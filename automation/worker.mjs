@@ -121,7 +121,7 @@ const TEMU_BASE_URL = "https://seller.kuajingmaihuo.com";
 async function login(phone, password) {
   const page = await context.newPage();
   try {
-    await page.goto(TEMU_LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 20000 });
+    await page.goto(TEMU_LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
     await randomDelay(2000, 4000);
 
     // 1. 切换到「账号登录」tab（默认是扫码登录）
@@ -187,138 +187,180 @@ async function login(phone, password) {
       }
     }
     await saveCookies();
+
+    // 8. 登录后可能停留在"履约中心"页面，需处理 Seller Central 授权
+    // 页面有：授权 checkbox + "进入 >" 按钮
+    if (page.url().includes("seller.kuajingmaihuo.com") || page.url().includes("settle")) {
+      console.error("[login] On 履约中心, handling Seller Central auth...");
+      await randomDelay(2000, 3000);
+
+      // 勾选授权 checkbox
+      const cbResult = await page.evaluate(() => {
+        const inputs = [...document.querySelectorAll('input[type="checkbox"]')];
+        for (const cb of inputs) { if (!cb.checked) { cb.click(); return "checked"; } return "already checked"; }
+        const customs = [...document.querySelectorAll('[class*="checkbox"], [class*="Checkbox"], [role="checkbox"]')];
+        for (const el of customs) { el.click(); return "clicked custom"; }
+        return "not found";
+      });
+      console.error("[login] Auth checkbox:", cbResult);
+      await randomDelay(500, 1000);
+
+      // 点击"进入 >"按钮
+      const btnResult = await page.evaluate(() => {
+        const keywords = ["进入", "确认授权", "确认并前往"];
+        const all = [...document.querySelectorAll('button, a, [role="button"], div[class*="btn"], div[class*="Btn"]')];
+        for (const kw of keywords) {
+          for (const el of all) {
+            const text = (el.innerText || "").trim();
+            if (text.includes(kw) && text.length < 20) { el.click(); return "clicked: " + text; }
+          }
+        }
+        return "not found";
+      });
+      console.error("[login] Auth enter button:", btnResult);
+      if (btnResult !== "not found") {
+        await randomDelay(5000, 8000);
+        await saveCookies();
+      }
+    }
+
     return true;
   } catch (err) { await page.close(); throw err; }
 }
 
 // ---- 导航辅助：从商家中心进入 Seller Central ----
 
+// 返回实际使用的 page（可能因 popup 切换到新窗口）
 async function navigateToSellerCentral(page, targetPath) {
   const directUrl = `https://agentseller.temu.com${targetPath}`;
   console.error(`[nav] Navigating to ${directUrl}`);
-  await page.goto(directUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
-  await randomDelay(2000, 4000);
+  await page.goto(directUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+  // 等待可能的重定向
+  await randomDelay(3000, 5000);
+  // 等 URL 稳定
+  await page.waitForURL(/.*/, { timeout: 10000 }).catch(() => {});
   console.error(`[nav] Current URL: ${page.url()}`);
 
-  // 情况1：被重定向到 agentseller 的认证/入口页面（Seller Central 授权页）
+  // 情况1：被重定向到 agentseller 的认证/入口页面
   if (page.url().includes("/main/authentication") || page.url().includes("/main/entry")) {
-    console.error("[nav] On Seller Central authentication/entry page");
+    console.error("[nav] On authentication page, handling popup flow...");
 
-    // 保存调试信息
-    const debugDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
-    fs.mkdirSync(debugDir, { recursive: true });
-    await page.screenshot({ path: path.join(debugDir, "entry_page.png"), fullPage: false });
+    // 等待微前端加载
+    for (let wait = 0; wait < 10; wait++) {
+      const hasContent = await page.evaluate(() => {
+        const root = document.querySelector('#root');
+        return root && root.innerHTML.length > 10;
+      });
+      if (hasContent) { console.error(`[nav] Micro-app loaded after ${wait}s`); break; }
+      await randomDelay(1000, 1500);
+    }
+    await randomDelay(1000, 2000);
 
-    // 页面结构：
-    // - 顶部有"履约中心"
-    // - 中间 Seller Central 区域，勾选授权复选框
-    // - "全球"卡片下面有"进入 >"按钮
-    // - 底部可能有"商家中心"入口
+    // 点击"商家中心"会打开新窗口，监听 popup
+    const popupPromise = context.waitForEvent("page", { timeout: 15000 }).catch(() => null);
 
-    // Step 1: 确保授权复选框被勾选
+    // 点击"商家中心 >"
     try {
-      // 方式A：标准 checkbox
-      const checkbox = page.locator('input[type="checkbox"]').first();
-      if (await checkbox.isVisible({ timeout: 3000 })) {
-        const isChecked = await checkbox.isChecked();
-        if (!isChecked) {
-          console.error("[nav] Checking authorization checkbox (standard)...");
-          await checkbox.check({ force: true });
-          await randomDelay(500, 1000);
-        } else {
-          console.error("[nav] Checkbox already checked");
-        }
+      const gotoBtn = page.locator('[class*="authentication_goto"]').first();
+      if (await gotoBtn.isVisible({ timeout: 3000 })) {
+        await gotoBtn.click();
+        console.error("[nav] Clicked authentication_goto");
       } else {
-        // 方式B：自定义 checkbox（Ant Design / Temu 组件）
-        console.error("[nav] Standard checkbox not visible, trying custom checkbox...");
         await page.evaluate(() => {
-          // 找包含"授权"文字的区域，点击 checkbox 容器
-          const labels = document.querySelectorAll("label, [class*='checkbox'], [class*='Checkbox'], [role='checkbox']");
-          for (const el of labels) {
-            if (el.textContent?.includes("授权") || el.textContent?.includes("同意")) {
-              el.click();
-              return "clicked checkbox label";
+          const all = [...document.querySelectorAll("div, span, a")];
+          for (const el of all) {
+            const text = (el.textContent?.trim() || "").replace(/\s+/g, "");
+            if (text.includes("商家中心") && !text.includes("其他地区") && text.length < 20) {
+              el.click(); return;
             }
           }
-          // 找 span/div 里有 checkbox 图标的
-          const checkboxEls = document.querySelectorAll("[class*='check'], [class*='Check']");
-          for (const el of checkboxEls) {
-            const parent = el.closest("label, div, span");
-            if (parent?.textContent?.includes("授权")) {
-              el.click();
-              return "clicked checkbox element";
-            }
-          }
-          return "no checkbox found";
         });
-        await randomDelay(500, 1000);
+        console.error("[nav] Clicked 商家中心 via evaluate");
       }
     } catch (e) {
-      console.error("[nav] Checkbox handling:", e.message);
-      // 备选：点击包含"授权"文字附近的区域
-      try {
-        await page.locator('text=您授权').first().click();
-        await randomDelay(500, 1000);
-      } catch {}
+      console.error("[nav] Click error:", e.message);
     }
 
-    // Step 2: 点击"进入 >"按钮（Seller Central 全球入口）
-    console.error("[nav] Looking for 进入 button...");
-    const enterAttempts = [
-      // 方法1: 通过按钮文字找"进入"
-      () => page.locator('button:has-text("进入")').first().click(),
-      // 方法2: 用 getByText
-      () => page.getByText("进入", { exact: false }).first().click(),
-      // 方法3: 通过 role=button
-      () => page.getByRole("button", { name: /进入/ }).first().click(),
-      // 方法4: evaluate 找所有按钮
-      () => page.evaluate(() => {
-        // 找 button 或 a 中包含"进入"的元素
-        const allEls = [...document.querySelectorAll("button, a, [role='button'], div[class*='btn'], span[class*='btn']")];
-        for (const el of allEls) {
-          const text = el.textContent?.trim() || "";
-          if (text.includes("进入") && text.length < 20) {
-            console.log("Found enter button:", el.tagName, text);
-            el.click();
-            return "clicked: " + text;
-          }
-        }
-        return "not found";
-      }),
-      // 方法5: 也试试点击"商家中心"（页面底部可能有）
-      () => page.evaluate(() => {
-        const allEls = [...document.querySelectorAll("a, button, [role='button'], [role='link']")];
-        for (const el of allEls) {
-          const text = el.textContent?.trim() || "";
-          if (text.includes("商家中心") && text.length < 20 && !text.includes("履约")) {
-            el.click();
-            return "clicked: " + text;
-          }
-        }
-        return "not found";
-      }),
-    ];
+    // 等待新窗口
+    const popup = await popupPromise;
+    if (popup) {
+      console.error(`[nav] Popup opened: ${popup.url()}`);
+      await popup.waitForLoadState("domcontentloaded").catch(() => {});
+      await randomDelay(3000, 5000);
+      console.error(`[nav] Popup URL: ${popup.url()}`);
 
-    for (let i = 0; i < enterAttempts.length; i++) {
-      try {
-        console.error(`[nav] Enter attempt ${i}...`);
-        const result = await enterAttempts[i]();
-        if (result) console.error(`[nav] Attempt ${i} result:`, result);
-        await randomDelay(5000, 8000);
-        console.error(`[nav] After attempt ${i}, URL: ${page.url()}`);
-        if (!page.url().includes("/main/authentication") && !page.url().includes("/main/entry")) {
-          console.error("[nav] Successfully passed entry page!");
-          break;
+      // 在弹出窗口中勾选 checkbox
+      const cbResult = await popup.evaluate(() => {
+        const inputs = [...document.querySelectorAll('input[type="checkbox"]')];
+        for (const cb of inputs) { if (!cb.checked) { cb.click(); return "checked"; } return "already checked"; }
+        const customs = [...document.querySelectorAll('[class*="checkbox"], [class*="Checkbox"], [role="checkbox"], label')];
+        for (const el of customs) {
+          const text = el.innerText || "";
+          if (text.includes("授权") || text.includes("同意") || el.className?.toString().toLowerCase().includes("checkbox")) {
+            el.click(); return "clicked custom: " + el.tagName;
+          }
         }
-      } catch (e) {
-        console.error(`[nav] Attempt ${i} failed: ${e.message}`);
+        return "not found";
+      });
+      console.error("[nav] Popup checkbox:", cbResult);
+      await randomDelay(500, 1000);
+
+      // 点击"确认授权并前往"或"进入"
+      const btnResult = await popup.evaluate(() => {
+        const keywords = ["确认授权并前往", "确认授权", "确认并前往", "进入"];
+        const all = [...document.querySelectorAll('button, [role="button"], a, div[class*="btn"], div[class*="Btn"], span[class*="btn"]')];
+        for (const keyword of keywords) {
+          for (const el of all) {
+            const text = el.innerText?.trim() || "";
+            if (text.includes(keyword) && text.length < 20) {
+              el.click(); return "clicked: " + text;
+            }
+          }
+        }
+        return "not found";
+      });
+      console.error("[nav] Popup confirm:", btnResult);
+
+      if (btnResult !== "not found") {
+        await randomDelay(8000, 12000);
+        // 检查所有页面
+        const pages = context.pages();
+        console.error(`[nav] After auth, ${pages.length} pages:`);
+        for (const p of pages) console.error(`  - ${p.url()}`);
+        // 找 agentseller 页面（非 authentication）
+        const targetPage = pages.find(p =>
+          p.url().includes("agentseller.temu.com") && !p.url().includes("authentication")
+        );
+        if (targetPage) {
+          console.error("[nav] Found target page, switching");
+          page = targetPage;
+        }
       }
+    } else {
+      console.error("[nav] No popup, trying same-page auth...");
+      await randomDelay(2000, 3000);
+      // 同页面模态框处理
+      await page.evaluate(() => {
+        const inputs = [...document.querySelectorAll('input[type="checkbox"]')];
+        for (const cb of inputs) { if (!cb.checked) cb.click(); }
+      });
+      await randomDelay(500, 1000);
+      await page.evaluate(() => {
+        const keywords = ["确认授权", "进入"];
+        const btns = [...document.querySelectorAll('button, [role="button"], a')];
+        for (const kw of keywords) {
+          for (const btn of btns) {
+            const text = (btn.innerText || "").trim();
+            if (text.includes(kw) && text.length < 20) { btn.click(); return; }
+          }
+        }
+      });
+      await randomDelay(5000, 8000);
     }
 
-    // 如果成功进入但不在目标页面，导航到目标
-    if (!page.url().includes("/main/authentication") && !page.url().includes(targetPath)) {
-      console.error(`[nav] Navigating to target: ${directUrl}`);
-      await page.goto(directUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+    // 导航到目标页面
+    if (page.url().includes("/main/authentication") || !page.url().includes(targetPath)) {
+      await page.goto(directUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
       await randomDelay(3000, 5000);
     }
   }
@@ -326,53 +368,84 @@ async function navigateToSellerCentral(page, targetPath) {
   // 情况2：被重定向到商家中心登录页（seller.kuajingmaihuo.com）
   if (page.url().includes("seller.kuajingmaihuo.com")) {
     console.error("[nav] Redirected to seller.kuajingmaihuo.com, handling auth...");
-    await page.evaluate(() => {
-      document.querySelectorAll('[class*=close],[class*=Close]').forEach(el => { try { el.click(); } catch {} });
-    });
-    await randomDelay(500, 1000);
+    await randomDelay(2000, 3000);
 
-    // 展开商品管理菜单并点击商品列表（触发 Seller Central 授权）
-    try {
-      await page.getByText("商品管理", { exact: true }).first().click();
-      await randomDelay(800, 1200);
-      await page.getByText("商品列表", { exact: true }).first().click();
-      await randomDelay(2000, 3000);
-    } catch {}
+    // 处理授权弹窗：勾选 checkbox + 点击"确认授权并前往"
+    async function handleAuthDialog() {
+      // 等待弹窗出现
+      await randomDelay(1000, 2000);
 
-    // 处理 Seller Central 授权弹窗
-    try {
-      const modal = page.locator('[class*=signModal]');
-      if (await modal.isVisible({ timeout: 5000 })) {
-        await modal.locator("label").first().click();
-        await randomDelay(300, 600);
-        await modal.locator("button").first().click();
+      // 查找并勾选 checkbox
+      const cbClicked = await page.evaluate(() => {
+        // 找所有 checkbox（input 和自定义组件）
+        const inputs = [...document.querySelectorAll('input[type="checkbox"]')];
+        for (const cb of inputs) {
+          if (!cb.checked) { cb.click(); return "checked input"; }
+          return "already checked";
+        }
+        // 自定义 checkbox
+        const customs = [...document.querySelectorAll('[class*="checkbox"], [class*="Checkbox"], [role="checkbox"]')];
+        for (const el of customs) {
+          el.click(); return "clicked custom: " + (el.className?.toString().slice(0, 50) || el.tagName);
+        }
+        // label 里的 checkbox
+        const labels = [...document.querySelectorAll('label')];
+        for (const label of labels) {
+          const text = label.innerText || "";
+          if (text.includes("授权") || text.includes("同意") || text.includes("隐私")) {
+            label.click(); return "clicked label: " + text.slice(0, 30);
+          }
+        }
+        return "not found";
+      });
+      console.error("[nav] Checkbox result:", cbClicked);
+      await randomDelay(500, 1000);
+
+      // 点击"确认授权并前往"或"进入"按钮
+      const btnClicked = await page.evaluate(() => {
+        const keywords = ["确认授权并前往", "确认授权", "确认并前往", "进入"];
+        const all = [...document.querySelectorAll('button, [role="button"], a, div[class*="btn"], div[class*="Btn"], span[class*="btn"]')];
+        for (const keyword of keywords) {
+          for (const el of all) {
+            const text = el.innerText?.trim() || "";
+            if (text.includes(keyword) && text.length < 20) {
+              el.click(); return "clicked: " + text;
+            }
+          }
+        }
+        return "not found";
+      });
+      console.error("[nav] Confirm button result:", btnClicked);
+      if (btnClicked !== "not found") {
         await randomDelay(5000, 8000);
       }
-    } catch {}
+    }
+
+    // 检查是否已经有授权弹窗
+    const hasDialog = await page.evaluate(() => {
+      const text = document.body.innerText || "";
+      return text.includes("确认授权") || text.includes("即将前往") || text.includes("Seller Central") || text.includes("进入");
+    });
+
+    if (hasDialog) {
+      console.error("[nav] Auth dialog already visible, handling...");
+      await handleAuthDialog();
+    } else {
+      // 没有弹窗，尝试触发它（展开商品管理菜单）
+      console.error("[nav] No auth dialog, trying to trigger via menu...");
+      try {
+        await page.getByText("商品管理", { exact: true }).first().click();
+        await randomDelay(800, 1200);
+        await page.getByText("商品列表", { exact: true }).first().click();
+        await randomDelay(2000, 3000);
+      } catch {}
+      await handleAuthDialog();
+    }
 
     // 再次访问目标页面
     if (!page.url().includes("agentseller.temu.com") || page.url().includes("authentication")) {
-      await page.goto(directUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+      await page.goto(directUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
       await randomDelay(3000, 5000);
-    }
-
-    // 如果又到入口页面，再处理一次
-    if (page.url().includes("/main/authentication")) {
-      try {
-        await page.evaluate(() => {
-          const links = document.querySelectorAll("a");
-          for (const a of links) {
-            if (a.textContent?.includes("商家中心") && a.href && !a.href.includes("authentication")) {
-              a.click(); return;
-            }
-          }
-        });
-        await randomDelay(5000, 8000);
-        if (!page.url().includes(targetPath.split("/")[1] || "xxx")) {
-          await page.goto(directUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
-          await randomDelay(3000, 5000);
-        }
-      } catch {}
     }
   }
 
@@ -392,17 +465,18 @@ async function navigateToSellerCentral(page, targetPath) {
     document.querySelectorAll('[class*=close],[class*=Close]').forEach(el => { try { el.click(); } catch {} });
   });
   await randomDelay(500, 1000);
+  return page;
 }
 
 // ---- 抓取商品 ----
 
 async function scrapeProducts() {
-  const page = await context.newPage();
+  let page = await context.newPage();
   const debugDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
   fs.mkdirSync(debugDir, { recursive: true });
 
   try {
-    await navigateToSellerCentral(page, "/goods/list");
+    page = await navigateToSellerCentral(page, "/goods/list");
     await page.screenshot({ path: path.join(debugDir, "01_after_navigate.png"), fullPage: false });
     console.error("[scrape] URL after navigate:", page.url());
 
@@ -430,20 +504,94 @@ async function scrapeProducts() {
     await randomDelay(500, 800);
     await page.screenshot({ path: path.join(debugDir, "02_after_popups.png"), fullPage: false });
 
-    // 等待表格加载
-    try {
-      await page.waitForSelector("table tbody tr", { timeout: 15000 });
-      console.error("[scrape] Table rows found");
-    } catch {
-      console.error("[scrape] No table rows found, waiting extra...");
-      await randomDelay(5000, 8000);
+    // 等待表格加载（微前端页面加载较慢，多次重试）
+    let tableFound = false;
+    for (let retry = 0; retry < 3; retry++) {
+      try {
+        await page.waitForSelector("table tbody tr", { timeout: 60000 });
+        console.error("[scrape] Table rows found");
+        tableFound = true;
+        break;
+      } catch {
+        console.error(`[scrape] Table not found (attempt ${retry + 1}/3), waiting...`);
+        // 可能页面还在"加载中..."，等待并刷新
+        if (retry < 2) {
+          await randomDelay(3000, 5000);
+          // 检查是否有"加载中"提示
+          const loading = await page.evaluate(() => {
+            const all = document.body.innerText;
+            return all.includes("加载中") || all.includes("loading");
+          }).catch(() => false);
+          if (loading) {
+            console.error("[scrape] Page still loading, waiting more...");
+            await randomDelay(5000, 8000);
+          }
+        }
+      }
     }
-    await randomDelay(3000, 5000);
-    await page.screenshot({ path: path.join(debugDir, "03_after_table_wait.png"), fullPage: false });
+    if (!tableFound) {
+      console.error("[scrape] Table not found after retries, trying to extract anyway...");
+    }
+    await randomDelay(2000, 3000);
+    await page.screenshot({ path: path.join(debugDir, "03_after_table_wait.png"), fullPage: true });
+
+    // 调试：输出表格头和第一行数据
+    try {
+      const tableDebug = await page.evaluate(() => {
+        const table = document.querySelector("table");
+        if (!table) return { error: "no table" };
+        // 获取表头（含 colspan 信息）
+        const ths = [...table.querySelectorAll("thead th, thead td")];
+        const headers = ths.map((th, i) => ({
+          index: i,
+          text: th.innerText?.trim(),
+          colspan: th.colSpan || 1,
+        }));
+        const totalColspan = headers.reduce((s, h) => s + h.colspan, 0);
+        const firstRow = table.querySelector("tbody tr");
+        if (!firstRow) return { headers, totalColspan, error: "no rows" };
+        const cells = [...firstRow.querySelectorAll("td")].map((td, i) => ({
+          index: i,
+          text: td.innerText?.trim().slice(0, 100),
+          colspan: td.colSpan || 1,
+        }));
+        return { headerCount: headers.length, totalColspan, cellCount: cells.length, headers, cells };
+      });
+      fs.writeFileSync(path.join(debugDir, "table_structure.json"), JSON.stringify(tableDebug, null, 2), "utf-8");
+      console.error("[scrape] Table headers:", JSON.stringify(tableDebug.headers));
+      console.error("[scrape] Cell count:", tableDebug.cellCount);
+    } catch (e) {
+      console.error("[scrape] Table debug error:", e.message);
+    }
 
     // ---- 单页提取函数 ----
+    // 表头（2026-03 实测）：
+    // 0:"" (checkbox), 1:"商品信息", 2:"商品属性", 3:"尺码表", 4:"说明书信息",
+    // 5:"SKU ID", 6:"商品规格", 7:"库存", 8:"是否展示库存标", 9:"商品编码",
+    // 10:"体积重量信息", 11:"敏感属性信息", 12:"SKU分类", 13:"SKU货号",
+    // 14:"申报价格(CNY)", 15:"销售信息", 16:"创建时间", 17:"商品优化事项",
+    // 18:"操作", 19:"电子版", 20:"纸质版", 21:"卖家测量", 22:"平台测量参考",
+    // 23:"今日销量", 24:"今日合计", 25:"7天销量"
+
+    // 先动态获取列索引映射
+    const headerMap = await page.evaluate(() => {
+      // 只取第一行表头，避免多行表头重复 key 覆盖
+      const firstRow = document.querySelector("table thead tr");
+      if (!firstRow) return {};
+      const ths = [...firstRow.querySelectorAll("th, td")];
+      const map = {};
+      let colIndex = 0;
+      ths.forEach((th) => {
+        const text = th.innerText?.trim().replace(/\n/g, " ");
+        if (text && !map.hasOwnProperty(text)) map[text] = colIndex;
+        colIndex += (th.colSpan || 1);
+      });
+      return map;
+    }).catch(() => ({}));
+    console.error("[scrape] Header map (colspan-aware):", JSON.stringify(headerMap));
+
     async function extractProductsPage() {
-      return await page.evaluate(() => {
+      return await page.evaluate((hMap) => {
         const tables = document.querySelectorAll("table");
         let targetTbody = null;
         for (const t of tables) {
@@ -457,39 +605,44 @@ async function scrapeProducts() {
         const rows = targetTbody.querySelectorAll("tr");
         const results = [];
 
+        // 辅助：安全获取 cell 文本
+        function cellText(cells, colName) {
+          const idx = hMap[colName];
+          if (idx !== undefined && idx < cells.length) {
+            return cells[idx].innerText?.trim() || "";
+          }
+          return "";
+        }
+
+        // 辅助：从文本行中提取字段值
+        function getFieldValue(lines, label) {
+          for (let i = 0; i < lines.length; i++) {
+            if (lines[i].includes(label)) {
+              const afterLabel = lines[i].split(/[：:]/);
+              if (afterLabel.length > 1) {
+                const val = afterLabel.slice(1).join(":").trim();
+                if (val) return val;
+              }
+              if (i + 1 < lines.length) return lines[i + 1];
+            }
+          }
+          return "";
+        }
+
         for (const row of rows) {
           const cells = row.querySelectorAll("td");
           if (cells.length < 2) continue;
 
-          // 找包含 SPU ID 的 cell（商品信息列）
-          let infoCell = null, infoCellIdx = -1;
-          for (let i = 0; i < cells.length; i++) {
-            if ((cells[i].innerText || "").includes("SPU ID")) {
-              infoCell = cells[i]; infoCellIdx = i; break;
-            }
-          }
+          // 商品信息列（标题、类目、SPU/SKC ID等）
+          const infoIdx = hMap["商品信息"] ?? 1;
+          const infoCell = cells[infoIdx];
           if (!infoCell) continue;
 
           const infoText = infoCell.innerText || "";
           const infoLines = infoText.split("\n").map(l => l.trim()).filter(Boolean);
-          const allText = row.innerText || "";
+          if (!infoText.includes("SPU ID")) continue;
 
-          // 获取字段值
-          function getFieldValue(lines, label) {
-            for (let i = 0; i < lines.length; i++) {
-              if (lines[i].includes(label)) {
-                const afterLabel = lines[i].split(/[：:]/);
-                if (afterLabel.length > 1) {
-                  const val = afterLabel.slice(1).join(":").trim();
-                  if (val) return val;
-                }
-                if (i + 1 < lines.length) return lines[i + 1];
-              }
-            }
-            return "";
-          }
-
-          // 标题
+          // 标题：第一行较长的文本
           const title = infoLines.find(l =>
             l.length > 5 &&
             !l.startsWith("类目") && !l.startsWith("SPU") && !l.startsWith("SKC") &&
@@ -499,31 +652,49 @@ async function scrapeProducts() {
           const category = getFieldValue(infoLines, "类目");
           const spuId = getFieldValue(infoLines, "SPU ID");
           const skcId = getFieldValue(infoLines, "SKC ID");
-          const productCode = getFieldValue(infoLines, "货号");
 
-          // 属性列
-          const attrCell = infoCellIdx + 1 < cells.length ? cells[infoCellIdx + 1] : null;
-          const attributes = attrCell?.innerText?.trim() || "";
+          // 商品属性列
+          const attributes = cellText(cells, "商品属性");
 
-          // 图片搜索（多种方式）
-          let imageUrl = "";
-          for (let i = 0; i < cells.length; i++) {
-            const img = cells[i].querySelector("img[src]");
-            if (img && img.src && !img.src.includes("data:") && img.src.startsWith("http")) { imageUrl = img.src; break; }
-            const lazyImg = cells[i].querySelector("img[data-src]");
-            if (lazyImg && lazyImg.dataset.src) { imageUrl = lazyImg.dataset.src; break; }
-            const bgEl = cells[i].querySelector("[style*='background-image']");
-            if (bgEl) {
-              const m = bgEl.style.backgroundImage.match(/url\(["']?(.*?)["']?\)/);
-              if (m && m[1] && !m[1].includes("data:")) { imageUrl = m[1]; break; }
-            }
+          // SKU ID 列
+          const skuId = cellText(cells, "SKU ID");
+
+          // 库存列
+          const stock = cellText(cells, "库存");
+
+          // 商品编码列
+          const productCode = cellText(cells, "商品编码") || getFieldValue(infoLines, "货号");
+
+          // SKU货号列
+          const skuCode = cellText(cells, "SKU货号");
+
+          // 申报价格列
+          let price = cellText(cells, "申报价格(CNY)");
+          if (!price) {
+            const allText = row.innerText || "";
+            const priceMatch = allText.match(/¥([\d.]+)/);
+            if (priceMatch) price = "¥" + priceMatch[1];
           }
-          if (!imageUrl) {
-            const rowRect = row.getBoundingClientRect();
-            const allPageImgs = document.querySelectorAll("img[src*='kwcdn.com'], img[src*='product']");
-            for (const img of allPageImgs) {
-              const imgRect = img.getBoundingClientRect();
-              if (Math.abs(imgRect.top - rowRect.top) < 30) { imageUrl = img.src; break; }
+
+          // 销售信息列
+          const salesInfo = cellText(cells, "销售信息");
+
+          // 今日销量、7天销量
+          const todaySales = cellText(cells, "今日销量");
+          const sales7d = cellText(cells, "7天销量");
+
+          // 创建时间
+          const createdAt = cellText(cells, "创建时间");
+
+          // 商品规格
+          const spec = cellText(cells, "商品规格");
+
+          // 图片搜索
+          let imageUrl = "";
+          for (let i = 0; i < Math.min(cells.length, 3); i++) {
+            const img = cells[i].querySelector("img[src]");
+            if (img && img.src && !img.src.includes("data:") && img.src.startsWith("http")) {
+              imageUrl = img.src; break;
             }
           }
           if (!imageUrl) {
@@ -532,55 +703,59 @@ async function scrapeProducts() {
             if (urlMatch) imageUrl = urlMatch[0];
           }
 
-          // 从其他列提取更多数据：价格、库存、状态
-          let price = "", stock = "", status = "", skuId = "";
-
-          // 遍历所有列文本提取
-          const priceMatch = allText.match(/¥([\d.]+)/);
-          if (priceMatch) price = "¥" + priceMatch[1];
-
-          const skuMatch = allText.match(/SKU\s*ID[：:]\s*(\d+)/);
-          if (skuMatch) skuId = skuMatch[1];
-
-          // 库存 "X + Y" 格式
-          const stockMatch = allText.match(/(\d+)\s*\+\s*(\d+)/);
-          if (stockMatch) stock = stockMatch[0];
-
-          // 状态关键词
-          const statusKeywords = ["在售", "已上架", "已下架", "审核中", "已驳回", "待审核", "已停售", "缺货", "已生效", "待生效"];
+          // 状态：从商品信息列或销售信息列提取
+          let status = "";
+          const statusKeywords = ["在售", "已上架", "已下架", "审核中", "已驳回", "待审核", "已停售", "缺货", "已生效", "待生效", "未发布"];
+          const allRowText = row.innerText || "";
           for (const kw of statusKeywords) {
-            if (allText.includes(kw)) { status = kw; break; }
+            if (allRowText.includes(kw)) { status = kw; break; }
           }
 
-          // 仓组
+          // 仓组 & 备货模式
           let warehouse = "";
-          const warehouseMatch = allText.match(/([\u4e00-\u9fa5]+仓组\d*)/);
+          const warehouseMatch = allRowText.match(/([\u4e00-\u9fa5]+仓组\d*)/);
           if (warehouseMatch) warehouse = warehouseMatch[1];
 
-          // 备货模式
           let stockMode = "";
           const modeKeywords = ["国内备货", "JIT", "海外仓", "VMI"];
           for (const kw of modeKeywords) {
-            if (allText.includes(kw)) { stockMode = kw; break; }
+            if (allRowText.includes(kw)) { stockMode = kw; break; }
           }
 
           results.push({
-            title, category, spuId, skcId, sku: skcId, skuId,
-            productCode, attributes, imageUrl,
-            price, stock, status, warehouse, stockMode,
+            title, category, spuId, skcId, skuId,
+            sku: skuCode || "", attributes, imageUrl,
+            price, spec, productCode, status,
+            salesInfo, todaySales, sales7d, createdAt,
           });
         }
         return results;
+      }, headerMap);
+    }
+
+    // ---- 关闭所有弹窗（防止遮挡翻页按钮） ----
+    async function closeModals() {
+      await page.evaluate(() => {
+        document.querySelectorAll('[data-testid="beast-core-modal"] [class*="close"], [class*="Modal"] [class*="close"], [class*="modal"] [class*="Close"], [class*="CloseIcon"], svg[class*="close"]').forEach(el => { try { el.click(); } catch {} });
       });
+      for (let i = 0; i < 5; i++) {
+        try {
+          const btn = page.locator('button:has-text("知道了"), button:has-text("我知道了"), button:has-text("确定"), button:has-text("关闭"), button:has-text("暂不处理")').first();
+          if (await btn.isVisible({ timeout: 500 })) { await btn.click(); await randomDelay(300, 500); }
+          else break;
+        } catch { break; }
+      }
     }
 
     // ---- 提取第一页 ----
+    await closeModals();
     let allProducts = (await extractProductsPage()).filter(p => p.spuId);
     console.error(`[scrape] Page 1: ${allProducts.length} products`);
 
     // ---- 翻页抓取所有数据 ----
     for (let pageNum = 2; pageNum <= 200; pageNum++) {
       try {
+        await closeModals();
         const nextBtn = page.locator(
           'button[class*="next"]:not([disabled]), ' +
           'li[class*="next"]:not([class*="disabled"]) button, ' +
@@ -608,9 +783,9 @@ async function scrapeProducts() {
         }
 
         await nextBtn.click();
-        await randomDelay(2000, 4000);
-        await page.waitForSelector("table tbody tr", { timeout: 15000 }).catch(() => {});
-        await randomDelay(1000, 2000);
+        // 等待表格数据更新（等 loading 消失或新行出现）
+        await page.waitForSelector("table tbody tr", { timeout: 10000 }).catch(() => {});
+        await randomDelay(500, 1000);
 
         const pageProducts = (await extractProductsPage()).filter(p => p.spuId);
         if (pageProducts.length === 0) {
@@ -618,7 +793,10 @@ async function scrapeProducts() {
           break;
         }
         allProducts = allProducts.concat(pageProducts);
-        console.error(`[scrape] Page ${pageNum}: +${pageProducts.length} products (total: ${allProducts.length})`);
+        // 每10页输出一次日志减少噪音
+        if (pageNum % 10 === 0 || pageProducts.length < 20) {
+          console.error(`[scrape] Page ${pageNum}: total ${allProducts.length} products`);
+        }
       } catch (e) {
         console.error(`[scrape] Pagination error at page ${pageNum}:`, e.message);
         break;
@@ -695,7 +873,7 @@ async function scrapeSales() {
 
       // 方法1：直接在同一个已认证的页面上修改URL（同源，不会重新认证）
       const salesUrl = "https://agentseller.temu.com/stock/fully-mgt/sale-manage/main";
-      await page.goto(salesUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+      await page.goto(salesUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
       await randomDelay(3000, 5000);
       console.error("[sales] After goto sales URL:", page.url());
 
@@ -747,7 +925,7 @@ async function scrapeSales() {
       // navigateToSellerCentral 也没能进入，直接尝试用 URL
       console.error("[sales] navigateToSellerCentral failed, trying direct URL...");
       const salesUrl = "https://agentseller.temu.com/stock/fully-mgt/sale-manage/main";
-      await page.goto(salesUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+      await page.goto(salesUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
       await randomDelay(3000, 5000);
 
       // 处理入口页面
@@ -964,9 +1142,8 @@ async function scrapeSales() {
         }
 
         await nextBtn.click();
-        await randomDelay(2000, 4000);
-        await page.waitForSelector("table tbody tr", { timeout: 15000 }).catch(() => {});
-        await randomDelay(1000, 2000);
+        await page.waitForSelector("table tbody tr", { timeout: 10000 }).catch(() => {});
+        await randomDelay(500, 1000);
 
         const pageItems = await extractSalesPage();
         if (pageItems.length === 0) {
@@ -1025,6 +1202,41 @@ async function handleRequest(body) {
     case "scrape_sales": {
       await ensureBrowser();
       return { sales: await scrapeSales() };
+    }
+    case "debug_page": {
+      await ensureBrowser();
+      let pg = context.pages().find(p => p.url().includes("goods") || p.url().includes("product"));
+      if (!pg) {
+        pg = context.pages()[0] || await context.newPage();
+      }
+      // 无论如何都导航到商品管理页
+      await pg.goto("https://agentseller.temu.com/goods/list", { waitUntil: "domcontentloaded", timeout: 30000 });
+      await pg.waitForSelector("table", { timeout: 15000 }).catch(() => {});
+      await new Promise(r => setTimeout(r, 5000));
+      if (!pg) throw new Error("No page found");
+      const info = await pg.evaluate(() => {
+        const result = {};
+        // 1. 表头
+        const ths = [...document.querySelectorAll("table thead th, table thead td")];
+        result.headers = ths.map((th, i) => ({ index: i, text: th.innerText?.trim().replace(/\n/g, " ") }));
+        // 2. 第一行数据
+        const tbody = document.querySelector("table tbody");
+        if (tbody) {
+          const firstRow = tbody.querySelector("tr");
+          if (firstRow) {
+            const cells = firstRow.querySelectorAll("td");
+            result.firstRow = [...cells].map((td, i) => ({
+              index: i,
+              text: (td.innerText || "").trim().substring(0, 200),
+              html: td.innerHTML.substring(0, 300)
+            }));
+          }
+        }
+        // 3. URL
+        result.url = location.href;
+        return result;
+      });
+      return info;
     }
     case "close": await closeBrowser(); return { status: "closed" };
     case "shutdown": await closeBrowser(); setTimeout(() => process.exit(0), 100); return { status: "shutting_down" };

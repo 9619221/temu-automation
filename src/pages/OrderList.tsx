@@ -1,6 +1,7 @@
-import { useState } from "react";
-import { Table, Button, Tag, Space, DatePicker, Card, message, notification } from "antd";
-import { SyncOutlined, ExportOutlined } from "@ant-design/icons";
+import { useState, useEffect } from "react";
+import { Table, Button, Tag, Space, DatePicker, Card, message, notification, Result } from "antd";
+import { SyncOutlined, ExportOutlined, ShopOutlined } from "@ant-design/icons";
+import { useNavigate } from "react-router-dom";
 import type { ColumnsType } from "antd/es/table";
 
 const { RangePicker } = DatePicker;
@@ -32,8 +33,21 @@ const statusMap: Record<string, { color: string; text: string }> = {
 export default function OrderList() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(false);
+  const [hasAccount, setHasAccount] = useState<boolean | null>(null);
 
+  const navigate = useNavigate();
   const api = window.electronAPI?.automation;
+  const store = window.electronAPI?.store;
+
+  useEffect(() => {
+    store?.get("temu_accounts").then((accounts: any) => {
+      if (!accounts || (Array.isArray(accounts) && accounts.length === 0)) {
+        setHasAccount(false);
+      } else {
+        setHasAccount(true);
+      }
+    });
+  }, []);
 
   const columns: ColumnsType<Order> = [
     { title: "订单号", dataIndex: "orderId", key: "orderId", width: 180 },
@@ -104,6 +118,21 @@ export default function OrderList() {
       setLoading(false);
     }
   };
+
+  if (hasAccount === false) {
+    return (
+      <Result
+        icon={<ShopOutlined style={{ color: "#fa8c16" }} />}
+        title="请先绑定店铺"
+        subTitle="绑定 Temu 店铺账号后，即可同步商品数据"
+        extra={
+          <Button type="primary" onClick={() => navigate("/accounts")}>
+            前往绑定店铺
+          </Button>
+        }
+      />
+    );
+  }
 
   return (
     <div>

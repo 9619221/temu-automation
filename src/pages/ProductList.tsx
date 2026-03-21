@@ -1,55 +1,53 @@
 import { useState, useEffect } from "react";
-import { Table, Button, Space, Tag, Input, Select, Card, message, notification, Image } from "antd";
-import { SyncOutlined, SearchOutlined, ExportOutlined } from "@ant-design/icons";
+import { Table, Button, Space, Tag, Input, Card, Result, message, notification, Image } from "antd";
+import { SyncOutlined, SearchOutlined, ExportOutlined, ShopOutlined } from "@ant-design/icons";
+import { useNavigate } from "react-router-dom";
 import type { ColumnsType } from "antd/es/table";
 
 interface Product {
   id: number;
   title: string;
-  sku: string;
+  category: string;
   spuId: string;
   skcId: string;
   skuId: string;
-  productCode: string;
-  category: string;
+  sku: string;
   attributes: string;
-  price: string;
-  stock: string;
-  status: string;
-  warehouse: string;
-  stockMode: string;
   imageUrl?: string;
+  price: string;
+  spec: string;
+  productCode: string;
+  status: string;
+  salesInfo: string;
+  todaySales: string;
+  sales7d: string;
+  createdAt: string;
   syncedAt?: string;
 }
-
-const statusColorMap: Record<string, string> = {
-  "在售": "green",
-  "已上架": "green",
-  "已生效": "green",
-  "待生效": "orange",
-  "审核中": "orange",
-  "待审核": "orange",
-  "已下架": "default",
-  "已驳回": "red",
-  "已停售": "red",
-  "缺货": "red",
-};
 
 export default function ProductList() {
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(false);
   const [searchText, setSearchText] = useState("");
-  const [statusFilter, setStatusFilter] = useState<string | undefined>();
+  const [hasAccount, setHasAccount] = useState<boolean | null>(null);
+  const navigate = useNavigate();
 
   const api = window.electronAPI?.automation;
   const store = window.electronAPI?.store;
 
-  // 启动时从文件加载商品数据
   useEffect(() => {
-    store?.get("temu_products").then((data: Product[] | null) => {
+    // 检查是否有绑定的店铺
+    store?.get("temu_accounts").then((data: any[] | null) => {
       if (data && Array.isArray(data) && data.length > 0) {
-        setProducts(data);
-        console.log(`[ProductList] 从文件恢复 ${data.length} 件商品`);
+        setHasAccount(true);
+        // 有店铺才加载商品数据
+        store?.get("temu_products").then((products: Product[] | null) => {
+          if (products && Array.isArray(products) && products.length > 0) {
+            setProducts(products);
+          }
+        });
+      } else {
+        setHasAccount(false);
       }
     });
   }, []);
@@ -105,9 +103,9 @@ export default function ProductList() {
       render: (text: string) => <span style={{ fontSize: 12, fontFamily: "monospace" }}>{text || "-"}</span>,
     },
     {
-      title: "货号",
-      dataIndex: "productCode",
-      key: "productCode",
+      title: "SKU货号",
+      dataIndex: "sku",
+      key: "sku",
       width: 110,
       render: (text: string) => <span style={{ fontSize: 12 }}>{text || "-"}</span>,
     },
@@ -119,40 +117,27 @@ export default function ProductList() {
       render: (text: string) => <span style={{ color: "#fa541c", fontWeight: 500 }}>{text || "-"}</span>,
     },
     {
-      title: "库存",
-      dataIndex: "stock",
-      key: "stock",
-      width: 80,
-      render: (text: string) => {
-        if (!text || text === "-" || text === "0") return <span style={{ color: "#999" }}>-</span>;
-        return <span style={{ color: "#1890ff", fontWeight: 500 }}>{text}</span>;
-      },
-    },
-    {
-      title: "仓组",
-      dataIndex: "warehouse",
-      key: "warehouse",
-      width: 100,
+      title: "商品规格",
+      dataIndex: "spec",
+      key: "spec",
+      width: 160,
+      ellipsis: true,
       render: (text: string) => <span style={{ fontSize: 12 }}>{text || "-"}</span>,
-    },
-    {
-      title: "备货模式",
-      dataIndex: "stockMode",
-      key: "stockMode",
-      width: 90,
-      render: (text: string) => {
-        if (!text) return "-";
-        const colorMap: Record<string, string> = { "国内备货": "blue", "JIT": "purple", "海外仓": "cyan", "VMI": "geekblue" };
-        return <Tag color={colorMap[text] || "default"}>{text}</Tag>;
-      },
     },
     {
       title: "商品属性",
       dataIndex: "attributes",
       key: "attributes",
-      width: 180,
+      width: 200,
       ellipsis: true,
       render: (text: string) => <span style={{ fontSize: 12, color: "#666" }}>{text || "-"}</span>,
+    },
+    {
+      title: "商品编码",
+      dataIndex: "productCode",
+      key: "productCode",
+      width: 110,
+      render: (text: string) => <span style={{ fontSize: 12 }}>{text || "-"}</span>,
     },
     {
       title: "状态",
@@ -160,9 +145,42 @@ export default function ProductList() {
       key: "status",
       width: 90,
       render: (status: string) => {
-        if (!status || status === "unknown") return <Tag>未知</Tag>;
-        return <Tag color={statusColorMap[status] || "default"}>{status}</Tag>;
+        if (!status) return <span style={{ color: "#999" }}>-</span>;
+        const colorMap: Record<string, string> = {
+          "在售": "green", "已上架": "green", "已生效": "green",
+          "待生效": "orange", "审核中": "orange", "待审核": "orange",
+          "已下架": "default", "已驳回": "red", "已停售": "red", "缺货": "red",
+        };
+        return <Tag color={colorMap[status] || "default"}>{status}</Tag>;
       },
+    },
+    {
+      title: "销售信息",
+      dataIndex: "salesInfo",
+      key: "salesInfo",
+      width: 100,
+      render: (text: string) => <span style={{ fontSize: 12 }}>{text || "-"}</span>,
+    },
+    {
+      title: "今日销量",
+      dataIndex: "todaySales",
+      key: "todaySales",
+      width: 90,
+      render: (text: string) => <span style={{ fontSize: 12 }}>{text || "-"}</span>,
+    },
+    {
+      title: "7天销量",
+      dataIndex: "sales7d",
+      key: "sales7d",
+      width: 90,
+      render: (text: string) => <span style={{ fontSize: 12 }}>{text || "-"}</span>,
+    },
+    {
+      title: "创建时间",
+      dataIndex: "createdAt",
+      key: "createdAt",
+      width: 160,
+      render: (text: string) => <span style={{ fontSize: 12 }}>{text || "-"}</span>,
     },
   ];
 
@@ -186,19 +204,21 @@ export default function ProductList() {
       const scraped = (result.products || []).map((p: any, i: number) => ({
         id: i + 1,
         title: p.title || "",
-        sku: p.sku || p.skcId || "",
+        category: p.category || "",
         spuId: p.spuId || "",
         skcId: p.skcId || "",
         skuId: p.skuId || "",
-        productCode: p.productCode || "",
-        category: p.category || "",
+        sku: p.sku || "",
         attributes: p.attributes || "",
-        price: p.price || "",
-        stock: p.stock || "",
-        status: p.status || "unknown",
-        warehouse: p.warehouse || "",
-        stockMode: p.stockMode || "",
         imageUrl: p.imageUrl || "",
+        price: p.price || "",
+        spec: p.spec || "",
+        productCode: p.productCode || "",
+        status: p.status || "",
+        salesInfo: p.salesInfo || "",
+        todaySales: p.todaySales || "",
+        sales7d: p.sales7d || "",
+        createdAt: p.createdAt || "",
         syncedAt: now,
       }));
 
@@ -220,64 +240,50 @@ export default function ProductList() {
     }
   };
 
-  // 统计各状态数量
-  const statusCounts: Record<string, number> = {};
-  products.forEach(p => {
-    const s = p.status || "unknown";
-    statusCounts[s] = (statusCounts[s] || 0) + 1;
-  });
-
   const filteredProducts = products.filter((p) => {
-    const matchSearch =
-      !searchText ||
-      p.title.toLowerCase().includes(searchText.toLowerCase()) ||
-      p.sku.toLowerCase().includes(searchText.toLowerCase()) ||
+    if (!searchText) return true;
+    const s = searchText.toLowerCase();
+    return (
+      p.title.toLowerCase().includes(s) ||
       p.spuId.includes(searchText) ||
       p.skcId.includes(searchText) ||
       (p.skuId || "").includes(searchText) ||
-      p.productCode.toLowerCase().includes(searchText.toLowerCase());
-    const matchStatus = !statusFilter || p.status === statusFilter;
-    return matchSearch && matchStatus;
+      (p.sku || "").toLowerCase().includes(s)
+    );
   });
+
+  if (hasAccount === false) {
+    return (
+      <Result
+        icon={<ShopOutlined style={{ color: "#fa8c16" }} />}
+        title="请先绑定店铺"
+        subTitle="绑定 Temu 店铺账号后，即可同步商品数据"
+        extra={
+          <Button type="primary" onClick={() => navigate("/accounts")}>
+            前往绑定店铺
+          </Button>
+        }
+      />
+    );
+  }
 
   return (
     <div>
-      {/* 统计卡片 */}
       {products.length > 0 && (
         <Card size="small" style={{ marginBottom: 16 }}>
-          <Space size={24}>
-            <span>总商品数：<strong style={{ color: "#1890ff", fontSize: 18 }}>{products.length}</strong></span>
-            {Object.entries(statusCounts).map(([status, count]) => (
-              <span key={status}>
-                <Tag color={statusColorMap[status] || "default"}>{status}</Tag>
-                <strong>{count}</strong>
-              </span>
-            ))}
-          </Space>
+          <span>总商品数：<strong style={{ color: "#1890ff", fontSize: 18 }}>{products.length}</strong></span>
         </Card>
       )}
 
-      {/* 工具栏 */}
       <Card size="small" style={{ marginBottom: 16 }}>
         <Space wrap>
           <Input
-            placeholder="搜索商品名称/SPU/SKC/SKU/货号"
+            placeholder="搜索商品名称/SPU/SKC/SKU"
             prefix={<SearchOutlined />}
             value={searchText}
             onChange={(e) => setSearchText(e.target.value)}
             style={{ width: 300 }}
             allowClear
-          />
-          <Select
-            placeholder="商品状态"
-            style={{ width: 140 }}
-            allowClear
-            value={statusFilter}
-            onChange={setStatusFilter}
-            options={Object.entries(statusCounts).map(([status, count]) => ({
-              label: `${status} (${count})`,
-              value: status,
-            }))}
           />
           <Button
             type="primary"
@@ -290,7 +296,7 @@ export default function ProductList() {
           <Button icon={<ExportOutlined />} disabled={products.length === 0}>
             导出
           </Button>
-          {filteredProducts.length > 0 && (
+          {filteredProducts.length > 0 && filteredProducts.length !== products.length && (
             <span style={{ color: "#999", fontSize: 13 }}>
               显示 {filteredProducts.length} / {products.length} 件商品
             </span>
@@ -298,7 +304,6 @@ export default function ProductList() {
         </Space>
       </Card>
 
-      {/* 数据表格 */}
       <Table
         columns={columns}
         dataSource={filteredProducts}
@@ -311,7 +316,7 @@ export default function ProductList() {
           pageSizeOptions: ["20", "50", "100"],
         }}
         locale={{ emptyText: "暂无商品数据，请先登录账号后点击「同步商品」" }}
-        scroll={{ x: 1600 }}
+        scroll={{ x: 2000 }}
         size="small"
       />
     </div>

@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
-import { Table, Button, Space, Card, Row, Col, Statistic, notification, Tag, Input, Spin } from "antd";
-import { SyncOutlined, SearchOutlined, DollarOutlined, ShoppingCartOutlined, RiseOutlined, BarChartOutlined } from "@ant-design/icons";
+import { Table, Button, Space, Card, Row, Col, Statistic, notification, Tag, Input, Spin, Result } from "antd";
+import { SyncOutlined, SearchOutlined, DollarOutlined, ShoppingCartOutlined, RiseOutlined, BarChartOutlined, ShopOutlined } from "@ant-design/icons";
+import { useNavigate } from "react-router-dom";
 import type { ColumnsType } from "antd/es/table";
 
 interface SalesItem {
@@ -31,12 +32,21 @@ export default function SalesManagement() {
   const [items, setItems] = useState<SalesItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [searchText, setSearchText] = useState("");
+  const [hasAccount, setHasAccount] = useState<boolean | null>(null);
 
+  const navigate = useNavigate();
   const api = window.electronAPI?.automation;
   const store = window.electronAPI?.store;
 
   // 启动时从文件恢复
   useEffect(() => {
+    store?.get("temu_accounts").then((accounts: any) => {
+      if (!accounts || (Array.isArray(accounts) && accounts.length === 0)) {
+        setHasAccount(false);
+      } else {
+        setHasAccount(true);
+      }
+    });
     store?.get("temu_sales").then((data: any) => {
       if (data) {
         setSalesData(data.raw || null);
@@ -202,6 +212,21 @@ export default function SalesManagement() {
   });
 
   const summary = salesData?.summary || {};
+
+  if (hasAccount === false) {
+    return (
+      <Result
+        icon={<ShopOutlined style={{ color: "#fa8c16" }} />}
+        title="请先绑定店铺"
+        subTitle="绑定 Temu 店铺账号后，即可同步商品数据"
+        extra={
+          <Button type="primary" onClick={() => navigate("/accounts")}>
+            前往绑定店铺
+          </Button>
+        }
+      />
+    );
+  }
 
   return (
     <div>
