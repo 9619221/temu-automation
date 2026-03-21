@@ -243,7 +243,7 @@ async function navigateToSellerCentral(page, targetPath) {
 
   // 情况1：被重定向到 agentseller 的认证/入口页面
   if (page.url().includes("/main/authentication") || page.url().includes("/main/entry")) {
-    console.error("[nav] On authentication page, handling popup flow...");
+    console.error("[nav] On authentication page, trying entry flow...");
 
     // 等待微前端加载
     for (let wait = 0; wait < 10; wait++) {
@@ -254,112 +254,308 @@ async function navigateToSellerCentral(page, targetPath) {
       if (hasContent) { console.error(`[nav] Micro-app loaded after ${wait}s`); break; }
       await randomDelay(1000, 1500);
     }
-    await randomDelay(1000, 2000);
+    await randomDelay(2000, 3000);
 
-    // 点击"商家中心"会打开新窗口，监听 popup
-    const popupPromise = context.waitForEvent("page", { timeout: 15000 }).catch(() => null);
+    // 保存截图用于调试
+    const debugDir2 = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
+    fs.mkdirSync(debugDir2, { recursive: true });
+    await page.screenshot({ path: path.join(debugDir2, "entry_page.png"), fullPage: true }).catch(() => {});
 
-    // 点击"商家中心 >"
-    try {
-      const gotoBtn = page.locator('[class*="authentication_goto"]').first();
-      if (await gotoBtn.isVisible({ timeout: 3000 })) {
-        await gotoBtn.click();
-        console.error("[nav] Clicked authentication_goto");
-      } else {
-        await page.evaluate(() => {
-          const all = [...document.querySelectorAll("div, span, a")];
-          for (const el of all) {
-            const text = (el.textContent?.trim() || "").replace(/\s+/g, "");
-            if (text.includes("商家中心") && !text.includes("其他地区") && text.length < 20) {
-              el.click(); return;
-            }
-          }
-        });
-        console.error("[nav] Clicked 商家中心 via evaluate");
+    // ★ 优先方案：在当前页面直接找"进入"按钮（Seller Central 授权页面）
+    // 页面结构：勾选授权复选框 → 点击"进入 >"按钮
+    console.error("[nav] Step A: Try checkbox + 进入 button on current page...");
+
+    // A1: 勾选授权复选框
+    const cbResult = await page.evaluate(() => {
+      // 标准 checkbox
+      const inputs = [...document.querySelectorAll('input[type="checkbox"]')];
+      for (const cb of inputs) { if (!cb.checked) { cb.click(); return "checked input"; } return "already checked"; }
+      // 自定义 checkbox
+      const customs = [...document.querySelectorAll('[class*="checkbox"], [class*="Checkbox"], [role="checkbox"], label')];
+      for (const el of customs) {
+        const text = el.innerText || el.textContent || "";
+        if (text.includes("授权") || text.includes("同意") || el.className?.toString().toLowerCase().includes("checkbox")) {
+          el.click(); return "clicked custom: " + el.tagName;
+        }
       }
-    } catch (e) {
-      console.error("[nav] Click error:", e.message);
+      return "no checkbox found";
+    });
+    console.error("[nav] Checkbox result:", cbResult);
+    await randomDelay(500, 1000);
+
+    // A2: 点击"进入 >"按钮
+    const enterResult = await page.evaluate(() => {
+      const keywords = ["进入", "确认授权并前往", "确认授权", "确认并前往"];
+      const all = [...document.querySelectorAll('button, [role="button"], a, div[class*="btn"], div[class*="Btn"], span[class*="btn"]')];
+      for (const keyword of keywords) {
+        for (const el of all) {
+          const text = el.innerText?.trim() || "";
+          if (text.includes(keyword) && text.length < 20) {
+            el.click(); return "clicked: " + text;
+          }
+        }
+      }
+      return "not found";
+    });
+    console.error("[nav] Enter button result:", enterResult);
+
+    if (enterResult !== "not found") {
+      await randomDelay(5000, 8000);
+      console.error(`[nav] After enter click, URL: ${page.url()}`);
     }
 
-    // 等待新窗口
-    const popup = await popupPromise;
-    if (popup) {
-      console.error(`[nav] Popup opened: ${popup.url()}`);
-      await popup.waitForLoadState("domcontentloaded").catch(() => {});
-      await randomDelay(3000, 5000);
-      console.error(`[nav] Popup URL: ${popup.url()}`);
+    // ★ 如果"进入"按钮没有找到或仍在 authentication 页面，走 popup 流程
+    if (page.url().includes("/main/authentication") || page.url().includes("/main/entry")) {
+      console.error("[nav] Step B: Try popup flow (authentication_goto)...");
 
-      // 在弹出窗口中勾选 checkbox
-      const cbResult = await popup.evaluate(() => {
-        const inputs = [...document.querySelectorAll('input[type="checkbox"]')];
-        for (const cb of inputs) { if (!cb.checked) { cb.click(); return "checked"; } return "already checked"; }
-        const customs = [...document.querySelectorAll('[class*="checkbox"], [class*="Checkbox"], [role="checkbox"], label')];
-        for (const el of customs) {
-          const text = el.innerText || "";
-          if (text.includes("授权") || text.includes("同意") || el.className?.toString().toLowerCase().includes("checkbox")) {
-            el.click(); return "clicked custom: " + el.tagName;
+      const popupPromise = context.waitForEvent("page", { timeout: 15000 }).catch(() => null);
+
+      // 点击"商家中心 >"
+      try {
+        const gotoBtn = page.locator('[class*="authentication_goto"]').first();
+        if (await gotoBtn.isVisible({ timeout: 3000 })) {
+          await gotoBtn.click();
+          console.error("[nav] Clicked authentication_goto");
+        } else {
+          await page.evaluate(() => {
+            const all = [...document.querySelectorAll("div, span, a")];
+            for (const el of all) {
+              const text = (el.textContent?.trim() || "").replace(/\s+/g, "");
+              if (text.includes("商家中心") && !text.includes("其他地区") && text.length < 20) {
+                el.click(); return;
+              }
+            }
+          });
+          console.error("[nav] Clicked 商家中心 via evaluate");
+        }
+      } catch (e) {
+        console.error("[nav] Click error:", e.message);
+      }
+
+      const popup = await popupPromise;
+      if (popup) {
+        console.error(`[nav] Popup opened: ${popup.url()}`);
+        await popup.waitForLoadState("domcontentloaded").catch(() => {});
+        await randomDelay(3000, 5000);
+        console.error(`[nav] Popup URL: ${popup.url()}`);
+
+        // 判断 popup 是登录页还是授权确认页
+        if (popup.url().includes("seller-login") || popup.url().includes("/login")) {
+          // Popup 打开了 seller-login，可能是：
+          // A) cookie 有效 → 自动登录后弹出"确认授权并前往"弹窗（URL 不变）
+          // B) cookie 过期 → 需要用户手动登录
+          console.error("[nav] Popup is login page, waiting for auth dialog or login...");
+          await randomDelay(3000, 5000);
+
+          // 先检查是否已经出现了授权确认弹窗（cookie 自动登录成功的情况）
+          async function tryAuthInPopup() {
+            const text = await popup.evaluate(() => document.body?.innerText || "");
+            if (text.includes("确认授权") || text.includes("即将前往") || text.includes("Seller Central")) {
+              console.error("[nav] Auth dialog found in popup!");
+              // 勾选复选框
+              await popup.evaluate(() => {
+                const inputs = [...document.querySelectorAll('input[type="checkbox"]')];
+                for (const cb of inputs) { if (!cb.checked) cb.click(); }
+                const customs = [...document.querySelectorAll('[class*="checkbox"], [class*="Checkbox"], [role="checkbox"], label')];
+                for (const el of customs) {
+                  const t = el.innerText || "";
+                  if (t.includes("授权") || t.includes("同意")) { el.click(); break; }
+                }
+              });
+              await randomDelay(500, 1000);
+              // 点击"确认授权并前往"
+              const btnResult = await popup.evaluate(() => {
+                const keywords = ["确认授权并前往", "确认授权", "确认并前往", "进入"];
+                const all = [...document.querySelectorAll('button, [role="button"], a, div[class*="btn"], div[class*="Btn"]')];
+                for (const kw of keywords) {
+                  for (const el of all) {
+                    const text = (el.innerText || "").trim();
+                    if (text.includes(kw) && text.length < 20) { el.click(); return "clicked: " + text; }
+                  }
+                }
+                return "not found";
+              });
+              console.error("[nav] Popup auth button:", btnResult);
+              if (btnResult !== "not found") {
+                await randomDelay(5000, 8000);
+                await saveCookies();
+                return true;
+              }
+            }
+            return false;
+          }
+
+          // 尝试最多30秒等待弹窗出现
+          let authHandled = false;
+          for (let attempt = 0; attempt < 6; attempt++) {
+            authHandled = await tryAuthInPopup();
+            if (authHandled) break;
+            console.error(`[nav] Auth dialog not found yet, attempt ${attempt + 1}/6...`);
+            await randomDelay(3000, 5000);
+          }
+
+          if (!authHandled) {
+            // 没有授权弹窗 → cookie 真的过期了，等用户手动登录
+            console.error("[nav] No auth dialog, waiting for user manual login (max 2min)...");
+
+            // 勾选 checkbox（隐私政策）
+            try {
+              const cb = popup.locator('input[type="checkbox"]').first();
+              if (await cb.isVisible({ timeout: 2000 })) {
+                const checked = await cb.isChecked();
+                if (!checked) await cb.click();
+              }
+            } catch {}
+
+            try {
+              // 等待 URL 变化或授权弹窗出现
+              await Promise.race([
+                popup.waitForURL((u) => !u.toString().includes("/login") && !u.toString().includes("seller-login"), { timeout: 120000 }),
+                (async () => {
+                  for (let i = 0; i < 24; i++) {
+                    await randomDelay(5000, 5000);
+                    if (await tryAuthInPopup()) return;
+                  }
+                })(),
+              ]);
+              console.error("[nav] Login/auth completed, popup URL:", popup.url());
+              await randomDelay(3000, 5000);
+            } catch {
+              console.error("[nav] Login timeout");
+            }
+            await saveCookies();
+          }
+        } else {
+          // Popup 是授权确认页
+          console.error("[nav] Popup is auth confirmation page");
+
+          // popup 中勾选 checkbox
+          const popupCb = await popup.evaluate(() => {
+            const inputs = [...document.querySelectorAll('input[type="checkbox"]')];
+            for (const cb of inputs) { if (!cb.checked) { cb.click(); return "checked"; } return "already checked"; }
+            const customs = [...document.querySelectorAll('[class*="checkbox"], [class*="Checkbox"], [role="checkbox"], label')];
+            for (const el of customs) {
+              const text = el.innerText || "";
+              if (text.includes("授权") || text.includes("同意") || el.className?.toString().toLowerCase().includes("checkbox")) {
+                el.click(); return "clicked custom: " + el.tagName;
+              }
+            }
+            return "not found";
+          });
+          console.error("[nav] Popup checkbox:", popupCb);
+          await randomDelay(500, 1000);
+
+          // popup 中点击确认按钮
+          const popupBtn = await popup.evaluate(() => {
+            const keywords = ["确认授权并前往", "确认授权", "确认并前往", "进入"];
+            const all = [...document.querySelectorAll('button, [role="button"], a, div[class*="btn"], div[class*="Btn"], span[class*="btn"]')];
+            for (const keyword of keywords) {
+              for (const el of all) {
+                const text = el.innerText?.trim() || "";
+                if (text.includes(keyword) && text.length < 20) {
+                  el.click(); return "clicked: " + text;
+                }
+              }
+            }
+            return "not found";
+          });
+          console.error("[nav] Popup confirm:", popupBtn);
+
+          if (popupBtn !== "not found") {
+            await randomDelay(5000, 8000);
           }
         }
-        return "not found";
-      });
-      console.error("[nav] Popup checkbox:", cbResult);
-      await randomDelay(500, 1000);
 
-      // 点击"确认授权并前往"或"进入"
-      const btnResult = await popup.evaluate(() => {
-        const keywords = ["确认授权并前往", "确认授权", "确认并前往", "进入"];
-        const all = [...document.querySelectorAll('button, [role="button"], a, div[class*="btn"], div[class*="Btn"], span[class*="btn"]')];
-        for (const keyword of keywords) {
-          for (const el of all) {
-            const text = el.innerText?.trim() || "";
-            if (text.includes(keyword) && text.length < 20) {
-              el.click(); return "clicked: " + text;
+        // 点击确认后，等待跳转发生
+        console.error("[nav] Waiting for redirect after auth confirm...");
+        await randomDelay(5000, 8000);
+
+        // 检查 popup 是否跳转了（不要关闭，让浏览器自己处理）
+        try {
+          if (!popup.isClosed()) {
+            console.error("[nav] Popup still open, URL:", popup.url());
+            // popup 可能跳转到了 agentseller
+            if (popup.url().includes("agentseller.temu.com") && !popup.url().includes("authentication")) {
+              console.error("[nav] Popup redirected to agentseller, using as main page");
+              page = popup;
+            } else {
+              // 等待 popup 跳转
+              try {
+                await popup.waitForURL((u) => u.toString().includes("agentseller.temu.com"), { timeout: 15000 });
+                console.error("[nav] Popup redirected to:", popup.url());
+                if (!popup.url().includes("authentication")) {
+                  page = popup;
+                }
+              } catch {
+                console.error("[nav] Popup did not redirect, closing...");
+                await popup.close().catch(() => {});
+              }
             }
           }
-        }
-        return "not found";
-      });
-      console.error("[nav] Popup confirm:", btnResult);
+        } catch {}
 
-      if (btnResult !== "not found") {
-        await randomDelay(8000, 12000);
-        // 检查所有页面
+        await randomDelay(2000, 3000);
+
+        // 检查原页面是否也跳转了
+        console.error("[nav] Original page URL:", page.url());
+
+        // 如果原页面还在 authentication，直接导航
+        if (page.url().includes("/main/authentication")) {
+          console.error("[nav] Still on auth, trying direct navigation...");
+          await page.goto(directUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+          await randomDelay(5000, 8000);
+          console.error("[nav] After direct goto, URL:", page.url());
+
+          // 如果现在进入了新的 authentication 页面（有进入按钮的那个）
+          if (page.url().includes("/main/authentication")) {
+            await randomDelay(3000, 5000);
+            // 再试勾选 + 点击进入
+            await page.evaluate(() => {
+              const inputs = [...document.querySelectorAll('input[type="checkbox"]')];
+              for (const cb of inputs) { if (!cb.checked) cb.click(); }
+              const customs = [...document.querySelectorAll('[class*="checkbox"], [class*="Checkbox"], [role="checkbox"], label')];
+              for (const el of customs) {
+                const t = el.innerText || "";
+                if (t.includes("授权") || t.includes("同意")) { el.click(); break; }
+              }
+            });
+            await randomDelay(500, 1000);
+            const enterResult2 = await page.evaluate(() => {
+              const keywords = ["进入", "确认授权并前往", "确认授权"];
+              const all = [...document.querySelectorAll('button, [role="button"], a, div[class*="btn"], div[class*="Btn"], span[class*="btn"]')];
+              for (const kw of keywords) {
+                for (const el of all) {
+                  const text = (el.innerText || "").trim();
+                  if (text.includes(kw) && text.length < 20) { el.click(); return "clicked: " + text; }
+                }
+              }
+              return "not found";
+            });
+            console.error("[nav] Enter button (retry):", enterResult2);
+            if (enterResult2 !== "not found") await randomDelay(5000, 8000);
+          }
+        }
+
+        // 最终检查所有页面
         const pages = context.pages();
-        console.error(`[nav] After auth, ${pages.length} pages:`);
+        console.error(`[nav] After full auth flow, ${pages.length} pages:`);
         for (const p of pages) console.error(`  - ${p.url()}`);
-        // 找 agentseller 页面（非 authentication）
         const targetPage = pages.find(p =>
           p.url().includes("agentseller.temu.com") && !p.url().includes("authentication")
         );
-        if (targetPage) {
+        if (targetPage && targetPage !== page) {
           console.error("[nav] Found target page, switching");
           page = targetPage;
         }
+      } else {
+        console.error("[nav] No popup, trying same-page fallback...");
+        await randomDelay(2000, 3000);
       }
-    } else {
-      console.error("[nav] No popup, trying same-page auth...");
-      await randomDelay(2000, 3000);
-      // 同页面模态框处理
-      await page.evaluate(() => {
-        const inputs = [...document.querySelectorAll('input[type="checkbox"]')];
-        for (const cb of inputs) { if (!cb.checked) cb.click(); }
-      });
-      await randomDelay(500, 1000);
-      await page.evaluate(() => {
-        const keywords = ["确认授权", "进入"];
-        const btns = [...document.querySelectorAll('button, [role="button"], a')];
-        for (const kw of keywords) {
-          for (const btn of btns) {
-            const text = (btn.innerText || "").trim();
-            if (text.includes(kw) && text.length < 20) { btn.click(); return; }
-          }
-        }
-      });
-      await randomDelay(5000, 8000);
     }
 
     // 导航到目标页面
     if (page.url().includes("/main/authentication") || !page.url().includes(targetPath)) {
+      console.error("[nav] Still on auth, trying direct goto...");
       await page.goto(directUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
       await randomDelay(3000, 5000);
     }
