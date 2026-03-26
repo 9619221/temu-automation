@@ -2048,7 +2048,7 @@ async function batchCreateFromCSV(params) {
  * @returns {string[]} 生成的图片文件路径数组
  */
 async function generateAIImages(sourceImagePath, productTitle, imageTypes = ["hero", "lifestyle"]) {
-  const AI_SERVER = process.env.AI_IMAGE_SERVER || "http://localhost:3001";
+  const AI_SERVER = process.env.AI_IMAGE_SERVER || "http://localhost:3000";
   const outputDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "ai-images");
   fs.mkdirSync(outputDir, { recursive: true });
 
@@ -2647,41 +2647,43 @@ async function autoCreateProduct(params) {
             await randomDelay(2000, 3000);
             await takeDebugScreenshot("06c_before_select");
 
-            // 方案1: 点击图片卡片选中（素材中心的图片网格）
-            // 素材中心的每个图片是一个卡片，点击卡片会勾选
-            const selectedCount = await page.evaluate((imgCount) => {
-              let selected = 0;
-              // 查找素材中心弹窗中的所有图片容器
-              // Temu 素材中心的图片卡片通常有 img 元素，点击整个卡片区域
-              const modal = document.querySelector('[class*="modal"], [class*="dialog"], [class*="drawer"], [role="dialog"]');
-              const container = modal || document;
-
-              // 找所有图片缩略图
-              const allImgs = container.querySelectorAll('img');
-              const cardImgs = [];
-              for (const img of allImgs) {
-                if (!img.offsetParent) continue;
-                const rect = img.getBoundingClientRect();
-                // 素材中心的图片缩略图大约 100-200px 宽，在弹窗范围内
-                if (rect.width > 80 && rect.width < 300 && rect.top > 100 && rect.top < 700) {
-                  cardImgs.push(img);
+            // 用坐标点击素材中心的图片来选中
+            let selectedCount = 0;
+            try {
+              // 获取素材中心图片的坐标位置
+              const imagePositions = await page.evaluate(() => {
+                const positions = [];
+                // 找素材中心弹窗
+                const imgs = document.querySelectorAll("img");
+                for (const img of imgs) {
+                  if (!img.offsetParent) continue;
+                  const rect = img.getBoundingClientRect();
+                  // 素材图片通常 100-250px 宽，在弹窗区域内
+                  if (rect.width > 80 && rect.width < 300 && rect.height > 80 && rect.top > 100 && rect.top < 700) {
+                    positions.push({
+                      x: Math.round(rect.left + rect.width / 2),
+                      y: Math.round(rect.top + rect.height / 2),
+                      w: Math.round(rect.width),
+                      h: Math.round(rect.height),
+                    });
+                  }
                 }
-              }
+                return positions;
+              });
 
-              // 选中前 N 张（最新上传的在最前面）
-              for (let i = 0; i < Math.min(imgCount, cardImgs.length); i++) {
-                const img = cardImgs[i];
-                // 尝试点击图片本身
-                img.click();
-                selected++;
-                // 也尝试点击父元素（卡片容器）
-                const card = img.closest('div[class]');
-                if (card && card !== img) {
-                  card.click();
-                }
+              console.error(`[create-product] Found ${imagePositions.length} images to select`);
+              const targetCount = Math.min(validImages.length, 5, imagePositions.length);
+
+              for (let i = 0; i < targetCount; i++) {
+                const pos = imagePositions[i];
+                console.error(`[create-product] Clicking image at (${pos.x}, ${pos.y})`);
+                await page.mouse.click(pos.x, pos.y);
+                selectedCount++;
+                await randomDelay(500, 800);
               }
-              return selected;
-            }, validImages.length);
+            } catch (e) {
+              console.error(`[create-product] Image click error: ${e.message?.slice(0, 50)}`);
+            }
             console.error(`[create-product] Selected ${selectedCount} images`);
             await randomDelay(2000, 3000);
             await takeDebugScreenshot("06d_images_selected");
@@ -2869,6 +2871,17 @@ async function autoCreateProduct(params) {
     }
 
     try {
+      // 先关闭所有可能的弹窗
+      for (let i = 0; i < 3; i++) {
+        try {
+          const popup = page.locator('button:has-text("知道了"), button:has-text("我知道了"), button:has-text("关闭"), [class*="close"]:visible').first();
+          if (await popup.isVisible({ timeout: 500 })) {
+            await popup.click();
+            await randomDelay(500, 1000);
+          } else break;
+        } catch { break; }
+      }
+
       // ---- 6a: 商品产地 ----
       console.error("[create-product] 6a: Setting origin (商品产地)...");
       const originSet = await page.evaluate(() => {
@@ -2894,55 +2907,88 @@ async function autoCreateProduct(params) {
         await randomDelay(1000, 2000);
         // 选择"中国大陆"
         const selected = await page.evaluate(() => {
-          const options = document.querySelectorAll('[class*="option"], [class*="Option"], [class*="item"], li[role="option"]');
-          for (const opt of options) {
-            if (opt.textContent?.includes("中国大陆") && opt.offsetParent !== null) {
-              opt.click();
-              return true;
-            }
-          }
-          // fallback: 搜索所有可见文本
-          const allEls = document.querySelectorAll("div, span, li");
+          // 找所有下拉选项，scrollIntoView 到"中国大陆"再点击
+          const allEls = document.querySelectorAll('[class*="option"], [class*="Option"], [class*="item"], li[role="option"], div, span, li');
           for (const el of allEls) {
             const text = el.textContent?.trim();
-            if (text === "中国大陆" && el.offsetParent !== null) {
-              const rect = el.getBoundingClientRect();
-              if (rect.width > 20 && rect.width < 400) {
-                el.click();
-                return true;
-              }
+            if (text === "中国大陆" || text === "中国大陆（含港澳台）") {
+              el.scrollIntoView({ block: "center" });
+              el.click();
+              return true;
             }
           }
           return false;
         });
         if (selected) {
           console.error("[create-product] Origin: 中国大陆 selected");
-          await randomDelay(1000, 2000);
+          // 点击空白处关闭下拉框
+          await page.mouse.click(700, 50).catch(() => {});
+          await randomDelay(2000, 3000);
 
-          // 选择省份 "浙江省"
-          const provinceSet = await page.evaluate(() => {
-            const options = document.querySelectorAll('[class*="option"], [class*="Option"], [class*="item"], li[role="option"], div[title]');
-            for (const opt of options) {
-              if (opt.textContent?.includes("浙江") && opt.offsetParent !== null) {
-                opt.click();
-                return true;
+          // 关闭满意度评分弹窗（如果出现）
+          try {
+            const closePopup = page.locator('[class*="close"], button:has-text("×")').last();
+            if (await closePopup.isVisible({ timeout: 1000 })) {
+              await closePopup.click();
+              console.error("[create-product] Closed rating popup");
+              await randomDelay(500, 1000);
+            }
+          } catch {}
+
+          // 选择省份 "浙江省" — 先点击省份下拉框再选
+          await randomDelay(1000, 2000);
+          try {
+            // 找第二个下拉框（省份）
+            const provinceDropdown = page.locator('[class*="select"]:has-text("请选择省份"), [class*="select"]:has-text("浙江")').first();
+            if (await provinceDropdown.isVisible({ timeout: 2000 })) {
+              await provinceDropdown.click();
+              await randomDelay(1000, 2000);
+            } else {
+              // 备用：找产地行中第二个下拉框
+              const selects = page.locator('[class*="select"], [class*="Select"]');
+              const count = await selects.count();
+              for (let i = 0; i < count; i++) {
+                const text = await selects.nth(i).textContent().catch(() => "");
+                if (text?.includes("请选择省份") || text?.includes("请选择")) {
+                  await selects.nth(i).click();
+                  await randomDelay(1000, 2000);
+                  break;
+                }
               }
             }
-            const allEls = document.querySelectorAll("div, span, li");
+          } catch {}
+
+          const provinceSet = await page.evaluate(() => {
+            const allEls = document.querySelectorAll('[class*="option"], [class*="Option"], li, div, span');
             for (const el of allEls) {
-              if (el.textContent?.trim()?.includes("浙江") && el.offsetParent !== null) {
-                const rect = el.getBoundingClientRect();
-                if (rect.width > 20 && rect.width < 400) {
-                  el.click();
-                  return true;
-                }
+              const text = el.textContent?.trim();
+              if ((text === "浙江省" || text === "浙江") && el.offsetParent !== null) {
+                el.scrollIntoView({ block: "center" });
+                el.click();
+                return true;
               }
             }
             return false;
           });
           if (provinceSet) console.error("[create-product] Province: 浙江省 selected");
+          else console.error("[create-product] Province: 浙江省 not found");
         }
       }
+      // 关闭所有残留下拉框和弹窗
+      await page.mouse.click(700, 50).catch(() => {});
+      await randomDelay(1000, 2000);
+      // 关闭满意度弹窗
+      try {
+        await page.evaluate(() => {
+          const closes = document.querySelectorAll('[class*="close"], button');
+          for (const el of closes) {
+            if (el.offsetParent && el.getBoundingClientRect().right > 1200 && el.getBoundingClientRect().top > 600) {
+              el.click(); // 右下角的关闭按钮
+              return;
+            }
+          }
+        });
+      } catch {}
       await randomDelay(1000, 2000);
 
       // ---- 6b: 商品属性下拉框 ----
@@ -3023,12 +3069,20 @@ async function autoCreateProduct(params) {
 
       // ---- 6b2: 商品规格（父规格随机选，子规格随机字母）----
       console.error("[create-product] 6b2: Setting product specs...");
+      // 先关闭任何残留的下拉框
+      await page.mouse.click(700, 50).catch(() => {});
+      await randomDelay(1000, 2000);
+      // 滚动到页面下方找规格区域
+      await page.evaluate(() => window.scrollBy(0, 500));
+      await randomDelay(1000, 2000);
+
       try {
-        // 找"父规格1"下拉框
+        // 找"父规格1"旁边的下拉框（文本必须精确包含"父规格"）
         const specSet = await page.evaluate(() => {
           const labels = document.querySelectorAll("span, label, div");
           for (const label of labels) {
-            if (label.textContent?.trim()?.includes("父规格") && label.offsetParent) {
+            const text = label.textContent?.trim() || "";
+            if (/^\*?父规格/.test(text) && text.length < 20 && label.offsetParent) {
               const parent = label.closest("[class]")?.parentElement || label.parentElement;
               const select = parent?.querySelector('[class*="select"], [class*="Select"], [role="combobox"], input[readonly]');
               if (select) {
