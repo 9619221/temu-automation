@@ -20,6 +20,8 @@ interface AutomationAPI {
   scrapeCheckup: () => Promise<any>;
   scrapeUSRetrieval: () => Promise<any>;
   scrapeDelivery: () => Promise<any>;
+  createProduct: (params: any) => Promise<any>;
+  batchCreateFromCsv: (params: any) => Promise<any>;
   close: () => Promise<{ status: string }>;
   ping: () => Promise<{ status: string }>;
 }

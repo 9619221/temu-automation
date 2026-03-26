@@ -7,6 +7,7 @@ import ProductList from "./pages/ProductList";
 import ProductDetail from "./pages/ProductDetail";
 import TaskManager from "./pages/TaskManager";
 import Settings from "./pages/Settings";
+import ProductCreate from "./pages/ProductCreate";
 import { CollectionProvider } from "./contexts/CollectionContext";
 
 function App() {
@@ -18,6 +19,7 @@ function App() {
           <Route path="shop" element={<ShopOverview />} />
           <Route path="products" element={<ProductList />} />
           <Route path="products/:id" element={<ProductDetail />} />
+          <Route path="create-product" element={<ProductCreate />} />
           <Route path="collect" element={<Dashboard />} />
           <Route path="accounts" element={<AccountManager />} />
           <Route path="tasks" element={<TaskManager />} />
