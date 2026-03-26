@@ -2175,7 +2175,7 @@ async function autoCreateProduct(params) {
       const searchTerms = [];
       // 标题优先
       if (params.title) {
-        searchTerms.push(params.title.slice(0, 50));
+        searchTerms.push(params.title);
       }
       // 分类关键词作为备选
       if (Array.isArray(params.categorySearchList)) searchTerms.push(...params.categorySearchList);
@@ -2368,90 +2368,318 @@ async function autoCreateProduct(params) {
         return { success: false, message: "图片文件不存在: " + params.images.join(", "), screenshots };
       }
 
-      // 滚动到图片上传区域
+      // 等待页面完全加载
+      console.error("[create-product] Waiting for page to fully load before upload...");
+      try {
+        await page.waitForFunction(() => {
+          const spinners = document.querySelectorAll('.ant-spin-spinning, [class*="loading"], [class*="Loading"]');
+          return spinners.length === 0 || Array.from(spinners).every(s => s.offsetParent === null);
+        }, { timeout: 20000 });
+      } catch {}
+      await randomDelay(3000, 5000);
+
+      // 滚动到商品轮播图/素材中心区域
       await page.evaluate(() => {
         const labels = document.querySelectorAll("span, label, div");
         for (const el of labels) {
-          if (el.textContent?.includes("商品轮播图") || el.textContent?.includes("商品主图")) {
+          if (el.textContent?.includes("商品轮播图") || el.textContent?.includes("素材中心") || el.textContent?.includes("商品主图")) {
             el.scrollIntoView({ behavior: "smooth", block: "center" });
             break;
           }
         }
       });
-      await randomDelay(1000, 2000);
+      await randomDelay(2000, 3000);
+      await takeDebugScreenshot("05b_before_upload");
 
       let uploaded = false;
 
-      // Temu 上传流程：点击"素材中心"按钮 → 弹出素材中心 → 在素材中心里上传图片
-      console.error("[create-product] Clicking '素材中心' button...");
-      try {
-        const materialBtn = page.locator('div:has-text("素材中心"), span:has-text("素材中心"), button:has-text("素材中心")').first();
+      // Temu 上传流程：点击"素材中心"按钮 → 弹出素材中心 → 本地上传
+      console.error("[create-product] Looking for '素材中心' button...");
+
+      // 用 evaluate 精确查找"素材中心"按钮（它是一个带图标+文字的div）
+      const materialFound = await page.evaluate(() => {
+        const allEls = document.querySelectorAll("div, span, a, button");
+        for (const el of allEls) {
+          const text = el.textContent?.trim() || "";
+          if (text === "素材中心" && el.offsetParent !== null) {
+            const rect = el.getBoundingClientRect();
+            if (rect.width > 20 && rect.width < 200 && rect.height > 20) {
+              // 点击这个元素或其父元素
+              const clickTarget = el.closest("[class]") || el;
+              clickTarget.click();
+              return { tag: el.tagName, text, top: Math.round(rect.top), left: Math.round(rect.left) };
+            }
+          }
+        }
+        return null;
+      });
+
+      if (materialFound) {
+        console.error(`[create-product] 素材中心 clicked at (${materialFound.left}, ${materialFound.top})`);
+      } else {
+        // 备用：用 Playwright locator
+        const materialBtn = page.locator('text=素材中心').first();
         if (await materialBtn.isVisible({ timeout: 3000 })) {
           await materialBtn.click();
+          console.error("[create-product] 素材中心 clicked via locator");
+        }
+      }
+
+      if (materialFound) {
+        try {
           console.error("[create-product] 素材中心 clicked, waiting for dialog...");
           await randomDelay(3000, 5000);
           await takeDebugScreenshot("06a_material_center");
 
-          // 素材中心弹窗中找上传按钮或 file input
-          // 方法1: 弹窗中的 file input
-          const dialogFileInput = page.locator('.ant-modal input[type="file"], [class*="dialog"] input[type="file"], [class*="modal"] input[type="file"], [class*="Dialog"] input[type="file"], [class*="Modal"] input[type="file"]').first();
-          if (await dialogFileInput.isVisible({ timeout: 2000 }).catch(() => false)) {
-            await dialogFileInput.setInputFiles(validImages);
-            uploaded = true;
-            console.error("[create-product] Uploaded via dialog file input");
-          }
+          // Step A: 探测素材中心弹窗中的DOM，找到"本地上传"并点击
+          console.error("[create-product] Looking for '本地上传' in material center...");
 
-          // 方法2: 弹窗中的"上传图片"按钮 + filechooser
-          if (!uploaded) {
-            try {
-              const uploadInDialog = page.locator('button:has-text("上传"), div:has-text("上传图片"), span:has-text("上传图片"), div:has-text("点击上传"), [class*="upload"]').last();
-              if (await uploadInDialog.isVisible({ timeout: 2000 })) {
-                const [fileChooser] = await Promise.all([
-                  page.waitForEvent("filechooser", { timeout: 8000 }),
-                  uploadInDialog.click(),
-                ]);
-                await fileChooser.setFiles(validImages);
-                uploaded = true;
-                console.error("[create-product] Uploaded via dialog filechooser");
+          // 先探测弹窗中所有可点击元素
+          const domInfo = await page.evaluate(() => {
+            const result = { links: [], inputs: [], buttons: [] };
+            // 找所有包含"上传"文字的元素
+            document.querySelectorAll("a, span, div, button, label").forEach(el => {
+              const text = el.textContent?.trim() || "";
+              if (text.includes("上传") && el.offsetParent !== null) {
+                const rect = el.getBoundingClientRect();
+                result.links.push({
+                  tag: el.tagName,
+                  text: text.slice(0, 30),
+                  class: el.className?.slice?.(0, 50) || "",
+                  rect: { top: Math.round(rect.top), left: Math.round(rect.left), w: Math.round(rect.width), h: Math.round(rect.height) },
+                });
               }
-            } catch (e) {
-              console.error(`[create-product] Dialog filechooser failed: ${e.message?.slice(0, 60)}`);
+            });
+            // 找所有 file input
+            document.querySelectorAll('input[type="file"]').forEach((el, i) => {
+              result.inputs.push({
+                index: i,
+                accept: el.accept,
+                hidden: el.offsetParent === null,
+                parent: el.parentElement?.className?.slice(0, 50) || "",
+              });
+            });
+            return result;
+          });
+          console.error(`[create-product] DOM scan: ${domInfo.links.length} upload links, ${domInfo.inputs.length} file inputs`);
+          domInfo.links.forEach(l => console.error(`  link: <${l.tag}> "${l.text}" class="${l.class}" pos=${l.rect.left},${l.rect.top}`));
+          domInfo.inputs.forEach(i => console.error(`  input[${i.index}]: accept=${i.accept} hidden=${i.hidden} parent="${i.parent}"`));
+
+          // 点击"本地上传"（用 evaluate 直接点击匹配的元素）
+          const clickedUpload = await page.evaluate(() => {
+            const els = document.querySelectorAll("a, span, div, button");
+            for (const el of els) {
+              const text = el.textContent?.trim() || "";
+              if (text === "本地上传" && el.offsetParent !== null) {
+                el.click();
+                return el.tagName + ": " + text;
+              }
             }
+            return null;
+          });
+
+          if (clickedUpload) {
+            console.error(`[create-product] Clicked: ${clickedUpload}`);
+            await randomDelay(2000, 3000);
+
+            // 等待 filechooser 或新的 file input 出现
+            try {
+              const fileChooser = await page.waitForEvent("filechooser", { timeout: 5000 });
+              await fileChooser.setFiles(validImages);
+              uploaded = true;
+              console.error(`[create-product] Uploaded ${validImages.length} images via filechooser after click`);
+            } catch {
+              console.error("[create-product] No filechooser, checking new file inputs...");
+              // 可能出现了新的 file input
+              const newInputs = page.locator('input[type="file"]');
+              const newCount = await newInputs.count();
+              console.error(`[create-product] File inputs now: ${newCount}`);
+              for (let i = newCount - 1; i >= 0 && !uploaded; i--) {
+                try {
+                  await newInputs.nth(i).setInputFiles(validImages, { timeout: 3000 });
+                  uploaded = true;
+                  console.error(`[create-product] Uploaded via new file input[${i}]`);
+                } catch {}
+              }
+            }
+
+            if (uploaded) {
+              await randomDelay(10000, 15000); // 等待上传完成
+              await takeDebugScreenshot("06b_after_upload");
+
+              // 处理"重复上传"弹窗 — 点击"关闭"或"在列表中查看"
+              for (let retry = 0; retry < 3; retry++) {
+                const dismissed = await page.evaluate(() => {
+                  const btns = document.querySelectorAll("button, a, span");
+                  for (const btn of btns) {
+                    const text = btn.textContent?.trim() || "";
+                    if ((text === "关闭" || text === "在列表中查看") && btn.offsetParent !== null) {
+                      const rect = btn.getBoundingClientRect();
+                      // 确保是弹窗中的按钮（在页面中间附近）
+                      if (rect.top > 200 && rect.top < 700 && rect.width > 30) {
+                        btn.click();
+                        return text;
+                      }
+                    }
+                  }
+                  return null;
+                });
+                if (dismissed) {
+                  console.error(`[create-product] Dismissed popup: "${dismissed}"`);
+                  await randomDelay(2000, 3000);
+                } else {
+                  break;
+                }
+              }
+
+              // 确保在"图片"视图（不是"上传列表"视图）
+              try {
+                await page.evaluate(() => {
+                  const els = document.querySelectorAll("span, div, button, a");
+                  for (const el of els) {
+                    const text = el.textContent?.trim() || "";
+                    if (text === "图片" && el.offsetParent !== null) {
+                      const rect = el.getBoundingClientRect();
+                      if (rect.width > 20 && rect.width < 100 && rect.top < 300) {
+                        el.click();
+                        return;
+                      }
+                    }
+                  }
+                });
+                await randomDelay(2000, 3000);
+              } catch {}
+
+              // 点击"刷新"
+              try {
+                await page.evaluate(() => {
+                  const els = document.querySelectorAll("a, span, div");
+                  for (const el of els) {
+                    if (el.textContent?.trim() === "刷新" && el.offsetParent !== null) {
+                      const rect = el.getBoundingClientRect();
+                      if (rect.top < 300) { el.click(); return; }
+                    }
+                  }
+                });
+                console.error("[create-product] Refreshed material list");
+                await randomDelay(3000, 5000);
+              } catch {}
+            }
+          } else {
+            console.error("[create-product] '本地上传' element not found in DOM");
           }
 
-          // 方法3: 弹窗中任意 file input（包括隐藏的）
+          // 最终 fallback
           if (!uploaded) {
+            console.error("[create-product] Fallback: trying all file inputs...");
             const allInputs = page.locator('input[type="file"]');
             const count = await allInputs.count();
-            console.error(`[create-product] Found ${count} file inputs in page`);
             for (let i = 0; i < count && !uploaded; i++) {
               try {
                 await allInputs.nth(i).setInputFiles(validImages, { timeout: 3000 });
                 uploaded = true;
-                console.error(`[create-product] Uploaded via file input[${i}]`);
+                console.error(`[create-product] Uploaded via fallback input[${i}]`);
+                await randomDelay(8000, 12000);
               } catch {}
             }
           }
 
           if (uploaded) {
-            await randomDelay(5000, 8000); // 等待上传完成
+            // Step B: 选中刚上传的图片
+            console.error("[create-product] Selecting uploaded images...");
+            await randomDelay(2000, 3000);
+            await takeDebugScreenshot("06c_before_select");
 
-            // 上传完成后点击"确认"选择图片
-            try {
-              const confirmBtn = page.locator('button:has-text("确认"), button:has-text("确定"), button:has-text("使用"), button:has-text("选择")').last();
-              if (await confirmBtn.isVisible({ timeout: 5000 })) {
-                await confirmBtn.click();
-                console.error("[create-product] Confirmed image selection");
-                await randomDelay(2000, 3000);
+            // 方案1: 点击图片卡片选中（素材中心的图片网格）
+            // 素材中心的每个图片是一个卡片，点击卡片会勾选
+            const selectedCount = await page.evaluate((imgCount) => {
+              let selected = 0;
+              // 查找素材中心弹窗中的所有图片容器
+              // Temu 素材中心的图片卡片通常有 img 元素，点击整个卡片区域
+              const modal = document.querySelector('[class*="modal"], [class*="dialog"], [class*="drawer"], [role="dialog"]');
+              const container = modal || document;
+
+              // 找所有图片缩略图
+              const allImgs = container.querySelectorAll('img');
+              const cardImgs = [];
+              for (const img of allImgs) {
+                if (!img.offsetParent) continue;
+                const rect = img.getBoundingClientRect();
+                // 素材中心的图片缩略图大约 100-200px 宽，在弹窗范围内
+                if (rect.width > 80 && rect.width < 300 && rect.top > 100 && rect.top < 700) {
+                  cardImgs.push(img);
+                }
               }
-            } catch {}
+
+              // 选中前 N 张（最新上传的在最前面）
+              for (let i = 0; i < Math.min(imgCount, cardImgs.length); i++) {
+                const img = cardImgs[i];
+                // 尝试点击图片本身
+                img.click();
+                selected++;
+                // 也尝试点击父元素（卡片容器）
+                const card = img.closest('div[class]');
+                if (card && card !== img) {
+                  card.click();
+                }
+              }
+              return selected;
+            }, validImages.length);
+            console.error(`[create-product] Selected ${selectedCount} images`);
+            await randomDelay(2000, 3000);
+            await takeDebugScreenshot("06d_images_selected");
+
+            // 检查底部"已选X个"是否变化
+            const selectionStatus = await page.evaluate(() => {
+              const els = document.querySelectorAll("span, div");
+              for (const el of els) {
+                if (el.textContent?.includes("已选") && el.textContent?.includes("个")) {
+                  return el.textContent.trim();
+                }
+              }
+              return "unknown";
+            });
+            console.error(`[create-product] Selection status: ${selectionStatus}`);
+
+            // Step C: 点击"确认"按钮（底部的确认按钮）
+            console.error("[create-product] Clicking confirm...");
+            try {
+              // 找到素材中心弹窗底部的"确认"按钮
+              const confirmed = await page.evaluate(() => {
+                const btns = document.querySelectorAll("button");
+                for (const btn of btns) {
+                  const text = btn.textContent?.trim() || "";
+                  if (text === "确认" && btn.offsetParent !== null) {
+                    const rect = btn.getBoundingClientRect();
+                    // 确认按钮在底部（y > 600）
+                    if (rect.top > 500) {
+                      btn.click();
+                      return true;
+                    }
+                  }
+                }
+                return false;
+              });
+              if (confirmed) {
+                console.error("[create-product] Confirmed! Images added to product");
+                await randomDelay(3000, 5000);
+              } else {
+                // fallback: 用 Playwright locator
+                const confirmBtn = page.locator('button:has-text("确认")').last();
+                if (await confirmBtn.isVisible({ timeout: 3000 })) {
+                  await confirmBtn.click();
+                  console.error("[create-product] Confirmed via locator");
+                  await randomDelay(3000, 5000);
+                }
+              }
+            } catch (e) {
+              console.error(`[create-product] Confirm failed: ${e.message?.slice(0, 40)}`);
+            }
           }
-        } else {
-          console.error("[create-product] 素材中心 button not found");
+        } catch (e) {
+          console.error(`[create-product] 素材中心 approach failed: ${e.message?.slice(0, 60)}`);
         }
-      } catch (e) {
-        console.error(`[create-product] 素材中心 approach failed: ${e.message?.slice(0, 60)}`);
-      }
+      } /* end if materialFound */
 
       // 备用方案：直接找页面上的 file input
       if (!uploaded) {

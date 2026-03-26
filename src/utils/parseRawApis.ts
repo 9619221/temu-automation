@@ -181,7 +181,32 @@ export function parseOrdersData(raw: any): any[] {
 
 // ============ Sales 销售管理 ============
 export function parseSalesData(raw: any): any {
-  if (raw?.items && Array.isArray(raw.items)) return raw; // 已解析
+  // 新格式：scrapeSales 直接返回 {summary, items, apis}，items 含 skuList
+  if (raw?.items && Array.isArray(raw.items) && raw.items[0]?.skuList) {
+    // 扁平化：每个 SKU 一行
+    const flatItems = raw.items.flatMap((item: any, idx: number) =>
+      (item.skuList || []).map((sku: any, si: number) => ({
+        key: idx * 100 + si + 1,
+        title: item.productName || "",
+        category: item.category || "",
+        skcId: item.skcId || "",
+        spuId: item.spuId || "",
+        imageUrl: item.imageUrl || "",
+        skuId: sku.skuId || "",
+        skuName: sku.skuName || "",
+        skuCode: sku.skuCode || "",
+        price: sku.price || 0,
+        warehouseStock: sku.warehouseStock || 0,
+        occupyStock: sku.occupyStock || 0,
+        unavailableStock: sku.unavailableStock || 0,
+        warehouseGroup: sku.warehouseGroup || "",
+        suggestStock: sku.suggestStock || 0,
+        stockStatus: sku.stockStatus || "",
+      }))
+    );
+    return { summary: raw.summary || {}, items: flatItems, syncedAt: raw.syncedAt };
+  }
+  if (raw?.items && Array.isArray(raw.items)) return raw; // 旧格式已解析
   if (!isRawApiFormat(raw)) return { summary: {}, items: [] };
   const apis = raw.apis;
 
