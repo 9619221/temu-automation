@@ -1966,6 +1966,8 @@ async function batchCreateFromCSV(params) {
       // 优先最后一级，逐级往上尝试
       const categorySearchList = [...categoryParts].reverse();
       const categorySearch = categorySearchList[0] || "商品";
+      // 父级分类用于过滤搜索结果（取第一级）
+      const categoryParent = categoryParts[0] || "";
 
       // Step 3: 价格转人民币（粗略 * 7）
       const priceCNY = priceUSD > 0 ? (priceUSD * 7).toFixed(2) : "9.99";
@@ -1974,6 +1976,7 @@ async function batchCreateFromCSV(params) {
       const result = await autoCreateProduct({
         categorySearch,
         categorySearchList: categorySearchList, // 逐级尝试的分类列表
+        categoryParent, // 父级分类用于过滤搜索结果
         title: productName,
         sourceImage: localImagePath,
         generateAI: params.generateAI !== false,
@@ -2171,15 +2174,44 @@ async function autoCreateProduct(params) {
     const categoryInput = page.locator('input[placeholder*="搜索分类"], input[placeholder*="搜索类目"], input[placeholder*="商品名称"], input[placeholder*="可输入"]').first();
 
     if (await categoryInput.isVisible({ timeout: 3000 })) {
-      // 搜索分类：优先用商品标题搜索（Temu搜索框支持用商品名匹配分类）
+      // 搜索分类：从标题中提取关键产品词
       const searchTerms = [];
-      // 标题优先
+
+      // 从标题提取关键词（去掉数量词、尺寸、通用形容词）
       if (params.title) {
-        searchTerms.push(params.title);
+        const title = params.title;
+        // 提取核心产品名（去掉数量、尺寸、品牌等修饰词）
+        const stopWords = /\b(upgraded|premium|professional|portable|universal|adjustable|durable|waterproof|heavy duty|high quality|set|pack|pcs|psc|piece|inch|cm|mm|ml|oz|for|with|and|the|a|an|in|on|of|to|is|it|by)\b/gi;
+        const cleaned = title
+          .replace(/\d+\s*(pcs|pack|set|pairs?|pieces?|inch|cm|mm|ml|oz|g|kg|lb)\b/gi, "")
+          .replace(/\d+(\.\d+)?\s*(x|×)\s*\d+(\.\d+)?/gi, "")
+          .replace(/\d{3,}/g, "")
+          .replace(stopWords, "")
+          .replace(/[,\-|()]/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+
+        // 取前4个有意义的词作为搜索词
+        const words = cleaned.split(" ").filter(w => w.length > 2);
+        if (words.length > 0) {
+          searchTerms.push(words.slice(0, 4).join(" "));
+        }
+        // 也用前2个词试试（更宽泛）
+        if (words.length > 2) {
+          searchTerms.push(words.slice(0, 2).join(" "));
+        }
+        // 整个标题作为最后备选
+        searchTerms.push(title);
       }
-      // 分类关键词作为备选
+
+      // 策略：先搜标题，从结果中匹配最后一级类目关键词
+      if (params.categorySearch && params.categorySearch !== params.title) {
+        const lastLevel = params.categorySearch.split("/").pop()?.trim();
+        // 标题优先搜索，最后一级分类作为备选
+        if (lastLevel) searchTerms.push(lastLevel);
+        console.error(`[create-product] Search by title first, match against: "${lastLevel}"`);
+      }
       if (Array.isArray(params.categorySearchList)) searchTerms.push(...params.categorySearchList);
-      else if (params.categorySearch) searchTerms.push(params.categorySearch);
 
       let categorySelected = false;
 
@@ -2199,7 +2231,10 @@ async function autoCreateProduct(params) {
 
         // 检查搜索结果：Temu 分类页搜索后会显示推荐分类行
         // 格式通常是 "一级分类 > 二级分类 > 三级分类" 的可点击链接
-        const clickResult = await page.evaluate(() => {
+        // 用最后一级类目名作为匹配依据
+        const lastLevelCat = (params.categorySearch || "").split("/").pop()?.trim() || "";
+        const parentCategory = lastLevelCat || params.categoryParent || "";
+        const clickResult = await page.evaluate((parentCat) => {
           // 策略1: 找"常用推荐"区域下的分类链接
           const links = document.querySelectorAll("a, span, div");
           const candidates = [];
@@ -2213,9 +2248,30 @@ async function autoCreateProduct(params) {
               }
             }
           }
-          // 点击第一个推荐分类
           if (candidates.length > 0) {
             candidates.sort((a, b) => a.top - b.top);
+            // 如果有父级分类，优先匹配包含父级关键词的结果
+            if (parentCat) {
+              // parentCat 现在传的是最后一级类目名（如"磨料与抛光用品"）
+              // 从中提取关键词用于匹配搜索结果
+              const catKeywords = parentCat.replace(/[/、与和，,用品产品]/g, " ").split(/\s+/).filter(w => w.length >= 2);
+              console.log("[category] Matching keywords:", catKeywords.join(","), "in", candidates.length, "results");
+              candidates.forEach((c,i) => console.log("  [" + i + "]", c.text.slice(0,60)));
+
+              // 找包含类目关键词最多的结果
+              let bestMatch = null, bestScore = 0;
+              for (const c of candidates) {
+                const score = catKeywords.filter(kw => c.text.includes(kw)).length;
+                if (score > bestScore) { bestScore = score; bestMatch = c; }
+              }
+              if (bestMatch && bestScore > 0) {
+                bestMatch.el.click();
+                return "[matched:" + bestScore + "] " + bestMatch.text.slice(0, 80);
+              }
+              // 没匹配到类目关键词，不选，继续下一个搜索词
+              return null;
+            }
+            // 没有类目约束，选第一个
             candidates[0].el.click();
             return candidates[0].text.slice(0, 60);
           }
@@ -2234,7 +2290,7 @@ async function autoCreateProduct(params) {
             }
           }
           return null;
-        });
+        }, parentCategory);
 
         if (clickResult) {
           console.error(`[create-product] Category selected: "${clickResult}"`);
@@ -2720,32 +2776,318 @@ async function autoCreateProduct(params) {
       await takeDebugScreenshot("07_detail_images");
     }
 
-    // ========== Step 6: 填写商品属性 ==========
-    if (params.attributes && Object.keys(params.attributes).length > 0) {
-      console.error("[create-product] Step 6: Fill attributes");
-      for (const [key, value] of Object.entries(params.attributes)) {
-        try {
-          // 找到标签文字对应的输入框
-          const label = page.locator(`text=${key}`).first();
-          if (await label.isVisible({ timeout: 1000 })) {
-            // 找标签旁边的 input/select
-            const parent = label.locator("xpath=../..");
-            const input = parent.locator("input, select, textarea").first();
-            if (await input.isVisible({ timeout: 500 })) {
-              const tagName = await input.evaluate(el => el.tagName.toLowerCase());
-              if (tagName === "select") {
-                await input.selectOption(String(value));
-              } else {
-                await input.fill(String(value));
+    // ========== Step 6: 智能填写所有必填字段 ==========
+    console.error("[create-product] Step 6: Smart auto-fill required fields");
+
+    // 默认值映射（字段关键词 → 要选择的值）
+    const defaultValues = {
+      // 产地
+      "商品产地": "中国大陆",
+      "产地": "中国大陆",
+      // 属性
+      "可重用性": "否",
+      "Reusability": "否",
+      "电池属性": "无电池",
+      "Battery": "无电池",
+      "品牌名": null, // 跳过品牌
+      "Brand": null,
+      "工作电压": null, // 非必填跳过
+      // 包装
+      "外包装类型": "软包装+硬物",
+      "外包装形状": "长方体",
+      // 敏感属性
+      "敏感属性": "非敏感品",
+      // 体积重量
+      "最长边": params.dimensions?.length || "15",
+      "次长边": params.dimensions?.width || "10",
+      "最短边": params.dimensions?.height || "5",
+      "重量": params.weight || "200",
+    };
+
+    // 用户自定义属性覆盖默认值
+    if (params.attributes) {
+      Object.assign(defaultValues, params.attributes);
+    }
+
+    try {
+      // ---- 6a: 商品产地 ----
+      console.error("[create-product] 6a: Setting origin (商品产地)...");
+      const originSet = await page.evaluate(() => {
+        // 找"商品产地"标签旁边的下拉框
+        const labels = document.querySelectorAll("span, label, div");
+        for (const label of labels) {
+          if (label.textContent?.trim()?.startsWith("商品产地") && label.offsetParent) {
+            // 找最近的 select 或可点击的下拉触发器
+            const parent = label.closest("div[class]")?.parentElement;
+            if (parent) {
+              const trigger = parent.querySelector('[class*="select"], [class*="Select"], [role="combobox"], input[readonly]');
+              if (trigger) {
+                trigger.click();
+                return "clicked";
               }
-              console.error(`[create-product] Attribute set: ${key} = ${value}`);
             }
           }
-        } catch (e) {
-          console.error(`[create-product] Failed to set attribute ${key}: ${e.message}`);
+        }
+        return "not_found";
+      });
+
+      if (originSet === "clicked") {
+        await randomDelay(1000, 2000);
+        // 选择"中国大陆"
+        const selected = await page.evaluate(() => {
+          const options = document.querySelectorAll('[class*="option"], [class*="Option"], [class*="item"], li[role="option"]');
+          for (const opt of options) {
+            if (opt.textContent?.includes("中国大陆") && opt.offsetParent !== null) {
+              opt.click();
+              return true;
+            }
+          }
+          // fallback: 搜索所有可见文本
+          const allEls = document.querySelectorAll("div, span, li");
+          for (const el of allEls) {
+            const text = el.textContent?.trim();
+            if (text === "中国大陆" && el.offsetParent !== null) {
+              const rect = el.getBoundingClientRect();
+              if (rect.width > 20 && rect.width < 400) {
+                el.click();
+                return true;
+              }
+            }
+          }
+          return false;
+        });
+        if (selected) {
+          console.error("[create-product] Origin: 中国大陆 selected");
+          await randomDelay(1000, 2000);
+
+          // 选择省份 "浙江省"
+          const provinceSet = await page.evaluate(() => {
+            const options = document.querySelectorAll('[class*="option"], [class*="Option"], [class*="item"], li[role="option"], div[title]');
+            for (const opt of options) {
+              if (opt.textContent?.includes("浙江") && opt.offsetParent !== null) {
+                opt.click();
+                return true;
+              }
+            }
+            const allEls = document.querySelectorAll("div, span, li");
+            for (const el of allEls) {
+              if (el.textContent?.trim()?.includes("浙江") && el.offsetParent !== null) {
+                const rect = el.getBoundingClientRect();
+                if (rect.width > 20 && rect.width < 400) {
+                  el.click();
+                  return true;
+                }
+              }
+            }
+            return false;
+          });
+          if (provinceSet) console.error("[create-product] Province: 浙江省 selected");
         }
       }
-      await takeDebugScreenshot("08_attributes_filled");
+      await randomDelay(1000, 2000);
+
+      // ---- 6b: 商品属性下拉框 ----
+      console.error("[create-product] 6b: Filling product attributes...");
+
+      // 扫描所有带*号的下拉框并自动选择
+      const attrResults = await page.evaluate((defaults) => {
+        const results = [];
+        // 找所有带*号标签的表单项
+        const formItems = document.querySelectorAll("[class*='form'], [class*='Form'], [class*='field'], [class*='Field']");
+
+        // 更通用：找所有 label/span 中带 * 的
+        const allLabels = document.querySelectorAll("span, label, div");
+        for (const label of allLabels) {
+          const text = label.textContent?.trim() || "";
+          if (!label.offsetParent) continue;
+          const rect = label.getBoundingClientRect();
+          if (rect.width < 20 || rect.width > 300) continue;
+
+          // 检查常见属性字段
+          for (const [key, value] of Object.entries(defaults)) {
+            if (value === null) continue;
+            if (text.includes(key)) {
+              // 找相邻的下拉框/输入框
+              const parent = label.closest("div")?.parentElement || label.parentElement;
+              if (parent) {
+                const selectTrigger = parent.querySelector('[class*="select"], [class*="Select"], [role="combobox"], input[readonly]');
+                if (selectTrigger) {
+                  selectTrigger.click();
+                  results.push({ field: key, action: "clicked_dropdown" });
+                }
+                const input = parent.querySelector('input:not([readonly]):not([type="hidden"])');
+                if (input && !selectTrigger) {
+                  input.value = String(value);
+                  input.dispatchEvent(new Event("input", { bubbles: true }));
+                  input.dispatchEvent(new Event("change", { bubbles: true }));
+                  results.push({ field: key, action: "filled", value: String(value) });
+                }
+              }
+              break;
+            }
+          }
+        }
+        return results;
+      }, defaultValues);
+
+      for (const r of attrResults) {
+        console.error(`[create-product] Attr: ${r.field} → ${r.action} ${r.value || ""}`);
+        if (r.action === "clicked_dropdown") {
+          await randomDelay(500, 1000);
+          // 选择对应的值
+          const targetValue = defaultValues[r.field];
+          if (targetValue) {
+            await page.evaluate((val) => {
+              const options = document.querySelectorAll('[class*="option"], [class*="Option"], li[role="option"], [class*="item"]');
+              for (const opt of options) {
+                const text = opt.textContent?.trim();
+                if (text?.includes(val) && opt.offsetParent !== null) {
+                  opt.click();
+                  return;
+                }
+              }
+              // 选第一个可见选项
+              for (const opt of options) {
+                if (opt.offsetParent !== null) {
+                  const rect = opt.getBoundingClientRect();
+                  if (rect.height > 10 && rect.top > 0) {
+                    opt.click();
+                    return;
+                  }
+                }
+              }
+            }, targetValue);
+            await randomDelay(500, 1000);
+          }
+        }
+      }
+
+      // ---- 6c: 外包装类型和形状（单选按钮）----
+      console.error("[create-product] 6c: Setting packaging info...");
+      await page.evaluate(() => {
+        // 外包装类型：选"软包装+硬物"
+        const radios = document.querySelectorAll('input[type="radio"], [role="radio"]');
+        const allLabels = document.querySelectorAll("span, label");
+        for (const el of allLabels) {
+          const text = el.textContent?.trim();
+          if (text === "软包装+硬物" || text === "长方体") {
+            // 点击 radio label
+            const radio = el.closest("label") || el.parentElement;
+            if (radio) radio.click();
+          }
+        }
+      });
+      await randomDelay(500, 1000);
+
+      // ---- 6d: 敏感属性下拉 ----
+      console.error("[create-product] 6d: Setting sensitivity...");
+      const sensitivitySet = await page.evaluate(() => {
+        const labels = document.querySelectorAll("span, div, label");
+        for (const label of labels) {
+          if (label.textContent?.trim() === "敏感属性" && label.offsetParent) {
+            const parent = label.closest("div")?.parentElement;
+            if (parent) {
+              const select = parent.querySelector('[class*="select"], [class*="Select"], [role="combobox"]');
+              if (select) { select.click(); return "clicked"; }
+            }
+          }
+        }
+        // 也试试表格中的敏感属性下拉
+        const selects = document.querySelectorAll('[class*="select"], [role="combobox"]');
+        for (const s of selects) {
+          const prev = s.previousElementSibling || s.closest("td")?.previousElementSibling;
+          if (prev?.textContent?.includes("敏感属性")) {
+            s.click();
+            return "clicked";
+          }
+        }
+        return "not_found";
+      });
+      if (sensitivitySet === "clicked") {
+        await randomDelay(500, 1000);
+        await page.evaluate(() => {
+          const options = document.querySelectorAll('[class*="option"], li[role="option"]');
+          for (const opt of options) {
+            if (opt.textContent?.includes("非敏感") && opt.offsetParent) {
+              opt.click();
+              return;
+            }
+          }
+          // 选第一个
+          for (const opt of options) {
+            if (opt.offsetParent) { opt.click(); return; }
+          }
+        });
+        await randomDelay(500, 1000);
+      }
+
+      // ---- 6e: 体积重量 ----
+      console.error("[create-product] 6e: Setting dimensions & weight...");
+      await page.evaluate((dims) => {
+        const inputs = document.querySelectorAll('input[placeholder*="请输入"]');
+        const dimInputs = [];
+        for (const input of inputs) {
+          const parent = input.closest("td, div");
+          const prevText = parent?.previousElementSibling?.textContent || "";
+          const nextText = input.nextElementSibling?.textContent || "";
+          // 找到体积和重量输入框（紧挨着 cm 或 g 标签的）
+          if (nextText === "cm" || nextText === "g" || prevText.includes("最长") || prevText.includes("次长") || prevText.includes("最短")) {
+            dimInputs.push(input);
+          }
+        }
+        // 也通过位置查找：体积区域的输入框
+        const allInputs = document.querySelectorAll('input[type="text"], input:not([type])');
+        for (const input of allInputs) {
+          if (!input.offsetParent) continue;
+          const sibling = input.nextElementSibling;
+          if (sibling?.textContent === "cm" || sibling?.textContent === "g") {
+            if (!dimInputs.includes(input)) dimInputs.push(input);
+          }
+        }
+
+        const values = [dims.length, dims.width, dims.height, dims.weight];
+        for (let i = 0; i < Math.min(dimInputs.length, values.length); i++) {
+          const input = dimInputs[i];
+          const nativeSet = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+          nativeSet.call(input, String(values[i]));
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        return dimInputs.length;
+      }, {
+        length: params.dimensions?.length || "15",
+        width: params.dimensions?.width || "10",
+        height: params.dimensions?.height || "5",
+        weight: params.weight || "200",
+      });
+
+      // ---- 6f: 勾选合规声明 ----
+      console.error("[create-product] 6f: Checking compliance checkbox...");
+      await page.evaluate(() => {
+        const labels = document.querySelectorAll("span, label");
+        for (const label of labels) {
+          if (label.textContent?.includes("我已阅读并同意") || label.textContent?.includes("商品合规声明")) {
+            const checkbox = label.closest("label")?.querySelector('input[type="checkbox"]') ||
+                            label.parentElement?.querySelector('input[type="checkbox"]');
+            if (checkbox && !checkbox.checked) {
+              checkbox.click();
+              return;
+            }
+            // Ant Design checkbox
+            const antCb = label.closest("label") || label.parentElement;
+            if (antCb) antCb.click();
+            return;
+          }
+        }
+      });
+
+      await randomDelay(1000, 2000);
+      await takeDebugScreenshot("08_smart_filled");
+      console.error("[create-product] Step 6 done: Smart auto-fill complete");
+
+    } catch (e) {
+      console.error(`[create-product] Step 6 error: ${e.message?.slice(0, 80)}`);
+      await takeDebugScreenshot("08_error");
     }
 
     // ========== Step 7: SKU / 价格设置 ==========
