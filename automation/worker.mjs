@@ -1961,9 +1961,11 @@ async function batchCreateFromCSV(params) {
         }
       }
 
-      // Step 2: 从中文分类提取搜索关键词（取最后一级分类）
-      const categoryParts = categoryCn.split("/").map(s => s.trim());
-      const categorySearch = categoryParts[categoryParts.length - 1] || categoryParts[0] || "商品";
+      // Step 2: 从中文分类提取搜索关键词（逐级尝试）
+      const categoryParts = categoryCn.split("/").map(s => s.trim()).filter(Boolean);
+      // 优先最后一级，逐级往上尝试
+      const categorySearchList = [...categoryParts].reverse();
+      const categorySearch = categorySearchList[0] || "商品";
 
       // Step 3: 价格转人民币（粗略 * 7）
       const priceCNY = priceUSD > 0 ? (priceUSD * 7).toFixed(2) : "9.99";
@@ -1971,6 +1973,7 @@ async function batchCreateFromCSV(params) {
       // Step 4: 调用 autoCreateProduct
       const result = await autoCreateProduct({
         categorySearch,
+        categorySearchList: categorySearchList, // 逐级尝试的分类列表
         title: productName,
         sourceImage: localImagePath,
         generateAI: params.generateAI !== false,
@@ -2168,39 +2171,89 @@ async function autoCreateProduct(params) {
     const categoryInput = page.locator('input[placeholder*="搜索分类"], input[placeholder*="搜索类目"], input[placeholder*="商品名称"], input[placeholder*="可输入"]').first();
 
     if (await categoryInput.isVisible({ timeout: 3000 })) {
-      await categoryInput.click();
-      await randomDelay(300, 500);
-      // 逐字输入模拟真人
-      for (const char of params.categorySearch) {
-        await page.keyboard.type(char, { delay: 50 + Math.random() * 100 });
+      // 搜索分类：优先用商品标题搜索（Temu搜索框支持用商品名匹配分类）
+      const searchTerms = [];
+      // 标题优先
+      if (params.title) {
+        searchTerms.push(params.title.slice(0, 50));
       }
-      await randomDelay(2000, 3000);
-      await takeDebugScreenshot("02_category_search");
+      // 分类关键词作为备选
+      if (Array.isArray(params.categorySearchList)) searchTerms.push(...params.categorySearchList);
+      else if (params.categorySearch) searchTerms.push(params.categorySearch);
 
-      // 点击搜索结果中的分类
-      try {
-        // 尝试点击包含搜索词的分类选项
-        const categoryOption = page.locator(`text=${params.categorySearch}`).first();
-        if (await categoryOption.isVisible({ timeout: 3000 })) {
-          await categoryOption.click();
-          await randomDelay(1000, 2000);
-        }
-      } catch {
-        console.error("[create-product] Category option not found by text, trying first result");
-      }
+      let categorySelected = false;
 
-      // 如果有多级分类，需要逐级点击
-      if (params.categoryPath) {
-        const levels = params.categoryPath.split(">");
-        for (const level of levels) {
-          try {
-            const levelOption = page.locator(`text=${level.trim()}`).first();
-            if (await levelOption.isVisible({ timeout: 2000 })) {
-              await levelOption.click();
-              await randomDelay(500, 1000);
+      for (const searchTerm of searchTerms) {
+        if (categorySelected) break;
+        console.error(`[create-product] Searching category: "${searchTerm.slice(0, 30)}"`);
+
+        // 清空并输入
+        await categoryInput.click({ clickCount: 3 });
+        await randomDelay(200, 300);
+        await page.keyboard.press("Backspace");
+        await randomDelay(200, 300);
+        await categoryInput.fill(searchTerm);
+        await randomDelay(2000, 3000);
+
+        await takeDebugScreenshot("02_category_search");
+
+        // 检查搜索结果：Temu 分类页搜索后会显示推荐分类行
+        // 格式通常是 "一级分类 > 二级分类 > 三级分类" 的可点击链接
+        const clickResult = await page.evaluate(() => {
+          // 策略1: 找"常用推荐"区域下的分类链接
+          const links = document.querySelectorAll("a, span, div");
+          const candidates = [];
+          for (const el of links) {
+            const text = el.textContent?.trim() || "";
+            // 分类推荐通常包含 ">" 分隔符
+            if (text.includes(">") && text.length > 5 && text.length < 200 && el.offsetParent !== null) {
+              const rect = el.getBoundingClientRect();
+              if (rect.height > 10 && rect.height < 50 && rect.top > 100 && rect.top < 600) {
+                candidates.push({ el, text, top: rect.top });
+              }
             }
-          } catch {}
+          }
+          // 点击第一个推荐分类
+          if (candidates.length > 0) {
+            candidates.sort((a, b) => a.top - b.top);
+            candidates[0].el.click();
+            return candidates[0].text.slice(0, 60);
+          }
+
+          // 策略2: 找分类树的叶子节点（最深层的可点击分类）
+          const allClickable = document.querySelectorAll("td, li, a");
+          for (const el of allClickable) {
+            const text = el.textContent?.trim() || "";
+            if (text.length > 2 && text.length < 30 && el.offsetParent !== null && !text.includes("全部分类") && !text.includes("搜索")) {
+              const rect = el.getBoundingClientRect();
+              // 分类树通常在页面中部
+              if (rect.top > 200 && rect.top < 700 && rect.left > 100 && rect.height > 15 && rect.height < 50) {
+                el.click();
+                return "tree:" + text;
+              }
+            }
+          }
+          return null;
+        });
+
+        if (clickResult) {
+          console.error(`[create-product] Category selected: "${clickResult}"`);
+          categorySelected = true;
+          await randomDelay(1000, 2000);
+
+          // 搜索后可能需要进一步选择子分类
+          // 等待子分类列表加载
+          await randomDelay(1000, 2000);
+
+          // 不再自动选子分类——搜索推荐的结果已经是完整分类路径
+          // 等待分类确认
+        } else {
+          console.error(`[create-product] No category results for "${searchTerm.slice(0, 20)}"`);
         }
+      }
+
+      if (!categorySelected) {
+        console.error("[create-product] WARNING: Category selection failed, will try to continue");
       }
 
       await takeDebugScreenshot("03_category_selected");
