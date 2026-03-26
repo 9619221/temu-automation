@@ -2819,11 +2819,19 @@ async function autoCreateProduct(params) {
     // 默认值映射（字段关键词 → 要选择的值）
     // 产地已在 6a 单独处理，不在这里重复操作
     const defaultValues = {
-      // 属性
+      // 通用属性（不同品类可能出现不同字段）
       "可重用性": "否",
       "Reusability": "否",
       "电池属性": "无电池",
       "Battery": "无电池",
+      "材质": "__FIRST__", // 选第一个选项
+      "Material": "__FIRST__",
+      "砂砾材料": "__FIRST__",
+      "Grit": "__FIRST__",
+      "颜色": "__FIRST__",
+      "Color": "__FIRST__",
+      "尺寸": "__FIRST__",
+      "Size": "__FIRST__",
       "品牌名": null, // 跳过品牌
       "Brand": null,
       "工作电压": null, // 非必填跳过
@@ -3016,26 +3024,25 @@ async function autoCreateProduct(params) {
           // 选择对应的值
           const targetValue = defaultValues[r.field];
           if (targetValue) {
-            await page.evaluate((val) => {
+            const selectFirst = targetValue === "__FIRST__";
+            await page.evaluate((val, first) => {
               const options = document.querySelectorAll('[class*="option"], [class*="Option"], li[role="option"], [class*="item"]');
-              for (const opt of options) {
-                const text = opt.textContent?.trim();
-                if (text?.includes(val) && opt.offsetParent !== null) {
-                  opt.click();
-                  return;
+              const visible = Array.from(options).filter(o => {
+                if (!o.offsetParent) return false;
+                const rect = o.getBoundingClientRect();
+                return rect.height > 10 && rect.top > 0 && rect.width > 30;
+              });
+              if (!first && val) {
+                // 精确匹配
+                for (const opt of visible) {
+                  if (opt.textContent?.trim()?.includes(val)) { opt.click(); return; }
                 }
               }
               // 选第一个可见选项
-              for (const opt of options) {
-                if (opt.offsetParent !== null) {
-                  const rect = opt.getBoundingClientRect();
-                  if (rect.height > 10 && rect.top > 0) {
-                    opt.click();
-                    return;
-                  }
-                }
-              }
-            }, targetValue);
+              if (visible.length > 0) { visible[0].click(); }
+            }, targetValue, selectFirst);
+            // 按Escape关闭下拉框
+            await page.keyboard.press("Escape").catch(() => {});
             await randomDelay(500, 1000);
           }
         }
