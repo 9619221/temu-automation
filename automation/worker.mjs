@@ -2898,7 +2898,7 @@ async function autoCreateProduct(params) {
         if (selected) {
           console.error("[create-product] Origin: 中国大陆 selected");
           // 点击空白处关闭下拉框
-          await page.mouse.click(700, 50).catch(() => {});
+          await page.keyboard.press("Escape").catch(() => {});
           await randomDelay(2000, 3000);
 
           // 关闭满意度评分弹窗（如果出现）
@@ -2951,7 +2951,7 @@ async function autoCreateProduct(params) {
         }
       }
       // 关闭所有残留下拉框和弹窗
-      await page.mouse.click(700, 50).catch(() => {});
+      await page.keyboard.press("Escape").catch(() => {});
       await randomDelay(1000, 2000);
       // 关闭满意度弹窗
       try {
@@ -3046,7 +3046,7 @@ async function autoCreateProduct(params) {
       // ---- 6b2: 商品规格（父规格随机选，子规格随机字母）----
       console.error("[create-product] 6b2: Setting product specs...");
       // 先关闭任何残留的下拉框
-      await page.mouse.click(700, 50).catch(() => {});
+      await page.keyboard.press("Escape").catch(() => {});
       await randomDelay(1000, 2000);
       // 滚动到页面下方找规格区域
       await page.evaluate(() => window.scrollBy(0, 500));
