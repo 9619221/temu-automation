@@ -2368,11 +2368,11 @@ async function autoCreateProduct(params) {
         return { success: false, message: "图片文件不存在: " + params.images.join(", "), screenshots };
       }
 
-      // 先滚动到图片上传区域
+      // 滚动到图片上传区域
       await page.evaluate(() => {
         const labels = document.querySelectorAll("span, label, div");
         for (const el of labels) {
-          if (el.textContent?.includes("商品轮播图") || el.textContent?.includes("商品主图") || el.textContent?.includes("素材图")) {
+          if (el.textContent?.includes("商品轮播图") || el.textContent?.includes("商品主图")) {
             el.scrollIntoView({ behavior: "smooth", block: "center" });
             break;
           }
@@ -2380,93 +2380,90 @@ async function autoCreateProduct(params) {
       });
       await randomDelay(1000, 2000);
 
-      // 探测页面上所有 file input
-      const fileInputInfo = await page.evaluate(() => {
-        const inputs = document.querySelectorAll('input[type="file"]');
-        return Array.from(inputs).map((input, i) => ({
-          index: i,
-          id: input.id,
-          name: input.name,
-          accept: input.accept,
-          multiple: input.multiple,
-          visible: input.offsetParent !== null,
-          display: getComputedStyle(input).display,
-          parentClass: input.parentElement?.className?.slice(0, 60) || "",
-          rect: input.getBoundingClientRect(),
-        }));
-      });
-      console.error(`[create-product] File inputs found: ${fileInputInfo.length}`);
-      fileInputInfo.forEach(info => {
-        console.error(`  [${info.index}] id=${info.id} accept=${info.accept} visible=${info.visible} parent=${info.parentClass}`);
-      });
-
       let uploaded = false;
 
-      // 方法1: 找到所有 file input，逐个尝试（包括隐藏的）
-      if (fileInputInfo.length > 0) {
-        for (let i = 0; i < fileInputInfo.length && !uploaded; i++) {
-          try {
-            const fileInput = page.locator('input[type="file"]').nth(i);
-            // Playwright 的 setInputFiles 可以操作隐藏的 file input
-            await fileInput.setInputFiles(validImages, { timeout: 5000 });
-            console.error(`[create-product] Uploaded via file input[${i}]`);
+      // Temu 上传流程：点击"素材中心"按钮 → 弹出素材中心 → 在素材中心里上传图片
+      console.error("[create-product] Clicking '素材中心' button...");
+      try {
+        const materialBtn = page.locator('div:has-text("素材中心"), span:has-text("素材中心"), button:has-text("素材中心")').first();
+        if (await materialBtn.isVisible({ timeout: 3000 })) {
+          await materialBtn.click();
+          console.error("[create-product] 素材中心 clicked, waiting for dialog...");
+          await randomDelay(3000, 5000);
+          await takeDebugScreenshot("06a_material_center");
+
+          // 素材中心弹窗中找上传按钮或 file input
+          // 方法1: 弹窗中的 file input
+          const dialogFileInput = page.locator('.ant-modal input[type="file"], [class*="dialog"] input[type="file"], [class*="modal"] input[type="file"], [class*="Dialog"] input[type="file"], [class*="Modal"] input[type="file"]').first();
+          if (await dialogFileInput.isVisible({ timeout: 2000 }).catch(() => false)) {
+            await dialogFileInput.setInputFiles(validImages);
             uploaded = true;
-            await randomDelay(5000, 8000); // 等待上传处理
-          } catch (e) {
-            console.error(`[create-product] File input[${i}] failed: ${e.message?.slice(0, 60)}`);
+            console.error("[create-product] Uploaded via dialog file input");
           }
-        }
-      }
 
-      // 方法2: 通过 filechooser 事件拦截（点击上传按钮触发文件选择对话框）
-      if (!uploaded) {
-        console.error("[create-product] Trying filechooser approach...");
-        try {
-          // 找到上传按钮/区域
-          const uploadBtn = page.locator(
-            '[class*="upload"]:not(input), [class*="Upload"]:not(input), ' +
-            'div:has-text("展示真实使用场景"), div:has-text("商品主图"), ' +
-            'button:has-text("上传"), [role="button"]:has(svg)'
-          ).first();
-
-          if (await uploadBtn.isVisible({ timeout: 2000 })) {
-            // 注册 filechooser 事件监听，然后点击上传按钮
-            const [fileChooser] = await Promise.all([
-              page.waitForEvent("filechooser", { timeout: 5000 }),
-              uploadBtn.click(),
-            ]);
-            await fileChooser.setFiles(validImages);
-            uploaded = true;
-            console.error("[create-product] Uploaded via filechooser event");
-            await randomDelay(5000, 8000);
-          }
-        } catch (e) {
-          console.error(`[create-product] Filechooser approach failed: ${e.message?.slice(0, 60)}`);
-        }
-      }
-
-      // 方法3: 点击"展示真实使用场景"等具体上传区域 + filechooser
-      if (!uploaded) {
-        console.error("[create-product] Trying specific upload slots...");
-        const uploadSlots = [
-          '展示真实使用场景',
-          '使用公制和英制单位',
-          '展示产品真是尺寸大小',
-        ];
-        for (const slotText of uploadSlots) {
-          try {
-            const slot = page.locator(`div:has-text("${slotText}")`).first();
-            if (await slot.isVisible({ timeout: 1000 })) {
-              const [fileChooser] = await Promise.all([
-                page.waitForEvent("filechooser", { timeout: 5000 }),
-                slot.click(),
-              ]);
-              await fileChooser.setFiles(validImages);
-              uploaded = true;
-              console.error(`[create-product] Uploaded to slot: ${slotText}`);
-              await randomDelay(5000, 8000);
-              break;
+          // 方法2: 弹窗中的"上传图片"按钮 + filechooser
+          if (!uploaded) {
+            try {
+              const uploadInDialog = page.locator('button:has-text("上传"), div:has-text("上传图片"), span:has-text("上传图片"), div:has-text("点击上传"), [class*="upload"]').last();
+              if (await uploadInDialog.isVisible({ timeout: 2000 })) {
+                const [fileChooser] = await Promise.all([
+                  page.waitForEvent("filechooser", { timeout: 8000 }),
+                  uploadInDialog.click(),
+                ]);
+                await fileChooser.setFiles(validImages);
+                uploaded = true;
+                console.error("[create-product] Uploaded via dialog filechooser");
+              }
+            } catch (e) {
+              console.error(`[create-product] Dialog filechooser failed: ${e.message?.slice(0, 60)}`);
             }
+          }
+
+          // 方法3: 弹窗中任意 file input（包括隐藏的）
+          if (!uploaded) {
+            const allInputs = page.locator('input[type="file"]');
+            const count = await allInputs.count();
+            console.error(`[create-product] Found ${count} file inputs in page`);
+            for (let i = 0; i < count && !uploaded; i++) {
+              try {
+                await allInputs.nth(i).setInputFiles(validImages, { timeout: 3000 });
+                uploaded = true;
+                console.error(`[create-product] Uploaded via file input[${i}]`);
+              } catch {}
+            }
+          }
+
+          if (uploaded) {
+            await randomDelay(5000, 8000); // 等待上传完成
+
+            // 上传完成后点击"确认"选择图片
+            try {
+              const confirmBtn = page.locator('button:has-text("确认"), button:has-text("确定"), button:has-text("使用"), button:has-text("选择")').last();
+              if (await confirmBtn.isVisible({ timeout: 5000 })) {
+                await confirmBtn.click();
+                console.error("[create-product] Confirmed image selection");
+                await randomDelay(2000, 3000);
+              }
+            } catch {}
+          }
+        } else {
+          console.error("[create-product] 素材中心 button not found");
+        }
+      } catch (e) {
+        console.error(`[create-product] 素材中心 approach failed: ${e.message?.slice(0, 60)}`);
+      }
+
+      // 备用方案：直接找页面上的 file input
+      if (!uploaded) {
+        console.error("[create-product] Fallback: trying direct file input...");
+        const allInputs = page.locator('input[type="file"]');
+        const count = await allInputs.count();
+        for (let i = 0; i < count && !uploaded; i++) {
+          try {
+            await allInputs.nth(i).setInputFiles(validImages, { timeout: 3000 });
+            uploaded = true;
+            console.error(`[create-product] Uploaded via fallback file input[${i}]`);
+            await randomDelay(5000, 8000);
           } catch {}
         }
       }
