@@ -2179,7 +2179,7 @@ async function autoCreateProduct(params) {
     // 关闭可能的弹窗
     for (let i = 0; i < 5; i++) {
       try {
-        const btn = page.locator('button:has-text("知道了"), button:has-text("我知道了"), button:has-text("确定"), button:has-text("关闭")').first();
+        const btn = page.locator('button:has-text("知道了"), button:has-text("我知道了"), button:has-text("确定"), button:has-text("不使用"), button:has-text("关闭")').first();
         if (await btn.isVisible({ timeout: 500 })) await btn.click();
         else break;
       } catch { break; }
@@ -2854,9 +2854,9 @@ async function autoCreateProduct(params) {
 
     try {
       // 先关闭所有可能的弹窗
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < 5; i++) {
         try {
-          const popup = page.locator('button:has-text("知道了"), button:has-text("我知道了"), button:has-text("关闭"), [class*="close"]:visible').first();
+          const popup = page.locator('button:has-text("知道了"), button:has-text("我知道了"), button:has-text("不使用"), button:has-text("关闭"), [class*="close"]:visible').first();
           if (await popup.isVisible({ timeout: 500 })) {
             await popup.click();
             await randomDelay(500, 1000);
