@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog } = require("electron");
 const path = require("path");
 const { spawn } = require("child_process");
 const http = require("http");
@@ -48,9 +48,10 @@ function httpPost(port, body) {
         timeout: 1800000,  // 30分钟超时（大量采集任务需要较长时间）
       },
       (res) => {
-        let buf = "";
-        res.on("data", (c) => (buf += c));
+        const chunks = [];
+        res.on("data", (c) => chunks.push(c));
         res.on("end", () => {
+          const buf = Buffer.concat(chunks).toString("utf8");
           try {
             const json = JSON.parse(buf);
             if (json.type === "error") reject(new Error(json.message));
@@ -263,6 +264,15 @@ app.on("activate", () => { if (!mainWindow) createWindow(); });
 
 ipcMain.handle("get-app-path", () => app.getPath("userData"));
 
+ipcMain.handle("select-file", async (_e, filters) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ["openFile"],
+    filters: filters || [{ name: "表格文件", extensions: ["xlsx", "xls", "csv"] }],
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  return result.filePaths[0];
+});
+
 ipcMain.handle("automation:login", async (_, accountId, phone, password) => {
   return sendCmd("login", { accountId, phone, password });
 });
@@ -313,6 +323,48 @@ ipcMain.handle("automation:scrape-all", async () => {
 
 ipcMain.handle("automation:create-product", async (_e, params) => {
   return sendCmd("create_product", params);
+});
+
+ipcMain.handle("automation:auto-pricing", async (_e, params) => {
+  return sendCmd("auto_pricing", params);
+});
+
+ipcMain.handle("automation:pause-pricing", async () => {
+  return sendCmd("pause_pricing");
+});
+
+ipcMain.handle("automation:resume-pricing", async () => {
+  return sendCmd("resume_pricing");
+});
+
+ipcMain.handle("automation:list-drafts", async () => {
+  return sendCmd("list_drafts");
+});
+
+ipcMain.handle("automation:retry-draft", async (_e, draftId) => {
+  return sendCmd("retry_draft", { draftId });
+});
+
+ipcMain.handle("automation:delete-draft", async (_e, draftId) => {
+  return sendCmd("delete_draft", { draftId });
+});
+
+ipcMain.handle("automation:get-progress", async () => {
+  try {
+    return await new Promise((resolve, reject) => {
+      const req = http.request({ hostname: "127.0.0.1", port: workerPort, method: "GET", path: "/progress", timeout: 3000 }, (res) => {
+        const chunks = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () => {
+          try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))); }
+          catch { resolve({ running: false }); }
+        });
+      });
+      req.on("error", () => resolve({ running: false }));
+      req.on("timeout", () => { req.destroy(); resolve({ running: false }); });
+      req.end();
+    });
+  } catch { return { running: false }; }
 });
 
 ipcMain.handle("automation:read-scrape-data", async (_e, key) => {

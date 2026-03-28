@@ -22,6 +22,7 @@ interface AutomationAPI {
   scrapeDelivery: () => Promise<any>;
   createProduct: (params: any) => Promise<any>;
   batchCreateFromCsv: (params: any) => Promise<any>;
+  autoPricing: (params: { csvPath: string; startRow?: number; count?: number }) => Promise<any>;
   close: () => Promise<{ status: string }>;
   ping: () => Promise<{ status: string }>;
 }

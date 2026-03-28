@@ -6,6 +6,12 @@ import http from "http";
 import https from "https";
 import fs from "fs";
 import path from "path";
+import { createRequire } from "module";
+import { randomDelay, downloadImage, saveBase64Image, getDebugDir, getTmpDir } from "./utils.mjs";
+import { browserState, ensureBrowser as _ensureBrowser, launch as _launch, login, saveCookies, closeBrowser, findLatestCookie } from "./browser.mjs";
+import { buildScrapeHandlers } from "./scrape-registry.mjs";
+const require = createRequire(import.meta.url);
+const XLSX = require("xlsx");
 
 // Load API keys from temu-claw .env
 const envFiles = [
@@ -24,243 +30,37 @@ for (const envFile of envFiles) {
   } catch {}
 }
 
+// AI API 配置（从环境变量读取，不再硬编码）
+const AI_API_KEY = process.env.VECTORENGINE_API_KEY || "";
+const AI_BASE_URL = process.env.VECTORENGINE_BASE_URL || "https://api.vectorengine.ai/v1";
+const AI_MODEL = process.env.VECTORENGINE_MODEL || "gemini-3.1-flash-lite-preview";
+
+// browser/context 代理：旧代码通过全局 browser/context 访问，实际指向 browserState
+// 使用 defineProperty 创建动态代理，读写都同步到 browserState
 let browser = null;
 let context = null;
 let cookiePath = "";
-let lastAccountId = "";  // 记住最近登录的 accountId
-let _navLiteMode = false; // scrape_all 时启用 lite 模式，弹窗交给监控器
+let lastAccountId = "";
+let _navLiteMode = false;
 
-function randomDelay(min = 800, max = 2500) {
-  return new Promise((r) => setTimeout(r, Math.floor(Math.random() * (max - min + 1)) + min));
+// 同步 browserState 到局部变量（ensureBrowser/launch 后自动调用）
+function syncBrowserState() {
+  browser = browserState.browser;
+  context = browserState.context;
+  cookiePath = browserState.cookiePath;
+  lastAccountId = browserState.lastAccountId;
+  _navLiteMode = browserState.navLiteMode;
 }
+async function ensureBrowser() { await _ensureBrowser(); syncBrowserState(); }
+async function launch(accountId, headless) { await _launch(accountId, headless); syncBrowserState(); }
 
-// ---- 查找系统 Chrome ----
+// randomDelay, findChromeExe → moved to utils.mjs / browser.mjs
 
-function findChromeExe() {
-  const candidates = [
-    "C:/Program Files/Google/Chrome/Application/chrome.exe",
-    "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
-    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Google/Chrome/Application/chrome.exe"),
-    "C:/Program Files/Microsoft/Edge/Application/msedge.exe",
-  ].filter(Boolean);
-  for (const p of candidates) {
-    try { if (fs.existsSync(p)) return p; } catch {}
-  }
-  throw new Error("未找到系统 Chrome，请安装 Google Chrome");
-}
+// 浏览器管理函数 → moved to browser.mjs
+// 通过 browserState 访问 browser/context（兼容旧代码引用）
 
-// ---- 浏览器管理 ----
-
-// 查找最近使用的 cookie 文件（按修改时间）
-function findLatestCookie() {
-  const dir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "cookies");
-  try {
-    if (!fs.existsSync(dir)) return null;
-    const files = fs.readdirSync(dir)
-      .filter(f => f.endsWith(".json"))
-      .map(f => ({ name: f, mtime: fs.statSync(path.join(dir, f)).mtimeMs }))
-      .sort((a, b) => b.mtime - a.mtime);
-    if (files.length > 0) {
-      const accountId = files[0].name.replace(".json", "");
-      return { accountId, cookiePath: path.join(dir, files[0].name) };
-    }
-  } catch {}
-  return null;
-}
-
-// 确保浏览器已启动（如果没有，自动用最近的 cookie 恢复）
-let _browserLaunchPromise = null;
-async function ensureBrowser() {
-  if (browser && context) return;
-
-  // 并发锁：多个请求同时到达时，只启动一次浏览器
-  if (_browserLaunchPromise) {
-    await _browserLaunchPromise;
-    return;
-  }
-
-  _browserLaunchPromise = (async () => {
-    // 如果有上次登录的 accountId，用它
-    let accountId = lastAccountId;
-    if (!accountId) {
-      const latest = findLatestCookie();
-      if (latest) {
-        accountId = latest.accountId;
-        console.error(`[Worker] Auto-restoring session for: ${accountId}`);
-      }
-    }
-    if (!accountId) {
-      throw new Error("请先登录账号后再操作");
-    }
-    await launch(accountId, false);
-  })();
-
-  try {
-    await _browserLaunchPromise;
-  } finally {
-    _browserLaunchPromise = null;
-  }
-}
-
-async function launch(accountId, headless) {
-  if (browser && context) return;
-
-  lastAccountId = accountId;
-  const dir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "cookies");
-  fs.mkdirSync(dir, { recursive: true });
-  cookiePath = path.join(dir, `${accountId}.json`);
-
-  // 直接指定系统 Chrome 路径，避免使用损坏的 Playwright 内置 Chromium
-  const chromeExe = findChromeExe();
-  browser = await chromium.launch({
-    executablePath: chromeExe,
-    headless: !!headless,
-    slowMo: 50,
-    args: ["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage"],
-  });
-
-  context = await browser.newContext({
-    viewport: { width: 1366, height: 768 },
-    locale: "zh-CN",
-    timezoneId: "Asia/Shanghai",
-    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-  });
-
-  await context.addInitScript(() => {
-    Object.defineProperty(navigator, "webdriver", { get: () => undefined });
-    Object.defineProperty(navigator, "languages", { get: () => ["zh-CN", "zh", "en-US", "en"] });
-  });
-
-  if (fs.existsSync(cookiePath)) {
-    try { await context.addCookies(JSON.parse(fs.readFileSync(cookiePath, "utf-8"))); } catch {}
-  }
-}
-
-async function saveCookies() {
-  if (context && cookiePath) {
-    try { fs.writeFileSync(cookiePath, JSON.stringify(await context.cookies(), null, 2)); } catch {}
-  }
-}
-
-async function closeBrowser() {
-  await saveCookies();
-  if (browser) { await browser.close(); browser = null; context = null; }
-}
-
-// ---- 登录 ----
-
-const TEMU_LOGIN_URL = "https://seller.kuajingmaihuo.com/login";
+// login → moved to browser.mjs
 const TEMU_BASE_URL = "https://seller.kuajingmaihuo.com";
-
-async function login(phone, password) {
-  const page = await context.newPage();
-  try {
-    await page.goto(TEMU_LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
-    await randomDelay(2000, 4000);
-
-    // 1. 切换到「账号登录」tab（默认是扫码登录）
-    try {
-      const accountTab = page.locator('text=账号登录').first();
-      if (await accountTab.isVisible({ timeout: 5000 })) {
-        await accountTab.click();
-        await randomDelay(1000, 2000);
-      }
-    } catch {}
-
-    // 2. 输入手机号（#usernameId 或 placeholder 含"手机"）
-    const ph = await page.waitForSelector('#usernameId, input[name="usernameId"], input[placeholder*="手机"]', { timeout: 10000 });
-    await ph.click(); await randomDelay(200, 500);
-    await ph.fill("");
-    for (const c of phone) await ph.type(c, { delay: Math.random() * 100 + 50 });
-    await randomDelay(800, 1500);
-
-    // 3. 输入密码（#passwordId 或 type=password）
-    const pw = await page.waitForSelector('#passwordId, input[type="password"]', { timeout: 5000 });
-    await pw.click(); await randomDelay(200, 500);
-    await pw.fill("");
-    for (const c of password) await pw.type(c, { delay: Math.random() * 100 + 50 });
-    await randomDelay(800, 1500);
-
-    // 4. 勾选协议 checkbox（如果有的话）
-    try {
-      const checkbox = page.locator('input[type="checkbox"]').first();
-      if (await checkbox.isVisible({ timeout: 2000 })) {
-        const checked = await checkbox.isChecked();
-        if (!checked) await checkbox.click();
-      }
-    } catch {}
-    await randomDelay(300, 600);
-
-    // 5. 点击登录按钮
-    const btn = await page.waitForSelector('button:has-text("登录")', { timeout: 5000 });
-    await btn.click();
-    await randomDelay(2000, 3000);
-
-    // 6. 处理隐私政策弹窗（"同意并登录"）
-    try {
-      const agreeBtn = page.locator('button:has-text("同意并登录"), button:has-text("同意")').first();
-      if (await agreeBtn.isVisible({ timeout: 3000 })) {
-        await agreeBtn.click();
-        await randomDelay(1000, 2000);
-      }
-    } catch {}
-
-    await page.waitForLoadState("domcontentloaded", { timeout: 15000 });
-    await randomDelay(3000, 5000);
-
-    // 7. 检查登录结果
-    if (page.url().includes("login")) {
-      // 检查验证码
-      const cap = await page.locator('[class*="captcha"], [class*="verify"], [class*="slider"], iframe[src*="captcha"]').first().isVisible().catch(() => false);
-      if (cap) {
-        // 等待用户手动完成验证码（最多2分钟）
-        await page.waitForURL((u) => !u.toString().includes("login"), { timeout: 120000 });
-      } else {
-        const e = await page.locator('[class*="error"], [class*="toast"], [class*="tip"]').first().textContent().catch(() => "");
-        throw new Error(e || "登录失败，请检查账号密码");
-      }
-    }
-    await saveCookies();
-
-    // 8. 登录后可能停留在"履约中心"页面，需处理 Seller Central 授权
-    // 页面有：授权 checkbox + "进入 >" 按钮
-    if (page.url().includes("seller.kuajingmaihuo.com") || page.url().includes("settle")) {
-      console.error("[login] On 履约中心, handling Seller Central auth...");
-      await randomDelay(2000, 3000);
-
-      // 勾选授权 checkbox
-      const cbResult = await page.evaluate(() => {
-        const inputs = [...document.querySelectorAll('input[type="checkbox"]')];
-        for (const cb of inputs) { if (!cb.checked) { cb.click(); return "checked"; } return "already checked"; }
-        const customs = [...document.querySelectorAll('[class*="checkbox"], [class*="Checkbox"], [role="checkbox"]')];
-        for (const el of customs) { el.click(); return "clicked custom"; }
-        return "not found";
-      });
-      console.error("[login] Auth checkbox:", cbResult);
-      await randomDelay(500, 1000);
-
-      // 点击"进入 >"按钮
-      const btnResult = await page.evaluate(() => {
-        const keywords = ["进入", "确认授权", "确认并前往"];
-        const all = [...document.querySelectorAll('button, a, [role="button"], div[class*="btn"], div[class*="Btn"]')];
-        for (const kw of keywords) {
-          for (const el of all) {
-            const text = (el.innerText || "").trim();
-            if (text.includes(kw) && text.length < 20) { el.click(); return "clicked: " + text; }
-          }
-        }
-        return "not found";
-      });
-      console.error("[login] Auth enter button:", btnResult);
-      if (btnResult !== "not found") {
-        await randomDelay(5000, 8000);
-        await saveCookies();
-      }
-    }
-
-    return true;
-  } catch (err) { await page.close(); throw err; }
-}
 
 // ---- 导航辅助：从商家中心进入 Seller Central ----
 
@@ -840,65 +640,7 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
   return page;
 }
 
-// ---- 抓取商品 (保存完整原始API数据) ----
-
-async function scrapeProducts() {
-  return scrapePageCaptureAll("/goods/list");
-}
-
-
-// ---- 抓取备货单 (API 方式) ----
-
-async function scrapeOrders() {
-  return scrapePageCaptureAll("/stock/fully-mgt/order-manage");
-}
-
-// ---- 抓取流量分析数据 (API 方式) ----
-
-async function scrapeFluxAnalysis() {
-  return scrapePageCaptureAll("/main/flux-analysis-full");
-}
-
-// ---- 抓取首页仪表盘数据 (API 方式) ----
-
-async function scrapeHomeDashboard() {
-  return scrapePageCaptureAll("/", { waitTime: 12000 });
-}
-
-// ---- 抓取售后管理数据 (API 方式) ----
-
-async function scrapeAfterSales() {
-  return scrapePageCaptureAll("/main/aftersales/information");
-}
-
-// ---- 抓取售罄看板数据 (API 方式) ----
-
-async function scrapeSoldOutBoard() {
-  return scrapePageCaptureAll("/stock/fully-mgt/sale-manage/board/sku-sale-out");
-}
-
-// ---- 抓取商品数据中心 (API 方式 - 通过 response 监听) ----
-
-async function scrapeGoodsData() {
-  // 保存完整原始API数据（不做字段筛选，由前端处理）
-  return scrapePageCaptureAll("/newon/goods-data");
-}
-
-// ---- 抓取活动数据 (API 方式 - 通过 response 监听) ----
-
-async function scrapeActivityData() {
-  return scrapePageCaptureAll("/main/act/data-full");
-}
-
-// ---- 抓取履约看板数据 (API 方式 - 通过 response 监听) ----
-
-async function scrapePerformanceBoard() {
-  return scrapePageCaptureAll("/stock/fully-mgt/sale-manage/board/count");
-}
-
-async function scrapeMainPages() {
-  return scrapePageCaptureAll("/");
-}
+// 核心采集函数已移到 scrape-registry.mjs（配置驱动）
 
 // ---- 抓取销售管理数据 (翻页采集所有商品库存) ----
 
@@ -1149,115 +891,7 @@ async function scrapePageWithListener(targetPath, apiMatchers, options = {}) {
 
 // ---- 新增采集函数 ----
 
-// 上新生命周期管理
-async function scrapeProductLifecycle() {
-  return scrapePageCaptureAll("/newon/product-select");
-}
-
-// 机会商品（竞标）
-async function scrapeBiddingOpportunity() {
-  return scrapePageWithListener("/newon/invite-bids/list", [
-    { key: "isAutoBidding", pattern: "isAutoBiddingOpen" },
-    { key: "recommendProducts", pattern: "recommendBiddingProducts" },
-    { key: "biddingWindows", pattern: "queryAutoBiddingOrderWindows" },
-    { key: "tabCount", pattern: "queryBiddingTabCount" },
-    { key: "invitationList", pattern: "queryBiddingInvitationOrderList" },
-  ]);
-}
-
-// 商品价格管理
-async function scrapePriceCompete() {
-  return scrapePageWithListener("/newon/compete-manager", [
-    { key: "priceCompete", pattern: "PriceComparingOrderSupplierRpcService/searchForSupplier" },
-  ]);
-}
-
-// 爆款扶持计划
-async function scrapeHotPlan() {
-  return scrapePageWithListener("/newon/hot-prop-plan-home", [
-    { key: "hotPlanHome", pattern: "bsr/query/homepage" },
-  ]);
-}
-
-// 体检中心
-async function scrapeCheckupCenter() {
-  return scrapePageWithListener("/goods/checkup-center", [
-    { key: "checkScore", pattern: "lucina-agent-seller/check/score" },
-  ]);
-}
-
-// 发货表现评估看板
-async function scrapeDeliveryAssessment() {
-  return scrapePageWithListener("/wms/deliver-examine-board", [
-    { key: "forwardSummary", pattern: "querySupplierForwardSummary" },
-    { key: "period", pattern: "queryDeliveryAssessmentPeriod" },
-    { key: "record", pattern: "queryDeliveryAssessmentRecord" },
-    { key: "rightPunish", pattern: "queryAssessmentRightPunish" },
-    { key: "recordDetail", pattern: "queryDeliveryAssessmentRecordDetail" },
-  ]);
-}
-
-// 市场分析
-async function scrapeMarketAnalysis() {
-  return scrapePageWithListener("/main/market-analysis", [
-    { key: "categoryList", pattern: "category/index/listV2" },
-    { key: "publishCategories", pattern: "category/supplier/publish/list" },
-    { key: "siteList", pattern: "common/site/semi/list" },
-    { key: "siteConfig", pattern: "common/site/config" },
-  ]);
-}
-
-// 商品条码管理
-async function scrapeLabelCode() {
-  return scrapePageWithListener("/goods/label", [
-    { key: "labelList", pattern: "labelcode/pageQuery" },
-    { key: "countdown", pattern: "labelcode/newStyle/countdown" },
-    { key: "certConfig", pattern: "label/cert/config/query" },
-  ]);
-}
-
-// 备货抽真空
-async function scrapeVacuumPumping() {
-  return scrapePageWithListener("/goods/stocking-vacuum", [
-    { key: "vacuumList", pattern: "vacuumPumping/pageQuery" },
-  ]);
-}
-
-// 紧急备货建议
-async function scrapeUrgentOrders() {
-  return scrapePageWithListener("/stock/fully-mgt/order-manage-urgency", [
-    { key: "orderList", pattern: "purchase/manager/querySubOrderList" },
-    { key: "popUpNotice", pattern: "purchase/manager/queryPopUpNotice" },
-    { key: "enumData", pattern: "management/common/queryEnum" },
-    { key: "mergeConfig", pattern: "merge/operate/queryMergeOperateConfig" },
-    { key: "businessConfig", pattern: "business/config/queryBusinessConfig" },
-    { key: "protocolSigned", pattern: "queryProtocolSigned" },
-    { key: "suggestCloseJit", pattern: "querySuggestCloseJitSkc" },
-  ]);
-}
-
-// 商品草稿
-async function scrapeGoodsDraft() {
-  return scrapePageWithListener("/goods/draft", [
-    { key: "draftList", pattern: "product/draft" },
-  ], { waitTime: 8000 });
-}
-
-// 保税商品管理
-async function scrapeBondedGoods() {
-  return scrapePageWithListener("/goods/bonded", [
-    { key: "bondedList", pattern: "bonded" },
-  ], { waitTime: 8000 });
-}
-
-// 收货入库异常看板
-async function scrapeReceiveAbnormal() {
-  return scrapePageWithListener("/stock/fully-mgt/sale-manage/board/receive-abnormal", [
-    { key: "weekInfo", pattern: "queryPastSeveralWeekInfo" },
-    { key: "exceptionDetail", pattern: "queryWeekReceiveExceptionDetailInfo" },
-    { key: "totalInfo", pattern: "queryPast12WeekReceiveExceptionTotalInfo" },
-  ]);
-}
+// listener-based 采集函数已移到 scrape-registry.mjs
 
 // ---- 通用侧边栏全量API捕获 ----
 async function scrapeSidebarCaptureAll(menuText, options = {}) {
@@ -1391,130 +1025,7 @@ async function scrapeSidebarCaptureAll(menuText, options = {}) {
   }
 }
 
-// 发货台
-async function scrapeShippingDesk() {
-  return scrapeSidebarCaptureAll("发货台");
-}
-
-// 发货单列表
-async function scrapeShippingList() {
-  return scrapeSidebarCaptureAll("发货单列表");
-}
-
-// 司机/地址管理
-async function scrapeAddressManage() {
-  return scrapeSidebarCaptureAll("司机/地址管理");
-}
-
-// 收货/入库异常处理
-async function scrapeExceptionNotice() {
-  return scrapeSidebarCaptureAll("收货/入库异常处...");
-}
-
-// 退货明细
-async function scrapeReturnDetail() {
-  return scrapeSidebarCaptureAll("退货明细");
-}
-
-// 退货包裹管理
-async function scrapeReturnOrders() {
-  return scrapeSidebarCaptureAll("退货包裹管理");
-}
-
-// 退货单管理
-async function scrapeReturnReceipt() {
-  return scrapeSidebarCaptureAll("退货单管理");
-}
-
-// 滞销商品延迟退货
-async function scrapeSalesReturn() {
-  return scrapePageCaptureAll("/activity/sales-return");
-}
-
-// 商品价格申报
-async function scrapePriceDeclaration() {
-  return scrapePageCaptureAll("/main/adjust-price-manage/order-price");
-}
-
-// 商品价格申报
-async function scrapePriceReport() {
-  return scrapePageCaptureAll("/main/adjust-price-manage/order-price");
-}
-
-// 体检中心
-async function scrapeCheckup() {
-  return scrapePageCaptureAll("/goods/checkup-center");
-}
-
-// 美国商品销售管理
-async function scrapeUSRetrieval() {
-  return scrapePageCaptureAll("/goods/retrieval-board");
-}
-
-// 建议零售价合规中心
-async function scrapeRetailPrice() {
-  return scrapePageCaptureAll("/goods/recommended-retail-price");
-}
-
-// 品质分析（全球）
-async function scrapeQualityDashboard() {
-  return scrapePageCaptureAll("/main/quality/dashboard");
-}
-
-// 店铺流量
-async function scrapeMallFlux() {
-  return scrapePageCaptureAll("/main/mall-flux-analysis-full");
-}
-
-// 报名记录
-async function scrapeActivityLog() {
-  return scrapePageCaptureAll("/activity/marketing-activity/log");
-}
-
-// 活动机遇商品
-async function scrapeChanceGoods() {
-  return scrapePageCaptureAll("/activity/marketing-activity/chance-goods");
-}
-
-// 营销活动首页
-async function scrapeMarketingActivity() {
-  return scrapePageCaptureAll("/activity/marketing-activity");
-}
-
-// 流量增长
-async function scrapeFlowGrow() {
-  return scrapePageCaptureAll("/main/flow-grow");
-}
-
-// 活动数据（美国）
-async function scrapeActivityUS() {
-  return scrapePageCaptureAll(null, { fullUrl: "https://agentseller-us.temu.com/main/act/data-full" });
-}
-
-// 活动数据（欧区）
-async function scrapeActivityEU() {
-  return scrapePageCaptureAll(null, { fullUrl: "https://agentseller-eu.temu.com/main/act/data-full" });
-}
-
-// 店铺流量（美国）
-async function scrapeMallFluxUS() {
-  return scrapePageCaptureAll(null, { fullUrl: "https://agentseller-us.temu.com/main/mall-flux-analysis-full" });
-}
-
-// 商品流量（美国）
-async function scrapeFluxUS() {
-  return scrapePageCaptureAll(null, { fullUrl: "https://agentseller-us.temu.com/main/flux-analysis-full" });
-}
-
-// 商品流量（欧区）
-async function scrapeFluxEU() {
-  return scrapePageCaptureAll(null, { fullUrl: "https://agentseller-eu.temu.com/main/flux-analysis-full" });
-}
-
-// 店铺流量（欧区）
-async function scrapeMallFluxEU() {
-  return scrapePageCaptureAll(null, { fullUrl: "https://agentseller-eu.temu.com/main/mall-flux-analysis-full" });
-}
+// 侧边栏/直接路径/多区域采集函数已移到 scrape-registry.mjs
 
 // 抽检结果明细 (kuajingmaihuo.com 侧边栏导航)
 // 策略：拦截列表API获取所有商品，然后用fetch批量调用详情API
@@ -1652,25 +1163,7 @@ async function scrapeQcDetail() {
   }
 }
 
-// 品质分析（欧区）
-async function scrapeQualityDashboardEU() {
-  return scrapePageCaptureAll(null, { fullUrl: "https://agentseller-eu.temu.com/main/quality/dashboard" });
-}
-
-// 样品管理 (kuajingmaihuo.com 侧边栏导航)
-async function scrapeSampleManage() {
-  return scrapePageCaptureAll("/main/sample-manage");
-}
-
-// 图片/视频更新任务
-async function scrapeImageTask() {
-  return scrapePageCaptureAll("/material/image-task");
-}
-
-// 商品流量视角
-async function scrapeFlowPrice() {
-  return scrapePageCaptureAll("/main/adjust-price-manage/high-price");
-}
+// 品质/样品/图片/流量采集函数已移到 scrape-registry.mjs
 
 // ---- 合规中心采集 ----
 
@@ -1786,106 +1279,14 @@ async function scrapeGovernDashboard() {
   }
 }
 
-// 合规中心子页面采集辅助函数（合规中心页面直接在 agentseller.temu.com 下）
-async function scrapeGovernPage(governPath) {
-  return scrapePageCaptureAll(null, { waitTime: 12000, fullUrl: "https://agentseller.temu.com/govern/" + governPath });
-}
-
-// 商品资质
-async function scrapeGovernProductQualification() {
-  return scrapeGovernPage("product-qualification");
-}
-
-// 资质上传申诉
-async function scrapeGovernQualificationAppeal() {
-  return scrapeGovernPage("qualification-appeal");
-}
-
-// 生产者延伸责任资质 (EPR)
-async function scrapeGovernEprQualification() {
-  return scrapeGovernPage("epr-qualification");
-}
-
-// 商品实拍图
-async function scrapeGovernProductPhoto() {
-  return scrapeGovernPage("product-photo");
-}
-
-// 商品合规信息
-async function scrapeGovernComplianceInfo() {
-  return scrapeGovernPage("compliance-info");
-}
-
-// 负责人信息申报
-async function scrapeGovernResponsiblePerson() {
-  return scrapeGovernPage("responsible-person");
-}
-
-// 制造商信息申报
-async function scrapeGovernManufacturer() {
-  return scrapeGovernPage("manufacturer");
-}
-
-// 投诉处理
-async function scrapeGovernComplaint() {
-  return scrapeGovernPage("complaint");
-}
-
-// 违规申诉
-async function scrapeGovernViolationAppeal() {
-  return scrapeGovernPage("violation-appeal");
-}
-
-// 违规处理商家申诉
-async function scrapeGovernMerchantAppeal() {
-  return scrapeGovernPage("merchant-appeal");
-}
-
-// 临时限制令 (TRO)
-async function scrapeGovernTro() {
-  return scrapeGovernPage("tro");
-}
-
-// EPR计费信息收集
-async function scrapeGovernEprBilling() {
-  return scrapeGovernPage("epr-billing");
-}
-
-// 合规性参考
-async function scrapeGovernComplianceReference() {
-  return scrapeGovernPage("compliance-reference");
-}
-
-// 清关属性维护
-async function scrapeGovernCustomsAttribute() {
-  return scrapeGovernPage("customs-attribute");
-}
-
-// 商品类目纠正
-async function scrapeGovernCategoryCorrection() {
-  return scrapeGovernPage("category-correction");
-}
+// 合规中心子页面采集函数已移到 scrape-registry.mjs
 
 // ---- 上品核价自动化 ----
 
 /**
  * 下载图片到本地
  */
-async function downloadImage(url, outputPath) {
-  const proto = url.startsWith("https") ? await import("https") : await import("http");
-  return new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(outputPath);
-    proto.default.get(url, { timeout: 30000 }, (res) => {
-      if (res.statusCode === 301 || res.statusCode === 302) {
-        // Follow redirect
-        downloadImage(res.headers.location, outputPath).then(resolve).catch(reject);
-        return;
-      }
-      res.pipe(file);
-      file.on("finish", () => { file.close(); resolve(outputPath); });
-    }).on("error", (e) => { fs.unlink(outputPath, () => {}); reject(e); });
-  });
-}
+// downloadImage → moved to utils.mjs
 
 /**
  * 从 CSV 文件批量创建商品
@@ -4648,8 +4049,19 @@ async function handleRequest(body) {
       return results;
     }
     case "read_scrape_data": {
-      // 从文件读取 scrape_all 保存的数据
       const taskKey = params.key;
+
+      // CSV/XLSX 预览
+      if (taskKey.startsWith("csv_preview:")) {
+        const filePath = taskKey.slice("csv_preview:".length);
+        if (!fs.existsSync(filePath)) return null;
+        const wb = XLSX.readFile(filePath);
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+        return { rows };
+      }
+
+      // 从文件读取 scrape_all 保存的数据
       const debugDir2 = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
       const dataFile2 = path.join(debugDir2, `scrape_all_${taskKey}.json`);
       if (fs.existsSync(dataFile2)) {
@@ -4827,40 +4239,7 @@ async function handleRequest(body) {
         await ep.close();
       }
     }
-    case "scrape_lifecycle": { await ensureBrowser(); return { lifecycle: await scrapeProductLifecycle() }; }
-    case "scrape_bidding": { await ensureBrowser(); return { bidding: await scrapeBiddingOpportunity() }; }
-    case "scrape_price_compete": { await ensureBrowser(); return { priceCompete: await scrapePriceCompete() }; }
-    case "scrape_hot_plan": { await ensureBrowser(); return { hotPlan: await scrapeHotPlan() }; }
-    case "scrape_checkup": { await ensureBrowser(); return { checkup: await scrapeCheckupCenter() }; }
-    case "scrape_us_retrieval": { await ensureBrowser(); return { usRetrieval: await scrapeUSRetrieval() }; }
-    case "scrape_delivery": { await ensureBrowser(); return { delivery: await scrapeDeliveryAssessment() }; }
-    case "scrape_retail_price": { await ensureBrowser(); return { retailPrice: await scrapeRetailPrice() }; }
-    case "scrape_market_analysis": { await ensureBrowser(); return { marketAnalysis: await scrapeMarketAnalysis() }; }
-    case "scrape_label_code": { await ensureBrowser(); return { labelCode: await scrapeLabelCode() }; }
-    case "scrape_vacuum": { await ensureBrowser(); return { vacuumPumping: await scrapeVacuumPumping() }; }
-    case "scrape_urgent_orders": { await ensureBrowser(); return { urgentOrders: await scrapeUrgentOrders() }; }
-    case "scrape_goods_draft": { await ensureBrowser(); return { goodsDraft: await scrapeGoodsDraft() }; }
-    case "scrape_bonded_goods": { await ensureBrowser(); return { bondedGoods: await scrapeBondedGoods() }; }
-    case "scrape_receive_abnormal": { await ensureBrowser(); return { receiveAbnormal: await scrapeReceiveAbnormal() }; }
-    case "scrape_delivery_desk": { await ensureBrowser(); return { deliveryDesk: await scrapeDeliveryDesk() }; }
-    case "scrape_sidebar_pages": { await ensureBrowser(); return { sidebarPages: await scrapeSidebarPages() }; }
-    // ---- 合规中心 ----
-    case "scrape_govern_dashboard": { await ensureBrowser(); return { governDashboard: await scrapeGovernDashboard() }; }
-    case "scrape_govern_product_qualification": { await ensureBrowser(); return { governProductQualification: await scrapeGovernProductQualification() }; }
-    case "scrape_govern_qualification_appeal": { await ensureBrowser(); return { governQualificationAppeal: await scrapeGovernQualificationAppeal() }; }
-    case "scrape_govern_epr_qualification": { await ensureBrowser(); return { governEprQualification: await scrapeGovernEprQualification() }; }
-    case "scrape_govern_product_photo": { await ensureBrowser(); return { governProductPhoto: await scrapeGovernProductPhoto() }; }
-    case "scrape_govern_compliance_info": { await ensureBrowser(); return { governComplianceInfo: await scrapeGovernComplianceInfo() }; }
-    case "scrape_govern_responsible_person": { await ensureBrowser(); return { governResponsiblePerson: await scrapeGovernResponsiblePerson() }; }
-    case "scrape_govern_manufacturer": { await ensureBrowser(); return { governManufacturer: await scrapeGovernManufacturer() }; }
-    case "scrape_govern_complaint": { await ensureBrowser(); return { governComplaint: await scrapeGovernComplaint() }; }
-    case "scrape_govern_violation_appeal": { await ensureBrowser(); return { governViolationAppeal: await scrapeGovernViolationAppeal() }; }
-    case "scrape_govern_merchant_appeal": { await ensureBrowser(); return { governMerchantAppeal: await scrapeGovernMerchantAppeal() }; }
-    case "scrape_govern_tro": { await ensureBrowser(); return { governTro: await scrapeGovernTro() }; }
-    case "scrape_govern_epr_billing": { await ensureBrowser(); return { governEprBilling: await scrapeGovernEprBilling() }; }
-    case "scrape_govern_compliance_reference": { await ensureBrowser(); return { governComplianceReference: await scrapeGovernComplianceReference() }; }
-    case "scrape_govern_customs_attribute": { await ensureBrowser(); return { governCustomsAttribute: await scrapeGovernCustomsAttribute() }; }
-    case "scrape_govern_category_correction": { await ensureBrowser(); return { governCategoryCorrection: await scrapeGovernCategoryCorrection() }; }
+    // 采集命令已移到 scrape-registry.mjs（通过 default 分支的 buildScrapeHandlers 处理）
     // ---- 推广平台 (ads.temu.com) ----
     case "scrape_ads_home": { await ensureBrowser(); return { adsHome: await scrapeAdsHome() }; }
     case "scrape_ads_product": { await ensureBrowser(); return { adsProduct: await scrapeAdsProduct() }; }
@@ -4967,9 +4346,149 @@ async function handleRequest(body) {
       await ensureBrowser();
       return await batchCreateViaAPI(params);
     }
+    case "auto_pricing": {
+      // 完整自动核价：CSV → AI生图 → 上传 → 提交核价
+      await ensureBrowser();
+      return await autoPricingFromCSV(params);
+    }
+    case "probe_create_flow": {
+      // 打开商品创建页面，拦截所有 API 请求，用于发现真实端点
+      await ensureBrowser();
+      return await probeCreateFlow(params);
+    }
+    case "capture_add_payload": {
+      // 专门捕获 product/add 的完整请求体（用 route 拦截）
+      await ensureBrowser();
+      const page = await context.newPage();
+      const capturedBodies = [];
+      const saveDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
+      fs.mkdirSync(saveDir, { recursive: true });
+      try {
+        // 用 route 拦截 product/add 和 draft/add 请求
+        await page.route("**/product/add", async (route) => {
+          const req = route.request();
+          const postBody = req.postDataJSON();
+          capturedBodies.push({ path: "/product/add", body: postBody, timestamp: Date.now() });
+          console.error("[capture] Got product/add body: " + JSON.stringify(postBody)?.length + " bytes");
+          const outputFile = path.join(saveDir, "real_product_add_payload.json");
+          fs.writeFileSync(outputFile, JSON.stringify(postBody, null, 2));
+          console.error("[capture] Saved to: " + outputFile);
+          await route.continue();
+        });
+        await page.route("**/product/draft/add", async (route) => {
+          const req = route.request();
+          const postBody = req.postDataJSON();
+          capturedBodies.push({ path: "/draft/add", body: postBody, timestamp: Date.now() });
+          console.error("[capture] Got draft/add body: " + JSON.stringify(postBody)?.length + " bytes");
+          const outputFile = path.join(saveDir, "real_draft_add_payload.json");
+          fs.writeFileSync(outputFile, JSON.stringify(postBody, null, 2));
+          await route.continue();
+        });
+        await page.route("**/store_image", async (route) => {
+          console.error("[capture] Got store_image request");
+          capturedBodies.push({ path: "/store_image", timestamp: Date.now() });
+          await route.continue();
+        });
+
+        await navigateToSellerCentral(page, "/goods/create/category");
+        await randomDelay(3000, 5000);
+        // 关闭弹窗
+        for (let i = 0; i < 5; i++) {
+          try {
+            const btn = page.locator('button:has-text("知道了"), button:has-text("确定"), button:has-text("关闭"), button:has-text("暂不"), button:has-text("不使用")').first();
+            if (await btn.isVisible({ timeout: 500 })) await btn.click();
+            else break;
+          } catch { break; }
+        }
+
+        const waitMinutes = params.waitMinutes || 10;
+        console.error("[capture] Ready. Please create product and submit. Waiting " + waitMinutes + " min...");
+        await new Promise(r => setTimeout(r, waitMinutes * 60000));
+
+        return { success: true, captured: capturedBodies.length, bodies: capturedBodies };
+      } finally {
+        if (!params.keepOpen) await page.close();
+      }
+    }
+    case "test_api": {
+      // 在已登录页面中调用指定 API 端点，用于调试
+      await ensureBrowser();
+      const page = await context.newPage();
+      try {
+        await navigateToSellerCentral(page, params.navPath || "/goods/list");
+        await randomDelay(5000, 8000);
+
+        // 调试模式：检查 fetch/XHR 是否被 hook
+        if (params.debug) {
+          const hookInfo = await page.evaluate(() => {
+            const info = {};
+            info.fetchNative = fetch.toString().includes("native");
+            info.fetchSrcLen = fetch.toString().length;
+            info.xhrOpenNative = XMLHttpRequest.prototype.open.toString().includes("native");
+            info.xhrSendNative = XMLHttpRequest.prototype.send.toString().includes("native");
+            // 检查 window 上的签名相关对象
+            const candidates = ["__ANTI__", "_AntiContent", "antiContent", "__pfb", "pfb"];
+            for (const c of candidates) {
+              if (window[c]) info["window." + c] = typeof window[c];
+            }
+            return info;
+          });
+          console.error("[test_api] Hook info:", JSON.stringify(hookInfo));
+
+          // 拦截请求看 headers
+          const reqHeaders = {};
+          page.on("request", (req) => {
+            if (req.url().includes(params.endpoint)) {
+              const h = req.headers();
+              reqHeaders["anti-content"] = h["anti-content"]?.slice(0, 50);
+              reqHeaders["content-type"] = h["content-type"];
+              reqHeaders["cookie"] = h["cookie"] ? "present" : "missing";
+            }
+          });
+
+          const result = await temuXHR(page, params.endpoint, params.body || {}, { maxRetries: 1 });
+          await randomDelay(500, 1000);
+          return { ...result, hookInfo, capturedHeaders: reqHeaders };
+        }
+
+        const result = await temuXHR(page, params.endpoint, params.body || {}, { maxRetries: params.maxRetries || 1 });
+        return result;
+      } finally {
+        if (!params.keepOpen) await page.close();
+      }
+    }
+    case "eval": {
+      // 在已登录页面中执行任意 JS（用于调试）
+      await ensureBrowser();
+      const evalCode = params.code || params.expression || "";
+      const page = await context.newPage();
+      try {
+        await navigateToSellerCentral(page, params.navPath || "/goods/list");
+        await randomDelay(3000, 5000);
+        const result = await page.evaluate((code) => {
+          return new Function(code)();
+        }, evalCode);
+        return result;
+      } finally {
+        if (!params.keepOpen) await page.close();
+      }
+    }
     case "close": await closeBrowser(); return { status: "closed" };
     case "shutdown": await closeBrowser(); setTimeout(() => process.exit(0), 100); return { status: "shutting_down" };
-    default: throw new Error("未知命令: " + action);
+    case "pause_pricing": pricingPaused = true; console.error("[Worker] Pricing PAUSED"); return { status: "paused" };
+    case "resume_pricing": pricingPaused = false; console.error("[Worker] Pricing RESUMED"); return { status: "resumed" };
+    default: {
+      // 注册表驱动的采集命令（替代 50+ 重复 case）
+      const scrapeHandlers = buildScrapeHandlers({
+        scrapePageCaptureAll, scrapeSidebarCaptureAll, scrapePageWithListener,
+        scrapeGovernPage: (subPath) => scrapePageCaptureAll(null, { waitTime: 12000, fullUrl: "https://agentseller.temu.com/govern/" + subPath }),
+        ensureBrowser,
+      });
+      if (scrapeHandlers[action]) {
+        return await scrapeHandlers[action]();
+      }
+      throw new Error("未知命令: " + action);
+    }
   }
 }
 
@@ -4977,206 +4496,1599 @@ async function handleRequest(body) {
 // 纯 API 方式创建商品（跳过 DOM 操作）
 // ============================================================
 
-async function uploadImageToMaterial(page, localImagePath) {
-  // 在已登录页面中上传图片到素材中心，返回 kwcdn URL
+async function uploadImageToMaterial(page, localImagePath, options = {}) {
+  const { maxRetries = 3 } = options;
   const imageBuffer = fs.readFileSync(localImagePath);
   const base64 = imageBuffer.toString("base64");
   const ext = path.extname(localImagePath).toLowerCase();
   const mimeType = ext === ".png" ? "image/png" : "image/jpeg";
   const fileName = path.basename(localImagePath);
 
-  const result = await page.evaluate(async ({ base64Data, mime, name }) => {
-    try {
-      // 将 base64 转为 Blob
-      const byteChars = atob(base64Data);
-      const byteArray = new Uint8Array(byteChars.length);
-      for (let i = 0; i < byteChars.length; i++) byteArray[i] = byteChars.charCodeAt(i);
-      const blob = new Blob([byteArray], { type: mime });
-      const file = new File([blob], name, { type: mime });
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const result = await page.evaluate(async ({ base64Data, mime, name }) => {
+      const mallid = document.cookie.match(/mallid=([^;]+)/)?.[1] || "";
 
-      // 用 FormData 上传到素材中心
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("scene", "product");
+      try {
+        // Step 1: 获取上传签名
+        const sigResp = await fetch("/general_auth/get_signature?sdk_version=js-0.0.40&tag_name=product-material-tag&scene_id=agent-seller", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "mallid": mallid },
+          credentials: "include",
+          body: JSON.stringify({ bucket_tag: "product-material-tag" }),
+        });
+        const sigData = await sigResp.json();
+        if (!sigData.signature) {
+          return { success: false, error: "get_signature failed: " + JSON.stringify(sigData).slice(0, 200) };
+        }
 
-      // 找上传接口 — 尝试常见的素材上传路径
-      const uploadUrls = [
-        "/visage-agent-seller/material/upload",
-        "/lich-mms/material/upload",
-        "/api/material/upload",
-        "/bg-anniston-agent-seller/material/upload",
-      ];
+        // Step 2: 将 base64 转为 File
+        const byteChars = atob(base64Data);
+        const byteArray = new Uint8Array(byteChars.length);
+        for (let i = 0; i < byteChars.length; i++) byteArray[i] = byteChars.charCodeAt(i);
+        const blob = new Blob([byteArray], { type: mime });
+        const file = new File([blob], name, { type: mime });
 
-      for (const url of uploadUrls) {
-        try {
-          const resp = await fetch(url, { method: "POST", body: formData, credentials: "include" });
-          if (resp.ok) {
-            const data = await resp.json();
-            if (data.result?.url || data.result?.imageUrl) {
-              return { success: true, url: data.result.url || data.result.imageUrl };
+        // Step 3: 上传图片到 galerie
+        const formData = new FormData();
+        formData.append("url_width_height", "true");
+        formData.append("image", file);
+        formData.append("upload_sign", sigData.signature);
+
+        const uploadResp = await fetch("/api/galerie/v3/store_image?sdk_version=js-0.0.40&tag_name=product-material-tag", {
+          method: "POST",
+          body: formData,
+          credentials: "include",
+          headers: { "mallid": mallid },
+        });
+        const uploadData = await uploadResp.json();
+
+        if (uploadData.url) {
+          return { success: true, url: uploadData.url, width: uploadData.width, height: uploadData.height };
+        }
+        return { success: false, error: "store_image no url: " + JSON.stringify(uploadData).slice(0, 200) };
+      } catch (e) {
+        return { success: false, error: e.message };
+      }
+    }, { base64Data: base64, mime: mimeType, name: fileName });
+
+    if (result.success) {
+      console.error(`[upload] OK: ${result.url?.slice(0, 80)} (${result.width}x${result.height})`);
+      return result;
+    }
+
+    console.error(`[upload] Attempt ${attempt}/${maxRetries} failed: ${result.error}`);
+    if (attempt < maxRetries) {
+      await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 1000));
+    }
+  }
+
+  return { success: false, error: `Upload failed after ${maxRetries} attempts` };
+}
+
+/**
+ * 搜索分类 — 通过逐级遍历分类树匹配中文分类路径
+ * @param {Page} page
+ * @param {string} searchTerm - 分类搜索词，支持 "一级/二级/三级" 格式或单个关键词
+ */
+async function searchCategoryAPI(page, searchTerm) {
+  const cleanStr = (s) => s.replace(/[\u200B-\u200D\uFEFF\u00AD]/g, "").replace(/[、，]/g, "");
+
+  // 判断搜索词类型：短文本(<=30字)且包含 "/" 说明是分类路径，否则是标题/关键词
+  const isPathSearch = searchTerm.includes("/") && searchTerm.length <= 30;
+  let searchParts;
+
+  if (isPathSearch) {
+    searchParts = searchTerm.split("/").map(s => cleanStr(s.trim())).filter(Boolean);
+    console.error(`[category] Path search: "${searchParts.join(" > ")}"`);
+  } else {
+    // 标题搜索模式：在所有一级分类的二级子分类中模糊匹配
+    console.error(`[category] Title search: "${searchTerm.slice(0, 40)}"`);
+    const rootResult = await temuXHR(page, "/anniston-agent-seller/category/children/list", { parentCatId: 0 }, { maxRetries: 2 });
+    if (!rootResult.success) return null;
+    const rootCats = rootResult.data?.categoryNodeVOS || [];
+
+    // 提取标题中的核心关键词（用分隔符切分后直接匹配）
+    const titleClean = cleanStr(searchTerm);
+    const segments = titleClean.split(/[|｜,，;；>》\s]+/).filter(s => s.length >= 2);
+    console.error(`[category] Segments: ${segments.slice(0, 8).join(", ")}`);
+
+    let bestCat = null;
+    let bestScore = 0;
+    let bestPath = "";
+
+    for (const root of rootCats) {
+      const childResult = await temuXHR(page, "/anniston-agent-seller/category/children/list", { parentCatId: root.catId }, { maxRetries: 1 });
+      if (!childResult.success) continue;
+      const children = childResult.data?.categoryNodeVOS || [];
+
+      for (const child of children) {
+        const childName = cleanStr(child.catName);
+        let score = 0;
+        for (const seg of segments) {
+          // 双向匹配：分类名包含片段，或片段包含分类名
+          if (childName.includes(seg)) score += seg.length * 2;
+          else if (seg.includes(childName)) score += childName.length * 2;
+          else {
+            // 子串匹配：片段中的任意2+字子串出现在分类名中
+            for (let len = Math.min(4, seg.length); len >= 2; len--) {
+              for (let i = 0; i <= seg.length - len; i++) {
+                if (childName.includes(seg.slice(i, i + len))) {
+                  score += len;
+                  break;
+                }
+              }
             }
-            if (data.result) return { success: true, url: JSON.stringify(data.result).slice(0, 200) };
+          }
+        }
+        if (score > bestScore) {
+          bestScore = score;
+          bestCat = child;
+          bestPath = `${root.catName} > ${child.catName}`;
+        }
+      }
+    }
+
+    if (bestCat && bestScore > 0) {
+      console.error(`[category] Best title match: ${bestPath} (score=${bestScore})`);
+      // 直接用找到的二级分类 catId 继续展开到叶子，跳过路径匹配
+      const catIds = {};
+      const rootCat = rootCats.find(r => {
+        // 找到包含 bestCat 的一级分类
+        return bestPath.startsWith(r.catName);
+      });
+      if (rootCat) {
+        catIds.cat1Id = rootCat.catId;
+        catIds.cat1Name = rootCat.catName;
+        catIds.cat2Id = bestCat.catId;
+        catIds.cat2Name = bestCat.catName;
+
+        // 继续展开到叶子 — 每层用标题关键词匹配最佳子分类
+        let parentId = bestCat.catId;
+        for (let level = 3; level <= 10; level++) {
+          const childResult = await temuXHR(page, "/anniston-agent-seller/category/children/list", { parentCatId: parentId }, { maxRetries: 1 });
+          if (!childResult.success || !childResult.data?.categoryNodeVOS?.length) break;
+          const children = childResult.data.categoryNodeVOS;
+
+          // 优先选"其他"兜底分类，其次用标题关键词匹配
+          let bestChild = null;
+          let bestChildScore = -1;
+          let otherChild = null;
+          for (const child of children) {
+            const cn = cleanStr(child.catName);
+            if (/^其[他它]/.test(cn)) { otherChild = child; }
+            let score = 0;
+            for (const seg of segments) {
+              if (cn.includes(seg)) score += seg.length * 3;
+              else if (seg.includes(cn)) score += cn.length * 2;
+              else {
+                for (let len = Math.min(4, seg.length); len >= 2; len--) {
+                  for (let j = 0; j <= seg.length - len; j++) {
+                    if (cn.includes(seg.slice(j, j + len))) { score += len; break; }
+                  }
+                }
+              }
+            }
+            if (score > bestChildScore) { bestChildScore = score; bestChild = child; }
+          }
+          // 如果没有好的匹配（score=0），选"其他"兜底
+          const selectedChild = bestChildScore > 0 ? bestChild : (otherChild || children[0]);
+          catIds[`cat${level}Id`] = selectedChild.catId;
+          catIds[`cat${level}Name`] = selectedChild.catName;
+          parentId = selectedChild.catId;
+          console.error(`[category] Level ${level}: auto-select → ${selectedChild.catId}:${selectedChild.catName}`);
+        }
+
+        // 补齐
+        for (let i = 1; i <= 10; i++) {
+          if (!catIds[`cat${i}Id`]) catIds[`cat${i}Id`] = 0;
+        }
+        catIds._path = Object.keys(catIds).filter(k => k.endsWith("Name") && catIds[k]).map(k => catIds[k]).join(" > ");
+        console.error(`[category] Final: ${catIds._path}`);
+        return { list: [catIds] };
+      }
+      // 如果没找到一级分类，走 fallback
+      searchParts = [bestPath.split(" > ")[0], bestPath.split(" > ")[1]];
+    } else {
+      searchParts = [searchTerm];
+      console.error(`[category] No title match, falling back to path search`);
+    }
+  }
+
+  // 模糊匹配函数：支持部分匹配
+  function fuzzyMatch(catName, searchName) {
+    const a = cleanStr(catName).toLowerCase();
+    const b = searchName.toLowerCase();
+    if (a === b) return 3; // 完全匹配
+    if (a.includes(b) || b.includes(a)) return 2; // 包含匹配
+    // 关键词重叠匹配（至少2个字符重叠）
+    for (let len = Math.min(a.length, b.length); len >= 2; len--) {
+      for (let i = 0; i <= b.length - len; i++) {
+        if (a.includes(b.slice(i, i + len))) return 1;
+      }
+    }
+    return 0;
+  }
+
+  // 逐级遍历分类树
+  let parentCatId = 0;
+  const catIds = {};
+  let lastMatchedCatId = 0;
+
+  for (let level = 0; level < searchParts.length && level < 5; level++) {
+    const result = await temuXHR(page, "/anniston-agent-seller/category/children/list", { parentCatId }, { maxRetries: 2 });
+    if (!result.success || !result.data?.categoryNodeVOS?.length) {
+      console.error(`[category] No children for parentCatId=${parentCatId} at level ${level + 1}`);
+      break;
+    }
+
+    const cats = result.data.categoryNodeVOS;
+    const searchName = searchParts[level];
+
+    // 找最佳匹配
+    let bestMatch = null;
+    let bestScore = 0;
+    for (const cat of cats) {
+      const score = fuzzyMatch(cat.catName, searchName);
+      if (score > bestScore) {
+        bestScore = score;
+        bestMatch = cat;
+      }
+    }
+
+    if (bestMatch && bestScore > 0) {
+      catIds[`cat${level + 1}Id`] = bestMatch.catId;
+      catIds[`cat${level + 1}Name`] = bestMatch.catName;
+      parentCatId = bestMatch.catId;
+      lastMatchedCatId = bestMatch.catId;
+      console.error(`[category] Level ${level + 1}: "${searchName}" → ${bestMatch.catId}:${bestMatch.catName} (score=${bestScore})`);
+    } else {
+      console.error(`[category] Level ${level + 1}: "${searchName}" no match in ${cats.length} categories`);
+      // 列出可用分类方便调试
+      console.error(`[category]   Available: ${cats.slice(0, 8).map(c => c.catName).join(", ")}...`);
+      break;
+    }
+  }
+
+  // 继续展开到叶子节点（如果还有子分类，选第一个）
+  for (let level = Object.keys(catIds).filter(k => k.endsWith("Id")).length; level < 10; level++) {
+    const result = await temuXHR(page, "/anniston-agent-seller/category/children/list", { parentCatId }, { maxRetries: 1 });
+    if (!result.success || !result.data?.categoryNodeVOS?.length) break;
+    const firstChild = result.data.categoryNodeVOS[0];
+    catIds[`cat${level + 1}Id`] = firstChild.catId;
+    catIds[`cat${level + 1}Name`] = firstChild.catName;
+    parentCatId = firstChild.catId;
+    lastMatchedCatId = firstChild.catId;
+    console.error(`[category] Level ${level + 1}: auto-select → ${firstChild.catId}:${firstChild.catName}`);
+  }
+
+  // 补齐剩余层级为 0
+  for (let i = 1; i <= 10; i++) {
+    if (!catIds[`cat${i}Id`]) catIds[`cat${i}Id`] = 0;
+  }
+
+  if (lastMatchedCatId > 0) {
+    catIds._path = Object.keys(catIds)
+      .filter(k => k.endsWith("Name") && catIds[k])
+      .map(k => catIds[k])
+      .join(" > ");
+    console.error(`[category] Final: ${catIds._path}`);
+    return { list: [catIds] };
+  }
+
+  console.error(`[category] No results for: "${searchTerm}"`);
+  return null;
+}
+
+// ============================================================
+// 统一 API 调用层 — 利用 Temu 前端 XHR 拦截器自动添加 anti-content
+// ============================================================
+
+/**
+ * 在 Temu 页面中通过 XHR 调用后端 API（自动携带签名）
+ * @param {import('playwright').Page} page - 已登录的 Temu 页面
+ * @param {string} endpoint - API 路径，如 "/visage-agent-seller/product/add"
+ * @param {Object} body - 请求体
+ * @param {Object} [options]
+ * @param {number} [options.maxRetries=3] - 最大重试次数
+ * @param {boolean} [options.isFormData=false] - 是否为 FormData 上传
+ * @returns {Object} { success, data, errorCode, errorMsg, raw }
+ */
+async function temuXHR(page, endpoint, body, options = {}) {
+  const { maxRetries = 3 } = options;
+  const NON_RETRYABLE = [1000001, 1000002, 1000003, 1000004, 40001, 40003, 50001, 6000002]; // 参数错误/无权限/属性不匹配（外层专用重试处理）
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const raw = await page.evaluate(async ({ ep, bd }) => {
+        // 优先用 fetch（Temu 前端拦截器 hook 了 fetch 添加 anti-content）
+        // mallid header 是必须的认证字段
+        const mallid = document.cookie.match(/mallid=([^;]+)/)?.[1] || "";
+        try {
+          const resp = await fetch(ep, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "mallid": mallid },
+            credentials: "include",
+            body: JSON.stringify(bd),
+          });
+          const text = await resp.text();
+          try {
+            return { status: resp.status, body: JSON.parse(text) };
+          } catch {
+            return { status: resp.status, body: null, text: text?.slice(0, 500) };
+          }
+        } catch (fetchErr) {
+          // fetch 失败，fallback 到 XHR
+          return new Promise((resolve) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open("POST", ep, true);
+            xhr.setRequestHeader("Content-Type", "application/json");
+            xhr.setRequestHeader("mallid", mallid);
+            xhr.withCredentials = true;
+            xhr.timeout = 30000;
+            xhr.onreadystatechange = function () {
+              if (xhr.readyState === 4) {
+                try {
+                  resolve({ status: xhr.status, body: JSON.parse(xhr.responseText) });
+                } catch {
+                  resolve({ status: xhr.status, body: null, text: xhr.responseText?.slice(0, 500) });
+                }
+              }
+            };
+            xhr.onerror = () => resolve({ status: 0, body: null, error: "XHR error: " + fetchErr.message });
+            xhr.ontimeout = () => resolve({ status: 0, body: null, error: "XHR timeout" });
+            xhr.send(JSON.stringify(bd));
+          });
+        }
+      }, { ep: endpoint, bd: body });
+
+      // 解析结果
+      if (!raw.body) {
+        console.error(`[temuXHR] ${endpoint} attempt ${attempt}/${maxRetries}: HTTP ${raw.status} - ${raw.error || raw.text?.slice(0, 100)}`);
+        if (attempt < maxRetries) {
+          const wait = Math.pow(3, attempt) * 1000; // 3s, 9s, 27s
+          console.error(`[temuXHR] Retrying in ${wait / 1000}s...`);
+          await new Promise(r => setTimeout(r, wait));
+          continue;
+        }
+        return { success: false, errorMsg: raw.error || "Empty response", raw };
+      }
+
+      const resp = raw.body;
+      const isOk = resp.success === true || resp.errorCode === 1000000;
+
+      if (isOk) {
+        console.error(`[temuXHR] ${endpoint} OK (attempt ${attempt})`);
+        return { success: true, data: resp.result, errorCode: resp.errorCode, raw: resp };
+      }
+
+      // 不可重试的错误
+      if (NON_RETRYABLE.includes(resp.errorCode)) {
+        console.error(`[temuXHR] ${endpoint} NON-RETRYABLE error: ${resp.errorCode} - ${resp.errorMsg}`);
+        return { success: false, errorCode: resp.errorCode, errorMsg: resp.errorMsg, raw: resp };
+      }
+
+      // 可重试的错误
+      console.error(`[temuXHR] ${endpoint} attempt ${attempt}/${maxRetries}: errorCode=${resp.errorCode} - ${resp.errorMsg}`);
+      if (attempt < maxRetries) {
+        const wait = Math.pow(3, attempt) * 1000;
+        console.error(`[temuXHR] Retrying in ${wait / 1000}s...`);
+        await new Promise(r => setTimeout(r, wait));
+        continue;
+      }
+      return { success: false, errorCode: resp.errorCode, errorMsg: resp.errorMsg, raw: resp };
+
+    } catch (e) {
+      console.error(`[temuXHR] ${endpoint} attempt ${attempt} exception: ${e.message}`);
+      if (attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, Math.pow(3, attempt) * 1000));
+        continue;
+      }
+      return { success: false, errorMsg: e.message };
+    }
+  }
+}
+
+// ============================================================
+// 探测创建商品流程 — 拦截真实 API 请求用于调试
+// ============================================================
+
+async function probeCreateFlow(params) {
+  const page = await context.newPage();
+  const captured = [];
+  const frameworkPatterns = [
+    'phantom/xg', 'pfb/l1', 'pfb/a4', 'web-performace', 'get-leo-config',
+    '_stm', 'msgBox', 'auth/userInfo', 'auth/menu', 'queryTotalExam',
+    'feedback/entrance', 'rule/unreadNum', 'checkAbleFeedback',
+    'queryFeedbackNotReadTotal', 'pop/query', '.js', '.css', '.png', '.svg',
+    '.woff', '.ico', '.jpg', '.gif', '.map', '.webp', 'hm.baidu', 'google',
+    'favicon', 'hot-update', 'sockjs', 'batchMatchBySupplierIds', 'gray/agent',
+  ];
+
+  // 保存完整的请求和响应数据
+  const saveDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "api-probe");
+  fs.mkdirSync(saveDir, { recursive: true });
+
+  try {
+    // 拦截所有 POST 请求
+    page.on("request", (req) => {
+      try {
+        if (req.method() !== "POST") return;
+        const url = req.url();
+        if (frameworkPatterns.some(p => url.includes(p))) return;
+        if (!url.includes("agentseller.temu.com") && !url.includes("kuajingmaihuo.com") && !url.includes("temu.com")) return;
+
+        const u = new URL(url);
+        const postData = req.postData();
+        let body = null;
+        try { body = JSON.parse(postData); } catch {}
+
+        captured.push({
+          timestamp: Date.now(),
+          method: "POST",
+          path: u.pathname,
+          bodyPreview: postData?.slice(0, 500),
+          bodyParsed: body,
+          headers: {
+            "content-type": req.headers()["content-type"],
+            "anti-content": req.headers()["anti-content"]?.slice(0, 50) + "...",
+          },
+        });
+        console.error(`[probe] POST ${u.pathname} (body: ${postData?.length || 0} bytes)`);
+      } catch {}
+    });
+
+    page.on("response", async (resp) => {
+      try {
+        if (resp.request().method() !== "POST") return;
+        const url = resp.url();
+        if (frameworkPatterns.some(p => url.includes(p))) return;
+
+        const u = new URL(url);
+        const ct = resp.headers()["content-type"] || "";
+        if (ct.includes("json") || ct.includes("application")) {
+          const body = await resp.json().catch(() => null);
+          if (body) {
+            // 找到对应的请求记录，补充响应数据
+            const req = [...captured].reverse().find(c => c.path === u.pathname && !c.response);
+            if (req) {
+              req.response = {
+                status: resp.status(),
+                errorCode: body.errorCode,
+                errorMsg: body.errorMsg,
+                success: body.success,
+                resultKeys: body.result ? Object.keys(body.result).slice(0, 20) : [],
+                resultPreview: JSON.stringify(body.result)?.slice(0, 500),
+              };
+            }
+          }
+        }
+      } catch {}
+    });
+
+    // 导航到创建商品页面
+    const targetPath = params.path || "/goods/create/category";
+    console.error(`[probe] Navigating to ${targetPath}...`);
+    await navigateToSellerCentral(page, targetPath);
+    await randomDelay(5000, 8000);
+
+    // 关闭弹窗
+    for (let i = 0; i < 5; i++) {
+      try {
+        const btn = page.locator('button:has-text("知道了"), button:has-text("确定"), button:has-text("关闭"), button:has-text("暂不"), button:has-text("不使用")').first();
+        if (await btn.isVisible({ timeout: 500 })) await btn.click();
+        else break;
+      } catch { break; }
+    }
+
+    // 等待用户手动操作（创建商品、填写信息、提交核价）
+    const waitMinutes = params.waitMinutes || 10;
+    console.error(`[probe] Page ready. Waiting ${waitMinutes} minutes for manual operations...`);
+    console.error(`[probe] Please manually create a product in the browser. All API calls will be captured.`);
+
+    await new Promise(r => setTimeout(r, waitMinutes * 60000));
+
+    // 保存捕获的数据
+    const outputFile = path.join(saveDir, `probe_${Date.now()}.json`);
+    fs.writeFileSync(outputFile, JSON.stringify(captured, null, 2), "utf8");
+    console.error(`[probe] Captured ${captured.length} API calls. Saved to: ${outputFile}`);
+
+    return {
+      success: true,
+      totalApis: captured.length,
+      apis: captured,
+      savedTo: outputFile,
+    };
+  } finally {
+    if (!params.keepOpen) await page.close();
+  }
+}
+
+// ============================================================
+// 完整自动核价：CSV → AI生图 → 上传素材 → 提交核价
+// ============================================================
+
+// AI 生图的图片类型顺序（scene_a 排第一，也用作 SKU 图）
+const IMAGE_TYPE_ORDER = [
+  "scene_a",    // 1. 核价场景图A（首图 + SKU图）
+  "scene_b",    // 2. 核价场景图B
+  "main",       // 3. 主图（白底 Hero）
+  "features",   // 4. 痛点/卖点图
+  "closeup",    // 5. 功能/结构图
+  "dimensions", // 6. 尺寸规格图
+  "lifestyle",  // 7. 场景结果图
+  "packaging",  // 8. 差异化价值图
+  "comparison", // 9. 对比优势图
+  "lifestyle2", // 10. A+ 收束图
+];
+
+const AI_IMAGE_GEN_URL = "http://localhost:3000";
+const AI_AUTH_HEADERS = { "sec-fetch-site": "same-origin", "origin": "http://localhost:3000" };
+
+/**
+ * 调用 AI 生图服务：分析 + 生成 10 张图
+ * @param {string} sourceImagePath - 商品原图本地路径
+ * @param {string} productTitle - 商品标题（用于分析）
+ * @returns {Object} { success, images: { [imageType]: base64DataUrl } }
+ */
+async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePaths = []) {
+  const imageBuffer = fs.readFileSync(sourceImagePath);
+  const base64 = imageBuffer.toString("base64");
+  const ext = path.extname(sourceImagePath).toLowerCase();
+  const mimeType = ext === ".png" ? "image/png" : "image/jpeg";
+
+  // 构建所有图片 blob 列表（主图 + 轮播图）
+  const imageBlob = new Blob([imageBuffer], { type: mimeType });
+  const allImageBlobs = [{ blob: imageBlob, name: path.basename(sourceImagePath) }];
+  for (const ep of extraImagePaths.slice(0, 4)) {  // 最多额外4张（总共5张）
+    try {
+      if (fs.existsSync(ep)) {
+        const buf = fs.readFileSync(ep);
+        const eExt = path.extname(ep).toLowerCase();
+        const eMime = eExt === ".png" ? "image/png" : "image/jpeg";
+        allImageBlobs.push({ blob: new Blob([buf], { type: eMime }), name: path.basename(ep) });
+      }
+    } catch {}
+  }
+  console.error(`[ai-gen] Source images: ${allImageBlobs.length} (1 main + ${allImageBlobs.length - 1} carousel)`);
+
+  // Step 1: 分析产品（传所有图片）
+  console.error("[ai-gen] Step 1: Analyzing product...");
+  const analyzeForm = new FormData();
+  for (const img of allImageBlobs) {
+    analyzeForm.append("images", img.blob, img.name);
+  }
+  analyzeForm.append("productMode", "single");
+
+  const analyzeResp = await fetch(`${AI_IMAGE_GEN_URL}/api/analyze`, {
+    method: "POST",
+    body: analyzeForm,
+    headers: AI_AUTH_HEADERS,
+  });
+  if (!analyzeResp.ok) {
+    return { success: false, error: `Analyze failed: ${analyzeResp.status}` };
+  }
+  const analysis = await analyzeResp.json();
+  console.error(`[ai-gen] Analysis: ${analysis.productName?.slice(0, 40)}, category: ${analysis.category?.slice(0, 30)}`);
+
+  // Step 2: 生成 plans（调用 /api/plans 获取带 prompt 的方案）
+  console.error("[ai-gen] Step 2: Generating plans with prompts...");
+  const plansResp = await fetch(`${AI_IMAGE_GEN_URL}/api/plans`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...AI_AUTH_HEADERS },
+    body: JSON.stringify({
+      analysis,
+      imageTypes: IMAGE_TYPE_ORDER,
+      salesRegion: "us",
+      imageSize: "1000x1000",
+      productMode: "single",
+    }),
+  });
+  if (!plansResp.ok) {
+    return { success: false, error: `Plans API failed: ${plansResp.status}` };
+  }
+  const { plans } = await plansResp.json();
+  console.error(`[ai-gen] Got ${plans.length} plans with prompts`);
+
+  // Step 3: 并发生成图片（分成多组并行请求）
+  const CONCURRENCY = 10; // 10并发，失败自动重试
+  const images = {};
+
+  // 将 plans 分组
+  const planGroups = [];
+  for (let i = 0; i < plans.length; i += CONCURRENCY) {
+    planGroups.push(plans.slice(i, i + CONCURRENCY));
+  }
+
+  console.error(`[ai-gen] Step 3: Generating ${plans.length} images (${planGroups.length} batches, ${CONCURRENCY} concurrent)...`);
+
+  // SSE 流处理函数
+  async function processSSE(resp) {
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const result = {};
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        try {
+          const data = JSON.parse(line.slice(6));
+          if (data.status === "done" && data.imageUrl) {
+            result[data.imageType] = data.imageUrl;
+            console.error(`[ai-gen] Generated: ${data.imageType} (${Object.keys(images).length + Object.keys(result).length}/${plans.length})`);
+          } else if (data.status === "error") {
+            console.error(`[ai-gen] Error: ${data.imageType}: ${data.error}`);
           }
         } catch {}
       }
-
-      // 备用：用 pfs 上传接口
-      const pfsResp = await fetch("https://pfs.temu.com/api/luna/upload", {
-        method: "POST",
-        body: formData,
-        credentials: "include",
-      });
-      if (pfsResp.ok) {
-        const pfsData = await pfsResp.json();
-        return { success: true, url: pfsData.result?.url || pfsData.url || JSON.stringify(pfsData).slice(0, 200) };
-      }
-
-      return { success: false, error: "All upload URLs failed" };
-    } catch (e) {
-      return { success: false, error: e.message };
     }
-  }, { base64Data: base64, mime: mimeType, name: fileName });
+    return result;
+  }
 
-  return result;
+  // 单个 plan 请求函数（带重试）
+  async function generateSinglePlan(plan, retries = 2) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const form = new FormData();
+        for (const img of allImageBlobs) {
+          form.append("images", img.blob, img.name);
+        }
+        form.append("plans", JSON.stringify([plan]));
+        form.append("productMode", "single");
+        form.append("imageLanguage", "en");
+        form.append("imageSize", "1000x1000");
+        const resp = await fetch(`${AI_IMAGE_GEN_URL}/api/generate`, { method: "POST", body: form, headers: AI_AUTH_HEADERS });
+        if (resp.ok) {
+          const r = await processSSE(resp);
+          if (Object.keys(r).length > 0) return r;
+          console.error(`[ai-gen] Empty result for ${plan.imageType}, attempt ${attempt + 1}/${retries + 1}`);
+        } else {
+          console.error(`[ai-gen] HTTP ${resp.status} for ${plan.imageType}, attempt ${attempt + 1}/${retries + 1}`);
+        }
+      } catch (e) {
+        console.error(`[ai-gen] Error for ${plan.imageType}: ${e.message}, attempt ${attempt + 1}/${retries + 1}`);
+      }
+      if (attempt < retries) await new Promise(r => setTimeout(r, 3000)); // 重试前等3秒
+    }
+    return {};
+  }
+
+  for (const group of planGroups) {
+    const promises = group.map(plan => generateSinglePlan(plan));
+    const results = await Promise.all(promises);
+    for (const r of results) Object.assign(images, r);
+  }
+
+  // 检查缺失的图片，单独重试
+  const missingPlans = plans.filter(p => !images[p.imageType]);
+  if (missingPlans.length > 0) {
+    console.error(`[ai-gen] Missing ${missingPlans.length} images, retrying individually...`);
+    for (const plan of missingPlans) {
+      const r = await generateSinglePlan(plan, 1);
+      Object.assign(images, r);
+    }
+  }
+
+  console.error(`[ai-gen] Total generated: ${Object.keys(images).length}/${plans.length}`);
+  return { success: Object.keys(images).length >= 5, images, analysis };
 }
 
-async function searchCategoryAPI(page, searchTerm) {
-  // 在页面中用 XHR 调用分类搜索 API（自动带签名）
-  const result = await page.evaluate((term) => {
-    return new Promise((resolve) => {
-      // 尝试多个可能的分类搜索 API
-      const urls = [
-        "/anniston-agent-seller/category/search",
-        "/anniston-agent-seller/category/children/list",
-        "/visage-agent-seller/category/search",
-      ];
-      let tried = 0;
-      function tryNext() {
-        if (tried >= urls.length) { resolve(null); return; }
-        const xhr = new XMLHttpRequest();
-        xhr.open("POST", urls[tried], true);
-        xhr.setRequestHeader("Content-Type", "application/json");
-        xhr.withCredentials = true;
-        xhr.onreadystatechange = function() {
-          if (xhr.readyState === 4) {
-            try {
-              const data = JSON.parse(xhr.responseText);
-              if (data.result && (data.errorCode === 1000000 || data.success)) {
-                resolve(data.result);
-                return;
-              }
-            } catch {}
-            tried++;
-            tryNext();
-          }
-        };
-        xhr.onerror = () => { tried++; tryNext(); };
-        xhr.send(JSON.stringify({ keyword: term, pageNo: 1, pageSize: 10 }));
+/**
+ * 将 base64 图片保存为本地文件
+ */
+// saveBase64Image → moved to utils.mjs
+
+/**
+ * 在 Temu 页面中上传图片到素材中心，获取 kwcdn URL
+ */
+async function uploadImageToKwcdn(page, localImagePath) {
+  const result = await uploadImageToMaterial(page, localImagePath);
+  if (result.success && result.url) {
+    return result.url;
+  }
+  return null;
+}
+
+/**
+ * 完整自动核价流程
+ * @param {Object} params
+ * @param {string} params.csvPath - CSV 文件路径
+ * @param {number} [params.startRow=0] - 起始行
+ * @param {number} [params.count=1] - 处理数量
+ * @param {number} [params.intervalMin=0.5] - 最小间隔（分钟）
+ * @param {number} [params.intervalMax=1] - 最大间隔（分钟）
+ */
+async function autoPricingFromCSV(params) {
+  console.error("[auto-pricing] Starting full auto pricing flow...");
+  const csvPath = params.csvPath;
+  if (!csvPath || !fs.existsSync(csvPath)) {
+    return { success: false, message: "CSV文件不存在: " + csvPath };
+  }
+
+  const startRow = params.startRow || 0;
+  const count = params.count || 1;
+  const intervalMin = params.intervalMin || 0.5;
+  const intervalMax = params.intervalMax || 1;
+  const results = [];
+
+  // 支持 XLSX 和 CSV 两种格式
+  let headers, dataRows;
+  const isXlsx = csvPath.endsWith(".xlsx") || csvPath.endsWith(".xls");
+  if (isXlsx) {
+    const wb = XLSX.readFile(csvPath);
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const allRows = XLSX.utils.sheet_to_json(ws, { header: 1 });
+    // 跳过可能的标题行（如"店铺信息"），找到真正的列头（包含"商品标题"或"商品名称"）
+    let headerRowIdx = 0;
+    for (let i = 0; i < Math.min(10, allRows.length); i++) {
+      const row = allRows[i];
+      if (row && row.some(c => typeof c === "string" && (c.includes("商品标题") || c.includes("商品名称") || c.includes("美元价格")))) {
+        headerRowIdx = i;
+        break;
       }
-      tryNext();
+    }
+    headers = (allRows[headerRowIdx] || []).map(h => String(h || ""));
+    dataRows = allRows.slice(headerRowIdx + 1).filter(r => r && r.length > 0);
+    console.error(`[auto-pricing] XLSX: header row=${headerRowIdx}, data rows=${dataRows.length}, headers=${headers.slice(0, 8).join("|")}`);
+  } else {
+    const csvContent = fs.readFileSync(csvPath, "utf8");
+    const lines = csvContent.split("\n").filter(l => l.trim());
+    function parseCSVLine(line) {
+      const result = [];
+      let current = "", inQuotes = false;
+      for (const ch of line) {
+        if (ch === '"') inQuotes = !inQuotes;
+        else if (ch === ',' && !inQuotes) { result.push(current.trim()); current = ""; }
+        else current += ch;
+      }
+      result.push(current.trim());
+      return result;
+    }
+    headers = parseCSVLine(lines[0]);
+    dataRows = lines.slice(1).map(l => parseCSVLine(l));
+  }
+
+  const colIndex = (names) => {
+    for (const name of names) {
+      const idx = headers.findIndex(h => h && h.includes(name));
+      if (idx >= 0) return idx;
+    }
+    return -1;
+  };
+
+  const nameIdx = colIndex(["商品标题（中文）", "商品名称", "title"]);
+  const nameEnIdx = colIndex(["商品标题（英文）", "title_en"]);
+  const imageIdx = colIndex(["商品主图", "商品原图", "image"]);
+  const carouselIdx = colIndex(["商品轮播图"]);
+  const catCnIdx = colIndex(["后台分类", "前台分类（中文）", "分类（中文）", "分类"]);
+  const priceIdx = colIndex(["美元价格($)", "美元价格", "price"]);
+
+  console.error(`[auto-pricing] Columns: name=${nameIdx}, image=${imageIdx}, cat=${catCnIdx}, price=${priceIdx}`);
+
+  const total = Math.min(count, dataRows.length - startRow);
+  console.error(`[auto-pricing] Will process ${total} products (dataRows=${dataRows.length})`);
+  console.error(`[auto-pricing] Columns: name=${nameIdx}, nameEn=${nameEnIdx}, image=${imageIdx}, carousel=${carouselIdx}, cat=${catCnIdx}, price=${priceIdx}`);
+
+  // 创建临时目录
+  const tmpDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "auto-pricing-tmp");
+  fs.mkdirSync(tmpDir, { recursive: true });
+
+  for (let i = startRow; i < startRow + total; i++) {
+    const cols = dataRows[i] || [];
+    const getCol = (idx) => idx >= 0 ? String(cols[idx] || "") : "";
+    const productName = getCol(nameIdx) || getCol(nameEnIdx) || "";
+    const imageUrl = getCol(imageIdx) || "";
+    const carouselUrls = getCol(carouselIdx).split(",").map(s => s.trim()).filter(s => s.startsWith("http"));
+    const categoryCn = getCol(catCnIdx) || "";
+    const priceUSD = priceIdx >= 0 ? parseFloat(getCol(priceIdx)) || 0 : 0;
+    const priceCNY = priceUSD > 0 ? priceUSD * 7 : 9.99;
+
+    const itemNum = i - startRow + 1;
+
+    // 暂停检查：等待恢复
+    while (pricingPaused) {
+      currentProgress = { running: true, paused: true, total, completed: itemNum - 1, current: `${itemNum}/${total} ${productName.slice(0, 30)}`, step: "已暂停", results: [...results] };
+      await new Promise(r => setTimeout(r, 1000));
+    }
+
+    // 更新实时进度
+    currentProgress = { running: true, total, completed: itemNum - 1, current: `${itemNum}/${total} ${productName.slice(0, 30)}`, step: "开始处理", results: [...results] };
+    console.error(`\n[auto-pricing] ======== ${itemNum}/${total} ========`);
+    console.error(`[auto-pricing] Title: ${productName.slice(0, 50)}`);
+    console.error(`[auto-pricing] Category: ${categoryCn}`);
+    console.error(`[auto-pricing] Price: $${priceUSD} → ¥${priceCNY.toFixed(2)}`);
+
+    try {
+      // Step 1: 下载商品原图
+      currentProgress.step = "下载原图";
+      let sourceImagePath = null;
+      if (imageUrl?.startsWith("http")) {
+        const imgFile = path.join(tmpDir, `source_${i}_${Date.now()}.jpg`);
+        try {
+          await downloadImage(imageUrl, imgFile);
+          sourceImagePath = imgFile;
+          console.error(`[auto-pricing] Source image downloaded`);
+        } catch (e) {
+          console.error(`[auto-pricing] Image download failed: ${e.message}`);
+        }
+      }
+
+      if (!sourceImagePath) {
+        results.push({ index: i, name: productName.slice(0, 40), success: false, message: "无法下载商品原图" });
+        continue;
+      }
+
+      // Step 1.5: 下载轮播图作为 AI 额外参考
+      const carouselLocalPaths = [];
+      if (carouselUrls.length > 0) {
+        console.error(`[auto-pricing] Downloading ${Math.min(carouselUrls.length, 4)} carousel images for AI reference...`);
+        for (let ci = 0; ci < Math.min(carouselUrls.length, 4); ci++) {
+          try {
+            const cFile = path.join(tmpDir, `carousel_${i}_${ci}_${Date.now()}.jpg`);
+            await downloadImage(carouselUrls[ci], cFile);
+            carouselLocalPaths.push(cFile);
+          } catch {}
+        }
+        console.error(`[auto-pricing] Downloaded ${carouselLocalPaths.length} carousel images`);
+      }
+
+      // Step 2: AI 生成 10 张图（主图 + 轮播图一起给 AI）
+      currentProgress.step = "AI生图中...";
+      console.error(`[auto-pricing] Generating AI images (${1 + carouselLocalPaths.length} source images)...`);
+      const aiResult = await generateImagesWithAI(sourceImagePath, productName, carouselLocalPaths);
+      if (!aiResult.success) {
+        results.push({ index: i, name: productName.slice(0, 40), success: false, message: "AI生图失败: " + (aiResult.error || "图片不足5张") });
+        continue;
+      }
+
+      // Step 3: 保存 base64 图片到本地文件
+      const localImages = {};
+      for (const type of IMAGE_TYPE_ORDER) {
+        if (aiResult.images[type]) {
+          const imgPath = path.join(tmpDir, `${i}_${type}_${Date.now()}.png`);
+          saveBase64Image(aiResult.images[type], imgPath);
+          localImages[type] = imgPath;
+        }
+      }
+      console.error(`[auto-pricing] Saved ${Object.keys(localImages).length} images locally`);
+
+      // Step 4: 上传到素材中心获取 kwcdn URL
+      currentProgress.step = "上传图片...";
+      console.error(`[auto-pricing] Uploading to material center...`);
+      const page = await context.newPage();
+      await navigateToSellerCentral(page, "/goods/list");
+      await randomDelay(3000, 5000);
+
+      const kwcdnUrls = {};
+      // 并发上传（3张一组）
+      const uploadTypes = IMAGE_TYPE_ORDER.filter(t => localImages[t]);
+      for (let u = 0; u < uploadTypes.length; u += 3) {
+        const batch = uploadTypes.slice(u, u + 3);
+        const uploadResults = await Promise.all(batch.map(async (type) => {
+          const url = await uploadImageToKwcdn(page, localImages[type]);
+          return { type, url };
+        }));
+        for (const { type, url } of uploadResults) {
+          if (url) {
+            kwcdnUrls[type] = url;
+            console.error(`[auto-pricing] Uploaded ${type}: ${url.slice(0, 60)}`);
+          } else {
+            console.error(`[auto-pricing] Upload failed for ${type}`);
+          }
+        }
+      }
+      await page.close();
+
+      // 按指定顺序排列图片 URL
+      const orderedImageUrls = IMAGE_TYPE_ORDER
+        .map(type => kwcdnUrls[type])
+        .filter(Boolean);
+
+      console.error(`[auto-pricing] Total uploaded: ${orderedImageUrls.length}`);
+
+      if (orderedImageUrls.length < 5) {
+        results.push({ index: i, name: productName.slice(0, 40), success: false, message: `上传图片不足5张 (${orderedImageUrls.length})` });
+        continue;
+      }
+
+      // Step 5: AI 生成中文标题
+      currentProgress.step = "生成标题...";
+      let finalTitle = productName;
+      if (aiResult.analysis) {
+        try {
+          console.error(`[auto-pricing] Generating Chinese title...`);
+          const titleResp = await fetch(`${AI_IMAGE_GEN_URL}/api/title`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...AI_AUTH_HEADERS },
+            body: JSON.stringify({ analysis: aiResult.analysis }),
+          });
+          if (titleResp.ok) {
+            const titleData = await titleResp.json();
+            // 用第一个标题（关键词优化版），去掉 [品牌名] 和数字（如250ml）
+            finalTitle = (titleData.titles?.[0]?.title || productName)
+              .replace(/\[.*?\]\s*/g, "")          // 去掉所有 [xxx] 包括品牌名
+              .replace(/（.*?）/g, "")               // 去掉中文括号内容
+              .replace(/\d+(\.\d+)?\s*(ml|g|kg|cm|mm|m|l|oz|inch|ft|pcs|件|个|只|片|包|瓶|支|毫升|厘米|毫米|英寸|磅|盎司|卷|套|组|双|对|块|条|根|张|把|台|袋)/gi, "")  // 去掉数字+单位
+              .replace(/\d+\s*[x×]\s*\d*/gi, "")    // 去掉 30x、10x20 等
+              .replace(/\d+p\b/gi, "")               // 去掉 100p 等
+              .replace(/\b\d{2,}\b/g, "")            // 去掉独立的2位以上数字
+              .replace(/，\s*，/g, "，")              // 修复连续中文逗号
+              .replace(/\|\s*\|/g, "|")              // 修复连续分隔符
+              .replace(/^\s*[|，,]\s*/g, "")          // 去掉开头的分隔符
+              .replace(/\s*[|，,]\s*$/g, "")          // 去掉结尾的分隔符
+              .replace(/\s+/g, " ")
+              .trim();
+            console.error(`[auto-pricing] Title: ${finalTitle.slice(0, 60)}`);
+          }
+        } catch (e) {
+          console.error(`[auto-pricing] Title generation failed: ${e.message}, using original`);
+        }
+      }
+
+      // 标题末尾追加后台分类最后一级
+      if (categoryCn) {
+        const lastCat = categoryCn.split(/[/>]/).map(s => s.trim()).filter(Boolean).pop();
+        if (lastCat && !finalTitle.includes(lastCat)) {
+          finalTitle = `${finalTitle}，${lastCat}`;
+          console.error(`[auto-pricing] Title + category: ${finalTitle.slice(0, 80)}`);
+        }
+      }
+
+      // Step 6: 提交核价
+      // 分类搜索词优先级：CSV分类路径（含/，最精确） > AI分析分类 > 标题
+      const aiCategory = aiResult.analysis?.category?.split("(")?.[0]?.trim() || ""; // 取中文部分，如 "家庭清洁用品"
+      // 优先用CSV中的分类路径（如 "商用、工业与科技/职业安全用品"），再用AI分析的分类
+      const categorySearch = categoryCn || aiCategory || productName;
+      console.error(`[auto-pricing] Category search: CSV="${categoryCn}" AI="${aiCategory}" → using "${categorySearch}"`);
+
+      currentProgress.step = "提交核价...";
+      console.error(`[auto-pricing] Submitting pricing with ${orderedImageUrls.length} images...`);
+      const createResult = await createProductViaAPI({
+        title: finalTitle,
+        imageUrls: orderedImageUrls,
+        price: priceCNY,
+        categorySearch,
+        keepOpen: false,
+        config: params.config,
+      });
+
+      results.push({
+        index: i,
+        name: productName.slice(0, 40),
+        ...createResult,
+      });
+      console.error(`[auto-pricing] ${createResult.success ? "SUCCESS productId=" + createResult.productId : "FAIL: " + createResult.message}`);
+
+      // 清理临时文件
+      for (const f of Object.values(localImages)) {
+        try { fs.unlinkSync(f); } catch {}
+      }
+      try { fs.unlinkSync(sourceImagePath); } catch {}
+
+    } catch (e) {
+      results.push({ index: i, name: productName.slice(0, 40), success: false, message: e.message });
+      console.error(`[auto-pricing] ERROR: ${e.message}`);
+    }
+
+    // 间隔控制
+    if (itemNum < total) {
+      const waitMin = intervalMin + Math.random() * (intervalMax - intervalMin);
+      console.error(`[auto-pricing] Progress: ${itemNum}/${total} (${results.filter(r => r.success).length} ok). Next in ${waitMin.toFixed(1)}min...`);
+      await new Promise(r => setTimeout(r, waitMin * 60000));
+    }
+  }
+
+  const successCount = results.filter(r => r.success).length;
+  const failedItems = results.filter(r => !r.success);
+  console.error(`\n[auto-pricing] DONE: ${successCount}/${results.length} succeeded`);
+
+  // 保存结果
+  const debugDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
+  fs.mkdirSync(debugDir, { recursive: true });
+  const resultFile = path.join(debugDir, `auto_pricing_result_${Date.now()}.json`);
+  fs.writeFileSync(resultFile, JSON.stringify({ total: results.length, successCount, failCount: failedItems.length, results }, null, 2));
+
+  // 重置进度
+  currentProgress = { running: false, total: results.length, completed: results.length, current: "完成", step: "完成", results };
+  return { success: true, total: results.length, successCount, failCount: failedItems.length, results, resultFile };
+}
+
+// ============================================================
+// 核价配置 — 可通过 params.config 覆盖
+// ============================================================
+const PRICING_CONFIG = {
+  retailPriceMultiplier: 1,        // 建议零售价 = 申报价 × N（默认1:1）
+  defaultWeight: 50000,            // 默认重量 (mg)，50g
+  defaultDimensions: { len: 80, width: 70, height: 60 },  // 默认尺寸 (mm)
+  defaultRegion: { countryShortName: "CN", region2Id: 43000000000031 }, // 浙江
+  currency: "CNY",
+  createEndpoint: "/visage-agent-seller/product/add",
+  draftEndpoint: "/visage-agent-seller/product/draft/add",
+  categoryTemplateEndpoint: "/anniston-agent-seller/category/template/query",
+  specQueryEndpoint: "/anniston-agent-seller/sku/spec/byName/queryOrAdd",
+  specParentEndpoint: "/anniston-agent-seller/sku/spec/parent/list",
+  // 通用默认属性（当分类模板无法获取时使用）
+  defaultProperties: [
+    { valueUnit: "", propValue: "其它塑料制", propName: "主体材质", refPid: 1920, vid: 63161, numberInputValue: "", controlType: 1, pid: 1, templatePid: 962980, valueExtendInfo: "" },
+    { valueUnit: "", propValue: "详见商品详情", propName: "适用车型", refPid: 1941, vid: 118290, numberInputValue: "", controlType: 1, pid: 1459, templatePid: 1249501, valueExtendInfo: "" },
+  ],
+  // 默认规格（风格 A）
+  defaultSpec: { parentSpecId: 18012, parentSpecName: "风格", specId: 20640, specName: "A" },
+};
+
+/**
+ * 查询分类的属性模板，用 AI 智能分析填充属性值
+ */
+async function getCategoryProperties(page, leafCatId, productTitle) {
+  const result = await temuXHR(page, PRICING_CONFIG.categoryTemplateEndpoint, { catId: leafCatId }, { maxRetries: 2 });
+  if (!result.success || !result.data) return null;
+
+  const props = result.data.properties
+    || result.data.productPropertyTemplateList
+    || result.data.propertyList
+    || result.data.templatePropertyList
+    || [];
+
+  if (props.length === 0) {
+    const debugDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
+    fs.mkdirSync(debugDir, { recursive: true });
+    const debugFile = path.join(debugDir, `template_response_${leafCatId}_${Date.now()}.json`);
+    fs.writeFileSync(debugFile, JSON.stringify(result.data, null, 2));
+    console.error(`[getCategoryProperties] No properties found. Debug: ${debugFile}`);
+    return null;
+  }
+
+  console.error(`[getCategoryProperties] Template has ${props.length} properties for catId=${leafCatId}`);
+
+  // 构建属性列表供 AI 分析
+  const propsForAI = [];
+  const propsMap = new Map(); // propName → { prop, values }
+
+  for (const p of props) {
+    const propName = p.name || p.propertyName || p.propName || "";
+    const propValues = p.values || p.propertyValueList || p.valueList || [];
+    const isRequired = p.required === true || p.required === 1 || p.isRequired === true || p.isRequired === 1;
+    if (!propValues || propValues.length === 0) continue;
+    // 只分析必填属性
+    if (!isRequired) continue;
+
+    const valueTexts = propValues.map(v => v.value || v.propValue || "").filter(Boolean);
+    propsForAI.push({ name: propName, required: isRequired, values: valueTexts.slice(0, 30) });
+    propsMap.set(propName, { prop: p, values: propValues });
+  }
+
+  if (propsForAI.length === 0) return null;
+
+  // 调用 AI 分析属性
+  let aiDecisions = null;
+  try {
+    const prompt = `你是一个电商商品属性填写专家。
+
+商品标题: "${productTitle}"
+
+以下是该分类的属性列表，每个属性有可选值。请判断哪些属性与该商品相关，并选择最合适的值。
+
+属性列表:
+${propsForAI.map((p, i) => `${i + 1}. ${p.name}${p.required ? '(必填)' : '(选填)'}: [${p.values.join(', ')}]`).join('\n')}
+
+规则:
+1. 只填与该商品确实相关的属性
+2. 不相关的属性标记为 "skip"（例如垃圾袋不需要填"木材类型"）
+3. 优先选择"其他"、"其它"等安全值，除非商品明确属于某个具体选项
+4. 必填属性尽量填，但如果确实不相关也可以 skip
+
+请用 JSON 数组格式回复，每项格式: {"name": "属性名", "value": "选择的值"} 或 {"name": "属性名", "value": "skip"}
+只返回 JSON 数组，不要其他文字。`;
+
+    console.error(`[getCategoryProperties] Calling AI to analyze ${propsForAI.length} required properties...`);
+
+    // 调用 AI API（从顶部常量读取配置）
+    if (!AI_API_KEY) {
+      console.error(`[getCategoryProperties] AI_API_KEY not configured, using safe defaults`);
+      throw new Error("skip_ai");
+    }
+
+    const aiResp = await fetch(`${AI_BASE_URL}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${AI_API_KEY}` },
+      body: JSON.stringify({
+        model: AI_MODEL,
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.1,
+      }),
     });
-  }, searchTerm);
-  return result;
+
+    if (aiResp.ok) {
+      const aiData = await aiResp.json();
+      const content = aiData.choices?.[0]?.message?.content || "";
+      console.error(`[getCategoryProperties] AI raw response: ${content.slice(0, 300)}`);
+      const jsonMatch = content.match(/\[[\s\S]*\]/);
+      if (jsonMatch) {
+        aiDecisions = JSON.parse(jsonMatch[0]);
+        console.error(`[getCategoryProperties] AI returned ${aiDecisions.length} decisions`);
+      }
+    } else {
+      console.error(`[getCategoryProperties] AI API error: ${aiResp.status} ${await aiResp.text().catch(() => '')}`);
+    }
+  } catch (e) {
+    console.error(`[getCategoryProperties] AI analysis failed: ${e.message}, falling back to safe defaults`);
+  }
+
+  // 安全值优先级（AI 失败时的 fallback）
+  const safeValuePriority = [
+    /^其[他它]$/,
+    /其[他它]/,
+    /不适用|N\/A/,
+    /^无$|^无\s/,
+    /通用/,
+    /详见/,
+    /不含|不需要|不涉及/,
+    /混合|混纺|复合/,
+  ];
+
+  const output = [];
+
+  for (const p of props) {
+    const propName = p.name || p.propertyName || p.propName || "";
+    const propValues = p.values || p.propertyValueList || p.valueList || [];
+    const isRequired = p.required === true || p.required === 1 || p.isRequired === true || p.isRequired === 1;
+    const propPid = p.pid || p.propertyId || 0;
+    const propRefPid = p.refPid || p.refPropertyId || 0;
+    const propTemplatePid = p.templatePid || p.templatePropertyId || 0;
+
+    if (!propValues || propValues.length === 0) continue;
+
+    let selectedVal = null;
+
+    if (aiDecisions) {
+      // AI 模式：按 AI 建议选值
+      const decision = aiDecisions.find(d => d.name === propName);
+      if (decision) {
+        if (decision.value === "skip") {
+          console.error(`[getCategoryProperties] AI skip: "${propName}"`);
+          continue;
+        }
+        // 在可选值中找 AI 推荐的值
+        selectedVal = propValues.find(v => (v.value || v.propValue || "") === decision.value);
+        if (!selectedVal) {
+          // 模糊匹配
+          selectedVal = propValues.find(v => (v.value || v.propValue || "").includes(decision.value) || decision.value.includes(v.value || v.propValue || ""));
+        }
+        if (selectedVal) {
+          console.error(`[getCategoryProperties] AI select: "${propName}" = "${decision.value}"`);
+        }
+      } else {
+        // AI 没提到的属性：必填用安全值，选填跳过
+        if (!isRequired) continue;
+      }
+    }
+
+    // Fallback：没有 AI 决策或 AI 没匹配到值时
+    if (!selectedVal) {
+      if (!isRequired) continue; // 非必填跳过
+      // 必填：用安全值
+      for (const pattern of safeValuePriority) {
+        selectedVal = propValues.find(v => pattern.test(v.value || v.propValue || ""));
+        if (selectedVal) break;
+      }
+      if (!selectedVal) {
+        selectedVal = propValues[0];
+        console.error(`[getCategoryProperties] Fallback first value: "${propName}" = "${selectedVal?.value || selectedVal?.propValue}"`);
+      }
+    }
+
+    const valText = selectedVal.value || selectedVal.propValue || "";
+    const valVid = selectedVal.vid || selectedVal.valueId || 0;
+    if (valVid <= 0) continue;
+
+    output.push({
+      valueUnit: (Array.isArray(p.valueUnit) ? p.valueUnit[0] : p.valueUnit) || "",
+      propValue: valText,
+      propName: propName,
+      refPid: propRefPid,
+      vid: valVid,
+      numberInputValue: "",
+      controlType: p.propertyValueType === 0 ? 1 : (p.controlType || 0),
+      pid: propPid,
+      templatePid: propTemplatePid,
+      valueExtendInfo: "",
+    });
+  }
+
+  // 后处理：检查父子关系冲突
+  // 如果电源方式=不带电/无，则移除工作电压、插头规格、电池相关等子属性
+  const powerProp = output.find(p => p.propName === "电源方式");
+  if (powerProp && /不带电|无|不需要/.test(powerProp.propValue)) {
+    const electricChildProps = ["工作电压", "插头规格", "额定功率", "电压", "功率", "瓦数", "电池数量", "电池类型", "电池容量", "充电时间", "充电方式"];
+    for (let i = output.length - 1; i >= 0; i--) {
+      if (electricChildProps.some(n => output[i].propName.includes(n))) {
+        console.error(`[getCategoryProperties] Remove child prop "${output[i].propName}" (parent 电源方式=不带电)`);
+        output.splice(i, 1);
+      }
+    }
+  }
+
+  // 电池数量=无电池/不含电池 → 直接移除（无意义且可能缺少父属性）
+  for (let i = output.length - 1; i >= 0; i--) {
+    if (output[i].propName === "电池数量" && /无电池|不含|不需要|^无$/.test(output[i].propValue)) {
+      console.error(`[getCategoryProperties] Remove "电池数量" = "${output[i].propValue}" (无电池无需提交)`);
+      output.splice(i, 1);
+    }
+  }
+
+  // 通用电池子属性兜底：如果有电池相关子属性但没有对应父属性，移除子属性
+  const batteryChildNames = ["电池数量", "电池类型", "电池容量", "充电时间", "充电方式"];
+  const hasBatteryParent = output.some(p => p.propName === "电源方式" || p.propName === "是否含电池");
+  if (!hasBatteryParent) {
+    for (let i = output.length - 1; i >= 0; i--) {
+      if (batteryChildNames.some(n => output[i].propName.includes(n))) {
+        console.error(`[getCategoryProperties] Remove orphan battery prop "${output[i].propName}" (no parent 电源方式/是否含电池)`);
+        output.splice(i, 1);
+      }
+    }
+  }
+
+  // 如果主体材质不是皮革/木材相关，移除真皮种类/木材类型/木种
+  const materialProp = output.find(p => ["主体材质", "材料", "材质"].includes(p.propName));
+  if (materialProp && !/皮革|真皮|牛皮|羊皮|猪皮/.test(materialProp.propValue)) {
+    for (let i = output.length - 1; i >= 0; i--) {
+      if (["真皮种类"].includes(output[i].propName)) {
+        console.error(`[getCategoryProperties] Remove "${output[i].propName}" (材质非皮革)`);
+        output.splice(i, 1);
+      }
+    }
+  }
+  if (materialProp && !/木|竹|藤/.test(materialProp.propValue)) {
+    for (let i = output.length - 1; i >= 0; i--) {
+      if (["木材类型", "木种"].includes(output[i].propName)) {
+        console.error(`[getCategoryProperties] Remove "${output[i].propName}" (材质非木材)`);
+        output.splice(i, 1);
+      }
+    }
+  }
+
+  console.error(`[getCategoryProperties] Final ${output.length} properties: ${output.map(p => `${p.propName}=${p.propValue}`).join(", ")}`);
+  return output;
+}
+
+/**
+ * 查询分类的规格信息（颜色/风格/尺寸等）
+ */
+async function getCategorySpec(page, leafCatId) {
+  const result = await temuXHR(page, PRICING_CONFIG.specParentEndpoint, { catId: leafCatId }, { maxRetries: 1 });
+  if (result.success && result.data?.parentSpecVOList?.length > 0) {
+    const spec = result.data.parentSpecVOList[0]; // 取第一个规格维度
+    return { parentSpecId: spec.parentSpecId, parentSpecName: spec.parentSpecName };
+  }
+  return null;
+}
+
+/**
+ * AI 自修复：分析提交错误并返回修复指令
+ */
+async function aiSelfRepair(errorMsg, errorCode, payload, params) {
+  if (!AI_API_KEY) { console.error("[selfRepair] AI_API_KEY not configured"); return null; }
+
+  const propsInfo = (payload.productPropertyReqs || []).map(p => `${p.propName}=${p.propValue}`).join(", ");
+  const catInfo = Object.entries(payload).filter(([k, v]) => k.startsWith("cat") && k.endsWith("Id") && v > 0).map(([k, v]) => `${k}=${v}`).join(", ");
+
+  const prompt = `你是 Temu 卖家后台商品上架错误修复专家。分析以下错误并给出修复指令。
+
+商品标题: "${params.title || ""}"
+提交的类目: ${catInfo}
+提交的属性: ${propsInfo}
+错误码: ${errorCode}
+错误信息: "${errorMsg}"
+
+常见错误模式和修复方法:
+1. "属性[X]校验错误:属性值:Y不满足父子关系" → 移除属性X（父属性不匹配时子属性应被删除）
+2. "属性[X]校验错误:缺少父属性值" → 移除属性X（缺少父属性时子属性不应提交）
+3. "货品类目属性更新" → 重新获取属性模板（retry_template）
+4. "不能为空" → 重新获取属性模板
+5. "Category is illegal" → 重新搜索类目（retry_category）
+6. "Outer packaging information is incomplete" → 补全包装信息（fix_packaging）
+
+请返回JSON（不要其他文字）:
+{
+  "analysis": "一句话分析错误原因",
+  "actions": [
+    {"type": "remove_prop", "propName": "属性名"},
+    {"type": "retry_template"},
+    {"type": "retry_category"},
+    {"type": "fix_packaging"},
+    {"type": "give_up", "reason": "原因"}
+  ]
+}
+只返回需要的action，不要返回所有类型。`;
+
+  try {
+    const resp = await fetch(`${AI_BASE_URL}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${AI_API_KEY}` },
+      body: JSON.stringify({ model: AI_MODEL, messages: [{ role: "user", content: prompt }], temperature: 0.1 }),
+    });
+
+    if (!resp.ok) {
+      console.error(`[selfRepair] AI API error: ${resp.status}`);
+      return null;
+    }
+
+    const data = await resp.json();
+    const content = data.choices?.[0]?.message?.content || "";
+    console.error(`[selfRepair] AI response: ${content.slice(0, 300)}`);
+
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      console.error(`[selfRepair] Analysis: ${parsed.analysis}`);
+      console.error(`[selfRepair] Actions: ${JSON.stringify(parsed.actions)}`);
+      return parsed;
+    }
+  } catch (e) {
+    console.error(`[selfRepair] AI call failed: ${e.message}`);
+  }
+  return null;
+}
+
+/**
+ * 规则兜底修复（AI 失败时的 fallback）
+ */
+function ruleBasedRepair(errorMsg) {
+  const actions = [];
+
+  // 属性校验错误：提取属性名并移除
+  const attrMatch = errorMsg.match(/属性\[(.+?)\]/);
+  if (attrMatch) {
+    actions.push({ type: "remove_prop", propName: attrMatch[1] });
+    return actions;
+  }
+
+  // 类目属性更新 → 重新获取模板
+  if (errorMsg.includes("货品类目属性更新")) {
+    actions.push({ type: "retry_template" });
+    return actions;
+  }
+
+  // 类目非法 → 重新搜索
+  if (errorMsg.includes("Category is illegal")) {
+    actions.push({ type: "retry_category" });
+    return actions;
+  }
+
+  // 包装不完整 → 补全
+  if (errorMsg.includes("Outer packaging") || errorMsg.includes("packaging information")) {
+    actions.push({ type: "fix_packaging" });
+    return actions;
+  }
+
+  // 不能为空 → 重新获取模板
+  if (errorMsg.includes("不能为空")) {
+    actions.push({ type: "retry_template" });
+    return actions;
+  }
+
+  return actions;
 }
 
 async function createProductViaAPI(params) {
   console.error("[api-create] Starting API-based product creation...");
+  const config = { ...PRICING_CONFIG, ...params.config };
 
-  // Step 1: 打开一个 Temu 页面获取认证上下文
+  // Step 1: 打开 Temu 页面获取认证上下文
   const page = await context.newPage();
   try {
     await navigateToSellerCentral(page, "/goods/list");
-    await randomDelay(5000, 8000);
+    await randomDelay(2000, 3000);
     await saveCookies();
 
-    // Step 2: AI 生成图片（如果需要）
-    let imageUrls = params.imageUrls || []; // 已有的 kwcdn URLs
+    // Step 2: 准备图片（至少 5 张）
+    let imageUrls = params.imageUrls || [];
     if (params.generateAI && params.sourceImage) {
       console.error("[api-create] Generating AI images...");
-      const aiResult = await generateAIImages(
-        params.sourceImage,
-        params.title,
-        params.aiImageTypes || ["hero", "lifestyle", "closeup", "infographic", "size_chart"]
-      );
-      const aiImages = aiResult.images || aiResult || [];
-      console.error(`[api-create] AI generated ${aiImages.length} images`);
+      try {
+        const aiResult = await generateAIImages(
+          params.sourceImage,
+          params.title,
+          params.aiImageTypes || ["hero", "lifestyle", "closeup", "infographic", "size_chart"]
+        );
+        const aiImages = aiResult.images || aiResult || [];
+        console.error(`[api-create] AI generated ${aiImages.length} images`);
 
-      // Step 3: 上传图片到素材中心获取 kwcdn URLs
-      if (aiImages.length > 0) {
-        console.error("[api-create] Uploading images to material center...");
-        for (const imgPath of aiImages) {
-          const uploadResult = await uploadImageToMaterial(page, imgPath);
-          if (uploadResult.success && uploadResult.url?.includes("http")) {
-            imageUrls.push(uploadResult.url);
-            console.error(`[api-create] Uploaded: ${uploadResult.url.slice(0, 60)}`);
-          } else {
-            console.error(`[api-create] Upload failed: ${uploadResult.error || uploadResult.url}`);
+        // 并发上传图片（3个一批）
+        for (let i = 0; i < aiImages.length; i += 3) {
+          const batch = aiImages.slice(i, i + 3);
+          const results = await Promise.allSettled(
+            batch.map(imgPath => uploadImageToMaterial(page, imgPath))
+          );
+          for (const r of results) {
+            if (r.status === "fulfilled" && r.value.success && r.value.url) {
+              imageUrls.push(r.value.url);
+            }
+          }
+        }
+      } catch (e) {
+        console.error(`[api-create] AI image generation failed: ${e.message}`);
+      }
+    }
+
+    if (imageUrls.length === 0) {
+      return { success: false, message: "没有可用的商品图片", step: "images" };
+    }
+    if (imageUrls.length < 5) {
+      console.error(`[api-create] Warning: only ${imageUrls.length} images (need 5+). Duplicating...`);
+      while (imageUrls.length < 5) {
+        imageUrls.push(imageUrls[imageUrls.length % imageUrls.length]);
+      }
+    }
+
+    // Step 3: 搜索分类 — 刷新页面确保 anti-content 有效
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForTimeout(2000);
+    console.error(`[api-create] Page refreshed before category search`);
+
+    let catIds = params.catIds;
+    let leafCatId = params.leafCatId;
+    if (!catIds) {
+      // 后台分类路径搜索 + 逐级 fallback
+      const searchTerms = [];
+      if (params.categorySearch) {
+        searchTerms.push(params.categorySearch);
+        // fallback: 逐级从最后一级往上搜
+        const parts = params.categorySearch.split("/").map(s => s.trim()).filter(Boolean);
+        for (let i = parts.length - 1; i >= 0; i--) {
+          if (!searchTerms.includes(parts[i])) searchTerms.push(parts[i]);
+        }
+      }
+      if (params.title && !searchTerms.includes(params.title)) searchTerms.push(params.title);
+      if (searchTerms.length === 0) searchTerms.push("通用商品");
+
+      // 辅助函数：从 queryCatHints 响应中提取 catIds
+      function extractCatIdsFromHints(hintsResult, categoryPath) {
+        const hints = Array.isArray(hintsResult.data)
+          ? hintsResult.data
+          : (hintsResult.data?.list || hintsResult.data?.catHints || hintsResult.data?.categoryList || []);
+        console.error(`[api-create] queryCatHints response keys: ${hintsResult.data ? Object.keys(hintsResult.data).join(",") : "null"}, hints count: ${hints.length}`);
+        if (hints.length === 0) return null;
+
+        // 智能匹配：从多个结果中找路径最匹配的
+        let hint = hints[0];
+        if (hints.length > 1 && categoryPath) {
+          const pathParts = categoryPath.split(/[/>]/).map(s => s.trim()).filter(Boolean);
+          let bestScore = -1;
+          for (const h of hints) {
+            // 构建完整路径
+            const hPath = [];
+            for (let j = 1; j <= 10; j++) {
+              const catName = h[`cat${j}`]?.catName || "";
+              if (catName) hPath.push(catName);
+            }
+            const fullPath = hPath.join(">");
+            // 计算匹配分数
+            let score = 0;
+            for (const part of pathParts) {
+              if (fullPath.includes(part)) score += 2;
+              // 部分匹配
+              for (const hp of hPath) {
+                if (hp.includes(part.substring(0, 2)) || part.includes(hp.substring(0, 2))) score += 0.5;
+              }
+            }
+            console.error(`[api-create] hint candidate: ${fullPath} score=${score}`);
+            if (score > bestScore) { bestScore = score; hint = h; }
+          }
+          console.error(`[api-create] Best match score: ${bestScore}`);
+        }
+        console.error(`[api-create] hint[0] keys: ${Object.keys(hint).join(",")}, sample: ${JSON.stringify(hint).slice(0, 300)}`);
+        const ids = {};
+        for (let i = 1; i <= 10; i++) {
+          // Support both flat (hint.cat1Id) and nested (hint.cat1.catId) formats
+          ids[`cat${i}Id`] = hint[`cat${i}Id`] || (hint[`cat${i}`] && hint[`cat${i}`].catId) || 0;
+        }
+        let leaf = null;
+        for (let i = 10; i >= 1; i--) {
+          if (ids[`cat${i}Id`] > 0) { leaf = ids[`cat${i}Id`]; break; }
+        }
+        // If all catIds are 0, try alternative field names
+        if (!leaf) {
+          // Try catIdList array format
+          if (hint.catIdList && Array.isArray(hint.catIdList)) {
+            hint.catIdList.forEach((id, idx) => { if (id > 0) ids[`cat${idx+1}Id`] = id; });
+            for (let i = 10; i >= 1; i--) { if (ids[`cat${i}Id`] > 0) { leaf = ids[`cat${i}Id`]; break; } }
+          }
+          // Try leafCatId directly
+          if (!leaf && hint.leafCatId) { leaf = hint.leafCatId; ids.cat3Id = hint.leafCatId; }
+          if (!leaf && hint.catId) { leaf = hint.catId; ids.cat3Id = hint.catId; }
+          console.error(`[api-create] Alternative extraction: leaf=${leaf}`);
+        }
+        if (!leaf) return null; // Don't return all-zero catIds
+        const hintPath = hint.catPath || hint._path || Object.keys(ids).filter(k => ids[k] > 0).map(k => `${k}=${ids[k]}`).join(",");
+        return { catIds: ids, leafCatId: leaf, path: hintPath };
+      }
+
+      // 方法1: 分类树遍历（主方法）— 用后台分类路径精确匹配
+      {
+        for (const term of searchTerms) {
+          if (catIds) break;
+          console.error(`[api-create] Fallback searchCategoryAPI: "${term.slice(0, 50)}"`);
+          const catResult = await searchCategoryAPI(page, term);
+          if (catResult?.list?.[0]) {
+            const cat = catResult.list[0];
+            catIds = {};
+            for (let i = 1; i <= 10; i++) {
+              catIds[`cat${i}Id`] = cat[`cat${i}Id`] || 0;
+            }
+            for (let i = 10; i >= 1; i--) {
+              if (catIds[`cat${i}Id`] > 0) { leafCatId = catIds[`cat${i}Id`]; break; }
+            }
+            console.error(`[api-create] Category: ${cat._path || JSON.stringify(catIds)}, leaf=${leafCatId}`);
           }
         }
       }
     }
 
-    if (imageUrls.length === 0) {
-      return { success: false, message: "没有可用的商品图片" };
-    }
-
-    // Step 4: 搜索分类获取 catId
-    let catIds = params.catIds; // 用户直接提供分类ID
-    if (!catIds) {
-      console.error(`[api-create] Searching category for: ${params.title?.slice(0, 30)}`);
-      const catResult = await searchCategoryAPI(page, params.title || params.categorySearch);
-      if (catResult?.list?.[0] || catResult?.[0]) {
-        const cat = catResult.list?.[0] || catResult[0];
-        catIds = {
-          cat1Id: cat.cat1Id || 0, cat2Id: cat.cat2Id || 0, cat3Id: cat.cat3Id || 0,
-          cat4Id: cat.cat4Id || 0, cat5Id: cat.cat5Id || 0,
-        };
-        console.error(`[api-create] Category: ${JSON.stringify(catIds)}`);
+    if (!catIds || !leafCatId) {
+      // Final check: all catIds zero means search failed
+      const allZero = catIds && Object.values(catIds).every(v => v === 0);
+      if (!catIds || allZero || !leafCatId) {
+        return { success: false, message: `分类搜索失败: "${params.categorySearch || params.title}"`, step: "category" };
       }
     }
 
-    if (!catIds) {
-      return { success: false, message: "分类搜索失败" };
+    // 确保 leafCatId 不为 undefined
+    if (!leafCatId) {
+      for (let i = 10; i >= 1; i--) {
+        if (catIds[`cat${i}Id`] > 0) { leafCatId = catIds[`cat${i}Id`]; break; }
+      }
+      console.error(`[api-create] Re-extracted leafCatId=${leafCatId} from catIds`);
     }
 
-    // Step 5: 构造创建商品 payload
-    const price = Math.round((params.price || 9.99) * 100); // 转为分
-    const retailPrice = Math.round(price * 4); // 建议零售价 = 申报价 × 4
+    // Step 4: 获取分类属性和规格
+    let properties = params.properties;
+    if (!properties) {
+      if (leafCatId) {
+        console.error(`[api-create] Fetching category template for leaf=${leafCatId}...`);
+        properties = await getCategoryProperties(page, leafCatId, params.title || "");
+        if (properties) {
+          console.error(`[api-create] Got ${properties.length} properties from template`);
+        }
+      }
+      if (!properties || properties.length === 0) {
+        properties = config.defaultProperties;
+        console.error(`[api-create] Using default properties (${properties.length})`);
+      }
+    }
+
+    // 获取规格信息
+    let specInfo = config.defaultSpec;
+    if (leafCatId) {
+      const catSpec = await getCategorySpec(page, leafCatId);
+      if (catSpec) {
+        specInfo = { ...specInfo, ...catSpec };
+        console.error(`[api-create] Spec: ${specInfo.parentSpecName} (${specInfo.parentSpecId})`);
+      }
+    }
+
+    // 查询/创建规格值 - 26个字母随机
     const randomLetter = String.fromCharCode(65 + Math.floor(Math.random() * 26));
+    const specName = params.specName || randomLetter;
+    const specResult = await temuXHR(page, config.specQueryEndpoint, { parentSpecId: specInfo.parentSpecId, specName }, { maxRetries: 1 });
+    if (specResult.success) {
+      specInfo.specId = specResult.data.specId;
+      specInfo.specName = specName;
+    }
+
+    // Step 5: 构造 payload（基于真实抓包结构）
+    const priceInCents = Math.round((params.price || 9.99) * 100 * 2);  // 申报价 ×2
+    const retailPrice = Math.round(priceInCents * config.retailPriceMultiplier);
 
     const payload = {
       ...catIds,
-      cat6Id: 0, cat7Id: 0, cat8Id: 0, cat9Id: 0, cat10Id: 0,
-      productName: params.title || "商品",
-      carouselImageUrls: imageUrls.slice(0, 10),
-      carouselImageI18nReqs: [],
-      materialImgUrl: imageUrls[0],
       materialMultiLanguages: [],
-      personalizationSwitch: 0,
-      productCarouseVideoReqList: [],
-      productDetailVideoReqList: [],
-      goodsAdvantageLabelTypes: [],
-      goodsLayerDecorationReqs: [],
-      goodsLayerDecorationCustomizeI18nReqs: [],
-      goodsModelReqs: [],
-      sizeTemplateIds: [],
-      showSizeTemplateIds: [],
-      productPropertyReqs: params.properties || [],
-      productWhExtAttrReq: {
-        outerGoodsUrl: "",
-        productOrigin: {
-          countryShortName: "CN",
-          region2Id: 43000000000031, // 浙江省
-        },
-      },
-      productComplianceStatementReq: { protocolVersion: "V1" },
-      productSpecPropertyReqs: [{
-        parentSpecId: 1001, parentSpecName: "颜色",
-        specId: 18112, specName: randomLetter,
-        vid: 0, specLangSimpleList: [], refPid: 0, pid: 0, templatePid: 0,
-        propName: "颜色", propValue: randomLetter,
-        valueUnit: "", valueGroupId: 0, valueGroupName: "", valueExtendInfo: "",
-      }],
+      productName: params.title || "商品",
+      productPropertyReqs: properties,
       productSkcReqs: [{
         previewImgUrls: [imageUrls[0]],
         productSkcCarouselImageI18nReqs: [],
@@ -5186,26 +6098,28 @@ async function createProductViaAPI(params) {
           thumbUrl: imageUrls[0],
           productSkuThumbUrlI18nReqs: [],
           extCode: "",
-          supplierPrice: price,
-          currencyType: "CNY",
+          supplierPrice: priceInCents,
+          currencyType: config.currency,
           productSkuSpecReqs: [{
-            parentSpecId: 1001, parentSpecName: "颜色",
-            specId: 18112, specName: randomLetter,
+            parentSpecId: specInfo.parentSpecId,
+            parentSpecName: specInfo.parentSpecName,
+            specId: specInfo.specId,
+            specName: specInfo.specName,
             specLangSimpleList: [],
           }],
           productSkuId: 0,
-          productSkuSuggestedPriceReq: { suggestedPrice: retailPrice, suggestedPriceCurrencyType: "CNY" },
+          productSkuSuggestedPriceReq: { suggestedPrice: retailPrice, suggestedPriceCurrencyType: config.currency },
           productSkuUsSuggestedPriceReq: {},
           productSkuWhExtAttrReq: {
-            productSkuVolumeReq: { len: 80, width: 70, height: 60 },
-            productSkuWeightReq: { value: 50000 }, // 50g = 50000mg
+            productSkuVolumeReq: params.dimensions || config.defaultDimensions,
+            productSkuWeightReq: { value: params.weight || config.defaultWeight },
             productSkuBarCodeReqs: [],
             productSkuSensitiveAttrReq: { isSensitive: 0, sensitiveList: [] },
             productSkuSensitiveLimitReq: {},
           },
           productSkuMultiPackReq: {
             skuClassification: 1, numberOfPieces: 1, pieceUnitCode: 1,
-            productSkuNetContentReq: { netContentNumber: 8000, netContentUnitCode: 1 },
+            productSkuNetContentReq: {},
             totalNetContent: {},
           },
           productSkuAccessoriesReq: { productSkuAccessories: [] },
@@ -5214,41 +6128,238 @@ async function createProductViaAPI(params) {
         productSkcId: 0,
         isBasePlate: 0,
       }],
-      productOuterPackageImageReqs: [],
+      productSpecPropertyReqs: [{
+        parentSpecId: specInfo.parentSpecId, parentSpecName: specInfo.parentSpecName,
+        specId: specInfo.specId, specName: specInfo.specName,
+        vid: 0, specLangSimpleList: [], refPid: 0, pid: 0, templatePid: 0,
+        propName: specInfo.parentSpecName, propValue: specInfo.specName,
+        valueUnit: "", valueGroupId: 0, valueGroupName: "", valueExtendInfo: "",
+      }],
+      carouselImageUrls: imageUrls.slice(0, 10),
+      carouselImageI18nReqs: [],
+      materialImgUrl: imageUrls[0],
+      goodsLayerDecorationReqs: [],
+      goodsLayerDecorationCustomizeI18nReqs: [],
+      sizeTemplateIds: [],
+      showSizeTemplateIds: [],
+      goodsModelReqs: [],
+      productWhExtAttrReq: {
+        outerGoodsUrl: params.outerGoodsUrl || "",
+        productOrigin: params.productOrigin || config.defaultRegion,
+      },
+      productCarouseVideoReqList: [],
+      goodsAdvantageLabelTypes: [],
+      productDetailVideoReqList: [],
+      productOuterPackageImageReqs: params.outerPackageImages || [
+        { imageUrl: "https://pfs.file.temu.com/product-material-private-tag/211a2a4a582/cb2fce63-cb55-4ea4-a43d-2754fcdd7c19_300x225.jpeg" },
+        { imageUrl: "https://pfs.file.temu.com/product-material-private-tag/211a2a4a582/ee94a810-071b-41ab-8079-55c0d394da78_300x225.jpeg" },
+        { imageUrl: "https://pfs.file.temu.com/product-material-private-tag/211a2a4a582/a8a2ebbd-e72d-4a33-bbee-703112dad786_300x225.jpeg" },
+      ],
+      productOuterPackageReq: params.outerPackageReq || { packageShape: 1, packageType: 0 },
+      sensitiveTransNormalFileReqs: [],
+      productGuideFileNewReqList: [],
+      productGuideFileI18nReqs: [],
+      productSaleExtAttrReq: {},
+      productNonAuditExtAttrReq: { california65WarningInfoReq: {}, cosmeticInfoReq: {} },
+      personalizationSwitch: 0,
+      productComplianceStatementReq: {
+        protocolVersion: "V2.0",
+        protocolUrl: "https://dl.kwcdn.com/seller-public-file-us-tag/2079f603b6/56888d17d8166a6700c9f3e82972e813.html",
+      },
+      productOriginCertFileReqs: [],
     };
 
-    // Step 6: 调用创建商品 API（用 XMLHttpRequest 触发 Temu 签名拦截器）
-    console.error("[api-create] Calling product/add API...");
+    // Step 6: 提交核价
+    console.error(`[api-create] Submitting to ${config.createEndpoint}...`);
+    console.error(`[api-create] Price: ¥${(priceInCents / 100).toFixed(2)}, Retail: ¥${(retailPrice / 100).toFixed(2)}, Images: ${imageUrls.length}, Props: ${properties.length}`);
 
-    // 方法：用 Temu 页面中的 XMLHttpRequest 发请求
-    // Temu 前端会拦截 XHR 并自动添加 anti-content/anti-token headers
-    const createResult = await page.evaluate((body) => {
-      return new Promise((resolve) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open("POST", "/visage-agent-seller/product/add", true);
-        xhr.setRequestHeader("Content-Type", "application/json");
-        xhr.withCredentials = true;
-        xhr.onreadystatechange = function() {
-          if (xhr.readyState === 4) {
-            try {
-              resolve(JSON.parse(xhr.responseText));
-            } catch {
-              resolve({ error: xhr.responseText?.slice(0, 200), status: xhr.status });
-            }
+    let result = await temuXHR(page, config.createEndpoint, payload, { maxRetries: 1 });
+
+    // ============ AI 自修复系统：最多5轮，根据错误类型智能修复 ============
+    for (let attempt = 1; attempt <= 5 && !result.success; attempt++) {
+      const errMsg = result.errorMsg || "";
+      const errCode = result.errorCode || 0;
+
+      // 只处理可修复的错误
+      if (![6000002, 1000001].includes(errCode) && !errMsg.includes("不能为空") && !errMsg.includes("Category") && !errMsg.includes("packaging") && !errMsg.includes("Invalid image")) {
+        console.error(`[selfRepair] Error ${errCode} not repairable, stopping`);
+        break;
+      }
+
+      console.error(`[selfRepair] ===== Attempt ${attempt}/5: error=${errCode} "${errMsg}" =====`);
+
+      // 保存调试信息
+      const debugDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
+      fs.mkdirSync(debugDir, { recursive: true });
+      fs.writeFileSync(path.join(debugDir, `selfrepair_${attempt}_${Date.now()}.json`), JSON.stringify({
+        attempt, errorCode: errCode, errorMsg: errMsg,
+        submittedProps: payload.productPropertyReqs?.map(p => ({ name: p.propName, value: p.propValue })),
+        leafCatId, catIds: Object.fromEntries(Object.entries(catIds).filter(([k,v]) => v > 0)),
+      }, null, 2));
+
+      // 先尝试 AI 分析，失败则用规则兜底
+      let repair = await aiSelfRepair(errMsg, errCode, payload, params);
+      let actions = repair?.actions || [];
+      if (actions.length === 0) {
+        console.error(`[selfRepair] AI returned no actions, falling back to rules`);
+        actions = ruleBasedRepair(errMsg);
+      }
+      if (actions.length === 0) {
+        console.error(`[selfRepair] No repair strategy found, stopping`);
+        break;
+      }
+
+      // 智能升级：如果连续2次 retry_template 都失败（同一错误），自动升级到 retry_category
+      if (attempt >= 2 && errMsg.includes("货品类目属性更新") && actions.every(a => a.type === "retry_template")) {
+        console.error(`[selfRepair] retry_template failed ${attempt} times, upgrading to retry_category`);
+        actions = [{ type: "retry_category" }];
+      }
+
+      // 检查是否放弃
+      const giveUp = actions.find(a => a.type === "give_up");
+      if (giveUp) {
+        console.error(`[selfRepair] AI says give up: ${giveUp.reason}`);
+        break;
+      }
+
+      // 执行修复动作
+      let needResubmit = false;
+      for (const action of actions) {
+        switch (action.type) {
+          case "remove_prop": {
+            const before = payload.productPropertyReqs.length;
+            payload.productPropertyReqs = payload.productPropertyReqs.filter(p => p.propName !== action.propName);
+            const removed = before - payload.productPropertyReqs.length;
+            console.error(`[selfRepair] remove_prop: "${action.propName}" (removed ${removed})`);
+            if (removed > 0) needResubmit = true;
+            break;
           }
-        };
-        xhr.onerror = () => resolve({ error: "XHR error", status: xhr.status });
-        xhr.send(JSON.stringify(body));
-      });
-    }, payload);
+          case "retry_template": {
+            console.error(`[selfRepair] retry_template: refreshing page and re-fetching...`);
+            await page.goto(page.url(), { waitUntil: "domcontentloaded" });
+            await randomDelay(2000, 3500);
+            const newProps = await getCategoryProperties(page, leafCatId, params.title || "");
+            if (newProps && newProps.length > 0) {
+              payload.productPropertyReqs = newProps;
+              console.error(`[selfRepair] Got ${newProps.length} refreshed properties`);
+              needResubmit = true;
+            } else {
+              console.error(`[selfRepair] retry_template failed to get properties`);
+            }
+            break;
+          }
+          case "retry_category": {
+            console.error(`[selfRepair] retry_category: re-searching with different terms...`);
+            await page.goto(page.url(), { waitUntil: "domcontentloaded" });
+            await randomDelay(2000, 3500);
 
-    console.error("[api-create] Result:", JSON.stringify(createResult).slice(0, 200));
+            // 尝试多种搜索词：原标题 → 类目路径中的关键词 → 标题前20字
+            const searchTerms = [];
+            if (params.title) searchTerms.push(params.title);
+            if (params.categorySearch) {
+              const parts = params.categorySearch.split("/").map(s => s.trim()).filter(Boolean);
+              // 从最后一级开始尝试
+              for (let i = parts.length - 1; i >= 0; i--) searchTerms.push(parts[i]);
+            }
+            if (params.title && params.title.length > 20) searchTerms.push(params.title.substring(0, 20));
 
-    if (createResult.success || createResult.errorCode === 1000000) {
-      console.error("[api-create] Product created successfully!");
-      return { success: true, message: "商品创建成功（API方式）", result: createResult };
+            let found = false;
+            for (const term of searchTerms) {
+              if (found) break;
+              console.error(`[selfRepair] Trying category search: "${term.substring(0, 30)}..."`);
+              const catResult = await searchCategoryAPI(page, term);
+              if (catResult?.list?.[0]) {
+                const cat = catResult.list[0];
+                let newLeaf = null;
+                let depth = 0;
+                for (let i = 1; i <= 10; i++) {
+                  const cid = cat[`cat${i}Id`] || 0;
+                  catIds[`cat${i}Id`] = cid;
+                  payload[`cat${i}Id`] = cid;
+                  if (cid > 0) { newLeaf = cid; depth = i; }
+                }
+                // 只接受比当前更深或不同的类目
+                if (newLeaf && (newLeaf !== leafCatId || depth > 3)) {
+                  leafCatId = newLeaf;
+                  console.error(`[selfRepair] New category: leaf=${leafCatId}, depth=${depth}`);
+                  const newProps = await getCategoryProperties(page, leafCatId, params.title || "");
+                  if (newProps && newProps.length > 0) payload.productPropertyReqs = newProps;
+                  needResubmit = true;
+                  found = true;
+                } else {
+                  console.error(`[selfRepair] Same/shallow category (depth=${depth}), trying next term...`);
+                }
+              }
+            }
+            break;
+          }
+          case "fix_packaging": {
+            payload.productOuterPackageReq = { packageShape: 1, packageType: 0 };
+            console.error(`[selfRepair] fix_packaging: set default packaging`);
+            needResubmit = true;
+            break;
+          }
+          default:
+            console.error(`[selfRepair] Unknown action: ${action.type}`);
+        }
+      }
+
+      if (!needResubmit) {
+        console.error(`[selfRepair] No effective repair action, stopping`);
+        break;
+      }
+
+      console.error(`[selfRepair] Re-submitting after repair...`);
+      result = await temuXHR(page, config.createEndpoint, payload, { maxRetries: 1 });
+    }
+
+    if (result.success) {
+      console.error(`[api-create] SUCCESS! productId=${result.data?.productId}`);
+      await saveCookies();
+      return {
+        success: true,
+        message: "商品已创建并提交核价",
+        productId: result.data?.productId,
+        skcId: result.data?.productSkcList?.[0]?.productSkcId,
+        skuId: result.data?.productSkuList?.[0]?.productSkuId,
+        result: result.data,
+      };
     } else {
-      return { success: false, message: createResult.errorMsg || createResult.error || "创建失败", result: createResult };
+      console.error(`[api-create] Failed: ${result.errorCode} - ${result.errorMsg}`);
+
+      // 保存失败的 payload 用于调试
+      const debugDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
+      fs.mkdirSync(debugDir, { recursive: true });
+      const debugFile = path.join(debugDir, `failed_payload_${Date.now()}.json`);
+      fs.writeFileSync(debugFile, JSON.stringify({ params: { title: params.title, price: params.price, categorySearch: params.categorySearch }, payload, response: result.raw }, null, 2));
+      console.error(`[api-create] Debug payload saved to: ${debugFile}`);
+
+      // 尝试保存到 Temu 草稿箱（用 draft/add 接口）
+      let draftSaved = false;
+      try {
+        console.error(`[api-create] Saving to Temu drafts...`);
+        const draftResult = await temuXHR(page, config.draftEndpoint, payload, { maxRetries: 1 });
+        if (draftResult.success) {
+          draftSaved = true;
+          console.error(`[api-create] Saved to Temu drafts! draftId=${draftResult.data?.productId || draftResult.data?.draftId || "unknown"}`);
+        } else {
+          console.error(`[api-create] Temu draft save failed: ${draftResult.errorMsg}`);
+        }
+      } catch (e) {
+        console.error(`[api-create] Temu draft save error: ${e.message}`);
+      }
+
+      return {
+        success: false,
+        message: draftSaved
+          ? "核价失败，已保存到Temu草稿箱"
+          : (result.errorMsg || "核价提交失败"),
+        errorCode: result.errorCode,
+        step: "submit",
+        debugFile,
+        draftSaved,
+        uploadedImageUrls: imageUrls,
+      };
     }
 
   } finally {
@@ -5256,6 +6367,21 @@ async function createProductViaAPI(params) {
   }
 }
 
+/**
+ * 批量 API 核价
+ * @param {Object} params
+ * @param {string} params.csvPath - CSV 文件路径
+ * @param {number} [params.startRow=0] - 起始行号（0-based）
+ * @param {number} [params.count=1] - 处理数量
+ * @param {number} [params.intervalMin=0.5] - 最小间隔（分钟）
+ * @param {number} [params.intervalMax=1] - 最大间隔（分钟）
+ * @param {string[]} [params.defaultImageUrls] - 默认图片 URL 列表（CSV 中无图时使用）
+ * @param {boolean} [params.generateAI=true] - 是否 AI 生成图片
+ * @param {Object} [params.config] - 覆盖 PRICING_CONFIG
+ *
+ * CSV 列：商品名称, 商品原图, 分类（中文）, 美元价格
+ * 也支持：imageUrls（多图，用 | 分隔）, 分类关键词
+ */
 async function batchCreateViaAPI(params) {
   console.error("[batch-api] Starting batch API creation...");
   const csvPath = params.csvPath;
@@ -5268,82 +6394,179 @@ async function batchCreateViaAPI(params) {
   const headers = lines[0];
   const startRow = params.startRow || 0;
   const count = params.count || 1;
+  const intervalMin = params.intervalMin || 0.5;
+  const intervalMax = params.intervalMax || 1;
   const results = [];
 
-  // 解析CSV列
-  const colIndex = (name) => {
-    const cols = headers.split(",");
-    return cols.findIndex(c => c.trim().includes(name));
-  };
-  const nameIdx = colIndex("商品名称");
-  const imageIdx = colIndex("商品原图");
-  const catCnIdx = colIndex("分类（中文）");
-  const priceIdx = colIndex("美元价格");
-
-  for (let i = startRow; i < Math.min(startRow + count, lines.length - 1); i++) {
-    const row = lines[i + 1]; // +1 skip header
-    const cols = [];
-    let c = "", q = false;
-    for (const ch of row) {
-      if (ch === '"') q = !q;
-      else if (ch === ',' && !q) { cols.push(c.trim()); c = ""; }
-      else c += ch;
+  // 解析CSV列（支持多种列名）
+  const colIndex = (names) => {
+    const cols = headers.split(",").map(c => c.trim().replace(/^"|"$/g, ""));
+    for (const name of names) {
+      const idx = cols.findIndex(c => c.includes(name));
+      if (idx >= 0) return idx;
     }
-    cols.push(c.trim());
+    return -1;
+  };
+  const nameIdx = colIndex(["商品名称", "title", "productName", "name"]);
+  const imageIdx = colIndex(["商品原图", "image", "imageUrl", "图片"]);
+  const imagesIdx = colIndex(["imageUrls", "多图", "images"]); // 多图列（用 | 分隔）
+  const catIdx = colIndex(["分类（中文）", "分类关键词", "category", "分类"]);
+  const priceIdx = colIndex(["美元价格", "price", "价格", "USD"]);
+  const priceCnyIdx = colIndex(["人民币价格", "priceCNY", "申报价"]);
 
-    const productName = cols[nameIdx] || "";
-    const imageUrl = cols[imageIdx] || "";
-    const priceUSD = parseFloat(cols[priceIdx]) || 0;
-    const priceCNY = priceUSD > 0 ? priceUSD * 7 : 9.99;
+  console.error(`[batch-api] Columns: name=${nameIdx}, image=${imageIdx}, images=${imagesIdx}, cat=${catIdx}, price=${priceIdx}, priceCNY=${priceCnyIdx}`);
 
-    console.error(`[batch-api] Product ${i + 1}: ${productName.slice(0, 30)} ¥${priceCNY.toFixed(2)}`);
+  function parseCSVLine(line) {
+    const result = [];
+    let current = "", inQuotes = false;
+    for (const ch of line) {
+      if (ch === '"') inQuotes = !inQuotes;
+      else if (ch === ',' && !inQuotes) { result.push(current.trim()); current = ""; }
+      else current += ch;
+    }
+    result.push(current.trim());
+    return result;
+  }
 
-    // 下载竞品主图
-    let localImage = null;
-    if (imageUrl?.startsWith("http")) {
+  const total = Math.min(count, lines.length - 1 - startRow);
+  console.error(`[batch-api] Processing ${total} products (rows ${startRow}-${startRow + total - 1})`);
+
+  for (let i = startRow; i < startRow + total; i++) {
+    const cols = parseCSVLine(lines[i + 1]);
+    const productName = (nameIdx >= 0 ? cols[nameIdx] : "") || "";
+    const categoryCn = (catIdx >= 0 ? cols[catIdx] : "") || "";
+    const priceUSD = priceIdx >= 0 ? parseFloat(cols[priceIdx]) || 0 : 0;
+    const priceCNY = priceCnyIdx >= 0 ? parseFloat(cols[priceCnyIdx]) || 0 : (priceUSD > 0 ? priceUSD * 7 : 9.99);
+
+    // 图片处理：优先多图列，否则单图列，最后用默认图
+    let imageUrls = [];
+    if (imagesIdx >= 0 && cols[imagesIdx]) {
+      imageUrls = cols[imagesIdx].split("|").map(u => u.trim()).filter(Boolean);
+    } else if (imageIdx >= 0 && cols[imageIdx]) {
+      imageUrls = [cols[imageIdx].trim()];
+    }
+
+    // 如果只有 1 张或没有图，尝试用 AI 生成或用默认图补齐
+    if (imageUrls.length === 0 && params.defaultImageUrls?.length > 0) {
+      imageUrls = [...params.defaultImageUrls];
+    }
+
+    const itemNum = i - startRow + 1;
+    console.error(`\n[batch-api] === ${itemNum}/${total}: ${productName.slice(0, 40)} ¥${priceCNY.toFixed(2)} imgs=${imageUrls.length} ===`);
+
+    // 如果只有外部图片 URL（非 kwcdn），需要下载后用 AI 生成
+    let sourceImage = null;
+    if (imageUrls.length > 0 && !imageUrls[0].includes("kwcdn.com") && imageUrls[0].startsWith("http")) {
       try {
-        const imgResp = await fetch(imageUrl);
+        const imgResp = await fetch(imageUrls[0]);
         const imgBuf = Buffer.from(await imgResp.arrayBuffer());
         const imgDir = path.join(process.env.APPDATA || "", "temu-automation", "ai-images");
         fs.mkdirSync(imgDir, { recursive: true });
-        localImage = path.join(imgDir, `csv_${i}_${Date.now()}.jpg`);
-        fs.writeFileSync(localImage, imgBuf);
+        sourceImage = path.join(imgDir, `csv_${i}_${Date.now()}.jpg`);
+        fs.writeFileSync(sourceImage, imgBuf);
+        imageUrls = []; // 清空，让 createProductViaAPI 用 AI 生成
+        console.error(`[batch-api] Source image downloaded for AI generation`);
       } catch (e) {
-        console.error(`[batch-api] Download failed: ${e.message}`);
+        console.error(`[batch-api] Image download failed: ${e.message}`);
       }
     }
 
-    const result = await createProductViaAPI({
-      title: productName,
-      sourceImage: localImage,
-      generateAI: params.generateAI !== false,
-      aiImageTypes: params.aiImageTypes || ["hero", "lifestyle", "closeup", "infographic", "size_chart"],
-      price: priceCNY,
-      keepOpen: false,
-    });
+    try {
+      const createParams = {
+        title: productName,
+        price: priceCNY,
+        categorySearch: categoryCn || productName, // 用分类名或标题搜索
+        keepOpen: false,
+        config: params.config,
+      };
 
-    results.push({ index: i, name: productName.slice(0, 30), ...result });
+      // 图片来源：已有 kwcdn URLs 或 AI 生成
+      if (imageUrls.length > 0) {
+        createParams.imageUrls = imageUrls;
+      } else if (sourceImage) {
+        createParams.sourceImage = sourceImage;
+        createParams.generateAI = params.generateAI !== false;
+        createParams.aiImageTypes = params.aiImageTypes || ["hero", "lifestyle", "closeup", "infographic", "size_chart"];
+      } else if (params.defaultImageUrls?.length > 0) {
+        createParams.imageUrls = params.defaultImageUrls;
+      } else {
+        results.push({ index: i, name: productName.slice(0, 40), success: false, message: "无可用图片" });
+        console.error(`[batch-api] SKIP: no images available`);
+        continue;
+      }
 
-    // 间隔3-5分钟（控制频率避免封号）
-    if (i < startRow + count - 1) {
-      const waitMin = 3 + Math.random() * 2;
-      console.error(`[batch-api] Waiting ${waitMin.toFixed(1)} minutes before next...`);
+      let result = await createProductViaAPI(createParams);
+
+      // 失败自动重试（不重新生成图片，复用已上传的图片）
+      if (!result.success && result.errorCode === 6000002) {
+        console.error(`[batch-api] RETRY: 6000002 error, retrying with same images...`);
+        await randomDelay(2000, 3000);
+
+        // 重试时用已有图片URL，不重新生成AI图
+        const retryParams = { ...createParams };
+        if (result.uploadedImageUrls?.length > 0) {
+          retryParams.imageUrls = result.uploadedImageUrls;
+          delete retryParams.sourceImage;
+          delete retryParams.generateAI;
+        }
+        result = await createProductViaAPI(retryParams);
+        if (!result.success) {
+          console.error(`[batch-api] RETRY 2: trying different category...`);
+          await randomDelay(1000, 2000);
+          // 第二次重试：用商品标题搜索分类
+          const retryParams2 = { ...retryParams, categorySearch: productName.slice(0, 20) };
+          result = await createProductViaAPI(retryParams2);
+        }
+      }
+
+      results.push({ index: i, name: productName.slice(0, 40), productId: result.productId, ...result });
+      console.error(`[batch-api] ${result.success ? "OK productId=" + result.productId : "FAIL: " + result.message}`);
+    } catch (e) {
+      results.push({ index: i, name: productName.slice(0, 40), success: false, message: e.message });
+      console.error(`[batch-api] ERROR: ${e.message}`);
+    }
+
+    // 间隔控制
+    if (itemNum < total) {
+      const waitMin = intervalMin + Math.random() * (intervalMax - intervalMin);
+      console.error(`[batch-api] Progress: ${itemNum}/${total} (${results.filter(r => r.success).length} ok). Next in ${waitMin.toFixed(1)}min...`);
       await new Promise(r => setTimeout(r, waitMin * 60000));
     }
   }
 
   const successCount = results.filter(r => r.success).length;
-  console.error(`[batch-api] Done! ${successCount}/${results.length} succeeded`);
-  return { success: true, results, successCount, failCount: results.length - successCount };
+  const failedItems = results.filter(r => !r.success);
+  console.error(`\n[batch-api] Completed: ${successCount}/${results.length} succeeded`);
+
+  // 保存结果
+  const debugDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
+  fs.mkdirSync(debugDir, { recursive: true });
+  const resultFile = path.join(debugDir, `batch_result_${Date.now()}.json`);
+  fs.writeFileSync(resultFile, JSON.stringify({ total: results.length, successCount, failCount: failedItems.length, results }, null, 2));
+  console.error(`[batch-api] Results saved to: ${resultFile}`);
+
+  return { success: true, total: results.length, successCount, failCount: failedItems.length, results, failedItems, resultFile };
 }
 
+// 全局进度追踪
+let currentProgress = { running: false, total: 0, completed: 0, current: "", results: [] };
+let pricingPaused = false;  // 暂停标志
+
 const server = http.createServer(async (req, res) => {
+  // GET /progress - 实时进度查询
+  if (req.method === "GET" && req.url === "/progress") {
+    res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+    res.end(JSON.stringify(currentProgress));
+    return;
+  }
+
   if (req.method !== "POST") { res.writeHead(404); res.end(); return; }
 
-  let body = "";
-  req.on("data", (c) => (body += c));
+  const chunks = [];
+  req.on("data", (c) => chunks.push(c));
   req.on("end", async () => {
     try {
+      const body = Buffer.concat(chunks).toString("utf8");
       const cmd = JSON.parse(body);
       const result = await handleRequest(cmd);
       res.writeHead(200, { "Content-Type": "application/json" });
