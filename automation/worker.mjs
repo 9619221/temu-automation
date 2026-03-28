@@ -4714,7 +4714,7 @@ async function searchCategoryAPI(page, searchTerm) {
   const catIds = {};
   let lastMatchedCatId = 0;
 
-  for (let level = 0; level < searchParts.length && level < 5; level++) {
+  for (let level = 0; level < searchParts.length && level < 10; level++) {
     const result = await temuXHR(page, "/anniston-agent-seller/category/children/list", { parentCatId }, { maxRetries: 2 });
     if (!result.success || !result.data?.categoryNodeVOS?.length) {
       console.error(`[category] No children for parentCatId=${parentCatId} at level ${level + 1}`);
@@ -4750,7 +4750,8 @@ async function searchCategoryAPI(page, searchTerm) {
   }
 
   // 继续展开到叶子节点（如果还有子分类，选第一个）
-  for (let level = Object.keys(catIds).filter(k => k.endsWith("Id")).length; level < 10; level++) {
+  const matchedLevels = Object.keys(catIds).filter(k => k.match(/^cat\d+Id$/)).length;
+  for (let level = matchedLevels; level < 10; level++) {
     const result = await temuXHR(page, "/anniston-agent-seller/category/children/list", { parentCatId }, { maxRetries: 1 });
     if (!result.success || !result.data?.categoryNodeVOS?.length) break;
     const firstChild = result.data.categoryNodeVOS[0];
