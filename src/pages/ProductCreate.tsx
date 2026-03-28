@@ -181,7 +181,7 @@ function BatchCreate() {
     }
   };
 
-  // 进度轮询
+  // 进度轮询（核心：前端状态完全由轮询驱动，不依赖 autoPricing 的 await 返回）
   const pollProgress = () => {
     if (progressRef.current) clearInterval(progressRef.current);
     progressRef.current = setInterval(async () => {
@@ -191,9 +191,31 @@ function BatchCreate() {
           setProgressInfo(p);
           if (p.results?.length) setResults(p.results);
           if (p.paused) setPaused(true);
-          if (!p.running) {
+          else setPaused(false);
+          if (!p.running && p.completed > 0) {
+            // Worker 完成，更新前端状态
             clearInterval(progressRef.current);
             progressRef.current = null;
+            setRunning(false);
+            setPaused(false);
+            const sc = (p.results || []).filter((r: any) => r.success).length;
+            const fc = (p.results || []).filter((r: any) => !r.success).length;
+            if (sc > 0) message.success(`批量上品完成：${sc} 成功，${fc} 失败`);
+            else if (fc > 0) message.error(`批量上品全部失败（${fc}个）`);
+            // 保存历史
+            try {
+              const history = (await store?.get("temu_create_history")) || [];
+              (p.results || []).forEach((r: any) => {
+                history.unshift({
+                  title: r.name || `商品`,
+                  status: r.success ? "draft" : "failed",
+                  message: r.message || "",
+                  productId: r.productId || "",
+                  createdAt: Date.now(),
+                });
+              });
+              await store?.set("temu_create_history", history.slice(0, 100));
+            } catch {}
           }
         }
       } catch {}
@@ -223,38 +245,19 @@ function BatchCreate() {
     setPaused(false);
     setResults([]);
     setProgressInfo({ running: true, total: count, completed: 0, current: "准备中...", step: "初始化" });
-    pollProgress();
 
-    try {
-      const res = await api?.autoPricing({ csvPath: filePath, startRow, count });
+    // 发射后不管：不 await，靠 pollProgress 轮询结果
+    api?.autoPricing({ csvPath: filePath, startRow, count }).then((res: any) => {
+      // Worker 返回结果时更新（但可能比轮询慢）
       if (res?.results) setResults(res.results);
-      const successCount = res?.results?.filter((r: any) => r.success).length || 0;
-      if (successCount > 0) {
-        message.success(`批量上品完成：${successCount}/${count} 成功`);
-      } else {
-        message.error("批量上品全部失败");
-      }
-      // 保存历史
-      const history = (await store?.get("temu_create_history")) || [];
-      (res?.results || []).forEach((r: any) => {
-        history.unshift({
-          title: r.name || `第 ${(r.index ?? 0) + 1} 行`,
-          price: r.price || "-",
-          status: r.success ? "draft" : "failed",
-          message: r.message || "",
-          productId: r.productId || "",
-          createdAt: Date.now(),
-        });
-      });
-      await store?.set("temu_create_history", history.slice(0, 100));
-    } catch (e: any) {
-      message.error(e.message || "批量操作失败");
-    } finally {
-      setRunning(false);
-      setPaused(false);
-      setProgressInfo({ running: false });
-      if (progressRef.current) { clearInterval(progressRef.current); progressRef.current = null; }
-    }
+      const sc = res?.results?.filter((r: any) => r.success).length || 0;
+      message.success(`批量上品完成：${sc}/${count} 成功`);
+    }).catch(() => {
+      // HTTP 连接断开不影响 Worker 继续跑，前端靠轮询
+    });
+
+    // 轮询进度（每3秒），直到 Worker 报告 running=false
+    pollProgress();
   };
 
   useEffect(() => {
