@@ -5,7 +5,7 @@
 import { chromium } from "playwright";
 import fs from "fs";
 import path from "path";
-import { randomDelay } from "./utils.mjs";
+import { randomDelay, logSilent } from "./utils.mjs";
 
 // 共享状态（被 worker.mjs 引用）
 export const browserState = {
@@ -27,7 +27,7 @@ export function findChromeExe() {
     "C:/Program Files/Microsoft/Edge/Application/msedge.exe",
   ].filter(Boolean);
   for (const p of candidates) {
-    try { if (fs.existsSync(p)) return p; } catch {}
+    try { if (fs.existsSync(p)) return p; } catch (e) { logSilent("chrome.find", e); }
   }
   throw new Error("未找到系统 Chrome，请安装 Google Chrome");
 }
@@ -45,14 +45,14 @@ export function findLatestCookie() {
       const accountId = files[0].name.replace(".json", "");
       return { accountId, cookiePath: path.join(dir, files[0].name) };
     }
-  } catch {}
+  } catch (e) { logSilent("cookie.find", e); }
   return null;
 }
 
 export async function saveCookies() {
   const { context, cookiePath } = browserState;
   if (context && cookiePath) {
-    try { fs.writeFileSync(cookiePath, JSON.stringify(await context.cookies(), null, 2)); } catch {}
+    try { fs.writeFileSync(cookiePath, JSON.stringify(await context.cookies(), null, 2)); } catch (e) { logSilent("cookie.save", e, "warn"); }
   }
 }
 
@@ -108,7 +108,7 @@ export async function launch(accountId, headless) {
   });
 
   if (fs.existsSync(browserState.cookiePath)) {
-    try { await browserState.context.addCookies(JSON.parse(fs.readFileSync(browserState.cookiePath, "utf-8"))); } catch {}
+    try { await browserState.context.addCookies(JSON.parse(fs.readFileSync(browserState.cookiePath, "utf-8"))); } catch (e) { logSilent("cookie.load", e, "warn"); }
   }
 }
 
@@ -135,7 +135,7 @@ export async function login(phone, password) {
         await accountTab.click();
         await randomDelay(1000, 2000);
       }
-    } catch {}
+    } catch (e) { logSilent("login.tab", e); }
 
     // 输入手机号
     const ph = await page.waitForSelector('#usernameId, input[name="usernameId"], input[placeholder*="手机"]', { timeout: 10000 });
@@ -157,7 +157,7 @@ export async function login(phone, password) {
       if (await checkbox.isVisible({ timeout: 2000 })) {
         if (!(await checkbox.isChecked())) await checkbox.click();
       }
-    } catch {}
+    } catch (e) { logSilent("login.checkbox", e); }
     await randomDelay(300, 600);
 
     // 点击登录
@@ -172,7 +172,7 @@ export async function login(phone, password) {
         await agreeBtn.click();
         await randomDelay(1000, 2000);
       }
-    } catch {}
+    } catch (e) { logSilent("login.agree", e); }
 
     await page.waitForLoadState("domcontentloaded", { timeout: 15000 });
     await randomDelay(3000, 5000);

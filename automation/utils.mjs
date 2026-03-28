@@ -57,3 +57,46 @@ export function getTmpDir(subdir = "") {
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
+
+/**
+ * 错误码体系
+ */
+export const ERR = {
+  // 浏览器/认证
+  BROWSER_LAUNCH: "BROWSER_LAUNCH",
+  AUTH_EXPIRED: "AUTH_EXPIRED",
+  LOGIN_FAILED: "LOGIN_FAILED",
+  NAV_FAILED: "NAV_FAILED",
+  // 采集
+  SCRAPE_TIMEOUT: "SCRAPE_TIMEOUT",
+  SCRAPE_NO_DATA: "SCRAPE_NO_DATA",
+  SCRAPE_PAGE_ERROR: "SCRAPE_PAGE_ERROR",
+  // 上品
+  CATEGORY_NOT_FOUND: "CATEGORY_NOT_FOUND",
+  ATTR_MISMATCH: "ATTR_MISMATCH",
+  IMAGE_UPLOAD_FAILED: "IMAGE_UPLOAD_FAILED",
+  SUBMIT_FAILED: "SUBMIT_FAILED",
+  AI_GEN_FAILED: "AI_GEN_FAILED",
+  // 通用
+  NETWORK_ERROR: "NETWORK_ERROR",
+  UNKNOWN: "UNKNOWN",
+};
+
+/**
+ * 静默日志：替代空 catch {}，记录错误但不中断流程
+ * @param {string} context - 调用位置描述（如 "login.checkbox"）
+ * @param {Error} err - 错误对象
+ * @param {string} [level="debug"] - 日志级别: "debug"(仅开发时关注) | "warn"(潜在问题) | "error"(需要关注)
+ */
+export function logSilent(context, err, level = "debug") {
+  const msg = `[${context}] ${err?.message || err || "unknown error"}`;
+  if (level === "error") {
+    console.error(`[ERROR] ${msg}`);
+  } else if (level === "warn") {
+    console.error(`[WARN] ${msg}`);
+  }
+  // debug 级别不输出，避免刷屏（可通过环境变量开启）
+  else if (process.env.DEBUG_SILENT) {
+    console.error(`[DEBUG] ${msg}`);
+  }
+}

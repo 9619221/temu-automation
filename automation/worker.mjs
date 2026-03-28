@@ -7,7 +7,7 @@ import https from "https";
 import fs from "fs";
 import path from "path";
 import { createRequire } from "module";
-import { randomDelay, downloadImage, saveBase64Image, getDebugDir, getTmpDir } from "./utils.mjs";
+import { randomDelay, downloadImage, saveBase64Image, getDebugDir, getTmpDir, logSilent, ERR } from "./utils.mjs";
 import { browserState, ensureBrowser as _ensureBrowser, launch as _launch, login, saveCookies, closeBrowser, findLatestCookie } from "./browser.mjs";
 import { buildScrapeHandlers } from "./scrape-registry.mjs";
 const require = createRequire(import.meta.url);
@@ -27,7 +27,7 @@ for (const envFile of envFiles) {
       }
       break;
     }
-  } catch {}
+  } catch (e) { logSilent("env.load", e); }
 }
 
 // AI API 配置（从环境变量读取，不再硬编码）
@@ -96,7 +96,7 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
           }
         });
       }
-    } catch {}
+    } catch (e) { logSilent("ui.action", e); }
 
     // 等待弹窗被监控器处理（最多60秒）
     for (let retry = 0; retry < 12; retry++) {
@@ -109,7 +109,7 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
           console.error(`[nav-lite] Successfully navigated after ${retry + 1} retries, URL: ${page.url()}`);
           break;
         }
-      } catch {}
+      } catch (e) { logSilent("ui.action", e); }
       console.error(`[nav-lite] Still on auth page, retry ${retry + 1}/12...`);
     }
 
@@ -296,7 +296,7 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
                     console.error("[nav] Clicked '确认授权并前往' via locator");
                     btnClicked = true;
                   }
-                } catch {}
+                } catch (e) { logSilent("ui.action", e); }
                 if (!btnClicked) {
                   try {
                     const btn2 = popup.locator('button:has-text("确认授权")').first();
@@ -305,7 +305,7 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
                       console.error("[nav] Clicked '确认授权' via locator");
                       btnClicked = true;
                     }
-                  } catch {}
+                  } catch (e) { logSilent("ui.action", e); }
                 }
                 if (!btnClicked) {
                   // fallback: evaluate
@@ -356,7 +356,7 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
                 const checked = await cb.isChecked();
                 if (!checked) await cb.click();
               }
-            } catch {}
+            } catch (e) { logSilent("ui.action", e); }
 
             try {
               // 等待 URL 变化或授权弹窗出现
@@ -391,7 +391,7 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
               const authLabel = popup.locator('text=授权').first();
               if (await authLabel.isVisible({ timeout: 1000 })) await authLabel.click();
             }
-          } catch {}
+          } catch (e) { logSilent("ui.action", e); }
 
           // 用 locator 方式点击确认按钮
           let popupBtnClicked = false;
@@ -402,7 +402,7 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
               console.error("[nav] Popup: clicked '确认授权并前往' via locator");
               popupBtnClicked = true;
             }
-          } catch {}
+          } catch (e) { logSilent("ui.action", e); }
           if (!popupBtnClicked) {
             try {
               const btn2 = popup.locator('button:has-text("确认授权")').first();
@@ -411,7 +411,7 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
                 console.error("[nav] Popup: clicked '确认授权' via locator");
                 popupBtnClicked = true;
               }
-            } catch {}
+            } catch (e) { logSilent("ui.action", e); }
           }
 
           // fallback: evaluate 方式
@@ -468,7 +468,7 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
               }
             }
           }
-        } catch {}
+        } catch (e) { logSilent("ui.action", e); }
 
         await randomDelay(2000, 3000);
 
@@ -610,7 +610,7 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
         await randomDelay(800, 1200);
         await page.getByText("商品列表", { exact: true }).first().click();
         await randomDelay(2000, 3000);
-      } catch {}
+      } catch (e) { logSilent("ui.action", e); }
       await handleAuthDialog();
     }
 
@@ -634,7 +634,7 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
     } catch { break; }
   }
   await page.evaluate(() => {
-    document.querySelectorAll('[class*=close],[class*=Close]').forEach(el => { try { el.click(); } catch {} });
+    document.querySelectorAll('[class*=close],[class*=Close]').forEach(el => { try { el.click(); } catch (e) { logSilent("ui.action", e); } });
   });
   await randomDelay(500, 1000);
   return page;
@@ -669,7 +669,7 @@ async function scrapeSales() {
             }
           }
         }
-      } catch {}
+      } catch (e) { logSilent("ui.action", e); }
     });
 
     // 导航到销售管理页面
@@ -789,7 +789,7 @@ async function scrapePageCaptureAll(targetPath, options = {}) {
             }
           }
         }
-      } catch {}
+      } catch (e) { logSilent("ui.action", e); }
     });
 
     if (fullUrl) {
@@ -842,7 +842,7 @@ async function scrapePageWithListener(targetPath, apiMatchers, options = {}) {
             }
           }
         }
-      } catch {}
+      } catch (e) { logSilent("ui.action", e); }
     });
 
     // 导航
@@ -918,7 +918,7 @@ async function scrapeSidebarCaptureAll(menuText, options = {}) {
             }
           }
         }
-      } catch {}
+      } catch (e) { logSilent("ui.action", e); }
     };
     page.on("response", handler);
 
@@ -954,7 +954,7 @@ async function scrapeSidebarCaptureAll(menuText, options = {}) {
           console.error("[sidebar-capture] Clicked menu: " + menuText);
           break;
         }
-      } catch {}
+      } catch (e) { logSilent("ui.action", e); }
     }
     if (!clicked) {
       // 尝试展开父菜单
@@ -966,7 +966,7 @@ async function scrapeSidebarCaptureAll(menuText, options = {}) {
             await parentEl.click();
             await randomDelay(1000, 2000);
           }
-        } catch {}
+        } catch (e) { logSilent("ui.action", e); }
       }
       // 再试一次
       for (const sel of menuSelectors) {
@@ -977,7 +977,7 @@ async function scrapeSidebarCaptureAll(menuText, options = {}) {
             clicked = true;
             break;
           }
-        } catch {}
+        } catch (e) { logSilent("ui.action", e); }
       }
     }
 
@@ -1063,7 +1063,7 @@ async function scrapeQcDetail() {
           detailApiUrl = url;
           console.error(`[qc-detail] Found detail API: ${u.pathname}`);
         }
-      } catch {}
+      } catch (e) { logSilent("ui.action", e); }
     });
 
     console.error("[qc-detail] Navigating to /wms/qc-detail...");
@@ -1151,9 +1151,9 @@ async function scrapeQcDetail() {
         try {
           const closeBtn = page.locator('.ant-modal-close, button:has-text("关闭"), .ant-drawer-close').first();
           if (await closeBtn.isVisible({ timeout: 1000 })) await closeBtn.click();
-        } catch {}
+        } catch (e) { logSilent("ui.action", e); }
       }
-    } catch {}
+    } catch (e) { logSilent("ui.action", e); }
 
     console.error(`[qc-detail] Done! Captured ${capturedApis.length} APIs`);
     await saveCookies();
@@ -1191,7 +1191,7 @@ async function scrapeGovernDashboard() {
             }
           }
         }
-      } catch {}
+      } catch (e) { logSilent("ui.action", e); }
     });
 
     // 先进入 agentseller 建立认证上下文
@@ -1528,7 +1528,7 @@ async function generateAIImages(sourceImagePath, productTitle, imageTypes = ["he
               console.error(`[ai-image] Generated: ${fileName}`);
             }
           }
-        } catch {}
+        } catch (e) { logSilent("ui.action", e); }
       }
     }
 
@@ -1565,7 +1565,7 @@ async function autoCreateProduct(params) {
       await page.screenshot({ path: filePath, fullPage: false });
       screenshots.push(filePath);
       console.error(`[create-product] Screenshot: ${name}`);
-    } catch {}
+    } catch (e) { logSilent("ui.action", e); }
   }
 
   try {
@@ -1747,7 +1747,7 @@ async function autoCreateProduct(params) {
           }
           await randomDelay(2000, 3000);
         }
-      } catch {}
+      } catch (e) { logSilent("ui.action", e); }
     } else {
       console.error("[create-product] Category input not found!");
       await takeDebugScreenshot("02_category_input_missing");
@@ -1833,7 +1833,7 @@ async function autoCreateProduct(params) {
           const spinners = document.querySelectorAll('.ant-spin-spinning, [class*="loading"], [class*="Loading"]');
           return spinners.length === 0 || Array.from(spinners).every(s => s.offsetParent === null);
         }, { timeout: 20000 });
-      } catch {}
+      } catch (e) { logSilent("ui.action", e); }
       await randomDelay(3000, 5000);
 
       // 滚动到商品轮播图/素材中心区域
@@ -1957,7 +1957,7 @@ async function autoCreateProduct(params) {
                   await newInputs.nth(i).setInputFiles(validImages, { timeout: 3000 });
                   uploaded = true;
                   console.error(`[create-product] Uploaded via new file input[${i}]`);
-                } catch {}
+                } catch (e) { logSilent("ui.action", e); }
               }
             }
 
@@ -2014,7 +2014,7 @@ async function autoCreateProduct(params) {
                 uploaded = true;
                 console.error(`[create-product] Uploaded via fallback input[${i}]`);
                 await randomDelay(8000, 12000);
-              } catch {}
+              } catch (e) { logSilent("ui.action", e); }
             }
           }
 
@@ -2128,7 +2128,7 @@ async function autoCreateProduct(params) {
             uploaded = true;
             console.error(`[create-product] Uploaded via fallback file input[${i}]`);
             await randomDelay(5000, 8000);
-          } catch {}
+          } catch (e) { logSilent("ui.action", e); }
         }
       }
 
@@ -2177,7 +2177,7 @@ async function autoCreateProduct(params) {
             console.error("[create-product] Title filled: " + params.title.slice(0, 30));
             break;
           }
-        } catch {}
+        } catch (e) { logSilent("ui.action", e); }
       }
       if (!titleFilled) {
         await page.evaluate((title) => {
@@ -2316,7 +2316,7 @@ async function autoCreateProduct(params) {
               console.error("[create-product] Closed rating popup");
               await randomDelay(500, 1000);
             }
-          } catch {}
+          } catch (e) { logSilent("ui.action", e); }
 
           // 选择省份 "浙江省" — 先点击省份下拉框再选
           await randomDelay(1000, 2000);
@@ -2339,7 +2339,7 @@ async function autoCreateProduct(params) {
                 }
               }
             }
-          } catch {}
+          } catch (e) { logSilent("ui.action", e); }
 
           const provinceSet = await page.evaluate(() => {
             const allEls = document.querySelectorAll('[class*="option"], [class*="Option"], li, div, span');
@@ -2371,7 +2371,7 @@ async function autoCreateProduct(params) {
             }
           }
         });
-      } catch {}
+      } catch (e) { logSilent("ui.action", e); }
       await randomDelay(1000, 2000);
 
       // ---- 6b: 商品属性下拉框 ----
@@ -2501,7 +2501,7 @@ async function autoCreateProduct(params) {
                 console.error("[create-product] Closed spec format popup");
                 await randomDelay(1000, 2000);
               }
-            } catch {}
+            } catch (e) { logSilent("ui.action", e); }
 
             // 填子规格：随机一个字母
             const randomLetter = String.fromCharCode(65 + Math.floor(Math.random() * 26));
@@ -2537,7 +2537,7 @@ async function autoCreateProduct(params) {
           console.error("[create-product] Closed packaging example popup");
           await randomDelay(1000, 2000);
         }
-      } catch {}
+      } catch (e) { logSilent("ui.action", e); }
 
       // ---- 6c: 外包装类型和形状（单选按钮）----
       console.error("[create-product] 6c: Setting packaging info...");
@@ -2677,7 +2677,7 @@ async function autoCreateProduct(params) {
         await nonCustom.click();
         await randomDelay(500, 1000);
       }
-    } catch {}
+    } catch (e) { logSilent("ui.action", e); }
 
     // 7b: 填写申报价格
     const price = params.price || 9.99;
@@ -2729,7 +2729,7 @@ async function autoCreateProduct(params) {
           await singleOption.click();
         }
       }
-    } catch {}
+    } catch (e) { logSilent("ui.action", e); }
 
     // 7d: SKU预览图 - 从素材中心选
     try {
@@ -2753,7 +2753,7 @@ async function autoCreateProduct(params) {
         }
         await randomDelay(1000, 2000);
       }
-    } catch {}
+    } catch (e) { logSilent("ui.action", e); }
 
     // 7e: 建议零售价 = 申报价格 × 4
     const retailPrice = Math.round(price * 4);
@@ -2778,7 +2778,7 @@ async function autoCreateProduct(params) {
         }
       }, retailPrice);
       console.error(`[create-product] Retail price set: ¥${retailPrice} (${price}×4)`);
-    } catch {}
+    } catch (e) { logSilent("ui.action", e); }
 
     await takeDebugScreenshot("09_sku_filled");
 
@@ -2850,7 +2850,7 @@ async function scrapeAdsPage(tabName, options = {}) {
             }
           }
         }
-      } catch {}
+      } catch (e) { logSilent("ui.action", e); }
     });
 
     // 先进入 agentseller 建立认证上下文
@@ -2912,7 +2912,7 @@ async function scrapeAdsPage(tabName, options = {}) {
               console.error(`[ads-${tabName}] Tab clicked: ${label}`);
               break;
             }
-          } catch {}
+          } catch (e) { logSilent("ui.action", e); }
         }
         if (!clicked) {
           console.error(`[ads-${tabName}] Tab not found via locator, trying evaluate...`);
@@ -3100,7 +3100,7 @@ async function scrapeSidebarPages() {
               }
             }
           }
-        } catch {}
+        } catch (e) { logSilent("ui.action", e); }
       };
       page.on("response", handler);
 
@@ -3116,7 +3116,7 @@ async function scrapeSidebarPages() {
               console.error(`[sidebar-scrape] Clicked: ${menuText}`);
               break;
             }
-          } catch {}
+          } catch (e) { logSilent("ui.action", e); }
           // fallback: evaluate
           if (!clicked) {
             clicked = await page.evaluate((text) => {
@@ -3342,7 +3342,7 @@ async function scrapeViaSidebarClick() {
               status: resp.status(),
               responseBody: body.substring(0, 5000),
             });
-          } catch {}
+          } catch (e) { logSilent("ui.action", e); }
         }
       };
       page.on("response", responseHandler);
@@ -3575,7 +3575,7 @@ async function scrapeViaSidebarClick() {
   } catch (err) {
     console.error(`[sidebar-nav] Fatal error: ${err.message}`);
     fs.writeFileSync(path.join(debugDir, "sidebar_nav_results.json"), JSON.stringify({ error: err.message, results: allResults, consoleErrors }, null, 2));
-    try { await page.screenshot({ path: path.join(debugDir, "sidebar_nav_error.png"), fullPage: false }); } catch {}
+    try { await page.screenshot({ path: path.join(debugDir, "sidebar_nav_error.png"), fullPage: false }); } catch (e) { logSilent("ui.action", e); }
     await page.close();
     throw err;
   }
@@ -3626,7 +3626,7 @@ async function captureApiRequests(targetUrl) {
             req.status = resp.status();
             req.responseBody = body.substring(0, 15000);
           }
-        } catch {}
+        } catch (e) { logSilent("ui.action", e); }
       }
     });
 
@@ -3648,10 +3648,10 @@ async function captureApiRequests(targetUrl) {
       try {
         await page.evaluate(() => {
           document.querySelectorAll('[class*="close"], [class*="Close"], [aria-label="close"]').forEach(el => {
-            try { el.click(); } catch {}
+            try { el.click(); } catch (e) { logSilent("ui.action", e); }
           });
         });
-      } catch {}
+      } catch (e) { logSilent("ui.action", e); }
       await randomDelay(500, 800);
     }
 
@@ -3854,7 +3854,7 @@ async function handleRequest(body) {
                     console.error("[popup-monitor] Clicked '确认授权并前往'");
                     clicked = true;
                   }
-                } catch {}
+                } catch (e) { logSilent("ui.action", e); }
                 if (!clicked) {
                   try {
                     const btn2 = newPage.locator('button:has-text("确认授权")').first();
@@ -3863,7 +3863,7 @@ async function handleRequest(body) {
                       console.error("[popup-monitor] Clicked '确认授权'");
                       clicked = true;
                     }
-                  } catch {}
+                  } catch (e) { logSilent("ui.action", e); }
                 }
                 if (!clicked) {
                   // evaluate fallback
@@ -4203,7 +4203,7 @@ async function handleRequest(body) {
               postData: resp.request().postData()?.substring(0, 2000) || null,
               responsePreview: body.substring(0, 3000),
             });
-          } catch {}
+          } catch (e) { logSilent("ui.action", e); }
         }
       });
 
@@ -4271,7 +4271,7 @@ async function handleRequest(body) {
                 }
               }
             }
-          } catch {}
+          } catch (e) { logSilent("ui.action", e); }
         });
         await navigateToSellerCentral(page, targetPath);
         await randomDelay(10000, 15000);
@@ -4314,7 +4314,7 @@ async function handleRequest(body) {
                   }
                 }
               }
-            } catch {}
+            } catch (e) { logSilent("ui.action", e); }
           });
           await navigateToSellerCentral(page, p);
           await randomDelay(8000, 12000);
@@ -4920,7 +4920,7 @@ async function probeCreateFlow(params) {
         const u = new URL(url);
         const postData = req.postData();
         let body = null;
-        try { body = JSON.parse(postData); } catch {}
+        try { body = JSON.parse(postData); } catch (e) { logSilent("ui.action", e); }
 
         captured.push({
           timestamp: Date.now(),
@@ -4934,7 +4934,7 @@ async function probeCreateFlow(params) {
           },
         });
         console.error(`[probe] POST ${u.pathname} (body: ${postData?.length || 0} bytes)`);
-      } catch {}
+      } catch (e) { logSilent("ui.action", e); }
     });
 
     page.on("response", async (resp) => {
@@ -4962,7 +4962,7 @@ async function probeCreateFlow(params) {
             }
           }
         }
-      } catch {}
+      } catch (e) { logSilent("ui.action", e); }
     });
 
     // 导航到创建商品页面
@@ -5047,7 +5047,7 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
         const eMime = eExt === ".png" ? "image/png" : "image/jpeg";
         allImageBlobs.push({ blob: new Blob([buf], { type: eMime }), name: path.basename(ep) });
       }
-    } catch {}
+    } catch (e) { logSilent("ui.action", e); }
   }
   console.error(`[ai-gen] Source images: ${allImageBlobs.length} (1 main + ${allImageBlobs.length - 1} carousel)`);
 
@@ -5123,7 +5123,7 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
           } else if (data.status === "error") {
             console.error(`[ai-gen] Error: ${data.imageType}: ${data.error}`);
           }
-        } catch {}
+        } catch (e) { logSilent("ui.action", e); }
       }
     }
     return result;
@@ -5331,7 +5331,7 @@ async function autoPricingFromCSV(params) {
             const cFile = path.join(tmpDir, `carousel_${i}_${ci}_${Date.now()}.jpg`);
             await downloadImage(carouselUrls[ci], cFile);
             carouselLocalPaths.push(cFile);
-          } catch {}
+          } catch (e) { logSilent("ui.action", e); }
         }
         console.error(`[auto-pricing] Downloaded ${carouselLocalPaths.length} carousel images`);
       }
@@ -5465,9 +5465,9 @@ async function autoPricingFromCSV(params) {
 
       // 清理临时文件
       for (const f of Object.values(localImages)) {
-        try { fs.unlinkSync(f); } catch {}
+        try { fs.unlinkSync(f); } catch (e) { logSilent("ui.action", e); }
       }
-      try { fs.unlinkSync(sourceImagePath); } catch {}
+      try { fs.unlinkSync(sourceImagePath); } catch (e) { logSilent("ui.action", e); }
 
     } catch (e) {
       results.push({ index: i, name: productName.slice(0, 40), success: false, message: e.message });
@@ -6565,15 +6565,23 @@ const server = http.createServer(async (req, res) => {
   const chunks = [];
   req.on("data", (c) => chunks.push(c));
   req.on("end", async () => {
+    const startTime = Date.now();
+    let action = "unknown";
     try {
       const body = Buffer.concat(chunks).toString("utf8");
       const cmd = JSON.parse(body);
+      action = cmd.action || "unknown";
       const result = await handleRequest(cmd);
+      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+      console.error(`[Worker] ${action} completed in ${duration}s`);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ type: "result", data: result }));
     } catch (err) {
+      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+      const errCode = err.code || ERR.UNKNOWN;
+      console.error(`[Worker] ${action} FAILED in ${duration}s: [${errCode}] ${err.message}`);
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ type: "error", message: err.message || String(err) }));
+      res.end(JSON.stringify({ type: "error", code: errCode, message: err.message || String(err), action, duration: parseFloat(duration) }));
     }
   });
 });
