@@ -4573,8 +4573,8 @@ async function uploadImageToMaterial(page, localImagePath, options = {}) {
 async function searchCategoryAPI(page, searchTerm) {
   const cleanStr = (s) => s.replace(/[\u200B-\u200D\uFEFF\u00AD]/g, "").replace(/[、，]/g, "");
 
-  // 判断搜索词类型：短文本(<=30字)且包含 "/" 说明是分类路径，否则是标题/关键词
-  const isPathSearch = searchTerm.includes("/") && searchTerm.length <= 30;
+  // 判断搜索词类型：包含 "/" 说明是分类路径，否则是标题/关键词
+  const isPathSearch = searchTerm.includes("/");
   let searchParts;
 
   if (isPathSearch) {
