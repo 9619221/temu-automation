@@ -5576,10 +5576,10 @@ async function getCategoryProperties(page, leafCatId, productTitle) {
 ${propsForAI.map((p, i) => `${i + 1}. ${p.name}${p.required ? '(必填)' : '(选填)'}: [${p.values.join(', ')}]`).join('\n')}
 
 规则:
-1. 只填与该商品确实相关的属性
-2. 不相关的属性标记为 "skip"（例如垃圾袋不需要填"木材类型"）
-3. 优先选择"其他"、"其它"等安全值，除非商品明确属于某个具体选项
-4. 必填属性尽量填，但如果确实不相关也可以 skip
+1. 必填属性必须填值，禁止skip！即使不确定也要选"其他"、"其它"等安全值
+2. 选填属性如果与商品无关可以 "skip"
+3. 优先选择"其他"、"其它"、"不适用"等安全值，除非商品明确属于某个具体选项
+4. 每个必填属性都必须返回一个具体的值
 
 请用 JSON 数组格式回复，每项格式: {"name": "属性名", "value": "选择的值"} 或 {"name": "属性名", "value": "skip"}
 只返回 JSON 数组，不要其他文字。`;
@@ -5649,8 +5649,14 @@ ${propsForAI.map((p, i) => `${i + 1}. ${p.name}${p.required ? '(必填)' : '(选
       const decision = aiDecisions.find(d => d.name === propName);
       if (decision) {
         if (decision.value === "skip") {
-          console.error(`[getCategoryProperties] AI skip: "${propName}"`);
-          continue;
+          if (isRequired) {
+            // 必填属性不允许 skip，fallback 到安全值
+            console.error(`[getCategoryProperties] AI tried to skip REQUIRED "${propName}", using safe value instead`);
+            // selectedVal 保持 null，后续走安全值 fallback
+          } else {
+            console.error(`[getCategoryProperties] AI skip: "${propName}"`);
+            continue;
+          }
         }
         // 在可选值中找 AI 推荐的值
         selectedVal = propValues.find(v => (v.value || v.propValue || "") === decision.value);
