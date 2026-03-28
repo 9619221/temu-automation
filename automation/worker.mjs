@@ -5887,6 +5887,18 @@ function ruleBasedRepair(errorMsg) {
     return actions;
   }
 
+  // 主销售属性不合法 → 重新获取规格并重试
+  if (errorMsg.includes("主销售属性不合法")) {
+    actions.push({ type: "retry_spec" });
+    return actions;
+  }
+
+  // 说明书未上传 → 保存草稿（无法自动上传说明书）
+  if (errorMsg.includes("说明书未上传")) {
+    actions.push({ type: "give_up", reason: "该类目要求上传说明书，需手动处理" });
+    return actions;
+  }
+
   return actions;
 }
 
@@ -6135,10 +6147,20 @@ async function createProductViaAPI(params) {
     // 查询/创建规格值 - 26个字母随机
     const randomLetter = String.fromCharCode(65 + Math.floor(Math.random() * 26));
     const specName = params.specName || randomLetter;
-    const specResult = await temuXHR(page, config.specQueryEndpoint, { parentSpecId: specInfo.parentSpecId, specName }, { maxRetries: 1 });
-    if (specResult.success) {
+    const specResult = await temuXHR(page, config.specQueryEndpoint, { parentSpecId: specInfo.parentSpecId, specName }, { maxRetries: 2 });
+    if (specResult.success && specResult.data?.specId) {
       specInfo.specId = specResult.data.specId;
       specInfo.specName = specName;
+    } else {
+      // specId 获取失败，尝试用默认值 "A"
+      console.error(`[api-create] Spec query failed, retrying with "A"...`);
+      const retrySpec = await temuXHR(page, config.specQueryEndpoint, { parentSpecId: specInfo.parentSpecId, specName: "A" }, { maxRetries: 1 });
+      if (retrySpec.success && retrySpec.data?.specId) {
+        specInfo.specId = retrySpec.data.specId;
+        specInfo.specName = "A";
+      } else {
+        console.error(`[api-create] WARNING: specId unavailable, using default`);
+      }
     }
 
     // Step 5: 构造 payload（基于真实抓包结构）
@@ -6242,7 +6264,7 @@ async function createProductViaAPI(params) {
       const errCode = result.errorCode || 0;
 
       // 只处理可修复的错误
-      if (![6000002, 1000001].includes(errCode) && !errMsg.includes("不能为空") && !errMsg.includes("Category") && !errMsg.includes("packaging") && !errMsg.includes("Invalid image")) {
+      if (![6000002, 1000001, 1000003, 2000148].includes(errCode) && !errMsg.includes("不能为空") && !errMsg.includes("Category") && !errMsg.includes("packaging") && !errMsg.includes("Invalid image")) {
         console.error(`[selfRepair] Error ${errCode} not repairable, stopping`);
         break;
       }
@@ -6358,6 +6380,26 @@ async function createProductViaAPI(params) {
             payload.productOuterPackageReq = { packageShape: 1, packageType: 0 };
             console.error(`[selfRepair] fix_packaging: set default packaging`);
             needResubmit = true;
+            break;
+          }
+          case "retry_spec": {
+            console.error(`[selfRepair] retry_spec: re-querying spec...`);
+            await page.goto(page.url(), { waitUntil: "domcontentloaded" });
+            await randomDelay(2000, 3000);
+            // 重新获取规格
+            const newSpec = await getCategorySpec(page, leafCatId);
+            if (newSpec) {
+              const newSpecName = "A";
+              const newSpecResult = await temuXHR(page, config.specQueryEndpoint, { parentSpecId: newSpec.parentSpecId, specName: newSpecName }, { maxRetries: 1 });
+              if (newSpecResult.success && newSpecResult.data?.specId) {
+                const sid = newSpecResult.data.specId;
+                // 更新 payload 中所有 spec 相关字段
+                payload.productSpecPropertyReqs = [{ ...payload.productSpecPropertyReqs[0], parentSpecId: newSpec.parentSpecId, parentSpecName: newSpec.parentSpecName, specId: sid, specName: newSpecName, propName: newSpec.parentSpecName, propValue: newSpecName }];
+                payload.productSkcReqs[0].productSkuReqs[0].productSkuSpecReqs = [{ parentSpecId: newSpec.parentSpecId, parentSpecName: newSpec.parentSpecName, specId: sid, specName: newSpecName, specLangSimpleList: [] }];
+                console.error(`[selfRepair] New spec: ${newSpec.parentSpecName} id=${sid}`);
+                needResubmit = true;
+              }
+            }
             break;
           }
           default:
