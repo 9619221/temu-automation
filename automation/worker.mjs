@@ -634,7 +634,7 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
     } catch { break; }
   }
   await page.evaluate(() => {
-    document.querySelectorAll('[class*=close],[class*=Close]').forEach(el => { try { el.click(); } catch (e) { logSilent("ui.action", e); } });
+    document.querySelectorAll('[class*=close],[class*=Close]').forEach(el => { try { el.click(); } catch {} });
   });
   await randomDelay(500, 1000);
   return page;
@@ -3648,7 +3648,7 @@ async function captureApiRequests(targetUrl) {
       try {
         await page.evaluate(() => {
           document.querySelectorAll('[class*="close"], [class*="Close"], [aria-label="close"]').forEach(el => {
-            try { el.click(); } catch (e) { logSilent("ui.action", e); }
+            try { el.click(); } catch {}
           });
         });
       } catch (e) { logSilent("ui.action", e); }
