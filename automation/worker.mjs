@@ -5012,14 +5012,10 @@ async function probeCreateFlow(params) {
 const IMAGE_TYPE_ORDER = [
   "scene_a",    // 1. 核价场景图A（首图 + SKU图）
   "scene_b",    // 2. 核价场景图B
-  "main",       // 3. 主图（白底 Hero）
-  "features",   // 4. 痛点/卖点图
-  "closeup",    // 5. 功能/结构图
-  "dimensions", // 6. 尺寸规格图
-  "lifestyle",  // 7. 场景结果图
-  "packaging",  // 8. 差异化价值图
-  "comparison", // 9. 对比优势图
-  "lifestyle2", // 10. A+ 收束图
+  "dimensions", // 3. 尺寸规格图
+  "lifestyle",  // 4. 场景结果图
+  "packaging",  // 5. 差异化价值图
+  "lifestyle2", // 6. A+ 收束图
 ];
 
 const AI_IMAGE_GEN_URL = "http://localhost:3000";
