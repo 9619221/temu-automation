@@ -6648,9 +6648,9 @@ const server = http.createServer(async (req, res) => {
 });
 
 const PORT = parseInt(process.env.WORKER_PORT || "19280");
-server.timeout = 1800000; // 30分钟超时
-server.keepAliveTimeout = 1800000;
-server.headersTimeout = 1810000;
+server.timeout = 86400000; // 24小时超时
+server.keepAliveTimeout = 86400000;
+server.headersTimeout = 86410000;
 server.listen(PORT, "127.0.0.1", () => {
   // 把端口写到文件
   const portFile = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "worker-port");

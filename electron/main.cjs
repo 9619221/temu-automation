@@ -45,7 +45,7 @@ function httpPost(port, body) {
         port,
         method: "POST",
         headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) },
-        timeout: 1800000,  // 30分钟超时（大量采集任务需要较长时间）
+        timeout: 86400000,  // 24小时超时
       },
       (res) => {
         const chunks = [];
