@@ -160,7 +160,7 @@ export default function AccountManager() {
     try {
       const result = await api.login(account.id, account.phone, account.password);
 
-      if (result === true || result?.success) {
+      if (result?.success) {
         setAccounts((prev) =>
           prev.map((a) =>
             a.id === account.id

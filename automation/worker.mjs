@@ -9,7 +9,7 @@ import path from "path";
 import { createRequire } from "module";
 import { randomDelay, downloadImage, saveBase64Image, getDebugDir, getTmpDir, logSilent, ERR } from "./utils.mjs";
 import { browserState, ensureBrowser as _ensureBrowser, launch as _launch, login, saveCookies, closeBrowser, findLatestCookie } from "./browser.mjs";
-import { buildScrapeHandlers } from "./scrape-registry.mjs";
+import { buildScrapeHandlers, getScrapeFunction } from "./scrape-registry.mjs";
 const require = createRequire(import.meta.url);
 const XLSX = require("xlsx");
 
@@ -3698,6 +3698,20 @@ async function captureApiRequests(targetUrl) {
   }
 }
 
+// ---- 注册表采集辅助（供 scrape_all 使用） ----
+const _scrapeExecutors = () => ({
+  scrapePageCaptureAll,
+  scrapeSidebarCaptureAll,
+  scrapePageWithListener,
+  scrapeGovernPage: (subPath) => scrapePageCaptureAll(null, { waitTime: 12000, fullUrl: "https://agentseller.temu.com/govern/" + subPath }),
+  ensureBrowser,
+});
+const _registryScrape = (key) => {
+  const fn = getScrapeFunction(key, _scrapeExecutors());
+  if (!fn) throw new Error(`scrape registry: no entry for '${key}'`);
+  return fn();
+};
+
 // ---- HTTP 服务 ----
 
 async function handleRequest(body) {
@@ -3715,11 +3729,11 @@ async function handleRequest(body) {
         console.error("[Worker] ensureBrowser error:", e.message);
         throw new Error("浏览器启动失败: " + e.message);
       }
-      return { products: await scrapeProducts() };
+      return await _registryScrape("products");
     }
     case "scrape_orders": {
       await ensureBrowser();
-      return { orders: await scrapeOrders() };
+      return await _registryScrape("orders");
     }
     case "capture_api": {
       // 捕获页面加载时的 API 请求
@@ -3772,22 +3786,6 @@ async function handleRequest(body) {
         params.imageTypes || ["hero", "lifestyle"]
       );
       return { success: true, images, count: images.length };
-    }
-    case "scrape_flux": {
-      await ensureBrowser();
-      return { flux: await scrapeFluxAnalysis() };
-    }
-    case "scrape_dashboard": {
-      await ensureBrowser();
-      return { dashboard: await scrapeHomeDashboard() };
-    }
-    case "scrape_aftersales": {
-      await ensureBrowser();
-      return { afterSales: await scrapeAfterSales() };
-    }
-    case "scrape_soldout": {
-      await ensureBrowser();
-      return { soldOut: await scrapeSoldOutBoard() };
     }
     case "sidebar_nav": {
       await ensureBrowser();
@@ -3926,66 +3924,65 @@ async function handleRequest(body) {
       _navLiteMode = true;
       console.error("[scrape_all] Step 2: Running all scrapers (concurrency=3) with popup monitor + lite nav...");
       const tasks = [
-        // ---- 核心运营数据 (8个) ----
-        { key: "dashboard", fn: () => scrapeHomeDashboard() },
-        { key: "products", fn: () => scrapeProducts() },
-        { key: "orders", fn: () => scrapeOrders() },
+        // ---- 核心运营数据 ----
+        { key: "dashboard", fn: () => _registryScrape("dashboard") },
+        { key: "products", fn: () => _registryScrape("products") },
+        { key: "orders", fn: () => _registryScrape("orders") },
         { key: "sales", fn: () => scrapeSales() },
-        { key: "flux", fn: () => scrapeFluxAnalysis() },
-        { key: "goodsData", fn: () => scrapeGoodsData() },
-        { key: "activity", fn: () => scrapeActivityData() },
-        { key: "afterSales", fn: () => scrapeAfterSales() },
-        // ---- 用户选择 (5个) ----
-        { key: "lifecycle", fn: () => scrapeProductLifecycle() },
-        { key: "priceCompete", fn: () => scrapePriceCompete() },
-        { key: "urgentOrders", fn: () => scrapeUrgentOrders() },
-        { key: "shippingDesk", fn: () => scrapeShippingDesk() },
-        { key: "shippingList", fn: () => scrapeShippingList() },
-        { key: "addressManage", fn: () => scrapeAddressManage() },
-        { key: "returnOrders", fn: () => scrapeReturnOrders() },
-        { key: "exceptionNotice", fn: () => scrapeExceptionNotice() },
-        { key: "returnDetail", fn: () => scrapeReturnDetail() },
-        { key: "salesReturn", fn: () => scrapeSalesReturn() },
-        { key: "returnReceipt", fn: () => scrapeReturnReceipt() },
-        { key: "priceReport", fn: () => scrapePriceReport() },
-        { key: "flowPrice", fn: () => scrapeFlowPrice() },
-        { key: "imageTask", fn: () => scrapeImageTask() },
-        { key: "sampleManage", fn: () => scrapeSampleManage() },
-        { key: "checkup", fn: () => scrapeCheckup() },
-        { key: "usRetrieval", fn: () => scrapeUSRetrieval() },
-        { key: "retailPrice", fn: () => scrapeRetailPrice() },
-        { key: "qualityDashboard", fn: () => scrapeQualityDashboard() },
-        { key: "qualityDashboardEU", fn: () => scrapeQualityDashboardEU() },
+        { key: "flux", fn: () => _registryScrape("flux") },
+        { key: "goodsData", fn: () => _registryScrape("goodsData") },
+        { key: "activity", fn: () => _registryScrape("activity") },
+        { key: "afterSales", fn: () => _registryScrape("aftersales") },
+        // ---- 扩展采集 ----
+        { key: "lifecycle", fn: () => _registryScrape("lifecycle") },
+        { key: "priceCompete", fn: () => _registryScrape("priceCompete") },
+        { key: "urgentOrders", fn: () => _registryScrape("urgentOrders") },
+        { key: "shippingDesk", fn: () => _registryScrape("shippingDesk") },
+        { key: "shippingList", fn: () => _registryScrape("shippingList") },
+        { key: "addressManage", fn: () => _registryScrape("addressManage") },
+        { key: "returnOrders", fn: () => _registryScrape("returnOrders") },
+        { key: "exceptionNotice", fn: () => _registryScrape("exceptionNotice") },
+        { key: "returnDetail", fn: () => _registryScrape("returnDetail") },
+        { key: "salesReturn", fn: () => _registryScrape("salesReturn") },
+        { key: "returnReceipt", fn: () => _registryScrape("returnReceipt") },
+        { key: "priceReport", fn: () => _registryScrape("priceReport") },
+        { key: "imageTask", fn: () => _registryScrape("imageTask") },
+        { key: "sampleManage", fn: () => _registryScrape("sampleManage") },
+        { key: "checkup", fn: () => _registryScrape("checkup") },
+        { key: "usRetrieval", fn: () => _registryScrape("usRetrieval") },
+        { key: "retailPrice", fn: () => _registryScrape("retailPrice") },
+        { key: "qualityDashboard", fn: () => _registryScrape("qualityDashboard") },
+        { key: "qualityDashboardEU", fn: () => _registryScrape("qualityDashboardEU") },
         { key: "qcDetail", fn: () => scrapeQcDetail() },
-        { key: "mallFlux", fn: () => scrapeMallFlux() },
-        { key: "mallFluxEU", fn: () => scrapeMallFluxEU() },
-        { key: "fluxEU", fn: () => scrapeFluxEU() },
-        { key: "fluxUS", fn: () => scrapeFluxUS() },
-        { key: "mallFluxUS", fn: () => scrapeMallFluxUS() },
-        { key: "activityLog", fn: () => scrapeActivityLog() },
-        { key: "chanceGoods", fn: () => scrapeChanceGoods() },
-        { key: "marketingActivity", fn: () => scrapeMarketingActivity() },
-        { key: "flowGrow", fn: () => scrapeFlowGrow() },
-        { key: "activityUS", fn: () => scrapeActivityUS() },
-        { key: "activityEU", fn: () => scrapeActivityEU() },
-        // ---- 合规中心 (16个) ----
+        { key: "mallFlux", fn: () => _registryScrape("mallFlux") },
+        { key: "mallFluxEU", fn: () => _registryScrape("mallFluxEU") },
+        { key: "fluxEU", fn: () => _registryScrape("fluxEU") },
+        { key: "fluxUS", fn: () => _registryScrape("fluxUS") },
+        { key: "mallFluxUS", fn: () => _registryScrape("mallFluxUS") },
+        { key: "activityLog", fn: () => _registryScrape("activityLog") },
+        { key: "chanceGoods", fn: () => _registryScrape("chanceGoods") },
+        { key: "marketingActivity", fn: () => _registryScrape("marketingActivity") },
+        { key: "flowGrow", fn: () => _registryScrape("flowGrow") },
+        { key: "activityUS", fn: () => _registryScrape("activityUS") },
+        { key: "activityEU", fn: () => _registryScrape("activityEU") },
+        // ---- 合规中心 ----
         { key: "governDashboard", fn: () => scrapeGovernDashboard() },
-        { key: "governProductQualification", fn: () => scrapeGovernProductQualification() },
-        { key: "governQualificationAppeal", fn: () => scrapeGovernQualificationAppeal() },
-        { key: "governEprQualification", fn: () => scrapeGovernEprQualification() },
-        { key: "governProductPhoto", fn: () => scrapeGovernProductPhoto() },
-        { key: "governComplianceInfo", fn: () => scrapeGovernComplianceInfo() },
-        { key: "governResponsiblePerson", fn: () => scrapeGovernResponsiblePerson() },
-        { key: "governManufacturer", fn: () => scrapeGovernManufacturer() },
-        { key: "governComplaint", fn: () => scrapeGovernComplaint() },
-        { key: "governViolationAppeal", fn: () => scrapeGovernViolationAppeal() },
-        { key: "governMerchantAppeal", fn: () => scrapeGovernMerchantAppeal() },
-        { key: "governTro", fn: () => scrapeGovernTro() },
-        { key: "governEprBilling", fn: () => scrapeGovernEprBilling() },
-        { key: "governComplianceReference", fn: () => scrapeGovernComplianceReference() },
-        { key: "governCustomsAttribute", fn: () => scrapeGovernCustomsAttribute() },
-        { key: "governCategoryCorrection", fn: () => scrapeGovernCategoryCorrection() },
-        // ---- 推广平台 (6个) ----
+        { key: "governProductQualification", fn: () => _registryScrape("governProductQualification") },
+        { key: "governQualificationAppeal", fn: () => _registryScrape("governQualificationAppeal") },
+        { key: "governEprQualification", fn: () => _registryScrape("governEprQualification") },
+        { key: "governProductPhoto", fn: () => _registryScrape("governProductPhoto") },
+        { key: "governComplianceInfo", fn: () => _registryScrape("governComplianceInfo") },
+        { key: "governResponsiblePerson", fn: () => _registryScrape("governResponsiblePerson") },
+        { key: "governManufacturer", fn: () => _registryScrape("governManufacturer") },
+        { key: "governComplaint", fn: () => _registryScrape("governComplaint") },
+        { key: "governViolationAppeal", fn: () => _registryScrape("governViolationAppeal") },
+        { key: "governMerchantAppeal", fn: () => _registryScrape("governMerchantAppeal") },
+        { key: "governTro", fn: () => _registryScrape("governTro") },
+        { key: "governEprBilling", fn: () => _registryScrape("governEprBilling") },
+        { key: "governComplianceReference", fn: () => _registryScrape("governComplianceReference") },
+        { key: "governCustomsAttribute", fn: () => _registryScrape("governCustomsAttribute") },
+        { key: "governCategoryCorrection", fn: () => _registryScrape("governCategoryCorrection") },
+        // ---- 推广平台 ----
         { key: "adsHome", fn: () => scrapeAdsHome() },
         { key: "adsProduct", fn: () => scrapeAdsProduct() },
         { key: "adsReport", fn: () => scrapeAdsReport() },
@@ -4068,22 +4065,6 @@ async function handleRequest(body) {
         return JSON.parse(fs.readFileSync(dataFile2, "utf8"));
       }
       return null;
-    }
-    case "scrape_goods_data": {
-      await ensureBrowser();
-      return { goodsData: await scrapeGoodsData() };
-    }
-    case "scrape_activity": {
-      await ensureBrowser();
-      return { activity: await scrapeActivityData() };
-    }
-    case "scrape_performance": {
-      await ensureBrowser();
-      return { performance: await scrapePerformanceBoard() };
-    }
-    case "scrape_main_pages": {
-      await ensureBrowser();
-      return { mainPages: await scrapeMainPages() };
     }
     case "debug_page": {
       await ensureBrowser();

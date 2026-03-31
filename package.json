@@ -1,7 +1,7 @@
 {
   "name": "temu-automation",
   "private": true,
-  "version": "0.1.21",
+  "version": "0.1.22",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -38,7 +38,6 @@
       }
     ],
     "files": [
-      "dist/**/*",
       "electron/**/*",
       "automation/**/*",
       "node_modules/**/*",
@@ -48,6 +47,9 @@
       "!docs/**/*",
       "!*.log",
       "!test_*.json"
+    ],
+    "extraFiles": [
+      { "from": "dist", "to": "dist" }
     ],
     "win": {
       "target": [

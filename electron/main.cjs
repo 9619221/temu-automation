@@ -456,9 +456,14 @@ async function createWindow() {
     console.log("[Main] Loading from Vite dev server");
     mainWindow.loadURL(devUrl);
   } else {
-    const distPath = path.join(__dirname, "../dist/index.html");
-    if (fs.existsSync(distPath)) {
-      console.log("[Main] Loading from dist");
+    // 打包后 dist 在 app 根目录（extraFiles），开发时在项目根目录
+    const distCandidates = [
+      path.join(__dirname, "../dist/index.html"),
+      app.isPackaged ? path.join(path.dirname(app.getPath("exe")), "dist", "index.html") : "",
+    ].filter(Boolean);
+    const distPath = distCandidates.find(p => fs.existsSync(p));
+    if (distPath) {
+      console.log("[Main] Loading from dist:", distPath);
       mainWindow.loadFile(distPath);
     } else {
       console.log("[Main] Fallback to dev URL");
