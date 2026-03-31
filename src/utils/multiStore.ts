@@ -148,9 +148,12 @@ export async function syncScopedDataToGlobalStore(store: StoreLike, accountId: s
 export async function setActiveAccountAndSync(store: StoreLike, accounts: MultiStoreAccount[], accountId?: string | null) {
   const activeAccount = getPreferredActiveAccount(accounts, accountId);
   const nextId = activeAccount?.id || null;
+  const previousId = await readActiveAccountId(store);
   await writeActiveAccountId(store, nextId);
   await syncScopedDataToGlobalStore(store, nextId);
-  emitActiveAccountChanged(nextId);
+  if (previousId !== nextId) {
+    emitActiveAccountChanged(nextId);
+  }
   return nextId;
 }
 

@@ -62,10 +62,11 @@ export default function AccountManager() {
   const restoreActiveAccountData = async (nextAccounts: Account[]) => {
     if (!store) return;
 
-    const activeAccountId = await readActiveAccountId(store);
-    if (activeAccountId && nextAccounts.some((account) => account.id === activeAccountId)) {
-      setActiveAccountId(activeAccountId);
-      await setActiveAccountAndSync(store, nextAccounts, activeAccountId);
+    const storedActiveAccountId = await readActiveAccountId(store);
+    if (storedActiveAccountId && nextAccounts.some((account) => account.id === storedActiveAccountId)) {
+      setActiveAccountId(storedActiveAccountId);
+      await writeActiveAccountId(store, storedActiveAccountId);
+      await syncScopedDataToGlobalStore(store, storedActiveAccountId);
       return;
     }
 
@@ -77,28 +78,37 @@ export default function AccountManager() {
   useEffect(() => {
     let cancelled = false;
 
-    if (store) {
-      store.get(STORAGE_KEY).then((data: Account[] | null) => {
+    const hydrateAccounts = async () => {
+      if (!store) {
+        if (!cancelled) {
+          setHydrated(true);
+        }
+        return;
+      }
+
+      try {
+        const data = await store.get(STORAGE_KEY);
+        if (cancelled) return;
+
         if (data && Array.isArray(data)) {
           const nextAccounts = data.map((a: Account) => ({ ...a, status: "offline" as const }));
-          if (!cancelled) {
-            setAccounts(nextAccounts);
-          }
-          restoreActiveAccountData(nextAccounts).catch(() => {});
+          setAccounts(nextAccounts);
+          await restoreActiveAccountData(nextAccounts);
         } else {
-          clearActiveAccount().catch(() => {});
+          await clearActiveAccount();
         }
+      } finally {
         if (!cancelled) {
           setHydrated(true);
         }
-      }).catch(() => {
-        if (!cancelled) {
-          setHydrated(true);
-        }
-      });
-    } else {
-      setHydrated(true);
-    }
+      }
+    };
+
+    hydrateAccounts().catch(() => {
+      if (!cancelled) {
+        setHydrated(true);
+      }
+    });
 
     return () => {
       cancelled = true;
@@ -107,24 +117,19 @@ export default function AccountManager() {
 
   // 账号变化时保存到文件
   useEffect(() => {
-    if (!store) return;
-
-    const syncActiveAccount = async () => {
-      const id = await readActiveAccountId(store);
-      setActiveAccountId(id);
-    };
-
-    syncActiveAccount().catch(() => {});
+    if (!store || !hydrated) return;
 
     const handleActiveAccountChanged = () => {
-      syncActiveAccount().catch(() => {});
+      readActiveAccountId(store).then((id) => {
+        setActiveAccountId((prev) => (prev === id ? prev : id));
+      }).catch(() => {});
     };
 
     window.addEventListener(ACTIVE_ACCOUNT_CHANGED_EVENT, handleActiveAccountChanged as EventListener);
     return () => {
       window.removeEventListener(ACTIVE_ACCOUNT_CHANGED_EVENT, handleActiveAccountChanged as EventListener);
     };
-  }, [store]);
+  }, [hydrated, store]);
 
   useEffect(() => {
     if (store && hydrated) {

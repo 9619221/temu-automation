@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, Menu } = requir
 const path = require("path");
 const { spawn } = require("child_process");
 const http = require("http");
+const net = require("net");
 const fs = require("fs");
 const { autoUpdater } = require("electron-updater");
 
@@ -711,24 +712,52 @@ function stopWorker() {
 // ============ AI 出图服务管理 ============
 
 const AUTO_IMAGE_HOST = "127.0.0.1";
-const AUTO_IMAGE_PORT = 3210;
+const AUTO_IMAGE_DEFAULT_PORT = 3210;
 const AUTO_IMAGE_HEALTH_PATH = "/api/config";
 
 let imageStudioProcess = null;
+let imageStudioPort = AUTO_IMAGE_DEFAULT_PORT;
 let imageStudioStatus = {
   status: "idle",
   message: "AI 出图服务未启动",
-  url: `http://${AUTO_IMAGE_HOST}:${AUTO_IMAGE_PORT}`,
+  url: `http://${AUTO_IMAGE_HOST}:${AUTO_IMAGE_DEFAULT_PORT}`,
   projectPath: "",
-  port: AUTO_IMAGE_PORT,
+  port: AUTO_IMAGE_DEFAULT_PORT,
   ready: false,
 };
 const IMAGE_STUDIO_EVENT_CHANNEL = "image-studio:event";
 const imageStudioGenerateControllers = new Map();
 
+function getImageStudioBaseUrl(port = imageStudioPort) {
+  return `http://${AUTO_IMAGE_HOST}:${port}`;
+}
+
 function updateImageStudioStatus(patch = {}) {
-  imageStudioStatus = { ...imageStudioStatus, ...patch, url: `http://${AUTO_IMAGE_HOST}:${AUTO_IMAGE_PORT}`, port: AUTO_IMAGE_PORT };
+  if (Number.isInteger(patch.port) && patch.port > 0) {
+    imageStudioPort = patch.port;
+  }
+  imageStudioStatus = { ...imageStudioStatus, ...patch, url: getImageStudioBaseUrl(imageStudioPort), port: imageStudioPort };
   return imageStudioStatus;
+}
+
+function getImageStudioLogPath() {
+  return path.join(app.getPath("userData"), "image-studio.log");
+}
+
+function appendImageStudioLog(message) {
+  try {
+    fs.appendFileSync(getImageStudioLogPath(), `[${new Date().toISOString()}] ${message}\n`);
+  } catch {}
+}
+
+function getImageStudioProcessOutputHandlers(prefix) {
+  return (chunk) => {
+    const text = chunk.toString("utf8").trim();
+    if (!text) return;
+    text.split(/\r?\n/).filter(Boolean).forEach((line) => {
+      appendImageStudioLog(`${prefix}: ${line}`);
+    });
+  };
 }
 
 function readEnvKeyValueFile(filePath) {
@@ -836,16 +865,51 @@ function httpGet(url, timeout = 5000) {
   });
 }
 
-async function isImageStudioHealthy() {
+async function isImageStudioHealthy(port = imageStudioPort) {
   try {
-    const response = await httpGet(`http://${AUTO_IMAGE_HOST}:${AUTO_IMAGE_PORT}${AUTO_IMAGE_HEALTH_PATH}`);
-    return response.statusCode >= 200 && response.statusCode < 500;
+    const response = await httpGet(`${getImageStudioBaseUrl(port)}${AUTO_IMAGE_HEALTH_PATH}`);
+    if (response.statusCode !== 200) return false;
+    JSON.parse(response.body || "{}");
+    return true;
   } catch { return false; }
 }
 
-async function waitForImageStudio(maxWait = 90000) {
+function canListenOnImageStudioPort(port) {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    const finalize = (result) => {
+      try { server.close(); } catch {}
+      resolve(result);
+    };
+    server.once("error", () => finalize(false));
+    server.once("listening", () => server.close(() => resolve(true)));
+    server.listen(port, AUTO_IMAGE_HOST);
+  });
+}
+
+async function findAvailableImageStudioPort() {
+  const candidates = [
+    imageStudioPort,
+    AUTO_IMAGE_DEFAULT_PORT,
+    ...Array.from({ length: 20 }, (_, index) => AUTO_IMAGE_DEFAULT_PORT + index + 1),
+  ].filter((port, index, list) => list.indexOf(port) === index);
+
+  for (const port of candidates) {
+    if (await isImageStudioHealthy(port)) return port;
+    if (await canListenOnImageStudioPort(port)) {
+      return port;
+    }
+  }
+
+  return imageStudioPort;
+}
+
+async function waitForImageStudio(startedProcess, maxWait = 90000) {
   const start = Date.now();
   while (Date.now() - start < maxWait) {
+    if (imageStudioProcess !== startedProcess || startedProcess.exitCode !== null) {
+      throw new Error(imageStudioStatus.message || "AI 出图服务启动失败");
+    }
     if (await isImageStudioHealthy()) return true;
     await new Promise(r => setTimeout(r, 1000));
   }
@@ -877,6 +941,8 @@ async function ensureImageStudioService() {
     imageStudioProcess = null;
   }
 
+  const nextPort = await findAvailableImageStudioPort();
+  updateImageStudioStatus({ projectPath: projectInfo.projectPath, port: nextPort });
   updateImageStudioStatus({ status: "starting", ready: false, message: "正在启动 AI 出图服务…" });
 
   const nodeExe = findNodeExe();
@@ -888,34 +954,48 @@ async function ensureImageStudioService() {
     console.log(`[Main] Loaded ${Object.keys(envLocalVars).length} vars from ${envLocalPath}`);
   }
 
-  const env = { ...process.env, ...envLocalVars, PORT: String(AUTO_IMAGE_PORT), HOSTNAME: AUTO_IMAGE_HOST, NODE_ENV: "production" };
+  const env = { ...process.env, ...envLocalVars, PORT: String(nextPort), HOSTNAME: AUTO_IMAGE_HOST, NODE_ENV: "production" };
 
   const spawnArgs = projectInfo.mode === "packaged-runtime"
     ? [projectInfo.serverPath]
-    : [projectInfo.nextBinPath, "start", "-p", String(AUTO_IMAGE_PORT), "--hostname", AUTO_IMAGE_HOST];
+    : [projectInfo.nextBinPath, "start", "-p", String(nextPort), "--hostname", AUTO_IMAGE_HOST];
 
   console.log(`[Main] Starting image studio: ${nodeExe} ${spawnArgs.join(" ")} (${projectInfo.mode})`);
+  appendImageStudioLog(`start: runtime=${path.basename(nodeExe)} exe=${nodeExe} project=${projectInfo.projectPath} mode=${projectInfo.mode} port=${nextPort}`);
 
   imageStudioProcess = spawn(nodeExe, spawnArgs, {
     cwd: projectInfo.projectPath,
     env,
-    stdio: "ignore",
+    stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
     detached: false,
   });
+  const startedProcess = imageStudioProcess;
+
+  if (imageStudioProcess.stdout) {
+    imageStudioProcess.stdout.on("data", getImageStudioProcessOutputHandlers("stdout"));
+    imageStudioProcess.stdout.on("error", () => {});
+  }
+  if (imageStudioProcess.stderr) {
+    imageStudioProcess.stderr.on("data", getImageStudioProcessOutputHandlers("stderr"));
+    imageStudioProcess.stderr.on("error", () => {});
+  }
 
   imageStudioProcess.on("error", (error) => {
     console.error("[Main] Image studio spawn error:", error.message);
+    appendImageStudioLog(`spawn-error: ${error.message}`);
   });
   imageStudioProcess.on("exit", (code) => {
     console.log(`[Main] Image studio exited: ${code}`);
-    if (imageStudioProcess) {
+    appendImageStudioLog(`exit: code=${code ?? "unknown"} port=${nextPort}`);
+    if (imageStudioProcess === startedProcess) {
       imageStudioProcess = null;
       updateImageStudioStatus({ status: "error", ready: false, message: `AI 出图服务已退出（code=${code ?? "unknown"}）` });
     }
   });
 
-  await waitForImageStudio();
+  await waitForImageStudio(startedProcess);
+  appendImageStudioLog(`ready: url=${getImageStudioBaseUrl(nextPort)}`);
   return updateImageStudioStatus({ status: "ready", ready: true, message: "AI 出图服务已就绪" });
 }
 
