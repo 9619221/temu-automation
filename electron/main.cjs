@@ -59,7 +59,7 @@ autoUpdater.on("checking-for-update", () => {
 });
 autoUpdater.on("update-available", (info) => {
   broadcastUpdateState({ status: "available", message: `发现新版本 ${info?.version || ""}`, releaseVersion: info?.version });
-  autoUpdater.downloadUpdate().catch(() => {});
+  // 不自动下载，等用户手动点击下载按钮
 });
 autoUpdater.on("update-not-available", () => {
   broadcastUpdateState({ status: "up-to-date", message: "当前已是最新版本", releaseVersion: null, progressPercent: null });
@@ -83,7 +83,9 @@ autoUpdater.on("update-downloaded", (info) => {
   }
 });
 autoUpdater.on("error", (error) => {
-  broadcastUpdateState({ status: "error", message: error?.message || "检查更新失败", progressPercent: null });
+  const msg = error?.message || "检查更新失败";
+  console.error("[updater] error:", msg, error?.stack || "");
+  broadcastUpdateState({ status: "error", message: msg, progressPercent: null });
 });
 
 // ============ Worker 管理（HTTP 通信，彻底避免 stdio 继承） ============

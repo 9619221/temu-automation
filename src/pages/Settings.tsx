@@ -39,6 +39,14 @@ export default function Settings() {
     }
   };
 
+  const handleDownloadUpdate = async () => {
+    try {
+      await appAPI?.downloadUpdate?.();
+    } catch (e: any) {
+      message.error(e?.message || "下载失败");
+    }
+  };
+
   const handleInstall = () => {
     appAPI?.quitAndInstallUpdate?.();
   };
@@ -59,7 +67,7 @@ export default function Settings() {
             {updateStatus.status === "available" && <Tag color="blue">发现新版本 {updateStatus.releaseVersion}</Tag>}
             {updateStatus.status === "downloading" && <Tag icon={<SyncOutlined spin />} color="processing">下载中</Tag>}
             {updateStatus.status === "downloaded" && <Tag icon={<CloudDownloadOutlined />} color="orange">更新已就绪</Tag>}
-            {updateStatus.status === "error" && <Tag color="error">更新失败</Tag>}
+            {updateStatus.status === "error" && <Tag color="error" title={updateStatus.message}>更新失败：{updateStatus.message || "未知错误"}</Tag>}
             {(updateStatus.status === "idle" || updateStatus.status === "dev") && <Tag>{updateStatus.message || "未检查"}</Tag>}
           </div>
 
@@ -71,6 +79,11 @@ export default function Settings() {
             <Button icon={<ReloadOutlined />} onClick={handleCheckUpdate} disabled={updateStatus.status === "downloading"}>
               检查更新
             </Button>
+            {updateStatus.status === "available" && (
+              <Button type="primary" icon={<CloudDownloadOutlined />} onClick={handleDownloadUpdate}>
+                下载更新
+              </Button>
+            )}
             {updateStatus.status === "downloaded" && (
               <Button type="primary" icon={<CloudDownloadOutlined />} onClick={handleInstall}>
                 立即安装更新
