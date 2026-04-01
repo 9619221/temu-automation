@@ -42,6 +42,7 @@ interface AutomationAPI {
   listDrafts: () => Promise<any>;
   retryDraft: (draftId: string) => Promise<any>;
   deleteDraft: (draftId: string) => Promise<any>;
+  filterProductTable: (csvPath: string) => Promise<any>;
   close: () => Promise<{ status: string }>;
   ping: () => Promise<{ status: string }>;
 }
@@ -115,7 +116,7 @@ interface ElectronAPI {
   imageStudio: ImageStudioAPI;
   app: AppAPI;
   store: StoreAPI;
-  onAutomationEvent: (callback: (data: any) => void) => void;
+  onAutomationEvent: (callback: (data: any) => void) => (() => void);
   onUpdateStatus?: (callback: (data: any) => void) => (() => void);
   onImageStudioEvent?: (callback: (data: ImageStudioEventPayload) => void) => (() => void);
 }

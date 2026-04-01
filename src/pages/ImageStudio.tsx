@@ -106,8 +106,8 @@ type ImageVariant = ImageStudioGeneratedImage & {
 type ImageVariantMap = Record<string, ImageVariant[]>;
 
 const FALLBACK_STATUS: ImageStudioStatus = {
-  status: "idle",
-  message: "AI 出图服务未启动",
+  status: "starting",
+  message: "正在启动 AI 出图服务…",
   url: "http://127.0.0.1:3210",
   projectPath: "",
   port: 3210,
@@ -453,6 +453,14 @@ export default function ImageStudio() {
   const refreshStatus = async (ensure = false) => {
     try {
       if (!imageStudioAPI) throw new Error("当前环境不支持 AI 出图服务");
+      if (ensure) {
+        setStatus((prev) => ({
+          ...prev,
+          status: "starting",
+          message: "正在启动 AI 出图服务…",
+          ready: false,
+        }));
+      }
       setActionLoading(ensure);
       const nextStatus = ensure
         ? await imageStudioAPI.ensureRunning()

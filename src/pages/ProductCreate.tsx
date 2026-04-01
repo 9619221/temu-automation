@@ -315,18 +315,22 @@ function BatchCreate() {
 
   // 暂停/继续
   const togglePause = async () => {
-    const taskId = selectedTaskId || progressInfo?.taskId;
-    if (paused) {
-      await api?.resumePricing?.(taskId);
-      message.info("已恢复");
-    } else {
-      await api?.pausePricing?.(taskId);
-      message.warning("已暂停，当前商品处理完后停止");
-    }
-    const task = taskId ? await api?.getTaskProgress?.(taskId) : await api?.getProgress?.();
-    if (task) {
-      applyTaskSnapshot(task);
-      syncTaskHistory(task);
+    try {
+      const taskId = selectedTaskId || progressInfo?.taskId;
+      if (paused) {
+        await api?.resumePricing?.(taskId);
+        message.info("已恢复");
+      } else {
+        await api?.pausePricing?.(taskId);
+        message.warning("已暂停，当前商品处理完后停止");
+      }
+      const task = taskId ? await api?.getTaskProgress?.(taskId) : await api?.getProgress?.();
+      if (task) {
+        applyTaskSnapshot(task);
+        syncTaskHistory(task);
+      }
+    } catch (err: any) {
+      message.error(err?.message || "操作失败");
     }
   };
 
@@ -366,28 +370,34 @@ function BatchCreate() {
     setResults([]);
     setProgressInfo({ running: true, status: "running", total: count, completed: 0, current: "准备中...", step: "初始化", results: [] });
 
-    const response = await api?.autoPricing({ csvPath: filePath, startRow, count });
-    if (!response?.accepted) {
-      setRunning(false);
-      setPaused(false);
+    try {
+      const response = await api?.autoPricing({ csvPath: filePath, startRow, count });
+      if (!response?.accepted) {
+        setRunning(false);
+        setPaused(false);
+        if (response?.task) {
+          applyTaskSnapshot(response.task);
+          syncTaskHistory(response.task);
+        }
+        message.warning(response?.message || "已有批量上品任务在运行");
+        if (response?.task?.running) pollProgress(response.task.taskId, true);
+        return;
+      }
+
       if (response?.task) {
         applyTaskSnapshot(response.task);
         syncTaskHistory(response.task);
       }
-      message.warning(response?.message || "已有批量上品任务在运行");
-      if (response?.task?.running) pollProgress(response.task.taskId, true);
-      return;
-    }
+      message.success("批量上品任务已启动");
+      refreshTaskHistory(false).catch(() => {});
 
-    if (response?.task) {
-      applyTaskSnapshot(response.task);
-      syncTaskHistory(response.task);
+      // 轮询进度（每3秒），直到 Worker 报告 running=false
+      pollProgress(response?.task?.taskId);
+    } catch (err: any) {
+      setRunning(false);
+      setPaused(false);
+      message.error(err?.message || "启动批量上品失败");
     }
-    message.success("批量上品任务已启动");
-    refreshTaskHistory(false).catch(() => {});
-
-    // 轮询进度（每3秒），直到 Worker 报告 running=false
-    pollProgress(response?.task?.taskId);
   };
 
   useEffect(() => {

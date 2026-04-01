@@ -3922,6 +3922,7 @@ async function handleRequest(body) {
       fs.mkdirSync(debugDir, { recursive: true });
       // ★ 启用 lite 模式：后续所有 navigateToSellerCentral 都用简化流程
       _navLiteMode = true;
+      try {
       console.error("[scrape_all] Step 2: Running all scrapers (concurrency=3) with popup monitor + lite nav...");
       const tasks = [
         // ---- 核心运营数据 ----
@@ -4019,7 +4020,8 @@ async function handleRequest(body) {
             results[task.key] = { success: false, error: err.message, duration: dur };
           })
           .then(() => {
-            running.splice(running.indexOf(p), 1);
+            const idx = running.indexOf(p);
+            if (idx !== -1) running.splice(idx, 1);
             const next = runNext();
             if (next) running.push(next);
           });
@@ -4031,12 +4033,13 @@ async function handleRequest(body) {
         if (p) running.push(p);
       }
       while (running.length > 0) await Promise.race(running);
-
-      // 关闭弹窗监控和 lite 模式
+      } finally {
+      // 关闭弹窗监控和 lite 模式（即使出错也要清理）
       _navLiteMode = false;
       popupMonitorActive = false;
-      context.removeListener("page", handleAuthPopup);
+      try { context.removeListener("page", handleAuthPopup); } catch (e) { console.error("[scrape_all] cleanup error:", e.message); }
       console.error("[popup-monitor] Monitor removed, lite mode off");
+      }
 
       console.error("[scrape_all] All done!", Object.keys(results).map(k => `${k}:${results[k].success}`).join(", "));
 
@@ -4280,8 +4283,9 @@ async function handleRequest(body) {
       const paths = params.paths || [];
       const results = {};
       for (const p of paths) {
+        let page = null;
         try {
-          const page = await context.newPage();
+          page = await context.newPage();
           const apis = [];
           const frameworkPatterns = ['phantom/xg', 'pfb/l1', 'pfb/a4', 'web-performace', 'get-leo-config', '_stm', 'msgBox', 'auth/userInfo', 'auth/menu', 'queryTotalExam', 'feedback/entrance', 'rule/unreadNum', 'suggestedPrice', 'checkAbleFeedback', 'queryFeedbackNotReadTotal', 'pop/query', '.js', '.css', '.png', '.svg', '.woff', '.ico', '.jpg', '.gif', '.map', '.webp', 'hm.baidu', 'google', 'favicon', 'hot-update', 'sockjs'];
           page.on("response", async (resp) => {
@@ -4312,10 +4316,11 @@ async function handleRequest(body) {
           await randomDelay(2000, 3000);
           console.error(`[probe-batch] ${p} => ${apis.length} APIs`);
           results[p] = apis;
-          await page.close();
         } catch (e) {
           console.error(`[probe-batch] ${p} ERROR: ${e.message}`);
           results[p] = { error: e.message };
+        } finally {
+          if (page) await page.close().catch(() => {});
         }
       }
       return results;
@@ -5470,6 +5475,7 @@ async function autoPricingFromCSV(params) {
       updateCurrentProgress({ step: "上传图片..." });
       console.error(`[auto-pricing] Uploading to material center...`);
       const page = await context.newPage();
+      try {
       await navigateToSellerCentral(page, "/goods/list");
       await randomDelay(3000, 5000);
 
@@ -5491,7 +5497,7 @@ async function autoPricingFromCSV(params) {
           }
         }
       }
-      await page.close();
+      } finally { await page.close().catch(() => {}); }
 
       // 按指定顺序排列图片 URL
       const orderedImageUrls = AI_DETAIL_IMAGE_TYPE_ORDER
@@ -6930,6 +6936,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method !== "POST") { res.writeHead(404); res.end(); return; }
 
   const chunks = [];
+  req.on("error", (err) => { console.error("[Worker] Request error:", err.message); });
   req.on("data", (c) => chunks.push(c));
   req.on("end", async () => {
     const startTime = Date.now();
@@ -6967,3 +6974,5 @@ server.listen(PORT, "127.0.0.1", () => {
 });
 
 process.on("SIGTERM", async () => { await closeBrowser(); server.close(); process.exit(0); });
+process.on("uncaughtException", (err) => { console.error("[Worker] Uncaught exception:", err.message, err.stack); });
+process.on("unhandledRejection", (reason) => { console.error("[Worker] Unhandled rejection:", reason); });

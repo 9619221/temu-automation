@@ -1527,15 +1527,21 @@ async function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  const imageStudioStartupPromise = ensureImageStudioService()
+    .then((status) => {
+      console.log("[Main] Image studio auto-started successfully");
+      return status;
+    })
+    .catch((e) => {
+      console.error("[Main] Image studio auto-start failed (will retry on demand):", e.message);
+      return null;
+    });
+
   await createWindow();
+
+  const imageStudioStartupStatus = await imageStudioStartupPromise;
   try {
-    await ensureImageStudioService();
-    console.log("[Main] Image studio auto-started successfully");
-  } catch (e) {
-    console.error("[Main] Image studio auto-start failed (will retry on demand):", e.message);
-  }
-  try {
-    await startWorker({ aiImageServer: imageStudioStatus.url });
+    await startWorker({ aiImageServer: imageStudioStartupStatus?.url || imageStudioStatus.url });
     console.log("[Main] Worker auto-started successfully");
   } catch (e) {
     console.error("[Main] Worker auto-start failed (will retry on demand):", e.message);
