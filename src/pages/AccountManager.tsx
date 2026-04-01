@@ -53,10 +53,13 @@ export default function AccountManager() {
 
   const clearActiveAccount = async () => {
     if (!store) return;
+    const previousActiveAccountId = await readActiveAccountId(store);
     setActiveAccountId(null);
     await writeActiveAccountId(store, null);
     await syncScopedDataToGlobalStore(store, null);
-    emitActiveAccountChanged(null);
+    if (previousActiveAccountId) {
+      emitActiveAccountChanged(null);
+    }
   };
 
   const restoreActiveAccountData = async (nextAccounts: Account[]) => {

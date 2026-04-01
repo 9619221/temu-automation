@@ -4,6 +4,7 @@ const { spawn } = require("child_process");
 const http = require("http");
 const net = require("net");
 const fs = require("fs");
+const XLSX = require("xlsx");
 const { autoUpdater } = require("electron-updater");
 
 // 全局捕获未处理异常，防止 EPIPE 等 pipe 错误崩溃 Electron
@@ -26,6 +27,151 @@ const ACCOUNT_STORE_KEY = "temu_accounts";
 let autoPricingTaskPromise = null;
 let autoPricingTaskSyncTimer = null;
 let autoPricingCurrentTaskId = null;
+
+const AUTO_PRICING_FILTER_KEYWORDS = {
+  liquid: [
+    "液体", "液态", "喷雾", "香水", "精油", "乳液", "爽肤水", "精华", "面霜", "乳霜", "溶液",
+    "洗发水", "沐浴露", "洗衣液", "护理液", "清洁液", "清洁剂", "墨水", "胶水", "机油", "酒精", "染发剂",
+  ],
+  paste: [
+    "膏体", "膏状", "牙膏", "乳膏", "软膏", "凝胶", "啫喱", "胶泥", "泥膜", "发蜡", "唇膏", "浆糊",
+  ],
+  electric: [
+    "带电", "电池", "锂电", "纽扣电池", "充电", "充电器", "适配器", "usb", "电动", "电机", "插电", "无线充", "电源",
+  ],
+};
+
+const AUTO_PRICING_IP_PATTERNS = [
+  /迪士尼|disney/i,
+  /漫威|marvel/i,
+  /宝可梦|pokemon/i,
+  /hello\s*kitty|凯蒂猫|三丽鸥|sanrio/i,
+  /哈利波特|harry\s*potter/i,
+  /冰雪奇缘|frozen/i,
+  /蜘蛛侠|spider-?man/i,
+  /蝙蝠侠|batman/i,
+  /火影|naruto/i,
+  /海贼王|one\s*piece/i,
+  /龙珠|dragon\s*ball/i,
+  /米老鼠|mickey/i,
+  /史迪奇|stitch/i,
+  /芭比|barbie/i,
+  /乐高|lego/i,
+  /小黄人|minions/i,
+  /变形金刚|transformers/i,
+  /小猪佩奇|peppa\s*pig/i,
+  /汪汪队|paw\s*patrol/i,
+  /我的世界|minecraft/i,
+];
+
+function detectProductTableHeaderRow(rows = []) {
+  for (let i = 0; i < Math.min(10, rows.length); i++) {
+    const row = Array.isArray(rows[i]) ? rows[i] : [];
+    const rowText = row.map((cell) => String(cell || "")).join("|");
+    if (rowText.includes("商品标题") || rowText.includes("商品名称") || rowText.includes("商品主图") || rowText.includes("美元价格")) {
+      return i;
+    }
+  }
+  return 0;
+}
+
+function buildAutoPricingRowSearchText(row = []) {
+  return row.map((cell) => String(cell || "").trim()).join(" | ");
+}
+
+function detectAutoPricingExcludedReasons(row = []) {
+  const searchText = buildAutoPricingRowSearchText(row);
+  const normalizedText = searchText.toLowerCase();
+  const reasons = [];
+
+  if (AUTO_PRICING_FILTER_KEYWORDS.liquid.some((keyword) => normalizedText.includes(keyword))) {
+    reasons.push("液体");
+  }
+  if (AUTO_PRICING_FILTER_KEYWORDS.paste.some((keyword) => normalizedText.includes(keyword))) {
+    reasons.push("膏体");
+  }
+  if (AUTO_PRICING_FILTER_KEYWORDS.electric.some((keyword) => normalizedText.includes(keyword))) {
+    reasons.push("带电");
+  }
+  if (AUTO_PRICING_IP_PATTERNS.some((pattern) => pattern.test(searchText))) {
+    reasons.push("IP");
+  }
+
+  return reasons;
+}
+
+function getFilteredProductTableOutputPath(inputPath) {
+  const parsed = path.parse(inputPath);
+  const baseName = `${parsed.name}_排除后`;
+  let attempt = 0;
+  while (attempt < 1000) {
+    const suffix = attempt === 0 ? "" : `_${attempt}`;
+    const candidate = path.join(parsed.dir, `${baseName}${suffix}.xlsx`);
+    if (!fs.existsSync(candidate)) return candidate;
+    attempt += 1;
+  }
+  return path.join(parsed.dir, `${baseName}_${Date.now()}.xlsx`);
+}
+
+function filterAutoPricingProductTable(inputPath) {
+  if (!inputPath || !fs.existsSync(inputPath)) {
+    throw new Error(`表格文件不存在: ${inputPath || ""}`);
+  }
+
+  const workbook = XLSX.readFile(inputPath, { cellDates: false });
+  const firstSheetName = workbook.SheetNames[0];
+  if (!firstSheetName) {
+    throw new Error("表格没有可用的工作表");
+  }
+
+  const worksheet = workbook.Sheets[firstSheetName];
+  const allRows = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: "" });
+  const headerRowIdx = detectProductTableHeaderRow(allRows);
+  const headerRow = Array.isArray(allRows[headerRowIdx]) ? allRows[headerRowIdx] : [];
+  const prefixRows = allRows.slice(0, headerRowIdx + 1);
+  const dataRows = allRows
+    .slice(headerRowIdx + 1)
+    .filter((row) => Array.isArray(row) && row.some((cell) => String(cell || "").trim()));
+
+  const keptRows = [];
+  const excludedRows = [];
+  const excludedSummary = { liquid: 0, paste: 0, electric: 0, ip: 0 };
+
+  dataRows.forEach((row) => {
+    const reasons = detectAutoPricingExcludedReasons(row);
+    if (reasons.length === 0) {
+      keptRows.push(row);
+      return;
+    }
+
+    excludedRows.push([...row, reasons.join("、")]);
+    if (reasons.includes("液体")) excludedSummary.liquid += 1;
+    if (reasons.includes("膏体")) excludedSummary.paste += 1;
+    if (reasons.includes("带电")) excludedSummary.electric += 1;
+    if (reasons.includes("IP")) excludedSummary.ip += 1;
+  });
+
+  const outputWorkbook = XLSX.utils.book_new();
+  const retainedSheet = XLSX.utils.aoa_to_sheet([...prefixRows, ...keptRows]);
+  XLSX.utils.book_append_sheet(outputWorkbook, retainedSheet, "可上品");
+
+  const excludedSheet = XLSX.utils.aoa_to_sheet([
+    [...headerRow, "排除原因"],
+    ...excludedRows,
+  ]);
+  XLSX.utils.book_append_sheet(outputWorkbook, excludedSheet, "排除记录");
+
+  const outputPath = getFilteredProductTableOutputPath(inputPath);
+  XLSX.writeFile(outputWorkbook, outputPath);
+
+  return {
+    outputPath,
+    totalRows: dataRows.length,
+    keptRows: keptRows.length,
+    excludedRows: excludedRows.length,
+    excludedSummary,
+  };
+}
 
 // ============ 自动更新 ============
 
@@ -1400,6 +1546,11 @@ ipcMain.handle("automation:scrape-all", async () => {
 
 ipcMain.handle("automation:create-product", async (_e, params) => {
   return sendCmd("create_product", params);
+});
+
+ipcMain.handle("automation:filter-product-table", async (_e, csvPath) => {
+  const result = filterAutoPricingProductTable(csvPath);
+  return result;
 });
 
 ipcMain.handle("automation:auto-pricing", async (_e, params) => {

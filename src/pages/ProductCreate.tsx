@@ -59,7 +59,7 @@ function SingleCreate() {
       <Card title={<span><PlusOutlined style={{ color: "#e55b00", marginRight: 8 }} />商品信息</span>} style={{ borderRadius: 12 }}>
         <Form form={form} layout="vertical">
           <Form.Item name="title" label="商品标题" rules={[{ required: true, message: "请输入标题" }]}>
-            <TextArea rows={2} placeholder="输入商品标题，系统自动匹配分类 + AI生成10张图" />
+            <TextArea rows={2} placeholder="输入商品标题，系统自动匹配分类 + AI生成9张图（不保留原主图）" />
           </Form.Item>
           <Row gutter={16}>
             <Col span={8}>
@@ -110,6 +110,8 @@ function BatchCreate() {
   const [taskHistory, setTaskHistory] = useState<any[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState("");
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [filteringTable, setFilteringTable] = useState(false);
+  const [filterSummary, setFilterSummary] = useState<any>(null);
   const progressRef = useRef<any>(null);
   const runningStateRef = useRef(false);
 
@@ -178,6 +180,7 @@ function BatchCreate() {
     setFilePath(fp);
     setPreview(null);
     setResults([]);
+    setFilterSummary(null);
     await loadPreview(fp);
   };
 
@@ -188,6 +191,7 @@ function BatchCreate() {
     setFilePath(fp);
     setPreview(null);
     setResults([]);
+    setFilterSummary(null);
     await loadPreview(fp);
     return false;
   };
@@ -326,6 +330,31 @@ function BatchCreate() {
     }
   };
 
+  const handleFilterProductTable = async () => {
+    if (!filePath) {
+      message.warning("请先上传表格文件");
+      return;
+    }
+    try {
+      setFilteringTable(true);
+      const result = await api?.filterProductTable?.(filePath);
+      if (!result?.outputPath) {
+        message.error("生成排除后表格失败");
+        return;
+      }
+      setFilterSummary(result);
+      setFilePath(result.outputPath);
+      setPreview(null);
+      setResults([]);
+      await loadPreview(result.outputPath);
+      message.success(`已排除 ${result.excludedRows || 0} 条，生成新表格`);
+    } catch (error: any) {
+      message.error(error?.message || "生成排除后表格失败");
+    } finally {
+      setFilteringTable(false);
+    }
+  };
+
   // 开始批量上品
   const handleBatch = async () => {
     if (!filePath) {
@@ -408,8 +437,32 @@ function BatchCreate() {
                 </Tag>
                 {preview && <span style={{ color: "#999" }}>共 {preview.total} 个商品</span>}
               </Space>
-              <Button size="small" onClick={() => { setFilePath(""); setPreview(null); setResults([]); }}>更换文件</Button>
+              <Space>
+                <Button size="small" loading={filteringTable} onClick={handleFilterProductTable}>
+                  排除液体/膏体/带电/IP
+                </Button>
+                <Button size="small" onClick={() => { setFilePath(""); setPreview(null); setResults([]); setFilterSummary(null); }}>
+                  更换文件
+                </Button>
+              </Space>
             </div>
+
+            {filterSummary && (
+              <Alert
+                style={{ marginBottom: 16 }}
+                type="info"
+                showIcon
+                message={`已生成新表格：保留 ${filterSummary.keptRows || 0} 条，排除 ${filterSummary.excludedRows || 0} 条`}
+                description={(
+                  <Space wrap>
+                    <Tag color="blue">液体 {filterSummary.excludedSummary?.liquid || 0}</Tag>
+                    <Tag color="purple">膏体 {filterSummary.excludedSummary?.paste || 0}</Tag>
+                    <Tag color="orange">带电 {filterSummary.excludedSummary?.electric || 0}</Tag>
+                    <Tag color="red">IP {filterSummary.excludedSummary?.ip || 0}</Tag>
+                  </Space>
+                )}
+              />
+            )}
 
             {/* 识别到的列 */}
             {preview?.detected && (
@@ -467,7 +520,7 @@ function BatchCreate() {
                 </Form.Item>
               </Col>
               <Col span={8} style={{ display: "flex", alignItems: "end" }}>
-                <Tag color="orange" style={{ padding: "4px 12px", fontSize: 13 }}>AI 自动生成10张商品图</Tag>
+                <Tag color="orange" style={{ padding: "4px 12px", fontSize: 13 }}>AI 自动生成9张商品图（不保留原主图）</Tag>
               </Col>
             </Row>
           </div>

@@ -31,6 +31,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.invoke("automation:scrape-all"),
     createProduct: (params) =>
       ipcRenderer.invoke("automation:create-product", params),
+    filterProductTable: (csvPath) =>
+      ipcRenderer.invoke("automation:filter-product-table", csvPath),
     autoPricing: (params) =>
       ipcRenderer.invoke("automation:auto-pricing", params),
     startAutoPricing: (params) =>

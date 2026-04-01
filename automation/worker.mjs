@@ -5018,14 +5018,19 @@ async function probeCreateFlow(params) {
 // 完整自动核价：CSV → AI生图 → 上传素材 → 提交核价
 // ============================================================
 
-// AI 生图的图片类型顺序（scene_a 排第一，也用作 SKU 图）
-const IMAGE_TYPE_ORDER = [
-  "scene_a",    // 1. 核价场景图A（首图 + SKU图）
+// 上品链路：原图只做参考，最终只提交 9 张 AI 图
+const AI_DETAIL_IMAGE_TYPE_ORDER = [
+  "scene_a",    // 1. 核价场景图A
   "scene_b",    // 2. 核价场景图B
-  "dimensions", // 3. 尺寸规格图
-  "lifestyle",  // 4. 场景结果图
-  "lifestyle2", // 5. A+ 收束图
+  "features",   // 3. 卖点图
+  "closeup",    // 4. 细节图
+  "dimensions", // 5. 尺寸规格图
+  "lifestyle",  // 6. 场景结果图
+  "packaging",  // 7. 包装图
+  "comparison", // 8. 对比图
+  "lifestyle2", // 9. A+ 收束图
 ];
+const REQUIRED_AI_DETAIL_IMAGE_COUNT = AI_DETAIL_IMAGE_TYPE_ORDER.length;
 
 const AI_IMAGE_GEN_URL = (process.env.AI_IMAGE_SERVER || "http://localhost:3210").replace(/\/+$/, "");
 const AI_IMAGE_GEN_ORIGIN = (() => {
@@ -5100,7 +5105,7 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
     headers: { "Content-Type": "application/json", ...AI_AUTH_HEADERS },
     body: JSON.stringify({
       analysis,
-      imageTypes: IMAGE_TYPE_ORDER,
+      imageTypes: AI_DETAIL_IMAGE_TYPE_ORDER,
       salesRegion: "us",
       imageSize: "1000x1000",
       productMode: "single",
@@ -5197,7 +5202,7 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
   }
 
   console.error(`[ai-gen] Total generated: ${Object.keys(images).length}/${plans.length}`);
-  return { success: Object.keys(images).length >= 5, images, analysis };
+  return { success: Object.keys(images).length >= REQUIRED_AI_DETAIL_IMAGE_COUNT, images, analysis };
 }
 
 /**
@@ -5416,19 +5421,24 @@ async function autoPricingFromCSV(params) {
         console.error(`[auto-pricing] Downloaded ${carouselLocalPaths.length} carousel images`);
       }
 
-      // Step 2: AI 生成 10 张图（主图 + 轮播图一起给 AI）
+      // Step 2: AI 生成 9 张详情图（原主图只做参考，不参与最终提交）
       updateCurrentProgress({ step: "AI生图中..." });
       console.error(`[auto-pricing] Generating AI images (${1 + carouselLocalPaths.length} source images)...`);
       const aiResult = await generateImagesWithAI(sourceImagePath, productName, carouselLocalPaths);
       if (!aiResult.success) {
-        results.push({ index: i, name: productName.slice(0, 40), success: false, message: "AI生图失败: " + (aiResult.error || "图片不足5张") });
+        results.push({
+          index: i,
+          name: productName.slice(0, 40),
+          success: false,
+          message: "AI生图失败: " + (aiResult.error || `图片不足${REQUIRED_AI_DETAIL_IMAGE_COUNT}张`),
+        });
         syncCurrentProgressResults(results, { current: `${itemNum}/${total} ${productName.slice(0, 30)}`, step: "AI生图失败" });
         continue;
       }
 
       // Step 3: 保存 base64 图片到本地文件
       const localImages = {};
-      for (const type of IMAGE_TYPE_ORDER) {
+      for (const type of AI_DETAIL_IMAGE_TYPE_ORDER) {
         if (aiResult.images[type]) {
           const imgPath = path.join(tmpDir, `${i}_${type}_${Date.now()}.png`);
           saveBase64Image(aiResult.images[type], imgPath);
@@ -5446,7 +5456,7 @@ async function autoPricingFromCSV(params) {
 
       const kwcdnUrls = {};
       // 并发上传（3张一组）
-      const uploadTypes = IMAGE_TYPE_ORDER.filter(t => localImages[t]);
+      const uploadTypes = AI_DETAIL_IMAGE_TYPE_ORDER.filter(t => localImages[t]);
       for (let u = 0; u < uploadTypes.length; u += 3) {
         const batch = uploadTypes.slice(u, u + 3);
         const uploadResults = await Promise.all(batch.map(async (type) => {
@@ -5465,14 +5475,19 @@ async function autoPricingFromCSV(params) {
       await page.close();
 
       // 按指定顺序排列图片 URL
-      const orderedImageUrls = IMAGE_TYPE_ORDER
+      const orderedImageUrls = AI_DETAIL_IMAGE_TYPE_ORDER
         .map(type => kwcdnUrls[type])
         .filter(Boolean);
 
       console.error(`[auto-pricing] Total uploaded: ${orderedImageUrls.length}`);
 
-      if (orderedImageUrls.length < 5) {
-        results.push({ index: i, name: productName.slice(0, 40), success: false, message: `上传图片不足5张 (${orderedImageUrls.length})` });
+      if (orderedImageUrls.length < REQUIRED_AI_DETAIL_IMAGE_COUNT) {
+        results.push({
+          index: i,
+          name: productName.slice(0, 40),
+          success: false,
+          message: `上传图片不足${REQUIRED_AI_DETAIL_IMAGE_COUNT}张 (${orderedImageUrls.length})`,
+        });
         syncCurrentProgressResults(results, { current: `${itemNum}/${total} ${productName.slice(0, 30)}`, step: "图片上传失败" });
         continue;
       }

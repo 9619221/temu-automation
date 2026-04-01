@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import { CollectionProvider } from "./contexts/CollectionContext";
 import {
@@ -61,6 +61,7 @@ function RouteLoading() {
 
 function App() {
   const [accountViewVersion, setAccountViewVersion] = useState(0);
+  const lastEmittedAccountIdRef = useRef<string | null | undefined>(undefined);
 
   useEffect(() => {
     const store = window.electronAPI?.store;
@@ -74,6 +75,7 @@ function App() {
 
       const activeAccountId = await readActiveAccountId(store);
       if (cancelled) return;
+      lastEmittedAccountIdRef.current = activeAccountId;
 
       if (!Array.isArray(accounts) || accounts.length === 0) {
         if (activeAccountId) {
@@ -104,7 +106,12 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const handleActiveAccountChanged = () => {
+    const handleActiveAccountChanged = (event: Event) => {
+      const nextAccountId = (event as CustomEvent<{ accountId?: string | null }>)?.detail?.accountId ?? null;
+      if (lastEmittedAccountIdRef.current === nextAccountId) {
+        return;
+      }
+      lastEmittedAccountIdRef.current = nextAccountId;
       setAccountViewVersion((prev) => prev + 1);
     };
 
