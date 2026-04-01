@@ -218,6 +218,10 @@ async function startWorker() {
   // 先尝试关闭旧的 worker
   await shutdownOldWorker();
 
+  const aiImagePort = await findAvailableImageStudioPort();
+  updateImageStudioStatus({ port: aiImagePort });
+  const aiImageServer = getImageStudioBaseUrl(aiImagePort);
+
   // 打包模式优先用 ELECTRON_RUN_AS_NODE（能读 asar），否则用外部 Node
   const workerPath = app.isPackaged
     ? path.join(process.resourcesPath, "app.asar", "automation", "worker-entry.cjs")
@@ -233,6 +237,7 @@ async function startWorker() {
       ELECTRON_RUN_AS_NODE: "1",
       WORKER_PORT: String(workerPort),
       APP_USER_DATA: app.getPath("userData"),
+      AI_IMAGE_SERVER: aiImageServer,
     };
   } else {
     nodeExe = findNodeExe();
@@ -241,10 +246,11 @@ async function startWorker() {
         Object.entries(process.env).filter(([k]) => !k.startsWith("ELECTRON"))
       ),
       WORKER_PORT: String(workerPort),
+      AI_IMAGE_SERVER: aiImageServer,
     };
   }
 
-  console.log(`[Main] Starting worker: ${nodeExe} ${workerPath} (port ${workerPort}) packaged=${app.isPackaged}`);
+  console.log(`[Main] Starting worker: ${nodeExe} ${workerPath} (port ${workerPort}) packaged=${app.isPackaged} aiImageServer=${aiImageServer}`);
 
   worker = spawn(nodeExe, [workerPath], {
     stdio: ["ignore", "pipe", "pipe"],

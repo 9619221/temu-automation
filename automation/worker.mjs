@@ -5027,8 +5027,25 @@ const IMAGE_TYPE_ORDER = [
   "lifestyle2", // 5. A+ 收束图
 ];
 
-const AI_IMAGE_GEN_URL = "http://localhost:3210";
-const AI_AUTH_HEADERS = { "sec-fetch-site": "same-origin", "origin": "http://localhost:3210" };
+const AI_IMAGE_GEN_URL = (process.env.AI_IMAGE_SERVER || "http://localhost:3210").replace(/\/+$/, "");
+const AI_IMAGE_GEN_ORIGIN = (() => {
+  try {
+    return new URL(AI_IMAGE_GEN_URL).origin;
+  } catch {
+    return AI_IMAGE_GEN_URL;
+  }
+})();
+const AI_AUTH_HEADERS = { "sec-fetch-site": "same-origin", "origin": AI_IMAGE_GEN_ORIGIN };
+
+async function formatAiImageError(prefix, response) {
+  try {
+    const payload = (await response.text()).trim();
+    if (payload) {
+      return `${prefix}: ${response.status} ${payload.slice(0, 240)}`;
+    }
+  } catch {}
+  return `${prefix}: ${response.status}`;
+}
 
 /**
  * 调用 AI 生图服务：分析 + 生成 10 张图
@@ -5071,7 +5088,7 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
     headers: AI_AUTH_HEADERS,
   });
   if (!analyzeResp.ok) {
-    return { success: false, error: `Analyze failed: ${analyzeResp.status}` };
+    return { success: false, error: await formatAiImageError("Analyze failed", analyzeResp) };
   }
   const analysis = await analyzeResp.json();
   console.error(`[ai-gen] Analysis: ${analysis.productName?.slice(0, 40)}, category: ${analysis.category?.slice(0, 30)}`);
@@ -5090,7 +5107,7 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
     }),
   });
   if (!plansResp.ok) {
-    return { success: false, error: `Plans API failed: ${plansResp.status}` };
+    return { success: false, error: await formatAiImageError("Plans API failed", plansResp) };
   }
   const { plans } = await plansResp.json();
   console.error(`[ai-gen] Got ${plans.length} plans with prompts`);
