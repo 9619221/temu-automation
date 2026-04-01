@@ -14,6 +14,8 @@ export const browserState = {
   cookiePath: "",
   lastAccountId: "",
   navLiteMode: false,
+  lastPhone: "",
+  lastPassword: "",
 };
 
 const TEMU_LOGIN_URL = "https://seller.kuajingmaihuo.com/login";
@@ -60,6 +62,12 @@ export async function saveCookies() {
 let _browserLaunchPromise = null;
 
 export async function ensureBrowser() {
+  // 检查浏览器是否还活着，已关闭则清空引用让下面重新启动
+  if (browserState.browser && !browserState.browser.isConnected()) {
+    console.error("[Browser] Browser disconnected, clearing references...");
+    browserState.browser = null;
+    browserState.context = null;
+  }
   if (browserState.browser && browserState.context) return;
   if (_browserLaunchPromise) { await _browserLaunchPromise; return; }
 
@@ -73,6 +81,7 @@ export async function ensureBrowser() {
       }
     }
     if (!accountId) throw new Error("请先登录账号后再操作");
+
     await launch(accountId, false);
   })();
 
@@ -123,6 +132,8 @@ export async function closeBrowser() {
 
 // ---- 登录 ----
 export async function login(phone, password) {
+  browserState.lastPhone = phone;
+  browserState.lastPassword = password;
   const page = await browserState.context.newPage();
   try {
     await page.goto(TEMU_LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 60000 });

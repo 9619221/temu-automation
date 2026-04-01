@@ -108,6 +108,7 @@ interface CollectionContextType {
   successCount: number;
   errorCount: number;
   startCollectAll: () => void;
+  cancelCollection: () => void;
   startSyncDashboard: () => void;
   syncingDashboard: boolean;
 }
@@ -120,6 +121,7 @@ const CollectionContext = createContext<CollectionContextType>({
   successCount: 0,
   errorCount: 0,
   startCollectAll: () => {},
+  cancelCollection: () => {},
   startSyncDashboard: () => {},
   syncingDashboard: false,
 });
@@ -403,11 +405,30 @@ export function CollectionProvider({ children }: { children: React.ReactNode }) 
     }
   }, [syncingDashboard]);
 
+  const cancelCollection = useCallback(() => {
+    if (!collecting) return;
+    // 关闭 worker 的浏览器来中断采集
+    api?.close?.().catch(() => {});
+    setCollecting(false);
+    setProgress(0);
+    // 把所有 running 状态改为 error
+    setTaskStates((prev) => {
+      const next = { ...prev };
+      for (const key of Object.keys(next)) {
+        if (next[key].status === "running") {
+          next[key] = { status: "error", message: "已取消" };
+        }
+      }
+      return next;
+    });
+    message.info("采集已取消");
+  }, [collecting]);
+
   return (
     <CollectionContext.Provider value={{
       collecting, taskStates, progress, elapsed,
       successCount, errorCount,
-      startCollectAll, startSyncDashboard, syncingDashboard,
+      startCollectAll, cancelCollection, startSyncDashboard, syncingDashboard,
     }}>
       {children}
     </CollectionContext.Provider>

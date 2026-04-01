@@ -124,6 +124,15 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   store: {
     get: (key) => ipcRenderer.invoke("store:get", key),
-    set: (key, data) => ipcRenderer.invoke("store:set", key, data),
+    set: (key, data) => {
+      // 先 JSON roundtrip 清除不可序列化的内容（Buffer、circular ref 等），避免 IPC 结构化克隆失败
+      try {
+        const safe = JSON.parse(JSON.stringify(data));
+        return ipcRenderer.invoke("store:set", key, safe);
+      } catch (e) {
+        console.error("[preload] store:set serialize error for key=" + key, e.message);
+        return ipcRenderer.invoke("store:set", key, null);
+      }
+    },
   },
 });

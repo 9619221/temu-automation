@@ -28,7 +28,7 @@ export default function Dashboard() {
   const {
     collecting, taskStates, progress, elapsed,
     successCount, errorCount,
-    startCollectAll, startSyncDashboard, syncingDashboard,
+    startCollectAll, cancelCollection, startSyncDashboard, syncingDashboard,
   } = useCollection();
   const completedCount = Object.values(taskStates).filter((task) => task.status === "success" || task.status === "error").length;
 
@@ -48,6 +48,16 @@ export default function Dashboard() {
             >
               一键采集全部数据
             </Button>
+            {collecting && (
+              <Button
+                danger
+                size="large"
+                onClick={cancelCollection}
+                style={{ borderRadius: 10, height: 48 }}
+              >
+                取消采集
+              </Button>
+            )}
             <Button
               icon={<SyncOutlined />}
               onClick={startSyncDashboard}

@@ -26,6 +26,7 @@ import {
 } from "antd";
 import type { UploadFile } from "antd/es/upload/interface";
 import {
+  CloseOutlined,
   CopyOutlined,
   DownloadOutlined,
   ExportOutlined,
@@ -83,6 +84,18 @@ const TEMU_UPLOAD_BG = "radial-gradient(circle at top, #fff9f3 0%, #ffffff 72%)"
 const IMAGE_STUDIO_FAST_MAX_SIDE = 1600;
 const IMAGE_STUDIO_FAST_RAW_BYTES = 2.5 * 1024 * 1024;
 const IMAGE_STUDIO_FAST_QUALITY = 0.88;
+const REDRAW_UI_TEXT = {
+  score: "\u8bc4\u5206",
+  redraw: "\u91cd\u7ed8",
+  download: "\u4e0b\u8f7d",
+  redrawTitle: "\u91cd\u7ed8\u63d0\u793a\u8bcd",
+  redrawPlaceholder: "\u4f8b\u5982\uff1a\u6539\u6210\u53a8\u623f\u53f0\u9762\uff0c\u4e0d\u8981\u4eba\u7269\uff0c\u753b\u9762\u66f4\u7b80\u6d01",
+  directRedraw: "\u76f4\u63a5\u91cd\u7ed8",
+  guidedRedraw: "\u5e26\u63d0\u793a\u91cd\u7ed8",
+  helper: "\u4e0d\u6ee1\u610f\u67d0\u4e00\u5f20\u56fe\u65f6\uff0c\u70b9\u51fb\u56fe\u7247\u4e0a\u7684\u91cd\u7ed8\u6309\u94ae\u5373\u53ef\u76f4\u63a5\u91cd\u7ed8\uff0c\u6216\u586b\u5199\u63d0\u793a\u8bcd\u540e\u65b0\u589e\u4e00\u4e2a\u5019\u9009\u7248\u672c\u3002",
+  needSuggestion: "\u5148\u8f93\u5165\u4f60\u7684\u4fee\u6539\u5efa\u8bae\uff0c\u518d\u91cd\u7ed8\u8fd9\u5f20\u56fe",
+  redrawStarted: "\u5df2\u5f00\u59cb\u91cd\u7ed8",
+} as const;
 
 type ResultStatus = "idle" | "queued" | "generating" | "done" | "error";
 
@@ -196,6 +209,16 @@ function buildRedrawPrompt(basePrompt: string, suggestion: string, imageType: st
     "",
     "除上述修改外，其他内容尽量保持一致，输出 1 张新的候选版本。",
   ].filter(Boolean).join("\n");
+}
+
+function buildDirectRedrawPrompt(basePrompt: string, imageType: string) {
+  return [
+    basePrompt.trim(),
+    "",
+    `\u8bf7\u57fa\u4e8e\u540c\u4e00\u4e2a\u5546\u54c1\u548c\u540c\u4e00\u4e2a\u51fa\u56fe\u76ee\u6807\uff0c\u76f4\u63a5\u91cd\u7ed8\u8fd9\u5f20${IMAGE_TYPE_LABELS[imageType] || imageType}\u3002`,
+    "\u4fdd\u7559\u5546\u54c1\u4e3b\u4f53\u3001\u5e73\u53f0\u5408\u89c4\u8981\u6c42\u548c\u6574\u4f53\u5356\u70b9\u65b9\u5411\u3002",
+    "\u8bf7\u7528\u66f4\u65b0\u7684\u6784\u56fe\u3001\u89c6\u89d2\u3001\u9053\u5177\u548c\u753b\u9762\u5904\u7406\u65b9\u5f0f\uff0c\u751f\u6210 1 \u5f20\u65b0\u7684\u5019\u9009\u7248\u672c\u3002",
+  ].join("\n");
 }
 
 function buildConfigDraft(config: ImageStudioConfig) {
@@ -401,6 +424,7 @@ export default function ImageStudio() {
   const [imageVariants, setImageVariants] = useState<ImageVariantMap>({});
   const [activeVariantIds, setActiveVariantIds] = useState<Record<string, string>>({});
   const [redrawSuggestions, setRedrawSuggestions] = useState<Record<string, string>>({});
+  const [openRedrawComposerFor, setOpenRedrawComposerFor] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
   const [planning, setPlanning] = useState(false);
@@ -767,6 +791,7 @@ export default function ImageStudio() {
       setImageVariants({});
       setActiveVariantIds({});
       setRedrawSuggestions({});
+      setOpenRedrawComposerFor(null);
       setRedrawingTypes({});
       setActiveStep(1);
       message.success("商品分析已完成");
@@ -842,6 +867,7 @@ export default function ImageStudio() {
       setImageVariants({});
       setActiveVariantIds({});
       setRedrawSuggestions({});
+      setOpenRedrawComposerFor(null);
       setRedrawingTypes({});
       if (normalizedPlans && normalizedPlans.length > 0) {
         setActiveStep(2);
@@ -1058,7 +1084,7 @@ export default function ImageStudio() {
     }
   };
 
-  const handleSingleRedraw = async (imageType: string) => {
+  const handleSingleRedraw = async (imageType: string, mode: "direct" | "guided" = "guided") => {
     if (!imageStudioAPI) return;
     if (generating) {
       message.warning("当前还有生成任务在运行，请先等待完成或取消");
@@ -1070,8 +1096,8 @@ export default function ImageStudio() {
     }
 
     const suggestion = (redrawSuggestions[imageType] || "").trim();
-    if (!suggestion) {
-      message.warning("先输入你的修改建议，再重绘这张图");
+    if (mode === "guided" && !suggestion) {
+      message.warning(REDRAW_UI_TEXT.needSuggestion);
       return;
     }
 
@@ -1082,7 +1108,9 @@ export default function ImageStudio() {
     }
 
     const activeVariant = getActiveVariant(imageType);
-    const nextPrompt = buildRedrawPrompt(activeVariant?.prompt?.trim() || basePlan.prompt, suggestion, imageType);
+    const nextPrompt = mode === "guided"
+      ? buildRedrawPrompt(activeVariant?.prompt?.trim() || basePlan.prompt, suggestion, imageType)
+      : buildDirectRedrawPrompt(activeVariant?.prompt?.trim() || basePlan.prompt, imageType);
     const redrawPlan: ImageStudioPlan = {
       ...basePlan,
       prompt: nextPrompt,
@@ -1093,7 +1121,8 @@ export default function ImageStudio() {
     setGenerating(true);
     setCurrentJobId(nextJobId);
     currentJobModeRef.current = "redraw";
-    currentRedrawMetaRef.current = { imageType, suggestion, prompt: nextPrompt };
+    currentRedrawMetaRef.current = { imageType, suggestion: mode === "guided" ? suggestion : "", prompt: nextPrompt };
+    setOpenRedrawComposerFor(null);
     setRedrawingTypes((prev) => ({ ...prev, [imageType]: true }));
     setResults((prev) => ({
       ...prev,
@@ -1112,7 +1141,8 @@ export default function ImageStudio() {
         imageLanguage,
         imageSize,
       });
-      message.success(`已开始重绘 ${IMAGE_TYPE_LABELS[imageType] || imageType}`);
+      message.success(`${REDRAW_UI_TEXT.redrawStarted}${IMAGE_TYPE_LABELS[imageType] || imageType}`);
+      return;
     } catch (error) {
       setGenerating(false);
       setCurrentJobId("");
@@ -1282,6 +1312,7 @@ export default function ImageStudio() {
     setImageVariants({});
     setActiveVariantIds({});
     setRedrawSuggestions({});
+    setOpenRedrawComposerFor(null);
     setRedrawingTypes({});
     setGenerating(false);
     setCurrentJobId("");
@@ -1839,31 +1870,131 @@ export default function ImageStudio() {
                             {IMAGE_TYPE_LABELS[image.imageType] || image.imageType}
                           </div>
                           <Image src={image.imageUrl} alt={image.imageType} style={{ width: "100%", borderRadius: 14, objectFit: "cover" }} />
+                          <div
+                            style={{
+                              position: "absolute",
+                              left: "50%",
+                              bottom: 12,
+                              transform: "translateX(-50%)",
+                              display: "flex",
+                              gap: 8,
+                              zIndex: 4,
+                            }}
+                          >
+                            <Tooltip title={REDRAW_UI_TEXT.score}>
+                              <Button
+                                shape="circle"
+                                icon={<StarOutlined />}
+                                onClick={() => handleScoreImage(image.imageType, activeVariant?.variantId)}
+                                loading={Boolean(activeVariant?.scoring)}
+                                style={{
+                                  width: 38,
+                                  height: 38,
+                                  borderColor: "#f2d4b4",
+                                  background: "#fff",
+                                  boxShadow: "0 10px 24px rgba(15, 23, 42, 0.12)",
+                                }}
+                              />
+                            </Tooltip>
+                            <Tooltip title={REDRAW_UI_TEXT.redraw}>
+                              <Button
+                                shape="circle"
+                                icon={<ReloadOutlined />}
+                                onClick={() => setOpenRedrawComposerFor((prev) => (prev === image.imageType ? null : image.imageType))}
+                                loading={Boolean(redrawingTypes[image.imageType])}
+                                disabled={generating && !redrawingTypes[image.imageType]}
+                                style={{
+                                  width: 38,
+                                  height: 38,
+                                  borderColor: "#ffd2ad",
+                                  background: "#fff7ef",
+                                  color: TEMU_ORANGE,
+                                  boxShadow: "0 10px 24px rgba(255, 106, 0, 0.18)",
+                                }}
+                              />
+                            </Tooltip>
+                            <Tooltip title={REDRAW_UI_TEXT.download}>
+                              <Button
+                                shape="circle"
+                                icon={<DownloadOutlined />}
+                                onClick={() => handleDownloadImage(image)}
+                                loading={Boolean(downloadingTypes[downloadKey])}
+                                style={{
+                                  width: 38,
+                                  height: 38,
+                                  borderColor: "#d9e2ec",
+                                  background: "#fff",
+                                  boxShadow: "0 10px 24px rgba(15, 23, 42, 0.12)",
+                                }}
+                              />
+                            </Tooltip>
+                          </div>
+
+                          {openRedrawComposerFor === image.imageType ? (
+                            <div
+                              style={{
+                                position: "absolute",
+                                right: 12,
+                                bottom: 58,
+                                width: "min(280px, calc(100% - 24px))",
+                                borderRadius: 18,
+                                background: "rgba(255,255,255,0.98)",
+                                boxShadow: "0 22px 44px rgba(15, 23, 42, 0.18)",
+                                border: "1px solid #f1dfcf",
+                                padding: 14,
+                                zIndex: 5,
+                                backdropFilter: "blur(10px)",
+                              }}
+                            >
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                                <Space size={6}>
+                                  <ReloadOutlined style={{ color: TEMU_ORANGE }} />
+                                  <Text strong style={{ color: TEMU_TEXT }}>{REDRAW_UI_TEXT.redrawTitle}</Text>
+                                </Space>
+                                <Button
+                                  type="text"
+                                  size="small"
+                                  icon={<CloseOutlined />}
+                                  onClick={() => setOpenRedrawComposerFor(null)}
+                                  style={{ color: "#94a3b8" }}
+                                />
+                              </div>
+                              <TextArea
+                                autoSize={{ minRows: 4, maxRows: 6 }}
+                                value={redrawSuggestions[image.imageType] || ""}
+                                onChange={(event) => setRedrawSuggestions((prev) => ({ ...prev, [image.imageType]: event.target.value }))}
+                                placeholder={REDRAW_UI_TEXT.redrawPlaceholder}
+                                style={{ borderRadius: 12, marginBottom: 12 }}
+                              />
+                              <Space style={{ width: "100%", justifyContent: "space-between" }}>
+                                <Button
+                                  onClick={() => handleSingleRedraw(image.imageType, "direct")}
+                                  loading={Boolean(redrawingTypes[image.imageType])}
+                                  disabled={generating && !redrawingTypes[image.imageType]}
+                                  style={{ borderRadius: 12 }}
+                                >
+                                  {REDRAW_UI_TEXT.directRedraw}
+                                </Button>
+                                <Button
+                                  type="primary"
+                                  icon={<RocketOutlined />}
+                                  onClick={() => handleSingleRedraw(image.imageType, "guided")}
+                                  loading={Boolean(redrawingTypes[image.imageType])}
+                                  disabled={generating && !redrawingTypes[image.imageType]}
+                                  style={{
+                                    borderRadius: 12,
+                                    border: "none",
+                                    background: TEMU_BUTTON_GRADIENT,
+                                    boxShadow: TEMU_BUTTON_SHADOW,
+                                  }}
+                                >
+                                  {REDRAW_UI_TEXT.guidedRedraw}
+                                </Button>
+                              </Space>
+                            </div>
+                          ) : null}
                         </div>
 
-                        <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
-                          <Text strong style={{ color: TEMU_TEXT }}>{IMAGE_TYPE_LABELS[image.imageType] || image.imageType}</Text>
-                          <Space size={8}>
-                            <Button
-                              size="small"
-                              icon={<DownloadOutlined />}
-                              onClick={() => handleDownloadImage(image)}
-                              loading={Boolean(downloadingTypes[downloadKey])}
-                              style={{ borderRadius: 12 }}
-                            >
-                              下载
-                            </Button>
-                            <Button
-                              size="small"
-                              icon={<StarOutlined />}
-                              onClick={() => handleScoreImage(image.imageType, activeVariant?.variantId)}
-                              loading={Boolean(activeVariant?.scoring)}
-                              style={{ borderRadius: 12 }}
-                            >
-                              评分
-                            </Button>
-                          </Space>
-                        </div>
 
                         {activeVariant?.score ? (
                           <Row gutter={[8, 8]}>
@@ -1877,29 +2008,6 @@ export default function ImageStudio() {
                           <Text type="secondary">优化建议：{activeVariant.score.suggestions.join("；")}</Text>
                         ) : null}
 
-                        <div>
-                          <Text type="secondary" style={{ display: "block", marginBottom: 6 }}>
-                            重绘建议
-                          </Text>
-                          <TextArea
-                            autoSize={{ minRows: 3, maxRows: 5 }}
-                            value={redrawSuggestions[image.imageType] || ""}
-                            onChange={(event) => setRedrawSuggestions((prev) => ({ ...prev, [image.imageType]: event.target.value }))}
-                            placeholder="例如：背景改成厨房台面，不要人物，文案更简洁，整体更高级。"
-                            style={{ borderRadius: 12 }}
-                          />
-                        </div>
-
-                        <Button
-                          block
-                          icon={<ReloadOutlined />}
-                          onClick={() => handleSingleRedraw(image.imageType)}
-                          loading={Boolean(redrawingTypes[image.imageType])}
-                          disabled={generating && !redrawingTypes[image.imageType]}
-                          style={{ borderRadius: 12 }}
-                        >
-                          {redrawingTypes[image.imageType] ? "正在重绘…" : "按建议重绘"}
-                        </Button>
 
                         {variants.length > 0 ? (
                           <div>
@@ -2244,420 +2352,6 @@ export default function ImageStudio() {
         </div>
       )}
 
-      {false ? (
-        <Row gutter={[20, 20]} style={{ maxWidth: 980, margin: "0 auto" }}>
-          <Col xs={24} xl={activeStep === 0 ? 24 : 9}>
-            <Space direction="vertical" size={16} style={{ width: "100%" }}>
-              <Card
-                title={activeStep === 0 ? null : `当前步骤 · ${stepItems[activeStep]?.title || "AI 出图"}`}
-                style={{ borderRadius: 12, borderColor: TEMU_BORDER, boxShadow: "0 2px 8px rgba(0,0,0,0.04)" }}
-                bodyStyle={activeStep === 0 ? { padding: 0 } : undefined}
-              >
-                <Space direction="vertical" size={16} style={{ width: "100%" }}>
-                  {activeStep !== 0 ? (
-                    <Text type="secondary" style={{ fontSize: 13 }}>
-                      {stepItems[activeStep]?.description}
-                    </Text>
-                  ) : null}
-
-                  {activeStep === 0 ? (
-                    <>
-                      <div
-                        style={{
-                          border: "1px dashed #ffb38a",
-                          borderRadius: 24,
-                          background: "radial-gradient(circle at top, #fffaf5 0%, #ffffff 70%)",
-                          padding: "44px 24px 32px",
-                          textAlign: "center",
-                        }}
-                      >
-                        <div
-                          style={{
-                            width: 64,
-                            height: 64,
-                            borderRadius: 12,
-                            margin: "0 auto 18px",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            background: "linear-gradient(135deg, #ff7a1a 0%, #ff5a00 100%)",
-                            boxShadow: "0 10px 24px rgba(255, 90, 0, 0.18)",
-                          }}
-                        >
-                          <UploadOutlined style={{ color: "#fff", fontSize: 28 }} />
-                        </div>
-
-                        <Title level={4} style={{ marginBottom: 8 }}>拖拽商品图片到此处</Title>
-                        <Text type="secondary">支持多张图片（最多 5 张），适合组合装/套装</Text>
-
-                        <div style={{ marginTop: 24 }}>
-                          <Upload
-                            accept="image/*"
-                            listType="picture"
-                            multiple
-                            beforeUpload={() => false}
-                            fileList={uploadFiles}
-                            maxCount={5}
-                            onChange={({ fileList }) => setUploadFiles(fileList.slice(-5))}
-                          >
-                            <Button type="primary" size="large" icon={<UploadOutlined />} style={{ borderRadius: 8, minWidth: 132 }}>
-                              选择图片
-                            </Button>
-                          </Upload>
-                        </div>
-
-                        <div style={{ marginTop: 18 }}>
-                          <Text type="secondary">上传 1-5 张商品图，支持组合装/套装商品</Text>
-                        </div>
-                      </div>
-
-                      <div style={{ padding: 24 }}>
-                        <Space direction="vertical" size={18} style={{ width: "100%" }}>
-                          <Row gutter={[12, 12]}>
-                            <Col xs={24} md={12} xl={6}>
-                              <Text type="secondary">商品模式</Text>
-                              <Select
-                                style={{ width: "100%", marginTop: 8 }}
-                                value={productMode}
-                                onChange={setProductMode}
-                                options={PRODUCT_MODE_OPTIONS.map((option) => ({
-                                  label: option.label,
-                                  value: option.value,
-                                }))}
-                              />
-                            </Col>
-                            <Col xs={24} md={12} xl={6}>
-                              <Text type="secondary">销售区域</Text>
-                              <Select
-                                style={{ width: "100%", marginTop: 8 }}
-                                value={salesRegion}
-                                onChange={(value) => {
-                                  setSalesRegion(value);
-                                  setImageLanguage(getDefaultImageLanguageForRegion(value));
-                                }}
-                                options={SALES_REGION_OPTIONS as unknown as { value: string; label: string }[]}
-                              />
-                            </Col>
-                            <Col xs={24} md={12} xl={6}>
-                              <Text type="secondary">文字语言</Text>
-                              <Select
-                                style={{ width: "100%", marginTop: 8 }}
-                                value={imageLanguage}
-                                onChange={setImageLanguage}
-                                options={IMAGE_LANGUAGE_OPTIONS as unknown as { value: string; label: string }[]}
-                              />
-                            </Col>
-                            <Col xs={24} md={12} xl={6}>
-                              <Text type="secondary">画布尺寸</Text>
-                              <Select
-                                style={{ width: "100%", marginTop: 8 }}
-                                value={imageSize}
-                                onChange={setImageSize}
-                                options={IMAGE_SIZE_OPTIONS as unknown as { value: string; label: string }[]}
-                              />
-                            </Col>
-                          </Row>
-
-                          <div>
-                            <Text type="secondary">需要生成的图片类型</Text>
-                            <Checkbox.Group
-                              style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 10, marginTop: 14 }}
-                              value={selectedImageTypes}
-                              options={DEFAULT_IMAGE_TYPES.map((type) => ({ label: IMAGE_TYPE_LABELS[type], value: type }))}
-                              onChange={(values) => setSelectedImageTypes(values.map(String))}
-                            />
-                          </div>
-
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-                            <Space wrap size={[8, 8]}>
-                              {selectedTypeLabels.map((label) => (
-                                <Tag key={label} color="orange" style={{ borderRadius: 8 }}>{label}</Tag>
-                              ))}
-                            </Space>
-                            <Button type="primary" size="large" style={{ borderRadius: 8, minWidth: 144 }} disabled={!hasUploads} onClick={() => setActiveStep(1)}>
-                              下一步
-                            </Button>
-                          </div>
-                        </Space>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <Space wrap size={[8, 8]}>
-                        <Tag color="orange">素材 {uploadFiles.length} 张</Tag>
-                        <Tag>{selectedTypeLabels.length || 0} 种图类型</Tag>
-                        <Tag>{SALES_REGION_OPTIONS.find((option) => option.value === salesRegion)?.label || salesRegion}</Tag>
-                        <Tag>{IMAGE_LANGUAGE_OPTIONS.find((option) => option.value === imageLanguage)?.label || imageLanguage}</Tag>
-                        <Tag>{imageSize}</Tag>
-                      </Space>
-
-                      <Space direction="vertical" size={10} style={{ width: "100%" }}>
-                        <Button block onClick={() => setActiveStep(Math.max(activeStep - 1, 0))}>上一步</Button>
-                        {activeStep === 1 ? (
-                          <>
-                            <Button block type="primary" icon={<PictureOutlined />} onClick={handleAnalyze} loading={analyzing}>
-                              {hasAnalysis ? "重新分析商品" : "开始分析商品"}
-                            </Button>
-                            <Button block icon={<ReloadOutlined />} onClick={handleRegenerateAnalysis} loading={regenerating} disabled={!hasAnalysis}>
-                              {regenerating ? "重生中…" : "重生卖点"}
-                            </Button>
-                            <Button block type="primary" disabled={!hasAnalysis} onClick={() => setActiveStep(2)}>
-                              下一步：生成方案
-                            </Button>
-                          </>
-                        ) : null}
-                        {activeStep === 2 ? (
-                          <>
-                            <Button block type="primary" icon={<RocketOutlined />} onClick={handleGeneratePlans} loading={planning} disabled={!hasAnalysis}>
-                              {planning ? "生成中…" : hasPlans ? "重新生成方案" : "生成方案"}
-                            </Button>
-                            <Button block type="primary" disabled={!hasPlans} onClick={() => setActiveStep(3)}>
-                              下一步：开始出图
-                            </Button>
-                          </>
-                        ) : null}
-                        {activeStep === 3 ? (
-                          <>
-                            <Button
-                              block
-                              type="primary"
-                              icon={<RocketOutlined />}
-                              onClick={() => handleStartGenerate(false)}
-                              loading={generating}
-                              disabled={plans.length === 0 || uploadFiles.length === 0}
-                            >
-                              {generating ? "正在生图…" : "开始原生生图"}
-                            </Button>
-                            <Button block icon={<ThunderboltOutlined />} onClick={() => handleStartGenerate(true)} disabled={plans.length === 0 || uploadFiles.length === 0 || generating}>
-                              后台生成
-                            </Button>
-                            <Button block danger icon={<StopOutlined />} onClick={handleCancelGenerate} disabled={!generating || !currentJobId}>
-                              取消任务
-                            </Button>
-                          </>
-                        ) : null}
-                      </Space>
-                    </>
-                  )}
-                </Space>
-              </Card>
-            </Space>
-          </Col>
-
-          {activeStep !== 0 ? (
-          <Col xs={24} xl={15}>
-            {activeStep === 1 ? (
-              <Card title="确认商品分析">
-                <Space direction="vertical" size={16} style={{ width: "100%" }}>
-                  {!hasAnalysis ? (
-                    <Text type="secondary">先点左侧“开始分析商品”，这里会自动填充商品信息。</Text>
-                  ) : null}
-
-                  <Input value={analysis.productName} onChange={(event) => updateAnalysisField("productName", event.target.value)} placeholder="商品名称" />
-                  <Row gutter={12}>
-                    <Col span={12}>
-                      <Input value={analysis.category} onChange={(event) => updateAnalysisField("category", event.target.value)} placeholder="商品类目" />
-                    </Col>
-                    <Col span={12}>
-                      <Input value={analysis.estimatedDimensions} onChange={(event) => updateAnalysisField("estimatedDimensions", event.target.value)} placeholder="尺寸信息" />
-                    </Col>
-                  </Row>
-                  <Input value={analysis.materials} onChange={(event) => updateAnalysisField("materials", event.target.value)} placeholder="材质" />
-                  <Input value={analysis.colors} onChange={(event) => updateAnalysisField("colors", event.target.value)} placeholder="颜色 / 色值" />
-                  <Row gutter={12}>
-                    <Col xs={24} xxl={8}>
-                      <Text type="secondary">卖点</Text>
-                      <TextArea
-                        autoSize={{ minRows: 4, maxRows: 10 }}
-                        value={arrayToMultiline(analysis.sellingPoints)}
-                        onChange={(event) => updateAnalysisField("sellingPoints", multilineToArray(event.target.value))}
-                        placeholder="一行一个卖点"
-                      />
-                    </Col>
-                    <Col xs={24} xxl={8}>
-                      <Text type="secondary">目标人群</Text>
-                      <TextArea
-                        autoSize={{ minRows: 4, maxRows: 10 }}
-                        value={arrayToMultiline(analysis.targetAudience)}
-                        onChange={(event) => updateAnalysisField("targetAudience", multilineToArray(event.target.value))}
-                        placeholder="一行一个人群"
-                      />
-                    </Col>
-                    <Col xs={24} xxl={8}>
-                      <Text type="secondary">使用场景</Text>
-                      <TextArea
-                        autoSize={{ minRows: 4, maxRows: 10 }}
-                        value={arrayToMultiline(analysis.usageScenes)}
-                        onChange={(event) => updateAnalysisField("usageScenes", multilineToArray(event.target.value))}
-                        placeholder="一行一个场景"
-                      />
-                    </Col>
-                  </Row>
-                </Space>
-              </Card>
-            ) : null}
-
-            {activeStep === 2 ? (
-              <Card title="确认出图方案">
-                <Space direction="vertical" size={16} style={{ width: "100%" }}>
-                  {plans.length > 0 ? (
-                    <List
-                      size="small"
-                      dataSource={plans}
-                      renderItem={(plan) => (
-                        <List.Item>
-                          <Space direction="vertical" size={10} style={{ width: "100%" }}>
-                            <Space style={{ justifyContent: "space-between", width: "100%" }} wrap>
-                              <Tag color="blue">{IMAGE_TYPE_LABELS[plan.imageType] || plan.imageType}</Tag>
-                              <Text type="secondary">{plan.title || plan.headline || "自动方案"}</Text>
-                            </Space>
-                            <TextArea
-                              autoSize={{ minRows: 4, maxRows: 10 }}
-                              value={plan.prompt}
-                              onChange={(event) => updatePlanPrompt(plan.imageType, event.target.value)}
-                              placeholder="这里可以手动微调每张图的 Prompt"
-                            />
-                          </Space>
-                        </List.Item>
-                      )}
-                    />
-                  ) : (
-                    <Text type="secondary">点左侧“生成方案”后，这里会列出每张图的 Prompt。</Text>
-                  )}
-                </Space>
-              </Card>
-            ) : null}
-
-            {activeStep === 3 ? (
-              <Space direction="vertical" size={16} style={{ width: "100%" }}>
-                <Card
-                  title="执行出图任务"
-                  extra={<Space><Tag color={generating ? "processing" : "default"}>{generating ? "生成中" : "空闲"}</Tag><Text type="secondary">{completedCount}/{planCount}</Text></Space>}
-                >
-                  <Space direction="vertical" size={16} style={{ width: "100%" }}>
-                    <Progress percent={progressPercent} status={generating ? "active" : "normal"} />
-
-                    {plans.length > 0 ? (
-                      <List
-                        size="small"
-                        bordered
-                        dataSource={plans}
-                        renderItem={(plan) => {
-                          const result = getResultState(results, plan.imageType);
-                          return (
-                            <List.Item>
-                              <Space direction="vertical" size={6} style={{ width: "100%" }}>
-                                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-                                  <Space>
-                                    <Tag color="blue">{IMAGE_TYPE_LABELS[plan.imageType] || plan.imageType}</Tag>
-                                    {result.status === "queued" ? <Tag>排队中</Tag> : null}
-                                    {result.status === "done" ? <Tag color="success">已完成</Tag> : null}
-                                    {result.status === "generating" ? <Tag color="processing">生成中</Tag> : null}
-                                    {result.status === "error" ? <Tag color="error">失败</Tag> : null}
-                                  </Space>
-                                  <Text type="secondary">{plan.title || plan.headline || "自动方案"}</Text>
-                                </div>
-                                <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }} ellipsis={{ rows: 2, expandable: true, symbol: "展开" }}>
-                                  {plan.prompt}
-                                </Paragraph>
-                                {result.warnings.length > 0 ? (
-                                  <Text type="secondary">注意：{result.warnings.join("；")}</Text>
-                                ) : null}
-                                {result.error ? (
-                                  <Text type="danger">{result.error}</Text>
-                                ) : null}
-                              </Space>
-                            </List.Item>
-                          );
-                        }}
-                      />
-                    ) : (
-                      <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有出图方案，请先回到上一步生成方案" />
-                    )}
-                  </Space>
-                </Card>
-
-                {generatedImages.length > 0 ? (
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 16 }}>
-                    {generatedImages.map((image) => {
-                      const result = getResultState(results, image.imageType);
-                      return (
-                        <Card
-                          key={image.imageType}
-                          size="small"
-                          title={IMAGE_TYPE_LABELS[image.imageType] || image.imageType}
-                          extra={<Button size="small" icon={<StarOutlined />} onClick={() => handleScoreImage(image.imageType)} loading={result.scoring}>评分</Button>}
-                        >
-                          <Space direction="vertical" size={12} style={{ width: "100%" }}>
-                            <Image src={image.imageUrl} alt={image.imageType} style={{ width: "100%", borderRadius: 8, objectFit: "cover" }} />
-                            {result.score ? (
-                              <Row gutter={[8, 8]}>
-                                <Col span={8}><Statistic title="综合" value={result.score.overall} precision={1} /></Col>
-                                <Col span={8}><Statistic title="合规" value={result.score.compliance} precision={1} /></Col>
-                                <Col span={8}><Statistic title="吸引力" value={result.score.appeal} precision={1} /></Col>
-                              </Row>
-                            ) : null}
-                            {result.score?.suggestions?.length ? (
-                              <Text type="secondary">优化建议：{result.score.suggestions.join("；")}</Text>
-                            ) : null}
-                          </Space>
-                        </Card>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <Card>
-                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="生成完成后，结果会在这里原生展示" />
-                  </Card>
-                )}
-              </Space>
-            ) : null}
-
-            {activeStep === 0 ? (
-              <Card title="本次出图">
-                <Space direction="vertical" size={16} style={{ width: "100%" }}>
-                  <div>
-                    <Text type="secondary">图片类型</Text>
-                    <div style={{ marginTop: 10 }}>
-                      <Space wrap size={[8, 8]}>
-                        {selectedTypeLabels.map((label) => (
-                          <Tag key={label} color="orange">{label}</Tag>
-                        ))}
-                      </Space>
-                    </div>
-                  </div>
-
-                  <div>
-                    <Text type="secondary">已上传素材</Text>
-                    <div style={{ marginTop: 10 }}>
-                      {uploadFiles.length > 0 ? (
-                        <Space direction="vertical" size={8} style={{ width: "100%" }}>
-                          {uploadFiles.map((file) => (
-                            <div
-                              key={file.uid}
-                              style={{
-                                padding: "12px 14px",
-                                border: `1px solid ${TEMU_BORDER}`,
-                                borderRadius: 14,
-                                background: "#fff",
-                              }}
-                            >
-                              <Text>{file.name}</Text>
-                            </div>
-                          ))}
-                        </Space>
-                      ) : (
-                        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="上传后的素材会显示在这里" />
-                      )}
-                    </div>
-                  </div>
-                </Space>
-              </Card>
-            ) : null}
-          </Col>
-          ) : null}
-        </Row>
-      ) : null}
 
       <Drawer
         title="AI 出图配置"

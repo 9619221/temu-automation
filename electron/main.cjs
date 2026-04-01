@@ -1639,7 +1639,7 @@ async function createWindow() {
 
   mainWindow.setMenuBarVisibility(false);
 
-  mainWindow.once("ready-to-show", () => {
+  mainWindow.webContents.once("did-finish-load", () => {
     mainWindow.show();
   });
 
@@ -1779,7 +1779,17 @@ ipcMain.handle("automation:scrape-performance", async () => {
 
 ipcMain.handle("automation:scrape-all", async () => {
   if (!workerReady) await startWorker();
-  return httpPost(workerPort, { action: "scrape_all", params: {}, timeoutMs: 30 * 60 * 1000 });
+  // 传递活跃账号凭据给 worker，用于 cookie 过期时自动登录
+  let credentials = {};
+  try {
+    const accounts = readStoreJsonWithRecovery(getStoreFilePath(ACCOUNT_STORE_KEY), ACCOUNT_STORE_KEY);
+    const activeId = readStoreJsonWithRecovery(getStoreFilePath("temu_active_account_id"), "temu_active_account_id");
+    if (Array.isArray(accounts) && activeId) {
+      const active = accounts.find(a => a?.id === activeId);
+      if (active?.phone) credentials = { phone: active.phone, password: active.password || "" };
+    }
+  } catch {}
+  return httpPost(workerPort, { action: "scrape_all", params: { credentials }, timeoutMs: 30 * 60 * 1000 });
 });
 
 ipcMain.handle("automation:create-product", async (_e, params) => {
@@ -2213,7 +2223,8 @@ ipcMain.handle("image-studio:download-all", async (_event, payload) => {
       if (!resp.ok) continue;
       const buffer = Buffer.from(await resp.arrayBuffer());
       const ext = (resp.headers.get("content-type") || "").includes("png") ? "png" : "jpg";
-      const typeName = (img.imageType || `image_${saved + 1}`).replace(/[<>:"/\\|?*]/g, "_");
+      const IMAGE_TYPE_LABELS_CN = { main: "主图", features: "卖点图", closeup: "细节图", dimensions: "尺寸图", lifestyle: "场景图", packaging: "包装图", comparison: "对比图", lifestyle2: "A+收束图", scene_a: "核价场景图A", scene_b: "核价场景图B" };
+      const typeName = (IMAGE_TYPE_LABELS_CN[img.imageType] || img.imageType || `图片_${saved + 1}`).replace(/[<>:"/\\|?*]/g, "_");
       fs.writeFileSync(path.join(saveDir, `${typeName}.${ext}`), buffer);
       saved++;
     } catch (e) {
@@ -2396,20 +2407,27 @@ async function readStoreJsonAsync(filePath) {
 
 async function writeStoreJsonAtomicAsync(filePath, data, options = {}) {
   const { skipBackup = false, key } = options;
-  const tempPath = `${filePath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
-  const backupPath = getStoreBackupPath(filePath);
   const serialized = JSON.stringify(serializeStoreValue(key, data), null, 2);
+  const backupPath = getStoreBackupPath(filePath);
 
   await fsPromises.mkdir(path.dirname(filePath), { recursive: true });
 
-  try {
-    await fsPromises.writeFile(tempPath, serialized);
-    await replaceStoreFileAsync(tempPath, filePath, { backupPath, skipBackup });
-  } catch (error) {
+  // 重试最多 3 次（Windows 文件锁冲突 EBUSY/EPERM）
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const tempPath = `${filePath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
     try {
-      await fsPromises.rm(tempPath, { force: true });
-    } catch {}
-    throw error;
+      await fsPromises.writeFile(tempPath, serialized);
+      await replaceStoreFileAsync(tempPath, filePath, { backupPath, skipBackup });
+      return;
+    } catch (error) {
+      try { await fsPromises.rm(tempPath, { force: true }); } catch {}
+      if (attempt < 2) {
+        console.error(`[Store] Write attempt ${attempt + 1} failed for ${path.basename(filePath)}: ${error.message}, retrying...`);
+        await new Promise(r => setTimeout(r, 200 + Math.random() * 300));
+      } else {
+        throw error;
+      }
+    }
   }
 }
 
@@ -2453,13 +2471,20 @@ const _storeWriteLocks = new Map();
 ipcMain.handle("store:set", async (_, key, data) => {
   // 串行化同 key 写入，避免并发文件冲突
   const prev = _storeWriteLocks.get(key) || Promise.resolve();
-  const current = prev.then(async () => {
-    await writeStoreJsonAtomicAsync(getStoreFilePath(key), data, { key });
-  }).catch((err) => {
-    console.error(`[Store] Write failed for key="${key}":`, err?.message || err);
-    throw err;
-  });
+  let resolve_lock;
+  const current = new Promise((r) => { resolve_lock = r; });
   _storeWriteLocks.set(key, current);
-  await current;
-  return true;
+  await prev.catch(() => {});
+  try {
+    const filePath = getStoreFilePath(key);
+    await fsPromises.mkdir(path.dirname(filePath), { recursive: true });
+    const serialized = JSON.stringify(serializeStoreValue(key, data), null, 2);
+    await fsPromises.writeFile(filePath, serialized);
+    return true;
+  } catch (err) {
+    console.error(`[Store] Write failed for key="${key}":`, err?.code, err?.message);
+    throw err;
+  } finally {
+    resolve_lock();
+  }
 });

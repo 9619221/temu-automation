@@ -119,7 +119,21 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
   const lite = options.lite || _navLiteMode; // lite 模式：不处理弹窗，交给外部监控器
   const directUrl = `https://agentseller.temu.com${targetPath}`;
   console.error(`[nav] Navigating to ${directUrl} (lite=${lite})`);
-  await page.goto(directUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+  // ERR_ABORTED / frame detached 重试
+  for (let navTry = 0; navTry < 3; navTry++) {
+    try {
+      await page.goto(directUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+      break;
+    } catch (navErr) {
+      const retryable = /ERR_ABORTED|frame was detached|ERR_FAILED/i.test(navErr.message);
+      if (retryable && navTry < 2) {
+        console.error(`[nav] goto ERR (attempt ${navTry + 1}), retrying: ${navErr.message}`);
+        await randomDelay(2000, 3000);
+      } else {
+        throw navErr;
+      }
+    }
+  }
   // 等待可能的重定向
   await randomDelay(3000, 5000);
   // 等 URL 稳定
@@ -148,9 +162,33 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
       }
     } catch (e) { logSilent("ui.action", e); }
 
-    // 等待弹窗被监控器处理（最多60秒）
+    // 等待弹窗被监控器处理（最多60秒），同时主动检查授权弹窗
     for (let retry = 0; retry < 12; retry++) {
       await randomDelay(5000, 5000);
+
+      // 主动扫描所有页面，处理未关闭的授权弹窗
+      try {
+        for (const p of context.pages()) {
+          if (p === page || p.isClosed()) continue;
+          const pUrl = p.url();
+          if (!pUrl.includes("kuajingmaihuo.com") && !pUrl.includes("seller-login")) continue;
+          const bodyText = await p.evaluate(() => document.body?.innerText || "").catch(() => "");
+          if (bodyText.includes("确认授权") || bodyText.includes("即将前往")) {
+            console.error("[nav-lite] Found unhandled auth popup, handling...");
+            try {
+              const cb = p.locator('input[type="checkbox"]').first();
+              if (await cb.isVisible({ timeout: 1000 })) { if (!(await cb.isChecked().catch(() => false))) await cb.click(); }
+            } catch {}
+            await randomDelay(300, 500);
+            try {
+              const btn = p.locator('button:has-text("确认授权并前往"), button:has-text("确认授权")').first();
+              if (await btn.isVisible({ timeout: 1000 })) { await btn.click(); console.error("[nav-lite] Clicked auth button"); }
+            } catch {}
+            await randomDelay(2000, 3000);
+          }
+        }
+      } catch (e) { logSilent("ui.action", e); }
+
       // 尝试重新导航
       try {
         await page.goto(directUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
@@ -396,8 +434,67 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
           }
 
           if (!authHandled) {
-            // 没有授权弹窗 → cookie 真的过期了，等用户手动登录
-            console.error("[nav] No auth dialog, waiting for user manual login (max 2min)...");
+            // 没有授权弹窗 → cookie 过期，尝试自动登录
+            const { lastPhone, lastPassword } = browserState;
+            if (lastPhone && lastPassword) {
+              console.error("[nav] Cookie expired, auto-login with saved credentials...");
+              try {
+                // 切换到账号登录 tab
+                try {
+                  const accountTab = popup.locator('text=账号登录').first();
+                  if (await accountTab.isVisible({ timeout: 3000 })) { await accountTab.click(); await randomDelay(1000, 2000); }
+                } catch (e) { logSilent("ui.action", e); }
+
+                // 输入手机号
+                const ph = await popup.waitForSelector('#usernameId, input[name="usernameId"], input[placeholder*="手机"]', { timeout: 5000 });
+                await ph.click(); await ph.fill("");
+                for (const c of lastPhone) await ph.type(c, { delay: Math.random() * 80 + 40 });
+                await randomDelay(500, 1000);
+
+                // 输入密码
+                const pw = await popup.waitForSelector('#passwordId, input[type="password"]', { timeout: 5000 });
+                await pw.click(); await pw.fill("");
+                for (const c of lastPassword) await pw.type(c, { delay: Math.random() * 80 + 40 });
+                await randomDelay(500, 1000);
+
+                // 勾选协议
+                try {
+                  const cb = popup.locator('input[type="checkbox"]').first();
+                  if (await cb.isVisible({ timeout: 2000 })) {
+                    if (!(await cb.isChecked())) await cb.click();
+                  }
+                } catch (e) { logSilent("ui.action", e); }
+                await randomDelay(300, 600);
+
+                // 点击登录
+                const btn = await popup.waitForSelector('button:has-text("登录")', { timeout: 3000 });
+                await btn.click();
+                console.error("[nav] Auto-login submitted, waiting...");
+                await randomDelay(3000, 5000);
+
+                // 处理隐私弹窗
+                try {
+                  const agreeBtn = popup.locator('button:has-text("同意并登录"), button:has-text("同意")').first();
+                  if (await agreeBtn.isVisible({ timeout: 3000 })) { await agreeBtn.click(); await randomDelay(1000, 2000); }
+                } catch (e) { logSilent("ui.action", e); }
+
+                // 等待登录完成或验证码
+                for (let i = 0; i < 30; i++) {
+                  await randomDelay(2000, 3000);
+                  if (await tryAuthInPopup()) { authHandled = true; break; }
+                  if (!popup.url().includes("login") && !popup.url().includes("seller-login")) break;
+                }
+                if (authHandled) {
+                  await saveCookies();
+                  console.error("[nav] Auto-login succeeded!");
+                }
+              } catch (e) {
+                console.error("[nav] Auto-login failed:", e.message);
+              }
+            }
+
+            if (!authHandled) {
+            console.error("[nav] Waiting for user manual login (max 2min)...");
 
             // 勾选 checkbox（隐私政策）
             try {
@@ -426,6 +523,7 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
             }
             await saveCookies();
           }
+          } // end if (!authHandled) fallback
         } else {
           // Popup 是授权确认页（包括 kuajingmaihuo.com 授权页）
           console.error("[nav] Popup is auth confirmation page, URL:", popup.url());
@@ -3842,7 +3940,13 @@ async function handleRequest(body) {
       return await scrapeViaSidebarClick();
     }
     case "scrape_all": {
-      // 一键采集：并发执行（限制3个），用弹窗监控器自动处理授权弹窗
+      // 一键采集：并发执行，用弹窗监控器自动处理授权弹窗
+      // 接收 main 进程传来的凭据，用于 cookie 过期时自动登录
+      if (params.credentials?.phone) {
+        browserState.lastPhone = params.credentials.phone;
+        browserState.lastPassword = params.credentials.password || "";
+        console.error(`[scrape_all] Received credentials for ${params.credentials.phone.slice(0, 3)}***`);
+      }
       await ensureBrowser();
       console.error("[scrape_all] Step 1: Setup popup monitor + establish session...");
 
@@ -4045,7 +4149,7 @@ async function handleRequest(body) {
         { key: "adsHelp", fn: () => scrapeAdsHelp() },
         { key: "adsNotification", fn: () => scrapeAdsNotification() },
       ];
-      const CONCURRENCY = 4;
+      const CONCURRENCY = 16;
       const queue = [...tasks];
       const running = [];
 
@@ -5463,17 +5567,21 @@ async function autoPricingFromCSV(params) {
     console.error(`[auto-pricing] Price: $${priceUSD} → ¥${priceCNY.toFixed(2)}`);
 
     try {
-      // Step 1: 下载商品原图
+      // Step 1: 下载商品原图（带重试）
       updateCurrentProgress({ step: "下载原图" });
       let sourceImagePath = null;
       if (imageUrl?.startsWith("http")) {
         const imgFile = path.join(tmpDir, `source_${i}_${Date.now()}.jpg`);
-        try {
-          await downloadImage(imageUrl, imgFile);
-          sourceImagePath = imgFile;
-          console.error(`[auto-pricing] Source image downloaded`);
-        } catch (e) {
-          console.error(`[auto-pricing] Image download failed: ${e.message}`);
+        for (let dl = 0; dl < 3; dl++) {
+          try {
+            await downloadImage(imageUrl, imgFile);
+            sourceImagePath = imgFile;
+            console.error(`[auto-pricing] Source image downloaded`);
+            break;
+          } catch (e) {
+            console.error(`[auto-pricing] Image download attempt ${dl + 1}/3 failed: ${e.message}`);
+            if (dl < 2) await randomDelay(2000, 4000);
+          }
         }
       }
 
@@ -5621,14 +5729,32 @@ async function autoPricingFromCSV(params) {
 
       updateCurrentProgress({ step: "提交核价..." });
       console.error(`[auto-pricing] Submitting pricing with ${orderedImageUrls.length} images...`);
-      const createResult = await createProductViaAPI({
-        title: finalTitle,
-        imageUrls: orderedImageUrls,
-        price: priceCNY,
-        categorySearch,
-        keepOpen: false,
-        config: params.config,
-      });
+      let createResult;
+      for (let submitAttempt = 0; submitAttempt < 3; submitAttempt++) {
+        try {
+          createResult = await createProductViaAPI({
+            title: finalTitle,
+            imageUrls: orderedImageUrls,
+            price: priceCNY,
+            categorySearch,
+            keepOpen: false,
+            config: params.config,
+          });
+          // 如果不是连接错误就不重试
+          if (createResult.success || !createResult.message?.includes("CONNECTION_RESET")) break;
+          console.error(`[auto-pricing] CONNECTION_RESET, retry ${submitAttempt + 1}/3...`);
+          await randomDelay(5000, 8000);
+        } catch (e) {
+          if (submitAttempt < 2 && e.message?.includes("CONNECTION_RESET")) {
+            console.error(`[auto-pricing] CONNECTION_RESET exception, retry ${submitAttempt + 1}/3...`);
+            await randomDelay(5000, 8000);
+            createResult = { success: false, message: e.message };
+          } else {
+            createResult = { success: false, message: e.message };
+            break;
+          }
+        }
+      }
 
       results.push({
         index: i,
@@ -6093,9 +6219,27 @@ function ruleBasedRepair(errorMsg) {
     return actions;
   }
 
-  // 说明书未上传 → 保存草稿（无法自动上传说明书）
+  // 净含量必填 / 某属性必填 → 重新获取模板并自动填充
+  if (errorMsg.includes("净含量") || errorMsg.includes("必填")) {
+    actions.push({ type: "retry_template" });
+    return actions;
+  }
+
+  // 属性校验错误（通用）→ 移除有问题的属性
+  if (errorMsg.includes("校验错误") || errorMsg.includes("不满足")) {
+    // 提取属性名
+    const propMatch = errorMsg.match(/属性[:\s]*[「"']?([^」"'\]]+)/);
+    if (propMatch) {
+      actions.push({ type: "remove_prop", propName: propMatch[1].trim() });
+    } else {
+      actions.push({ type: "retry_template" });
+    }
+    return actions;
+  }
+
+  // 说明书未上传 → 换一个不需要说明书的类目
   if (errorMsg.includes("说明书未上传")) {
-    actions.push({ type: "give_up", reason: "该类目要求上传说明书，需手动处理" });
+    actions.push({ type: "retry_category" });
     return actions;
   }
 
@@ -6464,7 +6608,7 @@ async function createProductViaAPI(params) {
       const errCode = result.errorCode || 0;
 
       // 只处理可修复的错误
-      if (![6000002, 1000001, 1000003, 2000148].includes(errCode) && !errMsg.includes("不能为空") && !errMsg.includes("Category") && !errMsg.includes("packaging") && !errMsg.includes("Invalid image")) {
+      if (![6000002, 1000001, 1000003, 2000148].includes(errCode) && !errMsg.includes("不能为空") && !errMsg.includes("Category") && !errMsg.includes("packaging") && !errMsg.includes("Invalid image") && !errMsg.includes("净含量") && !errMsg.includes("属性") && !errMsg.includes("校验") && !errMsg.includes("必填") && !errMsg.includes("说明书")) {
         console.error(`[selfRepair] Error ${errCode} not repairable, stopping`);
         break;
       }
@@ -6825,8 +6969,23 @@ async function batchCreateViaAPI(params) {
       results.push({ index: i, name: productName.slice(0, 40), productId: result.productId, ...result });
       console.error(`[batch-api] ${result.success ? "OK productId=" + result.productId : "FAIL: " + result.message}`);
     } catch (e) {
-      results.push({ index: i, name: productName.slice(0, 40), success: false, message: e.message });
-      console.error(`[batch-api] ERROR: ${e.message}`);
+      // ERR_ABORTED / frame detached / CONNECTION_RESET 等网络瞬断，自动重试一次
+      const isRetryable = /ERR_ABORTED|frame was detached|CONNECTION_RESET|ECONNRESET|net::/i.test(e.message);
+      if (isRetryable) {
+        console.error(`[batch-api] NETWORK ERROR, retrying once: ${e.message}`);
+        await randomDelay(3000, 5000);
+        try {
+          const retryResult = await createProductViaAPI(createParams);
+          results.push({ index: i, name: productName.slice(0, 40), productId: retryResult.productId, ...retryResult });
+          console.error(`[batch-api] RETRY ${retryResult.success ? "OK productId=" + retryResult.productId : "FAIL: " + retryResult.message}`);
+        } catch (e2) {
+          results.push({ index: i, name: productName.slice(0, 40), success: false, message: e2.message });
+          console.error(`[batch-api] RETRY ERROR: ${e2.message}`);
+        }
+      } else {
+        results.push({ index: i, name: productName.slice(0, 40), success: false, message: e.message });
+        console.error(`[batch-api] ERROR: ${e.message}`);
+      }
     }
 
     // 间隔控制
