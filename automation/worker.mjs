@@ -42,6 +42,56 @@ let context = null;
 let cookiePath = "";
 let lastAccountId = "";
 let _navLiteMode = false;
+const SCRAPE_RESULT_KEY_PATTERN = /^[A-Za-z0-9._:-]+$/;
+
+function createPendingTaskTracker() {
+  const pending = new Set();
+  return {
+    track(task) {
+      pending.add(task);
+      task.finally(() => pending.delete(task));
+      return task;
+    },
+    async drain(timeoutMs = 2000) {
+      if (pending.size === 0) return;
+      await Promise.race([
+        Promise.allSettled(Array.from(pending)),
+        new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+      ]);
+    },
+  };
+}
+
+function resolveReadScrapeDataRequest(taskKey) {
+  if (typeof taskKey !== "string" || !taskKey.trim()) {
+    throw new Error("é‡‡é›†æ•°æ® key æ— æ•ˆ");
+  }
+
+  if (taskKey.startsWith("csv_preview:")) {
+    const filePath = path.resolve(taskKey.slice("csv_preview:".length));
+    const extension = path.extname(filePath).toLowerCase();
+    if (![".csv", ".xlsx", ".xls"].includes(extension)) {
+      throw new Error("ä»…æ”¯æŒé¢„è§ˆ CSV / Excel è¡¨æ ¼");
+    }
+    return { type: "csv_preview", filePath };
+  }
+
+  const normalizedKey = taskKey.trim();
+  if (
+    normalizedKey.includes("..")
+    || normalizedKey.includes("/")
+    || normalizedKey.includes("\\")
+    || !SCRAPE_RESULT_KEY_PATTERN.test(normalizedKey)
+  ) {
+    throw new Error(`éžæ³•é‡‡é›†æ•°æ® key: ${taskKey}`);
+  }
+
+  const debugDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
+  return {
+    type: "scrape_result",
+    filePath: path.join(debugDir, `scrape_all_${normalizedKey}.json`),
+  };
+}
 
 // 同步 browserState 到局部变量（ensureBrowser/launch 后自动调用）
 function syncBrowserState() {
@@ -4052,25 +4102,118 @@ async function handleRequest(body) {
       return results;
     }
     case "read_scrape_data": {
-      const taskKey = params.key;
-
-      // CSV/XLSX 预览
-      if (taskKey.startsWith("csv_preview:")) {
-        const filePath = taskKey.slice("csv_preview:".length);
-        if (!fs.existsSync(filePath)) return null;
-        const wb = XLSX.readFile(filePath);
+      const request = resolveReadScrapeDataRequest(params.key);
+      if (!request || !fs.existsSync(request.filePath)) return null;
+      if (request.type === "csv_preview") {
+        const wb = XLSX.readFile(request.filePath);
         const ws = wb.Sheets[wb.SheetNames[0]];
         const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
-        return { rows };
+        return { rows, csvPath: request.filePath };
       }
-
-      // 从文件读取 scrape_all 保存的数据
-      const debugDir2 = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
-      const dataFile2 = path.join(debugDir2, `scrape_all_${taskKey}.json`);
-      if (fs.existsSync(dataFile2)) {
-        return JSON.parse(fs.readFileSync(dataFile2, "utf8"));
+      return JSON.parse(fs.readFileSync(request.filePath, "utf8"));
+    }
+    case "probe_page": {
+      // 探测指定页面的所有业务 API
+      await ensureBrowser();
+      const targetPath = params.path || "/goods/list";
+      const page = await context.newPage();
+      const allApis = [];
+      const responseTracker = createPendingTaskTracker();
+      const frameworkPatterns = ['phantom/xg', 'pfb/l1', 'pfb/a4', 'web-performace', 'get-leo-config', '_stm', 'msgBox', 'auth/userInfo', 'auth/menu', 'queryTotalExam', 'feedback/entrance', 'rule/unreadNum', 'suggestedPrice', 'checkAbleFeedback', 'queryFeedbackNotReadTotal', 'pop/query', '.js', '.css', '.png', '.svg', '.woff', '.ico', '.jpg', '.gif', '.map', '.webp', 'hm.baidu', 'google', 'favicon', 'hot-update', 'sockjs'];
+      try {
+        page.on("response", (resp) => {
+          responseTracker.track((async () => {
+            try {
+              const url = resp.url();
+              if (frameworkPatterns.some(p => url.includes(p))) return;
+              if (!url.includes("agentseller.temu.com") && !url.includes("kuajingmaihuo.com") && !url.includes("bg-")) return;
+              if (resp.status() === 200) {
+                const ct = resp.headers()["content-type"] || "";
+                if (ct.includes("json") || ct.includes("application")) {
+                  const body = await resp.json().catch(() => null);
+                  if (body) {
+                    const u = new URL(url);
+                    allApis.push({ path: u.pathname, hasResult: !!body.result, success: body.success, dataKeys: body.result ? Object.keys(body.result).slice(0, 10) : [] });
+                  }
+                }
+              }
+            } catch (e) { logSilent("ui.action", e); }
+          })());
+        });
+        await navigateToSellerCentral(page, targetPath);
+        await randomDelay(10000, 15000);
+        // 关闭弹窗
+        for (let i = 0; i < 5; i++) {
+          try {
+            const btn = page.locator('button:has-text("知道了"), button:has-text("确定"), button:has-text("关闭"), button:has-text("暂不")').first();
+            if (await btn.isVisible({ timeout: 500 })) await btn.click();
+            else break;
+          } catch { break; }
+        }
+        await randomDelay(3000, 5000);
+        await responseTracker.drain(3000);
+        console.error(`[probe] ${targetPath} => ${allApis.length} APIs captured`);
+        return { path: targetPath, apis: allApis };
+      } finally {
+        await responseTracker.drain(1000).catch(() => {});
+        await page.close().catch(() => {});
       }
-      return null;
+    }
+    case "probe_batch": {
+      // 批量探测多个页面
+      await ensureBrowser();
+      const paths = params.paths || [];
+      const results = {};
+      for (const p of paths) {
+        let page = null;
+        let responseTracker = null;
+        try {
+          page = await context.newPage();
+          responseTracker = createPendingTaskTracker();
+          const apis = [];
+          const frameworkPatterns = ['phantom/xg', 'pfb/l1', 'pfb/a4', 'web-performace', 'get-leo-config', '_stm', 'msgBox', 'auth/userInfo', 'auth/menu', 'queryTotalExam', 'feedback/entrance', 'rule/unreadNum', 'suggestedPrice', 'checkAbleFeedback', 'queryFeedbackNotReadTotal', 'pop/query', '.js', '.css', '.png', '.svg', '.woff', '.ico', '.jpg', '.gif', '.map', '.webp', 'hm.baidu', 'google', 'favicon', 'hot-update', 'sockjs'];
+          page.on("response", (resp) => {
+            responseTracker.track((async () => {
+              try {
+                const url = resp.url();
+                if (frameworkPatterns.some(pat => url.includes(pat))) return;
+                if (resp.status() === 200) {
+                  const ct = resp.headers()["content-type"] || "";
+                  if (ct.includes("json") || ct.includes("application")) {
+                    const body = await resp.json().catch(() => null);
+                    if (body) {
+                      const u = new URL(url);
+                      apis.push({ path: u.pathname, hasResult: !!body.result, success: body.success, dataKeys: body.result ? Object.keys(body.result).slice(0, 10) : [] });
+                    }
+                  }
+                }
+              } catch (e) { logSilent("ui.action", e); }
+            })());
+          });
+          await navigateToSellerCentral(page, p);
+          await randomDelay(8000, 12000);
+          for (let i = 0; i < 3; i++) {
+            try {
+              const btn = page.locator('button:has-text("知道了"), button:has-text("确定"), button:has-text("关闭"), button:has-text("暂不")').first();
+              if (await btn.isVisible({ timeout: 500 })) await btn.click();
+              else break;
+            } catch { break; }
+          }
+          await randomDelay(2000, 3000);
+          await responseTracker.drain(3000);
+          console.error(`[probe-batch] ${p} => ${apis.length} APIs`);
+          results[p] = apis;
+        } catch (e) {
+          console.error(`[probe-batch] ${p} ERROR: ${e.message}`);
+          results[p] = { error: e.message };
+        } finally {
+          if (responseTracker) {
+            await responseTracker.drain(1000).catch(() => {});
+          }
+          if (page) await page.close().catch(() => {});
+        }
+      }
+      return results;
     }
     case "debug_page": {
       await ensureBrowser();
@@ -4234,97 +4377,6 @@ async function handleRequest(body) {
     case "scrape_ads_finance": { await ensureBrowser(); return { adsFinance: await scrapeAdsFinance() }; }
     case "scrape_ads_help": { await ensureBrowser(); return { adsHelp: await scrapeAdsHelp() }; }
     case "scrape_ads_notification": { await ensureBrowser(); return { adsNotification: await scrapeAdsNotification() }; }
-    case "probe_page": {
-      // 探测指定页面的所有业务 API
-      await ensureBrowser();
-      const targetPath = params.path || "/goods/list";
-      const page = await context.newPage();
-      const allApis = [];
-      const frameworkPatterns = ['phantom/xg', 'pfb/l1', 'pfb/a4', 'web-performace', 'get-leo-config', '_stm', 'msgBox', 'auth/userInfo', 'auth/menu', 'queryTotalExam', 'feedback/entrance', 'rule/unreadNum', 'suggestedPrice', 'checkAbleFeedback', 'queryFeedbackNotReadTotal', 'pop/query', '.js', '.css', '.png', '.svg', '.woff', '.ico', '.jpg', '.gif', '.map', '.webp', 'hm.baidu', 'google', 'favicon', 'hot-update', 'sockjs'];
-      try {
-        page.on("response", async (resp) => {
-          try {
-            const url = resp.url();
-            if (frameworkPatterns.some(p => url.includes(p))) return;
-            if (!url.includes("agentseller.temu.com") && !url.includes("kuajingmaihuo.com") && !url.includes("bg-")) return;
-            if (resp.status() === 200) {
-              const ct = resp.headers()["content-type"] || "";
-              if (ct.includes("json") || ct.includes("application")) {
-                const body = await resp.json().catch(() => null);
-                if (body) {
-                  // 提取 URL 路径
-                  const u = new URL(url);
-                  allApis.push({ path: u.pathname, hasResult: !!body.result, success: body.success, dataKeys: body.result ? Object.keys(body.result).slice(0, 10) : [] });
-                }
-              }
-            }
-          } catch (e) { logSilent("ui.action", e); }
-        });
-        await navigateToSellerCentral(page, targetPath);
-        await randomDelay(10000, 15000);
-        // 关闭弹窗
-        for (let i = 0; i < 5; i++) {
-          try {
-            const btn = page.locator('button:has-text("知道了"), button:has-text("确定"), button:has-text("关闭"), button:has-text("暂不")').first();
-            if (await btn.isVisible({ timeout: 500 })) await btn.click();
-            else break;
-          } catch { break; }
-        }
-        await randomDelay(3000, 5000);
-        console.error(`[probe] ${targetPath} => ${allApis.length} APIs captured`);
-        return { path: targetPath, apis: allApis };
-      } finally {
-        await page.close();
-      }
-    }
-    case "probe_batch": {
-      // 批量探测多个页面
-      await ensureBrowser();
-      const paths = params.paths || [];
-      const results = {};
-      for (const p of paths) {
-        let page = null;
-        try {
-          page = await context.newPage();
-          const apis = [];
-          const frameworkPatterns = ['phantom/xg', 'pfb/l1', 'pfb/a4', 'web-performace', 'get-leo-config', '_stm', 'msgBox', 'auth/userInfo', 'auth/menu', 'queryTotalExam', 'feedback/entrance', 'rule/unreadNum', 'suggestedPrice', 'checkAbleFeedback', 'queryFeedbackNotReadTotal', 'pop/query', '.js', '.css', '.png', '.svg', '.woff', '.ico', '.jpg', '.gif', '.map', '.webp', 'hm.baidu', 'google', 'favicon', 'hot-update', 'sockjs'];
-          page.on("response", async (resp) => {
-            try {
-              const url = resp.url();
-              if (frameworkPatterns.some(pat => url.includes(pat))) return;
-              if (resp.status() === 200) {
-                const ct = resp.headers()["content-type"] || "";
-                if (ct.includes("json") || ct.includes("application")) {
-                  const body = await resp.json().catch(() => null);
-                  if (body) {
-                    const u = new URL(url);
-                    apis.push({ path: u.pathname, hasResult: !!body.result, success: body.success, dataKeys: body.result ? Object.keys(body.result).slice(0, 10) : [] });
-                  }
-                }
-              }
-            } catch (e) { logSilent("ui.action", e); }
-          });
-          await navigateToSellerCentral(page, p);
-          await randomDelay(8000, 12000);
-          for (let i = 0; i < 3; i++) {
-            try {
-              const btn = page.locator('button:has-text("知道了"), button:has-text("确定"), button:has-text("关闭"), button:has-text("暂不")').first();
-              if (await btn.isVisible({ timeout: 500 })) await btn.click();
-              else break;
-            } catch { break; }
-          }
-          await randomDelay(2000, 3000);
-          console.error(`[probe-batch] ${p} => ${apis.length} APIs`);
-          results[p] = apis;
-        } catch (e) {
-          console.error(`[probe-batch] ${p} ERROR: ${e.message}`);
-          results[p] = { error: e.message };
-        } finally {
-          if (page) await page.close().catch(() => {});
-        }
-      }
-      return results;
-    }
     case "create_product_api": {
       // 纯 API 方式创建商品（跳过 DOM 操作）
       await ensureBrowser();
@@ -6366,7 +6418,7 @@ async function createProductViaAPI(params) {
         propName: specInfo.parentSpecName, propValue: specInfo.specName,
         valueUnit: "", valueGroupId: 0, valueGroupName: "", valueExtendInfo: "",
       }],
-      carouselImageUrls: imageUrls.slice(0, 5),
+      carouselImageUrls: imageUrls.slice(0, 10),
       carouselImageI18nReqs: [],
       materialImgUrl: imageUrls[0],
       goodsLayerDecorationReqs: [],

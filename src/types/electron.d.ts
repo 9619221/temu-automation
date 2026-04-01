@@ -66,6 +66,26 @@ interface ImageStudioEventPayload {
   results?: ImageStudioGeneratedImage[];
   error?: string;
   message?: string;
+  historySaved?: boolean;
+  historyId?: string | null;
+  historySaveError?: string | null;
+}
+
+interface ImageStudioJob {
+  jobId: string;
+  status: "pending" | "running" | "done" | "failed" | "cancelled";
+  productName: string;
+  salesRegion?: string;
+  runInBackground?: boolean;
+  imageTypes: string[];
+  results: ImageStudioGeneratedImage[];
+  progress: { done: number; total: number; step: string };
+  createdAt: number;
+  finishedAt: number | null;
+  error: string | null;
+  historySaved?: boolean;
+  historyId?: string | null;
+  historySaveError?: string | null;
 }
 
 interface ImageStudioConfigUpdatePayload {
@@ -87,12 +107,15 @@ interface ImageStudioAPI {
   analyze: (payload: { files: NativeImagePayload[]; productMode: string }) => Promise<ImageStudioAnalysis>;
   regenerateAnalysis: (payload: { files: NativeImagePayload[]; productMode: string; analysis: ImageStudioAnalysis }) => Promise<Pick<ImageStudioAnalysis, "sellingPoints" | "targetAudience" | "usageScenes">>;
   generatePlans: (payload: { analysis: ImageStudioAnalysis; imageTypes: string[]; salesRegion: string; imageSize: string; productMode: string }) => Promise<ImageStudioPlan[]>;
-  startGenerate: (payload: { jobId?: string; files: NativeImagePayload[]; plans: ImageStudioPlan[]; productMode: string; imageLanguage: string; imageSize: string }) => Promise<ImageStudioGenerateStarted>;
+  startGenerate: (payload: { jobId?: string; files: NativeImagePayload[]; plans: ImageStudioPlan[]; productMode: string; salesRegion?: string; runInBackground?: boolean; imageLanguage: string; imageSize: string; productName?: string }) => Promise<ImageStudioGenerateStarted>;
   cancelGenerate: (jobId: string) => Promise<{ cancelled: boolean; jobId: string }>;
   listHistory: () => Promise<ImageStudioHistorySummary[]>;
   getHistoryItem: (id: string) => Promise<ImageStudioHistoryItem | null>;
   saveHistory: (payload: { productName: string; salesRegion: string; imageCount: number; images: ImageStudioGeneratedImage[] }) => Promise<{ id: string }>;
   scoreImage: (payload: { imageUrl: string; imageType: string }) => Promise<ImageStudioImageScore>;
+  listJobs: () => Promise<ImageStudioJob[]>;
+  getJob: (jobId: string) => Promise<ImageStudioJob | null>;
+  clearJob: (jobId: string) => Promise<void>;
 }
 
 interface AppAPI {

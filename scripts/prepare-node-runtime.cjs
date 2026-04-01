@@ -26,7 +26,26 @@ function resolveNodeSource() {
 function main() {
   const nodeSource = resolveNodeSource();
   fs.mkdirSync(outputDir, { recursive: true });
-  fs.copyFileSync(nodeSource, outputPath);
+  if (fs.existsSync(outputPath)) {
+    try {
+      const sourceStat = fs.statSync(nodeSource);
+      const outputStat = fs.statSync(outputPath);
+      if (sourceStat.size === outputStat.size) {
+        console.log(`[ok] node runtime already prepared: ${outputPath}`);
+        return;
+      }
+    } catch {}
+  }
+
+  try {
+    fs.copyFileSync(nodeSource, outputPath);
+  } catch (error) {
+    if (error?.code === "EBUSY" && fs.existsSync(outputPath)) {
+      console.warn(`[warn] node runtime busy, reusing existing file: ${outputPath}`);
+      return;
+    }
+    throw error;
+  }
   console.log(`[ok] node runtime prepared: ${outputPath}`);
 }
 

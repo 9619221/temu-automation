@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { Alert, Card, Row, Col, Statistic, Tag, Tabs, Table, Descriptions, Image, Button, Empty, Spin, Typography, Space } from "antd";
 import {
@@ -18,6 +18,7 @@ import { ACTIVE_ACCOUNT_CHANGED_EVENT } from "../utils/multiStore";
 
 const { Title, Paragraph } = Typography;
 const store = window.electronAPI?.store;
+const STALE_LOAD_ERROR = "__product_detail_stale_load__";
 
 interface ProductInfo {
   title: string;
@@ -103,9 +104,13 @@ export default function ProductDetail() {
   const [loading, setLoading] = useState(true);
   const [diagnostics, setDiagnostics] = useState<CollectionDiagnostics | null>(null);
   const [dataSources, setDataSources] = useState<DetailDataSources>(EMPTY_DATA_SOURCES);
+  const loadRequestIdRef = useRef(0);
 
   useEffect(() => {
-    loadProduct();
+    void loadProduct();
+    return () => {
+      loadRequestIdRef.current += 1;
+    };
   }, [id]);
 
   useEffect(() => {
@@ -119,6 +124,12 @@ export default function ProductDetail() {
   }, [id]);
 
   const loadProduct = async () => {
+    const requestId = ++loadRequestIdRef.current;
+    const ensureCurrentRequest = () => {
+      if (requestId !== loadRequestIdRef.current) {
+        throw new Error(STALE_LOAD_ERROR);
+      }
+    };
     setLoading(true);
     setProduct(null);
     setSalesInfo(null);
@@ -134,6 +145,7 @@ export default function ProductDetail() {
     setDataSources(EMPTY_DATA_SOURCES);
     try {
       setDiagnostics(normalizeCollectionDiagnostics(await getStoreValue(store, COLLECTION_DIAGNOSTICS_KEY)));
+      ensureCurrentRequest();
       const nextSources: DetailDataSources = { ...EMPTY_DATA_SOURCES };
       let resolvedProduct: ProductInfo | null = null;
       let productIdCandidates = buildProductIdCandidates(id);
@@ -141,6 +153,7 @@ export default function ProductDetail() {
 
       // Load product by skcId
       const rawProducts = await getStoreValue(store, "temu_products");
+      ensureCurrentRequest();
       if (rawProducts) {
         const products = parseProductsData(rawProducts);
         const found = products.find((p: any) => String(p.skcId) === id || String(p.spuId) === id || String(p.goodsId) === id);
@@ -153,6 +166,7 @@ export default function ProductDetail() {
 
       // Load related sales data
       const rawSales = await getStoreValue(store, "temu_sales");
+      ensureCurrentRequest();
       if (rawSales) {
         nextSources.sales = true;
         const sales = parseSalesData(rawSales);
@@ -179,6 +193,7 @@ export default function ProductDetail() {
 
       // Load related orders
       const rawOrders = await getStoreValue(store, "temu_orders");
+      ensureCurrentRequest();
       if (rawOrders) {
         nextSources.orders = true;
         const allOrders = parseOrdersData(rawOrders);
@@ -203,6 +218,7 @@ export default function ProductDetail() {
 
       // Load after-sales records
       const rawAfterSales = await getStoreValue(store, "temu_raw_afterSales");
+      ensureCurrentRequest();
       if (rawAfterSales) {
         nextSources.afterSales = true;
         const result = findInRawStore(rawAfterSales, "queryPageV3");
@@ -215,6 +231,7 @@ export default function ProductDetail() {
 
       // Load flow price / high price data
       const rawFlowPrice = await getStoreValue(store, "temu_raw_flowPrice");
+      ensureCurrentRequest();
       if (rawFlowPrice) {
         const result = findInRawStore(rawFlowPrice, "highPriceFlowReduce") || findInRawStore(rawFlowPrice, "high/price");
         if (result) {
@@ -226,6 +243,7 @@ export default function ProductDetail() {
 
       // Load retail price data
       const rawRetailPrice = await getStoreValue(store, "temu_raw_retailPrice");
+      ensureCurrentRequest();
       if (rawRetailPrice) {
         const result = findInRawStore(rawRetailPrice, "suggestedPrice/pageQuery") || findInRawStore(rawRetailPrice, "suggestedPrice");
         if (result) {
@@ -237,6 +255,7 @@ export default function ProductDetail() {
 
       // Load traffic/flux data
       const rawFlux = await getStoreValue(store, "temu_flux");
+      ensureCurrentRequest();
       if (rawFlux) {
         nextSources.flux = true;
         const parsedFlux = parseFluxData(rawFlux);
@@ -271,6 +290,7 @@ export default function ProductDetail() {
 
       // Load quality dashboard data
       const rawQuality = await getStoreValue(store, "temu_raw_qualityDashboard");
+      ensureCurrentRequest();
       if (rawQuality) {
         nextSources.quality = true;
         const result = findInRawStore(rawQuality, "qualityMetrics/pageQuery");
@@ -282,6 +302,7 @@ export default function ProductDetail() {
 
       // Load checkup data
       const rawCheckup = await getStoreValue(store, "temu_raw_checkup");
+      ensureCurrentRequest();
       if (rawCheckup) {
         nextSources.checkup = true;
         const result = findInRawStore(rawCheckup, "check/product/list");
@@ -293,6 +314,7 @@ export default function ProductDetail() {
 
       // Load goods sales data
       const rawGoodsData = await getFirstExistingStoreValue(store, STORE_KEY_ALIASES.goodsData);
+      ensureCurrentRequest();
       if (rawGoodsData) {
         nextSources.goodsData = true;
         const result = findInRawStore(rawGoodsData, "skc/sales/data");
@@ -304,6 +326,7 @@ export default function ProductDetail() {
 
       // Load marketing activity data
       const rawMarketing = await getFirstExistingStoreValue(store, STORE_KEY_ALIASES.marketingActivity);
+      ensureCurrentRequest();
       if (rawMarketing) {
         nextSources.marketingActivity = true;
         const result = findInRawStore(rawMarketing, "activity/list");
@@ -316,11 +339,16 @@ export default function ProductDetail() {
       }
       setDataSources(nextSources);
     } catch (e) {
+      if ((e as Error)?.message === STALE_LOAD_ERROR) {
+        return;
+      }
       console.error("加载商品详情失败", e);
       setDiagnostics(null);
       setDataSources(EMPTY_DATA_SOURCES);
     } finally {
-      setLoading(false);
+      if (requestId === loadRequestIdRef.current) {
+        setLoading(false);
+      }
     }
   };
 

@@ -253,12 +253,15 @@ export default function AccountManager() {
 
       if (result?.success) {
         const lastLoginAt = new Date().toLocaleString("zh-CN");
-        const nextAccounts = accounts.map((a) =>
-          a.id === account.id
-            ? { ...a, status: "online" as const, lastLoginAt }
-            : { ...a, status: "offline" as const }
-        );
-        setAccounts(nextAccounts);
+        let nextAccounts: Account[] = [];
+        setAccounts((prev) => {
+          nextAccounts = prev.map((a) =>
+            a.id === account.id
+              ? { ...a, status: "online" as const, lastLoginAt }
+              : { ...a, status: "offline" as const }
+          );
+          return nextAccounts;
+        });
         await setActiveAccountAndSync(store, nextAccounts, account.id);
         notification.success({
           key: "login",

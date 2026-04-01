@@ -28,6 +28,8 @@ const ACCOUNT_STORE_KEY = "temu_accounts";
 let autoPricingTaskPromise = null;
 let autoPricingTaskSyncTimer = null;
 let autoPricingCurrentTaskId = null;
+const WORKER_HTTP_TIMEOUT_MS = 5 * 60 * 1000;
+const STORE_KEY_PATTERN = /^[A-Za-z0-9._:-]+$/;
 
 const AUTO_PRICING_FILTER_KEYWORDS = {
   liquid: [
@@ -267,16 +269,63 @@ function findNodeExe() {
   return "node";
 }
 
+function killChildProcessTree(child) {
+  return new Promise((resolve) => {
+    if (!child?.pid) {
+      resolve(false);
+      return;
+    }
+
+    if (process.platform === "win32") {
+      const killer = spawn("taskkill", ["/F", "/T", "/PID", String(child.pid)], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      killer.on("error", () => resolve(false));
+      killer.on("exit", () => resolve(true));
+      return;
+    }
+
+    try {
+      child.kill("SIGTERM");
+      resolve(true);
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+function normalizeStoreKey(key) {
+  if (typeof key !== "string") {
+    throw new Error("Store key 必须是字符串");
+  }
+  const normalized = key.trim();
+  if (!normalized || normalized.includes("..") || !STORE_KEY_PATTERN.test(normalized)) {
+    throw new Error(`非法 store key: ${key}`);
+  }
+  return normalized;
+}
+
+function ensurePathInside(baseDir, targetPath, label) {
+  const relative = path.relative(baseDir, targetPath);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(`${label}超出允许目录`);
+  }
+  return targetPath;
+}
+
 function httpPost(port, body) {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify(body);
+    const timeout = Number(body?.timeoutMs) > 0 ? Number(body.timeoutMs) : WORKER_HTTP_TIMEOUT_MS;
+    const actionLabel = typeof body?.action === "string" && body.action ? body.action : "worker";
     const req = http.request(
       {
         hostname: "127.0.0.1",
         port,
         method: "POST",
         headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) },
-        timeout: 86400000,  // 24小时超时
+        timeout,
       },
       (res) => {
         const chunks = [];
@@ -294,7 +343,8 @@ function httpPost(port, body) {
       }
     );
     req.on("error", (e) => reject(new Error("Worker 通信失败: " + e.message)));
-    req.on("timeout", () => { req.destroy(); reject(new Error("Worker 请求超时")); });
+    req.on("timeout", () => { req.destroy(); reject(new Error(`Worker 请求超时: ${actionLabel}`)); });
+    req.setTimeout(timeout);
     req.write(data);
     req.end();
   });
@@ -340,7 +390,7 @@ async function shutdownOldWorker() {
           for (const pid of pids) {
             try {
               await new Promise((resolve) => {
-                exec(`taskkill /F /PID ${pid}`, { timeout: 3000 }, () => resolve());
+                exec(`taskkill /F /T /PID ${pid}`, { timeout: 3000 }, () => resolve());
               });
               console.log(`[Main] Killed old worker PID ${pid}`);
             } catch {}
@@ -363,7 +413,7 @@ async function startWorker(options = {}) {
 
   // 清理旧进程
   if (worker) {
-    try { worker.kill(); } catch {}
+    await killChildProcessTree(worker);
     worker = null;
     workerReady = false;
     workerAiImageServer = "";
@@ -447,7 +497,7 @@ async function startWorker(options = {}) {
     console.log(`[Main] Worker ready on port ${workerPort}`);
   } catch (e) {
     console.error("[Main] Worker 启动失败:", e.message);
-    if (worker) { try { worker.kill(); } catch {} }
+    if (worker) { await killChildProcessTree(worker); }
     worker = null;
     workerReady = false;
     workerAiImageServer = "";
@@ -864,7 +914,7 @@ function getAutoPricingProgressPayload(task) {
 function stopWorker() {
   stopAutoPricingTaskSync();
   if (worker) {
-    try { worker.kill(); } catch {}
+    void killChildProcessTree(worker);
     worker = null;
     workerReady = false;
     workerAiImageServer = "";
@@ -880,6 +930,7 @@ const IMAGE_STUDIO_SAFE_ANALYZE_MODEL = "gemini-3.1-flash-image-preview";
 
 let imageStudioProcess = null;
 let imageStudioPort = AUTO_IMAGE_DEFAULT_PORT;
+let imageStudioStartupPromise = null;
 let imageStudioStatus = {
   status: "idle",
   message: "AI 出图服务未启动",
@@ -890,6 +941,19 @@ let imageStudioStatus = {
 };
 const IMAGE_STUDIO_EVENT_CHANNEL = "image-studio:event";
 const imageStudioGenerateControllers = new Map();
+const imageStudioJobs = new Map(); // jobId → { jobId, status, productName, imageTypes, results[], progress, createdAt, finishedAt, error }
+
+function updateImageStudioJob(jobId, patch) {
+  const job = imageStudioJobs.get(jobId);
+  if (!job) return;
+  Object.assign(job, patch);
+}
+
+function getImageStudioJobList() {
+  return Array.from(imageStudioJobs.values())
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+    .slice(0, 50);
+}
 
 function getImageStudioBaseUrl(port = imageStudioPort) {
   return `http://${AUTO_IMAGE_HOST}:${port}`;
@@ -1080,14 +1144,27 @@ async function waitForImageStudio(startedProcess, maxWait = 90000) {
 }
 
 function stopImageStudioService() {
+  imageStudioStartupPromise = null;
   if (imageStudioProcess) {
-    try { imageStudioProcess.kill(); } catch {}
+    void killChildProcessTree(imageStudioProcess);
     imageStudioProcess = null;
   }
   updateImageStudioStatus({ status: "stopped", ready: false, message: "AI 出图服务已停止" });
 }
 
 async function ensureImageStudioService() {
+  if (imageStudioStartupPromise) {
+    return imageStudioStartupPromise;
+  }
+  imageStudioStartupPromise = ensureImageStudioServiceInternal();
+  try {
+    return await imageStudioStartupPromise;
+  } finally {
+    imageStudioStartupPromise = null;
+  }
+}
+
+async function ensureImageStudioServiceInternal() {
   const projectInfo = resolveAutoImageProjectDir();
   if (!projectInfo?.projectPath) {
     const searched = (projectInfo?.searchedPaths || []).join("；");
@@ -1100,7 +1177,7 @@ async function ensureImageStudioService() {
   }
 
   if (imageStudioProcess) {
-    try { imageStudioProcess.kill(); } catch {}
+    await killChildProcessTree(imageStudioProcess);
     imageStudioProcess = null;
   }
 
@@ -1190,10 +1267,11 @@ function getImageStudioWebContents(target) {
   return candidate;
 }
 
-function emitImageStudioEvent(target, payload) {
-  const webContents = getImageStudioWebContents(target);
-  if (!webContents) return;
-  webContents.send(IMAGE_STUDIO_EVENT_CHANNEL, payload);
+function emitImageStudioEvent(_target, payload) {
+  // 始终广播到 mainWindow（不绑定 sender），确保页面切换/刷新后也能收到后台 job 事件
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send(IMAGE_STUDIO_EVENT_CHANNEL, payload);
+  }
 }
 
 async function readImageStudioResponse(response) {
@@ -1324,6 +1402,34 @@ function normalizeImageStudioPlanList(payload) {
   return [];
 }
 
+function getImageStudioPlanForType(plans = [], imageType = "") {
+  if (!Array.isArray(plans) || !imageType) {
+    return null;
+  }
+  return plans.find((plan) => plan?.imageType === imageType) || null;
+}
+
+async function saveImageStudioHistorySnapshot(payload = {}) {
+  const images = Array.isArray(payload?.images)
+    ? payload.images.filter((item) => item?.imageType && item?.imageUrl)
+    : [];
+
+  if (images.length === 0) {
+    return null;
+  }
+
+  return imageStudioJson("/api/history", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      productName: payload?.productName || "未命名商品",
+      salesRegion: payload?.salesRegion || "us",
+      imageCount: Number(payload?.imageCount) || images.length,
+      images,
+    }),
+  });
+}
+
 function parseImageStudioSseChunk(buffer, onEvent) {
   let remaining = buffer;
   let boundaryIndex = remaining.indexOf("\n\n");
@@ -1350,18 +1456,82 @@ async function streamImageStudioGenerate(target, jobId, payload = {}) {
   imageStudioGenerateControllers.set(jobId, controller);
   const generatedImages = [];
   const emittedComplete = { current: false };
+  const normalizedPlans = Array.isArray(payload.plans) ? payload.plans : [];
+  const totalPlans = normalizedPlans.length;
 
-  const emitComplete = () => {
+  const appendGeneratedImage = (eventPayload) => {
+    if (eventPayload?.status !== "done" || !eventPayload?.imageUrl) {
+      return;
+    }
+
+    const currentPlan = getImageStudioPlanForType(normalizedPlans, eventPayload.imageType || "");
+    generatedImages.push({
+      imageType: eventPayload.imageType || "",
+      imageUrl: eventPayload.imageUrl,
+      prompt: currentPlan?.prompt || "",
+      suggestion: typeof currentPlan?.suggestion === "string" ? currentPlan.suggestion : "",
+      createdAt: Date.now(),
+    });
+    updateImageStudioJob(jobId, {
+      results: [...generatedImages],
+      progress: { done: generatedImages.length, total: totalPlans, step: `生成中 ${generatedImages.length}/${totalPlans}` },
+    });
+  };
+
+  const emitComplete = async () => {
     if (emittedComplete.current) return;
     emittedComplete.current = true;
+
+    let historySaved = false;
+    let historyId = null;
+    let historySaveError = null;
+    const completedImages = generatedImages.map((image) => {
+      const currentPlan = getImageStudioPlanForType(normalizedPlans, image?.imageType || "");
+      return {
+        ...image,
+        prompt: image?.prompt || currentPlan?.prompt || "",
+        suggestion: image?.suggestion || (typeof currentPlan?.suggestion === "string" ? currentPlan.suggestion : ""),
+        createdAt: image?.createdAt || Date.now(),
+      };
+    });
+
+    if (completedImages.length > 0) {
+      try {
+        const historyResult = await saveImageStudioHistorySnapshot({
+          productName: payload?.productName || "",
+          salesRegion: payload?.salesRegion || "us",
+          imageCount: completedImages.length,
+          images: completedImages,
+        });
+        historySaved = Boolean(historyResult?.id);
+        historyId = historyResult?.id || null;
+      } catch (error) {
+        historySaveError = error?.message || "自动保存历史记录失败";
+        appendImageStudioLog(`[history] background save failed for ${jobId}: ${historySaveError}`);
+      }
+    }
+
+    updateImageStudioJob(jobId, {
+      status: "done",
+      results: [...completedImages],
+      finishedAt: Date.now(),
+      progress: { done: completedImages.length, total: totalPlans, step: "完成" },
+      historySaved,
+      historyId,
+      historySaveError,
+    });
     emitImageStudioEvent(target, {
       jobId,
       type: "generate:complete",
-      results: generatedImages,
+      results: completedImages,
+      historySaved,
+      historyId,
+      historySaveError,
     });
   };
 
   try {
+    updateImageStudioJob(jobId, { status: "running", progress: { done: 0, total: totalPlans, step: "开始生成" } });
     emitImageStudioEvent(target, { jobId, type: "generate:started" });
 
     const response = await imageStudioFetch("/api/generate", {
@@ -1405,15 +1575,10 @@ async function streamImageStudioGenerate(target, jobId, payload = {}) {
           event: eventPayload,
         });
 
-        if (eventPayload?.status === "done" && eventPayload?.imageUrl) {
-          generatedImages.push({
-            imageType: eventPayload.imageType || "",
-            imageUrl: eventPayload.imageUrl,
-          });
-        }
+        appendGeneratedImage(eventPayload);
 
         if (eventPayload?.status === "complete") {
-          emitComplete();
+          void emitComplete();
         }
       });
     }
@@ -1424,20 +1589,18 @@ async function streamImageStudioGenerate(target, jobId, payload = {}) {
         type: "generate:event",
         event: eventPayload,
       });
-      if (eventPayload?.status === "done" && eventPayload?.imageUrl) {
-        generatedImages.push({
-          imageType: eventPayload.imageType || "",
-          imageUrl: eventPayload.imageUrl,
-        });
-      }
+
+      appendGeneratedImage(eventPayload);
+
       if (eventPayload?.status === "complete") {
-        emitComplete();
+        void emitComplete();
       }
     });
 
-    emitComplete();
+    await emitComplete();
   } catch (error) {
     if (controller.signal.aborted) {
+      updateImageStudioJob(jobId, { status: "cancelled", finishedAt: Date.now() });
       emitImageStudioEvent(target, {
         jobId,
         type: "generate:cancelled",
@@ -1446,6 +1609,7 @@ async function streamImageStudioGenerate(target, jobId, payload = {}) {
       return;
     }
 
+    updateImageStudioJob(jobId, { status: "failed", error: error?.message || "AI 出图失败", finishedAt: Date.now() });
     emitImageStudioEvent(target, {
       jobId,
       type: "generate:error",
@@ -1455,7 +1619,6 @@ async function streamImageStudioGenerate(target, jobId, payload = {}) {
     imageStudioGenerateControllers.delete(jobId);
   }
 }
-
 // ============ 窗口 ============
 
 async function createWindow() {
@@ -1947,7 +2110,28 @@ ipcMain.handle("image-studio:start-generate", async (event, payload) => {
     ? payload.jobId
     : `image_job_${Date.now()}`;
 
+  // 注册 job 到全局追踪 Map
+  const planCount = Array.isArray(payload?.plans) ? payload.plans.length : 0;
+  const imageTypes = Array.isArray(payload?.plans) ? payload.plans.map(p => p.imageType || "").filter(Boolean) : [];
+  imageStudioJobs.set(jobId, {
+    jobId,
+    status: "pending",
+    productName: payload?.productName || "",
+    salesRegion: payload?.salesRegion || "us",
+    runInBackground: Boolean(payload?.runInBackground),
+    imageTypes,
+    results: [],
+    progress: { done: 0, total: planCount, step: "等待开始" },
+    createdAt: Date.now(),
+    finishedAt: null,
+    error: null,
+    historySaved: false,
+    historyId: null,
+    historySaveError: null,
+  });
+
   streamImageStudioGenerate(event, jobId, payload).catch((error) => {
+    updateImageStudioJob(jobId, { status: "failed", error: error?.message || "AI 出图失败", finishedAt: Date.now() });
     emitImageStudioEvent(event, {
       jobId,
       type: "generate:error",
@@ -1966,6 +2150,21 @@ ipcMain.handle("image-studio:cancel-generate", async (_event, jobId) => {
   return { cancelled: Boolean(controller), jobId };
 });
 
+ipcMain.handle("image-studio:list-jobs", async () => {
+  return getImageStudioJobList();
+});
+
+ipcMain.handle("image-studio:get-job", async (_event, jobId) => {
+  return imageStudioJobs.get(jobId) || null;
+});
+
+ipcMain.handle("image-studio:clear-job", async (_event, jobId) => {
+  const job = imageStudioJobs.get(jobId);
+  if (job && job.status !== "running") {
+    imageStudioJobs.delete(jobId);
+  }
+});
+
 ipcMain.handle("image-studio:list-history", async () => {
   const payload = await imageStudioJson("/api/history");
   return normalizeImageStudioHistoryList(payload);
@@ -1977,16 +2176,7 @@ ipcMain.handle("image-studio:get-history-item", async (_event, id) => {
 });
 
 ipcMain.handle("image-studio:save-history", async (_event, payload) => {
-  return imageStudioJson("/api/history", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      productName: payload?.productName || "未命名商品",
-      salesRegion: payload?.salesRegion || "us",
-      imageCount: Number(payload?.imageCount) || 0,
-      images: Array.isArray(payload?.images) ? payload.images : [],
-    }),
-  });
+  return saveImageStudioHistorySnapshot(payload);
 });
 
 ipcMain.handle("image-studio:score-image", async (_event, payload) => {
@@ -2037,14 +2227,83 @@ ipcMain.handle("app:open-log-directory", async () => {
 // ============ 文件存储 IPC ============
 
 function getStoreFilePath(key) {
-  return path.join(app.getPath("userData"), `${key}.json`);
+  const normalizedKey = normalizeStoreKey(key);
+  const baseDir = app.getPath("userData");
+  return ensurePathInside(baseDir, path.join(baseDir, `${normalizedKey}.json`), "Store æ–‡ä»¶è·¯å¾„");
 }
 
 function getStoreBackupPath(filePath) {
   return `${filePath}.bak`;
 }
 
+function getStoreReplacePath(filePath) {
+  return `${filePath}.replace-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function replaceStoreFileSync(tempPath, filePath, { backupPath, skipBackup = false } = {}) {
+  if (!fs.existsSync(filePath)) {
+    fs.renameSync(tempPath, filePath);
+    return;
+  }
+
+  if (!skipBackup && backupPath) {
+    try {
+      fs.copyFileSync(filePath, backupPath);
+    } catch (error) {
+      console.error("[Store] Failed to create backup:", error.message);
+    }
+  }
+
+  const replacePath = getStoreReplacePath(filePath);
+  fs.renameSync(filePath, replacePath);
+  try {
+    fs.renameSync(tempPath, filePath);
+    fs.rmSync(replacePath, { force: true });
+  } catch (error) {
+    try {
+      if (!fs.existsSync(filePath) && fs.existsSync(replacePath)) {
+        fs.renameSync(replacePath, filePath);
+      }
+    } catch {}
+    throw error;
+  }
+}
+
 const fsPromises = require("fs").promises;
+
+async function replaceStoreFileAsync(tempPath, filePath, { backupPath, skipBackup = false } = {}) {
+  let fileExists = false;
+  try { await fsPromises.access(filePath); fileExists = true; } catch {}
+
+  if (!fileExists) {
+    await fsPromises.rename(tempPath, filePath);
+    return;
+  }
+
+  if (!skipBackup && backupPath) {
+    try {
+      await fsPromises.copyFile(filePath, backupPath);
+    } catch (error) {
+      console.error("[Store] Failed to create backup:", error.message);
+    }
+  }
+
+  const replacePath = getStoreReplacePath(filePath);
+  await fsPromises.rename(filePath, replacePath);
+  try {
+    await fsPromises.rename(tempPath, filePath);
+    await fsPromises.rm(replacePath, { force: true });
+  } catch (error) {
+    try {
+      await fsPromises.access(filePath);
+    } catch {
+      try {
+        await fsPromises.rename(replacePath, filePath);
+      } catch {}
+    }
+    throw error;
+  }
+}
 
 // ---- 同步版本（供 readAutoPricingState / writeAutoPricingState 等同步函数使用）----
 
@@ -2063,15 +2322,7 @@ function writeStoreJsonAtomic(filePath, data, options = {}) {
 
   try {
     fs.writeFileSync(tempPath, serialized);
-    if (fs.existsSync(filePath)) {
-      if (!skipBackup) {
-        try { fs.copyFileSync(filePath, backupPath); } catch (e) {
-          console.error("[Store] Failed to create backup:", e.message);
-        }
-      }
-      fs.rmSync(filePath, { force: true });
-    }
-    fs.renameSync(tempPath, filePath);
+    replaceStoreFileSync(tempPath, filePath, { backupPath, skipBackup });
   } catch (error) {
     try { fs.rmSync(tempPath, { force: true }); } catch {}
     throw error;
@@ -2119,22 +2370,7 @@ async function writeStoreJsonAtomicAsync(filePath, data, options = {}) {
 
   try {
     await fsPromises.writeFile(tempPath, serialized);
-
-    let fileExists = false;
-    try { await fsPromises.access(filePath); fileExists = true; } catch {}
-
-    if (fileExists) {
-      if (!skipBackup) {
-        try {
-          await fsPromises.copyFile(filePath, backupPath);
-        } catch (error) {
-          console.error("[Store] Failed to create backup:", error.message);
-        }
-      }
-      await fsPromises.rm(filePath, { force: true });
-    }
-
-    await fsPromises.rename(tempPath, filePath);
+    await replaceStoreFileAsync(tempPath, filePath, { backupPath, skipBackup });
   } catch (error) {
     try {
       await fsPromises.rm(tempPath, { force: true });

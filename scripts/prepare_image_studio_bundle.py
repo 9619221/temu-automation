@@ -89,6 +89,35 @@ def copy_file(src: Path, dst: Path) -> None:
     shutil.copy2(src, dst)
 
 
+def reset_output_dir(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+
+    try:
+        shutil.rmtree(path)
+        return set()
+    except PermissionError:
+        preserved_names: set[str] = set()
+        runtime_node_modules = path / "runtime_node_modules"
+        if runtime_node_modules.exists():
+            preserved_names.add("runtime_node_modules")
+        node_modules_link = path / "node_modules"
+        if node_modules_link.exists():
+            preserved_names.add("node_modules")
+
+        for child in list(path.iterdir()):
+            if child.name in preserved_names:
+                continue
+            if child.is_symlink():
+                child.unlink()
+            elif child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+
+        return preserved_names
+
+
 def main() -> None:
     source = resolve_source_dir()
 
@@ -102,14 +131,16 @@ def main() -> None:
     if not standalone_server.exists():
         raise SystemExit(f"未生成 Next standalone 产物: {standalone_server}")
 
-    if OUTPUT.exists():
-        shutil.rmtree(OUTPUT)
+    preserved_names = reset_output_dir(OUTPUT)
     ensure_dir(OUTPUT)
 
     # standalone 根目录本身就是一个可启动运行时，直接复制其内容。
     for child in standalone_root.iterdir():
       target_name = "runtime_node_modules" if child.name == "node_modules" else child.name
       target = OUTPUT / target_name
+      if target_name in preserved_names and target.exists():
+        print(f"Reusing locked runtime directory: {target}")
+        continue
       if child.is_dir():
         shutil.copytree(child, target)
       else:

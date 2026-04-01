@@ -91,6 +91,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
     getHistoryItem: (id) => ipcRenderer.invoke("image-studio:get-history-item", id),
     saveHistory: (payload) => ipcRenderer.invoke("image-studio:save-history", payload),
     scoreImage: (payload) => ipcRenderer.invoke("image-studio:score-image", payload),
+    listJobs: () => ipcRenderer.invoke("image-studio:list-jobs"),
+    getJob: (jobId) => ipcRenderer.invoke("image-studio:get-job", jobId),
+    clearJob: (jobId) => ipcRenderer.invoke("image-studio:clear-job", jobId),
   },
 
   app: {
