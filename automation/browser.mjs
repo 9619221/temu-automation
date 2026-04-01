@@ -69,9 +69,12 @@ export async function ensureBrowser() {
     browserState.context = null;
   }
   if (browserState.browser && browserState.context) return;
-  if (_browserLaunchPromise) { await _browserLaunchPromise; return; }
+  if (_browserLaunchPromise) {
+    await _browserLaunchPromise;
+    if (browserState.browser && browserState.context) return;
+  }
 
-  _browserLaunchPromise = (async () => {
+  const launchPromise = (async () => {
     let accountId = browserState.lastAccountId;
     if (!accountId) {
       const latest = findLatestCookie();
@@ -85,7 +88,16 @@ export async function ensureBrowser() {
     await launch(accountId, false);
   })();
 
-  try { await _browserLaunchPromise; } finally { _browserLaunchPromise = null; }
+  _browserLaunchPromise = launchPromise;
+  try {
+    await launchPromise;
+  } finally {
+    if (_browserLaunchPromise === launchPromise) _browserLaunchPromise = null;
+  }
+
+  if (!browserState.browser || !browserState.context) {
+    throw new Error("浏览器启动失败，请重试");
+  }
 }
 
 export async function launch(accountId, headless) {
@@ -233,5 +245,9 @@ export async function login(phone, password) {
     }
 
     return { success: true };
-  } catch (err) { await page.close(); throw err; }
+  } catch (err) {
+    throw err;
+  } finally {
+    if (!page.isClosed()) await page.close().catch(() => {});
+  }
 }

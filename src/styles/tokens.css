@@ -1,0 +1,22 @@
+:root {
+  --color-brand: #e55b00;
+  --color-brand-light: #fff7f0;
+  --color-brand-shadow: rgba(229, 91, 0, 0.12);
+  --color-success: #00b96b;
+  --color-danger: #ff4d4f;
+  --color-blue: #1677ff;
+  --color-purple: #722ed1;
+  --color-text: #1a1a2e;
+  --color-text-sec: #8c8c8c;
+  --color-border: #ebeef3;
+  --color-bg: #f7f8fa;
+  --color-card: #ffffff;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.08);
+  --space-page: 24px;
+  --space-section: 16px;
+  --space-card: 20px;
+}

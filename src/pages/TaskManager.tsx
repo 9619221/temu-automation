@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { Alert, Button, Card, Empty, InputNumber, Space, Statistic, Table, Tag, Typography, message } from "antd";
+import { Alert, Button, Card, Col, Empty, InputNumber, Row, Space, Table, Tag, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { ReloadOutlined, SyncOutlined } from "@ant-design/icons";
+import PageHeader from "../components/PageHeader";
 import {
   COLLECTION_DIAGNOSTICS_KEY,
   normalizeCollectionDiagnostics,
@@ -629,6 +630,10 @@ export default function TaskManager() {
     tasks.filter((task) => task.status === "error").length
   ), [tasks]);
 
+  const runningTaskCount = useMemo(() => (
+    tasks.filter((task) => task.status === "running").length
+  ), [tasks]);
+
   const taskColumns: ColumnsType<TaskConfig> = [
     {
       title: "任务名称",
@@ -722,40 +727,18 @@ export default function TaskManager() {
   ];
 
   return (
-    <div>
-      <Alert
-        style={{ marginBottom: 16 }}
-        type="info"
-        showIcon
-        message="任务页现在直接接入真实后端任务。建议一次只执行一个同步任务，避免同时占用同一个浏览器会话。"
+    <div className="dashboard-shell">
+      <PageHeader
+        compact
+        eyebrow="任务工作台"
+        title="任务管理"
+        subtitle="把常用同步任务和库存预警收进一个调度面板里，统一执行和查看结果。"
+        meta={[
+          `${tasks.length} 个内置任务`,
+          runningTaskCount > 0 ? `${runningTaskCount} 个运行中` : "当前空闲",
+          latestTaskRun ? `最近执行：${latestTaskRun}` : "尚未执行任务",
+        ]}
       />
-
-      <Card size="small" style={{ marginBottom: 16 }}>
-        <Space size="large" wrap align="end">
-          <Statistic title="任务成功数" value={successTaskCount} />
-          <Statistic title="任务失败数" value={errorTaskCount} />
-          <Statistic title="最近执行" value={latestTaskRun || "未执行"} valueStyle={{ fontSize: 16 }} />
-          <Statistic title="上次库存检查" value={lastCheckedAt || "未执行"} valueStyle={{ fontSize: 16 }} />
-          <Space direction="vertical" size={4}>
-            <Text type="secondary">低库存阈值</Text>
-            <Space>
-              <InputNumber
-                min={1}
-                max={1000}
-                value={threshold}
-                onChange={(value) => setThreshold(typeof value === "number" ? value : 1)}
-              />
-              <Button
-                onClick={handleSaveThreshold}
-                loading={savingThreshold}
-                disabled={threshold === savedThreshold}
-              >
-                保存阈值
-              </Button>
-            </Space>
-          </Space>
-        </Space>
-      </Card>
 
       {checkNotice && (
         <Alert
@@ -766,22 +749,79 @@ export default function TaskManager() {
         />
       )}
 
-      {diagnostics.syncedAt && (
-        <Card size="small" style={{ marginBottom: 16 }}>
-          <Text type="secondary">
-            最近一次采集诊断时间：{diagnostics.syncedAt}，成功 {diagnostics.summary.successCount} 项，失败 {diagnostics.summary.errorCount} 项。
-          </Text>
-        </Card>
-      )}
+      <Row gutter={[16, 16]} align="stretch">
+        <Col xs={24} xl={17}>
+          <div className="app-panel">
+            <div className="app-panel__title">
+              <div>
+                <div className="app-panel__title-main">任务列表</div>
+                <div className="app-panel__title-sub">直接执行同步、查看最近结果和数据量。</div>
+              </div>
+            </div>
+            <Table
+              columns={taskColumns}
+              dataSource={tasks}
+              rowKey="id"
+              pagination={false}
+            />
+          </div>
+        </Col>
+        <Col xs={24} xl={7}>
+          <div className="app-panel" style={{ height: "100%" }}>
+            <div className="app-panel__title">
+              <div>
+                <div className="app-panel__title-main">预警设置</div>
+                <div className="app-panel__title-sub">先设阈值，再执行库存检查。</div>
+              </div>
+            </div>
+            <Space direction="vertical" size={14} style={{ width: "100%" }}>
+              <div className="create-summary-list__item">
+                <span>低库存阈值</span>
+                <InputNumber
+                  min={1}
+                  max={1000}
+                  value={threshold}
+                  onChange={(value) => setThreshold(typeof value === "number" ? value : 1)}
+                />
+              </div>
+              <Button
+                type="primary"
+                onClick={handleSaveThreshold}
+                loading={savingThreshold}
+                disabled={threshold === savedThreshold}
+                className="create-primary-button"
+              >
+                保存预警阈值
+              </Button>
+              <Button
+                icon={<ReloadOutlined />}
+                loading={runningTaskId === "stock_alert"}
+                onClick={runStockCheck}
+                className="create-secondary-button"
+              >
+                立即执行库存检查
+              </Button>
+              {diagnostics.syncedAt ? (
+                <div className="friendly-alert__details" style={{ marginTop: 0, paddingTop: 0, borderTop: "none" }}>
+                  最近一次采集诊断：{diagnostics.syncedAt}
+                  <br />
+                  成功 {diagnostics.summary.successCount} 项，失败 {diagnostics.summary.errorCount} 项。
+                </div>
+              ) : (
+                <Text type="secondary">完成一次采集后，这里会显示最新诊断概况。</Text>
+              )}
+            </Space>
+          </div>
+        </Col>
+      </Row>
 
-      <Table
-        columns={taskColumns}
-        dataSource={tasks}
-        rowKey="id"
-        pagination={false}
-      />
-
-      <Card title="低库存明细" size="small" style={{ marginTop: 16 }}>
+      <div className="app-panel">
+        <div className="app-panel__title">
+          <div>
+            <div className="app-panel__title-main">低库存明细</div>
+            <div className="app-panel__title-sub">优先处理这里的商品，避免断货。</div>
+          </div>
+        </div>
         {lowStockItems.length > 0 ? (
           <Table
             columns={lowStockColumns}
@@ -792,7 +832,7 @@ export default function TaskManager() {
         ) : (
           <Empty description={lastCheckedAt ? "当前没有低库存商品" : "尚未执行库存检查"} />
         )}
-      </Card>
+      </div>
     </div>
   );
 }

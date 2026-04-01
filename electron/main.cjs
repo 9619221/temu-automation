@@ -4,6 +4,7 @@ const { spawn } = require("child_process");
 const http = require("http");
 const net = require("net");
 const fs = require("fs");
+const crypto = require("crypto");
 const XLSX = require("xlsx");
 const { autoUpdater } = require("electron-updater");
 
@@ -21,6 +22,7 @@ let worker = null;
 let workerPort = 19280;
 let workerReady = false;
 let workerAiImageServer = "";
+let workerAuthToken = "";
 const AUTO_PRICING_TASKS_KEY = "temu_auto_pricing_tasks";
 const AUTO_PRICING_TASK_LIMIT = 20;
 const CREATE_HISTORY_KEY = "temu_create_history";
@@ -67,10 +69,60 @@ const AUTO_PRICING_IP_PATTERNS = [
   /我的世界|minecraft/i,
 ];
 
+function normalizeImportedCellTexts(value, seen = new WeakSet()) {
+  if (value === null || value === undefined || value === "") return [];
+  if (typeof value === "string") {
+    const text = value.trim();
+    return text && text !== "[object Object]" ? [text] : [];
+  }
+  if (typeof value === "number" || typeof value === "boolean") return [String(value)];
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => normalizeImportedCellTexts(item, seen));
+  }
+  if (typeof value !== "object") {
+    const text = String(value).trim();
+    return text && text !== "[object Object]" ? [text] : [];
+  }
+  if (seen.has(value)) return [];
+  seen.add(value);
+
+  const objectValue = value;
+  const orderedCategoryKeys = Object.keys(objectValue)
+    .filter((key) => /^cat\d+$/i.test(key) || /^(first|second|third|fourth|fifth)Category/i.test(key) || /^leafCat$/i.test(key))
+    .sort();
+  const orderedTexts = orderedCategoryKeys.flatMap((key) => normalizeImportedCellTexts(objectValue[key], seen));
+  if (orderedTexts.length > 0) return orderedTexts;
+
+  const preferredTexts = [
+    objectValue.w,
+    objectValue.text,
+    objectValue.label,
+    objectValue.name,
+    objectValue.catName,
+    objectValue.categoryName,
+    objectValue.title,
+    objectValue.v,
+  ].flatMap((item) => normalizeImportedCellTexts(item, seen));
+  if (preferredTexts.length > 0) return preferredTexts;
+
+  return Object.values(objectValue).flatMap((item) => normalizeImportedCellTexts(item, seen));
+}
+
+function normalizeImportedCellText(value, separator = " | ") {
+  const seen = new Set();
+  return normalizeImportedCellTexts(value)
+    .filter((text) => {
+      if (seen.has(text)) return false;
+      seen.add(text);
+      return true;
+    })
+    .join(separator);
+}
+
 function detectProductTableHeaderRow(rows = []) {
   for (let i = 0; i < Math.min(10, rows.length); i++) {
     const row = Array.isArray(rows[i]) ? rows[i] : [];
-    const rowText = row.map((cell) => String(cell || "")).join("|");
+    const rowText = row.map((cell) => normalizeImportedCellText(cell, " ")).join("|");
     if (rowText.includes("商品标题") || rowText.includes("商品名称") || rowText.includes("商品主图") || rowText.includes("美元价格")) {
       return i;
     }
@@ -79,7 +131,7 @@ function detectProductTableHeaderRow(rows = []) {
 }
 
 function buildAutoPricingRowSearchText(row = []) {
-  return row.map((cell) => String(cell || "").trim()).join(" | ");
+  return row.map((cell) => normalizeImportedCellText(cell, " ")).filter(Boolean).join(" | ");
 }
 
 function detectAutoPricingExcludedReasons(row = []) {
@@ -134,7 +186,7 @@ function filterAutoPricingProductTable(inputPath) {
   const prefixRows = allRows.slice(0, headerRowIdx + 1);
   const dataRows = allRows
     .slice(headerRowIdx + 1)
-    .filter((row) => Array.isArray(row) && row.some((cell) => String(cell || "").trim()));
+    .filter((row) => Array.isArray(row) && row.some((cell) => normalizeImportedCellText(cell, " ")));
 
   const keptRows = [];
   const excludedRows = [];
@@ -314,23 +366,84 @@ function ensurePathInside(baseDir, targetPath, label) {
   return targetPath;
 }
 
-function httpPost(port, body) {
+function createWorkerAuthToken() {
+  return crypto.randomBytes(32).toString("hex");
+}
+
+function getWorkerAuthorizationHeader(authToken = workerAuthToken) {
+  return authToken ? `Bearer ${authToken}` : "";
+}
+
+function getWorkerRequestHeaders(headers = {}, authToken = workerAuthToken) {
+  const nextHeaders = { ...headers };
+  const authorization = getWorkerAuthorizationHeader(authToken);
+  if (authorization) nextHeaders.Authorization = authorization;
+  return nextHeaders;
+}
+
+function parseWorkerPortFile(raw) {
+  const text = typeof raw === "string" ? raw.trim() : "";
+  if (!text) return { port: 0, token: "" };
+  try {
+    const parsed = JSON.parse(text);
+    return {
+      port: Number(parsed?.port) > 0 ? Number(parsed.port) : 0,
+      token: typeof parsed?.token === "string" ? parsed.token : "",
+    };
+  } catch {
+    const port = parseInt(text, 10);
+    return { port: Number.isFinite(port) ? port : 0, token: "" };
+  }
+}
+
+function getActiveWorkerCredentials() {
+  try {
+    const accounts = readStoreJsonWithRecovery(getStoreFilePath(ACCOUNT_STORE_KEY), ACCOUNT_STORE_KEY);
+    const activeId = readStoreJsonWithRecovery(getStoreFilePath("temu_active_account_id"), "temu_active_account_id");
+    if (!Array.isArray(accounts) || !activeId) return {};
+    const active = accounts.find((account) => account?.id === activeId);
+    if (!active?.phone) return {};
+    return { phone: active.phone, password: active.password || "" };
+  } catch {
+    return {};
+  }
+}
+
+function attachWorkerCredentials(action, params = {}) {
+  const nextParams = params && typeof params === "object" ? params : {};
+  if (action === "login") return nextParams;
+  if (nextParams?.credentials?.phone) return nextParams;
+  const credentials = getActiveWorkerCredentials();
+  if (!credentials.phone) return nextParams;
+  return { ...nextParams, credentials };
+}
+
+function httpPost(port, body, options = {}) {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify(body);
     const timeout = Number(body?.timeoutMs) > 0 ? Number(body.timeoutMs) : WORKER_HTTP_TIMEOUT_MS;
     const actionLabel = typeof body?.action === "string" && body.action ? body.action : "worker";
+    const authToken = typeof options?.authToken === "string" ? options.authToken : workerAuthToken;
     const req = http.request(
       {
         hostname: "127.0.0.1",
         port,
         method: "POST",
-        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) },
+        headers: getWorkerRequestHeaders({ "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) }, authToken),
         timeout,
       },
       (res) => {
         const chunks = [];
         res.on("data", (c) => chunks.push(c));
         res.on("end", () => {
+          if (res.statusCode === 401) {
+            reject(new Error("Worker 未授权"));
+            return;
+          }
+          if ((res.statusCode || 500) >= 400) {
+            reject(new Error(`Worker HTTP ${res.statusCode}`));
+            return;
+          }
           const buf = Buffer.concat(chunks).toString("utf8");
           try {
             const json = JSON.parse(buf);
@@ -371,11 +484,11 @@ async function shutdownOldWorker() {
   try {
     const portFile = path.join(app.getPath("userData"), "worker-port");
     if (fs.existsSync(portFile)) {
-      const oldPort = parseInt(fs.readFileSync(portFile, "utf-8").trim());
+      const { port: oldPort, token: oldToken } = parseWorkerPortFile(fs.readFileSync(portFile, "utf-8"));
       if (oldPort > 0) {
         console.log(`[Main] Trying to shutdown old worker on port ${oldPort}`);
         // 先尝试 shutdown 命令
-        await httpPost(oldPort, { action: "shutdown" }).catch(() => {});
+        await httpPost(oldPort, { action: "shutdown" }, { authToken: oldToken }).catch(() => {});
         await new Promise(r => setTimeout(r, 1000));
         // 如果还在运行，用系统命令杀掉（异步避免阻塞主线程）
         try {
@@ -421,6 +534,7 @@ async function startWorker(options = {}) {
 
   // 先尝试关闭旧的 worker
   await shutdownOldWorker();
+  workerAuthToken = createWorkerAuthToken();
 
   // 打包模式优先用 ELECTRON_RUN_AS_NODE（能读 asar），否则用外部 Node
   const workerPath = app.isPackaged
@@ -436,6 +550,7 @@ async function startWorker(options = {}) {
       ),
       ELECTRON_RUN_AS_NODE: "1",
       WORKER_PORT: String(workerPort),
+      WORKER_AUTH_TOKEN: workerAuthToken,
       APP_USER_DATA: app.getPath("userData"),
       AI_IMAGE_SERVER: desiredAiImageServer,
     };
@@ -446,6 +561,7 @@ async function startWorker(options = {}) {
         Object.entries(process.env).filter(([k]) => !k.startsWith("ELECTRON"))
       ),
       WORKER_PORT: String(workerPort),
+      WORKER_AUTH_TOKEN: workerAuthToken,
       APP_USER_DATA: app.getPath("userData"),
       AI_IMAGE_SERVER: desiredAiImageServer,
     };
@@ -478,6 +594,7 @@ async function startWorker(options = {}) {
     worker = null;
     workerReady = false;
     workerAiImageServer = "";
+    workerAuthToken = "";
   });
 
   worker.on("error", (err) => {
@@ -487,6 +604,7 @@ async function startWorker(options = {}) {
     worker = null;
     workerReady = false;
     workerAiImageServer = "";
+    workerAuthToken = "";
   });
 
   // 等待 worker HTTP 服务就绪
@@ -501,6 +619,7 @@ async function startWorker(options = {}) {
     worker = null;
     workerReady = false;
     workerAiImageServer = "";
+    workerAuthToken = "";
     throw e;
   }
 }
@@ -509,7 +628,7 @@ async function sendCmd(action, params = {}) {
   if (!workerReady) {
     await startWorker();
   }
-  return httpPost(workerPort, { action, params });
+  return httpPost(workerPort, { action, params: attachWorkerCredentials(action, params) });
 }
 
 function getDefaultAutoPricingState() {
@@ -731,11 +850,15 @@ async function requestWorkerProgressSnapshot(taskId) {
       : "/progress";
     return await new Promise((resolve) => {
       const req = http.request(
-        { hostname: "127.0.0.1", port: workerPort, method: "GET", path: pathWithQuery, timeout: 3000 },
+        { hostname: "127.0.0.1", port: workerPort, method: "GET", path: pathWithQuery, timeout: 3000, headers: getWorkerRequestHeaders() },
         (res) => {
           const chunks = [];
           res.on("data", (c) => chunks.push(c));
           res.on("end", () => {
+            if (res.statusCode === 401) {
+              resolve({ running: false });
+              return;
+            }
             try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))); }
             catch { resolve({ running: false }); }
           });
@@ -758,11 +881,15 @@ async function requestWorkerTaskSnapshots() {
   try {
     return await new Promise((resolve) => {
       const req = http.request(
-        { hostname: "127.0.0.1", port: workerPort, method: "GET", path: "/tasks", timeout: 3000 },
+        { hostname: "127.0.0.1", port: workerPort, method: "GET", path: "/tasks", timeout: 3000, headers: getWorkerRequestHeaders() },
         (res) => {
           const chunks = [];
           res.on("data", (c) => chunks.push(c));
           res.on("end", () => {
+            if (res.statusCode === 401) {
+              resolve([]);
+              return;
+            }
             try {
               const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
               resolve(Array.isArray(payload) ? payload : []);
@@ -918,6 +1045,7 @@ function stopWorker() {
     worker = null;
     workerReady = false;
     workerAiImageServer = "";
+    workerAuthToken = "";
   }
 }
 
@@ -926,7 +1054,13 @@ function stopWorker() {
 const AUTO_IMAGE_HOST = "127.0.0.1";
 const AUTO_IMAGE_DEFAULT_PORT = 3210;
 const AUTO_IMAGE_HEALTH_PATH = "/api/config";
-const IMAGE_STUDIO_SAFE_ANALYZE_MODEL = "gemini-3.1-flash-image-preview";
+const IMAGE_STUDIO_SAFE_ANALYZE_MODEL = "gemini-3.1-flash-lite-preview";
+const IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG = Object.freeze({
+  analyzeModel: "gemini-3.1-flash-lite-preview",
+  analyzeBaseUrl: "https://api.vectorengine.ai/v1",
+  generateModel: "gemini-3.1-flash-image-preview",
+  generateBaseUrl: "https://api.vectorengine.ai/v1",
+});
 
 let imageStudioProcess = null;
 let imageStudioPort = AUTO_IMAGE_DEFAULT_PORT;
@@ -1259,6 +1393,123 @@ function getImageStudioAuthHeaders(projectInfo = getImageStudioProjectInfo()) {
   return {};
 }
 
+let lastImageStudioConfigSyncAt = 0;
+let lastImageStudioConfigSignature = "";
+
+function buildImageStudioRuntimeConfigPayload(projectInfo = getImageStudioProjectInfo()) {
+  const envLocalVars = readEnvKeyValueFile(projectInfo?.envLocalPath);
+  const runtimeConfig = {
+    analyzeModel: envLocalVars.ANALYZE_MODEL || process.env.ANALYZE_MODEL || IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG.analyzeModel,
+    analyzeApiKey: envLocalVars.ANALYZE_API_KEY || process.env.ANALYZE_API_KEY || "",
+    analyzeBaseUrl: envLocalVars.ANALYZE_BASE_URL || process.env.ANALYZE_BASE_URL || IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG.analyzeBaseUrl,
+    generateModel: envLocalVars.GENERATE_MODEL || process.env.GENERATE_MODEL || IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG.generateModel,
+    generateApiKey: envLocalVars.GENERATE_API_KEY || process.env.GENERATE_API_KEY || "",
+    generateBaseUrl: envLocalVars.GENERATE_BASE_URL || process.env.GENERATE_BASE_URL || IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG.generateBaseUrl,
+  };
+  return Object.fromEntries(
+    Object.entries(runtimeConfig).filter(([, value]) => typeof value === "string" && value.trim())
+  );
+}
+
+function getImageStudioRuntimeConfigSignature(payload) {
+  return JSON.stringify({
+    analyzeModel: payload.analyzeModel || "",
+    analyzeBaseUrl: payload.analyzeBaseUrl || "",
+    generateModel: payload.generateModel || "",
+    generateBaseUrl: payload.generateBaseUrl || "",
+    hasAnalyzeApiKey: Boolean(payload.analyzeApiKey),
+    hasGenerateApiKey: Boolean(payload.generateApiKey),
+  });
+}
+
+function routeNeedsImageStudioRuntimeConfig(routePath) {
+  return [
+    "/api/analyze",
+    "/api/regenerate-analysis",
+    "/api/plans",
+    "/api/generate",
+    "/api/score",
+  ].some((pattern) => routePath.startsWith(pattern));
+}
+
+function getImageStudioRouteConfigMeta(routePath) {
+  if (routePath === "/api/generate") {
+    return {
+      label: "AI 出图",
+      baseUrlLabel: "出图 Base URL",
+      baseUrlKey: "generateBaseUrl",
+    };
+  }
+
+  return {
+    label: "AI 商品分析",
+    baseUrlLabel: "分析 Base URL",
+    baseUrlKey: "analyzeBaseUrl",
+  };
+}
+
+function isImageStudioConnectionError(message) {
+  return typeof message === "string" && /connection error|fetch failed|econnrefused|network error/i.test(message);
+}
+
+function isLoopbackUrl(value) {
+  try {
+    const parsed = new URL(String(value || ""));
+    return ["127.0.0.1", "localhost", "::1"].includes(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function getImageStudioConnectionErrorHint(routePath) {
+  const meta = getImageStudioRouteConfigMeta(routePath);
+  const configPayload = buildImageStudioRuntimeConfigPayload();
+  const baseUrl = configPayload[meta.baseUrlKey] || "";
+
+  if (baseUrl && isLoopbackUrl(baseUrl)) {
+    return `${meta.label}连接失败：当前内置 ${meta.baseUrlLabel} 指向 ${baseUrl}，请先启动对应本地接口，或改为可访问的服务地址。`;
+  }
+
+  return `${meta.label}连接失败，请检查网络连接或内置 ${meta.baseUrlLabel} / API Key 是否可用。`;
+}
+
+async function syncImageStudioRuntimeConfig(routePath = "", options = {}) {
+  const { force = false } = options;
+  const projectInfo = getImageStudioProjectInfo();
+  const payload = buildImageStudioRuntimeConfigPayload();
+
+  if (Object.keys(payload).length === 0) {
+    return false;
+  }
+
+  const signature = getImageStudioRuntimeConfigSignature(payload);
+  const now = Date.now();
+  if (!force && signature === lastImageStudioConfigSignature && now - lastImageStudioConfigSyncAt < 30_000) {
+    return false;
+  }
+
+  const status = await ensureImageStudioService();
+  const response = await fetch(`${status.url}/api/config`, {
+    method: "POST",
+    headers: {
+      ...getImageStudioAuthHeaders(projectInfo),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  const responsePayload = await readImageStudioResponse(response);
+  if (!response.ok) {
+    const message = getImageStudioErrorMessage("/api/config", response, responsePayload);
+    appendImageStudioLog(`[config] sync failed before ${routePath || "request"}: ${message}`);
+    throw new Error(message);
+  }
+
+  lastImageStudioConfigSignature = signature;
+  lastImageStudioConfigSyncAt = now;
+  appendImageStudioLog(`[config] runtime config synced${routePath ? ` before ${routePath}` : ""}`);
+  return true;
+}
+
 function getImageStudioWebContents(target) {
   const candidate = target?.sender || mainWindow?.webContents || null;
   if (!candidate || candidate.isDestroyed()) {
@@ -1297,7 +1548,8 @@ function isHtmlErrorPayload(payload) {
 
 function getImageStudioErrorMessage(routePath, response, payload) {
   if (payload && typeof payload === "object" && typeof payload.error === "string" && payload.error.trim()) {
-    return payload.error.trim();
+    const message = payload.error.trim();
+    return isImageStudioConnectionError(message) ? getImageStudioConnectionErrorHint(routePath) : message;
   }
 
   if (isHtmlErrorPayload(payload)) {
@@ -1308,7 +1560,8 @@ function getImageStudioErrorMessage(routePath, response, payload) {
   }
 
   if (typeof payload === "string" && payload.trim()) {
-    return payload.trim();
+    const message = payload.trim();
+    return isImageStudioConnectionError(message) ? getImageStudioConnectionErrorHint(routePath) : message;
   }
 
   if (routePath === "/api/analyze" || routePath === "/api/regenerate-analysis") {
@@ -1319,7 +1572,7 @@ function getImageStudioErrorMessage(routePath, response, payload) {
 }
 
 function shouldFallbackAnalyzeModel(model) {
-  return typeof model === "string" && /flash-lite/i.test(model);
+  return typeof model === "string" && model.trim() && model !== IMAGE_STUDIO_SAFE_ANALYZE_MODEL;
 }
 
 async function ensureCompatibleAnalyzeModel() {
@@ -1335,7 +1588,7 @@ async function ensureCompatibleAnalyzeModel() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ analyzeModel: IMAGE_STUDIO_SAFE_ANALYZE_MODEL }),
     });
-    appendImageStudioLog(`[compat] analyze model upgraded from ${currentModel} to ${IMAGE_STUDIO_SAFE_ANALYZE_MODEL}`);
+    appendImageStudioLog(`[compat] analyze model switched from ${currentModel} to ${IMAGE_STUDIO_SAFE_ANALYZE_MODEL}`);
     return true;
   } catch (error) {
     appendImageStudioLog(`[compat] failed to upgrade analyze model: ${error?.message || error}`);
@@ -1345,6 +1598,9 @@ async function ensureCompatibleAnalyzeModel() {
 
 async function imageStudioFetch(routePath, init = {}) {
   const status = await ensureImageStudioService();
+  if (routeNeedsImageStudioRuntimeConfig(routePath)) {
+    await syncImageStudioRuntimeConfig(routePath);
+  }
   const projectInfo = getImageStudioProjectInfo();
   const headers = {
     ...getImageStudioAuthHeaders(projectInfo),
@@ -1779,16 +2035,7 @@ ipcMain.handle("automation:scrape-performance", async () => {
 
 ipcMain.handle("automation:scrape-all", async () => {
   if (!workerReady) await startWorker();
-  // 传递活跃账号凭据给 worker，用于 cookie 过期时自动登录
-  let credentials = {};
-  try {
-    const accounts = readStoreJsonWithRecovery(getStoreFilePath(ACCOUNT_STORE_KEY), ACCOUNT_STORE_KEY);
-    const activeId = readStoreJsonWithRecovery(getStoreFilePath("temu_active_account_id"), "temu_active_account_id");
-    if (Array.isArray(accounts) && activeId) {
-      const active = accounts.find(a => a?.id === activeId);
-      if (active?.phone) credentials = { phone: active.phone, password: active.password || "" };
-    }
-  } catch {}
+  const credentials = getActiveWorkerCredentials();
   return httpPost(workerPort, { action: "scrape_all", params: { credentials }, timeoutMs: 30 * 60 * 1000 });
 });
 
@@ -1987,6 +2234,10 @@ ipcMain.handle("automation:read-scrape-data", async (_e, key) => {
   return sendCmd("read_scrape_data", { key });
 });
 
+ipcMain.handle("automation:get-scrape-progress", async () => {
+  return sendCmd("scrape_progress");
+});
+
 ipcMain.handle("automation:scrape-lifecycle", async () => { return sendCmd("scrape_lifecycle"); });
 ipcMain.handle("automation:scrape-bidding", async () => { return sendCmd("scrape_bidding"); });
 ipcMain.handle("automation:scrape-price-compete", async () => { return sendCmd("scrape_price_compete"); });
@@ -2034,26 +2285,6 @@ ipcMain.handle("image-studio:open-external", async () => {
   const status = await ensureImageStudioService();
   await shell.openExternal(status.url);
   return status.url;
-});
-
-ipcMain.handle("image-studio:get-config", async () => {
-  const payload = await imageStudioJson("/api/config");
-  return payload && typeof payload === "object" ? payload : {};
-});
-
-ipcMain.handle("image-studio:update-config", async (_event, payload) => {
-  const nextPayload = Object.fromEntries(
-    Object.entries(payload || {}).filter(([, value]) => typeof value === "string" && value.trim())
-  );
-  if (Object.keys(nextPayload).length === 0) {
-    return imageStudioJson("/api/config");
-  }
-  await imageStudioJson("/api/config", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(nextPayload),
-  });
-  return imageStudioJson("/api/config");
 });
 
 ipcMain.handle("image-studio:analyze", async (_event, payload) => {
@@ -2274,7 +2505,8 @@ ipcMain.handle("app:open-log-directory", async () => {
 function getStoreFilePath(key) {
   const normalizedKey = normalizeStoreKey(key);
   const baseDir = app.getPath("userData");
-  return ensurePathInside(baseDir, path.join(baseDir, `${normalizedKey}.json`), "Store æ–‡ä»¶è·¯å¾„");
+  const safeFileName = encodeURIComponent(normalizedKey);
+  return ensurePathInside(baseDir, path.join(baseDir, `${safeFileName}.json`), "Store 文件路径");
 }
 
 function getStoreBackupPath(filePath) {

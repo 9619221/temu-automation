@@ -6,10 +6,11 @@ import http from "http";
 import https from "https";
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
 import { createRequire } from "module";
 import { randomDelay, downloadImage, saveBase64Image, getDebugDir, getTmpDir, logSilent, ERR } from "./utils.mjs";
 import { browserState, ensureBrowser as _ensureBrowser, launch as _launch, login, saveCookies, closeBrowser, findLatestCookie } from "./browser.mjs";
-import { buildScrapeHandlers, getScrapeFunction } from "./scrape-registry.mjs";
+import { ADS_GROUP_TABS, GOVERN_GROUP_TARGETS, buildScrapeHandlers, getScrapeFunction } from "./scrape-registry.mjs";
 const require = createRequire(import.meta.url);
 const XLSX = require("xlsx");
 
@@ -34,6 +35,11 @@ for (const envFile of envFiles) {
 const AI_API_KEY = process.env.VECTORENGINE_API_KEY || "";
 const AI_BASE_URL = process.env.VECTORENGINE_BASE_URL || "https://api.vectorengine.ai/v1";
 const AI_MODEL = process.env.VECTORENGINE_MODEL || "gemini-3.1-flash-lite-preview";
+const GENERATED_WORKER_AUTH_TOKEN = crypto.randomBytes(32).toString("hex");
+const WORKER_AUTH_TOKEN = process.env.WORKER_AUTH_TOKEN || GENERATED_WORKER_AUTH_TOKEN;
+let requestCredentialPhone = "";
+let requestCredentialPassword = "";
+const recentChildSpecValues = [];
 
 // browser/context 代理：旧代码通过全局 browser/context 访问，实际指向 browserState
 // 使用 defineProperty 创建动态代理，读写都同步到 browserState
@@ -60,6 +66,24 @@ function createPendingTaskTracker() {
       ]);
     },
   };
+}
+
+function isExcelLikeFile(filePath) {
+  try {
+    const extension = path.extname(filePath).toLowerCase();
+    if (extension === ".xlsx" || extension === ".xls") return true;
+    const fd = fs.openSync(filePath, "r");
+    try {
+      const header = Buffer.alloc(4);
+      const bytesRead = fs.readSync(fd, header, 0, 4, 0);
+      if (bytesRead >= 2 && header[0] === 0x50 && header[1] === 0x4b) return true;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (e) {
+    logSilent("spreadsheet.detect", e);
+  }
+  return false;
 }
 
 function resolveReadScrapeDataRequest(taskKey) {
@@ -91,6 +115,308 @@ function resolveReadScrapeDataRequest(taskKey) {
     type: "scrape_result",
     filePath: path.join(debugDir, `scrape_all_${normalizedKey}.json`),
   };
+}
+
+function pickRecentUniqueValue(values) {
+  const normalizedValues = values
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  if (normalizedValues.length === 0) return "热销款";
+
+  const unused = normalizedValues.filter((value) => !recentChildSpecValues.includes(value));
+  const pool = unused.length > 0 ? unused : normalizedValues;
+  const selected = pool[Math.floor(Math.random() * pool.length)];
+
+  recentChildSpecValues.push(selected);
+  if (recentChildSpecValues.length > 120) recentChildSpecValues.shift();
+  return selected;
+}
+
+function generateChildSpecValue(title = "") {
+  const raw = String(title || "").trim();
+  const normalized = raw.toLowerCase();
+
+  const specRules = [
+    {
+      keywords: ["毛巾", "抹布", "擦车巾", "洗车巾", "microfiber", "towel", "cloth", "rag"],
+      values: ["洗车神器", "加厚吸水", "强力去污", "爱车清洁"],
+    },
+    {
+      keywords: ["刷", "刷子", "清洁刷", "brush", "clean", "cleaner", "scrub"],
+      values: ["清洁神器", "缝隙清洁", "深层去污", "去污升级"],
+    },
+    {
+      keywords: ["收纳", "置物", "置物架", "收纳架", "organizer", "storage", "rack", "shelf"],
+      values: ["居家收纳", "空间升级", "整洁必备", "收纳好物"],
+    },
+    {
+      keywords: ["挂钩", "挂架", "挂扣", "hook", "hanger", "hanging"],
+      values: ["免打孔款", "稳固承重", "家用必备", "收纳升级"],
+    },
+    {
+      keywords: ["工具", "螺丝刀", "扳手", "套筒", "钳", "tool", "wrench", "screwdriver", "repair", "socket"],
+      values: ["维修必备", "耐用升级", "工具套装", "五金好物"],
+    },
+    {
+      keywords: ["胶带", "贴", "贴纸", "胶", "tape", "adhesive", "sticker"],
+      values: ["强力粘贴", "牢固耐用", "家用好物", "轻松固定"],
+    },
+    {
+      keywords: ["锁", "搭扣", "卡扣", "lock", "clasp", "buckle", "latch"],
+      values: ["加固耐用", "稳固升级", "安全防护", "安装省心"],
+    },
+    {
+      keywords: ["车", "汽车", "车载", "car", "auto", "vehicle"],
+      values: ["车载必备", "出行好物", "爱车清洁", "收纳升级"],
+    },
+  ];
+
+  for (const rule of specRules) {
+    if (rule.keywords.some((keyword) => normalized.includes(keyword))) {
+      return pickRecentUniqueValue(rule.values);
+    }
+  }
+
+  const cleanedChinese = raw
+    .replace(/[【】\[\]()（）<>《》]/g, " ")
+    .replace(/\d+(\.\d+)?\s*(pcs|pack|set|pairs?|pieces?|inch|cm|mm|ml|oz|g|kg|lb)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const chineseMatch = cleanedChinese.match(/[\u4e00-\u9fa5]{2,8}/g) || [];
+  const titleCandidates = chineseMatch.flatMap((item) => {
+    const trimmed = item.slice(0, 6);
+    return trimmed.length >= 2 ? [trimmed, `${trimmed.slice(0, 4)}款`] : [];
+  });
+
+  return pickRecentUniqueValue([...titleCandidates, "热销款", "实用款", "升级款", "精选款"]);
+}
+
+function buildSpecNameCandidates(title = "", preferredSpecName = "") {
+  const explicitName = String(preferredSpecName || "").trim();
+  const generatedName = generateChildSpecValue(title || "");
+  return Array.from(new Set([
+    explicitName,
+    generatedName,
+    "热销款",
+    "实用款",
+    "升级款",
+    "精选款",
+  ].filter(Boolean)));
+}
+
+function extractCellTextFragments(value, seen = new WeakSet()) {
+  if (value === null || value === undefined || value === "") return [];
+  if (typeof value === "string") {
+    const text = value.trim();
+    return text && text !== "[object Object]" ? [text] : [];
+  }
+  if (typeof value === "number" || typeof value === "boolean") return [String(value)];
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => extractCellTextFragments(item, seen));
+  }
+  if (typeof value !== "object") {
+    const text = String(value).trim();
+    return text && text !== "[object Object]" ? [text] : [];
+  }
+  if (seen.has(value)) return [];
+  seen.add(value);
+
+  const objectValue = value;
+  const orderedCategoryKeys = Object.keys(objectValue)
+    .filter((key) => /^cat\d+$/i.test(key) || /^(first|second|third|fourth|fifth)Category/i.test(key) || /^leafCat$/i.test(key))
+    .sort();
+  const orderedTexts = orderedCategoryKeys.flatMap((key) => extractCellTextFragments(objectValue[key], seen));
+  if (orderedTexts.length > 0) return orderedTexts;
+
+  const preferredTexts = [
+    objectValue.w,
+    objectValue.text,
+    objectValue.label,
+    objectValue.name,
+    objectValue.catName,
+    objectValue.categoryName,
+    objectValue.title,
+    objectValue.v,
+  ].flatMap((item) => extractCellTextFragments(item, seen));
+  if (preferredTexts.length > 0) return preferredTexts;
+
+  return Object.values(objectValue).flatMap((item) => extractCellTextFragments(item, seen));
+}
+
+function normalizeCellText(value, separator = ", ") {
+  const seen = new Set();
+  return extractCellTextFragments(value)
+    .filter((text) => {
+      if (seen.has(text)) return false;
+      seen.add(text);
+      return true;
+    })
+    .join(separator);
+}
+
+function normalizeCategoryText(value) {
+  return normalizeCellText(value, " / ");
+}
+
+function normalizePriceNumber(value, fallback = 0) {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : fallback;
+  }
+  const text = normalizeCellText(value);
+  if (!text) return fallback;
+  const normalized = text
+    .replace(/[\u00A0\s]/g, "")
+    .replace(/[,，]/g, "")
+    .replace(/[￥¥$€£]/g, "")
+    .replace(/[^\d.-]/g, "");
+  const number = Number(normalized);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function getScrapeAllTimestamp() {
+  return new Date().toLocaleString("zh-CN");
+}
+
+function cloneScrapeAllTasks(tasks = {}) {
+  return Object.fromEntries(
+    Object.entries(tasks).map(([key, value]) => [key, value && typeof value === "object" ? { ...value } : value]),
+  );
+}
+
+function summarizeScrapeAllTasks(tasks = {}) {
+  const entries = Object.entries(tasks);
+  let successCount = 0;
+  let errorCount = 0;
+  let runningCount = 0;
+  let pendingCount = 0;
+
+  for (const [, task] of entries) {
+    switch (task?.status) {
+      case "success":
+        successCount += 1;
+        break;
+      case "error":
+        errorCount += 1;
+        break;
+      case "running":
+        runningCount += 1;
+        break;
+      default:
+        pendingCount += 1;
+        break;
+    }
+  }
+
+  return {
+    totalTasks: entries.length,
+    completedTasks: successCount + errorCount,
+    successCount,
+    errorCount,
+    runningCount,
+    pendingCount,
+    currentTaskKeys: entries.filter(([, task]) => task?.status === "running").map(([key]) => key),
+  };
+}
+
+function createScrapeAllProgress(patch = {}) {
+  const tasks = cloneScrapeAllTasks(patch.tasks);
+  const summary = summarizeScrapeAllTasks(tasks);
+  return {
+    running: Boolean(patch.running),
+    status: typeof patch.status === "string" ? patch.status : "idle",
+    message: typeof patch.message === "string" ? patch.message : "",
+    tasks,
+    totalTasks: Number(patch.totalTasks) || summary.totalTasks,
+    completedTasks: Number(patch.completedTasks) || summary.completedTasks,
+    successCount: Number(patch.successCount) || summary.successCount,
+    errorCount: Number(patch.errorCount) || summary.errorCount,
+    runningCount: Number(patch.runningCount) || summary.runningCount,
+    pendingCount: Number(patch.pendingCount) || summary.pendingCount,
+    currentTaskKeys: Array.isArray(patch.currentTaskKeys) ? [...patch.currentTaskKeys] : summary.currentTaskKeys,
+    startedAt: typeof patch.startedAt === "string" ? patch.startedAt : "",
+    updatedAt: typeof patch.updatedAt === "string" ? patch.updatedAt : "",
+    finishedAt: typeof patch.finishedAt === "string" ? patch.finishedAt : "",
+  };
+}
+
+let scrapeAllProgress = createScrapeAllProgress();
+
+function replaceScrapeAllProgress(patch = {}) {
+  scrapeAllProgress = createScrapeAllProgress({
+    ...patch,
+    updatedAt: typeof patch.updatedAt === "string" ? patch.updatedAt : getScrapeAllTimestamp(),
+  });
+  return scrapeAllProgress;
+}
+
+function updateScrapeAllProgress(patch = {}) {
+  const nextTasks = patch.tasks ? cloneScrapeAllTasks(patch.tasks) : cloneScrapeAllTasks(scrapeAllProgress.tasks);
+  scrapeAllProgress = createScrapeAllProgress({
+    ...scrapeAllProgress,
+    ...patch,
+    tasks: nextTasks,
+    updatedAt: typeof patch.updatedAt === "string" ? patch.updatedAt : getScrapeAllTimestamp(),
+  });
+  return scrapeAllProgress;
+}
+
+function updateScrapeAllTask(taskKey, patch = {}) {
+  const nextTasks = cloneScrapeAllTasks(scrapeAllProgress.tasks);
+  nextTasks[taskKey] = {
+    ...(nextTasks[taskKey] || { status: "pending" }),
+    ...patch,
+  };
+  return updateScrapeAllProgress({ tasks: nextTasks });
+}
+
+function normalizeRequestCredential(value) {
+  return typeof value === "string" ? value : "";
+}
+
+function clearBrowserPassword() {
+  browserState.lastPassword = "";
+}
+
+function getRequestCredentials() {
+  return {
+    phone: requestCredentialPhone || browserState.lastPhone || "",
+    password: requestCredentialPassword,
+  };
+}
+
+async function withWorkerRequestCredentials(credentials, fn) {
+  const prevPhone = requestCredentialPhone;
+  const prevPassword = requestCredentialPassword;
+  if (credentials && typeof credentials === "object") {
+    const phone = normalizeRequestCredential(credentials.phone);
+    if (phone) {
+      requestCredentialPhone = phone;
+      requestCredentialPassword = normalizeRequestCredential(credentials.password);
+      browserState.lastPhone = phone;
+    }
+  }
+  clearBrowserPassword();
+  try {
+    return await fn();
+  } finally {
+    requestCredentialPhone = prevPhone;
+    requestCredentialPassword = prevPassword;
+    if (prevPhone) browserState.lastPhone = prevPhone;
+    clearBrowserPassword();
+  }
+}
+
+async function loginWithTransientPassword(phone, password) {
+  try {
+    return await login(phone, password);
+  } finally {
+    clearBrowserPassword();
+  }
+}
+
+function isAuthorizedWorkerRequest(req) {
+  return req.headers.authorization === `Bearer ${WORKER_AUTH_TOKEN}`;
 }
 
 // 同步 browserState 到局部变量（ensureBrowser/launch 后自动调用）
@@ -128,16 +454,21 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
       const retryable = /ERR_ABORTED|frame was detached|ERR_FAILED/i.test(navErr.message);
       if (retryable && navTry < 2) {
         console.error(`[nav] goto ERR (attempt ${navTry + 1}), retrying: ${navErr.message}`);
-        await randomDelay(2000, 3000);
+        await randomDelay(lite ? 800 : 2000, lite ? 1200 : 3000);
       } else {
         throw navErr;
       }
     }
   }
-  // 等待可能的重定向
-  await randomDelay(3000, 5000);
-  // 等 URL 稳定
-  await page.waitForURL(/.*/, { timeout: 10000 }).catch(() => {});
+  // 用 readyState / body 就绪替代固定白等
+  await page.waitForSelector("body", { timeout: lite ? 2500 : 5000 }).catch(() => {});
+  await page.waitForFunction(
+    () => document.readyState === "interactive" || document.readyState === "complete",
+    { timeout: lite ? 2000 : 4000 }
+  ).catch(() => {});
+  await page.waitForLoadState("domcontentloaded", { timeout: lite ? 2000 : 4000 }).catch(() => {});
+  await randomDelay(lite ? 300 : 700, lite ? 600 : 1100);
+  await page.waitForURL(/.*/, { timeout: lite ? 3000 : 10000 }).catch(() => {});
   console.error(`[nav] Current URL: ${page.url()}`);
 
   // lite 模式：如果被重定向到 authentication，等待弹窗监控器处理后重试
@@ -164,7 +495,7 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
 
     // 等待弹窗被监控器处理（最多60秒），同时主动检查授权弹窗
     for (let retry = 0; retry < 12; retry++) {
-      await randomDelay(5000, 5000);
+      await randomDelay(lite ? 1800 : 5000, lite ? 2200 : 5000);
 
       // 主动扫描所有页面，处理未关闭的授权弹窗
       try {
@@ -192,7 +523,8 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
       // 尝试重新导航
       try {
         await page.goto(directUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
-        await randomDelay(2000, 3000);
+        await page.waitForSelector("body", { timeout: lite ? 1500 : 3000 }).catch(() => {});
+        await randomDelay(lite ? 500 : 1200, lite ? 800 : 1800);
         if (!page.url().includes("/main/authentication") && !page.url().includes("/main/entry")) {
           console.error(`[nav-lite] Successfully navigated after ${retry + 1} retries, URL: ${page.url()}`);
           break;
@@ -435,7 +767,7 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
 
           if (!authHandled) {
             // 没有授权弹窗 → cookie 过期，尝试自动登录
-            const { lastPhone, lastPassword } = browserState;
+            const { phone: lastPhone, password: lastPassword } = getRequestCredentials();
             if (lastPhone && lastPassword) {
               console.error("[nav] Cookie expired, auto-login with saved credentials...");
               try {
@@ -765,7 +1097,8 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
     // 再次访问目标页面
     if (!page.url().includes("agentseller.temu.com") || page.url().includes("authentication")) {
       await page.goto(directUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
-      await randomDelay(3000, 5000);
+      await page.waitForSelector("body", { timeout: lite ? 2000 : 5000 }).catch(() => {});
+      await randomDelay(lite ? 500 : 1200, lite ? 900 : 1800);
     }
   }
 
@@ -784,7 +1117,7 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
   await page.evaluate(() => {
     document.querySelectorAll('[class*=close],[class*=Close]').forEach(el => { try { el.click(); } catch {} });
   });
-  await randomDelay(500, 1000);
+  await randomDelay(lite ? 200 : 500, lite ? 400 : 1000);
   return page;
 }
 
@@ -793,6 +1126,7 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
 // ---- 抓取销售管理数据 (翻页采集所有商品库存) ----
 
 async function scrapeSales() {
+  const lite = _navLiteMode;
   // 使用通用捕获器 + 翻页逻辑
   const page = await context.newPage();
   const capturedApis = [];
@@ -823,7 +1157,7 @@ async function scrapeSales() {
     // 导航到销售管理页面
     console.error("[sales] Navigating to sale-manage/main...");
     await navigateToSellerCentral(page, "/stock/fully-mgt/sale-manage/main");
-    await randomDelay(10000, 12000);
+    await randomDelay(lite ? 4500 : 6000, lite ? 6000 : 8000);
 
     // 关闭弹窗
     for (let i = 0; i < 8; i++) {
@@ -833,7 +1167,7 @@ async function scrapeSales() {
         else break;
       } catch { break; }
     }
-    await randomDelay(3000, 5000);
+    await randomDelay(lite ? 900 : 1500, lite ? 1500 : 2500);
 
     // 检查第一页的 listOverall 是否有 total > 10（需要翻页）
     const firstListApi = capturedApis.find(a => a.path?.includes("listOverall"));
@@ -890,7 +1224,7 @@ async function scrapeSales() {
 
           if (clicked) {
             console.error(`[sales] → page ${pageNum}/${totalPages} (via ${clicked})`);
-            await randomDelay(3000, 5000);
+            await randomDelay(lite ? 1000 : 2000, lite ? 1500 : 3000);
           } else {
             console.error(`[sales] Cannot find page ${pageNum} button, stopping`);
             break;
@@ -914,7 +1248,8 @@ async function scrapeSales() {
 // 用一个通用函数，通过 response listener 抓取指定页面的 API 数据
 // 通用：捕获页面所有API响应（保存完整原始数据）
 async function scrapePageCaptureAll(targetPath, options = {}) {
-  const { waitTime = 10000, fullUrl = null } = options;
+  const lite = options.lite ?? _navLiteMode;
+  const { waitTime = lite ? 4500 : 6000, fullUrl = null } = options;
   const page = await context.newPage();
   const capturedApis = [];
   const staticExts = [".js", ".css", ".png", ".svg", ".woff", ".woff2", ".ttf", ".ico", ".jpg", ".jpeg", ".gif", ".map", ".webp"];
@@ -944,13 +1279,13 @@ async function scrapePageCaptureAll(targetPath, options = {}) {
       console.error(`[capture-all] Navigating to ${fullUrl}...`);
       // 先进入 agentseller 获取认证上下文
       await navigateToSellerCentral(page, "/goods/list");
-      await randomDelay(2000, 3000);
+      await randomDelay(lite ? 700 : 1200, lite ? 1000 : 1800);
       await page.goto(fullUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
     } else {
       console.error(`[capture-all] Navigating to ${targetPath}...`);
       await navigateToSellerCentral(page, targetPath);
     }
-    await randomDelay(waitTime, waitTime + 3000);
+    await randomDelay(waitTime, waitTime + (lite ? 900 : 1500));
 
     for (let i = 0; i < 8; i++) {
       try {
@@ -959,7 +1294,11 @@ async function scrapePageCaptureAll(targetPath, options = {}) {
         else break;
       } catch { break; }
     }
-    await randomDelay(3000, 5000);
+    await randomDelay(lite ? 700 : 1200, lite ? 1000 : 1800);
+
+    if (capturedApis.length < 2) {
+      await randomDelay(lite ? 1800 : 2500, lite ? 2400 : 3500);
+    }
 
     console.error(`[capture-all] Done! Captured ${capturedApis.length} APIs`);
     await saveCookies();
@@ -970,7 +1309,8 @@ async function scrapePageCaptureAll(targetPath, options = {}) {
 }
 
 async function scrapePageWithListener(targetPath, apiMatchers, options = {}) {
-  const { waitTime = 10000, reloadIfMissing = true } = options;
+  const lite = options.lite ?? _navLiteMode;
+  const { waitTime = lite ? 4200 : 5500, reloadIfMissing = true } = options;
   const page = await context.newPage();
   const debugDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
   fs.mkdirSync(debugDir, { recursive: true });
@@ -996,7 +1336,7 @@ async function scrapePageWithListener(targetPath, apiMatchers, options = {}) {
     // 导航
     console.error(`[scrape-listener] Navigating to ${targetPath}...`);
     await navigateToSellerCentral(page, targetPath);
-    await randomDelay(waitTime, waitTime + 3000);
+    await randomDelay(waitTime, waitTime + (lite ? 900 : 1500));
 
     // 关闭弹窗
     for (let i = 0; i < 8; i++) {
@@ -1006,18 +1346,22 @@ async function scrapePageWithListener(targetPath, apiMatchers, options = {}) {
         else break;
       } catch { break; }
     }
-    await randomDelay(3000, 5000);
+    await randomDelay(lite ? 700 : 1200, lite ? 1000 : 1800);
 
     // 检查是否所有 API 都已捕获
     const allKeys = apiMatchers.map(m => m.key);
     const missing = allKeys.filter(k => !captured[k]);
     console.error(`[scrape-listener] Captured: ${Object.keys(captured).join(",")} | Missing: ${missing.join(",") || "none"}`);
 
+    if (missing.length > 0 && Object.keys(captured).length > 0) {
+      await randomDelay(lite ? 1200 : 1800, lite ? 1800 : 2600);
+    }
+
     // reload 重试
     if (reloadIfMissing && missing.length > 0) {
       console.error("[scrape-listener] Reloading to capture missing APIs...");
       await page.reload({ waitUntil: "domcontentloaded" });
-      await randomDelay(waitTime, waitTime + 3000);
+      await randomDelay(waitTime, waitTime + (lite ? 800 : 1200));
       for (let i = 0; i < 5; i++) {
         try {
           const btn = page.locator('button:has-text("知道了"), button:has-text("确定"), button:has-text("关闭"), button:has-text("暂不")').first();
@@ -1025,7 +1369,7 @@ async function scrapePageWithListener(targetPath, apiMatchers, options = {}) {
           else break;
         } catch { break; }
       }
-      await randomDelay(3000, 5000);
+      await randomDelay(lite ? 700 : 1000, lite ? 1100 : 1500);
       const missing2 = allKeys.filter(k => !captured[k]);
       console.error(`[scrape-listener] After reload - Missing: ${missing2.join(",") || "none"}`);
     }
@@ -1043,7 +1387,8 @@ async function scrapePageWithListener(targetPath, apiMatchers, options = {}) {
 
 // ---- 通用侧边栏全量API捕获 ----
 async function scrapeSidebarCaptureAll(menuText, options = {}) {
-  const { waitTime = 12000 } = options;
+  const lite = options.lite ?? _navLiteMode;
+  const { waitTime = lite ? 5200 : 7000 } = options;
   const page = await context.newPage();
   const capturedApis = [];
   const staticExts = [".js", ".css", ".png", ".svg", ".woff", ".woff2", ".ttf", ".ico", ".jpg", ".jpeg", ".gif", ".map", ".webp"];
@@ -1073,7 +1418,7 @@ async function scrapeSidebarCaptureAll(menuText, options = {}) {
     // 先导航到 agentseller
     console.error("[sidebar-capture] Navigating to agentseller...");
     await navigateToSellerCentral(page, "/goods/list");
-    await randomDelay(3000, 5000);
+    await randomDelay(lite ? 700 : 1200, lite ? 1000 : 1800);
 
     // 关闭弹窗
     for (let i = 0; i < 5; i++) {
@@ -1112,7 +1457,7 @@ async function scrapeSidebarCaptureAll(menuText, options = {}) {
           const parentEl = page.locator('span:has-text("' + parent + '")').first();
           if (await parentEl.isVisible({ timeout: 1000 })) {
             await parentEl.click();
-            await randomDelay(1000, 2000);
+            await randomDelay(lite ? 400 : 700, lite ? 800 : 1200);
           }
         } catch (e) { logSilent("ui.action", e); }
       }
@@ -1129,7 +1474,7 @@ async function scrapeSidebarCaptureAll(menuText, options = {}) {
       }
     }
 
-    await randomDelay(waitTime, waitTime + 5000);
+    await randomDelay(waitTime, waitTime + (lite ? 1000 : 1800));
 
     // 关闭弹窗
     for (let i = 0; i < 5; i++) {
@@ -1139,7 +1484,11 @@ async function scrapeSidebarCaptureAll(menuText, options = {}) {
         else break;
       } catch { break; }
     }
-    await randomDelay(3000, 5000);
+    await randomDelay(lite ? 700 : 1000, lite ? 1100 : 1500);
+
+    if (capturedApis.length < 2) {
+      await randomDelay(lite ? 1800 : 2500, lite ? 2400 : 3500);
+    }
 
     // 提取DOM表格
     const domData = await page.evaluate(() => {
@@ -1317,6 +1666,7 @@ async function scrapeQcDetail() {
 
 // 合规看板（主页仪表盘 - 包含重要通知、补充合规材料、涉嫌违反政策等汇总数据）
 async function scrapeGovernDashboard() {
+  const lite = _navLiteMode;
   const page = await context.newPage();
   const capturedApis = [];
   const staticExts = [".js", ".css", ".png", ".svg", ".woff", ".woff2", ".ttf", ".ico", ".jpg", ".jpeg", ".gif", ".map", ".webp"];
@@ -1345,7 +1695,7 @@ async function scrapeGovernDashboard() {
     // 先进入 agentseller 建立认证上下文
     console.error("[govern-dashboard] Navigating to govern dashboard...");
     await navigateToSellerCentral(page, "/goods/list");
-    await randomDelay(2000, 3000);
+    await randomDelay(lite ? 700 : 2000, lite ? 1000 : 3000);
 
     // 关闭弹窗
     for (let i = 0; i < 5; i++) {
@@ -1358,7 +1708,7 @@ async function scrapeGovernDashboard() {
 
     // 导航到合规中心看板
     await page.goto("https://agentseller.temu.com/govern/dashboard", { waitUntil: "domcontentloaded", timeout: 60000 });
-    await randomDelay(8000, 12000);
+    await randomDelay(lite ? 5500 : 8000, lite ? 7500 : 12000);
 
     // 关闭弹窗
     for (let i = 0; i < 5; i++) {
@@ -1428,6 +1778,317 @@ async function scrapeGovernDashboard() {
 }
 
 // 合规中心子页面采集函数已移到 scrape-registry.mjs
+
+async function extractGenericDomData(page, options = {}) {
+  const textLimit = options.textLimit || 12000;
+  return page.evaluate((limit) => {
+    const result = {};
+    const bodyText = document.body?.innerText || "";
+    result.pageText = bodyText.substring(0, limit);
+
+    result.stats = [];
+    const cards = document.querySelectorAll('[class*="card"], [class*="stat"], [class*="summary"], [class*="overview"], [class*="metric"], [class*="item"], [class*="block"], [class*="module"]');
+    cards.forEach((card) => {
+      const text = card.innerText?.trim();
+      if (text && text.length < 500 && /\d/.test(text)) {
+        result.stats.push(text.replace(/\n+/g, " | "));
+      }
+    });
+
+    const tables = document.querySelectorAll("table");
+    if (tables.length > 0) {
+      result.tables = [];
+      tables.forEach((table) => {
+        const headers = [...table.querySelectorAll("thead th, thead td")].map((h) => h.innerText?.trim());
+        const rows = [];
+        table.querySelectorAll("tbody tr").forEach((tr, ri) => {
+          if (ri < 200) {
+            const cells = [...tr.querySelectorAll("td")].map((td) => td.innerText?.trim()?.substring(0, 500));
+            rows.push(cells);
+          }
+        });
+        if (headers.length > 0 || rows.length > 0) {
+          result.tables.push({ headers, rows, rowCount: rows.length });
+        }
+      });
+    }
+
+    return result;
+  }, textLimit);
+}
+
+const GROUP_CAPTURE_STATIC_EXTS = [".js", ".css", ".png", ".svg", ".woff", ".woff2", ".ttf", ".ico", ".jpg", ".jpeg", ".gif", ".map", ".webp"];
+const GROUP_CAPTURE_FRAMEWORK_PATTERNS = ["phantom/xg", "pfb/l1", "pfb/a4", "web-performace", "_stm", "msgBox", "hot-update", "sockjs", "hm.baidu", "google", "favicon", "drogon-api", "report/uin"];
+
+function createGroupedApiCollector(page, options = {}) {
+  let capturedApis = [];
+  const includeErrorCode = Boolean(options.includeErrorCode);
+
+  const handler = async (resp) => {
+    try {
+      const url = resp.url();
+      if (GROUP_CAPTURE_STATIC_EXTS.some((ext) => url.includes(ext))) return;
+      if (GROUP_CAPTURE_FRAMEWORK_PATTERNS.some((pattern) => url.includes(pattern))) return;
+      if (resp.status() !== 200) return;
+
+      const ct = resp.headers()["content-type"] || "";
+      if (!ct.includes("json") && !ct.includes("application")) return;
+
+      const body = await resp.json().catch(() => null);
+      if (!body) return;
+
+      const hasBusinessPayload = (
+        body.result !== undefined
+        || body.success !== undefined
+        || body.data !== undefined
+        || (includeErrorCode && body.errorCode !== undefined)
+      );
+      if (!hasBusinessPayload) return;
+
+      const parsedUrl = new URL(url);
+      capturedApis.push({ path: parsedUrl.pathname, data: body });
+    } catch (e) { logSilent("ui.action", e); }
+  };
+
+  return {
+    attach() {
+      page.on("response", handler);
+    },
+    detach() {
+      page.removeListener("response", handler);
+    },
+    reset() {
+      capturedApis = [];
+    },
+    snapshot() {
+      return [...capturedApis];
+    },
+  };
+}
+
+async function dismissCommonDialogs(page, extraButtonTexts = []) {
+  const buttonTexts = Array.from(new Set(["知道了", "我知道了", "确定", "关闭", "暂不", "我已知晓", ...extraButtonTexts]));
+  const selector = buttonTexts.map((text) => `button:has-text("${text}")`).join(", ");
+
+  for (let i = 0; i < 6; i++) {
+    try {
+      const btn = page.locator(selector).first();
+      if (!await btn.isVisible({ timeout: 500 })) break;
+      await btn.click();
+      await randomDelay(200, 400);
+    } catch {
+      break;
+    }
+  }
+}
+
+async function expandSidebarMenus(page) {
+  await page.evaluate(() => {
+    document.querySelectorAll('[class*="menu-submenu-title"], [class*="submenu-title"], [class*="ant-menu-submenu-title"]').forEach((item) => {
+      const parent = item.closest('[class*="submenu"]') || item.parentElement;
+      const classText = parent?.classList?.toString?.() || "";
+      const isOpen = classText.includes("open") || classText.includes("active");
+      if (!isOpen) item.click();
+    });
+  }).catch(() => {});
+}
+
+async function clickFirstVisible(page, selectors, timeout = 1500) {
+  for (const selector of selectors) {
+    try {
+      const element = page.locator(selector).first();
+      if (await element.isVisible({ timeout })) {
+        await element.click();
+        return true;
+      }
+    } catch (e) { logSilent("ui.action", e); }
+  }
+  return false;
+}
+
+async function navigateGovernTarget(page, target, options = {}) {
+  const lite = options.lite ?? _navLiteMode;
+  const targetUrl = `https://agentseller.temu.com/govern/${target.subPath}`;
+  const expectedUrlPart = `/govern/${target.subPath}`;
+  const sidebarSelectors = [
+    `nav a[href*="${target.subPath}"]`,
+    `[class*="menu"] a[href*="${target.subPath}"]`,
+    `[class*="nav"] a[href*="${target.subPath}"]`,
+    `a[href*="${target.subPath}"]`,
+  ];
+
+  let clicked = await clickFirstVisible(page, sidebarSelectors, lite ? 1200 : 2000);
+  if (!clicked) {
+    await expandSidebarMenus(page);
+    await randomDelay(lite ? 300 : 600, lite ? 500 : 900);
+    clicked = await clickFirstVisible(page, sidebarSelectors, lite ? 1200 : 2000);
+  }
+  if (!clicked) {
+    clicked = await page.evaluate((subPath) => {
+      const links = document.querySelectorAll('a, [role="link"], [class*="menu"] a, [class*="nav"] a');
+      for (const link of links) {
+        const href = link.getAttribute("href") || "";
+        if ((href.includes(`/govern/${subPath}`) || href.includes(subPath)) && link.offsetParent !== null) {
+          link.click();
+          return true;
+        }
+      }
+      return false;
+    }, target.subPath).catch(() => false);
+  }
+
+  if (clicked) {
+    await page.waitForURL((url) => url.toString().includes(expectedUrlPart), { timeout: lite ? 5000 : 8000 }).catch(() => {});
+    await randomDelay(lite ? 2200 : 4500, lite ? 3200 : 6500);
+    if (page.url().includes(expectedUrlPart)) {
+      return { method: "sidebar", url: page.url() };
+    }
+  }
+
+  console.error(`[govern-group] Sidebar fallback -> ${target.key}`);
+  await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+  await randomDelay(lite ? 2500 : 6000, lite ? 3800 : 8500);
+  return { method: "goto", url: page.url() };
+}
+
+async function navigateAdsTab(page, tab, options = {}) {
+  if (!tab?.label) return true;
+
+  const lite = options.lite ?? _navLiteMode;
+  const tabSelectors = [
+    `nav a:has-text("${tab.label}")`,
+    `a:has-text("${tab.label}")`,
+    `div[role="tab"]:has-text("${tab.label}")`,
+    `span:has-text("${tab.label}")`,
+    `li:has-text("${tab.label}")`,
+  ];
+
+  let clicked = await clickFirstVisible(page, tabSelectors, lite ? 1200 : 1800);
+  if (!clicked) {
+    clicked = await page.evaluate((label) => {
+      const all = [...document.querySelectorAll("a, div, span, li")];
+      for (const element of all) {
+        if (element.innerText?.trim() === label && element.offsetParent !== null) {
+          element.click();
+          return true;
+        }
+      }
+      return false;
+    }, tab.label).catch(() => false);
+  }
+
+  return clicked;
+}
+
+function getAdsTabConfig(tabName) {
+  return ADS_GROUP_TABS.find((tab) => tab.tabName === tabName || tab.key === tabName) || null;
+}
+
+function getAdsTabWaitTime(tab, lite) {
+  return lite ? (tab?.liteWaitTime ?? tab?.waitTime ?? 3500) : (tab?.waitTime ?? 8000);
+}
+
+async function scrapeSingleGovernTarget(subPath, meta = {}) {
+  const taskKey = meta?.taskKey || `govern:${subPath}`;
+  const resultMap = await scrapeGovernTaskGroup([{ key: taskKey, subPath }]);
+  return resultMap[taskKey] || { error: `govern target missing: ${taskKey}` };
+}
+
+async function scrapeGovernTaskGroup(targets) {
+  const lite = _navLiteMode;
+  const page = await context.newPage();
+  const results = {};
+  const collector = createGroupedApiCollector(page);
+
+  try {
+    if (!Array.isArray(targets) || targets.length === 0) return results;
+
+    console.error("[govern-group] Establishing auth context...");
+    await navigateToSellerCentral(page, "/goods/list");
+    await randomDelay(lite ? 700 : 1500, lite ? 1000 : 2200);
+    await dismissCommonDialogs(page);
+
+    collector.attach();
+    console.error("[govern-group] Opening govern dashboard shell...");
+    await page.goto("https://agentseller.temu.com/govern/dashboard", { waitUntil: "domcontentloaded", timeout: 60000 });
+    await randomDelay(lite ? 2500 : 6000, lite ? 3800 : 8500);
+    await dismissCommonDialogs(page);
+    await expandSidebarMenus(page);
+    await randomDelay(lite ? 300 : 600, lite ? 500 : 900);
+
+    for (const target of targets) {
+      collector.reset();
+      console.error(`[govern-group] Navigating via sidebar: ${target.key}`);
+      await navigateGovernTarget(page, target, { lite });
+      await dismissCommonDialogs(page);
+
+      const capturedApis = collector.snapshot();
+      if (capturedApis.length < 2) {
+        await randomDelay(lite ? 800 : 2200, lite ? 1300 : 3000);
+      }
+
+      const domData = await extractGenericDomData(page, { textLimit: 10000 }).catch(() => ({}));
+      results[target.key] = { apis: collector.snapshot(), domData, url: page.url() };
+    }
+
+    await saveCookies();
+    return results;
+  } finally {
+    collector.detach();
+    await page.close();
+  }
+}
+
+async function scrapeAdsTaskGroup(tabs = ADS_GROUP_TABS) {
+  const lite = _navLiteMode;
+  const page = await context.newPage();
+  const results = {};
+  const normalizedTabs = Array.isArray(tabs) ? tabs.filter(Boolean) : ADS_GROUP_TABS;
+  const collector = createGroupedApiCollector(page, { includeErrorCode: true });
+
+  try {
+    if (normalizedTabs.length === 0) return results;
+
+    console.error("[ads-group] Establishing auth context...");
+    await navigateToSellerCentral(page, "/goods/list");
+    await randomDelay(lite ? 700 : 1500, lite ? 1000 : 2200);
+    await dismissCommonDialogs(page);
+
+    collector.attach();
+    console.error("[ads-group] Navigating to ads.temu.com...");
+    await page.goto("https://ads.temu.com/index.html", { waitUntil: "domcontentloaded", timeout: 60000 });
+    await randomDelay(lite ? 2500 : 5000, lite ? 3800 : 8000);
+    await dismissCommonDialogs(page, ["我已知晓"]);
+
+    for (const tab of normalizedTabs) {
+      if (tab.label) collector.reset();
+
+      if (tab.label) {
+        const clicked = await navigateAdsTab(page, tab, { lite });
+        if (!clicked) {
+          results[tab.key] = { error: `ads tab not found: ${tab.label}`, apis: [], domData: {}, url: page.url() };
+          continue;
+        }
+      }
+
+      const waitTime = getAdsTabWaitTime(tab, lite);
+      await randomDelay(waitTime, waitTime + (lite ? 1200 : 2200));
+      await dismissCommonDialogs(page, ["我已知晓"]);
+      if (collector.snapshot().length < 2) {
+        await randomDelay(lite ? 900 : 1800, lite ? 1400 : 2600);
+      }
+
+      const domData = await extractGenericDomData(page, { textLimit: 15000 }).catch(() => ({}));
+      results[tab.key] = { apis: collector.snapshot(), domData, url: page.url() };
+    }
+
+    await saveCookies();
+    return results;
+  } finally {
+    collector.detach();
+    await page.close();
+  }
+}
 
 // ---- 上品核价自动化 ----
 
@@ -1504,8 +2165,8 @@ async function batchCreateFromCSV(params) {
     const row = parseCSVLine(lines[i + 1]); // +1 跳过 header
     const productName = row[nameIdx] || "";
     const imageUrl = row[imageIdx] || "";
-    const categoryCn = row[catCnIdx] || "";
-    const priceUSD = parseFloat(row[priceIdx] || "0");
+    const categoryCn = normalizeCategoryText(row[catCnIdx] || "");
+    const priceUSD = normalizePriceNumber(row[priceIdx], 0);
     const totalSales = parseInt(row[salesIdx] || "0");
 
     console.error(`\n[batch] ===== Product ${i + 1}/${startRow + count} =====`);
@@ -2651,9 +3312,9 @@ async function autoCreateProduct(params) {
               }
             } catch (e) { logSilent("ui.action", e); }
 
-            // 填子规格：随机一个字母
-            const randomLetter = String.fromCharCode(65 + Math.floor(Math.random() * 26));
-            await page.evaluate((letter) => {
+            // 填子规格：按标题生成中文卖点词，并尽量避免最近重复
+            const childSpecValue = generateChildSpecValue(params.title || "");
+            await page.evaluate((value) => {
               const inputs = document.querySelectorAll('input[type="text"], input:not([type])');
               for (const input of inputs) {
                 if (input.offsetParent && !input.value && input.getBoundingClientRect().top > 400) {
@@ -2661,15 +3322,15 @@ async function autoCreateProduct(params) {
                   // 找规格表中的输入框（不是搜索框）
                   if (!placeholder.includes("搜索") && !placeholder.includes("输入素材")) {
                     const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
-                    setter?.call(input, letter);
+                    setter?.call(input, value);
                     input.dispatchEvent(new Event("input", { bubbles: true }));
                     input.dispatchEvent(new Event("change", { bubbles: true }));
                     return;
                   }
                 }
               }
-            }, randomLetter);
-            console.error(`[create-product] Child spec set: ${randomLetter}`);
+            }, childSpecValue);
+            console.error(`[create-product] Child spec set: ${childSpecValue}`);
           }
         }
       } catch (e) {
@@ -2975,200 +3636,51 @@ async function autoCreateProduct(params) {
 
 // 推广平台通用采集函数：捕获 API + DOM 数据 + 支持 Tab 内导航
 async function scrapeAdsPage(tabName, options = {}) {
-  const { waitTime = 10000 } = options;
-  const page = await context.newPage();
-  const capturedApis = [];
-  const staticExts = [".js", ".css", ".png", ".svg", ".woff", ".woff2", ".ttf", ".ico", ".jpg", ".jpeg", ".gif", ".map", ".webp"];
-  const frameworkPatterns = ['phantom/xg', 'pfb/l1', 'pfb/a4', 'web-performace', '_stm', 'msgBox', 'hot-update', 'sockjs', 'hm.baidu', 'google', 'favicon', 'drogon-api', 'report/uin'];
+  const tab = getAdsTabConfig(tabName);
+  if (!tab) throw new Error(`Unknown ads tab: ${tabName}`);
 
-  try {
-    page.on("response", async (resp) => {
-      try {
-        const url = resp.url();
-        if (staticExts.some(ext => url.includes(ext))) return;
-        if (frameworkPatterns.some(p => url.includes(p))) return;
-        if (resp.status() === 200) {
-          const ct = resp.headers()["content-type"] || "";
-          if (ct.includes("json") || ct.includes("application")) {
-            const body = await resp.json().catch(() => null);
-            if (body && (body.result !== undefined || body.success !== undefined || body.data !== undefined || body.errorCode !== undefined)) {
-              const u = new URL(url);
-              capturedApis.push({ path: u.pathname, data: body });
-              console.error(`[ads-${tabName}] Captured: ${u.pathname}`);
-            }
-          }
-        }
-      } catch (e) { logSilent("ui.action", e); }
-    });
-
-    // 先进入 agentseller 建立认证上下文
-    console.error(`[ads-${tabName}] Establishing auth context...`);
-    await navigateToSellerCentral(page, "/goods/list");
-    await randomDelay(2000, 3000);
-
-    // 关闭弹窗
-    for (let i = 0; i < 5; i++) {
-      try {
-        const btn = page.locator('button:has-text("知道了"), button:has-text("我知道了"), button:has-text("确定"), button:has-text("关闭"), button:has-text("暂不")').first();
-        if (await btn.isVisible({ timeout: 500 })) await btn.click();
-        else break;
-      } catch { break; }
-    }
-
-    // 导航到推广平台首页（需要通过 ads.temu.com 入口）
-    console.error(`[ads-${tabName}] Navigating to ads.temu.com...`);
-    await page.goto("https://ads.temu.com/index.html", { waitUntil: "domcontentloaded", timeout: 60000 });
-    await randomDelay(5000, 8000);
-
-    // 关闭推广平台弹窗
-    for (let i = 0; i < 5; i++) {
-      try {
-        const btn = page.locator('button:has-text("知道了"), button:has-text("我知道了"), button:has-text("确定"), button:has-text("关闭"), button:has-text("暂不"), button:has-text("我已知晓")').first();
-        if (await btn.isVisible({ timeout: 800 })) await btn.click();
-        else break;
-      } catch { break; }
-    }
-    await randomDelay(1000, 2000);
-
-    // 如果不是首页，点击对应 Tab 导航
-    if (tabName !== "home") {
-      const tabLabels = {
-        "product": "商品推广",
-        "report": "数据报表",
-        "finance": "财务管理",
-        "help": "帮助中心",
-        "notification": "消息通知",
-      };
-      const label = tabLabels[tabName];
-      if (label) {
-        console.error(`[ads-${tabName}] Clicking tab: ${label}`);
-        let clicked = false;
-        // 尝试点击顶部导航 Tab
-        const tabSelectors = [
-          `nav a:has-text("${label}")`,
-          `a:has-text("${label}")`,
-          `div[role="tab"]:has-text("${label}")`,
-          `span:has-text("${label}")`,
-          `li:has-text("${label}")`,
-        ];
-        for (const sel of tabSelectors) {
-          try {
-            const el = page.locator(sel).first();
-            if (await el.isVisible({ timeout: 2000 })) {
-              await el.click();
-              clicked = true;
-              console.error(`[ads-${tabName}] Tab clicked: ${label}`);
-              break;
-            }
-          } catch (e) { logSilent("ui.action", e); }
-        }
-        if (!clicked) {
-          console.error(`[ads-${tabName}] Tab not found via locator, trying evaluate...`);
-          await page.evaluate((lbl) => {
-            const all = [...document.querySelectorAll('a, div, span, li')];
-            for (const el of all) {
-              if (el.innerText?.trim() === lbl && el.offsetParent !== null) {
-                el.click();
-                return true;
-              }
-            }
-            return false;
-          }, label);
-        }
-        await randomDelay(waitTime, waitTime + 3000);
-
-        // 关闭弹窗
-        for (let i = 0; i < 5; i++) {
-          try {
-            const btn = page.locator('button:has-text("知道了"), button:has-text("确定"), button:has-text("关闭"), button:has-text("暂不")').first();
-            if (await btn.isVisible({ timeout: 500 })) await btn.click();
-            else break;
-          } catch { break; }
-        }
-      }
-    }
-
-    await randomDelay(3000, 5000);
-
-    // 提取 DOM 数据
-    const domData = await page.evaluate(() => {
-      const result = {};
-      const bodyText = document.body?.innerText || "";
-      result.pageText = bodyText.substring(0, 15000);
-
-      // 提取统计卡片
-      result.stats = [];
-      const cards = document.querySelectorAll('[class*="card"], [class*="stat"], [class*="summary"], [class*="overview"], [class*="metric"]');
-      cards.forEach(card => {
-        const text = card.innerText?.trim();
-        if (text && text.length < 500 && /\d/.test(text)) {
-          result.stats.push(text.replace(/\n+/g, ' | '));
-        }
-      });
-
-      // 提取表格
-      const tables = document.querySelectorAll("table");
-      if (tables.length > 0) {
-        result.tables = [];
-        tables.forEach((table) => {
-          const headers = [...table.querySelectorAll("thead th, thead td")].map(h => h.innerText?.trim());
-          const rows = [];
-          table.querySelectorAll("tbody tr").forEach((tr, ri) => {
-            if (ri < 200) {
-              const cells = [...tr.querySelectorAll("td")].map(td => td.innerText?.trim()?.substring(0, 500));
-              rows.push(cells);
-            }
-          });
-          if (headers.length > 0 || rows.length > 0) {
-            result.tables.push({ headers, rows, rowCount: rows.length });
-          }
-        });
-      }
-
-      return result;
-    });
-
-    await saveCookies();
-    console.error(`[ads-${tabName}] Done! APIs: ${capturedApis.length}`);
-    return { apis: capturedApis, domData };
-  } finally {
-    await page.close();
-  }
+  const resultMap = await scrapeAdsTaskGroup([{
+    ...tab,
+    waitTime: options.waitTime ?? tab.waitTime,
+    liteWaitTime: options.waitTime ?? tab.liteWaitTime,
+  }]);
+  return resultMap[tab.key] || { error: `ads tab missing: ${tab.key}` };
 }
 
 // 推广平台 - 首页（今日花费、申报价销售额、推广建议、推荐投放商品）
 async function scrapeAdsHome() {
-  return scrapeAdsPage("home", { waitTime: 10000 });
+  return scrapeAdsPage("home");
 }
 
 // 推广平台 - 商品推广（投放中、到达日预算、审核驳回、待推广商品数）
 async function scrapeAdsProduct() {
-  return scrapeAdsPage("product", { waitTime: 12000 });
+  return scrapeAdsPage("product");
 }
 
 // 推广平台 - 数据报表（推广效果数据报表）
 async function scrapeAdsReport() {
-  return scrapeAdsPage("report", { waitTime: 12000 });
+  return scrapeAdsPage("report");
 }
 
 // 推广平台 - 财务管理（推广账户余额、充值、消耗明细）
 async function scrapeAdsFinance() {
-  return scrapeAdsPage("finance", { waitTime: 12000 });
+  return scrapeAdsPage("finance");
 }
 
 // 推广平台 - 帮助中心
 async function scrapeAdsHelp() {
-  return scrapeAdsPage("help", { waitTime: 8000 });
+  return scrapeAdsPage("help");
 }
 
 // 推广平台 - 消息通知
 async function scrapeAdsNotification() {
-  return scrapeAdsPage("notification", { waitTime: 10000 });
+  return scrapeAdsPage("notification");
 }
 
 // ---- 通过侧边栏采集 qiankun 子应用数据 ----
 // 这些 /main/* 页面无法直接 page.goto，需要通过侧边栏点击导航
-async function scrapeSidebarPages() {
+async function scrapeSidebarPages(targetKeys = null) {
+  const lite = _navLiteMode;
   const page = await context.newPage();
   const debugDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
   fs.mkdirSync(debugDir, { recursive: true });
@@ -3179,22 +3691,25 @@ async function scrapeSidebarPages() {
   const results = {};
 
   // 目标页面（通过侧边栏点击导航加载）
-  const sidebarTargets = [
-    { menuTexts: ["收货入库异常看板", "收货入库异常"], key: "receiveAbnormal", apis: [] },
-    { menuTexts: ["商品价格申报"], key: "priceDeclaration", apis: [] },
+  const allSidebarTargets = [
     { menuTexts: ["样品管理"], key: "sampleManage", apis: [] },
-    { menuTexts: ["模特信息模版"], key: "modelTemplate", apis: [] },
-    { menuTexts: ["司机/地址管理", "司机"], key: "driverAddress", apis: [] },
-    { menuTexts: ["发货台"], key: "deliveryDesk", apis: [] },
-    { menuTexts: ["发货单列表"], key: "deliveryList", apis: [] },
-    { menuTexts: ["AB实验平台"], key: "abTest", apis: [] },
+    { menuTexts: ["司机/地址管理", "司机"], key: "addressManage", apis: [] },
+    { menuTexts: ["发货台"], key: "shippingDesk", apis: [] },
+    { menuTexts: ["发货单列表"], key: "shippingList", apis: [] },
+    { menuTexts: ["收货/入库异常处...", "收货/入库异常", "收货入库异常"], key: "exceptionNotice", apis: [] },
+    { menuTexts: ["退货明细"], key: "returnDetail", apis: [] },
+    { menuTexts: ["退货包裹管理"], key: "returnOrders", apis: [] },
+    { menuTexts: ["退货单管理"], key: "returnReceipt", apis: [] },
   ];
+  const sidebarTargets = Array.isArray(targetKeys) && targetKeys.length > 0
+    ? allSidebarTargets.filter((target) => targetKeys.includes(target.key))
+    : allSidebarTargets;
 
   try {
     // Step 1: 加载 shell
     console.error("[sidebar-scrape] Step 1: Loading shell...");
     await navigateToSellerCentral(page, "/goods/list");
-    await randomDelay(5000, 7000);
+    await randomDelay(lite ? 1200 : 5000, lite ? 1800 : 7000);
 
     // 关闭弹窗
     for (let i = 0; i < 10; i++) {
@@ -3215,7 +3730,7 @@ async function scrapeSidebarPages() {
         if (!isOpen) item.click();
       });
     });
-    await randomDelay(2000, 3000);
+    await randomDelay(lite ? 700 : 2000, lite ? 1200 : 3000);
     // 再展开一次
     await page.evaluate(() => {
       document.querySelectorAll('[class*="menu-submenu-title"], [class*="submenu-title"], [class*="ant-menu-submenu-title"]').forEach(item => {
@@ -3224,7 +3739,7 @@ async function scrapeSidebarPages() {
         if (!isOpen) item.click();
       });
     });
-    await randomDelay(1500, 2000);
+    await randomDelay(lite ? 500 : 1500, lite ? 900 : 2000);
 
     // Step 3: 逐个通过侧边栏点击导航
     for (const target of sidebarTargets) {
@@ -3282,7 +3797,7 @@ async function scrapeSidebarPages() {
         }
 
         if (clicked) {
-          await randomDelay(8000, 12000);
+          await randomDelay(lite ? 3200 : 8000, lite ? 4800 : 12000);
 
           // 关闭弹窗
           for (let i = 0; i < 3; i++) {
@@ -3292,7 +3807,7 @@ async function scrapeSidebarPages() {
               else break;
             } catch { break; }
           }
-          await randomDelay(3000, 5000);
+          await randomDelay(lite ? 700 : 3000, lite ? 1200 : 5000);
 
           // 从 DOM 提取数据
           const domData = await page.evaluate(() => {
@@ -3851,7 +4366,7 @@ const _scrapeExecutors = () => ({
   scrapePageCaptureAll,
   scrapeSidebarCaptureAll,
   scrapePageWithListener,
-  scrapeGovernPage: (subPath) => scrapePageCaptureAll(null, { waitTime: 12000, fullUrl: "https://agentseller.temu.com/govern/" + subPath }),
+  scrapeGovernPage: (subPath, meta) => scrapeSingleGovernTarget(subPath, meta),
   ensureBrowser,
 });
 const _registryScrape = (key) => {
@@ -3867,7 +4382,7 @@ async function handleRequest(body) {
   switch (action) {
     case "ping": return { status: "pong" };
     case "launch": await launch(params.accountId, params.headless); return { status: "launched" };
-    case "login": await launch(params.accountId, false); return { success: await login(params.phone, params.password) };
+    case "login": await launch(params.accountId, false); return { success: await loginWithTransientPassword(params.phone, params.password) };
     case "scrape_products": {
       console.error("[Worker] scrape_products called, browser:", !!browser, "context:", !!context);
       try {
@@ -3892,7 +4407,7 @@ async function handleRequest(body) {
     case "discover_pages": {
       // 自动发现所有页面和 API
       await ensureBrowser();
-      return await discoverAllPages();
+      return await handleRequest({ action: "scan_menu", params });
     }
     case "deep_probe": {
       // 深度探测 iframe 页面
@@ -3913,7 +4428,28 @@ async function handleRequest(body) {
         { name: "活动数据", url: "https://agentseller.temu.com/main/activity-analysis" },
         { name: "流量分析", url: "https://agentseller.temu.com/main/flux-analysis" },
       ];
-      return await deepProbePages(params.pages || defaultPages);
+      const pageEntries = (params.pages || defaultPages)
+        .map((page) => {
+          if (typeof page === "string") {
+            return page.startsWith("/") ? { name: page, path: page } : null;
+          }
+          const rawPath = page?.path || page?.url;
+          if (!rawPath || typeof rawPath !== "string") return null;
+          try {
+            const parsed = rawPath.startsWith("http")
+              ? new URL(rawPath)
+              : new URL(rawPath, "https://agentseller.temu.com");
+            return { ...page, path: `${parsed.pathname}${parsed.search}` };
+          } catch {
+            return rawPath.startsWith("/") ? { ...page, path: rawPath } : null;
+          }
+        })
+        .filter(Boolean);
+      const results = await handleRequest({
+        action: "probe_batch",
+        params: { paths: pageEntries.map((page) => page.path) },
+      });
+      return { pages: pageEntries, results, total: pageEntries.length };
     }
     case "scrape_sales": {
       await ensureBrowser();
@@ -3928,23 +4464,33 @@ async function handleRequest(body) {
       return await batchCreateFromCSV(params);
     }
     case "generate_ai_images": {
-      const images = await generateAIImages(
+      const aiResult = await generateAIImages(
         params.sourceImage,
         params.title,
         params.imageTypes || ["hero", "lifestyle"]
       );
-      return { success: true, images, count: images.length };
+      const images = Array.isArray(aiResult?.images) ? aiResult.images : [];
+      return { success: true, ...aiResult, images, count: images.length };
     }
     case "sidebar_nav": {
       await ensureBrowser();
       return await scrapeViaSidebarClick();
     }
     case "scrape_all": {
+      const scrapeStartedAt = getScrapeAllTimestamp();
+      replaceScrapeAllProgress({
+        running: true,
+        status: "warming",
+        message: "正在建立采集会话",
+        startedAt: scrapeStartedAt,
+        finishedAt: "",
+        tasks: {},
+      });
+
+      try {
       // 一键采集：并发执行，用弹窗监控器自动处理授权弹窗
       // 接收 main 进程传来的凭据，用于 cookie 过期时自动登录
       if (params.credentials?.phone) {
-        browserState.lastPhone = params.credentials.phone;
-        browserState.lastPassword = params.credentials.password || "";
         console.error(`[scrape_all] Received credentials for ${params.credentials.phone.slice(0, 3)}***`);
       }
       await ensureBrowser();
@@ -4071,14 +4617,18 @@ async function handleRequest(body) {
         await warmupPage.close();
       }
 
-      // Step 2: 并发执行采集，最多3个同时
+      // Step 2: 并发执行采集，限制并发避免风控
       const debugDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
       fs.mkdirSync(debugDir, { recursive: true });
       // ★ 启用 lite 模式：后续所有 navigateToSellerCentral 都用简化流程
       _navLiteMode = true;
       const results = {};
       try {
-      console.error("[scrape_all] Step 2: Running all scrapers (concurrency=4) with popup monitor + lite nav...");
+      console.error("[scrape_all] Step 2: Running all scrapers with popup monitor + lite nav...");
+      const governSplitIndex = Math.ceil(GOVERN_GROUP_TARGETS.length / 2);
+      const governBundleATargets = GOVERN_GROUP_TARGETS.slice(0, governSplitIndex);
+      const governBundleBTargets = GOVERN_GROUP_TARGETS.slice(governSplitIndex);
+      const adsBundleKeys = ADS_GROUP_TABS.map(({ key }) => key);
       const tasks = [
         // ---- 核心运营数据 ----
         { key: "dashboard", fn: () => _registryScrape("dashboard") },
@@ -4095,18 +4645,11 @@ async function handleRequest(body) {
         { key: "lifecycle", fn: () => _registryScrape("lifecycle") },
         { key: "priceCompete", fn: () => _registryScrape("priceCompete") },
         { key: "urgentOrders", fn: () => _registryScrape("urgentOrders") },
-        { key: "shippingDesk", fn: () => _registryScrape("shippingDesk") },
-        { key: "shippingList", fn: () => _registryScrape("shippingList") },
-        { key: "addressManage", fn: () => _registryScrape("addressManage") },
         { key: "delivery", fn: () => _registryScrape("delivery") },
-        { key: "returnOrders", fn: () => _registryScrape("returnOrders") },
-        { key: "exceptionNotice", fn: () => _registryScrape("exceptionNotice") },
-        { key: "returnDetail", fn: () => _registryScrape("returnDetail") },
         { key: "salesReturn", fn: () => _registryScrape("salesReturn") },
-        { key: "returnReceipt", fn: () => _registryScrape("returnReceipt") },
         { key: "priceReport", fn: () => _registryScrape("priceReport") },
+        { key: "flowPrice", fn: () => _registryScrape("flowPrice") },
         { key: "imageTask", fn: () => _registryScrape("imageTask") },
-        { key: "sampleManage", fn: () => _registryScrape("sampleManage") },
         { key: "checkup", fn: () => _registryScrape("checkup") },
         { key: "usRetrieval", fn: () => _registryScrape("usRetrieval") },
         { key: "retailPrice", fn: () => _registryScrape("retailPrice") },
@@ -4124,32 +4667,62 @@ async function handleRequest(body) {
         { key: "flowGrow", fn: () => _registryScrape("flowGrow") },
         { key: "activityUS", fn: () => _registryScrape("activityUS") },
         { key: "activityEU", fn: () => _registryScrape("activityEU") },
+        {
+          key: "sidebarBundleOps",
+          expectedKeys: ["sampleManage", "addressManage", "shippingDesk", "shippingList"],
+          fn: () => scrapeSidebarPages(["sampleManage", "addressManage", "shippingDesk", "shippingList"]),
+          expandResults: true
+        },
+        {
+          key: "sidebarBundleReturns",
+          expectedKeys: ["exceptionNotice", "returnDetail", "returnOrders", "returnReceipt"],
+          fn: () => scrapeSidebarPages(["exceptionNotice", "returnDetail", "returnOrders", "returnReceipt"]),
+          expandResults: true
+        },
         // ---- 合规中心 ----
         { key: "governDashboard", fn: () => scrapeGovernDashboard() },
-        { key: "governProductQualification", fn: () => _registryScrape("governProductQualification") },
-        { key: "governQualificationAppeal", fn: () => _registryScrape("governQualificationAppeal") },
-        { key: "governEprQualification", fn: () => _registryScrape("governEprQualification") },
-        { key: "governProductPhoto", fn: () => _registryScrape("governProductPhoto") },
-        { key: "governComplianceInfo", fn: () => _registryScrape("governComplianceInfo") },
-        { key: "governResponsiblePerson", fn: () => _registryScrape("governResponsiblePerson") },
-        { key: "governManufacturer", fn: () => _registryScrape("governManufacturer") },
-        { key: "governComplaint", fn: () => _registryScrape("governComplaint") },
-        { key: "governViolationAppeal", fn: () => _registryScrape("governViolationAppeal") },
-        { key: "governMerchantAppeal", fn: () => _registryScrape("governMerchantAppeal") },
-        { key: "governTro", fn: () => _registryScrape("governTro") },
-        { key: "governEprBilling", fn: () => _registryScrape("governEprBilling") },
-        { key: "governComplianceReference", fn: () => _registryScrape("governComplianceReference") },
-        { key: "governCustomsAttribute", fn: () => _registryScrape("governCustomsAttribute") },
-        { key: "governCategoryCorrection", fn: () => _registryScrape("governCategoryCorrection") },
+        {
+          key: "governBundleA",
+          expectedKeys: governBundleATargets.map(({ key }) => key),
+          fn: () => scrapeGovernTaskGroup(governBundleATargets),
+          expandResults: true
+        },
+        {
+          key: "governBundleB",
+          expectedKeys: governBundleBTargets.map(({ key }) => key),
+          fn: () => scrapeGovernTaskGroup(governBundleBTargets),
+          expandResults: true
+        },
         // ---- 推广平台 ----
-        { key: "adsHome", fn: () => scrapeAdsHome() },
-        { key: "adsProduct", fn: () => scrapeAdsProduct() },
-        { key: "adsReport", fn: () => scrapeAdsReport() },
-        { key: "adsFinance", fn: () => scrapeAdsFinance() },
-        { key: "adsHelp", fn: () => scrapeAdsHelp() },
-        { key: "adsNotification", fn: () => scrapeAdsNotification() },
+        { key: "adsBundle", expectedKeys: adsBundleKeys, fn: () => scrapeAdsTaskGroup(), expandResults: true },
       ];
-      const CONCURRENCY = 16;
+      const priorityOrder = new Map([
+        ["dashboard", 1],
+        ["products", 2],
+        ["orders", 3],
+        ["sales", 4],
+        ["flux", 5],
+        ["goodsData", 6],
+        ["activityUS", 7],
+        ["activityEU", 8],
+        ["governDashboard", 9],
+        ["governBundleA", 10],
+        ["governBundleB", 11],
+        ["adsBundle", 12],
+        ["sidebarBundleOps", 13],
+        ["sidebarBundleReturns", 14],
+        ["flowPrice", 15],
+      ]);
+      tasks.sort((a, b) => (priorityOrder.get(a.key) ?? 999) - (priorityOrder.get(b.key) ?? 999));
+      const trackedTaskKeys = tasks.flatMap((task) => Array.isArray(task.expectedKeys) && task.expectedKeys.length > 0 ? task.expectedKeys : [task.key]);
+      replaceScrapeAllProgress({
+        running: true,
+        status: "running",
+        message: `正在采集 ${trackedTaskKeys.length} 项任务`,
+        startedAt: scrapeStartedAt,
+        tasks: Object.fromEntries(trackedTaskKeys.map((taskKey) => [taskKey, { status: "pending", message: "排队中" }])),
+      });
+      const CONCURRENCY = 12;
       const queue = [...tasks];
       const running = [];
 
@@ -4158,20 +4731,77 @@ async function handleRequest(body) {
         if (!task) return null;
         const startMs = Date.now();
         console.error(`[scrape_all] Starting: ${task.key}`);
-        const p = task.fn()
+        const taskProgressKeys = Array.isArray(task.expectedKeys) && task.expectedKeys.length > 0
+          ? task.expectedKeys
+          : [task.key];
+        for (const progressKey of taskProgressKeys) {
+          updateScrapeAllTask(progressKey, {
+            status: "running",
+            message: "采集中",
+            startedAt: getScrapeAllTimestamp(),
+            finishedAt: "",
+          });
+        }
+        const writeScrapeAllResult = (resultKey, payload, dur) => {
+          if (payload && !payload.error) {
+            const dataFile = path.join(debugDir, `scrape_all_${resultKey}.json`);
+            try { fs.writeFileSync(dataFile, JSON.stringify(payload)); } catch (e) { console.error(`[scrape_all] Failed to save ${resultKey}:`, e.message); }
+            const dataSize = JSON.stringify(payload || {}).length;
+            results[resultKey] = { success: true, duration: dur, dataFile, dataSize };
+            updateScrapeAllTask(resultKey, {
+              status: "success",
+              message: `已完成 · ${dur}s`,
+              duration: dur,
+              dataSize,
+              finishedAt: getScrapeAllTimestamp(),
+            });
+            return;
+          }
+          const errorMessage = payload?.error || "采集失败";
+          results[resultKey] = { success: false, error: errorMessage, duration: dur };
+          updateScrapeAllTask(resultKey, {
+            status: "error",
+            message: errorMessage,
+            duration: dur,
+            finishedAt: getScrapeAllTimestamp(),
+          });
+        };
+        const p = Promise.resolve()
+          .then(() => task.fn())
           .then(data => {
             const dur = Math.round((Date.now() - startMs) / 1000);
             console.error(`[scrape_all] ✓ ${task.key} done in ${dur}s`);
-            // 保存数据到文件（避免返回超大JSON导致IPC失败）
-            const dataFile = path.join(debugDir, `scrape_all_${task.key}.json`);
-            try { fs.writeFileSync(dataFile, JSON.stringify(data)); } catch (e) { console.error(`[scrape_all] Failed to save ${task.key}:`, e.message); }
-            const dataSize = JSON.stringify(data || {}).length;
-            results[task.key] = { success: true, duration: dur, dataFile, dataSize };
+            if (task.expandResults && data && typeof data === "object" && !Array.isArray(data)) {
+              const expectedKeys = Array.isArray(task.expectedKeys) ? task.expectedKeys : Object.keys(data);
+              for (const resultKey of expectedKeys) {
+                writeScrapeAllResult(resultKey, data[resultKey], dur);
+              }
+            } else {
+              writeScrapeAllResult(task.key, data, dur);
+            }
           })
           .catch(err => {
             const dur = Math.round((Date.now() - startMs) / 1000);
             console.error(`[scrape_all] ✗ ${task.key} failed in ${dur}s: ${err.message}`);
-            results[task.key] = { success: false, error: err.message, duration: dur };
+            if (Array.isArray(task.expectedKeys) && task.expectedKeys.length > 0) {
+              for (const resultKey of task.expectedKeys) {
+                results[resultKey] = { success: false, error: err.message, duration: dur };
+                updateScrapeAllTask(resultKey, {
+                  status: "error",
+                  message: err.message || "采集失败",
+                  duration: dur,
+                  finishedAt: getScrapeAllTimestamp(),
+                });
+              }
+            } else {
+              results[task.key] = { success: false, error: err.message, duration: dur };
+              updateScrapeAllTask(task.key, {
+                status: "error",
+                message: err.message || "采集失败",
+                duration: dur,
+                finishedAt: getScrapeAllTimestamp(),
+              });
+            }
           })
           .then(() => {
             const idx = running.indexOf(p);
@@ -4203,7 +4833,26 @@ async function handleRequest(body) {
         console.error("[scrape_all] Browser closed.");
       } catch (e) { console.error("[scrape_all] Failed to close browser:", e.message); }
 
+      const resultList = Object.values(results);
+      const successCount = resultList.filter((item) => item?.success).length;
+      const errorCount = resultList.length - successCount;
+      updateScrapeAllProgress({
+        running: false,
+        status: errorCount > 0 ? "completed_with_errors" : "completed",
+        message: errorCount > 0 ? `${successCount} 项成功，${errorCount} 项失败` : `${successCount} 项采集完成`,
+        finishedAt: getScrapeAllTimestamp(),
+      });
+
       return results;
+      } catch (err) {
+        updateScrapeAllProgress({
+          running: false,
+          status: "failed",
+          message: err?.message || "采集失败",
+          finishedAt: getScrapeAllTimestamp(),
+        });
+        throw err;
+      }
     }
     case "read_scrape_data": {
       const request = resolveReadScrapeDataRequest(params.key);
@@ -4215,6 +4864,9 @@ async function handleRequest(body) {
         return { rows, csvPath: request.filePath };
       }
       return JSON.parse(fs.readFileSync(request.filePath, "utf8"));
+    }
+    case "scrape_progress": {
+      return scrapeAllProgress;
     }
     case "probe_page": {
       // 探测指定页面的所有业务 API
@@ -4618,7 +5270,29 @@ async function handleRequest(body) {
         if (!params.keepOpen) await page.close();
       }
     }
-    case "close": await closeBrowser(); return { status: "closed" };
+    case "close":
+      if (scrapeAllProgress.running) {
+        const nextTasks = cloneScrapeAllTasks(scrapeAllProgress.tasks);
+        for (const key of Object.keys(nextTasks)) {
+          if (nextTasks[key]?.status === "running") {
+            nextTasks[key] = {
+              ...nextTasks[key],
+              status: "error",
+              message: "已取消",
+              finishedAt: getScrapeAllTimestamp(),
+            };
+          }
+        }
+        updateScrapeAllProgress({
+          running: false,
+          status: "cancelled",
+          message: "采集已取消",
+          finishedAt: getScrapeAllTimestamp(),
+          tasks: nextTasks,
+        });
+      }
+      await closeBrowser();
+      return { status: "closed" };
     case "shutdown": await closeBrowser(); setTimeout(() => process.exit(0), 100); return { status: "shutting_down" };
     case "pause_pricing":
       if (!isCurrentProgressTask(params?.taskId)) {
@@ -4652,7 +5326,7 @@ async function handleRequest(body) {
       // 注册表驱动的采集命令（替代 50+ 重复 case）
       const scrapeHandlers = buildScrapeHandlers({
         scrapePageCaptureAll, scrapeSidebarCaptureAll, scrapePageWithListener,
-        scrapeGovernPage: (subPath) => scrapePageCaptureAll(null, { waitTime: 12000, fullUrl: "https://agentseller.temu.com/govern/" + subPath }),
+        scrapeGovernPage: (subPath, meta) => scrapeSingleGovernTarget(subPath, meta),
         ensureBrowser,
       });
       if (scrapeHandlers[action]) {
@@ -5444,7 +6118,7 @@ async function autoPricingFromCSV(params) {
 
   // 支持 XLSX 和 CSV 两种格式
   let headers, dataRows;
-  const isXlsx = csvPath.endsWith(".xlsx") || csvPath.endsWith(".xls");
+  const isXlsx = isExcelLikeFile(csvPath);
   if (isXlsx) {
     const wb = XLSX.readFile(csvPath);
     const ws = wb.Sheets[wb.SheetNames[0]];
@@ -5453,14 +6127,17 @@ async function autoPricingFromCSV(params) {
     let headerRowIdx = 0;
     for (let i = 0; i < Math.min(10, allRows.length); i++) {
       const row = allRows[i];
-      if (row && row.some(c => typeof c === "string" && (c.includes("商品标题") || c.includes("商品名称") || c.includes("美元价格")))) {
+      if (row && row.some((c) => {
+        const text = normalizeCellText(c);
+        return text.includes("商品标题") || text.includes("商品名称") || text.includes("美元价格");
+      })) {
         headerRowIdx = i;
         break;
       }
     }
-    headers = (allRows[headerRowIdx] || []).map(h => String(h || ""));
+    headers = (allRows[headerRowIdx] || []).map((h) => normalizeCellText(h));
     dataRows = allRows.slice(headerRowIdx + 1).filter(r => r && r.length > 0);
-    console.error(`[auto-pricing] XLSX: header row=${headerRowIdx}, data rows=${dataRows.length}, headers=${headers.slice(0, 8).join("|")}`);
+    console.error(`[auto-pricing] Excel-like file: header row=${headerRowIdx}, data rows=${dataRows.length}, headers=${headers.slice(0, 8).join("|")}`);
   } else {
     const csvContent = fs.readFileSync(csvPath, "utf8");
     const lines = csvContent.split("\n").filter(l => l.trim());
@@ -5495,6 +6172,25 @@ async function autoPricingFromCSV(params) {
   const priceIdx = colIndex(["美元价格($)", "美元价格", "price"]);
 
   console.error(`[auto-pricing] Columns: name=${nameIdx}, image=${imageIdx}, cat=${catCnIdx}, price=${priceIdx}`);
+  if (imageIdx < 0) {
+    const message = `未识别到商品原图列，当前表头：${headers.slice(0, 12).join(" | ")}`;
+    const failedAt = getProgressTimestamp();
+    replaceCurrentProgress({
+      taskId,
+      status: "failed",
+      running: false,
+      paused: false,
+      total,
+      completed: 0,
+      current: "失败",
+      step: "识别表头",
+      message,
+      results,
+      updatedAt: failedAt,
+      finishedAt: failedAt,
+    });
+    return { success: false, taskId, message };
+  }
 
   const total = Math.max(0, Math.min(count, dataRows.length - startRow));
   console.error(`[auto-pricing] Will process ${total} products (dataRows=${dataRows.length})`);
@@ -5525,12 +6221,12 @@ async function autoPricingFromCSV(params) {
 
   for (let i = startRow; i < startRow + total; i++) {
     const cols = dataRows[i] || [];
-    const getCol = (idx) => idx >= 0 ? String(cols[idx] || "") : "";
+    const getCol = (idx) => idx >= 0 ? normalizeCellText(cols[idx]) : "";
     const productName = getCol(nameIdx) || getCol(nameEnIdx) || "";
     const imageUrl = getCol(imageIdx) || "";
     const carouselUrls = getCol(carouselIdx).split(",").map(s => s.trim()).filter(s => s.startsWith("http"));
-    const categoryCn = getCol(catCnIdx) || "";
-    const priceUSD = priceIdx >= 0 ? parseFloat(getCol(priceIdx)) || 0 : 0;
+    const categoryCn = catCnIdx >= 0 ? normalizeCategoryText(cols[catCnIdx]) : "";
+    const priceUSD = priceIdx >= 0 ? normalizePriceNumber(cols[priceIdx], 0) : 0;
     const priceCNY = priceUSD > 0 ? priceUSD * 7 : 9.99;
 
     const itemNum = i - startRow + 1;
@@ -6102,8 +6798,9 @@ ${propsForAI.map((p, i) => `${i + 1}. ${p.name}${p.required ? '(必填)' : '(选
  */
 async function getCategorySpec(page, leafCatId) {
   const result = await temuXHR(page, PRICING_CONFIG.specParentEndpoint, { catId: leafCatId }, { maxRetries: 1 });
-  if (result.success && result.data?.parentSpecVOList?.length > 0) {
-    const spec = result.data.parentSpecVOList[0]; // 取第一个规格维度
+  const specList = (result.data?.parentSpecVOList || []).filter((spec) => spec?.parentSpecId && spec?.parentSpecName);
+  if (result.success && specList.length > 0) {
+    const spec = specList[Math.floor(Math.random() * specList.length)];
     return { parentSpecId: spec.parentSpecId, parentSpecName: spec.parentSpecName };
   }
   return null;
@@ -6488,23 +7185,27 @@ async function createProductViaAPI(params) {
       }
     }
 
-    // 查询/创建规格值 - 26个字母随机
-    const randomLetter = String.fromCharCode(65 + Math.floor(Math.random() * 26));
-    const specName = params.specName || randomLetter;
-    const specResult = await temuXHR(page, config.specQueryEndpoint, { parentSpecId: specInfo.parentSpecId, specName }, { maxRetries: 2 });
-    if (specResult.success && specResult.data?.specId) {
-      specInfo.specId = specResult.data.specId;
-      specInfo.specName = specName;
-    } else {
-      // specId 获取失败，尝试用默认值 "A"
-      console.error(`[api-create] Spec query failed, retrying with "A"...`);
-      const retrySpec = await temuXHR(page, config.specQueryEndpoint, { parentSpecId: specInfo.parentSpecId, specName: "A" }, { maxRetries: 1 });
-      if (retrySpec.success && retrySpec.data?.specId) {
-        specInfo.specId = retrySpec.data.specId;
-        specInfo.specName = "A";
-      } else {
-        console.error(`[api-create] WARNING: specId unavailable, using default`);
+    // 查询/创建规格值 - 统一使用中文卖点词，并保留中文兜底候选
+    const specNameCandidates = buildSpecNameCandidates(params.title || "", params.specName);
+    let resolvedSpec = false;
+    for (const candidate of specNameCandidates) {
+      const specResult = await temuXHR(
+        page,
+        config.specQueryEndpoint,
+        { parentSpecId: specInfo.parentSpecId, specName: candidate },
+        { maxRetries: 2 },
+      );
+      if (specResult.success && specResult.data?.specId) {
+        specInfo.specId = specResult.data.specId;
+        specInfo.specName = candidate;
+        resolvedSpec = true;
+        console.error(`[api-create] Spec value: ${candidate}`);
+        break;
       }
+      console.error(`[api-create] Spec query failed for "${candidate}", trying next candidate...`);
+    }
+    if (!resolvedSpec) {
+      console.error(`[api-create] WARNING: specId unavailable, using default`);
     }
 
     // Step 5: 构造 payload（基于真实抓包结构）
@@ -6733,15 +7434,23 @@ async function createProductViaAPI(params) {
             // 重新获取规格
             const newSpec = await getCategorySpec(page, leafCatId);
             if (newSpec) {
-              const newSpecName = "A";
-              const newSpecResult = await temuXHR(page, config.specQueryEndpoint, { parentSpecId: newSpec.parentSpecId, specName: newSpecName }, { maxRetries: 1 });
-              if (newSpecResult.success && newSpecResult.data?.specId) {
-                const sid = newSpecResult.data.specId;
-                // 更新 payload 中所有 spec 相关字段
-                payload.productSpecPropertyReqs = [{ ...payload.productSpecPropertyReqs[0], parentSpecId: newSpec.parentSpecId, parentSpecName: newSpec.parentSpecName, specId: sid, specName: newSpecName, propName: newSpec.parentSpecName, propValue: newSpecName }];
-                payload.productSkcReqs[0].productSkuReqs[0].productSkuSpecReqs = [{ parentSpecId: newSpec.parentSpecId, parentSpecName: newSpec.parentSpecName, specId: sid, specName: newSpecName, specLangSimpleList: [] }];
-                console.error(`[selfRepair] New spec: ${newSpec.parentSpecName} id=${sid}`);
-                needResubmit = true;
+              const retrySpecCandidates = buildSpecNameCandidates(params.title || "", params.specName);
+              for (const newSpecName of retrySpecCandidates) {
+                const newSpecResult = await temuXHR(
+                  page,
+                  config.specQueryEndpoint,
+                  { parentSpecId: newSpec.parentSpecId, specName: newSpecName },
+                  { maxRetries: 1 },
+                );
+                if (newSpecResult.success && newSpecResult.data?.specId) {
+                  const sid = newSpecResult.data.specId;
+                  // 更新 payload 中所有 spec 相关字段
+                  payload.productSpecPropertyReqs = [{ ...payload.productSpecPropertyReqs[0], parentSpecId: newSpec.parentSpecId, parentSpecName: newSpec.parentSpecName, specId: sid, specName: newSpecName, propName: newSpec.parentSpecName, propValue: newSpecName }];
+                  payload.productSkcReqs[0].productSkuReqs[0].productSkuSpecReqs = [{ parentSpecId: newSpec.parentSpecId, parentSpecName: newSpec.parentSpecName, specId: sid, specName: newSpecName, specLangSimpleList: [] }];
+                  console.error(`[selfRepair] New spec: ${newSpec.parentSpecName}=${newSpecName} id=${sid}`);
+                  needResubmit = true;
+                  break;
+                }
               }
             }
             break;
@@ -6881,9 +7590,9 @@ async function batchCreateViaAPI(params) {
   for (let i = startRow; i < startRow + total; i++) {
     const cols = parseCSVLine(lines[i + 1]);
     const productName = (nameIdx >= 0 ? cols[nameIdx] : "") || "";
-    const categoryCn = (catIdx >= 0 ? cols[catIdx] : "") || "";
-    const priceUSD = priceIdx >= 0 ? parseFloat(cols[priceIdx]) || 0 : 0;
-    const priceCNY = priceCnyIdx >= 0 ? parseFloat(cols[priceCnyIdx]) || 0 : (priceUSD > 0 ? priceUSD * 7 : 9.99);
+    const categoryCn = normalizeCategoryText((catIdx >= 0 ? cols[catIdx] : "") || "");
+    const priceUSD = priceIdx >= 0 ? normalizePriceNumber(cols[priceIdx], 0) : 0;
+    const priceCNY = priceCnyIdx >= 0 ? normalizePriceNumber(cols[priceCnyIdx], 0) : (priceUSD > 0 ? priceUSD * 7 : 9.99);
 
     // 图片处理：优先多图列，否则单图列，最后用默认图
     let imageUrls = [];
@@ -7127,6 +7836,12 @@ function isCurrentProgressTask(taskId) {
 }
 
 const server = http.createServer(async (req, res) => {
+  if (!isAuthorizedWorkerRequest(req)) {
+    res.writeHead(401, { "Content-Type": "application/json", "WWW-Authenticate": "Bearer" });
+    res.end(JSON.stringify({ type: "error", code: 401, message: "Unauthorized" }));
+    return;
+  }
+
   // GET /progress - 实时进度查询
   if (req.method === "GET") {
     const requestUrl = new URL(req.url, "http://127.0.0.1");
@@ -7156,7 +7871,7 @@ const server = http.createServer(async (req, res) => {
       const body = Buffer.concat(chunks).toString("utf8");
       const cmd = JSON.parse(body);
       action = cmd.action || "unknown";
-      const result = await handleRequest(cmd);
+      const result = await withWorkerRequestCredentials(cmd.params?.credentials, async () => handleRequest(cmd));
       const duration = ((Date.now() - startTime) / 1000).toFixed(1);
       console.error(`[Worker] ${action} completed in ${duration}s`);
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -7179,7 +7894,7 @@ server.listen(PORT, "127.0.0.1", () => {
   // 把端口写到文件
   const portFile = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "worker-port");
   fs.mkdirSync(path.dirname(portFile), { recursive: true });
-  fs.writeFileSync(portFile, String(PORT));
+  fs.writeFileSync(portFile, JSON.stringify({ port: PORT, token: WORKER_AUTH_TOKEN }));
   console.error(`WORKER_PORT=${PORT}`);
   console.log(`Worker ready on port ${PORT}`);
 });

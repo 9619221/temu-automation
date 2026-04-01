@@ -1,25 +1,158 @@
-import { useState, useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
-  Alert, Tabs, Card, Form, Input, InputNumber, Button, Space, Table, Tag,
-  message, Progress, Upload, Row, Col, Statistic, Descriptions,
+  Alert,
+  Button,
+  Card,
+  Col,
+  Form,
+  Input,
+  InputNumber,
+  Progress,
+  Row,
+  Segmented,
+  Space,
+  Statistic,
+  Table,
+  Tag,
+  Typography,
+  Upload,
+  message,
 } from "antd";
 import {
-  PlusOutlined, RocketOutlined, FileExcelOutlined,
-  CloudUploadOutlined, PauseCircleOutlined, PlayCircleOutlined,
-  CheckCircleOutlined, CloseCircleOutlined, InboxOutlined,
+  CheckCircleOutlined,
+  CloudUploadOutlined,
+  CloseCircleOutlined,
+  FileExcelOutlined,
+  HistoryOutlined,
+  InboxOutlined,
+  PauseCircleOutlined,
+  PlayCircleOutlined,
+  ReloadOutlined,
+  RocketOutlined,
 } from "@ant-design/icons";
+import PageHeader from "../components/PageHeader";
 import { setStoreValueForActiveAccount } from "../utils/multiStore";
 
 const { TextArea } = Input;
 const { Dragger } = Upload;
-const api = (window as any).electronAPI?.automation;
-const store = (window as any).electronAPI?.store;
+const { Title, Text } = Typography;
 
-// ========== Tab 1: 单个上品 ==========
+const api = window.electronAPI?.automation;
+const store = window.electronAPI?.store;
+
+const SUCCESS_COLOR = "#00b96b";
+
+type ProductCreateMode = "batch" | "single";
+
+function extractCellTexts(value: any, seen = new WeakSet<object>()): string[] {
+  if (value === null || value === undefined || value === "") return [];
+  if (typeof value === "string") {
+    const text = value.trim();
+    return text && text !== "[object Object]" ? [text] : [];
+  }
+  if (typeof value === "number" || typeof value === "boolean") return [String(value)];
+  if (Array.isArray(value)) return value.flatMap((item) => extractCellTexts(item, seen));
+  if (typeof value !== "object") {
+    const text = String(value).trim();
+    return text && text !== "[object Object]" ? [text] : [];
+  }
+  if (seen.has(value)) return [];
+  seen.add(value);
+
+  const objectValue = value as Record<string, any>;
+  const orderedCategoryKeys = Object.keys(objectValue)
+    .filter((key) => /^cat\d+$/i.test(key) || /^(first|second|third|fourth|fifth)Category/i.test(key) || /^leafCat$/i.test(key))
+    .sort();
+  const orderedTexts = orderedCategoryKeys.flatMap((key) => extractCellTexts(objectValue[key], seen));
+  if (orderedTexts.length > 0) return orderedTexts;
+
+  const preferredTexts = [
+    objectValue.w,
+    objectValue.text,
+    objectValue.label,
+    objectValue.name,
+    objectValue.catName,
+    objectValue.categoryName,
+    objectValue.title,
+    objectValue.v,
+  ].flatMap((item) => extractCellTexts(item, seen));
+  if (preferredTexts.length > 0) return preferredTexts;
+
+  return Object.values(objectValue).flatMap((item) => extractCellTexts(item, seen));
+}
+
+function normalizeCellText(value: any, separator = ", "): string {
+  const seen = new Set<string>();
+  return extractCellTexts(value)
+    .filter((text) => {
+      if (seen.has(text)) return false;
+      seen.add(text);
+      return true;
+    })
+    .join(separator);
+}
+
+function normalizeCategoryCellText(value: any): string {
+  return normalizeCellText(value, " / ");
+}
+
+function getResultDisplayName(item: any, index: number) {
+  const rawName = normalizeCellText(item?.name || item?.title || item?.productName || "");
+  if (rawName) return rawName;
+  const rowNumber = typeof item?.index === "number" ? item.index + 1 : index + 1;
+  return `第 ${rowNumber} 行商品`;
+}
+
+function getResultRowMeta(item: any, index: number) {
+  const rowNumber = typeof item?.index === "number" ? item.index + 1 : index + 1;
+  return `来源行：第 ${rowNumber} 行`;
+}
+
+function getBatchStatusLabel(status: string, running: boolean, paused: boolean) {
+  if (paused) return "已暂停";
+  if (running || status === "running") return "进行中";
+  if (status === "completed") return "已完成";
+  if (status === "failed") return "失败";
+  if (status === "interrupted") return "已中断";
+  return "待启动";
+}
+
+function getBatchTagColor(status: string, running: boolean, paused: boolean) {
+  if (paused) return "warning";
+  if (running || status === "running") return "processing";
+  if (status === "completed") return "success";
+  if (status === "failed" || status === "interrupted") return "error";
+  return "default";
+}
+
+function getHistoryStatusColor(status: string) {
+  if (status === "running") return "processing";
+  if (status === "paused") return "warning";
+  if (status === "completed") return "success";
+  if (status === "failed") return "error";
+  return "default";
+}
+
+function getHistoryStatusText(status: string) {
+  if (status === "running") return "进行中";
+  if (status === "paused") return "已暂停";
+  if (status === "completed") return "已完成";
+  if (status === "failed") return "失败";
+  if (status === "interrupted") return "已中断";
+  return status || "未知状态";
+}
+
 function SingleCreate() {
   const [form] = Form.useForm();
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<any>(null);
+
+  const watchedTitle = Form.useWatch("title", form);
+  const watchedPrice = Form.useWatch("price", form);
+  const watchedSourceImage = Form.useWatch("sourceImage", form);
+
+  const singleStatusLabel = submitting ? "生成中" : result ? (result.success ? "已完成" : "失败") : "待执行";
+  const singleStatusColor = submitting ? "warning" : result ? (result.success ? "success" : "error") : "default";
 
   const handleSubmit = async () => {
     try {
@@ -27,7 +160,7 @@ function SingleCreate() {
       setSubmitting(true);
       setResult(null);
 
-      const res = await api?.createProduct({
+      const response = await api?.createProduct({
         title: values.title,
         categorySearch: values.title,
         price: values.price,
@@ -37,70 +170,136 @@ function SingleCreate() {
         keepOpen: true,
         sourceImage: values.sourceImage || undefined,
       });
-      setResult(res);
+      setResult(response);
 
-      if (res?.success) {
-        message.success("上品成功！");
+      if (response?.success) {
+        message.success("单个草稿已生成");
         const history = (await store?.get("temu_create_history")) || [];
-        history.unshift({ title: values.title, price: values.price, status: "draft", createdAt: Date.now(), result: res });
+        history.unshift({
+          title: values.title,
+          price: values.price,
+          status: "draft",
+          createdAt: Date.now(),
+          result: response,
+        });
         await setStoreValueForActiveAccount(store, "temu_create_history", history.slice(0, 100));
       } else {
-        message.error(res?.message || "上品失败");
+        message.error(response?.message || "生成草稿失败");
       }
-    } catch (e: any) {
-      message.error(e.message || "操作失败");
+    } catch (error: any) {
+      if (error?.errorFields) return;
+      message.error(error?.message || "操作失败");
     } finally {
       setSubmitting(false);
     }
   };
 
+  const handleReset = () => {
+    form.resetFields();
+    setResult(null);
+  };
+
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
-      <Card title={<span><PlusOutlined style={{ color: "#e55b00", marginRight: 8 }} />商品信息</span>} style={{ borderRadius: 12 }}>
-        <Form form={form} layout="vertical">
-          <Form.Item name="title" label="商品标题" rules={[{ required: true, message: "请输入标题" }]}>
-            <TextArea rows={2} placeholder="输入商品标题，系统自动匹配分类 + AI生成9张图（不保留原主图）" />
-          </Form.Item>
-          <Row gutter={16}>
-            <Col span={8}>
-              <Form.Item name="price" label="申报价格 (¥)" rules={[{ required: true, message: "请输入价格" }]}>
-                <InputNumber min={0.01} step={0.1} style={{ width: "100%" }} placeholder="30.00" />
-              </Form.Item>
-            </Col>
-            <Col span={16}>
-              <Form.Item name="sourceImage" label="参考图片路径（可选）">
-                <Input placeholder="拖入图片文件或输入路径" />
-              </Form.Item>
-            </Col>
-          </Row>
-        </Form>
-      </Card>
+      <div className="studio-upload-layout">
+        <Card className="create-preview-card" style={{ borderRadius: 22, borderColor: "#eceff4" }} bodyStyle={{ padding: 24 }}>
+          <Space direction="vertical" size={18} style={{ width: "100%" }}>
+            <div>
+              <Title level={4} style={{ margin: 0 }}>单个调试</Title>
+              <Text type="secondary" style={{ display: "block", marginTop: 6 }}>
+                这条路径只用来验证标题、价格和参考图是否能顺利生成草稿，确认没问题后再切回自动化上品。
+              </Text>
+            </div>
 
-      <Card style={{ borderRadius: 12 }}>
-        <Space>
-          <Button type="primary" icon={<RocketOutlined />} size="large" loading={submitting} onClick={handleSubmit}
-            style={{ background: "#e55b00", borderColor: "#e55b00", height: 48, paddingInline: 32, fontSize: 16 }}>
-            {submitting ? "上品中..." : "开始上品"}
-          </Button>
-          <Button size="large" onClick={() => { form.resetFields(); setResult(null); }}>重置</Button>
-        </Space>
-        {result && (
-          <div style={{ marginTop: 16, padding: 12, background: result.success ? "#f6ffed" : "#fff2f0", borderRadius: 8 }}>
-            <Tag color={result.success ? "success" : "error"} style={{ fontSize: 14, padding: "4px 12px" }}>
-              {result.success ? "上品成功" : "上品失败"}
-            </Tag>
-            <span style={{ marginLeft: 8, color: "#666" }}>{result.message}</span>
+            <Form form={form} layout="vertical">
+              <Form.Item name="title" label="商品标题" rules={[{ required: true, message: "请输入商品标题" }]}>
+                <TextArea rows={3} placeholder="例如：不锈钢厨房置物架，免打孔，多层收纳" />
+              </Form.Item>
+
+              <Row gutter={16}>
+                <Col xs={24} md={8}>
+                  <Form.Item name="price" label="申报价 (¥)" rules={[{ required: true, message: "请输入价格" }]}>
+                    <InputNumber min={0.01} step={0.1} style={{ width: "100%" }} placeholder="30.00" />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={16}>
+                  <Form.Item name="sourceImage" label="参考图片路径（可选）">
+                    <Input placeholder="可填写本地图片路径，帮助生成更贴近原商品的草稿图" />
+                  </Form.Item>
+                </Col>
+              </Row>
+            </Form>
+          </Space>
+        </Card>
+
+        <div className="studio-setup-panel">
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
+            <div>
+              <div className="studio-setup-panel__title" style={{ marginTop: 0 }}>执行设置</div>
+              <div className="studio-setup-panel__desc">
+                这里只放当前状态和动作，不再重复讲流程。
+              </div>
+            </div>
+            <Tag color={singleStatusColor}>{singleStatusLabel}</Tag>
           </div>
-        )}
-      </Card>
+
+          <div className="studio-setup-stats">
+            <div className="studio-setup-stat">
+              <span className="studio-setup-stat__label">标题</span>
+              <span className="studio-setup-stat__value">{watchedTitle ? "已填写" : "待填写"}</span>
+            </div>
+            <div className="studio-setup-stat">
+              <span className="studio-setup-stat__label">价格</span>
+              <span className="studio-setup-stat__value">{watchedPrice ? `¥${watchedPrice}` : "--"}</span>
+            </div>
+            <div className="studio-setup-stat">
+              <span className="studio-setup-stat__label">参考图</span>
+              <span className="studio-setup-stat__value">{watchedSourceImage ? "已填写" : "未填写"}</span>
+            </div>
+          </div>
+
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            <Button type="primary" icon={<RocketOutlined />} block size="large" loading={submitting} onClick={handleSubmit} className="create-primary-button">
+              {submitting ? "正在生成草稿..." : "开始单个调试"}
+            </Button>
+            <Button block size="large" onClick={handleReset} className="create-secondary-button">
+              重置内容
+            </Button>
+          </Space>
+        </div>
+      </div>
+
+      {result ? (
+        <Card className="create-result-card" style={{ borderRadius: 22, borderColor: "#eceff4" }} bodyStyle={{ padding: 24 }}>
+          <Space direction="vertical" size={16} style={{ width: "100%" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+              <div>
+                <Title level={4} style={{ margin: 0 }}>执行反馈</Title>
+                <Text type="secondary" style={{ display: "block", marginTop: 6 }}>
+                  单个调试完成后，结果会在这里展示，方便判断是否可以切回自动化上品。
+                </Text>
+              </div>
+              <Tag color={result.success ? "success" : "error"} style={{ padding: "6px 14px", borderRadius: 999 }}>
+                {result.success ? "调试成功" : "调试失败"}
+              </Tag>
+            </div>
+
+            <Alert
+              type={result.success ? "success" : "error"}
+              showIcon
+              message={result.success ? "草稿已生成" : "执行失败"}
+              description={result.message || "未返回更多信息"}
+            />
+          </Space>
+        </Card>
+      ) : null}
     </Space>
   );
 }
 
-// ========== Tab 2: 批量上品 ==========
 function BatchCreate() {
   const [filePath, setFilePath] = useState("");
-  const [preview, setPreview] = useState<any>(null); // { headers, rows, detected }
+  const [preview, setPreview] = useState<any>(null);
   const [startRow, setStartRow] = useState(0);
   const [count, setCount] = useState(5);
   const [running, setRunning] = useState(false);
@@ -115,12 +314,16 @@ function BatchCreate() {
   const progressRef = useRef<any>(null);
   const runningStateRef = useRef(false);
 
+  const stopPolling = () => {
+    if (progressRef.current) {
+      clearInterval(progressRef.current);
+      progressRef.current = null;
+    }
+  };
+
   const syncTaskHistory = (task: any) => {
     if (!task?.taskId) return;
-    setTaskHistory((prev) => {
-      const next = [task, ...prev.filter((item) => item?.taskId !== task.taskId)];
-      return next.slice(0, 10);
-    });
+    setTaskHistory((prev) => [task, ...prev.filter((item) => item?.taskId !== task.taskId)].slice(0, 10));
   };
 
   const applyTaskSnapshot = (task: any) => {
@@ -135,18 +338,59 @@ function BatchCreate() {
     if (typeof task.count === "number" && task.count > 0) setCount(task.count);
   };
 
+  const pollProgress = (taskId?: string, suppressNotice = false) => {
+    stopPolling();
+    progressRef.current = setInterval(async () => {
+      try {
+        const snapshot = taskId ? await api?.getTaskProgress?.(taskId) : await api?.getProgress?.();
+        if (!snapshot) return;
+
+        applyTaskSnapshot(snapshot);
+        syncTaskHistory(snapshot);
+
+        const finished = !snapshot.running
+          && ["completed", "failed", "interrupted"].includes(snapshot.status || "")
+          && (snapshot.taskId || snapshot.completed > 0);
+        if (!finished) return;
+
+        stopPolling();
+        setRunning(false);
+        setPaused(false);
+        void refreshTaskHistory();
+
+        if (suppressNotice || !runningStateRef.current) return;
+
+        const successItems = Array.isArray(snapshot.results) ? snapshot.results.filter((item: any) => item.success).length : 0;
+        const failItems = Array.isArray(snapshot.results) ? snapshot.results.filter((item: any) => !item.success).length : 0;
+        if (snapshot.status === "completed") {
+          message.success(`自动上品完成：成功 ${successItems} 个，失败 ${failItems} 个`);
+        } else {
+          message.error(snapshot.message || "自动上品任务异常结束");
+        }
+      } catch {
+        // ignore polling errors
+      }
+    }, 2200);
+  };
+
   const refreshTaskHistory = async (preserveSelection = true) => {
     try {
       setHistoryLoading(true);
       const tasks = await api?.listTasks?.();
       if (!Array.isArray(tasks)) return;
+
       setTaskHistory(tasks);
       if (tasks.length === 0) return;
 
       const preferredTask = preserveSelection
         ? tasks.find((task: any) => task?.taskId === selectedTaskId) || tasks[0]
         : tasks[0];
-      if (preferredTask) applyTaskSnapshot(preferredTask);
+
+      if (!preferredTask) return;
+      applyTaskSnapshot(preferredTask);
+      if (preferredTask.running) {
+        pollProgress(preferredTask.taskId, true);
+      }
     } catch {
       // ignore
     } finally {
@@ -163,9 +407,8 @@ function BatchCreate() {
       syncTaskHistory(task);
       if (task.running) {
         pollProgress(task.taskId, true);
-      } else if (progressRef.current) {
-        clearInterval(progressRef.current);
-        progressRef.current = null;
+      } else {
+        stopPolling();
       }
       message.success("已恢复任务视图");
     } catch (error: any) {
@@ -173,113 +416,94 @@ function BatchCreate() {
     }
   };
 
-  // 通过 Electron 原生对话框选择文件
-  const selectFile = async () => {
-    const fp = await (window as any).electronAPI?.selectFile?.();
-    if (!fp) return;
-    setFilePath(fp);
-    setPreview(null);
-    setResults([]);
-    setFilterSummary(null);
-    await loadPreview(fp);
-  };
-
-  // 拖拽上传处理
-  const handleFile = async (file: any) => {
-    const fp = file.path || file.name;
-    if (!fp) { message.error("无法获取文件路径"); return false; }
-    setFilePath(fp);
-    setPreview(null);
-    setResults([]);
-    setFilterSummary(null);
-    await loadPreview(fp);
-    return false;
-  };
-
-  // 加载预览
-  const loadPreview = async (fp: string) => {
-
+  const loadPreview = async (nextFilePath: string) => {
     try {
-      const data = await api?.readScrapeData?.("csv_preview:" + fp);
-      if (data?.rows && data.rows.length > 0) {
-        // 智能检测表头行（可能有合并表头，真实列名在第1或2行）
-        let headerRowIdx = 0;
-        const colMap: Record<string, string[]> = {
-          title: ["商品标题（中文）", "商品名称", "title"],
-          mainImage: ["商品主图", "商品原图"],
-          carousel: ["商品轮播图"],
-          category: ["后台分类", "前台分类（中文）"],
-          price: ["美元价格($)", "美元价格", "price"],
-        };
-        // 扫描前3行找到含"商品标题"或"商品主图"的行作为表头
-        for (let r = 0; r < Math.min(3, data.rows.length); r++) {
-          const row = data.rows[r] || [];
-          const rowStr = row.map((c: any) => String(c || "")).join("|");
-          if (rowStr.includes("商品标题") || rowStr.includes("商品主图") || rowStr.includes("美元价格")) {
-            headerRowIdx = r;
+      const data = await api?.readScrapeData?.(`csv_preview:${nextFilePath}`);
+      if (!data?.rows || data.rows.length === 0) {
+        message.info("文件路径已设置，可以直接开始自动上品");
+        setPreview(null);
+        return;
+      }
+
+      let headerRowIdx = 0;
+      const columnMap: Record<string, string[]> = {
+        title: ["商品标题（中文）", "商品名称", "title"],
+        mainImage: ["商品主图", "商品原图"],
+        carousel: ["商品轮播图"],
+        category: ["后台分类", "前台分类（中文）"],
+        price: ["美元价格($)", "美元价格", "price"],
+      };
+
+      for (let rowIndex = 0; rowIndex < Math.min(3, data.rows.length); rowIndex += 1) {
+        const row = data.rows[rowIndex] || [];
+        const rowText = row.map((cell: any) => normalizeCellText(cell)).join("|");
+        if (rowText.includes("商品标题") || rowText.includes("商品主图") || rowText.includes("美元价格")) {
+          headerRowIdx = rowIndex;
+          break;
+        }
+      }
+
+      const headers = data.rows[headerRowIdx] || [];
+      const detected: Record<string, number> = {};
+      Object.entries(columnMap).forEach(([key, names]) => {
+        for (let columnIndex = 0; columnIndex < headers.length; columnIndex += 1) {
+          const headerText = normalizeCellText(headers[columnIndex]);
+          if (names.some((name) => headerText.includes(name))) {
+            detected[key] = columnIndex;
             break;
           }
         }
+      });
 
-        const headers = data.rows[headerRowIdx] || [];
-        const detected: Record<string, number> = {};
-        for (const [key, names] of Object.entries(colMap)) {
-          for (let c = 0; c < headers.length; c++) {
-            if (names.some(n => String(headers[c]).includes(n))) {
-              detected[key] = c;
-              break;
-            }
-          }
-        }
-
-        const dataStartIdx = headerRowIdx + 1;
-        const dataRows = data.rows.slice(dataStartIdx);
-        setPreview({
-          headers,
-          rows: dataRows.slice(0, 5), // 前5行数据
-          total: dataRows.length,
-          detected,
-        });
-        setCount(Math.min(dataRows.length, 10));
-        message.success(`已加载 ${dataRows.length} 个商品`);
-      }
+      const dataRows = data.rows.slice(headerRowIdx + 1);
+      setPreview({
+        headers,
+        rows: dataRows.slice(0, 5),
+        total: dataRows.length,
+        detected,
+      });
+      setCount(Math.min(dataRows.length || 1, 10));
+      message.success(`已识别 ${dataRows.length} 个商品`);
     } catch {
-      message.info("文件路径已设置，可以直接开始上品");
+      setPreview(null);
+      message.info("文件路径已设置，可以直接开始自动上品");
     }
   };
 
-  // 进度轮询（核心：前端状态完全由轮询驱动，不依赖 autoPricing 的 await 返回）
-  const pollProgress = (taskId?: string, suppressNotice = false) => {
-    if (progressRef.current) clearInterval(progressRef.current);
-    progressRef.current = setInterval(async () => {
-      try {
-        const p = taskId ? await api?.getTaskProgress?.(taskId) : await api?.getProgress?.();
-        if (p) {
-          applyTaskSnapshot(p);
-          syncTaskHistory(p);
-          if (!p.running && (p.taskId || p.completed > 0 || ["completed", "failed", "interrupted"].includes(p.status))) {
-            // Worker 完成，更新前端状态
-            clearInterval(progressRef.current);
-            progressRef.current = null;
-            setRunning(false);
-            setPaused(false);
-            refreshTaskHistory().catch(() => {});
-            const shouldNotify = !suppressNotice && runningStateRef.current;
-            const sc = (p.results || []).filter((r: any) => r.success).length;
-            const fc = (p.results || []).filter((r: any) => !r.success).length;
-            if (shouldNotify) {
-              if (p.status === "failed" || p.status === "interrupted") {
-                message.error(p.message || "批量上品任务已中断");
-              } else if (sc > 0) {
-                message.success(`批量上品完成：${sc} 成功，${fc} 失败`);
-              } else if (fc > 0) {
-                message.error(`批量上品全部失败（${fc}个）`);
-              }
-            }
-          }
-        }
-      } catch {}
-    }, 3000);
+  const resetSheetState = () => {
+    stopPolling();
+    setFilePath("");
+    setPreview(null);
+    setResults([]);
+    setFilterSummary(null);
+    setProgressInfo({ running: false, status: "idle" });
+    setRunning(false);
+    setPaused(false);
+    setSelectedTaskId("");
+  };
+
+  const selectFile = async () => {
+    const nextFilePath = await window.electronAPI?.selectFile?.();
+    if (!nextFilePath) return;
+    setFilePath(nextFilePath);
+    setPreview(null);
+    setResults([]);
+    setFilterSummary(null);
+    await loadPreview(nextFilePath);
+  };
+
+  const handleFile = async (file: any) => {
+    const nextFilePath = file.path || file.name;
+    if (!nextFilePath) {
+      message.error("无法获取文件路径");
+      return false;
+    }
+    setFilePath(nextFilePath);
+    setPreview(null);
+    setResults([]);
+    setFilterSummary(null);
+    await loadPreview(nextFilePath);
+    return false;
   };
 
   const hydrateTaskState = async () => {
@@ -287,100 +511,111 @@ function BatchCreate() {
       const tasks = await api?.listTasks?.();
       if (Array.isArray(tasks) && tasks.length > 0) {
         setTaskHistory(tasks);
-        const latestTask = tasks[0];
-        applyTaskSnapshot(latestTask);
-        if (latestTask.running) {
-          pollProgress(latestTask.taskId, true);
+        const preferredTask = tasks.find((task: any) => task?.running) || tasks[0];
+        if (preferredTask) {
+          applyTaskSnapshot(preferredTask);
+          if (preferredTask.running) {
+            pollProgress(preferredTask.taskId, true);
+          }
         }
         return;
       }
 
-      const task = await api?.getProgress?.();
-      if (!task) return;
-      const hasTaskState = Boolean(
-        task.taskId
-        || task.running
-        || task.completed > 0
-        || (Array.isArray(task.results) && task.results.length > 0)
-        || (task.status && task.status !== "idle")
-      );
+      const snapshot = await api?.getProgress?.();
+      if (!snapshot) return;
+      const hasTaskState = snapshot.taskId || snapshot.running || snapshot.completed || snapshot.status === "running";
       if (!hasTaskState) return;
+      applyTaskSnapshot(snapshot);
+      syncTaskHistory(snapshot);
+      if (snapshot.running) {
+        pollProgress(snapshot.taskId, true);
+      }
+    } catch {
+      // ignore hydration errors
+    }
+  };
+
+  const togglePause = async () => {
+    const taskId = selectedTaskId || progressInfo?.taskId;
+    if (!taskId) {
+      message.warning("当前没有可操作的任务");
+      return;
+    }
+
+    try {
+      const task = paused ? await api?.resumePricing?.(taskId) : await api?.pausePricing?.(taskId);
+      if (!task) return;
       applyTaskSnapshot(task);
       syncTaskHistory(task);
       if (task.running) {
         pollProgress(task.taskId, true);
-      }
-    } catch {}
-  };
-
-  // 暂停/继续
-  const togglePause = async () => {
-    try {
-      const taskId = selectedTaskId || progressInfo?.taskId;
-      if (paused) {
-        await api?.resumePricing?.(taskId);
-        message.info("已恢复");
+        message.success("任务已继续");
       } else {
-        await api?.pausePricing?.(taskId);
-        message.warning("已暂停，当前商品处理完后停止");
+        stopPolling();
+        message.success("任务已暂停");
       }
-      const task = taskId ? await api?.getTaskProgress?.(taskId) : await api?.getProgress?.();
-      if (task) {
-        applyTaskSnapshot(task);
-        syncTaskHistory(task);
-      }
-    } catch (err: any) {
-      message.error(err?.message || "操作失败");
+    } catch (error: any) {
+      message.error(error?.message || "操作失败");
     }
   };
 
   const handleFilterProductTable = async () => {
     if (!filePath) {
-      message.warning("请先上传表格文件");
+      message.warning("请先上传商品表格");
       return;
     }
     try {
       setFilteringTable(true);
-      const result = await api?.filterProductTable?.(filePath);
-      if (!result?.outputPath) {
-        message.error("生成排除后表格失败");
+      const response = await api?.filterProductTable?.(filePath);
+      if (!response?.outputPath) {
+        message.error("生成过滤后表格失败");
         return;
       }
-      setFilterSummary(result);
-      setFilePath(result.outputPath);
+      setFilterSummary(response);
+      setFilePath(response.outputPath);
       setPreview(null);
       setResults([]);
-      await loadPreview(result.outputPath);
-      message.success(`已排除 ${result.excludedRows || 0} 条，生成新表格`);
+      await loadPreview(response.outputPath);
+      message.success(`已过滤 ${response.excludedRows || 0} 条高风险商品`);
     } catch (error: any) {
-      message.error(error?.message || "生成排除后表格失败");
+      message.error(error?.message || "生成过滤后表格失败");
     } finally {
       setFilteringTable(false);
     }
   };
 
-  // 开始批量上品
   const handleBatch = async () => {
     if (!filePath) {
-      message.warning("请先上传表格文件");
+      message.warning("请先上传商品表格");
       return;
     }
+
     setRunning(true);
     setPaused(false);
     setResults([]);
-    setProgressInfo({ running: true, status: "running", total: count, completed: 0, current: "准备中...", step: "初始化", results: [] });
+    setProgressInfo({
+      running: true,
+      status: "running",
+      total: count,
+      completed: 0,
+      current: "准备中...",
+      step: "初始化",
+      results: [],
+    });
 
     try {
-      const response = await api?.autoPricing({ csvPath: filePath, startRow, count });
+      const response = await api?.autoPricing?.({ csvPath: filePath, startRow, count });
       if (!response?.accepted) {
         setRunning(false);
         setPaused(false);
         if (response?.task) {
           applyTaskSnapshot(response.task);
           syncTaskHistory(response.task);
+          if (response.task.running) {
+            pollProgress(response.task.taskId, true);
+          }
         }
-        message.warning(response?.message || "已有批量上品任务在运行");
-        if (response?.task?.running) pollProgress(response.task.taskId, true);
+        message.warning(response?.message || "已有自动上品任务在运行");
         return;
       }
 
@@ -388,15 +623,13 @@ function BatchCreate() {
         applyTaskSnapshot(response.task);
         syncTaskHistory(response.task);
       }
-      message.success("批量上品任务已启动");
-      refreshTaskHistory(false).catch(() => {});
-
-      // 轮询进度（每3秒），直到 Worker 报告 running=false
+      message.success("自动上品任务已启动");
+      void refreshTaskHistory(false);
       pollProgress(response?.task?.taskId);
-    } catch (err: any) {
+    } catch (error: any) {
       setRunning(false);
       setPaused(false);
-      message.error(err?.message || "启动批量上品失败");
+      message.error(error?.message || "启动自动上品失败");
     }
   };
 
@@ -405,307 +638,419 @@ function BatchCreate() {
   }, [running]);
 
   useEffect(() => {
-    hydrateTaskState();
+    void hydrateTaskState();
   }, []);
 
-  useEffect(() => {
-    return () => { if (progressRef.current) clearInterval(progressRef.current); };
+  useEffect(() => () => {
+    stopPolling();
   }, []);
 
-  const successCount = results.filter((r: any) => r.success).length;
-  const failCount = results.filter((r: any) => !r.success).length;
+  const hasFile = Boolean(filePath);
+  const hasPreview = Boolean(preview?.rows?.length);
+  const hasResults = results.length > 0;
+  const hasTaskProgress = Boolean(
+    running
+    || paused
+    || progressInfo?.taskId
+    || progressInfo?.completed
+    || ["completed", "failed", "interrupted", "running"].includes(progressInfo?.status),
+  );
+  const batchStatusLabel = getBatchStatusLabel(progressInfo?.status, running, paused);
+  const batchTagColor = getBatchTagColor(progressInfo?.status, running, paused);
+  const currentFileName = filePath ? filePath.split(/[/\\]/).pop() : "未选择文件";
+  const successCount = results.filter((item: any) => item.success).length;
+  const failCount = results.filter((item: any) => !item.success).length;
+  const progressTotal = progressInfo?.total || count || 0;
+  const progressPercent = progressTotal > 0 ? Math.round(((progressInfo?.completed || 0) / progressTotal) * 100) : 0;
+  const completedCount = progressInfo?.completed || 0;
+  const pendingCount = Math.max(progressTotal - completedCount, 0);
+  const previewRows = hasPreview
+    ? preview.rows.map((row: any[], index: number) => {
+      const detected = preview.detected || {};
+      const titleText = detected.title >= 0 ? normalizeCellText(row[detected.title]) : "";
+      const carouselText = detected.carousel >= 0 ? normalizeCellText(row[detected.carousel]) : "";
+      const categoryText = detected.category >= 0 ? normalizeCategoryCellText(row[detected.category]) : "";
+      const priceText = detected.price >= 0 ? normalizeCellText(row[detected.price]) : "";
+      return {
+        key: index,
+        title: titleText.slice(0, 72) || "-",
+        media: `${detected.mainImage >= 0 ? "主图" : "无主图"}${carouselText ? ` · 轮播 ${carouselText.split(",").length} 张` : ""}`,
+        category: categoryText.slice(0, 42) || "-",
+        price: priceText ? `$${priceText}` : "-",
+      };
+    })
+    : [];
+  const visibleTaskHistory = taskHistory.slice(0, 3);
+  const resultRows = results
+    .map((item: any, index: number) => ({
+      key: `${item?.index ?? index}-${item?.productId ?? item?.message ?? ""}`,
+      ...item,
+      displayName: getResultDisplayName(item, index),
+      rowMeta: getResultRowMeta(item, index),
+    }))
+    .sort((left: any, right: any) => Number(left.success) - Number(right.success));
+  const failedReasonSummary = Object.entries(
+    results.reduce<Record<string, number>>((acc, item: any) => {
+      if (item?.success) return acc;
+      const reason = String(item?.message || "未返回错误信息").trim() || "未返回错误信息";
+      acc[reason] = (acc[reason] || 0) + 1;
+      return acc;
+    }, {}),
+  )
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 3);
 
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
-      {/* 上传区域 */}
-      <Card title={<span><FileExcelOutlined style={{ color: "#00b96b", marginRight: 8 }} />上传商品表格</span>} style={{ borderRadius: 12 }}>
-        {!filePath ? (
-          <div>
-            <Dragger
-              accept=".xlsx,.xls,.csv"
-              showUploadList={false}
-              beforeUpload={handleFile}
-              style={{ padding: "20px 0" }}
-            >
-              <p className="ant-upload-drag-icon"><InboxOutlined style={{ color: "#e55b00", fontSize: 48 }} /></p>
-              <p className="ant-upload-text" style={{ fontSize: 16 }}>拖拽 Excel / CSV 文件到此处</p>
-              <p className="ant-upload-hint">支持 .xlsx .xls .csv 格式</p>
-            </Dragger>
-            <div style={{ textAlign: "center", marginTop: 12 }}>
-              <Button type="primary" icon={<FileExcelOutlined />} onClick={selectFile}
-                style={{ background: "#e55b00", borderColor: "#e55b00" }}>
-                选择文件
-              </Button>
-            </div>
-          </div>
-        ) : (
-          <div>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-              <Space>
-                <Tag color="green" style={{ fontSize: 14, padding: "4px 12px" }}>
-                  <FileExcelOutlined /> {filePath.split(/[/\\]/).pop()}
-                </Tag>
-                {preview && <span style={{ color: "#999" }}>共 {preview.total} 个商品</span>}
-              </Space>
-              <Space>
-                <Button size="small" loading={filteringTable} onClick={handleFilterProductTable}>
-                  排除液体/膏体/带电/IP
-                </Button>
-                <Button size="small" onClick={() => { setFilePath(""); setPreview(null); setResults([]); setFilterSummary(null); }}>
-                  更换文件
-                </Button>
-              </Space>
-            </div>
-
-            {filterSummary && (
-              <Alert
-                style={{ marginBottom: 16 }}
-                type="info"
-                showIcon
-                message={`已生成新表格：保留 ${filterSummary.keptRows || 0} 条，排除 ${filterSummary.excludedRows || 0} 条`}
-                description={(
-                  <Space wrap>
-                    <Tag color="blue">液体 {filterSummary.excludedSummary?.liquid || 0}</Tag>
-                    <Tag color="purple">膏体 {filterSummary.excludedSummary?.paste || 0}</Tag>
-                    <Tag color="orange">带电 {filterSummary.excludedSummary?.electric || 0}</Tag>
-                    <Tag color="red">IP {filterSummary.excludedSummary?.ip || 0}</Tag>
-                  </Space>
-                )}
-              />
-            )}
-
-            {/* 识别到的列 */}
-            {preview?.detected && (
-              <Descriptions size="small" bordered column={3} style={{ marginBottom: 16 }}>
-                {Object.entries(preview.detected as Record<string, number>).map(([key, col]) => {
-                  const labels: Record<string, string> = { title: "商品标题", mainImage: "商品主图", carousel: "轮播图", category: "后台分类", price: "价格" };
-                  return (
-                    <Descriptions.Item key={key} label={labels[key] || key}>
-                      <Tag color="blue">列{(col as number) + 1}: {String(preview.headers[col as number] || "").slice(0, 15)}</Tag>
-                    </Descriptions.Item>
-                  );
-                })}
-              </Descriptions>
-            )}
-
-            {/* 预览表格 */}
-            {preview?.rows && (
-              <Table
-                dataSource={preview.rows.map((row: any[], i: number) => {
-                  const d = preview.detected || {};
-                  return {
-                    key: i,
-                    title: d.title >= 0 ? String(row[d.title] || "").slice(0, 40) : "-",
-                    image: d.mainImage >= 0 ? "有" : "-",
-                    carousel: d.carousel >= 0 && row[d.carousel] ? String(row[d.carousel]).split(",").length + "张" : "-",
-                    category: d.category >= 0 ? String(row[d.category] || "").slice(0, 25) : "-",
-                    price: d.price >= 0 ? "$" + row[d.price] : "-",
-                  };
-                })}
-                columns={[
-                  { title: "#", key: "idx", width: 40, render: (_: any, __: any, i: number) => i + 1 },
-                  { title: "商品标题", dataIndex: "title", key: "title", ellipsis: true },
-                  { title: "主图", dataIndex: "image", key: "image", width: 50, render: (v: string) => v === "有" ? <Tag color="green">有</Tag> : <Tag>无</Tag> },
-                  { title: "轮播图", dataIndex: "carousel", key: "carousel", width: 70 },
-                  { title: "分类", dataIndex: "category", key: "category", width: 180, ellipsis: true },
-                  { title: "价格", dataIndex: "price", key: "price", width: 70 },
-                ]}
-                pagination={false}
-                size="small"
-                bordered
-                style={{ fontSize: 12 }}
-              />
-            )}
-
-            {/* 配置 */}
-            <Row gutter={16} style={{ marginTop: 16 }}>
-              <Col span={8}>
-                <Form.Item label="起始行" style={{ marginBottom: 0 }}>
-                  <InputNumber min={0} value={startRow} onChange={(v) => setStartRow(v || 0)} style={{ width: "100%" }} />
-                </Form.Item>
-              </Col>
-              <Col span={8}>
-                <Form.Item label="上品数量" style={{ marginBottom: 0 }}>
-                  <InputNumber min={1} max={100} value={count} onChange={(v) => setCount(v || 1)} style={{ width: "100%" }} />
-                </Form.Item>
-              </Col>
-              <Col span={8} style={{ display: "flex", alignItems: "end" }}>
-                <Tag color="orange" style={{ padding: "4px 12px", fontSize: 13 }}>AI 自动生成9张商品图（不保留原主图）</Tag>
-              </Col>
-            </Row>
-          </div>
-        )}
-      </Card>
-
-      {/* 操作按钮 */}
-      {filePath && (
-        <Card style={{ borderRadius: 12 }}>
-          <Space>
-            <Button type="primary" icon={<CloudUploadOutlined />} size="large" loading={running && !paused} onClick={handleBatch} disabled={running}
-              style={{ background: "#00b96b", borderColor: "#00b96b", height: 48, paddingInline: 32, fontSize: 16 }}>
-              {running ? "批量上品中..." : `开始批量上品 (${count}个)`}
-            </Button>
-            {running && (
-              <Button
-                size="large"
-                icon={paused ? <PlayCircleOutlined /> : <PauseCircleOutlined />}
-                onClick={togglePause}
-                style={{ height: 48, paddingInline: 24, fontSize: 16, borderColor: paused ? "#00b96b" : "#faad14", color: paused ? "#00b96b" : "#faad14" }}
-              >
-                {paused ? "继续" : "暂停"}
-              </Button>
-            )}
+      <div className="create-flow-toolbar">
+        <div className="create-flow-toolbar__summary">
+          <Text className="create-flow-toolbar__eyebrow">自动化上品流程</Text>
+          <Title level={4} style={{ margin: 0 }}>
+            先上传 Excel / CSV 商品表格
+          </Title>
+          <Text type="secondary" className="create-flow-toolbar__desc">
+            系统会自动识别标题、主图、轮播图、分类和价格列。确认无误后，可以先过滤高风险，再直接开始自动上品。
+          </Text>
+          <Space wrap className="app-table-meta">
+            <Tag color={batchTagColor}>{batchStatusLabel}</Tag>
+            {hasFile ? <Tag>{currentFileName}</Tag> : null}
+            {hasFile ? <Tag>{`从第 ${startRow + 1} 行开始`}</Tag> : <Tag>还没选择文件</Tag>}
+            {preview?.total ? <Tag color="blue">{`共 ${preview.total} 个商品`}</Tag> : null}
+            {hasFile ? <Tag>{`本次执行 ${count} 个`}</Tag> : null}
           </Space>
+        </div>
 
-          {(progressInfo?.status === "failed" || progressInfo?.status === "interrupted") && progressInfo?.message && (
-            <Alert
-              style={{ marginTop: 16 }}
-              type="error"
-              showIcon
-              message={progressInfo.message}
-            />
+        <div className="create-flow-toolbar__controls">
+          <div className="create-flow-toolbar__inputs">
+            <div className="create-flow-toolbar__input">
+              <span className="create-flow-toolbar__label">起始行</span>
+              <InputNumber min={0} value={startRow} onChange={(value) => setStartRow(value || 0)} style={{ width: "100%" }} />
+            </div>
+            <div className="create-flow-toolbar__input">
+              <span className="create-flow-toolbar__label">上品数量</span>
+              <InputNumber min={1} max={100} value={count} onChange={(value) => setCount(value || 1)} style={{ width: "100%" }} />
+            </div>
+          </div>
+
+          <div className="app-table-actions">
+            <Button icon={<FileExcelOutlined />} onClick={() => void selectFile()}>
+              {hasFile ? "更换文件" : "选择文件"}
+            </Button>
+            {hasFile ? (
+              <Button icon={<ReloadOutlined />} onClick={() => void loadPreview(filePath)}>
+                重新识别
+              </Button>
+            ) : null}
+            <Button icon={<FileExcelOutlined />} disabled={!hasFile} loading={filteringTable} onClick={handleFilterProductTable}>
+              过滤高风险
+            </Button>
+            <Button icon={<HistoryOutlined />} loading={historyLoading} onClick={() => void refreshTaskHistory()}>
+              刷新任务
+            </Button>
+            <Button
+              type="primary"
+              icon={<CloudUploadOutlined />}
+              disabled={!hasFile || running}
+              loading={running && !paused}
+              onClick={handleBatch}
+              className="create-primary-button"
+            >
+              {running ? "自动上品进行中..." : `开始自动上品（${count} 个）`}
+            </Button>
+            {running ? (
+              <Button icon={paused ? <PlayCircleOutlined /> : <PauseCircleOutlined />} onClick={togglePause} className="create-secondary-button">
+                {paused ? "继续任务" : "暂停任务"}
+              </Button>
+            ) : null}
+            {hasFile ? <Button onClick={resetSheetState}>清空文件</Button> : null}
+          </div>
+        </div>
+      </div>
+
+      {filterSummary ? (
+        <Alert
+          className="friendly-alert"
+          type="info"
+          showIcon
+          message={`已生成过滤后表格：保留 ${filterSummary.keptRows || 0} 条，排除 ${filterSummary.excludedRows || 0} 条`}
+          description={(
+            <Space wrap>
+              <Tag color="blue">液体 {filterSummary.excludedSummary?.liquid || 0}</Tag>
+              <Tag color="purple">膏体 {filterSummary.excludedSummary?.paste || 0}</Tag>
+              <Tag color="orange">带电 {filterSummary.excludedSummary?.electric || 0}</Tag>
+              <Tag color="red">IP {filterSummary.excludedSummary?.ip || 0}</Tag>
+            </Space>
           )}
+        />
+      ) : null}
 
-          {/* 进度条 */}
-          {running && (
-            <div style={{ marginTop: 16 }}>
-              <Progress
-                percent={progressInfo.total > 0 ? Math.round((progressInfo.completed / progressInfo.total) * 100) : 0}
-                status={paused ? "exception" : "active"}
-                format={() => `${progressInfo.completed || 0}/${progressInfo.total || count}`}
-              />
-              <div style={{ marginTop: 8, color: "#666", fontSize: 13 }}>
-                <span style={{ marginRight: 16 }}>{progressInfo.current || "准备中..."}</span>
-                <Tag color={paused ? "warning" : "processing"}>{paused ? "已暂停" : progressInfo.step || "等待"}</Tag>
+      {!hasFile ? (
+        <Card className="create-preview-card" style={{ borderRadius: 22, borderColor: "#eceff4" }} bodyStyle={{ padding: 24 }}>
+          <Space direction="vertical" size={20} style={{ width: "100%" }}>
+            <Dragger className="studio-dropzone" accept=".xlsx,.xls,.csv" showUploadList={false} beforeUpload={handleFile}>
+              <div className="studio-dropzone__inner">
+                <div className="studio-dropzone__icon">
+                  <InboxOutlined style={{ color: "#fff", fontSize: 28 }} />
+                </div>
+                <div>
+                  <Title level={4} style={{ marginBottom: 8 }}>拖拽商品表格到这里</Title>
+                  <Text type="secondary" className="studio-dropzone__desc">
+                    支持 Excel / CSV，上传后会自动识别商品标题、图片、分类和价格列。
+                  </Text>
+                </div>
+                <div className="studio-dropzone__actions">
+                  <Button
+                    type="primary"
+                    icon={<FileExcelOutlined />}
+                    className="create-primary-button"
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      void selectFile();
+                    }}
+                  >
+                    选择文件
+                  </Button>
+                </div>
+              </div>
+            </Dragger>
+
+            <div className="create-flow-hints">
+              <div className="create-flow-hint">
+                <Text strong>1. 导入表格</Text>
+                <Text type="secondary">上传 Excel / CSV 后，系统自动识别关键字段。</Text>
+              </div>
+              <div className="create-flow-hint">
+                <Text strong>2. 过滤风险</Text>
+                <Text type="secondary">可先剔除液体、膏体、带电、IP 等高风险商品。</Text>
+              </div>
+              <div className="create-flow-hint">
+                <Text strong>3. 自动上品</Text>
+                <Text type="secondary">按数量批量生成 Temu 草稿，并持续回传进度和结果。</Text>
               </div>
             </div>
-          )}
+          </Space>
         </Card>
-      )}
+      ) : null}
 
-      {/* 结果 */}
-      {results.length > 0 && (
-        <Card title="上品结果" style={{ borderRadius: 12 }}>
-          <Row gutter={24} style={{ marginBottom: 16 }}>
-            <Col><Statistic title="总计" value={results.length} valueStyle={{ fontSize: 20 }} /></Col>
-            <Col><Statistic title="成功" value={successCount} valueStyle={{ fontSize: 20, color: "#00b96b" }} /></Col>
-            <Col><Statistic title="失败" value={failCount} valueStyle={{ fontSize: 20, color: "#ff4d4f" }} /></Col>
-            <Col><Statistic title="成功率" value={results.length > 0 ? Math.round(successCount / results.length * 100) : 0} suffix="%" valueStyle={{ fontSize: 20, color: "#1890ff" }} /></Col>
-          </Row>
+      {hasPreview ? (
+        <Card style={{ borderRadius: 22, borderColor: "#eceff4" }} bodyStyle={{ padding: 0 }}>
+          <div style={{ padding: 20, borderBottom: "1px solid #edf1f5", display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+            <div>
+              <Title level={4} style={{ margin: 0 }}>前 5 行预览</Title>
+              <Text type="secondary" style={{ display: "block", marginTop: 6 }}>
+                这里只看自动化上品最关键的字段，确认标题、图片、分类和价格是否正常。
+              </Text>
+            </div>
+            {preview?.total ? <Tag color="blue">{`共 ${preview.total} 行可处理`}</Tag> : null}
+          </div>
 
           <Table
-            dataSource={results.map((r: any, i: number) => ({ key: i, ...r }))}
+            dataSource={previewRows}
             columns={[
-              { title: "#", key: "idx", width: 45, render: (_: any, __: any, i: number) => i + 1 },
-              { title: "商品", dataIndex: "name", key: "name", ellipsis: true, render: (v: string) => <span style={{ fontSize: 13 }}>{(v || "").slice(0, 45)}</span> },
-              {
-                title: "状态", dataIndex: "success", key: "status", width: 80,
-                render: (v: boolean) => <Tag color={v ? "success" : "error"} icon={v ? <CheckCircleOutlined /> : <CloseCircleOutlined />}>{v ? "成功" : "失败"}</Tag>,
-              },
-              {
-                title: "详情", dataIndex: "message", key: "msg", ellipsis: true,
-                render: (v: string, r: any) => r.success
-                  ? <span style={{ color: "#00b96b" }}>ID: {r.productId}</span>
-                  : <span style={{ color: "#ff4d4f", fontSize: 12 }}>{(v || "").slice(0, 55)}</span>,
-              },
+              { title: "商品标题", dataIndex: "title", key: "title", ellipsis: true },
+              { title: "图片", dataIndex: "media", key: "media", width: 150 },
+              { title: "分类", dataIndex: "category", key: "category", width: 260, ellipsis: true },
+              { title: "价格", dataIndex: "price", key: "price", width: 100 },
             ]}
             pagination={false}
             size="small"
-            bordered={false}
+            scroll={{ x: 660 }}
           />
         </Card>
-      )}
+      ) : null}
 
-      {taskHistory.length > 0 && (
+      {hasTaskProgress ? (
+        <Card className="create-result-card" style={{ borderRadius: 22, borderColor: "#eceff4" }} bodyStyle={{ padding: 24 }}>
+          <Space direction="vertical" size={18} style={{ width: "100%" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+              <div>
+                <Title level={4} style={{ margin: 0 }}>任务进度</Title>
+                <Text type="secondary" style={{ display: "block", marginTop: 6 }}>
+                  {progressInfo?.current || "等待开始"} {progressInfo?.step ? `· ${progressInfo.step}` : ""}
+                </Text>
+              </div>
+              <Space wrap>
+                <Tag color={batchTagColor}>{batchStatusLabel}</Tag>
+                {progressInfo?.taskId ? <Tag>{`任务 ${progressInfo.taskId}`}</Tag> : null}
+              </Space>
+            </div>
+
+            <Progress
+              percent={progressPercent}
+              status={paused || progressInfo?.status === "failed" || progressInfo?.status === "interrupted" ? "exception" : progressInfo?.status === "completed" ? "success" : "active"}
+              format={() => `${completedCount}/${progressTotal || 0}`}
+            />
+
+            <Row gutter={[12, 12]}>
+              <Col xs={12} md={6}>
+                <Statistic title="已处理" value={completedCount} />
+              </Col>
+              <Col xs={12} md={6}>
+                <Statistic title="待处理" value={pendingCount} />
+              </Col>
+              <Col xs={12} md={6}>
+                <Statistic title="成功" value={successCount} />
+              </Col>
+              <Col xs={12} md={6}>
+                <Statistic title="失败" value={failCount} />
+              </Col>
+            </Row>
+          </Space>
+        </Card>
+      ) : null}
+
+      {(progressInfo?.status === "failed" || progressInfo?.status === "interrupted") && progressInfo?.message ? (
+        <Alert type="error" showIcon message="任务执行异常" description={progressInfo.message} />
+      ) : null}
+
+      {hasResults ? (
+        <Card className="create-result-card" style={{ borderRadius: 22, borderColor: "#eceff4" }} bodyStyle={{ padding: 24 }}>
+          <Space direction="vertical" size={18} style={{ width: "100%" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+              <div>
+                <Title level={4} style={{ margin: 0 }}>执行结果</Title>
+              </div>
+              <Space wrap>
+                <Tag color="blue">{`共 ${results.length} 条`}</Tag>
+                <Tag color="success">{`成功 ${successCount}`}</Tag>
+                <Tag color="error">{`失败 ${failCount}`}</Tag>
+                <Tag>{`成功率 ${results.length ? Math.round(successCount / results.length * 100) : 0}%`}</Tag>
+              </Space>
+            </div>
+
+            {failedReasonSummary.length > 0 ? (
+              <Alert
+                type="warning"
+                showIcon
+                message="失败原因汇总"
+                description={(
+                  <div style={{ display: "grid", gap: 6 }}>
+                    {failedReasonSummary.map(([reason, count]) => (
+                      <div key={reason} style={{ color: "var(--color-text-sec)" }}>
+                        {count} 条：{reason}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              />
+            ) : null}
+
+            <Table
+              dataSource={resultRows}
+              columns={[
+                {
+                  title: "商品",
+                  dataIndex: "displayName",
+                  key: "displayName",
+                  ellipsis: true,
+                  render: (value: string, record: any) => (
+                    <div>
+                      <div style={{ fontWeight: 600, color: "var(--color-text)" }}>{value}</div>
+                      <div style={{ fontSize: 12, color: "var(--color-text-sec)", marginTop: 4 }}>{record.rowMeta}</div>
+                    </div>
+                  ),
+                },
+                {
+                  title: "结果",
+                  dataIndex: "success",
+                  key: "success",
+                  width: 100,
+                  render: (value: boolean) => (
+                    <Tag color={value ? "success" : "error"} icon={value ? <CheckCircleOutlined /> : <CloseCircleOutlined />}>
+                      {value ? "成功" : "失败"}
+                    </Tag>
+                  ),
+                },
+                {
+                  title: "详情",
+                  dataIndex: "message",
+                  key: "message",
+                  ellipsis: true,
+                  render: (value: string, record: any) => record.success
+                    ? <span style={{ color: SUCCESS_COLOR }}>{`ID: ${record.productId}`}</span>
+                    : <span style={{ color: "#ff4d4f" }}>{value || "未返回错误信息"}</span>,
+                },
+              ]}
+              pagination={{ pageSize: 6, showSizeChanger: false, hideOnSinglePage: true }}
+              size="small"
+              scroll={{ x: 620 }}
+            />
+          </Space>
+        </Card>
+      ) : null}
+
+      {visibleTaskHistory.length > 0 ? (
         <Card
+          style={{ borderRadius: 22, borderColor: "#eceff4" }}
           title="最近任务"
-          extra={(
-            <Button size="small" onClick={() => refreshTaskHistory()} loading={historyLoading}>
-              刷新任务
-            </Button>
-          )}
-          style={{ borderRadius: 12 }}
+          extra={<Button size="small" icon={<ReloadOutlined />} onClick={() => void refreshTaskHistory()} loading={historyLoading}>刷新</Button>}
         >
-          <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-            {taskHistory.map((task) => {
+          <div className="create-history-list">
+            {visibleTaskHistory.map((task) => {
               const isActive = task.taskId === selectedTaskId;
-              const statusColorMap: Record<string, string> = {
-                running: "processing",
-                paused: "warning",
-                completed: "success",
-                failed: "error",
-                interrupted: "default",
-              };
-              const statusTextMap: Record<string, string> = {
-                running: "进行中",
-                paused: "已暂停",
-                completed: "已完成",
-                failed: "失败",
-                interrupted: "已中断",
-              };
               const displayName = task.csvPath ? task.csvPath.split(/[/\\]/).pop() : "未命名任务";
               return (
-                <div
-                  key={task.taskId}
-                  style={{
-                    border: isActive ? "1px solid #1677ff" : "1px solid #f0f0f0",
-                    borderRadius: 10,
-                    padding: 12,
-                    background: isActive ? "#f0f7ff" : "#fff",
-                  }}
-                >
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
-                    <div style={{ minWidth: 0 }}>
+                <div key={task.taskId} className={`create-history-item${isActive ? " is-active" : ""}`}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
+                    <div style={{ minWidth: 0, flex: 1 }}>
                       <Space wrap>
-                        <Tag color={statusColorMap[task.status] || "default"}>
-                          {statusTextMap[task.status] || task.status || "未知状态"}
-                        </Tag>
-                        <span style={{ fontWeight: 500 }}>{displayName}</span>
+                        <Tag color={getHistoryStatusColor(task.status)}>{getHistoryStatusText(task.status)}</Tag>
+                        <Text strong ellipsis>{displayName}</Text>
                       </Space>
-                      <div style={{ marginTop: 8, color: "#666", fontSize: 12 }}>
-                        {task.completed || 0}/{task.total || task.count || 0} 已处理
-                        {task.updatedAt ? `，最近更新 ${task.updatedAt}` : ""}
+                      <div className="create-history-item__meta">
+                        {`${task.completed || 0}/${task.total || task.count || 0} 已处理`}
+                        {task.updatedAt ? ` · 最近更新 ${task.updatedAt}` : ""}
                       </div>
-                      {task.message && (
-                        <div style={{ marginTop: 6, color: task.status === "failed" || task.status === "interrupted" ? "#ff4d4f" : "#666", fontSize: 12 }}>
+                      {task.message ? (
+                        <div className="create-history-item__meta" style={{ color: task.status === "failed" || task.status === "interrupted" ? "#ff4d4f" : "#66758a" }}>
                           {task.message}
                         </div>
-                      )}
+                      ) : null}
                     </div>
-                    <Button size="small" onClick={() => restoreTaskView(task.taskId)}>
-                      {task.running ? "继续跟踪" : "查看结果"}
+                    <Button size="small" onClick={() => void restoreTaskView(task.taskId)}>
+                      {task.running ? "继续跟踪" : "恢复"}
                     </Button>
                   </div>
                 </div>
               );
             })}
-          </Space>
+          </div>
         </Card>
-      )}
+      ) : null}
     </Space>
   );
 }
 
-// ========== 主页面 ==========
 export default function ProductCreate() {
+  const [activeMode, setActiveMode] = useState<ProductCreateMode>("batch");
+
+  const pageDescription = activeMode === "batch"
+    ? "导入表格后，系统会自动识别字段、可选过滤高风险，再直接执行自动上品。"
+    : "单个调试模式，用来验证标题、价格和参考图是否能顺利生成草稿。";
+
   return (
-    <div style={{ maxWidth: 1000 }}>
-      <Tabs
-        defaultActiveKey="batch"
-        type="card"
-        items={[
-          {
-            key: "batch",
-            label: <span><FileExcelOutlined style={{ marginRight: 4 }} />批量上品</span>,
-            children: <BatchCreate />,
-          },
-          {
-            key: "single",
-            label: <span><PlusOutlined style={{ marginRight: 4 }} />单个上品</span>,
-            children: <SingleCreate />,
-          },
-        ]}
+    <div className="dashboard-shell product-create-shell">
+      <PageHeader
+        compact
+        eyebrow="自动化上品"
+        title="上品管理"
+        subtitle={pageDescription}
+        actions={(
+          <Segmented<ProductCreateMode>
+            value={activeMode}
+            onChange={(value) => setActiveMode(value)}
+            options={[
+              { label: "自动化上品", value: "batch" },
+              { label: "单个调试", value: "single" },
+            ]}
+          />
+        )}
       />
+
+      <div>
+        {activeMode === "batch" ? <BatchCreate /> : <SingleCreate />}
+      </div>
     </div>
   );
 }

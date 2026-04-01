@@ -45,6 +45,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.invoke("automation:list-tasks"),
     readScrapeData: (key) =>
       ipcRenderer.invoke("automation:read-scrape-data", key),
+    getScrapeProgress: () =>
+      ipcRenderer.invoke("automation:get-scrape-progress"),
     scrapeLifecycle: () =>
       ipcRenderer.invoke("automation:scrape-lifecycle"),
     scrapeBidding: () =>
@@ -80,8 +82,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ensureRunning: () => ipcRenderer.invoke("image-studio:ensure-running"),
     restart: () => ipcRenderer.invoke("image-studio:restart"),
     openExternal: () => ipcRenderer.invoke("image-studio:open-external"),
-    getConfig: () => ipcRenderer.invoke("image-studio:get-config"),
-    updateConfig: (payload) => ipcRenderer.invoke("image-studio:update-config", payload),
     analyze: (payload) => ipcRenderer.invoke("image-studio:analyze", payload),
     regenerateAnalysis: (payload) => ipcRenderer.invoke("image-studio:regenerate-analysis", payload),
     generatePlans: (payload) => ipcRenderer.invoke("image-studio:generate-plans", payload),

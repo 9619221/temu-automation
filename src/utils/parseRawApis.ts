@@ -52,23 +52,81 @@ function pickFirst<T>(...values: T[]): T | undefined {
   return values.find((value) => value !== null && value !== undefined && value !== "");
 }
 
-function normalizeCategoryPath(value: any): string {
-  if (!value) return "";
-  if (typeof value === "string") return value;
-  if (Array.isArray(value)) {
-    return value
-      .map((item) => normalizeCategoryPath(item))
-      .filter(Boolean)
-      .join(" > ");
-  }
-  if (typeof value !== "object") return "";
+const CATEGORY_TEXT_KEYS = ["catName", "categoryName", "name", "label", "title", "text"] as const;
 
-  return Object.keys(value)
-    .filter((key) => key.startsWith("cat"))
-    .sort()
-    .map((key) => toStringValue(value[key]?.catName || value[key]?.name || value[key]))
-    .filter(Boolean)
-    .join(" > ");
+function cleanCategoryText(value: any): string {
+  if (typeof value !== "string") return "";
+  const text = value.trim();
+  return text && text !== "[object Object]" ? text : "";
+}
+
+function dedupeTexts(values: string[]): string[] {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    const text = cleanCategoryText(value);
+    if (!text || seen.has(text)) return false;
+    seen.add(text);
+    return true;
+  });
+}
+
+function getCategoryKeyOrder(key: string): number {
+  const catLevel = key.match(/^cat(\d+)$/i);
+  if (catLevel) return Number(catLevel[1]);
+  const nameLevel = key.match(/^(first|second|third|fourth|fifth)Category/i)?.[1]?.toLowerCase();
+  if (nameLevel) {
+    return ({ first: 1, second: 2, third: 3, fourth: 4, fifth: 5 } as Record<string, number>)[nameLevel] || 500;
+  }
+  if (/^leafCat$/i.test(key)) return 999;
+  return 500;
+}
+
+function extractCategoryTexts(value: any, seen = new WeakSet<object>()): string[] {
+  if (!value) return [];
+  if (typeof value === "string") return dedupeTexts([value]);
+  if (Array.isArray(value)) {
+    return dedupeTexts(value.flatMap((item) => extractCategoryTexts(item, seen)));
+  }
+  if (typeof value !== "object") return [];
+  if (seen.has(value)) return [];
+  seen.add(value);
+
+  const objectValue = value as Record<string, any>;
+  const orderedCategoryKeys = Object.keys(objectValue)
+    .filter((key) => /^cat\d+$/i.test(key) || /^(first|second|third|fourth|fifth)Category/i.test(key) || /^leafCat$/i.test(key))
+    .sort((a, b) => getCategoryKeyOrder(a) - getCategoryKeyOrder(b));
+  const orderedCategoryTexts = dedupeTexts(
+    orderedCategoryKeys.flatMap((key) => extractCategoryTexts(objectValue[key], seen)),
+  );
+  if (orderedCategoryTexts.length > 0) return orderedCategoryTexts;
+
+  const nestedPathTexts = dedupeTexts(
+    ["categories", "categoryPath", "categoryTree", "categoryNodeVOS", "path", "children", "list"]
+      .flatMap((key) => extractCategoryTexts(objectValue[key], seen)),
+  );
+  const directTexts = dedupeTexts(
+    CATEGORY_TEXT_KEYS
+      .map((key) => cleanCategoryText(objectValue[key]))
+      .filter(Boolean),
+  );
+  if (nestedPathTexts.length > 0 || directTexts.length > 0) {
+    return dedupeTexts([...nestedPathTexts, ...directTexts]);
+  }
+
+  return dedupeTexts(
+    Object.values(objectValue)
+      .filter((nested) => nested && typeof nested === "object")
+      .flatMap((nested) => extractCategoryTexts(nested, seen)),
+  );
+}
+
+function normalizeCategoryPath(value: any): string {
+  return extractCategoryTexts(value).join(" > ");
+}
+
+function normalizeCategoryLeaf(value: any): string {
+  const parts = extractCategoryTexts(value);
+  return parts[parts.length - 1] || "";
 }
 
 function formatFenPrice(value: any): string {
@@ -100,14 +158,25 @@ function normalizeProductStatus(value: any): string {
 
 function normalizeProductsFromList(items: any[], syncedAt = ""): any[] {
   return items.map((item: any) => {
-    const categories = normalizeCategoryPath(item.categories || item.categoryPath || item.categoryTree);
-    const leafCategory = toStringValue(
+    const categories = normalizeCategoryPath(
       pickFirst(
-        item.leafCat?.catName,
+        item.categories,
+        item.categoryPath,
+        item.categoryTree,
+        item.category,
+        item.categoryName,
+        item.leafCat,
+      ),
+    );
+    const leafCategory = normalizeCategoryLeaf(
+      pickFirst(
         item.leafCatName,
         item.leafCat,
-        item.category?.catName,
         item.categoryName,
+        item.category,
+        item.categories,
+        item.categoryPath,
+        item.categoryTree,
       ),
     );
     const skuExtCodes = toArray(item.productSkuSummaries || item.skuList)

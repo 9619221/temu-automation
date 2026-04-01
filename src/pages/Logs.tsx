@@ -1,8 +1,25 @@
 import { useEffect, useMemo, useState } from "react";
-import { Alert, Button, Card, Empty, Input, Segmented, Space, Table, Tag, Typography, message } from "antd";
+import {
+  Alert,
+  Button,
+  Empty,
+  Input,
+  Segmented,
+  Space,
+  Table,
+  Tag,
+  Typography,
+  message,
+} from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { DeleteOutlined, ReloadOutlined } from "@ant-design/icons";
-import { FRONTEND_LOG_STORE_KEY, clearFrontendLogs, type FrontendLogEntry } from "../utils/frontendLogger";
+import PageHeader from "../components/PageHeader";
+import StatCard from "../components/StatCard";
+import {
+  FRONTEND_LOG_STORE_KEY,
+  clearFrontendLogs,
+  type FrontendLogEntry,
+} from "../utils/frontendLogger";
 
 const { Text } = Typography;
 const store = window.electronAPI?.store;
@@ -22,24 +39,6 @@ function levelLabel(level: FrontendLogEntry["level"] | LevelFilter) {
     default:
       return "全部";
   }
-}
-
-function explainMessage(log: FrontendLogEntry) {
-  const message = log.message || "";
-  if (message.includes("[antd: Spin]") && message.includes("tip")) {
-    return "Ant Design 的 Spin 组件提示文案只能用于嵌套加载或全屏加载，这是一条界面用法警告，不是业务失败。";
-  }
-  if (log.source === "unhandledrejection") {
-    return "有一个 Promise 异常没有被捕获，建议顺着这条日志继续定位调用链。";
-  }
-  if (log.source === "window-error") {
-    return "这是页面运行时异常，通常会直接影响当前功能。";
-  }
-  return "";
-}
-
-function formatTime(timestamp: number) {
-  return new Date(timestamp).toLocaleString("zh-CN", { hour12: false });
 }
 
 function levelColor(level: FrontendLogEntry["level"]) {
@@ -66,6 +65,24 @@ function sourceLabel(source: FrontendLogEntry["source"]) {
   }
 }
 
+function explainMessage(log: FrontendLogEntry) {
+  const rawMessage = log.message || "";
+  if (rawMessage.includes("[antd: Spin]") && rawMessage.includes("tip")) {
+    return "这是 Ant Design 的加载提示用法警告，不一定代表业务失败。";
+  }
+  if (log.source === "unhandledrejection") {
+    return "有 Promise 异常没有被捕获，建议顺着调用链继续排查。";
+  }
+  if (log.source === "window-error") {
+    return "这是页面运行时异常，通常会直接影响当前功能。";
+  }
+  return "";
+}
+
+function formatTime(timestamp: number) {
+  return new Date(timestamp).toLocaleString("zh-CN", { hour12: false });
+}
+
 export default function Logs() {
   const [logs, setLogs] = useState<FrontendLogEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -83,7 +100,7 @@ export default function Logs() {
   };
 
   useEffect(() => {
-    loadLogs();
+    void loadLogs();
 
     const handleLog = (event: WindowEventMap["temu-frontend-log"]) => {
       setLogs((prev) => [event.detail, ...prev].slice(0, 500));
@@ -97,37 +114,49 @@ export default function Logs() {
 
   const filteredLogs = useMemo(() => {
     return logs.filter((log) => {
-      if (levelFilter !== "all" && log.level !== levelFilter) return false;
-      if (!searchText) return true;
-      const needle = searchText.toLowerCase();
+      if (levelFilter !== "all" && log.level !== levelFilter) {
+        return false;
+      }
+      if (!searchText.trim()) {
+        return true;
+      }
+      const keyword = searchText.trim().toLowerCase();
       return (
-        log.message.toLowerCase().includes(needle) ||
-        log.source.toLowerCase().includes(needle) ||
-        log.level.toLowerCase().includes(needle)
+        log.message.toLowerCase().includes(keyword)
+        || log.source.toLowerCase().includes(keyword)
+        || log.level.toLowerCase().includes(keyword)
       );
     });
-  }, [logs, levelFilter, searchText]);
+  }, [levelFilter, logs, searchText]);
+
+  const errorCount = logs.filter((log) => log.level === "error").length;
+  const warnCount = logs.filter((log) => log.level === "warn").length;
+  const latestTime = logs[0]?.timestamp ? formatTime(logs[0].timestamp) : "--";
 
   const columns: ColumnsType<FrontendLogEntry> = [
     {
       title: "时间",
       dataIndex: "timestamp",
       key: "timestamp",
-      width: 180,
-      render: (value: number) => <Text style={{ fontFamily: "Consolas, monospace", fontSize: 12 }}>{formatTime(value)}</Text>,
+      width: 158,
+      render: (value: number) => (
+        <Text style={{ fontFamily: "Consolas, monospace", fontSize: 12 }}>
+          {formatTime(value)}
+        </Text>
+      ),
     },
     {
       title: "级别",
       dataIndex: "level",
       key: "level",
-      width: 90,
+      width: 88,
       render: (value: FrontendLogEntry["level"]) => <Tag color={levelColor(value)}>{levelLabel(value)}</Tag>,
     },
     {
       title: "来源",
       dataIndex: "source",
       key: "source",
-      width: 120,
+      width: 110,
       render: (value: FrontendLogEntry["source"]) => <Tag>{sourceLabel(value)}</Tag>,
     },
     {
@@ -135,42 +164,59 @@ export default function Logs() {
       dataIndex: "message",
       key: "message",
       render: (value: string) => (
-        <div>
-          <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "Consolas, monospace", fontSize: 12 }}>
-            {value}
-          </div>
-        </div>
+        <div className="app-log-message app-log-message--clamp">{value}</div>
       ),
     },
     {
-      title: "中文说明",
+      title: "说明",
       key: "explanation",
-      width: 360,
+      width: 260,
       render: (_: unknown, record: FrontendLogEntry) => {
         const explanation = explainMessage(record);
-        return explanation ? <span style={{ fontSize: 12, color: "#666" }}>{explanation}</span> : <span style={{ color: "#bbb" }}>-</span>;
+        return explanation ? (
+          <span style={{ fontSize: 12, color: "var(--color-text-sec)" }}>{explanation}</span>
+        ) : (
+          <span style={{ color: "#bbb" }}>-</span>
+        );
       },
     },
   ];
 
   return (
-    <Space direction="vertical" size="large" style={{ width: "100%" }}>
-      <Alert
-        type="info"
-        showIcon
-        message="前端日志页"
-        description="这里记录 renderer 侧的 console、页面异常和未处理的 Promise 异常。日志默认保留最近 500 条。"
-        style={{ borderRadius: 12 }}
+    <div className="dashboard-shell">
+      <PageHeader
+        compact
+        eyebrow="排查工作台"
+        title="日志中心"
+        subtitle="把前端异常、Promise 未处理错误和普通调试日志压缩进一个更易扫读的视图。"
+        meta={[
+          `${logs.length} 条日志`,
+          errorCount > 0 ? `${errorCount} 条错误` : "当前无错误",
+          warnCount > 0 ? `${warnCount} 条警告` : "警告较少",
+        ]}
       />
 
-      <Card style={{ borderRadius: 12 }}>
-        <Space wrap>
+      <div className="app-form-grid">
+        <StatCard compact title="错误数" value={errorCount} color="danger" trend="优先看页面异常和 Promise 异常" />
+        <StatCard compact title="警告数" value={warnCount} color="brand" trend="界面用法问题会集中到这里" />
+        <StatCard compact title="最近一条" value={latestTime} color="blue" trend={logs[0]?.source ? `来源：${sourceLabel(logs[0].source)}` : "等待新的前端日志"} />
+      </div>
+
+      <Alert
+        className="friendly-alert"
+        type="info"
+        showIcon
+        message="这里只记录渲染层日志"
+        description="默认保留最近 500 条。表格里先展示摘要，展开行后可以看完整内容和中文解释。"
+      />
+
+      <div className="app-panel">
+        <div className="app-toolbar app-toolbar--logs">
           <Input.Search
             allowClear
             value={searchText}
             onChange={(event) => setSearchText(event.target.value)}
-            placeholder="搜索日志内容"
-            style={{ width: 280 }}
+            placeholder="搜索日志内容 / 来源 / 级别"
           />
           <Segmented<LevelFilter>
             value={levelFilter}
@@ -183,7 +229,7 @@ export default function Logs() {
               { label: "错误", value: "error" },
             ]}
           />
-          <Button icon={<ReloadOutlined />} onClick={loadLogs} loading={loading}>
+          <Button icon={<ReloadOutlined />} onClick={() => void loadLogs()} loading={loading}>
             刷新
           </Button>
           <Button
@@ -195,26 +241,47 @@ export default function Logs() {
               message.success("前端日志已清空");
             }}
           >
-            清空日志
+            清空
           </Button>
-          <Text type="secondary">共 {filteredLogs.length} 条</Text>
-        </Space>
-      </Card>
+          <div className="app-toolbar__count">共 {filteredLogs.length} 条</div>
+        </div>
+      </div>
 
-      <Card style={{ borderRadius: 12 }}>
+      <div className="app-panel">
         {filteredLogs.length > 0 ? (
           <Table
             rowKey="id"
+            size="small"
             loading={loading}
             dataSource={filteredLogs}
             columns={columns}
-            pagination={{ pageSize: 20, showSizeChanger: true }}
-            scroll={{ x: 1000 }}
+            pagination={{ pageSize: 24, showSizeChanger: true }}
+            scroll={{ x: 920 }}
+            expandable={{
+              expandRowByClick: true,
+              rowExpandable: (record) => Boolean(record.message || explainMessage(record)),
+              expandedRowRender: (record) => (
+                <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                  <div>
+                    <Text strong>完整日志</Text>
+                    <div className="app-log-message" style={{ marginTop: 8 }}>{record.message}</div>
+                  </div>
+                  {explainMessage(record) ? (
+                    <div>
+                      <Text strong>中文说明</Text>
+                      <div style={{ marginTop: 8, fontSize: 12, color: "var(--color-text-sec)", lineHeight: 1.7 }}>
+                        {explainMessage(record)}
+                      </div>
+                    </div>
+                  ) : null}
+                </Space>
+              ),
+            }}
           />
         ) : (
-          <Empty description="暂无前端日志" style={{ padding: "40px 0" }} />
+          <Empty description="暂无前端日志" style={{ padding: "32px 0" }} />
         )}
-      </Card>
-    </Space>
+      </div>
+    </div>
   );
 }

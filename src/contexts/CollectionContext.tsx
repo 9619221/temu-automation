@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from "react";
-import { message } from "antd";
+import { message, notification } from "antd";
 import { parseDashboardData, parseProductsData, parseOrdersData, parseSalesData, parseFluxData } from "../utils/parseRawApis";
 import {
   COLLECTION_DIAGNOSTICS_KEY,
@@ -100,6 +100,22 @@ export interface TaskState {
   duration?: number;
 }
 
+function openCollectionNotification(successCount: number, errorCount: number, elapsed: number) {
+  const title = errorCount > 0 ? "采集完成，部分任务失败" : "采集完成";
+  const description = [
+    `${successCount} 项成功`,
+    errorCount > 0 ? `${errorCount} 项失败` : "",
+    elapsed > 0 ? `总耗时 ${elapsed} 秒` : "",
+  ].filter(Boolean).join("，");
+
+  notification[errorCount > 0 ? "warning" : "success"]({
+    message: title,
+    description,
+    duration: 5,
+    placement: "bottomRight",
+  });
+}
+
 interface CollectionContextType {
   collecting: boolean;
   taskStates: Record<string, TaskState>;
@@ -138,6 +154,7 @@ export function CollectionProvider({ children }: { children: React.ReactNode }) 
   const [elapsed, setElapsed] = useState(0);
   const [syncingDashboard, setSyncingDashboard] = useState(false);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const collectionRunRef = useRef(0);
 
   // 计时器
   useEffect(() => {
@@ -153,34 +170,90 @@ export function CollectionProvider({ children }: { children: React.ReactNode }) 
     };
   }, [collecting, startTime]);
 
+  useEffect(() => {
+    if (!collecting || !api?.getScrapeProgress) return;
+
+    const runId = collectionRunRef.current;
+    let cancelled = false;
+    let timeoutId: NodeJS.Timeout | null = null;
+
+    const syncProgress = async () => {
+      try {
+        const snapshot = await api.getScrapeProgress();
+        if (cancelled || collectionRunRef.current !== runId) return;
+
+        if (snapshot?.running && snapshot?.tasks && typeof snapshot.tasks === "object") {
+          setTaskStates((prev) => {
+            const next = { ...prev };
+            for (const task of COLLECT_TASKS) {
+              const remoteTask = snapshot.tasks?.[task.key];
+              if (!remoteTask) {
+                if (!next[task.key]) next[task.key] = { status: "pending" };
+                continue;
+              }
+              next[task.key] = {
+                ...next[task.key],
+                status: remoteTask.status || next[task.key]?.status || "pending",
+                message: typeof remoteTask.message === "string" ? remoteTask.message : next[task.key]?.message,
+                duration: typeof remoteTask.duration === "number" ? remoteTask.duration : next[task.key]?.duration,
+              };
+            }
+            return next;
+          });
+
+          const totalTasks = Number(snapshot.totalTasks) || COLLECT_TASKS.length;
+          const completedTasks = Number(snapshot.completedTasks) || 0;
+          setProgress(Math.min(95, Math.round((completedTasks / Math.max(1, totalTasks)) * 100)));
+        }
+      } catch {}
+
+      if (!cancelled && collectionRunRef.current === runId) {
+        timeoutId = setTimeout(syncProgress, 1000);
+      }
+    };
+
+    syncProgress().catch(() => {});
+
+    return () => {
+      cancelled = true;
+      if (timeoutId) clearTimeout(timeoutId);
+    };
+  }, [collecting]);
+
   const successCount = Object.values(taskStates).filter(t => t.status === "success").length;
   const errorCount = Object.values(taskStates).filter(t => t.status === "error").length;
 
   const startCollectAll = useCallback(async () => {
     if (!api || collecting) return;
+    const runId = collectionRunRef.current + 1;
+    collectionRunRef.current = runId;
+    const isCancelled = () => collectionRunRef.current !== runId;
+    const startedAtMs = Date.now();
 
     setCollecting(true);
-    setStartTime(Date.now());
+    setStartTime(startedAtMs);
     setElapsed(0);
     setProgress(0);
 
     const initStates: Record<string, TaskState> = {};
-    COLLECT_TASKS.forEach(t => { initStates[t.key] = { status: "running" }; });
+    COLLECT_TASKS.forEach(t => { initStates[t.key] = { status: "pending", message: "排队中" }; });
     setTaskStates(initStates);
-    setProgress(5);
 
     const syncedAt = new Date().toLocaleString("zh-CN");
     const diagnosticsTasks: Record<string, CollectionTaskDiagnostic> = {};
 
     try {
       const allResults: any = await api.scrapeAll();
+      if (isCancelled()) return;
 
       let completed = 0;
       for (const task of COLLECT_TASKS) {
+        if (isCancelled()) return;
         const r = allResults[task.key];
         if (r && r.success) {
           try {
             const data = await api.readScrapeData(task.key);
+            if (isCancelled()) return;
             if (data === null || data === undefined) {
               throw new Error("采集结果文件为空或未生成");
             }
@@ -224,6 +297,7 @@ export function CollectionProvider({ children }: { children: React.ReactNode }) 
               status: "success", count: displayCount, duration: r.duration, message: `${displayCount} 条数据`
             }}));
           } catch (error: any) {
+            if (isCancelled()) return;
             const detail = error?.message || "读取采集结果失败";
             diagnosticsTasks[task.key] = {
               status: "error",
@@ -237,6 +311,7 @@ export function CollectionProvider({ children }: { children: React.ReactNode }) 
             }}));
           }
         } else if (r) {
+          if (isCancelled()) return;
           diagnosticsTasks[task.key] = {
             status: "error",
             storeKey: task.storeKey,
@@ -248,6 +323,7 @@ export function CollectionProvider({ children }: { children: React.ReactNode }) 
             status: "error", duration: r.duration, message: r.error?.substring(0, 50) || "未知错误"
           }}));
         } else {
+          if (isCancelled()) return;
           diagnosticsTasks[task.key] = {
             status: "error",
             storeKey: task.storeKey,
@@ -262,15 +338,19 @@ export function CollectionProvider({ children }: { children: React.ReactNode }) 
         setProgress(Math.round((completed / COLLECT_TASKS.length) * 100));
       }
 
+      if (isCancelled()) return;
       const successTotal = Object.values(diagnosticsTasks).filter((task) => task.status === "success").length;
       const errorTotal = Object.values(diagnosticsTasks).filter((task) => task.status === "error").length;
-      if (errorTotal > 0) {
-        message.warning(`采集完成：${successTotal} 项成功，${errorTotal} 项失败`);
-      } else {
-        message.success("一键采集完成!");
-      }
+      const finalElapsed = Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000));
+      openCollectionNotification(successTotal, errorTotal, finalElapsed);
     } catch (e: any) {
-      message.error("采集失败: " + e.message);
+      if (isCancelled()) return;
+      notification.error({
+        message: "采集失败",
+        description: e.message || "采集过程中出现异常",
+        duration: 5,
+        placement: "bottomRight",
+      });
       COLLECT_TASKS.forEach(t => {
         diagnosticsTasks[t.key] = {
           status: "error",
@@ -283,6 +363,7 @@ export function CollectionProvider({ children }: { children: React.ReactNode }) 
       setProgress(100);
     }
 
+    if (isCancelled()) return;
     if (store) {
       try {
         const successTotal = Object.values(diagnosticsTasks).filter((task) => task.status === "success").length;
@@ -299,6 +380,7 @@ export function CollectionProvider({ children }: { children: React.ReactNode }) 
       } catch {}
     }
 
+    if (isCancelled()) return;
     setCollecting(false);
   }, [collecting]);
 
@@ -407,6 +489,7 @@ export function CollectionProvider({ children }: { children: React.ReactNode }) 
 
   const cancelCollection = useCallback(() => {
     if (!collecting) return;
+    collectionRunRef.current += 1;
     // 关闭 worker 的浏览器来中断采集
     api?.close?.().catch(() => {});
     setCollecting(false);

@@ -19,15 +19,46 @@ export function randomDelay(min = 800, max = 2500) {
 export async function downloadImage(url, outputPath) {
   const proto = url.startsWith("https") ? https : http;
   return new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(outputPath);
-    proto.get(url, { timeout: 30000 }, (res) => {
-      if (res.statusCode === 301 || res.statusCode === 302) {
-        downloadImage(res.headers.location, outputPath).then(resolve).catch(reject);
+    const req = proto.get(url, { timeout: 30000 }, (res) => {
+      const statusCode = res.statusCode || 0;
+      if ([301, 302, 303, 307, 308].includes(statusCode) && res.headers.location) {
+        const redirectUrl = new URL(res.headers.location, url).toString();
+        res.resume();
+        downloadImage(redirectUrl, outputPath).then(resolve).catch(reject);
         return;
       }
+
+      if (statusCode < 200 || statusCode >= 300) {
+        res.resume();
+        reject(new Error(`下载图片失败: HTTP ${statusCode}`));
+        return;
+      }
+
+      const file = fs.createWriteStream(outputPath);
+      const cleanup = (err) => {
+        file.destroy();
+        fs.unlink(outputPath, () => {});
+        reject(err);
+      };
+
+      res.on("error", cleanup);
+      file.on("error", cleanup);
       res.pipe(file);
-      file.on("finish", () => { file.close(); resolve(outputPath); });
-    }).on("error", (e) => { fs.unlink(outputPath, () => {}); reject(e); });
+      file.on("finish", () => {
+        file.close((closeErr) => {
+          if (closeErr) {
+            reject(closeErr);
+            return;
+          }
+          resolve(outputPath);
+        });
+      });
+    });
+
+    req.on("error", (e) => {
+      fs.unlink(outputPath, () => {});
+      reject(e);
+    });
   });
 }
 

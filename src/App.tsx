@@ -15,13 +15,13 @@ const AppLayout = lazy(() => import("./components/Layout/AppLayout"));
 const Dashboard = lazy(() => import("./pages/Dashboard"));
 const ShopOverview = lazy(() => import("./pages/ShopOverview"));
 const AccountManager = lazy(() => import("./pages/AccountManager"));
-const ProductList = lazy(() => import("./pages/ProductList"));
+const ProductList = lazy(() => import("./pages/ProductList.tsx"));
 const ProductDetail = lazy(() => import("./pages/ProductDetail"));
 const TaskManager = lazy(() => import("./pages/TaskManager"));
 const Settings = lazy(() => import("./pages/Settings"));
 const ProductCreate = lazy(() => import("./pages/ProductCreate"));
 const ImageStudio = lazy(() => import("./pages/ImageStudio"));
-const Logs = lazy(() => import("./pages/Logs"));
+const Logs = lazy(() => import("./pages/Logs.tsx"));
 
 function RouteLoading() {
   return (

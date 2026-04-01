@@ -5,6 +5,7 @@ import { ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import App from "./App";
 import { initFrontendLogger } from "./utils/frontendLogger";
+import "./styles/tokens.css";
 import "./styles/global.css";
 
 initFrontendLogger().catch(() => {});
@@ -20,17 +21,19 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
           colorWarning: "#faad14",
           colorError: "#ff4d4f",
           colorInfo: "#1677ff",
-          borderRadius: 8,
+          borderRadius: 12,
           fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif',
           fontSize: 14,
           colorBgContainer: "#ffffff",
-          colorBgLayout: "#f0f2f5",
-          controlHeight: 36,
+          colorBgLayout: "#f7f8fa",
+          colorText: "#1a1a2e",
+          colorTextSecondary: "#8c8c8c",
+          controlHeight: 40,
         },
         components: {
           Card: {
             paddingLG: 20,
-            borderRadiusLG: 12,
+            borderRadiusLG: 16,
           },
           Table: {
             borderRadiusLG: 10,
@@ -42,12 +45,12 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
             borderRadiusSM: 4,
           },
           Button: {
-            borderRadius: 8,
-            controlHeight: 36,
+            borderRadius: 10,
+            controlHeight: 40,
             controlHeightLG: 44,
           },
           Menu: {
-            itemBorderRadius: 8,
+            itemBorderRadius: 10,
             itemMarginInline: 8,
             itemHeight: 44,
           },

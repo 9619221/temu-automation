@@ -46,6 +46,10 @@ export const SCRAPE_TASKS = {
   priceCompete:   { type: "listener", path: "/newon/compete-manager", matchers: [
     { key: "priceCompete", pattern: "PriceComparingOrderSupplierRpcService/searchForSupplier" },
   ]},
+  flowPrice:      { type: "listener", path: "/newon/compete-manager", matchers: [
+    { key: "flowPriceOverview", pattern: "high/price/flow/reduce/queryFullHighPriceFlowReduceOverview" },
+    { key: "flowPriceList", pattern: "high/price/flow/reduce/queryFullHighPriceFlowReduceList" },
+  ]},
   hotPlan:        { type: "listener", path: "/newon/hot-prop-plan-home", matchers: [
     { key: "hotPlanHome", pattern: "bsr/query/homepage" },
   ]},
@@ -141,6 +145,22 @@ export const SCRAPE_TASKS = {
   governCategoryCorrection:     { type: "govern", subPath: "category-correction" },
 };
 
+export const GOVERN_GROUP_TARGETS = Object.entries(SCRAPE_TASKS)
+  .filter(([, task]) => task?.type === "govern")
+  .map(([key, task]) => ({
+    key,
+    subPath: task.subPath,
+  }));
+
+export const ADS_GROUP_TABS = [
+  { key: "adsHome", tabName: "home", label: null, waitTime: 8000, liteWaitTime: 3500 },
+  { key: "adsProduct", tabName: "product", label: "商品推广", waitTime: 9000, liteWaitTime: 4200 },
+  { key: "adsReport", tabName: "report", label: "数据报表", waitTime: 9000, liteWaitTime: 4200 },
+  { key: "adsFinance", tabName: "finance", label: "财务管理", waitTime: 9000, liteWaitTime: 4200 },
+  { key: "adsHelp", tabName: "help", label: "帮助中心", waitTime: 6500, liteWaitTime: 3000 },
+  { key: "adsNotification", tabName: "notification", label: "消息通知", waitTime: 8000, liteWaitTime: 3500 },
+];
+
 /**
  * 获取采集函数（需要传入实际的 scrape 执行器）
  * @param {string} taskKey - 任务键名
@@ -159,7 +179,7 @@ export function getScrapeFunction(taskKey, executors) {
     case "listener":
       return () => executors.scrapePageWithListener(task.path, task.matchers, task.opts || {});
     case "govern":
-      return () => executors.scrapeGovernPage(task.subPath);
+      return () => executors.scrapeGovernPage(task.subPath, { taskKey, task });
     default:
       return null;
   }

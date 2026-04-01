@@ -3,7 +3,6 @@ import {
   Alert,
   Button,
   Card,
-  Checkbox,
   Col,
   Descriptions,
   Drawer,
@@ -17,7 +16,6 @@ import {
   Space,
   Spin,
   Statistic,
-  Steps,
   Tag,
   Tooltip,
   Typography,
@@ -26,24 +24,25 @@ import {
 } from "antd";
 import type { UploadFile } from "antd/es/upload/interface";
 import {
+  CheckCircleOutlined,
   CloseOutlined,
   CopyOutlined,
+  DeleteOutlined,
   DownloadOutlined,
   ExportOutlined,
   HistoryOutlined,
   PictureOutlined,
   ReloadOutlined,
   RocketOutlined,
-  SettingOutlined,
   StarOutlined,
   StopOutlined,
   ThunderboltOutlined,
   UploadOutlined,
 } from "@ant-design/icons";
+import { useLocation } from "react-router-dom";
 import {
   DEFAULT_IMAGE_TYPES,
   EMPTY_IMAGE_STUDIO_ANALYSIS,
-  EMPTY_IMAGE_STUDIO_CONFIG,
   IMAGE_LANGUAGE_OPTIONS,
   IMAGE_SIZE_OPTIONS,
   IMAGE_TYPE_LABELS,
@@ -52,12 +51,9 @@ import {
   arrayToMultiline,
   formatTimestamp,
   getDefaultImageLanguageForRegion,
-  hasMaskedValue,
-  isConfigMissing,
   multilineToArray,
   normalizeImageStudioAnalysis,
   type ImageStudioAnalysis,
-  type ImageStudioConfig,
   type ImageStudioGeneratedImage,
   type ImageStudioHistoryItem,
   type ImageStudioHistorySummary,
@@ -84,6 +80,18 @@ const TEMU_UPLOAD_BG = "radial-gradient(circle at top, #fff9f3 0%, #ffffff 72%)"
 const IMAGE_STUDIO_FAST_MAX_SIDE = 1600;
 const IMAGE_STUDIO_FAST_RAW_BYTES = 2.5 * 1024 * 1024;
 const IMAGE_STUDIO_FAST_QUALITY = 0.88;
+const PLAN_DISPLAY_SUBTITLES: Record<string, string> = {
+  main: "主图方案",
+  features: "卖点方案",
+  closeup: "细节方案",
+  dimensions: "尺寸方案",
+  lifestyle: "场景方案",
+  packaging: "包装方案",
+  comparison: "对比方案",
+  lifestyle2: "A+ 收束方案",
+  scene_a: "核价场景方案 A",
+  scene_b: "核价场景方案 B",
+};
 const REDRAW_UI_TEXT = {
   score: "\u8bc4\u5206",
   redraw: "\u91cd\u7ed8",
@@ -116,6 +124,15 @@ type ImageVariant = ImageStudioGeneratedImage & {
 };
 
 type ImageVariantMap = Record<string, ImageVariant[]>;
+
+type ImageStudioLocationState = {
+  prefill?: {
+    title?: string;
+    category?: string;
+    imageUrl?: string;
+    skcId?: string;
+  };
+};
 
 const FALLBACK_STATUS: ImageStudioStatus = {
   status: "starting",
@@ -221,17 +238,6 @@ function buildDirectRedrawPrompt(basePrompt: string, imageType: string) {
   ].join("\n");
 }
 
-function buildConfigDraft(config: ImageStudioConfig) {
-  return {
-    analyzeModel: config.analyzeModel,
-    analyzeApiKey: "",
-    analyzeBaseUrl: config.analyzeBaseUrl,
-    generateModel: config.generateModel,
-    generateApiKey: "",
-    generateBaseUrl: config.generateBaseUrl,
-  };
-}
-
 async function buildNativeImagePayloads(fileList: UploadFile[]): Promise<NativeImagePayload[]> {
   const validFiles = fileList.flatMap((item) => (item.originFileObj ? [item.originFileObj] : []));
 
@@ -333,8 +339,25 @@ function trimTitle(text: string, maxLength: number) {
   return `${normalized.slice(0, maxLength - 1).trim()}…`;
 }
 
+function normalizeProductDisplayName(value?: string | null) {
+  const normalized = (value || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+
+  const withoutAsciiParen = normalized.replace(
+    /\s*[（(]\s*[A-Za-z0-9][A-Za-z0-9\s\-–—,./&+'"]{0,120}\s*[)）]\s*$/,
+    "",
+  ).trim();
+
+  const primarySegment = withoutAsciiParen
+    .split(/\s+[|｜]\s+/)[0]
+    .split(/\s+\/\s+/)[0]
+    .trim();
+
+  return primarySegment || withoutAsciiParen || normalized;
+}
+
 function buildTitleSuggestions(analysis: ImageStudioAnalysis) {
-  const productName = analysis.productName.trim() || analysis.category.trim() || "商品";
+  const productName = normalizeProductDisplayName(analysis.productName) || analysis.category.trim() || "商品";
   const category = analysis.category.trim();
   const materials = analysis.materials.trim();
   const colors = analysis.colors.trim();
@@ -359,6 +382,71 @@ function buildTitleSuggestions(analysis: ImageStudioAnalysis) {
     { key: "benefits", label: "卖点突出版", text: benefitFocused },
     { key: "concise", label: "简洁精炼版", text: conciseFocused },
   ];
+}
+
+type BilingualPlanPreview = {
+  goal: string;
+  highlights: string[];
+};
+
+function getImageTypeSummaryHint(imageType: string) {
+  if (imageType === "main") return "主图优先突出商品主体、质感和第一眼识别度。";
+  if (imageType === "features") return "卖点图重点讲清核心功能，但不要把画面堆得太满。";
+  if (imageType === "closeup") return "细节图重点放大材质、做工和结构细节。";
+  if (imageType === "dimensions") return "尺寸图优先保证比例清楚、标注可读。";
+  if (imageType === "lifestyle" || imageType === "lifestyle2") return "场景图要贴近日常使用环境，强化代入感。";
+  if (imageType === "packaging") return "包装图要交代包装完整度和开箱感受。";
+  if (imageType === "comparison") return "对比图要突出差异点，但不要做误导性夸张。";
+  if (imageType === "scene_a" || imageType === "scene_b") return "场景图要稳定表达核心卖点和使用氛围。";
+  return "";
+}
+
+function buildBilingualPlanPreview(
+  plan: ImageStudioPlan,
+  options: {
+    productName?: string;
+    regionLabel?: string;
+    languageLabel?: string;
+  } = {},
+): BilingualPlanPreview {
+  const prompt = plan.prompt || "";
+  const imageTypeLabel = IMAGE_TYPE_LABELS[plan.imageType] || plan.imageType || "商品图";
+  const productName = normalizeProductDisplayName(options.productName) || plan.headline?.trim() || plan.title?.trim() || "当前商品";
+  const regionLabel = options.regionLabel?.trim();
+  const languageLabel = options.languageLabel?.trim();
+
+  const highlights = dedupeTextList([
+    getImageTypeSummaryHint(plan.imageType),
+    /ALL text on the image MUST be in ENGLISH/i.test(prompt)
+      ? "图片中的文案统一使用英文，避免中英混排。"
+      : languageLabel
+        ? `当前方案会按 ${languageLabel} 输出画面文案。`
+        : "",
+    /CLEAN CORNERS RULE|corner icon|all four corners/i.test(prompt)
+      ? "四角保持干净，不要水印、Logo、印章或角标装饰。"
+      : "",
+    /PRODUCT IDENTITY RULE|real retail product|practical identity/i.test(prompt)
+      ? "商品必须真实还原用途和结构，不要改成抽象摆件或错误品类。"
+      : "",
+    /PRODUCT LABEL TEXT|LETTER-PERFECT|Brand name|verify against the reference photo/i.test(prompt)
+      ? "品牌名、标签文字和关键信息要逐字准确，宁可弱化也不要写错。"
+      : "",
+    /FRAMING & CROPPING|ENTIRE product|crop or cut off|padding/i.test(prompt)
+      ? "商品主体需要完整入镜，并预留安全边距，避免被裁切。"
+      : "",
+    /60-80%/i.test(prompt) ? "主体占画面约 60% 到 80%，既突出又保留呼吸感。" : "",
+    /5%\s+padding|at least 5% padding/i.test(prompt) ? "四周至少预留 5% 边距，避免贴边。": "",
+    /multi-panel|panel layout/i.test(prompt) ? "如果采用分栏布局，每个分栏都要保证信息清晰且不拥挤。" : "",
+  ]).slice(0, 6);
+
+  const goal = regionLabel
+    ? `为「${productName}」生成适配 ${regionLabel} 市场的${imageTypeLabel}方案，重点兼顾平台合规、主体清晰度和转化表达。`
+    : `为「${productName}」生成${imageTypeLabel}方案，重点兼顾平台合规、主体清晰度和转化表达。`;
+
+  return {
+    goal,
+    highlights,
+  };
 }
 
 function sanitizeDownloadNamePart(value: string) {
@@ -402,15 +490,12 @@ function triggerImageDownload(href: string, fileName: string) {
 }
 
 export default function ImageStudio() {
+  const location = useLocation();
   const [status, setStatus] = useState<ImageStudioStatus>(FALLBACK_STATUS);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
-  const [configLoading, setConfigLoading] = useState(false);
-  const [configOpen, setConfigOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [config, setConfig] = useState<ImageStudioConfig>(EMPTY_IMAGE_STUDIO_CONFIG);
-  const [configDraft, setConfigDraft] = useState(buildConfigDraft(EMPTY_IMAGE_STUDIO_CONFIG));
   const [historyItems, setHistoryItems] = useState<ImageStudioHistorySummary[]>([]);
   const [uploadFiles, setUploadFiles] = useState<UploadFile[]>([]);
   const [productMode, setProductMode] = useState("single");
@@ -445,6 +530,7 @@ export default function ImageStudio() {
   const activeVariantIdsRef = useRef<Record<string, string>>({});
   const currentJobModeRef = useRef<"full" | "redraw">("full");
   const currentRedrawMetaRef = useRef<{ imageType: string; suggestion: string; prompt: string } | null>(null);
+  const appliedPrefillRef = useRef("");
 
   useEffect(() => {
     currentJobIdRef.current = currentJobId;
@@ -474,6 +560,27 @@ export default function ImageStudio() {
     activeVariantIdsRef.current = activeVariantIds;
   }, [activeVariantIds]);
 
+  useEffect(() => {
+    const routeState = location.state as ImageStudioLocationState | null;
+    const prefill = routeState?.prefill;
+    const signature = [prefill?.skcId, prefill?.title, prefill?.category].filter(Boolean).join("|");
+
+    if (!prefill || !signature || appliedPrefillRef.current === signature) {
+      return;
+    }
+
+    appliedPrefillRef.current = signature;
+    setAnalysis((prev) => ({
+      ...prev,
+      productName: prefill.title || prev.productName,
+      category: prefill.category || prev.category,
+    }));
+
+    if (prefill.title || prefill.category) {
+      message.success("已带入商品信息，可直接继续 AI 出图");
+    }
+  }, [location.state]);
+
   const refreshStatus = async (ensure = false) => {
     try {
       if (!imageStudioAPI) throw new Error("当前环境不支持 AI 出图服务");
@@ -502,20 +609,6 @@ export default function ImageStudio() {
     } finally {
       setLoading(false);
       setActionLoading(false);
-    }
-  };
-
-  const loadConfig = async () => {
-    if (!imageStudioAPI) return;
-    setConfigLoading(true);
-    try {
-      const nextConfig = await imageStudioAPI.getConfig();
-      setConfig(nextConfig);
-      setConfigDraft(buildConfigDraft(nextConfig));
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : "读取配置失败");
-    } finally {
-      setConfigLoading(false);
     }
   };
 
@@ -568,7 +661,6 @@ export default function ImageStudio() {
   useEffect(() => {
     refreshStatus(true).then((nextStatus) => {
       if (nextStatus.ready) {
-        loadConfig().catch(() => {});
         loadHistory().catch(() => {});
         refreshBackgroundJobs();
       }
@@ -728,7 +820,6 @@ export default function ImageStudio() {
       if (!imageStudioAPI) throw new Error("当前环境不支持 AI 出图服务");
       const nextStatus = await imageStudioAPI.restart();
       setStatus(nextStatus);
-      await loadConfig();
       message.success("AI 出图服务已重启");
     } catch (error) {
       message.error(error instanceof Error ? error.message : "重启失败");
@@ -743,34 +834,6 @@ export default function ImageStudio() {
       await imageStudioAPI.openExternal();
     } catch (error) {
       message.error(error instanceof Error ? error.message : "打开失败");
-    }
-  };
-
-  const handleOpenConfig = async () => {
-    setConfigOpen(true);
-    await loadConfig();
-  };
-
-  const handleSaveConfig = async () => {
-    if (!imageStudioAPI) return;
-    setConfigLoading(true);
-    try {
-      const nextConfig = await imageStudioAPI.updateConfig({
-        analyzeModel: configDraft.analyzeModel.trim(),
-        analyzeApiKey: configDraft.analyzeApiKey.trim(),
-        analyzeBaseUrl: configDraft.analyzeBaseUrl.trim(),
-        generateModel: configDraft.generateModel.trim(),
-        generateApiKey: configDraft.generateApiKey.trim(),
-        generateBaseUrl: configDraft.generateBaseUrl.trim(),
-      });
-      setConfig(nextConfig);
-      setConfigDraft(buildConfigDraft(nextConfig));
-      setConfigOpen(false);
-      message.success("AI 出图配置已更新");
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : "保存配置失败");
-    } finally {
-      setConfigLoading(false);
     }
   };
 
@@ -921,10 +984,10 @@ export default function ImageStudio() {
         salesRegion,
         imageLanguage,
         imageSize,
-        productName: analysis.productName || "未命名商品",
+        productName: displayProductName,
       });
       if (runInBackground) {
-        message.success(`「${analysis.productName || "未命名商品"}」已在后台生成，完成后会自动保存到历史记录`);
+        message.success(`「${displayProductName}」已在后台生成，完成后会自动保存到历史记录`);
         refreshBackgroundJobs();
         resetStudio();
       } else {
@@ -977,7 +1040,7 @@ export default function ImageStudio() {
         }),
       );
 
-      setAnalysis((prev) => ({ ...prev, productName: historyItem.productName || prev.productName }));
+      setAnalysis((prev) => ({ ...prev, productName: normalizeProductDisplayName(historyItem.productName) || prev.productName }));
       setSalesRegion(historyItem.salesRegion || "us");
       setImageLanguage(getDefaultImageLanguageForRegion(historyItem.salesRegion || "us"));
       setSelectedImageTypes(nextSelectedTypes);
@@ -1000,7 +1063,7 @@ export default function ImageStudio() {
       }, {}));
       setActiveStep(3);
       setHistoryOpen(false);
-      message.success("已载入历史出图结果");
+      message.success("已恢复这次历史记录，可以继续筛图、评分或重绘");
     } catch (error) {
       message.error(error instanceof Error ? error.message : "读取历史详情失败");
     }
@@ -1140,6 +1203,7 @@ export default function ImageStudio() {
         salesRegion,
         imageLanguage,
         imageSize,
+        productName: displayProductName,
       });
       message.success(`${REDRAW_UI_TEXT.redrawStarted}${IMAGE_TYPE_LABELS[imageType] || imageType}`);
       return;
@@ -1154,7 +1218,7 @@ export default function ImageStudio() {
   };
 
   const downloadImage = async (image: ImageStudioGeneratedImage) => {
-    const baseName = sanitizeDownloadNamePart(analysis.productName || "temu-image");
+    const baseName = sanitizeDownloadNamePart(displayProductName || "temu-image");
     const typeName = sanitizeDownloadNamePart(IMAGE_TYPE_LABELS[image.imageType] || image.imageType);
 
     try {
@@ -1205,44 +1269,8 @@ export default function ImageStudio() {
   const hasUploads = uploadFiles.length > 0;
   const hasAnalysis = useMemo(() => hasAnalysisContent(analysis), [analysis]);
   const hasPlans = plans.length > 0;
-  const maxUnlockedStep = generating || generatedImages.length > 0 || hasPlans ? 3 : hasAnalysis ? 2 : hasUploads ? 1 : 0;
-  const nextStepHint = !hasUploads
-    ? "先上传商品素材图"
-    : !hasAnalysis
-      ? "先分析商品"
-      : !hasPlans
-        ? "先生成方案"
-        : generating
-          ? "正在生成图片"
-          : "可以开始出图";
-  const selectedTypeLabels = useMemo(
-    () => selectedImageTypes.map((type) => IMAGE_TYPE_LABELS[type] || type),
-    [selectedImageTypes],
-  );
   const titleSuggestions = useMemo(() => buildTitleSuggestions(analysis), [analysis]);
-  const stepItems = [
-    { title: "上传图片", description: "上传商品素材并选择市场" },
-    { title: "AI 分析", description: "确认商品信息和卖点" },
-    { title: "确认方案", description: "确认每张图的出图方案" },
-    { title: "生成图片", description: "执行生成并查看结果" },
-  ];
-
-  const renderStatusTag = () => {
-    if (status.ready) return <Tag color={configAlertNeeded ? "orange" : "success"}>{serviceLabel}</Tag>;
-    if (status.status === "starting") return <Tag color="processing">{serviceLabel}</Tag>;
-    if (status.status === "error") return <Tag color="error">{serviceLabel}</Tag>;
-    return <Tag>{serviceLabel}</Tag>;
-  };
-
-  const configAlertNeeded = status.ready && isConfigMissing(config);
-  const serviceLabel = status.ready ? (configAlertNeeded ? "待配置" : "已就绪") : status.status === "error" ? "服务异常" : "启动中";
-  const serviceColor = status.ready ? (configAlertNeeded ? TEMU_ORANGE : "#16a34a") : status.status === "error" ? "#ff4d4f" : "#faad14";
-
-  const handleStepChange = (nextStep: number) => {
-    if (nextStep <= maxUnlockedStep) {
-      setActiveStep(nextStep);
-    }
-  };
+  const displayProductName = normalizeProductDisplayName(analysis.productName) || "未命名商品";
 
   const regionCards = [
     { value: "us", code: "US", label: "美国" },
@@ -1256,6 +1284,22 @@ export default function ImageStudio() {
     { value: "latam", code: "MX", label: "拉美" },
     { value: "br", code: "BR", label: "巴西" },
   ];
+
+  const currentRegion = regionCards.find((region) => region.value === salesRegion);
+  const currentLanguage = IMAGE_LANGUAGE_OPTIONS.find((option) => option.value === imageLanguage);
+  const canChooseProductMode = uploadFiles.length > 1;
+  const canResetStudio = hasUploads || hasAnalysis || hasPlans || generatedImages.length > 0;
+  const filledPreviewFiles = uploadFiles.slice(0, 3);
+  const hiddenPreviewCount = Math.max(0, uploadFiles.length - filledPreviewFiles.length);
+  const runningBackgroundJobs = backgroundJobs.filter((job) => job.status === "running" || job.status === "pending");
+  const completedBackgroundJobs = backgroundJobs.filter((job) => job.status !== "running" && job.status !== "pending");
+  const primaryBackgroundJob = runningBackgroundJobs[0] || backgroundJobs[0] || null;
+  const intakeStickyHint = hasUploads ? "已上传素材，可直接开始 AI 分析" : "上传后即可开始 AI 分析";
+  const uploadDropzoneDescription = hasUploads
+    ? uploadFiles.length >= 2
+      ? "素材已经够开始分析了，也可以再补几张细节图，让识别和方案更稳。"
+      : "已上传首张素材，建议再补 1 张细节图或尺寸图，分析会更稳。"
+    : "建议上传主图、细节图、材质图和尺寸图，AI 会更容易识别卖点并生成更稳的方案。";
 
 
   const handleDownloadImage = async (image: ImageStudioGeneratedImage) => {
@@ -1287,7 +1331,7 @@ export default function ImageStudio() {
     try {
       const result = await imageStudioAPI.downloadAll({
         images: generatedImages,
-        productName: analysis.productName || "temu-image",
+        productName: displayProductName || "temu-image",
       });
       if (result?.cancelled) return;
       if (result?.saved === result?.total) {
@@ -1321,7 +1365,26 @@ export default function ImageStudio() {
     setActiveStep(0);
   };
 
-  const renderStepZero = () => (
+  const updateUploadFiles = (nextFiles: UploadFile[]) => {
+    setUploadFiles(nextFiles.slice(-5));
+  };
+
+  const handleProductModeChange = (nextMode: string) => {
+    if (!nextMode || nextMode === productMode) return;
+    setProductMode(nextMode);
+    if (hasAnalysis || hasPlans || generatedImages.length > 0) {
+      setActiveStep(0);
+      message.info("已切换商品模式，建议重新执行 AI 分析以刷新方案。");
+    }
+  };
+
+  useEffect(() => {
+    if (uploadFiles.length <= 1 && productMode !== "single") {
+      setProductMode("single");
+    }
+  }, [productMode, uploadFiles.length]);
+
+  const renderStepZeroLegacy = () => (
     <Card
       style={{
         borderRadius: TEMU_CARD_RADIUS,
@@ -1519,9 +1582,340 @@ export default function ImageStudio() {
     </Card>
   );
 
+  const renderStepZero = () => (
+    <div className="studio-step-zero">
+      <div className="studio-intake-sticky">
+        <div className="studio-intake-sticky__meta">
+          <div className="studio-intake-sticky__title">
+            {hasUploads ? `已上传 ${uploadFiles.length}/5 张素材` : "先选市场，再上传商品图"}
+          </div>
+          <div className="studio-intake-sticky__desc">{intakeStickyHint}</div>
+        </div>
+
+        <div className="studio-intake-sticky__actions">
+          <Select
+            value={salesRegion}
+            popupMatchSelectWidth={false}
+            className="studio-intake-select"
+            options={regionCards.map((region) => ({
+              value: region.value,
+              label: `${region.code} ${region.label}`,
+            }))}
+            onChange={(value) => {
+              setSalesRegion(value);
+              setImageLanguage(getDefaultImageLanguageForRegion(value));
+            }}
+          />
+
+          <Button
+            type="primary"
+            size="large"
+            icon={<RocketOutlined />}
+            onClick={handleAnalyze}
+            loading={analyzing}
+            disabled={!hasUploads}
+            style={{
+              minWidth: 220,
+              height: 46,
+              borderRadius: 16,
+              border: "none",
+              background: TEMU_BUTTON_GRADIENT,
+              boxShadow: TEMU_BUTTON_SHADOW,
+            }}
+          >
+            {`开始 AI 分析${hasUploads ? `（${uploadFiles.length} 张图）` : ""}`}
+          </Button>
+
+          <div className="studio-intake-sticky__utility">
+            <Button icon={<HistoryOutlined />} onClick={handleOpenHistory} style={{ height: 46, borderRadius: 16 }}>
+              历史
+            </Button>
+            {primaryBackgroundJob ? renderBackgroundJobsWidget() : null}
+          </div>
+        </div>
+      </div>
+
+      <div className="studio-upload-layout">
+        <div className="studio-upload-main">
+          <Upload.Dragger
+            accept="image/*"
+            multiple
+            beforeUpload={() => false}
+            fileList={uploadFiles}
+            maxCount={5}
+            onChange={({ fileList }) => updateUploadFiles(fileList)}
+            showUploadList={false}
+            className={`studio-dropzone${hasUploads ? " is-filled" : ""}`}
+            style={{ background: "transparent", border: "none", padding: 0 }}
+          >
+            <div className={`studio-dropzone__inner${hasUploads ? " is-filled" : ""}`}>
+              {hasUploads ? (
+                <>
+                  <div className="studio-dropzone__filled-top">
+                    <span className="studio-pill is-success">
+                      <CheckCircleOutlined />
+                      {`已上传 ${uploadFiles.length}/5 张`}
+                    </span>
+                    <span className="studio-pill">{`市场 ${currentRegion?.label || salesRegion}`}</span>
+                  </div>
+
+                  <div className="studio-dropzone__filled-main">
+                    <div className="studio-dropzone__filled-copy">
+                      <Title level={3} style={{ margin: 0, color: TEMU_TEXT }}>
+                        素材已就绪
+                      </Title>
+                      <div className="studio-dropzone__filled-preview">
+                        {filledPreviewFiles.map((file, index) => {
+                          const shouldShowMoreMask = hiddenPreviewCount > 0 && index === filledPreviewFiles.length - 1;
+                          return (
+                            <div key={file.uid} className="studio-dropzone__filled-thumb">
+                              <img
+                                src={file.thumbUrl || (file.originFileObj ? URL.createObjectURL(file.originFileObj) : "")}
+                                alt={file.name}
+                                className="studio-dropzone__filled-thumb-image"
+                              />
+                              {shouldShowMoreMask ? (
+                                <div className="studio-dropzone__filled-more">{`+${hiddenPreviewCount}`}</div>
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <Text type="secondary" className="studio-dropzone__desc">
+                        {uploadDropzoneDescription}
+                      </Text>
+                    </div>
+
+                    <div className="studio-dropzone__actions studio-dropzone__actions--filled">
+                      <Button
+                        type="primary"
+                        size="large"
+                        icon={<UploadOutlined />}
+                        style={{
+                          minWidth: 156,
+                          height: 46,
+                          borderRadius: 16,
+                          border: "none",
+                          background: TEMU_BUTTON_GRADIENT,
+                          boxShadow: TEMU_BUTTON_SHADOW,
+                        }}
+                      >
+                        继续加图
+                      </Button>
+                      <Button
+                        icon={<DeleteOutlined />}
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          setUploadFiles([]);
+                        }}
+                        style={{ height: 46, borderRadius: 16 }}
+                      >
+                        清空
+                      </Button>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="studio-dropzone__icon">
+                    <UploadOutlined style={{ color: "#fff", fontSize: 28 }} />
+                  </div>
+                  <Title level={3} style={{ margin: 0, color: TEMU_TEXT }}>
+                    拖拽商品图片到这里
+                  </Title>
+                  <Text type="secondary" className="studio-dropzone__desc">
+                    支持单品、组合装和多规格素材，拖拽或点击都可以上传。
+                  </Text>
+                  <div className="studio-dropzone__actions">
+                    <Button
+                      type="primary"
+                      size="large"
+                      icon={<UploadOutlined />}
+                      style={{
+                        minWidth: 156,
+                        height: 46,
+                        borderRadius: 16,
+                        border: "none",
+                        background: TEMU_BUTTON_GRADIENT,
+                        boxShadow: TEMU_BUTTON_SHADOW,
+                      }}
+                    >
+                      选择图片
+                    </Button>
+                  </div>
+                </>
+              )}
+            </div>
+          </Upload.Dragger>
+
+          {canChooseProductMode ? (
+            <div className="studio-mode-block studio-mode-block--surface">
+              <div className="studio-setup-panel__head">
+                <div className="studio-setup-panel__eyebrow">商品模式</div>
+                <div className="studio-setup-panel__desc">这组素材是什么关系？只需确认一次。</div>
+              </div>
+
+              <div className="studio-mode-grid studio-mode-grid--compact">
+                {PRODUCT_MODE_OPTIONS.map((option) => {
+                  const selected = option.value === productMode;
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => handleProductModeChange(option.value)}
+                      className={`studio-mode-card${selected ? " is-selected" : ""}`}
+                    >
+                      <div className="studio-mode-card__title-row">
+                        <span className="studio-mode-card__title">{option.label}</span>
+                        {selected ? <span className="studio-mode-card__tag">当前</span> : null}
+                      </div>
+                      <div className="studio-mode-card__desc">{option.description}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
+        </div>
+
+      </div>
+    </div>
+  );
+
+  const clearCompletedBackgroundJobs = async () => {
+    if (!imageStudioAPI || completedBackgroundJobs.length === 0) return;
+    await Promise.allSettled(completedBackgroundJobs.map((job) => imageStudioAPI.clearJob(job.jobId)));
+    refreshBackgroundJobs();
+  };
+
+  const handleOpenBackgroundJobHistory = async () => {
+    await loadHistory();
+    setHistoryOpen(true);
+  };
+
+  const renderBackgroundJobsWidget = () => {
+    if (!primaryBackgroundJob) return null;
+
+    const isRunning = primaryBackgroundJob.status === "running" || primaryBackgroundJob.status === "pending";
+    const buttonLabel = isRunning
+      ? `后台任务${runningBackgroundJobs.length > 1 ? ` ${runningBackgroundJobs.length}` : ""}`
+      : "后台任务";
+
+    return (
+      <Button
+        icon={<ThunderboltOutlined />}
+        onClick={handleOpenBackgroundJobHistory}
+        style={{ height: 46, borderRadius: 16 }}
+      >
+        {buttonLabel}
+      </Button>
+    );
+  };
+
+  const renderAnalysisListEditor = (
+    label: string,
+    field: "sellingPoints" | "targetAudience" | "usageScenes",
+    placeholder: string,
+  ) => {
+    const items = (analysis[field] || []).length > 0 ? analysis[field] : [""];
+    return (
+      <div style={{ background: "#fff", border: "1px solid #f0f0f0", borderRadius: 12, padding: "14px 16px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 12 }}>
+          <Text style={{ fontSize: 12, color: "#999" }}>{label}</Text>
+          <Button
+            size="small"
+            type="text"
+            style={{ color: TEMU_ORANGE, paddingInline: 0 }}
+            onClick={() => updateAnalysisField(field, [...items, ""])}
+          >
+            新增一条
+          </Button>
+        </div>
+        <div style={{ display: "grid", gap: 10 }}>
+          {items.map((item, index) => (
+            <div
+              key={field + "-" + index}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                border: "1px solid #e8edf3",
+                borderRadius: 12,
+                padding: 8,
+                background: "#fff",
+              }}
+            >
+              <div
+                style={{
+                  width: 24,
+                  height: 24,
+                  borderRadius: 999,
+                  background: "#fff5ec",
+                  color: TEMU_ORANGE,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: 12,
+                  fontWeight: 700,
+                  flex: "0 0 auto",
+                }}
+              >
+                {index + 1}
+              </div>
+              <Input
+                value={item}
+                onChange={(event) => {
+                  const nextItems = [...items];
+                  nextItems[index] = event.target.value;
+                  updateAnalysisField(field, nextItems);
+                }}
+                placeholder={placeholder}
+                bordered={false}
+                style={{ flex: 1, fontSize: 13 }}
+              />
+              {items.length > 1 ? (
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<DeleteOutlined />}
+                  onClick={() => updateAnalysisField(field, items.filter((_, itemIndex) => itemIndex !== index))}
+                  style={{ color: "#8b98ab" }}
+                />
+              ) : null}
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  const allImageTypesSelected = selectedImageTypes.length === DEFAULT_IMAGE_TYPES.length;
+  const toggleImageType = (imageType: string) => {
+    setSelectedImageTypes((prev) => {
+      if (prev.includes(imageType)) {
+        return prev.filter((item) => item !== imageType);
+      }
+      return DEFAULT_IMAGE_TYPES.filter((item) => item === imageType || prev.includes(item));
+    });
+  };
+
   const renderStepOne = () => (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
-      {/* 素材缩略图 */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "4px 0", flexWrap: "wrap" }}>
+        <Button size="small" onClick={() => setActiveStep(0)}>上一步</Button>
+        <Button
+          type="primary"
+          icon={<RocketOutlined />}
+          onClick={handleGeneratePlans}
+          loading={planning}
+          disabled={!hasAnalysis}
+          style={{ background: TEMU_ORANGE, borderColor: TEMU_ORANGE }}
+        >
+          生成出图方案
+        </Button>
+      </div>
+
       <div style={{ background: "#fff", border: "1px solid #f0f0f0", borderRadius: 8, padding: "12px 16px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
           <Text style={{ fontSize: 13, color: "#666" }}>商品素材（{uploadFiles.length} 张）</Text>
@@ -1535,7 +1929,6 @@ export default function ImageStudio() {
         </Space>
       </div>
 
-      {/* 基本信息 */}
       <div style={{ background: "#fff", border: "1px solid #f0f0f0", borderRadius: 8, padding: "16px 20px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
           <Text strong style={{ fontSize: 15, color: "#333" }}>商品信息</Text>
@@ -1569,65 +1962,55 @@ export default function ImageStudio() {
         </div>
       </div>
 
-      {/* 卖点/人群/场景 */}
+      <div className="studio-type-panel">
+        <div className="studio-type-panel__head">
+          <div>
+            <Text className="studio-type-panel__label">图片类型</Text>
+            <Text className="studio-type-panel__hint">选择这次要生成的图片方向，通常保留 4 到 6 类就够用。</Text>
+          </div>
+          <div className="studio-type-panel__actions">
+            <Tag style={{ margin: 0, borderRadius: 999, paddingInline: 12, color: "#5d6b80", background: "#fff", borderColor: "#e6ebf1" }}>
+              已选 {selectedImageTypes.length}/{DEFAULT_IMAGE_TYPES.length}
+            </Tag>
+            <Button
+              size="small"
+              onClick={() => setSelectedImageTypes(allImageTypesSelected ? [] : [...DEFAULT_IMAGE_TYPES])}
+              style={{ borderRadius: 999 }}
+            >
+              {allImageTypesSelected ? "清空" : "全选"}
+            </Button>
+          </div>
+        </div>
+        <div className="studio-type-grid">
+          {DEFAULT_IMAGE_TYPES.map((type) => {
+            const selected = selectedImageTypes.includes(type);
+            return (
+              <button
+                key={type}
+                type="button"
+                className={`studio-type-card${selected ? " is-selected" : ""}`}
+                onClick={() => toggleImageType(type)}
+              >
+                <div className="studio-type-card__head">
+                  <div className="studio-type-card__title">{IMAGE_TYPE_LABELS[type]}</div>
+                  <CheckCircleOutlined className="studio-type-card__icon" />
+                </div>
+                <div className="studio-type-card__desc">
+                  {getImageTypeSummaryHint(type) || "按这个方向生成更贴合场景的商品图。"}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       <div style={{ background: "#fff", border: "1px solid #f0f0f0", borderRadius: 8, padding: "16px 20px" }}>
         <Text strong style={{ fontSize: 15, color: "#333", display: "block", marginBottom: 12 }}>营销信息</Text>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
-          <div>
-            <Text style={{ fontSize: 12, color: "#999", display: "block", marginBottom: 4 }}>核心卖点</Text>
-            <TextArea autoSize={{ minRows: 5, maxRows: 10 }} value={arrayToMultiline(analysis.sellingPoints)} onChange={(event) => updateAnalysisField("sellingPoints", multilineToArray(event.target.value))} placeholder="一行一个卖点" style={{ fontSize: 13 }} />
-          </div>
-          <div>
-            <Text style={{ fontSize: 12, color: "#999", display: "block", marginBottom: 4 }}>目标人群</Text>
-            <TextArea autoSize={{ minRows: 5, maxRows: 10 }} value={arrayToMultiline(analysis.targetAudience)} onChange={(event) => updateAnalysisField("targetAudience", multilineToArray(event.target.value))} placeholder="一行一个目标人群" style={{ fontSize: 13 }} />
-          </div>
-          <div>
-            <Text style={{ fontSize: 12, color: "#999", display: "block", marginBottom: 4 }}>使用场景</Text>
-            <TextArea autoSize={{ minRows: 5, maxRows: 10 }} value={arrayToMultiline(analysis.usageScenes)} onChange={(event) => updateAnalysisField("usageScenes", multilineToArray(event.target.value))} placeholder="一行一个使用场景" style={{ fontSize: 13 }} />
-          </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 14 }}>
+          {renderAnalysisListEditor("核心卖点", "sellingPoints", "输入一条卖点")}
+          {renderAnalysisListEditor("目标人群", "targetAudience", "输入一条目标人群")}
+          {renderAnalysisListEditor("使用场景", "usageScenes", "输入一条使用场景")}
         </div>
-      </div>
-
-      {/* 生成设置 */}
-      <div style={{ background: "#fff", border: "1px solid #f0f0f0", borderRadius: 8, padding: "16px 20px" }}>
-        <Text strong style={{ fontSize: 15, color: "#333", display: "block", marginBottom: 12 }}>生成设置</Text>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16, marginBottom: 14 }}>
-          <div>
-            <Text style={{ fontSize: 12, color: "#999", display: "block", marginBottom: 4 }}>商品模式</Text>
-            <Select size="small" value={productMode} onChange={setProductMode} options={PRODUCT_MODE_OPTIONS.map((option) => ({ label: option.label, value: option.value }))} style={{ width: "100%" }} />
-          </div>
-          <div>
-            <Text style={{ fontSize: 12, color: "#999", display: "block", marginBottom: 4 }}>文字语言</Text>
-            <Select size="small" value={imageLanguage} onChange={setImageLanguage} options={IMAGE_LANGUAGE_OPTIONS as unknown as { value: string; label: string }[]} style={{ width: "100%" }} />
-          </div>
-          <div>
-            <Text style={{ fontSize: 12, color: "#999", display: "block", marginBottom: 4 }}>画布尺寸</Text>
-            <Select size="small" value={imageSize} onChange={setImageSize} options={IMAGE_SIZE_OPTIONS as unknown as { value: string; label: string }[]} style={{ width: "100%" }} />
-          </div>
-        </div>
-
-        <Text style={{ fontSize: 12, color: "#999", display: "block", marginBottom: 8 }}>图片类型</Text>
-        <Checkbox.Group
-          style={{ display: "flex", flexWrap: "wrap", gap: 8 }}
-          value={selectedImageTypes}
-          options={DEFAULT_IMAGE_TYPES.map((type) => ({ label: IMAGE_TYPE_LABELS[type], value: type }))}
-          onChange={(values) => setSelectedImageTypes(values.map(String))}
-        />
-      </div>
-
-      {/* 操作栏 */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 0" }}>
-        <Button size="small" onClick={() => setActiveStep(0)}>上一步</Button>
-        <Button
-          type="primary"
-          icon={<RocketOutlined />}
-          onClick={handleGeneratePlans}
-          loading={planning}
-          disabled={!hasAnalysis}
-          style={{ background: TEMU_ORANGE, borderColor: TEMU_ORANGE }}
-        >
-          生成出图方案
-        </Button>
       </div>
     </Space>
   );
@@ -1674,16 +2057,7 @@ export default function ImageStudio() {
         {plans.length > 0 ? (
           <Space direction="vertical" size={12} style={{ width: "100%" }}>
             {plans.map((plan, index) => (
-              <div
-                key={plan.imageType}
-                style={{
-                  border: "1px solid #eef1f4",
-                  borderRadius: 18,
-                  padding: 18,
-                  background: "#ffffff",
-                  boxShadow: "0 8px 20px rgba(15, 23, 42, 0.05)",
-                }}
-              >
+              <div key={plan.imageType} className="studio-plan-card">
                 <Space direction="vertical" size={10} style={{ width: "100%" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
                     <Space size={12} align="center">
@@ -1706,7 +2080,7 @@ export default function ImageStudio() {
                       <div>
                         <Text strong style={{ color: TEMU_TEXT }}>{IMAGE_TYPE_LABELS[plan.imageType] || plan.imageType}</Text>
                         <Text type="secondary" style={{ display: "block", fontSize: 12, marginTop: 2 }}>
-                          {plan.title || plan.headline || "AI 自动方案"}
+                          {PLAN_DISPLAY_SUBTITLES[plan.imageType] || "AI 自动方案"}
                         </Text>
                       </div>
                     </Space>
@@ -1716,20 +2090,37 @@ export default function ImageStudio() {
                       onClick={() => copyText(plan.prompt, `${IMAGE_TYPE_LABELS[plan.imageType] || plan.imageType}方案已复制`)}
                       style={{ borderRadius: 12 }}
                     >
-                      复制
+                      复制英文
                     </Button>
                   </div>
-                  <Paragraph
-                    style={{ marginBottom: 0, color: "#5f6b7c", whiteSpace: "pre-wrap" }}
-                    ellipsis={{ rows: 2, expandable: true, symbol: "展开完整方案" }}
-                  >
-                    {plan.prompt}
-                  </Paragraph>
+                  {(() => {
+                    const preview = buildBilingualPlanPreview(plan, {
+                      productName: analysis.productName,
+                      regionLabel: currentRegion?.label || salesRegion,
+                      languageLabel: currentLanguage?.label || imageLanguage,
+                    });
+
+                    return (
+                      <div className="studio-plan-preview">
+                        <div className="studio-plan-preview__summary">
+                          <div className="studio-plan-preview__eyebrow">中文解读</div>
+                          <div className="studio-plan-preview__goal">{preview.goal}</div>
+                          <div className="studio-plan-preview__bullets">
+                            {preview.highlights.map((item) => (
+                              <div key={item} className="studio-plan-preview__bullet">
+                                {item}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
                   <TextArea
                     autoSize={{ minRows: 3, maxRows: 8 }}
                     value={plan.prompt}
                     onChange={(event) => updatePlanPrompt(plan.imageType, event.target.value)}
-                    placeholder="这里可以手动微调每张图的 Prompt…"
+                    placeholder="这里可以手动微调每张图的英文提示词…"
                     style={{ borderRadius: 14 }}
                   />
                 </Space>
@@ -2167,66 +2558,7 @@ export default function ImageStudio() {
   }
 
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: 22,
-        padding: "4px 0 20px",
-        background: TEMU_PAGE_BG,
-      }}
-    >
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, flexWrap: "wrap" }}>
-        <div>
-          <Title level={3} style={{ margin: 0, color: TEMU_TEXT, fontWeight: 700 }}>亚马逊商品图片生成器</Title>
-          <Text type="secondary" style={{ display: "block", marginTop: 4, color: "#8a97ab" }}>
-            AI 智能生成高转化率 Listing 图片
-          </Text>
-        </div>
-        <Space size={10} wrap>
-          <Button icon={<HistoryOutlined />} onClick={handleOpenHistory} style={{ height: 40, borderRadius: 16 }}>
-            历史记录
-          </Button>
-          <Button icon={<SettingOutlined />} onClick={handleOpenConfig} loading={configLoading} style={{ height: 40, borderRadius: 16 }}>
-            服务设置
-          </Button>
-        </Space>
-      </div>
-
-      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-        {stepItems.map((item, index) => {
-          const active = index === activeStep;
-          const done = index < activeStep;
-          const disabled = index > maxUnlockedStep;
-          return (
-            <Space key={item.title} size={12} align="center">
-              <button
-                type="button"
-                onClick={() => handleStepChange(index)}
-                disabled={disabled}
-                style={{
-                  height: 28,
-                  padding: "0 14px",
-                  borderRadius: 999,
-                  border: "none",
-                  background: active ? TEMU_BUTTON_GRADIENT : done ? "#e9fff0" : "transparent",
-                  color: active ? "#ffffff" : done ? "#16a34a" : "#93a1b4",
-                  fontSize: 13,
-                  fontWeight: active ? 700 : 500,
-                  cursor: disabled ? "not-allowed" : "pointer",
-                  boxShadow: active ? "0 8px 18px rgba(255, 106, 0, 0.2)" : "none",
-                  opacity: disabled ? 0.6 : 1,
-                  transition: "background-color 0.2s, color 0.2s, box-shadow 0.2s, opacity 0.2s",
-                }}
-              >
-                {index + 1 + ". " + item.title}
-              </button>
-              {index < stepItems.length - 1 ? <div style={{ width: 30, height: 1, background: "#dbe3ee" }} /> : null}
-            </Space>
-          );
-        })}
-      </div>
-
+    <div className="studio-shell">
       {!status.ready ? (
         <Card style={{ borderRadius: TEMU_CARD_RADIUS, borderColor: "#eceff3", boxShadow: TEMU_CARD_SHADOW }}>
           {status.status === "error" ? (
@@ -2245,130 +2577,40 @@ export default function ImageStudio() {
           )}
         </Card>
       ) : (
-        <div style={{ maxWidth: 1120, margin: "0 auto", width: "100%" }}>
-          {renderStepContent()}
-
-          {/* 后台任务面板 */}
-          {backgroundJobs.length > 0 && (
-            <Card
-              size="small"
-              title={
-                <Space>
-                  <ThunderboltOutlined />
-                  <span>后台生图任务</span>
-                  <Tag>{backgroundJobs.filter(j => j.status === "running" || j.status === "pending").length} 进行中</Tag>
+        <div style={{ maxWidth: 1180, margin: "0 auto", width: "100%" }}>
+          <Card
+            className="studio-workspace-card"
+            style={{
+              borderRadius: TEMU_CARD_RADIUS,
+              borderColor: "#eceff3",
+              boxShadow: TEMU_CARD_SHADOW,
+              background: "#ffffff",
+            }}
+            bodyStyle={{ padding: 18 }}
+          >
+            {activeStep !== 0 ? (
+              <div className="studio-topbar">
+                <Space size={10} wrap className="studio-topbar__actions">
+                  <Button icon={<HistoryOutlined />} onClick={handleOpenHistory} style={{ height: 40, borderRadius: 16 }}>
+                    历史记录
+                  </Button>
+                  {canResetStudio ? (
+                    <Button icon={<ReloadOutlined />} onClick={resetStudio} style={{ height: 40, borderRadius: 16 }}>
+                      重新开始
+                    </Button>
+                  ) : null}
                 </Space>
-              }
-              style={{ borderRadius: 12, marginTop: 16, borderColor: TEMU_BORDER }}
-              extra={
-                <Button
-                  size="small"
-                  onClick={() => {
-                    const doneJobs = backgroundJobs.filter(j => j.status !== "running" && j.status !== "pending");
-                    doneJobs.forEach(j => imageStudioAPI?.clearJob(j.jobId));
-                    refreshBackgroundJobs();
-                  }}
-                  disabled={!backgroundJobs.some(j => j.status !== "running" && j.status !== "pending")}
-                >
-                  清除已完成
-                </Button>
-              }
-            >
-              <List
-                size="small"
-                dataSource={backgroundJobs}
-                renderItem={(job: any) => {
-                  const isRunning = job.status === "running" || job.status === "pending";
-                  const isDone = job.status === "done";
-                  const isFailed = job.status === "failed";
-                  const statusTag = isDone
-                    ? <Tag color="success">完成</Tag>
-                    : isFailed
-                      ? <Tag color="error">失败</Tag>
-                      : job.status === "cancelled"
-                        ? <Tag>已取消</Tag>
-                        : <Tag color="processing">生成中 {job.progress?.done || 0}/{job.progress?.total || 0}</Tag>;
 
-                  return (
-                    <List.Item
-                      actions={[
-                        isRunning && (
-                          <Button
-                            key="cancel"
-                            size="small"
-                            danger
-                            icon={<StopOutlined />}
-                            onClick={() => imageStudioAPI?.cancelGenerate(job.jobId)}
-                          >
-                            取消
-                          </Button>
-                        ),
-                        isDone && job.results?.length > 0 && (
-                          <Button
-                            key="view"
-                            size="small"
-                            type="link"
-                            style={{ color: TEMU_ORANGE }}
-                            onClick={async () => {
-                              await loadHistory();
-                              setHistoryOpen(true);
-                            }}
-                          >
-                            查看历史
-                          </Button>
-                        ),
-                      ].filter(Boolean)}
-                    >
-                      <List.Item.Meta
-                        title={
-                          <Space size={8}>
-                            <Text style={{ maxWidth: 200 }} ellipsis={{ tooltip: true }}>{job.productName || "未命名商品"}</Text>
-                            {statusTag}
-                          </Space>
-                        }
-                        description={
-                          <Space size={4}>
-                            <Text type="secondary" style={{ fontSize: 12 }}>{job.progress?.step || ""}</Text>
-                            {isDone && job.historySaved ? <Text type="secondary" style={{ fontSize: 12 }}>已自动存入历史</Text> : null}
-                            {isDone && job.historySaveError ? <Text type="danger" style={{ fontSize: 12 }}>{job.historySaveError}</Text> : null}
-                            {isFailed && job.error && <Text type="danger" style={{ fontSize: 12 }}>{job.error}</Text>}
-                          </Space>
-                        }
-                      />
-                      {isRunning && (
-                        <Progress
-                          percent={job.progress?.total > 0 ? Math.round((job.progress.done / job.progress.total) * 100) : 0}
-                          size="small"
-                          style={{ width: 120 }}
-                          strokeColor={TEMU_ORANGE}
-                        />
-                      )}
-                    </List.Item>
-                  );
-                }}
-              />
-            </Card>
-          )}
+                {primaryBackgroundJob ? renderBackgroundJobsWidget() : null}
+              </div>
+            ) : null}
+
+            <div className="studio-workspace-card__content">
+              {renderStepContent()}
+            </div>
+          </Card>
         </div>
       )}
-
-
-      <Drawer
-        title="AI 出图配置"
-        width={480}
-        open={configOpen}
-        onClose={() => setConfigOpen(false)}
-        extra={<Button type="primary" onClick={handleSaveConfig} loading={configLoading}>保存配置</Button>}
-      >
-        <Space direction="vertical" size={16} style={{ width: "100%" }}>
-          <Input value={configDraft.analyzeModel} onChange={(event) => setConfigDraft((prev) => ({ ...prev, analyzeModel: event.target.value }))} placeholder={config.analyzeModel || "分析模型"} />
-          <Input.Password value={configDraft.analyzeApiKey} onChange={(event) => setConfigDraft((prev) => ({ ...prev, analyzeApiKey: event.target.value }))} placeholder={hasMaskedValue(config.analyzeApiKey) ? "已配置分析 API Key，如需更新请重新输入" : "分析 API Key"} />
-          <Input value={configDraft.analyzeBaseUrl} onChange={(event) => setConfigDraft((prev) => ({ ...prev, analyzeBaseUrl: event.target.value }))} placeholder={config.analyzeBaseUrl || "分析 Base URL"} />
-          <Input value={configDraft.generateModel} onChange={(event) => setConfigDraft((prev) => ({ ...prev, generateModel: event.target.value }))} placeholder={config.generateModel || "出图模型"} />
-          <Input.Password value={configDraft.generateApiKey} onChange={(event) => setConfigDraft((prev) => ({ ...prev, generateApiKey: event.target.value }))} placeholder={hasMaskedValue(config.generateApiKey) ? "已配置出图 API Key，如需更新请重新输入" : "出图 API Key"} />
-          <Input value={configDraft.generateBaseUrl} onChange={(event) => setConfigDraft((prev) => ({ ...prev, generateBaseUrl: event.target.value }))} placeholder={config.generateBaseUrl || "出图 Base URL"} />
-        </Space>
-      </Drawer>
 
       <Drawer title="历史记录" width={420} open={historyOpen} onClose={() => setHistoryOpen(false)}>
         {historyLoading ? (
@@ -2380,10 +2622,10 @@ export default function ImageStudio() {
             renderItem={(item) => (
               <List.Item
                 key={item.id}
-                actions={[<Button key="load" type="link" onClick={() => handleLoadHistoryItem(item)}>加载结果</Button>]}
+                actions={[<Button key="load" type="link" onClick={() => handleLoadHistoryItem(item)}>恢复到当前页</Button>]}
               >
                 <List.Item.Meta
-                  title={item.productName}
+                  title={normalizeProductDisplayName(item.productName) || "未命名商品"}
                   description={`${item.imageCount} 张图片 · ${item.salesRegion.toUpperCase()} · ${formatTimestamp(item.timestamp)}`}
                 />
               </List.Item>

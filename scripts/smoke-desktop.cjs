@@ -21,9 +21,11 @@ function assertFileExists(filePath, label) {
   console.log(`[ok] ${label}: ${filePath}`);
 }
 
-function httpGet(url, timeout = 5000) {
+function httpGet(url, timeout = 5000, authToken = "") {
+  const options = { timeout };
+  if (authToken) options.headers = { Authorization: `Bearer ${authToken}` };
   return new Promise((resolve, reject) => {
-    const req = http.get(url, { timeout }, (res) => {
+    const req = http.get(url, options, (res) => {
       const chunks = [];
       res.on("data", (chunk) => chunks.push(chunk));
       res.on("end", () => {
@@ -38,9 +40,14 @@ function httpGet(url, timeout = 5000) {
   });
 }
 
-function httpPostJson(port, payload, timeout = 5000) {
+function httpPostJson(port, payload, timeout = 5000, authToken = "") {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify(payload);
+    const headers = {
+      "Content-Type": "application/json",
+      "Content-Length": Buffer.byteLength(body),
+    };
+    if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
     const req = http.request(
       {
         hostname: "127.0.0.1",
@@ -48,10 +55,7 @@ function httpPostJson(port, payload, timeout = 5000) {
         method: "POST",
         path: "/",
         timeout,
-        headers: {
-          "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(body),
-        },
+        headers,
       },
       (res) => {
         const chunks = [];
@@ -127,6 +131,7 @@ async function withSpawnedProcess(options, verify) {
 
 async function checkWorker() {
   const port = 19321;
+  const smokeToken = "smoke-test-token";
   const appUserData = path.join(tmpRoot, "worker-user-data");
   fs.mkdirSync(appUserData, { recursive: true });
 
@@ -137,6 +142,7 @@ async function checkWorker() {
       args: [workerEntry],
       env: {
         WORKER_PORT: String(port),
+        WORKER_AUTH_TOKEN: smokeToken,
         APP_USER_DATA: appUserData,
         WORKER_BOOTSTRAP_LOG: path.join(tmpRoot, "worker-bootstrap.log"),
       },
@@ -144,13 +150,13 @@ async function checkWorker() {
     async ({ ensureRunning, logPath }) => {
       await waitFor(async () => {
         ensureRunning();
-        const response = await httpPostJson(port, { action: "ping", params: {} }, 3000);
+        const response = await httpPostJson(port, { action: "ping", params: {} }, 3000, smokeToken);
         if (response.statusCode !== 200) {
           throw new Error(`worker ping status=${response.statusCode}`);
         }
         return response;
       }, 20000, "worker ping");
-      const progressResponse = await httpGet(`http://127.0.0.1:${port}/progress`, 3000);
+      const progressResponse = await httpGet(`http://127.0.0.1:${port}/progress`, 3000, smokeToken);
       if (progressResponse.statusCode !== 200) {
         throw new Error(`worker progress status=${progressResponse.statusCode}`);
       }
@@ -158,7 +164,7 @@ async function checkWorker() {
       if (!progress || typeof progress.status !== "string") {
         throw new Error("worker progress payload missing status");
       }
-      const tasksResponse = await httpGet(`http://127.0.0.1:${port}/tasks`, 3000);
+      const tasksResponse = await httpGet(`http://127.0.0.1:${port}/tasks`, 3000, smokeToken);
       if (tasksResponse.statusCode !== 200) {
         throw new Error(`worker tasks status=${tasksResponse.statusCode}`);
       }

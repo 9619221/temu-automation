@@ -1,6 +1,5 @@
 import type {
   ImageStudioAnalysis,
-  ImageStudioConfig,
   ImageStudioGeneratedImage,
   ImageStudioHistoryItem,
   ImageStudioHistorySummary,
@@ -39,6 +38,7 @@ interface AutomationAPI {
   listTasks: () => Promise<any>;
   pausePricing: (taskId?: string) => Promise<any>;
   resumePricing: (taskId?: string) => Promise<any>;
+  getScrapeProgress: () => Promise<any>;
   listDrafts: () => Promise<any>;
   retryDraft: (draftId: string) => Promise<any>;
   deleteDraft: (draftId: string) => Promise<any>;
@@ -88,22 +88,11 @@ interface ImageStudioJob {
   historySaveError?: string | null;
 }
 
-interface ImageStudioConfigUpdatePayload {
-  analyzeModel?: string;
-  analyzeApiKey?: string;
-  analyzeBaseUrl?: string;
-  generateModel?: string;
-  generateApiKey?: string;
-  generateBaseUrl?: string;
-}
-
 interface ImageStudioAPI {
   getStatus: () => Promise<ImageStudioStatus>;
   ensureRunning: () => Promise<ImageStudioStatus>;
   restart: () => Promise<ImageStudioStatus>;
   openExternal: () => Promise<string>;
-  getConfig: () => Promise<ImageStudioConfig>;
-  updateConfig: (payload: ImageStudioConfigUpdatePayload) => Promise<ImageStudioConfig>;
   analyze: (payload: { files: NativeImagePayload[]; productMode: string }) => Promise<ImageStudioAnalysis>;
   regenerateAnalysis: (payload: { files: NativeImagePayload[]; productMode: string; analysis: ImageStudioAnalysis }) => Promise<Pick<ImageStudioAnalysis, "sellingPoints" | "targetAudience" | "usageScenes">>;
   generatePlans: (payload: { analysis: ImageStudioAnalysis; imageTypes: string[]; salesRegion: string; imageSize: string; productMode: string }) => Promise<ImageStudioPlan[]>;
