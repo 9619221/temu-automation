@@ -2469,22 +2469,26 @@ ipcMain.handle("store:get", async (_, key) => {
 
 const _storeWriteLocks = new Map();
 ipcMain.handle("store:set", async (_, key, data) => {
+  const normalizedKey = normalizeStoreKey(key);
   // 串行化同 key 写入，避免并发文件冲突
-  const prev = _storeWriteLocks.get(key) || Promise.resolve();
-  let resolve_lock;
-  const current = new Promise((r) => { resolve_lock = r; });
-  _storeWriteLocks.set(key, current);
+  const prev = _storeWriteLocks.get(normalizedKey) || Promise.resolve();
+  let resolveLock;
+  const current = new Promise((resolve) => { resolveLock = resolve; });
+  _storeWriteLocks.set(normalizedKey, current);
   await prev.catch(() => {});
   try {
-    const filePath = getStoreFilePath(key);
-    await fsPromises.mkdir(path.dirname(filePath), { recursive: true });
-    const serialized = JSON.stringify(serializeStoreValue(key, data), null, 2);
-    await fsPromises.writeFile(filePath, serialized);
+    const filePath = getStoreFilePath(normalizedKey);
+    await writeStoreJsonAtomicAsync(filePath, data, { key: normalizedKey });
     return true;
   } catch (err) {
-    console.error(`[Store] Write failed for key="${key}":`, err?.code, err?.message);
-    throw err;
+    console.error(`[Store] Write failed for key="${normalizedKey}":`, err?.code, err?.message);
+    const detail = err?.message || "未知错误";
+    const code = err?.code ? `${err.code}: ` : "";
+    throw new Error(`Store 写入失败（${normalizedKey}）：${code}${detail}`);
   } finally {
-    resolve_lock();
+    resolveLock();
+    if (_storeWriteLocks.get(normalizedKey) === current) {
+      _storeWriteLocks.delete(normalizedKey);
+    }
   }
 });
