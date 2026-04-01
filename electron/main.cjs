@@ -1778,7 +1778,8 @@ ipcMain.handle("automation:scrape-performance", async () => {
 });
 
 ipcMain.handle("automation:scrape-all", async () => {
-  return sendCmd("scrape_all");
+  if (!workerReady) await startWorker();
+  return httpPost(workerPort, { action: "scrape_all", params: {}, timeoutMs: 30 * 60 * 1000 });
 });
 
 ipcMain.handle("automation:create-product", async (_e, params) => {
@@ -2190,6 +2191,39 @@ ipcMain.handle("image-studio:score-image", async (_event, payload) => {
   });
 });
 
+ipcMain.handle("image-studio:download-all", async (_event, payload) => {
+  const images = Array.isArray(payload?.images) ? payload.images : [];
+  if (images.length === 0) throw new Error("没有可下载的图片");
+
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "选择保存文件夹",
+    properties: ["openDirectory", "createDirectory"],
+  });
+  if (result.canceled || !result.filePaths.length) return { cancelled: true };
+
+  const dir = result.filePaths[0];
+  const productName = (payload?.productName || "temu-image").replace(/[<>:"/\\|?*]/g, "_").slice(0, 60);
+  const saveDir = path.join(dir, productName);
+  fs.mkdirSync(saveDir, { recursive: true });
+
+  let saved = 0;
+  for (const img of images) {
+    try {
+      const resp = await fetch(img.imageUrl);
+      if (!resp.ok) continue;
+      const buffer = Buffer.from(await resp.arrayBuffer());
+      const ext = (resp.headers.get("content-type") || "").includes("png") ? "png" : "jpg";
+      const typeName = (img.imageType || `image_${saved + 1}`).replace(/[<>:"/\\|?*]/g, "_");
+      fs.writeFileSync(path.join(saveDir, `${typeName}.${ext}`), buffer);
+      saved++;
+    } catch (e) {
+      console.error(`[download-all] Failed to save ${img.imageType}:`, e.message);
+    }
+  }
+
+  return { saved, total: images.length, dir: saveDir };
+});
+
 ipcMain.handle("app:get-version", () => app.getVersion());
 
 ipcMain.handle("app:get-update-status", () => updateState);
@@ -2415,7 +2449,17 @@ ipcMain.handle("store:get", async (_, key) => {
   return readStoreJsonWithRecoveryAsync(getStoreFilePath(key), key);
 });
 
+const _storeWriteLocks = new Map();
 ipcMain.handle("store:set", async (_, key, data) => {
-  await writeStoreJsonAtomicAsync(getStoreFilePath(key), data, { key });
+  // 串行化同 key 写入，避免并发文件冲突
+  const prev = _storeWriteLocks.get(key) || Promise.resolve();
+  const current = prev.then(async () => {
+    await writeStoreJsonAtomicAsync(getStoreFilePath(key), data, { key });
+  }).catch((err) => {
+    console.error(`[Store] Write failed for key="${key}":`, err?.message || err);
+    throw err;
+  });
+  _storeWriteLocks.set(key, current);
+  await current;
   return true;
 });

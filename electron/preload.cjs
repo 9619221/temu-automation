@@ -94,6 +94,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     listJobs: () => ipcRenderer.invoke("image-studio:list-jobs"),
     getJob: (jobId) => ipcRenderer.invoke("image-studio:get-job", jobId),
     clearJob: (jobId) => ipcRenderer.invoke("image-studio:clear-job", jobId),
+    downloadAll: (payload) => ipcRenderer.invoke("image-studio:download-all", payload),
   },
 
   app: {

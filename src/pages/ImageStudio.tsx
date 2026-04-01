@@ -1251,28 +1251,24 @@ export default function ImageStudio() {
       message.warning("当前还没有可下载的图片");
       return;
     }
+    if (!imageStudioAPI) return;
 
     setDownloadingAll(true);
-    let success = 0;
-
     try {
-      for (const image of generatedImages) {
-        try {
-          await downloadImage(image);
-          success += 1;
-          await new Promise((resolve) => window.setTimeout(resolve, 120));
-        } catch {
-          // Continue downloading the remaining images so one bad image doesn't block the batch.
-        }
-      }
-
-      if (success === generatedImages.length) {
-        message.success(`已开始下载 ${success} 张图片`);
-      } else if (success > 0) {
-        message.warning(`已开始下载 ${success}/${generatedImages.length} 张图片，剩余图片请单独重试`);
+      const result = await imageStudioAPI.downloadAll({
+        images: generatedImages,
+        productName: analysis.productName || "temu-image",
+      });
+      if (result?.cancelled) return;
+      if (result?.saved === result?.total) {
+        message.success(`已保存 ${result.saved} 张图片到文件夹`);
+      } else if ((result?.saved || 0) > 0) {
+        message.warning(`已保存 ${result.saved}/${result.total} 张图片`);
       } else {
-        message.error("批量下载失败，请重试");
+        message.error("保存失败，请重试");
       }
+    } catch (err: any) {
+      message.error(err?.message || "下载失败");
     } finally {
       setDownloadingAll(false);
     }

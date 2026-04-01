@@ -3972,8 +3972,9 @@ async function handleRequest(body) {
       fs.mkdirSync(debugDir, { recursive: true });
       // ★ 启用 lite 模式：后续所有 navigateToSellerCentral 都用简化流程
       _navLiteMode = true;
+      const results = {};
       try {
-      console.error("[scrape_all] Step 2: Running all scrapers (concurrency=3) with popup monitor + lite nav...");
+      console.error("[scrape_all] Step 2: Running all scrapers (concurrency=4) with popup monitor + lite nav...");
       const tasks = [
         // ---- 核心运营数据 ----
         { key: "dashboard", fn: () => _registryScrape("dashboard") },
@@ -4044,7 +4045,6 @@ async function handleRequest(body) {
         { key: "adsHelp", fn: () => scrapeAdsHelp() },
         { key: "adsNotification", fn: () => scrapeAdsNotification() },
       ];
-      const results = {};
       const CONCURRENCY = 4;
       const queue = [...tasks];
       const running = [];
@@ -5527,11 +5527,11 @@ async function autoPricingFromCSV(params) {
       updateCurrentProgress({ step: "上传图片..." });
       console.error(`[auto-pricing] Uploading to material center...`);
       const page = await context.newPage();
+      const kwcdnUrls = {};
       try {
       await navigateToSellerCentral(page, "/goods/list");
       await randomDelay(3000, 5000);
 
-      const kwcdnUrls = {};
       // 并发上传（3张一组）
       const uploadTypes = AI_DETAIL_IMAGE_TYPE_ORDER.filter(t => localImages[t]);
       for (let u = 0; u < uploadTypes.length; u += 3) {

@@ -116,6 +116,7 @@ interface ImageStudioAPI {
   listJobs: () => Promise<ImageStudioJob[]>;
   getJob: (jobId: string) => Promise<ImageStudioJob | null>;
   clearJob: (jobId: string) => Promise<void>;
+  downloadAll: (payload: { images: ImageStudioGeneratedImage[]; productName?: string }) => Promise<{ saved?: number; total?: number; dir?: string; cancelled?: boolean }>;
 }
 
 interface AppAPI {
