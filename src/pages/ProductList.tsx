@@ -318,14 +318,14 @@ export default function ProductList() {
           {record.imageUrl ? (
             <Image
               src={record.imageUrl}
-              width={56}
-              height={56}
-              style={{ objectFit: "cover", borderRadius: 12, flexShrink: 0 }}
-              preview={false}
+              width={72}
+              height={72}
+              style={{ objectFit: "cover", borderRadius: 8, flexShrink: 0, border: "1px solid #f0f0f0" }}
+              preview={{ mask: "查看大图" }}
               fallback={EMPTY_IMAGE_FALLBACK}
             />
           ) : (
-            <div style={{ width: 56, height: 56, borderRadius: 12, background: "#f2f4f7", flexShrink: 0 }} />
+            <div style={{ width: 72, height: 72, borderRadius: 8, background: "#f2f4f7", flexShrink: 0, border: "1px solid #f0f0f0" }} />
           )}
           <div style={{ minWidth: 0 }}>
             <Tooltip title={record.title || "-"}>
@@ -346,10 +346,11 @@ export default function ProductList() {
       key: "ids",
       width: 220,
       render: (_: string, record: ProductItem) => (
-        <div style={{ display: "grid", gap: 6 }}>
+        <div style={{ display: "grid", gap: 4 }}>
           <div style={{ fontFamily: "Consolas, monospace", fontSize: 12 }}>SKC: {record.skcId || "-"}</div>
-          <div style={{ fontFamily: "Consolas, monospace", fontSize: 12 }}>SPU: {record.spuId || "-"}</div>
-          <div style={{ fontFamily: "Consolas, monospace", fontSize: 12 }}>Goods: {record.goodsId || "-"}</div>
+          {record.spuId && record.spuId !== "-" ? (
+            <div style={{ fontFamily: "Consolas, monospace", fontSize: 12, color: "#8c8c8c" }}>SPU: {record.spuId}</div>
+          ) : null}
         </div>
       ),
     },
@@ -530,7 +531,7 @@ export default function ProductList() {
                 value={searchText}
                 onChange={(event) => setSearchText(event.target.value)}
                 prefix={<SearchOutlined />}
-                placeholder="搜索商品名称 / SKC / SPU / Goods / SKU"
+                placeholder="搜索商品名称 / SKC / SPU / SKU"
               />
               <Select
                 value={statusFilter}
