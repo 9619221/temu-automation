@@ -1,15 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
-import { Alert, Button, Card, Col, Empty, InputNumber, Row, Space, Table, Tag, Typography, message } from "antd";
-import type { ColumnsType } from "antd/es/table";
-import { ReloadOutlined, SyncOutlined } from "@ant-design/icons";
+import { Button, Table, Tag, Typography, message } from "antd";
 import PageHeader from "../components/PageHeader";
+import StatCard from "../components/StatCard";
+import type { ColumnsType } from "antd/es/table";
+import { SyncOutlined } from "@ant-design/icons";
 import {
   COLLECTION_DIAGNOSTICS_KEY,
   normalizeCollectionDiagnostics,
   type CollectionTaskDiagnostic,
   type CollectionDiagnostics,
 } from "../utils/collectionDiagnostics";
-import { APP_SETTINGS_KEY, normalizeAppSettings } from "../utils/appSettings";
 import { setStoreValueForActiveAccount } from "../utils/multiStore";
 import {
   parseDashboardData,
@@ -26,7 +26,7 @@ const store = window.electronAPI?.store;
 const TASK_MANAGER_STATE_KEY = "temu_task_manager_state";
 
 type TaskStatus = "idle" | "running" | "success" | "error";
-type TaskId = "sync_dashboard" | "sync_products" | "sync_orders" | "sync_analytics" | "stock_alert";
+type TaskId = "sync_dashboard" | "sync_products" | "sync_orders" | "sync_analytics";
 type CollectionTaskKey = "dashboard" | "products" | "orders" | "sales" | "flux";
 
 interface TaskConfig {
@@ -40,26 +40,10 @@ interface TaskConfig {
   count?: number;
 }
 
-interface LowStockItem {
-  key: string;
-  title: string;
-  skcId: string;
-  skuCode: string;
-  warehouseStock: number;
-  supplyStatus: string;
-}
-
 interface TaskManagerState {
   tasks: TaskConfig[];
-  lowStockItems: LowStockItem[];
-  lastCheckedAt: string | null;
-  threshold: number;
 }
 
-interface CheckNotice {
-  type: "info" | "warning" | "error";
-  message: string;
-}
 
 const DEFAULT_TASKS: TaskConfig[] = [
   {
@@ -90,23 +74,13 @@ const DEFAULT_TASKS: TaskConfig[] = [
     interval: "手动执行",
     status: "idle",
   },
-  {
-    id: "stock_alert",
-    name: "库存预警检查",
-    description: "按低库存阈值检查销售数据中的库存字段，生成低库存商品清单。",
-    interval: "手动执行",
-    status: "idle",
-  },
 ];
 
 const defaultState: TaskManagerState = {
   tasks: DEFAULT_TASKS,
-  lowStockItems: [],
-  lastCheckedAt: null,
-  threshold: 10,
 };
 
-const TASK_KEY_MAP: Record<Exclude<TaskId, "stock_alert">, CollectionTaskKey | "analytics"> = {
+const TASK_KEY_MAP: Record<TaskId, CollectionTaskKey | "analytics"> = {
   sync_dashboard: "dashboard",
   sync_products: "products",
   sync_orders: "orders",
@@ -261,13 +235,7 @@ async function persistCollectionDiagnostic(taskKey: CollectionTaskKey, diagnosti
 
 export default function TaskManager() {
   const [tasks, setTasks] = useState<TaskConfig[]>(DEFAULT_TASKS);
-  const [lowStockItems, setLowStockItems] = useState<LowStockItem[]>([]);
-  const [threshold, setThreshold] = useState(defaultState.threshold);
-  const [lastCheckedAt, setLastCheckedAt] = useState<string | null>(null);
   const [runningTaskId, setRunningTaskId] = useState<TaskId | null>(null);
-  const [checkNotice, setCheckNotice] = useState<CheckNotice | null>(null);
-  const [savingThreshold, setSavingThreshold] = useState(false);
-  const [savedThreshold, setSavedThreshold] = useState(defaultState.threshold);
   const [diagnostics, setDiagnostics] = useState<CollectionDiagnostics>(() => normalizeCollectionDiagnostics(null));
 
   useEffect(() => {
@@ -275,23 +243,13 @@ export default function TaskManager() {
 
     Promise.all([
       store?.get(TASK_MANAGER_STATE_KEY),
-      store?.get(APP_SETTINGS_KEY),
       store?.get(COLLECTION_DIAGNOSTICS_KEY),
-    ]).then(([savedState, appSettings, rawDiagnostics]) => {
+    ]).then(([savedState, rawDiagnostics]) => {
       if (!mounted) return;
 
-      const normalizedSettings = normalizeAppSettings(appSettings);
       const normalizedDiagnostics = normalizeCollectionDiagnostics(rawDiagnostics);
-      const nextThreshold = typeof savedState?.threshold === "number"
-        ? savedState.threshold
-        : normalizedSettings.lowStockThreshold;
-
       setDiagnostics(normalizedDiagnostics);
-      setThreshold(nextThreshold);
-      setSavedThreshold(normalizedSettings.lowStockThreshold);
       setTasks(mergeTaskState(savedState?.tasks, normalizedDiagnostics));
-      setLowStockItems(Array.isArray(savedState?.lowStockItems) ? savedState.lowStockItems : []);
-      setLastCheckedAt(savedState?.lastCheckedAt || null);
     }).catch(() => {});
 
     return () => {
@@ -301,14 +259,9 @@ export default function TaskManager() {
 
   useEffect(() => {
     if (!store) return;
-    const state: TaskManagerState = {
-      tasks,
-      lowStockItems,
-      lastCheckedAt,
-      threshold,
-    };
+    const state: TaskManagerState = { tasks };
     setStoreValueForActiveAccount(store, TASK_MANAGER_STATE_KEY, state).catch(() => {});
-  }, [tasks, lowStockItems, lastCheckedAt, threshold]);
+  }, [tasks]);
 
   const updateTask = (id: TaskId, patch: Partial<TaskConfig>) => {
     setTasks((prev) => prev.map((task) => (
@@ -423,90 +376,13 @@ export default function TaskManager() {
     }));
   };
 
-  const runStockCheck = async () => {
-    if (!store) {
-      message.error("本地存储接口未就绪，请在桌面端内运行。");
-      return;
-    }
-
-    setRunningTaskId("stock_alert");
-    setCheckNotice(null);
-    updateTask("stock_alert", { status: "running", lastMessage: "正在检查库存..." });
-
-    try {
-      const rawSales = await store.get("temu_sales");
-      if (!rawSales) {
-        throw new Error("请先执行“同步销售与流量”，再运行库存预警检查。");
-      }
-
-      const parsed = parseSalesData(rawSales);
-      const items = Array.isArray(parsed?.items) ? parsed.items : [];
-      const now = new Date().toLocaleString("zh-CN");
-
-      if (items.length === 0) {
-        setLowStockItems([]);
-        setLastCheckedAt(now);
-        setCheckNotice({
-          type: "warning",
-          message: "销售数据里没有可用于库存检查的商品记录，请重新同步销售数据后再试。",
-        });
-        updateTask("stock_alert", {
-          status: "success",
-          lastRun: now,
-          lastMessage: "销售数据为空，未生成库存预警清单",
-          count: 0,
-        });
-        return;
-      }
-
-      const nextItems: LowStockItem[] = items
-        .filter((item: any) => typeof item.warehouseStock === "number" && item.warehouseStock <= threshold)
-        .map((item: any, index: number) => ({
-          key: `${item.skcId || item.skuId || index}`,
-          title: item.title || "-",
-          skcId: String(item.skcId || "-"),
-          skuCode: item.skuCode || "-",
-          warehouseStock: Number(item.warehouseStock || 0),
-          supplyStatus: item.supplyStatus || "-",
-        }))
-        .sort((a: LowStockItem, b: LowStockItem) => a.warehouseStock - b.warehouseStock);
-
-      setLowStockItems(nextItems);
-      setLastCheckedAt(now);
-      setCheckNotice(
-        nextItems.length > 0
-          ? { type: "warning", message: `库存检查完成，发现 ${nextItems.length} 个低库存商品。` }
-          : { type: "info", message: "库存检查完成，当前没有低于阈值的商品。" },
-      );
-      updateTask("stock_alert", {
-        status: "success",
-        lastRun: now,
-        lastMessage: nextItems.length > 0 ? `发现 ${nextItems.length} 个低库存商品` : "未发现低库存商品",
-        count: nextItems.length,
-      });
-    } catch (error: any) {
-      const detail = error?.message || "库存检查失败，请稍后重试。";
-      setCheckNotice({
-        type: "error",
-        message: detail,
-      });
-      updateTask("stock_alert", {
-        status: "error",
-        lastMessage: detail,
-      });
-    } finally {
-      setRunningTaskId(null);
-    }
-  };
-
-  const runSyncTask = async (taskId: Exclude<TaskId, "stock_alert">) => {
+  const runSyncTask = async (taskId: TaskId) => {
     if (!automation || !store) {
       message.error("桌面端自动化接口未就绪，请在 Electron 客户端内运行。");
       return;
     }
 
     setRunningTaskId(taskId);
-    setCheckNotice(null);
     updateTask(taskId, { status: "running", lastMessage: "正在执行任务..." });
 
     try {
@@ -592,28 +468,6 @@ export default function TaskManager() {
     }
   };
 
-  const handleSaveThreshold = async () => {
-    if (!store) {
-      message.error("本地存储接口未就绪，请在桌面端内运行。");
-      return;
-    }
-
-    setSavingThreshold(true);
-    try {
-      const appSettings = normalizeAppSettings(await store.get(APP_SETTINGS_KEY));
-      await store.set(APP_SETTINGS_KEY, {
-        ...appSettings,
-        lowStockThreshold: threshold,
-      });
-      setSavedThreshold(threshold);
-      message.success("低库存阈值已保存。");
-    } catch (error: any) {
-      message.error(error?.message || "保存阈值失败，请稍后重试。");
-    } finally {
-      setSavingThreshold(false);
-    }
-  };
-
   const latestTaskRun = useMemo(() => {
     return tasks
       .map((task) => task.lastRun)
@@ -628,10 +482,6 @@ export default function TaskManager() {
 
   const errorTaskCount = useMemo(() => (
     tasks.filter((task) => task.status === "error").length
-  ), [tasks]);
-
-  const runningTaskCount = useMemo(() => (
-    tasks.filter((task) => task.status === "running").length
   ), [tasks]);
 
   const taskColumns: ColumnsType<TaskConfig> = [
@@ -693,145 +543,52 @@ export default function TaskManager() {
       render: (_, record) => (
         <Button
           type="primary"
-          icon={record.id === "stock_alert" ? <ReloadOutlined /> : <SyncOutlined />}
+          icon={<SyncOutlined />}
           loading={runningTaskId === record.id}
           disabled={Boolean(runningTaskId && runningTaskId !== record.id)}
-          onClick={() => (
-            record.id === "stock_alert"
-              ? runStockCheck()
-              : runSyncTask(record.id as Exclude<TaskId, "stock_alert">)
-          )}
+          onClick={() => runSyncTask(record.id as TaskId)}
         >
-          {record.id === "stock_alert" ? "立即检查" : "立即执行"}
+          立即执行
         </Button>
       ),
     },
-  ];
-
-  const lowStockColumns: ColumnsType<LowStockItem> = [
-    { title: "商品", dataIndex: "title", key: "title", ellipsis: true },
-    { title: "SKC", dataIndex: "skcId", key: "skcId", width: 140 },
-    { title: "SKU", dataIndex: "skuCode", key: "skuCode", width: 140 },
-    {
-      title: "库存",
-      dataIndex: "warehouseStock",
-      key: "warehouseStock",
-      width: 100,
-      render: (value: number) => (
-        <Tag color={value <= Math.max(1, Math.floor(threshold / 2)) ? "error" : "warning"}>
-          {value}
-        </Tag>
-      ),
-    },
-    { title: "供货状态", dataIndex: "supplyStatus", key: "supplyStatus", width: 140 },
   ];
 
   return (
     <div className="dashboard-shell">
       <PageHeader
         compact
-        eyebrow="任务工作台"
-        title="任务管理"
-        subtitle="把常用同步任务和库存预警收进一个调度面板里，统一执行和查看结果。"
+        eyebrow="数据"
+        title="定时任务"
+        subtitle="建议一次只执行一个同步任务，避免同时占用同一个浏览器会话"
         meta={[
-          `${tasks.length} 个内置任务`,
-          runningTaskCount > 0 ? `${runningTaskCount} 个运行中` : "当前空闲",
-          latestTaskRun ? `最近执行：${latestTaskRun}` : "尚未执行任务",
-        ]}
+          `${successTaskCount} 项成功`,
+          errorTaskCount > 0 ? `${errorTaskCount} 项失败` : null,
+          latestTaskRun ? `最近执行：${latestTaskRun}` : null,
+        ].filter(Boolean) as string[]}
       />
 
-      {checkNotice && (
-        <Alert
-          style={{ marginBottom: 16 }}
-          type={checkNotice.type}
-          showIcon
-          message={checkNotice.message}
-        />
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12, marginBottom: 16 }}>
+        <StatCard compact title="任务成功数" value={successTaskCount} color="success" />
+        <StatCard compact title="任务失败数" value={errorTaskCount} color={errorTaskCount > 0 ? "danger" : "neutral"} />
+        <StatCard compact title="最近执行" value={latestTaskRun || "未执行"} color="blue" />
+      </div>
+
+      {diagnostics.syncedAt && (
+        <div className="app-panel" style={{ marginBottom: 16 }}>
+          <Text type="secondary">
+            最近一次采集诊断时间：{diagnostics.syncedAt}，成功 {diagnostics.summary.successCount} 项，失败 {diagnostics.summary.errorCount} 项。
+          </Text>
+        </div>
       )}
 
-      <Row gutter={[16, 16]} align="stretch">
-        <Col xs={24} xl={17}>
-          <div className="app-panel">
-            <div className="app-panel__title">
-              <div>
-                <div className="app-panel__title-main">任务列表</div>
-                <div className="app-panel__title-sub">直接执行同步、查看最近结果和数据量。</div>
-              </div>
-            </div>
-            <Table
-              columns={taskColumns}
-              dataSource={tasks}
-              rowKey="id"
-              pagination={false}
-            />
-          </div>
-        </Col>
-        <Col xs={24} xl={7}>
-          <div className="app-panel" style={{ height: "100%" }}>
-            <div className="app-panel__title">
-              <div>
-                <div className="app-panel__title-main">预警设置</div>
-                <div className="app-panel__title-sub">先设阈值，再执行库存检查。</div>
-              </div>
-            </div>
-            <Space direction="vertical" size={14} style={{ width: "100%" }}>
-              <div className="create-summary-list__item">
-                <span>低库存阈值</span>
-                <InputNumber
-                  min={1}
-                  max={1000}
-                  value={threshold}
-                  onChange={(value) => setThreshold(typeof value === "number" ? value : 1)}
-                />
-              </div>
-              <Button
-                type="primary"
-                onClick={handleSaveThreshold}
-                loading={savingThreshold}
-                disabled={threshold === savedThreshold}
-                className="create-primary-button"
-              >
-                保存预警阈值
-              </Button>
-              <Button
-                icon={<ReloadOutlined />}
-                loading={runningTaskId === "stock_alert"}
-                onClick={runStockCheck}
-                className="create-secondary-button"
-              >
-                立即执行库存检查
-              </Button>
-              {diagnostics.syncedAt ? (
-                <div className="friendly-alert__details" style={{ marginTop: 0, paddingTop: 0, borderTop: "none" }}>
-                  最近一次采集诊断：{diagnostics.syncedAt}
-                  <br />
-                  成功 {diagnostics.summary.successCount} 项，失败 {diagnostics.summary.errorCount} 项。
-                </div>
-              ) : (
-                <Text type="secondary">完成一次采集后，这里会显示最新诊断概况。</Text>
-              )}
-            </Space>
-          </div>
-        </Col>
-      </Row>
-
       <div className="app-panel">
-        <div className="app-panel__title">
-          <div>
-            <div className="app-panel__title-main">低库存明细</div>
-            <div className="app-panel__title-sub">优先处理这里的商品，避免断货。</div>
-          </div>
-        </div>
-        {lowStockItems.length > 0 ? (
-          <Table
-            columns={lowStockColumns}
-            dataSource={lowStockItems}
-            rowKey="key"
-            pagination={{ pageSize: 10 }}
-          />
-        ) : (
-          <Empty description={lastCheckedAt ? "当前没有低库存商品" : "尚未执行库存检查"} />
-        )}
+        <Table
+          columns={taskColumns}
+          dataSource={tasks}
+          rowKey="id"
+          pagination={false}
+        />
       </div>
     </div>
   );

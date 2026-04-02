@@ -504,7 +504,7 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
           const pUrl = p.url();
           if (!pUrl.includes("kuajingmaihuo.com") && !pUrl.includes("seller-login")) continue;
           const bodyText = await p.evaluate(() => document.body?.innerText || "").catch(() => "");
-          if (bodyText.includes("确认授权") || bodyText.includes("即将前往")) {
+          if (bodyText.includes("确认授权") || bodyText.includes("即将前往") || bodyText.includes("授权登录")) {
             console.error("[nav-lite] Found unhandled auth popup, handling...");
             try {
               const cb = p.locator('input[type="checkbox"]').first();
@@ -512,7 +512,7 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
             } catch {}
             await randomDelay(300, 500);
             try {
-              const btn = p.locator('button:has-text("确认授权并前往"), button:has-text("确认授权")').first();
+              const btn = p.locator('button:has-text("授权登录"), button:has-text("确认授权并前往"), button:has-text("确认授权")').first();
               if (await btn.isVisible({ timeout: 1000 })) { await btn.click(); console.error("[nav-lite] Clicked auth button"); }
             } catch {}
             await randomDelay(2000, 3000);
@@ -674,7 +674,7 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
             try {
               const text = await popup.evaluate(() => document.body?.innerText || "");
               console.error("[nav] Popup body text length:", text.length, "contains auth:", text.includes("确认授权"), "contains 即将前往:", text.includes("即将前往"));
-              if (text.includes("确认授权") || text.includes("即将前往") || text.includes("Seller Central")) {
+              if (text.includes("确认授权") || text.includes("即将前往") || text.includes("Seller Central") || text.includes("授权登录")) {
                 console.error("[nav] Auth dialog found in popup! Handling...");
 
                 // 方式1：用 Playwright locator 勾选 checkbox
@@ -730,7 +730,7 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
                 if (!btnClicked) {
                   // fallback: evaluate
                   const btnResult = await popup.evaluate(() => {
-                    const keywords = ["确认授权并前往", "确认授权", "确认并前往", "进入"];
+                    const keywords = ["授权登录", "确认授权并前往", "确认授权", "确认并前往", "进入"];
                     const all = [...document.querySelectorAll('button, [role="button"], a, div[class*="btn"], div[class*="Btn"]')];
                     for (const kw of keywords) {
                       for (const el of all) {
@@ -4521,7 +4521,7 @@ async function handleRequest(body) {
           for (let attempt = 0; attempt < 10; attempt++) {
             try {
               const text = await newPage.evaluate(() => document.body?.innerText || "");
-              if (text.includes("确认授权") || text.includes("即将前往") || text.includes("Seller Central")) {
+              if (text.includes("确认授权") || text.includes("即将前往") || text.includes("Seller Central") || text.includes("授权登录")) {
                 console.error(`[popup-monitor] Auth dialog found on attempt ${attempt + 1}!`);
 
                 // 勾选 checkbox
@@ -4546,13 +4546,23 @@ async function handleRequest(body) {
                 // 点击"确认授权并前往"
                 let clicked = false;
                 try {
-                  const btn = newPage.locator('button:has-text("确认授权并前往")').first();
+                  const btn = newPage.locator('button:has-text("授权登录")').first();
                   if (await btn.isVisible({ timeout: 2000 })) {
                     await btn.click();
-                    console.error("[popup-monitor] Clicked '确认授权并前往'");
+                    console.error("[popup-monitor] Clicked '授权登录'");
                     clicked = true;
                   }
                 } catch (e) { logSilent("ui.action", e); }
+                if (!clicked) {
+                  try {
+                    const btn1b = newPage.locator('button:has-text("确认授权并前往")').first();
+                    if (await btn1b.isVisible({ timeout: 1000 })) {
+                      await btn1b.click();
+                      console.error("[popup-monitor] Clicked '确认授权并前往'");
+                      clicked = true;
+                    }
+                  } catch (e) { logSilent("ui.action", e); }
+                }
                 if (!clicked) {
                   try {
                     const btn2 = newPage.locator('button:has-text("确认授权")').first();
@@ -4566,7 +4576,7 @@ async function handleRequest(body) {
                 if (!clicked) {
                   // evaluate fallback
                   const result = await newPage.evaluate(() => {
-                    const keywords = ["确认授权并前往", "确认授权", "确认并前往", "进入"];
+                    const keywords = ["授权登录", "确认授权并前往", "确认授权", "确认并前往", "进入"];
                     const all = [...document.querySelectorAll('button, [role="button"], a, div[class*="btn"]')];
                     for (const kw of keywords) {
                       for (const el of all) {
@@ -4766,8 +4776,24 @@ async function handleRequest(body) {
             finishedAt: getScrapeAllTimestamp(),
           });
         };
+        const runWithRetry = async (fn, maxRetries = 2) => {
+          let lastErr;
+          for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            try {
+              return await fn();
+            } catch (err) {
+              lastErr = err;
+              if (attempt < maxRetries) {
+                const delay = 2000 * (attempt + 1);
+                console.error(`[scrape_all] ↻ ${task.key} retry ${attempt + 1}/${maxRetries} in ${delay}ms: ${err.message}`);
+                await new Promise(r => setTimeout(r, delay));
+              }
+            }
+          }
+          throw lastErr;
+        };
         const p = Promise.resolve()
-          .then(() => task.fn())
+          .then(() => runWithRetry(task.fn))
           .then(data => {
             const dur = Math.round((Date.now() - startMs) / 1000);
             console.error(`[scrape_all] ✓ ${task.key} done in ${dur}s`);

@@ -4,6 +4,7 @@ import {
   Progress,
   Space,
   Tag,
+  Tooltip,
   Typography,
 } from "antd";
 import {
@@ -130,85 +131,41 @@ export default function Dashboard() {
               取消
             </Button>
           ) : null,
-          <Button
-            key="sync-dashboard"
-            onClick={startSyncDashboard}
-            loading={syncingDashboard}
-          >
-            {syncingDashboard ? "同步中..." : "仅同步仪表盘"}
-          </Button>,
+          <Tooltip key="sync-dashboard" title="仅采集仪表盘核心数据，约需 30 秒，适合快速查看最新概览" placement="bottomRight">
+            <Button
+              onClick={startSyncDashboard}
+              loading={syncingDashboard}
+            >
+              {syncingDashboard ? "刷新中..." : "快速刷新概览"}
+            </Button>
+          </Tooltip>,
         ].filter(Boolean)}
       />
-
-      <div className="dashboard-summary">
-        <div className="app-panel">
-          <div className="app-panel__title">
-            <div>
-              <div className="app-panel__title-main">整体进度</div>
-              <div className="app-panel__title-sub">
-                {collecting
-                  ? "任务按批次在后台执行，状态每秒刷新"
-                  : "支持随时重新采集或只刷新仪表盘"}
-              </div>
-            </div>
-            <Tag color={collecting ? "processing" : progress === 100 ? (errorCount > 0 ? "warning" : "success") : "default"} style={{ borderRadius: 999, margin: 0 }}>
-              {collecting ? "运行中" : progress === 100 ? "已完成" : "待开始"}
-            </Tag>
-          </div>
-
-          <div className="dashboard-progress__meta">
-            <div>
-              <div className="dashboard-progress__count">
-                {completedCount}/{COLLECT_TASKS.length}
-              </div>
-              <div className="dashboard-progress__sub">
-                {collecting ? "已完成任务数" : progress === 100 ? "本轮采集已处理完成" : "等待开始本轮采集"}
-              </div>
-            </div>
-            <Space size={8} wrap>
-              <Tag color="success" style={{ borderRadius: 999, margin: 0 }}>
-                成功 {successCount}
-              </Tag>
-              <Tag color={errorCount > 0 ? "error" : "default"} style={{ borderRadius: 999, margin: 0 }}>
-                失败 {errorCount}
-              </Tag>
-              <Tag style={{ borderRadius: 999, margin: 0 }}>
-                用时 {formatTime(elapsed)}
-              </Tag>
-            </Space>
-          </div>
-
-          <Progress
-            percent={progress}
-            status={collecting ? "active" : progress === 100 ? (errorCount > 0 ? "exception" : "success") : "normal"}
-            strokeColor={{ "0%": "#e55b00", "100%": "#00b96b" }}
-            showInfo={false}
-          />
-
-          <div className="dashboard-kpis" style={{ marginTop: 16 }}>
-            <div className="dashboard-kpi">
-              <div className="dashboard-kpi__label">已完成</div>
-              <div className="dashboard-kpi__value">{completedCount}</div>
-            </div>
-            <div className="dashboard-kpi">
-              <div className="dashboard-kpi__label">成功</div>
-              <div className="dashboard-kpi__value" style={{ color: "var(--color-success)" }}>{successCount}</div>
-            </div>
-            <div className="dashboard-kpi">
-              <div className="dashboard-kpi__label">失败</div>
-              <div className="dashboard-kpi__value" style={{ color: errorCount > 0 ? "var(--color-danger)" : "var(--color-text)" }}>{errorCount}</div>
-            </div>
-          </div>
-        </div>
-      </div>
 
       <div className="app-panel">
         <div className="app-panel__title">
           <div>
-            <div className="app-panel__title-main">分组进度</div>
-            <div className="app-panel__title-sub">优先看这里，判断哪一类任务卡住或失败</div>
+            <div className="app-panel__title-main">采集进度</div>
+            <div className="app-panel__title-sub">
+              {collecting ? "任务按批次在后台执行，状态每秒刷新" : "优先看各分组状态，判断哪一类任务卡住或失败"}
+            </div>
           </div>
+          <Space size={6} wrap>
+            <Tag color="success" style={{ borderRadius: 999, margin: 0 }}>成功 {successCount}</Tag>
+            <Tag color={errorCount > 0 ? "error" : "default"} style={{ borderRadius: 999, margin: 0 }}>失败 {errorCount}</Tag>
+            <Tag color={collecting ? "processing" : progress === 100 ? (errorCount > 0 ? "warning" : "success") : "default"} style={{ borderRadius: 999, margin: 0 }}>
+              {collecting ? `${completedCount}/${COLLECT_TASKS.length} · ${formatTime(elapsed)}` : progress === 100 ? "已完成" : "待开始"}
+            </Tag>
+          </Space>
         </div>
+
+        <Progress
+          percent={progress}
+          status={collecting ? "active" : progress === 100 ? (errorCount > 0 ? "exception" : "success") : "normal"}
+          strokeColor={{ "0%": "#e55b00", "100%": "#00b96b" }}
+          showInfo={false}
+          style={{ marginBottom: 16 }}
+        />
 
         <div className="group-progress-list">
           {categorySummaries.map((group) => (
@@ -220,19 +177,16 @@ export default function Dashboard() {
                   </div>
                   <div className={`group-progress-row__status ${group.status.className}`}>
                     {group.status.label}
-                    {group.running > 0 ? ` · ${group.running} 项正在执行` : ""}
+                    {group.running > 0 ? ` · ${group.running} 项执行中` : ""}
                     {group.error > 0 ? ` · ${group.error} 项失败` : ""}
                   </div>
                 </div>
                 <Tag
                   color={
-                    group.status.className === "is-success"
-                      ? "success"
-                      : group.status.className === "is-error"
-                        ? "error"
-                        : group.status.className === "is-running"
-                          ? "processing"
-                          : "default"
+                    group.status.className === "is-success" ? "success"
+                    : group.status.className === "is-error" ? "error"
+                    : group.status.className === "is-running" ? "processing"
+                    : "default"
                   }
                   style={{ borderRadius: 999, margin: 0 }}
                 >

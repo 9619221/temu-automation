@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Button,
-  Empty,
   Input,
   Segmented,
   Space,
@@ -15,6 +14,7 @@ import type { ColumnsType } from "antd/es/table";
 import { DeleteOutlined, ReloadOutlined } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
 import StatCard from "../components/StatCard";
+import EmptyGuide from "../components/EmptyGuide";
 import {
   FRONTEND_LOG_STORE_KEY,
   clearFrontendLogs,
@@ -279,7 +279,7 @@ export default function Logs() {
             }}
           />
         ) : (
-          <Empty description="暂无前端日志" style={{ padding: "32px 0" }} />
+          <EmptyGuide title="暂无前端日志" description="前端异常和调试日志将自动收集到此处" />
         )}
       </div>
     </div>

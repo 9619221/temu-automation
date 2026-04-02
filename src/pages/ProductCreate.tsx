@@ -11,7 +11,6 @@ import {
   Row,
   Segmented,
   Space,
-  Statistic,
   Table,
   Tag,
   Typography,
@@ -31,6 +30,7 @@ import {
   RocketOutlined,
 } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
+import StatCard from "../components/StatCard";
 import { setStoreValueForActiveAccount } from "../utils/multiStore";
 
 const { TextArea } = Input;
@@ -40,7 +40,7 @@ const { Title, Text } = Typography;
 const api = window.electronAPI?.automation;
 const store = window.electronAPI?.store;
 
-const SUCCESS_COLOR = "#00b96b";
+const SUCCESS_COLOR = "var(--color-success)";
 
 type ProductCreateMode = "batch" | "single";
 
@@ -882,20 +882,12 @@ function BatchCreate() {
               format={() => `${completedCount}/${progressTotal || 0}`}
             />
 
-            <Row gutter={[12, 12]}>
-              <Col xs={12} md={6}>
-                <Statistic title="已处理" value={completedCount} />
-              </Col>
-              <Col xs={12} md={6}>
-                <Statistic title="待处理" value={pendingCount} />
-              </Col>
-              <Col xs={12} md={6}>
-                <Statistic title="成功" value={successCount} />
-              </Col>
-              <Col xs={12} md={6}>
-                <Statistic title="失败" value={failCount} />
-              </Col>
-            </Row>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12 }}>
+              <StatCard compact title="已处理" value={completedCount} color="brand" />
+              <StatCard compact title="待处理" value={pendingCount} color="blue" />
+              <StatCard compact title="成功" value={successCount} color="success" />
+              <StatCard compact title="失败" value={failCount} color={failCount > 0 ? "danger" : "neutral"} />
+            </div>
           </Space>
         </Card>
       ) : null}

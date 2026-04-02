@@ -101,7 +101,13 @@ export async function ensureBrowser() {
 }
 
 export async function launch(accountId, headless) {
-  if (browserState.browser && browserState.context) return;
+  if (browserState.browser && browserState.browser.isConnected() && browserState.context) return;
+  // 清理断开的旧引用
+  if (browserState.browser && !browserState.browser.isConnected()) {
+    console.error("[launch] Browser disconnected, cleaning up before relaunch...");
+    browserState.browser = null;
+    browserState.context = null;
+  }
 
   browserState.lastAccountId = accountId;
   const dir = path.join(process.env.APPDATA || "", "temu-automation", "cookies");
@@ -146,6 +152,15 @@ export async function closeBrowser() {
 export async function login(phone, password) {
   browserState.lastPhone = phone;
   browserState.lastPassword = password;
+
+  // 浏览器可能已崩溃或断开，先确保重建
+  if (!browserState.browser || !browserState.browser.isConnected() || !browserState.context) {
+    console.error("[login] Browser not available, restarting...");
+    browserState.browser = null;
+    browserState.context = null;
+    await ensureBrowser();
+  }
+
   const page = await browserState.context.newPage();
   try {
     await page.goto(TEMU_LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
@@ -200,8 +215,8 @@ export async function login(phone, password) {
     await page.waitForLoadState("domcontentloaded", { timeout: 15000 });
     await randomDelay(3000, 5000);
 
-    // 检查登录结果
-    if (page.url().includes("login")) {
+    // 检查登录结果（排除 seller-login 授权页，那是正常流程）
+    if (page.url().includes("login") && !page.url().includes("seller-login")) {
       const cap = await page.locator('[class*="captcha"], [class*="verify"], [class*="slider"], iframe[src*="captcha"]').first().isVisible().catch(() => false);
       if (cap) {
         await page.waitForURL((u) => !u.toString().includes("login"), { timeout: 120000 });
@@ -227,8 +242,8 @@ export async function login(phone, password) {
       await randomDelay(500, 1000);
 
       const btnResult = await page.evaluate(() => {
-        const keywords = ["进入", "确认授权", "确认并前往"];
-        const all = [...document.querySelectorAll('button, a, [role="button"], div[class*="btn"], div[class*="Btn"]')];
+        const keywords = ["授权登录", "进入", "确认授权", "确认并前往"];
+        const all = [...document.querySelectorAll('button, a, [role="button"], div[class*="btn"], div[class*="Btn"], span[class*="btn"], span[class*="Btn"]')];
         for (const kw of keywords) {
           for (const el of all) {
             const text = (el.innerText || "").trim();

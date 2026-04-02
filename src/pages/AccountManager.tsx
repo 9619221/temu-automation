@@ -8,6 +8,7 @@ import {
   Form,
   Input,
   Space,
+  Skeleton,
   Tag,
   Popconfirm,
   message,
@@ -21,8 +22,7 @@ import {
   DeleteOutlined,
   LogoutOutlined,
   EyeOutlined,
-  LoadingOutlined,
-  CheckCircleFilled,
+  CheckCircleOutlined,
   PhoneOutlined,
   ClockCircleOutlined,
   ShopOutlined,
@@ -44,7 +44,7 @@ import { normalizeCollectionDiagnostics } from "../utils/collectionDiagnostics";
 
 const { Text, Title } = Typography;
 
-const TEMU_ORANGE = "#ff6a00";
+const TEMU_ORANGE = "#e55b00";
 
 interface Account {
   id: string;
@@ -310,9 +310,8 @@ export default function AccountManager() {
 
   if (!hydrated) {
     return (
-      <div style={{ textAlign: "center", padding: "80px 0" }}>
-        <LoadingOutlined style={{ fontSize: 24 }} />
-        <div style={{ marginTop: 12, color: "#999" }}>加载账号数据...</div>
+      <div style={{ padding: 24 }}>
+        <Skeleton active paragraph={{ rows: 4 }} />
       </div>
     );
   }
@@ -353,7 +352,7 @@ export default function AccountManager() {
                 fontWeight: 600,
               }}
             >
-              <CheckCircleFilled style={{ marginRight: 4 }} />
+              <CheckCircleOutlined style={{ marginRight: 4 }} />
               当前
             </div>
           )}
@@ -442,7 +441,9 @@ export default function AccountManager() {
           {/* 操作按钮 */}
           <Divider style={{ margin: "10px 0" }} />
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            {account.status === "online" ? (
+            {/* 左侧：主操作 */}
+            {account.status === "online" && isActive ? (
+              /* 已登录 + 已激活：只显示断开 */
               <Button
                 size="small"
                 icon={<LogoutOutlined />}
@@ -451,7 +452,18 @@ export default function AccountManager() {
               >
                 断开
               </Button>
+            ) : account.status === "online" && !isActive ? (
+              /* 已登录但未激活：可切换数据视图 */
+              <Button
+                size="small"
+                icon={<EyeOutlined />}
+                onClick={() => handleActivateAccount(account.id)}
+                style={{ borderRadius: 8 }}
+              >
+                切换到此账号
+              </Button>
             ) : (
+              /* 未登录：显示登录按钮 */
               <Button
                 type="primary"
                 size="small"
@@ -468,26 +480,16 @@ export default function AccountManager() {
               </Button>
             )}
 
-            <Space size={4}>
-              <Button
-                size="small"
-                icon={isActive ? <CheckCircleFilled style={{ color: TEMU_ORANGE }} /> : <EyeOutlined />}
-                disabled={isActive}
-                onClick={() => handleActivateAccount(account.id)}
-                style={{ borderRadius: 8 }}
-              >
-                {isActive ? "当前" : "切换"}
+            {/* 右侧：删除 */}
+            <Popconfirm
+              title="确定删除此账号？"
+              description="删除后该账号的采集数据仍会保留"
+              onConfirm={() => handleDelete(account.id)}
+            >
+              <Button size="small" danger icon={<DeleteOutlined />} style={{ borderRadius: 8 }}>
+                删除
               </Button>
-              <Popconfirm
-                title="确定删除此账号？"
-                description="删除后该账号的采集数据仍会保留"
-                onConfirm={() => handleDelete(account.id)}
-              >
-                <Button size="small" danger icon={<DeleteOutlined />} style={{ borderRadius: 8 }}>
-                  删除
-                </Button>
-              </Popconfirm>
-            </Space>
+            </Popconfirm>
           </div>
         </Card>
       </Col>
