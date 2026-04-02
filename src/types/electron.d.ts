@@ -1,5 +1,6 @@
 import type {
   ImageStudioAnalysis,
+  ImageStudioConfig,
   ImageStudioGeneratedImage,
   ImageStudioHistoryItem,
   ImageStudioHistorySummary,
@@ -30,7 +31,6 @@ interface AutomationAPI {
   scrapeCheckup: () => Promise<any>;
   scrapeUSRetrieval: () => Promise<any>;
   scrapeDelivery: () => Promise<any>;
-  createProduct: (params: any) => Promise<any>;
   autoPricing: (params: any) => Promise<any>;
   startAutoPricing: (params: any) => Promise<any>;
   getProgress: () => Promise<any>;
@@ -92,6 +92,8 @@ interface ImageStudioAPI {
   getStatus: () => Promise<ImageStudioStatus>;
   ensureRunning: () => Promise<ImageStudioStatus>;
   restart: () => Promise<ImageStudioStatus>;
+  getConfig: () => Promise<ImageStudioConfig>;
+  updateConfig: (payload: Partial<ImageStudioConfig>) => Promise<ImageStudioConfig>;
   openExternal: () => Promise<string>;
   analyze: (payload: { files: NativeImagePayload[]; productMode: string }) => Promise<ImageStudioAnalysis>;
   regenerateAnalysis: (payload: { files: NativeImagePayload[]; productMode: string; analysis: ImageStudioAnalysis }) => Promise<Pick<ImageStudioAnalysis, "sellingPoints" | "targetAudience" | "usageScenes">>;

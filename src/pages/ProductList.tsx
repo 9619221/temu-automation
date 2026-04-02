@@ -10,7 +10,7 @@ import {
   ShoppingCartOutlined,
   SyncOutlined,
 } from "@ant-design/icons";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import EmptyGuide from "../components/EmptyGuide";
 import PageHeader from "../components/PageHeader";
 import StatCard from "../components/StatCard";
@@ -99,6 +99,7 @@ export default function ProductList() {
   const [hasAccount, setHasAccount] = useState<boolean | null>(null);
   const [diagnostics, setDiagnostics] = useState<CollectionDiagnostics | null>(null);
   const [sourceState, setSourceState] = useState<ProductSourceState>(EMPTY_SOURCES);
+  const location = useLocation();
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -283,6 +284,12 @@ export default function ProductList() {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (location.pathname === "/products") {
+      void loadProducts();
+    }
+  }, [location.pathname]);
 
   const filteredProducts = products.filter((product) => {
     const keyword = searchText.trim().toLowerCase();
@@ -543,7 +550,7 @@ export default function ProductList() {
                 value={searchText}
                 onChange={(event) => setSearchText(event.target.value)}
                 prefix={<SearchOutlined />}
-                placeholder="搜索商品名称 / SKC / SPU / SKU"
+                placeholder="搜索商品名称/SKC/SPU/货号"
               />
               <Select
                 value={statusFilter}

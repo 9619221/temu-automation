@@ -13,6 +13,7 @@ import {
   CheckCircleOutlined,
   PlusCircleOutlined,
   PictureOutlined,
+  FileTextOutlined,
   BellOutlined,
   ArrowRightOutlined,
   CloseCircleOutlined,
@@ -36,7 +37,7 @@ const menuItems = [
     label: "数据",
     children: [
       { key: "/collect", icon: <SyncOutlined />, label: "数据采集" },
-      { key: "/tasks", icon: <ScheduleOutlined />, label: "定时任务" },
+      { key: "/tasks", icon: <ScheduleOutlined />, label: "任务管理" },
     ],
   },
   {
@@ -59,6 +60,7 @@ const menuItems = [
     type: "group" as const,
     label: "系统",
     children: [
+      { key: "/logs", icon: <FileTextOutlined />, label: "日志中心" },
       { key: "/settings", icon: <SettingOutlined />, label: "设置" },
     ],
   },

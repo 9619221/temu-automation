@@ -559,8 +559,8 @@ export default function TaskManager() {
       <PageHeader
         compact
         eyebrow="数据"
-        title="定时任务"
-        subtitle="建议一次只执行一个同步任务，避免同时占用同一个浏览器会话"
+        title="任务管理"
+        subtitle="任务页现在直接接入真实后端任务，建议一次只执行一个同步任务，避免同时占用同一个浏览器会话"
         meta={[
           `${successTaskCount} 项成功`,
           errorTaskCount > 0 ? `${errorTaskCount} 项失败` : null,

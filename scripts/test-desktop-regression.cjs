@@ -7,8 +7,12 @@ const electronBinary = require("electron");
 const repoRoot = path.resolve(__dirname, "..");
 const distIndex = path.join(repoRoot, "dist", "index.html");
 const imageRuntimeEnvFile = path.join(repoRoot, "build", "auto-image-gen-runtime", ".env.local");
+const regressionImagePath = path.join(repoRoot, "build", "icon.png");
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "temu-desktop-regression-"));
 const tinyPngDataUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/l8epVQAAAABJRU5ErkJggg==";
+const regressionPngDataUrl = fs.existsSync(regressionImagePath)
+  ? `data:image/png;base64,${fs.readFileSync(regressionImagePath).toString("base64")}`
+  : tinyPngDataUrl;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -191,9 +195,21 @@ async function seedRegressionData(page) {
 
 async function runBridgeChecks(page) {
   const issues = [];
-  const result = await page.evaluate(async ({ tinyPngDataUrl: png }) => {
+  const result = await page.evaluate(async ({ regressionPngDataUrl: png }) => {
     const api = window.electronAPI;
     if (!api) throw new Error("window.electronAPI missing");
+
+    async function dataUrlToNativeImagePayload(dataUrl, name = "regression.png") {
+      const response = await fetch(dataUrl);
+      const blob = await response.blob();
+      const buffer = await blob.arrayBuffer();
+      return {
+        name,
+        type: blob.type || "image/png",
+        size: blob.size,
+        buffer,
+      };
+    }
 
     await api.store.set("__desktop_regression_roundtrip__", { ok: true, value: 42 });
     const roundtrip = await api.store.get("__desktop_regression_roundtrip__");
@@ -210,18 +226,64 @@ async function runBridgeChecks(page) {
     let updateConfigError = "";
     try {
       const updatedConfig = await api.imageStudio.updateConfig({
-        analyzeModel: "regression-analyze",
-        analyzeApiKey: "",
-        analyzeBaseUrl: "http://127.0.0.1:9999/v1",
-        generateModel: "regression-generate",
-        generateApiKey: "",
-        generateBaseUrl: "http://127.0.0.1:9999/v1",
+        analyzeModel: originalConfig?.analyzeModel || "",
+        analyzeBaseUrl: originalConfig?.analyzeBaseUrl || "",
+        generateModel: originalConfig?.generateModel || "",
+        generateBaseUrl: originalConfig?.generateBaseUrl || "",
       });
-      updateConfigOk = updatedConfig?.analyzeModel === "regression-analyze"
-        && updatedConfig?.generateModel === "regression-generate";
+      updateConfigOk = updatedConfig?.analyzeModel === (originalConfig?.analyzeModel || "")
+        && updatedConfig?.analyzeBaseUrl === (originalConfig?.analyzeBaseUrl || "")
+        && updatedConfig?.generateModel === (originalConfig?.generateModel || "")
+        && updatedConfig?.generateBaseUrl === (originalConfig?.generateBaseUrl || "");
     } catch (error) {
       updateConfigError = error instanceof Error ? error.message : String(error || "unknown error");
     }
+    const nativeImage = await dataUrlToNativeImagePayload(png);
+    const analysis = await api.imageStudio.analyze({
+      files: [nativeImage],
+      productMode: "single",
+    });
+    const aiPlans = await api.imageStudio.generatePlans({
+      analysis,
+      imageTypes: ["main"],
+      salesRegion: "us",
+      imageSize: "800x800",
+      productMode: "single",
+    });
+    const startedGenerate = await api.imageStudio.startGenerate({
+      files: [nativeImage],
+      plans: Array.isArray(aiPlans) ? aiPlans.slice(0, 1) : [],
+      productMode: "single",
+      salesRegion: "us",
+      runInBackground: false,
+      imageLanguage: "en",
+      imageSize: "800x800",
+      productName: analysis?.productName || "自动化回归测试商品",
+    });
+    const generateResult = await new Promise((resolve, reject) => {
+      const timeout = window.setTimeout(() => {
+        unsubscribe?.();
+        reject(new Error("imageStudio.startGenerate timeout"));
+      }, 240000);
+      const unsubscribe = api.onImageStudioEvent?.((payload) => {
+        if (!payload || payload.jobId !== startedGenerate?.jobId) return;
+        if (payload.type === "generate:complete") {
+          window.clearTimeout(timeout);
+          unsubscribe?.();
+          resolve(payload);
+          return;
+        }
+        if (payload.type === "generate:error") {
+          window.clearTimeout(timeout);
+          unsubscribe?.();
+          reject(new Error(payload.error || payload.message || "AI 出图失败"));
+        }
+      });
+      if (!unsubscribe) {
+        window.clearTimeout(timeout);
+        reject(new Error("imageStudio event bridge unavailable"));
+      }
+    });
     const savedHistory = await api.imageStudio.saveHistory({
       productName: "自动化回归测试商品",
       salesRegion: "us",
@@ -255,14 +317,17 @@ async function runBridgeChecks(page) {
       progressStatus: progress?.status || "",
       taskCount: Array.isArray(tasks) ? tasks.length : -1,
       imageStatus,
+      analysis,
       updateConfigOk,
       updateConfigError,
       generatedPlansCount: Array.isArray(generatedPlans) ? generatedPlans.length : -1,
+      aiGeneratedPlansCount: Array.isArray(aiPlans) ? aiPlans.length : -1,
+      generateResult,
       historyItem,
       historyListCount: Array.isArray(historyList) ? historyList.length : -1,
       originalConfig,
     };
-  }, { tinyPngDataUrl });
+  }, { regressionPngDataUrl });
 
   assert(typeof result.version === "string" && result.version.length > 0, "app.getVersion returned invalid version");
   assert(result.roundtrip?.ok === true, "store roundtrip failed");
@@ -270,12 +335,17 @@ async function runBridgeChecks(page) {
   assert(typeof result.progressStatus === "string" && result.progressStatus.length > 0, "automation.getProgress returned invalid payload");
   assert(result.taskCount >= 0, "automation.listTasks returned invalid task list");
   assert(typeof result.imageStatus?.status === "string", "imageStudio.ensureRunning returned invalid status");
+  assert(typeof result.analysis?.productName === "string" && result.analysis.productName.length > 0, "imageStudio.analyze returned invalid analysis");
+  assert(result.aiGeneratedPlansCount > 0, "imageStudio.generatePlans returned no AI plans");
+  assert(Array.isArray(result.generateResult?.results) && result.generateResult.results.length > 0, "imageStudio.startGenerate returned no generated images");
+  assert(typeof result.generateResult.results[0]?.imageUrl === "string" && result.generateResult.results[0].imageUrl.length > 0, "imageStudio.startGenerate returned invalid image url");
   assert(result.generatedPlansCount > 0, "imageStudio.generatePlans returned no plans");
   assert(result.historyListCount >= 1, "imageStudio.listHistory returned no history items");
   assert(result.historyItem?.productName === "自动化回归测试商品", "imageStudio.getHistoryItem returned invalid history item");
 
   console.log("[ok] electron bridge basic checks");
   console.log("[ok] automation worker bridge");
+  console.log("[ok] image studio analyze/generate bridge");
   if (result.updateConfigOk) {
     console.log("[ok] image studio config/history bridge");
   } else {

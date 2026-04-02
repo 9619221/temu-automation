@@ -23,10 +23,83 @@ let workerPort = 19280;
 let workerReady = false;
 let workerAiImageServer = "";
 let workerAuthToken = "";
+let workerStartPromise = null;
+let workerStartTargetAiImageServer = "";
 const AUTO_PRICING_TASKS_KEY = "temu_auto_pricing_tasks";
 const AUTO_PRICING_TASK_LIMIT = 20;
 const CREATE_HISTORY_KEY = "temu_create_history";
 const ACCOUNT_STORE_KEY = "temu_accounts";
+const ACTIVE_ACCOUNT_ID_KEY = "temu_active_account_id";
+const ACCOUNT_SCOPED_STORE_KEYS = new Set([
+  "temu_collection_diagnostics",
+  "temu_create_history",
+  "temu_dashboard",
+  "temu_products",
+  "temu_orders",
+  "temu_sales",
+  "temu_flux",
+  "temu_task_manager_state",
+  "temu_raw_goodsData",
+  "temu_raw_lifecycle",
+  "temu_raw_imageTask",
+  "temu_raw_sampleManage",
+  "temu_raw_activity",
+  "temu_raw_activityLog",
+  "temu_raw_activityUS",
+  "temu_raw_activityEU",
+  "temu_raw_chanceGoods",
+  "temu_raw_marketingActivity",
+  "temu_raw_urgentOrders",
+  "temu_raw_shippingDesk",
+  "temu_raw_shippingList",
+  "temu_raw_addressManage",
+  "temu_raw_returnOrders",
+  "temu_raw_returnDetail",
+  "temu_raw_salesReturn",
+  "temu_raw_returnReceipt",
+  "temu_raw_exceptionNotice",
+  "temu_raw_afterSales",
+  "temu_raw_soldout",
+  "temu_raw_performance",
+  "temu_raw_checkup",
+  "temu_raw_qualityDashboard",
+  "temu_raw_qualityDashboardEU",
+  "temu_raw_qcDetail",
+  "temu_raw_priceReport",
+  "temu_raw_priceCompete",
+  "temu_raw_flowPrice",
+  "temu_raw_retailPrice",
+  "temu_raw_mallFlux",
+  "temu_raw_mallFluxEU",
+  "temu_raw_mallFluxUS",
+  "temu_raw_fluxEU",
+  "temu_raw_fluxUS",
+  "temu_raw_flowGrow",
+  "temu_raw_governDashboard",
+  "temu_raw_governProductQualification",
+  "temu_raw_governQualificationAppeal",
+  "temu_raw_governEprQualification",
+  "temu_raw_governProductPhoto",
+  "temu_raw_governComplianceInfo",
+  "temu_raw_governResponsiblePerson",
+  "temu_raw_governManufacturer",
+  "temu_raw_governComplaint",
+  "temu_raw_governViolationAppeal",
+  "temu_raw_governMerchantAppeal",
+  "temu_raw_governTro",
+  "temu_raw_governEprBilling",
+  "temu_raw_governComplianceReference",
+  "temu_raw_governCustomsAttribute",
+  "temu_raw_governCategoryCorrection",
+  "temu_raw_delivery",
+  "temu_raw_adsHome",
+  "temu_raw_adsProduct",
+  "temu_raw_adsReport",
+  "temu_raw_adsFinance",
+  "temu_raw_adsHelp",
+  "temu_raw_adsNotification",
+  "temu_raw_usRetrieval",
+]);
 let autoPricingTaskPromise = null;
 let autoPricingTaskSyncTimer = null;
 let autoPricingCurrentTaskId = null;
@@ -358,6 +431,10 @@ function normalizeStoreKey(key) {
   return normalized;
 }
 
+function buildScopedStoreKey(accountId, baseKey) {
+  return `temu_store:${accountId}:${baseKey}`;
+}
+
 function ensurePathInside(baseDir, targetPath, label) {
   const relative = path.relative(baseDir, targetPath);
   if (relative.startsWith("..") || path.isAbsolute(relative)) {
@@ -400,10 +477,40 @@ function getActiveWorkerCredentials() {
   try {
     const accounts = readStoreJsonWithRecovery(getStoreFilePath(ACCOUNT_STORE_KEY), ACCOUNT_STORE_KEY);
     const activeId = readStoreJsonWithRecovery(getStoreFilePath("temu_active_account_id"), "temu_active_account_id");
-    if (!Array.isArray(accounts) || !activeId) return {};
-    const active = accounts.find((account) => account?.id === activeId);
-    if (!active?.phone) return {};
-    return { phone: active.phone, password: active.password || "" };
+    if (!Array.isArray(accounts) || accounts.length === 0) return {};
+
+    const isPlaceholderAccount = (account) => {
+      const phone = typeof account?.phone === "string" ? account.phone.trim() : "";
+      const name = typeof account?.name === "string" ? account.name.trim() : "";
+      return phone === "13800138000" || /回归测试|test/i.test(name);
+    };
+
+    const sortByLastLoginDesc = (list) => list.slice().sort((a, b) => {
+      const aTime = a?.lastLoginAt ? new Date(a.lastLoginAt).getTime() : 0;
+      const bTime = b?.lastLoginAt ? new Date(b.lastLoginAt).getTime() : 0;
+      return bTime - aTime;
+    });
+
+    const active = activeId ? accounts.find((account) => account?.id === activeId) : null;
+    const usableAccounts = accounts.filter((account) => typeof account?.phone === "string" && account.phone.trim());
+    const preferredRealAccounts = usableAccounts.filter((account) => !isPlaceholderAccount(account));
+    const onlineRealAccounts = preferredRealAccounts.filter((account) => account?.status === "online" || account?.status === "logging_in");
+
+    const selected = (
+      (active && !isPlaceholderAccount(active) ? active : null) ||
+      onlineRealAccounts[0] ||
+      sortByLastLoginDesc(preferredRealAccounts)[0] ||
+      (active && active.phone ? active : null) ||
+      usableAccounts[0] ||
+      null
+    );
+
+    if (!selected?.phone) return {};
+    return {
+      accountId: selected.id || "",
+      phone: selected.phone,
+      password: selected.password || "",
+    };
   } catch {
     return {};
   }
@@ -411,7 +518,17 @@ function getActiveWorkerCredentials() {
 
 function attachWorkerCredentials(action, params = {}) {
   const nextParams = params && typeof params === "object" ? params : {};
-  if (action === "login") return nextParams;
+  if (action === "login") {
+    const loginPhone = typeof nextParams.phone === "string" ? nextParams.phone.trim() : "";
+    if (!loginPhone) return nextParams;
+    return {
+      ...nextParams,
+      credentials: {
+        phone: loginPhone,
+        password: typeof nextParams.password === "string" ? nextParams.password : "",
+      },
+    };
+  }
   if (nextParams?.credentials?.phone) return nextParams;
   const credentials = getActiveWorkerCredentials();
   if (!credentials.phone) return nextParams;
@@ -463,7 +580,7 @@ function httpPost(port, body, options = {}) {
   });
 }
 
-function waitForWorker(port, maxWait = 15000) {
+function waitForWorker(port, maxWait = 60000) {
   const start = Date.now();
   return new Promise((resolve, reject) => {
     function check() {
@@ -471,7 +588,7 @@ function waitForWorker(port, maxWait = 15000) {
         reject(new Error("Worker 启动超时"));
         return;
       }
-      httpPost(port, { action: "ping" })
+      httpPost(port, { action: "ping", timeoutMs: 2000 })
         .then(() => resolve(true))
         .catch(() => setTimeout(check, 500));
     }
@@ -523,112 +640,185 @@ async function startWorker(options = {}) {
   ).replace(/\/+$/, "");
 
   if (worker && workerReady && workerAiImageServer === desiredAiImageServer) return;
+  if (workerStartPromise) {
+    if (
+      workerStartTargetAiImageServer === desiredAiImageServer
+      || !workerStartTargetAiImageServer
+      || !desiredAiImageServer
+    ) {
+      return workerStartPromise;
+    }
 
-  // 清理旧进程
-  if (worker) {
-    await killChildProcessTree(worker);
-    worker = null;
-    workerReady = false;
-    workerAiImageServer = "";
+    try {
+      await workerStartPromise;
+    } catch {}
+
+    if (worker && workerReady && workerAiImageServer === desiredAiImageServer) return;
   }
 
-  // 先尝试关闭旧的 worker
-  await shutdownOldWorker();
-  workerAuthToken = createWorkerAuthToken();
+  workerStartTargetAiImageServer = desiredAiImageServer;
+  const currentStartPromise = (async () => {
+    // 清理旧进程
+    if (worker) {
+      await killChildProcessTree(worker);
+      worker = null;
+      workerReady = false;
+      workerAiImageServer = "";
+    }
 
-  // 打包模式优先用 ELECTRON_RUN_AS_NODE（能读 asar），否则用外部 Node
-  const workerPath = app.isPackaged
-    ? path.join(process.resourcesPath, "app.asar", "automation", "worker-entry.cjs")
-    : path.join(__dirname, "../automation/worker.mjs");
+    // 先尝试关闭旧的 worker
+    await shutdownOldWorker();
+    workerAuthToken = createWorkerAuthToken();
 
-  let nodeExe, childEnv;
-  if (app.isPackaged) {
-    nodeExe = process.execPath; // Electron 自身
-    childEnv = {
-      ...Object.fromEntries(
-        Object.entries(process.env).filter(([k]) => !k.startsWith("ELECTRON"))
-      ),
-      ELECTRON_RUN_AS_NODE: "1",
-      WORKER_PORT: String(workerPort),
-      WORKER_AUTH_TOKEN: workerAuthToken,
-      APP_USER_DATA: app.getPath("userData"),
-      AI_IMAGE_SERVER: desiredAiImageServer,
-    };
-  } else {
-    nodeExe = findNodeExe();
-    childEnv = {
-      ...Object.fromEntries(
-        Object.entries(process.env).filter(([k]) => !k.startsWith("ELECTRON"))
-      ),
-      WORKER_PORT: String(workerPort),
-      WORKER_AUTH_TOKEN: workerAuthToken,
-      APP_USER_DATA: app.getPath("userData"),
-      AI_IMAGE_SERVER: desiredAiImageServer,
-    };
-  }
+    // 打包模式优先用 ELECTRON_RUN_AS_NODE（能读 asar），否则用外部 Node
+    const workerPath = app.isPackaged
+      ? path.join(process.resourcesPath, "app.asar", "automation", "worker-entry.cjs")
+      : path.join(__dirname, "../automation/worker.mjs");
 
-  console.log(`[Main] Starting worker: ${nodeExe} ${workerPath} (port ${workerPort}) packaged=${app.isPackaged} aiImageServer=${desiredAiImageServer}`);
+    let nodeExe, childEnv;
+    if (app.isPackaged) {
+      nodeExe = process.execPath; // Electron 自身
+      childEnv = {
+        ...Object.fromEntries(
+          Object.entries(process.env).filter(([k]) => !k.startsWith("ELECTRON"))
+        ),
+        ELECTRON_RUN_AS_NODE: "1",
+        WORKER_PORT: String(workerPort),
+        WORKER_AUTH_TOKEN: workerAuthToken,
+        APP_USER_DATA: app.getPath("userData"),
+        AI_IMAGE_SERVER: desiredAiImageServer,
+      };
+    } else {
+      nodeExe = findNodeExe();
+      childEnv = {
+        ...Object.fromEntries(
+          Object.entries(process.env).filter(([k]) => !k.startsWith("ELECTRON"))
+        ),
+        WORKER_PORT: String(workerPort),
+        WORKER_AUTH_TOKEN: workerAuthToken,
+        APP_USER_DATA: app.getPath("userData"),
+        AI_IMAGE_SERVER: desiredAiImageServer,
+      };
+    }
 
-  worker = spawn(nodeExe, [workerPath], {
-    stdio: ["ignore", "pipe", "pipe"],
-    detached: false,
-    windowsHide: true,
-    env: childEnv,
-  });
+    console.log(`[Main] Starting worker: ${nodeExe} ${workerPath} (port ${workerPort}) packaged=${app.isPackaged} aiImageServer=${desiredAiImageServer}`);
 
-  // 只读 stderr 用于调试日志（安全处理 EPIPE）
-  if (worker.stderr) {
-    worker.stderr.on("data", (d) => {
-      try { console.error("[Worker]", d.toString()); } catch {}
+    worker = spawn(nodeExe, [workerPath], {
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: false,
+      windowsHide: true,
+      env: childEnv,
     });
-    worker.stderr.on("error", () => {}); // 忽略 pipe 错误
-  }
-  if (worker.stdout) {
-    worker.stdout.on("error", () => {}); // 忽略 pipe 错误
-  }
 
-  worker.on("exit", (code) => {
-    console.log(`[Main] Worker exited: ${code}`);
-    markAutoPricingTaskInterrupted("批量上品任务已中断，worker 已退出。");
-    stopAutoPricingTaskSync();
-    worker = null;
-    workerReady = false;
-    workerAiImageServer = "";
-    workerAuthToken = "";
-  });
+    // 只读 stderr 用于调试日志（安全处理 EPIPE）
+    if (worker.stderr) {
+      worker.stderr.on("data", (d) => {
+        try { console.error("[Worker]", d.toString()); } catch {}
+      });
+      worker.stderr.on("error", () => {}); // 忽略 pipe 错误
+    }
+    if (worker.stdout) {
+      worker.stdout.on("error", () => {}); // 忽略 pipe 错误
+    }
 
-  worker.on("error", (err) => {
-    try { console.error("[Main] Worker spawn error:", err.message); } catch {}
-    markAutoPricingTaskInterrupted("批量上品任务已中断，worker 启动失败。");
-    stopAutoPricingTaskSync();
-    worker = null;
-    workerReady = false;
-    workerAiImageServer = "";
-    workerAuthToken = "";
-  });
+    worker.on("exit", (code) => {
+      console.log(`[Main] Worker exited: ${code}`);
+      markAutoPricingTaskInterrupted("批量上品任务已中断，worker 已退出。");
+      stopAutoPricingTaskSync();
+      worker = null;
+      workerReady = false;
+      workerAiImageServer = "";
+      workerAuthToken = "";
+    });
 
-  // 等待 worker HTTP 服务就绪
+    worker.on("error", (err) => {
+      try { console.error("[Main] Worker spawn error:", err.message); } catch {}
+      markAutoPricingTaskInterrupted("批量上品任务已中断，worker 启动失败。");
+      stopAutoPricingTaskSync();
+      worker = null;
+      workerReady = false;
+      workerAiImageServer = "";
+      workerAuthToken = "";
+    });
+
+    // 等待 worker HTTP 服务就绪
+    try {
+      await waitForWorker(workerPort);
+      workerReady = true;
+      workerAiImageServer = desiredAiImageServer;
+      console.log(`[Main] Worker ready on port ${workerPort}`);
+    } catch (e) {
+      console.error("[Main] Worker 启动失败:", e.message);
+      if (worker) { await killChildProcessTree(worker); }
+      worker = null;
+      workerReady = false;
+      workerAiImageServer = "";
+      workerAuthToken = "";
+      throw e;
+    }
+  })();
+
+  workerStartPromise = currentStartPromise;
   try {
-    await waitForWorker(workerPort);
-    workerReady = true;
-    workerAiImageServer = desiredAiImageServer;
-    console.log(`[Main] Worker ready on port ${workerPort}`);
-  } catch (e) {
-    console.error("[Main] Worker 启动失败:", e.message);
-    if (worker) { await killChildProcessTree(worker); }
+    return await currentStartPromise;
+  } finally {
+    if (workerStartPromise === currentStartPromise) {
+      workerStartPromise = null;
+      workerStartTargetAiImageServer = "";
+    }
+  }
+}
+
+async function ensureWorkerStarted(options = {}, retries = 1) {
+  try {
+    await startWorker(options);
+    return;
+  } catch (error) {
+    const message = String(error?.message || "");
+    const canRetry = retries > 0 && /Worker 启动超时|Worker 通信失败|Worker 请求超时/i.test(message);
+    if (!canRetry) {
+      throw error;
+    }
+
+    console.error(`[Main] Worker startup failed, retrying (${retries} left):`, message);
+    workerStartPromise = null;
+    workerStartTargetAiImageServer = "";
+    if (worker) {
+      try { await killChildProcessTree(worker); } catch {}
+    }
     worker = null;
     workerReady = false;
     workerAiImageServer = "";
     workerAuthToken = "";
-    throw e;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    return ensureWorkerStarted(options, retries - 1);
   }
 }
 
 async function sendCmd(action, params = {}) {
   if (!workerReady) {
-    await startWorker();
+    await ensureWorkerStarted();
   }
-  return httpPost(workerPort, { action, params: attachWorkerCredentials(action, params) });
+  const nextParams = attachWorkerCredentials(action, params);
+  const payload = { action, params: nextParams };
+  if (Number(params?.timeoutMs) > 0) {
+    payload.timeoutMs = Number(params.timeoutMs);
+  }
+  const keepLongRunningWorkerAlive = action === "auto_pricing";
+  try {
+    return await httpPost(workerPort, payload);
+  } catch (error) {
+    const message = String(error?.message || "");
+    const shouldRetry = /ECONNRESET|ECONNREFUSED|socket hang up|Worker 通信失败|Worker 请求超时/i.test(message);
+    if (!shouldRetry || keepLongRunningWorkerAlive) {
+      throw error;
+    }
+
+    console.error(`[Main] Worker request failed for ${action}, restarting worker and retrying once:`, message);
+    workerReady = false;
+    await ensureWorkerStarted(workerAiImageServer ? { aiImageServer: workerAiImageServer } : {});
+    return httpPost(workerPort, payload);
+  }
 }
 
 function getDefaultAutoPricingState() {
@@ -824,7 +1014,7 @@ function upsertAutoPricingTask(taskPatch) {
 
 function markAutoPricingTaskInterrupted(message) {
   const activeTask = getAutoPricingTask(autoPricingCurrentTaskId);
-  if (!activeTask || !["running", "paused"].includes(activeTask.status)) {
+  if (!activeTask || !["running", "pausing", "paused"].includes(activeTask.status)) {
     return activeTask;
   }
   const now = new Date().toLocaleString("zh-CN");
@@ -972,7 +1162,7 @@ async function syncAutoPricingTaskFromWorker(taskId, options = {}) {
     return mergeWorkerSnapshotIntoTask(task, live, task.taskId);
   }
 
-  if (markInterruptedOnIdle && !autoPricingTaskPromise && ["running", "paused"].includes(task.status)) {
+  if (markInterruptedOnIdle && !autoPricingTaskPromise && ["running", "pausing", "paused"].includes(task.status)) {
     return markAutoPricingTaskInterrupted("任务已中断，应用或 worker 已重启，请重新发起批量上品。");
   }
 
@@ -1040,6 +1230,8 @@ function getAutoPricingProgressPayload(task) {
 
 function stopWorker() {
   stopAutoPricingTaskSync();
+  workerStartPromise = null;
+  workerStartTargetAiImageServer = "";
   if (worker) {
     void killChildProcessTree(worker);
     worker = null;
@@ -1061,10 +1253,19 @@ const IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG = Object.freeze({
   generateModel: "gemini-3.1-flash-image-preview",
   generateBaseUrl: "https://api.vectorengine.ai/v1",
 });
+const IMAGE_STUDIO_RUNTIME_CONFIG_KEYS = Object.freeze([
+  "analyzeModel",
+  "analyzeApiKey",
+  "analyzeBaseUrl",
+  "generateModel",
+  "generateApiKey",
+  "generateBaseUrl",
+]);
 
 let imageStudioProcess = null;
 let imageStudioPort = AUTO_IMAGE_DEFAULT_PORT;
 let imageStudioStartupPromise = null;
+let imageStudioRuntimeConfigOverrides = {};
 let imageStudioStatus = {
   status: "idle",
   message: "AI 出图服务未启动",
@@ -1396,19 +1597,65 @@ function getImageStudioAuthHeaders(projectInfo = getImageStudioProjectInfo()) {
 let lastImageStudioConfigSyncAt = 0;
 let lastImageStudioConfigSignature = "";
 
-function buildImageStudioRuntimeConfigPayload(projectInfo = getImageStudioProjectInfo()) {
+function normalizeImageStudioRuntimeConfigValue(value) {
+  if (value === undefined || value === null) {
+    return "";
+  }
+  return typeof value === "string" ? value : String(value);
+}
+
+function normalizeImageStudioRuntimeConfigPatch(patch = {}) {
+  const normalized = {};
+  IMAGE_STUDIO_RUNTIME_CONFIG_KEYS.forEach((key) => {
+    if (!Object.prototype.hasOwnProperty.call(patch, key)) return;
+    normalized[key] = normalizeImageStudioRuntimeConfigValue(patch[key]);
+  });
+  return normalized;
+}
+
+function resolveImageStudioRuntimeConfigValue(key, ...candidates) {
+  if (Object.prototype.hasOwnProperty.call(imageStudioRuntimeConfigOverrides, key)) {
+    return normalizeImageStudioRuntimeConfigValue(imageStudioRuntimeConfigOverrides[key]);
+  }
+  for (const candidate of candidates) {
+    if (candidate !== undefined && candidate !== null) {
+      return normalizeImageStudioRuntimeConfigValue(candidate);
+    }
+  }
+  return "";
+}
+
+function readImageStudioRuntimeConfig(projectInfo = getImageStudioProjectInfo()) {
   const envLocalVars = readEnvKeyValueFile(projectInfo?.envLocalPath);
-  const runtimeConfig = {
-    analyzeModel: envLocalVars.ANALYZE_MODEL || process.env.ANALYZE_MODEL || IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG.analyzeModel,
-    analyzeApiKey: envLocalVars.ANALYZE_API_KEY || process.env.ANALYZE_API_KEY || "",
-    analyzeBaseUrl: envLocalVars.ANALYZE_BASE_URL || process.env.ANALYZE_BASE_URL || IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG.analyzeBaseUrl,
-    generateModel: envLocalVars.GENERATE_MODEL || process.env.GENERATE_MODEL || IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG.generateModel,
-    generateApiKey: envLocalVars.GENERATE_API_KEY || process.env.GENERATE_API_KEY || "",
-    generateBaseUrl: envLocalVars.GENERATE_BASE_URL || process.env.GENERATE_BASE_URL || IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG.generateBaseUrl,
+  return {
+    analyzeModel: resolveImageStudioRuntimeConfigValue("analyzeModel", envLocalVars.ANALYZE_MODEL, process.env.ANALYZE_MODEL, IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG.analyzeModel),
+    analyzeApiKey: resolveImageStudioRuntimeConfigValue("analyzeApiKey", envLocalVars.ANALYZE_API_KEY, process.env.ANALYZE_API_KEY, ""),
+    analyzeBaseUrl: resolveImageStudioRuntimeConfigValue("analyzeBaseUrl", envLocalVars.ANALYZE_BASE_URL, process.env.ANALYZE_BASE_URL, IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG.analyzeBaseUrl),
+    generateModel: resolveImageStudioRuntimeConfigValue("generateModel", envLocalVars.GENERATE_MODEL, process.env.GENERATE_MODEL, IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG.generateModel),
+    generateApiKey: resolveImageStudioRuntimeConfigValue("generateApiKey", envLocalVars.GENERATE_API_KEY, process.env.GENERATE_API_KEY, ""),
+    generateBaseUrl: resolveImageStudioRuntimeConfigValue("generateBaseUrl", envLocalVars.GENERATE_BASE_URL, process.env.GENERATE_BASE_URL, IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG.generateBaseUrl),
   };
+}
+
+function buildImageStudioRuntimeConfigPayload(projectInfo = getImageStudioProjectInfo()) {
+  const runtimeConfig = readImageStudioRuntimeConfig(projectInfo);
   return Object.fromEntries(
-    Object.entries(runtimeConfig).filter(([, value]) => typeof value === "string" && value.trim())
+    Object.entries(runtimeConfig).filter(([key, value]) => {
+      if (Object.prototype.hasOwnProperty.call(imageStudioRuntimeConfigOverrides, key)) {
+        return true;
+      }
+      return typeof value === "string" && value.trim();
+    })
   );
+}
+
+function updateImageStudioRuntimeConfigOverrides(patch = {}) {
+  const normalizedPatch = normalizeImageStudioRuntimeConfigPatch(patch);
+  imageStudioRuntimeConfigOverrides = {
+    ...imageStudioRuntimeConfigOverrides,
+    ...normalizedPatch,
+  };
+  return readImageStudioRuntimeConfig();
 }
 
 function getImageStudioRuntimeConfigSignature(payload) {
@@ -1575,6 +1822,10 @@ function shouldFallbackAnalyzeModel(model) {
   return typeof model === "string" && model.trim() && model !== IMAGE_STUDIO_SAFE_ANALYZE_MODEL;
 }
 
+function shouldPreemptivelyUpgradeAnalyzeModel(model) {
+  return typeof model === "string" && /flash-lite/i.test(model) && model !== IMAGE_STUDIO_SAFE_ANALYZE_MODEL;
+}
+
 async function ensureCompatibleAnalyzeModel() {
   try {
     const currentConfig = await imageStudioJson("/api/config");
@@ -1592,6 +1843,27 @@ async function ensureCompatibleAnalyzeModel() {
     return true;
   } catch (error) {
     appendImageStudioLog(`[compat] failed to upgrade analyze model: ${error?.message || error}`);
+    return false;
+  }
+}
+
+async function normalizeAnalyzeModelBeforeRequest() {
+  try {
+    const currentConfig = await imageStudioJson("/api/config");
+    const currentModel = currentConfig?.analyzeModel;
+    if (!shouldPreemptivelyUpgradeAnalyzeModel(currentModel)) {
+      return false;
+    }
+
+    await imageStudioJson("/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ analyzeModel: IMAGE_STUDIO_SAFE_ANALYZE_MODEL }),
+    });
+    appendImageStudioLog(`[compat] analyze model normalized from ${currentModel} to ${IMAGE_STUDIO_SAFE_ANALYZE_MODEL}`);
+    return true;
+  } catch (error) {
+    appendImageStudioLog(`[compat] failed to normalize analyze model: ${error?.message || error}`);
     return false;
   }
 }
@@ -1960,7 +2232,7 @@ app.whenReady().then(async () => {
 
   const imageStudioStartupStatus = await imageStudioStartupPromise;
   try {
-    await startWorker({ aiImageServer: imageStudioStartupStatus?.url || imageStudioStatus.url });
+    await ensureWorkerStarted({ aiImageServer: imageStudioStartupStatus?.url || imageStudioStatus.url });
     console.log("[Main] Worker auto-started successfully");
   } catch (e) {
     console.error("[Main] Worker auto-start failed (will retry on demand):", e.message);
@@ -2034,17 +2306,9 @@ ipcMain.handle("automation:scrape-performance", async () => {
 });
 
 ipcMain.handle("automation:scrape-all", async () => {
-  if (!workerReady) await startWorker();
+  if (!workerReady) await ensureWorkerStarted();
   const credentials = getActiveWorkerCredentials();
   return httpPost(workerPort, { action: "scrape_all", params: { credentials }, timeoutMs: 30 * 60 * 1000 });
-});
-
-ipcMain.handle("automation:create-product", async (_e, params) => {
-  if (params?.generateAI !== false && params?.sourceImage) {
-    const imageStudio = await ensureImageStudioService();
-    await startWorker({ aiImageServer: imageStudio.url });
-  }
-  return sendCmd("create_product", params);
 });
 
 ipcMain.handle("automation:filter-product-table", async (_e, csvPath) => {
@@ -2054,7 +2318,7 @@ ipcMain.handle("automation:filter-product-table", async (_e, csvPath) => {
 
 ipcMain.handle("automation:auto-pricing", async (_e, params) => {
   const existingTask = getAutoPricingTask(autoPricingCurrentTaskId);
-  if (existingTask && ["running", "paused"].includes(existingTask.status)) {
+  if (existingTask && ["running", "pausing", "paused"].includes(existingTask.status)) {
     return {
       accepted: false,
       taskId: existingTask.taskId,
@@ -2064,7 +2328,8 @@ ipcMain.handle("automation:auto-pricing", async (_e, params) => {
   }
 
   const imageStudio = await ensureImageStudioService();
-  await startWorker({ aiImageServer: imageStudio.url });
+  await ensureWorkerStarted({ aiImageServer: imageStudio.url });
+  const credentials = getActiveWorkerCredentials();
 
   const now = new Date().toLocaleString("zh-CN");
   const taskId = typeof params?.taskId === "string" && params.taskId.trim()
@@ -2092,7 +2357,12 @@ ipcMain.handle("automation:auto-pricing", async (_e, params) => {
   });
 
   startAutoPricingTaskSync();
-  autoPricingTaskPromise = sendCmd("auto_pricing", { ...params, taskId })
+  autoPricingTaskPromise = sendCmd("auto_pricing", {
+    ...params,
+    taskId,
+    credentials,
+    timeoutMs: 60 * 60 * 1000,
+  })
     .then((result) => {
       const finishedAt = new Date().toLocaleString("zh-CN");
       appendCreateHistoryEntries((result?.results || []).map((item) => ({
@@ -2170,26 +2440,28 @@ ipcMain.handle("automation:auto-pricing", async (_e, params) => {
 });
 
 ipcMain.handle("automation:pause-pricing", async (_e, taskId) => {
-  const result = await sendCmd("pause_pricing", { taskId });
+  await sendCmd("pause_pricing", { taskId });
   const activeTask = getAutoPricingTask(taskId || autoPricingCurrentTaskId);
   if (activeTask) {
-    upsertAutoPricingTask({
+    const nextTask = upsertAutoPricingTask({
       ...activeTask,
-      status: "paused",
+      status: "pausing",
       running: true,
-      paused: true,
+      paused: false,
       message: "暂停请求已发送，当前商品处理完后停止。",
       updatedAt: new Date().toLocaleString("zh-CN"),
     });
+    startAutoPricingTaskSync();
+    return getAutoPricingProgressPayload(nextTask);
   }
-  return result;
+  return getAutoPricingProgressPayload(getAutoPricingTask(taskId || autoPricingCurrentTaskId));
 });
 
 ipcMain.handle("automation:resume-pricing", async (_e, taskId) => {
-  const result = await sendCmd("resume_pricing", { taskId });
+  await sendCmd("resume_pricing", { taskId });
   const activeTask = getAutoPricingTask(taskId || autoPricingCurrentTaskId);
   if (activeTask) {
-    upsertAutoPricingTask({
+    const nextTask = upsertAutoPricingTask({
       ...activeTask,
       status: "running",
       running: true,
@@ -2197,9 +2469,11 @@ ipcMain.handle("automation:resume-pricing", async (_e, taskId) => {
       message: "批量上品任务已恢复。",
       updatedAt: new Date().toLocaleString("zh-CN"),
     });
+    startAutoPricingTaskSync();
+    return getAutoPricingProgressPayload(nextTask);
   }
   startAutoPricingTaskSync();
-  return result;
+  return getAutoPricingProgressPayload(getAutoPricingTask(taskId || autoPricingCurrentTaskId));
 });
 
 ipcMain.handle("automation:list-drafts", async () => {
@@ -2276,9 +2550,33 @@ ipcMain.handle("image-studio:restart", async () => {
   stopImageStudioService();
   const status = await ensureImageStudioService();
   if (workerReady) {
-    await startWorker({ aiImageServer: status.url });
+    await ensureWorkerStarted({ aiImageServer: status.url });
   }
   return status;
+});
+
+ipcMain.handle("image-studio:get-config", async () => {
+  return readImageStudioRuntimeConfig();
+});
+
+ipcMain.handle("image-studio:update-config", async (_event, payload) => {
+  const normalizedPatch = normalizeImageStudioRuntimeConfigPatch(payload);
+  if (Object.keys(normalizedPatch).length === 0) {
+    return readImageStudioRuntimeConfig();
+  }
+
+  const nextConfig = updateImageStudioRuntimeConfigOverrides(normalizedPatch);
+  await imageStudioJson("/api/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(normalizedPatch),
+  });
+
+  const currentPayload = buildImageStudioRuntimeConfigPayload();
+  lastImageStudioConfigSignature = getImageStudioRuntimeConfigSignature(currentPayload);
+  lastImageStudioConfigSyncAt = Date.now();
+  appendImageStudioLog("[config] runtime config updated from renderer bridge");
+  return nextConfig;
 });
 
 ipcMain.handle("image-studio:open-external", async () => {
@@ -2297,6 +2595,8 @@ ipcMain.handle("image-studio:analyze", async (_event, payload) => {
       },
     }),
   });
+
+  await normalizeAnalyzeModelBeforeRequest();
 
   try {
     return await requestAnalyze();
@@ -2320,6 +2620,8 @@ ipcMain.handle("image-studio:regenerate-analysis", async (_event, payload) => {
       },
     }),
   });
+
+  await normalizeAnalyzeModelBeforeRequest();
 
   try {
     return await requestRegenerateAnalysis();
@@ -2814,6 +3116,16 @@ ipcMain.handle("store:set", async (_, key, data) => {
   try {
     const filePath = getStoreFilePath(normalizedKey);
     await writeStoreJsonAtomicAsync(filePath, data, { key: normalizedKey });
+    if (ACCOUNT_SCOPED_STORE_KEYS.has(normalizedKey)) {
+      const activeAccountId = await readStoreJsonWithRecoveryAsync(
+        getStoreFilePath(ACTIVE_ACCOUNT_ID_KEY),
+        ACTIVE_ACCOUNT_ID_KEY,
+      );
+      if (typeof activeAccountId === "string" && activeAccountId.trim()) {
+        const scopedKey = buildScopedStoreKey(activeAccountId, normalizedKey);
+        await writeStoreJsonAtomicAsync(getStoreFilePath(scopedKey), data, { key: scopedKey });
+      }
+    }
     return true;
   } catch (err) {
     console.error(`[Store] Write failed for key="${normalizedKey}":`, err?.code, err?.message);

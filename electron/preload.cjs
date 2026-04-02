@@ -29,8 +29,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.invoke("automation:scrape-performance"),
     scrapeAll: () =>
       ipcRenderer.invoke("automation:scrape-all"),
-    createProduct: (params) =>
-      ipcRenderer.invoke("automation:create-product", params),
     filterProductTable: (csvPath) =>
       ipcRenderer.invoke("automation:filter-product-table", csvPath),
     autoPricing: (params) =>
@@ -81,6 +79,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     getStatus: () => ipcRenderer.invoke("image-studio:get-status"),
     ensureRunning: () => ipcRenderer.invoke("image-studio:ensure-running"),
     restart: () => ipcRenderer.invoke("image-studio:restart"),
+    getConfig: () => ipcRenderer.invoke("image-studio:get-config"),
+    updateConfig: (payload) => ipcRenderer.invoke("image-studio:update-config", payload),
     openExternal: () => ipcRenderer.invoke("image-studio:open-external"),
     analyze: (payload) => ipcRenderer.invoke("image-studio:analyze", payload),
     regenerateAnalysis: (payload) => ipcRenderer.invoke("image-studio:regenerate-analysis", payload),

@@ -8,14 +8,30 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import { createRequire } from "module";
+import { fileURLToPath } from "url";
 import { randomDelay, downloadImage, saveBase64Image, getDebugDir, getTmpDir, logSilent, ERR } from "./utils.mjs";
 import { browserState, ensureBrowser as _ensureBrowser, launch as _launch, login, saveCookies, closeBrowser, findLatestCookie } from "./browser.mjs";
 import { ADS_GROUP_TABS, GOVERN_GROUP_TARGETS, buildScrapeHandlers, getScrapeFunction } from "./scrape-registry.mjs";
+import { getConfiguredMaxRetries, getDelayScale, shouldAutoLoginRetry, shouldCaptureErrorScreenshots } from "./runtime-config.mjs";
 const require = createRequire(import.meta.url);
 const XLSX = require("xlsx");
 
-// Load API keys from temu-claw .env
+function normalizeChatBaseUrl(value, fallback = "") {
+  const raw = String(value || fallback || "").trim();
+  if (!raw) return "";
+  return raw.replace(/\/chat\/completions\/?$/i, "").replace(/\/+$/, "");
+}
+
+const workerFilePath = fileURLToPath(import.meta.url);
+const workerDirPath = path.dirname(workerFilePath);
+const projectRootDir = path.resolve(workerDirPath, "..");
+
+// Load API keys from local env files first, then legacy temu-claw .env
 const envFiles = [
+  path.join(projectRootDir, ".env.local"),
+  path.join(projectRootDir, ".env"),
+  path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", ".env.local"),
+  path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", ".env"),
   path.join(process.env.APPDATA || "", "..", "temu-claw", ".env"),
   "C:/Users/Administrator/temu-claw/.env",
 ];
@@ -32,9 +48,13 @@ for (const envFile of envFiles) {
 }
 
 // AI API 配置（从环境变量读取，不再硬编码）
+const DEFAULT_AI_BASE_URL = "https://api.vectorengine.ai/v1";
 const AI_API_KEY = process.env.VECTORENGINE_API_KEY || "";
-const AI_BASE_URL = process.env.VECTORENGINE_BASE_URL || "https://api.vectorengine.ai/v1";
+const AI_BASE_URL = normalizeChatBaseUrl(process.env.VECTORENGINE_BASE_URL, DEFAULT_AI_BASE_URL);
 const AI_MODEL = process.env.VECTORENGINE_MODEL || "gemini-3.1-flash-lite-preview";
+const ATTRIBUTE_AI_API_KEY = process.env.VECTORENGINE_ATTRIBUTE_API_KEY || AI_API_KEY;
+const ATTRIBUTE_AI_BASE_URL = normalizeChatBaseUrl(process.env.VECTORENGINE_ATTRIBUTE_BASE_URL, AI_BASE_URL);
+const ATTRIBUTE_AI_MODEL = process.env.VECTORENGINE_ATTRIBUTE_MODEL || AI_MODEL;
 const GENERATED_WORKER_AUTH_TOKEN = crypto.randomBytes(32).toString("hex");
 const WORKER_AUTH_TOKEN = process.env.WORKER_AUTH_TOKEN || GENERATED_WORKER_AUTH_TOKEN;
 let requestCredentialPhone = "";
@@ -378,14 +398,127 @@ function clearBrowserPassword() {
   browserState.lastPassword = "";
 }
 
+function sanitizeLoginPhone(value = "") {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length === 11) return digits;
+  if (digits.length > 11) return digits.slice(-11);
+  return digits || raw;
+}
+
 function getRequestCredentials() {
   return {
-    phone: requestCredentialPhone || browserState.lastPhone || "",
+    phone: sanitizeLoginPhone(requestCredentialPhone || browserState.lastPhone || ""),
     password: requestCredentialPassword,
   };
 }
 
+function getWorkerTypingDelay() {
+  const scale = getDelayScale();
+  const min = Math.max(20, Math.round(40 * scale));
+  const max = Math.max(min, Math.round(120 * scale));
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function buildSellerCentralUrl(targetPath = "/goods/list") {
+  return /^https?:\/\//i.test(String(targetPath || ""))
+    ? String(targetPath)
+    : `https://agentseller.temu.com${targetPath}`;
+}
+
+async function openSellerCentralTarget(page, targetPath = "/goods/list", options = {}) {
+  const lite = Boolean(options.lite);
+  const directUrl = buildSellerCentralUrl(targetPath);
+  const logPrefix = options.logPrefix || "[page-open]";
+
+  console.error(`${logPrefix} Opening ${directUrl} (lite=${lite})`);
+  for (let navTry = 0; navTry < 3; navTry += 1) {
+    try {
+      await page.goto(directUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+      break;
+    } catch (navErr) {
+      const retryable = /ERR_ABORTED|frame was detached|ERR_FAILED/i.test(navErr?.message || "");
+      if (!retryable || navTry >= 2) throw navErr;
+      console.error(`${logPrefix} goto retry ${navTry + 1}/3: ${navErr.message}`);
+      await randomDelay(lite ? 800 : 1800, lite ? 1400 : 2600);
+    }
+  }
+
+  await page.waitForSelector("body", { timeout: lite ? 2500 : 5000 }).catch(() => {});
+  await page.waitForFunction(
+    () => document.readyState === "interactive" || document.readyState === "complete",
+    { timeout: lite ? 2000 : 4000 }
+  ).catch(() => {});
+  await page.waitForLoadState("domcontentloaded", { timeout: lite ? 2000 : 4000 }).catch(() => {});
+  await randomDelay(lite ? 300 : 700, lite ? 600 : 1100);
+  await page.waitForURL(/.*/, { timeout: lite ? 3000 : 10000 }).catch(() => {});
+  console.error(`${logPrefix} Current URL: ${page.url()}`);
+  return page;
+}
+
+let dedicatedSellerLoginPromise = null;
+
+async function ensureDedicatedSellerLogin(logPrefix = "[seller-login-fallback]") {
+  if (dedicatedSellerLoginPromise) {
+    return dedicatedSellerLoginPromise;
+  }
+
+  const { phone, password } = getRequestCredentials();
+  if (!phone || !password) {
+    console.error(`${logPrefix} Missing saved credentials, skip dedicated login`);
+    return false;
+  }
+
+  dedicatedSellerLoginPromise = (async () => {
+    console.error(`${logPrefix} Starting dedicated seller login`);
+    try {
+      await loginWithTransientPassword(phone, password);
+      console.error(`${logPrefix} Dedicated seller login completed`);
+      return true;
+    } catch (error) {
+      console.error(`${logPrefix} Dedicated seller login failed: ${error.message}`);
+      return false;
+    } finally {
+      dedicatedSellerLoginPromise = null;
+    }
+  })();
+
+  return dedicatedSellerLoginPromise;
+}
+
+function getLatestWorkerPage(preferredPage = null) {
+  if (preferredPage && !preferredPage.isClosed?.()) return preferredPage;
+  const pageList = context?.pages?.() || browserState.context?.pages?.() || [];
+  for (let index = pageList.length - 1; index >= 0; index -= 1) {
+    const page = pageList[index];
+    if (page && !page.isClosed?.()) return page;
+  }
+  return null;
+}
+
+async function captureWorkerErrorScreenshot(tag, preferredPage = null) {
+  if (!shouldCaptureErrorScreenshots()) return "";
+  const targetPage = getLatestWorkerPage(preferredPage);
+  if (!targetPage) return "";
+  try {
+    const filename = `${String(tag || "worker_error").replace(/[^a-z0-9_-]/gi, "_")}_${Date.now()}.png`;
+    const filePath = path.join(getDebugDir(), filename);
+    await targetPage.screenshot({ path: filePath, fullPage: true });
+    console.error(`[Worker] Error screenshot saved: ${filePath}`);
+    return filePath;
+  } catch (error) {
+    logSilent("worker.screenshot", error);
+    return "";
+  }
+}
+
 async function tryAutoLoginInPopup(popup, logPrefix = "[popup-login]") {
+  if (!shouldAutoLoginRetry()) {
+    console.error(`${logPrefix} Auto-login retry disabled by settings`);
+    return false;
+  }
+
   const { phone, password } = getRequestCredentials();
   if (!phone || !password) {
     console.error(`${logPrefix} Missing saved credentials, skip auto-login`);
@@ -401,31 +534,47 @@ async function tryAutoLoginInPopup(popup, logPrefix = "[popup-login]") {
       }
     } catch (e) { logSilent("ui.action", e); }
 
-    const phoneInput = await popup.waitForSelector('#usernameId, input[name="usernameId"], input[placeholder*="手机"], input[placeholder*="号码"]', { timeout: 3000 });
+    const phoneInput = await popup.waitForSelector(
+      '#usernameId, input[name="usernameId"], input[type="tel"], input[inputmode="numeric"], input[placeholder*="手机"], input[placeholder*="号码"]',
+      { timeout: 8000 }
+    );
     await phoneInput.click();
     await phoneInput.fill("");
-    for (const c of phone) await phoneInput.type(c, { delay: Math.random() * 80 + 40 });
+    for (const c of phone) await phoneInput.type(c, { delay: getWorkerTypingDelay() });
     await randomDelay(400, 800);
 
-    const passwordInput = await popup.waitForSelector('#passwordId, input[type="password"]', { timeout: 3000 });
+    const passwordInput = await popup.waitForSelector('#passwordId, input[type="password"]', { timeout: 8000 });
     await passwordInput.click();
     await passwordInput.fill("");
-    for (const c of password) await passwordInput.type(c, { delay: Math.random() * 80 + 40 });
+    for (const c of password) await passwordInput.type(c, { delay: getWorkerTypingDelay() });
     await randomDelay(400, 800);
 
-    try {
-      const checkbox = popup.locator('input[type="checkbox"]').first();
-      if (await checkbox.isVisible({ timeout: 1000 })) {
-        const checked = await checkbox.isChecked().catch(() => false);
-        if (!checked) await checkbox.click();
-      }
-    } catch (e) { logSilent("ui.action", e); }
+    const consentReady = await ensurePopupConsentChecked(popup, logPrefix);
+    if (!consentReady) {
+      throw new Error("未能自动勾选隐私协议");
+    }
     await randomDelay(200, 500);
 
-    const loginBtn = await popup.waitForSelector('button:has-text("登录"), button:has-text("授权登录")', { timeout: 3000 });
+    const loginBtn = await popup.waitForSelector('button:has-text("登录"), button:has-text("授权登录"), button:has-text("同意并登录")', { timeout: 8000 });
     await loginBtn.click();
     console.error(`${logPrefix} Auto-login submitted`);
     await randomDelay(1500, 2500);
+
+    try {
+      const loginHint = await popup.evaluate(() => {
+        const nodes = [...document.querySelectorAll('[class*="error"], [class*="toast"], [class*="tip"], [class*="message"], [role="alert"]')];
+        const text = nodes
+          .map((node) => (node.textContent || "").trim())
+          .filter(Boolean)
+          .join(" | ");
+        return text.slice(0, 160);
+      });
+      if (loginHint) {
+        console.error(`${logPrefix} Login hint after submit: ${loginHint}`);
+      }
+    } catch (e) {
+      logSilent("ui.action", e);
+    }
 
     try {
       const agreeBtn = popup.locator('button:has-text("同意并登录"), button:has-text("同意")').first();
@@ -437,14 +586,447 @@ async function tryAutoLoginInPopup(popup, logPrefix = "[popup-login]") {
 
     return true;
   } catch (error) {
+    await captureWorkerErrorScreenshot("auto_login_popup_error", popup);
     console.error(`${logPrefix} Auto-login failed: ${error.message}`);
     return false;
+  }
+}
+
+async function ensurePopupConsentChecked(popup, logPrefix = "[popup-consent]") {
+  const isConsentChecked = async () => {
+    try {
+      return await popup.evaluate(() => {
+        const inputs = [...document.querySelectorAll('input[type="checkbox"]')];
+        if (inputs.some((input) => input.checked)) return true;
+        const customs = [...document.querySelectorAll('[role="checkbox"], [aria-checked], [class*="checkbox"], [class*="Checkbox"]')];
+        return customs.some((node) => {
+          const value = node.getAttribute("aria-checked");
+          return value === "true" || node.classList.contains("checked") || node.classList.contains("is-checked");
+        });
+      });
+    } catch (error) {
+      logSilent("ui.action", error);
+      return false;
+    }
+  };
+
+  if (await isConsentChecked()) {
+    return true;
+  }
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      const checkbox = popup.locator('input[type="checkbox"]').first();
+      if (await checkbox.isVisible({ timeout: 1200 }).catch(() => false)) {
+        const checked = await checkbox.isChecked().catch(() => false);
+        if (!checked) {
+          await checkbox.click({ force: true });
+          console.error(`${logPrefix} Checked consent checkbox via input`);
+        }
+      }
+    } catch (e) {
+      logSilent("ui.action", e);
+    }
+
+    if (await isConsentChecked()) {
+      return true;
+    }
+
+    try {
+      const clicked = await popup.evaluate(() => {
+        const consentTexts = ["隐私政策", "阅读并同意", "已阅读并同意", "授权", "同意"];
+        const setChecked = (input) => {
+          try {
+            const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "checked");
+            descriptor?.set?.call(input, true);
+          } catch {}
+          try { input.checked = true; } catch {}
+          input.dispatchEvent(new Event("click", { bubbles: true }));
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+        };
+
+        const inputs = [...document.querySelectorAll('input[type="checkbox"]')];
+        for (const input of inputs) {
+          if (input.checked) return true;
+          const label = input.closest("label") || document.querySelector(`label[for="${input.id}"]`);
+          if (label) {
+            label.click();
+            if (input.checked) return true;
+          }
+          setChecked(input);
+          if (input.checked) return true;
+        }
+
+        const nodes = [
+          ...document.querySelectorAll('label, [role="checkbox"], [aria-checked], [class*="checkbox"], [class*="Checkbox"], span, div'),
+        ];
+        for (const node of nodes) {
+          const text = (node.textContent || "").replace(/\s+/g, "");
+          if (!text) continue;
+          if (consentTexts.some((keyword) => text.includes(keyword))) {
+            node.click();
+            return true;
+          }
+        }
+        return false;
+      });
+      if (clicked) {
+        console.error(`${logPrefix} Clicked consent fallback`);
+      }
+    } catch (e) {
+      logSilent("ui.action", e);
+    }
+
+    await randomDelay(200, 400);
+    if (await isConsentChecked()) {
+      return true;
+    }
+  }
+
+  console.error(`${logPrefix} Consent checkbox still unchecked after retries`);
+  return false;
+}
+
+async function clickSellerAuthConfirmButton(popup, logPrefix = "[popup-auth]") {
+  const buttonSelectors = [
+    'button:has-text("确认授权并前往")',
+    'button:has-text("确认授权")',
+    'button:has-text("授权登录")',
+    'button:has-text("确认并前往")',
+    'button:has-text("进入")',
+  ];
+
+  for (const selector of buttonSelectors) {
+    try {
+      const button = popup.locator(selector).first();
+      if (await button.isVisible({ timeout: 1000 })) {
+        await button.click();
+        console.error(`${logPrefix} Clicked auth button via locator: ${selector}`);
+        return true;
+      }
+    } catch (error) {
+      logSilent("ui.action", error);
+    }
+  }
+
+  try {
+    const clicked = await popup.evaluate(() => {
+      const buttonKeywords = ["确认授权并前往", "确认授权", "授权登录", "确认并前往", "进入"];
+      const buttons = [...document.querySelectorAll('button, [role="button"], a, div[class*="btn"], span[class*="btn"]')];
+      for (const keyword of buttonKeywords) {
+        const target = buttons.find((node) => {
+          const text = (node.textContent || "").trim();
+          return text.includes(keyword) && text.length < 30;
+        });
+        if (!target) continue;
+        try { target.removeAttribute?.("disabled"); } catch {}
+        try { target.disabled = false; } catch {}
+        target.click();
+        return keyword;
+      }
+      return "";
+    });
+    if (clicked) {
+      console.error(`${logPrefix} Clicked auth button via evaluate: ${clicked}`);
+      return true;
+    }
+  } catch (error) {
+    logSilent("ui.action", error);
+  }
+
+  return false;
+}
+
+async function detectSellerPopupStage(popup) {
+  try {
+    return await popup.evaluate(() => {
+      const rawText = document.body?.innerText || "";
+      const text = rawText.replace(/\s+/g, "");
+      const hasPhoneInput = Boolean(document.querySelector(
+        '#usernameId, input[name="usernameId"], input[type="tel"], input[inputmode="numeric"], input[placeholder*="手机"], input[placeholder*="号码"]'
+      ));
+      const hasPasswordInput = Boolean(document.querySelector('#passwordId, input[type="password"]'));
+      const looksLikeLogin = hasPhoneInput || hasPasswordInput || /手机号|密码|账号登录/.test(text);
+      if (looksLikeLogin) return "login";
+      if (/确认授权|即将前往|SellerCentral/.test(text)) return "auth";
+      if (text.includes("授权登录")) return "auth";
+      return "unknown";
+    });
+  } catch (error) {
+    logSilent("ui.action", error);
+    return "unknown";
+  }
+}
+
+function isSellerCentralAuthUrl(url = "") {
+  const text = String(url || "");
+  return text.includes("/main/authentication")
+    || text.includes("/main/entry")
+    || text.includes("seller-login")
+    || text.includes("kuajingmaihuo.com/settle");
+}
+
+async function isSellerCentralAuthPage(page) {
+  try {
+    if (!page || page.isClosed?.()) return false;
+    if (isSellerCentralAuthUrl(page.url())) return true;
+    return await page.evaluate(() => {
+      const text = (document.body?.innerText || "").replace(/\s+/g, "");
+      return (
+        text.includes("确认授权并前往")
+        || text.includes("即将前往SellerCentral")
+        || text.includes("即将前往SellerCentral(全球)")
+        || text.includes("您授权您的账号ID和店铺名称")
+      );
+    });
+  } catch (error) {
+    logSilent("ui.action", error);
+    return false;
+  }
+}
+
+async function triggerSellerCentralAuthEntry(page, logPrefix = "[auth-entry]") {
+  if (!page || page.isClosed?.()) return false;
+  try {
+    const gotoButton = page.locator('[class*="authentication_goto"]').first();
+    if (await gotoButton.isVisible({ timeout: 1500 })) {
+      await gotoButton.click();
+      console.error(`${logPrefix} Clicked authentication_goto`);
+      return true;
+    }
+  } catch (error) {
+    logSilent("ui.action", error);
+  }
+
+  try {
+    const clicked = await page.evaluate(() => {
+      const candidates = [
+        ...document.querySelectorAll('button, a, div, span'),
+      ];
+      for (const node of candidates) {
+        const text = (node.textContent || "").replace(/\s+/g, "");
+        if (!text) continue;
+        if (
+          text.includes("商家中心")
+          || text.includes("SellerCentral")
+          || text.includes("继续前往")
+          || text.includes("确认授权")
+        ) {
+          node.click();
+          return text.slice(0, 30);
+        }
+      }
+      return "";
+    });
+    if (clicked) {
+      console.error(`${logPrefix} Clicked auth entry via evaluate: ${clicked}`);
+      return true;
+    }
+  } catch (error) {
+    logSilent("ui.action", error);
+  }
+
+  return false;
+}
+
+async function handleOpenSellerAuthPages(logPrefix = "[popup-open]") {
+  let handled = false;
+  const pages = context?.pages?.() || [];
+  for (const page of pages) {
+    if (!page || page.isClosed?.()) continue;
+    const currentUrl = page.url();
+    if (!isSellerCentralAuthUrl(currentUrl)) continue;
+    if (currentUrl.includes("kuajingmaihuo.com") || currentUrl.includes("seller-login")) {
+      await handleSellerAuthPopupPage(page, logPrefix);
+      handled = true;
+      continue;
+    }
+    const triggered = await triggerSellerCentralAuthEntry(page, `${logPrefix}-entry`);
+    handled = handled || triggered;
+    if (triggered) {
+      await randomDelay(1200, 2000);
+    }
+    const followupPages = context?.pages?.() || [];
+    for (const followupPage of followupPages) {
+      if (!followupPage || followupPage.isClosed?.()) continue;
+      const followupUrl = followupPage.url();
+      if (!followupUrl.includes("kuajingmaihuo.com") && !followupUrl.includes("seller-login")) continue;
+      await handleSellerAuthPopupPage(followupPage, logPrefix);
+      handled = true;
+    }
+    handled = true;
+  }
+  return handled;
+}
+
+async function ensureSellerCentralSessionReady(page, targetPath = "/goods/list", logPrefix = "[session-ready]") {
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    const authPending = await isSellerCentralAuthPage(page);
+    if (!authPending && page.url().includes("agentseller.temu.com")) {
+      console.error(`${logPrefix} Ready on attempt ${attempt}: ${page.url()}`);
+      return true;
+    }
+
+    console.error(`${logPrefix} Auth pending on attempt ${attempt}: ${page.url()}`);
+    if (page.url().includes("/main/authentication") || page.url().includes("/main/entry")) {
+      await triggerSellerCentralAuthEntry(page, `${logPrefix}-self`);
+      await randomDelay(1200, 2000);
+    }
+    await handleOpenSellerAuthPages(`${logPrefix}-popup`);
+    await randomDelay(1500, 2500);
+
+    if (await isSellerCentralAuthPage(page)) {
+      await openSellerCentralTarget(page, targetPath, { lite: false, logPrefix: `${logPrefix}-goto` });
+      await randomDelay(1500, 2500);
+    }
+  }
+
+  return false;
+}
+
+async function handleSellerAuthPopupPage(newPage, logPrefix = "[popup-monitor]") {
+  try {
+    const url = newPage.url();
+    console.error(`${logPrefix} New page detected: ${url}`);
+
+    await newPage.waitForLoadState("domcontentloaded").catch(() => {});
+    await randomDelay(2000, 4000);
+
+    const currentUrl = newPage.url();
+    console.error(`${logPrefix} Page loaded, URL: ${currentUrl}`);
+
+    if (!currentUrl.includes("kuajingmaihuo.com") && !currentUrl.includes("seller-login")) {
+      console.error(`${logPrefix} Not an auth popup, ignoring`);
+      return;
+    }
+
+    for (let attempt = 0; attempt < 10; attempt++) {
+      try {
+        const popupStage = await detectSellerPopupStage(newPage);
+        console.error(`${logPrefix} Popup stage on attempt ${attempt + 1}: ${popupStage}`);
+
+        if (popupStage === "login") {
+          const submitted = await tryAutoLoginInPopup(newPage, logPrefix);
+          await randomDelay(2000, 3000);
+
+          const nextStage = await detectSellerPopupStage(newPage);
+          if (nextStage === "login" && submitted && attempt >= 1) {
+            const dedicatedLoginOk = await ensureDedicatedSellerLogin(`${logPrefix}-full`);
+            if (dedicatedLoginOk && !newPage.isClosed()) {
+              await newPage.reload({ waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
+              await randomDelay(2000, 3000);
+            }
+          }
+
+          await randomDelay(2000, 3000);
+          continue;
+        }
+
+        if (popupStage !== "auth") {
+          await randomDelay(2000, 3000);
+          continue;
+        }
+
+        await ensurePopupConsentChecked(newPage, logPrefix);
+        await randomDelay(500, 1000);
+
+        const clicked = await clickSellerAuthConfirmButton(newPage, logPrefix);
+
+        if (!clicked) {
+          await randomDelay(2000, 3000);
+          continue;
+        }
+
+        await randomDelay(3000, 5000);
+        const nextStage = await detectSellerPopupStage(newPage);
+        if (nextStage === "login" || nextStage === "auth") {
+          console.error(`${logPrefix} Popup still on ${nextStage} stage after click, retrying`);
+          continue;
+        }
+
+        await saveCookies();
+        console.error(`${logPrefix} Auth popup handled successfully`);
+        return;
+      } catch (error) {
+        if (newPage.isClosed()) return;
+        logSilent("ui.action", error);
+      }
+      await randomDelay(2000, 3000);
+    }
+
+    console.error(`${logPrefix} Auth dialog not resolved after 10 attempts`);
+  } catch (error) {
+    console.error(`${logPrefix} Error handling popup: ${error.message}`);
+  }
+}
+
+function registerSellerAuthPopupMonitor(logPrefix = "[popup-monitor]") {
+  let active = true;
+  const handler = async (newPage) => {
+    if (!active) return;
+    await handleSellerAuthPopupPage(newPage, logPrefix);
+  };
+
+  context.on("page", handler);
+  console.error(`${logPrefix} Monitor registered`);
+
+  for (const page of context.pages()) {
+    if (!page || page.isClosed?.()) continue;
+    handler(page).catch((error) => console.error(`${logPrefix} Existing page scan failed: ${error.message}`));
+  }
+
+  return () => {
+    active = false;
+    try {
+      context.removeListener("page", handler);
+    } catch (error) {
+      console.error(`${logPrefix} cleanup error: ${error.message}`);
+    }
+    console.error(`${logPrefix} Monitor removed`);
+  };
+}
+
+async function establishSellerCentralSession(logPrefix = "[session]") {
+  const warmupPage = await createSellerCentralPage("/goods/list", {
+    attempts: 2,
+    lite: false,
+    readyDelayMin: 2000,
+    readyDelayMax: 3000,
+    logPrefix,
+  });
+  try {
+    const ready = await ensureSellerCentralSessionReady(warmupPage, "/goods/list", logPrefix);
+    if (!ready) {
+      throw new Error("Seller Central 授权未完成");
+    }
+    await dismissCommonDialogs(warmupPage);
+    await saveCookies();
+    console.error(`${logPrefix} Session established, URL: ${warmupPage.url()}`);
+  } finally {
+    await warmupPage.close().catch(() => {});
   }
 }
 
 async function withWorkerRequestCredentials(credentials, fn) {
   const prevPhone = requestCredentialPhone;
   const prevPassword = requestCredentialPassword;
+  const requestedAccountId = normalizeRequestCredential(credentials?.accountId);
+  const shouldSwitchAccount = requestedAccountId && requestedAccountId !== browserState.lastAccountId;
+
+  if (shouldSwitchAccount) {
+    console.error(`[worker-credentials] Switching browser account: ${browserState.lastAccountId || "none"} -> ${requestedAccountId}`);
+    try {
+      await closeBrowser();
+    } catch (error) {
+      logSilent("worker.credentials.close", error);
+    }
+    browserState.lastAccountId = requestedAccountId;
+    syncBrowserState();
+  } else if (requestedAccountId && !browserState.lastAccountId) {
+    browserState.lastAccountId = requestedAccountId;
+  }
+
   if (credentials && typeof credentials === "object") {
     const phone = normalizeRequestCredential(credentials.phone);
     if (phone) {
@@ -470,6 +1052,70 @@ async function loginWithTransientPassword(phone, password) {
   } finally {
     clearBrowserPassword();
   }
+}
+
+function isClosedTargetError(message = "") {
+  const text = String(message || "");
+  return /Target page, context or browser has been closed|Browser has been closed|Cannot find context with specified id|Execution context was destroyed/i.test(text);
+}
+
+async function recoverWorkerBrowserSession(reason = "") {
+  const suffix = reason ? `: ${String(reason).slice(0, 160)}` : "";
+  console.error(`[browser-recover] Resetting worker browser session${suffix}`);
+
+  try {
+    await closeBrowser();
+  } catch (error) {
+    logSilent("browser.recover.close", error);
+  }
+
+  syncBrowserState();
+  await ensureBrowser();
+}
+
+async function createSellerCentralPage(targetPath = "/goods/list", options = {}) {
+  const {
+    attempts = 2,
+    lite = false,
+    readyDelayMin = 0,
+    readyDelayMax = 0,
+    logPrefix = "[page-create]",
+  } = options;
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let page = null;
+    try {
+      await ensureBrowser();
+      page = await context.newPage();
+      await openSellerCentralTarget(page, targetPath, { lite, logPrefix: `${logPrefix}-open` });
+      const ready = await ensureSellerCentralSessionReady(page, targetPath, `${logPrefix}-ready`);
+      if (!ready) {
+        throw new Error(`Seller Central 授权未完成: ${targetPath}`);
+      }
+      if (readyDelayMax > 0) {
+        await randomDelay(readyDelayMin, Math.max(readyDelayMin, readyDelayMax));
+      }
+      return page;
+    } catch (error) {
+      lastError = error;
+      await page?.close?.().catch(() => {});
+      console.error(`${logPrefix} Attempt ${attempt}/${attempts} failed: ${error?.message || error}`);
+
+      const shouldRetry = attempt < attempts && (
+        isClosedTargetError(error?.message)
+        || isMaterialUploadRecoverableError(error?.message)
+        || isMaterialUploadNavigationTimeoutError(error?.message)
+      );
+      if (!shouldRetry) {
+        throw error;
+      }
+
+      await recoverWorkerBrowserSession(`${logPrefix} attempt ${attempt}`);
+    }
+  }
+
+  throw lastError || new Error("创建商家中心页面失败");
 }
 
 function isAuthorizedWorkerRequest(req) {
@@ -562,13 +1208,15 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
           if (p === page || p.isClosed()) continue;
           const pUrl = p.url();
           if (!pUrl.includes("kuajingmaihuo.com") && !pUrl.includes("seller-login")) continue;
-          const bodyText = await p.evaluate(() => document.body?.innerText || "").catch(() => "");
-          if (bodyText.includes("确认授权") || bodyText.includes("即将前往") || bodyText.includes("授权登录")) {
+          const popupStage = await detectSellerPopupStage(p);
+          if (popupStage === "login") {
+            await tryAutoLoginInPopup(p, "[nav-lite]");
+            await randomDelay(2000, 3000);
+            continue;
+          }
+          if (popupStage === "auth") {
             console.error("[nav-lite] Found unhandled auth popup, handling...");
-            try {
-              const cb = p.locator('input[type="checkbox"]').first();
-              if (await cb.isVisible({ timeout: 1000 })) { if (!(await cb.isChecked().catch(() => false))) await cb.click(); }
-            } catch {}
+            await ensurePopupConsentChecked(p, "[nav-lite]");
             await randomDelay(300, 500);
             try {
               const btn = p.locator('button:has-text("授权登录"), button:has-text("确认授权并前往"), button:has-text("确认授权")').first();
@@ -731,83 +1379,60 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
           // 先检查是否已经出现了授权确认弹窗（cookie 自动登录成功的情况）
           async function tryAuthInPopup() {
             try {
-              const text = await popup.evaluate(() => document.body?.innerText || "");
-              console.error("[nav] Popup body text length:", text.length, "contains auth:", text.includes("确认授权"), "contains 即将前往:", text.includes("即将前往"));
-              if (text.includes("确认授权") || text.includes("即将前往") || text.includes("Seller Central") || text.includes("授权登录")) {
-                console.error("[nav] Auth dialog found in popup! Handling...");
+              const popupStage = await detectSellerPopupStage(popup);
+              console.error("[nav] Popup stage:", popupStage, "url:", popup.url());
+              if (popupStage !== "auth") {
+                return false;
+              }
 
-                // 方式1：用 Playwright locator 勾选 checkbox
-                try {
-                  const cb = popup.locator('input[type="checkbox"]').first();
-                  if (await cb.isVisible({ timeout: 2000 })) {
-                    const checked = await cb.isChecked().catch(() => false);
-                    if (!checked) { await cb.click(); console.error("[nav] Clicked checkbox via locator"); }
-                    else console.error("[nav] Checkbox already checked");
-                  } else {
-                    // 找包含"授权"文字的 label 或 checkbox 容器
-                    const authLabel = popup.locator('text=授权').first();
-                    if (await authLabel.isVisible({ timeout: 1000 })) {
-                      await authLabel.click();
-                      console.error("[nav] Clicked auth label");
-                    }
-                  }
-                } catch (e) {
-                  console.error("[nav] Checkbox click error:", e.message);
-                  // fallback: evaluate
-                  await popup.evaluate(() => {
-                    const inputs = [...document.querySelectorAll('input[type="checkbox"]')];
-                    for (const cb of inputs) { if (!cb.checked) cb.click(); }
-                    const customs = [...document.querySelectorAll('[class*="checkbox"], [class*="Checkbox"], [role="checkbox"], label')];
-                    for (const el of customs) {
-                      const t = el.innerText || "";
-                      if (t.includes("授权") || t.includes("同意")) { el.click(); break; }
-                    }
-                  });
-                }
-                await randomDelay(800, 1500);
+              console.error("[nav] Auth dialog found in popup! Handling...");
+              await ensurePopupConsentChecked(popup, "[nav]");
+              await randomDelay(800, 1500);
 
-                // 方式1：用 Playwright locator 点击"确认授权并前往"
-                let btnClicked = false;
+              let btnClicked = false;
+              const authButtons = [
+                'button:has-text("确认授权并前往")',
+                'button:has-text("确认授权")',
+                'button:has-text("授权登录")',
+              ];
+              for (const selector of authButtons) {
+                if (btnClicked) break;
                 try {
-                  const btn = popup.locator('button:has-text("确认授权并前往")').first();
-                  if (await btn.isVisible({ timeout: 2000 })) {
+                  const btn = popup.locator(selector).first();
+                  if (await btn.isVisible({ timeout: 1000 })) {
                     await btn.click();
-                    console.error("[nav] Clicked '确认授权并前往' via locator");
+                    console.error(`[nav] Clicked auth button via locator: ${selector}`);
                     btnClicked = true;
                   }
-                } catch (e) { logSilent("ui.action", e); }
-                if (!btnClicked) {
-                  try {
-                    const btn2 = popup.locator('button:has-text("确认授权")').first();
-                    if (await btn2.isVisible({ timeout: 1000 })) {
-                      await btn2.click();
-                      console.error("[nav] Clicked '确认授权' via locator");
-                      btnClicked = true;
-                    }
-                  } catch (e) { logSilent("ui.action", e); }
+                } catch (e) {
+                  logSilent("ui.action", e);
                 }
-                if (!btnClicked) {
-                  // fallback: evaluate
-                  const btnResult = await popup.evaluate(() => {
-                    const keywords = ["授权登录", "确认授权并前往", "确认授权", "确认并前往", "进入"];
-                    const all = [...document.querySelectorAll('button, [role="button"], a, div[class*="btn"], div[class*="Btn"]')];
-                    for (const kw of keywords) {
-                      for (const el of all) {
-                        const text = (el.innerText || "").trim();
-                        if (text.includes(kw) && text.length < 20) { el.click(); return "clicked: " + text; }
-                      }
+              }
+              if (!btnClicked) {
+                const btnResult = await popup.evaluate(() => {
+                  const keywords = ["确认授权并前往", "确认授权", "授权登录", "确认并前往", "进入"];
+                  const all = [...document.querySelectorAll('button, [role="button"], a, div[class*="btn"], div[class*="Btn"]')];
+                  for (const kw of keywords) {
+                    for (const el of all) {
+                      const text = (el.innerText || "").trim();
+                      if (text.includes(kw) && text.length < 20) { el.click(); return "clicked: " + text; }
                     }
-                    return "not found";
-                  });
-                  console.error("[nav] Popup auth button (fallback):", btnResult);
-                  btnClicked = btnResult !== "not found";
-                }
+                  }
+                  return "not found";
+                });
+                console.error("[nav] Popup auth button (fallback):", btnResult);
+                btnClicked = btnResult !== "not found";
+              }
 
-                if (btnClicked) {
-                  await randomDelay(5000, 8000);
+              if (btnClicked) {
+                await randomDelay(5000, 8000);
+                const nextStage = await detectSellerPopupStage(popup);
+                console.error("[nav] Popup stage after auth click:", nextStage);
+                if (nextStage !== "login") {
                   await saveCookies();
                   return true;
                 }
+                console.error("[nav] Auth click landed back on login stage, waiting for a real login/auth transition");
               }
             } catch (e) {
               console.error("[nav] tryAuthInPopup error:", e.message);
@@ -827,47 +1452,14 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
           if (!authHandled) {
             // 没有授权弹窗 → cookie 过期，尝试自动登录
             const { phone: lastPhone, password: lastPassword } = getRequestCredentials();
-            if (lastPhone && lastPassword) {
+            if (shouldAutoLoginRetry() && lastPhone && lastPassword) {
               console.error("[nav] Cookie expired, auto-login with saved credentials...");
               try {
-                // 切换到账号登录 tab
-                try {
-                  const accountTab = popup.locator('text=账号登录').first();
-                  if (await accountTab.isVisible({ timeout: 3000 })) { await accountTab.click(); await randomDelay(1000, 2000); }
-                } catch (e) { logSilent("ui.action", e); }
-
-                // 输入手机号
-                const ph = await popup.waitForSelector('#usernameId, input[name="usernameId"], input[placeholder*="手机"]', { timeout: 5000 });
-                await ph.click(); await ph.fill("");
-                for (const c of lastPhone) await ph.type(c, { delay: Math.random() * 80 + 40 });
-                await randomDelay(500, 1000);
-
-                // 输入密码
-                const pw = await popup.waitForSelector('#passwordId, input[type="password"]', { timeout: 5000 });
-                await pw.click(); await pw.fill("");
-                for (const c of lastPassword) await pw.type(c, { delay: Math.random() * 80 + 40 });
-                await randomDelay(500, 1000);
-
-                // 勾选协议
-                try {
-                  const cb = popup.locator('input[type="checkbox"]').first();
-                  if (await cb.isVisible({ timeout: 2000 })) {
-                    if (!(await cb.isChecked())) await cb.click();
-                  }
-                } catch (e) { logSilent("ui.action", e); }
-                await randomDelay(300, 600);
-
-                // 点击登录
-                const btn = await popup.waitForSelector('button:has-text("登录")', { timeout: 3000 });
-                await btn.click();
-                console.error("[nav] Auto-login submitted, waiting...");
-                await randomDelay(3000, 5000);
-
-                // 处理隐私弹窗
-                try {
-                  const agreeBtn = popup.locator('button:has-text("同意并登录"), button:has-text("同意")').first();
-                  if (await agreeBtn.isVisible({ timeout: 3000 })) { await agreeBtn.click(); await randomDelay(1000, 2000); }
-                } catch (e) { logSilent("ui.action", e); }
+                const submitted = await tryAutoLoginInPopup(popup, "[nav]");
+                if (submitted) {
+                  console.error("[nav] Auto-login submitted, waiting...");
+                  await randomDelay(3000, 5000);
+                }
 
                 // 等待登录完成或验证码
                 for (let i = 0; i < 30; i++) {
@@ -882,6 +1474,8 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
               } catch (e) {
                 console.error("[nav] Auto-login failed:", e.message);
               }
+            } else if (!shouldAutoLoginRetry()) {
+              console.error("[nav] Auto-login retry disabled by settings, waiting for manual login...");
             }
 
             if (!authHandled) {
@@ -2174,167 +2768,7 @@ async function scrapeAdsTaskGroup(tabs = ADS_GROUP_TABS) {
  */
 // downloadImage → moved to utils.mjs
 
-/**
- * 从 CSV 文件批量创建商品
- * @param {Object} params
- * @param {string} params.csvPath - CSV 文件路径
- * @param {number} [params.startRow] - 开始行号（0-based，默认0）
- * @param {number} [params.count] - 创建数量（默认5）
- * @param {boolean} [params.generateAI] - 是否 AI 生成图片（默认true）
- * @param {string[]} [params.aiImageTypes] - AI 图片类型
- * @param {boolean} [params.autoSubmit] - 是否自动提交
- */
-async function batchCreateFromCSV(params) {
-  const csvPath = params.csvPath;
-  if (!csvPath || !fs.existsSync(csvPath)) {
-    return { success: false, message: "CSV 文件不存在: " + csvPath };
-  }
-
-  // 解析 CSV
-  const csvContent = fs.readFileSync(csvPath, "utf8");
-  const lines = csvContent.split("\n").filter(l => l.trim());
-  const headers = lines[0].split(",").map(h => h.trim().replace(/^"|"$/g, ""));
-  console.error(`[batch] CSV headers: ${headers.join(", ")}`);
-  console.error(`[batch] Total rows: ${lines.length - 1}`);
-
-  // 找到关键列的索引
-  const colIndex = (name) => headers.findIndex(h => h.includes(name));
-  const nameIdx = colIndex("商品名称");
-  const imageIdx = colIndex("商品原图");
-  const catCnIdx = colIndex("分类（中文）");
-  const catEnIdx = colIndex("分类（英文）");
-  const priceIdx = colIndex("美元价格");
-  const salesIdx = colIndex("总销量");
-  const linkIdx = colIndex("商品链接");
-  const ali1688Idx = colIndex("1688链接");
-
-  console.error(`[batch] Columns: name=${nameIdx}, image=${imageIdx}, catCn=${catCnIdx}, price=${priceIdx}`);
-
-  // 解析 CSV 行（处理引号内的逗号）
-  function parseCSVLine(line) {
-    const result = [];
-    let current = "";
-    let inQuotes = false;
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i];
-      if (ch === '"') {
-        inQuotes = !inQuotes;
-      } else if (ch === "," && !inQuotes) {
-        result.push(current.trim());
-        current = "";
-      } else {
-        current += ch;
-      }
-    }
-    result.push(current.trim());
-    return result;
-  }
-
-  const startRow = params.startRow || 0;
-  const count = params.count || 5;
-  const results = [];
-
-  // 创建下载目录
-  const downloadDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "downloads");
-  fs.mkdirSync(downloadDir, { recursive: true });
-
-  for (let i = startRow; i < Math.min(startRow + count, lines.length - 1); i++) {
-    const row = parseCSVLine(lines[i + 1]); // +1 跳过 header
-    const productName = row[nameIdx] || "";
-    const imageUrl = row[imageIdx] || "";
-    const categoryCn = normalizeCategoryText(row[catCnIdx] || "");
-    const priceUSD = normalizePriceNumber(row[priceIdx], 0);
-    const totalSales = parseInt(row[salesIdx] || "0");
-
-    console.error(`\n[batch] ===== Product ${i + 1}/${startRow + count} =====`);
-    console.error(`[batch] Name: ${productName.slice(0, 50)}`);
-    console.error(`[batch] Category: ${categoryCn}`);
-    console.error(`[batch] Price: $${priceUSD}, Sales: ${totalSales}`);
-
-    try {
-      // Step 1: 下载主图
-      let localImagePath = null;
-      if (imageUrl) {
-        const imgFileName = `product_${i}_${Date.now()}.jpg`;
-        localImagePath = path.join(downloadDir, imgFileName);
-        try {
-          await downloadImage(imageUrl, localImagePath);
-          console.error(`[batch] Downloaded image: ${imgFileName}`);
-        } catch (e) {
-          console.error(`[batch] Image download failed: ${e.message}`);
-          localImagePath = null;
-        }
-      }
-
-      // Step 2: 从中文分类提取搜索关键词（逐级尝试）
-      const categoryParts = categoryCn.split("/").map(s => s.trim()).filter(Boolean);
-      // 优先最后一级，逐级往上尝试
-      const categorySearchList = [...categoryParts].reverse();
-      const categorySearch = categorySearchList[0] || "商品";
-      // 父级分类用于过滤搜索结果（取第一级）
-      const categoryParent = categoryParts[0] || "";
-
-      // Step 3: 价格转人民币（粗略 * 7）
-      const priceCNY = priceUSD > 0 ? (priceUSD * 7).toFixed(2) : "9.99";
-
-      // Step 4: 调用 autoCreateProduct
-      const result = await autoCreateProduct({
-        categorySearch,
-        categorySearchList: categorySearchList, // 逐级尝试的分类列表
-        categoryParent, // 父级分类用于过滤搜索结果
-        title: productName,
-        sourceImage: localImagePath,
-        generateAI: params.generateAI !== false,
-        aiImageTypes: params.aiImageTypes || ["hero", "lifestyle", "closeup", "infographic", "size_chart"],
-        price: parseFloat(priceCNY),
-        autoSubmit: params.autoSubmit || false,
-        keepOpen: params.keepOpen || false,
-      });
-
-      results.push({
-        index: i,
-        name: productName.slice(0, 40),
-        category: categorySearch,
-        price: priceCNY,
-        success: result.success,
-        message: result.message,
-      });
-
-      console.error(`[batch] Result: ${result.success ? "✅" : "❌"} ${result.message}`);
-
-      // 每个商品间隔
-      await randomDelay(3000, 5000);
-    } catch (e) {
-      console.error(`[batch] Error: ${e.message}`);
-      results.push({
-        index: i,
-        name: productName.slice(0, 40),
-        success: false,
-        message: e.message,
-      });
-    }
-  }
-
-  const successCount = results.filter(r => r.success).length;
-  console.error(`\n[batch] Done! ${successCount}/${results.length} succeeded`);
-
-  return {
-    success: true,
-    total: results.length,
-    successCount,
-    failCount: results.length - successCount,
-    results,
-  };
-}
-
-/**
- * 调用 AI 图片生成服务生成商品图片
- * @param {string} sourceImagePath - 原图路径（商品实拍图）
- * @param {string} productTitle - 商品标题（用于生成 prompt）
- * @param {string[]} imageTypes - 需要生成的图片类型 ["hero","lifestyle","closeup","features"]
- * @returns {string[]} 生成的图片文件路径数组
- */
-async function generateAIImages(sourceImagePath, productTitle, imageTypes = ["hero", "lifestyle"]) {
+async function generateAIImages(sourceImagePath, productTitle, imageTypes = AI_DETAIL_IMAGE_TYPE_ORDER) {
   const AI_SERVER = process.env.AI_IMAGE_SERVER || "http://localhost:3210";
   const outputDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "ai-images");
   fs.mkdirSync(outputDir, { recursive: true });
@@ -2423,1289 +2857,6 @@ async function generateAIImages(sourceImagePath, productTitle, imageTypes = ["he
   } catch (e) {
     console.error(`[ai-image] Error: ${e.message}`);
     return { images: [], cnTitle: null };
-  }
-}
-
-/**
- * 自动创建商品并提交核价
- * @param {Object} params
- * @param {string} params.categorySearch - 分类搜索关键词（如 "汽车贴花"）
- * @param {string} params.title - 商品标题
- * @param {string[]} params.images - 主图文件路径数组（本地绝对路径）
- * @param {string[]} [params.detailImages] - 详情图文件路径数组
- * @param {Object} [params.attributes] - 商品属性 {key: value}
- * @param {Array} [params.skus] - SKU列表 [{name, price, stock}]
- * @param {number} [params.price] - 申报价格（分）
- * @param {string} [params.description] - 商品描述
- * @returns {Object} { success, message, productId?, screenshots[] }
- */
-async function autoCreateProduct(params) {
-  const page = await context.newPage();
-  const screenshots = [];
-  const debugDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
-  fs.mkdirSync(debugDir, { recursive: true });
-
-  async function takeDebugScreenshot(name) {
-    try {
-      const filePath = path.join(debugDir, `create_product_${name}_${Date.now()}.png`);
-      await page.screenshot({ path: filePath, fullPage: false });
-      screenshots.push(filePath);
-      console.error(`[create-product] Screenshot: ${name}`);
-    } catch (e) { logSilent("ui.action", e); }
-  }
-
-  try {
-    console.error("[create-product] Starting product creation...");
-    console.error(`[create-product] Category: ${params.categorySearch}, Title: ${params.title?.slice(0, 40)}`);
-
-    // ========== Step 1: 导航到创建商品页面 ==========
-    console.error("[create-product] Step 1: Navigate to create page");
-    await navigateToSellerCentral(page, "/goods/create/category");
-    await randomDelay(5000, 7000);
-
-    // 关闭可能的弹窗
-    for (let i = 0; i < 5; i++) {
-      try {
-        const btn = page.locator('button:has-text("知道了"), button:has-text("我知道了"), button:has-text("确定"), button:has-text("不使用"), button:has-text("关闭")').first();
-        if (await btn.isVisible({ timeout: 500 })) await btn.click();
-        else break;
-      } catch { break; }
-    }
-    await takeDebugScreenshot("01_category_page");
-
-    // ========== Step 2: 搜索并选择分类 ==========
-    console.error("[create-product] Step 2: Select category");
-    const categoryInput = page.locator('input[placeholder*="搜索分类"], input[placeholder*="搜索类目"], input[placeholder*="商品名称"], input[placeholder*="可输入"]').first();
-
-    if (await categoryInput.isVisible({ timeout: 3000 })) {
-      // 搜索分类：从标题中提取关键产品词
-      const searchTerms = [];
-
-      // 从标题提取关键词（去掉数量词、尺寸、通用形容词）
-      if (params.title) {
-        const title = params.title;
-        // 提取核心产品名（去掉数量、尺寸、品牌等修饰词）
-        const stopWords = /\b(upgraded|premium|professional|portable|universal|adjustable|durable|waterproof|heavy duty|high quality|set|pack|pcs|psc|piece|inch|cm|mm|ml|oz|for|with|and|the|a|an|in|on|of|to|is|it|by)\b/gi;
-        const cleaned = title
-          .replace(/\d+\s*(pcs|pack|set|pairs?|pieces?|inch|cm|mm|ml|oz|g|kg|lb)\b/gi, "")
-          .replace(/\d+(\.\d+)?\s*(x|×)\s*\d+(\.\d+)?/gi, "")
-          .replace(/\d{3,}/g, "")
-          .replace(stopWords, "")
-          .replace(/[,\-|()]/g, " ")
-          .replace(/\s+/g, " ")
-          .trim();
-
-        // 取前4个有意义的词作为搜索词
-        const words = cleaned.split(" ").filter(w => w.length > 2);
-        if (words.length > 0) {
-          searchTerms.push(words.slice(0, 4).join(" "));
-        }
-        // 也用前2个词试试（更宽泛）
-        if (words.length > 2) {
-          searchTerms.push(words.slice(0, 2).join(" "));
-        }
-        // 整个标题作为最后备选
-        searchTerms.push(title);
-      }
-
-      // 策略：先搜标题，从结果中匹配最后一级类目关键词
-      if (params.categorySearch && params.categorySearch !== params.title) {
-        const lastLevel = params.categorySearch.split("/").pop()?.trim();
-        // 标题优先搜索，最后一级分类作为备选
-        if (lastLevel) searchTerms.push(lastLevel);
-        console.error(`[create-product] Search by title first, match against: "${lastLevel}"`);
-      }
-      if (Array.isArray(params.categorySearchList)) searchTerms.push(...params.categorySearchList);
-
-      let categorySelected = false;
-
-      for (const searchTerm of searchTerms) {
-        if (categorySelected) break;
-        console.error(`[create-product] Searching category: "${searchTerm.slice(0, 30)}"`);
-
-        // 清空并输入
-        await categoryInput.click({ clickCount: 3 });
-        await randomDelay(200, 300);
-        await page.keyboard.press("Backspace");
-        await randomDelay(200, 300);
-        await categoryInput.fill(searchTerm);
-        await randomDelay(2000, 3000);
-
-        await takeDebugScreenshot("02_category_search");
-
-        // 检查搜索结果：Temu 分类页搜索后会显示推荐分类行
-        // 格式通常是 "一级分类 > 二级分类 > 三级分类" 的可点击链接
-        // 用最后一级类目名作为匹配依据
-        const lastLevelCat = (params.categorySearch || "").split("/").pop()?.trim() || "";
-        const parentCategory = lastLevelCat || params.categoryParent || "";
-        const clickResult = await page.evaluate((parentCat) => {
-          // 策略1: 找"常用推荐"区域下的分类链接
-          const links = document.querySelectorAll("a, span, div");
-          const candidates = [];
-          for (const el of links) {
-            const text = el.textContent?.trim() || "";
-            // 分类推荐通常包含 ">" 分隔符
-            if (text.includes(">") && text.length > 5 && text.length < 200 && el.offsetParent !== null) {
-              const rect = el.getBoundingClientRect();
-              if (rect.height > 10 && rect.height < 50 && rect.top > 100 && rect.top < 600) {
-                candidates.push({ el, text, top: rect.top });
-              }
-            }
-          }
-          if (candidates.length > 0) {
-            candidates.sort((a, b) => a.top - b.top);
-            // 如果有父级分类，优先匹配包含父级关键词的结果
-            if (parentCat) {
-              // parentCat 现在传的是最后一级类目名（如"磨料与抛光用品"）
-              // 从中提取关键词用于匹配搜索结果
-              const catKeywords = parentCat.replace(/[/、与和，,用品产品]/g, " ").split(/\s+/).filter(w => w.length >= 2);
-              console.log("[category] Matching keywords:", catKeywords.join(","), "in", candidates.length, "results");
-              candidates.forEach((c,i) => console.log("  [" + i + "]", c.text.slice(0,60)));
-
-              // 找包含类目关键词最多的结果
-              let bestMatch = null, bestScore = 0;
-              for (const c of candidates) {
-                const score = catKeywords.filter(kw => c.text.includes(kw)).length;
-                if (score > bestScore) { bestScore = score; bestMatch = c; }
-              }
-              if (bestMatch && bestScore > 0) {
-                bestMatch.el.click();
-                return "[matched:" + bestScore + "] " + bestMatch.text.slice(0, 80);
-              }
-              // 没匹配到类目关键词，不选，继续下一个搜索词
-              return null;
-            }
-            // 没有类目约束，选第一个
-            candidates[0].el.click();
-            return candidates[0].text.slice(0, 60);
-          }
-
-          // 策略2: 找分类树的叶子节点（最深层的可点击分类）
-          const allClickable = document.querySelectorAll("td, li, a");
-          for (const el of allClickable) {
-            const text = el.textContent?.trim() || "";
-            if (text.length > 2 && text.length < 30 && el.offsetParent !== null && !text.includes("全部分类") && !text.includes("搜索")) {
-              const rect = el.getBoundingClientRect();
-              // 分类树通常在页面中部
-              if (rect.top > 200 && rect.top < 700 && rect.left > 100 && rect.height > 15 && rect.height < 50) {
-                el.click();
-                return "tree:" + text;
-              }
-            }
-          }
-          return null;
-        }, parentCategory);
-
-        if (clickResult) {
-          console.error(`[create-product] Category selected: "${clickResult}"`);
-          categorySelected = true;
-          await randomDelay(1000, 2000);
-
-          // 搜索后可能需要进一步选择子分类
-          // 等待子分类列表加载
-          await randomDelay(1000, 2000);
-
-          // 不再自动选子分类——搜索推荐的结果已经是完整分类路径
-          // 等待分类确认
-        } else {
-          console.error(`[create-product] No category results for "${searchTerm.slice(0, 20)}"`);
-        }
-      }
-
-      if (!categorySelected) {
-        console.error("[create-product] WARNING: Category selection failed, will try to continue");
-      }
-
-      await takeDebugScreenshot("03_category_selected");
-
-      // 点击确认/下一步按钮
-      try {
-        const confirmBtn = page.locator('button:has-text("确认"), button:has-text("下一步"), button:has-text("确定选择"), button:has-text("开始创建")').first();
-        if (await confirmBtn.isVisible({ timeout: 3000 })) {
-          await confirmBtn.click();
-          console.error("[create-product] Clicked next, waiting for page load...");
-          // 等待页面加载完成（加载中消失 + 标题输入框出现）
-          try {
-            await page.waitForSelector('textarea, input[placeholder*="标题"], input[placeholder*="商品名"]', { timeout: 30000 });
-          } catch {
-            // 备选：等待加载动画消失
-            await randomDelay(10000, 15000);
-          }
-          await randomDelay(2000, 3000);
-        }
-      } catch (e) { logSilent("ui.action", e); }
-    } else {
-      console.error("[create-product] Category input not found!");
-      await takeDebugScreenshot("02_category_input_missing");
-      return { success: false, message: "找不到分类搜索框", screenshots };
-    }
-
-    await takeDebugScreenshot("04_basic_info_page");
-    console.error("[create-product] Step 2 done: Category selected");
-
-    // ========== Step 3: 等待页面加载 ==========
-    try {
-      await page.waitForFunction(() => {
-        const spinners = document.querySelectorAll('.ant-spin-spinning, [class*="loading"], [class*="Loading"]');
-        return spinners.length === 0 || Array.from(spinners).every(s => s.offsetParent === null);
-      }, { timeout: 15000 });
-    } catch {
-      await randomDelay(5000, 8000);
-    }
-    await randomDelay(2000, 3000);
-
-    // ========== Step 3: AI 图片生成（可选） ==========
-    if (params.generateAI && params.sourceImage) {
-      console.error("[create-product] Step 3: Generate AI images");
-      try {
-        const aiResult = await generateAIImages(
-          params.sourceImage,
-          params.title,
-          params.aiImageTypes || ["hero", "lifestyle", "closeup"]
-        );
-        const aiImages = aiResult.images || aiResult;
-        if (aiImages.length > 0) {
-          params.images = [...(params.images || []), ...aiImages];
-          console.error(`[create-product] AI generated ${aiImages.length} images`);
-        }
-        // 用 Claude API 翻译标题为中文
-        if (params.title && /[a-zA-Z]/.test(params.title)) {
-          console.error("[create-product] Translating title to Chinese...");
-          try {
-            const apiKey = process.env.ANTHROPIC_API_KEY;
-            if (apiKey) {
-              const cnTitle = await new Promise((resolve, reject) => {
-                // https is imported at top
-                const postBody = Buffer.from(JSON.stringify({
-                  model: "claude-sonnet-4-20250514",
-                  max_tokens: 200,
-                  messages: [{ role: "user", content: "Translate this e-commerce product title to Chinese (Temu style, concise with selling points). Return ONLY the Chinese title:\n\n" + params.title }]
-                }), "utf8");
-                const req = https.request({
-                  hostname: "api.anthropic.com", port: 443, path: "/v1/messages", method: "POST",
-                  headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json", "content-length": postBody.length }
-                }, res => {
-                  let data = ""; res.on("data", c => data += c);
-                  res.on("end", () => { try { resolve(JSON.parse(data).content?.[0]?.text?.trim()); } catch { resolve(null); } });
-                });
-                req.on("error", reject);
-                req.write(postBody); req.end();
-              });
-              if (cnTitle && cnTitle.length > 3) {
-                params.title = cnTitle;
-                console.error(`[create-product] Chinese title: ${cnTitle.slice(0, 40)}`);
-              }
-            }
-          } catch (e) { console.error("[create-product] Translation failed:", e.message); }
-        }
-      } catch (e) {
-        console.error(`[create-product] AI image generation failed: ${e.message}`);
-      }
-    }
-
-    // ========== Step 4: 上传主图 ==========
-    console.error("[create-product] Step 4: Upload images");
-    if (params.images && params.images.length > 0) {
-      const validImages = params.images.filter(img => fs.existsSync(img));
-      if (validImages.length === 0) {
-        console.error("[create-product] No valid image files found!");
-        return { success: false, message: "图片文件不存在: " + params.images.join(", "), screenshots };
-      }
-
-      // 等待页面完全加载
-      console.error("[create-product] Waiting for page to fully load before upload...");
-      try {
-        await page.waitForFunction(() => {
-          const spinners = document.querySelectorAll('.ant-spin-spinning, [class*="loading"], [class*="Loading"]');
-          return spinners.length === 0 || Array.from(spinners).every(s => s.offsetParent === null);
-        }, { timeout: 20000 });
-      } catch (e) { logSilent("ui.action", e); }
-      await randomDelay(3000, 5000);
-
-      // 滚动到商品轮播图/素材中心区域
-      await page.evaluate(() => {
-        const labels = document.querySelectorAll("span, label, div");
-        for (const el of labels) {
-          if (el.textContent?.includes("商品轮播图") || el.textContent?.includes("素材中心") || el.textContent?.includes("商品主图")) {
-            el.scrollIntoView({ behavior: "smooth", block: "center" });
-            break;
-          }
-        }
-      });
-      await randomDelay(2000, 3000);
-      await takeDebugScreenshot("05b_before_upload");
-
-      let uploaded = false;
-
-      // Temu 上传流程：点击"素材中心"按钮 → 弹出素材中心 → 本地上传
-      console.error("[create-product] Looking for '素材中心' button...");
-
-      // 用 evaluate 精确查找"素材中心"按钮（它是一个带图标+文字的div）
-      const materialFound = await page.evaluate(() => {
-        const allEls = document.querySelectorAll("div, span, a, button");
-        for (const el of allEls) {
-          const text = el.textContent?.trim() || "";
-          if (text === "素材中心" && el.offsetParent !== null) {
-            const rect = el.getBoundingClientRect();
-            if (rect.width > 20 && rect.width < 200 && rect.height > 20) {
-              // 点击这个元素或其父元素
-              const clickTarget = el.closest("[class]") || el;
-              clickTarget.click();
-              return { tag: el.tagName, text, top: Math.round(rect.top), left: Math.round(rect.left) };
-            }
-          }
-        }
-        return null;
-      });
-
-      if (materialFound) {
-        console.error(`[create-product] 素材中心 clicked at (${materialFound.left}, ${materialFound.top})`);
-      } else {
-        // 备用：用 Playwright locator
-        const materialBtn = page.locator('text=素材中心').first();
-        if (await materialBtn.isVisible({ timeout: 3000 })) {
-          await materialBtn.click();
-          console.error("[create-product] 素材中心 clicked via locator");
-        }
-      }
-
-      if (materialFound) {
-        try {
-          console.error("[create-product] 素材中心 clicked, waiting for dialog...");
-          await randomDelay(3000, 5000);
-          await takeDebugScreenshot("06a_material_center");
-
-          // Step A: 探测素材中心弹窗中的DOM，找到"本地上传"并点击
-          console.error("[create-product] Looking for '本地上传' in material center...");
-
-          // 先探测弹窗中所有可点击元素
-          const domInfo = await page.evaluate(() => {
-            const result = { links: [], inputs: [], buttons: [] };
-            // 找所有包含"上传"文字的元素
-            document.querySelectorAll("a, span, div, button, label").forEach(el => {
-              const text = el.textContent?.trim() || "";
-              if (text.includes("上传") && el.offsetParent !== null) {
-                const rect = el.getBoundingClientRect();
-                result.links.push({
-                  tag: el.tagName,
-                  text: text.slice(0, 30),
-                  class: el.className?.slice?.(0, 50) || "",
-                  rect: { top: Math.round(rect.top), left: Math.round(rect.left), w: Math.round(rect.width), h: Math.round(rect.height) },
-                });
-              }
-            });
-            // 找所有 file input
-            document.querySelectorAll('input[type="file"]').forEach((el, i) => {
-              result.inputs.push({
-                index: i,
-                accept: el.accept,
-                hidden: el.offsetParent === null,
-                parent: el.parentElement?.className?.slice(0, 50) || "",
-              });
-            });
-            return result;
-          });
-          console.error(`[create-product] DOM scan: ${domInfo.links.length} upload links, ${domInfo.inputs.length} file inputs`);
-          domInfo.links.forEach(l => console.error(`  link: <${l.tag}> "${l.text}" class="${l.class}" pos=${l.rect.left},${l.rect.top}`));
-          domInfo.inputs.forEach(i => console.error(`  input[${i.index}]: accept=${i.accept} hidden=${i.hidden} parent="${i.parent}"`));
-
-          // 点击"本地上传"（用 evaluate 直接点击匹配的元素）
-          const clickedUpload = await page.evaluate(() => {
-            const els = document.querySelectorAll("a, span, div, button");
-            for (const el of els) {
-              const text = el.textContent?.trim() || "";
-              if (text === "本地上传" && el.offsetParent !== null) {
-                el.click();
-                return el.tagName + ": " + text;
-              }
-            }
-            return null;
-          });
-
-          if (clickedUpload) {
-            console.error(`[create-product] Clicked: ${clickedUpload}`);
-            await randomDelay(2000, 3000);
-
-            // 等待 filechooser 或新的 file input 出现
-            try {
-              const fileChooser = await page.waitForEvent("filechooser", { timeout: 5000 });
-              await fileChooser.setFiles(validImages);
-              uploaded = true;
-              console.error(`[create-product] Uploaded ${validImages.length} images via filechooser after click`);
-            } catch {
-              console.error("[create-product] No filechooser, checking new file inputs...");
-              // 可能出现了新的 file input
-              const newInputs = page.locator('input[type="file"]');
-              const newCount = await newInputs.count();
-              console.error(`[create-product] File inputs now: ${newCount}`);
-              for (let i = newCount - 1; i >= 0 && !uploaded; i--) {
-                try {
-                  await newInputs.nth(i).setInputFiles(validImages, { timeout: 3000 });
-                  uploaded = true;
-                  console.error(`[create-product] Uploaded via new file input[${i}]`);
-                } catch (e) { logSilent("ui.action", e); }
-              }
-            }
-
-            if (uploaded) {
-              await randomDelay(10000, 15000); // 等待上传完成
-              await takeDebugScreenshot("06b_after_upload");
-
-              // 处理"重复上传"弹窗 — 点击"关闭"或"在列表中查看"
-              for (let retry = 0; retry < 3; retry++) {
-                const dismissed = await page.evaluate(() => {
-                  const btns = document.querySelectorAll("button, a, span");
-                  for (const btn of btns) {
-                    const text = btn.textContent?.trim() || "";
-                    if ((text === "关闭" || text === "在列表中查看") && btn.offsetParent !== null) {
-                      const rect = btn.getBoundingClientRect();
-                      // 确保是弹窗中的按钮（在页面中间附近）
-                      if (rect.top > 200 && rect.top < 700 && rect.width > 30) {
-                        btn.click();
-                        return text;
-                      }
-                    }
-                  }
-                  return null;
-                });
-                if (dismissed) {
-                  console.error(`[create-product] Dismissed popup: "${dismissed}"`);
-                  await randomDelay(2000, 3000);
-                } else {
-                  break;
-                }
-              }
-
-              // 关闭"上传列表"面板 — 点击空白区域即可关闭
-              console.error("[create-product] Closing upload list panel...");
-              await page.mouse.click(900, 400).catch(() => {}); // 点击素材网格区域
-              await randomDelay(2000, 3000);
-              // 再点一次确保关闭
-              await page.mouse.click(900, 300).catch(() => {});
-              await randomDelay(2000, 3000);
-              console.error("[create-product] Upload list closed");
-            }
-          } else {
-            console.error("[create-product] '本地上传' element not found in DOM");
-          }
-
-          // 最终 fallback
-          if (!uploaded) {
-            console.error("[create-product] Fallback: trying all file inputs...");
-            const allInputs = page.locator('input[type="file"]');
-            const count = await allInputs.count();
-            for (let i = 0; i < count && !uploaded; i++) {
-              try {
-                await allInputs.nth(i).setInputFiles(validImages, { timeout: 3000 });
-                uploaded = true;
-                console.error(`[create-product] Uploaded via fallback input[${i}]`);
-                await randomDelay(8000, 12000);
-              } catch (e) { logSilent("ui.action", e); }
-            }
-          }
-
-          if (uploaded) {
-            // Step B: 选中刚上传的图片
-            console.error("[create-product] Selecting uploaded images...");
-            await randomDelay(2000, 3000);
-            await takeDebugScreenshot("06c_before_select");
-
-            // 用坐标点击素材中心的图片来选中
-            let selectedCount = 0;
-            try {
-              // 获取素材中心图片的坐标位置
-              const imagePositions = await page.evaluate(() => {
-                const positions = [];
-                // 找素材中心弹窗
-                const imgs = document.querySelectorAll("img");
-                for (const img of imgs) {
-                  if (!img.offsetParent) continue;
-                  const rect = img.getBoundingClientRect();
-                  // 素材图片通常 100-250px 宽，在弹窗区域内
-                  if (rect.width > 80 && rect.width < 300 && rect.height > 80 && rect.top > 100 && rect.top < 700) {
-                    positions.push({
-                      x: Math.round(rect.left + rect.width / 2),
-                      y: Math.round(rect.top + rect.height / 2),
-                      w: Math.round(rect.width),
-                      h: Math.round(rect.height),
-                    });
-                  }
-                }
-                return positions;
-              });
-
-              console.error(`[create-product] Found ${imagePositions.length} images to select`);
-              const targetCount = Math.min(validImages.length, 5, imagePositions.length);
-
-              for (let i = 0; i < targetCount; i++) {
-                const pos = imagePositions[i];
-                console.error(`[create-product] Clicking image at (${pos.x}, ${pos.y})`);
-                await page.mouse.click(pos.x, pos.y);
-                selectedCount++;
-                await randomDelay(500, 800);
-              }
-            } catch (e) {
-              console.error(`[create-product] Image click error: ${e.message?.slice(0, 50)}`);
-            }
-            console.error(`[create-product] Selected ${selectedCount} images`);
-            await randomDelay(2000, 3000);
-            await takeDebugScreenshot("06d_images_selected");
-
-            // 检查底部"已选X个"是否变化
-            const selectionStatus = await page.evaluate(() => {
-              const els = document.querySelectorAll("span, div");
-              for (const el of els) {
-                if (el.textContent?.includes("已选") && el.textContent?.includes("个")) {
-                  return el.textContent.trim();
-                }
-              }
-              return "unknown";
-            });
-            console.error(`[create-product] Selection status: ${selectionStatus}`);
-
-            // Step C: 点击"确认"按钮（底部的确认按钮）
-            console.error("[create-product] Clicking confirm...");
-            try {
-              // 找到素材中心弹窗底部的"确认"按钮
-              const confirmed = await page.evaluate(() => {
-                const btns = document.querySelectorAll("button");
-                for (const btn of btns) {
-                  const text = btn.textContent?.trim() || "";
-                  if (text === "确认" && btn.offsetParent !== null) {
-                    const rect = btn.getBoundingClientRect();
-                    // 确认按钮在底部（y > 600）
-                    if (rect.top > 500) {
-                      btn.click();
-                      return true;
-                    }
-                  }
-                }
-                return false;
-              });
-              if (confirmed) {
-                console.error("[create-product] Confirmed! Images added to product");
-                await randomDelay(3000, 5000);
-              } else {
-                // fallback: 用 Playwright locator
-                const confirmBtn = page.locator('button:has-text("确认")').last();
-                if (await confirmBtn.isVisible({ timeout: 3000 })) {
-                  await confirmBtn.click();
-                  console.error("[create-product] Confirmed via locator");
-                  await randomDelay(3000, 5000);
-                }
-              }
-            } catch (e) {
-              console.error(`[create-product] Confirm failed: ${e.message?.slice(0, 40)}`);
-            }
-          }
-        } catch (e) {
-          console.error(`[create-product] 素材中心 approach failed: ${e.message?.slice(0, 60)}`);
-        }
-      } /* end if materialFound */
-
-      // 备用方案：直接找页面上的 file input
-      if (!uploaded) {
-        console.error("[create-product] Fallback: trying direct file input...");
-        const allInputs = page.locator('input[type="file"]');
-        const count = await allInputs.count();
-        for (let i = 0; i < count && !uploaded; i++) {
-          try {
-            await allInputs.nth(i).setInputFiles(validImages, { timeout: 3000 });
-            uploaded = true;
-            console.error(`[create-product] Uploaded via fallback file input[${i}]`);
-            await randomDelay(5000, 8000);
-          } catch (e) { logSilent("ui.action", e); }
-        }
-      }
-
-      if (!uploaded) {
-        console.error("[create-product] WARNING: All upload methods failed!");
-      }
-
-      await takeDebugScreenshot("06_images_uploaded");
-    }
-
-    // ========== Step 5: 上传详情图 ==========
-    if (params.detailImages && params.detailImages.length > 0) {
-      console.error("[create-product] Step 5: Upload detail images");
-      const validDetailImages = params.detailImages.filter(img => fs.existsSync(img));
-      if (validDetailImages.length > 0) {
-        const fileInputs = page.locator('input[type="file"]');
-        const count = await fileInputs.count();
-        // 第二个 file input 通常是详情图
-        if (count > 1) {
-          await fileInputs.nth(1).setInputFiles(validDetailImages);
-          console.error(`[create-product] Uploaded ${validDetailImages.length} detail images`);
-          await randomDelay(3000, 5000);
-        }
-      }
-      await takeDebugScreenshot("07_detail_images");
-    }
-
-    // ========== Step 5.5: 填写商品名称（只中文，不填英文） ==========
-    console.error("[create-product] Step 5.5: Fill product name (Chinese only)");
-    if (params.title) {
-      // 找"商品名称"标签旁边的 textarea
-      const titleSelectors = [
-        'textarea[placeholder*="请输入"]',
-        'textarea[placeholder*="标题"]',
-        'textarea[placeholder*="商品名"]',
-      ];
-      let titleFilled = false;
-      for (const sel of titleSelectors) {
-        try {
-          const titleInput = page.locator(sel).first();
-          if (await titleInput.isVisible({ timeout: 1000 })) {
-            await titleInput.click();
-            await titleInput.fill("");
-            await titleInput.type(params.title, { delay: 20 + Math.random() * 30 });
-            titleFilled = true;
-            console.error("[create-product] Title filled: " + params.title.slice(0, 30));
-            break;
-          }
-        } catch (e) { logSilent("ui.action", e); }
-      }
-      if (!titleFilled) {
-        await page.evaluate((title) => {
-          // 找第一个可见的 textarea（商品名称，不是英文名称）
-          const labels = document.querySelectorAll("span, label, div");
-          for (const label of labels) {
-            if (label.textContent?.trim()?.startsWith("商品名称") && label.offsetParent) {
-              const parent = label.closest("[class]")?.parentElement || label.parentElement;
-              const ta = parent?.querySelector("textarea");
-              if (ta) {
-                const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
-                setter?.call(ta, title);
-                ta.dispatchEvent(new Event("input", { bubbles: true }));
-                ta.dispatchEvent(new Event("change", { bubbles: true }));
-                return;
-              }
-            }
-          }
-          // fallback: 第一个可见 textarea
-          const textareas = document.querySelectorAll("textarea");
-          for (const ta of textareas) {
-            if (ta.offsetParent !== null && ta.getBoundingClientRect().top < 800) {
-              const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
-              setter?.call(ta, title);
-              ta.dispatchEvent(new Event("input", { bubbles: true }));
-              ta.dispatchEvent(new Event("change", { bubbles: true }));
-              break;
-            }
-          }
-        }, params.title);
-        console.error("[create-product] Title filled via evaluate");
-      }
-      await takeDebugScreenshot("05_title_filled");
-      await randomDelay(1000, 2000);
-    }
-
-    // ========== Step 6: 智能填写所有必填字段 ==========
-    console.error("[create-product] Step 6: Smart auto-fill required fields");
-
-    // 默认值映射（字段关键词 → 要选择的值）
-    // 产地已在 6a 单独处理，不在这里重复操作
-    const defaultValues = {
-      // 通用属性（不同品类可能出现不同字段）
-      "可重用性": "否",
-      "Reusability": "否",
-      "电池属性": "无电池",
-      "Battery": "无电池",
-      "材质": "__FIRST__", // 选第一个选项
-      "Material": "__FIRST__",
-      "砂砾材料": "__FIRST__",
-      "Grit": "__FIRST__",
-      "颜色": "__FIRST__",
-      "Color": "__FIRST__",
-      "尺寸": "__FIRST__",
-      "Size": "__FIRST__",
-      "品牌名": null, // 跳过品牌
-      "Brand": null,
-      "工作电压": null, // 非必填跳过
-      // 包装
-      "外包装类型": "硬包装",
-      "外包装形状": "长方体",
-      // 敏感属性
-      "敏感属性": "非敏感品",
-      // 体积重量
-      "最长边": params.dimensions?.length || "8",
-      "次长边": params.dimensions?.width || "7",
-      "最短边": params.dimensions?.height || "6",
-      "重量": params.weight || "50",
-    };
-
-    // 用户自定义属性覆盖默认值
-    if (params.attributes) {
-      Object.assign(defaultValues, params.attributes);
-    }
-
-    try {
-      // 先关闭所有可能的弹窗
-      for (let i = 0; i < 5; i++) {
-        try {
-          const popup = page.locator('button:has-text("知道了"), button:has-text("我知道了"), button:has-text("不使用"), button:has-text("关闭"), [class*="close"]:visible').first();
-          if (await popup.isVisible({ timeout: 500 })) {
-            await popup.click();
-            await randomDelay(500, 1000);
-          } else break;
-        } catch { break; }
-      }
-
-      // ---- 6a: 商品产地 ----
-      console.error("[create-product] 6a: Setting origin (商品产地)...");
-      const originSet = await page.evaluate(() => {
-        // 找"商品产地"标签旁边的下拉框
-        const labels = document.querySelectorAll("span, label, div");
-        for (const label of labels) {
-          if (label.textContent?.trim()?.startsWith("商品产地") && label.offsetParent) {
-            // 找最近的 select 或可点击的下拉触发器
-            const parent = label.closest("div[class]")?.parentElement;
-            if (parent) {
-              const trigger = parent.querySelector('[class*="select"], [class*="Select"], [role="combobox"], input[readonly]');
-              if (trigger) {
-                trigger.click();
-                return "clicked";
-              }
-            }
-          }
-        }
-        return "not_found";
-      });
-
-      if (originSet === "clicked") {
-        await randomDelay(1000, 2000);
-        // 选择"中国大陆"
-        const selected = await page.evaluate(() => {
-          // 找所有下拉选项，scrollIntoView 到"中国大陆"再点击
-          const allEls = document.querySelectorAll('[class*="option"], [class*="Option"], [class*="item"], li[role="option"], div, span, li');
-          for (const el of allEls) {
-            const text = el.textContent?.trim();
-            if (text === "中国大陆" || text === "中国大陆（含港澳台）") {
-              el.scrollIntoView({ block: "center" });
-              el.click();
-              return true;
-            }
-          }
-          return false;
-        });
-        if (selected) {
-          console.error("[create-product] Origin: 中国大陆 selected");
-          // 点击空白处关闭下拉框
-          await page.keyboard.press("Escape").catch(() => {});
-          await randomDelay(2000, 3000);
-
-          // 关闭满意度评分弹窗（如果出现）
-          try {
-            const closePopup = page.locator('[class*="close"], button:has-text("×")').last();
-            if (await closePopup.isVisible({ timeout: 1000 })) {
-              await closePopup.click();
-              console.error("[create-product] Closed rating popup");
-              await randomDelay(500, 1000);
-            }
-          } catch (e) { logSilent("ui.action", e); }
-
-          // 选择省份 "浙江省" — 先点击省份下拉框再选
-          await randomDelay(1000, 2000);
-          try {
-            // 找第二个下拉框（省份）
-            const provinceDropdown = page.locator('[class*="select"]:has-text("请选择省份"), [class*="select"]:has-text("浙江")').first();
-            if (await provinceDropdown.isVisible({ timeout: 2000 })) {
-              await provinceDropdown.click();
-              await randomDelay(1000, 2000);
-            } else {
-              // 备用：找产地行中第二个下拉框
-              const selects = page.locator('[class*="select"], [class*="Select"]');
-              const count = await selects.count();
-              for (let i = 0; i < count; i++) {
-                const text = await selects.nth(i).textContent().catch(() => "");
-                if (text?.includes("请选择省份") || text?.includes("请选择")) {
-                  await selects.nth(i).click();
-                  await randomDelay(1000, 2000);
-                  break;
-                }
-              }
-            }
-          } catch (e) { logSilent("ui.action", e); }
-
-          const provinceSet = await page.evaluate(() => {
-            const allEls = document.querySelectorAll('[class*="option"], [class*="Option"], li, div, span');
-            for (const el of allEls) {
-              const text = el.textContent?.trim();
-              if ((text === "浙江省" || text === "浙江") && el.offsetParent !== null) {
-                el.scrollIntoView({ block: "center" });
-                el.click();
-                return true;
-              }
-            }
-            return false;
-          });
-          if (provinceSet) console.error("[create-product] Province: 浙江省 selected");
-          else console.error("[create-product] Province: 浙江省 not found");
-        }
-      }
-      // 关闭所有残留下拉框和弹窗
-      await page.keyboard.press("Escape").catch(() => {});
-      await randomDelay(1000, 2000);
-      // 关闭满意度弹窗
-      try {
-        await page.evaluate(() => {
-          const closes = document.querySelectorAll('[class*="close"], button');
-          for (const el of closes) {
-            if (el.offsetParent && el.getBoundingClientRect().right > 1200 && el.getBoundingClientRect().top > 600) {
-              el.click(); // 右下角的关闭按钮
-              return;
-            }
-          }
-        });
-      } catch (e) { logSilent("ui.action", e); }
-      await randomDelay(1000, 2000);
-
-      // ---- 6b: 商品属性下拉框 ----
-      console.error("[create-product] 6b: Filling product attributes...");
-
-      // 扫描所有带*号的下拉框并自动选择
-      const attrResults = await page.evaluate((defaults) => {
-        const results = [];
-        // 找所有带*号标签的表单项
-        const formItems = document.querySelectorAll("[class*='form'], [class*='Form'], [class*='field'], [class*='Field']");
-
-        // 更通用：找所有 label/span 中带 * 的
-        const allLabels = document.querySelectorAll("span, label, div");
-        for (const label of allLabels) {
-          const text = label.textContent?.trim() || "";
-          if (!label.offsetParent) continue;
-          const rect = label.getBoundingClientRect();
-          if (rect.width < 20 || rect.width > 300) continue;
-
-          // 检查常见属性字段
-          for (const [key, value] of Object.entries(defaults)) {
-            if (value === null) continue;
-            if (text.includes(key)) {
-              // 找相邻的下拉框/输入框
-              const parent = label.closest("div")?.parentElement || label.parentElement;
-              if (parent) {
-                const selectTrigger = parent.querySelector('[class*="select"], [class*="Select"], [role="combobox"], input[readonly]');
-                if (selectTrigger) {
-                  selectTrigger.click();
-                  results.push({ field: key, action: "clicked_dropdown" });
-                }
-                const input = parent.querySelector('input:not([readonly]):not([type="hidden"])');
-                if (input && !selectTrigger) {
-                  input.value = String(value);
-                  input.dispatchEvent(new Event("input", { bubbles: true }));
-                  input.dispatchEvent(new Event("change", { bubbles: true }));
-                  results.push({ field: key, action: "filled", value: String(value) });
-                }
-              }
-              break;
-            }
-          }
-        }
-        return results;
-      }, defaultValues);
-
-      for (const r of attrResults) {
-        console.error(`[create-product] Attr: ${r.field} → ${r.action} ${r.value || ""}`);
-        if (r.action === "clicked_dropdown") {
-          await randomDelay(500, 1000);
-          // 选择对应的值
-          const targetValue = defaultValues[r.field];
-          if (targetValue) {
-            const selectFirst = targetValue === "__FIRST__";
-            await page.evaluate(({ val, first }) => {
-              const options = document.querySelectorAll('[class*="option"], [class*="Option"], li[role="option"], [class*="item"]');
-              const visible = Array.from(options).filter(o => {
-                if (!o.offsetParent) return false;
-                const rect = o.getBoundingClientRect();
-                return rect.height > 10 && rect.top > 0 && rect.width > 30;
-              });
-              if (!first && val) {
-                for (const opt of visible) {
-                  if (opt.textContent?.trim()?.includes(val)) { opt.click(); return; }
-                }
-              }
-              if (visible.length > 0) { visible[0].click(); }
-            }, { val: targetValue, first: selectFirst });
-            // 按Escape关闭下拉框
-            await page.keyboard.press("Escape").catch(() => {});
-            await randomDelay(500, 1000);
-          }
-        }
-      }
-
-      // ---- 6b2: 商品规格（父规格随机选，子规格随机字母）----
-      console.error("[create-product] 6b2: Setting product specs...");
-      // 先关闭任何残留的下拉框
-      await page.keyboard.press("Escape").catch(() => {});
-      await randomDelay(1000, 2000);
-      // 滚动到页面下方找规格区域
-      await page.evaluate(() => window.scrollBy(0, 500));
-      await randomDelay(1000, 2000);
-
-      try {
-        // 找"父规格1"旁边的下拉框（文本必须精确包含"父规格"）
-        const specSet = await page.evaluate(() => {
-          const labels = document.querySelectorAll("span, label, div");
-          for (const label of labels) {
-            const text = label.textContent?.trim() || "";
-            if (/^\*?父规格/.test(text) && text.length < 20 && label.offsetParent) {
-              const parent = label.closest("[class]")?.parentElement || label.parentElement;
-              const select = parent?.querySelector('[class*="select"], [class*="Select"], [role="combobox"], input[readonly]');
-              if (select) {
-                select.click();
-                return "clicked";
-              }
-            }
-          }
-          return "not_found";
-        });
-
-        if (specSet === "clicked") {
-          await randomDelay(1500, 2500);
-          // 随机选一个选项
-          const specSelected = await page.evaluate(() => {
-            const options = document.querySelectorAll('[class*="option"], [class*="Option"], li[role="option"]');
-            const visibleOpts = Array.from(options).filter(o => o.offsetParent !== null && o.textContent?.trim()?.length > 0);
-            if (visibleOpts.length > 0) {
-              const randomIdx = Math.floor(Math.random() * visibleOpts.length);
-              const chosen = visibleOpts[randomIdx];
-              chosen.click();
-              return chosen.textContent?.trim();
-            }
-            return null;
-          });
-          if (specSelected) {
-            console.error(`[create-product] Parent spec selected: ${specSelected}`);
-            await randomDelay(2000, 3000);
-
-            // 等待弹窗（商品规格填写要求），等5秒再关闭
-            await new Promise(r => setTimeout(r, 5000));
-            try {
-              const knowBtn = page.locator('button:has-text("我知道了"), button:has-text("知道了")').first();
-              if (await knowBtn.isVisible({ timeout: 2000 })) {
-                await knowBtn.click();
-                console.error("[create-product] Closed spec format popup");
-                await randomDelay(1000, 2000);
-              }
-            } catch (e) { logSilent("ui.action", e); }
-
-            // 填子规格：按标题生成中文卖点词，并尽量避免最近重复
-            const childSpecValue = generateChildSpecValue(params.title || "");
-            await page.evaluate((value) => {
-              const inputs = document.querySelectorAll('input[type="text"], input:not([type])');
-              for (const input of inputs) {
-                if (input.offsetParent && !input.value && input.getBoundingClientRect().top > 400) {
-                  const placeholder = input.getAttribute("placeholder") || "";
-                  // 找规格表中的输入框（不是搜索框）
-                  if (!placeholder.includes("搜索") && !placeholder.includes("输入素材")) {
-                    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
-                    setter?.call(input, value);
-                    input.dispatchEvent(new Event("input", { bubbles: true }));
-                    input.dispatchEvent(new Event("change", { bubbles: true }));
-                    return;
-                  }
-                }
-              }
-            }, childSpecValue);
-            console.error(`[create-product] Child spec set: ${childSpecValue}`);
-          }
-        }
-      } catch (e) {
-        console.error(`[create-product] Spec error: ${e.message?.slice(0, 50)}`);
-      }
-      await randomDelay(1000, 2000);
-
-      // ---- 6b3: 关闭外包装图示例弹窗 ----
-      try {
-        const knowBtn2 = page.locator('button:has-text("我知道了"), button:has-text("知道了")').first();
-        if (await knowBtn2.isVisible({ timeout: 3000 })) {
-          await knowBtn2.click();
-          console.error("[create-product] Closed packaging example popup");
-          await randomDelay(1000, 2000);
-        }
-      } catch (e) { logSilent("ui.action", e); }
-
-      // ---- 6c: 外包装类型和形状（单选按钮）----
-      console.error("[create-product] 6c: Setting packaging info...");
-      await page.evaluate(() => {
-        // 外包装类型：选"软包装+硬物"
-        const radios = document.querySelectorAll('input[type="radio"], [role="radio"]');
-        const allLabels = document.querySelectorAll("span, label");
-        for (const el of allLabels) {
-          const text = el.textContent?.trim();
-          if (text === "软包装+硬物" || text === "长方体") {
-            // 点击 radio label
-            const radio = el.closest("label") || el.parentElement;
-            if (radio) radio.click();
-          }
-        }
-      });
-      await randomDelay(500, 1000);
-
-      // ---- 6d: 敏感属性下拉 ----
-      console.error("[create-product] 6d: Setting sensitivity...");
-      const sensitivitySet = await page.evaluate(() => {
-        const labels = document.querySelectorAll("span, div, label");
-        for (const label of labels) {
-          if (label.textContent?.trim() === "敏感属性" && label.offsetParent) {
-            const parent = label.closest("div")?.parentElement;
-            if (parent) {
-              const select = parent.querySelector('[class*="select"], [class*="Select"], [role="combobox"]');
-              if (select) { select.click(); return "clicked"; }
-            }
-          }
-        }
-        // 也试试表格中的敏感属性下拉
-        const selects = document.querySelectorAll('[class*="select"], [role="combobox"]');
-        for (const s of selects) {
-          const prev = s.previousElementSibling || s.closest("td")?.previousElementSibling;
-          if (prev?.textContent?.includes("敏感属性")) {
-            s.click();
-            return "clicked";
-          }
-        }
-        return "not_found";
-      });
-      if (sensitivitySet === "clicked") {
-        await randomDelay(500, 1000);
-        await page.evaluate(() => {
-          const options = document.querySelectorAll('[class*="option"], li[role="option"]');
-          for (const opt of options) {
-            if (opt.textContent?.includes("非敏感") && opt.offsetParent) {
-              opt.click();
-              return;
-            }
-          }
-          // 选第一个
-          for (const opt of options) {
-            if (opt.offsetParent) { opt.click(); return; }
-          }
-        });
-        await randomDelay(500, 1000);
-      }
-
-      // ---- 6e: 体积重量 ----
-      console.error("[create-product] 6e: Setting dimensions & weight...");
-      await page.evaluate((dims) => {
-        const inputs = document.querySelectorAll('input[placeholder*="请输入"]');
-        const dimInputs = [];
-        for (const input of inputs) {
-          const parent = input.closest("td, div");
-          const prevText = parent?.previousElementSibling?.textContent || "";
-          const nextText = input.nextElementSibling?.textContent || "";
-          // 找到体积和重量输入框（紧挨着 cm 或 g 标签的）
-          if (nextText === "cm" || nextText === "g" || prevText.includes("最长") || prevText.includes("次长") || prevText.includes("最短")) {
-            dimInputs.push(input);
-          }
-        }
-        // 也通过位置查找：体积区域的输入框
-        const allInputs = document.querySelectorAll('input[type="text"], input:not([type])');
-        for (const input of allInputs) {
-          if (!input.offsetParent) continue;
-          const sibling = input.nextElementSibling;
-          if (sibling?.textContent === "cm" || sibling?.textContent === "g") {
-            if (!dimInputs.includes(input)) dimInputs.push(input);
-          }
-        }
-
-        const values = [dims.length, dims.width, dims.height, dims.weight];
-        for (let i = 0; i < Math.min(dimInputs.length, values.length); i++) {
-          const input = dimInputs[i];
-          const nativeSet = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-          nativeSet.call(input, String(values[i]));
-          input.dispatchEvent(new Event("input", { bubbles: true }));
-          input.dispatchEvent(new Event("change", { bubbles: true }));
-        }
-        return dimInputs.length;
-      }, {
-        length: params.dimensions?.length || "15",
-        width: params.dimensions?.width || "10",
-        height: params.dimensions?.height || "5",
-        weight: params.weight || "200",
-      });
-
-      // ---- 6f: 勾选合规声明 ----
-      console.error("[create-product] 6f: Checking compliance checkbox...");
-      await page.evaluate(() => {
-        const labels = document.querySelectorAll("span, label");
-        for (const label of labels) {
-          if (label.textContent?.includes("我已阅读并同意") || label.textContent?.includes("商品合规声明")) {
-            const checkbox = label.closest("label")?.querySelector('input[type="checkbox"]') ||
-                            label.parentElement?.querySelector('input[type="checkbox"]');
-            if (checkbox && !checkbox.checked) {
-              checkbox.click();
-              return;
-            }
-            // Ant Design checkbox
-            const antCb = label.closest("label") || label.parentElement;
-            if (antCb) antCb.click();
-            return;
-          }
-        }
-      });
-
-      await randomDelay(1000, 2000);
-      await takeDebugScreenshot("08_smart_filled");
-      console.error("[create-product] Step 6 done: Smart auto-fill complete");
-
-    } catch (e) {
-      console.error(`[create-product] Step 6 error: ${e.message?.slice(0, 80)}`);
-      await takeDebugScreenshot("08_error");
-    }
-
-    // ========== Step 7: SKU 信息填写 ==========
-    console.error("[create-product] Step 7: Set SKU info");
-
-    // 7a: 点击"非定制商品"
-    try {
-      const nonCustom = page.locator('label:has-text("非定制商品"), span:has-text("非定制商品")').first();
-      if (await nonCustom.isVisible({ timeout: 2000 })) {
-        await nonCustom.click();
-        await randomDelay(500, 1000);
-      }
-    } catch (e) { logSilent("ui.action", e); }
-
-    // 7b: 填写申报价格
-    const price = params.price || 9.99;
-    try {
-      await page.evaluate((p) => {
-        // 找所有带"请输入"placeholder的input，在"申报价格"附近的
-        const inputs = document.querySelectorAll('input[placeholder*="请输入"], input[placeholder*="价格"]');
-        for (const input of inputs) {
-          const row = input.closest("tr, [class*='row'], [class*='Row']") || input.parentElement?.parentElement;
-          if (row && input.offsetParent) {
-            const rect = input.getBoundingClientRect();
-            // 申报价格输入框通常在SKU信息表格中，前面有¥符号
-            const prev = input.previousElementSibling;
-            if (prev?.textContent?.includes("¥") || rect.top > 500) {
-              const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
-              setter?.call(input, String(p));
-              input.dispatchEvent(new Event("input", { bubbles: true }));
-              input.dispatchEvent(new Event("change", { bubbles: true }));
-              return;
-            }
-          }
-        }
-        // fallback: 找第一个空的数字输入框在SKU区域
-        const allInputs = document.querySelectorAll('input');
-        for (const input of allInputs) {
-          if (input.offsetParent && !input.value && input.getBoundingClientRect().top > 500) {
-            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
-            setter?.call(input, String(p));
-            input.dispatchEvent(new Event("input", { bubbles: true }));
-            input.dispatchEvent(new Event("change", { bubbles: true }));
-            break;
-          }
-        }
-      }, price);
-      console.error(`[create-product] Price set: ¥${price}`);
-    } catch (e) {
-      console.error(`[create-product] Price error: ${e.message?.slice(0, 50)}`);
-    }
-    await randomDelay(1000, 2000);
-
-    // 7c: SKU分类选"单品"
-    try {
-      const skuTypeSelect = page.locator('select, [class*="select"]').filter({ hasText: /单品|同款多件装|混合套装/ }).first();
-      if (await skuTypeSelect.isVisible({ timeout: 1000 })) {
-        await skuTypeSelect.click();
-        await randomDelay(500, 1000);
-        const singleOption = page.locator('[class*="option"], li').filter({ hasText: "单品" }).first();
-        if (await singleOption.isVisible({ timeout: 1000 })) {
-          await singleOption.click();
-        }
-      }
-    } catch (e) { logSilent("ui.action", e); }
-
-    // 7d: SKU预览图 - 从素材中心选
-    try {
-      // 找SKU行中的"素材中心"按钮
-      const skuMaterialBtn = page.locator('tr >> text=素材中心, [class*="sku"] >> text=素材中心').first();
-      if (await skuMaterialBtn.isVisible({ timeout: 2000 })) {
-        await skuMaterialBtn.click();
-        await randomDelay(2000, 3000);
-        // 选第一张图
-        const imgs = page.locator('[class*="material"] img, [class*="image-list"] img, [class*="gallery"] img');
-        const imgCount = await imgs.count();
-        if (imgCount > 0) {
-          await imgs.first().click();
-          await randomDelay(500, 1000);
-          // 点确认
-          const confirmBtn = page.locator('button:has-text("确认"), button:has-text("确定")').last();
-          if (await confirmBtn.isVisible({ timeout: 2000 })) {
-            await confirmBtn.click();
-            console.error("[create-product] SKU preview image selected");
-          }
-        }
-        await randomDelay(1000, 2000);
-      }
-    } catch (e) { logSilent("ui.action", e); }
-
-    // 7e: 建议零售价 = 申报价格 × 4
-    const retailPrice = Math.round(price * 4);
-    try {
-      await page.evaluate((rp) => {
-        // 找"建议零售价"附近的输入框
-        const labels = document.querySelectorAll("th, td, span, div");
-        for (const label of labels) {
-          if (label.textContent?.includes("建议零售价") && label.offsetParent) {
-            const row = label.closest("tr, [class*='row']") || label.parentElement;
-            const inputs = row?.querySelectorAll("input") || [];
-            for (const input of inputs) {
-              if (input.offsetParent && (!input.value || input.value === "0")) {
-                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
-                setter?.call(input, String(rp));
-                input.dispatchEvent(new Event("input", { bubbles: true }));
-                input.dispatchEvent(new Event("change", { bubbles: true }));
-                return;
-              }
-            }
-          }
-        }
-      }, retailPrice);
-      console.error(`[create-product] Retail price set: ¥${retailPrice} (${price}×4)`);
-    } catch (e) { logSilent("ui.action", e); }
-
-    await takeDebugScreenshot("09_sku_filled");
-
-    // ========== Step 8: 提交核价 ==========
-    console.error("[create-product] Step 8: Submit for pricing review");
-    await takeDebugScreenshot("10_before_submit");
-
-    // 先不自动点提交，让用户确认
-    if (params.autoSubmit) {
-      try {
-        const submitBtn = page.locator('button:has-text("提交"), button:has-text("提交核价"), button:has-text("提交审核"), button:has-text("Submit")').first();
-        if (await submitBtn.isVisible({ timeout: 3000 })) {
-          await submitBtn.click();
-          await randomDelay(3000, 5000);
-          await takeDebugScreenshot("11_submitted");
-          console.error("[create-product] Submitted for pricing review!");
-        }
-      } catch (e) {
-        console.error(`[create-product] Submit error: ${e.message}`);
-        return { success: false, message: "提交失败: " + e.message, screenshots };
-      }
-    } else {
-      console.error("[create-product] Auto-submit disabled. Product form filled, waiting for manual review.");
-    }
-
-    await saveCookies();
-
-    return {
-      success: true,
-      message: params.autoSubmit ? "商品已提交核价" : "商品信息已填写完成，请手动检查并提交",
-      screenshots,
-    };
-  } catch (e) {
-    console.error(`[create-product] Error: ${e.message}`);
-    await takeDebugScreenshot("error");
-    return { success: false, message: e.message, screenshots };
-  } finally {
-    // 不关闭页面，让用户可以检查
-    if (!params.keepOpen) {
-      await page.close();
-    }
   }
 }
 
@@ -4459,7 +3610,7 @@ async function handleRequest(body) {
   switch (action) {
     case "ping": return { status: "pong" };
     case "launch": await launch(params.accountId, params.headless); return { status: "launched" };
-    case "login": await launch(params.accountId, false); return { success: await loginWithTransientPassword(params.phone, params.password) };
+    case "login": await launch(params.accountId, params.headless); return { success: await loginWithTransientPassword(params.phone, params.password) };
     case "scrape_products": {
       console.error("[Worker] scrape_products called, browser:", !!browser, "context:", !!context);
       try {
@@ -4532,23 +3683,6 @@ async function handleRequest(body) {
       await ensureBrowser();
       return { sales: await scrapeSales() };
     }
-    case "create_product": {
-      await ensureBrowser();
-      return await autoCreateProduct(params);
-    }
-    case "batch_create_from_csv": {
-      await ensureBrowser();
-      return await batchCreateFromCSV(params);
-    }
-    case "generate_ai_images": {
-      const aiResult = await generateAIImages(
-        params.sourceImage,
-        params.title,
-        params.imageTypes || ["hero", "lifestyle"]
-      );
-      const images = Array.isArray(aiResult?.images) ? aiResult.images : [];
-      return { success: true, ...aiResult, images, count: images.length };
-    }
     case "sidebar_nav": {
       await ensureBrowser();
       return await scrapeViaSidebarClick();
@@ -4598,7 +3732,7 @@ async function handleRequest(body) {
           for (let attempt = 0; attempt < 10; attempt++) {
             try {
               const latestUrl = newPage.url();
-              if ((latestUrl.includes("seller-login") || latestUrl.includes("/login")) && attempt <= 1) {
+              if (latestUrl.includes("seller-login") || latestUrl.includes("/login")) {
                 await tryAutoLoginInPopup(newPage, "[popup-monitor]");
               }
 
@@ -4858,7 +3992,7 @@ async function handleRequest(body) {
             finishedAt: getScrapeAllTimestamp(),
           });
         };
-        const runWithRetry = async (fn, maxRetries = 2) => {
+        const runWithRetry = async (fn, maxRetries = getConfiguredMaxRetries()) => {
           let lastErr;
           for (let attempt = 0; attempt <= maxRetries; attempt++) {
             try {
@@ -5409,13 +4543,12 @@ async function handleRequest(body) {
       pricingPaused = true;
       updateCurrentProgress({
         running: true,
-        paused: true,
-        status: "paused",
-        step: "已暂停",
-        message: "批量上品任务已暂停，等待继续。",
+        paused: false,
+        status: "pausing",
+        message: "暂停请求已发送，当前商品处理完后停止。",
       });
       console.error("[Worker] Pricing PAUSED");
-      return { status: "paused", taskId: currentProgress.taskId };
+      return { status: "pausing", taskId: currentProgress.taskId };
     case "resume_pricing":
       if (!isCurrentProgressTask(params?.taskId)) {
         return { status: currentProgress.status || "idle", taskId: currentProgress.taskId };
@@ -5459,51 +4592,56 @@ async function uploadImageToMaterial(page, localImagePath, options = {}) {
   let lastError = "";
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    const result = await page.evaluate(async ({ base64Data, mime, name }) => {
-      const mallid = document.cookie.match(/mallid=([^;]+)/)?.[1] || "";
+    let result;
+    try {
+      result = await page.evaluate(async ({ base64Data, mime, name }) => {
+        const mallid = document.cookie.match(/mallid=([^;]+)/)?.[1] || "";
 
-      try {
-        // Step 1: 获取上传签名
-        const sigResp = await fetch("/general_auth/get_signature?sdk_version=js-0.0.40&tag_name=product-material-tag&scene_id=agent-seller", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "mallid": mallid },
-          credentials: "include",
-          body: JSON.stringify({ bucket_tag: "product-material-tag" }),
-        });
-        const sigData = await sigResp.json();
-        if (!sigData.signature) {
-          return { success: false, error: "get_signature failed: " + JSON.stringify(sigData).slice(0, 200) };
+        try {
+          // Step 1: 获取上传签名
+          const sigResp = await fetch("/general_auth/get_signature?sdk_version=js-0.0.40&tag_name=product-material-tag&scene_id=agent-seller", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "mallid": mallid },
+            credentials: "include",
+            body: JSON.stringify({ bucket_tag: "product-material-tag" }),
+          });
+          const sigData = await sigResp.json();
+          if (!sigData.signature) {
+            return { success: false, error: "get_signature failed: " + JSON.stringify(sigData).slice(0, 200) };
+          }
+
+          // Step 2: 将 base64 转为 File
+          const byteChars = atob(base64Data);
+          const byteArray = new Uint8Array(byteChars.length);
+          for (let i = 0; i < byteChars.length; i++) byteArray[i] = byteChars.charCodeAt(i);
+          const blob = new Blob([byteArray], { type: mime });
+          const file = new File([blob], name, { type: mime });
+
+          // Step 3: 上传图片到 galerie
+          const formData = new FormData();
+          formData.append("url_width_height", "true");
+          formData.append("image", file);
+          formData.append("upload_sign", sigData.signature);
+
+          const uploadResp = await fetch("/api/galerie/v3/store_image?sdk_version=js-0.0.40&tag_name=product-material-tag", {
+            method: "POST",
+            body: formData,
+            credentials: "include",
+            headers: { "mallid": mallid },
+          });
+          const uploadData = await uploadResp.json();
+
+          if (uploadData.url) {
+            return { success: true, url: uploadData.url, width: uploadData.width, height: uploadData.height };
+          }
+          return { success: false, error: "store_image no url: " + JSON.stringify(uploadData).slice(0, 200) };
+        } catch (e) {
+          return { success: false, error: e.message };
         }
-
-        // Step 2: 将 base64 转为 File
-        const byteChars = atob(base64Data);
-        const byteArray = new Uint8Array(byteChars.length);
-        for (let i = 0; i < byteChars.length; i++) byteArray[i] = byteChars.charCodeAt(i);
-        const blob = new Blob([byteArray], { type: mime });
-        const file = new File([blob], name, { type: mime });
-
-        // Step 3: 上传图片到 galerie
-        const formData = new FormData();
-        formData.append("url_width_height", "true");
-        formData.append("image", file);
-        formData.append("upload_sign", sigData.signature);
-
-        const uploadResp = await fetch("/api/galerie/v3/store_image?sdk_version=js-0.0.40&tag_name=product-material-tag", {
-          method: "POST",
-          body: formData,
-          credentials: "include",
-          headers: { "mallid": mallid },
-        });
-        const uploadData = await uploadResp.json();
-
-        if (uploadData.url) {
-          return { success: true, url: uploadData.url, width: uploadData.width, height: uploadData.height };
-        }
-        return { success: false, error: "store_image no url: " + JSON.stringify(uploadData).slice(0, 200) };
-      } catch (e) {
-        return { success: false, error: e.message };
-      }
-    }, { base64Data: base64, mime: mimeType, name: fileName });
+      }, { base64Data: base64, mime: mimeType, name: fileName });
+    } catch (evaluateError) {
+      result = { success: false, error: evaluateError?.message || String(evaluateError || "upload evaluate failed") };
+    }
 
     if (result.success) {
       console.error(`[upload] OK: ${result.url?.slice(0, 80)} (${result.width}x${result.height})`);
@@ -5512,6 +4650,12 @@ async function uploadImageToMaterial(page, localImagePath, options = {}) {
 
     lastError = result.error || lastError || "unknown upload error";
     console.error(`[upload] Attempt ${attempt}/${maxRetries} failed: ${result.error}`);
+    if (attempt < maxRetries && isMaterialUploadRecoverableError(lastError)) {
+      const refreshed = await refreshMaterialUploadSession(page, lastError);
+      if (!refreshed) {
+        console.error("[upload] Material upload session refresh failed");
+      }
+    }
     if (attempt < maxRetries) {
       await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 1000));
     }
@@ -5520,13 +4664,99 @@ async function uploadImageToMaterial(page, localImagePath, options = {}) {
   return { success: false, error: lastError || `Upload failed after ${maxRetries} attempts` };
 }
 
+function isMaterialUploadLoginStateError(message = "") {
+  const text = String(message || "");
+  return /Invalid Login State|登录态|AUTH_EXPIRED/i.test(text);
+}
+
+function isMaterialUploadRecoverableError(message = "") {
+  const text = String(message || "");
+  return (
+    isMaterialUploadLoginStateError(text)
+    || /Execution context was destroyed|frame was detached|ERR_ABORTED|ERR_FAILED|Target page, context or browser has been closed|Cannot find context with specified id/i.test(text)
+  );
+}
+
+function isMaterialUploadNavigationTimeoutError(message = "") {
+  const text = String(message || "");
+  return /Timeout \d+ms exceeded.*agentseller\.temu\.com\/goods\/list|page\.goto: Timeout .*goods\/list/i.test(text);
+}
+
+function formatAutoPricingUserError(message = "") {
+  const text = String(message || "").trim();
+  if (!text) return "执行失败，请稍后重试";
+  if (isMaterialUploadLoginStateError(text)) return "登录状态已失效，请重新登录后重试";
+  if (isMaterialUploadNavigationTimeoutError(text)) return "进入素材页面超时，请稍后重试";
+  if (/Execution context was destroyed/i.test(text)) return "素材上传过程中页面刷新中断，请稍后重试";
+  if (/frame was detached|ERR_ABORTED|ERR_FAILED/i.test(text)) return "素材页面连接中断，请稍后重试";
+  return text;
+}
+
+async function refreshMaterialUploadSession(page, reason = "") {
+  if (!page || page.isClosed()) {
+    return false;
+  }
+
+  const suffix = reason ? `: ${String(reason).slice(0, 160)}` : "";
+  console.error(`[upload] Refreshing material upload session${suffix}`);
+
+  try {
+    await navigateToSellerCentral(page, "/goods/list");
+    await randomDelay(1500, 2500);
+    return true;
+  } catch (navError) {
+    console.error(`[upload] Session refresh via navigation failed: ${navError.message}`);
+  }
+
+  const { phone, password } = getRequestCredentials();
+  if (!phone || !password) {
+    console.error("[upload] No credentials available for session refresh");
+    return false;
+  }
+
+  try {
+    const loginResult = await loginWithTransientPassword(phone, password);
+    if (!loginResult?.success) {
+      console.error("[upload] Transient re-login did not return success");
+      return false;
+    }
+    await navigateToSellerCentral(page, "/goods/list");
+    await randomDelay(1500, 2500);
+    return true;
+  } catch (loginError) {
+    console.error(`[upload] Transient re-login failed: ${loginError.message}`);
+    return false;
+  }
+}
+
 /**
  * 搜索分类 — 通过逐级遍历分类树匹配中文分类路径
  * @param {Page} page
  * @param {string} searchTerm - 分类搜索词，支持 "一级/二级/三级" 格式或单个关键词
  */
-async function searchCategoryAPI(page, searchTerm) {
+function extractCategoryRefinementSegments(text = "") {
+  return String(text || "")
+    .replace(/[\u200B-\u200D\uFEFF\u00AD]/g, "")
+    .replace(/[、，]/g, "")
+    .split(/[|｜,，;；>》/\s]+/)
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length >= 2);
+}
+
+function syncLeafCategoryPayloadFields(payload, leafCatId) {
+  const normalizedLeafCatId = Number(leafCatId) || 0;
+  if (!payload || normalizedLeafCatId <= 0) return;
+  payload.leafCatId = normalizedLeafCatId;
+  payload.leafCategoryId = normalizedLeafCatId;
+  payload.catId = normalizedLeafCatId;
+  payload.categoryId = normalizedLeafCatId;
+}
+
+async function searchCategoryAPI(page, searchTerm, options = {}) {
   const cleanStr = (s) => s.replace(/[\u200B-\u200D\uFEFF\u00AD]/g, "").replace(/[、，]/g, "");
+  const searchHintSegments = extractCategoryRefinementSegments(searchTerm);
+  const titleSegments = extractCategoryRefinementSegments(options.title || searchTerm);
+  const refinementSegments = Array.from(new Set([...searchHintSegments, ...titleSegments]));
 
   // 判断搜索词类型：包含 "/" 说明是分类路径，否则是标题/关键词
   const isPathSearch = searchTerm.includes("/");
@@ -5544,7 +4774,9 @@ async function searchCategoryAPI(page, searchTerm) {
 
     // 提取标题中的核心关键词（用分隔符切分后直接匹配）
     const titleClean = cleanStr(searchTerm);
-    const segments = titleClean.split(/[|｜,，;；>》\s]+/).filter(s => s.length >= 2);
+    const segments = refinementSegments.length > 0
+      ? refinementSegments
+      : titleClean.split(/[|｜,，;；>》\s]+/).filter(s => s.length >= 2);
     console.error(`[category] Segments: ${segments.slice(0, 8).join(", ")}`);
 
     let bestCat = null;
@@ -5704,17 +4936,51 @@ async function searchCategoryAPI(page, searchTerm) {
     }
   }
 
-  // 继续展开到叶子节点（如果还有子分类，选第一个）
+  // 继续展开到叶子节点：优先按标题关键词细化，避免宽类目一路误选第一个子类
   const matchedLevels = Object.keys(catIds).filter(k => k.match(/^cat\d+Id$/)).length;
   for (let level = matchedLevels; level < 10; level++) {
     const result = await temuXHR(page, "/anniston-agent-seller/category/children/list", { parentCatId }, { maxRetries: 1 });
     if (!result.success || !result.data?.categoryNodeVOS?.length) break;
-    const firstChild = result.data.categoryNodeVOS[0];
-    catIds[`cat${level + 1}Id`] = firstChild.catId;
-    catIds[`cat${level + 1}Name`] = firstChild.catName;
-    parentCatId = firstChild.catId;
-    lastMatchedCatId = firstChild.catId;
-    console.error(`[category] Level ${level + 1}: auto-select → ${firstChild.catId}:${firstChild.catName}`);
+    const children = result.data.categoryNodeVOS;
+    let bestChild = null;
+    let bestScore = -1;
+    let otherChild = null;
+
+    for (const child of children) {
+      const childName = cleanStr(child.catName);
+      if (/^其[他它]/.test(childName)) otherChild = child;
+      let score = 0;
+      for (const seg of refinementSegments) {
+        if (childName.includes(seg)) score += seg.length * 3;
+        else if (seg.includes(childName)) score += childName.length * 2;
+        else {
+          for (let len = Math.min(4, seg.length); len >= 2; len--) {
+            let matched = false;
+            for (let i = 0; i <= seg.length - len; i++) {
+              if (childName.includes(seg.slice(i, i + len))) {
+                score += len;
+                matched = true;
+                break;
+              }
+            }
+            if (matched) break;
+          }
+        }
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        bestChild = child;
+      }
+    }
+
+    const selectedChild = bestScore > 0
+      ? bestChild
+      : (otherChild || children[0]);
+    catIds[`cat${level + 1}Id`] = selectedChild.catId;
+    catIds[`cat${level + 1}Name`] = selectedChild.catName;
+    parentCatId = selectedChild.catId;
+    lastMatchedCatId = selectedChild.catId;
+    console.error(`[category] Level ${level + 1}: auto-select → ${selectedChild.catId}:${selectedChild.catName} (score=${bestScore})`);
   }
 
   // 补齐剩余层级为 0
@@ -5750,7 +5016,8 @@ async function searchCategoryAPI(page, searchTerm) {
  * @returns {Object} { success, data, errorCode, errorMsg, raw }
  */
 async function temuXHR(page, endpoint, body, options = {}) {
-  const { maxRetries = 3 } = options;
+  const configuredMaxRetries = getConfiguredMaxRetries();
+  const { maxRetries = configuredMaxRetries } = options;
   const NON_RETRYABLE = [1000001, 1000002, 1000003, 1000004, 40001, 40003, 50001, 6000002]; // 参数错误/无权限/属性不匹配（外层专用重试处理）
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -5990,6 +5257,9 @@ const AI_AUTH_HEADERS = { "sec-fetch-site": "same-origin", "origin": AI_IMAGE_GE
 async function formatAiImageError(prefix, response) {
   try {
     const payload = (await response.text()).trim();
+    if (response.status === 429 || isAiUpstreamBusyMessage(payload)) {
+      return `${prefix}: AI 服务当前繁忙或已限流，请稍后重试`;
+    }
     if (payload) {
       return `${prefix}: ${response.status} ${payload.slice(0, 240)}`;
     }
@@ -5999,16 +5269,224 @@ async function formatAiImageError(prefix, response) {
 
 function formatAiImageFetchError(prefix, error, routePath) {
   const reason = error?.message || String(error || "");
+  if (error?.name === "AbortError" || /timeout|timed out|超时/i.test(reason)) {
+    return `${prefix}: 请求 ${AI_IMAGE_GEN_URL}${routePath} 超时，请稍后重试`;
+  }
   return `${prefix}: 请求 ${AI_IMAGE_GEN_URL}${routePath} 失败 (${reason})`;
 }
 
+function isAiUpstreamBusyMessage(message) {
+  const text = String(message || "");
+  return /429|上游负载已饱和|too many requests|rate limit|invalid tokens multiple times|please wait 120 seconds/i.test(text);
+}
+
 /**
- * 调用 AI 生图服务：分析 + 生成 10 张图
+ * 调用 AI 生图服务：分析 + 生成 9 张图
  * @param {string} sourceImagePath - 商品原图本地路径
  * @param {string} productTitle - 商品标题（用于分析）
  * @returns {Object} { success, images: { [imageType]: base64DataUrl } }
  */
+function shouldRetryAiImageRequest(message, status = 0) {
+  const text = String(message || "");
+  return Number(status) >= 500
+    || isAiUpstreamBusyMessage(text)
+    || /connection error|network|socket hang up|econnreset|fetch failed|temporarily unavailable|timeout|timed out/i.test(text);
+}
+
+async function fetchAiImageStageWithRetry({ label, routePath, request, maxRetries = 2 }) {
+  let lastError = "";
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await request();
+      if (response.ok) {
+        return { success: true, response };
+      }
+
+      lastError = await formatAiImageError(label, response);
+      if (!shouldRetryAiImageRequest(lastError, response.status) || attempt >= maxRetries) {
+        return { success: false, error: lastError };
+      }
+    } catch (error) {
+      lastError = formatAiImageFetchError(label, error, routePath);
+      if (!shouldRetryAiImageRequest(lastError) || attempt >= maxRetries) {
+        return { success: false, error: lastError };
+      }
+    }
+
+    const waitMs = (attempt + 1) * 2000;
+    console.error(`[ai-gen] ${label} retry ${attempt + 1}/${maxRetries + 1}: ${lastError}`);
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
+
+  return { success: false, error: lastError || `${label}: unknown error` };
+}
+
+function buildAiAnalyzeImageDataUrl(imagePath) {
+  const imageBuffer = fs.readFileSync(imagePath);
+  const ext = path.extname(imagePath).toLowerCase();
+  const mimeType = ext === ".png"
+    ? "image/png"
+    : ext === ".webp"
+      ? "image/webp"
+      : ext === ".gif"
+        ? "image/gif"
+        : "image/jpeg";
+  return `data:${mimeType};base64,${imageBuffer.toString("base64")}`;
+}
+
+function extractJsonObjectFromText(text) {
+  const content = String(text || "").trim();
+  if (!content) return null;
+
+  const directMatch = content.match(/\{[\s\S]*\}/);
+  if (!directMatch) return null;
+
+  try {
+    return JSON.parse(directMatch[0]);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeAnalyzeFallbackPayload(payload, productTitle = "") {
+  const fallbackTitle = String(productTitle || "").trim() || "商品";
+  const normalizedSellingPoints = Array.isArray(payload?.sellingPoints)
+    ? payload.sellingPoints.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 6)
+    : [];
+  const normalizedAudience = Array.isArray(payload?.targetAudience)
+    ? payload.targetAudience.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 4)
+    : [];
+  const normalizedScenes = Array.isArray(payload?.usageScenes)
+    ? payload.usageScenes.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 4)
+    : [];
+  const productForm = String(payload?.productForm || "").trim();
+
+  return {
+    productName: String(payload?.productName || "").trim() || fallbackTitle,
+    category: String(payload?.category || "").trim() || "General merchandise",
+    sellingPoints: normalizedSellingPoints.length > 0
+      ? normalizedSellingPoints
+      : ["Clear product presentation", "Useful for e-commerce listing", "Highlights practical usage"],
+    materials: String(payload?.materials || "").trim() || "not clearly visible",
+    colors: String(payload?.colors || "").trim() || "not clearly visible",
+    targetAudience: normalizedAudience.length > 0 ? normalizedAudience : ["general consumers", "online shoppers"],
+    usageScenes: normalizedScenes.length > 0 ? normalizedScenes : ["home use", "daily use"],
+    estimatedDimensions: String(payload?.estimatedDimensions || "").trim() || "not clearly visible",
+    ...(productForm ? { productForm } : {}),
+    creativeBriefs: payload?.creativeBriefs && typeof payload.creativeBriefs === "object" ? payload.creativeBriefs : {},
+  };
+}
+
+async function requestJsonOverHttps(urlString, payload, options = {}) {
+  const url = new URL(urlString);
+  const body = typeof payload === "string" ? payload : JSON.stringify(payload);
+  const headers = {
+    "Content-Type": "application/json",
+    "Content-Length": Buffer.byteLength(body),
+    ...(options.headers || {}),
+  };
+  const timeoutMs = Number(options.timeoutMs) || 180000;
+
+  return new Promise((resolve, reject) => {
+    const request = https.request({
+      protocol: url.protocol,
+      hostname: url.hostname,
+      port: url.port || (url.protocol === "https:" ? 443 : 80),
+      path: `${url.pathname}${url.search}`,
+      method: options.method || "POST",
+      headers,
+      family: 4,
+      timeout: timeoutMs,
+    }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+      response.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        resolve({
+          ok: Number(response.statusCode) >= 200 && Number(response.statusCode) < 300,
+          status: Number(response.statusCode) || 0,
+          text,
+        });
+      });
+    });
+
+    request.on("timeout", () => request.destroy(new Error(`timeout after ${timeoutMs}ms`)));
+    request.on("error", reject);
+    request.write(body);
+    request.end();
+  });
+}
+
+async function directAnalyzeProductImages({ sourceImagePath, productTitle, extraImagePaths = [] }) {
+  if (!AI_API_KEY) {
+    return { success: false, error: "Direct analyze fallback unavailable: missing AI_API_KEY" };
+  }
+
+  const uniqueImagePaths = Array.from(new Set([sourceImagePath, ...extraImagePaths]))
+    .filter((imagePath) => typeof imagePath === "string" && imagePath.trim() && fs.existsSync(imagePath))
+    .slice(0, 5);
+
+  if (uniqueImagePaths.length === 0) {
+    return { success: false, error: "Direct analyze fallback unavailable: no source images" };
+  }
+
+  const prompt = `You are an e-commerce product analyst.\nAnalyze the provided product images together with the title and return exactly one JSON object.\nDo not use markdown, code fences, or extra commentary.\n\nTitle: ${JSON.stringify(String(productTitle || "").trim())}\n\nReturn this schema exactly:\n{\n  "productName": "short product name",\n  "category": "specific category",\n  "sellingPoints": ["point 1", "point 2", "point 3"],\n  "materials": "main material summary",\n  "colors": "main color summary",\n  "targetAudience": ["audience 1", "audience 2"],\n  "usageScenes": ["scene 1", "scene 2"],\n  "estimatedDimensions": "visible dimensions or not clearly visible",\n  "productForm": "standard"\n}\n\nRules:\n- sellingPoints: 3 to 5 concise strings\n- targetAudience: 1 to 3 concise strings\n- usageScenes: 2 to 4 concise strings\n- If something is unclear, write \"not clearly visible\"\n- productName should prefer the title when it is usable`;
+
+  const content = [{ type: "text", text: prompt }];
+  for (const imagePath of uniqueImagePaths) {
+    content.push({
+      type: "image_url",
+      image_url: {
+        url: buildAiAnalyzeImageDataUrl(imagePath),
+      },
+    });
+  }
+
+  try {
+    const response = await requestJsonOverHttps(`${AI_BASE_URL}/chat/completions`, {
+      model: AI_MODEL,
+      messages: [{ role: "user", content }],
+      temperature: 0.2,
+      max_tokens: 1200,
+    }, {
+      headers: {
+        Authorization: `Bearer ${AI_API_KEY}`,
+      },
+      timeoutMs: 300000,
+    });
+
+    if (!response.ok) {
+      return {
+        success: false,
+        error: `Direct analyze fallback failed: ${response.status} ${String(response.text || "").slice(0, 240)}`.trim(),
+      };
+    }
+
+    const parsedResponse = JSON.parse(response.text || "{}");
+    const modelContent = parsedResponse?.choices?.[0]?.message?.content || "";
+    const parsedAnalysis = extractJsonObjectFromText(modelContent);
+    if (!parsedAnalysis || typeof parsedAnalysis !== "object") {
+      return {
+        success: false,
+        error: `Direct analyze fallback returned invalid JSON: ${String(modelContent).slice(0, 240)}`,
+      };
+    }
+
+    return {
+      success: true,
+      analysis: normalizeAnalyzeFallbackPayload(parsedAnalysis, productTitle),
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: `Direct analyze fallback failed: ${error?.message || String(error || "unknown error")}`,
+    };
+  }
+}
+
 async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePaths = []) {
+  const AI_SINGLE_IMAGE_REQUEST_TIMEOUT_MS = 90000;
+  const AI_SINGLE_IMAGE_IDLE_TIMEOUT_MS = 45000;
   const imageBuffer = fs.readFileSync(sourceImagePath);
   const base64 = imageBuffer.toString("base64");
   const ext = path.extname(sourceImagePath).toLowerCase();
@@ -6037,27 +5515,47 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
   }
   analyzeForm.append("productMode", "single");
 
-  let analyzeResp;
-  try {
-    analyzeResp = await fetch(`${AI_IMAGE_GEN_URL}/api/analyze`, {
+  const analyzeStage = await fetchAiImageStageWithRetry({
+    label: "Analyze failed",
+    routePath: "/api/analyze",
+    request: () => fetch(`${AI_IMAGE_GEN_URL}/api/analyze`, {
       method: "POST",
       body: analyzeForm,
       headers: AI_AUTH_HEADERS,
+    }),
+    maxRetries: 2,
+  });
+
+  let analysis = null;
+  if (analyzeStage.success) {
+    const analyzeResp = analyzeStage.response;
+    analysis = await analyzeResp.json();
+  } else if (shouldRetryAiImageRequest(analyzeStage.error)) {
+    console.error(`[ai-gen] Primary analyze failed, trying direct fallback: ${analyzeStage.error}`);
+    const fallbackAnalyze = await directAnalyzeProductImages({
+      sourceImagePath,
+      productTitle,
+      extraImagePaths,
     });
-  } catch (error) {
-    return { success: false, error: formatAiImageFetchError("Analyze failed", error, "/api/analyze") };
+    if (!fallbackAnalyze.success) {
+      return {
+        success: false,
+        error: `${analyzeStage.error}; ${fallbackAnalyze.error}`,
+      };
+    }
+    analysis = fallbackAnalyze.analysis;
+    console.error("[ai-gen] Direct analyze fallback succeeded");
+  } else {
+    return { success: false, error: analyzeStage.error };
   }
-  if (!analyzeResp.ok) {
-    return { success: false, error: await formatAiImageError("Analyze failed", analyzeResp) };
-  }
-  const analysis = await analyzeResp.json();
   console.error(`[ai-gen] Analysis: ${analysis.productName?.slice(0, 40)}, category: ${analysis.category?.slice(0, 30)}`);
 
   // Step 2: 生成 plans（调用 /api/plans 获取带 prompt 的方案）
   console.error("[ai-gen] Step 2: Generating plans with prompts...");
-  let plansResp;
-  try {
-    plansResp = await fetch(`${AI_IMAGE_GEN_URL}/api/plans`, {
+  const plansStage = await fetchAiImageStageWithRetry({
+    label: "Plans API failed",
+    routePath: "/api/plans",
+    request: () => fetch(`${AI_IMAGE_GEN_URL}/api/plans`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...AI_AUTH_HEADERS },
       body: JSON.stringify({
@@ -6067,37 +5565,41 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
         imageSize: "1000x1000",
         productMode: "single",
       }),
-    });
-  } catch (error) {
-    return { success: false, error: formatAiImageFetchError("Plans API failed", error, "/api/plans") };
+    }),
+    maxRetries: 2,
+  });
+  if (!plansStage.success) {
+    return { success: false, error: plansStage.error };
   }
-  if (!plansResp.ok) {
-    return { success: false, error: await formatAiImageError("Plans API failed", plansResp) };
-  }
+  const plansResp = plansStage.response;
   const { plans } = await plansResp.json();
   console.error(`[ai-gen] Got ${plans.length} plans with prompts`);
 
-  // Step 3: 并发生成图片（分成多组并行请求）
-  const CONCURRENCY = 10; // 10并发，失败自动重试
+  // Step 3: 单图并发生成（每张图单独请求，互不影响）
   const images = {};
   let lastGenerateError = "";
 
-  // 将 plans 分组
-  const planGroups = [];
-  for (let i = 0; i < plans.length; i += CONCURRENCY) {
-    planGroups.push(plans.slice(i, i + CONCURRENCY));
-  }
-
-  console.error(`[ai-gen] Step 3: Generating ${plans.length} images (${planGroups.length} batches, ${CONCURRENCY} concurrent)...`);
+  console.error(`[ai-gen] Step 3: Generating ${plans.length} images (single-plan parallel requests)...`);
 
   // SSE 流处理函数
   async function processSSE(resp) {
+    if (!resp.body) {
+      throw new Error("AI 服务未返回可读取的数据流");
+    }
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
     const result = {};
     while (true) {
-      const { done, value } = await reader.read();
+      let idleTimer = null;
+      const { done, value } = await Promise.race([
+        reader.read(),
+        new Promise((_, reject) => {
+          idleTimer = setTimeout(() => reject(new Error(`AI 图片生成超时（${Math.round(AI_SINGLE_IMAGE_IDLE_TIMEOUT_MS / 1000)}s 无响应）`)), AI_SINGLE_IMAGE_IDLE_TIMEOUT_MS);
+        }),
+      ]).finally(() => {
+        if (idleTimer) clearTimeout(idleTimer);
+      });
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
@@ -6108,7 +5610,7 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
           const data = JSON.parse(line.slice(6));
           if (data.status === "done" && data.imageUrl) {
             result[data.imageType] = data.imageUrl;
-            console.error(`[ai-gen] Generated: ${data.imageType} (${Object.keys(images).length + Object.keys(result).length}/${plans.length})`);
+            console.error(`[ai-gen] Generated: ${data.imageType}`);
           } else if (data.status === "error") {
             console.error(`[ai-gen] Error: ${data.imageType}: ${data.error}`);
           }
@@ -6118,9 +5620,10 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
     return result;
   }
 
-  // 单个 plan 请求函数（带重试）
   async function generateSinglePlan(plan, retries = 2) {
+    let latestPlanError = "";
     for (let attempt = 0; attempt <= retries; attempt++) {
+      let requestTimer = null;
       try {
         const form = new FormData();
         for (const img of allImageBlobs) {
@@ -6130,37 +5633,69 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
         form.append("productMode", "single");
         form.append("imageLanguage", "en");
         form.append("imageSize", "1000x1000");
-        const resp = await fetch(`${AI_IMAGE_GEN_URL}/api/generate`, { method: "POST", body: form, headers: AI_AUTH_HEADERS });
+        const controller = new AbortController();
+        requestTimer = setTimeout(() => controller.abort(), AI_SINGLE_IMAGE_REQUEST_TIMEOUT_MS);
+        const resp = await fetch(`${AI_IMAGE_GEN_URL}/api/generate`, {
+          method: "POST",
+          body: form,
+          headers: AI_AUTH_HEADERS,
+          signal: controller.signal,
+        });
         if (resp.ok) {
-          const r = await processSSE(resp);
-          if (Object.keys(r).length > 0) return r;
-          console.error(`[ai-gen] Empty result for ${plan.imageType}, attempt ${attempt + 1}/${retries + 1}`);
+          const singleResult = await processSSE(resp);
+          if (singleResult[plan.imageType]) {
+            return singleResult[plan.imageType];
+          }
+          latestPlanError = `Generate failed (${plan.imageType}): 未返回图片`;
+          console.error(`[ai-gen] Missing image for ${plan.imageType}, attempt ${attempt + 1}/${retries + 1}`);
         } else {
-          lastGenerateError = await formatAiImageError(`Generate failed (${plan.imageType})`, resp);
+          latestPlanError = await formatAiImageError(`Generate failed (${plan.imageType})`, resp);
           console.error(`[ai-gen] HTTP ${resp.status} for ${plan.imageType}, attempt ${attempt + 1}/${retries + 1}`);
         }
       } catch (e) {
-        lastGenerateError = formatAiImageFetchError(`Generate failed (${plan.imageType})`, e, "/api/generate");
+        latestPlanError = formatAiImageFetchError(`Generate failed (${plan.imageType})`, e, "/api/generate");
         console.error(`[ai-gen] Error for ${plan.imageType}: ${e.message}, attempt ${attempt + 1}/${retries + 1}`);
+      } finally {
+        if (requestTimer) clearTimeout(requestTimer);
       }
-      if (attempt < retries) await new Promise(r => setTimeout(r, 3000)); // 重试前等3秒
+      if (isAiUpstreamBusyMessage(latestPlanError)) {
+        lastGenerateError = latestPlanError;
+        return null;
+      }
+      if (attempt < retries) {
+        await new Promise(r => setTimeout(r, 1500));
+      }
     }
-    return {};
+    if (latestPlanError) {
+      lastGenerateError = latestPlanError;
+    }
+    return null;
   }
 
-  for (const group of planGroups) {
-    const promises = group.map(plan => generateSinglePlan(plan));
-    const results = await Promise.all(promises);
-    for (const r of results) Object.assign(images, r);
+  const firstPassResults = await Promise.allSettled(
+    plans.map((plan) => generateSinglePlan(plan, 2))
+  );
+  for (let i = 0; i < plans.length; i++) {
+    const plan = plans[i];
+    const result = firstPassResults[i];
+    if (result?.status === "fulfilled" && result.value) {
+      images[plan.imageType] = result.value;
+    }
   }
 
   // 检查缺失的图片，单独重试
   const missingPlans = plans.filter(p => !images[p.imageType]);
   if (missingPlans.length > 0) {
-    console.error(`[ai-gen] Missing ${missingPlans.length} images, retrying individually...`);
-    for (const plan of missingPlans) {
-      const r = await generateSinglePlan(plan, 1);
-      Object.assign(images, r);
+    console.error(`[ai-gen] Missing ${missingPlans.length} images after parallel run, retrying individually...`);
+    const retryResults = await Promise.allSettled(
+      missingPlans.map((plan) => generateSinglePlan(plan, 1))
+    );
+    for (let i = 0; i < missingPlans.length; i++) {
+      const plan = missingPlans[i];
+      const result = retryResults[i];
+      if (result?.status === "fulfilled" && result.value) {
+        images[plan.imageType] = result.value;
+      }
     }
   }
 
@@ -6185,14 +5720,160 @@ async function uploadImageToKwcdn(page, localImagePath) {
   return { success: false, url: null, error: result.error || "unknown upload error" };
 }
 
+function normalizeUploadConcurrency(value, fallback = 3) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(1, Math.min(4, Math.floor(parsed)));
+}
+
+const DEFAULT_PRODUCT_INTERVAL_MIN = 0.15;
+const DEFAULT_PRODUCT_INTERVAL_MAX = 0.3;
+
+function normalizeIntervalMinutes(value, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return parsed;
+}
+
+async function createMaterialUploadPage() {
+  return await createSellerCentralPage("/goods/list", {
+    attempts: 2,
+    lite: false,
+    readyDelayMin: 3000,
+    readyDelayMax: 5000,
+    logPrefix: "[upload-page]",
+  });
+}
+
+async function uploadImagesToKwcdnSerial(localImages, options = {}) {
+  const uploadTypes = Array.isArray(options.types) && options.types.length > 0
+    ? options.types.filter((type) => localImages[type])
+    : AI_DETAIL_IMAGE_TYPE_ORDER.filter((type) => localImages[type]);
+  const kwcdnUrls = {};
+  const uploadErrors = {};
+  if (uploadTypes.length === 0) {
+    return { kwcdnUrls, uploadErrors, concurrency: 0, mode: "serial" };
+  }
+
+  let page = await createMaterialUploadPage();
+  try {
+    console.error(`[auto-pricing] Upload fallback: serial mode for ${uploadTypes.length} images`);
+    for (const type of uploadTypes) {
+      let uploadResult = await uploadImageToKwcdn(page, localImages[type]);
+      if (!uploadResult.success && (
+        isMaterialUploadRecoverableError(uploadResult.error)
+        || isMaterialUploadNavigationTimeoutError(uploadResult.error)
+      )) {
+        console.error(`[auto-pricing] Serial upload retry for ${type}: ${uploadResult.error}`);
+        await page.close().catch(() => {});
+        page = await createMaterialUploadPage();
+        uploadResult = await uploadImageToKwcdn(page, localImages[type]);
+      }
+      if (uploadResult.success && uploadResult.url) {
+        kwcdnUrls[type] = uploadResult.url;
+      } else {
+        uploadErrors[type] = uploadResult.error || "unknown upload error";
+      }
+    }
+    return { kwcdnUrls, uploadErrors, concurrency: 1, mode: "serial" };
+  } finally {
+    await page.close().catch(() => {});
+  }
+}
+
+async function uploadImagesToKwcdnConcurrently(localImages, options = {}) {
+  const uploadTypes = AI_DETAIL_IMAGE_TYPE_ORDER.filter((type) => localImages[type]);
+  const kwcdnUrls = {};
+  const uploadErrors = {};
+  if (uploadTypes.length === 0) {
+    return { kwcdnUrls, uploadErrors, concurrency: 0 };
+  }
+
+  const targetConcurrency = Math.min(
+    uploadTypes.length,
+    normalizeUploadConcurrency(options.concurrency, 3),
+  );
+  if (targetConcurrency <= 1) {
+    return uploadImagesToKwcdnSerial(localImages, { types: uploadTypes });
+  }
+  const uploadPages = [];
+
+  try {
+    try {
+      uploadPages.push(await createMaterialUploadPage());
+    } catch (error) {
+      console.error(`[auto-pricing] Upload page init failed, fallback to serial: ${error?.message || error}`);
+      return uploadImagesToKwcdnSerial(localImages, { types: uploadTypes });
+    }
+
+    for (let i = 1; i < targetConcurrency; i += 1) {
+      try {
+        uploadPages.push(await createMaterialUploadPage());
+      } catch (error) {
+        console.error(`[auto-pricing] Upload page init failed: ${error?.message || error}`);
+      }
+    }
+
+    console.error(`[auto-pricing] Uploading ${uploadTypes.length} images with concurrency=${uploadPages.length}...`);
+
+    for (let i = 0; i < uploadTypes.length; i += uploadPages.length) {
+      const batch = uploadTypes.slice(i, i + uploadPages.length);
+      const batchResults = await Promise.allSettled(
+        batch.map((type, index) => uploadImageToKwcdn(uploadPages[index], localImages[type])),
+      );
+
+      batchResults.forEach((result, index) => {
+        const type = batch[index];
+        if (!type) return;
+        if (result.status === "fulfilled" && result.value?.success && result.value.url) {
+          kwcdnUrls[type] = result.value.url;
+          console.error(`[auto-pricing] Uploaded ${type}: ${result.value.url.slice(0, 60)}`);
+          return;
+        }
+        const errorMessage = result.status === "fulfilled"
+          ? (result.value?.error || "unknown upload error")
+          : (result.reason?.message || String(result.reason || "unknown upload error"));
+        uploadErrors[type] = errorMessage;
+        console.error(`[auto-pricing] Upload failed for ${type}: ${errorMessage}`);
+      });
+
+      const retryableTypes = batch.filter((type) => {
+        const errorMessage = uploadErrors[type];
+        return errorMessage && (
+          isMaterialUploadRecoverableError(errorMessage)
+          || isMaterialUploadNavigationTimeoutError(errorMessage)
+        );
+      });
+
+      if (retryableTypes.length > 0) {
+        console.error(`[auto-pricing] Upload fallback triggered for ${retryableTypes.join(", ")}`);
+        const fallbackResult = await uploadImagesToKwcdnSerial(localImages, { types: retryableTypes });
+        Object.assign(kwcdnUrls, fallbackResult.kwcdnUrls);
+        retryableTypes.forEach((type) => {
+          if (fallbackResult.kwcdnUrls[type]) {
+            delete uploadErrors[type];
+          } else if (fallbackResult.uploadErrors[type]) {
+            uploadErrors[type] = fallbackResult.uploadErrors[type];
+          }
+        });
+      }
+    }
+
+    return { kwcdnUrls, uploadErrors, concurrency: uploadPages.length };
+  } finally {
+    await Promise.allSettled(uploadPages.map((page) => page.close().catch(() => {})));
+  }
+}
+
 /**
  * 完整自动核价流程
  * @param {Object} params
  * @param {string} params.csvPath - CSV 文件路径
  * @param {number} [params.startRow=0] - 起始行
  * @param {number} [params.count=1] - 处理数量
- * @param {number} [params.intervalMin=0.5] - 最小间隔（分钟）
- * @param {number} [params.intervalMax=1] - 最大间隔（分钟）
+ * @param {number} [params.intervalMin=0.15] - 最小间隔（分钟）
+ * @param {number} [params.intervalMax=0.3] - 最大间隔（分钟）
+ * @param {number} [params.uploadConcurrency=3] - 图片上传并发数
  */
 async function autoPricingFromCSV(params) {
   console.error("[auto-pricing] Starting full auto pricing flow...");
@@ -6222,8 +5903,10 @@ async function autoPricingFromCSV(params) {
 
   const startRow = params.startRow || 0;
   const count = params.count || 1;
-  const intervalMin = params.intervalMin || 0.5;
-  const intervalMax = params.intervalMax || 1;
+  const intervalMin = normalizeIntervalMinutes(params.intervalMin, DEFAULT_PRODUCT_INTERVAL_MIN);
+  const intervalMaxRaw = normalizeIntervalMinutes(params.intervalMax, DEFAULT_PRODUCT_INTERVAL_MAX);
+  const intervalMax = Math.max(intervalMin, intervalMaxRaw);
+  const uploadConcurrency = normalizeUploadConcurrency(params.uploadConcurrency, 3);
   const results = [];
 
   // 支持 XLSX 和 CSV 两种格式
@@ -6280,6 +5963,7 @@ async function autoPricingFromCSV(params) {
   const carouselIdx = colIndex(["商品轮播图"]);
   const catCnIdx = colIndex(["后台分类", "前台分类（中文）", "分类（中文）", "分类"]);
   const priceIdx = colIndex(["美元价格($)", "美元价格", "price"]);
+  const total = Math.max(0, Math.min(count, dataRows.length - startRow));
 
   console.error(`[auto-pricing] Columns: name=${nameIdx}, image=${imageIdx}, cat=${catCnIdx}, price=${priceIdx}`);
   if (imageIdx < 0) {
@@ -6302,7 +5986,6 @@ async function autoPricingFromCSV(params) {
     return { success: false, taskId, message };
   }
 
-  const total = Math.max(0, Math.min(count, dataRows.length - startRow));
   console.error(`[auto-pricing] Will process ${total} products (dataRows=${dataRows.length})`);
   console.error(`[auto-pricing] Columns: name=${nameIdx}, nameEn=${nameEnIdx}, image=${imageIdx}, carousel=${carouselIdx}, cat=${catCnIdx}, price=${priceIdx}`);
 
@@ -6328,6 +6011,16 @@ async function autoPricingFromCSV(params) {
     startedAt,
     updatedAt: startedAt,
   });
+  const previousNavLiteMode = _navLiteMode;
+  let stopAuthPopupMonitor = null;
+  try {
+    updateCurrentProgress({
+      step: "预热登录态",
+      message: "正在准备卖家中心会话...",
+    });
+    stopAuthPopupMonitor = registerSellerAuthPopupMonitor("[auto-pricing-popup]");
+    await establishSellerCentralSession("[auto-pricing]");
+    _navLiteMode = true;
 
   for (let i = startRow; i < startRow + total; i++) {
     const cols = dataRows[i] || [];
@@ -6440,26 +6133,9 @@ async function autoPricingFromCSV(params) {
       // Step 4: 上传到素材中心获取 kwcdn URL
       updateCurrentProgress({ step: "上传图片..." });
       console.error(`[auto-pricing] Uploading to material center...`);
-      const page = await context.newPage();
-      const kwcdnUrls = {};
-      const uploadErrors = {};
-      try {
-      await navigateToSellerCentral(page, "/goods/list");
-      await randomDelay(3000, 5000);
-
-      // 顺序上传，避免同页并发 evaluate 导致签名/上传互相覆盖
-      const uploadTypes = AI_DETAIL_IMAGE_TYPE_ORDER.filter(t => localImages[t]);
-      for (const type of uploadTypes) {
-        const uploadResult = await uploadImageToKwcdn(page, localImages[type]);
-        if (uploadResult.success && uploadResult.url) {
-          kwcdnUrls[type] = uploadResult.url;
-          console.error(`[auto-pricing] Uploaded ${type}: ${uploadResult.url.slice(0, 60)}`);
-        } else {
-          uploadErrors[type] = uploadResult.error || "unknown upload error";
-          console.error(`[auto-pricing] Upload failed for ${type}: ${uploadErrors[type]}`);
-        }
-      }
-      } finally { await page.close().catch(() => {}); }
+      const { kwcdnUrls, uploadErrors } = await uploadImagesToKwcdnConcurrently(localImages, {
+        concurrency: uploadConcurrency,
+      });
 
       // 按指定顺序排列图片 URL
       const orderedImageUrls = AI_DETAIL_IMAGE_TYPE_ORDER
@@ -6471,7 +6147,7 @@ async function autoPricingFromCSV(params) {
       if (orderedImageUrls.length < REQUIRED_AI_DETAIL_IMAGE_COUNT) {
         const uploadErrorSummary = Object.entries(uploadErrors)
           .slice(0, 3)
-          .map(([type, error]) => `${type}: ${String(error).slice(0, 80)}`)
+          .map(([type, error]) => `${type}: ${formatAutoPricingUserError(error).slice(0, 80)}`)
           .join("；");
         results.push({
           index: i,
@@ -6581,11 +6257,12 @@ async function autoPricingFromCSV(params) {
       try { fs.unlinkSync(sourceImagePath); } catch (e) { logSilent("ui.action", e); }
 
     } catch (e) {
-      results.push({ index: i, name: productName.slice(0, 40), success: false, message: e.message });
+      const friendlyMessage = formatAutoPricingUserError(e?.message);
+      results.push({ index: i, name: productName.slice(0, 40), success: false, message: friendlyMessage });
       syncCurrentProgressResults(results, {
         current: `${itemNum}/${total} ${productName.slice(0, 30)}`,
         step: "执行失败",
-        message: e.message || "当前商品执行失败",
+        message: friendlyMessage || "当前商品执行失败",
       });
       console.error(`[auto-pricing] ERROR: ${e.message}`);
     }
@@ -6623,6 +6300,31 @@ async function autoPricingFromCSV(params) {
     finishedAt,
   });
   return { success: true, taskId, total: results.length, successCount, failCount: failedItems.length, results, resultFile };
+  } catch (error) {
+    const failedAt = getProgressTimestamp();
+    syncCurrentProgressResults(results, {
+      running: false,
+      paused: false,
+      status: "failed",
+      total,
+      completed: results.length,
+      current: "失败",
+      step: currentProgress.step || "执行失败",
+      message: error?.message || "批量上品任务执行失败",
+      updatedAt: failedAt,
+      finishedAt: failedAt,
+    });
+    throw error;
+  } finally {
+    _navLiteMode = previousNavLiteMode;
+    if (stopAuthPopupMonitor) {
+      try {
+        stopAuthPopupMonitor();
+      } catch (cleanupError) {
+        console.error(`[auto-pricing] Popup monitor cleanup failed: ${cleanupError.message}`);
+      }
+    }
+  }
 }
 
 // ============================================================
@@ -6648,24 +6350,206 @@ const PRICING_CONFIG = {
   defaultSpec: { parentSpecId: 18012, parentSpecName: "风格", specId: 20640, specName: "A" },
 };
 
-/**
- * 查询分类的属性模板，用 AI 智能分析填充属性值
- */
-async function getCategoryProperties(page, leafCatId, productTitle) {
-  const result = await temuXHR(page, PRICING_CONFIG.categoryTemplateEndpoint, { catId: leafCatId }, { maxRetries: 2 });
-  if (!result.success || !result.data) return null;
+function getCategoryPathText(catIds = {}) {
+  return String(
+    catIds?._path
+    || Object.keys(catIds || {})
+      .filter((key) => key.endsWith("Name") && catIds[key])
+      .map((key) => catIds[key])
+      .join(" > ")
+  ).trim();
+}
 
-  const props = result.data.properties
+function getCategoryDepth(catIds = {}) {
+  let depth = 0;
+  for (let i = 1; i <= 10; i++) {
+    if ((Number(catIds?.[`cat${i}Id`]) || 0) > 0) depth = i;
+  }
+  return depth;
+}
+
+function selectPropertyValueByPatterns(propValues = [], patterns = []) {
+  if (!Array.isArray(propValues) || propValues.length === 0 || !Array.isArray(patterns)) return null;
+  for (const pattern of patterns) {
+    const matched = propValues.find((value) => pattern.test(value.value || value.propValue || ""));
+    if (matched) return matched;
+  }
+  return null;
+}
+
+function scoreCategoryTemplateCandidate(title = "", candidatePath = "", candidateName = "", templateProps = []) {
+  const titleText = String(title || "");
+  const pathText = `${candidatePath} ${candidateName}`.trim();
+  const propNames = templateProps.map((prop) => prop.name || prop.propertyName || prop.propName || "").join(" | ");
+  const propValueText = templateProps
+    .flatMap((prop) => (prop.values || prop.propertyValueList || prop.valueList || []).slice(0, 6).map((value) => value.value || value.propValue || ""))
+    .join(" | ");
+
+  let score = 0;
+  if (/供电方式|工作电压|电池|插头|RAM|ROM/i.test(`${propNames} ${propValueText}`)) score -= 120;
+  if (/其[他它]/.test(candidateName)) score -= 8;
+
+  if (/(洗衣|吸色|护色|染色|去污|清洁|污渍)/.test(titleText)) {
+    if (/清洁剂/.test(pathText)) score += 28;
+    if (/湿巾|纸巾/.test(pathText)) score += 20;
+    if (/清洁布|百洁布|海绵/.test(pathText)) score += 14;
+    if (/物品形式/.test(propNames) && /片剂|湿巾/.test(propValueText)) score += 18;
+    if (/表面推荐/.test(propNames) && /织物/.test(propValueText)) score += 12;
+    if (/用途|功效|数量|容量/.test(propNames)) score += 8;
+  }
+
+  if (/(布|纸|片|无纺布)/.test(titleText)) {
+    if (/织造方式/.test(propNames) && /无纺布/.test(propValueText)) score += 16;
+    if (/材料/.test(propNames) && /无纺布|超细纤维|涤纶/.test(propValueText)) score += 12;
+    if (/纸巾|清洁布|湿巾/.test(pathText)) score += 12;
+  }
+
+  if (/(消毒|抗菌)/.test(titleText) && /抗菌用品|消毒湿巾/.test(pathText)) {
+    score += 18;
+  }
+
+  return score;
+}
+
+function pickHeuristicPropertyValue(propName = "", propValues = [], productTitle = "", categoryPath = "") {
+  const titleText = `${String(productTitle || "")} ${String(categoryPath || "")}`;
+  const normalizedPropName = String(propName || "");
+  if (!Array.isArray(propValues) || propValues.length === 0) return null;
+
+  if (/(洗衣|吸色|护色|染色|去污|清洁)/.test(titleText)) {
+    if (/物品形式/.test(normalizedPropName)) {
+      return selectPropertyValueByPatterns(propValues, [/片剂/, /湿巾/, /片/, /纸/]);
+    }
+    if (/表面推荐/.test(normalizedPropName)) {
+      return selectPropertyValueByPatterns(propValues, [/织物/, /布/, /混纺/]);
+    }
+    if (/用途|功效/.test(normalizedPropName)) {
+      return selectPropertyValueByPatterns(propValues, [/其他/, /详见/]);
+    }
+    if (/数量/.test(normalizedPropName)) {
+      return selectPropertyValueByPatterns(propValues, [/>1/, /详见sku/, /^1$/]);
+    }
+    if (/容量/.test(normalizedPropName)) {
+      return selectPropertyValueByPatterns(propValues, [/^无$/, /<1L/, /1-10L/]);
+    }
+    if (/是否含有表面活性物质/.test(normalizedPropName)) {
+      return selectPropertyValueByPatterns(propValues, [/^否$/, /^是$/]);
+    }
+    if (/特殊功能/.test(normalizedPropName)) {
+      return selectPropertyValueByPatterns(propValues, [/无染料/, /回收/, /无树/]);
+    }
+    if (/容器类型/.test(normalizedPropName)) {
+      return selectPropertyValueByPatterns(propValues, [/袋/, /盒/, /罐/]);
+    }
+  }
+
+  if (/(布|纸|片|无纺布)/.test(titleText)) {
+    if (/材料/.test(normalizedPropName)) {
+      return selectPropertyValueByPatterns(propValues, [/无纺布/, /超细纤维/, /涤纶/, /纸/]);
+    }
+    if (/织造方式/.test(normalizedPropName)) {
+      return selectPropertyValueByPatterns(propValues, [/无纺布/, /针织/, /梭织/]);
+    }
+  }
+
+  return null;
+}
+
+async function fetchCategoryTemplateProps(page, leafCatId) {
+  const result = await temuXHR(page, PRICING_CONFIG.categoryTemplateEndpoint, { catId: leafCatId }, { maxRetries: 2 });
+  if (!result.success || !result.data) return [];
+  return result.data.properties
     || result.data.productPropertyTemplateList
     || result.data.propertyList
     || result.data.templatePropertyList
     || [];
+}
+
+async function findBetterLeafCategoryByTemplate(page, catIds, leafCatId, productTitle = "") {
+  const currentPath = getCategoryPathText(catIds);
+  const currentTemplateProps = await fetchCategoryTemplateProps(page, leafCatId);
+  const currentScore = scoreCategoryTemplateCandidate(productTitle, currentPath, String(catIds?.[`cat${getCategoryDepth(catIds)}Name`] || ""), currentTemplateProps);
+  if (currentScore > -30) {
+    return null;
+  }
+
+  console.error(`[category-fallback] Current category template looks mismatched (score=${currentScore}). Scanning siblings...`);
+
+  const depth = getCategoryDepth(catIds);
+  const parentLevels = [];
+  for (let level = depth - 1; level >= 2 && parentLevels.length < 3; level--) {
+    const parentId = Number(catIds?.[`cat${level}Id`]) || 0;
+    if (parentId > 0) parentLevels.push({ level, parentId });
+  }
+
+  let bestCandidate = null;
+  for (const { level, parentId } of parentLevels) {
+    const siblingsResult = await temuXHR(page, "/anniston-agent-seller/category/children/list", { parentCatId: parentId }, { maxRetries: 1 });
+    const siblings = siblingsResult.data?.categoryNodeVOS || [];
+    const parentPath = Object.keys(catIds)
+      .filter((key) => key.endsWith("Name") && catIds[key] && Number(key.match(/^cat(\d+)Name$/)?.[1] || 0) <= level)
+      .map((key) => catIds[key])
+      .join(" > ");
+
+    for (const sibling of siblings) {
+      const siblingChildrenResult = await temuXHR(page, "/anniston-agent-seller/category/children/list", { parentCatId: sibling.catId }, { maxRetries: 1 });
+      const siblingChildren = siblingChildrenResult.data?.categoryNodeVOS || [];
+      const leafCandidates = siblingChildren.length > 0 ? siblingChildren : [sibling];
+
+      for (const leaf of leafCandidates) {
+        if ((Number(leaf.catId) || 0) === (Number(leafCatId) || 0)) continue;
+        const leafPath = [parentPath, sibling.catName, siblingChildren.length > 0 ? leaf.catName : ""].filter(Boolean).join(" > ");
+        const candidateCatIds = {};
+        for (let i = 1; i <= level; i++) {
+          candidateCatIds[`cat${i}Id`] = Number(catIds?.[`cat${i}Id`]) || 0;
+          if (catIds?.[`cat${i}Name`]) candidateCatIds[`cat${i}Name`] = catIds[`cat${i}Name`];
+        }
+        candidateCatIds[`cat${level + 1}Id`] = Number(sibling.catId) || 0;
+        candidateCatIds[`cat${level + 1}Name`] = sibling.catName || "";
+        if (siblingChildren.length > 0) {
+          candidateCatIds[`cat${level + 2}Id`] = Number(leaf.catId) || 0;
+          candidateCatIds[`cat${level + 2}Name`] = leaf.catName || "";
+        }
+        for (let i = 1; i <= 10; i++) {
+          if (!candidateCatIds[`cat${i}Id`]) candidateCatIds[`cat${i}Id`] = 0;
+        }
+        candidateCatIds._path = leafPath;
+        const templateProps = await fetchCategoryTemplateProps(page, leaf.catId);
+        if (!templateProps.length) continue;
+        const score = scoreCategoryTemplateCandidate(productTitle, leafPath, leaf.catName || sibling.catName || "", templateProps);
+        if (!bestCandidate || score > bestCandidate.score) {
+          bestCandidate = {
+            catId: leaf.catId,
+            catName: leaf.catName || sibling.catName || "",
+            path: leafPath,
+            score,
+            catIds: candidateCatIds,
+            templateProps,
+          };
+        }
+      }
+    }
+  }
+
+  if (!bestCandidate || bestCandidate.score <= currentScore + 20 || bestCandidate.score <= 0) {
+    return null;
+  }
+
+  console.error(`[category-fallback] Selected better category: ${bestCandidate.path} (leaf=${bestCandidate.catId}, score=${bestCandidate.score})`);
+  return bestCandidate;
+}
+
+/**
+ * 查询分类的属性模板，用 AI 智能分析填充属性值
+ */
+async function getCategoryProperties(page, leafCatId, productTitle) {
+  const props = await fetchCategoryTemplateProps(page, leafCatId);
 
   if (props.length === 0) {
     const debugDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
     fs.mkdirSync(debugDir, { recursive: true });
     const debugFile = path.join(debugDir, `template_response_${leafCatId}_${Date.now()}.json`);
-    fs.writeFileSync(debugFile, JSON.stringify(result.data, null, 2));
+    fs.writeFileSync(debugFile, JSON.stringify({ leafCatId, props }, null, 2));
     console.error(`[getCategoryProperties] No properties found. Debug: ${debugFile}`);
     return null;
   }
@@ -6714,17 +6598,17 @@ ${propsForAI.map((p, i) => `${i + 1}. ${p.name}${p.required ? '(必填)' : '(选
 
     console.error(`[getCategoryProperties] Calling AI to analyze ${propsForAI.length} required properties...`);
 
-    // 调用 AI API（从顶部常量读取配置）
-    if (!AI_API_KEY) {
-      console.error(`[getCategoryProperties] AI_API_KEY not configured, using safe defaults`);
+    // 调用 AI API（属性分析支持独立配置）
+    if (!ATTRIBUTE_AI_API_KEY) {
+      console.error(`[getCategoryProperties] ATTRIBUTE_AI_API_KEY not configured, using safe defaults`);
       throw new Error("skip_ai");
     }
 
-    const aiResp = await fetch(`${AI_BASE_URL}/chat/completions`, {
+    const aiResp = await fetch(`${ATTRIBUTE_AI_BASE_URL}/chat/completions`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${AI_API_KEY}` },
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${ATTRIBUTE_AI_API_KEY}` },
       body: JSON.stringify({
-        model: AI_MODEL,
+        model: ATTRIBUTE_AI_MODEL,
         messages: [{ role: "user", content: prompt }],
         temperature: 0.1,
       }),
@@ -6804,10 +6688,13 @@ ${propsForAI.map((p, i) => `${i + 1}. ${p.name}${p.required ? '(必填)' : '(选
     // Fallback：没有 AI 决策或 AI 没匹配到值时
     if (!selectedVal) {
       if (!isRequired) continue; // 非必填跳过
+      selectedVal = pickHeuristicPropertyValue(propName, propValues, productTitle, "");
       // 必填：用安全值
-      for (const pattern of safeValuePriority) {
-        selectedVal = propValues.find(v => pattern.test(v.value || v.propValue || ""));
-        if (selectedVal) break;
+      if (!selectedVal) {
+        for (const pattern of safeValuePriority) {
+          selectedVal = propValues.find(v => pattern.test(v.value || v.propValue || ""));
+          if (selectedVal) break;
+        }
       }
       if (!selectedVal) {
         selectedVal = propValues[0];
@@ -7058,10 +6945,14 @@ async function createProductViaAPI(params) {
   const config = { ...PRICING_CONFIG, ...params.config };
 
   // Step 1: 打开 Temu 页面获取认证上下文
-  const page = await context.newPage();
+  const page = await createSellerCentralPage("/goods/list", {
+    attempts: 2,
+    lite: false,
+    readyDelayMin: 2000,
+    readyDelayMax: 3000,
+    logPrefix: "[api-create]",
+  });
   try {
-    await navigateToSellerCentral(page, "/goods/list");
-    await randomDelay(2000, 3000);
     await saveCookies();
 
     // Step 2: 准备图片（至少 5 张）
@@ -7072,22 +6963,23 @@ async function createProductViaAPI(params) {
         const aiResult = await generateAIImages(
           params.sourceImage,
           params.title,
-          params.aiImageTypes || ["hero", "lifestyle", "closeup", "infographic", "size_chart"]
+          params.aiImageTypes || AI_DETAIL_IMAGE_TYPE_ORDER
         );
         const aiImages = aiResult.images || aiResult || [];
         console.error(`[api-create] AI generated ${aiImages.length} images`);
 
-        // 并发上传图片（3个一批）
-        for (let i = 0; i < aiImages.length; i += 3) {
-          const batch = aiImages.slice(i, i + 3);
-          const results = await Promise.allSettled(
-            batch.map(imgPath => uploadImageToMaterial(page, imgPath))
-          );
-          for (const r of results) {
-            if (r.status === "fulfilled" && r.value.success && r.value.url) {
-              imageUrls.push(r.value.url);
-            }
+        if (aiImages.length > 0) {
+          await refreshMaterialUploadSession(page, "prepare_ai_upload");
+        }
+
+        // 素材上传对登录态很敏感，串行上传比同页并发更稳定。
+        for (const imgPath of aiImages) {
+          const uploadResult = await uploadImageToMaterial(page, imgPath);
+          if (uploadResult.success && uploadResult.url) {
+            imageUrls.push(uploadResult.url);
+            continue;
           }
+          console.error(`[api-create] Upload failed for ${path.basename(imgPath)}: ${uploadResult.error || "unknown upload error"}`);
         }
       } catch (e) {
         console.error(`[api-create] AI image generation failed: ${e.message}`);
@@ -7192,13 +7084,15 @@ async function createProductViaAPI(params) {
         for (const term of searchTerms) {
           if (catIds) break;
           console.error(`[api-create] Fallback searchCategoryAPI: "${term.slice(0, 50)}"`);
-          const catResult = await searchCategoryAPI(page, term);
+          const catResult = await searchCategoryAPI(page, term, { title: params.title });
           if (catResult?.list?.[0]) {
             const cat = catResult.list[0];
             catIds = {};
             for (let i = 1; i <= 10; i++) {
               catIds[`cat${i}Id`] = cat[`cat${i}Id`] || 0;
+              if (cat[`cat${i}Name`]) catIds[`cat${i}Name`] = cat[`cat${i}Name`];
             }
+            if (cat._path) catIds._path = cat._path;
             for (let i = 10; i >= 1; i--) {
               if (catIds[`cat${i}Id`] > 0) { leafCatId = catIds[`cat${i}Id`]; break; }
             }
@@ -7226,7 +7120,7 @@ async function createProductViaAPI(params) {
 
     // Step 3.5: AI 验证分类是否匹配商品标题
     if (catIds && params.title && AI_API_KEY) {
-      const catPath = Object.keys(catIds)
+      const catPath = catIds._path || Object.keys(catIds)
         .filter(k => k.endsWith("Name") && catIds[k])
         .map(k => catIds[k]).join(" > ");
       if (catPath) {
@@ -7249,7 +7143,7 @@ async function createProductViaAPI(params) {
             if (answer.includes("no")) {
               console.error(`[api-create] Category mismatch! Re-searching with product title...`);
               // 用标题重新搜索分类
-              const titleCatResult = await searchCategoryAPI(page, params.title);
+              const titleCatResult = await searchCategoryAPI(page, params.title, { title: params.title });
               if (titleCatResult?.list?.[0]) {
                 const cat = titleCatResult.list[0];
                 catIds = {};
@@ -7257,6 +7151,7 @@ async function createProductViaAPI(params) {
                   catIds[`cat${i}Id`] = cat[`cat${i}Id`] || 0;
                   if (cat[`cat${i}Name`]) catIds[`cat${i}Name`] = cat[`cat${i}Name`];
                 }
+                if (cat._path) catIds._path = cat._path;
                 for (let i = 10; i >= 1; i--) {
                   if (catIds[`cat${i}Id`] > 0) { leafCatId = catIds[`cat${i}Id`]; break; }
                 }
@@ -7267,6 +7162,14 @@ async function createProductViaAPI(params) {
           }
         } catch (e) { logSilent("category.verify", e); }
       }
+    }
+
+    const betterCategory = await findBetterLeafCategoryByTemplate(page, catIds, leafCatId, params.title || "");
+    if (betterCategory?.catId) {
+      catIds = { ...(betterCategory.catIds || catIds) };
+      leafCatId = Number(betterCategory.catId) || leafCatId;
+      catIds._path = betterCategory.path;
+      console.error(`[api-create] Category corrected by template scan: ${betterCategory.path} (leaf=${leafCatId})`);
     }
 
     // Step 4: 获取分类属性和规格
@@ -7324,6 +7227,10 @@ async function createProductViaAPI(params) {
 
     const payload = {
       ...catIds,
+      leafCatId,
+      leafCategoryId: leafCatId,
+      catId: leafCatId,
+      categoryId: leafCatId,
       materialMultiLanguages: [],
       productName: params.title || "商品",
       productPropertyReqs: properties,
@@ -7406,6 +7313,7 @@ async function createProductViaAPI(params) {
       },
       productOriginCertFileReqs: [],
     };
+    syncLeafCategoryPayloadFields(payload, leafCatId);
 
     // Step 6: 提交核价
     console.error(`[api-create] Submitting to ${config.createEndpoint}...`);
@@ -7505,7 +7413,7 @@ async function createProductViaAPI(params) {
             for (const term of searchTerms) {
               if (found) break;
               console.error(`[selfRepair] Trying category search: "${term.substring(0, 30)}..."`);
-              const catResult = await searchCategoryAPI(page, term);
+              const catResult = await searchCategoryAPI(page, term, { title: params.title });
               if (catResult?.list?.[0]) {
                 const cat = catResult.list[0];
                 let newLeaf = null;
@@ -7513,12 +7421,15 @@ async function createProductViaAPI(params) {
                 for (let i = 1; i <= 10; i++) {
                   const cid = cat[`cat${i}Id`] || 0;
                   catIds[`cat${i}Id`] = cid;
+                  if (cat[`cat${i}Name`]) catIds[`cat${i}Name`] = cat[`cat${i}Name`];
                   payload[`cat${i}Id`] = cid;
                   if (cid > 0) { newLeaf = cid; depth = i; }
                 }
+                if (cat._path) catIds._path = cat._path;
                 // 只接受比当前更深或不同的类目
                 if (newLeaf && (newLeaf !== leafCatId || depth > 3)) {
                   leafCatId = newLeaf;
+                  syncLeafCategoryPayloadFields(payload, leafCatId);
                   console.error(`[selfRepair] New category: leaf=${leafCatId}, depth=${depth}`);
                   const newProps = await getCategoryProperties(page, leafCatId, params.title || "");
                   if (newProps && newProps.length > 0) payload.productPropertyReqs = newProps;
@@ -7639,8 +7550,8 @@ async function createProductViaAPI(params) {
  * @param {string} params.csvPath - CSV 文件路径
  * @param {number} [params.startRow=0] - 起始行号（0-based）
  * @param {number} [params.count=1] - 处理数量
- * @param {number} [params.intervalMin=0.5] - 最小间隔（分钟）
- * @param {number} [params.intervalMax=1] - 最大间隔（分钟）
+ * @param {number} [params.intervalMin=0.15] - 最小间隔（分钟）
+ * @param {number} [params.intervalMax=0.3] - 最大间隔（分钟）
  * @param {string[]} [params.defaultImageUrls] - 默认图片 URL 列表（CSV 中无图时使用）
  * @param {boolean} [params.generateAI=true] - 是否 AI 生成图片
  * @param {Object} [params.config] - 覆盖 PRICING_CONFIG
@@ -7660,8 +7571,9 @@ async function batchCreateViaAPI(params) {
   const headers = lines[0];
   const startRow = params.startRow || 0;
   const count = params.count || 1;
-  const intervalMin = params.intervalMin || 0.5;
-  const intervalMax = params.intervalMax || 1;
+  const intervalMin = normalizeIntervalMinutes(params.intervalMin, DEFAULT_PRODUCT_INTERVAL_MIN);
+  const intervalMaxRaw = normalizeIntervalMinutes(params.intervalMax, DEFAULT_PRODUCT_INTERVAL_MAX);
+  const intervalMax = Math.max(intervalMin, intervalMaxRaw);
   const results = [];
 
   // 解析CSV列（支持多种列名）
@@ -7752,7 +7664,7 @@ async function batchCreateViaAPI(params) {
       } else if (sourceImage) {
         createParams.sourceImage = sourceImage;
         createParams.generateAI = params.generateAI !== false;
-        createParams.aiImageTypes = params.aiImageTypes || ["hero", "lifestyle", "closeup", "infographic", "size_chart"];
+        createParams.aiImageTypes = params.aiImageTypes || AI_DETAIL_IMAGE_TYPE_ORDER;
       } else if (params.defaultImageUrls?.length > 0) {
         createParams.imageUrls = params.defaultImageUrls;
       } else {
@@ -7989,9 +7901,17 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       const duration = ((Date.now() - startTime) / 1000).toFixed(1);
       const errCode = err.code || ERR.UNKNOWN;
+      const screenshotFile = await captureWorkerErrorScreenshot(`worker_${action}`);
       console.error(`[Worker] ${action} FAILED in ${duration}s: [${errCode}] ${err.message}`);
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ type: "error", code: errCode, message: err.message || String(err), action, duration: parseFloat(duration) }));
+      res.end(JSON.stringify({
+        type: "error",
+        code: errCode,
+        message: err.message || String(err),
+        action,
+        duration: parseFloat(duration),
+        screenshotFile: screenshotFile || undefined,
+      }));
     }
   });
 });
@@ -8010,5 +7930,11 @@ server.listen(PORT, "127.0.0.1", () => {
 });
 
 process.on("SIGTERM", async () => { await closeBrowser(); server.close(); process.exit(0); });
-process.on("uncaughtException", (err) => { console.error("[Worker] Uncaught exception:", err.message, err.stack); });
-process.on("unhandledRejection", (reason) => { console.error("[Worker] Unhandled rejection:", reason); });
+process.on("uncaughtException", (err) => {
+  captureWorkerErrorScreenshot("uncaught_exception").catch(() => {});
+  console.error("[Worker] Uncaught exception:", err.message, err.stack);
+});
+process.on("unhandledRejection", (reason) => {
+  captureWorkerErrorScreenshot("unhandled_rejection").catch(() => {});
+  console.error("[Worker] Unhandled rejection:", reason);
+});

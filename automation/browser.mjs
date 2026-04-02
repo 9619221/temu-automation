@@ -5,7 +5,8 @@
 import { chromium } from "playwright";
 import fs from "fs";
 import path from "path";
-import { randomDelay, logSilent } from "./utils.mjs";
+import { randomDelay, logSilent, getDebugDir } from "./utils.mjs";
+import { getDelayScale, getEffectiveHeadless, shouldCaptureErrorScreenshots } from "./runtime-config.mjs";
 
 // 共享状态（被 worker.mjs 引用）
 export const browserState = {
@@ -19,6 +20,36 @@ export const browserState = {
 };
 
 const TEMU_LOGIN_URL = "https://seller.kuajingmaihuo.com/login";
+
+function getTypingDelay() {
+  const scale = getDelayScale();
+  const min = Math.max(20, Math.round(50 * scale));
+  const max = Math.max(min, Math.round(150 * scale));
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function normalizeLoginPhone(value = "") {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length === 11) return digits;
+  if (digits.length > 11) return digits.slice(-11);
+  return digits || raw;
+}
+
+async function captureBrowserErrorScreenshot(page, prefix) {
+  if (!page || page.isClosed?.() || !shouldCaptureErrorScreenshots()) return "";
+  try {
+    const filename = `${String(prefix || "browser_error").replace(/[^a-z0-9_-]/gi, "_")}_${Date.now()}.png`;
+    const filePath = path.join(getDebugDir(), filename);
+    await page.screenshot({ path: filePath, fullPage: true });
+    console.error(`[browser] Error screenshot saved: ${filePath}`);
+    return filePath;
+  } catch (error) {
+    logSilent("browser.screenshot", error);
+    return "";
+  }
+}
 
 // ---- 查找系统 Chrome ----
 export function findChromeExe() {
@@ -85,7 +116,7 @@ export async function ensureBrowser() {
     }
     if (!accountId) throw new Error("请先登录账号后再操作");
 
-    await launch(accountId, false);
+    await launch(accountId);
   })();
 
   _browserLaunchPromise = launchPromise;
@@ -114,11 +145,13 @@ export async function launch(accountId, headless) {
   fs.mkdirSync(dir, { recursive: true });
   browserState.cookiePath = path.join(dir, `${accountId}.json`);
 
+  const effectiveHeadless = getEffectiveHeadless(headless);
+  const slowMo = Math.max(0, Math.round(50 * getDelayScale()));
   const chromeExe = findChromeExe();
   browserState.browser = await chromium.launch({
     executablePath: chromeExe,
-    headless: !!headless,
-    slowMo: 50,
+    headless: effectiveHeadless,
+    slowMo,
     args: ["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage"],
   });
 
@@ -150,7 +183,12 @@ export async function closeBrowser() {
 
 // ---- 登录 ----
 export async function login(phone, password) {
-  browserState.lastPhone = phone;
+  const normalizedPhone = normalizeLoginPhone(phone);
+  if (!normalizedPhone || !password) {
+    throw new Error("缺少登录凭据");
+  }
+
+  browserState.lastPhone = normalizedPhone;
   browserState.lastPassword = password;
 
   // 浏览器可能已崩溃或断开，先确保重建
@@ -179,14 +217,14 @@ export async function login(phone, password) {
     const ph = await page.waitForSelector('#usernameId, input[name="usernameId"], input[placeholder*="手机"]', { timeout: 10000 });
     await ph.click(); await randomDelay(200, 500);
     await ph.fill("");
-    for (const c of phone) await ph.type(c, { delay: Math.random() * 100 + 50 });
+    for (const c of normalizedPhone) await ph.type(c, { delay: getTypingDelay() });
     await randomDelay(800, 1500);
 
     // 输入密码
     const pw = await page.waitForSelector('#passwordId, input[type="password"]', { timeout: 5000 });
     await pw.click(); await randomDelay(200, 500);
     await pw.fill("");
-    for (const c of password) await pw.type(c, { delay: Math.random() * 100 + 50 });
+    for (const c of password) await pw.type(c, { delay: getTypingDelay() });
     await randomDelay(800, 1500);
 
     // 勾选协议
@@ -194,6 +232,36 @@ export async function login(phone, password) {
       const checkbox = page.locator('input[type="checkbox"]').first();
       if (await checkbox.isVisible({ timeout: 2000 })) {
         if (!(await checkbox.isChecked())) await checkbox.click();
+      } else {
+        await page.evaluate(() => {
+          const setChecked = (input) => {
+            try {
+              const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "checked");
+              descriptor?.set?.call(input, true);
+            } catch {}
+            try { input.checked = true; } catch {}
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            input.dispatchEvent(new Event("change", { bubbles: true }));
+          };
+
+          const inputs = [...document.querySelectorAll('input[type="checkbox"]')];
+          for (const input of inputs) {
+            if (input.checked) return true;
+            setChecked(input);
+            if (input.checked) return true;
+          }
+
+          const candidates = [...document.querySelectorAll('label, [role="checkbox"], [class*="checkbox"], [class*="Checkbox"], span, div')];
+          for (const node of candidates) {
+            const text = (node.textContent || "").replace(/\s+/g, "");
+            if (!text) continue;
+            if (text.includes("授权") || text.includes("同意") || text.includes("隐私")) {
+              node.click();
+              return true;
+            }
+          }
+          return false;
+        }).catch(() => {});
       }
     } catch (e) { logSilent("login.checkbox", e); }
     await randomDelay(300, 600);
@@ -202,6 +270,22 @@ export async function login(phone, password) {
     const btn = await page.waitForSelector('button:has-text("登录")', { timeout: 5000 });
     await btn.click();
     await randomDelay(2000, 3000);
+
+    try {
+      const loginHint = await page.evaluate(() => {
+        const nodes = [...document.querySelectorAll('[class*="error"], [class*="toast"], [class*="tip"], [class*="message"], [role="alert"]')];
+        const text = nodes
+          .map((node) => (node.textContent || "").trim())
+          .filter(Boolean)
+          .join(" | ");
+        return text.slice(0, 160);
+      });
+      if (loginHint) {
+        console.error(`[login] Hint after submit: ${loginHint}`);
+      }
+    } catch (e) {
+      logSilent("login.hint", e);
+    }
 
     // 处理隐私弹窗
     try {
@@ -261,6 +345,7 @@ export async function login(phone, password) {
 
     return { success: true };
   } catch (err) {
+    await captureBrowserErrorScreenshot(page, "login_error");
     throw err;
   } finally {
     if (!page.isClosed()) await page.close().catch(() => {});

@@ -5,12 +5,16 @@ import fs from "fs";
 import http from "http";
 import https from "https";
 import path from "path";
+import { getDelayScale } from "./runtime-config.mjs";
 
 /**
  * 随机延迟
  */
 export function randomDelay(min = 800, max = 2500) {
-  return new Promise((r) => setTimeout(r, Math.floor(Math.random() * (max - min + 1)) + min));
+  const scale = getDelayScale();
+  const scaledMin = Math.max(0, Math.round(min * scale));
+  const scaledMax = Math.max(scaledMin, Math.round(max * scale));
+  return new Promise((r) => setTimeout(r, Math.floor(Math.random() * (scaledMax - scaledMin + 1)) + scaledMin));
 }
 
 /**

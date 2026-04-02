@@ -3,13 +3,8 @@ import {
   Alert,
   Button,
   Card,
-  Col,
-  Form,
-  Input,
   InputNumber,
   Progress,
-  Row,
-  Segmented,
   Space,
   Table,
   Tag,
@@ -27,22 +22,16 @@ import {
   PauseCircleOutlined,
   PlayCircleOutlined,
   ReloadOutlined,
-  RocketOutlined,
 } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
 import StatCard from "../components/StatCard";
-import { setStoreValueForActiveAccount } from "../utils/multiStore";
 
-const { TextArea } = Input;
 const { Dragger } = Upload;
 const { Title, Text } = Typography;
 
 const api = window.electronAPI?.automation;
-const store = window.electronAPI?.store;
 
 const SUCCESS_COLOR = "var(--color-success)";
-
-type ProductCreateMode = "batch" | "single";
 
 function extractCellTexts(value: any, seen = new WeakSet<object>()): string[] {
   if (value === null || value === undefined || value === "") return [];
@@ -110,6 +99,8 @@ function getResultRowMeta(item: any, index: number) {
 
 function getBatchStatusLabel(status: string, running: boolean, paused: boolean) {
   if (paused) return "已暂停";
+  if (status === "paused") return "已暂停";
+  if (status === "pausing") return "暂停中";
   if (running || status === "running") return "进行中";
   if (status === "completed") return "已完成";
   if (status === "failed") return "失败";
@@ -119,6 +110,8 @@ function getBatchStatusLabel(status: string, running: boolean, paused: boolean) 
 
 function getBatchTagColor(status: string, running: boolean, paused: boolean) {
   if (paused) return "warning";
+  if (status === "paused") return "warning";
+  if (status === "pausing") return "warning";
   if (running || status === "running") return "processing";
   if (status === "completed") return "success";
   if (status === "failed" || status === "interrupted") return "error";
@@ -127,6 +120,7 @@ function getBatchTagColor(status: string, running: boolean, paused: boolean) {
 
 function getHistoryStatusColor(status: string) {
   if (status === "running") return "processing";
+  if (status === "pausing") return "warning";
   if (status === "paused") return "warning";
   if (status === "completed") return "success";
   if (status === "failed") return "error";
@@ -135,6 +129,7 @@ function getHistoryStatusColor(status: string) {
 
 function getHistoryStatusText(status: string) {
   if (status === "running") return "进行中";
+  if (status === "pausing") return "暂停中";
   if (status === "paused") return "已暂停";
   if (status === "completed") return "已完成";
   if (status === "failed") return "失败";
@@ -142,162 +137,8 @@ function getHistoryStatusText(status: string) {
   return status || "未知状态";
 }
 
-function SingleCreate() {
-  const [form] = Form.useForm();
-  const [submitting, setSubmitting] = useState(false);
-  const [result, setResult] = useState<any>(null);
-
-  const watchedTitle = Form.useWatch("title", form);
-  const watchedPrice = Form.useWatch("price", form);
-  const watchedSourceImage = Form.useWatch("sourceImage", form);
-
-  const singleStatusLabel = submitting ? "生成中" : result ? (result.success ? "已完成" : "失败") : "待执行";
-  const singleStatusColor = submitting ? "warning" : result ? (result.success ? "success" : "error") : "default";
-
-  const handleSubmit = async () => {
-    try {
-      const values = await form.validateFields();
-      setSubmitting(true);
-      setResult(null);
-
-      const response = await api?.createProduct({
-        title: values.title,
-        categorySearch: values.title,
-        price: values.price,
-        generateAI: true,
-        aiImageTypes: ["hero", "lifestyle", "closeup"],
-        autoSubmit: false,
-        keepOpen: true,
-        sourceImage: values.sourceImage || undefined,
-      });
-      setResult(response);
-
-      if (response?.success) {
-        message.success("单个草稿已生成");
-        const history = (await store?.get("temu_create_history")) || [];
-        history.unshift({
-          title: values.title,
-          price: values.price,
-          status: "draft",
-          createdAt: Date.now(),
-          result: response,
-        });
-        await setStoreValueForActiveAccount(store, "temu_create_history", history.slice(0, 100));
-      } else {
-        message.error(response?.message || "生成草稿失败");
-      }
-    } catch (error: any) {
-      if (error?.errorFields) return;
-      message.error(error?.message || "操作失败");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const handleReset = () => {
-    form.resetFields();
-    setResult(null);
-  };
-
-  return (
-    <Space direction="vertical" size="large" style={{ width: "100%" }}>
-      <div className="studio-upload-layout">
-        <Card className="create-preview-card" style={{ borderRadius: 22, borderColor: "#eceff4" }} bodyStyle={{ padding: 24 }}>
-          <Space direction="vertical" size={18} style={{ width: "100%" }}>
-            <div>
-              <Title level={4} style={{ margin: 0 }}>单个调试</Title>
-              <Text type="secondary" style={{ display: "block", marginTop: 6 }}>
-                这条路径只用来验证标题、价格和参考图是否能顺利生成草稿，确认没问题后再切回自动化上品。
-              </Text>
-            </div>
-
-            <Form form={form} layout="vertical">
-              <Form.Item name="title" label="商品标题" rules={[{ required: true, message: "请输入商品标题" }]}>
-                <TextArea rows={3} placeholder="例如：不锈钢厨房置物架，免打孔，多层收纳" />
-              </Form.Item>
-
-              <Row gutter={16}>
-                <Col xs={24} md={8}>
-                  <Form.Item name="price" label="申报价 (¥)" rules={[{ required: true, message: "请输入价格" }]}>
-                    <InputNumber min={0.01} step={0.1} style={{ width: "100%" }} placeholder="30.00" />
-                  </Form.Item>
-                </Col>
-                <Col xs={24} md={16}>
-                  <Form.Item name="sourceImage" label="参考图片路径（可选）">
-                    <Input placeholder="可填写本地图片路径，帮助生成更贴近原商品的草稿图" />
-                  </Form.Item>
-                </Col>
-              </Row>
-            </Form>
-          </Space>
-        </Card>
-
-        <div className="studio-setup-panel">
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
-            <div>
-              <div className="studio-setup-panel__title" style={{ marginTop: 0 }}>执行设置</div>
-              <div className="studio-setup-panel__desc">
-                这里只放当前状态和动作，不再重复讲流程。
-              </div>
-            </div>
-            <Tag color={singleStatusColor}>{singleStatusLabel}</Tag>
-          </div>
-
-          <div className="studio-setup-stats">
-            <div className="studio-setup-stat">
-              <span className="studio-setup-stat__label">标题</span>
-              <span className="studio-setup-stat__value">{watchedTitle ? "已填写" : "待填写"}</span>
-            </div>
-            <div className="studio-setup-stat">
-              <span className="studio-setup-stat__label">价格</span>
-              <span className="studio-setup-stat__value">{watchedPrice ? `¥${watchedPrice}` : "--"}</span>
-            </div>
-            <div className="studio-setup-stat">
-              <span className="studio-setup-stat__label">参考图</span>
-              <span className="studio-setup-stat__value">{watchedSourceImage ? "已填写" : "未填写"}</span>
-            </div>
-          </div>
-
-          <Space direction="vertical" size={12} style={{ width: "100%" }}>
-            <Button type="primary" icon={<RocketOutlined />} block size="large" loading={submitting} onClick={handleSubmit} className="create-primary-button">
-              {submitting ? "正在生成草稿..." : "开始单个调试"}
-            </Button>
-            <Button block size="large" onClick={handleReset} className="create-secondary-button">
-              重置内容
-            </Button>
-          </Space>
-        </div>
-      </div>
-
-      {result ? (
-        <Card className="create-result-card" style={{ borderRadius: 22, borderColor: "#eceff4" }} bodyStyle={{ padding: 24 }}>
-          <Space direction="vertical" size={16} style={{ width: "100%" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
-              <div>
-                <Title level={4} style={{ margin: 0 }}>执行反馈</Title>
-                <Text type="secondary" style={{ display: "block", marginTop: 6 }}>
-                  单个调试完成后，结果会在这里展示，方便判断是否可以切回自动化上品。
-                </Text>
-              </div>
-              <Tag color={result.success ? "success" : "error"} style={{ padding: "6px 14px", borderRadius: 999 }}>
-                {result.success ? "调试成功" : "调试失败"}
-              </Tag>
-            </div>
-
-            <Alert
-              type={result.success ? "success" : "error"}
-              showIcon
-              message={result.success ? "草稿已生成" : "执行失败"}
-              description={result.message || "未返回更多信息"}
-            />
-          </Space>
-        </Card>
-      ) : null}
-    </Space>
-  );
-}
-
 function BatchCreate() {
+
   const [filePath, setFilePath] = useState("");
   const [preview, setPreview] = useState<any>(null);
   const [startRow, setStartRow] = useState(0);
@@ -549,7 +390,7 @@ function BatchCreate() {
       syncTaskHistory(task);
       if (task.running) {
         pollProgress(task.taskId, true);
-        message.success("任务已继续");
+        message.success(paused ? "任务已继续" : "暂停请求已发送，当前商品处理完后停止");
       } else {
         stopPolling();
         message.success("任务已暂停");
@@ -648,12 +489,13 @@ function BatchCreate() {
   const hasFile = Boolean(filePath);
   const hasPreview = Boolean(preview?.rows?.length);
   const hasResults = results.length > 0;
+  const pausePending = progressInfo?.status === "pausing";
   const hasTaskProgress = Boolean(
     running
     || paused
     || progressInfo?.taskId
     || progressInfo?.completed
-    || ["completed", "failed", "interrupted", "running"].includes(progressInfo?.status),
+    || ["completed", "failed", "interrupted", "running", "pausing", "paused"].includes(progressInfo?.status),
   );
   const batchStatusLabel = getBatchStatusLabel(progressInfo?.status, running, paused);
   const batchTagColor = getBatchTagColor(progressInfo?.status, running, paused);
@@ -706,7 +548,7 @@ function BatchCreate() {
         <div className="create-flow-toolbar__summary">
           <Text className="create-flow-toolbar__eyebrow">自动化上品流程</Text>
           <Title level={4} style={{ margin: 0 }}>
-            先上传 Excel / CSV 商品表格
+            上传商品表格
           </Title>
           <Text type="secondary" className="create-flow-toolbar__desc">
             系统会自动识别标题、主图、轮播图、分类和价格列。确认无误后，可以先过滤高风险，再直接开始自动上品。
@@ -758,8 +600,13 @@ function BatchCreate() {
               {running ? "自动上品进行中..." : `开始自动上品（${count} 个）`}
             </Button>
             {running ? (
-              <Button icon={paused ? <PlayCircleOutlined /> : <PauseCircleOutlined />} onClick={togglePause} className="create-secondary-button">
-                {paused ? "继续任务" : "暂停任务"}
+              <Button
+                icon={paused ? <PlayCircleOutlined /> : <PauseCircleOutlined />}
+                onClick={togglePause}
+                className="create-secondary-button"
+                disabled={pausePending}
+              >
+                {pausePending ? "暂停中..." : paused ? "继续任务" : "暂停任务"}
               </Button>
             ) : null}
             {hasFile ? <Button onClick={resetSheetState}>清空文件</Button> : null}
@@ -1015,11 +862,7 @@ function BatchCreate() {
 }
 
 export default function ProductCreate() {
-  const [activeMode, setActiveMode] = useState<ProductCreateMode>("batch");
-
-  const pageDescription = activeMode === "batch"
-    ? "导入表格后，系统会自动识别字段、可选过滤高风险，再直接执行自动上品。"
-    : "单个调试模式，用来验证标题、价格和参考图是否能顺利生成草稿。";
+  const pageDescription = "导入表格后，系统会自动识别字段、可选过滤高风险，再直接执行自动上品。";
 
   return (
     <div className="dashboard-shell product-create-shell">
@@ -1028,20 +871,11 @@ export default function ProductCreate() {
         eyebrow="自动化上品"
         title="上品管理"
         subtitle={pageDescription}
-        actions={(
-          <Segmented<ProductCreateMode>
-            value={activeMode}
-            onChange={(value) => setActiveMode(value)}
-            options={[
-              { label: "自动化上品", value: "batch" },
-              { label: "单个调试", value: "single" },
-            ]}
-          />
-        )}
+        actions={<Tag color="orange">批量/API 主流程</Tag>}
       />
 
       <div>
-        {activeMode === "batch" ? <BatchCreate /> : <SingleCreate />}
+        <BatchCreate />
       </div>
     </div>
   );

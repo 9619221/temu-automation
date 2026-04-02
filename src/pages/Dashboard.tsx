@@ -124,7 +124,7 @@ export default function Dashboard() {
             onClick={startCollectAll}
             loading={collecting}
           >
-            {collecting ? "采集中..." : "一键采集全部"}
+            {collecting ? "采集中..." : "一键采集全部数据"}
           </Button>,
           collecting ? (
             <Button key="cancel" danger onClick={cancelCollection}>

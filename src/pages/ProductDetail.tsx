@@ -432,7 +432,7 @@ export default function ProductDetail() {
       label: <span><ShoppingOutlined /> 概览</span>,
       children: (
         <div style={{ display: "grid", gap: 16 }}>
-          <Card size="small" title="商品档案">
+          <Card size="small" title="基本信息">
             <Descriptions size="small" column={2}>
               <Descriptions.Item label="SPU ID">{p.spuId || "-"}</Descriptions.Item>
               <Descriptions.Item label="SKC ID">{p.skcId || "-"}</Descriptions.Item>
@@ -475,7 +475,7 @@ export default function ProductDetail() {
     },
     {
       key: "flux",
-      label: <span><EyeOutlined /> 流量与转化</span>,
+      label: <span><EyeOutlined /> 流量数据</span>,
       children: fluxItems.length > 0 ? (
         <div style={{ display: "grid", gap: 16 }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
@@ -485,7 +485,7 @@ export default function ProductDetail() {
             <StatCard compact title="支付买家" value={trafficSummary.buyerNum} color="success" trend="已支付买家数" />
           </div>
 
-          <Card size="small" title="流量明细">
+          <Card size="small" title="流量数据">
             <Table
               dataSource={fluxItems.map((item: any, i: number) => ({ ...item, key: i }))}
               columns={[

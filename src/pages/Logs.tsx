@@ -188,7 +188,7 @@ export default function Logs() {
         compact
         eyebrow="排查工作台"
         title="日志中心"
-        subtitle="把前端异常、Promise 未处理错误和普通调试日志压缩进一个更易扫读的视图。"
+        subtitle="前端日志页，把前端异常、Promise 未处理错误和普通调试日志压缩进一个更易扫读的视图。"
         meta={[
           `${logs.length} 条日志`,
           errorCount > 0 ? `${errorCount} 条错误` : "当前无错误",
@@ -241,7 +241,7 @@ export default function Logs() {
               message.success("前端日志已清空");
             }}
           >
-            清空
+            清空日志
           </Button>
           <div className="app-toolbar__count">共 {filteredLogs.length} 条</div>
         </div>

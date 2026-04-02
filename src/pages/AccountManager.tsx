@@ -353,7 +353,7 @@ export default function AccountManager() {
               }}
             >
               <CheckCircleOutlined style={{ marginRight: 4 }} />
-              当前
+              当前数据
             </div>
           )}
 
@@ -440,45 +440,47 @@ export default function AccountManager() {
 
           {/* 操作按钮 */}
           <Divider style={{ margin: "10px 0" }} />
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            {/* 左侧：主操作 */}
-            {account.status === "online" && isActive ? (
-              /* 已登录 + 已激活：只显示断开 */
-              <Button
-                size="small"
-                icon={<LogoutOutlined />}
-                onClick={() => handleLogout(account.id)}
-                style={{ borderRadius: 8 }}
-              >
-                断开
-              </Button>
-            ) : account.status === "online" && !isActive ? (
-              /* 已登录但未激活：可切换数据视图 */
-              <Button
-                size="small"
-                icon={<EyeOutlined />}
-                onClick={() => handleActivateAccount(account.id)}
-                style={{ borderRadius: 8 }}
-              >
-                切换到此账号
-              </Button>
-            ) : (
-              /* 未登录：显示登录按钮 */
-              <Button
-                type="primary"
-                size="small"
-                icon={<LoginOutlined />}
-                loading={isLoggingIn}
-                onClick={() => handleLogin(account)}
-                style={{
-                  borderRadius: 8,
-                  background: `linear-gradient(135deg, ${TEMU_ORANGE}, #ff8534)`,
-                  border: "none",
-                }}
-              >
-                登录
-              </Button>
-            )}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+            <Space size={8} wrap>
+              {!isActive ? (
+                <Button
+                  size="small"
+                  icon={<EyeOutlined />}
+                  onClick={() => handleActivateAccount(account.id)}
+                  style={{ borderRadius: 8 }}
+                >
+                  切换数据
+                </Button>
+              ) : null}
+
+              {account.status === "online" ? (
+                isActive ? (
+                  <Button
+                    size="small"
+                    icon={<LogoutOutlined />}
+                    onClick={() => handleLogout(account.id)}
+                    style={{ borderRadius: 8 }}
+                  >
+                    断开
+                  </Button>
+                ) : null
+              ) : (
+                <Button
+                  type="primary"
+                  size="small"
+                  icon={<LoginOutlined />}
+                  loading={isLoggingIn}
+                  onClick={() => handleLogin(account)}
+                  style={{
+                    borderRadius: 8,
+                    background: `linear-gradient(135deg, ${TEMU_ORANGE}, #ff8534)`,
+                    border: "none",
+                  }}
+                >
+                  登录
+                </Button>
+              )}
+            </Space>
 
             {/* 右侧：删除 */}
             <Popconfirm

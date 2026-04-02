@@ -1628,7 +1628,7 @@ export default function ImageStudio() {
 
           <div className="studio-intake-sticky__utility">
             <Button icon={<HistoryOutlined />} onClick={handleOpenHistory} style={{ height: 46, borderRadius: 16 }}>
-              历史
+              历史记录
             </Button>
             {primaryBackgroundJob ? renderBackgroundJobsWidget() : null}
           </div>
