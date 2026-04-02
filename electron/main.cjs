@@ -2509,6 +2509,107 @@ function getStoreFilePath(key) {
   return ensurePathInside(baseDir, path.join(baseDir, `${safeFileName}.json`), "Store 文件路径");
 }
 
+function hasMeaningfulStoreData(value, seen = new WeakSet()) {
+  if (value === null || value === undefined) return false;
+  if (typeof value === "string") return value.trim().length > 0;
+  if (typeof value === "number") return Number.isFinite(value) && value !== 0;
+  if (typeof value === "boolean") return value;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value !== "object") return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+
+  const objectValue = value;
+  const preferredArrayKeys = ["items", "list", "rows", "apis", "pageItems", "subOrderList"];
+  for (const key of preferredArrayKeys) {
+    if (Array.isArray(objectValue[key]) && objectValue[key].length > 0) {
+      return true;
+    }
+  }
+
+  return Object.values(objectValue).some((item) => hasMeaningfulStoreData(item, seen));
+}
+
+function getLegacyScopedStoreCandidates(baseKey, excludeAccountId = null) {
+  const baseDir = app.getPath("userData");
+  const entries = fs.readdirSync(baseDir, { withFileTypes: true });
+  const candidates = [];
+
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".json") || !entry.name.startsWith("temu_store%3A")) {
+      continue;
+    }
+    const encodedName = entry.name.slice(0, -5);
+    let decodedKey = "";
+    try {
+      decodedKey = decodeURIComponent(encodedName);
+    } catch {
+      continue;
+    }
+    const match = decodedKey.match(/^temu_store:([^:]+):(.+)$/);
+    if (!match) continue;
+    const [, accountId, candidateBaseKey] = match;
+    if (candidateBaseKey !== baseKey) continue;
+    if (excludeAccountId && accountId === excludeAccountId) continue;
+    candidates.push({
+      accountId,
+      filePath: path.join(baseDir, entry.name),
+    });
+  }
+
+  candidates.sort((a, b) => {
+    try {
+      const aTime = fs.statSync(a.filePath).mtimeMs;
+      const bTime = fs.statSync(b.filePath).mtimeMs;
+      return bTime - aTime;
+    } catch {
+      return 0;
+    }
+  });
+  return candidates;
+}
+
+async function recoverScopedStoreValueIfNeeded(baseKey, currentValue) {
+  if (hasMeaningfulStoreData(currentValue)) return currentValue;
+
+  let accounts = [];
+  try {
+    accounts = readStoreJsonWithRecovery(getStoreFilePath(ACCOUNT_STORE_KEY), ACCOUNT_STORE_KEY) || [];
+  } catch {}
+  if (!Array.isArray(accounts) || accounts.length !== 1) {
+    return currentValue;
+  }
+
+  let activeAccountId = null;
+  try {
+    activeAccountId = readStoreJsonWithRecovery(getStoreFilePath("temu_active_account_id"), "temu_active_account_id");
+  } catch {}
+  if (!activeAccountId || typeof activeAccountId !== "string") {
+    return currentValue;
+  }
+
+  const candidates = getLegacyScopedStoreCandidates(baseKey, activeAccountId);
+  for (const candidate of candidates) {
+    const recoveredValue = await readStoreJsonWithRecoveryAsync(candidate.filePath, `temu_store:${candidate.accountId}:${baseKey}`);
+    if (!hasMeaningfulStoreData(recoveredValue)) continue;
+
+    try {
+      await writeStoreJsonAtomicAsync(getStoreFilePath(baseKey), recoveredValue, { key: baseKey });
+      await writeStoreJsonAtomicAsync(
+        getStoreFilePath(`temu_store:${activeAccountId}:${baseKey}`),
+        recoveredValue,
+        { key: `temu_store:${activeAccountId}:${baseKey}` },
+      );
+      console.error(`[Store] Recovered ${baseKey} from legacy scoped account ${candidate.accountId} -> ${activeAccountId}`);
+    } catch (error) {
+      console.error(`[Store] Failed to persist recovered ${baseKey}:`, error?.message || error);
+    }
+    return recoveredValue;
+  }
+
+  return currentValue;
+}
+
 function getStoreBackupPath(filePath) {
   return `${filePath}.bak`;
 }
@@ -2696,7 +2797,9 @@ async function readStoreJsonWithRecoveryAsync(filePath, key) {
 }
 
 ipcMain.handle("store:get", async (_, key) => {
-  return readStoreJsonWithRecoveryAsync(getStoreFilePath(key), key);
+  const normalizedKey = normalizeStoreKey(key);
+  const value = await readStoreJsonWithRecoveryAsync(getStoreFilePath(normalizedKey), normalizedKey);
+  return recoverScopedStoreValueIfNeeded(normalizedKey, value);
 });
 
 const _storeWriteLocks = new Map();

@@ -22,7 +22,7 @@ export const SCRAPE_TASKS = {
   aftersales:     { type: "page", path: "/main/aftersales/information" },
   soldout:        { type: "page", path: "/stock/fully-mgt/sale-manage/board/sku-sale-out" },
   goodsData:      { type: "page", path: "/newon/goods-data" },
-  activity:       { type: "page", path: "/main/act/data-full" },
+  activity:       { type: "page", path: "/main/act/data-full", opts: { lite: false, waitTime: 10000, businessOnly: true } },
   performance:    { type: "page", path: "/stock/fully-mgt/sale-manage/board/count" },
   mainPages:      { type: "page", path: "/" },
 
@@ -113,14 +113,14 @@ export const SCRAPE_TASKS = {
   priceReport:    { type: "page", path: "/main/adjust-price-manage/order-price" },
   qualityDashboard:{ type: "page", path: "/main/quality/dashboard" },
   mallFlux:       { type: "page", path: "/main/mall-flux-analysis-full" },
-  activityLog:    { type: "page", path: "/activity/marketing-activity/log" },
-  chanceGoods:    { type: "page", path: "/activity/marketing-activity/chance-goods" },
-  marketingActivity:{ type: "page", path: "/activity/marketing-activity" },
+  activityLog:    { type: "page", path: "/activity/marketing-activity/log", opts: { lite: false, waitTime: 10000, businessOnly: true } },
+  chanceGoods:    { type: "page", path: "/activity/marketing-activity/chance-goods", opts: { lite: false, waitTime: 10000, businessOnly: true } },
+  marketingActivity:{ type: "page", path: "/activity/marketing-activity", opts: { lite: false, waitTime: 10000, businessOnly: true } },
   flowGrow:       { type: "page", path: "/main/flow-grow" },
 
   // ---- 多区域站点 ----
-  activityUS:     { type: "page", path: null, opts: { fullUrl: "https://agentseller-us.temu.com/main/act/data-full" } },
-  activityEU:     { type: "page", path: null, opts: { fullUrl: "https://agentseller-eu.temu.com/main/act/data-full" } },
+  activityUS:     { type: "page", path: null, opts: { fullUrl: "https://agentseller-us.temu.com/main/act/data-full", lite: false, waitTime: 10000, businessOnly: true } },
+  activityEU:     { type: "page", path: null, opts: { fullUrl: "https://agentseller-eu.temu.com/main/act/data-full", lite: false, waitTime: 10000, businessOnly: true } },
   mallFluxUS:     { type: "page", path: null, opts: { fullUrl: "https://agentseller-us.temu.com/main/mall-flux-analysis-full" } },
   fluxUS:         { type: "page", path: null, opts: { fullUrl: "https://agentseller-us.temu.com/main/flux-analysis-full" } },
   fluxEU:         { type: "page", path: null, opts: { fullUrl: "https://agentseller-eu.temu.com/main/flux-analysis-full" } },

@@ -385,6 +385,63 @@ function getRequestCredentials() {
   };
 }
 
+async function tryAutoLoginInPopup(popup, logPrefix = "[popup-login]") {
+  const { phone, password } = getRequestCredentials();
+  if (!phone || !password) {
+    console.error(`${logPrefix} Missing saved credentials, skip auto-login`);
+    return false;
+  }
+
+  try {
+    try {
+      const accountTab = popup.locator('text=账号登录').first();
+      if (await accountTab.isVisible({ timeout: 1500 })) {
+        await accountTab.click();
+        await randomDelay(500, 1000);
+      }
+    } catch (e) { logSilent("ui.action", e); }
+
+    const phoneInput = await popup.waitForSelector('#usernameId, input[name="usernameId"], input[placeholder*="手机"], input[placeholder*="号码"]', { timeout: 3000 });
+    await phoneInput.click();
+    await phoneInput.fill("");
+    for (const c of phone) await phoneInput.type(c, { delay: Math.random() * 80 + 40 });
+    await randomDelay(400, 800);
+
+    const passwordInput = await popup.waitForSelector('#passwordId, input[type="password"]', { timeout: 3000 });
+    await passwordInput.click();
+    await passwordInput.fill("");
+    for (const c of password) await passwordInput.type(c, { delay: Math.random() * 80 + 40 });
+    await randomDelay(400, 800);
+
+    try {
+      const checkbox = popup.locator('input[type="checkbox"]').first();
+      if (await checkbox.isVisible({ timeout: 1000 })) {
+        const checked = await checkbox.isChecked().catch(() => false);
+        if (!checked) await checkbox.click();
+      }
+    } catch (e) { logSilent("ui.action", e); }
+    await randomDelay(200, 500);
+
+    const loginBtn = await popup.waitForSelector('button:has-text("登录"), button:has-text("授权登录")', { timeout: 3000 });
+    await loginBtn.click();
+    console.error(`${logPrefix} Auto-login submitted`);
+    await randomDelay(1500, 2500);
+
+    try {
+      const agreeBtn = popup.locator('button:has-text("同意并登录"), button:has-text("同意")').first();
+      if (await agreeBtn.isVisible({ timeout: 1500 })) {
+        await agreeBtn.click();
+        await randomDelay(800, 1500);
+      }
+    } catch (e) { logSilent("ui.action", e); }
+
+    return true;
+  } catch (error) {
+    console.error(`${logPrefix} Auto-login failed: ${error.message}`);
+    return false;
+  }
+}
+
 async function withWorkerRequestCredentials(credentials, fn) {
   const prevPhone = requestCredentialPhone;
   const prevPassword = requestCredentialPassword;
@@ -443,7 +500,9 @@ const TEMU_BASE_URL = "https://seller.kuajingmaihuo.com";
 // 返回实际使用的 page（可能因 popup 切换到新窗口）
 async function navigateToSellerCentral(page, targetPath, options = {}) {
   const lite = options.lite || _navLiteMode; // lite 模式：不处理弹窗，交给外部监控器
-  const directUrl = `https://agentseller.temu.com${targetPath}`;
+  const directUrl = /^https?:\/\//i.test(String(targetPath || ""))
+    ? String(targetPath)
+    : `https://agentseller.temu.com${targetPath}`;
   console.error(`[nav] Navigating to ${directUrl} (lite=${lite})`);
   // ERR_ABORTED / frame detached 重试
   for (let navTry = 0; navTry < 3; navTry++) {
@@ -1249,18 +1308,38 @@ async function scrapeSales() {
 // 通用：捕获页面所有API响应（保存完整原始数据）
 async function scrapePageCaptureAll(targetPath, options = {}) {
   const lite = options.lite ?? _navLiteMode;
-  const { waitTime = lite ? 4500 : 6000, fullUrl = null } = options;
+  const {
+    waitTime = lite ? 4500 : 6000,
+    fullUrl = null,
+    businessOnly = false,
+    extraIgnorePatterns = [],
+  } = options;
   const page = await context.newPage();
   const capturedApis = [];
   const staticExts = [".js", ".css", ".png", ".svg", ".woff", ".woff2", ".ttf", ".ico", ".jpg", ".jpeg", ".gif", ".map", ".webp"];
   const frameworkPatterns = ['phantom/xg', 'pfb/l1', 'pfb/a4', 'web-performace', '_stm', 'msgBox', 'hot-update', 'sockjs', 'hm.baidu', 'google', 'favicon', 'drogon-api', 'report/uin'];
+  const businessNoisePatterns = [
+    "/api/phantom/dm/wl/cg",
+    "/pmm/api/pmm/",
+    "/api/seller/auth/",
+    "/api/server/_stm",
+    "/bert/api/page/info/agentSeller/pageInfo",
+    "/temu-sca-config/get-leo-config",
+    "/api/bg-ladyfish/mms/menu/page/feedback/entrance",
+    "/quick/merchant/pop/query",
+  ];
+  const ignorePatterns = [
+    ...frameworkPatterns,
+    ...extraIgnorePatterns,
+    ...(businessOnly ? businessNoisePatterns : []),
+  ];
 
   try {
     page.on("response", async (resp) => {
       try {
         const url = resp.url();
         if (staticExts.some(ext => url.includes(ext))) return;
-        if (frameworkPatterns.some(p => url.includes(p))) return;
+        if (ignorePatterns.some(p => url.includes(p))) return;
         if (resp.status() === 200) {
           const ct = resp.headers()["content-type"] || "";
           if (ct.includes("json") || ct.includes("application")) {
@@ -1276,11 +1355,8 @@ async function scrapePageCaptureAll(targetPath, options = {}) {
     });
 
     if (fullUrl) {
-      console.error(`[capture-all] Navigating to ${fullUrl}...`);
-      // 先进入 agentseller 获取认证上下文
-      await navigateToSellerCentral(page, "/goods/list");
-      await randomDelay(lite ? 700 : 1200, lite ? 1000 : 1800);
-      await page.goto(fullUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+      console.error(`[capture-all] Navigating to ${fullUrl} via Seller Central auth flow...`);
+      await navigateToSellerCentral(page, fullUrl, { lite });
     } else {
       console.error(`[capture-all] Navigating to ${targetPath}...`);
       await navigateToSellerCentral(page, targetPath);
@@ -1310,7 +1386,7 @@ async function scrapePageCaptureAll(targetPath, options = {}) {
 
 async function scrapePageWithListener(targetPath, apiMatchers, options = {}) {
   const lite = options.lite ?? _navLiteMode;
-  const { waitTime = lite ? 4200 : 5500, reloadIfMissing = true } = options;
+  const { waitTime = lite ? 4200 : 5500, reloadIfMissing = true, fullUrl = null } = options;
   const page = await context.newPage();
   const debugDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
   fs.mkdirSync(debugDir, { recursive: true });
@@ -1334,8 +1410,9 @@ async function scrapePageWithListener(targetPath, apiMatchers, options = {}) {
     });
 
     // 导航
-    console.error(`[scrape-listener] Navigating to ${targetPath}...`);
-    await navigateToSellerCentral(page, targetPath);
+    const navigationTarget = fullUrl || targetPath;
+    console.error(`[scrape-listener] Navigating to ${navigationTarget}...`);
+    await navigateToSellerCentral(page, navigationTarget);
     await randomDelay(waitTime, waitTime + (lite ? 900 : 1500));
 
     // 关闭弹窗
@@ -4520,6 +4597,11 @@ async function handleRequest(body) {
           // 等待授权弹窗内容出现（最多30秒）
           for (let attempt = 0; attempt < 10; attempt++) {
             try {
+              const latestUrl = newPage.url();
+              if ((latestUrl.includes("seller-login") || latestUrl.includes("/login")) && attempt <= 1) {
+                await tryAutoLoginInPopup(newPage, "[popup-monitor]");
+              }
+
               const text = await newPage.evaluate(() => document.body?.innerText || "");
               if (text.includes("确认授权") || text.includes("即将前往") || text.includes("Seller Central") || text.includes("授权登录")) {
                 console.error(`[popup-monitor] Auth dialog found on attempt ${attempt + 1}!`);
@@ -5374,6 +5456,7 @@ async function uploadImageToMaterial(page, localImagePath, options = {}) {
   const ext = path.extname(localImagePath).toLowerCase();
   const mimeType = ext === ".png" ? "image/png" : "image/jpeg";
   const fileName = path.basename(localImagePath);
+  let lastError = "";
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     const result = await page.evaluate(async ({ base64Data, mime, name }) => {
@@ -5427,13 +5510,14 @@ async function uploadImageToMaterial(page, localImagePath, options = {}) {
       return result;
     }
 
+    lastError = result.error || lastError || "unknown upload error";
     console.error(`[upload] Attempt ${attempt}/${maxRetries} failed: ${result.error}`);
     if (attempt < maxRetries) {
       await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 1000));
     }
   }
 
-  return { success: false, error: `Upload failed after ${maxRetries} attempts` };
+  return { success: false, error: lastError || `Upload failed after ${maxRetries} attempts` };
 }
 
 /**
@@ -6096,9 +6180,9 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
 async function uploadImageToKwcdn(page, localImagePath) {
   const result = await uploadImageToMaterial(page, localImagePath);
   if (result.success && result.url) {
-    return result.url;
+    return { success: true, url: result.url, error: "" };
   }
-  return null;
+  return { success: false, url: null, error: result.error || "unknown upload error" };
 }
 
 /**
@@ -6358,25 +6442,21 @@ async function autoPricingFromCSV(params) {
       console.error(`[auto-pricing] Uploading to material center...`);
       const page = await context.newPage();
       const kwcdnUrls = {};
+      const uploadErrors = {};
       try {
       await navigateToSellerCentral(page, "/goods/list");
       await randomDelay(3000, 5000);
 
-      // 并发上传（3张一组）
+      // 顺序上传，避免同页并发 evaluate 导致签名/上传互相覆盖
       const uploadTypes = AI_DETAIL_IMAGE_TYPE_ORDER.filter(t => localImages[t]);
-      for (let u = 0; u < uploadTypes.length; u += 3) {
-        const batch = uploadTypes.slice(u, u + 3);
-        const uploadResults = await Promise.all(batch.map(async (type) => {
-          const url = await uploadImageToKwcdn(page, localImages[type]);
-          return { type, url };
-        }));
-        for (const { type, url } of uploadResults) {
-          if (url) {
-            kwcdnUrls[type] = url;
-            console.error(`[auto-pricing] Uploaded ${type}: ${url.slice(0, 60)}`);
-          } else {
-            console.error(`[auto-pricing] Upload failed for ${type}`);
-          }
+      for (const type of uploadTypes) {
+        const uploadResult = await uploadImageToKwcdn(page, localImages[type]);
+        if (uploadResult.success && uploadResult.url) {
+          kwcdnUrls[type] = uploadResult.url;
+          console.error(`[auto-pricing] Uploaded ${type}: ${uploadResult.url.slice(0, 60)}`);
+        } else {
+          uploadErrors[type] = uploadResult.error || "unknown upload error";
+          console.error(`[auto-pricing] Upload failed for ${type}: ${uploadErrors[type]}`);
         }
       }
       } finally { await page.close().catch(() => {}); }
@@ -6389,11 +6469,15 @@ async function autoPricingFromCSV(params) {
       console.error(`[auto-pricing] Total uploaded: ${orderedImageUrls.length}`);
 
       if (orderedImageUrls.length < REQUIRED_AI_DETAIL_IMAGE_COUNT) {
+        const uploadErrorSummary = Object.entries(uploadErrors)
+          .slice(0, 3)
+          .map(([type, error]) => `${type}: ${String(error).slice(0, 80)}`)
+          .join("；");
         results.push({
           index: i,
           name: productName.slice(0, 40),
           success: false,
-          message: `上传图片不足${REQUIRED_AI_DETAIL_IMAGE_COUNT}张 (${orderedImageUrls.length})`,
+          message: `上传图片不足${REQUIRED_AI_DETAIL_IMAGE_COUNT}张 (${orderedImageUrls.length})${uploadErrorSummary ? `；${uploadErrorSummary}` : ""}`,
         });
         syncCurrentProgressResults(results, { current: `${itemNum}/${total} ${productName.slice(0, 30)}`, step: "图片上传失败" });
         continue;

@@ -36,6 +36,7 @@ interface ProductItem {
   sku: string;
   imageUrl: string;
   status: string;
+  todaySales: number;
   totalSales: number;
   last7DaysSales: number;
   syncedAt: string;
@@ -167,6 +168,7 @@ export default function ProductList() {
           sku: source.sku || "",
           imageUrl: source.imageUrl || "",
           status: source.status || "",
+          todaySales: source.todaySales || 0,
           totalSales: source.totalSales || 0,
           last7DaysSales: source.last7DaysSales || 0,
           syncedAt: source.syncedAt || "",
@@ -189,6 +191,7 @@ export default function ProductList() {
           sku: item.sku || "",
           imageUrl: item.imageUrl || "",
           status: item.status || "",
+          todaySales: item.todaySales || 0,
           totalSales: item.totalSales || 0,
           last7DaysSales: item.last7DaysSales || 0,
           syncedAt: item.syncedAt || "",
@@ -202,6 +205,7 @@ export default function ProductList() {
         product.sku = item.sku || product.sku;
         product.imageUrl = item.imageUrl || product.imageUrl;
         product.status = item.status || product.status;
+        product.todaySales = item.todaySales || product.todaySales;
         product.totalSales = item.totalSales || product.totalSales;
         product.last7DaysSales = item.last7DaysSales || product.last7DaysSales;
         product.syncedAt = item.syncedAt || product.syncedAt;
@@ -216,6 +220,7 @@ export default function ProductList() {
           skcId: String(item.skcId || ""),
           sku: item.skuCode || "",
           imageUrl: item.imageUrl || "",
+          todaySales: item.todaySales || 0,
           totalSales: item.totalSales || 0,
           last7DaysSales: item.last7DaysSales || 0,
           syncedAt: parsedSales?.syncedAt || "",
@@ -228,6 +233,7 @@ export default function ProductList() {
         product.skcId = product.skcId || String(item.skcId || "");
         product.sku = product.sku || item.skuCode || "";
         product.imageUrl = product.imageUrl || item.imageUrl || "";
+        product.todaySales = item.todaySales || product.todaySales || 0;
         product.totalSales = item.totalSales || product.totalSales || 0;
         product.last7DaysSales = item.last7DaysSales || product.last7DaysSales || 0;
         product.syncedAt = product.syncedAt || parsedSales?.syncedAt || "";
@@ -241,11 +247,13 @@ export default function ProductList() {
           title: item.title || "",
           skcId: String(item.skcId || ""),
           sku: item.skuCode || "",
+          imageUrl: item.imageUrl || "",
           pendingOrderCount: 0,
         });
         product.title = product.title || item.title || "";
         product.skcId = product.skcId || String(item.skcId || "");
         product.sku = product.sku || item.skuCode || "";
+        product.imageUrl = product.imageUrl || item.imageUrl || "";
         product.pendingOrderCount += 1;
         register(product);
       });
@@ -357,10 +365,14 @@ export default function ProductList() {
     {
       title: "销量",
       key: "sales",
-      width: 160,
+      width: 190,
       sorter: (a, b) => (a.totalSales || 0) - (b.totalSales || 0),
       render: (_: string, record: ProductItem) => (
         <div style={{ display: "grid", gap: 8 }}>
+          <div>
+            <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>今日销量</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "var(--color-brand)" }}>{record.todaySales || 0}</div>
+          </div>
           <div>
             <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>7日销量</div>
             <div style={{ fontSize: 18, fontWeight: 700, color: "var(--color-blue)" }}>{record.last7DaysSales || 0}</div>
