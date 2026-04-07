@@ -1,20 +1,28 @@
 import { useEffect, useMemo, useState } from "react";
-import { Alert, Button, Image, Input, Select, Table, Tag, Tooltip } from "antd";
+import { Alert, Button, Card, Col, Drawer, Image, Input, Radio, Row, Space, Statistic, Table, Tabs, Tag, Tooltip } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
   AppstoreOutlined,
-  EyeOutlined,
+  FireOutlined,
   PictureOutlined,
-  RiseOutlined,
   SearchOutlined,
-  ShopOutlined,
   ShoppingCartOutlined,
+  StopOutlined,
   SyncOutlined,
+  WarningOutlined,
 } from "@ant-design/icons";
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip as ReTooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import { useLocation, useNavigate } from "react-router-dom";
 import EmptyGuide from "../components/EmptyGuide";
 import PageHeader from "../components/PageHeader";
-import StatCard from "../components/StatCard";
 import {
   parseOrdersData,
   parseProductCountSummary,
@@ -32,7 +40,7 @@ import { ACTIVE_ACCOUNT_CHANGED_EVENT, STORE_VALUE_UPDATED_EVENT } from "../util
 
 const store = window.electronAPI?.store;
 
-type StatusFilter = "all" | "在售" | "已下架" | "other";
+type StatusFilter = "all" | "在售" | "已下架" | "未发布" | "other" | "saleOut" | "soonSaleOut" | "shortage" | "advice";
 
 type ProductSkuSpec = {
   parentSpecName: string;
@@ -87,13 +95,20 @@ interface ProductItem {
   asfScore?: string | number;
   buyerName?: string;
   buyerUid?: string;
+  operatorContact?: string;
+  highPriceFlowLimit?: boolean;
+  highPriceFlowInfo?: any;
   commentNum?: number;
   inBlackList?: string;
   pictureAuditStatus?: string;
   qualityAfterSalesRate?: string | number;
   predictTodaySaleVolume?: number;
   sevenDaysSaleReference?: number;
+  sevenDaysAddCartNum?: number;
   hasSalesSnapshot?: boolean;
+  salesRaw?: any;
+  salesRawSku?: any;
+  trendDaily?: Array<{ date: string; salesNumber: number }>;
 }
 
 interface ProductSourceState {
@@ -336,6 +351,8 @@ export default function ProductList() {
   const [hasAccount, setHasAccount] = useState<boolean | null>(null);
   const [diagnostics, setDiagnostics] = useState<CollectionDiagnostics | null>(null);
   const [sourceState, setSourceState] = useState<ProductSourceState>(EMPTY_SOURCES);
+  const [selectedProduct, setSelectedProduct] = useState<ProductItem | null>(null);
+  const [drawerTab, setDrawerTab] = useState<string>("overview");
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -373,13 +390,61 @@ export default function ProductList() {
   const loadProducts = async () => {
     setLoading(true);
     try {
-      const [accounts, rawProducts, rawSales, rawOrders, diagnosticsRaw] = await Promise.all([
+      const [accounts, rawProducts, rawSales, rawOrders, diagnosticsRaw, rawLifecycle, rawFlowPrice] = await Promise.all([
         store?.get("temu_accounts"),
         getStoreValue(store, "temu_products"),
         getStoreValue(store, "temu_sales"),
         getStoreValue(store, "temu_orders"),
         getStoreValue(store, COLLECTION_DIAGNOSTICS_KEY),
+        getStoreValue(store, "temu_raw_lifecycle"),
+        getStoreValue(store, "temu_raw_flowPrice"),
       ]);
+
+      // Build SKC/goodsId/productId -> contact(对接运营) maps from lifecycle searchForChainSupplier
+      const operatorMap = new Map<string, string>();
+      const operatorByGoodsId = new Map<string, string>();
+      const operatorByProductId = new Map<string, string>();
+      // Also collect highPriceProductSearchLimit from skcList for 高价限流
+      const skcLimitMap = new Map<string, any>();
+      try {
+        const lc: any = rawLifecycle;
+        const lcApis = lc?.apis || lc?.value?.apis || lc?.lifecycle?.apis || lc?.data?.apis || [];
+        const processItems = (items: any[]) => {
+          if (!Array.isArray(items)) return;
+          for (const it of items) {
+            const contact = String(it?.contact ?? it?.nickContact ?? "").trim();
+            if (!contact) continue;
+            const gid = it?.goodsId != null ? String(it.goodsId) : "";
+            const pid = it?.productId != null ? String(it.productId) : "";
+            if (gid) operatorByGoodsId.set(gid, contact);
+            if (pid) operatorByProductId.set(pid, contact);
+            const skcs = Array.isArray(it?.skcList) ? it.skcList : [];
+            for (const s of skcs) {
+              const skc = s?.skcId != null ? String(s.skcId) : "";
+              if (skc) {
+                operatorMap.set(skc, contact);
+                if (s?.highPriceProductSearchLimit != null || s?.highPriceProductSearchLimitBeginTime || s?.highPriceProductSearchLimitEndTime) {
+                  skcLimitMap.set(skc, s);
+                }
+              }
+            }
+            // also try top-level skc fields just in case
+            const topSkc = String(it?.skcId ?? it?.productSkcId ?? "").trim();
+            if (topSkc) operatorMap.set(topSkc, contact);
+          }
+        };
+        if (Array.isArray(lcApis)) {
+          for (const api of lcApis) {
+            const path = String(api?.path || "");
+            if (!path.includes("searchForChainSupplier")) continue;
+            const r = api?.data?.result || api?.data || {};
+            processItems(r?.dataList || r?.items || r?.list || r?.data || r?.pageItems || []);
+          }
+        }
+        console.log("[ProductList] lc top keys:", lc ? Object.keys(lc) : null, "lcApis len:", Array.isArray(lcApis) ? lcApis.length : "n/a");
+        console.log("[ProductList] operatorMap sizes - skc:", operatorMap.size, "goodsId:", operatorByGoodsId.size, "productId:", operatorByProductId.size);
+        if (operatorMap.size > 0) console.log("[ProductList] operator sample skc:", [...operatorMap.entries()].slice(0,3));
+      } catch (e) { console.warn("[ProductList] lifecycle parse error", e); }
 
       setHasAccount(Array.isArray(accounts) && accounts.length > 0);
       setDiagnostics(normalizeCollectionDiagnostics(diagnosticsRaw));
@@ -560,6 +625,7 @@ export default function ProductList() {
           qualityAfterSalesRate: item.qualityAfterSalesRate ?? "",
           predictTodaySaleVolume: item.predictTodaySaleVolume ?? 0,
           sevenDaysSaleReference: item.sevenDaysSaleReference ?? 0,
+          sevenDaysAddCartNum: item.sevenDaysAddCartNum ?? 0,
           hasSalesSnapshot: true,
         });
 
@@ -604,7 +670,15 @@ export default function ProductList() {
         product.sevenDaysSaleReference = firstSalesRow
           ? toNumberValue(item.sevenDaysSaleReference)
           : (product.sevenDaysSaleReference ?? 0) + toNumberValue(item.sevenDaysSaleReference);
+        product.sevenDaysAddCartNum = firstSalesRow
+          ? toNumberValue(item.sevenDaysAddCartNum)
+          : (product.sevenDaysAddCartNum ?? 0) + toNumberValue(item.sevenDaysAddCartNum);
         product.hasSalesSnapshot = true;
+        product.salesRaw = item.rawItem || product.salesRaw;
+        product.salesRawSku = item.rawFirstSku || product.salesRawSku;
+        if (Array.isArray(item.trendDaily) && item.trendDaily.length > 0) {
+          product.trendDaily = item.trendDaily;
+        }
         register(product);
       });
 
@@ -626,6 +700,75 @@ export default function ProductList() {
         register(product);
       });
 
+      // Build SKC -> high-price flow-limit map from flowPrice raw store
+      // Shape can be either { flowPriceList: {result:{pageItems:[...]}} } (listener)
+      // or { apis: [{path, data}] } (page-capture)
+      const flowLimitMap = new Map<string, any>();
+      try {
+        const fp: any = rawFlowPrice;
+        let items: any[] = [];
+        const extractList = (node: any) => {
+          const r = node?.result || node;
+          return r?.pageItems || r?.list || r?.items || (Array.isArray(r) ? r : []);
+        };
+        if (fp?.flowPriceList) items = extractList(fp.flowPriceList);
+        if ((!items || !items.length) && fp?.flowPriceOverview) items = extractList(fp.flowPriceOverview);
+        if ((!items || !items.length) && Array.isArray(fp?.apis)) {
+          for (const api of fp.apis) {
+            const p = String(api?.path || "");
+            if (p.includes("queryFullHighPriceFlowReduceList") || p.includes("highPriceFlowReduce") || p.includes("high/price")) {
+              items = extractList(api.data);
+              if (items?.length) break;
+            }
+          }
+        }
+        // Deep scan fallback
+        if (!items || !items.length) {
+          const walk = (obj: any, depth = 0) => {
+            if (!obj || depth > 4 || items.length) return;
+            if (Array.isArray(obj)) { obj.forEach((v) => walk(v, depth + 1)); return; }
+            if (typeof obj === "object") {
+              if (Array.isArray(obj.pageItems) && obj.pageItems.some((x: any) => x?.productSkcId || x?.skcId)) {
+                items = obj.pageItems; return;
+              }
+              Object.values(obj).forEach((v) => walk(v, depth + 1));
+            }
+          };
+          walk(fp);
+        }
+        if (Array.isArray(items)) {
+          for (const it of items) {
+            const skc = String(it?.productSkcId ?? it?.skcId ?? "").trim();
+            if (skc) flowLimitMap.set(skc, it);
+          }
+        }
+        console.log("[ProductList] flowLimitMap size:", flowLimitMap.size, "sample:", items?.[0]);
+      } catch (e) { console.warn("[ProductList] flowPrice parse error", e); }
+
+      // Apply operator(对接运营) from lifecycle + high-price flow limit
+      const sampleProd = [...lookup.values()][0];
+      if (sampleProd) console.log("[ProductList] sample product keys:", { skcId: sampleProd.skcId, goodsId: (sampleProd as any).goodsId, productId: (sampleProd as any).productId });
+      let opHits = 0;
+      for (const product of lookup.values()) {
+        const skc = product.skcId ? String(product.skcId) : "";
+        const gid = (product as any).goodsId ? String((product as any).goodsId) : "";
+        const pid = (product as any).productId ? String((product as any).productId) : "";
+        const contact =
+          (skc && operatorMap.get(skc)) ||
+          (gid && operatorByGoodsId.get(gid)) ||
+          (pid && operatorByProductId.get(pid)) ||
+          "";
+        if (contact) { product.operatorContact = contact; opHits++; }
+        if (skc && flowLimitMap.has(skc)) {
+          product.highPriceFlowLimit = true;
+          product.highPriceFlowInfo = flowLimitMap.get(skc);
+        } else if (skc && skcLimitMap.has(skc)) {
+          product.highPriceFlowLimit = true;
+          product.highPriceFlowInfo = skcLimitMap.get(skc);
+        }
+      }
+
+      console.log("[ProductList] operator hits:", opHits, "/", lookup.size);
       const mergedProducts: ProductItem[] = [];
       const seen = new Set<ProductItem>();
       for (const item of lookup.values()) {
@@ -659,17 +802,33 @@ export default function ProductList() {
     return products.filter((product) => {
       const matchKeyword = !keyword || buildSearchIndex(product).includes(keyword);
       const statusText = product.status || normalizeStatusText(product.removeStatus);
-      const matchStatus =
-        statusFilter === "all"
-        || (statusFilter === "other" ? !["在售", "已下架"].includes(statusText || "") : statusText === statusFilter);
+      const siteStatus = normalizeStatusText(product.skcSiteStatus);
+      let matchStatus = true;
+      if (statusFilter === "在售") matchStatus = Boolean(product.hasSalesSnapshot);
+      else if (statusFilter === "已下架") matchStatus = statusText === "已下架" || statusText === "已下架/已终止";
+      else if (statusFilter === "未发布") matchStatus = siteStatus === "未发布到站点" || statusText === "未发布到站点";
+      else if (statusFilter === "other") matchStatus = !["在售", "已下架", "已下架/已终止", "未发布到站点"].includes(statusText || "");
+      else if (statusFilter === "saleOut") {
+        const raw = (product.salesRaw || {}) as any;
+        matchStatus = Boolean(raw.isSaleOut || raw.isCompletelySoldOut || (product.warehouseStock || 0) === 0);
+      } else if (statusFilter === "soonSaleOut") {
+        const days = Number(product.availableSaleDays);
+        matchStatus = Number.isFinite(days) && days > 0 && days < 7;
+      } else if (statusFilter === "shortage") {
+        matchStatus = (product.lackQuantity || 0) > 0;
+      } else if (statusFilter === "advice") {
+        const raw = (product.salesRaw || {}) as any;
+        matchStatus = Boolean(raw.isAdviceStock);
+      }
       return matchKeyword && matchStatus;
     });
   }, [products, searchText, statusFilter]);
 
-  const totalProducts = countSummary.totalCount || products.length;
+  // 优先用合并后的真实 products 数（含 sales-only 条目），countSummary 仅作 fallback
+  const totalProducts = Math.max(products.length, countSummary.totalCount || 0);
   const total7dSales = products.reduce((sum, product) => sum + (product.last7DaysSales || 0), 0);
   const totalSales = products.reduce((sum, product) => sum + (product.totalSales || 0), 0);
-  const onSaleCount = countSummary.onSaleCount || products.filter((product) => (product.status || "") === "在售").length;
+  const onSaleCount = salesSummary?.addedToSiteSkcNum || products.filter((product) => product.hasSalesSnapshot).length;
   const latestSyncedAt = getLatestSyncedAt(products, diagnostics);
   const salesAttachedCount = products.filter((product) => product.hasSalesSnapshot).length;
 
@@ -679,318 +838,553 @@ export default function ProductList() {
     getCollectionDataIssue(diagnostics, "orders", "备货单数据", sourceState.orders),
   ].filter((issue): issue is string => Boolean(issue));
 
+  const numColor = (val: number, base = "#52c41a") => ({ color: val > 0 ? base : "#999", fontWeight: val > 0 ? 500 : 400 });
+
   const columns: ColumnsType<ProductItem> = [
+    {
+      title: "商品图片",
+      key: "imageUrl",
+      width: 60,
+      render: (_: any, record: ProductItem) => {
+        const url = normalizeImageUrl(record.imageUrl);
+        return url ? (
+          <div onClick={(e) => e.stopPropagation()} style={{ display: "inline-block" }}>
+            <Image src={url} width={45} height={45} style={{ objectFit: "cover", borderRadius: 4 }} preview={{ mask: false }} fallback={EMPTY_IMAGE_FALLBACK} />
+          </div>
+        ) : (
+          <div style={{ width: 45, height: 45, background: "#f0f0f0", borderRadius: 4, display: "flex", alignItems: "center", justifyContent: "center" }}><PictureOutlined /></div>
+        );
+      },
+    },
     {
       title: "商品信息",
       dataIndex: "title",
-      key: "product",
-      width: 360,
+      key: "title",
+      width: 320,
+      ellipsis: true,
       fixed: "left",
-      render: (_: string, record: ProductItem) => {
-        const displayImageUrl = normalizeImageUrl(record.imageUrl);
+      render: (text: string, record: ProductItem) => {
+        const raw = record.salesRaw || {};
+        const score = raw.productReviewScore ?? raw.goodsScore ?? raw.score ?? raw.avgScore;
+        const comment = record.commentNum ?? raw.commentNum;
+        const productDays = raw.productDays ?? raw.onSalesDurationOffline ?? raw.addSiteDays ?? raw.addedToSiteDays ?? raw.onSiteDays ?? raw.onShelfDays ?? raw.listedDays ?? raw.siteOnlineDays ?? raw.launchDays ?? raw.daysSinceAdd;
+        const seasonTag = raw.festivalSeasonTag || raw.seasonTag || raw.festivalTag;
+        const stockOut = (record.stockStatus || "").includes("断货") || raw.stockStatus === "SOLD_OUT";
         return (
-          <div className="product-list-product-cell">
-            <div className={`product-list-product-thumb${displayImageUrl ? "" : " product-list-product-thumb--empty"}`}>
-              {displayImageUrl ? (
-                <Image
-                  src={displayImageUrl}
-                  width={72}
-                  height={72}
-                  className="product-list-product-thumb-image"
-                  preview={{ mask: "查看大图" }}
-                  fallback={EMPTY_IMAGE_FALLBACK}
-                />
-              ) : (
-                <PictureOutlined />
-              )}
-            </div>
-            <div className="product-list-product-meta">
-              <Tooltip title={record.title || "-"}>
-                <div className="app-line-clamp-2 product-list-product-title">{record.title || "未命名商品"}</div>
-              </Tooltip>
-              <div className="app-table-meta">
-                {getPrimaryCategory(record) ? <Tag color="default">{getPrimaryCategory(record)}</Tag> : null}
-                {record.siteLabel ? <Tag color="orange">{record.siteLabel}</Tag> : null}
-                {record.sourceType ? <Tag color="blue">{record.sourceType}</Tag> : null}
-                {record.hasSalesSnapshot ? <Tag color="green">销售字段</Tag> : null}
+          <div style={{ fontSize: 11, lineHeight: 1.55 }}>
+            <Tooltip title={text || "-"} placement="topLeft">
+              <div style={{ fontWeight: 500, fontSize: 12, marginBottom: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {text || "-"}
               </div>
-            </div>
-          </div>
-        );
-      },
-    },
-    {
-      title: "核心标识",
-      key: "ids",
-      width: 280,
-      render: (_: string, record: ProductItem) => (
-        <div style={{ display: "grid", gap: 4 }}>
-          <div style={{ fontFamily: "Consolas, monospace", fontSize: 12 }}>SPU ID: {formatTextValue(record.spuId)}</div>
-          <div style={{ fontFamily: "Consolas, monospace", fontSize: 12 }}>SKC ID: {formatTextValue(record.skcId)}</div>
-          <div style={{ fontFamily: "Consolas, monospace", fontSize: 12 }}>货号/extCode: {formatTextValue(record.extCode || record.sku)}</div>
-          {record.goodsId ? (
-            <div style={{ fontFamily: "Consolas, monospace", fontSize: 12, color: "#8c8c8c" }}>Goods ID: {record.goodsId}</div>
-          ) : null}
-        </div>
-      ),
-    },
-    {
-      title: "分类与类型",
-      key: "categoryType",
-      width: 260,
-      render: (_: string, record: ProductItem) => (
-        <div style={{ display: "grid", gap: 6 }}>
-          <Tooltip title={record.categories || "-"}>
-            <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>商品分类：{record.category || "-"}</div>
-          </Tooltip>
-          <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>商品类型：{formatTextValue(record.productType)}</div>
-          <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>来源类型：{formatSourceType(record.sourceType)}</div>
-        </div>
-      ),
-    },
-    {
-      title: "站点与状态",
-      key: "statusSite",
-      width: 260,
-      render: (_: string, record: ProductItem) => (
-        <div style={{ display: "grid", gap: 8 }}>
-          <div className="app-table-meta">
-            {renderStatusTag(record.status || normalizeStatusText(record.removeStatus), record.status === "在售" ? "success" : "default")}
-            {renderStatusTag(normalizeStatusText(record.skcSiteStatus))}
-          </div>
-          <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>removeStatus：{formatTextValue(record.removeStatus)}</div>
-          <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>skcSiteStatus：{formatTextValue(record.skcSiteStatus)}</div>
-          <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>flowLimitStatus：{formatTextValue(record.flowLimitStatus)}</div>
-        </div>
-      ),
-    },
-    {
-      title: "SKU 信息",
-      key: "skuSummaries",
-      width: 380,
-      render: (_: string, record: ProductItem) => {
-        const skuList = record.skuSummaries.slice(0, 2);
-        return (
-          <div style={{ display: "grid", gap: 8 }}>
-            {skuList.length === 0 ? (
-              <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>暂无 SKU 明细</div>
-            ) : (
-              skuList.map((sku) => (
-                <div key={`${sku.productSkuId}-${sku.extCode}`} style={{ display: "grid", gap: 4 }}>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                    {sku.thumbUrl ? (
-                      <Image src={sku.thumbUrl} width={28} height={28} preview={false} fallback={EMPTY_IMAGE_FALLBACK} />
-                    ) : (
-                      <Tag>无图</Tag>
-                    )}
-                    <div style={{ fontFamily: "Consolas, monospace", fontSize: 12 }}>
-                      SKU ID: {formatTextValue(sku.productSkuId)}
-                    </div>
-                  </div>
-                  <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>规格：{formatTextValue(sku.specText || sku.specName)}</div>
-                  <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>extCode：{formatTextValue(sku.extCode)}</div>
-                </div>
-              ))
+            </Tooltip>
+            {getPrimaryCategory(record) && <div style={{ color: "#999" }}>类目：{getPrimaryCategory(record)}</div>}
+            {(score != null || comment != null) && (
+              <div style={{ color: "#faad14" }}>
+                {score != null && <span>★ {score}分</span>}
+                {score != null && comment != null && <span style={{ color: "#999" }}> | </span>}
+                {comment != null && <span style={{ color: "#999" }}>评论数:{comment}</span>}
+              </div>
             )}
-            {record.skuSummaries.length > 2 ? (
-              <Tag color="blue">其余 {record.skuSummaries.length - 2} 个 SKU 已折叠</Tag>
-            ) : null}
-          </div>
-        );
-      },
-    },
-    {
-      title: "销量",
-      key: "sales",
-      width: 240,
-      sorter: (a, b) => (a.totalSales || 0) - (b.totalSales || 0),
-      render: (_: string, record: ProductItem) => (
-        <div style={{ display: "grid", gap: 8 }}>
-          <div>
-            <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>今日销量</div>
-            <div style={{ fontSize: 16, fontWeight: 700, color: "var(--color-brand)" }}>{record.todaySales || 0}</div>
-          </div>
-          <div>
-            <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>30日销量</div>
-            <div style={{ fontSize: 18, fontWeight: 700, color: "var(--color-blue)" }}>{record.last30DaysSales || 0}</div>
-          </div>
-          <div>
-            <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>预测今日销量</div>
-            <div style={{ fontSize: 15, fontWeight: 700, color: "var(--color-text)" }}>{record.predictTodaySaleVolume || 0}</div>
-          </div>
-          <div>
-            <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>7日销量参考</div>
-            <div style={{ fontSize: 15, fontWeight: 700, color: "var(--color-text)" }}>{record.sevenDaysSaleReference || 0}</div>
-          </div>
-        </div>
-      ),
-    },
-    {
-      title: "库存与可售",
-      key: "inventory",
-      width: 260,
-      render: (_: string, record: ProductItem) => (
-        <div style={{ display: "grid", gap: 8 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
-            {renderSnapshotField("仓库库存", record.warehouseStock, true)}
-            {renderSnapshotField("缺货数量", record.lackQuantity, true)}
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
-            {renderSnapshotField("预占库存", record.occupyStock)}
-            {renderSnapshotField("不可用库存", record.unavailableStock)}
-          </div>
-          {renderSnapshotField("可售天数", record.availableSaleDays)}
-        </div>
-      ),
-    },
-    {
-      title: "销售字段快照",
-      key: "salesSnapshot",
-      width: 340,
-      render: (_: string, record: ProductItem) => (
-        <div style={{ display: "grid", gap: 8 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
-            {renderSnapshotField("申报价", record.price, true)}
-            {renderSnapshotField("热卖标签", record.hotTag)}
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
-            {renderSnapshotField("SKU ID", record.skuId)}
-            {renderSnapshotField("SKU名称", record.skuName)}
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
-            {renderSnapshotField("货号", record.extCode || record.sku)}
-            {renderSnapshotField("ASF评分", record.asfScore)}
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
-            {renderSnapshotField("买手", record.buyerName)}
-            {renderSnapshotField("买手ID", record.buyerUid)}
-          </div>
-        </div>
-      ),
-    },
-    {
-      title: "操作",
-      key: "action",
-      width: 110,
-      fixed: "right",
-      render: (_: string, record: ProductItem) => (
-        <div className="app-table-actions">
-          <Button
-            type="link"
-            style={{ padding: 0, color: "var(--color-brand)", fontWeight: 600 }}
-            onClick={() => navigate(`/products/${record.skcId || record.goodsId || record.spuId}`)}
-          >
-            查看详情
-          </Button>
-        </div>
-      ),
-    },
-  ];
-
-  const renderExpandedRow = (record: ProductItem) => {
-    const baseFields = [
-      { label: "商品标题", value: record.title, accent: true },
-      { label: "商品分类", value: record.category || record.categories },
-      { label: "商品站点", value: record.siteLabel },
-      { label: "商品来源", value: formatSourceType(record.sourceType) },
-      { label: "SKC ID", value: record.skcId },
-      { label: "SPU ID", value: record.spuId },
-      { label: "商品主图", value: record.imageUrl },
-    ];
-
-    const salesInventoryFields = [
-      { label: "今日销量", value: record.todaySales, accent: true },
-      { label: "30日销量", value: record.last30DaysSales, accent: true },
-      { label: "仓库库存", value: record.warehouseStock },
-      { label: "缺货数量", value: record.lackQuantity },
-      { label: "预占库存", value: record.occupyStock },
-      { label: "不可用库存", value: record.unavailableStock },
-      { label: "可售天数", value: record.availableSaleDays },
-      { label: "预测今日销量", value: record.predictTodaySaleVolume },
-      { label: "7日销量参考", value: record.sevenDaysSaleReference },
-    ];
-
-    const salesExtraFields = [
-      { label: "申报价", value: record.price, accent: true },
-      { label: "SKU货号", value: record.extCode || record.sku },
-      { label: "SKU ID", value: record.skuId },
-      { label: "SKU名称", value: record.skuName },
-      { label: "热卖标签", value: record.hotTag },
-      { label: "ASF评分", value: record.asfScore },
-      { label: "买手名称", value: record.buyerName },
-      { label: "买手ID", value: record.buyerUid },
-      { label: "评论数", value: record.commentNum },
-      { label: "黑名单", value: record.inBlackList },
-      { label: "图片审核状态", value: record.pictureAuditStatus },
-      { label: "品质售后率", value: record.qualityAfterSalesRate },
-    ];
-
-    const hasSalesDetails = Boolean(record.hasSalesSnapshot);
-
-    return (
-      <div
-        style={{
-          display: "grid",
-          gap: 12,
-          padding: "4px 0",
-        }}
-      >
-        {!hasSalesDetails ? (
-          <Alert
-            type="info"
-            showIcon
-            message="当前商品还没有匹配到销售管理字段"
-            description="这条商品基础信息已经加载成功，但销售管理页里的销量、库存、买手和 SKU 字段暂时没有匹配到。通常是因为当前销售缓存和商品缓存不是同一批采集数据，重新采集“商品列表 + 销售数据”后会更完整。"
-          />
-        ) : null}
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: hasSalesDetails ? "repeat(auto-fit, minmax(240px, 1fr))" : "minmax(280px, 1fr)",
-            gap: 12,
-          }}
-        >
-          <div className="app-surface" style={{ padding: 12, borderRadius: 12 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>基础信息</div>
-            <div style={{ display: "grid", gap: 10 }}>
-              {baseFields.map((field) => (
-                <div key={field.label}>
-                  {renderSnapshotField(field.label, field.value, field.accent)}
-                </div>
+            {record.skcId && <div style={{ color: "#999" }}>SKC：<span style={{ fontFamily: "monospace" }}>{record.skcId}</span></div>}
+            {productDays != null && productDays !== "" && <div style={{ color: "#999" }}>加入站点时长：{productDays}天</div>}
+            {record.spuId && <div style={{ color: "#999" }}>SPU：<span style={{ fontFamily: "monospace" }}>{record.spuId}</span></div>}
+            {seasonTag && <div style={{ color: "#999" }}>节日/季节标签：{seasonTag}</div>}
+            <div style={{ marginTop: 2 }}>
+              {stockOut && <Tag color="red" style={{ fontSize: 10, marginRight: 4 }}>已断货</Tag>}
+              {(record.hotTag === "true" || raw.hotTag === true) && <Tag color="volcano" style={{ fontSize: 10, marginRight: 4 }}>🔥 热销款</Tag>}
+              {record.hotTag && record.hotTag !== "true" && record.hotTag !== "false" && <Tag color="volcano" style={{ fontSize: 10, marginRight: 4 }}>{record.hotTag}</Tag>}
+              {raw.isAdProduct && <Tag color="blue" style={{ fontSize: 10, marginRight: 4 }}>广告</Tag>}
+              {Array.isArray(raw.purchaseLabelList) && raw.purchaseLabelList.map((lbl: any, i: number) => (
+                <Tag key={`p${i}`} color="gold" style={{ fontSize: 10, marginRight: 4 }}>{typeof lbl === "object" ? (lbl.name || lbl.label || JSON.stringify(lbl)) : String(lbl)}</Tag>
+              ))}
+              {Array.isArray(raw.adTypeList) && raw.adTypeList.filter((v: any) => v && v !== 0 && v !== "0").map((t: any, i: number) => (
+                <Tag key={`ad${i}`} color="geekblue" style={{ fontSize: 10, marginRight: 4 }}>{typeof t === "object" ? (t.name || t.label || JSON.stringify(t)) : String(t)}</Tag>
               ))}
             </div>
           </div>
-          {hasSalesDetails ? (
-            <div className="app-surface" style={{ padding: 12, borderRadius: 12 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>销量与库存</div>
-              <div style={{ display: "grid", gap: 10 }}>
-                {salesInventoryFields.map((field) => (
-                  <div key={field.label}>
-                    {renderSnapshotField(field.label, field.value, field.accent)}
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : null}
-          {hasSalesDetails ? (
-            <div className="app-surface" style={{ padding: 12, borderRadius: 12 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>销售补充信息</div>
-              <div style={{ display: "grid", gap: 10 }}>
-                {salesExtraFields.map((field) => (
-                  <div key={field.label}>
-                    {renderSnapshotField(field.label, field.value, field.accent)}
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : null}
+        );
+      },
+    },
+    {
+      title: "SKC ID",
+      dataIndex: "skcId",
+      key: "skcId",
+      width: 120,
+      render: (text: string) => <span style={{ fontSize: 12, fontFamily: "monospace" }}>{text || "-"}</span>,
+    },
+    {
+      title: "SKU/规格",
+      key: "skuInfo",
+      width: 150,
+      render: (_: any, record: ProductItem) => (
+        <div style={{ fontSize: 12 }}>
+          <div style={{ fontFamily: "monospace" }}>{record.skuId || "-"}</div>
+          {record.skuName && <div style={{ color: "#666" }}>{record.skuName}</div>}
+          {record.extCode && <div style={{ color: "#999" }}>货号：{record.extCode}</div>}
+        </div>
+      ),
+    },
+    {
+      title: "申报价格",
+      dataIndex: "price",
+      key: "price",
+      width: 90,
+      render: (text: any) => <span style={{ color: "#fa541c", fontWeight: 500 }}>{formatTextValue(text)}</span>,
+    },
+    {
+      title: "今日销量",
+      dataIndex: "todaySales",
+      key: "todaySales",
+      width: 85,
+      sorter: (a, b) => (a.todaySales || 0) - (b.todaySales || 0),
+      render: (val: number) => <span style={numColor(val || 0)}>{val || 0}</span>,
+    },
+    {
+      title: "7天销量",
+      dataIndex: "last7DaysSales",
+      key: "last7DaysSales",
+      width: 85,
+      sorter: (a, b) => (a.last7DaysSales || 0) - (b.last7DaysSales || 0),
+      render: (val: number) => <span style={numColor(val || 0)}>{val || 0}</span>,
+    },
+    {
+      title: "30天销量",
+      dataIndex: "last30DaysSales",
+      key: "last30DaysSales",
+      width: 90,
+      sorter: (a, b) => (a.last30DaysSales || 0) - (b.last30DaysSales || 0),
+      defaultSortOrder: "descend",
+      render: (val: number) => <span style={numColor(val || 0)}>{val || 0}</span>,
+    },
+    {
+      title: "总销量",
+      dataIndex: "totalSales",
+      key: "totalSales",
+      width: 85,
+      sorter: (a, b) => (a.totalSales || 0) - (b.totalSales || 0),
+      render: (val: number) => <span style={numColor(val || 0, "#1890ff")}>{val || 0}</span>,
+    },
+    {
+      title: "仓内可用库存",
+      dataIndex: "warehouseStock",
+      key: "warehouseStock",
+      width: 90,
+      sorter: (a, b) => (a.warehouseStock || 0) - (b.warehouseStock || 0),
+      render: (val: number) => <span style={{ color: (val || 0) > 0 ? "#1890ff" : "#ff4d4f", fontWeight: 500 }}>{val || 0}</span>,
+    },
+    {
+      title: "暂不可用库存",
+      dataIndex: "unavailableStock",
+      key: "unavailableStock",
+      width: 110,
+      sorter: (a, b) => (a.unavailableStock || 0) - (b.unavailableStock || 0),
+      render: (val: number) => <span style={{ color: (val || 0) > 0 ? "#fa8c16" : "#999", fontWeight: (val || 0) > 0 ? 500 : 400 }}>{val || 0}</span>,
+    },
+    {
+      title: "预占用库存",
+      dataIndex: "occupyStock",
+      key: "occupyStock",
+      width: 100,
+      sorter: (a, b) => (a.occupyStock || 0) - (b.occupyStock || 0),
+      render: (val: number) => <span style={{ color: (val || 0) > 0 ? "#13c2c2" : "#999", fontWeight: (val || 0) > 0 ? 500 : 400 }}>{val || 0}</span>,
+    },
+    {
+      title: "缺货",
+      dataIndex: "lackQuantity",
+      key: "lackQuantity",
+      width: 75,
+      render: (val: number) => <span style={{ color: (val || 0) > 0 ? "#ff4d4f" : "#999", fontWeight: (val || 0) > 0 ? 500 : 400 }}>{val || 0}</span>,
+    },
+    {
+      title: "7日加购",
+      dataIndex: "sevenDaysAddCartNum",
+      key: "sevenDaysAddCartNum",
+      width: 85,
+      sorter: (a, b) => (a.sevenDaysAddCartNum || 0) - (b.sevenDaysAddCartNum || 0),
+      render: (val: number) => (
+        <span style={{ color: (val || 0) > 0 ? "#722ed1" : "#999", fontWeight: (val || 0) > 0 ? 500 : 400 }}>
+          {val || 0}
+        </span>
+      ),
+    },
+    {
+      title: "建议备货",
+      key: "advice",
+      width: 90,
+      render: (_: any, r: ProductItem) => {
+        const v = r.salesRaw?.skuQuantityTotalInfo?.adviceQuantity;
+        return <span style={{ color: v > 0 ? "#fa541c" : "#999", fontWeight: v > 0 ? 500 : 400 }}>{v || "-"}</span>;
+      },
+    },
+    {
+      title: "对接运营",
+      dataIndex: "operatorContact",
+      key: "operatorContact",
+      width: 130,
+      render: (_: any, record: ProductItem) => (
+        <span style={{ fontSize: 12 }}>{record.operatorContact || record.buyerName || "-"}</span>
+      ),
+    },
+    {
+      title: "高价限流",
+      key: "highPriceFlowLimit",
+      width: 150,
+      filters: [
+        { text: "限流中", value: "on" },
+        { text: "正常", value: "off" },
+      ],
+      onFilter: (value, record) => (value === "on" ? !!record.highPriceFlowLimit : !record.highPriceFlowLimit),
+      render: (_: any, r: ProductItem) => {
+        if (!r.highPriceFlowLimit) return <span style={{ color: "#999" }}>-</span>;
+        const info = r.highPriceFlowInfo || {};
+        const fmt = (v: any) => {
+          if (v == null || v === "") return null;
+          const n = Number(v);
+          if (!Number.isFinite(n)) return String(v);
+          // Temu 价格通常以分为单位
+          return (n > 1000 ? n / 100 : n).toFixed(2);
+        };
+        const current = fmt(info.currentPrice ?? info.supplierPrice ?? info.price ?? info.salePrice);
+        const suggest = fmt(info.suggestPrice ?? info.targetPrice ?? info.expectPrice ?? info.reducePrice ?? info.lowPrice);
+        const tip = (
+          <div style={{ fontSize: 12, lineHeight: 1.6 }}>
+            {Object.entries(info).slice(0, 14).map(([k, v]) => (
+              <div key={k}>{k}: {typeof v === "object" ? JSON.stringify(v) : String(v)}</div>
+            ))}
+          </div>
+        );
+        return (
+          <Tooltip title={tip}>
+            <Space direction="vertical" size={0}>
+              <Tag color="red" style={{ marginRight: 0 }}>限流</Tag>
+              {(current || suggest) && (
+                <span style={{ fontSize: 11, color: "#666" }}>
+                  {current && <span style={{ color: "#ff4d4f" }}>¥{current}</span>}
+                  {current && suggest && " → "}
+                  {suggest && <span style={{ color: "#52c41a" }}>¥{suggest}</span>}
+                </span>
+              )}
+            </Space>
+          </Tooltip>
+        );
+      },
+    },
+    {
+      title: "供货状态",
+      dataIndex: "supplyStatus",
+      key: "supplyStatus",
+      width: 110,
+      render: (status: string) => {
+        if (!status) return "-";
+        const colorMap: Record<string, string> = {
+          "正常供货": "green",
+          "暂时无法供货": "orange",
+          "永久停止供货": "red",
+        };
+        return <Tag color={colorMap[status] || "default"}>{status}</Tag>;
+      },
+    },
+    {
+      title: "状态",
+      key: "status",
+      width: 100,
+      render: (_: string, record: ProductItem) => {
+        const status = record.status || normalizeStatusText(record.removeStatus);
+        const color: any = status === "在售" ? "success" : status.includes("下架") ? "error" : "default";
+        return renderStatusTag(status || "待同步", color);
+      },
+    },
+  ];
+
+  // ============ Drawer 渲染 ============
+  const renderDrawer = () => {
+    if (!selectedProduct) return null;
+    const record = selectedProduct;
+    const raw: any = record.salesRaw || {};
+    const sku: any = record.salesRawSku || {};
+    const qty: any = raw.skuQuantityTotalInfo || {};
+    const inv: any = qty.inventoryNumInfo || raw.inventoryNumInfo || {};
+    const trend = record.trendDaily || [];
+
+    const renderMetric = (label: string, value: any, accent?: boolean) => (
+      <div style={{ padding: "8px 12px", background: "var(--color-bg-1, #fafafa)", borderRadius: 8 }}>
+        <div style={{ fontSize: 11, color: "var(--color-text-sec)" }}>{label}</div>
+        <div style={{ fontSize: 16, fontWeight: 700, color: accent ? "var(--color-brand)" : "var(--color-text)" }}>
+          {formatTextValue(value)}
         </div>
       </div>
+    );
+
+    const overviewTab = (
+      <div style={{ display: "grid", gap: 16 }}>
+        {trend.length > 0 ? (
+          <div className="app-surface" style={{ padding: 12, borderRadius: 12 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8, color: "var(--color-brand)" }}>
+              销售趋势 · 共 {trend.length} 天
+            </div>
+            <ResponsiveContainer width="100%" height={220}>
+              <AreaChart data={trend} margin={{ top: 8, right: 16, left: -8, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#e55b00" stopOpacity={0.4} />
+                    <stop offset="100%" stopColor="#e55b00" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
+                <XAxis dataKey="date" tick={{ fontSize: 10 }} interval="preserveStartEnd" />
+                <YAxis tick={{ fontSize: 10 }} allowDecimals={false} />
+                <ReTooltip />
+                <Area type="monotone" dataKey="salesNumber" stroke="#e55b00" strokeWidth={2} fill="url(#trendFill)" />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        ) : (
+          <Alert type="info" showIcon message="暂无销售趋势数据" description="如需查看销售趋势曲线，请重新采集销售数据。" />
+        )}
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 8 }}>
+          {renderMetric("今日销量", qty.todaySaleVolume ?? record.todaySales, true)}
+          {renderMetric("7日销量", qty.lastSevenDaysSaleVolume ?? record.last7DaysSales, true)}
+          {renderMetric("30日销量", qty.lastThirtyDaysSaleVolume ?? record.last30DaysSales, true)}
+          {renderMetric("总销量", qty.totalSaleVolume ?? record.totalSales)}
+          {renderMetric("仓库库存", inv.warehouseInventoryNum ?? record.warehouseStock, true)}
+          {renderMetric("缺货", qty.lackQuantity ?? record.lackQuantity)}
+          {renderMetric("建议备货", qty.adviceQuantity)}
+          {renderMetric("可售天数", qty.availableSaleDays ?? record.availableSaleDays)}
+          {renderMetric("申报价", record.price)}
+          {renderMetric("买手", record.buyerName)}
+          {renderMetric("ASF评分", record.asfScore)}
+          {renderMetric("评论数", record.commentNum)}
+        </div>
+      </div>
+    );
+
+    // ----- SKU 明细 Tab：核心列 + 更多 -----
+    const skuList = Array.isArray(raw.skuQuantityDetailList) ? raw.skuQuantityDetailList : [];
+    const skuTab = skuList.length > 0 ? (
+      <Table
+        size="small"
+        rowKey={(s: any, i) => `${s.productSkuId || i}`}
+        dataSource={skuList}
+        pagination={false}
+        scroll={{ x: 900 }}
+        columns={[
+          { title: "SKU ID", dataIndex: "productSkuId", width: 120, render: (v) => <span style={{ fontFamily: "Consolas, monospace", fontSize: 11 }}>{formatTextValue(v)}</span> },
+          { title: "规格", dataIndex: "className", width: 120 },
+          { title: "货号", dataIndex: "skuExtCode", width: 120 },
+          { title: "今日", width: 70, align: "right", render: (_: any, s: any) => s.todaySaleVolume ?? 0 },
+          { title: "7日", width: 70, align: "right", render: (_: any, s: any) => s.lastSevenDaysSaleVolume ?? 0 },
+          { title: "30日", width: 70, align: "right", render: (_: any, s: any) => s.lastThirtyDaysSaleVolume ?? 0 },
+          { title: "缺货", dataIndex: "lackQuantity", width: 70, align: "right" },
+          { title: "建议", dataIndex: "adviceQuantity", width: 70, align: "right" },
+          { title: "卖家库存", dataIndex: "sellerWhStock", width: 90, align: "right" },
+          { title: "申报价", dataIndex: "supplierPrice", width: 90, align: "right" },
+        ]}
+      />
+    ) : record.skuSummaries.length > 0 ? (
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 8 }}>
+        {record.skuSummaries.map((s) => (
+          <div key={`${s.productSkuId}-${s.extCode}`} style={{ display: "flex", gap: 8, alignItems: "center", padding: 8, background: "var(--color-bg-1, #fafafa)", borderRadius: 8 }}>
+            {s.thumbUrl ? <Image src={s.thumbUrl} width={36} height={36} preview={false} fallback={EMPTY_IMAGE_FALLBACK} /> : <Tag>无图</Tag>}
+            <div style={{ display: "grid", gap: 2, fontSize: 11 }}>
+              <div style={{ fontFamily: "Consolas, monospace" }}>{s.productSkuId || "-"}</div>
+              <div style={{ color: "var(--color-text-sec)" }}>{s.specText || s.specName || "-"}</div>
+              <div style={{ color: "var(--color-text-sec)" }}>{s.extCode || "-"}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    ) : (
+      <Alert type="info" showIcon message="暂无 SKU 明细" />
+    );
+
+    // ----- 全部字段 Tab -----
+    const groups: { title: string; fields: Array<{ label: string; value: any; accent?: boolean }> }[] = [
+      {
+        title: "基础信息",
+        fields: [
+          { label: "商品标题", value: record.title, accent: true },
+          { label: "商品分类", value: record.category || record.categories },
+          { label: "商品类型", value: record.productType },
+          { label: "商品来源", value: formatSourceType(record.sourceType) },
+          { label: "JIT模式", value: raw.productJitMode ?? raw.purchaseStockType },
+          { label: "站点", value: record.siteLabel },
+          { label: "SKC ID", value: record.skcId },
+          { label: "SPU ID", value: record.spuId },
+          { label: "Goods ID", value: record.goodsId },
+          { label: "Product ID", value: raw.productId },
+          { label: "SKC 货号", value: raw.skcExtCode || record.extCode },
+          { label: "创建时间", value: raw.createdAtStr || raw.createdAt },
+          { label: "上架时长", value: raw.onSalesDurationOffline },
+          { label: "商品周期", value: raw.productCycleDays },
+        ],
+      },
+      {
+        title: "库存信息",
+        fields: [
+          { label: "仓库库存", value: inv.warehouseInventoryNum ?? record.warehouseStock, accent: true },
+          { label: "缺货数量", value: qty.lackQuantity ?? record.lackQuantity, accent: true },
+          { label: "建议备货量", value: qty.adviceQuantity },
+          { label: "可售天数", value: qty.availableSaleDays },
+          { label: "仓内可售天数", value: qty.warehouseAvailableSaleDays },
+          { label: "预测可售天数", value: qty.predictSaleAvailableDays },
+          { label: "待 QC 数", value: inv.waitQcNum },
+          { label: "待上架", value: inv.waitOnShelfNum },
+          { label: "待入库", value: inv.waitInStock },
+          { label: "待收货", value: inv.waitReceiveNum },
+          { label: "待发货", value: inv.waitDeliveryInventoryNum },
+          { label: "待审核库存", value: inv.waitApproveInventoryNum },
+          { label: "不可用库存", value: inv.unavailableWarehouseInventoryNum },
+          { label: "预占库存", value: inv.expectedOccupiedInventoryNum },
+          { label: "正常锁定", value: inv.normalLockNumber },
+          { label: "库存区域", value: raw.inventoryRegion },
+          { label: "仓库分组", value: Array.isArray(raw.warehouseGroupList) ? raw.warehouseGroupList.join("/") : raw.warehouseGroupList },
+        ],
+      },
+      {
+        title: "运营/买手",
+        fields: [
+          { label: "买手", value: record.buyerName, accent: true },
+          { label: "买手 ID", value: record.buyerUid },
+          { label: "供应商 ID", value: raw.supplierId },
+          { label: "供应商名称", value: raw.supplierName },
+          { label: "结算类型", value: raw.settlementType },
+          { label: "ASF 评分", value: record.asfScore },
+          { label: "评论数", value: record.commentNum },
+          { label: "品质售后率", value: record.qualityAfterSalesRate },
+          { label: "图片审核状态", value: record.pictureAuditStatus },
+          { label: "微瑕疵", value: raw.minorFlaw },
+          { label: "热卖标签", value: record.hotTag },
+          { label: "广告商品", value: raw.isAdProduct ? "是" : "" },
+          { label: "广告类型", value: Array.isArray(raw.adTypeList) ? raw.adTypeList.join("/") : raw.adTypeList },
+          { label: "店铺履约率", value: raw.mallDeliverRate },
+        ],
+      },
+      {
+        title: "供货/备货",
+        fields: [
+          { label: "库存状态", value: raw.stockStatus },
+          { label: "供货状态", value: raw.supplyStatus },
+          { label: "供货状态备注", value: raw.supplyStatusRemark },
+          { label: "正常供货预计时间", value: raw.expectNormalSupplyTime },
+          { label: "缺货", value: raw.isLack ? "是" : "" },
+          { label: "库存充足", value: raw.isEnoughStock ? "是" : "" },
+          { label: "建议备货", value: raw.isAdviceStock ? "是" : "" },
+          { label: "今日已申请备货", value: raw.isApplyStockToday ? "是" : "" },
+          { label: "今日申请备货数", value: raw.todayApplyStockNum },
+          { label: "建议关闭 JIT", value: raw.suggestCloseJit ? "是" : "" },
+          { label: "JIT 关闭状态", value: raw.closeJitStatus },
+          { label: "首采等待", value: qty.waitFirstPurchaseSkcNum },
+          { label: "首采未发", value: qty.firstPurchaseNotShippedSkcNum },
+        ],
+      },
+      {
+        title: "状态/合规",
+        fields: [
+          { label: "商品状态", value: record.status || normalizeStatusText(record.removeStatus) },
+          { label: "SKC 站点状态", value: normalizeStatusText(record.skcSiteStatus) },
+          { label: "下架状态", value: record.removeStatus },
+          { label: "限流状态", value: record.flowLimitStatus },
+          { label: "黑名单", value: record.inBlackList },
+          { label: "违规影响类型", value: raw.illegalImpactType },
+          { label: "违规原因", value: raw.illegalReason },
+          { label: "停售类型", value: raw.haltSalesType },
+          { label: "停售开始时间", value: raw.haltSalesStartTime },
+          { label: "停售结束时间", value: raw.haltSalesEndTime },
+        ],
+      },
+    ];
+
+    const allFieldsTab = (
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 12 }}>
+        {groups.map((group) => {
+          const visibleFields = group.fields.filter((f) => hasMeaningfulSnapshotValue(f.value));
+          if (visibleFields.length === 0) return null;
+          return (
+            <div key={group.title} className="app-surface" style={{ padding: 12, borderRadius: 12 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10, color: "var(--color-brand)" }}>{group.title}</div>
+              <div style={{ display: "grid", gap: 8 }}>
+                {visibleFields.map((field) => (
+                  <div key={field.label}>
+                    {renderSnapshotField(field.label, field.value, field.accent)}
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+
+    // ----- 标签 Tab -----
+    const labelGroups: { title: string; items: any }[] = [
+      { title: "SKC 标签", items: raw.skcLabels },
+      { title: "节日/季节标签", items: raw.holidayLabelList },
+      { title: "自定义标签", items: raw.customLabelList },
+      { title: "采购标签", items: raw.purchaseLabelList },
+      { title: "广告类型", items: raw.adTypeList },
+      { title: "命中规则", items: raw.hitRuleDetailList },
+      { title: "商品属性", items: raw.productProperties },
+    ].filter((g) => Array.isArray(g.items) && g.items.length > 0);
+
+    const labelTab = labelGroups.length > 0 ? (
+      <div style={{ display: "grid", gap: 12 }}>
+        {labelGroups.map((g) => (
+          <div key={g.title} className="app-surface" style={{ padding: 12, borderRadius: 12 }}>
+            <div style={{ fontSize: 12, color: "var(--color-text-sec)", marginBottom: 6 }}>{g.title}</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+              {g.items.map((item: any, idx: number) => {
+                const text = typeof item === "string" ? item
+                  : item?.tagName || item?.labelName || item?.name || item?.text || JSON.stringify(item);
+                return <Tag key={idx}>{String(text).slice(0, 40)}</Tag>;
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    ) : (
+      <Alert type="info" showIcon message="暂无标签数据" />
+    );
+
+    return (
+      <Drawer
+        width={Math.min(1080, typeof window !== "undefined" ? window.innerWidth - 80 : 1080)}
+        open={Boolean(selectedProduct)}
+        onClose={() => setSelectedProduct(null)}
+        title={(
+          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+            {record.imageUrl ? (
+              <Image src={record.imageUrl} width={48} height={48} preview={{ mask: "查看大图" }} fallback={EMPTY_IMAGE_FALLBACK} />
+            ) : null}
+            <div style={{ display: "grid", gap: 2, minWidth: 0 }}>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>{record.title || "未命名商品"}</div>
+              <div style={{ fontSize: 11, color: "var(--color-text-sec)", fontFamily: "Consolas, monospace" }}>
+                SKC {formatTextValue(record.skcId)} · 货号 {formatTextValue(record.extCode || record.sku)}
+              </div>
+            </div>
+          </div>
+        )}
+        destroyOnClose
+      >
+        <Tabs
+          activeKey={drawerTab}
+          onChange={setDrawerTab}
+          items={[
+            { key: "overview", label: "概览", children: overviewTab },
+            { key: "all", label: "全部字段", children: allFieldsTab },
+          ]}
+        />
+      </Drawer>
     );
   };
 
   const emptyState = !loading && products.length === 0;
   const filteredEmptyState = !loading && products.length > 0 && filteredProducts.length === 0;
+
+  // 顶部 4 个核心指标 + 可点击筛选标签
+  const saleOutCount = salesSummary?.saleOutSkcNum || 0;
+  const shortageCount = salesSummary?.shortageSkcNum || 0;
+  const adviceCount = salesSummary?.adviceStockSkcNum || 0;
 
   return (
     <div className="dashboard-shell">
@@ -998,12 +1392,9 @@ export default function ProductList() {
         compact
         eyebrow="商品数据"
         title="商品管理"
-        subtitle="集中查看商品基础资料，并联动展示销售管理里的销量、库存、买手和 SKU 字段。"
+        subtitle="紧凑表格 + 详情抽屉，集中查看商品基础资料、销量趋势和 SKU 字段。"
         meta={[
           formatSyncedAt(latestSyncedAt),
-          totalProducts > 0 ? `${totalProducts} 个商品` : "等待首次采集",
-          `在售中 ${onSaleCount}`,
-          salesAttachedCount > 0 ? `已接入销售字段 ${salesAttachedCount} 条` : "等待销售字段",
           hasAccount === false ? "本地历史数据" : null,
         ].filter(Boolean)}
         actions={(
@@ -1018,7 +1409,6 @@ export default function ProductList() {
           type="warning"
           showIcon
           message="当前没有绑定账号，正在展示本地历史数据"
-          description="如果你需要最新状态，先重新绑定店铺账号，再执行一次数据采集即可。"
         />
       ) : null}
 
@@ -1028,19 +1418,9 @@ export default function ProductList() {
           type="warning"
           showIcon
           message="部分商品数据还没有准备好"
-          description={(
-            <div className="friendly-alert__summary">
-              {dataIssues.slice(0, 3).join("；")}
-              {dataIssues.length > 3 ? `；另有 ${dataIssues.length - 3} 个数据源也需要补采。` : ""}
-              <div className="friendly-alert__details">
-                可以直接前往数据采集页执行“商品列表 / 销售数据 / 备货单”三项采集。
-              </div>
-            </div>
-          )}
+          description={dataIssues.slice(0, 3).join("；")}
           action={(
-            <Button type="link" onClick={() => navigate("/collect")}>
-              前往采集
-            </Button>
+            <Button type="link" onClick={() => navigate("/collect")}>前往采集</Button>
           )}
         />
       ) : null}
@@ -1053,7 +1433,7 @@ export default function ProductList() {
             description={
               hasAccount === false
                 ? "绑定 Temu 店铺账号后，商品列表会自动汇总商品、销量和库存数据。"
-                : "执行商品列表、销售数据和备货单采集后，这里会自动出现统计卡、筛选工具和商品表格。"
+                : "执行商品列表、销售数据和备货单采集后，这里会自动出现统计指标和商品表格。"
             }
             action={(
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "center" }}>
@@ -1069,78 +1449,93 @@ export default function ProductList() {
         </div>
       ) : (
         <>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-              gap: 12,
-              marginBottom: 16,
-            }}
-          >
-            <StatCard compact title="商品总数" value={totalProducts} icon={<ShopOutlined />} color="brand" trend="countStatus + 商品列表" />
-            <StatCard compact title="在售中数量" value={onSaleCount} icon={<ShoppingCartOutlined />} color="success" trend="Temu 商品列表页 countStatus" />
-            <StatCard compact title="未发布到站点" value={countSummary.notPublishedCount} icon={<ShopOutlined />} color="blue" trend="商品列表页状态统计" />
-            <StatCard compact title="已下架/已终止" value={countSummary.offSaleCount} icon={<EyeOutlined />} color="purple" trend="商品列表页状态统计" />
-            <StatCard compact title="7日总销量" value={total7dSales} icon={<RiseOutlined />} color="blue" trend={`累计销量 ${totalSales}`} />
-            <StatCard compact title="销售字段已接入" value={salesAttachedCount} icon={<ShoppingCartOutlined />} color="success" trend="已合并销售管理字段" />
-          </div>
+          {/* 汇总指标卡片 - SalesManagement 风格 */}
+          <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+            <Col span={4}>
+              <Card size="small">
+                <Statistic title="商品总数" value={totalProducts} prefix={<ShoppingCartOutlined />} valueStyle={{ color: "#1890ff" }} />
+              </Card>
+            </Col>
+            <Col span={4}>
+              <Card size="small">
+                <Statistic title="售罄" value={saleOutCount} prefix={<StopOutlined />} valueStyle={{ color: "#ff4d4f" }} />
+              </Card>
+            </Col>
+            <Col span={4}>
+              <Card size="small">
+                <Statistic title="即将售罄" value={salesSummary?.soonSaleOutSkcNum || 0} prefix={<WarningOutlined />} valueStyle={{ color: "#fa8c16" }} />
+              </Card>
+            </Col>
+            <Col span={4}>
+              <Card size="small">
+                <Statistic title="缺货" value={shortageCount} valueStyle={{ color: "#fa541c" }} />
+              </Card>
+            </Col>
+            <Col span={4}>
+              <Card size="small">
+                <Statistic title="建议备货" value={adviceCount} valueStyle={{ color: "#fa541c" }} />
+              </Card>
+            </Col>
+            <Col span={4}>
+              <Card size="small">
+                <Statistic title="广告商品" value={salesSummary?.adSkcNum || 0} prefix={<FireOutlined />} valueStyle={{ color: "#722ed1" }} />
+              </Card>
+            </Col>
+          </Row>
 
-          <div className="app-panel" style={{ marginBottom: 16 }}>
-            <div className="app-panel__title">
-              <div>
-                <div className="app-panel__title-main">筛选</div>
-                <div className="app-panel__title-sub">按关键词和状态快速定位商品。</div>
-              </div>
-            </div>
-            <div
-              className="app-toolbar"
-              style={{ gridTemplateColumns: "minmax(260px, 1.4fr) minmax(160px, 0.7fr) auto auto" }}
-            >
+          {/* 工具栏 - SalesManagement 风格 */}
+          <Card size="small" style={{ marginBottom: 16 }}>
+            <Space wrap>
               <Input
-                allowClear
-                value={searchText}
-                onChange={(event) => setSearchText(event.target.value)}
+                placeholder="搜索商品名称/SKC/SKU/货号/买手"
                 prefix={<SearchOutlined />}
-                placeholder="搜索商品名称 / SPU / SKC / SKU / SKU ID / 买手 / 热卖标签"
+                value={searchText}
+                onChange={(e) => setSearchText(e.target.value)}
+                style={{ width: 320 }}
+                allowClear
               />
-              <Select
+              <Radio.Group
                 value={statusFilter}
-                onChange={(value) => setStatusFilter(value)}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                optionType="button"
+                buttonStyle="solid"
+                size="middle"
                 options={[
-                  { label: "全部状态", value: "all" },
-                  { label: "在售", value: "在售" },
+                  { label: `全部 ${products.length}`, value: "all" },
+                  { label: `在售 ${onSaleCount}`, value: "在售" },
                   { label: "已下架", value: "已下架" },
-                  { label: "其他状态", value: "other" },
+                  { label: "未发布", value: "未发布" },
+                  { label: "售罄", value: "saleOut" },
+                  { label: "即将售罄", value: "soonSaleOut" },
+                  { label: "缺货", value: "shortage" },
+                  { label: "建议备货", value: "advice" },
                 ]}
               />
-              <Button icon={<SyncOutlined />} onClick={loadProducts} loading={loading}>
-                刷新当前页
+              <Button type="primary" icon={<SyncOutlined spin={loading} />} loading={loading} onClick={loadProducts}>
+                刷新数据
               </Button>
-              <div className="app-toolbar__count">
-                显示 {filteredProducts.length} / {products.length}
-              </div>
-            </div>
-          </div>
+              <span style={{ color: "#999", fontSize: 13 }}>
+                共 {products.length} 条 · 已接销售 {salesAttachedCount}
+              </span>
+              {filteredProducts.length !== products.length && (
+                <span style={{ color: "#999", fontSize: 13 }}>
+                  显示 {filteredProducts.length} / {products.length}
+                </span>
+              )}
+            </Space>
+          </Card>
 
+          {/* 紧凑表格 */}
           <div className="app-panel">
-            <div className="app-panel__title">
-              <div>
-                <div className="app-panel__title-main">商品列表</div>
-                <div className="app-panel__title-sub">已接入商品基础字段和销售管理字段；行内展示快照，展开后可查看 title、category、销量、库存、买手、审核和 SKU 全字段。</div>
-              </div>
-            </div>
             {filteredEmptyState ? (
               <EmptyGuide
                 icon={<SearchOutlined />}
                 title="没有符合当前筛选条件的商品"
                 description="可以清空关键词或切回全部状态，快速回到完整商品列表。"
                 action={(
-                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "center" }}>
-                    <Button type="primary" onClick={() => { setSearchText(""); setStatusFilter("all"); }}>
-                      清空筛选
-                    </Button>
-                    <Button onClick={loadProducts}>重新检查</Button>
-                  </div>
+                  <Button type="primary" onClick={() => { setSearchText(""); setStatusFilter("all"); }}>
+                    清空筛选
+                  </Button>
                 )}
               />
             ) : (
@@ -1148,23 +1543,81 @@ export default function ProductList() {
                 rowKey={(record, index) => record.skcId || record.goodsId || record.spuId || `${record.title}-${index}`}
                 dataSource={filteredProducts}
                 columns={columns}
-                expandable={{
-                  expandedRowRender: renderExpandedRow,
-                  rowExpandable: (record) => record.hasSalesSnapshot || Boolean(record.skcId || record.spuId || record.goodsId),
-                }}
                 size="small"
                 loading={loading}
+                expandable={{
+                  expandedRowRender: (record) => {
+                    const raw: any = record.salesRaw || {};
+                    const skuList: any[] = Array.isArray(raw.skuQuantityDetailList) ? raw.skuQuantityDetailList : [];
+                    if (skuList.length > 0) {
+                      return (
+                        <Table
+                          size="small"
+                          rowKey={(s: any, i) => `${s.productSkuId || i}`}
+                          dataSource={skuList}
+                          pagination={false}
+                          scroll={{ x: 1100 }}
+                          columns={[
+                            { title: "SKU ID", dataIndex: "productSkuId", width: 120, render: (v) => <span style={{ fontFamily: "monospace", fontSize: 11 }}>{formatTextValue(v)}</span> },
+                            { title: "规格", dataIndex: "className", width: 120 },
+                            { title: "货号", dataIndex: "skuExtCode", width: 120 },
+                            { title: "今日", width: 70, align: "right", render: (_: any, s: any) => s.todaySaleVolume ?? 0 },
+                            { title: "7天", width: 70, align: "right", render: (_: any, s: any) => s.lastSevenDaysSaleVolume ?? 0 },
+                            { title: "30天", width: 70, align: "right", render: (_: any, s: any) => s.lastThirtyDaysSaleVolume ?? 0 },
+                            { title: "缺货", dataIndex: "lackQuantity", width: 70, align: "right" },
+                            { title: "建议", dataIndex: "adviceQuantity", width: 70, align: "right" },
+                            { title: "卖家库存", dataIndex: "sellerWhStock", width: 90, align: "right" },
+                            { title: "申报价", dataIndex: "supplierPrice", width: 90, align: "right" },
+                            { title: "采购配置", dataIndex: "purchaseConfig", width: 100 },
+                            { title: "安全库存天", dataIndex: "safeInventoryDays", width: 100, align: "right" },
+                          ]}
+                        />
+                      );
+                    }
+                    if (record.skuSummaries.length > 0) {
+                      return (
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 8, padding: 8 }}>
+                          {record.skuSummaries.map((s) => (
+                            <div key={`${s.productSkuId}-${s.extCode}`} style={{ display: "flex", gap: 8, alignItems: "center", padding: 8, background: "#fafafa", borderRadius: 8 }}>
+                              {s.thumbUrl ? <Image src={s.thumbUrl} width={36} height={36} preview={false} fallback={EMPTY_IMAGE_FALLBACK} /> : <Tag>无图</Tag>}
+                              <div style={{ display: "grid", gap: 2, fontSize: 11 }}>
+                                <div style={{ fontFamily: "monospace" }}>{s.productSkuId || "-"}</div>
+                                <div style={{ color: "#999" }}>{s.specText || s.specName || "-"}</div>
+                                <div style={{ color: "#999" }}>{s.extCode || "-"}</div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    }
+                    return <div style={{ padding: 12, color: "#999" }}>暂无 SKU 明细</div>;
+                  },
+                  rowExpandable: (record) =>
+                    (Array.isArray(record.salesRaw?.skuQuantityDetailList) && record.salesRaw.skuQuantityDetailList.length > 0)
+                    || record.skuSummaries.length > 0,
+                }}
+                onRow={(record) => ({
+                  onClick: (e) => {
+                    const target = e.target as HTMLElement;
+                    if (target.closest(".ant-table-row-expand-icon")) return;
+                    setSelectedProduct(record);
+                    setDrawerTab("overview");
+                  },
+                  style: { cursor: "pointer" },
+                })}
                 pagination={{
-                  pageSize: 20,
+                  pageSize: 30,
                   showSizeChanger: true,
-                  pageSizeOptions: [20, 50, 100],
+                  pageSizeOptions: [20, 30, 50, 100],
                   showTotal: (total) => `共 ${total} 个商品`,
                 }}
-                scroll={{ x: 2360 }}
+                scroll={{ x: 2000 }}
                 locale={{ emptyText: "暂无商品数据" }}
               />
             )}
           </div>
+
+          {renderDrawer()}
         </>
       )}
     </div>

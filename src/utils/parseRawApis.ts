@@ -415,7 +415,16 @@ function normalizeSalesFlatItem(item: any, syncedAt = "") {
         quantityInfo.totalSaleVolume,
       ),
     ),
-    warehouseStock: toNumberValue(pickFirst(inventoryInfo.warehouseInventoryNum, item.warehouseStock)),
+    warehouseStock: toNumberValue(pickFirst(
+      inventoryInfo.availableInventoryNum,
+      inventoryInfo.warehouseAvailableNum,
+      inventoryInfo.canUseInventoryNum,
+      inventoryInfo.usableInventoryNum,
+      inventoryInfo.actualInventoryNum,
+      inventoryInfo.warehouseInventoryNum,
+      item.availableInventoryNum,
+      item.warehouseStock,
+    )),
     adviceQuantity: toNumberValue(pickFirst(item.adviceQuantity, item.suggestStock, quantityInfo.adviceQuantity)),
     lackQuantity: toNumberValue(pickFirst(item.lackQuantity, quantityInfo.lackQuantity)),
     occupyStock: toNumberValue(pickFirst(inventoryInfo.occupyInventoryNum, item.occupyStock)),
@@ -442,6 +451,14 @@ function normalizeSalesFlatItem(item: any, syncedAt = "") {
     qualityAfterSalesRate: item.qualityAfterSalesRate ?? item.qualityAfterSalesRateValue ?? "",
     predictTodaySaleVolume: toNumberValue(pickFirst(item.predictTodaySaleVolume, quantityInfo.predictTodaySaleVolume)),
     sevenDaysSaleReference: toNumberValue(pickFirst(item.sevenDaysSaleReference, quantityInfo.sevenDaysSaleReference)),
+    sevenDaysAddCartNum: toNumberValue(pickFirst(
+      item.recentSevenDaysAddCartNum,
+      item.sevenDaysAddCartNum,
+      item.last7DaysAddCartNum,
+      item.addCartNumLast7Days,
+      quantityInfo.recentSevenDaysAddCartNum,
+      quantityInfo.sevenDaysAddCartNum,
+    )),
     syncedAt,
   };
 }
@@ -715,7 +732,13 @@ export function parseSalesData(raw: any): any {
   if (Array.isArray(raw?.items)) {
     return {
       summary: raw.summary || {},
-      items: raw.items.map((item: any) => normalizeSalesFlatItem(item, raw.syncedAt)),
+      items: raw.items.map((item: any) => {
+        const normalized: any = normalizeSalesFlatItem(item, raw.syncedAt);
+        if (item.rawItem) normalized.rawItem = item.rawItem;
+        if (item.rawFirstSku) normalized.rawFirstSku = item.rawFirstSku;
+        if (item.trendDaily) normalized.trendDaily = item.trendDaily;
+        return normalized;
+      }),
       syncedAt: raw.syncedAt,
     };
   }
@@ -723,27 +746,60 @@ export function parseSalesData(raw: any): any {
   if (!isRawApiFormat(raw)) return { summary: {}, items: [] };
   const apis = getRawApis(raw);
 
-  const overallRaw = pickFirst(
-    findApi(apis, "listOverall"),
-    findApi(apis, "sales/management/overall"),
-  ) || {};
+  // 聚合全部分页 (listOverall 已分页采集)
+  const allOverallRaws = [
+    ...findAllApis(apis, "listOverall"),
+    ...findAllApis(apis, "sales/management/overall"),
+  ].filter(Boolean);
+  const overallRaw = allOverallRaws[0] || {};
 
-  const summary = {
-    saleOutSkcNum: toNumberValue(overallRaw.saleOutSkcNum),
-    soonSaleOutSkcNum: toNumberValue(overallRaw.soonSaleOutSkcNum),
-    adviceStockSkcNum: toNumberValue(overallRaw.adviceStockSkcNum),
-    completelySoldOutSkcNum: toNumberValue(overallRaw.completelySoldOutSkcNum),
-    adSkcNum: toNumberValue(overallRaw.adSkcNum),
-    shortageSkcNum: toNumberValue(overallRaw.shortageSkcNum),
-    totalSkcNum: toNumberValue(overallRaw.totalSkcNum),
-    addedToSiteSkcNum: toNumberValue(overallRaw.addedToSiteSkcNum),
-  };
-
-  const itemSources = [
-    ...toArray(overallRaw?.subOrderList),
-    ...toArray(overallRaw?.pageItems),
-    ...toArray(overallRaw?.list),
+  // summary 透传 listOverall 顶层所有非数组/非对象的统计字段，再 + 显式补齐
+  const summary: any = {};
+  for (const [k, v] of Object.entries(overallRaw)) {
+    if (v === null || v === undefined) continue;
+    if (Array.isArray(v) || typeof v === "object") continue;
+    summary[k] = v;
+  }
+  // 显式确保 UI 用到的字段为数字
+  const explicitNumKeys = [
+    "saleOutSkcNum", "soonSaleOutSkcNum", "adviceStockSkcNum", "completelySoldOutSkcNum",
+    "adSkcNum", "shortageSkcNum", "totalSkcNum", "addedToSiteSkcNum",
+    "lackNum", "recommendProduceNum", "priceAdjustingSkcNum",
+    "waitFirstPurchaseSkcNum", "firstPurchaseNotShippedSkcNum",
+    "saleOutSkuNum", "shortageSkuNum", "totalSkuNum",
   ];
+  for (const k of explicitNumKeys) {
+    summary[k] = toNumberValue((overallRaw as any)[k] ?? summary[k]);
+  }
+
+  // 跨所有分页合并 items
+  const itemSources: any[] = [];
+  for (const r of allOverallRaws) {
+    itemSources.push(
+      ...toArray(r?.subOrderList),
+      ...toArray(r?.pageItems),
+      ...toArray(r?.list),
+    );
+  }
+
+  // 收集所有"销售趋势"弹窗 API 响应（querySkuSalesNumber），按 prodSkuId 分组
+  const trendPoints = findAllApis(apis, "querySkuSalesNumber").flatMap((r: any) => toArray(r));
+  const trendBySkuId = new Map<string, Array<{ date: string; salesNumber: number; isPredict: any; soldOut: any }>>();
+  for (const p of trendPoints) {
+    const k = String(p?.prodSkuId ?? "");
+    if (!k) continue;
+    if (!trendBySkuId.has(k)) trendBySkuId.set(k, []);
+    trendBySkuId.get(k)!.push({
+      date: String(p.date || ""),
+      salesNumber: toNumberValue(p.salesNumber),
+      isPredict: p.isPredict,
+      soldOut: p.soldOut,
+    });
+  }
+  // 按日期排序
+  for (const arr of trendBySkuId.values()) {
+    arr.sort((a, b) => a.date.localeCompare(b.date));
+  }
   const items = itemSources.map((item: any) => {
     const firstSku = pickFirst(
       toArray(item.skuQuantityDetailList)[0],
@@ -751,7 +807,7 @@ export function parseSalesData(raw: any): any {
       item.skuInfo,
       item,
     ) || {};
-    return normalizeSalesFlatItem(
+    const normalized = normalizeSalesFlatItem(
       {
         ...item,
         ...firstSku,
@@ -759,6 +815,31 @@ export function parseSalesData(raw: any): any {
       },
       raw.syncedAt,
     );
+    // 把整条原始 item + firstSku 挂出去，前端展开行直接渲染全部字段
+    (normalized as any).rawItem = item;
+    (normalized as any).rawFirstSku = firstSku;
+    // 关联日销量趋势：以 firstSku.productSkuId 为主，匹配不到再试 skuQuantityDetailList 里所有 sku
+    const skuIds = new Set<string>();
+    if (firstSku?.productSkuId) skuIds.add(String(firstSku.productSkuId));
+    for (const s of toArray(item.skuQuantityDetailList)) {
+      if (s?.productSkuId) skuIds.add(String(s.productSkuId));
+    }
+    const trendDaily: Array<{ date: string; salesNumber: number }> = [];
+    for (const id of skuIds) {
+      const arr = trendBySkuId.get(id);
+      if (arr) trendDaily.push(...arr);
+    }
+    if (trendDaily.length > 0) {
+      // 同一日期合并多 SKU 求和
+      const byDate = new Map<string, number>();
+      for (const p of trendDaily) {
+        byDate.set(p.date, (byDate.get(p.date) || 0) + p.salesNumber);
+      }
+      (normalized as any).trendDaily = Array.from(byDate.entries())
+        .map(([date, salesNumber]) => ({ date, salesNumber }))
+        .sort((a, b) => a.date.localeCompare(b.date));
+    }
+    return normalized;
   });
 
   return { summary, items, syncedAt: raw.syncedAt };

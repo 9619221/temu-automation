@@ -1245,7 +1245,7 @@ function stopWorker() {
 
 const AUTO_IMAGE_HOST = "127.0.0.1";
 const AUTO_IMAGE_DEFAULT_PORT = 3210;
-const AUTO_IMAGE_HEALTH_PATH = "/api/config";
+const AUTO_IMAGE_HEALTH_PATH = "/api/history";
 const IMAGE_STUDIO_SAFE_ANALYZE_MODEL = "gemini-3.1-flash-lite-preview";
 const IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG = Object.freeze({
   analyzeModel: "gemini-3.1-flash-lite-preview",

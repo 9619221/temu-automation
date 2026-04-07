@@ -15,8 +15,8 @@
 
 export const SCRAPE_TASKS = {
   // ---- 核心数据 ----
-  products:       { type: "page", path: "/goods/list" },
-  orders:         { type: "page", path: "/stock/fully-mgt/order-manage" },
+  products:       { type: "page", path: "/goods/list", opts: { waitTime: 8000, waitForApi: "product/skc/pageQuery", waitForApiTimeout: 90000, paginate: true, paginateApi: "product/skc/pageQuery", paginateMaxPages: 30 } },
+  orders:         { type: "page", path: "/stock/fully-mgt/order-manage", opts: { waitTime: 8000, waitForApi: "querySubOrderList", waitForApiTimeout: 90000 } },
   flux:           { type: "page", path: "/main/flux-analysis-full" },
   dashboard:      { type: "page", path: "/", opts: { waitTime: 12000 } },
   aftersales:     { type: "page", path: "/main/aftersales/information" },
@@ -24,6 +24,19 @@ export const SCRAPE_TASKS = {
   goodsData:      { type: "page", path: "/newon/goods-data" },
   activity:       { type: "page", path: "/main/act/data-full", opts: { lite: false, waitTime: 10000, businessOnly: true } },
   performance:    { type: "page", path: "/stock/fully-mgt/sale-manage/board/count" },
+  salesChart:     { type: "listener", path: "/stock/fully-mgt/sale-manage/main", matchers: [
+    { key: "saleTrend", pattern: "saleTrend" },
+    { key: "salesTrend", pattern: "salesTrend" },
+    { key: "saleVolumeTrend", pattern: "saleVolumeTrend" },
+    { key: "trendData", pattern: "trendData" },
+    { key: "queryTrend", pattern: "queryTrend" },
+    { key: "chartData", pattern: "chartData" },
+    { key: "saleChart", pattern: "saleChart" },
+    { key: "salesChart", pattern: "salesChart" },
+    { key: "queryDailySale", pattern: "queryDailySale" },
+    { key: "saleAnalysis", pattern: "saleAnalysis" },
+    { key: "saleSummary", pattern: "saleSummary" },
+  ], opts: { waitTime: 10000 }},
   mainPages:      { type: "page", path: "/" },
 
   // ---- 商品管理 ----

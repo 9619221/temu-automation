@@ -1755,20 +1755,35 @@ async function triggerSellerCentralAuthEntry(page, logPrefix = "[auth-entry]") {
 
   try {
     const clicked = await page.evaluate(() => {
-      const candidates = [
-        ...document.querySelectorAll('button, a, div, span'),
-      ];
-      for (const node of candidates) {
-        const text = (node.textContent || "").replace(/\s+/g, "");
-        if (!text) continue;
-        if (
-          text.includes("商家中心")
-          || text.includes("SellerCentral")
-          || text.includes("继续前往")
-          || text.includes("确认授权")
-        ) {
-          node.click();
-          return text.slice(0, 30);
+      const isVis = (el) => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      };
+      const tag = (el) => (el.tagName || "").toLowerCase();
+      const isHeading = (el) => /^h[1-6]$/.test(tag(el));
+      const norm = (s) => String(s || "").replace(/\s+/g, "");
+      const ACCEPT = ["商家中心>", "商家中心›", "商家中心", "SellerCentral>", "SellerCentral", "继续前往", "确认授权"];
+      // Prefer clickable elements; exclude headings; require text length <= 16 to avoid container blocks
+      const all = Array.from(document.querySelectorAll('button, a, [role="button"], div, span'));
+      const candidates = all
+        .filter((el) => isVis(el) && !isHeading(el))
+        .map((el) => ({ el, text: norm(el.textContent || ""), tag: tag(el) }))
+        .filter(({ text }) => text && text.length <= 16);
+      // Try in order of preference: button/a/role first, then div/span
+      const priority = (c) => (["button", "a"].includes(c.tag) || c.el.getAttribute("role") === "button" ? 0 : 1);
+      candidates.sort((a, b) => priority(a) - priority(b));
+      for (const accept of ACCEPT) {
+        const hit = candidates.find((c) => c.text === accept || c.text.startsWith(accept));
+        if (hit) {
+          // Walk up to find a clickable ancestor (anchor/button) within 3 levels
+          let target = hit.el;
+          for (let i = 0; i < 3 && target; i += 1) {
+            const t = (target.tagName || "").toLowerCase();
+            if (t === "a" || t === "button" || target.getAttribute("role") === "button" || target.onclick) break;
+            target = target.parentElement;
+          }
+          (target || hit.el).click();
+          return hit.text.slice(0, 30);
         }
       }
       return "";
@@ -2803,12 +2818,174 @@ async function scrapeSales() {
     }
     await randomDelay(lite ? 900 : 1500, lite ? 1500 : 2500);
 
+    // 等待 listOverall 出现（轮询，最长 90s，15s 无响应时 reload 一次）
+    {
+      const hasListOverall = () => capturedApis.some((a) => (a.path || "").includes("listOverall"));
+      const startedAt = Date.now();
+      let reloaded = false;
+      while (!hasListOverall() && Date.now() - startedAt < 90000) {
+        if (!reloaded && Date.now() - startedAt > 15000) {
+          console.error("[sales] listOverall missing after 15s, reloading...");
+          try { await page.reload({ waitUntil: "domcontentloaded" }); } catch (e) { console.error("[sales] reload error:", e.message); }
+          reloaded = true;
+          await randomDelay(1500, 2200);
+          for (let i = 0; i < 5; i++) {
+            try {
+              const btn = page.locator('button:has-text("知道了"), button:has-text("确定"), button:has-text("关闭"), button:has-text("暂不")').first();
+              if (await btn.isVisible({ timeout: 400 })) await btn.click();
+              else break;
+            } catch { break; }
+          }
+        }
+        await randomDelay(500, 800);
+      }
+      if (hasListOverall()) console.error("[sales] listOverall HIT");
+      else console.error("[sales] listOverall TIMED OUT");
+    }
+
+    // ---- 通过"选品状态"下拉勾选"已加入站点"并查询 ----
+    try {
+      const beforeListOverallCount = capturedApis.filter(a => a.path?.includes("listOverall")).length;
+
+      // Step 1: 找到 "选品状态" 标签右侧的下拉框并点击
+      const opened = await page.evaluate(() => {
+        const labels = document.querySelectorAll('label, span, div');
+        for (const lbl of labels) {
+          if ((lbl.textContent || "").trim() === "选品状态") {
+            // 找标签同行右侧的 select / input / 下拉触发区
+            let row = lbl.closest('[class*="form-item"], [class*="row"], div');
+            while (row && row.parentElement) {
+              const trigger = row.querySelector('input, [class*="select"], [class*="Select"]');
+              if (trigger) {
+                trigger.scrollIntoView({ block: "center" });
+                (trigger).click();
+                return true;
+              }
+              row = row.parentElement;
+              if (row.tagName === "BODY") break;
+            }
+          }
+        }
+        return false;
+      });
+      if (!opened) { console.error("[sales] WARN: 选品状态 dropdown not found"); }
+      else {
+        await randomDelay(400, 700);
+        // Step 2: 在弹出的下拉里点 "已加入站点"
+        const checked = await page.evaluate(() => {
+          // 找文本为 "已加入站点" 的可见元素，优先选其复选框 / label
+          const els = document.querySelectorAll('label, span, div, li');
+          for (const el of els) {
+            if ((el.textContent || "").trim() === "已加入站点" && el.offsetParent !== null) {
+              const r = el.getBoundingClientRect();
+              if (r.width > 0 && r.width < 200) {
+                el.click();
+                return true;
+              }
+            }
+          }
+          return false;
+        });
+        console.error(`[sales] Checked 已加入站点: ${checked}`);
+        await randomDelay(300, 500);
+
+        // Step 3: 关闭下拉（点击页面别处或按 Escape）
+        try { await page.keyboard.press("Escape"); } catch {}
+        await randomDelay(200, 400);
+
+        // Step 4: 点击 "查询" 按钮
+        const beforeApi = capturedApis.length;
+        const queried = await page.evaluate(() => {
+          const btns = document.querySelectorAll('button, span, a');
+          for (const b of btns) {
+            if ((b.textContent || "").trim() === "查询" && b.offsetParent !== null) {
+              const r = b.getBoundingClientRect();
+              if (r.width > 0 && r.width < 200) { (b).click(); return true; }
+            }
+          }
+          return false;
+        });
+        console.error(`[sales] Clicked 查询: ${queried}`);
+        // 等新的 listOverall
+        const t0 = Date.now();
+        let gotNew = false;
+        while (Date.now() - t0 < 8000) {
+          if (capturedApis.slice(beforeApi).some(a => a.path?.includes("listOverall"))) { gotNew = true; break; }
+          await randomDelay(200, 300);
+        }
+        if (gotNew) {
+          console.error("[sales] Filter applied: listOverall refreshed");
+          // 删掉筛选前的 listOverall
+          for (let i = capturedApis.length - 1; i >= 0; i--) {
+            const a = capturedApis[i];
+            if (a.path?.includes("listOverall")) {
+              const pos = capturedApis.slice(0, i + 1).filter(x => x.path?.includes("listOverall")).length;
+              if (pos <= beforeListOverallCount) capturedApis.splice(i, 1);
+            }
+          }
+          await randomDelay(800, 1200);
+        } else {
+          console.error("[sales] WARN: 查询 didn't trigger new listOverall");
+        }
+      }
+    } catch (e) {
+      console.error(`[sales] Filter switch error: ${e.message}`);
+    }
+
     // 检查第一页的 listOverall 是否有 total > 10（需要翻页）
     const firstListApi = capturedApis.find(a => a.path?.includes("listOverall"));
     const total = firstListApi?.data?.result?.total || 0;
     const pageSize = firstListApi?.data?.result?.subOrderList?.length || 10;
     const totalPages = Math.ceil(total / pageSize);
     console.error(`[sales] Total: ${total} products, ${totalPages} pages`);
+
+    // 统一的"点击当前页所有 销售趋势 链接"函数（外层循环 + Escape 关弹窗）
+    const clickAllTrendsOnCurrentPage = async () => {
+      const before = capturedApis.length;
+      let clicked = 0;
+      try {
+        // 先数当前页有多少 销售趋势 链接
+        const total = await page.evaluate(() => {
+          let n = 0;
+          for (const el of document.querySelectorAll('a, span, div, button')) {
+            if ((el.textContent || "").trim() === "销售趋势" && el.offsetParent !== null) n++;
+          }
+          return n;
+        });
+        for (let i = 0; i < total; i++) {
+          // 每次循环重新查 + 索引定位（防止 DOM 变化）
+          const ok = await page.evaluate((idx) => {
+            const list = [];
+            for (const el of document.querySelectorAll('a, span, div, button')) {
+              if ((el.textContent || "").trim() === "销售趋势" && el.offsetParent !== null) list.push(el);
+            }
+            const target = list[idx];
+            if (!target) return false;
+            target.scrollIntoView({ block: "center" });
+            target.click();
+            return true;
+          }, i);
+          if (!ok) break;
+          clicked++;
+          // 等待 querySkuSalesNumber 响应
+          const waitStart = Date.now();
+          const beforeApi = capturedApis.length;
+          while (Date.now() - waitStart < 4000) {
+            if (capturedApis.slice(beforeApi).some(a => a.path?.includes("querySkuSalesNumber"))) break;
+            await randomDelay(80, 140);
+          }
+          // Escape 关弹窗
+          try { await page.keyboard.press("Escape"); } catch {}
+          await randomDelay(250, 400);
+        }
+      } catch (e) {
+        console.error(`[sales] Trend click error: ${e.message}`);
+      }
+      console.error(`[sales] Trend: clicked ${clicked} rows, +${capturedApis.length - before} APIs`);
+    };
+
+    // 第 1 页先采趋势
+    await clickAllTrendsOnCurrentPage();
 
     if (totalPages > 1) {
       // Temu API 需要 anti-content 签名，只能通过点击分页按钮翻页
@@ -2859,6 +3036,8 @@ async function scrapeSales() {
           if (clicked) {
             console.error(`[sales] → page ${pageNum}/${totalPages} (via ${clicked})`);
             await randomDelay(lite ? 1000 : 2000, lite ? 1500 : 3000);
+            // 当前页所有行的销售趋势
+            await clickAllTrendsOnCurrentPage();
           } else {
             console.error(`[sales] Cannot find page ${pageNum} button, stopping`);
             break;
@@ -2888,7 +3067,14 @@ async function scrapePageCaptureAll(targetPath, options = {}) {
     fullUrl = null,
     businessOnly = false,
     extraIgnorePatterns = [],
+    waitForApi = null, // string 或 string[]：必须等到这些 API 模式命中后才返回
+    waitForApiTimeout = 90000, // 最长等待时间（ms）
+    reloadIfMissing = true,
+    paginate = false, // 是否对列表类页面翻页（点击页码按钮）
+    paginateApi = null, // 用于计算总页数的 API path 关键字（比如 "skc/pageQuery"）
+    paginateMaxPages = 30,
   } = options;
+  const waitForApiList = Array.isArray(waitForApi) ? waitForApi : (waitForApi ? [waitForApi] : []);
   const page = await context.newPage();
   const capturedApis = [];
   const staticExts = [".js", ".css", ".png", ".svg", ".woff", ".woff2", ".ttf", ".ico", ".jpg", ".jpeg", ".gif", ".map", ".webp"];
@@ -2949,6 +3135,83 @@ async function scrapePageCaptureAll(targetPath, options = {}) {
 
     if (capturedApis.length < 2) {
       await randomDelay(lite ? 1800 : 2500, lite ? 2400 : 3500);
+    }
+
+    // 等待关键目标 API 出现（轮询），避免列表页懒加载导致空抓
+    if (waitForApiList.length > 0) {
+      const hasHit = () => waitForApiList.every((p) => capturedApis.some((a) => (a.path || "").includes(p)));
+      const startedAt = Date.now();
+      let reloaded = false;
+      while (!hasHit() && Date.now() - startedAt < waitForApiTimeout) {
+        if (!reloaded && reloadIfMissing && Date.now() - startedAt > 15000 && !hasHit()) {
+          console.error(`[capture-all] waitForApi missing after 15s, reloading...`);
+          try { await page.reload({ waitUntil: "domcontentloaded" }); } catch (e) { console.error("[capture-all] reload error:", e.message); }
+          reloaded = true;
+          await randomDelay(1500, 2200);
+          // 再次尝试关闭弹窗
+          for (let i = 0; i < 5; i++) {
+            try {
+              const btn = page.locator('button:has-text("知道了"), button:has-text("确定"), button:has-text("关闭"), button:has-text("暂不")').first();
+              if (await btn.isVisible({ timeout: 400 })) await btn.click();
+              else break;
+            } catch { break; }
+          }
+        }
+        await randomDelay(500, 800);
+      }
+      const missing = waitForApiList.filter((p) => !capturedApis.some((a) => (a.path || "").includes(p)));
+      if (missing.length > 0) {
+        console.error(`[capture-all] waitForApi TIMED OUT, missing: ${missing.join(",")}`);
+      } else {
+        console.error(`[capture-all] waitForApi HIT all: ${waitForApiList.join(",")}`);
+      }
+    }
+
+    // ---- 翻页：如果指定 paginate=true，根据 paginateApi 的 result.total 自动点击翻页 ----
+    if (paginate && paginateApi) {
+      const firstApi = capturedApis.find((a) => (a.path || "").includes(paginateApi));
+      const result = firstApi?.data?.result || {};
+      const total = Number(result.total || result.totalNum || result.totalCount || 0);
+      const pageItems = result.pageItems || result.list || result.subOrderList || [];
+      const pageSize = Array.isArray(pageItems) ? pageItems.length || 10 : 10;
+      const totalPages = Math.min(Math.ceil(total / pageSize), paginateMaxPages);
+      console.error(`[capture-all] paginate: total=${total} pageSize=${pageSize} pages=${totalPages}`);
+      if (totalPages > 1) {
+        for (let pageNum = 2; pageNum <= totalPages; pageNum++) {
+          try {
+            const clicked = await page.evaluate((pn) => {
+              const allLinks = document.querySelectorAll("a, button, li, span");
+              for (const el of allLinks) {
+                if (el.textContent?.trim() === String(pn) && el.offsetParent !== null) {
+                  const rect = el.getBoundingClientRect();
+                  if (rect.width < 100 && rect.width > 10 && rect.bottom > 300) {
+                    el.click();
+                    return "page-number";
+                  }
+                }
+              }
+              const nextBtns = document.querySelectorAll('[class*="next"], [aria-label*="next"], [aria-label*="Next"]');
+              for (const btn of nextBtns) {
+                if (btn.offsetParent !== null && !btn.classList.contains("disabled") && !btn.hasAttribute("disabled")) {
+                  btn.click();
+                  return "next-button";
+                }
+              }
+              return null;
+            }, pageNum);
+            if (clicked) {
+              console.error(`[capture-all] → page ${pageNum}/${totalPages} (${clicked})`);
+              await randomDelay(lite ? 1000 : 1800, lite ? 1500 : 2800);
+            } else {
+              console.error(`[capture-all] cannot find page ${pageNum}, stopping`);
+              break;
+            }
+          } catch (e) {
+            console.error(`[capture-all] page ${pageNum} click failed: ${e.message}`);
+            break;
+          }
+        }
+      }
     }
 
     console.error(`[capture-all] Done! Captured ${capturedApis.length} APIs`);
@@ -3028,6 +3291,21 @@ async function scrapeLifecycle(options = {}) {
     await randomDelay(waitTime, waitTime + (lite ? 1000 : 1800));
     await closeCommonPrompts();
 
+    // Auth recovery: if still parked on authentication/entry, retry navigation a few times
+    for (let authTry = 0; authTry < 3; authTry += 1) {
+      const u = page.url();
+      if (!u.includes("/main/authentication") && !u.includes("/main/entry")) break;
+      console.error(`[lifecycle] Still on auth page (try ${authTry + 1}/3): ${u}`);
+      await navigateToSellerCentral(page, "/newon/product-select", { lite: false }).catch(() => {});
+      await randomDelay(waitTime, waitTime + 1500);
+      await closeCommonPrompts(4);
+    }
+    if (page.url().includes("/main/authentication") || page.url().includes("/main/entry")) {
+      console.error("[lifecycle] Auth recovery failed, aborting lifecycle scrape");
+      await saveCookies();
+      return { apis: capturedApis, domData: null, meta: { authFailed: true, currentUrl: page.url() } };
+    }
+
     let queryClicked = false;
     try {
       const exactQueryButton = page.getByRole("button", { name: "查询", exact: true }).first();
@@ -3084,6 +3362,68 @@ async function scrapeLifecycle(options = {}) {
 
     await closeCommonPrompts(4);
     await responseTracker.drain(lite ? 2500 : 4500);
+
+    // Paginate through all pages so searchForChainSupplier captures every product
+    try {
+      const maxPages = options.maxPages ?? 100;
+      for (let pageIdx = 1; pageIdx < maxPages; pageIdx += 1) {
+        // Scroll bottom of the page to ensure paginator rendered (Temu often virtualizes)
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
+        await randomDelay(400, 700);
+        const clicked = await page.evaluate(() => {
+          const isVis = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+          // 1) ant-pagination next
+          const ant = document.querySelector('li.ant-pagination-next:not(.ant-pagination-disabled) a, li.ant-pagination-next:not(.ant-pagination-disabled) button, .ant-pagination-next:not(.ant-pagination-disabled)');
+          if (ant && isVis(ant) && ant.getAttribute('aria-disabled') !== 'true') { ant.click(); return 'ant'; }
+          // 2) any element with title/aria-label "下一页" / "Next Page"
+          const labeled = Array.from(document.querySelectorAll('[title="下一页"],[aria-label="下一页"],[title="Next Page"],[aria-label="Next Page"],button[title="next"]'))
+            .find((el) => isVis(el) && el.getAttribute('aria-disabled') !== 'true' && !el.disabled);
+          if (labeled) { labeled.click(); return 'labeled'; }
+          // 3) text-based search "下一页"
+          const text = Array.from(document.querySelectorAll('button, a, span, li, div'))
+            .find((el) => {
+              if (!isVis(el)) return false;
+              const t = (el.textContent || '').replace(/\s+/g, '');
+              if (t !== '下一页' && t !== '>') return false;
+              const cls = el.className || '';
+              if (typeof cls === 'string' && cls.includes('disabled')) return false;
+              return true;
+            });
+          if (text) { text.click(); return 'text'; }
+          // 4) chevron / arrow icon (svg) inside paginator
+          const svgBtn = Array.from(document.querySelectorAll('button, a'))
+            .find((el) => isVis(el) && /pagin|next|page-next/i.test(el.className || '') && !el.disabled && el.getAttribute('aria-disabled') !== 'true');
+          if (svgBtn) { svgBtn.click(); return 'svg'; }
+          return null;
+        });
+        if (!clicked) {
+          // Dump pagination-area DOM for diagnosis
+          try {
+            const dump = await page.evaluate(() => {
+              const out = [];
+              const all = Array.from(document.querySelectorAll('*'));
+              for (const el of all) {
+                const cls = String(el.className || '');
+                if (!/pagin|page-/i.test(cls)) continue;
+                const r = el.getBoundingClientRect();
+                if (r.width === 0 || r.height === 0) continue;
+                out.push({ tag: el.tagName, cls: cls.slice(0, 80), text: (el.textContent || '').replace(/\s+/g, ' ').slice(0, 60), aria: el.getAttribute('aria-label') || el.getAttribute('aria-disabled') || '' });
+                if (out.length > 20) break;
+              }
+              return out;
+            });
+            console.error(`[lifecycle] Pagination DOM dump: ${JSON.stringify(dump)}`);
+          } catch {}
+          console.error(`[lifecycle] No more pages after ${pageIdx} (no next button found)`);
+          break;
+        }
+        console.error(`[lifecycle] Clicked next (${clicked}) -> page ${pageIdx + 1}`);
+        await randomDelay(lite ? 2000 : 3000, lite ? 2800 : 4200);
+        await responseTracker.drain(lite ? 1500 : 2500);
+      }
+    } catch (error) {
+      console.error('[lifecycle] Pagination error:', error?.message || error);
+    }
 
     const domData = await page.evaluate(() => {
       const normalizeText = (value) => String(value || "").replace(/\s+/g, " ").trim();
@@ -3858,10 +4198,57 @@ async function navigateAdsTab(page, tab, options = {}) {
   const tabSelectors = [
     `nav a:has-text("${tab.label}")`,
     `a:has-text("${tab.label}")`,
+    `button:has-text("${tab.label}")`,
     `div[role="tab"]:has-text("${tab.label}")`,
+    `[role="menuitem"]:has-text("${tab.label}")`,
     `span:has-text("${tab.label}")`,
     `li:has-text("${tab.label}")`,
   ];
+
+  // 等待菜单中出现该 label（最多 10s），避免 SPA 未加载完
+  try {
+    await page.waitForFunction(
+      (label) => {
+        const all = document.querySelectorAll("a, button, div, span, li, [role='tab'], [role='menuitem']");
+        for (const el of all) {
+          const t = (el.innerText || el.textContent || "").trim();
+          if (t === label || (t.length < 20 && t.includes(label))) return true;
+        }
+        return false;
+      },
+      tab.label,
+      { timeout: 10000 }
+    );
+  } catch {}
+
+  // 优先：从 DOM 抓 a[href] 的 text→href 映射，直接 goto
+  try {
+    const hrefMap = await page.evaluate(() => {
+      const map = {};
+      document.querySelectorAll("a[href]").forEach((a) => {
+        const t = (a.innerText || a.textContent || "").trim();
+        const h = a.getAttribute("href") || "";
+        if (t && h && h !== "#" && !map[t]) map[t] = h;
+      });
+      return map;
+    }).catch(() => ({}));
+    let href = hrefMap[tab.label];
+    if (!href) {
+      for (const [t, h] of Object.entries(hrefMap)) {
+        if (t === tab.label || t.includes(tab.label) || tab.label.includes(t)) { href = h; break; }
+      }
+    }
+    if (href) {
+      let target = href;
+      if (href.startsWith("#")) target = `https://ads.temu.com/index.html${href}`;
+      else if (href.startsWith("/")) target = `https://ads.temu.com${href}`;
+      console.error(`[ads-tab] Direct goto: ${tab.label} → ${target}`);
+      try {
+        await page.goto(target, { waitUntil: "domcontentloaded", timeout: 45000 });
+        return true;
+      } catch (e) { console.error(`[ads-tab] goto failed: ${e.message}`); }
+    }
+  } catch (e) { logSilent("ui.action", e); }
 
   let clicked = await clickFirstVisible(page, tabSelectors, lite ? 1200 : 1800);
   if (!clicked) {
@@ -4198,9 +4585,67 @@ async function scrapeSidebarPages(targetKeys = null) {
     });
     await randomDelay(lite ? 500 : 1500, lite ? 900 : 2000);
 
-    // Step 3: 逐个通过侧边栏点击导航
+    // Step 2.4: 强制点开侧边栏内所有父菜单（仅在 sidebar 容器内，避免误点正文）
+    for (let pass = 0; pass < 5; pass++) {
+      await page.evaluate(() => {
+        const sider = document.querySelector('nav, [class*="sider"], [class*="Sider"], [class*="side-menu"], [class*="sideMenu"]');
+        const root = sider || document;
+        // 1) 通用 submenu 标题
+        const candidates = root.querySelectorAll(
+          '[class*="submenu-title"], [class*="menu-submenu-title"], [class*="ant-menu-submenu-title"], [aria-expanded="false"]'
+        );
+        candidates.forEach((el) => { try { el.click(); } catch {} });
+        // 2) 在侧边栏内匹配 li/div 中含关键词的折叠项（限制在 root，避免误点正文）
+        const keywords = ["退货", "备货", "商品", "发货", "销售", "质量", "库存", "样品", "司机", "地址", "异常", "收货", "入库"];
+        root.querySelectorAll('li, [class*="menu-item"], [class*="MenuItem"]').forEach((el) => {
+          const txt = (el.innerText || "").trim().split("\n")[0];
+          if (txt && txt.length < 16 && keywords.some((k) => txt.includes(k))) {
+            try { el.click(); } catch {}
+          }
+        });
+      }).catch(() => {});
+      await randomDelay(400, 700);
+    }
+
+    // Step 2.5: 从侧边栏 DOM 抓菜单 text → href 映射（更稳，不靠点击）
+    const menuHrefMap = await page.evaluate(() => {
+      const map = {};
+      const links = document.querySelectorAll('a[href]');
+      links.forEach((a) => {
+        const text = (a.innerText || a.textContent || "").trim();
+        const href = a.getAttribute("href") || "";
+        if (!text || !href || href === "#") return;
+        if (!href.startsWith("/") && !href.includes("agentseller")) return;
+        if (!map[text]) map[text] = href;
+      });
+      return map;
+    }).catch(() => ({}));
+    console.error(`[sidebar-scrape] Collected ${Object.keys(menuHrefMap).length} menu hrefs from sidebar`);
+    // 常见别名 / 模糊匹配兜底
+    const fuzzyFindHref = (candidates) => {
+      for (const c of candidates) {
+        if (menuHrefMap[c]) return menuHrefMap[c];
+      }
+      // 模糊：去掉省略号再精确匹配
+      for (const c of candidates) {
+        const cleaned = c.replace(/\.{3}|…/g, "");
+        for (const [text, href] of Object.entries(menuHrefMap)) {
+          if (text === cleaned || text.includes(cleaned) || cleaned.includes(text)) return href;
+        }
+      }
+      // 再模糊：关键词包含
+      for (const c of candidates) {
+        const kw = c.slice(0, 2); // 取前两字
+        for (const [text, href] of Object.entries(menuHrefMap)) {
+          if (text.startsWith(kw) && text.length <= c.length + 4) return href;
+        }
+      }
+      return null;
+    };
+
+    // Step 3: 逐个直接 goto href（不再依赖点击可见元素）
     for (const target of sidebarTargets) {
-      console.error(`[sidebar-scrape] Navigating to: ${target.menuTexts[0]}`);
+      console.error(`[sidebar-scrape] Resolving: ${target.menuTexts[0]}`);
       const capturedApis = [];
 
       // 设置 response listener
@@ -4225,30 +4670,42 @@ async function scrapeSidebarPages(targetKeys = null) {
       page.on("response", handler);
 
       try {
-        // 点击目标菜单项（使用与 scrapeViaSidebarClick 一致的选择器）
-        let clicked = false;
-        for (const menuText of target.menuTexts) {
+        // 优先：直接通过 href 跳转（最稳）
+        let navigated = false;
+        const href = fuzzyFindHref(target.menuTexts);
+        if (href) {
+          const fullUrl = href.startsWith("http") ? href : `https://agentseller.temu.com${href}`;
+          console.error(`[sidebar-scrape] Direct goto: ${target.key} → ${fullUrl}`);
           try {
-            const menuLink = page.locator(`nav a:has-text("${menuText}"), [class*="sider"] a:has-text("${menuText}"), [class*="sidebar"] a:has-text("${menuText}"), [class*="menu"] a:has-text("${menuText}"), [class*="menu-item"]:has-text("${menuText}")`).first();
-            if (await menuLink.isVisible({ timeout: 3000 }).catch(() => false)) {
-              await menuLink.click();
-              clicked = true;
-              console.error(`[sidebar-scrape] Clicked: ${menuText}`);
-              break;
-            }
-          } catch (e) { logSilent("ui.action", e); }
-          // fallback: evaluate
-          if (!clicked) {
-            clicked = await page.evaluate((text) => {
-              const links = document.querySelectorAll('a, [class*="menu-item"] span, [class*="menu-item"]');
-              for (const el of links) {
-                if (el.innerText?.trim() === text) { el.click(); return true; }
+            await page.goto(fullUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+            navigated = true;
+          } catch (e) { console.error(`[sidebar-scrape] goto failed: ${e.message}`); }
+        }
+        // 兜底：依旧尝试点菜单
+        let clicked = navigated;
+        if (!clicked) {
+          for (const menuText of target.menuTexts) {
+            try {
+              const menuLink = page.locator(`nav a:has-text("${menuText}"), [class*="sider"] a:has-text("${menuText}"), [class*="sidebar"] a:has-text("${menuText}"), [class*="menu"] a:has-text("${menuText}"), [class*="menu-item"]:has-text("${menuText}")`).first();
+              if (await menuLink.isVisible({ timeout: 2000 }).catch(() => false)) {
+                await menuLink.click();
+                clicked = true;
+                console.error(`[sidebar-scrape] Clicked: ${menuText}`);
+                break;
               }
-              return false;
-            }, menuText);
-            if (clicked) {
-              console.error(`[sidebar-scrape] Clicked via evaluate: ${menuText}`);
-              break;
+            } catch (e) { logSilent("ui.action", e); }
+            if (!clicked) {
+              clicked = await page.evaluate((text) => {
+                const links = document.querySelectorAll('a, [class*="menu-item"] span, [class*="menu-item"]');
+                for (const el of links) {
+                  if (el.innerText?.trim() === text) { el.click(); return true; }
+                }
+                return false;
+              }, menuText);
+              if (clicked) {
+                console.error(`[sidebar-scrape] Clicked via evaluate: ${menuText}`);
+                break;
+              }
             }
           }
         }
@@ -5074,6 +5531,28 @@ async function handleRequest(body) {
       try {
         await navigateToSellerCentral(warmupPage, "/goods/list", { lite: false });
         await randomDelay(2000, 3000);
+
+        // 如果 warmup 后仍在登录/入口页，阻塞等待用户手动登录（最长 5 分钟）
+        const waitForLoginDeadline = Date.now() + 5 * 60 * 1000;
+        let warnedUser = false;
+        while (Date.now() < waitForLoginDeadline) {
+          const cur = warmupPage.url();
+          if (!cur.includes("/main/authentication") && !cur.includes("/main/entry") && !cur.includes("seller-login")) {
+            console.error(`[scrape_all] Login confirmed: ${cur}`);
+            break;
+          }
+          if (!warnedUser) {
+            console.error(`[scrape_all] ⚠ Waiting for user manual login in worker browser. Current URL: ${cur}`);
+            warnedUser = true;
+          }
+          await randomDelay(1800, 2500);
+          // 尝试点击入口按钮 / 自动登录（最大努力）
+          await triggerSellerCentralAuthEntry(warmupPage, "[scrape_all-wait]").catch(() => {});
+        }
+        const finalUrl = warmupPage.url();
+        if (finalUrl.includes("/main/authentication") || finalUrl.includes("/main/entry") || finalUrl.includes("seller-login")) {
+          throw new Error(`登录超时，仍停留在: ${finalUrl}。请在 worker 浏览器中手动登录后重试一键采集。`);
+        }
         // 关闭页面弹窗
         for (let i = 0; i < 5; i++) {
           try {
@@ -5106,6 +5585,7 @@ async function handleRequest(body) {
         { key: "products", fn: () => _registryScrape("products") },
         { key: "orders", fn: () => _registryScrape("orders") },
         { key: "sales", fn: () => scrapeSales() },
+        { key: "salesChart", fn: () => _registryScrape("salesChart") },
         { key: "flux", fn: () => _registryScrape("flux") },
         { key: "goodsData", fn: () => _registryScrape("goodsData") },
         { key: "activity", fn: () => _registryScrape("activity") },
