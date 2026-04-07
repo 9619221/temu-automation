@@ -145,7 +145,11 @@ export default function AccountManager() {
         const data = await store.get(STORAGE_KEY);
         if (cancelled) return;
         if (data && Array.isArray(data)) {
-          const nextAccounts = data.map((a: Account) => ({ ...a, status: "offline" as const }));
+          const nextAccounts = data.map((a: Account) => ({
+            ...a,
+            // 保留持久化的 online 状态；把残留的 logging_in 兜底为 offline
+            status: a.status === "online" ? "online" as const : a.status === "logging_in" ? "offline" as const : (a.status || "offline"),
+          }));
           setAccounts(nextAccounts);
           await restoreActiveAccountData(nextAccounts);
         } else {
@@ -176,16 +180,38 @@ export default function AccountManager() {
 
   useEffect(() => {
     if (store && hydrated) {
-      store.set(STORAGE_KEY, accounts);
+      // store.set 是异步的，必须捕获 rejection 避免 unhandled promise
+      Promise.resolve(store.set(STORAGE_KEY, accounts)).catch((e) => {
+        console.error("[AccountManager] persist accounts failed:", e);
+      });
     }
   }, [accounts, hydrated, store]);
 
-  // 加载活跃账号的数据概览
+  // 加载活跃账号的数据概览（activeAccountId 变更时重新加载）
   useEffect(() => {
-    if (hydrated && activeAccountId) {
-      loadAccountStats();
-    }
-  }, [hydrated, activeAccountId]);
+    if (!hydrated || !activeAccountId || !store) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const [rawProducts, rawDiag] = await Promise.all([
+          getStoreValue(store, "temu_products"),
+          getStoreValue(store, "temu_collection_diagnostics"),
+        ]);
+        if (cancelled) return;
+        const products = parseProductsData(rawProducts);
+        const diag = normalizeCollectionDiagnostics(rawDiag);
+        const stats: AccountStats = {
+          productCount: products.length,
+          collectionTotal: diag.summary.totalTasks || 0,
+          collectionSuccess: diag.summary.successCount || 0,
+        };
+        setAccountStats((prev) => ({ ...prev, [activeAccountId]: stats }));
+      } catch (e) {
+        if (!cancelled) console.error("[AccountManager] loadAccountStats failed:", e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [hydrated, activeAccountId, store]);
 
   const handleAdd = async () => {
     try {
@@ -222,8 +248,10 @@ export default function AccountManager() {
       duration: 0,
     });
     try {
-      const result = await api.login(account.id, account.phone, account.password);
-      if (result?.success) {
+      const result: any = await api.login(account.id, account.phone, account.password);
+      console.log("[handleLogin] login result:", result);
+      const loginOk = !!(result && (result.success === true || (typeof result.success === "object" && result.success?.success === true)));
+      if (loginOk) {
         const lastLoginAt = new Date().toLocaleString("zh-CN");
         let nextAccounts: Account[] = [];
         setAccounts((prev) => {
@@ -235,6 +263,14 @@ export default function AccountManager() {
           return nextAccounts;
         });
         await setActiveAccountAndSync(store, nextAccounts, account.id);
+        // 防御性：确保登录后状态不被其他副作用回写
+        setAccounts((prev) =>
+          prev.map((a) =>
+            a.id === account.id
+              ? { ...a, status: "online" as const, lastLoginAt }
+              : a
+          )
+        );
         notification.success({
           key: "login",
           message: "登录成功",

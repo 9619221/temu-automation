@@ -15,6 +15,7 @@ import { ADS_GROUP_TABS, GOVERN_GROUP_TARGETS, buildScrapeHandlers, getScrapeFun
 import { getConfiguredMaxRetries, getDelayScale, shouldAutoLoginRetry, shouldCaptureErrorScreenshots } from "./runtime-config.mjs";
 const require = createRequire(import.meta.url);
 const XLSX = require("xlsx");
+const FormDataLib = require("form-data");
 
 function normalizeChatBaseUrl(value, fallback = "") {
   const raw = String(value || fallback || "").trim();
@@ -3453,7 +3454,8 @@ async function scrapeLifecycle(options = {}) {
           const totalPages = Math.min(Math.ceil(total / pageSize), options.maxPages ?? 200);
           console.error(`[lifecycle] API pagination: total=${total} pageSize=${pageSize} totalPages=${totalPages}`);
           for (let pageNum = 2; pageNum <= totalPages; pageNum += 1) {
-            const reqBody = { ...bodyObj, pageNum, pageNumber: pageNum, page: pageNum };
+            // Temu searchForChainSupplier 实际字段是 pageNum；清掉冗余别名避免服务端歧义
+            const reqBody = { ...bodyObj, pageNum };
             try {
               const result = await page.evaluate(async ({ url, headers, body }) => {
                 const resp = await fetch(url, {
@@ -4544,7 +4546,6 @@ async function generateAIImages(sourceImagePath, productTitle, imageTypes = AI_D
 
   // 使用 Node 内置 fetch + FormData
   try {
-    const { FormData: NodeFormData, File } = await import("node:buffer");
     const formData = new globalThis.FormData();
     formData.append("plans", JSON.stringify(plans));
     formData.append("productMode", "single");
@@ -5950,7 +5951,12 @@ async function handleRequest(body) {
         const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
         return { rows, csvPath: request.filePath };
       }
-      return JSON.parse(fs.readFileSync(request.filePath, "utf8"));
+      try {
+        return JSON.parse(fs.readFileSync(request.filePath, "utf8"));
+      } catch (e) {
+        console.error(`[read_scrape_data] Failed to parse ${request.filePath}: ${e.message}`);
+        return null;
+      }
     }
     case "scrape_progress": {
       return scrapeAllProgress;
@@ -7496,6 +7502,68 @@ function formatAiImageFetchError(prefix, error, routePath) {
   return `${prefix}: 请求 ${AI_IMAGE_GEN_URL}${routePath} 失败 (${reason})`;
 }
 
+/**
+ * 用 form-data + node http 直接发送 multipart/form-data 请求。
+ * 规避 undici FormData 在某些环境下不自动设置 Content-Type boundary 导致
+ * Next.js route 报 "Content-Type was not one of multipart/form-data" 的问题。
+ */
+function postMultipartViaNodeHttp(urlString, { fileBlobs = [], fields = {}, extraHeaders = {}, timeoutMs = 180000 } = {}) {
+  return new Promise((resolve, reject) => {
+    let url;
+    try { url = new URL(urlString); } catch (e) { reject(e); return; }
+    const form = new FormDataLib();
+    for (const item of fileBlobs) {
+      const buffer = item.buffer instanceof Buffer ? item.buffer : Buffer.from(item.buffer || []);
+      form.append("images", buffer, {
+        filename: item.name || "image.jpg",
+        contentType: item.type || "image/jpeg",
+        knownLength: buffer.length,
+      });
+    }
+    for (const [k, v] of Object.entries(fields || {})) {
+      if (v === undefined || v === null) continue;
+      form.append(k, typeof v === "string" ? v : JSON.stringify(v));
+    }
+    const formHeaders = form.getHeaders();
+    const headers = { ...formHeaders, ...extraHeaders };
+    try { headers["Content-Length"] = form.getLengthSync(); } catch {}
+
+    const lib = url.protocol === "https:" ? https : http;
+    const req = lib.request({
+      protocol: url.protocol,
+      hostname: url.hostname,
+      port: url.port || (url.protocol === "https:" ? 443 : 80),
+      path: `${url.pathname}${url.search}`,
+      method: "POST",
+      headers,
+      family: 4,
+      timeout: timeoutMs,
+    }, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+      res.on("end", () => {
+        const buf = Buffer.concat(chunks);
+        const text = buf.toString("utf8");
+        let cachedJson = null;
+        resolve({
+          ok: Number(res.statusCode) >= 200 && Number(res.statusCode) < 300,
+          status: Number(res.statusCode) || 0,
+          headers: res.headers,
+          text: async () => text,
+          json: async () => {
+            if (cachedJson !== null) return cachedJson;
+            cachedJson = JSON.parse(text);
+            return cachedJson;
+          },
+        });
+      });
+    });
+    req.on("timeout", () => req.destroy(new Error(`timeout after ${timeoutMs}ms`)));
+    req.on("error", (err) => reject(err));
+    form.pipe(req);
+  });
+}
+
 function isAiUpstreamBusyMessage(message) {
   const text = String(message || "");
   return /429|上游负载已饱和|too many requests|rate limit|invalid tokens multiple times|please wait 120 seconds/i.test(text);
@@ -7713,36 +7781,29 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
   const ext = path.extname(sourceImagePath).toLowerCase();
   const mimeType = ext === ".png" ? "image/png" : "image/jpeg";
 
-  // 构建所有图片 blob 列表（主图 + 轮播图）
-  const imageBlob = new Blob([imageBuffer], { type: mimeType });
-  const allImageBlobs = [{ blob: imageBlob, name: path.basename(sourceImagePath) }];
+  // 构建所有图片 buffer 列表（主图 + 轮播图）
+  const allImageBlobs = [{ buffer: imageBuffer, name: path.basename(sourceImagePath), type: mimeType }];
   for (const ep of extraImagePaths.slice(0, 4)) {  // 最多额外4张（总共5张）
     try {
       if (fs.existsSync(ep)) {
         const buf = fs.readFileSync(ep);
         const eExt = path.extname(ep).toLowerCase();
         const eMime = eExt === ".png" ? "image/png" : "image/jpeg";
-        allImageBlobs.push({ blob: new Blob([buf], { type: eMime }), name: path.basename(ep) });
+        allImageBlobs.push({ buffer: buf, name: path.basename(ep), type: eMime });
       }
     } catch (e) { logSilent("ui.action", e); }
   }
   console.error(`[ai-gen] Source images: ${allImageBlobs.length} (1 main + ${allImageBlobs.length - 1} carousel)`);
 
-  // Step 1: 分析产品（传所有图片）
+  // Step 1: 分析产品（传所有图片）—— 改用 form-data + node http 保证 multipart boundary 正确
   console.error("[ai-gen] Step 1: Analyzing product...");
-  const analyzeForm = new FormData();
-  for (const img of allImageBlobs) {
-    analyzeForm.append("images", img.blob, img.name);
-  }
-  analyzeForm.append("productMode", "single");
-
   const analyzeStage = await fetchAiImageStageWithRetry({
     label: "Analyze failed",
     routePath: "/api/analyze",
-    request: () => fetch(`${AI_IMAGE_GEN_URL}/api/analyze`, {
-      method: "POST",
-      body: analyzeForm,
-      headers: AI_AUTH_HEADERS,
+    request: () => postMultipartViaNodeHttp(`${AI_IMAGE_GEN_URL}/api/analyze`, {
+      fileBlobs: allImageBlobs,
+      fields: { productMode: "single" },
+      extraHeaders: AI_AUTH_HEADERS,
     }),
     maxRetries: 2,
   });
@@ -7811,34 +7872,40 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
     const decoder = new TextDecoder();
     let buffer = "";
     const result = {};
-    while (true) {
-      let idleTimer = null;
-      const { done, value } = await Promise.race([
-        reader.read(),
-        new Promise((_, reject) => {
-          idleTimer = setTimeout(() => reject(new Error(`AI 图片生成超时（${Math.round(AI_SINGLE_IMAGE_IDLE_TIMEOUT_MS / 1000)}s 无响应）`)), AI_SINGLE_IMAGE_IDLE_TIMEOUT_MS);
-        }),
-      ]).finally(() => {
-        if (idleTimer) clearTimeout(idleTimer);
-      });
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-      for (const line of lines) {
-        if (!line.startsWith("data: ")) continue;
-        try {
-          const data = JSON.parse(line.slice(6));
-          if (data.status === "done" && data.imageUrl) {
-            result[data.imageType] = data.imageUrl;
-            console.error(`[ai-gen] Generated: ${data.imageType}`);
-          } else if (data.status === "error") {
-            console.error(`[ai-gen] Error: ${data.imageType}: ${data.error}`);
-          }
-        } catch (e) { logSilent("ui.action", e); }
+    try {
+      while (true) {
+        let idleTimer = null;
+        const { done, value } = await Promise.race([
+          reader.read(),
+          new Promise((_, reject) => {
+            idleTimer = setTimeout(() => reject(new Error(`AI 图片生成超时（${Math.round(AI_SINGLE_IMAGE_IDLE_TIMEOUT_MS / 1000)}s 无响应）`)), AI_SINGLE_IMAGE_IDLE_TIMEOUT_MS);
+          }),
+        ]).finally(() => {
+          if (idleTimer) clearTimeout(idleTimer);
+        });
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const data = JSON.parse(line.slice(6));
+            if (data.status === "done" && data.imageUrl) {
+              result[data.imageType] = data.imageUrl;
+              console.error(`[ai-gen] Generated: ${data.imageType}`);
+            } else if (data.status === "error") {
+              console.error(`[ai-gen] Error: ${data.imageType}: ${data.error}`);
+            }
+          } catch (e) { logSilent("sse.parse", e); }
+        }
       }
+      return result;
+    } finally {
+      // 确保 reader 被释放，避免在任何退出路径（含异常）下泄漏 HTTP 连接
+      try { await reader.cancel(); } catch {}
+      try { reader.releaseLock(); } catch {}
     }
-    return result;
   }
 
   async function generateSinglePlan(plan, retries = 2) {
@@ -7848,7 +7915,8 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
       try {
         const form = new FormData();
         for (const img of allImageBlobs) {
-          form.append("images", img.blob, img.name);
+          const blob = new Blob([img.buffer], { type: img.type || "image/jpeg" });
+          form.append("images", blob, img.name);
         }
         form.append("plans", JSON.stringify([plan]));
         form.append("productMode", "single");
@@ -7881,7 +7949,7 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
       }
       if (isAiUpstreamBusyMessage(latestPlanError)) {
         lastGenerateError = latestPlanError;
-        return null;
+        return { imageType: plan.imageType, imageUrl: null, error: latestPlanError };
       }
       if (attempt < retries) {
         await new Promise(r => setTimeout(r, 1500));
@@ -7890,9 +7958,10 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
     if (latestPlanError) {
       lastGenerateError = latestPlanError;
     }
-    return null;
+    return { imageType: plan.imageType, imageUrl: null, error: latestPlanError };
   }
 
+  const perPlanErrors = {};
   const firstPassResults = await Promise.allSettled(
     plans.map((plan) => generateSinglePlan(plan, 2))
   );
@@ -7900,7 +7969,16 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
     const plan = plans[i];
     const result = firstPassResults[i];
     if (result?.status === "fulfilled" && result.value) {
-      images[plan.imageType] = result.value;
+      // 兼容旧返回（字符串 url）和新返回（对象）
+      if (typeof result.value === "string") {
+        images[plan.imageType] = result.value;
+      } else if (result.value.imageUrl) {
+        images[plan.imageType] = result.value.imageUrl;
+      } else if (result.value.error) {
+        perPlanErrors[plan.imageType] = result.value.error;
+      }
+    } else if (result?.status === "rejected") {
+      perPlanErrors[plan.imageType] = String(result.reason?.message || result.reason || "unknown");
     }
   }
 
@@ -7915,14 +7993,30 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
       const plan = missingPlans[i];
       const result = retryResults[i];
       if (result?.status === "fulfilled" && result.value) {
-        images[plan.imageType] = result.value;
+        if (typeof result.value === "string") {
+          images[plan.imageType] = result.value;
+          delete perPlanErrors[plan.imageType];
+        } else if (result.value.imageUrl) {
+          images[plan.imageType] = result.value.imageUrl;
+          delete perPlanErrors[plan.imageType];
+        } else if (result.value.error) {
+          perPlanErrors[plan.imageType] = result.value.error;
+        }
+      } else if (result?.status === "rejected") {
+        perPlanErrors[plan.imageType] = String(result.reason?.message || result.reason || "unknown");
       }
     }
   }
 
   console.error(`[ai-gen] Total generated: ${Object.keys(images).length}/${plans.length}`);
   const success = Object.keys(images).length >= REQUIRED_AI_DETAIL_IMAGE_COUNT;
-  return { success, images, analysis, error: success ? "" : lastGenerateError };
+  // 汇总每个失败 plan 的独立错误，避免全局串用 lastGenerateError
+  let aggregatedError = "";
+  if (!success) {
+    const missingErrors = Object.entries(perPlanErrors).map(([k, v]) => `${k}: ${v}`).join("; ");
+    aggregatedError = missingErrors || lastGenerateError || "未知错误";
+  }
+  return { success, images, analysis, error: aggregatedError };
 }
 
 /**

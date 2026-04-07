@@ -657,7 +657,11 @@ async function startWorker(options = {}) {
   }
 
   workerStartTargetAiImageServer = desiredAiImageServer;
-  const currentStartPromise = (async () => {
+  // 占位：先同步地把 workerStartPromise 标记成"进行中"，避免 IIFE 在第一个
+  // await 点让出事件循环时，另一个并发 startWorker 调用通过 null 检查。
+  let currentStartPromise;
+  workerStartPromise = new Promise((resolveOuter, rejectOuter) => {
+    currentStartPromise = (async () => {
     // 清理旧进程
     if (worker) {
       await killChildProcessTree(worker);
@@ -756,16 +760,15 @@ async function startWorker(options = {}) {
       workerAuthToken = "";
       throw e;
     }
-  })();
+    })();
+    currentStartPromise.then(resolveOuter, rejectOuter);
+  });
 
-  workerStartPromise = currentStartPromise;
   try {
-    return await currentStartPromise;
+    return await workerStartPromise;
   } finally {
-    if (workerStartPromise === currentStartPromise) {
-      workerStartPromise = null;
-      workerStartTargetAiImageServer = "";
-    }
+    workerStartPromise = null;
+    workerStartTargetAiImageServer = "";
   }
 }
 
@@ -2224,7 +2227,146 @@ async function createWindow() {
   mainWindow.on("closed", () => { mainWindow = null; });
 }
 
+// === 账号 id 变更数据迁移 ===
+// 问题：账号被删除重建后会拿到新的 acc_<ts>，但旧的 scoped 采集数据仍存在
+// 旧 id 下，导致"尚未采集"。此函数在启动时按手机号稳定映射，把孤儿 scoped
+// 文件自动迁移到当前账号 id 下，并持续维护 phone→accountId 历史。
+function normalizePhoneForMigration(phone) {
+  return typeof phone === "string" ? phone.replace(/\D+/g, "") : "";
+}
+function migrateScopedStoreFilesForAccountIdChange() {
+  try {
+    const baseDir = app.getPath("userData");
+    if (!fs.existsSync(baseDir)) return;
+
+    // 1. 读取当前账号列表
+    let accounts = [];
+    try {
+      accounts = readStoreJsonWithRecovery(getStoreFilePath(ACCOUNT_STORE_KEY), ACCOUNT_STORE_KEY) || [];
+    } catch { accounts = []; }
+    if (!Array.isArray(accounts)) accounts = [];
+    const currentAccounts = accounts
+      .map((a) => ({ id: String(a?.id || ""), phone: normalizePhoneForMigration(a?.phone) }))
+      .filter((a) => a.id && a.phone);
+    if (currentAccounts.length === 0) return;
+    const currentIds = new Set(currentAccounts.map((a) => a.id));
+
+    // 2. 读取 phone→id 历史
+    const HISTORY_KEY = "temu_account_id_history";
+    let history = {};
+    try {
+      const raw = readStoreJsonWithRecovery(getStoreFilePath(HISTORY_KEY), HISTORY_KEY);
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) history = raw;
+    } catch { history = {}; }
+
+    // 3. 扫描所有 scoped 文件，按 id 分组 baseKey 集合
+    const SCOPED_PREFIX_ENCODED = "temu_store%3A"; // = "temu_store:"
+    const scopedByAccountId = new Map(); // id -> Set(baseKey)
+    let files = [];
+    try { files = fs.readdirSync(baseDir); } catch { return; }
+    for (const fname of files) {
+      if (!fname.startsWith(SCOPED_PREFIX_ENCODED)) continue;
+      if (!fname.endsWith(".json") || fname.endsWith(".bak")) continue;
+      // 解码: temu_store%3Aacc_xxx%3AbaseKey.json
+      let decoded = "";
+      try { decoded = decodeURIComponent(fname.slice(0, -".json".length)); } catch { continue; }
+      // 格式: temu_store:<accId>:<baseKey>
+      const parts = decoded.split(":");
+      if (parts.length < 3 || parts[0] !== "temu_store") continue;
+      const accId = parts[1];
+      const baseKey = parts.slice(2).join(":");
+      if (!accId || !baseKey) continue;
+      if (!scopedByAccountId.has(accId)) scopedByAccountId.set(accId, new Set());
+      scopedByAccountId.get(accId).add(baseKey);
+    }
+
+    const renameScopedFilesFromTo = (oldId, newId) => {
+      if (!oldId || !newId || oldId === newId) return 0;
+      let count = 0;
+      for (const fname of files) {
+        if (!fname.startsWith(SCOPED_PREFIX_ENCODED)) continue;
+        let decoded = "";
+        try { decoded = decodeURIComponent(fname.replace(/\.bak$/i, "").replace(/\.json$/i, "")); } catch { continue; }
+        const parts = decoded.split(":");
+        if (parts.length < 3 || parts[1] !== oldId) continue;
+        const baseKey = parts.slice(2).join(":");
+        const suffix = fname.endsWith(".bak") ? ".json.bak" : ".json";
+        const newName = encodeURIComponent(`temu_store:${newId}:${baseKey}`) + suffix;
+        const src = path.join(baseDir, fname);
+        const dst = path.join(baseDir, newName);
+        try {
+          // 若目标已有文件，保留目标（较新数据），删除源
+          if (fs.existsSync(dst)) {
+            fs.unlinkSync(src);
+          } else {
+            fs.renameSync(src, dst);
+          }
+          count += 1;
+        } catch (e) {
+          console.error(`[migrate] rename failed ${fname} -> ${newName}: ${e.message}`);
+        }
+      }
+      return count;
+    };
+
+    // 4. 前向迁移：history 里 phone 对应的旧 id 与当前 id 不同，则迁移
+    let migratedTotal = 0;
+    for (const { id: currentId, phone } of currentAccounts) {
+      const oldId = history[phone];
+      if (oldId && oldId !== currentId && scopedByAccountId.has(oldId)) {
+        const n = renameScopedFilesFromTo(oldId, currentId);
+        if (n > 0) {
+          console.log(`[migrate] phone ${phone}: ${oldId} -> ${currentId} (${n} files)`);
+          migratedTotal += n;
+          scopedByAccountId.delete(oldId);
+        }
+      }
+    }
+
+    // 5. 启发式回退：恰好一个当前账号无 scoped 数据，且恰好一个孤儿 id 有数据
+    const accountsWithoutData = currentAccounts.filter(
+      (a) => !scopedByAccountId.has(a.id) || scopedByAccountId.get(a.id).size === 0,
+    );
+    const orphanIds = Array.from(scopedByAccountId.keys()).filter((id) => !currentIds.has(id));
+    if (accountsWithoutData.length === 1 && orphanIds.length === 1) {
+      // 若孤儿 id 在 history 里没有归属（或归属 phone 已不存在），则认为是该账号
+      const orphanId = orphanIds[0];
+      const orphanHistoryPhone = Object.keys(history).find((p) => history[p] === orphanId);
+      const orphanOwnerStillExists = orphanHistoryPhone && currentAccounts.some((a) => a.phone === orphanHistoryPhone);
+      if (!orphanOwnerStillExists) {
+        const target = accountsWithoutData[0];
+        const n = renameScopedFilesFromTo(orphanId, target.id);
+        if (n > 0) {
+          console.log(`[migrate] heuristic orphan ${orphanId} -> ${target.id} (phone=${target.phone}, ${n} files)`);
+          migratedTotal += n;
+          if (orphanHistoryPhone) delete history[orphanHistoryPhone];
+        }
+      }
+    }
+
+    // 6. 更新 phone→id 历史（始终记录当前账号最新 id）
+    for (const { id, phone } of currentAccounts) {
+      history[phone] = id;
+    }
+    try {
+      const historyPath = getStoreFilePath(HISTORY_KEY);
+      fs.writeFileSync(historyPath, JSON.stringify(history, null, 2));
+    } catch (e) {
+      console.error(`[migrate] failed to save history: ${e.message}`);
+    }
+
+    if (migratedTotal > 0) {
+      console.log(`[migrate] Total scoped files migrated: ${migratedTotal}`);
+    }
+  } catch (e) {
+    console.error(`[migrate] scoped store migration failed: ${e.message}`);
+  }
+}
+
 app.whenReady().then(async () => {
+  // 启动时先做 scoped 数据 id 迁移，避免账号重建后旧数据孤立
+  migrateScopedStoreFilesForAccountIdChange();
+
   const imageStudioStartupPromise = ensureImageStudioService()
     .then((status) => {
       console.log("[Main] Image studio auto-started successfully");

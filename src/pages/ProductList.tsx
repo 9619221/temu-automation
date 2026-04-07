@@ -96,6 +96,7 @@ interface ProductItem {
   buyerName?: string;
   buyerUid?: string;
   operatorContact?: string;
+  operatorNick?: string;
   highPriceFlowLimit?: boolean;
   highPriceFlowInfo?: any;
   commentNum?: number;
@@ -404,6 +405,9 @@ export default function ProductList() {
       const operatorMap = new Map<string, string>();
       const operatorByGoodsId = new Map<string, string>();
       const operatorByProductId = new Map<string, string>();
+      const operatorNickMap = new Map<string, string>();
+      const operatorNickByGoodsId = new Map<string, string>();
+      const operatorNickByProductId = new Map<string, string>();
       // Also collect highPriceProductSearchLimit from skcList for 高价限流
       const skcLimitMap = new Map<string, any>();
       try {
@@ -412,17 +416,19 @@ export default function ProductList() {
         const processItems = (items: any[]) => {
           if (!Array.isArray(items)) return;
           for (const it of items) {
-            const contact = String(it?.contact ?? it?.nickContact ?? "").trim();
-            if (!contact) continue;
+            const contact = String(it?.contact ?? "").trim();
+            const nick = String(it?.nickContact ?? "").trim();
+            if (!contact && !nick) continue;
             const gid = it?.goodsId != null ? String(it.goodsId) : "";
             const pid = it?.productId != null ? String(it.productId) : "";
-            if (gid) operatorByGoodsId.set(gid, contact);
-            if (pid) operatorByProductId.set(pid, contact);
+            if (gid) { if (contact) operatorByGoodsId.set(gid, contact); if (nick) operatorNickByGoodsId.set(gid, nick); }
+            if (pid) { if (contact) operatorByProductId.set(pid, contact); if (nick) operatorNickByProductId.set(pid, nick); }
             const skcs = Array.isArray(it?.skcList) ? it.skcList : [];
             for (const s of skcs) {
               const skc = s?.skcId != null ? String(s.skcId) : "";
               if (skc) {
-                operatorMap.set(skc, contact);
+                if (contact) operatorMap.set(skc, contact);
+                if (nick) operatorNickMap.set(skc, nick);
                 if (s?.highPriceProductSearchLimit != null || s?.highPriceProductSearchLimitBeginTime || s?.highPriceProductSearchLimitEndTime) {
                   skcLimitMap.set(skc, s);
                 }
@@ -430,7 +436,7 @@ export default function ProductList() {
             }
             // also try top-level skc fields just in case
             const topSkc = String(it?.skcId ?? it?.productSkcId ?? "").trim();
-            if (topSkc) operatorMap.set(topSkc, contact);
+            if (topSkc) { if (contact) operatorMap.set(topSkc, contact); if (nick) operatorNickMap.set(topSkc, nick); }
           }
         };
         if (Array.isArray(lcApis)) {
@@ -758,7 +764,13 @@ export default function ProductList() {
           (gid && operatorByGoodsId.get(gid)) ||
           (pid && operatorByProductId.get(pid)) ||
           "";
+        const nick =
+          (skc && operatorNickMap.get(skc)) ||
+          (gid && operatorNickByGoodsId.get(gid)) ||
+          (pid && operatorNickByProductId.get(pid)) ||
+          "";
         if (contact) { product.operatorContact = contact; opHits++; }
+        if (nick) { product.operatorNick = nick; }
         if (skc && flowLimitMap.has(skc)) {
           product.highPriceFlowLimit = true;
           product.highPriceFlowInfo = flowLimitMap.get(skc);
@@ -888,6 +900,7 @@ export default function ProductList() {
             {record.skcId && <div style={{ color: "#999" }}>SKC：<span style={{ fontFamily: "monospace" }}>{record.skcId}</span></div>}
             {productDays != null && productDays !== "" && <div style={{ color: "#999" }}>加入站点时长：{productDays}天</div>}
             {record.spuId && <div style={{ color: "#999" }}>SPU：<span style={{ fontFamily: "monospace" }}>{record.spuId}</span></div>}
+            {(record.operatorContact || record.operatorNick) && <div style={{ color: "#999" }}>买手：<span style={{ color: "#1890ff" }}>{record.operatorContact || ""}{record.operatorNick ? `（${record.operatorNick}）` : ""}</span></div>}
             {seasonTag && <div style={{ color: "#999" }}>节日/季节标签：{seasonTag}</div>}
             <div style={{ marginTop: 2 }}>
               {stockOut && <Tag color="red" style={{ fontSize: 10, marginRight: 4 }}>已断货</Tag>}
@@ -968,7 +981,7 @@ export default function ProductList() {
       title: "仓内可用库存",
       dataIndex: "warehouseStock",
       key: "warehouseStock",
-      width: 90,
+      width: 120,
       sorter: (a, b) => (a.warehouseStock || 0) - (b.warehouseStock || 0),
       render: (val: number) => <span style={{ color: (val || 0) > 0 ? "#1890ff" : "#ff4d4f", fontWeight: 500 }}>{val || 0}</span>,
     },
@@ -976,7 +989,7 @@ export default function ProductList() {
       title: "暂不可用库存",
       dataIndex: "unavailableStock",
       key: "unavailableStock",
-      width: 110,
+      width: 120,
       sorter: (a, b) => (a.unavailableStock || 0) - (b.unavailableStock || 0),
       render: (val: number) => <span style={{ color: (val || 0) > 0 ? "#fa8c16" : "#999", fontWeight: (val || 0) > 0 ? 500 : 400 }}>{val || 0}</span>,
     },
@@ -984,7 +997,7 @@ export default function ProductList() {
       title: "预占用库存",
       dataIndex: "occupyStock",
       key: "occupyStock",
-      width: 100,
+      width: 115,
       sorter: (a, b) => (a.occupyStock || 0) - (b.occupyStock || 0),
       render: (val: number) => <span style={{ color: (val || 0) > 0 ? "#13c2c2" : "#999", fontWeight: (val || 0) > 0 ? 500 : 400 }}>{val || 0}</span>,
     },
@@ -1015,15 +1028,6 @@ export default function ProductList() {
         const v = r.salesRaw?.skuQuantityTotalInfo?.adviceQuantity;
         return <span style={{ color: v > 0 ? "#fa541c" : "#999", fontWeight: v > 0 ? 500 : 400 }}>{v || "-"}</span>;
       },
-    },
-    {
-      title: "对接运营",
-      dataIndex: "operatorContact",
-      key: "operatorContact",
-      width: 130,
-      render: (_: any, record: ProductItem) => (
-        <span style={{ fontSize: 12 }}>{record.operatorContact || record.buyerName || "-"}</span>
-      ),
     },
     {
       title: "高价限流",

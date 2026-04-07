@@ -392,37 +392,95 @@ export async function login(phone, password) {
     }
     await saveCookies();
 
-    // 处理履约中心授权
-    if (page.url().includes("seller.kuajingmaihuo.com") || page.url().includes("settle")) {
-      console.error("[login] On 履约中心, handling Seller Central auth...");
-      await randomDelay(2000, 3000);
-      const cbResult = await page.evaluate(() => {
-        const inputs = [...document.querySelectorAll('input[type="checkbox"]')];
-        for (const cb of inputs) { if (!cb.checked) { cb.click(); return "checked"; } return "already checked"; }
-        const customs = [...document.querySelectorAll('[class*="checkbox"], [class*="Checkbox"], [role="checkbox"]')];
-        for (const el of customs) { el.click(); return "clicked custom"; }
-        return "not found";
-      });
-      console.error("[login] Auth checkbox:", cbResult);
-      await randomDelay(500, 1000);
+    // 处理履约中心授权（可能在当前 page，也可能弹到新的 window/tab）
+    const tryHandleAuthOnPage = async (targetPage, tag = "main") => {
+      try {
+        if (!targetPage || targetPage.isClosed()) return false;
+        const url = targetPage.url() || "";
+        if (!/seller-login|seller\.kuajingmaihuo\.com|settle|agentseller\.temu/i.test(url)) return false;
+        console.error(`[login] [${tag}] handling Seller Central auth at ${url}`);
+        await targetPage.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => {});
+        await randomDelay(1200, 2200);
 
-      const btnResult = await page.evaluate(() => {
-        const keywords = ["授权登录", "进入", "确认授权", "确认并前往"];
-        const all = [...document.querySelectorAll('button, a, [role="button"], div[class*="btn"], div[class*="Btn"], span[class*="btn"], span[class*="Btn"]')];
-        for (const kw of keywords) {
-          for (const el of all) {
-            const text = (el.innerText || "").trim();
-            if (text.includes(kw) && text.length < 20) { el.click(); return "clicked: " + text; }
+        const cbResult = await targetPage.evaluate(() => {
+          const tryCheck = (input) => {
+            try {
+              if (!input.checked) input.click();
+              if (!input.checked) {
+                const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "checked");
+                d?.set?.call(input, true);
+                input.dispatchEvent(new Event("input", { bubbles: true }));
+                input.dispatchEvent(new Event("change", { bubbles: true }));
+              }
+              return input.checked;
+            } catch { return false; }
+          };
+          const inputs = [...document.querySelectorAll('input[type="checkbox"]')];
+          for (const cb of inputs) { if (tryCheck(cb)) return "checked input"; }
+          const customs = [...document.querySelectorAll('[class*="checkbox"], [class*="Checkbox"], [role="checkbox"]')];
+          for (const el of customs) { el.click(); return "clicked custom"; }
+          return "not found";
+        }).catch(() => "error");
+        console.error(`[login] [${tag}] auth checkbox:`, cbResult);
+        await randomDelay(400, 800);
+
+        const btnResult = await targetPage.evaluate(() => {
+          const keywords = ["确认授权并前往", "确认授权", "确认并前往", "授权登录", "同意并登录", "同意", "进入"];
+          const all = [...document.querySelectorAll('button, a, [role="button"], div[class*="btn"], div[class*="Btn"], span[class*="btn"], span[class*="Btn"]')];
+          for (const kw of keywords) {
+            for (const el of all) {
+              const text = (el.innerText || el.textContent || "").trim();
+              if (text && text.includes(kw) && text.length < 30) {
+                el.click();
+                return "clicked: " + text;
+              }
+            }
+          }
+          return "not found";
+        }).catch(() => "error");
+        console.error(`[login] [${tag}] auth enter button:`, btnResult);
+        if (typeof btnResult === "string" && btnResult.startsWith("clicked")) {
+          await randomDelay(3000, 5000);
+          await saveCookies();
+          return true;
+        }
+        return false;
+      } catch (e) {
+        console.error(`[login] [${tag}] auth handler error:`, e?.message || e);
+        return false;
+      }
+    };
+
+    // 当前页先试一次
+    await tryHandleAuthOnPage(page, "main");
+
+    // 扫描 context 中其它已打开的授权窗口，并等待延迟弹出的新窗口最多 10 秒
+    const authWaitStart = Date.now();
+    let authHandled = false;
+    while (Date.now() - authWaitStart < 10000) {
+      try {
+        const pages = browserState.context.pages();
+        for (const p of pages) {
+          if (p.isClosed()) continue;
+          const u = p.url() || "";
+          if (!/seller-login|seller\.kuajingmaihuo\.com\/settle|agentseller\.temu/i.test(u)) continue;
+          const hasBtn = await p.evaluate(() => {
+            const all = [...document.querySelectorAll('button, a, [role="button"], div[class*="btn"], div[class*="Btn"], span[class*="btn"], span[class*="Btn"]')];
+            return all.some((el) => {
+              const t = (el.innerText || el.textContent || "").trim();
+              return t && (t.includes("确认授权") || t.includes("同意并登录") || t.includes("授权登录"));
+            });
+          }).catch(() => false);
+          if (hasBtn) {
+            const ok = await tryHandleAuthOnPage(p, p === page ? "main-retry" : "popup");
+            if (ok) { authHandled = true; break; }
           }
         }
-        return "not found";
-      });
-      console.error("[login] Auth enter button:", btnResult);
-      if (btnResult !== "not found") {
-        await randomDelay(5000, 8000);
-        await saveCookies();
-      }
+      } catch (e) { logSilent("login.auth-scan", e); }
+      if (authHandled) break;
+      await randomDelay(600, 900);
     }
+    console.error(`[login] auth loop done, handled=${authHandled}`);
 
     return { success: true };
   } catch (err) {
