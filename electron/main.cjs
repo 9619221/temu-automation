@@ -1746,6 +1746,13 @@ async function syncImageStudioRuntimeConfig(routePath = "", options = {}) {
   });
   const responsePayload = await readImageStudioResponse(response);
   if (!response.ok) {
+    // /api/config 路由可能不存在于当前 runtime 构建中，404 时静默跳过 (运行时已经使用内置默认配置)
+    if (response.status === 404) {
+      appendImageStudioLog(`[config] /api/config 不存在 (404)，跳过同步`);
+      lastImageStudioConfigSignature = signature;
+      lastImageStudioConfigSyncAt = now;
+      return false;
+    }
     const message = getImageStudioErrorMessage("/api/config", response, responsePayload);
     appendImageStudioLog(`[config] sync failed before ${routePath || "request"}: ${message}`);
     throw new Error(message);

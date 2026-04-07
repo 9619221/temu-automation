@@ -3265,6 +3265,64 @@ async function scrapeLifecycle(options = {}) {
     }
   };
 
+  let chainSupplierRequest = null;
+  // Use CDP to capture POST body which Playwright's postData() fails to provide for this endpoint
+  try {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Network.enable", { maxPostDataSize: 65536 });
+    const pendingScsRequestIds = new Set();
+    cdp.on("Network.requestWillBeSent", async (params) => {
+      try {
+        const url = params?.request?.url || "";
+        if (!url.includes("searchForChainSupplier")) return;
+        if (chainSupplierRequest) return;
+        const postData = params?.request?.postData || "";
+        const hasPostData = params?.request?.hasPostData;
+        const headers = params?.request?.headers || {};
+        console.error(`[lifecycle] CDP scs request: method=${params?.request?.method} bodyLen=${postData.length} hasPostData=${hasPostData} reqId=${params?.requestId}`);
+        if (postData) {
+          chainSupplierRequest = { url, method: params.request.method, headers, body: postData };
+          console.error(`[lifecycle] Captured scs template via CDP, body=${postData.slice(0, 300)}`);
+        } else if (hasPostData && params?.requestId) {
+          // Fetch the post body explicitly via getRequestPostData
+          try {
+            const r = await cdp.send("Network.getRequestPostData", { requestId: params.requestId });
+            if (r?.postData) {
+              chainSupplierRequest = { url, method: params.request.method, headers, body: r.postData };
+              console.error(`[lifecycle] Captured scs template via getRequestPostData, body=${r.postData.slice(0, 300)}`);
+            } else {
+              pendingScsRequestIds.add(params.requestId);
+              console.error(`[lifecycle] getRequestPostData returned empty, will retry on response`);
+            }
+          } catch (e2) {
+            console.error(`[lifecycle] getRequestPostData error:`, e2?.message || e2);
+            pendingScsRequestIds.add(params.requestId);
+          }
+        } else {
+          // Capture URL/headers anyway in case body is empty (might be GET-style POST with all in URL)
+          chainSupplierRequest = { url, method: params.request.method, headers, body: "" };
+        }
+      } catch (e) {
+        console.error(`[lifecycle] CDP listener error:`, e?.message || e);
+      }
+    });
+    cdp.on("Network.responseReceived", async (params) => {
+      if (!pendingScsRequestIds.has(params?.requestId)) return;
+      pendingScsRequestIds.delete(params.requestId);
+      try {
+        const r = await cdp.send("Network.getRequestPostData", { requestId: params.requestId });
+        if (r?.postData && !chainSupplierRequest?.body) {
+          chainSupplierRequest = chainSupplierRequest || { url: params?.response?.url || "", method: "POST", headers: {} };
+          chainSupplierRequest.body = r.postData;
+          console.error(`[lifecycle] Late-captured scs body via responseReceived, body=${r.postData.slice(0, 300)}`);
+        }
+      } catch (e) {
+        console.error(`[lifecycle] late getRequestPostData error:`, e?.message || e);
+      }
+    });
+  } catch (e) {
+    console.error(`[lifecycle] CDP setup error:`, e?.message || e);
+  }
   try {
     page.on("response", (resp) => {
       responseTracker.track((async () => {
@@ -3280,6 +3338,25 @@ async function scrapeLifecycle(options = {}) {
           const u = new URL(url);
           capturedApis.push({ path: u.pathname, data: body });
           console.error(`[lifecycle] Captured: ${u.pathname}`);
+          // Capture searchForChainSupplier request template for manual pagination
+          if (u.pathname.includes("searchForChainSupplier") && !chainSupplierRequest) {
+            try {
+              const req = resp.request();
+              const method = req.method();
+              const postData = req.postData();
+              const headers = await req.allHeaders().catch(() => req.headers());
+              console.error(`[lifecycle] scs request method=${method} hasBody=${!!postData} bodyLen=${postData ? postData.length : 0}`);
+              chainSupplierRequest = {
+                url: url,
+                method,
+                headers,
+                body: postData || "",
+              };
+              console.error(`[lifecycle] Captured searchForChainSupplier request template`);
+            } catch (e) {
+              console.error(`[lifecycle] scs template capture error:`, e?.message || e);
+            }
+          }
         } catch (error) {
           logSilent("ui.action", error);
         }
@@ -3363,9 +3440,52 @@ async function scrapeLifecycle(options = {}) {
     await closeCommonPrompts(4);
     await responseTracker.drain(lite ? 2500 : 4500);
 
-    // Paginate through all pages so searchForChainSupplier captures every product
+    // Paginate by directly calling searchForChainSupplier API with incremented pageNumber
     try {
-      const maxPages = options.maxPages ?? 100;
+      if (chainSupplierRequest) {
+        let bodyObj = null;
+        try { bodyObj = JSON.parse(chainSupplierRequest.body); } catch {}
+        if (bodyObj && typeof bodyObj === "object") {
+          // Find the total from already-captured first page
+          const firstScs = capturedApis.find((a) => String(a?.path || "").includes("searchForChainSupplier"));
+          const total = firstScs?.data?.result?.total || 0;
+          const pageSize = bodyObj.pageSize || bodyObj.size || 10;
+          const totalPages = Math.min(Math.ceil(total / pageSize), options.maxPages ?? 200);
+          console.error(`[lifecycle] API pagination: total=${total} pageSize=${pageSize} totalPages=${totalPages}`);
+          for (let pageNum = 2; pageNum <= totalPages; pageNum += 1) {
+            const reqBody = { ...bodyObj, pageNum, pageNumber: pageNum, page: pageNum };
+            try {
+              const result = await page.evaluate(async ({ url, headers, body }) => {
+                const resp = await fetch(url, {
+                  method: "POST",
+                  credentials: "include",
+                  headers: { ...headers, "content-type": "application/json" },
+                  body: JSON.stringify(body),
+                });
+                if (!resp.ok) return { error: `HTTP ${resp.status}` };
+                return await resp.json();
+              }, { url: chainSupplierRequest.url, headers: chainSupplierRequest.headers, body: reqBody });
+              if (result && !result.error && (result.result || result.success !== undefined)) {
+                capturedApis.push({ path: "/api/kiana/mms/robin/searchForChainSupplier", data: result });
+                const n = result?.result?.dataList?.length || 0;
+                console.error(`[lifecycle] Fetched page ${pageNum}/${totalPages} items=${n}`);
+                if (n === 0) break;
+              } else {
+                console.error(`[lifecycle] Page ${pageNum} failed: ${JSON.stringify(result).slice(0, 200)}`);
+                break;
+              }
+            } catch (error) {
+              console.error(`[lifecycle] Page ${pageNum} error:`, error?.message || error);
+              break;
+            }
+            await randomDelay(300, 600);
+          }
+        } else {
+          console.error("[lifecycle] chainSupplier body not parseable, falling back to DOM pagination");
+        }
+      }
+      // Fallback DOM pagination (also runs if no API template captured)
+      const maxPages = chainSupplierRequest ? 0 : (options.maxPages ?? 100);
       for (let pageIdx = 1; pageIdx < maxPages; pageIdx += 1) {
         // Scroll bottom of the page to ensure paginator rendered (Temu often virtualizes)
         await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
