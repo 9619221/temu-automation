@@ -1831,8 +1831,7 @@ async function handleOpenSellerAuthPages(logPrefix = "[popup-open]") {
 }
 
 async function ensureSellerCentralSessionReady(page, targetPath = "/goods/list", logPrefix = "[session-ready]") {
-  let dedicatedLoginAttempted = false;
-  for (let attempt = 1; attempt <= 6; attempt += 1) {
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
     if (__fatalLoginError) {
       console.error(`${logPrefix} Aborting due to fatal login error: ${__fatalLoginError}`);
       return false;
@@ -1854,21 +1853,6 @@ async function ensureSellerCentralSessionReady(page, targetPath = "/goods/list",
     if (await isSellerCentralAuthPage(page)) {
       await openSellerCentralTarget(page, targetPath, { lite: false, logPrefix: `${logPrefix}-goto` });
       await randomDelay(1500, 2500);
-    }
-
-    // 第 3 次仍未拿到授权 → 触发一次完整 dedicated 登录（会刷新 cookie）再继续重试
-    if (attempt === 3 && !dedicatedLoginAttempted) {
-      dedicatedLoginAttempted = true;
-      console.error(`${logPrefix} Auth still pending after ${attempt} attempts, invoking dedicated seller login fallback`);
-      const ok = await ensureDedicatedSellerLogin(`${logPrefix}-dedicated`);
-      if (ok && !page.isClosed?.()) {
-        try {
-          await openSellerCentralTarget(page, targetPath, { lite: false, logPrefix: `${logPrefix}-post-login` });
-          await randomDelay(1500, 2500);
-        } catch (error) {
-          logSilent("ui.action", error);
-        }
-      }
     }
   }
 
