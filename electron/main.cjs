@@ -41,6 +41,10 @@ const ACCOUNT_SCOPED_STORE_KEYS = new Set([
   "temu_task_manager_state",
   "temu_raw_goodsData",
   "temu_raw_lifecycle",
+  "temu_raw_yunduOverall",
+  "temu_raw_globalPerformance",
+  "temu_raw_yunduActivityList",
+  "temu_raw_yunduQualityMetrics",
   "temu_raw_imageTask",
   "temu_raw_sampleManage",
   "temu_raw_activity",
@@ -2677,6 +2681,21 @@ ipcMain.handle("automation:scrape-hot-plan", async () => { return sendCmd("scrap
 ipcMain.handle("automation:scrape-checkup", async () => { return sendCmd("scrape_checkup"); });
 ipcMain.handle("automation:scrape-us-retrieval", async () => { return sendCmd("scrape_us_retrieval"); });
 ipcMain.handle("automation:scrape-delivery", async () => { return sendCmd("scrape_delivery"); });
+ipcMain.handle("automation:scrape-global-performance", async (_e, params) => {
+  return sendCmd("scrape_global_performance", { range: params?.range || "30d" });
+});
+ipcMain.handle("automation:scrape-skc-region-detail", async (_e, params) => {
+  return sendCmd("scrape_skc_region_detail", { productId: params?.productId, range: params?.range || "30d" });
+});
+ipcMain.handle("automation:yundu-list-overall", async (_e, params) => sendCmd("yundu_list_overall", params || {}));
+ipcMain.handle("automation:yundu-site-count", async (_e, params) => sendCmd("yundu_site_count", params || {}));
+ipcMain.handle("automation:yundu-high-price-limit", async (_e, params) => sendCmd("yundu_high_price_limit", params || {}));
+ipcMain.handle("automation:yundu-quality-metrics", async (_e, params) => sendCmd("yundu_quality_metrics", params || {}));
+ipcMain.handle("automation:yundu-activity-list", async (_e, params) => sendCmd("yundu_activity_list", params || {}));
+ipcMain.handle("automation:yundu-activity-enrolled", async (_e, params) => sendCmd("yundu_activity_enrolled", params || {}));
+ipcMain.handle("automation:yundu-activity-match", async (_e, params) => sendCmd("yundu_activity_match", params || {}));
+ipcMain.handle("automation:yundu-activity-submit", async (_e, params) => sendCmd("yundu_activity_submit", params || {}));
+ipcMain.handle("automation:yundu-auto-enroll", async (_e, params) => sendCmd("yundu_auto_enroll", params || {}));
 
 ipcMain.handle("automation:close", async () => {
   return sendCmd("close");

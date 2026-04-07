@@ -17,6 +17,7 @@ import {
   BellOutlined,
   ArrowRightOutlined,
   CloseCircleOutlined,
+  GlobalOutlined,
 } from "@ant-design/icons";
 import { useCollection, COLLECT_TASKS } from "../../contexts/CollectionContext";
 import { ACTIVE_ACCOUNT_CHANGED_EVENT, readActiveAccountId } from "../../utils/multiStore";

@@ -59,6 +59,19 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.invoke("automation:scrape-us-retrieval"),
     scrapeDelivery: () =>
       ipcRenderer.invoke("automation:scrape-delivery"),
+    scrapeGlobalPerformance: (range) =>
+      ipcRenderer.invoke("automation:scrape-global-performance", { range: range || "30d" }),
+    scrapeSkcRegionDetail: (productId, range) =>
+      ipcRenderer.invoke("automation:scrape-skc-region-detail", { productId, range: range || "30d" }),
+    yunduListOverall: (params) => ipcRenderer.invoke("automation:yundu-list-overall", params || {}),
+    yunduSiteCount: (params) => ipcRenderer.invoke("automation:yundu-site-count", params || {}),
+    yunduHighPriceLimit: (params) => ipcRenderer.invoke("automation:yundu-high-price-limit", params || {}),
+    yunduQualityMetrics: (params) => ipcRenderer.invoke("automation:yundu-quality-metrics", params || {}),
+    yunduActivityList: (params) => ipcRenderer.invoke("automation:yundu-activity-list", params || {}),
+    yunduActivityEnrolled: (params) => ipcRenderer.invoke("automation:yundu-activity-enrolled", params || {}),
+    yunduActivityMatch: (params) => ipcRenderer.invoke("automation:yundu-activity-match", params || {}),
+    yunduActivitySubmit: (params) => ipcRenderer.invoke("automation:yundu-activity-submit", params || {}),
+    yunduAutoEnroll: (params) => ipcRenderer.invoke("automation:yundu-auto-enroll", params || {}),
     pausePricing: (taskId) =>
       ipcRenderer.invoke("automation:pause-pricing", taskId),
     resumePricing: (taskId) =>

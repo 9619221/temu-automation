@@ -31,6 +31,17 @@ interface AutomationAPI {
   scrapeCheckup: () => Promise<any>;
   scrapeUSRetrieval: () => Promise<any>;
   scrapeDelivery: () => Promise<any>;
+  scrapeGlobalPerformance: (range?: "1d" | "7d" | "30d") => Promise<any>;
+  scrapeSkcRegionDetail: (productId: number | string, range?: "1d" | "7d" | "30d") => Promise<any>;
+  yunduListOverall: (params?: { pageNo?: number; pageSize?: number; isLack?: boolean }) => Promise<any>;
+  yunduSiteCount: (params?: { skcIds?: number[] }) => Promise<any>;
+  yunduHighPriceLimit: (params?: { skcIds?: number[] }) => Promise<any>;
+  yunduQualityMetrics: (params?: { pageNum?: number; pageSize?: number }) => Promise<any>;
+  yunduActivityList: (params?: { pageNum?: number; pageSize?: number }) => Promise<any>;
+  yunduActivityEnrolled: (params?: { pageNum?: number; pageSize?: number }) => Promise<any>;
+  yunduActivityMatch: (params: { activityThematicId: number; activityType?: number; productIds?: number[]; productSkcExtCodes?: string[]; rowCount?: number; hasMore?: boolean }) => Promise<any>;
+  yunduActivitySubmit: (params: { activityThematicId: number; productIds: number[]; extra?: any }) => Promise<any>;
+  yunduAutoEnroll: (params: { activityThematicId: number; activityType?: number; dryRun?: boolean }) => Promise<any>;
   autoPricing: (params: any) => Promise<any>;
   startAutoPricing: (params: any) => Promise<any>;
   getProgress: () => Promise<any>;

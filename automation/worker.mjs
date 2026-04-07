@@ -2158,6 +2158,11 @@ const TEMU_BASE_URL = "https://seller.kuajingmaihuo.com";
 
 // 返回实际使用的 page（可能因 popup 切换到新窗口）
 async function navigateToSellerCentral(page, targetPath, options = {}) {
+  // 诊断陷阱：记录谁在打开新建商品页（用户反馈 scrape_all 期间出现意外的 create 页）
+  if (typeof targetPath === "string" && targetPath.includes("/goods/create/category")) {
+    console.error("[NAV-TRAP] /goods/create/category called! Stack:");
+    console.error(new Error("nav-trap").stack);
+  }
   const lite = options.lite || _navLiteMode; // lite 模式：不处理弹窗，交给外部监控器
   const directUrl = /^https?:\/\//i.test(String(targetPath || ""))
     ? String(targetPath)
@@ -2788,6 +2793,759 @@ async function navigateToSellerCentral(page, targetPath, options = {}) {
 }
 
 // 核心采集函数已移到 scrape-registry.mjs（配置驱动）
+
+// ---- 全球业务表现：按国家聚合订单数（替代第三方插件） ----
+// 数据源：Temu 卖家中心 调价/订单 内部接口（agentseller.temu.com）
+// 100% 本地，零云端中转，凭证只在本地 Playwright 上下文中使用
+const GLOBAL_PERF_COUNTRY_CN = {
+  DE: "德国", PL: "波兰", SE: "瑞典", NL: "荷兰", RO: "罗马尼亚",
+  FR: "法国", IT: "意大利", ES: "西班牙", GB: "英国", UK: "英国",
+  IE: "爱尔兰", PT: "葡萄牙", AT: "奥地利", BE: "比利时", FI: "芬兰",
+  DK: "丹麦", CZ: "捷克", HU: "匈牙利", GR: "希腊", BG: "保加利亚",
+  HR: "克罗地亚", SK: "斯洛伐克", SI: "斯洛文尼亚", LT: "立陶宛", LV: "拉脱维亚",
+  EE: "爱沙尼亚", LU: "卢森堡", MT: "马耳他", CY: "塞浦路斯",
+  US: "美国", CA: "加拿大", MX: "墨西哥", BR: "巴西", CL: "智利", PE: "秘鲁",
+  JP: "日本", KR: "韩国", TW: "台湾", HK: "香港", SG: "新加坡", MY: "马来西亚",
+  TH: "泰国", PH: "菲律宾", ID: "印度尼西亚", VN: "越南", IN: "印度",
+  AU: "澳大利亚", NZ: "新西兰",
+  SA: "沙特阿拉伯", AE: "阿联酋", IL: "以色列", TR: "土耳其", QA: "卡塔尔", KW: "科威特", BH: "巴林", OM: "阿曼",
+  ZA: "南非", EG: "埃及", NG: "尼日利亚", MA: "摩洛哥",
+};
+const GLOBAL_PERF_REGION_OF = {
+  DE: "europe", PL: "europe", SE: "europe", NL: "europe", RO: "europe",
+  FR: "europe", IT: "europe", ES: "europe", GB: "europe", UK: "europe", IE: "europe",
+  PT: "europe", AT: "europe", BE: "europe", FI: "europe", DK: "europe", CZ: "europe",
+  HU: "europe", GR: "europe", BG: "europe", HR: "europe", SK: "europe", SI: "europe",
+  LT: "europe", LV: "europe", EE: "europe", LU: "europe", MT: "europe", CY: "europe",
+  US: "americas", CA: "americas", MX: "americas", BR: "americas", CL: "americas", PE: "americas",
+  JP: "apac", KR: "apac", TW: "apac", HK: "apac", SG: "apac", MY: "apac",
+  TH: "apac", PH: "apac", ID: "apac", VN: "apac", IN: "apac",
+  AU: "oceania", NZ: "oceania",
+  SA: "mea", AE: "mea", IL: "mea", TR: "mea", QA: "mea", KW: "mea", BH: "mea", OM: "mea",
+  ZA: "africa", EG: "africa", NG: "africa", MA: "africa",
+};
+
+function _gpRangeToMs(range) {
+  const now = Date.now();
+  const day = 24 * 60 * 60 * 1000;
+  switch (String(range)) {
+    case "1d": return { start: now - day, end: now, days: 1 };
+    case "7d": return { start: now - 7 * day, end: now, days: 7 };
+    case "30d":
+    default:   return { start: now - 30 * day, end: now, days: 30 };
+  }
+}
+
+function _gpExtractCountryFromOrder(order) {
+  if (!order || typeof order !== "object") return null;
+  const candidates = [
+    order.countryCode, order.country_code, order.regionCode, order.region_code,
+    order.shippingAddressCountry, order.shippingCountry,
+    order.shippingAddress?.countryCode, order.shippingAddress?.country,
+    order.address?.countryCode, order.address?.country,
+    order.consigneeAddress?.countryCode, order.buyerAddress?.countryCode,
+    order.region?.code, order.site?.regionCode, order.siteCode,
+  ];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.length >= 2 && c.length <= 4) {
+      return c.toUpperCase();
+    }
+  }
+  return null;
+}
+
+// 递归在任意 JSON 树里找出所有可能是订单的对象（包含国家字段的）
+function _gpHarvestOrders(node, sink, depth = 0) {
+  if (!node || depth > 6) return;
+  if (Array.isArray(node)) {
+    for (const item of node) _gpHarvestOrders(item, sink, depth + 1);
+    return;
+  }
+  if (typeof node !== "object") return;
+  const code = _gpExtractCountryFromOrder(node);
+  if (code) sink.push(code);
+  for (const k of Object.keys(node)) {
+    const v = node[k];
+    if (v && (typeof v === "object")) _gpHarvestOrders(v, sink, depth + 1);
+  }
+}
+
+async function scrapeGlobalPerformance({ range = "30d" } = {}) {
+  await ensureBrowser();
+  const { start, end, days } = _gpRangeToMs(range);
+  const startedAt = new Date().toISOString();
+
+  // 江洋插件 getDomainForPath 揭示：/mms/venom/、/mms/tmod_punish/、/scp/、/visage-agent-seller/
+  // 必须打到 agentseller.temu.com（而非 kuajingmaihuo），且 header 用 mallId
+  await ensureBrowser();
+  const page = await createSellerCentralPage("/main/data-center", { logPrefix: "[global-perf]" }).catch(async (e) => {
+    console.error(`[global-perf] createSellerCentralPage fail: ${e.message}, fallback newPage`);
+    const p = await context.newPage();
+    try { await p.goto("https://agentseller.temu.com/main/data-center", { waitUntil: "domcontentloaded", timeout: 60000 }); } catch {}
+    return p;
+  });
+  await page.waitForTimeout(2000);
+
+  const byCountry = new Map();
+  const seenEndpoints = new Map(); // path -> hits
+  let usedEndpoint = "";
+  let lastError = "";
+  let pagesFetched = 0;
+  let totalOrders = 0;
+  // Plan A 数据收集：SKC销售 / 活动商品 / 库存
+  const skcSales = [];        // [{ skcId, productName, image, category, sales, changeRate, trend:[{day,quantity}] }]
+  const activityGoods = [];   // [{ goodsId, name, image, amount, currency, sales, visitors, clickRate, payRate }]
+  let warehouseTotal = 0;
+  let warehouseSampleStock = 0;
+
+  const seenAllPaths = new Map(); // 调试用：所有看到的 JSON 端点
+  const dumpedPaths = new Set();
+  const onResponse = async (resp) => {
+    try {
+      const url = resp.url();
+      if (!/agentseller\.temu\.com|kuajingmaihuo\.com/.test(url)) return;
+      const ct = resp.headers()["content-type"] || "";
+      if (!ct.includes("json")) return;
+      const u = new URL(url);
+      const pname = u.pathname;
+      if (/\.(js|css|png|jpg|svg|woff)/.test(pname)) return;
+      seenAllPaths.set(pname, (seenAllPaths.get(pname) || 0) + 1);
+      const json = await resp.json().catch(() => null);
+      if (!json) return;
+      // dump 多个候选端点的原始响应（跳过已 dump 的 / 跳过 bidding）
+      if (!dumpedPaths.has(pname) && /price-adjust|orderList|order-list|order\/list|aurora|govern|magneto|dashboard|analysis|data-center|region|country|site|finance|income|business/i.test(pname) && !/bidding|\.png|\.svg|hot-update/i.test(pname)) {
+        try {
+          const dumpDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
+          fs.mkdirSync(dumpDir, { recursive: true });
+          const safeName = pname.replace(/[^a-z0-9]/gi, "_").slice(0, 80);
+          fs.writeFileSync(path.join(dumpDir, `gp_${safeName}.json`), JSON.stringify({ url, json }, null, 2));
+          dumpedPaths.add(pname);
+          console.error(`[global-perf] DUMPED ${pname}`);
+        } catch (e) { console.error(`[global-perf] dump fail: ${e.message}`); }
+      }
+      const sink = [];
+      _gpHarvestOrders(json.result || json.data || json, sink);
+      if (sink.length === 0) return;
+      console.error(`[global-perf] HIT ${pname} +${sink.length}`);
+      seenEndpoints.set(pname, (seenEndpoints.get(pname) || 0) + sink.length);
+      for (const code of sink) {
+        byCountry.set(code, (byCountry.get(code) || 0) + 1);
+        totalOrders += 1;
+      }
+      pagesFetched += 1;
+    } catch { /* ignore */ }
+  };
+  page.on("response", onResponse);
+
+  // 先访问 seller.kuajingmaihuo.com 触发该域 cookie 同步（/mms/venom/ 需要 kuajingmaihuo 会话）
+  try {
+    const kjmhPage = await context.newPage();
+    console.error("[global-perf] warming kuajingmaihuo session...");
+    await kjmhPage.goto("https://seller.kuajingmaihuo.com/main/authentication", { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
+    await kjmhPage.waitForTimeout(2000);
+    // 如果落到 seller-login，尝试自动登录
+    if (/seller-login|kuajingmaihuo/.test(kjmhPage.url())) {
+      const stage = await detectSellerPopupStage(kjmhPage).catch(() => "unknown");
+      if (stage === "login") {
+        await tryAutoLoginInPopup(kjmhPage, "[global-perf-warm]").catch(() => {});
+        await kjmhPage.waitForTimeout(3000);
+      }
+    }
+    console.error(`[global-perf] kuajingmaihuo warm URL=${kjmhPage.url()}`);
+    await kjmhPage.close().catch(() => {});
+  } catch (e) {
+    console.error(`[global-perf] kuajingmaihuo warm fail: ${e.message}`);
+  }
+
+  // === 拦截 /mms/venom/ 请求重写 Origin/Referer（江洋插件 rules.json 关键bypass）===
+  try {
+    await page.route(/agentseller(-[a-z]+)?\.temu\.com\/(mms\/venom|api\/sale|bg-brando-mms|api\/activity)\//, async (route) => {
+      const req = route.request();
+      try {
+        const u = new URL(req.url());
+        const headers = { ...req.headers(),
+          origin: u.origin,
+          referer: u.origin + "/",
+        };
+        await route.continue({ headers });
+      } catch { await route.continue(); }
+    });
+    console.error("[global-perf] route interceptor installed for /mms/venom/");
+  } catch (e) { console.error(`[global-perf] route install fail: ${e.message}`); }
+
+  // === 直接 XHR 调用 supplier sales 接口（来自江洋插件反编译）===
+  try {
+    const _gpStart = new Date(Date.now()-Math.min(days,7)*86400000).toISOString().slice(0,10);
+    const _gpEnd = new Date().toISOString().slice(0,10);
+    const directEndpoints = [
+      { path: "/mms/venom/api/supplier/sales/management/listWarehouse", body: { pageNo: 1, pageSize: 100 } },
+      // SKC 销售数据中心（regionId 服务端忽略，单次足矣）
+      { path: "/bg-brando-mms/supplier/data/center/skc/sales/data",
+        body: { page: 1, pageSize: 50, regionId: -1, startDate: _gpStart, endDate: _gpEnd } },
+      { path: "/bg-brando-mms/supplier/data/center/skc/sales/data",
+        body: { page: 2, pageSize: 50, regionId: -1, startDate: _gpStart, endDate: _gpEnd } },
+      // 活动商品明细
+      { path: "/api/activity/data/goods/detail", body: { pageNumber: 1, pageSize: 50, statStartDate: new Date(Date.now()-days*86400000).toISOString().slice(0,10), statEndDate: _gpEnd } },
+      { path: "/api/activity/data/goods/detail", body: { pageNumber: 2, pageSize: 50, statStartDate: new Date(Date.now()-days*86400000).toISOString().slice(0,10), statEndDate: _gpEnd } },
+    ];
+    // === 多区域子域聚合：US / EU / 全局 各调一次 sale/analysis/total ===
+    const regions = [
+      { code: "GLOBAL", host: "https://agentseller.temu.com" },
+      { code: "US",     host: "https://agentseller-us.temu.com" },
+      { code: "EU",     host: "https://agentseller-eu.temu.com" },
+    ];
+    const regionResults = {};
+    for (const reg of regions) {
+      try {
+        const r = await page.evaluate(async ({ host, code }) => {
+          const mallId = (document.cookie.match(/mallid=([^;]+)/i)?.[1]) || "";
+          const out = {};
+          for (const path of ["/api/sale/analysis/total", "/mms/venom/api/supplier/sales/management/listOverall"]) {
+            try {
+              const resp = await fetch(host + path, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "mallId": mallId },
+                credentials: "include",
+                body: JSON.stringify({ pageNo: 1, pageSize: 50 }),
+              });
+              const text = await resp.text();
+              try { out[path] = { status: resp.status, body: JSON.parse(text) }; }
+              catch { out[path] = { status: resp.status, text: text.slice(0, 300) }; }
+            } catch (e) { out[path] = { error: e.message }; }
+          }
+          return { code, mallId, out };
+        }, reg);
+        regionResults[reg.code] = r;
+        console.error(`[global-perf] region ${reg.code} fetched`);
+      } catch (e) {
+        console.error(`[global-perf] region ${reg.code} fail: ${e.message}`);
+      }
+    }
+    try {
+      const dumpDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
+      fs.mkdirSync(dumpDir, { recursive: true });
+      fs.writeFileSync(path.join(dumpDir, "gp_regions.json"), JSON.stringify(regionResults, null, 2));
+      console.error("[global-perf] gp_regions.json dumped");
+    } catch {}
+
+    for (const ep of directEndpoints) {
+      console.error(`[global-perf] direct XHR ${ep.path}`);
+      // 直接在页面上下文 fetch 绝对URL，header 用 mallId 大写（江洋插件用法）
+      const r = await page.evaluate(async ({ ep }) => {
+        const mallId = (document.cookie.match(/mallid=([^;]+)/i)?.[1]) || "";
+        try {
+          const resp = await fetch("https://agentseller.temu.com" + ep.path, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "mallId": mallId },
+            credentials: "include",
+            body: JSON.stringify(ep.body),
+          });
+          const text = await resp.text();
+          let body = null;
+          try { body = JSON.parse(text); } catch {}
+          return { status: resp.status, body, text: body ? null : text.slice(0, 500), mallId };
+        } catch (e) {
+          return { error: e.message };
+        }
+      }, { ep }).then((raw) => {
+        if (raw.body && (raw.body.success || raw.body.error_code === 1000000)) {
+          return { success: true, data: raw.body.result, raw: raw.body };
+        }
+        return { success: false, raw: raw.body || raw, status: raw.status, mallId: raw.mallId };
+      });
+      try {
+        const dumpDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
+        fs.mkdirSync(dumpDir, { recursive: true });
+        const safe = (ep.path + "_" + Object.keys(ep.body).join("-") + "_r" + (ep.body.regionId ?? "x")).replace(/[^a-z0-9]/gi, "_").slice(0, 110);
+        fs.writeFileSync(path.join(dumpDir, `gp_kjmh_${safe}.json`), JSON.stringify({ endpoint: ep, result: r }, null, 2));
+        console.error(`[global-perf] direct DUMPED ${ep.path} success=${r.success}`);
+        if (r.success && r.data) {
+          // SKC 销售数据
+          if (ep.path.includes("/skc/sales/data")) {
+            const list = r.data.salesDataVOList || [];
+            for (const item of list) {
+              const info = item.productSkcBasicInfoVO || {};
+              skcSales.push({
+                skcId: item.productSkcId || info.productSkcId,
+                productId: info.productId || null,
+                productName: info.productName || "",
+                image: info.productSkcPicture || "",
+                category: info.category || "",
+                sales: item.confirmGoodsQuantity || 0,
+                changeRate: item.changeRate || 0,
+                trend: (item.confirmTrendList || []).map((t) => ({ day: t.day, quantity: t.quantity || 0 })),
+              });
+              totalOrders += item.confirmGoodsQuantity || 0;
+            }
+            if (list.length) usedEndpoint = ep.path;
+          }
+          // 活动商品
+          else if (ep.path.includes("/activity/data/goods/detail")) {
+            const list = r.data.list || [];
+            for (const g of list) {
+              activityGoods.push({
+                goodsId: g.goodsId,
+                name: g.goodsName || "",
+                image: g.goodsImageUrl || "",
+                amount: Number(g.activityTransactionAmount || 0),
+                currency: g.currency || "USD",
+                sales: g.activitySales || 0,
+                visitors: g.totalVisitorsNum || 0,
+                clickRate: Number(g.visitorsClickConversionRate || 0),
+                payRate: Number(g.visitorsPayConversionRate || 0),
+              });
+            }
+          }
+          // 库存
+          else if (ep.path.includes("listWarehouse")) {
+            const list = r.data.subOrderList || r.data.list || r.data.dataList || [];
+            warehouseTotal = r.data.total || list.length;
+            for (const w of list) {
+              warehouseSampleStock += Number(w.totalStock || w.stock || w.warehouseStock || 0);
+            }
+          }
+        }
+      } catch (e) { console.error(`[global-perf] direct dump fail: ${e.message}`); }
+    }
+  } catch (e) {
+    console.error(`[global-perf] direct XHR phase failed: ${e.message}`);
+  }
+
+  // 候选数据中心 / 经营分析路径，逐个 goto 让 sniffer 抓带 country 维度的接口
+  const candidatePaths = [
+    "/main/data-center",
+    "/main/goods-analysis",
+    "/main/activity-analysis",
+    "/main/flux-analysis",
+    "/main/business-analysis",
+    "/main/finance/income-detail",
+    "/govern/dashboard",
+    "/main/order/list",
+  ];
+
+  try {
+    if (skcSales.length > 0) {
+      console.error(`[global-perf] skipping candidate paths sniff, already have ${skcSales.length} SKC rows`);
+    } else
+    for (const p of candidatePaths) {
+      const url = `https://agentseller.temu.com${p}`;
+      console.error(`[global-perf] goto ${url}`);
+      try {
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+      } catch (e) {
+        console.error(`[global-perf] goto warn: ${e.message}`);
+      }
+      await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => {});
+      await page.waitForTimeout(6000); // 给 SPA 充分时间发起业务接口
+      // 若被弹回授权选择页，自动点击「商家中心」继续
+      for (let r = 0; r < 8; r += 1) {
+        const cur = page.url();
+        if (!/\/main\/authentication/.test(cur)) break;
+        console.error(`[global-perf] auth bounce ${r + 1} url=${cur}`);
+        const ok = await triggerSellerCentralAuthEntry(page, "[global-perf-auth]").catch(() => false);
+        await page.waitForTimeout(2500);
+        // 处理弹出的卖家中心登录窗口（自动填手机号/密码并提交）
+        await handleOpenSellerAuthPages("[global-perf-popup]").catch(() => {});
+        await page.waitForTimeout(2000);
+        if (!ok) {
+          // 兜底：直接 evaluate 点击任何"商家中心"链接
+          await page.evaluate(() => {
+            const els = Array.from(document.querySelectorAll('a, button, [role="button"], div, span'));
+            for (const el of els) {
+              const t = (el.textContent || "").replace(/\s+/g, "");
+              if (t === "商家中心>" || t === "商家中心›" || t === "商家中心") {
+                let tgt = el;
+                for (let i = 0; i < 4 && tgt; i++) {
+                  if (tgt.tagName === "A" || tgt.tagName === "BUTTON") break;
+                  tgt = tgt.parentElement;
+                }
+                (tgt || el).click();
+                return true;
+              }
+            }
+            return false;
+          }).catch(() => {});
+          await page.waitForTimeout(2000);
+        }
+      }
+      if (/\/main\/authentication/.test(page.url())) {
+        console.error(`[global-perf] STILL on auth page after retries, skipping`);
+        continue;
+      }
+      await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
+      await page.waitForTimeout(4000);
+      // 翻几页
+      for (let i = 0; i < 4; i += 1) {
+        const next = await page.$('li.ant-pagination-next:not(.ant-pagination-disabled) button, button[aria-label="下一页"]:not([disabled])').catch(() => null);
+        if (!next) break;
+        await next.click().catch(() => {});
+        await page.waitForTimeout(2000);
+      }
+      if (totalOrders > 0) break;
+    }
+
+    if (totalOrders === 0) {
+      const top = Array.from(seenAllPaths.entries()).sort((a, b) => b[1] - a[1]).slice(0, 30);
+      console.error(`[global-perf] NO HIT. Saw ${seenAllPaths.size} JSON endpoints. Top:`);
+      for (const [p, n] of top) console.error(`  ${n}x ${p}`);
+      lastError = `未在订单页捕获到带国家字段的响应（共看到 ${seenAllPaths.size} 个 JSON 端点，详见 worker 日志）`;
+    } else {
+      // 取命中最多的端点作为数据源
+      usedEndpoint = Array.from(seenEndpoints.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] || "";
+    }
+  } catch (e) {
+    lastError = e?.message || String(e);
+  } finally {
+    page.off("response", onResponse);
+    await page.close().catch(() => {});
+  }
+
+  const ranking = Array.from(byCountry.entries())
+    .map(([code, count]) => ({
+      code,
+      name: GLOBAL_PERF_COUNTRY_CN[code] || code,
+      region: GLOBAL_PERF_REGION_OF[code] || "other",
+      count,
+    }))
+    .sort((a, b) => b.count - a.count);
+
+  const byRegion = ranking.reduce((acc, row) => {
+    acc[row.region] = (acc[row.region] || 0) + row.count;
+    return acc;
+  }, {});
+
+  // 去重 SKC（按 skcId）
+  const skcDedup = Array.from(new Map(skcSales.map((s) => [s.skcId, s])).values())
+    .sort((a, b) => b.sales - a.sales);
+  const actDedup = Array.from(new Map(activityGoods.map((g) => [g.goodsId, g])).values())
+    .sort((a, b) => b.amount - a.amount);
+
+  // 全店趋势（聚合所有 SKC 的 trend）
+  const trendMap = new Map();
+  for (const s of skcDedup) {
+    for (const t of s.trend || []) {
+      trendMap.set(t.day, (trendMap.get(t.day) || 0) + (t.quantity || 0));
+    }
+  }
+  const overallTrend = Array.from(trendMap.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([day, quantity]) => ({ day, quantity }));
+
+  const totalSkcSales = skcDedup.reduce((s, x) => s + (x.sales || 0), 0);
+  const totalActivityAmount = actDedup.reduce((s, x) => s + (x.amount || 0), 0);
+  const avgClickRate = actDedup.length
+    ? actDedup.reduce((s, x) => s + x.clickRate, 0) / actDedup.length : 0;
+  const avgPayRate = actDedup.length
+    ? actDedup.reduce((s, x) => s + x.payRate, 0) / actDedup.length : 0;
+
+  return {
+    range,
+    days,
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    periodStart: new Date(start).toISOString(),
+    periodEnd: new Date(end).toISOString(),
+    usedEndpoint: usedEndpoint || "/bg-brando-mms/supplier/data/center/skc/sales/data",
+    // Plan A 数据
+    skcCount: skcDedup.length,
+    totalSkcSales,
+    overallTrend,
+    skcSales: skcDedup,
+    activityGoods: actDedup,
+    activityCount: actDedup.length,
+    totalActivityAmount,
+    avgClickRate,
+    avgPayRate,
+    warehouseTotal,
+    warehouseSampleStock,
+    // 兼容旧字段
+    pagesFetched,
+    totalOrders: totalSkcSales,
+    ranking: [],
+    byRegion: {},
+    error: skcDedup.length === 0 ? (lastError || "未采集到 SKC 销售数据（请确认 Temu 已登录）") : "",
+  };
+}
+
+// ---- 云舵 region map (从 detailed-sales-query.js 反编译提取) ----
+const YUNDU_ALL_REGION_IDS = [3,4,5,9,10,12,13,14,16,20,26,29,31,32,37,42,45,49,50,52,53,54,57,59,61,64,68,69,75,76,77,83,84,89,90,91,96,97,98,100,101,102,105,106,108,112,113,114,116,119,120,122,128,130,132,134,135,141,144,147,151,152,153,156,158,159,160,162,163,164,165,167,174,175,180,181,184,185,186,191,192,197,201,203,208,209,210,211,212,213,217,219,236];
+const YUNDU_REGION_CONTINENT = {3:"欧洲",5:"欧洲",13:"欧洲",20:"欧洲",26:"欧洲",32:"欧洲",50:"欧洲",52:"欧洲",53:"欧洲",54:"欧洲",64:"欧洲",68:"欧洲",69:"欧洲",76:"欧洲",90:"欧洲",91:"欧洲",96:"欧洲",98:"欧洲",108:"欧洲",112:"欧洲",113:"欧洲",114:"欧洲",116:"欧洲",122:"欧洲",130:"欧洲",134:"欧洲",141:"欧洲",151:"欧洲",162:"欧洲",163:"欧洲",167:"欧洲",175:"欧洲",180:"欧洲",181:"欧洲",186:"欧洲",191:"欧洲",192:"欧洲",208:"欧洲",210:"欧洲",10:"亚洲",14:"亚洲",16:"亚洲",31:"亚洲",75:"亚洲",97:"亚洲",100:"亚洲",101:"亚洲",102:"亚洲",105:"亚洲",106:"亚洲",119:"亚洲",120:"亚洲",132:"亚洲",152:"亚洲",153:"亚洲",160:"亚洲",165:"亚洲",174:"亚洲",185:"亚洲",197:"亚洲",203:"亚洲",209:"亚洲",213:"亚洲",217:"亚洲",9:"美洲",29:"美洲",37:"美洲",42:"美洲",45:"美洲",49:"美洲",57:"美洲",59:"美洲",61:"美洲",84:"美洲",89:"美洲",128:"美洲",156:"美洲",158:"美洲",159:"美洲",164:"美洲",201:"美洲",211:"美洲",212:"美洲",219:"美洲",4:"非洲",77:"非洲",135:"非洲",147:"非洲",184:"非洲",12:"大洋洲",83:"大洋洲",144:"大洋洲",236:"大洋洲"};
+
+// ---- SKC 按地区销量明细（云舵 detailed-sales-query 同款）----
+async function scrapeSkcRegionDetail({ productId, range = "30d" } = {}) {
+  if (!productId) throw new Error("productId required");
+  await ensureBrowser();
+  const days = range === "1d" ? 1 : range === "7d" ? 7 : 30;
+  const startDate = new Date(Date.now() - days * 86400000).toISOString().slice(0,10);
+  const endDate = new Date().toISOString().slice(0,10);
+
+  const page = await _yunduOpenPage();
+
+  // 分两批避免单次过大
+  const batches = [YUNDU_ALL_REGION_IDS.slice(0, 50), YUNDU_ALL_REGION_IDS.slice(50)];
+  const merged = [];
+  let lastErr = "";
+  for (const regionIdList of batches) {
+    try {
+      const r = await page.evaluate(async ({ pid, regionIdList, startDate, endDate }) => {
+        const mallid = (document.cookie.match(/mallid=([^;]+)/i)?.[1]) || "";
+        const resp = await fetch("https://agentseller.temu.com/bg-brando-mms/supplier/data/center/skc/sales/data", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "mallid": mallid },
+          credentials: "include",
+          body: JSON.stringify({
+            productIdList: [Number(pid)],
+            regionIdList,
+            select: "confirmGoodsQuantity",
+            startDate, endDate,
+            page: 1, pageSize: 100,
+          }),
+        });
+        const text = await resp.text();
+        try { return { status: resp.status, body: JSON.parse(text) }; }
+        catch { return { status: resp.status, text: text.slice(0, 300) }; }
+      }, { pid: productId, regionIdList, startDate, endDate });
+      const list = r?.body?.result?.salesDataVOList || [];
+      for (const it of list) merged.push(it);
+      if (!list.length && r?.body?.errorMsg) lastErr = r.body.errorMsg;
+    } catch (e) { lastErr = e.message; }
+  }
+  // 注意：page 是常驻缓存，不要 close
+
+  // 按 regionId 聚合（同一 regionId 多 SKC 行求和）
+  const byRegion = new Map();
+  for (const it of merged) {
+    if (!it.regionId || it.regionId < 0) continue;
+    const prev = byRegion.get(it.regionId) || { regionId: it.regionId, regionName: it.regionName, sales: 0 };
+    prev.sales += Number(it.confirmGoodsQuantity || 0);
+    byRegion.set(it.regionId, prev);
+  }
+  const rows = Array.from(byRegion.values())
+    .filter((r) => r.sales > 0)
+    .map((r) => ({ ...r, continent: YUNDU_REGION_CONTINENT[r.regionId] || "其他" }))
+    .sort((a, b) => b.sales - a.sales);
+
+  // 按大洲分组
+  const grouped = {};
+  for (const c of ["欧洲","亚洲","美洲","非洲","大洋洲","其他"]) grouped[c] = [];
+  for (const r of rows) grouped[r.continent].push(r);
+
+  return {
+    productId,
+    range, days, startDate, endDate,
+    total: rows.reduce((s, x) => s + x.sales, 0),
+    rows,
+    grouped,
+    error: rows.length === 0 ? (lastErr || "未返回任何地区销量数据") : "",
+  };
+}
+
+// ============================================================
+// ========== 云舵套件 (yundu mining) =========================
+// ============================================================
+// 缓存一个常驻 page（避免每次点击都新开窗口）
+let _yunduPage = null;
+async function _yunduOpenPage() {
+  await ensureBrowser();
+  if (_yunduPage && !_yunduPage.isClosed()) {
+    try { await _yunduPage.evaluate(() => 1); return _yunduPage; } catch { _yunduPage = null; }
+  }
+  const page = await createSellerCentralPage("/main/data-center", { logPrefix: "[yundu]" }).catch(async () => {
+    const p = await context.newPage();
+    try { await p.goto("https://agentseller.temu.com/main/data-center", { waitUntil: "domcontentloaded", timeout: 60000 }); } catch {}
+    return p;
+  });
+  await page.waitForTimeout(800);
+  try {
+    await page.route(/agentseller(-[a-z]+)?\.temu\.com\/(mms\/venom|api\/sale|bg-brando-mms|api\/activity|api\/kiana|marvel-mms|bg-luna-agent-seller)\//, async (route) => {
+      const req = route.request();
+      try {
+        const u = new URL(req.url());
+        await route.continue({ headers: { ...req.headers(), origin: u.origin, referer: u.origin + "/" } });
+      } catch { await route.continue(); }
+    });
+  } catch {}
+  _yunduPage = page;
+  return page;
+}
+
+async function _yunduFetch(page, path, body = {}) {
+  return await page.evaluate(async ({ path, body }) => {
+    const mallid = (document.cookie.match(/mallid=([^;]+)/i)?.[1]) || "";
+    const host = path.startsWith("/mms/venom/") ? "https://seller.kuajingmaihuo.com" : "https://agentseller.temu.com";
+    const resp = await fetch(host + path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "mallid": mallid },
+      credentials: "include",
+      body: JSON.stringify(body),
+    });
+    const text = await resp.text();
+    try { return { status: resp.status, body: JSON.parse(text) }; }
+    catch { return { status: resp.status, text: text.slice(0, 500) }; }
+  }, { path, body });
+}
+
+// ---- 1. listOverall (含 addedSiteList + allPunishInfoList) ----
+async function yunduListOverall({ pageNo = 1, pageSize = 50, isLack = false } = {}) {
+  const page = await _yunduOpenPage();
+  try {
+    const r = await _yunduFetch(page, "/mms/venom/api/supplier/sales/management/listOverall",
+      { pageNo, pageSize, isLack });
+    const result = r?.body?.data || r?.body?.result || {};
+    const list = (result.subOrderList || []).map((it) => {
+      const tagList = [];
+      if (it.hotTag) tagList.push("旺款");
+      if (it.hasHotSku) tagList.push("爆旺款SKU");
+      for (const t of (it.purchaseLabelList || [])) if (t) tagList.push(String(t));
+      for (const t of (it.skcLabels || [])) if (t) tagList.push(String(t));
+      for (const t of (it.holidayLabelList || [])) if (t) tagList.push(String(t));
+      for (const t of (it.customLabelList || [])) if (t) tagList.push(String(t));
+      const statusTags = [];
+      if (it.illegalReason) statusTags.push(String(it.illegalReason));
+      if (it.haltSalesType) statusTags.push("已停售");
+      if (it.inBlackList) statusTags.push("黑名单");
+      if (Array.isArray(it.hitRuleDetailList)) for (const r of it.hitRuleDetailList) if (r?.ruleName || r?.name) statusTags.push(String(r.ruleName || r.name));
+      return {
+        skcId: it.productSkcId ?? it.skcId,
+        productId: it.productId,
+        productName: it.productName || it.goodsName,
+        image: it.productSkcPicture || it.image || it.skcMainImage || it.imageUrl,
+        category: it.category || "",
+        buyerName: it.buyerName || "",
+        tagList: Array.from(new Set(tagList)),
+        statusTags: Array.from(new Set(statusTags)),
+        addedSiteList: it.addedSiteList || [],
+        onceAddSiteList: it.onceAddSiteList || [],
+        addedSiteCount: (it.addedSiteList || []).length,
+        punishList: (it.allPunishInfoList || []).map((p) => ({
+          type: p.punishType || p.type,
+          reason: p.reason || p.punishReason || p.desc,
+          time: p.punishTime || p.time,
+        })),
+        isLack: it.isLack,
+        isAdProduct: it.isAdProduct,
+      };
+    });
+    return { total: result.total || list.length, list, raw: r?.body };
+  } finally { /* keep _yunduPage cached */ }
+}
+
+// ---- 2. searchForChainSupplier 站点数 ----
+async function yunduSiteCount({ skcIds = [] } = {}) {
+  const page = await _yunduOpenPage();
+  try {
+    const r = await _yunduFetch(page, "/api/kiana/mms/robin/searchForChainSupplier",
+      { skcIdList: skcIds, pageNum: 1, pageSize: 100 });
+    return r?.body?.result || r?.body || {};
+  } finally { /* keep _yunduPage cached */ }
+}
+
+// ---- 3. 高价限流目标价 querySiteTargetPrice ----
+async function yunduHighPriceLimit({ skcIds = [] } = {}) {
+  const page = await _yunduOpenPage();
+  try {
+    const r = await _yunduFetch(page, "/marvel-mms/us/api/kiana/direnjie/high/price/flow/reduce/full/querySiteTargetPrice",
+      { skcIdList: skcIds });
+    return r?.body?.result || r?.body || {};
+  } finally { /* keep _yunduPage cached */ }
+}
+
+// ---- 4. 质量指标 qualityMetrics ----
+async function yunduQualityMetrics({ pageNum = 1, pageSize = 50 } = {}) {
+  const page = await _yunduOpenPage();
+  try {
+    const r = await _yunduFetch(page, "/bg-luna-agent-seller/goods/quality/supplyChain/qualityMetrics/pageQuery",
+      { pageNum, pageSize });
+    const result = r?.body?.result || {};
+    return { total: result.total || 0, list: result.list || result.dataList || [], raw: r?.body };
+  } finally { /* keep _yunduPage cached */ }
+}
+
+// ---- 5. 活动报名套件 ----
+async function yunduActivityList({ pageNum = 1, pageSize = 50 } = {}) {
+  const page = await _yunduOpenPage();
+  try {
+    const r = await _yunduFetch(page, "/api/kiana/gamblers/marketing/enroll/activity/list",
+      { pageNum, pageSize });
+    const result = r?.body?.result || {};
+    const list = (result.activityList || result.list || []).map((a) => ({
+      activityId: a.activityId || a.activityThematicId,
+      activityThematicId: a.activityThematicId || a.activityId,
+      activityName: a.activityName || a.title || a.name,
+      activityType: a.activityType,
+      startTime: a.startTime || a.activityStartTime,
+      endTime: a.endTime || a.activityEndTime,
+      needCanEnrollCnt: a.needCanEnrollCnt || 0,
+      raw: a,
+    }));
+    return { total: result.total || list.length, list, raw: r?.body };
+  } finally { /* keep _yunduPage cached */ }
+}
+
+async function yunduActivityEnrolled({ pageNum = 1, pageSize = 50 } = {}) {
+  const page = await _yunduOpenPage();
+  try {
+    const r = await _yunduFetch(page, "/api/kiana/gamblers/marketing/enroll/list",
+      { pageNum, pageSize });
+    return r?.body?.result || r?.body || {};
+  } finally { /* keep _yunduPage cached */ }
+}
+
+async function yunduActivityMatch({ activityThematicId, activityType, productIds = [], productSkcExtCodes = [], rowCount = 50, hasMore = false } = {}) {
+  if (!activityThematicId) throw new Error("activityThematicId required");
+  const page = await _yunduOpenPage();
+  try {
+    const r = await _yunduFetch(page, "/api/kiana/gamblers/marketing/enroll/scroll/match",
+      { activityThematicId, activityType, productIds, productSkcExtCodes, rowCount, hasMore });
+    return r?.body?.result || r?.body || {};
+  } finally { /* keep _yunduPage cached */ }
+}
+
+async function yunduActivitySubmit({ activityThematicId, productIds = [], extra = {} } = {}) {
+  if (!activityThematicId) throw new Error("activityThematicId required");
+  const page = await _yunduOpenPage();
+  try {
+    const r = await _yunduFetch(page, "/api/kiana/gamblers/marketing/enroll/submit",
+      { activityThematicId, productIds, ...extra });
+    return r?.body?.result || r?.body || {};
+  } finally { /* keep _yunduPage cached */ }
+}
+
+// 组合：自动报活动（拉可报 → 匹配 → 提交）
+async function yunduAutoEnroll({ activityThematicId, activityType, dryRun = true } = {}) {
+  if (!activityThematicId) throw new Error("activityThematicId required");
+  const page = await _yunduOpenPage();
+  try {
+    // 1. 滚动匹配所有可报商品
+    let allMatched = [];
+    let hasMore = true, rounds = 0;
+    while (hasMore && rounds < 20) {
+      const r = await _yunduFetch(page, "/api/kiana/gamblers/marketing/enroll/scroll/match",
+        { activityThematicId, activityType, productIds: [], productSkcExtCodes: [], rowCount: 100, hasMore: rounds > 0 });
+      const result = r?.body?.result || {};
+      const matchList = result.matchList || result.list || [];
+      allMatched.push(...matchList);
+      hasMore = !!result.hasMore;
+      rounds += 1;
+      if (matchList.length === 0) break;
+    }
+    if (dryRun) {
+      return { dryRun: true, matchedCount: allMatched.length, matched: allMatched.slice(0, 50) };
+    }
+    // 2. 提交
+    const productIds = allMatched.map((m) => m.productId || m.goodsId).filter(Boolean);
+    const sub = await _yunduFetch(page, "/api/kiana/gamblers/marketing/enroll/submit",
+      { activityThematicId, productIds });
+    const sr = sub?.body?.result || sub?.body || {};
+    return {
+      dryRun: false,
+      matchedCount: allMatched.length,
+      successCount: sr.successCount || 0,
+      failCount: sr.failCount || 0,
+      failList: sr.failList || [],
+    };
+  } finally { /* keep _yunduPage cached */ }
+}
 
 // ---- 抓取销售管理数据 (翻页采集所有商品库存) ----
 
@@ -5522,6 +6280,34 @@ async function handleRequest(body) {
       await ensureBrowser();
       return { lifecycle: await scrapeLifecycle() };
     }
+    case "scrape_global_performance": {
+      // 全球业务表现：调 Temu 卖家中心 调价/订单 内部接口，按国家聚合，写入 scrape_all_globalPerformance.json
+      // 用户可选时间范围 30d / 7d / 1d (params.range)，默认 30d
+      const range = String(params?.range || "30d");
+      const result = await scrapeGlobalPerformance({ range });
+      try {
+        const debugDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
+        fs.mkdirSync(debugDir, { recursive: true });
+        fs.writeFileSync(path.join(debugDir, "scrape_all_globalPerformance.json"), JSON.stringify(result));
+      } catch (e) {
+        console.error(`[scrape_global_performance] persist failed: ${e.message}`);
+      }
+      return result;
+    }
+    case "scrape_skc_region_detail": {
+      const productId = params?.productId || params?.pid;
+      const range = String(params?.range || "30d");
+      return await scrapeSkcRegionDetail({ productId, range });
+    }
+    case "yundu_list_overall": return await yunduListOverall(params || {});
+    case "yundu_site_count": return await yunduSiteCount(params || {});
+    case "yundu_high_price_limit": return await yunduHighPriceLimit(params || {});
+    case "yundu_quality_metrics": return await yunduQualityMetrics(params || {});
+    case "yundu_activity_list": return await yunduActivityList(params || {});
+    case "yundu_activity_enrolled": return await yunduActivityEnrolled(params || {});
+    case "yundu_activity_match": return await yunduActivityMatch(params || {});
+    case "yundu_activity_submit": return await yunduActivitySubmit(params || {});
+    case "yundu_auto_enroll": return await yunduAutoEnroll(params || {});
     case "sidebar_nav": {
       await ensureBrowser();
       return await scrapeViaSidebarClick();
@@ -5755,6 +6541,11 @@ async function handleRequest(body) {
         { key: "flowGrow", fn: () => _registryScrape("flowGrow") },
         { key: "activityUS", fn: () => _registryScrape("activityUS") },
         { key: "activityEU", fn: () => _registryScrape("activityEU") },
+        // ---- 云舵套件（已加站点 / 处罚 / 可报活动 / 质量指标）----
+        { key: "globalPerformance", fn: () => scrapeGlobalPerformance({ range: "7d" }) },
+        { key: "yunduOverall", fn: () => yunduListOverall({ pageNo: 1, pageSize: 200 }) },
+        { key: "yunduActivityList", fn: () => yunduActivityList({ pageNum: 1, pageSize: 100 }) },
+        { key: "yunduQualityMetrics", fn: () => yunduQualityMetrics({ pageNum: 1, pageSize: 100 }) },
         {
           key: "sidebarBundleOps",
           expectedKeys: ["sampleManage", "addressManage", "shippingDesk", "shippingList"],
