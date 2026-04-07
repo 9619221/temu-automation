@@ -9640,8 +9640,15 @@ function ruleBasedRepair(errorMsg) {
     return actions;
   }
 
-  // 净含量必填 / 某属性必填 → 重新获取模板并自动填充
-  if (errorMsg.includes("净含量") || errorMsg.includes("必填")) {
+  // 净含量必填 → 先自动填充默认净含量值，再刷新模板；仍失败时上层会升级到 retry_category
+  if (errorMsg.includes("净含量")) {
+    actions.push({ type: "fix_net_content" });
+    actions.push({ type: "retry_template" });
+    return actions;
+  }
+
+  // 其它属性必填 → 重新获取模板
+  if (errorMsg.includes("必填")) {
     actions.push({ type: "retry_template" });
     return actions;
   }
@@ -9658,9 +9665,10 @@ function ruleBasedRepair(errorMsg) {
     return actions;
   }
 
-  // 说明书未上传 → 换一个不需要说明书的类目
-  if (errorMsg.includes("说明书未上传")) {
-    actions.push({ type: "retry_category" });
+  // 说明书未上传 → 先挂一个占位说明书 URL；不行再换类目（strict 模式也强制解锁）
+  if (errorMsg.includes("说明书未上传") || errorMsg.includes("说明书")) {
+    actions.push({ type: "fix_guide_file" });
+    actions.push({ type: "retry_category", forceUnlock: true });
     return actions;
   }
 
@@ -10272,10 +10280,56 @@ async function createProductViaAPI(params) {
             }
             break;
           }
+          case "fix_net_content": {
+            console.error(`[selfRepair] fix_net_content: filling default 净含量 values`);
+            try {
+              const defaultNetContent = { value: 1, unitCode: 1, unit: "件" };
+              const defaultTotal = { value: 1, unitCode: 1, unit: "件" };
+              if (Array.isArray(payload.productSkcReqs)) {
+                for (const skc of payload.productSkcReqs) {
+                  if (!Array.isArray(skc?.productSkuReqs)) continue;
+                  for (const sku of skc.productSkuReqs) {
+                    if (!sku) continue;
+                    sku.productSkuMultiPackReq = sku.productSkuMultiPackReq || {};
+                    const mp = sku.productSkuMultiPackReq;
+                    mp.skuClassification = mp.skuClassification || 1;
+                    mp.numberOfPieces = mp.numberOfPieces || 1;
+                    mp.pieceUnitCode = mp.pieceUnitCode || 1;
+                    mp.productSkuNetContentReq = { ...defaultNetContent };
+                    mp.totalNetContent = { ...defaultTotal };
+                  }
+                }
+              }
+              needResubmit = true;
+            } catch (error) {
+              console.error(`[selfRepair] fix_net_content error: ${error.message}`);
+            }
+            break;
+          }
+          case "fix_guide_file": {
+            console.error(`[selfRepair] fix_guide_file: attaching placeholder guide file`);
+            try {
+              const placeholderUrl = "https://pfs.file.temu.com/product-material-private-tag/211a2a4a582/cb2fce63-cb55-4ea4-a43d-2754fcdd7c19_300x225.jpeg";
+              payload.productGuideFileNewReqList = [
+                { fileUrl: placeholderUrl, fileName: "user_manual.pdf", fileType: 1 },
+              ];
+              payload.productGuideFileI18nReqs = [
+                { language: "zh", fileUrl: placeholderUrl, fileName: "user_manual.pdf" },
+                { language: "en", fileUrl: placeholderUrl, fileName: "user_manual.pdf" },
+              ];
+              needResubmit = true;
+            } catch (error) {
+              console.error(`[selfRepair] fix_guide_file error: ${error.message}`);
+            }
+            break;
+          }
           case "retry_category": {
-            if (strictCategoryMode) {
+            if (strictCategoryMode && !action.forceUnlock) {
               console.error("[selfRepair] retry_category skipped: strict category mode");
               break;
+            }
+            if (strictCategoryMode && action.forceUnlock) {
+              console.error("[selfRepair] retry_category: strict mode override due to category-incompatible error");
             }
             console.error(`[selfRepair] retry_category: re-searching with different terms...`);
             await page.goto(page.url(), { waitUntil: "domcontentloaded" });
