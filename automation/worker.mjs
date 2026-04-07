@@ -8600,10 +8600,14 @@ async function autoPricingFromCSV(params) {
         continue;
       }
 
-      // Step 5: AI 生成中文标题
+      // Step 5: AI 生成中文标题（AI 失败时回退到原标题，但在结果中标记 warning 告知用户）
       updateCurrentProgress({ step: "生成标题..." });
-      let finalTitle = productName;
-      if (aiResult.analysis) {
+      let finalTitle = "";
+      let titleSource = "ai";
+      let titleWarning = "";
+      if (!aiResult.analysis) {
+        titleWarning = "AI 分析结果缺失，已使用原标题";
+      } else {
         try {
           console.error(`[auto-pricing] Generating Chinese title...`);
           const titleResp = await fetch(`${AI_IMAGE_GEN_URL}/api/title`, {
@@ -8611,27 +8615,44 @@ async function autoPricingFromCSV(params) {
             headers: { "Content-Type": "application/json", ...AI_AUTH_HEADERS },
             body: JSON.stringify({ analysis: aiResult.analysis }),
           });
-          if (titleResp.ok) {
+          if (!titleResp.ok) {
+            titleWarning = `AI 标题接口返回 ${titleResp.status}，已使用原标题`;
+          } else {
             const titleData = await titleResp.json();
-            // 用第一个标题（关键词优化版），去掉 [品牌名] 和数字（如250ml）
-            finalTitle = (titleData.titles?.[0]?.title || productName)
-              .replace(/\[.*?\]\s*/g, "")          // 去掉所有 [xxx] 包括品牌名
-              .replace(/（.*?）/g, "")               // 去掉中文括号内容
-              .replace(/\d+(\.\d+)?\s*(ml|g|kg|cm|mm|m|l|oz|inch|ft|pcs|件|个|只|片|包|瓶|支|毫升|厘米|毫米|英寸|磅|盎司|卷|套|组|双|对|块|条|根|张|把|台|袋)/gi, "")  // 去掉数字+单位
-              .replace(/\d+\s*[x×]\s*\d*/gi, "")    // 去掉 30x、10x20 等
-              .replace(/\d+p\b/gi, "")               // 去掉 100p 等
-              .replace(/\b\d{2,}\b/g, "")            // 去掉独立的2位以上数字
-              .replace(/，\s*，/g, "，")              // 修复连续中文逗号
-              .replace(/\|\s*\|/g, "|")              // 修复连续分隔符
-              .replace(/^\s*[|，,]\s*/g, "")          // 去掉开头的分隔符
-              .replace(/\s*[|，,]\s*$/g, "")          // 去掉结尾的分隔符
-              .replace(/\s+/g, " ")
-              .trim();
-            console.error(`[auto-pricing] Title: ${finalTitle.slice(0, 60)}`);
+            const rawTitle = String(titleData.titles?.[0]?.title || "").trim();
+            if (!rawTitle) {
+              titleWarning = "AI 标题接口未返回有效标题，已使用原标题";
+            } else {
+              finalTitle = rawTitle
+                .replace(/\[.*?\]\s*/g, "")
+                .replace(/（.*?）/g, "")
+                .replace(/\d+(\.\d+)?\s*(ml|g|kg|cm|mm|m|l|oz|inch|ft|pcs|件|个|只|片|包|瓶|支|毫升|厘米|毫米|英寸|磅|盎司|卷|套|组|双|对|块|条|根|张|把|台|袋)/gi, "")
+                .replace(/\d+\s*[x×]\s*\d*/gi, "")
+                .replace(/\d+p\b/gi, "")
+                .replace(/\b\d{2,}\b/g, "")
+                .replace(/，\s*，/g, "，")
+                .replace(/\|\s*\|/g, "|")
+                .replace(/^\s*[|，,]\s*/g, "")
+                .replace(/\s*[|，,]\s*$/g, "")
+                .replace(/\s+/g, " ")
+                .trim();
+              if (!finalTitle) {
+                titleWarning = "AI 标题清洗后为空，已使用原标题";
+              } else {
+                console.error(`[auto-pricing] Title: ${finalTitle.slice(0, 60)}`);
+              }
+            }
           }
         } catch (e) {
-          console.error(`[auto-pricing] Title generation failed: ${e.message}, using original`);
+          titleWarning = `AI 标题接口调用失败 (${e.message})，已使用原标题`;
+          console.error(`[auto-pricing] Title generation failed: ${e.message}`);
         }
+      }
+
+      // 兜底：AI 标题拿不到就继续用原 CSV 标题，但记下 warning
+      if (!finalTitle) {
+        finalTitle = productName;
+        titleSource = "original";
       }
 
       // 标题末尾追加后台分类最后一级
@@ -8715,15 +8736,28 @@ async function autoPricingFromCSV(params) {
         }
       }
 
-      results.push({
+      // 在结果中提示用户：本条是否用了原标题兜底
+      const resultEntry = {
         index: i,
         name: productName.slice(0, 40),
         ...createResult,
-      });
+        titleSource,
+        titleWarning: titleWarning || undefined,
+      };
+      if (createResult.success && titleSource === "original") {
+        resultEntry.message = `${createResult.message || "商品已保存到Temu草稿箱"}（⚠️ ${titleWarning}）`;
+      }
+      results.push(resultEntry);
       syncCurrentProgressResults(results, {
         current: `${itemNum}/${total} ${productName.slice(0, 30)}`,
-        step: createResult.success ? "草稿保存成功" : "草稿保存失败",
-        message: createResult.success ? "当前商品已保存到Temu草稿箱" : (createResult.message || "当前商品保存草稿失败"),
+        step: createResult.success
+          ? (titleSource === "original" ? "草稿保存成功（原标题兜底）" : "草稿保存成功")
+          : "草稿保存失败",
+        message: createResult.success
+          ? (titleSource === "original"
+              ? `当前商品已保存到Temu草稿箱（⚠️ ${titleWarning}）`
+              : "当前商品已保存到Temu草稿箱")
+          : (createResult.message || "当前商品保存草稿失败"),
       });
       console.error(`[auto-pricing] ${createResult.success ? "SUCCESS draftId=" + (createResult.draftId || createResult.productId || "unknown") : "FAIL: " + createResult.message}`);
 
