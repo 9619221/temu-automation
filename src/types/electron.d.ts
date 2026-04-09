@@ -113,6 +113,7 @@ interface ImageStudioAPI {
   cancelGenerate: (jobId: string) => Promise<{ cancelled: boolean; jobId: string }>;
   listHistory: () => Promise<ImageStudioHistorySummary[]>;
   getHistoryItem: (id: string) => Promise<ImageStudioHistoryItem | null>;
+  getHistorySources: (id: string) => Promise<{ files: Array<{ name: string; type: string; dataUrl: string }>; error?: string }>;
   saveHistory: (payload: { productName: string; salesRegion: string; imageCount: number; images: ImageStudioGeneratedImage[] }) => Promise<{ id: string }>;
   scoreImage: (payload: { imageUrl: string; imageType: string }) => Promise<ImageStudioImageScore>;
   listJobs: () => Promise<ImageStudioJob[]>;

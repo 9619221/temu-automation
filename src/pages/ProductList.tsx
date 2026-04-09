@@ -363,13 +363,20 @@ export default function ProductList() {
   const openGpDetail = async (record: any, range?: "1d" | "7d" | "30d") => {
     const gp = record?.gp;
     const pid = gp?.productId;
-    if (!pid) { message.error("该商品缺少 productId，请先在 数据采集 页运行 全球销量+地区明细"); return; }
+    if (!pid) { message.error("该商品缺少 productId，请先在 数据采集 页运行 一键采集"); return; }
     const r = range || gpDetailRange;
     setGpDetailRange(r);
     setGpDetailRow({ productId: pid, productName: gp.productName || record.title, skcId: record.skcId });
     setGpDetailOpen(true);
-    setGpDetailData(null);
     setGpDetailLoading(true);
+    // 优先从缓存（一键采集时已预拉）
+    const cached = gp.regionDetail;
+    if (cached && cached.rows?.length) {
+      setGpDetailData(cached);
+      setGpDetailLoading(false);
+      return;
+    }
+    setGpDetailData(null);
     try {
       const api = (window as any).electronAPI?.automation;
       const res = await api?.scrapeSkcRegionDetail?.(pid, r);
@@ -433,18 +440,21 @@ export default function ProductList() {
       ]);
 
       // 全球业务表现：按 skcId 索引
-      const gpSkcMap = new Map<string, { sales: number; changeRate: number; trend: any[]; productId: number | null; productName?: string }>();
+      const gpSkcMap = new Map<string, any>();
       try {
         const skcSales: any[] = (rawGlobalPerf as any)?.skcSales || [];
+        const regionDetails: any = (rawGlobalPerf as any)?.regionDetails || {};
         for (const r of skcSales) {
           const k = r?.skcId != null ? String(r.skcId) : "";
           if (!k) continue;
+          const pid = r.productId ?? null;
           gpSkcMap.set(k, {
             sales: Number(r.sales) || 0,
             changeRate: Number(r.changeRate) || 0,
             trend: Array.isArray(r.trend) ? r.trend : [],
-            productId: r.productId ?? null,
+            productId: pid,
             productName: r.productName,
+            regionDetail: pid != null ? regionDetails[String(pid)] : null,
           });
         }
       } catch (e) { console.warn("[ProductList] globalPerf parse error", e); }
@@ -952,48 +962,99 @@ export default function ProductList() {
       title: "商品信息",
       dataIndex: "title",
       key: "title",
-      width: 320,
-      ellipsis: true,
+      width: 380,
       fixed: "left",
-      render: (text: string, record: ProductItem) => {
+      render: (text: string, record: any) => {
         const raw = record.salesRaw || {};
+        const y = record.yundu;
+        const gp = record.gp;
         const score = raw.productReviewScore ?? raw.goodsScore ?? raw.score ?? raw.avgScore;
         const comment = record.commentNum ?? raw.commentNum;
         const productDays = raw.productDays ?? raw.onSalesDurationOffline ?? raw.addSiteDays ?? raw.addedToSiteDays ?? raw.onSiteDays ?? raw.onShelfDays ?? raw.listedDays ?? raw.siteOnlineDays ?? raw.launchDays ?? raw.daysSinceAdd;
         const seasonTag = raw.festivalSeasonTag || raw.seasonTag || raw.festivalTag;
         const stockOut = (record.stockStatus || "").includes("断货") || raw.stockStatus === "SOLD_OUT";
+        const tags: string[] = y?.tagList || [];
+        const statusTags: string[] = y?.statusTags || [];
+        const sites: any[] = y?.addedSiteList || [];
+        const offSites: any[] = y?.onceAddSiteList || [];
+        const trend = (gp?.trend || []).map((t: any) => ({ day: String(t.day || "").slice(5), v: t.quantity }));
+        const changeRate = gp?.changeRate || 0;
+        const up = changeRate >= 0;
+        const siteName = (s: any) => s?.siteName || s?.regionName || s?.name || s?.code || (typeof s === "string" ? s : "?");
+        const buyerLine = y?.buyerName || record.operatorContact || record.operatorNick;
+
         return (
           <div style={{ fontSize: 11, lineHeight: 1.55 }}>
             <Tooltip title={text || "-"} placement="topLeft">
-              <div style={{ fontWeight: 500, fontSize: 12, marginBottom: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <div style={{ fontWeight: 500, fontSize: 12, marginBottom: 2, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
                 {text || "-"}
               </div>
             </Tooltip>
-            {getPrimaryCategory(record) && <div style={{ color: "#999" }}>类目：{getPrimaryCategory(record)}</div>}
+            {getPrimaryCategory(record) && <div style={{ color: "#999" }}>{getPrimaryCategory(record)}</div>}
             {(score != null || comment != null) && (
               <div style={{ color: "#faad14" }}>
-                {score != null && <span>★ {score}分</span>}
-                {score != null && comment != null && <span style={{ color: "#999" }}> | </span>}
-                {comment != null && <span style={{ color: "#999" }}>评论数:{comment}</span>}
+                {score != null ? <span>★ {score}分</span> : <span style={{ color: "#999" }}>暂无评分</span>}
+                {comment != null && <span style={{ color: "#999" }}> · 评论 {comment}</span>}
               </div>
             )}
             {record.skcId && <div style={{ color: "#999" }}>SKC：<span style={{ fontFamily: "monospace" }}>{record.skcId}</span></div>}
             {productDays != null && productDays !== "" && <div style={{ color: "#999" }}>加入站点时长：{productDays}天</div>}
             {record.spuId && <div style={{ color: "#999" }}>SPU：<span style={{ fontFamily: "monospace" }}>{record.spuId}</span></div>}
-            {(record.operatorContact || record.operatorNick) && <div style={{ color: "#999" }}>买手：<span style={{ color: "#1890ff" }}>{record.operatorContact || ""}{record.operatorNick ? `（${record.operatorNick}）` : ""}</span></div>}
             {seasonTag && <div style={{ color: "#999" }}>节日/季节标签：{seasonTag}</div>}
-            <div style={{ marginTop: 2 }}>
-              {stockOut && <Tag color="red" style={{ fontSize: 10, marginRight: 4 }}>已断货</Tag>}
-              {(record.hotTag === "true" || raw.hotTag === true) && <Tag color="volcano" style={{ fontSize: 10, marginRight: 4 }}>🔥 热销款</Tag>}
-              {record.hotTag && record.hotTag !== "true" && record.hotTag !== "false" && <Tag color="volcano" style={{ fontSize: 10, marginRight: 4 }}>{record.hotTag}</Tag>}
-              {raw.isAdProduct && <Tag color="blue" style={{ fontSize: 10, marginRight: 4 }}>广告</Tag>}
-              {Array.isArray(raw.purchaseLabelList) && raw.purchaseLabelList.map((lbl: any, i: number) => (
-                <Tag key={`p${i}`} color="gold" style={{ fontSize: 10, marginRight: 4 }}>{typeof lbl === "object" ? (lbl.name || lbl.label || JSON.stringify(lbl)) : String(lbl)}</Tag>
-              ))}
-              {Array.isArray(raw.adTypeList) && raw.adTypeList.filter((v: any) => v && v !== 0 && v !== "0").map((t: any, i: number) => (
-                <Tag key={`ad${i}`} color="geekblue" style={{ fontSize: 10, marginRight: 4 }}>{typeof t === "object" ? (t.name || t.label || JSON.stringify(t)) : String(t)}</Tag>
+
+            {/* 状态标签行 */}
+            <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", gap: 3 }}>
+              {stockOut && <Tag color="red" style={{ fontSize: 10, margin: 0 }}>已断货</Tag>}
+              {(record.hotTag === "true" || raw.hotTag === true) && <Tag color="volcano" style={{ fontSize: 10, margin: 0 }}>🔥 热销款</Tag>}
+              {raw.isAdProduct && <Tag color="blue" style={{ fontSize: 10, margin: 0 }}>广告</Tag>}
+              {tags.map((t, i) => <Tag key={`yt${i}`} color="red" style={{ fontSize: 10, margin: 0 }}>{t}</Tag>)}
+              {statusTags.map((t, i) => <Tag key={`ys${i}`} color="volcano" style={{ fontSize: 10, margin: 0 }}>{t}</Tag>)}
+              {(y?.punishList || []).slice(0, 2).map((p: any, i: number) => (
+                <Tag key={`pn${i}`} color="red" style={{ fontSize: 10, margin: 0 }}>处罚:{p.reason || p.type}</Tag>
               ))}
             </div>
+
+            {/* 云舵卡区块 */}
+            {(y || gp) && (
+              <div style={{ marginTop: 6, padding: 6, background: "#fafafa", borderRadius: 4, border: "1px solid #f0f0f0" }}>
+                {buyerLine && (
+                  <div style={{ marginBottom: 3 }}>
+                    <span style={{ color: "#888" }}>买手：</span>
+                    <Tag color="orange" style={{ fontSize: 10, margin: 0 }}>{buyerLine}</Tag>
+                  </div>
+                )}
+                {y?.category && (
+                  <div style={{ marginBottom: 3, display: "flex", alignItems: "flex-start", gap: 4 }}>
+                    <span style={{ color: "#888", flexShrink: 0 }}>类目：</span>
+                    <span style={{ flex: 1, color: "#555", lineHeight: 1.4 }}>{y.category}</span>
+                    <a style={{ fontSize: 10, color: "#1677ff", flexShrink: 0 }} onClick={(e) => { e.stopPropagation(); navigator.clipboard?.writeText(y.category); message.success("已复制"); }}>复制</a>
+                  </div>
+                )}
+                {sites.length > 0 && (
+                  <div style={{ marginBottom: 3 }}>
+                    <span style={{ color: "#888" }}>销售：</span>
+                    <span style={{ color: "#1677ff" }}>{sites.slice(0, 3).map(siteName).join("，")}</span>
+                    {sites.length > 3 && <Tag color="blue" style={{ fontSize: 10, marginLeft: 4 }}>共 {sites.length} 站</Tag>}
+                  </div>
+                )}
+                {offSites.length > 0 && (
+                  <div style={{ marginBottom: 3 }}>
+                    <span style={{ color: "#888" }}>下架：</span>
+                    <span style={{ color: "#999" }}>{offSites.slice(0, 3).map(siteName).join("，")}{offSites.length > 3 ? `…` : ""}</span>
+                  </div>
+                )}
+                {gp && (
+                  <div style={{ marginTop: 4, paddingTop: 4, borderTop: "1px dashed #e8e8e8", display: "flex", justifyContent: "flex-end" }}>
+                    <a
+                      style={{ fontSize: 11, color: "#1677ff" }}
+                      onClick={(e) => { e.stopPropagation(); openGpDetail(record); }}
+                    >
+                      动销详情 →
+                    </a>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         );
       },
@@ -1004,120 +1065,6 @@ export default function ProductList() {
       key: "skcId",
       width: 120,
       render: (text: string) => <span style={{ fontSize: 12, fontFamily: "monospace" }}>{text || "-"}</span>,
-    },
-    {
-      title: "云舵卡",
-      key: "yunduCard",
-      width: 130,
-      render: (_: any, record: any) => {
-        const y = record.yundu;
-        const gp = record.gp;
-        if (!y && !gp) return <span style={{ color: "#bbb" }}>-</span>;
-        const tags: string[] = y?.tagList || [];
-        const statusTags: string[] = y?.statusTags || [];
-        const sites: any[] = y?.addedSiteList || [];
-        const offSites: any[] = y?.onceAddSiteList || [];
-        const trend = (gp?.trend || []).map((t: any) => ({ day: String(t.day || "").slice(5), v: t.quantity }));
-        const changeRate = gp?.changeRate || 0;
-        const up = changeRate >= 0;
-        const siteName = (s: any) => s?.siteName || s?.regionName || s?.name || s?.code || (typeof s === "string" ? s : "?");
-
-        const content = (
-          <div style={{ width: 320, fontSize: 12 }}>
-            {y?.buyerName && (
-              <div style={{ marginBottom: 6 }}>
-                <span style={{ color: "#888" }}>买手：</span>
-                <Tag color="orange">{y.buyerName}</Tag>
-              </div>
-            )}
-            {tags.length > 0 && (
-              <div style={{ marginBottom: 6 }}>
-                <span style={{ color: "#888" }}>标签：</span>
-                {tags.map((t, i) => <Tag key={i} color="red" style={{ marginBottom: 2 }}>{t}</Tag>)}
-              </div>
-            )}
-            {y?.category && (
-              <div style={{ marginBottom: 6, display: "flex", alignItems: "flex-start", gap: 6 }}>
-                <span style={{ color: "#888", flexShrink: 0 }}>类目：</span>
-                <span style={{ flex: 1, lineHeight: 1.4 }}>{y.category}</span>
-                <Button size="small" type="link" style={{ padding: 0, fontSize: 11 }} onClick={(e) => { e.stopPropagation(); navigator.clipboard?.writeText(y.category); message.success("已复制"); }}>复制</Button>
-              </div>
-            )}
-            {sites.length > 0 && (
-              <div style={{ marginBottom: 6 }}>
-                <span style={{ color: "#888" }}>销售：</span>
-                <span>{sites.slice(0, 5).map(siteName).join("，")}{sites.length > 5 ? `… 共 ${sites.length} 站` : ""}</span>
-              </div>
-            )}
-            {offSites.length > 0 && (
-              <div style={{ marginBottom: 6 }}>
-                <span style={{ color: "#888" }}>下架：</span>
-                <span>{offSites.slice(0, 5).map(siteName).join("，")}{offSites.length > 5 ? `…` : ""}</span>
-              </div>
-            )}
-            {statusTags.length > 0 && (
-              <div style={{ marginBottom: 6 }}>
-                {statusTags.map((t, i) => <Tag key={i} color="volcano" style={{ marginBottom: 2 }}>{t}</Tag>)}
-              </div>
-            )}
-            {(y?.punishList?.length || 0) > 0 && (
-              <div style={{ marginBottom: 6 }}>
-                <span style={{ color: "#888" }}>处罚：</span>
-                {y.punishList.slice(0, 3).map((p: any, i: number) => (
-                  <Tag key={i} color="red" style={{ marginBottom: 2, whiteSpace: "normal" }}>{p.reason || p.type || "处罚"}</Tag>
-                ))}
-              </div>
-            )}
-            {gp && (
-              <>
-                <Divider style={{ margin: "8px 0" }} />
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
-                  <span style={{ color: "#888" }}>近期销量</span>
-                  <Typography.Text strong style={{ fontSize: 14 }}>{gp.sales}</Typography.Text>
-                  <Typography.Text style={{ color: up ? "#52c41a" : "#f5222d", fontSize: 12 }}>
-                    {up ? "↑" : "↓"} {Math.abs(changeRate).toFixed(2)}%
-                  </Typography.Text>
-                </div>
-                {trend.length > 0 && (
-                  <ResponsiveContainer width="100%" height={40}>
-                    <AreaChart data={trend}>
-                      <Area type="monotone" dataKey="v" stroke="#1677ff" fill="#1677ff33" strokeWidth={1.5} />
-                    </AreaChart>
-                  </ResponsiveContainer>
-                )}
-                <Button
-                  block
-                  size="small"
-                  type="primary"
-                  style={{ marginTop: 6 }}
-                  disabled={!gp.productId}
-                  onClick={(e) => { e.stopPropagation(); openGpDetail(record); }}
-                >
-                  查看详细站点销售数据
-                </Button>
-              </>
-            )}
-          </div>
-        );
-
-        return (
-          <Popover content={content} placement="left" trigger="hover" overlayStyle={{ maxWidth: 360 }}>
-            <div style={{ cursor: "pointer", fontSize: 11, lineHeight: 1.5 }} onClick={(e) => e.stopPropagation()}>
-              {tags.slice(0, 2).map((t, i) => <Tag key={i} color="red" style={{ margin: 0, marginRight: 2, marginBottom: 2 }}>{t}</Tag>)}
-              {sites.length > 0 && <Tag color="blue" style={{ margin: 0, marginBottom: 2 }}>{sites.length} 站</Tag>}
-              {gp && (
-                <div>
-                  <Typography.Text strong style={{ fontSize: 13 }}>{gp.sales}</Typography.Text>
-                  <Typography.Text style={{ color: up ? "#52c41a" : "#f5222d", fontSize: 11, marginLeft: 4 }}>
-                    {up ? "↑" : "↓"}{Math.abs(changeRate).toFixed(1)}%
-                  </Typography.Text>
-                </div>
-              )}
-              {statusTags.length > 0 && <Tag color="volcano" style={{ margin: 0, fontSize: 10 }}>{statusTags[0]}</Tag>}
-            </div>
-          </Popover>
-        );
-      },
     },
     {
       title: "SKU/规格",

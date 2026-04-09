@@ -6,6 +6,7 @@ import http from "http";
 import https from "https";
 import fs from "fs";
 import path from "path";
+import os from "os";
 import crypto from "crypto";
 import { createRequire } from "module";
 import { fileURLToPath } from "url";
@@ -3231,6 +3232,58 @@ async function scrapeGlobalPerformance({ range = "30d" } = {}) {
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([day, quantity]) => ({ day, quantity }));
 
+  // === 预采集所有 SKC 的地区销量明细（一键采集时一次跑完，避免点击时再开页面）===
+  const regionDetails = {}; // productId -> { rows, grouped, total }
+  const skcWithPid = skcDedup.filter((s) => s.productId);
+  console.error(`[global-perf] Pre-fetching region details for ${skcWithPid.length} SKCs...`);
+  const _rdStart = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+  const _rdEnd = new Date().toISOString().slice(0, 10);
+  const fetchOneRegionDetail = async (pid) => {
+    const merged = [];
+    const batches = [YUNDU_ALL_REGION_IDS.slice(0, 50), YUNDU_ALL_REGION_IDS.slice(50)];
+    for (const regionIdList of batches) {
+      try {
+        const r = await page.evaluate(async ({ pid, regionIdList, startDate, endDate }) => {
+          const mallid = (document.cookie.match(/mallid=([^;]+)/i)?.[1]) || "";
+          const resp = await fetch("https://agentseller.temu.com/bg-brando-mms/supplier/data/center/skc/sales/data", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "mallid": mallid },
+            credentials: "include",
+            body: JSON.stringify({ productIdList: [Number(pid)], regionIdList, select: "confirmGoodsQuantity", startDate, endDate, page: 1, pageSize: 100 }),
+          });
+          try { return await resp.json(); } catch { return null; }
+        }, { pid, regionIdList, startDate: _rdStart, endDate: _rdEnd });
+        const list = r?.result?.salesDataVOList || [];
+        for (const it of list) merged.push(it);
+      } catch {}
+    }
+    const byRegion = new Map();
+    for (const it of merged) {
+      if (!it.regionId || it.regionId < 0) continue;
+      const prev = byRegion.get(it.regionId) || { regionId: it.regionId, regionName: it.regionName, sales: 0 };
+      prev.sales += Number(it.confirmGoodsQuantity || 0);
+      byRegion.set(it.regionId, prev);
+    }
+    const rows = Array.from(byRegion.values()).filter((r) => r.sales > 0)
+      .map((r) => ({ ...r, continent: YUNDU_REGION_CONTINENT[r.regionId] || "其他" }))
+      .sort((a, b) => b.sales - a.sales);
+    const grouped = { 欧洲: [], 亚洲: [], 美洲: [], 非洲: [], 大洋洲: [], 其他: [] };
+    for (const r of rows) grouped[r.continent].push(r);
+    return { productId: pid, rows, grouped, total: rows.reduce((s, x) => s + x.sales, 0) };
+  };
+  // 串行（同一 page，避免并发冲突）
+  for (let i = 0; i < skcWithPid.length; i++) {
+    const s = skcWithPid[i];
+    try {
+      const detail = await fetchOneRegionDetail(s.productId);
+      regionDetails[String(s.productId)] = detail;
+      if (i % 10 === 0) console.error(`[global-perf] region detail ${i + 1}/${skcWithPid.length}`);
+    } catch (e) {
+      console.error(`[global-perf] region detail fail pid=${s.productId}: ${e.message}`);
+    }
+  }
+  console.error(`[global-perf] Region details done: ${Object.keys(regionDetails).length} entries`);
+
   const totalSkcSales = skcDedup.reduce((s, x) => s + (x.sales || 0), 0);
   const totalActivityAmount = actDedup.reduce((s, x) => s + (x.amount || 0), 0);
   const avgClickRate = actDedup.length
@@ -3251,6 +3304,7 @@ async function scrapeGlobalPerformance({ range = "30d" } = {}) {
     totalSkcSales,
     overallTrend,
     skcSales: skcDedup,
+    regionDetails,
     activityGoods: actDedup,
     activityCount: actDedup.length,
     totalActivityAmount,
@@ -3345,17 +3399,94 @@ async function scrapeSkcRegionDetail({ productId, range = "30d" } = {}) {
 // ============================================================
 // 缓存一个常驻 page（避免每次点击都新开窗口）
 let _yunduPage = null;
+let _yunduKjmhPage = null;
+async function _yunduOpenKjmhPage() {
+  await ensureBrowser();
+  if (_yunduKjmhPage && !_yunduKjmhPage.isClosed()) {
+    try { await _yunduKjmhPage.evaluate(() => 1); return _yunduKjmhPage; } catch { _yunduKjmhPage = null; }
+  }
+  const p = await context.newPage();
+  try {
+    await p.goto("https://seller.kuajingmaihuo.com/main/sale-manage", { waitUntil: "domcontentloaded", timeout: 60000 });
+  } catch {}
+  await p.waitForTimeout(800);
+  _yunduKjmhPage = p;
+  return p;
+}
+
+let _yunduAntiContent = "";
+let _yunduMallid = "";
+const _yunduRealBodies = {}; // path -> latest real request body
 async function _yunduOpenPage() {
   await ensureBrowser();
   if (_yunduPage && !_yunduPage.isClosed()) {
     try { await _yunduPage.evaluate(() => 1); return _yunduPage; } catch { _yunduPage = null; }
   }
+  // 在页面加载前注入 fetch/XHR hook，捕获业务请求里的 anti-content 签名
+  await context.addInitScript(() => {
+    if (window.__yunduHookInstalled) return;
+    window.__yunduHookInstalled = true;
+    window.__yunduAntiContent = "";
+    window.__yunduMallid = "";
+    const origFetch = window.fetch;
+    window.fetch = function (input, init) {
+      try {
+        const headers = (init && init.headers) || {};
+        const get = (k) => {
+          if (headers instanceof Headers) return headers.get(k);
+          if (Array.isArray(headers)) { const h = headers.find((p) => String(p[0]).toLowerCase() === k); return h ? h[1] : null; }
+          for (const key of Object.keys(headers)) if (key.toLowerCase() === k) return headers[key];
+          return null;
+        };
+        const ac = get("anti-content");
+        if (ac) window.__yunduAntiContent = ac;
+        const mid = get("mallid");
+        if (mid) window.__yunduMallid = mid;
+      } catch {}
+      return origFetch.apply(this, arguments);
+    };
+    const origOpen = XMLHttpRequest.prototype.open;
+    const origSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+    XMLHttpRequest.prototype.setRequestHeader = function (k, v) {
+      try {
+        const lk = String(k).toLowerCase();
+        if (lk === "anti-content" && v) window.__yunduAntiContent = v;
+        if (lk === "mallid" && v) window.__yunduMallid = v;
+      } catch {}
+      return origSetHeader.apply(this, arguments);
+    };
+    void origOpen;
+  });
   const page = await createSellerCentralPage("/main/data-center", { logPrefix: "[yundu]" }).catch(async () => {
     const p = await context.newPage();
     try { await p.goto("https://agentseller.temu.com/main/data-center", { waitUntil: "domcontentloaded", timeout: 60000 }); } catch {}
     return p;
   });
   await page.waitForTimeout(800);
+  // 主进程侧嗅探：所有出站请求里只要带 anti-content 就缓存
+  page.on("request", (req) => {
+    try {
+      const h = req.headers();
+      const ac = h["anti-content"] || h["Anti-Content"];
+      if (ac) _yunduAntiContent = ac;
+      const mid = h["mallid"] || h["Mallid"];
+      if (mid) _yunduMallid = mid;
+      const u = req.url();
+      if (req.method() === "POST" && /\/(mms\/venom|api\/sale|bg-brando-mms|api\/activity|api\/kiana|marvel-mms|bg-luna-agent-seller)\//.test(u)) {
+        try {
+          const post = req.postData();
+          if (post) {
+            const upath = new URL(u).pathname;
+            // 只记录真实页面发出的（首次记录后不再覆盖，避免被自己的请求覆盖）
+            if (!_yunduRealBodies[upath]) {
+              _yunduRealBodies[upath] = post;
+              console.error(`[yundu-sniff] ${upath} body=${post.slice(0, 300)}`);
+            }
+          }
+        } catch {}
+      }
+    } catch {}
+  });
   try {
     await page.route(/agentseller(-[a-z]+)?\.temu\.com\/(mms\/venom|api\/sale|bg-brando-mms|api\/activity|api\/kiana|marvel-mms|bg-luna-agent-seller)\//, async (route) => {
       const req = route.request();
@@ -3370,28 +3501,96 @@ async function _yunduOpenPage() {
 }
 
 async function _yunduFetch(page, path, body = {}) {
-  return await page.evaluate(async ({ path, body }) => {
-    const mallid = (document.cookie.match(/mallid=([^;]+)/i)?.[1]) || "";
-    const host = path.startsWith("/mms/venom/") ? "https://seller.kuajingmaihuo.com" : "https://agentseller.temu.com";
+  // 等 主进程侧 嗅到 anti-content（最多 10 秒）
+  const t0 = Date.now();
+  while (!_yunduAntiContent && Date.now() - t0 < 10000) {
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  const ac = _yunduAntiContent || "";
+  const mid = _yunduMallid || "";
+  return await page.evaluate(async ({ path, body, ac, mid }) => {
+    const mallid = mid || (document.cookie.match(/mallid=([^;]+)/i)?.[1]) || "";
+    const host = location.origin.includes("kuajingmaihuo") ? "https://agentseller.temu.com" : location.origin;
+    const headers = { "Content-Type": "application/json", "mallid": mallid };
+    if (ac) headers["anti-content"] = ac;
     const resp = await fetch(host + path, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "mallid": mallid },
+      headers,
       credentials: "include",
       body: JSON.stringify(body),
     });
     const text = await resp.text();
-    try { return { status: resp.status, body: JSON.parse(text) }; }
-    catch { return { status: resp.status, text: text.slice(0, 500) }; }
-  }, { path, body });
+    try { return { status: resp.status, body: JSON.parse(text), antiContentUsed: !!ac }; }
+    catch { return { status: resp.status, text: text.slice(0, 500), antiContentUsed: !!ac }; }
+  }, { path, body, ac, mid });
 }
 
 // ---- 1. listOverall (含 addedSiteList + allPunishInfoList) ----
 async function yunduListOverall({ pageNo = 1, pageSize = 50, isLack = false } = {}) {
   const page = await _yunduOpenPage();
-  try {
-    const r = await _yunduFetch(page, "/mms/venom/api/supplier/sales/management/listOverall",
-      { pageNo, pageSize, isLack });
-    const result = r?.body?.data || r?.body?.result || {};
+  // 导航到销售管理页让业务代码发出真实 listOverall 请求
+  const listPath = "/mms/venom/api/supplier/sales/management/listOverall";
+  if (!_yunduRealBodies[listPath]) {
+    try {
+      console.error("[yundu] navigating to sale-manage via navigateToSellerCentral...");
+      await navigateToSellerCentral(page, "/stock/fully-mgt/sale-manage/main");
+      await page.waitForTimeout(3000);
+      // 关弹窗
+      for (let i = 0; i < 6; i++) {
+        try {
+          const btn = page.locator('button:has-text("知道了"), button:has-text("我知道了"), button:has-text("确定"), button:has-text("关闭"), button:has-text("暂不")').first();
+          if (await btn.isVisible({ timeout: 400 })) await btn.click(); else break;
+        } catch { break; }
+      }
+      // 等业务代码发出 listOverall（最多 30 秒）
+      const t0 = Date.now();
+      while (!_yunduRealBodies[listPath] && Date.now() - t0 < 30000) {
+        await page.waitForTimeout(400);
+      }
+      console.error(`[yundu] real body sniffed: ${!!_yunduRealBodies[listPath]}`);
+    } catch (e) { console.error("[yundu] sale-manage nav exception:", e.message); }
+  }
+  console.error(`[yundu] anti-content captured: ${_yunduAntiContent ? _yunduAntiContent.slice(0, 30) + "..." : "NONE"}`);
+  // 用嗅到的真实 body 模板，覆盖分页字段
+  const realBodyStr = _yunduRealBodies["/mms/venom/api/supplier/sales/management/listOverall"];
+  let bodyToSend = { pageNo, pageSize, isLack };
+  if (realBodyStr) {
+    try {
+      const realBody = JSON.parse(realBodyStr);
+      bodyToSend = { ...realBody, pageNo, pageSize };
+      console.error(`[yundu] using real body template, keys: ${Object.keys(realBody).join(",")}`);
+    } catch {}
+  } else {
+    console.error(`[yundu] WARN: no real body sniffed, using minimal body`);
+  }
+  // 翻页拉全部 subOrderList
+  const PAGE_SIZE = 200;
+  let allSubOrders = [];
+  let firstResult = null;
+  let totalCount = 0;
+  let firstResp = null;
+  {
+    const firstBody = { ...bodyToSend, pageNo: 1, pageSize: PAGE_SIZE };
+    const r0 = await _yunduFetch(page, "/mms/venom/api/supplier/sales/management/listOverall", firstBody);
+    firstResp = r0;
+    console.error(`[yundu] listOverall p1 status=${r0?.status} antiContent=${r0?.antiContentUsed} errCode=${r0?.body?.errorCode || r0?.body?.error_code}`);
+    firstResult = r0?.body?.data || r0?.body?.result || {};
+    totalCount = Number(firstResult.total || firstResult.totalCount || 0);
+    allSubOrders = (firstResult.subOrderList || []).slice();
+    const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+    console.error(`[yundu] listOverall total=${totalCount} pages=${totalPages}`);
+    for (let pn = 2; pn <= totalPages && pn <= 30; pn++) {
+      const rN = await _yunduFetch(page, "/mms/venom/api/supplier/sales/management/listOverall",
+        { ...bodyToSend, pageNo: pn, pageSize: PAGE_SIZE });
+      const resN = rN?.body?.data || rN?.body?.result || {};
+      const sub = resN.subOrderList || [];
+      allSubOrders.push(...sub);
+      console.error(`[yundu] listOverall p${pn} got ${sub.length} rows (total now ${allSubOrders.length})`);
+    }
+  }
+  const r = firstResp;
+  const result = { ...firstResult, subOrderList: allSubOrders, total: totalCount };
+  {
     const list = (result.subOrderList || []).map((it) => {
       const tagList = [];
       if (it.hotTag) tagList.push("旺款");
@@ -3426,8 +3625,65 @@ async function yunduListOverall({ pageNo = 1, pageSize = 50, isLack = false } = 
         isAdProduct: it.isAdProduct,
       };
     });
+    // 批量补站点信息：searchForChainSupplier（一次性翻页拉全部）
+    try {
+      console.error(`[yundu] fetching site info via searchForChainSupplier...`);
+      const siteMap = {};
+      // 嗅真实 body 模板
+      const sniffedBody = _yunduRealBodies["/api/kiana/mms/robin/searchForChainSupplier"];
+      let baseBody = { pageNum: 1, pageSize: 100 };
+      if (sniffedBody) { try { baseBody = JSON.parse(sniffedBody); } catch {} }
+      let pageNum = 1;
+      let totalPages = 1;
+      do {
+        const sr = await _yunduFetch(page, "/api/kiana/mms/robin/searchForChainSupplier",
+          { ...baseBody, pageNum, pageSize: 100 });
+        const result = sr?.body?.result || {};
+        const items = result.dataList || result.list || [];
+        if (pageNum === 1) {
+          const total = result.total || 0;
+          totalPages = Math.ceil(total / 100);
+          console.error(`[yundu] searchForChainSupplier total=${total} pages=${totalPages}`);
+          const it0 = items[0] || {};
+          console.error(`[yundu] buyer fields: nickContact=${JSON.stringify(it0.nickContact)} contact=${JSON.stringify(it0.contact)} buyerEditMessageVO=${JSON.stringify(it0.buyerEditMessageVO)?.slice(0,200)} buyerEditOpinionCount=${it0.buyerEditOpinionCount} canChangeBuyer=${it0.canChangeBuyer}`);
+        }
+        for (const it of items) {
+          const allPunish = it.allPunishInfoList || [];
+          const buyer = it.nickContact || it.contact || it.buyerEditMessageVO?.buyerName || "";
+          for (const skc of (it.skcList || [])) {
+            const k = String(skc.skcId ?? "");
+            if (!k) continue;
+            const sites = skc.addedSiteList || [];
+            siteMap[k] = {
+              buyerName: buyer,
+              addedSiteList: sites,
+              onceAddSiteList: skc.onceAddSiteList || [],
+              addedSiteCount: sites.length,
+              punishList: (skc.punishInfo ? [skc.punishInfo] : []).concat(allPunish).map((p) => ({
+                type: p.punishType || p.type,
+                reason: p.reason || p.punishReason || p.desc || p.ruleName,
+                time: p.punishTime || p.time,
+              })).filter((p) => p.reason || p.type),
+            };
+          }
+        }
+        pageNum++;
+      } while (pageNum <= totalPages && pageNum <= 30);
+      for (const row of list) {
+        const m = siteMap[String(row.skcId)];
+        if (m) {
+          row.addedSiteList = m.addedSiteList;
+          row.onceAddSiteList = m.onceAddSiteList;
+          row.addedSiteCount = m.addedSiteCount;
+          if (m.buyerName && !row.buyerName) row.buyerName = m.buyerName;
+          if (m.punishList?.length) row.punishList = m.punishList;
+        }
+      }
+      const merged = list.filter((r) => r.addedSiteCount > 0).length;
+      console.error(`[yundu] site info merged: ${Object.keys(siteMap).length} skcs scanned, ${merged}/${list.length} list rows have sites`);
+    } catch (e) { console.error("[yundu] siteCount merge error:", e.message); }
     return { total: result.total || list.length, list, raw: r?.body };
-  } finally { /* keep _yunduPage cached */ }
+  }
 }
 
 // ---- 2. searchForChainSupplier 站点数 ----
@@ -3438,6 +3694,178 @@ async function yunduSiteCount({ skcIds = [] } = {}) {
       { skcIdList: skcIds, pageNum: 1, pageSize: 100 });
     return r?.body?.result || r?.body || {};
   } finally { /* keep _yunduPage cached */ }
+}
+
+// ---- 嗅探发现：打开候选页面 + 导出已捕获的 endpoint / body ----
+async function yunduSniffDiscover({ urls = [], waitMs = 8000, dumpFile = "", interact = true } = {}) {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const page = await _yunduOpenPage();
+  const candidates = urls.length ? urls : [
+    // 广告投放
+    { url: "https://agentseller.temu.com/marketing/ads/report", tag: "ads" },
+    { url: "https://agentseller.temu.com/marketing/ads/overview", tag: "ads" },
+    { url: "https://agentseller.temu.com/marketing/promotion-data", tag: "ads" },
+    { url: "https://agentseller.temu.com/marketing/main", tag: "ads" },
+    // 退货率 / 质量分
+    { url: "https://agentseller.temu.com/data-center/after-sale", tag: "quality" },
+    { url: "https://agentseller.temu.com/data-center/quality-score", tag: "quality" },
+    { url: "https://agentseller.temu.com/stock/fully-mgt/quality/main", tag: "quality" },
+    { url: "https://agentseller.temu.com/data-center/quality", tag: "quality" },
+    // 买手沟通记录 / 站点销量（依赖商品详情）
+    { url: "https://agentseller.temu.com/stock/fully-mgt/sale-manage/main", tag: "sale" },
+    // 站点销量明细
+    { url: "https://agentseller.temu.com/data-center/site-sales", tag: "site-sales" },
+    { url: "https://agentseller.temu.com/data-center/sales-by-site", tag: "site-sales" },
+  ];
+  const visited = [];
+  // 每个候选页面：导航 → 等渲染 → 滚动 → 点击常见 tab/按钮 → 等接口飞
+  const KEYWORDS = ["广告","推广","曝光","点击","ROI","质量","退货","售后","买手","沟通","意见","站点","明细","销量","报表","数据","查看","详情","更多","近7","近30","本月","今日"];
+  for (const c of candidates) {
+    const u = c.url || c;
+    const before = Object.keys(_yunduRealBodies).length;
+    try {
+      await page.goto(u, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await page.waitForTimeout(3000);
+      if (interact) {
+        // 滚动触发懒加载
+        try { await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)); } catch {}
+        await page.waitForTimeout(800);
+        try { await page.evaluate(() => window.scrollTo(0, 0)); } catch {}
+        await page.waitForTimeout(400);
+        // 点击所有匹配关键词的可点元素（最多 8 个，避免乱跳）
+        try {
+          const clicked = await page.evaluate((kws) => {
+            const out = [];
+            const all = Array.from(document.querySelectorAll('button, a, [role="tab"], .ant-tabs-tab, .ant-btn, .ant-menu-item, span[class*="tab"], div[class*="tab"]'));
+            for (const el of all) {
+              if (out.length >= 8) break;
+              const t = (el.innerText || el.textContent || "").trim();
+              if (!t || t.length > 12) continue;
+              if (kws.some(k => t.includes(k))) {
+                try {
+                  const r = el.getBoundingClientRect();
+                  if (r.width > 0 && r.height > 0) {
+                    el.click();
+                    out.push(t);
+                  }
+                } catch {}
+              }
+            }
+            return out;
+          }, KEYWORDS);
+          if (clicked.length) console.error(`[yundu-sniff] ${c.tag||""} clicked: ${clicked.join("|")}`);
+        } catch (e) { console.error(`[yundu-sniff] click err: ${e.message}`); }
+        await page.waitForTimeout(waitMs);
+      } else {
+        await page.waitForTimeout(waitMs);
+      }
+      const after = Object.keys(_yunduRealBodies).length;
+      visited.push({ url: u, tag: c.tag, ok: true, newEndpoints: after - before });
+    } catch (e) {
+      visited.push({ url: u, tag: c.tag, ok: false, err: e.message });
+    }
+  }
+  // 菜单遍历：进 /main，抓左侧菜单全部叶子节点，依次点击
+  try {
+    await page.goto("https://agentseller.temu.com/main/data-center", { waitUntil: "domcontentloaded", timeout: 30000 });
+    await page.waitForTimeout(4000);
+    // 先把所有可展开菜单全部展开
+    for (let round = 0; round < 4; round++) {
+      try {
+        await page.evaluate(() => {
+          const exps = document.querySelectorAll('.ant-menu-submenu:not(.ant-menu-submenu-open) > .ant-menu-submenu-title, [class*="menu-submenu"]:not([class*="open"]) > [class*="title"]');
+          exps.forEach(e => { try { e.click(); } catch {} });
+        });
+      } catch {}
+      await page.waitForTimeout(600);
+    }
+    // 抓取所有菜单叶子链接（带 href 的 a，或带 path 的 li）
+    const links = await page.evaluate(() => {
+      const out = new Set();
+      document.querySelectorAll('.ant-menu a, [class*="menu"] a').forEach(a => {
+        const h = a.getAttribute('href') || "";
+        if (h && h.startsWith('/') && !h.includes('#')) out.add(h);
+      });
+      return Array.from(out);
+    });
+    console.error(`[yundu-sniff] menu links found: ${links.length}`);
+    visited.push({ url: "[menu-links-found]", tag: "menu", count: links.length });
+    let menuMax = Math.min(links.length, 40);
+    for (let i = 0; i < menuMax; i++) {
+      const href = links[i];
+      const before2 = Object.keys(_yunduRealBodies).length;
+      try {
+        await page.goto("https://agentseller.temu.com" + href, { waitUntil: "domcontentloaded", timeout: 25000 });
+        await page.waitForTimeout(4500);
+        try { await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)); } catch {}
+        await page.waitForTimeout(1500);
+        const after2 = Object.keys(_yunduRealBodies).length;
+        if (after2 > before2) {
+          visited.push({ url: href, tag: "menu", ok: true, newEndpoints: after2 - before2 });
+        }
+      } catch (e) {
+        // 静默
+      }
+    }
+  } catch (e) {
+    visited.push({ url: "[menu-walk]", tag: "menu", ok: false, err: e.message });
+  }
+
+  // 额外：进商品详情抓买手沟通 + 站点销量
+  try {
+    await page.goto("https://agentseller.temu.com/stock/fully-mgt/sale-manage/main", { waitUntil: "domcontentloaded", timeout: 30000 });
+    await page.waitForTimeout(4000);
+    const before = Object.keys(_yunduRealBodies).length;
+    // 点第一个商品行（图片或标题）
+    try {
+      await page.evaluate(() => {
+        const rows = document.querySelectorAll('tr.ant-table-row, [class*="goods-item"], [class*="product-row"]');
+        for (const r of rows) {
+          const link = r.querySelector('a, [class*="goods-name"], img');
+          if (link) { link.click(); return true; }
+        }
+        return false;
+      });
+    } catch {}
+    await page.waitForTimeout(5000);
+    // 详情页里再点关键词 tab
+    try {
+      const clicked = await page.evaluate((kws) => {
+        const out = [];
+        const all = Array.from(document.querySelectorAll('button, a, [role="tab"], .ant-tabs-tab, .ant-btn'));
+        for (const el of all) {
+          if (out.length >= 10) break;
+          const t = (el.innerText || el.textContent || "").trim();
+          if (!t || t.length > 12) continue;
+          if (kws.some(k => t.includes(k))) { try { el.click(); out.push(t); } catch {} }
+        }
+        return out;
+      }, KEYWORDS);
+      if (clicked.length) console.error(`[yundu-sniff] detail clicked: ${clicked.join("|")}`);
+    } catch {}
+    await page.waitForTimeout(waitMs);
+    const after = Object.keys(_yunduRealBodies).length;
+    visited.push({ url: "[product-detail-drill]", tag: "drill", ok: true, newEndpoints: after - before });
+  } catch (e) {
+    visited.push({ url: "[product-detail-drill]", tag: "drill", ok: false, err: e.message });
+  }
+  const endpoints = Object.keys(_yunduRealBodies).sort();
+  const dump = {
+    timestamp: new Date().toISOString(),
+    antiContentCaptured: !!_yunduAntiContent,
+    mallidCaptured: !!_yunduMallid,
+    visited,
+    endpoints,
+    bodies: _yunduRealBodies,
+  };
+  const file = dumpFile || path.join(process.cwd(), "logs", `yundu-sniff-${Date.now()}.json`);
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(dump, null, 2), "utf8");
+    console.error(`[yundu-sniff] dumped ${endpoints.length} endpoints to ${file}`);
+  } catch (e) { console.error(`[yundu-sniff] dump write failed: ${e.message}`); }
+  return { file, count: endpoints.length, endpoints, visited };
 }
 
 // ---- 3. 高价限流目标价 querySiteTargetPrice ----
@@ -6300,6 +6728,13 @@ async function handleRequest(body) {
       return await scrapeSkcRegionDetail({ productId, range });
     }
     case "yundu_list_overall": return await yunduListOverall(params || {});
+    case "yundu_sniff_discover": return await yunduSniffDiscover(params || {});
+    case "yundu_raw": {
+      const p = params || {};
+      const pg = await _yunduOpenPage();
+      const r = await _yunduFetch(pg, p.path, p.body || {});
+      return { status: r?.status, body: r?.body };
+    }
     case "yundu_site_count": return await yunduSiteCount(params || {});
     case "yundu_high_price_limit": return await yunduHighPriceLimit(params || {});
     case "yundu_quality_metrics": return await yunduQualityMetrics(params || {});
@@ -9453,6 +9888,31 @@ async function autoPricingFromCSV(params) {
           finalTitle = `${finalTitle}，${lastCat}`;
           console.error(`[auto-pricing] Title + category: ${finalTitle.slice(0, 80)}`);
         }
+      }
+
+      // 备份 AI 生成图到桌面 "AI自动化生图草稿/<标题>/"
+      try {
+        const desktopDir = path.join(os.homedir(), "Desktop", "AI自动化生图草稿");
+        const safeTitle = String(finalTitle || `untitled_${Date.now()}`)
+          .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 80) || `untitled_${Date.now()}`;
+        const subDir = path.join(desktopDir, safeTitle);
+        fs.mkdirSync(subDir, { recursive: true });
+        let copied = 0;
+        for (const type of AI_DETAIL_IMAGE_TYPE_ORDER) {
+          const src = localImages[type];
+          if (src && fs.existsSync(src)) {
+            try {
+              fs.copyFileSync(src, path.join(subDir, `${type}.png`));
+              copied++;
+            } catch (e) { console.error(`[auto-pricing] backup copy ${type} failed: ${e.message}`); }
+          }
+        }
+        console.error(`[auto-pricing] backup ${copied} images -> ${subDir}`);
+      } catch (e) {
+        console.error(`[auto-pricing] desktop backup failed: ${e.message}`);
       }
 
       // Step 6: 保存草稿

@@ -2047,6 +2047,29 @@ async function streamImageStudioGenerate(target, jobId, payload = {}) {
         });
         historySaved = Boolean(historyResult?.id);
         historyId = historyResult?.id || null;
+        // 同步把上传的素材图落盘到 userData，供后续从历史恢复后重绘使用
+        if (historyId && Array.isArray(payload?.files) && payload.files.length > 0) {
+          try {
+            const sourcesDir = path.join(app.getPath("userData"), "image-studio-sources", historyId);
+            fs.mkdirSync(sourcesDir, { recursive: true });
+            payload.files.forEach((f, idx) => {
+              const buf = Buffer.isBuffer(f?.buffer) ? f.buffer : Buffer.from(f?.buffer || []);
+              const safeName = String(f?.name || `source-${idx}`).replace(/[<>:"/\\|?*]/g, "_").slice(0, 80);
+              const ext = (safeName.match(/\.[a-zA-Z0-9]+$/)?.[0]) || (((f?.type || "").includes("png")) ? ".png" : ".jpg");
+              const final = safeName.includes(".") ? safeName : `${safeName}${ext}`;
+              try { fs.writeFileSync(path.join(sourcesDir, `${idx}-${final}`), buf); } catch {}
+            });
+            const metaPath = path.join(sourcesDir, "meta.json");
+            const metaList = payload.files.map((f, idx) => ({
+              index: idx,
+              name: String(f?.name || `source-${idx}`),
+              type: String(f?.type || "image/jpeg"),
+            }));
+            try { fs.writeFileSync(metaPath, JSON.stringify({ historyId, files: metaList }, null, 2)); } catch {}
+          } catch (e) {
+            appendImageStudioLog(`[history] source save failed for ${jobId}: ${e?.message || e}`);
+          }
+        }
       } catch (error) {
         historySaveError = error?.message || "自动保存历史记录失败";
         appendImageStudioLog(`[history] background save failed for ${jobId}: ${historySaveError}`);
@@ -2894,6 +2917,31 @@ ipcMain.handle("image-studio:list-history", async () => {
 ipcMain.handle("image-studio:get-history-item", async (_event, id) => {
   if (!id) return null;
   return imageStudioJson(`/api/history?id=${encodeURIComponent(id)}`);
+});
+
+ipcMain.handle("image-studio:get-history-sources", async (_event, id) => {
+  if (!id || !/^[\w.-]+$/.test(String(id))) return { files: [] };
+  try {
+    const dir = path.join(app.getPath("userData"), "image-studio-sources", String(id));
+    if (!fs.existsSync(dir)) return { files: [] };
+    const metaPath = path.join(dir, "meta.json");
+    let meta = null;
+    try { meta = JSON.parse(fs.readFileSync(metaPath, "utf8")); } catch {}
+    const entries = fs.readdirSync(dir).filter((n) => n !== "meta.json").sort();
+    const files = entries.map((name, i) => {
+      const full = path.join(dir, name);
+      try {
+        const buf = fs.readFileSync(full);
+        const m = meta?.files?.[i];
+        const lower = name.toLowerCase();
+        const type = m?.type || (lower.endsWith(".png") ? "image/png" : lower.endsWith(".webp") ? "image/webp" : "image/jpeg");
+        return { name: m?.name || name.replace(/^\d+-/, ""), type, dataUrl: `data:${type};base64,${buf.toString("base64")}` };
+      } catch { return null; }
+    }).filter(Boolean);
+    return { files };
+  } catch (e) {
+    return { files: [], error: e?.message || String(e) };
+  }
 });
 
 ipcMain.handle("image-studio:save-history", async (_event, payload) => {

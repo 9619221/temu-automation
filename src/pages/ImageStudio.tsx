@@ -1063,6 +1063,28 @@ export default function ImageStudio() {
       }, {}));
       setActiveStep(3);
       setHistoryOpen(false);
+      // 尝试拉取这次历史的原始素材图，回填 uploadFiles
+      try {
+        const sources = await imageStudioAPI.getHistorySources?.(historyItem.id);
+        if (sources && Array.isArray(sources.files) && sources.files.length > 0) {
+          const restored: UploadFile[] = await Promise.all(sources.files.map(async (s, i) => {
+            const resp = await fetch(s.dataUrl);
+            const blob = await resp.blob();
+            const file = new File([blob], s.name || `source-${i}`, { type: s.type || blob.type || "image/jpeg" });
+            return {
+              uid: `restored-source-${historyItem.id}-${i}`,
+              name: file.name,
+              status: "done",
+              originFileObj: file as any,
+            } as UploadFile;
+          }));
+          setUploadFiles(restored.slice(0, 5));
+        } else {
+          setUploadFiles([]);
+        }
+      } catch {
+        setUploadFiles([]);
+      }
       message.success("已恢复这次历史记录，可以继续筛图、评分或重绘");
     } catch (error) {
       message.error(error instanceof Error ? error.message : "读取历史详情失败");
@@ -1153,9 +1175,31 @@ export default function ImageStudio() {
       message.warning("当前还有生成任务在运行，请先等待完成或取消");
       return;
     }
-    if (uploadFiles.length === 0) {
-      message.warning("请先上传商品素材图");
-      return;
+    // 历史恢复后 uploadFiles 为空：自动用当前 active 变体的成品图作素材
+    let effectiveFiles = uploadFiles;
+    if (effectiveFiles.length === 0) {
+      try {
+        const fallbackVariant = getActiveVariant(imageType);
+        const fallbackUrl = fallbackVariant?.imageUrl;
+        if (!fallbackUrl) {
+          message.warning("请先上传商品素材图");
+          return;
+        }
+        const resp = await fetch(fallbackUrl);
+        if (!resp.ok) throw new Error(`下载素材失败 ${resp.status}`);
+        const blob = await resp.blob();
+        const ext = (blob.type.includes("png") ? "png" : "jpg");
+        const file = new File([blob], `redraw-source-${imageType}.${ext}`, { type: blob.type || "image/jpeg" });
+        effectiveFiles = [{
+          uid: `redraw-source-${imageType}-${Date.now()}`,
+          name: file.name,
+          status: "done",
+          originFileObj: file as any,
+        } as UploadFile];
+      } catch (e) {
+        message.error(e instanceof Error ? `自动复用历史图失败：${e.message}` : "自动复用历史图失败");
+        return;
+      }
     }
 
     const suggestion = (redrawSuggestions[imageType] || "").trim();
@@ -1193,7 +1237,7 @@ export default function ImageStudio() {
     }));
 
     try {
-      const files = await buildNativeImagePayloads(uploadFiles);
+      const files = await buildNativeImagePayloads(effectiveFiles);
       await imageStudioAPI.startGenerate({
         jobId: nextJobId,
         files,
