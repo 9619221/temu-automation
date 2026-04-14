@@ -50,6 +50,7 @@ import {
 } from "../utils/collectionDiagnostics";
 import { getStoreValue } from "../utils/storeCompat";
 import { ACTIVE_ACCOUNT_CHANGED_EVENT, STORE_VALUE_UPDATED_EVENT } from "../utils/multiStore";
+import { TrafficDriverPanel, buildTrafficDriverSitesFromProduct, type TrafficSiteKey } from "../components/TrafficDriverPanel";
 
 const store = window.electronAPI?.store;
 const automation = window.electronAPI?.automation;
@@ -72,6 +73,12 @@ type ProductSkuSummary = {
 };
 
 type FluxSiteKey = "global" | "us" | "eu";
+
+const FLUX_SITE_LABELS: Record<FluxSiteKey, string> = {
+  global: "全球",
+  us: "美国",
+  eu: "欧区",
+};
 
 interface ProductFluxSiteData {
   siteKey: FluxSiteKey;
@@ -729,6 +736,29 @@ function summarizeFluxItems(items: any[], siteKey: FluxSiteKey, siteLabel: strin
   return buildTrafficSummary(aggregate, siteKey, siteLabel, syncedAt);
 }
 
+function mergeFluxProductHistoryCaches(...sources: Array<Record<string, any> | null | undefined>) {
+  const merged: Record<string, any> = {};
+  for (const source of sources) {
+    if (!source || typeof source !== "object") continue;
+    for (const [goodsId, goodsData] of Object.entries(source) as [string, any][]) {
+      if (!goodsId) continue;
+      if (!merged[goodsId]) merged[goodsId] = { stations: {} };
+      const nextStations = merged[goodsId].stations && typeof merged[goodsId].stations === "object"
+        ? merged[goodsId].stations
+        : {};
+      merged[goodsId] = {
+        ...merged[goodsId],
+        ...goodsData,
+        stations: nextStations,
+      };
+      for (const [site, siteData] of Object.entries(goodsData?.stations || {}) as [string, any][]) {
+        nextStations[site] = siteData;
+      }
+    }
+  }
+  return merged;
+}
+
 function matchesFluxRecord(record: any, idCandidates: Set<string>) {
   const idMatched = PRODUCT_ID_LOOKUP_FIELDS.some((field) => {
     const text = normalizeText(record?.[field]);
@@ -759,6 +789,21 @@ function parseMallFluxTrend(raw: any) {
     .filter((item: any) => item.statDate);
 
   return rows.sort((left: any, right: any) => left.statDate.localeCompare(right.statDate));
+}
+
+function normalizeMallTrendRows(rows: any[]) {
+  return rows
+    .map((item: any) => {
+      const visitors = toNumberValue(item?.goodsVisitorsNum || item?.totalVisitorsNum);
+      const buyers = toNumberValue(item?.goodsDetailPayBuyerNum || item?.totalPayBuyerNum);
+      return {
+        date: normalizeText(item?.statDate),
+        visitors,
+        buyers,
+        conversionRate: toPercentValue(undefined, buyers, visitors),
+      };
+    })
+    .filter((item: any) => item.date);
 }
 
 function buildMallFallbackFluxSite(raw: any, siteKey: FluxSiteKey, siteLabel: string): ProductFluxSiteData | null {
@@ -902,6 +947,8 @@ export default function ProductList() {
   const [activeFluxSiteKey, setActiveFluxSiteKey] = useState<FluxSiteKey>("global");
   const [activeFluxRangeLabel, setActiveFluxRangeLabel] = useState("");
   const [fluxHistoryData, setFluxHistoryData] = useState<any[]>([]);
+  const [productHistoryCache, setProductHistoryCache] = useState<Record<string, any>>({});
+  const [siteTrendListBySite, setSiteTrendListBySite] = useState<Record<string, any[]>>({});
   const [gpDetailOpen, setGpDetailOpen] = useState(false);
   const [gpDetailLoading, setGpDetailLoading] = useState(false);
   const [gpDetailRow, setGpDetailRow] = useState<{
@@ -915,6 +962,7 @@ export default function ProductList() {
   } | null>(null);
   const [gpDetailData, setGpDetailData] = useState<any>(null);
   const [gpDetailRange, setGpDetailRange] = useState<"1d" | "7d" | "30d">("7d");
+  const fluxDetailFetchStateRef = useRef<Map<string, "loading" | "done" | "empty">>(new Map());
   const gpDetailRangeOptions: Array<"1d" | "7d" | "30d"> = ["30d", "7d", "1d"];
   const gpDetailCacheMissingMessage = "该商品的动销详情还没有进入缓存，请先到数据采集运行“动销详情 / 地区明细”。";
 
@@ -1039,6 +1087,83 @@ export default function ProductList() {
     }
   }, [activeFluxSiteKey, activeFluxRangeLabel, selectedProduct]);
 
+  useEffect(() => {
+    const record = selectedProduct;
+    if (!record || !automation?.scrapeFluxProductDetail) return;
+
+    const sites = Array.isArray(record.fluxSites) ? record.fluxSites : [];
+    const activeSite = sites.find((item) => item.siteKey === activeFluxSiteKey) || sites[0] || null;
+    const siteLabel = activeSite?.siteLabel || FLUX_SITE_LABELS[activeFluxSiteKey];
+    const goodsId = normalizeText(record.goodsId);
+    if (!goodsId || !siteLabel) return;
+    const stationTrend = siteTrendListBySite[activeFluxSiteKey] || [];
+
+    const idCandidates = [record.goodsId, record.skcId, record.spuId, record.skuId]
+      .map((value) => normalizeText(value))
+      .filter(Boolean);
+    const hasCachedDaily = idCandidates.some((id) => {
+      const daily = productHistoryCache[id]?.stations?.[siteLabel]?.daily;
+      return Array.isArray(daily) && daily.length > 1;
+    });
+    if (hasCachedDaily || stationTrend.length > 1) {
+      if (hasCachedDaily) {
+        fluxDetailFetchStateRef.current.set(`${siteLabel}:${goodsId}`, "done");
+      }
+      return;
+    }
+    const requestKey = `${siteLabel}:${goodsId}`;
+    if (fluxDetailFetchStateRef.current.has(requestKey)) return;
+
+    fluxDetailFetchStateRef.current.set(requestKey, "loading");
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const result = await automation.scrapeFluxProductDetail({
+          siteLabel,
+          goodsId,
+          spuId: record.spuId,
+          skcId: record.skcId,
+          skuId: record.skuId,
+          title: record.title,
+          rangeLabel: activeSite?.primaryRangeLabel || activeFluxRangeLabel || "",
+        });
+        const cachePatch = result?.cache && typeof result.cache === "object"
+          ? result.cache as Record<string, any>
+          : {};
+        const hasFetchedDaily = Object.values(cachePatch).some((entry: any) => {
+          const daily = entry?.stations?.[siteLabel]?.daily;
+          return Array.isArray(daily) && daily.length > 0;
+        });
+        fluxDetailFetchStateRef.current.set(requestKey, hasFetchedDaily ? "done" : "empty");
+        if (cancelled || !hasFetchedDaily) return;
+
+        setProductHistoryCache((current) => {
+          const merged = mergeFluxProductHistoryCaches(current, cachePatch);
+          void store?.set("temu_flux_product_history_cache", merged).catch(() => {});
+          return merged;
+        });
+      } catch (error) {
+        fluxDetailFetchStateRef.current.delete(requestKey);
+        console.warn("[ProductList] scrapeFluxProductDetail failed:", error);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    selectedProduct?.goodsId,
+    selectedProduct?.skcId,
+    selectedProduct?.spuId,
+    selectedProduct?.skuId,
+    selectedProduct?.title,
+    activeFluxSiteKey,
+    activeFluxRangeLabel,
+    productHistoryCache,
+    siteTrendListBySite,
+  ]);
+
   const loadProducts = async () => {
     setLoading(true);
     try {
@@ -1059,6 +1184,7 @@ export default function ProductList() {
         rawYunduOverall,
         rawGlobalPerf,
         rawFluxHistory,
+        rawFluxProductCache,
         debugFlux,
         debugFluxUS,
         debugFluxEU,
@@ -1082,6 +1208,7 @@ export default function ProductList() {
         getStoreValue(store, "temu_raw_yunduOverall"),
         getStoreValue(store, "temu_raw_globalPerformance"),
         getStoreValue(store, "temu_flux_history"),
+        store?.get("temu_flux_product_history_cache"),
         automation?.readScrapeData?.("flux").catch(() => null),
         automation?.readScrapeData?.("fluxUS").catch(() => null),
         automation?.readScrapeData?.("fluxEU").catch(() => null),
@@ -1217,6 +1344,41 @@ export default function ProductList() {
       const parsedFlux = preferredFlux ? parseFluxData(preferredFlux) : EMPTY_PARSED_FLUX;
       const parsedFluxUS = preferredFluxUS ? parseFluxData(preferredFluxUS) : EMPTY_PARSED_FLUX;
       const parsedFluxEU = preferredFluxEU ? parseFluxData(preferredFluxEU) : EMPTY_PARSED_FLUX;
+
+      // 提取 mall/summary 的 trendList(站点级 30 天日趋势,作为 chart fallback)
+      // 优先从 parsed flux 的 summary.trendList(已 normalized: date/visitors/buyers/conversionRate)
+      // fallback 从 raw apis 的 mall/summary -> result.trendList(raw 字段: statDate/visitorsNum/payBuyerNum)
+      const extractTrendList = (parsed: any, raw: any, mallRaw?: any): any[] => {
+        const parsedList = parsed?.summary?.trendList;
+        if (Array.isArray(parsedList) && parsedList.length > 0) return parsedList;
+        if (raw && Array.isArray(raw.apis)) {
+          const sumApi = raw.apis.find((a: any) => String(a?.path || "").includes("/mall/summary"));
+          const list = sumApi?.data?.result?.trendList;
+          if (Array.isArray(list) && list.length > 0) return list;
+        }
+        const mallRows = normalizeMallTrendRows(parseMallFluxTrend(mallRaw));
+        if (mallRows.length > 0) return mallRows;
+        return [];
+      };
+      const extractDailyCache = (raw: any): Record<string, any> => {
+        const rawApis = Array.isArray(raw?.apis) ? raw.apis : [];
+        const dailyCacheEntry = rawApis.find((a: any) => a.path === "__flux_product_daily_cache__");
+        return dailyCacheEntry?.data?.result && typeof dailyCacheEntry.data.result === "object"
+          ? dailyCacheEntry.data.result
+          : {};
+      };
+      const trendListMap: Record<string, any[]> = {
+        global: extractTrendList(parsedFlux, preferredFlux, preferredMallFlux),
+        us: extractTrendList(parsedFluxUS, preferredFluxUS, preferredMallFluxUS),
+        eu: extractTrendList(parsedFluxEU, preferredFluxEU, preferredMallFluxEU),
+      };
+      setSiteTrendListBySite(trendListMap);
+      const mergedFluxProductCache = mergeFluxProductHistoryCaches(
+        rawFluxProductCache && typeof rawFluxProductCache === "object" ? rawFluxProductCache as Record<string, any> : {},
+        extractDailyCache(preferredFlux),
+        extractDailyCache(preferredFluxUS),
+        extractDailyCache(preferredFluxEU),
+      );
       const productCounts = parseProductCountSummary(rawProducts);
       const salesItems = Array.isArray(parsedSales?.items) ? parsedSales.items : [];
       const fluxItems = Array.isArray(parsedFlux?.items) ? parsedFlux.items : [];
@@ -1673,10 +1835,12 @@ export default function ProductList() {
 
       setProducts(mergedProducts);
       setFluxHistoryData(Array.isArray(rawFluxHistory) ? rawFluxHistory : []);
+      setProductHistoryCache(mergedFluxProductCache);
     } catch (error) {
       console.error("加载商品失败", error);
       setProducts([]);
       setFluxHistoryData([]);
+      setProductHistoryCache({});
       setSalesSummary(null);
       setCountSummary(EMPTY_COUNT_SUMMARY);
       setDiagnostics(null);
@@ -2340,7 +2504,7 @@ export default function ProductList() {
       点击支付转化率: item.点击支付转化率,
     }));
 
-    // 日级流量趋势数据（从 flux_history 日快照构建，商品级真实数据）
+    // 日级流量趋势数据（优先从商品级 cache 读取，否则从 flux_history 日快照构建）
     let dailyTrendData: any[] = [];
     {
       const idSet = new Set(
@@ -2350,8 +2514,35 @@ export default function ProductList() {
       const titleSet = new Set(
         [record.title].map((v) => String(v || "").replace(/\s+/g, "").trim().toLowerCase()).filter(Boolean),
       );
-      // 方法1: 从 flux_history 日快照获取历史数据
+
+      // 方法0（最高优先级）: 从 temu_flux_product_history_cache 直接读取商品级 30 天日趋势
+      // cache 结构: { goodsId: { stations: { 全球|美国|欧区: { daily: [{date,exposeNum,...}] } } } }
+      const cacheSiteLabel = activeFluxSite?.siteLabel;
+      if (cacheSiteLabel && productHistoryCache && Object.keys(productHistoryCache).length > 0) {
+        for (const goodsId of idSet) {
+          const entry = productHistoryCache[goodsId];
+          const dailyArr = entry?.stations?.[cacheSiteLabel]?.daily;
+          if (Array.isArray(dailyArr) && dailyArr.length > 0) {
+            dailyTrendData = dailyArr.map((d: any) => ({
+              date: String(d.date || "").slice(5),
+              fullDate: String(d.date || ""),
+              曝光: toNumberValue(d.exposeNum),
+              点击: toNumberValue(d.clickNum),
+              详情访客: toNumberValue(d.detailVisitNum || d.detailVisitorNum),
+              支付买家: toNumberValue(d.buyerNum),
+              支付件数: toNumberValue(d.payGoodsNum),
+              搜索曝光: toNumberValue(d.searchExposeNum),
+              推荐曝光: toNumberValue(d.recommendExposeNum),
+              _fromCache: true,
+            })).sort((a: any, b: any) => String(a.fullDate).localeCompare(String(b.fullDate)));
+            break;
+          }
+        }
+      }
+
+      // 方法1: 从 flux_history 日快照获取历史数据（只有 cache 没命中时才用）
       const historyRows: any[] = [];
+      if (dailyTrendData.length === 0) {
       for (const snapshot of fluxHistoryData) {
         if (!snapshot?.date || !Array.isArray(snapshot.items)) continue;
         for (const item of snapshot.items) {
@@ -2417,6 +2608,44 @@ export default function ProductList() {
         // 如果过滤后不足2个点，用全部历史让图表有意义
         if (dailyTrendData.length < 2) dailyTrendData = historyRows;
       }
+      } // end if (dailyTrendData.length === 0) - 方法1 fallback
+
+      // 方法3 (兜底): 用站点级 mall/summary trendList 模拟,按当前商品在站点中的占比折算
+      // 兼容两种 trendList shape:
+      //   parsed (temu_flux.summary.trendList): { date, visitors, buyers, conversionRate }
+      //   raw   (mall/summary.result.trendList): { statDate, visitorsNum, payBuyerNum }
+      if (dailyTrendData.length < 2 && currentFluxSummary && activeFluxSite) {
+        const stationTrend = siteTrendListBySite[activeFluxSite.siteKey] || [];
+        if (stationTrend.length > 1) {
+          const getDate = (p: any) => String(p?.date || p?.statDate || "");
+          const getVisitors = (p: any) => toNumberValue(
+            p?.visitors
+            ?? p?.visitorsNum
+            ?? p?.goodsVisitorsNum
+            ?? p?.totalVisitorsNum,
+          );
+          const totalExpose = Math.max(toNumberValue(currentFluxSummary.exposeNum), 1);
+          const totalClick = Math.max(toNumberValue(currentFluxSummary.clickNum), 0);
+          const totalBuyers = Math.max(toNumberValue(currentFluxSummary.buyerNum), 0);
+          const stationVisitorTotal = stationTrend.reduce((sum: number, p: any) => sum + getVisitors(p), 0) || 1;
+          dailyTrendData = stationTrend.map((p: any) => {
+            const ratio = getVisitors(p) / stationVisitorTotal;
+            const fullDate = getDate(p);
+            return {
+              date: fullDate.slice(5),
+              fullDate,
+              曝光: Math.round(totalExpose * ratio),
+              点击: Math.round(totalClick * ratio),
+              详情访客: Math.round(toNumberValue(currentFluxSummary.detailVisitorNum || 0) * ratio),
+              支付买家: Math.round(totalBuyers * ratio),
+              支付件数: Math.round(toNumberValue(currentFluxSummary.payGoodsNum || 0) * ratio),
+              搜索曝光: Math.round(toNumberValue(currentFluxSummary.searchExposeNum || 0) * ratio),
+              推荐曝光: Math.round(toNumberValue(currentFluxSummary.recommendExposeNum || 0) * ratio),
+              _fromStationFallback: true,
+            };
+          });
+        }
+      }
     }
 
     const funnelSteps = currentFluxSummary
@@ -2428,6 +2657,31 @@ export default function ProductList() {
           { label: "支付买家", value: currentFluxSummary.buyerNum },
         ]
       : [];
+
+    // 工作台风格的 30 天日趋势数据 — 仅用于"曝光与转化趋势" + "来源结构" 两个图表
+    const fluxTrendChartData = dailyTrendData.map((d: any) => {
+      const expose = toNumberValue(d.曝光);
+      const click = toNumberValue(d.点击);
+      const buyers = toNumberValue(d.支付买家);
+      return {
+        label: d.date,
+        fullLabel: d.fullDate,
+        expose,
+        clickRate: expose > 0 ? Number(((click / expose) * 100).toFixed(1)) : 0,
+        clickPayRate: click > 0 ? Number(((buyers / click) * 100).toFixed(1)) : 0,
+      };
+    });
+    const fluxSourceTimelineData = dailyTrendData.map((d: any) => {
+      const expose = toNumberValue(d.曝光);
+      const search = toNumberValue(d.搜索曝光);
+      const recommend = toNumberValue(d.推荐曝光);
+      return {
+        label: d.date,
+        search,
+        recommend,
+        other: Math.max(expose - search - recommend, 0),
+      };
+    });
 
     const diagnosis = (() => {
       if (!currentFluxSummary) {
@@ -2645,512 +2899,14 @@ export default function ProductList() {
     );
 
     const fluxTab = activeFluxSite && currentFluxSummary ? (
-      <div style={{ display: "grid", gap: 18 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-          <Segmented
-            value={activeFluxSite.siteKey}
-            onChange={(value) => setActiveFluxSiteKey(value as FluxSiteKey)}
-            options={fluxSites.map((site) => ({ label: site.siteLabel, value: site.siteKey }))}
-          />
-          <Segmented
-            value={selectedFluxRange}
-            onChange={(value) => setActiveFluxRangeLabel(String(value))}
-            options={fluxRangeOptions.map((label) => ({ label, value: label }))}
-          />
-        </div>
-
-        <div
-          style={{
-            padding: 18,
-            borderRadius: 18,
-            border: "1px solid rgba(76, 110, 245, 0.12)",
-            background: "linear-gradient(135deg, rgba(232,240,255,0.95) 0%, rgba(255,255,255,1) 48%, rgba(255,243,232,0.92) 100%)",
-          }}
-        >
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
-            <div style={{ display: "grid", gap: 8, maxWidth: 680 }}>
-              <div style={{ fontSize: 22, fontWeight: 800 }}>流量驾驶舱</div>
-              <div style={{ fontSize: 16, fontWeight: 600 }}>{diagnosis.title}</div>
-              <div style={{ fontSize: 13, color: "var(--color-text-sec)", lineHeight: 1.7 }}>{diagnosis.desc}</div>
-            </div>
-            <div style={{ display: "grid", gap: 8, minWidth: 220 }}>
-              <Tag color="blue">{activeFluxSite.siteLabel} · {selectedFluxRange}</Tag>
-              {currentFluxSummary.dataDate ? <Tag>统计日期：{currentFluxSummary.dataDate}</Tag> : null}
-              {activeFluxSite.syncedAt ? <Tag>采集时间：{activeFluxSite.syncedAt}</Tag> : null}
-              {currentFluxSummary.growDataText ? <Tag color="gold">{currentFluxSummary.growDataText}</Tag> : null}
-            </div>
-          </div>
-        </div>
-
-        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.25fr) minmax(300px, 0.75fr)", gap: 16 }}>
-          <div
-            style={{
-              padding: 20,
-              borderRadius: 20,
-              border: "1px solid rgba(255,138,31,0.12)",
-              background: "linear-gradient(135deg, rgba(255,250,245,1) 0%, rgba(255,255,255,1) 46%, rgba(241,248,255,0.95) 100%)",
-              boxShadow: "0 14px 36px rgba(15,23,42,0.05)",
-              display: "grid",
-              gap: 14,
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
-              <div style={{ display: "grid", gap: 8, maxWidth: 560 }}>
-                <div style={{ fontSize: 13, fontWeight: 700, color: "var(--color-brand)" }}>运营判断</div>
-                <div style={{ fontSize: 24, fontWeight: 800, lineHeight: 1.25 }}>{trafficHealthTone.tag}</div>
-                <div style={{ fontSize: 13, color: "var(--color-text-sec)", lineHeight: 1.8 }}>{diagnosis.desc}</div>
-              </div>
-              <Tag color={trafficHealthScore >= 80 ? "success" : trafficHealthScore >= 60 ? "gold" : "error"} style={{ paddingInline: 12, paddingBlock: 4, borderRadius: 999 }}>
-                流量健康度 {trafficHealthScore}
-              </Tag>
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
-              {opportunityHighlights.map((item) => (
-                <div
-                  key={item.title}
-                  style={{
-                    padding: 14,
-                    borderRadius: 18,
-                    background: "#fff",
-                    border: "1px solid rgba(15,23,42,0.06)",
-                    boxShadow: "0 8px 24px rgba(15,23,42,0.04)",
-                  }}
-                >
-                  <div style={{ fontSize: 12, color: "var(--color-text-sec)", marginBottom: 8 }}>{item.title}</div>
-                  <div style={{ fontSize: 24, fontWeight: 800, color: item.accent, marginBottom: 8 }}>{item.value}</div>
-                  <div style={{ fontSize: 12, color: "var(--color-text-sec)", lineHeight: 1.7 }}>{item.helper}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <Card
-            size="small"
-            bodyStyle={{ padding: 18 }}
-            style={{
-              borderRadius: 20,
-              borderColor: "rgba(37,99,235,0.12)",
-              boxShadow: "0 14px 32px rgba(15,23,42,0.05)",
-            }}
-          >
-            <div style={{ display: "grid", gap: 14 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-                <div>
-                  <div style={{ fontSize: 16, fontWeight: 800 }}>流量体检</div>
-                  <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>把点击承接、转化效率和来源结构压成一个综合判断</div>
-                </div>
-                <Tag color={trafficHealthScore >= 80 ? "success" : trafficHealthScore >= 60 ? "gold" : "error"}>{trafficHealthTone.text}</Tag>
-              </div>
-              <div style={{ display: "grid", justifyContent: "center" }}>
-                <Progress
-                  type="dashboard"
-                  percent={trafficHealthScore}
-                  strokeColor={trafficHealthTone.color}
-                  trailColor="rgba(15,23,42,0.08)"
-                  size={160}
-                  format={(percent) => (
-                    <div style={{ display: "grid", gap: 2, justifyItems: "center" }}>
-                      <span style={{ fontSize: 28, fontWeight: 800, color: "var(--color-text)" }}>{percent}</span>
-                      <span style={{ fontSize: 12, color: "var(--color-text-sec)" }}>健康分</span>
-                    </div>
-                  )}
-                />
-              </div>
-              <div style={{ display: "grid", gap: 10 }}>
-                {actionChecklist.map((item) => (
-                  <div key={item.title} style={{ padding: 12, borderRadius: 14, background: "var(--color-bg-1, #fafafa)", border: "1px solid rgba(15,23,42,0.05)" }}>
-                    <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>{item.title}</div>
-                    <div style={{ fontSize: 12, color: "var(--color-text-sec)", lineHeight: 1.7 }}>{item.desc}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </Card>
-        </div>
-
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 }}>
-          {renderTrafficCard("曝光", formatTrafficNumber(currentFluxSummary.exposeNum), "入口规模", "#ff8a1f")}
-          {renderTrafficCard("点击", formatTrafficNumber(currentFluxSummary.clickNum), "首屏承接", "#0f766e")}
-          {renderTrafficCard("详情访客", formatTrafficNumber(currentFluxSummary.detailVisitorNum || currentFluxSummary.detailVisitNum), "进入详情页", "#2563eb")}
-          {renderTrafficCard("加购人数", formatTrafficNumber(currentFluxSummary.addToCartUserNum), "有意向人群", "#9333ea")}
-          {renderTrafficCard("支付买家", formatTrafficNumber(currentFluxSummary.buyerNum), "成交人数", "#16a34a")}
-          {renderTrafficCard("支付件数", formatTrafficNumber(currentFluxSummary.payGoodsNum), "成交件数", "#16a34a")}
-          {renderTrafficCard("曝光点击率", formatTrafficPercent(currentFluxSummary.exposeClickRate), "点击承接效率", "#4e79a7")}
-          {renderTrafficCard("点击支付转化率", formatTrafficPercent(currentFluxSummary.clickPayRate), "进店转化效率", "#e11d48")}
-        </div>
-
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 }}>
-          {secondaryTrafficCards.map((card) => renderTrafficCard(card.label, card.value, card.helper, card.accent))}
-        </div>
-
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
-          {executionSignals.map((signal) => (
-            <div
-              key={signal.title}
-              style={{
-                padding: 14,
-                borderRadius: 18,
-                border: "1px solid rgba(15,23,42,0.06)",
-                background: "#fff",
-                boxShadow: "0 10px 24px rgba(15,23,42,0.05)",
-              }}
-            >
-              <div style={{ fontSize: 12, color: "var(--color-text-sec)", marginBottom: 6 }}>{signal.title}</div>
-              <div style={{ fontSize: 24, fontWeight: 800, color: signal.color }}>{signal.value}</div>
-              <div style={{ marginTop: 6, fontSize: 12, color: "var(--color-text-sec)", lineHeight: 1.6 }}>{signal.helper}</div>
-            </div>
-          ))}
-        </div>
-
-        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.35fr) minmax(0, 1fr)", gap: 16 }}>
-          <Card size="small" bodyStyle={{ padding: 16 }} style={{ borderRadius: 18 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 10 }}>
-              <div>
-                <div style={{ fontSize: 16, fontWeight: 700 }}>流量趋势</div>
-                <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>{dailyTrendData.length > 0 ? (dailyTrendData[0]?._fromHistory ? "按日期维度的曝光、点击与支付变化（日快照）" : "按日期维度的访客数与支付买家数变化") : "不同统计周期下的流量规模变化"}</div>
-              </div>
-              <Tag color="orange">{activeFluxSite.siteLabel}{dailyTrendData.length > 0 ? (dailyTrendData[0]?._fromHistory ? " · 日快照" : ` · ${selectedFluxRange}`) : ""}</Tag>
-            </div>
-            {dailyTrendData.length > 0 && dailyTrendData[0]?._fromHistory ? (
-              <ResponsiveContainer width="100%" height={320}>
-                <AreaChart data={dailyTrendData} margin={{ top: 8, right: 12, left: -8, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="productFluxExposeFillH" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor={PRODUCT_TRAFFIC_COLORS.expose} stopOpacity={0.35} />
-                      <stop offset="100%" stopColor={PRODUCT_TRAFFIC_COLORS.expose} stopOpacity={0.03} />
-                    </linearGradient>
-                    <linearGradient id="productFluxClickFillH" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor={PRODUCT_TRAFFIC_COLORS.detail} stopOpacity={0.2} />
-                      <stop offset="100%" stopColor={PRODUCT_TRAFFIC_COLORS.detail} stopOpacity={0.02} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke={PRODUCT_TRAFFIC_COLORS.grid} />
-                  <XAxis dataKey="date" tick={{ fontSize: 12, fill: PRODUCT_TRAFFIC_COLORS.axis }} interval="preserveStartEnd" />
-                  <YAxis tick={{ fontSize: 12, fill: PRODUCT_TRAFFIC_COLORS.axis }} allowDecimals={false} />
-                  <ReTooltip formatter={(value: any) => formatTrafficNumber(value)} />
-                  <Legend />
-                  <Area type="monotone" dataKey="曝光" stroke={PRODUCT_TRAFFIC_COLORS.expose} fill="url(#productFluxExposeFillH)" strokeWidth={2.5} />
-                  <Area type="monotone" dataKey="点击" stroke={PRODUCT_TRAFFIC_COLORS.detail} fill="url(#productFluxClickFillH)" strokeWidth={2} />
-                  <Line type="monotone" dataKey="支付买家" stroke={PRODUCT_TRAFFIC_COLORS.clickPayRate} strokeWidth={2.5} dot={{ r: 3 }} />
-                  <Line type="monotone" dataKey="支付件数" stroke="#e11d48" strokeWidth={2.5} dot={{ r: 3 }} />
-                </AreaChart>
-              </ResponsiveContainer>
-            ) : dailyTrendData.length > 0 ? (
-              <ResponsiveContainer width="100%" height={320}>
-                <AreaChart data={dailyTrendData} margin={{ top: 8, right: 12, left: -8, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="productFluxVisitorFill" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor={PRODUCT_TRAFFIC_COLORS.expose} stopOpacity={0.35} />
-                      <stop offset="100%" stopColor={PRODUCT_TRAFFIC_COLORS.expose} stopOpacity={0.03} />
-                    </linearGradient>
-                    <linearGradient id="productFluxBuyerFill" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor={PRODUCT_TRAFFIC_COLORS.clickPayRate} stopOpacity={0.2} />
-                      <stop offset="100%" stopColor={PRODUCT_TRAFFIC_COLORS.clickPayRate} stopOpacity={0.02} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke={PRODUCT_TRAFFIC_COLORS.grid} />
-                  <XAxis dataKey="date" tick={{ fontSize: 12, fill: PRODUCT_TRAFFIC_COLORS.axis }} interval="preserveStartEnd" />
-                  <YAxis tick={{ fontSize: 12, fill: PRODUCT_TRAFFIC_COLORS.axis }} allowDecimals={false} />
-                  <ReTooltip formatter={(value: any) => formatTrafficNumber(value)} />
-                  <Legend />
-                  <Area type="monotone" dataKey="访客数" stroke={PRODUCT_TRAFFIC_COLORS.expose} fill="url(#productFluxVisitorFill)" strokeWidth={2.5} />
-                  <Area type="monotone" dataKey="支付买家数" stroke={PRODUCT_TRAFFIC_COLORS.clickPayRate} fill="url(#productFluxBuyerFill)" strokeWidth={2} />
-                </AreaChart>
-              </ResponsiveContainer>
-            ) : rangeComparisonData.length > 0 ? (
-              <ResponsiveContainer width="100%" height={320}>
-                <AreaChart data={rangeComparisonData} margin={{ top: 8, right: 12, left: -8, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="productFluxExposeFill" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor={PRODUCT_TRAFFIC_COLORS.expose} stopOpacity={0.35} />
-                      <stop offset="100%" stopColor={PRODUCT_TRAFFIC_COLORS.expose} stopOpacity={0.03} />
-                    </linearGradient>
-                    <linearGradient id="productFluxClickFill" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor={PRODUCT_TRAFFIC_COLORS.detail} stopOpacity={0.2} />
-                      <stop offset="100%" stopColor={PRODUCT_TRAFFIC_COLORS.detail} stopOpacity={0.02} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke={PRODUCT_TRAFFIC_COLORS.grid} />
-                  <XAxis dataKey="label" tick={{ fontSize: 12, fill: PRODUCT_TRAFFIC_COLORS.axis }} />
-                  <YAxis tick={{ fontSize: 12, fill: PRODUCT_TRAFFIC_COLORS.axis }} allowDecimals={false} />
-                  <ReTooltip formatter={(value: any) => formatTrafficNumber(value)} />
-                  <Legend />
-                  <Area type="monotone" dataKey="曝光" stroke={PRODUCT_TRAFFIC_COLORS.expose} fill="url(#productFluxExposeFill)" strokeWidth={2.5} />
-                  <Area type="monotone" dataKey="点击" stroke={PRODUCT_TRAFFIC_COLORS.detail} fill="url(#productFluxClickFill)" strokeWidth={2} />
-                  <Line type="monotone" dataKey="支付买家" stroke={PRODUCT_TRAFFIC_COLORS.clickPayRate} strokeWidth={2.5} dot={{ r: 3 }} />
-                  <Line type="monotone" dataKey="支付件数" stroke="#e11d48" strokeWidth={2.5} dot={{ r: 3 }} />
-                </AreaChart>
-              </ResponsiveContainer>
-            ) : (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无流量趋势数据" />
-            )}
-          </Card>
-
-          <Card size="small" bodyStyle={{ padding: 16 }} style={{ borderRadius: 18 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 10 }}>
-              <div>
-                <div style={{ fontSize: 16, fontWeight: 700 }}>来源占比</div>
-                <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>搜索、推荐和其他来源在曝光端的份额</div>
-              </div>
-              <Tag>{selectedFluxRange}</Tag>
-            </div>
-            {sourceDistributionData.length > 0 ? (
-              <div style={{ display: "grid", gridTemplateColumns: "minmax(220px, 0.9fr) minmax(0, 1fr)", gap: 12, alignItems: "center" }}>
-                <ResponsiveContainer width="100%" height={280}>
-                  <PieChart>
-                    <Pie data={sourceDistributionData} dataKey="value" nameKey="name" innerRadius={58} outerRadius={94} paddingAngle={2}>
-                      {sourceDistributionData.map((entry) => (
-                        <Cell key={entry.name} fill={entry.color} />
-                      ))}
-                    </Pie>
-                    <ReTooltip formatter={(value: any) => formatTrafficNumber(value)} />
-                    <Legend />
-                  </PieChart>
-                </ResponsiveContainer>
-                <div style={{ display: "grid", gap: 10 }}>
-                  {sourceDistributionData.map((item) => (
-                    <div key={item.name} style={{ padding: 12, borderRadius: 14, background: "var(--color-bg-1, #fafafa)", border: "1px solid rgba(15,23,42,0.05)" }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                          <span style={{ width: 10, height: 10, borderRadius: "50%", background: item.color, display: "inline-block" }} />
-                          <span style={{ fontWeight: 700 }}>{item.name}</span>
-                        </div>
-                        <span style={{ fontSize: 13, color: "var(--color-text-sec)" }}>{formatTrafficPercent(item.share)}</span>
-                      </div>
-                      <div style={{ marginTop: 8, fontSize: 22, fontWeight: 800 }}>{formatTrafficNumber(item.value)}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前范围没有来源拆解数据" />
-            )}
-          </Card>
-        </div>
-
-        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 16 }}>
-          <Card size="small" bodyStyle={{ padding: 16 }} style={{ borderRadius: 18 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 10 }}>
-              <div>
-                <div style={{ fontSize: 16, fontWeight: 700 }}>效率趋势</div>
-                <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>{dailyTrendData.length > 0 ? "按日期维度的支付转化率变化" : "不同统计周期下的点击效率与支付转化率"}</div>
-              </div>
-              <Tag color="purple">{activeFluxSite.siteLabel}</Tag>
-            </div>
-            {dailyTrendData.length > 0 ? (
-              <ResponsiveContainer width="100%" height={300}>
-                <LineChart data={dailyTrendData} margin={{ top: 8, right: 12, left: -8, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke={PRODUCT_TRAFFIC_COLORS.grid} />
-                  <XAxis dataKey="date" tick={{ fontSize: 12, fill: PRODUCT_TRAFFIC_COLORS.axis }} interval="preserveStartEnd" />
-                  <YAxis tick={{ fontSize: 12, fill: PRODUCT_TRAFFIC_COLORS.axis }} domain={[0, "auto"]} />
-                  <ReTooltip formatter={(value: any) => formatTrafficPercent(value)} />
-                  <Legend />
-                  <Line type="monotone" dataKey="转化率" stroke={PRODUCT_TRAFFIC_COLORS.clickPayRate} strokeWidth={2.5} dot={{ r: 3 }} />
-                </LineChart>
-              </ResponsiveContainer>
-            ) : efficiencyComparisonData.length > 0 ? (
-              <ResponsiveContainer width="100%" height={300}>
-                <LineChart data={efficiencyComparisonData} margin={{ top: 8, right: 12, left: -8, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke={PRODUCT_TRAFFIC_COLORS.grid} />
-                  <XAxis dataKey="label" tick={{ fontSize: 12, fill: PRODUCT_TRAFFIC_COLORS.axis }} />
-                  <YAxis tick={{ fontSize: 12, fill: PRODUCT_TRAFFIC_COLORS.axis }} domain={[0, 100]} />
-                  <ReTooltip formatter={(value: any) => formatTrafficPercent(value)} />
-                  <Legend />
-                  <Line type="monotone" dataKey="曝光点击率" stroke={PRODUCT_TRAFFIC_COLORS.clickRate} strokeWidth={2.5} dot={{ r: 3 }} />
-                  <Line type="monotone" dataKey="点击支付转化率" stroke={PRODUCT_TRAFFIC_COLORS.clickPayRate} strokeWidth={2.5} dot={{ r: 3 }} />
-                </LineChart>
-              </ResponsiveContainer>
-            ) : (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无效率趋势数据" />
-            )}
-          </Card>
-
-          <Card size="small" bodyStyle={{ padding: 16 }} style={{ borderRadius: 18 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 10 }}>
-              <div>
-                <div style={{ fontSize: 16, fontWeight: 700 }}>来源效率</div>
-                <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>各来源点击与支付件数的效率对比</div>
-              </div>
-              <Tag>{selectedFluxRange}</Tag>
-            </div>
-            {sourceBreakdownData.length > 0 ? (
-              <ResponsiveContainer width="100%" height={300}>
-                <BarChart data={sourceBreakdownData} margin={{ top: 8, right: 12, left: -8, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke={PRODUCT_TRAFFIC_COLORS.grid} />
-                  <XAxis dataKey="来源" tick={{ fontSize: 12, fill: PRODUCT_TRAFFIC_COLORS.axis }} />
-                  <YAxis tick={{ fontSize: 12, fill: PRODUCT_TRAFFIC_COLORS.axis }} allowDecimals={false} />
-                  <ReTooltip formatter={(value: any) => formatTrafficNumber(value)} />
-                  <Legend />
-                  <Bar dataKey="点击" fill={PRODUCT_TRAFFIC_COLORS.detail} radius={[8, 8, 0, 0]} />
-                  <Bar dataKey="支付件数" fill={PRODUCT_TRAFFIC_COLORS.clickPayRate} radius={[8, 8, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            ) : (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前范围没有来源效率数据" />
-            )}
-          </Card>
-        </div>
-
-        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.05fr) minmax(0, 0.95fr)", gap: 16 }}>
-          <Card size="small" bodyStyle={{ padding: 16 }} style={{ borderRadius: 18 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 12 }}>
-              <div>
-                <div style={{ fontSize: 16, fontWeight: 700 }}>流量漏斗</div>
-                <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>从曝光到支付买家的承接过程</div>
-              </div>
-              <Tag color="cyan">商品级流量</Tag>
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))", gap: 10 }}>
-              {funnelSteps.map((step, index) => {
-                const prev = index === 0 ? step.value : funnelSteps[index - 1].value || 0;
-                const stepRate = index === 0 || prev <= 0 ? 100 : (step.value / prev) * 100;
-                return (
-                  <div
-                    key={step.label}
-                    style={{
-                      padding: 12,
-                      borderRadius: 16,
-                      border: "1px solid rgba(15,23,42,0.06)",
-                      background: "#fff",
-                      boxShadow: "0 8px 24px rgba(15,23,42,0.04)",
-                    }}
-                  >
-                    <div style={{ fontSize: 12, color: "var(--color-text-sec)", marginBottom: 6 }}>{step.label}</div>
-                    <div style={{ fontSize: 24, fontWeight: 800, color: "var(--color-text)" }}>{formatTrafficNumber(step.value)}</div>
-                    <div style={{ marginTop: 6, fontSize: 12, color: "var(--color-text-sec)" }}>环节保留：{formatTrafficPercent(stepRate)}</div>
-                  </div>
-                );
-              })}
-            </div>
-          </Card>
-
-          <div style={{ display: "grid", gap: 12 }}>
-            {sourceBreakdownData.map((item, index) => (
-              <Card key={item.来源} size="small" bodyStyle={{ padding: 14 }} style={{ borderRadius: 16 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 10 }}>
-                  <div style={{ fontSize: 15, fontWeight: 700 }}>{item.来源}</div>
-                  <Tag color={index === 0 ? "orange" : index === 1 ? "blue" : "default"}>{selectedFluxRange}</Tag>
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
-                  {renderMetric("曝光", formatTrafficNumber(item.曝光), true)}
-                  {renderMetric("点击", formatTrafficNumber(item.点击))}
-                  {renderMetric("支付件数", formatTrafficNumber(item.支付件数))}
-                  {renderMetric("点击率", formatTrafficPercent(item.点击率))}
-                  {renderMetric("支付转化率", formatTrafficPercent(item.支付转化率))}
-                </div>
-              </Card>
-            ))}
-          </div>
-        </div>
-
-        <Card size="small" bodyStyle={{ padding: 16 }} style={{ borderRadius: 18 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 10 }}>
-            <div>
-              <div style={{ fontSize: 16, fontWeight: 700 }}>流量明细</div>
-              <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>当前站点与周期下命中的原始商品流量记录</div>
-            </div>
-            <Tag>{currentFluxItems.length} 条记录</Tag>
-          </div>
-          <Table
-            size="small"
-            rowKey={(item: any, index) => `${item.goodsId || item.skcId || item.productId || index}`}
-            dataSource={currentFluxItems}
-            pagination={currentFluxItems.length > 8 ? { pageSize: 8 } : false}
-            scroll={{ x: 1020 }}
-            columns={[
-              { title: "商品ID", dataIndex: "goodsId", width: 140, render: (value) => <span style={{ fontFamily: "Consolas, monospace", fontSize: 13 }}>{formatTextValue(value)}</span> },
-              { title: "曝光", dataIndex: "exposeNum", width: 90, align: "right", render: formatTrafficNumber },
-              { title: "点击", dataIndex: "clickNum", width: 90, align: "right", render: formatTrafficNumber },
-              { title: "详情访客", width: 100, align: "right", render: (_: any, item: any) => formatTrafficNumber(item?.detailVisitorNum || item?.detailVisitNum) },
-              { title: "收藏人数", dataIndex: "collectUserNum", width: 100, align: "right", render: formatTrafficNumber },
-              { title: "加购人数", dataIndex: "addToCartUserNum", width: 100, align: "right", render: formatTrafficNumber },
-              { title: "支付买家", dataIndex: "buyerNum", width: 100, align: "right", render: formatTrafficNumber },
-              { title: "支付订单", dataIndex: "payOrderNum", width: 100, align: "right", render: formatTrafficNumber },
-              { title: "支付件数", dataIndex: "payGoodsNum", width: 100, align: "right", render: formatTrafficNumber },
-              { title: "点击支付转化率", width: 130, align: "right", render: (_: any, item: any) => formatTrafficPercent(toPercentValue(item?.clickPayRate, item?.buyerNum, item?.clickNum)) },
-            ]}
-          />
-        </Card>
-
-        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.2fr) minmax(320px, 0.8fr)", gap: 16 }}>
-          <Card size="small" bodyStyle={{ padding: 16 }} style={{ borderRadius: 18 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 10 }}>
-              <div>
-                <div style={{ fontSize: 16, fontWeight: 700 }}>来源转化矩阵</div>
-                <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>把每个来源的流量规模、点击效率和成交贡献放在一张表里看清楚</div>
-              </div>
-              <Tag color="geekblue">{selectedFluxRange}</Tag>
-            </div>
-            <Table
-              size="small"
-              rowKey={(item: any) => item.来源}
-              dataSource={sourceContributionData}
-              pagination={false}
-              columns={[
-                { title: "来源", dataIndex: "来源", width: 90 },
-                { title: "曝光", dataIndex: "曝光", width: 90, align: "right", render: formatTrafficNumber },
-                { title: "曝光占比", dataIndex: "曝光占比", width: 100, align: "right", render: formatTrafficPercent },
-                { title: "点击", dataIndex: "点击", width: 90, align: "right", render: formatTrafficNumber },
-                { title: "点击率", dataIndex: "点击率", width: 100, align: "right", render: formatTrafficPercent },
-                { title: "支付件数", dataIndex: "支付件数", width: 100, align: "right", render: formatTrafficNumber },
-                { title: "支付贡献", dataIndex: "支付贡献占比", width: 100, align: "right", render: formatTrafficPercent },
-                { title: "千次曝光成交", dataIndex: "千次曝光成交", width: 120, align: "right", render: (value: number) => formatTrafficNumber(value) },
-                {
-                  title: "建议",
-                  dataIndex: "建议",
-                  width: 120,
-                  render: (value: string) => (
-                    <Tag color={value === "继续放量" ? "success" : value === "维持观察" ? "default" : "orange"}>{value}</Tag>
-                  ),
-                },
-              ]}
-            />
-          </Card>
-
-          <Card size="small" bodyStyle={{ padding: 16 }} style={{ borderRadius: 18 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 10 }}>
-              <div>
-                <div style={{ fontSize: 16, fontWeight: 700 }}>运营动作建议</div>
-                <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>按现在这波流量，优先先做这些动作</div>
-              </div>
-              <Tag color="purple">{activeFluxSite.siteLabel}</Tag>
-            </div>
-            <div style={{ display: "grid", gap: 10 }}>
-              {actionChecklist.map((item, index) => (
-                <div
-                  key={`${item.title}-${index}`}
-                  style={{
-                    padding: 14,
-                    borderRadius: 16,
-                    background: "linear-gradient(135deg, rgba(255,250,245,1) 0%, rgba(255,255,255,1) 100%)",
-                    border: "1px solid rgba(255,138,31,0.1)",
-                  }}
-                >
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                    <span
-                      style={{
-                        width: 24,
-                        height: 24,
-                        borderRadius: "50%",
-                        background: "rgba(255,138,31,0.12)",
-                        color: "var(--color-brand)",
-                        display: "inline-flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        fontSize: 12,
-                        fontWeight: 700,
-                      }}
-                    >
-                      {index + 1}
-                    </span>
-                    <span style={{ fontWeight: 700 }}>{item.title}</span>
-                  </div>
-                  <div style={{ fontSize: 12, color: "var(--color-text-sec)", lineHeight: 1.8 }}>{item.desc}</div>
-                </div>
-              ))}
-            </div>
-          </Card>
-        </div>
+      <div>
+        <TrafficDriverPanel
+          sites={buildTrafficDriverSitesFromProduct(fluxSites, siteTrendListBySite)}
+          activeSiteKey={activeFluxSiteKey as TrafficSiteKey}
+          onActiveSiteKeyChange={(key) => setActiveFluxSiteKey(key)}
+          rangeLabel={selectedFluxRange}
+          onRangeLabelChange={(label) => setActiveFluxRangeLabel(label)}
+        />
       </div>
     ) : (
       <Alert
@@ -3367,7 +3123,17 @@ export default function ProductList() {
         )}
         destroyOnClose
       >
-        {drawerTab === "flux" ? fluxTab : overviewTab}
+        <Tabs
+          activeKey={drawerTab}
+          onChange={setDrawerTab}
+          items={[
+            { key: "overview", label: "概览", children: overviewTab },
+            { key: "flux", label: "流量驾驶舱", children: fluxTab },
+            { key: "sku", label: "SKU 明细", children: skuTab },
+            { key: "fields", label: "全部字段", children: allFieldsTab },
+            { key: "labels", label: "标签", children: labelTab },
+          ]}
+        />
       </Drawer>
     );
   };
@@ -3539,7 +3305,12 @@ export default function ProductList() {
                 loading={loading}
                 onRow={(record: any) => ({
                   style: {
-                    ...(record._isTotal ? { background: "#fff7e6" } : {}),
+                    ...(record._isTotal ? { background: "#fff7e6" } : { cursor: "pointer" }),
+                  },
+                  onClick: () => {
+                    if (record?._isTotal) return;
+                    setSelectedProduct(record);
+                    setDrawerTab("overview");
                   },
                 })}
                 pagination={{

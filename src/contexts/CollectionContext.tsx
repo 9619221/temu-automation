@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from "react";
+﻿import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from "react";
 import { message, notification } from "antd";
 import { parseDashboardData, parseProductsData, parseOrdersData, parseSalesData, parseFluxData } from "../utils/parseRawApis";
 import {
@@ -315,6 +315,31 @@ export function CollectionProvider({ children }: { children: React.ReactNode }) 
             }
             const count = data?.apis?.length || 0;
 
+            // 防止空采集结果覆盖之前的好数据(scrape 失败时 apis 为空,不应该清空 store)
+            const isCaptureTask = data && typeof data === "object" && Array.isArray(data.apis);
+            if (isCaptureTask && count === 0) {
+              diagnosticsTasks[task.key] = {
+                status: "success",
+                storeKey: task.storeKey,
+                updatedAt: syncedAt,
+                count: 0,
+                duration: result.duration,
+                message: "本次采集 0 条,已保留上次数据",
+              };
+              setTaskStates((prev) => ({
+                ...prev,
+                [task.key]: {
+                  status: "success",
+                  count: 0,
+                  duration: result.duration,
+                  message: "本次采集 0 条,已保留上次数据",
+                },
+              }));
+              completed += 1;
+              continue;
+            }
+
+            const isFluxTask = task.key === "flux" || task.key === "fluxEU" || task.key === "fluxUS";
             let storeData: any = data;
             if (PARSED_TASK_KEYS.has(task.key)) {
               if (task.key === "dashboard") storeData = parseDashboardData(data);
@@ -365,29 +390,30 @@ export function CollectionProvider({ children }: { children: React.ReactNode }) 
                 } catch (e) {
                   console.warn("[flux-history] Failed to save daily snapshot:", e);
                 }
-
-                // 保存商品日趋势缓存（从 worker 返回的 __flux_product_daily_cache__）
-                try {
-                  const rawApis = Array.isArray(data?.apis) ? data.apis : [];
-                  const dailyCacheEntry = rawApis.find((a: any) => a.path === "__flux_product_daily_cache__");
-                  if (dailyCacheEntry?.data?.result) {
-                    const newCache = dailyCacheEntry.data.result;
-                    const existing: any = (await store!.get("temu_flux_product_history_cache")) || {};
-                    for (const [gid, gdata] of Object.entries(newCache) as [string, any][]) {
-                      if (!existing[gid]) existing[gid] = { stations: {} };
-                      for (const [site, sdata] of Object.entries(gdata.stations || {}) as [string, any][]) {
-                        existing[gid].stations[site] = sdata;
-                      }
-                    }
-                    await store!.set("temu_flux_product_history_cache", existing);
-                    console.log(`[flux-daily-cache] Saved daily trends for ${Object.keys(newCache).length} products`);
-                  }
-                } catch (e) {
-                  console.warn("[flux-daily-cache] Failed to save:", e);
-                }
               }
             } else {
               await setStoreValueForActiveAccount(store, task.storeKey, { ...data, syncedAt });
+            }
+
+            if (isFluxTask) {
+              try {
+                const rawApis = Array.isArray(data?.apis) ? data.apis : [];
+                const dailyCacheEntry = rawApis.find((a: any) => a.path === "__flux_product_daily_cache__");
+                if (dailyCacheEntry?.data?.result) {
+                  const newCache = dailyCacheEntry.data.result;
+                  const existing: any = (await store!.get("temu_flux_product_history_cache")) || {};
+                  for (const [gid, gdata] of Object.entries(newCache) as [string, any][]) {
+                    if (!existing[gid]) existing[gid] = { stations: {} };
+                    for (const [site, sdata] of Object.entries(gdata.stations || {}) as [string, any][]) {
+                      existing[gid].stations[site] = sdata;
+                    }
+                  }
+                  await store!.set("temu_flux_product_history_cache", existing);
+                  console.log(`[flux-daily-cache] Saved daily trends for ${Object.keys(newCache).length} products from ${task.key}`);
+                }
+              } catch (e) {
+                console.warn(`[flux-daily-cache] Failed to save for ${task.key}:`, e);
+              }
             }
 
             const displayCount = !PARSED_TASK_KEYS.has(task.key)

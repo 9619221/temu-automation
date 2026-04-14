@@ -6410,6 +6410,151 @@ async function clickFluxRangeTab(page, aliases = []) {
   }
 }
 
+function resolveFluxAnalysisTarget(params = {}) {
+  const rawSiteKey = String(params?.siteKey || params?.taskKey || "").trim().toLowerCase();
+  if (rawSiteKey === "us" || rawSiteKey === "fluxus") {
+    return { taskKey: "fluxUS", ...FLUX_ANALYSIS_TARGETS.fluxUS };
+  }
+  if (rawSiteKey === "eu" || rawSiteKey === "fluxeu") {
+    return { taskKey: "fluxEU", ...FLUX_ANALYSIS_TARGETS.fluxEU };
+  }
+  if (rawSiteKey === "global" || rawSiteKey === "flux") {
+    return { taskKey: "flux", ...FLUX_ANALYSIS_TARGETS.flux };
+  }
+
+  const rawSiteLabel = normalizeFluxUiText(params?.siteLabel || "");
+  if (rawSiteLabel === normalizeFluxUiText("美国")) {
+    return { taskKey: "fluxUS", ...FLUX_ANALYSIS_TARGETS.fluxUS };
+  }
+  if (rawSiteLabel === normalizeFluxUiText("欧区")) {
+    return { taskKey: "fluxEU", ...FLUX_ANALYSIS_TARGETS.fluxEU };
+  }
+  return { taskKey: "flux", ...FLUX_ANALYSIS_TARGETS.flux };
+}
+
+function mapFluxDailyDetailRows(rows = []) {
+  return (Array.isArray(rows) ? rows : [])
+    .map((item) => ({
+      date: item?.statDate || item?.day || item?.date || "",
+      exposeNum: item?.exposeNum || item?.goodsExposeNum || 0,
+      clickNum: item?.clickNum || item?.goodsClickNum || 0,
+      detailVisitNum: item?.goodsDetailVisitNum || item?.detailVisitNum || item?.goodsPageView || 0,
+      detailVisitorNum: item?.goodsDetailVisitorNum || item?.detailVisitorNum || 0,
+      addToCartUserNum: item?.addToCartUserNum || 0,
+      collectUserNum: item?.collectUserNum || 0,
+      buyerNum: item?.buyerNum || item?.payBuyerNum || 0,
+      payGoodsNum: item?.payGoodsNum || 0,
+      payOrderNum: item?.payOrderNum || 0,
+      exposeClickRate: item?.exposeClickConversionRate || item?.exposeClickRate || 0,
+      clickPayRate: item?.clickPayConversionRate || item?.clickPayRate || 0,
+      searchExposeNum: item?.searchExposeNum || 0,
+      searchClickNum: item?.searchClickNum || 0,
+      searchPayGoodsNum: item?.searchPayGoodsNum || 0,
+      searchPayOrderNum: item?.searchPayOrderNum || 0,
+      recommendExposeNum: item?.recommendExposeNum || 0,
+      recommendClickNum: item?.recommendClickNum || 0,
+      recommendPayGoodsNum: item?.recommendPayGoodsNum || 0,
+      recommendPayOrderNum: item?.recommendPayOrderNum || 0,
+    }))
+    .filter((item) => Boolean(item.date))
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+}
+
+async function scrapeFluxProductDetail(params = {}) {
+  const target = resolveFluxAnalysisTarget(params);
+  const goodsId = String(params?.goodsId || "").trim();
+  if (!goodsId) {
+    throw new Error("goodsId required");
+  }
+
+  const page = await createSellerCentralPage(target.fullUrl, {
+    lite: false,
+    readyDelayMin: 1000,
+    readyDelayMax: 1500,
+    logPrefix: `[flux:detail:${target.taskKey}]`,
+  });
+
+  try {
+    await closeFluxAnalysisPrompts(page);
+    await randomDelay(500, 900);
+
+    const endDate = new Date().toISOString().slice(0, 10);
+    const startDate = new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
+    const response = await page.evaluate(async ({ goodsId, startDate, endDate }) => {
+      try {
+        const result = await fetch("/api/seller/full/flow/analysis/goods/detail", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ goodsId, startDate, endDate }),
+        });
+        const body = await result.json().catch(() => null);
+        return {
+          ok: result.ok,
+          status: result.status,
+          body,
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          status: 0,
+          error: String(error?.message || error || "request failed"),
+          body: null,
+        };
+      }
+    }, { goodsId, startDate, endDate });
+
+    if (!response?.ok || !response?.body?.result) {
+      const errorText = response?.body?.errorMsg || response?.error || `HTTP ${response?.status || 0}`;
+      throw new Error(String(errorText || "fetch detail failed"));
+    }
+
+    const rawRows = response.body.result?.list || response.body.result?.dailyList || response.body.result?.trendList || [];
+    const daily = mapFluxDailyDetailRows(rawRows);
+    if (daily.length === 0) {
+      return {
+        success: false,
+        siteLabel: target.siteLabel,
+        goodsId,
+        startDate,
+        endDate,
+        daily: [],
+        cache: {},
+        raw: response.body.result || null,
+      };
+    }
+
+    const cachedAt = Date.now();
+    return {
+      success: true,
+      siteLabel: target.siteLabel,
+      goodsId,
+      startDate,
+      endDate,
+      daily,
+      cache: {
+        [goodsId]: {
+          goodsId,
+          productId: String(params?.spuId || params?.productId || "").trim(),
+          productSkcId: String(params?.skcId || params?.productSkcId || "").trim(),
+          productSkuId: String(params?.skuId || params?.productSkuId || "").trim(),
+          title: String(params?.title || "").trim(),
+          cachedAt,
+          stations: {
+            [target.siteLabel]: {
+              daily,
+              cachedAt,
+            },
+          },
+        },
+      },
+      raw: response.body.result || null,
+    };
+  } finally {
+    await saveCookies().catch(() => {});
+    await page.close().catch(() => {});
+  }
+}
+
 function extractFluxIdentity(resp) {
   try {
     const request = resp.request?.();
@@ -6443,12 +6588,67 @@ async function scrapeCustomTask(taskKey, task = {}) {
   const capturedApis = [];
   const seen = new Set();
   const responseTracker = createPendingTaskTracker();
+  let totalResponseCount = 0;
+  let sellerApiCount = 0;
+  const sellerApiPathSamples = [];
+  let totalRequestCount = 0;
+  let sellerRequestCount = 0;
+  const sellerRequestPathSamples = [];
+  let requestFailedCount = 0;
+  const requestFailedSamples = [];
+  let consoleErrorCount = 0;
+  const consoleErrorSamples = [];
+  let httpErrorCount = 0;
+  const httpErrorSamples = [];
   const page = await createSellerCentralPage(target.fullUrl, {
     lite: false,
     readyDelayMin: 1200,
     readyDelayMax: 1800,
     logPrefix: `[flux:${taskKey}]`,
   });
+
+  console.error(`[flux:${taskKey}] [diag] page created, target=${target.fullUrl}`);
+  try {
+    console.error(`[flux:${taskKey}] [diag] post-nav url=${page.url()}`);
+    const pageTitle = await page.title().catch(() => "?");
+    console.error(`[flux:${taskKey}] [diag] page title="${pageTitle}"`);
+  } catch {}
+
+  const dumpDiagnostics = async (label) => {
+    try {
+      const url = page.url();
+      const title = await page.title().catch(() => "?");
+      const probe = await page.evaluate(() => ({
+        bodyText: (document.body?.innerText || "").slice(0, 500),
+        hasLoginForm: !!document.querySelector('input[type="password"]'),
+        hasErrorBoundary: !!document.querySelector('[class*="error"], [class*="Error"]'),
+      })).catch(() => ({ bodyText: "?", hasLoginForm: false, hasErrorBoundary: false }));
+      console.error(`[flux:${taskKey}] [diag:${label}] url=${url}`);
+      console.error(`[flux:${taskKey}] [diag:${label}] title="${title}" hasLogin=${probe.hasLoginForm} hasError=${probe.hasErrorBoundary}`);
+      console.error(`[flux:${taskKey}] [diag:${label}] totalResponses=${totalResponseCount} sellerApis=${sellerApiCount} fluxApisCaptured=${capturedApis.length}`);
+      console.error(`[flux:${taskKey}] [diag:${label}] totalRequests=${totalRequestCount} sellerRequests=${sellerRequestCount} requestFailed=${requestFailedCount} consoleErrors=${consoleErrorCount} httpErrors=${httpErrorCount}`);
+      const httpErrSampleStr = httpErrorSamples.slice(-15).join(" | ");
+      if (httpErrSampleStr) {
+        console.error(`[flux:${taskKey}] [diag:${label}] HTTP 4xx/5xx: ${httpErrSampleStr}`);
+      }
+      const bodyExcerpt = String(probe.bodyText || "").replace(/\s+/g, " ").slice(0, 300);
+      console.error(`[flux:${taskKey}] [diag:${label}] bodyExcerpt="${bodyExcerpt}"`);
+      const respSampleStr = sellerApiPathSamples.slice(-12).join(", ");
+      console.error(`[flux:${taskKey}] [diag:${label}] last seller RESP paths: ${respSampleStr || "(none)"}`);
+      const reqSampleStr = sellerRequestPathSamples.slice(-12).join(", ");
+      console.error(`[flux:${taskKey}] [diag:${label}] last seller REQ paths: ${reqSampleStr || "(none)"}`);
+      const failSampleStr = requestFailedSamples.slice(-8).join(" | ");
+      if (failSampleStr) {
+        console.error(`[flux:${taskKey}] [diag:${label}] last requestfailed: ${failSampleStr}`);
+      }
+      const consoleSampleStr = consoleErrorSamples.slice(-5).join(" | ");
+      if (consoleSampleStr) {
+        console.error(`[flux:${taskKey}] [diag:${label}] last console errors: ${consoleSampleStr}`);
+      }
+    } catch (e) {
+      console.error(`[flux:${taskKey}] [diag:${label}] dump failed: ${e?.message || e}`);
+    }
+  };
 
   const hasRangeApi = (rangeLabel, pathPart) =>
     capturedApis.some((entry) => entry.rangeLabel === rangeLabel && String(entry.path || "").includes(pathPart));
@@ -6465,10 +6665,64 @@ async function scrapeCustomTask(taskKey, task = {}) {
   };
 
   try {
+    page.on("request", (req) => {
+      try {
+        const url = req.url();
+        const pathname = new URL(url).pathname;
+        totalRequestCount++;
+        if (pathname.startsWith("/api/seller/")) {
+          sellerRequestCount++;
+          if (sellerRequestPathSamples.length < 60) {
+            sellerRequestPathSamples.push(pathname);
+          }
+        }
+      } catch {}
+    });
+
+    page.on("requestfailed", (req) => {
+      try {
+        const url = req.url();
+        const pathname = new URL(url).pathname;
+        if (pathname.startsWith("/api/seller/") || pathname.includes("flow/analysis")) {
+          requestFailedCount++;
+          if (requestFailedSamples.length < 20) {
+            const failure = req.failure?.()?.errorText || "?";
+            requestFailedSamples.push(`${pathname}(${failure})`);
+          }
+        }
+      } catch {}
+    });
+
+    page.on("console", (msg) => {
+      try {
+        if (msg.type() === "error") {
+          consoleErrorCount++;
+          if (consoleErrorSamples.length < 10) {
+            consoleErrorSamples.push(String(msg.text() || "").slice(0, 160));
+          }
+        }
+      } catch {}
+    });
+
     page.on("response", (resp) => responseTracker.track((async () => {
       try {
         const url = resp.url();
         const pathname = new URL(url).pathname;
+        const status = resp.status();
+        totalResponseCount++;
+        if (status >= 400) {
+          httpErrorCount++;
+          if (httpErrorSamples.length < 30) {
+            const host = (() => { try { return new URL(url).host; } catch { return ""; } })();
+            httpErrorSamples.push(`${status} ${host}${pathname}`);
+          }
+        }
+        if (pathname.startsWith("/api/seller/")) {
+          sellerApiCount++;
+          if (sellerApiPathSamples.length < 60) {
+            sellerApiPathSamples.push(`${pathname}[${status}]`);
+          }
+        }
         if (!pathname.includes("/api/seller/full/flow/analysis/")) return;
         if (resp.status() !== 200) return;
         const contentType = resp.headers()["content-type"] || "";
@@ -6476,6 +6730,12 @@ async function scrapeCustomTask(taskKey, task = {}) {
 
         const body = await resp.json().catch(() => null);
         if (!body || (body.result === undefined && body.success === undefined)) return;
+
+        // 业务层错误响应(限流/权限/无数据)不视为有效捕获,避免下游误判"采集成功"用空数据覆盖 store
+        if (body.success === false || body.result === null || body.result === undefined) {
+          console.error(`[flux:${taskKey}] business error skipped: ${pathname} @ ${currentRangeLabel} -> errorCode=${body.errorCode} msg=${String(body.errorMsg || "").slice(0, 80)}`);
+          return;
+        }
 
         const dedupeKey = [
           currentRangeLabel,
@@ -6502,27 +6762,22 @@ async function scrapeCustomTask(taskKey, task = {}) {
     await closeFluxAnalysisPrompts(page);
     await randomDelay(900, 1400);
 
-    const availableRanges = [];
-    for (const step of FLUX_ANALYSIS_RANGE_STEPS) {
-      currentRangeLabel = step.label;
-      const clicked = await clickFluxRangeTab(page, step.aliases);
-      if (clicked) {
-        await randomDelay(900, 1500);
-      }
-      const hit = await waitForRangeApis(step.label, clicked ? 18000 : 12000);
-      if (hit) {
-        availableRanges.push(step.label);
-      } else {
-        console.error(`[flux:${taskKey}] Missing business APIs for ${step.label}`);
-      }
-    }
+    await dumpDiagnostics("after-prompts-closed");
+
+    // 等默认 range (近7日) 的业务 API 出来,然后直接进入商品日趋势采集
+    // 不再循环切 range tab —— 新版 SPA 切 tab 是纯前端 routing,不会触发新 API
+    currentRangeLabel = "\u8fd17\u65e5";
+    await waitForRangeApis(currentRangeLabel, 18000);
+
+    await dumpDiagnostics("after-default-range");
 
     await responseTracker.drain(2500);
     await saveCookies();
 
-    const primaryRangeLabel = availableRanges.includes("\u8fd17\u65e5")
-      ? "\u8fd17\u65e5"
-      : (availableRanges[0] || "\u4eca\u65e5");
+    const availableRanges = hasRangeApi(currentRangeLabel, "/mall/summary") || hasRangeApi(currentRangeLabel, "/goods/list")
+      ? [currentRangeLabel]
+      : [];
+    const primaryRangeLabel = currentRangeLabel;
 
     // ---- 商品日趋势采集：为每个商品请求最近30天的每日流量 ----
     try {
@@ -6535,6 +6790,29 @@ async function scrapeCustomTask(taskKey, task = {}) {
           if (gid) allGoodsIds.add(gid);
         }
       }
+
+      // 兜底: 如果 goods/list 被限流捕获不到 IDs,从已有 store 文件 temu_flux.json 提取
+      // (这样即使本次 goods/list 失败,daily trends 仍可继续运行)
+      if (allGoodsIds.size === 0) {
+        try {
+          const storeFile = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "temu_flux.json");
+          if (fs.existsSync(storeFile)) {
+            const storeJson = JSON.parse(fs.readFileSync(storeFile, "utf8"));
+            const itemSources = [
+              ...(Array.isArray(storeJson?.items) ? storeJson.items : []),
+              ...Object.values(storeJson?.itemsByRange || {}).flatMap((v) => Array.isArray(v) ? v : []),
+            ];
+            for (const item of itemSources) {
+              const gid = String(item?.goodsId || item?.productSkcId || "");
+              if (gid) allGoodsIds.add(gid);
+            }
+            console.error(`[flux:${taskKey}] Fallback: extracted ${allGoodsIds.size} goodsIds from store temu_flux.json`);
+          }
+        } catch (fallbackErr) {
+          console.error(`[flux:${taskKey}] Fallback goodsIds read failed: ${fallbackErr?.message || fallbackErr}`);
+        }
+      }
+
       if (allGoodsIds.size > 0) {
         console.error(`[flux:${taskKey}] Fetching daily trends for ${allGoodsIds.size} products...`);
         const endDate = new Date().toISOString().slice(0, 10);
@@ -6745,6 +7023,9 @@ async function handleRequest(body) {
         console.error(`[scrape_global_performance] persist failed: ${e.message}`);
       }
       return result;
+    }
+    case "scrape_flux_product_detail": {
+      return await scrapeFluxProductDetail(params || {});
     }
     case "scrape_skc_region_detail": {
       const productId = params?.productId || params?.pid;
@@ -7574,6 +7855,7 @@ async function handleRequest(body) {
       const scrapeHandlers = buildScrapeHandlers({
         scrapePageCaptureAll, scrapeSidebarCaptureAll, scrapePageWithListener,
         scrapeGovernPage: (subPath, meta) => scrapeSingleGovernTarget(subPath, meta),
+        scrapeCustomTask,
         ensureBrowser,
       });
       if (scrapeHandlers[action]) {

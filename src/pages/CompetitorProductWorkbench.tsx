@@ -52,6 +52,8 @@ import {
   type NormalizedMyProduct,
 } from "../utils/competitorWorkbench";
 import { parseFluxData, parseProductsData, parseSalesData } from "../utils/parseRawApis";
+import { getStoreValue, getStoreValues } from "../utils/storeCompat";
+import { setStoreValueForActiveAccount } from "../utils/multiStore";
 
 const { Text, Paragraph } = Typography;
 
@@ -692,7 +694,7 @@ function getFluxSiteDisplayName(siteKey: FluxSiteDataset["siteKey"]) {
 }
 
 async function readArrayStoreValue(key: string) {
-  const value = await store?.get(key);
+  const value = await getStoreValue(store, key);
   return Array.isArray(value) ? value : [];
 }
 
@@ -1416,13 +1418,18 @@ export default function CompetitorProductWorkbench({
     void loadWorkspaces();
 
     const loadInitialData = async () => {
-      const [rawProducts, rawSales, rawFlux, rawFluxUS, rawFluxEU] = await Promise.all([
-        store?.get("temu_products"),
-        store?.get("temu_sales"),
-        store?.get("temu_flux"),
-        store?.get("temu_raw_fluxUS"),
-        store?.get("temu_raw_fluxEU"),
+      const storeValues = await getStoreValues(store, [
+        "temu_products",
+        "temu_sales",
+        "temu_flux",
+        "temu_raw_fluxUS",
+        "temu_raw_fluxEU",
       ]);
+      const rawProducts = storeValues.temu_products;
+      const rawSales = storeValues.temu_sales;
+      const rawFlux = storeValues.temu_flux;
+      const rawFluxUS = storeValues.temu_raw_fluxUS;
+      const rawFluxEU = storeValues.temu_raw_fluxEU;
 
       const [debugFlux, debugFluxUS, debugFluxEU] = await Promise.all([
         automation?.readScrapeData?.("flux").catch(() => null),
@@ -2468,7 +2475,7 @@ export default function CompetitorProductWorkbench({
       });
       const merged = mergeTrackedProducts(existingTracked as TrackedProduct[], additions);
       setTracked(merged);
-      await store?.set("temu_competitor_tracked", merged);
+      await setStoreValueForActiveAccount(store, "temu_competitor_tracked", merged);
       await persistWorkspace(selectedMy, { keyword: keyword.trim(), wareHouseType, selectedUrls: dedupeStrings([...selectedUrls, ...urls]) });
       window.dispatchEvent(new CustomEvent(COMPETITOR_TRACKED_UPDATED_EVENT));
       message.success(`已加入“${selectedProduct.title}”的对比样本：${urls.length} 个`);
@@ -2503,7 +2510,7 @@ export default function CompetitorProductWorkbench({
           addedAt: new Date().toISOString(),
         }]);
         setTracked(merged);
-        await store?.set("temu_competitor_tracked", merged);
+        await setStoreValueForActiveAccount(store, "temu_competitor_tracked", merged);
         window.dispatchEvent(new CustomEvent(COMPETITOR_TRACKED_UPDATED_EVENT));
       }
       await persistWorkspace(selectedMy, { keyword: keyword.trim(), wareHouseType, selectedUrls: dedupeStrings([...selectedUrls, url]) });
@@ -2539,7 +2546,7 @@ export default function CompetitorProductWorkbench({
         return item;
       });
       setTracked(updated);
-      await store?.set("temu_competitor_tracked", updated);
+      await setStoreValueForActiveAccount(store, "temu_competitor_tracked", updated);
       window.dispatchEvent(new CustomEvent(COMPETITOR_TRACKED_UPDATED_EVENT));
       message.success(`已刷新当前商品样本：${response.success}/${response.total}`);
     } catch (error) {
