@@ -2169,18 +2169,26 @@ export default function ProductList() {
       key: "totalSales",
       width: 95,
       align: "right",
-      onCell: productCellSpanMiddle,
       sorter: (a, b) => (a.totalSales || 0) - (b.totalSales || 0),
-      render: (val: number) => <span style={{ fontSize: 14, ...numColor(val || 0, "#1890ff") }}>{val || 0}</span>,
+      render: (val: number, record: any) => {
+        // 商品级数据,只在"一行代表整个商品"的行展示:
+        //   - 多 SKU 的合计行 (_isTotal)
+        //   - 单 SKU / 无 SKU 明细的普通行 (_rowSpan === 1 && !_isTotal)
+        // SKU 明细行留空,避免 rowSpan 混在中列触发布局错位
+        const isProductRow = record._isTotal || record._rowSpan === 1;
+        if (!isProductRow) return null;
+        return <span style={{ fontSize: 14, ...numColor(val || 0, "#1890ff") }}>{val || 0}</span>;
+      },
     },
     {
       title: "仓内可用库存",
       key: "warehouseStock",
       width: 120,
       align: "right",
-      onCell: productCellSpanMiddle,
       sorter: (a, b) => (a.warehouseStock || 0) - (b.warehouseStock || 0),
       render: (_: any, r: any) => {
+        const isProductRow = r._isTotal || r._rowSpan === 1;
+        if (!isProductRow) return null;
         const v = r.warehouseStock || 0;
         return <span style={{ fontSize: 14, color: v > 0 ? "#1890ff" : "#ff4d4f", fontWeight: 500 }}>{v}</span>;
       },
@@ -2240,46 +2248,50 @@ export default function ProductList() {
       key: "actions",
       width: 110,
       fixed: "right",
-      onCell: productCellSpanMiddle,
-      render: (_: any, record: ProductItem) => (
-        <Space direction="vertical" size={2}>
-          <Button
-            type="link"
-            size="small"
-            style={{ padding: 0, height: "auto", fontWeight: 600, fontSize: 14 }}
-            onClick={(event) => {
-              event.stopPropagation();
-              openCompetitorAnalysis(record);
-            }}
-          >
-            竞品分析
-          </Button>
-          <Button
-            type="link"
-            size="small"
-            style={{ padding: 0, height: "auto", fontWeight: 600, fontSize: 14 }}
-            onClick={(event) => {
-              event.stopPropagation();
-              setSelectedProduct(record);
-              setDrawerTab("overview");
-            }}
-          >
-            销售趋势
-          </Button>
-          <Button
-            type="link"
-            size="small"
-            style={{ padding: 0, height: "auto", fontWeight: 600, fontSize: 14 }}
-            onClick={(event) => {
-              event.stopPropagation();
-              setSelectedProduct(record);
-              setDrawerTab("flux");
-            }}
-          >
-            流量分析
-          </Button>
-        </Space>
-      ),
+      render: (_: any, record: any) => {
+        // 只在"一行代表整个商品"的行渲染按钮,避免 fixed:right + rowSpan 破坏表格布局
+        const isProductRow = record._isTotal || record._rowSpan === 1;
+        if (!isProductRow) return null;
+        return (
+          <Space direction="vertical" size={2}>
+            <Button
+              type="link"
+              size="small"
+              style={{ padding: 0, height: "auto", fontWeight: 600, fontSize: 14 }}
+              onClick={(event) => {
+                event.stopPropagation();
+                openCompetitorAnalysis(record);
+              }}
+            >
+              竞品分析
+            </Button>
+            <Button
+              type="link"
+              size="small"
+              style={{ padding: 0, height: "auto", fontWeight: 600, fontSize: 14 }}
+              onClick={(event) => {
+                event.stopPropagation();
+                setSelectedProduct(record);
+                setDrawerTab("overview");
+              }}
+            >
+              销售趋势
+            </Button>
+            <Button
+              type="link"
+              size="small"
+              style={{ padding: 0, height: "auto", fontWeight: 600, fontSize: 14 }}
+              onClick={(event) => {
+                event.stopPropagation();
+                setSelectedProduct(record);
+                setDrawerTab("flux");
+              }}
+            >
+              流量分析
+            </Button>
+          </Space>
+        );
+      },
     },
   ];
 
