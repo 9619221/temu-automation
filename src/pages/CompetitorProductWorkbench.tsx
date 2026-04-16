@@ -2613,6 +2613,43 @@ export default function CompetitorProductWorkbench({
 
     try {
       const result = await doVisionCompare(competitorImageEntries);
+      // 部分图片 403（未全挂所以后端没 throw）——自动刷新一次获取新签名 URL 后重试
+      const partialOssErrors = Array.isArray(result?.imageErrors)
+        ? result.imageErrors.filter((e: any) => /403|Forbidden|Expires/i.test(e.error || ""))
+        : [];
+      if (partialOssErrors.length > 0 && !visionAutoRefreshedRef.current && competitor && selectedUrls.length > 0) {
+        visionAutoRefreshedRef.current = true;
+        try {
+          const response = await withRetry(() => competitor.batchTrack({ urls: selectedUrls }), { label: "vision-partial-refresh" });
+          const existingTracked = await readArrayStoreValue("temu_competitor_tracked");
+          const updated = (existingTracked as TrackedProduct[]).map((item) => {
+            if (!selectedUrls.includes(item.url)) return item;
+            const next = response.results.find((r: any) => r.url === item.url);
+            if (next && !next.error) return { ...item, title: next.title || item.title, snapshots: [...item.snapshots, next].slice(-30) };
+            return item;
+          });
+          setTracked(updated);
+          await setStoreValueForActiveAccount(store, "temu_competitor_tracked", updated);
+          window.dispatchEvent(new CustomEvent(COMPETITOR_TRACKED_UPDATED_EVENT));
+          const trackedByUrl = new Map(updated.map((item) => [item.url, item]));
+          const freshEntries = selectedUrls.slice(0, 3).map((url) => {
+            const item = trackedByUrl.get(url);
+            const latest = item?.snapshots?.[item.snapshots.length - 1] as any;
+            const imgUrl = firstTextValue(latest?.imageUrl, latest?.imageUrls?.[0]);
+            if (!imgUrl) return null;
+            return { url: imgUrl, title: latest?.titleZh || latest?.title || "竞品", priceText: latest?.priceText || "", monthlySales: toSafeNumber(latest?.monthlySales) };
+          }).filter(Boolean) as typeof competitorImageEntries;
+          if (freshEntries.length > 0) {
+            const retryResult = await doVisionCompare(freshEntries);
+            setVisionResult(retryResult);
+            visionAutoRefreshedRef.current = false;
+            setVisionLoading(false);
+            return;
+          }
+        } catch (refreshErr) {
+          console.warn("[vision-compare] partial-refresh failed:", refreshErr);
+        }
+      }
       setVisionResult(result);
       visionAutoRefreshedRef.current = false;
     } catch (error) {
@@ -3657,7 +3694,8 @@ export default function CompetitorProductWorkbench({
                 ) : null}
 
                 {isSelectedYunqiExactMatch && selectedYunqiDetail ? (
-                  <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+                  <Space direction="vertical" size={16} style={{ width: "100%" }}>
+                    {/* ── 标签栏 ── */}
                     <Space wrap size={[6, 6]}>
                       {selectedYunqiDetail.mallName ? <Tag color="blue">{selectedYunqiDetail.mallName}</Tag> : null}
                       {selectedYunqiDetail.brand ? <Tag>{selectedYunqiDetail.brand}</Tag> : null}
@@ -3667,149 +3705,103 @@ export default function CompetitorProductWorkbench({
                       {selectedYunqiDetail.activityType ? <Tag color="magenta">{selectedYunqiDetail.activityType}</Tag> : null}
                       {selectedYunqiDetail.soldOut ? <Tag color="red">已售罄</Tag> : <Tag color="success">在售</Tag>}
                       {selectedYunqiDetail.adult ? <Tag color="volcano">成人</Tag> : null}
+                      {selectedYunqiTags.map((tag) => <Tag key={tag}>{tag}</Tag>)}
                     </Space>
 
-                    <Row gutter={[12, 12]}>
-                      <Col xs={12} md={6}><Card size="small"><Statistic title="参考周销" value={toSafeNumber(selectedYunqiDetail.weeklySales)} /></Card></Col>
-                      <Col xs={12} md={6}><Card size="small"><Statistic title="参考月销" value={toSafeNumber(selectedYunqiDetail.monthlySales)} /></Card></Col>
-                      <Col xs={12} md={6}><Card size="small"><Statistic title="累计销量" value={toSafeNumber(selectedYunqiDetail.totalSales)} /></Card></Col>
-                      <Col xs={12} md={6}><Card size="small"><Statistic title="同款数" value={toSafeNumber(selectedYunqiDetail.sameNum)} /></Card></Col>
-                      <Col xs={12} md={6}><Card size="small"><Statistic title="USD GMV" value={toSafeNumber(selectedYunqiDetail.usdGmv)} prefix="$" precision={2} /></Card></Col>
-                      <Col xs={12} md={6}><Card size="small"><Statistic title="EUR GMV" value={toSafeNumber(selectedYunqiDetail.eurGmv)} prefix="€" precision={2} /></Card></Col>
-                      <Col xs={12} md={6}><Card size="small"><Statistic title="店铺评分" value={toSafeNumber(selectedYunqiDetail.mallScore)} precision={1} /></Card></Col>
-                      <Col xs={12} md={6}><Card size="small"><Statistic title="店铺商品数" value={toSafeNumber(selectedYunqiDetail.mallTotalGoods)} /></Card></Col>
-                    </Row>
-
-                    <div
-                      style={{
-                        borderRadius: 16,
-                        border: "1px solid #f0f0f0",
-                        background: "#fafafa",
-                        padding: 16,
-                      }}
-                    >
-                      <Text type="secondary" style={{ fontSize: 13 }}>原始标题</Text>
-                      <Paragraph
-                        style={{ marginTop: 8, marginBottom: 0, lineHeight: 1.8 }}
-                        ellipsis={{ rows: 3, expandable: true, symbol: "展开" }}
-                      >
-                        {firstTextValue(selectedYunqiDetail.titleZh, selectedYunqiDetail.titleEn, selectedYunqiDetail.originalTitle, selectedYunqiDetail.title) || "-"}
-                      </Paragraph>
+                    {/* ── 核心指标（紧凑网格） ── */}
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 8 }}>
+                      {[
+                        { label: "日销", value: toSafeNumber(selectedYunqiDetail.dailySales), color: "#262626" },
+                        { label: "周销", value: toSafeNumber(selectedYunqiDetail.weeklySales), color: "#262626" },
+                        { label: "月销", value: toSafeNumber(selectedYunqiDetail.monthlySales), color: "#262626" },
+                        { label: "累计", value: toSafeNumber(selectedYunqiDetail.totalSales), color: "#262626" },
+                        { label: "评分", value: toSafeNumber(selectedYunqiDetail.score ?? selectedYunqiDetail.rating), precision: 1, color: "#fa8c16" },
+                        { label: "USD GMV", value: toSafeNumber(selectedYunqiDetail.usdGmv), prefix: "$", precision: 2, color: "#389e0d" },
+                        { label: "EUR GMV", value: toSafeNumber(selectedYunqiDetail.eurGmv), prefix: "€", precision: 2, color: "#389e0d" },
+                        { label: "评论", value: toSafeNumber(selectedYunqiDetail.reviewCount), color: "#595959" },
+                        { label: "同款数", value: toSafeNumber(selectedYunqiDetail.sameNum), color: "#595959" },
+                        { label: "广告", value: Array.isArray(selectedYunqiDetail.adRecords) ? selectedYunqiDetail.adRecords.length : 0, color: "#595959" },
+                      ].map((item) => (
+                        <div key={item.label} style={{ background: "#fafafa", borderRadius: 10, padding: "8px 10px", border: "1px solid #f0f0f0" }}>
+                          <div style={{ fontSize: 11, color: "#8c8c8c", marginBottom: 2 }}>{item.label}</div>
+                          <div style={{ fontSize: 17, fontWeight: 600, color: item.color, lineHeight: 1.3 }}>
+                            {item.prefix || ""}{item.precision != null ? Number(item.value || 0).toLocaleString(undefined, { minimumFractionDigits: item.precision, maximumFractionDigits: item.precision }) : (item.value || 0).toLocaleString()}
+                          </div>
+                        </div>
+                      ))}
                     </div>
 
-                    <Row gutter={[12, 12]}>
-                      {[
-                        { label: "市场价", value: formatMoneyDisplay(selectedYunqiDetail.marketPrice) },
-                        { label: "美元价", value: formatMoneyDisplay(selectedYunqiDetail.usdPrice) },
-                        { label: "欧元价", value: formatMoneyDisplay(selectedYunqiDetail.eurPrice, "€") },
-                        { label: "上架时间", value: formatDateDisplay(selectedYunqiDetail.createdAt || selectedYunqiDetail.issuedDate) },
-                        { label: "最近更新", value: formatDateDisplay(selectedYunqiDetail.lastModified) },
-                        { label: "最近投流", value: formatDateDisplay(selectedYunqiDetail.lastAdTime) },
-                        { label: "评论提示", value: firstTextValue(selectedYunqiDetail.commentNumTips) || "-" },
-                        { label: "类目", value: firstTextValue(selectedYunqiDetail.categoryName, selectedYunqiDetail.category) || "-" },
-                        { label: "广告记录", value: String(Array.isArray(selectedYunqiDetail.adRecords) ? selectedYunqiDetail.adRecords.length : 0) },
-                      ].map((item) => (
-                        <Col xs={12} md={8} xl={8} key={item.label}>
-                          <Card size="small" style={{ borderRadius: 14, height: "100%" }} bodyStyle={{ padding: 14 }}>
-                            <Text type="secondary" style={{ fontSize: 13 }}>{item.label}</Text>
-                            <Paragraph
-                              style={{ marginTop: 8, marginBottom: 0, lineHeight: 1.7, fontSize: 16 }}
-                              ellipsis={{ rows: 2, tooltip: item.value }}
-                            >
-                              {item.value}
-                            </Paragraph>
-                          </Card>
-                        </Col>
-                      ))}
-                    </Row>
+                    {/* ── 原始标题 ── */}
+                    <Paragraph
+                      style={{ margin: 0, padding: "8px 12px", background: "#fafafa", borderRadius: 10, border: "1px solid #f0f0f0", lineHeight: 1.8, fontSize: 13, color: "#595959" }}
+                      ellipsis={{ rows: 2, expandable: true, symbol: "展开" }}
+                    >
+                      {firstTextValue(selectedYunqiDetail.titleZh, selectedYunqiDetail.titleEn, selectedYunqiDetail.originalTitle, selectedYunqiDetail.title) || "-"}
+                    </Paragraph>
 
-                    {selectedYunqiTags.length > 0 ? (
-                      <div>
-                        <Text strong style={{ fontSize: 13 }}>云启标签</Text>
-                        <div style={{ marginTop: 8 }}>
-                          <Space wrap size={[6, 6]}>
-                            {selectedYunqiTags.map((tag) => <Tag key={tag}>{tag}</Tag>)}
-                          </Space>
-                        </div>
-                      </div>
-                    ) : null}
+                    {/* ── 价格 + 店铺 + 时间（Descriptions 紧凑表格） ── */}
+                    <Descriptions
+                      size="small"
+                      bordered
+                      column={{ xs: 2, sm: 3, md: 3, lg: 3 }}
+                      labelStyle={{ fontSize: 12, color: "#8c8c8c", padding: "6px 10px", background: "#fafafa" }}
+                      contentStyle={{ fontSize: 13, padding: "6px 10px", fontWeight: 500 }}
+                    >
+                      <Descriptions.Item label="美元价">{formatMoneyDisplay(selectedYunqiDetail.usdPrice)}</Descriptions.Item>
+                      <Descriptions.Item label="欧元价">{formatMoneyDisplay(selectedYunqiDetail.eurPrice, "€")}</Descriptions.Item>
+                      <Descriptions.Item label="市场价">{formatMoneyDisplay(selectedYunqiDetail.marketPrice)}</Descriptions.Item>
+                      <Descriptions.Item label="店铺评分">
+                        {toSafeNumber(selectedYunqiDetail.mallScore) > 0 ? (
+                          <span style={{ color: toSafeNumber(selectedYunqiDetail.mallScore) >= 4.5 ? "#389e0d" : "#595959" }}>
+                            {toSafeNumber(selectedYunqiDetail.mallScore).toFixed(1)}
+                          </span>
+                        ) : "-"}
+                      </Descriptions.Item>
+                      <Descriptions.Item label="店铺商品数">{toSafeNumber(selectedYunqiDetail.mallTotalGoods) || "-"}</Descriptions.Item>
+                      <Descriptions.Item label="类目">
+                        <Tooltip title={firstTextValue(selectedYunqiDetail.categoryName, selectedYunqiDetail.category)}>
+                          <span style={{ maxWidth: 160, display: "inline-block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", verticalAlign: "bottom" }}>
+                            {firstTextValue(selectedYunqiDetail.categoryName, selectedYunqiDetail.category) || "-"}
+                          </span>
+                        </Tooltip>
+                      </Descriptions.Item>
+                      <Descriptions.Item label="上架时间">{formatDateDisplay(selectedYunqiDetail.createdAt || selectedYunqiDetail.issuedDate)}</Descriptions.Item>
+                      <Descriptions.Item label="最近更新">{formatDateDisplay(selectedYunqiDetail.lastModified)}</Descriptions.Item>
+                      <Descriptions.Item label="最近投流">{formatDateDisplay(selectedYunqiDetail.lastAdTime)}</Descriptions.Item>
+                      {firstTextValue(selectedYunqiDetail.commentNumTips) ? (
+                        <Descriptions.Item label="评论提示">{selectedYunqiDetail.commentNumTips}</Descriptions.Item>
+                      ) : null}
+                    </Descriptions>
 
+                    {/* ── 分站价格 + 近日销量走势（并排） ── */}
                     {(selectedYunqiPriceItems.length > 0 || selectedYunqiSalesTrendItems.length > 0) ? (
                       <Row gutter={[12, 12]}>
-                        <Col xs={24} xl={12}>
-                          <Card size="small" title="分站价格">
-                            {selectedYunqiPriceItems.length > 0 ? (
-                              <div
-                                style={{
-                                  display: "grid",
-                                  gridTemplateColumns: "repeat(auto-fit, minmax(116px, 1fr))",
-                                  gap: 8,
-                                }}
-                              >
-                                {selectedYunqiPriceItems.map((item: any) => (
-                                  <div
-                                    key={item.key}
-                                    style={{
-                                      borderRadius: 12,
-                                      border: "1px solid #f0f0f0",
-                                      background: "#fafafa",
-                                      padding: "10px 12px",
-                                    }}
-                                  >
-                                    <Text type="secondary" style={{ fontSize: 12 }}>
-                                      {item.site}
-                                    </Text>
-                                    <div style={{ marginTop: 6, fontSize: 18, fontWeight: 600, color: "#262626", lineHeight: 1.2 }}>
-                                      {item.priceLabel}
-                                    </div>
-                                  </div>
-                                ))}
-                              </div>
-                            ) : (
-                              <Text type="secondary">暂无分站价格记录</Text>
-                            )}
-                          </Card>
-                        </Col>
-                        <Col xs={24} xl={12}>
-                          <Card size="small" title="近日销量">
-                            {selectedYunqiSalesTrendItems.length > 0 ? (
-                              <div
-                                style={{
-                                  display: "flex",
-                                  gap: 8,
-                                  overflowX: "auto",
-                                  paddingBottom: 4,
-                                }}
-                              >
-                                {selectedYunqiSalesTrendItems.map((item: any) => (
-                                  <div
-                                    key={item.key}
-                                    style={{
-                                      minWidth: 96,
-                                      borderRadius: 12,
-                                      border: "1px solid #f0f0f0",
-                                      background: "#fafafa",
-                                      padding: "10px 12px",
-                                      flexShrink: 0,
-                                    }}
-                                  >
-                                    <Text type="secondary" style={{ fontSize: 12, whiteSpace: "nowrap" }}>
-                                      {item.date}
-                                    </Text>
-                                    <div style={{ marginTop: 6, fontSize: 18, fontWeight: 600, color: "#262626", lineHeight: 1.2 }}>
-                                      {item.sales}
-                                    </div>
-                                    <Text type="secondary" style={{ fontSize: 12 }}>
-                                      日销
-                                    </Text>
-                                  </div>
-                                ))}
-                              </div>
-                            ) : (
-                              <Text type="secondary">暂无近日销量趋势</Text>
-                            )}
-                          </Card>
-                        </Col>
+                        {selectedYunqiPriceItems.length > 0 ? (
+                          <Col xs={24} xl={12}>
+                            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>分站价格</div>
+                            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(100px, 1fr))", gap: 6 }}>
+                              {selectedYunqiPriceItems.map((item: any) => (
+                                <div key={item.key} style={{ borderRadius: 8, border: "1px solid #f0f0f0", background: "#fafafa", padding: "6px 10px" }}>
+                                  <div style={{ fontSize: 11, color: "#8c8c8c" }}>{item.site}</div>
+                                  <div style={{ fontSize: 15, fontWeight: 600, color: "#262626", marginTop: 2 }}>{item.priceLabel}</div>
+                                </div>
+                              ))}
+                            </div>
+                          </Col>
+                        ) : null}
+                        {selectedYunqiSalesTrendItems.length > 0 ? (
+                          <Col xs={24} xl={selectedYunqiPriceItems.length > 0 ? 12 : 24}>
+                            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>近日销量走势</div>
+                            <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 4 }}>
+                              {selectedYunqiSalesTrendItems.map((item: any) => (
+                                <div key={item.key} style={{ minWidth: 72, borderRadius: 8, border: "1px solid #f0f0f0", background: "#fafafa", padding: "6px 10px", flexShrink: 0, textAlign: "center" }}>
+                                  <div style={{ fontSize: 11, color: "#8c8c8c", whiteSpace: "nowrap" }}>{item.date}</div>
+                                  <div style={{ fontSize: 15, fontWeight: 600, color: "#262626", marginTop: 2 }}>{item.sales}</div>
+                                </div>
+                              ))}
+                            </div>
+                          </Col>
+                        ) : null}
                       </Row>
                     ) : null}
                   </Space>

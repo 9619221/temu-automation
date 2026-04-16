@@ -818,6 +818,12 @@ export function buildYunqiOnlineHandlers({ ensureBrowser, getContext, randomDela
 
   /** 获取或创建一个云启页面，用于在浏览器上下文中发 API 请求 */
   async function getYunqiApiPage() {
+    // CDP 可用时不应该走到这里（调用方 requestYunqiApiViaPage 会优先走 CDP）
+    // 再做一次检查，防止意外启动 Playwright
+    if (await isCdpAlive()) {
+      console.error("[yunqi] getYunqiApiPage: CDP 可用，跳过 Playwright");
+      return null;
+    }
     try {
       let context = getContext();
       // 检查浏览器是否掉线（用户关了 Chrome / context 被销毁）
@@ -949,10 +955,11 @@ export function buildYunqiOnlineHandlers({ ensureBrowser, getContext, randomDela
 
   /** 通过 Playwright 页面发请求（fallback） */
   async function requestYunqiApiViaPage(apiPath, options = {}) {
-    // 优先通过 CDP Chrome 发请求
+    // 优先通过 CDP Chrome 发请求——CDP 可用时不再启动 Playwright
     if (await isCdpAlive()) {
       return requestYunqiApiViaCdp(apiPath, options);
     }
+    // CDP 不可用才走 Playwright（避免开两个浏览器窗口）
     const page = await getYunqiApiPage();
     if (!page) return null; // 没有浏览器，回退到 Node.js fetch
     const pathName = String(apiPath || "").trim().startsWith("/") ? String(apiPath || "").trim() : `/${String(apiPath || "").trim()}`;
@@ -1239,96 +1246,187 @@ export function buildYunqiOnlineHandlers({ ensureBrowser, getContext, randomDela
     // 从 DOM 抓取结果
     const scrapeScript = `
       (() => {
+        // ── 第一步：读表头，建立 列名→索引 映射，不再硬编码列号 ──
+        const headerCells = [...document.querySelectorAll('.el-table__header-wrapper th, .el-table__header th')];
+        const colMap = {};
+        headerCells.forEach((th, idx) => {
+          const text = (th.innerText || '').trim().replace(/\\s+/g, '');
+          if (/商品|标题|产品/.test(text)) colMap.product = idx;
+          else if (/^店铺$|^店$|mallName/.test(text)) colMap.mall = idx;
+          else if (/分类|类目|分类名/.test(text)) colMap.category = idx;
+          else if (/价格|售价|price/i.test(text)) colMap.price = idx;
+          else if (/^日$|日销/.test(text)) colMap.daily = idx;
+          else if (/^周$|周销/.test(text)) colMap.weekly = idx;
+          else if (/^月$|月销/.test(text)) colMap.monthly = idx;
+          else if (/^总$|总销|累计/.test(text)) colMap.total = idx;
+          else if (/评分|评级|score/i.test(text)) colMap.rating = idx;
+          else if (/评论|评价|review/i.test(text)) colMap.review = idx;
+          else if (/更新/.test(text)) colMap.updated = idx;
+          else if (/上架/.test(text)) colMap.listed = idx;
+        });
+
         const rows = document.querySelectorAll('.el-table__body-wrapper .el-table__row');
         const products = [];
         rows.forEach(row => {
           const cells = [...row.querySelectorAll('.el-table__cell, td')];
           if (cells.length < 5) return;
-          // 第1列：商品标题+图片
-          const col0 = cells[0]?.innerText?.trim() || '';
+
+          const cellText = (idx) => (idx != null && cells[idx]) ? (cells[idx].innerText || '').trim() : '';
+          const cellInt = (idx) => {
+            const raw = cellText(idx).replace(/[^\\d.kKmM万千]/g, '');
+            if (!raw) return 0;
+            // 处理 1.7k+ 这类缩写
+            const kMatch = raw.match(/([\\d.]+)[kK千]/);
+            if (kMatch) return Math.round(parseFloat(kMatch[1]) * 1000);
+            const mMatch = raw.match(/([\\d.]+)[mM万]/);
+            if (mMatch) return Math.round(parseFloat(mMatch[1]) * 10000);
+            return parseInt(raw.replace(/[^\\d]/g, '')) || 0;
+          };
+
+          // 第1列（或表头映射）：商品标题+图片
+          const productIdx = colMap.product ?? 0;
+          const col0 = cellText(productIdx);
           const imgEl = row.querySelector('img');
           const titleLines = col0.split('\\n').filter(l => l.trim() && !l.includes('播放视频'));
           const title = titleLines[0] || '';
           const tags = titleLines.slice(1).filter(t => t.length < 20);
-          // 第2列：店铺
-          const mall = cells[1]?.innerText?.trim() || '';
-          // 第3列：分类
-          const catText = cells[2]?.innerText?.trim() || '';
+
+          const mall = cellText(colMap.mall ?? 1);
+          const catText = cellText(colMap.category ?? 2);
           const catParts = catText.split('\\n').filter(Boolean);
-          // 第5列：价格
-          const priceText = cells[4]?.innerText?.trim() || '';
+
+          // 价格：找含 $ 的列
+          let priceIdx = colMap.price;
+          if (priceIdx == null) {
+            priceIdx = cells.findIndex(c => /\\$[\\d,.]+/.test(c.innerText || ''));
+          }
+          const priceText = priceIdx >= 0 ? cellText(priceIdx) : '';
           const priceMatch = priceText.match(/\\$([\\d,.]+)/);
           const price = priceMatch ? parseFloat(priceMatch[1]) : null;
-          // 第6-9列：日/周/月/总销量
-          const dailySales = parseInt((cells[5]?.innerText || '').replace(/[^\\d]/g, '')) || 0;
-          const weeklySales = parseInt((cells[6]?.innerText || '').replace(/[^\\d]/g, '')) || 0;
-          const monthlySales = parseInt((cells[7]?.innerText || '').replace(/[^\\d]/g, '')) || 0;
-          const totalSales = parseInt((cells[8]?.innerText || '').replace(/[^\\d]/g, '')) || 0;
-          // 第10列：评分
-          const ratingText = cells[9]?.innerText?.trim() || '';
-          const globalRating = ratingText.match(/全球\\s*([\\d.]+)/)?.[1];
-          // 第11列：评论数
-          const reviewText = cells[10]?.innerText?.trim() || '';
-          const totalReviews = reviewText.match(/总计\\s*([\\d,]+)/)?.[1]?.replace(/,/g, '');
-          // 提取 goods_id (从图片 URL 或链接)
-          const goodsIdMatch = imgEl?.src?.match(/\\/(\\d{9,})/) || row.innerHTML.match(/goods_id=?(\\d{9,})/);
+          // 欧元价
+          const eurMatch = priceText.match(/€([\\d,.]+)/);
+          const eurPrice = eurMatch ? parseFloat(eurMatch[1]) : null;
 
+          // 销量
+          const dailySales = cellInt(colMap.daily);
+          const weeklySales = cellInt(colMap.weekly);
+          const monthlySales = cellInt(colMap.monthly);
+          const totalSales = cellInt(colMap.total);
+
+          // 评分
+          const ratingText = cellText(colMap.rating);
+          const globalRating = ratingText.match(/全球\\s*([\\d.]+)/)?.[1] || ratingText.match(/([\\d.]+)/)?.[1];
+
+          // 评论数
+          const reviewText = cellText(colMap.review);
+          const totalReviews = (reviewText.match(/总计\\s*([\\d,]+)/)?.[1] || reviewText.match(/([\\d,]+)/)?.[1] || '').replace(/,/g, '');
+
+          // 时间
+          const updatedAt = cellText(colMap.updated);
+          const listedAt = cellText(colMap.listed);
+
+          // goods_id
+          const goodsIdMatch = imgEl?.src?.match(/\\/(\\d{9,})/) || row.innerHTML.match(/goods_id=?(\\d{9,})/);
           const gid = goodsIdMatch?.[1] || '';
-          // 尝试从 Vue 组件或 Nuxt store 获取中文标题
+
+          // 尝试从 Vue 组件或 Nuxt store 获取完整行数据（含中文标题等）
           let titleZh = '';
+          let vueRowData = null;
           try {
-            // 方法1: 从 el-table 的 Vue 组件获取行数据
             const tableBody = document.querySelector('.el-table__body-wrapper');
             const tableVue = tableBody?.__vue__ || tableBody?.parentElement?.__vue__;
             if (tableVue) {
               const tableData = tableVue.data || tableVue.$parent?.data || tableVue.$parent?.tableData || [];
               if (Array.isArray(tableData)) {
-                const rowData = tableData.find(d => String(d?.goods_id || d?.id || '') === gid);
-                if (rowData) titleZh = rowData.title_zh || rowData.titleZh || rowData.title_cn || '';
+                vueRowData = tableData.find(d => String(d?.goods_id || d?.id || '') === gid) || null;
+                if (vueRowData) titleZh = vueRowData.title_zh || vueRowData.titleZh || vueRowData.title_cn || '';
               }
             }
-            // 方法2: 从行元素的 __vue__ 获取
             if (!titleZh && row.__vue__) {
               const rowVue = row.__vue__;
               const rd = rowVue.row || rowVue.$attrs?.row || rowVue.$parent?.row;
-              if (rd) titleZh = rd.title_zh || rd.titleZh || rd.title_cn || '';
+              if (rd) {
+                if (!vueRowData) vueRowData = rd;
+                titleZh = rd.title_zh || rd.titleZh || rd.title_cn || '';
+              }
             }
-            // 方法3: 从 Nuxt store 获取
             if (!titleZh && gid && window.$nuxt?.$store?.state) {
               const findInObj = (obj, depth) => {
-                if (!obj || typeof obj !== 'object' || depth > 4) return '';
+                if (!obj || typeof obj !== 'object' || depth > 4) return null;
                 if (Array.isArray(obj)) {
                   for (const item of obj) {
-                    if (item && String(item.goods_id || item.id || '') === gid) {
-                      return item.title_zh || item.titleZh || item.title_cn || '';
-                    }
+                    if (item && String(item.goods_id || item.id || '') === gid) return item;
                   }
                 }
                 for (const key of Object.keys(obj)) {
                   const found = findInObj(obj[key], depth + 1);
                   if (found) return found;
                 }
-                return '';
+                return null;
               };
-              titleZh = findInObj(window.$nuxt.$store.state, 0);
+              const storeItem = findInObj(window.$nuxt.$store.state, 0);
+              if (storeItem) {
+                if (!vueRowData) vueRowData = storeItem;
+                titleZh = storeItem.title_zh || storeItem.titleZh || storeItem.title_cn || '';
+              }
             }
           } catch(e) {}
-          products.push({
+
+          // 如果能从 Vue 组件拿到原始行数据，优先用它（最准确）
+          const product = {
             title: titleZh || title, title_zh: titleZh, title_en: title,
             mall_name: mall, thumb_url: imgEl?.src || '',
             category_zh: catParts.join(' > '),
-            usd_price: price, daily_sales: dailySales,
+            usd_price: price, eur_price: eurPrice,
+            daily_sales: dailySales,
             weekly_sales: weeklySales, monthly_sales: monthlySales,
             total_sales: totalSales,
             score: globalRating ? parseFloat(globalRating) : null,
             review_count: totalReviews ? parseInt(totalReviews) : 0,
             goods_id: gid,
             tags,
-          });
+            updated_at: updatedAt || undefined,
+            listed_at: listedAt || undefined,
+          };
+
+          // Vue 行数据直接覆盖 DOM 抓取（更准确、字段更全）
+          if (vueRowData) {
+            const vr = vueRowData;
+            const vNum = (v) => { const n = parseFloat(v); return isFinite(n) ? n : null; };
+            if (vr.daily_sales != null) product.daily_sales = vNum(vr.daily_sales) ?? product.daily_sales;
+            if (vr.weekly_sales != null) product.weekly_sales = vNum(vr.weekly_sales) ?? product.weekly_sales;
+            if (vr.monthly_sales != null) product.monthly_sales = vNum(vr.monthly_sales) ?? product.monthly_sales;
+            if (vr.total_sales != null) product.total_sales = vNum(vr.total_sales) ?? product.total_sales;
+            if (vr.usd_price != null) product.usd_price = vNum(vr.usd_price) ?? product.usd_price;
+            if (vr.eur_price != null) product.eur_price = vNum(vr.eur_price) ?? product.eur_price;
+            if (vr.market_price != null) product.market_price = vNum(vr.market_price) ?? null;
+            if (vr.score != null) product.score = vNum(vr.score) ?? product.score;
+            if (vr.total_comment_num_tips) product.comment_num_tips = String(vr.total_comment_num_tips);
+            if (vr.review_count != null || vr.total_comment_num) product.review_count = vNum(vr.review_count ?? vr.total_comment_num) ?? product.review_count;
+            if (vr.usd_gmv != null) product.usd_gmv = vNum(vr.usd_gmv);
+            if (vr.eur_gmv != null) product.eur_gmv = vNum(vr.eur_gmv);
+            if (vr.mall_score != null) product.mall_score = vNum(vr.mall_score);
+            if (vr.mall_product_count != null || vr.mall_total_goods != null) product.mall_product_count = vNum(vr.mall_product_count ?? vr.mall_total_goods);
+            if (vr.created_at) product.created_at = vr.created_at;
+            if (vr.issued_date) product.issued_date = vr.issued_date;
+            if (vr.last_modified) product.last_modified = vr.last_modified;
+            if (vr.last_ad_time) product.last_ad_time = vr.last_ad_time;
+            if (vr.ware_house_type != null) product.ware_house_type = vr.ware_house_type;
+            if (vr.video_url) product.video_url = vr.video_url;
+            if (vr.sold_out != null) product.sold_out = vr.sold_out;
+            if (vr.brand) product.brand = vr.brand;
+            if (vr.activity_type) product.activity_type = vr.activity_type;
+            if (vr.same_num != null) product.same_num = vNum(vr.same_num);
+            if (Array.isArray(vr.ad_records)) product.ad_records = vr.ad_records;
+            if (Array.isArray(vr.daily_sales_list)) product.daily_sales_list = vr.daily_sales_list;
+            if (vr.mall && typeof vr.mall === 'object') product.mall = vr.mall;
+          }
+
+          products.push(product);
         });
         const totalEl = [...document.querySelectorAll('span,div')].find(el => /共\\s*\\d+\\s*条/.test(el.textContent));
         const totalMatch = totalEl?.textContent?.match(/(\\d+)/);
-        return JSON.stringify({ total: totalMatch ? parseInt(totalMatch[1]) : products.length, products });
+        return JSON.stringify({ total: totalMatch ? parseInt(totalMatch[1]) : products.length, products, colMap });
       })()
     `;
     const scrapeResult = await sendCdpCommand("Runtime.evaluate", {
@@ -1708,6 +1806,29 @@ export function buildYunqiOnlineHandlers({ ensureBrowser, getContext, randomDela
         return { ...saved, cdpMode: true };
       }
 
+      // CDP 在线但 cookie 里没 token —— 尝试自动登录而不是启动 Playwright
+      if (await isCdpAlive()) {
+        console.error("[yunqi-cdp] fetchTokenFromBrowser: CDP 在线但无 token，尝试自动登录");
+        try {
+          await automateLoginViaCdp();
+          // 等待登录完成后再尝试提取 token
+          for (let i = 0; i < 12; i++) {
+            await new Promise((r) => setTimeout(r, 5000));
+            const freshToken = await extractTokenFromCdpChrome();
+            if (freshToken) {
+              const saved = writeYunqiTokenRecord(freshToken, "cdp-auto-login");
+              console.error("[yunqi-cdp] fetchTokenFromBrowser: 自动登录成功");
+              return { ...saved, cdpMode: true };
+            }
+          }
+        } catch (err) {
+          console.error(`[yunqi-cdp] fetchTokenFromBrowser: 自动登录失败: ${String(err?.message || err).slice(0, 200)}`);
+        }
+        // 仍然失败，返回空结果而不是启动 Playwright
+        throw new Error("CDP Chrome 无法获取云启 token，请在 CDP Chrome 中手动登录云启");
+      }
+
+      // CDP 不可用时才 fallback 到 Playwright
       await ensureBrowser();
       const context = getContext();
       let pages = getOpenYunqiPages();
