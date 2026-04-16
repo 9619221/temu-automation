@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, Menu } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, Menu, net: electronNet, session: electronSession } = require("electron");
 const path = require("path");
 const { spawn } = require("child_process");
 const http = require("http");
@@ -3004,28 +3004,109 @@ ipcMain.handle("competitor:yunqi-auto-login", async () => sendCmd("yunqi_auto_lo
  * 把远程图片 URL 拉成 base64 data URL，供 multimodal 请求使用。
  * 超时 15s，最大 5MB；失败抛错由上层捕获。
  */
-async function fetchImageAsDataUrl(imageUrl, timeoutMs = 15000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(imageUrl, {
-      signal: controller.signal,
-      headers: { "User-Agent": "Mozilla/5.0 temu-automation/vision-compare" },
+async function fetchImageAsDataUrl(rawImageUrl, timeoutMs = 15000) {
+  // Chromium 在 HTTPS-Only / HSTS 下会把明文 http 请求直接拒（ERR_BLOCKED_BY_CLIENT）
+  // 阿里云 OSS 等主流 CDN 都支持 https，OSS 签名不含协议，直接升级
+  const imageUrl = typeof rawImageUrl === "string" && rawImageUrl.startsWith("http://")
+    ? "https://" + rawImageUrl.slice("http://".length)
+    : rawImageUrl;
+
+  // 按 host 定 Referer：Temu CDN（kwcdn / temu）的图通常要求同源 Referer 才给过
+  const pickReferer = (url) => {
+    try {
+      const host = new URL(url).host;
+      if (host.includes("kwcdn.com")) return "https://www.temu.com/";
+      if (host.includes("temu.com")) return "https://www.temu.com/";
+      if (host.includes("yangkeduo.com") || host.includes("pinduoduo.com") || host.includes("yzcdn.cn")) return "https://mms.pinduoduo.com/";
+      if (host.includes("kuajingmaihuo.com")) return "https://kuajingmaihuo.com/";
+      return `https://${host}/`;
+    } catch {
+      return "";
+    }
+  };
+
+  // 用 Electron net.fetch —— 走 Chromium 网络栈，TLS 指纹 / Cookie / 协议特性都贴近浏览器，
+  // 能绕过 Temu 等 CDN 对 Node undici 的拦截
+  const doFetch = () => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      request.abort();
+      reject(new Error(`请求超时 ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    // 用独立 session，绕开默认 session 上可能挂着的 webRequest 拦截器（避免 ERR_BLOCKED_BY_CLIENT）
+    const isolatedSession = electronSession.fromPartition("image-fetch-isolated");
+    const request = electronNet.request({
+      method: "GET",
+      url: imageUrl,
+      session: isolatedSession,
+      useSessionCookies: false,
+      redirect: "follow",
     });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status} while fetching ${imageUrl}`);
-    }
-    const contentType = response.headers.get("content-type") || "image/jpeg";
-    const arrayBuffer = await response.arrayBuffer();
-    const maxBytes = 5 * 1024 * 1024;
-    if (arrayBuffer.byteLength > maxBytes) {
-      throw new Error(`图片过大（${(arrayBuffer.byteLength / 1024 / 1024).toFixed(1)}MB > 5MB）`);
-    }
-    const base64 = Buffer.from(arrayBuffer).toString("base64");
-    return `data:${contentType};base64,${base64}`;
-  } finally {
-    clearTimeout(timer);
-  }
+    request.setHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
+    request.setHeader("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8");
+    request.setHeader("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8");
+    const referer = pickReferer(imageUrl);
+    if (referer) request.setHeader("Referer", referer);
+
+    request.on("response", (response) => {
+      const statusCode = response.statusCode;
+      const contentType = (response.headers["content-type"] || "image/jpeg");
+      const contentTypeStr = Array.isArray(contentType) ? contentType[0] : contentType;
+      const chunks = [];
+      let totalBytes = 0;
+      const maxBytes = 5 * 1024 * 1024;
+      let aborted = false;
+
+      response.on("data", (chunk) => {
+        if (aborted) return;
+        totalBytes += chunk.length;
+        if (totalBytes > maxBytes) {
+          aborted = true;
+          request.abort();
+          clearTimeout(timer);
+          reject(new Error(`图片过大（> 5MB）`));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.on("end", () => {
+        if (aborted) return;
+        clearTimeout(timer);
+        if (statusCode < 200 || statusCode >= 300) {
+          return reject(new Error(`HTTP ${statusCode} while fetching ${imageUrl}`));
+        }
+        const buffer = Buffer.concat(chunks);
+        // CDN 常返回 application/octet-stream（Temu kwcdn 尤其），Gemini 不认；
+        // 通过 magic bytes 嗅探真实图片格式
+        const sniffImageMime = (buf) => {
+          if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "image/jpeg";
+          if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return "image/png";
+          if (buf.length >= 12 && buf.slice(0, 4).toString("ascii") === "RIFF" && buf.slice(8, 12).toString("ascii") === "WEBP") return "image/webp";
+          if (buf.length >= 6 && (buf.slice(0, 6).toString("ascii") === "GIF87a" || buf.slice(0, 6).toString("ascii") === "GIF89a")) return "image/gif";
+          if (buf.length >= 12 && buf.slice(4, 8).toString("ascii") === "ftyp" && ["avif", "avis"].includes(buf.slice(8, 12).toString("ascii"))) return "image/avif";
+          return null;
+        };
+        const sniffed = sniffImageMime(buffer);
+        const lowered = String(contentTypeStr).toLowerCase();
+        const finalMime = sniffed
+          || (lowered.startsWith("image/") ? lowered.split(";")[0].trim() : null)
+          || "image/jpeg";
+        const base64 = buffer.toString("base64");
+        resolve(`data:${finalMime};base64,${base64}`);
+      });
+      response.on("error", (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+    request.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    request.end();
+  });
+
+  return doFetch();
 }
 
 /**
@@ -3044,12 +3125,22 @@ ipcMain.handle("competitor:vision-compare", async (_event, payload) => {
 
   const runtimeConfig = readImageStudioRuntimeConfig();
   const apiKey = runtimeConfig.analyzeApiKey;
-  const baseUrl = runtimeConfig.analyzeBaseUrl || "https://api.vectorengine.ai/v1";
+  const rawBaseUrl = runtimeConfig.analyzeBaseUrl || "https://api.vectorengine.ai";
   const model = runtimeConfig.analyzeModel || "gemini-3.1-flash-lite-preview";
 
   if (!apiKey) {
     throw new Error("[ANALYZE_API_KEY_MISSING] 未配置分析用的 Gemini API Key，请到设置里填写");
   }
+
+  // 把配置里的 baseUrl 归一化成 origin：去掉 /v1、/v1beta 等路径后缀，保留 scheme + host
+  const baseOrigin = (() => {
+    try {
+      const u = new URL(rawBaseUrl);
+      return `${u.protocol}//${u.host}`;
+    } catch {
+      return String(rawBaseUrl).replace(/\/+$/, "").replace(/\/v1(beta)?.*$/, "");
+    }
+  })();
 
   // 并发拉取所有图片（我方 + 竞品）
   const allImages = [
@@ -3066,10 +3157,14 @@ ipcMain.handle("competitor:vision-compare", async (_event, payload) => {
 
   const fetched = await Promise.all(allImages.map(async (item) => {
     try {
+      console.log(`[vision-compare] fetching ${item.role} image: ${String(item.url).slice(0, 200)}`);
       const dataUrl = await fetchImageAsDataUrl(item.url);
+      console.log(`[vision-compare] ok ${item.role} (${item.title}) size=${Math.round(dataUrl.length / 1024)}KB`);
       return { ...item, dataUrl, error: null };
     } catch (error) {
-      return { ...item, dataUrl: null, error: String(error?.message || error) };
+      const msg = String(error?.message || error);
+      console.warn(`[vision-compare] FAIL ${item.role} (${item.title}) url=${String(item.url).slice(0, 200)} err=${msg}`);
+      return { ...item, dataUrl: null, error: msg };
     }
   }));
 
@@ -3078,7 +3173,19 @@ ipcMain.handle("competitor:vision-compare", async (_event, payload) => {
     throw new Error("所有图片都拉取失败：" + fetched.map((i) => i.error).filter(Boolean).join(" / "));
   }
 
-  // 构造 OpenAI 多模态 messages
+  // 竞品图全挂时，不再让 Gemini 靠文字瞎猜竞品。常见原因是 OSS 签名过期（403）。
+  const competitorFailed = fetched.filter((item) => item.role === "competitor" && !item.dataUrl);
+  const competitorOk = fetched.filter((item) => item.role === "competitor" && item.dataUrl);
+  if (competitorImages.length > 0 && competitorOk.length === 0) {
+    const looksExpired = competitorFailed.some((item) => /HTTP 403/i.test(item.error || "") || /Expires=\d+/.test(item.url || ""));
+    const reason = looksExpired
+      ? "竞品主图的 OSS 签名已过期（403 Forbidden），请回到步骤 3 点「刷新样本」重新抓取后再试。"
+      : "竞品主图全部拉取失败，无法做视觉对比。";
+    const detail = competitorFailed.map((item) => `${item.title}: ${item.error}`).join("；");
+    throw new Error(`${reason}\n失败明细：${detail}`);
+  }
+
+  // Gemini 原生 API（v1beta）的 systemInstruction + contents[parts] 格式
   const systemPrompt = [
     "你是 Temu 电商主图优化顾问。",
     "用户会提供 1 张「我的主图」和若干张「竞品主图」，需要你做视觉对比。",
@@ -3093,55 +3200,90 @@ ipcMain.handle("competitor:vision-compare", async (_event, payload) => {
     "- 只输出 JSON，不要解释，不要 markdown。",
   ].join("\n");
 
-  const userContent = [
-    {
-      type: "text",
-      text: [
-        `关键词：${context.keyword || "（未提供）"}`,
-        `市场主需求：${context.primaryNeed || "（未判断）"}`,
-        `视频门槛：${Math.round((context.videoRate || 0) * 100)}%`,
-        `品类：${context.category || "（未提供）"}`,
-        "",
-        "图片顺序：",
-        ...usable.map((item, index) => {
-          if (item.role === "my") return `第 ${index + 1} 张：我的主图 - ${item.title}`;
-          const salesPart = item.monthlySales ? ` / 月销 ${item.monthlySales}` : "";
-          const pricePart = item.priceText ? ` / ${item.priceText}` : "";
-          return `第 ${index + 1} 张：竞品 - ${item.title}${pricePart}${salesPart}`;
-        }),
-      ].join("\n"),
-    },
-    ...usable.map((item) => ({
-      type: "image_url",
-      image_url: { url: item.dataUrl },
-    })),
+  const userTextPart = {
+    text: [
+      `关键词：${context.keyword || "（未提供）"}`,
+      `市场主需求：${context.primaryNeed || "（未判断）"}`,
+      `视频门槛：${Math.round((context.videoRate || 0) * 100)}%`,
+      `品类：${context.category || "（未提供）"}`,
+      "",
+      "图片顺序：",
+      ...usable.map((item, index) => {
+        if (item.role === "my") return `第 ${index + 1} 张：我的主图 - ${item.title}`;
+        const salesPart = item.monthlySales ? ` / 月销 ${item.monthlySales}` : "";
+        const pricePart = item.priceText ? ` / ${item.priceText}` : "";
+        return `第 ${index + 1} 张：竞品 - ${item.title}${pricePart}${salesPart}`;
+      }),
+    ].join("\n"),
+  };
+
+  // data:image/jpeg;base64,XXX → 拆成 mimeType + pure base64
+  const parseDataUrl = (dataUrl) => {
+    const match = /^data:([^;]+);base64,(.+)$/.exec(dataUrl || "");
+    if (!match) return { mimeType: "image/jpeg", data: "" };
+    return { mimeType: match[1], data: match[2] };
+  };
+
+  const userParts = [
+    userTextPart,
+    ...usable.map((item) => {
+      const { mimeType, data } = parseDataUrl(item.dataUrl);
+      return { inline_data: { mime_type: mimeType, data } };
+    }),
   ];
 
-  const endpoint = `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
+  const endpoint = `${baseOrigin}/v1beta/models/${encodeURIComponent(model)}:generateContent`;
   const aiResponse = await fetch(endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
+      // 代理兼容 sk- 风格 key，同时附带 Google 官方的 x-goog-api-key 以防纯 Gemini 直连
+      "Authorization": `Bearer ${apiKey}`,
+      "x-goog-api-key": apiKey,
     },
     body: JSON.stringify({
-      model,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userContent },
-      ],
-      temperature: 0.4,
-      response_format: { type: "json_object" },
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      contents: [{ role: "user", parts: userParts }],
+      generationConfig: {
+        temperature: 0.4,
+        responseMimeType: "application/json",
+      },
     }),
   });
 
+  // 先按 text 拿回来，手动判内容类型——有些代理/墙会返 200 + HTML
+  const rawBody = await aiResponse.text().catch(() => "");
+  const contentType = aiResponse.headers.get("content-type") || "";
+
   if (!aiResponse.ok) {
-    const text = await aiResponse.text().catch(() => "");
-    throw new Error(`Gemini 请求失败 HTTP ${aiResponse.status}: ${text.slice(0, 300)}`);
+    throw new Error(`Gemini 请求失败 HTTP ${aiResponse.status} @ ${endpoint}: ${rawBody.slice(0, 300)}`);
   }
 
-  const aiJson = await aiResponse.json();
-  const rawText = aiJson?.choices?.[0]?.message?.content || "";
+  // 返 HTML 通常是 DNS 劫持 / 代理拦截 / endpoint 错
+  const looksLikeHtml = /^\s*<(!DOCTYPE|html|head|body)/i.test(rawBody) || contentType.includes("text/html");
+  if (looksLikeHtml) {
+    throw new Error(
+      `Gemini 返回非 JSON（疑似代理/DNS 拦截）@ ${endpoint}\n` +
+      `content-type=${contentType}\n` +
+      `body 前 300 字：${rawBody.slice(0, 300)}`
+    );
+  }
+
+  let aiJson;
+  try {
+    aiJson = JSON.parse(rawBody);
+  } catch {
+    throw new Error(
+      `Gemini 响应不是合法 JSON @ ${endpoint}\n` +
+      `content-type=${contentType}\n` +
+      `body 前 300 字：${rawBody.slice(0, 300)}`
+    );
+  }
+  // Gemini v1beta 响应：candidates[0].content.parts[*].text
+  const candidate = aiJson?.candidates?.[0];
+  const rawText = Array.isArray(candidate?.content?.parts)
+    ? candidate.content.parts.map((p) => p?.text || "").join("")
+    : "";
   let parsed = null;
   try {
     parsed = JSON.parse(rawText);

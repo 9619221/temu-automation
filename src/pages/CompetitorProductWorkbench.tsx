@@ -9,7 +9,6 @@ import {
   Image,
   Input,
   List,
-  Modal,
   Row,
   Select,
   Space,
@@ -1653,6 +1652,17 @@ export default function CompetitorProductWorkbench({
     onActiveStepChange?.(nextStep);
   }, [controlledActiveStep, onActiveStepChange]);
 
+  // 切步骤时回到页面顶部（否则上一步位置留在底部，新步骤从底部开始看，体验错乱）
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.scrollTo({ top: 0, behavior: "auto" });
+    document.querySelectorAll(".ant-layout-content, .ant-pro-layout-content, main").forEach((el) => {
+      if (el && typeof (el as HTMLElement).scrollTo === "function") {
+        (el as HTMLElement).scrollTo({ top: 0, behavior: "auto" });
+      }
+    });
+  }, [activeStep]);
+
   const loadTracked = useCallback(async () => {
     const data = await readArrayStoreValue("temu_competitor_tracked");
     setTracked(data as TrackedProduct[]);
@@ -2366,7 +2376,7 @@ export default function CompetitorProductWorkbench({
     return products.map((product: any) => buildFallbackSnapshotFromSearch(product));
   }, [results]);
 
-  const searchRows = useMemo(() => {
+  const rawSearchRows = useMemo(() => {
     return resultSnapshots.map((snapshot: any, index: number) => {
       const raw = results?.products?.[index];
       return {
@@ -2377,16 +2387,63 @@ export default function CompetitorProductWorkbench({
     });
   }, [resultSnapshots, results, selectedProduct]);
 
+  // yunqi 的关键词搜索经常返回大量不相关品类（盲盒、吸尘器、座椅套……），
+  // 这里用关键词的 2-gram 子串与标题匹配，给每行打一个相关度分数，并按分数过滤/排序
+  const onlyRelevantSamples = false;
+  const relevanceKeyword = (results?.keyword || keyword || "").trim();
+  const relevanceGrams = useMemo(() => {
+    // 同时保留空格分隔的 token（英文词）和 2-gram（中文窗口）
+    const cleaned = relevanceKeyword.replace(/[()（）\[\]【】,，.。!?！？"'`~#\-_/\\]/g, " ");
+    const tokens = cleaned.split(/\s+/).filter((token: string) => token.length >= 2);
+    const grams = new Set<string>(tokens);
+    for (const token of tokens) {
+      if (token.length <= 2) continue;
+      for (let i = 0; i < token.length - 1; i += 1) grams.add(token.slice(i, i + 2));
+    }
+    return Array.from(grams);
+  }, [relevanceKeyword]);
+
+  const computeRelevanceScore = useCallback((row: any) => {
+    if (relevanceGrams.length === 0) return 1; // 没关键词则默认全相关
+    const titlePool = [row?.title, row?.titleZh, row?.titleEn, row?.originalTitle, row?.snapshot?.title, row?.snapshot?.titleZh, row?.snapshot?.titleEn]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    if (!titlePool) return 0;
+    let hit = 0;
+    for (const gram of relevanceGrams) {
+      if (titlePool.includes(gram.toLowerCase())) hit += 1;
+    }
+    return hit / relevanceGrams.length;
+  }, [relevanceGrams]);
+
+  const searchRows = useMemo(() => {
+    return rawSearchRows.map((row: any) => ({
+      ...row,
+      relevanceScore: computeRelevanceScore(row),
+    }));
+  }, [rawSearchRows, computeRelevanceScore]);
+
+  const filteredSearchRows = useMemo(() => {
+    if (!onlyRelevantSamples || relevanceGrams.length === 0) return searchRows;
+    // 至少命中 30% 的 2-gram 才算相关，留底：只要命中数 >= 2 也放行
+    const threshold = 0.3;
+    return searchRows.filter((row: any) => row.relevanceScore >= threshold || row.relevanceScore * relevanceGrams.length >= 2);
+  }, [searchRows, onlyRelevantSamples, relevanceGrams.length]);
+
   const sortedSearchRows = useMemo(() => {
+    // 未显式排序时按相关度降序，比原来"按 yunqi 默认顺序"实用得多
     if (!searchTableSort.columnKey || !searchTableSort.order) {
-      return searchRows;
+      return [...filteredSearchRows].sort((left: any, right: any) =>
+        (right?.relevanceScore || 0) - (left?.relevanceScore || 0),
+      );
     }
     const originalIndex = new Map(
-      searchRows.map((record: any, index: number) => [getSearchRowKey(record, String(index)), index]),
+      filteredSearchRows.map((record: any, index: number) => [getSearchRowKey(record, String(index)), index]),
     );
     const direction = searchTableSort.order === "ascend" ? 1 : -1;
 
-    return [...searchRows].sort((left: any, right: any) => {
+    return [...filteredSearchRows].sort((left: any, right: any) => {
       let diff = 0;
       if (searchTableSort.columnKey === "price") {
         diff = toSafeNumber(left?.price) - toSafeNumber(right?.price);
@@ -2405,7 +2462,7 @@ export default function CompetitorProductWorkbench({
 
       return (originalIndex.get(getSearchRowKey(left)) ?? 0) - (originalIndex.get(getSearchRowKey(right)) ?? 0);
     });
-  }, [searchRows, searchTableSort]);
+  }, [filteredSearchRows, searchTableSort]);
 
   const workspaceSnapshotCache = useMemo(() => {
     if (!selectedMy) return [] as ProductWorkspaceSnapshotCache[];
@@ -2486,11 +2543,12 @@ export default function CompetitorProductWorkbench({
     });
   }, [diagnosisReferenceTags, marketInsight, selectedProductMeta?.imageUrl, selectedYunqiDisplay?.hasVideo, selectedYunqiDisplay?.imageUrl]);
 
-  // AI 视觉对比：主图级别的 Gemini 分析
-  const [visionModalOpen, setVisionModalOpen] = useState(false);
+  // 主图视觉对比：步骤 4 自动触发，基于已加入对比的链接（selectedSampleRows）
   const [visionLoading, setVisionLoading] = useState(false);
   const [visionResult, setVisionResult] = useState<Awaited<ReturnType<NonNullable<typeof window.electronAPI>["competitor"]["visionCompare"]>> | null>(null);
   const [visionError, setVisionError] = useState<string | null>(null);
+  // 记录上次分析的输入指纹，避免 selectedSampleRows 对象引用变化时反复触发
+  const visionFingerprintRef = useRef<string>("");
 
   const runVisionCompare = useCallback(async () => {
     const myImageUrl = firstTextValue(selectedYunqiDisplay?.imageUrl, selectedProductMeta?.imageUrl);
@@ -2510,14 +2568,11 @@ export default function CompetitorProductWorkbench({
       .filter(Boolean) as Array<{ url: string; title: string; priceText: string; monthlySales: number }>;
 
     if (!myImageUrl && competitorImageEntries.length === 0) {
-      message.warning("没有可分析的图片：请先关联我方主图或选择有主图的竞品样本");
-      return;
+      return; // 步骤 4 自动触发时静默跳过，等用户补齐数据
     }
 
-    setVisionModalOpen(true);
     setVisionLoading(true);
     setVisionError(null);
-    setVisionResult(null);
 
     try {
       const result = await window.electronAPI?.competitor?.visionCompare({
@@ -2534,10 +2589,30 @@ export default function CompetitorProductWorkbench({
       setVisionResult(result);
     } catch (error) {
       setVisionError(stripWorkerErrorCode(getErrorMessage(error)));
+      setVisionResult(null);
     } finally {
       setVisionLoading(false);
     }
   }, [keyword, marketInsight, results?.keyword, selectedProduct, selectedProductMeta, selectedSampleRows, selectedYunqiDisplay]);
+
+  // 步骤 4 自动触发主图视觉对比；只有输入指纹变化时才重跑
+  useEffect(() => {
+    if (activeStep !== 3) return;
+    const myImageUrl = firstTextValue(selectedYunqiDisplay?.imageUrl, selectedProductMeta?.imageUrl) || "";
+    const competitorUrls = selectedSampleRows
+      .slice(0, 3)
+      .map((row) => {
+        const latest = row.latest as any;
+        return firstTextValue(latest?.imageUrl, latest?.imageUrls?.[0]) || "";
+      })
+      .filter(Boolean);
+    if (!myImageUrl && competitorUrls.length === 0) return;
+    const fingerprint = [myImageUrl, ...competitorUrls].join("|");
+    if (fingerprint === visionFingerprintRef.current) return;
+    if (visionLoading) return;
+    visionFingerprintRef.current = fingerprint;
+    void runVisionCompare();
+  }, [activeStep, selectedSampleRows, selectedYunqiDisplay?.imageUrl, selectedProductMeta?.imageUrl, visionLoading, runVisionCompare]);
 
   const productDataCompareSections = useMemo(() => {
     if (!selectedProduct || !analysis) return [];
@@ -3072,24 +3147,25 @@ export default function CompetitorProductWorkbench({
       title: "对比样本",
       dataIndex: "title",
       key: "title",
-      width: 300,
       ellipsis: true,
       render: (_: string, record: any) => (
-        <Space align="start" size={12}>
+        <Space align="start" size={8}>
           <Image
             src={getPrimaryImageUrl(record)}
             alt={record.title || record.url}
-            width={68}
-            height={68}
-            style={{ objectFit: "cover", borderRadius: 10, flexShrink: 0 }}
-            fallback="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='68' height='68'><rect width='100%' height='100%' fill='%23f5f5f5'/></svg>"
+            width={52}
+            height={52}
+            style={{ objectFit: "cover", borderRadius: 8, flexShrink: 0 }}
+            fallback="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='52' height='52'><rect width='100%' height='100%' fill='%23f5f5f5'/></svg>"
             preview={false}
           />
-          <Space direction="vertical" size={2}>
-            <Tooltip title={record.title || record.url}><Text ellipsis style={{ maxWidth: 220 }}>{displayTitle(record.title, record.titleZh) || record.url}</Text></Tooltip>
+          <Space direction="vertical" size={2} style={{ minWidth: 0 }}>
+            <Tooltip title={record.title || record.url}>
+              <Text ellipsis style={{ display: "block", maxWidth: "100%" }}>{displayTitle(record.title, record.titleZh) || record.url}</Text>
+            </Tooltip>
             <Space wrap size={[4, 4]}>
-              {record.sourceKeyword ? <Tag color="blue">{record.sourceKeyword}</Tag> : null}
-              {record.signal?.priority ? <Tag color={record.signal.priority === "P0" ? "red" : record.signal.priority === "P1" ? "orange" : "default"}>{record.signal.priority}</Tag> : null}
+              {record.sourceKeyword ? <Tag color="blue" style={{ marginInlineEnd: 0 }}>{record.sourceKeyword}</Tag> : null}
+              {record.signal?.priority ? <Tag style={{ marginInlineEnd: 0 }} color={record.signal.priority === "P0" ? "red" : record.signal.priority === "P1" ? "orange" : "default"}>{record.signal.priority}</Tag> : null}
             </Space>
           </Space>
         </Space>
@@ -3098,28 +3174,27 @@ export default function CompetitorProductWorkbench({
     {
       title: "价格 / 日销",
       key: "sales",
-      width: 140,
+      width: 96,
       render: (_: any, record: any) => (
         <Space direction="vertical" size={0}>
           <Text strong style={{ color: TEMU_ORANGE }}>${toSafeNumber(record.latest?.price).toFixed(2)}</Text>
-          <Text type="secondary" style={{ fontSize: 13 }}>日销 {toSafeNumber(record.latest?.dailySales).toLocaleString()}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>日销 {toSafeNumber(record.latest?.dailySales).toLocaleString()}</Text>
         </Space>
       ),
     },
     {
       title: "标签",
       key: "tags",
-      width: 180,
-      render: (_: any, record: any) => <Space wrap size={[4, 4]}>{(record.signal?.tags || []).map((tag: string) => <Tag key={tag} color="orange">{tag}</Tag>)}</Space>,
+      width: 140,
+      render: (_: any, record: any) => <Space wrap size={[4, 4]}>{(record.signal?.tags || []).map((tag: string) => <Tag key={tag} color="orange" style={{ marginInlineEnd: 0 }}>{tag}</Tag>)}</Space>,
     },
-    { title: "动作建议", key: "responseAction", ellipsis: true, render: (_: any, record: any) => <Tooltip title={record.signal?.responseAction}><Text ellipsis style={{ maxWidth: 200 }}>{record.signal?.responseAction || "-"}</Text></Tooltip> },
     {
       title: "操作",
       key: "action",
-      width: 150,
+      width: 72,
       render: (_: any, record: any) => (
-        <Space>
-          {record.url ? <Button size="small" type="link" icon={<LinkOutlined />} href={record.url} target="_blank">打开</Button> : null}
+        <Space size={4}>
+          {record.url ? <Button size="small" type="link" icon={<LinkOutlined />} href={record.url} target="_blank" style={{ padding: 0 }} /> : null}
           <Button size="small" danger icon={<DeleteOutlined />} onClick={() => void handleRemoveSample(record.url)} />
         </Space>
       ),
@@ -3929,16 +4004,6 @@ export default function CompetitorProductWorkbench({
                         <Text strong>主图诊断</Text>
                         <Tag color={imageDiagnosis.statusColor}>{imageDiagnosis.status}</Tag>
                       </Space>
-                      <Button
-                        size="small"
-                        type="primary"
-                        ghost
-                        icon={<RobotOutlined />}
-                        onClick={runVisionCompare}
-                        loading={visionLoading}
-                      >
-                        AI 视觉对比
-                      </Button>
                     </div>
 
                     <Paragraph style={{ marginBottom: 0, lineHeight: 1.7 }}>
@@ -4465,11 +4530,11 @@ export default function CompetitorProductWorkbench({
 
   const renderSearchResultCard = () => (
     <Card
-      title={`搜索结果 - ${results?.keyword || keyword} (${searchRows.length})`}
+      title={`搜索结果 - ${results?.keyword || keyword} (${filteredSearchRows.length}/${searchRows.length})`}
       style={CARD_STYLE}
       size="small"
       extra={(
-        <Space>
+        <Space size={12}>
           <Button
             size="small"
             disabled={selectedResultKeys.length === 0}
@@ -4523,86 +4588,14 @@ export default function CompetitorProductWorkbench({
       {selectedSampleRows.length === 0 ? (
         <Empty description="先从搜索结果里挑 3-5 个真正可比的样本加入当前商品。" />
       ) : (
-        <Table dataSource={selectedSampleRows} columns={sampleColumns} rowKey="url" size="small" pagination={false} scroll={{ x: 960 }} />
+        <Table dataSource={selectedSampleRows} columns={sampleColumns} rowKey="url" size="small" pagination={false} tableLayout="fixed" />
       )}
     </Card>
     </div>
   );
 
-  const renderSelectedPreviewBar = () => {
-    if (selectedSampleRows.length === 0) return null;
-    return (
-      <div
-        style={{
-          position: "sticky",
-          top: 0,
-          zIndex: 9,
-          background: "linear-gradient(180deg, rgba(255,247,240,0.98) 0%, rgba(255,255,255,0.98) 100%)",
-          borderRadius: 12,
-          border: "1px solid rgba(229,91,0,0.18)",
-          padding: "10px 14px",
-          boxShadow: "0 2px 8px rgba(229,91,0,0.08)",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 8 }}>
-          <Text strong style={{ color: TEMU_ORANGE }}>
-            已选样本 {selectedSampleRows.length} 个 · 关键 5 列快览
-          </Text>
-          <Button
-            size="small"
-            type="primary"
-            onClick={() => setActiveStep(3)}
-            style={{ background: TEMU_ORANGE, borderColor: TEMU_ORANGE }}
-          >
-            去看动作建议
-          </Button>
-        </div>
-        <div style={{ maxHeight: 180, overflowY: "auto" }}>
-          <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ color: "#8c8c8c", textAlign: "left" }}>
-                <th style={{ padding: "4px 8px", width: "34%" }}>标题</th>
-                <th style={{ padding: "4px 8px", width: "14%" }}>价格</th>
-                <th style={{ padding: "4px 8px", width: "14%" }}>月销</th>
-                <th style={{ padding: "4px 8px", width: "14%" }}>评分</th>
-                <th style={{ padding: "4px 8px", width: "24%" }}>视频 / 标签</th>
-              </tr>
-            </thead>
-            <tbody>
-              {selectedSampleRows.map((row: any) => {
-                const latest = row.latest || {};
-                const priorityTagColor = row.signal?.priority === "P0" ? "red" : row.signal?.priority === "P1" ? "orange" : "default";
-                const tagList: string[] = Array.isArray(row.signal?.tags) ? row.signal.tags.slice(0, 2) : [];
-                return (
-                  <tr key={row.url} style={{ borderTop: "1px solid #f4f4f4" }}>
-                    <td style={{ padding: "6px 8px" }}>
-                      <Space size={6} wrap>
-                        {row.signal?.priority ? <Tag color={priorityTagColor} style={{ marginInlineEnd: 0 }}>{row.signal.priority}</Tag> : null}
-                        <Text ellipsis style={{ maxWidth: 280 }}>{latest.title || row.title || row.url}</Text>
-                      </Space>
-                    </td>
-                    <td style={{ padding: "6px 8px" }}>{latest.price ? `$${toSafeNumber(latest.price).toFixed(2)}` : "-"}</td>
-                    <td style={{ padding: "6px 8px" }}>{toSafeNumber(latest.monthlySales).toLocaleString() || "-"}</td>
-                    <td style={{ padding: "6px 8px" }}>{toSafeNumber(latest.score) || "-"} / {getSearchResultReviewCount(latest) || "-"}</td>
-                    <td style={{ padding: "6px 8px" }}>
-                      <Space size={4} wrap>
-                        {latest.hasVideo ? <Tag color="blue" style={{ marginInlineEnd: 0 }}>视频</Tag> : null}
-                        {tagList.map((tag) => <Tag key={tag} style={{ marginInlineEnd: 0 }}>{tag}</Tag>)}
-                      </Space>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    );
-  };
-
   const renderStepTwo = () => (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-      {renderSelectedPreviewBar()}
       <Card style={CARD_STYLE}>
         <Space direction="vertical" size="middle" style={{ width: "100%" }}>
           <div>
@@ -5626,9 +5619,158 @@ export default function CompetitorProductWorkbench({
       </Space>
     );
 
+    // ========== 主图视觉对比（基于已加入对比的链接，自动触发）==========
+    const renderVisionCompareCard = () => {
+      const hasMyImage = Boolean(firstTextValue(selectedYunqiDisplay?.imageUrl, selectedProductMeta?.imageUrl));
+      const competitorCount = selectedSampleRows.slice(0, 3).filter((row) => {
+        const latest = row.latest as any;
+        return Boolean(firstTextValue(latest?.imageUrl, latest?.imageUrls?.[0]));
+      }).length;
+
+      return (
+        <Card
+          size="small"
+          title={(
+            <Space size={8}>
+              <RobotOutlined style={{ color: TEMU_ORANGE }} />
+              <Text strong>主图视觉对比（Gemini）</Text>
+              {visionLoading ? <Tag color="processing">分析中</Tag> : null}
+            </Space>
+          )}
+          extra={(
+            <Space size={8}>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                对比 {hasMyImage ? "我方 + " : ""}{competitorCount} 张竞品主图
+              </Text>
+              <Button
+                size="small"
+                icon={<ReloadOutlined />}
+                loading={visionLoading}
+                onClick={() => {
+                  visionFingerprintRef.current = ""; // 清掉指纹，强制重跑
+                  void runVisionCompare();
+                }}
+                disabled={!hasMyImage && competitorCount === 0}
+              >
+                重新分析
+              </Button>
+            </Space>
+          )}
+          style={CARD_STYLE}
+        >
+          {visionLoading && !visionResult ? (
+            <div style={{ padding: "20px 0", textAlign: "center", color: "#8c8c8c" }}>
+              正在把我方主图和竞品主图丢给 Gemini 做视觉对比，通常 10-30 秒…
+            </div>
+          ) : visionError ? (
+            <Alert type="error" showIcon message="AI 视觉对比失败" description={visionError} />
+          ) : !hasMyImage && competitorCount === 0 ? (
+            <Empty description="需要先关联我方主图或在步骤 3 勾选带主图的竞品样本" />
+          ) : visionResult ? (
+            <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+              {Array.isArray(visionResult.imageErrors) && visionResult.imageErrors.length > 0 ? (
+                <Alert
+                  type="warning"
+                  showIcon
+                  message={`${visionResult.imageErrors.length} 张图片拉取失败，已自动跳过`}
+                  description={visionResult.imageErrors.map((item) => `${item.title}: ${item.error}`).join("；")}
+                />
+              ) : null}
+
+              {visionResult.rawText ? (
+                <Alert
+                  type="info"
+                  showIcon
+                  message="AI 未按 JSON 格式返回，下方为原始文本"
+                  description={<pre style={{ whiteSpace: "pre-wrap", margin: 0 }}>{visionResult.rawText}</pre>}
+                />
+              ) : null}
+
+              <Row gutter={[16, 16]}>
+                {visionResult.myStrengths.length > 0 ? (
+                  <Col xs={24} md={12}>
+                    <Text strong style={{ color: "#52c41a" }}>我方主图优势</Text>
+                    <List
+                      size="small"
+                      dataSource={visionResult.myStrengths}
+                      renderItem={(item) => (
+                        <List.Item style={{ paddingInline: 0 }}>
+                          <Text>✓ {item}</Text>
+                        </List.Item>
+                      )}
+                    />
+                  </Col>
+                ) : null}
+
+                {visionResult.myWeaknesses.length > 0 ? (
+                  <Col xs={24} md={12}>
+                    <Text strong style={{ color: "#fa541c" }}>我方主图短板</Text>
+                    <List
+                      size="small"
+                      dataSource={visionResult.myWeaknesses}
+                      renderItem={(item) => (
+                        <List.Item style={{ paddingInline: 0 }}>
+                          <Text>▲ {item}</Text>
+                        </List.Item>
+                      )}
+                    />
+                  </Col>
+                ) : null}
+
+                {visionResult.competitorTakeaways.length > 0 ? (
+                  <Col xs={24} md={12}>
+                    <Text strong>竞品可借鉴点</Text>
+                    <List
+                      size="small"
+                      dataSource={visionResult.competitorTakeaways}
+                      renderItem={(item) => (
+                        <List.Item style={{ paddingInline: 0, flexDirection: "column", alignItems: "flex-start", gap: 4 }}>
+                          <Text type="secondary" style={{ fontSize: 12 }}>{item.title || "竞品"}</Text>
+                          <Text>{item.takeaway || "-"}</Text>
+                        </List.Item>
+                      )}
+                    />
+                  </Col>
+                ) : null}
+
+                {visionResult.improvements.length > 0 ? (
+                  <Col xs={24} md={12}>
+                    <Text strong>改图动作清单</Text>
+                    <List
+                      size="small"
+                      dataSource={visionResult.improvements}
+                      renderItem={(item) => (
+                        <List.Item style={{ paddingInline: 0 }}>
+                          <Space align="start">
+                            <Tag color={item.priority === "P0" ? "red" : item.priority === "P1" ? "orange" : "default"}>
+                              {item.priority || "P2"}
+                            </Tag>
+                            <Text>{item.action || "-"}</Text>
+                          </Space>
+                        </List.Item>
+                      )}
+                    />
+                  </Col>
+                ) : null}
+              </Row>
+
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                模型：{visionResult.model || "gemini"} · 最多分析 1 张我方主图 + 3 张竞品主图
+              </Text>
+            </Space>
+          ) : (
+            <div style={{ padding: "20px 0", textAlign: "center", color: "#8c8c8c" }}>
+              进入步骤 4 时会自动分析当前已加入对比的主图
+            </div>
+          )}
+        </Card>
+      );
+    };
+
     return (
       <Space direction="vertical" size="middle" style={{ width: "100%" }}>
         {renderHeroSummary()}
+        {renderVisionCompareCard()}
         {renderConclusionTab()}
         {renderMarketTab()}
         {renderGapTab()}
@@ -5744,125 +5886,6 @@ export default function CompetitorProductWorkbench({
       ) : null}
 
       {renderStepContent()}
-
-      <Modal
-        open={visionModalOpen}
-        onCancel={() => setVisionModalOpen(false)}
-        title={<Space><RobotOutlined style={{ color: TEMU_ORANGE }} /><span>AI 视觉对比（Gemini）</span></Space>}
-        width={720}
-        footer={(
-          <Space>
-            <Button onClick={() => setVisionModalOpen(false)}>关闭</Button>
-            <Button type="primary" icon={<ReloadOutlined />} loading={visionLoading} onClick={runVisionCompare}>
-              重新分析
-            </Button>
-          </Space>
-        )}
-        destroyOnClose
-      >
-        {visionLoading ? (
-          <div style={{ padding: "40px 0", textAlign: "center", color: "#8c8c8c" }}>
-            正在把我方主图和竞品主图一起丢给 Gemini 做视觉对比，通常 10-30 秒…
-          </div>
-        ) : visionError ? (
-          <Alert
-            type="error"
-            showIcon
-            message="AI 视觉对比失败"
-            description={visionError}
-          />
-        ) : visionResult ? (
-          <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-            {Array.isArray(visionResult.imageErrors) && visionResult.imageErrors.length > 0 ? (
-              <Alert
-                type="warning"
-                showIcon
-                message={`${visionResult.imageErrors.length} 张图片拉取失败，已自动跳过`}
-                description={visionResult.imageErrors.map((item) => `${item.title}: ${item.error}`).join("；")}
-              />
-            ) : null}
-
-            {visionResult.rawText ? (
-              <Alert
-                type="info"
-                showIcon
-                message="AI 未按 JSON 格式返回，下方为原始文本"
-                description={<pre style={{ whiteSpace: "pre-wrap", margin: 0 }}>{visionResult.rawText}</pre>}
-              />
-            ) : null}
-
-            {visionResult.myStrengths.length > 0 ? (
-              <div>
-                <Text strong style={{ color: "#52c41a" }}>我方主图优势</Text>
-                <List
-                  size="small"
-                  dataSource={visionResult.myStrengths}
-                  renderItem={(item) => (
-                    <List.Item style={{ paddingInline: 0 }}>
-                      <Text>✓ {item}</Text>
-                    </List.Item>
-                  )}
-                />
-              </div>
-            ) : null}
-
-            {visionResult.myWeaknesses.length > 0 ? (
-              <div>
-                <Text strong style={{ color: "#fa541c" }}>我方主图短板</Text>
-                <List
-                  size="small"
-                  dataSource={visionResult.myWeaknesses}
-                  renderItem={(item) => (
-                    <List.Item style={{ paddingInline: 0 }}>
-                      <Text>▲ {item}</Text>
-                    </List.Item>
-                  )}
-                />
-              </div>
-            ) : null}
-
-            {visionResult.competitorTakeaways.length > 0 ? (
-              <div>
-                <Text strong>竞品可借鉴点</Text>
-                <List
-                  size="small"
-                  dataSource={visionResult.competitorTakeaways}
-                  renderItem={(item) => (
-                    <List.Item style={{ paddingInline: 0, flexDirection: "column", alignItems: "flex-start", gap: 4 }}>
-                      <Text type="secondary" style={{ fontSize: 12 }}>{item.title || "竞品"}</Text>
-                      <Text>{item.takeaway || "-"}</Text>
-                    </List.Item>
-                  )}
-                />
-              </div>
-            ) : null}
-
-            {visionResult.improvements.length > 0 ? (
-              <div>
-                <Text strong>改图动作清单</Text>
-                <List
-                  size="small"
-                  dataSource={visionResult.improvements}
-                  renderItem={(item) => (
-                    <List.Item style={{ paddingInline: 0 }}>
-                      <Space align="start">
-                        <Tag color={item.priority === "P0" ? "red" : item.priority === "P1" ? "orange" : "default"}>
-                          {item.priority || "P2"}
-                        </Tag>
-                        <Text>{item.action || "-"}</Text>
-                      </Space>
-                    </List.Item>
-                  )}
-                />
-              </div>
-            ) : null}
-
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              模型：{visionResult.model || "gemini"} · 本次仅分析最多 1 张我方主图 + 3 张竞品主图
-            </Text>
-          </Space>
-        ) : null}
-      </Modal>
     </Space>
   );
 }

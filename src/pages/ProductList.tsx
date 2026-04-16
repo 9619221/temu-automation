@@ -3567,7 +3567,7 @@ export default function ProductList() {
               `}</style>
               <Table
                 className="product-list-table"
-                rowKey={(record: any, index) => record._flatKey || `row-${index}`}
+                rowKey={(record: any, index) => `row-${index}-${record._flatKey || ""}`}
                 dataSource={tableRows}
                 columns={configuredColumns as any}
                 size="small"

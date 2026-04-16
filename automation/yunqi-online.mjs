@@ -1157,31 +1157,47 @@ export function buildYunqiOnlineHandlers({ ensureBrowser, getContext, randomDela
     await sendCdpCommand("Page.navigate", { url: "https://www.yunqishuju.com/temu/home" });
     await new Promise((r) => setTimeout(r, 4000));
 
-    // 填入关键词并搜索
-    const searchScript = `
-      (async () => {
-        const input = document.querySelector('.lay-input input.en');
+    // 步骤 1：同步填入关键词（不 await，不涉及导航）
+    const fillScript = `
+      (() => {
+        const input = document.querySelector('.lay-input input.en')
+          || document.querySelector('input.en')
+          || document.querySelector('input[placeholder*="关键词"]')
+          || document.querySelector('input[placeholder*="搜索"]');
         if (!input) return JSON.stringify({ error: '找不到搜索框' });
         input.focus();
         const ns = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
         ns.call(input, ${JSON.stringify(keyword)});
         input.dispatchEvent(new Event('input', { bubbles: true }));
         input.dispatchEvent(new Event('change', { bubbles: true }));
-        await new Promise(r => setTimeout(r, 500));
-        const searchBtn = [...document.querySelectorAll('button,.el-button')].find(b => b.textContent.trim() === '搜索' && b.offsetParent);
-        if (searchBtn) searchBtn.click();
-        else return JSON.stringify({ error: '找不到搜索按钮' });
         return JSON.stringify({ ok: true });
       })()
     `;
-    const searchResult = await sendCdpCommand("Runtime.evaluate", {
-      expression: searchScript, awaitPromise: true, returnByValue: true,
+    const fillResult = await sendCdpCommand("Runtime.evaluate", {
+      expression: fillScript, returnByValue: true,
     });
-    const searchStatus = JSON.parse(searchResult?.result?.value || "{}");
-    if (searchStatus.error) throw new Error(`[yunqi-search] ${searchStatus.error}`);
+    const fillStatus = JSON.parse(fillResult?.result?.value || "{}");
+    if (fillStatus.error) throw new Error(`[yunqi-search] ${fillStatus.error}`);
 
-    // 等待搜索结果加载
-    await new Promise((r) => setTimeout(r, 5000));
+    // 步骤 2：点击搜索按钮（fire-and-forget，click 会触发导航，不 await 返回值避免 Promise was collected）
+    const clickScript = `
+      (() => {
+        const btn = [...document.querySelectorAll('button,.el-button')].find(b => b.textContent.trim() === '搜索' && b.offsetParent);
+        if (btn) { btn.click(); return 'clicked'; }
+        return 'not-found';
+      })()
+    `;
+    try {
+      await sendCdpCommand("Runtime.evaluate", {
+        expression: clickScript, returnByValue: true,
+      });
+    } catch (err) {
+      // 即使 Promise was collected 也放过——click 本身已经发出
+      console.error(`[yunqi-search] click 可忽略的错误: ${String(err?.message || err).slice(0, 100)}`);
+    }
+
+    // 步骤 3：等搜索结果加载 + 给导航后的新 execution context 时间
+    await new Promise((r) => setTimeout(r, 6000));
 
     // 从 DOM 抓取结果
     const scrapeScript = `
@@ -1292,17 +1308,22 @@ export function buildYunqiOnlineHandlers({ ensureBrowser, getContext, randomDela
     const kw = body.q || body.keyword || "";
     const requestedSize = Math.min(Math.max(Number(body.size) || 50, 1), 100);
 
-    // 优先方式：通过 CDP Chrome 在云启网站上搜索并抓取 DOM 结果
-    if (kw && (await isCdpAlive())) {
+    // 有关键词就优先走 CDP（searchViaCdpScrape 内部会自动启动 Chrome + 登录，
+    // 所以这里**不要再用 isCdpAlive 门禁**——之前的门禁会导致 CDP 没开时直接跳到无关键词的 API，
+    // 结果返回的是日销量倒序的通用 feed，跟搜索词毫无关系）
+    if (kw) {
       try {
         return await searchViaCdpScrape(kw, requestedSize);
       } catch (err) {
         console.error(`[yunqi-search] CDP 抓取失败: ${String(err?.message || err).slice(0, 200)}`);
         if (String(err?.message || "").includes(YUNQI_AUTH_INVALID_CODE)) throw err;
+        // 有关键词但 CDP 挂了——宁可报错也不要悄悄返回错的数据
+        throw new Error(`关键词搜索失败（CDP）：${String(err?.message || err).slice(0, 200)}`);
       }
     }
 
-    // Fallback：直接调 API（不带关键词搜索）
+    // 没关键词才用 API（例如 competitorTrack 只按 goodsId 查单品），
+    // 这类请求 yunqi API 本身就不需要关键词
     try {
       const apiBody = {
         from: body.from || 0,
