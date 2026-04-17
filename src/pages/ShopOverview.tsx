@@ -31,6 +31,8 @@ import { getStoreValues, STORE_KEY_ALIASES } from "../utils/storeCompat";
 import PageHeader from "../components/PageHeader";
 import StatCard from "../components/StatCard";
 import EmptyGuide from "../components/EmptyGuide";
+import FluxOperatorPanel from "../components/FluxOperatorPanel";
+import type { RegionKey } from "../utils/fluxOperator";
 
 const { Text, Paragraph } = Typography;
 
@@ -125,6 +127,7 @@ const ShopOverview: React.FC = () => {
   const [checkup, setCheckup] = useState<any>(null);
   const [qcDetail, setQcDetail] = useState<any>(null);
   const [diagnostics, setDiagnostics] = useState<CollectionDiagnostics | null>(null);
+  const [productHistoryCache, setProductHistoryCache] = useState<Record<string, any> | null>(null);
 
   // 商品动态 / 库存预警
   const [lowStockItems, setLowStockItems] = useState<any[]>([]);
@@ -190,6 +193,14 @@ const ShopOverview: React.FC = () => {
       const diagnosticsRaw = storeValues[COLLECTION_DIAGNOSTICS_KEY];
       const appSettingsRaw = storeValues[APP_SETTINGS_KEY];
 
+      // 加载商品级流量历史缓存（运营助手所需）
+      try {
+        const phc = await store?.get("temu_flux_product_history_cache");
+        setProductHistoryCache(phc && typeof phc === "object" ? (phc as Record<string, any>) : null);
+      } catch {
+        setProductHistoryCache(null);
+      }
+
       if (dashRaw) setDashboard(parseDashboardData(dashRaw));
       if (fluxRaw) setFlux(parseFluxData(fluxRaw));
       if (perfRaw) setPerformance(perfRaw);
@@ -242,6 +253,7 @@ const ShopOverview: React.FC = () => {
       "temu_raw_checkup",
       "temu_raw_qcDetail",
       "temu_qc_detail",
+      "temu_flux_product_history_cache",
       COLLECTION_DIAGNOSTICS_KEY,
       APP_SETTINGS_KEY,
     ],
@@ -464,28 +476,15 @@ const ShopOverview: React.FC = () => {
     </Space>
   );
 
-  // ========== Tab 2: 流量分析 ==========
+  // ========== Tab 2: 流量分析（运营助手）==========
   const renderFluxTab = () => (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
-      {/* 区域切换 */}
-      <div style={{ display: "flex", justifyContent: "flex-end" }}>
-        <Segmented
-          value={fluxRegion}
-          onChange={(v) => setFluxRegion(v as string)}
-          options={[
-            { label: "🌍 全球", value: "global" },
-            { label: "🇺🇸 美国", value: "us" },
-            { label: "🇪🇺 欧盟", value: "eu" },
-          ]}
-          style={{ borderRadius: 8 }}
-        />
-      </div>
-
+      {/* 顶部：今日 vs 昨日 概览（保留） */}
       <div className="app-panel">
         <div className="app-panel__title">
           <div className="app-panel__title-main">流量概览{fluxRegion === "us" ? "（美国）" : fluxRegion === "eu" ? "（欧盟）" : ""}</div>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
           <StatCard compact title="今日访客" value={safeVal(fluxSummary?.todayVisitors)} color="purple" />
           <StatCard compact title="今日买家" value={safeVal(fluxSummary?.todayBuyers)} color="purple" />
           <StatCard compact title="今日转化率" value={fluxSummary?.todayConversionRate ? (fluxSummary.todayConversionRate * 100).toFixed(2) : "-"} suffix="%" color="success" />
@@ -495,11 +494,19 @@ const ShopOverview: React.FC = () => {
         </div>
       </div>
 
-      <div className="app-panel">
-        <div className="app-panel__title">
-          <div className="app-panel__title-main">流量趋势</div>
-        </div>
-        {fluxTrendList.length > 0 ? (
+      {/* 运营助手面板 */}
+      <FluxOperatorPanel
+        cache={productHistoryCache}
+        region={fluxRegion as RegionKey}
+        onRegionChange={(r) => setFluxRegion(r)}
+      />
+
+      {/* 流量趋势（保留为补充）*/}
+      {fluxTrendList.length > 0 && (
+        <div className="app-panel">
+          <div className="app-panel__title">
+            <div className="app-panel__title-main">店铺整体流量趋势</div>
+          </div>
           <div style={{ borderRadius: 12, overflow: "hidden" }}>
             <Table
               dataSource={fluxTrendList.map((item: any, idx: number) => ({
@@ -517,10 +524,8 @@ const ShopOverview: React.FC = () => {
               size="small"
             />
           </div>
-        ) : (
-          <EmptyGuide title="暂无流量趋势数据" description="采集数据后将在此展示" />
-        )}
-      </div>
+        </div>
+      )}
     </Space>
   );
 
