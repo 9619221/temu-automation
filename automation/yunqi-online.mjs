@@ -545,7 +545,7 @@ function extractYunqiTotal(payload, fallback = 0) {
 }
 
 // ---- CDP 模式：启动真实 Chrome，通过 CDP 协议（原生 WebSocket）读取 cookie ----
-const YUNQI_CDP_PORT = 9399;
+export const YUNQI_CDP_PORT = 9399;
 // 独立 profile，避免和用户正在使用的 Chrome 冲突
 const YUNQI_CDP_USER_DATA = path.join(APPDATA_DIR, "yunqi-chrome-profile");
 let _cdpProcess = null;
@@ -573,7 +573,7 @@ function findChromeExeForCdp() {
   return null;
 }
 
-async function isCdpAlive() {
+export async function isCdpAlive() {
   try {
     const resp = await fetch(`http://127.0.0.1:${YUNQI_CDP_PORT}/json/version`, { signal: AbortSignal.timeout(2000) });
     return resp.ok;
@@ -581,7 +581,7 @@ async function isCdpAlive() {
 }
 
 /** 启动独立 Chrome 带 CDP 调试端口（不影响用户正在用的 Chrome） */
-async function launchCdpChromeProcess(startUrl) {
+export async function launchCdpChromeProcess(startUrl) {
   const chromeExe = findChromeExeForCdp();
   if (!chromeExe) throw new Error("未找到系统 Chrome，请安装 Google Chrome");
   fs.mkdirSync(YUNQI_CDP_USER_DATA, { recursive: true });
