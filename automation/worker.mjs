@@ -16,6 +16,8 @@ import { ADS_GROUP_TABS, GOVERN_GROUP_TARGETS, buildScrapeHandlers, getScrapeFun
 import { getConfiguredMaxRetries, getDelayScale, shouldAutoLoginRetry, shouldCaptureErrorScreenshots } from "./runtime-config.mjs";
 import { buildYunqiOnlineHandlers } from "./yunqi-online.mjs";
 import { createGeminiClient } from "./gemini-client.mjs";
+import { optimizeTitle as _optimizeTitle } from "./title-optimizer.mjs";
+import { scrapeCompetitorReviews as _scrapeCompetitorReviews, openTemuLoginPage as _openTemuLoginPage, openTemuSearchPage as _openTemuSearchPage, extractReviewsFromFeed as _extractReviewsFromFeed, dumpFeedForGoods as _dumpFeedForGoods, extractProductFromFeed as _extractProductFromFeed, extractSearchResultsFromFeed as _extractSearchResultsFromFeed } from "./competitor-reviews.mjs";
 const require = createRequire(import.meta.url);
 const XLSX = require("xlsx");
 const FormDataLib = require("form-data");
@@ -54,8 +56,16 @@ for (const envFile of envFiles) {
 // AI API 配置（从环境变量读取，不再硬编码）
 const DEFAULT_AI_BASE_URL = "https://api.vectorengine.ai/v1";
 const AI_API_KEY = process.env.VECTORENGINE_API_KEY || "";
+// pro-preview 专用令牌（令牌权限按模型档位拆开时填这个；留空则所有模型都用 AI_API_KEY）
+const AI_PRO_API_KEY = process.env.VECTORENGINE_PRO_API_KEY || "";
 const AI_BASE_URL = normalizeChatBaseUrl(process.env.VECTORENGINE_BASE_URL, DEFAULT_AI_BASE_URL);
 const AI_MODEL = process.env.VECTORENGINE_MODEL || "gemini-3.1-flash-lite-preview";
+// 对比分析"最强形态"模型降级链：依次尝试，遇 403/权限错误自动降级
+// 允许用 VECTORENGINE_COMPARE_MODELS 覆盖，逗号分隔
+const COMPARE_MODEL_CHAIN = (process.env.VECTORENGINE_COMPARE_MODELS
+  || process.env.VECTORENGINE_COMPARE_MODEL
+  || "gemini-3.1-pro-preview,gemini-3.1-flash-preview,gemini-3.1-flash-lite-preview")
+  .split(",").map((s) => s.trim()).filter(Boolean);
 const ATTRIBUTE_AI_API_KEY = process.env.VECTORENGINE_ATTRIBUTE_API_KEY || AI_API_KEY;
 const ATTRIBUTE_AI_BASE_URL = normalizeChatBaseUrl(process.env.VECTORENGINE_ATTRIBUTE_BASE_URL, AI_BASE_URL);
 const ATTRIBUTE_AI_MODEL = process.env.VECTORENGINE_ATTRIBUTE_MODEL || AI_MODEL;
@@ -65,6 +75,19 @@ function getAiGeminiClient() {
   if (_aiGeminiClient || !AI_API_KEY) return _aiGeminiClient;
   _aiGeminiClient = createGeminiClient({ apiKey: AI_API_KEY, baseURL: AI_BASE_URL });
   return _aiGeminiClient;
+}
+let _aiGeminiProClient = null;
+function getAiGeminiProClient() {
+  const proKey = AI_PRO_API_KEY || AI_API_KEY;
+  if (_aiGeminiProClient || !proKey) return _aiGeminiProClient;
+  _aiGeminiProClient = createGeminiClient({ apiKey: proKey, baseURL: AI_BASE_URL });
+  return _aiGeminiProClient;
+}
+function getAiClientForModel(modelName) {
+  if (/pro-preview/i.test(modelName || "")) {
+    return getAiGeminiProClient() || getAiGeminiClient();
+  }
+  return getAiGeminiClient();
 }
 let _attributeGeminiClient = null;
 function getAttributeGeminiClient() {
@@ -8530,6 +8553,52 @@ async function handleRequest(body) {
       return await yunqiHandlers.competitorBatchTrack(params || {});
     case "competitor_auto_register":
       return await yunqiHandlers.competitorAutoRegister(params || {});
+    case "optimize_title":
+      return await _optimizeTitle(params || {}, { getClient: getAiGeminiClient, model: AI_MODEL });
+    case "competitor_scrape_reviews":
+      return await _scrapeCompetitorReviews(params || {});
+    case "open_temu_login":
+      return await _openTemuLoginPage(params || {});
+    case "open_temu_search":
+      return await _openTemuSearchPage(params || {});
+    case "competitor_ext_fetch_reviews":
+      return _extractReviewsFromFeed(params || {}, extFeedBuffer);
+    case "competitor_ext_feed_stats":
+      return {
+        total: extFeedBuffer.length,
+        latest: extFeedBuffer.slice(-10).map((e) => ({
+          url: e.url, status: e.status, pageUrl: e.pageUrl, receivedAt: e.receivedAt,
+        })),
+      };
+    case "competitor_ext_feed_clear":
+      extFeedBuffer.length = 0;
+      try { if (fs.existsSync(EXT_FEED_FILE)) fs.unlinkSync(EXT_FEED_FILE); } catch {}
+      return { cleared: true };
+    case "competitor_ext_feed_dump":
+      return _dumpFeedForGoods(params || {}, extFeedBuffer);
+    case "competitor_ext_fetch_product":
+      return _extractProductFromFeed(params || {}, extFeedBuffer);
+    case "competitor_ext_search_results":
+      return _extractSearchResultsFromFeed(params || {}, extFeedBuffer);
+    case "competitor_ext_compare_queue_list":
+      return { items: extCompareQueue.slice(), size: extCompareQueue.length };
+    case "competitor_ext_compare_queue_remove": {
+      const ok = removeExtCompareQueue((params || {}).goodsId);
+      return { ok, size: extCompareQueue.length };
+    }
+    case "competitor_ext_mine_goods_list":
+      return { items: Array.from(mineGoodsSet) };
+    case "competitor_ext_mine_goods_set": {
+      const p = params || {};
+      const goodsId = String(p.goodsId || "").trim();
+      const isMine = p.kind === "mine";
+      const changed = setMineGoods(goodsId, isMine);
+      return { ok: true, changed, items: Array.from(mineGoodsSet) };
+    }
+    case "competitor_analyze_compare_queue":
+      return await analyzeCompareQueue();
+    case "competitor_get_compare_insights":
+      return { ok: true, insights: compareInsightsCache };
     case "yunqi_db_import":
       return await yunqiHandlers.yunqiDbImport(params || {});
     case "yunqi_db_search":
@@ -8670,6 +8739,29 @@ function formatAutoPricingUserError(message = "") {
   if (/Execution context was destroyed/i.test(text)) return "素材上传过程中页面刷新中断，请稍后重试";
   if (/frame was detached|ERR_ABORTED|ERR_FAILED/i.test(text)) return "素材页面连接中断，请稍后重试";
   return text;
+}
+
+/**
+ * 分类自动上新失败原因，用于 UI 出具差异化提示。
+ * stage: 失败发生的阶段 —— source_download | image_gen | image_upload | title | category | draft | unknown
+ * 返回值形如 "image_gen:network" / "image_upload:auth" / "draft:unknown"，冒号前为阶段，冒号后为根因。
+ */
+function classifyAutoPricingError(stage, rawMessage) {
+  const text = String(rawMessage || "");
+  const lower = text.toLowerCase();
+  let rootCause = "unknown";
+  if (/ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|fetch failed|getaddrinfo|socket hang up|network error|请求超时|连接超时|连接被重置|proxy|tunneling|connect ETIMEDOUT|Connection closed/i.test(text)) {
+    rootCause = "network";
+  } else if (/\b401\b|\b403\b|unauthorized|forbidden|invalid[_ ]?api[_ ]?key|authentication|密钥无效|未授权|authentication failed|登录失效|login expired|sellerLogin/i.test(text)) {
+    rootCause = "auth";
+  } else if (/\b429\b|quota|rate[_ ]?limit|too many requests|额度|余额|insufficient|欠费|配额|上游.*饱和|overloaded|usage limit/i.test(text)) {
+    rootCause = "quota";
+  } else if (/worker.*exit|image studio|child process|spawn.*ENOENT|auto-image-gen|ECONNREFUSED.*3210|ECONNREFUSED.*127\.0\.0\.1/i.test(text)) {
+    rootCause = "worker_down";
+  } else if (/timeout|超时/i.test(lower)) {
+    rootCause = "timeout";
+  }
+  return `${stage || "unknown"}:${rootCause}`;
 }
 
 async function refreshMaterialUploadSession(page, reason = "") {
@@ -9815,6 +9907,65 @@ function extractJsonObjectFromText(text) {
   }
 }
 
+// 容错版：剥离 ```json fence、按括号平衡抽取、对被 max_tokens 截断的 JSON 做补齐（关字符串/数组/对象 + 删尾逗号）。
+// 专门给 compare 场景用：LLM 偶尔会无视"纯 JSON"指令，或在 token 上限处断尾。
+function extractJsonObjectLenient(text) {
+  let content = String(text || "").trim();
+  if (!content) return null;
+
+  const closedFence = content.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (closedFence && closedFence[1]) {
+    content = closedFence[1].trim();
+  } else {
+    const openFence = content.match(/```(?:json)?\s*([\s\S]*)$/i);
+    if (openFence && openFence[1]) content = openFence[1].trim();
+  }
+
+  const start = content.indexOf("{");
+  if (start < 0) return null;
+
+  const strict = extractJsonObjectFromText(content.slice(start));
+  if (strict) return strict;
+
+  const stack = [];
+  let inStr = false;
+  let escape = false;
+  let lastValidEnd = -1;
+  for (let i = start; i < content.length; i++) {
+    const ch = content[i];
+    if (inStr) {
+      if (escape) { escape = false; continue; }
+      if (ch === "\\") { escape = true; continue; }
+      if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') { inStr = true; continue; }
+    if (ch === "{" || ch === "[") { stack.push(ch); continue; }
+    if (ch === "}" || ch === "]") {
+      const want = ch === "}" ? "{" : "[";
+      if (stack[stack.length - 1] === want) stack.pop();
+      if (stack.length === 0) lastValidEnd = i;
+      continue;
+    }
+  }
+
+  if (lastValidEnd > 0) {
+    try { return JSON.parse(content.slice(start, lastValidEnd + 1)); } catch { /* fallthrough */ }
+  }
+
+  let tail = content.slice(start);
+  if (inStr) tail += '"';
+  tail = tail.replace(/,\s*$/g, "");
+  tail = tail.replace(/:\s*$/g, ": null");
+  tail = tail.replace(/,\s*([}\]])/g, "$1");
+  while (stack.length) {
+    const open = stack.pop();
+    tail = tail.replace(/,\s*$/g, "");
+    tail += open === "{" ? "}" : "]";
+  }
+  try { return JSON.parse(tail); } catch { return null; }
+}
+
 function normalizeAnalyzeFallbackPayload(payload, productTitle = "") {
   const fallbackTitle = String(productTitle || "").trim() || "商品";
   const normalizedSellingPoints = Array.isArray(payload?.sellingPoints)
@@ -10631,7 +10782,13 @@ async function autoPricingFromCSV(params) {
       }
 
       if (!sourceImagePath) {
-        results.push({ index: i, name: productName.slice(0, 40), success: false, message: "无法下载商品原图" });
+        results.push({
+          index: i,
+          name: productName.slice(0, 40),
+          success: false,
+          message: "无法下载商品原图",
+          errorCategory: classifyAutoPricingError("source_download", imageUrl),
+        });
         syncCurrentProgressResults(results, { current: `${itemNum}/${total} ${productName.slice(0, 30)}`, step: "原图下载失败" });
         continue;
       }
@@ -10655,11 +10812,13 @@ async function autoPricingFromCSV(params) {
       console.error(`[auto-pricing] Generating AI images (${1 + carouselLocalPaths.length} source images)...`);
       const aiResult = await generateImagesWithAI(sourceImagePath, productName, carouselLocalPaths);
       if (!aiResult.success) {
+        const rawErr = aiResult.error || `图片不足${REQUIRED_AI_DETAIL_IMAGE_COUNT}张`;
         results.push({
           index: i,
           name: productName.slice(0, 40),
           success: false,
-          message: "AI生图失败: " + (aiResult.error || `图片不足${REQUIRED_AI_DETAIL_IMAGE_COUNT}张`),
+          message: "AI生图失败: " + rawErr,
+          errorCategory: classifyAutoPricingError("image_gen", rawErr),
         });
         syncCurrentProgressResults(results, { current: `${itemNum}/${total} ${productName.slice(0, 30)}`, step: "AI生图失败" });
         continue;
@@ -10695,11 +10854,14 @@ async function autoPricingFromCSV(params) {
           .slice(0, 3)
           .map(([type, error]) => `${type}: ${formatAutoPricingUserError(error).slice(0, 80)}`)
           .join("；");
+        // 取第一条原始上传错误做分类（未包装前的原文更能命中 network/auth 关键词）
+        const firstRawUploadErr = Object.values(uploadErrors)[0] || "";
         results.push({
           index: i,
           name: productName.slice(0, 40),
           success: false,
           message: `上传图片不足${REQUIRED_AI_DETAIL_IMAGE_COUNT}张 (${orderedImageUrls.length})${uploadErrorSummary ? `；${uploadErrorSummary}` : ""}`,
+          errorCategory: classifyAutoPricingError("image_upload", firstRawUploadErr),
         });
         syncCurrentProgressResults(results, { current: `${itemNum}/${total} ${productName.slice(0, 30)}`, step: "图片上传失败" });
         continue;
@@ -10877,6 +11039,10 @@ async function autoPricingFromCSV(params) {
       if (createResult.success && titleSource === "original") {
         resultEntry.message = `${createResult.message || "商品已保存到Temu草稿箱"}（⚠️ ${titleWarning}）`;
       }
+      if (!createResult.success) {
+        const draftStage = /分类搜索失败/.test(createResult.message || "") ? "category" : "draft";
+        resultEntry.errorCategory = classifyAutoPricingError(draftStage, createResult.message);
+      }
       results.push(resultEntry);
       syncCurrentProgressResults(results, {
         current: `${itemNum}/${total} ${productName.slice(0, 30)}`,
@@ -10899,7 +11065,13 @@ async function autoPricingFromCSV(params) {
 
     } catch (e) {
       const friendlyMessage = formatAutoPricingUserError(e?.message);
-      results.push({ index: i, name: productName.slice(0, 40), success: false, message: friendlyMessage });
+      results.push({
+        index: i,
+        name: productName.slice(0, 40),
+        success: false,
+        message: friendlyMessage,
+        errorCategory: classifyAutoPricingError("unknown", e?.message),
+      });
       syncCurrentProgressResults(results, {
         current: `${itemNum}/${total} ${productName.slice(0, 30)}`,
         step: "执行失败",
@@ -13084,7 +13256,761 @@ function isCurrentProgressTask(taskId) {
   return !taskId || !currentProgress.taskId || currentProgress.taskId === taskId;
 }
 
+// ---- 浏览器扩展 feed（免鉴权，localhost-only）----
+// 持久化到磁盘：append-only JSONL，启动时读回内存，重启不丢
+const EXT_FEED_MAX = 1000;
+const EXT_FEED_REWRITE_THRESHOLD = Math.floor(EXT_FEED_MAX * 1.5); // 文件行数超过此值就压缩重写
+const EXT_FEED_FILE = path.join(
+  process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming",
+  "temu-automation",
+  "ext-feed.jsonl",
+);
+const extFeedBuffer = [];
+let extFeedAppendedSinceRewrite = 0;
+
+function ensureExtFeedDir() {
+  try {
+    const dir = path.dirname(EXT_FEED_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  } catch {}
+}
+
+function loadExtFeedFromDisk() {
+  try {
+    if (!fs.existsSync(EXT_FEED_FILE)) return;
+    const raw = fs.readFileSync(EXT_FEED_FILE, "utf8");
+    if (!raw) return;
+    const lines = raw.split("\n");
+    let parsed = 0;
+    // 只保留最后 EXT_FEED_MAX 行有效数据
+    const tail = lines.slice(-EXT_FEED_MAX - 100);
+    for (const line of tail) {
+      const s = line.trim();
+      if (!s) continue;
+      try {
+        const obj = JSON.parse(s);
+        extFeedBuffer.push(obj);
+        parsed += 1;
+      } catch {}
+    }
+    if (extFeedBuffer.length > EXT_FEED_MAX) {
+      extFeedBuffer.splice(0, extFeedBuffer.length - EXT_FEED_MAX);
+    }
+    console.log(`[ext-feed] loaded ${parsed} entries from disk (buffer=${extFeedBuffer.length})`);
+    // 文件行数太多则立刻压缩
+    if (lines.length > EXT_FEED_REWRITE_THRESHOLD) rewriteExtFeedFile();
+  } catch (e) {
+    console.warn("[ext-feed] load failed:", e?.message || e);
+  }
+}
+
+function rewriteExtFeedFile() {
+  try {
+    ensureExtFeedDir();
+    const tmp = EXT_FEED_FILE + ".tmp";
+    const content = extFeedBuffer.map((e) => JSON.stringify(e)).join("\n") + (extFeedBuffer.length ? "\n" : "");
+    fs.writeFileSync(tmp, content, "utf8");
+    fs.renameSync(tmp, EXT_FEED_FILE);
+    extFeedAppendedSinceRewrite = 0;
+  } catch (e) {
+    console.warn("[ext-feed] rewrite failed:", e?.message || e);
+  }
+}
+
+function appendExtFeedToDisk(entry) {
+  try {
+    ensureExtFeedDir();
+    fs.appendFileSync(EXT_FEED_FILE, JSON.stringify(entry) + "\n", "utf8");
+    extFeedAppendedSinceRewrite += 1;
+    // 阈值到了就压缩（保证文件不会无限膨胀）
+    if (extFeedBuffer.length + extFeedAppendedSinceRewrite > EXT_FEED_REWRITE_THRESHOLD) {
+      rewriteExtFeedFile();
+    }
+  } catch (e) {
+    console.warn("[ext-feed] append failed:", e?.message || e);
+  }
+}
+
+function pushExtFeed(entry) {
+  const record = { ...entry, receivedAt: Date.now() };
+  extFeedBuffer.push(record);
+  if (extFeedBuffer.length > EXT_FEED_MAX) {
+    extFeedBuffer.splice(0, extFeedBuffer.length - EXT_FEED_MAX);
+  }
+  appendExtFeedToDisk(record);
+}
+
+export function getExtFeedSnapshot() {
+  return extFeedBuffer.slice();
+}
+
+// 启动时立刻从磁盘恢复
+loadExtFeedFromDisk();
+
+// ---- 对比候选池（扩展浮层"加入对比列表"写入，前端读取）----
+const EXT_COMPARE_QUEUE_FILE = path.join(path.dirname(EXT_FEED_FILE), "ext-compare-queue.jsonl");
+const MINE_GOODS_FILE = path.join(path.dirname(EXT_FEED_FILE), "mine-goods.json");
+const extCompareQueue = [];
+const extCompareIds = new Set();
+const mineGoodsSet = new Set();
+
+function loadMineGoods() {
+  try {
+    if (!fs.existsSync(MINE_GOODS_FILE)) return;
+    const raw = fs.readFileSync(MINE_GOODS_FILE, "utf8");
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr)) {
+      for (const x of arr) {
+        const id = String(x || "").trim();
+        if (id) mineGoodsSet.add(id);
+      }
+    }
+  } catch (e) {
+    console.warn("[mine-goods] load failed:", e?.message || e);
+  }
+}
+
+function saveMineGoods() {
+  try {
+    ensureExtFeedDir();
+    fs.writeFileSync(MINE_GOODS_FILE, JSON.stringify(Array.from(mineGoodsSet), null, 2), "utf8");
+  } catch (e) {
+    console.warn("[mine-goods] save failed:", e?.message || e);
+  }
+}
+
+function isMineGoods(goodsId) {
+  return mineGoodsSet.has(String(goodsId || ""));
+}
+
+function setMineGoods(goodsId, isMine) {
+  const id = String(goodsId || "").trim();
+  if (!id) return false;
+  const was = mineGoodsSet.has(id);
+  if (isMine) mineGoodsSet.add(id); else mineGoodsSet.delete(id);
+  if (was === isMine) return false;
+  saveMineGoods();
+  // 回洗候选池里这条记录的 kind
+  const exist = extCompareQueue.find((e) => String(e.goodsId) === id);
+  if (exist) {
+    exist.kind = isMine ? "mine" : "competitor";
+    rewriteExtCompareQueueFile();
+  }
+  return true;
+}
+
+loadMineGoods();
+
+function loadExtCompareQueue() {
+  try {
+    if (!fs.existsSync(EXT_COMPARE_QUEUE_FILE)) return;
+    const raw = fs.readFileSync(EXT_COMPARE_QUEUE_FILE, "utf8");
+    for (const line of raw.split("\n")) {
+      const s = line.trim();
+      if (!s) continue;
+      try {
+        const obj = JSON.parse(s);
+        const id = String(obj?.goodsId || "");
+        if (!id || extCompareIds.has(id)) continue;
+        extCompareIds.add(id);
+        extCompareQueue.push(obj);
+      } catch {}
+    }
+  } catch (e) {
+    console.warn("[ext-queue] load failed:", e?.message || e);
+  }
+}
+loadExtCompareQueue();
+
+// ---- N 家横向对比聚类：我的商品 vs 多家竞品 ----
+const COMPARE_INSIGHTS_FILE = path.join(path.dirname(EXT_FEED_FILE), "compare-insights.json");
+let compareInsightsCache = null;
+function loadCompareInsights() {
+  try {
+    if (!fs.existsSync(COMPARE_INSIGHTS_FILE)) return;
+    compareInsightsCache = JSON.parse(fs.readFileSync(COMPARE_INSIGHTS_FILE, "utf8"));
+  } catch (e) {
+    console.warn("[compare-insights] load failed:", e?.message || e);
+  }
+}
+function saveCompareInsights(obj) {
+  try {
+    ensureExtFeedDir();
+    fs.writeFileSync(COMPARE_INSIGHTS_FILE, JSON.stringify(obj, null, 2), "utf8");
+  } catch (e) {
+    console.warn("[compare-insights] save failed:", e?.message || e);
+  }
+}
+loadCompareInsights();
+
+function _collectReviews(entries, ratingFilter, perGoodsLimit = 40, overallLimit = 80) {
+  const out = [];
+  for (const g of entries) {
+    const reviews = Array.isArray(g.reviews) ? g.reviews : [];
+    let taken = 0;
+    for (const r of reviews) {
+      if (!r || typeof r.text !== "string") continue;
+      const text = r.text.trim();
+      if (text.length < 10) continue;
+      const rating = Number(r.rating || 0);
+      if (!ratingFilter(rating)) continue;
+      out.push({ goodsId: g.goodsId, rating, text: text.slice(0, 400) });
+      taken++;
+      if (taken >= perGoodsLimit) break;
+    }
+  }
+  // 如果总量超过 overallLimit，均匀采样而非简单截断（保留多商品覆盖）
+  if (out.length <= overallLimit) return out;
+  const step = out.length / overallLimit;
+  const picked = [];
+  for (let i = 0; i < overallLimit; i++) picked.push(out[Math.floor(i * step)]);
+  return picked;
+}
+
+function _fmtReviews(arr) {
+  return arr
+    .map((r, i) => `[${i + 1}] goods=${r.goodsId} ★${r.rating} | ${r.text.replace(/\s+/g, " ")}`)
+    .join("\n");
+}
+
+// 本地确定性统计：价格带分位数
+function _computePriceStats(competitors, myPrice) {
+  const prices = [];
+  for (const c of competitors) {
+    const p = Number(c.price);
+    if (Number.isFinite(p) && p > 0) prices.push(p);
+  }
+  prices.sort((a, b) => a - b);
+  const q = (arr, r) => {
+    if (!arr.length) return null;
+    if (arr.length === 1) return arr[0];
+    const pos = (arr.length - 1) * r;
+    const base = Math.floor(pos);
+    const rest = pos - base;
+    const nxt = arr[base + 1];
+    return nxt !== undefined ? arr[base] + rest * (nxt - arr[base]) : arr[base];
+  };
+  let symbol = "";
+  for (const c of competitors) {
+    const cur = String(c.currency || "").toUpperCase();
+    if (cur === "USD") { symbol = "$"; break; }
+    if (cur === "GBP") { symbol = "£"; break; }
+    if (cur === "EUR") { symbol = "€"; break; }
+    if (cur === "JPY") { symbol = "¥"; break; }
+  }
+  if (!symbol) {
+    for (const c of competitors) {
+      const m = String(c.priceText || "").match(/[$£€¥]/);
+      if (m) { symbol = m[0]; break; }
+    }
+  }
+  const my = Number(myPrice);
+  return {
+    symbol,
+    sampleSize: prices.length,
+    min: prices[0] ?? null,
+    p25: q(prices, 0.25),
+    p50: q(prices, 0.5),
+    p75: q(prices, 0.75),
+    max: prices[prices.length - 1] ?? null,
+    myPrice: Number.isFinite(my) && my > 0 ? my : null,
+  };
+}
+
+// 本地确定性统计：视频覆盖率（基于 galleryUrls 后缀推断）
+function _computeVideoStats(mineItems, competitorItems) {
+  const looksLikeVideo = (u) => /\.(mp4|m3u8|mov|webm)(?:\?|#|$)/i.test(String(u || ""));
+  const hasVideoInRecord = (e) => {
+    if (e?.hasVideo === true) return true;
+    if (e?.videoUrl) return true;
+    const gal = Array.isArray(e?.galleryUrls) ? e.galleryUrls : [];
+    return gal.some(looksLikeVideo);
+  };
+  const myHasVideo = mineItems.some(hasVideoInRecord);
+  const withVideo = competitorItems.filter(hasVideoInRecord).length;
+  return {
+    myHasVideo,
+    competitorCount: competitorItems.length,
+    competitorWithVideoCount: withVideo,
+    competitorVideoRate: competitorItems.length ? withVideo / competitorItems.length : 0,
+  };
+}
+
+async function analyzeCompareQueue() {
+  const mineItems = extCompareQueue.filter((e) => e.kind === "mine");
+  const competitorItems = extCompareQueue.filter((e) => e.kind !== "mine");
+  if (mineItems.length === 0) {
+    return { ok: false, error: "候选池里没有「我的商品」。请先在候选池里把基准商品的 tag 切换为「我的」。" };
+  }
+  if (competitorItems.length === 0) {
+    return { ok: false, error: "候选池里没有竞品。至少采集 1 个竞品后再分析。" };
+  }
+
+  const mineLow = _collectReviews(mineItems, (r) => r <= 3);
+  const mineHigh = _collectReviews(mineItems, (r) => r >= 4);
+  const compLow = _collectReviews(competitorItems, (r) => r <= 3);
+  const compHigh = _collectReviews(competitorItems, (r) => r >= 4);
+
+  if (mineLow.length + compLow.length < 5 && mineHigh.length + compHigh.length < 5) {
+    return { ok: false, error: `评论样本太少（低分 ${mineLow.length + compLow.length}, 高分 ${mineHigh.length + compHigh.length}），至少需要 5 条有效评论` };
+  }
+
+  const client = getAiGeminiClient();
+  if (!client) return { ok: false, error: "AI client unavailable（缺少 VECTORENGINE_API_KEY）" };
+
+  // "最强形态"：降级链（pro → flash → flash-lite），大 token 上限，低温度
+  // 记录实际命中的模型，供 UI 展示
+  let lastSuccessModel = null;
+  const isPermissionError = (e) => {
+    const msg = String(e?.message || e?.response?.data || e);
+    return /\b(403|404)\b|permission|no access|not (allowed|authorized)/i.test(msg);
+  };
+  async function callLlm(prompt, { chain = COMPARE_MODEL_CHAIN, maxTokens = 12000, temperature = 0.2 } = {}) {
+    let lastErr = null;
+    for (const model of chain) {
+      const clientForModel = getAiClientForModel(model) || client;
+      if (!clientForModel) {
+        lastErr = new Error(`缺少可用的 AI client（model=${model}）`);
+        continue;
+      }
+      try {
+        const resp = await clientForModel.chat.completions.create({
+          model,
+          messages: [{ role: "user", content: prompt }],
+          temperature,
+          max_tokens: maxTokens,
+        });
+        const content = resp?.choices?.[0]?.message?.content || "";
+        const obj = extractJsonObjectLenient(content) || extractJsonObjectFromText(content);
+        lastSuccessModel = model;
+        return obj || { raw: String(content).slice(0, 4000) };
+      } catch (e) {
+        lastErr = e;
+        if (!isPermissionError(e)) throw e; // 非权限错直接抛
+        console.warn(`[compare-ai] model ${model} forbidden, trying next...`);
+      }
+    }
+    throw lastErr || new Error("全部候选模型均无权限");
+  }
+
+  // 段 1：低分痛点对比（专业版）→ my_unique_pains + industry_common_pains
+  const lowPrompt = `[OUTPUT MODE = RAW JSON ONLY] 直接以 { 开头，以 } 结束。禁止任何前言/解释/思考过程/markdown 代码块/\`\`\`json 围栏。不得出现除 JSON 以外的任何字符。
+
+你是 Temu / DTC 品类运营资深分析师（10+ 年经验，精通品控、主图语言、详情页预期管理）。基于客户真实评论，为「我的商品」做一次差异化改进的专业分析。
+
+方法论（必须严格遵守）：
+1. 只基于提供的评论抽取证据，禁止脑补；每条结论必须至少引用 1 条可追溯的客户原文。
+2. 严格区分「我方独有」（仅 A 频繁、B 未见或极少）与「行业共性」（A/B 都频繁）；共性问题不得出现在 my_unique_pains。
+3. 归因分三类：产品侧（需改 SKU/物料）/ listing 侧（主图/标题/详情/尺码表）/ 运营侧（客服脚本、预期管理）。
+4. 证据不足（< 2 条可引用原文）时 confidence 必须标 "low"，并在 root_cause 说明「样本薄弱，建议追加采集」。
+5. 禁止空泛建议（"优化描述""提升品质"）。每条建议必须可 Sprint 直接执行。
+
+【A】我的商品低分评论（${mineLow.length} 条）：
+${_fmtReviews(mineLow) || "（无）"}
+
+【B】竞品低分评论（来自 ${competitorItems.length} 个竞品，共 ${compLow.length} 条）：
+${_fmtReviews(compLow) || "（无）"}
+
+严格 JSON 输出（不加 markdown 代码块，不要任何解释文字）：
+{
+  "my_unique_pains": [
+    {
+      "label": "痛点主题（≤10 字）",
+      "severity": "high|medium|low",
+      "confidence": "high|medium|low",
+      "frequency_in_mine": "A 里出现情况描述（如：A 共 8 条，其中 5 条提到）",
+      "competitor_coverage": "B 里出现情况（未出现 / 极少 / 偶有）",
+      "my_evidence": ["A 原文片段1（≤40 字）", "片段2", "片段3"],
+      "root_cause": "归因：[产品侧|listing 侧|运营侧] + 一句话解释（≤50 字）",
+      "actionable_fix": "总括性修正建议（≤50 字，保持向下兼容旧字段）",
+      "fix_steps": ["第 1 步 具体动作（≤30 字）", "第 2 步", "第 3 步"],
+      "expected_uplift": "预期影响（≤30 字，如：降低差评集中度 / 减少退货率 X%）",
+      "priority_score": 1-10
+    }
+  ],
+  "industry_common_pains": [
+    {
+      "label": "共性痛点（≤10 字）",
+      "severity": "high|medium|low",
+      "confidence": "high|medium|low",
+      "evidence": ["A 或 B 原文1（≤40 字）", "另一条"],
+      "expectation_mgmt": "详情页预期管理方案（≤50 字）",
+      "main_image_hint": "主图可加的免责/提示元素（≤30 字）",
+      "listing_copy_hint": "文案可加的句式（≤30 字）"
+    }
+  ]
+}`;
+
+  // 段 2：高分卖点缺口（专业版）→ competitor_selling_points_i_miss
+  const highPrompt = `[OUTPUT MODE = RAW JSON ONLY] 直接以 { 开头，以 } 结束。禁止任何前言/解释/思考过程/markdown 代码块/\`\`\`json 围栏。不得出现除 JSON 以外的任何字符。
+
+你是 Temu / DTC 品类运营资深分析师。从 B（竞品高分评论）里挖出「竞品在吹、A（我的商品）没吹或很少吹」的增量卖点，写成可直接上 listing 的中英 bullet + 主图 + 详情页建议。
+
+方法论：
+1. 只从 B 抽客户原话赞美点反推卖点；不要编造卖点。
+2. gap_reason 三类归因：(a) 产品功能差异 → 我方确实没有 → 不虚假对标；(b) 产品有、listing 未强调 → 补上；(c) 使用场景/情绪价值 → 主图情景演绎补足。
+3. 每个卖点必须同时给：中文 bullet / English bullet / 主图建议 / 详情页 section 建议 / 关键词种子。
+4. 证据 < 2 条的卖点 confidence 必须标 "low"。
+5. angle 明确划分：功能 / 情感 / 场景 / 质感 / 性价比。
+
+【A】我的商品高分评论（${mineHigh.length} 条）：
+${_fmtReviews(mineHigh) || "（无）"}
+
+【B】竞品高分评论（来自 ${competitorItems.length} 个竞品，共 ${compHigh.length} 条）：
+${_fmtReviews(compHigh) || "（无）"}
+
+严格 JSON 输出：
+{
+  "competitor_selling_points_i_miss": [
+    {
+      "label": "卖点主题（≤10 字）",
+      "angle": "功能|情感|场景|质感|性价比",
+      "confidence": "high|medium|low",
+      "priority_score": 1-10,
+      "competitor_evidence": ["B 原文1（≤40 字）", "片段2", "片段3"],
+      "competitor_mention_frequency": "在 B 里被提及的概况（如：3 个竞品各≥2 条）",
+      "gap_reason": "缺口归因（产品差异 / listing 未强调 / 情境演绎不足） + 一句话",
+      "listing_bullet_cn": "中文 bullet（≤18 字，直接上架）",
+      "listing_bullet_en": "English bullet（≤18 words, copy-ready）",
+      "main_image_suggestion": "主图/副图建议（≤50 字，具体到哪张、加什么元素）",
+      "detail_section_suggestion": "详情页建议（≤50 字，具体到哪个 section、放什么内容）",
+      "keyword_seeds_cn": ["中文关键词1", "关键词2"],
+      "keyword_seeds_en": ["en keyword 1", "en keyword 2"]
+    }
+  ]
+}`;
+
+  // 本地先算好数值（确定性），再让 LLM 写定性建议
+  const priceStats = _computePriceStats(competitorItems, mineItems[0]?.price);
+  const videoStats = _computeVideoStats(mineItems, competitorItems);
+  const fmtPrice = (n) => n == null ? "-" : `${priceStats.symbol}${Number(n).toFixed(2)}`;
+  const videoPct = Math.round(videoStats.competitorVideoRate * 100);
+
+  // 段 3：价格带 + 视频覆盖（专业版）
+  const priceVideoPrompt = `[OUTPUT MODE = RAW JSON ONLY] 直接以 { 开头，以 } 结束。禁止任何前言/解释/思考过程/markdown 代码块/\`\`\`json 围栏。不得出现除 JSON 以外的任何字符。
+
+你是 Temu 定价策略师 + 视频营销顾问。基于已算好的数值做两项专业定性分析。不要重新计算数字，只引用给定数值；不要输出模糊建议。
+
+【我方商品】
+${mineItems.map((m) => `- ${m.title || m.goodsId} / 价格: ${fmtPrice(m.price)}`).join("\n")}
+
+【候选池价格分布】（有效样本 ${priceStats.sampleSize}）
+- 最低 ${fmtPrice(priceStats.min)} / P25 ${fmtPrice(priceStats.p25)} / 中位 ${fmtPrice(priceStats.p50)} / P75 ${fmtPrice(priceStats.p75)} / 最高 ${fmtPrice(priceStats.max)}
+- 我方价格: ${fmtPrice(priceStats.myPrice)}
+
+【视频覆盖】
+- 竞品总数: ${videoStats.competitorCount}，其中有视频: ${videoStats.competitorWithVideoCount}（${videoPct}%）
+- 我方是否有视频: ${videoStats.myHasVideo ? "是" : "否"}
+
+判定规则：
+- 价格 tier：budget（< P25）/ mid（P25~P75）/ premium（> P75）/ unknown（样本 < 3）
+- 视频 gap：竞品 ≥70% 有视频 & 我方没视频 → lagging；竞品 < 30% → leading；其他 → parity / unknown
+
+严格 JSON 输出：
+{
+  "price_band_insight": {
+    "tier": "budget|mid|premium|unknown",
+    "headline": "一句话定位（≤32 字，必须引用具体价格数值）",
+    "analysis": "3-5 句专业分析：引用 P25/中位/P75 对比，说明竞争格局、弹性空间、客户心理价位",
+    "recommendation": "定性建议（≤100 字，涨/降/保持 + 理由 + 目标价区间）",
+    "actionable": "一句话总括（≤50 字，保持向下兼容旧字段）",
+    "action_checklist": ["步骤 1（≤35 字）", "步骤 2", "步骤 3"],
+    "risks": ["风险 1（≤35 字）", "风险 2"]
+  },
+  "video_coverage_insight": {
+    "gap": "lagging|parity|leading|unknown",
+    "headline": "一句话（≤32 字，必须引用具体覆盖率）",
+    "analysis": "3-5 句专业分析：视频对当前品类的重要性、竞争激烈度评估、不补的机会成本",
+    "recommendation": "是否要补视频 + 优先级（≤100 字）",
+    "actionable": "一句话总括（≤50 字，保持向下兼容旧字段）",
+    "action_checklist": ["步骤 1（拍什么，≤35 字）", "步骤 2（时长/格式）", "步骤 3（上架位置）"],
+    "risks": ["风险 1（≤35 字）"]
+  }
+}`;
+
+  const [lowResult, highResult, priceVideoResult] = await Promise.all([
+    callLlm(lowPrompt),
+    callLlm(highPrompt),
+    callLlm(priceVideoPrompt),
+  ]);
+
+  // 段 4：执行摘要 & 路线图（依赖前 3 段输出）
+  const safeStringify = (obj, cap) => {
+    try { return JSON.stringify(obj).slice(0, cap); } catch { return ""; }
+  };
+  const summaryPrompt = `[OUTPUT MODE = RAW JSON ONLY] 直接以 { 开头，以 } 结束。禁止任何前言/解释/思考过程/markdown 代码块/\`\`\`json 围栏。不得出现除 JSON 以外的任何字符。
+
+你是 Temu 品类增长负责人（Category Manager）。前 3 段分析已产出详细洞察（见下方 JSON）。现在给产品 + 运营 team 写一份「执行摘要 + 路线图」——看完就能决定下周做什么。
+
+方法论：
+1. 不重复前 3 段明细；执行摘要是「读 30 秒做决策」级别。
+2. 必须引用具体数值或字段（前 3 段 JSON + 统计快照）。
+3. top_actions 优先级：P0=本周必做，P1=本月，P2=季度；每条带 effort (S/M/L) + expected_impact + success_metric。
+4. critical_risks 必须含「如果不做会怎样」的后果判断。
+5. data_gaps 要具体到：下一步该补采什么数据（评论样本不够？价格字段缺？视频样本少？）。
+6. SWOT 必须基于前面的证据，不得凭空发挥。
+
+【统计快照】
+- 我方商品数: ${mineItems.length}，竞品数: ${competitorItems.length}
+- 低分评论: 我方 ${mineLow.length} / 竞品 ${compLow.length}
+- 高分评论: 我方 ${mineHigh.length} / 竞品 ${compHigh.length}
+- 价格样本: ${priceStats.sampleSize}，我方 ${fmtPrice(priceStats.myPrice)} vs 中位 ${fmtPrice(priceStats.p50)}
+- 视频覆盖: 竞品 ${videoPct}%，我方${videoStats.myHasVideo ? "有" : "无"}视频
+
+【段 1 · 低分分析】
+${safeStringify(lowResult, 4500)}
+
+【段 2 · 高分分析】
+${safeStringify(highResult, 4500)}
+
+【段 3 · 价格/视频】
+${safeStringify(priceVideoResult, 2500)}
+
+严格 JSON 输出：
+{
+  "executive_summary": "2-3 段完整叙述（每段 2-4 句，总计 ≤350 字）。第 1 段：整体竞争定位（必须引用具体数值）；第 2 段：最关键的 1-2 个差距 + 根因；第 3 段：总体方向判断与节奏。",
+  "competitive_position": {
+    "strengths": ["2-4 条（≤25 字/条）"],
+    "weaknesses": ["2-4 条"],
+    "opportunities": ["2-4 条"],
+    "threats": ["2-4 条"]
+  },
+  "top_actions": [
+    {
+      "priority": "P0|P1|P2",
+      "title": "动作标题（≤18 字）",
+      "why": "为什么做（引证前面洞察，≤50 字）",
+      "how": "怎么做（一句话完整步骤，≤70 字）",
+      "owner_hint": "产品|运营|视觉|客服|定价",
+      "effort": "S|M|L",
+      "expected_impact": "预期效果（≤35 字）",
+      "success_metric": "衡量指标（≤30 字）"
+    }
+  ],
+  "critical_risks": [
+    { "risk": "风险（≤35 字）", "if_ignored": "不管会怎样（≤50 字）" }
+  ],
+  "data_gaps": ["下一步要补采什么数据（≤50 字/条）"]
+}`;
+
+  const summaryResult = await callLlm(summaryPrompt, { maxTokens: 6000 });
+
+  const insights = {
+    generatedAt: Date.now(),
+    model: lastSuccessModel || COMPARE_MODEL_CHAIN[0],
+    stats: {
+      mineGoods: mineItems.map((e) => ({ goodsId: e.goodsId, title: e.title })),
+      competitorGoods: competitorItems.map((e) => ({ goodsId: e.goodsId, title: e.title })),
+      mineLowCount: mineLow.length,
+      mineHighCount: mineHigh.length,
+      competitorLowCount: compLow.length,
+      competitorHighCount: compHigh.length,
+      priceStats,
+      videoStats,
+    },
+    myUniquePains: lowResult?.my_unique_pains || [],
+    industryCommonPains: lowResult?.industry_common_pains || [],
+    competitorPointsIMiss: highResult?.competitor_selling_points_i_miss || [],
+    priceBandInsight: priceVideoResult?.price_band_insight || null,
+    videoCoverageInsight: priceVideoResult?.video_coverage_insight || null,
+    executiveSummary: summaryResult?.executive_summary || null,
+    competitivePosition: summaryResult?.competitive_position || null,
+    topActions: summaryResult?.top_actions || [],
+    criticalRisks: summaryResult?.critical_risks || [],
+    dataGaps: summaryResult?.data_gaps || [],
+    _rawLowFallback: lowResult?.raw || null,
+    _rawHighFallback: highResult?.raw || null,
+    _rawPriceVideoFallback: priceVideoResult?.raw || null,
+    _rawSummaryFallback: summaryResult?.raw || null,
+  };
+  compareInsightsCache = insights;
+  saveCompareInsights(insights);
+  return { ok: true, insights };
+}
+
+// 启动时按白名单给已有记录回填 kind（允许用户先采后标记）
+(function backfillKinds() {
+  let touched = false;
+  for (const rec of extCompareQueue) {
+    const id = String(rec?.goodsId || "");
+    const want = isMineGoods(id) ? "mine" : "competitor";
+    if (rec.kind !== want) { rec.kind = want; touched = true; }
+  }
+  if (touched) rewriteExtCompareQueueFile();
+})();
+
+function pushExtCompareQueue(entry) {
+  const id = String(entry?.goodsId || "");
+  if (!id) return false;
+  const kind = isMineGoods(id) ? "mine" : "competitor";
+  if (extCompareIds.has(id)) {
+    // 已存在则覆盖字段（让浮层后续重点采带回来的新字段能更新进去），但不重复入文件
+    const exist = extCompareQueue.find((e) => String(e.goodsId) === id);
+    if (exist) {
+      Object.assign(exist, entry, { goodsId: id, kind, updatedAt: Date.now() });
+      rewriteExtCompareQueueFile();
+    }
+    return false;
+  }
+  const record = { ...entry, goodsId: id, kind, addedAt: Date.now() };
+  extCompareIds.add(id);
+  extCompareQueue.push(record);
+  try {
+    ensureExtFeedDir();
+    fs.appendFileSync(EXT_COMPARE_QUEUE_FILE, JSON.stringify(record) + "\n", "utf8");
+  } catch (e) {
+    console.warn("[ext-queue] append failed:", e?.message || e);
+  }
+  return true;
+}
+
+function removeExtCompareQueue(goodsId) {
+  const id = String(goodsId || "");
+  if (!id || !extCompareIds.has(id)) return false;
+  extCompareIds.delete(id);
+  const idx = extCompareQueue.findIndex((e) => String(e.goodsId) === id);
+  if (idx >= 0) extCompareQueue.splice(idx, 1);
+  rewriteExtCompareQueueFile();
+  return true;
+}
+
+function rewriteExtCompareQueueFile() {
+  try {
+    ensureExtFeedDir();
+    const text = extCompareQueue.map((e) => JSON.stringify(e)).join("\n") + (extCompareQueue.length ? "\n" : "");
+    fs.writeFileSync(EXT_COMPARE_QUEUE_FILE, text, "utf8");
+  } catch (e) {
+    console.warn("[ext-queue] rewrite failed:", e?.message || e);
+  }
+}
+
+// 查 extFeed 里是否有指定 goodsId 的采集记录
+function findExtCaptureForGoodsId(goodsId) {
+  const id = String(goodsId || "");
+  if (!id) return { captured: false };
+  // 倒序扫（最新优先），匹配 url 或 body 里出现 goodsId
+  for (let i = extFeedBuffer.length - 1; i >= 0; i--) {
+    const e = extFeedBuffer[i];
+    const url = String(e?.url || "");
+    if (url.includes(id)) {
+      return { captured: true, lastTs: e.receivedAt || e.ts, matchedUrl: url, matchedKind: e.kind };
+    }
+    const body = typeof e?.body === "string" ? e.body : "";
+    if (body && body.length < 2_000_000 && body.includes(id)) {
+      return { captured: true, lastTs: e.receivedAt || e.ts, matchedUrl: url, matchedKind: e.kind };
+    }
+  }
+  return { captured: false };
+}
+
 const server = http.createServer(async (req, res) => {
+  // CORS 预检：扩展 service worker fetch 可能触发
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Access-Control-Max-Age": "600",
+    });
+    res.end();
+    return;
+  }
+
+  // 扩展 feed 端点：免鉴权（仅 127.0.0.1 监听，外网访问不到）
+  if (req.method === "POST") {
+    let parsedUrl = null;
+    try { parsedUrl = new URL(req.url, "http://127.0.0.1"); } catch {}
+    if (parsedUrl && parsedUrl.pathname === "/ext-feed") {
+      const chunks = [];
+      req.on("data", (c) => chunks.push(c));
+      req.on("end", () => {
+        try {
+          const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          pushExtFeed(payload);
+        } catch {}
+        res.writeHead(204, { "Access-Control-Allow-Origin": "*" });
+        res.end();
+      });
+      return;
+    }
+    if (parsedUrl && parsedUrl.pathname === "/ext-compare-queue") {
+      const chunks = [];
+      req.on("data", (c) => chunks.push(c));
+      req.on("end", () => {
+        let added = false;
+        try {
+          const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          added = pushExtCompareQueue(payload);
+        } catch {}
+        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+        res.end(JSON.stringify({ ok: true, added, size: extCompareQueue.length }));
+      });
+      return;
+    }
+    if (parsedUrl && parsedUrl.pathname === "/mine-goods") {
+      const chunks = [];
+      req.on("data", (c) => chunks.push(c));
+      req.on("end", () => {
+        let changed = false;
+        try {
+          const payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+          const goodsId = String(payload?.goodsId || "").trim();
+          const isMine = payload?.kind === "mine";
+          changed = setMineGoods(goodsId, isMine);
+        } catch {}
+        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+        res.end(JSON.stringify({ ok: true, changed, items: Array.from(mineGoodsSet) }));
+      });
+      return;
+    }
+    if (parsedUrl && parsedUrl.pathname === "/ext-focus-main") {
+      // 通过 stderr 输出特殊标记，Electron main 监听 worker.stderr 识别并 show/focus 主窗
+      console.error("[EXT_FOCUS_MAIN_REQUEST]");
+      res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    if (parsedUrl && parsedUrl.pathname === "/ext-fetch-reviews") {
+      const chunks = [];
+      req.on("data", (c) => chunks.push(c));
+      req.on("end", () => {
+        let result = { reviews: [], stats: null, debug: { matchedEntries: 0, totalFeed: 0 } };
+        try {
+          const payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+          result = _extractReviewsFromFeed(payload, extFeedBuffer);
+        } catch (e) {
+          result.error = String(e?.message || e).slice(0, 200);
+        }
+        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+        res.end(JSON.stringify(result));
+      });
+      return;
+    }
+  }
+  // 扩展 GET 查询端点
+  if (req.method === "GET") {
+    let parsedUrl = null;
+    try { parsedUrl = new URL(req.url, "http://127.0.0.1"); } catch {}
+    if (parsedUrl && parsedUrl.pathname === "/ext-product") {
+      const goodsId = parsedUrl.searchParams.get("goodsId") || "";
+      const result = findExtCaptureForGoodsId(goodsId);
+      result.inCompareQueue = extCompareIds.has(String(goodsId));
+      res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+      res.end(JSON.stringify(result));
+      return;
+    }
+    if (parsedUrl && parsedUrl.pathname === "/ext-compare-queue") {
+      res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+      res.end(JSON.stringify({ items: extCompareQueue.slice(), size: extCompareQueue.length }));
+      return;
+    }
+    if (parsedUrl && parsedUrl.pathname === "/mine-goods") {
+      res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+      res.end(JSON.stringify({ items: Array.from(mineGoodsSet) }));
+      return;
+    }
+  }
+
   if (!isAuthorizedWorkerRequest(req)) {
     res.writeHead(401, { "Content-Type": "application/json", "WWW-Authenticate": "Bearer" });
     res.end(JSON.stringify({ type: "error", code: 401, message: "Unauthorized" }));

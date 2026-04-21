@@ -169,10 +169,54 @@ function getHistoryStatusText(status: string) {
   return status || "未知状态";
 }
 
-function normalizeBatchReason(messageText: string) {
+// Worker 传来的 errorCategory 形如 "stage:rootCause"，例如 "image_gen:network"
+// stage: source_download | image_gen | image_upload | category | draft | skipped | unknown
+// rootCause: network | auth | quota | worker_down | timeout | unknown
+const ERROR_CATEGORY_HINTS: Record<string, string> = {
+  "source_download:network": "原图下载失败：网络异常，请检查网络或代理设置",
+  "source_download:timeout": "原图下载超时，请稍后重试",
+  "source_download:unknown": "原图下载失败，请检查商品原图链接是否可访问",
+
+  "image_gen:network": "AI 生图失败：无法连接生图服务，请检查网络/代理（常见于系统代理拦截 grsaiapi.com / vectorengine.ai）",
+  "image_gen:auth": "AI 生图失败：API 密钥无效或已过期，请在设置 → AI 服务中更新密钥",
+  "image_gen:quota": "AI 生图失败：额度不足或已触发限流，请充值或稍后再试",
+  "image_gen:worker_down": "AI 生图失败：生图子进程未启动，请重启客户端",
+  "image_gen:timeout": "AI 生图超时，上游响应过慢，请稍后重试",
+  "image_gen:unknown": "AI 生图失败，请稍后重试",
+
+  "image_upload:network": "图片上传卖家中心失败：网络异常，请检查网络后重试",
+  "image_upload:auth": "图片上传失败：卖家中心登录状态已失效，请重新登录",
+  "image_upload:timeout": "图片上传超时，请稍后重试",
+  "image_upload:unknown": "图片上传卖家中心未完成，请稍后重试",
+
+  "category:unknown": "类目暂未匹配成功，请补充更准确的类目信息后重试",
+
+  "draft:network": "草稿保存失败：网络异常，请重试",
+  "draft:auth": "草稿保存失败：登录状态已失效，请重新登录",
+  "draft:unknown": "草稿保存未完成，请稍后重试",
+
+  "unknown:network": "网络异常，请检查网络连接或代理设置",
+  "unknown:auth": "登录状态已失效，请重新登录后再试",
+  "unknown:quota": "额度不足或已触发限流，请稍后再试",
+  "unknown:timeout": "请求超时，请稍后重试",
+};
+
+function normalizeBatchReason(messageText: string, errorCategory?: string) {
+  // 优先使用 Worker 打标的分类，UI 出差异化文案
+  if (errorCategory && ERROR_CATEGORY_HINTS[errorCategory]) {
+    return ERROR_CATEGORY_HINTS[errorCategory];
+  }
+  // 同阶段不同根因也没命中时，退回到阶段级文案
+  if (errorCategory) {
+    const stage = errorCategory.split(":")[0];
+    const fallbackKey = `${stage}:unknown`;
+    if (ERROR_CATEGORY_HINTS[fallbackKey]) return ERROR_CATEGORY_HINTS[fallbackKey];
+  }
+
   const text = String(messageText || "").trim();
   if (!text) return "请稍后重试";
 
+  // 旧正则兜底，保留向后兼容（老历史记录没有 errorCategory）
   if (/分类搜索失败/i.test(text)) return "类目暂未匹配成功，请补充更准确的类目信息后重试";
   if (/timeout|Execution context|page\.goto|worker|ipc/i.test(text)) return "页面响应较慢或连接中断，请重新尝试";
   if (/登录|authentication|seller-login/i.test(text)) return "登录状态已失效，请重新登录后再试";
@@ -613,7 +657,7 @@ function BatchCreate() {
   const normalizedFailedReasonSummary = Object.entries(
     results.reduce<Record<string, number>>((acc, item: any) => {
       if (item?.success) return acc;
-      const reason = normalizeBatchReason(item?.message || "请稍后重试");
+      const reason = normalizeBatchReason(item?.message || "请稍后重试", item?.errorCategory);
       acc[reason] = (acc[reason] || 0) + 1;
       return acc;
     }, {}),
@@ -652,7 +696,7 @@ function BatchCreate() {
       ellipsis: true,
       render: (value: string, record: any) => record.success
         ? <span style={{ color: SUCCESS_COLOR }}>{getResultSuccessDetail(record)}</span>
-        : <span style={{ color: "#ff4d4f" }}>{normalizeBatchReason(value || "请稍后重试")}</span>,
+        : <span style={{ color: "#ff4d4f" }} title={value || undefined}>{normalizeBatchReason(value || "请稍后重试", record?.errorCategory)}</span>,
     },
   ];
 
@@ -922,7 +966,7 @@ function BatchCreate() {
                       </div>
                       {task.message ? (
                         <div className="create-history-item__meta" style={{ color: task.status === "failed" || task.status === "interrupted" ? "#ff4d4f" : "#66758a" }}>
-                          {normalizeBatchReason(task.message)}
+                          {normalizeBatchReason(task.message, task.errorCategory)}
                         </div>
                       ) : null}
                     </div>
