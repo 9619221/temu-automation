@@ -182,6 +182,25 @@ contextBridge.exposeInMainWorld("electronAPI", {
     return () => ipcRenderer.removeListener("image-studio:event", listener);
   },
 
+  priceReview: {
+    scanNow: (params) => ipcRenderer.invoke("price-review:scan-now", params || {}),
+    list: (params) => ipcRenderer.invoke("price-review:list", params || {}),
+    setManualCost: (skuId, cost) => ipcRenderer.invoke("price-review:set-manual-cost", { skuId, cost }),
+    clearManualCost: (skuId) => ipcRenderer.invoke("price-review:clear-manual-cost", { skuId }),
+    open1688Login: (profilePath) => ipcRenderer.invoke("price-review:open-1688-login", { profilePath }),
+    restartScheduler: () => ipcRenderer.invoke("price-review:restart-scheduler"),
+    onAutoScanDone: (callback) => {
+      const listener = (_, data) => callback(data);
+      ipcRenderer.on("price-review:auto-scan-done", listener);
+      return () => ipcRenderer.removeListener("price-review:auto-scan-done", listener);
+    },
+    onScanDone: (callback) => {
+      const listener = (_, data) => callback(data);
+      ipcRenderer.on("price-review:scan-done", listener);
+      return () => ipcRenderer.removeListener("price-review:scan-done", listener);
+    },
+  },
+
   store: {
     get: (key) => ipcRenderer.invoke("store:get", key),
     getMany: (keys) => ipcRenderer.invoke("store:get-many", Array.isArray(keys) ? keys : []),

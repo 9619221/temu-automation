@@ -23,6 +23,7 @@ const ImageStudio = lazy(() => import("./pages/ImageStudio"));
 const ImageStudioGPT = lazy(() => import("./pages/ImageStudioGPT"));
 const Logs = lazy(() => import("./pages/Logs"));
 const CompetitorAnalysis = lazy(() => import("./pages/CompetitorAnalysis"));
+const PriceReview = lazy(() => import("./pages/PriceReview"));
 
 function RouteLoading() {
   return (
@@ -142,6 +143,7 @@ function App() {
             <Route path="accounts" element={<AccountManager />} />
             <Route path="tasks" element={<Navigate to="/collect" replace />} />
             <Route path="competitor" element={<CompetitorAnalysis />} />
+            <Route path="price-review" element={<PriceReview />} />
             <Route path="logs" element={<Logs />} />
             <Route path="settings" element={<Settings />} />
             {/* Legacy routes */}

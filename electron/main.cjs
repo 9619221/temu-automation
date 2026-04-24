@@ -3982,6 +3982,65 @@ ipcMain.handle("yunqi-db:top", async (_e, params) => sendCmd("yunqi_db_top", par
 ipcMain.handle("yunqi-db:info", async () => sendCmd("yunqi_db_info", {}));
 ipcMain.handle("yunqi-db:sync-online", async (_e, params) => sendCmd("yunqi_db_sync_online", params || {}, { timeoutMs: 300000 }));
 
+// ============ 核价筛选器 IPC ============
+ipcMain.handle("price-review:scan-now", async (_e, params) => {
+  const result = await sendCmd("price_review_scan", params || {}, { timeoutMs: 30 * 60 * 1000 });
+  try {
+    const wins = BrowserWindow.getAllWindows();
+    for (const w of wins) w.webContents.send("price-review:scan-done", { summary: result?.summary, snapshotId: result?.snapshotId });
+  } catch {}
+  return result;
+});
+ipcMain.handle("price-review:list", async (_e, params) => sendCmd("price_review_list", params || {}));
+ipcMain.handle("price-review:set-manual-cost", async (_e, params) => sendCmd("price_review_set_manual_cost", params || {}));
+ipcMain.handle("price-review:clear-manual-cost", async (_e, params) => sendCmd("price_review_clear_manual_cost", params || {}));
+ipcMain.handle("price-review:open-1688-login", async (_e, params) => sendCmd("price_review_open_1688_login", params || {}, { timeoutMs: 60000 }));
+
+// 30 分钟定时扫描（可通过 app settings 开关关闭）
+let _priceReviewTimer = null;
+let _priceReviewScanning = false;
+function readPriceReviewSettings() {
+  try {
+    const raw = readStoreJsonWithRecovery(getStoreFilePath("temu_app_settings"));
+    return raw && typeof raw === "object" ? raw : {};
+  } catch { return {}; }
+}
+async function tickPriceReviewAutoScan() {
+  if (_priceReviewScanning) return;
+  const s = readPriceReviewSettings();
+  if (s.priceReviewAutoScanEnabled === false) return;
+  _priceReviewScanning = true;
+  try {
+    const marginRatio = typeof s.priceReviewMarginRatio === "number" ? s.priceReviewMarginRatio : 1.75;
+    await sendCmd("price_review_scan", { marginRatio }, { timeoutMs: 30 * 60 * 1000 });
+    try {
+      const wins = BrowserWindow.getAllWindows();
+      for (const w of wins) w.webContents.send("price-review:auto-scan-done", { at: Date.now() });
+    } catch {}
+  } catch (e) {
+    console.warn("[price-review] auto scan failed:", e?.message || e);
+  } finally {
+    _priceReviewScanning = false;
+  }
+}
+function startPriceReviewScheduler() {
+  if (_priceReviewTimer) return;
+  const s = readPriceReviewSettings();
+  const minutes = typeof s.priceReviewScanIntervalMinutes === "number" && s.priceReviewScanIntervalMinutes >= 5
+    ? s.priceReviewScanIntervalMinutes : 30;
+  _priceReviewTimer = setInterval(tickPriceReviewAutoScan, minutes * 60 * 1000);
+  console.log(`[price-review] scheduler started, interval=${minutes}min`);
+}
+// 应用启动时挂调度（延迟 60s 避开冷启动）
+app.whenReady().then(() => {
+  setTimeout(() => { try { startPriceReviewScheduler(); } catch (e) { console.warn(e); } }, 60 * 1000);
+});
+ipcMain.handle("price-review:restart-scheduler", async () => {
+  if (_priceReviewTimer) { clearInterval(_priceReviewTimer); _priceReviewTimer = null; }
+  startPriceReviewScheduler();
+  return { ok: true };
+});
+
 // ============ AI 出图 IPC ============
 
 ipcMain.handle("image-studio:get-status", async () => {

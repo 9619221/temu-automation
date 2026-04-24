@@ -18,6 +18,9 @@ import { buildYunqiOnlineHandlers } from "./yunqi-online.mjs";
 import { loadFirstEnvFile } from "./env-loader.mjs";
 import { createAiRuntime } from "./ai-runtime.mjs";
 import { parseLocalUrl, readJsonBody, sendJson, sendNoContent } from "./http-json.mjs";
+import { scanPriceReview } from "./price-review-scanner.mjs";
+import { listPriceReview, setPriceReviewManualCost, clearPriceReviewManualCost } from "./yunqi-db.mjs";
+import { open1688LoginWindow } from "./aliexpress-1688-cost.mjs";
 import { optimizeTitle as _optimizeTitle } from "./title-optimizer.mjs";
 import { scrapeCompetitorReviews as _scrapeCompetitorReviews, openTemuLoginPage as _openTemuLoginPage, openTemuSearchPage as _openTemuSearchPage, extractReviewsFromFeed as _extractReviewsFromFeed, dumpFeedForGoods as _dumpFeedForGoods, extractProductFromFeed as _extractProductFromFeed, extractSearchResultsFromFeed as _extractSearchResultsFromFeed } from "./competitor-reviews.mjs";
 const require = createRequire(import.meta.url);
@@ -8666,6 +8669,16 @@ async function handleRequest(body) {
       return await yunqiHandlers.yunqiDbInfo();
     case "yunqi_db_sync_online":
       return await yunqiHandlers.yunqiDbSyncOnline(params || {});
+    case "price_review_scan":
+      return await handlePriceReviewScan(params || {});
+    case "price_review_list":
+      return await handlePriceReviewList(params || {});
+    case "price_review_set_manual_cost":
+      return await handlePriceReviewSetManualCost(params || {});
+    case "price_review_clear_manual_cost":
+      return await handlePriceReviewClearManualCost(params || {});
+    case "price_review_open_1688_login":
+      return await handlePriceReviewOpen1688Login(params || {});
     default: {
       // 注册表驱动的采集命令（替代 50+ 重复 case）
       const scrapeHandlers = buildScrapeHandlers({
@@ -9072,6 +9085,114 @@ function syncDraftPayloadDisplayFields(payload, params = {}, imageUrls = []) {
   }
 
   return payload;
+}
+
+function normalizeImageUrlList(values = []) {
+  return Array.from(new Set(
+    (Array.isArray(values) ? values : [values])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+  ));
+}
+
+function normalizeLocalImagePathList(values = []) {
+  const rawValues = Array.isArray(values)
+    ? values
+    : (values && typeof values === "object" ? Object.values(values) : [values]);
+  return Array.from(new Set(
+    rawValues
+      .map((value) => String(value || "").trim())
+      .filter((value) => value && fs.existsSync(value))
+  ));
+}
+
+function getDraftResultErrorText(result = {}) {
+  if (typeof result === "string") return result;
+  return [
+    result?.errorMsg,
+    result?.message,
+    result?.raw?.errorMsg,
+    result?.raw?.message,
+    result?.raw?.result?.errorMsg,
+    result?.raw?.result?.message,
+  ].map((value) => String(value || "").trim()).filter(Boolean).join(" ");
+}
+
+function isDraftImageMaterialPendingError(resultOrText = {}) {
+  const text = getDraftResultErrorText(resultOrText);
+  return /图片处理未完成|图片.*处理中|合格原图|未上传素材中心|素材中心.*未.*上传|original_kwcdn|material.*not.*upload|image.*processing/i.test(text);
+}
+
+function getDraftImageRetryWaitMs(attempt) {
+  const waits = [6000, 12000, 20000, 30000];
+  return waits[Math.min(Math.max(Number(attempt) - 1, 0), waits.length - 1)];
+}
+
+async function reuploadDraftImagesFromLocalPaths(page, localImagePaths = [], options = {}) {
+  const paths = normalizeLocalImagePathList(localImagePaths).slice(0, 10);
+  const uploadedUrls = [];
+  const uploadErrors = [];
+  if (paths.length === 0) {
+    return { uploadedUrls, uploadErrors, attempted: 0 };
+  }
+
+  await refreshMaterialUploadSession(page, options.reason || "draft_image_retry");
+  for (const imagePath of paths) {
+    const uploadResult = await uploadImageToMaterial(page, imagePath, { maxRetries: 3 });
+    if (uploadResult.success && uploadResult.url) {
+      uploadedUrls.push(uploadResult.url);
+      continue;
+    }
+    uploadErrors.push(`${path.basename(imagePath)}: ${uploadResult.error || "unknown upload error"}`);
+  }
+
+  return { uploadedUrls, uploadErrors, attempted: paths.length };
+}
+
+async function callDraftApiWithImageReadinessRetry(page, endpoint, payload, options = {}) {
+  const maxAttempts = Math.max(1, Number(options.maxAttempts) || 4);
+  const imageLocalPaths = normalizeLocalImagePathList(options.imageLocalPaths);
+  const params = options.params || {};
+  let lastResult = null;
+  let reuploaded = false;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    lastResult = await temuXHR(page, endpoint, payload, { maxRetries: 1 });
+    if (lastResult.success || !isDraftImageMaterialPendingError(lastResult)) {
+      return lastResult;
+    }
+
+    const errText = getDraftResultErrorText(lastResult);
+    console.error(`[api-create] ${endpoint} image assets not ready (${attempt}/${maxAttempts}): ${errText.slice(0, 220)}`);
+
+    if (!reuploaded && imageLocalPaths.length > 0 && attempt >= 2) {
+      const reupload = await reuploadDraftImagesFromLocalPaths(page, imageLocalPaths, { reason: errText });
+      if (reupload.uploadedUrls.length > 0) {
+        let nextImageUrls = normalizeImageUrlList(reupload.uploadedUrls).slice(0, 10);
+        while (nextImageUrls.length > 0 && nextImageUrls.length < 5) {
+          nextImageUrls.push(nextImageUrls[nextImageUrls.length % nextImageUrls.length]);
+        }
+        syncDraftPayloadDisplayFields(payload, params, nextImageUrls);
+        if (typeof options.onImageUrlsUpdated === "function") {
+          options.onImageUrlsUpdated(nextImageUrls);
+        }
+        reuploaded = true;
+        console.error(`[api-create] Re-uploaded ${nextImageUrls.length} draft images after material-center pending error`);
+        await page.waitForTimeout(4000).catch(() => {});
+        continue;
+      }
+      console.error(`[api-create] Re-upload did not produce usable image URLs: ${reupload.uploadErrors.slice(0, 3).join("; ")}`);
+      reuploaded = true;
+    }
+
+    if (attempt < maxAttempts) {
+      const waitMs = getDraftImageRetryWaitMs(attempt);
+      console.error(`[api-create] Waiting ${Math.round(waitMs / 1000)}s for Temu image materialization...`);
+      await page.waitForTimeout(waitMs).catch(() => {});
+    }
+  }
+
+  return lastResult || { success: false, errorMsg: "图片素材入库等待超时" };
 }
 
 function summarizeDraftVerificationResult(rawResult = {}) {
@@ -12735,6 +12856,9 @@ async function autoPricingFromCSV(params) {
       const orderedImageUrls = AI_DETAIL_IMAGE_TYPE_ORDER
         .map(type => kwcdnUrls[type])
         .filter(Boolean);
+      const orderedImageLocalPaths = AI_DETAIL_IMAGE_TYPE_ORDER
+        .map(type => localImages[type])
+        .filter(Boolean);
 
       console.error(`[auto-pricing] Total uploaded: ${orderedImageUrls.length}`);
 
@@ -12887,6 +13011,7 @@ async function autoPricingFromCSV(params) {
           createResult = await createProductViaAPI({
             title: finalTitle,
             imageUrls: orderedImageUrls,
+            imageLocalPaths: orderedImageLocalPaths,
             price: priceCNY,
             categorySearch,
             categorySearchVariants,
@@ -12929,7 +13054,11 @@ async function autoPricingFromCSV(params) {
         resultEntry.message = `${createResult.message || "商品已保存到Temu草稿箱"}（⚠️ ${titleWarning}）`;
       }
       if (!createResult.success) {
-        const draftStage = /分类搜索失败/.test(createResult.message || "") ? "category" : "draft";
+        const draftStage = /分类搜索失败/.test(createResult.message || "")
+          ? "category"
+          : isDraftImageMaterialPendingError(createResult.message || "")
+            ? "image_upload"
+            : "draft";
         resultEntry.errorCategory = classifyAutoPricingError(draftStage, createResult.message);
       }
       results.push(resultEntry);
@@ -14079,7 +14208,10 @@ async function createProductViaAPI(params) {
     await saveCookies();
 
     // Step 2: 准备图片（至少 5 张）
-    let imageUrls = params.imageUrls || [];
+    let imageUrls = normalizeImageUrlList(params.imageUrls);
+    let imageLocalPaths = normalizeLocalImagePathList(
+      params.imageLocalPaths || params.localImagePaths || params.imagePaths
+    );
     if (params.generateAI && params.sourceImage) {
       console.error("[api-create] Generating AI images...");
       try {
@@ -14088,7 +14220,8 @@ async function createProductViaAPI(params) {
           params.title,
           params.aiImageTypes || AI_DETAIL_IMAGE_TYPE_ORDER
         );
-        const aiImages = aiResult.images || aiResult || [];
+        const aiImages = normalizeLocalImagePathList(aiResult.images || aiResult || []);
+        imageLocalPaths = normalizeLocalImagePathList([...imageLocalPaths, ...aiImages]);
         console.error(`[api-create] AI generated ${aiImages.length} images`);
 
         if (aiImages.length > 0) {
@@ -14746,7 +14879,14 @@ async function createProductViaAPI(params) {
     console.error(`[api-create] Saving draft to ${submitEndpoint}...`);
     console.error(`[api-create] Price: ¥${(priceInCents / 100).toFixed(2)}, Retail: ¥${(retailPrice / 100).toFixed(2)}, Images: ${imageUrls.length}, Props: ${properties.length}`);
 
-    let result = await temuXHR(page, submitEndpoint, payload, { maxRetries: 1 });
+    let result = await callDraftApiWithImageReadinessRetry(page, submitEndpoint, payload, {
+      maxAttempts: 4,
+      imageLocalPaths,
+      params,
+      onImageUrlsUpdated: (nextImageUrls) => {
+        imageUrls = nextImageUrls;
+      },
+    });
 
     // ============ AI 自修复系统：最多5轮，根据错误类型智能修复 ============
     for (let attempt = 1; attempt <= 5 && !result.success; attempt++) {
@@ -15041,7 +15181,14 @@ async function createProductViaAPI(params) {
       }
 
       console.error(`[selfRepair] Re-submitting draft after repair...`);
-      result = await temuXHR(page, submitEndpoint, payload, { maxRetries: 1 });
+      result = await callDraftApiWithImageReadinessRetry(page, submitEndpoint, payload, {
+        maxAttempts: 4,
+        imageLocalPaths,
+        params,
+        onImageUrlsUpdated: (nextImageUrls) => {
+          imageUrls = nextImageUrls;
+        },
+      });
     }
 
     if (result.success) {
@@ -15061,7 +15208,14 @@ async function createProductViaAPI(params) {
         draftId,
       };
       console.error(`[api-create] Saving draft content to ${config.draftSaveEndpoint}...`);
-      const saveResult = await temuXHR(page, config.draftSaveEndpoint, savePayload, { maxRetries: 1 });
+      const saveResult = await callDraftApiWithImageReadinessRetry(page, config.draftSaveEndpoint, savePayload, {
+        maxAttempts: 4,
+        imageLocalPaths,
+        params,
+        onImageUrlsUpdated: (nextImageUrls) => {
+          imageUrls = nextImageUrls;
+        },
+      });
       if (!saveResult.success) {
         const debugDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
         fs.mkdirSync(debugDir, { recursive: true });
@@ -16337,6 +16491,40 @@ server.listen(PORT, "127.0.0.1", () => {
   console.error(`WORKER_PORT=${PORT}`);
   console.log(`Worker ready on port ${PORT}`);
 });
+
+// ============ 核价筛选器 worker handlers ============
+
+async function handlePriceReviewScan(params) {
+  const marginRatio = typeof params?.marginRatio === "number" ? params.marginRatio : 1.75;
+  const skip1688Search = !!params?.skip1688Search;
+  // 确保浏览器已登录
+  await _ensureBrowser();
+  const result = await scanPriceReview({
+    marginRatio,
+    skip1688Search,
+    onProgress: (stage, detail) => logSilent(`[price-review] ${stage}`, detail),
+  });
+  return result;
+}
+
+async function handlePriceReviewList(params) {
+  return listPriceReview(params || {});
+}
+
+async function handlePriceReviewSetManualCost(params) {
+  const { skuId, cost } = params || {};
+  setPriceReviewManualCost(skuId, cost);
+  return { ok: true };
+}
+
+async function handlePriceReviewClearManualCost(params) {
+  clearPriceReviewManualCost(params?.skuId);
+  return { ok: true };
+}
+
+async function handlePriceReviewOpen1688Login(params) {
+  return await open1688LoginWindow(params?.profilePath);
+}
 
 process.on("SIGTERM", async () => { await closeBrowser(); server.close(); process.exit(0); });
 process.on("uncaughtException", (err) => {
