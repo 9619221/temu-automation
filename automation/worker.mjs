@@ -17,6 +17,7 @@ import { getConfiguredMaxRetries, getDelayScale, shouldAutoLoginRetry, shouldCap
 import { buildYunqiOnlineHandlers } from "./yunqi-online.mjs";
 import { loadFirstEnvFile } from "./env-loader.mjs";
 import { createAiRuntime } from "./ai-runtime.mjs";
+import { parseLocalUrl, readJsonBody, sendJson, sendNoContent } from "./http-json.mjs";
 import { optimizeTitle as _optimizeTitle } from "./title-optimizer.mjs";
 import { scrapeCompetitorReviews as _scrapeCompetitorReviews, openTemuLoginPage as _openTemuLoginPage, openTemuSearchPage as _openTemuSearchPage, extractReviewsFromFeed as _extractReviewsFromFeed, dumpFeedForGoods as _dumpFeedForGoods, extractProductFromFeed as _extractProductFromFeed, extractSearchResultsFromFeed as _extractSearchResultsFromFeed } from "./competitor-reviews.mjs";
 const require = createRequire(import.meta.url);
@@ -16207,102 +16208,76 @@ const server = http.createServer(async (req, res) => {
 
   // 扩展 feed 端点：免鉴权（仅 127.0.0.1 监听，外网访问不到）
   if (req.method === "POST") {
-    let parsedUrl = null;
-    try { parsedUrl = new URL(req.url, "http://127.0.0.1"); } catch {}
+    const parsedUrl = parseLocalUrl(req.url);
     if (parsedUrl && parsedUrl.pathname === "/ext-feed") {
-      const chunks = [];
-      req.on("data", (c) => chunks.push(c));
-      req.on("end", () => {
-        try {
-          const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-          pushExtFeed(payload);
-        } catch {}
-        res.writeHead(204, { "Access-Control-Allow-Origin": "*" });
-        res.end();
-      });
+      try {
+        pushExtFeed(await readJsonBody(req));
+      } catch {}
+      sendNoContent(res, { cors: true });
       return;
     }
     if (parsedUrl && parsedUrl.pathname === "/ext-compare-queue") {
-      const chunks = [];
-      req.on("data", (c) => chunks.push(c));
-      req.on("end", () => {
-        let added = false;
-        try {
-          const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-          added = pushExtCompareQueue(payload);
-        } catch {}
-        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
-        res.end(JSON.stringify({ ok: true, added, size: extCompareQueue.length }));
-      });
+      let added = false;
+      try {
+        added = pushExtCompareQueue(await readJsonBody(req));
+      } catch {}
+      sendJson(res, { ok: true, added, size: extCompareQueue.length }, { cors: true });
       return;
     }
     if (parsedUrl && parsedUrl.pathname === "/mine-goods") {
-      const chunks = [];
-      req.on("data", (c) => chunks.push(c));
-      req.on("end", () => {
-        let changed = false;
-        try {
-          const payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
-          const goodsId = String(payload?.goodsId || "").trim();
-          const isMine = payload?.kind === "mine";
-          changed = setMineGoods(goodsId, isMine);
-        } catch {}
-        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
-        res.end(JSON.stringify({ ok: true, changed, items: Array.from(mineGoodsSet) }));
-      });
+      let changed = false;
+      try {
+        const payload = await readJsonBody(req, { emptyFallback: "{}" });
+        const goodsId = String(payload?.goodsId || "").trim();
+        const isMine = payload?.kind === "mine";
+        changed = setMineGoods(goodsId, isMine);
+      } catch {}
+      sendJson(res, { ok: true, changed, items: Array.from(mineGoodsSet) }, { cors: true });
       return;
     }
     if (parsedUrl && parsedUrl.pathname === "/ext-focus-main") {
       // 通过 stderr 输出特殊标记，Electron main 监听 worker.stderr 识别并 show/focus 主窗
       console.error("[EXT_FOCUS_MAIN_REQUEST]");
-      res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
-      res.end(JSON.stringify({ ok: true }));
+      sendJson(res, { ok: true }, { cors: true });
       return;
     }
     if (parsedUrl && parsedUrl.pathname === "/ext-fetch-reviews") {
-      const chunks = [];
-      req.on("data", (c) => chunks.push(c));
-      req.on("end", () => {
-        let result = { reviews: [], stats: null, debug: { matchedEntries: 0, totalFeed: 0 } };
-        try {
-          const payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
-          result = _extractReviewsFromFeed(payload, extFeedBuffer);
-        } catch (e) {
-          result.error = String(e?.message || e).slice(0, 200);
-        }
-        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
-        res.end(JSON.stringify(result));
-      });
+      let result = { reviews: [], stats: null, debug: { matchedEntries: 0, totalFeed: 0 } };
+      try {
+        const payload = await readJsonBody(req, { emptyFallback: "{}" });
+        result = _extractReviewsFromFeed(payload, extFeedBuffer);
+      } catch (e) {
+        result.error = String(e?.message || e).slice(0, 200);
+      }
+      sendJson(res, result, { cors: true });
       return;
     }
   }
   // 扩展 GET 查询端点
   if (req.method === "GET") {
-    let parsedUrl = null;
-    try { parsedUrl = new URL(req.url, "http://127.0.0.1"); } catch {}
+    const parsedUrl = parseLocalUrl(req.url);
     if (parsedUrl && parsedUrl.pathname === "/ext-product") {
       const goodsId = parsedUrl.searchParams.get("goodsId") || "";
       const result = findExtCaptureForGoodsId(goodsId);
       result.inCompareQueue = extCompareIds.has(String(goodsId));
-      res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
-      res.end(JSON.stringify(result));
+      sendJson(res, result, { cors: true });
       return;
     }
     if (parsedUrl && parsedUrl.pathname === "/ext-compare-queue") {
-      res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
-      res.end(JSON.stringify({ items: extCompareQueue.slice(), size: extCompareQueue.length }));
+      sendJson(res, { items: extCompareQueue.slice(), size: extCompareQueue.length }, { cors: true });
       return;
     }
     if (parsedUrl && parsedUrl.pathname === "/mine-goods") {
-      res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
-      res.end(JSON.stringify({ items: Array.from(mineGoodsSet) }));
+      sendJson(res, { items: Array.from(mineGoodsSet) }, { cors: true });
       return;
     }
   }
 
   if (!isAuthorizedWorkerRequest(req)) {
-    res.writeHead(401, { "Content-Type": "application/json", "WWW-Authenticate": "Bearer" });
-    res.end(JSON.stringify({ type: "error", code: 401, message: "Unauthorized" }));
+    sendJson(res, { type: "error", code: 401, message: "Unauthorized" }, {
+      statusCode: 401,
+      headers: { "WWW-Authenticate": "Bearer" },
+    });
     return;
   }
 
@@ -16312,50 +16287,42 @@ const server = http.createServer(async (req, res) => {
     if (requestUrl.pathname === "/progress") {
       const taskId = requestUrl.searchParams.get("taskId");
       const snapshot = getProgressSnapshot(taskId);
-      res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
-      res.end(JSON.stringify(snapshot));
+      sendJson(res, snapshot, { cors: true });
       return;
     }
     if (requestUrl.pathname === "/tasks") {
-      res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
-      res.end(JSON.stringify(listProgressSnapshots()));
+      sendJson(res, listProgressSnapshots(), { cors: true });
       return;
     }
   }
 
   if (req.method !== "POST") { res.writeHead(404); res.end(); return; }
 
-  const chunks = [];
-  req.on("error", (err) => { console.error("[Worker] Request error:", err.message); });
-  req.on("data", (c) => chunks.push(c));
-  req.on("end", async () => {
-    const startTime = Date.now();
-    let action = "unknown";
-    try {
-      const body = Buffer.concat(chunks).toString("utf8");
-      const cmd = JSON.parse(body);
-      action = cmd.action || "unknown";
-      const result = await withWorkerRequestCredentials(cmd.params?.credentials, async () => handleRequest(cmd));
-      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-      console.error(`[Worker] ${action} completed in ${duration}s`);
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ type: "result", data: result }));
-    } catch (err) {
-      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-      const errCode = err.code || ERR.UNKNOWN;
-      const screenshotFile = await captureWorkerErrorScreenshot(`worker_${action}`);
-      console.error(`[Worker] ${action} FAILED in ${duration}s: [${errCode}] ${err.message}`);
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({
-        type: "error",
-        code: errCode,
-        message: err.message || String(err),
-        action,
-        duration: parseFloat(duration),
-        screenshotFile: screenshotFile || undefined,
-      }));
-    }
-  });
+  const startTime = Date.now();
+  let action = "unknown";
+  try {
+    const cmd = await readJsonBody(req, {
+      onError: (err) => { console.error("[Worker] Request error:", err.message); },
+    });
+    action = cmd.action || "unknown";
+    const result = await withWorkerRequestCredentials(cmd.params?.credentials, async () => handleRequest(cmd));
+    const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.error(`[Worker] ${action} completed in ${duration}s`);
+    sendJson(res, { type: "result", data: result });
+  } catch (err) {
+    const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+    const errCode = err.code || ERR.UNKNOWN;
+    const screenshotFile = await captureWorkerErrorScreenshot(`worker_${action}`);
+    console.error(`[Worker] ${action} FAILED in ${duration}s: [${errCode}] ${err.message}`);
+    sendJson(res, {
+      type: "error",
+      code: errCode,
+      message: err.message || String(err),
+      action,
+      duration: parseFloat(duration),
+      screenshotFile: screenshotFile || undefined,
+    });
+  }
 });
 
 const PORT = parseInt(process.env.WORKER_PORT || "19280");
