@@ -16,6 +16,7 @@ import { ADS_GROUP_TABS, GOVERN_GROUP_TARGETS, buildScrapeHandlers, getScrapeFun
 import { getConfiguredMaxRetries, getDelayScale, shouldAutoLoginRetry, shouldCaptureErrorScreenshots } from "./runtime-config.mjs";
 import { buildYunqiOnlineHandlers } from "./yunqi-online.mjs";
 import { createGeminiClient } from "./gemini-client.mjs";
+import { loadFirstEnvFile } from "./env-loader.mjs";
 import { optimizeTitle as _optimizeTitle } from "./title-optimizer.mjs";
 import { scrapeCompetitorReviews as _scrapeCompetitorReviews, openTemuLoginPage as _openTemuLoginPage, openTemuSearchPage as _openTemuSearchPage, extractReviewsFromFeed as _extractReviewsFromFeed, dumpFeedForGoods as _dumpFeedForGoods, extractProductFromFeed as _extractProductFromFeed, extractSearchResultsFromFeed as _extractSearchResultsFromFeed } from "./competitor-reviews.mjs";
 const require = createRequire(import.meta.url);
@@ -47,17 +48,7 @@ const envFiles = [
   path.join(process.env.APPDATA || "", "..", "temu-claw", ".env"),
   "C:/Users/Administrator/temu-claw/.env",
 ];
-for (const envFile of envFiles) {
-  try {
-    if (fs.existsSync(envFile)) {
-      for (const line of fs.readFileSync(envFile, "utf8").split("\n")) {
-        const m = line.match(/^([^#=]+)=(.+)$/);
-        if (m && !process.env[m[1].trim()]) process.env[m[1].trim()] = m[2].trim();
-      }
-      break;
-    }
-  } catch (e) { logSilent("env.load", e); }
-}
+loadFirstEnvFile(envFiles, { onError: (error) => logSilent("env.load", error) });
 
 // AI API 配置（从环境变量读取，不再硬编码）
 const DEFAULT_AI_BASE_URL = "https://api.vectorengine.ai/v1";
