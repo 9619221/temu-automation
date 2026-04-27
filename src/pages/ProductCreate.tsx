@@ -1039,12 +1039,7 @@ function BatchCreate() {
   const validation = previewData?.validation || null;
   const validationBlockingCount = validation?.blockingIssues.reduce((sum, item) => sum + item.count, 0) || 0;
   const validationWarningCount = validation?.warningIssues.reduce((sum, item) => sum + item.count, 0) || 0;
-  const taskStatusParts = [progressInfo?.step, progressInfo?.current, progressInfo?.message]
-    .map((item) => String(item || "").trim())
-    .filter((item, index, list) => item && list.indexOf(item) === index);
-  const taskStepText = taskStatusParts.join(" · ");
-  const currentTaskStatusText = taskStepText || batchStatusMessage;
-  const currentProgressStepText = String(progressInfo?.step || batchStatusLabel || "-");
+  const currentTaskStatusText = String(progressInfo?.message || progressInfo?.current || progressInfo?.step || batchStatusMessage || "-");
   const progressUpdatedAtText = String(progressInfo?.updatedAt || progressInfo?.startedAt || "");
   const aiStageActive = Boolean(running && /(下载原图|AI生图|上传图片|生成标题)/.test(progressInfo?.step || ""));
   const draftStageActive = Boolean(running && /(保存草稿|草稿保存|开始处理|执行失败)/.test(progressInfo?.step || ""));
@@ -1521,7 +1516,7 @@ function BatchCreate() {
                     : packResult && !packResult.success
                       ? "素材准备失败，请先看失败原因。"
                       : aiStageActive
-                        ? (taskStepText || "正在逐商品准备上品素材。")
+                        ? (currentTaskStatusText || "正在逐商品准备上品素材。")
                         : hasResults
                           ? (aiStageFailed ? "本批次里有商品卡在素材准备阶段，建议先看失败原因。" : "这批商品的素材准备阶段已经跑完。")
                           : "点击下方按钮开始新上品流程。"}
@@ -1801,19 +1796,12 @@ function BatchCreate() {
                   {batchStatusMessage}
                 </Text>
               </div>
-              <Space wrap>
-                <Tag color={batchTagColor}>{currentProgressStepText}</Tag>
-              </Space>
             </div>
 
             <div className="create-progress-current">
               <div className="create-progress-current__item create-progress-current__item--wide">
                 <span className="create-progress-current__label">当前状态</span>
                 <span className="create-progress-current__value">{currentTaskStatusText}</span>
-              </div>
-              <div className="create-progress-current__item">
-                <span className="create-progress-current__label">当前步骤</span>
-                <span className="create-progress-current__value">{currentProgressStepText}</span>
               </div>
               {progressUpdatedAtText ? (
                 <div className="create-progress-current__item">

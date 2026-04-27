@@ -1885,7 +1885,7 @@ body {
 
 .create-progress-current {
   display: grid;
-  grid-template-columns: minmax(260px, 2fr) minmax(120px, 1fr) minmax(160px, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(160px, 220px);
   gap: 12px;
   padding: 14px 16px;
   border: 1px solid #edf1f5;
