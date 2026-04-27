@@ -15,23 +15,13 @@ import { browserState, ensureBrowser as _ensureBrowser, launch as _launch, login
 import { ADS_GROUP_TABS, GOVERN_GROUP_TARGETS, buildScrapeHandlers, getScrapeFunction } from "./scrape-registry.mjs";
 import { getConfiguredMaxRetries, getDelayScale, shouldAutoLoginRetry, shouldCaptureErrorScreenshots } from "./runtime-config.mjs";
 import { buildYunqiOnlineHandlers } from "./yunqi-online.mjs";
-import { createGeminiClient } from "./gemini-client.mjs";
 import { loadFirstEnvFile } from "./env-loader.mjs";
+import { createAiRuntime } from "./ai-runtime.mjs";
 import { optimizeTitle as _optimizeTitle } from "./title-optimizer.mjs";
 import { scrapeCompetitorReviews as _scrapeCompetitorReviews, openTemuLoginPage as _openTemuLoginPage, openTemuSearchPage as _openTemuSearchPage, extractReviewsFromFeed as _extractReviewsFromFeed, dumpFeedForGoods as _dumpFeedForGoods, extractProductFromFeed as _extractProductFromFeed, extractSearchResultsFromFeed as _extractSearchResultsFromFeed } from "./competitor-reviews.mjs";
 const require = createRequire(import.meta.url);
 const XLSX = require("xlsx");
 const FormDataLib = require("form-data");
-
-function normalizeChatBaseUrl(value, fallback = "") {
-  const raw = String(value || fallback || "").trim();
-  if (!raw) return "";
-  return raw.replace(/\/chat\/completions\/?$/i, "").replace(/\/+$/, "");
-}
-
-function normalizeGeminiBaseUrl(value, fallback = "") {
-  return normalizeChatBaseUrl(value, fallback).replace(/\/v1$/i, "");
-}
 
 const workerFilePath = fileURLToPath(import.meta.url);
 const workerDirPath = path.dirname(workerFilePath);
@@ -51,108 +41,17 @@ const envFiles = [
 loadFirstEnvFile(envFiles, { onError: (error) => logSilent("env.load", error) });
 
 // AI API 配置（从环境变量读取，不再硬编码）
-const DEFAULT_AI_BASE_URL = "https://api.vectorengine.ai/v1";
-const AI_API_KEY = process.env.VECTORENGINE_API_KEY || "";
-// pro-preview 专用令牌（令牌权限按模型档位拆开时填这个；留空则所有模型都用 AI_API_KEY）
-const AI_PRO_API_KEY = process.env.VECTORENGINE_PRO_API_KEY || "";
-const AI_BASE_URL = normalizeChatBaseUrl(process.env.VECTORENGINE_BASE_URL, DEFAULT_AI_BASE_URL);
-const AI_MODEL = process.env.VECTORENGINE_MODEL || "gemini-3.1-flash-lite-preview";
-// 对比分析"最强形态"模型降级链：依次尝试，遇 403/权限错误自动降级
-// 允许用 VECTORENGINE_COMPARE_MODELS 覆盖，逗号分隔
-const COMPARE_MODEL_CHAIN = (process.env.VECTORENGINE_COMPARE_MODELS
-  || process.env.VECTORENGINE_COMPARE_MODEL
-  || "gemini-3.1-pro-preview,gemini-3.1-flash-preview,gemini-3.1-flash-lite-preview")
-  .split(",").map((s) => s.trim()).filter(Boolean);
-const ATTRIBUTE_AI_API_KEY = process.env.VECTORENGINE_ATTRIBUTE_API_KEY || AI_API_KEY;
-const ATTRIBUTE_AI_BASE_URL = normalizeChatBaseUrl(process.env.VECTORENGINE_ATTRIBUTE_BASE_URL, AI_BASE_URL);
-const ATTRIBUTE_AI_MODEL = process.env.VECTORENGINE_ATTRIBUTE_MODEL || AI_MODEL;
-
-let _aiGeminiClient = null;
-function getAiGeminiClient() {
-  if (_aiGeminiClient || !AI_API_KEY) return _aiGeminiClient;
-  _aiGeminiClient = createGeminiClient({ apiKey: AI_API_KEY, baseURL: normalizeGeminiBaseUrl(AI_BASE_URL) });
-  return _aiGeminiClient;
-}
-let _aiGeminiProClient = null;
-function getAiGeminiProClient() {
-  const proKey = AI_PRO_API_KEY || AI_API_KEY;
-  if (_aiGeminiProClient || !proKey) return _aiGeminiProClient;
-  _aiGeminiProClient = createGeminiClient({ apiKey: proKey, baseURL: normalizeGeminiBaseUrl(AI_BASE_URL) });
-  return _aiGeminiProClient;
-}
-function createOpenAICompatibleClient({ apiKey, baseURL, timeout = 300000 } = {}) {
-  if (!apiKey) return null;
-  const endpointBase = normalizeChatBaseUrl(baseURL, AI_BASE_URL);
-  return {
-    chat: {
-      completions: {
-        create: async (params = {}) => {
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), timeout);
-          try {
-            const response = await fetch(`${endpointBase}/chat/completions`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${apiKey}`,
-              },
-              body: JSON.stringify({
-                model: params.model,
-                messages: params.messages || [],
-                temperature: params.temperature,
-                max_tokens: params.max_tokens,
-              }),
-              signal: controller.signal,
-            });
-            const text = await response.text();
-            if (!response.ok) {
-              const error = new Error(`OpenAI-compatible API ${response.status}: ${text.slice(0, 500)}`);
-              error.status = response.status;
-              throw error;
-            }
-            return JSON.parse(text);
-          } finally {
-            clearTimeout(timer);
-          }
-        },
-      },
-    },
-  };
-}
-let _aiOpenAICompatibleClient = null;
-function getAiOpenAICompatibleClient() {
-  if (_aiOpenAICompatibleClient || !AI_API_KEY) return _aiOpenAICompatibleClient;
-  _aiOpenAICompatibleClient = createOpenAICompatibleClient({ apiKey: AI_API_KEY, baseURL: AI_BASE_URL });
-  return _aiOpenAICompatibleClient;
-}
-function getAiClientForModel(modelName) {
-  if (/^gemini/i.test(modelName || "") && /pro-preview/i.test(modelName || "")) {
-    return getAiGeminiProClient() || getAiGeminiClient();
-  }
-  if (/^gemini/i.test(modelName || "")) return getAiGeminiClient();
-  return getAiOpenAICompatibleClient();
-}
-let _attributeGeminiClient = null;
-function getAttributeGeminiClient() {
-  if (_attributeGeminiClient || !ATTRIBUTE_AI_API_KEY) return _attributeGeminiClient;
-  _attributeGeminiClient = createGeminiClient({ apiKey: ATTRIBUTE_AI_API_KEY, baseURL: normalizeGeminiBaseUrl(ATTRIBUTE_AI_BASE_URL) });
-  return _attributeGeminiClient;
-}
-let _attributeOpenAICompatibleClient = null;
-function getAttributeOpenAICompatibleClient() {
-  if (_attributeOpenAICompatibleClient || !ATTRIBUTE_AI_API_KEY) return _attributeOpenAICompatibleClient;
-  _attributeOpenAICompatibleClient = createOpenAICompatibleClient({
-    apiKey: ATTRIBUTE_AI_API_KEY,
-    baseURL: ATTRIBUTE_AI_BASE_URL,
-  });
-  return _attributeOpenAICompatibleClient;
-}
-function getAttributeClientForModel(modelName) {
-  if (/^gemini/i.test(modelName || "")) {
-    return getAttributeGeminiClient();
-  }
-  return getAttributeOpenAICompatibleClient() || getAiClientForModel(modelName);
-}
+const {
+  AI_API_KEY,
+  AI_BASE_URL,
+  AI_MODEL,
+  COMPARE_MODEL_CHAIN,
+  ATTRIBUTE_AI_API_KEY,
+  ATTRIBUTE_AI_MODEL,
+  getAiGeminiClient,
+  getAiClientForModel,
+  getAttributeClientForModel,
+} = createAiRuntime();
 const GENERATED_WORKER_AUTH_TOKEN = crypto.randomBytes(32).toString("hex");
 const WORKER_AUTH_TOKEN = process.env.WORKER_AUTH_TOKEN || GENERATED_WORKER_AUTH_TOKEN;
 const CATEGORY_HISTORY_FILE = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "temu_category_history.json");
