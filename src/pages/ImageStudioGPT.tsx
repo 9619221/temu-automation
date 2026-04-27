@@ -39,6 +39,7 @@ import {
   UploadOutlined,
 } from "@ant-design/icons";
 import { useLocation } from "react-router-dom";
+import { DesignerSummary, type DesignerResult } from "@/components/designer";
 import {
   type ImageStudioComponentDetection,
   type ImageStudioDetectedComponent,
@@ -152,6 +153,8 @@ type PreparedComponentBundleState = {
 };
 
 type MarketingInfoField = "sellingPoints" | "targetAudience" | "usageScenes";
+type ProductFactField = "countAndConfiguration" | "mountingPlacement" | "packagingEvidence";
+type NestedInsightListField = "factGuardrails" | "purchaseDrivers" | "buyerQuestions" | "riskFlags";
 
 const EMPTY_MARKETING_TRANSLATING_STATE: Record<MarketingInfoField, boolean> = {
   sellingPoints: false,
@@ -380,7 +383,16 @@ function hasAnalysisContent(analysis: ImageStudioAnalysis) {
     || analysis.estimatedDimensions.trim()
     || analysis.sellingPoints.length > 0
     || analysis.targetAudience.length > 0
-    || analysis.usageScenes.length > 0,
+    || analysis.usageScenes.length > 0
+    || (analysis.productFacts?.countAndConfiguration || "").trim()
+    || (analysis.productFacts?.mountingPlacement || "").trim()
+    || (analysis.productFacts?.packagingEvidence || "").trim()
+    || (analysis.productFacts?.factGuardrails || []).length > 0
+    || (analysis.operatorInsights?.purchaseDrivers || []).length > 0
+    || (analysis.operatorInsights?.buyerQuestions || []).length > 0
+    || (analysis.operatorInsights?.riskFlags || []).length > 0
+    || (analysis.creativeDirection?.pageGoal || "").trim()
+    || (analysis.creativeDirection?.visualStyle || "").trim(),
   );
 }
 
@@ -787,6 +799,9 @@ export default function ImageStudioGPT() {
   const [analyzing, setAnalyzing] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
   const [planning, setPlanning] = useState(false);
+  const [designerRunning, setDesignerRunning] = useState(false);
+  const [designerResult, setDesignerResult] = useState<DesignerResult | null>(null);
+  const [designerDrawerOpen, setDesignerDrawerOpen] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [downloadingAll, setDownloadingAll] = useState(false);
   const [downloadingTypes, setDownloadingTypes] = useState<Record<string, boolean>>({});
@@ -1349,11 +1364,16 @@ export default function ImageStudioGPT() {
     try {
       const resolved = await resolveImageStudioInputs();
       const payload = await imageStudioAPI.regenerateAnalysis({ files: resolved.payloads, productMode: resolved.productMode, analysis });
-      setAnalysis((prev) => ({
+      setAnalysis((prev) => normalizeImageStudioAnalysis({
         ...prev,
-        sellingPoints: Array.isArray(payload.sellingPoints) ? payload.sellingPoints : prev.sellingPoints,
-        targetAudience: Array.isArray(payload.targetAudience) ? payload.targetAudience : prev.targetAudience,
-        usageScenes: Array.isArray(payload.usageScenes) ? payload.usageScenes : prev.usageScenes,
+        ...payload,
+        productFacts: payload.productFacts ?? prev.productFacts,
+        operatorInsights: payload.operatorInsights
+          ? { ...(prev.operatorInsights || {}), ...payload.operatorInsights }
+          : prev.operatorInsights,
+        creativeDirection: payload.creativeDirection
+          ? { ...(prev.creativeDirection || {}), ...payload.creativeDirection }
+          : prev.creativeDirection,
       }));
       message.success("卖点、人群和场景已重新生成");
     } catch (error) {
@@ -1621,8 +1641,102 @@ export default function ImageStudioGPT() {
     }
   };
 
+  const buildProductFactsState = (source: ImageStudioAnalysis) => ({
+    productName: source.productFacts?.productName || source.productName || "",
+    category: source.productFacts?.category || source.category || "",
+    materials: source.productFacts?.materials || source.materials || "",
+    colors: source.productFacts?.colors || source.colors || "",
+    estimatedDimensions: source.productFacts?.estimatedDimensions || source.estimatedDimensions || "",
+    productForm: source.productFacts?.productForm || source.productForm,
+    countAndConfiguration: source.productFacts?.countAndConfiguration || "",
+    packagingEvidence: source.productFacts?.packagingEvidence || "",
+    mountingPlacement: source.productFacts?.mountingPlacement || "",
+    factGuardrails: source.productFacts?.factGuardrails || [],
+  });
+
+  const buildOperatorInsightsState = (source: ImageStudioAnalysis) => ({
+    sellingPoints: source.operatorInsights?.sellingPoints || source.sellingPoints || [],
+    targetAudience: source.operatorInsights?.targetAudience || source.targetAudience || [],
+    usageScenes: source.operatorInsights?.usageScenes || source.usageScenes || [],
+    purchaseDrivers: source.operatorInsights?.purchaseDrivers || [],
+    buyerQuestions: source.operatorInsights?.buyerQuestions || [],
+    riskFlags: source.operatorInsights?.riskFlags || [],
+  });
+
+  const updateProductFactsField = (field: ProductFactField, value: string) => {
+    setAnalysis((prev) => ({
+      ...prev,
+      productFacts: {
+        ...buildProductFactsState(prev),
+        [field]: value,
+      },
+    }));
+  };
+
+  const updateCreativeDirectionField = (field: "pageGoal" | "visualStyle", value: string) => {
+    setAnalysis((prev) => ({
+      ...prev,
+      creativeDirection: {
+        ...(prev.creativeDirection || {}),
+        creativeBriefs: prev.creativeDirection?.creativeBriefs || prev.creativeBriefs || {},
+        suggestedBadges: prev.creativeDirection?.suggestedBadges || prev.suggestedBadges || [],
+        imageLayouts: prev.creativeDirection?.imageLayouts || prev.imageLayouts || {},
+        [field]: value,
+      },
+    }));
+  };
+
+  const getNestedInsightItems = (field: NestedInsightListField) => {
+    if (field === "factGuardrails") return analysis.productFacts?.factGuardrails || [];
+    if (field === "purchaseDrivers") return analysis.operatorInsights?.purchaseDrivers || [];
+    if (field === "buyerQuestions") return analysis.operatorInsights?.buyerQuestions || [];
+    return analysis.operatorInsights?.riskFlags || [];
+  };
+
+  const updateNestedInsightItems = (field: NestedInsightListField, items: string[]) => {
+    if (field === "factGuardrails") {
+      setAnalysis((prev) => ({
+        ...prev,
+        productFacts: {
+          ...buildProductFactsState(prev),
+          factGuardrails: items,
+        },
+      }));
+      return;
+    }
+
+    setAnalysis((prev) => ({
+      ...prev,
+      operatorInsights: {
+        ...buildOperatorInsightsState(prev),
+        [field]: items,
+      },
+    }));
+  };
+
   const updateAnalysisField = <K extends keyof ImageStudioAnalysis>(field: K, value: ImageStudioAnalysis[K]) => {
-    setAnalysis((prev) => ({ ...prev, [field]: value }));
+    setAnalysis((prev) => {
+      const next: ImageStudioAnalysis = { ...prev, [field]: value };
+      if (
+        field === "productName" ||
+        field === "category" ||
+        field === "materials" ||
+        field === "colors" ||
+        field === "estimatedDimensions"
+      ) {
+        next.productFacts = {
+          ...buildProductFactsState(prev),
+          [field]: value as string,
+        };
+      }
+      if (field === "sellingPoints" || field === "targetAudience" || field === "usageScenes") {
+        next.operatorInsights = {
+          ...buildOperatorInsightsState(prev),
+          [field]: value as string[],
+        };
+      }
+      return next;
+    });
   };
 
   const handleTranslateAnalysisField = async (field: MarketingInfoField, label: string) => {
@@ -2803,6 +2917,105 @@ export default function ImageStudioGPT() {
     );
   };
 
+  const renderFactField = (
+    label: string,
+    value: string,
+    placeholder: string,
+    field: ProductFactField,
+  ) => (
+    <div>
+      <Text style={{ fontSize: 12, color: "#999", display: "block", marginBottom: 4 }}>{label}</Text>
+      <Input
+        size="small"
+        value={value}
+        onChange={(event) => updateProductFactsField(field, event.target.value)}
+        placeholder={placeholder}
+      />
+    </div>
+  );
+
+  const renderNestedListEditor = (
+    label: string,
+    field: NestedInsightListField,
+    placeholder: string,
+    tone: "default" | "warn" | "danger" = "default",
+  ) => {
+    const items = getNestedInsightItems(field);
+    const displayItems = items.length > 0 ? items : [""];
+    const borderColor = tone === "danger" ? "#ffd6d9" : tone === "warn" ? "#ffe0b2" : "#f0f0f0";
+    const headerColor = tone === "danger" ? "#c53030" : tone === "warn" ? "#b7791f" : "#999";
+
+    return (
+      <div style={{ background: "#fff", border: `1px solid ${borderColor}`, borderRadius: 12, padding: "14px 16px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 12 }}>
+          <Text style={{ fontSize: 12, color: headerColor }}>{label}</Text>
+          <Button
+            size="small"
+            type="text"
+            style={{ color: TEMU_ORANGE, paddingInline: 0 }}
+            onClick={() => updateNestedInsightItems(field, [...displayItems, ""])}
+          >
+            {"\u65b0\u589e\u4e00\u6761"}
+          </Button>
+        </div>
+        <div style={{ display: "grid", gap: 10 }}>
+          {displayItems.map((item, index) => (
+            <div
+              key={field + "-" + index}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                border: "1px solid #e8edf3",
+                borderRadius: 12,
+                padding: 8,
+                background: "#fff",
+              }}
+            >
+              <div
+                style={{
+                  width: 24,
+                  height: 24,
+                  borderRadius: 999,
+                  background: tone === "danger" ? "#fff1f2" : tone === "warn" ? "#fff7e8" : "#fff5ec",
+                  color: tone === "danger" ? "#cf1322" : TEMU_ORANGE,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: 12,
+                  fontWeight: 700,
+                  flex: "0 0 auto",
+                }}
+              >
+                {index + 1}
+              </div>
+              <Input
+                value={item}
+                onChange={(event) => {
+                  const nextItems = [...displayItems];
+                  nextItems[index] = event.target.value;
+                  updateNestedInsightItems(field, nextItems);
+                }}
+                placeholder={placeholder}
+                bordered={false}
+                style={{ flex: 1, fontSize: 13 }}
+              />
+              {displayItems.length > 1 ? (
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<DeleteOutlined />}
+                  onClick={() => updateNestedInsightItems(field, displayItems.filter((_, itemIndex) => itemIndex !== index))}
+                  style={{ color: "#8b98ab" }}
+                />
+              ) : null}
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
   const allImageTypesSelected = selectedImageTypes.length === DEFAULT_IMAGE_TYPES.length;
   const toggleImageType = (imageType: string) => {
     setSelectedImageTypes((prev) => {
@@ -2813,20 +3026,83 @@ export default function ImageStudioGPT() {
     });
   };
 
+  const handleTryDesignerAgent = async () => {
+    if (!imageStudioAPI) return;
+    if (!hasAnalysis) {
+      message.warning("请先完成商品分析");
+      return;
+    }
+    setDesignerRunning(true);
+    setDesignerDrawerOpen(true);
+    try {
+      const res = await imageStudioAPI.runDesigner({
+        analysis,
+        extraNotes: "",
+        debug: false,
+      });
+      setDesignerResult(res as DesignerResult);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "设计师 Agent 调用失败");
+      setDesignerResult({
+        ok: false,
+        sharedDna: null,
+        briefs: [],
+        auditReport: null,
+        reworkRounds: 0,
+        warnings: [],
+        errors: [error instanceof Error ? error.message : String(error)],
+      });
+    } finally {
+      setDesignerRunning(false);
+    }
+  };
+
   const renderStepOne = () => (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
+      <Card style={{ borderRadius: 16, borderColor: "#ffe0c2", background: "#fffaf5" }} bodyStyle={{ padding: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
+          <div style={{ display: "grid", gap: 8, minWidth: 260 }}>
+            <Title level={4} style={{ margin: 0, color: TEMU_TEXT }}>🧪 设计师工作台（三步）</Title>
+            <Space wrap size={6}>
+              <Tag color="orange" style={{ borderRadius: 999 }}>1 商品分析</Tag>
+              <Tag color="blue" style={{ borderRadius: 999 }}>2 设计 Brief</Tag>
+              <Tag color="green" style={{ borderRadius: 999 }}>3 合成真实图</Tag>
+            </Space>
+          </div>
+          <Button
+            type="primary"
+            onClick={handleTryDesignerAgent}
+            loading={designerRunning}
+            disabled={!hasAnalysis}
+            style={{ borderRadius: 14, background: TEMU_ORANGE, borderColor: TEMU_ORANGE }}
+          >
+            打开工作台
+          </Button>
+        </div>
+      </Card>
+
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "4px 0", flexWrap: "wrap" }}>
         <Button size="small" onClick={() => setActiveStep(0)}>上一步</Button>
-        <Button
-          type="primary"
-          icon={<RocketOutlined />}
-          onClick={handleGeneratePlans}
-          loading={planning}
-          disabled={!hasAnalysis}
-          style={{ background: TEMU_ORANGE, borderColor: TEMU_ORANGE }}
-        >
-          生成出图方案
-        </Button>
+        <Space size={8}>
+          <Button
+            onClick={handleTryDesignerAgent}
+            loading={designerRunning}
+            disabled={!hasAnalysis}
+            style={{ borderRadius: 14 }}
+          >
+            运行设计师工作台
+          </Button>
+          <Button
+            type="primary"
+            icon={<RocketOutlined />}
+            onClick={handleGeneratePlans}
+            loading={planning}
+            disabled={!hasAnalysis}
+            style={{ background: TEMU_ORANGE, borderColor: TEMU_ORANGE }}
+          >
+            生成出图方案
+          </Button>
+        </Space>
       </div>
 
       <div style={{ background: "#fff", border: "1px solid #f0f0f0", borderRadius: 8, padding: "12px 16px" }}>
@@ -2872,6 +3148,12 @@ export default function ImageStudioGPT() {
             <Text style={{ fontSize: 12, color: "#999", display: "block", marginBottom: 4 }}>尺寸</Text>
             <Input size="small" value={analysis.estimatedDimensions} onChange={(e) => updateAnalysisField("estimatedDimensions", e.target.value)} placeholder="尺寸" />
           </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px 16px", marginTop: 14 }}>
+          {renderFactField("件数 / 组合", analysis.productFacts?.countAndConfiguration || "", "例如：单件 / 2件套 / 组合装", "countAndConfiguration")}
+          {renderFactField("安装 / 摆放", analysis.productFacts?.mountingPlacement || "", "例如：挂墙 / 桌面 / 手持", "mountingPlacement")}
+          {renderFactField("包装依据", analysis.productFacts?.packagingEvidence || "", "例如：可见真实包装 / 仅能用中性包装", "packagingEvidence")}
         </div>
       </div>
 
@@ -2940,6 +3222,42 @@ export default function ImageStudioGPT() {
           {renderAnalysisListEditor("核心卖点", "sellingPoints", "输入一条卖点")}
           {renderAnalysisListEditor("目标人群", "targetAudience", "输入一条目标人群")}
           {renderAnalysisListEditor("使用场景", "usageScenes", "输入一条使用场景")}
+        </div>
+      </div>
+
+      <div style={{ background: "#fff", border: "1px solid #f0f0f0", borderRadius: 8, padding: "16px 20px" }}>
+        <Text strong style={{ fontSize: 15, color: "#333", display: "block", marginBottom: 12 }}>事实护栏</Text>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 14 }}>
+          {renderNestedListEditor("不可违背的商品事实", "factGuardrails", "例如：20cm 小挂镜，不能画成大墙镜", "warn")}
+        </div>
+      </div>
+
+      <div style={{ background: "#fff", border: "1px solid #f0f0f0", borderRadius: 8, padding: "16px 20px" }}>
+        <Text strong style={{ fontSize: 15, color: "#333", display: "block", marginBottom: 12 }}>运营判断</Text>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 16px", marginBottom: 14 }}>
+          <div>
+            <Text style={{ fontSize: 12, color: "#999", display: "block", marginBottom: 4 }}>页面目标</Text>
+            <Input
+              size="small"
+              value={analysis.creativeDirection?.pageGoal || ""}
+              onChange={(event) => updateCreativeDirectionField("pageGoal", event.target.value)}
+              placeholder="例如：先建立真实感，再放大礼品感"
+            />
+          </div>
+          <div>
+            <Text style={{ fontSize: 12, color: "#999", display: "block", marginBottom: 4 }}>视觉方向</Text>
+            <Input
+              size="small"
+              value={analysis.creativeDirection?.visualStyle || ""}
+              onChange={(event) => updateCreativeDirectionField("visualStyle", event.target.value)}
+              placeholder="例如：暗黑复古，但必须保留真实尺寸比例"
+            />
+          </div>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 14 }}>
+          {renderNestedListEditor("购买驱动", "purchaseDrivers", "例如：礼品属性强 / 小空间友好 / 风格识别度高")}
+          {renderNestedListEditor("买家疑虑", "buyerQuestions", "例如：会不会太小 / 怎么安装 / 有没有包装")}
+          {renderNestedListEditor("风险提示", "riskFlags", "例如：禁止把挂墙镜画成立放摆件", "danger")}
         </div>
       </div>
     </Space>
@@ -3569,6 +3887,26 @@ export default function ImageStudioGPT() {
           />
         ) : (
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有历史记录" />
+        )}
+      </Drawer>
+
+      <Drawer
+        title="🧪 设计师工作台（三步）"
+        placement="right"
+        width={1080}
+        open={designerDrawerOpen}
+        onClose={() => setDesignerDrawerOpen(false)}
+        destroyOnClose={false}
+      >
+        {designerRunning && !designerResult ? (
+          <Space direction="vertical" size={16} align="center" style={{ width: "100%", padding: 40 }}>
+            <Spin size="large" />
+            <Text type="secondary">设计师工作台运行中，5 stage 串行 + 10 张图并行，首轮约需 1-2 分钟…</Text>
+          </Space>
+        ) : designerResult ? (
+          <DesignerSummary result={designerResult} primaryUploadFile={primaryUploadFile} />
+        ) : (
+          <Empty description="尚未执行" />
         )}
       </Drawer>
     </div>

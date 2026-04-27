@@ -135,6 +135,7 @@ function App() {
             <Route path="products" element={<ProductList />} />
             <Route path="products/:id" element={<ProductDetail />} />
             <Route path="create-product" element={<ProductCreate />} />
+            <Route path="product-create" element={<Navigate to="/create-product" replace />} />
             <Route path="image-studio" element={<ImageStudio />} />
             <Route path="image-studio-gpt" element={<ImageStudioGPT />} />
             <Route path="collect" element={<Dashboard />} />

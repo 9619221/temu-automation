@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import {
+  Alert,
   Card,
   Button,
   Modal,
@@ -34,6 +35,7 @@ import {
   ThunderboltOutlined,
   DashboardOutlined,
   ExclamationCircleOutlined,
+  KeyOutlined,
   SafetyCertificateOutlined,
 } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
@@ -65,6 +67,8 @@ interface Account {
   password: string;
   status: "online" | "offline" | "logging_in" | "error";
   lastLoginAt?: string;
+  passwordState?: "ready" | "missing" | "decrypt_failed";
+  passwordRepairRequired?: boolean;
 }
 
 const statusConfig = {
@@ -79,6 +83,19 @@ const STORAGE_KEY = "temu_accounts";
 function maskPhone(phone: string) {
   if (!phone || phone.length < 7) return phone;
   return phone.slice(0, 3) + "****" + phone.slice(-4);
+}
+
+function accountNeedsPasswordRepair(account?: Account | null) {
+  if (!account) return false;
+  return Boolean(account.passwordRepairRequired || !account.password);
+}
+
+function getPasswordRepairMessage(account?: Account | null) {
+  if (!account) return "";
+  if (account.passwordState === "decrypt_failed") {
+    return "当前保存的密码密文已失效，需要重新录入密码后才能继续自动登录。";
+  }
+  return "当前账号还没有可用密码，请先补录密码。";
 }
 
 /** 计算数据新鲜度 */
@@ -111,8 +128,13 @@ export default function AccountManager() {
   const [modalOpen, setModalOpen] = useState(false);
   const [loginLoadingId, setLoginLoadingId] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
+  const [accountsDirty, setAccountsDirty] = useState(false);
+  const [passwordModalOpen, setPasswordModalOpen] = useState(false);
+  const [passwordModalAccountId, setPasswordModalAccountId] = useState<string | null>(null);
+  const [passwordModalAutoLogin, setPasswordModalAutoLogin] = useState(false);
   const [accountStats, setAccountStats] = useState<Record<string, AccountStats>>({});
   const [form] = Form.useForm();
+  const [passwordForm] = Form.useForm();
   const navigate = useNavigate();
 
   const api = window.electronAPI?.automation;
@@ -213,12 +235,12 @@ export default function AccountManager() {
   }, [hydrated, store]);
 
   useEffect(() => {
-    if (store && hydrated) {
+    if (store && hydrated && accountsDirty) {
       Promise.resolve(store.set(STORAGE_KEY, accounts)).catch((e: unknown) => {
         console.error("[AccountManager] persist accounts failed:", e);
       });
     }
-  }, [accounts, hydrated, store]);
+  }, [accounts, accountsDirty, hydrated, store]);
 
   // 初始化选中账号
   useEffect(() => {
@@ -262,6 +284,38 @@ export default function AccountManager() {
     }
   }, [collecting]);
 
+  const closePasswordModal = () => {
+    setPasswordModalOpen(false);
+    setPasswordModalAccountId(null);
+    setPasswordModalAutoLogin(false);
+    passwordForm.resetFields();
+  };
+
+  const openPasswordModal = (account: Account, autoLogin = false) => {
+    setPasswordModalAccountId(account.id);
+    setPasswordModalAutoLogin(autoLogin);
+    setPasswordModalOpen(true);
+    passwordForm.resetFields();
+  };
+
+  const updateAccountPassword = (accountId: string, password: string) => {
+    let updatedAccount: Account | null = null;
+    setAccounts((prev) =>
+      prev.map((account) => {
+        if (account.id !== accountId) return account;
+        updatedAccount = {
+          ...account,
+          password,
+          passwordState: "ready",
+          passwordRepairRequired: false,
+        };
+        return updatedAccount;
+      })
+    );
+    setAccountsDirty(true);
+    return updatedAccount;
+  };
+
   const handleAdd = async () => {
     try {
       const values = await form.validateFields();
@@ -271,8 +325,11 @@ export default function AccountManager() {
         phone: values.phone,
         password: values.password,
         status: "offline",
+        passwordState: "ready",
+        passwordRepairRequired: false,
       };
       setAccounts((prev) => [...prev, newAccount]);
+      setAccountsDirty(true);
       setSelectedAccountId(newAccount.id);
       setModalOpen(false);
       form.resetFields();
@@ -283,7 +340,7 @@ export default function AccountManager() {
     }
   };
 
-  const handleLogin = async (account: Account) => {
+  const performLogin = async (account: Account) => {
     if (!api) {
       message.warning("自动化模块未连接（请在 Electron 环境中运行）");
       return;
@@ -292,6 +349,7 @@ export default function AccountManager() {
     setAccounts((prev) =>
       prev.map((a) => (a.id === account.id ? { ...a, status: "logging_in" as const } : a))
     );
+    setAccountsDirty(true);
     notification.info({
       key: "login",
       message: "正在启动浏览器",
@@ -300,7 +358,11 @@ export default function AccountManager() {
     });
     try {
       const result: any = await api.login(account.id, account.phone, account.password);
-      const loginOk = !!(result && (result.success === true || (typeof result.success === "object" && result.success?.success === true)));
+      const loginOk = !!(
+        result &&
+        (result.success === true ||
+          (typeof result.success === "object" && result.success?.success === true))
+      );
       if (loginOk) {
         const lastLoginAt = new Date().toLocaleString("zh-CN");
         let nextAccounts: Account[] = [];
@@ -312,6 +374,7 @@ export default function AccountManager() {
           );
           return nextAccounts;
         });
+        setAccountsDirty(true);
         await setActiveAccountAndSync(store, nextAccounts, account.id);
         setAccounts((prev) =>
           prev.map((a) =>
@@ -320,6 +383,7 @@ export default function AccountManager() {
               : a
           )
         );
+        setAccountsDirty(true);
         notification.success({
           key: "login",
           message: "登录成功",
@@ -334,6 +398,7 @@ export default function AccountManager() {
       setAccounts((prev) =>
         prev.map((a) => (a.id === account.id ? { ...a, status: "error" as const } : a))
       );
+      setAccountsDirty(true);
       notification.error({
         key: "login",
         message: "登录失败",
@@ -344,6 +409,36 @@ export default function AccountManager() {
     }
   };
 
+  const handleLogin = async (account: Account) => {
+    if (accountNeedsPasswordRepair(account)) {
+      message.warning(getPasswordRepairMessage(account));
+      openPasswordModal(account, true);
+      return;
+    }
+    await performLogin(account);
+  };
+
+  const handleRepairPassword = async () => {
+    try {
+      const values = await passwordForm.validateFields();
+      const accountId = passwordModalAccountId;
+      if (!accountId) return;
+      const targetAccount = accounts.find((account) => account.id === accountId) || null;
+      const updatedAccount = updateAccountPassword(accountId, values.password);
+      const shouldAutoLogin = passwordModalAutoLogin;
+      closePasswordModal();
+      message.success(
+        targetAccount?.passwordState === "decrypt_failed"
+          ? "密码已重新加密保存"
+          : "密码已保存"
+      );
+      if (shouldAutoLogin && updatedAccount) {
+        await performLogin(updatedAccount);
+      }
+    } catch (error) {
+      console.warn("[AccountManager] repair password validation failed", error);
+    }
+  };
   const handleActivateAccount = async (id: string) => {
     if (!store) {
       message.warning("本地存储未连接，暂时无法切换数据视图");
@@ -370,6 +465,7 @@ export default function AccountManager() {
     }
     const nextAccounts = accounts.map((a) => (a.id === id ? { ...a, status: "offline" as const } : a));
     setAccounts(nextAccounts);
+    setAccountsDirty(true);
     const currentActiveId = await readActiveAccountId(store);
     if (currentActiveId === id) {
       await clearActiveAccount();
@@ -384,6 +480,7 @@ export default function AccountManager() {
     }
     const nextAccounts = accounts.filter((a) => a.id !== id);
     setAccounts(nextAccounts);
+    setAccountsDirty(true);
     if (selectedAccountId === id) {
       setSelectedAccountId(nextAccounts.length > 0 ? nextAccounts[0].id : null);
     }
@@ -408,6 +505,8 @@ export default function AccountManager() {
   [accounts, activeAccountId]);
 
   const selectedAccount = accounts.find((a) => a.id === selectedAccountId) || null;
+  const selectedAccountNeedsPasswordRepair = accountNeedsPasswordRepair(selectedAccount);
+  const passwordModalAccount = accounts.find((account) => account.id === passwordModalAccountId) || null;
   const selectedStats = selectedAccountId ? accountStats[selectedAccountId] : null;
   const isSelectedActive = selectedAccountId === activeAccountId;
 
@@ -626,6 +725,12 @@ export default function AccountManager() {
                       当前数据视图
                     </Tag>
                   )}
+                  {selectedAccountNeedsPasswordRepair && (
+                    <Tag color="volcano" style={{ borderRadius: 999, margin: 0 }}>
+                      <WarningOutlined style={{ marginRight: 4 }} />
+                      {"\u9700\u8865\u5f55\u5bc6\u7801"}
+                    </Tag>
+                  )}
                 </div>
                 <Space size={16} style={{ marginTop: 8 }}>
                   <Space size={4}>
@@ -643,6 +748,20 @@ export default function AccountManager() {
             </div>
 
             {/* 操作按钮区 */}
+            {selectedAccountNeedsPasswordRepair && (
+              <Alert
+                showIcon
+                type={selectedAccount?.passwordState === "decrypt_failed" ? "warning" : "info"}
+                message={getPasswordRepairMessage(selectedAccount)}
+                action={
+                  <Button size="small" icon={<KeyOutlined />} onClick={() => openPasswordModal(selectedAccount)}>
+                    {"\u8865\u5f55\u5bc6\u7801"}
+                  </Button>
+                }
+                style={{ flex: 1, minWidth: 320 }}
+              />
+            )}
+
             <Space size={8} wrap>
               {!isSelectedActive && (
                 <Button
@@ -650,16 +769,23 @@ export default function AccountManager() {
                   onClick={() => handleActivateAccount(selectedAccount.id)}
                   style={{ borderRadius: 10 }}
                 >
-                  切换数据视图
+                  {"\u5207\u6362\u6570\u636e\u89c6\u56fe"}
                 </Button>
               )}
+              <Button
+                icon={<KeyOutlined />}
+                onClick={() => openPasswordModal(selectedAccount)}
+                style={{ borderRadius: 10 }}
+              >
+                {selectedAccountNeedsPasswordRepair ? "\u8865\u5f55\u5bc6\u7801" : "\u66f4\u65b0\u5bc6\u7801"}
+              </Button>
               {selectedAccount.status === "online" ? (
                 <Button
                   icon={<LogoutOutlined />}
                   onClick={() => handleLogout(selectedAccount.id)}
                   style={{ borderRadius: 10 }}
                 >
-                  断开连接
+                  {"\u65ad\u5f00\u8fde\u63a5"}
                 </Button>
               ) : (
                 <Button
@@ -673,16 +799,16 @@ export default function AccountManager() {
                     border: "none",
                   }}
                 >
-                  登录
+                  {selectedAccountNeedsPasswordRepair ? "\u8865\u5f55\u5bc6\u7801\u5e76\u767b\u5f55" : "\u767b\u5f55"}
                 </Button>
               )}
               <Popconfirm
-                title="确定删除此账号？"
-                description="删除后该账号的采集数据仍会保留"
+                title={"\u786e\u5b9a\u5220\u9664\u6b64\u8d26\u53f7\uff1f"}
+                description={"\u5220\u9664\u540e\u8be5\u8d26\u53f7\u7684\u91c7\u96c6\u6570\u636e\u4ecd\u4f1a\u4fdd\u7559"}
                 onConfirm={() => handleDelete(selectedAccount.id)}
               >
                 <Button danger icon={<DeleteOutlined />} style={{ borderRadius: 10 }}>
-                  删除
+                  {"\u5220\u9664"}
                 </Button>
               </Popconfirm>
             </Space>
@@ -1091,6 +1217,38 @@ export default function AccountManager() {
             <Input.Password placeholder="请输入密码" style={{ borderRadius: 8 }} />
           </Form.Item>
         </Form>
+      </Modal>
+
+      <Modal
+        title={passwordModalAccount ? `\u8865\u5f55\u300c${passwordModalAccount.name}\u300d\u7684\u767b\u5f55\u5bc6\u7801` : "\u8865\u5f55\u767b\u5f55\u5bc6\u7801"}
+        open={passwordModalOpen}
+        onOk={handleRepairPassword}
+        onCancel={closePasswordModal}
+        okText={passwordModalAutoLogin ? "\u4fdd\u5b58\u5e76\u767b\u5f55" : "\u4fdd\u5b58"}
+        cancelText="\u53d6\u6d88"
+        styles={{ body: { paddingTop: 16 } }}
+      >
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Alert
+            showIcon
+            type={passwordModalAccount?.passwordState === "decrypt_failed" ? "warning" : "info"}
+            message={getPasswordRepairMessage(passwordModalAccount)}
+          />
+          {passwordModalAccount && (
+            <Text type="secondary">
+              {`\u8d26\u53f7\uff1a${passwordModalAccount.name} | \u624b\u673a\u53f7\uff1a${maskPhone(passwordModalAccount.phone)}`}
+            </Text>
+          )}
+          <Form form={passwordForm} layout="vertical">
+            <Form.Item
+              name="password"
+              label="\u767b\u5f55\u5bc6\u7801"
+              rules={[{ required: true, message: "\u8bf7\u8f93\u5165\u767b\u5f55\u5bc6\u7801" }]}
+            >
+              <Input.Password placeholder="\u8bf7\u8f93\u5165\u6700\u65b0\u767b\u5f55\u5bc6\u7801" style={{ borderRadius: 8 }} />
+            </Form.Item>
+          </Form>
+        </Space>
       </Modal>
     </div>
   );

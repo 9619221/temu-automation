@@ -10,6 +10,7 @@ import type {
   ImageStudioStatus,
   NativeImagePayload,
 } from "../utils/imageStudio";
+import type { DesignBrief, DesignerResult, SharedDNA } from "../components/designer";
 
 interface AutomationAPI {
   login: (accountId: string, phone: string, password: string) => Promise<{ success: boolean; matchedStoreName?: string }>;
@@ -54,6 +55,7 @@ interface AutomationAPI {
   yunduAutoEnroll: (params: { activityThematicId: number; activityType?: number; dryRun?: boolean }) => Promise<any>;
   autoPricing: (params: any) => Promise<any>;
   startAutoPricing: (params: any) => Promise<any>;
+  generatePackImages: (params: any) => Promise<any>;
   getProgress: () => Promise<any>;
   getTaskProgress: (taskId?: string) => Promise<any>;
   listTasks: () => Promise<any>;
@@ -109,6 +111,13 @@ interface ImageStudioJob {
   historySaveError?: string | null;
 }
 
+interface ImageStudioComposedImage {
+  slot: number;
+  method: string;
+  dataUrl: string;
+  bytes: number;
+}
+
 interface ImageStudioAPI {
   switchProfile?: () => Promise<{ profile: string; status: unknown }>;
   getStatus: () => Promise<ImageStudioStatus>;
@@ -119,7 +128,9 @@ interface ImageStudioAPI {
   openExternal: () => Promise<string>;
   detectComponents: (payload: { files: NativeImagePayload[] }) => Promise<ImageStudioComponentDetection>;
   analyze: (payload: { files: NativeImagePayload[]; productMode: string }) => Promise<ImageStudioAnalysis>;
-  regenerateAnalysis: (payload: { files: NativeImagePayload[]; productMode: string; analysis: ImageStudioAnalysis }) => Promise<Pick<ImageStudioAnalysis, "sellingPoints" | "targetAudience" | "usageScenes">>;
+  regenerateAnalysis: (
+    payload: { files: NativeImagePayload[]; productMode: string; analysis: ImageStudioAnalysis }
+  ) => Promise<Partial<ImageStudioAnalysis>>;
   translate: (payload: { texts: string[] }) => Promise<{ translations: string[] }>;
   generatePlans: (payload: { analysis: ImageStudioAnalysis; imageTypes: string[]; salesRegion: string; imageSize: string; productMode: string }) => Promise<ImageStudioPlan[]>;
   startGenerate: (payload: { jobId?: string; files: NativeImagePayload[]; plans: ImageStudioPlan[]; productMode: string; salesRegion?: string; runInBackground?: boolean; imageLanguage: string; imageSize: string; productName?: string }) => Promise<ImageStudioGenerateStarted>;
@@ -133,6 +144,12 @@ interface ImageStudioAPI {
   getJob: (jobId: string) => Promise<ImageStudioJob | null>;
   clearJob: (jobId: string) => Promise<void>;
   downloadAll: (payload: { images: ImageStudioGeneratedImage[]; productName?: string }) => Promise<{ saved?: number; total?: number; dir?: string; cancelled?: boolean }>;
+  runDesigner: (payload: { analysis: ImageStudioAnalysis; extraNotes?: string; debug?: boolean }) => Promise<DesignerResult>;
+  composeBriefs: (payload: {
+    briefs: DesignBrief[];
+    sharedDna: SharedDNA | null;
+    productImageBase64?: string | null;
+  }) => Promise<{ images?: ImageStudioComposedImage[]; error?: string }>;
 }
 
 interface AppAPI {

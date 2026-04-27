@@ -334,7 +334,7 @@ async function runUiChecks(page) {
   console.log("[ok] 商品列表页面");
 
   const detailDrawer = page.locator(".ant-drawer .ant-drawer-content").last();
-  await productRow.click();
+  await productRow.getByRole("button", { name: "销售趋势" }).first().click();
   await detailDrawer.waitFor({ state: "visible", timeout: 30000 });
   await detailDrawer.getByText("概览", { exact: true }).waitFor({ state: "visible", timeout: 30000 });
   await detailDrawer.getByText("流量驾驶舱", { exact: false }).waitFor({ state: "visible", timeout: 30000 });

@@ -31,6 +31,8 @@ function createImageStudioApi(profile) {
     getJob: withProfile((jobId) => ipcRenderer.invoke("image-studio:get-job", jobId)),
     clearJob: withProfile((jobId) => ipcRenderer.invoke("image-studio:clear-job", jobId)),
     downloadAll: withProfile((payload) => ipcRenderer.invoke("image-studio:download-all", payload)),
+    runDesigner: withProfile((payload) => ipcRenderer.invoke("image-studio:run-designer", payload)),
+    composeBriefs: withProfile((payload) => ipcRenderer.invoke("image-studio:compose-briefs", payload)),
   };
 }
 
@@ -65,6 +67,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.invoke("automation:scrape-all"),
     filterProductTable: (csvPath) =>
       ipcRenderer.invoke("automation:filter-product-table", csvPath),
+    generatePackImages: (params) =>
+      ipcRenderer.invoke("automation:generate-pack-images", params),
     autoPricing: (params) =>
       ipcRenderer.invoke("automation:auto-pricing", params),
     startAutoPricing: (params) =>

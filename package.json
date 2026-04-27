@@ -1,7 +1,7 @@
 {
   "name": "temu-automation",
   "private": true,
-  "version": "0.1.83",
+  "version": "0.1.84",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -90,6 +90,7 @@
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.26.0",
     "recharts": "^2.12.7",
+    "undici": "^8.1.0",
     "wait-on": "^9.0.4",
     "xlsx": "^0.18.5",
     "zustand": "^4.5.4"

@@ -68,6 +68,45 @@ export interface ImageStudioAnalysis {
   targetAudience: string[];
   usageScenes: string[];
   estimatedDimensions: string;
+  productForm?: "2d_flat" | "3d_object";
+  creativeBriefs?: Record<string, string>;
+  suggestedBadges?: Array<{
+    badge: string;
+    painPoint: string;
+    benefit: string;
+  }>;
+  imageLayouts?: Record<string, unknown>;
+  productFacts?: {
+    productName: string;
+    category: string;
+    materials: string;
+    colors: string;
+    estimatedDimensions: string;
+    productForm?: "2d_flat" | "3d_object";
+    countAndConfiguration?: string;
+    packagingEvidence?: string;
+    mountingPlacement?: string;
+    factGuardrails?: string[];
+  };
+  operatorInsights?: {
+    sellingPoints: string[];
+    targetAudience: string[];
+    usageScenes: string[];
+    purchaseDrivers?: string[];
+    buyerQuestions?: string[];
+    riskFlags?: string[];
+  };
+  creativeDirection?: {
+    pageGoal?: string;
+    visualStyle?: string;
+    creativeBriefs?: Record<string, string>;
+    suggestedBadges?: Array<{
+      badge: string;
+      painPoint: string;
+      benefit: string;
+    }>;
+    imageLayouts?: Record<string, unknown>;
+  };
 }
 
 export interface ImageStudioPlan {
@@ -222,6 +261,35 @@ export const EMPTY_IMAGE_STUDIO_ANALYSIS: ImageStudioAnalysis = {
   targetAudience: [],
   usageScenes: [],
   estimatedDimensions: "",
+  creativeBriefs: {},
+  suggestedBadges: [],
+  imageLayouts: {},
+  productFacts: {
+    productName: "",
+    category: "",
+    materials: "",
+    colors: "",
+    estimatedDimensions: "",
+    countAndConfiguration: "",
+    packagingEvidence: "",
+    mountingPlacement: "",
+    factGuardrails: [],
+  },
+  operatorInsights: {
+    sellingPoints: [],
+    targetAudience: [],
+    usageScenes: [],
+    purchaseDrivers: [],
+    buyerQuestions: [],
+    riskFlags: [],
+  },
+  creativeDirection: {
+    pageGoal: "",
+    visualStyle: "",
+    creativeBriefs: {},
+    suggestedBadges: [],
+    imageLayouts: {},
+  },
 };
 
 const SALES_REGION_LANGUAGE_MAP: Record<ImageStudioSalesRegion, ImageStudioLanguage> = {
@@ -262,15 +330,123 @@ export function multilineToArray(value: string): string[] {
 }
 
 export function normalizeImageStudioAnalysis(input?: Partial<ImageStudioAnalysis> | null): ImageStudioAnalysis {
+  const topSellingPoints = Array.isArray(input?.sellingPoints)
+    ? input.sellingPoints.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  const topTargetAudience = Array.isArray(input?.targetAudience)
+    ? input.targetAudience.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  const topUsageScenes = Array.isArray(input?.usageScenes)
+    ? input.usageScenes.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  const nestedSellingPoints = Array.isArray(input?.operatorInsights?.sellingPoints)
+    ? input.operatorInsights.sellingPoints.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  const nestedTargetAudience = Array.isArray(input?.operatorInsights?.targetAudience)
+    ? input.operatorInsights.targetAudience.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  const nestedUsageScenes = Array.isArray(input?.operatorInsights?.usageScenes)
+    ? input.operatorInsights.usageScenes.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  const topCreativeBriefs = input?.creativeBriefs && typeof input.creativeBriefs === "object" ? input.creativeBriefs : {};
+  const nestedCreativeBriefs = input?.creativeDirection?.creativeBriefs && typeof input.creativeDirection.creativeBriefs === "object"
+    ? input.creativeDirection.creativeBriefs
+    : {};
+  const topSuggestedBadges = Array.isArray(input?.suggestedBadges) ? input.suggestedBadges : [];
+  const nestedSuggestedBadges = Array.isArray(input?.creativeDirection?.suggestedBadges) ? input.creativeDirection.suggestedBadges : [];
+  const topImageLayouts = input?.imageLayouts && typeof input.imageLayouts === "object" ? input.imageLayouts : {};
+  const nestedImageLayouts = input?.creativeDirection?.imageLayouts && typeof input.creativeDirection.imageLayouts === "object"
+    ? input.creativeDirection.imageLayouts
+    : {};
+
   return {
-    productName: typeof input?.productName === "string" ? input.productName : "",
-    category: typeof input?.category === "string" ? input.category : "",
-    sellingPoints: Array.isArray(input?.sellingPoints) ? input.sellingPoints.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [],
-    materials: typeof input?.materials === "string" ? input.materials : "",
-    colors: typeof input?.colors === "string" ? input.colors : "",
-    targetAudience: Array.isArray(input?.targetAudience) ? input.targetAudience.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [],
-    usageScenes: Array.isArray(input?.usageScenes) ? input.usageScenes.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [],
-    estimatedDimensions: typeof input?.estimatedDimensions === "string" ? input.estimatedDimensions : "",
+    productName: typeof input?.productName === "string"
+      ? input.productName
+      : typeof input?.productFacts?.productName === "string"
+        ? input.productFacts.productName
+        : "",
+    category: typeof input?.category === "string"
+      ? input.category
+      : typeof input?.productFacts?.category === "string"
+        ? input.productFacts.category
+        : "",
+    sellingPoints: topSellingPoints.length > 0 ? topSellingPoints : nestedSellingPoints,
+    materials: typeof input?.materials === "string"
+      ? input.materials
+      : typeof input?.productFacts?.materials === "string"
+        ? input.productFacts.materials
+        : "",
+    colors: typeof input?.colors === "string"
+      ? input.colors
+      : typeof input?.productFacts?.colors === "string"
+        ? input.productFacts.colors
+        : "",
+    targetAudience: topTargetAudience.length > 0 ? topTargetAudience : nestedTargetAudience,
+    usageScenes: topUsageScenes.length > 0 ? topUsageScenes : nestedUsageScenes,
+    estimatedDimensions: typeof input?.estimatedDimensions === "string"
+      ? input.estimatedDimensions
+      : typeof input?.productFacts?.estimatedDimensions === "string"
+        ? input.productFacts.estimatedDimensions
+        : "",
+    productForm: input?.productForm || input?.productFacts?.productForm,
+    creativeBriefs: Object.keys(topCreativeBriefs).length > 0 ? topCreativeBriefs : nestedCreativeBriefs,
+    suggestedBadges: topSuggestedBadges.length > 0 ? topSuggestedBadges : nestedSuggestedBadges,
+    imageLayouts: Object.keys(topImageLayouts).length > 0 ? topImageLayouts : nestedImageLayouts,
+    productFacts: {
+      productName: typeof input?.productFacts?.productName === "string"
+        ? input.productFacts.productName
+        : typeof input?.productName === "string"
+          ? input.productName
+          : "",
+      category: typeof input?.productFacts?.category === "string"
+        ? input.productFacts.category
+        : typeof input?.category === "string"
+          ? input.category
+          : "",
+      materials: typeof input?.productFacts?.materials === "string"
+        ? input.productFacts.materials
+        : typeof input?.materials === "string"
+          ? input.materials
+          : "",
+      colors: typeof input?.productFacts?.colors === "string"
+        ? input.productFacts.colors
+        : typeof input?.colors === "string"
+          ? input.colors
+          : "",
+      estimatedDimensions: typeof input?.productFacts?.estimatedDimensions === "string"
+        ? input.productFacts.estimatedDimensions
+        : typeof input?.estimatedDimensions === "string"
+          ? input.estimatedDimensions
+          : "",
+      productForm: input?.productFacts?.productForm || input?.productForm,
+      countAndConfiguration: typeof input?.productFacts?.countAndConfiguration === "string" ? input.productFacts.countAndConfiguration : "",
+      packagingEvidence: typeof input?.productFacts?.packagingEvidence === "string" ? input.productFacts.packagingEvidence : "",
+      mountingPlacement: typeof input?.productFacts?.mountingPlacement === "string" ? input.productFacts.mountingPlacement : "",
+      factGuardrails: Array.isArray(input?.productFacts?.factGuardrails)
+        ? input.productFacts.factGuardrails.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+        : [],
+    },
+    operatorInsights: {
+      sellingPoints: topSellingPoints.length > 0 ? topSellingPoints : nestedSellingPoints,
+      targetAudience: topTargetAudience.length > 0 ? topTargetAudience : nestedTargetAudience,
+      usageScenes: topUsageScenes.length > 0 ? topUsageScenes : nestedUsageScenes,
+      purchaseDrivers: Array.isArray(input?.operatorInsights?.purchaseDrivers)
+        ? input.operatorInsights.purchaseDrivers.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+        : [],
+      buyerQuestions: Array.isArray(input?.operatorInsights?.buyerQuestions)
+        ? input.operatorInsights.buyerQuestions.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+        : [],
+      riskFlags: Array.isArray(input?.operatorInsights?.riskFlags)
+        ? input.operatorInsights.riskFlags.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+        : [],
+    },
+    creativeDirection: {
+      pageGoal: typeof input?.creativeDirection?.pageGoal === "string" ? input.creativeDirection.pageGoal : "",
+      visualStyle: typeof input?.creativeDirection?.visualStyle === "string" ? input.creativeDirection.visualStyle : "",
+      creativeBriefs: Object.keys(topCreativeBriefs).length > 0 ? topCreativeBriefs : nestedCreativeBriefs,
+      suggestedBadges: topSuggestedBadges.length > 0 ? topSuggestedBadges : nestedSuggestedBadges,
+      imageLayouts: Object.keys(topImageLayouts).length > 0 ? topImageLayouts : nestedImageLayouts,
+    },
   };
 }
 

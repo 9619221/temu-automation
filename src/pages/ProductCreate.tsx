@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Alert,
   Button,
   Card,
   InputNumber,
   Progress,
+  Segmented,
   Space,
   Table,
   Tag,
@@ -32,6 +33,40 @@ const { Title, Text } = Typography;
 
 const api = window.electronAPI?.automation;
 const SUCCESS_COLOR = "var(--color-success)";
+const PRODUCT_CREATE_MODE_STORAGE_KEY = "temu-product-create-mode";
+const PRODUCT_CREATE_REVIEW_STORAGE_KEY = "temu-product-create-reviewed-tasks";
+
+type BatchCreateMode = "classic" | "workflow";
+type WorkflowStatus = "pending" | "ready" | "running" | "success" | "warning";
+
+function getTaskFlowType(task: any): BatchCreateMode {
+  const raw = String(task?.flowType || task?.mode || task?.taskType || "");
+  if (raw === "workflow" || raw === "new-workflow" || raw === "workflow_pack") return "workflow";
+  if (/^workflow_pack_/.test(String(task?.taskId || ""))) return "workflow";
+  return "classic";
+}
+
+function normalizeTaskForFlow(task: any, fallbackMode: BatchCreateMode): any {
+  if (!task) return task;
+  const flowType = task.flowType ? getTaskFlowType(task) : fallbackMode;
+  return { ...task, flowType };
+}
+
+type ValidationIssue = {
+  key: string;
+  label: string;
+  count: number;
+  hint: string;
+};
+
+type ValidationSummary = {
+  totalRows: number;
+  requiredHeadersMissing: string[];
+  suggestedHeadersMissing: string[];
+  blockingIssues: ValidationIssue[];
+  warningIssues: ValidationIssue[];
+  canProceed: boolean;
+};
 
 function extractCellTexts(value: any, seen = new WeakSet<object>()): string[] {
   if (value === null || value === undefined || value === "") return [];
@@ -114,6 +149,8 @@ function getResultSuccessIdentity(item: any) {
 }
 
 function getResultSuccessDetail(item: any) {
+  if (item?.workflowStage === "material_upload" && item?.message) return item.message;
+
   const draftId = item?.productDraftId || item?.draftId || item?.result?.productDraftId || item?.result?.draftId;
   const productId = item?.productId || item?.result?.productId;
   const skcId = item?.skcId || item?.result?.skcId;
@@ -177,12 +214,12 @@ const ERROR_CATEGORY_HINTS: Record<string, string> = {
   "source_download:timeout": "原图下载超时，请稍后重试",
   "source_download:unknown": "原图下载失败，请检查商品原图链接是否可访问",
 
-  "image_gen:network": "AI 生图失败：无法连接生图服务，请检查网络/代理（常见于系统代理拦截 grsaiapi.com / vectorengine.ai）",
-  "image_gen:auth": "AI 生图失败：API 密钥无效或已过期，请在设置 → AI 服务中更新密钥",
-  "image_gen:quota": "AI 生图失败：额度不足或已触发限流，请充值或稍后再试",
-  "image_gen:worker_down": "AI 生图失败：生图子进程未启动，请重启客户端",
-  "image_gen:timeout": "AI 生图超时，上游响应过慢，请稍后重试",
-  "image_gen:unknown": "AI 生图失败，请稍后重试",
+  "image_gen:network": "素材准备失败：无法连接服务，请检查网络/代理（常见于系统代理拦截 grsaiapi.com / vectorengine.ai）",
+  "image_gen:auth": "素材准备失败：API 密钥无效或已过期，请在设置 → AI 服务中更新密钥",
+  "image_gen:quota": "素材准备失败：额度不足或已触发限流，请充值或稍后再试",
+  "image_gen:worker_down": "素材准备失败：处理服务未启动，请重启客户端",
+  "image_gen:timeout": "素材准备超时，上游响应过慢，请稍后重试",
+  "image_gen:unknown": "素材准备失败，请稍后重试",
 
   "image_upload:network": "图片上传卖家中心失败：网络异常，请检查网络后重试",
   "image_upload:auth": "图片上传失败：卖家中心登录状态已失效，请重新登录",
@@ -251,9 +288,121 @@ type PreviewState = {
   rows: any[][];
   total: number;
   detected: Record<string, number>;
+  validation: ValidationSummary;
 } | null;
 
+function getWorkflowStatusMeta(status: WorkflowStatus) {
+  if (status === "success") return { color: "success", label: "已完成" };
+  if (status === "running") return { color: "processing", label: "进行中" };
+  if (status === "warning") return { color: "warning", label: "需处理" };
+  if (status === "ready") return { color: "blue", label: "可执行" };
+  return { color: "default", label: "待开始" };
+}
+
+function WorkflowPanel(props: {
+  step: number;
+  title: string;
+  status: WorkflowStatus;
+  summary: string;
+  detail?: ReactNode;
+  actions?: ReactNode;
+  extra?: ReactNode;
+}) {
+  const { color, label } = getWorkflowStatusMeta(props.status);
+  return (
+    <Card style={{ borderRadius: 20, borderColor: "#eceff4" }} bodyStyle={{ padding: 20, height: "100%" }}>
+      <Space direction="vertical" size={12} style={{ width: "100%" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
+          <Space wrap>
+            <Tag color={color}>{`步骤 ${props.step}`}</Tag>
+            <Text strong>{props.title}</Text>
+          </Space>
+          <Tag color={color}>{label}</Tag>
+        </div>
+        <Text>{props.summary}</Text>
+        {props.detail ? <div style={{ display: "grid", gap: 8 }}>{props.detail}</div> : null}
+        {props.extra}
+        {props.actions ? <Space wrap>{props.actions}</Space> : null}
+      </Space>
+    </Card>
+  );
+}
+
+function buildValidationSummary(dataRows: any[][], detected: Record<string, number>) {
+  const totalRows = Array.isArray(dataRows) ? dataRows.length : 0;
+  const requiredHeadersMissing = [
+    detected.mainImage >= 0 ? "" : "商品原图 / 商品主图",
+    detected.backCategory >= 0 ? "" : "后台分类",
+  ].filter(Boolean);
+  const suggestedHeadersMissing = [
+    detected.title >= 0 ? "" : "商品标题",
+    detected.price >= 0 ? "" : "美元价格",
+    detected.carousel >= 0 ? "" : "商品轮播图",
+  ].filter(Boolean);
+
+  const countMissing = (fieldIndex: number) => {
+    if (fieldIndex < 0) return totalRows;
+    return dataRows.reduce((count, row) => {
+      const text = normalizeCellText(row?.[fieldIndex]);
+      return text ? count : count + 1;
+    }, 0);
+  };
+
+  const blockingIssues: ValidationIssue[] = [
+    {
+      key: "mainImage",
+      label: "原图缺失",
+      count: countMissing(detected.mainImage ?? -1),
+      hint: "自动化上品需要可下载的商品原图，否则素材准备无法开始。",
+    },
+    {
+      key: "backCategory",
+      label: "后台分类缺失",
+      count: countMissing(detected.backCategory ?? -1),
+      hint: "当前自动化草稿链路以【后台分类】为硬约束，缺失时该商品会被跳过。",
+    },
+  ].filter((issue) => issue.count > 0);
+
+  const warningIssues: ValidationIssue[] = [
+    {
+      key: "title",
+      label: "标题缺失",
+      count: countMissing(detected.title ?? -1),
+      hint: "标题缺失会降低 AI 理解商品的准确度，建议补齐。",
+    },
+    {
+      key: "price",
+      label: "价格缺失",
+      count: countMissing(detected.price ?? -1),
+      hint: "价格缺失时会回退默认价格，建议在导表前补齐。",
+    },
+    {
+      key: "carousel",
+      label: "轮播图缺失",
+      count: countMissing(detected.carousel ?? -1),
+      hint: "轮播图不是硬阻塞，但补充后能让素材准备更稳。",
+    },
+  ].filter((issue) => issue.count > 0);
+
+  return {
+    totalRows,
+    requiredHeadersMissing,
+    suggestedHeadersMissing,
+    blockingIssues,
+    warningIssues,
+    canProceed: requiredHeadersMissing.length === 0 && blockingIssues.length === 0,
+  } satisfies ValidationSummary;
+}
+
 function BatchCreate() {
+  const [mode, setMode] = useState<BatchCreateMode>(() => {
+    try {
+      const stored = window.localStorage.getItem(PRODUCT_CREATE_MODE_STORAGE_KEY);
+      return stored === "workflow" ? "workflow" : "classic";
+    } catch {
+      return "classic";
+    }
+  });
   const [filePath, setFilePath] = useState("");
   const [preview, setPreview] = useState<PreviewState>(null);
   const [startRow, setStartRow] = useState(0);
@@ -267,6 +416,18 @@ function BatchCreate() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [filteringTable, setFilteringTable] = useState(false);
   const [filterSummary, setFilterSummary] = useState<any>(null);
+  const [packGenerating, setPackGenerating] = useState(false);
+  const [packResult, setPackResult] = useState<any>(null);
+  const [reviewedTaskIds, setReviewedTaskIds] = useState<Record<string, true>>(() => {
+    try {
+      const raw = window.localStorage.getItem(PRODUCT_CREATE_REVIEW_STORAGE_KEY);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  });
   const progressRef = useRef<any>(null);
   const runningStateRef = useRef(false);
 
@@ -279,19 +440,21 @@ function BatchCreate() {
 
   const syncTaskHistory = (task: any) => {
     if (!task?.taskId) return;
-    setTaskHistory((prev) => [task, ...prev.filter((item) => item?.taskId !== task.taskId)].slice(0, 10));
+    const normalizedTask = normalizeTaskForFlow(task, mode);
+    setTaskHistory((prev) => [normalizedTask, ...prev.filter((item) => item?.taskId !== normalizedTask.taskId)].slice(0, 10));
   };
 
   const applyTaskSnapshot = (task: any) => {
     if (!task) return;
-    if (task.taskId) setSelectedTaskId(task.taskId);
-    setProgressInfo(task);
-    setResults(Array.isArray(task.results) ? task.results : []);
-    setPaused(Boolean(task.paused));
-    setRunning(Boolean(task.running));
-    if (task.csvPath) setFilePath(task.csvPath);
-    if (typeof task.startRow === "number") setStartRow(task.startRow);
-    if (typeof task.count === "number" && task.count > 0) setCount(task.count);
+    const normalizedTask = normalizeTaskForFlow(task, mode);
+    if (normalizedTask.taskId) setSelectedTaskId(normalizedTask.taskId);
+    setProgressInfo(normalizedTask);
+    setResults(Array.isArray(normalizedTask.results) ? normalizedTask.results : []);
+    setPaused(Boolean(normalizedTask.paused));
+    setRunning(Boolean(normalizedTask.running));
+    if (normalizedTask.csvPath) setFilePath(normalizedTask.csvPath);
+    if (typeof normalizedTask.startRow === "number") setStartRow(normalizedTask.startRow);
+    if (typeof normalizedTask.count === "number" && normalizedTask.count > 0) setCount(normalizedTask.count);
   };
 
   const refreshTaskHistory = async (preserveSelection = true) => {
@@ -300,12 +463,14 @@ function BatchCreate() {
       const tasks = await api?.listTasks?.();
       if (!Array.isArray(tasks)) return;
 
-      setTaskHistory(tasks);
-      if (tasks.length === 0) return;
+      const normalizedTasks = tasks.map((task: any) => normalizeTaskForFlow(task, getTaskFlowType(task)));
+      setTaskHistory(normalizedTasks);
+      const modeTasks = normalizedTasks.filter((task: any) => getTaskFlowType(task) === mode);
+      if (modeTasks.length === 0) return;
 
       const preferredTask = preserveSelection
-        ? tasks.find((task: any) => task?.taskId === selectedTaskId) || tasks[0]
-        : tasks[0];
+        ? modeTasks.find((task: any) => task?.taskId === selectedTaskId) || modeTasks[0]
+        : modeTasks[0];
 
       if (!preferredTask) return;
       applyTaskSnapshot(preferredTask);
@@ -379,7 +544,7 @@ function BatchCreate() {
       const data = await api?.readScrapeData?.(`csv_preview:${nextFilePath}`);
       if (!data?.rows || data.rows.length === 0) {
         setPreview(null);
-        message.info("文件已载入，可以直接开始批量创建");
+        message.info(mode === "workflow" ? "文件已载入，可以开始新上品流程" : "文件已载入，可以直接开始批量创建");
         return;
       }
 
@@ -388,8 +553,11 @@ function BatchCreate() {
         title: ["商品标题（中文）", "商品名称", "title"],
         mainImage: ["商品主图", "商品原图"],
         carousel: ["商品轮播图"],
-        category: ["后台分类", "前台分类（中文）", "分类"],
+        backCategory: ["后台分类"],
+        frontCategory: ["前台分类（中文）"],
+        category: ["分类（中文）", "分类关键词", "category", "分类"],
         price: ["美元价格($)", "美元价格", "price"],
+        leafCategoryId: ["leafCatId", "leafCategoryId", "catId", "categoryId", "叶子类目ID"],
       };
 
       for (let rowIndex = 0; rowIndex < Math.min(3, data.rows.length); rowIndex += 1) {
@@ -414,17 +582,19 @@ function BatchCreate() {
       });
 
       const dataRows = data.rows.slice(headerRowIdx + 1);
+      const validation = buildValidationSummary(dataRows, detected);
       setPreview({
         headers,
         rows: dataRows.slice(0, 5),
         total: dataRows.length,
         detected,
+        validation,
       });
       setCount(Math.min(dataRows.length || 1, 10));
       message.success(`已识别 ${dataRows.length} 个商品`);
     } catch {
       setPreview(null);
-      message.info("文件已载入，可以直接开始批量创建");
+      message.info(mode === "workflow" ? "文件已载入，可以开始新上品流程" : "文件已载入，可以直接开始批量创建");
     }
   };
 
@@ -434,6 +604,7 @@ function BatchCreate() {
     setPreview(null);
     setResults([]);
     setFilterSummary(null);
+    setPackResult(null);
     setProgressInfo({ running: false, status: "idle" });
     setRunning(false);
     setPaused(false);
@@ -447,6 +618,7 @@ function BatchCreate() {
     setPreview(null);
     setResults([]);
     setFilterSummary(null);
+    setPackResult(null);
     await loadPreview(nextFilePath);
   };
 
@@ -460,6 +632,7 @@ function BatchCreate() {
     setPreview(null);
     setResults([]);
     setFilterSummary(null);
+    setPackResult(null);
     await loadPreview(nextFilePath);
     return false;
   };
@@ -468,8 +641,10 @@ function BatchCreate() {
     try {
       const tasks = await api?.listTasks?.();
       if (Array.isArray(tasks) && tasks.length > 0) {
-        setTaskHistory(tasks);
-        const preferredTask = tasks.find((task: any) => task?.running) || tasks[0];
+        const normalizedTasks = tasks.map((task: any) => normalizeTaskForFlow(task, getTaskFlowType(task)));
+        setTaskHistory(normalizedTasks);
+        const modeTasks = normalizedTasks.filter((task: any) => getTaskFlowType(task) === mode);
+        const preferredTask = modeTasks.find((task: any) => task?.running) || modeTasks[0];
         if (preferredTask) {
           applyTaskSnapshot(preferredTask);
           if (preferredTask.running) {
@@ -534,6 +709,7 @@ function BatchCreate() {
       setFilePath(response.outputPath);
       setPreview(null);
       setResults([]);
+      setPackResult(null);
       await loadPreview(response.outputPath);
       message.success(`已过滤 ${response.excludedRows || 0} 条高风险商品`);
     } catch (error: any) {
@@ -555,6 +731,7 @@ function BatchCreate() {
     setProgressInfo({
       running: true,
       status: "running",
+      flowType: "classic",
       total: count,
       completed: 0,
       current: "准备中",
@@ -592,9 +769,192 @@ function BatchCreate() {
     }
   };
 
+  const handleWorkflowTest = () => {
+    if (!filePath) {
+      message.warning("请先上传商品表格");
+      return;
+    }
+    message.info("新上品流程会沿用批量上品入口，后台自动准备素材并回写数据。");
+  };
+
+  const handleWorkflowPackImages = async () => {
+    if (!filePath) {
+      message.warning("请先上传商品表格");
+      return;
+    }
+    setPackGenerating(true);
+    setRunning(true);
+    setPaused(false);
+    setPackResult(null);
+    setResults([]);
+    setProgressInfo({
+      running: true,
+      status: "running",
+      flowType: "workflow",
+      step: "新上品流程",
+      current: "后台正在准备素材、上传素材中心并保存草稿",
+      message: `正在处理 ${count} 个商品`,
+      total: count,
+      completed: 0,
+    });
+
+    const buildWorkflowRows = (response: any) => {
+      const responseRows = Array.isArray(response?.results) ? response.results : [];
+      return responseRows.map((item: any, index: number) => {
+        const rowIndex = typeof item?.rowNumber === "number"
+          ? Math.max(item.rowNumber - 1, 0)
+          : startRow + index;
+        const isComplete = item?.success === true;
+        const isPartial = !isComplete && Number(item?.successCount || 0) > 0;
+        const messageText = isComplete
+          ? (item?.message || "商品已保存到 Temu 草稿箱")
+          : isPartial
+            ? (item?.message || "部分商品已处理，请检查结果")
+            : (item?.message || item?.error || "新上品流程处理失败");
+
+        return {
+          ...item,
+          index: rowIndex,
+          name: item?.name || item?.productName || item?.title,
+          success: isComplete,
+          message: messageText,
+          workflowStage: "draft_create",
+          kwcdnTablePath: response?.kwcdnTablePath,
+        };
+      });
+    };
+
+    try {
+      const response = await api?.generatePackImages?.({
+        csvPath: filePath,
+        startRow,
+        count,
+        packCounts: [2, 3, 4],
+        quantityCounts: [1, 2, 3, 4],
+        workflowRandomSpecValueCount: 2,
+        workflowQuantityPriceMultipliers: { 1: 4, 2: 3, 3: 2.5, 4: 2 },
+        createDrafts: true,
+      });
+      const workflowRows = buildWorkflowRows(response);
+      const workflowTask = response?.task || (response?.taskId ? {
+        taskId: response.taskId,
+        flowType: "workflow",
+        status: response?.success === false ? "failed" : "completed",
+        running: false,
+        paused: false,
+        csvPath: filePath,
+        startRow,
+        count,
+        total: Number(response?.total || response?.totalCount || count || workflowRows.length || 0),
+        completed: workflowRows.length,
+        current: response?.success === false ? "处理未完成" : "已完成",
+        step: "新上品流程",
+        message: response?.message || "",
+        results: workflowRows,
+      } : null);
+      if (workflowTask) {
+        syncTaskHistory({ ...workflowTask, flowType: "workflow", results: workflowRows });
+        setSelectedTaskId(workflowTask.taskId || "");
+      }
+      const processedCount = workflowRows.length
+        || Number(response?.successCount || 0) + Number(response?.partialCount || 0) + Number(response?.failCount || 0);
+      const totalCount = Number(response?.total || response?.totalCount || count || workflowRows.length || 0);
+
+      setResults(workflowRows);
+      if (!response?.success) {
+        setPackResult(response || null);
+        setProgressInfo({
+          running: false,
+          status: "failed",
+          step: "新上品流程",
+          flowType: "workflow",
+          current: "处理未完成",
+          message: response?.message || "新上品流程未完成",
+          total: totalCount,
+          completed: processedCount,
+          results: workflowRows,
+        });
+        message.error(response?.message || "新上品流程未完成");
+        return;
+      }
+      setPackResult(response);
+      const ok = response.successCount || 0;
+      const partial = response.partialCount || 0;
+      setProgressInfo({
+        running: false,
+        status: "completed",
+        step: "新上品流程",
+        flowType: "workflow",
+        current: "已完成",
+        message: `新上品流程完成：完整 ${ok} 个，部分 ${partial} 个`,
+        total: totalCount,
+        completed: processedCount || totalCount,
+        results: workflowRows,
+      });
+      message.success(`新上品流程完成：完整 ${ok} 个，部分 ${partial} 个`);
+    } catch (error: any) {
+      setProgressInfo({
+        running: false,
+        status: "failed",
+        flowType: "workflow",
+        step: "新上品流程",
+        current: "处理失败",
+        message: error?.message || "新上品流程启动失败",
+        total: count,
+        completed: 0,
+      });
+      message.error(error?.message || "新上品流程启动失败");
+    } finally {
+      setPackGenerating(false);
+      setRunning(false);
+    }
+  };
+
+  const toggleReviewed = () => {
+    const taskId = selectedTaskId || progressInfo?.taskId;
+    if (!taskId) {
+      message.warning("当前还没有可检查的素材任务");
+      return;
+    }
+    setReviewedTaskIds((prev) => {
+      if (prev[taskId]) {
+        const next = { ...prev };
+        delete next[taskId];
+        message.success("已取消这批素材的检查标记");
+        return next;
+      }
+      message.success("已标记这批素材完成人工检查");
+      return { ...prev, [taskId]: true };
+    });
+  };
+
   useEffect(() => {
     runningStateRef.current = running;
   }, [running]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(PRODUCT_CREATE_MODE_STORAGE_KEY, mode);
+    } catch {
+      // ignore local storage write failures in desktop sandbox edge cases
+    }
+    setSelectedTaskId("");
+    setResults([]);
+    setPackResult(null);
+    setProgressInfo({ running: false, status: "idle" });
+    setPaused(false);
+    setRunning(false);
+    setPackGenerating(false);
+    stopPolling();
+  }, [mode]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(PRODUCT_CREATE_REVIEW_STORAGE_KEY, JSON.stringify(reviewedTaskIds));
+    } catch {
+      // ignore local storage write failures in desktop sandbox edge cases
+    }
+  }, [reviewedTaskIds]);
 
   useEffect(() => {
     void hydrateTaskState();
@@ -607,6 +967,10 @@ function BatchCreate() {
   const hasFile = Boolean(filePath);
   const hasPreview = Boolean(preview?.rows?.length);
   const hasResults = results.length > 0;
+  const hasPackResults = Boolean(packResult?.results?.length);
+  const packCompleteCount = packResult?.successCount || 0;
+  const packPartialCount = packResult?.partialCount || 0;
+  const packFailCount = packResult?.failCount || 0;
   const pausePending = progressInfo?.status === "pausing";
   const hasTaskProgress = Boolean(
     running
@@ -621,18 +985,77 @@ function BatchCreate() {
   const currentFileName = filePath ? filePath.split(/[/\\]/).pop() : "未选择文件";
   const successCount = results.filter((item: any) => item.success).length;
   const failCount = results.filter((item: any) => !item.success).length;
+  const currentTaskId = selectedTaskId || progressInfo?.taskId || "";
+  const currentTaskReviewed = Boolean(currentTaskId && reviewedTaskIds[currentTaskId]);
   const progressTotal = progressInfo?.total || count || 0;
   const progressPercent = progressTotal > 0 ? Math.round(((progressInfo?.completed || 0) / progressTotal) * 100) : 0;
   const completedCount = progressInfo?.completed || 0;
   const pendingCount = Math.max(progressTotal - completedCount, 0);
   const previewData = preview;
+  const validation = previewData?.validation || null;
+  const validationBlockingCount = validation?.blockingIssues.reduce((sum, item) => sum + item.count, 0) || 0;
+  const validationWarningCount = validation?.warningIssues.reduce((sum, item) => sum + item.count, 0) || 0;
+  const taskStepText = [progressInfo?.step, progressInfo?.current, progressInfo?.message].filter(Boolean).join(" · ");
+  const aiStageActive = Boolean(running && /(下载原图|AI生图|上传图片|生成标题)/.test(progressInfo?.step || ""));
+  const draftStageActive = Boolean(running && /(保存草稿|草稿保存|开始处理|执行失败)/.test(progressInfo?.step || ""));
+  const aiStageFailed = results.some((item: any) => !item.success && /^image_gen:|^image_upload:|^source_download:/.test(String(item?.errorCategory || "")));
+  const draftStageFailed = results.some((item: any) => !item.success && /^draft:|^category:|^unknown:/.test(String(item?.errorCategory || "")));
+  const importStepStatus: WorkflowStatus = hasFile ? "success" : "pending";
+  const validationStepStatus: WorkflowStatus = !hasFile
+    ? "pending"
+    : validation?.canProceed
+      ? "success"
+      : "warning";
+  const filterStepStatus: WorkflowStatus = !hasFile
+    ? "pending"
+    : filterSummary
+      ? "success"
+      : validation?.canProceed
+        ? "ready"
+        : "pending";
+  const aiStepStatus: WorkflowStatus = !hasFile
+    ? "pending"
+    : packGenerating || aiStageActive
+      ? "running"
+      : hasPackResults
+        ? (packFailCount > 0 || packPartialCount > 0 ? "warning" : "success")
+        : packResult && !packResult.success
+          ? "warning"
+          : hasResults
+        ? (aiStageFailed ? "warning" : "success")
+        : (validation?.canProceed ? "ready" : "pending");
+  const draftStepStatus: WorkflowStatus = !hasFile
+    ? "pending"
+    : draftStageActive
+      ? "running"
+      : hasResults
+        ? (failCount > 0 || draftStageFailed ? "warning" : "success")
+        : (validation?.canProceed ? "ready" : "pending");
+  const reviewStepStatus: WorkflowStatus = !hasResults
+    ? "pending"
+    : currentTaskReviewed
+      ? "success"
+      : "ready";
+  const workflowOverviewSteps = [
+    { step: 1, title: "导表", status: importStepStatus },
+    { step: 2, title: "读取商品原图", status: validationStepStatus },
+    { step: 3, title: "后台处理", status: aiStepStatus },
+  ];
 
   const previewRows = hasPreview && previewData
     ? previewData.rows.map((row: any[], index: number) => {
       const detected = previewData.detected || {};
       const titleText = detected.title >= 0 ? normalizeCellText(row[detected.title]) : "";
       const carouselText = detected.carousel >= 0 ? normalizeCellText(row[detected.carousel]) : "";
-      const categoryText = detected.category >= 0 ? normalizeCategoryCellText(row[detected.category]) : "";
+      const categoryText = detected.backCategory >= 0
+        ? normalizeCategoryCellText(row[detected.backCategory])
+        : detected.category >= 0
+          ? normalizeCategoryCellText(row[detected.category])
+          : detected.frontCategory >= 0
+            ? normalizeCategoryCellText(row[detected.frontCategory])
+            : detected.leafCategoryId >= 0
+              ? normalizeCellText(row[detected.leafCategoryId])
+              : "";
       const priceText = detected.price >= 0 ? normalizeCellText(row[detected.price]) : "";
       return {
         key: index,
@@ -644,7 +1067,7 @@ function BatchCreate() {
     })
     : [];
 
-  const visibleTaskHistory = taskHistory.slice(0, 3);
+  const visibleTaskHistory = taskHistory.filter((task) => getTaskFlowType(task) === mode).slice(0, 3);
   const resultRows = results
     .map((item: any, index: number) => ({
       key: `${item?.index ?? index}-${getResultSuccessIdentity(item) || item?.message || ""}`,
@@ -700,75 +1123,515 @@ function BatchCreate() {
     },
   ];
 
+  const getWorkflowMaterialImageLabel = (image: any) => {
+    if (image?.label) return String(image.label);
+    if (image?.role === "original" || image?.imageType === "original") return "原图";
+    if (image?.packCount) return `${image.packCount}PCS`;
+    return String(image?.imageType || "素材");
+  };
+  const getWorkflowMaterialImageTagColor = (image: any) => {
+    if (image?.skipped) return "warning";
+    return image?.imageUrl ? "blue" : "error";
+  };
+  const renderWorkflowMaterialUploadStatus = (image: any) => {
+    if (image?.kwcdnUrl) return <Tag color="success">已上传</Tag>;
+    if (image?.uploadError) return <Tag color="error">上传失败</Tag>;
+    if (image?.skipped || image?.uploadEligible === false) return <Tag color="warning">不上传</Tag>;
+    return null;
+  };
+  const renderWorkflowKwcdnUrl = (image: any) => {
+    if (!image?.kwcdnUrl) return null;
+    const url = String(image.kwcdnUrl);
+    return (
+      <Typography.Paragraph
+        copyable={{ text: url }}
+        ellipsis={{ rows: 1, tooltip: url }}
+        style={{ margin: "6px 0 0", fontSize: 12 }}
+      >
+        {url}
+      </Typography.Paragraph>
+    );
+  };
+
+  const modeHint = mode === "classic"
+    ? "保留你之前一直在用的 AI 生图上品流程：导表后直接走 AI 生图、图片上传和草稿生成。"
+    : "新上品流程会沿用批量上品入口，后台自动准备素材、上传素材中心并回写 kwcdn 数据。";
+
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
-      <div className="create-flow-toolbar">
-        <div className="create-flow-toolbar__summary">
-          <Text className="create-flow-toolbar__eyebrow">批量创建</Text>
-          <Title level={4} style={{ margin: 0 }}>上传商品表格</Title>
-          <Text type="secondary" className="create-flow-toolbar__desc">
-            导入 Excel 或 CSV 后，系统会整理关键字段、可选过滤高风险商品，再批量生成 Temu 草稿。
-          </Text>
-          <Space wrap className="app-table-meta">
-            <Tag color={batchTagColor}>{batchStatusLabel}</Tag>
-            {hasFile ? <Tag>{currentFileName}</Tag> : <Tag>还没有选择文件</Tag>}
-            {hasFile ? <Tag>{`从第 ${startRow + 1} 行开始`}</Tag> : null}
-            {preview?.total ? <Tag color="blue">{`共 ${preview.total} 个商品`}</Tag> : null}
-            {hasFile ? <Tag>{`本次处理 ${count} 个`}</Tag> : null}
-          </Space>
+      <Card style={{ borderRadius: 22, borderColor: "#eceff4" }} bodyStyle={{ padding: 20 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 16, flexWrap: "wrap", alignItems: "center" }}>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <Text className="create-flow-toolbar__eyebrow">上品流程模式</Text>
+            <Title level={4} style={{ margin: "4px 0 0" }}>
+              {mode === "classic" ? "AI 生图上品流程" : "新上品流程"}
+            </Title>
+            <Text type="secondary" className="create-flow-toolbar__desc">
+              {modeHint}
+            </Text>
+          </div>
+          <Segmented<BatchCreateMode>
+            value={mode}
+            onChange={(value) => setMode(value as BatchCreateMode)}
+            options={[
+              { label: "AI 生图上品流程", value: "classic" },
+              { label: "新上品流程", value: "workflow" },
+            ]}
+          />
         </div>
+      </Card>
 
-        <div className="create-flow-toolbar__controls">
-          <div className="create-flow-toolbar__inputs">
-            <div className="create-flow-toolbar__input">
-              <span className="create-flow-toolbar__label">起始行</span>
-              <InputNumber min={0} value={startRow} onChange={(value) => setStartRow(value || 0)} style={{ width: "100%" }} />
-            </div>
-            <div className="create-flow-toolbar__input">
-              <span className="create-flow-toolbar__label">处理数量</span>
-              <InputNumber min={1} max={100} value={count} onChange={(value) => setCount(value || 1)} style={{ width: "100%" }} />
-            </div>
+      {mode === "classic" ? (
+        <div className="create-flow-toolbar">
+          <div className="create-flow-toolbar__summary">
+            <Text className="create-flow-toolbar__eyebrow">批量创建</Text>
+            <Title level={4} style={{ margin: 0 }}>AI 生图上品流程</Title>
+            <Text type="secondary" className="create-flow-toolbar__desc">
+              这是你原来的老流程。导入 Excel 或 CSV 后，可选过滤高风险商品，然后直接走 AI 生图、图片上传和 Temu 草稿生成。
+            </Text>
+            <Space wrap className="app-table-meta">
+              <Tag color={batchTagColor}>{batchStatusLabel}</Tag>
+              {hasFile ? <Tag>{currentFileName}</Tag> : <Tag>还没有选择文件</Tag>}
+              {hasFile ? <Tag>{`从第 ${startRow + 1} 行开始`}</Tag> : null}
+              {preview?.total ? <Tag color="blue">{`共 ${preview.total} 个商品`}</Tag> : null}
+              {hasFile ? <Tag>{`本次处理 ${count} 个`}</Tag> : null}
+            </Space>
           </div>
 
-          <div className="app-table-actions">
-            <Button icon={<FileExcelOutlined />} onClick={() => void selectFile()}>
-              {hasFile ? "更换文件" : "选择文件"}
-            </Button>
-            {hasFile ? (
-              <Button icon={<ReloadOutlined />} onClick={() => void loadPreview(filePath)}>
-                重新识别
+          <div className="create-flow-toolbar__controls">
+            <div className="create-flow-toolbar__inputs">
+              <div className="create-flow-toolbar__input">
+                <span className="create-flow-toolbar__label">起始行</span>
+                <InputNumber min={0} value={startRow} onChange={(value) => setStartRow(value || 0)} style={{ width: "100%" }} />
+              </div>
+              <div className="create-flow-toolbar__input">
+                <span className="create-flow-toolbar__label">处理数量</span>
+                <InputNumber min={1} max={100} value={count} onChange={(value) => setCount(value || 1)} style={{ width: "100%" }} />
+              </div>
+            </div>
+
+            <div className="app-table-actions">
+              <Button icon={<FileExcelOutlined />} onClick={() => void selectFile()}>
+                {hasFile ? "更换文件" : "选择文件"}
               </Button>
-            ) : null}
-            <Button icon={<FileExcelOutlined />} disabled={!hasFile} loading={filteringTable} onClick={handleFilterProductTable}>
-              过滤高风险
-            </Button>
-            <Button icon={<HistoryOutlined />} loading={historyLoading} onClick={() => void refreshTaskHistory()}>
-              刷新记录
-            </Button>
-            <Button
-              type="primary"
-              icon={<CloudUploadOutlined />}
-              disabled={!hasFile || running}
-              loading={running && !paused}
-              onClick={handleBatch}
-              className="create-primary-button"
-            >
-              {running ? "处理中..." : `开始批量创建（${count} 个）`}
-            </Button>
-            {running ? (
+              {hasFile ? (
+                <Button icon={<ReloadOutlined />} onClick={() => void loadPreview(filePath)}>
+                  重新识别
+                </Button>
+              ) : null}
+              <Button icon={<FileExcelOutlined />} disabled={!hasFile} loading={filteringTable} onClick={handleFilterProductTable}>
+                过滤高风险
+              </Button>
+              <Button icon={<HistoryOutlined />} loading={historyLoading} onClick={() => void refreshTaskHistory()}>
+                刷新记录
+              </Button>
               <Button
-                icon={paused ? <PlayCircleOutlined /> : <PauseCircleOutlined />}
-                onClick={togglePause}
-                className="create-secondary-button"
-                disabled={pausePending}
+                type="primary"
+                icon={<CloudUploadOutlined />}
+                disabled={!hasFile || running}
+                loading={running && !paused}
+                onClick={handleBatch}
+                className="create-primary-button"
               >
-                {pausePending ? "暂停中..." : paused ? "继续处理" : "暂停处理"}
+                {running ? "处理中..." : `开始批量创建（${count} 个）`}
               </Button>
-            ) : null}
-            {hasFile ? <Button onClick={resetSheetState}>清空文件</Button> : null}
+              {running ? (
+                <Button
+                  icon={paused ? <PlayCircleOutlined /> : <PauseCircleOutlined />}
+                  onClick={togglePause}
+                  className="create-secondary-button"
+                  disabled={pausePending}
+                >
+                  {pausePending ? "暂停中..." : paused ? "继续处理" : "暂停处理"}
+                </Button>
+              ) : null}
+              {hasFile ? <Button onClick={resetSheetState}>清空文件</Button> : null}
+            </div>
           </div>
         </div>
-      </div>
+      ) : (
+        <div style={{ display: "grid", gap: 16 }}>
+          <Card style={{ borderRadius: 18, borderColor: "#eef2f6" }} bodyStyle={{ padding: 20 }}>
+            <div style={{ display: "grid", gap: 18 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 16, flexWrap: "wrap", alignItems: "flex-start" }}>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <Text className="create-flow-toolbar__eyebrow">新上品流程</Text>
+                  <Title level={4} style={{ margin: "4px 0 0" }}>批量创建</Title>
+                  <Text type="secondary" className="create-flow-toolbar__desc">
+                    导入 Excel 或 CSV 后，可先过滤高风险商品，然后按新流程批量处理。
+                  </Text>
+                </div>
+                <Space wrap className="app-table-meta">
+                  <Tag color={batchTagColor}>{packGenerating ? "处理中" : batchStatusLabel}</Tag>
+                  {hasFile ? <Tag>{currentFileName}</Tag> : <Tag>待上传商品表</Tag>}
+                  {hasFile ? <Tag>{`从第 ${startRow + 1} 行开始`}</Tag> : null}
+                  {preview?.total ? <Tag color="blue">{`共 ${preview.total} 个商品`}</Tag> : null}
+                </Space>
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 }}>
+                <div>
+                  <div className="create-flow-toolbar__label">起始行</div>
+                  <InputNumber min={0} value={startRow} onChange={(value) => setStartRow(value || 0)} style={{ width: "100%" }} />
+                </div>
+                <div>
+                  <div className="create-flow-toolbar__label">处理数量</div>
+                  <InputNumber min={1} max={100} value={count} onChange={(value) => setCount(value || 1)} style={{ width: "100%" }} />
+                </div>
+              </div>
+
+              {validation && !validation.canProceed ? (
+                <Alert
+                  type="warning"
+                  showIcon
+                  message={`表格有 ${validationBlockingCount} 条需要注意`}
+                  description={validation.requiredHeadersMissing.length > 0 ? `缺少必需列：${validation.requiredHeadersMissing.join("、")}` : "可以继续处理当前选择范围；缺少关键字段的商品会在结果里标记失败。"}
+                />
+              ) : null}
+              {packResult?.message && !hasPackResults ? (
+                <Alert type="warning" showIcon message={packResult.message} />
+              ) : null}
+
+              <div className="app-table-actions">
+                <Button icon={<FileExcelOutlined />} onClick={() => void selectFile()}>
+                  {hasFile ? "更换文件" : "选择文件"}
+                </Button>
+                {hasFile ? (
+                  <Button icon={<ReloadOutlined />} onClick={() => void loadPreview(filePath)}>
+                    重新识别
+                  </Button>
+                ) : null}
+                <Button icon={<FileExcelOutlined />} disabled={!hasFile} loading={filteringTable} onClick={handleFilterProductTable}>
+                  {filterSummary ? "重新筛选" : "过滤高风险"}
+                </Button>
+                <Button icon={<HistoryOutlined />} loading={historyLoading} onClick={() => void refreshTaskHistory()}>
+                  刷新记录
+                </Button>
+                <Button
+                  type="primary"
+                  icon={<CloudUploadOutlined />}
+                  disabled={!hasFile || packGenerating || running}
+                  loading={packGenerating}
+                  onClick={handleWorkflowPackImages}
+                  className="create-primary-button"
+                >
+                  {packGenerating ? "处理中..." : `开始批量创建（${count} 个）`}
+                </Button>
+                {hasFile ? <Button onClick={resetSheetState}>清空文件</Button> : null}
+              </div>
+            </div>
+          </Card>
+
+          <div style={{ display: "none" }}>
+            <StatCard compact title="当前状态" value={batchStatusLabel} color={running ? "brand" : paused ? "purple" : "neutral"} />
+            <StatCard compact title="商品表" value={hasFile ? currentFileName : "待上传"} color={hasFile ? "success" : "neutral"} />
+            <StatCard compact title="总商品数" value={preview?.total || 0} color="blue" />
+            <StatCard compact title="人工复核" value={currentTaskReviewed ? "已标记" : hasResults ? "待复核" : "未开始"} color={currentTaskReviewed ? "success" : hasResults ? "danger" : "neutral"} />
+          </div>
+
+          <div style={{ display: "none" }}>
+            {workflowOverviewSteps.map((item) => {
+              const meta = getWorkflowStatusMeta(item.status);
+              return (
+                <Card key={item.step} style={{ borderRadius: 18, borderColor: "#eef2f6" }} bodyStyle={{ padding: 16 }}>
+                  <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                    <Text type="secondary">{`步骤 ${item.step}`}</Text>
+                    <Text strong>{item.title}</Text>
+                    <Tag color={meta.color}>{meta.label}</Tag>
+                  </Space>
+                </Card>
+              );
+            })}
+          </div>
+
+          <div style={{ display: "none" }}>
+            <WorkflowPanel
+              step={1}
+              title="导表"
+              status={importStepStatus}
+              summary={hasFile ? `当前文件：${currentFileName}` : "先上传 Excel / CSV，系统会自动识别字段并准备预览。"}
+              detail={hasFile ? (
+                <Space wrap className="app-table-meta">
+                  <Tag color="blue">{`共 ${preview?.total || 0} 条商品`}</Tag>
+                  <Tag>{`从第 ${startRow + 1} 行开始`}</Tag>
+                  <Tag>{`本次处理 ${count} 条`}</Tag>
+                </Space>
+              ) : (
+                <Text type="secondary">支持 Excel / CSV。上传后会自动生成前 5 行预览。</Text>
+              )}
+              actions={(
+                <>
+                  <Button icon={<FileExcelOutlined />} onClick={() => void selectFile()}>
+                    {hasFile ? "更换文件" : "选择文件"}
+                  </Button>
+                  {hasFile ? (
+                    <Button icon={<ReloadOutlined />} onClick={() => void loadPreview(filePath)}>
+                      重新识别
+                    </Button>
+                  ) : null}
+                </>
+              )}
+            />
+
+            <WorkflowPanel
+              step={2}
+              title="字段校验"
+              status={validationStepStatus}
+              summary={!hasFile
+                ? "上传表格后自动校验关键字段，先找出会阻塞上品的列和空值。"
+                : validation?.canProceed
+                  ? `字段校验已通过${validationWarningCount > 0 ? `，还有 ${validationWarningCount} 条建议优化项` : ""}。`
+                  : `当前有 ${validationBlockingCount} 条阻塞项，需要先处理后再继续。`}
+              detail={validation ? (
+                <>
+                  {validation.requiredHeadersMissing.length > 0 ? (
+                    <Alert
+                      type="error"
+                      showIcon
+                      message={`缺少必需列：${validation.requiredHeadersMissing.join("、")}`}
+                    />
+                  ) : null}
+                  {validation.blockingIssues.map((issue) => (
+                    <div key={issue.key} style={{ display: "grid", gap: 4 }}>
+                      <Text strong>{`${issue.label}：${issue.count} / ${validation.totalRows}`}</Text>
+                      <Text type="secondary">{issue.hint}</Text>
+                    </div>
+                  ))}
+                  {validation.warningIssues.slice(0, 2).map((issue) => (
+                    <div key={issue.key} style={{ display: "grid", gap: 4 }}>
+                      <Text strong>{`${issue.label}：${issue.count} / ${validation.totalRows}`}</Text>
+                      <Text type="secondary">{issue.hint}</Text>
+                    </div>
+                  ))}
+                  {validation.suggestedHeadersMissing.length > 0 ? (
+                    <Text type="secondary">{`建议补充列：${validation.suggestedHeadersMissing.join("、")}`}</Text>
+                  ) : null}
+                </>
+              ) : (
+                <Text type="secondary">没有文件时不会触发字段校验。</Text>
+              )}
+              actions={hasFile ? (
+                <Button icon={<ReloadOutlined />} onClick={() => void loadPreview(filePath)}>
+                  重新校验
+                </Button>
+              ) : null}
+            />
+
+            <WorkflowPanel
+              step={3}
+              title="核价筛选"
+              status={filterStepStatus}
+              summary={!hasFile
+                ? "字段准备好之后，可以先筛掉高风险商品再进入后续流程。"
+                : filterSummary
+                  ? `已保留 ${filterSummary.keptRows || 0} 条，排除 ${filterSummary.excludedRows || 0} 条高风险商品。`
+                  : "这一步仍然保留为可选项，但建议在批量上品前先做一次筛表。"}
+              detail={filterSummary ? (
+                <Space wrap>
+                  <Tag color="blue">液体 {filterSummary.excludedSummary?.liquid || 0}</Tag>
+                  <Tag color="purple">膏体 {filterSummary.excludedSummary?.paste || 0}</Tag>
+                  <Tag color="orange">带电 {filterSummary.excludedSummary?.electric || 0}</Tag>
+                  <Tag color="cyan">服饰鞋 {filterSummary.excludedSummary?.clothing || 0}</Tag>
+                  <Tag color="red">IP {filterSummary.excludedSummary?.ip || 0}</Tag>
+                </Space>
+              ) : (
+                <Text type="secondary">如果这批商品来源比较杂，先筛表能减少后面素材准备的无效消耗。</Text>
+              )}
+              actions={(
+                <Button icon={<FileExcelOutlined />} disabled={!hasFile} loading={filteringTable} onClick={handleFilterProductTable}>
+                  {filterSummary ? "重新筛选" : "过滤高风险"}
+                </Button>
+              )}
+            />
+
+            <WorkflowPanel
+              step={4}
+              title="素材准备"
+              status={aiStepStatus}
+              summary={!hasFile
+                ? "导表后，这一步会自动准备后续上品需要的商品素材。"
+                : packGenerating
+                  ? "正在按商品顺序准备上品素材。"
+                  : hasPackResults
+                    ? "后台素材已经准备完成，并已回写可用数据。"
+                    : packResult && !packResult.success
+                      ? "素材准备失败，请先看失败原因。"
+                      : aiStageActive
+                        ? (taskStepText || "正在逐商品准备上品素材。")
+                        : hasResults
+                          ? (aiStageFailed ? "本批次里有商品卡在素材准备阶段，建议先看失败原因。" : "这批商品的素材准备阶段已经跑完。")
+                          : "点击下方按钮开始新上品流程。"}
+              detail={(
+                <>
+                  <Text type="secondary">系统会按商品顺序准备上品所需素材，上传素材中心，并回写 kwcdn URL。</Text>
+                  <Text type="secondary">这些步骤属于后台流程，不需要用户单独操作。</Text>
+                  {packResult?.message && !hasPackResults ? (
+                    <Alert type="warning" showIcon message={packResult.message} />
+                  ) : null}
+                  {hasPackResults ? (
+                    <div style={{ display: "grid", gap: 12, marginTop: 4 }}>
+                      <Space wrap>
+                        <Tag color="success">{`完整 ${packCompleteCount}`}</Tag>
+                        <Tag color={packPartialCount > 0 ? "warning" : "blue"}>{`部分 ${packPartialCount}`}</Tag>
+                        <Tag color={packFailCount > 0 ? "error" : "default"}>{`失败 ${packFailCount}`}</Tag>
+                        {packResult?.outputDir ? <Tag>{packResult.outputDir}</Tag> : null}
+                        {packResult?.kwcdnTablePath ? <Tag>{`回写表 ${packResult.kwcdnTablePath}`}</Tag> : null}
+                      </Space>
+                      {packResult.results.map((item: any, itemIndex: number) => (
+                        <div key={`${item.rowNumber || itemIndex}-${item.name}`} style={{ border: "1px solid #eef1f6", borderRadius: 8, padding: 12 }}>
+                          <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                            <Space wrap>
+                              <Text strong>{item.name || `商品 ${itemIndex + 1}`}</Text>
+                              <Tag>{`表格行 ${item.rowNumber || item.index + 1}`}</Tag>
+                              <Tag color={item.success ? "success" : item.successCount > 0 ? "warning" : "error"}>
+                                {item.message || (item.success ? "素材已准备" : "素材准备失败")}
+                              </Tag>
+                            </Space>
+                            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(132px, 1fr))", gap: 12 }}>
+                              {(item.images || []).map((image: any) => (
+                                <div key={image.imageType} style={{ border: "1px solid #edf0f5", borderRadius: 8, padding: 8, background: "#fff" }}>
+                                  <Tag color={getWorkflowMaterialImageTagColor(image)}>{getWorkflowMaterialImageLabel(image)}</Tag>
+                                  {renderWorkflowMaterialUploadStatus(image)}
+                                  {image.imageUrl ? (
+                                    <>
+                                      <img
+                                        src={image.imageUrl}
+                                        alt={getWorkflowMaterialImageLabel(image)}
+                                        style={{ display: "block", width: "100%", aspectRatio: "1 / 1", objectFit: "contain", marginTop: 8, background: "#fff" }}
+                                      />
+                                      {renderWorkflowKwcdnUrl(image)}
+                                      {image.uploadError ? (
+                                        <Text type="danger" style={{ display: "block", marginTop: 6 }}>{image.uploadError}</Text>
+                                      ) : null}
+                                    </>
+                                  ) : (
+                                    <Text type={image.skipped ? "warning" : "danger"} style={{ display: "block", marginTop: 8 }}>{image.error || (image.skipped ? "已按规则跳过" : "未生成")}</Text>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          </Space>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  {hasResults ? (
+                    <Space wrap>
+                      <Tag color="success">{`成功 ${successCount}`}</Tag>
+                      <Tag color={aiStageFailed ? "error" : "blue"}>{`需关注 ${failCount}`}</Tag>
+                    </Space>
+                  ) : null}
+                </>
+              )}
+              actions={(
+                <>
+                  <Button
+                    type="primary"
+                    icon={<CloudUploadOutlined />}
+                    disabled={!hasFile}
+                    loading={packGenerating}
+                    onClick={handleWorkflowPackImages}
+                    className="create-primary-button"
+                  >
+                    开始新上品流程
+                  </Button>
+                  <Button icon={<HistoryOutlined />} loading={historyLoading} onClick={() => void refreshTaskHistory()}>
+                    刷新任务
+                  </Button>
+                </>
+              )}
+            />
+
+            <WorkflowPanel
+              step={5}
+              title="流程结果"
+              status={draftStepStatus}
+              summary={running
+                ? batchStatusMessage
+                : hasResults
+                  ? `当前批次已产出 ${successCount} 条成功草稿，${failCount} 条待处理。`
+                  : "这里用于查看本次批量处理范围与结果状态。"}
+              detail={(
+                <>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 12 }}>
+                    <div>
+                      <div className="create-flow-toolbar__label">起始行</div>
+                      <InputNumber min={0} value={startRow} onChange={(value) => setStartRow(value || 0)} style={{ width: "100%" }} />
+                    </div>
+                    <div>
+                      <div className="create-flow-toolbar__label">处理数量</div>
+                      <InputNumber min={1} max={100} value={count} onChange={(value) => setCount(value || 1)} style={{ width: "100%" }} />
+                    </div>
+                  </div>
+                  <Space wrap className="app-table-meta">
+                    <Tag color={batchTagColor}>{batchStatusLabel}</Tag>
+                    {hasFile ? <Tag>{`从第 ${startRow + 1} 行开始`}</Tag> : null}
+                    {hasFile ? <Tag>{`本次处理 ${count} 条`}</Tag> : null}
+                  </Space>
+                </>
+              )}
+              actions={(
+                <>
+                  <Button
+                    type="primary"
+                    icon={<CloudUploadOutlined />}
+                    disabled={!hasFile || Boolean(validation && !validation.canProceed)}
+                    onClick={handleWorkflowTest}
+                    className="create-primary-button"
+                  >
+                    查看流程结果
+                  </Button>
+                  <Button icon={<HistoryOutlined />} loading={historyLoading} onClick={() => void refreshTaskHistory()}>
+                    刷新记录
+                  </Button>
+                  {hasFile ? <Button onClick={resetSheetState}>清空文件</Button> : null}
+                </>
+              )}
+            />
+
+            <WorkflowPanel
+              step={6}
+              title="人工检查"
+              status={reviewStepStatus}
+              summary={!hasResults
+                ? "素材准备完成后，这里会承接失败原因、历史批次和人工检查标记。"
+                : currentTaskReviewed
+                  ? "当前批次已经标记完成人工检查。"
+                  : "建议先处理失败项，再抽检成功素材，确认后把这批任务标记为已检查。"}
+              detail={hasResults ? (
+                <>
+                  <Space wrap>
+                    <Tag color="success">{`成功 ${successCount}`}</Tag>
+                    <Tag color={failCount > 0 ? "error" : "blue"}>{`失败 ${failCount}`}</Tag>
+                    <Tag>{`成功率 ${results.length ? Math.round(successCount / results.length * 100) : 0}%`}</Tag>
+                  </Space>
+                  {normalizedFailedReasonSummary.length > 0 ? (
+                    <div style={{ display: "grid", gap: 6 }}>
+                      {normalizedFailedReasonSummary.map(([reason, count]) => (
+                        <Text key={reason} type="secondary">{`${count} 条：${reason}`}</Text>
+                      ))}
+                    </div>
+                  ) : (
+                    <Text type="secondary">这批暂时没有失败项，建议抽检几条成功草稿确认标题、图片和类目。</Text>
+                  )}
+                </>
+              ) : (
+                <Text type="secondary">还没有草稿结果时，可以先看下方历史记录，恢复之前的批次继续复核。</Text>
+              )}
+              actions={(
+                <>
+                  <Button onClick={toggleReviewed} disabled={!hasResults}>
+                    {currentTaskReviewed ? "取消复核标记" : "标记已复核"}
+                  </Button>
+                  <Button icon={<HistoryOutlined />} loading={historyLoading} onClick={() => void refreshTaskHistory()}>
+                    刷新历史
+                  </Button>
+                </>
+              )}
+            />
+          </div>
+        </div>
+      )}
 
       {filterSummary ? (
         <Alert
@@ -985,7 +1848,7 @@ function BatchCreate() {
 }
 
 export default function ProductCreate() {
-  const pageDescription = "导入表格后，系统会自动整理关键字段，可先过滤高风险商品，再批量生成商品草稿。";
+  const pageDescription = "同一页保留两条上品流程：AI 生图上品流程走老链路，新上品流程走新的批量上品链路。";
 
   return (
     <div className="dashboard-shell product-create-shell">
@@ -994,7 +1857,7 @@ export default function ProductCreate() {
         eyebrow="商品创建"
         title="上品管理"
         subtitle={pageDescription}
-        actions={<Tag color="orange">批量创建</Tag>}
+        actions={<Tag color="orange">双上品流程</Tag>}
       />
 
       <div>

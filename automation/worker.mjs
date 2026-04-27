@@ -28,9 +28,15 @@ function normalizeChatBaseUrl(value, fallback = "") {
   return raw.replace(/\/chat\/completions\/?$/i, "").replace(/\/+$/, "");
 }
 
+function normalizeGeminiBaseUrl(value, fallback = "") {
+  return normalizeChatBaseUrl(value, fallback).replace(/\/v1$/i, "");
+}
+
 const workerFilePath = fileURLToPath(import.meta.url);
 const workerDirPath = path.dirname(workerFilePath);
 const projectRootDir = path.resolve(workerDirPath, "..");
+const roamingDataDir = process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming";
+const workerRuntimeDataDir = process.env.APP_USER_DATA || path.join(roamingDataDir, "temu-automation");
 
 // Load API keys from local env files first, then legacy temu-claw .env
 const envFiles = [
@@ -73,27 +79,88 @@ const ATTRIBUTE_AI_MODEL = process.env.VECTORENGINE_ATTRIBUTE_MODEL || AI_MODEL;
 let _aiGeminiClient = null;
 function getAiGeminiClient() {
   if (_aiGeminiClient || !AI_API_KEY) return _aiGeminiClient;
-  _aiGeminiClient = createGeminiClient({ apiKey: AI_API_KEY, baseURL: AI_BASE_URL });
+  _aiGeminiClient = createGeminiClient({ apiKey: AI_API_KEY, baseURL: normalizeGeminiBaseUrl(AI_BASE_URL) });
   return _aiGeminiClient;
 }
 let _aiGeminiProClient = null;
 function getAiGeminiProClient() {
   const proKey = AI_PRO_API_KEY || AI_API_KEY;
   if (_aiGeminiProClient || !proKey) return _aiGeminiProClient;
-  _aiGeminiProClient = createGeminiClient({ apiKey: proKey, baseURL: AI_BASE_URL });
+  _aiGeminiProClient = createGeminiClient({ apiKey: proKey, baseURL: normalizeGeminiBaseUrl(AI_BASE_URL) });
   return _aiGeminiProClient;
 }
+function createOpenAICompatibleClient({ apiKey, baseURL, timeout = 300000 } = {}) {
+  if (!apiKey) return null;
+  const endpointBase = normalizeChatBaseUrl(baseURL, AI_BASE_URL);
+  return {
+    chat: {
+      completions: {
+        create: async (params = {}) => {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), timeout);
+          try {
+            const response = await fetch(`${endpointBase}/chat/completions`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${apiKey}`,
+              },
+              body: JSON.stringify({
+                model: params.model,
+                messages: params.messages || [],
+                temperature: params.temperature,
+                max_tokens: params.max_tokens,
+              }),
+              signal: controller.signal,
+            });
+            const text = await response.text();
+            if (!response.ok) {
+              const error = new Error(`OpenAI-compatible API ${response.status}: ${text.slice(0, 500)}`);
+              error.status = response.status;
+              throw error;
+            }
+            return JSON.parse(text);
+          } finally {
+            clearTimeout(timer);
+          }
+        },
+      },
+    },
+  };
+}
+let _aiOpenAICompatibleClient = null;
+function getAiOpenAICompatibleClient() {
+  if (_aiOpenAICompatibleClient || !AI_API_KEY) return _aiOpenAICompatibleClient;
+  _aiOpenAICompatibleClient = createOpenAICompatibleClient({ apiKey: AI_API_KEY, baseURL: AI_BASE_URL });
+  return _aiOpenAICompatibleClient;
+}
 function getAiClientForModel(modelName) {
-  if (/pro-preview/i.test(modelName || "")) {
+  if (/^gemini/i.test(modelName || "") && /pro-preview/i.test(modelName || "")) {
     return getAiGeminiProClient() || getAiGeminiClient();
   }
-  return getAiGeminiClient();
+  if (/^gemini/i.test(modelName || "")) return getAiGeminiClient();
+  return getAiOpenAICompatibleClient();
 }
 let _attributeGeminiClient = null;
 function getAttributeGeminiClient() {
   if (_attributeGeminiClient || !ATTRIBUTE_AI_API_KEY) return _attributeGeminiClient;
-  _attributeGeminiClient = createGeminiClient({ apiKey: ATTRIBUTE_AI_API_KEY, baseURL: ATTRIBUTE_AI_BASE_URL });
+  _attributeGeminiClient = createGeminiClient({ apiKey: ATTRIBUTE_AI_API_KEY, baseURL: normalizeGeminiBaseUrl(ATTRIBUTE_AI_BASE_URL) });
   return _attributeGeminiClient;
+}
+let _attributeOpenAICompatibleClient = null;
+function getAttributeOpenAICompatibleClient() {
+  if (_attributeOpenAICompatibleClient || !ATTRIBUTE_AI_API_KEY) return _attributeOpenAICompatibleClient;
+  _attributeOpenAICompatibleClient = createOpenAICompatibleClient({
+    apiKey: ATTRIBUTE_AI_API_KEY,
+    baseURL: ATTRIBUTE_AI_BASE_URL,
+  });
+  return _attributeOpenAICompatibleClient;
+}
+function getAttributeClientForModel(modelName) {
+  if (/^gemini/i.test(modelName || "")) {
+    return getAttributeGeminiClient();
+  }
+  return getAttributeOpenAICompatibleClient() || getAiClientForModel(modelName);
 }
 const GENERATED_WORKER_AUTH_TOKEN = crypto.randomBytes(32).toString("hex");
 const WORKER_AUTH_TOKEN = process.env.WORKER_AUTH_TOKEN || GENERATED_WORKER_AUTH_TOKEN;
@@ -956,22 +1023,73 @@ function createPendingTaskTracker() {
   };
 }
 
-function isExcelLikeFile(filePath) {
+function detectSpreadsheetFileKind(filePath) {
   try {
     const extension = path.extname(filePath).toLowerCase();
-    if (extension === ".xlsx" || extension === ".xls") return true;
+    if (extension === ".xlsx" || extension === ".xls") return "excel";
     const fd = fs.openSync(filePath, "r");
     try {
       const header = Buffer.alloc(4);
       const bytesRead = fs.readSync(fd, header, 0, 4, 0);
-      if (bytesRead >= 2 && header[0] === 0x50 && header[1] === 0x4b) return true;
+      if (bytesRead >= 2 && header[0] === 0x50 && header[1] === 0x4b) return "excel";
+      if (bytesRead >= 4 && header[0] === 0xd0 && header[1] === 0xcf && header[2] === 0x11 && header[3] === 0xe0) return "excel";
     } finally {
       fs.closeSync(fd);
     }
   } catch (e) {
     logSilent("spreadsheet.detect", e);
   }
-  return false;
+  return "csv";
+}
+
+function isExcelLikeFile(filePath) {
+  return detectSpreadsheetFileKind(filePath) === "excel";
+}
+
+function parseSpreadsheetCsvLine(line) {
+  const result = [];
+  let current = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    const next = line[i + 1];
+    if (ch === '"' && inQuotes && next === '"') {
+      current += '"';
+      i += 1;
+    } else if (ch === '"') {
+      inQuotes = !inQuotes;
+    } else if (ch === "," && !inQuotes) {
+      result.push(current.trim());
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  result.push(current.trim());
+  return result;
+}
+
+function readSpreadsheetRows(filePath, options = {}) {
+  const kind = detectSpreadsheetFileKind(filePath);
+  try {
+    const wb = XLSX.readFile(filePath, { cellDates: false });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    if (!ws) return { kind, rows: [] };
+    const rows = XLSX.utils.sheet_to_json(ws, {
+      header: 1,
+      raw: false,
+      defval: options.defval ?? "",
+    });
+    return { kind, rows };
+  } catch (error) {
+    if (kind !== "csv") throw error;
+    const csvContent = fs.readFileSync(filePath, "utf8");
+    const rows = csvContent
+      .split(/\r?\n/)
+      .filter((line) => line.trim())
+      .map((line) => parseSpreadsheetCsvLine(line));
+    return { kind, rows };
+  }
 }
 
 function resolveReadScrapeDataRequest(taskKey) {
@@ -1091,6 +1209,33 @@ function buildSpecNameCandidates(title = "", preferredSpecName = "") {
     "升级款",
     "精选款",
   ].filter(Boolean)));
+}
+
+function buildSecondarySpecNameCandidates(title = "", usedNames = []) {
+  const used = new Set((Array.isArray(usedNames) ? usedNames : [usedNames])
+    .map((item) => String(item || "").trim())
+    .filter(Boolean));
+  return buildSpecNameCandidates(title || "")
+    .filter((item) => !used.has(item))
+    .concat(["精选款", "升级款", "实用款", "热销款"])
+    .filter((item, index, list) => item && !used.has(item) && list.indexOf(item) === index);
+}
+
+function cleanWorkflowListingTitle(rawTitle = "") {
+  return String(rawTitle || "")
+    .replace(/[【\[][^】\]]*(?:\d+(?:\.\d+)?\s*(?:cm|mm|m|inch|in|ft|ml|l|oz|g|kg|lb|lbs|pcs?|pieces?|packs?|sets?)|尺寸|尺码|规格|数量|件装|个装|只装|套装|组合装)[^】\]]*[】\]]/gi, " ")
+    .replace(/[（(][^）)]*(?:\d+(?:\.\d+)?\s*(?:cm|mm|m|inch|in|ft|ml|l|oz|g|kg|lb|lbs|pcs?|pieces?|packs?|sets?)|尺寸|尺码|规格|数量|件装|个装|只装|套装|组合装)[^）)]*[）)]/gi, " ")
+    .replace(/\d+(?:\.\d+)?\s*[x×*]\s*\d+(?:\.\d+)?(?:\s*[x×*]\s*\d+(?:\.\d+)?)?\s*(?:cm|mm|m|inch|in|ft)?/gi, " ")
+    .replace(/\b(?:set|pack|bundle)\s+of\s+\d+\b/gi, " ")
+    .replace(/\b\d+(?:\.\d+)?\s*(?:cm|mm|m|inch|in|ft|ml|l|oz|g|kg|lb|lbs)\b/gi, " ")
+    .replace(/\b\d+\s*(?:pcs?|pieces?|packs?|sets?|pairs?)\b/gi, " ")
+    .replace(/\d+\s*(?:件装|个装|只装|片装|包装|套装|组装|对装|件套|件|个|只|片|包|套|组|对|瓶|支|张|条|根|块|台|袋)/g, " ")
+    .replace(/(?:多件装|组合装|套装|数量|规格|尺寸|尺码)\s*[:：]?\s*/g, " ")
+    .replace(/[|｜/]+/g, " ")
+    .replace(/[，,、；;]\s*[，,、；;]+/g, "，")
+    .replace(/^[\s，,、；;|｜/]+|[\s，,、；;|｜/]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function extractCellTextFragments(value, seen = new WeakSet()) {
@@ -1501,7 +1646,8 @@ function buildSellerCentralUrl(targetPath = "/goods/list") {
 
 function isSellerCentralWorkspaceUrl(url = "") {
   const text = String(url || "");
-  return /^https:\/\/agentseller(?:-[a-z]+)?\.temu\.com\//i.test(text);
+  return /^https:\/\/agentseller(?:-[a-z]+)?\.temu\.com\//i.test(text)
+    && !isSellerCentralAuthUrl(text);
 }
 
 async function openSellerCentralTarget(page, targetPath = "/goods/list", options = {}) {
@@ -1986,6 +2132,7 @@ function isSellerCentralAuthUrl(url = "") {
   const text = String(url || "");
   return text.includes("/main/authentication")
     || text.includes("/main/entry")
+    || /agentseller(?:-[a-z]+)?\.temu\.com\/auth\//i.test(text)
     || text.includes("seller-login")
     || text.includes("kuajingmaihuo.com/settle");
 }
@@ -2162,7 +2309,15 @@ async function ensureSellerCentralSessionReady(page, targetPath = "/goods/list",
   return false;
 }
 
+const sellerAuthPopupPagesInFlight = new WeakSet();
+
 async function handleSellerAuthPopupPage(newPage, logPrefix = "[popup-monitor]") {
+  if (!newPage) return;
+  if (sellerAuthPopupPagesInFlight.has(newPage)) {
+    console.error(`${logPrefix} Popup already being handled, skipping duplicate handler`);
+    return;
+  }
+  sellerAuthPopupPagesInFlight.add(newPage);
   try {
     const url = newPage.url();
     console.error(`${logPrefix} New page detected: ${url}`);
@@ -2300,20 +2455,28 @@ async function handleSellerAuthPopupPage(newPage, logPrefix = "[popup-monitor]")
     console.error(`${logPrefix} Auth dialog not resolved after 10 attempts`);
   } catch (error) {
     console.error(`${logPrefix} Error handling popup: ${error.message}`);
+  } finally {
+    sellerAuthPopupPagesInFlight.delete(newPage);
   }
 }
 
 function registerSellerAuthPopupMonitor(logPrefix = "[popup-monitor]") {
+  const targetContext = context || browserState.context;
+  if (!targetContext) {
+    console.error(`${logPrefix} Monitor skipped: browser context not ready`);
+    return () => {};
+  }
+
   let active = true;
   const handler = async (newPage) => {
     if (!active) return;
     await handleSellerAuthPopupPage(newPage, logPrefix);
   };
 
-  context.on("page", handler);
+  targetContext.on("page", handler);
   console.error(`${logPrefix} Monitor registered`);
 
-  for (const page of context.pages()) {
+  for (const page of targetContext.pages()) {
     if (!page || page.isClosed?.()) continue;
     handler(page).catch((error) => console.error(`${logPrefix} Existing page scan failed: ${error.message}`));
   }
@@ -2321,7 +2484,7 @@ function registerSellerAuthPopupMonitor(logPrefix = "[popup-monitor]") {
   return () => {
     active = false;
     try {
-      context.removeListener("page", handler);
+      targetContext.removeListener("page", handler);
     } catch (error) {
       console.error(`${logPrefix} cleanup error: ${error.message}`);
     }
@@ -8053,10 +8216,8 @@ async function handleRequest(body) {
       const request = resolveReadScrapeDataRequest(params.key);
       if (!request || !fs.existsSync(request.filePath)) return null;
       if (request.type === "csv_preview") {
-        const wb = XLSX.readFile(request.filePath);
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
-        return { rows, csvPath: request.filePath };
+        const { rows, kind } = readSpreadsheetRows(request.filePath, { defval: "" });
+        return { rows, csvPath: request.filePath, fileKind: kind };
       }
       try {
         return JSON.parse(fs.readFileSync(request.filePath, "utf8"));
@@ -8342,6 +8503,9 @@ async function handleRequest(body) {
       // 纯 API 批量创建商品
       await ensureBrowser();
       return await batchCreateViaAPI(params);
+    }
+    case "workflow_pack_images": {
+      return await generateWorkflowPackImages(params);
     }
     case "auto_pricing": {
       // 完整自动核价：CSV → AI生图 → 上传 → 提交核价
@@ -8946,11 +9110,12 @@ function syncDraftPayloadDisplayFields(payload, params = {}, imageUrls = []) {
   if (!payload || typeof payload !== "object") return payload;
 
   const normalizedTitle = String(params.title || payload.productName || "").trim() || "商品";
-  const normalizedImages = Array.from(new Set(
-    (Array.isArray(imageUrls) ? imageUrls : [])
-      .map((value) => String(value || "").trim())
-      .filter(Boolean)
-  )).slice(0, 10);
+  const rawImages = (Array.isArray(imageUrls) ? imageUrls : [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  const normalizedImages = (params.workflowQuantitySpecs || params.preserveDuplicateMainImages)
+    ? rawImages.slice(0, 10)
+    : Array.from(new Set(rawImages)).slice(0, 10);
   const primaryImage = normalizedImages[0] || "";
   const titleLanguages = normalizeDraftLanguageList(
     params.titleLanguages,
@@ -8962,6 +9127,7 @@ function syncDraftPayloadDisplayFields(payload, params = {}, imageUrls = []) {
   );
   const carouselImageI18nReqs = buildDraftImageI18nReqs(normalizedImages, materialLanguages);
   const thumbImageI18nReqs = buildDraftImageI18nReqs(primaryImage ? [primaryImage] : [], materialLanguages);
+  const preserveSkuThumbUrls = Boolean(params.workflowQuantitySpecs || params.preserveSkuThumbUrls);
 
   payload.productName = normalizedTitle;
   payload.materialMultiLanguages = [...materialLanguages];
@@ -8985,9 +9151,13 @@ function syncDraftPayloadDisplayFields(payload, params = {}, imageUrls = []) {
       if (!Array.isArray(skc.productSkuReqs)) continue;
       for (const sku of skc.productSkuReqs) {
         if (!sku || typeof sku !== "object") continue;
-        if (primaryImage) sku.thumbUrl = primaryImage;
+        const existingSkuThumb = String(sku.thumbUrl || "").trim();
+        const skuThumbUrl = preserveSkuThumbUrls && existingSkuThumb ? existingSkuThumb : primaryImage;
+        if (skuThumbUrl) sku.thumbUrl = skuThumbUrl;
         if (Array.isArray(sku.productSkuThumbUrlI18nReqs)) {
-          sku.productSkuThumbUrlI18nReqs = thumbImageI18nReqs;
+          sku.productSkuThumbUrlI18nReqs = preserveSkuThumbUrls
+            ? buildDraftImageI18nReqs(skuThumbUrl ? [skuThumbUrl] : [], materialLanguages)
+            : thumbImageI18nReqs;
         }
       }
     }
@@ -9022,6 +9192,395 @@ function summarizeDraftVerificationResult(rawResult = {}) {
     imageCount: carouselImageUrls.filter(Boolean).length,
     skcCount: productSkcList.length,
   };
+}
+
+function normalizeDraftImageIdentity(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    const pathname = decodeURIComponent(parsed.pathname || "")
+      .replace(/_[0-9]+x[0-9]+(?=\.(?:jpe?g|png|webp|gif|avif)$)/i, "");
+    return `${parsed.host}${pathname}`.toLowerCase();
+  } catch {
+    return raw
+      .split(/[?#]/)[0]
+      .replace(/_[0-9]+x[0-9]+(?=\.(?:jpe?g|png|webp|gif|avif)$)/i, "")
+      .toLowerCase();
+  }
+}
+
+function normalizeWorkflowQuantityCount(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return 0;
+  const exact = raw.match(/^(\d+)\s*(?:PCS?|Pcs?|件|个)?$/i);
+  if (exact) return Math.max(1, Number(exact[1]) || 0);
+  const loose = raw.match(/^(\d+)\s*(?:PCS?|Pcs?)$/i);
+  return loose ? Math.max(1, Number(loose[1]) || 0) : 0;
+}
+
+function getExpectedQuantitySkuImageMap(expectedQuantitySkuImages, expectedQuantityCounts = [1, 2, 3, 4]) {
+  if (!expectedQuantitySkuImages || typeof expectedQuantitySkuImages !== "object") return {};
+  const counts = Array.from(new Set(
+    (Array.isArray(expectedQuantityCounts) && expectedQuantityCounts.length > 0 ? expectedQuantityCounts : [1, 2, 3, 4])
+      .map((value) => Math.max(1, Number(value) || 0))
+      .filter(Boolean)
+  ));
+  const map = {};
+  for (const count of counts) {
+    const url = expectedQuantitySkuImages[count]
+      || expectedQuantitySkuImages[String(count)]
+      || expectedQuantitySkuImages[`${count}PC`]
+      || expectedQuantitySkuImages[`${count}PCS`]
+      || expectedQuantitySkuImages[`${count}pc`]
+      || expectedQuantitySkuImages[`${count}pcs`];
+    if (url) map[count] = String(url).trim();
+  }
+  return map;
+}
+
+function inferDraftSkuQuantityCount(sku = {}) {
+  const specLists = [
+    sku.productSkuSpecList,
+    sku.productSkuSpecVOS,
+    sku.productSkuSpecReqs,
+    sku.specs,
+  ].filter(Array.isArray);
+  for (const specList of specLists) {
+    for (const spec of specList) {
+      const specName = String(spec?.specName || spec?.name || spec?.value || "").trim();
+      const parentSpecName = String(spec?.parentSpecName || spec?.parentName || "").trim();
+      const count = normalizeWorkflowQuantityCount(specName);
+      if (count && (/数量|件数|pcs?|pack/i.test(parentSpecName) || /pcs?/i.test(specName))) {
+        return count;
+      }
+    }
+  }
+  const multipack = sku.productSkuMultiPackReq || sku.productSkuMultiPackVO || sku.productSkuMultiPack || {};
+  const pieces = Math.max(0, Number(multipack.numberOfPieces || multipack.pieces || 0) || 0);
+  return pieces || 0;
+}
+
+function getDraftSkuThumbUrls(sku = {}) {
+  const urls = [];
+  const pushUrl = (value) => {
+    const url = String(value || "").trim();
+    if (url) urls.push(url);
+  };
+  pushUrl(sku.thumbUrl);
+  pushUrl(sku.skuThumbUrl);
+  pushUrl(sku.imageUrl);
+
+  for (const list of [
+    sku.productSkuThumbUrlI18nReqs,
+    sku.productSkuThumbUrlI18nList,
+    sku.productSkuImageProcessExtVOList,
+    sku.productSkuImageList,
+  ]) {
+    if (!Array.isArray(list)) continue;
+    for (const item of list) {
+      pushUrl(item?.imageUrl || item?.imgUrl || item?.thumbUrl || item?.url);
+    }
+  }
+
+  return Array.from(new Set(urls));
+}
+
+function verifyDraftQuantitySkuImages(rawResult = {}, options = {}) {
+  const expectedMap = getExpectedQuantitySkuImageMap(
+    options.expectedQuantitySkuImages,
+    options.expectedQuantityCounts
+  );
+  const expectedCounts = Object.keys(expectedMap).map((value) => Number(value)).filter(Boolean);
+  if (expectedCounts.length === 0) {
+    return { ok: true, skipped: true, expectedCounts: [] };
+  }
+
+  const productSkcList = Array.isArray(rawResult?.productSkcList) ? rawResult.productSkcList : [];
+  const skuList = productSkcList.flatMap((skc) => Array.isArray(skc?.productSkuList) ? skc.productSkuList : []);
+  const missingCounts = [];
+  const mismatched = [];
+  const skuThumbs = [];
+
+  for (const count of expectedCounts) {
+    const expectedUrl = expectedMap[count];
+    const expectedIdentity = normalizeDraftImageIdentity(expectedUrl);
+    const sku = skuList.find((item) => inferDraftSkuQuantityCount(item) === count);
+    if (!sku) {
+      missingCounts.push(count);
+      continue;
+    }
+    const actualUrls = getDraftSkuThumbUrls(sku);
+    const matched = actualUrls.some((url) => normalizeDraftImageIdentity(url) === expectedIdentity);
+    skuThumbs.push({ count, expectedUrl, actualUrls });
+    if (!matched) {
+      mismatched.push({ count, expectedUrl, actualUrls });
+    }
+  }
+
+  return {
+    ok: missingCounts.length === 0 && mismatched.length === 0,
+    skipped: false,
+    expectedCounts,
+    missingCounts,
+    mismatched,
+    skuThumbs,
+  };
+}
+
+function verifyDraftWorkflowSpecMatrix(rawResult = {}, options = {}) {
+  const expectedRandomValueCount = Math.max(0, Math.floor(Number(options.expectedRandomSpecValueCount) || 0));
+  const hasExpectedQuantityCounts = Array.isArray(options.expectedQuantityCounts)
+    && options.expectedQuantityCounts.length > 0;
+  const expectedQuantityCounts = Array.from(new Set(
+    (hasExpectedQuantityCounts ? options.expectedQuantityCounts : [])
+      .map((value) => Math.max(1, Number(value) || 0))
+      .filter(Boolean)
+  ));
+  if (!expectedRandomValueCount && expectedQuantityCounts.length === 0) {
+    return { ok: true, skipped: true };
+  }
+
+  const productSkcList = Array.isArray(rawResult?.productSkcList) ? rawResult.productSkcList : [];
+  const skuList = productSkcList.flatMap((skc) => Array.isArray(skc?.productSkuList) ? skc.productSkuList : []);
+  const valuesByParent = new Map();
+  for (const sku of skuList) {
+    const specLists = [
+      sku.productSkuSpecList,
+      sku.productSkuSpecVOS,
+      sku.productSkuSpecReqs,
+      sku.specs,
+    ].filter(Array.isArray);
+    for (const specList of specLists) {
+      for (const spec of specList) {
+        const parentName = String(spec?.parentSpecName || spec?.parentName || "").trim();
+        const specName = String(spec?.specName || spec?.name || spec?.value || "").trim();
+        if (!parentName || !specName) continue;
+        if (!valuesByParent.has(parentName)) valuesByParent.set(parentName, new Set());
+        valuesByParent.get(parentName).add(specName);
+      }
+    }
+  }
+
+  let randomParent = null;
+  let quantityParent = null;
+  for (const [parentName, values] of valuesByParent.entries()) {
+    if (isWorkflowQuantityParentSpecName(parentName)) {
+      quantityParent = { parentName, values: Array.from(values) };
+    } else if (!randomParent || values.size > randomParent.values.length) {
+      randomParent = { parentName, values: Array.from(values) };
+    }
+  }
+
+  const quantityValues = new Set((quantityParent?.values || []).map((value) => normalizeWorkflowQuantityCount(value)).filter(Boolean));
+  const missingQuantityCounts = expectedQuantityCounts.filter((count) => !quantityValues.has(count));
+  const randomValueCount = randomParent?.values?.length || 0;
+  const expectedSkuCount = Math.max(1, expectedRandomValueCount || 1) * Math.max(1, expectedQuantityCounts.length || 1);
+
+  return {
+    ok: randomValueCount >= expectedRandomValueCount
+      && missingQuantityCounts.length === 0
+      && skuList.length >= expectedSkuCount,
+    skipped: false,
+    randomParent,
+    quantityParent,
+    expectedRandomValueCount,
+    randomValueCount,
+    expectedQuantityCounts,
+    missingQuantityCounts,
+    skuCount: skuList.length,
+    expectedSkuCount,
+  };
+}
+
+function getDraftSkuSaleNetContent(sku = {}) {
+  return sku?.productSkuSaleExtAttr?.productSkuNetContent
+    || sku?.productSkuMultiPack?.productSkuNetContent
+    || {};
+}
+
+function getDraftSkuSaleTotalContent(sku = {}) {
+  const saleExt = sku?.productSkuSaleExtAttr || {};
+  const multiPack = sku?.productSkuMultiPack || {};
+  const packIncludeInfo = saleExt.packIncludeInfo
+    || multiPack.packIncludeInfo
+    || {};
+  const numberOfPiecesNew = Number(saleExt.numberOfPiecesNew ?? multiPack.numberOfPiecesNew ?? 0);
+  const pieceNewUnitCode = Number(saleExt.pieceNewUnitCode ?? multiPack.pieceNewUnitCode ?? 0);
+  if (Number(packIncludeInfo?.numberOfPieces) > 0 || Number(packIncludeInfo?.pieceUnitCode) > 0) {
+    return {
+      ...packIncludeInfo,
+      netContentNumber: Number(packIncludeInfo.numberOfPieces) || Number(packIncludeInfo.netContentNumber) || 0,
+      netContentUnitCode: Number(packIncludeInfo.pieceUnitCode) || Number(packIncludeInfo.netContentUnitCode) || 0,
+    };
+  }
+  if (numberOfPiecesNew > 0 || pieceNewUnitCode > 0) {
+    return {
+      numberOfPiecesNew,
+      pieceNewUnitCode,
+      netContentNumber: numberOfPiecesNew,
+      netContentUnitCode: pieceNewUnitCode,
+    };
+  }
+  return saleExt.totalNetContent
+    || multiPack.totalNetContent
+    || saleExt.totalNetContentInfo
+    || multiPack.totalNetContentInfo
+    || {};
+}
+
+function verifyDraftWorkflowSkuRequiredFields(rawResult = {}, options = {}) {
+  if (!options.expectWorkflowQuantitySkuRequiredFields) {
+    return { ok: true, skipped: true };
+  }
+
+  const productSkcList = Array.isArray(rawResult?.productSkcList) ? rawResult.productSkcList : [];
+  const skuList = productSkcList.flatMap((skc) => Array.isArray(skc?.productSkuList) ? skc.productSkuList : []);
+  const issues = [];
+  const skuSummary = [];
+
+  for (const sku of skuList) {
+    const specs = (Array.isArray(sku?.productSkuSpecList) ? sku.productSkuSpecList : [])
+      .map((spec) => String(spec?.specName || "").trim())
+      .filter(Boolean)
+      .join(" / ");
+    const quantityCount = inferDraftSkuQuantityCount(sku);
+    const netContent = getDraftSkuSaleNetContent(sku);
+    const totalContent = getDraftSkuSaleTotalContent(sku);
+    const suggestedPrice = sku?.productSkuSuggestedPrice || {};
+    const individuallyPacked = sku?.productSkuSaleExtAttr?.productSkuIndividuallyPacked
+      ?? sku?.productSkuMultiPack?.individuallyPacked
+      ?? null;
+    const summary = {
+      specs,
+      quantityCount,
+      netContent,
+      totalContent,
+      suggestedPrice,
+      individuallyPacked,
+    };
+    skuSummary.push(summary);
+
+    if (!(Number(netContent?.netContentNumber) > 0) || !(Number(netContent?.netContentUnitCode) > 0)) {
+      issues.push({ specs, field: "productSkuNetContent", value: netContent });
+    }
+    if (!(Number(totalContent?.netContentNumber) > 0) || !(Number(totalContent?.netContentUnitCode) > 0)) {
+      issues.push({ specs, field: "totalNetContent", value: totalContent });
+    }
+    if (quantityCount === 1 && ![2, 3, 4].includes(Number(totalContent?.netContentNumber))) {
+      issues.push({ specs, field: "totalNetContent_1pc_random", value: totalContent });
+    }
+    if (quantityCount > 1 && Number(totalContent?.netContentNumber) !== quantityCount) {
+      issues.push({ specs, field: "totalNetContent_quantity_count", value: totalContent, expected: quantityCount });
+    }
+    if (quantityCount > 1 && individuallyPacked === null) {
+      issues.push({ specs, field: "individuallyPacked", value: individuallyPacked });
+    }
+    if (!(Number(suggestedPrice?.suggestedPrice) > 0) || suggestedPrice?.suggestedPriceCurrencyType === "NA") {
+      issues.push({ specs, field: "suggestedPrice", value: suggestedPrice });
+    }
+  }
+
+  return {
+    ok: skuList.length > 0 && issues.length === 0,
+    skipped: false,
+    skuCount: skuList.length,
+    issues,
+    skuSummary,
+  };
+}
+
+async function verifyWorkflowSkuRequiredFieldsInDom(page, options = {}) {
+  if (!options.expectWorkflowQuantitySkuRequiredFields || !page) {
+    return { ok: true, skipped: true };
+  }
+
+  try {
+    await page.evaluate(() => {
+      const all = [...document.querySelectorAll("body *")];
+      const skuNode = all.find((node) => String(node?.innerText || "").trim() === "SKU 信息")
+        || all.find((node) => String(node?.innerText || "").includes("SKU 信息"));
+      if (skuNode?.scrollIntoView) {
+        skuNode.scrollIntoView({ block: "start" });
+      } else {
+        window.scrollTo(0, Math.max(0, Math.floor(document.body.scrollHeight * 0.65)));
+      }
+    }).catch(() => {});
+    await page.waitForTimeout(1000).catch(() => {});
+    await page.evaluate(() => window.scrollBy(0, 350)).catch(() => {});
+    await page.waitForTimeout(600).catch(() => {});
+
+    const state = await page.evaluate(() => {
+      const bodyText = document.body?.innerText || "";
+      const inputs = [...document.querySelectorAll("input")].map((node, index) => {
+        const rect = node.getBoundingClientRect();
+        let ancestorText = "";
+        let current = node;
+        for (let depth = 0; current && depth < 6; depth += 1, current = current.parentElement) {
+          const text = String(current.innerText || "").trim().replace(/\s+/g, " ");
+          if (text && text.length > ancestorText.length) ancestorText = text.slice(0, 260);
+        }
+        return {
+          index,
+          value: String(node.value || "").trim(),
+          placeholder: String(node.getAttribute("placeholder") || "").trim(),
+          visible: Boolean(rect.width && rect.height),
+          x: Math.round(rect.x || 0),
+          y: Math.round(rect.y || 0),
+          ancestorText,
+        };
+      }).filter((item) => item.visible);
+
+      const packIncludeInputs = inputs
+        .filter((item) => item.ancestorText.includes("共计内含"))
+        .map((item) => ({ value: item.value, ancestorText: item.ancestorText, x: item.x, y: item.y }));
+      const skuRelatedInputs = inputs
+        .filter((item) => (
+          item.value === "NA"
+          || item.value === "CNY"
+          || item.ancestorText.includes("共计内含")
+          || item.ancestorText.includes("单品数量")
+          || item.ancestorText.includes("单品净含量")
+        ))
+        .slice(0, 80);
+
+      return {
+        hasSuggestPriceError: bodyText.includes("请输入建议零售价") || bodyText.includes("请输入/建议零售价"),
+        hasPackIncludeError: bodyText.includes("请输入共计内含"),
+        hasNaCurrencyInVisibleInputs: inputs.some((item) => item.value === "NA"),
+        packIncludeInputs,
+        skuRelatedInputs,
+      };
+    });
+
+    const expectedMinimumPackInputs = Math.max(1, Math.min(4, Array.isArray(options.expectedQuantityCounts)
+      ? options.expectedQuantityCounts.length
+      : 4));
+    const invalidPackIncludeInputs = state.packIncludeInputs.filter((item) => !(Number(item.value) > 0));
+    return {
+      ok: !state.hasSuggestPriceError
+        && !state.hasPackIncludeError
+        && !state.hasNaCurrencyInVisibleInputs
+        && state.packIncludeInputs.length >= expectedMinimumPackInputs
+        && invalidPackIncludeInputs.length === 0,
+      skipped: false,
+      hasSuggestPriceError: state.hasSuggestPriceError,
+      hasPackIncludeError: state.hasPackIncludeError,
+      hasNaCurrencyInVisibleInputs: state.hasNaCurrencyInVisibleInputs,
+      expectedMinimumPackInputs,
+      packIncludeInputs: state.packIncludeInputs,
+      invalidPackIncludeInputs,
+      skuRelatedInputs: state.skuRelatedInputs,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      skipped: false,
+      error: error?.message || String(error),
+      packIncludeInputs: [],
+      invalidPackIncludeInputs: [],
+    };
+  }
 }
 
 async function verifyDraftPersistedContent(page, draftId, options = {}) {
@@ -9094,12 +9653,27 @@ async function verifyDraftPersistedContent(page, draftId, options = {}) {
       if (!summary.hasImages && domState.domImageCount >= 1) {
         summary.hasImages = true;
       }
+      const quantitySkuImageCheck = verifyDraftQuantitySkuImages(draftResult || {}, options);
+      summary.quantitySkuImageCheck = quantitySkuImageCheck;
+      const specMatrixCheck = verifyDraftWorkflowSpecMatrix(draftResult || {}, options);
+      summary.specMatrixCheck = specMatrixCheck;
+      const skuRequiredFieldsCheck = verifyDraftWorkflowSkuRequiredFields(draftResult || {}, options);
+      summary.skuRequiredFieldsCheck = skuRequiredFieldsCheck;
+      const workflowSkuDomCheck = await verifyWorkflowSkuRequiredFieldsInDom(page, options);
+      summary.workflowSkuDomCheck = workflowSkuDomCheck;
+      const expectedMainImageMin = Math.max(0, Math.floor(Number(options.expectedMainImageMin) || 0));
+      const mainImageCountCheck = {
+        ok: expectedMainImageMin <= 0 || summary.imageCount >= expectedMainImageMin,
+        expectedMin: expectedMainImageMin,
+        actual: summary.imageCount,
+      };
+      summary.mainImageCountCheck = mainImageCountCheck;
 
       lastSummary = summary;
       lastDomState = domState;
       lastRawResult = draftResult || {};
 
-      if (summary.hasTitle && summary.hasImages) {
+      if (summary.hasTitle && summary.hasImages && mainImageCountCheck.ok && quantitySkuImageCheck.ok && specMatrixCheck.ok && skuRequiredFieldsCheck.ok && workflowSkuDomCheck.ok) {
         return {
           ok: true,
           reason: "verified",
@@ -9110,7 +9684,7 @@ async function verifyDraftPersistedContent(page, draftId, options = {}) {
         };
       }
 
-      console.error(`${logPrefix} Attempt ${attempt} incomplete: hasTitle=${summary.hasTitle} hasImages=${summary.hasImages}`);
+      console.error(`${logPrefix} Attempt ${attempt} incomplete: hasTitle=${summary.hasTitle} hasImages=${summary.hasImages} mainImages=${summary.imageCount}/${expectedMainImageMin || "-"} quantitySkuImages=${quantitySkuImageCheck.ok} specMatrix=${specMatrixCheck.ok} skuRequired=${skuRequiredFieldsCheck.ok} skuDom=${workflowSkuDomCheck.ok}`);
       if (attempt < maxAttempts) {
         await page.waitForTimeout(2000).catch(() => {});
       }
@@ -9118,7 +9692,15 @@ async function verifyDraftPersistedContent(page, draftId, options = {}) {
 
     return {
       ok: false,
-      reason: "draft_shell_only",
+      reason: lastSummary?.mainImageCountCheck && !lastSummary.mainImageCountCheck.ok
+        ? "main_image_count_insufficient"
+          : (lastSummary?.specMatrixCheck && !lastSummary.specMatrixCheck.ok
+            ? "workflow_spec_matrix_mismatch"
+            : (lastSummary?.quantitySkuImageCheck && !lastSummary.quantitySkuImageCheck.ok
+              ? "quantity_sku_image_mismatch"
+              : (lastSummary?.skuRequiredFieldsCheck && !lastSummary.skuRequiredFieldsCheck.ok
+                ? "workflow_sku_required_fields_missing"
+                : (lastSummary?.workflowSkuDomCheck && !lastSummary.workflowSkuDomCheck.ok ? "workflow_sku_dom_required_fields_missing" : "draft_shell_only")))),
       summary: lastSummary,
       domState: lastDomState,
       rawResult: lastRawResult,
@@ -9907,6 +10489,33 @@ function extractJsonObjectFromText(text) {
   }
 }
 
+function extractJsonArrayFromText(text) {
+  let content = String(text || "").trim();
+  if (!content) return null;
+
+  const closedFence = content.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (closedFence && closedFence[1]) {
+    content = closedFence[1].trim();
+  } else {
+    const openFence = content.match(/```(?:json)?\s*([\s\S]*)$/i);
+    if (openFence && openFence[1]) content = openFence[1].trim();
+  }
+
+  try {
+    const parsed = JSON.parse(content);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    const match = content.match(/\[[\s\S]*\]/);
+    if (!match) return null;
+    try {
+      const parsed = JSON.parse(match[0]);
+      return Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+}
+
 // 容错版：剥离 ```json fence、按括号平衡抽取、对被 max_tokens 截断的 JSON 做补齐（关字符串/数组/对象 + 删尾逗号）。
 // 专门给 compare 场景用：LLM 偶尔会无视"纯 JSON"指令，或在 token 上限处断尾。
 function extractJsonObjectLenient(text) {
@@ -10101,9 +10710,1144 @@ async function directAnalyzeProductImages({ sourceImagePath, productTitle, extra
   }
 }
 
+function normalizeWorkflowPackCounts(value) {
+  const source = Array.isArray(value) && value.length > 0 ? value : [2, 3, 4];
+  const counts = source
+    .map((item) => Math.floor(Number(item)))
+    .filter((item) => Number.isFinite(item) && item >= 2 && item <= 12);
+  return Array.from(new Set(counts)).slice(0, 6);
+}
+
+function getWorkflowPackImageType(count) {
+  return `pack_${count}pc`;
+}
+
+const WORKFLOW_ORIGINAL_IMAGE_TYPE = "original";
+const WORKFLOW_MIN_MAIN_IMAGE_COUNT = 5;
+const WORKFLOW_MAX_MAIN_IMAGE_COUNT = 10;
+const WORKFLOW_QUANTITY_PRICE_MULTIPLIERS = {
+  1: 4,
+  2: 3,
+  3: 2.5,
+  4: 2,
+};
+
+function getWorkflowOriginalImageType(index = 0) {
+  const normalizedIndex = Math.max(0, Number(index) || 0);
+  return normalizedIndex === 0 ? WORKFLOW_ORIGINAL_IMAGE_TYPE : `${WORKFLOW_ORIGINAL_IMAGE_TYPE}_${normalizedIndex + 1}`;
+}
+
+function isWorkflowOriginalImageType(imageType = "") {
+  return String(imageType || "") === WORKFLOW_ORIGINAL_IMAGE_TYPE
+    || /^original_\d+$/i.test(String(imageType || ""));
+}
+
+function normalizeWorkflowQuantityPriceMultipliers(value) {
+  const normalized = { ...WORKFLOW_QUANTITY_PRICE_MULTIPLIERS };
+  if (value && typeof value === "object") {
+    for (const [key, rawMultiplier] of Object.entries(value)) {
+      const count = Math.max(1, Number(String(key).replace(/[^\d.]/g, "")) || 0);
+      const multiplier = Number(rawMultiplier);
+      if (count && Number.isFinite(multiplier) && multiplier > 0) normalized[count] = multiplier;
+    }
+  }
+  return normalized;
+}
+
+function getWorkflowQuantityPriceMultiplier(count, multipliers = WORKFLOW_QUANTITY_PRICE_MULTIPLIERS) {
+  const normalizedCount = Math.max(1, Number(count) || 1);
+  return Number(multipliers[normalizedCount]) || normalizedCount;
+}
+
+const WORKFLOW_PACK_LOG_FILE = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "workflow-pack.log");
+
+function logWorkflowPack(taskId, message) {
+  const line = `[${new Date().toISOString()}] [${taskId || "workflow-pack"}] ${message}`;
+  console.error(`[workflow-pack] ${message}`);
+  try {
+    fs.mkdirSync(path.dirname(WORKFLOW_PACK_LOG_FILE), { recursive: true });
+    fs.appendFileSync(WORKFLOW_PACK_LOG_FILE, `${line}\n`, "utf8");
+  } catch (error) {
+    logSilent("workflow-pack.log", error);
+  }
+}
+
+function buildWorkflowWhitePackPlans(productTitle, packCounts) {
+  return packCounts.map((count) => {
+    const imageType = getWorkflowPackImageType(count);
+    const packLabel = `${count}PCS`;
+    return {
+      imageType,
+      prompt: [
+        "Create a clean retail catalog product photo from the reference image.",
+        "Keep the exact same product subject count as the reference image. Do not add, duplicate, remove, or rearrange any product units.",
+        `Add the plain text "${packLabel}" exactly once on the empty white background area, preferably near the top-right corner.`,
+        "The pack-count text must stay on the white background only, must not overlap or touch the product, and must not be drawn on the product.",
+        "Use simple dark gray or black sans-serif text only: no badge, no sticker, no label box, no border, no colored tag, no decorative shape.",
+        "Preserve the original product placement and composition as much as possible on a plain white background.",
+        "Strictly preserve the exact product identity from the reference image.",
+        "Keep the original product structure locked: same silhouette, color, material, texture, visible details, attachments, and functional parts.",
+        "Keep the original product scale and perspective unchanged.",
+        "Use soft studio lighting, a subtle natural shadow, and a centered square 1:1 composition.",
+        "Do not preserve any source size chart, dimension marks, measurement callouts, ruler, comparison graphic, captions, labels, background graphics, hands, packaging, or extra props.",
+        "Use a clean white background with clean corners and no watermark, logo, border, QR code, platform UI, hands, packaging, or extra props.",
+        `Do not render any other letters, numbers, labels, captions, or symbols besides "${packLabel}".`
+      ].join(" "),
+    };
+  });
+}
+
+function detectWorkflowImageMime(buffer, filePath = "") {
+  if (buffer?.[0] === 0x89 && buffer?.[1] === 0x50 && buffer?.[2] === 0x4e && buffer?.[3] === 0x47) return "image/png";
+  if (buffer?.[0] === 0xff && buffer?.[1] === 0xd8 && buffer?.[2] === 0xff) return "image/jpeg";
+  if (buffer?.[0] === 0x52 && buffer?.[1] === 0x49 && buffer?.[2] === 0x46 && buffer?.[3] === 0x46) return "image/webp";
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".png") return "image/png";
+  if (ext === ".webp") return "image/webp";
+  return "image/jpeg";
+}
+
+function extractWorkflowImageCandidate(value) {
+  return extractWorkflowImageCandidates(value)[0] || "";
+}
+
+function extractWorkflowImageCandidates(value) {
+  const text = normalizeCellText(value, "\n").trim();
+  if (!text) return [];
+  const candidates = [];
+  const push = (candidate) => {
+    const next = String(candidate || "").trim().replace(/^["']|["']$/g, "");
+    if (!next || candidates.includes(next)) return;
+    candidates.push(next);
+  };
+  for (const match of text.matchAll(/https?:\/\/[^\s"'<>，,；;]+/gi)) push(match[0]);
+  for (const match of text.matchAll(/file:\/\/\/[^\s"'<>，,；;]+/gi)) push(match[0]);
+  for (const part of text.split(/[\r\n,，;；]+/)) {
+    const next = part.trim();
+    if (!next) continue;
+    if (/^(https?:\/\/|file:\/\/\/|[a-zA-Z]:[\\/]|\\\\)/i.test(next)) push(next);
+  }
+  if (candidates.length === 0) push(text.split(/[\r\n,，;；]+/).map((item) => item.trim()).find(Boolean) || "");
+  return candidates;
+}
+
+function classifyWorkflowOriginalCandidateText(candidate) {
+  const text = String(candidate || "").toLowerCase();
+  const reasons = [];
+  if (/(尺寸|尺码|规格图|尺寸图|测量|量尺|dimension|dimensions|size[-_\s]?chart|measurement|measure|ruler|length|width|height|\bcm\b|\bmm\b|\binch(?:es)?\b)/i.test(text)) {
+    reasons.push("疑似尺寸图");
+  }
+  if (/(白底|白底图|white[-_\s]?background|white[-_\s]?bg|plain[-_\s]?white)/i.test(text)) {
+    reasons.push("疑似白底图");
+  }
+  if (/(\b\d+\s*(?:pcs?|pieces?|packs?|sets?|pairs?)\b|\d+\s*(?:件|个|只|片|包|套|组|对)|数量|多件|套装|组合装|pack[-_\s]?\d+|\d+[-_\s]?pack)/i.test(text)) {
+    reasons.push("疑似带数量图");
+  }
+  return {
+    blocked: reasons.length > 0,
+    reasons,
+    source: "text",
+    confidence: reasons.length > 0 ? 0.75 : 0.2,
+  };
+}
+
+function normalizeWorkflowOriginalVisualFilter(payload = {}) {
+  const reasons = Array.isArray(payload?.reasons)
+    ? payload.reasons.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 5)
+    : [];
+  const isSizeChart = Boolean(payload?.isSizeChart);
+  const isWhiteBackground = Boolean(payload?.isWhiteBackgroundOnlyProductPhoto);
+  const hasQuantityText = Boolean(payload?.hasQuantityText || payload?.hasPackOrSetCountText);
+  if (isSizeChart && !reasons.some((item) => /尺寸|size|dimension/i.test(item))) reasons.push("尺寸图");
+  if (isWhiteBackground && !reasons.some((item) => /白底|white/i.test(item))) reasons.push("白底图");
+  if (hasQuantityText && !reasons.some((item) => /数量|pack|pcs|套/i.test(item))) reasons.push("带数量图");
+  const blocked = isSizeChart || isWhiteBackground || hasQuantityText || payload?.shouldUploadAsOriginalMaterial === false;
+  return {
+    uploadEligible: !blocked,
+    reasons: blocked ? (reasons.length ? reasons : ["不适合作为原图素材上传"]) : [],
+    confidence: Number.isFinite(Number(payload?.confidence)) ? Math.max(0, Math.min(1, Number(payload.confidence))) : 0.5,
+    raw: payload,
+  };
+}
+
+function parseWorkflowOriginalVisualFilterFromText(text = "") {
+  const raw = String(text || "");
+  if (!raw.trim()) return null;
+  const readBool = (key) => {
+    const match = raw.match(new RegExp(`["']?${key}["']?\\s*:\\s*(true|false)`, "i"));
+    return match ? match[1].toLowerCase() === "true" : null;
+  };
+  const parsed = {
+    isSizeChart: readBool("isSizeChart"),
+    isWhiteBackgroundOnlyProductPhoto: readBool("isWhiteBackgroundOnlyProductPhoto"),
+    hasQuantityText: readBool("hasQuantityText"),
+    hasPackOrSetCountText: readBool("hasPackOrSetCountText"),
+    shouldUploadAsOriginalMaterial: readBool("shouldUploadAsOriginalMaterial"),
+  };
+  const knownCount = Object.values(parsed).filter((value) => value !== null).length;
+  if (knownCount === 0) return null;
+  const hasBlockingSignal = parsed.isSizeChart === true
+    || parsed.isWhiteBackgroundOnlyProductPhoto === true
+    || parsed.hasQuantityText === true
+    || parsed.hasPackOrSetCountText === true
+    || parsed.shouldUploadAsOriginalMaterial === false;
+  const hasStrongAllowSignal = parsed.isSizeChart === false
+    && parsed.isWhiteBackgroundOnlyProductPhoto === false
+    && parsed.hasQuantityText === false
+    && parsed.hasPackOrSetCountText === false
+    && parsed.shouldUploadAsOriginalMaterial === true;
+  if (!hasBlockingSignal && !hasStrongAllowSignal) return null;
+  return normalizeWorkflowOriginalVisualFilter({
+    isSizeChart: parsed.isSizeChart === true,
+    isWhiteBackgroundOnlyProductPhoto: parsed.isWhiteBackgroundOnlyProductPhoto === true,
+    hasQuantityText: parsed.hasQuantityText === true,
+    hasPackOrSetCountText: parsed.hasPackOrSetCountText === true,
+    shouldUploadAsOriginalMaterial: parsed.shouldUploadAsOriginalMaterial !== false,
+    reasons: [],
+    confidence: hasBlockingSignal ? 0.88 : 0.72,
+  });
+}
+
+function getWorkflowOriginalFilterModelChain() {
+  const candidates = [
+    process.env.WORKFLOW_ORIGINAL_FILTER_MODEL,
+    process.env.VECTORENGINE_ORIGINAL_FILTER_MODEL,
+    "gpt-5.4",
+    ATTRIBUTE_AI_MODEL,
+    AI_MODEL,
+    ...COMPARE_MODEL_CHAIN,
+    "gemini-3.1-flash-lite-preview",
+  ];
+  const seen = new Set();
+  return candidates
+    .map((item) => String(item || "").trim())
+    .filter(Boolean)
+    .filter((item) => {
+      const key = item.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function getAttributeFillModelChain() {
+  const candidates = [
+    "gpt-5.4",
+    process.env.WORKFLOW_ATTRIBUTE_MODEL,
+    process.env.WORKFLOW_PROPERTY_MODEL,
+    process.env.VECTORENGINE_ATTRIBUTE_MODEL,
+    ATTRIBUTE_AI_MODEL,
+    AI_MODEL,
+    ...COMPARE_MODEL_CHAIN,
+    "gemini-3.1-flash-lite-preview",
+  ];
+  const seen = new Set();
+  return candidates
+    .map((item) => String(item || "").trim())
+    .filter(Boolean)
+    .filter((item) => {
+      const key = item.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+async function classifyWorkflowOriginalMaterialImage(imagePath, { candidate = "", productName = "", taskId = "" } = {}) {
+  const textFilter = classifyWorkflowOriginalCandidateText(candidate);
+  if (textFilter.blocked) {
+    return {
+      uploadEligible: false,
+      reasons: textFilter.reasons,
+      confidence: textFilter.confidence,
+      source: "text",
+    };
+  }
+
+  const modelChain = getWorkflowOriginalFilterModelChain();
+  if (!AI_API_KEY || modelChain.length === 0) {
+    return {
+      uploadEligible: false,
+      reasons: ["AI 原图筛选不可用，为避免尺寸图/白底图/带数量图误入主图，已排除"],
+      confidence: 0.6,
+      source: "fallback",
+      warning: "AI 原图筛选不可用，未放行原图",
+    };
+  }
+
+  const prompt = `You are filtering raw product images before uploading them to an e-commerce material center.
+Return exactly one JSON object, no markdown.
+
+Product title: ${JSON.stringify(String(productName || "").trim())}
+
+Reject this image if ANY condition is true:
+1. It is a size chart, dimension image, measurement diagram, specification table, ruler/callout image, or contains visible dimensions such as cm/mm/inch/length/width/height.
+2. It is a plain white-background catalog/main product image.
+3. It contains visible quantity or pack-count text, such as 2PCS, 3PC, 4 pack, set of 2, 2件, 3个, bundle count, or quantity labels.
+
+Accept only a clean raw product/lifestyle/detail image that is not a size chart, not a white-background catalog image, and not a quantity/pack-count image.
+
+Schema:
+{
+  "isSizeChart": false,
+  "isWhiteBackgroundOnlyProductPhoto": false,
+  "hasQuantityText": false,
+  "hasPackOrSetCountText": false,
+  "shouldUploadAsOriginalMaterial": true,
+  "reasons": [],
+  "confidence": 0.0
+}`;
+
+  let lastError = "";
+  for (const model of modelChain) {
+    const client = getAiClientForModel(model) || getAiGeminiClient();
+    if (!client) continue;
+    try {
+      const response = await client.chat.completions.create({
+        model,
+        messages: [{
+          role: "user",
+          content: [
+            { type: "text", text: prompt },
+            { type: "image_url", image_url: { url: buildAiAnalyzeImageDataUrl(imagePath) } },
+          ],
+        }],
+        temperature: 0,
+        max_tokens: 600,
+      });
+      const modelContent = response?.choices?.[0]?.message?.content || "";
+      const parsed = extractJsonObjectFromText(modelContent);
+      if (!parsed || typeof parsed !== "object") {
+        const partial = parseWorkflowOriginalVisualFilterFromText(modelContent);
+        if (partial) {
+          logWorkflowPack(taskId, `original filter recovered partial JSON from ${model}: uploadEligible=${partial.uploadEligible}, reasons=${partial.reasons.join("、")}`);
+          return { ...partial, source: "ai_partial", model };
+        }
+        lastError = `invalid JSON from ${model}: ${String(modelContent).slice(0, 160)}`;
+        logWorkflowPack(taskId, `original filter ${lastError}`);
+        continue;
+      }
+      const normalized = normalizeWorkflowOriginalVisualFilter(parsed);
+      return { ...normalized, source: "ai", model };
+    } catch (error) {
+      lastError = error?.message || String(error || "unknown");
+      logWorkflowPack(taskId, `original filter failed on ${model}: ${lastError}`);
+    }
+  }
+
+  return {
+    uploadEligible: false,
+    reasons: ["AI 原图筛选失败，为避免尺寸图/白底图/带数量图误入主图，已排除"],
+    confidence: 0.6,
+    source: "ai_error",
+    warning: lastError || "AI 原图筛选不可用，未放行原图",
+  };
+}
+
+async function materializeWorkflowImageCandidate(candidate, outputPath) {
+  if (/^https?:\/\//i.test(candidate)) {
+    await downloadImage(candidate, outputPath);
+    return outputPath;
+  }
+  const localPath = candidate.startsWith("file:///")
+    ? fileURLToPath(candidate)
+    : path.resolve(candidate);
+  if (!fs.existsSync(localPath)) {
+    throw new Error(`原图不存在或不可下载: ${candidate.slice(0, 120)}`);
+  }
+  fs.copyFileSync(localPath, outputPath);
+  return outputPath;
+}
+
+async function prepareWorkflowSourceImage(rawValue, outputPath, options = {}) {
+  return prepareWorkflowSourceImages(extractWorkflowImageCandidates(rawValue), outputPath, options);
+}
+
+async function prepareWorkflowSourceImages(rawCandidates, outputPath, options = {}) {
+  const candidates = Array.from(new Set(
+    (Array.isArray(rawCandidates) ? rawCandidates : extractWorkflowImageCandidates(rawCandidates))
+      .map((item) => String(item || "").trim())
+      .filter(Boolean)
+  )).slice(0, WORKFLOW_MAX_MAIN_IMAGE_COUNT);
+  if (candidates.length === 0) {
+    throw new Error("未识别到商品原图链接");
+  }
+
+  const tmpBase = outputPath.replace(/\.[^.\\/]+$/, "");
+  const rejectedOriginals = [];
+  let firstDownloaded = null;
+  let lastDownloadError = null;
+  const acceptedOriginals = [];
+
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index];
+    const candidatePath = `${tmpBase}_candidate_${index}.jpg`;
+    try {
+      await materializeWorkflowImageCandidate(candidate, candidatePath);
+      if (!firstDownloaded) firstDownloaded = { candidate, path: candidatePath };
+      const filter = await classifyWorkflowOriginalMaterialImage(candidatePath, {
+        candidate,
+        productName: options.productName,
+        taskId: options.taskId,
+      });
+      if (filter.uploadEligible) {
+        const originalPath = `${tmpBase}_original_${acceptedOriginals.length}.jpg`;
+        fs.copyFileSync(candidatePath, originalPath);
+        acceptedOriginals.push({
+          candidate,
+          sourceImagePath: originalPath,
+          originalFilter: filter,
+        });
+        if (acceptedOriginals.length >= WORKFLOW_MAX_MAIN_IMAGE_COUNT) break;
+        continue;
+      }
+      rejectedOriginals.push({ candidate, reasons: filter.reasons, filter });
+      logWorkflowPack(options.taskId, `original candidate skipped: ${filter.reasons.join("、") || "不适合上传"} (${candidate.slice(0, 80)})`);
+    } catch (error) {
+      lastDownloadError = error;
+      rejectedOriginals.push({ candidate, reasons: [error?.message || String(error || "下载失败")] });
+      logWorkflowPack(options.taskId, `original candidate failed: ${error?.message || String(error || "unknown")} (${candidate.slice(0, 80)})`);
+    }
+  }
+
+  if (acceptedOriginals.length > 0) {
+    fs.copyFileSync(acceptedOriginals[0].sourceImagePath, outputPath);
+    return {
+      sourceImageUrl: acceptedOriginals[0].candidate,
+      sourceImagePath: outputPath,
+      originalUploadEligible: true,
+      originalFilter: acceptedOriginals[0].originalFilter,
+      originals: acceptedOriginals,
+      rejectedOriginals,
+      candidateCount: candidates.length,
+    };
+  }
+
+  if (firstDownloaded) {
+    fs.copyFileSync(firstDownloaded.path, outputPath);
+    return {
+      sourceImageUrl: firstDownloaded.candidate,
+      sourceImagePath: outputPath,
+      originalUploadEligible: false,
+      originals: [],
+      originalFilter: {
+        uploadEligible: false,
+        reasons: ["所有原图候选均为尺寸图/白底图/带数量图或不可用，不上传原图到素材中心"],
+        confidence: 1,
+        source: "aggregate",
+      },
+      rejectedOriginals,
+      candidateCount: candidates.length,
+    };
+  }
+
+  throw lastDownloadError || new Error("没有可下载的商品原图");
+}
+
+async function readWorkflowGenerateSSE(resp, expectedTypes, idleTimeoutMs = 60000, taskId = "") {
+  if (!resp.body) {
+    throw new Error("AI 服务未返回可读取的数据流");
+  }
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  const expected = new Set(expectedTypes);
+  const images = {};
+  const errors = {};
+  const warnings = {};
+  let buffer = "";
+  try {
+    while (true) {
+      let idleTimer = null;
+      const { done, value } = await Promise.race([
+        reader.read(),
+        new Promise((_, reject) => {
+          idleTimer = setTimeout(() => reject(new Error(`AI 图片生成超时（${Math.round(idleTimeoutMs / 1000)}s 无响应）`)), idleTimeoutMs);
+        }),
+      ]).finally(() => {
+        if (idleTimer) clearTimeout(idleTimer);
+      });
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        try {
+          const data = JSON.parse(line.slice(6));
+          if (data?.imageType && expected.has(data.imageType) && Array.isArray(data.warnings) && data.warnings.length > 0) {
+            warnings[data.imageType] = data.warnings;
+            logWorkflowPack(taskId, `${data.imageType} warnings: ${data.warnings.join("; ")}`);
+          }
+          if (data?.status === "done" && data.imageType && data.imageUrl && expected.has(data.imageType)) {
+            images[data.imageType] = data.imageUrl;
+            logWorkflowPack(taskId, `${data.imageType} done`);
+          } else if (data?.status === "error" && data.imageType && expected.has(data.imageType)) {
+            errors[data.imageType] = data.error || "生成失败";
+            logWorkflowPack(taskId, `${data.imageType} error: ${errors[data.imageType]}`);
+          } else if (data?.status && data.imageType && expected.has(data.imageType)) {
+            logWorkflowPack(taskId, `${data.imageType} status=${data.status}`);
+          }
+        } catch (error) {
+          logSilent("workflow-pack.sse.parse", error);
+        }
+      }
+    }
+    return { images, errors, warnings };
+  } finally {
+    try { await reader.cancel(); } catch {}
+    try { reader.releaseLock(); } catch {}
+  }
+}
+
+async function generateWorkflowSinglePackImage({ imageBuffer, mimeType, sourceImagePath, plan, taskId }) {
+  const requestTimeoutMs = 6 * 60 * 1000;
+  const idleTimeoutMs = 2 * 60 * 1000;
+  let requestTimer = null;
+  try {
+    logWorkflowPack(taskId, `${plan.imageType} request start`);
+    const form = new FormData();
+    form.append("images", new Blob([imageBuffer], { type: mimeType }), path.basename(sourceImagePath));
+    form.append("plans", JSON.stringify([plan]));
+    form.append("productMode", "single");
+    form.append("imageLanguage", "en");
+    form.append("imageSize", "1000x1000");
+
+    const controller = new AbortController();
+    requestTimer = setTimeout(() => controller.abort(), requestTimeoutMs);
+    const resp = await fetch(`${AI_IMAGE_GEN_URL}/api/generate`, {
+      method: "POST",
+      body: form,
+      headers: AI_AUTH_HEADERS,
+      signal: controller.signal,
+    });
+
+    if (!resp.ok) {
+      const error = await formatAiImageError(`Workflow pack generate failed (${plan.imageType})`, resp);
+      logWorkflowPack(taskId, `${plan.imageType} http failed: ${error}`);
+      return { imageType: plan.imageType, imageUrl: "", error, warnings: [] };
+    }
+
+    const parsed = await readWorkflowGenerateSSE(resp, [plan.imageType], idleTimeoutMs, taskId);
+    const imageUrl = parsed.images?.[plan.imageType] || "";
+    const error = parsed.errors?.[plan.imageType] || (imageUrl ? "" : "未返回图片");
+    if (!imageUrl) {
+      logWorkflowPack(taskId, `${plan.imageType} missing image: ${error}`);
+    }
+    return {
+      imageType: plan.imageType,
+      imageUrl,
+      error,
+      warnings: parsed.warnings?.[plan.imageType] || [],
+    };
+  } catch (error) {
+    const message = formatAiImageFetchError(`Workflow pack generate failed (${plan.imageType})`, error, "/api/generate");
+    logWorkflowPack(taskId, `${plan.imageType} fetch failed: ${message}`);
+    return { imageType: plan.imageType, imageUrl: "", error: message, warnings: [] };
+  } finally {
+    if (requestTimer) clearTimeout(requestTimer);
+  }
+}
+
+async function generateWorkflowWhitePackImages(sourceImagePath, productTitle, packCounts, options = {}) {
+  const taskId = options.taskId || "";
+  const imageBuffer = fs.readFileSync(sourceImagePath);
+  const mimeType = detectWorkflowImageMime(imageBuffer, sourceImagePath);
+  const plans = buildWorkflowWhitePackPlans(productTitle, packCounts);
+  logWorkflowPack(taskId, `AI request batch start: ${plans.map((plan) => plan.imageType).join(", ")}`);
+  const settled = await Promise.allSettled(
+    plans.map((plan) => generateWorkflowSinglePackImage({ imageBuffer, mimeType, sourceImagePath, plan, taskId }))
+  );
+
+  const images = {};
+  const errors = {};
+  const warnings = {};
+  for (let i = 0; i < plans.length; i += 1) {
+    const plan = plans[i];
+    const result = settled[i];
+    if (result?.status === "fulfilled") {
+      if (result.value.imageUrl) images[plan.imageType] = result.value.imageUrl;
+      if (result.value.error) errors[plan.imageType] = result.value.error;
+      if (result.value.warnings?.length) warnings[plan.imageType] = result.value.warnings;
+    } else {
+      errors[plan.imageType] = result?.reason?.message || String(result?.reason || "生成失败");
+    }
+  }
+
+  const missing = plans.map((plan) => plan.imageType).filter((imageType) => !images[imageType]);
+  const error = missing.map((imageType) => `${imageType}: ${errors[imageType] || "未返回图片"}`).join("; ");
+  logWorkflowPack(taskId, `AI request batch done: generated=${Object.keys(images).length}/${plans.length}${error ? `, error=${error}` : ""}`);
+  return {
+    success: missing.length === 0,
+    images,
+    errors,
+    warnings,
+    plans,
+    error,
+  };
+}
+
+function getWorkflowProductRows(csvPath) {
+  const { kind: spreadsheetKind, rows: allRows } = readSpreadsheetRows(csvPath, { defval: "" });
+  let headerRowIdx = 0;
+  for (let i = 0; i < Math.min(10, allRows.length); i += 1) {
+    const row = allRows[i];
+    if (row && row.some((cell) => {
+      const text = normalizeCellText(cell);
+      return text.includes("商品标题") || text.includes("商品名称") || text.includes("商品主图") || text.includes("商品原图") || text.includes("美元价格");
+    })) {
+      headerRowIdx = i;
+      break;
+    }
+  }
+  const headers = (allRows[headerRowIdx] || []).map((item) => normalizeCellText(item));
+  const dataRowsWithIndex = allRows
+    .slice(headerRowIdx + 1)
+    .map((row, offset) => ({ row, rowIndex: headerRowIdx + 1 + offset }))
+    .filter(({ row }) => row && row.some((cell) => normalizeCellText(cell).trim()));
+  const dataRows = dataRowsWithIndex.map((item) => item.row);
+  const findColumn = (names) => {
+    for (const name of names) {
+      const needle = String(name).toLowerCase();
+      const idx = headers.findIndex((header) => {
+        const text = String(header || "");
+        return text.includes(name) || text.toLowerCase().includes(needle);
+      });
+      if (idx >= 0) return idx;
+    }
+    return -1;
+  };
+  const exactColumn = (patterns) => headers.findIndex((columnName) => patterns.some((pattern) => pattern.test(String(columnName || "").trim())));
+  const catIdIndexes = {};
+  const catNameIndexes = {};
+  for (let level = 1; level <= 10; level += 1) {
+    const catIdIdx = exactColumn([new RegExp(`^cat${level}Id$`, "i")]);
+    const catNameIdx = exactColumn([new RegExp(`^cat${level}Name$`, "i")]);
+    if (catIdIdx >= 0) catIdIndexes[`cat${level}Id`] = catIdIdx;
+    if (catNameIdx >= 0) catNameIndexes[`cat${level}Name`] = catNameIdx;
+  }
+  return {
+    spreadsheetKind,
+    allRows,
+    headerRowIdx,
+    headers,
+    dataRows,
+    dataRowIndexes: dataRowsWithIndex.map((item) => item.rowIndex),
+    nameIdx: findColumn(["商品标题（中文）", "商品标题", "商品名称", "product name", "title"]),
+    nameEnIdx: findColumn(["商品标题（英文）", "英文标题", "title_en", "english title"]),
+    imageIdx: findColumn(["商品主图", "商品原图", "主图", "原图", "image", "main image", "picture"]),
+    carouselIdx: findColumn(["商品轮播图", "轮播图", "carousel"]),
+    frontCatIdx: findColumn(["前台分类（中文）", "前台分类"]),
+    backCatIdx: findColumn(["后台分类"]),
+    genericCatIdx: findColumn(["分类（中文）", "分类关键词", "category", "分类"]),
+    priceIdx: findColumn(["美元价格($)", "美元价格", "price", "USD", "价格"]),
+    priceCnyIdx: findColumn(["人民币价格", "priceCNY", "申报价"]),
+    directLeafCatIdx: exactColumn([/^leafCatId$/i, /^leafCategoryId$/i, /^catId$/i, /^categoryId$/i, /^叶子类目ID$/i]),
+    catIdsJsonIdx: exactColumn([/^catIds$/i, /^categoryIds$/i]),
+    goodsIdIdx: exactColumn([/^商品ID$/i, /^goodsId$/i, /^goods_id$/i]),
+    productIdIdx: exactColumn([/^productId$/i, /^spuId$/i, /^SPU ID$/i]),
+    productSkcIdIdx: exactColumn([/^productSkcId$/i, /^skcId$/i, /^SKC ID$/i]),
+    catIdIndexes,
+    catNameIndexes,
+  };
+}
+
+function ensureWorkflowTableColumn(headerRow, title) {
+  const normalizedTitle = normalizeCellText(title);
+  const existing = headerRow.findIndex((cell) => normalizeCellText(cell) === normalizedTitle);
+  if (existing >= 0) return existing;
+  headerRow.push(title);
+  return headerRow.length - 1;
+}
+
+function writeWorkflowKwcdnResultTable(inputPath, table, results, outputDir, taskId, packCounts) {
+  const rows = Array.isArray(table?.allRows) && table.allRows.length > 0
+    ? table.allRows.map((row) => Array.isArray(row) ? row.slice() : [])
+    : [];
+  const headerRowIdx = Math.max(0, Number(table?.headerRowIdx) || 0);
+  while (rows.length <= headerRowIdx) rows.push([]);
+  const headerRow = rows[headerRowIdx] || [];
+  rows[headerRowIdx] = headerRow;
+
+  const statusCol = ensureWorkflowTableColumn(headerRow, "新上品素材状态");
+  const originalCol = ensureWorkflowTableColumn(headerRow, "新上品原图 kwcdn URL");
+  const packColumns = new Map();
+  for (const packCount of packCounts || []) {
+    packColumns.set(
+      getWorkflowPackImageType(packCount),
+      ensureWorkflowTableColumn(headerRow, `${packCount}PCS 白底图 kwcdn URL`),
+    );
+  }
+
+  for (const result of results || []) {
+    const dataIndex = Number(result?.index);
+    const rowIndex = table?.dataRowIndexes?.[dataIndex] ?? (headerRowIdx + 1 + dataIndex);
+    if (!Number.isFinite(rowIndex) || rowIndex < 0) continue;
+    while (rows.length <= rowIndex) rows.push([]);
+    const row = Array.isArray(rows[rowIndex]) ? rows[rowIndex] : [];
+    rows[rowIndex] = row;
+    row[statusCol] = result?.success
+      ? "素材已上传"
+      : (result?.message || "素材未完成");
+    const byType = new Map((result?.images || []).map((image) => [image?.imageType, image]));
+    row[originalCol] = getWorkflowOriginalKwcdnUrls(result).join(",");
+    for (const [imageType, columnIndex] of packColumns.entries()) {
+      row[columnIndex] = byType.get(imageType)?.kwcdnUrl || "";
+    }
+  }
+
+  const baseName = path.basename(inputPath || "products").replace(/\.[^.]+$/, "");
+  const outputPath = path.join(outputDir, `${baseName}_${taskId}_kwcdn.xlsx`);
+  const workbook = XLSX.utils.book_new();
+  const sheet = XLSX.utils.aoa_to_sheet(rows);
+  XLSX.utils.book_append_sheet(workbook, sheet, "kwcdn");
+  XLSX.writeFile(workbook, outputPath);
+  return outputPath;
+}
+
+function saveWorkflowPackImages(images, outputDir, rowIndex) {
+  const saved = {};
+  for (const [imageType, imageUrl] of Object.entries(images || {})) {
+    if (typeof imageUrl !== "string" || !imageUrl.startsWith("data:image/")) continue;
+    const outputPath = path.join(outputDir, `${rowIndex}_${imageType}_${Date.now()}.png`);
+    saveBase64Image(imageUrl, outputPath);
+    saved[imageType] = outputPath;
+  }
+  return saved;
+}
+
+function getWorkflowImageExtension(mimeType) {
+  if (mimeType === "image/png") return ".png";
+  if (mimeType === "image/webp") return ".webp";
+  return ".jpg";
+}
+
+function saveWorkflowOriginalMaterialImage(sourceImagePath, outputDir, rowIndex, imageType = WORKFLOW_ORIGINAL_IMAGE_TYPE) {
+  const buffer = fs.readFileSync(sourceImagePath);
+  const mimeType = detectWorkflowImageMime(buffer, sourceImagePath);
+  const outputPath = path.join(outputDir, `${rowIndex}_${imageType}_${Date.now()}${getWorkflowImageExtension(mimeType)}`);
+  fs.copyFileSync(sourceImagePath, outputPath);
+  return {
+    imageUrl: `data:${mimeType};base64,${buffer.toString("base64")}`,
+    localPath: outputPath,
+  };
+}
+
+function buildWorkflowMaterialImageSpecs(packCounts, originalCount = 1) {
+  const normalizedOriginalCount = Math.max(1, Math.min(WORKFLOW_MAX_MAIN_IMAGE_COUNT, Math.floor(Number(originalCount) || 1)));
+  const originalSpecs = Array.from({ length: normalizedOriginalCount }, (_, index) => ({
+    imageType: getWorkflowOriginalImageType(index),
+    role: "original",
+    label: index === 0 ? "原图" : `原图${index + 1}`,
+    packCount: null,
+    sourceIndex: index,
+  }));
+  return [
+    ...originalSpecs,
+    ...packCounts.map((packCount) => ({
+      imageType: getWorkflowPackImageType(packCount),
+      role: "pack",
+      label: `${packCount}PCS`,
+      packCount,
+    })),
+  ];
+}
+
+function getWorkflowResultImage(result, imageType) {
+  return (Array.isArray(result?.images) ? result.images : []).find((image) => image?.imageType === imageType) || null;
+}
+
+function getWorkflowOriginalKwcdnUrls(result) {
+  return (Array.isArray(result?.images) ? result.images : [])
+    .filter((image) => image?.role === "original" || isWorkflowOriginalImageType(image?.imageType))
+    .map((image) => String(image?.kwcdnUrl || "").trim())
+    .filter(Boolean)
+    .slice(0, WORKFLOW_MAX_MAIN_IMAGE_COUNT);
+}
+
+function buildWorkflowOriginalUploadSources(originalSources = [], minCount = WORKFLOW_MIN_MAIN_IMAGE_COUNT) {
+  const eligible = (Array.isArray(originalSources) ? originalSources : [])
+    .filter((source) => source?.sourceImagePath && fs.existsSync(source.sourceImagePath))
+    .slice(0, WORKFLOW_MAX_MAIN_IMAGE_COUNT);
+  if (eligible.length === 0) return [];
+  const output = eligible.slice();
+  let index = 0;
+  while (output.length < minCount && output.length < WORKFLOW_MAX_MAIN_IMAGE_COUNT) {
+    const source = eligible[index % eligible.length];
+    output.push({
+      ...source,
+      paddedFromIndex: index % eligible.length,
+      paddedMainImage: true,
+    });
+    index += 1;
+  }
+  return output.slice(0, WORKFLOW_MAX_MAIN_IMAGE_COUNT);
+}
+
+function getWorkflowRowImageCandidates(table, row) {
+  const values = [];
+  if (table?.imageIdx >= 0) values.push(row?.[table.imageIdx]);
+  if (table?.carouselIdx >= 0) values.push(row?.[table.carouselIdx]);
+  const candidates = [];
+  for (const value of values) {
+    for (const candidate of extractWorkflowImageCandidates(value)) {
+      const normalized = String(candidate || "").trim();
+      if (normalized && !candidates.includes(normalized)) candidates.push(normalized);
+    }
+  }
+  return candidates;
+}
+
+function buildWorkflowDraftParamsFromRow(table, row, rowResult, params = {}) {
+  const getCol = (idx) => idx >= 0 ? normalizeCellText(row?.[idx]) : "";
+  const rawTitle = getCol(table.nameIdx) || getCol(table.nameEnIdx);
+  const finalTitle = cleanWorkflowListingTitle(rawTitle);
+  if (!finalTitle) {
+    return { success: false, message: "标题清洗后为空，请补标题", step: "title_clean" };
+  }
+
+  const originalKwcdnUrls = getWorkflowOriginalKwcdnUrls(rowResult);
+  const originalKwcdnUrl = originalKwcdnUrls[0] || "";
+  if (!originalKwcdnUrl) {
+    return { success: false, message: "合格原图未上传素材中心，无法保存草稿", step: "original_kwcdn" };
+  }
+
+  const quantityCounts = [1, 2, 3, 4];
+  const quantitySkuImages = { 1: originalKwcdnUrl, "1PC": originalKwcdnUrl, "1PCS": originalKwcdnUrl };
+  for (const count of quantityCounts.filter((item) => item > 1)) {
+    const packImage = getWorkflowResultImage(rowResult, getWorkflowPackImageType(count));
+    const packKwcdnUrl = packImage?.kwcdnUrl || "";
+    if (!packKwcdnUrl) {
+      return { success: false, message: `${count}PC SKU 图未上传素材中心，无法保存草稿`, step: "quantity_sku_image" };
+    }
+    quantitySkuImages[count] = packKwcdnUrl;
+    quantitySkuImages[`${count}PC`] = packKwcdnUrl;
+    quantitySkuImages[`${count}PCS`] = packKwcdnUrl;
+  }
+
+  const frontCategoryCn = table.frontCatIdx >= 0 ? normalizeCategoryText(row[table.frontCatIdx]) : "";
+  const backCategoryCn = table.backCatIdx >= 0 ? normalizeCategoryText(row[table.backCatIdx]) : "";
+  const genericCategoryCn = table.genericCatIdx >= 0 ? normalizeCategoryText(row[table.genericCatIdx]) : "";
+  const preferredCategoryCn = backCategoryCn || genericCategoryCn || frontCategoryCn;
+  const priceUSD = table.priceIdx >= 0 ? normalizePriceNumber(row[table.priceIdx], 0) : 0;
+  const tablePriceCNY = table.priceCnyIdx >= 0 ? normalizePriceNumber(row[table.priceCnyIdx], 0) : 0;
+  const priceCNY = priceUSD > 0 ? priceUSD * 7 : (tablePriceCNY > 0 ? tablePriceCNY : 9.99);
+  const sourceProductId = table.goodsIdIdx >= 0 ? normalizeHistoryIdentifier(getCol(table.goodsIdIdx)) : "";
+  const sourceSpuId = table.productIdIdx >= 0 ? normalizeHistoryIdentifier(getCol(table.productIdIdx)) : "";
+  const sourceSkcId = table.productSkcIdIdx >= 0 ? normalizeHistoryIdentifier(getCol(table.productSkcIdIdx)) : "";
+  const directLeafCatId = table.directLeafCatIdx >= 0 ? (Number(getCol(table.directLeafCatIdx)) || 0) : 0;
+  const directCatIds = parseCategoryIdsCell(table.catIdsJsonIdx >= 0 ? getCol(table.catIdsJsonIdx) : "") || {};
+  for (const [key, idx] of Object.entries(table.catIdIndexes || {})) {
+    const nextId = Number(getCol(idx)) || 0;
+    if (nextId > 0) directCatIds[key] = nextId;
+  }
+  for (const [key, idx] of Object.entries(table.catNameIndexes || {})) {
+    const nextName = getCol(idx);
+    if (nextName) directCatIds[key] = nextName;
+  }
+  if (!directCatIds._path && preferredCategoryCn) directCatIds._path = preferredCategoryCn;
+
+  const categoryLockMode = (
+    directLeafCatId > 0
+    || Object.keys(directCatIds).some((key) => key !== "_path")
+    || Boolean(backCategoryCn)
+    || Boolean(genericCategoryCn)
+    || Boolean(frontCategoryCn)
+  ) ? "strict" : "guided";
+
+  return {
+    success: true,
+    title: finalTitle,
+    rawTitle,
+    imageUrls: originalKwcdnUrls,
+    expectedMainImageMin: WORKFLOW_MIN_MAIN_IMAGE_COUNT,
+    quantitySkuImages,
+    quantityCounts,
+    workflowQuantitySpecs: true,
+    workflowRandomSpecValueCount: Math.max(1, Number(params.workflowRandomSpecValueCount) || 2),
+    workflowQuantityPriceMultipliers: normalizeWorkflowQuantityPriceMultipliers(params.workflowQuantityPriceMultipliers),
+    price: priceCNY,
+    categorySearch: categoryLockMode === "guided" ? finalTitle : (preferredCategoryCn || finalTitle),
+    categorySearchVariants: categoryLockMode === "strict"
+      ? [backCategoryCn, genericCategoryCn, frontCategoryCn].map((value) => normalizeCategoryText(value)).filter(Boolean)
+      : buildGuidedCategorySearchVariants(finalTitle, "", backCategoryCn),
+    categoryLockMode,
+    sourceProductId,
+    goodsId: sourceProductId || undefined,
+    productId: sourceSpuId || undefined,
+    productSkcId: sourceSkcId || undefined,
+    leafCatId: directLeafCatId || undefined,
+    catIds: Object.keys(directCatIds).length > 0 ? directCatIds : undefined,
+    keepOpen: false,
+    config: params.config,
+    multiplyPriceByQuantity: params.multiplyPriceByQuantity,
+  };
+}
+
+async function generateWorkflowPackImages(params = {}) {
+  const csvPath = String(params.csvPath || params.filePath || "").trim();
+  if (!csvPath || !fs.existsSync(csvPath)) {
+    return { success: false, message: "请先上传商品表格" };
+  }
+
+  const packCounts = normalizeWorkflowPackCounts(params.packCounts);
+  if (packCounts.length === 0) {
+    return { success: false, message: "组合数量无效" };
+  }
+
+  const startRow = Math.max(0, Number(params.startRow) || 0);
+  const count = Math.max(1, Math.min(Number(params.count) || 1, 20));
+  const table = getWorkflowProductRows(csvPath);
+  if (table.imageIdx < 0) {
+    return {
+      success: false,
+      message: `未识别到商品原图列，当前表头：${table.headers.slice(0, 12).join(" | ")}`,
+      headers: table.headers,
+    };
+  }
+
+  const total = Math.max(0, Math.min(count, table.dataRows.length - startRow));
+  if (total <= 0) {
+    return { success: false, message: "没有可处理的商品行" };
+  }
+
+  const taskId = typeof params?.taskId === "string" && params.taskId.trim()
+    ? params.taskId.trim()
+    : `workflow_pack_${Date.now()}`;
+  const tmpDir = getTmpDir("workflow-pack-tmp");
+  const outputDir = path.join(getDebugDir(), "workflow-pack-images", taskId);
+  fs.mkdirSync(tmpDir, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true });
+
+  logWorkflowPack(taskId, `start kind=${table.spreadsheetKind}, header=${table.headerRowIdx}, start=${startRow}, total=${total}, packs=${packCounts.join(",")}, csv=${csvPath}`);
+  const results = [];
+  let kwcdnTablePath = "";
+  const shouldCreateDrafts = Boolean(params.createDrafts || params.workflowCreateDrafts);
+
+  let stopAuthPopupMonitor = null;
+  try {
+    await ensureBrowser();
+    stopAuthPopupMonitor = registerSellerAuthPopupMonitor("[workflow-pack-popup]");
+    await establishSellerCentralSession("[workflow-pack]");
+
+    for (let offset = 0; offset < total; offset += 1) {
+      const dataIndex = startRow + offset;
+      const row = table.dataRows[dataIndex];
+      const rowNumber = (table.dataRowIndexes?.[dataIndex] ?? (table.headerRowIdx + 1 + dataIndex)) + 1;
+      const productName = normalizeCellText(table.nameIdx >= 0 ? row[table.nameIdx] : "") || `第 ${rowNumber} 行商品`;
+      const sourceImagePath = path.join(tmpDir, `${taskId}_${dataIndex}_source.jpg`);
+      const imageCandidates = getWorkflowRowImageCandidates(table, row);
+
+      try {
+        logWorkflowPack(taskId, `row=${rowNumber} product="${productName.slice(0, 80)}" source download start candidates=${imageCandidates.length}`);
+        const source = await prepareWorkflowSourceImages(imageCandidates, sourceImagePath, { productName, taskId });
+        logWorkflowPack(taskId, `row=${rowNumber} source ready path=${source.sourceImagePath}, originalUploadEligible=${source.originalUploadEligible}, acceptedOriginals=${source.originals?.length || 0}`);
+        const aiResult = await generateWorkflowWhitePackImages(source.sourceImagePath, productName, packCounts, { taskId, rowNumber });
+        const localFiles = saveWorkflowPackImages(aiResult.images, outputDir, dataIndex);
+        const originalSources = Array.isArray(source.originals) && source.originals.length > 0
+          ? source.originals
+          : (source.originalUploadEligible ? [{ sourceImagePath: source.sourceImagePath, originalFilter: source.originalFilter, candidate: source.sourceImageUrl }] : []);
+        const originalUploadSources = buildWorkflowOriginalUploadSources(originalSources, WORKFLOW_MIN_MAIN_IMAGE_COUNT);
+        const originalMaterials = originalUploadSources.map((original, index) => ({
+          ...original,
+          ...saveWorkflowOriginalMaterialImage(original.sourceImagePath, outputDir, dataIndex, getWorkflowOriginalImageType(index)),
+        }));
+        const materialSpecs = buildWorkflowMaterialImageSpecs(packCounts, originalMaterials.length || 1);
+        let images = materialSpecs.map((spec) => {
+          const imageType = spec.imageType;
+          if (spec.role === "original") {
+            const originalMaterial = originalMaterials[spec.sourceIndex || 0] || { imageUrl: "", localPath: "", originalFilter: null };
+            return {
+              packCount: spec.packCount,
+              imageType,
+              role: spec.role,
+              label: spec.label,
+              imageUrl: originalMaterial.imageUrl,
+              localPath: originalMaterial.localPath,
+              uploadEligible: Boolean(source.originalUploadEligible),
+              skipped: !source.originalUploadEligible,
+              error: source.originalUploadEligible ? "" : (source.originalFilter?.reasons?.join("；") || "原图不上传素材中心"),
+              warnings: originalMaterial.originalFilter?.warning ? [originalMaterial.originalFilter.warning] : [],
+              filter: originalMaterial.originalFilter || source.originalFilter || null,
+              sourceImageUrl: originalMaterial.candidate || "",
+              sourceIndex: spec.sourceIndex || 0,
+            };
+          }
+          return {
+            packCount: spec.packCount,
+            imageType,
+            role: spec.role,
+            label: spec.label,
+            imageUrl: aiResult.images?.[imageType] || "",
+            localPath: localFiles[imageType] || "",
+            uploadEligible: true,
+            skipped: false,
+            error: aiResult.errors?.[imageType] || "",
+            warnings: aiResult.warnings?.[imageType] || [],
+          };
+        });
+        const successCount = images.filter((item) => item.imageUrl).length;
+        const skippedCount = images.filter((item) => item.skipped).length;
+        const requiredCount = Math.max(0, materialSpecs.length - skippedCount);
+        const materialSuccess = successCount >= requiredCount;
+        const uploadSummary = materialSuccess
+          ? await uploadWorkflowMaterialImages(images, { taskId, rowNumber })
+          : getEmptyWorkflowUploadSummary(images);
+        images = uploadSummary.images;
+        const uploadSuccess = materialSuccess
+          && uploadSummary.uploadableCount > 0
+          && uploadSummary.uploadFailCount === 0
+          && uploadSummary.uploadSuccessCount >= uploadSummary.uploadableCount;
+        const rowSuccess = materialSuccess && uploadSuccess;
+        const rowResult = {
+          index: dataIndex,
+          rowNumber,
+          name: productName.slice(0, 120),
+          sourceImageUrl: source.sourceImageUrl,
+          originalUploadEligible: Boolean(source.originalUploadEligible),
+          originalFilter: source.originalFilter || null,
+          rejectedOriginals: source.rejectedOriginals || [],
+          success: rowSuccess,
+          successCount,
+          skippedCount,
+          requiredCount,
+          uploadableCount: uploadSummary.uploadableCount,
+          uploadSuccessCount: uploadSummary.uploadSuccessCount,
+          uploadFailCount: uploadSummary.uploadFailCount,
+          uploadSkippedCount: uploadSummary.uploadSkippedCount,
+          total: materialSpecs.length,
+          materialTypes: materialSpecs.map((item) => item.imageType),
+          message: !materialSuccess
+            ? (aiResult.error || `仅准备 ${successCount}/${requiredCount} 张`)
+            : rowSuccess
+              ? (skippedCount > 0 ? "素材已上传，原图已按规则跳过" : "素材已上传并回写 kwcdn URL")
+              : `素材上传失败 ${uploadSummary.uploadFailCount}/${uploadSummary.uploadableCount}`,
+          errorCategory: rowSuccess ? "" : (materialSuccess ? classifyAutoPricingError("image_upload", uploadSummary.firstError || "") : classifyAutoPricingError("image_gen", aiResult.error || "")),
+          images,
+        };
+        if (shouldCreateDrafts && rowSuccess) {
+          const draftParams = buildWorkflowDraftParamsFromRow(table, row, rowResult, params);
+          if (!draftParams.success) {
+            rowResult.success = false;
+            rowResult.message = draftParams.message;
+            rowResult.errorCategory = classifyAutoPricingError("draft", draftParams.message);
+            rowResult.draftStep = draftParams.step;
+          } else {
+            logWorkflowPack(taskId, `row=${rowNumber} draft save start title="${draftParams.title.slice(0, 80)}"`);
+            const draftResult = await createProductViaAPI(draftParams);
+            rowResult.draftResult = draftResult;
+            rowResult.title = draftParams.title;
+            rowResult.rawTitle = draftParams.rawTitle;
+            rowResult.draftId = draftResult?.draftId || draftResult?.productDraftId || "";
+            rowResult.productId = draftResult?.productId || "";
+            rowResult.skcId = draftResult?.skcId || "";
+            rowResult.skuId = draftResult?.skuId || "";
+            rowResult.success = Boolean(draftResult?.success);
+            rowResult.message = draftResult?.success
+              ? (draftResult.message || "商品已保存到Temu草稿箱")
+              : (draftResult?.message || "草稿保存失败");
+            rowResult.errorCategory = draftResult?.success ? "" : classifyAutoPricingError("draft", rowResult.message);
+            logWorkflowPack(taskId, `row=${rowNumber} draft ${draftResult?.success ? "ok" : "failed"} ${rowResult.draftId || rowResult.message}`);
+          }
+        }
+        results.push(rowResult);
+        logWorkflowPack(taskId, `row=${rowNumber} done generated=${successCount}/${requiredCount}, uploaded=${uploadSummary.uploadSuccessCount}/${uploadSummary.uploadableCount}, skipped=${skippedCount}`);
+        try {
+          kwcdnTablePath = writeWorkflowKwcdnResultTable(csvPath, table, results, outputDir, taskId, packCounts);
+          fs.writeFileSync(path.join(outputDir, "result.json"), JSON.stringify({ taskId, total, packCounts, kwcdnTablePath, results }, null, 2), "utf8");
+        } catch (error) {
+          logSilent("workflow-pack.result.write", error);
+        }
+      } catch (error) {
+        logWorkflowPack(taskId, `row=${rowNumber} failed: ${error?.message || String(error || "生成失败")}`);
+        results.push({
+          index: dataIndex,
+          rowNumber,
+          name: productName.slice(0, 120),
+          sourceImageUrl: extractWorkflowImageCandidate(row[table.imageIdx]),
+          success: false,
+          successCount: 0,
+          total: packCounts.length + 1,
+          message: error?.message || String(error || "生成失败"),
+          materialTypes: buildWorkflowMaterialImageSpecs(packCounts).map((item) => item.imageType),
+          images: buildWorkflowMaterialImageSpecs(packCounts).map((spec) => ({
+            packCount: spec.packCount,
+            imageType: spec.imageType,
+            role: spec.role,
+            label: spec.label,
+            imageUrl: "",
+            localPath: "",
+            uploadEligible: spec.role !== "original",
+            skipped: false,
+            error: error?.message || String(error || "生成失败"),
+            warnings: [],
+          })),
+        });
+        try {
+          kwcdnTablePath = writeWorkflowKwcdnResultTable(csvPath, table, results, outputDir, taskId, packCounts);
+          fs.writeFileSync(path.join(outputDir, "result.json"), JSON.stringify({ taskId, total, packCounts, kwcdnTablePath, results }, null, 2), "utf8");
+        } catch (writeError) {
+          logSilent("workflow-pack.result.write", writeError);
+        }
+      }
+    }
+  } catch (error) {
+    const message = error?.message || String(error || "卖家中心会话准备失败");
+    logWorkflowPack(taskId, `seller session failed: ${message}`);
+    return {
+      success: false,
+      taskId,
+      total,
+      successCount: 0,
+      partialCount: 0,
+      failCount: total,
+      packCounts,
+      outputDir,
+      kwcdnTablePath,
+      message: `卖家中心登录/授权未完成，无法上传素材中心：${message}`,
+      results,
+    };
+  } finally {
+    try {
+      stopAuthPopupMonitor?.();
+    } catch (error) {
+      logSilent("workflow-pack.popup.cleanup", error);
+    }
+  }
+
+  const successCount = results.filter((item) => item.success).length;
+  const partialCount = results.filter((item) => !item.success && item.successCount > 0).length;
+  const finalResult = {
+    success: successCount > 0 || partialCount > 0,
+    taskId,
+    total,
+    successCount,
+    partialCount,
+    failCount: total - successCount - partialCount,
+    packCounts,
+    outputDir,
+    kwcdnTablePath,
+    results,
+  };
+  logWorkflowPack(taskId, `finish success=${finalResult.success} complete=${successCount} partial=${partialCount} fail=${finalResult.failCount}`);
+  try {
+    fs.writeFileSync(path.join(outputDir, "result.json"), JSON.stringify(finalResult, null, 2), "utf8");
+  } catch (error) {
+    logSilent("workflow-pack.result.write", error);
+  }
+  return finalResult;
+}
+
 async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePaths = []) {
-  const AI_SINGLE_IMAGE_REQUEST_TIMEOUT_MS = 90000;
-  const AI_SINGLE_IMAGE_IDLE_TIMEOUT_MS = 45000;
+  const parsePositiveEnvInt = (name, fallback) => {
+    const value = Number(process.env[name]);
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+  };
+  const AI_SINGLE_IMAGE_REQUEST_TIMEOUT_MS = parsePositiveEnvInt("AUTO_PRICING_AI_REQUEST_TIMEOUT_MS", 15 * 60 * 1000);
+  const AI_SINGLE_IMAGE_IDLE_TIMEOUT_MS = parsePositiveEnvInt("AUTO_PRICING_AI_IDLE_TIMEOUT_MS", 5 * 60 * 1000);
+  const AI_SINGLE_IMAGE_CONCURRENCY_LIMIT = Math.max(
+    1,
+    parsePositiveEnvInt("AUTO_PRICING_AI_GENERATE_CONCURRENCY", REQUIRED_AI_DETAIL_IMAGE_COUNT)
+  );
   const imageBuffer = fs.readFileSync(sourceImagePath);
   const base64 = imageBuffer.toString("base64");
   const ext = path.extname(sourceImagePath).toLowerCase();
@@ -10189,7 +11933,11 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
   const images = {};
   let lastGenerateError = "";
 
-  console.error(`[ai-gen] Step 3: Generating ${plans.length} images (single-plan parallel requests)...`);
+  const generateConcurrency = Math.max(1, Math.min(plans.length || 1, AI_SINGLE_IMAGE_CONCURRENCY_LIMIT));
+  console.error(
+    `[ai-gen] Step 3: Generating ${plans.length} images ` +
+    `(concurrency=${generateConcurrency}, requestTimeout=${Math.round(AI_SINGLE_IMAGE_REQUEST_TIMEOUT_MS / 1000)}s, idleTimeout=${Math.round(AI_SINGLE_IMAGE_IDLE_TIMEOUT_MS / 1000)}s)...`
+  );
 
   // SSE 流处理函数
   async function processSSE(resp) {
@@ -10240,7 +11988,9 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
     let latestPlanError = "";
     for (let attempt = 0; attempt <= retries; attempt++) {
       let requestTimer = null;
+      const attemptStartedAt = Date.now();
       try {
+        console.error(`[ai-gen] Start ${plan.imageType}, attempt ${attempt + 1}/${retries + 1}`);
         const form = new FormData();
         for (const img of allImageBlobs) {
           const blob = new Blob([img.buffer], { type: img.type || "image/jpeg" });
@@ -10261,17 +12011,22 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
         if (resp.ok) {
           const singleResult = await processSSE(resp);
           if (singleResult[plan.imageType]) {
+            const elapsedSec = ((Date.now() - attemptStartedAt) / 1000).toFixed(1);
+            console.error(`[ai-gen] Done ${plan.imageType}, attempt ${attempt + 1}/${retries + 1}, ${elapsedSec}s`);
             return singleResult[plan.imageType];
           }
           latestPlanError = `Generate failed (${plan.imageType}): 未返回图片`;
-          console.error(`[ai-gen] Missing image for ${plan.imageType}, attempt ${attempt + 1}/${retries + 1}`);
+          const elapsedSec = ((Date.now() - attemptStartedAt) / 1000).toFixed(1);
+          console.error(`[ai-gen] Missing image for ${plan.imageType}, attempt ${attempt + 1}/${retries + 1}, ${elapsedSec}s`);
         } else {
           latestPlanError = await formatAiImageError(`Generate failed (${plan.imageType})`, resp);
-          console.error(`[ai-gen] HTTP ${resp.status} for ${plan.imageType}, attempt ${attempt + 1}/${retries + 1}`);
+          const elapsedSec = ((Date.now() - attemptStartedAt) / 1000).toFixed(1);
+          console.error(`[ai-gen] HTTP ${resp.status} for ${plan.imageType}, attempt ${attempt + 1}/${retries + 1}, ${elapsedSec}s`);
         }
       } catch (e) {
         latestPlanError = formatAiImageFetchError(`Generate failed (${plan.imageType})`, e, "/api/generate");
-        console.error(`[ai-gen] Error for ${plan.imageType}: ${e.message}, attempt ${attempt + 1}/${retries + 1}`);
+        const elapsedSec = ((Date.now() - attemptStartedAt) / 1000).toFixed(1);
+        console.error(`[ai-gen] Error for ${plan.imageType}: ${e.message}, attempt ${attempt + 1}/${retries + 1}, ${elapsedSec}s`);
       } finally {
         if (requestTimer) clearTimeout(requestTimer);
       }
@@ -10280,7 +12035,9 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
         return { imageType: plan.imageType, imageUrl: null, error: latestPlanError };
       }
       if (attempt < retries) {
-        await new Promise(r => setTimeout(r, 1500));
+        const waitMs = Math.min(30000, 5000 * (attempt + 1));
+        console.error(`[ai-gen] Retry ${plan.imageType} in ${Math.round(waitMs / 1000)}s`);
+        await new Promise(r => setTimeout(r, waitMs));
       }
     }
     if (latestPlanError) {
@@ -10289,10 +12046,33 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
     return { imageType: plan.imageType, imageUrl: null, error: latestPlanError };
   }
 
+  async function generatePlansWithLimit(targetPlans, retries, stageLabel) {
+    const settled = new Array(targetPlans.length);
+    const concurrency = Math.max(1, Math.min(generateConcurrency, targetPlans.length || 1));
+    let cursor = 0;
+    console.error(`[ai-gen] ${stageLabel}: ${targetPlans.length} plan(s), concurrency=${concurrency}`);
+
+    async function runWorker(workerIndex) {
+      while (cursor < targetPlans.length) {
+        const index = cursor;
+        cursor += 1;
+        const plan = targetPlans[index];
+        try {
+          const value = await generateSinglePlan(plan, retries);
+          settled[index] = { status: "fulfilled", value };
+        } catch (reason) {
+          settled[index] = { status: "rejected", reason };
+          console.error(`[ai-gen] Worker ${workerIndex + 1} rejected ${plan?.imageType || index}: ${reason?.message || reason}`);
+        }
+      }
+    }
+
+    await Promise.all(Array.from({ length: concurrency }, (_, workerIndex) => runWorker(workerIndex)));
+    return settled;
+  }
+
   const perPlanErrors = {};
-  const firstPassResults = await Promise.allSettled(
-    plans.map((plan) => generateSinglePlan(plan, 2))
-  );
+  const firstPassResults = await generatePlansWithLimit(plans, 2, "First pass");
   for (let i = 0; i < plans.length; i++) {
     const plan = plans[i];
     const result = firstPassResults[i];
@@ -10313,10 +12093,8 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
   // 检查缺失的图片，单独重试
   const missingPlans = plans.filter(p => !images[p.imageType]);
   if (missingPlans.length > 0) {
-    console.error(`[ai-gen] Missing ${missingPlans.length} images after parallel run, retrying individually...`);
-    const retryResults = await Promise.allSettled(
-      missingPlans.map((plan) => generateSinglePlan(plan, 1))
-    );
+    console.error(`[ai-gen] Missing ${missingPlans.length} images after limited run, retrying with same queue...`);
+    const retryResults = await generatePlansWithLimit(missingPlans, 1, "Missing retry");
     for (let i = 0; i < missingPlans.length; i++) {
       const plan = missingPlans[i];
       const result = retryResults[i];
@@ -10358,7 +12136,7 @@ async function generateImagesWithAI(sourceImagePath, productTitle, extraImagePat
 async function uploadImageToKwcdn(page, localImagePath) {
   const result = await uploadImageToMaterial(page, localImagePath);
   if (result.success && result.url) {
-    return { success: true, url: result.url, error: "" };
+    return { success: true, url: result.url, width: result.width, height: result.height, error: "" };
   }
   return { success: false, url: null, error: result.error || "unknown upload error" };
 }
@@ -10508,6 +12286,132 @@ async function uploadImagesToKwcdnConcurrently(localImages, options = {}) {
   }
 }
 
+function getEmptyWorkflowUploadSummary(images = []) {
+  const nextImages = Array.isArray(images) ? images.map((image) => ({ ...image })) : [];
+  return {
+    images: nextImages,
+    uploadableCount: 0,
+    uploadSuccessCount: 0,
+    uploadFailCount: 0,
+    uploadSkippedCount: nextImages.filter((image) => image?.skipped || image?.uploadEligible === false).length,
+    firstError: "",
+  };
+}
+
+async function uploadWorkflowMaterialImages(images = [], options = {}) {
+  const taskId = String(options.taskId || "workflow-pack");
+  const rowNumber = options.rowNumber || "";
+  const nextImages = Array.isArray(images) ? images.map((image) => ({ ...image })) : [];
+  const uploadItems = [];
+  let uploadFailCount = 0;
+  let firstError = "";
+
+  nextImages.forEach((image, index) => {
+    if (!image) return;
+    if (image.skipped || image.uploadEligible === false) {
+      image.uploadSkipped = true;
+      return;
+    }
+    if (!image.localPath) {
+      image.uploadSuccess = false;
+      image.uploadError = "本地素材文件缺失";
+      uploadFailCount += 1;
+      firstError ||= image.uploadError;
+      return;
+    }
+    if (!fs.existsSync(image.localPath)) {
+      image.uploadSuccess = false;
+      image.uploadError = `本地素材文件不存在：${image.localPath}`;
+      uploadFailCount += 1;
+      firstError ||= image.uploadError;
+      return;
+    }
+    uploadItems.push({ image, index });
+  });
+
+  const uploadableCount = uploadItems.length + uploadFailCount;
+  if (uploadItems.length === 0) {
+    return {
+      images: nextImages,
+      uploadableCount,
+      uploadSuccessCount: 0,
+      uploadFailCount,
+      uploadSkippedCount: nextImages.filter((image) => image?.skipped || image?.uploadEligible === false).length,
+      firstError,
+    };
+  }
+
+  let page = null;
+  let uploadSuccessCount = 0;
+  try {
+    page = await createMaterialUploadPage();
+  } catch (error) {
+    const rawError = error?.message || String(error || "material upload page init failed");
+    const userError = formatAutoPricingUserError(rawError);
+    uploadItems.forEach((item) => {
+      item.image.uploadSuccess = false;
+      item.image.uploadError = userError;
+      item.image.uploadRawError = rawError;
+    });
+    return {
+      images: nextImages,
+      uploadableCount,
+      uploadSuccessCount: 0,
+      uploadFailCount: uploadFailCount + uploadItems.length,
+      uploadSkippedCount: nextImages.filter((image) => image?.skipped || image?.uploadEligible === false).length,
+      firstError: firstError || rawError,
+    };
+  }
+
+  try {
+    for (const item of uploadItems) {
+      const image = item.image;
+      const type = image.imageType || image.label || `image_${item.index}`;
+      console.error(`[workflow-pack] task=${taskId} row=${rowNumber} upload start type=${type}`);
+      let uploadResult = await uploadImageToKwcdn(page, image.localPath);
+      if (!uploadResult.success && (
+        isMaterialUploadRecoverableError(uploadResult.error)
+        || isMaterialUploadNavigationTimeoutError(uploadResult.error)
+      )) {
+        console.error(`[workflow-pack] task=${taskId} row=${rowNumber} retry upload type=${type}: ${uploadResult.error}`);
+        await page.close().catch(() => {});
+        page = await createMaterialUploadPage();
+        uploadResult = await uploadImageToKwcdn(page, image.localPath);
+      }
+
+      if (uploadResult.success && uploadResult.url) {
+        image.kwcdnUrl = uploadResult.url;
+        image.materialCenterUrl = uploadResult.url;
+        image.uploadSuccess = true;
+        image.uploadError = "";
+        image.uploadedWidth = uploadResult.width || null;
+        image.uploadedHeight = uploadResult.height || null;
+        uploadSuccessCount += 1;
+        console.error(`[workflow-pack] task=${taskId} row=${rowNumber} upload ok type=${type} url=${uploadResult.url.slice(0, 80)}`);
+      } else {
+        const rawError = uploadResult.error || "unknown upload error";
+        image.uploadSuccess = false;
+        image.uploadError = formatAutoPricingUserError(rawError);
+        image.uploadRawError = rawError;
+        uploadFailCount += 1;
+        firstError ||= rawError;
+        console.error(`[workflow-pack] task=${taskId} row=${rowNumber} upload failed type=${type}: ${rawError}`);
+      }
+    }
+  } finally {
+    await page.close().catch(() => {});
+  }
+
+  return {
+    images: nextImages,
+    uploadableCount,
+    uploadSuccessCount,
+    uploadFailCount,
+    uploadSkippedCount: nextImages.filter((image) => image?.skipped || image?.uploadEligible === false).length,
+    firstError,
+  };
+}
+
 /**
  * 完整自动核价流程
  * @param {Object} params
@@ -10552,45 +12456,24 @@ async function autoPricingFromCSV(params) {
   const uploadConcurrency = normalizeUploadConcurrency(params.uploadConcurrency, 3);
   const results = [];
 
-  // 支持 XLSX 和 CSV 两种格式
+  // 支持 CSV、Excel，以及后缀是 CSV 但内容实际为 Excel 的导出文件
   let headers, dataRows;
-  const isXlsx = isExcelLikeFile(csvPath);
-  if (isXlsx) {
-    const wb = XLSX.readFile(csvPath);
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    const allRows = XLSX.utils.sheet_to_json(ws, { header: 1 });
-    // 跳过可能的标题行（如"店铺信息"），找到真正的列头（包含"商品标题"或"商品名称"）
-    let headerRowIdx = 0;
-    for (let i = 0; i < Math.min(10, allRows.length); i++) {
-      const row = allRows[i];
-      if (row && row.some((c) => {
-        const text = normalizeCellText(c);
-        return text.includes("商品标题") || text.includes("商品名称") || text.includes("美元价格");
-      })) {
-        headerRowIdx = i;
-        break;
-      }
+  const { kind: spreadsheetKind, rows: allRows } = readSpreadsheetRows(csvPath, { defval: "" });
+  // 跳过可能的标题行（如"店铺信息"），找到真正的列头（包含"商品标题"或"商品名称"）
+  let headerRowIdx = 0;
+  for (let i = 0; i < Math.min(10, allRows.length); i++) {
+    const row = allRows[i];
+    if (row && row.some((c) => {
+      const text = normalizeCellText(c);
+      return text.includes("商品标题") || text.includes("商品名称") || text.includes("美元价格");
+    })) {
+      headerRowIdx = i;
+      break;
     }
-    headers = (allRows[headerRowIdx] || []).map((h) => normalizeCellText(h));
-    dataRows = allRows.slice(headerRowIdx + 1).filter(r => r && r.length > 0);
-    console.error(`[auto-pricing] Excel-like file: header row=${headerRowIdx}, data rows=${dataRows.length}, headers=${headers.slice(0, 8).join("|")}`);
-  } else {
-    const csvContent = fs.readFileSync(csvPath, "utf8");
-    const lines = csvContent.split("\n").filter(l => l.trim());
-    function parseCSVLine(line) {
-      const result = [];
-      let current = "", inQuotes = false;
-      for (const ch of line) {
-        if (ch === '"') inQuotes = !inQuotes;
-        else if (ch === ',' && !inQuotes) { result.push(current.trim()); current = ""; }
-        else current += ch;
-      }
-      result.push(current.trim());
-      return result;
-    }
-    headers = parseCSVLine(lines[0]);
-    dataRows = lines.slice(1).map(l => parseCSVLine(l));
   }
+  headers = (allRows[headerRowIdx] || []).map((h) => normalizeCellText(h));
+  dataRows = allRows.slice(headerRowIdx + 1).filter(r => r && r.length > 0);
+  console.error(`[auto-pricing] Spreadsheet file: kind=${spreadsheetKind}, header row=${headerRowIdx}, data rows=${dataRows.length}, headers=${headers.slice(0, 8).join("|")}`);
 
   const colIndex = (names) => {
     for (const name of names) {
@@ -11406,6 +13289,80 @@ function selectPropertyValueByPatterns(propValues = [], patterns = []) {
   return null;
 }
 
+function getPropertyValueText(value) {
+  return String(value?.value || value?.propValue || "").trim();
+}
+
+function hasPropertyEvidence(text = "", patterns = []) {
+  const value = String(text || "");
+  return patterns.some((pattern) => pattern.test(value));
+}
+
+function isWorkflowAutoCareLikeProduct(evidenceText = "") {
+  return /(汽车|车载|车辆|卡车|SUV|摩托车|车内|车身|塑料修复|塑料翻新|修复剂|护理剂|清洁剂|保养|翻新|polish|restore|restorer|plastic|car|auto|vehicle)/i.test(String(evidenceText || ""));
+}
+
+function isStrongLinkedPropertyValueWithoutEvidence(propName = "", propValue = "", evidenceText = "") {
+  const name = String(propName || "");
+  const value = String(propValue || "");
+  const evidence = String(evidenceText || "");
+
+  if (/(木材类型|木种)/.test(name)) {
+    return !hasPropertyEvidence(evidence, [/木(制|质|头|材)?/, /竹/, /藤/, /\bwood(en)?\b/i, /\bbamboo\b/i, /\brattan\b/i]);
+  }
+  if (/真皮种类|皮革类型/.test(name)) {
+    return !hasPropertyEvidence(evidence, [/皮革/, /真皮/, /牛皮/, /羊皮/, /猪皮/, /\bleather\b/i]);
+  }
+  if (/(木|竹|藤|再生木|十齿花|榉木|橡木|松木|桦木|胡桃木)/.test(value)) {
+    return !hasPropertyEvidence(evidence, [/木(制|质|头|材)?/, /竹/, /藤/, /\bwood(en)?\b/i, /\bbamboo\b/i, /\brattan\b/i]);
+  }
+  if (/(真皮|牛皮|羊皮|猪皮|皮革)/.test(value)) {
+    return !hasPropertyEvidence(evidence, [/皮革/, /真皮/, /牛皮/, /羊皮/, /猪皮/, /\bleather\b/i]);
+  }
+  if (/(电池|锂电|充电|电子|插电|USB|电源)/i.test(value)) {
+    return !hasPropertyEvidence(evidence, [/电池|锂电|充电|电子|插电|USB|电源|battery|recharge|electric/i]);
+  }
+  if (/(金属|铁|钢|铝|铜)/.test(value)) {
+    return !hasPropertyEvidence(evidence, [/金属|铁|钢|铝|铜|metal|steel|aluminum|aluminium|copper/i]);
+  }
+
+  return false;
+}
+
+function findSafePropertyValue(propName = "", propValues = [], productTitle = "", categoryPath = "") {
+  if (!Array.isArray(propValues) || propValues.length === 0) return null;
+  const evidenceText = `${String(productTitle || "")} ${String(categoryPath || "")}`;
+  const values = propValues.filter((value) => {
+    const text = getPropertyValueText(value);
+    return text && !isStrongLinkedPropertyValueWithoutEvidence(propName, text, evidenceText);
+  });
+
+  const autoCare = isWorkflowAutoCareLikeProduct(evidenceText);
+  const propText = String(propName || "");
+  const priorityGroups = [];
+  if (autoCare && /(材质|材料|Material)/i.test(propText)) {
+    priorityGroups.push([/其[他它]/, /不适用|N\/A/i, /详见/, /塑料|树脂|橡胶|硅胶/]);
+  }
+  priorityGroups.push([
+    /^其[他它]$/,
+    /其[他它]/,
+    /不适用|N\/A/i,
+    /详见/,
+    /^无$|^无\s/,
+    /通用/,
+    /不含|不需要|不涉及/,
+  ]);
+  if (autoCare && /(物品形式|形式|形态)/.test(propText)) {
+    priorityGroups.unshift([/膏体|凝胶|液体|乳液|喷雾|固体|其他|其它/]);
+  }
+
+  for (const patterns of priorityGroups) {
+    const matched = selectPropertyValueByPatterns(values, patterns);
+    if (matched) return matched;
+  }
+  return values[0] || null;
+}
+
 function scoreCategoryTemplateCandidate(title = "", candidatePath = "", candidateName = "", templateProps = []) {
   const titleText = String(title || "");
   const pathText = `${candidatePath} ${candidateName}`.trim();
@@ -11571,7 +13528,7 @@ async function findBetterLeafCategoryByTemplate(page, catIds, leafCatId, product
 /**
  * 查询分类的属性模板，用 AI 智能分析填充属性值
  */
-async function getCategoryProperties(page, leafCatId, productTitle) {
+async function getCategoryProperties(page, leafCatId, productTitle, categoryPath = "") {
   const props = await fetchCategoryTemplateProps(page, leafCatId);
 
   if (props.length === 0) {
@@ -11610,6 +13567,7 @@ async function getCategoryProperties(page, leafCatId, productTitle) {
     const prompt = `你是一个电商商品属性填写专家。
 
 商品标题: "${productTitle}"
+类目路径: "${categoryPath || ""}"
 
 以下是该分类的属性列表，每个属性有可选值。请判断哪些属性与该商品相关，并选择最合适的值。
 
@@ -11617,38 +13575,46 @@ async function getCategoryProperties(page, leafCatId, productTitle) {
 ${propsForAI.map((p, i) => `${i + 1}. ${p.name}${p.required ? '(必填)' : '(选填)'}: [${p.values.join(', ')}]`).join('\n')}
 
 规则:
-1. 必填属性必须填值，禁止skip！即使不确定也要选"其他"、"其它"等安全值
+1. 优先填必填属性，但如果候选值都明显会误导商品属性，可以返回 "skip"，系统会用更保守的规则处理
 2. 选填属性如果与商品无关可以 "skip"
 3. 优先选择"其他"、"其它"、"不适用"等安全值，除非商品明确属于某个具体选项
-4. 每个必填属性都必须返回一个具体的值
+4. 不确定时不要硬选第一个候选值，宁可选"其他/不适用/详见商品详情/skip"
+5. 不要为了安全选择会触发强关联子属性的材质/属性，例如木材、真皮、金属、电子、电池；只有标题或类目明确表达时才选择
+6. 汽车护理、清洁、修复剂类商品：材质/成分/容量不明确时优先选"不适用"、"其他"、"详见sku"，不要误选木材
 
 请用 JSON 数组格式回复，每项格式: {"name": "属性名", "value": "选择的值"} 或 {"name": "属性名", "value": "skip"}
 只返回 JSON 数组，不要其他文字。`;
 
-    console.error(`[getCategoryProperties] Calling AI to analyze ${propsForAI.length} required properties...`);
+    const modelChain = getAttributeFillModelChain();
+    console.error(`[getCategoryProperties] Calling AI to analyze ${propsForAI.length} required properties. models=${modelChain.join(" -> ")}`);
 
-    // 调用 AI API（属性分析支持独立配置）
-    const attrClient = getAttributeGeminiClient();
-    if (!attrClient) {
-      console.error(`[getCategoryProperties] ATTRIBUTE_AI_API_KEY not configured, using safe defaults`);
+    if (!ATTRIBUTE_AI_API_KEY && !AI_API_KEY) {
+      console.error(`[getCategoryProperties] AI API key not configured, using safe defaults`);
       throw new Error("skip_ai");
     }
 
-    try {
-      const aiData = await attrClient.chat.completions.create({
-        model: ATTRIBUTE_AI_MODEL,
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.1,
-      });
-      const content = aiData?.choices?.[0]?.message?.content || "";
-      console.error(`[getCategoryProperties] AI raw response: ${content.slice(0, 300)}`);
-      const jsonMatch = content.match(/\[[\s\S]*\]/);
-      if (jsonMatch) {
-        aiDecisions = JSON.parse(jsonMatch[0]);
-        console.error(`[getCategoryProperties] AI returned ${aiDecisions.length} decisions`);
+    for (const model of modelChain) {
+      const attrClient = getAttributeClientForModel(model);
+      if (!attrClient) continue;
+      try {
+        const aiData = await attrClient.chat.completions.create({
+          model,
+          messages: [{ role: "user", content: prompt }],
+          temperature: 0.1,
+          max_tokens: 1200,
+        });
+        const content = aiData?.choices?.[0]?.message?.content || "";
+        console.error(`[getCategoryProperties] AI raw response from ${model}: ${content.slice(0, 300)}`);
+        const parsed = extractJsonArrayFromText(content);
+        if (parsed) {
+          aiDecisions = parsed;
+          console.error(`[getCategoryProperties] AI model=${model} returned ${aiDecisions.length} decisions`);
+          break;
+        }
+        console.error(`[getCategoryProperties] AI model=${model} returned invalid JSON array`);
+      } catch (innerErr) {
+        console.error(`[getCategoryProperties] AI model=${model} error: ${innerErr?.message || String(innerErr)}`);
       }
-    } catch (innerErr) {
-      console.error(`[getCategoryProperties] AI API error: ${innerErr?.message || String(innerErr)}`);
     }
   } catch (e) {
     console.error(`[getCategoryProperties] AI analysis failed: ${e.message}, falling back to safe defaults`);
@@ -11685,23 +13651,25 @@ ${propsForAI.map((p, i) => `${i + 1}. ${p.name}${p.required ? '(必填)' : '(选
       const decision = aiDecisions.find(d => d.name === propName);
       if (decision) {
         if (decision.value === "skip") {
-          if (isRequired) {
-            // 必填属性不允许 skip，fallback 到安全值
-            console.error(`[getCategoryProperties] AI tried to skip REQUIRED "${propName}", using safe value instead`);
-            // selectedVal 保持 null，后续走安全值 fallback
+          const safeFallback = isRequired ? findSafePropertyValue(propName, propValues, productTitle, categoryPath) : null;
+          if (safeFallback) {
+            selectedVal = safeFallback;
+            console.error(`[getCategoryProperties] AI skip required "${propName}", using safe fallback "${getPropertyValueText(safeFallback)}"`);
           } else {
             console.error(`[getCategoryProperties] AI skip: "${propName}"`);
             continue;
           }
         }
         // 在可选值中找 AI 推荐的值
-        selectedVal = propValues.find(v => (v.value || v.propValue || "") === decision.value);
         if (!selectedVal) {
-          // 模糊匹配
-          selectedVal = propValues.find(v => (v.value || v.propValue || "").includes(decision.value) || decision.value.includes(v.value || v.propValue || ""));
-        }
-        if (selectedVal) {
-          console.error(`[getCategoryProperties] AI select: "${propName}" = "${decision.value}"`);
+          selectedVal = propValues.find(v => (v.value || v.propValue || "") === decision.value);
+          if (!selectedVal) {
+            // 模糊匹配
+            selectedVal = propValues.find(v => (v.value || v.propValue || "").includes(decision.value) || decision.value.includes(v.value || v.propValue || ""));
+          }
+          if (selectedVal) {
+            console.error(`[getCategoryProperties] AI select: "${propName}" = "${decision.value}"`);
+          }
         }
       } else {
         // AI 没提到的属性：必填用安全值，选填跳过
@@ -11712,8 +13680,11 @@ ${propsForAI.map((p, i) => `${i + 1}. ${p.name}${p.required ? '(必填)' : '(选
     // Fallback：没有 AI 决策或 AI 没匹配到值时
     if (!selectedVal) {
       if (!isRequired) continue; // 非必填跳过
-      selectedVal = pickHeuristicPropertyValue(propName, propValues, productTitle, "");
+      selectedVal = pickHeuristicPropertyValue(propName, propValues, productTitle, categoryPath);
       // 必填：用安全值
+      if (!selectedVal) {
+        selectedVal = findSafePropertyValue(propName, propValues, productTitle, categoryPath);
+      }
       if (!selectedVal) {
         for (const pattern of safeValuePriority) {
           selectedVal = propValues.find(v => pattern.test(v.value || v.propValue || ""));
@@ -11723,6 +13694,19 @@ ${propsForAI.map((p, i) => `${i + 1}. ${p.name}${p.required ? '(必填)' : '(选
       if (!selectedVal) {
         selectedVal = propValues[0];
         console.error(`[getCategoryProperties] Fallback first value: "${propName}" = "${selectedVal?.value || selectedVal?.propValue}"`);
+      }
+    }
+
+    const selectedText = getPropertyValueText(selectedVal);
+    const evidenceText = `${String(productTitle || "")} ${String(categoryPath || "")}`;
+    if (isStrongLinkedPropertyValueWithoutEvidence(propName, selectedText, evidenceText)) {
+      const safeFallback = findSafePropertyValue(propName, propValues, productTitle, categoryPath);
+      if (safeFallback && getPropertyValueText(safeFallback) !== selectedText) {
+        console.error(`[getCategoryProperties] Replace risky "${propName}"="${selectedText}" with "${getPropertyValueText(safeFallback)}"`);
+        selectedVal = safeFallback;
+      } else {
+        console.error(`[getCategoryProperties] Skip risky "${propName}"="${selectedText}" (no evidence in title/category)`);
+        continue;
       }
     }
 
@@ -11817,14 +13801,107 @@ ${propsForAI.map((p, i) => `${i + 1}. ${p.name}${p.required ? '(必填)' : '(选
 /**
  * 查询分类的规格信息（颜色/风格/尺寸等）
  */
-async function getCategorySpec(page, leafCatId) {
+async function getCategorySpecList(page, leafCatId) {
   const result = await temuXHR(page, PRICING_CONFIG.specParentEndpoint, { catId: leafCatId }, { maxRetries: 1 });
   const specList = (result.data?.parentSpecVOList || []).filter((spec) => spec?.parentSpecId && spec?.parentSpecName);
-  if (result.success && specList.length > 0) {
-    const spec = specList[Math.floor(Math.random() * specList.length)];
-    return { parentSpecId: spec.parentSpecId, parentSpecName: spec.parentSpecName };
+  return result.success
+    ? specList.map((spec) => ({ parentSpecId: spec.parentSpecId, parentSpecName: spec.parentSpecName }))
+    : [];
+}
+
+async function getCategorySpec(page, leafCatId) {
+  const specList = await getCategorySpecList(page, leafCatId);
+  if (specList.length === 0) return null;
+  return specList[Math.floor(Math.random() * specList.length)];
+}
+
+function isWorkflowQuantityParentSpecName(name = "") {
+  return /(数量|件数|个数|包数|套数|规格数量|quantity|pieces?|pcs?|pack\s*count|number\s*of\s*pieces)/i.test(String(name || ""));
+}
+
+function isWorkflowUnsafeRandomParentSpecName(name = "") {
+  return /(数量|件数|个数|包数|套数|尺寸|尺码|大小|容量|重量|净含量|包装数量|quantity|pieces?|pcs?|pack|size|weight|volume|capacity)/i.test(String(name || ""));
+}
+
+function chooseWorkflowQuantityParentSpec(specList = []) {
+  return (specList || []).find((spec) => isWorkflowQuantityParentSpecName(spec?.parentSpecName)) || null;
+}
+
+function chooseWorkflowRandomParentSpec(specList = [], quantitySpec = null) {
+  const candidates = (specList || []).filter((spec) => {
+    if (!spec?.parentSpecId || !spec?.parentSpecName) return false;
+    if (quantitySpec?.parentSpecId && spec.parentSpecId === quantitySpec.parentSpecId) return false;
+    return !isWorkflowUnsafeRandomParentSpecName(spec.parentSpecName);
+  });
+  const priority = [
+    /(颜色|color)/i,
+    /(款式|风格|样式|style|variant)/i,
+    /(型号|model)/i,
+    /(材质|material)/i,
+    /(品类|type|category)/i,
+  ];
+  for (const pattern of priority) {
+    const matched = candidates.find((spec) => pattern.test(String(spec.parentSpecName || "")));
+    if (matched) return matched;
+  }
+  return candidates.length > 0 ? candidates[Math.floor(Math.random() * candidates.length)] : null;
+}
+
+async function resolveSpecValueForParent(page, config, parentSpec, candidates = [], logPrefix = "[spec]") {
+  const parentSpecId = Number(parentSpec?.parentSpecId) || 0;
+  const parentSpecName = String(parentSpec?.parentSpecName || "").trim();
+  const names = Array.from(new Set(candidates.map((item) => String(item || "").trim()).filter(Boolean)));
+  if (!parentSpecId || !parentSpecName || names.length === 0) return null;
+  for (const specName of names) {
+    const specResult = await temuXHR(
+      page,
+      config.specQueryEndpoint,
+      { parentSpecId, specName },
+      { maxRetries: 2 },
+    );
+    if (specResult.success && specResult.data?.specId) {
+      const resolved = {
+        parentSpecId,
+        parentSpecName,
+        specId: specResult.data.specId,
+        specName,
+      };
+      console.error(`${logPrefix} Spec value: ${parentSpecName}=${specName} (${resolved.specId})`);
+      return resolved;
+    }
+    console.error(`${logPrefix} Spec query failed for ${parentSpecName}="${specName}", trying next candidate...`);
   }
   return null;
+}
+
+function buildSkuSpecReq(spec) {
+  return {
+    parentSpecId: spec.parentSpecId,
+    parentSpecName: spec.parentSpecName,
+    specId: spec.specId,
+    specName: spec.specName,
+    specLangSimpleList: [],
+  };
+}
+
+function buildProductSpecPropertyReq(spec) {
+  return {
+    parentSpecId: spec.parentSpecId,
+    parentSpecName: spec.parentSpecName,
+    specId: spec.specId,
+    specName: spec.specName,
+    vid: 0,
+    specLangSimpleList: [],
+    refPid: 0,
+    pid: 0,
+    templatePid: 0,
+    propName: spec.parentSpecName,
+    propValue: spec.specName,
+    valueUnit: "",
+    valueGroupId: 0,
+    valueGroupName: "",
+    valueExtendInfo: "",
+  };
 }
 
 /**
@@ -12358,7 +14435,7 @@ async function createProductViaAPI(params) {
     if (!properties) {
       if (leafCatId) {
         console.error(`[api-create] Fetching category template for leaf=${leafCatId}...`);
-        properties = await getCategoryProperties(page, leafCatId, params.title || "");
+        properties = await getCategoryProperties(page, leafCatId, params.title || "", getCategoryPathText(catIds));
         if (properties) {
           console.error(`[api-create] Got ${properties.length} properties from template`);
         }
@@ -12371,40 +14448,235 @@ async function createProductViaAPI(params) {
 
     // 获取规格信息
     let specInfo = config.defaultSpec;
+    let workflowQuantitySpecConfig = null;
     if (leafCatId) {
-      const catSpec = await getCategorySpec(page, leafCatId);
-      if (catSpec) {
-        specInfo = { ...specInfo, ...catSpec };
-        console.error(`[api-create] Spec: ${specInfo.parentSpecName} (${specInfo.parentSpecId})`);
+      const specList = await getCategorySpecList(page, leafCatId);
+      if (params.workflowQuantitySpecs) {
+        const quantityCounts = (Array.isArray(params.quantityCounts) && params.quantityCounts.length > 0 ? params.quantityCounts : [1, 2, 3, 4])
+          .map((item) => Math.floor(Number(item)))
+          .filter((item) => Number.isFinite(item) && item >= 1 && item <= 12);
+        const uniqueQuantityCounts = Array.from(new Set(quantityCounts));
+        const workflowRandomSpecValueCount = Math.max(1, Math.min(4, Math.floor(Number(params.workflowRandomSpecValueCount) || 2)));
+        const quantityParentSpec = chooseWorkflowQuantityParentSpec(specList);
+        const randomParentSpec = chooseWorkflowRandomParentSpec(specList, quantityParentSpec);
+        if (!quantityParentSpec) {
+          return {
+            success: false,
+            message: "该类目未提供数量父规格，无法创建 1PC/2PC/3PC/4PC SKU",
+            step: "spec_quantity_parent",
+            draftSaved: false,
+          };
+        }
+        if (!randomParentSpec) {
+          return {
+            success: false,
+            message: "该类目未提供可用随机父规格，无法创建双父规格 SKU",
+            step: "spec_random_parent",
+            draftSaved: false,
+          };
+        }
+        const randomSpecs = [];
+        for (let index = 0; index < workflowRandomSpecValueCount; index += 1) {
+          const candidates = index === 0
+            ? buildSpecNameCandidates(params.title || "", params.specName)
+            : buildSecondarySpecNameCandidates(params.title || "", randomSpecs.map((item) => item.specName));
+          const randomSpec = await resolveSpecValueForParent(
+            page,
+            config,
+            randomParentSpec,
+            candidates,
+            "[api-create-workflow]",
+          );
+          if (!randomSpec?.specId) {
+            return {
+              success: false,
+              message: `随机父规格【${randomParentSpec.parentSpecName}】第 ${index + 1} 个子规格创建失败`,
+              step: "spec_random_value",
+              draftSaved: false,
+            };
+          }
+          randomSpecs.push(randomSpec);
+        }
+        const quantitySpecs = [];
+        for (const count of uniqueQuantityCounts) {
+          const label = `${count}PC`;
+          const quantitySpec = await resolveSpecValueForParent(
+            page,
+            config,
+            quantityParentSpec,
+            [label, `${count}PCS`, `${count}件`, `${count}件装`],
+            "[api-create-workflow]",
+          );
+          if (!quantitySpec?.specId) {
+            return {
+              success: false,
+              message: `数量父规格【${quantityParentSpec.parentSpecName}】子规格 ${label} 创建失败`,
+              step: "spec_quantity_value",
+              draftSaved: false,
+            };
+          }
+          quantitySpecs.push({ ...quantitySpec, count, label });
+        }
+        workflowQuantitySpecConfig = {
+          randomSpec: randomSpecs[0],
+          randomSpecs,
+          quantityParentSpec,
+          quantitySpecs,
+        };
+        specInfo = randomSpecs[0];
+        console.error(`[api-create-workflow] Specs: random=${randomParentSpec.parentSpecName}/${randomSpecs.map((item) => item.specName).join("|")}, quantity=${quantityParentSpec.parentSpecName} values=${quantitySpecs.map((item) => item.specName).join("|")}`);
+      } else {
+        const catSpec = specList.length > 0 ? specList[Math.floor(Math.random() * specList.length)] : null;
+        if (catSpec) {
+          specInfo = { ...specInfo, ...catSpec };
+          console.error(`[api-create] Spec: ${specInfo.parentSpecName} (${specInfo.parentSpecId})`);
+        }
       }
     }
 
-    // 查询/创建规格值 - 统一使用中文卖点词，并保留中文兜底候选
-    const specNameCandidates = buildSpecNameCandidates(params.title || "", params.specName);
-    let resolvedSpec = false;
-    for (const candidate of specNameCandidates) {
-      const specResult = await temuXHR(
-        page,
-        config.specQueryEndpoint,
-        { parentSpecId: specInfo.parentSpecId, specName: candidate },
-        { maxRetries: 2 },
-      );
-      if (specResult.success && specResult.data?.specId) {
-        specInfo.specId = specResult.data.specId;
-        specInfo.specName = candidate;
-        resolvedSpec = true;
-        console.error(`[api-create] Spec value: ${candidate}`);
-        break;
+    if (!workflowQuantitySpecConfig) {
+      // 查询/创建规格值 - 统一使用中文卖点词，并保留中文兜底候选
+      const specNameCandidates = buildSpecNameCandidates(params.title || "", params.specName);
+      const resolved = await resolveSpecValueForParent(page, config, specInfo, specNameCandidates, "[api-create]");
+      if (resolved?.specId) {
+        specInfo = { ...specInfo, ...resolved };
+      } else {
+        console.error(`[api-create] WARNING: specId unavailable, using default`);
       }
-      console.error(`[api-create] Spec query failed for "${candidate}", trying next candidate...`);
-    }
-    if (!resolvedSpec) {
-      console.error(`[api-create] WARNING: specId unavailable, using default`);
     }
 
     // Step 5: 构造 payload（基于真实抓包结构）
-    const priceInCents = Math.round((params.price || 9.99) * 100 * 2);  // 申报价 ×2
+    const basePriceInCents = Math.max(1, Math.round((params.price || 9.99) * 100));
+    const priceInCents = params.workflowQuantitySpecs
+      ? basePriceInCents
+      : Math.round((params.price || 9.99) * 100 * 2);  // 老流程沿用申报价 ×2
     const retailPrice = Math.round(priceInCents * config.retailPriceMultiplier);
+    const buildWorkflowNetContentReq = (value = 1) => {
+      const count = Math.max(1, Math.floor(Number(value) || 1));
+      return {
+        value: count,
+        unitCode: 1,
+        unit: "件",
+        netContentNumber: count,
+        netContentUnitCode: 1,
+      };
+    };
+    const getWorkflowPackIncludeCount = (pieces = 1) => {
+      const count = Math.max(1, Number(pieces) || 1);
+      return count === 1 ? 2 + Math.floor(Math.random() * 3) : Math.floor(count);
+    };
+    const buildWorkflowPieceIncludeInfo = (value = 1) => {
+      const count = Math.max(1, Math.floor(Number(value) || 1));
+      return {
+        value: count,
+        unitCode: 1,
+        unit: "件",
+        numberOfPieces: count,
+        pieceUnitCode: 1,
+        numberOfPiecesNew: count,
+        pieceNewUnitCode: 1,
+      };
+    };
+    const buildWorkflowTotalNetContentReq = (value = 1) => {
+      if (!params.workflowQuantitySpecs) return {};
+      return buildWorkflowNetContentReq(value);
+    };
+    const buildSkuReq = ({ thumbUrl, skuSpecReqs, pieces = 1, priceMultiplier = 1 }) => {
+      const skuPrice = Math.max(1, Math.round(priceInCents * priceMultiplier));
+      const skuRetailPrice = Math.max(1, Math.round(retailPrice * priceMultiplier));
+      const workflowNetContentReq = params.workflowQuantitySpecs ? buildWorkflowNetContentReq(1) : {};
+      const workflowPackIncludeCount = params.workflowQuantitySpecs ? getWorkflowPackIncludeCount(pieces) : 0;
+      const workflowTotalNetContentReq = buildWorkflowTotalNetContentReq(workflowPackIncludeCount);
+      const workflowPackIncludeInfo = params.workflowQuantitySpecs ? buildWorkflowPieceIncludeInfo(workflowPackIncludeCount) : {};
+      const workflowIndividuallyPacked = params.workflowQuantitySpecs && Math.max(1, Number(pieces) || 1) > 1
+        ? 0
+        : null;
+      return {
+        thumbUrl,
+        productSkuThumbUrlI18nReqs: [],
+        extCode: "",
+        supplierPrice: skuPrice,
+        currencyType: config.currency,
+        productSkuSpecReqs: skuSpecReqs,
+        productSkuId: 0,
+        productSkuSuggestedPriceReq: { suggestedPrice: skuRetailPrice, suggestedPriceCurrencyType: config.currency },
+        productSkuUsSuggestedPriceReq: {},
+        productSkuWhExtAttrReq: {
+          productSkuVolumeReq: params.dimensions || config.defaultDimensions,
+          productSkuWeightReq: { value: params.weight || config.defaultWeight },
+          productSkuBarCodeReqs: [],
+          productSkuSensitiveAttrReq: { isSensitive: 0, sensitiveList: [] },
+          productSkuSensitiveLimitReq: {},
+        },
+        productSkuMultiPackReq: {
+          skuClassification: pieces > 1 ? 2 : 1,
+          numberOfPieces: pieces,
+          pieceUnitCode: 1,
+          individuallyPacked: workflowIndividuallyPacked,
+          productSkuNetContent: workflowNetContentReq,
+          productSkuNetContentReq: workflowNetContentReq,
+          totalNetContent: workflowTotalNetContentReq,
+          totalNetContentReq: workflowTotalNetContentReq,
+          totalNetContentInfo: workflowTotalNetContentReq,
+          packIncludeInfo: workflowPackIncludeInfo,
+          numberOfPiecesNew: workflowPackIncludeCount || undefined,
+          pieceNewUnitCode: workflowPackIncludeCount ? 1 : undefined,
+        },
+        productSkuSaleExtAttrReq: {
+          productSkuAccessoriesReq: { productSkuAccessories: [] },
+          productSkuIndividuallyPacked: workflowIndividuallyPacked,
+          productSkuIndividuallyPackedReq: workflowIndividuallyPacked === null
+            ? {}
+            : { individuallyPacked: workflowIndividuallyPacked },
+          productSkuNetContent: workflowNetContentReq,
+          productSkuNetContentReq: workflowNetContentReq,
+          totalNetContent: workflowTotalNetContentReq,
+          totalNetContentReq: workflowTotalNetContentReq,
+          totalNetContentInfo: workflowTotalNetContentReq,
+          packIncludeInfo: workflowPackIncludeInfo,
+          numberOfPiecesNew: workflowPackIncludeCount || undefined,
+          pieceNewUnitCode: workflowPackIncludeCount ? 1 : undefined,
+          mixedType: null,
+        },
+        productSkuAccessoriesReq: { productSkuAccessories: [] },
+        productSkuNonAuditExtAttrReq: {},
+      };
+    };
+    const quantitySkuImages = params.quantitySkuImages && typeof params.quantitySkuImages === "object"
+      ? params.quantitySkuImages
+      : {};
+    const workflowQuantityPriceMultipliers = normalizeWorkflowQuantityPriceMultipliers(params.workflowQuantityPriceMultipliers);
+    const productSkuReqs = workflowQuantitySpecConfig
+      ? workflowQuantitySpecConfig.randomSpecs.flatMap((randomSpec) => workflowQuantitySpecConfig.quantitySpecs.map((quantitySpec) => {
+          const count = Math.max(1, Number(quantitySpec.count) || 1);
+          const quantityThumbUrl = quantitySkuImages[count]
+            || quantitySkuImages[`${count}PC`]
+            || quantitySkuImages[`${count}PCS`]
+            || imageUrls[0];
+          return buildSkuReq({
+            thumbUrl: quantityThumbUrl,
+            pieces: count,
+            priceMultiplier: params.multiplyPriceByQuantity === false
+              ? 1
+              : getWorkflowQuantityPriceMultiplier(count, workflowQuantityPriceMultipliers),
+            skuSpecReqs: [
+              buildSkuSpecReq(randomSpec),
+              buildSkuSpecReq(quantitySpec),
+            ],
+          });
+        }))
+      : [buildSkuReq({
+          thumbUrl: imageUrls[0],
+          pieces: 1,
+          priceMultiplier: 1,
+          skuSpecReqs: [buildSkuSpecReq(specInfo)],
+        })];
+    const productSpecPropertyReqs = workflowQuantitySpecConfig
+      ? [
+          ...workflowQuantitySpecConfig.randomSpecs.map((spec) => buildProductSpecPropertyReq(spec)),
+          ...workflowQuantitySpecConfig.quantitySpecs.map((spec) => buildProductSpecPropertyReq(spec)),
+        ]
+      : [buildProductSpecPropertyReq(specInfo)];
 
     const payload = {
       ...catIds,
@@ -12416,51 +14688,17 @@ async function createProductViaAPI(params) {
       productName: params.title || "商品",
       productPropertyReqs: properties,
       productSkcReqs: [{
-        previewImgUrls: [imageUrls[0]],
+        previewImgUrls: imageUrls.slice(0, 10),
         productSkcCarouselImageI18nReqs: [],
         extCode: "",
-        mainProductSkuSpecReqs: [{ parentSpecId: 0, parentSpecName: "", specId: 0, specName: "" }],
-        productSkuReqs: [{
-          thumbUrl: imageUrls[0],
-          productSkuThumbUrlI18nReqs: [],
-          extCode: "",
-          supplierPrice: priceInCents,
-          currencyType: config.currency,
-          productSkuSpecReqs: [{
-            parentSpecId: specInfo.parentSpecId,
-            parentSpecName: specInfo.parentSpecName,
-            specId: specInfo.specId,
-            specName: specInfo.specName,
-            specLangSimpleList: [],
-          }],
-          productSkuId: 0,
-          productSkuSuggestedPriceReq: { suggestedPrice: retailPrice, suggestedPriceCurrencyType: config.currency },
-          productSkuUsSuggestedPriceReq: {},
-          productSkuWhExtAttrReq: {
-            productSkuVolumeReq: params.dimensions || config.defaultDimensions,
-            productSkuWeightReq: { value: params.weight || config.defaultWeight },
-            productSkuBarCodeReqs: [],
-            productSkuSensitiveAttrReq: { isSensitive: 0, sensitiveList: [] },
-            productSkuSensitiveLimitReq: {},
-          },
-          productSkuMultiPackReq: {
-            skuClassification: 1, numberOfPieces: 1, pieceUnitCode: 1,
-            productSkuNetContentReq: {},
-            totalNetContent: {},
-          },
-          productSkuAccessoriesReq: { productSkuAccessories: [] },
-          productSkuNonAuditExtAttrReq: {},
-        }],
+        mainProductSkuSpecReqs: workflowQuantitySpecConfig
+          ? workflowQuantitySpecConfig.randomSpecs.map((spec) => buildSkuSpecReq(spec))
+          : [{ parentSpecId: 0, parentSpecName: "", specId: 0, specName: "" }],
+        productSkuReqs,
         productSkcId: 0,
         isBasePlate: 0,
       }],
-      productSpecPropertyReqs: [{
-        parentSpecId: specInfo.parentSpecId, parentSpecName: specInfo.parentSpecName,
-        specId: specInfo.specId, specName: specInfo.specName,
-        vid: 0, specLangSimpleList: [], refPid: 0, pid: 0, templatePid: 0,
-        propName: specInfo.parentSpecName, propValue: specInfo.specName,
-        valueUnit: "", valueGroupId: 0, valueGroupName: "", valueExtendInfo: "",
-      }],
+      productSpecPropertyReqs,
       carouselImageUrls: imageUrls.slice(0, 10),
       carouselImageI18nReqs: [],
       materialImgUrl: imageUrls[0],
@@ -12567,7 +14805,7 @@ async function createProductViaAPI(params) {
             console.error(`[selfRepair] retry_template: refreshing page and re-fetching...`);
             await page.goto(page.url(), { waitUntil: "domcontentloaded" });
             await randomDelay(2000, 3500);
-            const newProps = await getCategoryProperties(page, leafCatId, params.title || "");
+            const newProps = await getCategoryProperties(page, leafCatId, params.title || "", getCategoryPathText(catIds));
             if (newProps && newProps.length > 0) {
               payload.productPropertyReqs = newProps;
               console.error(`[selfRepair] Got ${newProps.length} refreshed properties`);
@@ -12582,6 +14820,15 @@ async function createProductViaAPI(params) {
             try {
               const defaultNetContent = { value: 1, unitCode: 1, unit: "件" };
               const defaultTotal = { value: 1, unitCode: 1, unit: "件" };
+              const defaultPackInclude = {
+                value: 1,
+                unitCode: 1,
+                unit: "件",
+                numberOfPieces: 1,
+                pieceUnitCode: 1,
+                numberOfPiecesNew: 1,
+                pieceNewUnitCode: 1,
+              };
               if (Array.isArray(payload.productSkcReqs)) {
                 for (const skc of payload.productSkcReqs) {
                   if (!Array.isArray(skc?.productSkuReqs)) continue;
@@ -12594,6 +14841,19 @@ async function createProductViaAPI(params) {
                     mp.pieceUnitCode = mp.pieceUnitCode || 1;
                     mp.productSkuNetContentReq = { ...defaultNetContent };
                     mp.totalNetContent = { ...defaultTotal };
+                    mp.totalNetContentReq = { ...defaultTotal };
+                    mp.totalNetContentInfo = { ...defaultTotal };
+                    mp.packIncludeInfo = { ...defaultPackInclude };
+                    mp.numberOfPiecesNew = mp.numberOfPiecesNew || 1;
+                    mp.pieceNewUnitCode = mp.pieceNewUnitCode || 1;
+                    sku.productSkuSaleExtAttrReq = sku.productSkuSaleExtAttrReq || {};
+                    sku.productSkuSaleExtAttrReq.productSkuNetContentReq = { ...defaultNetContent };
+                    sku.productSkuSaleExtAttrReq.totalNetContent = { ...defaultTotal };
+                    sku.productSkuSaleExtAttrReq.totalNetContentReq = { ...defaultTotal };
+                    sku.productSkuSaleExtAttrReq.totalNetContentInfo = { ...defaultTotal };
+                    sku.productSkuSaleExtAttrReq.packIncludeInfo = { ...defaultPackInclude };
+                    sku.productSkuSaleExtAttrReq.numberOfPiecesNew = sku.productSkuSaleExtAttrReq.numberOfPiecesNew || 1;
+                    sku.productSkuSaleExtAttrReq.pieceNewUnitCode = sku.productSkuSaleExtAttrReq.pieceNewUnitCode || 1;
                   }
                 }
               }
@@ -12659,7 +14919,7 @@ async function createProductViaAPI(params) {
                   payload[`cat${i}Id`] = Number(catIds[`cat${i}Id`]) || 0;
                 }
                 syncLeafCategoryPayloadFields(payload, leafCatId);
-                const newProps = await getCategoryProperties(page, leafCatId, params.title || "");
+            const newProps = await getCategoryProperties(page, leafCatId, params.title || "", getCategoryPathText(catIds));
                 if (newProps && newProps.length > 0) payload.productPropertyReqs = newProps;
                 console.error(`[selfRepair] Preferred known branch category: ${knownBranchMatch.path || leafCatId}`);
                 needResubmit = true;
@@ -12698,7 +14958,7 @@ async function createProductViaAPI(params) {
                   leafCatId = newLeaf;
                   syncLeafCategoryPayloadFields(payload, leafCatId);
                   console.error(`[selfRepair] New category: leaf=${leafCatId}, depth=${depth}`);
-                  const newProps = await getCategoryProperties(page, leafCatId, params.title || "");
+              const newProps = await getCategoryProperties(page, leafCatId, params.title || "", getCategoryPathText(catIds));
                   if (newProps && newProps.length > 0) payload.productPropertyReqs = newProps;
                   needResubmit = true;
                   found = true;
@@ -12717,7 +14977,7 @@ async function createProductViaAPI(params) {
                   payload[`cat${i}Id`] = Number(catIds[`cat${i}Id`]) || 0;
                 }
                 syncLeafCategoryPayloadFields(payload, leafCatId);
-                const newProps = await getCategoryProperties(page, leafCatId, params.title || "");
+            const newProps = await getCategoryProperties(page, leafCatId, params.title || "", getCategoryPathText(catIds));
                 if (newProps && newProps.length > 0) payload.productPropertyReqs = newProps;
                 console.error(`[selfRepair] Known branch fallback category: ${knownBranchMatch.path || leafCatId}`);
                 needResubmit = true;
@@ -12733,6 +14993,10 @@ async function createProductViaAPI(params) {
             break;
           }
           case "retry_spec": {
+            if (workflowQuantitySpecConfig) {
+              console.error("[selfRepair] retry_spec skipped: workflow quantity SKU uses two parent specs");
+              break;
+            }
             console.error(`[selfRepair] retry_spec: re-querying spec...`);
             await page.goto(page.url(), { waitUntil: "domcontentloaded" });
             await randomDelay(2000, 3000);
@@ -12814,7 +15078,14 @@ async function createProductViaAPI(params) {
         };
       }
       result = saveResult;
-      const verification = await verifyDraftPersistedContent(page, draftId, { logPrefix: "[draft-verify]" }).catch((error) => ({
+      const verification = await verifyDraftPersistedContent(page, draftId, {
+        logPrefix: "[draft-verify]",
+        expectedQuantitySkuImages: params.workflowQuantitySpecs ? params.quantitySkuImages : null,
+        expectedQuantityCounts: params.workflowQuantitySpecs ? (params.quantityCounts || [1, 2, 3, 4]) : null,
+        expectedRandomSpecValueCount: params.workflowQuantitySpecs ? (params.workflowRandomSpecValueCount || 2) : null,
+        expectedMainImageMin: params.expectedMainImageMin || 0,
+        expectWorkflowQuantitySkuRequiredFields: Boolean(params.workflowQuantitySpecs),
+      }).catch((error) => ({
         ok: false,
         reason: "verify_error",
         error: error?.message || String(error),
@@ -12832,9 +15103,18 @@ async function createProductViaAPI(params) {
           verification,
         }, null, 2));
         console.error(`[api-create] Draft verification failed, details saved to: ${debugFile}`);
+        const verifyMessage = verification?.reason === "quantity_sku_image_mismatch"
+          ? "草稿已创建，但数量SKU图片未按1PC/2PC/3PC/4PC保存"
+          : (verification?.reason === "workflow_spec_matrix_mismatch"
+            ? "草稿已创建，但父规格1双子规格或数量规格未完整保存"
+            : (verification?.reason === "workflow_sku_required_fields_missing"
+              ? "草稿已创建，但SKU必填项未完整保存"
+              : (verification?.reason === "main_image_count_insufficient"
+                ? "草稿已创建，但主图未达到5张"
+                : "草稿箱只创建了空白草稿，标题/图片未真正保存")));
         return {
           success: false,
-          message: "草稿箱只创建了空白草稿，标题/图片未真正保存",
+          message: verifyMessage,
           step: "draft_verify",
           productId: result.data?.productId,
           draftId,
@@ -12847,7 +15127,9 @@ async function createProductViaAPI(params) {
       }
       return {
         success: true,
-        message: "商品已保存到Temu草稿箱（已校验标题和图片）",
+        message: params.workflowQuantitySpecs
+          ? "商品已保存到Temu草稿箱（已校验标题、5张主图、父规格1双值、数量SKU图片和SKU必填项）"
+          : "商品已保存到Temu草稿箱（已校验标题和图片）",
         productId: result.data?.productId,
         draftId,
         skcId: result.data?.productSkcList?.[0]?.productSkcId,
@@ -14075,7 +16357,7 @@ server.keepAliveTimeout = 86400000;
 server.headersTimeout = 86410000;
 server.listen(PORT, "127.0.0.1", () => {
   // 把端口写到文件
-  const portFile = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "worker-port");
+  const portFile = path.join(workerRuntimeDataDir, "worker-port");
   fs.mkdirSync(path.dirname(portFile), { recursive: true });
   fs.writeFileSync(portFile, JSON.stringify({ port: PORT, token: WORKER_AUTH_TOKEN }));
   console.error(`WORKER_PORT=${PORT}`);
