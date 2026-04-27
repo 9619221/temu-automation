@@ -121,6 +121,7 @@ let autoPricingTaskPromise = null;
 let autoPricingTaskSyncTimer = null;
 let autoPricingCurrentTaskId = null;
 const WORKER_HTTP_TIMEOUT_MS = 5 * 60 * 1000;
+const WORKER_LONG_TASK_TIMEOUT_MS = 12 * 60 * 60 * 1000;
 const STORE_KEY_PATTERN = /^[A-Za-z0-9._:-]+$/;
 
 const AUTO_PRICING_FILTER_KEYWORDS = {
@@ -236,6 +237,54 @@ const AUTO_PRICING_IP_PATTERNS = [
   /汪汪队|paw\s*patrol/i,
   /我的世界|minecraft/i,
 ];
+
+const AUTO_PRICING_FILTER_EXTRA_KEYWORDS = {
+  liquid: [
+    "水管", "花园水管", "软管", "水泵", "水枪", "喷水", "洒水", "喷淋", "花洒", "水龙头", "水槽", "水箱", "水杯", "水瓶",
+    "水壶", "水袋", "水桶", "水盆", "水刮", "水族", "鱼缸", "饮水", "吸水", "补水", "加湿", "除湿", "蒸汽", "雾化",
+    "冰块", "冰格", "冰模", "制冰", "冰球", "冷饮", "滤茶", "茶滤", "茶漏", "泡茶", "茶具", "咖啡滤", "漏斗",
+    "hose", "garden hose", "water hose", "sprinkler", "watering", "water pump", "water gun", "faucet", "tap",
+    "water bottle", "water cup", "hydration", "humidifier", "mist humidifier", "steam", "ice cube", "ice mold",
+    "ice tray", "tea strainer", "tea infuser", "tea filter", "coffee filter",
+  ],
+  paste: [
+    "膏", "霜", "泥", "胶状", "胶体", "粘土", "修复膏", "清洁膏", "抛光膏", "密封胶", "玻璃胶", "美缝剂",
+    "caulk", "sealant", "polish paste", "cleaning paste", "repair paste", "putty", "slime",
+  ],
+  clothing: [
+    "女装", "男装", "童装", "宝宝衣", "婴儿衣", "儿童衣", "服装", "服饰", "衣裤", "裤", "裙", "鞋靴", "袜子", "帽子", "围巾",
+    "手套", "腰带", "皮带", "领带", "假领", "袖套", "护膝", "护腕", "围裙", "围兜", "披肩", "披风",
+    "apparel", "garment", "clothes", "clothing", "outfit", "costume", "uniform", "sock", "socks", "hat", "cap",
+    "scarf", "glove", "gloves", "belt", "apron", "bib", "shawl", "cape",
+  ],
+};
+
+for (const [group, keywords] of Object.entries(AUTO_PRICING_FILTER_EXTRA_KEYWORDS)) {
+  const target = AUTO_PRICING_FILTER_KEYWORDS[group];
+  if (!Array.isArray(target)) continue;
+  for (const keyword of keywords) {
+    if (keyword && !target.includes(keyword)) target.push(keyword);
+  }
+}
+
+AUTO_PRICING_IP_PATTERNS.push(
+  /任天堂|nintendo|mario|马里奥/i,
+  /pokemon|pok[eé]mon|皮卡丘|宝可梦|精灵宝可梦/i,
+  /sonic|索尼克/i,
+  /spongebob|海绵宝宝/i,
+  /winnie|pooh|维尼|小熊维尼/i,
+  /kuromi|库洛米|美乐蒂|melody|玉桂狗|cinnamoroll/i,
+  /doraemon|哆啦a梦|机器猫/i,
+  /奥特曼|ultraman/i,
+  /迪迦|特利迦|假面骑士|kamen\s*rider/i,
+  /鬼灭|kimetsu|demon\s*slayer/i,
+  /咒术回战|jujutsu/i,
+  /海绵宝宝|spongebob/i,
+  /史努比|snoopy/i,
+  /可达鸭|psyduck/i,
+  /卡通人物|动漫人物|电影周边|游戏周边|明星同款|品牌logo|商标图案/i,
+  /custom\s*(name|logo|photo|text)|personalized|定制照片|定制头像|个性化定制/i,
+);
 
 function normalizeImportedCellTexts(value, seen = new WeakSet()) {
   if (value === null || value === undefined || value === "") return [];
@@ -971,6 +1020,8 @@ function resolveSendCmdTimeout(params, requestOptions) {
   return 0;
 }
 
+const LONG_RUNNING_WORKER_ACTIONS = new Set(["auto_pricing", "workflow_pack_images", "competitor_auto_register"]);
+
 async function sendCmd(action, params = {}, requestOptions = {}) {
   if (!workerReady) {
     await ensureWorkerStarted();
@@ -980,8 +1031,10 @@ async function sendCmd(action, params = {}, requestOptions = {}) {
   const timeoutMs = resolveSendCmdTimeout(params, requestOptions);
   if (timeoutMs > 0) {
     payload.timeoutMs = timeoutMs;
+  } else if (LONG_RUNNING_WORKER_ACTIONS.has(action)) {
+    payload.timeoutMs = WORKER_LONG_TASK_TIMEOUT_MS;
   }
-  const keepLongRunningWorkerAlive = action === "auto_pricing" || action === "workflow_pack_images" || action === "competitor_auto_register";
+  const keepLongRunningWorkerAlive = LONG_RUNNING_WORKER_ACTIONS.has(action);
   try {
     return await httpPost(workerPort, payload);
   } catch (error) {
@@ -1431,9 +1484,6 @@ async function syncAutoPricingTaskFromWorker(taskId, options = {}) {
   const task = getAutoPricingTask(taskId || autoPricingCurrentTaskId);
   if (!task) {
     return null;
-  }
-  if (task.flowType === "workflow") {
-    return task;
   }
 
   const live = await requestWorkerProgressSnapshot(task.taskId);
@@ -3295,6 +3345,7 @@ ipcMain.handle("automation:generate-pack-images", async (_e, params) => {
     startedAt: now,
     finishedAt: "",
   });
+  startAutoPricingTaskSync();
 
   let imageStudioUrl = "";
   try {
@@ -3309,8 +3360,8 @@ ipcMain.handle("automation:generate-pack-images", async (_e, params) => {
     const result = await sendCmd("workflow_pack_images", {
       ...(params || {}),
       taskId,
-      timeoutMs: Number(params?.timeoutMs) > 0 ? Number(params.timeoutMs) : 30 * 60 * 1000,
-    }, { timeoutMs: 30 * 60 * 1000 });
+      timeoutMs: Number(params?.timeoutMs) > 0 ? Number(params.timeoutMs) : WORKER_LONG_TASK_TIMEOUT_MS,
+    }, { timeoutMs: WORKER_LONG_TASK_TIMEOUT_MS });
     const finishedAt = new Date().toLocaleString("zh-CN");
     const results = Array.isArray(result?.results) ? result.results : [];
     const total = Number(result?.total) || nextTask.total;
@@ -3352,6 +3403,11 @@ ipcMain.handle("automation:generate-pack-images", async (_e, params) => {
     });
     error.task = getAutoPricingProgressPayload(failedTask);
     throw error;
+  } finally {
+    const latestTask = await syncAutoPricingTaskFromWorker(taskId, { markInterruptedOnIdle: true }).catch(() => null);
+    if (!latestTask || !latestTask.running) {
+      stopAutoPricingTaskSync();
+    }
   }
 });
 
@@ -3410,7 +3466,7 @@ ipcMain.handle("automation:auto-pricing", async (_e, params) => {
     ...params,
     taskId,
     credentials,
-    timeoutMs: 60 * 60 * 1000,
+    timeoutMs: WORKER_LONG_TASK_TIMEOUT_MS,
   })
     .then((result) => {
       const finishedAt = new Date().toLocaleString("zh-CN");

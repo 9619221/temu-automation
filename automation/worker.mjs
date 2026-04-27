@@ -11622,11 +11622,34 @@ async function generateWorkflowPackImages(params = {}) {
   const results = [];
   let kwcdnTablePath = "";
   const shouldCreateDrafts = Boolean(params.createDrafts || params.workflowCreateDrafts);
+  const startedAt = getProgressTimestamp();
+  replaceCurrentProgress({
+    taskId,
+    flowType: "workflow",
+    status: "running",
+    running: true,
+    paused: false,
+    total,
+    completed: 0,
+    current: "准备中",
+    step: "新上品流程",
+    message: "正在准备卖家中心会话、素材中心上传和草稿保存链路",
+    csvPath,
+    startRow,
+    count,
+    createdAt: startedAt,
+    startedAt,
+    updatedAt: startedAt,
+  });
 
   let stopAuthPopupMonitor = null;
   try {
     await ensureBrowser();
     stopAuthPopupMonitor = registerSellerAuthPopupMonitor("[workflow-pack-popup]");
+    updateCurrentProgress({
+      step: "预热登录态",
+      message: "正在确认卖家中心登录/授权状态...",
+    });
     await establishSellerCentralSession("[workflow-pack]");
 
     for (let offset = 0; offset < total; offset += 1) {
@@ -11638,9 +11661,23 @@ async function generateWorkflowPackImages(params = {}) {
       const imageCandidates = getWorkflowRowImageCandidates(table, row);
 
       try {
+        syncCurrentProgressResults(results, {
+          flowType: "workflow",
+          running: true,
+          paused: false,
+          status: "running",
+          total,
+          current: `${offset + 1}/${total} ${productName.slice(0, 30)}`,
+          step: "读取商品原图",
+          message: "正在下载并筛选可上传的原图素材",
+        });
         logWorkflowPack(taskId, `row=${rowNumber} product="${productName.slice(0, 80)}" source download start candidates=${imageCandidates.length}`);
         const source = await prepareWorkflowSourceImages(imageCandidates, sourceImagePath, { productName, taskId });
         logWorkflowPack(taskId, `row=${rowNumber} source ready path=${source.sourceImagePath}, originalUploadEligible=${source.originalUploadEligible}, acceptedOriginals=${source.originals?.length || 0}`);
+        updateCurrentProgress({
+          step: "生成白底组合图",
+          message: "正在生成 2PCS / 3PCS / 4PCS 白底素材",
+        });
         const aiResult = await generateWorkflowWhitePackImages(source.sourceImagePath, productName, packCounts, { taskId, rowNumber });
         const localFiles = saveWorkflowPackImages(aiResult.images, outputDir, dataIndex);
         const originalSources = Array.isArray(source.originals) && source.originals.length > 0
@@ -11689,6 +11726,10 @@ async function generateWorkflowPackImages(params = {}) {
         const skippedCount = images.filter((item) => item.skipped).length;
         const requiredCount = Math.max(0, materialSpecs.length - skippedCount);
         const materialSuccess = successCount >= requiredCount;
+        updateCurrentProgress({
+          step: "上传素材中心",
+          message: "正在上传原图和白底组合素材，并回写 kwcdn URL",
+        });
         const uploadSummary = materialSuccess
           ? await uploadWorkflowMaterialImages(images, { taskId, rowNumber })
           : getEmptyWorkflowUploadSummary(images);
@@ -11732,6 +11773,10 @@ async function generateWorkflowPackImages(params = {}) {
             rowResult.errorCategory = classifyAutoPricingError("draft", draftParams.message);
             rowResult.draftStep = draftParams.step;
           } else {
+            updateCurrentProgress({
+              step: "保存草稿",
+              message: "素材已准备完成，正在保存到 Temu 草稿箱",
+            });
             logWorkflowPack(taskId, `row=${rowNumber} draft save start title="${draftParams.title.slice(0, 80)}"`);
             const draftResult = await createProductViaAPI(draftParams);
             rowResult.draftResult = draftResult;
@@ -11750,6 +11795,16 @@ async function generateWorkflowPackImages(params = {}) {
           }
         }
         results.push(rowResult);
+        syncCurrentProgressResults(results, {
+          flowType: "workflow",
+          running: true,
+          paused: false,
+          status: "running",
+          total,
+          current: `${offset + 1}/${total} ${productName.slice(0, 30)}`,
+          step: rowResult.success ? "本条完成" : "本条失败",
+          message: rowResult.message || (rowResult.success ? "当前商品已完成" : "当前商品处理失败"),
+        });
         logWorkflowPack(taskId, `row=${rowNumber} done generated=${successCount}/${requiredCount}, uploaded=${uploadSummary.uploadSuccessCount}/${uploadSummary.uploadableCount}, skipped=${skippedCount}`);
         try {
           kwcdnTablePath = writeWorkflowKwcdnResultTable(csvPath, table, results, outputDir, taskId, packCounts);
@@ -11782,6 +11837,16 @@ async function generateWorkflowPackImages(params = {}) {
             warnings: [],
           })),
         });
+        syncCurrentProgressResults(results, {
+          flowType: "workflow",
+          running: true,
+          paused: false,
+          status: "running",
+          total,
+          current: `${offset + 1}/${total} ${productName.slice(0, 30)}`,
+          step: "本条失败",
+          message: error?.message || String(error || "生成失败"),
+        });
         try {
           kwcdnTablePath = writeWorkflowKwcdnResultTable(csvPath, table, results, outputDir, taskId, packCounts);
           fs.writeFileSync(path.join(outputDir, "result.json"), JSON.stringify({ taskId, total, packCounts, kwcdnTablePath, results }, null, 2), "utf8");
@@ -11793,6 +11858,20 @@ async function generateWorkflowPackImages(params = {}) {
   } catch (error) {
     const message = error?.message || String(error || "卖家中心会话准备失败");
     logWorkflowPack(taskId, `seller session failed: ${message}`);
+    const failedAt = getProgressTimestamp();
+    syncCurrentProgressResults(results, {
+      flowType: "workflow",
+      running: false,
+      paused: false,
+      status: "failed",
+      total,
+      completed: results.length,
+      current: "失败",
+      step: "登录/授权失败",
+      message: `卖家中心登录/授权未完成，无法上传素材中心：${message}`,
+      updatedAt: failedAt,
+      finishedAt: failedAt,
+    });
     return {
       success: false,
       taskId,
@@ -11829,6 +11908,20 @@ async function generateWorkflowPackImages(params = {}) {
     results,
   };
   logWorkflowPack(taskId, `finish success=${finalResult.success} complete=${successCount} partial=${partialCount} fail=${finalResult.failCount}`);
+  const finishedAt = getProgressTimestamp();
+  syncCurrentProgressResults(results, {
+    flowType: "workflow",
+    running: false,
+    paused: false,
+    status: finalResult.success ? "completed" : "failed",
+    total,
+    completed: total,
+    current: finalResult.success ? "完成" : "处理未完成",
+    step: "完成",
+    message: `新上品流程完成：成功 ${successCount}，部分 ${partialCount}，失败 ${finalResult.failCount}`,
+    updatedAt: finishedAt,
+    finishedAt,
+  });
   try {
     fs.writeFileSync(path.join(outputDir, "result.json"), JSON.stringify(finalResult, null, 2), "utf8");
   } catch (error) {
@@ -15107,7 +15200,7 @@ async function createProductViaAPI(params) {
           ? "草稿已创建，但数量SKU图片未按1PC/2PC/3PC/4PC保存"
           : (verification?.reason === "workflow_spec_matrix_mismatch"
             ? "草稿已创建，但父规格1双子规格或数量规格未完整保存"
-            : (verification?.reason === "workflow_sku_required_fields_missing"
+            : (verification?.reason === "workflow_sku_required_fields_missing" || verification?.reason === "workflow_sku_dom_required_fields_missing"
               ? "草稿已创建，但SKU必填项未完整保存"
               : (verification?.reason === "main_image_count_insufficient"
                 ? "草稿已创建，但主图未达到5张"
@@ -15119,7 +15212,8 @@ async function createProductViaAPI(params) {
           productId: result.data?.productId,
           draftId,
           result: result.data,
-          draftSaved: false,
+          draftSaved: true,
+          verificationReason: verification?.reason || "",
           debugFile,
           verification,
           uploadedImageUrls: imageUrls,
@@ -15441,6 +15535,7 @@ function createProgressState(patch = {}) {
   const summary = summarizeProgressResults(results);
   return {
     taskId: typeof patch.taskId === "string" ? patch.taskId : "",
+    flowType: typeof patch.flowType === "string" ? patch.flowType : "",
     running: Boolean(patch.running),
     paused: Boolean(patch.paused),
     status: typeof patch.status === "string" ? patch.status : "idle",

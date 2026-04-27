@@ -239,19 +239,26 @@ const ERROR_CATEGORY_HINTS: Record<string, string> = {
 };
 
 function normalizeBatchReason(messageText: string, errorCategory?: string) {
-  // 优先使用 Worker 打标的分类，UI 出差异化文案
-  if (errorCategory && ERROR_CATEGORY_HINTS[errorCategory]) {
-    return ERROR_CATEGORY_HINTS[errorCategory];
-  }
-  // 同阶段不同根因也没命中时，退回到阶段级文案
-  if (errorCategory) {
-    const stage = errorCategory.split(":")[0];
-    const fallbackKey = `${stage}:unknown`;
-    if (ERROR_CATEGORY_HINTS[fallbackKey]) return ERROR_CATEGORY_HINTS[fallbackKey];
+  const text = String(messageText || "").trim();
+  if (!text) {
+    if (errorCategory && ERROR_CATEGORY_HINTS[errorCategory]) return ERROR_CATEGORY_HINTS[errorCategory];
+    if (errorCategory) {
+      const stage = errorCategory.split(":")[0];
+      const fallbackKey = `${stage}:unknown`;
+      if (ERROR_CATEGORY_HINTS[fallbackKey]) return ERROR_CATEGORY_HINTS[fallbackKey];
+    }
+    return "请稍后重试";
   }
 
-  const text = String(messageText || "").trim();
-  if (!text) return "请稍后重试";
+  // Worker 已经给出具体根因时，不再压成“草稿保存未完成”这类泛化提示。
+  if (/草稿已创建|草稿箱只创建|SKU必填项|父规格|数量SKU|主图未达到|Temu 草稿内容保存失败|保存Temu草稿箱失败/i.test(text)) {
+    return text;
+  }
+
+  // 只有非常明确的分类才覆盖原文；未知分类保留 Worker 原始信息，方便定位用户机器上的真实问题。
+  if (errorCategory && ERROR_CATEGORY_HINTS[errorCategory] && !/unknown$/i.test(errorCategory)) {
+    return ERROR_CATEGORY_HINTS[errorCategory];
+  }
 
   // 旧正则兜底，保留向后兼容（老历史记录没有 errorCategory）
   if (/分类搜索失败/i.test(text)) return "类目暂未匹配成功，请补充更准确的类目信息后重试";
@@ -259,7 +266,7 @@ function normalizeBatchReason(messageText: string, errorCategory?: string) {
   if (/登录|authentication|seller-login/i.test(text)) return "登录状态已失效，请重新登录后再试";
   if (/quota|额度|403/i.test(text)) return "当前图片生成额度不足，请稍后再试";
   if (/图片|image|upload/i.test(text) && /失败|error/i.test(text)) return "图片处理未完成，请稍后重试";
-  if (/草稿|draft/i.test(text) && /失败|error/i.test(text)) return "草稿保存未完成，请稍后重试";
+  if (/草稿|draft/i.test(text) && /失败|error/i.test(text)) return text === "草稿保存失败" ? "草稿保存未完成，请稍后重试" : text;
 
   return text;
 }
@@ -787,7 +794,10 @@ function BatchCreate() {
     setPaused(false);
     setPackResult(null);
     setResults([]);
+    const taskId = `workflow_pack_${Date.now()}`;
+    setSelectedTaskId(taskId);
     setProgressInfo({
+      taskId,
       running: true,
       status: "running",
       flowType: "workflow",
@@ -797,6 +807,21 @@ function BatchCreate() {
       total: count,
       completed: 0,
     });
+    syncTaskHistory({
+      taskId,
+      running: true,
+      status: "running",
+      flowType: "workflow",
+      total: count,
+      completed: 0,
+      csvPath: filePath,
+      startRow,
+      count,
+      current: "后台正在准备素材、上传素材中心并保存草稿",
+      step: "新上品流程",
+      results: [],
+    });
+    pollProgress(taskId, true);
 
     const buildWorkflowRows = (response: any) => {
       const responseRows = Array.isArray(response?.results) ? response.results : [];
@@ -826,6 +851,7 @@ function BatchCreate() {
 
     try {
       const response = await api?.generatePackImages?.({
+        taskId,
         csvPath: filePath,
         startRow,
         count,
@@ -864,6 +890,7 @@ function BatchCreate() {
       if (!response?.success) {
         setPackResult(response || null);
         setProgressInfo({
+          taskId,
           running: false,
           status: "failed",
           step: "新上品流程",
@@ -881,6 +908,7 @@ function BatchCreate() {
       const ok = response.successCount || 0;
       const partial = response.partialCount || 0;
       setProgressInfo({
+        taskId,
         running: false,
         status: "completed",
         step: "新上品流程",
@@ -893,7 +921,12 @@ function BatchCreate() {
       });
       message.success(`新上品流程完成：完整 ${ok} 个，部分 ${partial} 个`);
     } catch (error: any) {
+      if (error?.task) {
+        applyTaskSnapshot(error.task);
+        syncTaskHistory(error.task);
+      }
       setProgressInfo({
+        taskId,
         running: false,
         status: "failed",
         flowType: "workflow",
