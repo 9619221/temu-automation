@@ -45,7 +45,7 @@ const menuItems = [
     type: "group" as const,
     label: "工具",
     children: [
-      { key: "/create-product", icon: <PlusCircleOutlined />, label: "上新流程" },
+      { key: "/create-product", icon: <PlusCircleOutlined />, label: "上品管理" },
       { key: "/image-studio", icon: <PictureOutlined />, label: "AI 出图" },
       { key: "/image-studio-gpt", icon: <PictureOutlined />, label: "AI 生图 GPT 版" },
     ],
@@ -257,7 +257,7 @@ export default function AppLayout() {
                   whiteSpace: "nowrap",
                 }}
               >
-                上新流程
+                Temu 运营助手
               </span>
             )}
           </div>
