@@ -152,7 +152,7 @@ export function DesignerStudioPanel({ primaryUploadFile }: Props) {
 
   const handleStartGenerate = async () => {
     if (!api?.designerGenerateStart || !api?.onDesignerGenerateEvent) {
-      setGenerateGlobalError("Electron API 不可用");
+      setGenerateGlobalError("生成服务不可用，请重启软件后重试");
       return;
     }
     if (!primaryUploadFile) {

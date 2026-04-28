@@ -75,7 +75,7 @@ export default function PriceReview() {
 
   const load = useCallback(async (nextFilter: Filter = filter) => {
     if (!window.electronAPI?.priceReview) {
-      message.warning("priceReview API 未就绪，请重启客户端");
+      message.warning("核价服务未就绪，请重启软件");
       return;
     }
     setLoading(true);

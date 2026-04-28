@@ -1,5 +1,6 @@
 const crypto = require("crypto");
-const { openErpDatabase } = require("../db/connection.cjs");
+const fs = require("fs");
+const { getErpDatabasePath, openErpDatabase } = require("../db/connection.cjs");
 const { runMigrations } = require("../db/migrate.cjs");
 const { createErpServices } = require("./services/index.cjs");
 const { createId, nowIso } = require("./services/utils.cjs");
@@ -13,6 +14,18 @@ const {
   startLanServer,
   stopLanServer,
 } = require("./lanServer.cjs");
+const {
+  configureClientRuntime,
+  discoverControllers,
+  getRuntimeStatus,
+  isClientMode,
+  remoteAuthStatus,
+  remoteLogin,
+  remoteLogout,
+  remoteRequest,
+  setClientMode,
+  setHostMode,
+} = require("./clientRuntime.cjs");
 
 const erpState = {
   db: null,
@@ -20,6 +33,7 @@ const erpState = {
   initResult: null,
   initError: null,
   currentUser: null,
+  userDataDir: null,
 };
 
 const ACCESS_CODE_ITERATIONS = 120000;
@@ -136,7 +150,15 @@ function normalizeOffset(value) {
   return Math.max(0, Math.floor(number));
 }
 
-function initializeErp(options = {}) {
+function hasExistingErpDatabase(options = {}) {
+  try {
+    return fs.existsSync(getErpDatabasePath(options));
+  } catch {
+    return false;
+  }
+}
+
+function initializeHostErp(options = {}) {
   if (erpState.db) {
     return erpState.initResult;
   }
@@ -165,9 +187,52 @@ function initializeErp(options = {}) {
   }
 }
 
+function initializeErp(options = {}) {
+  erpState.userDataDir = options.userDataDir || erpState.userDataDir || null;
+  configureClientRuntime({ userDataDir: erpState.userDataDir });
+
+  const runtime = getRuntimeStatus();
+  if (runtime.mode === "client") {
+    erpState.initResult = {
+      mode: "client",
+      dbPath: null,
+      backupPath: null,
+      migrations: [],
+      runtime,
+    };
+    erpState.initError = null;
+    erpState.db = null;
+    erpState.services = null;
+    return erpState.initResult;
+  }
+
+  if (runtime.mode === "unset" && !hasExistingErpDatabase(options)) {
+    erpState.initResult = {
+      mode: "unset",
+      dbPath: null,
+      backupPath: null,
+      migrations: [],
+      runtime,
+    };
+    erpState.initError = null;
+    erpState.db = null;
+    erpState.services = null;
+    return erpState.initResult;
+  }
+
+  if (runtime.mode === "unset") {
+    setHostMode();
+  }
+
+  return initializeHostErp(options);
+}
+
 function getErpStatus() {
+  const runtime = getRuntimeStatus();
   return {
     initialized: Boolean(erpState.db),
+    mode: runtime.mode,
+    runtime,
     dbPath: erpState.initResult?.dbPath || erpState.db?.__erpDbPath || null,
     backupPath: erpState.initResult?.backupPath || null,
     migrations: erpState.initResult?.migrations || [],
@@ -318,6 +383,15 @@ function countUsers() {
 }
 
 function getAuthStatus() {
+  if (isClientMode()) {
+    return remoteAuthStatus();
+  }
+  if (!erpState.db) {
+    return {
+      hasUsers: false,
+      currentUser: null,
+    };
+  }
   return {
     hasUsers: countUsers() > 0,
     currentUser: erpState.currentUser,
@@ -325,6 +399,11 @@ function getAuthStatus() {
 }
 
 function createFirstAdmin(payload = {}) {
+  assertHostMode("首个管理员创建");
+  if (!erpState.db) {
+    setHostMode();
+    initializeHostErp({ userDataDir: erpState.userDataDir });
+  }
   if (countUsers() > 0) {
     throw new Error("Initial admin already exists");
   }
@@ -339,6 +418,12 @@ function createFirstAdmin(payload = {}) {
 }
 
 function loginElectronUser(payload = {}) {
+  if (isClientMode() || optionalString(payload.serverUrl)) {
+    return remoteLogin(payload).then((status) => {
+      erpState.currentUser = status.currentUser;
+      return status;
+    });
+  }
   const user = verifyLanLogin(payload);
   if (!user) throw new Error("用户名或访问码错误");
   erpState.currentUser = user;
@@ -346,8 +431,39 @@ function loginElectronUser(payload = {}) {
 }
 
 function logoutElectronUser() {
+  if (isClientMode()) {
+    return remoteLogout().then((status) => {
+      erpState.currentUser = null;
+      return status;
+    });
+  }
   erpState.currentUser = null;
   return getAuthStatus();
+}
+
+function getClientRuntimeStatus() {
+  return getRuntimeStatus({
+    dbInitialized: Boolean(erpState.db),
+  });
+}
+
+function switchToHostMode() {
+  const config = setHostMode();
+  erpState.currentUser = null;
+  initializeHostErp({ userDataDir: erpState.userDataDir });
+  return getRuntimeStatus({
+    dbInitialized: Boolean(erpState.db),
+    config,
+  });
+}
+
+function switchToClientMode(payload = {}) {
+  const config = setClientMode(payload);
+  erpState.currentUser = null;
+  return getRuntimeStatus({
+    dbInitialized: Boolean(erpState.db),
+    config,
+  });
 }
 
 function getCurrentSessionActor(actorInput = {}) {
@@ -367,13 +483,16 @@ function assertRoleIfLoggedIn(allowedRoles) {
   }
 }
 
-function scopeWorkItemParams(params = {}) {
-  const user = erpState.currentUser;
+function scopeWorkItemParamsForUser(params = {}, user = erpState.currentUser) {
   if (!user || ["admin", "manager"].includes(user.role)) return params;
   return {
     ...params,
     ownerRole: user.role,
   };
+}
+
+function scopeWorkItemParams(params = {}) {
+  return scopeWorkItemParamsForUser(params, erpState.currentUser);
 }
 
 function listSuppliers(params = {}) {
@@ -1584,23 +1703,31 @@ function normalizeWorkItemActor(actorInput = {}) {
   };
 }
 
-function listWorkItems(params = {}) {
+function listWorkItemsForUser(params = {}, user = erpState.currentUser) {
   const { services } = requireErp();
-  return services.workItem.list(scopeWorkItemParams(params)).map(toWorkItem);
+  return services.workItem.list(scopeWorkItemParamsForUser(params, user)).map(toWorkItem);
+}
+
+function listWorkItems(params = {}) {
+  return listWorkItemsForUser(params, erpState.currentUser);
+}
+
+function getWorkItemStatsForUser(params = {}, user = erpState.currentUser) {
+  const { services } = requireErp();
+  return services.workItem.getStats(scopeWorkItemParamsForUser(params, user));
 }
 
 function getWorkItemStats(params = {}) {
-  const { services } = requireErp();
-  return services.workItem.getStats(scopeWorkItemParams(params));
+  return getWorkItemStatsForUser(params, erpState.currentUser);
 }
 
-function generateWorkItems(payload = {}) {
+function generateWorkItemsForUser(payload = {}, user = erpState.currentUser) {
   const { services } = requireErp();
-  const actor = erpState.currentUser
-    ? { id: erpState.currentUser.id, role: erpState.currentUser.role }
+  const actor = user
+    ? { id: user.id, role: user.role }
     : normalizeWorkItemActor(payload.actor);
   const result = services.workItem.generateFromCurrentState(payload, actor);
-  const scopedParams = scopeWorkItemParams(payload);
+  const scopedParams = scopeWorkItemParamsForUser(payload, user);
   return {
     ...result,
     items: services.workItem.list({
@@ -1612,14 +1739,22 @@ function generateWorkItems(payload = {}) {
   };
 }
 
-function updateWorkItemStatus(payload = {}) {
+function generateWorkItems(payload = {}) {
+  return generateWorkItemsForUser(payload, erpState.currentUser);
+}
+
+function updateWorkItemStatusForUser(payload = {}, user = erpState.currentUser) {
   const { services } = requireErp();
-  const actor = erpState.currentUser
-    ? { id: erpState.currentUser.id, role: erpState.currentUser.role }
+  const actor = user
+    ? { id: user.id, role: user.role }
     : normalizeWorkItemActor(payload.actor);
   const id = requireString(payload.id || payload.workItemId, "workItemId");
   const status = requireString(payload.status, "status");
   return toWorkItem(services.workItem.updateStatus(id, status, actor, payload.remark));
+}
+
+function updateWorkItemStatus(payload = {}) {
+  return updateWorkItemStatusForUser(payload, erpState.currentUser);
 }
 
 function transitionWorkflow(payload = {}) {
@@ -1634,11 +1769,159 @@ function transitionWorkflow(payload = {}) {
   });
 }
 
+function assertHostMode(featureName = "该功能") {
+  if (isClientMode()) {
+    throw new Error(`${featureName}只能在主控端使用`);
+  }
+}
+
+async function getPurchaseWorkbenchRuntime(params = {}) {
+  if (isClientMode()) {
+    const payload = await remoteRequest("/api/purchase/workbench");
+    return payload.workbench || {};
+  }
+  return getPurchaseWorkbench(params);
+}
+
+async function performPurchaseActionRuntime(payload = {}) {
+  if (isClientMode()) {
+    const response = await remoteRequest("/api/purchase/action", {
+      method: "POST",
+      body: payload,
+    });
+    return response.result;
+  }
+  const actor = getCurrentSessionActor(payload?.actor || {});
+  return performPurchaseAction(payload || {}, actor);
+}
+
+async function getWarehouseWorkbenchRuntime(params = {}) {
+  if (isClientMode()) {
+    const payload = await remoteRequest("/api/warehouse/workbench");
+    return payload.workbench || {};
+  }
+  return getWarehouseWorkbench(params);
+}
+
+async function performWarehouseActionRuntime(payload = {}) {
+  if (isClientMode()) {
+    const response = await remoteRequest("/api/warehouse/action", {
+      method: "POST",
+      body: payload,
+    });
+    return response.result;
+  }
+  const actor = getCurrentSessionActor(payload?.actor || {});
+  return performWarehouseAction(payload || {}, actor);
+}
+
+async function getQcWorkbenchRuntime(params = {}) {
+  if (isClientMode()) {
+    const payload = await remoteRequest("/api/qc/workbench");
+    return payload.workbench || {};
+  }
+  return getQcWorkbench(params);
+}
+
+async function performQcActionRuntime(payload = {}) {
+  if (isClientMode()) {
+    const response = await remoteRequest("/api/qc/action", {
+      method: "POST",
+      body: payload,
+    });
+    return response.result;
+  }
+  const actor = getCurrentSessionActor(payload?.actor || {});
+  return performQcAction(payload || {}, actor);
+}
+
+async function getOutboundWorkbenchRuntime(params = {}) {
+  if (isClientMode()) {
+    const payload = await remoteRequest("/api/outbound/workbench");
+    return payload.workbench || {};
+  }
+  return getOutboundWorkbench(params);
+}
+
+async function performOutboundActionRuntime(payload = {}) {
+  if (isClientMode()) {
+    const response = await remoteRequest("/api/outbound/action", {
+      method: "POST",
+      body: payload,
+    });
+    return response.result;
+  }
+  const actor = getCurrentSessionActor(payload?.actor || {});
+  return performOutboundAction(payload || {}, actor);
+}
+
+async function listWorkItemsRuntime(params = {}) {
+  if (isClientMode()) {
+    const payload = await remoteRequest("/api/work-items/list", {
+      method: "POST",
+      body: params,
+    });
+    return payload.items || [];
+  }
+  return listWorkItems(params);
+}
+
+async function getWorkItemStatsRuntime(params = {}) {
+  if (isClientMode()) {
+    const payload = await remoteRequest("/api/work-items/stats", {
+      method: "POST",
+      body: params,
+    });
+    return payload.stats || {};
+  }
+  return getWorkItemStats(params);
+}
+
+async function generateWorkItemsRuntime(payload = {}) {
+  if (isClientMode()) {
+    const response = await remoteRequest("/api/work-items/generate", {
+      method: "POST",
+      body: payload,
+    });
+    return response.result;
+  }
+  return generateWorkItems(payload);
+}
+
+async function updateWorkItemStatusRuntime(payload = {}) {
+  if (isClientMode()) {
+    const response = await remoteRequest("/api/work-items/update-status", {
+      method: "POST",
+      body: payload,
+    });
+    return response.item;
+  }
+  return updateWorkItemStatus(payload);
+}
+
 function getLanServiceStatus() {
+  if (isClientMode()) {
+    const runtime = getRuntimeStatus();
+    return {
+      running: Boolean(runtime.serverUrl),
+      port: runtime.serverUrl ? Number(new URL(runtime.serverUrl).port || 80) : 0,
+      bindAddress: "remote",
+      startedAt: null,
+      localUrl: runtime.serverUrl,
+      primaryUrl: runtime.serverUrl,
+      lanUrls: runtime.serverUrl ? [runtime.serverUrl] : [],
+      routes: [],
+      authMode: "client-session",
+      sessionCount: runtime.connected ? 1 : 0,
+      lastError: null,
+      clientMode: true,
+    };
+  }
   return getLanStatus();
 }
 
 function startLanService(payload = {}) {
+  assertHostMode("局域网服务");
   requireErp();
   return startLanServer({
     port: Number(payload.port) || undefined,
@@ -1652,67 +1935,83 @@ function startLanService(payload = {}) {
     performWarehouseAction,
     performQcAction,
     performOutboundAction,
+    listWorkItems: listWorkItemsForUser,
+    getWorkItemStats: getWorkItemStatsForUser,
+    generateWorkItems: generateWorkItemsForUser,
+    updateWorkItemStatus: updateWorkItemStatusForUser,
     verifyLogin: verifyLanLogin,
   });
 }
 
 function stopLanService() {
+  assertHostMode("局域网服务");
   return stopLanServer();
 }
 
 function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:get-status", () => getErpStatus());
-  ipcMain.handle("erp:run-migrations", () => rerunMigrations());
+  ipcMain.handle("erp:run-migrations", () => {
+    assertHostMode("Migration");
+    return rerunMigrations();
+  });
   ipcMain.handle("erp:get-enums", () => enums);
   ipcMain.handle("erp:auth:get-status", () => getAuthStatus());
-  ipcMain.handle("erp:auth:get-current-user", () => erpState.currentUser);
+  ipcMain.handle("erp:auth:get-current-user", async () => (isClientMode() ? (await remoteAuthStatus()).currentUser : erpState.currentUser));
   ipcMain.handle("erp:auth:create-first-admin", (_event, payload) => createFirstAdmin(payload || {}));
   ipcMain.handle("erp:auth:login", (_event, payload) => loginElectronUser(payload || {}));
   ipcMain.handle("erp:auth:logout", () => logoutElectronUser());
-  ipcMain.handle("erp:account:list", (_event, params) => listAccounts(params || {}));
+  ipcMain.handle("erp:client:get-status", () => getClientRuntimeStatus());
+  ipcMain.handle("erp:client:set-host-mode", () => switchToHostMode());
+  ipcMain.handle("erp:client:set-client-mode", (_event, payload) => switchToClientMode(payload || {}));
+  ipcMain.handle("erp:client:discover", (_event, payload) => discoverControllers(payload || {}));
+  ipcMain.handle("erp:account:list", (_event, params) => {
+    assertHostMode("账号管理");
+    return listAccounts(params || {});
+  });
   ipcMain.handle("erp:account:upsert", (_event, payload) => {
+    assertHostMode("账号管理");
     assertRoleIfLoggedIn(["admin", "manager"]);
     return upsertAccount(payload || {});
   });
-  ipcMain.handle("erp:user:list", (_event, params) => listUsers(params || {}));
+  ipcMain.handle("erp:user:list", (_event, params) => {
+    assertHostMode("用户管理");
+    return listUsers(params || {});
+  });
   ipcMain.handle("erp:user:upsert", (_event, payload) => {
+    assertHostMode("用户管理");
     assertRoleIfLoggedIn(["admin", "manager"]);
     return upsertUser(payload || {});
   });
-  ipcMain.handle("erp:supplier:list", (_event, params) => listSuppliers(params || {}));
+  ipcMain.handle("erp:supplier:list", (_event, params) => {
+    assertHostMode("供应商管理");
+    return listSuppliers(params || {});
+  });
   ipcMain.handle("erp:supplier:create", (_event, payload) => {
+    assertHostMode("供应商管理");
     assertRoleIfLoggedIn(["admin", "manager", "buyer"]);
     return createSupplier(payload || {});
   });
-  ipcMain.handle("erp:sku:list", (_event, params) => listSkus(params || {}));
+  ipcMain.handle("erp:sku:list", (_event, params) => {
+    assertHostMode("SKU 管理");
+    return listSkus(params || {});
+  });
   ipcMain.handle("erp:sku:create", (_event, payload) => {
+    assertHostMode("SKU 管理");
     assertRoleIfLoggedIn(["admin", "manager", "operations"]);
     return createSku(payload || {});
   });
-  ipcMain.handle("erp:purchase:workbench", (_event, params) => getPurchaseWorkbench(params || {}));
-  ipcMain.handle("erp:purchase:action", (_event, payload) => {
-    const actor = getCurrentSessionActor(payload?.actor || {});
-    return performPurchaseAction(payload || {}, actor);
-  });
-  ipcMain.handle("erp:warehouse:workbench", (_event, params) => getWarehouseWorkbench(params || {}));
-  ipcMain.handle("erp:warehouse:action", (_event, payload) => {
-    const actor = getCurrentSessionActor(payload?.actor || {});
-    return performWarehouseAction(payload || {}, actor);
-  });
-  ipcMain.handle("erp:qc:workbench", (_event, params) => getQcWorkbench(params || {}));
-  ipcMain.handle("erp:qc:action", (_event, payload) => {
-    const actor = getCurrentSessionActor(payload?.actor || {});
-    return performQcAction(payload || {}, actor);
-  });
-  ipcMain.handle("erp:outbound:workbench", (_event, params) => getOutboundWorkbench(params || {}));
-  ipcMain.handle("erp:outbound:action", (_event, payload) => {
-    const actor = getCurrentSessionActor(payload?.actor || {});
-    return performOutboundAction(payload || {}, actor);
-  });
-  ipcMain.handle("erp:workItem:list", (_event, params) => listWorkItems(params || {}));
-  ipcMain.handle("erp:workItem:stats", (_event, params) => getWorkItemStats(params || {}));
-  ipcMain.handle("erp:workItem:generate", (_event, payload) => generateWorkItems(payload || {}));
-  ipcMain.handle("erp:workItem:update-status", (_event, payload) => updateWorkItemStatus(payload || {}));
+  ipcMain.handle("erp:purchase:workbench", (_event, params) => getPurchaseWorkbenchRuntime(params || {}));
+  ipcMain.handle("erp:purchase:action", (_event, payload) => performPurchaseActionRuntime(payload || {}));
+  ipcMain.handle("erp:warehouse:workbench", (_event, params) => getWarehouseWorkbenchRuntime(params || {}));
+  ipcMain.handle("erp:warehouse:action", (_event, payload) => performWarehouseActionRuntime(payload || {}));
+  ipcMain.handle("erp:qc:workbench", (_event, params) => getQcWorkbenchRuntime(params || {}));
+  ipcMain.handle("erp:qc:action", (_event, payload) => performQcActionRuntime(payload || {}));
+  ipcMain.handle("erp:outbound:workbench", (_event, params) => getOutboundWorkbenchRuntime(params || {}));
+  ipcMain.handle("erp:outbound:action", (_event, payload) => performOutboundActionRuntime(payload || {}));
+  ipcMain.handle("erp:workItem:list", (_event, params) => listWorkItemsRuntime(params || {}));
+  ipcMain.handle("erp:workItem:stats", (_event, params) => getWorkItemStatsRuntime(params || {}));
+  ipcMain.handle("erp:workItem:generate", (_event, payload) => generateWorkItemsRuntime(payload || {}));
+  ipcMain.handle("erp:workItem:update-status", (_event, payload) => updateWorkItemStatusRuntime(payload || {}));
   ipcMain.handle("erp:workflow:can-transition", (_event, payload) => canTransition(payload || {}));
   ipcMain.handle("erp:workflow:transition", (_event, payload) => transitionWorkflow(payload || {}));
   ipcMain.handle("erp:qc:decide", (_event, payload) => decideQCResult(payload || {}));

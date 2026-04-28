@@ -34,6 +34,8 @@ async function main() {
       return handler({}, payload);
     };
 
+    await invoke("erp:client:set-host-mode");
+
     const status = await invoke("erp:get-status");
     assert.equal(status.initialized, true);
     assert.ok(status.dbPath.endsWith(path.join("data", "erp.sqlite")));

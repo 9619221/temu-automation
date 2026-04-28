@@ -217,7 +217,7 @@ const ERROR_CATEGORY_HINTS: Record<string, string> = {
   "image_gen:network": "素材准备失败：无法连接服务，请检查网络/代理（常见于系统代理拦截 grsaiapi.com / vectorengine.ai）",
   "image_gen:auth": "素材准备失败：API 密钥无效或已过期，请在设置 → AI 服务中更新密钥",
   "image_gen:quota": "素材准备失败：额度不足或已触发限流，请充值或稍后再试",
-  "image_gen:worker_down": "素材准备失败：处理服务未启动，请重启客户端",
+  "image_gen:worker_down": "素材准备失败：处理服务未启动，请重启软件",
   "image_gen:timeout": "素材准备超时，上游响应过慢，请稍后重试",
   "image_gen:unknown": "素材准备失败，请稍后重试",
 

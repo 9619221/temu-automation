@@ -313,9 +313,9 @@ export default function ErpDebug() {
         })
         : await erp.lan.stop();
       setLanStatus(nextStatus);
-      message.success(checked ? "局域网服务已启动" : "局域网服务已停止");
+      message.success(checked ? "团队协作服务已开启" : "团队协作服务已关闭");
     } catch (error: any) {
-      message.error(error?.message || "局域网服务操作失败");
+      message.error(error?.message || "团队协作服务操作失败");
       const nextStatus = await erp.lan.getStatus().catch(() => null);
       if (nextStatus) setLanStatus(nextStatus);
     } finally {
@@ -393,7 +393,7 @@ export default function ErpDebug() {
   if (!erp) {
     return (
       <div className="dashboard-shell">
-        <PageHeader compact eyebrow="ERP" title="ERP 调试台" subtitle="Electron API 未加载" />
+        <PageHeader compact eyebrow="ERP" title="ERP 调试台" subtitle="服务未就绪，请重启软件" />
         <Alert type="error" showIcon message="当前环境没有 window.electronAPI.erp" />
       </div>
     );
@@ -405,9 +405,9 @@ export default function ErpDebug() {
         compact
         eyebrow="ERP"
         title="ERP 调试台"
-        subtitle="SQLite 状态、基础资料和局域网服务入口"
+        subtitle="数据状态、基础资料和团队协作入口"
         meta={[
-          status?.initialized ? "SQLite 已初始化" : "SQLite 未初始化",
+          status?.initialized ? "数据服务已就绪" : "数据服务未就绪",
           status?.dbPath || "等待状态",
         ]}
         actions={[
@@ -422,7 +422,7 @@ export default function ErpDebug() {
 
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
         <Col xs={24} md={8}>
-          <StatCard title="SQLite" value={status?.initialized ? "Ready" : "Not ready"} color="blue" icon={<DatabaseOutlined />} />
+          <StatCard title="数据服务" value={status?.initialized ? "Ready" : "Not ready"} color="blue" icon={<DatabaseOutlined />} />
         </Col>
         <Col xs={24} md={8}>
           <StatCard title="Migration" value={`${successMigrationCount}/${migrationRows.length || 5}`} color="success" icon={<CheckCircleOutlined />} />
@@ -453,7 +453,7 @@ export default function ErpDebug() {
                   <div className="app-panel">
                     <div className="app-panel__title">
                       <div>
-                        <div className="app-panel__title-main">SQLite</div>
+                        <div className="app-panel__title-main">数据服务</div>
                         <div className="app-panel__title-sub">本机 ERP 数据库</div>
                       </div>
                       <Tag color={status?.initialized ? "success" : "error"}>
@@ -665,7 +665,7 @@ export default function ErpDebug() {
             label: (
               <Space size={6}>
                 <CloudServerOutlined />
-                局域网服务
+                团队协作服务
               </Space>
             ),
             children: (
@@ -675,7 +675,7 @@ export default function ErpDebug() {
                     <div className="app-panel__title">
                       <div>
                         <div className="app-panel__title-main">服务开关</div>
-                        <div className="app-panel__title-sub">本机启动 HTTP 服务，采购和仓库设备可在局域网访问</div>
+                        <div className="app-panel__title-sub">开启后，团队成员可在同一网络内访问业务工作台</div>
                       </div>
                       <Switch
                         checked={Boolean(lanStatus?.running)}
@@ -721,14 +721,14 @@ export default function ErpDebug() {
                       <Descriptions.Item label="本机">
                         <Text code>{lanStatus?.localUrl || "http://127.0.0.1:19380"}</Text>
                       </Descriptions.Item>
-                      <Descriptions.Item label="局域网地址">
+                      <Descriptions.Item label="服务地址">
                         {(lanStatus?.lanUrls || []).length > 0
                           ? (
                             <Space direction="vertical" size={4}>
                               {lanStatus?.lanUrls.map((url) => <Text code key={url}>{url}</Text>)}
                             </Space>
                           )
-                          : <Text type="secondary">未检测到局域网 IPv4 地址</Text>}
+                          : <Text type="secondary">未检测到可用网络地址</Text>}
                       </Descriptions.Item>
                     </Descriptions>
                     {lanStatus?.lastError ? (
@@ -741,7 +741,7 @@ export default function ErpDebug() {
                     <div className="app-panel__title">
                       <div>
                         <div className="app-panel__title-main">访问控制</div>
-                        <div className="app-panel__title-sub">软件登录与局域网登录共用系统用户表</div>
+                        <div className="app-panel__title-sub">团队成员共用同一套用户与权限</div>
                       </div>
                       <SafetyCertificateOutlined style={{ color: "var(--color-success)", fontSize: 18 }} />
                     </div>
@@ -749,8 +749,8 @@ export default function ErpDebug() {
                       <Alert
                         type={lanStatus?.running ? "success" : "info"}
                         showIcon
-                        message={lanStatus?.running ? "服务已在局域网开放占位页面" : "启动服务后会开放采购、仓库和 QC 页面"}
-                        description="当前阶段只开放页面壳、健康检查和状态接口；LAN 登录、角色权限和真实业务 API 在下一开发包接入。"
+                        message={lanStatus?.running ? "团队协作服务已开启" : "启动服务后会开放采购、仓库、QC 和出库工作台"}
+                        description="采购、仓库、QC、出库和事项工作台可供团队成员登录后使用；用户与权限由管理员统一管理。"
                       />
                       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                         {(lanStatus?.routes || [
@@ -769,7 +769,7 @@ export default function ErpDebug() {
                     <div className="app-panel__title">
                       <div>
                         <div className="app-panel__title-main">系统用户</div>
-                        <div className="app-panel__title-sub">创建可登录软件和局域网页面的用户，访问码只保存哈希</div>
+                        <div className="app-panel__title-sub">创建可登录软件和团队工作台的用户，访问码会安全保存</div>
                       </div>
                       <KeyOutlined style={{ color: "var(--color-brand)", fontSize: 18 }} />
                     </div>

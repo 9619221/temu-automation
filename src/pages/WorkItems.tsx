@@ -235,7 +235,7 @@ export default function WorkItems() {
   const openRelated = (row: WorkItemRow) => {
     const baseUrl = lanStatus?.primaryUrl || lanStatus?.localUrl;
     if (!baseUrl) {
-      message.warning("局域网服务尚未启动");
+      message.warning("团队协作服务尚未开启");
       return;
     }
     window.open(`${baseUrl}${relatedPath(row.relatedDocType)}`, "_blank", "noopener,noreferrer");
@@ -366,7 +366,7 @@ export default function WorkItems() {
   if (!erp) {
     return (
       <div className="dashboard-shell">
-        <PageHeader compact eyebrow="ERP" title="事项中心" subtitle="Electron API 未加载" />
+        <PageHeader compact eyebrow="ERP" title="事项中心" subtitle="服务未就绪，请重启软件" />
         <Alert type="error" showIcon message="当前环境没有 window.electronAPI.erp" />
       </div>
     );

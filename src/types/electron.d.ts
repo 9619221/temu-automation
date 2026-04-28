@@ -241,6 +241,8 @@ interface StoreAPI {
 
 interface ErpStatus {
   initialized: boolean;
+  mode?: "unset" | "host" | "client";
+  runtime?: ErpClientStatus;
   dbPath: string | null;
   backupPath?: string | null;
   migrations: Array<{ key: string; status: "success" | "skipped" | "failed" | string }>;
@@ -262,6 +264,23 @@ interface ErpUserSession {
 interface ErpAuthStatus {
   hasUsers: boolean;
   currentUser: ErpUserSession | null;
+}
+
+interface ErpClientStatus {
+  mode: "unset" | "host" | "client";
+  isClientMode: boolean;
+  serverUrl?: string;
+  currentUser?: ErpUserSession | null;
+  connected?: boolean;
+  updatedAt?: string | null;
+  dbInitialized?: boolean;
+}
+
+interface ErpDiscoveredController {
+  url: string;
+  service: string;
+  name?: string;
+  startedAt?: string | null;
 }
 
 interface ErpListParams {
@@ -305,11 +324,17 @@ interface ErpAPI {
   getStatus: () => Promise<ErpStatus>;
   runMigrations: () => Promise<ErpStatus>;
   getEnums: () => Promise<Record<string, Record<string, string>>>;
+  client: {
+    getStatus: () => Promise<ErpClientStatus>;
+    setHostMode: () => Promise<ErpClientStatus>;
+    setClientMode: (payload: { serverUrl: string }) => Promise<ErpClientStatus>;
+    discover: (payload?: { port?: number; timeoutMs?: number; concurrency?: number }) => Promise<ErpDiscoveredController[]>;
+  };
   auth: {
     getStatus: () => Promise<ErpAuthStatus>;
     getCurrentUser: () => Promise<ErpUserSession | null>;
     createFirstAdmin: (payload: { name: string; accessCode: string }) => Promise<ErpAuthStatus>;
-    login: (payload: { login: string; accessCode: string }) => Promise<ErpAuthStatus>;
+    login: (payload: { login: string; accessCode: string; serverUrl?: string }) => Promise<ErpAuthStatus>;
     logout: () => Promise<ErpAuthStatus>;
   };
   account: {

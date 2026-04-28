@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { Button, Card, Form, Input, Space, Typography, message } from "antd";
+import { Button, Card, Form, Input, Select, Space, Typography, message } from "antd";
 import { LockOutlined, UserOutlined } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import { useErpAuth } from "../contexts/ErpAuthContext";
@@ -8,6 +8,7 @@ import { getDefaultPathForRole } from "../utils/erpRoleAccess";
 
 const { Text } = Typography;
 const LOGIN_MESSAGE_KEY = "temu-login-message";
+const TEAM_WORKSPACE_PORT = 19380;
 
 const loginShellStyle: CSSProperties = {
   position: "relative",
@@ -81,8 +82,56 @@ export default function ErpLogin() {
   const navigate = useNavigate();
   const auth = useErpAuth();
   const [submitting, setSubmitting] = useState(false);
+  const [checkingWorkspace, setCheckingWorkspace] = useState(false);
+  const [workspaces, setWorkspaces] = useState<Array<{ url: string; name?: string }>>([]);
+  const [selectedWorkspaceUrl, setSelectedWorkspaceUrl] = useState("");
   const submittingRef = useRef(false);
-  const isSetup = !auth.hasUsers;
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadWorkspace() {
+      if (auth.loading) return;
+      setCheckingWorkspace(true);
+      try {
+        const status = await window.electronAPI?.erp?.client?.getStatus?.();
+        if (cancelled) return;
+        if (status?.serverUrl) {
+          setSelectedWorkspaceUrl(status.serverUrl);
+          setWorkspaces([{ url: status.serverUrl, name: undefined }]);
+          return;
+        }
+
+        if (status?.mode === "host" || status?.dbInitialized || auth.hasUsers) {
+          setSelectedWorkspaceUrl("");
+          setWorkspaces([]);
+          return;
+        }
+
+        const found = await window.electronAPI?.erp?.client?.discover?.({
+          port: TEAM_WORKSPACE_PORT,
+          timeoutMs: 650,
+        });
+        if (cancelled) return;
+        const nextWorkspaces = (found || []).map((item: any) => ({
+          url: item.url,
+          name: item.name,
+        }));
+        setWorkspaces(nextWorkspaces);
+        setSelectedWorkspaceUrl(nextWorkspaces[0]?.url || "");
+      } catch {
+        if (!cancelled) {
+          setWorkspaces([]);
+          setSelectedWorkspaceUrl("");
+        }
+      } finally {
+        if (!cancelled) setCheckingWorkspace(false);
+      }
+    }
+    void loadWorkspace();
+    return () => {
+      cancelled = true;
+    };
+  }, [auth.hasUsers, auth.loading]);
 
   useEffect(() => {
     if (auth.currentUser) {
@@ -90,19 +139,16 @@ export default function ErpLogin() {
     }
   }, [auth.currentUser, navigate]);
 
-  const title = useMemo(() => (
-    isSetup ? "创建首个管理员" : "登录 Temu 自动化运营工具"
-  ), [isSetup]);
-
-  const handleSubmit = async (values: { name?: string; login?: string; accessCode: string }) => {
-    if (submittingRef.current || submitting || auth.loading) return;
+  const handleSubmit = async (values: { login?: string; accessCode: string }) => {
+    if (submittingRef.current || submitting || auth.loading || checkingWorkspace) return;
     submittingRef.current = true;
     setSubmitting(true);
     try {
-      const nextStatus = isSetup
-        ? await auth.createFirstAdmin({
-          name: values.name || "",
+      const nextStatus = selectedWorkspaceUrl
+        ? await auth.login({
+          login: values.login || "",
           accessCode: values.accessCode,
+          serverUrl: selectedWorkspaceUrl,
         })
         : await auth.login({
           login: values.login || "",
@@ -111,13 +157,13 @@ export default function ErpLogin() {
       const user = nextStatus.currentUser;
       message.success({
         key: LOGIN_MESSAGE_KEY,
-        content: isSetup ? "管理员已创建" : "登录成功",
+        content: "登录成功",
       });
       navigate(getDefaultPathForRole(user?.role), { replace: true });
     } catch (error: any) {
       message.error({
         key: LOGIN_MESSAGE_KEY,
-        content: error?.message || (isSetup ? "管理员创建失败" : "登录失败"),
+        content: error?.message || "登录失败",
       });
     } finally {
       submittingRef.current = false;
@@ -132,7 +178,7 @@ export default function ErpLogin() {
       <div aria-hidden="true" style={loginBandLayerStyle} />
       <div aria-hidden="true" style={loginPanelLayerStyle} />
       <Card
-        title={title}
+        title="登录 Temu 自动化运营工具"
         style={loginCardStyle}
         styles={{
           header: {
@@ -147,28 +193,28 @@ export default function ErpLogin() {
       >
         <Space direction="vertical" size={18} style={{ width: "100%" }}>
           <Text type="secondary">
-            {isSetup
-              ? "当前还没有系统用户，请先创建本机管理员。"
-              : "使用系统用户名和访问码登录，不同角色会看到不同工作界面。"}
+            输入管理员分配的账号和访问码，系统会按角色进入对应工作台。
           </Text>
           <Form form={form} layout="vertical" onFinish={handleSubmit}>
-            {isSetup ? (
-              <Form.Item
-                name="name"
-                label="管理员名称"
-                rules={[{ required: true, message: "请输入管理员名称" }]}
-              >
-                <Input prefix={<UserOutlined />} placeholder="例如：老板 / 管理员" autoFocus />
+            {workspaces.length > 1 ? (
+              <Form.Item label="工作空间">
+                <Select
+                  value={selectedWorkspaceUrl}
+                  options={workspaces.map((item, index) => ({
+                    label: item.name || `工作空间 ${index + 1}`,
+                    value: item.url,
+                  }))}
+                  onChange={setSelectedWorkspaceUrl}
+                />
               </Form.Item>
-            ) : (
-              <Form.Item
-                name="login"
-                label="用户"
-                rules={[{ required: true, message: "请输入用户名" }]}
-              >
-                <Input prefix={<UserOutlined />} placeholder="用户名或用户 ID" autoFocus />
-              </Form.Item>
-            )}
+            ) : null}
+            <Form.Item
+              name="login"
+              label="用户"
+              rules={[{ required: true, message: "请输入用户名" }]}
+            >
+              <Input prefix={<UserOutlined />} placeholder="用户名或用户 ID" autoFocus />
+            </Form.Item>
             <Form.Item
               name="accessCode"
               label="访问码"
@@ -180,9 +226,9 @@ export default function ErpLogin() {
               type="primary"
               htmlType="submit"
               block
-              loading={submitting || auth.loading}
+              loading={submitting || auth.loading || checkingWorkspace}
             >
-              {isSetup ? "创建并进入" : "登录"}
+              登录
             </Button>
           </Form>
         </Space>

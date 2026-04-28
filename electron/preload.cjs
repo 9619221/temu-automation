@@ -174,6 +174,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
     getStatus: () => ipcRenderer.invoke("erp:get-status"),
     runMigrations: () => ipcRenderer.invoke("erp:run-migrations"),
     getEnums: () => ipcRenderer.invoke("erp:get-enums"),
+    client: {
+      getStatus: () => ipcRenderer.invoke("erp:client:get-status"),
+      setHostMode: () => ipcRenderer.invoke("erp:client:set-host-mode"),
+      setClientMode: (payload) => ipcRenderer.invoke("erp:client:set-client-mode", payload || {}),
+      discover: (payload) => ipcRenderer.invoke("erp:client:discover", payload || {}),
+    },
     auth: {
       getStatus: () => ipcRenderer.invoke("erp:auth:get-status"),
       getCurrentUser: () => ipcRenderer.invoke("erp:auth:get-current-user"),

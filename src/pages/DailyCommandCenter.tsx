@@ -294,7 +294,7 @@ export default function DailyCommandCenter() {
   if (!erp) {
     return (
       <div className="dashboard-shell">
-        <PageHeader compact eyebrow="ERP" title="今日作战台" subtitle="Electron API 未加载" />
+        <PageHeader compact eyebrow="ERP" title="今日作战台" subtitle="服务未就绪，请重启软件" />
         <Alert type="error" showIcon message="当前环境没有 window.electronAPI.erp" />
       </div>
     );

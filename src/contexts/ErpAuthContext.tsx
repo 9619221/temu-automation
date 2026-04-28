@@ -29,7 +29,7 @@ interface ErpAuthContextValue extends ErpAuthStatus {
   loading: boolean;
   apiReady: boolean;
   refresh: () => Promise<ErpAuthStatus | null>;
-  login: (payload: { login: string; accessCode: string }) => Promise<ErpAuthStatus>;
+  login: (payload: { login: string; accessCode: string; serverUrl?: string }) => Promise<ErpAuthStatus>;
   createFirstAdmin: (payload: { name: string; accessCode: string }) => Promise<ErpAuthStatus>;
   logout: () => Promise<ErpAuthStatus>;
 }
@@ -77,7 +77,7 @@ export function ErpAuthProvider({ children }: { children: ReactNode }) {
     void refresh();
   }, [refresh]);
 
-  const login = useCallback(async (payload: { login: string; accessCode: string }) => {
+  const login = useCallback(async (payload: { login: string; accessCode: string; serverUrl?: string }) => {
     const authApi = getAuthApi();
     setApiReady(Boolean(authApi));
     if (!authApi) throw new Error(LOGIN_SERVICE_UNAVAILABLE);

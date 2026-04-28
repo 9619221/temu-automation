@@ -21,6 +21,10 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/outbound": ["admin", "manager", "operations", "warehouse"],
   "/api/outbound/workbench": ["admin", "manager", "operations", "warehouse"],
   "/api/outbound/action": ["admin", "manager", "operations", "warehouse"],
+  "/api/work-items/list": ["admin", "manager", "operations", "buyer", "finance", "warehouse", "viewer"],
+  "/api/work-items/stats": ["admin", "manager", "operations", "buyer", "finance", "warehouse", "viewer"],
+  "/api/work-items/generate": ["admin", "manager", "operations", "buyer", "finance", "warehouse"],
+  "/api/work-items/update-status": ["admin", "manager", "operations", "buyer", "finance", "warehouse"],
 });
 
 const PR_STATUS_LABELS = Object.freeze({
@@ -1665,6 +1669,23 @@ function createRequestHandler(options = {}) {
   const performOutboundAction = options.performOutboundAction || (() => {
     throw new Error("Outbound action handler is not available");
   });
+  const listWorkItems = options.listWorkItems || (() => []);
+  const getWorkItemStats = options.getWorkItemStats || (() => ({
+    total: 0,
+    active: 0,
+    byOwnerRole: {},
+    byStatus: {},
+    byPriority: {},
+  }));
+  const generateWorkItems = options.generateWorkItems || (() => ({
+    created: 0,
+    updated: 0,
+    resolved: 0,
+    items: [],
+  }));
+  const updateWorkItemStatus = options.updateWorkItemStatus || (() => {
+    throw new Error("Work item action handler is not available");
+  });
   const verifyLogin = options.verifyLogin || (() => null);
 
   return (req, res) => {
@@ -1680,6 +1701,10 @@ function createRequestHandler(options = {}) {
       performQcAction,
       getOutboundWorkbench,
       performOutboundAction,
+      listWorkItems,
+      getWorkItemStats,
+      generateWorkItems,
+      updateWorkItemStatus,
       verifyLogin,
     }).catch((error) => {
       writeJson(res, 500, {
@@ -1709,6 +1734,11 @@ async function readLoginPayload(req) {
   }
   const params = new URLSearchParams(body);
   return Object.fromEntries(params.entries());
+}
+
+async function readOptionalPayload(req) {
+  if (req.method === "GET" || req.method === "HEAD") return {};
+  return readLoginPayload(req);
 }
 
 async function handleLoginRequest({ req, res, verifyLogin }) {
@@ -1940,6 +1970,10 @@ async function handleRequest({
   performQcAction,
   getOutboundWorkbench,
   performOutboundAction,
+  listWorkItems,
+  getWorkItemStats,
+  generateWorkItems,
+  updateWorkItemStatus,
   verifyLogin,
 }) {
     if (req.method === "OPTIONS") {
@@ -1987,6 +2021,7 @@ async function handleRequest({
       writeJson(res, 200, {
         ok: true,
         service: "temu-erp-lan",
+        name: os.hostname(),
         running: true,
         startedAt: lanState.startedAt,
       });
@@ -2091,6 +2126,50 @@ async function handleRequest({
         res,
         session,
         performOutboundAction,
+      });
+      return;
+    }
+
+    if (pathname === "/api/work-items/list") {
+      const payload = await readOptionalPayload(req);
+      writeJson(res, 200, {
+        ok: true,
+        items: await listWorkItems(payload, session.user),
+      });
+      return;
+    }
+
+    if (pathname === "/api/work-items/stats") {
+      const payload = await readOptionalPayload(req);
+      writeJson(res, 200, {
+        ok: true,
+        stats: await getWorkItemStats(payload, session.user),
+      });
+      return;
+    }
+
+    if (pathname === "/api/work-items/generate") {
+      if (req.method !== "POST") {
+        writeJson(res, 405, { ok: false, error: "Method not allowed" });
+        return;
+      }
+      const payload = await readOptionalPayload(req);
+      writeJson(res, 200, {
+        ok: true,
+        result: await generateWorkItems(payload, session.user),
+      });
+      return;
+    }
+
+    if (pathname === "/api/work-items/update-status") {
+      if (req.method !== "POST") {
+        writeJson(res, 405, { ok: false, error: "Method not allowed" });
+        return;
+      }
+      const payload = await readOptionalPayload(req);
+      writeJson(res, 200, {
+        ok: true,
+        item: await updateWorkItemStatus(payload, session.user),
       });
       return;
     }

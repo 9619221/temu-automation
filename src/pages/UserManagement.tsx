@@ -213,7 +213,7 @@ export default function UserManagement() {
       <PageHeader
         eyebrow="系统"
         title="用户管理"
-        subtitle="在软件内创建采购、仓库、运营和财务账号。访问码只保存加密哈希，忘记后需要重新设置。"
+        subtitle="在软件内创建采购、仓库、运营和财务账号。访问码会安全保存，忘记后需要重新设置。"
         meta={[`共 ${users.length} 个用户`, `启用 ${activeCount} 个`, roleCountText]}
         actions={<Button icon={<ReloadOutlined />} onClick={() => void loadUsers()} loading={loading}>刷新</Button>}
       />
