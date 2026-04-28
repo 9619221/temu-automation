@@ -354,7 +354,7 @@ interface ErpAPI {
     getStatus: () => Promise<ErpAuthStatus>;
     getCurrentUser: () => Promise<ErpUserSession | null>;
     createFirstAdmin: (payload: { name: string; accessCode: string }) => Promise<ErpAuthStatus>;
-    login: (payload: { login: string; accessCode: string }) => Promise<ErpAuthStatus>;
+    login: (payload: { login: string; accessCode: string; serverUrl?: string }) => Promise<ErpAuthStatus>;
     logout: () => Promise<ErpAuthStatus>;
   };
   account: {

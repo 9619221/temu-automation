@@ -89,7 +89,19 @@ export default function ErpLogin() {
     }
   }, [auth.currentUser, navigate]);
 
-  const handleSubmit = async (values: { login?: string; accessCode: string }) => {
+  useEffect(() => {
+    let alive = true;
+    window.electronAPI?.erp?.client?.getStatus?.()
+      .then((status: { serverUrl?: string }) => {
+        if (alive && status?.serverUrl) form.setFieldValue("serverUrl", status.serverUrl);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [form]);
+
+  const handleSubmit = async (values: { login?: string; accessCode: string; serverUrl?: string }) => {
     if (submittingRef.current || submitting || auth.loading) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -97,11 +109,14 @@ export default function ErpLogin() {
       const nextStatus = await auth.login({
         login: values.login || "",
         accessCode: values.accessCode,
+        serverUrl: values.serverUrl,
       });
       const user = nextStatus.currentUser;
       message.success({
         key: LOGIN_MESSAGE_KEY,
-        content: user?.role === "admin" ? "管理员登录成功，当前设备已进入主控身份" : "登录成功",
+        content: values.serverUrl
+          ? "云端登录成功"
+          : (user?.role === "admin" ? "管理员登录成功，当前设备已进入主控身份" : "登录成功"),
       });
       navigate(getDefaultPathForRole(user?.role), { replace: true });
     } catch (error: any) {
@@ -145,9 +160,12 @@ export default function ErpLogin() {
             />
           ) : null}
           <Text type="secondary">
-            输入管理员分配的用户名和访问码。管理员账号登录后，当前设备就是主控。
+            输入管理员分配的用户名和访问码；如需连接云端 ERP，可填写服务器地址。
           </Text>
           <Form form={form} layout="vertical" onFinish={handleSubmit}>
+            <Form.Item name="serverUrl" label="服务器地址">
+              <Input placeholder="例如：http://43.156.121.172:19380，留空则登录本机" />
+            </Form.Item>
             <Form.Item
               name="login"
               label="用户"

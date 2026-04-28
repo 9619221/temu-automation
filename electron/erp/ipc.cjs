@@ -21,6 +21,9 @@ const {
   discoverControllers,
   getRuntimeStatus,
   isClientMode,
+  remoteAuthStatus,
+  remoteLogin,
+  remoteLogout,
   remoteRequest,
   setClientMode,
   setHostMode,
@@ -521,7 +524,7 @@ function loadExistingHostDatabaseForStatus() {
   }
 }
 
-function getAuthStatus() {
+function getLocalAuthStatus() {
   loadExistingHostDatabaseForStatus();
   if (!erpState.db) {
     return {
@@ -533,6 +536,15 @@ function getAuthStatus() {
     hasUsers: countUsers() > 0,
     currentUser: erpState.currentUser,
   };
+}
+
+async function getAuthStatus() {
+  if (isClientMode()) {
+    const status = await remoteAuthStatus();
+    erpState.currentUser = status.currentUser || null;
+    return status;
+  }
+  return getLocalAuthStatus();
 }
 
 function createFirstAdmin(payload = {}) {
@@ -551,7 +563,7 @@ function createFirstAdmin(payload = {}) {
     accessCode: requireString(payload.accessCode, "accessCode"),
   });
   erpState.currentUser = toSessionUser(user);
-  return getAuthStatus();
+  return getLocalAuthStatus();
 }
 
 function ensureHostModeForLogin() {
@@ -566,6 +578,11 @@ function ensureHostModeForLogin() {
 }
 
 async function loginElectronUser(payload = {}) {
+  if (payload.serverUrl || isClientMode()) {
+    const status = await remoteLogin(payload);
+    erpState.currentUser = status.currentUser || null;
+    return status;
+  }
   ensureHostModeForLogin();
   const user = verifyLanLogin(payload);
   if (!user) throw new Error("用户名或访问码错误");
@@ -577,12 +594,17 @@ async function loginElectronUser(payload = {}) {
       console.warn("[ERP] Admin controller service start failed:", error?.message || error);
     }
   }
-  return getAuthStatus();
+  return getLocalAuthStatus();
 }
 
-function logoutElectronUser() {
+async function logoutElectronUser() {
+  if (isClientMode()) {
+    const status = await remoteLogout();
+    erpState.currentUser = null;
+    return status;
+  }
   erpState.currentUser = null;
-  return getAuthStatus();
+  return getLocalAuthStatus();
 }
 
 function getClientRuntimeStatus() {
@@ -2557,6 +2579,29 @@ async function updateWorkItemStatusRuntime(payload = {}) {
   return updateWorkItemStatus(payload);
 }
 
+async function listUsersRuntime(params = {}) {
+  if (isClientMode()) {
+    const payload = await remoteRequest("/api/users/list", {
+      method: "POST",
+      body: params,
+    });
+    return payload.users || [];
+  }
+  return listUsers(params);
+}
+
+async function upsertUserRuntime(payload = {}, actor = {}) {
+  if (isClientMode()) {
+    const response = await remoteRequest("/api/users/upsert", {
+      method: "POST",
+      body: payload,
+    });
+    return response.user;
+  }
+  assertRoleIfLoggedIn(["admin", "manager"]);
+  return upsertUserAndBroadcast(payload, actor);
+}
+
 function getLanServiceStatus() {
   if (isClientMode()) {
     const runtime = getRuntimeStatus();
@@ -2682,7 +2727,9 @@ function registerErpIpcHandlers(ipcMain) {
   });
   ipcMain.handle("erp:get-enums", () => enums);
   ipcMain.handle("erp:auth:get-status", () => getAuthStatus());
-  ipcMain.handle("erp:auth:get-current-user", () => erpState.currentUser);
+  ipcMain.handle("erp:auth:get-current-user", () => (
+    isClientMode() ? (getRuntimeStatus().currentUser || null) : erpState.currentUser
+  ));
   ipcMain.handle("erp:auth:create-first-admin", (_event, payload) => createFirstAdmin(payload || {}));
   ipcMain.handle("erp:auth:login", (_event, payload) => loginElectronUser(payload || {}));
   ipcMain.handle("erp:auth:logout", () => logoutElectronUser());
@@ -2700,13 +2747,12 @@ function registerErpIpcHandlers(ipcMain) {
     return upsertAccount(payload || {});
   });
   ipcMain.handle("erp:user:list", (_event, params) => {
-    assertHostMode("用户管理");
-    return listUsers(params || {});
+    if (!isClientMode()) assertHostMode("用户管理");
+    return listUsersRuntime(params || {});
   });
   ipcMain.handle("erp:user:upsert", (_event, payload) => {
-    assertHostMode("用户管理");
-    assertRoleIfLoggedIn(["admin", "manager"]);
-    return upsertUserAndBroadcast(payload || {}, erpState.currentUser || {});
+    if (!isClientMode()) assertHostMode("用户管理");
+    return upsertUserRuntime(payload || {}, erpState.currentUser || {});
   });
   ipcMain.handle("erp:supplier:list", (_event, params) => {
     assertHostMode("供应商管理");

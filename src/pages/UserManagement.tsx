@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Button, Col, Form, Input, Row, Select, Space, Table, Tag, Typography, message } from "antd";
+import { Alert, Button, Col, Form, Input, Row, Select, Space, Table, Tag, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { EditOutlined, KeyOutlined, PlusOutlined, ReloadOutlined, SafetyCertificateOutlined, StopOutlined } from "@ant-design/icons";
+import { EditOutlined, KeyOutlined, PlusOutlined, ReloadOutlined, SafetyCertificateOutlined, StopOutlined, SyncOutlined } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
 import { roleLabel } from "../utils/erpRoleAccess";
 import { useErpAuth } from "../contexts/ErpAuthContext";
@@ -40,6 +40,14 @@ interface UserFormValues {
   accessCode?: string;
 }
 
+interface ClientStatusView {
+  mode: "unset" | "host" | "client";
+  isClientMode: boolean;
+  serverUrl?: string;
+  currentUser?: ErpUserRow | null;
+  connected?: boolean;
+}
+
 function formatTime(value?: string | null) {
   if (!value) return "-";
   const timestamp = Date.parse(value);
@@ -55,10 +63,13 @@ function statusTag(status?: string) {
 
 export default function UserManagement() {
   const [form] = Form.useForm<UserFormValues>();
+  const [cloudForm] = Form.useForm<{ serverUrl: string; login: string; accessCode: string }>();
   const auth = useErpAuth();
   const [users, setUsers] = useState<ErpUserRow[]>([]);
+  const [clientStatus, setClientStatus] = useState<ClientStatusView | null>(null);
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [cloudSubmitting, setCloudSubmitting] = useState(false);
   const editingId = Form.useWatch("id", form);
 
   const activeCount = useMemo(() => users.filter((user) => user.status === "active").length, [users]);
@@ -71,14 +82,21 @@ export default function UserManagement() {
     if (!erp) return;
     setLoading(true);
     try {
-      const nextUsers = await erp.user.list({ limit: 200 });
+      const [nextUsers, nextClientStatus] = await Promise.all([
+        erp.user.list({ limit: 200 }),
+        erp.client.getStatus().catch(() => null),
+      ]);
       setUsers(nextUsers as ErpUserRow[]);
+      if (nextClientStatus) {
+        setClientStatus(nextClientStatus as ClientStatusView);
+        if (nextClientStatus.serverUrl) cloudForm.setFieldValue("serverUrl", nextClientStatus.serverUrl);
+      }
     } catch (error: any) {
       message.error(error?.message || "用户列表读取失败");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [cloudForm]);
 
   useEffect(() => {
     void loadUsers();
@@ -94,6 +112,41 @@ export default function UserManagement() {
   const resetForm = () => {
     form.resetFields();
     form.setFieldsValue({ role: "buyer", status: "active" });
+  };
+
+  const handleConnectCloud = async () => {
+    if (!erp) return;
+    const values = await cloudForm.validateFields();
+    setCloudSubmitting(true);
+    try {
+      const nextStatus = await auth.login({
+        login: values.login,
+        accessCode: values.accessCode,
+        serverUrl: values.serverUrl,
+      });
+      message.success(`已连接云端：${nextStatus.currentUser?.name || values.login}`);
+      cloudForm.resetFields(["accessCode"]);
+      await loadUsers();
+    } catch (error: any) {
+      message.error(error?.message || "云端连接失败");
+    } finally {
+      setCloudSubmitting(false);
+    }
+  };
+
+  const handleUseLocal = async () => {
+    if (!erp) return;
+    setCloudSubmitting(true);
+    try {
+      await erp.client.setHostMode();
+      await auth.logout().catch(() => null);
+      message.success("已切回本机用户库");
+      await loadUsers();
+    } catch (error: any) {
+      message.error(error?.message || "切换本机模式失败");
+    } finally {
+      setCloudSubmitting(false);
+    }
   };
 
   const handleSubmit = async () => {
@@ -224,6 +277,54 @@ export default function UserManagement() {
         meta={[`共 ${users.length} 个用户`, `启用 ${activeCount} 个`, roleCountText]}
         actions={<Button icon={<ReloadOutlined />} onClick={() => void loadUsers()} loading={loading}>刷新</Button>}
       />
+
+      <div className="app-panel">
+        <div className="app-panel__title">
+          <div>
+            <div className="app-panel__title-main">云端同步</div>
+            <div className="app-panel__title-sub">连接后，本页创建和停用用户会直接写入云服务器。</div>
+          </div>
+          <Tag color={clientStatus?.isClientMode ? "success" : "default"}>
+            {clientStatus?.isClientMode ? "云端模式" : "本机模式"}
+          </Tag>
+        </div>
+        <Alert
+          type={clientStatus?.isClientMode ? "success" : "info"}
+          showIcon
+          message={clientStatus?.isClientMode ? "当前正在同步云端用户库" : "当前正在使用本机用户库"}
+          description={clientStatus?.isClientMode ? (clientStatus.serverUrl || "-") : "填写云端地址并用云端管理员账号连接后，用户管理会切到服务器数据库。"}
+          style={{ marginBottom: 12 }}
+        />
+        <Form form={cloudForm} layout="vertical" initialValues={{ login: "admin" }}>
+          <Row gutter={12}>
+            <Col xs={24} md={9}>
+              <Form.Item name="serverUrl" label="云端地址" rules={[{ required: true, message: "请输入云端地址" }]}>
+                <Input placeholder="http://43.156.121.172:19380" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={5}>
+              <Form.Item name="login" label="管理员" rules={[{ required: true, message: "请输入管理员用户" }]}>
+                <Input placeholder="admin" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={6}>
+              <Form.Item name="accessCode" label="访问码" rules={[{ required: true, message: "请输入访问码" }]}>
+                <Input.Password placeholder="云端管理员访问码" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item label=" ">
+                <Space.Compact block>
+                  <Button type="primary" icon={<SyncOutlined />} loading={cloudSubmitting} onClick={handleConnectCloud}>
+                    连接
+                  </Button>
+                  {clientStatus?.isClientMode ? <Button onClick={handleUseLocal}>本机</Button> : null}
+                </Space.Compact>
+              </Form.Item>
+            </Col>
+          </Row>
+        </Form>
+      </div>
 
       <div className="app-panel">
         <div className="app-panel__title">
