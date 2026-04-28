@@ -7,9 +7,11 @@ import Database from "better-sqlite3";
 import path from "path";
 import fs from "fs";
 
+const APP_DATA_ROOT = process.env.APP_USER_DATA
+  || path.join(process.env.APPDATA || path.join(process.env.HOME || "", ".config"), "temu-automation");
+
 const DB_PATH = path.join(
-  process.env.APPDATA || path.join(process.env.HOME || "", ".config"),
-  "temu-automation",
+  APP_DATA_ROOT,
   "yunqi_products.db"
 );
 

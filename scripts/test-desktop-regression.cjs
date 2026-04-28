@@ -402,7 +402,7 @@ async function runUiChecks(page) {
 
   await clickMenuItem(page, "账号管理");
   await waitForHashContains(page, "/accounts");
-  const addAccountButton = page.getByRole("button", { name: "添加账号" }).first();
+  const addAccountButton = page.locator(".app-page-header__actions button").filter({ hasText: "添加账号" }).first();
   await addAccountButton.waitFor({ state: "visible", timeout: 30000 });
   await addAccountButton.click();
   const modal = page.locator(".ant-modal-root .ant-modal").last();

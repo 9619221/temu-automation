@@ -94,6 +94,60 @@ interface ImageStudioEventPayload {
   historySaveError?: string | null;
 }
 
+interface DesignerOpsBrief {
+  productName: string;
+  productDescription: string;
+  howToUse: string;
+  sellingPoints: string[];
+  targetAudience: {
+    buyer: string;
+    user: string;
+  };
+  painPointsAndNeeds: string[];
+  imageStyle: string;
+}
+
+interface DesignerTextOverlay {
+  headline?: string;
+  subhead?: string;
+  pillLabels?: string[];
+}
+
+interface DesignerImagePrompt {
+  slot: number;
+  imageType: string;
+  mode: "edit" | "generate";
+  cameraAngle: string;
+  sceneDescription: string;
+  mood: string;
+  prompt: string;
+  textOverlay: DesignerTextOverlay | null;
+}
+
+interface DesignerPlanResponse {
+  ok?: boolean;
+  productIdentity?: string;
+  globalForbidden?: string[];
+  imagePrompts?: DesignerImagePrompt[];
+  warnings?: string[];
+  errors?: string[];
+  elapsedMs?: number;
+  error?: string;
+}
+
+interface DesignerGenerateEventPayload {
+  jobId: string;
+  type: "started" | "event" | "done" | "cancelled" | "error";
+  event?: {
+    slot?: number;
+    status?: string;
+    dataUrl?: string;
+    error?: string;
+    bytes?: number;
+  };
+  error?: string;
+}
+
 interface ImageStudioJob {
   jobId: string;
   status: "pending" | "running" | "done" | "failed" | "cancelled";
@@ -139,7 +193,15 @@ interface ImageStudioAPI {
   getHistoryItem: (id: string) => Promise<ImageStudioHistoryItem | null>;
   getHistorySources: (id: string) => Promise<{ files: Array<{ name: string; type: string; dataUrl: string }>; error?: string }>;
   saveHistory: (payload: { productName: string; salesRegion: string; imageCount: number; images: ImageStudioGeneratedImage[] }) => Promise<{ id: string }>;
-  scoreImage: (payload: { imageUrl: string; imageType: string }) => Promise<ImageStudioImageScore>;
+  scoreImage: (payload: {
+    imageUrl: string;
+    imageType: string;
+    plan?: ImageStudioPlan;
+    analysis?: ImageStudioAnalysis;
+    productName?: string;
+    salesRegion?: string;
+    packCount?: number;
+  }) => Promise<ImageStudioImageScore>;
   listJobs: () => Promise<ImageStudioJob[]>;
   getJob: (jobId: string) => Promise<ImageStudioJob | null>;
   clearJob: (jobId: string) => Promise<void>;
@@ -150,6 +212,13 @@ interface ImageStudioAPI {
     sharedDna: SharedDNA | null;
     productImageBase64?: string | null;
   }) => Promise<{ images?: ImageStudioComposedImage[]; error?: string }>;
+  composeImagePrompts?: (payload: { imagePrompts: DesignerImagePrompt[]; productIdentity: string; productImageBase64?: string | null }) => Promise<unknown>;
+  regenerateSlot?: (payload: { imagePrompt: DesignerImagePrompt; productIdentity: string; productImageBase64?: string | null; promptOverride?: string | null }) => Promise<unknown>;
+  designerAnalyze?: (payload: { productImageBase64: string; productInput?: unknown }) => Promise<{ ok?: boolean; opsBrief?: DesignerOpsBrief; elapsedMs?: number; error?: string }>;
+  designerPlan?: (payload: { opsBrief: DesignerOpsBrief; productImageBase64: string; debug?: boolean }) => Promise<DesignerPlanResponse>;
+  designerGenerateStart?: (payload: { jobId?: string; imagePrompts: DesignerImagePrompt[]; productIdentity: string; productImageBase64?: string | null }) => Promise<{ jobId: string }>;
+  designerGenerateCancel?: (jobId: string) => Promise<{ cancelled: boolean; jobId: string }>;
+  onDesignerGenerateEvent?: (handler: (payload: DesignerGenerateEventPayload) => void) => (() => void);
 }
 
 interface AppAPI {

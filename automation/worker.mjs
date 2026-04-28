@@ -20,7 +20,7 @@ import { createAiRuntime } from "./ai-runtime.mjs";
 import { parseLocalUrl, readJsonBody, sendJson, sendNoContent } from "./http-json.mjs";
 import { scanPriceReview } from "./price-review-scanner.mjs";
 import { listPriceReview, setPriceReviewManualCost, clearPriceReviewManualCost } from "./yunqi-db.mjs";
-import { open1688LoginWindow } from "./aliexpress-1688-cost.mjs";
+import { open1688LoginWindow, close1688Browser } from "./aliexpress-1688-cost.mjs";
 import { optimizeTitle as _optimizeTitle } from "./title-optimizer.mjs";
 import { scrapeCompetitorReviews as _scrapeCompetitorReviews, openTemuLoginPage as _openTemuLoginPage, openTemuSearchPage as _openTemuSearchPage, extractReviewsFromFeed as _extractReviewsFromFeed, dumpFeedForGoods as _dumpFeedForGoods, extractProductFromFeed as _extractProductFromFeed, extractSearchResultsFromFeed as _extractSearchResultsFromFeed } from "./competitor-reviews.mjs";
 const require = createRequire(import.meta.url);
@@ -11588,6 +11588,10 @@ function buildWorkflowDraftParamsFromRow(table, row, rowResult, params = {}) {
     title: finalTitle,
     rawTitle,
     imageUrls: originalKwcdnUrls,
+    imageLocalPaths: (Array.isArray(rowResult?.images) ? rowResult.images : [])
+      .filter((image) => image?.role === "original" || isWorkflowOriginalImageType(image?.imageType))
+      .map((image) => String(image?.localPath || "").trim())
+      .filter((localPath) => localPath && fs.existsSync(localPath)),
     expectedMainImageMin: WORKFLOW_MIN_MAIN_IMAGE_COUNT,
     quantitySkuImages,
     quantityCounts,
@@ -11652,6 +11656,7 @@ async function generateWorkflowPackImages(params = {}) {
   let kwcdnTablePath = "";
   const shouldCreateDrafts = Boolean(params.createDrafts || params.workflowCreateDrafts);
   const startedAt = getProgressTimestamp();
+  pricingPaused = false;
   replaceCurrentProgress({
     taskId,
     flowType: "workflow",
@@ -11689,6 +11694,21 @@ async function generateWorkflowPackImages(params = {}) {
       const sourceImagePath = path.join(tmpDir, `${taskId}_${dataIndex}_source.jpg`);
       const imageCandidates = getWorkflowRowImageCandidates(table, row);
 
+      while (pricingPaused) {
+        syncCurrentProgressResults(results, {
+          flowType: "workflow",
+          running: true,
+          paused: true,
+          status: "paused",
+          total,
+          completed: offset,
+          current: `${offset + 1}/${total} ${productName.slice(0, 30)}`,
+          step: "已暂停",
+          message: "新上品流程已暂停，点击继续后将处理当前商品。",
+        });
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+
       try {
         syncCurrentProgressResults(results, {
           flowType: "workflow",
@@ -11711,7 +11731,21 @@ async function generateWorkflowPackImages(params = {}) {
         const localFiles = saveWorkflowPackImages(aiResult.images, outputDir, dataIndex);
         const originalSources = Array.isArray(source.originals) && source.originals.length > 0
           ? source.originals
-          : (source.originalUploadEligible ? [{ sourceImagePath: source.sourceImagePath, originalFilter: source.originalFilter, candidate: source.sourceImageUrl }] : []);
+          : (source.originalUploadEligible
+            ? [{ sourceImagePath: source.sourceImagePath, originalFilter: source.originalFilter, candidate: source.sourceImageUrl }]
+            : (shouldCreateDrafts && source.sourceImagePath && fs.existsSync(source.sourceImagePath)
+              ? [{
+                  sourceImagePath: source.sourceImagePath,
+                  originalFilter: {
+                    ...(source.originalFilter || {}),
+                    uploadEligible: true,
+                    warning: "原图未通过优选规则，但为保存草稿已作为兜底原图上传",
+                  },
+                  candidate: source.sourceImageUrl,
+                  forceUpload: true,
+                  fallbackOriginal: true,
+                }]
+              : []));
         const originalUploadSources = buildWorkflowOriginalUploadSources(originalSources, WORKFLOW_MIN_MAIN_IMAGE_COUNT);
         const originalMaterials = originalUploadSources.map((original, index) => ({
           ...original,
@@ -11722,6 +11756,7 @@ async function generateWorkflowPackImages(params = {}) {
           const imageType = spec.imageType;
           if (spec.role === "original") {
             const originalMaterial = originalMaterials[spec.sourceIndex || 0] || { imageUrl: "", localPath: "", originalFilter: null };
+            const originalUploadEligible = Boolean(source.originalUploadEligible || originalMaterial.forceUpload);
             return {
               packCount: spec.packCount,
               imageType,
@@ -11729,9 +11764,9 @@ async function generateWorkflowPackImages(params = {}) {
               label: spec.label,
               imageUrl: originalMaterial.imageUrl,
               localPath: originalMaterial.localPath,
-              uploadEligible: Boolean(source.originalUploadEligible),
-              skipped: !source.originalUploadEligible,
-              error: source.originalUploadEligible ? "" : (source.originalFilter?.reasons?.join("；") || "原图不上传素材中心"),
+              uploadEligible: originalUploadEligible,
+              skipped: !originalUploadEligible,
+              error: originalUploadEligible ? "" : (source.originalFilter?.reasons?.join("；") || "原图不上传素材中心"),
               warnings: originalMaterial.originalFilter?.warning ? [originalMaterial.originalFilter.warning] : [],
               filter: originalMaterial.originalFilter || source.originalFilter || null,
               sourceImageUrl: originalMaterial.candidate || "",
@@ -11824,7 +11859,8 @@ async function generateWorkflowPackImages(params = {}) {
             rowResult.message = draftResult?.success
               ? (draftResult.message || "商品已保存到Temu草稿箱")
               : getDraftFailureMessage(draftResult);
-            rowResult.errorCategory = draftResult?.success ? "" : classifyAutoPricingError("draft", rowResult.message);
+            const draftFailureStage = isDraftImageMaterialPendingError(rowResult.message) ? "image_upload" : "draft";
+            rowResult.errorCategory = draftResult?.success ? "" : classifyAutoPricingError(draftFailureStage, rowResult.message);
             logWorkflowPack(taskId, `row=${rowNumber} draft ${draftResult?.success ? "ok" : "failed"} ${rowResult.draftId || rowResult.message}`);
           }
         }
@@ -16497,14 +16533,20 @@ server.listen(PORT, "127.0.0.1", () => {
 async function handlePriceReviewScan(params) {
   const marginRatio = typeof params?.marginRatio === "number" ? params.marginRatio : 1.75;
   const skip1688Search = !!params?.skip1688Search;
-  // 确保浏览器已登录
+
   await _ensureBrowser();
-  const result = await scanPriceReview({
-    marginRatio,
-    skip1688Search,
-    onProgress: (stage, detail) => logSilent(`[price-review] ${stage}`, detail),
-  });
-  return result;
+
+  const stopPopupMonitor = registerSellerAuthPopupMonitor("[price-review-popup]");
+  try {
+    await establishSellerCentralSession("[price-review-session]");
+    return await scanPriceReview({
+      marginRatio,
+      skip1688Search,
+      onProgress: (stage, detail) => logSilent(`[price-review] ${stage}`, detail),
+    });
+  } finally {
+    stopPopupMonitor?.();
+  }
 }
 
 async function handlePriceReviewList(params) {
@@ -16526,7 +16568,12 @@ async function handlePriceReviewOpen1688Login(params) {
   return await open1688LoginWindow(params?.profilePath);
 }
 
-process.on("SIGTERM", async () => { await closeBrowser(); server.close(); process.exit(0); });
+process.on("SIGTERM", async () => {
+  await close1688Browser().catch(() => {});
+  await closeBrowser();
+  server.close();
+  process.exit(0);
+});
 process.on("uncaughtException", (err) => {
   captureWorkerErrorScreenshot("uncaught_exception").catch(() => {});
   console.error("[Worker] Uncaught exception:", err.message, err.stack);

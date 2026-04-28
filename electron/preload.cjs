@@ -33,6 +33,20 @@ function createImageStudioApi(profile) {
     downloadAll: withProfile((payload) => ipcRenderer.invoke("image-studio:download-all", payload)),
     runDesigner: withProfile((payload) => ipcRenderer.invoke("image-studio:run-designer", payload)),
     composeBriefs: withProfile((payload) => ipcRenderer.invoke("image-studio:compose-briefs", payload)),
+    composeImagePrompts: withProfile((payload) => ipcRenderer.invoke("image-studio:compose-image-prompts", payload)),
+    regenerateSlot: withProfile((payload) => ipcRenderer.invoke("image-studio:regenerate-slot", payload)),
+
+    // 三步式新版（参考老版 SSE 模式）
+    designerAnalyze: withProfile((payload) => ipcRenderer.invoke("image-studio:designer-analyze", payload)),
+    designerPlan: withProfile((payload) => ipcRenderer.invoke("image-studio:designer-plan", payload)),
+    designerGenerateStart: withProfile((payload) => ipcRenderer.invoke("image-studio:designer-generate-start", payload)),
+    designerGenerateCancel: withProfile((jobId) => ipcRenderer.invoke("image-studio:designer-generate-cancel", jobId)),
+    onDesignerGenerateEvent: (handler) => {
+      const channel = "image-studio:designer-generate-event";
+      const listener = (_event, payload) => handler(payload);
+      ipcRenderer.on(channel, listener);
+      return () => ipcRenderer.removeListener(channel, listener);
+    },
   };
 }
 
@@ -153,7 +167,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
 
   // 每次调用前显式切到对应 profile，保证普通版/GPT 版不会串用生图凭证。
-  imageStudio: createImageStudioApi("default"),
   imageStudio: createImageStudioApi("default"),
   imageStudioGpt: createImageStudioApi("gpt"),
 

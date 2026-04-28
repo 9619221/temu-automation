@@ -1,183 +1,239 @@
-/**
- * 1688 图搜成本查询
- *
- * 策略：
- *  1. 打开独立 Chrome profile（避免污染主账号），访问 1688 图搜页
- *  2. 下载 Temu 主图到临时文件 → 上传到图搜框
- *  3. 抓前 N 个结果的单价，去掉最高/最低后取中位数
- *
- * ⚠️ 当前是骨架 —— chromium 启动、DOM 选择器、价格解析均待首次
- * 跑 dev 时对着真实页面填（代码里用 TODO 标出）
- *
- * 兜底：首次运行 profile 还没登录时，调用方会拿到 null，
- * UI 显示「未找到同款」灰色标，用户自己去 Settings 里触发一次登录
- */
-
 import { chromium } from "playwright";
 import fs from "fs";
 import path from "path";
-import os from "os";
-import crypto from "crypto";
+import { findChromeExe } from "./browser.mjs";
 
-// 1688 图搜入口（截至本文档真实）
-const SEARCH_ENTRY_URL = "https://s.1688.com/youyuan/index.htm";
+const SEARCH_URL_TEMPLATE = (imageUrl) =>
+  `https://air.1688.com/app/channel-fe/search/index.html#/result?image_list=${encodeURIComponent(imageUrl)}`;
 
-// 从 Temu 图片 CDN 下载到本地的临时目录
-const TMP_DIR = path.join(os.tmpdir(), "temu-auto-1688-search");
+const LOGIN_URL = "https://login.1688.com/member/signin.htm";
+const DEFAULT_SAMPLE_SIZE = 30;
+const DEFAULT_TIMEOUT_MS = 30_000;
 
-let _browser = null;
-let _context = null;
-let _profilePath = "";
+const CARD_SELECTOR_CANDIDATES = [
+  '[class*="offer-card"]',
+  '[class*="offer-item"]',
+  '[class*="product-card"]',
+  '[data-spm*="offer"]',
+];
 
-/**
- * 外部可调：首次使用前登录 1688 账号
- * 调用时会弹出一个有头浏览器，用户手动扫码登录，登录态持久化到 profile
- */
-export async function open1688LoginWindow(profilePath) {
-  const effectivePath = profilePath || getDefaultProfilePath();
-  fs.mkdirSync(effectivePath, { recursive: true });
-  const browser = await chromium.launchPersistentContext(effectivePath, {
-    headless: false,
-    viewport: { width: 1280, height: 800 },
-    args: ["--disable-blink-features=AutomationControlled"],
-  });
-  const page = await browser.newPage();
-  await page.goto("https://login.1688.com/", { waitUntil: "domcontentloaded" });
-  // 不关闭，让用户登录完自行关
-  return { profilePath: effectivePath };
+const PRICE_SELECTOR_CANDIDATES = [
+  '[class*="offer-price"]',
+  '[class*="price-num"]',
+  '[class*="_price"]',
+  '[class*="price"]',
+];
+
+const EMPTY_TEXT_CANDIDATES = [
+  "暂未找到您想要的结果",
+  "为您找到0个结果",
+];
+
+const browserState1688 = {
+  context: null,
+  profilePath: "",
+  launchPromise: null,
+};
+
+function getDefault1688ProfilePath() {
+  const baseDir = process.env.APP_USER_DATA
+    || path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation");
+  return path.join(baseDir, "profiles", "1688");
 }
 
-/**
- * 核心函数：用图片 URL 换 1688 成本价
- * @param {string} imageUrl - Temu 主图 URL
- * @param {object} opts - { profilePath, topN, priceStrategy: 'median'|'min' }
- * @returns {Promise<{ price: number|null, sampleCount: number, sampleUrl: string }>}
- */
-export async function fetch1688CostByImage(imageUrl, opts = {}) {
-  if (!imageUrl) return { price: null, sampleCount: 0 };
+function resolve1688ProfilePath(profilePath) {
+  return path.resolve(profilePath || getDefault1688ProfilePath());
+}
 
-  const topN = opts.topN || 10;
-  const strategy = opts.priceStrategy || "median";
+function extractPriceFromText(txt) {
+  if (!txt) return null;
+  const value = String(txt).replace(/[,\s]/g, "");
+  const tagged = value.match(/([0-9]+(?:\.[0-9]+)?)(?=元|￥|¥)/);
+  if (tagged) return Number(tagged[1]);
 
-  // 1. 下载图到本地
-  const localPath = await downloadToTmp(imageUrl);
-  if (!localPath) return { price: null, sampleCount: 0 };
+  const loose = value.match(/([0-9]+(?:\.[0-9]+)?)/);
+  return loose ? Number(loose[1]) : null;
+}
 
-  // 2. 确保浏览器/context 就绪
-  await ensureBrowserContext(opts.profilePath);
-  const page = await _context.newPage();
+function robustMedian(nums) {
+  const sorted = nums.filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b);
+  if (sorted.length === 0) return null;
+  if (sorted.length < 5) return sorted[Math.floor(sorted.length / 2)];
+  const trim = Math.floor(sorted.length * 0.1);
+  const trimmed = sorted.slice(trim, sorted.length - trim);
+  return trimmed[Math.floor(trimmed.length / 2)];
+}
 
-  let priceSamples = [];
-  let resultUrl = "";
+async function ensure1688Context(opts = {}) {
+  const targetProfilePath = resolve1688ProfilePath(opts.profilePath);
 
-  try {
-    // 3. 打开图搜页
-    await page.goto(SEARCH_ENTRY_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
+  if (browserState1688.context && browserState1688.profilePath === targetProfilePath) {
+    return browserState1688.context;
+  }
 
-    // 4. TODO: 实测后填入上传输入框选择器
-    //   候选：page.locator('input[type=file]')，可能需要点「上传图片」按钮先
-    const fileInput = page.locator('input[type="file"]').first();
-    await fileInput.setInputFiles(localPath);
+  if (browserState1688.launchPromise) {
+    await browserState1688.launchPromise;
+    if (browserState1688.context && browserState1688.profilePath === targetProfilePath) {
+      return browserState1688.context;
+    }
+  }
 
-    // 5. 等结果页加载
-    await page.waitForLoadState("networkidle", { timeout: 30_000 }).catch(() => {});
-    await page.waitForTimeout(2000);
-    resultUrl = page.url();
-
-    // 6. 检测验证码（登录失效或反爬）
-    const hasCaptcha = await page.evaluate(() => {
-      return document.body?.innerText?.includes("滑动") ||
-             document.body?.innerText?.includes("验证") ||
-             !!document.querySelector(".nc_wrapper, .baxia-dialog");
-    }).catch(() => false);
-    if (hasCaptcha) {
-      throw new Error("1688 图搜遇到验证码，请手动在浏览器中处理");
+  browserState1688.launchPromise = (async () => {
+    if (browserState1688.context && browserState1688.profilePath !== targetProfilePath) {
+      await browserState1688.context.close().catch(() => {});
+      browserState1688.context = null;
+      browserState1688.profilePath = "";
     }
 
-    // 7. TODO: 实测后填入结果卡片 + 价格选择器
-    //   候选容器：.sw-offer-list .offer-item 或 .list-offer-item
-    //   价格节点：.sw-dpl-offer-price / .price-num
-    const rawPrices = await page.evaluate((limit) => {
-      const out = [];
-      const items = document.querySelectorAll(".sw-offer-list .offer-item, .list-offer-item, [data-offer-id]");
-      for (let i = 0; i < Math.min(items.length, limit); i++) {
-        const el = items[i];
-        const priceText = el.querySelector(".sw-dpl-offer-price, .price, .price-num, [class*=price]")?.textContent || "";
-        const num = parseFloat(priceText.replace(/[^\d.]/g, ""));
-        if (Number.isFinite(num) && num > 0) out.push(num);
+    fs.mkdirSync(targetProfilePath, { recursive: true });
+    const executablePath = findChromeExe();
+    const context = await chromium.launchPersistentContext(targetProfilePath, {
+      executablePath,
+      headless: false,
+      viewport: { width: 1480, height: 960 },
+      locale: "zh-CN",
+      ignoreHTTPSErrors: true,
+      args: [
+        "--disable-blink-features=AutomationControlled",
+      ],
+    });
+
+    browserState1688.context = context;
+    browserState1688.profilePath = targetProfilePath;
+
+    context.on("close", () => {
+      if (browserState1688.context === context) {
+        browserState1688.context = null;
+        browserState1688.profilePath = "";
       }
-      return out;
-    }, topN).catch(() => []);
+    });
 
-    priceSamples = rawPrices;
-  } finally {
-    await page.close().catch(() => {});
-  }
-
-  const price = pickPrice(priceSamples, strategy);
-  return { price, sampleCount: priceSamples.length, sampleUrl: resultUrl };
-}
-
-/**
- * 关闭图搜浏览器（定时任务跑完可以回收）
- */
-export async function close1688Browser() {
-  try {
-    if (_context) await _context.close();
-  } catch {}
-  _context = null;
-  _browser = null;
-}
-
-// ============ 内部工具 ============
-
-function getDefaultProfilePath() {
-  const base = process.env.APPDATA || path.join(os.homedir(), ".config");
-  return path.join(base, "temu-automation", "1688-search-profile");
-}
-
-async function ensureBrowserContext(profilePath) {
-  const effectivePath = profilePath || _profilePath || getDefaultProfilePath();
-  if (_context && _profilePath === effectivePath) return;
-  if (_context) {
-    try { await _context.close(); } catch {}
-    _context = null;
-  }
-  fs.mkdirSync(effectivePath, { recursive: true });
-  _profilePath = effectivePath;
-  _context = await chromium.launchPersistentContext(effectivePath, {
-    headless: false, // 验证码/登录失效时需要人工介入，保持有头
-    viewport: { width: 1280, height: 800 },
-    args: ["--disable-blink-features=AutomationControlled"],
+    return context;
+  })().finally(() => {
+    browserState1688.launchPromise = null;
   });
+
+  return browserState1688.launchPromise;
 }
 
-async function downloadToTmp(imageUrl) {
+async function openOrReuse1688Page(context, url) {
+  const existing = (context.pages() || []).find((page) => {
+    const currentUrl = page.url() || "";
+    return currentUrl.includes("1688.com") || currentUrl === "about:blank";
+  });
+
+  const page = existing || await context.newPage();
+  await page.bringToFront().catch(() => {});
+
+  if (!page.url() || page.url() === "about:blank" || url) {
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: DEFAULT_TIMEOUT_MS }).catch(() => {});
+  }
+
+  return page;
+}
+
+export async function fetch1688CostByImage(imageUrl, opts = {}) {
+  if (!imageUrl || typeof imageUrl !== "string") {
+    return { cost: null, source: null, samples: [], error: "imageUrl required" };
+  }
+
+  const sampleSize = Math.max(5, Math.min(200, opts.sampleSize || DEFAULT_SAMPLE_SIZE));
+  const timeoutMs = opts.timeoutMs || DEFAULT_TIMEOUT_MS;
+  const minSamples = Math.max(1, opts.minSamples || 3);
+
+  let page;
   try {
-    fs.mkdirSync(TMP_DIR, { recursive: true });
-    const hash = crypto.createHash("md5").update(imageUrl).digest("hex");
-    const ext = path.extname(new URL(imageUrl).pathname) || ".jpg";
-    const filePath = path.join(TMP_DIR, `${hash}${ext}`);
-    if (fs.existsSync(filePath) && fs.statSync(filePath).size > 100) return filePath;
-    const res = await fetch(imageUrl);
-    if (!res.ok) return null;
-    const buf = Buffer.from(await res.arrayBuffer());
-    fs.writeFileSync(filePath, buf);
-    return filePath;
-  } catch (e) {
-    return null;
+    const context = await ensure1688Context(opts);
+    const url = SEARCH_URL_TEMPLATE(imageUrl);
+    page = await openOrReuse1688Page(context, url);
+
+    const cardSelector = CARD_SELECTOR_CANDIDATES.join(",");
+    const deadline = Date.now() + timeoutMs;
+    let cards = [];
+
+    while (Date.now() < deadline) {
+      const bodyText = await page.evaluate(() => document.body?.innerText || "").catch(() => "");
+      const joinedText = `${bodyText}\n${page.url() || ""}`;
+
+      if (EMPTY_TEXT_CANDIDATES.some((text) => bodyText.includes(text))) {
+        return { cost: null, source: null, samples: [], error: "1688 无搜索结果" };
+      }
+
+      if (/login\.1688\.com|请登录|立即登录|扫码登录/i.test(joinedText)) {
+        return { cost: null, source: null, samples: [], error: "1688 未登录，请先点击“1688 登录”完成登录" };
+      }
+
+      cards = await page.$$(cardSelector).catch(() => []);
+      if (cards.length > 0) break;
+      await page.waitForTimeout(500);
+    }
+
+    if (cards.length === 0) {
+      return { cost: null, source: null, samples: [], error: "未定位到 1688 商品卡片，请更新选择器" };
+    }
+
+    const priceSelector = PRICE_SELECTOR_CANDIDATES.join(",");
+    const samples = [];
+
+    for (const card of cards.slice(0, sampleSize)) {
+      const priceText = await card
+        .$(priceSelector)
+        .then((el) => (el ? el.innerText() : null))
+        .catch(() => null);
+      const price = extractPriceFromText(priceText);
+      if (price != null) samples.push({ price });
+    }
+
+    if (samples.length < minSamples) {
+      return { cost: null, source: null, samples, error: `样本不足 (${samples.length}<${minSamples})` };
+    }
+
+    const cost = robustMedian(samples.map((item) => item.price));
+    return {
+      cost: cost != null ? Number(cost.toFixed(2)) : null,
+      source: "1688_image_search",
+      samples: samples.slice(0, 10),
+    };
+  } catch (error) {
+    return { cost: null, source: null, samples: [], error: String(error?.message || error) };
+  } finally {
+    if (page) {
+      await page.close().catch(() => {});
+    }
   }
 }
 
-function pickPrice(samples, strategy) {
-  if (!Array.isArray(samples) || samples.length === 0) return null;
-  const sorted = [...samples].sort((a, b) => a - b);
-  if (strategy === "min") return sorted[0];
-  // median 策略：去掉最高最低后取中位数
-  const trimmed = sorted.length >= 4 ? sorted.slice(1, -1) : sorted;
-  const mid = Math.floor(trimmed.length / 2);
-  if (trimmed.length % 2 === 0) {
-    return Number(((trimmed[mid - 1] + trimmed[mid]) / 2).toFixed(2));
+export async function open1688LoginWindow(profilePath) {
+  try {
+    const context = await ensure1688Context({ profilePath });
+    const page = await openOrReuse1688Page(context, LOGIN_URL);
+    await page.bringToFront().catch(() => {});
+    return {
+      ok: true,
+      method: "persistent_1688_profile",
+      profilePath: resolve1688ProfilePath(profilePath),
+      url: page.url(),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: String(error?.message || error),
+      profilePath: resolve1688ProfilePath(profilePath),
+    };
   }
-  return trimmed[mid];
+}
+
+export async function close1688Browser() {
+  if (!browserState1688.context) {
+    return { ok: true, alreadyClosed: true };
+  }
+
+  try {
+    await browserState1688.context.close();
+    browserState1688.context = null;
+    browserState1688.profilePath = "";
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, reason: String(error?.message || error) };
+  }
 }

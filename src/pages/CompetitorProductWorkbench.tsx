@@ -167,6 +167,17 @@ interface TrackedProduct {
   goodsId?: string;
 }
 
+interface VisionCompareResult {
+  success?: boolean;
+  myStrengths: string[];
+  myWeaknesses: string[];
+  competitorTakeaways: Array<{ title?: string; takeaway?: string }>;
+  improvements: Array<{ priority?: "P0" | "P1" | "P2"; action?: string }>;
+  rawText?: string;
+  imageErrors?: Array<{ title: string; error: string }>;
+  model?: string;
+}
+
 interface ProductWorkspaceSnapshotCache {
   url: string;
   title?: string;
@@ -2563,7 +2574,7 @@ export default function CompetitorProductWorkbench({
 
   // 主图视觉对比：步骤 4 自动触发，基于已加入对比的链接（selectedSampleRows）
   const [visionLoading, setVisionLoading] = useState(false);
-  const [visionResult, setVisionResult] = useState<Awaited<ReturnType<NonNullable<typeof window.electronAPI>["competitor"]["visionCompare"]>> | null>(null);
+  const [visionResult, setVisionResult] = useState<VisionCompareResult | null>(null);
   const [visionError, setVisionError] = useState<string | null>(null);
   // 记录上次分析的输入指纹，避免 selectedSampleRows 对象引用变化时反复触发
   const visionFingerprintRef = useRef<string>("");
@@ -2606,7 +2617,7 @@ export default function CompetitorProductWorkbench({
           videoRate: marketInsight?.videoRate,
           category: selectedProductMeta?.category || selectedProduct?.category || "",
         },
-      });
+      }) as VisionCompareResult | undefined;
       if (!result) throw new Error("AI 返回为空");
       return result;
     };
@@ -2620,7 +2631,7 @@ export default function CompetitorProductWorkbench({
       if (partialOssErrors.length > 0 && !visionAutoRefreshedRef.current && competitor && selectedUrls.length > 0) {
         visionAutoRefreshedRef.current = true;
         try {
-          const response = await withRetry(() => competitor.batchTrack({ urls: selectedUrls }), { label: "vision-partial-refresh" });
+          const response = await withRetry<any>(() => competitor.batchTrack({ urls: selectedUrls }), { label: "vision-partial-refresh" });
           const existingTracked = await readArrayStoreValue("temu_competitor_tracked");
           const updated = (existingTracked as TrackedProduct[]).map((item) => {
             if (!selectedUrls.includes(item.url)) return item;
@@ -2659,7 +2670,7 @@ export default function CompetitorProductWorkbench({
       if (isOssExpired && !visionAutoRefreshedRef.current && competitor && selectedUrls.length > 0) {
         visionAutoRefreshedRef.current = true;
         try {
-          const response = await withRetry(
+          const response = await withRetry<any>(
             () => competitor.batchTrack({ urls: selectedUrls }),
             { label: "vision-auto-refresh" },
           );
@@ -2943,7 +2954,7 @@ export default function CompetitorProductWorkbench({
     setLoading(true);
     onYunqiRequestStart?.();
     try {
-      const response = await withRetry(() => competitor.search({
+      const response = await withRetry<any>(() => competitor.search({
         keyword: keyword.trim(),
         maxResults: 50,
         wareHouseType,
@@ -2977,7 +2988,7 @@ export default function CompetitorProductWorkbench({
     onYunqiRequestStart?.();
     try {
       const existingTracked = await readArrayStoreValue("temu_competitor_tracked");
-      const batch = await withRetry(() => competitor.batchTrack({ urls }), { onRetry: handleRetryToast("加入对比"), label: "batchTrack" });
+      const batch = await withRetry<any>(() => competitor.batchTrack({ urls }), { onRetry: handleRetryToast("加入对比"), label: "batchTrack" });
       onYunqiRequestSuccess?.();
       setDegradedReason("");
       const lookup = new Map(validItems.map((item) => [item.productUrl, item]));
@@ -3017,7 +3028,7 @@ export default function CompetitorProductWorkbench({
     setYunqiRescueLoading(true);
     onYunqiRequestStart?.();
     try {
-      const resp = await withRetry(
+      const resp = await withRetry<any>(
         () => competitor.search({
           keyword: title.slice(0, 60),
           maxResults: 5,
@@ -3085,7 +3096,7 @@ export default function CompetitorProductWorkbench({
       const existingItem = (existingTracked as TrackedProduct[]).find((item) => item.url === url);
       if (!existingItem) {
         onYunqiRequestStart?.();
-        const snapshot = await withRetry(() => competitor.track({ url }), { onRetry: handleRetryToast("手动加入"), label: "track" });
+        const snapshot = await withRetry<any>(() => competitor.track({ url }), { onRetry: handleRetryToast("手动加入"), label: "track" });
         onYunqiRequestSuccess?.();
         setDegradedReason("");
         const merged = mergeTrackedProducts(existingTracked as TrackedProduct[], [{
@@ -3116,7 +3127,7 @@ export default function CompetitorProductWorkbench({
     setRefreshingSamples(true);
     onYunqiRequestStart?.();
     try {
-      const response = await withRetry(() => competitor.batchTrack({ urls: selectedUrls }), { onRetry: handleRetryToast("刷新样本"), label: "refreshSamples" });
+      const response = await withRetry<any>(() => competitor.batchTrack({ urls: selectedUrls }), { onRetry: handleRetryToast("刷新样本"), label: "refreshSamples" });
       onYunqiRequestSuccess?.();
       setDegradedReason("");
       const existingTracked = await readArrayStoreValue("temu_competitor_tracked");

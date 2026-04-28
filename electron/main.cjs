@@ -9,6 +9,10 @@ const XLSX = require("xlsx");
 const { autoUpdater } = require("electron-updater");
 const { getDefaultCredentials } = require("./default-credentials.cjs");
 
+if (process.env.APP_USER_DATA) {
+  app.setPath("userData", process.env.APP_USER_DATA);
+}
+
 // 全局捕获未处理异常，防止 EPIPE 等 pipe 错误崩溃 Electron
 process.on("uncaughtException", (err) => {
   if (err.code === "EPIPE" || err.code === "ERR_STREAM_DESTROYED") return; // 忽略 pipe 错误
@@ -2511,6 +2515,7 @@ async function normalizeAnalyzeModelBeforeRequest() {
 const IMAGE_STUDIO_LONG_RUNNING_ROUTES = new Set([
   "/api/designer/run",
   "/api/designer/compose",
+  "/api/designer/regenerate-slot",
   "/api/generate",
   "/api/regenerate",
   "/api/compose",
@@ -2565,6 +2570,12 @@ async function imageStudioFetch(routePath, init = {}) {
     return await request();
   } catch (error) {
     if (!isImageStudioLocalServiceConnectionError(error)) {
+      throw error;
+    }
+    // 长任务路由：fetch 失败有可能只是慢/超时，不要立刻重启服务（会让任务白跑）
+    // 长任务的重启-重试改成只对 connect/socket 立即失败这类硬错误生效
+    if (isLongRunning) {
+      appendImageStudioLog(`[http] ${routePath} fetch failed (long route，不重启服务): ${getImageStudioErrorText(error)}`);
       throw error;
     }
     appendImageStudioLog(`[http] ${routePath} local service unavailable，正在重启后重试: ${getImageStudioErrorText(error)}`);
@@ -3004,9 +3015,15 @@ async function streamImageStudioGenerate(target, jobId, payload = {}) {
 async function createWindow() {
   Menu.setApplicationMenu(null);
 
+  // 多实例区分：通过 TEMU_WINDOW_TITLE 覆盖标题，或通过 TEMU_TITLE_PREFIX 给标题加前缀
+  // 例：TEMU_WINDOW_TITLE="gpt生图" → "gpt生图"
+  // 例：TEMU_TITLE_PREFIX="[Claude 1421]" → "[Claude 1421] Temu 自动化运营工具"
+  const titlePrefix = process.env.TEMU_TITLE_PREFIX ? `${process.env.TEMU_TITLE_PREFIX} ` : "";
+  const finalTitle = process.env.TEMU_WINDOW_TITLE || `${titlePrefix}Temu 自动化运营工具`;
+
   mainWindow = new BrowserWindow({
     width: 1280, height: 800,
-    title: WINDOW_TITLE,
+    title: finalTitle,
     show: false,
     backgroundColor: "#ffffff",
     autoHideMenuBar: true,
@@ -3017,16 +3034,22 @@ async function createWindow() {
     },
   });
 
-  mainWindow.setTitle(WINDOW_TITLE);
+  mainWindow.setTitle(finalTitle);
   mainWindow.setMenuBarVisibility(false);
 
+  // 阻止页面 document.title 覆盖窗口标题（保持前缀一直可见）
+  mainWindow.on("page-title-updated", (event) => {
+    event.preventDefault();
+    mainWindow.setTitle(finalTitle);
+  });
+
   mainWindow.webContents.once("did-finish-load", () => {
-    mainWindow.setTitle(WINDOW_TITLE);
+    mainWindow.setTitle(finalTitle);
     mainWindow.show();
   });
   mainWindow.webContents.on("page-title-updated", (event) => {
     event.preventDefault();
-    mainWindow?.setTitle(WINDOW_TITLE);
+    mainWindow?.setTitle(finalTitle);
   });
 
   // 开发模式：等待 Vite dev server 就绪（最多30秒）
@@ -3984,7 +4007,8 @@ ipcMain.handle("yunqi-db:sync-online", async (_e, params) => sendCmd("yunqi_db_s
 
 // ============ 核价筛选器 IPC ============
 ipcMain.handle("price-review:scan-now", async (_e, params) => {
-  const result = await sendCmd("price_review_scan", params || {}, { timeoutMs: 30 * 60 * 1000 });
+  const credentials = getActiveWorkerCredentials();
+  const result = await sendCmd("price_review_scan", { ...(params || {}), credentials }, { timeoutMs: 30 * 60 * 1000 });
   try {
     const wins = BrowserWindow.getAllWindows();
     for (const w of wins) w.webContents.send("price-review:scan-done", { summary: result?.summary, snapshotId: result?.snapshotId });
@@ -4012,7 +4036,8 @@ async function tickPriceReviewAutoScan() {
   _priceReviewScanning = true;
   try {
     const marginRatio = typeof s.priceReviewMarginRatio === "number" ? s.priceReviewMarginRatio : 1.75;
-    await sendCmd("price_review_scan", { marginRatio }, { timeoutMs: 30 * 60 * 1000 });
+    const credentials = getActiveWorkerCredentials();
+    await sendCmd("price_review_scan", { marginRatio, credentials }, { timeoutMs: 30 * 60 * 1000 });
     try {
       const wins = BrowserWindow.getAllWindows();
       for (const w of wins) w.webContents.send("price-review:auto-scan-done", { at: Date.now() });
@@ -4223,6 +4248,8 @@ ipcMain.handle("image-studio:run-designer", async (_event, payload) => {
       analysis: payload?.analysis || {},
       extraNotes: typeof payload?.extraNotes === "string" ? payload.extraNotes : "",
       debug: !!payload?.debug,
+      productImageBase64:
+        typeof payload?.productImageBase64 === "string" ? payload.productImageBase64 : null,
     }),
   });
   return result;
@@ -4236,6 +4263,183 @@ ipcMain.handle("image-studio:compose-briefs", async (_event, payload) => {
       briefs: Array.isArray(payload?.briefs) ? payload.briefs : [],
       sharedDna: payload?.sharedDna || null,
       productImageBase64: typeof payload?.productImageBase64 === "string" ? payload.productImageBase64 : null,
+    }),
+  });
+  return result;
+});
+
+// 新版合成：imagePrompts + productIdentity（电商主图版，全 edit）
+ipcMain.handle("image-studio:compose-image-prompts", async (_event, payload) => {
+  const result = await imageStudioJson("/api/designer/compose", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      imagePrompts: Array.isArray(payload?.imagePrompts) ? payload.imagePrompts : [],
+      productIdentity: typeof payload?.productIdentity === "string" ? payload.productIdentity : "",
+      productImageBase64: typeof payload?.productImageBase64 === "string" ? payload.productImageBase64 : null,
+    }),
+  });
+  return result;
+});
+
+// ============ 三步式新版 IPC ============
+
+// 第 1 步：运营 Agent
+ipcMain.handle("image-studio:designer-analyze", async (_event, payload) => {
+  const result = await imageStudioJson("/api/designer/analyze", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      productImageBase64: typeof payload?.productImageBase64 === "string" ? payload.productImageBase64 : null,
+      extraNotes: typeof payload?.extraNotes === "string" ? payload.extraNotes : "",
+      debug: !!payload?.debug,
+    }),
+  });
+  return result;
+});
+
+// 第 2 步：设计师 Agent
+ipcMain.handle("image-studio:designer-plan", async (_event, payload) => {
+  const result = await imageStudioJson("/api/designer/plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      opsBrief: payload?.opsBrief || null,
+      productImageBase64: typeof payload?.productImageBase64 === "string" ? payload.productImageBase64 : null,
+      debug: !!payload?.debug,
+    }),
+  });
+  return result;
+});
+
+// 第 3 步：SSE 流式生图
+const designerGenerateControllers = new Map(); // jobId → AbortController
+
+ipcMain.handle("image-studio:designer-generate-start", async (event, payload) => {
+  const jobId = typeof payload?.jobId === "string" && payload.jobId
+    ? payload.jobId
+    : `designer_job_${Date.now()}`;
+
+  const controller = new AbortController();
+  designerGenerateControllers.set(jobId, controller);
+
+  // 异步起 SSE，立刻返回 jobId
+  (async () => {
+    const sender = (data) => {
+      const win = event.sender;
+      if (win && !win.isDestroyed()) {
+        win.send("image-studio:designer-generate-event", { jobId, ...data });
+      }
+    };
+
+    try {
+      const status = await ensureImageStudioService();
+      const projectInfo = getImageStudioProjectInfo();
+      const headers = {
+        ...getImageStudioAuthHeaders(projectInfo),
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      };
+      // 注意：不用 dispatcher 选项，Electron 中 undici fetch 默认 headersTimeout = 5 分钟，
+      // 心跳 15s 间隔保证 body 不会 idle 超过 5 分钟，对 SSE 已足够
+      const response = await fetch(`${status.url}/api/designer/generate-stream`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          imagePrompts: Array.isArray(payload?.imagePrompts) ? payload.imagePrompts : [],
+          productIdentity: typeof payload?.productIdentity === "string" ? payload.productIdentity : "",
+          productImageBase64: typeof payload?.productImageBase64 === "string" ? payload.productImageBase64 : null,
+        }),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const txt = await response.text().catch(() => "");
+        throw new Error(`HTTP ${response.status}: ${txt.slice(0, 300)}`);
+      }
+      if (!response.body) {
+        throw new Error("SSE 响应 body 为空");
+      }
+
+      console.log(`[designer-generate] SSE connected ${status.url}/api/designer/generate-stream status=${response.status}`);
+      sender({ type: "started" });
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // 按 SSE 帧切割：以 \n\n 为分隔
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop() || "";
+        for (const frame of frames) {
+          const trimmed = frame.trim();
+          if (!trimmed) continue;
+          if (trimmed.startsWith(":")) continue; // heartbeat
+          const dataLines = trimmed
+            .split("\n")
+            .filter((l) => l.startsWith("data:"))
+            .map((l) => l.slice(5).trim());
+          if (dataLines.length === 0) continue;
+          const dataStr = dataLines.join("\n");
+          try {
+            const obj = JSON.parse(dataStr);
+            sender({ type: "event", event: obj });
+          } catch (parseErr) {
+            console.warn("[designer-generate] SSE parse error:", parseErr);
+          }
+        }
+      }
+
+      sender({ type: "done" });
+    } catch (error) {
+      const detail = (() => {
+        if (!error || typeof error !== "object") return String(error);
+        const parts = [];
+        if (error.message) parts.push(error.message);
+        if (error.cause) {
+          const c = error.cause;
+          parts.push(`cause: ${c.code || ""} ${c.message || c.toString?.() || ""}`.trim());
+        }
+        if (error.stack) parts.push("stack: " + String(error.stack).split("\n").slice(0, 3).join(" / "));
+        return parts.join(" | ");
+      })();
+      console.error("[designer-generate] SSE failed:", detail);
+      appendImageStudioLog(`[designer-generate] SSE failed: ${detail}`);
+      if (controller.signal.aborted) {
+        sender({ type: "cancelled" });
+      } else {
+        sender({ type: "error", error: detail });
+      }
+    } finally {
+      designerGenerateControllers.delete(jobId);
+    }
+  })();
+
+  return { jobId };
+});
+
+ipcMain.handle("image-studio:designer-generate-cancel", async (_event, jobId) => {
+  const ctrl = designerGenerateControllers.get(jobId);
+  if (ctrl) {
+    ctrl.abort();
+    designerGenerateControllers.delete(jobId);
+    return { cancelled: true, jobId };
+  }
+  return { cancelled: false, jobId };
+});
+
+// 单张重生
+ipcMain.handle("image-studio:regenerate-slot", async (_event, payload) => {
+  const result = await imageStudioJson("/api/designer/regenerate-slot", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      imagePrompt: payload?.imagePrompt || null,
+      productIdentity: typeof payload?.productIdentity === "string" ? payload.productIdentity : "",
+      productImageBase64: typeof payload?.productImageBase64 === "string" ? payload.productImageBase64 : null,
+      promptOverride: typeof payload?.promptOverride === "string" ? payload.promptOverride : null,
     }),
   });
   return result;
@@ -4347,6 +4551,11 @@ ipcMain.handle("image-studio:score-image", async (_event, payload) => {
     body: JSON.stringify({
       imageUrl: payload?.imageUrl || "",
       imageType: payload?.imageType || "main",
+      plan: payload?.plan || null,
+      analysis: payload?.analysis || null,
+      productName: payload?.productName || "",
+      salesRegion: payload?.salesRegion || "",
+      packCount: payload?.packCount || 1,
     }),
   });
 });
@@ -4423,10 +4632,15 @@ ipcMain.handle("app:open-log-directory", async () => {
 
 function getStoreFilePath(key) {
   const normalizedKey = normalizeStoreKey(key);
-  const baseDir = app.getPath("userData");
+  const sharedKeys = new Set([ACCOUNT_STORE_KEY, ACTIVE_ACCOUNT_ID_KEY, "temu_account_id_history"]);
+  const baseDir = sharedKeys.has(normalizedKey)
+    ? path.join(process.env.APPDATA || app.getPath("appData"), "temu-automation")
+    : app.getPath("userData");
+  fs.mkdirSync(baseDir, { recursive: true });
   const safeFileName = encodeURIComponent(normalizedKey);
-  return ensurePathInside(baseDir, path.join(baseDir, `${safeFileName}.json`), "Store 文件路径");
+  return ensurePathInside(baseDir, path.join(baseDir, `${safeFileName}.json`), "Store file path");
 }
+
 
 function hasMeaningfulStoreData(value, seen = new WeakSet()) {
   if (value === null || value === undefined) return false;

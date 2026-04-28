@@ -116,6 +116,30 @@ type ImageVariant = ImageStudioGeneratedImage & {
 
 type ImageVariantMap = Record<string, ImageVariant[]>;
 
+type ImageStudioEventPayloadLike = {
+  type?: string;
+  jobId?: string;
+  event?: {
+    imageType?: string;
+    status?: string;
+    imageUrl?: string;
+    error?: string;
+    warnings?: string[];
+  };
+  results?: ImageStudioGeneratedImage[];
+  error?: string;
+  message?: string;
+  historySaved?: boolean;
+  historyId?: string | null;
+  historySaveError?: string | null;
+};
+
+type ImageStudioHistorySourceFile = {
+  name?: string;
+  type?: string;
+  dataUrl: string;
+};
+
 type RedrawJobMeta = {
   imageType: string;
   suggestion: string;
@@ -810,7 +834,7 @@ export default function ImageStudio() {
       refreshBackgroundJobs();
     }, 8000);
 
-    const unsubscribe = window.electronAPI?.onImageStudioEvent?.((payload) => {
+    const unsubscribe = window.electronAPI?.onImageStudioEvent?.((payload: ImageStudioEventPayloadLike | null) => {
       if (!payload) return;
 
       if (payload.type === "generate:complete" || payload.type === "generate:error" || payload.type === "generate:cancelled") {
@@ -1248,7 +1272,7 @@ export default function ImageStudio() {
       try {
         const sources = await imageStudioAPI.getHistorySources?.(historyItem.id);
         if (sources && Array.isArray(sources.files) && sources.files.length > 0) {
-          const restored: UploadFile[] = await Promise.all(sources.files.map(async (s, i) => {
+          const restored: UploadFile[] = await Promise.all(sources.files.map(async (s: ImageStudioHistorySourceFile, i: number) => {
             const resp = await fetch(s.dataUrl);
             const blob = await resp.blob();
             const file = new File([blob], s.name || `source-${i}`, { type: s.type || blob.type || "image/jpeg" });

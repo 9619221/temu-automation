@@ -201,7 +201,7 @@ export default function PriceReview() {
           <Space direction="vertical" size={0} style={{ alignItems: "flex-end" }}>
             <span>¥{effective.toFixed(2)}</span>
             <Text type="secondary" style={{ fontSize: 11 }}>
-              {manual != null ? "手填" : r.cost_source === "1688_image_search" ? "图搜" : r.cost_source}
+              {manual != null ? "手填" : (r.cost_source === "yunqi_img_search" || r.cost_source === "1688_image_search") ? "云启图搜" : r.cost_source}
             </Text>
           </Space>
         );

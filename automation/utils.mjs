@@ -75,11 +75,18 @@ export function saveBase64Image(dataUrl, outputPath) {
   return outputPath;
 }
 
+export function getAppDataRoot() {
+  const dir = process.env.APP_USER_DATA
+    || path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 /**
  * 获取调试目录路径
  */
 export function getDebugDir() {
-  const dir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
+  const dir = path.join(getAppDataRoot(), "debug");
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -88,7 +95,7 @@ export function getDebugDir() {
  * 获取临时目录路径
  */
 export function getTmpDir(subdir = "") {
-  const dir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", subdir || "tmp");
+  const dir = path.join(getAppDataRoot(), subdir || "tmp");
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
