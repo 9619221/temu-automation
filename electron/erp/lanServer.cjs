@@ -1254,7 +1254,7 @@ function renderTable({ columns, rows, emptyText }) {
   `;
 }
 
-function renderSelectOptions(options, selected) {
+function renderKeyValueSelectOptions(options, selected) {
   return options.map(([value, label]) => `
     <option value="${escapeHtml(value)}" ${value === selected ? "selected" : ""}>${escapeHtml(label)}</option>
   `).join("");
@@ -1269,12 +1269,12 @@ function renderUserCreateForm() {
         </label>
         <label class="inline-label">角色
           <select class="mini-input full" name="role" required>
-            ${renderSelectOptions(USER_ROLE_OPTIONS, "buyer")}
+            ${renderKeyValueSelectOptions(USER_ROLE_OPTIONS, "buyer")}
           </select>
         </label>
         <label class="inline-label">状态
           <select class="mini-input full" name="status">
-            ${renderSelectOptions(Object.entries(USER_STATUS_LABELS), "active")}
+            ${renderKeyValueSelectOptions(Object.entries(USER_STATUS_LABELS), "active")}
           </select>
         </label>
         <label class="inline-label">访问码
@@ -1299,12 +1299,12 @@ function renderUserEditForm(row, currentUser) {
         </label>
         <label class="inline-label">角色
           <select class="mini-input full" name="role" required>
-            ${renderSelectOptions(USER_ROLE_OPTIONS, row.role)}
+            ${renderKeyValueSelectOptions(USER_ROLE_OPTIONS, row.role)}
           </select>
         </label>
         <label class="inline-label">状态
           <select class="mini-input full" name="status">
-            ${renderSelectOptions(Object.entries(USER_STATUS_LABELS), row.status || "active")}
+            ${renderKeyValueSelectOptions(Object.entries(USER_STATUS_LABELS), row.status || "active")}
           </select>
         </label>
         <label class="inline-label">重设访问码
