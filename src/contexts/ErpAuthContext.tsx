@@ -39,9 +39,22 @@ const defaultStatus: ErpAuthStatus = {
   currentUser: null,
 };
 
+const legacyStatus: ErpAuthStatus = {
+  hasUsers: false,
+  currentUser: {
+    id: "legacy-local-user",
+    name: "本机用户",
+    role: "legacy",
+    status: "active",
+  },
+};
+
 const ErpAuthContext = createContext<ErpAuthContextValue | null>(null);
 
 function normalizeStatus(status: ErpAuthStatus | null | undefined): ErpAuthStatus {
+  if (status && !status.hasUsers && !status.currentUser) {
+    return legacyStatus;
+  }
   return {
     hasUsers: Boolean(status?.hasUsers),
     currentUser: status?.currentUser || null,

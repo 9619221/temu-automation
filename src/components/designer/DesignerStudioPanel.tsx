@@ -45,6 +45,10 @@ function readFileAsDataUrl(file: File): Promise<string> {
   });
 }
 
+function createDesignerJobId() {
+  return `designer_job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
 const api = (typeof window !== "undefined"
   ? (window as any).electronAPI?.imageStudioGpt
   : null);
@@ -150,6 +154,11 @@ export function DesignerStudioPanel({ primaryUploadFile }: Props) {
   const getEffectivePrompt = (slot: number, original: string) =>
     promptOverrides.get(slot) ?? original;
 
+  const cleanupGenerateListener = () => {
+    eventUnsubRef.current?.();
+    eventUnsubRef.current = null;
+  };
+
   const handleStartGenerate = async () => {
     if (!api?.designerGenerateStart || !api?.onDesignerGenerateEvent) {
       setGenerateGlobalError("生成服务不可用，请重启软件后重试");
@@ -179,6 +188,10 @@ export function DesignerStudioPanel({ primaryUploadFile }: Props) {
     setGenerating(true);
     setGenerateGlobalError(null);
     setStep(3);
+    cleanupGenerateListener();
+
+    const jobId = createDesignerJobId();
+    setGenerateJobId(jobId);
 
     // 重置勾选 slot 的状态为 generating（即将开始）
     setSlotStates((prev) => {
@@ -192,19 +205,23 @@ export function DesignerStudioPanel({ primaryUploadFile }: Props) {
     // 订阅 SSE 事件
     const unsub = api.onDesignerGenerateEvent((payload: any) => {
       if (!payload || typeof payload !== "object") return;
+      if (payload.jobId !== jobId) return;
       // payload: { jobId, type: "started"|"event"|"done"|"cancelled"|"error", event?, error? }
       if (payload.type === "started") return;
       if (payload.type === "done") {
         setGenerating(false);
+        cleanupGenerateListener();
         return;
       }
       if (payload.type === "cancelled") {
         setGenerating(false);
+        cleanupGenerateListener();
         return;
       }
       if (payload.type === "error") {
         setGenerateGlobalError(String(payload.error || "SSE 流出错"));
         setGenerating(false);
+        cleanupGenerateListener();
         return;
       }
       if (payload.type === "event") {
@@ -238,6 +255,7 @@ export function DesignerStudioPanel({ primaryUploadFile }: Props) {
     try {
       const productImageBase64 = await readFileAsDataUrl(primaryUploadFile);
       const res = await api.designerGenerateStart({
+        jobId,
         imagePrompts: selected,
         productIdentity,
         productImageBase64,
@@ -246,6 +264,7 @@ export function DesignerStudioPanel({ primaryUploadFile }: Props) {
     } catch (err) {
       setGenerateGlobalError(err instanceof Error ? err.message : String(err));
       setGenerating(false);
+      cleanupGenerateListener();
     }
   };
 
@@ -260,7 +279,7 @@ export function DesignerStudioPanel({ primaryUploadFile }: Props) {
   const handleRegenerateSlot = async (slot: number) => {
     const target = imagePrompts.find((p) => p.slot === slot);
     if (!target) return;
-    if (!api?.designerGenerateStart) return;
+    if (!api?.designerGenerateStart || !api?.onDesignerGenerateEvent) return;
     if (!primaryUploadFile) return;
 
     // 标记单张 generating
@@ -270,12 +289,14 @@ export function DesignerStudioPanel({ primaryUploadFile }: Props) {
       return next;
     });
 
+    let unsubscribeRegenerate = () => {};
     try {
       const productImageBase64 = await readFileAsDataUrl(primaryUploadFile);
       // 不复用主 SSE，单独起一个
-      let unsub: null | (() => void) = null;
+      const jobId = createDesignerJobId();
       const finished = new Promise<void>((resolve) => {
-        unsub = api.onDesignerGenerateEvent((payload: any) => {
+        unsubscribeRegenerate = api.onDesignerGenerateEvent((payload: any) => {
+          if (payload?.jobId !== jobId) return;
           if (payload?.type === "event" && payload.event?.slot === slot) {
             const ev = payload.event;
             setSlotStates((prev) => {
@@ -296,19 +317,21 @@ export function DesignerStudioPanel({ primaryUploadFile }: Props) {
             });
           }
           if (payload?.type === "done" || payload?.type === "error" || payload?.type === "cancelled") {
-            unsub?.();
+            unsubscribeRegenerate();
             resolve();
           }
         });
       });
       const promptText = getEffectivePrompt(slot, target.prompt);
       await api.designerGenerateStart({
+        jobId,
         imagePrompts: [{ ...target, prompt: promptText }],
         productIdentity,
         productImageBase64,
       });
       await finished;
     } catch (err) {
+      unsubscribeRegenerate();
       setSlotStates((prev) => {
         const next = new Map(prev);
         next.set(slot, {

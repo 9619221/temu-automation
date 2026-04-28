@@ -90,6 +90,7 @@ export default function AppLayout() {
   const location = useLocation();
   const auth = useErpAuth();
   const currentRole = auth.currentUser?.role || "";
+  const isLegacyMode = currentRole === "legacy";
   const { collecting, progress, successCount, errorCount, taskStates } = useCollection();
   const completedCount = successCount + errorCount;
   const canUseCollection = canAccessRoute(currentRole, "/collect");
@@ -367,7 +368,9 @@ export default function AppLayout() {
             {canAccessRoute(currentRole, "/settings") ? (
               <Button icon={<SettingOutlined />} onClick={() => navigate("/settings")} style={{ borderRadius: 10 }} />
             ) : null}
-            <Button icon={<LogoutOutlined />} onClick={handleLogout} style={{ borderRadius: 10 }} />
+            {!isLegacyMode ? (
+              <Button icon={<LogoutOutlined />} onClick={handleLogout} style={{ borderRadius: 10 }} />
+            ) : null}
           </Space>
         </Header>
 

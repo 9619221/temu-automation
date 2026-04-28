@@ -1,4 +1,4 @@
-export type ErpRole = "admin" | "manager" | "operations" | "buyer" | "finance" | "warehouse" | "viewer" | string;
+export type ErpRole = "admin" | "manager" | "operations" | "buyer" | "finance" | "warehouse" | "viewer" | "legacy" | string;
 
 export interface ErpSessionUser {
   id: string;
@@ -15,6 +15,7 @@ const ROLE_LABELS: Record<string, string> = {
   finance: "财务",
   warehouse: "仓库",
   viewer: "只读",
+  legacy: "本机模式",
 };
 
 const DEFAULT_PATH_BY_ROLE: Record<string, string> = {
@@ -25,6 +26,7 @@ const DEFAULT_PATH_BY_ROLE: Record<string, string> = {
   finance: "/daily-command",
   warehouse: "/daily-command",
   viewer: "/daily-command",
+  legacy: "/shop",
 };
 
 const ROUTE_ROLES: Record<string, string[]> = {
@@ -48,6 +50,20 @@ const ROUTE_ROLES: Record<string, string[]> = {
   "/settings": ["admin", "manager"],
 };
 
+const LEGACY_ROUTES = new Set([
+  "/accounts",
+  "/shop",
+  "/products",
+  "/create-product",
+  "/image-studio",
+  "/image-studio-gpt",
+  "/collect",
+  "/competitor",
+  "/price-review",
+  "/logs",
+  "/settings",
+]);
+
 const SCOPED_WORK_ITEM_ROLES = new Set(["operations", "buyer", "finance", "warehouse"]);
 
 export function roleLabel(role?: string | null) {
@@ -62,6 +78,7 @@ export function canAccessRoute(role: string | null | undefined, pathname: string
   if (!role) return false;
   if (role === "admin" || role === "manager") return true;
   const normalized = pathname.startsWith("/products/") ? "/products" : pathname;
+  if (role === "legacy") return LEGACY_ROUTES.has(normalized);
   const allowed = ROUTE_ROLES[normalized];
   if (!allowed) return false;
   return allowed.includes(role);

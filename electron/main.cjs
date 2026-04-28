@@ -2270,6 +2270,7 @@ function routeNeedsImageStudioRuntimeConfig(routePath) {
     "/api/regenerate-analysis",
     "/api/translate",
     "/api/plans",
+    "/api/designer/",
     "/api/generate",
     "/api/score",
   ].some((pattern) => routePath.startsWith(pattern));
@@ -2523,6 +2524,7 @@ async function normalizeAnalyzeModelBeforeRequest() {
 const IMAGE_STUDIO_LONG_RUNNING_ROUTES = new Set([
   "/api/designer/run",
   "/api/designer/compose",
+  "/api/designer/generate-stream",
   "/api/designer/regenerate-slot",
   "/api/generate",
   "/api/regenerate",
@@ -2540,12 +2542,32 @@ function getImageStudioLongRunningFetch() {
       keepAliveTimeout: 10_000,
       keepAliveMaxTimeout: 10_000,
     });
-    imageStudioLongRunningFetchPair = { fetch: undici.fetch, agent };
+    imageStudioLongRunningFetchPair = { fetch: undici.fetch, agent, FormData: undici.FormData };
   } catch (err) {
     console.error("[Main] Failed to init undici long-running fetch:", err?.message || err);
     imageStudioLongRunningFetchPair = null;
   }
   return imageStudioLongRunningFetchPair;
+}
+
+function isNativeFormDataBody(body) {
+  return typeof FormData !== "undefined" && body instanceof FormData;
+}
+
+function createUndiciFormDataBody(body, UndiciFormData) {
+  if (!isNativeFormDataBody(body) || typeof UndiciFormData !== "function") {
+    return body;
+  }
+
+  const formData = new UndiciFormData();
+  for (const [key, value] of body.entries()) {
+    if (typeof value === "string") {
+      formData.append(key, value);
+    } else {
+      formData.append(key, value, value?.name || "file");
+    }
+  }
+  return formData;
 }
 
 async function imageStudioFetch(routePath, init = {}) {
@@ -2565,6 +2587,7 @@ async function imageStudioFetch(routePath, init = {}) {
       return longRunningFetch.fetch(`${status.url}${routePath}`, {
         ...init,
         headers,
+        body: createUndiciFormDataBody(init.body, longRunningFetch.FormData),
         dispatcher: longRunningFetch.agent,
       });
     }
@@ -4379,6 +4402,7 @@ ipcMain.handle("image-studio:designer-generate-start", async (event, payload) =>
     };
 
     try {
+      await syncImageStudioRuntimeConfig("/api/designer/generate-stream");
       const status = await ensureImageStudioService();
       const projectInfo = getImageStudioProjectInfo();
       const headers = {
