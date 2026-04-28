@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Card, Checkbox, Col, Drawer, Empty, Image, Input, Modal, Radio, Row, Segmented, Space, Spin, Statistic, Table, Tag, Tooltip, Typography, message } from "antd";
+import { Alert, Button, Card, Checkbox, Col, Drawer, Empty, Image, Input, Modal, Radio, Row, Segmented, Space, Spin, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
   AppstoreOutlined,
@@ -3181,8 +3181,6 @@ export default function ProductList() {
     ) : (
       <Alert type="info" showIcon message="暂无 SKU 明细" />
     );
-    void skuTab; // 保留
-
     // ----- 全部字段 Tab -----
     const groups: { title: string; fields: Array<{ label: string; value: any; accent?: boolean }> }[] = [
       {
@@ -3300,8 +3298,6 @@ export default function ProductList() {
         })}
       </div>
     );
-    void allFieldsTab; // 保留
-
     // ----- 标签 Tab -----
     const labelGroups: { title: string; items: any }[] = [
       { title: "SKC 标签", items: raw.skcLabels },
@@ -3331,7 +3327,13 @@ export default function ProductList() {
     ) : (
       <Alert type="info" showIcon message="暂无标签数据" />
     );
-    void labelTab; // 保留
+    const drawerItems = [
+      { key: "overview", label: "概览", children: overviewTab },
+      { key: "flux", label: "流量驾驶舱", children: fluxTab },
+      { key: "sku", label: "SKU", children: skuTab },
+      { key: "fields", label: "全部字段", children: allFieldsTab },
+      { key: "labels", label: "标签", children: labelTab },
+    ];
 
     return (
       <Drawer
@@ -3353,7 +3355,12 @@ export default function ProductList() {
         )}
         destroyOnClose
       >
-        {drawerTab === "flux" ? fluxTab : overviewTab}
+        <Tabs
+          activeKey={drawerTab}
+          onChange={setDrawerTab}
+          items={drawerItems}
+          destroyInactiveTabPane
+        />
       </Drawer>
     );
   };

@@ -41,6 +41,7 @@ def get_source_candidates() -> list[Path]:
         Path(env_candidate) if env_candidate else None,
         ROOT / "auto-image-gen-dev",
         ROOT.parent / "auto-image-gen-dev",
+        Path.home() / "auto-image-gen-dev",
         Path.cwd() / "auto-image-gen-dev",
         Path.cwd().parent / "auto-image-gen-dev",
     ]

@@ -347,7 +347,7 @@ async function runUiChecks(page) {
 
   await clickMenuItem(page, "上品管理");
   await waitForHashContains(page, "/create-product");
-  await waitForVisibleText(page, "上传商品表格");
+  await waitForVisibleText(page, "上品流程模式");
   console.log("[ok] 上品管理页面");
 
   await clickMenuItem(page, "数据采集");
