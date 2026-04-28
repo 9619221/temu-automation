@@ -20,8 +20,18 @@ import crypto from "crypto";
 // 鏍镐环鍒楄〃椤碉紙agentseller 浠ｈ繍钀ュ悗鍙帮級
 const PRICE_REVIEW_LIST_URL = "https://agentseller.temu.com/newon/product-select";
 
-// 銆屼环鏍肩敵鎶ヤ腑銆嶇瓫閫夊弬鏁帮紙鍙兘鏄?query string 鎴?tab 鍒囨崲锛岃繍琛屾椂瀵圭収锛?
-const REVIEW_STATUS_FILTER = "浠锋牸鐢虫姤涓?";
+// “价格申报中”筛选参数，兼容页面 tab 或状态文案调整。
+const REVIEW_STATUS_FILTER = "价格申报中";
+
+function getReviewStatusKeywords(statusText = REVIEW_STATUS_FILTER) {
+  return Array.from(new Set([
+    statusText,
+    "价格申报中",
+    "价格申报",
+    "价格待确认",
+    "核价",
+  ].filter(Boolean)));
+}
 
 async function ensurePriceReviewPageReady(page) {
   if (!page || page.isClosed()) {
@@ -35,9 +45,10 @@ async function ensurePriceReviewPageReady(page) {
   const currentUrl = page.url() || "";
   const pageText = await page.evaluate(() => (document.body?.innerText || "").trim().slice(0, 800)).catch(() => "");
   const authBlocked = /\/auth\/authentication|\/main\/authentication|\/main\/entry/i.test(currentUrl)
-    || (pageText.includes("鍟嗗涓績") && pageText.includes("涓浗鍦板尯"))
-    || pageText.includes("纭鎺堟潈")
-    || pageText.includes("鎺堟潈鐧诲綍");
+    || (pageText.includes("商家中心") && pageText.includes("中国地区"))
+    || pageText.includes("确认授权")
+    || pageText.includes("授权登录")
+    || pageText.includes("同意并登录");
 
   if (authBlocked) {
     throw new Error("Temu seller auth required. Complete auth/region selection in the opened browser, then retry scan. Page: " + (currentUrl || "unknown"));
@@ -58,7 +69,7 @@ export async function scanPriceReview(opts = {}) {
   // 1. 纭繚娴忚鍣ㄤ笂涓嬫枃瀛樺湪
   const context = browserState.context;
   if (!context) {
-    throw new Error("娴忚鍣ㄦ湭鍚姩锛岃鍏堢櫥褰?Temu 鍚庡彴");
+    throw new Error("浏览器未启动，请先登录 Temu 后台");
   }
 
   onProgress("open_page", { url: PRICE_REVIEW_LIST_URL });
@@ -190,22 +201,21 @@ async function applyReviewStatusFilter(page, statusText) {
   //   innerText 褰㈠銆屽叏閮?1234銆嶃€屼环鏍煎緟纭 56銆嶃€屽緟涓婃灦 78銆?..
   // 鎴戜滑瑕佺偣銆屼环鏍煎緟纭銆嶈繖涓?tab
   await page.waitForTimeout(800);
-  const clicked = await page.evaluate(() => {
+  const clicked = await page.evaluate((keywords) => {
     const tabs = document.querySelectorAll('[class*="TAB_tabItem"]');
     for (const t of tabs) {
       const txt = (t.textContent || "").trim();
-      // match review-status tabs only
-      if (!txt.includes("??") || (!txt.includes("??") && !txt.includes("??"))) continue;
+      if (!keywords.some((keyword) => txt.includes(keyword))) continue;
       t.click();
       return txt;
     }
     return null;
-  }).catch(() => null);
+  }, getReviewStatusKeywords(statusText)).catch(() => null);
   if (clicked) {
-    logSilent(`[price-review] 鍒囧埌绛涢€?tab: ${clicked}`);
+    logSilent(`[price-review] switched to status tab: ${clicked}`);
     await page.waitForTimeout(1500);
   } else {
-    logSilent(`[price-review] 鏈壘鍒般€?{statusText}銆峵ab锛岀户缁敤榛樿瑙嗗浘`);
+    logSilent(`[price-review] status tab not found: ${statusText}; continuing with current view`);
   }
 }
 
@@ -214,25 +224,30 @@ async function scrapeCurrentPage(page) {
   await page.waitForTimeout(1500);
   await page.waitForSelector('table tbody tr', { timeout: 15_000 }).catch(() => {});
 
-  const rows = await page.evaluate(() => {
+  const rows = await page.evaluate((statusKeywords) => {
     const out = [];
     const firstNum = (txt) => {
       const m = String(txt || "").match(/(\d{6,})/);
       return m ? m[1] : "";
     };
-    const parseMoney = (txt, key) => {
-      // 濡?"鍘熺敵鎶ヤ环锛毬?5.60"
-      const re = new RegExp(key + "[锛?]\\s*楼?\\s*([0-9]+(?:\\.[0-9]+)?)");
-      const m = String(txt || "").match(re);
-      return m ? Number(m[1]) : null;
+    const escapeRegExp = (value) => String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const parseMoney = (txt, keys) => {
+      const keyList = Array.isArray(keys) ? keys : [keys];
+      const text = String(txt || "");
+      for (const key of keyList) {
+        const re = new RegExp(`${escapeRegExp(key)}\\s*[：:]\\s*(?:￥|¥|RMB|CNY)?\\s*([+-]?[0-9]+(?:\\.[0-9]+)?)`);
+        const m = text.match(re);
+        if (m) return Number(m[1]);
+      }
+      return null;
     };
     const parsePctKey = (txt, key) => {
-      const re = new RegExp(key + "[锛?]\\s*([0-9]+(?:\\.[0-9]+)?)\\s*%");
+      const re = new RegExp(`${escapeRegExp(key)}\\s*[：:]\\s*([+-]?[0-9]+(?:\\.[0-9]+)?)\\s*%`);
       const m = String(txt || "").match(re);
       return m ? Number(m[1]) : null;
     };
     const parseIntKey = (txt, key) => {
-      const re = new RegExp(key + "[锛?]\\s*(\\d+)");
+      const re = new RegExp(`${escapeRegExp(key)}\\s*[：:]\\s*(\\d+)`);
       const m = String(txt || "").match(re);
       return m ? Number(m[1]) : null;
     };
@@ -246,27 +261,27 @@ async function scrapeCurrentPage(page) {
       const td1 = tds[1]; // product info
       const td4 = tds[4]; // review status
       const td5 = tds[5]; // sku info
-      const td6 = tds[6]; // 浠锋牸淇℃伅
-      const td7 = tds[7]; // 鎿嶄綔 / 鏀逛环娆℃暟
+      const td6 = tds[6]; // 价格信息
+      const td7 = tds[7]; // 操作 / 改价次数
 
       const td4Text = (td4?.innerText || "").replace(/\s+/g, " ").trim();
       // keep only price-review rows
-      if (!td4Text.includes("??") || (!td4Text.includes("??") && !td4Text.includes("??"))) return;
+      if (statusKeywords.length && !statusKeywords.some((keyword) => td4Text.includes(keyword))) return;
 
       const td1Text = (td1?.innerText || "").replace(/\s+/g, " ").trim();
       const td6Text = (td6?.innerText || "").replace(/\s+/g, " ").trim();
       const td7Text = (td7?.innerText || "").replace(/\s+/g, " ").trim();
 
       // SPU
-      const spuMatch = td1Text.match(/SPU[锛?]\s*(\d+)/);
+      const spuMatch = td1Text.match(/SPU\s*[：:]?\s*(\d+)/i);
       const spuId = spuMatch ? spuMatch[1] : firstNum(td1Text);
 
       // 涓诲浘
       const img = td1?.querySelector("img");
       const mainImage = img?.getAttribute("src") || img?.getAttribute("data-src") || "";
 
-      // 鏍囬锛氬幓鎺?SPU 娈佃惤
-      let title = td1Text.replace(/SPU[锛?]\s*\d+/g, "").replace(/楼\s*[0-9.]+/g, "").trim();
+      // 标题：去掉 SPU 片段。
+      let title = td1Text.replace(/SPU\s*[：:]?\s*\d+/ig, "").replace(/¥\s*[0-9.]+/g, "").trim();
       if (title.length > 120) title = title.slice(0, 120);
 
       const skcId = firstNum(td4Text);
@@ -283,18 +298,18 @@ async function scrapeCurrentPage(page) {
         title,
         mainImage,
         skuSpec: "",
-        originalPrice: parseMoney(td6Text, "鍘熺敵鎶ヤ环"),
-        sellerCurrentPrice: parseMoney(td6Text, "鍗栧褰撳墠鎶ヤ环"),
-        referencePrice: parseMoney(td6Text, "鍙傝€冪敵鎶ヤ环"),
-        priceDiff: parseMoney(td6Text, "浠峰樊"),
-        priceDiffPct: null,
+        originalPrice: parseMoney(td6Text, ["原申报价", "原申报价格"]),
+        sellerCurrentPrice: parseMoney(td6Text, ["卖家当前报价", "卖家当前申报价", "当前报价"]),
+        referencePrice: parseMoney(td6Text, ["参考申报价", "参考价格"]),
+        priceDiff: parseMoney(td6Text, "价差"),
+        priceDiffPct: parsePctKey(td6Text, "价差"),
         reviewStatus: td4Text || td7Text || "",
-        changeCount: parseIntKey(td7Text, "鏀逛环娆℃暟") || 0,
+        changeCount: parseIntKey(td7Text, "改价次数") || 0,
         detailUrl,
       });
     });
     return out;
-  }).catch(() => []);
+  }, getReviewStatusKeywords(REVIEW_STATUS_FILTER)).catch(() => []);
 
   return rows.filter((r) => r.skuId);
 }

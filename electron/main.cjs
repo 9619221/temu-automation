@@ -8,6 +8,7 @@ const crypto = require("crypto");
 const XLSX = require("xlsx");
 const { autoUpdater } = require("electron-updater");
 const { getDefaultCredentials } = require("./default-credentials.cjs");
+const { closeErp, initializeErp, registerErpIpcHandlers } = require("./erp/ipc.cjs");
 
 if (process.env.APP_USER_DATA) {
   app.setPath("userData", process.env.APP_USER_DATA);
@@ -1322,6 +1323,13 @@ function getAutoPricingTask(taskId) {
     return state.tasks.find((task) => task.taskId === taskId) || null;
   }
   return state.tasks.find((task) => task.taskId === state.activeTaskId) || state.tasks[0] || null;
+}
+
+function isAutoPricingTaskActive(task) {
+  return Boolean(
+    task
+    && (task.running || ["running", "pausing", "paused"].includes(task.status))
+  );
 }
 
 function listAutoPricingTasks() {
@@ -3238,6 +3246,15 @@ function migrateScopedStoreFilesForAccountIdChange() {
 }
 
 app.whenReady().then(async () => {
+  try {
+    const erpInit = initializeErp({ userDataDir: app.getPath("userData") });
+    const applied = (erpInit.migrations || []).filter((item) => item.status === "success").length;
+    const skipped = (erpInit.migrations || []).filter((item) => item.status === "skipped").length;
+    console.log(`[ERP] SQLite initialized: ${erpInit.dbPath} (applied=${applied}, skipped=${skipped})`);
+  } catch (error) {
+    console.error("[ERP] SQLite initialization failed:", error?.message || error);
+  }
+
   // 启动时先做 scoped 数据 id 迁移，避免账号重建后旧数据孤立
   migrateScopedStoreFilesForAccountIdChange();
 
@@ -3271,10 +3288,12 @@ app.whenReady().then(async () => {
     }, 5000);
   }
 });
-app.on("window-all-closed", () => { stopWorker(); stopImageStudioService(); app.quit(); });
+app.on("window-all-closed", () => { closeErp(); stopWorker(); stopImageStudioService(); app.quit(); });
 app.on("activate", () => { if (!mainWindow) createWindow(); });
 
 // ============ IPC ============
+
+registerErpIpcHandlers(ipcMain);
 
 ipcMain.handle("get-app-path", () => app.getPath("userData"));
 
@@ -3343,6 +3362,20 @@ ipcMain.handle("automation:filter-product-table", async (_e, csvPath) => {
 });
 
 ipcMain.handle("automation:generate-pack-images", async (_e, params) => {
+  const existingTask = getAutoPricingTask(autoPricingCurrentTaskId);
+  if (isAutoPricingTaskActive(existingTask)) {
+    const syncedTask = await syncAutoPricingTaskFromWorker(existingTask.taskId, { markInterruptedOnIdle: true }).catch(() => null);
+    const activeTask = syncedTask || getAutoPricingTask(existingTask.taskId) || existingTask;
+    if (isAutoPricingTaskActive(activeTask)) {
+      return {
+        accepted: false,
+        taskId: activeTask.taskId,
+        message: "已有新上品流程正在执行，请先等待完成或暂停后继续查看当前任务。",
+        task: getAutoPricingProgressPayload(activeTask),
+      };
+    }
+  }
+
   const now = new Date().toLocaleString("zh-CN");
   const taskId = typeof params?.taskId === "string" && params.taskId.trim()
     ? params.taskId.trim()
@@ -3570,7 +3603,6 @@ ipcMain.handle("automation:auto-pricing", async (_e, params) => {
 });
 
 ipcMain.handle("automation:pause-pricing", async (_e, taskId) => {
-  await sendCmd("pause_pricing", { taskId });
   const activeTask = getAutoPricingTask(taskId || autoPricingCurrentTaskId);
   if (activeTask) {
     const nextTask = upsertAutoPricingTask({
@@ -3582,13 +3614,16 @@ ipcMain.handle("automation:pause-pricing", async (_e, taskId) => {
       updatedAt: new Date().toLocaleString("zh-CN"),
     });
     startAutoPricingTaskSync();
+    sendCmd("pause_pricing", { taskId: nextTask.taskId }).catch((err) => {
+      console.error(`[Main] pause_pricing failed: ${err?.message || err}`);
+    });
     return getAutoPricingProgressPayload(nextTask);
   }
+  await sendCmd("pause_pricing", { taskId });
   return getAutoPricingProgressPayload(getAutoPricingTask(taskId || autoPricingCurrentTaskId));
 });
 
 ipcMain.handle("automation:resume-pricing", async (_e, taskId) => {
-  await sendCmd("resume_pricing", { taskId });
   const activeTask = getAutoPricingTask(taskId || autoPricingCurrentTaskId);
   if (activeTask) {
     const nextTask = upsertAutoPricingTask({
@@ -3600,8 +3635,12 @@ ipcMain.handle("automation:resume-pricing", async (_e, taskId) => {
       updatedAt: new Date().toLocaleString("zh-CN"),
     });
     startAutoPricingTaskSync();
+    sendCmd("resume_pricing", { taskId: nextTask.taskId }).catch((err) => {
+      console.error(`[Main] resume_pricing failed: ${err?.message || err}`);
+    });
     return getAutoPricingProgressPayload(nextTask);
   }
+  await sendCmd("resume_pricing", { taskId });
   startAutoPricingTaskSync();
   return getAutoPricingProgressPayload(getAutoPricingTask(taskId || autoPricingCurrentTaskId));
 });
@@ -4029,10 +4068,13 @@ function readPriceReviewSettings() {
     return raw && typeof raw === "object" ? raw : {};
   } catch { return {}; }
 }
+function isPriceReviewAutoScanEnabled(settings) {
+  return settings?.priceReviewAutoScanEnabled === true;
+}
 async function tickPriceReviewAutoScan() {
   if (_priceReviewScanning) return;
   const s = readPriceReviewSettings();
-  if (s.priceReviewAutoScanEnabled === false) return;
+  if (!isPriceReviewAutoScanEnabled(s)) return;
   _priceReviewScanning = true;
   try {
     const marginRatio = typeof s.priceReviewMarginRatio === "number" ? s.priceReviewMarginRatio : 1.75;
@@ -4051,6 +4093,10 @@ async function tickPriceReviewAutoScan() {
 function startPriceReviewScheduler() {
   if (_priceReviewTimer) return;
   const s = readPriceReviewSettings();
+  if (!isPriceReviewAutoScanEnabled(s)) {
+    console.log("[price-review] scheduler disabled");
+    return;
+  }
   const minutes = typeof s.priceReviewScanIntervalMinutes === "number" && s.priceReviewScanIntervalMinutes >= 5
     ? s.priceReviewScanIntervalMinutes : 30;
   _priceReviewTimer = setInterval(tickPriceReviewAutoScan, minutes * 60 * 1000);
@@ -4629,6 +4675,86 @@ ipcMain.handle("app:open-log-directory", async () => {
 });
 
 // ============ 文件存储 IPC ============
+
+function parseWorkflowPackLogLine(line, index) {
+  const raw = String(line || "").trim();
+  if (!raw) return null;
+  const match = raw.match(/^\[([^\]]+)\]\s+\[([^\]]+)\]\s+([\s\S]*)$/);
+  if (!match) return null;
+  const isoTime = match[1] || "";
+  const taskId = match[2] || "workflow-pack";
+  const body = match[3] || "";
+  if (!body.startsWith("DIAG ") && !body.startsWith("control ")) return null;
+  const timestamp = Number.isFinite(Date.parse(isoTime)) ? Date.parse(isoTime) : Date.now();
+  const level = /row_exception|task_failed|failed|失败|error|exception/i.test(body)
+    ? "error"
+    : (/warning|warn|retry|pause|paused|暂停|重试/i.test(body) ? "warn" : "info");
+
+  let message = body;
+  let detail = raw;
+  const diagMatch = body.match(/^DIAG\s+(\S+)\s+([\s\S]+)$/);
+  if (diagMatch) {
+    const label = diagMatch[1];
+    const jsonText = diagMatch[2];
+    try {
+      const payload = JSON.parse(jsonText);
+      if (label === "task_start") {
+        message = `新上品任务开始：${payload.taskId || taskId}，共 ${payload.total ?? "-"} 条，表格 ${payload.csvPath || "-"}`;
+      } else if (label === "row_result" || label === "row_exception") {
+        const status = payload.success ? "成功" : "失败";
+        message = `新上品第 ${payload.rowNumber || "-"} 行${status}：${payload.stage || "-"}，${payload.message || ""}`;
+      } else if (label === "task_finish") {
+        message = `新上品任务完成：成功 ${payload.successCount ?? 0}，部分 ${payload.partialCount ?? 0}，失败 ${payload.failCount ?? 0}`;
+      } else if (label === "task_failed") {
+        message = `新上品任务失败：${payload.stage || "-"}，${payload.message || ""}`;
+      } else {
+        message = `新上品诊断 ${label}：${jsonText}`;
+      }
+      detail = JSON.stringify({ label, taskId, ...payload }, null, 2);
+    } catch {
+      message = `新上品诊断 ${label}：${jsonText}`;
+    }
+  } else if (body.startsWith("control pause_requested")) {
+    message = `新上品暂停请求：${body.replace(/^control\s+/, "")}`;
+  } else if (body.startsWith("control resume_requested")) {
+    message = `新上品继续请求：${body.replace(/^control\s+/, "")}`;
+  }
+
+  return {
+    id: `workflow-pack-${timestamp}-${index}`,
+    timestamp,
+    level,
+    source: "workflow-pack",
+    message,
+    detail,
+    taskId,
+  };
+}
+
+ipcMain.handle("app:read-workflow-pack-logs", async (_e, params = {}) => {
+  const limit = Math.max(1, Math.min(Number(params?.limit) || 500, 2000));
+  const logFile = path.join(app.getPath("userData"), "workflow-pack.log");
+  if (!fs.existsSync(logFile)) {
+    return { logFile, entries: [] };
+  }
+  const text = await fsPromises.readFile(logFile, "utf8").catch(() => "");
+  const lines = text.split(/\r?\n/).filter((line) => line.trim());
+  const entries = [];
+  for (let index = lines.length - 1; index >= 0 && entries.length < limit; index -= 1) {
+    const entry = parseWorkflowPackLogLine(lines[index], index);
+    if (entry) entries.push(entry);
+  }
+  return {
+    logFile,
+    entries: entries.reverse(),
+  };
+});
+
+ipcMain.handle("app:clear-workflow-pack-logs", async () => {
+  const logFile = path.join(app.getPath("userData"), "workflow-pack.log");
+  await fsPromises.writeFile(logFile, "", "utf8").catch(() => {});
+  return { logFile, cleared: true };
+});
 
 function getStoreFilePath(key) {
   const normalizedKey = normalizeStoreKey(key);

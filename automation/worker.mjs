@@ -1320,6 +1320,124 @@ function sanitizeLoginPhone(value = "") {
   return digits || raw;
 }
 
+function maskLoginPhone(value = "") {
+  const phone = sanitizeLoginPhone(value);
+  if (!phone) return "";
+  if (/^\d{11}$/.test(phone)) return `${phone.slice(0, 3)}****${phone.slice(-4)}`;
+  if (phone.length <= 4) return "****";
+  return `${phone.slice(0, 2)}****${phone.slice(-2)}`;
+}
+
+function getCredentialIdentity(credentials = {}, params = {}) {
+  const accountId = normalizeRequestCredential(credentials?.accountId || params?.accountId).trim();
+  const phone = sanitizeLoginPhone(credentials?.phone || params?.phone || "");
+  return {
+    accountId,
+    phone,
+    phoneMasked: maskLoginPhone(phone),
+    key: accountId || phone || "",
+  };
+}
+
+function buildWorkerAccountDiagnostic(credentials = {}, params = {}) {
+  const identity = getCredentialIdentity(credentials, params);
+  return {
+    accountId: workflowPackText(identity.accountId || ""),
+    phone: workflowPackText(identity.phoneMasked || ""),
+    browserAccountId: workflowPackText(browserState.lastAccountId || ""),
+    stickyAccountId: workflowPackText(stickyCredentialAccountId || ""),
+  };
+}
+
+const BROWSER_ACCOUNT_ACTIONS = new Set([
+  "launch",
+  "login",
+  "capture_api",
+  "discover_pages",
+  "deep_probe",
+  "sidebar_nav",
+  "scrape_all",
+  "create_product_api",
+  "batch_create_api",
+  "workflow_pack_images",
+  "auto_pricing",
+  "probe_create_flow",
+  "capture_add_payload",
+  "test_api",
+  "eval",
+  "yundu_list_overall",
+  "yundu_sniff_discover",
+  "yundu_raw",
+  "yundu_site_count",
+  "yundu_high_price_limit",
+  "yundu_quality_metrics",
+  "yundu_activity_list",
+  "yundu_activity_enrolled",
+  "yundu_activity_match",
+  "yundu_activity_submit",
+  "yundu_auto_enroll",
+  "price_review_scan",
+  "competitor_scrape_reviews",
+  "open_temu_login",
+  "open_temu_search",
+  "competitor_ext_fetch_reviews",
+  "competitor_ext_fetch_product",
+  "competitor_ext_search_results",
+]);
+
+let activeBrowserAccountAction = null;
+
+function isBrowserAccountAction(action = "") {
+  const name = String(action || "");
+  return BROWSER_ACCOUNT_ACTIONS.has(name) || name.startsWith("scrape_");
+}
+
+function describeBrowserAccountAction(action = {}) {
+  const account = action.accountId || action.phoneMasked || "未知账号";
+  const task = action.taskId ? ` task=${action.taskId}` : "";
+  return `${action.action || "任务"}${task} 账号=${account}`;
+}
+
+async function withBrowserAccountActionGuard(cmd, fn) {
+  const action = String(cmd?.action || "unknown");
+  if (!isBrowserAccountAction(action)) {
+    return await fn();
+  }
+
+  const params = cmd?.params || {};
+  const identity = getCredentialIdentity(params?.credentials || {}, params);
+  const lease = {
+    action,
+    accountId: identity.accountId,
+    phoneMasked: identity.phoneMasked,
+    taskId: normalizeRequestCredential(params?.taskId || ""),
+    startedAt: Date.now(),
+  };
+
+  if (activeBrowserAccountAction) {
+    const active = activeBrowserAccountAction;
+    const seconds = Math.max(1, Math.round((Date.now() - active.startedAt) / 1000));
+    const error = new Error(
+      `当前已有卖家账号任务运行中（${describeBrowserAccountAction(active)}，已运行 ${seconds}s）。` +
+      `为避免多账户互相抢登录，已拒绝新的 ${action} 请求。请等待当前任务完成后再切换账号或登录。`
+    );
+    error.code = "ACCOUNT_SESSION_BUSY";
+    console.error(`[account-lock] rejected action=${action} account=${identity.accountId || identity.phoneMasked || "unknown"}; active=${describeBrowserAccountAction(active)}`);
+    throw error;
+  }
+
+  activeBrowserAccountAction = lease;
+  console.error(`[account-lock] acquired ${describeBrowserAccountAction(lease)}`);
+  try {
+    return await fn();
+  } finally {
+    if (activeBrowserAccountAction === lease) {
+      activeBrowserAccountAction = null;
+    }
+    console.error(`[account-lock] released ${describeBrowserAccountAction(lease)}`);
+  }
+}
+
 function normalizeFilledLoginPhone(value = "") {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -8399,6 +8517,19 @@ async function handleRequest(body) {
       return await batchCreateViaAPI(params);
     }
     case "workflow_pack_images": {
+      if (
+        currentProgress.flowType === "workflow"
+        && (currentProgress.running || ["running", "pausing", "paused"].includes(currentProgress.status))
+        && (!params?.taskId || params.taskId !== currentProgress.taskId)
+      ) {
+        return {
+          success: false,
+          accepted: false,
+          taskId: currentProgress.taskId,
+          task: getProgressSnapshot(currentProgress.taskId),
+          message: "已有新上品流程正在执行，请勿重复启动。",
+        };
+      }
       return await generateWorkflowPackImages(params);
     }
     case "auto_pricing": {
@@ -8570,6 +8701,9 @@ async function handleRequest(body) {
         status: "pausing",
         message: "暂停请求已发送，当前商品处理完后停止。",
       });
+      if (currentProgress.flowType === "workflow") {
+        logWorkflowPack(currentProgress.taskId, `control pause_requested completed=${currentProgress.completed}/${currentProgress.total} step="${currentProgress.step}"`);
+      }
       console.error("[Worker] Pricing PAUSED");
       return { status: "pausing", taskId: currentProgress.taskId };
     case "resume_pricing":
@@ -8584,6 +8718,9 @@ async function handleRequest(body) {
         step: "继续执行",
         message: "批量上品任务已恢复。",
       });
+      if (currentProgress.flowType === "workflow") {
+        logWorkflowPack(currentProgress.taskId, `control resume_requested completed=${currentProgress.completed}/${currentProgress.total} step="${currentProgress.step}"`);
+      }
       console.error("[Worker] Pricing RESUMED");
       return { status: "resumed", taskId: currentProgress.taskId };
     case "set_yunqi_token": {
@@ -10801,6 +10938,147 @@ function logWorkflowPack(taskId, message) {
   }
 }
 
+function workflowPackText(value, maxLength = 240) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function workflowPackFileInfo(filePath) {
+  const normalized = String(filePath || "").trim();
+  if (!normalized) return null;
+  try {
+    const stat = fs.existsSync(normalized) ? fs.statSync(normalized) : null;
+    return {
+      path: normalized,
+      exists: Boolean(stat),
+      size: stat?.size || 0,
+    };
+  } catch {
+    return { path: normalized, exists: false, size: 0 };
+  }
+}
+
+function readWorkflowPackageVersion() {
+  try {
+    const packageJsonPath = path.join(projectRootDir, "package.json");
+    const parsed = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+    return workflowPackText(parsed?.version || "");
+  } catch {
+    return "";
+  }
+}
+
+function logWorkflowPackDiagnostic(taskId, label, payload = {}) {
+  try {
+    logWorkflowPack(taskId, `DIAG ${label} ${JSON.stringify(payload)}`);
+  } catch (error) {
+    logWorkflowPack(taskId, `DIAG ${label} failed_to_serialize=${workflowPackText(error?.message || error)}`);
+  }
+}
+
+function summarizeWorkflowDebugFile(filePath) {
+  const info = workflowPackFileInfo(filePath);
+  if (!info?.exists || info.size > 2_000_000) return info;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(info.path, "utf8"));
+    const response = parsed?.response || {};
+    const responseBody = response?.body || response?.data || response?.raw || response;
+    return {
+      ...info,
+      draftId: workflowPackText(parsed?.draftId || responseBody?.draftId || responseBody?.productDraftId || ""),
+      responseSuccess: response?.success ?? responseBody?.success ?? null,
+      responseCode: workflowPackText(response?.errorCode || response?.code || responseBody?.errorCode || responseBody?.code || ""),
+      responseMessage: workflowPackText(response?.errorMsg || response?.message || response?.error || responseBody?.errorMsg || responseBody?.message || responseBody?.error || ""),
+      verificationReason: workflowPackText(parsed?.verification?.reason || ""),
+      verificationSummary: parsed?.verification?.summary || null,
+    };
+  } catch (error) {
+    return { ...info, parseError: workflowPackText(error?.message || error) };
+  }
+}
+
+function summarizeWorkflowImageForLog(image) {
+  if (!image) return null;
+  const localPath = String(image.localPath || "").trim();
+  return {
+    type: workflowPackText(image.imageType || image.label || ""),
+    role: workflowPackText(image.role || ""),
+    uploadEligible: image.uploadEligible !== false,
+    skipped: Boolean(image.skipped || image.uploadSkipped),
+    hasLocalFile: Boolean(localPath && fs.existsSync(localPath)),
+    hasKwcdn: Boolean(image.kwcdnUrl),
+    uploadSuccess: image.uploadSuccess ?? null,
+    uploadError: workflowPackText(image.uploadError || image.error || ""),
+    warnings: Array.isArray(image.warnings) ? image.warnings.map((item) => workflowPackText(item, 120)).slice(0, 3) : [],
+    width: image.uploadedWidth || null,
+    height: image.uploadedHeight || null,
+  };
+}
+
+function getWorkflowRowFailureStage(rowResult) {
+  if (rowResult?.success) return "success";
+  if (rowResult?.draftStep) return `draft:${rowResult.draftStep}`;
+  if (Number(rowResult?.uploadFailCount || 0) > 0) return "material_upload";
+  if (Number(rowResult?.successCount || 0) < Number(rowResult?.requiredCount || 0)) return "image_prepare";
+  return workflowPackText(rowResult?.errorCategory || "unknown");
+}
+
+function buildWorkflowRowDiagnostic(rowResult, extra = {}) {
+  const images = Array.isArray(rowResult?.images) ? rowResult.images : [];
+  const missingKwcdn = images
+    .filter((image) => image && image.uploadEligible !== false && !image.skipped && !image.kwcdnUrl)
+    .map((image) => workflowPackText(image.imageType || image.label || "unknown"))
+    .slice(0, 20);
+  return {
+    rowNumber: rowResult?.rowNumber || extra.rowNumber || "",
+    index: rowResult?.index ?? extra.index ?? "",
+    account: extra.account || undefined,
+    product: workflowPackText(rowResult?.name || extra.productName || "", 160),
+    success: Boolean(rowResult?.success),
+    stage: getWorkflowRowFailureStage(rowResult),
+    message: workflowPackText(rowResult?.message || extra.message || "", 360),
+    errorCategory: workflowPackText(rowResult?.errorCategory || ""),
+    counts: {
+      prepared: Number(rowResult?.successCount || 0),
+      required: Number(rowResult?.requiredCount || 0),
+      uploadable: Number(rowResult?.uploadableCount || 0),
+      uploaded: Number(rowResult?.uploadSuccessCount || 0),
+      uploadFailed: Number(rowResult?.uploadFailCount || 0),
+      skipped: Number(rowResult?.skippedCount || 0),
+      uploadSkipped: Number(rowResult?.uploadSkippedCount || 0),
+      total: Number(rowResult?.total || 0),
+    },
+    original: {
+      eligible: Boolean(rowResult?.originalUploadEligible),
+      rejectedCount: Array.isArray(rowResult?.rejectedOriginals) ? rowResult.rejectedOriginals.length : 0,
+      filterReasons: Array.isArray(rowResult?.originalFilter?.reasons)
+        ? rowResult.originalFilter.reasons.map((item) => workflowPackText(item, 160)).slice(0, 5)
+        : [],
+    },
+    draft: {
+      saved: Boolean(rowResult?.draftSaved),
+      step: workflowPackText(rowResult?.draftStep || ""),
+      draftId: workflowPackText(rowResult?.draftId || ""),
+      productId: workflowPackText(rowResult?.productId || ""),
+      skcId: workflowPackText(rowResult?.skcId || ""),
+      skuId: workflowPackText(rowResult?.skuId || ""),
+      errorCode: workflowPackText(rowResult?.errorCode || ""),
+      verificationReason: workflowPackText(rowResult?.verificationReason || ""),
+      debug: summarizeWorkflowDebugFile(rowResult?.debugFile),
+    },
+    material: {
+      missingKwcdn,
+      images: images.map((image) => summarizeWorkflowImageForLog(image)).filter(Boolean).slice(0, 16),
+    },
+    paths: {
+      resultJson: extra.resultJsonPath || "",
+      kwcdnTable: extra.kwcdnTablePath || "",
+      outputDir: extra.outputDir || "",
+    },
+    durationSec: extra.durationMs ? Number((extra.durationMs / 1000).toFixed(1)) : undefined,
+  };
+}
+
 function buildWorkflowWhitePackPlans(productTitle, packCounts) {
   return packCounts.map((count) => {
     const imageType = getWorkflowPackImageType(count);
@@ -11646,8 +11924,10 @@ async function generateWorkflowPackImages(params = {}) {
   const taskId = typeof params?.taskId === "string" && params.taskId.trim()
     ? params.taskId.trim()
     : `workflow_pack_${Date.now()}`;
+  const accountDiagnostic = buildWorkerAccountDiagnostic(params?.credentials || {}, params);
   const tmpDir = getTmpDir("workflow-pack-tmp");
   const outputDir = path.join(getDebugDir(), "workflow-pack-images", taskId);
+  const resultJsonPath = path.join(outputDir, "result.json");
   fs.mkdirSync(tmpDir, { recursive: true });
   fs.mkdirSync(outputDir, { recursive: true });
 
@@ -11655,6 +11935,28 @@ async function generateWorkflowPackImages(params = {}) {
   const results = [];
   let kwcdnTablePath = "";
   const shouldCreateDrafts = Boolean(params.createDrafts || params.workflowCreateDrafts);
+  logWorkflowPackDiagnostic(taskId, "task_start", {
+    taskId,
+    version: readWorkflowPackageVersion(),
+    platform: process.platform,
+    arch: process.arch,
+    node: process.version,
+    flowType: "workflow",
+    csvPath,
+    spreadsheetKind: table.spreadsheetKind,
+    headerRowIdx: table.headerRowIdx,
+    dataRows: table.dataRows.length,
+    startRow,
+    count,
+    total,
+    packCounts,
+    account: accountDiagnostic,
+    createDrafts: shouldCreateDrafts,
+    aiImageServer: AI_IMAGE_GEN_URL,
+    logFile: WORKFLOW_PACK_LOG_FILE,
+    outputDir,
+    resultJsonPath,
+  });
   const startedAt = getProgressTimestamp();
   pricingPaused = false;
   replaceCurrentProgress({
@@ -11676,6 +11978,27 @@ async function generateWorkflowPackImages(params = {}) {
     updatedAt: startedAt,
   });
 
+  const waitIfWorkflowPaused = async ({
+    completed = results.length,
+    current = "新上品流程",
+    message = "新上品流程已暂停，点击继续后将从当前步骤继续。",
+  } = {}) => {
+    while (pricingPaused) {
+      syncCurrentProgressResults(results, {
+        flowType: "workflow",
+        running: true,
+        paused: true,
+        status: "paused",
+        total,
+        completed,
+        current,
+        step: "已暂停",
+        message,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  };
+
   let stopAuthPopupMonitor = null;
   try {
     await ensureBrowser();
@@ -11694,20 +12017,15 @@ async function generateWorkflowPackImages(params = {}) {
       const sourceImagePath = path.join(tmpDir, `${taskId}_${dataIndex}_source.jpg`);
       const imageCandidates = getWorkflowRowImageCandidates(table, row);
 
-      while (pricingPaused) {
-        syncCurrentProgressResults(results, {
-          flowType: "workflow",
-          running: true,
-          paused: true,
-          status: "paused",
-          total,
-          completed: offset,
-          current: `${offset + 1}/${total} ${productName.slice(0, 30)}`,
-          step: "已暂停",
-          message: "新上品流程已暂停，点击继续后将处理当前商品。",
-        });
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-      }
+      const rowProgressCurrent = `${offset + 1}/${total} ${productName.slice(0, 30)}`;
+      const waitIfCurrentRowPaused = (message) => waitIfWorkflowPaused({
+        completed: offset,
+        current: rowProgressCurrent,
+        message,
+      });
+      const rowStartedAt = Date.now();
+
+      await waitIfCurrentRowPaused("新上品流程已暂停，点击继续后将处理当前商品。");
 
       try {
         syncCurrentProgressResults(results, {
@@ -11723,6 +12041,7 @@ async function generateWorkflowPackImages(params = {}) {
         logWorkflowPack(taskId, `row=${rowNumber} product="${productName.slice(0, 80)}" source download start candidates=${imageCandidates.length}`);
         const source = await prepareWorkflowSourceImages(imageCandidates, sourceImagePath, { productName, taskId });
         logWorkflowPack(taskId, `row=${rowNumber} source ready path=${source.sourceImagePath}, originalUploadEligible=${source.originalUploadEligible}, acceptedOriginals=${source.originals?.length || 0}`);
+        await waitIfCurrentRowPaused("新上品流程已暂停，点击继续后将继续生成组合图。");
         updateCurrentProgress({
           step: "生成白底组合图",
           message: "正在生成 2PCS / 3PCS / 4PCS 白底素材",
@@ -11790,12 +12109,17 @@ async function generateWorkflowPackImages(params = {}) {
         const skippedCount = images.filter((item) => item.skipped).length;
         const requiredCount = Math.max(0, materialSpecs.length - skippedCount);
         const materialSuccess = successCount >= requiredCount;
+        await waitIfCurrentRowPaused("新上品流程已暂停，点击继续后将继续上传素材中心。");
         updateCurrentProgress({
           step: "上传素材中心",
           message: "正在上传原图和白底组合素材，并回写 kwcdn URL",
         });
         const uploadSummary = materialSuccess
-          ? await uploadWorkflowMaterialImages(images, { taskId, rowNumber })
+          ? await uploadWorkflowMaterialImages(images, {
+              taskId,
+              rowNumber,
+              waitIfPaused: () => waitIfCurrentRowPaused("新上品流程已暂停，点击继续后将继续上传剩余素材。"),
+            })
           : getEmptyWorkflowUploadSummary(images);
         images = uploadSummary.images;
         const uploadSuccess = materialSuccess
@@ -11837,6 +12161,7 @@ async function generateWorkflowPackImages(params = {}) {
             rowResult.errorCategory = classifyAutoPricingError("draft", draftParams.message);
             rowResult.draftStep = draftParams.step;
           } else {
+            await waitIfCurrentRowPaused("新上品流程已暂停，点击继续后将继续保存草稿。");
             updateCurrentProgress({
               step: "保存草稿",
               message: "素材已准备完成，正在保存到 Temu 草稿箱",
@@ -11878,21 +12203,35 @@ async function generateWorkflowPackImages(params = {}) {
         logWorkflowPack(taskId, `row=${rowNumber} done generated=${successCount}/${requiredCount}, uploaded=${uploadSummary.uploadSuccessCount}/${uploadSummary.uploadableCount}, skipped=${skippedCount}`);
         try {
           kwcdnTablePath = writeWorkflowKwcdnResultTable(csvPath, table, results, outputDir, taskId, packCounts);
-          fs.writeFileSync(path.join(outputDir, "result.json"), JSON.stringify({ taskId, total, packCounts, kwcdnTablePath, results }, null, 2), "utf8");
+          fs.writeFileSync(resultJsonPath, JSON.stringify({ taskId, total, packCounts, kwcdnTablePath, results }, null, 2), "utf8");
         } catch (error) {
           logSilent("workflow-pack.result.write", error);
         }
+        logWorkflowPackDiagnostic(taskId, "row_result", buildWorkflowRowDiagnostic(rowResult, {
+          account: accountDiagnostic,
+          resultJsonPath,
+          kwcdnTablePath,
+          outputDir,
+          durationMs: Date.now() - rowStartedAt,
+        }));
       } catch (error) {
         logWorkflowPack(taskId, `row=${rowNumber} failed: ${error?.message || String(error || "生成失败")}`);
-        results.push({
+        const errorMessage = error?.message || String(error || "生成失败");
+        const rowResult = {
           index: dataIndex,
           rowNumber,
           name: productName.slice(0, 120),
           sourceImageUrl: extractWorkflowImageCandidate(row[table.imageIdx]),
           success: false,
           successCount: 0,
+          requiredCount: packCounts.length + 1,
+          uploadableCount: 0,
+          uploadSuccessCount: 0,
+          uploadFailCount: 0,
+          uploadSkippedCount: 0,
           total: packCounts.length + 1,
-          message: error?.message || String(error || "生成失败"),
+          message: errorMessage,
+          errorCategory: classifyAutoPricingError("workflow", errorMessage),
           materialTypes: buildWorkflowMaterialImageSpecs(packCounts).map((item) => item.imageType),
           images: buildWorkflowMaterialImageSpecs(packCounts).map((spec) => ({
             packCount: spec.packCount,
@@ -11903,10 +12242,11 @@ async function generateWorkflowPackImages(params = {}) {
             localPath: "",
             uploadEligible: spec.role !== "original",
             skipped: false,
-            error: error?.message || String(error || "生成失败"),
+            error: errorMessage,
             warnings: [],
           })),
-        });
+        };
+        results.push(rowResult);
         syncCurrentProgressResults(results, {
           flowType: "workflow",
           running: true,
@@ -11919,15 +12259,33 @@ async function generateWorkflowPackImages(params = {}) {
         });
         try {
           kwcdnTablePath = writeWorkflowKwcdnResultTable(csvPath, table, results, outputDir, taskId, packCounts);
-          fs.writeFileSync(path.join(outputDir, "result.json"), JSON.stringify({ taskId, total, packCounts, kwcdnTablePath, results }, null, 2), "utf8");
+          fs.writeFileSync(resultJsonPath, JSON.stringify({ taskId, total, packCounts, kwcdnTablePath, results }, null, 2), "utf8");
         } catch (writeError) {
           logSilent("workflow-pack.result.write", writeError);
         }
+        logWorkflowPackDiagnostic(taskId, "row_exception", buildWorkflowRowDiagnostic(rowResult, {
+          account: accountDiagnostic,
+          resultJsonPath,
+          kwcdnTablePath,
+          outputDir,
+          durationMs: Date.now() - rowStartedAt,
+        }));
       }
     }
   } catch (error) {
     const message = error?.message || String(error || "卖家中心会话准备失败");
     logWorkflowPack(taskId, `seller session failed: ${message}`);
+    logWorkflowPackDiagnostic(taskId, "task_failed", {
+      taskId,
+      stage: "seller_session",
+      message: workflowPackText(message, 500),
+      account: accountDiagnostic,
+      completed: results.length,
+      total,
+      outputDir,
+      resultJsonPath,
+      kwcdnTablePath,
+    });
     const failedAt = getProgressTimestamp();
     syncCurrentProgressResults(results, {
       flowType: "workflow",
@@ -11952,6 +12310,7 @@ async function generateWorkflowPackImages(params = {}) {
       packCounts,
       outputDir,
       kwcdnTablePath,
+      resultJsonPath,
       message: `卖家中心登录/授权未完成，无法上传素材中心：${message}`,
       results,
     };
@@ -11975,6 +12334,7 @@ async function generateWorkflowPackImages(params = {}) {
     packCounts,
     outputDir,
     kwcdnTablePath,
+    resultJsonPath,
     results,
   };
   logWorkflowPack(taskId, `finish success=${finalResult.success} complete=${successCount} partial=${partialCount} fail=${finalResult.failCount}`);
@@ -11993,10 +12353,32 @@ async function generateWorkflowPackImages(params = {}) {
     finishedAt,
   });
   try {
-    fs.writeFileSync(path.join(outputDir, "result.json"), JSON.stringify(finalResult, null, 2), "utf8");
+    fs.writeFileSync(resultJsonPath, JSON.stringify(finalResult, null, 2), "utf8");
   } catch (error) {
     logSilent("workflow-pack.result.write", error);
   }
+  logWorkflowPackDiagnostic(taskId, "task_finish", {
+    taskId,
+    success: finalResult.success,
+    account: accountDiagnostic,
+    total,
+    successCount,
+    partialCount,
+    failCount: finalResult.failCount,
+    failedRows: results
+      .filter((item) => !item?.success)
+      .map((item) => ({
+        rowNumber: item?.rowNumber || "",
+        stage: getWorkflowRowFailureStage(item),
+        message: workflowPackText(item?.message || "", 220),
+        debugFile: item?.debugFile || "",
+      }))
+      .slice(0, 30),
+    outputDir,
+    resultJsonPath,
+    kwcdnTablePath,
+    logFile: WORKFLOW_PACK_LOG_FILE,
+  });
   return finalResult;
 }
 
@@ -12464,6 +12846,7 @@ function getEmptyWorkflowUploadSummary(images = []) {
 async function uploadWorkflowMaterialImages(images = [], options = {}) {
   const taskId = String(options.taskId || "workflow-pack");
   const rowNumber = options.rowNumber || "";
+  const waitIfPaused = typeof options.waitIfPaused === "function" ? options.waitIfPaused : null;
   const nextImages = Array.isArray(images) ? images.map((image) => ({ ...image })) : [];
   const uploadItems = [];
   let uploadFailCount = 0;
@@ -12507,6 +12890,7 @@ async function uploadWorkflowMaterialImages(images = [], options = {}) {
   let page = null;
   let uploadSuccessCount = 0;
   try {
+    if (waitIfPaused) await waitIfPaused();
     page = await createMaterialUploadPage();
   } catch (error) {
     const rawError = error?.message || String(error || "material upload page init failed");
@@ -12528,6 +12912,7 @@ async function uploadWorkflowMaterialImages(images = [], options = {}) {
 
   try {
     for (const item of uploadItems) {
+      if (waitIfPaused) await waitIfPaused();
       const image = item.image;
       const type = image.imageType || image.label || `image_${item.index}`;
       console.error(`[workflow-pack] task=${taskId} row=${rowNumber} upload start type=${type}`);
@@ -16495,14 +16880,18 @@ const server = http.createServer(async (req, res) => {
       onError: (err) => { console.error("[Worker] Request error:", err.message); },
     });
     action = cmd.action || "unknown";
-    const result = await withWorkerRequestCredentials(cmd.params?.credentials, async () => handleRequest(cmd));
+    const result = await withBrowserAccountActionGuard(cmd, async () => (
+      withWorkerRequestCredentials(cmd.params?.credentials, async () => handleRequest(cmd))
+    ));
     const duration = ((Date.now() - startTime) / 1000).toFixed(1);
     console.error(`[Worker] ${action} completed in ${duration}s`);
     sendJson(res, { type: "result", data: result });
   } catch (err) {
     const duration = ((Date.now() - startTime) / 1000).toFixed(1);
     const errCode = err.code || ERR.UNKNOWN;
-    const screenshotFile = await captureWorkerErrorScreenshot(`worker_${action}`);
+    const screenshotFile = errCode === "ACCOUNT_SESSION_BUSY"
+      ? ""
+      : await captureWorkerErrorScreenshot(`worker_${action}`);
     console.error(`[Worker] ${action} FAILED in ${duration}s: [${errCode}] ${err.message}`);
     sendJson(res, {
       type: "error",

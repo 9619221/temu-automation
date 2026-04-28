@@ -46,7 +46,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   lowStockThreshold: 10,
   screenshotOnError: true,
   updateFeedUrl: "",
-  priceReviewAutoScanEnabled: true,
+  priceReviewAutoScanEnabled: false,
   priceReviewScanIntervalMinutes: 30,
   priceReviewMarginRatio: 1.75,
   priceReview1688ProfilePath: "",

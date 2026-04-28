@@ -1,0 +1,299 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Button, Col, Form, Input, Row, Select, Space, Table, Tag, Typography, message } from "antd";
+import type { ColumnsType } from "antd/es/table";
+import { EditOutlined, KeyOutlined, PlusOutlined, ReloadOutlined, SafetyCertificateOutlined, StopOutlined } from "@ant-design/icons";
+import PageHeader from "../components/PageHeader";
+import { roleLabel } from "../utils/erpRoleAccess";
+import { useErpAuth } from "../contexts/ErpAuthContext";
+
+const { Text } = Typography;
+const erp = window.electronAPI?.erp;
+
+const ROLE_OPTIONS = [
+  { label: "管理员", value: "admin" },
+  { label: "负责人", value: "manager" },
+  { label: "运营", value: "operations" },
+  { label: "采购", value: "buyer" },
+  { label: "财务", value: "finance" },
+  { label: "仓库", value: "warehouse" },
+];
+
+const STATUS_OPTIONS = [
+  { label: "启用", value: "active" },
+  { label: "停用", value: "blocked" },
+];
+
+interface ErpUserRow {
+  id: string;
+  name: string;
+  role: string;
+  status: string;
+  hasAccessCode?: boolean;
+  updatedAt?: string;
+}
+
+interface UserFormValues {
+  id?: string;
+  name: string;
+  role: string;
+  status?: string;
+  accessCode?: string;
+}
+
+function formatTime(value?: string | null) {
+  if (!value) return "-";
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return value;
+  return new Date(timestamp).toLocaleString("zh-CN", { hour12: false });
+}
+
+function statusTag(status?: string) {
+  if (status === "active") return <Tag color="success">启用</Tag>;
+  if (status === "blocked") return <Tag color="error">停用</Tag>;
+  return <Tag>{status || "-"}</Tag>;
+}
+
+export default function UserManagement() {
+  const [form] = Form.useForm<UserFormValues>();
+  const auth = useErpAuth();
+  const [users, setUsers] = useState<ErpUserRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const editingId = Form.useWatch("id", form);
+
+  const activeCount = useMemo(() => users.filter((user) => user.status === "active").length, [users]);
+  const roleCountText = useMemo(() => {
+    const roles = new Set(users.map((user) => user.role).filter(Boolean));
+    return `${roles.size} 个角色`;
+  }, [users]);
+
+  const loadUsers = useCallback(async () => {
+    if (!erp) return;
+    setLoading(true);
+    try {
+      const nextUsers = await erp.user.list({ limit: 200 });
+      setUsers(nextUsers as ErpUserRow[]);
+    } catch (error: any) {
+      message.error(error?.message || "用户列表读取失败");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadUsers();
+  }, [loadUsers]);
+
+  const resetForm = () => {
+    form.resetFields();
+    form.setFieldsValue({ role: "buyer", status: "active" });
+  };
+
+  const handleSubmit = async () => {
+    if (!erp) return;
+    const values = await form.validateFields();
+    setSubmitting(true);
+    try {
+      await erp.user.upsert({
+        id: values.id,
+        name: values.name,
+        role: values.role,
+        status: values.status || "active",
+        accessCode: values.accessCode,
+      });
+      message.success(values.id ? "用户已更新" : "用户已创建");
+      resetForm();
+      await loadUsers();
+    } catch (error: any) {
+      message.error(error?.message || "用户保存失败");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleEdit = (record: ErpUserRow) => {
+    form.setFieldsValue({
+      id: record.id,
+      name: record.name,
+      role: record.role,
+      status: record.status || "active",
+      accessCode: "",
+    });
+  };
+
+  const handleToggleStatus = async (record: ErpUserRow) => {
+    if (!erp) return;
+    const nextStatus = record.status === "active" ? "blocked" : "active";
+    if (record.id === auth.currentUser?.id && nextStatus === "blocked") {
+      message.warning("不能停用当前登录用户");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await erp.user.upsert({
+        id: record.id,
+        name: record.name,
+        role: record.role,
+        status: nextStatus,
+      });
+      message.success(nextStatus === "active" ? "用户已启用" : "用户已停用");
+      await loadUsers();
+    } catch (error: any) {
+      message.error(error?.message || "用户状态更新失败");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const columns: ColumnsType<ErpUserRow> = [
+    {
+      title: "用户",
+      dataIndex: "name",
+      key: "name",
+      ellipsis: true,
+      render: (value, record) => (
+        <Space direction="vertical" size={2}>
+          <Text strong>{value}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>{record.id}</Text>
+        </Space>
+      ),
+    },
+    {
+      title: "角色",
+      dataIndex: "role",
+      key: "role",
+      width: 120,
+      render: (value) => <Tag color="blue">{roleLabel(value)}</Tag>,
+    },
+    {
+      title: "访问码",
+      dataIndex: "hasAccessCode",
+      key: "hasAccessCode",
+      width: 110,
+      render: (value) => <Tag color={value ? "success" : "warning"}>{value ? "已设置" : "未设置"}</Tag>,
+    },
+    {
+      title: "状态",
+      dataIndex: "status",
+      key: "status",
+      width: 100,
+      render: statusTag,
+    },
+    {
+      title: "更新",
+      dataIndex: "updatedAt",
+      key: "updatedAt",
+      width: 180,
+      render: formatTime,
+    },
+    {
+      title: "操作",
+      key: "actions",
+      width: 180,
+      render: (_, record) => (
+        <Space size={8}>
+          <Button size="small" icon={<EditOutlined />} onClick={() => handleEdit(record)}>
+            编辑
+          </Button>
+          <Button
+            size="small"
+            danger={record.status === "active"}
+            icon={record.status === "active" ? <StopOutlined /> : <SafetyCertificateOutlined />}
+            onClick={() => void handleToggleStatus(record)}
+          >
+            {record.status === "active" ? "停用" : "启用"}
+          </Button>
+        </Space>
+      ),
+    },
+  ];
+
+  return (
+    <div className="app-stack">
+      <PageHeader
+        eyebrow="系统"
+        title="用户管理"
+        subtitle="在软件内创建采购、仓库、运营和财务账号。访问码只保存加密哈希，忘记后需要重新设置。"
+        meta={[`共 ${users.length} 个用户`, `启用 ${activeCount} 个`, roleCountText]}
+        actions={<Button icon={<ReloadOutlined />} onClick={() => void loadUsers()} loading={loading}>刷新</Button>}
+      />
+
+      <div className="app-panel">
+        <div className="app-panel__title">
+          <div>
+            <div className="app-panel__title-main">{editingId ? "编辑用户" : "创建用户"}</div>
+            <div className="app-panel__title-sub">新用户必须设置访问码；编辑用户时留空表示不修改原访问码。</div>
+          </div>
+          <KeyOutlined style={{ color: "var(--color-brand)", fontSize: 18 }} />
+        </div>
+        <Form form={form} layout="vertical" initialValues={{ role: "buyer", status: "active" }}>
+          <Form.Item name="id" hidden>
+            <Input />
+          </Form.Item>
+          <Row gutter={12}>
+            <Col xs={24} md={6}>
+              <Form.Item name="name" label="用户名称" rules={[{ required: true, message: "请输入用户名称" }]}>
+                <Input placeholder="例如：采购小王" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={5}>
+              <Form.Item name="role" label="角色" rules={[{ required: true, message: "请选择角色" }]}>
+                <Select options={ROLE_OPTIONS} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="status" label="状态">
+                <Select options={STATUS_OPTIONS} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={6}>
+              <Form.Item
+                name="accessCode"
+                label="访问码"
+                dependencies={["id"]}
+                rules={[
+                  ({ getFieldValue }) => ({
+                    validator(_, value) {
+                      if (getFieldValue("id") || value) return Promise.resolve();
+                      return Promise.reject(new Error("请输入访问码"));
+                    },
+                  }),
+                ]}
+              >
+                <Input.Password placeholder={editingId ? "留空则不修改" : "用于登录软件"} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={3}>
+              <Form.Item label=" ">
+                <Space.Compact block>
+                  <Button type="primary" icon={<PlusOutlined />} loading={submitting} onClick={handleSubmit}>
+                    保存
+                  </Button>
+                  {editingId ? <Button onClick={resetForm}>取消</Button> : null}
+                </Space.Compact>
+              </Form.Item>
+            </Col>
+          </Row>
+        </Form>
+      </div>
+
+      <div className="app-panel">
+        <div className="app-panel__title">
+          <div>
+            <div className="app-panel__title-main">系统用户</div>
+            <div className="app-panel__title-sub">启用的用户可以按角色登录软件；停用后不能继续登录。</div>
+          </div>
+          <SafetyCertificateOutlined style={{ color: "var(--color-success)", fontSize: 18 }} />
+        </div>
+        <Table
+          size="small"
+          rowKey="id"
+          loading={loading}
+          columns={columns}
+          dataSource={users}
+          pagination={{ pageSize: 8, showSizeChanger: false }}
+        />
+      </div>
+    </div>
+  );
+}

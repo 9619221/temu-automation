@@ -170,6 +170,67 @@ contextBridge.exposeInMainWorld("electronAPI", {
   imageStudio: createImageStudioApi("default"),
   imageStudioGpt: createImageStudioApi("gpt"),
 
+  erp: {
+    getStatus: () => ipcRenderer.invoke("erp:get-status"),
+    runMigrations: () => ipcRenderer.invoke("erp:run-migrations"),
+    getEnums: () => ipcRenderer.invoke("erp:get-enums"),
+    auth: {
+      getStatus: () => ipcRenderer.invoke("erp:auth:get-status"),
+      getCurrentUser: () => ipcRenderer.invoke("erp:auth:get-current-user"),
+      createFirstAdmin: (payload) => ipcRenderer.invoke("erp:auth:create-first-admin", payload || {}),
+      login: (payload) => ipcRenderer.invoke("erp:auth:login", payload || {}),
+      logout: () => ipcRenderer.invoke("erp:auth:logout"),
+    },
+    account: {
+      list: (params) => ipcRenderer.invoke("erp:account:list", params || {}),
+      upsert: (payload) => ipcRenderer.invoke("erp:account:upsert", payload || {}),
+    },
+    user: {
+      list: (params) => ipcRenderer.invoke("erp:user:list", params || {}),
+      upsert: (payload) => ipcRenderer.invoke("erp:user:upsert", payload || {}),
+    },
+    supplier: {
+      list: (params) => ipcRenderer.invoke("erp:supplier:list", params || {}),
+      create: (payload) => ipcRenderer.invoke("erp:supplier:create", payload || {}),
+    },
+    sku: {
+      list: (params) => ipcRenderer.invoke("erp:sku:list", params || {}),
+      create: (payload) => ipcRenderer.invoke("erp:sku:create", payload || {}),
+    },
+    purchase: {
+      workbench: (params) => ipcRenderer.invoke("erp:purchase:workbench", params || {}),
+      action: (payload) => ipcRenderer.invoke("erp:purchase:action", payload || {}),
+    },
+    warehouse: {
+      workbench: (params) => ipcRenderer.invoke("erp:warehouse:workbench", params || {}),
+      action: (payload) => ipcRenderer.invoke("erp:warehouse:action", payload || {}),
+    },
+    qc: {
+      workbench: (params) => ipcRenderer.invoke("erp:qc:workbench", params || {}),
+      action: (payload) => ipcRenderer.invoke("erp:qc:action", payload || {}),
+      decide: (payload) => ipcRenderer.invoke("erp:qc:decide", payload || {}),
+    },
+    outbound: {
+      workbench: (params) => ipcRenderer.invoke("erp:outbound:workbench", params || {}),
+      action: (payload) => ipcRenderer.invoke("erp:outbound:action", payload || {}),
+    },
+    workItem: {
+      list: (params) => ipcRenderer.invoke("erp:workItem:list", params || {}),
+      stats: (params) => ipcRenderer.invoke("erp:workItem:stats", params || {}),
+      generate: (payload) => ipcRenderer.invoke("erp:workItem:generate", payload || {}),
+      updateStatus: (payload) => ipcRenderer.invoke("erp:workItem:update-status", payload || {}),
+    },
+    workflow: {
+      canTransition: (payload) => ipcRenderer.invoke("erp:workflow:can-transition", payload || {}),
+      transition: (payload) => ipcRenderer.invoke("erp:workflow:transition", payload || {}),
+    },
+    lan: {
+      getStatus: () => ipcRenderer.invoke("erp:lan:get-status"),
+      start: (payload) => ipcRenderer.invoke("erp:lan:start", payload || {}),
+      stop: () => ipcRenderer.invoke("erp:lan:stop"),
+    },
+  },
+
   app: {
     getVersion: () => ipcRenderer.invoke("app:get-version"),
     getUpdateStatus: () => ipcRenderer.invoke("app:get-update-status"),
@@ -177,6 +238,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     downloadUpdate: () => ipcRenderer.invoke("app:download-update"),
     quitAndInstallUpdate: () => ipcRenderer.invoke("app:quit-and-install-update"),
     openLogDirectory: () => ipcRenderer.invoke("app:open-log-directory"),
+    readWorkflowPackLogs: (params) => ipcRenderer.invoke("app:read-workflow-pack-logs", params || {}),
+    clearWorkflowPackLogs: () => ipcRenderer.invoke("app:clear-workflow-pack-logs"),
   },
 
   onAutomationEvent: (callback) => {

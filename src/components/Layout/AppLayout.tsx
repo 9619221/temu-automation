@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { Badge, Button, Dropdown, Layout, List, Menu, Space, Tag } from "antd";
 import {
@@ -7,12 +7,16 @@ import {
   CheckCircleOutlined,
   CloseCircleOutlined,
   DashboardOutlined,
+  DatabaseOutlined,
   DollarOutlined,
   FileTextOutlined,
+  InboxOutlined,
   LoadingOutlined,
+  LogoutOutlined,
   PictureOutlined,
   PlusCircleOutlined,
   RocketOutlined,
+  SafetyCertificateOutlined,
   SettingOutlined,
   ShoppingOutlined,
   SyncOutlined,
@@ -20,6 +24,8 @@ import {
 } from "@ant-design/icons";
 import { ACTIVE_ACCOUNT_CHANGED_EVENT, readActiveAccountId } from "../../utils/multiStore";
 import { COLLECT_TASKS, useCollection } from "../../contexts/CollectionContext";
+import { useErpAuth } from "../../contexts/ErpAuthContext";
+import { canAccessRoute, roleLabel } from "../../utils/erpRoleAccess";
 
 const { Content, Header, Sider } = Layout;
 
@@ -28,6 +34,16 @@ const menuItems = [
     type: "group" as const,
     label: "账号",
     children: [{ key: "/accounts", icon: <UserOutlined />, label: "账号管理" }],
+  },
+  {
+    type: "group" as const,
+    label: "ERP",
+    children: [
+      { key: "/daily-command", icon: <BellOutlined />, label: "今日作战台" },
+      { key: "/purchase-center", icon: <ShoppingOutlined />, label: "采购中心" },
+      { key: "/warehouse-center", icon: <InboxOutlined />, label: "仓库中心" },
+      { key: "/qc-outbound", icon: <SafetyCertificateOutlined />, label: "QC 发仓" },
+    ],
   },
   {
     type: "group" as const,
@@ -56,6 +72,9 @@ const menuItems = [
     type: "group" as const,
     label: "系统",
     children: [
+      { key: "/work-items", icon: <BellOutlined />, label: "事项中心" },
+      { key: "/users", icon: <UserOutlined />, label: "用户管理" },
+      { key: "/erp-debug", icon: <DatabaseOutlined />, label: "ERP 调试台" },
       { key: "/logs", icon: <FileTextOutlined />, label: "日志中心" },
       { key: "/settings", icon: <SettingOutlined />, label: "设置" },
     ],
@@ -69,8 +88,21 @@ export default function AppLayout() {
   const [activeAccountId, setActiveAccountId] = useState<string | null>(null);
   const navigate = useNavigate();
   const location = useLocation();
+  const auth = useErpAuth();
+  const currentRole = auth.currentUser?.role || "";
   const { collecting, progress, successCount, errorCount, taskStates } = useCollection();
   const completedCount = successCount + errorCount;
+  const canUseCollection = canAccessRoute(currentRole, "/collect");
+  const canManageAccounts = canAccessRoute(currentRole, "/accounts");
+
+  const visibleMenuItems = useMemo(() => (
+    menuItems
+      .map((group) => ({
+        ...group,
+        children: group.children.filter((item) => canAccessRoute(currentRole, item.key)),
+      }))
+      .filter((group) => group.children.length > 0)
+  ), [currentRole]);
 
   const recentErrors = Object.entries(taskStates)
     .filter(([, state]) => state.status === "error")
@@ -156,6 +188,11 @@ export default function AppLayout() {
     if (!store) return;
     const { setActiveAccountAndSync } = await import("../../utils/multiStore");
     await setActiveAccountAndSync(store, accounts as any[], key);
+  };
+
+  const handleLogout = async () => {
+    await auth.logout();
+    navigate("/login", { replace: true });
   };
 
   const bellDropdown = (
@@ -268,7 +305,7 @@ export default function AppLayout() {
             <Menu
               mode="inline"
               selectedKeys={[selectedKey]}
-              items={menuItems}
+              items={visibleMenuItems}
               onClick={({ key }) => navigate(key)}
               style={{ border: 0 }}
             />
@@ -292,6 +329,7 @@ export default function AppLayout() {
           }}
         >
           <Space size={12}>
+            {canUseCollection ? (
             <Tag
               onClick={() => navigate("/collect")}
               color={collecting ? "processing" : progress === 100 ? (errorCount > 0 ? "warning" : "success") : "default"}
@@ -300,13 +338,17 @@ export default function AppLayout() {
             >
               {collecting ? `${completedCount}/${COLLECT_TASKS.length}` : progress === 100 ? "采集完成" : "就绪"}
             </Tag>
+            ) : null}
 
+            {canUseCollection ? (
             <Dropdown trigger={["click"]} dropdownRender={() => bellDropdown}>
               <Badge count={errorCount > 0 ? errorCount : 0} size="small" offset={[-2, 2]}>
                 <Button icon={<BellOutlined />} style={{ borderRadius: 10 }} />
               </Badge>
             </Dropdown>
+            ) : null}
 
+            {canManageAccounts ? (
             <Dropdown menu={{ items: accountMenuItems, onClick: handleAccountMenuClick }} trigger={["click"]}>
               <Tag
                 color={activeAccountName ? "blue" : "default"}
@@ -316,12 +358,20 @@ export default function AppLayout() {
                 {activeAccountName || "未选择账号"}
               </Tag>
             </Dropdown>
+            ) : null}
 
-            <Button icon={<SettingOutlined />} onClick={() => navigate("/settings")} style={{ borderRadius: 10 }} />
+            <Tag color="blue" icon={<UserOutlined />} style={{ borderRadius: 12, padding: "4px 12px", marginInlineEnd: 0 }}>
+              {auth.currentUser?.name || "-"} · {roleLabel(currentRole)}
+            </Tag>
+
+            {canAccessRoute(currentRole, "/settings") ? (
+              <Button icon={<SettingOutlined />} onClick={() => navigate("/settings")} style={{ borderRadius: 10 }} />
+            ) : null}
+            <Button icon={<LogoutOutlined />} onClick={handleLogout} style={{ borderRadius: 10 }} />
           </Space>
         </Header>
 
-        {noAccount && (
+        {noAccount && canManageAccounts && (
           <div
             style={{
               background: "linear-gradient(90deg, #fff7f0, #fff)",

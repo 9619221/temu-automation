@@ -23,6 +23,7 @@ import {
 
 const { Text } = Typography;
 const store = window.electronAPI?.store;
+const appApi = window.electronAPI?.app;
 
 type LevelFilter = "all" | "log" | "info" | "warn" | "error";
 
@@ -56,6 +57,8 @@ function levelColor(level: FrontendLogEntry["level"]) {
 
 function sourceLabel(source: FrontendLogEntry["source"]) {
   switch (source) {
+    case "workflow-pack":
+      return "新上品诊断";
     case "window-error":
       return "页面异常";
     case "unhandledrejection":
@@ -67,6 +70,12 @@ function sourceLabel(source: FrontendLogEntry["source"]) {
 
 function explainMessage(log: FrontendLogEntry) {
   const rawMessage = log.message || "";
+  if (log.source === "workflow-pack") {
+    if (rawMessage.includes("失败") || log.level === "error") {
+      return "新上品流程诊断日志：优先看行号、阶段、错误信息和展开后的 debug 摘要。";
+    }
+    return "新上品流程诊断日志：用于定位任务、商品行、素材上传和草稿保存状态。";
+  }
   if (rawMessage.includes("[antd: Spin]") && rawMessage.includes("tip")) {
     return "这是界面加载提示的用法提醒，通常不会影响主要功能。";
   }
@@ -83,6 +92,23 @@ function formatTime(timestamp: number) {
   return new Date(timestamp).toLocaleString("zh-CN", { hour12: false });
 }
 
+function normalizeLogEntry(log: any): FrontendLogEntry | null {
+  if (!log) return null;
+  const level = (["log", "info", "warn", "error"].includes(log.level) ? log.level : "log") as FrontendLogEntry["level"];
+  const source = ["console", "window-error", "unhandledrejection", "workflow-pack"].includes(log.source)
+    ? log.source
+    : "console" as FrontendLogEntry["source"];
+  return {
+    id: String(log.id || `${source}-${log.timestamp || Date.now()}-${Math.random().toString(16).slice(2)}`),
+    timestamp: Number(log.timestamp) || Date.now(),
+    level,
+    source,
+    message: String(log.message || ""),
+    detail: typeof log.detail === "string" ? log.detail : undefined,
+    taskId: typeof log.taskId === "string" ? log.taskId : undefined,
+  };
+}
+
 export default function Logs() {
   const [logs, setLogs] = useState<FrontendLogEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -92,8 +118,18 @@ export default function Logs() {
   const loadLogs = async () => {
     setLoading(true);
     try {
-      const data = await store?.get?.(FRONTEND_LOG_STORE_KEY);
-      setLogs(Array.isArray(data) ? data.slice().reverse() : []);
+      const [frontendData, workflowData] = await Promise.all([
+        store?.get?.(FRONTEND_LOG_STORE_KEY),
+        appApi?.readWorkflowPackLogs?.({ limit: 500 }).catch(() => ({ entries: [] })),
+      ]);
+      const frontendLogs = Array.isArray(frontendData) ? frontendData : [];
+      const workflowLogs = Array.isArray(workflowData?.entries) ? workflowData.entries : [];
+      const merged = [...frontendLogs, ...workflowLogs]
+        .map((item) => normalizeLogEntry(item))
+        .filter(Boolean)
+        .sort((a, b) => (b?.timestamp || 0) - (a?.timestamp || 0))
+        .slice(0, 1000) as FrontendLogEntry[];
+      setLogs(merged);
     } finally {
       setLoading(false);
     }
@@ -119,6 +155,8 @@ export default function Logs() {
       const keyword = searchText.trim().toLowerCase();
       return (
         log.message.toLowerCase().includes(keyword)
+        || (log.detail || "").toLowerCase().includes(keyword)
+        || (log.taskId || "").toLowerCase().includes(keyword)
         || log.source.toLowerCase().includes(keyword)
         || log.level.toLowerCase().includes(keyword)
       );
@@ -233,6 +271,7 @@ export default function Logs() {
             icon={<DeleteOutlined />}
             onClick={async () => {
               await clearFrontendLogs();
+              await appApi?.clearWorkflowPackLogs?.();
               setLogs([]);
               message.success("运行记录已清空");
             }}
@@ -260,7 +299,7 @@ export default function Logs() {
                 <Space direction="vertical" size={12} style={{ width: "100%" }}>
                   <div>
                     <Text strong>完整内容</Text>
-                    <div className="app-log-message" style={{ marginTop: 8 }}>{record.message}</div>
+                    <div className="app-log-message" style={{ marginTop: 8 }}>{record.detail || record.message}</div>
                   </div>
                   {explainMessage(record) ? (
                     <div>

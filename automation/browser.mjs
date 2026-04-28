@@ -97,7 +97,7 @@ function isLikelyCountryCodeInput(meta = {}) {
 
   if (id === "usernameId" || name === "usernameId") return false;
   if (name === "phone" || name === "mobile") return false;
-  if (placeholder.includes("鎵嬫満") || placeholder.includes("鍙风爜")) return false;
+  if (/手机|手机号|手机号码|号码|phone|mobile/i.test(placeholder)) return false;
   if (/^\+\d+$/.test(value)) return true;
   if (!placeholder && !id && !name && width > 0 && width <= 120) return true;
   return false;
@@ -210,7 +210,7 @@ export function findChromeExe() {
   for (const p of candidates) {
     try { if (fs.existsSync(p)) return p; } catch (e) { logSilent("chrome.find", e); }
   }
-  throw new Error("鏈壘鍒扮郴缁?Chrome锛岃瀹夎 Google Chrome");
+  throw new Error("未找到系统 Chrome，请安装 Google Chrome");
 }
 
 // ---- Cookie 绠＄悊 ----
@@ -280,7 +280,20 @@ export async function ensureBrowser() {
 }
 
 export async function launch(accountId, headless) {
-  if (browserState.browser && browserState.browser.isConnected() && browserState.context) return;
+  const requestedAccountId = String(accountId || "").trim();
+  const latestCookie = !requestedAccountId && !browserState.lastAccountId ? findLatestCookie() : null;
+  const targetAccountId = requestedAccountId || browserState.lastAccountId || latestCookie?.accountId || "";
+
+  if (!targetAccountId) {
+    throw new Error("missing Temu account id");
+  }
+
+  if (browserState.browser && browserState.browser.isConnected() && browserState.context) {
+    if (browserState.lastAccountId === targetAccountId) return;
+    console.error(`[launch] Account switch requested: ${browserState.lastAccountId || "none"} -> ${targetAccountId}, closing current browser context`);
+    await closeBrowser();
+  }
+
   // 娓呯悊鏂紑鐨勬棫寮曠敤
   if (browserState.browser && !browserState.browser.isConnected()) {
     console.error("[launch] Browser disconnected, cleaning up before relaunch...");
@@ -288,10 +301,10 @@ export async function launch(accountId, headless) {
     browserState.context = null;
   }
 
-  browserState.lastAccountId = accountId;
+  browserState.lastAccountId = targetAccountId;
   const dir = path.join(getAppDataRoot(), "cookies");
   fs.mkdirSync(dir, { recursive: true });
-  browserState.cookiePath = path.join(dir, `${accountId}.json`);
+  browserState.cookiePath = path.join(dir, `${targetAccountId}.json`);
 
   const effectiveHeadless = getEffectiveHeadless(headless);
   const slowMo = Math.max(0, Math.round(50 * getDelayScale()));
@@ -370,7 +383,7 @@ export async function handleAuthOnPage(targetPage, tag = "main") {
     await randomDelay(400, 800);
 
     const btnResult = await targetPage.evaluate(() => {
-      const keywords = ["纭鎺堟潈骞跺墠寰€", "纭鎺堟潈", "纭骞跺墠寰€", "鎺堟潈鐧诲綍", "鍚屾剰骞剁櫥褰?", "鍚屾剰", "杩涘叆", "鍟嗗涓績"];
+      const keywords = ["确认授权并前往", "确认授权", "确认并前往", "授权登录", "同意并登录", "同意", "进入", "商家中心"];
       const all = [...document.querySelectorAll('button, a, [role="button"], div[class*="btn"], div[class*="Btn"], span[class*="btn"], span[class*="Btn"]')];
       for (const kw of keywords) {
         for (const el of all) {
@@ -426,7 +439,13 @@ async function drainPendingAuthPopups(context) {
             const all = [...document.querySelectorAll('button, a, [role="button"], div[class*="btn"], div[class*="Btn"], span[class*="btn"], span[class*="Btn"]')];
             return all.some((el) => {
               const t = (el.innerText || el.textContent || "").trim();
-              return t && (t.includes("??") || t.includes("??") || t.includes("??") || t.includes("????"));
+              return t && (
+                t.includes("确认授权")
+                || t.includes("授权登录")
+                || t.includes("同意")
+                || t.includes("商家中心")
+                || t.includes("进入")
+              );
             });
           }).catch(() => false),
           perPageEvalTimeoutMs,
@@ -490,16 +509,25 @@ export async function login(phone, password) {
     await page.goto(TEMU_LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
     await randomDelay(2000, 4000);
 
-    // 鍒囨崲鍒般€岃处鍙风櫥褰曘€峵ab
+    // 切换到账号登录 tab。
     try {
-      const accountTab = page.locator('text=璐﹀彿鐧诲綍').first();
-      if (await accountTab.isVisible({ timeout: 5000 })) {
-        await accountTab.click();
-        await randomDelay(1000, 2000);
+      const accountTabSelectors = [
+        'text=账号登录',
+        '[role="tab"]:has-text("账号登录")',
+        'button:has-text("账号登录")',
+        'span:has-text("账号登录")',
+      ];
+      for (const selector of accountTabSelectors) {
+        const accountTab = page.locator(selector).first();
+        if (await accountTab.isVisible({ timeout: 1200 }).catch(() => false)) {
+          await accountTab.click();
+          await randomDelay(1000, 2000);
+          break;
+        }
       }
     } catch (e) { logSilent("login.tab", e); }
 
-    // 杈撳叆鎵嬫満鍙?
+    // 输入手机号。
     const phoneTarget = await findLoginPhoneInput(page);
     const ph = phoneTarget?.input || null;
     // Use the dedicated phone selector so we do not target the +86 country-code field.
@@ -555,7 +583,7 @@ export async function login(phone, password) {
           for (const node of candidates) {
             const text = (node.textContent || "").replace(/\s+/g, "");
             if (!text) continue;
-            if (text.includes("鎺堟潈") || text.includes("鍚屾剰") || text.includes("闅愮")) {
+            if (text.includes("授权") || text.includes("同意") || text.includes("隐私")) {
               node.click();
               return true;
             }
@@ -566,9 +594,39 @@ export async function login(phone, password) {
     } catch (e) { logSilent("login.checkbox", e); }
     await randomDelay(300, 600);
 
-    // 鐐瑰嚮鐧诲綍
-    const btn = await page.waitForSelector('button:has-text("鐧诲綍")', { timeout: 5000 });
-    await btn.click();
+    // 点击登录，兼容 Temu 登录页按钮文案调整。
+    const loginButtonSelectors = [
+      'button:has-text("登录")',
+      'button:has-text("授权登录")',
+      'button:has-text("同意并登录")',
+      '[role="button"]:has-text("登录")',
+      'div[class*="btn"]:has-text("登录")',
+      'span[class*="btn"]:has-text("登录")',
+    ];
+    let clickedLoginButton = false;
+    for (const selector of loginButtonSelectors) {
+      const candidate = page.locator(selector).first();
+      if (await candidate.isVisible({ timeout: 1200 }).catch(() => false)) {
+        await candidate.click();
+        clickedLoginButton = true;
+        break;
+      }
+    }
+    if (!clickedLoginButton) {
+      clickedLoginButton = await page.evaluate(() => {
+        const candidates = [...document.querySelectorAll('button, [role="button"], a, div[class*="btn"], div[class*="Btn"], span[class*="btn"], span[class*="Btn"]')];
+        const target = candidates.find((node) => {
+          const text = (node.textContent || "").replace(/\s+/g, "").trim();
+          return text && /^(登录|授权登录|同意并登录)$/.test(text);
+        });
+        target?.click?.();
+        return Boolean(target);
+      }).catch(() => false);
+    }
+    if (!clickedLoginButton) {
+      const pageHint = await page.evaluate(() => (document.body?.innerText || "").trim().slice(0, 180)).catch(() => "");
+      throw new Error(`未找到登录按钮，请确认 Temu 登录页是否加载完成或是否出现验证码/风控提示。${pageHint ? `页面提示：${pageHint}` : ""}`);
+    }
     await randomDelay(2000, 3000);
 
     try {
@@ -587,9 +645,9 @@ export async function login(phone, password) {
       logSilent("login.hint", e);
     }
 
-    // 澶勭悊闅愮寮圭獥
+    // 处理隐私/协议弹窗。
     try {
-      const agreeBtn = page.locator('button:has-text("??"), button:has-text("??"), a:has-text("????")').first();
+      const agreeBtn = page.locator('button:has-text("同意"), button:has-text("确认"), a:has-text("同意")').first();
       if (await agreeBtn.isVisible({ timeout: 3000 })) {
         await agreeBtn.click();
         await randomDelay(1000, 2000);
@@ -615,7 +673,7 @@ export async function login(phone, password) {
     // 褰撳墠椤靛厛璇曚竴娆?
     await handleAuthOnPage(page, "main");
 
-    // 鎵弿 context 涓叾瀹冨凡鎵撳紑鐨勬巿鏉冪獥鍙ｏ紝骞剁瓑寰呭欢杩熷脊鍑虹殑鏂扮獥鍙ｆ渶澶?10 绉?
+    // 扫描 context 中其他已打开的授权窗口，并等待延迟弹出的新窗口最多 10 秒。
     const authWaitStart = Date.now();
     let authHandled = false;
     while (Date.now() - authWaitStart < 10000) {
@@ -629,7 +687,13 @@ export async function login(phone, password) {
             const all = [...document.querySelectorAll('button, a, [role="button"], div[class*="btn"], div[class*="Btn"], span[class*="btn"], span[class*="Btn"]')];
             return all.some((el) => {
               const t = (el.innerText || el.textContent || "").trim();
-              return t && (t.includes("??") || t.includes("??") || t.includes("??") || t.includes("????"));
+              return t && (
+                t.includes("确认授权")
+                || t.includes("授权登录")
+                || t.includes("同意")
+                || t.includes("商家中心")
+                || t.includes("进入")
+              );
             });
           }).catch(() => false);
           if (hasBtn) {

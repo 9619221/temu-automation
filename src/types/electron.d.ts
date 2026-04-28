@@ -228,6 +228,8 @@ interface AppAPI {
   downloadUpdate: () => Promise<any>;
   quitAndInstallUpdate: () => Promise<boolean>;
   openLogDirectory: () => Promise<string>;
+  readWorkflowPackLogs?: (params?: { limit?: number }) => Promise<{ logFile?: string; entries?: any[] }>;
+  clearWorkflowPackLogs?: () => Promise<{ logFile?: string; cleared?: boolean }>;
 }
 
 interface StoreAPI {
@@ -235,6 +237,178 @@ interface StoreAPI {
   getMany: (keys: string[]) => Promise<Record<string, any>>;
   set: (key: string, data: any) => Promise<boolean>;
   setMany: (entries: Record<string, any>) => Promise<boolean>;
+}
+
+interface ErpStatus {
+  initialized: boolean;
+  dbPath: string | null;
+  backupPath?: string | null;
+  migrations: Array<{ key: string; status: "success" | "skipped" | "failed" | string }>;
+  error?: { name?: string; code?: string | null; message: string } | null;
+}
+
+interface ErpActor {
+  id?: string | null;
+  role: string;
+}
+
+interface ErpUserSession {
+  id: string;
+  name: string;
+  role: string;
+  status: string;
+}
+
+interface ErpAuthStatus {
+  hasUsers: boolean;
+  currentUser: ErpUserSession | null;
+}
+
+interface ErpListParams {
+  accountId?: string;
+  limit?: number;
+  offset?: number;
+}
+
+interface ErpWorkflowTransitionPayload {
+  entityType: string;
+  id: string;
+  action: string;
+  toStatus: string;
+  actor: ErpActor;
+  patch?: Record<string, any>;
+}
+
+interface ErpWorkflowCanTransitionPayload {
+  entityType: string;
+  fromStatus: string;
+  toStatus: string;
+  action: string;
+  role: string;
+}
+
+interface ErpLanStatus {
+  running: boolean;
+  port: number;
+  bindAddress: string;
+  startedAt: string | null;
+  localUrl: string;
+  primaryUrl: string;
+  lanUrls: string[];
+  routes: Array<{ path: string; label: string; allowedRoles?: string[] }>;
+  authMode: string;
+  sessionCount?: number;
+  lastError?: string | null;
+}
+
+interface ErpAPI {
+  getStatus: () => Promise<ErpStatus>;
+  runMigrations: () => Promise<ErpStatus>;
+  getEnums: () => Promise<Record<string, Record<string, string>>>;
+  auth: {
+    getStatus: () => Promise<ErpAuthStatus>;
+    getCurrentUser: () => Promise<ErpUserSession | null>;
+    createFirstAdmin: (payload: { name: string; accessCode: string }) => Promise<ErpAuthStatus>;
+    login: (payload: { login: string; accessCode: string }) => Promise<ErpAuthStatus>;
+    logout: () => Promise<ErpAuthStatus>;
+  };
+  account: {
+    list: (params?: ErpListParams) => Promise<any[]>;
+    upsert: (payload: {
+      id?: string;
+      name: string;
+      phone?: string;
+      status?: string;
+      source?: string;
+    }) => Promise<any>;
+  };
+  user: {
+    list: (params?: ErpListParams) => Promise<any[]>;
+    upsert: (payload: {
+      id?: string;
+      name: string;
+      role: string;
+      status?: string;
+      accessCode?: string;
+    }) => Promise<any>;
+  };
+  supplier: {
+    list: (params?: ErpListParams) => Promise<any[]>;
+    create: (payload: {
+      id?: string;
+      name: string;
+      contactName?: string;
+      phone?: string;
+      wechat?: string;
+      address?: string;
+      categories?: string[];
+      status?: string;
+    }) => Promise<any>;
+  };
+  sku: {
+    list: (params?: ErpListParams) => Promise<any[]>;
+    create: (payload: {
+      id?: string;
+      accountId: string;
+      internalSkuCode: string;
+      productName: string;
+      temuSkuId?: string;
+      temuProductId?: string;
+      temuSkcId?: string;
+      category?: string;
+      imageUrl?: string;
+      supplierId?: string;
+      status?: string;
+    }) => Promise<any>;
+  };
+  purchase: {
+    workbench: (params?: ErpListParams) => Promise<any>;
+    action: (payload: Record<string, any>) => Promise<any>;
+  };
+  warehouse: {
+    workbench: (params?: ErpListParams) => Promise<any>;
+    action: (payload: Record<string, any>) => Promise<any>;
+  };
+  workflow: {
+    canTransition: (payload: ErpWorkflowCanTransitionPayload) => Promise<boolean>;
+    transition: (payload: ErpWorkflowTransitionPayload) => Promise<any>;
+  };
+  qc: {
+    workbench: (params?: ErpListParams) => Promise<any>;
+    action: (payload: Record<string, any>) => Promise<any>;
+    decide: (payload: {
+      actualSampleQty: number;
+      defectiveQty: number;
+      observationThreshold?: number;
+      failureThreshold?: number;
+    }) => Promise<any>;
+  };
+  outbound: {
+    workbench: (params?: ErpListParams) => Promise<any>;
+    action: (payload: Record<string, any>) => Promise<any>;
+  };
+  workItem: {
+    list: (params?: ErpListParams & {
+      ownerRole?: string;
+      status?: string;
+      priority?: string;
+      activeOnly?: boolean;
+    }) => Promise<any[]>;
+    stats: (params?: ErpListParams) => Promise<any>;
+    generate: (payload?: ErpListParams & { actor?: ErpActor }) => Promise<any>;
+    updateStatus: (payload: {
+      id?: string;
+      workItemId?: string;
+      status: string;
+      remark?: string;
+      actor?: ErpActor;
+    }) => Promise<any>;
+  };
+  lan: {
+    getStatus: () => Promise<ErpLanStatus>;
+    start: (payload?: { port?: number; bindAddress?: string }) => Promise<ErpLanStatus>;
+    stop: () => Promise<ErpLanStatus>;
+  };
 }
 
 interface YunqiPriceEntry {
@@ -423,6 +597,7 @@ interface ElectronAPI {
   yunqiDb: YunqiDbAPI;
   imageStudio: ImageStudioAPI;
   imageStudioGpt: ImageStudioAPI & { switchProfile: () => Promise<{ profile: string; status: unknown }> };
+  erp: ErpAPI;
   app: AppAPI;
   store: StoreAPI;
   onAutomationEvent: (callback: (data: any) => void) => (() => void);

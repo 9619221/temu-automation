@@ -1,6 +1,8 @@
 import { Suspense, lazy, useEffect, useRef, useState } from "react";
-import { Routes, Route, Navigate } from "react-router-dom";
+import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { CollectionProvider } from "./contexts/CollectionContext";
+import { ErpAuthProvider, useErpAuth } from "./contexts/ErpAuthContext";
+import { canAccessRoute, getDefaultPathForRole, roleLabel } from "./utils/erpRoleAccess";
 import {
   ACTIVE_ACCOUNT_CHANGED_EVENT,
   emitActiveAccountChanged,
@@ -24,6 +26,14 @@ const ImageStudioGPT = lazy(() => import("./pages/ImageStudioGPT"));
 const Logs = lazy(() => import("./pages/Logs"));
 const CompetitorAnalysis = lazy(() => import("./pages/CompetitorAnalysis"));
 const PriceReview = lazy(() => import("./pages/PriceReview"));
+const ErpDebug = lazy(() => import("./pages/ErpDebug"));
+const DailyCommandCenter = lazy(() => import("./pages/DailyCommandCenter"));
+const PurchaseCenter = lazy(() => import("./pages/PurchaseCenter"));
+const WarehouseCenter = lazy(() => import("./pages/WarehouseCenter"));
+const QcOutboundCenter = lazy(() => import("./pages/QcOutboundCenter"));
+const WorkItems = lazy(() => import("./pages/WorkItems"));
+const UserManagement = lazy(() => import("./pages/UserManagement"));
+const ErpLogin = lazy(() => import("./pages/ErpLogin"));
 
 function RouteLoading() {
   return (
@@ -59,6 +69,51 @@ function RouteLoading() {
       </style>
     </div>
   );
+}
+
+function RequireAuth({ children }: { children: JSX.Element }) {
+  const auth = useErpAuth();
+  const location = useLocation();
+
+  if (auth.loading) return <RouteLoading />;
+  if (!auth.currentUser) {
+    return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+  }
+  return children;
+}
+
+function RoleHomeRedirect() {
+  const { currentUser } = useErpAuth();
+  return <Navigate to={getDefaultPathForRole(currentUser?.role)} replace />;
+}
+
+function AccessDenied() {
+  const { currentUser } = useErpAuth();
+  return (
+    <div
+      style={{
+        minHeight: 360,
+        display: "grid",
+        placeItems: "center",
+        background: "#fff",
+        borderRadius: 10,
+        border: "1px solid #eef0f5",
+      }}
+    >
+      <div style={{ textAlign: "center", padding: 24 }}>
+        <div style={{ fontSize: 22, fontWeight: 800, marginBottom: 8 }}>无权访问</div>
+        <div style={{ color: "#667085", marginBottom: 16 }}>
+          当前角色：{roleLabel(currentUser?.role)}。请切换到有权限的账号。
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RoleRoute({ path, children }: { path: string; children: JSX.Element }) {
+  const { currentUser } = useErpAuth();
+  if (!canAccessRoute(currentUser?.role, path)) return <AccessDenied />;
+  return children;
 }
 
 function App() {
@@ -127,34 +182,51 @@ function App() {
   }, []);
 
   return (
-    <CollectionProvider key={`collection-${accountViewVersion}`}>
-      <Suspense fallback={<RouteLoading />}>
-        <Routes>
-          <Route path="/" element={<AppLayout key={`layout-${accountViewVersion}`} />}>
-            <Route index element={<Navigate to="/shop" replace />} />
-            <Route path="shop" element={<ShopOverview />} />
-            <Route path="products" element={<ProductList />} />
-            <Route path="products/:id" element={<ProductDetail />} />
-            <Route path="create-product" element={<ProductCreate />} />
+    <ErpAuthProvider>
+      <CollectionProvider key={`collection-${accountViewVersion}`}>
+        <Suspense fallback={<RouteLoading />}>
+          <Routes>
+            <Route path="/login" element={<ErpLogin />} />
+            <Route
+              path="/"
+              element={(
+                <RequireAuth>
+                  <AppLayout key={`layout-${accountViewVersion}`} />
+                </RequireAuth>
+              )}
+            >
+            <Route index element={<RoleHomeRedirect />} />
+            <Route path="shop" element={<RoleRoute path="/shop"><ShopOverview /></RoleRoute>} />
+            <Route path="products" element={<RoleRoute path="/products"><ProductList /></RoleRoute>} />
+            <Route path="products/:id" element={<RoleRoute path="/products"><ProductDetail /></RoleRoute>} />
+            <Route path="create-product" element={<RoleRoute path="/create-product"><ProductCreate /></RoleRoute>} />
             <Route path="product-create" element={<Navigate to="/create-product" replace />} />
-            <Route path="image-studio" element={<ImageStudio />} />
-            <Route path="image-studio-gpt" element={<ImageStudioGPT />} />
-            <Route path="collect" element={<Dashboard />} />
-            <Route path="accounts" element={<AccountManager />} />
-            <Route path="tasks" element={<Navigate to="/collect" replace />} />
-            <Route path="competitor" element={<CompetitorAnalysis />} />
-            <Route path="price-review" element={<PriceReview />} />
-            <Route path="logs" element={<Logs />} />
-            <Route path="settings" element={<Settings />} />
+            <Route path="image-studio" element={<RoleRoute path="/image-studio"><ImageStudio /></RoleRoute>} />
+            <Route path="image-studio-gpt" element={<RoleRoute path="/image-studio-gpt"><ImageStudioGPT /></RoleRoute>} />
+            <Route path="collect" element={<RoleRoute path="/collect"><Dashboard /></RoleRoute>} />
+            <Route path="accounts" element={<RoleRoute path="/accounts"><AccountManager /></RoleRoute>} />
+            <Route path="tasks" element={<Navigate to="/work-items" replace />} />
+            <Route path="competitor" element={<RoleRoute path="/competitor"><CompetitorAnalysis /></RoleRoute>} />
+            <Route path="price-review" element={<RoleRoute path="/price-review"><PriceReview /></RoleRoute>} />
+            <Route path="daily-command" element={<RoleRoute path="/daily-command"><DailyCommandCenter /></RoleRoute>} />
+            <Route path="purchase-center" element={<RoleRoute path="/purchase-center"><PurchaseCenter /></RoleRoute>} />
+            <Route path="warehouse-center" element={<RoleRoute path="/warehouse-center"><WarehouseCenter /></RoleRoute>} />
+            <Route path="qc-outbound" element={<RoleRoute path="/qc-outbound"><QcOutboundCenter /></RoleRoute>} />
+            <Route path="work-items" element={<RoleRoute path="/work-items"><WorkItems /></RoleRoute>} />
+            <Route path="users" element={<RoleRoute path="/users"><UserManagement /></RoleRoute>} />
+            <Route path="erp-debug" element={<RoleRoute path="/erp-debug"><ErpDebug /></RoleRoute>} />
+            <Route path="logs" element={<RoleRoute path="/logs"><Logs /></RoleRoute>} />
+            <Route path="settings" element={<RoleRoute path="/settings"><Settings /></RoleRoute>} />
             {/* Legacy routes */}
             <Route path="dashboard" element={<Navigate to="/shop" replace />} />
             <Route path="sales" element={<Navigate to="/products" replace />} />
             <Route path="orders" element={<Navigate to="/products" replace />} />
             <Route path="analytics" element={<Navigate to="/shop" replace />} />
           </Route>
-        </Routes>
-      </Suspense>
-    </CollectionProvider>
+          </Routes>
+        </Suspense>
+      </CollectionProvider>
+    </ErpAuthProvider>
   );
 }
 
