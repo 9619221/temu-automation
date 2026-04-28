@@ -84,6 +84,13 @@ export default function UserManagement() {
     void loadUsers();
   }, [loadUsers]);
 
+  useEffect(() => {
+    const unsubscribe = erp?.events?.onUserUpdate?.(() => {
+      void loadUsers();
+    });
+    return unsubscribe;
+  }, [loadUsers]);
+
   const resetForm = () => {
     form.resetFields();
     form.setFieldsValue({ role: "buyer", status: "active" });

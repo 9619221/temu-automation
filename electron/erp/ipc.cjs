@@ -12,6 +12,7 @@ const enums = require("./workflow/enums.cjs");
 const {
   broadcastLanEvent,
   getLanStatus,
+  syncLanUserSessions,
   startLanServer,
   stopLanServer,
 } = require("./lanServer.cjs");
@@ -35,6 +36,7 @@ const erpState = {
 };
 
 const PURCHASE_UPDATE_CHANNEL = "erp:purchase:update";
+const USER_UPDATE_CHANNEL = "erp:user:update";
 const rendererEventSubscribers = new Set();
 const BROADCAST_PURCHASE_ACTIONS = new Set([
   "create_pr",
@@ -53,6 +55,8 @@ const BROADCAST_PURCHASE_ACTIONS = new Set([
 const ACCESS_CODE_ITERATIONS = 120000;
 const ACCESS_CODE_KEY_LENGTH = 32;
 const ACCESS_CODE_DIGEST = "sha256";
+const VALID_USER_ROLES = new Set(["admin", "manager", "operations", "buyer", "finance", "warehouse", "viewer"]);
+const VALID_USER_STATUSES = new Set(["active", "blocked"]);
 
 function toCamelKey(key) {
   return String(key).replace(/_([a-z])/g, (_, char) => char.toUpperCase());
@@ -106,18 +110,26 @@ function unsubscribeRendererEvents(webContents) {
   if (webContents) rendererEventSubscribers.delete(webContents);
 }
 
-function broadcastRendererPurchaseUpdate(payload) {
+function broadcastRendererEvent(channel, payload) {
   for (const webContents of Array.from(rendererEventSubscribers)) {
     if (!webContents || webContents.isDestroyed()) {
       rendererEventSubscribers.delete(webContents);
       continue;
     }
     try {
-      webContents.send(PURCHASE_UPDATE_CHANNEL, payload);
+      webContents.send(channel, payload);
     } catch {
       rendererEventSubscribers.delete(webContents);
     }
   }
+}
+
+function broadcastRendererPurchaseUpdate(payload) {
+  broadcastRendererEvent(PURCHASE_UPDATE_CHANNEL, payload);
+}
+
+function broadcastRendererUserUpdate(payload) {
+  broadcastRendererEvent(USER_UPDATE_CHANNEL, payload);
 }
 
 function broadcastPurchaseUpdate(action, payload = {}, actor = {}, result = {}) {
@@ -134,6 +146,23 @@ function broadcastPurchaseUpdate(action, payload = {}, actor = {}, result = {}) 
     broadcastLanEvent(event);
   } catch {}
   broadcastRendererPurchaseUpdate(event);
+  return event;
+}
+
+function broadcastUserUpdate(action, payload = {}, actor = {}, user = {}) {
+  const event = {
+    type: "user:update",
+    action,
+    userId: optionalString(user.id || payload.id),
+    role: optionalString(user.role || payload.role),
+    status: optionalString(user.status || payload.status),
+    actorRole: optionalString(actor.role),
+    at: nowIso(),
+  };
+  try {
+    broadcastLanEvent(event);
+  } catch {}
+  broadcastRendererUserUpdate(event);
   return event;
 }
 
@@ -376,12 +405,26 @@ function listUsers(params = {}) {
 function upsertUser(payload = {}) {
   const { db } = requireErp();
   const now = nowIso();
+  const id = optionalString(payload.id) || createId("user");
+  const role = requireString(payload.role, "role");
+  const status = optionalString(payload.status) || "active";
+  const accessCodeHash = hashAccessCode(payload.accessCode);
+  if (!VALID_USER_ROLES.has(role)) {
+    throw new Error("Invalid user role");
+  }
+  if (!VALID_USER_STATUSES.has(status)) {
+    throw new Error("Invalid user status");
+  }
+  const existing = db.prepare("SELECT id FROM erp_users WHERE id = ?").get(id);
+  if (!existing && !accessCodeHash) {
+    throw new Error("Access code is required for new users");
+  }
   const row = {
-    id: optionalString(payload.id) || createId("user"),
+    id,
     name: requireString(payload.name, "name"),
-    role: requireString(payload.role, "role"),
-    status: optionalString(payload.status) || "active",
-    access_code_hash: hashAccessCode(payload.accessCode),
+    role,
+    status,
+    access_code_hash: accessCodeHash,
     created_at: now,
     updated_at: now,
   };
@@ -404,6 +447,34 @@ function upsertUser(payload = {}) {
     FROM erp_users
     WHERE id = ?
   `).get(row.id));
+}
+
+function upsertUserAndBroadcast(payload = {}, actor = {}) {
+  const user = upsertUser(payload);
+  broadcastUserUpdate(optionalString(payload.id) ? "update_user" : "create_user", payload, actor, user);
+  try {
+    syncLanUserSessions(user);
+  } catch {}
+  return user;
+}
+
+function validateLanSessionUser(userId) {
+  const { db } = requireErp();
+  const id = optionalString(userId);
+  if (!id) return null;
+  const row = db.prepare(`
+    SELECT id, name, role, status
+    FROM erp_users
+    WHERE id = ?
+    LIMIT 1
+  `).get(id);
+  if (!row || row.status !== "active") return null;
+  return {
+    id: row.id,
+    name: row.name,
+    role: row.role,
+    status: row.status,
+  };
 }
 
 function verifyLanLogin(payload = {}) {
@@ -2527,6 +2598,9 @@ function startLanService(payload = {}) {
     generateWorkItems: generateWorkItemsForUser,
     updateWorkItemStatus: updateWorkItemStatusForUser,
     verifyLogin: verifyLanLogin,
+    validateSessionUser: validateLanSessionUser,
+    listUsers,
+    upsertUser: upsertUserAndBroadcast,
   });
 }
 
@@ -2581,6 +2655,9 @@ async function startErpHeadlessServer(options = {}) {
     generateWorkItems: generateWorkItemsForUser,
     updateWorkItemStatus: updateWorkItemStatusForUser,
     verifyLogin: verifyLanLogin,
+    validateSessionUser: validateLanSessionUser,
+    listUsers,
+    upsertUser: upsertUserAndBroadcast,
   });
 
   return {
@@ -2629,7 +2706,7 @@ function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:user:upsert", (_event, payload) => {
     assertHostMode("用户管理");
     assertRoleIfLoggedIn(["admin", "manager"]);
-    return upsertUser(payload || {});
+    return upsertUserAndBroadcast(payload || {}, erpState.currentUser || {});
   });
   ipcMain.handle("erp:supplier:list", (_event, params) => {
     assertHostMode("供应商管理");

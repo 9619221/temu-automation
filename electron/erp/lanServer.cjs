@@ -9,6 +9,9 @@ const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
 const ROLE_PERMISSIONS = Object.freeze({
   "/": ["admin", "manager", "operations", "buyer", "finance", "warehouse", "viewer"],
+  "/users": ["admin", "manager"],
+  "/api/users/list": ["admin", "manager"],
+  "/api/users/upsert": ["admin", "manager"],
   "/purchase": ["admin", "manager", "operations", "buyer", "finance"],
   "/api/purchase/workbench": ["admin", "manager", "operations", "buyer", "finance"],
   "/api/purchase/action": ["admin", "manager", "operations", "buyer", "finance"],
@@ -107,6 +110,21 @@ const OUTBOUND_STATUS_LABELS = Object.freeze({
   cancelled: "已取消",
 });
 
+const USER_STATUS_LABELS = Object.freeze({
+  active: "启用",
+  blocked: "停用",
+});
+
+const USER_ROLE_OPTIONS = Object.freeze([
+  ["admin", "管理员"],
+  ["manager", "负责人"],
+  ["operations", "运营"],
+  ["buyer", "采购"],
+  ["finance", "财务"],
+  ["warehouse", "仓库"],
+  ["viewer", "只读"],
+]);
+
 const lanState = {
   server: null,
   port: DEFAULT_LAN_PORT,
@@ -170,6 +188,7 @@ function getLanStatus(extra = {}) {
     lanUrls: urls.lanUrls,
     routes: [
       { path: "/", label: "入口", allowedRoles: ROLE_PERMISSIONS["/"] },
+      { path: "/users", label: "用户管理", allowedRoles: ROLE_PERMISSIONS["/users"] },
       { path: "/purchase", label: "采购工作台", allowedRoles: ROLE_PERMISSIONS["/purchase"] },
       { path: "/warehouse", label: "仓库工作台", allowedRoles: ROLE_PERMISSIONS["/warehouse"] },
       { path: "/qc", label: "QC 抽检工作台", allowedRoles: ROLE_PERMISSIONS["/qc"] },
@@ -260,6 +279,45 @@ function getSessionFromRequest(req) {
 function destroySession(req) {
   const token = parseCookies(req)[SESSION_COOKIE_NAME];
   if (token) lanState.sessions.delete(token);
+}
+
+function syncLanUserSessions(user = {}) {
+  const userId = String(user.id || "").trim();
+  if (!userId) return { updated: 0, removed: 0 };
+  const nextUser = {
+    id: userId,
+    name: user.name,
+    role: user.role,
+    status: user.status,
+  };
+  const isActive = user.status === "active";
+  let updated = 0;
+  let removed = 0;
+
+  for (const [token, session] of Array.from(lanState.sessions.entries())) {
+    if (session?.user?.id !== userId) continue;
+    if (!isActive) {
+      lanState.sessions.delete(token);
+      removed += 1;
+      continue;
+    }
+    session.user = nextUser;
+    updated += 1;
+  }
+
+  for (const client of Array.from(lanState.wsClients)) {
+    if (client?.user?.id !== userId) continue;
+    if (!isActive) {
+      setTimeout(() => {
+        try { client.socket.destroy(); } catch {}
+      }, 1200);
+      lanState.wsClients.delete(client);
+      continue;
+    }
+    client.user = nextUser;
+  }
+
+  return { updated, removed };
 }
 
 function writeUpgradeError(socket, statusCode, message) {
@@ -445,6 +503,7 @@ function writeForbidden(res, user, pathname) {
 function renderShell({ title, subtitle, cards = [], currentPath, user, content = "" }) {
   const navItems = [
     ["/", "入口"],
+    ["/users", "用户"],
     ["/purchase", "采购"],
     ["/warehouse", "仓库"],
     ["/qc", "QC"],
@@ -457,7 +516,10 @@ function renderShell({ title, subtitle, cards = [], currentPath, user, content =
       <div class="card-body">${card.body}</div>
     </section>
   `).join("");
-  const navHtml = navItems.map(([path, label]) => `
+  const navHtml = navItems.filter(([path]) => {
+    if (path === "/health") return true;
+    return !user || isRoleAllowed(path, user.role);
+  }).map(([path, label]) => `
     <a class="${path === currentPath ? "active" : ""}" href="${path}">${escapeHtml(label)}</a>
   `).join("");
   const userHtml = user
@@ -731,6 +793,13 @@ function renderShell({ title, subtitle, cards = [], currentPath, user, content =
     .action-chip.success {
       background: #16a34a;
     }
+    .action-chip.danger {
+      background: #d92d20;
+    }
+    .action-chip:disabled {
+      cursor: not-allowed;
+      opacity: 0.45;
+    }
     .inline-form {
       display: inline-flex;
       margin: 0;
@@ -873,18 +942,20 @@ function renderShell({ title, subtitle, cards = [], currentPath, user, content =
     ${cardHtml ? `<div class="grid">${cardHtml}</div>` : ""}
     ${content}
   </main>
-  <div id="realtime-toast" class="realtime-toast">采购协作已更新，正在刷新...</div>
+  <div id="realtime-toast" class="realtime-toast">数据已更新，正在刷新...</div>
   <script>
     (function () {
       if (!("WebSocket" in window)) return;
       var currentPath = ${JSON.stringify(currentPath || "")};
+      var currentUserId = ${JSON.stringify(user?.id || null)};
       var retryCount = 0;
       var reloadTimer = null;
       var toastTimer = null;
 
-      function showRealtimeToast() {
+      function showRealtimeToast(text) {
         var toast = document.getElementById("realtime-toast");
         if (!toast) return;
+        if (text) toast.textContent = text;
         toast.classList.add("is-visible");
         window.clearTimeout(toastTimer);
         toastTimer = window.setTimeout(function () {
@@ -905,8 +976,25 @@ function renderShell({ title, subtitle, cards = [], currentPath, user, content =
           } catch {
             return;
           }
-          if (!payload || payload.type !== "purchase:update" || currentPath !== "/purchase") return;
-          showRealtimeToast();
+          if (!payload) return;
+          if (payload.type === "purchase:update") {
+            if (currentPath !== "/purchase") return;
+            showRealtimeToast("采购协作已更新，正在刷新...");
+          } else if (payload.type === "user:update") {
+            var isCurrentUser = payload.userId && currentUserId && payload.userId === currentUserId;
+            if (isCurrentUser && payload.status && payload.status !== "active") {
+              showRealtimeToast("当前账号已停用，正在退出...");
+              window.clearTimeout(reloadTimer);
+              reloadTimer = window.setTimeout(function () {
+                window.location.href = "/logout";
+              }, 700);
+              return;
+            }
+            if (currentPath !== "/users" && !isCurrentUser) return;
+            showRealtimeToast("用户信息已更新，正在刷新...");
+          } else {
+            return;
+          }
           window.clearTimeout(reloadTimer);
           reloadTimer = window.setTimeout(function () {
             window.location.reload();
@@ -1047,7 +1135,7 @@ function buildLandingCards() {
     },
     {
       title: "已开放页面",
-      body: "<ul><li>采购工作台：<code>/purchase</code></li><li>仓库工作台：<code>/warehouse</code></li><li>QC 抽检：<code>/qc</code></li></ul>",
+      body: "<ul><li>用户管理：<code>/users</code></li><li>采购工作台：<code>/purchase</code></li><li>仓库工作台：<code>/warehouse</code></li><li>QC 抽检：<code>/qc</code></li></ul>",
     },
     {
       title: "安全边界",
@@ -1117,10 +1205,10 @@ function statusClass(status) {
   if (["buyer_processing", "sourced", "waiting_ops_confirm", "supplier_processing", "shipped", "arrived", "counted", "in_progress", "picking", "packed", "shipped_out"].includes(status)) {
     return "status-info";
   }
-  if (["converted_to_po", "paid", "inbounded", "closed", "approved", "inbounded_pending_qc", "passed", "passed_with_observation", "partial_passed", "confirmed"].includes(status)) {
+  if (["active", "converted_to_po", "paid", "inbounded", "closed", "approved", "inbounded_pending_qc", "passed", "passed_with_observation", "partial_passed", "confirmed"].includes(status)) {
     return "status-ok";
   }
-  if (["rejected", "cancelled", "exception", "delayed", "quantity_mismatch", "damaged", "failed", "rework_required"].includes(status)) {
+  if (["blocked", "rejected", "cancelled", "exception", "delayed", "quantity_mismatch", "damaged", "failed", "rework_required"].includes(status)) {
     return "status-danger";
   }
   return "";
@@ -1164,6 +1252,114 @@ function renderTable({ columns, rows, emptyText }) {
       </table>
     </div>
   `;
+}
+
+function renderSelectOptions(options, selected) {
+  return options.map(([value, label]) => `
+    <option value="${escapeHtml(value)}" ${value === selected ? "selected" : ""}>${escapeHtml(label)}</option>
+  `).join("");
+}
+
+function renderUserCreateForm() {
+  return `
+    <form class="stacked-form" method="post" action="/api/users/upsert">
+      <div class="form-grid">
+        <label class="inline-label">用户名称
+          <input class="mini-input full" name="name" placeholder="例如：采购小王" required />
+        </label>
+        <label class="inline-label">角色
+          <select class="mini-input full" name="role" required>
+            ${renderSelectOptions(USER_ROLE_OPTIONS, "buyer")}
+          </select>
+        </label>
+        <label class="inline-label">状态
+          <select class="mini-input full" name="status">
+            ${renderSelectOptions(Object.entries(USER_STATUS_LABELS), "active")}
+          </select>
+        </label>
+        <label class="inline-label">访问码
+          <input class="mini-input full" name="accessCode" type="password" autocomplete="new-password" required />
+        </label>
+      </div>
+      <div class="actions">
+        <button class="action-chip" type="submit">创建用户</button>
+      </div>
+    </form>
+  `;
+}
+
+function renderUserEditForm(row, currentUser) {
+  const isSelf = row.id === currentUser?.id;
+  return `
+    <div class="actions">
+      <form class="compact-form" method="post" action="/api/users/upsert">
+        <input type="hidden" name="id" value="${escapeHtml(row.id)}" />
+        <label class="inline-label">名称
+          <input class="mini-input full" name="name" value="${escapeHtml(row.name || "")}" required />
+        </label>
+        <label class="inline-label">角色
+          <select class="mini-input full" name="role" required>
+            ${renderSelectOptions(USER_ROLE_OPTIONS, row.role)}
+          </select>
+        </label>
+        <label class="inline-label">状态
+          <select class="mini-input full" name="status">
+            ${renderSelectOptions(Object.entries(USER_STATUS_LABELS), row.status || "active")}
+          </select>
+        </label>
+        <label class="inline-label">重设访问码
+          <input class="mini-input full" name="accessCode" type="password" autocomplete="new-password" placeholder="留空不改" />
+        </label>
+        <button class="action-chip secondary" type="submit">保存</button>
+      </form>
+      <form class="inline-form" method="post" action="/api/users/upsert">
+        <input type="hidden" name="id" value="${escapeHtml(row.id)}" />
+        <input type="hidden" name="name" value="${escapeHtml(row.name || "")}" />
+        <input type="hidden" name="role" value="${escapeHtml(row.role || "buyer")}" />
+        <input type="hidden" name="status" value="${row.status === "active" ? "blocked" : "active"}" />
+        <button class="action-chip ${row.status === "active" ? "danger" : "success"}" type="submit" ${isSelf && row.status === "active" ? "disabled" : ""}>
+          ${row.status === "active" ? "停用" : "启用"}
+        </button>
+      </form>
+    </div>
+  `;
+}
+
+function renderUserManagement(users = [], currentUser = {}) {
+  const rows = Array.isArray(users) ? users : [];
+  const activeCount = rows.filter((row) => row.status === "active").length;
+  const userTable = renderTable({
+    rows,
+    emptyText: "暂无系统用户",
+    columns: [
+      {
+        title: "用户",
+        render: (row) => `
+          <div class="primary-text">${escapeHtml(row.name || "-")}</div>
+          <div class="muted">${escapeHtml(row.id || "-")}</div>
+        `,
+      },
+      { title: "角色", render: (row) => `<span class="status status-info">${escapeHtml(roleLabel(row.role))}</span>` },
+      { title: "状态", render: (row) => statusPill(row.status, USER_STATUS_LABELS) },
+      { title: "访问码", render: (row) => `<span class="status ${row.hasAccessCode ? "status-ok" : "status-warn"}">${row.hasAccessCode ? "已设置" : "未设置"}</span>` },
+      { title: "更新", render: (row) => formatDate(row.updatedAt) },
+      { title: "编辑", render: (row) => renderUserEditForm(row, currentUser) },
+    ],
+  });
+
+  return [
+    renderSection({
+      title: "创建用户",
+      subtitle: "新用户保存后无需重启服务，可立即用用户名称或 ID 登录。",
+      table: `<div style="padding: 16px;">${renderUserCreateForm()}</div>`,
+    }),
+    renderSection({
+      title: "系统用户",
+      subtitle: "停用用户会立即失去网页登录会话；启用用户可以按角色访问对应工作台。",
+      badge: `${rows.length} 个用户 / ${activeCount} 个启用`,
+      table: userTable,
+    }),
+  ].join("");
 }
 
 function renderSkuCell(row) {
@@ -2143,6 +2339,11 @@ function createRequestHandler(options = {}) {
   const updateWorkItemStatus = options.updateWorkItemStatus || (() => {
     throw new Error("Work item action handler is not available");
   });
+  const listUsers = options.listUsers || (() => []);
+  const upsertUser = options.upsertUser || (() => {
+    throw new Error("User action handler is not available");
+  });
+  const validateSessionUser = options.validateSessionUser || null;
   const verifyLogin = options.verifyLogin || (() => null);
 
   return (req, res) => {
@@ -2162,6 +2363,9 @@ function createRequestHandler(options = {}) {
       getWorkItemStats,
       generateWorkItems,
       updateWorkItemStatus,
+      listUsers,
+      upsertUser,
+      validateSessionUser,
       verifyLogin,
     }).catch((error) => {
       writeJson(res, 500, {
@@ -2236,6 +2440,62 @@ async function handleLoginRequest({ req, res, verifyLogin }) {
   writeRedirect(res, next, {
     "Set-Cookie": buildSessionCookie(token),
   });
+}
+
+async function handleUserUpsertRequest({ req, res, session, upsertUser }) {
+  const wantsJson = String(req.headers.accept || "").includes("application/json")
+    || String(req.headers["content-type"] || "").includes("application/json");
+  if (req.method !== "POST") {
+    writeJson(res, 405, { ok: false, error: "Method not allowed" });
+    return;
+  }
+
+  try {
+    const payload = await readLoginPayload(req);
+    if (!payload.id && !String(payload.accessCode || "").trim()) {
+      throw new Error("新建用户必须设置访问码");
+    }
+    if (payload.role && !USER_ROLE_OPTIONS.some(([role]) => role === payload.role)) {
+      throw new Error("用户角色无效");
+    }
+    if (payload.status && !Object.prototype.hasOwnProperty.call(USER_STATUS_LABELS, payload.status)) {
+      throw new Error("用户状态无效");
+    }
+    if (payload.id === session.user.id && payload.status && payload.status !== "active") {
+      throw new Error("不能停用当前登录用户");
+    }
+    const user = await upsertUser(payload, session.user);
+    if (wantsJson) {
+      writeJson(res, 200, { ok: true, user });
+      return;
+    }
+    writeRedirect(res, "/users");
+  } catch (error) {
+    if (wantsJson) {
+      writeJson(res, 400, {
+        ok: false,
+        error: error?.message || String(error),
+        code: error?.code || null,
+      });
+      return;
+    }
+    writeHtml(res, renderShell({
+      title: "用户保存失败",
+      subtitle: error?.message || String(error),
+      cards: [
+        {
+          title: "处理建议",
+          body: "请确认用户名称、角色、状态和访问码是否填写完整。新建用户必须设置访问码，编辑用户时访问码可以留空。",
+        },
+        {
+          title: "返回入口",
+          body: '<a class="action-chip" href="/users">回到用户管理</a>',
+        },
+      ],
+      currentPath: "/users",
+      user: session.user,
+    }), 400);
+  }
 }
 
 async function handlePurchaseActionRequest({ req, res, session, performPurchaseAction }) {
@@ -2431,6 +2691,9 @@ async function handleRequest({
   getWorkItemStats,
   generateWorkItems,
   updateWorkItemStatus,
+  listUsers,
+  upsertUser,
+  validateSessionUser,
   verifyLogin,
 }) {
     if (req.method === "OPTIONS") {
@@ -2497,13 +2760,24 @@ async function handleRequest({
     }
 
     const protectedPath = ROLE_PERMISSIONS[pathname] ? pathname : null;
-    const session = protectedPath ? getSessionFromRequest(req) : null;
+    let session = protectedPath ? getSessionFromRequest(req) : null;
+    let shouldClearSessionCookie = false;
+    if (session && typeof validateSessionUser === "function") {
+      const freshUser = await validateSessionUser(session.user?.id);
+      if (!freshUser) {
+        destroySession(req);
+        session = null;
+        shouldClearSessionCookie = true;
+      } else {
+        session.user = freshUser;
+      }
+    }
     if (protectedPath && !session) {
       if (pathname.startsWith("/api/")) {
-        writeJson(res, 401, { ok: false, error: "Unauthorized" });
+        writeJson(res, 401, { ok: false, error: "Unauthorized" }, shouldClearSessionCookie ? { "Set-Cookie": buildClearSessionCookie() } : {});
         return;
       }
-      writeRedirect(res, `/login?next=${encodeURIComponent(pathname)}`);
+      writeRedirect(res, `/login?next=${encodeURIComponent(pathname)}`, shouldClearSessionCookie ? { "Set-Cookie": buildClearSessionCookie() } : {});
       return;
     }
     if (protectedPath && !isRoleAllowed(pathname, session.user.role)) {
@@ -2512,6 +2786,24 @@ async function handleRequest({
         return;
       }
       writeForbidden(res, session.user, pathname);
+      return;
+    }
+
+    if (pathname === "/api/users/list") {
+      writeJson(res, 200, {
+        ok: true,
+        users: await listUsers({ limit: 200 }),
+      });
+      return;
+    }
+
+    if (pathname === "/api/users/upsert") {
+      await handleUserUpsertRequest({
+        req,
+        res,
+        session,
+        upsertUser,
+      });
       return;
     }
 
@@ -2638,6 +2930,28 @@ async function handleRequest({
         cards: buildLandingCards(),
         currentPath: "/",
         user: session.user,
+      }));
+      return;
+    }
+
+    if (pathname === "/users") {
+      const users = await listUsers({ limit: 200 });
+      writeHtml(res, renderShell({
+        title: "用户管理",
+        subtitle: "管理员在这里创建真实账号、分配角色、重设访问码，并实时同步给已登录用户。",
+        cards: [
+          {
+            title: "实时同步",
+            body: "保存用户后会通过 WebSocket 推送到已登录页面；被停用的账号会立即退出网页登录。",
+          },
+          {
+            title: "登录规则",
+            body: "用户可使用用户名称或用户 ID 登录。新建用户必须设置访问码，编辑用户时访问码留空表示不修改。",
+          },
+        ],
+        currentPath: pathname,
+        user: session.user,
+        content: renderUserManagement(users, session.user),
       }));
       return;
     }
@@ -2775,6 +3089,7 @@ module.exports = {
   getLanAddresses,
   getLanStatus,
   broadcastLanEvent,
+  syncLanUserSessions,
   startLanServer,
   stopLanServer,
 };

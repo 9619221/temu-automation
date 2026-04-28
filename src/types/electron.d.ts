@@ -330,6 +330,16 @@ interface ErpPurchaseUpdateEvent {
   at?: string;
 }
 
+interface ErpUserUpdateEvent {
+  type: "user:update";
+  action: string;
+  userId?: string | null;
+  role?: string | null;
+  status?: string | null;
+  actorRole?: string | null;
+  at?: string;
+}
+
 interface ErpAPI {
   getStatus: () => Promise<ErpStatus>;
   runMigrations: () => Promise<ErpStatus>;
@@ -446,6 +456,7 @@ interface ErpAPI {
   };
   events?: {
     onPurchaseUpdate: (handler: (payload: ErpPurchaseUpdateEvent) => void) => () => void;
+    onUserUpdate: (handler: (payload: ErpUserUpdateEvent) => void) => () => void;
   };
 }
 

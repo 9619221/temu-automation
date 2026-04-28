@@ -1,5 +1,20 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
+let erpEventSubscriptionCount = 0;
+
+function retainErpEventSubscription() {
+  erpEventSubscriptionCount += 1;
+  if (erpEventSubscriptionCount === 1) {
+    ipcRenderer.send("erp:events:subscribe");
+  }
+  return () => {
+    erpEventSubscriptionCount = Math.max(0, erpEventSubscriptionCount - 1);
+    if (erpEventSubscriptionCount === 0) {
+      ipcRenderer.send("erp:events:unsubscribe");
+    }
+  };
+}
+
 function createImageStudioApi(profile) {
   const ensureProfile = () => ipcRenderer.invoke("image-studio:switch-profile", profile);
   const withProfile = (fn) => async (...args) => {
@@ -238,11 +253,20 @@ contextBridge.exposeInMainWorld("electronAPI", {
     events: {
       onPurchaseUpdate: (handler) => {
         const listener = (_event, payload) => handler(payload);
-        ipcRenderer.send("erp:events:subscribe");
+        const releaseSubscription = retainErpEventSubscription();
         ipcRenderer.on("erp:purchase:update", listener);
         return () => {
           ipcRenderer.removeListener("erp:purchase:update", listener);
-          ipcRenderer.send("erp:events:unsubscribe");
+          releaseSubscription();
+        };
+      },
+      onUserUpdate: (handler) => {
+        const listener = (_event, payload) => handler(payload);
+        const releaseSubscription = retainErpEventSubscription();
+        ipcRenderer.on("erp:user:update", listener);
+        return () => {
+          ipcRenderer.removeListener("erp:user:update", listener);
+          releaseSubscription();
         };
       },
     },

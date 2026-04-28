@@ -116,6 +116,18 @@ export function ErpAuthProvider({ children }: { children: ReactNode }) {
     }
   }, [getAuthApi]);
 
+  useEffect(() => {
+    const unsubscribe = window.electronAPI?.erp?.events?.onUserUpdate?.((payload: { userId?: string | null; status?: string | null }) => {
+      if (!payload?.userId || payload.userId !== status.currentUser?.id) return;
+      if (payload.status && payload.status !== "active") {
+        void logout();
+        return;
+      }
+      void refresh();
+    });
+    return unsubscribe;
+  }, [logout, refresh, status.currentUser?.id]);
+
   const value = useMemo<ErpAuthContextValue>(() => ({
     ...status,
     loading,
