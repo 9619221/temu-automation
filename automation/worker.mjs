@@ -2,12 +2,10 @@
  * 自动化 Worker - 通过 HTTP 服务通信，避免 stdio pipe 继承问题
  */
 import { chromium } from "playwright";
-import http from "http";
 import https from "https";
 import fs from "fs";
 import path from "path";
 import os from "os";
-import crypto from "crypto";
 import { createRequire } from "module";
 import { fileURLToPath } from "url";
 import { randomDelay, downloadImage, saveBase64Image, getDebugDir, getTmpDir, logSilent, ERR } from "./utils.mjs";
@@ -18,6 +16,7 @@ import { buildYunqiOnlineHandlers } from "./yunqi-online.mjs";
 import { loadFirstEnvFile } from "./env-loader.mjs";
 import { createAiRuntime } from "./ai-runtime.mjs";
 import { parseLocalUrl, readJsonBody, sendJson, sendNoContent } from "./http-json.mjs";
+import { createWorkerAuthToken, createWorkerAuthenticator, createWorkerServer, resolveWorkerPort, startWorkerServer } from "./worker-server.mjs";
 import { optimizeTitle as _optimizeTitle } from "./title-optimizer.mjs";
 import { scrapeCompetitorReviews as _scrapeCompetitorReviews, openTemuLoginPage as _openTemuLoginPage, openTemuSearchPage as _openTemuSearchPage, extractReviewsFromFeed as _extractReviewsFromFeed, dumpFeedForGoods as _dumpFeedForGoods, extractProductFromFeed as _extractProductFromFeed, extractSearchResultsFromFeed as _extractSearchResultsFromFeed } from "./competitor-reviews.mjs";
 const require = createRequire(import.meta.url);
@@ -53,8 +52,8 @@ const {
   getAiClientForModel,
   getAttributeClientForModel,
 } = createAiRuntime();
-const GENERATED_WORKER_AUTH_TOKEN = crypto.randomBytes(32).toString("hex");
-const WORKER_AUTH_TOKEN = process.env.WORKER_AUTH_TOKEN || GENERATED_WORKER_AUTH_TOKEN;
+const WORKER_AUTH_TOKEN = createWorkerAuthToken();
+const isAuthorizedWorkerRequest = createWorkerAuthenticator(WORKER_AUTH_TOKEN);
 const CATEGORY_HISTORY_FILE = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "temu_category_history.json");
 const AUTO_PRICING_TASKS_FILE = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "temu_auto_pricing_tasks.json");
 const CATEGORY_HISTORY_LIMIT = 300;
@@ -2531,10 +2530,6 @@ async function createSellerCentralPage(targetPath = "/goods/list", options = {})
   }
 
   throw lastError || new Error("创建商家中心页面失败");
-}
-
-function isAuthorizedWorkerRequest(req) {
-  return req.headers.authorization === `Bearer ${WORKER_AUTH_TOKEN}`;
 }
 
 // 同步 browserState 到局部变量（ensureBrowser/launch 后自动调用）
@@ -16193,7 +16188,7 @@ function findExtCaptureForGoodsId(goodsId) {
   return { captured: false };
 }
 
-const server = http.createServer(async (req, res) => {
+const server = createWorkerServer(async (req, res) => {
   // CORS 预检：扩展 service worker fetch 可能触发
   if (req.method === "OPTIONS") {
     res.writeHead(204, {
@@ -16325,17 +16320,11 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-const PORT = parseInt(process.env.WORKER_PORT || "19280");
-server.timeout = 86400000; // 24小时超时
-server.keepAliveTimeout = 86400000;
-server.headersTimeout = 86410000;
-server.listen(PORT, "127.0.0.1", () => {
-  // 把端口写到文件
-  const portFile = path.join(workerRuntimeDataDir, "worker-port");
-  fs.mkdirSync(path.dirname(portFile), { recursive: true });
-  fs.writeFileSync(portFile, JSON.stringify({ port: PORT, token: WORKER_AUTH_TOKEN }));
-  console.error(`WORKER_PORT=${PORT}`);
-  console.log(`Worker ready on port ${PORT}`);
+const PORT = resolveWorkerPort();
+startWorkerServer(server, {
+  port: PORT,
+  runtimeDataDir: workerRuntimeDataDir,
+  authToken: WORKER_AUTH_TOKEN,
 });
 
 process.on("SIGTERM", async () => { await closeBrowser(); server.close(); process.exit(0); });
