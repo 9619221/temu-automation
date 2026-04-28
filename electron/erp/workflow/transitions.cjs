@@ -29,6 +29,7 @@ const TRANSITIONS = Object.freeze({
     rule(PR.BUYER_PROCESSING, "mark_sourced", PR.SOURCED, BUYER),
     rule(PR.SOURCED, "request_ops_confirm", PR.WAITING_OPS_CONFIRM, BUYER),
     rule(PR.WAITING_OPS_CONFIRM, "confirm_sourcing", PR.CONVERTED_TO_PO, OPS),
+    rule([PR.SOURCED, PR.WAITING_OPS_CONFIRM], "generate_po", PR.CONVERTED_TO_PO, BUYER),
     rule(PR.WAITING_OPS_CONFIRM, "reject_sourcing", PR.REJECTED, OPS),
     rule([PR.DRAFT, PR.SUBMITTED, PR.BUYER_PROCESSING, PR.SOURCED], "cancel_pr", PR.CANCELLED, OPS),
   ],
@@ -88,4 +89,3 @@ const TRANSITIONS = Object.freeze({
 module.exports = {
   TRANSITIONS,
 };
-

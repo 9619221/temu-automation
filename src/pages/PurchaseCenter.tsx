@@ -1,19 +1,31 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
+  Badge,
   Button,
   Col,
+  DatePicker,
+  Drawer,
+  Form,
+  Input,
+  InputNumber,
+  Modal,
   Row,
+  Select,
   Space,
   Table,
+  Timeline,
   Typography,
   message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import type { Dayjs } from "dayjs";
 import {
   CheckCircleOutlined,
+  CommentOutlined,
   DollarOutlined,
   FileDoneOutlined,
+  PlusOutlined,
   ReloadOutlined,
   SearchOutlined,
   ShoppingCartOutlined,
@@ -28,13 +40,48 @@ import {
   canRole,
   formatDate,
   formatDateTime,
-  formatMoney,
   formatQty,
   statusTag,
 } from "../utils/erpUi";
 
 const { Text } = Typography;
+const { TextArea } = Input;
 const erp = window.electronAPI?.erp;
+
+const ROLE_LABELS: Record<string, string> = {
+  admin: "管理员",
+  manager: "负责人",
+  operations: "运营",
+  buyer: "采购",
+  finance: "财务",
+  warehouse: "仓库",
+  viewer: "只读",
+};
+
+interface SourcingCandidateRow {
+  id: string;
+  supplierName?: string;
+  productTitle?: string | null;
+  productUrl?: string | null;
+  unitPrice?: number;
+  moq?: number;
+  leadDays?: number | null;
+  logisticsFee?: number | null;
+  remark?: string | null;
+  status?: string;
+  createdByName?: string;
+  updatedAt?: string;
+}
+
+interface TimelineRow {
+  id: string;
+  kind: "event" | "comment";
+  actorName?: string | null;
+  actorRole?: string | null;
+  message?: string;
+  eventType?: string;
+  createdAt?: string;
+}
 
 interface PurchaseRequestRow {
   id: string;
@@ -43,12 +90,15 @@ interface PurchaseRequestRow {
   status: string;
   reason?: string;
   requestedQty?: number;
-  targetUnitCost?: number;
+  targetUnitCost?: number | null;
   expectedArrivalDate?: string | null;
   requestedByName?: string;
   evidence?: string[];
   candidateCount?: number;
   selectedCandidateCount?: number;
+  unreadCount?: number;
+  candidates?: SourcingCandidateRow[];
+  timeline?: TimelineRow[];
   updatedAt?: string;
 }
 
@@ -88,6 +138,57 @@ interface PurchaseWorkbench {
   paymentQueue?: PaymentQueueRow[];
 }
 
+interface SkuOption {
+  id: string;
+  internalSkuCode?: string;
+  productName?: string;
+}
+
+interface SupplierOption {
+  id: string;
+  name?: string;
+}
+
+interface RequestFormValues {
+  skuId: string;
+  requestedQty: number;
+  targetUnitCost?: number;
+  expectedArrivalDate?: Dayjs | null;
+  reason: string;
+  evidenceText?: string;
+}
+
+interface QuoteFormValues {
+  supplierId?: string;
+  supplierName?: string;
+  unitPrice: number;
+  logisticsFee?: number;
+  moq?: number;
+  leadDays?: number;
+  productTitle?: string;
+  productUrl?: string;
+  remark?: string;
+}
+
+interface PoFormValues {
+  candidateId?: string;
+  qty?: number;
+  expectedDeliveryDate?: Dayjs | null;
+  remark?: string;
+}
+
+function formatCurrency(value?: number | string | null) {
+  const number = Number(value ?? 0);
+  if (!Number.isFinite(number)) return "-";
+  return `¥${number.toFixed(2)}`;
+}
+
+function toApiDate(value?: Dayjs | string | null) {
+  if (!value) return null;
+  if (typeof value === "string") return value;
+  return value.format("YYYY-MM-DD");
+}
+
 function skuText(row: { internalSkuCode?: string; productName?: string }) {
   return (
     <Space direction="vertical" size={2}>
@@ -97,41 +198,230 @@ function skuText(row: { internalSkuCode?: string; productName?: string }) {
   );
 }
 
+function actorText(item: TimelineRow) {
+  const roleText = ROLE_LABELS[item.actorRole || ""] || item.actorRole || "";
+  return [item.actorName || "系统", roleText].filter(Boolean).join(" · ");
+}
+
+function candidateLabel(candidate: SourcingCandidateRow) {
+  return `${candidate.supplierName || "未命名供应商"} · ${formatCurrency(candidate.unitPrice)} · MOQ ${formatQty(candidate.moq || 1)}`;
+}
+
+function firstPoCandidate(row?: PurchaseRequestRow | null) {
+  const candidates = row?.candidates || [];
+  return candidates.find((item) => item.status === "selected")
+    || candidates.find((item) => item.status === "shortlisted")
+    || candidates[0]
+    || null;
+}
+
 export default function PurchaseCenter() {
   const auth = useErpAuth();
   const role = auth.currentUser?.role || "";
+  const canCreateRequest = canRole(role, ["operations", "manager", "admin"]);
+  const canPurchase = canRole(role, ["buyer", "manager", "admin"]);
+  const canFinance = canRole(role, ["finance", "manager", "admin"]);
+
   const [data, setData] = useState<PurchaseWorkbench>({});
   const [loading, setLoading] = useState(false);
   const [actingKey, setActingKey] = useState<string | null>(null);
+  const [skus, setSkus] = useState<SkuOption[]>([]);
+  const [suppliers, setSuppliers] = useState<SupplierOption[]>([]);
+  const [requestOpen, setRequestOpen] = useState(false);
+  const [quotePrId, setQuotePrId] = useState<string | null>(null);
+  const [poPrId, setPoPrId] = useState<string | null>(null);
+  const [detailPrId, setDetailPrId] = useState<string | null>(null);
+  const [realtimeStatus, setRealtimeStatus] = useState<"connected" | "updated" | "unavailable">("unavailable");
+
+  const [requestForm] = Form.useForm<RequestFormValues>();
+  const [quoteForm] = Form.useForm<QuoteFormValues>();
+  const [poForm] = Form.useForm<PoFormValues>();
+  const [commentForm] = Form.useForm<{ body: string }>();
+
+  const quotePr = useMemo(
+    () => data.purchaseRequests?.find((item) => item.id === quotePrId) || null,
+    [data.purchaseRequests, quotePrId],
+  );
+  const poPr = useMemo(
+    () => data.purchaseRequests?.find((item) => item.id === poPrId) || null,
+    [data.purchaseRequests, poPrId],
+  );
+  const detailPr = useMemo(
+    () => data.purchaseRequests?.find((item) => item.id === detailPrId) || null,
+    [data.purchaseRequests, detailPrId],
+  );
+
+  const skuOptions = useMemo(
+    () => skus.map((sku) => ({
+      value: sku.id,
+      label: `${sku.internalSkuCode || "-"} · ${sku.productName || "-"}`,
+    })),
+    [skus],
+  );
+  const supplierOptions = useMemo(
+    () => suppliers.map((supplier) => ({
+      value: supplier.id,
+      label: supplier.name || supplier.id,
+    })),
+    [suppliers],
+  );
+  const poCandidateOptions = useMemo(
+    () => (poPr?.candidates || []).map((candidate) => ({
+      value: candidate.id,
+      label: candidateLabel(candidate),
+    })),
+    [poPr],
+  );
+
+  const applyWorkbench = useCallback((nextData: PurchaseWorkbench) => {
+    setData(nextData || {});
+  }, []);
 
   const loadData = useCallback(async () => {
     if (!erp) return;
     setLoading(true);
     try {
-      setData(await erp.purchase.workbench({ limit: 200 }));
+      const [workbench, skuRows, supplierRows] = await Promise.all([
+        erp.purchase.workbench({ limit: 200 }),
+        erp.sku.list({ limit: 500 }),
+        erp.supplier.list({ limit: 500 }),
+      ]);
+      applyWorkbench(workbench);
+      setSkus(Array.isArray(skuRows) ? skuRows : []);
+      setSuppliers(Array.isArray(supplierRows) ? supplierRows : []);
     } catch (error: any) {
       message.error(error?.message || "采购中心读取失败");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [applyWorkbench]);
 
   useEffect(() => {
     void loadData();
   }, [loadData]);
 
-  const runAction = async (key: string, payload: Record<string, any>, successText: string) => {
-    if (!erp) return;
+  useEffect(() => {
+    if (!erp?.events?.onPurchaseUpdate) {
+      setRealtimeStatus("unavailable");
+      return;
+    }
+    let refreshTimer: number | null = null;
+    setRealtimeStatus("connected");
+    const unsubscribe = erp.events.onPurchaseUpdate((payload: { type?: string }) => {
+      if (payload?.type !== "purchase:update") return;
+      setRealtimeStatus("updated");
+      if (refreshTimer) window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        setRealtimeStatus("connected");
+        void loadData();
+      }, 180);
+    });
+    return () => {
+      if (refreshTimer) window.clearTimeout(refreshTimer);
+      unsubscribe();
+    };
+  }, [loadData]);
+
+  const runAction = async (key: string, payload: Record<string, any>, successText?: string) => {
+    if (!erp) return null;
     setActingKey(key);
     try {
       const result = await erp.purchase.action({ ...payload, limit: 200 });
-      setData(result?.workbench || await erp.purchase.workbench({ limit: 200 }));
-      message.success(successText);
+      const workbench = result?.workbench || await erp.purchase.workbench({ limit: 200 });
+      applyWorkbench(workbench);
+      if (successText) message.success(successText);
+      return result;
     } catch (error: any) {
       message.error(error?.message || "操作失败");
+      return null;
     } finally {
       setActingKey(null);
     }
+  };
+
+  const openDetail = async (row: PurchaseRequestRow) => {
+    setDetailPrId(row.id);
+    await runAction(`read-${row.id}`, { action: "mark_read", prId: row.id });
+  };
+
+  const openQuoteModal = (row: PurchaseRequestRow) => {
+    setQuotePrId(row.id);
+    quoteForm.resetFields();
+    quoteForm.setFieldsValue({ moq: 1, logisticsFee: 0 });
+  };
+
+  const openPoModal = (row: PurchaseRequestRow) => {
+    const candidate = firstPoCandidate(row);
+    setPoPrId(row.id);
+    poForm.resetFields();
+    poForm.setFieldsValue({
+      candidateId: candidate?.id,
+      qty: row.requestedQty,
+    });
+  };
+
+  const handleCreateRequest = async (values: RequestFormValues) => {
+    const result = await runAction("create-pr", {
+      action: "create_pr",
+      skuId: values.skuId,
+      requestedQty: values.requestedQty,
+      targetUnitCost: values.targetUnitCost,
+      expectedArrivalDate: toApiDate(values.expectedArrivalDate),
+      reason: values.reason,
+      evidenceText: values.evidenceText,
+    }, "采购需求已提交给采购端");
+    if (result) {
+      setRequestOpen(false);
+      requestForm.resetFields();
+    }
+  };
+
+  const handleQuoteFeedback = async (values: QuoteFormValues) => {
+    if (!quotePr) return;
+    const result = await runAction(`quote-${quotePr.id}`, {
+      action: "quote_feedback",
+      prId: quotePr.id,
+      supplierId: values.supplierId,
+      supplierName: values.supplierName,
+      unitPrice: values.unitPrice,
+      logisticsFee: values.logisticsFee,
+      moq: values.moq,
+      leadDays: values.leadDays,
+      productTitle: values.productTitle,
+      productUrl: values.productUrl,
+      remark: values.remark,
+      feedback: values.remark,
+    }, "报价反馈已同步给运营");
+    if (result) {
+      setQuotePrId(null);
+      quoteForm.resetFields();
+    }
+  };
+
+  const handleGeneratePo = async (values: PoFormValues) => {
+    if (!poPr) return;
+    const result = await runAction(`po-${poPr.id}`, {
+      action: "generate_po",
+      prId: poPr.id,
+      candidateId: values.candidateId,
+      qty: values.qty,
+      expectedDeliveryDate: toApiDate(values.expectedDeliveryDate),
+      remark: values.remark,
+    }, "采购单已生成");
+    if (result) {
+      setPoPrId(null);
+      poForm.resetFields();
+    }
+  };
+
+  const handleAddComment = async (values: { body: string }) => {
+    if (!detailPr) return;
+    const result = await runAction(`comment-${detailPr.id}`, {
+      action: "add_comment",
+      prId: detailPr.id,
+      body: values.body,
+    }, "留言已发送");
+    if (result) commentForm.resetFields();
   };
 
   const requestColumns = useMemo<ColumnsType<PurchaseRequestRow>>(() => [
@@ -144,17 +434,19 @@ export default function PurchaseCenter() {
     {
       title: "状态",
       dataIndex: "status",
-      width: 120,
+      width: 130,
       render: (value) => statusTag(value, PR_STATUS_LABELS),
     },
     {
-      title: "申请",
+      title: "需求",
       key: "request",
-      width: 150,
+      width: 190,
       render: (_value, row) => (
         <Space direction="vertical" size={2}>
           <Text strong>{formatQty(row.requestedQty)} 件</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{row.reason || "-"} · {row.requestedByName || "-"}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {row.reason || "-"} · {row.requestedByName || "-"}
+          </Text>
         </Space>
       ),
     },
@@ -162,7 +454,7 @@ export default function PurchaseCenter() {
       title: "目标成本",
       dataIndex: "targetUnitCost",
       width: 110,
-      render: formatMoney,
+      render: formatCurrency,
     },
     {
       title: "期望到货",
@@ -171,59 +463,67 @@ export default function PurchaseCenter() {
       render: formatDate,
     },
     {
-      title: "证据",
-      dataIndex: "evidence",
-      ellipsis: true,
-      render: (value: string[] = []) => (
-        <Space direction="vertical" size={1}>
-          {value.slice(0, 2).map((item) => <Text key={item} type="secondary" style={{ fontSize: 12 }}>{item}</Text>)}
-          {value.length === 0 ? <Text type="secondary">-</Text> : null}
-        </Space>
-      ),
-    },
-    {
       title: "寻源",
       key: "sourcing",
-      width: 110,
+      width: 120,
       render: (_value, row) => (
         <Space direction="vertical" size={2}>
-          <Text>{formatQty(row.candidateCount)} 个候选</Text>
+          <Text>{formatQty(row.candidateCount)} 个报价</Text>
           <Text type="secondary" style={{ fontSize: 12 }}>已选 {formatQty(row.selectedCandidateCount)}</Text>
         </Space>
       ),
     },
     {
-      title: "动作",
-      key: "actions",
-      width: 170,
-      fixed: "right",
+      title: "协作",
+      key: "collaboration",
+      width: 110,
       render: (_value, row) => (
-        <Space size={6} wrap>
-          {row.status === "submitted" && canRole(role, ["buyer", "manager", "admin"]) ? (
-            <Button
-              size="small"
-              icon={<ShoppingCartOutlined />}
-              loading={actingKey === `accept-${row.id}`}
-              onClick={() => runAction(`accept-${row.id}`, { action: "accept_pr", prId: row.id }, "已接收 PR")}
-            >
-              接收 PR
-            </Button>
-          ) : null}
-          {row.status === "buyer_processing" && canRole(role, ["buyer", "manager", "admin"]) ? (
-            <Button
-              size="small"
-              icon={<SearchOutlined />}
-              loading={actingKey === `sourced-${row.id}`}
-              onClick={() => runAction(`sourced-${row.id}`, { action: "mark_sourced", prId: row.id }, "已标记寻源")}
-            >
-              已寻源
-            </Button>
-          ) : null}
-          {!["submitted", "buyer_processing"].includes(row.status) ? <Text type="secondary">无动作</Text> : null}
-        </Space>
+        <Badge count={row.unreadCount || 0} size="small">
+          <Button size="small" icon={<CommentOutlined />} onClick={() => openDetail(row)}>
+            详情
+          </Button>
+        </Badge>
       ),
     },
-  ], [actingKey, role]);
+    {
+      title: "动作",
+      key: "actions",
+      width: 260,
+      fixed: "right",
+      render: (_value, row) => {
+        const hasCandidates = Boolean(row.candidates?.length || row.candidateCount);
+        const canQuote = canPurchase && ["submitted", "buyer_processing", "sourced"].includes(row.status);
+        const canGeneratePo = canPurchase
+          && hasCandidates
+          && ["submitted", "buyer_processing", "sourced", "waiting_ops_confirm"].includes(row.status);
+        return (
+          <Space size={6} wrap>
+            {row.status === "submitted" && canPurchase ? (
+              <Button
+                size="small"
+                icon={<ShoppingCartOutlined />}
+                loading={actingKey === `accept-${row.id}`}
+                onClick={() => runAction(`accept-${row.id}`, { action: "accept_pr", prId: row.id }, "已接收采购需求")}
+              >
+                接收
+              </Button>
+            ) : null}
+            {canQuote ? (
+              <Button size="small" icon={<SearchOutlined />} onClick={() => openQuoteModal(row)}>
+                报价反馈
+              </Button>
+            ) : null}
+            {canGeneratePo ? (
+              <Button size="small" type="primary" icon={<FileDoneOutlined />} onClick={() => openPoModal(row)}>
+                生成采购单
+              </Button>
+            ) : null}
+            {!canQuote && !canGeneratePo && row.status !== "submitted" ? <Text type="secondary">无待办</Text> : null}
+          </Space>
+        );
+      },
+    },
+  ], [actingKey, canPurchase]);
 
   const orderColumns = useMemo<ColumnsType<PurchaseOrderRow>>(() => [
     {
@@ -250,7 +550,9 @@ export default function PurchaseCenter() {
       render: (_value, row) => (
         <Space direction="vertical" size={2}>
           <Text>{row.skuSummary || "-"}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{formatQty(row.receivedQty)} / {formatQty(row.totalQty)} 已收</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            已收 {formatQty(row.receivedQty)} / {formatQty(row.totalQty)}
+          </Text>
         </Space>
       ),
     },
@@ -258,7 +560,7 @@ export default function PurchaseCenter() {
       title: "金额",
       dataIndex: "totalAmount",
       width: 120,
-      render: formatMoney,
+      render: formatCurrency,
     },
     {
       title: "付款",
@@ -275,11 +577,11 @@ export default function PurchaseCenter() {
     {
       title: "动作",
       key: "actions",
-      width: 180,
+      width: 210,
       fixed: "right",
       render: (_value, row) => (
         <Space size={6} wrap>
-          {row.status === "draft" && canRole(role, ["buyer", "manager", "admin"]) ? (
+          {row.status === "draft" && canPurchase ? (
             <Button
               size="small"
               type="primary"
@@ -294,7 +596,7 @@ export default function PurchaseCenter() {
               提交付款
             </Button>
           ) : null}
-          {row.status === "pending_finance_approval" && canRole(role, ["finance", "manager", "admin"]) ? (
+          {row.status === "pending_finance_approval" && canFinance ? (
             <Button
               size="small"
               icon={<CheckCircleOutlined />}
@@ -304,7 +606,7 @@ export default function PurchaseCenter() {
               财务批准
             </Button>
           ) : null}
-          {row.status === "approved_to_pay" && canRole(role, ["finance", "manager", "admin"]) ? (
+          {row.status === "approved_to_pay" && canFinance ? (
             <Button
               size="small"
               type="primary"
@@ -312,14 +614,14 @@ export default function PurchaseCenter() {
               loading={actingKey === `paid-po-${row.id}`}
               onClick={() => runAction(`paid-po-${row.id}`, { action: "confirm_paid", poId: row.id }, "已确认付款")}
             >
-              已付款
+              确认付款
             </Button>
           ) : null}
-          {!["draft", "pending_finance_approval", "approved_to_pay"].includes(row.status) ? <Text type="secondary">无动作</Text> : null}
+          {!["draft", "pending_finance_approval", "approved_to_pay"].includes(row.status) ? <Text type="secondary">无待办</Text> : null}
         </Space>
       ),
     },
-  ], [actingKey, role]);
+  ], [actingKey, canFinance, canPurchase]);
 
   const paymentColumns = useMemo<ColumnsType<PaymentQueueRow>>(() => [
     {
@@ -343,7 +645,7 @@ export default function PurchaseCenter() {
       title: "金额",
       key: "amount",
       width: 120,
-      render: (_value, row) => formatMoney(row.paymentAmount ?? row.totalAmount),
+      render: (_value, row) => formatCurrency(row.paymentAmount ?? row.totalAmount),
     },
     {
       title: "审批状态",
@@ -374,11 +676,11 @@ export default function PurchaseCenter() {
     {
       title: "下一步",
       key: "actions",
-      width: 170,
+      width: 180,
       fixed: "right",
       render: (_value, row) => (
         <Space size={6} wrap>
-          {(row.paymentApprovalStatus === "pending" || row.poStatus === "pending_finance_approval") && canRole(role, ["finance", "manager", "admin"]) ? (
+          {(row.paymentApprovalStatus === "pending" || row.poStatus === "pending_finance_approval") && canFinance ? (
             <Button
               size="small"
               icon={<CheckCircleOutlined />}
@@ -392,7 +694,7 @@ export default function PurchaseCenter() {
               财务批准
             </Button>
           ) : null}
-          {(row.paymentApprovalStatus === "approved" || row.poStatus === "approved_to_pay") && canRole(role, ["finance", "manager", "admin"]) ? (
+          {(row.paymentApprovalStatus === "approved" || row.poStatus === "approved_to_pay") && canFinance ? (
             <Button
               size="small"
               type="primary"
@@ -408,12 +710,12 @@ export default function PurchaseCenter() {
             </Button>
           ) : null}
           {!["pending", "approved"].includes(row.paymentApprovalStatus || "") && !["pending_finance_approval", "approved_to_pay"].includes(row.poStatus || "") ? (
-            <Text type="secondary">无动作</Text>
+            <Text type="secondary">无待办</Text>
           ) : null}
         </Space>
       ),
     },
-  ], [actingKey, role]);
+  ], [actingKey, canFinance]);
 
   const summary = data.summary || {};
 
@@ -431,33 +733,45 @@ export default function PurchaseCenter() {
       <PageHeader
         compact
         eyebrow="采购中心"
-        title="采购申请、采购单、付款审批"
-        subtitle="运营提交 PR 后，采购接收和寻源；PO 进入财务审批和付款链路。"
-        meta={[`更新 ${formatDateTime(data.generatedAt)}`]}
+        title="采购需求、报价协作、采购单"
+        subtitle="运营新建采购需求，采购接收后寻源报价并生成采购单；双方通过留言、时间线和未读提醒持续同步。"
+        meta={[
+          `更新 ${formatDateTime(data.generatedAt)}`,
+          realtimeStatus === "updated"
+            ? "实时推送：收到更新"
+            : realtimeStatus === "connected"
+              ? "实时推送：已启用"
+              : "实时推送：不可用",
+        ]}
         actions={[
+          canCreateRequest ? (
+            <Button key="new" type="primary" icon={<PlusOutlined />} onClick={() => setRequestOpen(true)}>
+              新建采购需求
+            </Button>
+          ) : null,
           <Button key="refresh" icon={<ReloadOutlined />} loading={loading} onClick={loadData}>
             刷新
           </Button>,
-        ]}
+        ].filter(Boolean)}
       />
 
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
         <Col xs={24} md={8}>
-          <StatCard title="待处理 PR" value={summary.pendingPurchaseRequestCount || 0} color="blue" icon={<ShoppingCartOutlined />} compact />
+          <StatCard title="待处理需求" value={summary.pendingPurchaseRequestCount || 0} color="blue" icon={<ShoppingCartOutlined />} compact />
         </Col>
         <Col xs={24} md={8}>
-          <StatCard title="未关闭 PO" value={summary.openPurchaseOrderCount || 0} color="purple" icon={<FileDoneOutlined />} compact />
+          <StatCard title="未读协作" value={summary.unreadPurchaseRequestCount || 0} color="purple" icon={<CommentOutlined />} compact />
         </Col>
         <Col xs={24} md={8}>
-          <StatCard title="付款审批" value={summary.paymentQueueCount || 0} suffix={`/${formatMoney(summary.paymentQueueAmount)}`} color="danger" icon={<DollarOutlined />} compact />
+          <StatCard title="付款审批" value={summary.paymentQueueCount || 0} suffix={`/${formatCurrency(summary.paymentQueueAmount)}`} color="danger" icon={<DollarOutlined />} compact />
         </Col>
       </Row>
 
       <div className="app-panel" style={{ marginBottom: 16 }}>
         <div className="app-panel__title">
           <div>
-            <div className="app-panel__title-main">采购申请列表</div>
-            <div className="app-panel__title-sub">采购角色处理接收 PR 和标记已寻源。</div>
+            <div className="app-panel__title-main">采购需求列表</div>
+            <div className="app-panel__title-sub">运营发起需求后，采购在这里接收、寻源、反馈报价并转成采购单。</div>
           </div>
         </div>
         <Table
@@ -466,7 +780,7 @@ export default function PurchaseCenter() {
           size="middle"
           columns={requestColumns}
           dataSource={data.purchaseRequests || []}
-          scroll={{ x: 1120 }}
+          scroll={{ x: 1220 }}
           pagination={{ pageSize: 8, showSizeChanger: false }}
         />
       </div>
@@ -475,7 +789,7 @@ export default function PurchaseCenter() {
         <div className="app-panel__title">
           <div>
             <div className="app-panel__title-main">采购单列表</div>
-            <div className="app-panel__title-sub">采购单跟踪财务审批、付款、供应商备货、到仓和入库状态。</div>
+            <div className="app-panel__title-sub">采购单用于跟踪付款审批、供应商备货、到货与后续入库链路。</div>
           </div>
         </div>
         <Table
@@ -493,7 +807,7 @@ export default function PurchaseCenter() {
         <div className="app-panel__title">
           <div>
             <div className="app-panel__title-main">付款审批入口</div>
-            <div className="app-panel__title-sub">财务批准后再确认付款，系统会把 PO 推到后续备货链路。</div>
+            <div className="app-panel__title-sub">采购提交付款后，财务在这里批准并确认付款。</div>
           </div>
         </div>
         <Table
@@ -506,6 +820,217 @@ export default function PurchaseCenter() {
           pagination={{ pageSize: 8, showSizeChanger: false }}
         />
       </div>
+
+      <Modal
+        open={requestOpen}
+        title="新建采购需求"
+        okText="提交给采购"
+        cancelText="取消"
+        confirmLoading={actingKey === "create-pr"}
+        onCancel={() => setRequestOpen(false)}
+        onOk={() => requestForm.submit()}
+        destroyOnClose
+      >
+        <Form form={requestForm} layout="vertical" onFinish={handleCreateRequest} initialValues={{ requestedQty: 1 }}>
+          <Form.Item name="skuId" label="SKU" rules={[{ required: true, message: "请选择 SKU" }]}>
+            <Select showSearch optionFilterProp="label" options={skuOptions} placeholder="选择要补货或打样的 SKU" />
+          </Form.Item>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item name="requestedQty" label="需求数量" rules={[{ required: true, message: "请输入需求数量" }]}>
+                <InputNumber min={1} precision={0} style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="targetUnitCost" label="目标单价">
+                <InputNumber min={0} precision={2} prefix="¥" style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item name="expectedArrivalDate" label="期望到货">
+            <DatePicker style={{ width: "100%" }} />
+          </Form.Item>
+          <Form.Item name="reason" label="需求原因" rules={[{ required: true, message: "请输入需求原因" }]}>
+            <TextArea rows={3} placeholder="例如：活动备货、断货补采、新品打样、价格复核后采购" />
+          </Form.Item>
+          <Form.Item name="evidenceText" label="证据 / 链接">
+            <TextArea rows={3} placeholder="每行一条：销量截图、竞品链接、站内数据结论等" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        open={Boolean(quotePr)}
+        title="报价反馈"
+        okText="同步报价"
+        cancelText="取消"
+        confirmLoading={quotePr ? actingKey === `quote-${quotePr.id}` : false}
+        onCancel={() => setQuotePrId(null)}
+        onOk={() => quoteForm.submit()}
+        destroyOnClose
+      >
+        <Form form={quoteForm} layout="vertical" onFinish={handleQuoteFeedback}>
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message={quotePr ? `${quotePr.productName || quotePr.internalSkuCode || "采购需求"} · ${formatQty(quotePr.requestedQty)} 件` : ""}
+          />
+          <Form.Item name="supplierId" label="已有供应商">
+            <Select allowClear showSearch optionFilterProp="label" options={supplierOptions} placeholder="可选；没有就手填供应商名称" />
+          </Form.Item>
+          <Form.Item name="supplierName" label="供应商名称">
+            <Input placeholder="手动供应商或平台店铺名称" />
+          </Form.Item>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item name="unitPrice" label="报价单价" rules={[{ required: true, message: "请输入报价单价" }]}>
+                <InputNumber min={0} precision={2} prefix="¥" style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="logisticsFee" label="运费">
+                <InputNumber min={0} precision={2} prefix="¥" style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item name="moq" label="起订量">
+                <InputNumber min={1} precision={0} style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="leadDays" label="交期天数">
+                <InputNumber min={0} precision={0} style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item name="productTitle" label="供应商商品标题">
+            <Input placeholder="可选" />
+          </Form.Item>
+          <Form.Item name="productUrl" label="报价链接">
+            <Input placeholder="可选" />
+          </Form.Item>
+          <Form.Item name="remark" label="反馈说明">
+            <TextArea rows={3} placeholder="价格有效期、材质差异、交期风险、建议等" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        open={Boolean(poPr)}
+        title="生成采购单"
+        okText="生成采购单"
+        cancelText="取消"
+        confirmLoading={poPr ? actingKey === `po-${poPr.id}` : false}
+        onCancel={() => setPoPrId(null)}
+        onOk={() => poForm.submit()}
+        destroyOnClose
+      >
+        <Form form={poForm} layout="vertical" onFinish={handleGeneratePo}>
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message={poPr ? `${poPr.productName || poPr.internalSkuCode || "采购需求"} · 默认数量 ${formatQty(poPr.requestedQty)}` : ""}
+          />
+          <Form.Item name="candidateId" label="选择报价" rules={[{ required: true, message: "请选择报价" }]}>
+            <Select options={poCandidateOptions} placeholder="选择一个报价生成采购单" />
+          </Form.Item>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item name="qty" label="采购数量" rules={[{ required: true, message: "请输入采购数量" }]}>
+                <InputNumber min={1} precision={0} style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="expectedDeliveryDate" label="预计到货">
+                <DatePicker style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item name="remark" label="采购单备注">
+            <TextArea rows={3} placeholder="对供应商、付款或入库的补充说明" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Drawer
+        open={Boolean(detailPrId)}
+        title="采购需求协作"
+        width={620}
+        onClose={() => setDetailPrId(null)}
+      >
+        {detailPr ? (
+          <Space direction="vertical" size={18} style={{ width: "100%" }}>
+            <div>
+              {skuText(detailPr)}
+              <div style={{ marginTop: 8 }}>{statusTag(detailPr.status, PR_STATUS_LABELS)}</div>
+              <Text type="secondary">
+                数量 {formatQty(detailPr.requestedQty)} 件 · 目标 {formatCurrency(detailPr.targetUnitCost)} · 期望 {formatDate(detailPr.expectedArrivalDate)}
+              </Text>
+            </div>
+
+            <div>
+              <Text strong>需求原因</Text>
+              <div style={{ marginTop: 6 }}>{detailPr.reason || "-"}</div>
+            </div>
+
+            <div>
+              <Text strong>报价记录</Text>
+              <Table
+                rowKey="id"
+                size="small"
+                style={{ marginTop: 8 }}
+                pagination={false}
+                dataSource={detailPr.candidates || []}
+                columns={[
+                  { title: "供应商", dataIndex: "supplierName", render: (value) => value || "-" },
+                  { title: "单价", dataIndex: "unitPrice", width: 90, render: formatCurrency },
+                  { title: "MOQ", dataIndex: "moq", width: 70, render: formatQty },
+                  { title: "交期", dataIndex: "leadDays", width: 80, render: (value) => (value ? `${value} 天` : "-") },
+                ]}
+              />
+            </div>
+
+            <div>
+              <Text strong>状态时间线 / 留言记录</Text>
+              <Timeline
+                style={{ marginTop: 16 }}
+                items={(detailPr.timeline || []).map((item) => ({
+                  key: item.id,
+                  color: item.kind === "comment" ? "green" : "blue",
+                  children: (
+                    <div>
+                      <div>{item.message || "-"}</div>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {actorText(item)} · {formatDateTime(item.createdAt)}
+                      </Text>
+                    </div>
+                  ),
+                }))}
+              />
+            </div>
+
+            <Form form={commentForm} layout="vertical" onFinish={handleAddComment}>
+              <Form.Item name="body" label="新增留言" rules={[{ required: true, message: "请输入留言内容" }]}>
+                <TextArea rows={3} placeholder="运营和采购都可以在这里补充信息" />
+              </Form.Item>
+              <Button
+                type="primary"
+                icon={<CommentOutlined />}
+                loading={actingKey === `comment-${detailPr.id}`}
+                onClick={() => commentForm.submit()}
+              >
+                发送留言
+              </Button>
+            </Form>
+          </Space>
+        ) : (
+          <Alert type="warning" showIcon message="当前需求不存在或已刷新" />
+        )}
+      </Drawer>
     </div>
   );
 }

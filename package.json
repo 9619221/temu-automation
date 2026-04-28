@@ -20,7 +20,8 @@
     "dist:win": "npm run build:resources && npm run build:node-runtime && npm run build:image-studio && npm run verify:release && npm run build && npm run smoke:desktop && electron-builder --win nsis",
     "pack:win": "npm run build:resources && npm run build:node-runtime && npm run build:image-studio && npm run verify:release && npm run build && npm run smoke:desktop && electron-builder --win dir",
     "preview": "vite preview",
-    "electron": "cross-env NODE_ENV=development electron ."
+    "electron": "cross-env NODE_ENV=development electron .",
+    "erp:server": "node scripts/erp-server.cjs"
   },
   "build": {
     "appId": "com.temu.automation",

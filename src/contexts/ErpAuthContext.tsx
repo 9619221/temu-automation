@@ -29,7 +29,7 @@ interface ErpAuthContextValue extends ErpAuthStatus {
   loading: boolean;
   apiReady: boolean;
   refresh: () => Promise<ErpAuthStatus | null>;
-  login: (payload: { login: string; accessCode: string; serverUrl?: string }) => Promise<ErpAuthStatus>;
+  login: (payload: { login: string; accessCode: string }) => Promise<ErpAuthStatus>;
   createFirstAdmin: (payload: { name: string; accessCode: string }) => Promise<ErpAuthStatus>;
   logout: () => Promise<ErpAuthStatus>;
 }
@@ -39,22 +39,9 @@ const defaultStatus: ErpAuthStatus = {
   currentUser: null,
 };
 
-const legacyStatus: ErpAuthStatus = {
-  hasUsers: false,
-  currentUser: {
-    id: "legacy-local-user",
-    name: "本机用户",
-    role: "legacy",
-    status: "active",
-  },
-};
-
 const ErpAuthContext = createContext<ErpAuthContextValue | null>(null);
 
 function normalizeStatus(status: ErpAuthStatus | null | undefined): ErpAuthStatus {
-  if (status && !status.hasUsers && !status.currentUser) {
-    return legacyStatus;
-  }
   return {
     hasUsers: Boolean(status?.hasUsers),
     currentUser: status?.currentUser || null,
@@ -90,7 +77,7 @@ export function ErpAuthProvider({ children }: { children: ReactNode }) {
     void refresh();
   }, [refresh]);
 
-  const login = useCallback(async (payload: { login: string; accessCode: string; serverUrl?: string }) => {
+  const login = useCallback(async (payload: { login: string; accessCode: string }) => {
     const authApi = getAuthApi();
     setApiReady(Boolean(authApi));
     if (!authApi) throw new Error(LOGIN_SERVICE_UNAVAILABLE);

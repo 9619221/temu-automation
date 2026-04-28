@@ -9,9 +9,9 @@ const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
 const ROLE_PERMISSIONS = Object.freeze({
   "/": ["admin", "manager", "operations", "buyer", "finance", "warehouse", "viewer"],
-  "/purchase": ["admin", "manager", "buyer", "finance"],
-  "/api/purchase/workbench": ["admin", "manager", "buyer", "finance"],
-  "/api/purchase/action": ["admin", "manager", "buyer", "finance"],
+  "/purchase": ["admin", "manager", "operations", "buyer", "finance"],
+  "/api/purchase/workbench": ["admin", "manager", "operations", "buyer", "finance"],
+  "/api/purchase/action": ["admin", "manager", "operations", "buyer", "finance"],
   "/warehouse": ["admin", "manager", "warehouse"],
   "/api/warehouse/workbench": ["admin", "manager", "warehouse"],
   "/api/warehouse/action": ["admin", "manager", "warehouse"],
@@ -114,6 +114,7 @@ const lanState = {
   startedAt: null,
   lastError: null,
   sessions: new Map(),
+  wsClients: new Set(),
 };
 
 function roleLabel(role) {
@@ -178,6 +179,7 @@ function getLanStatus(extra = {}) {
     ],
     authMode: "cookie_session",
     sessionCount: lanState.sessions.size,
+    wsClientCount: lanState.wsClients.size,
     lastError: lanState.lastError,
     ...extra,
   };
@@ -258,6 +260,138 @@ function getSessionFromRequest(req) {
 function destroySession(req) {
   const token = parseCookies(req)[SESSION_COOKIE_NAME];
   if (token) lanState.sessions.delete(token);
+}
+
+function writeUpgradeError(socket, statusCode, message) {
+  try {
+    socket.write([
+      `HTTP/1.1 ${statusCode} ${message}`,
+      "Connection: close",
+      "Content-Length: 0",
+      "",
+      "",
+    ].join("\r\n"));
+  } catch {}
+  socket.destroy();
+}
+
+function encodeWebSocketFrame(payload, opcode = 0x1) {
+  const body = Buffer.isBuffer(payload) ? payload : Buffer.from(String(payload));
+  const length = body.length;
+  if (length < 126) {
+    return Buffer.concat([Buffer.from([0x80 | opcode, length]), body]);
+  }
+  if (length <= 0xffff) {
+    const header = Buffer.alloc(4);
+    header[0] = 0x80 | opcode;
+    header[1] = 126;
+    header.writeUInt16BE(length, 2);
+    return Buffer.concat([header, body]);
+  }
+  const header = Buffer.alloc(10);
+  header[0] = 0x80 | opcode;
+  header[1] = 127;
+  header.writeBigUInt64BE(BigInt(length), 2);
+  return Buffer.concat([header, body]);
+}
+
+function sendWebSocketPayload(client, payload) {
+  if (!client?.socket || client.socket.destroyed) return false;
+  try {
+    client.socket.write(encodeWebSocketFrame(JSON.stringify(payload)));
+    return true;
+  } catch {
+    try { client.socket.destroy(); } catch {}
+    return false;
+  }
+}
+
+function broadcastLanEvent(payload = {}) {
+  const event = {
+    type: payload.type || "erp:update",
+    at: payload.at || new Date().toISOString(),
+    ...payload,
+  };
+  for (const client of Array.from(lanState.wsClients)) {
+    if (!sendWebSocketPayload(client, event)) {
+      lanState.wsClients.delete(client);
+    }
+  }
+  return {
+    delivered: lanState.wsClients.size,
+    event,
+  };
+}
+
+function handleWebSocketData(client, chunk) {
+  if (!chunk || chunk.length < 2) return;
+  const opcode = chunk[0] & 0x0f;
+  if (opcode === 0x8) {
+    lanState.wsClients.delete(client);
+    client.socket.end(encodeWebSocketFrame("", 0x8));
+    return;
+  }
+  if (opcode === 0x9) {
+    client.socket.write(encodeWebSocketFrame("", 0xA));
+  }
+}
+
+function handleWebSocketUpgrade(req, socket) {
+  let pathname = "/";
+  try {
+    const parsed = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+    pathname = parsed.pathname;
+  } catch {}
+
+  if (pathname !== "/ws") {
+    writeUpgradeError(socket, 404, "Not Found");
+    return;
+  }
+
+  const session = getSessionFromRequest(req);
+  if (!session) {
+    writeUpgradeError(socket, 401, "Unauthorized");
+    return;
+  }
+
+  const key = String(req.headers["sec-websocket-key"] || "").trim();
+  const version = String(req.headers["sec-websocket-version"] || "");
+  if (!key || version !== "13") {
+    writeUpgradeError(socket, 400, "Bad Request");
+    return;
+  }
+
+  const accept = crypto
+    .createHash("sha1")
+    .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+    .digest("base64");
+
+  socket.write([
+    "HTTP/1.1 101 Switching Protocols",
+    "Upgrade: websocket",
+    "Connection: Upgrade",
+    `Sec-WebSocket-Accept: ${accept}`,
+    "",
+    "",
+  ].join("\r\n"));
+  socket.setNoDelay(true);
+
+  const client = {
+    id: crypto.randomBytes(8).toString("hex"),
+    user: session.user,
+    socket,
+    connectedAt: new Date().toISOString(),
+  };
+  lanState.wsClients.add(client);
+  sendWebSocketPayload(client, {
+    type: "connected",
+    at: new Date().toISOString(),
+    userRole: session.user?.role || null,
+  });
+
+  socket.on("data", (chunk) => handleWebSocketData(client, chunk));
+  socket.on("close", () => lanState.wsClients.delete(client));
+  socket.on("error", () => lanState.wsClients.delete(client));
 }
 
 function buildSessionCookie(token) {
@@ -617,13 +751,90 @@ function renderShell({ title, subtitle, cards = [], currentPath, user, content =
       background: #fff;
       font-family: inherit;
     }
+    .mini-input.wide {
+      width: 150px;
+    }
+    .mini-input.full {
+      width: 100%;
+    }
     .mini-input.remark {
       width: 132px;
+    }
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .stacked-form {
+      display: grid;
+      gap: 8px;
+      max-width: 520px;
+    }
+    .compact-form {
+      display: grid;
+      gap: 7px;
+      min-width: 220px;
+      max-width: 300px;
+    }
+    .inline-label {
+      display: grid;
+      gap: 4px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .timeline-list,
+    .candidate-list {
+      margin: 8px 0 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 6px;
+    }
+    .timeline-list li,
+    .candidate-list li {
+      border: 1px solid #eef0f5;
+      border-radius: 7px;
+      padding: 8px;
+      background: #fafbfc;
+    }
+    .unread-dot {
+      display: inline-flex;
+      min-width: 18px;
+      height: 18px;
+      align-items: center;
+      justify-content: center;
+      margin-left: 6px;
+      border-radius: 999px;
+      background: #e55b00;
+      color: #fff;
+      font-size: 11px;
+      font-weight: 800;
     }
     .empty {
       padding: 18px 16px;
       color: var(--muted);
       font-size: 14px;
+    }
+    .realtime-toast {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      z-index: 20;
+      display: none;
+      max-width: min(360px, calc(100vw - 36px));
+      border: 1px solid #cfe5ff;
+      border-radius: 8px;
+      background: #eef6ff;
+      color: #175cd3;
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
+      padding: 10px 12px;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .realtime-toast.is-visible {
+      display: block;
     }
     code {
       color: #344054;
@@ -662,6 +873,54 @@ function renderShell({ title, subtitle, cards = [], currentPath, user, content =
     ${cardHtml ? `<div class="grid">${cardHtml}</div>` : ""}
     ${content}
   </main>
+  <div id="realtime-toast" class="realtime-toast">采购协作已更新，正在刷新...</div>
+  <script>
+    (function () {
+      if (!("WebSocket" in window)) return;
+      var currentPath = ${JSON.stringify(currentPath || "")};
+      var retryCount = 0;
+      var reloadTimer = null;
+      var toastTimer = null;
+
+      function showRealtimeToast() {
+        var toast = document.getElementById("realtime-toast");
+        if (!toast) return;
+        toast.classList.add("is-visible");
+        window.clearTimeout(toastTimer);
+        toastTimer = window.setTimeout(function () {
+          toast.classList.remove("is-visible");
+        }, 2200);
+      }
+
+      function connectRealtimeSocket() {
+        var protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        var socket = new WebSocket(protocol + "//" + window.location.host + "/ws");
+        socket.onopen = function () {
+          retryCount = 0;
+        };
+        socket.onmessage = function (event) {
+          var payload = null;
+          try {
+            payload = JSON.parse(event.data || "{}");
+          } catch {
+            return;
+          }
+          if (!payload || payload.type !== "purchase:update" || currentPath !== "/purchase") return;
+          showRealtimeToast();
+          window.clearTimeout(reloadTimer);
+          reloadTimer = window.setTimeout(function () {
+            window.location.reload();
+          }, 700);
+        };
+        socket.onclose = function () {
+          retryCount += 1;
+          window.setTimeout(connectRealtimeSocket, Math.min(10000, 1000 * retryCount));
+        };
+      }
+
+      connectRealtimeSocket();
+    })();
+  </script>
 </body>
 </html>`;
 }
@@ -974,7 +1233,163 @@ function renderUnavailableAction(text = "等待") {
   return `<span class="status">${escapeHtml(text)}</span>`;
 }
 
-function renderPurchaseRequestActions(row, user) {
+function renderSelectOptions(rows = [], valueKey = "id", labelFn = (row) => row.name || row.id, emptyLabel = "请选择") {
+  return [
+    `<option value="">${escapeHtml(emptyLabel)}</option>`,
+    ...rows.map((row) => `<option value="${escapeHtml(row[valueKey])}">${escapeHtml(labelFn(row))}</option>`),
+  ].join("");
+}
+
+function renderCreatePurchaseRequestForm(model = {}, user = {}) {
+  const role = user?.role || "";
+  if (!canRole(role, ["operations", "manager", "admin"])) return "";
+  const skuOptions = Array.isArray(model.skuOptions) ? model.skuOptions : [];
+  return renderSection({
+    title: "新建采购需求",
+    subtitle: "运营端可在用户端直接提交采购需求，采购端会实时收到并处理。",
+    badge: "运营端",
+    table: `
+      <form class="stacked-form" method="post" action="/api/purchase/action">
+        <input type="hidden" name="action" value="create_pr" />
+        <label class="inline-label">SKU
+          <select class="mini-input full" name="skuId" required>
+            ${renderSelectOptions(skuOptions, "id", (sku) => `${sku.internalSkuCode || "-"} · ${sku.productName || "-"}`, "选择 SKU")}
+          </select>
+        </label>
+        <div class="form-grid">
+          <label class="inline-label">需求数量
+            <input class="mini-input full" name="requestedQty" type="number" min="1" step="1" value="1" required />
+          </label>
+          <label class="inline-label">目标单价
+            <input class="mini-input full" name="targetUnitCost" type="number" min="0" step="0.01" placeholder="可选" />
+          </label>
+          <label class="inline-label">期望到货
+            <input class="mini-input full" name="expectedArrivalDate" type="date" />
+          </label>
+        </div>
+        <label class="inline-label">需求原因
+          <input class="mini-input full" name="reason" placeholder="活动备货 / 缺货补采 / 新品打样" required />
+        </label>
+        <label class="inline-label">证据或链接
+          <input class="mini-input full" name="evidenceText" placeholder="截图说明、竞品链接、数据结论" />
+        </label>
+        <button class="action-chip" type="submit">提交采购需求</button>
+      </form>
+    `,
+  });
+}
+
+function renderQuoteFeedbackForm(row, model = {}, user = {}) {
+  const role = user?.role || "";
+  if (!canRole(role, ["buyer", "manager", "admin"])) return "";
+  if (!["submitted", "buyer_processing", "sourced"].includes(row.status)) return "";
+  const supplierOptions = Array.isArray(model.supplierOptions) ? model.supplierOptions : [];
+  return `
+    <form class="compact-form" method="post" action="/api/purchase/action">
+      <input type="hidden" name="action" value="quote_feedback" />
+      <input type="hidden" name="prId" value="${escapeHtml(row.id)}" />
+      <label class="inline-label">已有供应商
+        <select class="mini-input full" name="supplierId">
+          ${renderSelectOptions(supplierOptions, "id", (supplier) => supplier.name || supplier.id, "手填供应商")}
+        </select>
+      </label>
+      <label class="inline-label">供应商名称
+        <input class="mini-input full" name="supplierName" placeholder="未选已有供应商时填写" />
+      </label>
+      <div class="form-grid">
+        <label class="inline-label">单价
+          <input class="mini-input full" name="unitPrice" type="number" min="0" step="0.01" required />
+        </label>
+        <label class="inline-label">运费
+          <input class="mini-input full" name="logisticsFee" type="number" min="0" step="0.01" value="0" />
+        </label>
+        <label class="inline-label">MOQ
+          <input class="mini-input full" name="moq" type="number" min="1" step="1" value="1" />
+        </label>
+        <label class="inline-label">交期天数
+          <input class="mini-input full" name="leadDays" type="number" min="0" step="1" />
+        </label>
+      </div>
+      <input class="mini-input full" name="productUrl" placeholder="报价链接，可选" />
+      <input class="mini-input full" name="remark" placeholder="报价说明，可选" />
+      <button class="action-chip secondary" type="submit">报价反馈</button>
+    </form>
+  `;
+}
+
+function renderGeneratePoForm(row, user = {}) {
+  const role = user?.role || "";
+  const candidates = Array.isArray(row.candidates) ? row.candidates : [];
+  if (!canRole(role, ["buyer", "manager", "admin"])) return "";
+  if (!candidates.length || !["submitted", "buyer_processing", "sourced", "waiting_ops_confirm"].includes(row.status)) return "";
+  return `
+    <form class="compact-form" method="post" action="/api/purchase/action">
+      <input type="hidden" name="action" value="generate_po" />
+      <input type="hidden" name="prId" value="${escapeHtml(row.id)}" />
+      <label class="inline-label">选择报价
+        <select class="mini-input full" name="candidateId" required>
+          ${renderSelectOptions(candidates, "id", (candidate) => `${candidate.supplierName || "供应商"} · ${formatMoney(candidate.unitPrice)} · MOQ ${formatQty(candidate.moq)}`, "选择报价")}
+        </select>
+      </label>
+      <div class="form-grid">
+        <label class="inline-label">采购数量
+          <input class="mini-input full" name="qty" type="number" min="1" step="1" value="${escapeHtml(row.requestedQty || 1)}" required />
+        </label>
+        <label class="inline-label">预计到货
+          <input class="mini-input full" name="expectedDeliveryDate" type="date" />
+        </label>
+      </div>
+      <input class="mini-input full" name="remark" placeholder="采购单备注，可选" />
+      <button class="action-chip success" type="submit">生成采购单</button>
+    </form>
+  `;
+}
+
+function renderCommentForm(row, user = {}) {
+  const role = user?.role || "";
+  if (!canRole(role, ["operations", "buyer", "manager", "admin"])) return "";
+  return `
+    <form class="compact-form" method="post" action="/api/purchase/action">
+      <input type="hidden" name="action" value="add_comment" />
+      <input type="hidden" name="prId" value="${escapeHtml(row.id)}" />
+      <input class="mini-input full" name="body" placeholder="留言给对方" required />
+      <button class="action-chip" type="submit">发送留言</button>
+    </form>
+  `;
+}
+
+function renderCandidateList(row) {
+  const candidates = Array.isArray(row.candidates) ? row.candidates : [];
+  if (!candidates.length) return '<span class="muted">暂无报价</span>';
+  return `
+    <ul class="candidate-list">
+      ${candidates.slice(0, 4).map((candidate) => `
+        <li>
+          <div class="primary-text">${escapeHtml(candidate.supplierName || "供应商")}</div>
+          <div class="muted">单价 ${formatMoney(candidate.unitPrice)} · MOQ ${formatQty(candidate.moq)} · 交期 ${candidate.leadDays ? `${escapeHtml(candidate.leadDays)} 天` : "-"}</div>
+          ${candidate.remark ? `<div class="muted">${escapeHtml(candidate.remark)}</div>` : ""}
+        </li>
+      `).join("")}
+    </ul>
+  `;
+}
+
+function renderTimelineList(row) {
+  const items = Array.isArray(row.timeline) ? row.timeline.slice(-5).reverse() : [];
+  if (!items.length) return '<span class="muted">暂无协作记录</span>';
+  return `
+    <ul class="timeline-list">
+      ${items.map((item) => `
+        <li>
+          <div>${escapeHtml(item.message || "-")}</div>
+          <div class="muted">${escapeHtml(item.actorName || "系统")} · ${escapeHtml(item.actorRole || "-")} · ${formatDate(item.createdAt)}</div>
+        </li>
+      `).join("")}
+    </ul>
+  `;
+}
+
+function renderPurchaseRequestActions(row, user, model = {}) {
   const role = user?.role || "";
   const actions = [];
   if (row.status === "submitted" && canRole(role, ["buyer", "manager", "admin"])) {
@@ -993,6 +1408,39 @@ function renderPurchaseRequestActions(row, user) {
     }));
   }
   return actions.length ? `<div class="actions">${actions.join("")}</div>` : renderUnavailableAction("无动作");
+}
+
+function renderPurchaseRequestActionsV2(row, user, model = {}) {
+  const role = user?.role || "";
+  const actions = [];
+  if (row.status === "submitted" && canRole(role, ["buyer", "manager", "admin"])) {
+    actions.push(renderActionButton({
+      action: "accept_pr",
+      label: "接收",
+      fields: { prId: row.id },
+    }));
+  }
+  if (row.status === "buyer_processing" && canRole(role, ["buyer", "manager", "admin"])) {
+    actions.push(renderActionButton({
+      action: "mark_sourced",
+      label: "标记已寻源",
+      fields: { prId: row.id },
+      className: "secondary",
+    }));
+  }
+  if (Number(row.unreadCount || 0) > 0 && canRole(role, ["operations", "buyer", "manager", "admin"])) {
+    actions.push(renderActionButton({
+      action: "mark_read",
+      label: "标记已读",
+      fields: { prId: row.id },
+      className: "secondary",
+    }));
+  }
+  actions.push(renderQuoteFeedbackForm(row, model, user));
+  actions.push(renderGeneratePoForm(row, user));
+  actions.push(renderCommentForm(row, user));
+  const html = actions.filter(Boolean).join("");
+  return html ? `<div class="actions">${html}</div>` : renderUnavailableAction("无待办");
 }
 
 function renderPurchaseOrderActions(row, user) {
@@ -1073,7 +1521,15 @@ function renderPurchaseWorkbench(model = {}, user = {}) {
           <div class="muted">已选 ${formatQty(row.selectedCandidateCount)}</div>
         `,
       },
-      { title: "动作", render: (row) => renderPurchaseRequestActions(row, user) },
+      {
+        title: "协作",
+        render: (row) => `
+          <div class="primary-text">报价 ${formatQty(row.candidateCount)}${row.unreadCount ? `<span class="unread-dot">${escapeHtml(row.unreadCount)}</span>` : ""}</div>
+          ${renderCandidateList(row)}
+          ${renderTimelineList(row)}
+        `,
+      },
+      { title: "动作", render: (row) => renderPurchaseRequestActionsV2(row, user, model) },
     ],
   });
 
@@ -1130,6 +1586,7 @@ function renderPurchaseWorkbench(model = {}, user = {}) {
   });
 
   return [
+    renderCreatePurchaseRequestForm(model, user),
     renderSection({
       title: "采购申请列表",
       subtitle: "运营发起的 PR 在这里由采购接收、寻源、推进确认。",
@@ -2255,6 +2712,7 @@ function startLanServer(options = {}) {
   const bindAddress = options.bindAddress || DEFAULT_BIND_ADDRESS;
   const handler = createRequestHandler(options);
   const server = http.createServer(handler);
+  server.on("upgrade", handleWebSocketUpgrade);
 
   return new Promise((resolve, reject) => {
     const cleanup = () => {
@@ -2292,6 +2750,10 @@ function stopLanServer() {
   }
 
   const server = lanState.server;
+  for (const client of Array.from(lanState.wsClients)) {
+    try { client.socket.destroy(); } catch {}
+  }
+  lanState.wsClients.clear();
   return new Promise((resolve, reject) => {
     server.close((error) => {
       if (error) {
@@ -2312,6 +2774,7 @@ module.exports = {
   createRequestHandler,
   getLanAddresses,
   getLanStatus,
+  broadcastLanEvent,
   startLanServer,
   stopLanServer,
 };

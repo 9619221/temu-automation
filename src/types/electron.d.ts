@@ -181,9 +181,9 @@ interface ImageStudioAPI {
   updateConfig: (payload: Partial<ImageStudioConfig>) => Promise<ImageStudioConfig>;
   openExternal: () => Promise<string>;
   detectComponents: (payload: { files: NativeImagePayload[] }) => Promise<ImageStudioComponentDetection>;
-  analyze: (payload: { files: NativeImagePayload[]; productMode: string }) => Promise<ImageStudioAnalysis>;
+  analyze: (payload: { files: NativeImagePayload[]; productMode: string; analysisProfile?: string }) => Promise<ImageStudioAnalysis>;
   regenerateAnalysis: (
-    payload: { files: NativeImagePayload[]; productMode: string; analysis: ImageStudioAnalysis }
+    payload: { files: NativeImagePayload[]; productMode: string; analysis: ImageStudioAnalysis; analysisProfile?: string }
   ) => Promise<Partial<ImageStudioAnalysis>>;
   translate: (payload: { texts: string[] }) => Promise<{ translations: string[] }>;
   generatePlans: (payload: { analysis: ImageStudioAnalysis; imageTypes: string[]; salesRegion: string; imageSize: string; productMode: string }) => Promise<ImageStudioPlan[]>;
@@ -317,7 +317,17 @@ interface ErpLanStatus {
   routes: Array<{ path: string; label: string; allowedRoles?: string[] }>;
   authMode: string;
   sessionCount?: number;
+  wsClientCount?: number;
   lastError?: string | null;
+}
+
+interface ErpPurchaseUpdateEvent {
+  type: "purchase:update";
+  action: string;
+  prId?: string | null;
+  poId?: string | null;
+  actorRole?: string | null;
+  at?: string;
 }
 
 interface ErpAPI {
@@ -334,7 +344,7 @@ interface ErpAPI {
     getStatus: () => Promise<ErpAuthStatus>;
     getCurrentUser: () => Promise<ErpUserSession | null>;
     createFirstAdmin: (payload: { name: string; accessCode: string }) => Promise<ErpAuthStatus>;
-    login: (payload: { login: string; accessCode: string; serverUrl?: string }) => Promise<ErpAuthStatus>;
+    login: (payload: { login: string; accessCode: string }) => Promise<ErpAuthStatus>;
     logout: () => Promise<ErpAuthStatus>;
   };
   account: {
@@ -433,6 +443,9 @@ interface ErpAPI {
     getStatus: () => Promise<ErpLanStatus>;
     start: (payload?: { port?: number; bindAddress?: string }) => Promise<ErpLanStatus>;
     stop: () => Promise<ErpLanStatus>;
+  };
+  events?: {
+    onPurchaseUpdate: (handler: (payload: ErpPurchaseUpdateEvent) => void) => () => void;
   };
 }
 

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { Button, Card, Form, Input, Select, Space, Typography, message } from "antd";
+import { Alert, Button, Card, Form, Input, Space, Typography, message } from "antd";
 import { LockOutlined, UserOutlined } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import { useErpAuth } from "../contexts/ErpAuthContext";
@@ -8,7 +8,6 @@ import { getDefaultPathForRole } from "../utils/erpRoleAccess";
 
 const { Text } = Typography;
 const LOGIN_MESSAGE_KEY = "temu-login-message";
-const TEAM_WORKSPACE_PORT = 19380;
 
 const loginShellStyle: CSSProperties = {
   position: "relative",
@@ -82,56 +81,7 @@ export default function ErpLogin() {
   const navigate = useNavigate();
   const auth = useErpAuth();
   const [submitting, setSubmitting] = useState(false);
-  const [checkingWorkspace, setCheckingWorkspace] = useState(false);
-  const [workspaces, setWorkspaces] = useState<Array<{ url: string; name?: string }>>([]);
-  const [selectedWorkspaceUrl, setSelectedWorkspaceUrl] = useState("");
   const submittingRef = useRef(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    async function loadWorkspace() {
-      if (auth.loading) return;
-      setCheckingWorkspace(true);
-      try {
-        const status = await window.electronAPI?.erp?.client?.getStatus?.();
-        if (cancelled) return;
-        if (status?.serverUrl) {
-          setSelectedWorkspaceUrl(status.serverUrl);
-          setWorkspaces([{ url: status.serverUrl, name: undefined }]);
-          return;
-        }
-
-        if (status?.mode === "host" || status?.dbInitialized || auth.hasUsers) {
-          setSelectedWorkspaceUrl("");
-          setWorkspaces([]);
-          return;
-        }
-
-        const found = await window.electronAPI?.erp?.client?.discover?.({
-          port: TEAM_WORKSPACE_PORT,
-          timeoutMs: 650,
-        });
-        if (cancelled) return;
-        const nextWorkspaces = (found || []).map((item: any) => ({
-          url: item.url,
-          name: item.name,
-        }));
-        setWorkspaces(nextWorkspaces);
-        setSelectedWorkspaceUrl(nextWorkspaces[0]?.url || "");
-      } catch {
-        if (!cancelled) {
-          setWorkspaces([]);
-          setSelectedWorkspaceUrl("");
-        }
-      } finally {
-        if (!cancelled) setCheckingWorkspace(false);
-      }
-    }
-    void loadWorkspace();
-    return () => {
-      cancelled = true;
-    };
-  }, [auth.hasUsers, auth.loading]);
 
   useEffect(() => {
     if (auth.currentUser) {
@@ -140,24 +90,18 @@ export default function ErpLogin() {
   }, [auth.currentUser, navigate]);
 
   const handleSubmit = async (values: { login?: string; accessCode: string }) => {
-    if (submittingRef.current || submitting || auth.loading || checkingWorkspace) return;
+    if (submittingRef.current || submitting || auth.loading) return;
     submittingRef.current = true;
     setSubmitting(true);
     try {
-      const nextStatus = selectedWorkspaceUrl
-        ? await auth.login({
-          login: values.login || "",
-          accessCode: values.accessCode,
-          serverUrl: selectedWorkspaceUrl,
-        })
-        : await auth.login({
-          login: values.login || "",
-          accessCode: values.accessCode,
-        });
+      const nextStatus = await auth.login({
+        login: values.login || "",
+        accessCode: values.accessCode,
+      });
       const user = nextStatus.currentUser;
       message.success({
         key: LOGIN_MESSAGE_KEY,
-        content: "登录成功",
+        content: user?.role === "admin" ? "管理员登录成功，当前设备已进入主控身份" : "登录成功",
       });
       navigate(getDefaultPathForRole(user?.role), { replace: true });
     } catch (error: any) {
@@ -192,22 +136,18 @@ export default function ErpLogin() {
         }}
       >
         <Space direction="vertical" size={18} style={{ width: "100%" }}>
+          {!auth.hasUsers ? (
+            <Alert
+              type="warning"
+              showIcon
+              message="当前没有可登录的真实账号"
+              description="系统不会绕过登录。请先由管理员在本机初始化或导入真实账号。"
+            />
+          ) : null}
           <Text type="secondary">
-            输入管理员分配的账号和访问码，系统会按角色进入对应工作台。
+            输入管理员分配的用户名和访问码。管理员账号登录后，当前设备就是主控。
           </Text>
           <Form form={form} layout="vertical" onFinish={handleSubmit}>
-            {workspaces.length > 1 ? (
-              <Form.Item label="工作空间">
-                <Select
-                  value={selectedWorkspaceUrl}
-                  options={workspaces.map((item, index) => ({
-                    label: item.name || `工作空间 ${index + 1}`,
-                    value: item.url,
-                  }))}
-                  onChange={setSelectedWorkspaceUrl}
-                />
-              </Form.Item>
-            ) : null}
             <Form.Item
               name="login"
               label="用户"
@@ -226,7 +166,7 @@ export default function ErpLogin() {
               type="primary"
               htmlType="submit"
               block
-              loading={submitting || auth.loading || checkingWorkspace}
+              loading={submitting || auth.loading}
             >
               登录
             </Button>

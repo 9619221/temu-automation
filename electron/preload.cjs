@@ -235,6 +235,17 @@ contextBridge.exposeInMainWorld("electronAPI", {
       start: (payload) => ipcRenderer.invoke("erp:lan:start", payload || {}),
       stop: () => ipcRenderer.invoke("erp:lan:stop"),
     },
+    events: {
+      onPurchaseUpdate: (handler) => {
+        const listener = (_event, payload) => handler(payload);
+        ipcRenderer.send("erp:events:subscribe");
+        ipcRenderer.on("erp:purchase:update", listener);
+        return () => {
+          ipcRenderer.removeListener("erp:purchase:update", listener);
+          ipcRenderer.send("erp:events:unsubscribe");
+        };
+      },
+    },
   },
 
   app: {

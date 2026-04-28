@@ -10,6 +10,7 @@ const {
 } = require("./workflow/validators.cjs");
 const enums = require("./workflow/enums.cjs");
 const {
+  broadcastLanEvent,
   getLanStatus,
   startLanServer,
   stopLanServer,
@@ -19,9 +20,6 @@ const {
   discoverControllers,
   getRuntimeStatus,
   isClientMode,
-  remoteAuthStatus,
-  remoteLogin,
-  remoteLogout,
   remoteRequest,
   setClientMode,
   setHostMode,
@@ -35,6 +33,22 @@ const erpState = {
   currentUser: null,
   userDataDir: null,
 };
+
+const PURCHASE_UPDATE_CHANNEL = "erp:purchase:update";
+const rendererEventSubscribers = new Set();
+const BROADCAST_PURCHASE_ACTIONS = new Set([
+  "create_pr",
+  "create_purchase_request",
+  "add_comment",
+  "accept_pr",
+  "mark_sourced",
+  "quote_feedback",
+  "add_sourcing_candidate",
+  "generate_po",
+  "submit_payment_approval",
+  "approve_payment",
+  "confirm_paid",
+]);
 
 const ACCESS_CODE_ITERATIONS = 120000;
 const ACCESS_CODE_KEY_LENGTH = 32;
@@ -77,6 +91,50 @@ function serializeError(error) {
     code: error.code || null,
     message: error.message || String(error),
   };
+}
+
+function subscribeRendererEvents(webContents) {
+  if (!webContents || typeof webContents.send !== "function") return;
+  if (rendererEventSubscribers.has(webContents)) return;
+  rendererEventSubscribers.add(webContents);
+  webContents.once("destroyed", () => {
+    rendererEventSubscribers.delete(webContents);
+  });
+}
+
+function unsubscribeRendererEvents(webContents) {
+  if (webContents) rendererEventSubscribers.delete(webContents);
+}
+
+function broadcastRendererPurchaseUpdate(payload) {
+  for (const webContents of Array.from(rendererEventSubscribers)) {
+    if (!webContents || webContents.isDestroyed()) {
+      rendererEventSubscribers.delete(webContents);
+      continue;
+    }
+    try {
+      webContents.send(PURCHASE_UPDATE_CHANNEL, payload);
+    } catch {
+      rendererEventSubscribers.delete(webContents);
+    }
+  }
+}
+
+function broadcastPurchaseUpdate(action, payload = {}, actor = {}, result = {}) {
+  if (!BROADCAST_PURCHASE_ACTIONS.has(action)) return null;
+  const event = {
+    type: "purchase:update",
+    action,
+    prId: optionalString(payload.prId || payload.id || result?.id || result?.purchaseRequest?.id),
+    poId: optionalString(payload.poId || result?.purchaseOrder?.id),
+    actorRole: optionalString(actor.role),
+    at: nowIso(),
+  };
+  try {
+    broadcastLanEvent(event);
+  } catch {}
+  broadcastRendererPurchaseUpdate(event);
+  return event;
 }
 
 function requireString(value, fieldName) {
@@ -382,10 +440,18 @@ function countUsers() {
   return Number(db.prepare("SELECT COUNT(*) AS count FROM erp_users").get().count || 0);
 }
 
-function getAuthStatus() {
-  if (isClientMode()) {
-    return remoteAuthStatus();
+function loadExistingHostDatabaseForStatus() {
+  if (!erpState.db && hasExistingErpDatabase({ userDataDir: erpState.userDataDir })) {
+    if (isClientMode()) {
+      setHostMode();
+      erpState.currentUser = null;
+    }
+    initializeHostErp({ userDataDir: erpState.userDataDir });
   }
+}
+
+function getAuthStatus() {
+  loadExistingHostDatabaseForStatus();
   if (!erpState.db) {
     return {
       hasUsers: false,
@@ -417,26 +483,33 @@ function createFirstAdmin(payload = {}) {
   return getAuthStatus();
 }
 
-function loginElectronUser(payload = {}) {
-  if (isClientMode() || optionalString(payload.serverUrl)) {
-    return remoteLogin(payload).then((status) => {
-      erpState.currentUser = status.currentUser;
-      return status;
-    });
+function ensureHostModeForLogin() {
+  if (isClientMode()) {
+    setHostMode();
+    erpState.currentUser = null;
   }
+  if (!erpState.db) {
+    setHostMode();
+    initializeHostErp({ userDataDir: erpState.userDataDir });
+  }
+}
+
+async function loginElectronUser(payload = {}) {
+  ensureHostModeForLogin();
   const user = verifyLanLogin(payload);
   if (!user) throw new Error("用户名或访问码错误");
   erpState.currentUser = user;
+  if (user.role === "admin") {
+    try {
+      await startLanService({});
+    } catch (error) {
+      console.warn("[ERP] Admin controller service start failed:", error?.message || error);
+    }
+  }
   return getAuthStatus();
 }
 
 function logoutElectronUser() {
-  if (isClientMode()) {
-    return remoteLogout().then((status) => {
-      erpState.currentUser = null;
-      return status;
-    });
-  }
   erpState.currentUser = null;
   return getAuthStatus();
 }
@@ -609,6 +682,99 @@ function toPurchaseRequest(row) {
   return next;
 }
 
+function actorCan(actor, roles) {
+  return Boolean(actor?.role && roles.includes(actor.role));
+}
+
+function assertActorRole(actor, roles, actionName = "该操作") {
+  if (!actorCan(actor, roles)) {
+    throw new Error(`${actionName}需要以下角色之一：${roles.join(", ")}`);
+  }
+}
+
+function getActorProfile(db, actor = {}) {
+  const id = optionalString(actor.id);
+  const row = id ? db.prepare("SELECT id, name, role FROM erp_users WHERE id = ?").get(id) : null;
+  return {
+    id: row?.id || id || null,
+    name: row?.name || null,
+    role: row?.role || optionalString(actor.role),
+  };
+}
+
+function getPurchaseRequest(db, prId) {
+  const row = db.prepare("SELECT * FROM erp_purchase_requests WHERE id = ?").get(prId);
+  if (!row) throw new Error(`Purchase request not found: ${prId}`);
+  return row;
+}
+
+function markPurchaseRequestRead(db, prId, actor) {
+  const actorProfile = getActorProfile(db, actor);
+  if (!actorProfile.id) return null;
+  const now = nowIso();
+  db.prepare(`
+    INSERT INTO erp_purchase_request_reads (pr_id, user_id, last_read_at)
+    VALUES (@pr_id, @user_id, @last_read_at)
+    ON CONFLICT(pr_id, user_id) DO UPDATE SET
+      last_read_at = excluded.last_read_at
+  `).run({
+    pr_id: prId,
+    user_id: actorProfile.id,
+    last_read_at: now,
+  });
+  return now;
+}
+
+function writePurchaseRequestEvent(db, pr, actor, eventType, message) {
+  const actorProfile = getActorProfile(db, actor);
+  const row = {
+    id: createId("pr_evt"),
+    pr_id: pr.id,
+    account_id: pr.account_id,
+    actor_id: actorProfile.id,
+    actor_name: actorProfile.name,
+    actor_role: actorProfile.role,
+    event_type: eventType,
+    message: requireString(message, "message"),
+    created_at: nowIso(),
+  };
+  db.prepare(`
+    INSERT INTO erp_purchase_request_events (
+      id, pr_id, account_id, actor_id, actor_name, actor_role,
+      event_type, message, created_at
+    )
+    VALUES (
+      @id, @pr_id, @account_id, @actor_id, @actor_name, @actor_role,
+      @event_type, @message, @created_at
+    )
+  `).run(row);
+  return row;
+}
+
+function addPurchaseRequestComment(db, pr, actor, body) {
+  const actorProfile = getActorProfile(db, actor);
+  const row = {
+    id: createId("pr_msg"),
+    pr_id: pr.id,
+    account_id: pr.account_id,
+    author_id: actorProfile.id,
+    author_name: actorProfile.name,
+    author_role: actorProfile.role,
+    body: requireString(body, "comment"),
+    created_at: nowIso(),
+  };
+  db.prepare(`
+    INSERT INTO erp_purchase_request_comments (
+      id, pr_id, account_id, author_id, author_name, author_role, body, created_at
+    )
+    VALUES (
+      @id, @pr_id, @account_id, @author_id, @author_name, @author_role, @body, @created_at
+    )
+  `).run(row);
+  markPurchaseRequestRead(db, pr.id, actor);
+  return row;
+}
+
 function getPurchaseWorkbench(params = {}) {
   const { db } = requireErp();
   const accountId = optionalString(params.accountId);
@@ -651,6 +817,100 @@ function getPurchaseWorkbench(params = {}) {
       pr.updated_at DESC
     LIMIT @limit
   `).all(baseParams).map(toPurchaseRequest);
+
+  const currentUserId = params.user?.id || erpState.currentUser?.id || null;
+  const candidatesByPr = new Map();
+  const commentsByPr = new Map();
+  const eventsByPr = new Map();
+  const unreadByPr = new Map();
+
+  const candidateStmt = db.prepare(`
+    SELECT
+      candidate.*,
+      supplier.name AS linked_supplier_name,
+      creator.name AS created_by_name
+    FROM erp_sourcing_candidates candidate
+    LEFT JOIN erp_suppliers supplier ON supplier.id = candidate.supplier_id
+    LEFT JOIN erp_users creator ON creator.id = candidate.created_by
+    WHERE candidate.pr_id = ?
+    ORDER BY
+      CASE candidate.status
+        WHEN 'selected' THEN 0
+        WHEN 'shortlisted' THEN 1
+        WHEN 'candidate' THEN 2
+        ELSE 9
+      END,
+      candidate.updated_at DESC
+  `);
+  const commentStmt = db.prepare(`
+    SELECT *
+    FROM erp_purchase_request_comments
+    WHERE pr_id = ?
+    ORDER BY created_at ASC
+  `);
+  const eventStmt = db.prepare(`
+    SELECT *
+    FROM erp_purchase_request_events
+    WHERE pr_id = ?
+    ORDER BY created_at ASC
+  `);
+  const unreadStmt = db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM (
+      SELECT author_id AS source_user_id, created_at
+      FROM erp_purchase_request_comments
+      WHERE pr_id = @pr_id
+      UNION ALL
+      SELECT actor_id AS source_user_id, created_at
+      FROM erp_purchase_request_events
+      WHERE pr_id = @pr_id
+    ) item
+    LEFT JOIN erp_purchase_request_reads read_state
+      ON read_state.pr_id = @pr_id AND read_state.user_id = @user_id
+    WHERE item.created_at > COALESCE(read_state.last_read_at, '')
+      AND COALESCE(item.source_user_id, '') != @user_id
+  `);
+
+  for (const pr of purchaseRequests) {
+    const candidates = candidateStmt.all(pr.id).map((row) => {
+      const next = toCamelRow(row);
+      next.supplierName = next.supplierName || next.linkedSupplierName || "";
+      return next;
+    });
+    const comments = commentStmt.all(pr.id).map(toCamelRow);
+    const events = eventStmt.all(pr.id).map(toCamelRow);
+    const timeline = [
+      ...events.map((item) => ({
+        id: item.id,
+        kind: "event",
+        actorName: item.actorName,
+        actorRole: item.actorRole,
+        message: item.message,
+        eventType: item.eventType,
+        createdAt: item.createdAt,
+      })),
+      ...comments.map((item) => ({
+        id: item.id,
+        kind: "comment",
+        actorName: item.authorName,
+        actorRole: item.authorRole,
+        message: item.body,
+        createdAt: item.createdAt,
+      })),
+    ].sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt)));
+
+    candidatesByPr.set(pr.id, candidates);
+    commentsByPr.set(pr.id, comments);
+    eventsByPr.set(pr.id, events);
+    unreadByPr.set(pr.id, currentUserId
+      ? Number(unreadStmt.get({ pr_id: pr.id, user_id: currentUserId })?.count || 0)
+      : 0);
+    pr.candidates = candidates;
+    pr.comments = comments;
+    pr.events = events;
+    pr.timeline = timeline;
+    pr.unreadCount = unreadByPr.get(pr.id);
+  }
 
   const purchaseOrders = db.prepare(`
     SELECT
@@ -779,7 +1039,25 @@ function getPurchaseWorkbench(params = {}) {
     paymentQueueAmount: paymentQueue.reduce((sum, item) => (
       sum + Number(item.paymentAmount ?? item.totalAmount ?? 0)
     ), 0),
+    unreadPurchaseRequestCount: purchaseRequests.reduce((sum, item) => (
+      sum + Number(item.unreadCount || 0)
+    ), 0),
   };
+
+  const skuOptions = db.prepare(`
+    SELECT id, internal_sku_code, product_name, account_id
+    FROM erp_skus
+    ${accountId ? "WHERE account_id = @account_id" : ""}
+    ORDER BY updated_at DESC, created_at DESC
+    LIMIT 500
+  `).all(accountId ? baseParams : {}).map(toCamelRow);
+
+  const supplierOptions = db.prepare(`
+    SELECT id, name
+    FROM erp_suppliers
+    ORDER BY updated_at DESC, created_at DESC
+    LIMIT 500
+  `).all().map(toCamelRow);
 
   return {
     generatedAt: nowIso(),
@@ -788,6 +1066,8 @@ function getPurchaseWorkbench(params = {}) {
     purchaseOrders,
     paymentApprovals,
     paymentQueue,
+    skuOptions,
+    supplierOptions,
   };
 }
 
@@ -936,6 +1216,286 @@ function normalizeActor(actorInput = {}) {
   };
 }
 
+function parseEvidenceList(payload = {}) {
+  if (Array.isArray(payload.evidence)) {
+    return payload.evidence.map((item) => String(item || "").trim()).filter(Boolean);
+  }
+  const text = optionalString(payload.evidenceText || payload.evidenceLines);
+  if (!text) return [];
+  return text.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+}
+
+function createPurchaseRequestAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["operations", "manager", "admin"], "新建采购需求");
+  const skuId = requireString(payload.skuId, "skuId");
+  const sku = db.prepare("SELECT * FROM erp_skus WHERE id = ?").get(skuId);
+  if (!sku) throw new Error(`SKU not found: ${skuId}`);
+
+  const accountId = optionalString(payload.accountId) || sku.account_id;
+  const now = nowIso();
+  const row = {
+    id: optionalString(payload.id) || createId("pr"),
+    account_id: accountId,
+    sku_id: skuId,
+    requested_by: actor.id || null,
+    reason: requireString(payload.reason, "reason"),
+    requested_qty: Number(requireString(payload.requestedQty, "requestedQty")),
+    target_unit_cost: optionalNumber(payload.targetUnitCost),
+    expected_arrival_date: optionalString(payload.expectedArrivalDate),
+    evidence_json: JSON.stringify(parseEvidenceList(payload)),
+    status: "submitted",
+    created_at: now,
+    updated_at: now,
+  };
+  if (!Number.isInteger(row.requested_qty) || row.requested_qty <= 0) {
+    throw new Error("requestedQty must be a positive integer");
+  }
+
+  db.prepare(`
+    INSERT INTO erp_purchase_requests (
+      id, account_id, sku_id, requested_by, reason, requested_qty,
+      target_unit_cost, expected_arrival_date, evidence_json, status, created_at, updated_at
+    )
+    VALUES (
+      @id, @account_id, @sku_id, @requested_by, @reason, @requested_qty,
+      @target_unit_cost, @expected_arrival_date, @evidence_json, @status, @created_at, @updated_at
+    )
+  `).run(row);
+
+  const after = getPurchaseRequest(db, row.id);
+  services.workflow.writeAudit({
+    accountId,
+    actor,
+    action: "create_purchase_request",
+    entityType: "purchase_request",
+    entityId: row.id,
+    before: null,
+    after,
+  });
+  writePurchaseRequestEvent(db, after, actor, "create_request", "运营新建采购需求");
+  markPurchaseRequestRead(db, row.id, actor);
+  return toPurchaseRequest(after);
+}
+
+function addSourcingCandidateAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "报价反馈");
+  const prId = requireString(payload.prId || payload.id, "prId");
+  let pr = getPurchaseRequest(db, prId);
+
+  if (pr.status === "submitted") {
+    services.purchase.acceptRequest(prId, actor);
+    pr = getPurchaseRequest(db, prId);
+    writePurchaseRequestEvent(db, pr, actor, "accept_request", "采购接收需求");
+  }
+
+  const supplierId = optionalString(payload.supplierId);
+  const supplier = supplierId ? db.prepare("SELECT * FROM erp_suppliers WHERE id = ?").get(supplierId) : null;
+  const now = nowIso();
+  const row = {
+    id: optionalString(payload.candidateId) || createId("source"),
+    account_id: pr.account_id,
+    pr_id: pr.id,
+    purchase_source: supplierId ? "existing_supplier" : (optionalString(payload.purchaseSource) || "other_manual"),
+    sourcing_method: "manual",
+    supplier_id: supplierId,
+    supplier_name: optionalString(payload.supplierName) || supplier?.name || "",
+    product_title: optionalString(payload.productTitle),
+    product_url: optionalString(payload.productUrl),
+    image_url: optionalString(payload.imageUrl),
+    unit_price: optionalNumber(payload.unitPrice) ?? 0,
+    moq: Number(optionalNumber(payload.moq) ?? 1),
+    lead_days: optionalNumber(payload.leadDays),
+    logistics_fee: optionalNumber(payload.logisticsFee) ?? 0,
+    remark: optionalString(payload.remark),
+    status: "candidate",
+    created_by: actor.id || null,
+    created_at: now,
+    updated_at: now,
+  };
+  if (!row.supplier_name) throw new Error("supplierName is required");
+  if (!Number.isFinite(row.unit_price) || row.unit_price < 0) throw new Error("unitPrice must be greater than or equal to 0");
+  if (!Number.isInteger(row.moq) || row.moq <= 0) throw new Error("moq must be a positive integer");
+
+  db.prepare(`
+    INSERT INTO erp_sourcing_candidates (
+      id, account_id, pr_id, purchase_source, sourcing_method, supplier_id, supplier_name,
+      product_title, product_url, image_url, unit_price, moq, lead_days,
+      logistics_fee, remark, status, created_by, created_at, updated_at
+    )
+    VALUES (
+      @id, @account_id, @pr_id, @purchase_source, @sourcing_method, @supplier_id, @supplier_name,
+      @product_title, @product_url, @image_url, @unit_price, @moq, @lead_days,
+      @logistics_fee, @remark, @status, @created_by, @created_at, @updated_at
+    )
+  `).run(row);
+
+  const afterCandidate = db.prepare("SELECT * FROM erp_sourcing_candidates WHERE id = ?").get(row.id);
+  services.workflow.writeAudit({
+    accountId: pr.account_id,
+    actor,
+    action: "add_sourcing_candidate",
+    entityType: "sourcing_candidate",
+    entityId: row.id,
+    before: null,
+    after: afterCandidate,
+  });
+
+  if (pr.status === "buyer_processing") {
+    services.purchase.markRequestSourced(prId, actor);
+    pr = getPurchaseRequest(db, prId);
+  }
+
+  writePurchaseRequestEvent(db, pr, actor, "quote_feedback", `采购反馈报价：${row.supplier_name} ¥${Number(row.unit_price).toFixed(2)}`);
+  const feedback = optionalString(payload.feedback || payload.remark);
+  if (feedback) addPurchaseRequestComment(db, pr, actor, feedback);
+  markPurchaseRequestRead(db, pr.id, actor);
+  return toCamelRow(afterCandidate);
+}
+
+function getCandidateForPo(db, prId, candidateId) {
+  if (candidateId) {
+    const row = db.prepare("SELECT * FROM erp_sourcing_candidates WHERE id = ?").get(candidateId);
+    if (!row) throw new Error(`Sourcing candidate not found: ${candidateId}`);
+    if (row.pr_id !== prId) throw new Error("Sourcing candidate does not belong to this request");
+    return row;
+  }
+  const row = db.prepare(`
+    SELECT *
+    FROM erp_sourcing_candidates
+    WHERE pr_id = ?
+    ORDER BY
+      CASE status WHEN 'selected' THEN 0 WHEN 'shortlisted' THEN 1 WHEN 'candidate' THEN 2 ELSE 9 END,
+      updated_at DESC
+    LIMIT 1
+  `).get(prId);
+  if (!row) throw new Error("请先添加报价反馈，再生成采购单");
+  return row;
+}
+
+function buildPurchaseOrderNo() {
+  const date = new Date();
+  const stamp = `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, "0")}${String(date.getDate()).padStart(2, "0")}`;
+  return `PO-${stamp}-${createId("").replace(/^_?/, "").slice(-8).toUpperCase()}`;
+}
+
+function resolveExpectedDeliveryDate(candidate, payload = {}) {
+  const explicit = optionalString(payload.expectedDeliveryDate);
+  if (explicit) return explicit;
+  const leadDays = Number(candidate.lead_days || 0);
+  if (!Number.isFinite(leadDays) || leadDays <= 0) return null;
+  const date = new Date();
+  date.setDate(date.getDate() + leadDays);
+  return date.toISOString().slice(0, 10);
+}
+
+function generatePurchaseOrderAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "生成采购单");
+  const prId = requireString(payload.prId || payload.id, "prId");
+  let pr = getPurchaseRequest(db, prId);
+  const candidate = getCandidateForPo(db, prId, optionalString(payload.candidateId));
+
+  if (candidate.status === "candidate" || candidate.status === "shortlisted") {
+    services.purchase.selectCandidate(candidate.id, actor);
+  } else if (candidate.status !== "selected") {
+    throw new Error(`Cannot generate PO from candidate status: ${candidate.status}`);
+  }
+
+  if (pr.status === "submitted") {
+    services.purchase.acceptRequest(prId, actor);
+    pr = getPurchaseRequest(db, prId);
+  }
+  if (pr.status === "buyer_processing") {
+    services.purchase.markRequestSourced(prId, actor);
+    pr = getPurchaseRequest(db, prId);
+  }
+
+  const transition = services.workflow.transition({
+    entityType: "purchase_request",
+    id: pr.id,
+    action: "generate_po",
+    toStatus: "converted_to_po",
+    actor,
+  });
+
+  const now = nowIso();
+  const qty = Number(optionalNumber(payload.qty) ?? pr.requested_qty);
+  if (!Number.isInteger(qty) || qty <= 0) throw new Error("qty must be a positive integer");
+  const unitCost = Number(candidate.unit_price || 0);
+  const logisticsFee = Number(candidate.logistics_fee || 0);
+  const totalAmount = qty * unitCost + logisticsFee;
+  const po = {
+    id: optionalString(payload.poId) || createId("po"),
+    account_id: pr.account_id,
+    pr_id: pr.id,
+    selected_candidate_id: candidate.id,
+    supplier_id: candidate.supplier_id || null,
+    po_no: optionalString(payload.poNo) || buildPurchaseOrderNo(),
+    status: "draft",
+    payment_status: "unpaid",
+    expected_delivery_date: resolveExpectedDeliveryDate(candidate, payload),
+    actual_delivery_date: null,
+    total_amount: totalAmount,
+    created_by: actor.id || null,
+    created_at: now,
+    updated_at: now,
+  };
+
+  db.prepare(`
+    INSERT INTO erp_purchase_orders (
+      id, account_id, pr_id, selected_candidate_id, supplier_id, po_no,
+      status, payment_status, expected_delivery_date, actual_delivery_date,
+      total_amount, created_by, created_at, updated_at
+    )
+    VALUES (
+      @id, @account_id, @pr_id, @selected_candidate_id, @supplier_id, @po_no,
+      @status, @payment_status, @expected_delivery_date, @actual_delivery_date,
+      @total_amount, @created_by, @created_at, @updated_at
+    )
+  `).run(po);
+
+  const line = {
+    id: createId("po_line"),
+    account_id: pr.account_id,
+    po_id: po.id,
+    sku_id: pr.sku_id,
+    qty,
+    unit_cost: unitCost,
+    logistics_fee: logisticsFee,
+    expected_qty: qty,
+    received_qty: 0,
+    remark: optionalString(payload.remark),
+  };
+  db.prepare(`
+    INSERT INTO erp_purchase_order_lines (
+      id, account_id, po_id, sku_id, qty, unit_cost, logistics_fee,
+      expected_qty, received_qty, remark
+    )
+    VALUES (
+      @id, @account_id, @po_id, @sku_id, @qty, @unit_cost, @logistics_fee,
+      @expected_qty, @received_qty, @remark
+    )
+  `).run(line);
+
+  const afterPo = getPurchaseOrder(db, po.id);
+  services.workflow.writeAudit({
+    accountId: po.account_id,
+    actor,
+    action: "create_purchase_order",
+    entityType: "purchase_order",
+    entityId: po.id,
+    before: null,
+    after: afterPo,
+  });
+  const latestPr = getPurchaseRequest(db, pr.id);
+  writePurchaseRequestEvent(db, latestPr, actor, "generate_po", `采购生成采购单：${po.po_no}`);
+  if (line.remark) addPurchaseRequestComment(db, latestPr, actor, line.remark);
+  markPurchaseRequestRead(db, pr.id, actor);
+  return {
+    transition,
+    purchaseOrder: toCamelRow(afterPo),
+  };
+}
+
 function performPurchaseAction(payload = {}, actorInput = {}) {
   const { db, services } = requireErp();
   const action = requireString(payload.action, "action");
@@ -943,13 +1503,39 @@ function performPurchaseAction(payload = {}, actorInput = {}) {
 
   const run = db.transaction(() => {
     switch (action) {
+      case "create_pr":
+      case "create_purchase_request": {
+        return createPurchaseRequestAction({ db, services, payload, actor });
+      }
+      case "add_comment": {
+        const pr = getPurchaseRequest(db, requireString(payload.prId || payload.id, "prId"));
+        const comment = addPurchaseRequestComment(db, pr, actor, payload.body || payload.comment);
+        return { comment: toCamelRow(comment) };
+      }
+      case "mark_read": {
+        const pr = getPurchaseRequest(db, requireString(payload.prId || payload.id, "prId"));
+        return { lastReadAt: markPurchaseRequestRead(db, pr.id, actor) };
+      }
       case "accept_pr": {
         const prId = requireString(payload.prId || payload.id, "prId");
-        return services.purchase.acceptRequest(prId, actor);
+        const transition = services.purchase.acceptRequest(prId, actor);
+        writePurchaseRequestEvent(db, getPurchaseRequest(db, prId), actor, "accept_request", "采购接收需求");
+        markPurchaseRequestRead(db, prId, actor);
+        return transition;
       }
       case "mark_sourced": {
         const prId = requireString(payload.prId || payload.id, "prId");
-        return services.purchase.markRequestSourced(prId, actor);
+        const transition = services.purchase.markRequestSourced(prId, actor);
+        writePurchaseRequestEvent(db, getPurchaseRequest(db, prId), actor, "mark_sourced", "采购标记已寻源");
+        markPurchaseRequestRead(db, prId, actor);
+        return transition;
+      }
+      case "quote_feedback":
+      case "add_sourcing_candidate": {
+        return addSourcingCandidateAction({ db, services, payload, actor });
+      }
+      case "generate_po": {
+        return generatePurchaseOrderAction({ db, services, payload, actor });
       }
       case "submit_payment_approval": {
         const poId = requireString(payload.poId || payload.id, "poId");
@@ -991,10 +1577,11 @@ function performPurchaseAction(payload = {}, actorInput = {}) {
   });
 
   const result = run();
+  broadcastPurchaseUpdate(action, payload, actor, result);
   return {
     action,
     result,
-    workbench: getPurchaseWorkbench({ limit: payload.limit }),
+    workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
   };
 }
 
@@ -1943,12 +2530,74 @@ function startLanService(payload = {}) {
   });
 }
 
+function bootstrapAdminFromEnv(env = process.env) {
+  if (countUsers() > 0) {
+    return {
+      created: false,
+      reason: "users_exist",
+    };
+  }
+
+  const name = optionalString(env.ERP_ADMIN_NAME);
+  const accessCode = optionalString(env.ERP_ADMIN_CODE);
+  if (!name || !accessCode) {
+    return {
+      created: false,
+      reason: "missing_env",
+      message: "Set ERP_ADMIN_NAME and ERP_ADMIN_CODE before first start to bootstrap the admin account.",
+    };
+  }
+
+  createFirstAdmin({ name, accessCode });
+  return {
+    created: true,
+    name,
+  };
+}
+
+async function startErpHeadlessServer(options = {}) {
+  const env = options.env || process.env;
+  erpState.userDataDir = options.userDataDir || erpState.userDataDir || env.TEMU_USER_DATA || env.APP_USER_DATA || null;
+  const initResult = initializeHostErp({
+    userDataDir: erpState.userDataDir,
+    dataDir: options.dataDir || env.ERP_DATA_DIR,
+    dbPath: options.dbPath || env.ERP_DB_PATH,
+  });
+  const bootstrap = bootstrapAdminFromEnv(env);
+  const lanStatus = await startLanServer({
+    port: Number(options.port || env.ERP_PORT) || DEFAULT_LAN_PORT,
+    bindAddress: optionalString(options.bindAddress || env.ERP_BIND_ADDRESS) || DEFAULT_BIND_ADDRESS,
+    getErpStatus,
+    getPurchaseWorkbench,
+    getWarehouseWorkbench,
+    getQcWorkbench,
+    getOutboundWorkbench,
+    performPurchaseAction,
+    performWarehouseAction,
+    performQcAction,
+    performOutboundAction,
+    listWorkItems: listWorkItemsForUser,
+    getWorkItemStats: getWorkItemStatsForUser,
+    generateWorkItems: generateWorkItemsForUser,
+    updateWorkItemStatus: updateWorkItemStatusForUser,
+    verifyLogin: verifyLanLogin,
+  });
+
+  return {
+    initResult,
+    bootstrap,
+    lanStatus,
+  };
+}
+
 function stopLanService() {
   assertHostMode("局域网服务");
   return stopLanServer();
 }
 
 function registerErpIpcHandlers(ipcMain) {
+  ipcMain.on("erp:events:subscribe", (event) => subscribeRendererEvents(event.sender));
+  ipcMain.on("erp:events:unsubscribe", (event) => unsubscribeRendererEvents(event.sender));
   ipcMain.handle("erp:get-status", () => getErpStatus());
   ipcMain.handle("erp:run-migrations", () => {
     assertHostMode("Migration");
@@ -1956,7 +2605,7 @@ function registerErpIpcHandlers(ipcMain) {
   });
   ipcMain.handle("erp:get-enums", () => enums);
   ipcMain.handle("erp:auth:get-status", () => getAuthStatus());
-  ipcMain.handle("erp:auth:get-current-user", async () => (isClientMode() ? (await remoteAuthStatus()).currentUser : erpState.currentUser));
+  ipcMain.handle("erp:auth:get-current-user", () => erpState.currentUser);
   ipcMain.handle("erp:auth:create-first-admin", (_event, payload) => createFirstAdmin(payload || {}));
   ipcMain.handle("erp:auth:login", (_event, payload) => loginElectronUser(payload || {}));
   ipcMain.handle("erp:auth:logout", () => logoutElectronUser());
@@ -2035,6 +2684,7 @@ function closeErp() {
 module.exports = {
   initializeErp,
   getErpStatus,
+  startErpHeadlessServer,
   registerErpIpcHandlers,
   closeErp,
 };

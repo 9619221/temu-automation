@@ -13,6 +13,7 @@ automation/data/user-data/
 
 # 临时探测与备份文件
 .codex-backups/
+.codex-dev/
 tmp-grsai-*
 logs/yundu-sniff-*.json
 
