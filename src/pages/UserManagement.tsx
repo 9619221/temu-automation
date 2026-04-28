@@ -5,6 +5,7 @@ import { EditOutlined, KeyOutlined, PlusOutlined, ReloadOutlined, SafetyCertific
 import PageHeader from "../components/PageHeader";
 import { roleLabel } from "../utils/erpRoleAccess";
 import { useErpAuth } from "../contexts/ErpAuthContext";
+import { ERP_CLOUD_SERVER_URL } from "../config/erpCloud";
 
 const { Text } = Typography;
 const erp = window.electronAPI?.erp;
@@ -63,7 +64,7 @@ function statusTag(status?: string) {
 
 export default function UserManagement() {
   const [form] = Form.useForm<UserFormValues>();
-  const [cloudForm] = Form.useForm<{ serverUrl: string; login: string; accessCode: string }>();
+  const [cloudForm] = Form.useForm<{ login: string; accessCode: string }>();
   const auth = useErpAuth();
   const [users, setUsers] = useState<ErpUserRow[]>([]);
   const [clientStatus, setClientStatus] = useState<ClientStatusView | null>(null);
@@ -77,26 +78,28 @@ export default function UserManagement() {
     const roles = new Set(users.map((user) => user.role).filter(Boolean));
     return `${roles.size} 个角色`;
   }, [users]);
+  const isCloudMode = Boolean(clientStatus?.isClientMode);
 
   const loadUsers = useCallback(async () => {
     if (!erp) return;
     setLoading(true);
     try {
-      const [nextUsers, nextClientStatus] = await Promise.all([
-        erp.user.list({ limit: 200 }),
-        erp.client.getStatus().catch(() => null),
-      ]);
-      setUsers(nextUsers as ErpUserRow[]);
+      const nextClientStatus = await erp.client.getStatus().catch(() => null);
       if (nextClientStatus) {
         setClientStatus(nextClientStatus as ClientStatusView);
-        if (nextClientStatus.serverUrl) cloudForm.setFieldValue("serverUrl", nextClientStatus.serverUrl);
       }
+      if (!nextClientStatus?.isClientMode) {
+        setUsers([]);
+        return;
+      }
+      const nextUsers = await erp.user.list({ limit: 200 });
+      setUsers(nextUsers as ErpUserRow[]);
     } catch (error: any) {
       message.error(error?.message || "用户列表读取失败");
     } finally {
       setLoading(false);
     }
-  }, [cloudForm]);
+  }, []);
 
   useEffect(() => {
     void loadUsers();
@@ -122,7 +125,7 @@ export default function UserManagement() {
       const nextStatus = await auth.login({
         login: values.login,
         accessCode: values.accessCode,
-        serverUrl: values.serverUrl,
+        serverUrl: ERP_CLOUD_SERVER_URL,
       });
       message.success(`已连接云端：${nextStatus.currentUser?.name || values.login}`);
       cloudForm.resetFields(["accessCode"]);
@@ -134,23 +137,12 @@ export default function UserManagement() {
     }
   };
 
-  const handleUseLocal = async () => {
-    if (!erp) return;
-    setCloudSubmitting(true);
-    try {
-      await erp.client.setHostMode();
-      await auth.logout().catch(() => null);
-      message.success("已切回本机用户库");
-      await loadUsers();
-    } catch (error: any) {
-      message.error(error?.message || "切换本机模式失败");
-    } finally {
-      setCloudSubmitting(false);
-    }
-  };
-
   const handleSubmit = async () => {
     if (!erp) return;
+    if (!isCloudMode) {
+      message.warning("请先连接云端，再创建或编辑用户");
+      return;
+    }
     const values = await form.validateFields();
     setSubmitting(true);
     try {
@@ -183,6 +175,10 @@ export default function UserManagement() {
 
   const handleToggleStatus = async (record: ErpUserRow) => {
     if (!erp) return;
+    if (!isCloudMode) {
+      message.warning("请先连接云端，再停用或启用用户");
+      return;
+    }
     const nextStatus = record.status === "active" ? "blocked" : "active";
     if (record.id === auth.currentUser?.id && nextStatus === "blocked") {
       message.warning("不能停用当前登录用户");
@@ -273,7 +269,7 @@ export default function UserManagement() {
       <PageHeader
         eyebrow="系统"
         title="用户管理"
-        subtitle="在软件内创建采购、仓库、运营和财务账号。访问码会安全保存，忘记后需要重新设置。"
+        subtitle="在云端创建采购、仓库、运营和财务账号。访问码会安全保存，忘记后需要重新设置。"
         meta={[`共 ${users.length} 个用户`, `启用 ${activeCount} 个`, roleCountText]}
         actions={<Button icon={<ReloadOutlined />} onClick={() => void loadUsers()} loading={loading}>刷新</Button>}
       />
@@ -282,44 +278,36 @@ export default function UserManagement() {
         <div className="app-panel__title">
           <div>
             <div className="app-panel__title-main">云端同步</div>
-            <div className="app-panel__title-sub">连接后，本页创建和停用用户会直接写入云服务器。</div>
+            <div className="app-panel__title-sub">本页只写入云服务器，用户端统一登录云端。</div>
           </div>
-          <Tag color={clientStatus?.isClientMode ? "success" : "default"}>
-            {clientStatus?.isClientMode ? "云端模式" : "本机模式"}
+          <Tag color={isCloudMode ? "success" : "warning"}>
+            {isCloudMode ? "云端模式" : "未绑定云端"}
           </Tag>
         </div>
         <Alert
-          type={clientStatus?.isClientMode ? "success" : "info"}
+          type={isCloudMode ? "success" : "warning"}
           showIcon
-          message={clientStatus?.isClientMode ? "当前正在同步云端用户库" : "当前正在使用本机用户库"}
-          description={clientStatus?.isClientMode ? (clientStatus.serverUrl || "-") : "填写云端地址并用云端管理员账号连接后，用户管理会切到服务器数据库。"}
+          message={isCloudMode ? "当前正在同步云端用户库" : "请先连接云端"}
+          description={isCloudMode ? "云端服务器已固定绑定，创建、编辑和停用用户都会直接同步。" : "不提供本机用户库。绑定云端后，创建、编辑和停用用户都会直接同步到服务器。"}
           style={{ marginBottom: 12 }}
         />
         <Form form={cloudForm} layout="vertical" initialValues={{ login: "admin" }}>
           <Row gutter={12}>
-            <Col xs={24} md={9}>
-              <Form.Item name="serverUrl" label="云端地址" rules={[{ required: true, message: "请输入云端地址" }]}>
-                <Input placeholder="http://43.156.121.172:19380" />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={5}>
+            <Col xs={24} md={8}>
               <Form.Item name="login" label="管理员" rules={[{ required: true, message: "请输入管理员用户" }]}>
                 <Input placeholder="admin" />
               </Form.Item>
             </Col>
-            <Col xs={24} md={6}>
+            <Col xs={24} md={10}>
               <Form.Item name="accessCode" label="访问码" rules={[{ required: true, message: "请输入访问码" }]}>
                 <Input.Password placeholder="云端管理员访问码" />
               </Form.Item>
             </Col>
-            <Col xs={24} md={4}>
+            <Col xs={24} md={6}>
               <Form.Item label=" ">
-                <Space.Compact block>
-                  <Button type="primary" icon={<SyncOutlined />} loading={cloudSubmitting} onClick={handleConnectCloud}>
-                    连接
-                  </Button>
-                  {clientStatus?.isClientMode ? <Button onClick={handleUseLocal}>本机</Button> : null}
-                </Space.Compact>
+                <Button block type="primary" icon={<SyncOutlined />} loading={cloudSubmitting} onClick={handleConnectCloud}>
+                  连接
+                </Button>
               </Form.Item>
             </Col>
           </Row>
@@ -330,11 +318,20 @@ export default function UserManagement() {
         <div className="app-panel__title">
           <div>
             <div className="app-panel__title-main">{editingId ? "编辑用户" : "创建用户"}</div>
-            <div className="app-panel__title-sub">新用户必须设置访问码；编辑用户时留空表示不修改原访问码。</div>
+            <div className="app-panel__title-sub">新用户必须设置访问码；保存后立即写入云端用户库。</div>
           </div>
           <KeyOutlined style={{ color: "var(--color-brand)", fontSize: 18 }} />
         </div>
-        <Form form={form} layout="vertical" initialValues={{ role: "buyer", status: "active" }}>
+        {!isCloudMode ? (
+          <Alert
+            type="warning"
+            showIcon
+            message="未绑定云端，暂不能创建用户"
+            description="请先在上方输入管理员和访问码并连接。"
+            style={{ marginBottom: 12 }}
+          />
+        ) : null}
+        <Form form={form} layout="vertical" initialValues={{ role: "buyer", status: "active" }} disabled={!isCloudMode}>
           <Form.Item name="id" hidden>
             <Input />
           </Form.Item>
@@ -389,7 +386,7 @@ export default function UserManagement() {
         <div className="app-panel__title">
           <div>
             <div className="app-panel__title-main">系统用户</div>
-            <div className="app-panel__title-sub">启用的用户可以按角色登录软件；停用后不能继续登录。</div>
+            <div className="app-panel__title-sub">列表来自云端服务器；启用的用户可以按角色登录软件。</div>
           </div>
           <SafetyCertificateOutlined style={{ color: "var(--color-success)", fontSize: 18 }} />
         </div>
