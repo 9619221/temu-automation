@@ -24,7 +24,7 @@ const {
   remoteAuthStatus,
   remoteLogin,
   remoteLogout,
-  remoteRequest,
+  remoteRequest: rawRemoteRequest,
   setClientMode,
   setHostMode,
 } = require("./clientRuntime.cjs");
@@ -48,6 +48,7 @@ const erpState = {
 
 const PURCHASE_UPDATE_CHANNEL = "erp:purchase:update";
 const USER_UPDATE_CHANNEL = "erp:user:update";
+const AUTH_EXPIRED_CHANNEL = "erp:auth:expired";
 const rendererEventSubscribers = new Set();
 const BROADCAST_PURCHASE_ACTIONS = new Set([
   "create_pr",
@@ -168,6 +169,30 @@ function broadcastRendererPurchaseUpdate(payload) {
 
 function broadcastRendererUserUpdate(payload) {
   broadcastRendererEvent(USER_UPDATE_CHANNEL, payload);
+}
+
+function broadcastRendererAuthExpired(payload = {}) {
+  broadcastRendererEvent(AUTH_EXPIRED_CHANNEL, {
+    type: "auth:expired",
+    message: optionalString(payload.message) || "Cloud login expired, please reconnect.",
+    path: optionalString(payload.path),
+    at: nowIso(),
+  });
+}
+
+async function remoteRequest(requestPath, options = {}) {
+  try {
+    return await rawRemoteRequest(requestPath, options);
+  } catch (error) {
+    const message = String(error?.message || "");
+    if (error?.statusCode === 401 || message.includes("Cloud login expired")) {
+      broadcastRendererAuthExpired({
+        path: requestPath,
+        message,
+      });
+    }
+    throw error;
+  }
 }
 
 function broadcastPurchaseUpdate(action, payload = {}, actor = {}, result = {}) {
@@ -635,6 +660,138 @@ function verifyLanLogin(payload = {}) {
     return null;
   }
   return toSessionUser(row);
+}
+
+function hashLanSessionToken(token) {
+  return crypto.createHash("sha256").update(String(token || "")).digest("hex");
+}
+
+function timestampToIso(value) {
+  const time = Number(value);
+  return new Date(Number.isFinite(time) ? time : Date.now()).toISOString();
+}
+
+function parseSessionTime(value, fallback = Date.now()) {
+  const time = Date.parse(String(value || ""));
+  return Number.isFinite(time) ? time : fallback;
+}
+
+function normalizeStoredSessionUser(user) {
+  const sessionUser = toSessionUser(user);
+  if (!sessionUser?.id) return null;
+  return sessionUser;
+}
+
+function createLanSessionStore() {
+  const { db } = requireErp();
+  const save = (token, session = {}) => {
+    const user = normalizeStoredSessionUser(session.user);
+    if (!token || !user) return null;
+    const now = nowIso();
+    const row = {
+      token_hash: hashLanSessionToken(token),
+      user_id: user.id,
+      user_json: JSON.stringify(user),
+      created_at: timestampToIso(session.createdAt),
+      expires_at: timestampToIso(session.expiresAt),
+      updated_at: now,
+    };
+    db.prepare(`
+      INSERT INTO erp_lan_sessions (
+        token_hash, user_id, user_json, created_at, expires_at, updated_at
+      )
+      VALUES (
+        @token_hash, @user_id, @user_json, @created_at, @expires_at, @updated_at
+      )
+      ON CONFLICT(token_hash) DO UPDATE SET
+        user_id = excluded.user_id,
+        user_json = excluded.user_json,
+        expires_at = excluded.expires_at,
+        updated_at = excluded.updated_at
+    `).run(row);
+    return row;
+  };
+
+  return {
+    save,
+    load(token) {
+      const tokenHash = hashLanSessionToken(token);
+      const row = db.prepare(`
+        SELECT *
+        FROM erp_lan_sessions
+        WHERE token_hash = ?
+        LIMIT 1
+      `).get(tokenHash);
+      if (!row) return null;
+      const expiresAt = parseSessionTime(row.expires_at, 0);
+      if (expiresAt <= Date.now()) {
+        db.prepare("DELETE FROM erp_lan_sessions WHERE token_hash = ?").run(tokenHash);
+        return null;
+      }
+      let user = null;
+      try {
+        user = JSON.parse(row.user_json || "null");
+      } catch {
+        user = null;
+      }
+      user = normalizeStoredSessionUser(user);
+      if (!user) {
+        db.prepare("DELETE FROM erp_lan_sessions WHERE token_hash = ?").run(tokenHash);
+        return null;
+      }
+      return {
+        token,
+        user,
+        createdAt: parseSessionTime(row.created_at),
+        expiresAt,
+      };
+    },
+    touch(token, session = {}) {
+      const user = normalizeStoredSessionUser(session.user);
+      if (!token || !user) return null;
+      const result = db.prepare(`
+        UPDATE erp_lan_sessions
+        SET user_id = @user_id,
+            user_json = @user_json,
+            expires_at = @expires_at,
+            updated_at = @updated_at
+        WHERE token_hash = @token_hash
+      `).run({
+        token_hash: hashLanSessionToken(token),
+        user_id: user.id,
+        user_json: JSON.stringify(user),
+        expires_at: timestampToIso(session.expiresAt),
+        updated_at: nowIso(),
+      });
+      if (result.changes === 0) return save(token, session);
+      return result;
+    },
+    destroy(token) {
+      if (!token) return null;
+      return db.prepare("DELETE FROM erp_lan_sessions WHERE token_hash = ?").run(hashLanSessionToken(token));
+    },
+    cleanupExpired(now = Date.now()) {
+      return db.prepare("DELETE FROM erp_lan_sessions WHERE expires_at <= ?").run(timestampToIso(now));
+    },
+    syncUser(user = {}) {
+      const nextUser = normalizeStoredSessionUser(user);
+      const userId = optionalString(user.id || nextUser?.id);
+      if (!userId) return null;
+      if (!nextUser || nextUser.status !== "active") {
+        return db.prepare("DELETE FROM erp_lan_sessions WHERE user_id = ?").run(userId);
+      }
+      return db.prepare(`
+        UPDATE erp_lan_sessions
+        SET user_json = @user_json,
+            updated_at = @updated_at
+        WHERE user_id = @user_id
+      `).run({
+        user_id: userId,
+        user_json: JSON.stringify(nextUser),
+        updated_at: nowIso(),
+      });
+    },
+  };
 }
 
 function listRolePermissions(params = {}) {
@@ -4665,6 +4822,7 @@ function startLanService(payload = {}) {
     getPermissionProfile,
     upsertRolePermission,
     upsertUserResourceScope,
+    sessionStore: createLanSessionStore(),
     verifyLogin: verifyLanLogin,
     validateSessionUser: validateLanSessionUser,
     listUsers,
@@ -4740,6 +4898,7 @@ async function startErpHeadlessServer(options = {}) {
     getPermissionProfile,
     upsertRolePermission,
     upsertUserResourceScope,
+    sessionStore: createLanSessionStore(),
     verifyLogin: verifyLanLogin,
     validateSessionUser: validateLanSessionUser,
     listUsers,

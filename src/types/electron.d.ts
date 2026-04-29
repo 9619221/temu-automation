@@ -340,6 +340,13 @@ interface ErpUserUpdateEvent {
   at?: string;
 }
 
+interface ErpAuthExpiredEvent {
+  type: "auth:expired";
+  message?: string | null;
+  path?: string | null;
+  at?: string;
+}
+
 interface ErpAPI {
   getStatus: () => Promise<ErpStatus>;
   runMigrations: () => Promise<ErpStatus>;
@@ -457,6 +464,7 @@ interface ErpAPI {
   events?: {
     onPurchaseUpdate: (handler: (payload: ErpPurchaseUpdateEvent) => void) => () => void;
     onUserUpdate: (handler: (payload: ErpUserUpdateEvent) => void) => () => void;
+    onAuthExpired: (handler: (payload: ErpAuthExpiredEvent) => void) => () => void;
   };
 }
 

@@ -278,6 +278,15 @@ contextBridge.exposeInMainWorld("electronAPI", {
           releaseSubscription();
         };
       },
+      onAuthExpired: (handler) => {
+        const listener = (_event, payload) => handler(payload);
+        const releaseSubscription = retainErpEventSubscription();
+        ipcRenderer.on("erp:auth:expired", listener);
+        return () => {
+          ipcRenderer.removeListener("erp:auth:expired", listener);
+          releaseSubscription();
+        };
+      },
     },
   },
 

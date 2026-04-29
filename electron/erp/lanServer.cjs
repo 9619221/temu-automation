@@ -5,7 +5,7 @@ const os = require("os");
 const DEFAULT_LAN_PORT = 19380;
 const DEFAULT_BIND_ADDRESS = "0.0.0.0";
 const SESSION_COOKIE_NAME = "temu_erp_lan_session";
-const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 const ROLE_PERMISSIONS = Object.freeze({
   "/": ["admin", "manager", "operations", "buyer", "finance", "warehouse", "viewer"],
@@ -141,6 +141,7 @@ const lanState = {
   startedAt: null,
   lastError: null,
   sessions: new Map(),
+  sessionStore: null,
   wsClients: new Set(),
 };
 
@@ -276,18 +277,25 @@ function cleanupExpiredSessions() {
       lanState.sessions.delete(token);
     }
   }
+  try {
+    lanState.sessionStore?.cleanupExpired?.(now);
+  } catch {}
 }
 
 function createSession(user) {
   cleanupExpiredSessions();
   const token = crypto.randomBytes(32).toString("base64url");
   const now = Date.now();
-  lanState.sessions.set(token, {
+  const session = {
     token,
     user,
     createdAt: now,
     expiresAt: now + SESSION_TTL_MS,
-  });
+  };
+  lanState.sessions.set(token, session);
+  try {
+    lanState.sessionStore?.save?.(token, session);
+  } catch {}
   return token;
 }
 
@@ -295,15 +303,30 @@ function getSessionFromRequest(req) {
   cleanupExpiredSessions();
   const token = parseCookies(req)[SESSION_COOKIE_NAME];
   if (!token) return null;
-  const session = lanState.sessions.get(token);
+  let session = lanState.sessions.get(token);
+  if (!session) {
+    try {
+      session = lanState.sessionStore?.load?.(token) || null;
+    } catch {
+      session = null;
+    }
+    if (session) lanState.sessions.set(token, session);
+  }
   if (!session) return null;
   session.expiresAt = Date.now() + SESSION_TTL_MS;
+  try {
+    lanState.sessionStore?.touch?.(token, session);
+  } catch {}
   return session;
 }
 
 function destroySession(req) {
   const token = parseCookies(req)[SESSION_COOKIE_NAME];
-  if (token) lanState.sessions.delete(token);
+  if (!token) return;
+  lanState.sessions.delete(token);
+  try {
+    lanState.sessionStore?.destroy?.(token);
+  } catch {}
 }
 
 function syncLanUserSessions(user = {}) {
@@ -332,6 +355,10 @@ function syncLanUserSessions(user = {}) {
     session.user = nextUser;
     updated += 1;
   }
+
+  try {
+    lanState.sessionStore?.syncUser?.(nextUser);
+  } catch {}
 
   for (const client of Array.from(lanState.wsClients)) {
     if (client?.user?.id !== userId) continue;
@@ -3477,6 +3504,7 @@ function startLanServer(options = {}) {
     return Promise.resolve(getLanStatus());
   }
 
+  lanState.sessionStore = options.sessionStore || null;
   const port = Number.isInteger(Number(options.port)) && Number(options.port) >= 0
     ? Number(options.port)
     : DEFAULT_LAN_PORT;
