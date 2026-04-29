@@ -186,6 +186,7 @@ interface OrderMatchDialogState {
 
 interface SkuOption {
   id: string;
+  accountId?: string | null;
   internalSkuCode?: string;
   productName?: string;
   procurementSourceCount?: number;
@@ -205,7 +206,14 @@ interface SupplierOption {
   name?: string;
 }
 
+interface AccountOption {
+  id: string;
+  name?: string;
+  status?: string;
+}
+
 interface RequestFormValues {
+  accountId?: string;
   skuId: string;
   requestedQty: number;
   targetUnitCost?: number;
@@ -304,6 +312,7 @@ export default function PurchaseCenter() {
   const [actingKey, setActingKey] = useState<string | null>(null);
   const [skus, setSkus] = useState<SkuOption[]>([]);
   const [suppliers, setSuppliers] = useState<SupplierOption[]>([]);
+  const [accounts, setAccounts] = useState<AccountOption[]>([]);
   const [requestOpen, setRequestOpen] = useState(false);
   const [quotePrId, setQuotePrId] = useState<string | null>(null);
   const [source1688PrId, setSource1688PrId] = useState<string | null>(null);
@@ -360,6 +369,13 @@ export default function PurchaseCenter() {
     })),
     [suppliers],
   );
+  const accountOptions = useMemo(
+    () => accounts.map((account) => ({
+      value: account.id,
+      label: account.name || account.id,
+    })),
+    [accounts],
+  );
   const poCandidateOptions = useMemo(
     () => (poPr?.candidates || []).map((candidate) => ({
       value: candidate.id,
@@ -377,13 +393,15 @@ export default function PurchaseCenter() {
     setLoading(true);
     try {
       const workbench = await erp.purchase.workbench({ limit: 200 });
-      const [skuRows, supplierRows] = await Promise.all([
+      const [skuRows, supplierRows, accountRows] = await Promise.all([
         Array.isArray(workbench?.skuOptions) ? Promise.resolve(workbench.skuOptions) : erp.sku.list({ limit: 500 }),
         Array.isArray(workbench?.supplierOptions) ? Promise.resolve(workbench.supplierOptions) : erp.supplier.list({ limit: 500 }),
+        erp.account.list({ limit: 500 }),
       ]);
       applyWorkbench(workbench);
       setSkus(Array.isArray(skuRows) ? skuRows : []);
       setSuppliers(Array.isArray(supplierRows) ? supplierRows : []);
+      setAccounts(Array.isArray(accountRows) ? accountRows : []);
     } catch (error: any) {
       message.error(error?.message || "采购中心读取失败");
     } finally {
@@ -426,6 +444,10 @@ export default function PurchaseCenter() {
       applyWorkbench(workbench);
       if (Array.isArray(workbench?.skuOptions)) setSkus(workbench.skuOptions);
       if (Array.isArray(workbench?.supplierOptions)) setSuppliers(workbench.supplierOptions);
+      if (accounts.length === 0) {
+        const accountRows = await erp.account.list({ limit: 500 });
+        setAccounts(Array.isArray(accountRows) ? accountRows : []);
+      }
       if (successText) message.success(successText);
       return result;
     } catch (error: any) {
@@ -469,6 +491,7 @@ export default function PurchaseCenter() {
   const handleCreateRequest = async (values: RequestFormValues) => {
     const result = await runAction("create-pr", {
       action: "create_pr",
+      accountId: values.accountId,
       skuId: values.skuId,
       requestedQty: values.requestedQty,
       targetUnitCost: values.targetUnitCost,
@@ -1136,6 +1159,15 @@ export default function PurchaseCenter() {
         onOk={() => requestForm.submit()}
         destroyOnClose
       >
+        {skuOptions.length === 0 ? (
+          <Alert
+            type="warning"
+            showIcon
+            message="还没有商品资料"
+            description="请先到左侧 ERP > 商品资料 创建商品编码，再回来新建采购需求。"
+            style={{ marginBottom: 12 }}
+          />
+        ) : null}
         <Form form={requestForm} layout="vertical" onFinish={handleCreateRequest} initialValues={{ requestedQty: 1 }}>
           <Form.Item name="skuId" label="商品编码" rules={[{ required: true, message: "请选择商品编码" }]}>
             <Select
@@ -1143,6 +1175,16 @@ export default function PurchaseCenter() {
               optionFilterProp="searchText"
               options={skuOptions}
               placeholder="选择/搜索商品编码或商品名"
+              notFoundContent="暂无商品资料，请先到 ERP > 商品资料 创建"
+            />
+          </Form.Item>
+          <Form.Item name="accountId" label="采购归属账号">
+            <Select
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              options={accountOptions}
+              placeholder="可选；商品未设置账号且有多个账号时需要选择"
             />
           </Form.Item>
           <Row gutter={12}>

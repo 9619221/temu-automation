@@ -10,6 +10,86 @@ const { autoUpdater } = require("electron-updater");
 const { getDefaultCredentials } = require("./default-credentials.cjs");
 const { closeErp, initializeErp, registerErpIpcHandlers } = require("./erp/ipc.cjs");
 
+const MAX_DIAGNOSTIC_LOG_BYTES = 5 * 1024 * 1024;
+
+function getDiagnosticLogFilePath() {
+  try {
+    return path.join(app.getPath("userData"), "diagnostic.log");
+  } catch {
+    return path.join(process.env.APPDATA || process.cwd(), "temu-automation", "diagnostic.log");
+  }
+}
+
+function diagnosticErrorToDetail(value) {
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message,
+      stack: value.stack || "",
+      code: value.code || "",
+    };
+  }
+  if (value && typeof value === "object") {
+    try {
+      return JSON.parse(JSON.stringify(value));
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value ?? "");
+}
+
+function rotateDiagnosticLogIfNeeded(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return;
+    const stat = fs.statSync(filePath);
+    if (stat.size <= MAX_DIAGNOSTIC_LOG_BYTES) return;
+    fs.copyFileSync(filePath, `${filePath}.bak`);
+    fs.writeFileSync(filePath, "", "utf8");
+  } catch {}
+}
+
+function appendDiagnosticLog(entry = {}) {
+  try {
+    const logFile = getDiagnosticLogFilePath();
+    fs.mkdirSync(path.dirname(logFile), { recursive: true });
+    rotateDiagnosticLogIfNeeded(logFile);
+    const payload = {
+      timestamp: new Date().toISOString(),
+      level: entry.level || "info",
+      source: entry.source || "main",
+      message: String(entry.message || ""),
+      detail: entry.detail === undefined ? "" : entry.detail,
+      taskId: entry.taskId || "",
+    };
+    fs.appendFileSync(logFile, `${JSON.stringify(payload)}\n`, "utf8");
+  } catch {}
+}
+
+function inferDiagnosticLevel(message, fallback = "info") {
+  const text = String(message || "");
+  if (/uncaught|unhandled|failed|failure|error|exception|crash|gone|timeout|ECONN|EPIPE|ERR_|HTTP 4|HTTP 5|失败|异常|崩溃|超时/i.test(text)) {
+    return "error";
+  }
+  if (/warn|warning|retry|paused|pause|slow|stuck|interrupted|重试|警告|暂停|中断|慢/i.test(text)) {
+    return "warn";
+  }
+  return fallback;
+}
+
+function appendDiagnosticText(source, text, extra = {}) {
+  const lines = String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  for (const line of lines) {
+    appendDiagnosticLog({
+      source,
+      level: inferDiagnosticLevel(line, extra.level || "info"),
+      message: line.slice(0, 1200),
+      detail: extra.detail || "",
+      taskId: extra.taskId || "",
+    });
+  }
+}
+
 if (process.env.APP_USER_DATA) {
   app.setPath("userData", process.env.APP_USER_DATA);
 }
@@ -17,9 +97,21 @@ if (process.env.APP_USER_DATA) {
 // 全局捕获未处理异常，防止 EPIPE 等 pipe 错误崩溃 Electron
 process.on("uncaughtException", (err) => {
   if (err.code === "EPIPE" || err.code === "ERR_STREAM_DESTROYED") return; // 忽略 pipe 错误
+  appendDiagnosticLog({
+    source: "main",
+    level: "error",
+    message: `Uncaught exception: ${err?.message || err}`,
+    detail: diagnosticErrorToDetail(err),
+  });
   console.error("[Main] Uncaught exception:", err.message);
 });
 process.on("unhandledRejection", (reason) => {
+  appendDiagnosticLog({
+    source: "main",
+    level: "error",
+    message: `Unhandled rejection: ${reason?.message || reason}`,
+    detail: diagnosticErrorToDetail(reason),
+  });
   console.error("[Main] Unhandled rejection:", reason);
 });
 
@@ -772,6 +864,17 @@ function httpPost(port, body, options = {}) {
               if (json?.action) error.action = json.action;
               if (typeof json?.duration === "number") error.duration = json.duration;
               if (json?.screenshotFile) error.screenshotFile = json.screenshotFile;
+              appendDiagnosticLog({
+                source: "worker-rpc",
+                level: "error",
+                message: `${json?.action || actionLabel} failed: ${error.message}`,
+                detail: {
+                  action: json?.action || actionLabel,
+                  code,
+                  duration: json?.duration,
+                  screenshotFile: json?.screenshotFile,
+                },
+              });
               reject(error);
             }
             else resolve(json.data);
@@ -783,6 +886,22 @@ function httpPost(port, body, options = {}) {
     );
     req.on("error", (e) => reject(new Error("Worker 通信失败: " + e.message)));
     req.on("timeout", () => { req.destroy(); reject(new Error(`Worker 请求超时: ${actionLabel}`)); });
+    req.on("error", (e) => {
+      appendDiagnosticLog({
+        source: "worker-rpc",
+        level: "error",
+        message: `${actionLabel} communication failed: ${e.message}`,
+        detail: diagnosticErrorToDetail(e),
+      });
+    });
+    req.on("timeout", () => {
+      appendDiagnosticLog({
+        source: "worker-rpc",
+        level: "error",
+        message: `${actionLabel} request timed out after ${timeout}ms`,
+        detail: { action: actionLabel, timeout },
+      });
+    });
     req.setTimeout(timeout);
     req.write(data);
     req.end();
@@ -930,7 +1049,11 @@ async function startWorker(options = {}) {
     // 只读 stderr 用于调试日志（安全处理 EPIPE）
     if (worker.stderr) {
       worker.stderr.on("data", (d) => {
-        try { console.error("[Worker]", d.toString()); } catch {}
+        try {
+          const text = d.toString();
+          console.error("[Worker]", text);
+          appendDiagnosticText("worker", text);
+        } catch {}
       });
       worker.stderr.on("error", () => {}); // 忽略 pipe 错误
     }
@@ -940,6 +1063,12 @@ async function startWorker(options = {}) {
 
     worker.on("exit", (code) => {
       console.log(`[Main] Worker exited: ${code}`);
+      appendDiagnosticLog({
+        source: "worker",
+        level: code === 0 ? "warn" : "error",
+        message: `Worker exited with code ${code}`,
+        detail: { code, port: workerPort },
+      });
       markAutoPricingTaskInterrupted(`批量上品任务已中断，worker 进程退出 (code=${code})。请检查 worker 日志后重新发起。`);
       stopAutoPricingTaskSync();
       worker = null;
@@ -950,6 +1079,12 @@ async function startWorker(options = {}) {
 
     worker.on("error", (err) => {
       try { console.error("[Main] Worker spawn error:", err.message); } catch {}
+      appendDiagnosticLog({
+        source: "worker",
+        level: "error",
+        message: `Worker spawn error: ${err?.message || err}`,
+        detail: diagnosticErrorToDetail(err),
+      });
       markAutoPricingTaskInterrupted("批量上品任务已中断，worker 启动失败。");
       stopAutoPricingTaskSync();
       worker = null;
@@ -1069,6 +1204,83 @@ function summarizeAutoPricingResults(results) {
     successCount,
     failCount: list.length - successCount,
   };
+}
+
+function isInlineImageDataUrl(value) {
+  return typeof value === "string" && /^data:image\//i.test(value);
+}
+
+function compactAutoPricingImageForStore(image = {}) {
+  if (!image || typeof image !== "object") return image;
+  const next = { ...image };
+  if (isInlineImageDataUrl(next.imageUrl)) {
+    next.inlineImageBytes = next.imageUrl.length;
+    next.imageUrl = typeof next.kwcdnUrl === "string" && next.kwcdnUrl ? next.kwcdnUrl : "";
+  }
+  if (next.filter && typeof next.filter === "object" && next.filter.raw) {
+    next.filter = { ...next.filter };
+    delete next.filter.raw;
+  }
+  return next;
+}
+
+function pickDraftIdentity(value = {}) {
+  if (!value || typeof value !== "object") return {};
+  return {
+    draftId: value.draftId || value.productDraftId || "",
+    productDraftId: value.productDraftId || value.draftId || "",
+    productId: value.productId || "",
+    skcId: value.skcId || "",
+    skuId: value.skuId || "",
+    step: value.step || "",
+    errorCode: value.errorCode || "",
+    debugFile: value.debugFile || "",
+    draftSaved: Boolean(value.draftSaved),
+    verificationReason: value.verificationReason || "",
+    message: value.message || "",
+    success: value.success,
+  };
+}
+
+function compactAutoPricingResultForStore(item = {}) {
+  if (!item || typeof item !== "object") return item;
+  const next = { ...item };
+  const draftIdentity = pickDraftIdentity(next.draftResult || next.result || {});
+
+  next.draftId = next.draftId || draftIdentity.draftId || "";
+  next.productDraftId = next.productDraftId || draftIdentity.productDraftId || "";
+  next.productId = next.productId || draftIdentity.productId || "";
+  next.skcId = next.skcId || draftIdentity.skcId || "";
+  next.skuId = next.skuId || draftIdentity.skuId || "";
+  next.draftStep = next.draftStep || draftIdentity.step || "";
+  next.errorCode = next.errorCode || draftIdentity.errorCode || "";
+  next.debugFile = next.debugFile || draftIdentity.debugFile || "";
+  next.verificationReason = next.verificationReason || draftIdentity.verificationReason || "";
+  if (typeof next.draftSaved !== "boolean" && draftIdentity.draftSaved) next.draftSaved = true;
+
+  if (Array.isArray(next.images)) {
+    next.images = next.images.map((image) => compactAutoPricingImageForStore(image));
+  }
+  if (next.originalFilter && typeof next.originalFilter === "object" && next.originalFilter.raw) {
+    next.originalFilter = { ...next.originalFilter };
+    delete next.originalFilter.raw;
+  }
+  if (next.result && typeof next.result === "object") {
+    next.result = pickDraftIdentity(next.result);
+  }
+  delete next.draftResult;
+  return next;
+}
+
+function hasHeavyAutoPricingPayload(task = {}) {
+  return Array.isArray(task?.results) && task.results.some((result) => (
+    Boolean(result?.draftResult)
+    || Boolean(result?.originalFilter?.raw)
+    || (Array.isArray(result?.images) && result.images.some((image) => (
+      isInlineImageDataUrl(image?.imageUrl)
+      || Boolean(image?.filter?.raw)
+    )))
+  ));
 }
 
 function isSafeStorageReady() {
@@ -1255,7 +1467,7 @@ function appendCreateHistoryEntries(entries) {
 }
 
 function normalizeAutoPricingTask(task = {}) {
-  const results = Array.isArray(task.results) ? task.results : [];
+  const results = Array.isArray(task.results) ? task.results.map((item) => compactAutoPricingResultForStore(item)) : [];
   const summary = summarizeAutoPricingResults(results);
   const taskId = typeof task.taskId === "string" ? task.taskId : `pricing_${Date.now()}`;
   const flowType = task.flowType === "workflow" || task.mode === "workflow" || /^workflow_pack_/.test(taskId)
@@ -1292,15 +1504,20 @@ function readAutoPricingState() {
       autoPricingCurrentTaskId = null;
       return getDefaultAutoPricingState();
     }
+    const needsCompaction = Array.isArray(raw.tasks) && raw.tasks.some((task) => hasHeavyAutoPricingPayload(task));
     const tasks = Array.isArray(raw.tasks) ? raw.tasks.map((task) => normalizeAutoPricingTask(task)) : [];
     const activeTaskId = typeof raw.activeTaskId === "string"
       ? raw.activeTaskId
       : (tasks[0]?.taskId || null);
     autoPricingCurrentTaskId = activeTaskId;
-    return {
+    const nextState = {
       activeTaskId,
       tasks,
     };
+    if (needsCompaction) {
+      writeStoreJsonAtomic(getStoreFilePath(AUTO_PRICING_TASKS_KEY), nextState);
+    }
+    return nextState;
   } catch {
     autoPricingCurrentTaskId = null;
     return getDefaultAutoPricingState();
@@ -1567,6 +1784,14 @@ function getAutoPricingProgressPayload(task) {
     };
   }
   return normalizeAutoPricingTask(task);
+}
+
+function getAutoPricingTaskSummaryPayload(task) {
+  const normalized = getAutoPricingProgressPayload(task);
+  return {
+    ...normalized,
+    results: [],
+  };
 }
 
 function stopWorker() {
@@ -3084,6 +3309,52 @@ async function createWindow() {
   });
 
   // 开发模式：等待 Vite dev server 就绪（最多30秒）
+  mainWindow.on("unresponsive", () => {
+    appendDiagnosticLog({
+      source: "renderer",
+      level: "error",
+      message: "Main window became unresponsive",
+      detail: { url: mainWindow?.webContents?.getURL?.() || "" },
+    });
+  });
+
+  mainWindow.on("responsive", () => {
+    appendDiagnosticLog({
+      source: "renderer",
+      level: "info",
+      message: "Main window became responsive again",
+      detail: { url: mainWindow?.webContents?.getURL?.() || "" },
+    });
+  });
+
+  mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    appendDiagnosticLog({
+      source: "renderer",
+      level: "error",
+      message: `Renderer process gone: ${details?.reason || "unknown"}`,
+      detail: details || {},
+    });
+  });
+
+  mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
+    appendDiagnosticLog({
+      source: "renderer",
+      level: "error",
+      message: `Page load failed: ${errorDescription || errorCode}`,
+      detail: { errorCode, errorDescription, validatedURL },
+    });
+  });
+
+  mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+    if (Number(level) < 2) return;
+    appendDiagnosticLog({
+      source: "renderer",
+      level: Number(level) >= 3 ? "error" : "warn",
+      message: String(message || "").slice(0, 1200),
+      detail: { line, sourceId },
+    });
+  });
+
   const devUrl = process.env.TEMU_DEV_URL || "http://localhost:1420";
   const forcedProduction = process.env.NODE_ENV === "production";
   const isDev = !forcedProduction && (process.env.NODE_ENV === "development" || !app.isPackaged);
@@ -3693,7 +3964,7 @@ ipcMain.handle("automation:get-task-progress", async (_e, taskId) => {
 ipcMain.handle("automation:list-tasks", async () => {
   await syncWorkerTaskSnapshotsToStore();
   await syncActiveAutoPricingTaskFromWorker({ markInterruptedOnIdle: true });
-  return listAutoPricingTasks().map((task) => getAutoPricingProgressPayload(task));
+  return listAutoPricingTasks().map((task) => getAutoPricingTaskSummaryPayload(task));
 });
 
 ipcMain.handle("automation:read-scrape-data", async (_e, key) => {
@@ -4216,6 +4487,7 @@ ipcMain.handle("image-studio:analyze", async (_event, payload) => {
       files: payload?.files,
       fields: {
         productMode: payload?.productMode || "single",
+        analysisProfile: payload?.analysisProfile || "",
       },
     }),
   });
@@ -4240,6 +4512,7 @@ ipcMain.handle("image-studio:regenerate-analysis", async (_event, payload) => {
       files: payload?.files,
       fields: {
         productMode: payload?.productMode || "single",
+        analysisProfile: payload?.analysisProfile || "",
         analysis: payload?.analysis || {},
       },
     }),
@@ -4755,29 +5028,86 @@ function parseWorkflowPackLogLine(line, index) {
   };
 }
 
-ipcMain.handle("app:read-workflow-pack-logs", async (_e, params = {}) => {
-  const limit = Math.max(1, Math.min(Number(params?.limit) || 500, 2000));
-  const logFile = path.join(app.getPath("userData"), "workflow-pack.log");
-  if (!fs.existsSync(logFile)) {
-    return { logFile, entries: [] };
+function parseDiagnosticLogLine(line, index) {
+  const raw = String(line || "").trim();
+  if (!raw) return null;
+  try {
+    const payload = JSON.parse(raw);
+    const timestamp = Number.isFinite(Date.parse(payload.timestamp)) ? Date.parse(payload.timestamp) : Date.now();
+    const detail = typeof payload.detail === "string"
+      ? payload.detail
+      : JSON.stringify(payload.detail || {}, null, 2);
+    return {
+      id: `diagnostic-${timestamp}-${index}`,
+      timestamp,
+      level: ["log", "info", "warn", "error"].includes(payload.level) ? payload.level : inferDiagnosticLevel(payload.message, "info"),
+      source: payload.source || "main",
+      message: String(payload.message || ""),
+      detail,
+      taskId: payload.taskId || undefined,
+    };
+  } catch {
+    return null;
   }
-  const text = await fsPromises.readFile(logFile, "utf8").catch(() => "");
+}
+
+function parseImageStudioLogLine(line, index) {
+  const raw = String(line || "").trim();
+  if (!raw) return null;
+  const match = raw.match(/^\[([^\]]+)\]\s+([\s\S]*)$/);
+  const timestampText = match?.[1] || "";
+  const message = match?.[2] || raw;
+  const timestamp = Number.isFinite(Date.parse(timestampText)) ? Date.parse(timestampText) : Date.now();
+  return {
+    id: `image-studio-${timestamp}-${index}`,
+    timestamp,
+    level: inferDiagnosticLevel(message, "info"),
+    source: "image-studio",
+    message: message.slice(0, 1200),
+    detail: raw,
+  };
+}
+
+async function readRecentParsedLogEntries(filePath, limit, parser) {
+  if (!fs.existsSync(filePath)) return [];
+  const text = await fsPromises.readFile(filePath, "utf8").catch(() => "");
   const lines = text.split(/\r?\n/).filter((line) => line.trim());
   const entries = [];
   for (let index = lines.length - 1; index >= 0 && entries.length < limit; index -= 1) {
-    const entry = parseWorkflowPackLogLine(lines[index], index);
+    const entry = parser(lines[index], index);
     if (entry) entries.push(entry);
   }
+  return entries;
+}
+
+ipcMain.handle("app:read-workflow-pack-logs", async (_e, params = {}) => {
+  const limit = Math.max(1, Math.min(Number(params?.limit) || 500, 2000));
+  const logFile = path.join(app.getPath("userData"), "workflow-pack.log");
+  const diagnosticLogFile = getDiagnosticLogFilePath();
+  const imageStudioLogFile = path.join(app.getPath("userData"), "image-studio.log");
+  const entries = [
+    ...await readRecentParsedLogEntries(logFile, limit, parseWorkflowPackLogLine),
+    ...await readRecentParsedLogEntries(diagnosticLogFile, limit, parseDiagnosticLogLine),
+    ...await readRecentParsedLogEntries(imageStudioLogFile, Math.min(limit, 300), parseImageStudioLogLine),
+  ]
+    .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+    .slice(0, limit);
   return {
     logFile,
-    entries: entries.reverse(),
+    diagnosticLogFile,
+    imageStudioLogFile,
+    entries,
   };
 });
 
 ipcMain.handle("app:clear-workflow-pack-logs", async () => {
   const logFile = path.join(app.getPath("userData"), "workflow-pack.log");
+  const diagnosticLogFile = getDiagnosticLogFilePath();
+  const imageStudioLogFile = path.join(app.getPath("userData"), "image-studio.log");
   await fsPromises.writeFile(logFile, "", "utf8").catch(() => {});
-  return { logFile, cleared: true };
+  await fsPromises.writeFile(diagnosticLogFile, "", "utf8").catch(() => {});
+  await fsPromises.writeFile(imageStudioLogFile, "", "utf8").catch(() => {});
+  return { logFile, diagnosticLogFile, imageStudioLogFile, cleared: true };
 });
 
 function getStoreFilePath(key) {

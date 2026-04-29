@@ -66,6 +66,10 @@ function writeMigrationLog(db, migrationKey, status, remark = "") {
   });
 }
 
+function shouldRunWithoutWrapperTransaction(sql) {
+  return /--\s*@no-transaction\b/i.test(sql);
+}
+
 function backupDatabaseIfNeeded(dbPath, options = {}) {
   if (options.backup === false) return null;
   if (!fs.existsSync(dbPath)) return null;
@@ -98,13 +102,18 @@ function runMigrations(options = {}) {
       }
 
       const sql = fs.readFileSync(migration.path, "utf8");
-      const applyMigration = db.transaction(() => {
-        db.exec(sql);
-        writeMigrationLog(db, migration.key, "success", "");
-      });
 
       try {
-        applyMigration();
+        if (shouldRunWithoutWrapperTransaction(sql)) {
+          db.exec(sql);
+          writeMigrationLog(db, migration.key, "success", "");
+        } else {
+          const applyMigration = db.transaction(() => {
+            db.exec(sql);
+            writeMigrationLog(db, migration.key, "success", "");
+          });
+          applyMigration();
+        }
         results.push({ key: migration.key, status: "success" });
       } catch (error) {
         writeMigrationLog(db, migration.key, "failed", error?.message || String(error));
@@ -124,4 +133,3 @@ module.exports = {
   listMigrationFiles,
   runMigrations,
 };
-

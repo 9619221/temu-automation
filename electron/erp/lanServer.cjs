@@ -16,6 +16,8 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/permissions/profile": ["admin", "manager", "operations", "buyer", "finance", "warehouse", "viewer"],
   "/api/permissions/role/upsert": ["admin", "manager"],
   "/api/permissions/scope/upsert": ["admin", "manager"],
+  "/api/master-data/workbench": ["admin", "manager", "operations", "buyer"],
+  "/api/master-data/action": ["admin", "manager", "operations", "buyer"],
   "/1688": ["admin", "manager"],
   "/api/1688/status": ["admin", "manager"],
   "/api/1688/config": ["admin", "manager"],
@@ -2486,6 +2488,18 @@ function createRequestHandler(options = {}) {
   const upsertUserResourceScope = options.upsertUserResourceScope || (() => {
     throw new Error("User resource scope handler is not available");
   });
+  const listAccounts = options.listAccounts || (() => []);
+  const upsertAccount = options.upsertAccount || (() => {
+    throw new Error("Account action handler is not available");
+  });
+  const listSuppliers = options.listSuppliers || (() => []);
+  const createSupplier = options.createSupplier || (() => {
+    throw new Error("Supplier action handler is not available");
+  });
+  const listSkus = options.listSkus || (() => []);
+  const createSku = options.createSku || (() => {
+    throw new Error("SKU action handler is not available");
+  });
   const get1688AuthStatus = options.get1688AuthStatus || (() => ({
     configured: false,
     authorized: false,
@@ -2531,6 +2545,12 @@ function createRequestHandler(options = {}) {
       getPermissionProfile,
       upsertRolePermission,
       upsertUserResourceScope,
+      listAccounts,
+      upsertAccount,
+      listSuppliers,
+      createSupplier,
+      listSkus,
+      createSku,
       get1688AuthStatus,
       upsert1688AuthConfig,
       create1688AuthorizeUrl,
@@ -2742,6 +2762,82 @@ async function handleUserUpsertRequest({ req, res, session, upsertUser }) {
       currentPath: "/users",
       user: session.user,
     }), 400);
+  }
+}
+
+function assertSessionRole(session, allowedRoles, actionName = "该操作") {
+  const role = session?.user?.role;
+  if (!allowedRoles.includes(role)) {
+    const error = new Error(`${actionName}无权限：当前角色 ${role || "unknown"}`);
+    error.statusCode = 403;
+    throw error;
+  }
+}
+
+async function buildMasterDataWorkbench({
+  listAccounts,
+  listSuppliers,
+  listSkus,
+  user,
+  params = {},
+}) {
+  const companyId = user?.companyId;
+  const scopedParams = {
+    ...(params || {}),
+    limit: Number(params?.limit) || 500,
+    companyId,
+  };
+  const [accounts, suppliers, skus] = await Promise.all([
+    Promise.resolve(listAccounts(scopedParams)),
+    Promise.resolve(listSuppliers(scopedParams)),
+    Promise.resolve(listSkus(scopedParams)),
+  ]);
+  return {
+    accounts,
+    suppliers,
+    skus,
+  };
+}
+
+async function handleMasterDataActionRequest({
+  req,
+  res,
+  session,
+  upsertAccount,
+  createSupplier,
+  createSku,
+}) {
+  if (req.method !== "POST") {
+    writeJson(res, 405, { ok: false, error: "Method not allowed" });
+    return;
+  }
+
+  try {
+    const payload = await readLoginPayload(req);
+    const action = String(payload.action || "").trim();
+    const scopedPayload = {
+      ...payload,
+      companyId: session.user.companyId,
+    };
+    let result = null;
+    if (action === "upsert_account" || action === "create_account") {
+      assertSessionRole(session, ["admin", "manager"], "账号保存");
+      result = await upsertAccount(scopedPayload, session.user);
+    } else if (action === "create_supplier") {
+      assertSessionRole(session, ["admin", "manager", "buyer"], "供应商创建");
+      result = await createSupplier(scopedPayload, session.user);
+    } else if (action === "create_sku") {
+      assertSessionRole(session, ["admin", "manager", "operations"], "商品资料创建");
+      result = await createSku(scopedPayload, session.user);
+    } else {
+      throw new Error(`不支持的商品资料操作：${action || "-"}`);
+    }
+    writeJson(res, 200, { ok: true, result });
+  } catch (error) {
+    writeJson(res, error?.statusCode || 400, {
+      ok: false,
+      error: error?.message || String(error),
+    });
   }
 }
 
@@ -3068,6 +3164,12 @@ async function handleRequest({
   getPermissionProfile,
   upsertRolePermission,
   upsertUserResourceScope,
+  listAccounts,
+  upsertAccount,
+  listSuppliers,
+  createSupplier,
+  listSkus,
+  createSku,
   get1688AuthStatus,
   upsert1688AuthConfig,
   create1688AuthorizeUrl,
@@ -3236,6 +3338,35 @@ async function handleRequest({
       writeJson(res, 200, {
         ok: true,
         scope: await upsertUserResourceScope(payload, session.user),
+      });
+      return;
+    }
+
+    if (pathname === "/api/master-data/workbench") {
+      const payload = await readOptionalPayload(req);
+      const workbench = await buildMasterDataWorkbench({
+        listAccounts,
+        listSuppliers,
+        listSkus,
+        user: session.user,
+        params: payload,
+      });
+      writeJson(res, 200, {
+        ok: true,
+        workbench,
+        ...workbench,
+      });
+      return;
+    }
+
+    if (pathname === "/api/master-data/action") {
+      await handleMasterDataActionRequest({
+        req,
+        res,
+        session,
+        upsertAccount,
+        createSupplier,
+        createSku,
       });
       return;
     }

@@ -228,8 +228,18 @@ interface AppAPI {
   downloadUpdate: () => Promise<any>;
   quitAndInstallUpdate: () => Promise<boolean>;
   openLogDirectory: () => Promise<string>;
-  readWorkflowPackLogs?: (params?: { limit?: number }) => Promise<{ logFile?: string; entries?: any[] }>;
-  clearWorkflowPackLogs?: () => Promise<{ logFile?: string; cleared?: boolean }>;
+  readWorkflowPackLogs?: (params?: { limit?: number }) => Promise<{
+    logFile?: string;
+    diagnosticLogFile?: string;
+    imageStudioLogFile?: string;
+    entries?: any[];
+  }>;
+  clearWorkflowPackLogs?: () => Promise<{
+    logFile?: string;
+    diagnosticLogFile?: string;
+    imageStudioLogFile?: string;
+    cleared?: boolean;
+  }>;
 }
 
 interface StoreAPI {
@@ -401,7 +411,7 @@ interface ErpAPI {
     list: (params?: ErpListParams) => Promise<any[]>;
     create: (payload: {
       id?: string;
-      accountId: string;
+      accountId?: string;
       internalSkuCode: string;
       productName: string;
       temuSkuId?: string;

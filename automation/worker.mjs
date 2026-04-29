@@ -11739,6 +11739,70 @@ function saveWorkflowOriginalMaterialImage(sourceImagePath, outputDir, rowIndex,
   };
 }
 
+function isInlineWorkflowImageUrl(value) {
+  return typeof value === "string" && /^data:image\//i.test(value);
+}
+
+function compactWorkflowImageForProgress(image = {}) {
+  if (!image || typeof image !== "object") return image;
+  const next = { ...image };
+  if (isInlineWorkflowImageUrl(next.imageUrl)) {
+    next.inlineImageBytes = next.imageUrl.length;
+    next.imageUrl = typeof next.kwcdnUrl === "string" && next.kwcdnUrl ? next.kwcdnUrl : "";
+  }
+  if (next.filter && typeof next.filter === "object" && next.filter.raw) {
+    next.filter = { ...next.filter };
+    delete next.filter.raw;
+  }
+  return next;
+}
+
+function compactWorkflowDraftResult(draftResult = {}) {
+  if (!draftResult || typeof draftResult !== "object") return {};
+  return {
+    success: draftResult.success,
+    message: draftResult.message || "",
+    draftId: draftResult.draftId || draftResult.productDraftId || "",
+    productDraftId: draftResult.productDraftId || draftResult.draftId || "",
+    productId: draftResult.productId || "",
+    skcId: draftResult.skcId || "",
+    skuId: draftResult.skuId || "",
+    step: draftResult.step || "",
+    errorCode: draftResult.errorCode || "",
+    debugFile: draftResult.debugFile || "",
+    draftSaved: Boolean(draftResult.draftSaved),
+    verificationReason: draftResult.verificationReason || "",
+  };
+}
+
+function compactWorkflowRowResultForProgress(rowResult = {}) {
+  if (!rowResult || typeof rowResult !== "object") return rowResult;
+  const next = { ...rowResult };
+  const draft = compactWorkflowDraftResult(next.draftResult || next.result || {});
+  next.draftId = next.draftId || draft.draftId || "";
+  next.productDraftId = next.productDraftId || draft.productDraftId || "";
+  next.productId = next.productId || draft.productId || "";
+  next.skcId = next.skcId || draft.skcId || "";
+  next.skuId = next.skuId || draft.skuId || "";
+  next.draftStep = next.draftStep || draft.step || "";
+  next.errorCode = next.errorCode || draft.errorCode || "";
+  next.debugFile = next.debugFile || draft.debugFile || "";
+  next.verificationReason = next.verificationReason || draft.verificationReason || "";
+  if (typeof next.draftSaved !== "boolean" && draft.draftSaved) next.draftSaved = true;
+  if (Array.isArray(next.images)) {
+    next.images = next.images.map((image) => compactWorkflowImageForProgress(image));
+  }
+  if (next.originalFilter && typeof next.originalFilter === "object" && next.originalFilter.raw) {
+    next.originalFilter = { ...next.originalFilter };
+    delete next.originalFilter.raw;
+  }
+  if (next.result && typeof next.result === "object") {
+    next.result = compactWorkflowDraftResult(next.result);
+  }
+  delete next.draftResult;
+  return next;
+}
+
 function buildWorkflowMaterialImageSpecs(packCounts, originalCount = 1) {
   const normalizedOriginalCount = Math.max(1, Math.min(WORKFLOW_MAX_MAIN_IMAGE_COUNT, Math.floor(Number(originalCount) || 1)));
   const originalSpecs = Array.from({ length: normalizedOriginalCount }, (_, index) => ({
@@ -12189,7 +12253,8 @@ async function generateWorkflowPackImages(params = {}) {
             logWorkflowPack(taskId, `row=${rowNumber} draft ${draftResult?.success ? "ok" : "failed"} ${rowResult.draftId || rowResult.message}`);
           }
         }
-        results.push(rowResult);
+        const compactRowResult = compactWorkflowRowResultForProgress(rowResult);
+        results.push(compactRowResult);
         syncCurrentProgressResults(results, {
           flowType: "workflow",
           running: true,
@@ -12207,7 +12272,7 @@ async function generateWorkflowPackImages(params = {}) {
         } catch (error) {
           logSilent("workflow-pack.result.write", error);
         }
-        logWorkflowPackDiagnostic(taskId, "row_result", buildWorkflowRowDiagnostic(rowResult, {
+        logWorkflowPackDiagnostic(taskId, "row_result", buildWorkflowRowDiagnostic(compactRowResult, {
           account: accountDiagnostic,
           resultJsonPath,
           kwcdnTablePath,
@@ -12246,7 +12311,8 @@ async function generateWorkflowPackImages(params = {}) {
             warnings: [],
           })),
         };
-        results.push(rowResult);
+        const compactRowResult = compactWorkflowRowResultForProgress(rowResult);
+        results.push(compactRowResult);
         syncCurrentProgressResults(results, {
           flowType: "workflow",
           running: true,
@@ -12263,7 +12329,7 @@ async function generateWorkflowPackImages(params = {}) {
         } catch (writeError) {
           logSilent("workflow-pack.result.write", writeError);
         }
-        logWorkflowPackDiagnostic(taskId, "row_exception", buildWorkflowRowDiagnostic(rowResult, {
+        logWorkflowPackDiagnostic(taskId, "row_exception", buildWorkflowRowDiagnostic(compactRowResult, {
           account: accountDiagnostic,
           resultJsonPath,
           kwcdnTablePath,
@@ -16019,7 +16085,7 @@ function summarizeProgressResults(results) {
 }
 
 function createProgressState(patch = {}) {
-  const results = Array.isArray(patch.results) ? [...patch.results] : [];
+  const results = Array.isArray(patch.results) ? patch.results.map((item) => compactWorkflowRowResultForProgress(item)) : [];
   const summary = summarizeProgressResults(results);
   return {
     taskId: typeof patch.taskId === "string" ? patch.taskId : "",
@@ -16095,7 +16161,9 @@ function listProgressSnapshots() {
 }
 
 function updateCurrentProgress(patch = {}) {
-  const nextResults = Array.isArray(patch.results) ? [...patch.results] : currentProgress.results;
+  const nextResults = Array.isArray(patch.results)
+    ? patch.results.map((item) => compactWorkflowRowResultForProgress(item))
+    : currentProgress.results;
   const summary = summarizeProgressResults(nextResults);
   currentProgress = {
     ...currentProgress,

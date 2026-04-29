@@ -1704,96 +1704,99 @@ function createSupplier(payload = {}, actor = erpState.currentUser) {
 
 function listSkus(params = {}) {
   const { db } = requireErp();
-  const accountId = optionalString(params.accountId);
-  const rows = accountId
-    ? db.prepare(`
-      SELECT
-        sku.*,
-        COALESCE(source_count.source_count, 0) AS procurement_source_count,
-        source.id AS primary_1688_source_id,
-        source.external_offer_id AS primary_1688_offer_id,
-        source.external_sku_id AS primary_1688_sku_id,
-        source.external_spec_id AS primary_1688_spec_id,
-        source.supplier_name AS primary_1688_supplier_name,
-        source.product_title AS primary_1688_product_title,
-        source.unit_price AS primary_1688_unit_price,
-        source.moq AS primary_1688_moq
-      FROM erp_skus sku
-      LEFT JOIN (
-        SELECT account_id, sku_id, COUNT(*) AS source_count
-        FROM erp_sku_1688_sources
-        WHERE status = 'active'
-        GROUP BY account_id, sku_id
-      ) source_count ON source_count.account_id = sku.account_id AND source_count.sku_id = sku.id
-      LEFT JOIN erp_sku_1688_sources source ON source.id = (
-        SELECT id
-        FROM erp_sku_1688_sources item
-        WHERE item.account_id = sku.account_id
-          AND item.sku_id = sku.id
-          AND item.status = 'active'
-        ORDER BY item.is_default DESC, item.updated_at DESC, item.created_at DESC
-        LIMIT 1
-      )
-      WHERE sku.account_id = @account_id
-      ORDER BY sku.updated_at DESC, sku.created_at DESC
-      LIMIT @limit OFFSET @offset
-    `).all({
-      account_id: accountId,
-      limit: normalizeLimit(params.limit),
-      offset: normalizeOffset(params.offset),
-    })
-    : db.prepare(`
-      SELECT
-        sku.*,
-        COALESCE(source_count.source_count, 0) AS procurement_source_count,
-        source.id AS primary_1688_source_id,
-        source.external_offer_id AS primary_1688_offer_id,
-        source.external_sku_id AS primary_1688_sku_id,
-        source.external_spec_id AS primary_1688_spec_id,
-        source.supplier_name AS primary_1688_supplier_name,
-        source.product_title AS primary_1688_product_title,
-        source.unit_price AS primary_1688_unit_price,
-        source.moq AS primary_1688_moq
-      FROM erp_skus sku
-      LEFT JOIN (
-        SELECT account_id, sku_id, COUNT(*) AS source_count
-        FROM erp_sku_1688_sources
-        WHERE status = 'active'
-        GROUP BY account_id, sku_id
-      ) source_count ON source_count.account_id = sku.account_id AND source_count.sku_id = sku.id
-      LEFT JOIN erp_sku_1688_sources source ON source.id = (
-        SELECT id
-        FROM erp_sku_1688_sources item
-        WHERE item.account_id = sku.account_id
-          AND item.sku_id = sku.id
-          AND item.status = 'active'
-        ORDER BY item.is_default DESC, item.updated_at DESC, item.created_at DESC
-        LIMIT 1
-      )
-      ORDER BY sku.updated_at DESC, sku.created_at DESC
-      LIMIT @limit OFFSET @offset
-    `).all({
-      limit: normalizeLimit(params.limit),
-      offset: normalizeOffset(params.offset),
-    });
+  const accountId = optionalString(params.accountId || params.account_id);
+  const companyId = optionalString(params.companyId || params.company_id);
+  const conditions = [];
+  if (accountId) conditions.push("(sku.account_id = @account_id OR sku.account_id IS NULL)");
+  if (companyId) conditions.push("sku.company_id = @company_id");
+  const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const rows = db.prepare(`
+    SELECT
+      sku.*,
+      COALESCE(source_count.source_count, 0) AS procurement_source_count,
+      source.id AS primary_1688_source_id,
+      source.external_offer_id AS primary_1688_offer_id,
+      source.external_sku_id AS primary_1688_sku_id,
+      source.external_spec_id AS primary_1688_spec_id,
+      source.supplier_name AS primary_1688_supplier_name,
+      source.product_title AS primary_1688_product_title,
+      source.unit_price AS primary_1688_unit_price,
+      source.moq AS primary_1688_moq
+    FROM erp_skus sku
+    LEFT JOIN erp_accounts acct ON acct.id = sku.account_id
+    LEFT JOIN (
+      SELECT account_id, sku_id, COUNT(*) AS source_count
+      FROM erp_sku_1688_sources
+      WHERE status = 'active'
+      GROUP BY account_id, sku_id
+    ) source_count ON source_count.account_id = sku.account_id AND source_count.sku_id = sku.id
+    LEFT JOIN erp_sku_1688_sources source ON source.id = (
+      SELECT id
+      FROM erp_sku_1688_sources item
+      WHERE item.account_id = sku.account_id
+        AND item.sku_id = sku.id
+        AND item.status = 'active'
+      ORDER BY item.is_default DESC, item.updated_at DESC, item.created_at DESC
+      LIMIT 1
+    )
+    ${whereClause}
+    ORDER BY sku.updated_at DESC, sku.created_at DESC
+    LIMIT @limit OFFSET @offset
+  `).all({
+    account_id: accountId,
+    company_id: companyId,
+    limit: normalizeLimit(params.limit),
+    offset: normalizeOffset(params.offset),
+  });
 
   return rows.map(toSkuOptionRow);
 }
 
-function createSku(payload = {}) {
+function createSku(payload = {}, actor = erpState.currentUser) {
   const { db } = requireErp();
   const now = nowIso();
+  const accountId = optionalString(payload.accountId || payload.account_id);
+  const account = accountId
+    ? db.prepare("SELECT id, company_id FROM erp_accounts WHERE id = ?").get(accountId)
+    : null;
+  if (accountId && !account) throw new Error("账号不存在");
+  const companyId = normalizeCompanyId(payload.companyId || payload.company_id || account?.company_id, actor);
+  if (account && account.company_id !== companyId) {
+    throw new Error("商品资料账号不属于当前公司");
+  }
+  const supplierId = optionalString(payload.supplierId);
+  if (companyId && supplierId) {
+    const supplier = db.prepare("SELECT id, company_id FROM erp_suppliers WHERE id = ?").get(supplierId);
+    if (!supplier || supplier.company_id !== companyId) {
+      throw new Error("商品资料供应商不属于当前公司");
+    }
+  }
+  const internalSkuCode = requireString(payload.internalSkuCode, "internalSkuCode");
+  const duplicate = db.prepare(`
+    SELECT id
+    FROM erp_skus
+    WHERE company_id = @company_id
+      AND internal_sku_code = @internal_sku_code
+      AND id != @id
+    LIMIT 1
+  `).get({
+    company_id: companyId,
+    internal_sku_code: internalSkuCode,
+    id: optionalString(payload.id) || "",
+  });
+  if (duplicate) throw new Error(`商品编码已存在：${internalSkuCode}`);
   const row = {
     id: optionalString(payload.id) || createId("sku"),
-    account_id: requireString(payload.accountId, "accountId"),
-    internal_sku_code: requireString(payload.internalSkuCode, "internalSkuCode"),
+    company_id: companyId,
+    account_id: accountId,
+    internal_sku_code: internalSkuCode,
     temu_sku_id: optionalString(payload.temuSkuId),
     temu_product_id: optionalString(payload.temuProductId),
     temu_skc_id: optionalString(payload.temuSkcId),
     product_name: requireString(payload.productName, "productName"),
     category: optionalString(payload.category),
     image_url: optionalString(payload.imageUrl),
-    supplier_id: optionalString(payload.supplierId),
+    supplier_id: supplierId,
     status: optionalString(payload.status) || "active",
     created_at: now,
     updated_at: now,
@@ -1801,12 +1804,12 @@ function createSku(payload = {}) {
 
   db.prepare(`
     INSERT INTO erp_skus (
-      id, account_id, internal_sku_code, temu_sku_id, temu_product_id,
+      id, company_id, account_id, internal_sku_code, temu_sku_id, temu_product_id,
       temu_skc_id, product_name, category, image_url, supplier_id,
       status, created_at, updated_at
     )
     VALUES (
-      @id, @account_id, @internal_sku_code, @temu_sku_id, @temu_product_id,
+      @id, @company_id, @account_id, @internal_sku_code, @temu_sku_id, @temu_product_id,
       @temu_skc_id, @product_name, @category, @image_url, @supplier_id,
       @status, @created_at, @updated_at
     )
@@ -2389,7 +2392,7 @@ function getPurchaseWorkbench(params = {}) {
     ), 0),
   };
 
-  const skuOptions = listSkus({ accountId, limit: 500 });
+  const skuOptions = listSkus({ accountId, companyId, limit: 500 });
 
   const supplierOptions = db.prepare(`
     SELECT id, name
@@ -2574,7 +2577,21 @@ function createPurchaseRequestAction({ db, services, payload, actor }) {
   const sku = db.prepare("SELECT * FROM erp_skus WHERE id = ?").get(skuId);
   if (!sku) throw new Error(`SKU not found: ${skuId}`);
 
-  const accountId = optionalString(payload.accountId) || sku.account_id;
+  const companyId = normalizeCompanyId(sku.company_id || payload.companyId || payload.company_id, actor);
+  let accountId = optionalString(payload.accountId || payload.account_id) || optionalString(sku.account_id);
+  if (!accountId) {
+    const accounts = listAccounts({ companyId, limit: 2 }).filter((account) => account.status !== "blocked");
+    if (accounts.length === 1) {
+      accountId = accounts[0].id;
+    } else if (accounts.length === 0) {
+      throw new Error("请先在商品资料中创建账号，再提交采购需求");
+    } else {
+      throw new Error("该商品资料未设置默认账号，请在采购需求里选择归属账号");
+    }
+  }
+  const account = db.prepare("SELECT id, company_id FROM erp_accounts WHERE id = ?").get(accountId);
+  if (!account) throw new Error("采购需求归属账号不存在");
+  if (account.company_id !== companyId) throw new Error("采购需求归属账号不属于当前公司");
   const now = nowIso();
   const row = {
     id: optionalString(payload.id) || createId("pr"),
@@ -4778,6 +4795,85 @@ async function upsertUserRuntime(payload = {}, actor = {}) {
   return upsertUserAndBroadcast(payload, actor);
 }
 
+async function getMasterDataWorkbenchRuntime(params = {}) {
+  if (isClientMode()) {
+    const payload = await remoteRequest("/api/master-data/workbench", {
+      method: "POST",
+      body: params,
+    });
+    return payload.workbench || {};
+  }
+  const scopedParams = {
+    ...(params || {}),
+    companyId: optionalString(params.companyId || params.company_id) || erpState.currentUser?.companyId || undefined,
+  };
+  return {
+    accounts: listAccounts(scopedParams),
+    suppliers: listSuppliers(scopedParams),
+    skus: listSkus(scopedParams),
+  };
+}
+
+async function listAccountsRuntime(params = {}) {
+  const workbench = await getMasterDataWorkbenchRuntime(params);
+  return workbench.accounts || [];
+}
+
+async function upsertAccountRuntime(payload = {}, actor = {}) {
+  if (isClientMode()) {
+    const response = await remoteRequest("/api/master-data/action", {
+      method: "POST",
+      body: {
+        ...payload,
+        action: "upsert_account",
+      },
+    });
+    return response.result;
+  }
+  assertRoleIfLoggedIn(["admin", "manager"]);
+  return upsertAccount(payload || {}, actor);
+}
+
+async function listSuppliersRuntime(params = {}) {
+  const workbench = await getMasterDataWorkbenchRuntime(params);
+  return workbench.suppliers || [];
+}
+
+async function createSupplierRuntime(payload = {}, actor = {}) {
+  if (isClientMode()) {
+    const response = await remoteRequest("/api/master-data/action", {
+      method: "POST",
+      body: {
+        ...payload,
+        action: "create_supplier",
+      },
+    });
+    return response.result;
+  }
+  assertRoleIfLoggedIn(["admin", "manager", "buyer"]);
+  return createSupplier(payload || {}, actor);
+}
+
+async function listSkusRuntime(params = {}) {
+  const workbench = await getMasterDataWorkbenchRuntime(params);
+  return workbench.skus || [];
+}
+
+async function createSkuRuntime(payload = {}, actor = {}) {
+  if (isClientMode()) {
+    const response = await remoteRequest("/api/master-data/action", {
+      method: "POST",
+      body: {
+        ...payload,
+        action: "create_sku",
+      },
+    });
+    return response.result;
+  }
+  assertRoleIfLoggedIn(["admin", "manager", "operations"]);
+  return createSku(payload || {}, actor);
+}
+
 function getLanServiceStatus() {
   if (isClientMode()) {
     const runtime = getRuntimeStatus();
@@ -4822,6 +4918,12 @@ function startLanService(payload = {}) {
     getPermissionProfile,
     upsertRolePermission,
     upsertUserResourceScope,
+    listAccounts,
+    upsertAccount,
+    listSuppliers,
+    createSupplier,
+    listSkus,
+    createSku,
     sessionStore: createLanSessionStore(),
     verifyLogin: verifyLanLogin,
     validateSessionUser: validateLanSessionUser,
@@ -4898,6 +5000,12 @@ async function startErpHeadlessServer(options = {}) {
     getPermissionProfile,
     upsertRolePermission,
     upsertUserResourceScope,
+    listAccounts,
+    upsertAccount,
+    listSuppliers,
+    createSupplier,
+    listSkus,
+    createSku,
     sessionStore: createLanSessionStore(),
     verifyLogin: verifyLanLogin,
     validateSessionUser: validateLanSessionUser,
@@ -4952,18 +5060,8 @@ function registerErpIpcHandlers(ipcMain) {
     assertRoleIfLoggedIn(["admin", "manager"]);
     return upsertCompany(payload || {});
   });
-  ipcMain.handle("erp:account:list", (_event, params) => {
-    assertHostMode("账号管理");
-    return listAccounts({
-      ...(params || {}),
-      companyId: optionalString(params?.companyId || params?.company_id) || erpState.currentUser?.companyId || undefined,
-    });
-  });
-  ipcMain.handle("erp:account:upsert", (_event, payload) => {
-    assertHostMode("账号管理");
-    assertRoleIfLoggedIn(["admin", "manager"]);
-    return upsertAccount(payload || {}, erpState.currentUser || {});
-  });
+  ipcMain.handle("erp:account:list", (_event, params) => listAccountsRuntime(params || {}));
+  ipcMain.handle("erp:account:upsert", (_event, payload) => upsertAccountRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:user:list", (_event, params) => {
     if (!isClientMode()) assertHostMode("用户管理");
     return listUsersRuntime(params || {});
@@ -4987,27 +5085,10 @@ function registerErpIpcHandlers(ipcMain) {
     assertRoleIfLoggedIn(["admin", "manager"]);
     return upsertUserResourceScope(payload || {}, erpState.currentUser || {});
   });
-  ipcMain.handle("erp:supplier:list", (_event, params) => {
-    assertHostMode("供应商管理");
-    return listSuppliers({
-      ...(params || {}),
-      companyId: optionalString(params?.companyId || params?.company_id) || erpState.currentUser?.companyId || undefined,
-    });
-  });
-  ipcMain.handle("erp:supplier:create", (_event, payload) => {
-    assertHostMode("供应商管理");
-    assertRoleIfLoggedIn(["admin", "manager", "buyer"]);
-    return createSupplier(payload || {}, erpState.currentUser || {});
-  });
-  ipcMain.handle("erp:sku:list", (_event, params) => {
-    assertHostMode("SKU 管理");
-    return listSkus(params || {});
-  });
-  ipcMain.handle("erp:sku:create", (_event, payload) => {
-    assertHostMode("SKU 管理");
-    assertRoleIfLoggedIn(["admin", "manager", "operations"]);
-    return createSku(payload || {});
-  });
+  ipcMain.handle("erp:supplier:list", (_event, params) => listSuppliersRuntime(params || {}));
+  ipcMain.handle("erp:supplier:create", (_event, payload) => createSupplierRuntime(payload || {}, erpState.currentUser || {}));
+  ipcMain.handle("erp:sku:list", (_event, params) => listSkusRuntime(params || {}));
+  ipcMain.handle("erp:sku:create", (_event, payload) => createSkuRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:purchase:workbench", (_event, params) => getPurchaseWorkbenchRuntime(params || {}));
   ipcMain.handle("erp:purchase:action", (_event, payload) => performPurchaseActionRuntime(payload || {}));
   ipcMain.handle("erp:warehouse:workbench", (_event, params) => getWarehouseWorkbenchRuntime(params || {}));

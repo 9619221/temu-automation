@@ -20,6 +20,7 @@ import {
   SettingOutlined,
   ShoppingOutlined,
   SyncOutlined,
+  TagsOutlined,
   UserOutlined,
 } from "@ant-design/icons";
 import { ACTIVE_ACCOUNT_CHANGED_EVENT, readActiveAccountId } from "../../utils/multiStore";
@@ -40,6 +41,7 @@ const menuItems = [
     label: "ERP",
     children: [
       { key: "/daily-command", icon: <BellOutlined />, label: "今日作战台" },
+      { key: "/product-master-data", icon: <TagsOutlined />, label: "商品资料" },
       { key: "/purchase-center", icon: <ShoppingOutlined />, label: "采购中心" },
       { key: "/warehouse-center", icon: <InboxOutlined />, label: "仓库中心" },
       { key: "/qc-outbound", icon: <SafetyCertificateOutlined />, label: "QC 发仓" },
@@ -94,6 +96,7 @@ export default function AppLayout() {
   const completedCount = successCount + errorCount;
   const canUseCollection = canAccessRoute(currentRole, "/collect");
   const canManageAccounts = canAccessRoute(currentRole, "/accounts");
+  const canViewLogs = canAccessRoute(currentRole, "/logs");
 
   const visibleMenuItems = useMemo(() => (
     menuItems
@@ -358,6 +361,15 @@ export default function AppLayout() {
                 {activeAccountName || "未选择账号"}
               </Tag>
             </Dropdown>
+            ) : null}
+
+            {canViewLogs ? (
+              <Button
+                icon={<FileTextOutlined />}
+                onClick={() => navigate("/logs")}
+                style={{ borderRadius: 10 }}
+                title="日志中心"
+              />
             ) : null}
 
             <Tag color="blue" icon={<UserOutlined />} style={{ borderRadius: 12, padding: "4px 12px", marginInlineEnd: 0 }}>

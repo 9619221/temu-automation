@@ -29,6 +29,7 @@ const DEFAULT_PATH_BY_ROLE: Record<string, string> = {
 
 const ROUTE_ROLES: Record<string, string[]> = {
   "/daily-command": ["admin", "manager", "operations", "buyer", "finance", "warehouse", "viewer"],
+  "/product-master-data": ["admin", "manager", "operations", "buyer"],
   "/purchase-center": ["admin", "manager", "operations", "buyer", "finance"],
   "/warehouse-center": ["admin", "manager", "warehouse"],
   "/qc-outbound": ["admin", "manager", "operations", "warehouse"],
@@ -39,7 +40,7 @@ const ROUTE_ROLES: Record<string, string[]> = {
   "/image-studio": ["admin", "manager", "operations"],
   "/image-studio-gpt": ["admin", "manager", "operations"],
   "/collect": ["admin", "manager", "operations"],
-  "/accounts": ["admin", "manager"],
+  "/accounts": ["admin", "manager", "operations"],
   "/competitor": ["admin", "manager", "operations"],
   "/price-review": ["admin", "manager", "operations"],
   "/users": ["admin", "manager"],

@@ -193,6 +193,13 @@ function assertColumnExists(db, tableName, columnName) {
   );
 }
 
+function assertColumnNullable(db, tableName, columnName) {
+  const column = db.prepare(`PRAGMA table_info(${tableName})`).all()
+    .find((item) => item.name === columnName);
+  assert.ok(column, `Expected column ${tableName}.${columnName} to exist`);
+  assert.equal(column.notnull, 0, `Expected column ${tableName}.${columnName} to be nullable`);
+}
+
 function assertTransitionDenied(fn) {
   assert.throws(fn, (error) => (
     error instanceof WorkflowTransitionError
@@ -261,6 +268,8 @@ function runFlow() {
     }
     assertColumnExists(db, "erp_users", "company_id");
     assertColumnExists(db, "erp_accounts", "company_id");
+    assertColumnExists(db, "erp_skus", "company_id");
+    assertColumnNullable(db, "erp_skus", "account_id");
     assertColumnExists(db, "erp_1688_auth_settings", "company_id");
     assertColumnExists(db, "erp_1688_delivery_addresses", "company_id");
     assertColumnExists(db, "erp_sourcing_candidates", "external_offer_id");

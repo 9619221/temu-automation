@@ -39,7 +39,6 @@ import {
   UploadOutlined,
 } from "@ant-design/icons";
 import { useLocation } from "react-router-dom";
-import { DesignerSummary, type DesignerResult } from "@/components/designer";
 import {
   type ImageStudioComponentDetection,
   type ImageStudioDetectedComponent,
@@ -184,6 +183,53 @@ const DESIGNER_PLAN_SOURCE = "gpt-designer-agent";
 const IMAGE2_ECOMMERCE_PLAN_SOURCE = "image2-ecommerce-plan";
 const SHOT_BRIEF_VERSION = "shotbrief-v1";
 const SHOT_BRIEF_PROMPT_SOURCE = "gpt-image-2-shotbrief";
+const GPT_PREMIUM_ANALYSIS_PROFILE = "gpt-premium-ecommerce";
+const GPT_PREMIUM_ANALYSIS_MARKER = "GPT_PREMIUM_ECOMMERCE_PROFILE";
+const GPT_A_PLUS_SHARPNESS_LOCK = "SHARPNESS LOCK: the product, functional contact point, material texture, brush fibers, handle grip, and relevant surface edges must be tack-sharp enough for ecommerce inspection at 800x800. Use deep/medium depth of field, high-shutter commercial product photography, crisp micro-contrast, and stable focus. No motion blur, soft focus, smeared water, hazy mist, excessive bokeh, shallow depth-of-field hiding proof details, AI painterly texture, or overcompressed low-detail rendering.";
+const GPT_A_PLUS_STRATEGY_VERSION = "gpt-aplus-strategy-v3";
+const GPT_A_PLUS_NO_BLANK_LOCK = "NO-BLANK A+ LOCK: non-main images must use the full square as useful photographic evidence. Do not reserve a blank white panel, empty information column, poster margin, lower-third rectangle, or generic copy area. If local overlay copy is planned, place it later over natural low-detail photo areas, shadows, reflections, or depth.";
+const GPT_A_PLUS_BASE_TEXT_LOCK = "TEXT-FREE BASE LOCK: the generated base photo must not render headlines, captions, badges, labels, random letters, pseudo text, arrows, icons, comparison marks, fake seals, price copy, or watermarks. Approved selling copy is mandatory in layout.textBlocks and is added by the local compose layer after generation.";
+const GPT_A_PLUS_FINISHED_MODULE_LOCK = "FINISHED A+ MODULE LOCK: judge success on the final composed image, not the raw base photo. The final output must read as a premium Amazon A+ module with a strong headline, 2-3 proof labels, and rich visual evidence, while the generated base remains a text-free commercial advertising composite.";
+const GPT_A_PLUS_STRUCTURE_LOCK = "STRUCTURE LOCK: build one full-bleed ecommerce/A+ composition with one hero subject, one buyer question, and 2-3 visible proof cues. The image must not be a plain documentary close-up; it needs reference-style advertising structure through macro detail, use-contact, scale, material, result, or placement evidence. Avoid empty poster boards, cheap feature grids, fake comparison tables, or split layouts without a clear buyer reason.";
+const GPT_A_PLUS_PRODUCT_IDENTITY_LOCK = "PRODUCT IDENTITY LOCK: preserve the reference product shape, color, material, count, proportions, handle/head geometry, and key functional structure. Do not redesign the SKU, change its scale category, add extra parts, or substitute a generic product.";
+const GPT_A_PLUS_CLEAN_CORNER_LOCK = "CLEAN-CORNER ANTI-WATERMARK LOCK: keep all corners and edges free of watermarks, logos, signatures, QR codes, UI marks, random letters, serial-like text, clipped labels, and decorative corner badges.";
+const GPT_A_PLUS_REFERENCE_INFOGRAPHIC_LOCK = "REFERENCE A+ INFOGRAPHIC LOCK: learn the supplied A+ examples as a structure pattern: hero product/action, oversized readable headline, compact parameter/proof cluster, and detail or scenario proof zones when useful. Keep the information density and purchase reasons; reject the low-end artifacts: watermark, copied debris, spelling errors, tiny random text, blurry cutouts, clutter, and fake icons.";
+const GPT_A_PLUS_INFO_DENSITY_LOCK = "INFO-DENSITY LOCK: every non-main finished module must carry one clear purchase reason plus 2-3 visible proof cues. Use generated photography for proof and layout.textBlocks for approved copy; never rely on model-rendered tiny text, pseudo labels, or random infographic marks.";
+const GPT_A_PLUS_REVERSE_ENGINEERED_PROMPT_LOCK = "REVERSE-ENGINEERED A+ PROMPT LOCK: transfer the supplied reference images as a universal A+ advertising recipe, not as product/category templates. Formula: exact product identity, full-bleed square commercial render/composite, dominant hero action, 2-3 visual proof cues, premium material micro-detail, dramatic believable lighting, tight crop, no blank panels, local overlay copy only. Never copy reference products, brands, metrics, or category claims.";
+const GPT_A_PLUS_REVERSE_PROMPT_GRAMMAR = "REFERENCE PROMPT GRAMMAR: exact user product preserved; 800x800 full-bleed premium A+ ad composite; hero subject/action fills 55-75%; diagonal or low three-quarter camera when useful; proof cues from macro detail, mechanism, scale, placement, use-contact, result, or small photographic inset; controlled rim light, glossy highlights, soft reflections, high micro-contrast, no blur; category-relevant environment inferred from product facts; base image has no rendered text; local overlay later adds one headline plus short proof labels; no watermark, random letters, fake icons, invented specs, extra accessories, copied reference product, or empty white area.";
+const GPT_A_PLUS_REFERENCE_REVERSE_NEGATIVE_PROMPT = "REFERENCE NEGATIVE PROMPT: do not reproduce the sample product, sample brand, sample numbers, sample text, sample watermark, Douyin/TikTok marks, random UI, QR code, serial digits, fake spec badges, fake certification seals, red/green comparison marks, clipped text, cluttered icon walls, low-resolution blur, washed-out flat lighting, or stock-photo emptiness.";
+const GPT_A_PLUS_COMPACT_PROMPT_MARKER = "GPT PREMIUM COMPACT IMAGE2 PROMPT";
+
+type GptAPlusStrategySlot = {
+  imageType: string;
+  roleName: string;
+  buyerQuestion: string;
+  purchaseDriver: string;
+  visualProof: string[];
+  scene: string;
+  camera: string;
+  composition: string;
+  copy: string[];
+  forbidden: string[];
+  layout: Record<string, unknown>;
+  brief: string;
+  promptPlan: string;
+};
+
+type GptAPlusStrategy = {
+  version: string;
+  categoryMode: "universal";
+  productTruth: string[];
+  buyerQuestions: string[];
+  purchaseDrivers: string[];
+  proofPoints: string[];
+  usageActions: string[];
+  riskControls: string[];
+  storyArc: string[];
+  slots: Record<string, GptAPlusStrategySlot>;
+  creativeBriefs: Record<string, string>;
+  imageLayouts: Record<string, unknown>;
+};
 
 const EMPTY_MARKETING_TRANSLATING_STATE: Record<MarketingInfoField, boolean> = {
   sellingPoints: false,
@@ -438,6 +484,1061 @@ function dedupeTextList(values: string[]) {
       seen.add(value);
       return true;
     });
+}
+
+function mergeAnalysisList(base: string[] | undefined, additions: string[], limit = 12) {
+  return dedupeTextList([...(Array.isArray(base) ? base : []), ...additions]).slice(0, limit);
+}
+
+function appendAnalysisDirective(existing: string | undefined, directive: string) {
+  const current = (existing || "").trim();
+  if (!current) return directive;
+  if (current.includes(directive)) return current;
+  return `${current}\n${directive}`;
+}
+
+function buildGptReferenceReversePrompt(role: string) {
+  return compactShotList([
+    `Reverse-engineered reference prompt for ${role}:`,
+    GPT_A_PLUS_REVERSE_ENGINEERED_PROMPT_LOCK,
+    GPT_A_PLUS_REVERSE_PROMPT_GRAMMAR,
+    "Reference transfer target: emulate the expensive A+ advertising structure seen in the examples: hero product dominance, cinematic contrast, strong material highlights, compact evidence windows, and purchase-proof density.",
+    "Reference transfer boundary: keep only the visual system and prompt grammar; do not copy the reference category, product, text, numbers, logos, layout debris, or watermark.",
+    GPT_A_PLUS_REFERENCE_REVERSE_NEGATIVE_PROMPT,
+  ]).join(" ");
+}
+
+function getGptPremiumVisualStyle(analysis: ImageStudioAnalysis) {
+  void analysis;
+  return [
+    "Universal premium Amazon A+ commercial photography: reverse-engineered from high-performing reference modules, not hardcoded by product category.",
+    buildGptReferenceReversePrompt("global visual style"),
+    "Use a full-bleed cinematic product/ad composition with one dominant hero product or action, 2-3 compact photographic evidence cues, premium material micro-detail, truthful scale, dramatic but believable lighting, and no blank poster space.",
+    "Final text is added by the local compose layer; the generated base image must stay photographic and text-free except for real physical product/package markings already present in the reference.",
+    "Use verified specs, numbers, model names, compatibility, materials, angles, counts, and claims only when the analysis supplies them; otherwise communicate the benefit visually without invented metrics.",
+  ].join(" ");
+}
+function buildGptPremiumCreativeBriefs(analysis: ImageStudioAnalysis) {
+  const productName = normalizeProductDisplayName(analysis.productName)
+    || analysis.productFacts?.productName
+    || analysis.category
+    || "the exact product";
+  const existing = {
+    ...(analysis.creativeBriefs || {}),
+    ...(analysis.creativeDirection?.creativeBriefs || {}),
+  };
+  const setBrief = (key: string, directive: string) => appendAnalysisDirective(
+    typeof existing[key] === "string" ? existing[key] : "",
+    directive,
+  );
+  const referencePrompt = buildGptReferenceReversePrompt("creative brief");
+
+  return {
+    ...existing,
+    main: setBrief(
+      "main",
+      `GPT premium Amazon main image: photorealistic compliant packshot of ${productName}; preserve exact product shape, color, material, count, and proportions; use pure white #FFFFFF studio background, natural soft shadow, no generated text, no icons, no badges, no price, no watermark, no invented packaging or accessories.`,
+    ),
+    features: setBrief(
+      "features",
+      `${referencePrompt} GPT premium Amazon A+ proof module in 800x800 square format: prove one strongest purchase driver visually with the real product first; use a single editorial composition, not stacked callout cards, badge walls, feature grids, arrows, or generic template slogans.`,
+    ),
+    closeup: setBrief(
+      "closeup",
+      `${referencePrompt} GPT premium Amazon A+ style close-up module in 800x800 square format: show material, construction, texture, edge quality, handle/grip/fiber/detail truth from the reference image; no fake macro parts or redesigned structure.`,
+    ),
+    dimensions: setBrief(
+      "dimensions",
+      "GPT premium Amazon A+ style size module in 800x800 square format: communicate truthful scale only from verified or cautious dimensions; use product-only measurement hierarchy, thin guide lines, and no unrelated reference object or invented numbers.",
+    ),
+    lifestyle: setBrief(
+      "lifestyle",
+      `${referencePrompt} GPT premium Amazon A+ style lifestyle module in 800x800 square format: show a believable real-use action with natural contact, correct scale, and realistic environment; do not make the product larger or more dramatic than the facts support.`,
+    ),
+    packaging: setBrief(
+      "packaging",
+      "GPT premium Amazon A+ contents/trust module in 800x800 square format: use real packaging only if clearly visible in references; if packaging is not visible, do not create a box, plastic bag, barcode, insert card, manual, accessory, or retail package fantasy. Instead show the exact sellable product in a clean premium contents/receipt context.",
+    ),
+    comparison: setBrief(
+      "comparison",
+      `${referencePrompt} GPT premium Amazon A+ decision-proof module in 800x800 square format: answer one buyer doubt through product-positive evidence such as material, reach, scale, fit, mechanism, or real-use contact; do not create fake competitors, red X/green check marks, before/after exaggeration, or Our/Other labels.`,
+    ),
+    lifestyle2: setBrief(
+      "lifestyle2",
+      `${referencePrompt} GPT premium Amazon A+ closing module in 800x800 square format: create a coherent visual story with shared lighting, palette, and product identity; each panel should have one clear role, not a collage of unrelated template ideas.`,
+    ),
+    scene_a: setBrief(
+      "scene_a",
+      `${referencePrompt} GPT premium scenario A: show one high-intent shopper use case with realistic scale, clean composition, and a premium catalog feel.`,
+    ),
+    scene_b: setBrief(
+      "scene_b",
+      `${referencePrompt} GPT premium scenario B: show a different high-intent use case or proof angle while keeping the same visual DNA and exact product identity.`,
+    ),
+  };
+}
+function extractEnglishCopy(value: string) {
+  const text = value.replace(/\s+/g, " ").trim();
+  const match = text.match(/\(([^()]*[A-Za-z][^()]*)\)\s*$/);
+  return (match?.[1] || text).trim();
+}
+
+function titleCaseCopy(value: string) {
+  const smallWords = new Set(["a", "an", "and", "as", "at", "for", "in", "into", "of", "on", "or", "the", "to", "with"]);
+  return value
+    .split(/\s+/)
+    .map((word, index) => {
+      const lower = word.toLowerCase();
+      if (index > 0 && smallWords.has(lower)) return lower;
+      return lower.charAt(0).toUpperCase() + lower.slice(1);
+    })
+    .join(" ");
+}
+
+function cleanPremiumCopy(value: string, fallback: string, maxWords = 5) {
+  const normalized = extractEnglishCopy(value)
+    .replace(/[#*"'`]/g, "")
+    .replace(/[|/]+/g, " ")
+    .replace(/\b(best|guaranteed|guarantee|perfect|free|sale|discount|certified|approved|official|scratch[- ]?proof|100%|#1)\b/gi, "")
+    .replace(/\b(proof|benefit|buyer|shopper|question|risk|module|story|claim|conversion|driver|reason to buy|a\+)\b/gi, "")
+    .replace(/[^A-Za-z0-9%&+., -]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (words.length < 2) return fallback;
+  return titleCaseCopy(words.slice(0, maxWords).join(" "));
+}
+
+function premiumCopyCandidates(analysis: ImageStudioAnalysis) {
+  const nestedBadges = Array.isArray(analysis.creativeDirection?.suggestedBadges)
+    ? analysis.creativeDirection?.suggestedBadges
+    : [];
+  const topBadges = Array.isArray(analysis.suggestedBadges) ? analysis.suggestedBadges : [];
+  const badgeText = [...topBadges, ...nestedBadges].flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const record = item as Record<string, unknown>;
+    return [record.badge, record.benefit, record.painPoint].filter((value): value is string => typeof value === "string");
+  });
+
+  return [
+    ...(analysis.operatorInsights?.purchaseDrivers || []),
+    ...(analysis.sellingPoints || []),
+    ...(analysis.operatorInsights?.proofPoints || []),
+    ...badgeText,
+    analysis.materials,
+    analysis.category,
+  ].filter(Boolean);
+}
+
+type GptPremiumCopyRole = "features" | "closeup" | "lifestyle" | "packaging" | "comparison" | "lifestyle2" | "scene_a" | "scene_b";
+
+function isInternalOrWeakPremiumCopy(value: string) {
+  const text = value.trim();
+  if (!text) return true;
+  if (/^(core benefit|material proof|choice proof|use proof|trust detail|practical use proof)$/i.test(text)) return true;
+  if (/\b(proof|benefit|buyer|shopper|question|risk|module|story|claim|conversion|driver)\b/i.test(text)) return true;
+  if (/^(can|will|should|whether|how|why|what|is|are)\b/i.test(text)) return true;
+  if (/[?]/.test(text)) return true;
+  return false;
+}
+
+function roleCopyCandidates(analysis: ImageStudioAnalysis, role: GptPremiumCopyRole) {
+  const insights = analysis.operatorInsights || {};
+  const common = premiumCopyCandidates(analysis);
+  const firstUsage = compactShotList([insights.usageActions, analysis.usageScenes]);
+  const material = compactShotList([insights.proofPoints, analysis.materials, analysis.productFacts?.materials]);
+  const contents = compactShotList([
+    analysis.productFacts?.countAndConfiguration,
+    analysis.productFacts?.packagingEvidence,
+    analysis.productName,
+  ]);
+  const choice = compactShotList([insights.purchaseDrivers, insights.buyerQuestions, insights.proofPoints, analysis.sellingPoints]);
+
+  const candidatesByRole: Record<GptPremiumCopyRole, string[]> = {
+    features: compactShotList([insights.purchaseDrivers, analysis.sellingPoints, common]),
+    closeup: compactShotList([material, analysis.colors, common]),
+    lifestyle: compactShotList([firstUsage, insights.purchaseDrivers, analysis.sellingPoints]),
+    packaging: contents,
+    comparison: choice,
+    lifestyle2: compactShotList([analysis.sellingPoints.slice(-2), insights.purchaseDrivers?.slice?.(-2), firstUsage.slice(-2), common.slice(-2)]),
+    scene_a: compactShotList([firstUsage.slice(0, 1), insights.buyerQuestions?.slice?.(0, 1), analysis.sellingPoints.slice(0, 1)]),
+    scene_b: compactShotList([firstUsage.slice(1, 2), insights.buyerQuestions?.slice?.(1, 2), insights.proofPoints?.slice?.(1, 2), common.slice(1, 3)]),
+  };
+
+  return candidatesByRole[role] || common;
+}
+
+function pickGptAPlusCopy(analysis: ImageStudioAnalysis, role: GptPremiumCopyRole, fallback: string, maxWords = 4) {
+  const candidates = roleCopyCandidates(analysis, role);
+  const normalizedCandidates = candidates.flatMap((candidate) => {
+    const rewritten = rewriteImage2BenefitCopy(candidate, "en");
+    const cleanedRewritten = rewritten ? cleanPremiumCopy(rewritten, "", maxWords) : "";
+    const cleanedRaw = cleanPremiumCopy(candidate, "", maxWords);
+    return [cleanedRewritten, cleanedRaw];
+  });
+
+  const selected = dedupeTextList(normalizedCandidates)
+    .filter((copy) => !isInternalOrWeakPremiumCopy(copy))
+    .filter((copy) => !isCheapImage2TemplateCopy(copy))[0];
+
+  return selected || fallback;
+}
+
+function buildGptPremiumCopy(analysis: ImageStudioAnalysis) {
+  return {
+    features: pickGptAPlusCopy(analysis, "features", "Built For Daily Use", 4),
+    closeup: pickGptAPlusCopy(analysis, "closeup", "Real Product Detail", 4),
+    lifestyle: pickGptAPlusCopy(analysis, "lifestyle", "Made For Real Use", 4),
+    packaging: pickGptAPlusCopy(analysis, "packaging", "What You Receive", 4),
+    comparison: pickGptAPlusCopy(analysis, "comparison", "Choose With Confidence", 4),
+    lifestyle2: pickGptAPlusCopy(analysis, "lifestyle2", "Ready For Everyday Use", 4),
+    scene_a: pickGptAPlusCopy(analysis, "scene_a", "In Real Use", 4),
+    scene_b: pickGptAPlusCopy(analysis, "scene_b", "Practical Detail", 4),
+  };
+}
+
+function splitPremiumHeadlineLines(line: string) {
+  const normalized = line.replace(/\s+/g, " ").trim();
+  if (!normalized) return [];
+  if (normalized.length <= 16) return [normalized];
+
+  const words = normalized.split(" ").filter(Boolean);
+  if (words.length <= 1) {
+    return [normalized.slice(0, 16), normalized.slice(16, 32).trim()].filter(Boolean);
+  }
+
+  let bestIndex = 1;
+  let bestScore = Number.POSITIVE_INFINITY;
+  for (let index = 1; index < words.length; index += 1) {
+    const left = words.slice(0, index).join(" ");
+    const right = words.slice(index).join(" ");
+    const overflow = Math.max(0, left.length - 18) + Math.max(0, right.length - 18);
+    const score = Math.abs(left.length - right.length) + overflow * 10;
+    if (score < bestScore) {
+      bestScore = score;
+      bestIndex = index;
+    }
+  }
+
+  return [
+    words.slice(0, bestIndex).join(" "),
+    words.slice(bestIndex).join(" "),
+  ].filter(Boolean);
+}
+
+function premiumHeadline(region: string, line: string, color: "white" | "black" = "white") {
+  return {
+    region,
+    role: "title",
+    lines: [splitPremiumHeadlineLines(line).join(" ")],
+    style: "bold-headline",
+    color,
+  };
+}
+
+const GENERIC_PREMIUM_COPY = new Set([
+  "Built For Daily Use",
+  "Real Product Detail",
+  "Made For Real Use",
+  "What You Receive",
+  "Choose With Confidence",
+  "Ready For Everyday Use",
+  "In Real Use",
+  "Practical Detail",
+]);
+
+function premiumEvidenceLines(lines: string[]) {
+  return dedupeTextList(
+    lines
+      .map((line) => line.replace(/\s+/g, " ").trim())
+      .filter((line) => line && !GENERIC_PREMIUM_COPY.has(line))
+      .filter((line) => line.length <= 28),
+  ).slice(0, 3);
+}
+
+function premiumSizeLabel(region: string, lines: string[], color: "white" | "black" = "black") {
+  return {
+    region,
+    role: "size",
+    lines: premiumEvidenceLines(lines).length ? premiumEvidenceLines(lines) : lines.slice(0, 2),
+    style: "size-label",
+    color,
+  };
+}
+
+function premiumProofStack(region: string, lines: string[], color: "white" | "black" = "black") {
+  return {
+    region,
+    role: "proof",
+    lines: premiumEvidenceLines(lines).slice(0, 3),
+    style: "size-label",
+    color,
+  };
+}
+
+function premiumOverlayHeadline(line: string) {
+  return premiumHeadline("top-left", line, "white");
+}
+
+function premiumOverlayProof(lines: string[]) {
+  return premiumProofStack("bottom-right", lines, "white");
+}
+
+function buildUniversalGptAPlusImageLayouts(copy: ReturnType<typeof buildGptPremiumCopy>) {
+  const referencePrompt = buildGptReferenceReversePrompt("image layout");
+
+  return {
+    main: {
+      renderTextDirectly: false,
+      blankZones: [],
+      textBlocks: [],
+      informationAnchors: [
+        "exact sellable product identity",
+        "truthful count, color, material, and proportions",
+        "pure white #FFFFFF background with natural product shadow",
+      ],
+      visualHierarchy: "SKU identity first, thumbnail click clarity second, premium studio finish third.",
+      compositionHint: "Universal Amazon-compliant main image: exact sellable product only, pure white #FFFFFF background, crisp edges, natural grounding shadow, truthful count and scale. No generated text, badges, arrows, lifestyle scene, packaging fantasy, extra accessories, or decorative props.",
+    },
+    features: {
+      renderTextDirectly: false,
+      blankZones: [],
+      approvedCopy: [copy.features, copy.closeup, copy.lifestyle],
+      textBlocks: [
+        premiumOverlayHeadline(copy.features),
+        premiumOverlayProof([copy.closeup, copy.lifestyle, "Visible Proof"]),
+      ],
+      informationAnchors: [
+        "one strongest buyer benefit from the real product",
+        "one visible proof element tied to product form, function, material, fit, or use",
+        "product remains larger and more important than the text",
+      ],
+      visualHierarchy: "Hero product proof first, compact reference-style evidence cluster second, restrained text hierarchy third.",
+      compositionHint: `${referencePrompt} Universal Amazon A+ full-bleed benefit module: fill the square with one polished product/action photograph that proves the strongest benefit, with 2-3 supporting visual evidence cues built into the same coherent scene. Use the supplied reference structure as layout logic only: hero subject, compact proof cluster, detail or scenario evidence zone when useful. It should feel like a premium detail-page module, not a plain packshot and not a blank information board. Do not create a large blank panel, blank corner, or empty copy area. Do not render words, letters, slogans, pseudo text, icons, badges, labels, arrows, or graphics in the base image; final copy will be overlaid locally. No cheap feature walls, random icon grids, lower-third bars, sticker badges, or repeated text.`,
+    },
+    closeup: {
+      renderTextDirectly: false,
+      blankZones: [],
+      approvedCopy: [copy.closeup, copy.features],
+      textBlocks: [
+        premiumOverlayHeadline(copy.closeup),
+        premiumOverlayProof([copy.features, "Material Detail", "Sharp Close-Up"]),
+      ],
+      informationAnchors: [
+        "macro material, texture, edge, connector, stitching, surface, or build detail",
+        "product identity remains connected to the detail",
+        "detail proof is tactile and inspectable",
+      ],
+      visualHierarchy: "Material/detail proof first, product continuity second, restrained headline and one proof cue third.",
+      compositionHint: `${referencePrompt} Universal A+ full-bleed detail module: premium macro or close detail that proves material, finish, construction, edge, connector, surface, or mechanism. Add depth, tactile surface detail, and one secondary identity cue so it does not feel like a random zoom. Do not create a blank panel, blank corner, or empty information column. Do not render words, letters, slogans, pseudo text, icons, badges, labels, or graphics in the base image; final copy will be overlaid locally.`,
+    },
+    dimensions: {
+      renderTextDirectly: false,
+      blankZones: [],
+      textBlocks: [],
+      informationAnchors: [
+        "full product silhouette on white or light neutral background",
+        "thin guide lines tied to product edges",
+        "only verified measurement labels from references or analysis",
+      ],
+      visualHierarchy: "Product silhouette first, simple measurement system second, verified labels third.",
+      compositionHint: "Universal size-truth module: product-only technical layout with simple measurement lines. Use exact dimensions only when verified in the references or analysis. No Size Guide headline, no scale props, no hand, no phone, no car, no wheel, no table props, no packaging, no ruler object, and no invented numbers.",
+    },
+    lifestyle: {
+      renderTextDirectly: false,
+      blankZones: [],
+      approvedCopy: [copy.lifestyle, copy.features, copy.closeup],
+      textBlocks: [
+        premiumOverlayHeadline(copy.lifestyle),
+        premiumOverlayProof([copy.features, copy.closeup, "Real Use Proof"]),
+      ],
+      informationAnchors: [
+        "natural real-use action that matches the category",
+        "clear hand/body/surface/device/product contact when relevant",
+        "believable product scale and premium lighting",
+      ],
+      visualHierarchy: "Real use action first, buyer outcome/context second, restrained headline and proof cues third.",
+      compositionHint: `${referencePrompt} Universal premium full-bleed lifestyle module: show the product actively used, held, installed, cleaned, applied, worn, placed, opened, or operated in a believable target scenario. Build a richer scene with a clear foreground action, relevant environment, and visible product contact rather than a passive product placement. Do not create a blank panel, blank corner, blank wall, or empty overlay area. Do not render words, letters, slogans, pseudo text, icons, badges, labels, or graphics in the base image; final copy will be overlaid locally.`,
+    },
+    packaging: {
+      renderTextDirectly: false,
+      blankZones: [],
+      approvedCopy: [copy.packaging, copy.features],
+      textBlocks: [
+        premiumOverlayHeadline(copy.packaging),
+        premiumOverlayProof([copy.features, "Exact Contents", "No Extras"]),
+      ],
+      informationAnchors: [
+        "show only the exact sellable item and verified included components",
+        "packaging appears only if visible in the references or explicitly confirmed",
+        "contents are countable and not upgraded beyond evidence",
+      ],
+      visualHierarchy: "What buyer receives first, count/components second, one truth headline third.",
+      compositionHint: "Universal contents/trust module: clarify what the buyer receives. If packaging is not verified, do not create boxes, pouches, manuals, inserts, barcodes, labels, certificates, tools, or accessories. Use a clean product-first contents layout with one truthful headline only.",
+    },
+    comparison: {
+      renderTextDirectly: false,
+      blankZones: [],
+      approvedCopy: [copy.comparison, copy.features, copy.closeup],
+      textBlocks: [
+        premiumOverlayHeadline(copy.comparison),
+        premiumOverlayProof([copy.features, copy.closeup, "Decision Proof"]),
+      ],
+      informationAnchors: [
+        "product-positive decision proof",
+        "show a real benefit through material, fit, reach, function, scale, handling, or result context",
+        "no fake competitor or unsupported before/after claim",
+      ],
+      visualHierarchy: "Buyer decision proof first, product evidence second, restrained headline and proof cues third.",
+      compositionHint: `${referencePrompt} Universal full-bleed decision-proof module: help the buyer choose through positive evidence from the product itself. Show why the real product is useful through material, fit, reach, function, scale, handling, or result context in one coherent image that fills the whole square. Do not create a blank panel, fake competitors, Our/Other labels, red-X/green-check marks, comparison tables, fake percentages, certifications, or exaggerated before/after drama. Do not render text in the base image; final copy will be overlaid locally.`,
+    },
+    lifestyle2: {
+      renderTextDirectly: false,
+      blankZones: [],
+      approvedCopy: [copy.lifestyle2, copy.lifestyle],
+      textBlocks: [
+        premiumOverlayHeadline(copy.lifestyle2),
+        premiumOverlayProof([copy.lifestyle, copy.features, "Trust Proof"]),
+      ],
+      informationAnchors: [
+        "trust-building finished impression or clean setup",
+        "product identity remains inspectable",
+        "shared lighting and palette with the rest of the set",
+      ],
+      visualHierarchy: "Trust impression first, product relevance second, one confidence message third.",
+      compositionHint: `${referencePrompt} Universal A+ closing module: polished, believable final scene that reinforces trust and product desirability. A clean 2-3 zone proof layout is allowed only when each zone shows a distinct real product reason to buy; keep the base photographic and text-free, not a noisy collage. Make it visually distinct from the first lifestyle image while keeping the same product identity. No discount-ad look, fake awards, or generic filler props.`,
+    },
+    scene_a: {
+      renderTextDirectly: false,
+      blankZones: [],
+      approvedCopy: [copy.scene_a, copy.features],
+      textBlocks: [
+        premiumOverlayHeadline(copy.scene_a),
+        premiumOverlayProof([copy.features, "Scenario Proof", "Product Visible"]),
+      ],
+      informationAnchors: [
+        "one practical buyer question answered visually",
+        "distinct action, angle, surface, fit, placement, or use context",
+        "product remains clear and not hidden",
+      ],
+      visualHierarchy: "Practical proof first, buyer question second, one scenario label third.",
+      compositionHint: `${referencePrompt} Scenario A: answer one practical shopper question with a distinct action or placement proof. Do not duplicate the feature image or lifestyle image. Use one local overlay label on top of the full-bleed photo; do not create a blank label area in the base image.`,
+    },
+    scene_b: {
+      renderTextDirectly: false,
+      blankZones: [],
+      approvedCopy: [copy.scene_b, copy.comparison],
+      textBlocks: [
+        premiumOverlayHeadline(copy.scene_b),
+        premiumOverlayProof([copy.comparison, "Second Proof", "Different Angle"]),
+      ],
+      informationAnchors: [
+        "second buyer doubt or trust point",
+        "different camera distance, angle, product state, or contact point from scene A",
+        "product identity and scale remain truthful",
+      ],
+      visualHierarchy: "Second proof angle first, difference from scene A second, one label third.",
+      compositionHint: `${referencePrompt} Scenario B: answer a different buyer doubt from Scenario A with a meaningfully different angle, environment, product state, or contact point. It must not be Scene A with a new caption. Use one label only.`,
+    },
+  };
+}
+
+type GptAPlusStrategySlotInput = Omit<GptAPlusStrategySlot, "layout" | "brief" | "promptPlan">;
+
+function getGptAPlusProductName(analysis: ImageStudioAnalysis) {
+  return normalizeProductDisplayName(analysis.productName)
+    || normalizeProductDisplayName(analysis.productFacts?.productName)
+    || analysis.category
+    || analysis.productFacts?.category
+    || "the exact product";
+}
+
+function getGptAPlusProductTruth(analysis: ImageStudioAnalysis) {
+  return compactShotList([
+    getGptAPlusProductName(analysis),
+    analysis.category,
+    analysis.productFacts?.category,
+    analysis.materials,
+    analysis.productFacts?.materials,
+    analysis.colors,
+    analysis.productFacts?.colors,
+    analysis.estimatedDimensions,
+    analysis.productFacts?.estimatedDimensions,
+    analysis.productFacts?.countAndConfiguration,
+    analysis.productFacts?.packagingEvidence,
+  ]).slice(0, 9);
+}
+
+function firstGptAPlusInsight(values: unknown[], fallback: string) {
+  return compactShotList(values)[0] || fallback;
+}
+
+function getGptAPlusDimensionCopy(analysis: ImageStudioAnalysis, fallback: string[]) {
+  const measurementText = compactShotList([
+    analysis.estimatedDimensions,
+    analysis.productFacts?.estimatedDimensions,
+    ...(analysis.operatorInsights?.proofPoints || []),
+    ...(analysis.sellingPoints || []),
+  ]).join(" ");
+  const measurements = extractImage2Measurements(measurementText);
+
+  if (measurements.length >= 2) return measurements.slice(0, 2).map((item) => titleCaseCopy(item));
+  if (measurements.length === 1) return [titleCaseCopy(measurements[0])];
+  return fallback;
+}
+
+function buildGptAPlusSlotBrief(productName: string, slot: GptAPlusStrategySlotInput) {
+  return compactShotList([
+    `${GPT_A_PLUS_STRATEGY_VERSION} ${slot.roleName} for ${productName}.`,
+    buildGptReferenceReversePrompt(slot.roleName),
+    `Buyer question: ${slot.buyerQuestion}.`,
+    `Purchase reason: ${slot.purchaseDriver}.`,
+    slot.visualProof.length ? `Required visual proof: ${slot.visualProof.join("; ")}.` : "",
+    `Scene: ${slot.scene}.`,
+    `Camera: ${slot.camera}.`,
+    `Composition: ${slot.composition}.`,
+    slot.copy.length ? `Approved local overlay copy: ${slot.copy.join("; ")}.` : "No marketing overlay copy.",
+    slot.forbidden.length ? `Do not show: ${slot.forbidden.join("; ")}.` : "",
+  ]).join(" ");
+}
+
+function buildGptAPlusSlotPromptPlan(productName: string, slot: GptAPlusStrategySlotInput) {
+  return compactShotList([
+    `GPT A+ STRATEGY ${GPT_A_PLUS_STRATEGY_VERSION}`,
+    `Product truth: preserve ${productName}; no redesign, no extra accessories, no invented packaging.`,
+    GPT_A_PLUS_PRODUCT_IDENTITY_LOCK,
+    buildGptReferenceReversePrompt(slot.roleName),
+    `Role: ${slot.roleName}.`,
+    `Buyer question to answer: ${slot.buyerQuestion}.`,
+    `Purchase driver to prove: ${slot.purchaseDriver}.`,
+    slot.visualProof.length ? `Visual evidence: ${slot.visualProof.join("; ")}.` : "",
+    `Scene/background: ${slot.scene}.`,
+    `Camera/framing: ${slot.camera}.`,
+    `Composition: ${slot.composition}.`,
+    slot.copy.length ? `Final local overlay copy after generation: ${slot.copy.join("; ")}.` : "No local overlay copy required.",
+    slot.imageType === "main"
+      ? "Main image exception: pure white background is required; do not apply lifestyle or A+ full-bleed scene rules."
+      : [GPT_A_PLUS_FINISHED_MODULE_LOCK, GPT_A_PLUS_STRUCTURE_LOCK, buildGptReferenceReversePrompt(slot.roleName), GPT_A_PLUS_REFERENCE_INFOGRAPHIC_LOCK, GPT_A_PLUS_INFO_DENSITY_LOCK, GPT_A_PLUS_NO_BLANK_LOCK, GPT_A_PLUS_BASE_TEXT_LOCK, GPT_A_PLUS_CLEAN_CORNER_LOCK, GPT_A_PLUS_SHARPNESS_LOCK].join(" "),
+    slot.forbidden.length ? `Forbidden: ${slot.forbidden.join("; ")}.` : "",
+  ]).join("\n");
+}
+
+function toGptAPlusProofLabel(value: string) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  const lower = normalized.toLowerCase();
+  const mapped = [
+    { match: /spoke|gap/, label: "Spoke Gap Fit" },
+    { match: /inner|barrel|deep/, label: "Inner Barrel" },
+    { match: /fiber|microfiber|material|texture|surface/, label: "Material Detail" },
+    { match: /foam|water|wet/, label: "Wet Use Proof" },
+    { match: /hand|grip|handle|control/, label: "Grip Control" },
+    { match: /count|included|contents|receive|sellable/, label: "Exact Contents" },
+    { match: /size|scale|dimension|measurement/, label: "Size Clarity" },
+    { match: /contact|fit|placement|use/, label: "Use Proof" },
+  ].find((item) => item.match.test(lower));
+
+  if (mapped) return mapped.label;
+
+  const short = titleCaseCopy(cleanPremiumCopy(normalized, "", 3));
+  return short.length <= 28 ? short : "";
+}
+
+function buildGptAPlusLocalTextBlocks(slot: GptAPlusStrategySlotInput) {
+  const copy = dedupeTextList(slot.copy).slice(0, slot.imageType === "dimensions" ? 2 : 4);
+  if (slot.imageType === "dimensions") {
+    return copy.length ? [premiumSizeLabel("top", copy, "black")] : [];
+  }
+
+  if (!copy.length) return [];
+
+  const proofLines = premiumEvidenceLines([
+    ...copy.slice(1),
+    ...slot.visualProof.map(toGptAPlusProofLabel),
+  ]);
+
+  return proofLines.length
+    ? [premiumOverlayHeadline(copy[0]), premiumOverlayProof(proofLines)]
+    : [premiumOverlayHeadline(copy[0])];
+}
+
+function mergeGptAPlusSlotLayout(baseLayout: Record<string, unknown>, slot: GptAPlusStrategySlotInput, productName: string) {
+  const existingTextBlocks = Array.isArray(baseLayout.textBlocks) ? baseLayout.textBlocks : [];
+  const copy = dedupeTextList(slot.copy).slice(0, slot.imageType === "dimensions" ? 2 : 3);
+  const generatedTextBlocks = buildGptAPlusLocalTextBlocks(slot);
+  const minimumTextBlocks = slot.imageType === "main" ? 0 : slot.imageType === "dimensions" ? 1 : 2;
+  const textBlocks = existingTextBlocks.length >= minimumTextBlocks
+    ? existingTextBlocks
+    : generatedTextBlocks.length > 0
+      ? generatedTextBlocks
+      : copy.length > 0
+        ? [slot.imageType === "dimensions" ? premiumSizeLabel("top", copy, "black") : premiumOverlayHeadline(copy[0])]
+      : [];
+  const oldAnchors = Array.isArray(baseLayout.informationAnchors) ? compactShotList(baseLayout.informationAnchors) : [];
+  const oldComposition = typeof baseLayout.compositionHint === "string" ? baseLayout.compositionHint : "";
+  const oldHierarchy = typeof baseLayout.visualHierarchy === "string" ? baseLayout.visualHierarchy : "";
+  const promptPlan = buildGptAPlusSlotPromptPlan(productName, slot);
+  const aPlusLocks = slot.imageType === "main"
+    ? [GPT_A_PLUS_PRODUCT_IDENTITY_LOCK, GPT_A_PLUS_CLEAN_CORNER_LOCK]
+    : [GPT_A_PLUS_PRODUCT_IDENTITY_LOCK, GPT_A_PLUS_FINISHED_MODULE_LOCK, GPT_A_PLUS_STRUCTURE_LOCK, buildGptReferenceReversePrompt(slot.roleName), GPT_A_PLUS_REFERENCE_INFOGRAPHIC_LOCK, GPT_A_PLUS_INFO_DENSITY_LOCK, GPT_A_PLUS_NO_BLANK_LOCK, GPT_A_PLUS_BASE_TEXT_LOCK, GPT_A_PLUS_CLEAN_CORNER_LOCK, GPT_A_PLUS_SHARPNESS_LOCK];
+
+  return {
+    ...baseLayout,
+    strategyVersion: GPT_A_PLUS_STRATEGY_VERSION,
+    strategyRole: slot.roleName,
+    buyerQuestion: slot.buyerQuestion,
+    purchaseDriver: slot.purchaseDriver,
+    visualProof: slot.visualProof,
+    renderTextDirectly: false,
+    blankZones: [],
+    approvedCopy: copy,
+    textBlocks,
+    informationAnchors: dedupeTextList([
+      ...slot.visualProof,
+      ...oldAnchors,
+    ]).slice(0, 8),
+    visualHierarchy: compactShotList([
+      `${slot.roleName}: ${slot.purchaseDriver}`,
+      "One image, one buyer question, one proof cluster with 2-3 visible cues.",
+      oldHierarchy,
+    ]).join(" "),
+    compositionHint: compactShotList([
+      promptPlan,
+      oldComposition,
+      ...aPlusLocks,
+    ]).join(" "),
+  };
+}
+
+function createGptAPlusStrategySlot(productName: string, baseLayout: Record<string, unknown>, input: GptAPlusStrategySlotInput): GptAPlusStrategySlot {
+  const brief = buildGptAPlusSlotBrief(productName, input);
+  const promptPlan = buildGptAPlusSlotPromptPlan(productName, input);
+  const layout = mergeGptAPlusSlotLayout(baseLayout, input, productName);
+
+  return {
+    ...input,
+    copy: dedupeTextList(input.copy).slice(0, input.imageType === "dimensions" ? 2 : 3),
+    visualProof: dedupeTextList(input.visualProof).slice(0, 5),
+    forbidden: dedupeTextList(input.forbidden).slice(0, 10),
+    layout,
+    brief,
+    promptPlan,
+  };
+}
+
+function buildUniversalStrategyInputs(analysis: ImageStudioAnalysis, copy: ReturnType<typeof buildGptPremiumCopy>): GptAPlusStrategySlotInput[] {
+  const dimensionCopy = getGptAPlusDimensionCopy(analysis, []);
+  const featureDriver = firstGptAPlusInsight([analysis.operatorInsights?.purchaseDrivers, analysis.sellingPoints], copy.features);
+  const materialProof = firstGptAPlusInsight([analysis.operatorInsights?.proofPoints, analysis.materials, analysis.productFacts?.materials], copy.closeup);
+  const realUse = firstGptAPlusInsight([analysis.operatorInsights?.usageActions, analysis.usageScenes], copy.lifestyle);
+  const contentsTruth = firstGptAPlusInsight([analysis.productFacts?.countAndConfiguration, analysis.productFacts?.packagingEvidence], copy.packaging);
+  const buyerDoubt = firstGptAPlusInsight([analysis.operatorInsights?.buyerQuestions], "What should the buyer trust before ordering?");
+
+  return [
+    {
+      imageType: "main",
+      roleName: "MAIN SKU identity image",
+      buyerQuestion: "What exactly is this product?",
+      purchaseDriver: "Clear product identity",
+      visualProof: ["exact sellable product", "truthful count", "correct material and color", "clean silhouette"],
+      scene: "pure white #FFFFFF studio packshot with natural grounding shadow",
+      camera: "straight or mild three-quarter product angle, crisp edges, thumbnail clarity",
+      composition: "product fills the frame confidently while preserving Amazon main-image compliance",
+      copy: [],
+      forbidden: ["generated text", "badge", "icon", "lifestyle scene", "unverified packaging", "extra accessories"],
+    },
+    {
+      imageType: "features",
+      roleName: "A+ strongest-benefit proof module",
+      buyerQuestion: buyerDoubt,
+      purchaseDriver: featureDriver,
+      visualProof: ["real product function or form", "one strongest buyer benefit", "visible product-led proof cue"],
+      scene: "premium product/action photo that directly proves the main benefit",
+      camera: "product-first commercial angle with hero subject sharp and large",
+      composition: "reference-style full-bleed proof module: hero subject dominates, with 2-3 compact visual proof cues or evidence zones tied to the purchase reason and no poster-like blank area",
+      copy: [copy.features, copy.closeup, copy.lifestyle],
+      forbidden: ["feature wall", "icon grid", "arrows", "crowded badge stack", "blank information board"],
+    },
+    {
+      imageType: "closeup",
+      roleName: "A+ material and build proof module",
+      buyerQuestion: "Does the material or construction look trustworthy?",
+      purchaseDriver: materialProof,
+      visualProof: ["material texture", "edge or construction detail", "product identity cue"],
+      scene: "premium macro or close product-detail photography",
+      camera: "controlled macro depth with proof texture and identity cue both sharp",
+      composition: "full-bleed tactile close-up that proves quality rather than a generic zoom",
+      copy: [copy.closeup, copy.features, "Material Detail"],
+      forbidden: ["fake material", "redesigned mechanism", "random zoom texture", "shallow blur hiding detail"],
+    },
+    {
+      imageType: "dimensions",
+      roleName: "A+ size and scale truth module",
+      buyerQuestion: "Is the size/count clear before purchase?",
+      purchaseDriver: "Truthful scale and quantity",
+      visualProof: ["full product silhouette", "verified measurement labels if available", "thin guide lines tied to product edges"],
+      scene: "clean product-only technical layout",
+      camera: "flat or orthographic view with all important edges visible",
+      composition: "product uses the square efficiently; no random scale props or blank side panel",
+      copy: dimensionCopy,
+      forbidden: ["phone", "coin", "ruler object", "hand", "car", "wheel", "invented numbers", "Size Guide headline"],
+    },
+    {
+      imageType: "lifestyle",
+      roleName: "A+ real-use module",
+      buyerQuestion: "How does this product fit into a real use case?",
+      purchaseDriver: realUse,
+      visualProof: ["natural use action", "truthful scale", "clear contact with surface, hand, body, device, or environment when relevant"],
+      scene: "believable target-user environment with the product actively used",
+      camera: "medium close editorial product-use angle, product and contact point sharp",
+      composition: "rich full-frame scene with a clear foreground action and no empty overlay zone",
+      copy: [copy.lifestyle, copy.features, "Real Use Proof"],
+      forbidden: ["stock-photo filler", "tiny product placement", "luxury props unrelated to product", "motion blur"],
+    },
+    {
+      imageType: "packaging",
+      roleName: "A+ contents-truth module",
+      buyerQuestion: "What does the buyer receive?",
+      purchaseDriver: contentsTruth,
+      visualProof: ["exact sellable item", "verified included components only", "countable presentation"],
+      scene: "clean product-first contents layout",
+      camera: "top-down or low three-quarter contents view with crisp edges",
+      composition: "truthful full-frame contents proof; packaging appears only when proven",
+      copy: [copy.packaging, "Exact Contents", "No Extras"],
+      forbidden: ["unverified box", "manual", "insert", "barcode", "certificate", "tool", "extra accessory", "fake retail package"],
+    },
+    {
+      imageType: "comparison",
+      roleName: "A+ decision proof module",
+      buyerQuestion: buyerDoubt,
+      purchaseDriver: copy.comparison,
+      visualProof: ["product-positive evidence", "fit, function, material, handling, or result context", "fair same-scene proof"],
+      scene: "one coherent product-positive proof scene",
+      camera: "angle chosen to show why the product helps without fake competitor framing",
+      composition: "full-bleed decision proof; no fake comparison table or attack layout",
+      copy: [copy.comparison, copy.features, copy.closeup],
+      forbidden: ["fake competitor", "Our Product", "Other Product", "red X", "green check", "fake percentages", "unsupported before/after"],
+    },
+    {
+      imageType: "lifestyle2",
+      roleName: "A+ trust closing module",
+      buyerQuestion: "What final impression should make the buyer comfortable ordering?",
+      purchaseDriver: copy.lifestyle2,
+      visualProof: ["finished setup or outcome", "product identity remains visible", "shared visual DNA with earlier modules"],
+      scene: "polished final product scene, visually distinct from first lifestyle module",
+      camera: "calm premium catalog angle with strong product readability",
+      composition: "full-frame closing image that builds trust without discount-ad styling; a clean 2-3 zone evidence layout is allowed when each zone shows a distinct real product reason",
+      copy: [copy.lifestyle2, copy.lifestyle, "Trust Proof"],
+      forbidden: ["fake award", "fake certification", "coupon look", "generic filler props", "blank poster area"],
+    },
+    {
+      imageType: "scene_a",
+      roleName: "A+ practical scenario A",
+      buyerQuestion: "What is the first practical use case or doubt?",
+      purchaseDriver: copy.scene_a,
+      visualProof: ["distinct action or placement", "product visible", "one practical proof cue"],
+      scene: "first high-intent real-use scenario",
+      camera: "angle different from feature and lifestyle modules",
+      composition: "full-bleed proof image with one concise local overlay label",
+      copy: [copy.scene_a, copy.features, "Scenario Proof"],
+      forbidden: ["duplicate feature image", "blank label area", "icons", "arrows"],
+    },
+    {
+      imageType: "scene_b",
+      roleName: "A+ practical scenario B",
+      buyerQuestion: "What second buyer doubt should be answered differently?",
+      purchaseDriver: copy.scene_b,
+      visualProof: ["different angle, surface, state, or contact point from scene A", "product identity remains truthful"],
+      scene: "second high-intent use or trust proof scenario",
+      camera: "meaningfully different distance or viewpoint from scene A",
+      composition: "full-bleed proof image; must not be scene A with a new caption",
+      copy: [copy.scene_b, copy.comparison, "Different Angle"],
+      forbidden: ["duplicate scene A", "fake accessory", "unsupported claim", "blank information column"],
+    },
+  ];
+}
+
+
+function buildGptAPlusStrategy(analysis: ImageStudioAnalysis): GptAPlusStrategy {
+  const productName = getGptAPlusProductName(analysis);
+  const copy = buildGptPremiumCopy(analysis);
+  const universalLayouts = buildUniversalGptAPlusImageLayouts(copy) as Record<string, Record<string, unknown>>;
+  const baseLayouts = universalLayouts;
+  const slotInputs = buildUniversalStrategyInputs(analysis, copy);
+
+  const slots = slotInputs.reduce<Record<string, GptAPlusStrategySlot>>((accumulator, input) => {
+    accumulator[input.imageType] = createGptAPlusStrategySlot(productName, baseLayouts[input.imageType] || {}, input);
+    return accumulator;
+  }, {});
+  const creativeBriefs = Object.fromEntries(
+    Object.entries(slots).map(([imageType, slot]) => [imageType, slot.brief]),
+  ) as Record<string, string>;
+  const imageLayouts = Object.fromEntries(
+    Object.entries(slots).map(([imageType, slot]) => [imageType, slot.layout]),
+  ) as Record<string, unknown>;
+  const productTruth = getGptAPlusProductTruth(analysis);
+  const buyerQuestions = dedupeTextList([
+    ...slotInputs.map((slot) => slot.buyerQuestion),
+    ...(analysis.operatorInsights?.buyerQuestions || []),
+  ]).slice(0, 12);
+  const purchaseDrivers = dedupeTextList([
+    ...slotInputs.map((slot) => slot.purchaseDriver),
+    ...(analysis.operatorInsights?.purchaseDrivers || []),
+    ...(analysis.sellingPoints || []),
+  ]).slice(0, 12);
+  const proofPoints = dedupeTextList([
+    ...slotInputs.flatMap((slot) => slot.visualProof),
+    ...(analysis.operatorInsights?.proofPoints || []),
+  ]).slice(0, 16);
+  const usageActions = dedupeTextList([
+    ...slotInputs.filter((slot) => !["main", "dimensions", "packaging"].includes(slot.imageType)).map((slot) => slot.scene),
+    ...(analysis.operatorInsights?.usageActions || []),
+    ...(analysis.usageScenes || []),
+  ]).slice(0, 12);
+  const riskControls = dedupeTextList([
+    GPT_A_PLUS_STRATEGY_VERSION,
+    GPT_A_PLUS_PRODUCT_IDENTITY_LOCK,
+    GPT_A_PLUS_FINISHED_MODULE_LOCK,
+    GPT_A_PLUS_STRUCTURE_LOCK,
+    GPT_A_PLUS_REVERSE_ENGINEERED_PROMPT_LOCK,
+    GPT_A_PLUS_REVERSE_PROMPT_GRAMMAR,
+    GPT_A_PLUS_REFERENCE_REVERSE_NEGATIVE_PROMPT,
+    GPT_A_PLUS_REFERENCE_INFOGRAPHIC_LOCK,
+    GPT_A_PLUS_INFO_DENSITY_LOCK,
+    GPT_A_PLUS_NO_BLANK_LOCK,
+    GPT_A_PLUS_BASE_TEXT_LOCK,
+    GPT_A_PLUS_CLEAN_CORNER_LOCK,
+    GPT_A_PLUS_SHARPNESS_LOCK,
+    "One A+ module answers one buyer question with visible product evidence; do not cram every feature into one image.",
+    "Use local overlay copy only after generation, except verified physical product/package text.",
+    "Do not invent packaging, accessories, competitors, awards, certifications, before/after results, performance statistics, or brand claims.",
+    ...(analysis.operatorInsights?.riskFlags || []),
+  ]).slice(0, 18);
+
+  return {
+    version: GPT_A_PLUS_STRATEGY_VERSION,
+    categoryMode: "universal",
+    productTruth,
+    buyerQuestions,
+    purchaseDrivers,
+    proofPoints,
+    usageActions,
+    riskControls,
+    storyArc: slotInputs.map((slot) => `${slot.imageType}: ${slot.roleName} -> ${slot.purchaseDriver}`),
+    slots,
+    creativeBriefs,
+    imageLayouts,
+  };
+}
+
+function buildGptPremiumImageLayouts(analysis: ImageStudioAnalysis) {
+  return buildGptAPlusStrategy(analysis).imageLayouts;
+}
+
+function getGptPremiumLayoutMap(analysis: ImageStudioAnalysis) {
+  const topLayouts = analysis.imageLayouts && typeof analysis.imageLayouts === "object" ? analysis.imageLayouts : {};
+  const nestedLayouts = analysis.creativeDirection?.imageLayouts && typeof analysis.creativeDirection.imageLayouts === "object"
+    ? analysis.creativeDirection.imageLayouts
+    : {};
+  return { ...topLayouts, ...nestedLayouts } as Record<string, Record<string, unknown>>;
+}
+
+function getGptPremiumLayout(analysis: ImageStudioAnalysis, imageType: string) {
+  const layout = getGptPremiumLayoutMap(analysis)[imageType];
+  return layout && typeof layout === "object" && !Array.isArray(layout) ? layout : null;
+}
+
+function getGptPremiumBrief(analysis: ImageStudioAnalysis, imageType: string) {
+  const topBriefs = analysis.creativeBriefs && typeof analysis.creativeBriefs === "object" ? analysis.creativeBriefs : {};
+  const nestedBriefs = analysis.creativeDirection?.creativeBriefs && typeof analysis.creativeDirection.creativeBriefs === "object"
+    ? analysis.creativeDirection.creativeBriefs
+    : {};
+  const brief = { ...topBriefs, ...nestedBriefs }[imageType];
+  return typeof brief === "string" ? brief.trim() : "";
+}
+
+function formatGptPremiumLayoutSection(layout: Record<string, unknown> | null) {
+  if (!layout) return "";
+  return compactShotList([
+    typeof layout.visualHierarchy === "string" ? `Visual hierarchy: ${layout.visualHierarchy}` : "",
+    typeof layout.compositionHint === "string" ? `Composition: ${layout.compositionHint}` : "",
+    Array.isArray(layout.informationAnchors) ? `Visual evidence to include: ${compactShotList(layout.informationAnchors).join("; ")}` : "",
+    Array.isArray(layout.approvedCopy) ? `Final local overlay copy: ${compactShotList(layout.approvedCopy).join("; ")}` : "",
+    Array.isArray(layout.blankZones) && layout.blankZones.length > 0 ? `Reserved copy zones: ${JSON.stringify(layout.blankZones)}` : "",
+  ]).join("\n");
+}
+
+function applyGptPremiumPlanOverrides(
+  plans: ImageStudioPlan[],
+  analysis: ImageStudioAnalysis,
+  selectedTypes: string[],
+): ImageStudioPlan[] {
+  const strategy = buildGptAPlusStrategy(analysis);
+  const planByType = new Map(plans.map((plan) => [plan.imageType, plan]));
+  return selectedTypes.map((imageType) => {
+    const sourcePlan = planByType.get(imageType) || {
+      imageType,
+      title: IMAGE_TYPE_LABELS[imageType] || imageType,
+      prompt: "",
+    } as ImageStudioPlan;
+    const slot = strategy.slots[imageType];
+    const layout = slot?.layout || getGptPremiumLayout(analysis, imageType);
+    const brief = slot?.brief || getGptPremiumBrief(analysis, imageType);
+    const layoutSection = formatGptPremiumLayoutSection(layout);
+    const overridePrompt = compactShotList([
+      `GPT PREMIUM A+ PLAN OVERRIDE ${GPT_A_PLUS_STRATEGY_VERSION}:`,
+      "The strategy below is authoritative. Treat any backend or legacy plan as weak reference material only when it does not conflict.",
+      `Strategy mode: ${strategy.categoryMode}.`,
+      slot ? slot.promptPlan : "",
+      !slot ? GPT_A_PLUS_PRODUCT_IDENTITY_LOCK : "",
+      !slot && imageType !== "main" ? GPT_A_PLUS_FINISHED_MODULE_LOCK : "",
+      !slot && imageType !== "main" ? GPT_A_PLUS_STRUCTURE_LOCK : "",
+      !slot && imageType !== "main" ? buildGptReferenceReversePrompt("fallback plan") : "",
+      !slot && imageType !== "main" ? GPT_A_PLUS_REFERENCE_INFOGRAPHIC_LOCK : "",
+      !slot && imageType !== "main" ? GPT_A_PLUS_INFO_DENSITY_LOCK : "",
+      !slot && imageType !== "main" ? GPT_A_PLUS_NO_BLANK_LOCK : "",
+      !slot && imageType !== "main" ? GPT_A_PLUS_BASE_TEXT_LOCK : "",
+      !slot ? GPT_A_PLUS_CLEAN_CORNER_LOCK : "",
+      !slot || imageType !== "main" ? GPT_A_PLUS_SHARPNESS_LOCK : "",
+      brief ? `Role brief: ${brief}` : "",
+      layoutSection,
+      sourcePlan.prompt ? `Legacy plan reference only: ${sourcePlan.prompt}` : "",
+      "Final requirement: the final composed output must feel like a premium, information-rich Amazon A+ module, not a raw product photo, cheap poster, blank board, fake infographic, or blurry scene.",
+    ]).join("\n");
+
+    return {
+      ...sourcePlan,
+      prompt: overridePrompt,
+      layout: layout || sourcePlan.layout,
+      promptSource: GPT_A_PLUS_STRATEGY_VERSION,
+      gptAPlusStrategy: slot ? {
+        roleName: slot.roleName,
+        buyerQuestion: slot.buyerQuestion,
+        purchaseDriver: slot.purchaseDriver,
+        visualProof: slot.visualProof,
+        copy: slot.copy,
+      } : undefined,
+    };
+  });
+}
+
+function upgradeGptPremiumAnalysis(source: ImageStudioAnalysis): ImageStudioAnalysis {
+  const analysis = normalizeImageStudioAnalysis(source);
+  const strategy = buildGptAPlusStrategy(analysis);
+  const visualStyle = [
+    getGptPremiumVisualStyle(analysis),
+    "GPT A+ strategy style: universal reverse-engineered premium ecommerce photography with full-frame visual proof, real material detail, truthful scale, believable use context, compact evidence cues, and restrained local overlay copy.",
+  ].join("\n");
+  const creativeBriefs = {
+    ...buildGptPremiumCreativeBriefs(analysis),
+    ...strategy.creativeBriefs,
+  };
+  const imageLayouts = buildGptPremiumImageLayouts(analysis);
+  const productFacts = analysis.productFacts || {};
+  const operatorInsights = analysis.operatorInsights || {};
+  const creativeDirection = analysis.creativeDirection || {};
+  const premiumGuardrails = [
+    GPT_PREMIUM_ANALYSIS_MARKER,
+    buildGptReferenceReversePrompt("analysis guardrail"),
+    "GPT premium role rewrite: packaging image is a contents/trust proof module, comparison image is a decision-proof module, and feature image is a single proof module. If packaging or competitor evidence is missing, do not render packaging or competitor products.",
+    "锁定商品身份：生成图必须保留参考图中的形状、颜色、材质、数量、比例和关键结构，不能重新设计商品 (Product identity lock: preserve the reference shape, color, material, count, proportions, and key structure; do not redesign the product).",
+    "主图优先真实准确：主图不生成文字、图标、徽章、箭头、价格、水印或未经提供的商标 (Main image accuracy first: no generated text, icons, badges, arrows, price, watermark, or unprovided trademarks).",
+    "不编造包装/配件/竞品：包装、配件、证书、说明书、条码、竞品和前后对比必须有依据，否则禁止出现 (Do not invent packaging, accessories, certificates, manuals, barcodes, competitors, or before/after results without evidence).",
+    "高级感来自摄影：用真实光影、材质细节、景深层次、自然阴影和可信满版场景提升质感，不靠促销模板和大字贴纸 (Premium feel comes from photography: real light, material detail, depth, natural shadow, and believable full-frame scenes instead of promo templates and large stickers).",
+  ];
+  const premiumRisks = [
+    "廉价模板风险：大字标题、圆角贴纸、红绿叉、箭头、图标堆叠会让画面显得低端 (Cheap-template risk: big slogans, sticker pills, red/green crosses, arrows, and icon clutter make the image look low-end).",
+    "AI乱字风险：除非指定精确文案和排版，否则不要让模型直接在主图里写字 (AI text risk: avoid model-rendered text in the main image unless exact copy and typography are specified).",
+    "虚假证明风险：不要生成未经证明的包装、品牌标识、竞品、认证、夸张清洁效果或性能承诺 (False-proof risk: do not generate unverified packaging, brand marks, competitors, certifications, exaggerated cleaning results, or performance claims).",
+  ];
+  const premiumProofPoints = [
+    "证明商品本体真实：形状、颜色、材质、数量和比例与参考图一致 (Prove product truth: shape, color, material, count, and proportions match the reference).",
+    "证明材质和做工：用清晰细节展示触感、纹理、接缝、刷毛/表面/边缘等真实结构 (Prove material and build: show tactile texture, seams, fibers/surface/edges, and real construction details).",
+    "证明使用可信：场景图只展示自然接触、真实尺度和可理解的使用动作 (Prove believable use: lifestyle scenes show natural contact, truthful scale, and understandable action).",
+  ];
+  const premiumBuyerQuestions = [
+    "实物会不会和图里不一样？需要用商品身份锁定来回答 (Will the real item differ from the image? Answer with strict product identity lock).",
+    "尺寸、数量、包装是否被夸大？需要用保守事实和真实尺度来回答 (Are size, count, or packaging exaggerated? Answer with conservative facts and truthful scale).",
+  ];
+
+  const conversionGuardrails = [
+    "AI analysis must act like a conversion art director: identify product truth, buyer doubts, purchase reasons, visual proof, and compliance risks before planning images.",
+    "Each A+ image needs one clear job: one buyer question, one visual proof, one restrained copy group.",
+    "A+ modules must be information-rich through visible proof such as material, fit, scale, use action, contents truth, and decision evidence; do not rely on empty slogans.",
+    "GPT A+ strategy is authoritative: every design plan is rebuilt from role, buyer question, purchase driver, visual proof, scene, camera, copy, and forbidden elements.",
+    GPT_A_PLUS_PRODUCT_IDENTITY_LOCK,
+    GPT_A_PLUS_FINISHED_MODULE_LOCK,
+    GPT_A_PLUS_STRUCTURE_LOCK,
+    GPT_A_PLUS_REVERSE_ENGINEERED_PROMPT_LOCK,
+    GPT_A_PLUS_REVERSE_PROMPT_GRAMMAR,
+    GPT_A_PLUS_REFERENCE_REVERSE_NEGATIVE_PROMPT,
+    GPT_A_PLUS_REFERENCE_INFOGRAPHIC_LOCK,
+    GPT_A_PLUS_INFO_DENSITY_LOCK,
+    GPT_A_PLUS_NO_BLANK_LOCK,
+    GPT_A_PLUS_BASE_TEXT_LOCK,
+    GPT_A_PLUS_CLEAN_CORNER_LOCK,
+    GPT_A_PLUS_SHARPNESS_LOCK,
+    ...strategy.riskControls,
+  ];
+  const conversionRisks = [
+    "Cheap-template risk: big slogans, sticker pills, red/green crosses, arrows, icon clutter, fake seals, and crowded poster copy reduce premium trust.",
+    "AI text risk: model-rendered words often become artifacts; the base image should stay text-free and full-bleed, while final copy is composed locally on top of natural low-detail photo areas.",
+    "False-proof risk: do not generate unverified package, brand mark, competitor, certification, exaggerated result, or performance claim.",
+    "Blur risk: wet scenes, hand movement, shallow depth of field, mist, foam, reflections, and close crops can make the selling point unreadable; keep the proof area sharp.",
+  ];
+  const conversionProofPoints = [
+    "Prove product truth: shape, color, material, count, and proportions match the reference.",
+    "Prove material and build: show tactile texture, fibers, surface, edges, joints, grip, or real construction details.",
+    "Prove believable use: show natural contact, truthful scale, and a concrete action the buyer immediately understands.",
+    ...strategy.proofPoints,
+  ];
+  const conversionBuyerQuestions = [
+    "What specific problem does this image solve for the buyer?",
+    ...strategy.buyerQuestions,
+  ];
+  const conversionPurchaseDrivers = [
+    "Clear product identity at thumbnail size",
+    "Material and build quality visible in close detail",
+    "Real-use context with truthful scale",
+    "Contents and quantity are easy to understand",
+    ...strategy.purchaseDrivers,
+  ];
+  const conversionUsageActions = strategy.usageActions;
+
+  return normalizeImageStudioAnalysis({
+    ...analysis,
+    creativeBriefs,
+    imageLayouts,
+    productFacts: {
+      ...productFacts,
+      factGuardrails: mergeAnalysisList(productFacts.factGuardrails, [...premiumGuardrails, ...conversionGuardrails], 18),
+    },
+    operatorInsights: {
+      ...operatorInsights,
+      purchaseDrivers: mergeAnalysisList(operatorInsights.purchaseDrivers, conversionPurchaseDrivers, 12),
+      usageActions: mergeAnalysisList(operatorInsights.usageActions, conversionUsageActions, 12),
+      proofPoints: mergeAnalysisList(operatorInsights.proofPoints, [...premiumProofPoints, ...conversionProofPoints], 16),
+      buyerQuestions: mergeAnalysisList(operatorInsights.buyerQuestions, [...premiumBuyerQuestions, ...conversionBuyerQuestions], 14),
+      riskFlags: mergeAnalysisList(operatorInsights.riskFlags, [...premiumRisks, ...conversionRisks], 16),
+    },
+    creativeDirection: {
+      ...creativeDirection,
+      pageGoal: appendAnalysisDirective(
+        creativeDirection.pageGoal,
+        "GPT版出图目标：不增加模式选择，自动按亚马逊体系出图；主图执行 Amazon 主图合规，其他 800x800 方图按 Amazon A+ 叙事模块逐步证明卖点和疑虑 (GPT image goal: no extra mode selection; automatically use the Amazon system, with MAIN as an Amazon-compliant main image and other 800x800 square images as Amazon A+ narrative modules that prove benefits and doubts step by step).",
+      ),
+      visualStyle: appendAnalysisDirective(creativeDirection.visualStyle, visualStyle),
+      aPlusStory: appendAnalysisDirective(
+        appendAnalysisDirective(
+          creativeDirection.aPlusStory,
+          `GPT A+ strategy story ${strategy.version}: ${strategy.storyArc.join(" | ")}. Main image builds exact SKU trust; every non-main square image answers one buyer question with full-frame visual proof, no blank panel, no model-rendered marketing text, and sharp ecommerce detail.`,
+        ),
+        "GPT版A+叙事：主图不是A+，负责建立真实高级第一印象；卖点/细节/场景/尺寸/包装/对比/收束图自动作为 800x800 A+ 方图模块，分别证明一个卖点、材质做工、真实使用、尺寸事实、包装事实、选择理由和信任收束 (GPT A+ story: the main image is not A+ and builds a truthful premium first impression; feature/detail/lifestyle/size/packaging/comparison/closing images automatically become 800x800 A+ square modules for one benefit, material/build, real use, size truth, packaging truth, choice proof, and trust closing).",
+      ),
+      creativeBriefs,
+      imageLayouts,
+    },
+  });
 }
 
 function trimTitle(text: string, maxLength: number) {
@@ -1157,14 +2258,14 @@ const IMAGE_TYPE_PROOF_ROLES: Record<string, ImageTypeProofRole> = {
     conversionRole: "usage imagination",
   },
   packaging: {
-    proofType: "delivery_gift_proof",
-    storyIntent: "Show how the product arrives, stores, or feels gift-ready without fake branding.",
-    shopperQuestion: "Will it arrive safely and feel presentable?",
-    conversionRole: "delivery and gifting confidence",
+    proofType: "contents_trust_proof",
+    storyIntent: "Show what the buyer receives truthfully, using real packaging only when it is visible or confirmed.",
+    shopperQuestion: "What exactly will I receive?",
+    conversionRole: "contents and trust confidence",
   },
   comparison: {
     proofType: "choice_proof",
-    storyIntent: "Create a clean base for a fair comparison without rendered claim text.",
+    storyIntent: "Create a product-positive decision proof without rendered comparison labels or invented competitors.",
     shopperQuestion: "What makes this a better choice?",
     conversionRole: "choice simplification",
   },
@@ -1256,6 +2357,8 @@ function buildProductVisualStrategy(analysis: ImageStudioAnalysis): ProductVisua
   const isAutoCare = /scratch|scratches|scratch\s*remover|repair\s*(cream|paste|compound)|polish|detailing|wax|car\s*care|paint\s*repair|划痕|修复膏|补漆|车漆|抛光|打蜡|汽车养护|汽车美容/.test(text);
   const isAutoOutdoor = /car|auto|vehicle|bike|camp|outdoor|garden|sport|travel|汽车|车载|车辆|自行车|露营|户外|花园|园艺|运动|旅行/.test(text);
 
+  const isWheelCleaningTool = false;
+
   if (isMirror) {
     return {
       strategyName: "mirror-reflection-proof",
@@ -1291,6 +2394,80 @@ function buildProductVisualStrategy(analysis: ImageStudioAnalysis): ProductVisua
       storyboardNotes: [
         "Mirror scenes must include reflection proof when the image type is about usage.",
         "Decor atmosphere is useful, but utility proof is the differentiator.",
+      ],
+    };
+  }
+
+  if (isWheelCleaningTool) {
+    return {
+      strategyName: "automotive-wheel-cleaning-proof",
+      categoryPattern: "automotive wheel, rim, spoke, lug-nut, and inner-barrel cleaning brush",
+      identityRules: [
+        "The product must remain the same blue-handle white/blue microfiber wheel cleaning brush across the full gallery.",
+        "Preserve the slim wand proportion, microfiber/chenille head volume, handle color, brush length, head width, and soft-fiber construction from the references.",
+        "Do not turn the product into a bottle brush, sponge, detailing mitt, drill brush, tire brush, or generic cleaning cloth.",
+      ],
+      categoryGuardrails: [
+        "do not invent car brand logos, certification marks, scratch-proof claims, miracle cleaning claims, package labels, or extra accessories",
+        "do not repeat the same hand-in-wheel close-up across feature, lifestyle, scene A, and scene B",
+        "do not hide the brush head inside the wheel so the product cannot be inspected",
+        "do not make the wheel, car, foam, bucket, or hand more important than the sellable brush",
+        "do not show unsafe driving, spinning wheels, engine work, or unrelated car-repair tools",
+      ],
+      scaleCues: ["hand grip", "alloy wheel spokes", "lug-nut recess", "inner barrel", "wash bucket", "foam", "microfiber towel"],
+      buyerQuestions: [
+        "Can it reach between narrow wheel spokes?",
+        "Will the microfiber contact feel gentle on rims?",
+        "Can it clean brake dust around the inner barrel and lug-nut areas?",
+        "How big is the brush and what exactly is included?",
+      ],
+      useSceneAction: "Show a hand naturally gripping the blue handle while the microfiber head cleans between alloy-wheel spokes, the inner barrel, lug-nut recess, or wheel edge with foam and realistic water droplets.",
+      proofRequirements: {
+        identity_proof: [
+          "show the exact blue handle and white/blue microfiber head clearly",
+          "use clean product-first framing so the brush is recognizable at thumbnail size",
+        ],
+        benefit_proof: [
+          "prove deep reach into wheel spoke gaps or inner barrel with the slim brush head visibly fitting the space",
+          "show brake-dust or foam context without exaggerating the cleaning result",
+        ],
+        material_detail_proof: [
+          "show chenille/microfiber fiber texture, soft rounded contact surface, and handle grip detail",
+          "make softness believable through close material rendering, not unsupported scratch-proof text",
+        ],
+        scale_proof: [
+          "use the verified 29 cm length and 8 cm head width only if present in references or analysis",
+          "use product-only measurement lines; no car, wheel, hand, ruler object, coin, or phone in the dimension image",
+        ],
+        use_case_proof: [
+          "show a premium real-use automotive detailing scene with natural hand posture and product contact",
+          "keep the brush large enough to inspect while showing how it reaches wheel gaps",
+        ],
+        operation_proof: [
+          "show an action step different from the first lifestyle scene, such as cleaning inner barrel, lug-nut recess, or wheel edge",
+          "use a different camera distance or angle to avoid repeated composition",
+        ],
+        contents_trust_proof: [
+          "show only the exact sellable brush and verified contents",
+          "do not create packaging, manual, insert, pouch, barcode, or accessories without evidence",
+        ],
+        choice_proof: [
+          "make the choice reason visible through reach, soft microfiber contact, handle control, or product scale",
+          "avoid fake competitor brushes, red X/green check marks, Our/Other labels, and fake before/after panels",
+        ],
+        objection_proof: [
+          "answer whether it fits narrow spokes or rim recesses through real contact geometry",
+          "answer softness concern through microfiber macro proof rather than claim-heavy text",
+        ],
+        context_fit_proof: [
+          "show a second distinct wheel-cleaning zone, vehicle scale, or detailing setup from scene A",
+          "do not duplicate the same wheel angle, hand pose, or foam pattern",
+        ],
+      },
+      storyboardNotes: [
+        "Wheel cleaning brush galleries must work like Amazon A+: identity, deep reach, microfiber softness, verified size, real-use action, contents truth, decision proof, and closing trust.",
+        "High-end feel comes from automotive detailing photography: alloy wheel reflections, believable foam/water, controlled garage light, clean negative space, and faithful product scale.",
+        "Every non-main image must add a new buying reason instead of repeating a brush-in-wheel close-up.",
       ],
     };
   }
@@ -1589,7 +2766,7 @@ function buildProductVisualStrategy(analysis: ImageStudioAnalysis): ProductVisua
       use_case_proof: ["show a natural use or placement moment"],
       scale_proof: ["use familiar objects or body cues to prove size"],
       operation_proof: ["show handling or setup if the product has a use mechanism"],
-      choice_proof: ["show a clean comparison-ready base without claim text"],
+      choice_proof: ["show product-positive decision proof without claim text or invented competitors"],
     },
     storyboardNotes: ["The default system is proof-first: each image must answer one buyer doubt visually."],
   };
@@ -1746,8 +2923,8 @@ function buildShotBriefBlueprint(imageType: string, isBlackHeartMirror: boolean)
   if (imageType === "main") {
     return {
       purpose: "Create a marketplace hero image that makes the product identity instantly clear.",
-      scene: "Clean e-commerce product setup with a premium neutral surface or simple studio environment.",
-      composition: "Product centered or slightly elevated, full product visible, enough breathing room for marketplace crop safety.",
+      scene: "Pure white #FFFFFF Amazon-ready studio background with the exact sellable product only.",
+      composition: "Product centered or tasteful three-quarter packshot, full product visible, natural grounding shadow, enough breathing room for marketplace crop safety.",
       camera: "Front-facing or mild three-quarter product angle, natural retail perspective, no extreme crop.",
       lighting: "Soft commercial studio lighting with clear edge definition and controlled reflections.",
       style: "Professional cross-border marketplace hero product photography, realistic materials, crisp details.",
@@ -1757,16 +2934,16 @@ function buildShotBriefBlueprint(imageType: string, isBlackHeartMirror: boolean)
         "accurate product color and material",
       ],
       forbiddenElements: baseForbidden,
-      overlayPlacement: "top corner or lower corner",
-      overlayNotes: ["Keep a clean corner if image2 is asked to render an exact pack-count or offer badge."],
+      overlayPlacement: "none",
+      overlayNotes: ["No generated marketing text, badges, icons, arrows, or offer copy on the main image."],
     };
   }
 
   if (imageType === "features") {
     return {
-      purpose: "Create a feature-ready image where any text must be rendered directly by image2 from exact allowed copy.",
-      scene: "Clean product-forward setup with subtle props only when they help explain the product.",
-      composition: "Balanced product composition with negative space for later callouts, no dense infographic text.",
+      purpose: "Create one premium Amazon A+ proof module where the product/action proves the strongest buyer benefit.",
+      scene: "Clean product-forward proof setup with only necessary use-context props.",
+      composition: "One large product/action photograph, no stacked cards, no badge wall, no icon grid, no dense infographic text.",
       camera: "Medium product angle with enough depth to show form and important features.",
       lighting: "Soft directional light that reveals material, relief, and shape.",
       style: "Clear e-commerce feature image, polished but not poster-like.",
@@ -1774,8 +2951,8 @@ function buildShotBriefBlueprint(imageType: string, isBlackHeartMirror: boolean)
         ? ["black heart mirror", "carved ornamental border", "visible reflective heart center"]
         : ["complete product", "visible key features"],
       forbiddenElements: baseForbidden,
-      overlayPlacement: "left or right empty area",
-      overlayNotes: ["Feature copy is image2-only and must stay short, exact, and readable if used."],
+      overlayPlacement: "small clean margin only if exact text is allowed",
+      overlayNotes: ["Feature copy is optional, image2-only, and limited to one exact short phrase."],
     };
   }
 
@@ -1799,15 +2976,15 @@ function buildShotBriefBlueprint(imageType: string, isBlackHeartMirror: boolean)
   if (imageType === "dimensions") {
     return {
       purpose: "Create a clean dimension-ready base image for later precise size annotation.",
-      scene: "Minimal product setup with blank margins and simple scale context.",
+      scene: "Minimal product-only setup with blank margins and no scale props.",
       composition: "Product centered or slightly offset with clear empty space on left, right, and bottom for size lines.",
       camera: "Straight-on front view or mild top-down view that makes proportions easy to understand.",
       lighting: "Even soft light with minimal shadow clutter.",
       style: "Clean catalog dimension base, not a finished infographic.",
       requiredElements: isBlackHeartMirror
-        ? ["compact small decorative accent scale", "full black heart mirror visible"]
-        : ["full product visible", "believable physical scale"],
-      forbiddenElements: [...baseForbidden, "rulers", "measurement arrows", "hands", "decorative clutter"],
+        ? ["full black heart mirror visible", "product-only proportion"]
+        : ["full product visible", "product-only proportion"],
+      forbiddenElements: [...baseForbidden, "rulers", "measurement arrows", "hands", "cars", "wheels", "boxes", "decorative clutter"],
       overlayPlacement: "left, right, and bottom",
       overlayNotes: ["Precise numbers, arrows, and measurement lines are image2-only and must use verified dimensions only."],
     };
@@ -1815,35 +2992,35 @@ function buildShotBriefBlueprint(imageType: string, isBlackHeartMirror: boolean)
 
   if (imageType === "packaging") {
     return {
-      purpose: "Show a gift-ready or shipping-ready product presentation without inventing brand text.",
-      scene: "Neutral protective packaging, tissue paper, gift box, or unboxing surface with the product still visible.",
-      composition: "Product and packaging arranged clearly, no fake brand label, no cluttered copy.",
-      camera: "Slight top-down or three-quarter unboxing angle.",
+      purpose: "Show a truthful contents/trust module without inventing packaging or brand text.",
+      scene: "Clean contents surface with the exact sellable product visible; include real packaging only if it is visible or confirmed.",
+      composition: "Product and verified contents arranged clearly, no fake package object, no fake brand label, no cluttered copy.",
+      camera: "Slight top-down or three-quarter contents angle.",
       lighting: "Soft warm commercial light, clean shadows.",
-      style: "Realistic gift/unboxing e-commerce photography.",
+      style: "Realistic premium contents e-commerce photography.",
       requiredElements: isBlackHeartMirror
-        ? ["black heart mirror visible", "neutral gift-ready box or protective wrapping"]
-        : ["product visible", "neutral packaging or protective wrapping"],
-      forbiddenElements: [...baseForbidden, "invented brand names", "fake shipping labels"],
-      overlayPlacement: "empty package-side margin",
-      overlayNotes: ["Any gift or packaging text is image2-only and must use exact allowed copy only."],
+        ? ["black heart mirror visible", "truthful contents only"]
+        : ["product visible", "truthful contents only"],
+      forbiddenElements: [...baseForbidden, "invented brand names", "fake shipping labels", "gift boxes", "plastic bags", "barcodes", "manuals", "insert cards", "extra accessories"],
+      overlayPlacement: "none unless exact pack-count text is allowed",
+      overlayNotes: ["Default to no packaging text; never invent package labels, inserts, barcodes, or brand copy."],
     };
   }
 
   if (imageType === "comparison") {
     return {
-      purpose: "Create a restrained comparison-ready base image without rendered comparison text.",
-      scene: "Two clean product/alternative areas with simple visual contrast and enough space for later labels.",
-      composition: "Side-by-side or split composition, calm and not exaggerated.",
-      camera: "Consistent product angle across both comparison areas.",
-      lighting: "Even commercial light so the comparison feels fair and credible.",
-      style: "Credible e-commerce comparison base, not a claim-heavy poster.",
+      purpose: "Create a restrained product-positive decision-proof image without rendered comparison text.",
+      scene: "One clean proof scene that answers a buyer doubt through material, scale, reach, fit, contact, or use evidence.",
+      composition: "Single product-first proof composition, calm and not exaggerated.",
+      camera: "Consistent commercial product angle focused on the proof point.",
+      lighting: "Even commercial light so the evidence feels fair and credible.",
+      style: "Credible Amazon A+ decision-proof photography, not a claim-heavy poster.",
       requiredElements: isBlackHeartMirror
-        ? ["black heart mirror with stronger decorative presence", "plain generic alternative area"]
-        : ["hero product", "plain generic alternative area"],
-      forbiddenElements: [...baseForbidden, "Ours label", "Ordinary label", "checkmarks", "red X marks", "comparison tables"],
-      overlayPlacement: "top and bottom",
-      overlayNotes: ["Comparison labels and proof points are image2-only and must use exact allowed copy only."],
+        ? ["black heart mirror with truthful decorative proof"]
+        : ["hero product", "one clear product-positive proof"],
+      forbiddenElements: [...baseForbidden, "fake competitor product", "plain generic alternative area", "Ours label", "Ordinary label", "checkmarks", "red X marks", "green check marks", "comparison tables"],
+      overlayPlacement: "none",
+      overlayNotes: ["Default to no comparison text; avoid Our/Other labels and fake before/after claims."],
     };
   }
 
@@ -1996,7 +3173,7 @@ function buildImage2PromptSpec(
       "Do not invent readable product labels, container copy, packaging copy, slogans, badges, certification marks, or claim text. If a label area is needed, keep it as blank color bands or non-readable graphic shapes.",
       "If multiple product components are provided, use only the selected sellable components.",
       "Do not treat background props, packaging, manuals, or decoration as sellable components unless explicitly marked as sellable.",
-      "The sellable product is always the hero. People, rooms, hands, props, packaging, and comparison alternatives are proof context only.",
+      "The sellable product is always the hero. People, rooms, hands, props, packaging, and decision-proof context are secondary proof only.",
       `Product identity: ${shotBrief.productIdentity}`,
       shotBrief.productFacts,
     ]),
@@ -2328,6 +3505,22 @@ function normalizeLegacyImage2PlanContext(context: number | LegacyImage2PlanCont
   return typeof context === "number" ? { packCount: context } : context;
 }
 
+function isGptPremiumAnalysisContext(context: LegacyImage2PlanContext) {
+  const analysis = context.analysis;
+  if (!analysis) return false;
+
+  const markerText = compactShotList([
+    analysis.productFacts?.factGuardrails,
+    analysis.creativeDirection?.pageGoal,
+    analysis.creativeDirection?.visualStyle,
+    analysis.creativeDirection?.aPlusStory,
+  ]).join(" ");
+
+  return markerText.includes(GPT_PREMIUM_ANALYSIS_MARKER)
+    || markerText.includes(GPT_A_PLUS_STRATEGY_VERSION)
+    || markerText.includes("GPT A+ strategy");
+}
+
 function isPhoneRelevantProduct(context: LegacyImage2PlanContext) {
   const analysis = context.analysis;
   const text = [
@@ -2369,7 +3562,7 @@ function stripLegacyImage2Section(prompt: string, marker: string) {
   for (const line of lines) {
     const trimmedLine = line.trim();
     const startsSection = line.includes(marker);
-    const knownLegacySectionHeader = /(?:COMMERCIAL ANALYSIS|COMPOSITION|BLANK ZONES|NO TEXT IN IMAGE|REGIONAL STYLE|FRAMING|PRODUCT IDENTITY|SINGLE PRODUCT COUNT LOCK|REAL-WORLD SCALE LOCK|IMAGE2 FINAL RULES)\b/.test(trimmedLine);
+    const knownLegacySectionHeader = /(?:COMMERCIAL ANALYSIS|COMPOSITION|BLANK ZONES|NO TEXT IN IMAGE|REGIONAL STYLE|FRAMING|PRODUCT IDENTITY|SINGLE PRODUCT COUNT LOCK|PACKAGING \/ VALUE IMAGE LOCK|PACKAGING \/ CONTENTS TRUTH LOCK|REAL-WORLD SCALE LOCK|GPT PREMIUM AMAZON IMAGE RULES|IMAGE2 FINAL RULES)\b/.test(trimmedLine);
     const startsNextSection = skipping
       && !trimmedLine.startsWith("-")
       && (
@@ -2400,8 +3593,12 @@ function sanitizeLegacyImage2BasePrompt(prompt: string, imageType: string) {
   sanitized = stripLegacyImage2Section(sanitized, "NO TEXT IN IMAGE");
   sanitized = stripLegacyImage2Section(sanitized, "REGIONAL STYLE");
   sanitized = stripLegacyImage2Section(sanitized, "FRAMING");
+  sanitized = stripLegacyImage2Section(sanitized, "PRODUCT IDENTITY");
   sanitized = stripLegacyImage2Section(sanitized, "REAL-WORLD SCALE LOCK");
   sanitized = stripLegacyImage2Section(sanitized, "SINGLE PRODUCT COUNT LOCK");
+  sanitized = stripLegacyImage2Section(sanitized, "PACKAGING / VALUE IMAGE LOCK");
+  sanitized = stripLegacyImage2Section(sanitized, "PACKAGING / CONTENTS TRUTH LOCK");
+  sanitized = stripLegacyImage2Section(sanitized, "GPT PREMIUM AMAZON IMAGE RULES");
 
   if (imageType === "main") {
     sanitized = sanitized
@@ -2450,6 +3647,133 @@ type LegacyImage2InsightAllocation = {
   riskFlags: string[];
 };
 
+function buildUniversalGptImage2InsightAllocation(
+  imageType: string,
+  context: LegacyImage2PlanContext,
+): LegacyImage2InsightAllocation | null {
+  const analysis = context.analysis;
+  if (!analysis) return null;
+
+  const insights = analysis.operatorInsights || {};
+  const purchaseDrivers = compactShotList([insights.purchaseDrivers, analysis.sellingPoints]);
+  const usageActions = compactShotList([insights.usageActions, analysis.usageScenes]);
+  const proofPoints = compactShotList([insights.proofPoints]);
+  const buyerQuestions = compactShotList([insights.buyerQuestions]);
+  const riskFlags = compactShotList([
+    insights.riskFlags,
+    "Do not invent packaging, accessories, brand logos, certifications, competitors, before/after results, quantities, or measurements not visible in references.",
+    "Do not repeat the same action, angle, background, or crop across A+ modules; each image must add one new buyer reason.",
+    "Do not use translucent bars, lower-third strips, header bands, stacked captions, icon grids, sticker badges, tiny text, or duplicated headlines.",
+  ]).slice(0, 5);
+
+  const primaryDriver = purchaseDrivers[0] || "the strongest real buyer benefit from the product";
+  const secondaryDriver = purchaseDrivers[1] || purchaseDrivers[0] || "a second product-positive buyer reason";
+  const materialProof = selectInsightItems(
+    compactShotList([proofPoints, purchaseDrivers, analysis.materials, analysis.productFacts?.materials]),
+    LEGACY_IMAGE2_INSIGHT_KEYWORDS.texture,
+    1,
+    0,
+  )[0] || "material, finish, texture, construction, edge, connector, surface, or build detail";
+  const sizeProof = compactShotList([
+    analysis.estimatedDimensions,
+    analysis.productFacts?.estimatedDimensions,
+    proofPoints,
+    purchaseDrivers,
+  ])[0] || "truthful product size and proportion";
+  const useAction = usageActions[0] || "natural real-use action that matches the category";
+  const secondUseAction = usageActions[1] || usageActions[0] || "a second distinct use angle, contact point, product state, or environment";
+  const contentsProof = compactShotList([
+    analysis.productFacts?.countAndConfiguration,
+    analysis.productFacts?.packagingEvidence,
+  ])[0] || "exact sellable item and verified included components only";
+  const firstQuestion = buyerQuestions[0] || "What is it, how is it used, and why should I trust it?";
+  const secondQuestion = buyerQuestions[1] || buyerQuestions[0] || "What second doubt should this image resolve without repeating the prior scene?";
+
+  const allocations: Record<string, LegacyImage2InsightAllocation> = {
+    main: {
+      purchaseDrivers: [primaryDriver],
+      usageActions: [],
+      proofPoints: ["exact sellable product identity, truthful count, faithful color/material/proportion"],
+      buyerQuestions: [firstQuestion],
+      riskFlags,
+    },
+    features: {
+      theme: inferLegacyImage2FeatureTheme(context),
+      purchaseDrivers: [primaryDriver],
+      usageActions: [useAction],
+      proofPoints: [proofPoints[0] || "one visible product proof tied to the strongest benefit"],
+      buyerQuestions: [firstQuestion],
+      riskFlags,
+    },
+    closeup: {
+      theme: "texture",
+      purchaseDrivers: [materialProof],
+      usageActions: [],
+      proofPoints: [materialProof],
+      buyerQuestions: [buyerQuestions.find((item) => /material|texture|finish|soft|fit|quality|材质|质感|做工/.test(item.toLowerCase())) || firstQuestion],
+      riskFlags,
+    },
+    dimensions: {
+      theme: "size",
+      purchaseDrivers: [sizeProof],
+      usageActions: [],
+      proofPoints: [sizeProof],
+      buyerQuestions: [buyerQuestions.find((item) => /size|dimension|scale|fit|length|width|尺寸|大小|长度|宽度/.test(item.toLowerCase())) || firstQuestion],
+      riskFlags,
+    },
+    lifestyle: {
+      theme: "use",
+      purchaseDrivers: [primaryDriver],
+      usageActions: [useAction],
+      proofPoints: [proofPoints[0] || "believable real-use contact and truthful scale"],
+      buyerQuestions: [firstQuestion],
+      riskFlags,
+    },
+    packaging: {
+      theme: "size",
+      purchaseDrivers: [contentsProof],
+      usageActions: [],
+      proofPoints: [contentsProof],
+      buyerQuestions: ["What exactly does the buyer receive?"],
+      riskFlags,
+    },
+    comparison: {
+      theme: "use",
+      purchaseDrivers: [secondaryDriver],
+      usageActions: [useAction],
+      proofPoints: [proofPoints[1] || proofPoints[0] || "product-positive choice proof without fake competitors"],
+      buyerQuestions: [secondQuestion],
+      riskFlags,
+    },
+    lifestyle2: {
+      theme: "use",
+      purchaseDrivers: [purchaseDrivers[2] || secondaryDriver],
+      usageActions: [secondUseAction],
+      proofPoints: [proofPoints[2] || "trust-building finished impression with product relevance"],
+      buyerQuestions: [secondQuestion],
+      riskFlags,
+    },
+    scene_a: {
+      theme: "use",
+      purchaseDrivers: [primaryDriver],
+      usageActions: [useAction],
+      proofPoints: [proofPoints[0] || "practical buyer question answered visually"],
+      buyerQuestions: [firstQuestion],
+      riskFlags,
+    },
+    scene_b: {
+      theme: "use",
+      purchaseDrivers: [secondaryDriver],
+      usageActions: [secondUseAction],
+      proofPoints: [proofPoints[1] || "a different trust point or buyer doubt from scene A"],
+      buyerQuestions: [secondQuestion],
+      riskFlags,
+    },
+  };
+
+  return allocations[imageType] || null;
+}
+
 function scoreInsightTheme(text: string, theme: LegacyImage2FeatureTheme) {
   const keywords = theme === "scratch"
     ? LEGACY_IMAGE2_INSIGHT_KEYWORDS.scratch
@@ -2487,15 +3811,15 @@ function getLegacyImage2ThemeKeywords(theme: LegacyImage2FeatureTheme) {
 function getImageTypeStoryStep(imageType: string) {
   const steps: Record<string, string> = {
     main: "IDENTITY + CLICK REASON: make the SKU instantly clear and give one strong reason to click.",
-    features: "SELLING POINT: explain the strongest buyer benefit with 2-3 related signals.",
-    closeup: "MATERIAL / QUALITY: prove real texture, finish, formula, construction, edge, or working detail.",
-    dimensions: "SIZE: prove true dimensions using only the product and measurement graphics, with no reference objects.",
-    lifestyle: "USE: show the most realistic use action with visible product interaction.",
-    packaging: "PACKAGE / CONTENTS: clarify what the customer receives without inventing packaging.",
-    comparison: "COMPARISON: show a fair contrast that helps the buyer decide without exaggerated claims.",
-    lifestyle2: "TRUST / A+ CLOSE: close the set with believable trust, desirability, and product confidence.",
-    scene_a: "USE DETAIL: answer one practical buyer question through a distinct action or context.",
-    scene_b: "BUYER DOUBT / TRUST: answer a different doubt or trust point without repeating scene A.",
+    features: "AMAZON A+ FEATURE MODULE: explain the strongest buyer benefit with one clear proof idea.",
+    closeup: "AMAZON A+ DETAIL MODULE: prove real texture, finish, formula, construction, edge, or working detail.",
+    dimensions: "AMAZON A+ SIZE MODULE: prove true dimensions using only the product and measurement graphics, with no reference objects.",
+    lifestyle: "AMAZON A+ USE MODULE: show the most realistic use action with visible product interaction.",
+    packaging: "AMAZON A+ CONTENTS MODULE: clarify what the customer receives without inventing packaging.",
+    comparison: "AMAZON A+ DECISION MODULE: show product-positive proof that helps the buyer decide without invented competitors or exaggerated claims.",
+    lifestyle2: "AMAZON A+ TRUST CLOSE: close the set with believable trust, desirability, and product confidence.",
+    scene_a: "AMAZON A+ USE DETAIL: answer one practical buyer question through a distinct action or context.",
+    scene_b: "AMAZON A+ BUYER DOUBT / TRUST: answer a different doubt or trust point without repeating scene A.",
   };
   return steps[imageType] || "Use only the part of the story relevant to this image type.";
 }
@@ -2507,6 +3831,9 @@ function buildLegacyImage2InsightAllocation(imageType: string, context: LegacyIm
   const proofPoints = compactShotList([insights?.proofPoints]);
   const buyerQuestions = compactShotList([insights?.buyerQuestions]);
   const riskFlags = compactShotList([insights?.riskFlags]);
+
+  const universalAllocation = buildUniversalGptImage2InsightAllocation(imageType, context);
+  if (universalAllocation) return universalAllocation;
 
   if (imageType === "main") {
     return {
@@ -2675,6 +4002,184 @@ function buildLegacyImage2ProductFacts(context: LegacyImage2PlanContext) {
   ]);
 }
 
+function getLegacyImage2CreativeBrief(context: LegacyImage2PlanContext, imageType: string) {
+  const analysis = context.analysis;
+  if (!analysis) return "";
+
+  const topBriefs = analysis.creativeBriefs && typeof analysis.creativeBriefs === "object" ? analysis.creativeBriefs : {};
+  const nestedBriefs = analysis.creativeDirection?.creativeBriefs && typeof analysis.creativeDirection.creativeBriefs === "object"
+    ? analysis.creativeDirection.creativeBriefs
+    : {};
+  const briefs = { ...topBriefs, ...nestedBriefs };
+  const brief = briefs[imageType];
+  return typeof brief === "string" ? brief.trim() : "";
+}
+
+function getLegacyImage2LayoutRecord(context: LegacyImage2PlanContext, imageType: string) {
+  const analysis = context.analysis;
+  if (!analysis) return null;
+
+  const topLayouts = analysis.imageLayouts && typeof analysis.imageLayouts === "object" ? analysis.imageLayouts : {};
+  const nestedLayouts = analysis.creativeDirection?.imageLayouts && typeof analysis.creativeDirection.imageLayouts === "object"
+    ? analysis.creativeDirection.imageLayouts
+    : {};
+  const layouts = { ...topLayouts, ...nestedLayouts } as Record<string, unknown>;
+  const layout = layouts[imageType];
+  return layout && typeof layout === "object" && !Array.isArray(layout)
+    ? layout as Record<string, unknown>
+    : null;
+}
+
+function formatLegacyImage2LayoutValue(label: string, value: unknown) {
+  if (typeof value === "string" && value.trim()) return `${label}: ${value.trim()}`;
+  if (Array.isArray(value)) {
+    const items = compactShotList(value);
+    return items.length ? `${label}: ${items.join("; ")}` : "";
+  }
+  return "";
+}
+
+function buildGptPremiumAnalysisRules(context: LegacyImage2PlanContext, imageType: string) {
+  const analysis = context.analysis;
+  if (!analysis) return [];
+
+  const creativeBrief = getLegacyImage2CreativeBrief(context, imageType);
+  const layout = getLegacyImage2LayoutRecord(context, imageType);
+  const allocation = buildLegacyImage2InsightAllocation(imageType, context);
+  const layoutRules = compactShotList([
+    formatLegacyImage2LayoutValue("Analysis composition hint", layout?.compositionHint),
+    formatLegacyImage2LayoutValue("Analysis visual hierarchy", layout?.visualHierarchy),
+    formatLegacyImage2LayoutValue("Analysis information anchors", layout?.informationAnchors),
+    formatLegacyImage2LayoutValue("Analysis approved copy", layout?.approvedCopy),
+    formatLegacyImage2LayoutValue("Analysis text blocks", layout?.textBlocks),
+    formatLegacyImage2LayoutValue("Analysis blank zones", layout?.blankZones),
+  ]);
+
+  const typeRules: Record<string, string[]> = {
+    main: [
+      "GPT premium main directive: render a photorealistic Amazon-ready product hero on pure white #FFFFFF with natural grounding shadow; product identity and truthful count are the first priority.",
+      "Main image text lock: do not generate headlines, callouts, badges, icons, arrows, slogans, price text, template copy, or random letters. Only exact physical text already printed on the real product may remain.",
+      "Main proof rule: choose one visual proof from the analysis, but show it through product state, material, count, or clean category context rather than extra props, collage, or poster copy.",
+    ],
+    features: [
+      "Feature directive: use the analysis to pick one benefit cluster and prove it visually with the real product first; avoid badge walls, feature grids, or unrelated selling points.",
+      "Feature copy must be optional, short, exact, and secondary to the product/action proof.",
+    ],
+    closeup: [
+      "Close-up directive: translate analysis proof points into tactile macro photography of real material, finish, fibers, edge, seam, grip, surface, formula, or construction.",
+      "Do not invent a different material, extra mechanism, or fake macro detail that is not supported by the product references.",
+    ],
+    dimensions: [
+      "Dimension directive: use only verified measurement text from analysis or the legacy prompt. If no exact measurements exist, show non-numeric proportion only.",
+      "Do not render generic words such as \"Size Guide\" or use phones, coins, ruler objects, hands, cars, wheels, packaging boxes, or random props as scale references.",
+    ],
+    lifestyle: [
+      "Lifestyle directive: convert analysis usage actions into one believable real-use moment with natural contact, correct scale, and the product clearly visible.",
+      "Do not make the environment more luxurious, dramatic, or cluttered than the product facts support.",
+    ],
+    packaging: [
+      "Packaging directive: follow packaging evidence from analysis. If packaging is not proven, show truthful contents only without neutral boxes, bags, pouches, manuals, inserts, barcodes, or accessories.",
+      "Do not render \"Single Unit\", fake gift boxes, barcodes, manuals, certificates, inserts, accessories, or premium package copy unless verified.",
+    ],
+    comparison: [
+      "Comparison directive: use product-positive decision proof from analysis instead of fake competitor products, \"Our Brush\"/\"Other Brush\" labels, red X/green check marks, fake percentages, or exaggerated before/after drama.",
+      "A comparison must be fair, same-scale, and visually explain one buyer doubt without attacking an invented competitor.",
+    ],
+    lifestyle2: [
+      "A+ closing directive: use the analysis story to create one polished trust-building scene with shared lighting, palette, and product identity from the rest of the gallery.",
+      "Keep the closing image aspirational but believable; no fake awards, seals, discount-ad styling, or unrelated decorative filler.",
+    ],
+    scene_a: [
+      "Scenario A directive: answer one high-intent buyer question from analysis through a distinct practical use/action scene.",
+    ],
+    scene_b: [
+      "Scenario B directive: answer a different buyer question or proof angle from Scenario A while keeping the same product identity and visual system.",
+    ],
+  };
+
+  return compactShotList([
+    "Use the upgraded AI analysis as the production brief. Keep prompts in this order: scene/background -> product subject -> key details -> constraints.",
+    "Use concrete product materials, shapes, textures, action, viewpoint, lighting, and exclusions; do not rely on generic words like premium without visual proof.",
+    "GPT premium layout override: respect the upgraded A+ layout. Generate a full-bleed photographic base image with no large blank panel or blank information column; the local compose layer adds approved textBlocks after generation.",
+    GPT_A_PLUS_PRODUCT_IDENTITY_LOCK,
+    GPT_A_PLUS_FINISHED_MODULE_LOCK,
+    GPT_A_PLUS_STRUCTURE_LOCK,
+    GPT_A_PLUS_REFERENCE_INFOGRAPHIC_LOCK,
+    GPT_A_PLUS_INFO_DENSITY_LOCK,
+    GPT_A_PLUS_NO_BLANK_LOCK,
+    GPT_A_PLUS_BASE_TEXT_LOCK,
+    GPT_A_PLUS_CLEAN_CORNER_LOCK,
+    GPT_A_PLUS_SHARPNESS_LOCK,
+    analysis.creativeDirection?.pageGoal ? `Analysis page goal: ${analysis.creativeDirection.pageGoal}` : "",
+    analysis.creativeDirection?.visualStyle ? `Analysis visual style: ${analysis.creativeDirection.visualStyle}` : "",
+    analysis.creativeDirection?.aPlusStory ? `Analysis A+ story: ${analysis.creativeDirection.aPlusStory}` : "",
+    creativeBrief ? `Image-type creative brief from analysis: ${creativeBrief}` : "",
+    layoutRules,
+    analysis.productFacts?.factGuardrails?.length
+      ? `Non-negotiable analysis guardrails: ${analysis.productFacts.factGuardrails.join("; ")}`
+      : "",
+    allocation.purchaseDrivers.length ? `Selected purchase driver: ${allocation.purchaseDrivers.join("; ")}` : "",
+    allocation.proofPoints.length ? `Selected proof point: ${allocation.proofPoints.join("; ")}` : "",
+    allocation.buyerQuestions.length ? `Selected buyer question to answer visually: ${allocation.buyerQuestions.join("; ")}` : "",
+    allocation.riskFlags.length ? `Selected risk to avoid: ${allocation.riskFlags.join("; ")}` : "",
+    typeRules[imageType] || [],
+  ]);
+}
+
+function buildAmazonIntegratedOutputRules(context: LegacyImage2PlanContext, imageType: string) {
+  const canvas = context.imageSize || "800x800";
+  const common = [
+    "No user-facing mode selection is required: this GPT version automatically maps image roles to the Amazon listing system.",
+    `Canvas contract: keep the requested ${canvas} square output unless the caller explicitly changes imageSize. Build every non-main module as a crop-safe square detail-page/A+ style asset, not a wide banner.`,
+    "Use Amazon-grade trust signals through product truth, clean photography, restrained information hierarchy, and evidence-backed visuals rather than loud marketplace graphics.",
+    "Do not create fake awards, fake certifications, fake ratings, fake warranty seals, fake brand logos, fake competitor brands, or unsupported performance claims.",
+  ];
+
+  const roleRules: Record<string, string[]> = {
+    main: [
+      "Amazon role: MAIN IMAGE. This is not an A+ module.",
+      "Main-image compliance: pure white #FFFFFF background, real sellable product only, no generated text, no badges, no icons, no arrows, no comparison layout, no lifestyle scene, no packaging unless the packaging/container itself is the sold product.",
+      "Main-image success metric: a shopper instantly understands the exact SKU, count, material/color, and premium product quality at thumbnail size.",
+    ],
+    features: [
+      "Amazon role: A+ STYLE FEATURE MODULE adapted to 800x800. Prove one purchase driver with one clear product-first composition.",
+      "Use one short headline plus 2-3 compact evidence labels when exact useful copy exists; otherwise solve the benefit visually.",
+    ],
+    closeup: [
+      "Amazon role: A+ STYLE DETAIL MODULE adapted to 800x800. Prove material, construction, texture, finish, fiber, edge, seam, grip, or functional detail.",
+      "The detail image should feel like premium macro product photography, not a generic zoom poster.",
+    ],
+    dimensions: [
+      "Amazon role: A+ STYLE SIZE/TRUTH MODULE adapted to 800x800. Show exact measurements only when verified.",
+      "If exact dimensions are missing, show product-only proportion without numeric labels or scale props.",
+    ],
+    lifestyle: [
+      "Amazon role: A+ STYLE USE MODULE adapted to 800x800. Show a believable real-use action with natural contact and correct product scale.",
+      "The scene should answer where/how the item is used without making the product a tiny background prop.",
+    ],
+    packaging: [
+      "Amazon role: A+ STYLE CONTENTS MODULE adapted to 800x800. Clarify what the buyer receives only from verified count, contents, and packaging evidence.",
+      "If real packaging is not provided, show truthful contents only; never invent neutral packaging, gift boxes, bags, manuals, inserts, barcodes, accessories, or premium retail packaging.",
+    ],
+    comparison: [
+      "Amazon role: A+ STYLE DECISION MODULE adapted to 800x800. Explain one choice reason with fair product-positive proof.",
+      "Avoid fake competitors, red/green marks, fake percentages, exaggerated before/after results, and labels like Our Brush or Other Brush.",
+    ],
+    lifestyle2: [
+      "Amazon role: A+ STYLE TRUST CLOSING MODULE adapted to 800x800. Close the set with a believable polished product scene and shared visual DNA.",
+      "Use the final image to build confidence, not to add discount-ad copy or unsupported claims.",
+    ],
+    scene_a: [
+      "Amazon role: A+ STYLE PRACTICAL USE MODULE adapted to 800x800. Answer the first practical buyer question with a distinct action or context.",
+    ],
+    scene_b: [
+      "Amazon role: A+ STYLE BUYER-DOUBT MODULE adapted to 800x800. Answer a different doubt or trust proof from scene A.",
+    ],
+  };
+
+  return compactShotList([common, roleRules[imageType] || []]);
+}
+
 function formatLegacyImage2AssignedList(label: string, items: string[]) {
   return items.length ? `${label}: ${items.join("; ")}` : "";
 }
@@ -2704,7 +4209,7 @@ function buildLegacyImage2PlanAllocationRules(context: LegacyImage2PlanContext, 
       ? "Main should use one high-value slice of the analysis only: exact SKU identity plus one strongest purchase driver, proof point, or buyer question. Do not import the full A+ story."
       : "",
     imageType === "features"
-      ? "Features should cover one conversion cluster with 2-3 supporting signals, not a poster with every selling point."
+      ? "Features should cover one conversion cluster with a hero proof idea plus 2-3 related supporting cues, not a poster with every selling point."
       : "",
     imageType === "scene_b"
       ? "Scene B must not repeat Scene A; choose a distinct action, setting, buyer question, or proof point."
@@ -2714,9 +4219,15 @@ function buildLegacyImage2PlanAllocationRules(context: LegacyImage2PlanContext, 
 
 function buildLegacyImage2PremiumVisualRules(imageType: string) {
   const shared = [
-    "Premium standard: create a polished cross-border ecommerce visual that feels like a high-quality product photography or A+ detail module, not a bargain poster.",
-    "Use visual restraint: refined lighting, believable material rendering, clean negative space, controlled contrast, and a simple palette derived from the product and real use context.",
+    "Premium standard: create a polished Amazon-ready visual that feels like high-quality product photography or an A+ detail module, not a bargain poster.",
+    "Act like a senior ecommerce art director: every 800x800 image needs one clear job, one hero subject, one conversion promise, and 2-3 visible evidence cues that make the promise believable.",
+    GPT_A_PLUS_REFERENCE_INFOGRAPHIC_LOCK,
+    GPT_A_PLUS_INFO_DENSITY_LOCK,
+    GPT_A_PLUS_SHARPNESS_LOCK,
+    "Use visual restraint without empty panels: refined lighting, believable material rendering, full-frame composition, controlled contrast, and a simple palette derived from the product and real use context.",
     "Avoid cheap marketplace styling: no sticker-like badges, clipart icons, thick arrows, noisy gradients, neon glow, busy color blocks, thick colored header bars, harsh blue ribbons, fake UI panels, red-X/green-check gimmicks, crowded feature walls, fake 3D labels, low-end collage, or decorative filler props.",
+    "Avoid template marketplace copy such as 'Single Unit', 'Compact Size', 'Size Guide', 'Our Brush', or 'Other Brush' unless the user explicitly supplied that exact copy.",
+    "When the product belongs to automotive care or detailing, use a premium detailing-brand look: high-end alloy wheel closeups, controlled garage or studio light, realistic water and grime, believable hand contact, crisp reflections, and no bargain-ad graphics.",
     "Do not add generic lifestyle props for scale. A scale cue must come from the product's real use context, not from a random phone, coin, ruler, pen, or gadget.",
     "Product fidelity still wins over beauty. Do not redesign the product, invent packaging, exaggerate scale, or hide flaws by over-stylizing.",
   ];
@@ -2727,11 +4238,12 @@ function buildLegacyImage2PremiumVisualRules(imageType: string) {
       "Avoid the plain document-photo look when the product needs explanation. Use a polished ecommerce hero composition rather than a cheap poster, collage, or crowded infographic.",
     ],
     features: [
-      "Feature image should feel like a premium A+ hero module: one conversion theme, one clear focal point, and 2-3 well-spaced information signals when they improve understanding.",
-      "If text is used, make it editorial and readable: one headline plus up to two short callouts, generous spacing, no tiny captions, no icon grid.",
+      "Feature image should feel like a premium A+ proof module: one conversion theme, one clear focal point, and one strong visual proof idea.",
+      "If text is used, make it editorial and readable through local overlay only: one short headline plus 2-3 compact evidence labels, generous spacing, no tiny captions, no random icon grid, no crowded callout wall.",
     ],
     closeup: [
       "Close-up should look like macro commercial photography: texture, fibers, finish, formula, seams, or construction rendered with depth and tactile realism.",
+      "Use controlled macro focus, not shallow-focus blur. The proof texture and product identity cue must both remain sharp.",
       "Avoid generic 'detail view' poster styling; let the material proof carry the premium feel.",
     ],
     dimensions: [
@@ -2741,18 +4253,21 @@ function buildLegacyImage2PremiumVisualRules(imageType: string) {
     ],
     lifestyle: [
       "Lifestyle should feel like believable editorial product use: natural hand posture, real contact with the product, authentic environment, and clean composition.",
+      "Freeze the action with sharp commercial-product focus. The product and contact point must be crisp, not blurred by hand motion, foam, steam, or camera movement.",
       "Avoid stock-photo clutter, staged smiles, messy backgrounds, luxury props unrelated to the product, or tiny product placement.",
     ],
     packaging: [
       "Packaging/contents image should feel like a restrained unboxing or clean contents layout, not a gift-box fantasy.",
-      "Use neutral packaging only when evidence is weak; premium means truthful, orderly, and uncluttered.",
+      "Do not use neutral packaging when evidence is weak; premium means truthful, orderly, and uncluttered, with the exact sellable item as the proof.",
+      "If no real packaging is visible in the reference, do not invent a generic kraft box, plastic sleeve, barcode, manual, brand mark, or premium insert.",
     ],
     comparison: [
-      "Comparison image should be honest and premium: clean split or paired composition, consistent lighting, restrained labels, no miracle transformation.",
-      "Avoid aggressive before/after advertising, fake percentages, red warning marks, or exaggerated dirty-vs-perfect drama.",
+      "Comparison image should be honest and premium: product-positive decision proof with consistent lighting and no miracle transformation.",
+      "Avoid split-table advertising, fake percentages, red warning marks, green-check/red-X gimmicks, Our/Other labels, or exaggerated dirty-vs-perfect drama.",
+      "Do not attack a competitor or a fake 'other product'. Use product-positive decision proof instead: material softness, reach, fit, texture, or use-context clarity.",
     ],
     lifestyle2: [
-      "A+ closing image should feel like a polished detail-page banner: aspirational but believable, product-first, refined lighting, and strong negative space.",
+      "A+ closing image should feel like a polished detail-page image: aspirational but believable, product-first, refined lighting, and full-frame scene evidence.",
       "Do not make it look like a discount ad; remove loud claims and let the scene communicate trust.",
     ],
     scene_a: [
@@ -2875,7 +4390,7 @@ function buildLegacyImage2UsageActionRules(plan: ImageStudioPlan, context: Legac
   if (imageType === "packaging") {
     return compactShotList([
       "Packaging/contents image must follow packaging evidence, not imagined gift-box styling.",
-      productFacts?.packagingEvidence ? `Packaging evidence to obey: ${productFacts.packagingEvidence}` : "If no real packaging evidence exists, show product contents or neutral unbranded packaging only.",
+      productFacts?.packagingEvidence ? `Packaging evidence to obey: ${productFacts.packagingEvidence}` : "If no real packaging evidence exists, show the exact sellable item and verified contents only; do not add neutral boxes, bags, pouches, manuals, inserts, barcodes, or accessories.",
       productFacts?.countAndConfiguration ? `Count/configuration truth: ${productFacts.countAndConfiguration}` : "",
       allocation.proofPoints.length ? `Packaging/storage proof assigned to this image: ${allocation.proofPoints.join("; ")}` : "",
       allocation.buyerQuestions.length ? `Packaging question to answer visually: ${allocation.buyerQuestions.join("; ")}` : "",
@@ -2904,10 +4419,10 @@ function buildLegacyImage2UsageActionRules(plan: ImageStudioPlan, context: Legac
     allocation.riskFlags.length ? `Risks this image must avoid: ${allocation.riskFlags.join("; ")}` : "",
     productFacts?.mountingPlacement ? `Usage/mounting must respect: ${productFacts.mountingPlacement}` : "",
     imageType === "features"
-      ? "For feature images, pick one benefit/action/proof cluster and show 2-3 related signals inside that cluster; do not mix unrelated selling points into one poster."
+      ? "For feature images, pick one benefit/action/proof cluster and show one strong proof idea with 1-2 related supporting cues; do not mix unrelated selling points into one poster."
       : "",
     imageType === "comparison"
-      ? "For comparison images, make the contrast visible through scene, result, surface condition, fit, scale, or product state, not through dense text or exaggerated claims."
+      ? "For comparison images, avoid invented contrast panels; make the decision proof visible through material, reach, fit, scale, contact, or product state without dense text or exaggerated claims."
       : "",
     imageType === "lifestyle" || imageType === "lifestyle2" || imageType === "scene_a" || imageType === "scene_b"
       ? "Include natural human interaction when it helps: hand applying, holding, installing, wearing, placing, opening, cleaning, repairing, using, or viewing the product. The action must match the category."
@@ -2963,12 +4478,12 @@ function buildLegacyImage2CompositionRules(imageType: string) {
     packaging: [
       "Camera: clean three-quarter or top-down package-content layout.",
       "Framing: delivered contents are separated enough to count and recognize.",
-      "Use a neutral unboxing or contents layout; avoid luxury gift staging unless real packaging evidence supports it.",
+      "Use a clean contents layout; avoid neutral packages, gift staging, boxes, bags, or inserts unless real packaging evidence supports them.",
     ],
     comparison: [
-      "Camera: split or side-by-side composition only if it stays visually simple.",
-      "Framing: make the comparison understandable without relying on small text.",
-      "Keep product scale and camera angle consistent between the compared sides so the result feels honest.",
+      "Camera: product-first proof angle focused on material, reach, fit, scale, contact, or use evidence.",
+      "Framing: make the decision proof understandable without relying on small text.",
+      "Do not create a fake second product or inferior comparison side.",
     ],
     lifestyle: [
       "Camera: realistic eye-level, close-up, or over-the-shoulder usage shot.",
@@ -3074,8 +4589,8 @@ function buildSupplementaryImageRoleRules(imageType: string) {
 
   const roleRules: Record<string, string[]> = {
     features: [
-      "SUPPLEMENTARY IMAGE ROLE: explain one buying reason cluster clearly through product use, benefit proof, and a simple premium callout layout.",
-      "Prefer one strong theme with 2-3 supporting signals over many unrelated claims; make every signal legible at small listing-thumbnail size.",
+      "SUPPLEMENTARY IMAGE ROLE: explain one buying reason cluster clearly through product use, benefit proof, and a premium photographic layout.",
+      "Prefer one strong theme with one proof signal over many unrelated claims; make the proof legible at small listing-thumbnail size.",
       "Do not duplicate the main image as a plain packshot. This image must add a reason to click or buy.",
     ],
     closeup: [
@@ -3090,13 +4605,13 @@ function buildSupplementaryImageRoleRules(imageType: string) {
     ],
     packaging: [
       "SUPPLEMENTARY IMAGE ROLE: show delivered contents and packaging truthfully.",
-      "If no real packaging is provided, use neutral unbranded packaging or show contents only; do not invent retail box design.",
+      "If no real packaging is provided, show contents only; do not invent neutral packaging, gift boxes, bags, inserts, manuals, accessories, or retail box design.",
       "Make included items countable and understandable; do not add manuals, cards, tools, or accessories that are not verified.",
     ],
     comparison: [
-      "SUPPLEMENTARY IMAGE ROLE: clarify before/after, with/without, or product-vs-generic difference without misleading claims.",
-      "Avoid fake competitor logos and avoid dense comparison tables rendered by image2.",
-      "The comparison should be visually self-explanatory even if the viewer ignores the text.",
+      "SUPPLEMENTARY IMAGE ROLE: clarify one decision reason with product-positive evidence without misleading claims.",
+      "Avoid fake competitors, product-vs-generic panels, before/after exaggeration, and dense comparison tables rendered by image2.",
+      "The decision proof should be visually self-explanatory even if the viewer ignores the text.",
     ],
     lifestyle: [
       "SUPPLEMENTARY IMAGE ROLE: show realistic use in context, including a hand/person only when it proves use, scale, or function.",
@@ -3179,7 +4694,7 @@ function buildImage2GalleryRoleRules(imageType: string) {
     ],
     features: [
       "Gallery role: SELLING POINT module.",
-      "Show the strongest benefit cluster that cannot be understood from the main image alone, combining real use proof, product detail, and 1-3 large readable callouts.",
+      "Show the strongest benefit cluster that cannot be understood from the main image alone, using one real use or product-detail proof with at most one exact phrase.",
     ],
     closeup: [
       "Gallery role: MATERIAL / QUALITY proof.",
@@ -3198,8 +4713,8 @@ function buildImage2GalleryRoleRules(imageType: string) {
       "Clarify package contents, bundle components, and delivery expectation truthfully.",
     ],
     comparison: [
-      "Gallery role: COMPARISON / decision proof.",
-      "Make a simple visual contrast that helps the buyer choose this product without fake claims or dense tables.",
+      "Gallery role: DECISION proof.",
+      "Make one product-positive visual proof that helps the buyer choose this product without fake competitors, fake claims, or dense tables.",
     ],
     lifestyle2: [
       "Gallery role: TRUST / A+ closing image.",
@@ -3230,7 +4745,7 @@ function buildImage2GallerySetStrategyRules(context: LegacyImage2PlanContext, im
     dimensions: "size",
     lifestyle: "use",
     packaging: "package / contents",
-    comparison: "comparison",
+    comparison: "decision proof",
     lifestyle2: "trust / A+ close",
     scene_a: "use detail",
     scene_b: "buyer doubt / trust",
@@ -3238,11 +4753,11 @@ function buildImage2GallerySetStrategyRules(context: LegacyImage2PlanContext, im
 
   return compactShotList([
     "The whole gallery should feel like one premium, information-rich ecommerce set: consistent SKU identity, varied camera angles, varied proof roles, and no repeated filler images.",
-    "Fixed gallery purchase chain: identity -> selling point -> material -> size -> use -> package -> comparison -> trust.",
+    "Fixed gallery purchase chain: identity -> selling point -> material -> size -> use -> contents -> decision proof -> trust.",
     slotText,
     `Current gallery sequence: ${selectedTypes.join(" -> ")}.`,
     `Current image role in the purchase chain: ${chainRoles[imageType] || "supporting proof"}.`,
-    "Each image must add new buyer information: identity, benefit, material, size, use, packaging, comparison, trust, or second use case.",
+    "Each image must add new buyer information: identity, benefit, material, size, use, contents, decision proof, trust, or second use case.",
     "Do not repeat the same packshot, same angle, same scene, same text, or same proof point across the set unless the current image type specifically requires it.",
     "Use a consistent premium visual system across the set: related color palette, clean spacing, realistic product photography, and restrained high-readability typography.",
     imageType === "main"
@@ -3258,10 +4773,12 @@ function buildImage2PremiumInformationHierarchyRules(imageType: string) {
   const shared = [
     "Premium and information-rich means controlled information hierarchy, not more clutter.",
     "Build every image with three readable layers: (1) hero product subject, (2) one visual proof element, (3) concise ecommerce copy only when allowed.",
-    "Target information density: one dominant product subject, one proof scene/detail/measurement/contents/comparison element, and 1-3 short text elements when the image type allows visible text.",
+    "Use the former designer-workbench discipline inside this GPT flow: product identity lock, shared visual DNA, varied narrative roles, and an internal audit against cheap marketplace styling before writing the final prompt.",
+    "Target information density: one dominant product subject, one proof scene/detail/measurement/contents/decision element, and at most one short text element when the image type allows visible text.",
     "Use editorial ecommerce typography: large, sparse, aligned, high contrast, enough margin, no tiny paragraphs, no dense bullet walls, no random badge clutter.",
     "Use a consistent premium design system across the set: neutral or product-context background, restrained product-color accents, realistic shadows, clean spacing, and repeated alignment logic.",
     "Do not use cheap visual shortcuts: thick banners, sticker bursts, clipart icon grids, loud arrows, fake UI cards, noisy gradients, random decorative props, or crowded poster layouts.",
+    "For 800x800 output, protect mobile readability: fewer words, larger type, generous margins, and no text near crop edges.",
   ];
 
   const typeRules: Record<string, string[]> = {
@@ -3271,9 +4788,9 @@ function buildImage2PremiumInformationHierarchyRules(imageType: string) {
       "If text overlays are not allowed for main, the click reason must be visual, not written.",
     ],
     features: [
-      "Feature image hierarchy: one major benefit, one proof visual, one headline plus up to two short supporting callouts when text is allowed.",
+      "Feature image hierarchy: one major benefit, one proof visual, and at most one short headline plus two small proof labels when text is allowed.",
       "The buyer should understand the benefit in two seconds. Do not combine unrelated benefits, tiny icons, dense feature lists, or repeated use scenes.",
-      "Use a premium A+ module composition: large product/action image, clean callout alignment, and enough whitespace around each information block.",
+      "Use a premium A+ module composition: large product/action image, clean spacing, and no callout stack.",
     ],
     closeup: [
       "Close-up hierarchy: macro material/form proof first, SKU continuity second, short material label only when allowed.",
@@ -3291,14 +4808,14 @@ function buildImage2PremiumInformationHierarchyRules(imageType: string) {
       "Make the scene editorial and believable, with natural scale and clear contact between user/object and product.",
     ],
     packaging: [
-      "Packaging hierarchy: what the buyer receives first, count/components second, neutral packaging truth third.",
-      "Use a clean unboxing or contents layout. Do not invent premium gift boxes, extra accessories, manuals, tools, or packaging copy when evidence is weak.",
+      "Contents hierarchy: what the buyer receives first, count/components second, packaging truth third only when packaging is verified.",
+      "Use a clean contents layout. Do not invent premium gift boxes, neutral packages, extra accessories, manuals, tools, or packaging copy when evidence is weak.",
       "The image should answer package contents quickly without becoming a cluttered flat lay.",
     ],
     comparison: [
-      "Comparison hierarchy: decision contrast first, fair product proof second, restrained labels third.",
-      "Use a clean split or paired layout with the product as the hero. Avoid red-X/green-check gimmicks, fake percentages, extreme before/after drama, or unsupported performance claims.",
-      "The comparison must help the buyer decide, not attack a fake competitor.",
+      "Decision-proof hierarchy: buyer doubt first, fair product proof second, no labels by default.",
+      "Avoid split-table layouts, red-X/green-check gimmicks, fake percentages, extreme before/after drama, or unsupported performance claims.",
+      "The decision proof must help the buyer decide, not attack a fake competitor, not mention 'other brush/product', and not create a negative competitor panel.",
     ],
     lifestyle2: [
       "Trust closing hierarchy: credible finished impression first, product relevance second, one confidence message third when allowed.",
@@ -3371,7 +4888,7 @@ function rewriteImage2BenefitCopy(rawValue: unknown, imageLanguage?: string) {
   if (/dimension|size|scale|compact|portable|storage|store|palm|small|mini|尺寸|大小|便携|收纳|掌心|小巧|小型/.test(lower)) {
     if (/store|storage|portable|收纳|便携/.test(lower)) return imageLanguage === "zh" ? "便携收纳" : "Easy to Store";
     if (/true|real|actual|palm|掌心|真实/.test(lower)) return imageLanguage === "zh" ? "真实尺寸" : "True Size";
-    return imageLanguage === "zh" ? "小巧便携" : "Compact Size";
+    return "";
   }
 
   if (/deep\s*clean|deep cleaning|cleaning depth|deep reach|reach deep|深度清洁|深入清洁/.test(lower)) {
@@ -3420,6 +4937,12 @@ function isWeakImage2Copy(rawValue: string, imageType: string) {
   if (!containsChineseText(text) && text.split(/\s+/).filter(Boolean).length > 4) return true;
   if (containsChineseText(text) && text.length > 10) return true;
   return false;
+}
+
+function isCheapImage2TemplateCopy(rawValue: string) {
+  const text = rawValue.trim();
+  if (!text) return false;
+  return /^(single unit|compact size|size guide|our brush|other brush|our product|other product|ours|ordinary|regular|competitor)$/i.test(text);
 }
 
 function extractImage2Measurements(rawValue: unknown) {
@@ -3482,23 +5005,19 @@ function buildImage2GeneratedTextCandidates(
   const candidatesByType: Record<string, unknown[]> = {
     main: [
       packCount > 1 ? `${packCount}PCS` : "",
-      planText,
-      allocatedBenefitText,
-      suggestedBadges,
     ],
     features: [planText, allocatedBenefitText, suggestedBadges, quotedPromptText],
     closeup: [planText, allocation.proofPoints.length ? allocation.proofPoints : proofPoints.slice(0, 1), sellingPoints.slice(0, 1)],
     dimensions: [
-      "Size Guide",
       extractImage2Measurements(analysis?.estimatedDimensions),
       extractImage2Measurements(analysis?.productFacts?.estimatedDimensions),
       extractImage2Measurements(basePrompt),
     ],
     lifestyle: [planText, sellingPoints.slice(0, 1), allocation.purchaseDrivers.length ? allocation.purchaseDrivers : purchaseDrivers.slice(0, 1)],
     packaging: [
-      packCount > 1 || context.productMode === "bundle" ? "Included Items" : "Single Unit",
+      packCount > 1 || context.productMode === "bundle" ? "Included Items" : "",
       packCount > 1 ? `${packCount}PCS` : "",
-      planText,
+      packCount > 1 || context.productMode === "bundle" ? planText : [],
     ],
     comparison: [planText, allocation.purchaseDrivers.length ? allocation.purchaseDrivers : sellingPoints.slice(0, 1)],
     lifestyle2: [planText, sellingPoints.slice(-1), allocation.purchaseDrivers.length ? allocation.purchaseDrivers : purchaseDrivers.slice(-1)],
@@ -3513,16 +5032,18 @@ function buildImage2GeneratedTextCandidates(
       return rewriteImage2BenefitCopy(normalized || text, imageLanguage);
     })
     .filter(Boolean)
-    .filter((text) => !isWeakImage2Copy(text, imageType));
+    .filter((text) => !isWeakImage2Copy(text, imageType))
+    .filter((text) => !isCheapImage2TemplateCopy(text));
 
-  const maxTextCount = imageType === "dimensions" ? 5 : imageType === "features" ? 3 : 4;
   const dedupedCandidates = dedupeTextList(normalizedCandidates);
-  if (imageType === "main") return dedupedCandidates.slice(0, packCount > 1 ? 2 : 2);
-  if (imageType === "features") return dedupedCandidates.slice(0, Math.min(3, maxTextCount));
-  if (imageType === "closeup") return dedupedCandidates.slice(0, 2);
-  if (imageType === "packaging") return dedupedCandidates.slice(0, packCount > 1 || context.productMode === "bundle" ? 3 : 2);
-  if (imageType === "comparison") return dedupedCandidates.slice(0, 2);
-  return dedupedCandidates.slice(0, maxTextCount);
+  if (imageType === "main") return packCount > 1 ? dedupedCandidates.slice(0, 1) : [];
+  if (imageType === "features") return dedupedCandidates.slice(0, 1);
+  if (imageType === "closeup") return dedupedCandidates.slice(0, 1);
+  if (imageType === "dimensions") return dedupedCandidates.slice(0, 4);
+  if (imageType === "packaging") {
+    return packCount > 1 || context.productMode === "bundle" ? dedupedCandidates.slice(0, 1) : [];
+  }
+  return [];
 }
 
 function buildLegacyImage2TypeRules(imageType: string, packCount: number) {
@@ -3535,21 +5056,20 @@ function buildLegacyImage2TypeRules(imageType: string, packCount: number) {
 
   const typeRules: Record<string, string[]> = {
     main: [
-      "Main image: premium conversion hero. It should be more informative than a plain packshot but much cleaner than a poster.",
-      "Use one coherent ecommerce hero layout: product-dominant composition, clean premium background, one visual proof element, and optional restrained large text from the allowed list.",
-      "The main image should sell the SKU by clarity plus one reason to click: one glance should reveal product category, included components, pack quantity when applicable, color/material, real scale impression, and the strongest buyer benefit.",
+      "Main image: premium Amazon-ready conversion hero. Render the exact sellable product as a photorealistic studio packshot on pure white #FFFFFF with natural grounding shadow.",
+      "No generated marketing text, no callouts, no badges, no icons, no arrows, no price tags, no borders, no sticker pills, no dense poster copy.",
+      "One glance should reveal product category, truthful count, color/material, scale impression, and the strongest visual click reason through the product itself.",
       "Do not add phones, coins, pens, measuring cards, standalone rulers, random gadgets, decorative furniture, busy lifestyle props, fake packaging, or unrelated scale props.",
-      "Do not add cheap badges, arrows, icon grids, borders, price tags, fake certification marks, fake discount stickers, dense poster text, or tiny unreadable captions.",
       packCount > 1
-        ? `For this main image, the visible physical product count must be exactly ${packCount}; optional text may only use the exact allowed "${packCount}PCS" wording once.`
+        ? `For this main image, the visible physical product count must be exactly ${packCount}; optional text may only use the exact allowed "${packCount}PCS" wording once if the pack count would otherwise be unclear.`
         : "For this main image, show one complete sellable unit unless the product facts explicitly include accessories or bundle contents. A secondary open/detail state is allowed only if it reads as a detail proof, not a multi-pack.",
     ],
     features: [
-      "Feature image: show one key buyer benefit cluster visually through clear product use, material proof, function, outcome, or problem-solution composition.",
-      "Use only the assigned feature cluster from BUYER INTENT and SCENE AND ACTION; include 2-3 related information signals inside that cluster when useful.",
-      "Use one large image2-rendered headline plus up to two short callouts only when visible text rules provide exact text.",
-      "Keep callouts minimal, large, and readable; avoid dense poster-style copy, feature walls, cheap arrows, tiny icon grids, and unrelated claim stacking.",
-      "Do not use the same composition as lifestyle, scene A, or scene B. This should look like a designed selling-point module, not another raw use photo.",
+      "Feature image: build one premium Amazon A+ proof module around the strongest buyer benefit cluster.",
+      "Prove the benefit with one large product/action photograph, material proof, function proof, or problem-solution composition; avoid 2-3 unrelated signals in the same image.",
+      "Use at most one short image2-rendered phrase only when visible text rules provide exact text.",
+      "No stacked callout cards, blue feature boxes, badge walls, icon grids, cheap arrows, sticker pills, dense poster copy, or unrelated claim stacking.",
+      "Do not use the same composition as lifestyle, scene A, or scene B. This should look like a polished proof photograph, not another raw use photo.",
       "The product must remain the largest visual subject; do not let text, icons, or decorative graphics become the hero.",
     ],
     closeup: [
@@ -3576,18 +5096,19 @@ function buildLegacyImage2TypeRules(imageType: string, packCount: number) {
       "Avoid fantasy rooms, luxury sets, impossible reflections, unrealistic scale, and props that hide the product.",
     ],
     packaging: [
-      "Packaging image: show actual delivered contents or a clean package-content arrangement.",
+      "Packaging image: treat this as a contents/trust proof module, not a fake package ad.",
+      "Show real packaging only if it is clearly visible or explicitly confirmed in product facts.",
+      "If real packaging is not provided, do not render any box, bag, pouch, protective wrap, insert card, manual, barcode, sticker, accessory, or retail package fantasy; focus on the exact sellable item as what the buyer receives.",
       "Do not invent branded boxes, premium inserts, manuals, certifications, warranty cards, or extra accessories.",
-      "If real packaging is not provided, use neutral packaging or focus on product contents instead of fake package design.",
       "Make every included sellable component countable and separated enough for buyers to understand the order contents.",
-      "Even for a single-unit SKU, clarify the truthful received item, container, included components if verified, and packaging absence/presence in a clean premium layout.",
+      "Even for a single-unit SKU, clarify the truthful received item and any verified contents in a clean premium layout.",
       "Do not use packaging to upgrade perceived value beyond the evidence in the references.",
     ],
     comparison: [
-      "Comparison image: make the difference visually understandable without exaggerated claims.",
-      "Use honest before/after, with/without, old/new, or product-vs-generic comparison only when the legacy prompt supports it.",
-      "Use only short image2-rendered comparison labels from the visible text rules; do not create dense small comparison text or loud before/after advertising.",
-      "Keep both sides visually fair: same camera distance, similar lighting, no fake competitor logos, no impossible transformation, no exaggerated dirty-vs-perfect drama.",
+      "Comparison image: reinterpret this as a product-positive decision-proof module. Help the buyer decide through evidence from the product itself.",
+      "Do not create fake competitor products, black/gray inferior alternatives, Our/Other labels, red X/green check marks, fake percentages, or exaggerated before/after drama.",
+      "Use no visible text by default; rely on material, reach, scale, contact, or use proof instead of a comparison table.",
+      "If a true comparison is explicitly supported by the product facts, keep it fair, same-scale, same lighting, and claim-free.",
     ],
     lifestyle2: [
       "A+ closing image: create a polished final ecommerce scene that reinforces trust, use context, and product desirability.",
@@ -3620,11 +5141,12 @@ function buildLegacyImage2TypeRules(imageType: string, packCount: number) {
 function buildImage2TextByTypeRules(imageType: string) {
   const rules: Record<string, string[]> = {
     features: [
-      "Feature text layout: premium and restrained, at most one headline plus two short supporting callouts.",
-      "Text should name the shopper benefit in plain product language, while the image proves it visually.",
+      "Feature text layout: premium and restrained, at most one short headline or benefit phrase.",
+      "No supporting callout stack, badge row, icon label grid, blue card labels, or dense poster copy.",
+      "The image should prove the benefit visually; text is optional and secondary.",
     ],
     closeup: [
-      "Close-up text layout: use at most two short material/detail labels only when exact text is available.",
+      "Close-up text layout: use at most one short material/detail label only when exact text is available.",
       "Do not cover the material/detail area with text.",
     ],
     dimensions: [
@@ -3633,24 +5155,24 @@ function buildImage2TextByTypeRules(imageType: string) {
       "Do not render labels for any scale object because no scale object is allowed.",
     ],
     lifestyle: [
-      "Lifestyle text layout: if exact text is available, use one short headline and optionally one tiny-but-readable support label away from the product and hand/action.",
+      "Lifestyle text layout: default to no generated text; use one short exact value phrase only if it does not distract from the action.",
     ],
     packaging: [
-      "Packaging text layout: prefer clean contents photography; use only exact item-count or included-content text when the product is a bundle or pack.",
-      "Do not invent product label copy, certification marks, instruction cards, or branded box text.",
+      "Packaging text layout: default to no generated text; use only exact item-count text when the product is a verified bundle or pack.",
+      "Do not invent product label copy, certification marks, instruction cards, branded box text, package labels, barcodes, or insert text.",
     ],
     comparison: [
-      "Comparison text layout: use no text or two restrained labels at most; avoid loud before/after advertising.",
-      "No dense comparison tables, rating rows, fake percentages, red warning marks, or tiny footnotes.",
+      "Comparison text layout: use no generated text by default.",
+      "No Our/Other labels, dense comparison tables, rating rows, fake percentages, red/green marks, warning marks, or tiny footnotes.",
     ],
     lifestyle2: [
-      "A+ text layout: one short benefit headline plus one supporting value phrase is allowed only when exact text is available; otherwise keep clean negative space.",
+      "A+ text layout: default to no generated text in the base image; one exact short value phrase is allowed only when it improves clarity.",
     ],
     scene_a: [
-      "Scene A text layout: use one short exact value phrase when it helps; the action scene should carry most of the message.",
+      "Scene A text layout: default to no generated text; the action scene should carry the message.",
     ],
     scene_b: [
-      "Scene B text layout: use one short exact value phrase that differs from scene A when it helps.",
+      "Scene B text layout: default to no generated text; avoid repeating scene A with a different caption.",
     ],
   };
 
@@ -3668,18 +5190,50 @@ function buildLegacyImage2TextRules(
 
   if (imageType === "main") {
     return compactShotList([
-      "MAIN image visible text policy: image2 may render a very small amount of premium ecommerce text directly inside the final image. No local text overlay or post-production text layer will be added.",
-      "Use at most one large headline plus one short supporting callout. Text must be large, clean, sparse, and useful at small listing-thumbnail size.",
-      "Allowed main-image text must come only from the exact allowed text list below. Do not invent slogans, claims, certifications, warranty text, discount words, brand names, or label copy.",
+      "MAIN image visible text policy: default to no readable generated text. The main image should earn the click through product clarity, lighting, truthful scale/count, and one visual proof rather than copy.",
+      "Do not render generated headlines, callouts, badges, icons, arrows, slogans, price text, template phrases, or random letters on the main image.",
       allowedText.length
         ? [
-          `Required/allowed image2-rendered main text: ${allowedText.map((text) => `"${text}"`).join(", ")}.`,
-          `Use these exact words only. Render 1-${Math.min(allowedText.length, 2)} short text elements depending on the layout.`,
+          `Only optional main-image generated text: ${allowedText.map((text) => `"${text}"`).join(", ")}.`,
+          "Use it only if the pack quantity would otherwise be unclear; otherwise render no generated text.",
         ].join(" ")
-        : "If no exact short text is available, use the clean visual proof without readable marketing text.",
+        : "Render no generated marketing text on the main image.",
       "Do not render arrows, icon grids, dense bullets, tiny captions, price text, fake ratings, fake seals, watermarks, or random letters.",
       "Only preserve real readable text physically printed on the actual product or actual packaging when clearly visible in a real product reference. If no verified real label text exists, use blank/non-readable label areas or simple graphic color bands instead of fake readable words.",
-      "Place text in clean negative space away from the product edges, hands, use action, and important material/detail areas.",
+      "Never render template words such as \"Single Unit\", \"Compact Size\", \"Size Guide\", \"Our Brush\", or \"Other Brush\" on the main image.",
+    ]);
+  }
+
+  const externalLayout = getImage2ExternalLayout(plan, context);
+  const externalTextLines = getExternalLayoutTextLines(externalLayout);
+  if (externalTextLines.length > 0) {
+    if (Boolean(externalLayout?.renderTextDirectly)) {
+      const directTextLines = imageType === "dimensions" ? externalTextLines.slice(0, 2) : externalTextLines.slice(0, 1);
+      return compactShotList([
+        "Image2 should render only the approved A+ copy directly inside this final image because the GPT version is responsible for a finished information-rich asset.",
+        `Approved exact visible text lines: ${directTextLines.map((text) => `"${text}"`).join(", ")}.`,
+        imageType === "dimensions"
+          ? "Dimension text lock: render these as separate large measurement labels tied to thin guide lines. Do not combine the labels into one phrase, do not add inch conversions, and do not invent extra numbers."
+          : "Text lock: render exactly one clean headline text group. Do not render a subtitle, caption, chip, second copy line, or duplicate headline at another size.",
+        "Hard layout lock: do not create translucent gray or black bars, header strips, lower-third rectangles, text shadows that look like duplicate words, sticker badges, callout cards, or inset circles.",
+        "Typography must feel high-end: clean sans-serif, large readable letters, strong contrast, generous margins, and aligned spacing.",
+        "Keep all text fully inside clean negative space with at least 48 px visual margin from every crop edge.",
+        "The text must not cover the brush head, hand contact, wheel gap, microfiber detail, or measurement lines.",
+        "If text accuracy or spacing is uncertain, render fewer approved text lines rather than inventing, shrinking, overlapping, or mutating the text.",
+        "No extra words, random letters, fake logos, fake certifications, price text, watermark, dense bullets, tiny captions, or tiny paragraphs.",
+      ]);
+    }
+
+    return compactShotList([
+      "This GPT version uses a two-step text pipeline: Image2 generates a clean text-free base image, then the local compose layer adds the approved selling-point copy.",
+      `Approved external overlay copy after generation: ${externalTextLines.map((text) => `"${text}"`).join(", ")}.`,
+      "Do NOT render these words, any headline, caption, badge, label, random letters, or marketing copy inside the generated base image.",
+      "No-blank-panel lock: do not create a large empty white/off-white panel, blank information column, blank label box, or empty poster area just for text. Fill the square with rich photographic evidence.",
+      GPT_A_PLUS_SHARPNESS_LOCK,
+      "Keep the generated base image text-free. The local compose layer will place copy over natural low-detail photo areas, shadows, reflections, or depth-of-field areas without requiring blank space.",
+      "The base image still needs to visually prove the copy: show product contact, material, scale, use context, or contents evidence instead of relying on text alone.",
+      "Only preserve real readable text physically printed on the actual product or actual verified packaging.",
+      "No watermark, no fake logo, no fake certification mark, no dense small text, no tiny unreadable paragraphs.",
     ]);
   }
 
@@ -3694,14 +5248,14 @@ function buildLegacyImage2TextRules(
     allowedText.length
       ? [
         `Required/allowed image2-rendered text: ${allowedText.map((text) => `"${text}"`).join(", ")}.`,
-        `Use these exact words only. Render 1-${Math.min(allowedText.length, imageType === "features" ? 3 : 4)} short text elements depending on the layout.`,
+        `Use these exact words only. Render 1-${Math.min(allowedText.length, imageType === "dimensions" ? 4 : 1)} short text elements depending on the layout.`,
       ].join(" ")
       : "If no exact short text is available, use the clean visual scene without readable marketing text.",
     buildImage2TextByTypeRules(imageType),
     imageType === "dimensions"
       ? "For size labels, render only exact visible measurements from the allowed text list. Do not invent numbers."
       : "",
-    "Place generated text as large readable ecommerce callouts, title labels, or simple comparison labels; do not place invented text on the physical product label unless it is verified.",
+    "Place any allowed generated text as one large readable ecommerce phrase or exact measurement label; do not place invented text on the physical product label unless it is verified.",
     "No watermark, no fake logo, no fake certification mark, no random letters, no dense small text, no tiny unreadable paragraphs.",
   ]);
 }
@@ -3717,6 +5271,113 @@ function buildLegacyImage2ReferenceBlock(context: LegacyImage2PlanContext) {
   ].join("\n");
 }
 
+function getImage2ExternalLayout(plan: ImageStudioPlan, context: LegacyImage2PlanContext) {
+  const directLayout = plan.layout;
+  if (directLayout && typeof directLayout === "object" && !Array.isArray(directLayout)) {
+    return directLayout as Record<string, unknown>;
+  }
+  return getLegacyImage2LayoutRecord(context, plan.imageType) || undefined;
+}
+
+function getExternalLayoutTextLines(layout?: Record<string, unknown>) {
+  const textBlocks = Array.isArray(layout?.textBlocks) ? layout.textBlocks : [];
+  return textBlocks.flatMap((block) => {
+    if (!block || typeof block !== "object") return [];
+    const record = block as Record<string, unknown>;
+    const lines = Array.isArray(record.lines) ? record.lines : [];
+    return lines.filter((line): line is string => typeof line === "string" && line.trim().length > 0);
+  });
+}
+
+function getCompactGptLegacyPrompt(prompt: string) {
+  const normalized = prompt.replace(/\s+/g, " ").trim();
+  if (!normalized || normalized.includes(`GPT PREMIUM A+ PLAN OVERRIDE ${GPT_A_PLUS_STRATEGY_VERSION}`)) {
+    return "";
+  }
+  return normalized.length > 520 ? `${normalized.slice(0, 520).trim()}...` : normalized;
+}
+
+function truncateCompactGptPromptLine(value: unknown, maxLength = 360) {
+  if (typeof value !== "string") return "";
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, maxLength).trim()}...`;
+}
+
+function buildCompactGptPremiumImage2AdapterPrompt(
+  plan: ImageStudioPlan,
+  basePrompt: string,
+  context: LegacyImage2PlanContext,
+) {
+  const layout = getImage2ExternalLayout(plan, context);
+  const allocation = buildLegacyImage2InsightAllocation(plan.imageType, context);
+  const strategy = (plan as Record<string, unknown>).gptAPlusStrategy as Record<string, unknown> | undefined;
+  const productFacts = buildLegacyImage2ProductFacts(context).slice(0, 7);
+  const externalTextLines = getExternalLayoutTextLines(layout).slice(0, plan.imageType === "dimensions" ? 3 : 4);
+  const compositionHint = truncateCompactGptPromptLine(layout?.compositionHint, 360);
+  const cleanLegacyPrompt = getCompactGptLegacyPrompt(basePrompt);
+  const canvas = context.imageSize || "800x800";
+  const roleName = typeof strategy?.roleName === "string" ? strategy.roleName : plan.title || plan.imageType;
+  const buyerQuestion = typeof strategy?.buyerQuestion === "string" ? strategy.buyerQuestion : allocation.buyerQuestions[0] || "";
+  const purchaseDriver = typeof strategy?.purchaseDriver === "string" ? strategy.purchaseDriver : allocation.purchaseDrivers[0] || "";
+  const visualProof = compactShotList([
+    Array.isArray(strategy?.visualProof) ? strategy.visualProof : [],
+    allocation.proofPoints,
+    allocation.usageActions,
+  ]).slice(0, 4);
+
+  const textPipeline = externalTextLines.length
+    ? `Local overlay text after generation: ${externalTextLines.map((line) => `"${line}"`).join(", ")}. Do not render these words in the base image.`
+    : "No local overlay copy was approved; keep the base image text-free.";
+
+  return [
+    LEGACY_IMAGE2_ADAPTER_MARKER,
+    GPT_A_PLUS_COMPACT_PROMPT_MARKER,
+    "",
+    "TASK",
+    formatShotBriefList(compactShotList([
+      `Create one ${canvas} text-free base image for the GPT Amazon A+ final compose layer.`,
+      `Image role: ${IMAGE_TYPE_LABELS[plan.imageType] || plan.imageType} (${plan.imageType}); ${roleName}.`,
+      buyerQuestion ? `Buyer question: ${buyerQuestion}` : "",
+      purchaseDriver ? `Purchase driver: ${purchaseDriver}` : "",
+      visualProof.length ? `Visual proof cues: ${visualProof.join("; ")}` : "",
+    ])),
+    "",
+    "REFERENCES",
+    buildLegacyImage2ReferenceBlock(context),
+    "",
+    "PRODUCT FACTS",
+    formatShotBriefList(productFacts),
+    "",
+    "COMPOSITION",
+    formatShotBriefList(compactShotList([
+      compositionHint,
+      plan.imageType === "main"
+        ? "Amazon main image: exact sellable product only on pure white #FFFFFF, crisp silhouette, natural shadow, no text."
+        : "Reference-grade A+ base: commercial render/photo composite with one dominant hero action and 2-3 photographic proof zones or detail windows. It must not be a plain close-up or stock scene.",
+      plan.imageType !== "main"
+        ? "Use tight crop, diagonal or low three-quarter camera, premium rim light, glossy shadows/reflections, tactile material detail, and no blank poster panel."
+        : "",
+    ])),
+    "",
+    "TEXT PIPELINE",
+    formatShotBriefList([
+      textPipeline,
+      "TEXT-FREE BASE LOCK: no headlines, captions, labels, arrows, icons, fake specs, badges, watermarks, random letters, or pseudo text.",
+    ]),
+    "",
+    "HARD LOCKS",
+    formatShotBriefList(compactShotList([
+      GPT_A_PLUS_PRODUCT_IDENTITY_LOCK,
+      GPT_A_PLUS_CLEAN_CORNER_LOCK,
+      plan.imageType !== "main" ? GPT_A_PLUS_STRUCTURE_LOCK : "",
+      GPT_A_PLUS_SHARPNESS_LOCK,
+      "Do not invent packaging, accessories, competitors, awards, certifications, numbers, brand claims, or before/after results not visible in the references.",
+    ])),
+    cleanLegacyPrompt ? ["", "USER/LEGACY NOTE", cleanLegacyPrompt].join("\n") : "",
+  ].filter(Boolean).join("\n");
+}
+
 function buildLegacyImage2AdapterPrompt(
   plan: ImageStudioPlan,
   basePrompt: string,
@@ -3724,10 +5385,15 @@ function buildLegacyImage2AdapterPrompt(
 ) {
   const clampedPack = Math.max(1, Math.min(12, Math.floor(context.packCount || 1)));
   const sanitizedBasePrompt = sanitizeLegacyImage2BasePrompt(basePrompt, plan.imageType);
+  if (isGptPremiumAnalysisContext(context)) {
+    return buildCompactGptPremiumImage2AdapterPrompt(plan, sanitizedBasePrompt, context);
+  }
   const typeRules = buildLegacyImage2TypeRules(plan.imageType, clampedPack);
   const textRules = buildLegacyImage2TextRules(plan, context, clampedPack, sanitizedBasePrompt);
   const productModeRules = buildLegacyImage2ProductModeRules(context.productMode);
   const productFacts = buildLegacyImage2ProductFacts(context);
+  const amazonOutputRules = buildAmazonIntegratedOutputRules(context, plan.imageType);
+  const gptPremiumAnalysisRules = buildGptPremiumAnalysisRules(context, plan.imageType);
   const planAllocationRules = buildLegacyImage2PlanAllocationRules(context, plan.imageType);
   const premiumVisualRules = buildLegacyImage2PremiumVisualRules(plan.imageType);
   const premiumInformationRules = buildImage2PremiumInformationHierarchyRules(plan.imageType);
@@ -3757,7 +5423,7 @@ function buildLegacyImage2AdapterPrompt(
     "",
     "TASK",
     formatShotBriefList(compactShotList([
-      "Create one finished Temu-ready ecommerce product image.",
+      "Create one finished Amazon-ready ecommerce product image.",
       `Image type: ${IMAGE_TYPE_LABELS[plan.imageType] || plan.imageType} (${plan.imageType}).`,
       context.salesRegion ? `Target market: ${context.salesRegion}.` : "",
       context.imageLanguage ? `Visible language preference: ${context.imageLanguage}.` : "",
@@ -3773,6 +5439,12 @@ function buildLegacyImage2AdapterPrompt(
     "",
     "PRODUCT FACTS",
     formatShotBriefList(productFacts),
+    "",
+    "AMAZON OUTPUT ROLE",
+    formatShotBriefList(amazonOutputRules),
+    "",
+    "GPT PREMIUM ANALYSIS",
+    formatShotBriefList(gptPremiumAnalysisRules),
     "",
     "PRODUCT MODE",
     formatShotBriefList(productModeRules),
@@ -3829,6 +5501,7 @@ function buildLegacyImage2AdapterPrompt(
       "If the legacy prompt conflicts with the adapter, the adapter wins for product fidelity, text, dimensions, packaging, count, and image-type behavior.",
       ...iterationRules,
       "Keep the image clean, realistic, commercially plausible, and immediately understandable to a cross-border ecommerce shopper.",
+      "CLEAN CORNERS RULE: all four corners must stay free of watermarks, logos, UI marks, random icons, pseudo text, signatures, timestamps, and decorative corner labels.",
       "Output only the final image; do not create a collage unless the image type or legacy prompt explicitly asks for one.",
     ]),
   ].join("\n");
@@ -3842,6 +5515,7 @@ function buildLegacyImage2Plan(
   const basePrompt = unwrapLegacyImage2AdapterPrompt(sourcePrompt);
   const context = normalizeLegacyImage2PlanContext(contextOrPackCount);
   const prompt = buildLegacyImage2AdapterPrompt(plan, basePrompt, context);
+  const layout = getImage2ExternalLayout(plan, context);
 
   return {
     ...plan,
@@ -3849,8 +5523,8 @@ function buildLegacyImage2Plan(
     promptSource: IMAGE2_ECOMMERCE_PLAN_SOURCE,
     compiledPrompt: undefined,
     shotBrief: undefined,
-    layout: undefined,
-    lang: undefined,
+    layout,
+    lang: plan.lang || context.imageLanguage || undefined,
   };
 }
 
@@ -3870,6 +5544,8 @@ const IMAGE2_ADAPTER_SECTION_HEADINGS = [
   "REFERENCE IMAGES",
   "REFERENCE RELIABILITY",
   "PRODUCT FACTS",
+  "AMAZON OUTPUT ROLE",
+  "GPT PREMIUM ANALYSIS",
   "PRODUCT MODE",
   "PLAN ALLOCATION",
   "PREMIUM VISUAL DIRECTION",
@@ -3955,7 +5631,7 @@ function getImageTypeSummaryHint(imageType: string) {
   if (imageType === "dimensions") return "尺寸图优先保证比例清楚、标注可读。";
   if (imageType === "lifestyle" || imageType === "lifestyle2") return "场景图要贴近日常使用环境，强化代入感。";
   if (imageType === "packaging") return "包装图要交代包装完整度和开箱感受。";
-  if (imageType === "comparison") return "对比图要突出差异点，但不要做误导性夸张。";
+  if (imageType === "comparison") return "选择证明图要用产品本身证明差异，不做虚构竞品或夸张对比。";
   if (imageType === "scene_a" || imageType === "scene_b") return "场景图要稳定表达核心卖点和使用氛围。";
   return "";
 }
@@ -4131,9 +5807,6 @@ export default function ImageStudioGPT() {
   const [analyzing, setAnalyzing] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
   const [planning, setPlanning] = useState(false);
-  const [designerRunning, setDesignerRunning] = useState(false);
-  const [designerResult, setDesignerResult] = useState<DesignerResult | null>(null);
-  const [designerDrawerOpen, setDesignerDrawerOpen] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [downloadingAll, setDownloadingAll] = useState(false);
   const [downloadingTypes, setDownloadingTypes] = useState<Record<string, boolean>>({});
@@ -4667,8 +6340,12 @@ export default function ImageStudioGPT() {
     setAnalyzing(true);
     try {
       const resolved = await resolveImageStudioInputs();
-      const payload = await imageStudioAPI.analyze({ files: resolved.payloads, productMode: resolved.productMode });
-      setAnalysis(normalizeImageStudioAnalysis(payload));
+      const payload = await imageStudioAPI.analyze({
+        files: resolved.payloads,
+        productMode: resolved.productMode,
+        analysisProfile: GPT_PREMIUM_ANALYSIS_PROFILE,
+      });
+      setAnalysis(upgradeGptPremiumAnalysis(normalizeImageStudioAnalysis(payload)));
       setPlans([]);
       setResults({});
       setImageVariants({});
@@ -4699,8 +6376,13 @@ export default function ImageStudioGPT() {
     setRegenerating(true);
     try {
       const resolved = await resolveImageStudioInputs();
-      const payload = await imageStudioAPI.regenerateAnalysis({ files: resolved.payloads, productMode: resolved.productMode, analysis });
-      setAnalysis((prev) => normalizeImageStudioAnalysis({
+      const payload = await imageStudioAPI.regenerateAnalysis({
+        files: resolved.payloads,
+        productMode: resolved.productMode,
+        analysis,
+        analysisProfile: GPT_PREMIUM_ANALYSIS_PROFILE,
+      });
+      setAnalysis((prev) => upgradeGptPremiumAnalysis(normalizeImageStudioAnalysis({
         ...prev,
         ...payload,
         productFacts: payload.productFacts ?? prev.productFacts,
@@ -4710,7 +6392,7 @@ export default function ImageStudioGPT() {
         creativeDirection: payload.creativeDirection
           ? { ...(prev.creativeDirection || {}), ...payload.creativeDirection }
           : prev.creativeDirection,
-      }));
+      })));
       message.success("卖点、人群和场景已重新生成");
     } catch (error) {
       message.error(error instanceof Error ? error.message : "重新生成失败");
@@ -4732,14 +6414,20 @@ export default function ImageStudioGPT() {
 
     try {
       const resolved = await resolveImageStudioSourceFiles();
+      const gptAnalysis = upgradeGptPremiumAnalysis(analysis);
+      setAnalysis(gptAnalysis);
       const nextPlans = await imageStudioAPI.generatePlans({
-        analysis,
+        analysis: gptAnalysis,
         imageTypes: selectedImageTypes,
         salesRegion,
         imageSize,
         productMode: resolved.productMode,
       });
-      const normalizedPlans = Array.isArray(nextPlans) ? nextPlans : [];
+      const normalizedPlans = applyGptPremiumPlanOverrides(
+        Array.isArray(nextPlans) ? nextPlans : [],
+        gptAnalysis,
+        selectedImageTypes,
+      );
       const clampedPack = Math.max(1, Math.min(12, Math.floor(packCount || 1)));
       const image2Plans = buildLegacyImage2Plans(normalizedPlans, {
         packCount: clampedPack,
@@ -4748,8 +6436,8 @@ export default function ImageStudioGPT() {
         salesRegion,
         imageLanguage,
         imageSize,
-        productName: normalizeProductDisplayName(analysis.productName) || "Unnamed Product",
-        analysis,
+        productName: normalizeProductDisplayName(gptAnalysis.productName) || "Unnamed Product",
+        analysis: gptAnalysis,
       });
       logImage2PlanDiagnostics("generated-plans", image2Plans);
       setPlans(image2Plans);
@@ -4816,10 +6504,12 @@ export default function ImageStudioGPT() {
     try {
       const resolved = await resolveImageStudioInputs();
       if (!runInBackground) setActiveStep(3);
-      // 方案阶段已经生成 image2 电商规格；这里仅兼容历史旧方案或手动粘贴的旧 prompt。
-      // 不启用 ShotBrief，不启用后端本地文字合成层，整图仍由 image2 直接生成。
+      // GPT plans stay Image2-first, but keep the v2 layout so approved selling-point copy
+      // is composed locally after the text-free base image is generated.
       const clampedPack = Math.max(1, Math.min(12, Math.floor(packCount || 1)));
-      const generationPlans = buildLegacyImage2Plans(plans, {
+      const gptAnalysis = upgradeGptPremiumAnalysis(analysis);
+      const premiumPlans = applyGptPremiumPlanOverrides(plans, gptAnalysis, selectedImageTypes);
+      const generationPlans = buildLegacyImage2Plans(premiumPlans, {
         packCount: clampedPack,
         productMode: resolved.productMode,
         referenceImages: buildImage2ReferenceImages(resolved.files, resolved.productMode, resolved.comboLabel),
@@ -4827,7 +6517,7 @@ export default function ImageStudioGPT() {
         imageLanguage,
         imageSize,
         productName: displayProductName,
-        analysis,
+        analysis: gptAnalysis,
       });
       logImage2PlanDiagnostics(runInBackground ? "start-generate-background" : "start-generate", generationPlans);
       plansRef.current = generationPlans;
@@ -5252,6 +6942,7 @@ export default function ImageStudioGPT() {
       } else {
         files = await buildNativeImagePayloads(effectiveFiles);
       }
+      const gptAnalysis = upgradeGptPremiumAnalysis(analysis);
       const redrawPlan = buildLegacyImage2Plan(redrawDraftPlan, {
         packCount,
         productMode: redrawProductMode,
@@ -5260,7 +6951,7 @@ export default function ImageStudioGPT() {
         imageLanguage,
         imageSize,
         productName: displayProductName,
-        analysis,
+        analysis: gptAnalysis,
       });
       logImage2PlanDiagnostics("redraw-generate", [redrawPlan]);
 
@@ -6403,57 +8094,27 @@ export default function ImageStudioGPT() {
     });
   };
 
-  const handleTryDesignerAgent = async () => {
-    if (!imageStudioAPI) return;
-    if (!hasAnalysis) {
-      message.warning("请先完成商品分析");
-      return;
-    }
-    setDesignerRunning(true);
-    setDesignerDrawerOpen(true);
-    try {
-      const res = await imageStudioAPI.runDesigner({
-        analysis,
-        extraNotes: "",
-        debug: false,
-      });
-      setDesignerResult(res as DesignerResult);
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : "设计师 Agent 调用失败");
-      setDesignerResult({
-        ok: false,
-        sharedDna: null,
-        briefs: [],
-        auditReport: null,
-        reworkRounds: 0,
-        warnings: [],
-        errors: [error instanceof Error ? error.message : String(error)],
-      });
-    } finally {
-      setDesignerRunning(false);
-    }
-  };
-
   const renderStepOne = () => (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
       <Card style={{ borderRadius: 16, borderColor: "#ffe0c2", background: "#fffaf5" }} bodyStyle={{ padding: 16 }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
           <div style={{ display: "grid", gap: 8, minWidth: 260 }}>
-            <Title level={4} style={{ margin: 0, color: TEMU_TEXT }}>🧪 设计师工作台（三步）</Title>
+            <Title level={4} style={{ margin: 0, color: TEMU_TEXT }}>GPT 版 Amazon 出图方案</Title>
             <Space wrap size={6}>
-              <Tag color="orange" style={{ borderRadius: 999 }}>1 商品分析</Tag>
-              <Tag color="blue" style={{ borderRadius: 999 }}>2 设计 Brief</Tag>
-              <Tag color="green" style={{ borderRadius: 999 }}>3 合成真实图</Tag>
+              <Tag color="orange" style={{ borderRadius: 999 }}>主图合规</Tag>
+              <Tag color="blue" style={{ borderRadius: 999 }}>A+ 自动叙事</Tag>
+              <Tag color="green" style={{ borderRadius: 999 }}>800×800 方图</Tag>
             </Space>
           </div>
           <Button
             type="primary"
-            onClick={handleTryDesignerAgent}
-            loading={designerRunning}
+            icon={<RocketOutlined />}
+            onClick={handleGeneratePlans}
+            loading={planning}
             disabled={!hasAnalysis}
             style={{ borderRadius: 14, background: TEMU_ORANGE, borderColor: TEMU_ORANGE }}
           >
-            打开工作台
+            生成出图方案
           </Button>
         </div>
       </Card>
@@ -6461,14 +8122,6 @@ export default function ImageStudioGPT() {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "4px 0", flexWrap: "wrap" }}>
         <Button size="small" onClick={() => setActiveStep(0)}>上一步</Button>
         <Space size={8}>
-          <Button
-            onClick={handleTryDesignerAgent}
-            loading={designerRunning}
-            disabled={!hasAnalysis}
-            style={{ borderRadius: 14 }}
-          >
-            运行设计师工作台
-          </Button>
           <Button
             type="primary"
             icon={<RocketOutlined />}
@@ -7288,26 +8941,6 @@ export default function ImageStudioGPT() {
           />
         ) : (
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有历史记录" />
-        )}
-      </Drawer>
-
-      <Drawer
-        title="🧪 设计师工作台（三步）"
-        placement="right"
-        width={1080}
-        open={designerDrawerOpen}
-        onClose={() => setDesignerDrawerOpen(false)}
-        destroyOnClose={false}
-      >
-        {designerRunning && !designerResult ? (
-          <Space direction="vertical" size={16} align="center" style={{ width: "100%", padding: 40 }}>
-            <Spin size="large" />
-            <Text type="secondary">设计师工作台运行中，5 stage 串行 + 10 张图并行，首轮约需 1-2 分钟…</Text>
-          </Space>
-        ) : designerResult ? (
-          <DesignerSummary result={designerResult} primaryUploadFile={primaryUploadFile} />
-        ) : (
-          <Empty description="尚未执行" />
         )}
       </Drawer>
     </div>

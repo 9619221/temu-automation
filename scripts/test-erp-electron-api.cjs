@@ -163,6 +163,15 @@ async function main() {
     });
     assert.equal(supplier.id, "supplier_ipc");
 
+    const companySku = await invoke("erp:sku:create", {
+      id: "sku_company_ipc",
+      internalSkuCode: "SKU-COMPANY-001",
+      productName: "Company Level SKU",
+      supplierId: supplier.id,
+    });
+    assert.equal(companySku.accountId, null);
+    assert.equal(companySku.companyId, "company_default");
+
     const sku = await invoke("erp:sku:create", {
       id: "sku_ipc",
       accountId: account.id,
@@ -173,7 +182,11 @@ async function main() {
     assert.equal(sku.accountId, account.id);
 
     const skus = await invoke("erp:sku:list", { accountId: account.id });
-    assert.equal(skus.length, 1);
+    assert.equal(skus.length, 2);
+    assert.equal(skus.some((item) => item.accountId === null), true);
+
+    const companySkus = await invoke("erp:sku:list", { companyId: "company_default" });
+    assert.equal(companySkus.length, 2);
 
     const seedDb = openErpDatabase({ userDataDir: tempUserData });
     try {

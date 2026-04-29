@@ -7,7 +7,16 @@ export interface FrontendLogEntry {
   id: string;
   timestamp: number;
   level: FrontendLogLevel;
-  source: "console" | "window-error" | "unhandledrejection" | "workflow-pack";
+  source:
+    | "console"
+    | "window-error"
+    | "unhandledrejection"
+    | "workflow-pack"
+    | "main"
+    | "worker"
+    | "worker-rpc"
+    | "renderer"
+    | "image-studio";
   message: string;
   detail?: string;
   taskId?: string;
