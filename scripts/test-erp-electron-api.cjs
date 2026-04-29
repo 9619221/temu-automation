@@ -801,6 +801,21 @@ async function main() {
                     },
                   ],
                 },
+                {
+                  tradeId: "1688-order-ipc-alt",
+                  orderStatus: "waitsellerpush",
+                  sellerCompanyName: "1688 Detail Supplier",
+                  totalAmount: "510.00",
+                  createTime: "2026-04-29 16:05:00",
+                  products: [
+                    {
+                      offerId: "1688-offer-ipc",
+                      skuId: "sku-blue",
+                      specId: "spec-blue",
+                      quantity: 60,
+                    },
+                  ],
+                },
               ],
             },
           },
@@ -809,10 +824,50 @@ async function main() {
     });
     assert.equal(sync1688Order.statusCode, 200);
     const sync1688OrderResult = JSON.parse(sync1688Order.body).result.result;
-    assert.equal(sync1688OrderResult.matchStatus, "bound");
-    assert.equal(sync1688OrderResult.externalOrderId, "1688-order-ipc");
-    assert.equal(sync1688OrderResult.purchaseOrder.externalOrderId, "1688-order-ipc");
-    assert.equal(sync1688OrderResult.purchaseOrder.externalOrderStatus, "waitbuyerpay");
+    assert.equal(sync1688OrderResult.matchStatus, "needs_confirmation");
+    assert.equal(sync1688OrderResult.matchedCount, 2);
+
+    const bind1688Order = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "sync_1688_orders",
+        poId: "po_1688_preview_ipc",
+        externalOrderId: "1688-order-ipc-alt",
+        mockOrderListResponse: {
+          result: {
+            data: {
+              orderList: [
+                {
+                  tradeId: "1688-order-ipc",
+                  orderStatus: "waitbuyerpay",
+                  sellerCompanyName: "1688 Detail Supplier",
+                  totalAmount: "510.00",
+                  products: [{ offerId: "1688-offer-ipc", skuId: "sku-blue", specId: "spec-blue", quantity: 60 }],
+                },
+                {
+                  tradeId: "1688-order-ipc-alt",
+                  orderStatus: "waitsellerpush",
+                  sellerCompanyName: "1688 Detail Supplier",
+                  totalAmount: "510.00",
+                  products: [{ offerId: "1688-offer-ipc", skuId: "sku-blue", specId: "spec-blue", quantity: 60 }],
+                },
+              ],
+            },
+          },
+        },
+      }),
+    });
+    assert.equal(bind1688Order.statusCode, 200);
+    const bind1688OrderResult = JSON.parse(bind1688Order.body).result.result;
+    assert.equal(bind1688OrderResult.matchStatus, "bound");
+    assert.equal(bind1688OrderResult.externalOrderId, "1688-order-ipc-alt");
+    assert.equal(bind1688OrderResult.purchaseOrder.externalOrderId, "1688-order-ipc-alt");
+    assert.equal(bind1688OrderResult.purchaseOrder.externalOrderStatus, "waitsellerpush");
 
     const buyerApproveDenied = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
       method: "POST",

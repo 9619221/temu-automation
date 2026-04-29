@@ -166,6 +166,22 @@ interface Alibaba1688AddressRow {
   isDefault?: boolean;
 }
 
+interface OrderMatchCandidate {
+  externalOrderId: string;
+  status?: string | null;
+  supplierName?: string | null;
+  totalAmount?: number | null;
+  createdAt?: string | null;
+  matchScore?: number;
+  matchReasons?: string[];
+}
+
+interface OrderMatchDialogState {
+  po: PurchaseOrderRow;
+  query?: Record<string, any>;
+  matches: OrderMatchCandidate[];
+}
+
 interface SkuOption {
   id: string;
   internalSkuCode?: string;
@@ -282,6 +298,8 @@ export default function PurchaseCenter() {
   const [address1688Open, setAddress1688Open] = useState(false);
   const [poPrId, setPoPrId] = useState<string | null>(null);
   const [detailPrId, setDetailPrId] = useState<string | null>(null);
+  const [orderMatchDialog, setOrderMatchDialog] = useState<OrderMatchDialogState | null>(null);
+  const [selectedExternalOrderId, setSelectedExternalOrderId] = useState<string | null>(null);
   const [realtimeStatus, setRealtimeStatus] = useState<"connected" | "updated" | "unavailable">("unavailable");
 
   const [requestForm] = Form.useForm<RequestFormValues>();
@@ -516,9 +534,33 @@ export default function PurchaseCenter() {
     if (matchStatus === "bound") {
       message.success(`已绑定 1688 订单：${result.result.externalOrderId}`);
     } else if (matchStatus === "needs_confirmation") {
-      message.warning("找到多个可能订单，下一版会加入人工选择绑定");
+      const matches = Array.isArray(result?.result?.matches) ? result.result.matches : [];
+      setOrderMatchDialog({
+        po: row,
+        query: result?.result?.query || {},
+        matches,
+      });
+      setSelectedExternalOrderId(matches[0]?.externalOrderId || null);
+      message.warning("找到多个可能订单，请选择一个绑定");
     } else if (matchStatus === "not_found") {
       message.warning("暂未匹配到 1688 订单，请稍后再同步");
+    }
+  };
+
+  const confirm1688OrderBind = async () => {
+    if (!orderMatchDialog || !selectedExternalOrderId) return;
+    const result = await runAction(`1688-bind-${orderMatchDialog.po.id}`, {
+      action: "sync_1688_orders",
+      poId: orderMatchDialog.po.id,
+      ...(orderMatchDialog.query || {}),
+      externalOrderId: selectedExternalOrderId,
+    });
+    if (result?.result?.matchStatus === "bound") {
+      message.success(`已绑定 1688 订单：${result.result.externalOrderId}`);
+      setOrderMatchDialog(null);
+      setSelectedExternalOrderId(null);
+    } else {
+      message.warning("绑定失败：未能重新匹配到所选订单，请稍后重试");
     }
   };
 
@@ -1235,6 +1277,78 @@ export default function PurchaseCenter() {
             <TextArea rows={3} placeholder="对供应商、付款或入库的补充说明" />
           </Form.Item>
         </Form>
+      </Modal>
+
+      <Modal
+        open={Boolean(orderMatchDialog)}
+        title="选择 1688 订单"
+        okText="确认绑定"
+        cancelText="取消"
+        width={760}
+        confirmLoading={orderMatchDialog ? actingKey === `1688-bind-${orderMatchDialog.po.id}` : false}
+        okButtonProps={{ disabled: !selectedExternalOrderId }}
+        onCancel={() => {
+          setOrderMatchDialog(null);
+          setSelectedExternalOrderId(null);
+        }}
+        onOk={confirm1688OrderBind}
+        destroyOnClose
+      >
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message={orderMatchDialog ? `采购单 ${orderMatchDialog.po.poNo || orderMatchDialog.po.id} 找到多个可能的 1688 订单，请人工确认。` : ""}
+        />
+        <Table<OrderMatchCandidate>
+          rowKey="externalOrderId"
+          size="small"
+          pagination={false}
+          dataSource={orderMatchDialog?.matches || []}
+          rowSelection={{
+            type: "radio",
+            selectedRowKeys: selectedExternalOrderId ? [selectedExternalOrderId] : [],
+            onChange: (keys) => setSelectedExternalOrderId(String(keys[0] || "")),
+          }}
+          columns={[
+            {
+              title: "1688订单号",
+              dataIndex: "externalOrderId",
+              width: 180,
+              render: (value) => <Text strong>{value}</Text>,
+            },
+            {
+              title: "供应商",
+              dataIndex: "supplierName",
+              render: (value) => value || "-",
+            },
+            {
+              title: "金额",
+              dataIndex: "totalAmount",
+              width: 100,
+              render: formatCurrency,
+            },
+            {
+              title: "状态",
+              dataIndex: "status",
+              width: 120,
+              render: (value) => value || "-",
+            },
+            {
+              title: "匹配",
+              key: "match",
+              width: 160,
+              render: (_value, row) => (
+                <Space direction="vertical" size={2}>
+                  <Text>{row.matchScore || 0} 分</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {(row.matchReasons || []).join(", ") || "-"}
+                  </Text>
+                </Space>
+              ),
+            },
+          ]}
+        />
       </Modal>
 
       <Drawer
