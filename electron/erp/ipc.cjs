@@ -60,6 +60,7 @@ const BROADCAST_PURCHASE_ACTIONS = new Set([
   "source_1688_keyword",
   "refresh_1688_product_detail",
   "save_1688_address",
+  "upsert_sku_1688_source",
   "preview_1688_order",
   "generate_po",
   "push_1688_order",
@@ -1549,10 +1550,35 @@ function listSkus(params = {}) {
   const accountId = optionalString(params.accountId);
   const rows = accountId
     ? db.prepare(`
-      SELECT *
-      FROM erp_skus
-      WHERE account_id = @account_id
-      ORDER BY updated_at DESC, created_at DESC
+      SELECT
+        sku.*,
+        COALESCE(source_count.source_count, 0) AS procurement_source_count,
+        source.id AS primary_1688_source_id,
+        source.external_offer_id AS primary_1688_offer_id,
+        source.external_sku_id AS primary_1688_sku_id,
+        source.external_spec_id AS primary_1688_spec_id,
+        source.supplier_name AS primary_1688_supplier_name,
+        source.product_title AS primary_1688_product_title,
+        source.unit_price AS primary_1688_unit_price,
+        source.moq AS primary_1688_moq
+      FROM erp_skus sku
+      LEFT JOIN (
+        SELECT account_id, sku_id, COUNT(*) AS source_count
+        FROM erp_sku_1688_sources
+        WHERE status = 'active'
+        GROUP BY account_id, sku_id
+      ) source_count ON source_count.account_id = sku.account_id AND source_count.sku_id = sku.id
+      LEFT JOIN erp_sku_1688_sources source ON source.id = (
+        SELECT id
+        FROM erp_sku_1688_sources item
+        WHERE item.account_id = sku.account_id
+          AND item.sku_id = sku.id
+          AND item.status = 'active'
+        ORDER BY item.is_default DESC, item.updated_at DESC, item.created_at DESC
+        LIMIT 1
+      )
+      WHERE sku.account_id = @account_id
+      ORDER BY sku.updated_at DESC, sku.created_at DESC
       LIMIT @limit OFFSET @offset
     `).all({
       account_id: accountId,
@@ -1560,16 +1586,41 @@ function listSkus(params = {}) {
       offset: normalizeOffset(params.offset),
     })
     : db.prepare(`
-      SELECT *
-      FROM erp_skus
-      ORDER BY updated_at DESC, created_at DESC
+      SELECT
+        sku.*,
+        COALESCE(source_count.source_count, 0) AS procurement_source_count,
+        source.id AS primary_1688_source_id,
+        source.external_offer_id AS primary_1688_offer_id,
+        source.external_sku_id AS primary_1688_sku_id,
+        source.external_spec_id AS primary_1688_spec_id,
+        source.supplier_name AS primary_1688_supplier_name,
+        source.product_title AS primary_1688_product_title,
+        source.unit_price AS primary_1688_unit_price,
+        source.moq AS primary_1688_moq
+      FROM erp_skus sku
+      LEFT JOIN (
+        SELECT account_id, sku_id, COUNT(*) AS source_count
+        FROM erp_sku_1688_sources
+        WHERE status = 'active'
+        GROUP BY account_id, sku_id
+      ) source_count ON source_count.account_id = sku.account_id AND source_count.sku_id = sku.id
+      LEFT JOIN erp_sku_1688_sources source ON source.id = (
+        SELECT id
+        FROM erp_sku_1688_sources item
+        WHERE item.account_id = sku.account_id
+          AND item.sku_id = sku.id
+          AND item.status = 'active'
+        ORDER BY item.is_default DESC, item.updated_at DESC, item.created_at DESC
+        LIMIT 1
+      )
+      ORDER BY sku.updated_at DESC, sku.created_at DESC
       LIMIT @limit OFFSET @offset
     `).all({
       limit: normalizeLimit(params.limit),
       offset: normalizeOffset(params.offset),
     });
 
-  return rows.map(toCamelRow);
+  return rows.map(toSkuOptionRow);
 }
 
 function createSku(payload = {}) {
@@ -1605,6 +1656,199 @@ function createSku(payload = {}) {
   `).run(row);
 
   return toCamelRow(db.prepare("SELECT * FROM erp_skus WHERE id = ?").get(row.id));
+}
+
+function toSku1688Source(row) {
+  if (!row) return null;
+  const next = toCamelRow(row);
+  next.isDefault = Boolean(row.is_default);
+  next.sourcePayload = parseJsonObject(row.source_payload_json);
+  delete next.sourcePayloadJson;
+  return next;
+}
+
+function toSkuOptionRow(row) {
+  const next = toCamelRow(row);
+  next.procurementSourceCount = Number(row.procurement_source_count || 0);
+  if (row.primary_1688_source_id) {
+    next.primary1688Source = {
+      id: row.primary_1688_source_id,
+      externalOfferId: row.primary_1688_offer_id,
+      externalSkuId: row.primary_1688_sku_id || "",
+      externalSpecId: row.primary_1688_spec_id || "",
+      supplierName: row.primary_1688_supplier_name || "",
+      productTitle: row.primary_1688_product_title || "",
+      unitPrice: row.primary_1688_unit_price,
+      moq: row.primary_1688_moq,
+    };
+  } else {
+    next.primary1688Source = null;
+  }
+  for (const key of [
+    "primary1688SourceId",
+    "primary1688OfferId",
+    "primary1688SkuId",
+    "primary1688SpecId",
+    "primary1688SupplierName",
+    "primary1688ProductTitle",
+    "primary1688UnitPrice",
+    "primary1688Moq",
+  ]) {
+    delete next[key];
+  }
+  return next;
+}
+
+function getDefaultSku1688Source(db, accountId, skuId) {
+  return db.prepare(`
+    SELECT *
+    FROM erp_sku_1688_sources
+    WHERE account_id = @account_id
+      AND sku_id = @sku_id
+      AND status = 'active'
+    ORDER BY is_default DESC, updated_at DESC, created_at DESC
+    LIMIT 1
+  `).get({
+    account_id: accountId,
+    sku_id: skuId,
+  });
+}
+
+function listSku1688Sources(params = {}) {
+  const { db } = requireErp();
+  const accountId = optionalString(params.accountId || params.account_id);
+  const skuId = optionalString(params.skuId || params.sku_id);
+  const conditions = [];
+  const values = {
+    account_id: accountId,
+    sku_id: skuId,
+    status: optionalString(params.status),
+    limit: normalizeLimit(params.limit, 500),
+    offset: normalizeOffset(params.offset),
+  };
+  if (accountId) conditions.push("source.account_id = @account_id");
+  if (skuId) conditions.push("source.sku_id = @sku_id");
+  if (values.status) conditions.push("source.status = @status");
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const rows = db.prepare(`
+    SELECT
+      source.*,
+      sku.internal_sku_code,
+      sku.product_name
+    FROM erp_sku_1688_sources source
+    LEFT JOIN erp_skus sku ON sku.id = source.sku_id
+    ${where}
+    ORDER BY source.is_default DESC, source.updated_at DESC, source.created_at DESC
+    LIMIT @limit OFFSET @offset
+  `).all(values);
+  return rows.map(toSku1688Source);
+}
+
+function upsertSku1688SourceRow(db, payload = {}, actor = {}) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688采购来源绑定");
+  const skuId = requireString(payload.skuId || payload.sku_id, "skuId");
+  const sku = db.prepare("SELECT * FROM erp_skus WHERE id = ?").get(skuId);
+  if (!sku) throw new Error(`SKU not found: ${skuId}`);
+  const now = nowIso();
+  const row = {
+    id: optionalString(payload.id) || createId("sku_1688"),
+    account_id: optionalString(payload.accountId || payload.account_id) || sku.account_id,
+    sku_id: sku.id,
+    external_offer_id: requireString(payload.externalOfferId || payload.external_offer_id, "externalOfferId"),
+    external_sku_id: optionalString(payload.externalSkuId || payload.external_sku_id) || "",
+    external_spec_id: optionalString(payload.externalSpecId || payload.external_spec_id) || "",
+    supplier_name: optionalString(payload.supplierName || payload.supplier_name),
+    product_title: optionalString(payload.productTitle || payload.product_title),
+    product_url: optionalString(payload.productUrl || payload.product_url),
+    image_url: optionalString(payload.imageUrl || payload.image_url),
+    unit_price: optionalNumber(payload.unitPrice ?? payload.unit_price),
+    moq: optionalNumber(payload.moq),
+    lead_days: optionalNumber(payload.leadDays ?? payload.lead_days),
+    logistics_fee: optionalNumber(payload.logisticsFee ?? payload.logistics_fee),
+    status: optionalString(payload.status) || "active",
+    is_default: payload.isDefault === false || payload.is_default === false ? 0 : (payload.isDefault || payload.is_default ? 1 : 0),
+    source_payload_json: trimJsonForStorage(payload.sourcePayload || payload.source_payload || payload.raw || {}),
+    created_by: optionalString(actor.id),
+    created_at: now,
+    updated_at: now,
+  };
+  if (!["active", "disabled"].includes(row.status)) {
+    throw new Error("Invalid 1688 source status");
+  }
+  if (row.moq !== null && (!Number.isInteger(Number(row.moq)) || Number(row.moq) <= 0)) {
+    throw new Error("moq must be a positive integer");
+  }
+  if (row.is_default) {
+    db.prepare(`
+      UPDATE erp_sku_1688_sources
+      SET is_default = 0, updated_at = @updated_at
+      WHERE account_id = @account_id AND sku_id = @sku_id
+    `).run({
+      account_id: row.account_id,
+      sku_id: row.sku_id,
+      updated_at: now,
+    });
+  }
+  db.prepare(`
+    INSERT INTO erp_sku_1688_sources (
+      id, account_id, sku_id, external_offer_id, external_sku_id, external_spec_id,
+      supplier_name, product_title, product_url, image_url, unit_price, moq,
+      lead_days, logistics_fee, status, is_default, source_payload_json,
+      created_by, created_at, updated_at
+    )
+    VALUES (
+      @id, @account_id, @sku_id, @external_offer_id, @external_sku_id, @external_spec_id,
+      @supplier_name, @product_title, @product_url, @image_url, @unit_price, @moq,
+      @lead_days, @logistics_fee, @status, @is_default, @source_payload_json,
+      @created_by, @created_at, @updated_at
+    )
+    ON CONFLICT(account_id, sku_id, external_offer_id, external_sku_id, external_spec_id) DO UPDATE SET
+      supplier_name = COALESCE(excluded.supplier_name, supplier_name),
+      product_title = COALESCE(excluded.product_title, product_title),
+      product_url = COALESCE(excluded.product_url, product_url),
+      image_url = COALESCE(excluded.image_url, image_url),
+      unit_price = COALESCE(excluded.unit_price, unit_price),
+      moq = COALESCE(excluded.moq, moq),
+      lead_days = COALESCE(excluded.lead_days, lead_days),
+      logistics_fee = COALESCE(excluded.logistics_fee, logistics_fee),
+      status = excluded.status,
+      is_default = CASE WHEN excluded.is_default = 1 THEN 1 ELSE is_default END,
+      source_payload_json = excluded.source_payload_json,
+      updated_at = excluded.updated_at
+  `).run(row);
+  const after = db.prepare(`
+    SELECT *
+    FROM erp_sku_1688_sources
+    WHERE account_id = @account_id
+      AND sku_id = @sku_id
+      AND external_offer_id = @external_offer_id
+      AND external_sku_id = @external_sku_id
+      AND external_spec_id = @external_spec_id
+  `).get(row);
+  return toSku1688Source(after);
+}
+
+function upsertSku1688SourceFromCandidate(db, candidate = {}, pr = {}, actor = {}, options = {}) {
+  const externalOfferId = optionalString(candidate.external_offer_id || candidate.externalOfferId);
+  if (!externalOfferId || !pr?.sku_id) return null;
+  return upsertSku1688SourceRow(db, {
+    accountId: candidate.account_id || pr.account_id,
+    skuId: pr.sku_id,
+    externalOfferId,
+    externalSkuId: candidate.external_sku_id || candidate.externalSkuId,
+    externalSpecId: candidate.external_spec_id || candidate.externalSpecId,
+    supplierName: candidate.supplier_name || candidate.supplierName,
+    productTitle: candidate.product_title || candidate.productTitle,
+    productUrl: candidate.product_url || candidate.productUrl,
+    imageUrl: candidate.image_url || candidate.imageUrl,
+    unitPrice: candidate.unit_price ?? candidate.unitPrice,
+    moq: candidate.moq,
+    leadDays: candidate.lead_days ?? candidate.leadDays,
+    logisticsFee: candidate.logistics_fee ?? candidate.logisticsFee,
+    sourcePayload: parseJsonObject(candidate.external_detail_json) || parseJsonObject(candidate.source_payload_json),
+    isDefault: Boolean(options.isDefault),
+    status: "active",
+  }, actor);
 }
 
 function toPurchaseRequest(row) {
@@ -1988,13 +2232,7 @@ function getPurchaseWorkbench(params = {}) {
     ), 0),
   };
 
-  const skuOptions = db.prepare(`
-    SELECT id, internal_sku_code, product_name, account_id
-    FROM erp_skus
-    ${accountId ? "WHERE account_id = @account_id" : ""}
-    ORDER BY updated_at DESC, created_at DESC
-    LIMIT 500
-  `).all(accountId ? baseParams : {}).map(toCamelRow);
+  const skuOptions = listSkus({ accountId, limit: 500 });
 
   const supplierOptions = db.prepare(`
     SELECT id, name
@@ -2518,6 +2756,13 @@ async function refresh1688ProductDetailAction({ db, services, payload, actor }) 
   });
 
   const afterCandidate = db.prepare("SELECT * FROM erp_sourcing_candidates WHERE id = ?").get(candidate.id);
+  const sku1688Source = upsertSku1688SourceFromCandidate(
+    db,
+    afterCandidate,
+    getPurchaseRequest(db, candidate.pr_id),
+    actor,
+    { isDefault: false },
+  );
   services.workflow.writeAudit({
     accountId: candidate.account_id,
     actor,
@@ -2547,6 +2792,7 @@ async function refresh1688ProductDetailAction({ db, services, payload, actor }) 
       ...detail,
       raw: undefined,
     },
+    sku1688Source,
     rawResponse,
   };
 }
@@ -2805,6 +3051,7 @@ function generatePurchaseOrderAction({ db, services, payload, actor }) {
     )
   `).run(line);
 
+  const sku1688Source = upsertSku1688SourceFromCandidate(db, candidate, pr, actor, { isDefault: true });
   const afterPo = getPurchaseOrder(db, po.id);
   services.workflow.writeAudit({
     accountId: po.account_id,
@@ -2821,6 +3068,7 @@ function generatePurchaseOrderAction({ db, services, payload, actor }) {
   markPurchaseRequestRead(db, pr.id, actor);
   return {
     transition,
+    sku1688Source,
     purchaseOrder: toCamelRow(afterPo),
   };
 }
@@ -2848,9 +3096,22 @@ function getPurchaseOrderLines(db, poId) {
     SELECT
       line.*,
       sku.internal_sku_code,
-      sku.product_name
+      sku.product_name,
+      sku_source.external_offer_id AS sku_1688_offer_id,
+      sku_source.external_sku_id AS sku_1688_sku_id,
+      sku_source.external_spec_id AS sku_1688_spec_id,
+      sku_source.supplier_name AS sku_1688_supplier_name
     FROM erp_purchase_order_lines line
     LEFT JOIN erp_skus sku ON sku.id = line.sku_id
+    LEFT JOIN erp_sku_1688_sources sku_source ON sku_source.id = (
+      SELECT source.id
+      FROM erp_sku_1688_sources source
+      WHERE source.account_id = line.account_id
+        AND source.sku_id = line.sku_id
+        AND source.status = 'active'
+      ORDER BY source.is_default DESC, source.updated_at DESC, source.created_at DESC
+      LIMIT 1
+    )
     WHERE line.po_id = ?
     ORDER BY line.id ASC
   `).all(poId);
@@ -2860,14 +3121,17 @@ function build1688OrderCargoParamList(po, lines, payload = {}) {
   if (Array.isArray(payload.cargoParamList) && payload.cargoParamList.length) {
     return payload.cargoParamList;
   }
-  if (!po.external_offer_id) {
-    throw new Error("Selected sourcing candidate is missing externalOfferId; import it from 1688 API first");
-  }
-  return lines.map((line) => ({
-    offerId: po.external_offer_id,
-    specId: po.external_spec_id || po.external_sku_id || undefined,
-    quantity: Number(line.qty || 0),
-  }));
+  return lines.map((line) => {
+    const offerId = optionalString(po.external_offer_id || line.sku_1688_offer_id);
+    if (!offerId) {
+      throw new Error(`商品编码 ${line.internal_sku_code || line.sku_id} 还没有绑定 1688 采购来源`);
+    }
+    return {
+      offerId,
+      specId: optionalString(po.external_spec_id || po.external_sku_id || line.sku_1688_spec_id || line.sku_1688_sku_id) || undefined,
+      quantity: Number(line.qty || 0),
+    };
+  });
 }
 
 function resolve1688AddressParam(db, payload = {}, actor = {}) {
@@ -3373,6 +3637,11 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
       case "quote_feedback":
       case "add_sourcing_candidate": {
         return addSourcingCandidateAction({ db, services, payload, actor });
+      }
+      case "upsert_sku_1688_source": {
+        return {
+          sku1688Source: upsertSku1688SourceRow(db, payload, actor),
+        };
       }
       case "generate_po": {
         return generatePurchaseOrderAction({ db, services, payload, actor });

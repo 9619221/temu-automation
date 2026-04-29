@@ -701,6 +701,10 @@ async function main() {
     assert.equal(detail1688Result.candidate.externalSpecId, "spec-blue");
     assert.equal(detail1688Result.candidate.unitPrice, 8.5);
     assert.equal(detail1688Result.candidate.externalSkuOptions[0].specText, "Color:Blue");
+    assert.equal(detail1688Result.sku1688Source.externalOfferId, "1688-offer-ipc");
+    assert.equal(detail1688Result.sku1688Source.externalSkuId, "sku-blue");
+    assert.equal(detail1688Result.sku1688Source.externalSpecId, "spec-blue");
+    assert.equal(detail1688Result.sku1688Source.isDefault, false);
 
     const address1688 = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
       method: "POST",
@@ -745,6 +749,12 @@ async function main() {
       }),
     });
     assert.equal(po1688.statusCode, 200);
+    const po1688Result = JSON.parse(po1688.body).result.result;
+    assert.equal(po1688Result.sku1688Source.externalOfferId, "1688-offer-ipc");
+    assert.equal(po1688Result.sku1688Source.isDefault, true);
+    const mappedSku = JSON.parse(po1688.body).result.workbench.skuOptions.find((item) => item.id === sku.id);
+    assert.equal(mappedSku.procurementSourceCount, 1);
+    assert.equal(mappedSku.primary1688Source.externalOfferId, "1688-offer-ipc");
 
     const preview1688 = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
       method: "POST",

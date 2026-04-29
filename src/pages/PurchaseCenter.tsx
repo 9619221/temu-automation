@@ -151,6 +151,8 @@ interface PurchaseWorkbench {
   purchaseRequests?: PurchaseRequestRow[];
   purchaseOrders?: PurchaseOrderRow[];
   paymentQueue?: PaymentQueueRow[];
+  skuOptions?: SkuOption[];
+  supplierOptions?: SupplierOption[];
   alibaba1688Addresses?: Alibaba1688AddressRow[];
 }
 
@@ -186,6 +188,16 @@ interface SkuOption {
   id: string;
   internalSkuCode?: string;
   productName?: string;
+  procurementSourceCount?: number;
+  primary1688Source?: {
+    externalOfferId?: string;
+    externalSkuId?: string;
+    externalSpecId?: string;
+    supplierName?: string;
+    productTitle?: string;
+    unitPrice?: number | null;
+    moq?: number | null;
+  } | null;
 }
 
 interface SupplierOption {
@@ -330,10 +342,13 @@ export default function PurchaseCenter() {
     () => skus.map((sku) => {
       const code = sku.internalSkuCode || sku.id;
       const name = sku.productName || "-";
+      const sourceLabel = sku.procurementSourceCount
+        ? ` · 1688已绑${sku.procurementSourceCount}`
+        : "";
       return {
         value: sku.id,
-        label: `${code} · ${name}`,
-        searchText: `${code} ${name}`,
+        label: `${code} · ${name}${sourceLabel}`,
+        searchText: `${code} ${name} ${sku.primary1688Source?.externalOfferId || ""}`,
       };
     }),
     [skus],
@@ -361,10 +376,10 @@ export default function PurchaseCenter() {
     if (!erp) return;
     setLoading(true);
     try {
-      const [workbench, skuRows, supplierRows] = await Promise.all([
-        erp.purchase.workbench({ limit: 200 }),
-        erp.sku.list({ limit: 500 }),
-        erp.supplier.list({ limit: 500 }),
+      const workbench = await erp.purchase.workbench({ limit: 200 });
+      const [skuRows, supplierRows] = await Promise.all([
+        Array.isArray(workbench?.skuOptions) ? Promise.resolve(workbench.skuOptions) : erp.sku.list({ limit: 500 }),
+        Array.isArray(workbench?.supplierOptions) ? Promise.resolve(workbench.supplierOptions) : erp.supplier.list({ limit: 500 }),
       ]);
       applyWorkbench(workbench);
       setSkus(Array.isArray(skuRows) ? skuRows : []);
@@ -409,6 +424,8 @@ export default function PurchaseCenter() {
       const result = await erp.purchase.action({ ...payload, limit: 200 });
       const workbench = result?.workbench || await erp.purchase.workbench({ limit: 200 });
       applyWorkbench(workbench);
+      if (Array.isArray(workbench?.skuOptions)) setSkus(workbench.skuOptions);
+      if (Array.isArray(workbench?.supplierOptions)) setSuppliers(workbench.supplierOptions);
       if (successText) message.success(successText);
       return result;
     } catch (error: any) {
@@ -520,7 +537,7 @@ export default function PurchaseCenter() {
     await runAction(`1688-detail-${candidate.id}`, {
       action: "refresh_1688_product_detail",
       candidateId: candidate.id,
-    }, "1688 detail refreshed");
+    }, "1688详情已刷新，并已绑定到商品编码");
   };
 
   const preview1688Order = async (row: PurchaseOrderRow) => {
