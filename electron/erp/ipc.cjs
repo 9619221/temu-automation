@@ -28,6 +28,13 @@ const {
   setClientMode,
   setHostMode,
 } = require("./clientRuntime.cjs");
+const {
+  DEFAULT_1688_GATEWAY_BASE,
+  PROCUREMENT_APIS,
+  call1688OpenApi,
+  normalize1688ProductDetailResponse,
+  normalize1688SearchResponse,
+} = require("./1688Client.cjs");
 
 const erpState = {
   db: null,
@@ -49,7 +56,12 @@ const BROADCAST_PURCHASE_ACTIONS = new Set([
   "mark_sourced",
   "quote_feedback",
   "add_sourcing_candidate",
+  "source_1688_keyword",
+  "refresh_1688_product_detail",
+  "save_1688_address",
+  "preview_1688_order",
   "generate_po",
+  "push_1688_order",
   "submit_payment_approval",
   "approve_payment",
   "confirm_paid",
@@ -92,6 +104,15 @@ function parseJsonArray(value) {
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
+  }
+}
+
+function parseJsonObject(value) {
+  try {
+    const parsed = JSON.parse(value || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
   }
 }
 
@@ -879,6 +900,181 @@ async function refresh1688AccessToken(actor = {}) {
   return to1688AuthStatus();
 }
 
+function shouldRefresh1688AccessToken(row) {
+  if (!row?.access_token || !row?.refresh_token || !row?.access_token_expires_at) return false;
+  const expiresAt = new Date(row.access_token_expires_at).getTime();
+  return Number.isFinite(expiresAt) && expiresAt <= Date.now() + 5 * 60 * 1000;
+}
+
+async function getReady1688Credentials(actor = {}) {
+  let setting = get1688AuthRow();
+  if (shouldRefresh1688AccessToken(setting)) {
+    await refresh1688AccessToken(actor);
+    setting = get1688AuthRow();
+  }
+  if (!setting?.app_key || !setting?.app_secret) {
+    throw new Error("1688 AppKey/AppSecret is not configured");
+  }
+  if (!setting?.access_token) {
+    throw new Error("1688 access token is missing; authorize 1688 first");
+  }
+  return {
+    appKey: setting.app_key,
+    appSecret: setting.app_secret,
+    accessToken: setting.access_token,
+  };
+}
+
+function trimJsonForStorage(value, maxLength = 60000) {
+  const text = JSON.stringify(value ?? {});
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function redact1688Request(request = {}) {
+  const params = { ...(request.params || {}) };
+  if (params.access_token) params.access_token = "***";
+  if (params._aop_signature) params._aop_signature = "***";
+  return {
+    ...request,
+    params,
+  };
+}
+
+function write1688ApiCallLog(db, row = {}) {
+  db.prepare(`
+    INSERT INTO erp_1688_api_call_log (
+      id, account_id, api_key, action, status, request_json, response_json,
+      error_message, created_by, created_at
+    )
+    VALUES (
+      @id, @account_id, @api_key, @action, @status, @request_json, @response_json,
+      @error_message, @created_by, @created_at
+    )
+  `).run({
+    id: createId("1688_call"),
+    account_id: optionalString(row.accountId),
+    api_key: requireString(row.apiKey, "apiKey"),
+    action: optionalString(row.action),
+    status: requireString(row.status, "status"),
+    request_json: trimJsonForStorage(row.request || {}),
+    response_json: trimJsonForStorage(row.response || {}),
+    error_message: optionalString(row.errorMessage),
+    created_by: optionalString(row.actor?.id),
+    created_at: nowIso(),
+  });
+}
+
+function pick1688MessageField(payload = {}, keys = []) {
+  for (const key of keys) {
+    const value = payload[key];
+    if (value !== null && value !== undefined && value !== "") return String(value);
+  }
+  return null;
+}
+
+function normalize1688MessagePayload(input = {}) {
+  const payload = input.payload && typeof input.payload === "object" ? input.payload : {};
+  const query = input.query && typeof input.query === "object" ? input.query : {};
+  return {
+    messageId: pick1688MessageField(payload, ["messageId", "message_id", "msgId", "msg_id", "id"]),
+    topic: pick1688MessageField(payload, ["topic", "typeName", "messageType", "message_type", "event", "eventType"])
+      || pick1688MessageField(query, ["topic", "typeName", "messageType", "event"]),
+    messageType: pick1688MessageField(payload, ["messageType", "message_type", "type", "typeName", "eventType"])
+      || pick1688MessageField(query, ["messageType", "type", "typeName", "eventType"]),
+  };
+}
+
+function receive1688Message(input = {}) {
+  const { db } = requireErp();
+  const normalized = normalize1688MessagePayload(input);
+  const row = {
+    id: createId("1688_msg"),
+    message_id: normalized.messageId,
+    topic: normalized.topic,
+    message_type: normalized.messageType,
+    status: "received",
+    source_ip: optionalString(input.sourceIp),
+    headers_json: trimJsonForStorage(input.headers || {}),
+    query_json: trimJsonForStorage(input.query || {}),
+    payload_json: trimJsonForStorage(input.payload || {}),
+    body_text: optionalString(input.bodyText),
+    error_message: null,
+    received_at: nowIso(),
+    processed_at: null,
+  };
+
+  db.prepare(`
+    INSERT INTO erp_1688_message_events (
+      id, message_id, topic, message_type, status, source_ip, headers_json,
+      query_json, payload_json, body_text, error_message, received_at, processed_at
+    )
+    VALUES (
+      @id, @message_id, @topic, @message_type, @status, @source_ip, @headers_json,
+      @query_json, @payload_json, @body_text, @error_message, @received_at, @processed_at
+    )
+  `).run(row);
+
+  return toCamelRow(row);
+}
+
+async function call1688ProcurementApi({ db, actor, accountId, action, api, params }) {
+  const credentials = await getReady1688Credentials(actor);
+  const gatewayBase = optionalString(process.env.ERP_1688_GATEWAY_BASE) || DEFAULT_1688_GATEWAY_BASE;
+  try {
+    const result = await call1688OpenApi({
+      credentials,
+      api,
+      params,
+      gatewayBase,
+      protocol: optionalString(process.env.ERP_1688_GATEWAY_PROTOCOL) || undefined,
+    });
+    write1688ApiCallLog(db, {
+      accountId,
+      apiKey: api.key,
+      action,
+      status: "success",
+      request: redact1688Request(result.request),
+      response: result.response,
+      actor,
+    });
+    return result.response;
+  } catch (error) {
+    write1688ApiCallLog(db, {
+      accountId,
+      apiKey: api.key,
+      action,
+      status: "failed",
+      request: { params },
+      response: {},
+      errorMessage: error?.message || String(error),
+      actor,
+    });
+    throw error;
+  }
+}
+
+function build1688KeywordSearchParams(payload = {}, pr = {}, sku = {}) {
+  const keyword = requireString(
+    payload.keyword || sku.product_name || sku.internal_sku_code || pr.sku_id,
+    "keyword",
+  );
+  const pageSize = Math.max(1, Math.min(Number(optionalNumber(payload.pageSize) ?? 10), 20));
+  const beginPage = Math.max(1, Math.floor(Number(optionalNumber(payload.page) ?? 1)));
+  const param = {
+    keyword,
+    beginPage,
+    pageSize,
+  };
+  for (const key of ["priceStart", "priceEnd", "categoryId", "categoryIdList", "filter", "sort"]) {
+    const value = optionalString(payload[key]);
+    if (value) param[key] = value;
+  }
+  return {
+    query: { keyword, beginPage, pageSize },
+    apiParams: { param },
+  };
+}
+
 function countUsers() {
   const { db } = requireErp();
   return Number(db.prepare("SELECT COUNT(*) AS count FROM erp_users").get().count || 0);
@@ -1145,6 +1341,15 @@ function toPurchaseRequest(row) {
   return next;
 }
 
+function to1688DeliveryAddress(row) {
+  const next = toCamelRow(row);
+  next.isDefault = Boolean(row.is_default);
+  next.rawAddressParam = parseJsonObject(row.raw_address_param_json);
+  delete next.rawAddressParamJson;
+  next.addressParam = build1688AddressParamFromRow(row);
+  return next;
+}
+
 function actorCan(actor, roles) {
   return Boolean(actor?.role && roles.includes(actor.role));
 }
@@ -1338,6 +1543,8 @@ function getPurchaseWorkbench(params = {}) {
     const candidates = candidateStmt.all(pr.id).map((row) => {
       const next = toCamelRow(row);
       next.supplierName = next.supplierName || next.linkedSupplierName || "";
+      next.externalSkuOptions = parseJsonArray(row.external_sku_options_json);
+      next.externalPriceRanges = parseJsonArray(row.external_price_ranges_json);
       return next;
     });
     const comments = commentStmt.all(pr.id).map(toCamelRow);
@@ -1522,6 +1729,8 @@ function getPurchaseWorkbench(params = {}) {
     LIMIT 500
   `).all().map(toCamelRow);
 
+  const alibaba1688Addresses = list1688DeliveryAddresses({ status: "active" });
+
   return {
     generatedAt: nowIso(),
     summary,
@@ -1531,6 +1740,7 @@ function getPurchaseWorkbench(params = {}) {
     paymentQueue,
     skuOptions,
     supplierOptions,
+    alibaba1688Addresses,
   };
 }
 
@@ -1815,6 +2025,381 @@ function addSourcingCandidateAction({ db, services, payload, actor }) {
   return toCamelRow(afterCandidate);
 }
 
+function insert1688SourcingCandidate(db, services, pr, actor, item = {}) {
+  const now = nowIso();
+  const row = {
+    id: createId("source"),
+    account_id: pr.account_id,
+    pr_id: pr.id,
+    purchase_source: enums.PURCHASE_SOURCE.SOURCE_1688_OFFICIAL,
+    sourcing_method: enums.SOURCING_METHOD.OFFICIAL_API,
+    supplier_id: null,
+    supplier_name: optionalString(item.supplierName) || "1688 Supplier",
+    product_title: optionalString(item.productTitle),
+    product_url: optionalString(item.productUrl),
+    image_url: optionalString(item.imageUrl),
+    unit_price: optionalNumber(item.unitPrice) ?? 0,
+    moq: Math.max(1, Math.floor(Number(optionalNumber(item.moq) ?? 1))),
+    lead_days: optionalNumber(item.leadDays),
+    logistics_fee: optionalNumber(item.logisticsFee) ?? 0,
+    remark: optionalString(item.remark),
+    status: "candidate",
+    created_by: actor.id || null,
+    external_offer_id: optionalString(item.externalOfferId),
+    external_sku_id: optionalString(item.externalSkuId),
+    external_spec_id: optionalString(item.externalSpecId),
+    source_payload_json: trimJsonForStorage(item.raw || item),
+    created_at: now,
+    updated_at: now,
+  };
+
+  db.prepare(`
+    INSERT INTO erp_sourcing_candidates (
+      id, account_id, pr_id, purchase_source, sourcing_method, supplier_id, supplier_name,
+      product_title, product_url, image_url, unit_price, moq, lead_days,
+      logistics_fee, remark, status, created_by, external_offer_id, external_sku_id,
+      external_spec_id, source_payload_json, created_at, updated_at
+    )
+    VALUES (
+      @id, @account_id, @pr_id, @purchase_source, @sourcing_method, @supplier_id, @supplier_name,
+      @product_title, @product_url, @image_url, @unit_price, @moq, @lead_days,
+      @logistics_fee, @remark, @status, @created_by, @external_offer_id, @external_sku_id,
+      @external_spec_id, @source_payload_json, @created_at, @updated_at
+    )
+  `).run(row);
+
+  const afterCandidate = db.prepare("SELECT * FROM erp_sourcing_candidates WHERE id = ?").get(row.id);
+  services.workflow.writeAudit({
+    accountId: pr.account_id,
+    actor,
+    action: "source_1688_keyword",
+    entityType: "sourcing_candidate",
+    entityId: row.id,
+    before: null,
+    after: afterCandidate,
+  });
+  return toCamelRow(afterCandidate);
+}
+
+async function source1688KeywordAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 API sourcing");
+  const prId = requireString(payload.prId || payload.id, "prId");
+  let pr = getPurchaseRequest(db, prId);
+  const sku = db.prepare("SELECT * FROM erp_skus WHERE id = ?").get(pr.sku_id);
+  if (!sku) throw new Error(`SKU not found: ${pr.sku_id}`);
+
+  const { query, apiParams } = build1688KeywordSearchParams(payload, pr, sku);
+  const mockResults = Array.isArray(payload.mockResults) ? payload.mockResults : null;
+  let normalized = [];
+  let rawResponse = null;
+  if (mockResults) {
+    rawResponse = { mock: true, result: { data: mockResults } };
+    normalized = normalize1688SearchResponse(rawResponse);
+  } else {
+    rawResponse = await call1688ProcurementApi({
+      db,
+      actor,
+      accountId: pr.account_id,
+      action: "source_1688_keyword",
+      api: PROCUREMENT_APIS.KEYWORD_SEARCH,
+      params: apiParams,
+    });
+    normalized = normalize1688SearchResponse(rawResponse);
+  }
+
+  const maxImport = Math.max(1, Math.min(Number(optionalNumber(payload.importLimit) ?? normalized.length), 20));
+  const candidatesToImport = normalized.slice(0, maxImport);
+  const insertCandidates = db.transaction(() => {
+    if (pr.status === "submitted") {
+      services.purchase.acceptRequest(prId, actor);
+      pr = getPurchaseRequest(db, prId);
+      writePurchaseRequestEvent(db, pr, actor, "accept_request", "采购接收需求");
+    }
+    const candidates = candidatesToImport.map((item) => insert1688SourcingCandidate(db, services, pr, actor, item));
+    if (candidates.length && pr.status === "buyer_processing") {
+      services.purchase.markRequestSourced(prId, actor);
+      pr = getPurchaseRequest(db, prId);
+    }
+    writePurchaseRequestEvent(
+      db,
+      pr,
+      actor,
+      "source_1688_keyword",
+      `1688 API sourcing: ${query.keyword}; imported ${candidates.length} candidates`,
+    );
+    markPurchaseRequestRead(db, pr.id, actor);
+    return candidates;
+  });
+
+  const candidates = insertCandidates();
+  return {
+    query,
+    apiKey: PROCUREMENT_APIS.KEYWORD_SEARCH.key,
+    importedCount: candidates.length,
+    totalFound: normalized.length,
+    candidates,
+    rawResponse,
+  };
+}
+
+function pickPriceForQuantity(priceRanges = [], qty = 1) {
+  const quantity = Math.max(1, Number(qty || 1));
+  let selected = null;
+  for (const range of priceRanges || []) {
+    const startQuantity = Number(range?.startQuantity || 1);
+    const price = optionalNumber(range?.price);
+    if (price === null) continue;
+    if (startQuantity <= quantity && (!selected || startQuantity >= selected.startQuantity)) {
+      selected = { startQuantity, price };
+    }
+  }
+  return selected?.price ?? null;
+}
+
+function pickSkuOption(detail = {}, payload = {}) {
+  const skuOptions = Array.isArray(detail.skuOptions) ? detail.skuOptions : [];
+  const externalSkuId = optionalString(payload.externalSkuId || payload.skuId);
+  const externalSpecId = optionalString(payload.externalSpecId || payload.specId);
+  if (externalSkuId || externalSpecId) {
+    const found = skuOptions.find((sku) => (
+      (!externalSkuId || sku.externalSkuId === externalSkuId)
+      && (!externalSpecId || sku.externalSpecId === externalSpecId)
+    ));
+    if (found) return found;
+  }
+  return skuOptions.find((sku) => optionalNumber(sku.price) !== null) || skuOptions[0] || null;
+}
+
+function build1688ProductDetailParams(offerId, payload = {}) {
+  return {
+    productID: requireString(payload.productId || payload.productID || offerId, "productID"),
+    webSite: optionalString(payload.webSite) || "1688",
+  };
+}
+
+async function refresh1688ProductDetailAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 product detail");
+  const candidateId = requireString(payload.candidateId || payload.id, "candidateId");
+  const candidate = db.prepare("SELECT * FROM erp_sourcing_candidates WHERE id = ?").get(candidateId);
+  if (!candidate) throw new Error(`Sourcing candidate not found: ${candidateId}`);
+  const pr = getPurchaseRequest(db, candidate.pr_id);
+  const offerId = requireString(payload.offerId || candidate.external_offer_id, "offerId");
+  const apiParams = build1688ProductDetailParams(offerId, payload);
+  const rawResponse = payload.mockDetail || payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: candidate.account_id,
+    action: "refresh_1688_product_detail",
+    api: PROCUREMENT_APIS.PRODUCT_DETAIL,
+    params: apiParams,
+  });
+  const detail = normalize1688ProductDetailResponse(rawResponse);
+  const selectedSku = pickSkuOption(detail, payload);
+  const qty = Number(pr.requested_qty || candidate.moq || 1);
+  const priceFromRange = pickPriceForQuantity(detail.priceRanges, qty);
+  const nextUnitPrice = optionalNumber(payload.unitPrice)
+    ?? optionalNumber(selectedSku?.price)
+    ?? priceFromRange
+    ?? optionalNumber(detail.unitPrice)
+    ?? Number(candidate.unit_price || 0);
+  const nextMoq = Math.max(1, Math.floor(Number(optionalNumber(detail.moq) ?? candidate.moq ?? 1)));
+  const now = nowIso();
+
+  db.prepare(`
+    UPDATE erp_sourcing_candidates
+    SET supplier_name = COALESCE(@supplier_name, supplier_name),
+        product_title = COALESCE(@product_title, product_title),
+        product_url = COALESCE(@product_url, product_url),
+        image_url = COALESCE(@image_url, image_url),
+        unit_price = @unit_price,
+        moq = @moq,
+        external_offer_id = COALESCE(@external_offer_id, external_offer_id),
+        external_sku_id = COALESCE(@external_sku_id, external_sku_id),
+        external_spec_id = COALESCE(@external_spec_id, external_spec_id),
+        source_payload_json = @source_payload_json,
+        external_detail_json = @external_detail_json,
+        external_sku_options_json = @external_sku_options_json,
+        external_price_ranges_json = @external_price_ranges_json,
+        external_detail_fetched_at = @external_detail_fetched_at,
+        updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id: candidate.id,
+    supplier_name: optionalString(detail.supplierName),
+    product_title: optionalString(detail.productTitle),
+    product_url: optionalString(detail.productUrl),
+    image_url: optionalString(detail.imageUrl),
+    unit_price: nextUnitPrice,
+    moq: nextMoq,
+    external_offer_id: optionalString(detail.externalOfferId || offerId),
+    external_sku_id: optionalString(payload.externalSkuId || selectedSku?.externalSkuId),
+    external_spec_id: optionalString(payload.externalSpecId || selectedSku?.externalSpecId),
+    source_payload_json: trimJsonForStorage(detail.raw || rawResponse),
+    external_detail_json: trimJsonForStorage(detail.raw || rawResponse),
+    external_sku_options_json: trimJsonForStorage(detail.skuOptions || [], 60000),
+    external_price_ranges_json: trimJsonForStorage(detail.priceRanges || [], 60000),
+    external_detail_fetched_at: now,
+    updated_at: now,
+  });
+
+  const afterCandidate = db.prepare("SELECT * FROM erp_sourcing_candidates WHERE id = ?").get(candidate.id);
+  services.workflow.writeAudit({
+    accountId: candidate.account_id,
+    actor,
+    action: "refresh_1688_product_detail",
+    entityType: "sourcing_candidate",
+    entityId: candidate.id,
+    before: candidate,
+    after: afterCandidate,
+  });
+  writePurchaseRequestEvent(
+    db,
+    getPurchaseRequest(db, candidate.pr_id),
+    actor,
+    "refresh_1688_product_detail",
+    `1688 product detail refreshed: ${offerId}`,
+  );
+  markPurchaseRequestRead(db, candidate.pr_id, actor);
+
+  const resultCandidate = toCamelRow(afterCandidate);
+  resultCandidate.externalSkuOptions = parseJsonArray(afterCandidate.external_sku_options_json);
+  resultCandidate.externalPriceRanges = parseJsonArray(afterCandidate.external_price_ranges_json);
+  return {
+    apiKey: PROCUREMENT_APIS.PRODUCT_DETAIL.key,
+    query: apiParams,
+    candidate: resultCandidate,
+    detail: {
+      ...detail,
+      raw: undefined,
+    },
+    rawResponse,
+  };
+}
+
+function build1688AddressParamFromRow(row = {}) {
+  const raw = parseJsonObject(row.raw_address_param_json);
+  const fromRaw = Object.keys(raw).length ? raw : {};
+  const addressParam = {
+    ...fromRaw,
+  };
+  if (row.address_id) addressParam.addressId = row.address_id;
+  if (row.full_name) addressParam.fullName = row.full_name;
+  if (row.mobile) addressParam.mobile = row.mobile;
+  if (row.phone) addressParam.phone = row.phone;
+  if (row.post_code) addressParam.postCode = row.post_code;
+  if (row.province_text) addressParam.provinceText = row.province_text;
+  if (row.city_text) addressParam.cityText = row.city_text;
+  if (row.area_text) addressParam.areaText = row.area_text;
+  if (row.town_text) addressParam.townText = row.town_text;
+  if (row.address) addressParam.address = row.address;
+  return addressParam;
+}
+
+function list1688DeliveryAddresses(params = {}) {
+  const { db } = requireErp();
+  const status = optionalString(params.status);
+  const rows = status
+    ? db.prepare(`
+      SELECT *
+      FROM erp_1688_delivery_addresses
+      WHERE status = @status
+      ORDER BY is_default DESC, updated_at DESC, created_at DESC
+    `).all({ status })
+    : db.prepare(`
+      SELECT *
+      FROM erp_1688_delivery_addresses
+      ORDER BY is_default DESC, updated_at DESC, created_at DESC
+    `).all();
+  return rows.map(to1688DeliveryAddress);
+}
+
+function get1688DeliveryAddress(db, addressId = null) {
+  const id = optionalString(addressId);
+  if (id) {
+    const row = db.prepare("SELECT * FROM erp_1688_delivery_addresses WHERE id = ?").get(id);
+    if (!row) throw new Error(`1688 delivery address not found: ${id}`);
+    return row;
+  }
+  const row = db.prepare(`
+    SELECT *
+    FROM erp_1688_delivery_addresses
+    WHERE status = 'active'
+    ORDER BY is_default DESC, updated_at DESC, created_at DESC
+    LIMIT 1
+  `).get();
+  if (!row) throw new Error("1688 delivery address is not configured");
+  return row;
+}
+
+function save1688DeliveryAddressAction({ db, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 delivery address config");
+  const now = nowIso();
+  const rawAddressParam = payload.rawAddressParam || payload.addressParam || {};
+  const row = {
+    id: optionalString(payload.addressId || payload.id) || createId("1688_addr"),
+    label: requireString(payload.label || payload.name, "label"),
+    full_name: requireString(payload.fullName || payload.receiverName || rawAddressParam.fullName, "fullName"),
+    mobile: optionalString(payload.mobile || rawAddressParam.mobile),
+    phone: optionalString(payload.phone || rawAddressParam.phone),
+    post_code: optionalString(payload.postCode || rawAddressParam.postCode),
+    province_text: optionalString(payload.provinceText || rawAddressParam.provinceText),
+    city_text: optionalString(payload.cityText || rawAddressParam.cityText),
+    area_text: optionalString(payload.areaText || rawAddressParam.areaText),
+    town_text: optionalString(payload.townText || rawAddressParam.townText),
+    address: requireString(payload.address || rawAddressParam.address, "address"),
+    address_id: optionalString(payload.alibabaAddressId || rawAddressParam.addressId),
+    raw_address_param_json: trimJsonForStorage(rawAddressParam || {}),
+    is_default: payload.isDefault === false ? 0 : (payload.isDefault || payload.default ? 1 : 0),
+    status: optionalString(payload.status) || "active",
+    created_by: optionalString(actor.id),
+    created_at: now,
+    updated_at: now,
+  };
+  if (!row.mobile && !row.phone && !row.address_id) {
+    throw new Error("mobile, phone or alibabaAddressId is required");
+  }
+  if (!["active", "blocked"].includes(row.status)) {
+    throw new Error("Invalid 1688 delivery address status");
+  }
+  const existing = db.prepare("SELECT created_at, created_by FROM erp_1688_delivery_addresses WHERE id = ?").get(row.id);
+  if (row.is_default) {
+    db.prepare("UPDATE erp_1688_delivery_addresses SET is_default = 0 WHERE id != ?").run(row.id);
+  }
+  db.prepare(`
+    INSERT INTO erp_1688_delivery_addresses (
+      id, label, full_name, mobile, phone, post_code, province_text, city_text,
+      area_text, town_text, address, address_id, raw_address_param_json,
+      is_default, status, created_by, created_at, updated_at
+    )
+    VALUES (
+      @id, @label, @full_name, @mobile, @phone, @post_code, @province_text, @city_text,
+      @area_text, @town_text, @address, @address_id, @raw_address_param_json,
+      @is_default, @status, @created_by, @created_at, @updated_at
+    )
+    ON CONFLICT(id) DO UPDATE SET
+      label = excluded.label,
+      full_name = excluded.full_name,
+      mobile = excluded.mobile,
+      phone = excluded.phone,
+      post_code = excluded.post_code,
+      province_text = excluded.province_text,
+      city_text = excluded.city_text,
+      area_text = excluded.area_text,
+      town_text = excluded.town_text,
+      address = excluded.address,
+      address_id = excluded.address_id,
+      raw_address_param_json = excluded.raw_address_param_json,
+      is_default = excluded.is_default,
+      status = excluded.status,
+      updated_at = excluded.updated_at
+  `).run({
+    ...row,
+    created_by: existing?.created_by || row.created_by,
+    created_at: existing?.created_at || row.created_at,
+  });
+  return to1688DeliveryAddress(db.prepare("SELECT * FROM erp_1688_delivery_addresses WHERE id = ?").get(row.id));
+}
+
 function getCandidateForPo(db, prId, candidateId) {
   if (candidateId) {
     const row = db.prepare("SELECT * FROM erp_sourcing_candidates WHERE id = ?").get(candidateId);
@@ -1959,10 +2544,323 @@ function generatePurchaseOrderAction({ db, services, payload, actor }) {
   };
 }
 
-function performPurchaseAction(payload = {}, actorInput = {}) {
+function getPurchaseOrderWithCandidate(db, poId) {
+  const row = db.prepare(`
+    SELECT
+      po.*,
+      candidate.external_offer_id,
+      candidate.external_sku_id,
+      candidate.external_spec_id,
+      candidate.product_title AS candidate_product_title,
+      candidate.product_url AS candidate_product_url,
+      candidate.supplier_name AS candidate_supplier_name
+    FROM erp_purchase_orders po
+    LEFT JOIN erp_sourcing_candidates candidate ON candidate.id = po.selected_candidate_id
+    WHERE po.id = ?
+  `).get(poId);
+  if (!row) throw new Error(`Purchase order not found: ${poId}`);
+  return row;
+}
+
+function getPurchaseOrderLines(db, poId) {
+  return db.prepare(`
+    SELECT
+      line.*,
+      sku.internal_sku_code,
+      sku.product_name
+    FROM erp_purchase_order_lines line
+    LEFT JOIN erp_skus sku ON sku.id = line.sku_id
+    WHERE line.po_id = ?
+    ORDER BY line.id ASC
+  `).all(poId);
+}
+
+function build1688OrderCargoParamList(po, lines, payload = {}) {
+  if (Array.isArray(payload.cargoParamList) && payload.cargoParamList.length) {
+    return payload.cargoParamList;
+  }
+  if (!po.external_offer_id) {
+    throw new Error("Selected sourcing candidate is missing externalOfferId; import it from 1688 API first");
+  }
+  return lines.map((line) => ({
+    offerId: po.external_offer_id,
+    specId: po.external_spec_id || po.external_sku_id || undefined,
+    quantity: Number(line.qty || 0),
+  }));
+}
+
+function resolve1688AddressParam(db, payload = {}) {
+  if (payload.addressParam && typeof payload.addressParam === "object") return payload.addressParam;
+  const addressId = optionalString(payload.deliveryAddressId || payload.erpAddressId || payload.addressId);
+  try {
+    const row = get1688DeliveryAddress(db, addressId);
+    return build1688AddressParamFromRow(row);
+  } catch (error) {
+    if (payload.dryRun || payload.mockResponse || payload.mockPreviewResponse) return null;
+    throw error;
+  }
+}
+
+function build1688FastCreateOrderParams(po, lines, payload = {}) {
+  const cargoParamList = build1688OrderCargoParamList(po, lines, payload);
+  const addressParam = payload.addressParam || null;
+  if (!addressParam && !payload.dryRun && !payload.mockResponse && !payload.mockPreviewResponse) {
+    throw new Error("addressParam is required before pushing a 1688 order");
+  }
+  const params = {
+    flow: optionalString(payload.flow) || "general",
+    message: optionalString(payload.message || payload.remark),
+    addressParam,
+    cargoParamList,
+    outOrderId: optionalString(payload.outOrderId) || po.po_no,
+    isvBizTypeErp: true,
+    useOfficialSolution: true,
+  };
+  for (const key of ["tradeType", "fenxiaoChannel", "preSelectPayChannel", "instanceId"]) {
+    const value = optionalString(payload[key]);
+    if (value) params[key] = value;
+  }
+  return params;
+}
+
+function normalize1688OrderPreviewResponse(rawResponse = {}) {
+  const result = rawResponse.result && typeof rawResponse.result === "object" ? rawResponse.result : rawResponse;
+  const nested = result.toReturn || result.data || result.preview || result;
+  const amount = optionalNumber(
+    nested.totalAmount
+    || nested.totalPrice
+    || nested.sumPayment
+    || nested.orderAmount
+    || nested.actualPayFee,
+  );
+  const freight = optionalNumber(
+    nested.freight
+    || nested.shippingFee
+    || nested.postFee
+    || nested.carriage,
+  );
+  return {
+    totalAmount: amount,
+    freight,
+    raw: rawResponse,
+  };
+}
+
+function findExternalOrderId(value, depth = 0) {
+  if (!value || depth > 8) return null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findExternalOrderId(item, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof value !== "object") return null;
+  for (const key of ["orderId", "order_id", "tradeId", "trade_id", "orderid"]) {
+    const candidate = value[key];
+    if (candidate !== null && candidate !== undefined && candidate !== "") return String(candidate);
+  }
+  for (const item of Object.values(value)) {
+    const found = findExternalOrderId(item, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+async function push1688OrderAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 order push");
+  const poId = requireString(payload.poId || payload.id, "poId");
+  const po = getPurchaseOrderWithCandidate(db, poId);
+  const lines = getPurchaseOrderLines(db, poId);
+  if (!lines.length) throw new Error(`Purchase order has no lines: ${poId}`);
+
+  const apiParams = build1688FastCreateOrderParams(po, lines, {
+    ...payload,
+    addressParam: resolve1688AddressParam(db, payload),
+  });
+  if (payload.dryRun) {
+    return {
+      dryRun: true,
+      apiKey: PROCUREMENT_APIS.FAST_CREATE_ORDER.key,
+      params: apiParams,
+    };
+  }
+
+  const rawResponse = payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: po.account_id,
+    action: "push_1688_order",
+    api: PROCUREMENT_APIS.FAST_CREATE_ORDER,
+    params: apiParams,
+  });
+  const externalOrderId = findExternalOrderId(rawResponse);
+  const now = nowIso();
+  db.prepare(`
+    UPDATE erp_purchase_orders
+    SET external_order_id = COALESCE(@external_order_id, external_order_id),
+        external_order_status = @external_order_status,
+        external_order_payload_json = @external_order_payload_json,
+        external_order_synced_at = @external_order_synced_at,
+        updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id: po.id,
+    external_order_id: externalOrderId,
+    external_order_status: externalOrderId ? "created" : "submitted",
+    external_order_payload_json: trimJsonForStorage(rawResponse),
+    external_order_synced_at: now,
+    updated_at: now,
+  });
+  const afterPo = getPurchaseOrder(db, po.id);
+  services.workflow.writeAudit({
+    accountId: po.account_id,
+    actor,
+    action: "push_1688_order",
+    entityType: "purchase_order",
+    entityId: po.id,
+    before: po,
+    after: afterPo,
+  });
+  if (po.pr_id) {
+    const pr = getPurchaseRequest(db, po.pr_id);
+    writePurchaseRequestEvent(
+      db,
+      pr,
+      actor,
+      "push_1688_order",
+      `1688 official order pushed: ${externalOrderId || po.po_no}`,
+    );
+    markPurchaseRequestRead(db, pr.id, actor);
+  }
+  return {
+    apiKey: PROCUREMENT_APIS.FAST_CREATE_ORDER.key,
+    externalOrderId,
+    purchaseOrder: toCamelRow(afterPo),
+    rawResponse,
+  };
+}
+
+async function preview1688OrderAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 order preview");
+  const poId = requireString(payload.poId || payload.id, "poId");
+  const po = getPurchaseOrderWithCandidate(db, poId);
+  const lines = getPurchaseOrderLines(db, poId);
+  if (!lines.length) throw new Error(`Purchase order has no lines: ${poId}`);
+
+  const apiParams = build1688FastCreateOrderParams(po, lines, {
+    ...payload,
+    addressParam: resolve1688AddressParam(db, payload),
+  });
+  if (payload.dryRun) {
+    return {
+      dryRun: true,
+      apiKey: PROCUREMENT_APIS.ORDER_PREVIEW.key,
+      params: apiParams,
+    };
+  }
+
+  const rawResponse = payload.mockPreviewResponse || payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: po.account_id,
+    action: "preview_1688_order",
+    api: PROCUREMENT_APIS.ORDER_PREVIEW,
+    params: apiParams,
+  });
+  const preview = normalize1688OrderPreviewResponse(rawResponse);
+  const now = nowIso();
+  db.prepare(`
+    UPDATE erp_purchase_orders
+    SET external_order_status = @external_order_status,
+        external_order_preview_json = @external_order_preview_json,
+        external_order_previewed_at = @external_order_previewed_at,
+        updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id: po.id,
+    external_order_status: "previewed",
+    external_order_preview_json: trimJsonForStorage(rawResponse),
+    external_order_previewed_at: now,
+    updated_at: now,
+  });
+  const afterPo = getPurchaseOrder(db, po.id);
+  services.workflow.writeAudit({
+    accountId: po.account_id,
+    actor,
+    action: "preview_1688_order",
+    entityType: "purchase_order",
+    entityId: po.id,
+    before: po,
+    after: afterPo,
+  });
+  if (po.pr_id) {
+    const pr = getPurchaseRequest(db, po.pr_id);
+    writePurchaseRequestEvent(db, pr, actor, "preview_1688_order", `1688 order preview: ${po.po_no}`);
+    markPurchaseRequestRead(db, pr.id, actor);
+  }
+  return {
+    apiKey: PROCUREMENT_APIS.ORDER_PREVIEW.key,
+    preview,
+    purchaseOrder: toCamelRow(afterPo),
+    rawResponse,
+  };
+}
+
+async function performPurchaseAction(payload = {}, actorInput = {}) {
   const { db, services } = requireErp();
   const action = requireString(payload.action, "action");
   const actor = normalizeActor(actorInput);
+
+  if (action === "source_1688_keyword") {
+    const result = await source1688KeywordAction({ db, services, payload, actor });
+    broadcastPurchaseUpdate(action, payload, actor, result);
+    return {
+      action,
+      result,
+      workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+    };
+  }
+
+  if (action === "refresh_1688_product_detail") {
+    const result = await refresh1688ProductDetailAction({ db, services, payload, actor });
+    broadcastPurchaseUpdate(action, payload, actor, result);
+    return {
+      action,
+      result,
+      workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+    };
+  }
+
+  if (action === "save_1688_address") {
+    const result = save1688DeliveryAddressAction({ db, payload, actor });
+    broadcastPurchaseUpdate(action, payload, actor, result);
+    return {
+      action,
+      result,
+      workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+    };
+  }
+
+  if (action === "preview_1688_order") {
+    const result = await preview1688OrderAction({ db, services, payload, actor });
+    broadcastPurchaseUpdate(action, payload, actor, result);
+    return {
+      action,
+      result,
+      workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+    };
+  }
+
+  if (action === "push_1688_order") {
+    const result = await push1688OrderAction({ db, services, payload, actor });
+    broadcastPurchaseUpdate(action, payload, actor, result);
+    return {
+      action,
+      result,
+      workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+    };
+  }
 
   const run = db.transaction(() => {
     switch (action) {
@@ -3021,6 +3919,7 @@ function startLanService(payload = {}) {
     create1688AuthorizeUrl,
     complete1688OAuth,
     refresh1688AccessToken,
+    receive1688Message,
   });
 }
 
@@ -3083,6 +3982,7 @@ async function startErpHeadlessServer(options = {}) {
     create1688AuthorizeUrl,
     complete1688OAuth,
     refresh1688AccessToken,
+    receive1688Message,
   });
 
   return {

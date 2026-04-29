@@ -3,6 +3,10 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
+const { relaunchUnderElectronIfNeeded } = require("./ensure-electron-runtime.cjs");
+
+relaunchUnderElectronIfNeeded(__filename);
+
 const { openErpDatabase } = require("../electron/db/connection.cjs");
 const {
   closeErp,
@@ -13,11 +17,24 @@ const {
 async function main() {
   const tempUserData = fs.mkdtempSync(path.join(os.tmpdir(), "temu-erp-ipc-"));
   const handlers = new Map();
+  const listeners = new Map();
   const fakeIpcMain = {
     handle(channel, handler) {
       assert.equal(typeof channel, "string");
       assert.equal(typeof handler, "function");
       handlers.set(channel, handler);
+    },
+    on(channel, listener) {
+      assert.equal(typeof channel, "string");
+      assert.equal(typeof listener, "function");
+      listeners.set(channel, listener);
+      return this;
+    },
+    removeListener(channel, listener) {
+      if (listeners.get(channel) === listener) {
+        listeners.delete(channel);
+      }
+      return this;
     },
   };
 
@@ -426,6 +443,36 @@ async function main() {
     assert.equal(statusPage.statusCode, 200);
     assert.equal(JSON.parse(statusPage.body).lan.running, true);
 
+    const messageHealth = await requestUrl(`${lanStatus.localUrl}/api/1688/message/health`);
+    assert.equal(messageHealth.statusCode, 200);
+    assert.equal(JSON.parse(messageHealth.body).ok, true);
+
+    const receive1688Message = await requestUrl(`${lanStatus.localUrl}/api/1688/message`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        messageId: "msg_ipc_1688",
+        topic: "alibaba.trade.order.success",
+        messageType: "order",
+        orderId: "16880001",
+      }),
+    });
+    assert.equal(receive1688Message.statusCode, 200);
+    const receive1688Body = JSON.parse(receive1688Message.body);
+    assert.equal(receive1688Body.ok, true);
+    assert.equal(receive1688Body.success, true);
+    const messageDb = openErpDatabase({ userDataDir: tempUserData });
+    try {
+      const messageRow = messageDb.prepare("SELECT * FROM erp_1688_message_events WHERE message_id = ?").get("msg_ipc_1688");
+      assert.equal(messageRow.topic, "alibaba.trade.order.success");
+      assert.equal(messageRow.status, "received");
+    } finally {
+      messageDb.close();
+    }
+
     const unauthPurchase = await requestUrl(`${lanStatus.localUrl}/purchase`);
     assert.equal(unauthPurchase.statusCode, 302);
     assert.match(unauthPurchase.headers.location, /^\/login/);
@@ -557,6 +604,150 @@ async function main() {
     assert.ok(
       buyerActionBody.workbench.paymentQueue.some((item) => item.poId === "po_draft_ipc" && item.paymentApprovalStatus === "pending"),
     );
+
+    const source1688 = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "source_1688_keyword",
+        prId: "pr_ipc",
+        keyword: "demo product",
+        pageSize: 1,
+        importLimit: 1,
+        mockResults: [
+          {
+            offerId: "1688-offer-ipc",
+            subject: "1688 API Candidate",
+            price: "9.90",
+            minOrderQuantity: 10,
+            companyName: "1688 API Supplier",
+            imageUrl: "https://example.test/1688-api.jpg",
+          },
+        ],
+      }),
+    });
+    assert.equal(source1688.statusCode, 200);
+    const source1688Result = JSON.parse(source1688.body).result;
+    assert.equal(source1688Result.result.importedCount, 1);
+    assert.equal(source1688Result.result.candidates[0].externalOfferId, "1688-offer-ipc");
+    assert.equal(source1688Result.result.candidates[0].sourcingMethod, "official_api");
+    const source1688CandidateId = source1688Result.result.candidates[0].id;
+
+    const detail1688 = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "refresh_1688_product_detail",
+        candidateId: source1688CandidateId,
+        mockDetail: {
+          result: {
+            toReturn: {
+              productID: "1688-offer-ipc",
+              subject: "1688 API Candidate Detail",
+              companyName: "1688 Detail Supplier",
+              saleInfo: {
+                priceRanges: [
+                  { startQuantity: 1, price: "8.80" },
+                  { startQuantity: 50, price: "7.70" },
+                ],
+              },
+              skuInfos: [
+                {
+                  skuId: "sku-blue",
+                  specId: "spec-blue",
+                  price: "8.50",
+                  attributes: [{ attributeName: "Color", value: "Blue" }],
+                },
+              ],
+            },
+          },
+        },
+      }),
+    });
+    assert.equal(detail1688.statusCode, 200);
+    const detail1688Result = JSON.parse(detail1688.body).result.result;
+    assert.equal(detail1688Result.candidate.externalSkuId, "sku-blue");
+    assert.equal(detail1688Result.candidate.externalSpecId, "spec-blue");
+    assert.equal(detail1688Result.candidate.unitPrice, 8.5);
+    assert.equal(detail1688Result.candidate.externalSkuOptions[0].specText, "Color:Blue");
+
+    const address1688 = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "save_1688_address",
+        id: "addr_1688_ipc",
+        label: "IPC Warehouse",
+        fullName: "Receiver",
+        mobile: "13800000000",
+        provinceText: "Zhejiang",
+        cityText: "Hangzhou",
+        areaText: "Xihu",
+        address: "No. 1 Test Road",
+        postCode: "310000",
+        isDefault: true,
+      }),
+    });
+    assert.equal(address1688.statusCode, 200);
+    const address1688Result = JSON.parse(address1688.body).result.result;
+    assert.equal(address1688Result.id, "addr_1688_ipc");
+    assert.equal(address1688Result.addressParam.fullName, "Receiver");
+
+    const po1688 = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "generate_po",
+        prId: "pr_ipc",
+        candidateId: source1688CandidateId,
+        poId: "po_1688_preview_ipc",
+        poNo: "PO-1688-PREVIEW",
+        qty: 60,
+      }),
+    });
+    assert.equal(po1688.statusCode, 200);
+
+    const preview1688 = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "preview_1688_order",
+        poId: "po_1688_preview_ipc",
+        mockPreviewResponse: {
+          result: {
+            toReturn: {
+              totalAmount: "512.00",
+              freight: "2.00",
+            },
+          },
+        },
+      }),
+    });
+    assert.equal(preview1688.statusCode, 200);
+    const preview1688Result = JSON.parse(preview1688.body).result.result;
+    assert.equal(preview1688Result.preview.totalAmount, 512);
+    assert.equal(preview1688Result.purchaseOrder.externalOrderStatus, "previewed");
+    assert.equal(preview1688Result.purchaseOrder.externalOrderPreviewedAt.length > 0, true);
 
     const buyerApproveDenied = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
       method: "POST",
@@ -919,7 +1110,11 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+main()
+  .then(() => {
+    process.exit(0);
+  })
+  .catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });

@@ -12,6 +12,7 @@ import {
   Modal,
   Row,
   Select,
+  Switch,
   Space,
   Table,
   Timeline,
@@ -21,6 +22,7 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import type { Dayjs } from "dayjs";
 import {
+  ApiOutlined,
   CheckCircleOutlined,
   CommentOutlined,
   DollarOutlined,
@@ -60,9 +62,18 @@ const ROLE_LABELS: Record<string, string> = {
 
 interface SourcingCandidateRow {
   id: string;
+  purchaseSource?: string;
+  sourcingMethod?: string;
   supplierName?: string;
   productTitle?: string | null;
   productUrl?: string | null;
+  imageUrl?: string | null;
+  externalOfferId?: string | null;
+  externalSkuId?: string | null;
+  externalSpecId?: string | null;
+  externalSkuOptions?: Array<{ externalSkuId?: string | null; externalSpecId?: string | null; specText?: string; price?: number | null }>;
+  externalPriceRanges?: Array<{ startQuantity?: number; price?: number }>;
+  externalDetailFetchedAt?: string | null;
   unitPrice?: number;
   moq?: number;
   leadDays?: number | null;
@@ -113,6 +124,8 @@ interface PurchaseOrderRow {
   receivedQty?: number;
   totalAmount?: number;
   expectedDeliveryDate?: string | null;
+  externalOrderStatus?: string | null;
+  externalOrderPreviewedAt?: string | null;
   updatedAt?: string;
 }
 
@@ -136,6 +149,19 @@ interface PurchaseWorkbench {
   purchaseRequests?: PurchaseRequestRow[];
   purchaseOrders?: PurchaseOrderRow[];
   paymentQueue?: PaymentQueueRow[];
+  alibaba1688Addresses?: Alibaba1688AddressRow[];
+}
+
+interface Alibaba1688AddressRow {
+  id: string;
+  label?: string;
+  fullName?: string;
+  mobile?: string;
+  provinceText?: string;
+  cityText?: string;
+  areaText?: string;
+  address?: string;
+  isDefault?: boolean;
 }
 
 interface SkuOption {
@@ -170,11 +196,32 @@ interface QuoteFormValues {
   remark?: string;
 }
 
+interface Source1688FormValues {
+  keyword: string;
+  pageSize?: number;
+  priceStart?: number;
+  priceEnd?: number;
+}
+
 interface PoFormValues {
   candidateId?: string;
   qty?: number;
   expectedDeliveryDate?: Dayjs | null;
   remark?: string;
+}
+
+interface Address1688FormValues {
+  label: string;
+  fullName: string;
+  mobile?: string;
+  phone?: string;
+  provinceText?: string;
+  cityText?: string;
+  areaText?: string;
+  townText?: string;
+  address: string;
+  postCode?: string;
+  isDefault?: boolean;
 }
 
 function formatCurrency(value?: number | string | null) {
@@ -229,18 +276,26 @@ export default function PurchaseCenter() {
   const [suppliers, setSuppliers] = useState<SupplierOption[]>([]);
   const [requestOpen, setRequestOpen] = useState(false);
   const [quotePrId, setQuotePrId] = useState<string | null>(null);
+  const [source1688PrId, setSource1688PrId] = useState<string | null>(null);
+  const [address1688Open, setAddress1688Open] = useState(false);
   const [poPrId, setPoPrId] = useState<string | null>(null);
   const [detailPrId, setDetailPrId] = useState<string | null>(null);
   const [realtimeStatus, setRealtimeStatus] = useState<"connected" | "updated" | "unavailable">("unavailable");
 
   const [requestForm] = Form.useForm<RequestFormValues>();
   const [quoteForm] = Form.useForm<QuoteFormValues>();
+  const [source1688Form] = Form.useForm<Source1688FormValues>();
+  const [address1688Form] = Form.useForm<Address1688FormValues>();
   const [poForm] = Form.useForm<PoFormValues>();
   const [commentForm] = Form.useForm<{ body: string }>();
 
   const quotePr = useMemo(
     () => data.purchaseRequests?.find((item) => item.id === quotePrId) || null,
     [data.purchaseRequests, quotePrId],
+  );
+  const source1688Pr = useMemo(
+    () => data.purchaseRequests?.find((item) => item.id === source1688PrId) || null,
+    [data.purchaseRequests, source1688PrId],
   );
   const poPr = useMemo(
     () => data.purchaseRequests?.find((item) => item.id === poPrId) || null,
@@ -350,6 +405,15 @@ export default function PurchaseCenter() {
     quoteForm.setFieldsValue({ moq: 1, logisticsFee: 0 });
   };
 
+  const open1688SourceModal = (row: PurchaseRequestRow) => {
+    setSource1688PrId(row.id);
+    source1688Form.resetFields();
+    source1688Form.setFieldsValue({
+      keyword: row.productName || row.internalSkuCode || "",
+      pageSize: 10,
+    });
+  };
+
   const openPoModal = (row: PurchaseRequestRow) => {
     const candidate = firstPoCandidate(row);
     setPoPrId(row.id);
@@ -396,6 +460,49 @@ export default function PurchaseCenter() {
       setQuotePrId(null);
       quoteForm.resetFields();
     }
+  };
+
+  const handleSource1688 = async (values: Source1688FormValues) => {
+    if (!source1688Pr) return;
+    const result = await runAction(`1688-source-${source1688Pr.id}`, {
+      action: "source_1688_keyword",
+      prId: source1688Pr.id,
+      keyword: values.keyword,
+      pageSize: values.pageSize,
+      importLimit: values.pageSize,
+      priceStart: values.priceStart,
+      priceEnd: values.priceEnd,
+    }, "1688 API候选已导入");
+    if (result) {
+      setSource1688PrId(null);
+      source1688Form.resetFields();
+    }
+  };
+
+  const handleSave1688Address = async (values: Address1688FormValues) => {
+    const result = await runAction("1688-address", {
+      action: "save_1688_address",
+      ...values,
+      isDefault: values.isDefault !== false,
+    }, "1688 address saved");
+    if (result) {
+      setAddress1688Open(false);
+      address1688Form.resetFields();
+    }
+  };
+
+  const refresh1688CandidateDetail = async (candidate: SourcingCandidateRow) => {
+    await runAction(`1688-detail-${candidate.id}`, {
+      action: "refresh_1688_product_detail",
+      candidateId: candidate.id,
+    }, "1688 detail refreshed");
+  };
+
+  const preview1688Order = async (row: PurchaseOrderRow) => {
+    await runAction(`1688-preview-${row.id}`, {
+      action: "preview_1688_order",
+      poId: row.id,
+    }, "1688 order preview finished");
   };
 
   const handleGeneratePo = async (values: PoFormValues) => {
@@ -513,6 +620,16 @@ export default function PurchaseCenter() {
                 报价反馈
               </Button>
             ) : null}
+            {canQuote ? (
+              <Button
+                size="small"
+                icon={<ApiOutlined />}
+                loading={actingKey === `1688-source-${row.id}`}
+                onClick={() => open1688SourceModal(row)}
+              >
+                1688 API
+              </Button>
+            ) : null}
             {canGeneratePo ? (
               <Button size="small" type="primary" icon={<FileDoneOutlined />} onClick={() => openPoModal(row)}>
                 生成采购单
@@ -581,6 +698,16 @@ export default function PurchaseCenter() {
       fixed: "right",
       render: (_value, row) => (
         <Space size={6} wrap>
+          {row.status === "draft" && canPurchase ? (
+            <Button
+              size="small"
+              icon={<ApiOutlined />}
+              loading={actingKey === `1688-preview-${row.id}`}
+              onClick={() => preview1688Order(row)}
+            >
+              1688 Preview
+            </Button>
+          ) : null}
           {row.status === "draft" && canPurchase ? (
             <Button
               size="small"
@@ -749,6 +876,24 @@ export default function PurchaseCenter() {
               新建采购需求
             </Button>
           ) : null,
+          canPurchase ? (
+            <Button key="1688-address" icon={<ApiOutlined />} onClick={() => {
+              const current = data.alibaba1688Addresses?.[0];
+              address1688Form.setFieldsValue({
+                label: current?.label || "Default",
+                fullName: current?.fullName || "",
+                mobile: current?.mobile || "",
+                provinceText: current?.provinceText || "",
+                cityText: current?.cityText || "",
+                areaText: current?.areaText || "",
+                address: current?.address || "",
+                isDefault: current?.isDefault ?? true,
+              });
+              setAddress1688Open(true);
+            }}>
+              1688 Address
+            </Button>
+          ) : null,
           <Button key="refresh" icon={<ReloadOutlined />} loading={loading} onClick={loadData}>
             刷新
           </Button>,
@@ -820,6 +965,62 @@ export default function PurchaseCenter() {
           pagination={{ pageSize: 8, showSizeChanger: false }}
         />
       </div>
+
+      <Modal
+        open={address1688Open}
+        title="1688 Address"
+        okText="Save"
+        cancelText="Cancel"
+        confirmLoading={actingKey === "1688-address"}
+        onCancel={() => setAddress1688Open(false)}
+        onOk={() => address1688Form.submit()}
+      >
+        <Form form={address1688Form} layout="vertical" onFinish={handleSave1688Address} initialValues={{ isDefault: true }}>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item name="label" label="Label" rules={[{ required: true, message: "Label is required" }]}>
+                <Input placeholder="Default warehouse" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="fullName" label="Receiver" rules={[{ required: true, message: "Receiver is required" }]}>
+                <Input placeholder="Receiver name" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="mobile" label="Mobile" rules={[{ required: true, message: "Mobile is required" }]}>
+                <Input placeholder="13800000000" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="postCode" label="Post code">
+                <Input placeholder="310000" />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="provinceText" label="Province">
+                <Input />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="cityText" label="City">
+                <Input />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="areaText" label="Area">
+                <Input />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item name="address" label="Address" rules={[{ required: true, message: "Address is required" }]}>
+            <Input />
+          </Form.Item>
+          <Form.Item name="isDefault" label="Default" valuePropName="checked">
+            <Switch />
+          </Form.Item>
+        </Form>
+      </Modal>
 
       <Modal
         open={requestOpen}
@@ -919,6 +1120,46 @@ export default function PurchaseCenter() {
       </Modal>
 
       <Modal
+        open={Boolean(source1688Pr)}
+        title="1688 API寻源"
+        okText="导入候选"
+        cancelText="取消"
+        confirmLoading={source1688Pr ? actingKey === `1688-source-${source1688Pr.id}` : false}
+        onCancel={() => setSource1688PrId(null)}
+        onOk={() => source1688Form.submit()}
+        destroyOnClose
+      >
+        <Form form={source1688Form} layout="vertical" onFinish={handleSource1688}>
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message={source1688Pr ? `${source1688Pr.productName || source1688Pr.internalSkuCode || "PR"} · ${formatQty(source1688Pr.requestedQty)} pcs` : ""}
+          />
+          <Form.Item name="keyword" label="关键词" rules={[{ required: true, message: "请输入1688搜索关键词" }]}>
+            <Input placeholder="商品名、类目词或供应商常用词" />
+          </Form.Item>
+          <Row gutter={12}>
+            <Col span={8}>
+              <Form.Item name="pageSize" label="导入数量">
+                <InputNumber min={1} max={20} precision={0} style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="priceStart" label="最低价">
+                <InputNumber min={0} precision={2} prefix="¥" style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="priceEnd" label="最高价">
+                <InputNumber min={0} precision={2} prefix="¥" style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+          </Row>
+        </Form>
+      </Modal>
+
+      <Modal
         open={Boolean(poPr)}
         title="生成采购单"
         okText="生成采购单"
@@ -986,10 +1227,25 @@ export default function PurchaseCenter() {
                 pagination={false}
                 dataSource={detailPr.candidates || []}
                 columns={[
+                  { title: "来源", width: 90, render: (_value, row) => (row.sourcingMethod === "official_api" ? "1688 API" : "手动") },
                   { title: "供应商", dataIndex: "supplierName", render: (value) => value || "-" },
                   { title: "单价", dataIndex: "unitPrice", width: 90, render: formatCurrency },
                   { title: "MOQ", dataIndex: "moq", width: 70, render: formatQty },
                   { title: "交期", dataIndex: "leadDays", width: 80, render: (value) => (value ? `${value} 天` : "-") },
+                  {
+                    title: "1688",
+                    width: 110,
+                    render: (_value, row) => row.sourcingMethod === "official_api" ? (
+                      <Button
+                        size="small"
+                        icon={<ReloadOutlined />}
+                        loading={actingKey === `1688-detail-${row.id}`}
+                        onClick={() => refresh1688CandidateDetail(row)}
+                      >
+                        Detail
+                      </Button>
+                    ) : "-",
+                  },
                 ]}
               />
             </div>

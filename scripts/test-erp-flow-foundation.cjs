@@ -3,8 +3,12 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
+const { relaunchUnderElectronIfNeeded } = require("./ensure-electron-runtime.cjs");
+
+relaunchUnderElectronIfNeeded(__filename);
+
 const { openErpDatabase } = require("../electron/db/connection.cjs");
-const { runMigrations } = require("../electron/db/migrate.cjs");
+const { listMigrationFiles, runMigrations } = require("../electron/db/migrate.cjs");
 const { createErpServices } = require("../electron/erp/services/index.cjs");
 const {
   ERP_ROLES,
@@ -181,6 +185,14 @@ function assertTableExists(db, tableName) {
   assert.ok(row, `Expected table ${tableName} to exist`);
 }
 
+function assertColumnExists(db, tableName, columnName) {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  assert.ok(
+    columns.some((column) => column.name === columnName),
+    `Expected column ${tableName}.${columnName} to exist`,
+  );
+}
+
 function assertTransitionDenied(fn) {
   assert.throws(fn, (error) => (
     error instanceof WorkflowTransitionError
@@ -216,7 +228,10 @@ function runFlow() {
       userDataDir: tempUserData,
       backup: false,
     });
-    assert.equal(migrationResult.migrations.filter((item) => item.status === "success").length, 6);
+    assert.equal(
+      migrationResult.migrations.filter((item) => item.status === "success").length,
+      listMigrationFiles().length,
+    );
 
     db = openErpDatabase({ userDataDir: tempUserData });
     for (const tableName of [
@@ -234,9 +249,19 @@ function runFlow() {
       "erp_work_items",
       "erp_work_item_events",
       "erp_audit_logs",
+      "erp_1688_api_call_log",
+      "erp_1688_message_events",
+      "erp_1688_delivery_addresses",
     ]) {
       assertTableExists(db, tableName);
     }
+    assertColumnExists(db, "erp_sourcing_candidates", "external_offer_id");
+    assertColumnExists(db, "erp_sourcing_candidates", "source_payload_json");
+    assertColumnExists(db, "erp_sourcing_candidates", "external_sku_options_json");
+    assertColumnExists(db, "erp_sourcing_candidates", "external_price_ranges_json");
+    assertColumnExists(db, "erp_purchase_orders", "external_order_id");
+    assertColumnExists(db, "erp_purchase_orders", "external_order_payload_json");
+    assertColumnExists(db, "erp_purchase_orders", "external_order_preview_json");
 
     assertQcThresholds();
     insertSeedData(db);
@@ -369,4 +394,10 @@ function runFlow() {
   }
 }
 
-runFlow();
+try {
+  runFlow();
+  process.exit(0);
+} catch (error) {
+  console.error(error);
+  process.exit(1);
+}

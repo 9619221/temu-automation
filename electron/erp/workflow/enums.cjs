@@ -30,6 +30,7 @@ const SOURCING_CANDIDATE_STATUS = Object.freeze({
 const PURCHASE_SOURCE = Object.freeze({
   EXISTING_SUPPLIER: "existing_supplier",
   SOURCE_1688_MANUAL: "1688_manual",
+  SOURCE_1688_OFFICIAL: "1688_official_api",
   OTHER_MANUAL: "other_manual",
 });
 
@@ -168,4 +169,3 @@ module.exports = {
   WORK_ITEM_PRIORITY,
   WORK_ITEM_TYPE,
 };
-

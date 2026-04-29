@@ -201,6 +201,7 @@ function getLanStatus(extra = {}) {
       { path: "/outbound", label: "出库发货工作台", allowedRoles: ROLE_PERMISSIONS["/outbound"] },
       { path: "/health", label: "健康检查" },
       { path: "/api/status", label: "服务状态" },
+      { path: "/api/1688/message", label: "1688 消息回调" },
     ],
     authMode: "cookie_session",
     sessionCount: lanState.sessions.size,
@@ -222,6 +223,20 @@ function writeJson(res, statusCode, payload, headers = {}) {
     ...headers,
   });
   res.end(body);
+}
+
+function writeText(res, statusCode, body, headers = {}) {
+  const text = String(body ?? "");
+  res.writeHead(statusCode, {
+    "Content-Type": "text/plain; charset=utf-8",
+    "Content-Length": Buffer.byteLength(text),
+    "Cache-Control": "no-store",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "X-Content-Type-Options": "nosniff",
+    ...headers,
+  });
+  res.end(text);
 }
 
 function escapeHtml(value) {
@@ -2445,6 +2460,9 @@ function createRequestHandler(options = {}) {
   const refresh1688AccessToken = options.refresh1688AccessToken || (() => {
     throw new Error("1688 token refresh handler is not available");
   });
+  const receive1688Message = options.receive1688Message || (() => {
+    throw new Error("1688 message handler is not available");
+  });
   const validateSessionUser = options.validateSessionUser || null;
   const verifyLogin = options.verifyLogin || (() => null);
 
@@ -2472,6 +2490,7 @@ function createRequestHandler(options = {}) {
       create1688AuthorizeUrl,
       complete1688OAuth,
       refresh1688AccessToken,
+      receive1688Message,
       validateSessionUser,
       verifyLogin,
     }).catch((error) => {
@@ -2494,6 +2513,15 @@ async function readRequestBody(req, maxBytes = 16 * 1024) {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+function parseRequestQuery(req) {
+  try {
+    const parsed = new URL(req.url || "/", "http://127.0.0.1");
+    return Object.fromEntries(parsed.searchParams.entries());
+  } catch {
+    return {};
+  }
+}
+
 async function readLoginPayload(req) {
   const body = await readRequestBody(req);
   const contentType = String(req.headers["content-type"] || "");
@@ -2507,6 +2535,72 @@ async function readLoginPayload(req) {
 async function readOptionalPayload(req) {
   if (req.method === "GET" || req.method === "HEAD") return {};
   return readLoginPayload(req);
+}
+
+function parse1688MessageBody(bodyText, contentType) {
+  if (!bodyText) return {};
+  if (String(contentType || "").includes("application/json")) {
+    try {
+      return JSON.parse(bodyText);
+    } catch {
+      return { raw: bodyText };
+    }
+  }
+  const params = new URLSearchParams(bodyText);
+  const payload = Object.fromEntries(params.entries());
+  if (Object.keys(payload).length > 0) return payload;
+  try {
+    return JSON.parse(bodyText);
+  } catch {
+    return { raw: bodyText };
+  }
+}
+
+function getRequestSourceIp(req) {
+  const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  return forwarded || req.socket?.remoteAddress || null;
+}
+
+async function handle1688MessageRequest({ req, res, receive1688Message }) {
+  const query = parseRequestQuery(req);
+  if (req.method === "GET" || req.method === "HEAD") {
+    const payload = {
+      ok: true,
+      service: "temu-erp-1688-message",
+      endpoint: "/api/1688/message",
+    };
+    if (query.response === "plain") {
+      writeText(res, 200, "success");
+      return;
+    }
+    writeJson(res, 200, payload);
+    return;
+  }
+  if (req.method !== "POST") {
+    writeJson(res, 405, { ok: false, error: "Method not allowed" });
+    return;
+  }
+
+  const bodyText = await readRequestBody(req, 1024 * 1024);
+  const payload = parse1688MessageBody(bodyText, req.headers["content-type"]);
+  const message = await receive1688Message({
+    headers: req.headers,
+    query,
+    payload,
+    bodyText,
+    sourceIp: getRequestSourceIp(req),
+  });
+
+  if (query.response === "plain") {
+    writeText(res, 200, "success");
+    return;
+  }
+  writeJson(res, 200, {
+    ok: true,
+    success: true,
+    message: "success",
+    id: message.id,
+  });
 }
 
 async function handleLoginRequest({ req, res, verifyLogin }) {
@@ -2929,6 +3023,7 @@ async function handleRequest({
   create1688AuthorizeUrl,
   complete1688OAuth,
   refresh1688AccessToken,
+  receive1688Message,
   validateSessionUser,
   verifyLogin,
 }) {
@@ -3000,6 +3095,15 @@ async function handleRequest({
         req,
         res,
         complete1688OAuth,
+      });
+      return;
+    }
+
+    if (pathname === "/api/1688/message" || pathname === "/api/1688/message/health") {
+      await handle1688MessageRequest({
+        req,
+        res,
+        receive1688Message,
       });
       return;
     }
