@@ -257,8 +257,8 @@ function toApiDate(value?: Dayjs | string | null) {
 function skuText(row: { internalSkuCode?: string; productName?: string }) {
   return (
     <Space direction="vertical" size={2}>
-      <Text strong>{row.productName || "-"}</Text>
-      <Text type="secondary" style={{ fontSize: 12 }}>{row.internalSkuCode || "-"}</Text>
+      <Text strong>{row.internalSkuCode || "-"}</Text>
+      <Text type="secondary" style={{ fontSize: 12 }}>{row.productName || "-"}</Text>
     </Space>
   );
 }
@@ -327,10 +327,15 @@ export default function PurchaseCenter() {
   );
 
   const skuOptions = useMemo(
-    () => skus.map((sku) => ({
-      value: sku.id,
-      label: `${sku.internalSkuCode || "-"} · ${sku.productName || "-"}`,
-    })),
+    () => skus.map((sku) => {
+      const code = sku.internalSkuCode || sku.id;
+      const name = sku.productName || "-";
+      return {
+        value: sku.id,
+        label: `${code} · ${name}`,
+        searchText: `${code} ${name}`,
+      };
+    }),
     [skus],
   );
   const supplierOptions = useMemo(
@@ -592,7 +597,7 @@ export default function PurchaseCenter() {
 
   const requestColumns = useMemo<ColumnsType<PurchaseRequestRow>>(() => [
     {
-      title: "SKU",
+      title: "商品编码",
       key: "sku",
       width: 260,
       render: (_value, row) => skuText(row),
@@ -720,7 +725,7 @@ export default function PurchaseCenter() {
       render: (value) => statusTag(value, PO_STATUS_LABELS),
     },
     {
-      title: "SKU / 数量",
+      title: "商品编码 / 数量",
       key: "qty",
       ellipsis: true,
       render: (_value, row) => (
@@ -1115,8 +1120,13 @@ export default function PurchaseCenter() {
         destroyOnClose
       >
         <Form form={requestForm} layout="vertical" onFinish={handleCreateRequest} initialValues={{ requestedQty: 1 }}>
-          <Form.Item name="skuId" label="SKU" rules={[{ required: true, message: "请选择 SKU" }]}>
-            <Select showSearch optionFilterProp="label" options={skuOptions} placeholder="选择要补货或打样的 SKU" />
+          <Form.Item name="skuId" label="商品编码" rules={[{ required: true, message: "请选择商品编码" }]}>
+            <Select
+              showSearch
+              optionFilterProp="searchText"
+              options={skuOptions}
+              placeholder="选择/搜索商品编码或商品名"
+            />
           </Form.Item>
           <Row gutter={12}>
             <Col span={12}>
