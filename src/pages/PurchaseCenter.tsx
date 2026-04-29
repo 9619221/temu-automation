@@ -124,7 +124,9 @@ interface PurchaseOrderRow {
   receivedQty?: number;
   totalAmount?: number;
   expectedDeliveryDate?: string | null;
+  externalOrderId?: string | null;
   externalOrderStatus?: string | null;
+  externalOrderSyncedAt?: string | null;
   externalOrderPreviewedAt?: string | null;
   updatedAt?: string;
 }
@@ -505,6 +507,21 @@ export default function PurchaseCenter() {
     }, "1688 order preview finished");
   };
 
+  const sync1688Order = async (row: PurchaseOrderRow) => {
+    const result = await runAction(`1688-sync-${row.id}`, {
+      action: "sync_1688_orders",
+      poId: row.id,
+    });
+    const matchStatus = result?.result?.matchStatus;
+    if (matchStatus === "bound") {
+      message.success(`已绑定 1688 订单：${result.result.externalOrderId}`);
+    } else if (matchStatus === "needs_confirmation") {
+      message.warning("找到多个可能订单，下一版会加入人工选择绑定");
+    } else if (matchStatus === "not_found") {
+      message.warning("暂未匹配到 1688 订单，请稍后再同步");
+    }
+  };
+
   const handleGeneratePo = async (values: PoFormValues) => {
     if (!poPr) return;
     const result = await runAction(`po-${poPr.id}`, {
@@ -692,9 +709,22 @@ export default function PurchaseCenter() {
       render: formatDate,
     },
     {
+      title: "1688订单",
+      key: "externalOrder",
+      width: 190,
+      render: (_value, row) => (
+        <Space direction="vertical" size={2}>
+          <Text strong>{row.externalOrderId || "未绑定"}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {row.externalOrderStatus || "-"} · {formatDateTime(row.externalOrderSyncedAt)}
+          </Text>
+        </Space>
+      ),
+    },
+    {
       title: "动作",
       key: "actions",
-      width: 210,
+      width: 250,
       fixed: "right",
       render: (_value, row) => (
         <Space size={6} wrap>
@@ -706,6 +736,16 @@ export default function PurchaseCenter() {
               onClick={() => preview1688Order(row)}
             >
               1688 Preview
+            </Button>
+          ) : null}
+          {!row.externalOrderId && canPurchase ? (
+            <Button
+              size="small"
+              icon={<ReloadOutlined />}
+              loading={actingKey === `1688-sync-${row.id}`}
+              onClick={() => sync1688Order(row)}
+            >
+              同步订单
             </Button>
           ) : null}
           {row.status === "draft" && canPurchase ? (
@@ -744,7 +784,7 @@ export default function PurchaseCenter() {
               确认付款
             </Button>
           ) : null}
-          {!["draft", "pending_finance_approval", "approved_to_pay"].includes(row.status) ? <Text type="secondary">无待办</Text> : null}
+          {!["draft", "pending_finance_approval", "approved_to_pay"].includes(row.status) && (row.externalOrderId || !canPurchase) ? <Text type="secondary">无待办</Text> : null}
         </Space>
       ),
     },
@@ -943,7 +983,7 @@ export default function PurchaseCenter() {
           size="middle"
           columns={orderColumns}
           dataSource={data.purchaseOrders || []}
-          scroll={{ x: 1120 }}
+          scroll={{ x: 1350 }}
           pagination={{ pageSize: 8, showSizeChanger: false }}
         />
       </div>

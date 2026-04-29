@@ -32,6 +32,7 @@ const {
   DEFAULT_1688_GATEWAY_BASE,
   PROCUREMENT_APIS,
   call1688OpenApi,
+  normalize1688BuyerOrderListResponse,
   normalize1688ProductDetailResponse,
   normalize1688SearchResponse,
 } = require("./1688Client.cjs");
@@ -62,6 +63,7 @@ const BROADCAST_PURCHASE_ACTIONS = new Set([
   "preview_1688_order",
   "generate_po",
   "push_1688_order",
+  "sync_1688_orders",
   "submit_payment_approval",
   "approve_payment",
   "confirm_paid",
@@ -3087,6 +3089,193 @@ async function preview1688OrderAction({ db, services, payload, actor }) {
   };
 }
 
+function format1688DateTime(value) {
+  const date = value ? new Date(value) : new Date();
+  if (!Number.isFinite(date.getTime())) return null;
+  const pad = (number) => String(number).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function build1688OrderListParams(payload = {}, po = {}) {
+  const page = Math.max(1, Math.floor(Number(optionalNumber(payload.page) ?? 1)));
+  const pageSize = Math.max(1, Math.min(Math.floor(Number(optionalNumber(payload.pageSize) ?? 50)), 100));
+  const createdAt = Date.parse(po.created_at || po.createdAt || "");
+  const start = optionalString(payload.createStartTime || payload.startTime)
+    || format1688DateTime(Number.isFinite(createdAt) ? createdAt - 3 * 24 * 60 * 60 * 1000 : Date.now() - 3 * 24 * 60 * 60 * 1000);
+  const end = optionalString(payload.createEndTime || payload.endTime)
+    || format1688DateTime(Date.now() + 10 * 60 * 1000);
+  const params = {
+    page,
+    pageSize,
+    createStartTime: start,
+    createEndTime: end,
+  };
+  for (const key of ["orderStatus", "tradeStatus", "sellerMemberId", "sellerLoginId"]) {
+    const value = optionalString(payload[key]);
+    if (value) params[key] = value;
+  }
+  return params;
+}
+
+function normalizeLooseText(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function almostEqualMoney(left, right, tolerance = 0.05) {
+  const a = Number(left);
+  const b = Number(right);
+  return Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= tolerance;
+}
+
+function score1688OrderForPo(order = {}, po = {}, lines = []) {
+  let score = 0;
+  const reasons = [];
+  const offerId = optionalString(po.external_offer_id);
+  const skuId = optionalString(po.external_sku_id);
+  const specId = optionalString(po.external_spec_id);
+  const supplierName = normalizeLooseText(po.candidate_supplier_name || po.supplier_name);
+
+  if (offerId && (order.productIds || []).map(String).includes(offerId)) {
+    score += 50;
+    reasons.push("offer_id");
+  }
+  if (skuId && (order.skuIds || []).map(String).includes(skuId)) {
+    score += 20;
+    reasons.push("sku_id");
+  }
+  if (specId && (order.specIds || []).map(String).includes(specId)) {
+    score += 20;
+    reasons.push("spec_id");
+  }
+  const totalQty = lines.reduce((sum, line) => sum + Number(line.qty || 0), 0);
+  const orderQty = (order.lines || []).reduce((sum, line) => sum + Number(line.quantity || 0), 0);
+  if (totalQty > 0 && orderQty > 0 && totalQty === orderQty) {
+    score += 10;
+    reasons.push("qty");
+  }
+  if (almostEqualMoney(order.totalAmount, po.total_amount)) {
+    score += 20;
+    reasons.push("amount");
+  }
+  const orderSupplier = normalizeLooseText(order.supplierName);
+  if (supplierName && orderSupplier && (supplierName.includes(orderSupplier) || orderSupplier.includes(supplierName))) {
+    score += 10;
+    reasons.push("supplier");
+  }
+  return {
+    ...order,
+    matchScore: score,
+    matchReasons: reasons,
+  };
+}
+
+function bind1688OrderToPurchaseOrder({ db, services, po, order, actor, action = "sync_1688_orders" }) {
+  const now = nowIso();
+  db.prepare(`
+    UPDATE erp_purchase_orders
+    SET external_order_id = @external_order_id,
+        external_order_status = @external_order_status,
+        external_order_payload_json = @external_order_payload_json,
+        external_order_synced_at = @external_order_synced_at,
+        updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id: po.id,
+    external_order_id: order.externalOrderId,
+    external_order_status: optionalString(order.status) || "bound",
+    external_order_payload_json: trimJsonForStorage(order.raw || order),
+    external_order_synced_at: now,
+    updated_at: now,
+  });
+  const afterPo = getPurchaseOrder(db, po.id);
+  services.workflow.writeAudit({
+    accountId: po.account_id,
+    actor,
+    action,
+    entityType: "purchase_order",
+    entityId: po.id,
+    before: po,
+    after: afterPo,
+  });
+  if (po.pr_id) {
+    const pr = getPurchaseRequest(db, po.pr_id);
+    writePurchaseRequestEvent(
+      db,
+      pr,
+      actor,
+      action,
+      `1688 order bound: ${order.externalOrderId}`,
+    );
+    markPurchaseRequestRead(db, pr.id, actor);
+  }
+  return afterPo;
+}
+
+async function sync1688OrdersAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 order sync");
+  const poId = requireString(payload.poId || payload.id, "poId");
+  const po = getPurchaseOrderWithCandidate(db, poId);
+  const lines = getPurchaseOrderLines(db, poId);
+  if (!lines.length) throw new Error(`Purchase order has no lines: ${poId}`);
+
+  const apiParams = build1688OrderListParams(payload, po);
+  const rawResponse = payload.mockOrderListResponse || payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: po.account_id,
+    action: "sync_1688_orders",
+    api: PROCUREMENT_APIS.ORDER_LIST,
+    params: apiParams,
+  });
+  const orders = normalize1688BuyerOrderListResponse(rawResponse);
+  const explicitOrderId = optionalString(payload.externalOrderId || payload.orderId || payload.tradeId);
+  const scored = orders
+    .map((order) => {
+      const scoredOrder = score1688OrderForPo(order, po, lines);
+      if (explicitOrderId && scoredOrder.externalOrderId === explicitOrderId) {
+        return {
+          ...scoredOrder,
+          matchScore: scoredOrder.matchScore + 100,
+          matchReasons: [...scoredOrder.matchReasons, "explicit_order_id"],
+        };
+      }
+      return scoredOrder;
+    })
+    .sort((left, right) => right.matchScore - left.matchScore);
+
+  const minScore = Math.max(1, Math.floor(Number(optionalNumber(payload.minMatchScore) ?? 50)));
+  const matches = scored.filter((order) => (
+    explicitOrderId ? order.externalOrderId === explicitOrderId : order.matchScore >= minScore
+  ));
+
+  let boundOrder = null;
+  let afterPo = getPurchaseOrder(db, po.id);
+  if (matches.length === 1) {
+    boundOrder = matches[0];
+    afterPo = bind1688OrderToPurchaseOrder({ db, services, po, order: boundOrder, actor });
+  }
+
+  return {
+    apiKey: PROCUREMENT_APIS.ORDER_LIST.key,
+    query: apiParams,
+    matchStatus: boundOrder ? "bound" : (matches.length > 1 ? "needs_confirmation" : "not_found"),
+    externalOrderId: boundOrder?.externalOrderId || null,
+    matchedCount: matches.length,
+    totalFound: orders.length,
+    matches: matches.slice(0, 10).map((order) => ({
+      externalOrderId: order.externalOrderId,
+      status: order.status,
+      supplierName: order.supplierName,
+      totalAmount: order.totalAmount,
+      createdAt: order.createdAt,
+      matchScore: order.matchScore,
+      matchReasons: order.matchReasons,
+    })),
+    purchaseOrder: toCamelRow(afterPo),
+    rawResponse,
+  };
+}
+
 async function performPurchaseAction(payload = {}, actorInput = {}) {
   const { db, services } = requireErp();
   const action = requireString(payload.action, "action");
@@ -3134,6 +3323,16 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
 
   if (action === "push_1688_order") {
     const result = await push1688OrderAction({ db, services, payload, actor });
+    broadcastPurchaseUpdate(action, payload, actor, result);
+    return {
+      action,
+      result,
+      workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+    };
+  }
+
+  if (action === "sync_1688_orders") {
+    const result = await sync1688OrdersAction({ db, services, payload, actor });
     broadcastPurchaseUpdate(action, payload, actor, result);
     return {
       action,

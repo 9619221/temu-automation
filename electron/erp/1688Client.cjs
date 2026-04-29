@@ -480,12 +480,142 @@ function normalize1688ProductDetailResponse(payload = {}) {
   };
 }
 
+function looksLikeBuyerOrder(item) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+  return Boolean(
+    item.orderId
+    || item.order_id
+    || item.tradeId
+    || item.trade_id
+    || item.id
+    || item.orderStatus
+    || item.status
+    || item.sellerCompany
+    || item.sellerCompanyName
+    || item.sellerLoginId
+    || item.buyerOrder
+  );
+}
+
+function findBuyerOrderArray(value, depth = 0) {
+  const parsed = parseMaybeJson(value);
+  if (!parsed || depth > 8) return [];
+  if (Array.isArray(parsed)) {
+    if (parsed.some(looksLikeBuyerOrder)) return parsed.filter((item) => item && typeof item === "object");
+    for (const item of parsed) {
+      const found = findBuyerOrderArray(item, depth + 1);
+      if (found.length) return found;
+    }
+    return [];
+  }
+  if (typeof parsed !== "object") return [];
+  for (const key of [
+    "result",
+    "data",
+    "orders",
+    "orderList",
+    "tradeList",
+    "trades",
+    "items",
+    "list",
+    "toReturn",
+    "returnValue",
+  ]) {
+    const found = findBuyerOrderArray(parsed[key], depth + 1);
+    if (found.length) return found;
+  }
+  for (const item of Object.values(parsed)) {
+    const found = findBuyerOrderArray(item, depth + 1);
+    if (found.length) return found;
+  }
+  return [];
+}
+
+function normalizeOrderLineIds(rawLine = {}) {
+  const productId = firstPresent(
+    rawLine.offerId,
+    rawLine.offerID,
+    rawLine.productId,
+    rawLine.productID,
+    rawLine.product_id,
+    rawLine.itemId,
+    rawLine.itemID,
+  );
+  const skuId = firstPresent(rawLine.skuId, rawLine.skuID, rawLine.sku_id, rawLine.cargoSkuId, rawLine.cargoSkuID);
+  const specId = firstPresent(rawLine.specId, rawLine.specID, rawLine.spec_id, rawLine.cargoSpecId, rawLine.cargoSpecID);
+  return {
+    productId: productId ? String(productId) : null,
+    skuId: skuId ? String(skuId) : null,
+    specId: specId ? String(specId) : null,
+    quantity: firstNumber(rawLine.quantity, rawLine.num, rawLine.amount, rawLine.count),
+    title: firstPresent(rawLine.productName, rawLine.title, rawLine.name, rawLine.subject),
+    raw: rawLine,
+  };
+}
+
+function normalize1688BuyerOrder(item = {}) {
+  const nested = item.buyerOrder && typeof item.buyerOrder === "object" ? item.buyerOrder : item;
+  const externalOrderId = firstPresent(
+    nested.orderId,
+    nested.order_id,
+    nested.tradeId,
+    nested.trade_id,
+    nested.id,
+    nested.orderid,
+  );
+  const rawLines = normalizeArray(firstPresent(
+    nested.products,
+    nested.productItems,
+    nested.orderEntries,
+    nested.cargoList,
+    nested.cargoParamList,
+    nested.items,
+    nested.itemList,
+  ));
+  const lines = rawLines.map(normalizeOrderLineIds).filter((line) => (
+    line.productId || line.skuId || line.specId || line.quantity || line.title
+  ));
+  return {
+    externalOrderId: externalOrderId ? String(externalOrderId) : null,
+    status: firstPresent(nested.orderStatus, nested.status, nested.baseStatus, nested.tradeStatus),
+    supplierName: firstPresent(
+      nested.sellerCompany,
+      nested.sellerCompanyName,
+      nested.supplierName,
+      nested.companyName,
+      nested.sellerLoginId,
+      nested.sellerMemberId,
+    ),
+    totalAmount: firstNumber(
+      nested.totalAmount,
+      nested.sumPayment,
+      nested.actualPayFee,
+      nested.orderAmount,
+      nested.payment,
+      nested.price,
+    ),
+    freight: firstNumber(nested.freight, nested.postFee, nested.shippingFee, nested.carriage),
+    createdAt: firstPresent(nested.createTime, nested.gmtCreate, nested.orderCreateTime, nested.tradeCreateTime),
+    productIds: Array.from(new Set(lines.map((line) => line.productId).filter(Boolean))),
+    skuIds: Array.from(new Set(lines.map((line) => line.skuId).filter(Boolean))),
+    specIds: Array.from(new Set(lines.map((line) => line.specId).filter(Boolean))),
+    lines,
+    raw: item,
+  };
+}
+
+function normalize1688BuyerOrderListResponse(payload = {}) {
+  const orders = findBuyerOrderArray(payload);
+  return orders.map(normalize1688BuyerOrder).filter((order) => order.externalOrderId);
+}
+
 module.exports = {
   DEFAULT_1688_GATEWAY_BASE,
   PROCUREMENT_APIS,
   build1688ApiPath,
   build1688OpenApiRequest,
   call1688OpenApi,
+  normalize1688BuyerOrderListResponse,
   normalize1688ProductDetailResponse,
   normalize1688SearchResponse,
   sign1688Request,
