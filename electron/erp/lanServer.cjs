@@ -12,6 +12,11 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/users": ["admin", "manager"],
   "/api/users/list": ["admin", "manager"],
   "/api/users/upsert": ["admin", "manager"],
+  "/1688": ["admin", "manager"],
+  "/api/1688/status": ["admin", "manager"],
+  "/api/1688/config": ["admin", "manager"],
+  "/api/1688/start": ["admin", "manager"],
+  "/api/1688/refresh": ["admin", "manager"],
   "/purchase": ["admin", "manager", "operations", "buyer", "finance"],
   "/api/purchase/workbench": ["admin", "manager", "operations", "buyer", "finance"],
   "/api/purchase/action": ["admin", "manager", "operations", "buyer", "finance"],
@@ -189,6 +194,7 @@ function getLanStatus(extra = {}) {
     routes: [
       { path: "/", label: "入口", allowedRoles: ROLE_PERMISSIONS["/"] },
       { path: "/users", label: "用户管理", allowedRoles: ROLE_PERMISSIONS["/users"] },
+      { path: "/1688", label: "1688 授权", allowedRoles: ROLE_PERMISSIONS["/1688"] },
       { path: "/purchase", label: "采购工作台", allowedRoles: ROLE_PERMISSIONS["/purchase"] },
       { path: "/warehouse", label: "仓库工作台", allowedRoles: ROLE_PERMISSIONS["/warehouse"] },
       { path: "/qc", label: "QC 抽检工作台", allowedRoles: ROLE_PERMISSIONS["/qc"] },
@@ -504,6 +510,7 @@ function renderShell({ title, subtitle, cards = [], currentPath, user, content =
   const navItems = [
     ["/", "入口"],
     ["/users", "用户"],
+    ["/1688", "1688"],
     ["/purchase", "采购"],
     ["/warehouse", "仓库"],
     ["/qc", "QC"],
@@ -1123,6 +1130,14 @@ function getRequestPath(req) {
   }
 }
 
+function getRequestOrigin(req) {
+  const host = String(req.headers.host || "").trim();
+  if (!host) return "http://127.0.0.1";
+  const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+  const proto = forwardedProto || (req.socket?.encrypted ? "https" : "http");
+  return `${proto}://${host}`;
+}
+
 function buildLandingCards() {
   const status = getLanStatus();
   const urlList = [status.localUrl, ...status.lanUrls]
@@ -1360,6 +1375,77 @@ function renderUserManagement(users = [], currentUser = {}) {
       table: userTable,
     }),
   ].join("");
+}
+
+function render1688AuthPage(status = {}, requestOrigin = "") {
+  const origin = requestOrigin || "http://127.0.0.1";
+  const callbackUrl = status.redirectUri || `${origin}/api/1688/oauth/callback`;
+  const appKey = status.appKey || "";
+  const configuredLabel = status.configured ? "已保存配置" : "未配置";
+  const authorizedLabel = status.authorized ? "已授权" : "未授权";
+  const expiryText = status.accessTokenExpiresAt ? String(status.accessTokenExpiresAt).replace("T", " ").slice(0, 19) : "-";
+  const refreshExpiryText = status.refreshTokenExpiresAt ? String(status.refreshTokenExpiresAt).replace("T", " ").slice(0, 19) : "-";
+
+  return `
+    <section class="section">
+      <div class="section-head">
+        <div>
+          <div class="section-title">1688 开放平台授权</div>
+          <div class="section-subtitle">先在这里保存应用凭证，再跳转到 1688 完成买家账号授权。授权成功后，后续搜索商品、创建订单、同步订单和物流都会共用这份云端 token。</div>
+        </div>
+        <span class="badge">${escapeHtml(authorizedLabel)}</span>
+      </div>
+      <div style="padding: 16px; display: grid; gap: 14px;">
+        <div class="grid" style="margin-bottom: 0;">
+          <section class="card">
+            <div class="card-title">回调地址</div>
+            <div class="card-body">
+              <div>把下面地址填到 1688 开放平台应用的 OAuth 回调地址中。</div>
+              <p><code>${escapeHtml(callbackUrl)}</code></p>
+            </div>
+          </section>
+          <section class="card">
+            <div class="card-title">授权状态</div>
+            <div class="card-body">
+              <div><span class="status ${status.configured ? "status-ok" : "status-warn"}">${escapeHtml(configuredLabel)}</span></div>
+              <div style="margin-top: 8px;"><span class="status ${status.authorized ? "status-ok" : "status-warn"}">${escapeHtml(authorizedLabel)}</span></div>
+              <div class="muted" style="margin-top: 8px;">会员：${escapeHtml(status.memberId || status.aliId || status.resourceOwner || "-")}</div>
+              <div class="muted">Access Token 到期：${escapeHtml(expiryText)}</div>
+              <div class="muted">Refresh Token 到期：${escapeHtml(refreshExpiryText)}</div>
+            </div>
+          </section>
+        </div>
+
+        <form class="stacked-form" method="post" action="/api/1688/config" style="max-width: 760px;">
+          <div class="form-grid">
+            <label class="inline-label">AppKey
+              <input class="mini-input full" name="appKey" value="${escapeHtml(appKey)}" required />
+            </label>
+            <label class="inline-label">AppSecret
+              <input class="mini-input full" name="appSecret" type="password" autocomplete="new-password" placeholder="${status.hasAppSecret ? "留空不修改" : "请输入 AppSecret"}" ${status.hasAppSecret ? "" : "required"} />
+            </label>
+            <label class="inline-label">回调地址
+              <input class="mini-input full" name="redirectUri" value="${escapeHtml(callbackUrl)}" required />
+            </label>
+          </div>
+          <div class="actions">
+            <button class="action-chip" type="submit">保存配置</button>
+          </div>
+        </form>
+
+        <div class="actions">
+          <form class="inline-form" method="post" action="/api/1688/start">
+            <input type="hidden" name="appKey" value="${escapeHtml(appKey)}" />
+            <input type="hidden" name="redirectUri" value="${escapeHtml(callbackUrl)}" />
+            <button class="action-chip secondary" type="submit" ${status.configured ? "" : "disabled"}>去 1688 授权</button>
+          </form>
+          <form class="inline-form" method="post" action="/api/1688/refresh">
+            <button class="action-chip success" type="submit" ${status.authorized ? "" : "disabled"}>刷新 Token</button>
+          </form>
+        </div>
+      </div>
+    </section>
+  `;
 }
 
 function renderSkuCell(row) {
@@ -2343,6 +2429,22 @@ function createRequestHandler(options = {}) {
   const upsertUser = options.upsertUser || (() => {
     throw new Error("User action handler is not available");
   });
+  const get1688AuthStatus = options.get1688AuthStatus || (() => ({
+    configured: false,
+    authorized: false,
+  }));
+  const upsert1688AuthConfig = options.upsert1688AuthConfig || (() => {
+    throw new Error("1688 auth config handler is not available");
+  });
+  const create1688AuthorizeUrl = options.create1688AuthorizeUrl || (() => {
+    throw new Error("1688 auth start handler is not available");
+  });
+  const complete1688OAuth = options.complete1688OAuth || (() => {
+    throw new Error("1688 auth callback handler is not available");
+  });
+  const refresh1688AccessToken = options.refresh1688AccessToken || (() => {
+    throw new Error("1688 token refresh handler is not available");
+  });
   const validateSessionUser = options.validateSessionUser || null;
   const verifyLogin = options.verifyLogin || (() => null);
 
@@ -2365,6 +2467,11 @@ function createRequestHandler(options = {}) {
       updateWorkItemStatus,
       listUsers,
       upsertUser,
+      get1688AuthStatus,
+      upsert1688AuthConfig,
+      create1688AuthorizeUrl,
+      complete1688OAuth,
+      refresh1688AccessToken,
       validateSessionUser,
       verifyLogin,
     }).catch((error) => {
@@ -2495,6 +2602,130 @@ async function handleUserUpsertRequest({ req, res, session, upsertUser }) {
       currentPath: "/users",
       user: session.user,
     }), 400);
+  }
+}
+
+function render1688Error(res, session, error, statusCode = 400) {
+  writeHtml(res, renderShell({
+    title: "1688 授权处理失败",
+    subtitle: error?.message || String(error),
+    cards: [
+      {
+        title: "处理建议",
+        body: "请确认 AppKey、AppSecret、回调地址和 1688 开放平台应用配置一致，然后回到 1688 授权页重试。",
+      },
+      {
+        title: "返回",
+        body: '<a class="action-chip" href="/1688">回到 1688 授权</a>',
+      },
+    ],
+    currentPath: "/1688",
+    user: session?.user || null,
+  }), statusCode);
+}
+
+async function handle1688ConfigRequest({ req, res, session, upsert1688AuthConfig }) {
+  const wantsJson = String(req.headers.accept || "").includes("application/json")
+    || String(req.headers["content-type"] || "").includes("application/json");
+  if (req.method !== "POST") {
+    writeJson(res, 405, { ok: false, error: "Method not allowed" });
+    return;
+  }
+  try {
+    const payload = await readLoginPayload(req);
+    const status = await upsert1688AuthConfig(payload, session.user);
+    if (wantsJson) {
+      writeJson(res, 200, { ok: true, status });
+      return;
+    }
+    writeRedirect(res, "/1688");
+  } catch (error) {
+    if (wantsJson) {
+      writeJson(res, 400, { ok: false, error: error?.message || String(error) });
+      return;
+    }
+    render1688Error(res, session, error, 400);
+  }
+}
+
+async function handle1688StartRequest({ req, res, session, create1688AuthorizeUrl }) {
+  const wantsJson = String(req.headers.accept || "").includes("application/json")
+    || String(req.headers["content-type"] || "").includes("application/json");
+  if (req.method !== "POST") {
+    writeJson(res, 405, { ok: false, error: "Method not allowed" });
+    return;
+  }
+  try {
+    const payload = await readLoginPayload(req);
+    const result = await create1688AuthorizeUrl(payload, session.user);
+    if (wantsJson) {
+      writeJson(res, 200, { ok: true, ...result });
+      return;
+    }
+    writeRedirect(res, result.authUrl);
+  } catch (error) {
+    if (wantsJson) {
+      writeJson(res, 400, { ok: false, error: error?.message || String(error) });
+      return;
+    }
+    render1688Error(res, session, error, 400);
+  }
+}
+
+async function handle1688RefreshRequest({ req, res, session, refresh1688AccessToken }) {
+  const wantsJson = String(req.headers.accept || "").includes("application/json")
+    || String(req.headers["content-type"] || "").includes("application/json");
+  if (req.method !== "POST") {
+    writeJson(res, 405, { ok: false, error: "Method not allowed" });
+    return;
+  }
+  try {
+    const status = await refresh1688AccessToken(session.user);
+    if (wantsJson) {
+      writeJson(res, 200, { ok: true, status });
+      return;
+    }
+    writeRedirect(res, "/1688");
+  } catch (error) {
+    if (wantsJson) {
+      writeJson(res, 400, { ok: false, error: error?.message || String(error) });
+      return;
+    }
+    render1688Error(res, session, error, 400);
+  }
+}
+
+async function handle1688OAuthCallback({ req, res, complete1688OAuth }) {
+  const parsed = new URL(req.url || "/", "http://127.0.0.1");
+  const error = parsed.searchParams.get("error");
+  if (error) {
+    render1688Error(res, null, new Error(parsed.searchParams.get("error_description") || error), 400);
+    return;
+  }
+
+  try {
+    const status = await complete1688OAuth({
+      code: parsed.searchParams.get("code"),
+      state: parsed.searchParams.get("state"),
+    });
+    writeHtml(res, renderShell({
+      title: "1688 授权成功",
+      subtitle: "云端已经保存 1688 Access Token，后续可以开始接商品、订单和物流接口。",
+      cards: [
+        {
+          title: "绑定账号",
+          body: `会员：<code>${escapeHtml(status.memberId || status.aliId || status.resourceOwner || "-")}</code><br/>Access Token 到期：<code>${escapeHtml(status.accessTokenExpiresAt || "-")}</code>`,
+        },
+        {
+          title: "下一步",
+          body: '<a class="action-chip" href="/1688">回到 1688 授权页</a>',
+        },
+      ],
+      currentPath: "/1688",
+      user: getSessionFromRequest(req)?.user || null,
+    }));
+  } catch (callbackError) {
+    render1688Error(res, null, callbackError, 400);
   }
 }
 
@@ -2693,6 +2924,11 @@ async function handleRequest({
   updateWorkItemStatus,
   listUsers,
   upsertUser,
+  get1688AuthStatus,
+  upsert1688AuthConfig,
+  create1688AuthorizeUrl,
+  complete1688OAuth,
+  refresh1688AccessToken,
   validateSessionUser,
   verifyLogin,
 }) {
@@ -2759,6 +2995,15 @@ async function handleRequest({
       return;
     }
 
+    if (pathname === "/api/1688/oauth/callback") {
+      await handle1688OAuthCallback({
+        req,
+        res,
+        complete1688OAuth,
+      });
+      return;
+    }
+
     const protectedPath = ROLE_PERMISSIONS[pathname] ? pathname : null;
     let session = protectedPath ? getSessionFromRequest(req) : null;
     let shouldClearSessionCookie = false;
@@ -2803,6 +3048,44 @@ async function handleRequest({
         res,
         session,
         upsertUser,
+      });
+      return;
+    }
+
+    if (pathname === "/api/1688/status") {
+      writeJson(res, 200, {
+        ok: true,
+        status: await get1688AuthStatus(),
+      });
+      return;
+    }
+
+    if (pathname === "/api/1688/config") {
+      await handle1688ConfigRequest({
+        req,
+        res,
+        session,
+        upsert1688AuthConfig,
+      });
+      return;
+    }
+
+    if (pathname === "/api/1688/start") {
+      await handle1688StartRequest({
+        req,
+        res,
+        session,
+        create1688AuthorizeUrl,
+      });
+      return;
+    }
+
+    if (pathname === "/api/1688/refresh") {
+      await handle1688RefreshRequest({
+        req,
+        res,
+        session,
+        refresh1688AccessToken,
       });
       return;
     }
@@ -2952,6 +3235,19 @@ async function handleRequest({
         currentPath: pathname,
         user: session.user,
         content: renderUserManagement(users, session.user),
+      }));
+      return;
+    }
+
+    if (pathname === "/1688") {
+      const status = await get1688AuthStatus();
+      writeHtml(res, renderShell({
+        title: "1688 授权",
+        subtitle: "绑定 1688 开放平台应用和买家账号，后续采购寻源、下单、订单同步会使用这份云端授权。",
+        cards: [],
+        currentPath: pathname,
+        user: session.user,
+        content: render1688AuthPage(status, getRequestOrigin(req)),
       }));
       return;
     }

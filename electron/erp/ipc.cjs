@@ -60,6 +60,10 @@ const ACCESS_CODE_KEY_LENGTH = 32;
 const ACCESS_CODE_DIGEST = "sha256";
 const VALID_USER_ROLES = new Set(["admin", "manager", "operations", "buyer", "finance", "warehouse", "viewer"]);
 const VALID_USER_STATUSES = new Set(["active", "blocked"]);
+const ALIBABA_1688_AUTH_SETTING_ID = "default";
+const ALIBABA_1688_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+const ALIBABA_1688_AUTHORIZE_URL = "https://auth.1688.com/oauth/authorize";
+const ALIBABA_1688_TOKEN_URL_BASE = "https://gw.open.1688.com/openapi/http/1/system.oauth2/getToken";
 
 function toCamelKey(key) {
   return String(key).replace(/_([a-z])/g, (_, char) => char.toUpperCase());
@@ -507,6 +511,372 @@ function verifyLanLogin(payload = {}) {
     role: row.role,
     status: row.status,
   };
+}
+
+function get1688AuthRow() {
+  const { db } = requireErp();
+  return db.prepare("SELECT * FROM erp_1688_auth_settings WHERE id = ?").get(ALIBABA_1688_AUTH_SETTING_ID) || null;
+}
+
+function to1688AuthStatus(row = get1688AuthRow()) {
+  return {
+    configured: Boolean(row?.app_key && row?.app_secret && row?.redirect_uri),
+    authorized: Boolean(row?.access_token),
+    appKey: row?.app_key || "",
+    redirectUri: row?.redirect_uri || "",
+    hasAppSecret: Boolean(row?.app_secret),
+    memberId: row?.member_id || "",
+    aliId: row?.ali_id || "",
+    resourceOwner: row?.resource_owner || "",
+    authorizedAt: row?.authorized_at || "",
+    accessTokenExpiresAt: row?.access_token_expires_at || "",
+    refreshTokenExpiresAt: row?.refresh_token_expires_at || "",
+    updatedAt: row?.updated_at || "",
+  };
+}
+
+function get1688AuthStatus() {
+  requireErp();
+  return to1688AuthStatus();
+}
+
+function requireHttpUrl(value, fieldName) {
+  const text = requireString(value, fieldName);
+  let parsed = null;
+  try {
+    parsed = new URL(text);
+  } catch {
+    throw new Error(`${fieldName} must be a valid URL`);
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error(`${fieldName} must start with http:// or https://`);
+  }
+  return parsed.toString();
+}
+
+function cleanupExpired1688OAuthStates() {
+  const { db } = requireErp();
+  db.prepare("DELETE FROM erp_1688_oauth_states WHERE expires_at <= ?").run(nowIso());
+}
+
+function parseAbsoluteTokenTime(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const text = String(value).trim();
+  const compact = text.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})([+-]\d{2})(\d{2})$/);
+  if (compact) {
+    const [, year, month, day, hour, minute, second, zoneHour, zoneMinute] = compact;
+    const date = new Date(`${year}-${month}-${day}T${hour}:${minute}:${second}${zoneHour}:${zoneMinute}`);
+    if (!Number.isNaN(date.getTime())) return date.toISOString();
+  }
+
+  const compactNoZone = text.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/);
+  if (compactNoZone) {
+    const [, year, month, day, hour, minute, second] = compactNoZone;
+    const date = new Date(`${year}-${month}-${day}T${hour}:${minute}:${second}+08:00`);
+    if (!Number.isNaN(date.getTime())) return date.toISOString();
+  }
+
+  const numeric = Number(text);
+  if (Number.isFinite(numeric)) {
+    if (numeric > 100000000000) {
+      const date = new Date(numeric);
+      if (!Number.isNaN(date.getTime())) return date.toISOString();
+    }
+    if (numeric > 1000000000) {
+      const date = new Date(numeric * 1000);
+      if (!Number.isNaN(date.getTime())) return date.toISOString();
+    }
+    return null;
+  }
+
+  const date = new Date(text);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function computeTokenExpiryIso(payload = {}, durationKeys = [], absoluteKeys = []) {
+  for (const key of absoluteKeys) {
+    const value = parseAbsoluteTokenTime(payload[key]);
+    if (value) return value;
+  }
+
+  for (const key of durationKeys) {
+    const value = optionalNumber(payload[key]);
+    if (!value) continue;
+    const date = new Date(Date.now() + value * 1000);
+    if (!Number.isNaN(date.getTime())) return date.toISOString();
+  }
+
+  return null;
+}
+
+function build1688TokenUrl(appKey) {
+  const configuredUrl = optionalString(process.env.ERP_1688_TOKEN_URL);
+  if (configuredUrl) return configuredUrl;
+  const configuredBase = optionalString(process.env.ERP_1688_TOKEN_URL_BASE) || ALIBABA_1688_TOKEN_URL_BASE;
+  return `${configuredBase.replace(/\/+$/, "")}/${encodeURIComponent(appKey)}`;
+}
+
+function build1688AuthorizeUrl() {
+  return optionalString(process.env.ERP_1688_AUTHORIZE_URL) || ALIBABA_1688_AUTHORIZE_URL;
+}
+
+async function postFormJson(url, params) {
+  if (typeof fetch !== "function") {
+    throw new Error("Current Node runtime does not provide fetch");
+  }
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
+    },
+    body: new URLSearchParams(params).toString(),
+  });
+  const text = await response.text();
+  let payload = {};
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch {
+    throw new Error(`1688 token response is not JSON: ${text.slice(0, 200)}`);
+  }
+  const errorText = payload.error_description
+    || payload.errorMessage
+    || payload.error_message
+    || payload.message
+    || payload.error;
+  if (!response.ok || payload.error || payload.error_code || payload.errorCode) {
+    throw new Error(errorText || `1688 token request failed with HTTP ${response.status}`);
+  }
+  return payload;
+}
+
+async function exchange1688AuthorizationCode({ appKey, appSecret, redirectUri, code }) {
+  return postFormJson(build1688TokenUrl(appKey), {
+    grant_type: "authorization_code",
+    need_refresh_token: "true",
+    client_id: appKey,
+    client_secret: appSecret,
+    redirect_uri: redirectUri,
+    code,
+  });
+}
+
+async function exchange1688RefreshToken({ appKey, appSecret, refreshToken }) {
+  return postFormJson(build1688TokenUrl(appKey), {
+    grant_type: "refresh_token",
+    client_id: appKey,
+    client_secret: appSecret,
+    refresh_token: refreshToken,
+  });
+}
+
+function extract1688TokenFields(payload = {}, existing = {}) {
+  const accessToken = optionalString(payload.access_token || payload.accessToken);
+  const refreshToken = optionalString(payload.refresh_token || payload.refreshToken) || existing.refresh_token || null;
+  return {
+    access_token: accessToken || existing.access_token || null,
+    refresh_token: refreshToken,
+    member_id: optionalString(payload.memberId || payload.member_id || payload.memberID) || existing.member_id || null,
+    ali_id: optionalString(payload.aliId || payload.ali_id || payload.aliID) || existing.ali_id || null,
+    resource_owner: optionalString(payload.resource_owner || payload.resourceOwner) || existing.resource_owner || null,
+    token_payload_json: JSON.stringify(payload || {}),
+    access_token_expires_at: computeTokenExpiryIso(
+      payload,
+      ["expires_in", "expiresIn", "expires_in_seconds", "access_token_timeout"],
+      ["expires_at", "expiresAt", "expires_time", "accessTokenExpiresAt"],
+    ) || existing.access_token_expires_at || null,
+    refresh_token_expires_at: computeTokenExpiryIso(
+      payload,
+      ["refresh_token_timeout", "refreshTokenTimeout", "refresh_expires_in", "refreshExpiresIn"],
+      ["refresh_token_timeout", "refreshTokenTimeout", "refresh_token_expires_at", "refreshTokenExpiresAt", "refresh_token_expires_time"],
+    ) || existing.refresh_token_expires_at || null,
+  };
+}
+
+function upsert1688AuthConfig(payload = {}, actor = {}) {
+  const { db } = requireErp();
+  const existing = get1688AuthRow();
+  const appKey = optionalString(payload.appKey) || optionalString(payload.app_key) || existing?.app_key;
+  const appSecretInput = optionalString(payload.appSecret) || optionalString(payload.app_secret);
+  const appSecret = appSecretInput || existing?.app_secret;
+  const redirectUri = optionalString(payload.redirectUri) || optionalString(payload.redirect_uri) || existing?.redirect_uri;
+  if (!appKey) throw new Error("1688 AppKey is required");
+  if (!appSecret) throw new Error("1688 AppSecret is required");
+  const normalizedRedirectUri = requireHttpUrl(redirectUri, "1688 redirect URI");
+  const credentialsChanged = !existing
+    || appKey !== existing.app_key
+    || Boolean(appSecretInput && appSecretInput !== existing.app_secret)
+    || normalizedRedirectUri !== existing.redirect_uri;
+  const now = nowIso();
+  const row = {
+    id: ALIBABA_1688_AUTH_SETTING_ID,
+    app_key: appKey,
+    app_secret: appSecret,
+    redirect_uri: normalizedRedirectUri,
+    access_token: credentialsChanged ? null : existing.access_token,
+    refresh_token: credentialsChanged ? null : existing.refresh_token,
+    member_id: credentialsChanged ? null : existing.member_id,
+    ali_id: credentialsChanged ? null : existing.ali_id,
+    resource_owner: credentialsChanged ? null : existing.resource_owner,
+    token_payload_json: credentialsChanged ? "{}" : existing.token_payload_json,
+    access_token_expires_at: credentialsChanged ? null : existing.access_token_expires_at,
+    refresh_token_expires_at: credentialsChanged ? null : existing.refresh_token_expires_at,
+    authorized_at: credentialsChanged ? null : existing.authorized_at,
+    created_at: existing?.created_at || now,
+    updated_at: now,
+  };
+
+  db.prepare(`
+    INSERT INTO erp_1688_auth_settings (
+      id, app_key, app_secret, redirect_uri, access_token, refresh_token,
+      member_id, ali_id, resource_owner, token_payload_json,
+      access_token_expires_at, refresh_token_expires_at, authorized_at,
+      created_at, updated_at
+    )
+    VALUES (
+      @id, @app_key, @app_secret, @redirect_uri, @access_token, @refresh_token,
+      @member_id, @ali_id, @resource_owner, @token_payload_json,
+      @access_token_expires_at, @refresh_token_expires_at, @authorized_at,
+      @created_at, @updated_at
+    )
+    ON CONFLICT(id) DO UPDATE SET
+      app_key = excluded.app_key,
+      app_secret = excluded.app_secret,
+      redirect_uri = excluded.redirect_uri,
+      access_token = excluded.access_token,
+      refresh_token = excluded.refresh_token,
+      member_id = excluded.member_id,
+      ali_id = excluded.ali_id,
+      resource_owner = excluded.resource_owner,
+      token_payload_json = excluded.token_payload_json,
+      access_token_expires_at = excluded.access_token_expires_at,
+      refresh_token_expires_at = excluded.refresh_token_expires_at,
+      authorized_at = excluded.authorized_at,
+      updated_at = excluded.updated_at
+  `).run(row);
+
+  return to1688AuthStatus(db.prepare("SELECT * FROM erp_1688_auth_settings WHERE id = ?").get(row.id));
+}
+
+function create1688AuthorizeUrl(payload = {}, actor = {}) {
+  if (payload.appKey || payload.app_key || payload.appSecret || payload.app_secret || payload.redirectUri || payload.redirect_uri) {
+    upsert1688AuthConfig(payload, actor);
+  }
+  const { db } = requireErp();
+  const setting = get1688AuthRow();
+  if (!setting?.app_key || !setting?.app_secret || !setting?.redirect_uri) {
+    throw new Error("Save 1688 AppKey, AppSecret and redirect URI first");
+  }
+  cleanupExpired1688OAuthStates();
+  const state = crypto.randomBytes(18).toString("base64url");
+  const now = nowIso();
+  const expiresAt = new Date(Date.now() + ALIBABA_1688_OAUTH_STATE_TTL_MS).toISOString();
+  db.prepare(`
+    INSERT INTO erp_1688_oauth_states (state, created_by, redirect_after, expires_at, created_at)
+    VALUES (@state, @created_by, @redirect_after, @expires_at, @created_at)
+  `).run({
+    state,
+    created_by: optionalString(actor?.id),
+    redirect_after: "/1688",
+    expires_at: expiresAt,
+    created_at: now,
+  });
+  const params = new URLSearchParams({
+    client_id: setting.app_key,
+    site: "1688",
+    redirect_uri: setting.redirect_uri,
+    response_type: "code",
+    state,
+  });
+  return {
+    authUrl: `${build1688AuthorizeUrl()}?${params.toString()}`,
+    state,
+    redirectUri: setting.redirect_uri,
+    expiresAt,
+  };
+}
+
+async function complete1688OAuth(payload = {}) {
+  const { db } = requireErp();
+  const code = requireString(payload.code, "1688 authorization code");
+  const state = requireString(payload.state, "1688 OAuth state");
+  const stateRow = db.prepare("SELECT * FROM erp_1688_oauth_states WHERE state = ?").get(state);
+  if (!stateRow) throw new Error("1688 authorization state has expired or is invalid");
+  if (new Date(stateRow.expires_at).getTime() <= Date.now()) {
+    db.prepare("DELETE FROM erp_1688_oauth_states WHERE state = ?").run(state);
+    throw new Error("1688 authorization state has expired");
+  }
+  const setting = get1688AuthRow();
+  if (!setting?.app_key || !setting?.app_secret || !setting?.redirect_uri) {
+    throw new Error("1688 authorization config is missing");
+  }
+  const tokenPayload = await exchange1688AuthorizationCode({
+    appKey: setting.app_key,
+    appSecret: setting.app_secret,
+    redirectUri: setting.redirect_uri,
+    code,
+  });
+  const tokenFields = extract1688TokenFields(tokenPayload, setting);
+  if (!tokenFields.access_token) {
+    throw new Error("1688 did not return an access token");
+  }
+  const now = nowIso();
+  db.prepare(`
+    UPDATE erp_1688_auth_settings
+    SET access_token = @access_token,
+        refresh_token = @refresh_token,
+        member_id = @member_id,
+        ali_id = @ali_id,
+        resource_owner = @resource_owner,
+        token_payload_json = @token_payload_json,
+        access_token_expires_at = @access_token_expires_at,
+        refresh_token_expires_at = @refresh_token_expires_at,
+        authorized_at = @authorized_at,
+        updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id: ALIBABA_1688_AUTH_SETTING_ID,
+    ...tokenFields,
+    authorized_at: now,
+    updated_at: now,
+  });
+  db.prepare("DELETE FROM erp_1688_oauth_states WHERE state = ?").run(state);
+  return to1688AuthStatus();
+}
+
+async function refresh1688AccessToken(actor = {}) {
+  const { db } = requireErp();
+  const setting = get1688AuthRow();
+  if (!setting?.app_key || !setting?.app_secret || !setting?.refresh_token) {
+    throw new Error("1688 refresh token is not available; authorize again first");
+  }
+  const tokenPayload = await exchange1688RefreshToken({
+    appKey: setting.app_key,
+    appSecret: setting.app_secret,
+    refreshToken: setting.refresh_token,
+  });
+  const tokenFields = extract1688TokenFields(tokenPayload, setting);
+  if (!tokenFields.access_token) {
+    throw new Error("1688 did not return an access token");
+  }
+  db.prepare(`
+    UPDATE erp_1688_auth_settings
+    SET access_token = @access_token,
+        refresh_token = @refresh_token,
+        member_id = @member_id,
+        ali_id = @ali_id,
+        resource_owner = @resource_owner,
+        token_payload_json = @token_payload_json,
+        access_token_expires_at = @access_token_expires_at,
+        refresh_token_expires_at = @refresh_token_expires_at,
+        updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id: ALIBABA_1688_AUTH_SETTING_ID,
+    ...tokenFields,
+    updated_at: nowIso(),
+  });
+  return to1688AuthStatus();
 }
 
 function countUsers() {
@@ -2646,6 +3016,11 @@ function startLanService(payload = {}) {
     validateSessionUser: validateLanSessionUser,
     listUsers,
     upsertUser: upsertUserAndBroadcast,
+    get1688AuthStatus,
+    upsert1688AuthConfig,
+    create1688AuthorizeUrl,
+    complete1688OAuth,
+    refresh1688AccessToken,
   });
 }
 
@@ -2703,6 +3078,11 @@ async function startErpHeadlessServer(options = {}) {
     validateSessionUser: validateLanSessionUser,
     listUsers,
     upsertUser: upsertUserAndBroadcast,
+    get1688AuthStatus,
+    upsert1688AuthConfig,
+    create1688AuthorizeUrl,
+    complete1688OAuth,
+    refresh1688AccessToken,
   });
 
   return {
