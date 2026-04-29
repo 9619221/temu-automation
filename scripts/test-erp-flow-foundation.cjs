@@ -235,6 +235,7 @@ function runFlow() {
 
     db = openErpDatabase({ userDataDir: tempUserData });
     for (const tableName of [
+      "erp_companies",
       "erp_accounts",
       "erp_users",
       "erp_skus",
@@ -252,9 +253,16 @@ function runFlow() {
       "erp_1688_api_call_log",
       "erp_1688_message_events",
       "erp_1688_delivery_addresses",
+      "erp_warehouses",
+      "erp_role_permissions",
+      "erp_user_resource_scopes",
     ]) {
       assertTableExists(db, tableName);
     }
+    assertColumnExists(db, "erp_users", "company_id");
+    assertColumnExists(db, "erp_accounts", "company_id");
+    assertColumnExists(db, "erp_1688_auth_settings", "company_id");
+    assertColumnExists(db, "erp_1688_delivery_addresses", "company_id");
     assertColumnExists(db, "erp_sourcing_candidates", "external_offer_id");
     assertColumnExists(db, "erp_sourcing_candidates", "source_payload_json");
     assertColumnExists(db, "erp_sourcing_candidates", "external_sku_options_json");

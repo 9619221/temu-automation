@@ -95,15 +95,19 @@ export default function ErpLogin() {
     submittingRef.current = true;
     setSubmitting(true);
     try {
-      const nextStatus = await auth.login({
+      const runtime = await window.electronAPI?.erp?.client?.getStatus?.().catch(() => null);
+      const loginPayload: { login: string; accessCode: string; serverUrl?: string } = {
         login: values.login || "",
         accessCode: values.accessCode,
-        serverUrl: ERP_CLOUD_SERVER_URL,
-      });
+      };
+      if (runtime?.isClientMode) {
+        loginPayload.serverUrl = runtime.serverUrl || ERP_CLOUD_SERVER_URL;
+      }
+      const nextStatus = await auth.login(loginPayload);
       const user = nextStatus.currentUser;
       message.success({
         key: LOGIN_MESSAGE_KEY,
-        content: "云端登录成功",
+        content: "登录成功",
       });
       navigate(getDefaultPathForRole(user?.role), { replace: true });
     } catch (error: any) {
@@ -139,7 +143,7 @@ export default function ErpLogin() {
       >
         <Space direction="vertical" size={18} style={{ width: "100%" }}>
           <Text type="secondary">
-            输入管理员分配的用户名和访问码登录云端 ERP。
+            输入管理员分配的用户名和访问码登录 ERP。
           </Text>
           <Form form={form} layout="vertical" onFinish={handleSubmit}>
             <Form.Item

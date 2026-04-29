@@ -79,6 +79,9 @@ export default function UserManagement() {
     return `${roles.size} 个角色`;
   }, [users]);
   const isCloudMode = Boolean(clientStatus?.isClientMode);
+  const isHostMode = clientStatus?.mode === "host";
+  const canManageUsers = isCloudMode || isHostMode;
+  const userStoreName = isCloudMode ? "云端用户库" : isHostMode ? "本地用户库" : "用户库";
 
   const loadUsers = useCallback(async () => {
     if (!erp) return;
@@ -88,7 +91,7 @@ export default function UserManagement() {
       if (nextClientStatus) {
         setClientStatus(nextClientStatus as ClientStatusView);
       }
-      if (!nextClientStatus?.isClientMode) {
+      if (!nextClientStatus?.isClientMode && nextClientStatus?.mode !== "host") {
         setUsers([]);
         return;
       }
@@ -139,8 +142,8 @@ export default function UserManagement() {
 
   const handleSubmit = async () => {
     if (!erp) return;
-    if (!isCloudMode) {
-      message.warning("请先连接云端，再创建或编辑用户");
+    if (!canManageUsers) {
+      message.warning("请先连接云端或切换到本地用户库，再创建或编辑用户");
       return;
     }
     const values = await form.validateFields();
@@ -175,8 +178,8 @@ export default function UserManagement() {
 
   const handleToggleStatus = async (record: ErpUserRow) => {
     if (!erp) return;
-    if (!isCloudMode) {
-      message.warning("请先连接云端，再停用或启用用户");
+    if (!canManageUsers) {
+      message.warning("请先连接云端或切换到本地用户库，再停用或启用用户");
       return;
     }
     const nextStatus = record.status === "active" ? "blocked" : "active";
@@ -269,7 +272,7 @@ export default function UserManagement() {
       <PageHeader
         eyebrow="系统"
         title="用户管理"
-        subtitle="在云端创建采购、仓库、运营和财务账号。访问码会安全保存，忘记后需要重新设置。"
+        subtitle="创建采购、仓库、运营和财务账号。访问码会安全保存，忘记后需要重新设置。"
         meta={[`共 ${users.length} 个用户`, `启用 ${activeCount} 个`, roleCountText]}
         actions={<Button icon={<ReloadOutlined />} onClick={() => void loadUsers()} loading={loading}>刷新</Button>}
       />
@@ -277,18 +280,18 @@ export default function UserManagement() {
       <div className="app-panel">
         <div className="app-panel__title">
           <div>
-            <div className="app-panel__title-main">云端同步</div>
-            <div className="app-panel__title-sub">本页只写入云服务器，用户端统一登录云端。</div>
+            <div className="app-panel__title-main">用户同步</div>
+            <div className="app-panel__title-sub">云端模式同步服务器，本地模式读取当前电脑数据库。</div>
           </div>
-          <Tag color={isCloudMode ? "success" : "warning"}>
-            {isCloudMode ? "云端模式" : "未绑定云端"}
+          <Tag color={isCloudMode ? "success" : isHostMode ? "processing" : "warning"}>
+            {isCloudMode ? "云端模式" : isHostMode ? "本地模式" : "未绑定用户库"}
           </Tag>
         </div>
         <Alert
-          type={isCloudMode ? "success" : "warning"}
+          type={isCloudMode ? "success" : isHostMode ? "info" : "warning"}
           showIcon
-          message={isCloudMode ? "当前正在同步云端用户库" : "请先连接云端"}
-          description={isCloudMode ? "云端服务器已固定绑定，创建、编辑和停用用户都会直接同步。" : "不提供本机用户库。绑定云端后，创建、编辑和停用用户都会直接同步到服务器。"}
+          message={isCloudMode ? "当前正在同步云端用户库" : isHostMode ? "当前正在读取本地用户库" : "请先连接云端"}
+          description={isCloudMode ? "云端服务器已固定绑定，创建、编辑和停用用户都会直接同步。" : isHostMode ? "本机数据没有丢失，创建、编辑和停用用户会写入当前电脑的 ERP 数据库。" : "连接云端后同步服务器；本机存在数据库时会自动进入本地模式。"}
           style={{ marginBottom: 12 }}
         />
         <Form form={cloudForm} layout="vertical" initialValues={{ login: "admin" }}>
@@ -318,20 +321,20 @@ export default function UserManagement() {
         <div className="app-panel__title">
           <div>
             <div className="app-panel__title-main">{editingId ? "编辑用户" : "创建用户"}</div>
-            <div className="app-panel__title-sub">新用户必须设置访问码；保存后立即写入云端用户库。</div>
+            <div className="app-panel__title-sub">新用户必须设置访问码；保存后立即写入{userStoreName}。</div>
           </div>
           <KeyOutlined style={{ color: "var(--color-brand)", fontSize: 18 }} />
         </div>
-        {!isCloudMode ? (
+        {!canManageUsers ? (
           <Alert
             type="warning"
             showIcon
-            message="未绑定云端，暂不能创建用户"
-            description="请先在上方输入管理员和访问码并连接。"
+            message="暂不能创建用户"
+            description="请先在上方输入管理员和访问码连接云端，或切换到本地用户库。"
             style={{ marginBottom: 12 }}
           />
         ) : null}
-        <Form form={form} layout="vertical" initialValues={{ role: "buyer", status: "active" }} disabled={!isCloudMode}>
+        <Form form={form} layout="vertical" initialValues={{ role: "buyer", status: "active" }} disabled={!canManageUsers}>
           <Form.Item name="id" hidden>
             <Input />
           </Form.Item>
@@ -386,7 +389,7 @@ export default function UserManagement() {
         <div className="app-panel__title">
           <div>
             <div className="app-panel__title-main">系统用户</div>
-            <div className="app-panel__title-sub">列表来自云端服务器；启用的用户可以按角色登录软件。</div>
+            <div className="app-panel__title-sub">列表来自{userStoreName}；启用的用户可以按角色登录软件。</div>
           </div>
           <SafetyCertificateOutlined style={{ color: "var(--color-success)", fontSize: 18 }} />
         </div>

@@ -12,6 +12,10 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/users": ["admin", "manager"],
   "/api/users/list": ["admin", "manager"],
   "/api/users/upsert": ["admin", "manager"],
+  "/api/companies/list": ["admin", "manager"],
+  "/api/permissions/profile": ["admin", "manager", "operations", "buyer", "finance", "warehouse", "viewer"],
+  "/api/permissions/role/upsert": ["admin", "manager"],
+  "/api/permissions/scope/upsert": ["admin", "manager"],
   "/1688": ["admin", "manager"],
   "/api/1688/status": ["admin", "manager"],
   "/api/1688/config": ["admin", "manager"],
@@ -310,6 +314,9 @@ function syncLanUserSessions(user = {}) {
     name: user.name,
     role: user.role,
     status: user.status,
+    companyId: user.companyId,
+    companyName: user.companyName,
+    companyCode: user.companyCode,
   };
   const isActive = user.status === "active";
   let updated = 0;
@@ -2444,6 +2451,14 @@ function createRequestHandler(options = {}) {
   const upsertUser = options.upsertUser || (() => {
     throw new Error("User action handler is not available");
   });
+  const listCompanies = options.listCompanies || (() => []);
+  const getPermissionProfile = options.getPermissionProfile || (() => ({}));
+  const upsertRolePermission = options.upsertRolePermission || (() => {
+    throw new Error("Role permission handler is not available");
+  });
+  const upsertUserResourceScope = options.upsertUserResourceScope || (() => {
+    throw new Error("User resource scope handler is not available");
+  });
   const get1688AuthStatus = options.get1688AuthStatus || (() => ({
     configured: false,
     authorized: false,
@@ -2485,6 +2500,10 @@ function createRequestHandler(options = {}) {
       updateWorkItemStatus,
       listUsers,
       upsertUser,
+      listCompanies,
+      getPermissionProfile,
+      upsertRolePermission,
+      upsertUserResourceScope,
       get1688AuthStatus,
       upsert1688AuthConfig,
       create1688AuthorizeUrl,
@@ -3018,6 +3037,10 @@ async function handleRequest({
   updateWorkItemStatus,
   listUsers,
   upsertUser,
+  listCompanies,
+  getPermissionProfile,
+  upsertRolePermission,
+  upsertUserResourceScope,
   get1688AuthStatus,
   upsert1688AuthConfig,
   create1688AuthorizeUrl,
@@ -3141,7 +3164,7 @@ async function handleRequest({
     if (pathname === "/api/users/list") {
       writeJson(res, 200, {
         ok: true,
-        users: await listUsers({ limit: 200 }),
+        users: await listUsers({ limit: 200, companyId: session.user.companyId }),
       });
       return;
     }
@@ -3156,10 +3179,44 @@ async function handleRequest({
       return;
     }
 
+    if (pathname === "/api/companies/list") {
+      writeJson(res, 200, {
+        ok: true,
+        companies: await listCompanies({ limit: 200 }),
+      });
+      return;
+    }
+
+    if (pathname === "/api/permissions/profile") {
+      writeJson(res, 200, {
+        ok: true,
+        profile: await getPermissionProfile(session.user),
+      });
+      return;
+    }
+
+    if (pathname === "/api/permissions/role/upsert") {
+      const payload = await readLoginPayload(req);
+      writeJson(res, 200, {
+        ok: true,
+        permission: await upsertRolePermission(payload, session.user),
+      });
+      return;
+    }
+
+    if (pathname === "/api/permissions/scope/upsert") {
+      const payload = await readLoginPayload(req);
+      writeJson(res, 200, {
+        ok: true,
+        scope: await upsertUserResourceScope(payload, session.user),
+      });
+      return;
+    }
+
     if (pathname === "/api/1688/status") {
       writeJson(res, 200, {
         ok: true,
-        status: await get1688AuthStatus(),
+        status: await get1688AuthStatus(session.user),
       });
       return;
     }

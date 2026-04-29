@@ -67,6 +67,15 @@ async function main() {
     });
     assert.equal(authStatus.hasUsers, true);
     assert.equal(authStatus.currentUser.role, "admin");
+    assert.equal(authStatus.currentUser.companyId, "company_default");
+
+    const companies = await invoke("erp:company:list", { limit: 20 });
+    assert.equal(companies.length, 1);
+    assert.equal(companies[0].id, "company_default");
+
+    const adminPermissionProfile = await invoke("erp:permission:get-profile");
+    assert.equal(adminPermissionProfile.company.id, "company_default");
+    assert.equal(adminPermissionProfile.rolePermissions.some((item) => item.role === "admin" && item.resourceKey === "*"), true);
 
     authStatus = await invoke("erp:auth:logout");
     assert.equal(authStatus.currentUser, null);
@@ -77,6 +86,7 @@ async function main() {
       source: "test",
     });
     assert.equal(account.id, "acct_ipc");
+    assert.equal(account.companyId, "company_default");
 
     const user = await invoke("erp:user:upsert", {
       id: "user_ops_ipc",
@@ -86,6 +96,7 @@ async function main() {
     });
     assert.equal(user.role, "operations");
     assert.equal(user.hasAccessCode, true);
+    assert.equal(user.companyId, "company_default");
     const buyer = await invoke("erp:user:upsert", {
       id: "user_buyer_ipc",
       name: "Buyer",
@@ -108,6 +119,15 @@ async function main() {
     });
     assert.equal(financeUser.role, "finance");
 
+    const accountScope = await invoke("erp:permission:upsert-scope", {
+      userId: buyer.id,
+      resourceType: "account",
+      resourceId: account.id,
+      accessLevel: "manage",
+    });
+    assert.equal(accountScope.companyId, "company_default");
+    assert.equal(accountScope.resourceId, account.id);
+
     await assert.rejects(
       () => invoke("erp:auth:create-first-admin", {
         name: "Another Admin",
@@ -129,6 +149,9 @@ async function main() {
       accessCode: "buyer-code",
     });
     assert.equal(authStatus.currentUser.role, "buyer");
+    assert.equal(authStatus.currentUser.companyId, "company_default");
+    const buyerPermissionProfile = await invoke("erp:permission:get-profile");
+    assert.equal(buyerPermissionProfile.resourceScopes[0].resourceId, account.id);
     assert.equal((await invoke("erp:auth:get-current-user")).id, buyer.id);
     authStatus = await invoke("erp:auth:logout");
     assert.equal(authStatus.currentUser, null);

@@ -202,6 +202,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
       login: (payload) => ipcRenderer.invoke("erp:auth:login", payload || {}),
       logout: () => ipcRenderer.invoke("erp:auth:logout"),
     },
+    company: {
+      list: (params) => ipcRenderer.invoke("erp:company:list", params || {}),
+      upsert: (payload) => ipcRenderer.invoke("erp:company:upsert", payload || {}),
+    },
     account: {
       list: (params) => ipcRenderer.invoke("erp:account:list", params || {}),
       upsert: (payload) => ipcRenderer.invoke("erp:account:upsert", payload || {}),
@@ -209,6 +213,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
     user: {
       list: (params) => ipcRenderer.invoke("erp:user:list", params || {}),
       upsert: (payload) => ipcRenderer.invoke("erp:user:upsert", payload || {}),
+    },
+    permission: {
+      getProfile: () => ipcRenderer.invoke("erp:permission:get-profile"),
+      upsertRole: (payload) => ipcRenderer.invoke("erp:permission:upsert-role", payload || {}),
+      upsertScope: (payload) => ipcRenderer.invoke("erp:permission:upsert-scope", payload || {}),
     },
     supplier: {
       list: (params) => ipcRenderer.invoke("erp:supplier:list", params || {}),

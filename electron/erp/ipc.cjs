@@ -72,6 +72,13 @@ const ACCESS_CODE_KEY_LENGTH = 32;
 const ACCESS_CODE_DIGEST = "sha256";
 const VALID_USER_ROLES = new Set(["admin", "manager", "operations", "buyer", "finance", "warehouse", "viewer"]);
 const VALID_USER_STATUSES = new Set(["active", "blocked"]);
+const DEFAULT_COMPANY_ID = "company_default";
+const DEFAULT_COMPANY_CODE = "default";
+const DEFAULT_COMPANY_NAME = "Default Company";
+const VALID_COMPANY_STATUSES = new Set(["active", "disabled"]);
+const VALID_PERMISSION_RESOURCE_TYPES = new Set(["menu", "document", "action"]);
+const VALID_RESOURCE_SCOPE_TYPES = new Set(["account", "warehouse"]);
+const VALID_ACCESS_LEVELS = new Set(["read", "write", "approve", "manage", "allow", "deny"]);
 const ALIBABA_1688_AUTH_SETTING_ID = "default";
 const ALIBABA_1688_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 const ALIBABA_1688_AUTHORIZE_URL = "https://auth.1688.com/oauth/authorize";
@@ -212,6 +219,15 @@ function optionalNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+function normalizeCompanyId(value, actor = erpState.currentUser) {
+  return optionalString(value) || optionalString(actor?.companyId || actor?.company_id) || DEFAULT_COMPANY_ID;
+}
+
+function companySettingId(companyId) {
+  const id = normalizeCompanyId(companyId, null);
+  return id === DEFAULT_COMPANY_ID ? ALIBABA_1688_AUTH_SETTING_ID : `company:${id}`;
+}
+
 function hashAccessCode(accessCode) {
   const code = String(accessCode || "");
   if (!code) return null;
@@ -239,6 +255,9 @@ function verifyAccessCode(accessCode, storedHash) {
 function toPublicUser(row) {
   const next = toCamelRow(row);
   next.hasAccessCode = Boolean(row.has_access_code ?? row.access_code_hash);
+  next.companyId = next.companyId || row.company_id || DEFAULT_COMPANY_ID;
+  next.companyName = next.companyName || row.company_name || "";
+  next.companyCode = next.companyCode || row.company_code || "";
   delete next.accessCodeHash;
   return next;
 }
@@ -250,7 +269,14 @@ function toSessionUser(row) {
     name: row.name,
     role: row.role,
     status: row.status,
+    companyId: row.company_id || row.companyId || DEFAULT_COMPANY_ID,
+    companyName: row.company_name || row.companyName || DEFAULT_COMPANY_NAME,
+    companyCode: row.company_code || row.companyCode || DEFAULT_COMPANY_CODE,
   };
+}
+
+function toCompany(row) {
+  return toCamelRow(row);
 }
 
 function normalizeLimit(value, fallback = 100) {
@@ -373,25 +399,80 @@ function rerunMigrations() {
   return getErpStatus();
 }
 
-function listAccounts(params = {}) {
+function getCompany(companyId = DEFAULT_COMPANY_ID) {
+  const { db } = requireErp();
+  const id = normalizeCompanyId(companyId, null);
+  return toCompany(db.prepare("SELECT * FROM erp_companies WHERE id = ?").get(id));
+}
+
+function listCompanies(params = {}) {
   const { db } = requireErp();
   const rows = db.prepare(`
     SELECT *
-    FROM erp_accounts
+    FROM erp_companies
     ORDER BY updated_at DESC, created_at DESC
     LIMIT @limit OFFSET @offset
   `).all({
     limit: normalizeLimit(params.limit),
     offset: normalizeOffset(params.offset),
   });
+  return rows.map(toCompany);
+}
+
+function upsertCompany(payload = {}) {
+  const { db } = requireErp();
+  const now = nowIso();
+  const id = optionalString(payload.id) || createId("company");
+  const status = optionalString(payload.status) || "active";
+  if (!VALID_COMPANY_STATUSES.has(status)) throw new Error("Invalid company status");
+  const row = {
+    id,
+    name: requireString(payload.name, "name"),
+    code: optionalString(payload.code) || id,
+    status,
+    created_at: now,
+    updated_at: now,
+  };
+  db.prepare(`
+    INSERT INTO erp_companies (id, name, code, status, created_at, updated_at)
+    VALUES (@id, @name, @code, @status, @created_at, @updated_at)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      code = excluded.code,
+      status = excluded.status,
+      updated_at = excluded.updated_at
+  `).run(row);
+  return getCompany(row.id);
+}
+
+function listAccounts(params = {}) {
+  const { db } = requireErp();
+  const companyId = optionalString(params.companyId || params.company_id);
+  const whereCompany = companyId ? "WHERE company_id = @company_id" : "";
+  const rows = db.prepare(`
+    SELECT *
+    FROM erp_accounts
+    ${whereCompany}
+    ORDER BY updated_at DESC, created_at DESC
+    LIMIT @limit OFFSET @offset
+  `).all({
+    company_id: companyId,
+    limit: normalizeLimit(params.limit),
+    offset: normalizeOffset(params.offset),
+  });
   return rows.map(toCamelRow);
 }
 
-function upsertAccount(payload = {}) {
+function upsertAccount(payload = {}, actor = erpState.currentUser) {
   const { db } = requireErp();
   const now = nowIso();
+  const existing = optionalString(payload.id)
+    ? db.prepare("SELECT id, company_id FROM erp_accounts WHERE id = ?").get(payload.id)
+    : null;
+  const companyId = normalizeCompanyId(payload.companyId || payload.company_id || existing?.company_id, actor);
   const row = {
     id: optionalString(payload.id) || createId("acct"),
+    company_id: companyId,
     name: requireString(payload.name, "name"),
     phone: optionalString(payload.phone),
     status: optionalString(payload.status) || "offline",
@@ -401,9 +482,10 @@ function upsertAccount(payload = {}) {
   };
 
   db.prepare(`
-    INSERT INTO erp_accounts (id, name, phone, status, source, created_at, updated_at)
-    VALUES (@id, @name, @phone, @status, @source, @created_at, @updated_at)
+    INSERT INTO erp_accounts (id, company_id, name, phone, status, source, created_at, updated_at)
+    VALUES (@id, @company_id, @name, @phone, @status, @source, @created_at, @updated_at)
     ON CONFLICT(id) DO UPDATE SET
+      company_id = excluded.company_id,
       name = excluded.name,
       phone = excluded.phone,
       status = excluded.status,
@@ -416,21 +498,27 @@ function upsertAccount(payload = {}) {
 
 function listUsers(params = {}) {
   const { db } = requireErp();
+  const companyId = optionalString(params.companyId || params.company_id);
+  const whereCompany = companyId ? "WHERE user.company_id = @company_id" : "";
   const rows = db.prepare(`
-    SELECT id, name, role, status,
-           CASE WHEN access_code_hash IS NOT NULL AND access_code_hash != '' THEN 1 ELSE 0 END AS has_access_code,
-           created_at, updated_at
-    FROM erp_users
-    ORDER BY updated_at DESC, created_at DESC
+    SELECT user.id, user.name, user.role, user.status, user.company_id,
+           company.name AS company_name, company.code AS company_code,
+           CASE WHEN user.access_code_hash IS NOT NULL AND user.access_code_hash != '' THEN 1 ELSE 0 END AS has_access_code,
+           user.created_at, user.updated_at
+    FROM erp_users user
+    LEFT JOIN erp_companies company ON company.id = user.company_id
+    ${whereCompany}
+    ORDER BY user.updated_at DESC, user.created_at DESC
     LIMIT @limit OFFSET @offset
   `).all({
+    company_id: companyId,
     limit: normalizeLimit(params.limit),
     offset: normalizeOffset(params.offset),
   });
   return rows.map(toPublicUser);
 }
 
-function upsertUser(payload = {}) {
+function upsertUser(payload = {}, actor = erpState.currentUser) {
   const { db } = requireErp();
   const now = nowIso();
   const id = optionalString(payload.id) || createId("user");
@@ -443,12 +531,16 @@ function upsertUser(payload = {}) {
   if (!VALID_USER_STATUSES.has(status)) {
     throw new Error("Invalid user status");
   }
-  const existing = db.prepare("SELECT id FROM erp_users WHERE id = ?").get(id);
+  const existing = db.prepare("SELECT id, company_id FROM erp_users WHERE id = ?").get(id);
+  const companyId = normalizeCompanyId(payload.companyId || payload.company_id || existing?.company_id, actor);
+  const company = db.prepare("SELECT id FROM erp_companies WHERE id = ? AND status = 'active'").get(companyId);
+  if (!company) throw new Error("Company is not active or does not exist");
   if (!existing && !accessCodeHash) {
     throw new Error("Access code is required for new users");
   }
   const row = {
     id,
+    company_id: companyId,
     name: requireString(payload.name, "name"),
     role,
     status,
@@ -458,9 +550,10 @@ function upsertUser(payload = {}) {
   };
 
   db.prepare(`
-    INSERT INTO erp_users (id, name, role, status, access_code_hash, created_at, updated_at)
-    VALUES (@id, @name, @role, @status, @access_code_hash, @created_at, @updated_at)
+    INSERT INTO erp_users (id, company_id, name, role, status, access_code_hash, created_at, updated_at)
+    VALUES (@id, @company_id, @name, @role, @status, @access_code_hash, @created_at, @updated_at)
     ON CONFLICT(id) DO UPDATE SET
+      company_id = excluded.company_id,
       name = excluded.name,
       role = excluded.role,
       status = excluded.status,
@@ -469,11 +562,13 @@ function upsertUser(payload = {}) {
   `).run(row);
 
   return toPublicUser(db.prepare(`
-    SELECT id, name, role, status,
-           CASE WHEN access_code_hash IS NOT NULL AND access_code_hash != '' THEN 1 ELSE 0 END AS has_access_code,
-           created_at, updated_at
-    FROM erp_users
-    WHERE id = ?
+    SELECT user.id, user.name, user.role, user.status, user.company_id,
+           company.name AS company_name, company.code AS company_code,
+           CASE WHEN user.access_code_hash IS NOT NULL AND user.access_code_hash != '' THEN 1 ELSE 0 END AS has_access_code,
+           user.created_at, user.updated_at
+    FROM erp_users user
+    LEFT JOIN erp_companies company ON company.id = user.company_id
+    WHERE user.id = ?
   `).get(row.id));
 }
 
@@ -491,34 +586,44 @@ function validateLanSessionUser(userId) {
   const id = optionalString(userId);
   if (!id) return null;
   const row = db.prepare(`
-    SELECT id, name, role, status
-    FROM erp_users
-    WHERE id = ?
+    SELECT user.id, user.name, user.role, user.status, user.company_id,
+           company.name AS company_name, company.code AS company_code
+    FROM erp_users user
+    LEFT JOIN erp_companies company ON company.id = user.company_id
+    WHERE user.id = ?
     LIMIT 1
   `).get(id);
   if (!row || row.status !== "active") return null;
-  return {
-    id: row.id,
-    name: row.name,
-    role: row.role,
-    status: row.status,
-  };
+  return toSessionUser(row);
 }
 
 function verifyLanLogin(payload = {}) {
   const { db } = requireErp();
   const login = optionalString(payload.login);
   const accessCode = optionalString(payload.accessCode);
+  const companyId = optionalString(payload.companyId || payload.company_id);
+  const companyCode = optionalString(payload.companyCode || payload.company_code);
   if (!login || !accessCode) {
     return null;
   }
 
   const row = db.prepare(`
-    SELECT id, name, role, status, access_code_hash
-    FROM erp_users
-    WHERE id = @login OR name = @login
+    SELECT user.id, user.name, user.role, user.status, user.access_code_hash,
+           user.company_id, company.name AS company_name, company.code AS company_code
+    FROM erp_users user
+    LEFT JOIN erp_companies company ON company.id = user.company_id
+    WHERE (user.id = @login OR user.name = @login)
+      AND (@company_id IS NULL OR user.company_id = @company_id)
+      AND (@company_code IS NULL OR company.code = @company_code)
+    ORDER BY CASE WHEN user.company_id = @default_company_id THEN 0 ELSE 1 END,
+             user.created_at ASC
     LIMIT 1
-  `).get({ login });
+  `).get({
+    login,
+    company_id: companyId,
+    company_code: companyCode,
+    default_company_id: DEFAULT_COMPANY_ID,
+  });
 
   if (!row || row.status !== "active" || !row.access_code_hash) {
     return null;
@@ -526,23 +631,165 @@ function verifyLanLogin(payload = {}) {
   if (!verifyAccessCode(accessCode, row.access_code_hash)) {
     return null;
   }
+  return toSessionUser(row);
+}
+
+function listRolePermissions(params = {}) {
+  const { db } = requireErp();
+  const companyId = normalizeCompanyId(params.companyId || params.company_id, erpState.currentUser);
+  const role = optionalString(params.role);
+  const whereRole = role ? "AND role = @role" : "";
+  return db.prepare(`
+    SELECT *
+    FROM erp_role_permissions
+    WHERE company_id = @company_id
+    ${whereRole}
+    ORDER BY role ASC, resource_type ASC, resource_key ASC
+  `).all({
+    company_id: companyId,
+    role,
+  }).map((row) => {
+    const next = toCamelRow(row);
+    next.conditions = parseJsonObject(row.conditions_json);
+    return next;
+  });
+}
+
+function upsertRolePermission(payload = {}, actor = erpState.currentUser) {
+  const { db } = requireErp();
+  const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
+  const role = requireString(payload.role, "role");
+  const resourceType = requireString(payload.resourceType || payload.resource_type, "resourceType");
+  const resourceKey = requireString(payload.resourceKey || payload.resource_key, "resourceKey");
+  const accessLevel = optionalString(payload.accessLevel || payload.access_level) || "allow";
+  if (!VALID_USER_ROLES.has(role)) throw new Error("Invalid user role");
+  if (!VALID_PERMISSION_RESOURCE_TYPES.has(resourceType)) throw new Error("Invalid permission resource type");
+  if (!VALID_ACCESS_LEVELS.has(accessLevel)) throw new Error("Invalid access level");
+  const now = nowIso();
+  const row = {
+    id: optionalString(payload.id) || createId("perm"),
+    company_id: companyId,
+    role,
+    resource_type: resourceType,
+    resource_key: resourceKey,
+    access_level: accessLevel,
+    conditions_json: JSON.stringify(payload.conditions || payload.conditions_json || {}),
+    created_at: now,
+    updated_at: now,
+  };
+  db.prepare(`
+    INSERT INTO erp_role_permissions (
+      id, company_id, role, resource_type, resource_key, access_level,
+      conditions_json, created_at, updated_at
+    )
+    VALUES (
+      @id, @company_id, @role, @resource_type, @resource_key, @access_level,
+      @conditions_json, @created_at, @updated_at
+    )
+    ON CONFLICT(company_id, role, resource_type, resource_key) DO UPDATE SET
+      access_level = excluded.access_level,
+      conditions_json = excluded.conditions_json,
+      updated_at = excluded.updated_at
+  `).run(row);
+  return listRolePermissions({ companyId, role }).find((item) => (
+    item.resourceType === resourceType && item.resourceKey === resourceKey
+  ));
+}
+
+function listUserResourceScopes(params = {}) {
+  const { db } = requireErp();
+  const companyId = normalizeCompanyId(params.companyId || params.company_id, erpState.currentUser);
+  const userId = optionalString(params.userId || params.user_id);
+  const whereUser = userId ? "AND scope.user_id = @user_id" : "";
+  return db.prepare(`
+    SELECT scope.*, user.name AS user_name
+    FROM erp_user_resource_scopes scope
+    LEFT JOIN erp_users user ON user.id = scope.user_id
+    WHERE scope.company_id = @company_id
+    ${whereUser}
+    ORDER BY scope.user_id ASC, scope.resource_type ASC, scope.resource_id ASC
+  `).all({
+    company_id: companyId,
+    user_id: userId,
+  }).map(toCamelRow);
+}
+
+function upsertUserResourceScope(payload = {}, actor = erpState.currentUser) {
+  const { db } = requireErp();
+  const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
+  const userId = requireString(payload.userId || payload.user_id, "userId");
+  const resourceType = requireString(payload.resourceType || payload.resource_type, "resourceType");
+  const resourceId = requireString(payload.resourceId || payload.resource_id, "resourceId");
+  const accessLevel = optionalString(payload.accessLevel || payload.access_level) || "manage";
+  if (!VALID_RESOURCE_SCOPE_TYPES.has(resourceType)) throw new Error("Invalid resource scope type");
+  if (!VALID_ACCESS_LEVELS.has(accessLevel)) throw new Error("Invalid access level");
+  const user = db.prepare("SELECT id FROM erp_users WHERE id = ? AND company_id = ?").get(userId, companyId);
+  if (!user) throw new Error("Scoped user does not exist in this company");
+  const now = nowIso();
+  const row = {
+    id: optionalString(payload.id) || createId("scope"),
+    company_id: companyId,
+    user_id: userId,
+    resource_type: resourceType,
+    resource_id: resourceId,
+    access_level: accessLevel,
+    created_at: now,
+    updated_at: now,
+  };
+  db.prepare(`
+    INSERT INTO erp_user_resource_scopes (
+      id, company_id, user_id, resource_type, resource_id, access_level,
+      created_at, updated_at
+    )
+    VALUES (
+      @id, @company_id, @user_id, @resource_type, @resource_id, @access_level,
+      @created_at, @updated_at
+    )
+    ON CONFLICT(company_id, user_id, resource_type, resource_id) DO UPDATE SET
+      access_level = excluded.access_level,
+      updated_at = excluded.updated_at
+  `).run(row);
+  return listUserResourceScopes({ companyId, userId }).find((item) => (
+    item.resourceType === resourceType && item.resourceId === resourceId
+  ));
+}
+
+function getPermissionProfile(user = erpState.currentUser) {
+  const sessionUser = user?.id ? validateLanSessionUser(user.id) : toSessionUser(user);
+  const companyId = normalizeCompanyId(sessionUser?.companyId, null);
   return {
-    id: row.id,
-    name: row.name,
-    role: row.role,
-    status: row.status,
+    company: getCompany(companyId),
+    user: sessionUser,
+    rolePermissions: listRolePermissions({
+      companyId,
+      role: sessionUser?.role,
+    }),
+    resourceScopes: sessionUser?.id
+      ? listUserResourceScopes({ companyId, userId: sessionUser.id })
+      : [],
   };
 }
 
-function get1688AuthRow() {
+function get1688AuthRow(companyId = erpState.currentUser?.companyId || DEFAULT_COMPANY_ID) {
   const { db } = requireErp();
-  return db.prepare("SELECT * FROM erp_1688_auth_settings WHERE id = ?").get(ALIBABA_1688_AUTH_SETTING_ID) || null;
+  const normalizedCompanyId = normalizeCompanyId(companyId, null);
+  return db.prepare(`
+    SELECT *
+    FROM erp_1688_auth_settings
+    WHERE company_id = @company_id
+    ORDER BY CASE WHEN id = @default_id THEN 0 ELSE 1 END
+    LIMIT 1
+  `).get({
+    company_id: normalizedCompanyId,
+    default_id: companySettingId(normalizedCompanyId),
+  }) || null;
 }
 
 function to1688AuthStatus(row = get1688AuthRow()) {
   return {
     configured: Boolean(row?.app_key && row?.app_secret && row?.redirect_uri),
     authorized: Boolean(row?.access_token),
+    companyId: row?.company_id || DEFAULT_COMPANY_ID,
     appKey: row?.app_key || "",
     redirectUri: row?.redirect_uri || "",
     hasAppSecret: Boolean(row?.app_secret),
@@ -556,9 +803,9 @@ function to1688AuthStatus(row = get1688AuthRow()) {
   };
 }
 
-function get1688AuthStatus() {
+function get1688AuthStatus(actor = erpState.currentUser) {
   requireErp();
-  return to1688AuthStatus();
+  return to1688AuthStatus(get1688AuthRow(normalizeCompanyId(actor?.companyId || actor?.company_id, null)));
 }
 
 function requireHttpUrl(value, fieldName) {
@@ -716,7 +963,8 @@ function extract1688TokenFields(payload = {}, existing = {}) {
 
 function upsert1688AuthConfig(payload = {}, actor = {}) {
   const { db } = requireErp();
-  const existing = get1688AuthRow();
+  const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
+  const existing = get1688AuthRow(companyId);
   const appKey = optionalString(payload.appKey) || optionalString(payload.app_key) || existing?.app_key;
   const appSecretInput = optionalString(payload.appSecret) || optionalString(payload.app_secret);
   const appSecret = appSecretInput || existing?.app_secret;
@@ -730,7 +978,8 @@ function upsert1688AuthConfig(payload = {}, actor = {}) {
     || normalizedRedirectUri !== existing.redirect_uri;
   const now = nowIso();
   const row = {
-    id: ALIBABA_1688_AUTH_SETTING_ID,
+    id: existing?.id || companySettingId(companyId),
+    company_id: companyId,
     app_key: appKey,
     app_secret: appSecret,
     redirect_uri: normalizedRedirectUri,
@@ -749,18 +998,19 @@ function upsert1688AuthConfig(payload = {}, actor = {}) {
 
   db.prepare(`
     INSERT INTO erp_1688_auth_settings (
-      id, app_key, app_secret, redirect_uri, access_token, refresh_token,
+      id, company_id, app_key, app_secret, redirect_uri, access_token, refresh_token,
       member_id, ali_id, resource_owner, token_payload_json,
       access_token_expires_at, refresh_token_expires_at, authorized_at,
       created_at, updated_at
     )
     VALUES (
-      @id, @app_key, @app_secret, @redirect_uri, @access_token, @refresh_token,
+      @id, @company_id, @app_key, @app_secret, @redirect_uri, @access_token, @refresh_token,
       @member_id, @ali_id, @resource_owner, @token_payload_json,
       @access_token_expires_at, @refresh_token_expires_at, @authorized_at,
       @created_at, @updated_at
     )
     ON CONFLICT(id) DO UPDATE SET
+      company_id = excluded.company_id,
       app_key = excluded.app_key,
       app_secret = excluded.app_secret,
       redirect_uri = excluded.redirect_uri,
@@ -784,7 +1034,8 @@ function create1688AuthorizeUrl(payload = {}, actor = {}) {
     upsert1688AuthConfig(payload, actor);
   }
   const { db } = requireErp();
-  const setting = get1688AuthRow();
+  const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
+  const setting = get1688AuthRow(companyId);
   if (!setting?.app_key || !setting?.app_secret || !setting?.redirect_uri) {
     throw new Error("Save 1688 AppKey, AppSecret and redirect URI first");
   }
@@ -793,10 +1044,11 @@ function create1688AuthorizeUrl(payload = {}, actor = {}) {
   const now = nowIso();
   const expiresAt = new Date(Date.now() + ALIBABA_1688_OAUTH_STATE_TTL_MS).toISOString();
   db.prepare(`
-    INSERT INTO erp_1688_oauth_states (state, created_by, redirect_after, expires_at, created_at)
-    VALUES (@state, @created_by, @redirect_after, @expires_at, @created_at)
+    INSERT INTO erp_1688_oauth_states (state, company_id, created_by, redirect_after, expires_at, created_at)
+    VALUES (@state, @company_id, @created_by, @redirect_after, @expires_at, @created_at)
   `).run({
     state,
+    company_id: companyId,
     created_by: optionalString(actor?.id),
     redirect_after: "/1688",
     expires_at: expiresAt,
@@ -827,7 +1079,8 @@ async function complete1688OAuth(payload = {}) {
     db.prepare("DELETE FROM erp_1688_oauth_states WHERE state = ?").run(state);
     throw new Error("1688 authorization state has expired");
   }
-  const setting = get1688AuthRow();
+  const companyId = normalizeCompanyId(stateRow.company_id, null);
+  const setting = get1688AuthRow(companyId);
   if (!setting?.app_key || !setting?.app_secret || !setting?.redirect_uri) {
     throw new Error("1688 authorization config is missing");
   }
@@ -856,18 +1109,19 @@ async function complete1688OAuth(payload = {}) {
         updated_at = @updated_at
     WHERE id = @id
   `).run({
-    id: ALIBABA_1688_AUTH_SETTING_ID,
+    id: setting.id,
     ...tokenFields,
     authorized_at: now,
     updated_at: now,
   });
   db.prepare("DELETE FROM erp_1688_oauth_states WHERE state = ?").run(state);
-  return to1688AuthStatus();
+  return to1688AuthStatus(get1688AuthRow(companyId));
 }
 
 async function refresh1688AccessToken(actor = {}) {
   const { db } = requireErp();
-  const setting = get1688AuthRow();
+  const companyId = normalizeCompanyId(actor?.companyId || actor?.company_id, null);
+  const setting = get1688AuthRow(companyId);
   if (!setting?.app_key || !setting?.app_secret || !setting?.refresh_token) {
     throw new Error("1688 refresh token is not available; authorize again first");
   }
@@ -893,11 +1147,11 @@ async function refresh1688AccessToken(actor = {}) {
         updated_at = @updated_at
     WHERE id = @id
   `).run({
-    id: ALIBABA_1688_AUTH_SETTING_ID,
+    id: setting.id,
     ...tokenFields,
     updated_at: nowIso(),
   });
-  return to1688AuthStatus();
+  return to1688AuthStatus(get1688AuthRow(companyId));
 }
 
 function shouldRefresh1688AccessToken(row) {
@@ -907,10 +1161,11 @@ function shouldRefresh1688AccessToken(row) {
 }
 
 async function getReady1688Credentials(actor = {}) {
-  let setting = get1688AuthRow();
+  const companyId = normalizeCompanyId(actor?.companyId || actor?.company_id, null);
+  let setting = get1688AuthRow(companyId);
   if (shouldRefresh1688AccessToken(setting)) {
     await refresh1688AccessToken(actor);
-    setting = get1688AuthRow();
+    setting = get1688AuthRow(companyId);
   }
   if (!setting?.app_key || !setting?.app_secret) {
     throw new Error("1688 AppKey/AppSecret is not configured");
@@ -1122,7 +1377,16 @@ function createFirstAdmin(payload = {}) {
   if (countUsers() > 0) {
     throw new Error("Initial admin already exists");
   }
+  if (payload.companyName || payload.companyCode) {
+    upsertCompany({
+      id: DEFAULT_COMPANY_ID,
+      name: optionalString(payload.companyName) || DEFAULT_COMPANY_NAME,
+      code: optionalString(payload.companyCode) || DEFAULT_COMPANY_CODE,
+      status: "active",
+    });
+  }
   const user = upsertUser({
+    companyId: DEFAULT_COMPANY_ID,
     name: requireString(payload.name, "name"),
     role: "admin",
     status: "active",
@@ -1203,6 +1467,7 @@ function getCurrentSessionActor(actorInput = {}) {
     return {
       id: erpState.currentUser.id,
       role: erpState.currentUser.role,
+      companyId: erpState.currentUser.companyId,
     };
   }
   return normalizeActor(actorInput);
@@ -1229,23 +1494,29 @@ function scopeWorkItemParams(params = {}) {
 
 function listSuppliers(params = {}) {
   const { db } = requireErp();
+  const companyId = optionalString(params.companyId || params.company_id);
+  const whereCompany = companyId ? "WHERE company_id = @company_id" : "";
   const rows = db.prepare(`
     SELECT *
     FROM erp_suppliers
+    ${whereCompany}
     ORDER BY updated_at DESC, created_at DESC
     LIMIT @limit OFFSET @offset
   `).all({
+    company_id: companyId,
     limit: normalizeLimit(params.limit),
     offset: normalizeOffset(params.offset),
   });
   return rows.map(toSupplier);
 }
 
-function createSupplier(payload = {}) {
+function createSupplier(payload = {}, actor = erpState.currentUser) {
   const { db } = requireErp();
   const now = nowIso();
+  const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
   const row = {
     id: optionalString(payload.id) || createId("supplier"),
+    company_id: companyId,
     name: requireString(payload.name, "name"),
     contact_name: optionalString(payload.contactName),
     phone: optionalString(payload.phone),
@@ -1259,11 +1530,11 @@ function createSupplier(payload = {}) {
 
   db.prepare(`
     INSERT INTO erp_suppliers (
-      id, name, contact_name, phone, wechat, address, categories_json,
+      id, company_id, name, contact_name, phone, wechat, address, categories_json,
       status, created_at, updated_at
     )
     VALUES (
-      @id, @name, @contact_name, @phone, @wechat, @address,
+      @id, @company_id, @name, @contact_name, @phone, @wechat, @address,
       @categories_json, @status, @created_at, @updated_at
     )
   `).run(row);
@@ -1446,6 +1717,7 @@ function addPurchaseRequestComment(db, pr, actor, body) {
 function getPurchaseWorkbench(params = {}) {
   const { db } = requireErp();
   const accountId = optionalString(params.accountId);
+  const companyId = normalizeCompanyId(params.user?.companyId || params.companyId || params.company_id, erpState.currentUser);
   const limit = normalizeLimit(params.limit, 50);
   const whereAccount = accountId ? "WHERE pr.account_id = @account_id" : "";
   const poWhereAccount = accountId ? "WHERE po.account_id = @account_id" : "";
@@ -1725,11 +1997,12 @@ function getPurchaseWorkbench(params = {}) {
   const supplierOptions = db.prepare(`
     SELECT id, name
     FROM erp_suppliers
+    WHERE company_id = @company_id
     ORDER BY updated_at DESC, created_at DESC
     LIMIT 500
-  `).all().map(toCamelRow);
+  `).all({ company_id: companyId }).map(toCamelRow);
 
-  const alibaba1688Addresses = list1688DeliveryAddresses({ status: "active" });
+  const alibaba1688Addresses = list1688DeliveryAddresses({ status: "active", companyId });
 
   return {
     generatedAt: nowIso(),
@@ -2298,35 +2571,38 @@ function build1688AddressParamFromRow(row = {}) {
 function list1688DeliveryAddresses(params = {}) {
   const { db } = requireErp();
   const status = optionalString(params.status);
+  const companyId = normalizeCompanyId(params.companyId || params.company_id, erpState.currentUser);
   const rows = status
     ? db.prepare(`
       SELECT *
       FROM erp_1688_delivery_addresses
-      WHERE status = @status
+      WHERE company_id = @company_id AND status = @status
       ORDER BY is_default DESC, updated_at DESC, created_at DESC
-    `).all({ status })
+    `).all({ company_id: companyId, status })
     : db.prepare(`
       SELECT *
       FROM erp_1688_delivery_addresses
+      WHERE company_id = @company_id
       ORDER BY is_default DESC, updated_at DESC, created_at DESC
-    `).all();
+    `).all({ company_id: companyId });
   return rows.map(to1688DeliveryAddress);
 }
 
-function get1688DeliveryAddress(db, addressId = null) {
+function get1688DeliveryAddress(db, addressId = null, companyId = DEFAULT_COMPANY_ID) {
   const id = optionalString(addressId);
+  const normalizedCompanyId = normalizeCompanyId(companyId, null);
   if (id) {
-    const row = db.prepare("SELECT * FROM erp_1688_delivery_addresses WHERE id = ?").get(id);
+    const row = db.prepare("SELECT * FROM erp_1688_delivery_addresses WHERE id = ? AND company_id = ?").get(id, normalizedCompanyId);
     if (!row) throw new Error(`1688 delivery address not found: ${id}`);
     return row;
   }
   const row = db.prepare(`
     SELECT *
     FROM erp_1688_delivery_addresses
-    WHERE status = 'active'
+    WHERE company_id = @company_id AND status = 'active'
     ORDER BY is_default DESC, updated_at DESC, created_at DESC
     LIMIT 1
-  `).get();
+  `).get({ company_id: normalizedCompanyId });
   if (!row) throw new Error("1688 delivery address is not configured");
   return row;
 }
@@ -2334,9 +2610,11 @@ function get1688DeliveryAddress(db, addressId = null) {
 function save1688DeliveryAddressAction({ db, payload, actor }) {
   assertActorRole(actor, ["buyer", "manager", "admin"], "1688 delivery address config");
   const now = nowIso();
+  const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
   const rawAddressParam = payload.rawAddressParam || payload.addressParam || {};
   const row = {
     id: optionalString(payload.addressId || payload.id) || createId("1688_addr"),
+    company_id: companyId,
     label: requireString(payload.label || payload.name, "label"),
     full_name: requireString(payload.fullName || payload.receiverName || rawAddressParam.fullName, "fullName"),
     mobile: optionalString(payload.mobile || rawAddressParam.mobile),
@@ -2363,20 +2641,21 @@ function save1688DeliveryAddressAction({ db, payload, actor }) {
   }
   const existing = db.prepare("SELECT created_at, created_by FROM erp_1688_delivery_addresses WHERE id = ?").get(row.id);
   if (row.is_default) {
-    db.prepare("UPDATE erp_1688_delivery_addresses SET is_default = 0 WHERE id != ?").run(row.id);
+    db.prepare("UPDATE erp_1688_delivery_addresses SET is_default = 0 WHERE company_id = ? AND id != ?").run(row.company_id, row.id);
   }
   db.prepare(`
     INSERT INTO erp_1688_delivery_addresses (
-      id, label, full_name, mobile, phone, post_code, province_text, city_text,
+      id, company_id, label, full_name, mobile, phone, post_code, province_text, city_text,
       area_text, town_text, address, address_id, raw_address_param_json,
       is_default, status, created_by, created_at, updated_at
     )
     VALUES (
-      @id, @label, @full_name, @mobile, @phone, @post_code, @province_text, @city_text,
+      @id, @company_id, @label, @full_name, @mobile, @phone, @post_code, @province_text, @city_text,
       @area_text, @town_text, @address, @address_id, @raw_address_param_json,
       @is_default, @status, @created_by, @created_at, @updated_at
     )
     ON CONFLICT(id) DO UPDATE SET
+      company_id = excluded.company_id,
       label = excluded.label,
       full_name = excluded.full_name,
       mobile = excluded.mobile,
@@ -2589,11 +2868,12 @@ function build1688OrderCargoParamList(po, lines, payload = {}) {
   }));
 }
 
-function resolve1688AddressParam(db, payload = {}) {
+function resolve1688AddressParam(db, payload = {}, actor = {}) {
   if (payload.addressParam && typeof payload.addressParam === "object") return payload.addressParam;
   const addressId = optionalString(payload.deliveryAddressId || payload.erpAddressId || payload.addressId);
+  const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
   try {
-    const row = get1688DeliveryAddress(db, addressId);
+    const row = get1688DeliveryAddress(db, addressId, companyId);
     return build1688AddressParamFromRow(row);
   } catch (error) {
     if (payload.dryRun || payload.mockResponse || payload.mockPreviewResponse) return null;
@@ -2676,7 +2956,7 @@ async function push1688OrderAction({ db, services, payload, actor }) {
 
   const apiParams = build1688FastCreateOrderParams(po, lines, {
     ...payload,
-    addressParam: resolve1688AddressParam(db, payload),
+    addressParam: resolve1688AddressParam(db, payload, actor),
   });
   if (payload.dryRun) {
     return {
@@ -2750,7 +3030,7 @@ async function preview1688OrderAction({ db, services, payload, actor }) {
 
   const apiParams = build1688FastCreateOrderParams(po, lines, {
     ...payload,
-    addressParam: resolve1688AddressParam(db, payload),
+    addressParam: resolve1688AddressParam(db, payload, actor),
   });
   if (payload.dryRun) {
     return {
@@ -3855,7 +4135,10 @@ async function listUsersRuntime(params = {}) {
     });
     return payload.users || [];
   }
-  return listUsers(params);
+  return listUsers({
+    ...params,
+    companyId: optionalString(params.companyId || params.company_id) || erpState.currentUser?.companyId || undefined,
+  });
 }
 
 async function upsertUserRuntime(payload = {}, actor = {}) {
@@ -3910,6 +4193,10 @@ function startLanService(payload = {}) {
     getWorkItemStats: getWorkItemStatsForUser,
     generateWorkItems: generateWorkItemsForUser,
     updateWorkItemStatus: updateWorkItemStatusForUser,
+    listCompanies,
+    getPermissionProfile,
+    upsertRolePermission,
+    upsertUserResourceScope,
     verifyLogin: verifyLanLogin,
     validateSessionUser: validateLanSessionUser,
     listUsers,
@@ -3941,6 +4228,14 @@ function bootstrapAdminFromEnv(env = process.env) {
     };
   }
 
+  if (env.ERP_COMPANY_NAME || env.ERP_COMPANY_CODE) {
+    upsertCompany({
+      id: DEFAULT_COMPANY_ID,
+      name: optionalString(env.ERP_COMPANY_NAME) || DEFAULT_COMPANY_NAME,
+      code: optionalString(env.ERP_COMPANY_CODE) || DEFAULT_COMPANY_CODE,
+      status: "active",
+    });
+  }
   createFirstAdmin({ name, accessCode });
   return {
     created: true,
@@ -3973,6 +4268,10 @@ async function startErpHeadlessServer(options = {}) {
     getWorkItemStats: getWorkItemStatsForUser,
     generateWorkItems: generateWorkItemsForUser,
     updateWorkItemStatus: updateWorkItemStatusForUser,
+    listCompanies,
+    getPermissionProfile,
+    upsertRolePermission,
+    upsertUserResourceScope,
     verifyLogin: verifyLanLogin,
     validateSessionUser: validateLanSessionUser,
     listUsers,
@@ -4017,14 +4316,26 @@ function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:client:set-host-mode", () => switchToHostMode());
   ipcMain.handle("erp:client:set-client-mode", (_event, payload) => switchToClientMode(payload || {}));
   ipcMain.handle("erp:client:discover", (_event, payload) => discoverControllers(payload || {}));
+  ipcMain.handle("erp:company:list", (_event, params) => {
+    assertHostMode("公司管理");
+    return listCompanies(params || {});
+  });
+  ipcMain.handle("erp:company:upsert", (_event, payload) => {
+    assertHostMode("公司管理");
+    assertRoleIfLoggedIn(["admin", "manager"]);
+    return upsertCompany(payload || {});
+  });
   ipcMain.handle("erp:account:list", (_event, params) => {
     assertHostMode("账号管理");
-    return listAccounts(params || {});
+    return listAccounts({
+      ...(params || {}),
+      companyId: optionalString(params?.companyId || params?.company_id) || erpState.currentUser?.companyId || undefined,
+    });
   });
   ipcMain.handle("erp:account:upsert", (_event, payload) => {
     assertHostMode("账号管理");
     assertRoleIfLoggedIn(["admin", "manager"]);
-    return upsertAccount(payload || {});
+    return upsertAccount(payload || {}, erpState.currentUser || {});
   });
   ipcMain.handle("erp:user:list", (_event, params) => {
     if (!isClientMode()) assertHostMode("用户管理");
@@ -4034,14 +4345,32 @@ function registerErpIpcHandlers(ipcMain) {
     if (!isClientMode()) assertHostMode("用户管理");
     return upsertUserRuntime(payload || {}, erpState.currentUser || {});
   });
+  ipcMain.handle("erp:permission:get-profile", () => {
+    if (!isClientMode()) assertHostMode("权限档案");
+    if (isClientMode()) return remoteRequest("/api/permissions/profile");
+    return getPermissionProfile(erpState.currentUser);
+  });
+  ipcMain.handle("erp:permission:upsert-role", (_event, payload) => {
+    assertHostMode("角色权限");
+    assertRoleIfLoggedIn(["admin", "manager"]);
+    return upsertRolePermission(payload || {}, erpState.currentUser || {});
+  });
+  ipcMain.handle("erp:permission:upsert-scope", (_event, payload) => {
+    assertHostMode("资源权限");
+    assertRoleIfLoggedIn(["admin", "manager"]);
+    return upsertUserResourceScope(payload || {}, erpState.currentUser || {});
+  });
   ipcMain.handle("erp:supplier:list", (_event, params) => {
     assertHostMode("供应商管理");
-    return listSuppliers(params || {});
+    return listSuppliers({
+      ...(params || {}),
+      companyId: optionalString(params?.companyId || params?.company_id) || erpState.currentUser?.companyId || undefined,
+    });
   });
   ipcMain.handle("erp:supplier:create", (_event, payload) => {
     assertHostMode("供应商管理");
     assertRoleIfLoggedIn(["admin", "manager", "buyer"]);
-    return createSupplier(payload || {});
+    return createSupplier(payload || {}, erpState.currentUser || {});
   });
   ipcMain.handle("erp:sku:list", (_event, params) => {
     assertHostMode("SKU 管理");
