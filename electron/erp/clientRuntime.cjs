@@ -7,6 +7,7 @@ const path = require("path");
 const CONFIG_FILE_NAME = "erp-runtime.json";
 const DEFAULT_PORT = 19380;
 const SESSION_COOKIE_NAME = "temu_erp_lan_session";
+const REMOTE_SESSION_EXPIRED_MESSAGE = "Cloud login expired, please reconnect.";
 
 let userDataDir = null;
 
@@ -69,6 +70,13 @@ function writeRuntimeConfig(nextConfig = {}) {
   fs.mkdirSync(path.dirname(getConfigPath()), { recursive: true });
   fs.writeFileSync(getConfigPath(), JSON.stringify(config, null, 2), "utf8");
   return config;
+}
+
+function clearClientSession() {
+  return writeRuntimeConfig({
+    sessionCookie: "",
+    currentUser: null,
+  });
 }
 
 function getRuntimeStatus(extra = {}) {
@@ -188,13 +196,25 @@ async function remoteRequest(requestPath, options = {}) {
   if (!config.serverUrl) throw new Error("尚未配置主控端地址");
   const headers = {};
   if (config.sessionCookie) headers.Cookie = config.sessionCookie;
-  const result = await requestJson(config.serverUrl, requestPath, {
-    ...options,
-    headers: {
-      ...headers,
-      ...(options.headers || {}),
-    },
-  });
+  let result = null;
+  try {
+    result = await requestJson(config.serverUrl, requestPath, {
+      ...options,
+      headers: {
+        ...headers,
+        ...(options.headers || {}),
+      },
+    });
+  } catch (error) {
+    if (error?.statusCode === 401) {
+      clearClientSession();
+      const nextError = new Error(REMOTE_SESSION_EXPIRED_MESSAGE);
+      nextError.statusCode = 401;
+      nextError.payload = error.payload;
+      throw nextError;
+    }
+    throw error;
+  }
   if (result.sessionCookie) {
     writeRuntimeConfig({ sessionCookie: result.sessionCookie });
   }
@@ -263,16 +283,20 @@ async function remoteAuthStatus() {
   try {
     const status = await remoteRequest("/api/status");
     const user = status?.user || null;
+    if (!user) {
+      clearClientSession();
+      return {
+        hasUsers: true,
+        currentUser: null,
+      };
+    }
     writeRuntimeConfig({ currentUser: user });
     return {
       hasUsers: true,
       currentUser: user,
     };
   } catch {
-    writeRuntimeConfig({
-      sessionCookie: "",
-      currentUser: null,
-    });
+    clearClientSession();
     return {
       hasUsers: true,
       currentUser: null,
