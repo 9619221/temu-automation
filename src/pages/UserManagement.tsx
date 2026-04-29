@@ -79,9 +79,8 @@ export default function UserManagement() {
     return `${roles.size} 个角色`;
   }, [users]);
   const isCloudMode = Boolean(clientStatus?.isClientMode);
-  const isHostMode = clientStatus?.mode === "host";
-  const canManageUsers = isCloudMode || isHostMode;
-  const userStoreName = isCloudMode ? "云端用户库" : isHostMode ? "本地用户库" : "用户库";
+  const canManageUsers = isCloudMode;
+  const userStoreName = "云端用户库";
 
   const loadUsers = useCallback(async () => {
     if (!erp) return;
@@ -91,7 +90,7 @@ export default function UserManagement() {
       if (nextClientStatus) {
         setClientStatus(nextClientStatus as ClientStatusView);
       }
-      if (!nextClientStatus?.isClientMode && nextClientStatus?.mode !== "host") {
+      if (!nextClientStatus?.isClientMode) {
         setUsers([]);
         return;
       }
@@ -143,7 +142,7 @@ export default function UserManagement() {
   const handleSubmit = async () => {
     if (!erp) return;
     if (!canManageUsers) {
-      message.warning("请先连接云端或切换到本地用户库，再创建或编辑用户");
+      message.warning("请先连接云端，再创建或编辑用户");
       return;
     }
     const values = await form.validateFields();
@@ -179,7 +178,7 @@ export default function UserManagement() {
   const handleToggleStatus = async (record: ErpUserRow) => {
     if (!erp) return;
     if (!canManageUsers) {
-      message.warning("请先连接云端或切换到本地用户库，再停用或启用用户");
+      message.warning("请先连接云端，再停用或启用用户");
       return;
     }
     const nextStatus = record.status === "active" ? "blocked" : "active";
@@ -281,17 +280,17 @@ export default function UserManagement() {
         <div className="app-panel__title">
           <div>
             <div className="app-panel__title-main">用户同步</div>
-            <div className="app-panel__title-sub">云端模式同步服务器，本地模式读取当前电脑数据库。</div>
+            <div className="app-panel__title-sub">用户管理统一同步云端服务器，避免本地和云端两套数据不一致。</div>
           </div>
-          <Tag color={isCloudMode ? "success" : isHostMode ? "processing" : "warning"}>
-            {isCloudMode ? "云端模式" : isHostMode ? "本地模式" : "未绑定用户库"}
+          <Tag color={isCloudMode ? "success" : "warning"}>
+            {isCloudMode ? "云端模式" : "未连接云端"}
           </Tag>
         </div>
         <Alert
-          type={isCloudMode ? "success" : isHostMode ? "info" : "warning"}
+          type={isCloudMode ? "success" : "warning"}
           showIcon
-          message={isCloudMode ? "当前正在同步云端用户库" : isHostMode ? "当前正在读取本地用户库" : "请先连接云端"}
-          description={isCloudMode ? "云端服务器已固定绑定，创建、编辑和停用用户都会直接同步。" : isHostMode ? "本机数据没有丢失，创建、编辑和停用用户会写入当前电脑的 ERP 数据库。" : "连接云端后同步服务器；本机存在数据库时会自动进入本地模式。"}
+          message={isCloudMode ? "当前正在同步云端用户库" : "请先连接云端"}
+          description={isCloudMode ? "创建、编辑和停用用户都会直接同步到云端服务器。" : "本地历史数据不会丢失，但用户管理以云端为准；连接后列表会显示服务器上的用户。"}
           style={{ marginBottom: 12 }}
         />
         <Form form={cloudForm} layout="vertical" initialValues={{ login: "admin" }}>
@@ -330,7 +329,7 @@ export default function UserManagement() {
             type="warning"
             showIcon
             message="暂不能创建用户"
-            description="请先在上方输入管理员和访问码连接云端，或切换到本地用户库。"
+            description="请先在上方输入管理员和访问码连接云端。"
             style={{ marginBottom: 12 }}
           />
         ) : null}

@@ -100,9 +100,9 @@ export default function ErpLogin() {
         login: values.login || "",
         accessCode: values.accessCode,
       };
-      if (runtime?.isClientMode) {
-        loginPayload.serverUrl = runtime.serverUrl || ERP_CLOUD_SERVER_URL;
-      }
+      loginPayload.serverUrl = runtime?.isClientMode
+        ? runtime.serverUrl || ERP_CLOUD_SERVER_URL
+        : ERP_CLOUD_SERVER_URL;
       const nextStatus = await auth.login(loginPayload);
       const user = nextStatus.currentUser;
       message.success({

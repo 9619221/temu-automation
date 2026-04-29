@@ -31,9 +31,10 @@ function normalizeMode(value) {
 function normalizeServerUrl(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
-  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
+  const hasProtocol = /^https?:\/\//i.test(raw);
+  const withProtocol = hasProtocol ? raw : `http://${raw}`;
   const url = new URL(withProtocol);
-  if (!url.port) url.port = String(DEFAULT_PORT);
+  if (!url.port && !hasProtocol && url.protocol === "http:") url.port = String(DEFAULT_PORT);
   url.pathname = "";
   url.search = "";
   url.hash = "";
