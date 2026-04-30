@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const fs = require("fs");
+const path = require("path");
 const { getErpDatabasePath, openErpDatabase } = require("../db/connection.cjs");
 const { runMigrations } = require("../db/migrate.cjs");
 const { createErpServices } = require("./services/index.cjs");
@@ -36,6 +37,8 @@ const {
   normalize1688ProductDetailResponse,
   normalize1688SearchResponse,
 } = require("./1688Client.cjs");
+const { imageSearchProduct: imageSearchAlphaShopProduct } = require("./alphaShopMcpClient.cjs");
+const { imageSearch1688Web } = require("./1688WebImageSearch.cjs");
 
 const erpState = {
   db: null,
@@ -59,12 +62,15 @@ const BROADCAST_PURCHASE_ACTIONS = new Set([
   "quote_feedback",
   "add_sourcing_candidate",
   "source_1688_keyword",
+  "source_1688_image",
   "refresh_1688_product_detail",
   "save_1688_address",
   "upsert_sku_1688_source",
   "preview_1688_order",
   "generate_po",
   "push_1688_order",
+  "request_1688_price_change",
+  "sync_1688_order_price",
   "sync_1688_orders",
   "submit_payment_approval",
   "approve_payment",
@@ -245,6 +251,13 @@ function optionalNumber(value) {
   if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+function optionalPositiveInteger(value, fallback = null) {
+  const number = optionalNumber(value);
+  if (number === null) return fallback;
+  const integer = Math.floor(number);
+  return integer > 0 ? integer : fallback;
 }
 
 function normalizeCompanyId(value, actor = erpState.currentUser) {
@@ -1189,6 +1202,61 @@ function upsert1688AuthConfig(payload = {}, actor = {}) {
   return to1688AuthStatus(db.prepare("SELECT * FROM erp_1688_auth_settings WHERE id = ?").get(row.id));
 }
 
+function save1688ManualToken(payload = {}, actor = {}) {
+  const { db } = requireErp();
+  const hasCredentialInput = payload.appKey || payload.app_key || payload.appSecret || payload.app_secret || payload.redirectUri || payload.redirect_uri;
+  if (hasCredentialInput) {
+    upsert1688AuthConfig(payload, actor);
+  }
+  const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
+  const setting = get1688AuthRow(companyId);
+  if (!setting?.app_key || !setting?.app_secret) {
+    throw new Error("请先保存 1688 AppKey 和 AppSecret");
+  }
+  const accessToken = requireString(payload.accessToken || payload.access_token || payload.token, "accessToken");
+  const refreshToken = optionalString(payload.refreshToken || payload.refresh_token) || setting.refresh_token || null;
+  const accessTokenExpiresAt = parseAbsoluteTokenTime(
+    payload.accessTokenExpiresAt || payload.access_token_expires_at || payload.expiresAt || payload.expires_at,
+  );
+  const refreshTokenExpiresAt = parseAbsoluteTokenTime(
+    payload.refreshTokenExpiresAt || payload.refresh_token_expires_at || payload.refreshExpiresAt || payload.refresh_expires_at,
+  ) || setting.refresh_token_expires_at || null;
+  const now = nowIso();
+  db.prepare(`
+    UPDATE erp_1688_auth_settings
+    SET access_token = @access_token,
+        refresh_token = @refresh_token,
+        member_id = @member_id,
+        ali_id = @ali_id,
+        resource_owner = @resource_owner,
+        token_payload_json = @token_payload_json,
+        access_token_expires_at = @access_token_expires_at,
+        refresh_token_expires_at = @refresh_token_expires_at,
+        authorized_at = @authorized_at,
+        updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id: setting.id,
+    access_token: accessToken,
+    refresh_token: refreshToken,
+    member_id: optionalString(payload.memberId || payload.member_id || payload.memberName || payload.member_name) || setting.member_id || null,
+    ali_id: optionalString(payload.aliId || payload.ali_id) || setting.ali_id || null,
+    resource_owner: optionalString(payload.resourceOwner || payload.resource_owner) || setting.resource_owner || null,
+    token_payload_json: JSON.stringify({
+      source: "manual",
+      savedAt: now,
+      hasRefreshToken: Boolean(refreshToken),
+      accessTokenExpiresAt,
+      refreshTokenExpiresAt,
+    }),
+    access_token_expires_at: accessTokenExpiresAt,
+    refresh_token_expires_at: refreshTokenExpiresAt,
+    authorized_at: now,
+    updated_at: now,
+  });
+  return to1688AuthStatus(get1688AuthRow(companyId));
+}
+
 function create1688AuthorizeUrl(payload = {}, actor = {}) {
   if (payload.appKey || payload.app_key || payload.appSecret || payload.app_secret || payload.redirectUri || payload.redirect_uri) {
     upsert1688AuthConfig(payload, actor);
@@ -1349,6 +1417,7 @@ function redact1688Request(request = {}) {
   const params = { ...(request.params || {}) };
   if (params.access_token) params.access_token = "***";
   if (params._aop_signature) params._aop_signature = "***";
+  if (params.uploadImageParam) params.uploadImageParam = "[image payload]";
   return {
     ...request,
     params,
@@ -1459,7 +1528,7 @@ async function call1688ProcurementApi({ db, actor, accountId, action, api, param
       apiKey: api.key,
       action,
       status: "failed",
-      request: { params },
+      request: redact1688Request({ params }),
       response: {},
       errorMessage: error?.message || String(error),
       actor,
@@ -1752,6 +1821,41 @@ function listSkus(params = {}) {
   return rows.map(toSkuOptionRow);
 }
 
+function buildSkuCodePrefix(date = new Date()) {
+  const year = String(date.getFullYear());
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}${month}${day}`;
+}
+
+function generateInternalSkuCode(db, companyId) {
+  const prefix = buildSkuCodePrefix();
+  const rows = db.prepare(`
+    SELECT internal_sku_code
+    FROM erp_skus
+    WHERE company_id = @company_id
+      AND internal_sku_code LIKE @code_like
+    ORDER BY internal_sku_code DESC
+    LIMIT 1000
+  `).all({
+    company_id: companyId,
+    code_like: `${prefix}%`,
+  });
+  const usedCodes = new Set(rows.map((row) => row.internal_sku_code));
+  let nextSequence = 1;
+  for (const row of rows) {
+    const suffix = String(row.internal_sku_code || "").slice(prefix.length);
+    if (/^\d+$/.test(suffix)) {
+      nextSequence = Math.max(nextSequence, Number(suffix) + 1);
+    }
+  }
+  for (let offset = 0; offset < 2000; offset += 1) {
+    const code = `${prefix}${String(nextSequence + offset).padStart(4, "0")}`;
+    if (!usedCodes.has(code)) return code;
+  }
+  throw new Error("无法自动生成商品编码，请稍后重试");
+}
+
 function createSku(payload = {}, actor = erpState.currentUser) {
   const { db } = requireErp();
   const now = nowIso();
@@ -1771,7 +1875,8 @@ function createSku(payload = {}, actor = erpState.currentUser) {
       throw new Error("商品资料供应商不属于当前公司");
     }
   }
-  const internalSkuCode = requireString(payload.internalSkuCode, "internalSkuCode");
+  const internalSkuCode = optionalString(payload.internalSkuCode || payload.internal_sku_code)
+    || generateInternalSkuCode(db, companyId);
   const duplicate = db.prepare(`
     SELECT id
     FROM erp_skus
@@ -1794,6 +1899,7 @@ function createSku(payload = {}, actor = erpState.currentUser) {
     temu_product_id: optionalString(payload.temuProductId),
     temu_skc_id: optionalString(payload.temuSkcId),
     product_name: requireString(payload.productName, "productName"),
+    color_spec: optionalString(payload.colorSpec || payload.color_spec || payload.category),
     category: optionalString(payload.category),
     image_url: optionalString(payload.imageUrl),
     supplier_id: supplierId,
@@ -1805,12 +1911,12 @@ function createSku(payload = {}, actor = erpState.currentUser) {
   db.prepare(`
     INSERT INTO erp_skus (
       id, company_id, account_id, internal_sku_code, temu_sku_id, temu_product_id,
-      temu_skc_id, product_name, category, image_url, supplier_id,
+      temu_skc_id, product_name, color_spec, category, image_url, supplier_id,
       status, created_at, updated_at
     )
     VALUES (
       @id, @company_id, @account_id, @internal_sku_code, @temu_sku_id, @temu_product_id,
-      @temu_skc_id, @product_name, @category, @image_url, @supplier_id,
+      @temu_skc_id, @product_name, @color_spec, @category, @image_url, @supplier_id,
       @status, @created_at, @updated_at
     )
   `).run(row);
@@ -1818,10 +1924,60 @@ function createSku(payload = {}, actor = erpState.currentUser) {
   return toCamelRow(db.prepare("SELECT * FROM erp_skus WHERE id = ?").get(row.id));
 }
 
+function getSkuReferenceCounts(db, skuId) {
+  const references = [
+    { table: "erp_purchase_requests", label: "采购需求" },
+    { table: "erp_purchase_order_lines", label: "采购单明细" },
+    { table: "erp_inbound_receipt_lines", label: "入库明细" },
+    { table: "erp_inventory_batches", label: "库存批次" },
+    { table: "erp_inventory_ledger_entries", label: "库存流水" },
+    { table: "erp_qc_inspections", label: "QC 记录" },
+    { table: "erp_outbound_shipments", label: "出库单" },
+    { table: "erp_work_items", label: "工作事项" },
+  ];
+  return references
+    .map((item) => ({
+      ...item,
+      count: Number(db.prepare(`SELECT COUNT(*) AS count FROM ${item.table} WHERE sku_id = ?`).get(skuId)?.count || 0),
+    }))
+    .filter((item) => item.count > 0);
+}
+
+function deleteSku(payload = {}, actor = erpState.currentUser) {
+  const { db } = requireErp();
+  const skuId = requireString(payload.skuId || payload.id, "skuId");
+  const sku = db.prepare("SELECT * FROM erp_skus WHERE id = ?").get(skuId);
+  if (!sku) throw new Error("商品资料不存在");
+
+  const companyId = normalizeCompanyId(payload.companyId || payload.company_id || sku.company_id, actor);
+  if (sku.company_id !== companyId) {
+    throw new Error("商品资料不属于当前公司");
+  }
+
+  const references = getSkuReferenceCounts(db, skuId);
+  if (references.length > 0) {
+    const detail = references.map((item) => `${item.label}${item.count}条`).join("、");
+    throw new Error(`商品资料已被${detail}引用，不能删除`);
+  }
+
+  db.transaction(() => {
+    db.prepare("DELETE FROM erp_sku_1688_sources WHERE sku_id = ?").run(skuId);
+    db.prepare("DELETE FROM erp_skus WHERE id = ?").run(skuId);
+  })();
+
+  return {
+    id: skuId,
+    deleted: true,
+  };
+}
+
 function toSku1688Source(row) {
   if (!row) return null;
   const next = toCamelRow(row);
   next.isDefault = Boolean(row.is_default);
+  next.ourQty = Number(row.our_qty || 1);
+  next.platformQty = Number(row.platform_qty || 1);
+  next.ratioText = `${next.ourQty}:${next.platformQty}`;
   next.sourcePayload = parseJsonObject(row.source_payload_json);
   delete next.sourcePayloadJson;
   return next;
@@ -1893,15 +2049,140 @@ function listSku1688Sources(params = {}) {
   const rows = db.prepare(`
     SELECT
       source.*,
+      acct.name AS account_name,
       sku.internal_sku_code,
-      sku.product_name
+      sku.product_name,
+      sku.color_spec
     FROM erp_sku_1688_sources source
     LEFT JOIN erp_skus sku ON sku.id = source.sku_id
+    LEFT JOIN erp_accounts acct ON acct.id = source.account_id
     ${where}
     ORDER BY source.is_default DESC, source.updated_at DESC, source.created_at DESC
     LIMIT @limit OFFSET @offset
   `).all(values);
   return rows.map(toSku1688Source);
+}
+
+function getActiveSku1688SourceRows(db, accountId, skuId) {
+  const rows = db.prepare(`
+    SELECT *
+    FROM erp_sku_1688_sources
+    WHERE account_id = @account_id
+      AND sku_id = @sku_id
+      AND status = 'active'
+    ORDER BY is_default DESC, updated_at DESC, created_at DESC
+  `).all({
+    account_id: accountId,
+    sku_id: skuId,
+  });
+  if (!rows.length) return [];
+  const defaultRow = rows.find((row) => Number(row.is_default) === 1);
+  const defaultGroupId = optionalString(defaultRow?.mapping_group_id);
+  if (defaultGroupId) {
+    return rows.filter((row) => optionalString(row.mapping_group_id) === defaultGroupId);
+  }
+  const defaultRows = rows.filter((row) => Number(row.is_default) === 1);
+  return defaultRows.length ? defaultRows : rows.slice(0, 1);
+}
+
+function buildCandidateFromSku1688Source(db, pr = {}, source = {}, actor = {}) {
+  const now = nowIso();
+  const row = {
+    id: createId("source"),
+    account_id: pr.account_id,
+    pr_id: pr.id,
+    purchase_source: enums.PURCHASE_SOURCE.SOURCE_1688_MANUAL,
+    sourcing_method: "1688_mapping",
+    supplier_id: null,
+    supplier_name: optionalString(source.supplier_name) || "1688",
+    product_title: optionalString(source.product_title),
+    product_url: optionalString(source.product_url),
+    image_url: optionalString(source.image_url),
+    unit_price: optionalNumber(source.unit_price) ?? 0,
+    moq: Math.max(1, Math.floor(Number(optionalNumber(source.moq) ?? 1))),
+    lead_days: optionalNumber(source.lead_days),
+    logistics_fee: optionalNumber(source.logistics_fee) ?? 0,
+    remark: "来自 1688 映射总表",
+    status: "candidate",
+    created_by: actor.id || null,
+    external_offer_id: optionalString(source.external_offer_id),
+    external_sku_id: optionalString(source.external_sku_id),
+    external_spec_id: optionalString(source.external_spec_id),
+    source_payload_json: source.source_payload_json || "{}",
+    created_at: now,
+    updated_at: now,
+  };
+  db.prepare(`
+    INSERT INTO erp_sourcing_candidates (
+      id, account_id, pr_id, purchase_source, sourcing_method, supplier_id, supplier_name,
+      product_title, product_url, image_url, unit_price, moq, lead_days,
+      logistics_fee, remark, status, created_by, external_offer_id, external_sku_id,
+      external_spec_id, source_payload_json, created_at, updated_at
+    )
+    VALUES (
+      @id, @account_id, @pr_id, @purchase_source, @sourcing_method, @supplier_id, @supplier_name,
+      @product_title, @product_url, @image_url, @unit_price, @moq, @lead_days,
+      @logistics_fee, @remark, @status, @created_by, @external_offer_id, @external_sku_id,
+      @external_spec_id, @source_payload_json, @created_at, @updated_at
+    )
+  `).run(row);
+  return db.prepare("SELECT * FROM erp_sourcing_candidates WHERE id = ?").get(row.id);
+}
+
+function getSkuSupplierSource(db, skuId) {
+  if (!skuId) return null;
+  return db.prepare(`
+    SELECT
+      sku.supplier_id,
+      sku.product_name,
+      sku.image_url,
+      supplier.name AS supplier_name
+    FROM erp_skus sku
+    LEFT JOIN erp_suppliers supplier ON supplier.id = sku.supplier_id
+    WHERE sku.id = ?
+    LIMIT 1
+  `).get(skuId);
+}
+
+function buildCandidateFromSkuSupplier(db, pr = {}, source = {}, actor = {}) {
+  const supplierId = optionalString(source.supplier_id);
+  const supplierName = optionalString(source.supplier_name);
+  if (!supplierId && !supplierName) return null;
+  const now = nowIso();
+  const row = {
+    id: createId("source"),
+    account_id: pr.account_id,
+    pr_id: pr.id,
+    purchase_source: "existing_supplier",
+    sourcing_method: "sku_supplier",
+    supplier_id: supplierId,
+    supplier_name: supplierName || "商品资料供应商",
+    product_title: optionalString(source.product_name),
+    product_url: null,
+    image_url: optionalString(source.image_url),
+    unit_price: 0,
+    moq: 1,
+    lead_days: null,
+    logistics_fee: 0,
+    remark: "来自商品资料供应商",
+    status: "candidate",
+    created_by: actor.id || null,
+    created_at: now,
+    updated_at: now,
+  };
+  db.prepare(`
+    INSERT INTO erp_sourcing_candidates (
+      id, account_id, pr_id, purchase_source, sourcing_method, supplier_id, supplier_name,
+      product_title, product_url, image_url, unit_price, moq, lead_days,
+      logistics_fee, remark, status, created_by, created_at, updated_at
+    )
+    VALUES (
+      @id, @account_id, @pr_id, @purchase_source, @sourcing_method, @supplier_id, @supplier_name,
+      @product_title, @product_url, @image_url, @unit_price, @moq, @lead_days,
+      @logistics_fee, @remark, @status, @created_by, @created_at, @updated_at
+    )
+  `).run(row);
+  return db.prepare("SELECT * FROM erp_sourcing_candidates WHERE id = ?").get(row.id);
 }
 
 function upsertSku1688SourceRow(db, payload = {}, actor = {}) {
@@ -1910,13 +2191,17 @@ function upsertSku1688SourceRow(db, payload = {}, actor = {}) {
   const sku = db.prepare("SELECT * FROM erp_skus WHERE id = ?").get(skuId);
   if (!sku) throw new Error(`SKU not found: ${skuId}`);
   const now = nowIso();
+  const externalOfferId = requireString(payload.externalOfferId || payload.external_offer_id, "externalOfferId");
+  const mappingGroupId = optionalString(payload.mappingGroupId || payload.mapping_group_id) || `map_${sku.id}_${externalOfferId}`;
   const row = {
     id: optionalString(payload.id) || createId("sku_1688"),
     account_id: optionalString(payload.accountId || payload.account_id) || sku.account_id,
     sku_id: sku.id,
-    external_offer_id: requireString(payload.externalOfferId || payload.external_offer_id, "externalOfferId"),
+    mapping_group_id: mappingGroupId,
+    external_offer_id: externalOfferId,
     external_sku_id: optionalString(payload.externalSkuId || payload.external_sku_id) || "",
     external_spec_id: optionalString(payload.externalSpecId || payload.external_spec_id) || "",
+    platform_sku_name: optionalString(payload.platformSkuName || payload.platform_sku_name),
     supplier_name: optionalString(payload.supplierName || payload.supplier_name),
     product_title: optionalString(payload.productTitle || payload.product_title),
     product_url: optionalString(payload.productUrl || payload.product_url),
@@ -1925,8 +2210,11 @@ function upsertSku1688SourceRow(db, payload = {}, actor = {}) {
     moq: optionalNumber(payload.moq),
     lead_days: optionalNumber(payload.leadDays ?? payload.lead_days),
     logistics_fee: optionalNumber(payload.logisticsFee ?? payload.logistics_fee),
+    our_qty: optionalPositiveInteger(payload.ourQty ?? payload.our_qty, 1),
+    platform_qty: optionalPositiveInteger(payload.platformQty ?? payload.platform_qty, 1),
     status: optionalString(payload.status) || "active",
     is_default: payload.isDefault === false || payload.is_default === false ? 0 : (payload.isDefault || payload.is_default ? 1 : 0),
+    remark: optionalString(payload.remark),
     source_payload_json: trimJsonForStorage(payload.sourcePayload || payload.source_payload || payload.raw || {}),
     created_by: optionalString(actor.id),
     created_at: now,
@@ -1938,31 +2226,39 @@ function upsertSku1688SourceRow(db, payload = {}, actor = {}) {
   if (row.moq !== null && (!Number.isInteger(Number(row.moq)) || Number(row.moq) <= 0)) {
     throw new Error("moq must be a positive integer");
   }
+  if (!Number.isInteger(row.our_qty) || row.our_qty <= 0 || !Number.isInteger(row.platform_qty) || row.platform_qty <= 0) {
+    throw new Error("1688 mapping ratio must be positive integers");
+  }
   if (row.is_default) {
     db.prepare(`
       UPDATE erp_sku_1688_sources
       SET is_default = 0, updated_at = @updated_at
-      WHERE account_id = @account_id AND sku_id = @sku_id
+      WHERE account_id = @account_id
+        AND sku_id = @sku_id
+        AND COALESCE(NULLIF(mapping_group_id, ''), id) != @mapping_group_id
     `).run({
       account_id: row.account_id,
       sku_id: row.sku_id,
+      mapping_group_id: row.mapping_group_id,
       updated_at: now,
     });
   }
   db.prepare(`
     INSERT INTO erp_sku_1688_sources (
-      id, account_id, sku_id, external_offer_id, external_sku_id, external_spec_id,
-      supplier_name, product_title, product_url, image_url, unit_price, moq,
-      lead_days, logistics_fee, status, is_default, source_payload_json,
+      id, account_id, sku_id, mapping_group_id, external_offer_id, external_sku_id, external_spec_id,
+      platform_sku_name, supplier_name, product_title, product_url, image_url, unit_price, moq,
+      lead_days, logistics_fee, our_qty, platform_qty, status, is_default, remark, source_payload_json,
       created_by, created_at, updated_at
     )
     VALUES (
-      @id, @account_id, @sku_id, @external_offer_id, @external_sku_id, @external_spec_id,
-      @supplier_name, @product_title, @product_url, @image_url, @unit_price, @moq,
-      @lead_days, @logistics_fee, @status, @is_default, @source_payload_json,
+      @id, @account_id, @sku_id, @mapping_group_id, @external_offer_id, @external_sku_id, @external_spec_id,
+      @platform_sku_name, @supplier_name, @product_title, @product_url, @image_url, @unit_price, @moq,
+      @lead_days, @logistics_fee, @our_qty, @platform_qty, @status, @is_default, @remark, @source_payload_json,
       @created_by, @created_at, @updated_at
     )
     ON CONFLICT(account_id, sku_id, external_offer_id, external_sku_id, external_spec_id) DO UPDATE SET
+      mapping_group_id = excluded.mapping_group_id,
+      platform_sku_name = COALESCE(excluded.platform_sku_name, platform_sku_name),
       supplier_name = COALESCE(excluded.supplier_name, supplier_name),
       product_title = COALESCE(excluded.product_title, product_title),
       product_url = COALESCE(excluded.product_url, product_url),
@@ -1971,8 +2267,11 @@ function upsertSku1688SourceRow(db, payload = {}, actor = {}) {
       moq = COALESCE(excluded.moq, moq),
       lead_days = COALESCE(excluded.lead_days, lead_days),
       logistics_fee = COALESCE(excluded.logistics_fee, logistics_fee),
+      our_qty = excluded.our_qty,
+      platform_qty = excluded.platform_qty,
       status = excluded.status,
-      is_default = CASE WHEN excluded.is_default = 1 THEN 1 ELSE is_default END,
+      is_default = excluded.is_default,
+      remark = COALESCE(excluded.remark, remark),
       source_payload_json = excluded.source_payload_json,
       updated_at = excluded.updated_at
   `).run(row);
@@ -1994,9 +2293,11 @@ function upsertSku1688SourceFromCandidate(db, candidate = {}, pr = {}, actor = {
   return upsertSku1688SourceRow(db, {
     accountId: candidate.account_id || pr.account_id,
     skuId: pr.sku_id,
+    mappingGroupId: `map_${pr.sku_id}_${externalOfferId}`,
     externalOfferId,
     externalSkuId: candidate.external_sku_id || candidate.externalSkuId,
     externalSpecId: candidate.external_spec_id || candidate.externalSpecId,
+    platformSkuName: candidate.external_spec_id || candidate.externalSpecId || candidate.external_sku_id || candidate.externalSkuId,
     supplierName: candidate.supplier_name || candidate.supplierName,
     productTitle: candidate.product_title || candidate.productTitle,
     productUrl: candidate.product_url || candidate.productUrl,
@@ -2005,6 +2306,8 @@ function upsertSku1688SourceFromCandidate(db, candidate = {}, pr = {}, actor = {
     moq: candidate.moq,
     leadDays: candidate.lead_days ?? candidate.leadDays,
     logisticsFee: candidate.logistics_fee ?? candidate.logisticsFee,
+    ourQty: 1,
+    platformQty: 1,
     sourcePayload: parseJsonObject(candidate.external_detail_json) || parseJsonObject(candidate.source_payload_json),
     isDefault: Boolean(options.isDefault),
     status: "active",
@@ -2140,12 +2443,40 @@ function getPurchaseWorkbench(params = {}) {
       sku.internal_sku_code,
       sku.product_name,
       sku.image_url AS sku_image_url,
+      sku.supplier_id AS sku_supplier_id,
+      sku_supplier.name AS sku_supplier_name,
       requester.name AS requested_by_name,
       COUNT(candidate.id) AS candidate_count,
-      SUM(CASE WHEN candidate.status = 'selected' THEN 1 ELSE 0 END) AS selected_candidate_count
+      SUM(CASE WHEN candidate.status = 'selected' THEN 1 ELSE 0 END) AS selected_candidate_count,
+      (
+        SELECT COUNT(*)
+        FROM erp_sku_1688_sources source
+        WHERE source.account_id = pr.account_id
+          AND source.sku_id = pr.sku_id
+          AND source.status = 'active'
+      ) AS mapping_count,
+      (
+        SELECT source.supplier_name
+        FROM erp_sku_1688_sources source
+        WHERE source.account_id = pr.account_id
+          AND source.sku_id = pr.sku_id
+          AND source.status = 'active'
+        ORDER BY source.is_default DESC, source.updated_at DESC, source.created_at DESC
+        LIMIT 1
+      ) AS primary_mapping_supplier_name,
+      (
+        SELECT source.external_offer_id
+        FROM erp_sku_1688_sources source
+        WHERE source.account_id = pr.account_id
+          AND source.sku_id = pr.sku_id
+          AND source.status = 'active'
+        ORDER BY source.is_default DESC, source.updated_at DESC, source.created_at DESC
+        LIMIT 1
+      ) AS primary_mapping_offer_id
     FROM erp_purchase_requests pr
     LEFT JOIN erp_accounts acct ON acct.id = pr.account_id
     LEFT JOIN erp_skus sku ON sku.id = pr.sku_id
+    LEFT JOIN erp_suppliers sku_supplier ON sku_supplier.id = sku.supplier_id
     LEFT JOIN erp_users requester ON requester.id = pr.requested_by
     LEFT JOIN erp_sourcing_candidates candidate ON candidate.pr_id = pr.id
     ${whereAccount}
@@ -2221,6 +2552,8 @@ function getPurchaseWorkbench(params = {}) {
     const candidates = candidateStmt.all(pr.id).map((row) => {
       const next = toCamelRow(row);
       next.supplierName = next.supplierName || next.linkedSupplierName || "";
+      next.sourcePayload = parseJsonObject(row.source_payload_json);
+      delete next.sourcePayloadJson;
       next.externalSkuOptions = parseJsonArray(row.external_sku_options_json);
       next.externalPriceRanges = parseJsonArray(row.external_price_ranges_json);
       return next;
@@ -2265,14 +2598,25 @@ function getPurchaseWorkbench(params = {}) {
       po.*,
       acct.name AS account_name,
       supplier.name AS supplier_name,
+      creator.name AS created_by_name,
       pr.status AS pr_status,
       GROUP_CONCAT(DISTINCT sku.internal_sku_code || ' ' || sku.product_name) AS sku_summary,
       COUNT(DISTINCT line.id) AS line_count,
       COALESCE(SUM(line.qty), 0) AS total_qty,
-      COALESCE(SUM(line.received_qty), 0) AS received_qty
+      COALESCE(SUM(line.received_qty), 0) AS received_qty,
+      (
+        SELECT COUNT(*)
+        FROM erp_purchase_order_lines map_line
+        JOIN erp_sku_1688_sources map_source
+          ON map_source.account_id = map_line.account_id
+         AND map_source.sku_id = map_line.sku_id
+         AND map_source.status = 'active'
+        WHERE map_line.po_id = po.id
+      ) AS mapping_count
     FROM erp_purchase_orders po
     LEFT JOIN erp_accounts acct ON acct.id = po.account_id
     LEFT JOIN erp_suppliers supplier ON supplier.id = po.supplier_id
+    LEFT JOIN erp_users creator ON creator.id = po.created_by
     LEFT JOIN erp_purchase_requests pr ON pr.id = po.pr_id
     LEFT JOIN erp_purchase_order_lines line ON line.po_id = po.id
     LEFT JOIN erp_skus sku ON sku.id = line.sku_id
@@ -2282,13 +2626,14 @@ function getPurchaseWorkbench(params = {}) {
       CASE po.status
         WHEN 'pending_finance_approval' THEN 0
         WHEN 'approved_to_pay' THEN 1
-        WHEN 'paid' THEN 2
-        WHEN 'supplier_processing' THEN 3
-        WHEN 'shipped' THEN 4
-        WHEN 'arrived' THEN 5
-        WHEN 'draft' THEN 6
-        WHEN 'inbounded' THEN 7
-        WHEN 'closed' THEN 8
+        WHEN 'pushed_pending_price' THEN 2
+        WHEN 'paid' THEN 3
+        WHEN 'supplier_processing' THEN 4
+        WHEN 'shipped' THEN 5
+        WHEN 'arrived' THEN 6
+        WHEN 'draft' THEN 7
+        WHEN 'inbounded' THEN 8
+        WHEN 'closed' THEN 9
         ELSE 9
       END,
       po.updated_at DESC
@@ -2393,6 +2738,7 @@ function getPurchaseWorkbench(params = {}) {
   };
 
   const skuOptions = listSkus({ accountId, companyId, limit: 500 });
+  const sku1688Sources = listSku1688Sources({ accountId, limit: 500 });
 
   const supplierOptions = db.prepare(`
     SELECT id, name
@@ -2412,6 +2758,7 @@ function getPurchaseWorkbench(params = {}) {
     paymentApprovals,
     paymentQueue,
     skuOptions,
+    sku1688Sources,
     supplierOptions,
     alibaba1688Addresses,
   };
@@ -2584,15 +2931,41 @@ function createPurchaseRequestAction({ db, services, payload, actor }) {
     if (accounts.length === 1) {
       accountId = accounts[0].id;
     } else if (accounts.length === 0) {
-      throw new Error("请先在商品资料中创建账号，再提交采购需求");
+      throw new Error("请先创建采购店铺，再提交采购单");
     } else {
-      throw new Error("该商品资料未设置默认账号，请在采购需求里选择归属账号");
+      throw new Error("该商品资料未绑定采购店铺，请先到商品资料补充店铺");
     }
   }
   const account = db.prepare("SELECT id, company_id FROM erp_accounts WHERE id = ?").get(accountId);
-  if (!account) throw new Error("采购需求归属账号不存在");
-  if (account.company_id !== companyId) throw new Error("采购需求归属账号不属于当前公司");
+  if (!account) throw new Error("采购店铺不存在");
+  if (account.company_id !== companyId) throw new Error("采购店铺不属于当前公司");
   const now = nowIso();
+  const uploadedImageUrls = saveErpImageUploads(db, payload, "purchase-images");
+  const manualImageUrls = [
+    ...(Array.isArray(payload.imageUrls) ? payload.imageUrls.map((value) => optionalString(value)).filter(Boolean) : []),
+    optionalString(payload.imageUrl || payload.imgUrl),
+  ].filter(Boolean);
+  const purchaseImageUrls = [...uploadedImageUrls, ...manualImageUrls];
+  const purchaseImageUrl = purchaseImageUrls[0] || null;
+  const evidence = parseEvidenceList(payload);
+  if (purchaseImageUrls.length) {
+    purchaseImageUrls.slice().reverse().forEach((imageUrl, index) => {
+      const label = purchaseImageUrls.length > 1 ? `采购图片${purchaseImageUrls.length - index}` : "采购图片";
+      evidence.unshift(`${label}：${imageUrl}`);
+    });
+    if (!optionalString(sku.image_url)) {
+      db.prepare(`
+        UPDATE erp_skus
+        SET image_url = @image_url,
+            updated_at = @updated_at
+        WHERE id = @id
+      `).run({
+        id: skuId,
+        image_url: purchaseImageUrl,
+        updated_at: now,
+      });
+    }
+  }
   const row = {
     id: optionalString(payload.id) || createId("pr"),
     account_id: accountId,
@@ -2602,7 +2975,7 @@ function createPurchaseRequestAction({ db, services, payload, actor }) {
     requested_qty: Number(requireString(payload.requestedQty, "requestedQty")),
     target_unit_cost: optionalNumber(payload.targetUnitCost),
     expected_arrival_date: optionalString(payload.expectedArrivalDate),
-    evidence_json: JSON.stringify(parseEvidenceList(payload)),
+    evidence_json: JSON.stringify(evidence),
     status: "submitted",
     created_at: now,
     updated_at: now,
@@ -2714,6 +3087,7 @@ function addSourcingCandidateAction({ db, services, payload, actor }) {
 
 function insert1688SourcingCandidate(db, services, pr, actor, item = {}) {
   const now = nowIso();
+  const auditAction = optionalString(item.auditAction) || "source_1688_keyword";
   const row = {
     id: createId("source"),
     account_id: pr.account_id,
@@ -2759,7 +3133,7 @@ function insert1688SourcingCandidate(db, services, pr, actor, item = {}) {
   services.workflow.writeAudit({
     accountId: pr.account_id,
     actor,
-    action: "source_1688_keyword",
+    action: auditAction,
     entityType: "sourcing_candidate",
     entityId: row.id,
     before: null,
@@ -2824,6 +3198,487 @@ async function source1688KeywordAction({ db, services, payload, actor }) {
     apiKey: PROCUREMENT_APIS.KEYWORD_SEARCH.key,
     importedCount: candidates.length,
     totalFound: normalized.length,
+    candidates,
+    rawResponse,
+  };
+}
+
+function alphaShopSettingId(companyId) {
+  return `alphashop:${normalizeCompanyId(companyId, null)}`;
+}
+
+function getAlphaShopSettingsRow(db, companyId) {
+  return db.prepare(`
+    SELECT *
+    FROM erp_alpha_shop_settings
+    WHERE company_id = @company_id
+    LIMIT 1
+  `).get({ company_id: normalizeCompanyId(companyId, null) }) || null;
+}
+
+function saveAlphaShopCredentials(db, credentials = {}) {
+  const companyId = normalizeCompanyId(credentials.companyId || credentials.company_id, null);
+  const accessKey = requireString(credentials.accessKey || credentials.access_key, "accessKey");
+  const secretKey = requireString(credentials.secretKey || credentials.secret_key, "secretKey");
+  const now = nowIso();
+  db.prepare(`
+    INSERT INTO erp_alpha_shop_settings (
+      id, company_id, access_key, secret_key, created_at, updated_at
+    )
+    VALUES (
+      @id, @company_id, @access_key, @secret_key, @created_at, @updated_at
+    )
+    ON CONFLICT(company_id) DO UPDATE SET
+      access_key = excluded.access_key,
+      secret_key = excluded.secret_key,
+      updated_at = excluded.updated_at
+  `).run({
+    id: alphaShopSettingId(companyId),
+    company_id: companyId,
+    access_key: accessKey,
+    secret_key: secretKey,
+    created_at: now,
+    updated_at: now,
+  });
+  return getAlphaShopSettingsRow(db, companyId);
+}
+
+function getAlphaShopCredentials(db, payload = {}, actor = {}) {
+  const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
+  const saved = getAlphaShopSettingsRow(db, companyId);
+  const payloadAccessKey = optionalString(payload.accessKey || payload.ak);
+  const payloadSecretKey = optionalString(payload.secretKey || payload.sk);
+  const accessKey = optionalString(
+    payloadAccessKey
+      || process.env.ALPHASHOP_ACCESS_KEY
+      || process.env.ERP_ALPHASHOP_ACCESS_KEY
+      || saved?.access_key,
+  );
+  const secretKey = optionalString(
+    payloadSecretKey
+      || process.env.ALPHASHOP_SECRET_KEY
+      || process.env.ERP_ALPHASHOP_SECRET_KEY
+      || saved?.secret_key,
+  );
+  if (!accessKey || !secretKey) {
+    throw new Error("请先配置图搜密钥，首次使用填写一次即可");
+  }
+  return {
+    accessKey,
+    secretKey,
+    companyId,
+    shouldSave: Boolean(payloadAccessKey && payloadSecretKey),
+  };
+}
+
+function sanitizeAlphaShopPayload(payload = {}) {
+  const sanitized = { ...payload };
+  delete sanitized.accessKey;
+  delete sanitized.secretKey;
+  delete sanitized.ak;
+  delete sanitized.sk;
+  delete sanitized.imageDataUrl;
+  delete sanitized.imageData;
+  return sanitized;
+}
+
+function getErpUploadDataDir(db, bucket = "1688-image-search") {
+  const dbPath = db?.__erpDbPath || getErpDatabasePath();
+  return path.join(path.dirname(dbPath), "uploads", bucket);
+}
+
+function getErpUploadRootDir(db) {
+  const dbPath = db?.__erpDbPath || getErpDatabasePath();
+  return path.join(path.dirname(dbPath), "uploads");
+}
+
+function publicUploadBaseUrl(payload = {}) {
+  const configured = optionalString(
+    payload.publicBaseUrl
+      || process.env.ERP_PUBLIC_BASE_URL
+      || process.env.ERP_PUBLIC_URL
+      || process.env.PUBLIC_BASE_URL,
+  );
+  return (configured || "https://erp.temu.chat").replace(/\/+$/, "");
+}
+
+function parseErpImageDataUrl(payload = {}) {
+  const dataUrl = optionalString(payload.imageDataUrl || payload.imageData);
+  if (!dataUrl) return null;
+  const matched = dataUrl.match(/^data:(image\/(?:png|jpe?g|webp));base64,([A-Za-z0-9+/=]+)$/i);
+  if (!matched) throw new Error("请上传 PNG、JPG 或 WebP 图片");
+
+  const mime = matched[1].toLowerCase();
+  const buffer = Buffer.from(matched[2], "base64");
+  if (!buffer.length) throw new Error("上传图片为空");
+  if (buffer.length > 5 * 1024 * 1024) throw new Error("图片太大，请压缩后再上传");
+  return { mime, buffer };
+}
+
+function saveErpImageUpload(db, payload = {}, bucket = "purchase-images") {
+  const parsed = parseErpImageDataUrl(payload);
+  if (!parsed) return null;
+
+  const ext = parsed.mime.includes("png") ? "png" : parsed.mime.includes("webp") ? "webp" : "jpg";
+  const uploadDir = getErpUploadDataDir(db, bucket);
+  fs.mkdirSync(uploadDir, { recursive: true });
+  const fileName = `${Date.now()}-${crypto.randomBytes(8).toString("hex")}.${ext}`;
+  fs.writeFileSync(path.join(uploadDir, fileName), parsed.buffer);
+  return `${publicUploadBaseUrl(payload)}/uploads/${bucket}/${fileName}`;
+}
+
+function saveErpImageUploads(db, payload = {}, bucket = "purchase-images") {
+  const dataUrls = Array.isArray(payload.imageDataUrls)
+    ? payload.imageDataUrls.map((value) => optionalString(value)).filter(Boolean)
+    : [];
+  const fileNames = Array.isArray(payload.imageFileNames) ? payload.imageFileNames : [];
+  const uploadPayloads = dataUrls.length
+    ? dataUrls.map((dataUrl, index) => ({
+      ...payload,
+      imageDataUrl: dataUrl,
+      imageFileName: optionalString(fileNames[index]) || payload.imageFileName,
+    }))
+    : [payload];
+  return uploadPayloads
+    .slice(0, 6)
+    .map((item) => saveErpImageUpload(db, item, bucket))
+    .filter(Boolean);
+}
+
+function save1688ImageSearchUpload(db, payload = {}) {
+  return saveErpImageUpload(db, payload, "1688-image-search");
+}
+
+function extractFirstHttpUrl(value) {
+  const match = String(value || "").match(/https?:\/\/[^\s"'<>，。；、]+/i);
+  return match ? match[0].replace(/[),.;，。；、]+$/u, "") : "";
+}
+
+function getPurchaseRequestImageUrl(db, pr = {}) {
+  const evidence = parseJsonArray(pr.evidence_json);
+  for (const item of evidence) {
+    const url = extractFirstHttpUrl(item);
+    if (url) return url;
+  }
+  const skuImageUrl = pr.sku_id
+    ? optionalString(db.prepare("SELECT image_url FROM erp_skus WHERE id = ?").get(pr.sku_id)?.image_url)
+    : "";
+  return skuImageUrl || "";
+}
+
+function buildImageSearchEmptyReason(error = null) {
+  const messageText = String(error?.message || error || "");
+  if (/auth|token|鉴权|密钥|FAIL_AUTH/i.test(messageText)) {
+    return "图搜暂时不可用，请联系管理员检查配置。";
+  }
+  return "这张图没有搜到候选，可以换一张更清晰的商品主图再试。";
+}
+
+function isAlibabaImageUrl(value) {
+  try {
+    const host = new URL(String(value || "")).hostname.toLowerCase();
+    return host.endsWith(".alicdn.com") || host.endsWith(".alibaba.com") || host.endsWith(".1688.com");
+  } catch {
+    return false;
+  }
+}
+
+function erpUploadUrlToLocalPath(db, imageUrl, payload = {}) {
+  const text = optionalString(imageUrl);
+  if (!text) return "";
+  let parsed = null;
+  try {
+    parsed = new URL(text);
+  } catch {
+    return "";
+  }
+  const publicBase = publicUploadBaseUrl(payload);
+  let publicHost = "";
+  try {
+    publicHost = new URL(publicBase).host;
+  } catch {
+    publicHost = "";
+  }
+  if (publicHost && parsed.host !== publicHost) return "";
+
+  const parts = parsed.pathname.split("/").map((part) => decodeURIComponent(part)).filter(Boolean);
+  if (parts[0] !== "uploads" || parts.length < 3) return "";
+  const root = path.resolve(getErpUploadRootDir(db));
+  const localPath = path.resolve(root, ...parts.slice(1));
+  if (localPath !== root && !localPath.startsWith(`${root}${path.sep}`)) return "";
+  return fs.existsSync(localPath) ? localPath : "";
+}
+
+async function fetchImageBuffer(imageUrl) {
+  if (typeof fetch !== "function") {
+    throw new Error("当前运行环境不能下载图片");
+  }
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 30000) : null;
+  try {
+    const response = await fetch(imageUrl, {
+      method: "GET",
+      headers: { Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8" },
+      signal: controller?.signal,
+    });
+    if (!response.ok) throw new Error(`图片下载失败：HTTP ${response.status}`);
+    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+    if (contentType && !contentType.startsWith("image/")) {
+      throw new Error("图片链接返回的不是图片");
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (!buffer.length) throw new Error("图片内容为空");
+    if (buffer.length > 5 * 1024 * 1024) throw new Error("图片太大，请压缩后再试");
+    return buffer;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function resolveImageSearchAsset(db, payload = {}, pr = {}) {
+  const parsedUpload = parseErpImageDataUrl(payload);
+  const uploadedImgUrl = parsedUpload ? save1688ImageSearchUpload(db, payload) : null;
+  const imgUrl = uploadedImgUrl
+    || optionalString(payload.imgUrl || payload.imageUrl)
+    || getPurchaseRequestImageUrl(db, pr);
+  if (!imgUrl) {
+    throw new Error("采购单没有可用于图搜的图片，请先在采购单上传图片");
+  }
+  if (parsedUpload?.buffer) {
+    return { imgUrl, imageBuffer: parsedUpload.buffer };
+  }
+
+  const localPath = erpUploadUrlToLocalPath(db, imgUrl, payload);
+  if (localPath) {
+    const buffer = fs.readFileSync(localPath);
+    if (!buffer.length) throw new Error("图片内容为空");
+    return { imgUrl, imageBuffer: buffer };
+  }
+  return { imgUrl, imageBuffer: await fetchImageBuffer(imgUrl) };
+}
+
+function build1688ImageUploadParams(imageBuffer) {
+  return {
+    uploadImageParam: JSON.stringify({
+      imageBase64: imageBuffer.toString("base64"),
+    }),
+  };
+}
+
+function extract1688ImageId(rawResponse = {}) {
+  const values = [
+    rawResponse?.result?.result,
+    rawResponse?.result?.imageId,
+    rawResponse?.result?.data?.imageId,
+    rawResponse?.data?.imageId,
+    rawResponse?.imageId,
+  ];
+  for (const value of values) {
+    if (value && typeof value === "object") {
+      const nested = optionalString(value.imageId || value.id || value.value);
+      if (nested && nested !== "0") return nested;
+    }
+    const text = optionalString(value);
+    if (text && text !== "0") return text;
+  }
+  return "";
+}
+
+function build1688ImageSearchParams({ imageId, imgUrl, beginPage, pageSize }) {
+  const offerQueryParam = {
+    country: "en",
+    beginPage,
+    pageSize,
+  };
+  if (imageId) offerQueryParam.imageId = imageId;
+  else offerQueryParam.imageAddress = imgUrl;
+  return { offerQueryParam: JSON.stringify(offerQueryParam) };
+}
+
+async function runOfficial1688ImageSearch({ db, actor, pr, imgUrl, imageBuffer, beginPage, pageSize }) {
+  let imageId = "";
+  let uploadResponse = null;
+  if (!isAlibabaImageUrl(imgUrl)) {
+    uploadResponse = await call1688ProcurementApi({
+      db,
+      actor,
+      accountId: pr.account_id,
+      action: "source_1688_image",
+      api: PROCUREMENT_APIS.IMAGE_UPLOAD,
+      params: build1688ImageUploadParams(imageBuffer),
+    });
+    imageId = extract1688ImageId(uploadResponse);
+    if (!imageId) throw new Error("1688 没有返回可用图片ID");
+  }
+
+  const rawResponse = await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: pr.account_id,
+    action: "source_1688_image",
+    api: PROCUREMENT_APIS.IMAGE_SEARCH,
+    params: build1688ImageSearchParams({
+      imageId,
+      imgUrl,
+      beginPage,
+      pageSize,
+    }),
+  });
+  return {
+    imageId,
+    uploadResponse,
+    rawResponse,
+    products: normalize1688SearchResponse(rawResponse),
+  };
+}
+
+async function runAlphaShopImageSearch({ db, payload, actor, imgUrl, beginPage, pageSize = 10 }) {
+  const credentials = getAlphaShopCredentials(db, payload, actor);
+  const raw = await imageSearchAlphaShopProduct({
+    accessKey: credentials.accessKey,
+    secretKey: credentials.secretKey,
+    imgUrl,
+    beginPage,
+    pageSize,
+    timeoutMs: 120000,
+  });
+  if (credentials.shouldSave) {
+    saveAlphaShopCredentials(db, credentials);
+  }
+  return {
+    rawResponse: raw.rawResponse,
+    products: Array.isArray(raw.products) ? raw.products : [],
+  };
+}
+
+async function run1688WebImageSearch({ imageBuffer, beginPage, pageSize = 10 }) {
+  const raw = await imageSearch1688Web({
+    imageBuffer,
+    beginPage,
+    pageSize,
+    timeoutMs: 120000,
+  });
+  return {
+    imageId: raw.imageId,
+    rawResponse: raw.rawResponse,
+    products: Array.isArray(raw.products) ? raw.products : [],
+  };
+}
+
+async function source1688ImageAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 image sourcing");
+  const prId = requireString(payload.prId || payload.id, "prId");
+  let pr = getPurchaseRequest(db, prId);
+  const beginPage = Math.max(1, Math.min(Math.floor(Number(optionalNumber(payload.beginPage) ?? 1)), 10));
+  const importLimit = Math.max(1, Math.min(Math.floor(Number(optionalNumber(payload.importLimit) ?? 10)), 20));
+  const pageSize = Math.max(1, Math.min(importLimit, 50));
+  const mockResults = Array.isArray(payload.mockResults) ? payload.mockResults : null;
+  const { imgUrl, imageBuffer } = mockResults
+    ? { imgUrl: optionalString(payload.imgUrl || payload.imageUrl), imageBuffer: null }
+    : await resolveImageSearchAsset(db, payload, pr);
+
+  let normalized = [];
+  let rawResponse = null;
+  let searchError = null;
+  let conversionError = null;
+  let sourceMode = "alphashop_image";
+
+  if (mockResults) {
+    rawResponse = { mock: true, localImageSearch: payload.localImageSearch || null, result: { data: mockResults } };
+    normalized = normalize1688SearchResponse(rawResponse);
+    sourceMode = optionalString(payload.localImageSearch?.source) || "mock";
+  } else {
+    if (!isAlibabaImageUrl(imgUrl)) {
+      try {
+        const official = await runOfficial1688ImageSearch({
+          db,
+          actor,
+          pr,
+          imgUrl,
+          imageBuffer,
+          beginPage,
+          pageSize,
+        });
+        normalized = Array.isArray(official.products) ? official.products : [];
+        rawResponse = official.rawResponse;
+        sourceMode = "official_1688_image";
+      } catch (error) {
+        conversionError = error;
+      }
+    }
+
+    try {
+      if (normalized.length === 0 && imageBuffer?.length) {
+        const webImageSearch = await run1688WebImageSearch({
+          imageBuffer,
+          beginPage,
+          pageSize,
+        });
+        normalized = Array.isArray(webImageSearch.products) ? webImageSearch.products : [];
+        rawResponse = webImageSearch.rawResponse;
+        sourceMode = "1688_web_image";
+      }
+    } catch (error) {
+      searchError = error;
+    }
+
+    try {
+      if (normalized.length === 0) {
+        const imageSearch = await runAlphaShopImageSearch({
+          db,
+          payload,
+          actor,
+          imgUrl,
+          beginPage,
+          pageSize,
+        });
+        normalized = Array.isArray(imageSearch.products) ? imageSearch.products : [];
+        rawResponse = imageSearch.rawResponse;
+        sourceMode = "alphashop_image";
+      }
+    } catch (error) {
+      searchError = error;
+      if (!rawResponse) throw error;
+    }
+  }
+  const emptyReason = normalized.length === 0 ? buildImageSearchEmptyReason(conversionError || searchError) : "";
+  const candidatesToImport = normalized.slice(0, importLimit);
+  const insertCandidates = db.transaction(() => {
+    if (pr.status === "submitted") {
+      services.purchase.acceptRequest(prId, actor);
+      pr = getPurchaseRequest(db, prId);
+      writePurchaseRequestEvent(db, pr, actor, "accept_request", "采购接收需求");
+    }
+    const candidates = candidatesToImport.map((item) => insert1688SourcingCandidate(
+      db,
+      services,
+      pr,
+      actor,
+      { ...item, auditAction: "source_1688_image" },
+    ));
+    if (candidates.length && pr.status === "buyer_processing") {
+      services.purchase.markRequestSourced(prId, actor);
+      pr = getPurchaseRequest(db, prId);
+    }
+    writePurchaseRequestEvent(
+      db,
+      pr,
+      actor,
+      "source_1688_image",
+      candidates.length
+        ? `以图搜款：第 ${beginPage} 页，导入 ${candidates.length} 个候选`
+        : emptyReason,
+    );
+    markPurchaseRequestRead(db, pr.id, actor);
+    return candidates;
+  });
+
+  const candidates = insertCandidates();
+  return {
+    query: { beginPage, pageSize, importLimit, sourceMode },
+    importedCount: candidates.length,
+    totalFound: normalized.length,
+    emptyReason,
     candidates,
     rawResponse,
   };
@@ -3101,7 +3956,8 @@ function save1688DeliveryAddressAction({ db, payload, actor }) {
   return to1688DeliveryAddress(db.prepare("SELECT * FROM erp_1688_delivery_addresses WHERE id = ?").get(row.id));
 }
 
-function getCandidateForPo(db, prId, candidateId) {
+function getCandidateForPo(db, pr, candidateId, actor = {}) {
+  const prId = pr.id || pr;
   if (candidateId) {
     const row = db.prepare("SELECT * FROM erp_sourcing_candidates WHERE id = ?").get(candidateId);
     if (!row) throw new Error(`Sourcing candidate not found: ${candidateId}`);
@@ -3117,8 +3973,16 @@ function getCandidateForPo(db, prId, candidateId) {
       updated_at DESC
     LIMIT 1
   `).get(prId);
-  if (!row) throw new Error("请先添加报价反馈，再生成采购单");
-  return row;
+  if (row) return row;
+
+  const source = getActiveSku1688SourceRows(db, pr.account_id, pr.sku_id)[0];
+  if (source) return buildCandidateFromSku1688Source(db, pr, source, actor);
+
+  const skuSupplier = getSkuSupplierSource(db, pr.sku_id);
+  const supplierCandidate = buildCandidateFromSkuSupplier(db, pr, skuSupplier, actor);
+  if (supplierCandidate) return supplierCandidate;
+
+  throw new Error("请先添加报价反馈、绑定 1688 映射或在商品资料维护供应商，再生成采购单");
 }
 
 function buildPurchaseOrderNo() {
@@ -3141,7 +4005,7 @@ function generatePurchaseOrderAction({ db, services, payload, actor }) {
   assertActorRole(actor, ["buyer", "manager", "admin"], "生成采购单");
   const prId = requireString(payload.prId || payload.id, "prId");
   let pr = getPurchaseRequest(db, prId);
-  const candidate = getCandidateForPo(db, prId, optionalString(payload.candidateId));
+  const candidate = getCandidateForPo(db, pr, optionalString(payload.candidateId), actor);
 
   if (candidate.status === "candidate" || candidate.status === "shortlisted") {
     services.purchase.selectCandidate(candidate.id, actor);
@@ -3266,7 +4130,7 @@ function getPurchaseOrderWithCandidate(db, poId) {
 }
 
 function getPurchaseOrderLines(db, poId) {
-  return db.prepare(`
+  const rows = db.prepare(`
     SELECT
       line.*,
       sku.internal_sku_code,
@@ -3289,22 +4153,39 @@ function getPurchaseOrderLines(db, poId) {
     WHERE line.po_id = ?
     ORDER BY line.id ASC
   `).all(poId);
+  return rows.map((line) => ({
+    ...line,
+    source_mappings: getActiveSku1688SourceRows(db, line.account_id, line.sku_id),
+  }));
 }
 
 function build1688OrderCargoParamList(po, lines, payload = {}) {
   if (Array.isArray(payload.cargoParamList) && payload.cargoParamList.length) {
     return payload.cargoParamList;
   }
-  return lines.map((line) => {
-    const offerId = optionalString(po.external_offer_id || line.sku_1688_offer_id);
-    if (!offerId) {
-      throw new Error(`商品编码 ${line.internal_sku_code || line.sku_id} 还没有绑定 1688 采购来源`);
-    }
-    return {
-      offerId,
-      specId: optionalString(po.external_spec_id || po.external_sku_id || line.sku_1688_spec_id || line.sku_1688_sku_id) || undefined,
-      quantity: Number(line.qty || 0),
-    };
+  return lines.flatMap((line) => {
+    const mappings = Array.isArray(line.source_mappings) && line.source_mappings.length
+      ? line.source_mappings
+      : [{
+        external_offer_id: po.external_offer_id || line.sku_1688_offer_id,
+        external_sku_id: po.external_sku_id || line.sku_1688_sku_id,
+        external_spec_id: po.external_spec_id || line.sku_1688_spec_id,
+        our_qty: 1,
+        platform_qty: 1,
+      }];
+    return mappings.map((mapping) => {
+      const offerId = optionalString(mapping.external_offer_id);
+      if (!offerId) {
+        throw new Error(`商品编码 ${line.internal_sku_code || line.sku_id} 还没有绑定 1688 映射`);
+      }
+      const ourQty = optionalPositiveInteger(mapping.our_qty, 1);
+      const platformQty = optionalPositiveInteger(mapping.platform_qty, 1);
+      return {
+        offerId,
+        specId: optionalString(mapping.external_spec_id || mapping.external_sku_id) || undefined,
+        quantity: Math.max(1, Math.ceil(Number(line.qty || 0) * platformQty / ourQty)),
+      };
+    });
   });
 }
 
@@ -3416,6 +4297,16 @@ async function push1688OrderAction({ db, services, payload, actor }) {
   });
   const externalOrderId = findExternalOrderId(rawResponse);
   const now = nowIso();
+  let transition = null;
+  if (po.status === "draft") {
+    transition = services.workflow.transition({
+      entityType: "purchase_order",
+      id: po.id,
+      action: "push_1688_order",
+      toStatus: "pushed_pending_price",
+      actor,
+    });
+  }
   db.prepare(`
     UPDATE erp_purchase_orders
     SET external_order_id = COALESCE(@external_order_id, external_order_id),
@@ -3456,6 +4347,7 @@ async function push1688OrderAction({ db, services, payload, actor }) {
   return {
     apiKey: PROCUREMENT_APIS.FAST_CREATE_ORDER.key,
     externalOrderId,
+    transition,
     purchaseOrder: toCamelRow(afterPo),
     rawResponse,
   };
@@ -3524,6 +4416,94 @@ async function preview1688OrderAction({ db, services, payload, actor }) {
     preview,
     purchaseOrder: toCamelRow(afterPo),
     rawResponse,
+  };
+}
+
+function request1688PriceChangeAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 改价留言");
+  const poId = requireString(payload.poId || payload.id, "poId");
+  const po = getPurchaseOrder(db, poId);
+  const now = nowIso();
+  const remark = optionalString(payload.remark || payload.message) || "已发起 1688 改价沟通";
+  db.prepare(`
+    UPDATE erp_purchase_orders
+    SET external_order_status = @external_order_status,
+        updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id: po.id,
+    external_order_status: "price_change_requested",
+    updated_at: now,
+  });
+  const afterPo = getPurchaseOrder(db, po.id);
+  services.workflow.writeAudit({
+    accountId: po.account_id,
+    actor,
+    action: "request_1688_price_change",
+    entityType: "purchase_order",
+    entityId: po.id,
+    before: po,
+    after: afterPo,
+  });
+  if (po.pr_id) {
+    const pr = getPurchaseRequest(db, po.pr_id);
+    writePurchaseRequestEvent(db, pr, actor, "request_1688_price_change", remark);
+    markPurchaseRequestRead(db, pr.id, actor);
+  }
+  return {
+    purchaseOrder: toCamelRow(afterPo),
+  };
+}
+
+function sync1688OrderPriceAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 订单价格同步");
+  const poId = requireString(payload.poId || payload.id, "poId");
+  const po = getPurchaseOrder(db, poId);
+  const amount = optionalNumber(payload.amount ?? payload.totalAmount);
+  if (amount === null || amount < 0) throw new Error("请填写同步后的 1688 订单金额");
+  const now = nowIso();
+  let transition = null;
+  if (po.status === "pushed_pending_price") {
+    transition = services.workflow.transition({
+      entityType: "purchase_order",
+      id: po.id,
+      action: "sync_1688_order_price",
+      toStatus: "pushed_pending_price",
+      actor,
+    });
+  }
+  db.prepare(`
+    UPDATE erp_purchase_orders
+    SET total_amount = @total_amount,
+        external_order_status = @external_order_status,
+        external_order_synced_at = @external_order_synced_at,
+        updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id: po.id,
+    total_amount: amount,
+    external_order_status: optionalString(payload.externalOrderStatus) || "price_synced",
+    external_order_synced_at: now,
+    updated_at: now,
+  });
+  const afterPo = getPurchaseOrder(db, po.id);
+  services.workflow.writeAudit({
+    accountId: po.account_id,
+    actor,
+    action: "sync_1688_order_price",
+    entityType: "purchase_order",
+    entityId: po.id,
+    before: po,
+    after: afterPo,
+  });
+  if (po.pr_id) {
+    const pr = getPurchaseRequest(db, po.pr_id);
+    writePurchaseRequestEvent(db, pr, actor, "sync_1688_order_price", `1688 订单金额已同步为 ￥${amount.toFixed(2)}`);
+    markPurchaseRequestRead(db, pr.id, actor);
+  }
+  return {
+    transition,
+    purchaseOrder: toCamelRow(afterPo),
   };
 }
 
@@ -3729,6 +4709,16 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     };
   }
 
+  if (action === "source_1688_image") {
+    const result = await source1688ImageAction({ db, services, payload, actor });
+    broadcastPurchaseUpdate(action, sanitizeAlphaShopPayload(payload), actor, result);
+    return {
+      action,
+      result,
+      workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+    };
+  }
+
   if (action === "refresh_1688_product_detail") {
     const result = await refresh1688ProductDetailAction({ db, services, payload, actor });
     broadcastPurchaseUpdate(action, payload, actor, result);
@@ -3819,6 +4809,12 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
       }
       case "generate_po": {
         return generatePurchaseOrderAction({ db, services, payload, actor });
+      }
+      case "request_1688_price_change": {
+        return request1688PriceChangeAction({ db, services, payload, actor });
+      }
+      case "sync_1688_order_price": {
+        return sync1688OrderPriceAction({ db, services, payload, actor });
       }
       case "submit_payment_approval": {
         const poId = requireString(payload.poId || payload.id, "poId");
@@ -4653,11 +5649,59 @@ async function getPurchaseWorkbenchRuntime(params = {}) {
   return getPurchaseWorkbench(params);
 }
 
+function toRemoteImageSearchMockResult(item = {}) {
+  return {
+    offerId: optionalString(item.externalOfferId || item.offerId || item.id),
+    skuId: optionalString(item.externalSkuId || item.skuId),
+    specId: optionalString(item.externalSpecId || item.specId),
+    supplierName: optionalString(item.supplierName),
+    productTitle: optionalString(item.productTitle || item.title || item.subject),
+    productUrl: optionalString(item.productUrl || item.offerUrl),
+    imageUrl: optionalString(item.imageUrl || item.imgUrl),
+    price: optionalNumber(item.unitPrice ?? item.price),
+    moq: optionalNumber(item.moq ?? item.minOrderQuantity),
+    leadDays: optionalNumber(item.leadDays),
+    logisticsFee: optionalNumber(item.logisticsFee),
+    raw: item.raw || item,
+  };
+}
+
+async function buildClientImageSearchMockResults(payload = {}) {
+  if (payload.action !== "source_1688_image" || Array.isArray(payload.mockResults)) return null;
+  const beginPage = Math.max(1, Math.min(Math.floor(Number(optionalNumber(payload.beginPage) ?? 1)), 10));
+  const importLimit = Math.max(1, Math.min(Math.floor(Number(optionalNumber(payload.importLimit) ?? 10)), 20));
+  const pageSize = Math.max(1, Math.min(importLimit, 50));
+  const parsedUpload = parseErpImageDataUrl(payload);
+  const imgUrl = optionalString(payload.imgUrl || payload.imageUrl);
+  const imageBuffer = parsedUpload?.buffer || (imgUrl ? await fetchImageBuffer(imgUrl) : null);
+  if (!imageBuffer?.length) return null;
+  const localResult = await run1688WebImageSearch({
+    imageBuffer,
+    beginPage,
+    pageSize,
+  });
+  return {
+    ...payload,
+    imageDataUrl: undefined,
+    imageData: undefined,
+    mockResults: (localResult.products || []).map(toRemoteImageSearchMockResult),
+    localImageSearch: {
+      source: "1688_web_image_client",
+      imageId: localResult.imageId,
+      totalFound: localResult.products?.length || 0,
+    },
+  };
+}
+
 async function performPurchaseActionRuntime(payload = {}) {
   if (isClientMode()) {
+    let remotePayload = payload;
+    try {
+      remotePayload = await buildClientImageSearchMockResults(payload) || payload;
+    } catch {}
     const response = await remoteRequest("/api/purchase/action", {
       method: "POST",
-      body: payload,
+      body: remotePayload,
     });
     return response.result;
   }
@@ -4874,6 +5918,21 @@ async function createSkuRuntime(payload = {}, actor = {}) {
   return createSku(payload || {}, actor);
 }
 
+async function deleteSkuRuntime(payload = {}, actor = {}) {
+  if (isClientMode()) {
+    const response = await remoteRequest("/api/master-data/action", {
+      method: "POST",
+      body: {
+        ...payload,
+        action: "delete_sku",
+      },
+    });
+    return response.result;
+  }
+  assertRoleIfLoggedIn(["admin", "manager", "operations"]);
+  return deleteSku(payload || {}, actor);
+}
+
 function getLanServiceStatus() {
   if (isClientMode()) {
     const runtime = getRuntimeStatus();
@@ -4924,6 +5983,7 @@ function startLanService(payload = {}) {
     createSupplier,
     listSkus,
     createSku,
+    deleteSku,
     sessionStore: createLanSessionStore(),
     verifyLogin: verifyLanLogin,
     validateSessionUser: validateLanSessionUser,
@@ -4931,6 +5991,7 @@ function startLanService(payload = {}) {
     upsertUser: upsertUserAndBroadcast,
     get1688AuthStatus,
     upsert1688AuthConfig,
+    save1688ManualToken,
     create1688AuthorizeUrl,
     complete1688OAuth,
     refresh1688AccessToken,
@@ -5006,6 +6067,7 @@ async function startErpHeadlessServer(options = {}) {
     createSupplier,
     listSkus,
     createSku,
+    deleteSku,
     sessionStore: createLanSessionStore(),
     verifyLogin: verifyLanLogin,
     validateSessionUser: validateLanSessionUser,
@@ -5013,6 +6075,7 @@ async function startErpHeadlessServer(options = {}) {
     upsertUser: upsertUserAndBroadcast,
     get1688AuthStatus,
     upsert1688AuthConfig,
+    save1688ManualToken,
     create1688AuthorizeUrl,
     complete1688OAuth,
     refresh1688AccessToken,
@@ -5089,6 +6152,7 @@ function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:supplier:create", (_event, payload) => createSupplierRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:sku:list", (_event, params) => listSkusRuntime(params || {}));
   ipcMain.handle("erp:sku:create", (_event, payload) => createSkuRuntime(payload || {}, erpState.currentUser || {}));
+  ipcMain.handle("erp:sku:delete", (_event, payload) => deleteSkuRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:purchase:workbench", (_event, params) => getPurchaseWorkbenchRuntime(params || {}));
   ipcMain.handle("erp:purchase:action", (_event, payload) => performPurchaseActionRuntime(payload || {}));
   ipcMain.handle("erp:warehouse:workbench", (_event, params) => getWarehouseWorkbenchRuntime(params || {}));

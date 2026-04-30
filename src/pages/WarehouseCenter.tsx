@@ -115,7 +115,7 @@ export default function WarehouseCenter() {
       render: (_value, row) => (
         <Space direction="vertical" size={2}>
           <Text strong>{row.receiptNo || row.id}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>PO：{row.poNo || row.poId || "-"}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>采购单：{row.poNo || row.poId || "-"}</Text>
         </Space>
       ),
     },
@@ -126,7 +126,7 @@ export default function WarehouseCenter() {
       render: (value) => statusTag(value, INBOUND_STATUS_LABELS),
     },
     {
-      title: "供应商 / SKU",
+      title: "供应商 / 商品",
       key: "supplier",
       ellipsis: true,
       render: (_value, row) => (
@@ -223,7 +223,7 @@ export default function WarehouseCenter() {
       ),
     },
     {
-      title: "SKU",
+      title: "商品",
       key: "sku",
       ellipsis: true,
       render: (_value, row) => (
@@ -245,7 +245,7 @@ export default function WarehouseCenter() {
       ),
     },
     {
-      title: "QC",
+      title: "质检",
       dataIndex: "qcStatus",
       width: 130,
       render: (value) => statusTag(value, BATCH_QC_STATUS_LABELS),
@@ -275,8 +275,8 @@ export default function WarehouseCenter() {
   if (!erp) {
     return (
       <div className="dashboard-shell">
-        <PageHeader compact eyebrow="ERP" title="仓库中心" subtitle="服务未就绪，请重启软件" />
-        <Alert type="error" showIcon message="当前环境没有 window.electronAPI.erp" />
+        <PageHeader compact eyebrow="系统" title="仓库中心" subtitle="服务未就绪，请重启软件" />
+        <Alert type="error" showIcon message="当前环境缺少本地服务接口" />
       </div>
     );
   }
@@ -330,7 +330,7 @@ export default function WarehouseCenter() {
         <div className="app-panel__title">
           <div>
             <div className="app-panel__title-main">库存批次</div>
-            <div className="app-panel__title-sub">每批货可追溯到 PO / 入库单 / 供应商，并展示可用、预留、锁定库存。</div>
+            <div className="app-panel__title-sub">每批货可追溯到采购单、入库单和供应商，并展示可用、预留、锁定库存。</div>
           </div>
         </div>
         <Table

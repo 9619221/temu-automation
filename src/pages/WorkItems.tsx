@@ -59,6 +59,13 @@ const PRIORITY_COLOR: Record<string, string> = {
   P3: "default",
 };
 
+const PRIORITY_LABEL: Record<string, string> = {
+  P0: "紧急",
+  P1: "高",
+  P2: "中",
+  P3: "低",
+};
+
 const STATUS_COLOR: Record<string, string> = {
   new: "processing",
   in_progress: "blue",
@@ -135,11 +142,27 @@ function formatTime(value?: string | null) {
 }
 
 function roleLabel(role?: string) {
-  return ROLE_LABEL[role || ""] || role || "-";
+  return ROLE_LABEL[role || ""] || "未知角色";
 }
 
 function statusLabel(status?: string) {
-  return STATUS_LABEL[status || ""] || status || "-";
+  return STATUS_LABEL[status || ""] || "未知状态";
+}
+
+function priorityLabel(priority?: string) {
+  return PRIORITY_LABEL[priority || ""] || "未定";
+}
+
+function relatedDocLabel(type?: string) {
+  const labels: Record<string, string> = {
+    purchase_request: "采购需求",
+    purchase_order: "采购单",
+    inbound_receipt: "入库单",
+    inventory_batch: "库存批次",
+    qc_inspection: "质检单",
+    outbound_shipment: "发货单",
+  };
+  return labels[type || ""] || "关联单据";
 }
 
 function relatedPath(type?: string) {
@@ -255,7 +278,7 @@ export default function WorkItems() {
       dataIndex: "priority",
       key: "priority",
       width: 86,
-      render: (value) => <Tag color={PRIORITY_COLOR[value] || "default"}>{value}</Tag>,
+      render: (value) => <Tag color={PRIORITY_COLOR[value] || "default"}>{priorityLabel(value)}</Tag>,
     },
     {
       title: "事项",
@@ -310,7 +333,7 @@ export default function WorkItems() {
       width: 170,
       render: (_value, row) => (
         <Space direction="vertical" size={2}>
-          <Text code>{row.relatedDocType || "-"}</Text>
+          <Text>{relatedDocLabel(row.relatedDocType)}</Text>
           <Text type="secondary" style={{ fontSize: 12 }}>{row.relatedDocId || "-"}</Text>
         </Space>
       ),
@@ -329,7 +352,7 @@ export default function WorkItems() {
       fixed: "right",
       render: (_value, row) => (
         <Space size={6} wrap>
-          <Tooltip title="打开对应 LAN 工作台">
+          <Tooltip title="打开对应工作台">
             <Button size="small" icon={<LinkOutlined />} onClick={() => openRelated(row)} />
           </Tooltip>
           {row.status === "new" ? (
@@ -366,8 +389,8 @@ export default function WorkItems() {
   if (!erp) {
     return (
       <div className="dashboard-shell">
-        <PageHeader compact eyebrow="ERP" title="事项中心" subtitle="服务未就绪，请重启软件" />
-        <Alert type="error" showIcon message="当前环境没有 window.electronAPI.erp" />
+        <PageHeader compact eyebrow="系统" title="事项中心" subtitle="服务未就绪，请重启软件" />
+        <Alert type="error" showIcon message="当前环境缺少本地服务接口" />
       </div>
     );
   }
@@ -376,12 +399,12 @@ export default function WorkItems() {
     <div className="dashboard-shell">
       <PageHeader
         compact
-        eyebrow="ERP"
+        eyebrow="系统"
         title="事项中心"
-        subtitle="从采购、付款、仓库、QC 和出库状态生成今日待办"
+        subtitle="从采购、付款、仓库、质检和出库状态生成今日待办"
         meta={[
           `${items.length} 条当前列表`,
-          lanStatus?.running ? "LAN 已启动" : "LAN 未启动",
+          lanStatus?.running ? "协作服务已启动" : "协作服务未启动",
         ]}
         actions={[
           <Button key="refresh" icon={<ReloadOutlined />} loading={loading} onClick={loadItems}>
@@ -398,7 +421,7 @@ export default function WorkItems() {
           <StatCard title="未完成事项" value={activeCount} color="blue" icon={<BellOutlined />} />
         </Col>
         <Col xs={24} md={8}>
-          <StatCard title="P0 风险" value={p0Count} color={p0Count > 0 ? "danger" : "success"} icon={<CloseCircleOutlined />} />
+          <StatCard title="紧急风险" value={p0Count} color={p0Count > 0 ? "danger" : "success"} icon={<CloseCircleOutlined />} />
         </Col>
         <Col xs={24} md={8}>
           <StatCard title="等待状态" value={waitingCount} color="purple" icon={<PlayCircleOutlined />} />

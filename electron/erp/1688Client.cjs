@@ -10,6 +10,20 @@ const PROCUREMENT_APIS = Object.freeze({
     version: 1,
     displayName: "国内分销词搜",
   }),
+  IMAGE_UPLOAD: Object.freeze({
+    key: "com.alibaba.fenxiao.crossborder:product.image.upload-1",
+    namespace: "com.alibaba.fenxiao.crossborder",
+    name: "product.image.upload",
+    version: 1,
+    displayName: "1688 image upload",
+  }),
+  IMAGE_SEARCH: Object.freeze({
+    key: "com.alibaba.fenxiao.crossborder:product.search.imageQuery-1",
+    namespace: "com.alibaba.fenxiao.crossborder",
+    name: "product.search.imageQuery",
+    version: 1,
+    displayName: "1688 image search",
+  }),
   PRODUCT_DETAIL: Object.freeze({
     key: "com.alibaba.product:alibaba.product.get-1",
     namespace: "com.alibaba.product",
@@ -249,6 +263,9 @@ function normalize1688Offer(item = {}) {
   const supplierName = firstPresent(
     item.supplierName,
     item.companyName,
+    item.companyInfo?.companyName,
+    item.sellerDataInfo?.companyName,
+    item.sellerDataInfo?.sellerCompanyName,
     item.shopName,
     item.sellerLoginId,
     item.memberName,
@@ -257,8 +274,11 @@ function normalize1688Offer(item = {}) {
   );
   const title = firstPresent(item.subject, item.title, item.productTitle, item.name, item.subjectTrans);
   const unitPrice = firstNumber(
+    item.offerPrice,
     item.price,
     item.priceInfo,
+    item.priceInfo?.promotionPrice,
+    item.priceInfo?.consignPrice,
     item.salePrice,
     item.minPrice,
     item.minPriceText,
@@ -277,10 +297,13 @@ function normalize1688Offer(item = {}) {
     item.image,
     item.imgUrl,
     item.pictureUrl,
+    item.offerImage?.imageUrl,
     Array.isArray(item.imageUrls) ? item.imageUrls[0] : null,
   );
   const productUrl = firstPresent(
     item.productUrl,
+    item.promotionURL,
+    item.promotionUrl,
     item.offerUrl,
     item.detailUrl,
     offerId ? `https://detail.1688.com/offer/${offerId}.html` : null,

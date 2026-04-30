@@ -597,6 +597,14 @@ function filterAutoPricingProductTable(inputPath) {
 // /releases/latest/download/ 是 GitHub 的稳定别名,不用每次发版改 URL
 const UPDATE_FEED_URL = "https://gh-proxy.com/https://github.com/9619221/temu-automation/releases/latest/download/";
 const UPDATE_MANUAL_DOWNLOAD_URL = "https://gh-proxy.com/https://github.com/9619221/temu-automation/releases/latest";
+const UPDATE_CONFIG_FILE_NAME = "app-update.yml";
+const UPDATE_CONFIG_CONTENT = [
+  "owner: '9619221'",
+  "repo: temu-automation",
+  "provider: github",
+  "updaterCacheDirName: temu-automation-updater",
+  "",
+].join("\n");
 
 let updateState = {
   status: "idle",
@@ -614,18 +622,75 @@ function broadcastUpdateState(patch) {
   }
 }
 
+function writeUpdateConfigFile(filePath) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, UPDATE_CONFIG_CONTENT, "utf8");
+}
+
+function ensureAppUpdateConfig() {
+  if (!app.isPackaged) return null;
+
+  const candidates = [];
+  if (process.resourcesPath) {
+    candidates.push(path.join(process.resourcesPath, UPDATE_CONFIG_FILE_NAME));
+  }
+  try {
+    candidates.push(path.join(app.getPath("userData"), UPDATE_CONFIG_FILE_NAME));
+  } catch {}
+
+  for (const filePath of candidates) {
+    if (!filePath) continue;
+    if (fs.existsSync(filePath)) {
+      autoUpdater.updateConfigPath = filePath;
+      return { filePath, generated: false };
+    }
+  }
+
+  for (const filePath of candidates) {
+    if (!filePath) continue;
+    try {
+      writeUpdateConfigFile(filePath);
+      autoUpdater.updateConfigPath = filePath;
+      appendDiagnosticLog({
+        source: "main",
+        level: "warn",
+        message: `Generated missing ${UPDATE_CONFIG_FILE_NAME}`,
+        detail: { filePath },
+      });
+      return { filePath, generated: true };
+    } catch (error) {
+      appendDiagnosticLog({
+        source: "main",
+        level: "warn",
+        message: `Unable to write ${UPDATE_CONFIG_FILE_NAME}: ${error?.message || error}`,
+        detail: { filePath },
+      });
+    }
+  }
+
+  return null;
+}
+
+function applyAutoUpdaterFeedUrl() {
+  autoUpdater.setFeedURL({
+    provider: "generic",
+    url: UPDATE_FEED_URL,
+  });
+}
+
 function configureAutoUpdater() {
   if (!app.isPackaged) {
     broadcastUpdateState({ status: "dev", message: "开发环境不支持自动更新" });
     return;
   }
+  const updateConfig = ensureAppUpdateConfig();
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
-  autoUpdater.setFeedURL({
-    provider: "generic",
-    url: UPDATE_FEED_URL,
+  applyAutoUpdaterFeedUrl();
+  broadcastUpdateState({
+    message: updateConfig?.generated ? "更新源: gh-proxy 镜像（已修复本机更新配置）" : "更新源: gh-proxy 镜像",
+    manualDownloadUrl: UPDATE_MANUAL_DOWNLOAD_URL,
   });
-  broadcastUpdateState({ message: "更新源: gh-proxy 镜像", manualDownloadUrl: UPDATE_MANUAL_DOWNLOAD_URL });
 }
 
 autoUpdater.on("checking-for-update", () => {
@@ -4943,6 +5008,8 @@ ipcMain.handle("app:get-update-status", () => updateState);
 
 ipcMain.handle("app:check-for-updates", async () => {
   try {
+    ensureAppUpdateConfig();
+    applyAutoUpdaterFeedUrl();
     await autoUpdater.checkForUpdates();
     return updateState;
   } catch (e) {
@@ -4953,6 +5020,8 @@ ipcMain.handle("app:check-for-updates", async () => {
 
 ipcMain.handle("app:download-update", async () => {
   try {
+    ensureAppUpdateConfig();
+    applyAutoUpdaterFeedUrl();
     await autoUpdater.downloadUpdate();
   } catch (error) {
     broadcastUpdateState({ status: "error", message: error?.message || "下载更新失败", progressPercent: null });
@@ -4969,6 +5038,16 @@ ipcMain.handle("app:open-log-directory", async () => {
   const logDir = app.getPath("userData");
   await shell.openPath(logDir);
   return logDir;
+});
+
+ipcMain.handle("app:open-external", async (_event, rawUrl) => {
+  const target = String(rawUrl || UPDATE_MANUAL_DOWNLOAD_URL).trim();
+  const url = new URL(target);
+  if (!["http:", "https:"].includes(url.protocol)) {
+    throw new Error("只支持打开 http/https 链接");
+  }
+  await shell.openExternal(url.toString());
+  return url.toString();
 });
 
 // ============ 文件存储 IPC ============

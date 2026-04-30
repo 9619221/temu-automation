@@ -73,11 +73,24 @@ function routeForDoc(type?: string) {
   return "/work-items";
 }
 
+function relatedDocLabel(type?: string) {
+  const labels: Record<string, string> = {
+    purchase_request: "采购需求",
+    purchase_order: "采购单",
+    payment_approval: "付款审批",
+    inbound_receipt: "入库单",
+    inventory_batch: "库存批次",
+    qc_inspection: "质检单",
+    outbound_shipment: "发货单",
+  };
+  return labels[type || ""] || "关联单据";
+}
+
 function centerCards(navigate: (path: string) => void) {
   return [
     {
       title: "采购中心",
-      text: "PR / PO / 付款审批",
+      text: "采购需求 / 采购单 / 付款审批",
       icon: <ShoppingCartOutlined />,
       path: "/purchase-center",
     },
@@ -88,7 +101,7 @@ function centerCards(navigate: (path: string) => void) {
       path: "/warehouse-center",
     },
     {
-      title: "QC 发仓",
+      title: "质检发仓",
       text: "抽检 / 出库计划 / 发货",
       icon: <ExportOutlined />,
       path: "/qc-outbound",
@@ -211,7 +224,7 @@ export default function DailyCommandCenter() {
       width: 120,
       render: (value, row) => (
         <Space direction="vertical" size={2}>
-          <Tag>{WORK_ITEM_OWNER_LABELS[value] || value || "-"}</Tag>
+          <Tag>{WORK_ITEM_OWNER_LABELS[value] || "未知角色"}</Tag>
           {row.ownerUserName ? <Text type="secondary" style={{ fontSize: 12 }}>{row.ownerUserName}</Text> : null}
         </Space>
       ),
@@ -239,7 +252,7 @@ export default function DailyCommandCenter() {
       width: 170,
       render: (_value, row) => (
         <Space direction="vertical" size={2}>
-          <Text code>{row.relatedDocType || "-"}</Text>
+          <Text>{relatedDocLabel(row.relatedDocType)}</Text>
           <Text type="secondary" style={{ fontSize: 12 }}>{row.relatedDocId || "-"}</Text>
         </Space>
       ),
@@ -294,8 +307,8 @@ export default function DailyCommandCenter() {
   if (!erp) {
     return (
       <div className="dashboard-shell">
-        <PageHeader compact eyebrow="ERP" title="今日作战台" subtitle="服务未就绪，请重启软件" />
-        <Alert type="error" showIcon message="当前环境没有 window.electronAPI.erp" />
+        <PageHeader compact eyebrow="系统" title="今日作战台" subtitle="服务未就绪，请重启软件" />
+        <Alert type="error" showIcon message="当前环境缺少本地服务接口" />
       </div>
     );
   }
@@ -305,9 +318,9 @@ export default function DailyCommandCenter() {
       <PageHeader
         compact
         eyebrow="今日作战台"
-        title="今天必须处理的 ERP 事项"
-        subtitle="从采购、付款、仓库、QC 和出库状态生成 WorkItem，打开系统先看这里。"
-        meta={[`${stats?.active || 0} 个未完成`, `P0 ${stats?.byPriority?.P0 || 0} 个`, `等待 ${waitingCount} 个`]}
+        title="今天必须处理的业务事项"
+        subtitle="从采购、付款、仓库、质检和出库状态生成事项，打开系统先看这里。"
+        meta={[`${stats?.active || 0} 个未完成`, `紧急 ${stats?.byPriority?.P0 || 0} 个`, `等待 ${waitingCount} 个`]}
         actions={[
           <Button key="refresh" icon={<ReloadOutlined />} loading={loading} onClick={loadData}>
             刷新
@@ -323,7 +336,7 @@ export default function DailyCommandCenter() {
           <StatCard title="未完成事项" value={stats?.active || 0} color="blue" icon={<BellOutlined />} compact />
         </Col>
         <Col xs={24} md={6}>
-          <StatCard title="P0 风险" value={stats?.byPriority?.P0 || 0} color={(stats?.byPriority?.P0 || 0) > 0 ? "danger" : "success"} icon={<CloseCircleOutlined />} compact />
+          <StatCard title="紧急风险" value={stats?.byPriority?.P0 || 0} color={(stats?.byPriority?.P0 || 0) > 0 ? "danger" : "success"} icon={<CloseCircleOutlined />} compact />
         </Col>
         <Col xs={24} md={6}>
           <StatCard title="等待状态" value={waitingCount} color="purple" icon={<PlayCircleOutlined />} compact />
@@ -336,7 +349,7 @@ export default function DailyCommandCenter() {
       <div className="app-panel" style={{ marginBottom: 16 }}>
         <div className="app-panel__title">
           <div>
-            <div className="app-panel__title-main">ERP 快速入口</div>
+            <div className="app-panel__title-main">业务快速入口</div>
             <div className="app-panel__title-sub">作战台看问题，进入对应中心处理单据。</div>
           </div>
           <Space wrap>{centerCards(navigate)}</Space>
@@ -348,7 +361,7 @@ export default function DailyCommandCenter() {
           <div className="app-panel" style={{ minHeight: 258 }}>
             <div className="app-panel__title">
               <div>
-                <div className="app-panel__title-main">P0 必须拍板</div>
+                <div className="app-panel__title-main">紧急事项</div>
                 <div className="app-panel__title-sub">最高优先级事项会固定在这里，优先处理。</div>
               </div>
             </div>
@@ -380,7 +393,7 @@ export default function DailyCommandCenter() {
                 ))}
               </Space>
             ) : (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无 P0 风险" />
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无紧急风险" />
             )}
           </div>
         </Col>
@@ -395,7 +408,7 @@ export default function DailyCommandCenter() {
             <Space direction="vertical" style={{ width: "100%" }} size={8}>
               {Object.entries(stats?.byOwnerRole || {}).map(([roleKey, count]) => (
                 <div key={roleKey} style={{ display: "flex", justifyContent: "space-between", borderBottom: "1px solid #f5f5f5", paddingBottom: 8 }}>
-                  <Text>{WORK_ITEM_OWNER_LABELS[roleKey] || roleKey}</Text>
+                  <Text>{WORK_ITEM_OWNER_LABELS[roleKey] || "未知角色"}</Text>
                   <Text strong>{count}</Text>
                 </div>
               ))}

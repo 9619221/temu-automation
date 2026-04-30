@@ -42,7 +42,9 @@ const TRANSITIONS = Object.freeze({
   ],
 
   purchase_order: [
-    rule(PO.DRAFT, "submit_payment_approval", PO.PENDING_FINANCE_APPROVAL, BUYER),
+    rule(PO.DRAFT, "push_1688_order", PO.PUSHED_PENDING_PRICE, BUYER),
+    rule(PO.PUSHED_PENDING_PRICE, "sync_1688_order_price", PO.PUSHED_PENDING_PRICE, BUYER),
+    rule([PO.DRAFT, PO.PUSHED_PENDING_PRICE], "submit_payment_approval", PO.PENDING_FINANCE_APPROVAL, BUYER),
     rule(PO.PENDING_FINANCE_APPROVAL, "approve_payment", PO.APPROVED_TO_PAY, FINANCE),
     rule(PO.PENDING_FINANCE_APPROVAL, "reject_payment", PO.EXCEPTION, FINANCE),
     rule(PO.APPROVED_TO_PAY, "confirm_paid", PO.PAID, FINANCE),
@@ -52,7 +54,7 @@ const TRANSITIONS = Object.freeze({
     rule(PO.ARRIVED, "mark_inbounded", PO.INBOUNDED, WAREHOUSE),
     rule(PO.INBOUNDED, "close_po", PO.CLOSED, BUYER),
     rule([PO.PAID, PO.SUPPLIER_PROCESSING, PO.SHIPPED], "mark_delayed", PO.DELAYED, BUYER),
-    rule([PO.DRAFT, PO.PENDING_FINANCE_APPROVAL, PO.APPROVED_TO_PAY], "cancel_po", PO.CANCELLED, BUYER),
+    rule([PO.DRAFT, PO.PUSHED_PENDING_PRICE, PO.PENDING_FINANCE_APPROVAL, PO.APPROVED_TO_PAY], "cancel_po", PO.CANCELLED, BUYER),
   ],
 
   inbound_receipt: [

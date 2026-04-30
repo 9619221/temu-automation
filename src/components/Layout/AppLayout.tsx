@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { Badge, Button, Dropdown, Layout, List, Menu, Space, Tag } from "antd";
 import {
+  ApiOutlined,
   ArrowRightOutlined,
   BellOutlined,
   CheckCircleOutlined,
@@ -18,9 +19,11 @@ import {
   RocketOutlined,
   SafetyCertificateOutlined,
   SettingOutlined,
+  ShopOutlined,
   ShoppingOutlined,
   SyncOutlined,
   TagsOutlined,
+  TeamOutlined,
   UserOutlined,
 } from "@ant-design/icons";
 import { ACTIVE_ACCOUNT_CHANGED_EVENT, readActiveAccountId } from "../../utils/multiStore";
@@ -38,13 +41,16 @@ const menuItems = [
   },
   {
     type: "group" as const,
-    label: "ERP",
+    label: "业务",
     children: [
       { key: "/daily-command", icon: <BellOutlined />, label: "今日作战台" },
       { key: "/product-master-data", icon: <TagsOutlined />, label: "商品资料" },
+      { key: "/suppliers", icon: <TeamOutlined />, label: "供应商" },
+      { key: "/stores", icon: <ShopOutlined />, label: "店铺" },
+      { key: "/1688-mapping", icon: <ApiOutlined />, label: "1688 映射" },
       { key: "/purchase-center", icon: <ShoppingOutlined />, label: "采购中心" },
       { key: "/warehouse-center", icon: <InboxOutlined />, label: "仓库中心" },
-      { key: "/qc-outbound", icon: <SafetyCertificateOutlined />, label: "QC 发仓" },
+      { key: "/qc-outbound", icon: <SafetyCertificateOutlined />, label: "质检发仓" },
     ],
   },
   {
@@ -76,7 +82,7 @@ const menuItems = [
     children: [
       { key: "/work-items", icon: <BellOutlined />, label: "事项中心" },
       { key: "/users", icon: <UserOutlined />, label: "用户管理" },
-      { key: "/erp-debug", icon: <DatabaseOutlined />, label: "ERP 调试台" },
+      { key: "/erp-debug", icon: <DatabaseOutlined />, label: "调试台" },
       { key: "/logs", icon: <FileTextOutlined />, label: "日志中心" },
       { key: "/settings", icon: <SettingOutlined />, label: "设置" },
     ],
@@ -418,7 +424,7 @@ export default function AppLayout() {
         <Content
           className="app-layout-content"
           style={{
-            margin: 20,
+            margin: 0,
             padding: 0,
             overflow: "auto",
             minHeight: 280,

@@ -42,6 +42,7 @@ const SOURCING_METHOD = Object.freeze({
 
 const PURCHASE_ORDER_STATUS = Object.freeze({
   DRAFT: "draft",
+  PUSHED_PENDING_PRICE: "pushed_pending_price",
   PENDING_FINANCE_APPROVAL: "pending_finance_approval",
   APPROVED_TO_PAY: "approved_to_pay",
   PAID: "paid",

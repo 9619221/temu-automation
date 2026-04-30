@@ -165,18 +165,21 @@ async function main() {
 
     const companySku = await invoke("erp:sku:create", {
       id: "sku_company_ipc",
-      internalSkuCode: "SKU-COMPANY-001",
       productName: "Company Level SKU",
+      colorSpec: "Blue / 500ml",
       supplierId: supplier.id,
     });
     assert.equal(companySku.accountId, null);
     assert.equal(companySku.companyId, "company_default");
+    assert.match(companySku.internalSkuCode, /^\d{12}$/);
+    assert.equal(companySku.colorSpec, "Blue / 500ml");
 
     const sku = await invoke("erp:sku:create", {
       id: "sku_ipc",
       accountId: account.id,
       internalSkuCode: "SKU-IPC-001",
       productName: "IPC Demo SKU",
+      colorSpec: "White / Standard",
       supplierId: supplier.id,
     });
     assert.equal(sku.accountId, account.id);
@@ -187,6 +190,11 @@ async function main() {
 
     const companySkus = await invoke("erp:sku:list", { companyId: "company_default" });
     assert.equal(companySkus.length, 2);
+
+    const deleteCompanySku = await invoke("erp:sku:delete", { id: companySku.id });
+    assert.equal(deleteCompanySku.deleted, true);
+    const companySkusAfterDelete = await invoke("erp:sku:list", { companyId: "company_default" });
+    assert.equal(companySkusAfterDelete.length, 1);
 
     const seedDb = openErpDatabase({ userDataDir: tempUserData });
     try {
@@ -365,6 +373,11 @@ async function main() {
     } finally {
       seedDb.close();
     }
+
+    await assert.rejects(
+      () => invoke("erp:sku:delete", { id: sku.id }),
+      /不能删除/,
+    );
 
     const purchaseWorkbench = await invoke("erp:purchase:workbench");
     assert.equal(purchaseWorkbench.purchaseRequests.length, 1);

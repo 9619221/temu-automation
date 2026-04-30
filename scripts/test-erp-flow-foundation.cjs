@@ -62,11 +62,11 @@ function insertSeedData(db) {
 
     db.prepare(`
       INSERT INTO erp_skus (
-        id, account_id, internal_sku_code, product_name, category, supplier_id,
+        id, account_id, internal_sku_code, product_name, color_spec, category, supplier_id,
         status, created_at, updated_at
       )
       VALUES (
-        'sku_demo', 'acct_demo', 'SKU-DEMO-001', 'Demo Product', 'daily',
+        'sku_demo', 'acct_demo', 'SKU-DEMO-001', 'Demo Product', 'Blue / Standard', 'daily',
         'supplier_demo', 'active', @now, @now
       )
     `).run({ now });
@@ -269,6 +269,7 @@ function runFlow() {
     assertColumnExists(db, "erp_users", "company_id");
     assertColumnExists(db, "erp_accounts", "company_id");
     assertColumnExists(db, "erp_skus", "company_id");
+    assertColumnExists(db, "erp_skus", "color_spec");
     assertColumnNullable(db, "erp_skus", "account_id");
     assertColumnExists(db, "erp_1688_auth_settings", "company_id");
     assertColumnExists(db, "erp_1688_delivery_addresses", "company_id");

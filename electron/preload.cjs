@@ -226,6 +226,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     sku: {
       list: (params) => ipcRenderer.invoke("erp:sku:list", params || {}),
       create: (payload) => ipcRenderer.invoke("erp:sku:create", payload || {}),
+      delete: (payload) => ipcRenderer.invoke("erp:sku:delete", payload || {}),
     },
     purchase: {
       workbench: (params) => ipcRenderer.invoke("erp:purchase:workbench", params || {}),
@@ -297,6 +298,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     downloadUpdate: () => ipcRenderer.invoke("app:download-update"),
     quitAndInstallUpdate: () => ipcRenderer.invoke("app:quit-and-install-update"),
     openLogDirectory: () => ipcRenderer.invoke("app:open-log-directory"),
+    openExternal: (url) => ipcRenderer.invoke("app:open-external", url),
     readWorkflowPackLogs: (params) => ipcRenderer.invoke("app:read-workflow-pack-logs", params || {}),
     clearWorkflowPackLogs: () => ipcRenderer.invoke("app:clear-workflow-pack-logs"),
   },

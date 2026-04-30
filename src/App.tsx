@@ -30,6 +30,7 @@ const ErpDebug = lazy(() => import("./pages/ErpDebug"));
 const DailyCommandCenter = lazy(() => import("./pages/DailyCommandCenter"));
 const ProductMasterData = lazy(() => import("./pages/ProductMasterData"));
 const PurchaseCenter = lazy(() => import("./pages/PurchaseCenter"));
+const AlibabaMapping = lazy(() => import("./pages/AlibabaMapping"));
 const WarehouseCenter = lazy(() => import("./pages/WarehouseCenter"));
 const QcOutboundCenter = lazy(() => import("./pages/QcOutboundCenter"));
 const WorkItems = lazy(() => import("./pages/WorkItems"));
@@ -210,7 +211,10 @@ function App() {
             <Route path="competitor" element={<RoleRoute path="/competitor"><CompetitorAnalysis /></RoleRoute>} />
             <Route path="price-review" element={<RoleRoute path="/price-review"><PriceReview /></RoleRoute>} />
             <Route path="daily-command" element={<RoleRoute path="/daily-command"><DailyCommandCenter /></RoleRoute>} />
-            <Route path="product-master-data" element={<RoleRoute path="/product-master-data"><ProductMasterData /></RoleRoute>} />
+            <Route path="product-master-data" element={<RoleRoute path="/product-master-data"><ProductMasterData mode="skus" /></RoleRoute>} />
+            <Route path="suppliers" element={<RoleRoute path="/suppliers"><ProductMasterData mode="suppliers" /></RoleRoute>} />
+            <Route path="stores" element={<RoleRoute path="/stores"><ProductMasterData mode="stores" /></RoleRoute>} />
+            <Route path="1688-mapping" element={<RoleRoute path="/1688-mapping"><AlibabaMapping /></RoleRoute>} />
             <Route path="purchase-center" element={<RoleRoute path="/purchase-center"><PurchaseCenter /></RoleRoute>} />
             <Route path="warehouse-center" element={<RoleRoute path="/warehouse-center"><WarehouseCenter /></RoleRoute>} />
             <Route path="qc-outbound" element={<RoleRoute path="/qc-outbound"><QcOutboundCenter /></RoleRoute>} />

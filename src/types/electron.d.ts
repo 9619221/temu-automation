@@ -228,6 +228,7 @@ interface AppAPI {
   downloadUpdate: () => Promise<any>;
   quitAndInstallUpdate: () => Promise<boolean>;
   openLogDirectory: () => Promise<string>;
+  openExternal: (url: string) => Promise<string>;
   readWorkflowPackLogs?: (params?: { limit?: number }) => Promise<{
     logFile?: string;
     diagnosticLogFile?: string;
@@ -412,16 +413,18 @@ interface ErpAPI {
     create: (payload: {
       id?: string;
       accountId?: string;
-      internalSkuCode: string;
+      internalSkuCode?: string;
       productName: string;
       temuSkuId?: string;
       temuProductId?: string;
       temuSkcId?: string;
+      colorSpec?: string;
       category?: string;
       imageUrl?: string;
       supplierId?: string;
       status?: string;
     }) => Promise<any>;
+    delete: (payload: { id?: string; skuId?: string }) => Promise<any>;
   };
   purchase: {
     workbench: (params?: ErpListParams) => Promise<any>;

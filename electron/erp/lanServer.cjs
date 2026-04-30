@@ -1,6 +1,8 @@
 const http = require("http");
 const crypto = require("crypto");
+const fs = require("fs");
 const os = require("os");
+const path = require("path");
 
 const DEFAULT_LAN_PORT = 19380;
 const DEFAULT_BIND_ADDRESS = "0.0.0.0";
@@ -21,6 +23,7 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/1688": ["admin", "manager"],
   "/api/1688/status": ["admin", "manager"],
   "/api/1688/config": ["admin", "manager"],
+  "/api/1688/token": ["admin", "manager"],
   "/api/1688/start": ["admin", "manager"],
   "/api/1688/refresh": ["admin", "manager"],
   "/purchase": ["admin", "manager", "operations", "buyer", "finance"],
@@ -54,6 +57,7 @@ const PR_STATUS_LABELS = Object.freeze({
 
 const PO_STATUS_LABELS = Object.freeze({
   draft: "草稿",
+  pushed_pending_price: "已推单待改价",
   pending_finance_approval: "待财务审批",
   approved_to_pay: "已批准付款",
   paid: "已付款",
@@ -244,6 +248,45 @@ function writeText(res, statusCode, body, headers = {}) {
     ...headers,
   });
   res.end(text);
+}
+
+function uploadRootDir() {
+  const appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+  const userDataDir = process.env.APP_USER_DATA || process.env.TEMU_USER_DATA || path.join(appData, "temu-automation");
+  const dataDir = process.env.ERP_DATA_DIR || process.env.ERP_DATA_PATH || path.join(userDataDir, "data");
+  return path.join(dataDir, "uploads");
+}
+
+function imageContentType(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".png") return "image/png";
+  if (ext === ".webp") return "image/webp";
+  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+  return "application/octet-stream";
+}
+
+function serveUploadedFile(_req, res, pathname) {
+  const root = uploadRootDir();
+  const relativePath = decodeURIComponent(pathname.replace(/^\/uploads\/?/, ""));
+  const target = path.resolve(root, relativePath);
+  const resolvedRoot = path.resolve(root);
+  if (!target.startsWith(`${resolvedRoot}${path.sep}`)) {
+    writeText(res, 403, "Forbidden");
+    return;
+  }
+  fs.stat(target, (statError, stat) => {
+    if (statError || !stat.isFile()) {
+      writeText(res, 404, "Not found");
+      return;
+    }
+    res.writeHead(200, {
+      "Content-Type": imageContentType(target),
+      "Content-Length": stat.size,
+      "Cache-Control": "public, max-age=604800, immutable",
+      "X-Content-Type-Options": "nosniff",
+    });
+    fs.createReadStream(target).pipe(res);
+  });
 }
 
 function escapeHtml(value) {
@@ -1265,7 +1308,7 @@ function formatQty(value) {
 }
 
 function statusClass(status) {
-  if (["submitted", "pending_finance_approval", "pending", "approved_to_pay", "pending_arrival", "pending_qc", "pending_warehouse", "pending_ops_confirm"].includes(status)) {
+  if (["submitted", "pushed_pending_price", "pending_finance_approval", "pending", "approved_to_pay", "pending_arrival", "pending_qc", "pending_warehouse", "pending_ops_confirm"].includes(status)) {
     return "status-warn";
   }
   if (["buyer_processing", "sourced", "waiting_ops_confirm", "supplier_processing", "shipped", "arrived", "counted", "in_progress", "picking", "packed", "shipped_out"].includes(status)) {
@@ -1481,6 +1524,24 @@ function render1688AuthPage(status = {}, requestOrigin = "") {
           </div>
           <div class="actions">
             <button class="action-chip" type="submit">保存配置</button>
+          </div>
+        </form>
+
+        <form class="stacked-form" method="post" action="/api/1688/token" style="max-width: 760px;">
+          <div class="section-subtitle" style="margin-bottom: 8px;">已有开放平台永久 Token 时，可以直接粘贴保存；不填到期时间表示长期有效。</div>
+          <div class="form-grid">
+            <label class="inline-label">1688 Token
+              <input class="mini-input full" name="accessToken" type="password" autocomplete="new-password" placeholder="粘贴开放平台已授权 token" required />
+            </label>
+            <label class="inline-label">授权账号
+              <input class="mini-input full" name="memberId" value="${escapeHtml(status.memberId || status.resourceOwner || "")}" placeholder="例如 chenjialin202" />
+            </label>
+            <label class="inline-label">到期时间
+              <input class="mini-input full" name="accessTokenExpiresAt" placeholder="可选；不填表示长期有效" />
+            </label>
+          </div>
+          <div class="actions">
+            <button class="action-chip success" type="submit" ${status.appKey && status.hasAppSecret ? "" : "disabled"}>保存 Token</button>
           </div>
         </form>
 
@@ -2500,12 +2561,18 @@ function createRequestHandler(options = {}) {
   const createSku = options.createSku || (() => {
     throw new Error("SKU action handler is not available");
   });
+  const deleteSku = options.deleteSku || (() => {
+    throw new Error("SKU delete handler is not available");
+  });
   const get1688AuthStatus = options.get1688AuthStatus || (() => ({
     configured: false,
     authorized: false,
   }));
   const upsert1688AuthConfig = options.upsert1688AuthConfig || (() => {
     throw new Error("1688 auth config handler is not available");
+  });
+  const save1688ManualToken = options.save1688ManualToken || (() => {
+    throw new Error("1688 token handler is not available");
   });
   const create1688AuthorizeUrl = options.create1688AuthorizeUrl || (() => {
     throw new Error("1688 auth start handler is not available");
@@ -2551,8 +2618,10 @@ function createRequestHandler(options = {}) {
       createSupplier,
       listSkus,
       createSku,
+      deleteSku,
       get1688AuthStatus,
       upsert1688AuthConfig,
+      save1688ManualToken,
       create1688AuthorizeUrl,
       complete1688OAuth,
       refresh1688AccessToken,
@@ -2588,8 +2657,8 @@ function parseRequestQuery(req) {
   }
 }
 
-async function readLoginPayload(req) {
-  const body = await readRequestBody(req);
+async function readLoginPayload(req, maxBytes = 16 * 1024) {
+  const body = await readRequestBody(req, maxBytes);
   const contentType = String(req.headers["content-type"] || "");
   if (contentType.includes("application/json")) {
     return body ? JSON.parse(body) : {};
@@ -2598,9 +2667,9 @@ async function readLoginPayload(req) {
   return Object.fromEntries(params.entries());
 }
 
-async function readOptionalPayload(req) {
+async function readOptionalPayload(req, maxBytes = 16 * 1024) {
   if (req.method === "GET" || req.method === "HEAD") return {};
-  return readLoginPayload(req);
+  return readLoginPayload(req, maxBytes);
 }
 
 function parse1688MessageBody(bodyText, contentType) {
@@ -2674,7 +2743,7 @@ async function handleLoginRequest({ req, res, verifyLogin }) {
     || String(req.headers["content-type"] || "").includes("application/json");
   let payload = {};
   try {
-    payload = await readLoginPayload(req);
+    payload = await readLoginPayload(req, 8 * 1024 * 1024);
   } catch (error) {
     if (wantsJson) {
       writeJson(res, 400, { ok: false, error: error?.message || "Invalid login request" });
@@ -2806,6 +2875,7 @@ async function handleMasterDataActionRequest({
   upsertAccount,
   createSupplier,
   createSku,
+  deleteSku,
 }) {
   if (req.method !== "POST") {
     writeJson(res, 405, { ok: false, error: "Method not allowed" });
@@ -2829,6 +2899,9 @@ async function handleMasterDataActionRequest({
     } else if (action === "create_sku") {
       assertSessionRole(session, ["admin", "manager", "operations"], "商品资料创建");
       result = await createSku(scopedPayload, session.user);
+    } else if (action === "delete_sku") {
+      assertSessionRole(session, ["admin", "manager", "operations"], "商品资料删除");
+      result = await deleteSku(scopedPayload, session.user);
     } else {
       throw new Error(`不支持的商品资料操作：${action || "-"}`);
     }
@@ -2870,6 +2943,30 @@ async function handle1688ConfigRequest({ req, res, session, upsert1688AuthConfig
   try {
     const payload = await readLoginPayload(req);
     const status = await upsert1688AuthConfig(payload, session.user);
+    if (wantsJson) {
+      writeJson(res, 200, { ok: true, status });
+      return;
+    }
+    writeRedirect(res, "/1688");
+  } catch (error) {
+    if (wantsJson) {
+      writeJson(res, 400, { ok: false, error: error?.message || String(error) });
+      return;
+    }
+    render1688Error(res, session, error, 400);
+  }
+}
+
+async function handle1688TokenRequest({ req, res, session, save1688ManualToken }) {
+  const wantsJson = String(req.headers.accept || "").includes("application/json")
+    || String(req.headers["content-type"] || "").includes("application/json");
+  if (req.method !== "POST") {
+    writeJson(res, 405, { ok: false, error: "Method not allowed" });
+    return;
+  }
+  try {
+    const payload = await readLoginPayload(req);
+    const status = await save1688ManualToken(payload, session.user);
     if (wantsJson) {
       writeJson(res, 200, { ok: true, status });
       return;
@@ -2975,7 +3072,7 @@ async function handlePurchaseActionRequest({ req, res, session, performPurchaseA
 
   let payload = {};
   try {
-    payload = await readLoginPayload(req);
+    payload = await readLoginPayload(req, 8 * 1024 * 1024);
     const result = await performPurchaseAction(payload, session.user);
     if (wantsJson) {
       writeJson(res, 200, { ok: true, result });
@@ -3170,8 +3267,10 @@ async function handleRequest({
   createSupplier,
   listSkus,
   createSku,
+  deleteSku,
   get1688AuthStatus,
   upsert1688AuthConfig,
+  save1688ManualToken,
   create1688AuthorizeUrl,
   complete1688OAuth,
   refresh1688AccessToken,
@@ -3228,6 +3327,11 @@ async function handleRequest({
         running: true,
         startedAt: lanState.startedAt,
       });
+      return;
+    }
+
+    if (pathname.startsWith("/uploads/")) {
+      serveUploadedFile(req, res, pathname);
       return;
     }
 
@@ -3367,6 +3471,7 @@ async function handleRequest({
         upsertAccount,
         createSupplier,
         createSku,
+        deleteSku,
       });
       return;
     }
@@ -3385,6 +3490,16 @@ async function handleRequest({
         res,
         session,
         upsert1688AuthConfig,
+      });
+      return;
+    }
+
+    if (pathname === "/api/1688/token") {
+      await handle1688TokenRequest({
+        req,
+        res,
+        session,
+        save1688ManualToken,
       });
       return;
     }

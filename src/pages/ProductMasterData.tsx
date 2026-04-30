@@ -1,9 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Button, Col, Form, Input, Modal, Row, Select, Space, Table, Tag, message } from "antd";
+import { useCallback, useEffect, useState } from "react";
+import { Alert, Button, Col, Form, Image, Input, Modal, Popconfirm, Row, Select, Space, Table, Tag, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { PlusOutlined, ReloadOutlined, ShopOutlined, TagsOutlined } from "@ant-design/icons";
+import { DeleteOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
-import StatCard from "../components/StatCard";
 import { useErpAuth } from "../contexts/ErpAuthContext";
 
 const erp = window.electronAPI?.erp;
@@ -33,16 +32,26 @@ interface ErpSkuRow {
   accountId?: string | null;
   internalSkuCode: string;
   productName: string;
+  colorSpec?: string | null;
   category?: string | null;
+  imageUrl?: string | null;
   supplierId?: string | null;
   status?: string;
+  createdAt?: string;
   updatedAt?: string;
 }
 
 interface SkuDialogValues {
   productName: string;
   colorSpec: string;
+  imageUrl?: string;
   accountId?: string;
+}
+
+type MasterDataMode = "skus" | "suppliers" | "stores";
+
+interface ProductMasterDataProps {
+  mode?: MasterDataMode;
 }
 
 function statusColor(status?: string) {
@@ -62,22 +71,48 @@ function statusColor(status?: string) {
   }
 }
 
-function idShort(id?: string | null) {
-  if (!id) return "-";
-  return id.length > 18 ? `${id.slice(0, 8)}...${id.slice(-6)}` : id;
+const STATUS_LABELS: Record<string, string> = {
+  active: "启用",
+  blocked: "停用",
+  online: "在线",
+  offline: "下线",
+  success: "成功",
+  skipped: "跳过",
+  failed: "失败",
+};
+
+function statusLabel(status?: string | null) {
+  if (!status) return "-";
+  return STATUS_LABELS[status] || "未知状态";
+}
+
+function sourceLabel(source?: string | null) {
+  if (!source) return "-";
+  const labels: Record<string, string> = {
+    product_master_data: "商品资料",
+  };
+  return labels[source] || "其他来源";
 }
 
 function canRole(role: string | undefined, roles: string[]) {
   return Boolean(role && roles.includes(role));
 }
 
-function createAutoSkuCode() {
-  const stamp = new Date().toISOString().replace(/\D/g, "").slice(0, 14);
-  const suffix = Math.random().toString(36).slice(2, 6).toUpperCase();
-  return `SKU-${stamp}-${suffix}`;
+function formatDateTime(value?: string | null) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("zh-CN", {
+    year: "2-digit",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
 }
 
-export default function ProductMasterData() {
+export default function ProductMasterData({ mode = "skus" }: ProductMasterDataProps) {
   const auth = useErpAuth();
   const role = auth.currentUser?.role;
   const canManageAccounts = canRole(role, ["admin", "manager"]);
@@ -93,17 +128,12 @@ export default function ProductMasterData() {
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState<string | null>(null);
   const [skuModalOpen, setSkuModalOpen] = useState(false);
-
-  const accountOptions = useMemo(
-    () => accounts.map((account) => ({ label: account.name || account.id, value: account.id })),
-    [accounts],
-  );
-
-  const accountNameById = useMemo(() => {
-    const lookup = new Map<string, string>();
-    accounts.forEach((account) => lookup.set(account.id, account.name));
-    return lookup;
-  }, [accounts]);
+  const pageTitle = mode === "suppliers" ? "供应商" : mode === "stores" ? "店铺" : "商品资料";
+  const pageMeta = mode === "suppliers"
+    ? [`供应商 ${suppliers.length}`]
+    : mode === "stores"
+      ? [`店铺 ${accounts.length}`]
+      : [`商品 ${skus.length}`];
 
   const loadAll = useCallback(async () => {
     if (!erp) return;
@@ -179,9 +209,9 @@ export default function ProductMasterData() {
     try {
       await erp.sku.create({
         accountId: values.accountId,
-        internalSkuCode: createAutoSkuCode(),
         productName: values.productName,
-        category: values.colorSpec,
+        colorSpec: values.colorSpec,
+        imageUrl: values.imageUrl,
         status: "active",
       });
       skuForm.resetFields();
@@ -195,11 +225,25 @@ export default function ProductMasterData() {
     }
   };
 
+  const handleDeleteSku = async (row: ErpSkuRow) => {
+    if (!erp) return;
+    setSubmitting(`delete-sku:${row.id}`);
+    try {
+      await erp.sku.delete({ id: row.id });
+      message.success("商品资料已删除");
+      await loadAll();
+    } catch (error: any) {
+      message.error(error?.message || "商品资料删除失败");
+    } finally {
+      setSubmitting(null);
+    }
+  };
+
   const accountColumns: ColumnsType<ErpAccountRow> = [
     { title: "店铺", dataIndex: "name", key: "name", ellipsis: true },
     { title: "电话", dataIndex: "phone", key: "phone", width: 140, render: (value) => value || "-" },
-    { title: "状态", dataIndex: "status", key: "status", width: 92, render: (value) => <Tag color={statusColor(value)}>{value || "-"}</Tag> },
-    { title: "来源", dataIndex: "source", key: "source", width: 160, render: (value) => value || "-" },
+    { title: "状态", dataIndex: "status", key: "status", width: 92, render: (value) => <Tag color={statusColor(value)}>{statusLabel(value)}</Tag> },
+    { title: "来源", dataIndex: "source", key: "source", width: 160, render: sourceLabel },
   ];
 
   const supplierColumns: ColumnsType<ErpSupplierRow> = [
@@ -214,28 +258,87 @@ export default function ProductMasterData() {
       width: 180,
       render: (items: string[] = []) => items.length ? items.map((item) => <Tag key={item}>{item}</Tag>) : "-",
     },
-    { title: "状态", dataIndex: "status", key: "status", width: 92, render: (value) => <Tag color={statusColor(value)}>{value || "-"}</Tag> },
+    { title: "状态", dataIndex: "status", key: "status", width: 92, render: (value) => <Tag color={statusColor(value)}>{statusLabel(value)}</Tag> },
   ];
 
   const skuColumns: ColumnsType<ErpSkuRow> = [
-    { title: "商品编码", dataIndex: "internalSkuCode", key: "internalSkuCode", width: 160, ellipsis: true },
+    {
+      title: "图片",
+      dataIndex: "imageUrl",
+      key: "imageUrl",
+      width: 72,
+      render: (value: string | null | undefined) => value ? (
+        <Image
+          src={value}
+          alt="商品图片"
+          width={44}
+          height={44}
+          preview={{ mask: "查看" }}
+          style={{ borderRadius: 6, objectFit: "cover", background: "#f5f7fb" }}
+        />
+      ) : (
+        <div
+          style={{
+            width: 44,
+            height: 44,
+            borderRadius: 6,
+            border: "1px dashed #d8dee9",
+            color: "#98a2b3",
+            fontSize: 12,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "#f8fafc",
+          }}
+        >
+          无图
+        </div>
+      ),
+    },
+    { title: "商品编码", dataIndex: "internalSkuCode", key: "internalSkuCode", width: 128, ellipsis: true },
     { title: "商品名称", dataIndex: "productName", key: "productName", ellipsis: true },
-    { title: "颜色/规格", dataIndex: "category", key: "category", width: 180, render: (value) => value || "-" },
+    { title: "颜色/规格", dataIndex: "colorSpec", key: "colorSpec", width: 180, render: (value, row) => value || row.category || "-" },
     {
       title: "店铺",
       dataIndex: "accountId",
       key: "accountId",
       width: 150,
-      render: (value?: string | null) => accountNameById.get(value || "") || (value ? idShort(value) : "公司级"),
+      render: (value) => accounts.find((account) => account.id === value)?.name || "-",
     },
-    { title: "状态", dataIndex: "status", key: "status", width: 92, render: (value) => <Tag color={statusColor(value)}>{value || "-"}</Tag> },
+    { title: "状态", dataIndex: "status", key: "status", width: 92, render: (value) => <Tag color={statusColor(value)}>{statusLabel(value)}</Tag> },
+    { title: "创建时间", dataIndex: "createdAt", key: "createdAt", width: 142, render: formatDateTime },
+    ...(canManageSkus ? [{
+      title: "操作",
+      key: "actions",
+      width: 96,
+      render: (_value: unknown, row: ErpSkuRow) => (
+        <Popconfirm
+          title="删除商品资料"
+          description="未被采购、库存等单据引用时才会删除。"
+          okText="删除"
+          cancelText="取消"
+          okButtonProps={{ danger: true }}
+          onConfirm={() => handleDeleteSku(row)}
+        >
+          <Button
+            danger
+            size="small"
+            type="text"
+            icon={<DeleteOutlined />}
+            loading={submitting === `delete-sku:${row.id}`}
+          >
+            删除
+          </Button>
+        </Popconfirm>
+      ),
+    }] : []),
   ];
 
   if (!erp) {
     return (
       <div className="dashboard-shell">
-        <PageHeader compact eyebrow="ERP" title="商品资料" subtitle="服务未就绪，请重启软件" />
-        <Alert type="error" showIcon message="当前环境没有 window.electronAPI.erp" />
+        <PageHeader compact eyebrow="系统" title={pageTitle} subtitle="服务未就绪，请重启软件" />
+        <Alert type="error" showIcon message="当前环境缺少本地服务接口" />
       </div>
     );
   }
@@ -244,50 +347,42 @@ export default function ProductMasterData() {
     <div className="dashboard-shell">
       <PageHeader
         compact
-        eyebrow="ERP"
-        title="商品资料"
-        subtitle="维护公司级商品名称、颜色/规格和可选店铺归属。"
-        actions={(
-          <Button icon={<ReloadOutlined />} loading={loading} onClick={loadAll}>
+        eyebrow="系统"
+        title={pageTitle}
+        meta={pageMeta}
+        actions={[
+          mode === "skus" && canManageSkus ? (
+            <Button
+              key="new-sku"
+              type="primary"
+              icon={<PlusOutlined />}
+              onClick={() => {
+                skuForm.resetFields();
+                if (accounts.length === 1) {
+                  skuForm.setFieldsValue({ accountId: accounts[0].id });
+                }
+                setSkuModalOpen(true);
+              }}
+            >
+              新增商品
+            </Button>
+          ) : null,
+          <Button key="refresh" icon={<ReloadOutlined />} loading={loading} onClick={loadAll}>
             刷新
-          </Button>
-        )}
+          </Button>,
+        ].filter(Boolean)}
       />
 
-      <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
-        <Col xs={24} md={8}>
-          <StatCard title="商品编码" value={skus.length} suffix="条" color="brand" icon={<TagsOutlined />} />
-        </Col>
-        <Col xs={24} md={8}>
-          <StatCard title="供应商" value={suppliers.length} suffix="条" color="blue" icon={<ShopOutlined />} />
-        </Col>
-        <Col xs={24} md={8}>
-          <StatCard title="店铺" value={accounts.length} suffix="条" color="success" icon={<ShopOutlined />} />
-        </Col>
-      </Row>
-
-      <Space direction="vertical" size={16} style={{ width: "100%" }}>
+      <Space direction="vertical" size={12} style={{ width: "100%" }}>
+        {mode === "skus" ? (
         <div className="app-panel">
           <div className="app-panel__title">
             <div>
               <div className="app-panel__title-main">商品资料</div>
-              <div className="app-panel__title-sub">新增时只填写商品名称、颜色/规格和店铺；商品编码自动生成</div>
             </div>
-            {canManageSkus ? (
-              <Button
-                type="primary"
-                icon={<PlusOutlined />}
-                onClick={() => {
-                  skuForm.resetFields();
-                  setSkuModalOpen(true);
-                }}
-              >
-                新增商品
-              </Button>
-            ) : null}
           </div>
           {!canManageSkus ? (
-            <Alert type="info" showIcon message="当前角色可查看商品资料，创建商品编码需要运营、负责人或管理员权限。" style={{ marginBottom: 12 }} />
+            <Alert type="info" showIcon message="当前角色仅可查看商品资料。" style={{ marginBottom: 12 }} />
           ) : null}
           <Table
             size="small"
@@ -298,12 +393,13 @@ export default function ProductMasterData() {
             pagination={{ pageSize: 8, showSizeChanger: false }}
           />
         </div>
+        ) : null}
 
+        {mode === "suppliers" ? (
         <div className="app-panel">
           <div className="app-panel__title">
             <div>
               <div className="app-panel__title-main">供应商</div>
-              <div className="app-panel__title-sub">采购寻源、报价和商品编码可关联供应商</div>
             </div>
           </div>
           {canManageSuppliers ? (
@@ -333,8 +429,8 @@ export default function ProductMasterData() {
                   <Form.Item name="status" label="状态" initialValue="active">
                     <Select
                       options={[
-                        { label: "active", value: "active" },
-                        { label: "blocked", value: "blocked" },
+                        { label: "启用", value: "active" },
+                        { label: "停用", value: "blocked" },
                       ]}
                     />
                   </Form.Item>
@@ -352,7 +448,7 @@ export default function ProductMasterData() {
               </Row>
             </Form>
           ) : (
-            <Alert type="info" showIcon message="当前角色可查看供应商资料，维护供应商需要采购、负责人或管理员权限。" style={{ marginBottom: 12 }} />
+            <Alert type="info" showIcon message="当前角色仅可查看供应商。" style={{ marginBottom: 12 }} />
           )}
           <Table
             size="small"
@@ -363,12 +459,13 @@ export default function ProductMasterData() {
             pagination={{ pageSize: 5, showSizeChanger: false }}
           />
         </div>
+        ) : null}
 
+        {mode === "stores" ? (
         <div className="app-panel">
           <div className="app-panel__title">
             <div>
               <div className="app-panel__title-main">店铺</div>
-              <div className="app-panel__title-sub">可选销售店铺资料，采购建档不再依赖店铺</div>
             </div>
           </div>
           {canManageAccounts ? (
@@ -388,8 +485,8 @@ export default function ProductMasterData() {
                   <Form.Item name="status" label="状态" initialValue="online">
                     <Select
                       options={[
-                        { label: "online", value: "online" },
-                        { label: "offline", value: "offline" },
+                        { label: "在线", value: "online" },
+                        { label: "下线", value: "offline" },
                       ]}
                     />
                   </Form.Item>
@@ -404,7 +501,7 @@ export default function ProductMasterData() {
               </Row>
             </Form>
           ) : (
-            <Alert type="info" showIcon message="账号资料由负责人或管理员维护。" style={{ marginBottom: 12 }} />
+            <Alert type="info" showIcon message="当前角色仅可查看店铺。" style={{ marginBottom: 12 }} />
           )}
           <Table
             size="small"
@@ -415,6 +512,7 @@ export default function ProductMasterData() {
             pagination={{ pageSize: 5, showSizeChanger: false }}
           />
         </div>
+        ) : null}
       </Space>
 
       <Modal
@@ -427,6 +525,15 @@ export default function ProductMasterData() {
         onCancel={() => setSkuModalOpen(false)}
         destroyOnClose
       >
+        {accounts.length === 0 ? (
+          <Alert
+            type="warning"
+            showIcon
+            message="还没有店铺"
+            description="请先到左侧店铺新增店铺，再回来创建商品。"
+            style={{ marginBottom: 12 }}
+          />
+        ) : null}
         <Form form={skuForm} layout="vertical">
           <Form.Item name="productName" label="商品名称" rules={[{ required: true, message: "请输入商品名称" }]}>
             <Input placeholder="例如：儿童保温杯" />
@@ -434,13 +541,15 @@ export default function ProductMasterData() {
           <Form.Item name="colorSpec" label="颜色/规格" rules={[{ required: true, message: "请输入颜色/规格" }]}>
             <Input placeholder="例如：蓝色 / 500ml / 单只装" />
           </Form.Item>
-          <Form.Item name="accountId" label="店铺">
+          <Form.Item name="imageUrl" label="商品图片链接" rules={[{ type: "url", message: "请输入完整图片链接" }]}>
+            <Input placeholder="可选；用于商品识别和以图搜款" />
+          </Form.Item>
+          <Form.Item name="accountId" label="店铺" rules={[{ required: true, message: "请选择店铺" }]}>
             <Select
-              allowClear
               showSearch
               optionFilterProp="label"
-              options={accountOptions}
-              placeholder="可选；不选则为公司级商品"
+              options={accounts.map((account) => ({ label: account.name || account.id, value: account.id }))}
+              placeholder="请选择商品所属店铺"
             />
           </Form.Item>
         </Form>

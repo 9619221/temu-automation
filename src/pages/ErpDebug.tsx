@@ -45,7 +45,7 @@ const ROLE_OPTIONS = [
 ];
 
 function roleLabel(role?: string) {
-  return ROLE_OPTIONS.find((item) => item.value === role)?.label || role || "-";
+  return ROLE_OPTIONS.find((item) => item.value === role)?.label || "未知角色";
 }
 
 interface ErpUserRow {
@@ -102,6 +102,28 @@ function statusColor(status?: string) {
   }
 }
 
+const STATUS_LABELS: Record<string, string> = {
+  active: "启用",
+  blocked: "停用",
+  online: "在线",
+  offline: "下线",
+  success: "成功",
+  skipped: "跳过",
+  failed: "失败",
+};
+
+function statusLabel(status?: string) {
+  return STATUS_LABELS[status || ""] || status || "-";
+}
+
+function migrationLabel(key?: string) {
+  if (!key) return "-";
+  const labels: Record<string, string> = {
+    "001_erp_core.sql": "基础数据结构",
+  };
+  return labels[key] || "数据结构检查项";
+}
+
 export default function ErpDebug() {
   const [userForm] = Form.useForm();
   const [status, setStatus] = useState<ErpStatusView | null>(null);
@@ -124,7 +146,7 @@ export default function ErpDebug() {
       setLanStatus(nextLanStatus);
       setUsers(nextUsers as ErpUserRow[]);
     } catch (error: any) {
-      message.error(error?.message || "ERP 状态读取失败");
+      message.error(error?.message || "系统状态读取失败");
     } finally {
       setLoading(false);
     }
@@ -140,10 +162,10 @@ export default function ErpDebug() {
     try {
       const nextStatus = await erp.runMigrations();
       setStatus(nextStatus);
-      message.success("Migration 检查完成");
+      message.success("数据结构检查完成");
       await loadAll();
     } catch (error: any) {
-      message.error(error?.message || "Migration 执行失败");
+      message.error(error?.message || "数据结构检查失败");
     } finally {
       setLoading(false);
     }
@@ -212,20 +234,20 @@ export default function ErpDebug() {
     { title: "用户", dataIndex: "name", key: "name", ellipsis: true },
     { title: "角色", dataIndex: "role", key: "role", width: 100, render: (value) => <Tag>{roleLabel(value)}</Tag> },
     { title: "访问码", dataIndex: "hasAccessCode", key: "hasAccessCode", width: 100, render: (value) => <Tag color={value ? "success" : "warning"}>{value ? "已设置" : "未设置"}</Tag> },
-    { title: "状态", dataIndex: "status", key: "status", width: 92, render: (value) => <Tag color={statusColor(value)}>{value || "-"}</Tag> },
+    { title: "状态", dataIndex: "status", key: "status", width: 92, render: (value) => <Tag color={statusColor(value)}>{statusLabel(value)}</Tag> },
     { title: "更新", dataIndex: "updatedAt", key: "updatedAt", width: 170, render: formatTime },
   ];
 
   const migrationColumns: ColumnsType<{ key: string; status: string }> = [
-    { title: "Migration", dataIndex: "key", key: "key", ellipsis: true },
-    { title: "状态", dataIndex: "status", key: "status", width: 120, render: (value) => <Tag color={statusColor(value)}>{value}</Tag> },
+    { title: "检查项", dataIndex: "key", key: "key", ellipsis: true, render: migrationLabel },
+    { title: "状态", dataIndex: "status", key: "status", width: 120, render: (value) => <Tag color={statusColor(value)}>{statusLabel(value)}</Tag> },
   ];
 
   if (!erp) {
     return (
       <div className="dashboard-shell">
-        <PageHeader compact eyebrow="ERP" title="ERP 调试台" subtitle="服务未就绪，请重启软件" />
-        <Alert type="error" showIcon message="当前环境没有 window.electronAPI.erp" />
+        <PageHeader compact eyebrow="系统" title="调试台" subtitle="服务未就绪，请重启软件" />
+        <Alert type="error" showIcon message="当前环境缺少本地服务接口" />
       </div>
     );
   }
@@ -234,9 +256,9 @@ export default function ErpDebug() {
     <div className="dashboard-shell">
       <PageHeader
         compact
-        eyebrow="ERP"
-        title="ERP 调试台"
-        subtitle="数据状态、团队协作服务和系统用户入口。商品编码与供应商已迁移到“商品资料”。"
+        eyebrow="系统"
+        title="调试台"
+        subtitle="数据状态、团队协作服务和系统用户入口。商品、供应商、店铺资料已拆分为独立入口。"
         meta={[
           status?.initialized ? "数据服务已就绪" : "数据服务未就绪",
           status?.dbPath || "等待状态",
@@ -246,17 +268,17 @@ export default function ErpDebug() {
             刷新
           </Button>,
           <Button key="migration" type="primary" icon={<DatabaseOutlined />} loading={loading} onClick={handleRunMigrations}>
-            检查 Migration
+            检查数据结构
           </Button>,
         ]}
       />
 
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
         <Col xs={24} md={8}>
-          <StatCard title="数据服务" value={status?.initialized ? "Ready" : "Not ready"} color="blue" icon={<DatabaseOutlined />} />
+          <StatCard title="数据服务" value={status?.initialized ? "已就绪" : "未就绪"} color="blue" icon={<DatabaseOutlined />} />
         </Col>
         <Col xs={24} md={8}>
-          <StatCard title="Migration" value={`${successMigrationCount}/${migrationRows.length || 5}`} color="success" icon={<CheckCircleOutlined />} />
+          <StatCard title="数据结构" value={`${successMigrationCount}/${migrationRows.length || 5}`} color="success" icon={<CheckCircleOutlined />} />
         </Col>
         <Col xs={24} md={8}>
           <StatCard title="系统用户" value={users.length} suffix="个" color="purple" icon={<UserOutlined />} />
@@ -264,7 +286,7 @@ export default function ErpDebug() {
       </Row>
 
       {status?.error?.message ? (
-        <Alert type="error" showIcon message="ERP 初始化异常" description={status.error.message} style={{ marginBottom: 16 }} />
+        <Alert type="error" showIcon message="系统初始化异常" description={status.error.message} style={{ marginBottom: 16 }} />
       ) : null}
 
       <Tabs
@@ -285,7 +307,7 @@ export default function ErpDebug() {
                     <div className="app-panel__title">
                       <div>
                         <div className="app-panel__title-main">数据服务</div>
-                        <div className="app-panel__title-sub">本机 ERP 数据库</div>
+                        <div className="app-panel__title-sub">本机业务数据库</div>
                       </div>
                       <Tag color={status?.initialized ? "success" : "error"}>
                         {status?.initialized ? "已连接" : "未连接"}
@@ -301,7 +323,7 @@ export default function ErpDebug() {
                   <div className="app-panel">
                     <div className="app-panel__title">
                       <div>
-                        <div className="app-panel__title-main">Migration</div>
+                        <div className="app-panel__title-main">数据结构</div>
                         <div className="app-panel__title-sub">启动时自动检查</div>
                       </div>
                       <Tag>{migrationRows.length} 条</Tag>
@@ -369,7 +391,7 @@ export default function ErpDebug() {
                       </Descriptions.Item>
                       <Descriptions.Item label="入口">
                         <Space direction="vertical" size={4}>
-                          <Text code>{lanStatus?.primaryUrl || "http://本机IP:19380"}</Text>
+                          <Text code>{lanStatus?.primaryUrl || "http://本机地址:19380"}</Text>
                           {lanStatus?.running ? (
                             <Button size="small" onClick={() => openLanUrl(lanStatus.primaryUrl)}>
                               打开入口
@@ -408,16 +430,16 @@ export default function ErpDebug() {
                       <Alert
                         type={lanStatus?.running ? "success" : "info"}
                         showIcon
-                        message={lanStatus?.running ? "团队协作服务已开启" : "启动服务后会开放采购、仓库、QC 和出库工作台"}
-                        description="采购、仓库、QC、出库和事项工作台可供团队成员登录后使用；用户与权限由管理员统一管理。"
+                        message={lanStatus?.running ? "团队协作服务已开启" : "启动服务后会开放采购、仓库、质检和出库工作台"}
+                        description="采购、仓库、质检、出库和事项工作台可供团队成员登录后使用；用户与权限由管理员统一管理。"
                       />
                       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                         {(lanStatus?.routes || [
                           { path: "/purchase", label: "采购工作台" },
                           { path: "/warehouse", label: "仓库工作台" },
-                          { path: "/qc", label: "QC 抽检工作台" },
+                          { path: "/qc", label: "质检抽检工作台" },
                         ]).map((route) => (
-                          <Tag icon={<ApiOutlined />} key={route.path}>{route.path}</Tag>
+                          <Tag icon={<ApiOutlined />} key={route.path}>{route.label}</Tag>
                         ))}
                       </div>
                     </Space>
@@ -448,8 +470,8 @@ export default function ErpDebug() {
                           <Form.Item name="status" label="状态" initialValue="active">
                             <Select
                               options={[
-                                { label: "active", value: "active" },
-                                { label: "blocked", value: "blocked" },
+                                { label: "启用", value: "active" },
+                                { label: "停用", value: "blocked" },
                               ]}
                             />
                           </Form.Item>

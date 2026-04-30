@@ -149,7 +149,7 @@ export default function QcOutboundCenter() {
       setQcData(nextQc);
       setOutboundData(nextOutbound);
     } catch (error: any) {
-      message.error(error?.message || "QC 发仓读取失败");
+      message.error(error?.message || "质检发仓读取失败");
     } finally {
       setLoading(false);
     }
@@ -280,7 +280,7 @@ export default function QcOutboundCenter() {
       ),
     },
     {
-      title: "SKU",
+      title: "商品",
       key: "sku",
       ellipsis: true,
       render: (_value, row) => (
@@ -302,13 +302,13 @@ export default function QcOutboundCenter() {
       ),
     },
     {
-      title: "批次 QC",
+      title: "批次质检",
       dataIndex: "qcStatus",
       width: 130,
       render: (value) => statusTag(value, BATCH_QC_STATUS_LABELS),
     },
     {
-      title: "QC 单",
+      title: "质检单",
       key: "qc",
       width: 170,
       render: (_value, row) => (
@@ -359,7 +359,7 @@ export default function QcOutboundCenter() {
 
   const inspectionColumns = useMemo<ColumnsType<QcInspectionRow>>(() => [
     {
-      title: "QC 单",
+      title: "质检单",
       key: "qc",
       width: 210,
       render: (_value, row) => (
@@ -370,7 +370,7 @@ export default function QcOutboundCenter() {
       ),
     },
     {
-      title: "SKU",
+      title: "商品",
       key: "sku",
       ellipsis: true,
       render: (_value, row) => (
@@ -431,7 +431,7 @@ export default function QcOutboundCenter() {
       ),
     },
     {
-      title: "SKU",
+      title: "商品",
       key: "sku",
       ellipsis: true,
       render: (_value, row) => (
@@ -453,7 +453,7 @@ export default function QcOutboundCenter() {
       ),
     },
     {
-      title: "QC",
+      title: "质检",
       dataIndex: "qcStatus",
       width: 130,
       render: (value) => statusTag(value, BATCH_QC_STATUS_LABELS),
@@ -498,7 +498,7 @@ export default function QcOutboundCenter() {
       ),
     },
     {
-      title: "SKU / 批次",
+      title: "商品 / 批次",
       key: "sku",
       ellipsis: true,
       render: (_value, row) => (
@@ -608,8 +608,8 @@ export default function QcOutboundCenter() {
   if (!erp) {
     return (
       <div className="dashboard-shell">
-        <PageHeader compact eyebrow="ERP" title="QC 发仓" subtitle="服务未就绪，请重启软件" />
-        <Alert type="error" showIcon message="当前环境没有 window.electronAPI.erp" />
+        <PageHeader compact eyebrow="系统" title="质检发仓" subtitle="服务未就绪，请重启软件" />
+        <Alert type="error" showIcon message="当前环境缺少本地服务接口" />
       </div>
     );
   }
@@ -618,10 +618,10 @@ export default function QcOutboundCenter() {
     <div className="dashboard-shell">
       <PageHeader
         compact
-        eyebrow="QC 发仓"
+        eyebrow="质检发仓"
         title="抽检、锁定/释放库存、出库计划"
-        subtitle="运营录入抽检数和不良数；QC 放行后运营创建出库计划，仓库拣货打包发出。"
-        meta={[`QC 更新 ${formatDateTime(qcData.generatedAt)}`, `出库更新 ${formatDateTime(outboundData.generatedAt)}`]}
+        subtitle="运营录入抽检数和不良数；质检放行后运营创建出库计划，仓库拣货打包发出。"
+        meta={[`质检更新 ${formatDateTime(qcData.generatedAt)}`, `出库更新 ${formatDateTime(outboundData.generatedAt)}`]}
         actions={[
           <Button key="refresh" icon={<ReloadOutlined />} loading={loading} onClick={loadData}>
             刷新
@@ -665,7 +665,7 @@ export default function QcOutboundCenter() {
       <div className="app-panel" style={{ marginBottom: 16 }}>
         <div className="app-panel__title">
           <div>
-            <div className="app-panel__title-main">QC 记录</div>
+            <div className="app-panel__title-main">质检记录</div>
             <div className="app-panel__title-sub">记录每次抽检的判定结果、释放数量和锁定数量。</div>
           </div>
         </div>
@@ -684,7 +684,7 @@ export default function QcOutboundCenter() {
         <div className="app-panel__title">
           <div>
             <div className="app-panel__title-main">可出库批次</div>
-            <div className="app-panel__title-sub">运营从 QC 已放行批次创建出库计划，系统会预留库存给仓库处理。</div>
+            <div className="app-panel__title-sub">运营从质检已放行批次创建出库计划，系统会预留库存给仓库处理。</div>
           </div>
         </div>
         <Table

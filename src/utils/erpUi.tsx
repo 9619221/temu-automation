@@ -13,6 +13,7 @@ export const PR_STATUS_LABELS: Record<string, string> = {
 
 export const PO_STATUS_LABELS: Record<string, string> = {
   draft: "草稿",
+  pushed_pending_price: "已推单待改价",
   pending_finance_approval: "待财务审批",
   approved_to_pay: "已批准付款",
   paid: "已付款",
@@ -41,7 +42,7 @@ export const INBOUND_STATUS_LABELS: Record<string, string> = {
   pending_arrival: "待到货",
   arrived: "已到仓",
   counted: "已核数",
-  inbounded_pending_qc: "已入库待 QC",
+  inbounded_pending_qc: "已入库待质检",
   quantity_mismatch: "数量异常",
   damaged: "破损异常",
   exception: "异常",
@@ -49,11 +50,11 @@ export const INBOUND_STATUS_LABELS: Record<string, string> = {
 };
 
 export const BATCH_QC_STATUS_LABELS: Record<string, string> = {
-  pending: "待 QC",
-  passed: "QC 通过",
+  pending: "待质检",
+  passed: "质检通过",
   passed_with_observation: "观察放行",
   partial_passed: "部分通过",
-  failed: "QC 不通过",
+  failed: "质检不通过",
   rework_required: "需返工",
 };
 
@@ -182,7 +183,7 @@ export function formatPercent(value?: number | string | null) {
 
 export function statusLabel(value?: string | null, labels?: Record<string, string>) {
   if (!value) return "-";
-  return labels?.[value] || value;
+  return labels?.[value] || "未知状态";
 }
 
 export function statusTag(value?: string | null, labels?: Record<string, string>) {
@@ -193,10 +194,15 @@ export function statusTag(value?: string | null, labels?: Record<string, string>
 export function priorityTag(value?: string | null) {
   const priority = value || "-";
   const color = priority === "P0" ? "red" : priority === "P1" ? "orange" : priority === "P2" ? "blue" : "default";
-  return <Tag color={color}>{priority}</Tag>;
+  const label: Record<string, string> = {
+    P0: "紧急",
+    P1: "高",
+    P2: "中",
+    P3: "低",
+  };
+  return <Tag color={color}>{label[priority] || "未定"}</Tag>;
 }
 
 export function canRole(role: string | undefined | null, allowed: string[]) {
   return !!role && allowed.includes(role);
 }
-
