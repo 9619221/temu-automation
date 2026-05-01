@@ -2553,6 +2553,9 @@ function createRequestHandler(options = {}) {
   const upsertAccount = options.upsertAccount || (() => {
     throw new Error("Account action handler is not available");
   });
+  const deleteAccount = options.deleteAccount || (() => {
+    throw new Error("Account delete handler is not available");
+  });
   const listSuppliers = options.listSuppliers || (() => []);
   const createSupplier = options.createSupplier || (() => {
     throw new Error("Supplier action handler is not available");
@@ -2614,6 +2617,7 @@ function createRequestHandler(options = {}) {
       upsertUserResourceScope,
       listAccounts,
       upsertAccount,
+      deleteAccount,
       listSuppliers,
       createSupplier,
       listSkus,
@@ -2873,6 +2877,7 @@ async function handleMasterDataActionRequest({
   res,
   session,
   upsertAccount,
+  deleteAccount,
   createSupplier,
   createSku,
   deleteSku,
@@ -2893,6 +2898,9 @@ async function handleMasterDataActionRequest({
     if (action === "upsert_account" || action === "create_account") {
       assertSessionRole(session, ["admin", "manager"], "账号保存");
       result = await upsertAccount(scopedPayload, session.user);
+    } else if (action === "delete_account") {
+      assertSessionRole(session, ["admin", "manager"], "店铺删除");
+      result = await deleteAccount(scopedPayload, session.user);
     } else if (action === "create_supplier") {
       assertSessionRole(session, ["admin", "manager", "buyer"], "供应商创建");
       result = await createSupplier(scopedPayload, session.user);
@@ -3469,6 +3477,7 @@ async function handleRequest({
         res,
         session,
         upsertAccount,
+        deleteAccount,
         createSupplier,
         createSku,
         deleteSku,

@@ -30,7 +30,6 @@ const DEFAULT_PATH_BY_ROLE: Record<string, string> = {
 const ROUTE_ROLES: Record<string, string[]> = {
   "/daily-command": ["admin", "manager", "operations", "buyer", "finance", "warehouse", "viewer"],
   "/product-master-data": ["admin", "manager", "operations", "buyer"],
-  "/suppliers": ["admin", "manager", "operations", "buyer"],
   "/stores": ["admin", "manager", "operations", "buyer"],
   "/1688-mapping": ["admin", "manager", "operations", "buyer"],
   "/purchase-center": ["admin", "manager", "operations", "buyer", "finance"],

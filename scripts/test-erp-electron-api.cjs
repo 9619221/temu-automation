@@ -241,12 +241,13 @@ async function main() {
           INSERT INTO erp_purchase_orders (
             id, account_id, pr_id, selected_candidate_id, supplier_id, po_no,
             status, payment_status, expected_delivery_date, total_amount,
+            external_order_id, external_order_status,
             created_by, created_at, updated_at
           )
           VALUES (
             'po_ipc', @account_id, 'pr_ipc', 'candidate_ipc', @supplier_id,
             'PO-IPC-001', 'pending_finance_approval', 'unpaid',
-            '2026-05-10', 1260, @buyer_id, @now, @now
+            '2026-05-10', 1260, '16880001', 'paid', @buyer_id, @now, @now
           )
         `).run({
           account_id: account.id,
@@ -374,10 +375,16 @@ async function main() {
       seedDb.close();
     }
 
-    await assert.rejects(
-      () => invoke("erp:sku:delete", { id: sku.id }),
-      /不能删除/,
-    );
+    const referencedSkuDelete = await invoke("erp:sku:delete", { id: sku.id });
+    assert.equal(referencedSkuDelete.deleted, true);
+    assert.equal(referencedSkuDelete.archived, true);
+    assert.match(referencedSkuDelete.referenceSummary, /采购需求/);
+    const restoreSkuDb = openErpDatabase({ userDataDir: tempUserData });
+    try {
+      restoreSkuDb.prepare("UPDATE erp_skus SET status = 'active' WHERE id = ?").run(sku.id);
+    } finally {
+      restoreSkuDb.close();
+    }
 
     const purchaseWorkbench = await invoke("erp:purchase:workbench");
     assert.equal(purchaseWorkbench.purchaseRequests.length, 1);
@@ -517,7 +524,10 @@ async function main() {
     try {
       const messageRow = messageDb.prepare("SELECT * FROM erp_1688_message_events WHERE message_id = ?").get("msg_ipc_1688");
       assert.equal(messageRow.topic, "alibaba.trade.order.success");
-      assert.equal(messageRow.status, "received");
+      assert.equal(messageRow.status, "processed");
+      assert.ok(messageRow.processed_at);
+      const messagePo = messageDb.prepare("SELECT external_order_status FROM erp_purchase_orders WHERE id = ?").get("po_ipc");
+      assert.equal(messagePo.external_order_status, "success");
     } finally {
       messageDb.close();
     }

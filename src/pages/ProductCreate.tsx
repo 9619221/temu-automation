@@ -218,7 +218,7 @@ const ERROR_CATEGORY_HINTS: Record<string, string> = {
   "image_gen:auth": "素材准备失败：API 密钥无效或已过期，请在设置 → AI 服务中更新密钥",
   "image_gen:quota": "素材准备失败：额度不足或已触发限流，请充值或稍后再试",
   "image_gen:worker_down": "素材准备失败：处理服务未启动，请重启软件",
-  "image_gen:timeout": "素材准备超时，上游响应过慢，请稍后重试",
+  "image_gen:timeout": "素材准备超时：AI 出图服务响应过慢，系统已自动重试仍未完成，请稍后重试或减少本批数量",
   "image_gen:unknown": "素材准备失败，请稍后重试",
 
   "image_upload:network": "图片上传卖家中心失败：网络异常，请检查网络后重试",

@@ -34,7 +34,9 @@ const {
   PROCUREMENT_APIS,
   call1688OpenApi,
   normalize1688BuyerOrderListResponse,
+  normalize1688MarketingMixConfigResponse,
   normalize1688ProductDetailResponse,
+  normalize1688RefundListResponse,
   normalize1688SearchResponse,
 } = require("./1688Client.cjs");
 const { imageSearchProduct: imageSearchAlphaShopProduct } = require("./alphaShopMcpClient.cjs");
@@ -59,18 +61,56 @@ const BROADCAST_PURCHASE_ACTIONS = new Set([
   "add_comment",
   "accept_pr",
   "mark_sourced",
+  "cancel_pr",
   "quote_feedback",
   "add_sourcing_candidate",
   "source_1688_keyword",
   "source_1688_image",
   "refresh_1688_product_detail",
+  "search_1688_relation_suppliers",
+  "sync_1688_relation_user_info",
+  "follow_1688_product",
+  "unfollow_1688_product",
+  "sync_1688_purchased_products",
   "save_1688_address",
+  "sync_1688_addresses",
   "upsert_sku_1688_source",
   "preview_1688_order",
   "generate_po",
   "push_1688_order",
+  "query_1688_mix_config",
+  "get_1688_payment_url",
+  "query_1688_pay_ways",
+  "query_1688_protocol_pay_status",
+  "prepare_1688_protocol_pay",
+  "fetch_1688_order_detail",
+  "sync_1688_logistics",
+  "get_1688_refund_reasons",
+  "get_1688_max_refund_fee",
+  "upload_1688_refund_voucher",
+  "create_1688_refund",
+  "sync_1688_refunds",
+  "sync_1688_refund_detail",
+  "sync_1688_refund_operations",
+  "submit_1688_return_goods",
+  "list_1688_offline_logistics_companies",
   "request_1688_price_change",
   "sync_1688_order_price",
+  "import_1688_orders",
+  "generate_po_from_1688_order",
+  "link_1688_order_to_po",
+  "cancel_1688_order",
+  "add_1688_order_memo",
+  "add_1688_order_feedback",
+  "confirm_1688_receive_goods",
+  "run_1688_supply_change_agent",
+  "feedback_1688_supply_change_agent",
+  "add_1688_monitor_product",
+  "delete_1688_monitor_product",
+  "query_1688_monitor_products",
+  "run_1688_deep_search_agent",
+  "configure_1688_message_subscriptions",
+  "receive_1688_message",
   "sync_1688_orders",
   "submit_payment_approval",
   "approve_payment",
@@ -93,6 +133,31 @@ const ALIBABA_1688_AUTH_SETTING_ID = "default";
 const ALIBABA_1688_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 const ALIBABA_1688_AUTHORIZE_URL = "https://auth.1688.com/oauth/authorize";
 const ALIBABA_1688_TOKEN_URL_BASE = "https://gw.open.1688.com/openapi/http/1/system.oauth2/getToken";
+const ALIBABA_1688_MESSAGE_TOPICS = Object.freeze([
+  ["order", "ORDER_BUYER_VIEW_BUYER_MAKE", "1688 order created"],
+  ["order", "ORDER_BUYER_VIEW_MODIFY_MEMO", "1688 order memo modified"],
+  ["order", "ORDER_BUYER_VIEW_ORDER_BUYER_CLOSE", "1688 buyer closed order"],
+  ["order", "ORDER_BUYER_VIEW_ORDER_BOPS_CLOSE", "1688 platform closed order"],
+  ["order", "ORDER_BUYER_VIEW_ORDER_PRICE_MODIFY", "1688 order price modified"],
+  ["order", "ORDER_BUYER_VIEW_ORDER_SUCCESS", "1688 trade success"],
+  ["order", "ORDER_BUYER_VIEW_ANNOUNCE_SENDGOODS", "1688 order shipped"],
+  ["order", "ORDER_BUYER_VIEW_ORDER_BUYER_REFUND_IN_SALES", "1688 in-sale refund"],
+  ["order", "ORDER_BUYER_VIEW_ORDER_SELLER_CLOSE", "1688 seller closed order"],
+  ["order", "ORDER_BUYER_VIEW_PART_PART_SENDGOODS", "1688 partial shipment"],
+  ["order", "ORDER_BATCH_PAY", "1688 batch payment"],
+  ["order", "ORDER_BUYER_VIEW_ORDER_PAY", "1688 order paid"],
+  ["order", "ORDER_BUYER_VIEW_ORDER_REFUND_AFTER_SALES", "1688 after-sale refund"],
+  ["order", "ORDER_BUYER_VIEW_ORDER_COMFIRM_RECEIVEGOODS", "1688 received goods"],
+  ["order", "ORDER_BUYER_VIEW_ORDER_STEP_PAY", "1688 step payment"],
+  ["product", "PRODUCT_PRODUCT_INVENTORY_CHANGE", "1688 inventory changed"],
+  ["product", "PRODUCT_RELATION_VIEW_PRODUCT_DELETE", "1688 product deleted"],
+  ["product", "PRODUCT_RELATION_VIEW_PRODUCT_EXPIRE", "1688 product expired"],
+  ["product", "PRODUCT_RELATION_VIEW_PRODUCT_REPOST", "1688 product reposted"],
+  ["product", "PRODUCT_RELATION_VIEW_PRODUCT_NEW_OR_MODIFY", "1688 product created or modified"],
+  ["logistics", "LOGISTICS_BUYER_VIEW_TRACE", "1688 logistics trace"],
+  ["logistics", "LOGISTICS_MAIL_NO_CHANGE", "1688 logistics mail number changed"],
+  ["agent", "AGENT_SUPPLY_CHANGE_RECOMMEND", "1688 supply change recommendation"],
+]);
 
 function toCamelKey(key) {
   return String(key).replace(/_([a-z])/g, (_, char) => char.toUpperCase());
@@ -489,12 +554,40 @@ function upsertCompany(payload = {}) {
 function listAccounts(params = {}) {
   const { db } = requireErp();
   const companyId = optionalString(params.companyId || params.company_id);
-  const whereCompany = companyId ? "WHERE company_id = @company_id" : "";
+  const includeDeleted = Boolean(params.includeDeleted || params.include_deleted);
+  const conditions = [];
+  if (companyId) conditions.push("acct.company_id = @company_id");
+  if (!includeDeleted) conditions.push("acct.status != 'deleted'");
+  const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const rows = db.prepare(`
-    SELECT *
-    FROM erp_accounts
-    ${whereCompany}
-    ORDER BY updated_at DESC, created_at DESC
+    SELECT
+      acct.*,
+      addr.id AS alibaba_1688_address_id,
+      addr.label AS alibaba_1688_address_label,
+      addr.full_name AS alibaba_1688_full_name,
+      addr.mobile AS alibaba_1688_mobile,
+      addr.phone AS alibaba_1688_phone,
+      addr.post_code AS alibaba_1688_post_code,
+      addr.province_text AS alibaba_1688_province_text,
+      addr.city_text AS alibaba_1688_city_text,
+      addr.area_text AS alibaba_1688_area_text,
+      addr.town_text AS alibaba_1688_town_text,
+      addr.address AS alibaba_1688_address,
+      addr.address_id AS alibaba_1688_address_remote_id,
+      addr.is_default AS alibaba_1688_address_is_default
+    FROM erp_accounts acct
+    LEFT JOIN erp_1688_delivery_addresses addr
+      ON addr.id = (
+        SELECT latest_addr.id
+        FROM erp_1688_delivery_addresses latest_addr
+        WHERE latest_addr.company_id = acct.company_id
+          AND latest_addr.account_id = acct.id
+          AND latest_addr.status = 'active'
+        ORDER BY latest_addr.is_default DESC, latest_addr.updated_at DESC, latest_addr.created_at DESC
+        LIMIT 1
+      )
+    ${whereClause}
+    ORDER BY acct.updated_at DESC, acct.created_at DESC
     LIMIT @limit OFFSET @offset
   `).all({
     company_id: companyId,
@@ -535,6 +628,37 @@ function upsertAccount(payload = {}, actor = erpState.currentUser) {
   `).run(row);
 
   return toCamelRow(db.prepare("SELECT * FROM erp_accounts WHERE id = ?").get(row.id));
+}
+
+function deleteAccount(payload = {}, actor = erpState.currentUser) {
+  const { db } = requireErp();
+  const accountId = requireString(payload.id || payload.accountId || payload.account_id, "accountId");
+  const existing = db.prepare("SELECT id, company_id, status FROM erp_accounts WHERE id = ?").get(accountId);
+  if (!existing) throw new Error("店铺不存在或已删除");
+  const companyId = normalizeCompanyId(payload.companyId || payload.company_id || existing.company_id, actor);
+  if (normalizeCompanyId(existing.company_id, actor) !== companyId) {
+    throw new Error("店铺不属于当前公司，不能删除");
+  }
+  const now = nowIso();
+  db.transaction(() => {
+    db.prepare(`
+      UPDATE erp_accounts
+      SET status = 'deleted',
+          updated_at = ?
+      WHERE id = ?
+    `).run(now, accountId);
+    db.prepare(`
+      UPDATE erp_1688_delivery_addresses
+      SET status = 'blocked',
+          is_default = 0,
+          updated_at = ?
+      WHERE account_id = ?
+    `).run(now, accountId);
+  })();
+  return {
+    id: accountId,
+    deleted: true,
+  };
 }
 
 function listUsers(params = {}) {
@@ -1468,8 +1592,602 @@ function normalize1688MessagePayload(input = {}) {
   };
 }
 
+function parseEmbeddedJson(value) {
+  if (!value || typeof value !== "string") return null;
+  const text = value.trim();
+  if (!text || !/^[{[]/.test(text)) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function expandMessageValue(value, depth = 0) {
+  if (depth > 6 || value === null || value === undefined) return value;
+  if (typeof value === "string") {
+    const parsed = parseEmbeddedJson(value);
+    return parsed ? expandMessageValue(parsed, depth + 1) : value;
+  }
+  if (Array.isArray(value)) return value.map((item) => expandMessageValue(item, depth + 1));
+  if (typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, next]) => [key, expandMessageValue(next, depth + 1)]),
+    );
+  }
+  return value;
+}
+
+function findFirstDeepValue(value, keys = [], depth = 0) {
+  if (!value || depth > 8) return null;
+  const keySet = new Set(keys.map((key) => String(key).toLowerCase()));
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findFirstDeepValue(item, keys, depth + 1);
+      if (found !== null) return found;
+    }
+    return null;
+  }
+  if (typeof value !== "object") return null;
+  for (const [key, next] of Object.entries(value)) {
+    if (keySet.has(String(key).toLowerCase()) && next !== null && next !== undefined && next !== "") {
+      if (Array.isArray(next)) {
+        const first = next.find((item) => item !== null && item !== undefined && item !== "");
+        if (first !== undefined) return first;
+      }
+      return next;
+    }
+  }
+  for (const next of Object.values(value)) {
+    const found = findFirstDeepValue(next, keys, depth + 1);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
+function normalizeMessageTopic(normalized = {}) {
+  const topic = optionalString(normalized.topic || normalized.messageType);
+  return topic ? topic.toUpperCase() : "";
+}
+
+function extract1688MessageRefs(input = {}, normalized = {}) {
+  const expanded = expandMessageValue({
+    query: input.query || {},
+    payload: input.payload || {},
+    bodyText: input.bodyText || "",
+  });
+  const orderId = findFirstDeepValue(expanded, [
+    "orderId",
+    "orderID",
+    "order_id",
+    "tradeId",
+    "tradeID",
+    "trade_id",
+    "mainOrderId",
+    "main_order_id",
+    "bizId",
+    "resourceId",
+  ]);
+  const refundId = findFirstDeepValue(expanded, [
+    "refundId",
+    "refundID",
+    "refund_id",
+    "orderRefundId",
+    "disputeId",
+  ]);
+  const logisticsBillNo = findFirstDeepValue(expanded, [
+    "logisticsBillNo",
+    "logistics_bill_no",
+    "mailNo",
+    "mail_no",
+    "trackingNo",
+    "tracking_no",
+  ]);
+  const productId = findFirstDeepValue(expanded, [
+    "offerId",
+    "offerID",
+    "productId",
+    "productID",
+    "product_id",
+    "itemId",
+    "itemID",
+  ]);
+  const skuId = findFirstDeepValue(expanded, [
+    "skuId",
+    "skuID",
+    "sku_id",
+    "cargoSkuId",
+    "cargoSkuID",
+  ]);
+  const specId = findFirstDeepValue(expanded, [
+    "specId",
+    "specID",
+    "spec_id",
+    "cargoSpecId",
+    "cargoSpecID",
+  ]);
+  return {
+    topic: normalizeMessageTopic(normalized),
+    externalOrderId: orderId ? String(orderId) : null,
+    refundId: refundId ? String(refundId) : null,
+    logisticsBillNo: logisticsBillNo ? String(logisticsBillNo) : null,
+    productId: productId ? String(productId) : null,
+    skuId: skuId ? String(skuId) : null,
+    specId: specId ? String(specId) : null,
+    expanded,
+  };
+}
+
+function findPurchaseOrderByExternalOrderId(db, externalOrderId) {
+  const orderId = optionalString(externalOrderId);
+  if (!orderId) return null;
+  return db.prepare(`
+    SELECT *
+    FROM erp_purchase_orders
+    WHERE external_order_id = ?
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `).get(orderId) || null;
+}
+
+function build1688MessageEffect(topic = "") {
+  const text = String(topic || "").toUpperCase();
+  if (!text) return null;
+  const normalized = text.replace(/[^A-Z0-9]+/g, "_");
+  const hasTopic = (part) => text.includes(part) || normalized.includes(part);
+  if (hasTopic("REFUND")) {
+    return {
+      externalOrderStatus: hasTopic("AFTER_SALES") ? "refund_after_sales" : "refund_in_sales",
+      paymentStatus: "partial_refund",
+      eventType: "1688_refund_message",
+      message: "1688 退款售后消息已同步",
+      refund: true,
+    };
+  }
+  if (hasTopic("ORDER_PAY") || hasTopic("BATCH_PAY") || hasTopic("ORDER_STEP_PAY")) {
+    return {
+      externalOrderStatus: "paid",
+      paymentStatus: "paid",
+      poStatus: "paid",
+      eventType: "1688_payment_message",
+      message: "1688 付款消息已同步",
+    };
+  }
+  if (hasTopic("ANNOUNCE_SENDGOODS") || hasTopic("PART_PART_SENDGOODS")) {
+    return {
+      externalOrderStatus: hasTopic("PART_PART") ? "partial_shipped" : "shipped",
+      poStatus: "shipped",
+      eventType: "1688_ship_message",
+      message: "1688 发货消息已同步",
+    };
+  }
+  if (hasTopic("LOGISTICS")) {
+    return {
+      externalOrderStatus: "logistics_updated",
+      eventType: "1688_logistics_message",
+      message: "1688 物流消息已同步",
+    };
+  }
+  if (hasTopic("COMFIRM_RECEIVEGOODS") || hasTopic("CONFIRM_RECEIVEGOODS")) {
+    return {
+      externalOrderStatus: "received",
+      eventType: "1688_receive_message",
+      message: "1688 确认收货消息已同步",
+    };
+  }
+  if (hasTopic("ORDER_SUCCESS")) {
+    return {
+      externalOrderStatus: "success",
+      eventType: "1688_order_success_message",
+      message: "1688 交易成功消息已同步",
+    };
+  }
+  if (hasTopic("ORDER_PRICE_MODIFY")) {
+    return {
+      externalOrderStatus: "price_modified",
+      eventType: "1688_price_message",
+      message: "1688 改价消息已同步",
+    };
+  }
+  if (hasTopic("MODIFY_MEMO")) {
+    return {
+      externalOrderStatus: "memo_modified",
+      eventType: "1688_memo_message",
+      message: "1688 备注修改消息已同步",
+    };
+  }
+  if (hasTopic("ORDER_BUYER_CLOSE") || hasTopic("ORDER_SELLER_CLOSE") || hasTopic("ORDER_BOPS_CLOSE")) {
+    return {
+      externalOrderStatus: "closed",
+      poStatus: "cancelled",
+      eventType: "1688_close_message",
+      message: "1688 关闭订单消息已同步",
+    };
+  }
+  if (hasTopic("BUYER_MAKE")) {
+    return {
+      externalOrderStatus: "created",
+      eventType: "1688_create_message",
+      message: "1688 创建订单消息已同步",
+    };
+  }
+  if (hasTopic("PRODUCT")) {
+    let productStatus = "product_changed";
+    if (hasTopic("DELETE")) productStatus = "product_deleted";
+    else if (hasTopic("EXPIRE")) productStatus = "product_expired";
+    else if (hasTopic("REPOST")) productStatus = "product_reposted";
+    else if (hasTopic("INVENTORY")) productStatus = "inventory_changed";
+    return {
+      product: true,
+      productStatus,
+      eventType: "1688_product_message",
+      message: "1688 商品消息已同步",
+    };
+  }
+  if (hasTopic("AGENT_SUPPLY_CHANGE_RECOMMEND")) {
+    return {
+      agent: true,
+      eventType: "1688_supply_agent_message",
+      message: "1688 换供推荐消息已接收",
+    };
+  }
+  return null;
+}
+
+function safeMessagePoStatus(currentStatus, nextStatus) {
+  if (!nextStatus) return null;
+  const current = optionalString(currentStatus);
+  if (["closed", "cancelled", "inbounded"].includes(current)) return null;
+  if (nextStatus === "paid" && ["shipped", "arrived"].includes(current)) return null;
+  if (nextStatus === "shipped" && ["arrived"].includes(current)) return null;
+  if (nextStatus === "cancelled" && ["paid", "supplier_processing", "shipped", "arrived"].includes(current)) return null;
+  return nextStatus;
+}
+
+function updatePurchaseOrderFrom1688Message({ db, services, po, refs, effect, row }) {
+  const before = po;
+  const now = nowIso();
+  const nextStatus = safeMessagePoStatus(before.status, effect.poStatus);
+  const params = {
+    id: before.id,
+    status: nextStatus || before.status,
+    payment_status: effect.paymentStatus || before.payment_status,
+    external_order_status: effect.externalOrderStatus || before.external_order_status,
+    external_order_payload_json: trimJsonForStorage({
+      ...(parseJsonObject(before.external_order_payload_json) || {}),
+      lastMessage: {
+        messageId: row.message_id,
+        topic: row.topic,
+        messageType: row.message_type,
+        refundId: refs.refundId,
+        logisticsBillNo: refs.logisticsBillNo,
+        receivedAt: row.received_at,
+      },
+    }),
+    external_order_synced_at: now,
+    updated_at: now,
+  };
+  db.prepare(`
+    UPDATE erp_purchase_orders
+    SET status = @status,
+        payment_status = @payment_status,
+        external_order_status = @external_order_status,
+        external_order_payload_json = @external_order_payload_json,
+        external_order_synced_at = @external_order_synced_at,
+        updated_at = @updated_at
+    WHERE id = @id
+  `).run(params);
+  const after = getPurchaseOrder(db, before.id);
+  services.workflow.writeAudit({
+    accountId: after.account_id || before.account_id,
+    actor: { id: null, role: "system" },
+    action: "process_1688_message",
+    entityType: "purchase_order",
+    entityId: before.id,
+    before,
+    after,
+  });
+  if (before.pr_id) {
+    writePurchaseRequestEvent(db, getPurchaseRequest(db, before.pr_id), { role: "system" }, effect.eventType, effect.message);
+  }
+  return after;
+}
+
+function get1688MessageTopicDefinition(topic) {
+  const normalizedTopic = optionalString(topic)?.toUpperCase();
+  if (!normalizedTopic) return null;
+  const found = ALIBABA_1688_MESSAGE_TOPICS.find((item) => item[1] === normalizedTopic);
+  if (found) {
+    return {
+      category: found[0],
+      topic: found[1],
+      displayName: found[2],
+    };
+  }
+  if (normalizedTopic.includes("PRODUCT")) return { category: "product", topic: normalizedTopic, displayName: normalizedTopic };
+  if (normalizedTopic.includes("LOGISTICS")) return { category: "logistics", topic: normalizedTopic, displayName: normalizedTopic };
+  if (normalizedTopic.includes("AGENT")) return { category: "agent", topic: normalizedTopic, displayName: normalizedTopic };
+  return { category: "order", topic: normalizedTopic, displayName: normalizedTopic };
+}
+
+function get1688MessageCallbackUrl(payload = {}) {
+  const explicit = optionalString(payload.callbackUrl || payload.callback_url);
+  if (explicit) return explicit;
+  const configured = optionalString(
+    process.env.ERP_1688_MESSAGE_CALLBACK_URL
+    || process.env.ERP_PUBLIC_1688_MESSAGE_CALLBACK_URL,
+  );
+  if (configured) return configured;
+  const publicBase = optionalString(process.env.ERP_PUBLIC_URL || process.env.ERP_BASE_URL || process.env.PUBLIC_URL);
+  if (publicBase) return `${publicBase.replace(/\/+$/, "")}/api/1688/message`;
+  try {
+    const status = getLanStatus();
+    const base = optionalString(status.primaryUrl || status.localUrl);
+    return base ? `${base.replace(/\/+$/, "")}/api/1688/message` : null;
+  } catch {
+    return null;
+  }
+}
+
+function upsert1688MessageSubscriptions({ db, payload = {}, actor = {}, companyId: explicitCompanyId = null } = {}) {
+  const now = nowIso();
+  const companyId = normalizeCompanyId(explicitCompanyId || payload.companyId || payload.company_id, actor);
+  const callbackUrl = get1688MessageCallbackUrl(payload);
+  const requestedTopics = new Set(
+    (Array.isArray(payload.topics) && payload.topics.length
+      ? payload.topics
+      : ALIBABA_1688_MESSAGE_TOPICS.map((item) => item[1]))
+      .map((item) => optionalString(item)?.toUpperCase())
+      .filter(Boolean),
+  );
+  const rows = [];
+  for (const topic of requestedTopics) {
+    const def = get1688MessageTopicDefinition(topic);
+    const row = {
+      id: createId("1688_sub"),
+      company_id: companyId,
+      topic: def.topic,
+      category: def.category,
+      display_name: def.displayName,
+      status: optionalString(payload.status) || "enabled",
+      callback_url: callbackUrl,
+      created_by: optionalString(actor.id),
+      created_at: now,
+      updated_at: now,
+    };
+    db.prepare(`
+      INSERT INTO erp_1688_message_subscriptions (
+        id, company_id, topic, category, display_name, status, callback_url,
+        created_by, created_at, updated_at
+      )
+      VALUES (
+        @id, @company_id, @topic, @category, @display_name, @status, @callback_url,
+        @created_by, @created_at, @updated_at
+      )
+      ON CONFLICT(company_id, topic) DO UPDATE SET
+        category = excluded.category,
+        display_name = excluded.display_name,
+        status = excluded.status,
+        callback_url = COALESCE(excluded.callback_url, callback_url),
+        updated_at = excluded.updated_at
+    `).run(row);
+    rows.push(db.prepare(`
+      SELECT *
+      FROM erp_1688_message_subscriptions
+      WHERE company_id = ? AND topic = ?
+    `).get(companyId, def.topic));
+  }
+  return {
+    callbackUrl,
+    count: rows.length,
+    subscriptions: rows.map(toCamelRow),
+    note: "Local subscriptions are ready. Configure the same callback URL in the 1688 open platform message console.",
+  };
+}
+
+function ensureDefault1688MessageSubscriptions(db, params = {}) {
+  return upsert1688MessageSubscriptions({
+    db,
+    payload: {
+      callbackUrl: params.callbackUrl || params.callback_url,
+      status: "enabled",
+    },
+    actor: params.actor || {},
+    companyId: params.companyId || params.company_id,
+  });
+}
+
+function configure1688MessageSubscriptionsAction({ db, payload = {}, actor = {} }) {
+  assertActorRole(actor, ["manager", "admin"], "1688 message subscriptions");
+  return upsert1688MessageSubscriptions({ db, payload, actor });
+}
+
+function list1688MessageSubscriptions(db, params = {}) {
+  const companyId = normalizeCompanyId(params.companyId || params.company_id, erpState.currentUser);
+  return db.prepare(`
+    SELECT *
+    FROM erp_1688_message_subscriptions
+    WHERE company_id = @company_id
+    ORDER BY category ASC, topic ASC
+  `).all({ company_id: companyId }).map(toCamelRow);
+}
+
+function list1688MessageEvents(db, params = {}) {
+  const limit = normalizeLimit(params.limit, 30);
+  return db.prepare(`
+    SELECT *
+    FROM erp_1688_message_events
+    ORDER BY received_at DESC
+    LIMIT @limit
+  `).all({ limit }).map((row) => {
+    const next = toCamelRow(row);
+    next.headers = parseJsonObject(row.headers_json);
+    next.query = parseJsonObject(row.query_json);
+    next.payload = parseJsonObject(row.payload_json);
+    delete next.headersJson;
+    delete next.queryJson;
+    delete next.payloadJson;
+    return next;
+  });
+}
+
+function update1688MessageSubscriptionStats(db, row = {}, status = "received") {
+  const def = get1688MessageTopicDefinition(row.topic || row.message_type);
+  if (!def) return null;
+  const now = nowIso();
+  const companyId = DEFAULT_COMPANY_ID;
+  const callbackUrl = get1688MessageCallbackUrl();
+  db.prepare(`
+    INSERT INTO erp_1688_message_subscriptions (
+      id, company_id, topic, category, display_name, status, callback_url,
+      last_message_event_id, last_received_at, created_at, updated_at
+    )
+    VALUES (
+      @id, @company_id, @topic, @category, @display_name, 'enabled', @callback_url,
+      @last_message_event_id, @last_received_at, @created_at, @updated_at
+    )
+    ON CONFLICT(company_id, topic) DO UPDATE SET
+      category = excluded.category,
+      display_name = excluded.display_name,
+      callback_url = COALESCE(excluded.callback_url, callback_url),
+      last_message_event_id = excluded.last_message_event_id,
+      last_received_at = excluded.last_received_at,
+      processed_count = processed_count + @processed_delta,
+      unmatched_count = unmatched_count + @unmatched_delta,
+      ignored_count = ignored_count + @ignored_delta,
+      error_count = error_count + @error_delta,
+      updated_at = excluded.updated_at
+  `).run({
+    id: createId("1688_sub"),
+    company_id: companyId,
+    topic: def.topic,
+    category: def.category,
+    display_name: def.displayName,
+    callback_url: callbackUrl,
+    last_message_event_id: row.id,
+    last_received_at: row.received_at || now,
+    created_at: now,
+    updated_at: now,
+    processed_delta: status === "processed" ? 1 : 0,
+    unmatched_delta: status === "unmatched" ? 1 : 0,
+    ignored_delta: status === "ignored" ? 1 : 0,
+    error_delta: status === "error" ? 1 : 0,
+  });
+  return db.prepare(`
+    SELECT *
+    FROM erp_1688_message_subscriptions
+    WHERE company_id = ? AND topic = ?
+  `).get(companyId, def.topic);
+}
+
+function process1688ProductMessageEvent({ db, services, refs, effect, row }) {
+  const productId = optionalString(refs.productId);
+  if (!productId) return { status: "unmatched", reason: "product_id_not_found", refs };
+  const rows = db.prepare(`
+    SELECT *
+    FROM erp_sku_1688_sources
+    WHERE external_offer_id = @external_offer_id
+      AND (@external_sku_id IS NULL OR external_sku_id = @external_sku_id OR external_sku_id = '')
+      AND (@external_spec_id IS NULL OR external_spec_id = @external_spec_id OR external_spec_id = '')
+  `).all({
+    external_offer_id: productId,
+    external_sku_id: optionalString(refs.skuId),
+    external_spec_id: optionalString(refs.specId),
+  });
+  if (!rows.length) return { status: "unmatched", reason: "sku_1688_source_not_found", refs };
+  const now = nowIso();
+  const nextStatus = ["product_deleted", "product_expired"].includes(effect.productStatus)
+    ? "inactive"
+    : (["product_reposted", "product_changed"].includes(effect.productStatus) ? "active" : null);
+  for (const source of rows) {
+    const before = source;
+    const payload = {
+      ...(parseJsonObject(source.source_payload_json) || {}),
+      lastMessage: {
+        messageId: row.message_id,
+        topic: row.topic,
+        productStatus: effect.productStatus,
+        receivedAt: row.received_at,
+        refs,
+      },
+    };
+    db.prepare(`
+      UPDATE erp_sku_1688_sources
+      SET status = COALESCE(@status, status),
+          source_payload_json = @source_payload_json,
+          updated_at = @updated_at
+      WHERE id = @id
+    `).run({
+      id: source.id,
+      status: nextStatus,
+      source_payload_json: trimJsonForStorage(payload),
+      updated_at: now,
+    });
+    const after = db.prepare("SELECT * FROM erp_sku_1688_sources WHERE id = ?").get(source.id);
+    services.workflow.writeAudit({
+      accountId: source.account_id,
+      actor: { id: null, role: "system" },
+      action: "process_1688_product_message",
+      entityType: "sku_1688_source",
+      entityId: source.id,
+      before,
+      after,
+    });
+  }
+  return {
+    status: "processed",
+    refs,
+    productStatus: effect.productStatus,
+    updatedCount: rows.length,
+  };
+}
+
+function process1688AgentMessageEvent({ refs, effect }) {
+  return {
+    status: "processed",
+    refs,
+    agentStatus: effect.eventType,
+  };
+}
+
+function process1688MessageEvent({ db, services, input, normalized, row }) {
+  const refs = extract1688MessageRefs(input, normalized);
+  const effect = build1688MessageEffect(refs.topic);
+  if (!effect) {
+    return { status: "ignored", reason: "unsupported_topic", refs };
+  }
+  if (effect.product) {
+    return process1688ProductMessageEvent({ db, services, refs, effect, row });
+  }
+  if (effect.agent) {
+    return process1688AgentMessageEvent({ refs, effect });
+  }
+  const po = findPurchaseOrderByExternalOrderId(db, refs.externalOrderId);
+  if (!po) {
+    return { status: "unmatched", reason: "purchase_order_not_found", refs };
+  }
+  const afterPo = updatePurchaseOrderFrom1688Message({ db, services, po, refs, effect, row });
+  if (effect.refund || refs.refundId) {
+    upsert1688RefundRow(db, {
+      po: afterPo,
+      refund: {
+        refundId: refs.refundId,
+        externalOrderId: refs.externalOrderId,
+        status: effect.externalOrderStatus,
+        raw: refs.expanded,
+      },
+      actor: { role: "system" },
+    });
+  }
+  return {
+    status: "processed",
+    refs,
+    purchaseOrder: toCamelRow(afterPo),
+  };
+}
+
 function receive1688Message(input = {}) {
-  const { db } = requireErp();
+  const { db, services } = requireErp();
   const normalized = normalize1688MessagePayload(input);
   const row = {
     id: createId("1688_msg"),
@@ -1498,7 +2216,48 @@ function receive1688Message(input = {}) {
     )
   `).run(row);
 
-  return toCamelRow(row);
+  try {
+    const processResult = process1688MessageEvent({ db, services, input, normalized, row });
+    const status = processResult.status === "processed"
+      ? "processed"
+      : (processResult.status === "unmatched" ? "unmatched" : "ignored");
+    db.prepare(`
+      UPDATE erp_1688_message_events
+      SET status = @status,
+          error_message = @error_message,
+          processed_at = @processed_at
+      WHERE id = @id
+    `).run({
+      id: row.id,
+      status,
+      error_message: processResult.reason || null,
+      processed_at: nowIso(),
+    });
+    update1688MessageSubscriptionStats(db, row, status);
+    broadcastPurchaseUpdate("receive_1688_message", {}, { role: "system" }, processResult);
+    return {
+      ...toCamelRow({ ...row, status, processed_at: nowIso(), error_message: processResult.reason || null }),
+      processResult,
+    };
+  } catch (error) {
+    db.prepare(`
+      UPDATE erp_1688_message_events
+      SET status = 'error',
+          error_message = @error_message,
+          processed_at = @processed_at
+      WHERE id = @id
+    `).run({
+      id: row.id,
+      error_message: error?.message || String(error),
+      processed_at: nowIso(),
+    });
+    update1688MessageSubscriptionStats(db, row, "error");
+    broadcastPurchaseUpdate("receive_1688_message", {}, { role: "system" }, { status: "error" });
+    return {
+      ...toCamelRow({ ...row, status: "error", error_message: error?.message || String(error), processed_at: nowIso() }),
+      processResult: { status: "error", error: error?.message || String(error) },
+    };
+  }
 }
 
 async function call1688ProcurementApi({ db, actor, accountId, action, api, params }) {
@@ -1775,9 +2534,11 @@ function listSkus(params = {}) {
   const { db } = requireErp();
   const accountId = optionalString(params.accountId || params.account_id);
   const companyId = optionalString(params.companyId || params.company_id);
+  const includeDeleted = Boolean(params.includeDeleted || params.include_deleted);
   const conditions = [];
   if (accountId) conditions.push("(sku.account_id = @account_id OR sku.account_id IS NULL)");
   if (companyId) conditions.push("sku.company_id = @company_id");
+  if (!includeDeleted) conditions.push("sku.status != 'deleted'");
   const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const rows = db.prepare(`
     SELECT
@@ -1957,7 +2718,28 @@ function deleteSku(payload = {}, actor = erpState.currentUser) {
   const references = getSkuReferenceCounts(db, skuId);
   if (references.length > 0) {
     const detail = references.map((item) => `${item.label}${item.count}条`).join("、");
-    throw new Error(`商品资料已被${detail}引用，不能删除`);
+    const now = nowIso();
+    db.transaction(() => {
+      db.prepare(`
+        UPDATE erp_sku_1688_sources
+        SET status = 'deleted',
+            is_default = 0,
+            updated_at = ?
+        WHERE sku_id = ?
+      `).run(now, skuId);
+      db.prepare(`
+        UPDATE erp_skus
+        SET status = 'deleted',
+            updated_at = ?
+        WHERE id = ?
+      `).run(now, skuId);
+    })();
+    return {
+      id: skuId,
+      deleted: true,
+      archived: true,
+      referenceSummary: detail,
+    };
   }
 
   db.transaction(() => {
@@ -2034,6 +2816,7 @@ function listSku1688Sources(params = {}) {
   const { db } = requireErp();
   const accountId = optionalString(params.accountId || params.account_id);
   const skuId = optionalString(params.skuId || params.sku_id);
+  const includeDeleted = Boolean(params.includeDeleted || params.include_deleted);
   const conditions = [];
   const values = {
     account_id: accountId,
@@ -2045,16 +2828,22 @@ function listSku1688Sources(params = {}) {
   if (accountId) conditions.push("source.account_id = @account_id");
   if (skuId) conditions.push("source.sku_id = @sku_id");
   if (values.status) conditions.push("source.status = @status");
+  if (!includeDeleted) {
+    conditions.push("source.status != 'deleted'");
+    conditions.push("(sku.status IS NULL OR sku.status != 'deleted')");
+  }
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const rows = db.prepare(`
     SELECT
       source.*,
       acct.name AS account_name,
+      supplier.name AS system_supplier_name,
       sku.internal_sku_code,
       sku.product_name,
       sku.color_spec
     FROM erp_sku_1688_sources source
     LEFT JOIN erp_skus sku ON sku.id = source.sku_id
+    LEFT JOIN erp_suppliers supplier ON supplier.id = sku.supplier_id
     LEFT JOIN erp_accounts acct ON acct.id = source.account_id
     ${where}
     ORDER BY source.is_default DESC, source.updated_at DESC, source.created_at DESC
@@ -2102,7 +2891,7 @@ function buildCandidateFromSku1688Source(db, pr = {}, source = {}, actor = {}) {
     moq: Math.max(1, Math.floor(Number(optionalNumber(source.moq) ?? 1))),
     lead_days: optionalNumber(source.lead_days),
     logistics_fee: optionalNumber(source.logistics_fee) ?? 0,
-    remark: "来自 1688 映射总表",
+    remark: "来自供应商管理总表",
     status: "candidate",
     created_by: actor.id || null,
     external_offer_id: optionalString(source.external_offer_id),
@@ -2613,6 +3402,37 @@ function getPurchaseWorkbench(params = {}) {
          AND map_source.status = 'active'
         WHERE map_line.po_id = po.id
       ) AS mapping_count
+      ,
+      (
+        SELECT COUNT(*)
+        FROM erp_1688_refunds refund
+        WHERE refund.po_id = po.id
+          OR (po.external_order_id IS NOT NULL AND refund.external_order_id = po.external_order_id)
+      ) AS refund_count,
+      (
+        SELECT latest_refund.refund_id
+        FROM erp_1688_refunds latest_refund
+        WHERE latest_refund.po_id = po.id
+          OR (po.external_order_id IS NOT NULL AND latest_refund.external_order_id = po.external_order_id)
+        ORDER BY latest_refund.updated_at DESC
+        LIMIT 1
+      ) AS latest_refund_id,
+      (
+        SELECT latest_refund.refund_status
+        FROM erp_1688_refunds latest_refund
+        WHERE latest_refund.po_id = po.id
+          OR (po.external_order_id IS NOT NULL AND latest_refund.external_order_id = po.external_order_id)
+        ORDER BY latest_refund.updated_at DESC
+        LIMIT 1
+      ) AS latest_refund_status,
+      (
+        SELECT latest_refund.refund_amount
+        FROM erp_1688_refunds latest_refund
+        WHERE latest_refund.po_id = po.id
+          OR (po.external_order_id IS NOT NULL AND latest_refund.external_order_id = po.external_order_id)
+        ORDER BY latest_refund.updated_at DESC
+        LIMIT 1
+      ) AS latest_refund_amount
     FROM erp_purchase_orders po
     LEFT JOIN erp_accounts acct ON acct.id = po.account_id
     LEFT JOIN erp_suppliers supplier ON supplier.id = po.supplier_id
@@ -2732,6 +3552,7 @@ function getPurchaseWorkbench(params = {}) {
     paymentQueueAmount: paymentQueue.reduce((sum, item) => (
       sum + Number(item.paymentAmount ?? item.totalAmount ?? 0)
     ), 0),
+    refundOrderCount: purchaseOrders.filter((item) => Number(item.refundCount || 0) > 0).length,
     unreadPurchaseRequestCount: purchaseRequests.reduce((sum, item) => (
       sum + Number(item.unreadCount || 0)
     ), 0),
@@ -2748,7 +3569,14 @@ function getPurchaseWorkbench(params = {}) {
     LIMIT 500
   `).all({ company_id: companyId }).map(toCamelRow);
 
+  ensureDefault1688MessageSubscriptions(db, {
+    companyId,
+    actor: params.user || erpState.currentUser || {},
+  });
+
   const alibaba1688Addresses = list1688DeliveryAddresses({ status: "active", companyId });
+  const alibaba1688MessageSubscriptions = list1688MessageSubscriptions(db, { companyId });
+  const recent1688MessageEvents = list1688MessageEvents(db, { limit: 30 });
 
   return {
     generatedAt: nowIso(),
@@ -2761,6 +3589,8 @@ function getPurchaseWorkbench(params = {}) {
     sku1688Sources,
     supplierOptions,
     alibaba1688Addresses,
+    alibaba1688MessageSubscriptions,
+    recent1688MessageEvents,
   };
 }
 
@@ -3849,34 +4679,53 @@ function list1688DeliveryAddresses(params = {}) {
   const { db } = requireErp();
   const status = optionalString(params.status);
   const companyId = normalizeCompanyId(params.companyId || params.company_id, erpState.currentUser);
-  const rows = status
-    ? db.prepare(`
-      SELECT *
-      FROM erp_1688_delivery_addresses
-      WHERE company_id = @company_id AND status = @status
-      ORDER BY is_default DESC, updated_at DESC, created_at DESC
-    `).all({ company_id: companyId, status })
-    : db.prepare(`
-      SELECT *
-      FROM erp_1688_delivery_addresses
-      WHERE company_id = @company_id
-      ORDER BY is_default DESC, updated_at DESC, created_at DESC
-    `).all({ company_id: companyId });
+  const accountId = optionalString(params.accountId || params.account_id);
+  const conditions = ["addr.company_id = @company_id"];
+  const values = { company_id: companyId, status, account_id: accountId };
+  if (status) conditions.push("addr.status = @status");
+  if (accountId) conditions.push("addr.account_id = @account_id");
+  const rows = db.prepare(`
+    SELECT addr.*, acct.name AS account_name
+    FROM erp_1688_delivery_addresses addr
+    LEFT JOIN erp_accounts acct ON acct.id = addr.account_id
+    WHERE ${conditions.join(" AND ")}
+    ORDER BY addr.is_default DESC, addr.updated_at DESC, addr.created_at DESC
+  `).all(values);
   return rows.map(to1688DeliveryAddress);
 }
 
-function get1688DeliveryAddress(db, addressId = null, companyId = DEFAULT_COMPANY_ID) {
+function get1688DeliveryAddress(db, addressId = null, companyId = DEFAULT_COMPANY_ID, accountId = null) {
   const id = optionalString(addressId);
   const normalizedCompanyId = normalizeCompanyId(companyId, null);
+  const normalizedAccountId = optionalString(accountId);
   if (id) {
     const row = db.prepare("SELECT * FROM erp_1688_delivery_addresses WHERE id = ? AND company_id = ?").get(id, normalizedCompanyId);
     if (!row) throw new Error(`1688 delivery address not found: ${id}`);
+    if (normalizedAccountId && optionalString(row.account_id) !== normalizedAccountId) {
+      throw new Error("1688 delivery address does not belong to this store");
+    }
     return row;
+  }
+  if (normalizedAccountId) {
+    const row = db.prepare(`
+      SELECT *
+      FROM erp_1688_delivery_addresses
+      WHERE company_id = @company_id
+        AND account_id = @account_id
+        AND status = 'active'
+      ORDER BY is_default DESC, updated_at DESC, created_at DESC
+      LIMIT 1
+    `).get({ company_id: normalizedCompanyId, account_id: normalizedAccountId });
+    if (row) return row;
+    const account = db.prepare("SELECT name FROM erp_accounts WHERE id = ?").get(normalizedAccountId);
+    throw new Error(`店铺${account?.name ? `「${account.name}」` : ""}还没有绑定 1688 地址，请先到店铺维护`);
   }
   const row = db.prepare(`
     SELECT *
     FROM erp_1688_delivery_addresses
-    WHERE company_id = @company_id AND status = 'active'
+    WHERE company_id = @company_id
+      AND (account_id IS NULL OR account_id = '')
+      AND status = 'active'
     ORDER BY is_default DESC, updated_at DESC, created_at DESC
     LIMIT 1
   `).get({ company_id: normalizedCompanyId });
@@ -3888,10 +4737,19 @@ function save1688DeliveryAddressAction({ db, payload, actor }) {
   assertActorRole(actor, ["buyer", "manager", "admin"], "1688 delivery address config");
   const now = nowIso();
   const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
+  const accountId = optionalString(payload.accountId || payload.account_id);
+  if (accountId) {
+    const account = db.prepare("SELECT id, company_id FROM erp_accounts WHERE id = ?").get(accountId);
+    if (!account) throw new Error("店铺不存在，无法绑定 1688 地址");
+    if (normalizeCompanyId(account.company_id, actor) !== companyId) {
+      throw new Error("店铺不属于当前公司，无法绑定 1688 地址");
+    }
+  }
   const rawAddressParam = payload.rawAddressParam || payload.addressParam || {};
   const row = {
     id: optionalString(payload.addressId || payload.id) || createId("1688_addr"),
     company_id: companyId,
+    account_id: accountId || null,
     label: requireString(payload.label || payload.name, "label"),
     full_name: requireString(payload.fullName || payload.receiverName || rawAddressParam.fullName, "fullName"),
     mobile: optionalString(payload.mobile || rawAddressParam.mobile),
@@ -3918,21 +4776,28 @@ function save1688DeliveryAddressAction({ db, payload, actor }) {
   }
   const existing = db.prepare("SELECT created_at, created_by FROM erp_1688_delivery_addresses WHERE id = ?").get(row.id);
   if (row.is_default) {
-    db.prepare("UPDATE erp_1688_delivery_addresses SET is_default = 0 WHERE company_id = ? AND id != ?").run(row.company_id, row.id);
+    if (row.account_id) {
+      db.prepare("UPDATE erp_1688_delivery_addresses SET is_default = 0 WHERE company_id = ? AND account_id = ? AND id != ?")
+        .run(row.company_id, row.account_id, row.id);
+    } else {
+      db.prepare("UPDATE erp_1688_delivery_addresses SET is_default = 0 WHERE company_id = ? AND (account_id IS NULL OR account_id = '') AND id != ?")
+        .run(row.company_id, row.id);
+    }
   }
   db.prepare(`
     INSERT INTO erp_1688_delivery_addresses (
-      id, company_id, label, full_name, mobile, phone, post_code, province_text, city_text,
+      id, company_id, account_id, label, full_name, mobile, phone, post_code, province_text, city_text,
       area_text, town_text, address, address_id, raw_address_param_json,
       is_default, status, created_by, created_at, updated_at
     )
     VALUES (
-      @id, @company_id, @label, @full_name, @mobile, @phone, @post_code, @province_text, @city_text,
+      @id, @company_id, @account_id, @label, @full_name, @mobile, @phone, @post_code, @province_text, @city_text,
       @area_text, @town_text, @address, @address_id, @raw_address_param_json,
       @is_default, @status, @created_by, @created_at, @updated_at
     )
     ON CONFLICT(id) DO UPDATE SET
       company_id = excluded.company_id,
+      account_id = excluded.account_id,
       label = excluded.label,
       full_name = excluded.full_name,
       mobile = excluded.mobile,
@@ -3954,6 +4819,147 @@ function save1688DeliveryAddressAction({ db, payload, actor }) {
     created_at: existing?.created_at || row.created_at,
   });
   return to1688DeliveryAddress(db.prepare("SELECT * FROM erp_1688_delivery_addresses WHERE id = ?").get(row.id));
+}
+
+function looksLike1688Address(item = {}) {
+  return Boolean(
+    item
+    && typeof item === "object"
+    && !Array.isArray(item)
+    && (
+      item.addressId
+      || item.id
+      || item.fullName
+      || item.receiverName
+      || item.mobile
+      || item.phone
+      || item.address
+      || item.detailAddress
+    )
+  );
+}
+
+function normalize1688RemoteAddress(item = {}, index = 0) {
+  const raw = item && typeof item === "object" ? item : {};
+  const addressId = optionalString(
+    raw.addressId
+    || raw.addressID
+    || raw.receiveAddressId
+    || raw.receive_address_id
+    || raw.id,
+  );
+  const fullName = optionalString(
+    raw.fullName
+    || raw.receiverName
+    || raw.receiveName
+    || raw.receiver
+    || raw.name,
+  ) || "1688 Receiver";
+  const provinceText = optionalString(raw.provinceText || raw.province || raw.provinceName);
+  const cityText = optionalString(raw.cityText || raw.city || raw.cityName);
+  const areaText = optionalString(raw.areaText || raw.area || raw.district || raw.areaName);
+  const townText = optionalString(raw.townText || raw.town || raw.townName);
+  const address = optionalString(
+    raw.address
+    || raw.detailAddress
+    || raw.addressDetail
+    || raw.receiveAddress
+    || raw.fullAddress,
+  ) || [provinceText, cityText, areaText, townText].filter(Boolean).join("");
+  return {
+    label: optionalString(raw.label || raw.alias || raw.addressName) || `${fullName} ${addressId || index + 1}`,
+    fullName,
+    mobile: optionalString(raw.mobile || raw.receiverMobile || raw.receiveMobile || raw.phoneNumber),
+    phone: optionalString(raw.phone || raw.receiverPhone || raw.receivePhone || raw.tel),
+    postCode: optionalString(raw.postCode || raw.zip || raw.zipCode || raw.post),
+    provinceText,
+    cityText,
+    areaText,
+    townText,
+    address: address || "1688 remote address",
+    alibabaAddressId: addressId,
+    rawAddressParam: {
+      ...raw,
+      ...(addressId ? { addressId } : {}),
+      fullName,
+      provinceText,
+      cityText,
+      areaText,
+      townText,
+      address: address || raw.address,
+    },
+    isDefault: Boolean(raw.isDefault || raw.defaultAddress || raw.default || index === 0),
+    status: "active",
+  };
+}
+
+function normalize1688ReceiveAddressResponse(rawResponse = {}) {
+  const expanded = asExpandedObject(rawResponse);
+  const rows = findDeepArray(expanded, looksLike1688Address);
+  if (!rows.length && looksLike1688Address(expanded)) return [normalize1688RemoteAddress(expanded, 0)];
+  return rows.map(normalize1688RemoteAddress).filter((item) => item.address || item.alibabaAddressId);
+}
+
+function findExisting1688AddressId(db, { companyId, accountId, alibabaAddressId }) {
+  const remoteId = optionalString(alibabaAddressId);
+  if (!remoteId) return null;
+  const row = db.prepare(`
+    SELECT id
+    FROM erp_1688_delivery_addresses
+    WHERE company_id = @company_id
+      AND COALESCE(account_id, '') = COALESCE(@account_id, '')
+      AND address_id = @address_id
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `).get({
+    company_id: companyId,
+    account_id: optionalString(accountId) || "",
+    address_id: remoteId,
+  });
+  return row?.id || null;
+}
+
+async function sync1688DeliveryAddressesAction({ db, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 receive address sync");
+  const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
+  const accountId = optionalString(payload.accountId || payload.account_id);
+  const params = raw1688Params(payload, {
+    webSite: optionalString(payload.webSite) || "1688",
+  });
+  if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.RECEIVE_ADDRESS.key, params };
+  const rawResponse = payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId,
+    action: "sync_1688_addresses",
+    api: PROCUREMENT_APIS.RECEIVE_ADDRESS,
+    params,
+  });
+  const addresses = normalize1688ReceiveAddressResponse(rawResponse);
+  const saved = addresses.map((address) => {
+    const existingId = findExisting1688AddressId(db, {
+      companyId,
+      accountId,
+      alibabaAddressId: address.alibabaAddressId,
+    });
+    return save1688DeliveryAddressAction({
+      db,
+      actor,
+      payload: {
+        ...address,
+        id: existingId || undefined,
+        companyId,
+        accountId,
+      },
+    });
+  });
+  return {
+    apiKey: PROCUREMENT_APIS.RECEIVE_ADDRESS.key,
+    query: params,
+    addressCount: saved.length,
+    addresses: saved,
+    rawResponse,
+  };
 }
 
 function getCandidateForPo(db, pr, candidateId, actor = {}) {
@@ -3982,7 +4988,7 @@ function getCandidateForPo(db, pr, candidateId, actor = {}) {
   const supplierCandidate = buildCandidateFromSkuSupplier(db, pr, skuSupplier, actor);
   if (supplierCandidate) return supplierCandidate;
 
-  throw new Error("请先添加报价反馈、绑定 1688 映射或在商品资料维护供应商，再生成采购单");
+  throw new Error("请先添加报价反馈、绑定供应商管理记录或在商品资料维护供应商，再生成采购单");
 }
 
 function buildPurchaseOrderNo() {
@@ -4176,7 +5182,7 @@ function build1688OrderCargoParamList(po, lines, payload = {}) {
     return mappings.map((mapping) => {
       const offerId = optionalString(mapping.external_offer_id);
       if (!offerId) {
-        throw new Error(`商品编码 ${line.internal_sku_code || line.sku_id} 还没有绑定 1688 映射`);
+        throw new Error(`商品编码 ${line.internal_sku_code || line.sku_id} 还没有绑定供应商管理记录`);
       }
       const ourQty = optionalPositiveInteger(mapping.our_qty, 1);
       const platformQty = optionalPositiveInteger(mapping.platform_qty, 1);
@@ -4189,12 +5195,13 @@ function build1688OrderCargoParamList(po, lines, payload = {}) {
   });
 }
 
-function resolve1688AddressParam(db, payload = {}, actor = {}) {
+function resolve1688AddressParam(db, payload = {}, actor = {}, po = {}) {
   if (payload.addressParam && typeof payload.addressParam === "object") return payload.addressParam;
   const addressId = optionalString(payload.deliveryAddressId || payload.erpAddressId || payload.addressId);
   const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
+  const accountId = optionalString(payload.accountId || payload.account_id || po.account_id || po.accountId);
   try {
-    const row = get1688DeliveryAddress(db, addressId, companyId);
+    const row = get1688DeliveryAddress(db, addressId, companyId, accountId);
     return build1688AddressParamFromRow(row);
   } catch (error) {
     if (payload.dryRun || payload.mockResponse || payload.mockPreviewResponse) return null;
@@ -4277,7 +5284,7 @@ async function push1688OrderAction({ db, services, payload, actor }) {
 
   const apiParams = build1688FastCreateOrderParams(po, lines, {
     ...payload,
-    addressParam: resolve1688AddressParam(db, payload, actor),
+    addressParam: resolve1688AddressParam(db, payload, actor, po),
   });
   if (payload.dryRun) {
     return {
@@ -4362,7 +5369,7 @@ async function preview1688OrderAction({ db, services, payload, actor }) {
 
   const apiParams = build1688FastCreateOrderParams(po, lines, {
     ...payload,
-    addressParam: resolve1688AddressParam(db, payload, actor),
+    addressParam: resolve1688AddressParam(db, payload, actor, po),
   });
   if (payload.dryRun) {
     return {
@@ -4455,12 +5462,31 @@ function request1688PriceChangeAction({ db, services, payload, actor }) {
   };
 }
 
-function sync1688OrderPriceAction({ db, services, payload, actor }) {
+async function sync1688OrderPriceAction({ db, services, payload, actor }) {
   assertActorRole(actor, ["buyer", "manager", "admin"], "1688 订单价格同步");
   const poId = requireString(payload.poId || payload.id, "poId");
   const po = getPurchaseOrder(db, poId);
   const amount = optionalNumber(payload.amount ?? payload.totalAmount);
-  if (amount === null || amount < 0) throw new Error("请填写同步后的 1688 订单金额");
+  if (amount === null) {
+    const detailResult = await fetch1688OrderDetailForPo({
+      db,
+      services,
+      po,
+      payload,
+      actor,
+      action: "sync_1688_order_price",
+    });
+    const syncedAmount = optionalNumber(detailResult?.detail?.totalAmount);
+    if (syncedAmount === null || syncedAmount < 0) {
+      throw new Error("1688 订单详情没有返回可同步金额，请手动输入订单金额");
+    }
+    return {
+      ...detailResult,
+      syncedAmount,
+      manual: false,
+    };
+  }
+  if (amount < 0) throw new Error("请填写正确的 1688 订单金额");
   const now = nowIso();
   let transition = null;
   if (po.status === "pushed_pending_price") {
@@ -4504,6 +5530,8 @@ function sync1688OrderPriceAction({ db, services, payload, actor }) {
   return {
     transition,
     purchaseOrder: toCamelRow(afterPo),
+    syncedAmount: amount,
+    manual: true,
   };
 }
 
@@ -4694,6 +5722,1805 @@ async function sync1688OrdersAction({ db, services, payload, actor }) {
   };
 }
 
+function build1688MarketingMixConfigParams(payload = {}, source = {}) {
+  const sellerMemberId = optionalString(
+    payload.sellerMemberId
+    || payload.seller_member_id
+    || source.seller_member_id
+    || source.member_id,
+  );
+  const sellerLoginId = optionalString(
+    payload.sellerLoginId
+    || payload.seller_login_id
+    || payload.supplierName
+    || payload.supplier_name
+    || source.seller_login_id
+    || source.supplier_name,
+  );
+  if (!sellerMemberId && !sellerLoginId) {
+    throw new Error("请填写 1688 卖家 memberId 或旺旺登录名后再查询混批设置");
+  }
+  return {
+    ...(sellerMemberId ? { sellerMemberId } : {}),
+    ...(sellerLoginId ? { sellerLoginId } : {}),
+  };
+}
+
+function updateSku1688SourceMixConfig(db, sourceId, mixConfig) {
+  if (!sourceId) return null;
+  const source = db.prepare("SELECT * FROM erp_sku_1688_sources WHERE id = ?").get(sourceId);
+  if (!source) return null;
+  const sourcePayload = parseJsonObject(source.source_payload_json);
+  const now = nowIso();
+  db.prepare(`
+    UPDATE erp_sku_1688_sources
+    SET source_payload_json = @source_payload_json,
+        updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id: source.id,
+    source_payload_json: trimJsonForStorage({
+      ...sourcePayload,
+      marketingMixConfig: mixConfig,
+      marketingMixSyncedAt: now,
+    }),
+    updated_at: now,
+  });
+  return toSku1688Source(db.prepare("SELECT * FROM erp_sku_1688_sources WHERE id = ?").get(source.id));
+}
+
+async function query1688MixConfigAction({ db, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 seller mix config query");
+  const sourceId = optionalString(payload.sourceId || payload.source_id || payload.id);
+  const source = sourceId
+    ? db.prepare("SELECT * FROM erp_sku_1688_sources WHERE id = ?").get(sourceId)
+    : null;
+  if (sourceId && !source) throw new Error(`1688 supplier mapping not found: ${sourceId}`);
+
+  const apiParams = build1688MarketingMixConfigParams(payload, source || {});
+  if (payload.dryRun) {
+    return {
+      dryRun: true,
+      apiKey: PROCUREMENT_APIS.MARKETING_MIX_CONFIG.key,
+      params: apiParams,
+    };
+  }
+
+  const rawResponse = payload.mockMixConfigResponse || payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: optionalString(payload.accountId || payload.account_id || source?.account_id),
+    action: "query_1688_mix_config",
+    api: PROCUREMENT_APIS.MARKETING_MIX_CONFIG,
+    params: apiParams,
+  });
+  const mixConfig = normalize1688MarketingMixConfigResponse(rawResponse);
+  const updatedSource = sourceId ? updateSku1688SourceMixConfig(db, sourceId, mixConfig) : null;
+  return {
+    apiKey: PROCUREMENT_APIS.MARKETING_MIX_CONFIG.key,
+    query: apiParams,
+    mixConfig,
+    sku1688Source: updatedSource,
+    rawResponse,
+  };
+}
+
+function compact1688Params(params = {}) {
+  return Object.fromEntries(
+    Object.entries(params).filter(([, value]) => value !== null && value !== undefined && value !== ""),
+  );
+}
+
+function firstDefinedValue(...values) {
+  return values.find((value) => value !== null && value !== undefined && value !== "");
+}
+
+function optionalBoolean(value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  const text = String(value).trim().toLowerCase();
+  if (["true", "1", "yes", "y", "open", "opened"].includes(text)) return true;
+  if (["false", "0", "no", "n", "closed"].includes(text)) return false;
+  return null;
+}
+
+function page1688Params(payload = {}, defaults = {}) {
+  return compact1688Params({
+    ...defaults,
+    beginPage: optionalNumber(payload.beginPage ?? payload.page) || defaults.beginPage,
+    page: optionalNumber(payload.page) || defaults.page,
+    pageSize: optionalNumber(payload.pageSize) || defaults.pageSize,
+    keyword: optionalString(payload.keyword) || defaults.keyword,
+  });
+}
+
+function getSku1688SourceFromPayload(db, payload = {}) {
+  const sourceId = optionalString(payload.sourceId || payload.source_id || payload.id);
+  if (sourceId) {
+    const source = db.prepare("SELECT * FROM erp_sku_1688_sources WHERE id = ?").get(sourceId);
+    if (!source) throw new Error(`1688 source not found: ${sourceId}`);
+    return source;
+  }
+  const externalOfferId = optionalString(payload.externalOfferId || payload.offerId || payload.productId || payload.productID);
+  if (!externalOfferId) return null;
+  const source = db.prepare(`
+    SELECT *
+    FROM erp_sku_1688_sources
+    WHERE external_offer_id = @external_offer_id
+      AND (@account_id IS NULL OR account_id = @account_id)
+      AND (@sku_id IS NULL OR sku_id = @sku_id)
+    ORDER BY is_default DESC, updated_at DESC, created_at DESC
+    LIMIT 1
+  `).get({
+    external_offer_id: externalOfferId,
+    account_id: optionalString(payload.accountId || payload.account_id),
+    sku_id: optionalString(payload.skuId || payload.sku_id),
+  });
+  return source || null;
+}
+
+function patchSku1688SourcePayload(db, sourceId, patch = {}) {
+  if (!sourceId) return null;
+  const source = db.prepare("SELECT * FROM erp_sku_1688_sources WHERE id = ?").get(sourceId);
+  if (!source) return null;
+  const current = parseJsonObject(source.source_payload_json);
+  const now = nowIso();
+  db.prepare(`
+    UPDATE erp_sku_1688_sources
+    SET source_payload_json = @source_payload_json,
+        updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id: source.id,
+    source_payload_json: trimJsonForStorage({ ...current, ...patch, updatedBy1688ActionAt: now }),
+    updated_at: now,
+  });
+  return toSku1688Source(db.prepare("SELECT * FROM erp_sku_1688_sources WHERE id = ?").get(source.id));
+}
+
+function extract1688ProductId(payload = {}, source = {}) {
+  return optionalString(
+    payload.productId
+    || payload.productID
+    || payload.offerId
+    || payload.externalOfferId
+    || source.external_offer_id,
+  );
+}
+
+function build1688RelationSupplyParams(payload = {}) {
+  return raw1688Params(payload, page1688Params(payload, {
+    beginPage: 1,
+    pageSize: 20,
+    relationType: optionalString(payload.relationType || payload.type),
+  }));
+}
+
+function build1688RelationUserInfoParams(payload = {}, source = {}) {
+  const sellerLoginId = optionalString(
+    payload.sellerLoginId
+    || payload.loginId
+    || payload.memberId
+    || payload.supplierName
+    || source.supplier_name,
+  );
+  const domain = optionalString(payload.domain || payload.shopDomain || payload.shopUrl || payload.url);
+  return raw1688Params(payload, compact1688Params({
+    domain,
+    sellerLoginId,
+    memberId: optionalString(payload.memberId),
+  }));
+}
+
+function build1688ProductFollowParams(payload = {}, source = {}) {
+  const productId = requireString(extract1688ProductId(payload, source), "1688 productId");
+  return raw1688Params(payload, compact1688Params({
+    productId,
+    productID: productId,
+    webSite: optionalString(payload.webSite) || "1688",
+  }));
+}
+
+function build1688ProductSimpleParams(payload = {}, source = {}) {
+  const productId = requireString(extract1688ProductId(payload, source), "1688 productId");
+  return raw1688Params(payload, compact1688Params({
+    productID: productId,
+    productId,
+    webSite: optionalString(payload.webSite) || "1688",
+  }));
+}
+
+function orderIdsFor1688PaymentAction(db, payload = {}) {
+  const purchaseOrders = getPurchaseOrdersForPayment(db, payload);
+  const orderIds = Array.from(new Set([
+    ...purchaseOrders.map((po) => po.external_order_id),
+    ...(Array.isArray(payload.externalOrderIds) ? payload.externalOrderIds : []),
+    ...(Array.isArray(payload.orderIds) ? payload.orderIds : []),
+    payload.externalOrderId || payload.orderId || payload.tradeId,
+  ].map((item) => optionalString(item)).filter(Boolean)));
+  if (!orderIds.length) throw new Error("1688 orderId is required");
+  return { purchaseOrders, orderIds };
+}
+
+function build1688PayWayParams(payload = {}, orderIds = []) {
+  const orderId = orderIds[0];
+  return raw1688Params(payload, compact1688Params({
+    orderId,
+    orderIdList: orderIds,
+    webSite: optionalString(payload.webSite) || "1688",
+  }));
+}
+
+function build1688ProtocolPayStatusParams(payload = {}, orderIds = []) {
+  return raw1688Params(payload, compact1688Params({
+    orderId: orderIds[0],
+    orderIdList: orderIds.length ? orderIds : undefined,
+    payChannel: optionalString(payload.payChannel || payload.channel),
+    webSite: optionalString(payload.webSite) || "1688",
+  }));
+}
+
+function build1688ProtocolPayPrepareParams(payload = {}, orderIds = []) {
+  return raw1688Params(payload, compact1688Params({
+    orderId: orderIds[0],
+    orderIdList: orderIds,
+    payChannel: optionalString(payload.payChannel || payload.channel),
+    payWay: optionalString(payload.payWay),
+    webSite: optionalString(payload.webSite) || "1688",
+  }));
+}
+
+function looksLike1688Supplier(item = {}) {
+  return Boolean(
+    item
+    && typeof item === "object"
+    && !Array.isArray(item)
+    && (
+      item.memberId
+      || item.sellerMemberId
+      || item.loginId
+      || item.sellerLoginId
+      || item.companyName
+      || item.shopName
+      || item.supplierName
+    )
+  );
+}
+
+function normalize1688SupplierRelationResponse(rawResponse = {}) {
+  const expanded = asExpandedObject(rawResponse);
+  const rows = findDeepArray(expanded, looksLike1688Supplier);
+  const sourceRows = rows.length ? rows : (looksLike1688Supplier(expanded) ? [expanded] : []);
+  return sourceRows.map((row) => ({
+    memberId: optionalString(row.memberId || row.sellerMemberId || row.member_id),
+    loginId: optionalString(row.loginId || row.sellerLoginId || row.seller_login_id),
+    companyName: optionalString(row.companyName || row.supplierName || row.sellerCompanyName),
+    shopName: optionalString(row.shopName || row.storeName || row.wangpuName),
+    shopUrl: optionalString(row.shopUrl || row.domain || row.url),
+    raw: row,
+  }));
+}
+
+function normalize1688PayWayResponse(rawResponse = {}) {
+  const expanded = asExpandedObject(rawResponse);
+  const rows = findDeepArray(expanded, (item) => hasAnyKey(item, ["payWay", "payChannel", "channel", "name", "code"]));
+  return rows.map((row) => ({
+    code: optionalString(row.payWay || row.payChannel || row.channel || row.code || row.id),
+    name: optionalString(row.name || row.payWayName || row.channelName || row.title),
+    enabled: firstDefinedValue(row.enabled, row.available, row.support, row.canUse),
+    raw: row,
+  }));
+}
+
+function import1688AgentCandidates({ db, services, payload, actor, products = [], auditAction }) {
+  const prId = optionalString(payload.prId || payload.id);
+  if (!prId || !products.length) return [];
+  let pr = getPurchaseRequest(db, prId);
+  return db.transaction(() => {
+    if (pr.status === "submitted") {
+      services.purchase.acceptRequest(prId, actor);
+      pr = getPurchaseRequest(db, prId);
+      writePurchaseRequestEvent(db, pr, actor, "accept_request", "Purchase request accepted");
+    }
+    const limit = Math.max(1, Math.min(Number(optionalNumber(payload.importLimit) ?? products.length), 20));
+    const candidates = products.slice(0, limit).map((item) => insert1688SourcingCandidate(
+      db,
+      services,
+      pr,
+      actor,
+      { ...item, auditAction },
+    ));
+    if (candidates.length && pr.status === "buyer_processing") {
+      services.purchase.markRequestSourced(prId, actor);
+      pr = getPurchaseRequest(db, prId);
+    }
+    writePurchaseRequestEvent(db, pr, actor, auditAction, `1688 agent imported ${candidates.length} candidates`);
+    markPurchaseRequestRead(db, pr.id, actor);
+    return candidates;
+  })();
+}
+
+async function search1688RelationSuppliersAction({ db, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 relation supplier search");
+  const params = build1688RelationSupplyParams(payload);
+  if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.RELATION_SUPPLY_SEARCH.key, params };
+  const rawResponse = payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: optionalString(payload.accountId || payload.account_id),
+    action: "search_1688_relation_suppliers",
+    api: PROCUREMENT_APIS.RELATION_SUPPLY_SEARCH,
+    params,
+  });
+  const suppliers = normalize1688SupplierRelationResponse(rawResponse);
+  return { apiKey: PROCUREMENT_APIS.RELATION_SUPPLY_SEARCH.key, query: params, suppliers, rawResponse };
+}
+
+async function sync1688RelationUserInfoAction({ db, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 relation supplier info");
+  const source = getSku1688SourceFromPayload(db, payload);
+  const params = build1688RelationUserInfoParams(payload, source || {});
+  if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.RELATION_USER_INFO.key, params };
+  const rawResponse = payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: optionalString(payload.accountId || payload.account_id || source?.account_id),
+    action: "sync_1688_relation_user_info",
+    api: PROCUREMENT_APIS.RELATION_USER_INFO,
+    params,
+  });
+  const suppliers = normalize1688SupplierRelationResponse(rawResponse);
+  const updatedSource = source ? patchSku1688SourcePayload(db, source.id, {
+    relationUserInfo: suppliers[0] || rawResponse,
+    relationUserInfoRaw: rawResponse,
+  }) : null;
+  return { apiKey: PROCUREMENT_APIS.RELATION_USER_INFO.key, query: params, suppliers, sku1688Source: updatedSource, rawResponse };
+}
+
+async function set1688ProductFollowAction({ db, payload, actor, follow }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], follow ? "1688 product follow" : "1688 product unfollow");
+  const source = getSku1688SourceFromPayload(db, payload);
+  const params = build1688ProductFollowParams(payload, source || {});
+  const api = follow ? PROCUREMENT_APIS.PRODUCT_FOLLOW : PROCUREMENT_APIS.PRODUCT_UNFOLLOW;
+  const action = follow ? "follow_1688_product" : "unfollow_1688_product";
+  if (payload.dryRun) return { dryRun: true, apiKey: api.key, params };
+  const rawResponse = payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: optionalString(payload.accountId || payload.account_id || source?.account_id),
+    action,
+    api,
+    params,
+  });
+  const updatedSource = source ? patchSku1688SourcePayload(db, source.id, {
+    followedAt1688: follow ? nowIso() : null,
+    unfollowedAt1688: follow ? null : nowIso(),
+    followResponse: rawResponse,
+  }) : null;
+  return { apiKey: api.key, query: params, followed: follow, sku1688Source: updatedSource, rawResponse };
+}
+
+async function sync1688PurchasedProductsAction({ db, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 purchased product simple info");
+  const source = getSku1688SourceFromPayload(db, payload);
+  const params = build1688ProductSimpleParams(payload, source || {});
+  if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.PRODUCT_SIMPLE_GET.key, params };
+  const rawResponse = payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: optionalString(payload.accountId || payload.account_id || source?.account_id),
+    action: "sync_1688_purchased_products",
+    api: PROCUREMENT_APIS.PRODUCT_SIMPLE_GET,
+    params,
+  });
+  const product = normalize1688ProductDetailResponse(rawResponse);
+  const updatedSource = source ? patchSku1688SourcePayload(db, source.id, {
+    purchasedProductSimple: product,
+    purchasedProductSimpleRaw: rawResponse,
+  }) : null;
+  return { apiKey: PROCUREMENT_APIS.PRODUCT_SIMPLE_GET.key, query: params, product, sku1688Source: updatedSource, rawResponse };
+}
+
+async function query1688PayWaysAction({ db, payload, actor }) {
+  assertActorRole(actor, ["finance", "manager", "admin", "buyer"], "1688 pay way query");
+  const { purchaseOrders, orderIds } = orderIdsFor1688PaymentAction(db, payload);
+  const params = build1688PayWayParams(payload, orderIds);
+  if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.PAY_WAY_QUERY.key, params };
+  const rawResponse = payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: purchaseOrders[0]?.account_id || optionalString(payload.accountId || payload.account_id),
+    action: "query_1688_pay_ways",
+    api: PROCUREMENT_APIS.PAY_WAY_QUERY,
+    params,
+  });
+  return {
+    apiKey: PROCUREMENT_APIS.PAY_WAY_QUERY.key,
+    query: params,
+    externalOrderIds: orderIds,
+    payWays: normalize1688PayWayResponse(rawResponse),
+    rawResponse,
+  };
+}
+
+async function query1688ProtocolPayStatusAction({ db, payload, actor }) {
+  assertActorRole(actor, ["finance", "manager", "admin", "buyer"], "1688 protocol pay status");
+  let purchaseOrders = [];
+  let orderIds = [];
+  try {
+    const resolved = orderIdsFor1688PaymentAction(db, payload);
+    purchaseOrders = resolved.purchaseOrders;
+    orderIds = resolved.orderIds;
+  } catch {
+    orderIds = [];
+  }
+  const params = build1688ProtocolPayStatusParams(payload, orderIds);
+  if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.PROTOCOL_PAY_IS_OPEN.key, params };
+  const rawResponse = payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: purchaseOrders[0]?.account_id || optionalString(payload.accountId || payload.account_id),
+    action: "query_1688_protocol_pay_status",
+    api: PROCUREMENT_APIS.PROTOCOL_PAY_IS_OPEN,
+    params,
+  });
+  return {
+    apiKey: PROCUREMENT_APIS.PROTOCOL_PAY_IS_OPEN.key,
+    query: params,
+    externalOrderIds: orderIds,
+    isOpen: optionalBoolean(findFirstDeepValue(asExpandedObject(rawResponse), ["isOpen", "opened", "protocolOpen", "open"])),
+    rawResponse,
+  };
+}
+
+async function prepare1688ProtocolPayAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["finance", "manager", "admin"], "1688 protocol pay");
+  const { purchaseOrders, orderIds } = orderIdsFor1688PaymentAction(db, payload);
+  const params = build1688ProtocolPayPrepareParams(payload, orderIds);
+  if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.PROTOCOL_PAY_PREPARE.key, params };
+  const rawResponse = payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: purchaseOrders[0]?.account_id || optionalString(payload.accountId || payload.account_id),
+    action: "prepare_1688_protocol_pay",
+    api: PROCUREMENT_APIS.PROTOCOL_PAY_PREPARE,
+    params,
+  });
+  const updated = purchaseOrders
+    .filter((po) => orderIds.includes(String(po.external_order_id || "")))
+    .map((po) => updatePurchaseOrderFrom1688Snapshot({
+      db,
+      services,
+      po,
+      order: { externalOrderId: po.external_order_id, status: "protocol_pay_prepared" },
+      rawPayment: { protocolPay: rawResponse },
+      action: "prepare_1688_protocol_pay",
+      actor,
+    }));
+  return {
+    apiKey: PROCUREMENT_APIS.PROTOCOL_PAY_PREPARE.key,
+    query: params,
+    externalOrderIds: orderIds,
+    purchaseOrders: updated.map(toCamelRow),
+    rawResponse,
+  };
+}
+
+function build1688AgentParams(payload = {}, source = {}) {
+  const productId = extract1688ProductId(payload, source);
+  const keyword = optionalString(payload.keyword || payload.productName || payload.productTitle || source.product_title);
+  const agentParam = compact1688Params({
+    productId,
+    offerId: productId,
+    skuId: optionalString(payload.skuId || payload.externalSkuId || source.external_sku_id),
+    specId: optionalString(payload.specId || payload.externalSpecId || source.external_spec_id),
+    keyword,
+    imageUrl: optionalString(payload.imageUrl || source.image_url),
+    targetPrice: optionalNumber(payload.targetPrice || payload.targetUnitCost),
+    quantity: optionalNumber(payload.quantity || payload.qty),
+  });
+  return raw1688Params(payload, payload.param ? { param: payload.param } : { param: agentParam });
+}
+
+function build1688SupplyChangeFeedbackParams(payload = {}) {
+  return raw1688Params(payload, {
+    param: compact1688Params({
+      taskId: optionalString(payload.taskId || payload.agentTaskId || payload.requestId),
+      productId: optionalString(payload.productId || payload.offerId || payload.externalOfferId),
+      selectedOfferId: optionalString(payload.selectedOfferId || payload.recommendOfferId),
+      feedbackType: optionalString(payload.feedbackType || payload.status || payload.result),
+      feedback: optionalString(payload.feedback || payload.remark || payload.message),
+    }),
+  });
+}
+
+async function run1688AgentAction({ db, services, payload, actor, api, action }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 agent");
+  const source = getSku1688SourceFromPayload(db, payload);
+  const params = build1688AgentParams(payload, source || {});
+  if (payload.dryRun) return { dryRun: true, apiKey: api.key, params };
+  const rawResponse = payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: optionalString(payload.accountId || payload.account_id || source?.account_id),
+    action,
+    api,
+    params,
+  });
+  const products = normalize1688SearchResponse(rawResponse);
+  const candidates = import1688AgentCandidates({
+    db,
+    services,
+    payload,
+    actor,
+    products,
+    auditAction: action,
+  });
+  const updatedSource = source ? patchSku1688SourcePayload(db, source.id, {
+    [action]: { rawResponse, productCount: products.length, syncedAt: nowIso() },
+  }) : null;
+  return {
+    apiKey: api.key,
+    query: params,
+    productCount: products.length,
+    importedCount: candidates.length,
+    candidates,
+    products,
+    sku1688Source: updatedSource,
+    rawResponse,
+  };
+}
+
+async function feedback1688SupplyChangeAgentAction({ db, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 supply change feedback");
+  const params = build1688SupplyChangeFeedbackParams(payload);
+  if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.SUPPLY_CHANGE_DATA_FEEDBACK.key, params };
+  const rawResponse = payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: optionalString(payload.accountId || payload.account_id),
+    action: "feedback_1688_supply_change_agent",
+    api: PROCUREMENT_APIS.SUPPLY_CHANGE_DATA_FEEDBACK,
+    params,
+  });
+  return { apiKey: PROCUREMENT_APIS.SUPPLY_CHANGE_DATA_FEEDBACK.key, query: params, rawResponse };
+}
+
+function build1688MonitorProductParams(payload = {}, source = {}) {
+  const productId = requireString(extract1688ProductId(payload, source), "1688 productId");
+  return raw1688Params(payload, compact1688Params({
+    productId,
+    offerId: productId,
+    skuId: optionalString(payload.skuId || payload.externalSkuId || source.external_sku_id),
+    specId: optionalString(payload.specId || payload.externalSpecId || source.external_spec_id),
+    webSite: optionalString(payload.webSite) || "1688",
+  }));
+}
+
+async function set1688MonitorProductAction({ db, payload, actor, add }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], add ? "1688 add monitor product" : "1688 delete monitor product");
+  const source = getSku1688SourceFromPayload(db, payload);
+  const params = build1688MonitorProductParams(payload, source || {});
+  const api = add ? PROCUREMENT_APIS.MONITOR_PRODUCT_ADD : PROCUREMENT_APIS.MONITOR_PRODUCT_DELETE;
+  const action = add ? "add_1688_monitor_product" : "delete_1688_monitor_product";
+  if (payload.dryRun) return { dryRun: true, apiKey: api.key, params };
+  const rawResponse = payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: optionalString(payload.accountId || payload.account_id || source?.account_id),
+    action,
+    api,
+    params,
+  });
+  const updatedSource = source ? patchSku1688SourcePayload(db, source.id, {
+    monitorProduct: add ? { enabled: true, params, response: rawResponse, at: nowIso() } : { enabled: false, params, response: rawResponse, at: nowIso() },
+  }) : null;
+  return { apiKey: api.key, query: params, monitored: add, sku1688Source: updatedSource, rawResponse };
+}
+
+async function query1688MonitorProductsAction({ db, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 monitor products");
+  const params = raw1688Params(payload, page1688Params(payload, { page: 1, pageSize: 50 }));
+  if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.MONITOR_PRODUCT_LIST.key, params };
+  const rawResponse = payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: optionalString(payload.accountId || payload.account_id),
+    action: "query_1688_monitor_products",
+    api: PROCUREMENT_APIS.MONITOR_PRODUCT_LIST,
+    params,
+  });
+  const products = normalize1688SearchResponse(rawResponse);
+  return { apiKey: PROCUREMENT_APIS.MONITOR_PRODUCT_LIST.key, query: params, products, rawResponse };
+}
+
+function asExpandedObject(value = {}) {
+  const expanded = expandMessageValue(value);
+  return expanded && typeof expanded === "object" ? expanded : {};
+}
+
+function findFirstDeepNumber(value, keys = []) {
+  const found = findFirstDeepValue(value, keys);
+  if (Array.isArray(found)) {
+    for (const item of found) {
+      const number = optionalNumber(item);
+      if (number !== null) return number;
+    }
+    return null;
+  }
+  if (found && typeof found === "object") {
+    for (const key of ["amount", "value", "price", "totalAmount", "cent"]) {
+      const number = optionalNumber(found[key]);
+      if (number !== null) return key === "cent" ? number / 100 : number;
+    }
+    return null;
+  }
+  return optionalNumber(found);
+}
+
+function findDeepArray(value, predicate, depth = 0) {
+  if (!value || depth > 8) return [];
+  if (Array.isArray(value)) {
+    const objects = value.filter((item) => item && typeof item === "object");
+    if (objects.length && objects.some(predicate)) return objects;
+    for (const item of objects) {
+      const found = findDeepArray(item, predicate, depth + 1);
+      if (found.length) return found;
+    }
+    return [];
+  }
+  if (typeof value !== "object") return [];
+  for (const item of Object.values(value)) {
+    const found = findDeepArray(item, predicate, depth + 1);
+    if (found.length) return found;
+  }
+  return [];
+}
+
+function hasAnyKey(item = {}, keys = []) {
+  const keySet = new Set(Object.keys(item || {}).map((key) => key.toLowerCase()));
+  return keys.some((key) => keySet.has(String(key).toLowerCase()));
+}
+
+function normalize1688OrderDetailResponse(rawResponse = {}, fallbackOrderId = null) {
+  const expanded = asExpandedObject(rawResponse);
+  const normalizedList = normalize1688BuyerOrderListResponse(expanded);
+  const order = normalizedList[0] || {};
+  const externalOrderId = optionalString(order.externalOrderId)
+    || optionalString(findFirstDeepValue(expanded, ["orderId", "orderID", "tradeId", "tradeID", "id"]))
+    || optionalString(fallbackOrderId);
+  const status = optionalString(order.status)
+    || optionalString(findFirstDeepValue(expanded, ["orderStatus", "tradeStatus", "baseStatus", "status"]));
+  const totalAmount = optionalNumber(order.totalAmount)
+    ?? findFirstDeepNumber(expanded, ["totalAmount", "sumPayment", "actualPayFee", "orderAmount", "payment", "payFee"]);
+  const freight = optionalNumber(order.freight)
+    ?? findFirstDeepNumber(expanded, ["freight", "postFee", "shippingFee", "carriage", "logisticsFee"]);
+  const payTime = optionalString(findFirstDeepValue(expanded, ["payTime", "paymentTime", "gmtPayment"]));
+  const receiver = {
+    fullName: optionalString(findFirstDeepValue(expanded, ["fullName", "receiverName", "receiveName", "receiver"])),
+    mobile: optionalString(findFirstDeepValue(expanded, ["mobile", "receiverMobile", "receiveMobile"])),
+    phone: optionalString(findFirstDeepValue(expanded, ["phone", "receiverPhone", "receivePhone"])),
+    provinceText: optionalString(findFirstDeepValue(expanded, ["provinceText", "province", "receiverProvince"])),
+    cityText: optionalString(findFirstDeepValue(expanded, ["cityText", "city", "receiverCity"])),
+    areaText: optionalString(findFirstDeepValue(expanded, ["areaText", "area", "district", "receiverArea"])),
+    townText: optionalString(findFirstDeepValue(expanded, ["townText", "town"])),
+    address: optionalString(findFirstDeepValue(expanded, ["address", "detailAddress", "receiverAddress", "receiveAddress"])),
+  };
+  return {
+    ...order,
+    externalOrderId,
+    status,
+    supplierName: optionalString(order.supplierName)
+      || optionalString(findFirstDeepValue(expanded, ["sellerCompanyName", "sellerCompany", "supplierName", "sellerLoginId"])),
+    totalAmount,
+    freight,
+    payTime,
+    receiver,
+    raw: expanded,
+  };
+}
+
+function normalize1688LogisticsResponse(rawResponse = {}, externalOrderId = null) {
+  const expanded = asExpandedObject(rawResponse);
+  const logisticsItems = findDeepArray(expanded, (item) => hasAnyKey(item, [
+    "logisticsId",
+    "logisticsBillNo",
+    "mailNo",
+    "mailNoList",
+    "logisticsCompanyName",
+    "logisticsStatus",
+  ])).map((item) => ({
+    logisticsId: optionalString(item.logisticsId || item.id),
+    logisticsBillNo: optionalString(item.logisticsBillNo || item.mailNo || item.mail_no || item.waybillNo),
+    logisticsCompanyName: optionalString(item.logisticsCompanyName || item.companyName || item.logisticsCompany),
+    status: optionalString(item.logisticsStatus || item.status || item.statusDesc),
+    deliveredAt: optionalString(item.deliveredAt || item.signTime || item.endTime),
+    raw: item,
+  }));
+  const traceItems = findDeepArray(expanded, (item) => hasAnyKey(item, [
+    "acceptTime",
+    "time",
+    "traceTime",
+    "remark",
+    "eventDetail",
+    "desc",
+  ])).map((item) => ({
+    time: optionalString(item.acceptTime || item.traceTime || item.time || item.timeStr),
+    text: optionalString(item.remark || item.eventDetail || item.desc || item.description || item.context),
+    raw: item,
+  })).filter((item) => item.time || item.text);
+  const statusText = [
+    ...logisticsItems.map((item) => item.status),
+    ...traceItems.map((item) => item.text),
+  ].filter(Boolean).join(" ").toLowerCase();
+  const signed = /签收|已收|delivered|signed|success/.test(statusText);
+  const shipped = logisticsItems.length > 0 || traceItems.length > 0;
+  return {
+    externalOrderId: optionalString(externalOrderId)
+      || optionalString(findFirstDeepValue(expanded, ["orderId", "orderID", "tradeId", "tradeID"])),
+    status: signed ? "signed" : (shipped ? "shipped" : optionalString(findFirstDeepValue(expanded, ["status", "logisticsStatus"]))),
+    signed,
+    shipped,
+    logisticsItems,
+    traceItems,
+    raw: expanded,
+  };
+}
+
+function raw1688Params(payload = {}, fallback = {}) {
+  const params = payload.params && typeof payload.params === "object" && !Array.isArray(payload.params)
+    ? payload.params
+    : null;
+  const rawParams = payload.rawParams && typeof payload.rawParams === "object" && !Array.isArray(payload.rawParams)
+    ? payload.rawParams
+    : null;
+  return params || rawParams || fallback;
+}
+
+function getPurchaseOrderFor1688Action(db, payload = {}) {
+  const poId = optionalString(payload.poId || payload.id);
+  if (poId) return getPurchaseOrder(db, poId);
+  const externalOrderId = optionalString(payload.externalOrderId || payload.orderId || payload.tradeId);
+  const row = findPurchaseOrderByExternalOrderId(db, externalOrderId);
+  if (!row) throw new Error("purchase order or externalOrderId is required");
+  return row;
+}
+
+function build1688RefundOrderParams(payload = {}, po = {}) {
+  const externalOrderId = requireString(
+    payload.externalOrderId || payload.orderId || payload.tradeId || po.external_order_id,
+    "externalOrderId",
+  );
+  return raw1688Params(payload, {
+    orderId: externalOrderId,
+    tradeId: externalOrderId,
+    webSite: optionalString(payload.webSite) || "1688",
+    refundStatus: optionalString(payload.refundStatus || payload.status) || undefined,
+    page: optionalNumber(payload.page) || undefined,
+    pageSize: optionalNumber(payload.pageSize) || undefined,
+  });
+}
+
+function build1688RefundReasonParams(payload = {}, po = {}) {
+  const externalOrderId = optionalString(payload.externalOrderId || payload.orderId || payload.tradeId || po.external_order_id);
+  return raw1688Params(payload, {
+    orderId: externalOrderId || undefined,
+    tradeId: externalOrderId || undefined,
+    refundType: optionalString(payload.refundType) || undefined,
+    goodsStatus: optionalString(payload.goodsStatus) || undefined,
+  });
+}
+
+function build1688CreateRefundParams(payload = {}, po = {}) {
+  const externalOrderId = requireString(
+    payload.externalOrderId || payload.orderId || payload.tradeId || po.external_order_id,
+    "externalOrderId",
+  );
+  const amount = optionalNumber(payload.amount ?? payload.refundPayment ?? payload.applyPayment) ?? optionalNumber(po.total_amount);
+  return raw1688Params(payload, {
+    orderId: externalOrderId,
+    tradeId: externalOrderId,
+    refundPayment: amount,
+    applyPayment: amount,
+    refundReason: optionalString(payload.reason || payload.refundReason),
+    reason: optionalString(payload.reason || payload.refundReason),
+    description: optionalString(payload.description || payload.remark),
+    goodsStatus: optionalString(payload.goodsStatus) || "received",
+    refundType: optionalString(payload.refundType) || "refund",
+    voucherIds: Array.isArray(payload.voucherIds) ? payload.voucherIds : undefined,
+  });
+}
+
+function build1688RefundIdParams(payload = {}, po = {}) {
+  const refundId = requireString(payload.refundId || payload.refund_id || payload.id, "refundId");
+  return raw1688Params(payload, {
+    refundId,
+    orderId: optionalString(payload.externalOrderId || payload.orderId || po.external_order_id) || undefined,
+    webSite: optionalString(payload.webSite) || "1688",
+  });
+}
+
+function build1688ReturnGoodsParams(payload = {}, po = {}) {
+  const refundId = requireString(payload.refundId || payload.refund_id || payload.id, "refundId");
+  return raw1688Params(payload, {
+    refundId,
+    orderId: optionalString(payload.externalOrderId || payload.orderId || po.external_order_id) || undefined,
+    logisticsCompanyNo: optionalString(payload.logisticsCompanyNo || payload.companyNo),
+    logisticsBillNo: optionalString(payload.logisticsBillNo || payload.trackingNo || payload.mailNo),
+    description: optionalString(payload.description || payload.remark),
+  });
+}
+
+function upsert1688RefundRow(db, { po = {}, refund = {}, actor = {}, operationLog = null } = {}) {
+  const now = nowIso();
+  const refundId = optionalString(refund.refundId || refund.refund_id);
+  const existing = refundId
+    ? db.prepare("SELECT * FROM erp_1688_refunds WHERE refund_id = ?").get(refundId)
+    : null;
+  const row = {
+    id: existing?.id || createId("1688_refund"),
+    account_id: optionalString(po.account_id || refund.accountId || refund.account_id),
+    po_id: optionalString(po.id || refund.poId || refund.po_id),
+    external_order_id: optionalString(refund.externalOrderId || refund.external_order_id || po.external_order_id),
+    refund_id: refundId,
+    refund_status: optionalString(refund.status || refund.refundStatus || refund.refund_status),
+    refund_type: optionalString(refund.refundType || refund.refund_type),
+    refund_reason: optionalString(refund.reason || refund.refundReason || refund.refund_reason),
+    refund_amount: optionalNumber(refund.amount ?? refund.refundAmount ?? refund.refundPayment),
+    currency: optionalString(refund.currency) || "CNY",
+    raw_payload_json: trimJsonForStorage(refund.raw || refund),
+    operation_log_json: trimJsonForStorage(operationLog || parseJsonArray(existing?.operation_log_json)),
+    created_by: optionalString(existing?.created_by || actor.id),
+    created_at: existing?.created_at || now,
+    updated_at: now,
+    synced_at: now,
+  };
+  db.prepare(`
+    INSERT INTO erp_1688_refunds (
+      id, account_id, po_id, external_order_id, refund_id, refund_status,
+      refund_type, refund_reason, refund_amount, currency, raw_payload_json,
+      operation_log_json, created_by, created_at, updated_at, synced_at
+    )
+    VALUES (
+      @id, @account_id, @po_id, @external_order_id, @refund_id, @refund_status,
+      @refund_type, @refund_reason, @refund_amount, @currency, @raw_payload_json,
+      @operation_log_json, @created_by, @created_at, @updated_at, @synced_at
+    )
+    ON CONFLICT(refund_id) DO UPDATE SET
+      account_id = COALESCE(excluded.account_id, account_id),
+      po_id = COALESCE(excluded.po_id, po_id),
+      external_order_id = COALESCE(excluded.external_order_id, external_order_id),
+      refund_status = COALESCE(excluded.refund_status, refund_status),
+      refund_type = COALESCE(excluded.refund_type, refund_type),
+      refund_reason = COALESCE(excluded.refund_reason, refund_reason),
+      refund_amount = COALESCE(excluded.refund_amount, refund_amount),
+      currency = COALESCE(excluded.currency, currency),
+      raw_payload_json = excluded.raw_payload_json,
+      operation_log_json = excluded.operation_log_json,
+      updated_at = excluded.updated_at,
+      synced_at = excluded.synced_at
+  `).run(row);
+  return db.prepare("SELECT * FROM erp_1688_refunds WHERE id = ?").get(row.id)
+    || (refundId ? db.prepare("SELECT * FROM erp_1688_refunds WHERE refund_id = ?").get(refundId) : null)
+    || row;
+}
+
+function markPurchaseOrderRefundSynced({ db, services, po, actor, externalStatus = "refund_synced", paymentStatus = "partial_refund" }) {
+  const before = getPurchaseOrder(db, po.id);
+  const now = nowIso();
+  db.prepare(`
+    UPDATE erp_purchase_orders
+    SET external_order_status = @external_order_status,
+        payment_status = @payment_status,
+        external_order_synced_at = @external_order_synced_at,
+        updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id: before.id,
+    external_order_status: externalStatus,
+    payment_status: paymentStatus || before.payment_status,
+    external_order_synced_at: now,
+    updated_at: now,
+  });
+  const after = getPurchaseOrder(db, before.id);
+  services.workflow.writeAudit({
+    accountId: after.account_id || before.account_id,
+    actor,
+    action: "sync_1688_refund_status",
+    entityType: "purchase_order",
+    entityId: before.id,
+    before,
+    after,
+  });
+  if (after.pr_id) {
+    writePurchaseRequestEvent(db, getPurchaseRequest(db, after.pr_id), actor, "sync_1688_refund_status", "1688 退款售后状态已同步");
+  }
+  return after;
+}
+
+async function get1688RefundReasonsAction({ db, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 refund reasons");
+  const po = payload.poId || payload.id || payload.externalOrderId ? getPurchaseOrderFor1688Action(db, payload) : {};
+  const params = build1688RefundReasonParams(payload, po);
+  if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.REFUND_REASON_LIST.key, params };
+  const rawResponse = payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: optionalString(payload.accountId || po.account_id),
+    action: "get_1688_refund_reasons",
+    api: PROCUREMENT_APIS.REFUND_REASON_LIST,
+    params,
+  });
+  return { apiKey: PROCUREMENT_APIS.REFUND_REASON_LIST.key, query: params, rawResponse };
+}
+
+async function get1688MaxRefundFeeAction({ db, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 max refund fee");
+  const po = getPurchaseOrderFor1688Action(db, payload);
+  const params = raw1688Params(payload, {
+    orderId: requireString(payload.externalOrderId || payload.orderId || po.external_order_id, "externalOrderId"),
+    orderEntryIds: Array.isArray(payload.orderEntryIds) ? payload.orderEntryIds : undefined,
+  });
+  if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.MAX_REFUND_FEE.key, params };
+  const rawResponse = payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: po.account_id,
+    action: "get_1688_max_refund_fee",
+    api: PROCUREMENT_APIS.MAX_REFUND_FEE,
+    params,
+  });
+  return { apiKey: PROCUREMENT_APIS.MAX_REFUND_FEE.key, query: params, rawResponse };
+}
+
+async function upload1688RefundVoucherAction({ db, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 refund voucher upload");
+  const params = raw1688Params(payload, {
+    voucher: payload.voucher,
+    imageBase64: payload.imageBase64,
+    fileName: optionalString(payload.fileName),
+  });
+  if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.REFUND_VOUCHER_UPLOAD.key, params };
+  const rawResponse = payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: optionalString(payload.accountId),
+    action: "upload_1688_refund_voucher",
+    api: PROCUREMENT_APIS.REFUND_VOUCHER_UPLOAD,
+    params,
+  });
+  return { apiKey: PROCUREMENT_APIS.REFUND_VOUCHER_UPLOAD.key, query: params, rawResponse };
+}
+
+async function create1688RefundAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 refund create");
+  const po = getPurchaseOrderFor1688Action(db, payload);
+  const params = build1688CreateRefundParams(payload, po);
+  if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.CREATE_REFUND.key, params };
+  const rawResponse = payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: po.account_id,
+    action: "create_1688_refund",
+    api: PROCUREMENT_APIS.CREATE_REFUND,
+    params,
+  });
+  const refunds = normalize1688RefundListResponse(rawResponse);
+  const savedRefunds = (refunds.length ? refunds : [{
+    externalOrderId: po.external_order_id,
+    status: "created",
+    reason: params.refundReason || params.reason,
+    amount: params.refundPayment || params.applyPayment,
+    raw: rawResponse,
+  }]).map((refund) => upsert1688RefundRow(db, { po, refund, actor }));
+  const purchaseOrder = markPurchaseOrderRefundSynced({
+    db,
+    services,
+    po,
+    actor,
+    externalStatus: "refund_requested",
+    paymentStatus: "partial_refund",
+  });
+  return {
+    apiKey: PROCUREMENT_APIS.CREATE_REFUND.key,
+    query: params,
+    refunds: savedRefunds.map(toCamelRow),
+    purchaseOrder: toCamelRow(purchaseOrder),
+    rawResponse,
+  };
+}
+
+async function sync1688RefundsAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 refund sync");
+  const po = getPurchaseOrderFor1688Action(db, payload);
+  const params = build1688RefundOrderParams(payload, po);
+  const api = payload.byOrderDetail ? PROCUREMENT_APIS.REFUND_BY_ORDER : PROCUREMENT_APIS.REFUND_LIST;
+  if (payload.dryRun) return { dryRun: true, apiKey: api.key, params };
+  const rawResponse = payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: po.account_id,
+    action: "sync_1688_refunds",
+    api,
+    params,
+  });
+  const refunds = normalize1688RefundListResponse(rawResponse);
+  const savedRefunds = refunds.map((refund) => upsert1688RefundRow(db, { po, refund, actor }));
+  const purchaseOrder = refunds.length
+    ? markPurchaseOrderRefundSynced({ db, services, po, actor })
+    : getPurchaseOrder(db, po.id);
+  return {
+    apiKey: api.key,
+    query: params,
+    refunds: savedRefunds.map(toCamelRow),
+    refundCount: savedRefunds.length,
+    purchaseOrder: toCamelRow(purchaseOrder),
+    rawResponse,
+  };
+}
+
+async function sync1688RefundDetailAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 refund detail");
+  const po = payload.poId || payload.externalOrderId ? getPurchaseOrderFor1688Action(db, payload) : {};
+  const params = build1688RefundIdParams(payload, po);
+  if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.REFUND_DETAIL.key, params };
+  const rawResponse = payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: optionalString(payload.accountId || po.account_id),
+    action: "sync_1688_refund_detail",
+    api: PROCUREMENT_APIS.REFUND_DETAIL,
+    params,
+  });
+  const refunds = normalize1688RefundListResponse(rawResponse);
+  const savedRefunds = (refunds.length ? refunds : [{ refundId: params.refundId, raw: rawResponse }])
+    .map((refund) => upsert1688RefundRow(db, { po, refund, actor }));
+  if (po.id && savedRefunds.length) markPurchaseOrderRefundSynced({ db, services, po, actor });
+  return { apiKey: PROCUREMENT_APIS.REFUND_DETAIL.key, query: params, refunds: savedRefunds.map(toCamelRow), rawResponse };
+}
+
+async function sync1688RefundOperationsAction({ db, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 refund operations");
+  const po = payload.poId || payload.externalOrderId ? getPurchaseOrderFor1688Action(db, payload) : {};
+  const params = build1688RefundIdParams(payload, po);
+  if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.REFUND_OPERATION_LIST.key, params };
+  const rawResponse = payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: optionalString(payload.accountId || po.account_id),
+    action: "sync_1688_refund_operations",
+    api: PROCUREMENT_APIS.REFUND_OPERATION_LIST,
+    params,
+  });
+  const refund = upsert1688RefundRow(db, {
+    po,
+    refund: { refundId: params.refundId, raw: rawResponse },
+    actor,
+    operationLog: rawResponse,
+  });
+  return { apiKey: PROCUREMENT_APIS.REFUND_OPERATION_LIST.key, query: params, refund: toCamelRow(refund), rawResponse };
+}
+
+async function submit1688ReturnGoodsAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 refund return goods");
+  const po = payload.poId || payload.externalOrderId ? getPurchaseOrderFor1688Action(db, payload) : {};
+  const params = build1688ReturnGoodsParams(payload, po);
+  if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.REFUND_RETURN_GOODS.key, params };
+  const rawResponse = payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: optionalString(payload.accountId || po.account_id),
+    action: "submit_1688_return_goods",
+    api: PROCUREMENT_APIS.REFUND_RETURN_GOODS,
+    params,
+  });
+  const refund = upsert1688RefundRow(db, {
+    po,
+    refund: {
+      refundId: params.refundId,
+      externalOrderId: params.orderId,
+      status: "return_goods_submitted",
+      raw: rawResponse,
+    },
+    actor,
+  });
+  if (po.id) markPurchaseOrderRefundSynced({ db, services, po, actor, externalStatus: "refund_return_goods_submitted" });
+  return { apiKey: PROCUREMENT_APIS.REFUND_RETURN_GOODS.key, query: params, refund: toCamelRow(refund), rawResponse };
+}
+
+async function list1688OfflineLogisticsCompaniesAction({ db, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 offline logistics companies");
+  const params = raw1688Params(payload, {
+    keyword: optionalString(payload.keyword),
+  });
+  if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.OFFLINE_LOGISTIC_COMPANY_LIST.key, params };
+  const rawResponse = payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: optionalString(payload.accountId),
+    action: "list_1688_offline_logistics_companies",
+    api: PROCUREMENT_APIS.OFFLINE_LOGISTIC_COMPANY_LIST,
+    params,
+  });
+  return { apiKey: PROCUREMENT_APIS.OFFLINE_LOGISTIC_COMPANY_LIST.key, query: params, rawResponse };
+}
+
+function build1688OrderIdParams(payload = {}, po = {}) {
+  const orderId = requireString(
+    payload.externalOrderId
+      || payload.orderId
+      || payload.tradeId
+      || po.external_order_id
+      || po.externalOrderId,
+    "1688 orderId",
+  );
+  return {
+    webSite: Number(optionalNumber(payload.webSite) ?? 1688),
+    orderId,
+  };
+}
+
+function build1688CancelOrderParams(payload = {}, po = {}) {
+  const orderId = build1688OrderIdParams(payload, po).orderId;
+  return {
+    webSite: Number(optionalNumber(payload.webSite) ?? 1688),
+    tradeID: orderId,
+    cancelReason: optionalString(payload.cancelReason) || "other",
+    remark: optionalString(payload.remark) || "ERP取消未付款1688订单",
+  };
+}
+
+function build1688PaymentUrlParams(payload = {}, orderIds = []) {
+  const ids = orderIds.map((item) => optionalString(item)).filter(Boolean);
+  if (!ids.length) throw new Error("请先选择至少一个已绑定的 1688 订单");
+  const params = { orderIdList: ids };
+  for (const key of ["payChannel", "payWay", "returnUrl", "buyerLoginId"]) {
+    const value = optionalString(payload[key]);
+    if (value) params[key] = value;
+  }
+  return raw1688Params(payload, params);
+}
+
+function extract1688PaymentUrl(rawResponse = {}) {
+  return optionalString(findFirstDeepValue(asExpandedObject(rawResponse), [
+    "payUrl",
+    "paymentUrl",
+    "alipayUrl",
+    "cashierUrl",
+    "redirectUrl",
+    "url",
+  ]));
+}
+
+function map1688StatusToLocal(status, currentStatus, logistics = {}) {
+  const text = String(status || "").toUpperCase();
+  const current = optionalString(currentStatus);
+  if (["closed", "cancelled", "inbounded"].includes(current)) return null;
+  if (/CANCEL|TERMINATED|CLOSE/.test(text)) return "cancelled";
+  if (logistics.signed) return "arrived";
+  if (/CONFIRM_RECEIVE|RECEIVEGOODS|RECEIVED|SIGNED/.test(text)) return "arrived";
+  if (/WAIT_BUYER_RECEIVE|SELLER_SEND|SHIPPED|SENDGOODS/.test(text) || logistics.shipped) return "shipped";
+  if (/WAIT_SELLER_SEND|PAID|PAYED|WAIT_SELLER_DELIVER|SUCCESS/.test(text)) return "paid";
+  if (/WAIT_BUYER_PAY|UNPAID|CREATED|PREVIEW/.test(text)) {
+    return current === "draft" ? "pushed_pending_price" : null;
+  }
+  return null;
+}
+
+function map1688StatusToPaymentStatus(status, currentPaymentStatus) {
+  const text = String(status || "").toUpperCase();
+  if (/WAIT_SELLER_SEND|WAIT_BUYER_RECEIVE|PAID|PAYED|SUCCESS|SELLER_SEND|SHIPPED/.test(text)) return "paid";
+  return null;
+}
+
+function updatePurchaseOrderFrom1688Snapshot({
+  db,
+  services,
+  po,
+  order = {},
+  logistics = null,
+  paymentUrl = null,
+  rawDetail = null,
+  rawLogistics = null,
+  rawPayment = null,
+  action,
+  actor,
+  forceCancel = false,
+}) {
+  const before = getPurchaseOrder(db, po.id);
+  const now = nowIso();
+  const nextStatus = forceCancel ? "cancelled" : map1688StatusToLocal(order.status, before.status, logistics || {});
+  const nextPaymentStatus = map1688StatusToPaymentStatus(order.status, before.payment_status);
+  const payloadJson = {
+    ...(parseJsonObject(before.external_order_payload_json) || {}),
+    ...(rawPayment ? { payment: rawPayment } : {}),
+    ...(paymentUrl ? { paymentUrl } : {}),
+    ...(rawDetail ? { lastDetail: rawDetail } : {}),
+    ...(rawLogistics ? { logistics: rawLogistics } : {}),
+  };
+  db.prepare(`
+    UPDATE erp_purchase_orders
+    SET status = @status,
+        payment_status = @payment_status,
+        total_amount = COALESCE(@total_amount, total_amount),
+        external_order_id = COALESCE(@external_order_id, external_order_id),
+        external_order_status = COALESCE(@external_order_status, external_order_status),
+        external_order_payload_json = @external_order_payload_json,
+        external_order_synced_at = @external_order_synced_at,
+        external_payment_url = COALESCE(@external_payment_url, external_payment_url),
+        external_payment_url_synced_at = COALESCE(@external_payment_url_synced_at, external_payment_url_synced_at),
+        external_order_detail_json = COALESCE(@external_order_detail_json, external_order_detail_json),
+        external_order_detail_synced_at = COALESCE(@external_order_detail_synced_at, external_order_detail_synced_at),
+        external_logistics_json = COALESCE(@external_logistics_json, external_logistics_json),
+        external_logistics_synced_at = COALESCE(@external_logistics_synced_at, external_logistics_synced_at),
+        updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id: before.id,
+    status: nextStatus || before.status,
+    payment_status: nextPaymentStatus || before.payment_status,
+    total_amount: optionalNumber(order.totalAmount),
+    external_order_id: optionalString(order.externalOrderId),
+    external_order_status: forceCancel ? "cancelled" : optionalString(order.status),
+    external_order_payload_json: trimJsonForStorage(payloadJson),
+    external_order_synced_at: now,
+    external_payment_url: paymentUrl,
+    external_payment_url_synced_at: paymentUrl ? now : null,
+    external_order_detail_json: rawDetail ? trimJsonForStorage(rawDetail) : null,
+    external_order_detail_synced_at: rawDetail ? now : null,
+    external_logistics_json: rawLogistics ? trimJsonForStorage(rawLogistics) : null,
+    external_logistics_synced_at: rawLogistics ? now : null,
+    updated_at: now,
+  });
+  const after = getPurchaseOrder(db, before.id);
+  services.workflow.writeAudit({
+    accountId: before.account_id,
+    actor,
+    action,
+    entityType: "purchase_order",
+    entityId: before.id,
+    before,
+    after,
+  });
+  if (before.pr_id) {
+    const eventText = action === "get_1688_payment_url"
+      ? "1688 支付链接已同步"
+      : action === "sync_1688_logistics"
+        ? "1688 物流信息已同步"
+        : action === "cancel_1688_order"
+          ? "1688 订单已取消"
+          : "1688 订单详情已同步";
+    writePurchaseRequestEvent(db, getPurchaseRequest(db, before.pr_id), actor, action, eventText);
+    markPurchaseRequestRead(db, before.pr_id, actor);
+  }
+  return after;
+}
+
+async function fetch1688OrderDetailForPo({ db, services, po, payload, actor, action = "fetch_1688_order_detail" }) {
+  const apiParams = build1688OrderIdParams(payload, po);
+  if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.ORDER_DETAIL.key, params: apiParams };
+  const rawResponse = payload.mockDetailResponse || payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: po.account_id,
+    action,
+    api: PROCUREMENT_APIS.ORDER_DETAIL,
+    params: apiParams,
+  });
+  const detail = normalize1688OrderDetailResponse(rawResponse, apiParams.orderId);
+  const afterPo = po.id ? updatePurchaseOrderFrom1688Snapshot({
+    db,
+    services,
+    po,
+    order: detail,
+    rawDetail: rawResponse,
+    action,
+    actor,
+  }) : null;
+  return {
+    apiKey: PROCUREMENT_APIS.ORDER_DETAIL.key,
+    query: apiParams,
+    detail,
+    purchaseOrder: afterPo ? toCamelRow(afterPo) : null,
+    rawResponse,
+  };
+}
+
+async function fetch1688OrderDetailAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin", "finance", "warehouse"], "1688 订单详情同步");
+  const po = getPurchaseOrder(db, requireString(payload.poId || payload.id, "poId"));
+  return fetch1688OrderDetailForPo({ db, services, po, payload, actor });
+}
+
+async function sync1688LogisticsAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin", "warehouse"], "1688 物流同步");
+  const po = getPurchaseOrder(db, requireString(payload.poId || payload.id, "poId"));
+  const apiParams = build1688OrderIdParams(payload, po);
+  if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.LOGISTICS_INFO.key, params: apiParams };
+  const rawResponse = payload.mockLogisticsResponse || payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: po.account_id,
+    action: "sync_1688_logistics",
+    api: PROCUREMENT_APIS.LOGISTICS_INFO,
+    params: apiParams,
+  });
+  const logistics = normalize1688LogisticsResponse(rawResponse, apiParams.orderId);
+  let traceResponse = null;
+  if (payload.includeTrace !== false) {
+    try {
+      traceResponse = payload.mockTraceResponse || await call1688ProcurementApi({
+        db,
+        actor,
+        accountId: po.account_id,
+        action: "sync_1688_logistics_trace",
+        api: PROCUREMENT_APIS.LOGISTICS_TRACE,
+        params: apiParams,
+      });
+      const trace = normalize1688LogisticsResponse(traceResponse, apiParams.orderId);
+      logistics.traceItems = trace.traceItems.length ? trace.traceItems : logistics.traceItems;
+      logistics.signed = logistics.signed || trace.signed;
+      logistics.shipped = logistics.shipped || trace.shipped;
+      logistics.status = logistics.signed ? "signed" : logistics.status;
+    } catch (error) {
+      logistics.traceError = error?.message || String(error);
+    }
+  }
+  const afterPo = updatePurchaseOrderFrom1688Snapshot({
+    db,
+    services,
+    po,
+    order: { externalOrderId: apiParams.orderId, status: logistics.status },
+    logistics,
+    rawLogistics: { info: rawResponse, trace: traceResponse },
+    action: "sync_1688_logistics",
+    actor,
+  });
+  return {
+    apiKey: PROCUREMENT_APIS.LOGISTICS_INFO.key,
+    query: apiParams,
+    logistics,
+    purchaseOrder: toCamelRow(afterPo),
+    rawResponse,
+    traceResponse,
+  };
+}
+
+function getPurchaseOrdersForPayment(db, payload = {}) {
+  const poIds = [
+    ...(Array.isArray(payload.poIds) ? payload.poIds : []),
+    payload.poId || payload.id,
+  ].map((item) => optionalString(item)).filter(Boolean);
+  if (!poIds.length) return [];
+  const placeholders = poIds.map(() => "?").join(", ");
+  return db.prepare(`SELECT * FROM erp_purchase_orders WHERE id IN (${placeholders})`).all(poIds);
+}
+
+async function get1688PaymentUrlAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["finance", "manager", "admin", "buyer"], "1688 支付链接");
+  const purchaseOrders = getPurchaseOrdersForPayment(db, payload);
+  const orderIds = Array.from(new Set([
+    ...purchaseOrders.map((po) => po.external_order_id),
+    ...(Array.isArray(payload.externalOrderIds) ? payload.externalOrderIds : []),
+    payload.externalOrderId || payload.orderId,
+  ].map((item) => optionalString(item)).filter(Boolean)));
+  const apiParams = build1688PaymentUrlParams(payload, orderIds);
+  if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.PAYMENT_URL.key, params: apiParams };
+  const rawResponse = payload.mockPaymentResponse || payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: purchaseOrders[0]?.account_id || optionalString(payload.accountId),
+    action: "get_1688_payment_url",
+    api: PROCUREMENT_APIS.PAYMENT_URL,
+    params: apiParams,
+  });
+  const paymentUrl = extract1688PaymentUrl(rawResponse);
+  if (!paymentUrl) throw new Error("1688 没有返回支付链接，请检查订单是否待付款");
+  const updated = purchaseOrders
+    .filter((po) => orderIds.includes(String(po.external_order_id || "")))
+    .map((po) => updatePurchaseOrderFrom1688Snapshot({
+      db,
+      services,
+      po,
+      order: { externalOrderId: po.external_order_id, status: po.external_order_status },
+      paymentUrl,
+      rawPayment: rawResponse,
+      action: "get_1688_payment_url",
+      actor,
+    }));
+  return {
+    apiKey: PROCUREMENT_APIS.PAYMENT_URL.key,
+    query: apiParams,
+    paymentUrl,
+    externalOrderIds: orderIds,
+    purchaseOrders: updated.map(toCamelRow),
+    rawResponse,
+  };
+}
+
+async function cancel1688OrderAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "取消 1688 订单");
+  const po = getPurchaseOrder(db, requireString(payload.poId || payload.id, "poId"));
+  const apiParams = build1688CancelOrderParams(payload, po);
+  if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.CANCEL_ORDER.key, params: apiParams };
+  const rawResponse = payload.mockCancelResponse || payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: po.account_id,
+    action: "cancel_1688_order",
+    api: PROCUREMENT_APIS.CANCEL_ORDER,
+    params: apiParams,
+  });
+  const afterPo = updatePurchaseOrderFrom1688Snapshot({
+    db,
+    services,
+    po,
+    order: { externalOrderId: apiParams.tradeID, status: "cancelled" },
+    rawDetail: { cancel: rawResponse },
+    action: "cancel_1688_order",
+    actor,
+    forceCancel: true,
+  });
+  return {
+    apiKey: PROCUREMENT_APIS.CANCEL_ORDER.key,
+    query: apiParams,
+    purchaseOrder: toCamelRow(afterPo),
+    rawResponse,
+  };
+}
+
+function build1688OrderMemoParams(payload = {}, po = {}) {
+  const orderId = build1688OrderIdParams(payload, po).orderId;
+  const remark = requireString(payload.memo || payload.remark || payload.message, "memo");
+  const params = {
+    webSite: Number(optionalNumber(payload.webSite) ?? 1688),
+    orderId,
+    remark,
+  };
+  const remarkIcon = optionalString(payload.remarkIcon || payload.icon);
+  if (remarkIcon) params.remarkIcon = remarkIcon;
+  return raw1688Params(payload, params);
+}
+
+function build1688OrderFeedbackParams(payload = {}, po = {}) {
+  const orderId = build1688OrderIdParams(payload, po).orderId;
+  const feedback = requireString(payload.feedback || payload.message || payload.remark, "feedback");
+  return raw1688Params(payload, {
+    webSite: Number(optionalNumber(payload.webSite) ?? 1688),
+    orderId,
+    feedback,
+  });
+}
+
+function build1688ConfirmReceiveGoodsParams(payload = {}, po = {}) {
+  const orderId = build1688OrderIdParams(payload, po).orderId;
+  return raw1688Params(payload, {
+    webSite: Number(optionalNumber(payload.webSite) ?? 1688),
+    orderId,
+  });
+}
+
+async function add1688OrderMemoAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 order memo");
+  const po = getPurchaseOrderFor1688Action(db, payload);
+  const params = build1688OrderMemoParams(payload, po);
+  if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.ORDER_MEMO_ADD.key, params };
+  const rawResponse = payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: po.account_id,
+    action: "add_1688_order_memo",
+    api: PROCUREMENT_APIS.ORDER_MEMO_ADD,
+    params,
+  });
+  const afterPo = updatePurchaseOrderFrom1688Snapshot({
+    db,
+    services,
+    po,
+    order: { externalOrderId: params.orderId, status: "memo_modified" },
+    rawDetail: { orderMemo: { params, response: rawResponse, at: nowIso() } },
+    action: "add_1688_order_memo",
+    actor,
+  });
+  return {
+    apiKey: PROCUREMENT_APIS.ORDER_MEMO_ADD.key,
+    query: params,
+    purchaseOrder: toCamelRow(afterPo),
+    rawResponse,
+  };
+}
+
+async function add1688OrderFeedbackAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 order feedback");
+  const po = getPurchaseOrderFor1688Action(db, payload);
+  const params = build1688OrderFeedbackParams(payload, po);
+  if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.ORDER_FEEDBACK_ADD.key, params };
+  const rawResponse = payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: po.account_id,
+    action: "add_1688_order_feedback",
+    api: PROCUREMENT_APIS.ORDER_FEEDBACK_ADD,
+    params,
+  });
+  const afterPo = updatePurchaseOrderFrom1688Snapshot({
+    db,
+    services,
+    po,
+    order: { externalOrderId: params.orderId, status: "feedback_added" },
+    rawDetail: { orderFeedback: { params, response: rawResponse, at: nowIso() } },
+    action: "add_1688_order_feedback",
+    actor,
+  });
+  return {
+    apiKey: PROCUREMENT_APIS.ORDER_FEEDBACK_ADD.key,
+    query: params,
+    purchaseOrder: toCamelRow(afterPo),
+    rawResponse,
+  };
+}
+
+async function confirm1688ReceiveGoodsAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin", "warehouse"], "1688 confirm receive goods");
+  const po = getPurchaseOrderFor1688Action(db, payload);
+  const params = build1688ConfirmReceiveGoodsParams(payload, po);
+  if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.CONFIRM_RECEIVE_GOODS.key, params };
+  const rawResponse = payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: po.account_id,
+    action: "confirm_1688_receive_goods",
+    api: PROCUREMENT_APIS.CONFIRM_RECEIVE_GOODS,
+    params,
+  });
+  const afterPo = updatePurchaseOrderFrom1688Snapshot({
+    db,
+    services,
+    po,
+    order: { externalOrderId: params.orderId, status: "received" },
+    rawDetail: { receiveGoods: { params, response: rawResponse, at: nowIso() } },
+    action: "confirm_1688_receive_goods",
+    actor,
+  });
+  return {
+    apiKey: PROCUREMENT_APIS.CONFIRM_RECEIVE_GOODS.key,
+    query: params,
+    purchaseOrder: toCamelRow(afterPo),
+    rawResponse,
+  };
+}
+
+function findSku1688SourceForOrderLine(db, line = {}, accountId = null) {
+  const productId = optionalString(line.productId || line.offerId || line.externalOfferId);
+  if (!productId) return null;
+  const rows = db.prepare(`
+    SELECT source.*, sku.internal_sku_code, sku.product_name
+    FROM erp_sku_1688_sources source
+    JOIN erp_skus sku ON sku.id = source.sku_id
+    WHERE source.status = 'active'
+      AND source.external_offer_id = @external_offer_id
+      ${accountId ? "AND source.account_id = @account_id" : ""}
+    ORDER BY source.is_default DESC, source.updated_at DESC, source.created_at DESC
+  `).all({
+    external_offer_id: productId,
+    account_id: accountId,
+  });
+  const skuId = optionalString(line.skuId);
+  const specId = optionalString(line.specId);
+  return rows
+    .map((row) => {
+      let score = 0;
+      if (skuId && row.external_sku_id === skuId) score += 20;
+      if (specId && row.external_spec_id === specId) score += 20;
+      if (!row.external_sku_id && !row.external_spec_id) score += 1;
+      return { ...row, matchScore: score };
+    })
+    .sort((left, right) => right.matchScore - left.matchScore)[0] || null;
+}
+
+function buildPoNoFrom1688Order(order) {
+  const suffix = String(order.externalOrderId || "").replace(/\D+/g, "").slice(-10);
+  return suffix ? `PO-1688-${suffix}` : buildPurchaseOrderNo();
+}
+
+function createPurchaseOrderFrom1688Order({ db, services, order, payload = {}, actor }) {
+  const externalOrderId = requireString(order.externalOrderId || payload.externalOrderId, "externalOrderId");
+  const existing = findPurchaseOrderByExternalOrderId(db, externalOrderId);
+  if (existing) return { purchaseOrder: existing, created: false, reason: "exists" };
+  const accountId = optionalString(payload.accountId || payload.account_id);
+  const lines = Array.isArray(order.lines) ? order.lines : [];
+  if (!lines.length) throw new Error(`1688订单 ${externalOrderId} 没有可识别商品明细，不能自动生成采购单`);
+  const mappedLines = lines.map((line) => ({ line, source: findSku1688SourceForOrderLine(db, line, accountId) }));
+  const missing = mappedLines.filter((item) => !item.source);
+  if (missing.length && !payload.allowPartial) {
+    throw new Error(`1688订单 ${externalOrderId} 有 ${missing.length} 个商品未匹配本地SKU，请先维护1688映射`);
+  }
+  const usableLines = mappedLines.filter((item) => item.source);
+  if (!usableLines.length) throw new Error(`1688订单 ${externalOrderId} 没有匹配到本地SKU`);
+  const finalAccountId = accountId || usableLines[0].source.account_id;
+  const totalQty = usableLines.reduce((sum, item) => sum + Math.max(1, Math.floor(Number(item.line.quantity || 1))), 0);
+  const totalAmount = optionalNumber(order.totalAmount) ?? usableLines.reduce((sum, item) => (
+    sum + Math.max(1, Math.floor(Number(item.line.quantity || 1))) * Number(item.source.unit_price || 0)
+  ), 0);
+  const unitFallback = totalQty > 0 && totalAmount > 0 ? totalAmount / totalQty : 0;
+  const now = nowIso();
+  const po = {
+    id: optionalString(payload.poId) || createId("po"),
+    account_id: finalAccountId,
+    pr_id: null,
+    selected_candidate_id: null,
+    supplier_id: null,
+    po_no: optionalString(payload.poNo) || buildPoNoFrom1688Order(order),
+    status: map1688StatusToLocal(order.status, "draft", {}) || "draft",
+    payment_status: map1688StatusToPaymentStatus(order.status, "unpaid") || "unpaid",
+    expected_delivery_date: null,
+    actual_delivery_date: null,
+    total_amount: totalAmount,
+    created_by: actor.id || null,
+    created_at: now,
+    updated_at: now,
+    external_order_id: externalOrderId,
+    external_order_status: optionalString(order.status) || "imported",
+    external_order_payload_json: trimJsonForStorage(order.raw || order),
+    external_order_synced_at: now,
+    external_order_detail_json: trimJsonForStorage(order.raw || order),
+    external_order_detail_synced_at: now,
+  };
+  db.prepare(`
+    INSERT INTO erp_purchase_orders (
+      id, account_id, pr_id, selected_candidate_id, supplier_id, po_no,
+      status, payment_status, expected_delivery_date, actual_delivery_date,
+      total_amount, created_by, created_at, updated_at,
+      external_order_id, external_order_status, external_order_payload_json,
+      external_order_synced_at, external_order_detail_json, external_order_detail_synced_at
+    )
+    VALUES (
+      @id, @account_id, @pr_id, @selected_candidate_id, @supplier_id, @po_no,
+      @status, @payment_status, @expected_delivery_date, @actual_delivery_date,
+      @total_amount, @created_by, @created_at, @updated_at,
+      @external_order_id, @external_order_status, @external_order_payload_json,
+      @external_order_synced_at, @external_order_detail_json, @external_order_detail_synced_at
+    )
+  `).run(po);
+  usableLines.forEach((item, index) => {
+    const qty = Math.max(1, Math.floor(Number(item.line.quantity || 1)));
+    db.prepare(`
+      INSERT INTO erp_purchase_order_lines (
+        id, account_id, po_id, sku_id, qty, unit_cost, logistics_fee,
+        expected_qty, received_qty, remark
+      )
+      VALUES (
+        @id, @account_id, @po_id, @sku_id, @qty, @unit_cost, @logistics_fee,
+        @expected_qty, @received_qty, @remark
+      )
+    `).run({
+      id: createId("po_line"),
+      account_id: finalAccountId,
+      po_id: po.id,
+      sku_id: item.source.sku_id,
+      qty,
+      unit_cost: optionalNumber(item.source.unit_price) ?? unitFallback,
+      logistics_fee: index === 0 ? (optionalNumber(order.freight) ?? 0) : 0,
+      expected_qty: qty,
+      received_qty: 0,
+      remark: item.line.title || item.source.product_title || null,
+    });
+  });
+  const afterPo = getPurchaseOrder(db, po.id);
+  services.workflow.writeAudit({
+    accountId: finalAccountId,
+    actor,
+    action: "generate_po_from_1688_order",
+    entityType: "purchase_order",
+    entityId: po.id,
+    before: null,
+    after: afterPo,
+  });
+  return { purchaseOrder: afterPo, created: true, missingCount: missing.length };
+}
+
+function normalizeImported1688Order(input = {}) {
+  return normalize1688OrderDetailResponse(input.raw || input, input.externalOrderId);
+}
+
+async function import1688OrdersAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "同步 1688 后台订单");
+  const apiParams = build1688OrderListParams(payload, {});
+  if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.ORDER_LIST.key, params: apiParams };
+  const rawResponse = payload.mockOrderListResponse || payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId: optionalString(payload.accountId || payload.account_id),
+    action: "import_1688_orders",
+    api: PROCUREMENT_APIS.ORDER_LIST,
+    params: apiParams,
+  });
+  const orders = normalize1688BuyerOrderListResponse(rawResponse);
+  const imported = [];
+  for (const order of orders) {
+    const existing = findPurchaseOrderByExternalOrderId(db, order.externalOrderId);
+    let localPo = existing;
+    let generated = false;
+    let error = null;
+    if (existing) {
+      localPo = updatePurchaseOrderFrom1688Snapshot({
+        db,
+        services,
+        po: existing,
+        order,
+        rawDetail: order.raw || order,
+        action: "import_1688_orders",
+        actor,
+      });
+    } else if (payload.autoGenerate) {
+      try {
+        const result = createPurchaseOrderFrom1688Order({ db, services, order, payload, actor });
+        localPo = result.purchaseOrder;
+        generated = Boolean(result.created);
+      } catch (nextError) {
+        error = nextError?.message || String(nextError);
+      }
+    }
+    imported.push({
+      ...order,
+      localPoId: localPo?.id || null,
+      localPoNo: localPo?.po_no || null,
+      generated,
+      error,
+    });
+  }
+  return {
+    apiKey: PROCUREMENT_APIS.ORDER_LIST.key,
+    query: apiParams,
+    importedCount: imported.length,
+    generatedCount: imported.filter((item) => item.generated).length,
+    orders: imported,
+    rawResponse,
+  };
+}
+
+async function generatePoFrom1688OrderAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 后台订单生成采购单");
+  let order = payload.order ? normalizeImported1688Order(payload.order) : null;
+  if (!order?.externalOrderId) {
+    const detail = await fetch1688OrderDetailForPo({
+      db,
+      services,
+      po: { external_order_id: optionalString(payload.externalOrderId || payload.orderId), account_id: optionalString(payload.accountId) },
+      payload,
+      actor,
+      action: "fetch_1688_order_for_generate_po",
+    });
+    order = detail.detail;
+  }
+  const result = createPurchaseOrderFrom1688Order({ db, services, order, payload, actor });
+  return {
+    purchaseOrder: toCamelRow(result.purchaseOrder),
+    created: result.created,
+    missingCount: result.missingCount || 0,
+  };
+}
+
+async function link1688OrderToPoAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "关联 1688 后台订单");
+  const po = getPurchaseOrderWithCandidate(db, requireString(payload.poId || payload.id, "poId"));
+  let order = payload.order ? normalizeImported1688Order(payload.order) : null;
+  if (!order?.externalOrderId) {
+    const detail = await fetch1688OrderDetailForPo({
+      db,
+      services,
+      po,
+      payload,
+      actor,
+      action: "fetch_1688_order_for_link_po",
+    });
+    order = detail.detail;
+  }
+  const afterPo = bind1688OrderToPurchaseOrder({ db, services, po, order, actor, action: "link_1688_order_to_po" });
+  return { purchaseOrder: toCamelRow(afterPo), order };
+}
+
 async function performPurchaseAction(payload = {}, actorInput = {}) {
   const { db, services } = requireErp();
   const action = requireString(payload.action, "action");
@@ -4739,6 +7566,26 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     };
   }
 
+  if (action === "sync_1688_addresses") {
+    const result = await sync1688DeliveryAddressesAction({ db, payload, actor });
+    broadcastPurchaseUpdate(action, payload, actor, result);
+    return {
+      action,
+      result,
+      workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+    };
+  }
+
+  if (action === "configure_1688_message_subscriptions") {
+    const result = configure1688MessageSubscriptionsAction({ db, payload, actor });
+    broadcastPurchaseUpdate(action, payload, actor, result);
+    return {
+      action,
+      result,
+      workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+    };
+  }
+
   if (action === "preview_1688_order") {
     const result = await preview1688OrderAction({ db, services, payload, actor });
     broadcastPurchaseUpdate(action, payload, actor, result);
@@ -4761,6 +7608,82 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
 
   if (action === "sync_1688_orders") {
     const result = await sync1688OrdersAction({ db, services, payload, actor });
+    broadcastPurchaseUpdate(action, payload, actor, result);
+    return {
+      action,
+      result,
+      workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+    };
+  }
+
+  if (action === "query_1688_mix_config") {
+    const result = await query1688MixConfigAction({ db, services, payload, actor });
+    broadcastPurchaseUpdate(action, payload, actor, result);
+    return {
+      action,
+      result,
+      workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+    };
+  }
+
+  const async1688RefundActions = {
+    get_1688_refund_reasons: get1688RefundReasonsAction,
+    get_1688_max_refund_fee: get1688MaxRefundFeeAction,
+    upload_1688_refund_voucher: upload1688RefundVoucherAction,
+    create_1688_refund: create1688RefundAction,
+    sync_1688_refunds: sync1688RefundsAction,
+    sync_1688_refund_detail: sync1688RefundDetailAction,
+    sync_1688_refund_operations: sync1688RefundOperationsAction,
+    submit_1688_return_goods: submit1688ReturnGoodsAction,
+    list_1688_offline_logistics_companies: list1688OfflineLogisticsCompaniesAction,
+  };
+  if (async1688RefundActions[action]) {
+    const result = await async1688RefundActions[action]({ db, services, payload, actor });
+    broadcastPurchaseUpdate(action, payload, actor, result);
+    return {
+      action,
+      result,
+      workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+    };
+  }
+
+  const async1688OrderActions = {
+    search_1688_relation_suppliers: search1688RelationSuppliersAction,
+    sync_1688_relation_user_info: sync1688RelationUserInfoAction,
+    follow_1688_product: (args) => set1688ProductFollowAction({ ...args, follow: true }),
+    unfollow_1688_product: (args) => set1688ProductFollowAction({ ...args, follow: false }),
+    sync_1688_purchased_products: sync1688PurchasedProductsAction,
+    get_1688_payment_url: get1688PaymentUrlAction,
+    query_1688_pay_ways: query1688PayWaysAction,
+    query_1688_protocol_pay_status: query1688ProtocolPayStatusAction,
+    prepare_1688_protocol_pay: prepare1688ProtocolPayAction,
+    fetch_1688_order_detail: fetch1688OrderDetailAction,
+    sync_1688_logistics: sync1688LogisticsAction,
+    sync_1688_order_price: sync1688OrderPriceAction,
+    import_1688_orders: import1688OrdersAction,
+    generate_po_from_1688_order: generatePoFrom1688OrderAction,
+    link_1688_order_to_po: link1688OrderToPoAction,
+    cancel_1688_order: cancel1688OrderAction,
+    add_1688_order_memo: add1688OrderMemoAction,
+    add_1688_order_feedback: add1688OrderFeedbackAction,
+    confirm_1688_receive_goods: confirm1688ReceiveGoodsAction,
+    run_1688_supply_change_agent: (args) => run1688AgentAction({
+      ...args,
+      api: PROCUREMENT_APIS.SUPPLY_CHANGE_AGENT,
+      action: "run_1688_supply_change_agent",
+    }),
+    feedback_1688_supply_change_agent: feedback1688SupplyChangeAgentAction,
+    add_1688_monitor_product: (args) => set1688MonitorProductAction({ ...args, add: true }),
+    delete_1688_monitor_product: (args) => set1688MonitorProductAction({ ...args, add: false }),
+    query_1688_monitor_products: query1688MonitorProductsAction,
+    run_1688_deep_search_agent: (args) => run1688AgentAction({
+      ...args,
+      api: PROCUREMENT_APIS.DEEP_SEARCH_AGENT,
+      action: "run_1688_deep_search_agent",
+    }),
+  };
+  if (async1688OrderActions[action]) {
+    const result = await async1688OrderActions[action]({ db, services, payload, actor });
     broadcastPurchaseUpdate(action, payload, actor, result);
     return {
       action,
@@ -4795,6 +7718,19 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
         const prId = requireString(payload.prId || payload.id, "prId");
         const transition = services.purchase.markRequestSourced(prId, actor);
         writePurchaseRequestEvent(db, getPurchaseRequest(db, prId), actor, "mark_sourced", "采购标记已寻源");
+        markPurchaseRequestRead(db, prId, actor);
+        return transition;
+      }
+      case "cancel_pr": {
+        const prId = requireString(payload.prId || payload.id, "prId");
+        const transition = services.workflow.transition({
+          entityType: "purchase_request",
+          id: prId,
+          action: "cancel_pr",
+          toStatus: "cancelled",
+          actor,
+        });
+        writePurchaseRequestEvent(db, getPurchaseRequest(db, prId), actor, "cancel_request", "采购单已删除");
         markPurchaseRequestRead(db, prId, actor);
         return transition;
       }
@@ -5878,6 +8814,21 @@ async function upsertAccountRuntime(payload = {}, actor = {}) {
   return upsertAccount(payload || {}, actor);
 }
 
+async function deleteAccountRuntime(payload = {}, actor = {}) {
+  if (isClientMode()) {
+    const response = await remoteRequest("/api/master-data/action", {
+      method: "POST",
+      body: {
+        ...payload,
+        action: "delete_account",
+      },
+    });
+    return response.result;
+  }
+  assertRoleIfLoggedIn(["admin", "manager"]);
+  return deleteAccount(payload || {}, actor);
+}
+
 async function listSuppliersRuntime(params = {}) {
   const workbench = await getMasterDataWorkbenchRuntime(params);
   return workbench.suppliers || [];
@@ -5979,6 +8930,7 @@ function startLanService(payload = {}) {
     upsertUserResourceScope,
     listAccounts,
     upsertAccount,
+    deleteAccount,
     listSuppliers,
     createSupplier,
     listSkus,
@@ -6125,6 +9077,7 @@ function registerErpIpcHandlers(ipcMain) {
   });
   ipcMain.handle("erp:account:list", (_event, params) => listAccountsRuntime(params || {}));
   ipcMain.handle("erp:account:upsert", (_event, payload) => upsertAccountRuntime(payload || {}, erpState.currentUser || {}));
+  ipcMain.handle("erp:account:delete", (_event, payload) => deleteAccountRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:user:list", (_event, params) => {
     if (!isClientMode()) assertHostMode("用户管理");
     return listUsersRuntime(params || {});

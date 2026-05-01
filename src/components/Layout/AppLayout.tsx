@@ -19,11 +19,9 @@ import {
   RocketOutlined,
   SafetyCertificateOutlined,
   SettingOutlined,
-  ShopOutlined,
   ShoppingOutlined,
   SyncOutlined,
   TagsOutlined,
-  TeamOutlined,
   UserOutlined,
 } from "@ant-design/icons";
 import { ACTIVE_ACCOUNT_CHANGED_EVENT, readActiveAccountId } from "../../utils/multiStore";
@@ -45,9 +43,7 @@ const menuItems = [
     children: [
       { key: "/daily-command", icon: <BellOutlined />, label: "今日作战台" },
       { key: "/product-master-data", icon: <TagsOutlined />, label: "商品资料" },
-      { key: "/suppliers", icon: <TeamOutlined />, label: "供应商" },
-      { key: "/stores", icon: <ShopOutlined />, label: "店铺" },
-      { key: "/1688-mapping", icon: <ApiOutlined />, label: "1688 映射" },
+      { key: "/1688-mapping", icon: <ApiOutlined />, label: "供应商管理" },
       { key: "/purchase-center", icon: <ShoppingOutlined />, label: "采购中心" },
       { key: "/warehouse-center", icon: <InboxOutlined />, label: "仓库中心" },
       { key: "/qc-outbound", icon: <SafetyCertificateOutlined />, label: "质检发仓" },
@@ -74,6 +70,7 @@ const menuItems = [
       { key: "/image-studio", icon: <PictureOutlined />, label: "AI 出图" },
       { key: "/image-studio-gpt", icon: <PictureOutlined />, label: "AI 生图 GPT 版" },
       { key: "/price-review", icon: <DollarOutlined />, label: "核价筛选" },
+      { key: "/logs", icon: <FileTextOutlined />, label: "日志中心" },
     ],
   },
   {
@@ -83,7 +80,6 @@ const menuItems = [
       { key: "/work-items", icon: <BellOutlined />, label: "事项中心" },
       { key: "/users", icon: <UserOutlined />, label: "用户管理" },
       { key: "/erp-debug", icon: <DatabaseOutlined />, label: "调试台" },
-      { key: "/logs", icon: <FileTextOutlined />, label: "日志中心" },
       { key: "/settings", icon: <SettingOutlined />, label: "设置" },
     ],
   },

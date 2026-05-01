@@ -11,29 +11,37 @@ import {
   Input,
   InputNumber,
   Modal,
+  Popconfirm,
   Row,
   Select,
-  Switch,
   Space,
   Table,
+  Tag,
   Typography,
   Upload,
   message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import type { TableRowSelection } from "antd/es/table/interface";
 import type { Dayjs } from "dayjs";
 import {
   ApiOutlined,
+  CarOutlined,
   CheckCircleOutlined,
+  CloudSyncOutlined,
   CommentOutlined,
   DeleteOutlined,
   DollarOutlined,
   DownloadOutlined,
+  FileSearchOutlined,
   FileDoneOutlined,
+  ImportOutlined,
+  LinkOutlined,
   PlusOutlined,
   ReloadOutlined,
   SearchOutlined,
   ShoppingCartOutlined,
+  StopOutlined,
   UploadOutlined,
 } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
@@ -135,7 +143,15 @@ interface PurchaseOrderRow {
   externalOrderStatus?: string | null;
   externalOrderSyncedAt?: string | null;
   externalOrderPreviewedAt?: string | null;
+  externalPaymentUrl?: string | null;
+  externalPaymentUrlSyncedAt?: string | null;
+  externalOrderDetailSyncedAt?: string | null;
+  externalLogisticsSyncedAt?: string | null;
   mappingCount?: number;
+  refundCount?: number;
+  latestRefundId?: string | null;
+  latestRefundStatus?: string | null;
+  latestRefundAmount?: number | null;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -162,8 +178,10 @@ interface PurchaseWorkbench {
   paymentQueue?: PaymentQueueRow[];
   skuOptions?: SkuOption[];
   supplierOptions?: SupplierOption[];
-  alibaba1688Addresses?: Alibaba1688AddressRow[];
   sku1688Sources?: Sku1688SourceRow[];
+  alibaba1688Addresses?: Alibaba1688AddressRow[];
+  alibaba1688MessageSubscriptions?: Alibaba1688MessageSubscriptionRow[];
+  recent1688MessageEvents?: Alibaba1688MessageEventRow[];
 }
 
 interface Sku1688SourceRow {
@@ -180,18 +198,6 @@ interface Sku1688SourceRow {
   status?: string;
 }
 
-interface Alibaba1688AddressRow {
-  id: string;
-  label?: string;
-  fullName?: string;
-  mobile?: string;
-  provinceText?: string;
-  cityText?: string;
-  areaText?: string;
-  address?: string;
-  isDefault?: boolean;
-}
-
 interface OrderMatchCandidate {
   externalOrderId: string;
   status?: string | null;
@@ -206,6 +212,27 @@ interface OrderMatchDialogState {
   po: PurchaseOrderRow;
   query?: Record<string, any>;
   matches: OrderMatchCandidate[];
+}
+
+interface Imported1688OrderRow {
+  externalOrderId: string;
+  status?: string | null;
+  supplierName?: string | null;
+  totalAmount?: number | null;
+  freight?: number | null;
+  createdAt?: string | null;
+  localPoId?: string | null;
+  localPoNo?: string | null;
+  generated?: boolean;
+  error?: string | null;
+  lines?: Array<{
+    title?: string | null;
+    quantity?: number | null;
+    productId?: string | null;
+    skuId?: string | null;
+    specId?: string | null;
+  }>;
+  raw?: Record<string, any>;
 }
 
 interface SkuOption {
@@ -234,6 +261,35 @@ interface AccountOption {
   id: string;
   name?: string;
   status?: string;
+}
+
+interface Alibaba1688AddressRow {
+  id: string;
+  label?: string;
+  fullName?: string;
+  mobile?: string | null;
+  address?: string;
+  addressId?: string | null;
+  isDefault?: boolean;
+}
+
+interface Alibaba1688MessageSubscriptionRow {
+  id: string;
+  topic?: string;
+  category?: string;
+  status?: string;
+  lastReceivedAt?: string | null;
+  processedCount?: number;
+  unmatchedCount?: number;
+  ignoredCount?: number;
+  errorCount?: number;
+}
+
+interface Alibaba1688MessageEventRow {
+  id: string;
+  topic?: string | null;
+  status?: string;
+  receivedAt?: string;
 }
 
 interface RequestUploadImage {
@@ -275,18 +331,22 @@ interface PoFormValues {
   remark?: string;
 }
 
-interface Address1688FormValues {
-  label: string;
-  fullName: string;
-  mobile?: string;
-  phone?: string;
-  provinceText?: string;
-  cityText?: string;
-  areaText?: string;
-  townText?: string;
-  address: string;
-  postCode?: string;
-  isDefault?: boolean;
+interface RefundFormValues {
+  refundType?: string;
+  goodsStatus?: string;
+  amount?: number;
+  reason?: string;
+  description?: string;
+  rawParams?: string;
+}
+
+interface OrderNoteFormValues {
+  text?: string;
+}
+
+interface OrderNoteDialogState {
+  po: PurchaseOrderRow;
+  mode: "memo" | "feedback";
 }
 
 function formatCurrency(value?: number | string | null) {
@@ -368,9 +428,46 @@ function externalOrderStatusLabel(status?: string | null) {
     SUCCESS: "交易完成",
     CANCEL: "已取消",
     TERMINATED: "已关闭",
+    paid: "已付款",
+    shipped: "已发货",
+    partial_shipped: "部分发货",
+    logistics_updated: "物流更新",
+    received: "已收货",
+    success: "交易完成",
+    created: "已创建",
+    closed: "已关闭",
+    price_modified: "已改价",
+    memo_modified: "备注更新",
+    feedback_added: "留言已补充",
+    refund_synced: "售后已同步",
+    refund_requested: "已申请退款",
+    refund_in_sales: "售中退款",
+    refund_after_sales: "售后退款",
+    refund_return_goods_submitted: "退货物流已提交",
   };
   if (labels[text]) return labels[text];
   return /[A-Za-z_]/.test(text) ? "已同步" : text;
+}
+
+function refundStatusLabel(status?: string | null) {
+  if (!status) return "-";
+  const labels: Record<string, string> = {
+    refund_requested: "已申请",
+    refund_synced: "已同步",
+    refund_in_sales: "售中退款",
+    refund_after_sales: "售后退款",
+    refund_return_goods_submitted: "已退货",
+    created: "已创建",
+    success: "成功",
+    closed: "关闭",
+  };
+  return labels[String(status)] || String(status);
+}
+
+function parseJsonObjectInput(text?: string) {
+  const value = String(text || "").trim();
+  if (!value) return undefined;
+  return JSON.parse(value);
 }
 
 function firstPoCandidate(row?: PurchaseRequestRow | null) {
@@ -565,18 +662,23 @@ export default function PurchaseCenter() {
   const [quotePrId, setQuotePrId] = useState<string | null>(null);
   const [source1688PrId, setSource1688PrId] = useState<string | null>(null);
   const [requestUploadImages, setRequestUploadImages] = useState<RequestUploadImage[]>([]);
-  const [address1688Open, setAddress1688Open] = useState(false);
   const [poPrId, setPoPrId] = useState<string | null>(null);
   const [detailPrId, setDetailPrId] = useState<string | null>(null);
   const [orderMatchDialog, setOrderMatchDialog] = useState<OrderMatchDialogState | null>(null);
   const [selectedExternalOrderId, setSelectedExternalOrderId] = useState<string | null>(null);
+  const [refundPoId, setRefundPoId] = useState<string | null>(null);
+  const [orderNoteDialog, setOrderNoteDialog] = useState<OrderNoteDialogState | null>(null);
+  const [selectedPoIds, setSelectedPoIds] = useState<string[]>([]);
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
+  const [imported1688Orders, setImported1688Orders] = useState<Imported1688OrderRow[]>([]);
   const [activeQueueKey, setActiveQueueKey] = useState<PurchaseQueueKey>("all_orders");
 
   const [requestForm] = Form.useForm<RequestFormValues>();
   const [quoteForm] = Form.useForm<QuoteFormValues>();
   const [source1688Form] = Form.useForm<Source1688FormValues>();
-  const [address1688Form] = Form.useForm<Address1688FormValues>();
   const [poForm] = Form.useForm<PoFormValues>();
+  const [refundForm] = Form.useForm<RefundFormValues>();
+  const [orderNoteForm] = Form.useForm<OrderNoteFormValues>();
 
   const quotePr = useMemo(
     () => data.purchaseRequests?.find((item) => item.id === quotePrId) || null,
@@ -593,6 +695,10 @@ export default function PurchaseCenter() {
   const detailPr = useMemo(
     () => data.purchaseRequests?.find((item) => item.id === detailPrId) || null,
     [data.purchaseRequests, detailPrId],
+  );
+  const refundPo = useMemo(
+    () => data.purchaseOrders?.find((item) => item.id === refundPoId) || null,
+    [data.purchaseOrders, refundPoId],
   );
   const skuOptions = useMemo(
     () => skus.map((sku) => {
@@ -748,6 +854,21 @@ export default function PurchaseCenter() {
   const activeRequestRows = activeQueueKey === "all_orders" || activeQueueKey === "pending_requests"
     ? pendingRequestRows
     : purchaseRequests;
+
+  const selectedPurchaseOrders = useMemo(
+    () => purchaseOrders.filter((row) => selectedPoIds.includes(row.id)),
+    [purchaseOrders, selectedPoIds],
+  );
+
+  const orderRowSelection = useMemo<TableRowSelection<PurchaseOrderRow>>(() => ({
+    selectedRowKeys: selectedPoIds,
+    preserveSelectedRowKeys: true,
+    onChange: (keys) => setSelectedPoIds(keys.map(String)),
+    getCheckboxProps: (row) => ({
+      disabled: !row.externalOrderId,
+    }),
+  }), [selectedPoIds]);
+
   const applyWorkbench = useCallback((nextData: PurchaseWorkbench) => {
     setData(nextData || {});
   }, []);
@@ -821,6 +942,19 @@ export default function PurchaseCenter() {
   const openDetail = async (row: PurchaseRequestRow) => {
     setDetailPrId(row.id);
     await runAction(`read-${row.id}`, { action: "mark_read", prId: row.id });
+  };
+
+  const deletePurchaseRequest = async (row: PurchaseRequestRow) => {
+    const result = await runAction(
+      `delete-pr-${row.id}`,
+      { action: "cancel_pr", prId: row.id },
+      "采购单已删除",
+    );
+    if (!result) return;
+    if (detailPrId === row.id) setDetailPrId(null);
+    if (quotePrId === row.id) setQuotePrId(null);
+    if (source1688PrId === row.id) setSource1688PrId(null);
+    if (poPrId === row.id) setPoPrId(null);
   };
 
   const openQuoteModal = (row: PurchaseRequestRow) => {
@@ -1013,18 +1147,6 @@ export default function PurchaseCenter() {
     void loadMoreImageCandidates(row);
   };
 
-  const handleSave1688Address = async (values: Address1688FormValues) => {
-    const result = await runAction("1688-address", {
-      action: "save_1688_address",
-      ...values,
-      isDefault: values.isDefault !== false,
-    }, "1688 地址已保存");
-    if (result) {
-      setAddress1688Open(false);
-      address1688Form.resetFields();
-    }
-  };
-
   const openCandidateUrl = (candidate: SourcingCandidateRow) => {
     const url = candidateUrl(candidate);
     if (!url) {
@@ -1113,6 +1235,248 @@ export default function PurchaseCenter() {
       message.warning("找到多个可能订单，请选择一个绑定");
     } else if (matchStatus === "not_found") {
       message.warning("暂未匹配到 1688 订单，请稍后再同步");
+    }
+  };
+
+  const fetch1688OrderDetail = async (row: PurchaseOrderRow) => {
+    await runAction(`1688-detail-${row.id}`, {
+      action: "fetch_1688_order_detail",
+      poId: row.id,
+    }, "1688 订单详情已同步");
+  };
+
+  const sync1688Logistics = async (row: PurchaseOrderRow) => {
+    await runAction(`1688-logistics-${row.id}`, {
+      action: "sync_1688_logistics",
+      poId: row.id,
+    }, "1688 物流信息已同步");
+  };
+
+  const sync1688OrderPrice = async (row: PurchaseOrderRow) => {
+    const result = await runAction(`1688-price-sync-${row.id}`, {
+      action: "sync_1688_order_price",
+      poId: row.id,
+    });
+    const amount = Number(result?.result?.syncedAmount);
+    if (Number.isFinite(amount)) {
+      message.success(`订单金额已同步为 ${formatCurrency(amount)}`);
+    }
+  };
+
+  const open1688PaymentUrl = async (row: PurchaseOrderRow) => {
+    const result = await runAction(`1688-pay-${row.id}`, {
+      action: "get_1688_payment_url",
+      poIds: [row.id],
+    }, "1688 支付链接已同步");
+    const paymentUrl = result?.result?.paymentUrl || row.externalPaymentUrl;
+    if (paymentUrl) window.open(paymentUrl, "_blank", "noopener,noreferrer");
+  };
+
+  const openBatch1688PaymentUrl = async () => {
+    const poIds = selectedPurchaseOrders
+      .filter((row) => row.externalOrderId)
+      .map((row) => row.id);
+    if (!poIds.length) {
+      message.warning("请先勾选已绑定 1688 单号的采购单");
+      return;
+    }
+    const result = await runAction("1688-batch-pay", {
+      action: "get_1688_payment_url",
+      poIds,
+    }, "1688 批量支付链接已同步");
+    const paymentUrl = result?.result?.paymentUrl;
+    if (paymentUrl) window.open(paymentUrl, "_blank", "noopener,noreferrer");
+  };
+
+  const query1688PayWays = async (row: PurchaseOrderRow) => {
+    const result = await runAction(`1688-pay-ways-${row.id}`, {
+      action: "query_1688_pay_ways",
+      poIds: [row.id],
+    }, "1688 支付渠道已同步");
+    const payWays = Array.isArray(result?.result?.payWays) ? result.result.payWays : [];
+    Modal.info({
+      title: "1688 支付渠道",
+      content: (
+        <Space direction="vertical" size={6}>
+          <Text>订单：{row.externalOrderId || row.poNo || row.id}</Text>
+          <Text>{payWays.length ? payWays.map((item: any) => item.name || item.code).filter(Boolean).join(" / ") : "已返回原始支付渠道数据"}</Text>
+        </Space>
+      ),
+    });
+  };
+
+  const query1688ProtocolPayStatus = async (row: PurchaseOrderRow) => {
+    const result = await runAction(`1688-protocol-status-${row.id}`, {
+      action: "query_1688_protocol_pay_status",
+      poIds: [row.id],
+    }, "1688 代扣协议状态已同步");
+    const isOpen = result?.result?.isOpen;
+    Modal.info({
+      title: "1688 代扣协议",
+      content: (
+        <Space direction="vertical" size={6}>
+          <Text>订单：{row.externalOrderId || row.poNo || row.id}</Text>
+          <Text>状态：{isOpen === true ? "已开通" : isOpen === false ? "未开通" : "已返回原始状态"}</Text>
+        </Space>
+      ),
+    });
+  };
+
+  const prepare1688ProtocolPay = async (row: PurchaseOrderRow) => {
+    await runAction(`1688-protocol-pay-${row.id}`, {
+      action: "prepare_1688_protocol_pay",
+      poIds: [row.id],
+    }, "1688 免密支付已发起");
+  };
+
+  const cancel1688Order = async (row: PurchaseOrderRow) => {
+    await runAction(`1688-cancel-${row.id}`, {
+      action: "cancel_1688_order",
+      poId: row.id,
+      cancelReason: "other",
+      remark: "ERP取消未付款1688订单",
+    }, "1688 订单已取消");
+  };
+
+  const open1688OrderNote = (row: PurchaseOrderRow, mode: OrderNoteDialogState["mode"]) => {
+    if (!row.externalOrderId) {
+      message.warning("请先同步或绑定 1688 订单号");
+      return;
+    }
+    setOrderNoteDialog({ po: row, mode });
+    orderNoteForm.resetFields();
+    orderNoteForm.setFieldsValue({ text: "" });
+  };
+
+  const handle1688OrderNote = async (values: OrderNoteFormValues) => {
+    if (!orderNoteDialog) return;
+    const text = String(values.text || "").trim();
+    if (!text) {
+      message.warning("请填写内容");
+      return;
+    }
+    const mode = orderNoteDialog.mode;
+    const poId = orderNoteDialog.po.id;
+    const result = await runAction(`1688-${mode}-${poId}`, {
+      action: mode === "memo" ? "add_1688_order_memo" : "add_1688_order_feedback",
+      poId,
+      ...(mode === "memo" ? { memo: text } : { feedback: text }),
+    }, mode === "memo" ? "1688 备忘已更新" : "1688 买家留言已补充");
+    if (result) {
+      setOrderNoteDialog(null);
+      orderNoteForm.resetFields();
+    }
+  };
+
+  const confirm1688ReceiveGoods = async (row: PurchaseOrderRow) => {
+    await runAction(`1688-receive-${row.id}`, {
+      action: "confirm_1688_receive_goods",
+      poId: row.id,
+    }, "1688 已确认收货");
+  };
+
+  const sync1688Addresses = async () => {
+    const result = await runAction("1688-address-sync", {
+      action: "sync_1688_addresses",
+    });
+    const count = Number(result?.result?.addressCount || 0);
+    if (result) message.success(count ? `已同步 ${count} 个 1688 收货地址` : "1688 暂未返回收货地址");
+  };
+
+  const configure1688Messages = async () => {
+    const result = await runAction("1688-message-subscribe", {
+      action: "configure_1688_message_subscriptions",
+    });
+    const count = Number(result?.result?.count || 0);
+    if (result) message.success(`已启用 ${count} 个 1688 消息订阅主题`);
+  };
+
+  const import1688Orders = async (autoGenerate = false) => {
+    const result = await runAction(autoGenerate ? "1688-import-generate" : "1688-import-orders", {
+      action: "import_1688_orders",
+      pageSize: 50,
+      autoGenerate,
+    });
+    const orders = Array.isArray(result?.result?.orders) ? result.result.orders : [];
+    setImported1688Orders(orders);
+    setImportDialogOpen(true);
+    if (result) {
+      const generatedCount = Number(result?.result?.generatedCount || 0);
+      message.success(autoGenerate ? `已同步 ${orders.length} 个 1688 订单，生成 ${generatedCount} 张本地采购单` : `已同步 ${orders.length} 个 1688 订单`);
+    }
+  };
+
+  const generatePoFromImportedOrder = async (row: Imported1688OrderRow) => {
+    const result = await runAction(`1688-generate-po-${row.externalOrderId}`, {
+      action: "generate_po_from_1688_order",
+      order: row,
+      allowPartial: false,
+    }, "已生成本地采购单");
+    const po = result?.result?.purchaseOrder;
+    if (po?.id) {
+      setImported1688Orders((previous) => previous.map((item) => (
+        item.externalOrderId === row.externalOrderId
+          ? { ...item, localPoId: po.id, localPoNo: po.poNo || po.id, generated: true, error: null }
+          : item
+      )));
+    }
+  };
+
+  const openRefundModal = (row: PurchaseOrderRow) => {
+    if (!row.externalOrderId) {
+      message.warning("请先同步或绑定 1688 订单号");
+      return;
+    }
+    setRefundPoId(row.id);
+    refundForm.resetFields();
+    refundForm.setFieldsValue({
+      refundType: "refund",
+      goodsStatus: "received",
+      amount: row.latestRefundAmount ?? row.totalAmount,
+      reason: "",
+      description: "",
+    });
+  };
+
+  const sync1688Refunds = async (row: PurchaseOrderRow) => {
+    const result = await runAction(`1688-refund-sync-${row.id}`, {
+      action: "sync_1688_refunds",
+      poId: row.id,
+    });
+    const count = Number(result?.result?.refundCount || 0);
+    if (result) message.success(count ? `已同步 ${count} 条退款售后` : "暂未查到退款售后");
+  };
+
+  const get1688MaxRefundFee = async (row: PurchaseOrderRow) => {
+    const result = await runAction(`1688-refund-max-${row.id}`, {
+      action: "get_1688_max_refund_fee",
+      poId: row.id,
+    });
+    if (result) message.success("最大可退金额已查询，详情已写入接口日志");
+  };
+
+  const handleCreate1688Refund = async (values: RefundFormValues) => {
+    if (!refundPo) return;
+    let rawParams: Record<string, any> | undefined;
+    try {
+      rawParams = parseJsonObjectInput(values.rawParams);
+    } catch {
+      message.error("原始参数不是合法 JSON");
+      return;
+    }
+    const result = await runAction(`1688-refund-create-${refundPo.id}`, {
+      action: "create_1688_refund",
+      poId: refundPo.id,
+      refundType: values.refundType,
+      goodsStatus: values.goodsStatus,
+      amount: values.amount,
+      reason: values.reason,
+      description: values.description,
+      ...(rawParams ? { params: rawParams } : {}),
+    }, "退款售后已提交");
+    if (result) {
+      setRefundPoId(null);
+      refundForm.resetFields();
     }
   };
 
@@ -1288,6 +1652,7 @@ export default function PurchaseCenter() {
         const canGeneratePo = canPurchase
           && (hasCandidates || hasMapping || hasSkuSupplier)
           && ["submitted", "buyer_processing", "sourced", "waiting_ops_confirm"].includes(row.status);
+        const canDelete = canCreateRequest && ["submitted", "buyer_processing", "sourced"].includes(row.status);
         return (
           <Space size={6} wrap>
             {row.status === "submitted" && canPurchase ? (
@@ -1330,12 +1695,31 @@ export default function PurchaseCenter() {
                 生成采购单
               </Button>
             ) : null}
-            {!canFindSupplier && !canGeneratePo && row.status !== "submitted" ? <Text type="secondary">无待办</Text> : null}
+            {canDelete ? (
+              <Popconfirm
+                title="删除采购单"
+                description="删除后会从待办列表移除，已产生的历史记录保留。"
+                okText="删除"
+                cancelText="取消"
+                okButtonProps={{ danger: true }}
+                onConfirm={() => deletePurchaseRequest(row)}
+              >
+                <Button
+                  size="small"
+                  danger
+                  icon={<DeleteOutlined />}
+                  loading={actingKey === `delete-pr-${row.id}`}
+                >
+                  删除
+                </Button>
+              </Popconfirm>
+            ) : null}
+            {!canFindSupplier && !canGeneratePo && !canDelete && row.status !== "submitted" ? <Text type="secondary">无待办</Text> : null}
           </Space>
         );
       },
     },
-  ], [actingKey, canPurchase]);
+  ], [actingKey, canCreateRequest, canPurchase, detailPrId, poPrId, quotePrId, source1688PrId]);
 
   const orderColumns = useMemo<ColumnsType<PurchaseOrderRow>>(() => [
     {
@@ -1410,6 +1794,24 @@ export default function PurchaseCenter() {
       render: externalOrderStatusLabel,
     },
     {
+      title: "售后",
+      key: "refundStatus",
+      width: 130,
+      render: (_value, row) => {
+        const count = Number(row.refundCount || 0);
+        if (!count && !row.latestRefundStatus) return "-";
+        return (
+          <Space direction="vertical" size={2}>
+            <Text>{count ? `${count} 条` : "已同步"}</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {refundStatusLabel(row.latestRefundStatus)}
+              {row.latestRefundAmount ? ` · ${formatCurrency(row.latestRefundAmount)}` : ""}
+            </Text>
+          </Space>
+        );
+      },
+    },
+    {
       title: "入库数",
       key: "receivedQty",
       width: 110,
@@ -1437,10 +1839,10 @@ export default function PurchaseCenter() {
     {
       title: "动作",
       key: "actions",
-      width: 250,
+      width: 260,
       fixed: "right",
       render: (_value, row) => (
-        <Space size={6} wrap>
+        <Space size={6} wrap style={{ maxWidth: 236 }}>
           {row.status === "draft" && canPurchase && Number(row.mappingCount || 0) > 0 ? (
             <Button
               size="small"
@@ -1487,6 +1889,150 @@ export default function PurchaseCenter() {
               同步订单
             </Button>
           ) : null}
+          {row.externalOrderId && (canPurchase || canFinance) ? (
+            <Button
+              size="small"
+              icon={<FileSearchOutlined />}
+              loading={actingKey === `1688-detail-${row.id}`}
+              onClick={() => fetch1688OrderDetail(row)}
+            >
+              详情
+            </Button>
+          ) : null}
+          {row.externalOrderId && canPurchase ? (
+            <Button
+              size="small"
+              icon={<CarOutlined />}
+              loading={actingKey === `1688-logistics-${row.id}`}
+              onClick={() => sync1688Logistics(row)}
+            >
+              物流
+            </Button>
+          ) : null}
+          {row.externalOrderId && (canPurchase || canFinance) ? (
+            <Button
+              size="small"
+              icon={<LinkOutlined />}
+              loading={actingKey === `1688-pay-${row.id}`}
+              onClick={() => open1688PaymentUrl(row)}
+            >
+              支付链接
+            </Button>
+          ) : null}
+          {row.externalOrderId && (canPurchase || canFinance) ? (
+            <Button
+              size="small"
+              icon={<DollarOutlined />}
+              loading={actingKey === `1688-pay-ways-${row.id}`}
+              onClick={() => query1688PayWays(row)}
+            >
+              支付渠道
+            </Button>
+          ) : null}
+          {row.externalOrderId && (canPurchase || canFinance) ? (
+            <Button
+              size="small"
+              icon={<FileSearchOutlined />}
+              loading={actingKey === `1688-protocol-status-${row.id}`}
+              onClick={() => query1688ProtocolPayStatus(row)}
+            >
+              代扣
+            </Button>
+          ) : null}
+          {row.externalOrderId && canFinance ? (
+            <Popconfirm
+              title="发起 1688 免密支付"
+              description="会调用 1688 代扣/免密支付接口，扣款结果以后续 1688 消息或订单详情为准。"
+              okText="发起支付"
+              cancelText="返回"
+              onConfirm={() => prepare1688ProtocolPay(row)}
+            >
+              <Button
+                size="small"
+                type="primary"
+                icon={<CheckCircleOutlined />}
+                loading={actingKey === `1688-protocol-pay-${row.id}`}
+              >
+                免密支付
+              </Button>
+            </Popconfirm>
+          ) : null}
+          {row.externalOrderId && canPurchase ? (
+            <Button
+              size="small"
+              icon={<DollarOutlined />}
+              loading={actingKey === `1688-price-sync-${row.id}`}
+              onClick={() => sync1688OrderPrice(row)}
+            >
+              同步金额
+            </Button>
+          ) : null}
+          {row.externalOrderId && canPurchase ? (
+            <Button
+              size="small"
+              icon={<ApiOutlined />}
+              loading={actingKey === `1688-refund-sync-${row.id}`}
+              onClick={() => openRefundModal(row)}
+            >
+              售后
+            </Button>
+          ) : null}
+          {row.externalOrderId && canPurchase ? (
+            <Button
+              size="small"
+              icon={<CommentOutlined />}
+              loading={actingKey === `1688-memo-${row.id}`}
+              onClick={() => open1688OrderNote(row, "memo")}
+            >
+              备忘
+            </Button>
+          ) : null}
+          {row.externalOrderId && canPurchase ? (
+            <Button
+              size="small"
+              icon={<CommentOutlined />}
+              loading={actingKey === `1688-feedback-${row.id}`}
+              onClick={() => open1688OrderNote(row, "feedback")}
+            >
+              留言
+            </Button>
+          ) : null}
+          {row.externalOrderId && canPurchase && ["paid", "shipped", "arrived"].includes(row.status) ? (
+            <Popconfirm
+              title="确认 1688 收货"
+              description="会在 1688 买家侧确认收货，并同步本地采购单状态。"
+              okText="确认收货"
+              cancelText="返回"
+              onConfirm={() => confirm1688ReceiveGoods(row)}
+            >
+              <Button
+                size="small"
+                icon={<CheckCircleOutlined />}
+                loading={actingKey === `1688-receive-${row.id}`}
+              >
+                确认收货
+              </Button>
+            </Popconfirm>
+          ) : null}
+          {row.externalOrderId && canPurchase && ["pushed_pending_price", "pending_finance_approval", "approved_to_pay"].includes(row.status) ? (
+            <Popconfirm
+              title="取消 1688 订单"
+              description="只适合取消未付款的 1688 订单，本地采购单会同步为已取消。"
+              okText="取消订单"
+              cancelText="返回"
+              okButtonProps={{ danger: true }}
+              onConfirm={() => cancel1688Order(row)}
+            >
+              <Button
+                danger
+                size="small"
+                icon={<StopOutlined />}
+                loading={actingKey === `1688-cancel-${row.id}`}
+              >
+                取消1688
+              </Button>
+            </Popconfirm>
+          ) : null}
           {row.status === "pushed_pending_price" && canPurchase ? (
             <Button
               size="small"
@@ -1522,7 +2068,7 @@ export default function PurchaseCenter() {
               财务批准
             </Button>
           ) : null}
-          {row.status === "approved_to_pay" && canFinance ? (
+          {row.status === "approved_to_pay" && canFinance && (row.externalOrderId || Number(row.mappingCount || 0) === 0) ? (
             <Button
               size="small"
               type="primary"
@@ -1533,11 +2079,80 @@ export default function PurchaseCenter() {
               确认付款
             </Button>
           ) : null}
-          {!["draft", "pushed_pending_price", "pending_finance_approval", "approved_to_pay"].includes(row.status) && (row.externalOrderId || !canPurchase) ? <Text type="secondary">无待办</Text> : null}
+          {!["draft", "pushed_pending_price", "pending_finance_approval", "approved_to_pay"].includes(row.status) && !(row.externalOrderId && canPurchase) ? <Text type="secondary">无待办</Text> : null}
         </Space>
       ),
     },
   ], [actingKey, canFinance, canPurchase]);
+
+  const importedOrderColumns = useMemo<ColumnsType<Imported1688OrderRow>>(() => [
+    {
+      title: "1688单号",
+      dataIndex: "externalOrderId",
+      width: 180,
+      ellipsis: true,
+      render: (value) => <Text strong>{value || "-"}</Text>,
+    },
+    {
+      title: "状态",
+      dataIndex: "status",
+      width: 130,
+      render: externalOrderStatusLabel,
+    },
+    {
+      title: "供应商",
+      dataIndex: "supplierName",
+      width: 180,
+      ellipsis: true,
+      render: (value) => value || "-",
+    },
+    {
+      title: "金额",
+      dataIndex: "totalAmount",
+      width: 110,
+      align: "right",
+      render: formatCurrency,
+    },
+    {
+      title: "商品",
+      key: "lines",
+      ellipsis: true,
+      render: (_value, row) => {
+        const lines = Array.isArray(row.lines) ? row.lines : [];
+        if (!lines.length) return "-";
+        return lines.slice(0, 2).map((line) => `${line.title || line.productId || "商品"} x${formatQty(line.quantity || 1)}`).join(" / ");
+      },
+    },
+    {
+      title: "本地采购单",
+      key: "localPo",
+      width: 150,
+      render: (_value, row) => row.localPoNo || (row.localPoId ? row.localPoId : <Tag color="warning">未生成</Tag>),
+    },
+    {
+      title: "操作",
+      key: "actions",
+      width: 150,
+      fixed: "right",
+      render: (_value, row) => (
+        <Space size={6}>
+          {row.localPoId ? (
+            <Tag color="success">已关联</Tag>
+          ) : (
+            <Button
+              size="small"
+              type="primary"
+              icon={<FileDoneOutlined />}
+              loading={actingKey === `1688-generate-po-${row.externalOrderId}`}
+              onClick={() => generatePoFromImportedOrder(row)}
+            >
+              生成采购单
+            </Button>
+          )}
+        </Space>
+      ),
+    },
+  ], [actingKey]);
 
   const summary = data.summary || {};
 
@@ -1580,24 +2195,6 @@ export default function PurchaseCenter() {
               新建采购单
             </Button>
           ) : null,
-          canPurchase ? (
-            <Button key="1688-address" icon={<ApiOutlined />} onClick={() => {
-              const current = data.alibaba1688Addresses?.[0];
-              address1688Form.setFieldsValue({
-                label: current?.label || "默认地址",
-                fullName: current?.fullName || "",
-                mobile: current?.mobile || "",
-                provinceText: current?.provinceText || "",
-                cityText: current?.cityText || "",
-                areaText: current?.areaText || "",
-                address: current?.address || "",
-                isDefault: current?.isDefault ?? true,
-              });
-              setAddress1688Open(true);
-            }}>
-              1688 地址
-            </Button>
-          ) : null,
           <Button key="refresh" icon={<ReloadOutlined />} loading={loading} onClick={loadData}>
             刷新
           </Button>,
@@ -1610,6 +2207,52 @@ export default function PurchaseCenter() {
             <div className="app-panel__title-main">{activeQueue.title}</div>
           </div>
           <Space size={8} wrap>
+            {canPurchase ? (
+              <Button
+                icon={<ImportOutlined />}
+                loading={actingKey === "1688-import-orders"}
+                onClick={() => import1688Orders(false)}
+              >
+                同步1688订单
+              </Button>
+            ) : null}
+            {canPurchase ? (
+              <Button
+                icon={<CloudSyncOutlined />}
+                loading={actingKey === "1688-import-generate"}
+                onClick={() => import1688Orders(true)}
+              >
+                同步并生成
+              </Button>
+            ) : null}
+            {canPurchase ? (
+              <Button
+                icon={<ApiOutlined />}
+                loading={actingKey === "1688-address-sync"}
+                onClick={sync1688Addresses}
+              >
+                同步地址
+              </Button>
+            ) : null}
+            {canPurchase ? (
+              <Button
+                icon={<CloudSyncOutlined />}
+                loading={actingKey === "1688-message-subscribe"}
+                onClick={configure1688Messages}
+              >
+                消息订阅
+              </Button>
+            ) : null}
+            {canPurchase || canFinance ? (
+              <Button
+                icon={<LinkOutlined />}
+                disabled={!selectedPurchaseOrders.some((row) => row.externalOrderId)}
+                loading={actingKey === "1688-batch-pay"}
+                onClick={openBatch1688PaymentUrl}
+              >
+                批量支付
+              </Button>
+            ) : null}
             <Button icon={<DownloadOutlined />} onClick={exportActiveQueue}>
               导出
             </Button>
@@ -1656,7 +2299,8 @@ export default function PurchaseCenter() {
                   size="middle"
                   columns={orderColumns}
                   dataSource={activeOrderRows}
-                  scroll={{ x: 1600 }}
+                  rowSelection={orderRowSelection}
+                  scroll={{ x: 2300 }}
                   pagination={{ pageSize: 10, showSizeChanger: false }}
                   style={{ marginTop: 8 }}
                 />
@@ -1669,7 +2313,8 @@ export default function PurchaseCenter() {
                 size="middle"
                 columns={orderColumns}
                 dataSource={[]}
-                scroll={{ x: 1600 }}
+                rowSelection={orderRowSelection}
+                scroll={{ x: 2300 }}
                 pagination={false}
               />
             ) : null}
@@ -1691,66 +2336,54 @@ export default function PurchaseCenter() {
             size="middle"
             columns={orderColumns}
             dataSource={activeOrderRows}
-            scroll={{ x: 1600 }}
+            rowSelection={orderRowSelection}
+            scroll={{ x: 2300 }}
             pagination={{ pageSize: 10, showSizeChanger: false }}
           />
         )}
       </div>
 
       <Modal
-        open={address1688Open}
-        title="1688 地址"
-        okText="保存"
-        cancelText="取消"
-        confirmLoading={actingKey === "1688-address"}
-        onCancel={() => setAddress1688Open(false)}
-        onOk={() => address1688Form.submit()}
+        open={importDialogOpen}
+        title="1688 后台订单"
+        width={980}
+        footer={[
+          <Button key="close" onClick={() => setImportDialogOpen(false)}>
+            关闭
+          </Button>,
+          canPurchase ? (
+            <Button
+              key="refresh"
+              icon={<ImportOutlined />}
+              loading={actingKey === "1688-import-orders"}
+              onClick={() => import1688Orders(false)}
+            >
+              重新同步
+            </Button>
+          ) : null,
+          canPurchase ? (
+            <Button
+              key="generate"
+              type="primary"
+              icon={<CloudSyncOutlined />}
+              loading={actingKey === "1688-import-generate"}
+              onClick={() => import1688Orders(true)}
+            >
+              同步并生成
+            </Button>
+          ) : null,
+        ].filter(Boolean)}
+        onCancel={() => setImportDialogOpen(false)}
+        destroyOnClose
       >
-        <Form form={address1688Form} layout="vertical" onFinish={handleSave1688Address} initialValues={{ isDefault: true }}>
-          <Row gutter={12}>
-            <Col span={12}>
-              <Form.Item name="label" label="名称" rules={[{ required: true, message: "请输入名称" }]}>
-                <Input placeholder="默认仓库" />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="fullName" label="收件人" rules={[{ required: true, message: "请输入收件人" }]}>
-                <Input placeholder="收件人姓名" />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="mobile" label="手机号" rules={[{ required: true, message: "请输入手机号" }]}>
-                <Input placeholder="13800000000" />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="postCode" label="邮编">
-                <Input placeholder="310000" />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item name="provinceText" label="省">
-                <Input />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item name="cityText" label="市">
-                <Input />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item name="areaText" label="区">
-                <Input />
-              </Form.Item>
-            </Col>
-          </Row>
-          <Form.Item name="address" label="详细地址" rules={[{ required: true, message: "请输入详细地址" }]}>
-            <Input />
-          </Form.Item>
-          <Form.Item name="isDefault" label="默认地址" valuePropName="checked">
-            <Switch />
-          </Form.Item>
-        </Form>
+        <Table<Imported1688OrderRow>
+          rowKey="externalOrderId"
+          size="small"
+          columns={importedOrderColumns}
+          dataSource={imported1688Orders}
+          pagination={{ pageSize: 8, showSizeChanger: false }}
+          scroll={{ x: 980 }}
+        />
       </Modal>
 
       <Modal
@@ -1984,7 +2617,7 @@ export default function PurchaseCenter() {
                 allowClear={poPrHasMapping || poPrHasSkuSupplier}
                 options={poCandidateOptions}
                 placeholder={poPrHasMapping
-                  ? "不选则使用 1688 映射"
+                  ? "不选则使用供应商管理"
                   : poPrHasSkuSupplier
                     ? "不选则使用商品资料供应商"
                     : "选择一个报价生成采购单"}
@@ -1996,10 +2629,10 @@ export default function PurchaseCenter() {
               showIcon
               style={{ marginBottom: 16 }}
               message={poPrHasMapping
-                ? "将使用 1688 映射生成采购单"
+                ? "将使用供应商管理生成采购单"
                 : poPrHasSkuSupplier
                   ? "将使用商品资料供应商生成采购单"
-                  : "请先报价、绑定 1688 映射或维护商品资料供应商"}
+                  : "请先报价、绑定供应商管理记录或维护商品资料供应商"}
               description={poPrHasMapping
                 ? "后续推单会按映射总表里的链接、规格和采购比例下单。"
                 : poPrHasSkuSupplier
@@ -2023,6 +2656,112 @@ export default function PurchaseCenter() {
             <TextArea rows={3} placeholder="对供应商、付款或入库的补充说明" />
           </Form.Item>
         </Form>
+      </Modal>
+
+      <Modal
+        open={Boolean(orderNoteDialog)}
+        title={orderNoteDialog?.mode === "memo" ? "修改 1688 订单备忘" : "补充 1688 买家留言"}
+        okText={orderNoteDialog?.mode === "memo" ? "保存备忘" : "提交留言"}
+        cancelText="取消"
+        confirmLoading={orderNoteDialog ? actingKey === `1688-${orderNoteDialog.mode}-${orderNoteDialog.po.id}` : false}
+        onCancel={() => setOrderNoteDialog(null)}
+        onOk={() => orderNoteForm.submit()}
+        destroyOnClose
+      >
+        <Form form={orderNoteForm} layout="vertical" onFinish={handle1688OrderNote}>
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message={orderNoteDialog ? `采购单 ${orderNoteDialog.po.poNo || orderNoteDialog.po.id} · 1688订单 ${orderNoteDialog.po.externalOrderId || "-"}` : ""}
+          />
+          <Form.Item
+            name="text"
+            label={orderNoteDialog?.mode === "memo" ? "订单备忘" : "买家留言"}
+            rules={[{ required: true, message: "请填写内容" }]}
+          >
+            <TextArea rows={4} placeholder={orderNoteDialog?.mode === "memo" ? "写入 1688 买家侧订单备忘" : "补充给卖家的订单留言"} />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        open={Boolean(refundPo)}
+        title="1688 退款售后"
+        okText="提交退款"
+        cancelText="关闭"
+        width={720}
+        confirmLoading={refundPo ? actingKey === `1688-refund-create-${refundPo.id}` : false}
+        onCancel={() => setRefundPoId(null)}
+        onOk={() => refundForm.submit()}
+        destroyOnClose
+      >
+        {refundPo ? (
+          <Space direction="vertical" size={14} style={{ width: "100%" }}>
+            <Alert
+              type="info"
+              showIcon
+              message={`采购单 ${refundPo.poNo || refundPo.id} · 1688订单 ${refundPo.externalOrderId || "-"}`}
+              description={`当前线上状态：${externalOrderStatusLabel(refundPo.externalOrderStatus)}；售后：${refundPo.refundCount ? `${refundPo.refundCount} 条` : "暂无记录"}${refundPo.latestRefundStatus ? `，${refundStatusLabel(refundPo.latestRefundStatus)}` : ""}`}
+            />
+            <Space wrap>
+              <Button
+                icon={<ReloadOutlined />}
+                loading={actingKey === `1688-refund-sync-${refundPo.id}`}
+                onClick={() => sync1688Refunds(refundPo)}
+              >
+                同步售后
+              </Button>
+              <Button
+                icon={<DollarOutlined />}
+                loading={actingKey === `1688-refund-max-${refundPo.id}`}
+                onClick={() => get1688MaxRefundFee(refundPo)}
+              >
+                查最大可退
+              </Button>
+            </Space>
+            <Form form={refundForm} layout="vertical" onFinish={handleCreate1688Refund}>
+              <Row gutter={12}>
+                <Col span={12}>
+                  <Form.Item name="refundType" label="退款类型" rules={[{ required: true, message: "请选择退款类型" }]}>
+                    <Select
+                      options={[
+                        { label: "仅退款", value: "refund" },
+                        { label: "退货退款", value: "return_goods" },
+                      ]}
+                    />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item name="goodsStatus" label="货物状态" rules={[{ required: true, message: "请选择货物状态" }]}>
+                    <Select
+                      options={[
+                        { label: "已收货", value: "received" },
+                        { label: "未收货", value: "not_received" },
+                      ]}
+                    />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item name="amount" label="退款金额" rules={[{ required: true, message: "请输入退款金额" }]}>
+                    <InputNumber min={0} precision={2} style={{ width: "100%" }} placeholder="0.00" />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item name="reason" label="退款原因" rules={[{ required: true, message: "请输入退款原因" }]}>
+                    <Input placeholder="例如：缺货、质量问题、协商退款" />
+                  </Form.Item>
+                </Col>
+              </Row>
+              <Form.Item name="description" label="说明">
+                <TextArea rows={3} placeholder="补充售后说明" />
+              </Form.Item>
+              <Form.Item name="rawParams" label="原始参数 JSON（可选）">
+                <TextArea rows={4} placeholder='例如：{"refundReasonId":"123"}' />
+              </Form.Item>
+            </Form>
+          </Space>
+        ) : null}
       </Modal>
 
       <Modal

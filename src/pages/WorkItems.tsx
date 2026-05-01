@@ -22,6 +22,7 @@ import {
   ReloadOutlined,
   SyncOutlined,
 } from "@ant-design/icons";
+import { useNavigate } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
 import StatCard from "../components/StatCard";
 import { useErpAuth } from "../contexts/ErpAuthContext";
@@ -166,16 +167,15 @@ function relatedDocLabel(type?: string) {
 }
 
 function relatedPath(type?: string) {
-  if (!type) return "/";
-  if (type === "purchase_request" || type === "purchase_order") return "/purchase";
-  if (type === "inbound_receipt" || type === "inventory_batch") return "/warehouse";
-  if (type === "qc_inspection") return "/qc";
-  if (type === "outbound_shipment") return "/outbound";
-  return "/";
+  if (type === "purchase_request" || type === "purchase_order") return "/purchase-center";
+  if (type === "inbound_receipt" || type === "inventory_batch") return "/warehouse-center";
+  if (type === "qc_inspection" || type === "outbound_shipment") return "/qc-outbound";
+  return "/work-items";
 }
 
 export default function WorkItems() {
   const auth = useErpAuth();
+  const navigate = useNavigate();
   const defaultOwnerRole = getDefaultWorkItemOwnerRole(auth.currentUser?.role);
   const canViewAll = canViewAllWorkItems(auth.currentUser?.role);
   const [items, setItems] = useState<WorkItemRow[]>([]);
@@ -255,14 +255,19 @@ export default function WorkItems() {
     }
   };
 
-  const openRelated = (row: WorkItemRow) => {
+  const openRelated = useCallback((row: WorkItemRow) => {
+    const path = relatedPath(row.relatedDocType);
+    if (path) {
+      navigate(path);
+      return;
+    }
     const baseUrl = lanStatus?.primaryUrl || lanStatus?.localUrl;
     if (!baseUrl) {
       message.warning("团队协作服务尚未开启");
       return;
     }
-    window.open(`${baseUrl}${relatedPath(row.relatedDocType)}`, "_blank", "noopener,noreferrer");
-  };
+    window.open(`${baseUrl}${path}`, "_blank", "noopener,noreferrer");
+  }, [lanStatus, navigate]);
 
   const activeCount = stats?.active || 0;
   const p0Count = stats?.byPriority?.P0 || 0;
@@ -384,7 +389,7 @@ export default function WorkItems() {
         </Space>
       ),
     },
-  ], [lanStatus, updatingId]);
+  ], [openRelated, updatingId]);
 
   if (!erp) {
     return (

@@ -209,6 +209,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     account: {
       list: (params) => ipcRenderer.invoke("erp:account:list", params || {}),
       upsert: (payload) => ipcRenderer.invoke("erp:account:upsert", payload || {}),
+      delete: (payload) => ipcRenderer.invoke("erp:account:delete", payload || {}),
     },
     user: {
       list: (params) => ipcRenderer.invoke("erp:user:list", params || {}),

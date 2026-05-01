@@ -35,6 +35,12 @@ const PLAINTEXT_DEFAULTS = Object.freeze({
   generateModel: "gpt-image-2",
   gptGenerateBaseUrl: "https://grsaiapi.com",
   gptGenerateModel: "gpt-image-2",
+  gptGenerateModelOverrides: JSON.stringify({
+    features: "gpt-image-2",
+    closeup: "gpt-image-2",
+    dimensions: "gpt-image-2",
+  }),
+  gptGenerateQualityTier: "premium",
 });
 
 function getDefaultCredentials() {
@@ -48,6 +54,8 @@ function getDefaultCredentials() {
     gptGenerateApiKey: decode(ENCODED.gptGenerateApiKey),
     gptGenerateBaseUrl: PLAINTEXT_DEFAULTS.gptGenerateBaseUrl,
     gptGenerateModel: PLAINTEXT_DEFAULTS.gptGenerateModel,
+    gptGenerateModelOverrides: PLAINTEXT_DEFAULTS.gptGenerateModelOverrides,
+    gptGenerateQualityTier: PLAINTEXT_DEFAULTS.gptGenerateQualityTier,
   };
 }
 

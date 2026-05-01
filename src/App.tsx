@@ -212,7 +212,6 @@ function App() {
             <Route path="price-review" element={<RoleRoute path="/price-review"><PriceReview /></RoleRoute>} />
             <Route path="daily-command" element={<RoleRoute path="/daily-command"><DailyCommandCenter /></RoleRoute>} />
             <Route path="product-master-data" element={<RoleRoute path="/product-master-data"><ProductMasterData mode="skus" /></RoleRoute>} />
-            <Route path="suppliers" element={<RoleRoute path="/suppliers"><ProductMasterData mode="suppliers" /></RoleRoute>} />
             <Route path="stores" element={<RoleRoute path="/stores"><ProductMasterData mode="stores" /></RoleRoute>} />
             <Route path="1688-mapping" element={<RoleRoute path="/1688-mapping"><AlibabaMapping /></RoleRoute>} />
             <Route path="purchase-center" element={<RoleRoute path="/purchase-center"><PurchaseCenter /></RoleRoute>} />

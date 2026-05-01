@@ -14,17 +14,18 @@ import {
   Switch,
   Table,
   Tag,
+  Tooltip,
   Typography,
   message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { ApiOutlined, EditOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
+import { EditOutlined, LinkOutlined, PlusOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
 import { useErpAuth } from "../contexts/ErpAuthContext";
 
 const { Text } = Typography;
-const { TextArea } = Input;
 const erp = window.electronAPI?.erp;
+const appAPI = window.electronAPI?.app;
 
 interface SkuOptionRow {
   id: string;
@@ -44,6 +45,7 @@ interface Sku1688SourceRow {
   internalSkuCode?: string;
   productName?: string;
   colorSpec?: string | null;
+  systemSupplierName?: string | null;
   externalOfferId?: string | null;
   externalSkuId?: string | null;
   externalSpecId?: string | null;
@@ -59,14 +61,30 @@ interface Sku1688SourceRow {
   ratioText?: string | null;
   status?: string | null;
   isDefault?: boolean;
-  remark?: string | null;
+  sourcePayload?: {
+    marketingMixConfig?: MarketingMixConfig | null;
+    marketingMixSyncedAt?: string | null;
+    followedAt1688?: string | null;
+    monitorProduct?: { enabled?: boolean } | null;
+    [key: string]: unknown;
+  } | null;
+  createdAt?: string | null;
   updatedAt?: string | null;
+}
+
+interface MarketingMixConfig {
+  generalHunpi?: boolean;
+  mixAmount?: number | null;
+  mixNumber?: number | null;
+  memberId?: string | null;
+  gmtCreate?: string | null;
+  gmtModified?: string | null;
 }
 
 interface MappingFormValues {
   skuId: string;
   mappingGroupId?: string;
-  externalOfferId: string;
+  externalOfferId?: string;
   externalSkuId?: string;
   externalSpecId?: string;
   platformSkuName?: string;
@@ -80,22 +98,10 @@ interface MappingFormValues {
   platformQty: number;
   status: string;
   isDefault?: boolean;
-  remark?: string;
 }
-
-const STATUS_LABELS: Record<string, string> = {
-  active: "启用",
-  disabled: "停用",
-};
 
 function canManage(role?: string | null) {
   return Boolean(role && ["admin", "manager", "buyer"].includes(role));
-}
-
-function formatCurrency(value?: number | string | null) {
-  const number = Number(value ?? 0);
-  if (!Number.isFinite(number)) return "-";
-  return `¥${number.toFixed(2)}`;
 }
 
 function formatDateTime(value?: string | null) {
@@ -118,9 +124,55 @@ function build1688Link(row: Sku1688SourceRow | MappingFormValues) {
   return "";
 }
 
-function mappingLabel(row: Sku1688SourceRow) {
-  const group = row.mappingGroupId || row.id;
-  return group.replace(/^map_/, "");
+async function openExternalUrl(url: string) {
+  const target = url.trim();
+  if (!target) return;
+  try {
+    if (appAPI?.openExternal) {
+      await appAPI.openExternal(target);
+      return;
+    }
+    window.open(target, "_blank", "noopener,noreferrer");
+  } catch (error: any) {
+    message.error(error?.message || "打开 1688 地址失败");
+  }
+}
+
+function extract1688OfferId(value?: string | null) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const offerPathMatch = text.match(/offer\/(\d+)\.html/i);
+  if (offerPathMatch?.[1]) return offerPathMatch[1];
+  const queryMatch = text.match(/[?&](?:offerId|offer_id|productId|productID)=(\d+)/i);
+  if (queryMatch?.[1]) return queryMatch[1];
+  const looseMatch = text.match(/(?:^|[^\d])(\d{8,})(?:[^\d]|$)/);
+  return looseMatch?.[1] || "";
+}
+
+function mappingStatus(row: Sku1688SourceRow) {
+  if (!row.supplierName || !build1688Link(row) || !row.externalOfferId) {
+    return { label: "未匹配", color: "default" };
+  }
+  if (!row.platformSkuName && !row.externalSkuId && !row.externalSpecId) {
+    return { label: "待同步", color: "warning" };
+  }
+  return { label: "匹配成功", color: "success" };
+}
+
+function formatMixRule(config?: MarketingMixConfig | null) {
+  if (!config) return "-";
+  if (!config.generalHunpi) return "不支持混批";
+  const amountText = config.mixAmount !== null && config.mixAmount !== undefined
+    ? `满 ${Number(config.mixAmount).toFixed(2)} 元`
+    : "";
+  const numberText = config.mixNumber !== null && config.mixNumber !== undefined
+    ? `满 ${Number(config.mixNumber)} 件`
+    : "";
+  return [amountText, numberText].filter(Boolean).join(" / ") || "支持混批";
+}
+
+function getMarketingMixConfig(row: Sku1688SourceRow) {
+  return row.sourcePayload?.marketingMixConfig || null;
 }
 
 export default function AlibabaMapping() {
@@ -133,6 +185,8 @@ export default function AlibabaMapping() {
   const [editingRow, setEditingRow] = useState<Sku1688SourceRow | null>(null);
   const [skus, setSkus] = useState<SkuOptionRow[]>([]);
   const [mappings, setMappings] = useState<Sku1688SourceRow[]>([]);
+  const [mixLoadingId, setMixLoadingId] = useState<string | null>(null);
+  const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
     if (!erp) return;
@@ -142,7 +196,7 @@ export default function AlibabaMapping() {
       setSkus(Array.isArray(workbench?.skuOptions) ? workbench.skuOptions : []);
       setMappings(Array.isArray(workbench?.sku1688Sources) ? workbench.sku1688Sources : []);
     } catch (error: any) {
-      message.error(error?.message || "1688 映射读取失败");
+      message.error(error?.message || "供应商管理读取失败");
     } finally {
       setLoading(false);
     }
@@ -199,7 +253,6 @@ export default function AlibabaMapping() {
       platformQty: row.platformQty || 1,
       status: row.status || "active",
       isDefault: Boolean(row.isDefault),
-      remark: row.remark || "",
     });
     setModalOpen(true);
   };
@@ -213,14 +266,19 @@ export default function AlibabaMapping() {
     }
     setSaving(true);
     try {
-      const productUrl = values.productUrl || build1688Link(values);
+      const externalOfferId = values.externalOfferId || extract1688OfferId(values.productUrl);
+      if (!externalOfferId) {
+        message.error("请填写可识别商品号的 1688 地址，或手动补 1688 商品ID");
+        return;
+      }
+      const productUrl = values.productUrl || build1688Link({ ...values, externalOfferId });
       await erp.purchase.action({
         action: "upsert_sku_1688_source",
         id: editingRow?.id,
         skuId: values.skuId,
         accountId: sku.accountId,
         mappingGroupId: values.mappingGroupId,
-        externalOfferId: values.externalOfferId,
+        externalOfferId,
         externalSkuId: values.externalSkuId,
         externalSpecId: values.externalSpecId,
         platformSkuName: values.platformSkuName,
@@ -234,132 +292,422 @@ export default function AlibabaMapping() {
         platformQty: values.platformQty,
         status: values.status,
         isDefault: values.isDefault,
-        remark: values.remark,
         limit: 500,
       });
-      message.success("1688 映射已保存");
+      message.success("供应商信息已保存");
       setModalOpen(false);
       setEditingRow(null);
       form.resetFields();
       await loadData();
     } catch (error: any) {
-      message.error(error?.message || "1688 映射保存失败");
+      message.error(error?.message || "供应商信息保存失败");
     } finally {
       setSaving(false);
     }
   };
 
+  const queryMixConfig = useCallback(async (row: Sku1688SourceRow) => {
+    if (!erp) return;
+    const sellerLoginId = row.supplierName?.trim();
+    if (!sellerLoginId) {
+      message.error("请先填写 1688 供应商旺旺名称");
+      return;
+    }
+    setMixLoadingId(row.id);
+    try {
+      const response = await erp.purchase.action({
+        action: "query_1688_mix_config",
+        sourceId: row.id,
+        sellerLoginId,
+        accountId: row.accountId,
+        limit: 500,
+      });
+      if (Array.isArray(response?.workbench?.sku1688Sources)) {
+        setMappings(response.workbench.sku1688Sources);
+      }
+      const config = response?.result?.mixConfig as MarketingMixConfig | undefined;
+      Modal.info({
+        title: "卖家混批设置",
+        content: (
+          <Space direction="vertical" size={6}>
+            <Text>卖家：{sellerLoginId}</Text>
+            <Text>状态：{config?.generalHunpi ? "支持混批" : "不支持混批"}</Text>
+            <Text>规则：{formatMixRule(config)}</Text>
+            {config?.memberId ? <Text>MemberId：{config.memberId}</Text> : null}
+          </Space>
+        ),
+      });
+    } catch (error: any) {
+      message.error(error?.message || "查询 1688 混批设置失败");
+    } finally {
+      setMixLoadingId(null);
+    }
+  }, []);
+
+  const run1688SourceAction = useCallback(async (
+    row: Sku1688SourceRow,
+    action: string,
+    successText: string,
+    extra: Record<string, unknown> = {},
+  ) => {
+    if (!erp) return null;
+    const key = `${action}-${row.id}`;
+    setActionLoadingId(key);
+    try {
+      const response = await erp.purchase.action({
+        action,
+        sourceId: row.id,
+        accountId: row.accountId,
+        externalOfferId: row.externalOfferId,
+        productId: row.externalOfferId,
+        externalSkuId: row.externalSkuId,
+        externalSpecId: row.externalSpecId,
+        keyword: row.productTitle || row.productName || row.externalOfferId,
+        imageUrl: row.imageUrl,
+        ...extra,
+        limit: 500,
+      });
+      if (Array.isArray(response?.workbench?.sku1688Sources)) {
+        setMappings(response.workbench.sku1688Sources);
+      }
+      message.success(successText);
+      return response;
+    } catch (error: any) {
+      message.error(error?.message || "1688 操作失败");
+      return null;
+    } finally {
+      setActionLoadingId(null);
+    }
+  }, []);
+
+  const searchRelationSuppliers = useCallback(async () => {
+    if (!erp) return;
+    setActionLoadingId("search_1688_relation_suppliers");
+    try {
+      const response = await erp.purchase.action({
+        action: "search_1688_relation_suppliers",
+        pageSize: 20,
+        limit: 500,
+      });
+      const suppliers = Array.isArray(response?.result?.suppliers) ? response.result.suppliers : [];
+      Modal.info({
+        title: "1688 推荐供应商",
+        width: 680,
+        content: (
+          <Space direction="vertical" size={6}>
+            {suppliers.length ? suppliers.slice(0, 12).map((supplier: any, index: number) => (
+              <Text key={`${supplier.memberId || supplier.loginId || index}`}>
+                {supplier.companyName || supplier.shopName || supplier.loginId || supplier.memberId || "-"}
+              </Text>
+            )) : <Text>已调用接口，暂无可展示供应商</Text>}
+          </Space>
+        ),
+      });
+    } catch (error: any) {
+      message.error(error?.message || "1688 推荐供应商查询失败");
+    } finally {
+      setActionLoadingId(null);
+    }
+  }, []);
+
+  const queryMonitorProducts = useCallback(async () => {
+    if (!erp) return;
+    setActionLoadingId("query_1688_monitor_products");
+    try {
+      const response = await erp.purchase.action({
+        action: "query_1688_monitor_products",
+        pageSize: 50,
+        limit: 500,
+      });
+      const products = Array.isArray(response?.result?.products) ? response.result.products : [];
+      Modal.info({
+        title: "1688 监控商品",
+        width: 720,
+        content: (
+          <Space direction="vertical" size={6}>
+            {products.length ? products.slice(0, 12).map((product: any, index: number) => (
+              <Text key={`${product.externalOfferId || index}`}>
+                {product.productTitle || product.externalOfferId || "-"}
+              </Text>
+            )) : <Text>已调用接口，暂无可展示监控商品</Text>}
+          </Space>
+        ),
+      });
+    } catch (error: any) {
+      message.error(error?.message || "1688 监控商品查询失败");
+    } finally {
+      setActionLoadingId(null);
+    }
+  }, []);
+
   const columns = useMemo<ColumnsType<Sku1688SourceRow>>(() => [
     {
       title: "商品编码",
       key: "sku",
-      width: 190,
+      width: 170,
       fixed: "left",
       render: (_value, row) => (
         <Space direction="vertical" size={2}>
           <Text strong>{row.internalSkuCode || row.skuId}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{row.productName || "-"}</Text>
-          {row.colorSpec ? <Text type="secondary" style={{ fontSize: 12 }}>{row.colorSpec}</Text> : null}
+          {row.skuId && row.skuId !== row.internalSkuCode ? <Text type="secondary" style={{ fontSize: 12 }}>{row.skuId}</Text> : null}
         </Space>
       ),
     },
     {
-      title: "1688 商品",
-      key: "offer",
-      width: 320,
+      title: "商品名称",
+      key: "productName",
+      width: 220,
       render: (_value, row) => (
         <Space size={10} align="start">
           {row.imageUrl ? <Image src={row.imageUrl} width={54} height={54} style={{ objectFit: "cover", borderRadius: 6 }} /> : null}
           <Space direction="vertical" size={2}>
-            <Text strong ellipsis style={{ maxWidth: 230 }}>{row.productTitle || row.externalOfferId || "-"}</Text>
-            <Text type="secondary" style={{ fontSize: 12 }}>商品号 {row.externalOfferId || "-"}</Text>
-            {row.supplierName ? <Text type="secondary" style={{ fontSize: 12 }}>{row.supplierName}</Text> : null}
+            <Text strong ellipsis style={{ maxWidth: 150 }}>{row.productTitle || row.productName || "-"}</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>{row.externalOfferId ? `1688商品ID ${row.externalOfferId}` : row.productName || "-"}</Text>
           </Space>
         </Space>
       ),
     },
     {
-      title: "1688 规格",
-      key: "platformSku",
-      width: 180,
-      render: (_value, row) => (
-        <Space direction="vertical" size={2}>
-          <Text>{row.platformSkuName || row.externalSkuId || row.externalSpecId || "-"}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{row.externalSpecId || row.externalSkuId || "-"}</Text>
-        </Space>
-      ),
+      title: "颜色规格",
+      key: "colorSpec",
+      width: 160,
+      render: (_value, row) => row.colorSpec || "-",
     },
     {
-      title: "采购比例",
-      key: "ratio",
-      width: 140,
-      render: (_value, row) => (
-        <Space direction="vertical" size={2}>
-          <Text strong>{row.ourQty || 1} : {row.platformQty || 1}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{mappingLabel(row)}</Text>
-        </Space>
-      ),
+      title: "系统供应商",
+      key: "systemSupplier",
+      width: 150,
+      render: (_value, row) => row.systemSupplierName || "-",
     },
     {
-      title: "价格",
-      key: "price",
+      title: "是否默认供应商",
+      key: "defaultSupplier",
       width: 130,
+      render: (_value, row) => (row.isDefault ? "是" : "否"),
+    },
+    {
+      title: "基础数量",
+      dataIndex: "ourQty",
+      width: 100,
+      render: (value) => value || 1,
+    },
+    {
+      title: "映射数量",
+      dataIndex: "platformQty",
+      width: 100,
+      render: (value) => value || 1,
+    },
+    {
+      title: "1688????",
+      key: "externalSku",
+      width: 150,
       render: (_value, row) => (
         <Space direction="vertical" size={2}>
-          <Text>{formatCurrency(row.unitPrice)}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>起订 {row.moq || 1}</Text>
+          <Text>{row.externalSkuId || row.externalSpecId || "-"}</Text>
+          {row.externalSpecId && row.externalSpecId !== row.externalSkuId ? (
+            <Text type="secondary" style={{ fontSize: 12 }}>{row.externalSpecId}</Text>
+          ) : null}
         </Space>
       ),
     },
     {
-      title: "店铺",
-      dataIndex: "accountName",
-      width: 140,
-      render: (value) => value || "-",
+      title: "1688供应商旺旺名称",
+      key: "supplier",
+      width: 180,
+      render: (_value, row) => row.supplierName || "-",
+    },
+    {
+      title: "混批",
+      key: "marketingMix",
+      width: 130,
+      render: (_value, row) => {
+        const config = getMarketingMixConfig(row);
+        if (!config) return <Tag>未查询</Tag>;
+        return (
+          <Tooltip title={formatMixRule(config)}>
+            <Tag color={config.generalHunpi ? "success" : "default"}>
+              {config.generalHunpi ? "支持" : "不支持"}
+            </Tag>
+          </Tooltip>
+        );
+      },
+    },
+    {
+      title: "1688地址",
+      key: "offerUrl",
+      width: 230,
+      ellipsis: true,
+      render: (_value, row) => {
+        const offerUrl = build1688Link(row);
+        return offerUrl ? (
+          <Tooltip title={offerUrl}>
+            <a
+              href={offerUrl}
+              onClick={(event) => {
+                event.preventDefault();
+                void openExternalUrl(offerUrl);
+              }}
+              style={{
+                alignItems: "center",
+                display: "inline-flex",
+                gap: 4,
+                maxWidth: 206,
+                overflow: "hidden",
+                verticalAlign: "middle",
+              }}
+            >
+              <LinkOutlined style={{ flex: "0 0 auto" }} />
+              <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {offerUrl}
+              </span>
+            </a>
+          </Tooltip>
+        ) : "-";
+      },
+    },
+    {
+      title: "查看线上",
+      key: "online",
+      width: 100,
+      render: (_value, row) => (
+        build1688Link(row) ? (
+          <Button type="link" size="small" style={{ padding: 0 }} onClick={() => void openExternalUrl(build1688Link(row))}>
+            查看线上
+          </Button>
+        ) : "-"
+      ),
     },
     {
       title: "状态",
-      key: "status",
-      width: 120,
+      key: "mappingStatus",
+      width: 100,
+      render: (_value, row) => {
+        const state = mappingStatus(row);
+        return <Tag color={state.color}>{state.label}</Tag>;
+      },
+    },
+    {
+      title: "??",
+      key: "actions",
+      width: 430,
+      fixed: "right",
       render: (_value, row) => (
-        <Space direction="vertical" size={2}>
-          <Tag color={row.status === "active" ? "success" : "default"}>{STATUS_LABELS[row.status || ""] || row.status || "-"}</Tag>
-          {row.isDefault ? <Tag color="processing">默认</Tag> : null}
+        <Space size={6} wrap>
+          <Button
+            size="small"
+            icon={<SearchOutlined />}
+            loading={mixLoadingId === row.id}
+            onClick={() => void queryMixConfig(row)}
+          >
+            ??
+          </Button>
+          {editable ? (
+            <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(row)}>
+              ??
+            </Button>
+          ) : null}
+          <Button
+            size="small"
+            loading={actionLoadingId === `sync_1688_relation_user_info-${row.id}`}
+            onClick={() => void run1688SourceAction(row, "sync_1688_relation_user_info", "1688 ?????????")}
+          >
+            ????
+          </Button>
+          <Button
+            size="small"
+            loading={actionLoadingId === `sync_1688_purchased_products-${row.id}`}
+            onClick={() => void run1688SourceAction(row, "sync_1688_purchased_products", "1688 ?????????")}
+          >
+            ????
+          </Button>
+          <Button
+            size="small"
+            loading={actionLoadingId === `${row.sourcePayload?.followedAt1688 ? "unfollow_1688_product" : "follow_1688_product"}-${row.id}`}
+            onClick={() => void run1688SourceAction(
+              row,
+              row.sourcePayload?.followedAt1688 ? "unfollow_1688_product" : "follow_1688_product",
+              row.sourcePayload?.followedAt1688 ? "1688 ???????" : "1688 ?????",
+            )}
+          >
+            {row.sourcePayload?.followedAt1688 ? "????" : "??"}
+          </Button>
+          <Button
+            size="small"
+            loading={actionLoadingId === `run_1688_supply_change_agent-${row.id}`}
+            onClick={() => void run1688SourceAction(row, "run_1688_supply_change_agent", "1688 ?? agent ???")}
+          >
+            ??
+          </Button>
+          <Button
+            size="small"
+            loading={actionLoadingId === `run_1688_deep_search_agent-${row.id}`}
+            onClick={() => void run1688SourceAction(row, "run_1688_deep_search_agent", "1688 ??? agent ???")}
+          >
+            ???
+          </Button>
+          <Button
+            size="small"
+            loading={actionLoadingId === `${row.sourcePayload?.monitorProduct?.enabled ? "delete_1688_monitor_product" : "add_1688_monitor_product"}-${row.id}`}
+            onClick={() => void run1688SourceAction(
+              row,
+              row.sourcePayload?.monitorProduct?.enabled ? "delete_1688_monitor_product" : "add_1688_monitor_product",
+              row.sourcePayload?.monitorProduct?.enabled ? "1688 ?????" : "1688 ?????",
+            )}
+          >
+            {row.sourcePayload?.monitorProduct?.enabled ? "???" : "???"}
+          </Button>
+          <Button
+            size="small"
+            loading={actionLoadingId === `feedback_1688_supply_change_agent-${row.id}`}
+            onClick={() => void run1688SourceAction(row, "feedback_1688_supply_change_agent", "1688 ???????", { feedbackType: "viewed", feedback: "viewed in ERP" })}
+          >
+            ??
+          </Button>
         </Space>
       ),
     },
     {
-      title: "更新",
+      title: "1688规格描述",
+      key: "platformSku",
+      width: 220,
+      render: (_value, row) => row.platformSkuName || "-",
+    },
+    {
+      title: "1688商品起批数量",
+      key: "moq",
+      width: 140,
+      render: (_value, row) => row.moq || 1,
+    },
+    {
+      title: "1688商品规格ID",
+      key: "externalSpecId",
+      width: 150,
+      render: (_value, row) => row.externalSpecId || "-",
+    },
+    {
+      title: "品牌",
+      key: "brand",
+      width: 100,
+      render: (_value, row) => row.accountName || "-",
+    },
+    {
+      title: "修改时间",
       dataIndex: "updatedAt",
       width: 150,
       render: formatDateTime,
     },
     {
-      title: "操作",
-      key: "actions",
+      title: "创建时间",
+      dataIndex: "createdAt",
       width: 150,
-      fixed: "right",
-      render: (_value, row) => (
-        <Space size={6}>
-          {row.externalOfferId ? (
-            <Button size="small" icon={<ApiOutlined />} onClick={() => window.open(build1688Link(row), "_blank")}>
-              打开
-            </Button>
-          ) : null}
-          {editable ? (
-            <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(row)}>
-              编辑
-            </Button>
-          ) : null}
-        </Space>
-      ),
+      render: formatDateTime,
     },
-  ], [editable]);
+  ], [actionLoadingId, editable, mixLoadingId, queryMixConfig, run1688SourceAction]);
 
   if (!erp) {
     return (
       <div className="dashboard-shell">
-        <PageHeader compact eyebrow="业务" title="1688 映射" />
+        <PageHeader compact eyebrow="业务" title="供应商管理" />
         <Alert type="error" showIcon message="ERP 服务未就绪，请重启软件" />
       </div>
     );
@@ -370,14 +718,30 @@ export default function AlibabaMapping() {
       <PageHeader
         compact
         eyebrow="业务"
-        title="1688 映射"
-        meta={[`映射 ${mappings.length}`]}
+        title="供应商管理"
+        meta={[`供应商 ${mappings.length}`]}
         actions={[
           editable ? (
             <Button key="new" type="primary" icon={<PlusOutlined />} onClick={openCreate}>
-              新增映射
+              新增供应商
             </Button>
           ) : null,
+          <Button
+            key="relation-supply"
+            icon={<SearchOutlined />}
+            loading={actionLoadingId === "search_1688_relation_suppliers"}
+            onClick={searchRelationSuppliers}
+          >
+            推荐供应商
+          </Button>,
+          <Button
+            key="monitor-list"
+            icon={<SearchOutlined />}
+            loading={actionLoadingId === "query_1688_monitor_products"}
+            onClick={queryMonitorProducts}
+          >
+            监控列表
+          </Button>,
           <Button key="refresh" icon={<ReloadOutlined />} loading={loading} onClick={loadData}>
             刷新
           </Button>,
@@ -390,14 +754,14 @@ export default function AlibabaMapping() {
           loading={loading}
           columns={columns}
           dataSource={mappings}
-          scroll={{ x: 1550 }}
+          scroll={{ x: 2380 }}
           pagination={{ pageSize: 10, showSizeChanger: false }}
         />
       </section>
 
       <Modal
         open={modalOpen}
-        title={editingRow ? "编辑 1688 映射" : "新增 1688 映射"}
+        title={editingRow ? "编辑供应商" : "新增供应商"}
         okText="保存"
         cancelText="取消"
         width={860}
@@ -423,27 +787,37 @@ export default function AlibabaMapping() {
               </Form.Item>
             </Col>
             <Col span={12}>
+              <Form.Item name="supplierName" label="1688供应商旺旺名称" rules={[{ required: true, message: "请输入 1688 供应商旺旺名称" }]}>
+                <Input placeholder="1688 供应商旺旺名称" />
+              </Form.Item>
+            </Col>
+            <Col span={24}>
+              <Form.Item name="productUrl" label="1688 地址" rules={[{ required: true, message: "请输入 1688 地址" }]}>
+                <Input placeholder="https://detail.1688.com/offer/1234567890.html" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="externalOfferId" label="1688 商品ID">
+                <Input placeholder="可由 1688 地址自动识别" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
               <Form.Item name="mappingGroupId" label="组合编号">
                 <Input placeholder="同组规格会一起推单" />
               </Form.Item>
             </Col>
             <Col span={12}>
-              <Form.Item name="externalOfferId" label="1688 商品号" rules={[{ required: true, message: "请输入 1688 商品号" }]}>
-                <Input placeholder="例如 1234567890" />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="platformSkuName" label="1688 规格名称">
+              <Form.Item name="platformSkuName" label="1688 规格描述">
                 <Input placeholder="例如 蓝色 / 500ml" />
               </Form.Item>
             </Col>
             <Col span={12}>
-              <Form.Item name="externalSkuId" label="1688 规格号">
+              <Form.Item name="externalSkuId" label="1688单品货号">
                 <Input placeholder="可选" />
               </Form.Item>
             </Col>
             <Col span={12}>
-              <Form.Item name="externalSpecId" label="1688 子规格号">
+              <Form.Item name="externalSpecId" label="1688商品规格ID">
                 <Input placeholder="可选" />
               </Form.Item>
             </Col>
@@ -463,13 +837,8 @@ export default function AlibabaMapping() {
               </Form.Item>
             </Col>
             <Col span={12}>
-              <Form.Item name="moq" label="起订量">
+              <Form.Item name="moq" label="1688商品起批数量">
                 <InputNumber min={1} precision={0} style={{ width: "100%" }} />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="supplierName" label="供应商">
-                <Input placeholder="1688 供应商名称" />
               </Form.Item>
             </Col>
             <Col span={12}>
@@ -482,29 +851,19 @@ export default function AlibabaMapping() {
                 />
               </Form.Item>
             </Col>
+            <Col span={12}>
+              <Form.Item name="isDefault" label="默认推单供应商" valuePropName="checked">
+                <Switch />
+              </Form.Item>
+            </Col>
             <Col span={24}>
               <Form.Item name="productTitle" label="1688 商品标题">
                 <Input placeholder="可选" />
               </Form.Item>
             </Col>
             <Col span={12}>
-              <Form.Item name="productUrl" label="1688 链接">
-                <Input placeholder="不填会按商品号生成" />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
               <Form.Item name="imageUrl" label="图片链接">
                 <Input placeholder="可选" />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="isDefault" label="默认映射" valuePropName="checked">
-                <Switch />
-              </Form.Item>
-            </Col>
-            <Col span={24}>
-              <Form.Item name="remark" label="备注">
-                <TextArea rows={3} placeholder="例如：一个商品对应 1688 两个规格；或 1 件对应 5 件下单" />
               </Form.Item>
             </Col>
           </Row>

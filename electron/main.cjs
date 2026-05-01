@@ -1896,6 +1896,12 @@ const IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG = Object.freeze({
   generateBaseUrl: "https://grsaiapi.com",
   gptGenerateModel: "gpt-image-2",
   gptGenerateBaseUrl: "https://grsaiapi.com",
+  gptGenerateModelOverrides: JSON.stringify({
+    features: "gpt-image-2",
+    closeup: "gpt-image-2",
+    dimensions: "gpt-image-2",
+  }),
+  gptGenerateQualityTier: "premium",
 });
 const IMAGE_STUDIO_RUNTIME_CONFIG_KEYS = Object.freeze([
   "analyzeModel",
@@ -1907,6 +1913,8 @@ const IMAGE_STUDIO_RUNTIME_CONFIG_KEYS = Object.freeze([
   "gptGenerateModel",
   "gptGenerateApiKey",
   "gptGenerateBaseUrl",
+  "gptGenerateModelOverrides",
+  "gptGenerateQualityTier",
 ]);
 
 // AI 出图 profile：default = 原有生图页，gpt = 新增 GPT 版生图页（共享子进程，切换时重启）
@@ -2491,6 +2499,8 @@ function readImageStudioRuntimeConfig(projectInfo = getImageStudioProjectInfo())
     gptGenerateModel: resolveImageStudioRuntimeConfigValue("gptGenerateModel", envLocalVars.GPT_GENERATE_MODEL, process.env.GPT_GENERATE_MODEL, baked.gptGenerateModel, IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG.gptGenerateModel),
     gptGenerateApiKey: resolveImageStudioRuntimeConfigValue("gptGenerateApiKey", envLocalVars.GPT_GENERATE_API_KEY, process.env.GPT_GENERATE_API_KEY, baked.gptGenerateApiKey, ""),
     gptGenerateBaseUrl: resolveImageStudioRuntimeConfigValue("gptGenerateBaseUrl", envLocalVars.GPT_GENERATE_BASE_URL, process.env.GPT_GENERATE_BASE_URL, baked.gptGenerateBaseUrl, IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG.gptGenerateBaseUrl),
+    gptGenerateModelOverrides: resolveImageStudioRuntimeConfigValue("gptGenerateModelOverrides", envLocalVars.GPT_GENERATE_MODEL_OVERRIDES, process.env.GPT_GENERATE_MODEL_OVERRIDES, baked.gptGenerateModelOverrides, IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG.gptGenerateModelOverrides),
+    gptGenerateQualityTier: resolveImageStudioRuntimeConfigValue("gptGenerateQualityTier", envLocalVars.GPT_GENERATE_QUALITY_TIER, process.env.GPT_GENERATE_QUALITY_TIER, baked.gptGenerateQualityTier, IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG.gptGenerateQualityTier),
   };
   return normalizeImageStudioAnalyzeConfig(config);
 }
@@ -2502,11 +2512,15 @@ function buildImageStudioRuntimeConfigPayload(projectInfo = getImageStudioProjec
     runtimeConfig.generateModel = runtimeConfig.gptGenerateModel || runtimeConfig.generateModel;
     runtimeConfig.generateApiKey = runtimeConfig.gptGenerateApiKey || runtimeConfig.generateApiKey;
     runtimeConfig.generateBaseUrl = runtimeConfig.gptGenerateBaseUrl || runtimeConfig.generateBaseUrl;
+    runtimeConfig.generateModelOverrides = runtimeConfig.gptGenerateModelOverrides || "";
+    runtimeConfig.generateQualityTier = runtimeConfig.gptGenerateQualityTier || "";
   }
 
   delete runtimeConfig.gptGenerateModel;
   delete runtimeConfig.gptGenerateApiKey;
   delete runtimeConfig.gptGenerateBaseUrl;
+  delete runtimeConfig.gptGenerateModelOverrides;
+  delete runtimeConfig.gptGenerateQualityTier;
 
   return Object.fromEntries(
     Object.entries(runtimeConfig).filter(([key, value]) => {
@@ -3115,7 +3129,7 @@ async function streamImageStudioGenerate(target, jobId, payload = {}) {
     generatedImages.push({
       imageType: eventPayload.imageType || "",
       imageUrl: eventPayload.imageUrl,
-      prompt: currentPlan?.prompt || "",
+      prompt: typeof eventPayload.prompt === "string" ? eventPayload.prompt : (currentPlan?.prompt || ""),
       suggestion: typeof currentPlan?.suggestion === "string" ? currentPlan.suggestion : "",
       createdAt: Date.now(),
     });

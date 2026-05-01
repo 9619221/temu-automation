@@ -60,6 +60,16 @@ class PurchaseService {
     });
   }
 
+  cancelRequest(id, actor) {
+    return this.workflow.transition({
+      entityType: "purchase_request",
+      id,
+      action: "cancel_pr",
+      toStatus: PR.CANCELLED,
+      actor,
+    });
+  }
+
   selectCandidate(id, actor) {
     return this.workflow.transition({
       entityType: "sourcing_candidate",

@@ -10,6 +10,41 @@ const PROCUREMENT_APIS = Object.freeze({
     version: 1,
     displayName: "国内分销词搜",
   }),
+  RELATION_SUPPLY_SEARCH: Object.freeze({
+    key: "com.alibaba.search:alibaba.search.relation.supply-1",
+    namespace: "com.alibaba.search",
+    name: "alibaba.search.relation.supply",
+    version: 1,
+    displayName: "Related supplier search",
+  }),
+  RELATION_USER_INFO: Object.freeze({
+    key: "com.alibaba.trade:alibaba.member.getRelationUserInfo-1",
+    namespace: "com.alibaba.trade",
+    name: "alibaba.member.getRelationUserInfo",
+    version: 1,
+    displayName: "Purchased supplier relation info",
+  }),
+  PRODUCT_FOLLOW: Object.freeze({
+    key: "com.alibaba.product:alibaba.product.follow.crossborder-1",
+    namespace: "com.alibaba.product",
+    name: "alibaba.product.follow.crossborder",
+    version: 1,
+    displayName: "Follow product",
+  }),
+  PRODUCT_UNFOLLOW: Object.freeze({
+    key: "com.alibaba.product:alibaba.product.unfollow.crossborder-1",
+    namespace: "com.alibaba.product",
+    name: "alibaba.product.unfollow.crossborder",
+    version: 1,
+    displayName: "Unfollow product",
+  }),
+  PRODUCT_SIMPLE_GET: Object.freeze({
+    key: "com.alibaba.product:alibaba.product.simple.get-1",
+    namespace: "com.alibaba.product",
+    name: "alibaba.product.simple.get",
+    version: 1,
+    displayName: "Purchased supplier simple product info",
+  }),
   IMAGE_UPLOAD: Object.freeze({
     key: "com.alibaba.fenxiao.crossborder:product.image.upload-1",
     namespace: "com.alibaba.fenxiao.crossborder",
@@ -52,6 +87,34 @@ const PROCUREMENT_APIS = Object.freeze({
     version: 1,
     displayName: "批量获取订单的支付链接",
   }),
+  PAY_WAY_QUERY: Object.freeze({
+    key: "com.alibaba.trade:alibaba.trade.payWay.query-1",
+    namespace: "com.alibaba.trade",
+    name: "alibaba.trade.payWay.query",
+    version: 1,
+    displayName: "Query order payment channels",
+  }),
+  PROTOCOL_PAY_IS_OPEN: Object.freeze({
+    key: "com.alibaba.trade:alibaba.trade.pay.protocolPay.isopen-1",
+    namespace: "com.alibaba.trade",
+    name: "alibaba.trade.pay.protocolPay.isopen",
+    version: 1,
+    displayName: "Query protocol payment status",
+  }),
+  PROTOCOL_PAY_PREPARE: Object.freeze({
+    key: "com.alibaba.trade:alibaba.trade.pay.protocolPay.preparePay-1",
+    namespace: "com.alibaba.trade",
+    name: "alibaba.trade.pay.protocolPay.preparePay",
+    version: 1,
+    displayName: "Prepare protocol payment",
+  }),
+  CANCEL_ORDER: Object.freeze({
+    key: "com.alibaba.trade:alibaba.trade.cancel-1",
+    namespace: "com.alibaba.trade",
+    name: "alibaba.trade.cancel",
+    version: 1,
+    displayName: "取消未付款订单",
+  }),
   ORDER_DETAIL: Object.freeze({
     key: "com.alibaba.trade:alibaba.trade.get.buyerView-1",
     namespace: "com.alibaba.trade",
@@ -66,12 +129,173 @@ const PROCUREMENT_APIS = Object.freeze({
     version: 1,
     displayName: "订单列表查看(买家视角)",
   }),
+  RECEIVE_ADDRESS: Object.freeze({
+    key: "com.alibaba.trade:alibaba.trade.receiveAddress.get-1",
+    namespace: "com.alibaba.trade",
+    name: "alibaba.trade.receiveAddress.get",
+    version: 1,
+    displayName: "Buyer receive address list",
+  }),
+  ORDER_MEMO_ADD: Object.freeze({
+    key: "com.alibaba.trade:alibaba.order.memoAdd-1",
+    namespace: "com.alibaba.trade",
+    name: "alibaba.order.memoAdd",
+    version: 1,
+    displayName: "Buyer order memo add",
+  }),
+  ORDER_FEEDBACK_ADD: Object.freeze({
+    key: "com.alibaba.trade:alibaba.trade.addFeedback-1",
+    namespace: "com.alibaba.trade",
+    name: "alibaba.trade.addFeedback",
+    version: 1,
+    displayName: "Buyer order feedback add",
+  }),
+  CONFIRM_RECEIVE_GOODS: Object.freeze({
+    key: "com.alibaba.trade:trade.receivegoods.confirm-1",
+    namespace: "com.alibaba.trade",
+    name: "trade.receivegoods.confirm",
+    version: 1,
+    displayName: "Buyer confirm receive goods",
+  }),
   LOGISTICS_INFO: Object.freeze({
     key: "com.alibaba.logistics:alibaba.trade.getLogisticsInfos.buyerView-1",
     namespace: "com.alibaba.logistics",
     name: "alibaba.trade.getLogisticsInfos.buyerView",
     version: 1,
     displayName: "获取交易订单的物流信息(买家视角)",
+  }),
+  LOGISTICS_TRACE: Object.freeze({
+    key: "com.alibaba.logistics:alibaba.trade.getLogisticsTraceInfo.buyerView-1",
+    namespace: "com.alibaba.logistics",
+    name: "alibaba.trade.getLogisticsTraceInfo.buyerView",
+    version: 1,
+    displayName: "获取交易订单物流跟踪信息(买家视角)",
+  }),
+  LOGISTICS_TRACE_INFO: Object.freeze({
+    key: "com.alibaba.logistics:alibaba.trade.getLogisticsTraceInfo.buyerView-1",
+    namespace: "com.alibaba.logistics",
+    name: "alibaba.trade.getLogisticsTraceInfo.buyerView",
+    version: 1,
+    displayName: "获取交易订单的物流跟踪信息(买家视角)",
+  }),
+  MARKETING_MIX_CONFIG: Object.freeze({
+    key: "com.alibaba.trade:alibaba.trade.OpQueryMarketingMixConfig-1",
+    namespace: "com.alibaba.trade",
+    name: "alibaba.trade.OpQueryMarketingMixConfig",
+    version: 1,
+    displayName: "Query seller mixed batch settings",
+  }),
+  REFUND_REASON_LIST: Object.freeze({
+    key: "com.alibaba.trade:alibaba.trade.getRefundReasonList-1",
+    namespace: "com.alibaba.trade",
+    name: "alibaba.trade.getRefundReasonList",
+    version: 1,
+    displayName: "查询退款退货原因",
+  }),
+  REFUND_VOUCHER_UPLOAD: Object.freeze({
+    key: "com.alibaba.trade:alibaba.trade.uploadRefundVoucher-1",
+    namespace: "com.alibaba.trade",
+    name: "alibaba.trade.uploadRefundVoucher",
+    version: 1,
+    displayName: "上传退款退货凭证",
+  }),
+  CREATE_REFUND: Object.freeze({
+    key: "com.alibaba.trade:alibaba.trade.createRefund-1",
+    namespace: "com.alibaba.trade",
+    name: "alibaba.trade.createRefund",
+    version: 1,
+    displayName: "创建退款退货申请",
+  }),
+  REFUND_LIST: Object.freeze({
+    key: "com.alibaba.trade:alibaba.trade.refund.buyer.queryOrderRefundList-1",
+    namespace: "com.alibaba.trade",
+    name: "alibaba.trade.refund.buyer.queryOrderRefundList",
+    version: 1,
+    displayName: "查询退款单列表(买家视角)",
+  }),
+  REFUND_BY_ORDER: Object.freeze({
+    key: "com.alibaba.trade:alibaba.trade.refund.OpQueryBatchRefundByOrderIdAndStatus-1",
+    namespace: "com.alibaba.trade",
+    name: "alibaba.trade.refund.OpQueryBatchRefundByOrderIdAndStatus",
+    version: 1,
+    displayName: "查询退款单详情-根据订单ID",
+  }),
+  REFUND_DETAIL: Object.freeze({
+    key: "com.alibaba.trade:alibaba.trade.refund.OpQueryOrderRefund-1",
+    namespace: "com.alibaba.trade",
+    name: "alibaba.trade.refund.OpQueryOrderRefund",
+    version: 1,
+    displayName: "查询退款单详情-根据退款单ID",
+  }),
+  REFUND_OPERATION_LIST: Object.freeze({
+    key: "com.alibaba.trade:alibaba.trade.refund.OpQueryOrderRefundOperationList-1",
+    namespace: "com.alibaba.trade",
+    name: "alibaba.trade.refund.OpQueryOrderRefundOperationList",
+    version: 1,
+    displayName: "退款单操作记录列表",
+  }),
+  REFUND_RETURN_GOODS: Object.freeze({
+    key: "com.alibaba.trade:alibaba.trade.refund.returnGoods-1",
+    namespace: "com.alibaba.trade",
+    name: "alibaba.trade.refund.returnGoods",
+    version: 1,
+    displayName: "买家提交退款货信息",
+  }),
+  OFFLINE_LOGISTIC_COMPANY_LIST: Object.freeze({
+    key: "com.alibaba.logistics:alibaba.logistics.OpQueryLogisticCompanyList.offline-1",
+    namespace: "com.alibaba.logistics",
+    name: "alibaba.logistics.OpQueryLogisticCompanyList.offline",
+    version: 1,
+    displayName: "物流公司列表-自联物流",
+  }),
+  SUPPLY_CHANGE_AGENT: Object.freeze({
+    key: "com.alibaba.ai:open.agent.supplyChange-1",
+    namespace: "com.alibaba.ai",
+    name: "open.agent.supplyChange",
+    version: 1,
+    displayName: "Supply change agent",
+  }),
+  SUPPLY_CHANGE_DATA_FEEDBACK: Object.freeze({
+    key: "com.alibaba.ai:open.agent.supplyChangeDataFeedback-1",
+    namespace: "com.alibaba.ai",
+    name: "open.agent.supplyChangeDataFeedback",
+    version: 1,
+    displayName: "Supply change agent data feedback",
+  }),
+  MONITOR_PRODUCT_ADD: Object.freeze({
+    key: "com.alibaba.fenxiao:fenxiao.supply.addMonitorProduct-1",
+    namespace: "com.alibaba.fenxiao",
+    name: "fenxiao.supply.addMonitorProduct",
+    version: 1,
+    displayName: "Add supply monitor product",
+  }),
+  MONITOR_PRODUCT_DELETE: Object.freeze({
+    key: "com.alibaba.fenxiao:fenxiao.supply.deleteMonitorProduct-1",
+    namespace: "com.alibaba.fenxiao",
+    name: "fenxiao.supply.deleteMonitorProduct",
+    version: 1,
+    displayName: "Delete supply monitor product",
+  }),
+  MONITOR_PRODUCT_LIST: Object.freeze({
+    key: "com.alibaba.fenxiao:fenxiao.supply.queryMonitorProductList-1",
+    namespace: "com.alibaba.fenxiao",
+    name: "fenxiao.supply.queryMonitorProductList",
+    version: 1,
+    displayName: "Query supply monitor products",
+  }),
+  DEEP_SEARCH_AGENT: Object.freeze({
+    key: "com.alibaba.ai:open.agent.deepSearch-1",
+    namespace: "com.alibaba.ai",
+    name: "open.agent.deepSearch",
+    version: 1,
+    displayName: "Deep search agent",
+  }),
+  MAX_REFUND_FEE: Object.freeze({
+    key: "com.alibaba.trade:alibaba.trade.getMaxRefundFee-1",
+    namespace: "com.alibaba.trade",
+    name: "alibaba.trade.getMaxRefundFee",
+    version: 1,
+    displayName: "申请退款时查询最大可退费用",
   }),
 });
 
@@ -201,6 +425,18 @@ function firstNumber(...values) {
     }
     const number = Number(String(value).replace(/[^\d.-]/g, ""));
     if (Number.isFinite(number)) return number;
+  }
+  return null;
+}
+
+function firstBoolean(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined || value === "") continue;
+    if (typeof value === "boolean") return value;
+    if (typeof value === "number") return value !== 0;
+    const text = String(value).trim().toLowerCase();
+    if (["true", "1", "yes", "y"].includes(text)) return true;
+    if (["false", "0", "no", "n"].includes(text)) return false;
   }
   return null;
 }
@@ -632,6 +868,153 @@ function normalize1688BuyerOrderListResponse(payload = {}) {
   return orders.map(normalize1688BuyerOrder).filter((order) => order.externalOrderId);
 }
 
+function looksLikeMarketingMixConfig(item) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+  return Boolean(
+    Object.prototype.hasOwnProperty.call(item, "generalHunpi")
+    || Object.prototype.hasOwnProperty.call(item, "general_hunpi")
+    || Object.prototype.hasOwnProperty.call(item, "mixAmount")
+    || Object.prototype.hasOwnProperty.call(item, "mix_amount")
+    || Object.prototype.hasOwnProperty.call(item, "mixNumber")
+    || Object.prototype.hasOwnProperty.call(item, "mix_number")
+    || Object.prototype.hasOwnProperty.call(item, "memberId")
+    || Object.prototype.hasOwnProperty.call(item, "member_id")
+  );
+}
+
+function findMarketingMixConfigObject(value, depth = 0) {
+  const parsed = parseMaybeJson(value);
+  if (!parsed || depth > 8) return {};
+  if (Array.isArray(parsed)) {
+    for (const item of parsed) {
+      const found = findMarketingMixConfigObject(item, depth + 1);
+      if (Object.keys(found).length) return found;
+    }
+    return {};
+  }
+  if (typeof parsed !== "object") return {};
+  if (looksLikeMarketingMixConfig(parsed)) return parsed;
+  for (const key of ["result", "data", "toReturn", "returnValue", "response"]) {
+    const found = findMarketingMixConfigObject(parsed[key], depth + 1);
+    if (Object.keys(found).length) return found;
+  }
+  for (const item of Object.values(parsed)) {
+    const found = findMarketingMixConfigObject(item, depth + 1);
+    if (Object.keys(found).length) return found;
+  }
+  return {};
+}
+
+function normalize1688MarketingMixConfigResponse(payload = {}) {
+  const config = findMarketingMixConfigObject(payload);
+  const memberId = firstPresent(config.memberId, config.member_id);
+  return {
+    generalHunpi: firstBoolean(config.generalHunpi, config.general_hunpi) ?? false,
+    mixAmount: firstNumber(config.mixAmount, config.mix_amount),
+    mixNumber: firstNumber(config.mixNumber, config.mix_number),
+    memberId: memberId ? String(memberId) : null,
+    gmtCreate: firstPresent(config.gmtCreate, config.gmt_create) || null,
+    gmtModified: firstPresent(config.gmtModified, config.gmt_modified) || null,
+    raw: config,
+  };
+}
+
+function looksLikeRefund(item) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+  return Boolean(
+    item.refundId
+    || item.refund_id
+    || item.refundID
+    || item.orderRefundId
+    || item.refundStatus
+    || item.refund_status
+    || item.refundPayment
+    || item.applyPayment
+    || item.refundType
+    || item.reason
+  );
+}
+
+function findRefundArray(value, depth = 0) {
+  const parsed = parseMaybeJson(value);
+  if (!parsed || depth > 8) return [];
+  if (Array.isArray(parsed)) {
+    if (parsed.some(looksLikeRefund)) return parsed.filter((item) => item && typeof item === "object");
+    for (const item of parsed) {
+      const found = findRefundArray(item, depth + 1);
+      if (found.length) return found;
+    }
+    return [];
+  }
+  if (typeof parsed !== "object") return [];
+  for (const key of [
+    "result",
+    "data",
+    "refunds",
+    "refundList",
+    "refund_list",
+    "orderRefundList",
+    "items",
+    "list",
+    "toReturn",
+    "returnValue",
+  ]) {
+    const found = findRefundArray(parsed[key], depth + 1);
+    if (found.length) return found;
+  }
+  if (looksLikeRefund(parsed)) return [parsed];
+  for (const item of Object.values(parsed)) {
+    const found = findRefundArray(item, depth + 1);
+    if (found.length) return found;
+  }
+  return [];
+}
+
+function normalize1688Refund(item = {}) {
+  const nested = item.refund && typeof item.refund === "object" ? item.refund : item;
+  const refundId = firstPresent(
+    nested.refundId,
+    nested.refundID,
+    nested.refund_id,
+    nested.orderRefundId,
+    nested.id,
+  );
+  const externalOrderId = firstPresent(
+    nested.orderId,
+    nested.orderID,
+    nested.order_id,
+    nested.tradeId,
+    nested.tradeID,
+    nested.trade_id,
+    nested.mainOrderId,
+  );
+  const amount = firstNumber(
+    nested.refundPayment,
+    nested.applyPayment,
+    nested.refundAmount,
+    nested.amount,
+    nested.payment,
+  );
+  return {
+    refundId: refundId ? String(refundId) : null,
+    externalOrderId: externalOrderId ? String(externalOrderId) : null,
+    status: firstPresent(nested.refundStatus, nested.refund_status, nested.status, nested.bizStatus),
+    refundType: firstPresent(nested.refundType, nested.refund_type, nested.disputeType),
+    reason: firstPresent(nested.reason, nested.refundReason, nested.refund_reason, nested.applyReason),
+    amount,
+    currency: firstPresent(nested.currency, nested.currencyCode) || "CNY",
+    createdAt: firstPresent(nested.gmtCreate, nested.createTime, nested.createdAt),
+    modifiedAt: firstPresent(nested.gmtModified, nested.modifiedTime, nested.updatedAt),
+    raw: item,
+  };
+}
+
+function normalize1688RefundListResponse(payload = {}) {
+  return findRefundArray(payload).map(normalize1688Refund).filter((refund) => (
+    refund.refundId || refund.externalOrderId
+  ));
+}
+
 module.exports = {
   DEFAULT_1688_GATEWAY_BASE,
   PROCUREMENT_APIS,
@@ -639,7 +1022,9 @@ module.exports = {
   build1688OpenApiRequest,
   call1688OpenApi,
   normalize1688BuyerOrderListResponse,
+  normalize1688MarketingMixConfigResponse,
   normalize1688ProductDetailResponse,
+  normalize1688RefundListResponse,
   normalize1688SearchResponse,
   sign1688Request,
 };

@@ -57,6 +57,8 @@ export interface ImageStudioConfig {
   gptGenerateModel?: string;
   gptGenerateApiKey?: string;
   gptGenerateBaseUrl?: string;
+  gptGenerateModelOverrides?: string;
+  gptGenerateQualityTier?: string;
 }
 
 export interface ImageStudioProductFacts {
@@ -341,6 +343,8 @@ export const EMPTY_IMAGE_STUDIO_CONFIG: ImageStudioConfig = {
   gptGenerateModel: "",
   gptGenerateApiKey: "",
   gptGenerateBaseUrl: "",
+  gptGenerateModelOverrides: "",
+  gptGenerateQualityTier: "",
 };
 
 export const EMPTY_IMAGE_STUDIO_ANALYSIS: ImageStudioAnalysis = {

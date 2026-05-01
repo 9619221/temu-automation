@@ -384,6 +384,7 @@ interface ErpAPI {
       status?: string;
       source?: string;
     }) => Promise<any>;
+    delete: (payload: { id?: string; accountId?: string }) => Promise<any>;
   };
   user: {
     list: (params?: ErpListParams) => Promise<any[]>;

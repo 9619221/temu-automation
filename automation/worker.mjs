@@ -10499,6 +10499,11 @@ const AI_IMAGE_GEN_ORIGIN = (() => {
 })();
 const AI_AUTH_HEADERS = { "sec-fetch-site": "same-origin", "origin": AI_IMAGE_GEN_ORIGIN };
 
+function parsePositiveEnvInt(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
 async function formatAiImageError(prefix, response) {
   try {
     const payload = (await response.text()).trim();
@@ -11506,12 +11511,19 @@ async function readWorkflowGenerateSSE(resp, expectedTypes, idleTimeoutMs = 6000
   }
 }
 
-async function generateWorkflowSinglePackImage({ imageBuffer, mimeType, sourceImagePath, plan, taskId }) {
-  const requestTimeoutMs = 6 * 60 * 1000;
-  const idleTimeoutMs = 2 * 60 * 1000;
+async function generateWorkflowSinglePackImageAttempt({
+  imageBuffer,
+  mimeType,
+  sourceImagePath,
+  plan,
+  taskId,
+  attempt,
+  requestTimeoutMs,
+  idleTimeoutMs,
+}) {
   let requestTimer = null;
   try {
-    logWorkflowPack(taskId, `${plan.imageType} request start`);
+    logWorkflowPack(taskId, `${plan.imageType} request start attempt=${attempt}`);
     const form = new FormData();
     form.append("images", new Blob([imageBuffer], { type: mimeType }), path.basename(sourceImagePath));
     form.append("plans", JSON.stringify([plan]));
@@ -11553,6 +11565,36 @@ async function generateWorkflowSinglePackImage({ imageBuffer, mimeType, sourceIm
   } finally {
     if (requestTimer) clearTimeout(requestTimer);
   }
+}
+
+async function generateWorkflowSinglePackImage({ imageBuffer, mimeType, sourceImagePath, plan, taskId }) {
+  const requestTimeoutMs = parsePositiveEnvInt("WORKFLOW_PACK_AI_REQUEST_TIMEOUT_MS", 10 * 60 * 1000);
+  const idleTimeoutMs = parsePositiveEnvInt("WORKFLOW_PACK_AI_IDLE_TIMEOUT_MS", 4 * 60 * 1000);
+  const maxRetries = Math.max(0, parsePositiveEnvInt("WORKFLOW_PACK_AI_MAX_RETRIES", 2));
+  let lastResult = null;
+
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt += 1) {
+    const result = await generateWorkflowSinglePackImageAttempt({
+      imageBuffer,
+      mimeType,
+      sourceImagePath,
+      plan,
+      taskId,
+      attempt,
+      requestTimeoutMs,
+      idleTimeoutMs,
+    });
+    lastResult = result;
+    if (result.imageUrl) return { ...result, attempts: attempt };
+    if (!shouldRetryAiImageRequest(result.error) || attempt > maxRetries) {
+      return { ...result, attempts: attempt };
+    }
+    const waitMs = attempt * 3000;
+    logWorkflowPack(taskId, `${plan.imageType} retry ${attempt}/${maxRetries}: ${result.error}`);
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
+
+  return lastResult || { imageType: plan.imageType, imageUrl: "", error: "生成失败", warnings: [], attempts: 0 };
 }
 
 async function generateWorkflowWhitePackImages(sourceImagePath, productTitle, packCounts, options = {}) {
