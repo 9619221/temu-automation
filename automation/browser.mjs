@@ -3,6 +3,7 @@
  * 浠?worker.mjs 鎻愬彇锛屽叡浜?browserState 瀵硅薄
  */
 import { chromium } from "playwright";
+import { execFileSync } from "child_process";
 import fs from "fs";
 import path from "path";
 import { randomDelay, logSilent, getAppDataRoot, getDebugDir } from "./utils.mjs";
@@ -199,18 +200,171 @@ async function captureBrowserErrorScreenshot(page, prefix) {
   }
 }
 
-// ---- 鏌ユ壘绯荤粺 Chrome ----
-export function findChromeExe() {
+function normalizeBrowserExePath(value = "") {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const withoutOuterQuotes = raw.replace(/^"(.*)"$/, "$1");
+  const match = withoutOuterQuotes.match(/^"?(.+?(?:chrome|msedge)\.exe)"?(?:\s+.*)?$/i);
+  return path.normalize(match?.[1] || withoutOuterQuotes);
+}
+
+function pickExistingBrowser(candidates = []) {
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const exePath = normalizeBrowserExePath(candidate);
+    if (!exePath || seen.has(exePath.toLowerCase())) continue;
+    seen.add(exePath.toLowerCase());
+    if (!/[\\/](chrome|msedge)\.exe$/i.test(exePath)) continue;
+    try {
+      if (fs.existsSync(exePath)) return exePath;
+    } catch (error) {
+      logSilent("chrome.find.exists", error);
+    }
+  }
+  return "";
+}
+
+function runCommandLines(command, args = []) {
+  try {
+    const output = execFileSync(command, args, {
+      encoding: "utf8",
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return String(output || "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  } catch (error) {
+    logSilent(`chrome.find.${command}`, error);
+    return [];
+  }
+}
+
+function getEnvBrowserCandidates() {
+  return [
+    process.env.CHROME_PATH,
+    process.env.CHROME_BIN,
+    process.env.GOOGLE_CHROME_SHIM,
+    process.env.MSEDGE_PATH,
+    process.env.EDGE_PATH,
+  ].filter(Boolean);
+}
+
+function getStandardBrowserCandidates() {
+  const programFiles = [
+    process.env.ProgramFiles,
+    process.env.PROGRAMFILES,
+    process.env["ProgramFiles(x86)"],
+    process.env["PROGRAMFILES(X86)"],
+  ].filter(Boolean);
+  const localAppData = process.env.LOCALAPPDATA;
   const candidates = [
     "C:/Program Files/Google/Chrome/Application/chrome.exe",
     "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
-    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Google/Chrome/Application/chrome.exe"),
+    localAppData && path.join(localAppData, "Google/Chrome/Application/chrome.exe"),
     "C:/Program Files/Microsoft/Edge/Application/msedge.exe",
-  ].filter(Boolean);
-  for (const p of candidates) {
-    try { if (fs.existsSync(p)) return p; } catch (e) { logSilent("chrome.find", e); }
+    "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
+    localAppData && path.join(localAppData, "Microsoft/Edge/Application/msedge.exe"),
+  ];
+
+  for (const root of programFiles) {
+    candidates.push(path.join(root, "Google/Chrome/Application/chrome.exe"));
+    candidates.push(path.join(root, "Microsoft/Edge/Application/msedge.exe"));
   }
-  throw new Error("未找到系统 Chrome，请安装 Google Chrome");
+
+  return candidates.filter(Boolean);
+}
+
+function getRegistryBrowserCandidates() {
+  if (process.platform !== "win32") return [];
+  const registryRoots = [
+    "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths",
+    "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths",
+    "HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths",
+  ];
+  const exeNames = ["chrome.exe", "msedge.exe"];
+  const candidates = [];
+
+  for (const root of registryRoots) {
+    for (const exeName of exeNames) {
+      const key = `${root}\\${exeName}`;
+      const lines = runCommandLines("reg.exe", ["query", key, "/ve"]);
+      for (const line of lines) {
+        const match = line.match(/REG_(?:SZ|EXPAND_SZ)\s+(.+)$/i);
+        if (match?.[1]) candidates.push(match[1].trim());
+      }
+    }
+  }
+
+  return candidates;
+}
+
+function getPathBrowserCandidates() {
+  if (process.platform !== "win32") return [];
+  return [
+    ...runCommandLines("where.exe", ["chrome"]),
+    ...runCommandLines("where.exe", ["msedge"]),
+  ];
+}
+
+function quotePowerShellString(value) {
+  return `'${String(value || "").replace(/'/g, "''")}'`;
+}
+
+function getShortcutBrowserCandidates() {
+  if (process.platform !== "win32") return [];
+  const roots = [
+    process.env.USERPROFILE && path.join(process.env.USERPROFILE, "Desktop"),
+    process.env.PUBLIC && path.join(process.env.PUBLIC, "Desktop"),
+    process.env.APPDATA && path.join(process.env.APPDATA, "Microsoft/Windows/Start Menu/Programs"),
+    process.env.PROGRAMDATA && path.join(process.env.PROGRAMDATA, "Microsoft/Windows/Start Menu/Programs"),
+  ].filter(Boolean);
+  if (!roots.length) return [];
+
+  const rootList = roots.map(quotePowerShellString).join(",");
+  const script = [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    "$shell = New-Object -ComObject WScript.Shell",
+    `$roots = @(${rootList})`,
+    "foreach ($root in $roots) {",
+    "  if (Test-Path -LiteralPath $root) {",
+    "    Get-ChildItem -LiteralPath $root -Filter *.lnk -Recurse -ErrorAction SilentlyContinue |",
+    "      Where-Object { $_.Name -match '(?i)(chrome|edge)' } |",
+    "      ForEach-Object {",
+    "        try {",
+    "          $target = $shell.CreateShortcut($_.FullName).TargetPath",
+    "          if ($target) { $target }",
+    "        } catch {}",
+    "      }",
+    "  }",
+    "}",
+  ].join("; ");
+
+  return runCommandLines("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script]);
+}
+
+function findBrowserFromGroups(groups = []) {
+  for (const getCandidates of groups) {
+    const found = pickExistingBrowser(typeof getCandidates === "function" ? getCandidates() : getCandidates);
+    if (found) return found;
+  }
+  return "";
+}
+
+// ---- 鏌ユ壘绯荤粺 Chrome / Edge ----
+export function findChromeExe() {
+  const found = findBrowserFromGroups([
+    [...getEnvBrowserCandidates(), ...getStandardBrowserCandidates()],
+    getRegistryBrowserCandidates,
+    getPathBrowserCandidates,
+    getShortcutBrowserCandidates,
+  ]);
+  if (found) {
+    console.error(`[browser] Using system browser: ${found}`);
+    return found;
+  }
+  throw new Error("未找到系统 Chrome 或 Edge，请安装 Google Chrome / Microsoft Edge，或把浏览器快捷方式放到桌面/开始菜单");
 }
 
 // ---- Cookie 绠＄悊 ----
