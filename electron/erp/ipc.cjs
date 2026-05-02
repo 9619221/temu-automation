@@ -39,7 +39,10 @@ const {
   normalize1688RefundListResponse,
   normalize1688SearchResponse,
 } = require("./1688Client.cjs");
-const { imageSearchProduct: imageSearchAlphaShopProduct } = require("./alphaShopMcpClient.cjs");
+const {
+  imageSearchProduct: imageSearchAlphaShopProduct,
+  productDetailQuery: alphaShopProductDetailQuery,
+} = require("./alphaShopMcpClient.cjs");
 const { imageSearch1688Web } = require("./1688WebImageSearch.cjs");
 
 const erpState = {
@@ -82,13 +85,16 @@ const BROADCAST_PURCHASE_ACTIONS = new Set([
   "follow_1688_product",
   "unfollow_1688_product",
   "sync_1688_purchased_products",
+  "ensure_1688_supplier_profile_once",
   "save_1688_address",
   "sync_1688_addresses",
   "upsert_sku_1688_source",
   "delete_sku_1688_source",
+  "bind_1688_candidate_spec",
   "validate_1688_order_push",
   "preview_1688_order",
   "generate_po",
+  "delete_po",
   "push_1688_order",
   "query_1688_mix_config",
   "get_1688_payment_url",
@@ -121,6 +127,7 @@ const BROADCAST_PURCHASE_ACTIONS = new Set([
   "delete_1688_monitor_product",
   "query_1688_monitor_products",
   "run_1688_deep_search_agent",
+  "ensure_1688_mix_config_once",
   "configure_1688_message_subscriptions",
   "receive_1688_message",
   "sync_1688_orders",
@@ -2740,6 +2747,7 @@ function listSkus(params = {}) {
     SELECT
       sku.*,
       acct.name AS account_name,
+      supplier.name AS system_supplier_name,
       COALESCE(inv.actual_stock_qty, 0) AS actual_stock_qty,
       inv.location_codes AS warehouse_location,
       COALESCE(inv.weighted_unit_landed_cost, source.unit_price) AS cost_price,
@@ -2755,6 +2763,7 @@ function listSkus(params = {}) {
       source.moq AS primary_1688_moq
     FROM erp_skus sku
     LEFT JOIN erp_accounts acct ON acct.id = sku.account_id
+    LEFT JOIN erp_suppliers supplier ON supplier.id = sku.supplier_id
     LEFT JOIN (
       SELECT account_id, sku_id, COUNT(*) AS source_count
       FROM erp_sku_1688_sources
@@ -3375,7 +3384,7 @@ function upsertSku1688SourceFromCandidate(db, candidate = {}, pr = {}, actor = {
     externalOfferId,
     externalSkuId,
     externalSpecId,
-    platformSkuName: candidate.platform_sku_name || candidate.platformSkuName || externalSpecId || externalSkuId,
+    platformSkuName: options.platformSkuName || options.platform_sku_name || candidate.platform_sku_name || candidate.platformSkuName || externalSpecId || externalSkuId,
     supplierName: candidate.supplier_name || candidate.supplierName,
     productTitle: candidate.product_title || candidate.productTitle,
     productUrl: candidate.product_url || candidate.productUrl,
@@ -3384,8 +3393,8 @@ function upsertSku1688SourceFromCandidate(db, candidate = {}, pr = {}, actor = {
     moq: candidate.moq,
     leadDays: candidate.lead_days ?? candidate.leadDays,
     logisticsFee: candidate.logistics_fee ?? candidate.logisticsFee,
-    ourQty: 1,
-    platformQty: 1,
+    ourQty: optionalPositiveInteger(options.ourQty ?? options.our_qty ?? candidate.our_qty ?? candidate.ourQty, 1),
+    platformQty: optionalPositiveInteger(options.platformQty ?? options.platform_qty ?? candidate.platform_qty ?? candidate.platformQty, 1),
     sourcePayload,
     isDefault: Boolean(options.isDefault),
     status: "active",
@@ -3503,9 +3512,14 @@ function addPurchaseRequestComment(db, pr, actor, body) {
 
 function getPurchaseWorkbench(params = {}) {
   const { db } = requireErp();
+  normalizePurchaseOrderNumbers(db);
   const accountId = optionalString(params.accountId);
   const companyId = normalizeCompanyId(params.user?.companyId || params.companyId || params.company_id, erpState.currentUser);
   const limit = normalizeLimit(params.limit, 50);
+  const includeRequestDetails = params.includeRequestDetails !== false && params.include_request_details !== false;
+  const includeOptions = params.includeOptions !== false && params.include_options !== false;
+  const include1688Meta = params.include1688Meta !== false && params.include_1688_meta !== false;
+  const detailPrId = optionalString(params.detailPrId || params.detail_pr_id || params.prId || params.pr_id);
   const whereAccount = accountId ? "WHERE pr.account_id = @account_id" : "";
   const poWhereAccount = accountId ? "WHERE po.account_id = @account_id" : "";
   const paymentWhereAccount = accountId ? "AND po.account_id = @account_id" : "";
@@ -3574,103 +3588,107 @@ function getPurchaseWorkbench(params = {}) {
   `).all(baseParams).map(toPurchaseRequest);
 
   const currentUserId = params.user?.id || erpState.currentUser?.id || null;
-  const candidatesByPr = new Map();
-  const commentsByPr = new Map();
-  const eventsByPr = new Map();
-  const unreadByPr = new Map();
 
-  const candidateStmt = db.prepare(`
-    SELECT
-      candidate.*,
-      supplier.name AS linked_supplier_name,
-      creator.name AS created_by_name
-    FROM erp_sourcing_candidates candidate
-    LEFT JOIN erp_suppliers supplier ON supplier.id = candidate.supplier_id
-    LEFT JOIN erp_users creator ON creator.id = candidate.created_by
-    WHERE candidate.pr_id = ?
-    ORDER BY
-      CASE candidate.status
-        WHEN 'selected' THEN 0
-        WHEN 'shortlisted' THEN 1
-        WHEN 'candidate' THEN 2
-        ELSE 9
-      END,
-      candidate.updated_at DESC
-  `);
-  const commentStmt = db.prepare(`
-    SELECT *
-    FROM erp_purchase_request_comments
-    WHERE pr_id = ?
-    ORDER BY created_at ASC
-  `);
-  const eventStmt = db.prepare(`
-    SELECT *
-    FROM erp_purchase_request_events
-    WHERE pr_id = ?
-    ORDER BY created_at ASC
-  `);
-  const unreadStmt = db.prepare(`
-    SELECT COUNT(*) AS count
-    FROM (
-      SELECT author_id AS source_user_id, created_at
+  for (const pr of purchaseRequests) pr.unreadCount = 0;
+  if (currentUserId && purchaseRequests.length) {
+    const prIds = purchaseRequests.map((pr) => pr.id);
+    const placeholders = prIds.map(() => "?").join(",");
+    const unreadRows = db.prepare(`
+      SELECT item.pr_id, COUNT(*) AS count
+      FROM (
+        SELECT pr_id, author_id AS source_user_id, created_at
+        FROM erp_purchase_request_comments
+        WHERE pr_id IN (${placeholders})
+        UNION ALL
+        SELECT pr_id, actor_id AS source_user_id, created_at
+        FROM erp_purchase_request_events
+        WHERE pr_id IN (${placeholders})
+      ) item
+      LEFT JOIN erp_purchase_request_reads read_state
+        ON read_state.pr_id = item.pr_id AND read_state.user_id = ?
+      WHERE item.created_at > COALESCE(read_state.last_read_at, '')
+        AND COALESCE(item.source_user_id, '') != ?
+      GROUP BY item.pr_id
+    `).all(...prIds, ...prIds, currentUserId, currentUserId);
+    const unreadByPr = new Map(unreadRows.map((row) => [row.pr_id, Number(row.count || 0)]));
+    for (const pr of purchaseRequests) pr.unreadCount = unreadByPr.get(pr.id) || 0;
+  }
+
+  const detailPurchaseRequests = purchaseRequests.filter((pr) => (
+    includeRequestDetails || (detailPrId && pr.id === detailPrId)
+  ));
+
+  if (detailPurchaseRequests.length) {
+    const candidateStmt = db.prepare(`
+      SELECT
+        candidate.*,
+        supplier.name AS linked_supplier_name,
+        creator.name AS created_by_name
+      FROM erp_sourcing_candidates candidate
+      LEFT JOIN erp_suppliers supplier ON supplier.id = candidate.supplier_id
+      LEFT JOIN erp_users creator ON creator.id = candidate.created_by
+      WHERE candidate.pr_id = ?
+      ORDER BY
+        CASE candidate.status
+          WHEN 'selected' THEN 0
+          WHEN 'shortlisted' THEN 1
+          WHEN 'candidate' THEN 2
+          ELSE 9
+        END,
+        candidate.updated_at DESC
+    `);
+    const commentStmt = db.prepare(`
+      SELECT *
       FROM erp_purchase_request_comments
-      WHERE pr_id = @pr_id
-      UNION ALL
-      SELECT actor_id AS source_user_id, created_at
+      WHERE pr_id = ?
+      ORDER BY created_at ASC
+    `);
+    const eventStmt = db.prepare(`
+      SELECT *
       FROM erp_purchase_request_events
-      WHERE pr_id = @pr_id
-    ) item
-    LEFT JOIN erp_purchase_request_reads read_state
-      ON read_state.pr_id = @pr_id AND read_state.user_id = @user_id
-    WHERE item.created_at > COALESCE(read_state.last_read_at, '')
-      AND COALESCE(item.source_user_id, '') != @user_id
-  `);
+      WHERE pr_id = ?
+      ORDER BY created_at ASC
+    `);
 
-  for (const pr of purchaseRequests) {
-    const candidates = candidateStmt.all(pr.id).map((row) => {
-      const next = toCamelRow(row);
-      next.supplierName = next.supplierName || next.linkedSupplierName || "";
-      next.sourcePayload = parseJsonObject(row.source_payload_json);
-      delete next.sourcePayloadJson;
-      next.externalSkuOptions = parseJsonArray(row.external_sku_options_json);
-      next.externalPriceRanges = parseJsonArray(row.external_price_ranges_json);
-      next.inquiryResult = parseJsonObject(row.inquiry_result_json);
-      delete next.inquiryResultJson;
-      return next;
-    });
-    const comments = commentStmt.all(pr.id).map(toCamelRow);
-    const events = eventStmt.all(pr.id).map(toCamelRow);
-    const timeline = [
-      ...events.map((item) => ({
-        id: item.id,
-        kind: "event",
-        actorName: item.actorName,
-        actorRole: item.actorRole,
-        message: item.message,
-        eventType: item.eventType,
-        createdAt: item.createdAt,
-      })),
-      ...comments.map((item) => ({
-        id: item.id,
-        kind: "comment",
-        actorName: item.authorName,
-        actorRole: item.authorRole,
-        message: item.body,
-        createdAt: item.createdAt,
-      })),
-    ].sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt)));
+    for (const pr of detailPurchaseRequests) {
+      const candidates = candidateStmt.all(pr.id).map((row) => {
+        const next = toCamelRow(row);
+        next.supplierName = next.supplierName || next.linkedSupplierName || "";
+        next.sourcePayload = parseJsonObject(row.source_payload_json);
+        delete next.sourcePayloadJson;
+        next.externalSkuOptions = parseJsonArray(row.external_sku_options_json);
+        next.externalPriceRanges = parseJsonArray(row.external_price_ranges_json);
+        next.inquiryResult = parseJsonObject(row.inquiry_result_json);
+        delete next.inquiryResultJson;
+        return next;
+      });
+      const comments = commentStmt.all(pr.id).map(toCamelRow);
+      const events = eventStmt.all(pr.id).map(toCamelRow);
+      const timeline = [
+        ...events.map((item) => ({
+          id: item.id,
+          kind: "event",
+          actorName: item.actorName,
+          actorRole: item.actorRole,
+          message: item.message,
+          eventType: item.eventType,
+          createdAt: item.createdAt,
+        })),
+        ...comments.map((item) => ({
+          id: item.id,
+          kind: "comment",
+          actorName: item.authorName,
+          actorRole: item.authorRole,
+          message: item.body,
+          createdAt: item.createdAt,
+        })),
+      ].sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt)));
 
-    candidatesByPr.set(pr.id, candidates);
-    commentsByPr.set(pr.id, comments);
-    eventsByPr.set(pr.id, events);
-    unreadByPr.set(pr.id, currentUserId
-      ? Number(unreadStmt.get({ pr_id: pr.id, user_id: currentUserId })?.count || 0)
-      : 0);
-    pr.candidates = candidates;
-    pr.comments = comments;
-    pr.events = events;
-    pr.timeline = timeline;
-    pr.unreadCount = unreadByPr.get(pr.id);
+      pr.candidates = candidates;
+      pr.comments = comments;
+      pr.events = events;
+      pr.timeline = timeline;
+    }
   }
 
   const purchaseOrders = db.prepare(`
@@ -3681,6 +3699,17 @@ function getPurchaseWorkbench(params = {}) {
       creator.name AS created_by_name,
       pr.status AS pr_status,
       GROUP_CONCAT(DISTINCT sku.internal_sku_code || ' ' || sku.product_name) AS sku_summary,
+      GROUP_CONCAT(DISTINCT sku.internal_sku_code) AS sku_codes,
+      GROUP_CONCAT(DISTINCT sku.product_name) AS product_names,
+      (
+        SELECT first_sku.image_url
+        FROM erp_purchase_order_lines first_line
+        LEFT JOIN erp_skus first_sku ON first_sku.id = first_line.sku_id
+        WHERE first_line.po_id = po.id
+          AND COALESCE(first_sku.image_url, '') <> ''
+        ORDER BY first_line.id ASC
+        LIMIT 1
+      ) AS sku_image_url,
       COUNT(DISTINCT line.id) AS line_count,
       COALESCE(SUM(line.qty), 0) AS total_qty,
       COALESCE(SUM(line.received_qty), 0) AS received_qty,
@@ -3856,46 +3885,54 @@ function getPurchaseWorkbench(params = {}) {
     ), 0),
   };
 
-  const skuOptions = listSkus({ accountId, companyId, limit: 500 });
-  const sku1688Sources = listSku1688Sources({ accountId, limit: 500 });
+  const skuOptions = includeOptions ? listSkus({ accountId, companyId, limit: 500 }) : undefined;
+  const sku1688Sources = includeOptions ? listSku1688Sources({ accountId, limit: 500 }) : undefined;
+  const supplierOptions = includeOptions
+    ? db.prepare(`
+      SELECT id, name
+      FROM erp_suppliers
+      WHERE company_id = @company_id
+      ORDER BY updated_at DESC, created_at DESC
+      LIMIT 500
+    `).all({ company_id: companyId }).map(toCamelRow)
+    : undefined;
 
-  const supplierOptions = db.prepare(`
-    SELECT id, name
-    FROM erp_suppliers
-    WHERE company_id = @company_id
-    ORDER BY updated_at DESC, created_at DESC
-    LIMIT 500
-  `).all({ company_id: companyId }).map(toCamelRow);
+  if (include1688Meta) {
+    ensureDefault1688MessageSubscriptions(db, {
+      companyId,
+      actor: params.user || erpState.currentUser || {},
+    });
+    ensureDefault1688DeliveryAddresses(db, {
+      companyId,
+      actor: params.user || erpState.currentUser || {},
+    });
+  }
 
-  ensureDefault1688MessageSubscriptions(db, {
-    companyId,
-    actor: params.user || erpState.currentUser || {},
-  });
-  ensureDefault1688DeliveryAddresses(db, {
-    companyId,
-    actor: params.user || erpState.currentUser || {},
-  });
-
-  const alibaba1688Addresses = list1688DeliveryAddresses({ status: "active", companyId });
-  const alibaba1688MessageSubscriptions = list1688MessageSubscriptions(db, { companyId });
-  const recent1688MessageEvents = list1688MessageEvents(db, { limit: 30 });
+  const alibaba1688Addresses = include1688Meta ? list1688DeliveryAddresses({ status: "active", companyId }) : undefined;
+  const alibaba1688MessageSubscriptions = include1688Meta ? list1688MessageSubscriptions(db, { companyId }) : undefined;
+  const recent1688MessageEvents = include1688Meta ? list1688MessageEvents(db, { limit: 30 }) : undefined;
   const purchaseSettings = getPurchaseSettings(db, companyId);
 
-  return {
+  const workbench = {
     generatedAt: nowIso(),
     summary,
     purchaseRequests,
     purchaseOrders,
     paymentApprovals,
     paymentQueue,
-    skuOptions,
-    sku1688Sources,
-    supplierOptions,
     purchaseSettings,
-    alibaba1688Addresses,
-    alibaba1688MessageSubscriptions,
-    recent1688MessageEvents,
   };
+  if (includeOptions) {
+    workbench.skuOptions = skuOptions;
+    workbench.sku1688Sources = sku1688Sources;
+    workbench.supplierOptions = supplierOptions;
+  }
+  if (include1688Meta) {
+    workbench.alibaba1688Addresses = alibaba1688Addresses;
+    workbench.alibaba1688MessageSubscriptions = alibaba1688MessageSubscriptions;
+    workbench.recent1688MessageEvents = recent1688MessageEvents;
+  }
+  return workbench;
 }
 
 function getPurchaseOrder(db, poId) {
@@ -4197,6 +4234,124 @@ function rollbackPurchaseOrderStatusAction({ db, services, payload, actor }) {
     transition,
     paymentApproval: paymentApproval ? toCamelRow(paymentApproval) : null,
     purchaseOrder: toCamelRow(afterPo),
+  };
+}
+
+function countPurchaseOrderInboundLineRefs(db, poId) {
+  const row = db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM erp_inbound_receipt_lines line
+    JOIN erp_purchase_order_lines po_line ON po_line.id = line.po_line_id
+    WHERE po_line.po_id = ?
+  `).get(poId);
+  return Number(row?.count || 0);
+}
+
+function deletePurchaseOrderAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "删除采购单");
+  const poId = requireString(payload.poId || payload.id, "poId");
+  const po = db.prepare("SELECT * FROM erp_purchase_orders WHERE id = ?").get(poId);
+  if (!po) {
+    return {
+      deleted: true,
+      alreadyMissing: true,
+      poId,
+    };
+  }
+  const lines = db.prepare("SELECT * FROM erp_purchase_order_lines WHERE po_id = ?").all(po.id);
+  const blockers = [];
+  const status = optionalString(po.status);
+  const paymentStatus = optionalString(po.payment_status) || "unpaid";
+  if (status !== "draft") blockers.push(`当前状态为 ${status || "-"}`);
+  if (paymentStatus !== "unpaid") blockers.push(`付款状态为 ${paymentStatus}`);
+  if (has1688OrderTrace(po)) blockers.push("已有 1688 订单记录");
+  if (getPurchaseOrderReceivedQty(db, po.id) > 0) blockers.push("已有入库数量");
+  const paymentApprovalCount = Number(db.prepare("SELECT COUNT(*) AS count FROM erp_payment_approvals WHERE po_id = ?").get(po.id)?.count || 0);
+  if (paymentApprovalCount > 0) blockers.push("已有付款审批记录");
+  const inboundReceiptCount = Number(db.prepare("SELECT COUNT(*) AS count FROM erp_inbound_receipts WHERE po_id = ?").get(po.id)?.count || 0);
+  if (inboundReceiptCount > 0) blockers.push("已有入库单");
+  const inboundLineCount = countPurchaseOrderInboundLineRefs(db, po.id);
+  if (inboundLineCount > 0) blockers.push("已有入库明细");
+  const batchCount = Number(db.prepare("SELECT COUNT(*) AS count FROM erp_inventory_batches WHERE po_id = ?").get(po.id)?.count || 0);
+  if (batchCount > 0) blockers.push("已有库存批次");
+  const refundCount = Number(db.prepare("SELECT COUNT(*) AS count FROM erp_1688_refunds WHERE po_id = ?").get(po.id)?.count || 0);
+  if (refundCount > 0) blockers.push("已有售后记录");
+  if (blockers.length) {
+    throw new Error(`采购单不能删除：${blockers.join("、")}`);
+  }
+
+  let reopenedPurchaseRequest = null;
+  const beforePayload = {
+    purchaseOrder: po,
+    lines,
+  };
+  services.workflow.writeAudit({
+    accountId: po.account_id,
+    actor,
+    action: "delete_purchase_order",
+    entityType: "purchase_order",
+    entityId: po.id,
+    before: beforePayload,
+    after: null,
+  });
+
+  db.prepare("DELETE FROM erp_purchase_order_lines WHERE po_id = ?").run(po.id);
+  db.prepare("DELETE FROM erp_purchase_orders WHERE id = ?").run(po.id);
+  const now = nowIso();
+  const resolvedWorkItems = db.prepare(`
+    UPDATE erp_work_items
+    SET status = 'done',
+        updated_at = @updated_at,
+        resolved_at = COALESCE(resolved_at, @updated_at)
+    WHERE related_doc_type = 'purchase_order'
+      AND related_doc_id = @po_id
+      AND status NOT IN ('done', 'dismissed')
+  `).run({
+    po_id: po.id,
+    updated_at: now,
+  }).changes;
+
+  if (po.pr_id) {
+    const remainingPoCount = Number(db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM erp_purchase_orders
+      WHERE pr_id = ?
+    `).get(po.pr_id)?.count || 0);
+    const pr = getPurchaseRequest(db, po.pr_id);
+    if (remainingPoCount === 0 && pr.status === "converted_to_po") {
+      const beforePr = { ...pr };
+      db.prepare(`
+        UPDATE erp_purchase_requests
+        SET status = 'sourced',
+            updated_at = @updated_at
+        WHERE id = @id
+      `).run({
+        id: pr.id,
+        updated_at: now,
+      });
+      const afterPr = getPurchaseRequest(db, pr.id);
+      services.workflow.writeAudit({
+        accountId: afterPr.account_id,
+        actor,
+        action: "reopen_purchase_request_after_delete_po",
+        entityType: "purchase_request",
+        entityId: afterPr.id,
+        before: beforePr,
+        after: afterPr,
+      });
+      reopenedPurchaseRequest = toCamelRow(afterPr);
+    }
+    const latestPr = getPurchaseRequest(db, po.pr_id);
+    writePurchaseRequestEvent(db, latestPr, actor, "delete_po", `采购单已删除：${po.po_no}`);
+    markPurchaseRequestRead(db, po.pr_id, actor);
+  }
+
+  return {
+    deleted: true,
+    purchaseOrder: toCamelRow(po),
+    purchaseRequest: reopenedPurchaseRequest,
+    deletedLineCount: lines.length,
+    resolvedWorkItemCount: resolvedWorkItems,
   };
 }
 
@@ -4961,6 +5116,23 @@ async function runAlphaShopImageSearch({ db, payload, actor, imgUrl, beginPage, 
   return {
     rawResponse: raw.rawResponse,
     products: Array.isArray(raw.products) ? raw.products : [],
+  };
+}
+
+async function runAlphaShopProductDetail({ db, payload, actor, offerId }) {
+  const credentials = getAlphaShopCredentials(db, payload, actor);
+  const raw = await alphaShopProductDetailQuery({
+    accessKey: credentials.accessKey,
+    secretKey: credentials.secretKey,
+    productId: offerId,
+    timeoutMs: 120000,
+  });
+  if (credentials.shouldSave) {
+    saveAlphaShopCredentials(db, credentials);
+  }
+  return {
+    rawResponse: raw.rawResponse,
+    detail: raw.detail,
   };
 }
 
@@ -5825,6 +5997,91 @@ function pickSkuOption(detail = {}, payload = {}) {
   return skuOptions.find((sku) => optionalNumber(sku.price) !== null) || skuOptions[0] || null;
 }
 
+function hasSyncableSkuOptions(detail = {}) {
+  return Array.isArray(detail.skuOptions)
+    && detail.skuOptions.some((sku) => optionalString(sku?.externalSpecId || sku?.externalSkuId));
+}
+
+function is1688ProductDetailAclError(error) {
+  const message = String(error?.message || error || "");
+  return error?.code === "1688_APP_ACL_DENIED"
+    || /alibaba\.product\.get|AppKey is not allowed\(acl\)|not allowed\(acl\)/i.test(message);
+}
+
+function addFallback1688SkuOption(options, item = {}) {
+  const externalSkuId = optionalString(
+    item.externalSkuId
+      || item.external_sku_id
+      || item.skuId
+      || item.skuID
+      || item.sku_id,
+  );
+  const externalSpecId = optionalString(
+    item.externalSpecId
+      || item.external_spec_id
+      || item.specId
+      || item.specID
+      || item.spec_id
+      || item.cargoSkuId
+      || item.cargoSkuID
+      || item.cargo_sku_id,
+  ) || externalSkuId;
+  if (!externalSkuId && !externalSpecId) return;
+  const key = `${externalSkuId || ""}:${externalSpecId || ""}`;
+  if (options.some((option) => `${option.externalSkuId || ""}:${option.externalSpecId || ""}` === key)) return;
+  options.push({
+    externalSkuId: externalSkuId || externalSpecId,
+    externalSpecId,
+    specText: optionalString(item.specText || item.spec_text || item.specAttrs || item.spec_attrs) || externalSpecId,
+    price: optionalNumber(item.price),
+    stock: optionalNumber(item.stock),
+    raw: item.raw || item,
+  });
+}
+
+async function buildFallback1688ProductDetail(candidate = {}, offerId, payload = {}, error = null) {
+  const sourcePayload = parseJsonObject(candidate.source_payload_json);
+  const skuOptions = [];
+  for (const item of parseJsonArray(candidate.external_sku_options_json)) {
+    addFallback1688SkuOption(skuOptions, item);
+  }
+  addFallback1688SkuOption(skuOptions, {
+    externalSkuId: payload.externalSkuId || payload.external_sku_id || candidate.external_sku_id || infer1688CandidateSkuId({ ...candidate, raw: sourcePayload }),
+    externalSpecId: payload.externalSpecId || payload.external_spec_id || candidate.external_spec_id || infer1688CandidateSpecId({ ...candidate, raw: sourcePayload }),
+    specText: candidate.product_title,
+    price: payload.unitPrice ?? candidate.unit_price,
+  });
+
+  let webDetailError = null;
+  try {
+    const webSkuOptions = await fetch1688WebSkuOptions(offerId);
+    for (const item of webSkuOptions) addFallback1688SkuOption(skuOptions, item);
+  } catch (webError) {
+    webDetailError = webError;
+  }
+
+  return {
+    externalOfferId: String(offerId),
+    supplierName: optionalString(candidate.supplier_name) || "1688 Supplier",
+    productTitle: optionalString(candidate.product_title),
+    productUrl: optionalString(candidate.product_url) || `https://detail.1688.com/offer/${offerId}.html`,
+    imageUrl: optionalString(candidate.image_url),
+    unitPrice: optionalNumber(payload.unitPrice) ?? optionalNumber(candidate.unit_price) ?? 0,
+    moq: Math.max(1, Math.floor(Number(optionalNumber(candidate.moq) ?? 1))),
+    priceRanges: parseJsonArray(candidate.external_price_ranges_json),
+    skuOptions,
+    raw: {
+      ...sourcePayload,
+      fallbackDetail: {
+        source: "candidate_or_1688_web_detail",
+        reason: error?.message || String(error || ""),
+        webDetailError: webDetailError?.message || null,
+        fetchedAt: nowIso(),
+      },
+    },
+  };
+}
+
 function build1688ProductDetailParams(offerId, payload = {}) {
   return {
     productID: requireString(payload.productId || payload.productID || offerId, "productID"),
@@ -5840,16 +6097,76 @@ async function refresh1688ProductDetailAction({ db, services, payload, actor }) 
   const pr = getPurchaseRequest(db, candidate.pr_id);
   const offerId = requireString(payload.offerId || candidate.external_offer_id, "offerId");
   const apiParams = build1688ProductDetailParams(offerId, payload);
-  const rawResponse = payload.mockDetail || payload.mockResponse || await call1688ProcurementApi({
-    db,
-    actor,
-    accountId: candidate.account_id,
-    action: "refresh_1688_product_detail",
-    api: PROCUREMENT_APIS.PRODUCT_DETAIL,
-    params: apiParams,
+  let rawResponse = null;
+  let detail = null;
+  let usedFallbackDetail = false;
+  let usedAlphaShopProductDetail = false;
+  let alphaShopDetailError = null;
+  const mockDetail = payload.mockDetail || payload.mockResponse || null;
+
+  if (mockDetail) {
+    rawResponse = mockDetail;
+    detail = normalize1688ProductDetailResponse(rawResponse);
+  } else {
+    const preferAlphaShopDetail = payload.preferAlphaShopDetail !== false
+      && payload.prefer_alpha_shop_detail !== false;
+    if (preferAlphaShopDetail) {
+      try {
+        const alphaShopDetail = await runAlphaShopProductDetail({
+          db,
+          payload,
+          actor,
+          offerId,
+        });
+        if (hasSyncableSkuOptions(alphaShopDetail.detail)) {
+          rawResponse = alphaShopDetail.rawResponse;
+          detail = alphaShopDetail.detail;
+          usedAlphaShopProductDetail = true;
+        } else {
+          alphaShopDetailError = new Error("productDetailQuery 未返回可绑定规格");
+        }
+      } catch (error) {
+        alphaShopDetailError = error;
+      }
+    }
+
+    if (!detail) {
+      try {
+        rawResponse = await call1688ProcurementApi({
+          db,
+          actor,
+          accountId: candidate.account_id,
+          action: "refresh_1688_product_detail",
+          api: PROCUREMENT_APIS.PRODUCT_DETAIL,
+          params: apiParams,
+        });
+        detail = normalize1688ProductDetailResponse(rawResponse);
+      } catch (error) {
+        if (!is1688ProductDetailAclError(error)) throw error;
+        detail = await buildFallback1688ProductDetail(candidate, offerId, payload, error);
+        if (detail.raw?.fallbackDetail && alphaShopDetailError) {
+          detail.raw.fallbackDetail.alphaShopDetailError = alphaShopDetailError.message || String(alphaShopDetailError);
+        }
+        rawResponse = detail.raw;
+        usedFallbackDetail = true;
+      }
+    }
+  }
+  const selectedSku = pickSkuOption(detail, {
+    ...payload,
+    externalSkuId: payload.externalSkuId || payload.external_sku_id || candidate.external_sku_id,
+    externalSpecId: payload.externalSpecId || payload.external_spec_id || candidate.external_spec_id,
   });
-  const detail = normalize1688ProductDetailResponse(rawResponse);
-  const selectedSku = pickSkuOption(detail, payload);
+  if (usedFallbackDetail && !optionalString(payload.externalSpecId || payload.external_spec_id || candidate.external_spec_id || selectedSku?.externalSpecId)) {
+    const alphaShopMessage = alphaShopDetailError
+      ? `productDetailQuery 也未拿到可绑定规格（${alphaShopDetailError.message || String(alphaShopDetailError)}），`
+      : "";
+    throw new Error(`${alphaShopMessage}当前 1688 AppKey 没有商品详情接口权限，且未能从图搜候选或 1688 页面解析到具体规格。请开通 alibaba.product.get ACL，或在供应商管理里手动填写 1688 规格ID。`);
+  }
+  const shouldBindMapping = payload.bindMapping !== false && payload.bind_mapping !== false;
+  const explicitExternalSkuId = optionalString(payload.externalSkuId || payload.external_sku_id);
+  const explicitExternalSpecId = optionalString(payload.externalSpecId || payload.external_spec_id);
+  const shouldApplySelectedSpec = shouldBindMapping || explicitExternalSkuId || explicitExternalSpecId;
   const qty = Number(pr.requested_qty || candidate.moq || 1);
   const priceFromRange = pickPriceForQuantity(detail.priceRanges, qty);
   const nextUnitPrice = optionalNumber(payload.unitPrice)
@@ -5887,8 +6204,12 @@ async function refresh1688ProductDetailAction({ db, services, payload, actor }) 
     unit_price: nextUnitPrice,
     moq: nextMoq,
     external_offer_id: optionalString(detail.externalOfferId || offerId),
-    external_sku_id: optionalString(payload.externalSkuId || selectedSku?.externalSkuId),
-    external_spec_id: optionalString(payload.externalSpecId || selectedSku?.externalSpecId),
+    external_sku_id: shouldApplySelectedSpec
+      ? optionalString(explicitExternalSkuId || selectedSku?.externalSkuId || candidate.external_sku_id)
+      : null,
+    external_spec_id: shouldApplySelectedSpec
+      ? optionalString(explicitExternalSpecId || selectedSku?.externalSpecId || candidate.external_spec_id)
+      : null,
     source_payload_json: trimJsonForStorage(detail.raw || rawResponse),
     external_detail_json: trimJsonForStorage(detail.raw || rawResponse),
     external_sku_options_json: trimJsonForStorage(detail.skuOptions || [], 60000),
@@ -5898,13 +6219,15 @@ async function refresh1688ProductDetailAction({ db, services, payload, actor }) 
   });
 
   const afterCandidate = db.prepare("SELECT * FROM erp_sourcing_candidates WHERE id = ?").get(candidate.id);
-  const sku1688Source = upsertSku1688SourceFromCandidate(
-    db,
-    afterCandidate,
-    getPurchaseRequest(db, candidate.pr_id),
-    actor,
-    { isDefault: false },
-  );
+  const sku1688Source = shouldBindMapping
+    ? upsertSku1688SourceFromCandidate(
+      db,
+      afterCandidate,
+      getPurchaseRequest(db, candidate.pr_id),
+      actor,
+      { isDefault: true },
+    )
+    : null;
   services.workflow.writeAudit({
     accountId: candidate.account_id,
     actor,
@@ -5932,10 +6255,218 @@ async function refresh1688ProductDetailAction({ db, services, payload, actor }) 
     candidate: resultCandidate,
     detail: {
       ...detail,
+      usedFallbackDetail,
+      usedAlphaShopProductDetail,
       raw: undefined,
     },
     sku1688Source,
     rawResponse,
+  };
+}
+
+async function preview1688UrlSpecsAction({ db, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 URL spec preview");
+  const productUrl = optionalString(payload.productUrl || payload.product_url || payload.url);
+  const offerId = requireString(
+    payload.offerId
+      || payload.externalOfferId
+      || payload.productId
+      || payload.productID
+      || extract1688OfferIdFromUrl(productUrl),
+    "offerId",
+  );
+  const apiParams = build1688ProductDetailParams(offerId, payload);
+  const fallbackCandidate = {
+    account_id: optionalString(payload.accountId || payload.account_id),
+    supplier_name: optionalString(payload.supplierName || payload.supplier_name),
+    product_title: optionalString(payload.productTitle || payload.product_title),
+    product_url: productUrl || `https://detail.1688.com/offer/${offerId}.html`,
+    image_url: optionalString(payload.imageUrl || payload.image_url),
+    unit_price: optionalNumber(payload.unitPrice ?? payload.unit_price),
+    moq: optionalNumber(payload.moq),
+    external_sku_options_json: "[]",
+    external_price_ranges_json: "[]",
+    source_payload_json: "{}",
+  };
+  let rawResponse = null;
+  let detail = null;
+  let usedFallbackDetail = false;
+  let usedAlphaShopProductDetail = false;
+  let alphaShopDetailError = null;
+  let officialDetailError = null;
+  const mockDetail = payload.mockDetail || payload.mockResponse || null;
+
+  if (mockDetail) {
+    rawResponse = mockDetail;
+    detail = normalize1688ProductDetailResponse(rawResponse);
+  } else {
+    const preferAlphaShopDetail = payload.preferAlphaShopDetail !== false
+      && payload.prefer_alpha_shop_detail !== false;
+    if (preferAlphaShopDetail) {
+      try {
+        const alphaShopDetail = await runAlphaShopProductDetail({
+          db,
+          payload,
+          actor,
+          offerId,
+        });
+        if (hasSyncableSkuOptions(alphaShopDetail.detail)) {
+          rawResponse = alphaShopDetail.rawResponse;
+          detail = alphaShopDetail.detail;
+          usedAlphaShopProductDetail = true;
+        } else {
+          alphaShopDetailError = new Error("productDetailQuery 未返回可绑定规格");
+        }
+      } catch (error) {
+        alphaShopDetailError = error;
+      }
+    }
+
+    if (!detail) {
+      try {
+        rawResponse = await call1688ProcurementApi({
+          db,
+          actor,
+          accountId: fallbackCandidate.account_id,
+          action: "preview_1688_url_specs",
+          api: PROCUREMENT_APIS.PRODUCT_DETAIL,
+          params: apiParams,
+        });
+        detail = normalize1688ProductDetailResponse(rawResponse);
+      } catch (error) {
+        officialDetailError = error;
+        detail = await buildFallback1688ProductDetail(fallbackCandidate, offerId, payload, error);
+        if (detail.raw?.fallbackDetail) {
+          if (alphaShopDetailError) {
+            detail.raw.fallbackDetail.alphaShopDetailError = alphaShopDetailError.message || String(alphaShopDetailError);
+          }
+          detail.raw.fallbackDetail.officialDetailError = officialDetailError?.message || String(officialDetailError || "");
+        }
+        rawResponse = detail.raw;
+        usedFallbackDetail = true;
+      }
+    }
+  }
+
+  if (!hasSyncableSkuOptions(detail)) {
+    const alphaShopMessage = alphaShopDetailError
+      ? `productDetailQuery 未拿到可绑定规格（${alphaShopDetailError.message || String(alphaShopDetailError)}），`
+      : "";
+    const officialMessage = officialDetailError
+      ? `1688 商品详情接口也未拿到规格（${officialDetailError.message || String(officialDetailError)}）。`
+      : "";
+    throw new Error(`${alphaShopMessage}${officialMessage || "未能从这个 1688 地址解析到可绑定规格。"}请开通 alibaba.product.get ACL，或手动填写 1688 商品规格ID。`);
+  }
+
+  return {
+    apiKey: PROCUREMENT_APIS.PRODUCT_DETAIL.key,
+    query: apiParams,
+    externalOfferId: offerId,
+    productUrl: productUrl || optionalString(detail.productUrl) || `https://detail.1688.com/offer/${offerId}.html`,
+    detail: {
+      ...detail,
+      externalOfferId: optionalString(detail.externalOfferId) || offerId,
+      productUrl: optionalString(detail.productUrl) || productUrl || `https://detail.1688.com/offer/${offerId}.html`,
+      usedFallbackDetail,
+      usedAlphaShopProductDetail,
+      raw: undefined,
+    },
+    rawResponse,
+  };
+}
+
+function bind1688CandidateSpecAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 spec binding");
+  const candidateId = requireString(payload.candidateId || payload.id, "candidateId");
+  const candidate = db.prepare("SELECT * FROM erp_sourcing_candidates WHERE id = ?").get(candidateId);
+  if (!candidate) throw new Error(`Sourcing candidate not found: ${candidateId}`);
+  const pr = getPurchaseRequest(db, candidate.pr_id);
+  const skuOptions = parseJsonArray(candidate.external_sku_options_json);
+  const externalSpecId = require1688SpecId(
+    payload.externalSpecId || payload.external_spec_id,
+    "1688 spec binding",
+  );
+  const selectedSku = skuOptions.find((sku) => (
+    String(sku.externalSpecId || sku.external_spec_id || sku.specId || sku.spec_id || "") === externalSpecId
+  )) || {};
+  const externalSkuId = optionalString(
+    payload.externalSkuId
+      || payload.external_sku_id
+      || selectedSku.externalSkuId
+      || selectedSku.external_sku_id
+      || selectedSku.skuId
+      || selectedSku.sku_id
+      || candidate.external_sku_id,
+  ) || externalSpecId;
+  const unitPrice = optionalNumber(payload.unitPrice ?? payload.unit_price)
+    ?? optionalNumber(selectedSku.price)
+    ?? optionalNumber(candidate.unit_price)
+    ?? 0;
+  const ourQty = optionalPositiveInteger(payload.ourQty ?? payload.our_qty, 1);
+  const platformQty = optionalPositiveInteger(payload.platformQty ?? payload.platform_qty, 1);
+  const now = nowIso();
+
+  db.prepare(`
+    UPDATE erp_sourcing_candidates
+    SET external_sku_id = @external_sku_id,
+        external_spec_id = @external_spec_id,
+        unit_price = @unit_price,
+        updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id: candidate.id,
+    external_sku_id: externalSkuId,
+    external_spec_id: externalSpecId,
+    unit_price: unitPrice,
+    updated_at: now,
+  });
+
+  const afterCandidate = db.prepare("SELECT * FROM erp_sourcing_candidates WHERE id = ?").get(candidate.id);
+  const sku1688Source = upsertSku1688SourceFromCandidate(
+    db,
+    afterCandidate,
+    pr,
+    actor,
+    {
+      isDefault: true,
+      ourQty,
+      platformQty,
+      platformSkuName: selectedSku.specText || selectedSku.spec_text || externalSpecId,
+      remark: `本地 ${ourQty} 件 = 1688 ${platformQty} 件`,
+    },
+  );
+  services.workflow.writeAudit({
+    accountId: candidate.account_id,
+    actor,
+    action: "bind_1688_candidate_spec",
+    entityType: "sourcing_candidate",
+    entityId: candidate.id,
+    before: candidate,
+    after: afterCandidate,
+  });
+  writePurchaseRequestEvent(
+    db,
+    pr,
+    actor,
+    "bind_1688_candidate_spec",
+    `1688 spec bound: ${candidate.external_offer_id || ""}/${externalSpecId}`,
+  );
+  markPurchaseRequestRead(db, candidate.pr_id, actor);
+
+  const resultCandidate = toCamelRow(afterCandidate);
+  resultCandidate.externalSkuOptions = skuOptions;
+  resultCandidate.externalPriceRanges = parseJsonArray(afterCandidate.external_price_ranges_json);
+  return {
+    candidate: resultCandidate,
+    selectedSpec: {
+      externalSkuId,
+      externalSpecId,
+      unitPrice,
+      specText: selectedSku.specText || selectedSku.spec_text || null,
+      ourQty,
+      platformQty,
+    },
+    sku1688Source,
   };
 }
 
@@ -6420,13 +6951,22 @@ function ensureDefault1688DeliveryAddresses(db, { companyId, actor = {}, wait = 
   return wait ? promise : null;
 }
 
-function getCandidateForPo(db, pr, candidateId, actor = {}) {
+function getSku1688SourceCandidateForPo(db, pr, actor = {}) {
+  const source = getActiveSku1688SourceRows(db, pr.account_id, pr.sku_id)[0];
+  return source ? buildCandidateFromSku1688Source(db, pr, source, actor) : null;
+}
+
+function getCandidateForPo(db, pr, candidateId, actor = {}, options = {}) {
   const prId = pr.id || pr;
   if (candidateId) {
     const row = db.prepare("SELECT * FROM erp_sourcing_candidates WHERE id = ?").get(candidateId);
     if (!row) throw new Error(`Sourcing candidate not found: ${candidateId}`);
     if (row.pr_id !== prId) throw new Error("Sourcing candidate does not belong to this request");
     return row;
+  }
+  if (options.preferSku1688Source) {
+    const sourceCandidate = getSku1688SourceCandidateForPo(db, pr, actor);
+    if (sourceCandidate) return sourceCandidate;
   }
   const row = db.prepare(`
     SELECT *
@@ -6439,8 +6979,8 @@ function getCandidateForPo(db, pr, candidateId, actor = {}) {
   `).get(prId);
   if (row) return row;
 
-  const source = getActiveSku1688SourceRows(db, pr.account_id, pr.sku_id)[0];
-  if (source) return buildCandidateFromSku1688Source(db, pr, source, actor);
+  const sourceCandidate = getSku1688SourceCandidateForPo(db, pr, actor);
+  if (sourceCandidate) return sourceCandidate;
 
   const skuSupplier = getSkuSupplierSource(db, pr.sku_id);
   const supplierCandidate = buildCandidateFromSkuSupplier(db, pr, skuSupplier, actor);
@@ -6481,10 +7021,142 @@ function applySelected1688SpecToCandidate(candidate = {}, payload = {}) {
   };
 }
 
-function buildPurchaseOrderNo() {
-  const date = new Date();
-  const stamp = `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, "0")}${String(date.getDate()).padStart(2, "0")}`;
-  return `PO-${stamp}-${createId("").replace(/^_?/, "").slice(-8).toUpperCase()}`;
+function isSixDigitPurchaseOrderNo(value) {
+  return /^\d{6}$/.test(String(value || "").trim());
+}
+
+function normalizePurchaseOrderNumbers(db) {
+  if (!db?.prepare) return { updated: 0 };
+  const rows = db.prepare(`
+    SELECT id, po_no
+    FROM erp_purchase_orders
+    ORDER BY COALESCE(created_at, ''), id
+  `).all();
+  const reserved = new Set();
+  const pending = [];
+  for (const row of rows) {
+    const poNo = optionalString(row.po_no);
+    if (isSixDigitPurchaseOrderNo(poNo) && !reserved.has(poNo)) {
+      reserved.add(poNo);
+    } else {
+      pending.push(row);
+    }
+  }
+  if (!pending.length) return { updated: 0 };
+  let nextSerial = 1;
+  const nextPoNo = () => {
+    while (reserved.has(String(nextSerial).padStart(6, "0"))) nextSerial += 1;
+    if (nextSerial > 999999) throw new Error("采购单号流水已超过 999999，请调整编号规则");
+    const poNo = String(nextSerial).padStart(6, "0");
+    reserved.add(poNo);
+    nextSerial += 1;
+    return poNo;
+  };
+  const update = db.prepare("UPDATE erp_purchase_orders SET po_no = @po_no WHERE id = @id");
+  const tx = db.transaction((items) => {
+    for (const row of items) update.run({ id: row.id, po_no: nextPoNo() });
+  });
+  tx(pending);
+  return { updated: pending.length };
+}
+
+function normalizePurchaseWorkbenchPoNumbers(workbench = {}) {
+  const purchaseOrders = Array.isArray(workbench.purchaseOrders) ? workbench.purchaseOrders : [];
+  if (!purchaseOrders.length) return workbench;
+  const reserved = new Set();
+  const pending = [];
+  const mappedById = new Map();
+  for (const row of purchaseOrders) {
+    const poNo = optionalString(row.poNo || row.po_no);
+    if (isSixDigitPurchaseOrderNo(poNo) && !reserved.has(poNo)) {
+      reserved.add(poNo);
+      mappedById.set(row.id, poNo);
+    } else {
+      pending.push(row);
+    }
+  }
+  let nextSerial = 1;
+  const nextPoNo = () => {
+    while (reserved.has(String(nextSerial).padStart(6, "0"))) nextSerial += 1;
+    const poNo = String(nextSerial).padStart(6, "0");
+    reserved.add(poNo);
+    nextSerial += 1;
+    return poNo;
+  };
+  pending
+    .slice()
+    .sort((left, right) => {
+      const leftDate = String(left.createdAt || left.created_at || left.updatedAt || left.updated_at || "");
+      const rightDate = String(right.createdAt || right.created_at || right.updatedAt || right.updated_at || "");
+      return leftDate.localeCompare(rightDate) || String(left.id || "").localeCompare(String(right.id || ""));
+    })
+    .forEach((row) => mappedById.set(row.id, nextPoNo()));
+
+  const nextOrders = purchaseOrders.map((row) => {
+    const poNo = mappedById.get(row.id);
+    if (!poNo) return row;
+    return {
+      ...row,
+      originalPoNo: row.originalPoNo || row.poNo || row.po_no || null,
+      poNo,
+      po_no: row.po_no !== undefined ? poNo : row.po_no,
+    };
+  });
+  const nextPaymentQueue = Array.isArray(workbench.paymentQueue)
+    ? workbench.paymentQueue.map((row) => {
+      const poNo = mappedById.get(row.poId || row.po_id);
+      return poNo ? { ...row, originalPoNo: row.originalPoNo || row.poNo || row.po_no || null, poNo, po_no: row.po_no !== undefined ? poNo : row.po_no } : row;
+    })
+    : workbench.paymentQueue;
+  return {
+    ...workbench,
+    purchaseOrders: nextOrders,
+    paymentQueue: nextPaymentQueue,
+  };
+}
+
+function normalizePurchaseResultPoNumbers(result = {}) {
+  if (!result || typeof result !== "object") return result;
+  const workbench = result.workbench ? normalizePurchaseWorkbenchPoNumbers(result.workbench) : null;
+  if (!workbench) return result;
+  const purchaseOrder = result.purchaseOrder?.id
+    ? workbench.purchaseOrders.find((row) => row.id === result.purchaseOrder.id) || result.purchaseOrder
+    : result.purchaseOrder;
+  return {
+    ...result,
+    workbench,
+    purchaseOrder,
+  };
+}
+
+function getNextClientPurchaseOrderNo(workbench = {}) {
+  const normalized = normalizePurchaseWorkbenchPoNumbers(workbench);
+  const maxNo = (normalized.purchaseOrders || [])
+    .map((row) => optionalString(row.poNo || row.po_no))
+    .filter(isSixDigitPurchaseOrderNo)
+    .reduce((max, value) => Math.max(max, Number(value)), 0);
+  const next = maxNo + 1;
+  if (next > 999999) throw new Error("采购单号流水已超过 999999，请调整编号规则");
+  return String(next).padStart(6, "0");
+}
+
+function buildPurchaseOrderNo(db) {
+  let nextSerial = 1;
+  if (db?.prepare) {
+    const rows = db.prepare(`
+      SELECT po_no
+      FROM erp_purchase_orders
+      WHERE length(po_no) = 6
+        AND po_no GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]'
+    `).all();
+    for (const row of rows) {
+      const poNo = optionalString(row.po_no);
+      if (!poNo) continue;
+      nextSerial = Math.max(nextSerial, Number(poNo) + 1);
+    }
+  }
+  if (nextSerial > 999999) throw new Error("采购单号流水已超过 999999，请调整编号规则");
+  return String(nextSerial).padStart(6, "0");
 }
 
 function resolveExpectedDeliveryDate(candidate, payload = {}) {
@@ -6502,7 +7174,9 @@ function generatePurchaseOrderAction({ db, services, payload, actor }) {
   const prId = requireString(payload.prId || payload.id, "prId");
   let pr = getPurchaseRequest(db, prId);
   const candidate = applySelected1688SpecToCandidate(
-    getCandidateForPo(db, pr, optionalString(payload.candidateId), actor),
+    getCandidateForPo(db, pr, optionalString(payload.candidateId), actor, {
+      preferSku1688Source: Boolean(payload.preferSku1688Source || payload.preferSku1688Mapping || payload.useSku1688Source),
+    }),
     payload,
   );
 
@@ -6541,7 +7215,7 @@ function generatePurchaseOrderAction({ db, services, payload, actor }) {
     pr_id: pr.id,
     selected_candidate_id: candidate.id,
     supplier_id: candidate.supplier_id || null,
-    po_no: optionalString(payload.poNo) || buildPurchaseOrderNo(),
+    po_no: optionalString(payload.poNo) || buildPurchaseOrderNo(db),
     status: "draft",
     payment_status: "unpaid",
     expected_delivery_date: resolveExpectedDeliveryDate(candidate, payload),
@@ -6589,9 +7263,13 @@ function generatePurchaseOrderAction({ db, services, payload, actor }) {
   `).run(line);
 
   const hasSelected1688Spec = Boolean(optionalString(candidate.external_spec_id || candidate.externalSpecId));
-  const sku1688Source = hasSelected1688Spec
+  const selected1688Source = hasSelected1688Spec
     ? upsertSku1688SourceFromCandidate(db, candidate, pr, actor, { isDefault: true })
     : null;
+  const existing1688SourceRow = selected1688Source
+    ? null
+    : getActiveSku1688SourceRows(db, pr.account_id, pr.sku_id)[0];
+  const sku1688Source = selected1688Source || (existing1688SourceRow ? toSku1688Source(existing1688SourceRow) : null);
   const afterPo = getPurchaseOrder(db, po.id);
   services.workflow.writeAudit({
     accountId: po.account_id,
@@ -6708,20 +7386,209 @@ function isLikely1688NumericSkuId(value) {
 function parse1688WebSkuOptions(html = "") {
   const options = [];
   const seen = new Set();
-  const pattern = /"specId":"([^"]+)"[^}]*?"specAttrs":"([^"]*)"[^}]*?"skuId":(\d+)/g;
-  for (const match of String(html || "").matchAll(pattern)) {
-    const option = {
+  const addOption = (option = {}) => {
+    const specId = optionalString(option.specId);
+    const skuId = optionalString(option.skuId);
+    if (!specId || !skuId) return;
+    const next = {
+      specId,
+      specAttrs: optionalString(option.specAttrs) || "",
+      skuId,
+    };
+    const key = `${next.skuId}:${next.specId}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      options.push(next);
+    }
+  };
+  const text = String(html || "").replace(/\\"/g, "\"");
+  const pattern = /"specId"\s*:\s*"?([^",}]+)"?[^{}]*?"specAttrs"\s*:\s*"([^"]*)"[^{}]*?"skuId"\s*:\s*"?(\d+)"?/g;
+  for (const match of text.matchAll(pattern)) {
+    addOption({
       specId: match[1],
       specAttrs: match[2],
       skuId: match[3],
-    };
-    const key = `${option.skuId}:${option.specId}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      options.push(option);
-    }
+    });
+  }
+  const looseObjectPattern = /\{[^{}]*(?:"specId"\s*:\s*"?([^",}]+)"?[^{}]*"skuId"\s*:\s*"?(\d+)"?|"skuId"\s*:\s*"?(\d+)"?[^{}]*"specId"\s*:\s*"?([^",}]+)"?)[^{}]*\}/g;
+  for (const match of text.matchAll(looseObjectPattern)) {
+    const objectText = match[0] || "";
+    const attrsMatch = objectText.match(/"specAttrs"\s*:\s*"([^"]*)"/);
+    addOption({
+      specId: match[1] || match[4],
+      skuId: match[2] || match[3],
+      specAttrs: attrsMatch?.[1] || "",
+    });
   }
   return options;
+}
+
+function normalize1688SkuMatchOption(option = {}) {
+  if (!option || typeof option !== "object") return null;
+  const skuId = optionalString(
+    option.skuId
+      || option.skuID
+      || option.sku_id
+      || option.externalSkuId
+      || option.external_sku_id,
+  );
+  const specId = optionalString(
+    option.specId
+      || option.specID
+      || option.spec_id
+      || option.cargoSkuId
+      || option.cargoSkuID
+      || option.cargo_sku_id
+      || option.externalSpecId
+      || option.external_spec_id,
+  ) || skuId;
+  if (!skuId && !specId) return null;
+  return {
+    skuId: skuId || specId,
+    specId,
+    specAttrs: optionalString(
+      option.specAttrs
+        || option.spec_attrs
+        || option.specText
+        || option.spec_text
+        || option.platformSkuName
+        || option.platform_sku_name,
+    ),
+  };
+}
+
+function add1688SkuMatchOption(options, seen, option = {}, source = "cached_product_detail") {
+  const normalized = normalize1688SkuMatchOption(option);
+  if (!normalized?.specId) return;
+  const key = `${normalized.skuId || ""}:${normalized.specId || ""}`;
+  if (seen.has(key)) return;
+  seen.add(key);
+  options.push({ ...normalized, source });
+}
+
+function collect1688SkuMatchOptions(value, options = [], seen = new Set(), depth = 0) {
+  if (!value || depth > 5) return options;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      add1688SkuMatchOption(options, seen, item, "cached_sku_options");
+      collect1688SkuMatchOptions(item, options, seen, depth + 1);
+    }
+    return options;
+  }
+  if (typeof value !== "object") return options;
+
+  add1688SkuMatchOption(options, seen, value, "cached_sku_option");
+  try {
+    const detail = normalize1688ProductDetailResponse(value);
+    for (const sku of detail.skuOptions || []) {
+      add1688SkuMatchOption(options, seen, sku, "cached_product_detail");
+    }
+  } catch {}
+
+  for (const key of ["skuOptions", "sku_infos", "skuInfos", "skuInfo", "skuList", "skus"]) {
+    collect1688SkuMatchOptions(value[key], options, seen, depth + 1);
+  }
+  for (const key of [
+    "detail",
+    "productDetail",
+    "productDetailForMix",
+    "purchasedProductSimple",
+    "rawAlphaShopResponse",
+    "result",
+    "data",
+    "productInfo",
+  ]) {
+    collect1688SkuMatchOptions(value[key], options, seen, depth + 1);
+  }
+  return options;
+}
+
+function findCached1688SkuMatch(mapping = {}, skuId, specId) {
+  const sourcePayload = parseJsonObject(mapping.source_payload_json || mapping.sourcePayload);
+  const options = collect1688SkuMatchOptions(sourcePayload);
+  const resolved = sourcePayload.resolved1688Sku;
+  if (resolved && typeof resolved === "object") {
+    add1688SkuMatchOption(options, new Set(options.map((item) => `${item.skuId || ""}:${item.specId || ""}`)), resolved, "resolved_1688_sku");
+  }
+  return find1688WebSkuMatch(options, skuId, specId);
+}
+
+function updateResolved1688SkuMapping(db, mapping = {}, resolved = {}) {
+  const now = nowIso();
+  const sourcePayload = parseJsonObject(mapping.source_payload_json);
+  sourcePayload.resolved1688Sku = {
+    offerId: optionalString(resolved.offerId),
+    skuId: optionalString(resolved.skuId),
+    specId: optionalString(resolved.specId),
+    specAttrs: optionalString(resolved.specAttrs),
+    resolvedAt: now,
+    source: optionalString(resolved.source) || "1688_web_detail",
+    webMatch: resolved.webMatch !== false,
+  };
+  if (mapping.id) {
+    db.prepare(`
+      UPDATE erp_sku_1688_sources
+      SET external_sku_id = COALESCE(@external_sku_id, external_sku_id),
+          external_spec_id = COALESCE(@external_spec_id, external_spec_id),
+          platform_sku_name = COALESCE(@platform_sku_name, platform_sku_name),
+          source_payload_json = @source_payload_json,
+          updated_at = @updated_at
+      WHERE id = @id
+    `).run({
+      id: mapping.id,
+      external_sku_id: optionalString(resolved.skuId),
+      external_spec_id: optionalString(resolved.specId),
+      platform_sku_name: optionalString(resolved.specAttrs || resolved.specId),
+      source_payload_json: trimJsonForStorage(sourcePayload),
+      updated_at: now,
+    });
+  }
+  mapping.external_sku_id = optionalString(resolved.skuId) || mapping.external_sku_id;
+  mapping.external_spec_id = optionalString(resolved.specId) || mapping.external_spec_id;
+  mapping.platform_sku_name = optionalString(resolved.specAttrs) || mapping.platform_sku_name;
+  mapping.source_payload_json = trimJsonForStorage(sourcePayload);
+}
+
+function find1688WebSkuMatch(options = [], skuId, specId) {
+  const normalizedSkuId = optionalString(skuId);
+  const normalizedSpecId = optionalString(specId);
+  return options.find((option) => normalizedSpecId && String(option.specId) === normalizedSpecId)
+    || options.find((option) => normalizedSkuId && String(option.skuId) === normalizedSkuId)
+    || null;
+}
+
+function preserveSelected1688Spec(db, mapping = {}, offerId, reason = "web_detail_not_matched") {
+  const specId = optionalString(mapping.external_spec_id || mapping.externalSpecId);
+  if (!specId) return null;
+  updateResolved1688SkuMapping(db, mapping, {
+    offerId,
+    skuId: optionalString(mapping.external_sku_id || mapping.externalSkuId),
+    specId,
+    specAttrs: optionalString(mapping.platform_sku_name || mapping.platformSkuName) || specId,
+    source: reason,
+    webMatch: false,
+  });
+  return { specId };
+}
+
+function fallback1688SkuIdAsSpecId(db, mapping = {}, offerId, skuId, reason = "selected_sku_id_as_spec_id") {
+  const normalizedSkuId = optionalString(skuId);
+  if (!normalizedSkuId) return null;
+  const specAttrs = optionalString(mapping.platform_sku_name || mapping.platformSkuName) || normalizedSkuId;
+  updateResolved1688SkuMapping(db, mapping, {
+    offerId,
+    skuId: normalizedSkuId,
+    specId: normalizedSkuId,
+    specAttrs,
+    source: reason,
+    webMatch: false,
+  });
+  return {
+    skuId: normalizedSkuId,
+    specId: normalizedSkuId,
+    specAttrs,
+    source: reason,
+  };
 }
 
 async function fetch1688WebSkuOptions(offerId) {
@@ -6748,45 +7615,43 @@ async function resolve1688NumericSkuMapping(db, mapping = {}) {
   const offerId = optionalString(mapping.external_offer_id || mapping.externalOfferId);
   const skuId = optionalString(mapping.external_sku_id || mapping.externalSkuId);
   const specId = optionalString(mapping.external_spec_id || mapping.externalSpecId);
-  const lookupSkuId = isLikely1688NumericSkuId(skuId) ? skuId : (isLikely1688NumericSkuId(specId) ? specId : null);
-  if (!offerId || !lookupSkuId || (specId && !isLikely1688NumericSkuId(specId))) return null;
-  const skuOptions = await fetch1688WebSkuOptions(offerId);
-  const matched = skuOptions.find((option) => String(option.skuId) === lookupSkuId);
-  if (!matched?.specId) {
-    throw new Error(`1688 商品 ${offerId} 的规格 ${lookupSkuId} 未匹配到可下单 specId，请重新选择规格`);
-  }
-  const now = nowIso();
-  const sourcePayload = parseJsonObject(mapping.source_payload_json);
-  sourcePayload.resolved1688Sku = {
-    offerId,
-    skuId: lookupSkuId,
-    specId: matched.specId,
-    specAttrs: matched.specAttrs,
-    resolvedAt: now,
-    source: "1688_web_detail",
-  };
-  if (mapping.id) {
-    db.prepare(`
-      UPDATE erp_sku_1688_sources
-      SET external_sku_id = @external_sku_id,
-          external_spec_id = @external_spec_id,
-          platform_sku_name = COALESCE(@platform_sku_name, platform_sku_name),
-          source_payload_json = @source_payload_json,
-          updated_at = @updated_at
-      WHERE id = @id
-    `).run({
-      id: mapping.id,
-      external_sku_id: lookupSkuId,
-      external_spec_id: matched.specId,
-      platform_sku_name: matched.specAttrs || matched.specId,
-      source_payload_json: trimJsonForStorage(sourcePayload),
-      updated_at: now,
+  const lookupSkuId = isLikely1688NumericSkuId(skuId) ? skuId : null;
+  if (!offerId || (!lookupSkuId && !specId)) return null;
+  const cachedMatch = findCached1688SkuMatch(mapping, lookupSkuId, specId);
+  if (cachedMatch?.specId) {
+    updateResolved1688SkuMapping(db, mapping, {
+      offerId,
+      skuId: cachedMatch.skuId || lookupSkuId || skuId,
+      specId: cachedMatch.specId,
+      specAttrs: cachedMatch.specAttrs || specId || cachedMatch.specId,
+      source: cachedMatch.source || "cached_product_detail",
+      webMatch: false,
     });
+    return cachedMatch;
   }
-  mapping.external_sku_id = lookupSkuId;
-  mapping.external_spec_id = matched.specId;
-  mapping.platform_sku_name = matched.specAttrs || mapping.platform_sku_name;
-  mapping.source_payload_json = trimJsonForStorage(sourcePayload);
+  let skuOptions = [];
+  try {
+    skuOptions = await fetch1688WebSkuOptions(offerId);
+  } catch (error) {
+    return preserveSelected1688Spec(db, mapping, offerId, "selected_spec_web_lookup_failed")
+      || fallback1688SkuIdAsSpecId(db, mapping, offerId, lookupSkuId, "selected_sku_web_lookup_failed");
+  }
+  const matched = find1688WebSkuMatch(skuOptions, lookupSkuId, specId);
+  if (!matched?.specId) {
+    const preserved = preserveSelected1688Spec(db, mapping, offerId, "selected_spec_not_in_web_detail");
+    if (preserved) return preserved;
+    const fallback = fallback1688SkuIdAsSpecId(db, mapping, offerId, lookupSkuId, "selected_sku_not_in_web_detail");
+    if (fallback) return fallback;
+    throw new Error(`1688 商品 ${offerId} 的规格 ${lookupSkuId || specId} 未匹配到可下单 specId，请重新选择规格`);
+  }
+  updateResolved1688SkuMapping(db, mapping, {
+    offerId,
+    skuId: matched.skuId || lookupSkuId || skuId,
+    specId: matched.specId,
+    specAttrs: matched.specAttrs || specId,
+    source: "1688_web_detail",
+    webMatch: true,
+  });
   return matched;
 }
 
@@ -6839,26 +7704,46 @@ function build1688FastCreateOrderParams(po, lines, payload = {}) {
   return params;
 }
 
+function pick1688PreviewMoney(nested = {}, keys = []) {
+  for (const key of keys) {
+    const rawValue = nested[key];
+    const number = optionalNumber(rawValue);
+    if (number === null) continue;
+    return /cent|fen/i.test(key) ? number / 100 : number;
+  }
+  return null;
+}
+
 function normalize1688OrderPreviewResponse(rawResponse = {}) {
   const result = rawResponse.result && typeof rawResponse.result === "object" ? rawResponse.result : rawResponse;
   const previewRow = Array.isArray(result.orderPreviewResuslt) ? result.orderPreviewResuslt[0] : null;
   const nested = previewRow || result.toReturn || result.data || result.preview || result;
-  let amount = optionalNumber(
-    nested.totalAmount
-    || nested.totalPrice
-    || nested.sumPayment
-    || nested.orderAmount
-    || nested.actualPayFee,
-  );
-  let freight = optionalNumber(
-    nested.freight
-    || nested.shippingFee
-    || nested.postFee
-    || nested.sumCarriage
-    || nested.carriage,
-  );
-  if (amount !== null && amount >= 100 && Number.isInteger(amount)) amount /= 100;
-  if (freight !== null && freight >= 100 && Number.isInteger(freight)) freight /= 100;
+  const amount = pick1688PreviewMoney(nested, [
+    "totalAmount",
+    "totalPrice",
+    "sumPayment",
+    "orderAmount",
+    "actualPayFee",
+    "totalAmountCent",
+    "totalPriceCent",
+    "sumPaymentCent",
+    "orderAmountCent",
+    "actualPayFeeCent",
+    "totalAmountFen",
+  ]);
+  const freight = pick1688PreviewMoney(nested, [
+    "freight",
+    "shippingFee",
+    "postFee",
+    "sumCarriage",
+    "carriage",
+    "freightCent",
+    "shippingFeeCent",
+    "postFeeCent",
+    "sumCarriageCent",
+    "carriageCent",
+    "freightFen",
+  ]);
   return {
     totalAmount: amount,
     freight,
@@ -6887,7 +7772,7 @@ function findExternalOrderId(value, depth = 0) {
   return null;
 }
 
-function validate1688OrderPushAction({ db, payload, actor }) {
+async function validate1688OrderPushAction({ db, payload, actor }) {
   assertActorRole(actor, ["buyer", "manager", "admin"], "1688 order push validation");
   const poId = requireString(payload.poId || payload.id, "poId");
   const po = getPurchaseOrderWithCandidate(db, poId);
@@ -6901,6 +7786,7 @@ function validate1688OrderPushAction({ db, payload, actor }) {
   }
   const lines = getPurchaseOrderLines(db, poId);
   if (!lines.length) throw new Error(`Purchase order has no lines: ${poId}`);
+  await resolve1688OrderLineMappings(db, lines);
   const addressParam = resolve1688AddressParam(db, payload, actor, po);
   const cargoParamList = build1688OrderCargoParamList(po, lines, payload);
   if (!cargoParamList.length) {
@@ -7444,7 +8330,7 @@ function build1688MarketingMixConfigParams(payload = {}, source = {}) {
   const sellerMemberId = optionalString(identity.sellerMemberId);
   const sellerLoginId = optionalString(identity.sellerLoginId);
   if (!sellerMemberId && !sellerLoginId) {
-    throw new Error("这个供应商缺少 1688 memberId/旺旺登录名，无法查询混批；请先同步商品详情或补充旺旺/memberId。");
+    throw new Error("这个供应商缺少 1688 memberId/旺旺登录名，无法识别起批规则；请先同步商品详情或补充旺旺/memberId。");
   }
   return {
     ...(sellerMemberId ? { sellerMemberId } : {}),
@@ -7492,12 +8378,83 @@ async function fetch1688SellerIdentityFromProductDetail({ db, payload, actor, so
   return { sellerIdentity, rawResponse, detail, query };
 }
 
-function updateSku1688SourceMixConfig(db, sourceId, mixConfig) {
+function normalized1688SellerIdentity(identity = {}) {
+  return {
+    sellerMemberId: optionalString(identity.sellerMemberId || identity.seller_member_id || identity.memberId || identity.member_id),
+    sellerLoginId: optionalString(identity.sellerLoginId || identity.seller_login_id || identity.loginId || identity.login_id),
+  };
+}
+
+function normalizedSupplierName(value) {
+  return optionalString(value).toLowerCase();
+}
+
+function getSourceMarketingMixCache(source = {}) {
+  const sourcePayload = parseJsonObject(source.source_payload_json ?? source.sourcePayloadJson ?? source.sourcePayload);
+  const mixConfig = sourcePayload.marketingMixConfig;
+  if (!mixConfig || typeof mixConfig !== "object" || Array.isArray(mixConfig)) return null;
+  return {
+    mixConfig,
+    sellerIdentity: normalized1688SellerIdentity(sourcePayload.marketingMixSellerIdentity || extract1688SellerIdentity({}, source)),
+    syncedAt: optionalString(sourcePayload.marketingMixSyncedAt),
+    rawResponse: sourcePayload.marketingMixRawResponse || null,
+    sourcePayload,
+  };
+}
+
+function sourceMatches1688Seller(source = {}, sellerIdentity = {}, supplierName = "") {
+  const targetIdentity = normalized1688SellerIdentity(sellerIdentity);
+  const sourceIdentity = normalized1688SellerIdentity(extract1688SellerIdentity({}, source));
+  if (targetIdentity.sellerMemberId && sourceIdentity.sellerMemberId === targetIdentity.sellerMemberId) return true;
+  if (
+    targetIdentity.sellerLoginId
+    && sourceIdentity.sellerLoginId
+    && sourceIdentity.sellerLoginId.toLowerCase() === targetIdentity.sellerLoginId.toLowerCase()
+  ) return true;
+  const targetSupplierName = normalizedSupplierName(supplierName);
+  return Boolean(targetSupplierName && normalizedSupplierName(source.supplier_name) === targetSupplierName);
+}
+
+function findCached1688MixConfig(db, source = {}, sellerIdentity = {}) {
+  const supplierName = optionalString(source.supplier_name);
+  const rows = db.prepare(`
+    SELECT *
+    FROM erp_sku_1688_sources
+    WHERE status != 'deleted'
+    ORDER BY updated_at DESC, created_at DESC
+  `).all();
+  for (const row of rows) {
+    const cache = getSourceMarketingMixCache(row);
+    if (!cache) continue;
+    const cacheIdentity = has1688SellerIdentity(cache.sellerIdentity) ? cache.sellerIdentity : extract1688SellerIdentity({}, row);
+    if (sourceMatches1688Seller(row, sellerIdentity, supplierName) || sourceMatches1688Seller(source, cacheIdentity, row.supplier_name)) {
+      return { ...cache, source: row };
+    }
+  }
+  return null;
+}
+
+function updateSku1688SourceMixConfig(db, sourceId, mixConfig, options = {}) {
   if (!sourceId) return null;
   const source = db.prepare("SELECT * FROM erp_sku_1688_sources WHERE id = ?").get(sourceId);
   if (!source) return null;
   const sourcePayload = parseJsonObject(source.source_payload_json);
   const now = nowIso();
+  const sellerIdentity = normalized1688SellerIdentity(options.sellerIdentity || extract1688SellerIdentity({}, source));
+  const patch = {
+    ...sourcePayload,
+    marketingMixConfig: mixConfig,
+    marketingMixSyncedAt: optionalString(options.syncedAt) || now,
+    marketingMixSellerIdentity: sellerIdentity,
+    marketingMixCacheSource: optionalString(options.cacheSource) || "api",
+  };
+  if (options.auto) {
+    patch.marketingMixAutoAttemptedAt = optionalString(options.autoAttemptedAt) || now;
+    patch.marketingMixAutoStatus = "success";
+    patch.marketingMixAutoError = null;
+  }
+  if (options.cachedFromSourceId) patch.marketingMixCachedFromSourceId = options.cachedFromSourceId;
+  if (options.rawResponse) patch.marketingMixRawResponse = options.rawResponse;
   db.prepare(`
     UPDATE erp_sku_1688_sources
     SET source_payload_json = @source_payload_json,
@@ -7505,14 +8462,62 @@ function updateSku1688SourceMixConfig(db, sourceId, mixConfig) {
     WHERE id = @id
   `).run({
     id: source.id,
-    source_payload_json: trimJsonForStorage({
-      ...sourcePayload,
-      marketingMixConfig: mixConfig,
-      marketingMixSyncedAt: now,
-    }),
+    source_payload_json: trimJsonForStorage(patch),
     updated_at: now,
   });
   return toSku1688Source(db.prepare("SELECT * FROM erp_sku_1688_sources WHERE id = ?").get(source.id));
+}
+
+function updateSku1688SourceMixAutoState(db, sourceId, state = {}) {
+  if (!sourceId) return null;
+  return patchSku1688SourcePayload(db, sourceId, {
+    marketingMixAutoAttemptedAt: optionalString(state.at) || nowIso(),
+    marketingMixAutoStatus: optionalString(state.status),
+    marketingMixAutoError: optionalString(state.error),
+  });
+}
+
+function sync1688SupplierMixAutoState(db, source = {}, sellerIdentity = {}, state = {}) {
+  const supplierName = optionalString(source.supplier_name);
+  const rows = db.prepare(`
+    SELECT *
+    FROM erp_sku_1688_sources
+    WHERE status != 'deleted'
+    ORDER BY updated_at DESC, created_at DESC
+  `).all();
+  const targetRows = rows.filter((row) => sourceMatches1688Seller(row, sellerIdentity, supplierName));
+  const targets = targetRows.length ? targetRows : (source?.id ? [source] : []);
+  const updated = [];
+  for (const target of targets) {
+    const next = updateSku1688SourceMixAutoState(db, target.id, state);
+    if (next) updated.push(next);
+  }
+  return updated;
+}
+
+function sync1688SupplierMixConfig(db, source = {}, sellerIdentity = {}, mixConfig = {}, options = {}) {
+  const supplierName = optionalString(source.supplier_name);
+  const rows = db.prepare(`
+    SELECT *
+    FROM erp_sku_1688_sources
+    WHERE status != 'deleted'
+    ORDER BY updated_at DESC, created_at DESC
+  `).all();
+  const targetRows = rows.filter((row) => sourceMatches1688Seller(row, sellerIdentity, supplierName));
+  const targets = targetRows.length ? targetRows : (source?.id ? [source] : []);
+  const updated = [];
+  for (const target of targets) {
+    const next = updateSku1688SourceMixConfig(db, target.id, mixConfig, {
+      ...options,
+      sellerIdentity,
+    });
+    if (next) updated.push(next);
+  }
+  return {
+    updatedCount: updated.length,
+    updatedSourceIds: updated.map((row) => row.id),
+    updatedSource: source?.id ? updated.find((row) => row.id === source.id) || null : null,
+  };
 }
 
 async function query1688MixConfigAction({ db, payload, actor }) {
@@ -7523,11 +8528,68 @@ async function query1688MixConfigAction({ db, payload, actor }) {
     : null;
   if (sourceId && !source) throw new Error(`1688 supplier mapping not found: ${sourceId}`);
 
+  const forceRefresh = Boolean(payload.forceRefresh || payload.force_refresh);
   let sellerIdentity = extract1688SellerIdentity(payload, source || {});
   let productDetailLookup = null;
+  if (!forceRefresh && source) {
+    const cached = findCached1688MixConfig(db, source, sellerIdentity);
+    if (cached) {
+      const cachedIdentity = has1688SellerIdentity(cached.sellerIdentity)
+        ? cached.sellerIdentity
+        : extract1688SellerIdentity({}, cached.source);
+      const syncResult = sync1688SupplierMixConfig(db, source, cachedIdentity, cached.mixConfig, {
+        syncedAt: cached.syncedAt,
+        cacheSource: "cache",
+        cachedFromSourceId: cached.source.id,
+        auto: Boolean(payload.autoMix || payload.auto_mix),
+        autoAttemptedAt: payload.autoAttemptedAt || payload.auto_attempted_at,
+      });
+      return {
+        apiKey: PROCUREMENT_APIS.MARKETING_MIX_CONFIG.key,
+        query: has1688SellerIdentity(cachedIdentity)
+          ? build1688MarketingMixConfigParams({ ...payload, sellerIdentity: cachedIdentity }, source || {})
+          : { sellerName: optionalString(source.supplier_name) },
+        mixConfig: cached.mixConfig,
+        sku1688Source: syncResult.updatedSource || (sourceId ? toSku1688Source(db.prepare("SELECT * FROM erp_sku_1688_sources WHERE id = ?").get(sourceId)) : null),
+        productDetailLookup,
+        rawResponse: cached.rawResponse,
+        cached: true,
+        cachedFromSourceId: cached.source.id,
+        updatedSourceCount: syncResult.updatedCount,
+      };
+    }
+  }
   if (!has1688SellerIdentity(sellerIdentity)) {
     productDetailLookup = await fetch1688SellerIdentityFromProductDetail({ db, payload, actor, source });
     sellerIdentity = productDetailLookup.sellerIdentity || sellerIdentity;
+  }
+  if (!forceRefresh && source) {
+    const cached = findCached1688MixConfig(db, source, sellerIdentity);
+    if (cached) {
+      const cachedIdentity = has1688SellerIdentity(cached.sellerIdentity)
+        ? cached.sellerIdentity
+        : sellerIdentity;
+      const syncResult = sync1688SupplierMixConfig(db, source, cachedIdentity, cached.mixConfig, {
+        syncedAt: cached.syncedAt,
+        cacheSource: "cache",
+        cachedFromSourceId: cached.source.id,
+        auto: Boolean(payload.autoMix || payload.auto_mix),
+        autoAttemptedAt: payload.autoAttemptedAt || payload.auto_attempted_at,
+      });
+      return {
+        apiKey: PROCUREMENT_APIS.MARKETING_MIX_CONFIG.key,
+        query: has1688SellerIdentity(cachedIdentity)
+          ? build1688MarketingMixConfigParams({ ...payload, sellerIdentity: cachedIdentity }, source || {})
+          : { sellerName: optionalString(source.supplier_name) },
+        mixConfig: cached.mixConfig,
+        sku1688Source: syncResult.updatedSource || (sourceId ? toSku1688Source(db.prepare("SELECT * FROM erp_sku_1688_sources WHERE id = ?").get(sourceId)) : null),
+        productDetailLookup,
+        rawResponse: cached.rawResponse,
+        cached: true,
+        cachedFromSourceId: cached.source.id,
+        updatedSourceCount: syncResult.updatedCount,
+      };
+    }
   }
   const apiParams = build1688MarketingMixConfigParams({ ...payload, sellerIdentity }, source || {});
   if (payload.dryRun) {
@@ -7548,15 +8610,84 @@ async function query1688MixConfigAction({ db, payload, actor }) {
     params: apiParams,
   });
   const mixConfig = normalize1688MarketingMixConfigResponse(rawResponse);
-  const updatedSource = sourceId ? updateSku1688SourceMixConfig(db, sourceId, mixConfig) : null;
+  const syncResult = source
+    ? sync1688SupplierMixConfig(db, source, sellerIdentity, mixConfig, {
+      rawResponse,
+      cacheSource: "api",
+      auto: Boolean(payload.autoMix || payload.auto_mix),
+      autoAttemptedAt: payload.autoAttemptedAt || payload.auto_attempted_at,
+    })
+    : { updatedSource: sourceId ? updateSku1688SourceMixConfig(db, sourceId, mixConfig, { sellerIdentity, rawResponse }) : null, updatedCount: sourceId ? 1 : 0 };
   return {
     apiKey: PROCUREMENT_APIS.MARKETING_MIX_CONFIG.key,
     query: apiParams,
     mixConfig,
-    sku1688Source: updatedSource,
+    sku1688Source: syncResult.updatedSource,
     productDetailLookup,
     rawResponse,
+    cached: false,
+    updatedSourceCount: syncResult.updatedCount,
   };
+}
+
+async function ensure1688MixConfigOnceAction({ db, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 seller mix config auto query");
+  const sourceId = requireString(payload.sourceId || payload.source_id || payload.id, "sourceId");
+  const source = db.prepare("SELECT * FROM erp_sku_1688_sources WHERE id = ?").get(sourceId);
+  if (!source) throw new Error(`1688 supplier mapping not found: ${sourceId}`);
+  const sourcePayload = parseJsonObject(source.source_payload_json);
+  if (sourcePayload.marketingMixConfig && typeof sourcePayload.marketingMixConfig === "object") {
+    return {
+      skipped: true,
+      reason: "cached",
+      mixConfig: sourcePayload.marketingMixConfig,
+      sku1688Source: toSku1688Source(source),
+    };
+  }
+  if (!payload.forceRefresh && !payload.force_refresh && sourcePayload.marketingMixAutoAttemptedAt) {
+    return {
+      skipped: true,
+      reason: sourcePayload.marketingMixAutoStatus || "attempted",
+      sku1688Source: toSku1688Source(source),
+    };
+  }
+
+  const attemptedAt = nowIso();
+  const sellerIdentity = extract1688SellerIdentity(payload, source);
+  sync1688SupplierMixAutoState(db, source, sellerIdentity, {
+    at: attemptedAt,
+    status: "running",
+    error: null,
+  });
+
+  try {
+    const result = await query1688MixConfigAction({
+      db,
+      payload: {
+        ...payload,
+        autoMix: true,
+        autoAttemptedAt: attemptedAt,
+      },
+      actor,
+    });
+    return {
+      ...result,
+      autoAttempted: true,
+    };
+  } catch (error) {
+    const errorMessage = String(error?.message || error);
+    sync1688SupplierMixAutoState(db, source, sellerIdentity, {
+      at: attemptedAt,
+      status: "failed",
+      error: errorMessage,
+    });
+    return {
+      ok: false,
+      autoAttempted: true,
+      error: errorMessage,
+      sku1688Source: toSku1688Source(db.prepare("SELECT * FROM erp_sku_1688_sources WHERE id = ?").get(sourceId)),
+    };
+  }
 }
 
 function compact1688Params(params = {}) {
@@ -7886,6 +9017,111 @@ async function sync1688PurchasedProductsAction({ db, payload, actor }) {
     purchasedProductSimpleRaw: rawResponse,
   }) : null;
   return { apiKey: PROCUREMENT_APIS.PRODUCT_SIMPLE_GET.key, query: params, product, sku1688Source: updatedSource, rawResponse };
+}
+
+function patch1688SourceAutoState(db, sourceId, prefix, state = {}) {
+  const attemptedAtKey = `${prefix}AutoAttemptedAt`;
+  const statusKey = `${prefix}AutoStatus`;
+  const errorKey = `${prefix}AutoError`;
+  return patchSku1688SourcePayload(db, sourceId, {
+    [attemptedAtKey]: optionalString(state.at) || nowIso(),
+    [statusKey]: optionalString(state.status),
+    [errorKey]: optionalString(state.error),
+  });
+}
+
+async function ensure1688SourcePayloadOnce({ db, payload, actor, source, dataKey, prefix, action }) {
+  const sourcePayload = parseJsonObject(source.source_payload_json);
+  if (sourcePayload[dataKey] && typeof sourcePayload[dataKey] === "object") {
+    return {
+      skipped: true,
+      reason: "cached",
+      sku1688Source: toSku1688Source(source),
+    };
+  }
+  if (!payload.forceRefresh && !payload.force_refresh && sourcePayload[`${prefix}AutoAttemptedAt`]) {
+    return {
+      skipped: true,
+      reason: sourcePayload[`${prefix}AutoStatus`] || "attempted",
+      sku1688Source: toSku1688Source(source),
+    };
+  }
+
+  const attemptedAt = nowIso();
+  patch1688SourceAutoState(db, source.id, prefix, {
+    at: attemptedAt,
+    status: "running",
+    error: null,
+  });
+
+  try {
+    const result = await action({
+      db,
+      payload: {
+        ...payload,
+        autoAttemptedAt: attemptedAt,
+      },
+      actor,
+    });
+    const updatedSource = patch1688SourceAutoState(db, source.id, prefix, {
+      at: attemptedAt,
+      status: "success",
+      error: null,
+    });
+    return {
+      skipped: false,
+      ok: true,
+      result,
+      sku1688Source: updatedSource,
+    };
+  } catch (error) {
+    const errorMessage = String(error?.message || error);
+    const updatedSource = patch1688SourceAutoState(db, source.id, prefix, {
+      at: attemptedAt,
+      status: "failed",
+      error: errorMessage,
+    });
+    return {
+      skipped: false,
+      ok: false,
+      error: errorMessage,
+      sku1688Source: updatedSource,
+    };
+  }
+}
+
+async function ensure1688SupplierProfileOnceAction({ db, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 supplier profile auto sync");
+  const sourceId = requireString(payload.sourceId || payload.source_id || payload.id, "sourceId");
+  let source = db.prepare("SELECT * FROM erp_sku_1688_sources WHERE id = ?").get(sourceId);
+  if (!source) throw new Error(`1688 supplier mapping not found: ${sourceId}`);
+
+  const relationUserInfo = await ensure1688SourcePayloadOnce({
+    db,
+    payload,
+    actor,
+    source,
+    dataKey: "relationUserInfo",
+    prefix: "relationUserInfo",
+    action: sync1688RelationUserInfoAction,
+  });
+
+  source = db.prepare("SELECT * FROM erp_sku_1688_sources WHERE id = ?").get(sourceId);
+  const purchasedProductSimple = await ensure1688SourcePayloadOnce({
+    db,
+    payload,
+    actor,
+    source,
+    dataKey: "purchasedProductSimple",
+    prefix: "purchasedProductSimple",
+    action: sync1688PurchasedProductsAction,
+  });
+
+  return {
+    relationUserInfo,
+    purchasedProductSimple,
+    sku1688Source: toSku1688Source(db.prepare("SELECT * FROM erp_sku_1688_sources WHERE id = ?").get(sourceId)),
+  };
 }
 
 async function query1688PayWaysAction({ db, payload, actor }) {
@@ -8265,6 +9501,144 @@ function raw1688Params(payload = {}, fallback = {}) {
   return params || rawParams || fallback;
 }
 
+function raw1688ParamObject(payload = {}) {
+  if (payload.params && typeof payload.params === "object" && !Array.isArray(payload.params)) return payload.params;
+  if (payload.rawParams && typeof payload.rawParams === "object" && !Array.isArray(payload.rawParams)) return payload.rawParams;
+  return null;
+}
+
+function structured1688InputParams(payload = {}, fallbackInput = {}) {
+  const raw = raw1688ParamObject(payload);
+  if (!raw) return { input: fallbackInput };
+  const rawInput = raw.input && typeof raw.input === "object" && !Array.isArray(raw.input)
+    ? raw.input
+    : {};
+  const looseInput = { ...raw };
+  delete looseInput.input;
+  return {
+    input: {
+      ...fallbackInput,
+      ...looseInput,
+      ...rawInput,
+    },
+  };
+}
+
+function normalizeStringList(value) {
+  if (Array.isArray(value)) return value.map((item) => optionalString(item)).filter(Boolean);
+  const text = optionalString(value);
+  return text ? text.split(/[,\s]+/).map((item) => optionalString(item)).filter(Boolean) : [];
+}
+
+function firstOptionalString(...values) {
+  for (const value of values) {
+    const text = optionalString(value);
+    if (text) return text;
+  }
+  return "";
+}
+
+function infer1688OrderEntryIds(payload = {}, po = {}) {
+  const direct = normalizeStringList(
+    payload.orderEntryIds
+      || payload.orderEntryIdList
+      || payload.input?.orderEntryIds
+      || payload.input?.orderEntryIdList,
+  );
+  if (direct.length) return direct;
+  const detail = asExpandedObject(parseJsonObject(po.external_order_detail_json));
+  const payloadJson = asExpandedObject(parseJsonObject(po.external_order_payload_json));
+  const directFromDetail = normalizeStringList(findFirstDeepValue(detail, ["orderEntryIds", "orderEntryIdList"]))
+    .concat(normalizeStringList(findFirstDeepValue(payloadJson, ["orderEntryIds", "orderEntryIdList"])));
+  if (directFromDetail.length) return Array.from(new Set(directFromDetail));
+  const rows = findDeepArray({ detail, payloadJson }, (item) => (
+    hasAnyKey(item, ["orderEntryId", "orderEntryID", "order_entry_id", "entryId", "entry_id"])
+    && hasAnyKey(item, ["offerId", "productId", "skuId", "quantity", "amount", "name", "title"])
+  ));
+  return Array.from(new Set(rows.map((item) => firstOptionalString(
+    item.orderEntryId,
+    item.orderEntryID,
+    item.order_entry_id,
+    item.entryId,
+    item.entry_id,
+  )).filter(Boolean)));
+}
+
+function normalize1688MaxRefundFee(rawResponse = {}) {
+  return findFirstDeepNumber(asExpandedObject(rawResponse), [
+    "maxRefundFee",
+    "maxRefundAmount",
+    "maxRefundPayment",
+    "maxApplyPayment",
+    "canRefundFee",
+    "availableRefundFee",
+    "refundPayment",
+    "applyPayment",
+  ]);
+}
+
+function normalize1688RefundReason(item = {}) {
+  const reasonId = firstOptionalString(
+    item.refundReasonId,
+    item.reasonId,
+    item.reasonID,
+    item.refund_reason_id,
+    item.id,
+    item.code,
+    item.value,
+  );
+  const label = firstOptionalString(
+    item.refundReason,
+    item.reason,
+    item.name,
+    item.label,
+    item.text,
+    item.content,
+    item.desc,
+  );
+  if (!reasonId && !label) return null;
+  return {
+    refundReasonId: reasonId || null,
+    reason: label || reasonId,
+    label: label || reasonId,
+    value: label || reasonId,
+    raw: item,
+  };
+}
+
+function looksLike1688RefundReason(item = {}) {
+  return Boolean(
+    item
+    && typeof item === "object"
+    && !Array.isArray(item)
+    && (
+      item.refundReasonId
+      || item.reasonId
+      || item.refund_reason_id
+      || item.refundReason
+      || item.reason
+      || item.name
+      || item.label
+    )
+  );
+}
+
+function normalize1688RefundReasons(rawResponse = {}) {
+  const expanded = asExpandedObject(rawResponse);
+  const rows = findDeepArray(expanded, looksLike1688RefundReason);
+  const sourceRows = rows.length ? rows : (looksLike1688RefundReason(expanded) ? [expanded] : []);
+  const seen = new Set();
+  return sourceRows
+    .map(normalize1688RefundReason)
+    .filter(Boolean)
+    .filter((item) => {
+      const key = `${item.refundReasonId || ""}:${item.reason || ""}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
 function getPurchaseOrderFor1688Action(db, payload = {}) {
   const poId = optionalString(payload.poId || payload.id);
   if (poId) return getPurchaseOrder(db, poId);
@@ -8291,7 +9665,7 @@ function build1688RefundOrderParams(payload = {}, po = {}) {
 
 function build1688RefundReasonParams(payload = {}, po = {}) {
   const externalOrderId = optionalString(payload.externalOrderId || payload.orderId || payload.tradeId || po.external_order_id);
-  return raw1688Params(payload, {
+  return structured1688InputParams(payload, {
     orderId: externalOrderId || undefined,
     tradeId: externalOrderId || undefined,
     refundType: optionalString(payload.refundType) || undefined,
@@ -8305,11 +9679,17 @@ function build1688CreateRefundParams(payload = {}, po = {}) {
     "externalOrderId",
   );
   const amount = optionalNumber(payload.amount ?? payload.refundPayment ?? payload.applyPayment) ?? optionalNumber(po.total_amount);
-  return raw1688Params(payload, {
+  const orderEntryIds = infer1688OrderEntryIds(payload, po);
+  const refundReasonId = optionalString(payload.refundReasonId || payload.reasonId || payload.refund_reason_id);
+  return structured1688InputParams(payload, {
     orderId: externalOrderId,
     tradeId: externalOrderId,
+    orderEntryIds: orderEntryIds.length ? orderEntryIds : undefined,
+    orderEntryIdList: orderEntryIds.length ? orderEntryIds : undefined,
     refundPayment: amount,
     applyPayment: amount,
+    refundReasonId: refundReasonId || undefined,
+    reasonId: refundReasonId || undefined,
     refundReason: optionalString(payload.reason || payload.refundReason),
     reason: optionalString(payload.reason || payload.refundReason),
     description: optionalString(payload.description || payload.remark),
@@ -8439,15 +9819,17 @@ async function get1688RefundReasonsAction({ db, payload, actor }) {
     api: PROCUREMENT_APIS.REFUND_REASON_LIST,
     params,
   });
-  return { apiKey: PROCUREMENT_APIS.REFUND_REASON_LIST.key, query: params, rawResponse };
+  const refundReasons = normalize1688RefundReasons(rawResponse);
+  return { apiKey: PROCUREMENT_APIS.REFUND_REASON_LIST.key, query: params, refundReasons, rawResponse };
 }
 
 async function get1688MaxRefundFeeAction({ db, payload, actor }) {
   assertActorRole(actor, ["buyer", "manager", "admin"], "1688 max refund fee");
   const po = getPurchaseOrderFor1688Action(db, payload);
-  const params = raw1688Params(payload, {
+  const orderEntryIds = infer1688OrderEntryIds(payload, po);
+  const params = structured1688InputParams(payload, {
     orderId: requireString(payload.externalOrderId || payload.orderId || po.external_order_id, "externalOrderId"),
-    orderEntryIds: Array.isArray(payload.orderEntryIds) ? payload.orderEntryIds : undefined,
+    orderEntryIds: orderEntryIds.length ? orderEntryIds : undefined,
   });
   if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.MAX_REFUND_FEE.key, params };
   const rawResponse = payload.mockResponse || await call1688ProcurementApi({
@@ -8458,7 +9840,8 @@ async function get1688MaxRefundFeeAction({ db, payload, actor }) {
     api: PROCUREMENT_APIS.MAX_REFUND_FEE,
     params,
   });
-  return { apiKey: PROCUREMENT_APIS.MAX_REFUND_FEE.key, query: params, rawResponse };
+  const maxRefundFee = normalize1688MaxRefundFee(rawResponse);
+  return { apiKey: PROCUREMENT_APIS.MAX_REFUND_FEE.key, query: params, maxRefundFee, rawResponse };
 }
 
 async function upload1688RefundVoucherAction({ db, payload, actor }) {
@@ -8497,8 +9880,8 @@ async function create1688RefundAction({ db, services, payload, actor }) {
   const savedRefunds = (refunds.length ? refunds : [{
     externalOrderId: po.external_order_id,
     status: "created",
-    reason: params.refundReason || params.reason,
-    amount: params.refundPayment || params.applyPayment,
+    reason: params.input?.refundReason || params.input?.reason,
+    amount: params.input?.refundPayment || params.input?.applyPayment,
     raw: rawResponse,
   }]).map((refund) => upsert1688RefundRow(db, { po, refund, actor }));
   const purchaseOrder = markPurchaseOrderRefundSynced({
@@ -9106,9 +10489,8 @@ function findSku1688SourceForOrderLine(db, line = {}, accountId = null) {
     .sort((left, right) => right.matchScore - left.matchScore)[0] || null;
 }
 
-function buildPoNoFrom1688Order(order) {
-  const suffix = String(order.externalOrderId || "").replace(/\D+/g, "").slice(-10);
-  return suffix ? `PO-1688-${suffix}` : buildPurchaseOrderNo();
+function buildPoNoFrom1688Order(db) {
+  return buildPurchaseOrderNo(db);
 }
 
 function createPurchaseOrderFrom1688Order({ db, services, order, payload = {}, actor }) {
@@ -9138,7 +10520,7 @@ function createPurchaseOrderFrom1688Order({ db, services, order, payload = {}, a
     pr_id: null,
     selected_candidate_id: null,
     supplier_id: null,
-    po_no: optionalString(payload.poNo) || buildPoNoFrom1688Order(order),
+    po_no: optionalString(payload.poNo) || buildPoNoFrom1688Order(db),
     status: map1688StatusToLocal(order.status, "draft", {}) || "draft",
     payment_status: map1688StatusToPaymentStatus(order.status, "unpaid") || "unpaid",
     expected_delivery_date: null,
@@ -9308,6 +10690,19 @@ async function link1688OrderToPoAction({ db, services, payload, actor }) {
   return { purchaseOrder: toCamelRow(afterPo), order };
 }
 
+function getPurchaseWorkbenchForAction(payload = {}, actor = {}) {
+  if (payload.includeWorkbench === false || payload.skipWorkbench || payload.noWorkbench) return null;
+  return getPurchaseWorkbench({
+    limit: payload.limit,
+    accountId: payload.accountId || payload.account_id,
+    includeRequestDetails: payload.includeRequestDetails,
+    includeOptions: payload.includeOptions,
+    include1688Meta: payload.include1688Meta,
+    detailPrId: payload.detailPrId || payload.detail_pr_id || payload.prId || payload.pr_id,
+    user: actor,
+  });
+}
+
 async function performPurchaseAction(payload = {}, actorInput = {}) {
   const { db, services } = requireErp();
   const action = requireString(payload.action, "action");
@@ -9319,7 +10714,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+      workbench: getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -9329,7 +10724,16 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+      workbench: getPurchaseWorkbenchForAction(payload, actor),
+    };
+  }
+
+  if (action === "preview_1688_url_specs") {
+    const result = await preview1688UrlSpecsAction({ db, payload, actor });
+    return {
+      action,
+      result,
+      workbench: getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -9339,7 +10743,17 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+      workbench: getPurchaseWorkbenchForAction(payload, actor),
+    };
+  }
+
+  if (action === "bind_1688_candidate_spec") {
+    const result = bind1688CandidateSpecAction({ db, services, payload, actor });
+    broadcastPurchaseUpdate(action, payload, actor, result);
+    return {
+      action,
+      result,
+      workbench: getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -9349,7 +10763,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+      workbench: getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -9359,7 +10773,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+      workbench: getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -9369,7 +10783,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+      workbench: getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -9379,16 +10793,16 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+      workbench: getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
   if (action === "validate_1688_order_push") {
-    const result = validate1688OrderPushAction({ db, payload, actor });
+    const result = await validate1688OrderPushAction({ db, payload, actor });
     return {
       action,
       result,
-      workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+      workbench: getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -9398,7 +10812,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+      workbench: getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -9408,7 +10822,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+      workbench: getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -9418,7 +10832,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+      workbench: getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -9439,7 +10853,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+      workbench: getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -9452,6 +10866,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     follow_1688_product: (args) => set1688ProductFollowAction({ ...args, follow: true }),
     unfollow_1688_product: (args) => set1688ProductFollowAction({ ...args, follow: false }),
     sync_1688_purchased_products: sync1688PurchasedProductsAction,
+    ensure_1688_supplier_profile_once: ensure1688SupplierProfileOnceAction,
     get_1688_payment_url: get1688PaymentUrlAction,
     query_1688_pay_ways: query1688PayWaysAction,
     query_1688_protocol_pay_status: query1688ProtocolPayStatusAction,
@@ -9480,6 +10895,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
       api: PROCUREMENT_APIS.DEEP_SEARCH_AGENT,
       action: "run_1688_deep_search_agent",
     }),
+    ensure_1688_mix_config_once: ensure1688MixConfigOnceAction,
   };
   if (async1688OrderActions[action]) {
     const result = await async1688OrderActions[action]({ db, services, payload, actor });
@@ -9487,7 +10903,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return {
       action,
       result,
-      workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+      workbench: getPurchaseWorkbenchForAction(payload, actor),
     };
   }
 
@@ -9555,6 +10971,9 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
       case "generate_po": {
         return generatePurchaseOrderAction({ db, services, payload, actor });
       }
+      case "delete_po": {
+        return deletePurchaseOrderAction({ db, services, payload, actor });
+      }
       case "request_1688_price_change": {
         return request1688PriceChangeAction({ db, services, payload, actor });
       }
@@ -9613,7 +11032,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
   return {
     action,
     result,
-    workbench: getPurchaseWorkbench({ limit: payload.limit, user: actor }),
+    workbench: getPurchaseWorkbenchForAction(payload, actor),
   };
 }
 
@@ -10396,8 +11815,18 @@ function assertHostMode(featureName = "该功能") {
 
 async function getPurchaseWorkbenchRuntime(params = {}) {
   if (isClientMode()) {
-    const payload = await remoteRequest("/api/purchase/workbench");
-    return payload.workbench || {};
+    let payload;
+    try {
+      payload = await remoteRequest("/api/purchase/workbench", {
+        method: "POST",
+        body: params,
+      });
+    } catch (error) {
+      const statusCode = Number(error?.statusCode || 0);
+      if (!statusCode || ![404, 405, 502].includes(statusCode)) throw error;
+      payload = await remoteRequest("/api/purchase/workbench");
+    }
+    return normalizePurchaseWorkbenchPoNumbers(payload.workbench || {});
   }
   return getPurchaseWorkbench(params);
 }
@@ -10446,17 +11875,260 @@ async function buildClientImageSearchMockResults(payload = {}) {
   };
 }
 
+function getClientRuntimeActor() {
+  return getRuntimeStatus().currentUser || erpState.currentUser || {};
+}
+
+function getClientLocalAlphaShopCredentials(payload = {}) {
+  const actor = getClientRuntimeActor();
+  const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
+  const payloadAccessKey = normalizeAlphaShopAccessKey(payload.accessKey || payload.ak);
+  const payloadSecretKey = normalizeAlphaShopSecretKey(payload.secretKey || payload.sk);
+  const envAccessKey = normalizeAlphaShopAccessKey(process.env.ALPHASHOP_ACCESS_KEY || process.env.ERP_ALPHASHOP_ACCESS_KEY);
+  const envSecretKey = normalizeAlphaShopSecretKey(process.env.ALPHASHOP_SECRET_KEY || process.env.ERP_ALPHASHOP_SECRET_KEY);
+  let purchaseAccessKey = "";
+  let purchaseSecretKey = "";
+  let imageSearchAccessKey = "";
+  let imageSearchSecretKey = "";
+  let db = null;
+  try {
+    if (hasExistingErpDatabase({ userDataDir: erpState.userDataDir })) {
+      db = openErpDatabase({ userDataDir: erpState.userDataDir });
+      if (tableHasColumn(db, "erp_purchase_settings", "alphashop_access_key")) {
+        const purchaseRow = db.prepare(`
+          SELECT alphashop_access_key, alphashop_secret_key
+          FROM erp_purchase_settings
+          WHERE company_id = ?
+          LIMIT 1
+        `).get(companyId);
+        purchaseAccessKey = normalizeAlphaShopAccessKey(purchaseRow?.alphashop_access_key);
+        purchaseSecretKey = normalizeAlphaShopSecretKey(purchaseRow?.alphashop_secret_key);
+      }
+      const imageSearchRow = getAlphaShopSettingsRow(db, companyId);
+      imageSearchAccessKey = normalizeAlphaShopAccessKey(imageSearchRow?.access_key);
+      imageSearchSecretKey = normalizeAlphaShopSecretKey(imageSearchRow?.secret_key);
+    }
+  } catch {
+    // Client mode can still use payload/env credentials if the local DB is unavailable.
+  } finally {
+    try {
+      db?.close?.();
+    } catch {}
+  }
+
+  const accessKey = payloadAccessKey || purchaseAccessKey || imageSearchAccessKey || envAccessKey;
+  const secretKey = payloadSecretKey || purchaseSecretKey || imageSearchSecretKey || envSecretKey;
+  if (!accessKey || !secretKey) {
+    throw new Error("请先在本机配置 AlphaShop productDetailQuery 密钥，再同步 1688 规格");
+  }
+  return { accessKey, secretKey, companyId };
+}
+
+function alphaShopDetailTo1688MockDetail(detail = {}, rawResponse = {}) {
+  const skuInfos = (Array.isArray(detail.skuOptions) ? detail.skuOptions : []).map((sku) => ({
+    skuId: optionalString(sku.externalSkuId || sku.skuId || sku.id),
+    specId: optionalString(sku.externalSpecId || sku.specId || sku.cargoSkuId || sku.externalSkuId),
+    attributes: Array.isArray(sku.attributes) && sku.attributes.length
+      ? sku.attributes
+      : String(sku.specText || "")
+        .split(";")
+        .map((part) => {
+          const [name, ...valueParts] = String(part || "").split(":");
+          return {
+            name: optionalString(name) || "",
+            value: optionalString(valueParts.join(":")) || optionalString(part) || "",
+          };
+        })
+        .filter((item) => item.name || item.value),
+    price: optionalNumber(sku.price),
+    stock: optionalNumber(sku.stock),
+    amountOnSale: optionalNumber(sku.stock),
+    raw: sku.raw || sku,
+  }));
+  const priceRanges = Array.isArray(detail.priceRanges) ? detail.priceRanges : [];
+  const productID = optionalString(detail.externalOfferId || detail.productId || detail.offerId);
+  const productInfo = {
+    productID,
+    productId: productID,
+    offerId: productID,
+    subject: optionalString(detail.productTitle || detail.title),
+    productTitle: optionalString(detail.productTitle || detail.title),
+    supplierName: optionalString(detail.supplierName),
+    productUrl: optionalString(detail.productUrl) || (productID ? `https://detail.1688.com/offer/${productID}.html` : null),
+    imageUrl: optionalString(detail.imageUrl),
+    imageUrls: optionalString(detail.imageUrl) ? [optionalString(detail.imageUrl)] : [],
+    price: optionalNumber(detail.unitPrice),
+    minPrice: optionalNumber(detail.unitPrice),
+    moq: optionalNumber(detail.moq),
+    minOrderQuantity: optionalNumber(detail.moq),
+    priceRanges,
+    skuInfos,
+    saleInfo: {
+      minOrderQuantity: optionalNumber(detail.moq),
+      priceRanges,
+    },
+    rawAlphaShopResponse: rawResponse,
+  };
+  return {
+    result: {
+      data: {
+        productInfo,
+      },
+    },
+  };
+}
+
+async function buildClientProductDetailMockPayload(payload = {}) {
+  if (!["refresh_1688_product_detail", "preview_1688_url_specs"].includes(payload.action)) return null;
+  if (payload.mockDetail || payload.mockResponse) return payload;
+  if (payload.preferAlphaShopDetail === false || payload.prefer_alpha_shop_detail === false) return payload;
+  const productUrl = optionalString(payload.productUrl || payload.product_url || payload.url);
+  const offerId = requireString(
+    payload.offerId
+      || payload.externalOfferId
+      || payload.productId
+      || payload.productID
+      || extract1688OfferIdFromUrl(productUrl),
+    "offerId",
+  );
+  const credentials = getClientLocalAlphaShopCredentials(payload);
+  const alphaShopDetail = await alphaShopProductDetailQuery({
+    accessKey: credentials.accessKey,
+    secretKey: credentials.secretKey,
+    productId: offerId,
+    timeoutMs: 120000,
+  });
+  if (!hasSyncableSkuOptions(alphaShopDetail.detail)) {
+    throw new Error("productDetailQuery 未返回可绑定规格，请换一个 1688 候选商品或检查遨虾接口返回");
+  }
+  return {
+    ...payload,
+    offerId,
+    productId: offerId,
+    productID: offerId,
+    mockDetail: alphaShopDetailTo1688MockDetail(alphaShopDetail.detail, alphaShopDetail.rawResponse),
+    clientAlphaShopProductDetail: {
+      source: "productDetailQuery",
+      skuOptionCount: alphaShopDetail.detail.skuOptions.length,
+    },
+  };
+}
+
+function isUnsupportedRemotePurchaseAction(error) {
+  const message = String(error?.message || error?.payload?.error || error || "");
+  return /Unsupported purchase action|unsupported.*action|不支持.*操作/i.test(message);
+}
+
+async function performClientPreview1688UrlSpecs(payload = {}) {
+  try {
+    const response = await remoteRequest("/api/purchase/action", {
+      method: "POST",
+      body: payload,
+    });
+    return normalizePurchaseResultPoNumbers(response.result);
+  } catch (error) {
+    if (!isUnsupportedRemotePurchaseAction(error)) throw error;
+  }
+
+  const fallbackPayload = await buildClientProductDetailMockPayload({
+    ...payload,
+    action: "preview_1688_url_specs",
+  });
+  const productUrl = optionalString(fallbackPayload.productUrl || fallbackPayload.product_url || fallbackPayload.url);
+  const offerId = requireString(
+    fallbackPayload.offerId
+      || fallbackPayload.externalOfferId
+      || fallbackPayload.productId
+      || fallbackPayload.productID
+      || extract1688OfferIdFromUrl(productUrl),
+    "offerId",
+  );
+  const rawResponse = fallbackPayload.mockDetail || fallbackPayload.mockResponse;
+  const detail = normalize1688ProductDetailResponse(rawResponse);
+  if (!hasSyncableSkuOptions(detail)) {
+    throw new Error("productDetailQuery 未返回可绑定规格，请换一个 1688 地址或检查遨虾接口返回");
+  }
+  const finalProductUrl = productUrl || optionalString(detail.productUrl) || `https://detail.1688.com/offer/${offerId}.html`;
+  return {
+    action: "preview_1688_url_specs",
+    result: {
+      apiKey: PROCUREMENT_APIS.PRODUCT_DETAIL.key,
+      query: build1688ProductDetailParams(offerId, fallbackPayload),
+      externalOfferId: offerId,
+      productUrl: finalProductUrl,
+      detail: {
+        ...detail,
+        externalOfferId: optionalString(detail.externalOfferId) || offerId,
+        productUrl: optionalString(detail.productUrl) || finalProductUrl,
+        usedFallbackDetail: false,
+        usedAlphaShopProductDetail: true,
+        raw: undefined,
+      },
+      rawResponse,
+      clientAlphaShopProductDetail: fallbackPayload.clientAlphaShopProductDetail,
+    },
+    workbench: {},
+  };
+}
+
+async function performClientBind1688CandidateSpec(payload = {}) {
+  try {
+    const response = await remoteRequest("/api/purchase/action", {
+      method: "POST",
+      body: payload,
+    });
+    return response.result;
+  } catch (error) {
+    if (!isUnsupportedRemotePurchaseAction(error)) throw error;
+  }
+
+  const fallbackPayload = await buildClientProductDetailMockPayload({
+    ...payload,
+    action: "refresh_1688_product_detail",
+    bindMapping: true,
+  });
+  const refreshResponse = await remoteRequest("/api/purchase/action", {
+    method: "POST",
+    body: fallbackPayload,
+  });
+  return {
+    ...(refreshResponse.result || {}),
+    bindFallback: "refresh_1688_product_detail",
+  };
+}
+
 async function performPurchaseActionRuntime(payload = {}) {
   if (isClientMode()) {
+    if (payload?.action === "preview_1688_url_specs") {
+      return performClientPreview1688UrlSpecs(payload);
+    }
+    if (payload?.action === "bind_1688_candidate_spec") {
+      return performClientBind1688CandidateSpec(payload);
+    }
     let remotePayload = payload;
+    if ((payload?.action === "generate_po" || payload?.action === "generate_purchase_order") && !optionalString(payload.poNo || payload.po_no)) {
+      try {
+        const current = await remoteRequest("/api/purchase/workbench", {
+          method: "POST",
+          body: { limit: 500, includeRequestDetails: false },
+        });
+        remotePayload = {
+          ...remotePayload,
+          poNo: getNextClientPurchaseOrderNo(current.workbench || {}),
+        };
+      } catch {}
+    }
     try {
-      remotePayload = await buildClientImageSearchMockResults(payload) || payload;
+      remotePayload = await buildClientImageSearchMockResults(remotePayload) || remotePayload;
     } catch {}
+    if (payload?.action === "refresh_1688_product_detail") {
+      remotePayload = await buildClientProductDetailMockPayload(remotePayload) || remotePayload;
+    }
     const response = await remoteRequest("/api/purchase/action", {
       method: "POST",
       body: remotePayload,
     });
-    return response.result;
+    return normalizePurchaseResultPoNumbers(response.result);
   }
   const actor = getCurrentSessionActor(payload?.actor || {});
   return performPurchaseAction(payload || {}, actor);

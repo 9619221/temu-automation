@@ -43,6 +43,23 @@ function firstText(...values) {
   return null;
 }
 
+function firstPresent(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined) continue;
+    if (typeof value === "string" && !value.trim()) continue;
+    return value;
+  }
+  return null;
+}
+
+function firstNumber(...values) {
+  for (const value of values.flat(Infinity)) {
+    const number = toNumber(value);
+    if (number !== null) return number;
+  }
+  return null;
+}
+
 function findNestedText(value, keys, depth = 0) {
   if (!value || depth > 6) return null;
   if (Array.isArray(value)) {
@@ -81,6 +98,14 @@ function normalizeArray(value) {
   if (Array.isArray(value)) return value;
   const parsed = parseMaybeJson(value);
   if (Array.isArray(parsed)) return parsed;
+  return [];
+}
+
+function normalizeList(value) {
+  if (!value) return [];
+  const parsed = parseMaybeJson(value);
+  if (Array.isArray(parsed)) return parsed;
+  if (parsed && typeof parsed === "object") return Object.values(parsed);
   return [];
 }
 
@@ -231,6 +256,331 @@ function normalizeAlphaShopProduct(item = {}) {
   };
 }
 
+function looksLikeProductDetail(item) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+  return Boolean(
+    item.productId
+      || item.productID
+      || item.offerId
+      || item.offerID
+      || item.goodsId
+      || item.itemId
+      || item.productTitle
+      || item.subject
+      || item.title
+      || item.productSkuInfos
+      || item.productSkuInfoList
+      || item.skuInfos
+      || item.skuInfo
+      || item.skuInfoList
+      || item.skuList
+      || item.skus
+      || item.productAttributeList
+      || item.productAttributes
+      || item.imageList
+      || item.productImageList
+      || item.priceRanges
+  );
+}
+
+function findProductDetailObject(value, depth = 0) {
+  const parsed = parseMaybeJson(value);
+  if (!parsed || depth > 10) return {};
+  if (Array.isArray(parsed)) {
+    for (const item of parsed) {
+      const found = findProductDetailObject(item, depth + 1);
+      if (Object.keys(found).length) return found;
+    }
+    return {};
+  }
+  if (typeof parsed !== "object") return {};
+  if (looksLikeProductDetail(parsed)) return parsed;
+  for (const key of [
+    "product",
+    "productInfo",
+    "productDetail",
+    "detail",
+    "data",
+    "result",
+    "response",
+    "returnValue",
+    "toReturn",
+  ]) {
+    const found = findProductDetailObject(parsed[key], depth + 1);
+    if (Object.keys(found).length) return found;
+  }
+  for (const item of Object.values(parsed)) {
+    const found = findProductDetailObject(item, depth + 1);
+    if (Object.keys(found).length) return found;
+  }
+  return {};
+}
+
+function looksLikeSku(item) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+  return Boolean(
+    item.skuId
+      || item.skuID
+      || item.sku_id
+      || item.specId
+      || item.specID
+      || item.spec_id
+      || item.cargoSkuId
+      || item.cargoSkuID
+      || item.cargo_sku_id
+      || item.offerSkuId
+      || item.offer_sku_id
+      || item.specAttrs
+      || item.skuAttributes
+      || item.attrList
+  );
+}
+
+function findSkuArray(value, depth = 0) {
+  const parsed = parseMaybeJson(value);
+  if (!parsed || depth > 8) return [];
+  if (Array.isArray(parsed)) {
+    const objectItems = parsed.filter((item) => item && typeof item === "object" && !Array.isArray(item));
+    if (objectItems.some(looksLikeSku)) return objectItems;
+    for (const item of parsed) {
+      const found = findSkuArray(item, depth + 1);
+      if (found.length) return found;
+    }
+    return [];
+  }
+  if (typeof parsed !== "object") return [];
+  for (const key of [
+    "productSkuInfos",
+    "productSkuInfoList",
+    "skuInfos",
+    "skuInfo",
+    "skuInfoList",
+    "skuList",
+    "skus",
+    "skuMap",
+    "offerSkuList",
+    "saleSkuList",
+    "cargoSkuList",
+  ]) {
+    const values = normalizeList(parsed[key]);
+    if (values.some(looksLikeSku)) return values.filter((item) => item && typeof item === "object");
+    const found = findSkuArray(parsed[key], depth + 1);
+    if (found.length) return found;
+  }
+  for (const item of Object.values(parsed)) {
+    const found = findSkuArray(item, depth + 1);
+    if (found.length) return found;
+  }
+  return [];
+}
+
+function normalizeSkuAttributes(sku = {}) {
+  const raw = firstPresent(
+    sku.attributes,
+    sku.skuAttributes,
+    sku.attrList,
+    sku.specAttrs,
+    sku.specList,
+    sku.productSkuAttributeInfos,
+    sku.productSkuAttributes,
+    sku.skuAttributeInfos,
+    sku.properties,
+    sku.saleAttributes,
+    sku.skuProps,
+    sku.specName,
+    sku.specText,
+  );
+  const parsed = parseMaybeJson(raw);
+  if (Array.isArray(parsed)) {
+    return parsed.map((item) => {
+      if (!item || typeof item !== "object") return { name: "", value: String(item || "") };
+      return {
+        name: String(firstText(
+          item.attributeName,
+          item.attributeNameTrans,
+          item.name,
+          item.prop,
+          item.key,
+          item.propertyName,
+          "",
+        ) || ""),
+        value: String(firstText(
+          item.value,
+          item.valueTrans,
+          item.attributeValue,
+          item.valueName,
+          item.text,
+          item.propertyValue,
+          "",
+        ) || ""),
+      };
+    }).filter((item) => item.name || item.value);
+  }
+  if (parsed && typeof parsed === "object") {
+    return Object.entries(parsed).map(([name, value]) => ({
+      name: String(name),
+      value: String(value),
+    }));
+  }
+  const text = firstText(parsed);
+  return text ? [{ name: "", value: text }] : [];
+}
+
+function normalizeAlphaShopSkuOptions(product = {}) {
+  return findSkuArray(product).map((sku) => {
+    const attributes = normalizeSkuAttributes(sku);
+    const skuId = firstText(
+      sku.skuId,
+      sku.skuID,
+      sku.sku_id,
+      sku.id,
+      sku.offerSkuId,
+      sku.offer_sku_id,
+      sku.cargoSkuId,
+      sku.cargoSkuID,
+      sku.cargo_sku_id,
+    );
+    const specId = firstText(
+      sku.specId,
+      sku.specID,
+      sku.spec_id,
+      sku.cargoSkuId,
+      sku.cargoSkuID,
+      sku.cargo_sku_id,
+      sku.offerSkuId,
+      sku.offer_sku_id,
+    ) || skuId;
+    const specText = attributes
+      .map((item) => (item.name ? `${item.name}:${item.value}` : item.value))
+      .filter(Boolean)
+      .join("; ") || firstText(sku.specText, sku.specName, sku.name);
+    return {
+      externalSkuId: skuId,
+      externalSpecId: specId,
+      specText,
+      attributes,
+      price: firstNumber(
+        sku.price,
+        sku.salePrice,
+        sku.discountPrice,
+        sku.priceCent ? Number(sku.priceCent) / 100 : null,
+        sku.priceInfo,
+      ),
+      stock: firstNumber(sku.amountOnSale, sku.canBookCount, sku.stock, sku.inventory, sku.availableStock),
+      raw: sku,
+    };
+  }).filter((sku) => sku.externalSkuId || sku.externalSpecId || sku.price !== null || sku.specText);
+}
+
+function normalizeAlphaShopPriceRanges(product = {}) {
+  const ranges = normalizeList(firstPresent(
+    product.priceRanges,
+    product.priceRange,
+    product.priceRangeList,
+    product.ladderPrices,
+    product.ladderPriceList,
+    product.productPriceList,
+    product.priceInfo && product.priceInfo.priceRanges,
+  ));
+  return ranges
+    .map((range) => {
+      if (!range || typeof range !== "object") return null;
+      const price = firstNumber(range.price, range.value, range.amount, range.discountPrice, range.salePrice);
+      if (price === null) return null;
+      return {
+        startQuantity: Math.max(1, Math.floor(firstNumber(
+          range.startQuantity,
+          range.beginAmount,
+          range.begin,
+          range.minQuantity,
+          range.min,
+        ) || 1)),
+        price,
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.startQuantity - right.startQuantity);
+}
+
+function normalizeAlphaShopProductDetail(rawResponse = {}, fallbackProductId = null) {
+  const product = findProductDetailObject(rawResponse);
+  const productId = firstText(
+    product.productId,
+    product.productID,
+    product.offerId,
+    product.offerID,
+    product.goodsId,
+    product.itemId,
+    product.id,
+    fallbackProductId,
+  );
+  const skuOptions = normalizeAlphaShopSkuOptions(product);
+  const priceRanges = normalizeAlphaShopPriceRanges(product);
+  const productUrl = firstText(
+    product.productUrl,
+    product.detailUrl,
+    product.offerUrl,
+    product.url,
+    productId ? `https://detail.1688.com/offer/${productId}.html` : null,
+  );
+  return {
+    externalOfferId: productId,
+    supplierName: firstText(
+      product.supplierName,
+      product.companyName,
+      product.shopName,
+      product.sellerName,
+      product.storeName,
+      product.companyInfo && product.companyInfo.companyName,
+    ) || "1688 Supplier",
+    productTitle: firstText(
+      product.productTitle,
+      product.originTitle,
+      product.title,
+      product.subject,
+      product.name,
+      product.titleCn,
+      product.titleZh,
+      product.subjectTrans,
+    ),
+    productUrl,
+    imageUrl: firstImage(
+      product.imageUrl,
+      product.originImageUrl,
+      product.mainImage,
+      product.imgUrl,
+      product.picUrl,
+      product.pictureUrl,
+      product.images,
+      product.imageList,
+      product.imageUrls,
+      product.productImageList,
+      product.productImages,
+    ),
+    unitPrice: firstNumber(
+      skuOptions.map((item) => item.price),
+      priceRanges.map((item) => item.price),
+      product.price,
+      product.offerPrice,
+      product.salePrice,
+      product.minPrice,
+      product.priceText,
+      product.priceRange,
+      product.priceInfo,
+    ) ?? 0,
+    moq: Math.max(1, Math.floor(firstNumber(
+      product.moq,
+      product.minOrderQuantity,
+      product.minimumOrderQuantity,
+      product.startQuantity,
+      product.beginAmount,
+    ) || 1)),
+    priceRanges,
+    skuOptions,
+    raw: product,
+  };
+}
+
 function decodeToolResult(result) {
   if (!result) return {};
   if (result.structuredContent) return result.structuredContent;
@@ -375,11 +725,14 @@ async function callMcpTool({ serverUrl, toolName, args, timeoutMs = 120000 }) {
   }
 }
 
-async function imageSearchProduct({ accessKey, secretKey, imgUrl, beginPage = 1, pageSize = 10, timeoutMs }) {
+function alphaShopServerUrl(accessKey, secretKey) {
   const token = signAlphaShopToken(accessKey, secretKey);
-  const serverUrl = `${MCP_SERVER_BASE}?key=${encodeURIComponent(token)}`;
+  return `${MCP_SERVER_BASE}?key=${encodeURIComponent(token)}`;
+}
+
+async function imageSearchProduct({ accessKey, secretKey, imgUrl, beginPage = 1, pageSize = 10, timeoutMs }) {
   const result = await callMcpTool({
-    serverUrl,
+    serverUrl: alphaShopServerUrl(accessKey, secretKey),
     toolName: "imageSearchProduct",
     args: { imgUrl, beginPage, pageSize },
     timeoutMs,
@@ -389,7 +742,23 @@ async function imageSearchProduct({ accessKey, secretKey, imgUrl, beginPage = 1,
   return { rawResponse: decoded, products };
 }
 
+async function productDetailQuery({ accessKey, secretKey, productId, timeoutMs }) {
+  const result = await callMcpTool({
+    serverUrl: alphaShopServerUrl(accessKey, secretKey),
+    toolName: "productDetailQuery",
+    args: { productId: firstText(productId) },
+    timeoutMs,
+  });
+  const decoded = decodeToolResult(result);
+  return {
+    rawResponse: decoded,
+    detail: normalizeAlphaShopProductDetail(decoded, productId),
+  };
+}
+
 module.exports = {
   imageSearchProduct,
+  productDetailQuery,
+  normalizeAlphaShopProductDetail,
   signAlphaShopToken,
 };

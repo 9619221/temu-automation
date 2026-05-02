@@ -35,6 +35,7 @@ import {
   priorityTag,
   statusTag,
 } from "../utils/erpUi";
+import { hasPageCache, readPageCache, writePageCache } from "../utils/pageCache";
 
 const { Text } = Typography;
 const erp = window.electronAPI?.erp;
@@ -65,6 +66,14 @@ interface WorkItemStats {
   byStatus?: Record<string, number>;
   byPriority?: Record<string, number>;
 }
+
+interface DailyCommandCache {
+  generatedAt?: string;
+  items: WorkItemRow[];
+  stats: WorkItemStats | null;
+}
+
+const DAILY_COMMAND_CACHE_KEY = "page-cache:daily-command:v1";
 
 function routeForDoc(type?: string) {
   if (type === "purchase_request" || type === "purchase_order" || type === "payment_approval") return "/purchase-center";
@@ -123,9 +132,14 @@ export default function DailyCommandCenter() {
   const auth = useErpAuth();
   const defaultOwnerRole = getDefaultWorkItemOwnerRole(auth.currentUser?.role);
   const canViewAll = canViewAllWorkItems(auth.currentUser?.role);
-  const [items, setItems] = useState<WorkItemRow[]>([]);
-  const [stats, setStats] = useState<WorkItemStats | null>(null);
+  const cached = useMemo(() => readPageCache<DailyCommandCache>(DAILY_COMMAND_CACHE_KEY, {
+    items: [],
+    stats: null,
+  }), []);
+  const [items, setItems] = useState<WorkItemRow[]>(() => cached.items || []);
+  const [stats, setStats] = useState<WorkItemStats | null>(() => cached.stats || null);
   const [loading, setLoading] = useState(false);
+  const [loadedOnce, setLoadedOnce] = useState(() => hasPageCache(cached));
   const [generating, setGenerating] = useState(false);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
 
@@ -142,8 +156,15 @@ export default function DailyCommandCenter() {
         erp.workItem.list(listParams),
         erp.workItem.stats({ limit: 1 }),
       ]);
-      setItems(nextItems as WorkItemRow[]);
-      setStats(nextStats as WorkItemStats);
+      const nextCache = {
+        generatedAt: new Date().toISOString(),
+        items: nextItems as WorkItemRow[],
+        stats: nextStats as WorkItemStats,
+      };
+      setItems(nextCache.items);
+      setStats(nextCache.stats);
+      setLoadedOnce(true);
+      writePageCache(DAILY_COMMAND_CACHE_KEY, nextCache);
     } catch (error: any) {
       message.error(error?.message || "今日事项读取失败");
     } finally {
@@ -197,6 +218,7 @@ export default function DailyCommandCenter() {
       .reduce((sum, [, count]) => sum + Number(count || 0), 0)
   ), [stats]);
   const myRoleCount = stats?.byOwnerRole?.[auth.currentUser?.role || ""] || 0;
+  const tableLoading = (loading || generating) && !loadedOnce && items.length > 0;
 
   const columns = useMemo<ColumnsType<WorkItemRow>>(() => [
     {
@@ -429,7 +451,7 @@ export default function DailyCommandCenter() {
         </div>
         <Table
           rowKey="id"
-          loading={loading || generating}
+          loading={tableLoading}
           size="middle"
           columns={columns}
           dataSource={items}

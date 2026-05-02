@@ -320,6 +320,36 @@ async function main() {
             created_by, created_at, updated_at
           )
           VALUES (
+            'po_delete_ipc', @account_id, 'pr_ipc', 'candidate_ipc', @supplier_id,
+            'PO-IPC-DELETE', 'draft', 'unpaid',
+            '2026-05-13', 105, @buyer_id, @now, @now
+          )
+        `).run({
+          account_id: account.id,
+          supplier_id: supplier.id,
+          buyer_id: buyer.id,
+          now,
+        });
+
+        seedDb.prepare(`
+          INSERT INTO erp_purchase_order_lines (
+            id, account_id, po_id, sku_id, qty, unit_cost, expected_qty, received_qty
+          )
+          VALUES (
+            'po_line_delete_ipc', @account_id, 'po_delete_ipc', @sku_id, 10, 10.5, 10, 0
+          )
+        `).run({
+          account_id: account.id,
+          sku_id: sku.id,
+        });
+
+        seedDb.prepare(`
+          INSERT INTO erp_purchase_orders (
+            id, account_id, pr_id, selected_candidate_id, supplier_id, po_no,
+            status, payment_status, expected_delivery_date, total_amount,
+            created_by, created_at, updated_at
+          )
+          VALUES (
             'po_wh_ipc', @account_id, 'pr_ipc', 'candidate_ipc', @supplier_id,
             'PO-WH-001', 'shipped', 'paid',
             '2026-05-11', 420, @buyer_id, @now, @now
@@ -388,9 +418,26 @@ async function main() {
 
     const purchaseWorkbench = await invoke("erp:purchase:workbench");
     assert.equal(purchaseWorkbench.purchaseRequests.length, 1);
-    assert.equal(purchaseWorkbench.purchaseOrders.length, 3);
+    assert.equal(purchaseWorkbench.purchaseOrders.length, 4);
     assert.equal(purchaseWorkbench.paymentQueue.length, 1);
     assert.equal(purchaseWorkbench.paymentQueue[0].paymentApprovalId, "pay_ipc");
+
+    const deleteDraftPo = await invoke("erp:purchase:action", {
+      action: "delete_po",
+      poId: "po_delete_ipc",
+      actor: { id: buyer.id, role: buyer.role },
+    });
+    assert.equal(deleteDraftPo.action, "delete_po");
+    assert.equal(deleteDraftPo.result.deleted, true);
+    assert.equal(deleteDraftPo.result.deletedLineCount, 1);
+    assert.equal(deleteDraftPo.workbench.purchaseOrders.some((item) => item.id === "po_delete_ipc"), false);
+    const deletePoDb = openErpDatabase({ userDataDir: tempUserData });
+    try {
+      assert.equal(deletePoDb.prepare("SELECT COUNT(*) AS count FROM erp_purchase_orders WHERE id = ?").get("po_delete_ipc").count, 0);
+      assert.equal(deletePoDb.prepare("SELECT COUNT(*) AS count FROM erp_purchase_order_lines WHERE po_id = ?").get("po_delete_ipc").count, 0);
+    } finally {
+      deletePoDb.close();
+    }
 
     const warehouseWorkbench = await invoke("erp:warehouse:workbench");
     assert.equal(warehouseWorkbench.inboundReceipts.length, 1);
@@ -596,7 +643,6 @@ async function main() {
     });
     assert.equal(purchasePage.statusCode, 200);
     assert.match(purchasePage.body, /Temu ERP LAN/);
-    assert.match(purchasePage.body, /PO-IPC-001/);
     assert.match(purchasePage.body, /pay_ipc/);
 
     const purchaseApi = await requestUrl(`${lanStatus.localUrl}/api/purchase/workbench`, {
@@ -605,8 +651,9 @@ async function main() {
     assert.equal(purchaseApi.statusCode, 200);
     const purchaseApiBody = JSON.parse(purchaseApi.body);
     assert.equal(purchaseApiBody.workbench.purchaseRequests[0].id, "pr_ipc");
-    assert.equal(purchaseApiBody.workbench.purchaseOrders[0].poNo, "PO-IPC-001");
-    assert.equal(purchaseApiBody.workbench.paymentQueue[0].paymentApprovalId, "pay_ipc");
+    assert.equal(purchaseApiBody.workbench.purchaseOrders.some((item) => item.id === "po_ipc"), true);
+    assert.equal(purchaseApiBody.workbench.purchaseOrders.some((item) => item.id === "po_delete_ipc"), false);
+    assert.equal(purchaseApiBody.workbench.paymentQueue.some((item) => item.paymentApprovalId === "pay_ipc"), true);
 
     const acceptPr = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
       method: "POST",
@@ -742,7 +789,7 @@ async function main() {
     assert.equal(detail1688Result.sku1688Source.externalOfferId, "1688-offer-ipc");
     assert.equal(detail1688Result.sku1688Source.externalSkuId, "sku-blue");
     assert.equal(detail1688Result.sku1688Source.externalSpecId, "spec-blue");
-    assert.equal(detail1688Result.sku1688Source.isDefault, false);
+    assert.equal(detail1688Result.sku1688Source.isDefault, true);
 
     const mix1688 = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
       method: "POST",

@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { execFileSync } from "child_process";
 import fs from "fs";
 import path from "path";
 import { findChromeExe } from "./browser.mjs";
@@ -90,11 +91,12 @@ export async function ensure1688Context(opts = {}) {
     const context = await chromium.launchPersistentContext(targetProfilePath, {
       executablePath,
       headless: false,
-      viewport: { width: 1480, height: 960 },
+      viewport: null,
       locale: "zh-CN",
       ignoreHTTPSErrors: true,
       args: [
         "--disable-blink-features=AutomationControlled",
+        "--start-maximized",
       ],
     });
 
@@ -219,6 +221,113 @@ export async function open1688LoginWindow(profilePath) {
       ok: false,
       reason: String(error?.message || error),
       profilePath: resolve1688ProfilePath(profilePath),
+    };
+  }
+}
+
+async function focus1688Page(page, profilePath) {
+  await page.bringToFront().catch(() => {});
+
+  const session = await page.context().newCDPSession(page).catch(() => null);
+  if (session) {
+    try {
+      const windowInfo = await session.send("Browser.getWindowForTarget").catch(() => null);
+      if (windowInfo?.windowId) {
+        await session.send("Browser.setWindowBounds", {
+          windowId: windowInfo.windowId,
+          bounds: { windowState: "maximized" },
+        }).catch(() => {});
+      }
+      await session.send("Page.bringToFront").catch(() => {});
+      const targetInfo = await session.send("Target.getTargetInfo").catch(() => null);
+      const targetId = targetInfo?.targetInfo?.targetId;
+      if (targetId) await session.send("Target.activateTarget", { targetId }).catch(() => {});
+    } finally {
+      await session.detach().catch(() => {});
+    }
+  }
+
+  if (process.platform !== "win32") return;
+  const script = `
+$profile = [System.IO.Path]::GetFullPath($env:TEMU_1688_PROFILE_PATH)
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class TemuWin32Focus {
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+}
+"@
+$topmost = [IntPtr]::new(-1)
+$notTopmost = [IntPtr]::new(-2)
+$flags = 0x0001 -bor 0x0002 -bor 0x0040
+$rows = Get-CimInstance Win32_Process | Where-Object {
+  $_.Name -match '^(chrome|msedge)\\.exe$' -and $_.CommandLine -and $_.CommandLine.Contains($profile)
+}
+foreach ($row in $rows) {
+  $proc = Get-Process -Id $row.ProcessId -ErrorAction SilentlyContinue
+  if ($proc -and $proc.MainWindowHandle -and $proc.MainWindowHandle -ne 0) {
+    [TemuWin32Focus]::ShowWindowAsync($proc.MainWindowHandle, 3) | Out-Null
+    [TemuWin32Focus]::SetWindowPos($proc.MainWindowHandle, $topmost, 0, 0, 0, 0, $flags) | Out-Null
+    [TemuWin32Focus]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
+    [TemuWin32Focus]::SetWindowPos($proc.MainWindowHandle, $notTopmost, 0, 0, 0, 0, $flags) | Out-Null
+    break
+  }
+}
+`;
+  try {
+    execFileSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], {
+      windowsHide: true,
+      timeout: 3000,
+      stdio: "ignore",
+      env: { ...process.env, TEMU_1688_PROFILE_PATH: profilePath },
+    });
+  } catch {
+    // Best-effort focus only; opening the tab is the important part.
+  }
+}
+
+export async function open1688DetailPage(url, opts = {}) {
+  const targetUrl = String(url || "").trim();
+  if (!/^https?:\/\//i.test(targetUrl)) {
+    return { ok: false, reason: "url required" };
+  }
+
+  const parsed = new URL(targetUrl);
+  if (!/(\.|^)1688\.com$/i.test(parsed.hostname)) {
+    return { ok: false, reason: "only 1688 detail urls are supported" };
+  }
+
+  try {
+    const targetProfilePath = resolve1688ProfilePath(opts.profilePath);
+    const hadOpenContext = Boolean(
+      browserState1688.context
+      && browserState1688.profilePath === targetProfilePath,
+    );
+    const context = await ensure1688Context({ profilePath: targetProfilePath });
+    const pages = (context.pages() || []).filter((page) => !page.isClosed?.());
+    const openedAs = hadOpenContext && pages.length > 0 ? "tab" : "window";
+    const page = openedAs === "tab"
+      ? await context.newPage()
+      : (pages.find((item) => item.url() === "about:blank") || pages[0] || await context.newPage());
+
+    await focus1688Page(page, targetProfilePath);
+    await page.goto(parsed.toString(), { waitUntil: "domcontentloaded", timeout: DEFAULT_TIMEOUT_MS }).catch(() => {});
+    await focus1688Page(page, targetProfilePath);
+
+    return {
+      ok: true,
+      method: "persistent_1688_profile",
+      openedAs,
+      profilePath: targetProfilePath,
+      url: page.url(),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: String(error?.message || error),
+      url: targetUrl,
     };
   }
 }

@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useRef, useState, type ComponentType, type LazyExoticComponent } from "react";
 import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { CollectionProvider } from "./contexts/CollectionContext";
 import { ErpAuthProvider, useErpAuth } from "./contexts/ErpAuthContext";
@@ -13,28 +13,58 @@ import {
 
 const ACCOUNT_STORAGE_KEY = "temu_accounts";
 
-const AppLayout = lazy(() => import("./components/Layout/AppLayout"));
-const Dashboard = lazy(() => import("./pages/Dashboard"));
-const ShopOverview = lazy(() => import("./pages/ShopOverview"));
-const AccountManager = lazy(() => import("./pages/AccountManager"));
-const ProductList = lazy(() => import("./pages/ProductList.tsx"));
-const ProductDetail = lazy(() => import("./pages/ProductDetail"));
-const Settings = lazy(() => import("./pages/Settings"));
-const ProductCreate = lazy(() => import("./pages/ProductCreate"));
-const ImageStudio = lazy(() => import("./pages/ImageStudio"));
-const ImageStudioGPT = lazy(() => import("./pages/ImageStudioGPT"));
-const Logs = lazy(() => import("./pages/Logs"));
-const CompetitorAnalysis = lazy(() => import("./pages/CompetitorAnalysis"));
-const PriceReview = lazy(() => import("./pages/PriceReview"));
-const ErpDebug = lazy(() => import("./pages/ErpDebug"));
-const ProductMasterData = lazy(() => import("./pages/ProductMasterData"));
-const PurchaseCenter = lazy(() => import("./pages/PurchaseCenter"));
-const AlibabaMapping = lazy(() => import("./pages/AlibabaMapping"));
-const WarehouseCenter = lazy(() => import("./pages/WarehouseCenter"));
-const QcOutboundCenter = lazy(() => import("./pages/QcOutboundCenter"));
-const WorkItems = lazy(() => import("./pages/WorkItems"));
-const UserManagement = lazy(() => import("./pages/UserManagement"));
-const ErpLogin = lazy(() => import("./pages/ErpLogin"));
+type LazyFactory<T extends ComponentType<any>> = () => Promise<{ default: T }>;
+type PreloadableLazy<T extends ComponentType<any>> = LazyExoticComponent<T> & { preload: LazyFactory<T> };
+
+function lazyWithPreload<T extends ComponentType<any>>(factory: LazyFactory<T>) {
+  const component = lazy(factory) as PreloadableLazy<T>;
+  component.preload = factory;
+  return component;
+}
+
+const AppLayout = lazyWithPreload(() => import("./components/Layout/AppLayout"));
+const Dashboard = lazyWithPreload(() => import("./pages/Dashboard"));
+const ShopOverview = lazyWithPreload(() => import("./pages/ShopOverview"));
+const AccountManager = lazyWithPreload(() => import("./pages/AccountManager"));
+const ProductList = lazyWithPreload(() => import("./pages/ProductList.tsx"));
+const ProductDetail = lazyWithPreload(() => import("./pages/ProductDetail"));
+const Settings = lazyWithPreload(() => import("./pages/Settings"));
+const ProductCreate = lazyWithPreload(() => import("./pages/ProductCreate"));
+const ImageStudio = lazyWithPreload(() => import("./pages/ImageStudio"));
+const ImageStudioGPT = lazyWithPreload(() => import("./pages/ImageStudioGPT"));
+const Logs = lazyWithPreload(() => import("./pages/Logs"));
+const CompetitorAnalysis = lazyWithPreload(() => import("./pages/CompetitorAnalysis"));
+const PriceReview = lazyWithPreload(() => import("./pages/PriceReview"));
+const ErpDebug = lazyWithPreload(() => import("./pages/ErpDebug"));
+const ProductMasterData = lazyWithPreload(() => import("./pages/ProductMasterData"));
+const PurchaseCenter = lazyWithPreload(() => import("./pages/PurchaseCenter"));
+const AlibabaMapping = lazyWithPreload(() => import("./pages/AlibabaMapping"));
+const WarehouseCenter = lazyWithPreload(() => import("./pages/WarehouseCenter"));
+const QcOutboundCenter = lazyWithPreload(() => import("./pages/QcOutboundCenter"));
+const WorkItems = lazyWithPreload(() => import("./pages/WorkItems"));
+const UserManagement = lazyWithPreload(() => import("./pages/UserManagement"));
+const ErpLogin = lazyWithPreload(() => import("./pages/ErpLogin"));
+
+const CORE_ROUTE_PRELOADERS = [
+  AppLayout.preload,
+  ShopOverview.preload,
+  ProductList.preload,
+  ProductMasterData.preload,
+  AlibabaMapping.preload,
+  PurchaseCenter.preload,
+  WarehouseCenter.preload,
+  QcOutboundCenter.preload,
+  WorkItems.preload,
+  AccountManager.preload,
+  Logs.preload,
+  Settings.preload,
+  UserManagement.preload,
+  PriceReview.preload,
+  Dashboard.preload,
+  CompetitorAnalysis.preload,
+  ProductCreate.preload,
+  ProductDetail.preload,
+];
 
 function RouteLoading() {
   return (
@@ -120,6 +150,25 @@ function RoleRoute({ path, children }: { path: string; children: JSX.Element }) 
 function App() {
   const [accountViewVersion, setAccountViewVersion] = useState(0);
   const lastEmittedAccountIdRef = useRef<string | null | undefined>(undefined);
+
+  useEffect(() => {
+    let index = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
+
+    const preloadNext = () => {
+      if (cancelled || index >= CORE_ROUTE_PRELOADERS.length) return;
+      const preload = CORE_ROUTE_PRELOADERS[index++];
+      void preload().catch(() => {});
+      timer = setTimeout(preloadNext, 220);
+    };
+
+    timer = setTimeout(preloadNext, 900);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, []);
 
   useEffect(() => {
     const store = window.electronAPI?.store;

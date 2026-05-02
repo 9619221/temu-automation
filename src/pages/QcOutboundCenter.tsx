@@ -24,6 +24,7 @@ import {
 import PageHeader from "../components/PageHeader";
 import StatCard from "../components/StatCard";
 import { useErpAuth } from "../contexts/ErpAuthContext";
+import { hasPageCache, readPageCache, writePageCache } from "../utils/pageCache";
 import {
   BATCH_QC_STATUS_LABELS,
   OUTBOUND_STATUS_LABELS,
@@ -37,6 +38,7 @@ import {
 
 const { Text } = Typography;
 const erp = window.electronAPI?.erp;
+const QC_OUTBOUND_CACHE_KEY = "temu.qc-outbound.workbench.cache.v1";
 
 interface QcBatchRow {
   id: string;
@@ -124,11 +126,22 @@ interface OutboundWorkbench {
   outboundShipments?: OutboundShipmentRow[];
 }
 
+interface QcOutboundCache {
+  generatedAt?: string;
+  qcData?: QcWorkbench;
+  outboundData?: OutboundWorkbench;
+}
+
 export default function QcOutboundCenter() {
   const auth = useErpAuth();
   const role = auth.currentUser?.role || "";
-  const [qcData, setQcData] = useState<QcWorkbench>({});
-  const [outboundData, setOutboundData] = useState<OutboundWorkbench>({});
+  const cachedData = useMemo(
+    () => readPageCache<QcOutboundCache>(QC_OUTBOUND_CACHE_KEY, {}),
+    [],
+  );
+  const [qcData, setQcData] = useState<QcWorkbench>(() => cachedData.qcData || {});
+  const [outboundData, setOutboundData] = useState<OutboundWorkbench>(() => cachedData.outboundData || {});
+  const [loadedOnce, setLoadedOnce] = useState(() => hasPageCache(cachedData));
   const [loading, setLoading] = useState(false);
   const [actingKey, setActingKey] = useState<string | null>(null);
   const [qcTarget, setQcTarget] = useState<QcBatchRow | null>(null);
@@ -138,6 +151,19 @@ export default function QcOutboundCenter() {
   const [planForm] = Form.useForm();
   const [shipForm] = Form.useForm();
 
+  const applyWorkbenches = useCallback((nextQc: QcWorkbench, nextOutbound: OutboundWorkbench) => {
+    const qcWorkbench = nextQc || {};
+    const outboundWorkbench = nextOutbound || {};
+    setQcData(qcWorkbench);
+    setOutboundData(outboundWorkbench);
+    setLoadedOnce(true);
+    writePageCache<QcOutboundCache>(QC_OUTBOUND_CACHE_KEY, {
+      generatedAt: new Date().toISOString(),
+      qcData: qcWorkbench,
+      outboundData: outboundWorkbench,
+    });
+  }, []);
+
   const loadData = useCallback(async () => {
     if (!erp) return;
     setLoading(true);
@@ -146,14 +172,13 @@ export default function QcOutboundCenter() {
         erp.qc.workbench({ limit: 200 }),
         erp.outbound.workbench({ limit: 200 }),
       ]);
-      setQcData(nextQc);
-      setOutboundData(nextOutbound);
+      applyWorkbenches(nextQc, nextOutbound);
     } catch (error: any) {
       message.error(error?.message || "质检发仓读取失败");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [applyWorkbenches]);
 
   useEffect(() => {
     void loadData();
@@ -604,6 +629,15 @@ export default function QcOutboundCenter() {
 
   const qcSummary = qcData.summary || {};
   const outboundSummary = outboundData.summary || {};
+  const tableLoading = loading
+    && !loadedOnce
+    && (
+      (qcData.pendingBatches?.length || 0)
+      + (qcData.inspections?.length || 0)
+      + (outboundData.availableBatches?.length || 0)
+      + (outboundData.outboundShipments?.length || 0)
+      > 0
+    );
 
   if (!erp) {
     return (
@@ -653,7 +687,7 @@ export default function QcOutboundCenter() {
         </div>
         <Table
           rowKey="id"
-          loading={loading}
+          loading={tableLoading}
           size="middle"
           columns={qcBatchColumns}
           dataSource={qcData.pendingBatches || []}
@@ -671,7 +705,7 @@ export default function QcOutboundCenter() {
         </div>
         <Table
           rowKey="id"
-          loading={loading}
+          loading={tableLoading}
           size="middle"
           columns={inspectionColumns}
           dataSource={qcData.inspections || []}
@@ -689,7 +723,7 @@ export default function QcOutboundCenter() {
         </div>
         <Table
           rowKey="id"
-          loading={loading}
+          loading={tableLoading}
           size="middle"
           columns={availableBatchColumns}
           dataSource={outboundData.availableBatches || []}
@@ -707,7 +741,7 @@ export default function QcOutboundCenter() {
         </div>
         <Table
           rowKey="id"
-          loading={loading}
+          loading={tableLoading}
           size="middle"
           columns={shipmentColumns}
           dataSource={outboundData.outboundShipments || []}

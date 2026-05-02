@@ -27,9 +27,11 @@ import PageHeader from "../components/PageHeader";
 import StatCard from "../components/StatCard";
 import { useErpAuth } from "../contexts/ErpAuthContext";
 import { canViewAllWorkItems, getDefaultWorkItemOwnerRole } from "../utils/erpRoleAccess";
+import { hasPageCache, readPageCache, writePageCache } from "../utils/pageCache";
 
 const { Text } = Typography;
 const erp = window.electronAPI?.erp;
+const WORK_ITEMS_CACHE_KEY = "temu.work-items.cache.v1";
 
 const ROLE_OPTIONS = [
   { label: "全部角色", value: "__all" },
@@ -135,6 +137,13 @@ interface LanStatus {
   localUrl?: string;
 }
 
+interface WorkItemsCache {
+  generatedAt?: string;
+  items?: WorkItemRow[];
+  stats?: WorkItemStats | null;
+  lanStatus?: LanStatus | null;
+}
+
 function formatTime(value?: string | null) {
   if (!value) return "-";
   const timestamp = Date.parse(value);
@@ -178,9 +187,14 @@ export default function WorkItems() {
   const navigate = useNavigate();
   const defaultOwnerRole = getDefaultWorkItemOwnerRole(auth.currentUser?.role);
   const canViewAll = canViewAllWorkItems(auth.currentUser?.role);
-  const [items, setItems] = useState<WorkItemRow[]>([]);
-  const [stats, setStats] = useState<WorkItemStats | null>(null);
-  const [lanStatus, setLanStatus] = useState<LanStatus | null>(null);
+  const cachedData = useMemo(
+    () => readPageCache<WorkItemsCache>(WORK_ITEMS_CACHE_KEY, {}),
+    [],
+  );
+  const [items, setItems] = useState<WorkItemRow[]>(() => cachedData.items || []);
+  const [stats, setStats] = useState<WorkItemStats | null>(() => cachedData.stats || null);
+  const [lanStatus, setLanStatus] = useState<LanStatus | null>(() => cachedData.lanStatus || null);
+  const [loadedOnce, setLoadedOnce] = useState(() => hasPageCache(cachedData));
   const [ownerRole, setOwnerRole] = useState(defaultOwnerRole);
   const [statusFilter, setStatusFilter] = useState("__active");
   const [loading, setLoading] = useState(false);
@@ -201,14 +215,24 @@ export default function WorkItems() {
         status: statusFilter.startsWith("__") ? undefined : statusFilter,
         activeOnly: statusFilter === "__active",
       };
-      const [nextItems, nextStats, nextLanStatus] = await Promise.all([
+      const [nextItems, nextStats, rawLanStatus] = await Promise.all([
         erp.workItem.list(params),
         erp.workItem.stats({ limit: 1 }),
         erp.lan.getStatus(),
       ]);
-      setItems(nextItems as WorkItemRow[]);
-      setStats(nextStats as WorkItemStats);
-      setLanStatus(nextLanStatus as LanStatus);
+      const nextItemRows = nextItems as WorkItemRow[];
+      const nextStatsRow = nextStats as WorkItemStats;
+      const nextLanStatus = rawLanStatus as LanStatus;
+      setItems(nextItemRows);
+      setStats(nextStatsRow);
+      setLanStatus(nextLanStatus);
+      setLoadedOnce(true);
+      writePageCache<WorkItemsCache>(WORK_ITEMS_CACHE_KEY, {
+        generatedAt: new Date().toISOString(),
+        items: nextItemRows,
+        stats: nextStatsRow,
+        lanStatus: nextLanStatus,
+      });
     } catch (error: any) {
       message.error(error?.message || "事项读取失败");
     } finally {
@@ -276,6 +300,7 @@ export default function WorkItems() {
       .filter(([key]) => key.startsWith("waiting_"))
       .reduce((sum, [, count]) => sum + Number(count || 0), 0)
   ), [stats]);
+  const tableLoading = (loading || generating) && !loadedOnce && items.length > 0;
 
   const columns = useMemo<ColumnsType<WorkItemRow>>(() => [
     {
@@ -458,7 +483,7 @@ export default function WorkItems() {
         <Table
           size="middle"
           rowKey="id"
-          loading={loading || generating}
+          loading={tableLoading}
           columns={columns}
           dataSource={items}
           scroll={{ x: 1180 }}

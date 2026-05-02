@@ -20,12 +20,20 @@ import {
   clearFrontendLogs,
   type FrontendLogEntry,
 } from "../utils/frontendLogger";
+import { hasPageCache, readPageCache, writePageCache } from "../utils/pageCache";
 
 const { Text } = Typography;
 const store = window.electronAPI?.store;
 const appApi = window.electronAPI?.app;
 
 type LevelFilter = "all" | "log" | "info" | "warn" | "error";
+
+interface LogsCache {
+  generatedAt?: string;
+  logs: FrontendLogEntry[];
+}
+
+const LOGS_CACHE_KEY = "page-cache:logs:v1";
 
 function levelLabel(level: FrontendLogEntry["level"] | LevelFilter) {
   switch (level) {
@@ -155,8 +163,10 @@ function normalizeLogEntry(log: any): FrontendLogEntry | null {
 }
 
 export default function Logs() {
-  const [logs, setLogs] = useState<FrontendLogEntry[]>([]);
+  const cached = useMemo(() => readPageCache<LogsCache>(LOGS_CACHE_KEY, { logs: [] }), []);
+  const [logs, setLogs] = useState<FrontendLogEntry[]>(() => cached.logs || []);
   const [loading, setLoading] = useState(false);
+  const [loadedOnce, setLoadedOnce] = useState(() => hasPageCache(cached));
   const [searchText, setSearchText] = useState("");
   const [levelFilter, setLevelFilter] = useState<LevelFilter>("all");
 
@@ -175,6 +185,11 @@ export default function Logs() {
         .sort((a, b) => (b?.timestamp || 0) - (a?.timestamp || 0))
         .slice(0, 1000) as FrontendLogEntry[];
       setLogs(merged);
+      setLoadedOnce(true);
+      writePageCache(LOGS_CACHE_KEY, {
+        generatedAt: new Date().toISOString(),
+        logs: merged.slice(0, 500),
+      });
     } finally {
       setLoading(false);
     }
@@ -211,6 +226,7 @@ export default function Logs() {
   const errorCount = logs.filter((log) => log.level === "error").length;
   const warnCount = logs.filter((log) => log.level === "warn").length;
   const latestTime = logs[0]?.timestamp ? formatTime(logs[0].timestamp) : "--";
+  const tableLoading = loading && !loadedOnce && filteredLogs.length > 0;
 
   const columns: ColumnsType<FrontendLogEntry> = [
     {
@@ -340,7 +356,7 @@ export default function Logs() {
           <Table
             rowKey="id"
             size="small"
-            loading={loading}
+            loading={tableLoading}
             dataSource={filteredLogs}
             columns={columns}
             pagination={{ pageSize: 24, showSizeChanger: true }}

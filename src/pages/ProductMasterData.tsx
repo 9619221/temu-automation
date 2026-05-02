@@ -4,8 +4,16 @@ import type { ColumnsType } from "antd/es/table";
 import { DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
 import { useErpAuth } from "../contexts/ErpAuthContext";
+import { hasPageCache, readPageCache, writePageCache } from "../utils/pageCache";
 
 const erp = window.electronAPI?.erp;
+const PRODUCT_MASTER_DATA_CACHE_KEY = "temu.product-master-data.cache.v1";
+const ADDRESS_WORKBENCH_PARAMS = {
+  limit: 20,
+  includeRequestDetails: false,
+  includeOptions: false,
+  include1688Meta: true,
+};
 
 interface ErpAccountRow {
   id: string;
@@ -110,6 +118,14 @@ type MasterDataMode = "skus" | "suppliers" | "stores";
 
 interface ProductMasterDataProps {
   mode?: MasterDataMode;
+}
+
+interface ProductMasterDataCache {
+  generatedAt?: string;
+  accounts?: ErpAccountRow[];
+  suppliers?: ErpSupplierRow[];
+  skus?: ErpSkuRow[];
+  alibaba1688Addresses?: Alibaba1688AddressRow[];
 }
 
 function statusColor(status?: string) {
@@ -347,7 +363,7 @@ function buildStoreAddressPayload(values: StoreAddressValues, accountId: string,
     alibabaAddressId: values.alibabaAddressId,
     isDefault: true,
     status: "active",
-    limit: 500,
+    ...ADDRESS_WORKBENCH_PARAMS,
   };
 }
 
@@ -358,6 +374,10 @@ function isDeleteAccountHandlerMissing(error: any) {
 export default function ProductMasterData({ mode = "skus" }: ProductMasterDataProps) {
   const auth = useErpAuth();
   const role = auth.currentUser?.role;
+  const cachedData = useMemo(
+    () => readPageCache<ProductMasterDataCache>(PRODUCT_MASTER_DATA_CACHE_KEY, {}),
+    [],
+  );
   const canManageAccounts = canRole(role, ["admin", "manager"]);
   const canManageStoreAddress = canRole(role, ["admin", "manager", "buyer"]);
   const canManageSuppliers = canRole(role, ["admin", "manager", "buyer"]);
@@ -367,10 +387,11 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
   const [storeAddressForm] = Form.useForm<StoreAddressValues>();
   const [supplierForm] = Form.useForm();
   const [skuForm] = Form.useForm();
-  const [accounts, setAccounts] = useState<ErpAccountRow[]>([]);
-  const [suppliers, setSuppliers] = useState<ErpSupplierRow[]>([]);
-  const [skus, setSkus] = useState<ErpSkuRow[]>([]);
-  const [alibaba1688Addresses, setAlibaba1688Addresses] = useState<Alibaba1688AddressRow[]>([]);
+  const [accounts, setAccounts] = useState<ErpAccountRow[]>(() => cachedData.accounts || []);
+  const [suppliers, setSuppliers] = useState<ErpSupplierRow[]>(() => cachedData.suppliers || []);
+  const [skus, setSkus] = useState<ErpSkuRow[]>(() => cachedData.skus || []);
+  const [alibaba1688Addresses, setAlibaba1688Addresses] = useState<Alibaba1688AddressRow[]>(() => cachedData.alibaba1688Addresses || []);
+  const [loadedOnce, setLoadedOnce] = useState(() => hasPageCache(cachedData));
   const [loading, setLoading] = useState(false);
   const [addressLoading, setAddressLoading] = useState(false);
   const [submitting, setSubmitting] = useState<string | null>(null);
@@ -433,31 +454,52 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
         erp.account.list({ limit: 500 }),
         erp.supplier.list({ limit: 500 }),
         erp.sku.list({ limit: 500 }),
-        erp.purchase.workbench({ limit: 20 }).catch(() => null),
+        erp.purchase.workbench(ADDRESS_WORKBENCH_PARAMS).catch(() => null),
       ]);
-      setAccounts(nextAccounts as ErpAccountRow[]);
-      setSuppliers(nextSuppliers as ErpSupplierRow[]);
-      setSkus(nextSkus as ErpSkuRow[]);
       const nextAddresses = get1688AddressRows(purchaseWorkbench);
+      const nextAccountRows = nextAccounts as ErpAccountRow[];
+      const nextSupplierRows = nextSuppliers as ErpSupplierRow[];
+      const nextSkuRows = nextSkus as ErpSkuRow[];
+      setAccounts(nextAccountRows);
+      setSuppliers(nextSupplierRows);
+      setSkus(nextSkuRows);
       if (nextAddresses.length) setAlibaba1688Addresses(nextAddresses);
+      setLoadedOnce(true);
+      writePageCache<ProductMasterDataCache>(PRODUCT_MASTER_DATA_CACHE_KEY, {
+        generatedAt: new Date().toISOString(),
+        accounts: nextAccountRows,
+        suppliers: nextSupplierRows,
+        skus: nextSkuRows,
+        alibaba1688Addresses: nextAddresses.length ? nextAddresses : cachedData.alibaba1688Addresses,
+      });
     } catch (error: any) {
       message.error(error?.message || "商品资料读取失败");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [cachedData.alibaba1688Addresses]);
 
   const refresh1688Addresses = useCallback(async (syncIfEmpty = false) => {
     if (!erp) return [];
     setAddressLoading(true);
     try {
-      const workbench = await erp.purchase.workbench({ limit: 500 }).catch(() => null);
+      const workbench = await erp.purchase.workbench(ADDRESS_WORKBENCH_PARAMS).catch(() => null);
       let nextAddresses = get1688AddressRows(workbench);
       if (!nextAddresses.length && syncIfEmpty) {
-        const result = await erp.purchase.action({ action: "sync_1688_addresses", limit: 500 });
+        const result = await erp.purchase.action({ action: "sync_1688_addresses", ...ADDRESS_WORKBENCH_PARAMS });
         nextAddresses = get1688AddressRows(result);
       }
-      if (nextAddresses.length) setAlibaba1688Addresses(nextAddresses);
+      if (nextAddresses.length) {
+        setAlibaba1688Addresses(nextAddresses);
+        setLoadedOnce(true);
+        writePageCache<ProductMasterDataCache>(PRODUCT_MASTER_DATA_CACHE_KEY, {
+          generatedAt: new Date().toISOString(),
+          accounts,
+          suppliers,
+          skus,
+          alibaba1688Addresses: nextAddresses,
+        });
+      }
       return nextAddresses;
     } catch (error: any) {
       if (syncIfEmpty) message.error(error?.message || "1688 地址同步失败");
@@ -465,7 +507,7 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
     } finally {
       setAddressLoading(false);
     }
-  }, []);
+  }, [accounts, skus, suppliers]);
 
   useEffect(() => {
     void loadAll();
@@ -844,6 +886,8 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
     </Form>
   );
 
+  const tableLoading = loading && !loadedOnce && (accounts.length + suppliers.length + skus.length > 0);
+
   const renderAccountManager = () => (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
       {canManageAccounts ? (
@@ -858,7 +902,7 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
       <Table
         size="small"
         rowKey="id"
-        loading={loading}
+        loading={tableLoading}
         columns={accountColumns}
         dataSource={accounts}
         pagination={{ pageSize: 5, showSizeChanger: false }}
@@ -960,7 +1004,7 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
             className="product-master-data-table product-master-data-table--skus"
             size="small"
             rowKey="id"
-            loading={loading}
+            loading={tableLoading}
             columns={skuColumns}
             dataSource={filteredSkus}
             scroll={{ x: 1500, y: "max(220px, calc(100vh - 470px))" }}
@@ -1027,7 +1071,7 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
           <Table
             size="small"
             rowKey="id"
-            loading={loading}
+            loading={tableLoading}
             columns={supplierColumns}
             dataSource={suppliers}
             pagination={{ pageSize: 5, showSizeChanger: false }}

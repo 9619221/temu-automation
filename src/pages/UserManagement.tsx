@@ -6,6 +6,7 @@ import PageHeader from "../components/PageHeader";
 import { roleLabel } from "../utils/erpRoleAccess";
 import { useErpAuth } from "../contexts/ErpAuthContext";
 import { ERP_CLOUD_SERVER_URL } from "../config/erpCloud";
+import { hasPageCache, readPageCache, writePageCache } from "../utils/pageCache";
 
 const { Text } = Typography;
 const erp = window.electronAPI?.erp;
@@ -49,6 +50,14 @@ interface ClientStatusView {
   connected?: boolean;
 }
 
+interface UserManagementCache {
+  generatedAt?: string;
+  users: ErpUserRow[];
+  clientStatus: ClientStatusView | null;
+}
+
+const USER_MANAGEMENT_CACHE_KEY = "page-cache:user-management:v1";
+
 function formatTime(value?: string | null) {
   if (!value) return "-";
   const timestamp = Date.parse(value);
@@ -66,9 +75,14 @@ export default function UserManagement() {
   const [form] = Form.useForm<UserFormValues>();
   const [cloudForm] = Form.useForm<{ login: string; accessCode: string }>();
   const auth = useErpAuth();
-  const [users, setUsers] = useState<ErpUserRow[]>([]);
-  const [clientStatus, setClientStatus] = useState<ClientStatusView | null>(null);
+  const cached = useMemo(() => readPageCache<UserManagementCache>(USER_MANAGEMENT_CACHE_KEY, {
+    users: [],
+    clientStatus: null,
+  }), []);
+  const [users, setUsers] = useState<ErpUserRow[]>(() => cached.users || []);
+  const [clientStatus, setClientStatus] = useState<ClientStatusView | null>(() => cached.clientStatus || null);
   const [loading, setLoading] = useState(false);
+  const [loadedOnce, setLoadedOnce] = useState(() => hasPageCache(cached));
   const [submitting, setSubmitting] = useState(false);
   const [cloudSubmitting, setCloudSubmitting] = useState(false);
   const editingId = Form.useWatch("id", form);
@@ -80,6 +94,7 @@ export default function UserManagement() {
   }, [users]);
   const isCloudMode = Boolean(clientStatus?.isClientMode);
   const canManageUsers = isCloudMode;
+  const tableLoading = loading && !loadedOnce && users.length > 0;
   const userStoreName = "云端用户库";
 
   const loadUsers = useCallback(async () => {
@@ -92,10 +107,24 @@ export default function UserManagement() {
       }
       if (!nextClientStatus?.isClientMode) {
         setUsers([]);
+        const nextCache = {
+          generatedAt: new Date().toISOString(),
+          users: [],
+          clientStatus: nextClientStatus as ClientStatusView | null,
+        };
+        setLoadedOnce(true);
+        writePageCache(USER_MANAGEMENT_CACHE_KEY, nextCache);
         return;
       }
       const nextUsers = await erp.user.list({ limit: 200 });
-      setUsers(nextUsers as ErpUserRow[]);
+      const nextCache = {
+        generatedAt: new Date().toISOString(),
+        users: nextUsers as ErpUserRow[],
+        clientStatus: nextClientStatus as ClientStatusView | null,
+      };
+      setUsers(nextCache.users);
+      setLoadedOnce(true);
+      writePageCache(USER_MANAGEMENT_CACHE_KEY, nextCache);
     } catch (error: any) {
       message.error(error?.message || "用户列表读取失败");
     } finally {
@@ -395,7 +424,7 @@ export default function UserManagement() {
         <Table
           size="small"
           rowKey="id"
-          loading={loading}
+          loading={tableLoading}
           columns={columns}
           dataSource={users}
           pagination={{ pageSize: 8, showSizeChanger: false }}

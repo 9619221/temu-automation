@@ -10,6 +10,7 @@ import {
 import PageHeader from "../components/PageHeader";
 import StatCard from "../components/StatCard";
 import { useErpAuth } from "../contexts/ErpAuthContext";
+import { hasPageCache, readPageCache, writePageCache } from "../utils/pageCache";
 import {
   BATCH_QC_STATUS_LABELS,
   INBOUND_STATUS_LABELS,
@@ -22,6 +23,7 @@ import {
 
 const { Text } = Typography;
 const erp = window.electronAPI?.erp;
+const WAREHOUSE_WORKBENCH_CACHE_KEY = "temu.warehouse.workbench.cache.v1";
 
 interface InboundReceiptRow {
   id: string;
@@ -73,21 +75,33 @@ interface WarehouseWorkbench {
 export default function WarehouseCenter() {
   const auth = useErpAuth();
   const role = auth.currentUser?.role || "";
-  const [data, setData] = useState<WarehouseWorkbench>({});
+  const cachedData = useMemo(
+    () => readPageCache<WarehouseWorkbench>(WAREHOUSE_WORKBENCH_CACHE_KEY, {}),
+    [],
+  );
+  const [data, setData] = useState<WarehouseWorkbench>(cachedData);
+  const [loadedOnce, setLoadedOnce] = useState(() => hasPageCache(cachedData));
   const [loading, setLoading] = useState(false);
   const [actingKey, setActingKey] = useState<string | null>(null);
+
+  const applyWorkbench = useCallback((workbench: WarehouseWorkbench) => {
+    const nextWorkbench = workbench || {};
+    setData(nextWorkbench);
+    setLoadedOnce(true);
+    writePageCache(WAREHOUSE_WORKBENCH_CACHE_KEY, nextWorkbench);
+  }, []);
 
   const loadData = useCallback(async () => {
     if (!erp) return;
     setLoading(true);
     try {
-      setData(await erp.warehouse.workbench({ limit: 200 }));
+      applyWorkbench(await erp.warehouse.workbench({ limit: 200 }));
     } catch (error: any) {
       message.error(error?.message || "仓库中心读取失败");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [applyWorkbench]);
 
   useEffect(() => {
     void loadData();
@@ -98,7 +112,7 @@ export default function WarehouseCenter() {
     setActingKey(key);
     try {
       const result = await erp.warehouse.action({ ...payload, limit: 200 });
-      setData(result?.workbench || await erp.warehouse.workbench({ limit: 200 }));
+      applyWorkbench(result?.workbench || await erp.warehouse.workbench({ limit: 200 }));
       message.success(successText);
     } catch (error: any) {
       message.error(error?.message || "操作失败");
@@ -271,7 +285,9 @@ export default function WarehouseCenter() {
   ], []);
 
   const summary = data.summary || {};
-
+  const tableLoading = loading
+    && !loadedOnce
+    && ((data.inboundReceipts?.length || 0) + (data.inventoryBatches?.length || 0) > 0);
   if (!erp) {
     return (
       <div className="dashboard-shell">
@@ -317,7 +333,7 @@ export default function WarehouseCenter() {
         </div>
         <Table
           rowKey="id"
-          loading={loading}
+          loading={tableLoading}
           size="middle"
           columns={receiptColumns}
           dataSource={data.inboundReceipts || []}
@@ -335,7 +351,7 @@ export default function WarehouseCenter() {
         </div>
         <Table
           rowKey="id"
-          loading={loading}
+          loading={tableLoading}
           size="middle"
           columns={batchColumns}
           dataSource={data.inventoryBatches || []}

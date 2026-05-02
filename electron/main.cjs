@@ -4092,6 +4092,10 @@ ipcMain.handle("erp:purchase:local-1688-inquiry", async (_event, payload) => {
   return sendCmd("local_1688_inquiry", payload || {}, { timeoutMs: WORKER_LONG_TASK_TIMEOUT_MS });
 });
 
+ipcMain.handle("erp:purchase:open-1688-detail", async (_event, payload) => {
+  return sendCmd("open_1688_detail", payload || {}, { timeoutMs: 60000 });
+});
+
 // ============ 竞品分析 IPC ============
 
 ipcMain.handle("competitor:search", async (_e, params) => sendCmd("competitor_search", params || {}));

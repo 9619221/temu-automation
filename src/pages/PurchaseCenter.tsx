@@ -6,7 +6,6 @@ import {
   Button,
   Checkbox,
   Col,
-  DatePicker,
   Drawer,
   Form,
   Input,
@@ -17,6 +16,7 @@ import {
   Row,
   Select,
   Space,
+  Spin,
   Table,
   Tag,
   Typography,
@@ -25,10 +25,8 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type { TableRowSelection } from "antd/es/table/interface";
-import type { Dayjs } from "dayjs";
 import {
   ApiOutlined,
-  CarOutlined,
   CheckCircleOutlined,
   CommentOutlined,
   DeleteOutlined,
@@ -72,6 +70,7 @@ const UPLOAD_IMAGE_TARGET_BYTES = 260 * 1024;
 
 const SHOW_KEYWORD_1688_SOURCE = false;
 const AUTO_1688_ORDER_SYNC_INTERVAL_MS = 10 * 60 * 1000;
+const AUTO_1688_ORDER_SYNC_START_DELAY_MS = 15 * 1000;
 const IMAGE_SEARCH_PAGE_SIZE = 10;
 const IMAGE_SEARCH_MAX_PAGE = 10;
 const AUTO_INQUIRY_LIMIT = 5;
@@ -81,6 +80,52 @@ const CANDIDATE_SCROLL_REARM_PX = 220;
 const MINIMIZED_IMAGE_SEARCH_WIDTH = 132;
 const MINIMIZED_IMAGE_SEARCH_HEIGHT = 58;
 const MINIMIZED_IMAGE_SEARCH_MARGIN = 8;
+const PURCHASE_WORKBENCH_CACHE_KEY = "temu.purchase.workbench.cache.v2";
+const FAST_PURCHASE_WORKBENCH_PARAMS = {
+  limit: 200,
+  includeRequestDetails: false,
+  includeOptions: false,
+  include1688Meta: false,
+};
+const FULL_PURCHASE_WORKBENCH_PARAMS = {
+  limit: 200,
+  includeRequestDetails: false,
+};
+const TABLE_IDENTIFIER_TEXT_STYLE = {
+  fontFamily: "inherit",
+  fontWeight: 500,
+  color: "#0f172a",
+};
+const QUICK_PURCHASE_ACTIONS = new Set([
+  "accept_pr",
+  "mark_read",
+  "mark_sourced",
+  "cancel_pr",
+  "delete_pr",
+  "generate_po",
+  "delete_po",
+  "rollback_po_status",
+  "submit_payment_approval",
+  "approve_payment",
+  "confirm_paid",
+  "request_1688_price_change",
+  "get_1688_payment_url",
+  "query_1688_pay_ways",
+  "query_1688_protocol_pay_status",
+  "prepare_1688_protocol_pay",
+  "sync_1688_order_price",
+  "sync_1688_refunds",
+  "sync_1688_refund_detail",
+  "get_1688_refund_reasons",
+  "get_1688_max_refund_fee",
+  "upload_1688_refund_voucher",
+  "create_1688_refund",
+  "cancel_1688_order",
+  "add_1688_order_memo",
+  "add_1688_order_feedback",
+  "confirm_1688_receive_goods",
+  "link_1688_order_to_po",
+]);
 const DEFAULT_PURCHASE_INQUIRY_TEMPLATE = [
   "商品包装方式是什么？商品需要提供哪些资质文件？可以优惠吗？",
   "整箱包装尺寸和重量是多少？下单需要注意什么？",
@@ -96,10 +141,31 @@ const PURCHASE_INQUIRY_TEMPLATE_VARIABLES = [
 ];
 let lastAuto1688OrderSyncAt = 0;
 let auto1688OrderSyncPromise: Promise<void> | null = null;
+let initialPurchaseWorkbenchCache: PurchaseWorkbench | null | undefined;
 type PurchaseRequestDrawerMode = "collaboration" | "imageSearch";
+
+interface ExternalSkuOptionRow {
+  externalSkuId?: string | null;
+  externalSpecId?: string | null;
+  specText?: string | null;
+  price?: number | null;
+  stock?: number | null;
+}
+
+interface BindingSpecRow extends ExternalSkuOptionRow {
+  key: string;
+  externalSpecId: string;
+}
+
+interface SpecBindingDialogState {
+  candidate: SourcingCandidateRow;
+  prId?: string | null;
+}
 
 interface SourcingCandidateRow {
   id: string;
+  prId?: string;
+  accountId?: string | null;
   purchaseSource?: string;
   sourcingMethod?: string;
   supplierName?: string;
@@ -109,7 +175,7 @@ interface SourcingCandidateRow {
   externalOfferId?: string | null;
   externalSkuId?: string | null;
   externalSpecId?: string | null;
-  externalSkuOptions?: Array<{ externalSkuId?: string | null; externalSpecId?: string | null; specText?: string; price?: number | null }>;
+  externalSkuOptions?: ExternalSkuOptionRow[];
   externalPriceRanges?: Array<{ startQuantity?: number; price?: number }>;
   externalDetailFetchedAt?: string | null;
   sourcePayload?: Record<string, any> | null;
@@ -139,6 +205,8 @@ interface TimelineRow {
 
 interface PurchaseRequestRow {
   id: string;
+  accountId?: string | null;
+  skuId?: string | null;
   internalSkuCode?: string;
   productName?: string;
   skuImageUrl?: string | null;
@@ -171,6 +239,9 @@ interface PurchaseOrderRow {
   status: string;
   paymentStatus?: string;
   skuSummary?: string;
+  skuImageUrl?: string | null;
+  skuCodes?: string | null;
+  productNames?: string | null;
   totalQty?: number;
   receivedQty?: number;
   totalAmount?: number;
@@ -376,23 +447,20 @@ interface Source1688FormValues {
   priceEnd?: number;
 }
 
-interface PoFormValues {
-  candidateId?: string;
-  externalSkuId?: string;
-  externalSpecId?: string;
-  unitPrice?: number;
-  qty?: number;
-  expectedDeliveryDate?: Dayjs | null;
-  remark?: string;
-}
-
 interface RefundFormValues {
   refundType?: string;
   goodsStatus?: string;
   amount?: number;
+  refundReasonId?: string;
   reason?: string;
   description?: string;
   rawParams?: string;
+}
+
+interface RefundReasonOption {
+  label: string;
+  value: string;
+  refundReasonId?: string | null;
 }
 
 interface OrderNoteFormValues {
@@ -412,16 +480,62 @@ interface OrderNoteDialogState {
   mode: "memo" | "feedback";
 }
 
+function compactPurchaseWorkbenchForCache(workbench: PurchaseWorkbench): PurchaseWorkbench {
+  const purchaseRequests = Array.isArray(workbench.purchaseRequests)
+    ? workbench.purchaseRequests.map((row) => {
+      const { candidates: _candidates, timeline: _timeline, comments: _comments, events: _events, ...rest } = row as any;
+      return rest as PurchaseRequestRow;
+    })
+    : undefined;
+  return {
+    ...workbench,
+    purchaseRequests,
+  };
+}
+
+function readCachedPurchaseWorkbench(): PurchaseWorkbench {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(PURCHASE_WORKBENCH_CACHE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed as PurchaseWorkbench : {};
+  } catch {
+    return {};
+  }
+}
+
+function getInitialPurchaseWorkbenchCache(): PurchaseWorkbench {
+  if (initialPurchaseWorkbenchCache === undefined) {
+    initialPurchaseWorkbenchCache = readCachedPurchaseWorkbench();
+  }
+  return initialPurchaseWorkbenchCache || {};
+}
+
+function writeCachedPurchaseWorkbench(workbench: PurchaseWorkbench) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(
+      PURCHASE_WORKBENCH_CACHE_KEY,
+      JSON.stringify(compactPurchaseWorkbenchForCache(workbench)),
+    );
+  } catch {
+    // Cache is only a speed hint; ignore quota or privacy-mode failures.
+  }
+}
+
+function hasWorkbenchSnapshot(workbench: PurchaseWorkbench) {
+  return Boolean(
+    workbench.generatedAt
+    || (Array.isArray(workbench.purchaseRequests) && workbench.purchaseRequests.length)
+    || (Array.isArray(workbench.purchaseOrders) && workbench.purchaseOrders.length)
+  );
+}
+
 function formatCurrency(value?: number | string | null) {
   const number = Number(value ?? 0);
   if (!Number.isFinite(number)) return "-";
   return `¥${number.toFixed(2)}`;
-}
-
-function toApiDate(value?: Dayjs | string | null) {
-  if (!value) return null;
-  if (typeof value === "string") return value;
-  return value.format("YYYY-MM-DD");
 }
 
 function skuText(row: { internalSkuCode?: string; productName?: string }) {
@@ -431,10 +545,6 @@ function skuText(row: { internalSkuCode?: string; productName?: string }) {
       <Text type="secondary" style={{ fontSize: 12 }}>{row.productName || "-"}</Text>
     </Space>
   );
-}
-
-function candidateLabel(candidate: SourcingCandidateRow) {
-  return `${candidate.supplierName || "未命名供应商"} · ${formatCurrency(candidate.unitPrice)} · 起订量 ${formatQty(candidate.moq || 1)}`;
 }
 
 function candidatePayload(candidate: SourcingCandidateRow): Record<string, any> {
@@ -828,6 +938,28 @@ function parseJsonObjectInput(text?: string) {
   return JSON.parse(value);
 }
 
+function normalizeRefundReasonOptions(rows: any[] = []): RefundReasonOption[] {
+  const seen = new Set<string>();
+  const options: RefundReasonOption[] = [];
+  for (const row of rows) {
+    const label = String(row?.label || row?.reason || row?.value || row?.name || row?.refundReason || "").trim();
+    const refundReasonId = String(row?.refundReasonId || row?.reasonId || row?.id || "").trim();
+    const value = label || refundReasonId;
+    if (!value) continue;
+    const key = `${refundReasonId}:${value}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    options.push({ label: value, value, refundReasonId: refundReasonId || null });
+  }
+  return options;
+}
+
+function optionalFiniteNumber(value: unknown) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
 function cleanRemoteErrorMessage(error: any) {
   return String(error?.message || error || "")
     .replace(/^Error invoking remote method '[^']+':\s*/i, "")
@@ -835,11 +967,16 @@ function cleanRemoteErrorMessage(error: any) {
     .trim();
 }
 
+function is1688AclDeniedError(error: any, message: string) {
+  if (error?.code === "1688_APP_ACL_DENIED") return true;
+  return /AppKey is not allowed\(acl\)|not allowed\(acl\)|当前 1688 AppKey 没有接口权限/i.test(message);
+}
+
 function purchaseActionErrorMessage(error: any, action?: string) {
   const message = cleanRemoteErrorMessage(error);
-  if (/AppKey is not allowed\(acl\)|not allowed\(acl\)/i.test(message)) {
+  if (is1688AclDeniedError(error, message)) {
     if (action === "refresh_1688_product_detail") {
-      return "当前 1688 AppKey 没有商品详情接口权限，不能同步规格；请在 1688 开放平台开通 alibaba.product.get 接口，或先生成本地采购单。";
+      return message || "1688 官方商品详情接口没有权限，已无法从官方接口同步规格；请确认遨虾 productDetailQuery 密钥配置后重试。";
     }
     if (action === "preview_1688_order" || action === "push_1688_order") {
       return "当前 1688 AppKey 没有下单接口权限，暂时不能推送 1688；请在 1688 开放平台开通对应交易接口权限。";
@@ -849,52 +986,38 @@ function purchaseActionErrorMessage(error: any, action?: string) {
   if (message.includes("Client network socket disconnected before secure TLS connection was established")) {
     return "1688 网络连接中断，TLS 握手未完成，请稍后重试";
   }
+  if (/1688 API request failed with HTTP 200/i.test(message)) {
+    if (action === "get_1688_payment_url") {
+      return "1688 没有返回付款链接，订单可能已取消、已付款或当前账号无权限";
+    }
+    if (action === "query_1688_pay_ways" || action === "query_1688_protocol_pay_status" || action === "prepare_1688_protocol_pay") {
+      return "当前 1688 订单状态不支持付款操作，请先确认订单是否已取消或已付款";
+    }
+    return "1688 返回业务失败，系统已保留当前数据，请稍后重试";
+  }
   return message || "操作失败";
 }
 
-function firstPoCandidate(row?: PurchaseRequestRow | null) {
-  const candidates = row?.candidates || [];
-  return candidates.find((item) => item.status === "selected")
-    || candidates.find((item) => item.status === "shortlisted")
-    || candidates[0]
-    || null;
+function canUse1688PaymentActions(row: PurchaseOrderRow) {
+  if (!row.externalOrderId) return false;
+  const localStatus = String(row.status || "").toLowerCase();
+  const paymentStatus = String(row.paymentStatus || "").toLowerCase();
+  const externalStatus = String(row.externalOrderStatus || "").toLowerCase();
+  if (["cancelled", "canceled", "closed", "success", "received", "arrived", "paid"].includes(localStatus)) return false;
+  if (["paid", "confirmed", "success"].includes(paymentStatus)) return false;
+  if (/cancel|close|terminat|success/.test(externalStatus)) return false;
+  return true;
 }
 
-function candidateSpecOptions(candidate?: SourcingCandidateRow | null) {
+function candidateSpecRows(candidate?: SourcingCandidateRow | null): BindingSpecRow[] {
   const options = Array.isArray(candidate?.externalSkuOptions) ? candidate.externalSkuOptions : [];
   return options
     .filter((item) => item.externalSpecId)
-    .map((item) => ({
-      value: String(item.externalSpecId),
-      externalSkuId: item.externalSkuId || undefined,
-      unitPrice: item.price ?? undefined,
-      label: [
-        item.specText || item.externalSpecId,
-        item.price !== null && item.price !== undefined ? formatCurrency(item.price) : "",
-      ].filter(Boolean).join(" · "),
+    .map((item, index) => ({
+      ...item,
+      externalSpecId: String(item.externalSpecId),
+      key: `${item.externalSpecId || ""}:${item.externalSkuId || ""}:${index}`,
     }));
-}
-
-function defaultCandidateSpec(candidate?: SourcingCandidateRow | null) {
-  const options = candidateSpecOptions(candidate);
-  if (candidate?.externalSpecId) {
-    const matched = options.find((item) => item.value === candidate.externalSpecId);
-    return {
-      externalSpecId: candidate.externalSpecId,
-      externalSkuId: matched?.externalSkuId || candidate.externalSkuId || undefined,
-      unitPrice: matched?.unitPrice ?? candidate.unitPrice,
-    };
-  }
-  const first = options[0];
-  return first ? {
-    externalSpecId: first.value,
-    externalSkuId: first.externalSkuId,
-    unitPrice: first.unitPrice ?? candidate?.unitPrice,
-  } : {
-    externalSpecId: undefined,
-    externalSkuId: candidate?.externalSkuId || undefined,
-    unitPrice: candidate?.unitPrice,
-  };
 }
 
 type PurchaseQueueKey =
@@ -961,6 +1084,15 @@ function has1688OrderTrace(row?: PurchaseOrderRow | null) {
   if (row.externalOrderId) return true;
   const status = row.externalOrderStatus || "";
   return Boolean(status && !["previewed", "price_change_requested"].includes(status));
+}
+
+function canDeletePurchaseOrder(row?: PurchaseOrderRow | null) {
+  if (!row) return false;
+  const paymentStatus = String(row.paymentStatus || "unpaid").toLowerCase();
+  return row.status === "draft"
+    && paymentStatus === "unpaid"
+    && !has1688OrderTrace(row)
+    && Number(row.receivedQty || 0) <= 0;
 }
 
 function getPurchaseOrderRollbackTarget(row?: PurchaseOrderRow | null) {
@@ -1051,6 +1183,33 @@ function getPurchaseRequestDefaultImageUrl(row?: PurchaseRequestRow | null) {
   return row.skuImageUrl || "";
 }
 
+function splitGroupedText(value?: string | null) {
+  return String(value || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function getPurchaseOrderSkuCodes(row: PurchaseOrderRow) {
+  const explicit = splitGroupedText(row.skuCodes);
+  if (explicit.length) return explicit;
+  return splitGroupedText(row.skuSummary)
+    .map((item) => item.split(/\s+/)[0])
+    .filter(Boolean);
+}
+
+function getPurchaseOrderProductNames(row: PurchaseOrderRow) {
+  const explicit = splitGroupedText(row.productNames);
+  if (explicit.length) return explicit;
+  return splitGroupedText(row.skuSummary)
+    .map((item) => item.replace(/^\S+\s+/, "").trim())
+    .filter(Boolean);
+}
+
+function joinGroupedText(items: string[]) {
+  return items.filter(Boolean).join(" / ");
+}
+
 function extractMessageImageUrls(value?: string | null) {
   const text = String(value || "");
   const urls: string[] = [];
@@ -1132,6 +1291,8 @@ function buildPurchaseOrderSearchText(row: PurchaseOrderRow) {
     row.paymentStatus,
     row.paymentStatus ? PAYMENT_STATUS_LABELS[row.paymentStatus] : "",
     row.skuSummary,
+    row.skuCodes,
+    row.productNames,
     row.externalOrderId,
     row.externalOrderStatus,
     row.createdAt,
@@ -1185,8 +1346,9 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const canPurchase = canRole(role, ["buyer", "manager", "admin"]);
   const canFinance = canRole(role, ["finance", "manager", "admin"]);
   const canWarehouse = canRole(role, ["warehouse", "manager", "admin"]);
+  const initialWorkbench = getInitialPurchaseWorkbenchCache();
 
-  const [data, setData] = useState<PurchaseWorkbench>({});
+  const [data, setData] = useState<PurchaseWorkbench>(initialWorkbench);
   const [loading, setLoading] = useState(false);
   const [actingKey, setActingKey] = useState<string | null>(null);
   const [loadingMorePrId, setLoadingMorePrId] = useState<string | null>(null);
@@ -1194,14 +1356,19 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const candidateScrollLockRef = useRef<Record<string, boolean>>({});
   const pendingCandidateScrollRestoreRef = useRef<{ prId: string; scrollTop: number; scrollHeight: number } | null>(null);
   const candidateScrollElRef = useRef<HTMLDivElement | null>(null);
-  const [skus, setSkus] = useState<SkuOption[]>([]);
-  const [suppliers, setSuppliers] = useState<SupplierOption[]>([]);
+  const auto1688OrderSupplementKeysRef = useRef<Set<string>>(new Set());
+  const supplementalWorkbenchPromiseRef = useRef<Promise<void> | null>(null);
+  const [skus, setSkus] = useState<SkuOption[]>(() => (
+    Array.isArray(initialWorkbench.skuOptions) ? initialWorkbench.skuOptions : []
+  ));
+  const [suppliers, setSuppliers] = useState<SupplierOption[]>(() => (
+    Array.isArray(initialWorkbench.supplierOptions) ? initialWorkbench.supplierOptions : []
+  ));
   const [accounts, setAccounts] = useState<AccountOption[]>([]);
   const [requestOpen, setRequestOpen] = useState(false);
   const [quotePrId, setQuotePrId] = useState<string | null>(null);
   const [source1688PrId, setSource1688PrId] = useState<string | null>(null);
   const [requestUploadImages, setRequestUploadImages] = useState<RequestUploadImage[]>([]);
-  const [poPrId, setPoPrId] = useState<string | null>(null);
   const [detailPrId, setDetailPrId] = useState<string | null>(null);
   const [detailDrawerMode, setDetailDrawerMode] = useState<PurchaseRequestDrawerMode>("collaboration");
   const [detailDrawerOpen, setDetailDrawerOpen] = useState(false);
@@ -1221,6 +1388,9 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const [orderMatchDialog, setOrderMatchDialog] = useState<OrderMatchDialogState | null>(null);
   const [selectedExternalOrderId, setSelectedExternalOrderId] = useState<string | null>(null);
   const [refundPoId, setRefundPoId] = useState<string | null>(null);
+  const [refundAutoLoadingPoId, setRefundAutoLoadingPoId] = useState<string | null>(null);
+  const [refundReasonOptions, setRefundReasonOptions] = useState<RefundReasonOption[]>([]);
+  const [refundMaxAmount, setRefundMaxAmount] = useState<number | null>(null);
   const [orderNoteDialog, setOrderNoteDialog] = useState<OrderNoteDialogState | null>(null);
   const [selectedPoIds, setSelectedPoIds] = useState<string[]>([]);
   const [importDialogOpen, setImportDialogOpen] = useState(false);
@@ -1234,11 +1404,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const [collaborationUploadImages, setCollaborationUploadImages] = useState<RequestUploadImage[]>([]);
   const [storeManagerOpen, setStoreManagerOpen] = useState(initialStoreManagerOpen);
   const [purchaseSettingsOpen, setPurchaseSettingsOpen] = useState(false);
+  const [specBindingDialog, setSpecBindingDialog] = useState<SpecBindingDialogState | null>(null);
+  const [selectedBindingSpecId, setSelectedBindingSpecId] = useState<string | null>(null);
+  const [bindingOurQty, setBindingOurQty] = useState(1);
+  const [bindingPlatformQty, setBindingPlatformQty] = useState(1);
 
   const [requestForm] = Form.useForm<RequestFormValues>();
   const [quoteForm] = Form.useForm<QuoteFormValues>();
   const [source1688Form] = Form.useForm<Source1688FormValues>();
-  const [poForm] = Form.useForm<PoFormValues>();
   const [refundForm] = Form.useForm<RefundFormValues>();
   const [orderNoteForm] = Form.useForm<OrderNoteFormValues>();
   const [purchaseSettingsForm] = Form.useForm<PurchaseSettingsFormValues>();
@@ -1251,10 +1424,6 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const source1688Pr = useMemo(
     () => data.purchaseRequests?.find((item) => item.id === source1688PrId) || null,
     [data.purchaseRequests, source1688PrId],
-  );
-  const poPr = useMemo(
-    () => data.purchaseRequests?.find((item) => item.id === poPrId) || null,
-    [data.purchaseRequests, poPrId],
   );
   const detailPr = useMemo(
     () => data.purchaseRequests?.find((item) => item.id === detailPrId) || null,
@@ -1288,6 +1457,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     && selectedInquiryCount === selectableInquiryCandidateIds.length;
   const someInquiryCandidatesSelected = selectedInquiryCount > 0
     && selectedInquiryCount < selectableInquiryCandidateIds.length;
+  const detailImageSearchLoading = detailDrawerMode === "imageSearch"
+    && Boolean(detailPr && actingKey === `1688-image-${detailPr.id}`);
   const refundPo = useMemo(
     () => data.purchaseOrders?.find((item) => item.id === refundPoId) || null,
     [data.purchaseOrders, refundPoId],
@@ -1311,27 +1482,49 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     })),
     [suppliers],
   );
-  const poCandidateOptions = useMemo(
-    () => (poPr?.candidates || []).map((candidate) => ({
-      value: candidate.id,
-      label: candidateLabel(candidate),
-    })),
-    [poPr],
+  const specBindingCandidate = useMemo(() => {
+    if (!specBindingDialog) return null;
+    const candidates = (data.purchaseRequests || []).flatMap((request) => request.candidates || []);
+    return candidates.find((candidate) => candidate.id === specBindingDialog.candidate.id) || specBindingDialog.candidate;
+  }, [data.purchaseRequests, specBindingDialog]);
+  const specBindingRows = useMemo(
+    () => candidateSpecRows(specBindingCandidate),
+    [specBindingCandidate],
   );
-  const selectedPoCandidateId = Form.useWatch("candidateId", poForm);
-  const selectedPoCandidate = useMemo(
-    () => selectedPoCandidateId
-      ? (poPr?.candidates || []).find((candidate) => candidate.id === selectedPoCandidateId) || null
-      : null,
-    [poPr, selectedPoCandidateId],
+  const selectedBindingSpec = useMemo(
+    () => specBindingRows.find((row) => row.externalSpecId === selectedBindingSpecId) || null,
+    [selectedBindingSpecId, specBindingRows],
   );
-  const selectedPoCandidateSpecOptions = useMemo(
-    () => candidateSpecOptions(selectedPoCandidate),
-    [selectedPoCandidate],
-  );
-  const poPrHasMapping = Number(poPr?.mappingCount || 0) > 0;
-  const poPrHasSkuSupplier = Boolean(poPr?.skuSupplierId || poPr?.skuSupplierName);
-
+  const specBindingColumns = useMemo<ColumnsType<BindingSpecRow>>(() => [
+    {
+      title: "规格",
+      dataIndex: "specText",
+      render: (text: string | null | undefined, row) => text || row.externalSpecId,
+    },
+    {
+      title: "SKU ID",
+      dataIndex: "externalSkuId",
+      width: 150,
+      render: (value: string | null | undefined) => value || "-",
+    },
+    {
+      title: "Spec ID",
+      dataIndex: "externalSpecId",
+      width: 150,
+    },
+    {
+      title: "价格",
+      dataIndex: "price",
+      width: 110,
+      render: (value: number | null | undefined) => value === null || value === undefined ? "-" : formatCurrency(value),
+    },
+    {
+      title: "库存",
+      dataIndex: "stock",
+      width: 100,
+      render: (value: number | null | undefined) => value === null || value === undefined ? "-" : formatQty(value),
+    },
+  ], []);
   const purchaseRequests = data.purchaseRequests || [];
   const purchaseOrders = data.purchaseOrders || [];
 
@@ -1482,35 +1675,80 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     selectedRowKeys: selectedPoIds,
     preserveSelectedRowKeys: true,
     onChange: (keys) => setSelectedPoIds(keys.map(String)),
-    getCheckboxProps: (row) => ({
-      disabled: !row.externalOrderId,
-    }),
   }), [selectedPoIds]);
 
   const applyWorkbench = useCallback((nextData: PurchaseWorkbench) => {
-    setData(nextData || {});
+    setData((prevData) => {
+      const nextWorkbench = nextData || {};
+      if (!Array.isArray(nextWorkbench.purchaseRequests)) {
+        const merged = { ...prevData, ...nextWorkbench };
+        writeCachedPurchaseWorkbench(merged);
+        return merged;
+      }
+      const previousById = new Map((prevData.purchaseRequests || []).map((row) => [row.id, row]));
+      const purchaseRequests = nextWorkbench.purchaseRequests.map((row) => {
+        const previous = previousById.get(row.id);
+        if (!previous) return row;
+        return {
+          ...row,
+          candidates: Array.isArray(row.candidates) ? row.candidates : previous.candidates,
+          timeline: Array.isArray(row.timeline) ? row.timeline : previous.timeline,
+        };
+      });
+      const merged = { ...prevData, ...nextWorkbench, purchaseRequests };
+      writeCachedPurchaseWorkbench(merged);
+      return merged;
+    });
   }, []);
 
-  const loadData = useCallback(async () => {
+  const syncWorkbenchOptions = useCallback((workbench: PurchaseWorkbench) => {
+    if (Array.isArray(workbench?.skuOptions)) setSkus(workbench.skuOptions);
+    if (Array.isArray(workbench?.supplierOptions)) setSuppliers(workbench.supplierOptions);
+  }, []);
+
+  const loadSupplementalWorkbenchData = useCallback(async () => {
     if (!erp) return;
-    setLoading(true);
-    try {
-      const workbench = await erp.purchase.workbench({ limit: 200 });
-      const [skuRows, supplierRows, accountRows] = await Promise.all([
-        Array.isArray(workbench?.skuOptions) ? Promise.resolve(workbench.skuOptions) : erp.sku.list({ limit: 500 }),
-        Array.isArray(workbench?.supplierOptions) ? Promise.resolve(workbench.supplierOptions) : erp.supplier.list({ limit: 500 }),
-        erp.account.list({ limit: 500 }),
-      ]);
-      applyWorkbench(workbench);
-      setSkus(Array.isArray(skuRows) ? skuRows : []);
-      setSuppliers(Array.isArray(supplierRows) ? supplierRows : []);
-      setAccounts(Array.isArray(accountRows) ? accountRows : []);
-    } catch (error: any) {
-      message.error(error?.message || "采购中心读取失败");
-    } finally {
-      setLoading(false);
+    if (supplementalWorkbenchPromiseRef.current) {
+      await supplementalWorkbenchPromiseRef.current;
+      return;
     }
-  }, [applyWorkbench]);
+    const promise = (async () => {
+      try {
+        const workbench = await erp.purchase.workbench(FULL_PURCHASE_WORKBENCH_PARAMS);
+        applyWorkbench(workbench);
+        syncWorkbenchOptions(workbench);
+      } catch {
+        // Supplemental options and 1688 metadata should never block the purchase list.
+      } finally {
+        supplementalWorkbenchPromiseRef.current = null;
+      }
+    })();
+    supplementalWorkbenchPromiseRef.current = promise;
+    await promise;
+  }, [applyWorkbench, syncWorkbenchOptions]);
+
+  const loadData = useCallback(async (options: { silent?: boolean; withSupplemental?: boolean } = {}) => {
+    if (!erp) return;
+    const silent = Boolean(options?.silent);
+    if (!silent) setLoading(true);
+    try {
+      const workbench = await erp.purchase.workbench(FAST_PURCHASE_WORKBENCH_PARAMS);
+      applyWorkbench(workbench);
+      syncWorkbenchOptions(workbench);
+      void erp.account.list({ limit: 500 })
+        .then((accountRows: unknown) => setAccounts(Array.isArray(accountRows) ? accountRows : []))
+        .catch(() => {});
+      if (options?.withSupplemental !== false) {
+        void loadSupplementalWorkbenchData();
+      }
+    } catch (error: any) {
+      if (!silent) {
+        message.error(error?.message || "采购中心读取失败");
+      }
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  }, [applyWorkbench, loadSupplementalWorkbenchData, syncWorkbenchOptions]);
 
   const runAuto1688OrderSync = useCallback(async () => {
     if (!erp || !canPurchase) return;
@@ -1530,11 +1768,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           pageSize: 50,
           autoGenerate: false,
           limit: 200,
+          includeRequestDetails: false,
+          includeOptions: false,
+          include1688Meta: false,
         });
-        const workbench = result?.workbench || await erp.purchase.workbench({ limit: 200 });
+        const workbench = result?.workbench || await erp.purchase.workbench(FAST_PURCHASE_WORKBENCH_PARAMS);
         applyWorkbench(workbench);
-        if (Array.isArray(workbench?.skuOptions)) setSkus(workbench.skuOptions);
-        if (Array.isArray(workbench?.supplierOptions)) setSuppliers(workbench.supplierOptions);
+        syncWorkbenchOptions(workbench);
       } catch {
         // Keep background 1688 sync quiet when auth is missing or the network is unavailable.
       } finally {
@@ -1543,7 +1783,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     })();
     auto1688OrderSyncPromise = syncPromise;
     await syncPromise;
-  }, [applyWorkbench, canPurchase]);
+  }, [applyWorkbench, canPurchase, syncWorkbenchOptions]);
 
   useEffect(() => {
     void loadData();
@@ -1580,12 +1820,73 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
 
   useEffect(() => {
     if (!canPurchase) return;
-    void runAuto1688OrderSync();
+    const startTimer = window.setTimeout(() => {
+      void runAuto1688OrderSync();
+    }, AUTO_1688_ORDER_SYNC_START_DELAY_MS);
     const timer = window.setInterval(() => {
       void runAuto1688OrderSync();
     }, AUTO_1688_ORDER_SYNC_INTERVAL_MS);
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearTimeout(startTimer);
+      window.clearInterval(timer);
+    };
   }, [canPurchase, runAuto1688OrderSync]);
+
+  useEffect(() => {
+    if (!erp) return;
+    const canSyncDetail = canPurchase || canFinance || canWarehouse;
+    const canSyncLogistics = canPurchase || canWarehouse;
+    if (!canSyncDetail && !canSyncLogistics) return;
+
+    const jobs: Array<{ key: string; payload: Record<string, unknown> }> = [];
+    for (const row of data.purchaseOrders || []) {
+      if (!row.externalOrderId) continue;
+      if (canSyncDetail && !row.externalOrderDetailSyncedAt) {
+        jobs.push({
+          key: `detail-${row.id}`,
+          payload: { action: "fetch_1688_order_detail", poId: row.id },
+        });
+      }
+      if (canSyncLogistics && !row.externalLogisticsSyncedAt) {
+        jobs.push({
+          key: `logistics-${row.id}`,
+          payload: { action: "sync_1688_logistics", poId: row.id },
+        });
+      }
+    }
+
+    const pendingJobs = jobs
+      .filter((job) => !auto1688OrderSupplementKeysRef.current.has(job.key))
+      .slice(0, 2);
+    if (!pendingJobs.length) return;
+
+    let cancelled = false;
+    pendingJobs.forEach((job) => {
+      auto1688OrderSupplementKeysRef.current.add(job.key);
+      void (async () => {
+        try {
+          const result = await erp.purchase.action({
+            ...job.payload,
+            limit: 200,
+            includeRequestDetails: false,
+            includeOptions: false,
+            include1688Meta: false,
+          });
+          if (cancelled) return;
+          const workbench = result?.workbench || await erp.purchase.workbench(FAST_PURCHASE_WORKBENCH_PARAMS);
+          if (cancelled) return;
+          applyWorkbench(workbench);
+          syncWorkbenchOptions(workbench);
+        } catch {
+          // Background 1688 order maintenance stays quiet; manual payment/sales actions still surface errors.
+        }
+      })();
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [applyWorkbench, canFinance, canPurchase, canWarehouse, data.purchaseOrders, syncWorkbenchOptions]);
 
   useEffect(() => {
     if (!erp?.events?.onPurchaseUpdate) {
@@ -1596,7 +1897,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       if (payload?.type !== "purchase:update") return;
       if (refreshTimer) window.clearTimeout(refreshTimer);
       refreshTimer = window.setTimeout(() => {
-        void loadData();
+        void loadData({ silent: true, withSupplemental: false });
       }, 180);
     });
     return () => {
@@ -1609,14 +1910,36 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     if (!erp) return null;
     setActingKey(key);
     try {
-      const result = await erp.purchase.action({ ...payload, limit: 200 });
-      const workbench = result?.workbench || await erp.purchase.workbench({ limit: 200 });
-      applyWorkbench(workbench);
-      if (Array.isArray(workbench?.skuOptions)) setSkus(workbench.skuOptions);
-      if (Array.isArray(workbench?.supplierOptions)) setSuppliers(workbench.supplierOptions);
+      const workbenchParams = {
+        limit: 200,
+        includeRequestDetails: payload.includeRequestDetails,
+        includeOptions: payload.includeOptions ?? false,
+        include1688Meta: payload.include1688Meta ?? false,
+        detailPrId: payload.detailPrId || payload.prId,
+      };
+      const shouldRefreshWorkbench = payload.refreshWorkbench === true
+        || (
+          payload.refreshWorkbench !== false
+          && payload.includeWorkbench !== false
+          && !QUICK_PURCHASE_ACTIONS.has(String(payload.action || ""))
+        );
+      const result = await erp.purchase.action({
+        ...payload,
+        ...workbenchParams,
+        includeWorkbench: shouldRefreshWorkbench,
+      });
+      if (shouldRefreshWorkbench) {
+        const workbench = result?.workbench || await erp.purchase.workbench(workbenchParams);
+        applyWorkbench(workbench);
+        syncWorkbenchOptions(workbench);
+      } else if (result?.workbench) {
+        applyWorkbench(result.workbench);
+        syncWorkbenchOptions(result.workbench);
+      }
       if (accounts.length === 0) {
-        const accountRows = await erp.account.list({ limit: 500 });
-        setAccounts(Array.isArray(accountRows) ? accountRows : []);
+        void erp.account.list({ limit: 500 })
+          .then((accountRows: unknown) => setAccounts(Array.isArray(accountRows) ? accountRows : []))
+          .catch(() => {});
       }
       if (successText) message.success(successText);
       return result;
@@ -1624,6 +1947,16 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       const errorMessage = purchaseActionErrorMessage(error, payload.action);
       if (payload.action === "rollback_po_status" && errorMessage.includes("Unsupported purchase action")) {
         message.error("当前主控端还没更新/重启，暂不支持采购单回退");
+      } else if (payload.action === "delete_po" && errorMessage.includes("Unsupported purchase action")) {
+        message.error("当前主控端还没更新/重启，暂不支持删除采购单");
+      } else if (payload.action === "delete_po" && /Purchase order not found/i.test(errorMessage)) {
+        await loadData({ silent: true });
+        if (successText) message.success(successText);
+        return {
+          deleted: true,
+          alreadyMissing: true,
+          poId: payload.poId,
+        };
       } else {
         message.error(errorMessage || "操作失败");
       }
@@ -1744,12 +2077,27 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     );
   };
 
+  const deletePurchaseOrder = async (row: PurchaseOrderRow) => {
+    const result = await runAction(
+      `delete-po-${row.id}`,
+      { action: "delete_po", poId: row.id },
+      "采购单已删除",
+    );
+    if (!result) return;
+    setSelectedPoIds((previous) => previous.filter((id) => id !== row.id));
+  };
+
   const openDetail = async (row: PurchaseRequestRow) => {
     setDetailDrawerMode("collaboration");
     setDetailPrId(row.id);
     setDetailDrawerOpen(true);
     setMinimizedImageSearchPrId(null);
-    await runAction(`read-${row.id}`, { action: "mark_read", prId: row.id });
+    await runAction(`read-${row.id}`, {
+      action: "mark_read",
+      prId: row.id,
+      includeRequestDetails: false,
+      detailPrId: row.id,
+    });
   };
 
   const openPurchaseSettings = () => {
@@ -1847,7 +2195,6 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     if (minimizedImageSearchPrId === row.id) setMinimizedImageSearchPrId(null);
     if (quotePrId === row.id) setQuotePrId(null);
     if (source1688PrId === row.id) setSource1688PrId(null);
-    if (poPrId === row.id) setPoPrId(null);
   };
 
   const open1688SourceModal = (row: PurchaseRequestRow) => {
@@ -1859,32 +2206,28 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     });
   };
 
-  const openPoModal = (row: PurchaseRequestRow, selectedCandidate?: SourcingCandidateRow | null) => {
-    const candidate = selectedCandidate || firstPoCandidate(row);
-    const spec = defaultCandidateSpec(candidate);
-    setPoPrId(row.id);
-    poForm.resetFields();
-    poForm.setFieldsValue({
-      candidateId: candidate?.id,
-      externalSkuId: spec.externalSkuId,
-      externalSpecId: spec.externalSpecId,
-      unitPrice: spec.unitPrice,
-      qty: row.requestedQty,
-    });
-  };
-
   const handleCreateRequest = async (values: RequestFormValues) => {
     if (!erp) return;
-    const selectedSkuIds = Array.isArray(values.skuIds) ? values.skuIds.filter(Boolean) : [];
+    const selectedSkuIds = Array.isArray(values.skuIds)
+      ? values.skuIds.map((value) => String(value || "").trim()).filter(Boolean)
+      : [];
     if (selectedSkuIds.length === 0) {
       message.error("请选择商品编码");
       return;
     }
 
     const selectedSkus = selectedSkuIds
-      .map((skuId) => skus.find((sku) => sku.id === skuId))
+      .map((skuId) => skus.find((sku) => sku.id === skuId || sku.internalSkuCode === skuId))
       .filter((sku): sku is SkuOption => Boolean(sku));
-    const missingStoreSkus = selectedSkus.filter((sku) => !sku.accountId);
+    const missingSkuIds = selectedSkuIds.filter((skuId) => (
+      !skus.some((sku) => sku.id === skuId || sku.internalSkuCode === skuId)
+    ));
+    if (missingSkuIds.length > 0) {
+      message.error(`未找到商品编码：${missingSkuIds.slice(0, 3).join("、")}`);
+      return;
+    }
+    const uniqueSelectedSkus = Array.from(new Map(selectedSkus.map((sku) => [sku.id, sku])).values());
+    const missingStoreSkus = uniqueSelectedSkus.filter((sku) => !sku.accountId);
     if (missingStoreSkus.length > 0) {
       message.error("有商品资料还没有选择所属店铺，请先在商品资料里补齐");
       return;
@@ -1895,7 +2238,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     let skippedImages = false;
     setActingKey("create-pr");
     try {
-      for (const sku of selectedSkus) {
+      for (const sku of uniqueSelectedSkus) {
         const payload = {
           action: "create_pr",
           accountId: sku.accountId,
@@ -1934,7 +2277,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       applyWorkbench(workbench);
       if (Array.isArray(workbench?.skuOptions)) setSkus(workbench.skuOptions);
       if (Array.isArray(workbench?.supplierOptions)) setSuppliers(workbench.supplierOptions);
-      message.success(selectedSkuIds.length > 1 ? `已创建 ${selectedSkuIds.length} 张采购单` : "采购单已创建");
+      message.success(uniqueSelectedSkus.length > 1 ? `已创建 ${uniqueSelectedSkus.length} 张采购单` : "采购单已创建");
       if (skippedImages) message.warning("图片过大，采购单已创建，图片未上传");
       setRequestOpen(false);
       setRequestUploadImages([]);
@@ -2122,19 +2465,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     if (result) closeInquiryDialog();
   };
 
-  const openImageSearchAndInquiry = async (row: PurchaseRequestRow) => {
+  const openImageSearch = async (row: PurchaseRequestRow) => {
     setDetailDrawerMode("imageSearch");
     setDetailPrId(row.id);
     setDetailDrawerOpen(true);
     setMinimizedImageSearchPrId(null);
     setSelectedInquiryCandidateIds([]);
-    const result = await runImageSearchForRow(row, Math.min(nextImageSearchPageForRow(row), IMAGE_SEARCH_MAX_PAGE));
-    const nextPr = (result?.workbench?.purchaseRequests || []).find((item: PurchaseRequestRow) => item.id === row.id)
-      || data.purchaseRequests?.find((item) => item.id === row.id)
-      || row;
-    if (nextPr?.id && (nextPr.candidates || []).some((candidate: SourcingCandidateRow) => !candidateInquirySent(candidate))) {
-      openInquiryDialog(nextPr);
-    }
+    await runImageSearchForRow(row, Math.min(nextImageSearchPageForRow(row), IMAGE_SEARCH_MAX_PAGE));
   };
 
   const toggleInquiryCandidate = (candidateId: string, checked: boolean) => {
@@ -2188,12 +2525,23 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     void loadMoreImageCandidates(row, target);
   };
 
-  const openCandidateUrl = (candidate: SourcingCandidateRow) => {
+  const openCandidateUrl = async (candidate: SourcingCandidateRow) => {
     const url = candidateUrl(candidate);
     if (!url) {
       message.warning("这个候选还没有商品链接");
       return;
     }
+
+    if (erp?.purchase?.open1688Detail) {
+      try {
+        const result = await erp.purchase.open1688Detail({ url });
+        if (result?.ok) return;
+        message.warning(result?.reason ? `1688 浏览器打开失败：${result.reason}` : "1688 浏览器打开失败，已改用普通窗口打开");
+      } catch (error: any) {
+        message.warning(error?.message ? `1688 浏览器打开失败：${error.message}` : "1688 浏览器打开失败，已改用普通窗口打开");
+      }
+    }
+
     window.open(url, "_blank", "noopener,noreferrer");
   };
 
@@ -2273,11 +2621,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     void setCollaborationImageFiles(imageFiles);
   };
 
-  const preview1688Order = async (row: PurchaseOrderRow) => {
-    await runAction(`1688-preview-${row.id}`, {
+  const preview1688Order = async (row: PurchaseOrderRow, options: { quiet?: boolean } = {}) => {
+    return runAction(`1688-preview-${row.id}`, {
       action: "preview_1688_order",
       poId: row.id,
-    }, "1688 订单已预览");
+    }, options.quiet ? undefined : "1688 订单已预览");
   };
 
   const validate1688OrderPush = async (row: PurchaseOrderRow, quiet = false) => {
@@ -2297,8 +2645,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const push1688Order = async (row: PurchaseOrderRow, options: { skipValidation?: boolean } = {}) => {
     if (!options.skipValidation) {
       const validation = await validate1688OrderPush(row, true);
-      if (!validation?.ready) return null;
+      if (!validation?.ready) {
+        if (validation?.message) message.warning(validation.message);
+        return null;
+      }
     }
+    const previewResult = await preview1688Order(row, { quiet: true });
+    if (!previewResult) return null;
     const result = await runAction(`1688-push-${row.id}`, {
       action: "push_1688_order",
       poId: row.id,
@@ -2312,74 +2665,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     return result;
   };
 
-  const confirmPush1688Order = (row: PurchaseOrderRow, validation?: any) => {
-    Modal.confirm({
-      title: "推送 1688 下单",
-      content: (
-        <Space direction="vertical" size={6}>
-          <Text>采购单 {row.poNo || row.id} 已通过供应商映射和店铺 1688 地址校验。</Text>
-          <Text type="secondary">确认后会调用 1688 创建订单接口。</Text>
-        </Space>
-      ),
-      okText: "推送1688下单",
-      cancelText: "稍后",
-      onOk: () => push1688Order(row, { skipValidation: Boolean(validation?.ready) }),
-    });
-  };
-
   const request1688PriceChange = async (row: PurchaseOrderRow) => {
     await runAction(`1688-price-request-${row.id}`, {
       action: "request_1688_price_change",
       poId: row.id,
       remark: "已发起 1688 改价沟通",
     }, "已记录改价沟通");
-  };
-
-  const sync1688Order = async (row: PurchaseOrderRow) => {
-    const result = await runAction(`1688-sync-${row.id}`, {
-      action: "sync_1688_orders",
-      poId: row.id,
-    });
-    const matchStatus = result?.result?.matchStatus;
-    if (matchStatus === "bound") {
-      message.success(`已绑定 1688 订单：${result.result.externalOrderId}`);
-    } else if (matchStatus === "needs_confirmation") {
-      const matches = Array.isArray(result?.result?.matches) ? result.result.matches : [];
-      setOrderMatchDialog({
-        po: row,
-        query: result?.result?.query || {},
-        matches,
-      });
-      setSelectedExternalOrderId(matches[0]?.externalOrderId || null);
-      message.warning("找到多个可能订单，请选择一个绑定");
-    } else if (matchStatus === "not_found") {
-      message.warning("暂未匹配到 1688 订单，请稍后再同步");
-    }
-  };
-
-  const fetch1688OrderDetail = async (row: PurchaseOrderRow) => {
-    await runAction(`1688-detail-${row.id}`, {
-      action: "fetch_1688_order_detail",
-      poId: row.id,
-    }, "1688 订单详情已同步");
-  };
-
-  const sync1688Logistics = async (row: PurchaseOrderRow) => {
-    await runAction(`1688-logistics-${row.id}`, {
-      action: "sync_1688_logistics",
-      poId: row.id,
-    }, "1688 物流信息已同步");
-  };
-
-  const sync1688OrderPrice = async (row: PurchaseOrderRow) => {
-    const result = await runAction(`1688-price-sync-${row.id}`, {
-      action: "sync_1688_order_price",
-      poId: row.id,
-    });
-    const amount = Number(result?.result?.syncedAmount);
-    if (Number.isFinite(amount)) {
-      message.success(`订单金额已同步为 ${formatCurrency(amount)}`);
-    }
   };
 
   const open1688PaymentUrl = async (row: PurchaseOrderRow) => {
@@ -2531,31 +2822,90 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       return;
     }
     setRefundPoId(row.id);
+    setRefundReasonOptions([]);
+    setRefundMaxAmount(null);
     refundForm.resetFields();
     refundForm.setFieldsValue({
       refundType: "refund",
       goodsStatus: "received",
       amount: row.latestRefundAmount ?? row.totalAmount,
       reason: "",
+      refundReasonId: "",
       description: "",
     });
+    void loadRefundAutomation(row, { refundType: "refund", goodsStatus: "received" });
   };
 
-  const sync1688Refunds = async (row: PurchaseOrderRow) => {
+  const sync1688Refunds = async (row: PurchaseOrderRow, silent = false) => {
     const result = await runAction(`1688-refund-sync-${row.id}`, {
       action: "sync_1688_refunds",
       poId: row.id,
     });
     const count = Number(result?.result?.refundCount || 0);
-    if (result) message.success(count ? `已同步 ${count} 条退款售后` : "暂未查到退款售后");
+    if (result && !silent) message.success(count ? `已同步 ${count} 条退款售后` : "暂未查到退款售后");
+    return result;
   };
 
-  const get1688MaxRefundFee = async (row: PurchaseOrderRow) => {
+  const get1688MaxRefundFee = async (row: PurchaseOrderRow, overrides: Partial<RefundFormValues> = {}) => {
     const result = await runAction(`1688-refund-max-${row.id}`, {
       action: "get_1688_max_refund_fee",
       poId: row.id,
+      refundType: overrides.refundType || refundForm.getFieldValue("refundType"),
+      goodsStatus: overrides.goodsStatus || refundForm.getFieldValue("goodsStatus"),
     });
-    if (result) message.success("最大可退金额已查询，详情已写入接口日志");
+    const amount = optionalFiniteNumber(result?.result?.maxRefundFee);
+    if (amount !== null) {
+      setRefundMaxAmount(amount);
+      refundForm.setFieldsValue({ amount });
+    }
+    return amount;
+  };
+
+  const load1688RefundReasons = async (row: PurchaseOrderRow, overrides: Partial<RefundFormValues> = {}) => {
+    const result = await runAction(`1688-refund-reasons-${row.id}`, {
+      action: "get_1688_refund_reasons",
+      poId: row.id,
+      refundType: overrides.refundType || refundForm.getFieldValue("refundType"),
+      goodsStatus: overrides.goodsStatus || refundForm.getFieldValue("goodsStatus"),
+    });
+    const options = normalizeRefundReasonOptions(result?.result?.refundReasons || []);
+    setRefundReasonOptions(options);
+    const first = options[0];
+    if (first && !refundForm.getFieldValue("reason")) {
+      refundForm.setFieldsValue({
+        reason: first.value,
+        refundReasonId: first.refundReasonId || "",
+      });
+    }
+    return options;
+  };
+
+  const loadRefundAutomation = async (row: PurchaseOrderRow, overrides: Partial<RefundFormValues> = {}) => {
+    setRefundAutoLoadingPoId(row.id);
+    try {
+      await sync1688Refunds(row, true);
+      await get1688MaxRefundFee(row, overrides);
+      await load1688RefundReasons(row, overrides);
+    } finally {
+      setRefundAutoLoadingPoId(null);
+    }
+  };
+
+  const refreshRefundComputedFields = async (row: PurchaseOrderRow, overrides: Partial<RefundFormValues> = {}) => {
+    setRefundAutoLoadingPoId(row.id);
+    try {
+      await get1688MaxRefundFee(row, overrides);
+      await load1688RefundReasons(row, overrides);
+    } finally {
+      setRefundAutoLoadingPoId(null);
+    }
+  };
+
+  const handleRefundReasonChange = (value: string, option: any) => {
+    refundForm.setFieldsValue({
+      reason: value,
+      refundReasonId: option?.refundReasonId || "",
+    });
   };
 
   const handleCreate1688Refund = async (values: RefundFormValues) => {
@@ -2573,6 +2923,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       refundType: values.refundType,
       goodsStatus: values.goodsStatus,
       amount: values.amount,
+      refundReasonId: values.refundReasonId,
       reason: values.reason,
       description: values.description,
       ...(rawParams ? { params: rawParams } : {}),
@@ -2600,63 +2951,106 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     }
   };
 
+  const openSpecBindingDialog = (candidate: SourcingCandidateRow, prId?: string | null) => {
+    const rows = candidateSpecRows(candidate);
+    setSpecBindingDialog({ candidate, prId: prId || candidate.prId || detailPr?.id || null });
+    setSelectedBindingSpecId(candidate.externalSpecId || rows[0]?.externalSpecId || null);
+    setBindingOurQty(1);
+    setBindingPlatformQty(1);
+  };
+
   const refreshCandidate1688Specs = async (candidate: SourcingCandidateRow) => {
     const result = await runAction(
       `1688-detail-${candidate.id}`,
-      { action: "refresh_1688_product_detail", candidateId: candidate.id },
-      "1688规格已同步",
+      {
+        action: "refresh_1688_product_detail",
+        candidateId: candidate.id,
+        offerId: candidate.externalOfferId || undefined,
+        bindMapping: false,
+        includeRequestDetails: true,
+        detailPrId: candidate.prId || detailPr?.id,
+      },
+      "1688规格已同步，请选择要绑定的规格",
     );
     if (!result) return;
-    const nextPr = result?.workbench?.purchaseRequests?.find((item: PurchaseRequestRow) => item.id === poPr?.id);
-    const nextCandidate = nextPr?.candidates?.find((item: SourcingCandidateRow) => item.id === candidate.id);
-    const spec = defaultCandidateSpec(nextCandidate || candidate);
-    poForm.setFieldsValue({
-      candidateId: candidate.id,
-      externalSkuId: spec.externalSkuId,
-      externalSpecId: spec.externalSpecId,
-      unitPrice: spec.unitPrice,
-    });
+    const activePrId = detailPr?.id || candidate.prId;
+    const nextPr = result?.workbench?.purchaseRequests?.find((item: PurchaseRequestRow) => item.id === activePrId);
+    const nextCandidate = nextPr?.candidates?.find((item: SourcingCandidateRow) => item.id === candidate.id)
+      || result?.result?.candidate
+      || candidate;
+    if (candidateSpecRows(nextCandidate).length === 0) {
+      message.warning("已同步商品详情，但没有返回可绑定的 1688 规格");
+      return;
+    }
+    openSpecBindingDialog(nextCandidate, activePrId);
   };
 
-  const handleGeneratePo = async (values: PoFormValues) => {
-    if (!poPr) return;
-    const candidate = values.candidateId
-      ? (poPr.candidates || []).find((item) => item.id === values.candidateId)
-      : null;
-    if (candidate?.externalOfferId && !values.externalSpecId) {
-      message.warning("未选择 1688 规格，将先生成本地采购单；这张单暂不能自动推送 1688");
+  const confirmBindCandidate1688Spec = async () => {
+    if (!specBindingCandidate || !selectedBindingSpec) {
+      message.warning("请先选择一个 1688 规格");
+      return;
     }
-    const result = await runAction(`po-${poPr.id}`, {
+    const ourQty = Math.max(1, Math.floor(Number(bindingOurQty || 1)));
+    const platformQty = Math.max(1, Math.floor(Number(bindingPlatformQty || 1)));
+    const bindingPr = [detailPr].find((item) => item?.id === specBindingDialog?.prId)
+      || detailPr
+      || null;
+    const result = await runAction(
+      `1688-bind-spec-${specBindingCandidate.id}`,
+      {
+        action: "bind_1688_candidate_spec",
+        candidateId: specBindingCandidate.id,
+        offerId: specBindingCandidate.externalOfferId || undefined,
+        skuId: bindingPr?.skuId || undefined,
+        externalSkuId: selectedBindingSpec.externalSkuId || undefined,
+        externalSpecId: selectedBindingSpec.externalSpecId,
+        unitPrice: selectedBindingSpec.price ?? specBindingCandidate.unitPrice,
+        supplierName: specBindingCandidate.supplierName || undefined,
+        productTitle: specBindingCandidate.productTitle || undefined,
+        moq: specBindingCandidate.moq || undefined,
+        ourQty,
+        platformQty,
+        includeRequestDetails: true,
+        detailPrId: specBindingDialog?.prId || specBindingCandidate.prId || detailPr?.id,
+      },
+      "1688规格映射已绑定",
+    );
+    if (!result) return;
+    setSpecBindingDialog(null);
+  };
+
+  const generatePurchaseOrderForRow = async (row: PurchaseRequestRow) => {
+    const hasMapping = Number(row.mappingCount || 0) > 0;
+    const result = await runAction(`po-${row.id}`, {
       action: "generate_po",
-      prId: poPr.id,
-      candidateId: values.candidateId,
-      externalSkuId: values.externalSkuId,
-      externalSpecId: values.externalSpecId,
-      unitPrice: values.unitPrice,
-      qty: values.qty,
-      expectedDeliveryDate: toApiDate(values.expectedDeliveryDate),
-      remark: values.remark,
-    }, "采购单已生成");
-    if (result) {
-      const generatedPo = result?.result?.purchaseOrder as PurchaseOrderRow | undefined;
-      const has1688Source = Boolean(result?.result?.sku1688Source);
-      setPoPrId(null);
-      poForm.resetFields();
-      if (generatedPo?.id && has1688Source) {
-        const validation = await validate1688OrderPush(generatedPo, true);
-        if (validation?.ready) confirmPush1688Order(generatedPo, validation);
-      }
+      prId: row.id,
+      qty: row.requestedQty,
+      preferSku1688Source: hasMapping,
+    }, hasMapping ? undefined : "手工采购单已生成");
+    if (!result) return;
+    const generatedPo = result?.result?.purchaseOrder as PurchaseOrderRow | undefined;
+    if (!hasMapping) return;
+    if (!generatedPo?.id) {
+      message.warning("采购单已生成，但没有拿到可推送的采购单号，请刷新后手动推单");
+      return;
+    }
+    const validation = await validate1688OrderPush(generatedPo, true);
+    if (validation?.ready) {
+      await push1688Order(generatedPo, { skipValidation: true });
+    } else {
+      message.warning(validation?.message || "采购单已生成，但当前映射还不满足 1688 自动推单条件");
     }
   };
 
   const exportActiveQueue = () => {
     if (activeQueue.kind === "mixed") {
       downloadCsv(`purchase-todos-${activeQueueKey}.csv`, [
-        ["类型", "商品编码/采购单号", "商品名称/商品摘要", "状态", "数量", "金额/目标成本", "负责人"],
+        ["类型", "商品编码/采购单号", "商品名称", "商品图片", "状态", "数量", "金额/目标成本", "负责人"],
         ...activeRequestRows.map((row) => [
           "待处理",
           row.internalSkuCode || "",
           row.productName || "",
+          getPurchaseRequestDefaultImageUrl(row),
           PR_STATUS_LABELS[row.status] || row.status,
           row.requestedQty || 0,
           row.targetUnitCost ?? "",
@@ -2665,7 +3059,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         ...activeOrderRows.map((row) => [
           "采购单",
           row.poNo || row.id,
-          row.skuSummary || "",
+          joinGroupedText(getPurchaseOrderProductNames(row)),
+          row.skuImageUrl || "",
           PO_STATUS_LABELS[row.status] || row.status,
           row.totalQty || 0,
           row.totalAmount ?? "",
@@ -2689,13 +3084,15 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       return;
     }
     downloadCsv(`purchase-orders-${activeQueueKey}.csv`, [
-      ["采购日期", "采购单号", "采购员", "供应商", "商品摘要", "总数量", "已入库", "金额", "1688订单号", "线上状态", "状态"],
+      ["采购日期", "采购单号", "采购员", "供应商", "商品图片", "商品编码", "商品名称", "总数量", "已入库", "金额", "1688订单号", "线上状态", "状态"],
       ...activeOrderRows.map((row) => [
         formatDateTime(row.createdAt || row.updatedAt),
         row.poNo || row.id,
         row.createdByName || "",
         row.supplierName || "",
-        row.skuSummary || "",
+        row.skuImageUrl || "",
+        joinGroupedText(getPurchaseOrderSkuCodes(row)),
+        joinGroupedText(getPurchaseOrderProductNames(row)),
         row.totalQty || 0,
         row.receivedQty || 0,
         row.totalAmount ?? "",
@@ -2854,13 +3251,19 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 size="small"
                 icon={<SearchOutlined />}
                 loading={actingKey === `1688-image-${row.id}`}
-                onClick={() => void openImageSearchAndInquiry(row)}
+                onClick={() => void openImageSearch(row)}
               >
                 以图搜款
               </Button>
             ) : null}
             {canGeneratePo ? (
-              <Button size="small" type="primary" icon={<FileDoneOutlined />} onClick={() => openPoModal(row)}>
+              <Button
+                size="small"
+                type="primary"
+                icon={<FileDoneOutlined />}
+                loading={actingKey === `po-${row.id}`}
+                onClick={() => void generatePurchaseOrderForRow(row)}
+              >
                 生成采购单
               </Button>
             ) : null}
@@ -2888,7 +3291,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         );
       },
     },
-  ], [actingKey, canCreateRequest, canPurchase, detailPrId, poPrId, source1688PrId]);
+  ], [actingKey, canCreateRequest, canPurchase, detailPrId, source1688PrId]);
 
   const orderColumns = useMemo<ColumnsType<PurchaseOrderRow>>(() => [
     {
@@ -2900,12 +3303,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     {
       title: "采购单号",
       key: "po",
-      width: 150,
+      width: 138,
       render: (_value, row) => (
-        <Space direction="vertical" size={2}>
-          <Text strong>{row.poNo || row.id}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{row.accountName || "-"}</Text>
-        </Space>
+        <Text style={TABLE_IDENTIFIER_TEXT_STYLE}>
+          {row.poNo || row.id}
+        </Text>
       ),
     },
     {
@@ -2922,11 +3324,67 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       render: (value) => value || "-",
     },
     {
-      title: "商品摘要",
-      key: "qty",
-      width: 230,
-      ellipsis: true,
-      render: (_value, row) => row.skuSummary || "-",
+      title: "商品图片",
+      key: "skuImage",
+      width: 86,
+      render: (_value, row) => {
+        const imageUrl = row.skuImageUrl || "";
+        return imageUrl ? (
+          <div
+            style={{
+              width: 48,
+              height: 48,
+              borderRadius: 6,
+              overflow: "hidden",
+              background: "#f8fafc",
+              border: "1px solid #e5e7eb",
+            }}
+          >
+            <img
+              src={imageUrl}
+              alt=""
+              style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+            />
+          </div>
+        ) : (
+          <Text type="secondary">-</Text>
+        );
+      },
+    },
+    {
+      title: "商品编码",
+      key: "skuCodes",
+      width: 150,
+      render: (_value, row) => {
+        const codes = getPurchaseOrderSkuCodes(row);
+        if (!codes.length) return "-";
+        return (
+          <Space direction="vertical" size={2}>
+            {codes.slice(0, 2).map((code) => (
+              <Text key={code} style={TABLE_IDENTIFIER_TEXT_STYLE}>
+                {code}
+              </Text>
+            ))}
+            {codes.length > 2 ? <Text type="secondary" style={{ fontSize: 12 }}>等 {codes.length} 个</Text> : null}
+          </Space>
+        );
+      },
+    },
+    {
+      title: "商品名称",
+      key: "productNames",
+      width: 240,
+      render: (_value, row) => {
+        const names = getPurchaseOrderProductNames(row);
+        return (
+          <Paragraph
+            ellipsis={{ rows: 2, tooltip: joinGroupedText(names) || row.skuSummary || "-" }}
+            style={{ marginBottom: 0, lineHeight: 1.5 }}
+          >
+            {joinGroupedText(names) || row.skuSummary || "-"}
+          </Paragraph>
+        );
+      },
     },
     {
       title: "数量",
@@ -3028,13 +3486,17 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         const mappingCount = Number(row.mappingCount || 0);
         const deliveryAddressCount = Number(row.deliveryAddressCount || 0);
         const canPushTo1688 = !row.externalOrderId && canPurchase && mappingCount > 0 && deliveryAddressCount > 0;
-        const pushLoading = actingKey === `1688-push-${row.id}` || actingKey === `1688-validate-${row.id}`;
+        const pushLoading = actingKey === `1688-push-${row.id}`
+          || actingKey === `1688-validate-${row.id}`
+          || actingKey === `1688-preview-${row.id}`;
+        const canUse1688Payment = canUse1688PaymentActions(row);
+        const canDeletePo = canPurchase && canDeletePurchaseOrder(row);
         return (
           <div className="purchase-action-grid">
           {canPushTo1688 ? (
             <Popconfirm
               title="推送 1688 下单"
-              description="会先校验供应商映射和店铺 1688 地址，通过后创建 1688 订单。"
+              description="会先校验供应商映射、店铺 1688 地址并预览订单，通过后创建 1688 订单。"
               okText="推送"
               cancelText="取消"
               onConfirm={() => push1688Order(row)}
@@ -3048,16 +3510,6 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 推送1688下单
               </Button>
             </Popconfirm>
-          ) : null}
-          {!row.externalOrderId && canPurchase && mappingCount > 0 ? (
-            <Button
-              size="small"
-              icon={<LinkOutlined />}
-              loading={actingKey === `1688-sync-${row.id}`}
-              onClick={() => sync1688Order(row)}
-            >
-              绑定1688订单
-            </Button>
           ) : null}
           {rollbackVisible ? (
             <Popconfirm
@@ -3076,15 +3528,24 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               </Button>
             </Popconfirm>
           ) : null}
-          {row.status === "draft" && canPurchase && Number(row.mappingCount || 0) > 0 ? (
-            <Button
-              size="small"
-              icon={<ApiOutlined />}
-              loading={actingKey === `1688-preview-${row.id}`}
-              onClick={() => preview1688Order(row)}
+          {canDeletePo ? (
+            <Popconfirm
+              title="删除采购单"
+              description="只会删除未推送、未付款、未入库的本地草稿采购单。"
+              okText="删除"
+              cancelText="取消"
+              okButtonProps={{ danger: true }}
+              onConfirm={() => deletePurchaseOrder(row)}
             >
-              1688 预览
-            </Button>
+              <Button
+                size="small"
+                danger
+                icon={<DeleteOutlined />}
+                loading={actingKey === `delete-po-${row.id}`}
+              >
+                删除
+              </Button>
+            </Popconfirm>
           ) : null}
           {row.status === "draft" && canPurchase && Number(row.mappingCount || 0) === 0 ? (
             <Button
@@ -3101,27 +3562,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               提交付款
             </Button>
           ) : null}
-          {row.externalOrderId && (canPurchase || canFinance) ? (
-            <Button
-              size="small"
-              icon={<FileSearchOutlined />}
-              loading={actingKey === `1688-detail-${row.id}`}
-              onClick={() => fetch1688OrderDetail(row)}
-            >
-              详情
-            </Button>
-          ) : null}
-          {row.externalOrderId && canPurchase ? (
-            <Button
-              size="small"
-              icon={<CarOutlined />}
-              loading={actingKey === `1688-logistics-${row.id}`}
-              onClick={() => sync1688Logistics(row)}
-            >
-              物流
-            </Button>
-          ) : null}
-          {row.externalOrderId && (canPurchase || canFinance) ? (
+          {canUse1688Payment && (canPurchase || canFinance) ? (
             <Button
               size="small"
               icon={<LinkOutlined />}
@@ -3131,7 +3572,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               支付链接
             </Button>
           ) : null}
-          {row.externalOrderId && (canPurchase || canFinance) ? (
+          {canUse1688Payment && (canPurchase || canFinance) ? (
             <Button
               size="small"
               icon={<DollarOutlined />}
@@ -3141,7 +3582,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               支付渠道
             </Button>
           ) : null}
-          {row.externalOrderId && (canPurchase || canFinance) ? (
+          {canUse1688Payment && (canPurchase || canFinance) ? (
             <Button
               size="small"
               icon={<FileSearchOutlined />}
@@ -3151,7 +3592,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               代扣
             </Button>
           ) : null}
-          {row.externalOrderId && canFinance ? (
+          {canUse1688Payment && canFinance ? (
             <Popconfirm
               title="发起 1688 免密支付"
               description="会调用 1688 代扣/免密支付接口，扣款结果以后续 1688 消息或订单详情为准。"
@@ -3168,16 +3609,6 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 免密支付
               </Button>
             </Popconfirm>
-          ) : null}
-          {row.externalOrderId && canPurchase ? (
-            <Button
-              size="small"
-              icon={<DollarOutlined />}
-              loading={actingKey === `1688-price-sync-${row.id}`}
-              onClick={() => sync1688OrderPrice(row)}
-            >
-              同步金额
-            </Button>
           ) : null}
           {row.externalOrderId && canPurchase ? (
             <Button
@@ -3291,7 +3722,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               确认付款
             </Button>
           ) : null}
-          {!["draft", "pushed_pending_price", "pending_finance_approval", "approved_to_pay"].includes(row.status) && !(row.externalOrderId && canPurchase) && !rollbackVisible ? <Text type="secondary">无待办</Text> : null}
+          {!["draft", "pushed_pending_price", "pending_finance_approval", "approved_to_pay"].includes(row.status) && !(row.externalOrderId && canPurchase) && !rollbackVisible && !canDeletePo ? <Text type="secondary">无待办</Text> : null}
         </div>
         );
       },
@@ -3369,6 +3800,9 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   ], [actingKey]);
 
   const summary = data.summary || {};
+  const tableLoading = loading
+    && !hasWorkbenchSnapshot(data)
+    && (filteredActiveRequestRows.length + filteredActiveOrderRows.length > 0);
 
   if (!erp) {
     return (
@@ -3448,7 +3882,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
             <Button icon={<DownloadOutlined />} onClick={exportActiveQueue}>
               导出
             </Button>
-            <Button icon={<ReloadOutlined />} loading={loading} onClick={loadData}>
+            <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void loadData()}>
               刷新
             </Button>
           </Space>
@@ -3486,7 +3920,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 <Text strong>待处理</Text>
                 <Table
                   rowKey="id"
-                  loading={loading}
+                  loading={tableLoading}
                   size="middle"
                   columns={requestColumns}
                   dataSource={filteredActiveRequestRows}
@@ -3501,7 +3935,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 <Text strong>采购单</Text>
                 <Table
                   rowKey="id"
-                  loading={loading}
+                  loading={tableLoading}
                   size="middle"
                   columns={orderColumns}
                   dataSource={filteredActiveOrderRows}
@@ -3515,7 +3949,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
             {!filteredActiveRequestRows.length && !filteredActiveOrderRows.length ? (
               <Table
                 rowKey="id"
-                loading={loading}
+                loading={tableLoading}
                 size="middle"
                 columns={orderColumns}
                 dataSource={[]}
@@ -3528,7 +3962,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         ) : activeQueue.kind === "request" ? (
           <Table
             rowKey="id"
-            loading={loading}
+            loading={tableLoading}
             size="middle"
             columns={requestColumns}
             dataSource={filteredActiveRequestRows}
@@ -3538,7 +3972,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         ) : (
           <Table
             rowKey="id"
-            loading={loading}
+            loading={tableLoading}
             size="middle"
             columns={orderColumns}
             dataSource={filteredActiveOrderRows}
@@ -3760,13 +4194,15 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         <Form form={requestForm} layout="vertical" onFinish={handleCreateRequest} initialValues={{ requestedQty: 1 }}>
           <Form.Item name="skuIds" label="商品编码" rules={[{ required: true, message: "请选择商品编码" }]}>
             <Select
-              mode="multiple"
+              mode="tags"
               showSearch
+              open={false}
               maxTagCount="responsive"
               optionFilterProp="searchText"
               options={skuOptions}
-              placeholder="选择/搜索商品编码，可多选"
-              notFoundContent="暂无商品资料，请先到左侧商品资料创建"
+              suffixIcon={<SearchOutlined />}
+              tokenSeparators={[",", "，", " ", "\n"]}
+              placeholder="输入商品编码，回车添加，可多选"
             />
           </Form.Item>
           <Form.Item label="采购图片">
@@ -3939,146 +4375,60 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       </Modal>
 
       <Modal
-        open={Boolean(poPr)}
-        title="生成采购单"
-        okText="生成采购单"
+        open={Boolean(specBindingDialog)}
+        title="选择并绑定 1688 规格"
+        okText="绑定规格"
         cancelText="取消"
-        confirmLoading={poPr ? actingKey === `po-${poPr.id}` : false}
-        onCancel={() => setPoPrId(null)}
-        onOk={() => poForm.submit()}
+        width={860}
+        confirmLoading={specBindingCandidate ? actingKey === `1688-bind-spec-${specBindingCandidate.id}` : false}
+        okButtonProps={{ disabled: !selectedBindingSpec }}
+        onCancel={() => setSpecBindingDialog(null)}
+        onOk={() => void confirmBindCandidate1688Spec()}
         destroyOnClose
       >
-        <Form form={poForm} layout="vertical" onFinish={handleGeneratePo}>
-          <Alert
-            type="info"
-            showIcon
-            style={{ marginBottom: 16 }}
-            message={poPr ? `${poPr.productName || poPr.internalSkuCode || "采购单"} · 默认数量 ${formatQty(poPr.requestedQty)}` : ""}
+        <Space direction="vertical" size={14} style={{ width: "100%" }}>
+          <Table<BindingSpecRow>
+            size="small"
+            rowKey="externalSpecId"
+            columns={specBindingColumns}
+            dataSource={specBindingRows}
+            pagination={{ pageSize: 8, hideOnSinglePage: true }}
+            rowSelection={{
+              type: "radio",
+              selectedRowKeys: selectedBindingSpecId ? [selectedBindingSpecId] : [],
+              onChange: (keys) => setSelectedBindingSpecId(String(keys[0] || "")),
+            }}
+            onRow={(row) => ({
+              onClick: () => setSelectedBindingSpecId(row.externalSpecId),
+            })}
           />
-          {poCandidateOptions.length > 0 ? (
-            <>
-              <Form.Item
-                name="candidateId"
-                label="选择报价"
-                rules={poPrHasMapping || poPrHasSkuSupplier ? [] : [{ required: true, message: "请选择报价" }]}
-              >
-                <Select
-                  allowClear={poPrHasMapping || poPrHasSkuSupplier}
-                  options={poCandidateOptions}
-                  placeholder={poPrHasMapping
-                    ? "不选则使用供应商管理"
-                    : poPrHasSkuSupplier
-                      ? "不选则使用商品资料供应商"
-                      : "选择一个报价生成采购单"}
-                  onChange={(candidateId) => {
-                    const candidate = (poPr?.candidates || []).find((item) => item.id === candidateId) || null;
-                    const spec = defaultCandidateSpec(candidate);
-                    poForm.setFieldsValue({
-                      externalSkuId: spec.externalSkuId,
-                      externalSpecId: spec.externalSpecId,
-                      unitPrice: spec.unitPrice,
-                    });
-                  }}
-                />
-              </Form.Item>
-              {selectedPoCandidate?.externalOfferId ? (
-                selectedPoCandidateSpecOptions.length > 0 ? (
-                  <>
-                    <Form.Item
-                      name="externalSpecId"
-                      label="1688规格"
-                      rules={[{ required: true, message: "请选择 1688 规格" }]}
-                    >
-                      <Select
-                        options={selectedPoCandidateSpecOptions}
-                        placeholder="选择具体规格后再生成采购单"
-                        onChange={(specId) => {
-                          const spec = selectedPoCandidateSpecOptions.find((item) => item.value === specId);
-                          poForm.setFieldsValue({
-                            externalSkuId: spec?.externalSkuId,
-                            unitPrice: spec?.unitPrice ?? selectedPoCandidate.unitPrice,
-                          });
-                        }}
-                      />
-                    </Form.Item>
-                    <Form.Item name="externalSkuId" hidden>
-                      <Input />
-                    </Form.Item>
-                    <Form.Item name="unitPrice" hidden>
-                      <InputNumber />
-                    </Form.Item>
-                  </>
-                ) : selectedPoCandidate.externalSpecId ? (
-                  <>
-                    <Alert
-                      type="success"
-                      showIcon
-                      style={{ marginBottom: 16 }}
-                      message={`已选择 1688 规格：${selectedPoCandidate.externalSpecId}`}
-                    />
-                    <Form.Item name="externalSpecId" hidden>
-                      <Input />
-                    </Form.Item>
-                    <Form.Item name="externalSkuId" hidden>
-                      <Input />
-                    </Form.Item>
-                    <Form.Item name="unitPrice" hidden>
-                      <InputNumber />
-                    </Form.Item>
-                  </>
-                ) : (
-                  <Alert
-                    type="warning"
-                    showIcon
-                    style={{ marginBottom: 16 }}
-                    message="这个候选还没有 1688 规格"
-                    description="可先生成本地采购单；如需自动推送 1688，必须同步并选择具体规格。"
-                    action={(
-                      <Button
-                        size="small"
-                        loading={actingKey === `1688-detail-${selectedPoCandidate.id}`}
-                        onClick={() => refreshCandidate1688Specs(selectedPoCandidate)}
-                      >
-                        同步规格
-                      </Button>
-                    )}
-                  />
-                )
-              ) : null}
-            </>
-          ) : (
-            <Alert
-              type={poPrHasMapping || poPrHasSkuSupplier ? "success" : "warning"}
-              showIcon
-              style={{ marginBottom: 16 }}
-              message={poPrHasMapping
-                ? "将使用供应商管理生成采购单"
-                : poPrHasSkuSupplier
-                  ? "将使用商品资料供应商生成采购单"
-                  : "请先报价、绑定供应商管理记录或维护商品资料供应商"}
-              description={poPrHasMapping
-                ? "后续推单会按映射总表里的链接、规格和采购比例下单。"
-                : poPrHasSkuSupplier
-                  ? "这张采购单不会进入 1688 推单，会走普通供应商采购。"
-                  : "没有报价、映射和供应商时，采购单还不能生成。"}
-            />
-          )}
           <Row gutter={12}>
             <Col span={12}>
-              <Form.Item name="qty" label="采购数量" rules={[{ required: true, message: "请输入采购数量" }]}>
-                <InputNumber min={1} precision={0} style={{ width: "100%" }} />
-              </Form.Item>
+              <Text type="secondary" style={{ display: "block", marginBottom: 6 }}>本地数量</Text>
+              <InputNumber
+                min={1}
+                precision={0}
+                value={bindingOurQty}
+                style={{ width: "100%" }}
+                addonBefore="本地"
+                addonAfter="件"
+                onChange={(value) => setBindingOurQty(Math.max(1, Math.floor(Number(value || 1))))}
+              />
             </Col>
             <Col span={12}>
-              <Form.Item name="expectedDeliveryDate" label="预计到货">
-                <DatePicker style={{ width: "100%" }} />
-              </Form.Item>
+              <Text type="secondary" style={{ display: "block", marginBottom: 6 }}>1688 数量</Text>
+              <InputNumber
+                min={1}
+                precision={0}
+                value={bindingPlatformQty}
+                style={{ width: "100%" }}
+                addonBefore="1688"
+                addonAfter="件"
+                onChange={(value) => setBindingPlatformQty(Math.max(1, Math.floor(Number(value || 1))))}
+              />
             </Col>
           </Row>
-          <Form.Item name="remark" label="采购单备注">
-            <TextArea rows={3} placeholder="对供应商、付款或入库的补充说明" />
-          </Form.Item>
-        </Form>
+        </Space>
       </Modal>
 
       <Modal
@@ -4127,27 +4477,22 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               message={`采购单 ${refundPo.poNo || refundPo.id} · 1688订单 ${refundPo.externalOrderId || "-"}`}
               description={`当前线上状态：${externalOrderStatusLabel(refundPo.externalOrderStatus)}；售后：${refundPo.refundCount ? `${refundPo.refundCount} 条` : "暂无记录"}${refundPo.latestRefundStatus ? `，${refundStatusLabel(refundPo.latestRefundStatus)}` : ""}`}
             />
-            <Space wrap>
-              <Button
-                icon={<ReloadOutlined />}
-                loading={actingKey === `1688-refund-sync-${refundPo.id}`}
-                onClick={() => sync1688Refunds(refundPo)}
-              >
-                同步售后
-              </Button>
-              <Button
-                icon={<DollarOutlined />}
-                loading={actingKey === `1688-refund-max-${refundPo.id}`}
-                onClick={() => get1688MaxRefundFee(refundPo)}
-              >
-                查最大可退
-              </Button>
-            </Space>
+            {refundAutoLoadingPoId === refundPo.id ? (
+              <Text type="secondary">正在自动读取售后、可退金额和退款原因...</Text>
+            ) : null}
             <Form form={refundForm} layout="vertical" onFinish={handleCreate1688Refund}>
               <Row gutter={12}>
                 <Col span={12}>
                   <Form.Item name="refundType" label="退款类型" rules={[{ required: true, message: "请选择退款类型" }]}>
                     <Select
+                      onChange={(value) => {
+                        if (refundPo) {
+                          void refreshRefundComputedFields(refundPo, {
+                            refundType: value,
+                            goodsStatus: refundForm.getFieldValue("goodsStatus"),
+                          });
+                        }
+                      }}
                       options={[
                         { label: "仅退款", value: "refund" },
                         { label: "退货退款", value: "return_goods" },
@@ -4158,6 +4503,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 <Col span={12}>
                   <Form.Item name="goodsStatus" label="货物状态" rules={[{ required: true, message: "请选择货物状态" }]}>
                     <Select
+                      onChange={(value) => {
+                        if (refundPo) {
+                          void refreshRefundComputedFields(refundPo, {
+                            refundType: refundForm.getFieldValue("refundType"),
+                            goodsStatus: value,
+                          });
+                        }
+                      }}
                       options={[
                         { label: "已收货", value: "received" },
                         { label: "未收货", value: "not_received" },
@@ -4166,13 +4519,31 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                   </Form.Item>
                 </Col>
                 <Col span={12}>
-                  <Form.Item name="amount" label="退款金额" rules={[{ required: true, message: "请输入退款金额" }]}>
+                  <Form.Item
+                    name="amount"
+                    label="退款金额"
+                    extra={refundMaxAmount !== null ? `1688最大可退：${formatCurrency(refundMaxAmount)}` : undefined}
+                    rules={[{ required: true, message: "请输入退款金额" }]}
+                  >
                     <InputNumber min={0} precision={2} style={{ width: "100%" }} placeholder="0.00" />
                   </Form.Item>
                 </Col>
                 <Col span={12}>
                   <Form.Item name="reason" label="退款原因" rules={[{ required: true, message: "请输入退款原因" }]}>
-                    <Input placeholder="例如：缺货、质量问题、协商退款" />
+                    {refundReasonOptions.length ? (
+                      <Select
+                        showSearch
+                        options={refundReasonOptions}
+                        optionFilterProp="label"
+                        placeholder="选择退款原因"
+                        onChange={handleRefundReasonChange}
+                      />
+                    ) : (
+                      <Input placeholder="例如：缺货、质量问题、协商退款" />
+                    )}
+                  </Form.Item>
+                  <Form.Item name="refundReasonId" hidden>
+                    <Input />
                   </Form.Item>
                 </Col>
               </Row>
@@ -4526,7 +4897,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
                 <Space align="baseline" size={8}>
                   <Text strong>候选商品</Text>
-                  <Text type="secondary">{formatQty((detailPr.candidates || []).length)} 个候选</Text>
+                  <Text type="secondary">{formatQty(detailCandidateCount)} 个候选</Text>
                   <Text type="secondary">{selectedInquiryCount ? `已勾选 ${selectedInquiryCount}` : "未勾选"}</Text>
                 </Space>
                 <Space size={8} wrap>
@@ -4549,33 +4920,51 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                   </Button>
                 </Space>
               </div>
-              {!(detailPr!.candidates || []).length ? (
-                <Alert
-                  type="warning"
-                  showIcon
-                  style={{ marginTop: 8, marginBottom: 8 }}
-                  message={latestImageSearchEmptyEvent(detailPr!)?.message || "还没有候选商品"}
-                />
-              ) : null}
-              <div
-                ref={candidateScrollElRef}
-                onScroll={(event) => handleCandidateScroll(event, detailPr!)}
-                style={{
-                  maxHeight: "calc(100vh - 260px)",
-                  overflowY: "auto",
-                  overscrollBehavior: "contain",
-                  paddingRight: 6,
-                  marginTop: 12,
-                }}
-              >
+              {detailImageSearchLoading && !detailCandidateCount ? (
                 <div
                   style={{
-                    display: "grid",
-                    gridTemplateColumns: "repeat(auto-fill, minmax(184px, 1fr))",
-                    gap: 16,
+                    minHeight: "calc(100vh - 260px)",
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: 10,
+                    color: "#475569",
                   }}
                 >
-                  {(detailPr!.candidates || []).map((candidate, index) => {
+                  <Spin size="large" />
+                  <Text strong>正在以图搜款</Text>
+                  <Text type="secondary">正在从 1688 拉取候选商品，结果回来后会自动展示。</Text>
+                </div>
+              ) : (
+                <>
+                  {!detailCandidateCount ? (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      style={{ marginTop: 8, marginBottom: 8 }}
+                      message={latestImageSearchEmptyEvent(detailPr!)?.message || "还没有候选商品"}
+                    />
+                  ) : null}
+                  <div
+                    ref={candidateScrollElRef}
+                    onScroll={(event) => handleCandidateScroll(event, detailPr!)}
+                    style={{
+                      maxHeight: "calc(100vh - 260px)",
+                      overflowY: "auto",
+                      overscrollBehavior: "contain",
+                      paddingRight: 6,
+                      marginTop: 12,
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "repeat(auto-fill, minmax(184px, 1fr))",
+                        gap: 16,
+                      }}
+                    >
+                      {(detailPr!.candidates || []).map((candidate, index) => {
                   const image = candidateImage(candidate);
                   const title = candidateTitle(candidate);
                   const url = candidateUrl(candidate);
@@ -4598,13 +4987,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                       role={url ? "button" : undefined}
                       tabIndex={url ? 0 : undefined}
                       onClick={() => {
-                        if (url) openCandidateUrl(candidate);
+                        if (url) void openCandidateUrl(candidate);
                       }}
                       onKeyDown={(event) => {
                         if (!url) return;
                         if (event.key === "Enter" || event.key === " ") {
                           event.preventDefault();
-                          openCandidateUrl(candidate);
+                          void openCandidateUrl(candidate);
                         }
                       }}
                       style={{
@@ -4785,27 +5174,33 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                         <Space size={6} wrap style={{ marginTop: 10 }}>
                           <Button
                             size="small"
-                            type="primary"
-                            icon={<FileDoneOutlined />}
+                            icon={<ReloadOutlined />}
+                            disabled={!candidate.externalOfferId}
+                            loading={actingKey === `1688-detail-${candidate.id}`}
                             onClick={(event) => {
                               event.stopPropagation();
-                              openPoModal(detailPr!, candidate);
+                              void refreshCandidate1688Specs(candidate);
                             }}
                           >
-                            生成采购单
+                            同步规格
                           </Button>
                         </Space>
                       </div>
                     </div>
                   );
                   })}
-                </div>
-                {loadingMorePrId === detailPr!.id ? (
-                  <div style={{ padding: "18px 0", textAlign: "center" }}>
-                    <Text type="secondary">加载中</Text>
+                    </div>
+                    {loadingMorePrId === detailPr!.id ? (
+                      <div style={{ padding: "18px 0", textAlign: "center" }}>
+                        <Space align="center" size={8}>
+                          <Spin size="small" />
+                          <Text type="secondary">正在加载下一页候选</Text>
+                        </Space>
+                      </div>
+                    ) : null}
                   </div>
-                ) : null}
-              </div>
+                </>
+              )}
             </div>
             ) : null}
 

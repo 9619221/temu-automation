@@ -47,7 +47,7 @@ const ROUTE_ROLES: Record<string, string[]> = {
   "/users": ["admin", "manager"],
   "/erp-debug": ["admin", "manager"],
   "/logs": ["admin", "manager", "operations"],
-  "/settings": ["admin", "manager"],
+  "/settings": ["admin", "manager", "operations"],
 };
 
 const SCOPED_WORK_ITEM_ROLES = new Set(["operations", "buyer", "finance", "warehouse"]);

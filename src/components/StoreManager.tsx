@@ -4,8 +4,16 @@ import type { ColumnsType } from "antd/es/table";
 import { DeleteOutlined, EditOutlined, PlusOutlined } from "@ant-design/icons";
 import { canRole } from "../utils/erpUi";
 import { useErpAuth } from "../contexts/ErpAuthContext";
+import { hasPageCache, readPageCache, writePageCache } from "../utils/pageCache";
 
 const erp = window.electronAPI?.erp;
+const STORE_MANAGER_CACHE_KEY = "temu.store-manager.cache.v1";
+const ADDRESS_WORKBENCH_PARAMS = {
+  limit: 20,
+  includeRequestDetails: false,
+  includeOptions: false,
+  include1688Meta: true,
+};
 
 interface StoreAccountRow {
   id: string;
@@ -61,6 +69,12 @@ interface StoreAddressValues {
 
 interface StoreManagerProps {
   onChanged?: () => void | Promise<void>;
+}
+
+interface StoreManagerCache {
+  generatedAt?: string;
+  accounts?: StoreAccountRow[];
+  alibaba1688Addresses?: Alibaba1688AddressRow[];
 }
 
 function statusColor(status?: string) {
@@ -264,7 +278,7 @@ function buildStoreAddressPayload(values: StoreAddressValues, accountId: string,
     alibabaAddressId: values.alibabaAddressId,
     isDefault: true,
     status: "active",
-    limit: 500,
+    ...ADDRESS_WORKBENCH_PARAMS,
   };
 }
 
@@ -277,11 +291,16 @@ export default function StoreManager({ onChanged }: StoreManagerProps) {
   const role = auth.currentUser?.role;
   const canManageAccounts = canRole(role, ["admin", "manager"]);
   const canManageStoreAddress = canRole(role, ["admin", "manager", "buyer"]);
+  const cachedData = useMemo(
+    () => readPageCache<StoreManagerCache>(STORE_MANAGER_CACHE_KEY, {}),
+    [],
+  );
 
   const [accountForm] = Form.useForm();
   const [storeAddressForm] = Form.useForm<StoreAddressValues>();
-  const [accounts, setAccounts] = useState<StoreAccountRow[]>([]);
-  const [alibaba1688Addresses, setAlibaba1688Addresses] = useState<Alibaba1688AddressRow[]>([]);
+  const [accounts, setAccounts] = useState<StoreAccountRow[]>(() => cachedData.accounts || []);
+  const [alibaba1688Addresses, setAlibaba1688Addresses] = useState<Alibaba1688AddressRow[]>(() => cachedData.alibaba1688Addresses || []);
+  const [loadedOnce, setLoadedOnce] = useState(() => hasPageCache(cachedData));
   const [loading, setLoading] = useState(false);
   const [addressLoading, setAddressLoading] = useState(false);
   const [submitting, setSubmitting] = useState<string | null>(null);
@@ -307,17 +326,24 @@ export default function StoreManager({ onChanged }: StoreManagerProps) {
     try {
       const [nextAccounts, purchaseWorkbench] = await Promise.all([
         erp.account.list({ limit: 500 }),
-        erp.purchase.workbench({ limit: 500 }).catch(() => null),
+        erp.purchase.workbench(ADDRESS_WORKBENCH_PARAMS).catch(() => null),
       ]);
-      setAccounts(Array.isArray(nextAccounts) ? nextAccounts as StoreAccountRow[] : []);
+      const nextAccountRows = Array.isArray(nextAccounts) ? nextAccounts as StoreAccountRow[] : [];
+      setAccounts(nextAccountRows);
       const nextAddresses = get1688AddressRows(purchaseWorkbench);
       if (nextAddresses.length) setAlibaba1688Addresses(nextAddresses);
+      setLoadedOnce(true);
+      writePageCache<StoreManagerCache>(STORE_MANAGER_CACHE_KEY, {
+        generatedAt: new Date().toISOString(),
+        accounts: nextAccountRows,
+        alibaba1688Addresses: nextAddresses.length ? nextAddresses : cachedData.alibaba1688Addresses,
+      });
     } catch (error: any) {
       message.error(error?.message || "店铺读取失败");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [cachedData.alibaba1688Addresses]);
 
   const notifyChanged = useCallback(async () => {
     await loadAll();
@@ -328,13 +354,21 @@ export default function StoreManager({ onChanged }: StoreManagerProps) {
     if (!erp) return [];
     setAddressLoading(true);
     try {
-      const workbench = await erp.purchase.workbench({ limit: 500 }).catch(() => null);
+      const workbench = await erp.purchase.workbench(ADDRESS_WORKBENCH_PARAMS).catch(() => null);
       let nextAddresses = get1688AddressRows(workbench);
       if (!nextAddresses.length && syncIfEmpty) {
-        const result = await erp.purchase.action({ action: "sync_1688_addresses", limit: 500 });
+        const result = await erp.purchase.action({ action: "sync_1688_addresses", ...ADDRESS_WORKBENCH_PARAMS });
         nextAddresses = get1688AddressRows(result);
       }
-      if (nextAddresses.length) setAlibaba1688Addresses(nextAddresses);
+      if (nextAddresses.length) {
+        setAlibaba1688Addresses(nextAddresses);
+        setLoadedOnce(true);
+        writePageCache<StoreManagerCache>(STORE_MANAGER_CACHE_KEY, {
+          generatedAt: new Date().toISOString(),
+          accounts,
+          alibaba1688Addresses: nextAddresses,
+        });
+      }
       return nextAddresses;
     } catch (error: any) {
       if (syncIfEmpty) message.error(error?.message || "1688 地址同步失败");
@@ -342,7 +376,7 @@ export default function StoreManager({ onChanged }: StoreManagerProps) {
     } finally {
       setAddressLoading(false);
     }
-  }, []);
+  }, [accounts]);
 
   useEffect(() => {
     void loadAll();
@@ -524,6 +558,8 @@ export default function StoreManager({ onChanged }: StoreManagerProps) {
     return <Alert type="error" showIcon message="当前环境缺少本地服务接口" />;
   }
 
+  const tableLoading = loading && !loadedOnce && accounts.length > 0;
+
   return (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
       {canManageAccounts ? (
@@ -538,7 +574,7 @@ export default function StoreManager({ onChanged }: StoreManagerProps) {
       <Table
         size="small"
         rowKey="id"
-        loading={loading}
+        loading={tableLoading}
         columns={accountColumns}
         dataSource={accounts}
         pagination={{ pageSize: 5, showSizeChanger: false }}

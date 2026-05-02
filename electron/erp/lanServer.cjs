@@ -3535,9 +3535,10 @@ async function handleRequest({
     }
 
     if (pathname === "/api/purchase/workbench") {
+      const payload = await readOptionalPayload(req);
       writeJson(res, 200, {
         ok: true,
-        workbench: await getPurchaseWorkbench({ user: session.user }),
+        workbench: await getPurchaseWorkbench({ ...payload, user: session.user }),
       });
       return;
     }

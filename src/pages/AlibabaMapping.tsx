@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button,
@@ -9,7 +9,6 @@ import {
   InputNumber,
   Modal,
   Row,
-  Select,
   Space,
   Switch,
   Table,
@@ -19,21 +18,57 @@ import {
   message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { DeleteOutlined, EditOutlined, LinkOutlined, PlusOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons";
+import { BellOutlined, DeleteOutlined, EditOutlined, LinkOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, StarOutlined } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
 import { useErpAuth } from "../contexts/ErpAuthContext";
+import { hasPageCache, readPageCache, writePageCache } from "../utils/pageCache";
 
 const { Text } = Typography;
 const erp = window.electronAPI?.erp;
 const appAPI = window.electronAPI?.app;
+const ALIBABA_MAPPING_CACHE_KEY = "temu.alibaba-mapping.cache.v1";
+const MAPPING_WORKBENCH_PARAMS = {
+  limit: 500,
+  includeRequestDetails: false,
+  include1688Meta: false,
+};
+const supplierActionGridStyle: CSSProperties = {
+  display: "grid",
+  gap: 6,
+  gridTemplateColumns: "repeat(2, 68px)",
+  justifyContent: "start",
+};
+const supplierActionButtonStyle: CSSProperties = {
+  paddingInline: 0,
+  width: 68,
+};
+
+interface Primary1688Source {
+  id?: string | null;
+  externalOfferId?: string | null;
+  externalSkuId?: string | null;
+  externalSpecId?: string | null;
+  platformSkuName?: string | null;
+  supplierName?: string | null;
+  productTitle?: string | null;
+  productUrl?: string | null;
+  imageUrl?: string | null;
+  unitPrice?: number | null;
+  moq?: number | null;
+  ourQty?: number | null;
+  platformQty?: number | null;
+}
 
 interface SkuOptionRow {
   id: string;
   accountId?: string | null;
+  accountName?: string | null;
   internalSkuCode?: string;
   productName?: string;
   colorSpec?: string | null;
+  systemSupplierName?: string | null;
   imageUrl?: string | null;
+  primary1688Source?: Primary1688Source | null;
 }
 
 interface Sku1688SourceRow {
@@ -64,12 +99,30 @@ interface Sku1688SourceRow {
   sourcePayload?: {
     marketingMixConfig?: MarketingMixConfig | null;
     marketingMixSyncedAt?: string | null;
+    marketingMixAutoAttemptedAt?: string | null;
+    marketingMixAutoStatus?: string | null;
+    marketingMixAutoError?: string | null;
+    relationUserInfo?: Record<string, unknown> | null;
+    relationUserInfoAutoAttemptedAt?: string | null;
+    relationUserInfoAutoStatus?: string | null;
+    relationUserInfoAutoError?: string | null;
+    purchasedProductSimple?: Record<string, unknown> | null;
+    purchasedProductSimpleAutoAttemptedAt?: string | null;
+    purchasedProductSimpleAutoStatus?: string | null;
+    purchasedProductSimpleAutoError?: string | null;
     followedAt1688?: string | null;
     monitorProduct?: { enabled?: boolean } | null;
     [key: string]: unknown;
   } | null;
   createdAt?: string | null;
   updatedAt?: string | null;
+  isSkuPlaceholder?: boolean;
+}
+
+interface AlibabaMappingCache {
+  generatedAt?: string;
+  skus?: SkuOptionRow[];
+  mappings?: Sku1688SourceRow[];
 }
 
 interface MarketingMixConfig {
@@ -100,6 +153,29 @@ interface MappingFormValues {
   isDefault?: boolean;
 }
 
+interface MappingSpecRow {
+  key: string;
+  externalSkuId?: string | null;
+  externalSpecId: string;
+  specText?: string | null;
+  price?: number | null;
+  stock?: number | null;
+}
+
+interface UrlSpecDialogState {
+  externalOfferId: string;
+  productUrl: string;
+  detail: {
+    supplierName?: string | null;
+    productTitle?: string | null;
+    imageUrl?: string | null;
+    unitPrice?: number | null;
+    moq?: number | null;
+    skuOptions?: Array<Partial<MappingSpecRow>>;
+  };
+  rows: MappingSpecRow[];
+}
+
 function canManage(role?: string | null) {
   return Boolean(role && ["admin", "manager", "buyer"].includes(role));
 }
@@ -122,6 +198,89 @@ function build1688Link(row: Sku1688SourceRow | MappingFormValues) {
   if (row.productUrl) return row.productUrl;
   if (row.externalOfferId) return `https://detail.1688.com/offer/${row.externalOfferId}.html`;
   return "";
+}
+
+function isSkuPlaceholderRow(row: Sku1688SourceRow) {
+  return Boolean(row.isSkuPlaceholder);
+}
+
+function buildSkuDisplayRow(sku: SkuOptionRow): Sku1688SourceRow {
+  const source = sku.primary1688Source || {};
+  const sourceId = source.id || "";
+  const externalOfferId = source.externalOfferId || null;
+  return {
+    id: sourceId || `sku:${sku.id}`,
+    accountId: sku.accountId || null,
+    accountName: sku.accountName || null,
+    skuId: sku.id,
+    internalSkuCode: sku.internalSkuCode,
+    productName: sku.productName,
+    colorSpec: sku.colorSpec || null,
+    systemSupplierName: sku.systemSupplierName || null,
+    externalOfferId,
+    externalSkuId: source.externalSkuId || null,
+    externalSpecId: source.externalSpecId || null,
+    platformSkuName: source.platformSkuName || null,
+    supplierName: source.supplierName || null,
+    productTitle: source.productTitle || null,
+    productUrl: source.productUrl || (externalOfferId ? `https://detail.1688.com/offer/${externalOfferId}.html` : null),
+    imageUrl: source.imageUrl || sku.imageUrl || null,
+    unitPrice: source.unitPrice ?? null,
+    moq: source.moq ?? null,
+    ourQty: source.ourQty ?? 1,
+    platformQty: source.platformQty ?? 1,
+    status: externalOfferId ? "active" : "unmapped",
+    isDefault: Boolean(sourceId),
+    sourcePayload: null,
+    isSkuPlaceholder: !sourceId,
+  };
+}
+
+function mergeSkuAndMappingRows(skus: SkuOptionRow[], mappings: Sku1688SourceRow[]) {
+  const skusById = new Map(skus.map((sku) => [sku.id, sku]));
+  const rows: Sku1688SourceRow[] = mappings.map((row): Sku1688SourceRow => {
+    const sku = skusById.get(row.skuId);
+    return {
+      ...row,
+      accountId: row.accountId || sku?.accountId || null,
+      accountName: row.accountName || sku?.accountName || null,
+      internalSkuCode: row.internalSkuCode || sku?.internalSkuCode,
+      productName: row.productName || sku?.productName,
+      colorSpec: row.colorSpec ?? sku?.colorSpec ?? null,
+      systemSupplierName: row.systemSupplierName || sku?.systemSupplierName || null,
+      imageUrl: row.imageUrl || sku?.imageUrl || null,
+      isSkuPlaceholder: false,
+    };
+  });
+  const mappedSkuIds = new Set(rows.map((row) => row.skuId));
+  for (const sku of skus) {
+    if (!mappedSkuIds.has(sku.id)) {
+      rows.push(buildSkuDisplayRow(sku));
+    }
+  }
+  return rows;
+}
+
+function normalizeSearchText(value: unknown) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function getRowSearchText(row: Sku1688SourceRow) {
+  return [
+    row.internalSkuCode,
+    row.skuId,
+    row.productName,
+    row.productTitle,
+    row.colorSpec,
+    row.systemSupplierName,
+    row.supplierName,
+    row.platformSkuName,
+    row.externalOfferId,
+    row.externalSkuId,
+    row.externalSpecId,
+    row.accountName,
+    row.isSkuPlaceholder ? "未绑定 未匹配 无1688供应商" : "",
+  ].map((value) => String(value ?? "")).join(" ").toLowerCase();
 }
 
 async function openExternalUrl(url: string) {
@@ -149,6 +308,23 @@ function extract1688OfferId(value?: string | null) {
   return looseMatch?.[1] || "";
 }
 
+function productDetailSpecRows(detail?: UrlSpecDialogState["detail"] | null): MappingSpecRow[] {
+  const options = Array.isArray(detail?.skuOptions) ? detail.skuOptions : [];
+  return options
+    .filter((item) => item?.externalSpecId || item?.externalSkuId)
+    .map((item, index) => {
+      const externalSpecId = String(item.externalSpecId || item.externalSkuId || "");
+      return {
+        key: `${externalSpecId}:${item.externalSkuId || ""}:${index}`,
+        externalSkuId: item.externalSkuId || externalSpecId,
+        externalSpecId,
+        specText: item.specText || externalSpecId,
+        price: item.price ?? null,
+        stock: item.stock ?? null,
+      };
+    });
+}
+
 function mappingStatus(row: Sku1688SourceRow) {
   if (!row.supplierName || !build1688Link(row) || !row.externalOfferId) {
     return { label: "未匹配", color: "default" };
@@ -161,77 +337,267 @@ function mappingStatus(row: Sku1688SourceRow) {
 
 function formatMixRule(config?: MarketingMixConfig | null) {
   if (!config) return "-";
-  if (!config.generalHunpi) return "不支持混批";
+  if (!config.generalHunpi) return "按单品起订";
   const amountText = config.mixAmount !== null && config.mixAmount !== undefined
-    ? `满 ${Number(config.mixAmount).toFixed(2)} 元`
+    ? `满 ¥${Number(config.mixAmount).toFixed(2)}`
     : "";
   const numberText = config.mixNumber !== null && config.mixNumber !== undefined
     ? `满 ${Number(config.mixNumber)} 件`
     : "";
-  return [amountText, numberText].filter(Boolean).join(" / ") || "支持混批";
+  return [amountText, numberText].filter(Boolean).join(" / ") || "支持组合起订";
 }
 
 function getMarketingMixConfig(row: Sku1688SourceRow) {
   return row.sourcePayload?.marketingMixConfig || null;
 }
 
+function getPurchaseRuleState(row: Sku1688SourceRow) {
+  const config = getMarketingMixConfig(row);
+  if (config) {
+    return {
+      color: config.generalHunpi ? "success" : "default",
+      label: `起批规则：${formatMixRule(config)}`,
+      tooltip: row.sourcePayload?.marketingMixSyncedAt
+        ? `已识别：${formatDateTime(row.sourcePayload.marketingMixSyncedAt)}`
+        : "已识别",
+    };
+  }
+  if (row.sourcePayload?.marketingMixAutoStatus === "running") {
+    return { color: "processing", label: "起批规则：识别中", tooltip: "正在自动识别供应商起批规则" };
+  }
+  if (row.sourcePayload?.marketingMixAutoStatus === "failed") {
+    return {
+      color: "error",
+      label: "起批规则：识别失败",
+      tooltip: row.sourcePayload?.marketingMixAutoError || "自动识别失败",
+    };
+  }
+  if (row.sourcePayload?.marketingMixAutoAttemptedAt) {
+    return { color: "warning", label: "起批规则：待补充", tooltip: "已尝试自动识别，暂未得到可用结果" };
+  }
+  return { color: "default", label: "起批规则：待自动识别", tooltip: "系统会自动识别一次并记录到供应商资料" };
+}
+
+function needsSupplierProfileAutoSync(row: Sku1688SourceRow) {
+  const payload = row.sourcePayload || {};
+  return Boolean(
+    row.id
+    && row.externalOfferId
+    && (
+      (!payload.relationUserInfo && !payload.relationUserInfoAutoAttemptedAt)
+      || (!payload.purchasedProductSimple && !payload.purchasedProductSimpleAutoAttemptedAt)
+    ),
+  );
+}
+
 export default function AlibabaMapping() {
   const auth = useErpAuth();
   const editable = canManage(auth.currentUser?.role);
+  const cachedData = useMemo(
+    () => readPageCache<AlibabaMappingCache>(ALIBABA_MAPPING_CACHE_KEY, {}),
+    [],
+  );
   const [form] = Form.useForm<MappingFormValues>();
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editingRow, setEditingRow] = useState<Sku1688SourceRow | null>(null);
-  const [skus, setSkus] = useState<SkuOptionRow[]>([]);
-  const [mappings, setMappings] = useState<Sku1688SourceRow[]>([]);
-  const [mixLoadingId, setMixLoadingId] = useState<string | null>(null);
+  const [skus, setSkus] = useState<SkuOptionRow[]>(() => cachedData.skus || []);
+  const [mappings, setMappings] = useState<Sku1688SourceRow[]>(() => cachedData.mappings || []);
+  const [loadedOnce, setLoadedOnce] = useState(() => hasPageCache(cachedData));
+  const [searchText, setSearchText] = useState("");
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
+  const [specPreviewLoading, setSpecPreviewLoading] = useState(false);
+  const [urlSpecDialog, setUrlSpecDialog] = useState<UrlSpecDialogState | null>(null);
+  const [selectedUrlSpecId, setSelectedUrlSpecId] = useState<string | null>(null);
+  const [urlSpecOurQty, setUrlSpecOurQty] = useState(1);
+  const [urlSpecPlatformQty, setUrlSpecPlatformQty] = useState(1);
+  const autoPurchaseRuleIdsRef = useRef<Set<string>>(new Set());
+  const autoSupplierProfileIdsRef = useRef<Set<string>>(new Set());
+
+  const applyMappingRows = useCallback((nextSkus: SkuOptionRow[], nextMappings: Sku1688SourceRow[]) => {
+    setSkus(nextSkus);
+    setMappings(nextMappings);
+    setLoadedOnce(true);
+    writePageCache<AlibabaMappingCache>(ALIBABA_MAPPING_CACHE_KEY, {
+      generatedAt: new Date().toISOString(),
+      skus: nextSkus,
+      mappings: nextMappings,
+    });
+  }, []);
+
+  const applyMappingSources = useCallback((nextMappings: Sku1688SourceRow[]) => {
+    setMappings(nextMappings);
+    setLoadedOnce(true);
+    writePageCache<AlibabaMappingCache>(ALIBABA_MAPPING_CACHE_KEY, {
+      generatedAt: new Date().toISOString(),
+      skus,
+      mappings: nextMappings,
+    });
+  }, [skus]);
+
+  const updateMappingSources = useCallback((updater: (rows: Sku1688SourceRow[]) => Sku1688SourceRow[]) => {
+    setMappings((current) => {
+      const nextMappings = updater(current);
+      setLoadedOnce(true);
+      writePageCache<AlibabaMappingCache>(ALIBABA_MAPPING_CACHE_KEY, {
+        generatedAt: new Date().toISOString(),
+        skus,
+        mappings: nextMappings,
+      });
+      return nextMappings;
+    });
+  }, [skus]);
 
   const loadData = useCallback(async () => {
     if (!erp) return;
     setLoading(true);
     try {
-      const workbench = await erp.purchase.workbench({ limit: 500 });
-      setSkus(Array.isArray(workbench?.skuOptions) ? workbench.skuOptions : []);
-      setMappings(Array.isArray(workbench?.sku1688Sources) ? workbench.sku1688Sources : []);
+      const workbench = await erp.purchase.workbench(MAPPING_WORKBENCH_PARAMS);
+      applyMappingRows(
+        Array.isArray(workbench?.skuOptions) ? workbench.skuOptions : [],
+        Array.isArray(workbench?.sku1688Sources) ? workbench.sku1688Sources : [],
+      );
     } catch (error: any) {
       message.error(error?.message || "供应商管理读取失败");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [applyMappingRows]);
 
   useEffect(() => {
     void loadData();
-  }, [loadData]);
+  }, [loadData, updateMappingSources]);
 
-  const skuOptions = useMemo(
-    () => skus.map((sku) => {
-      const code = sku.internalSkuCode || sku.id;
-      const name = sku.productName || "";
-      const spec = sku.colorSpec || "";
-      return {
-        value: sku.id,
-        label: code,
-        searchText: `${code} ${name} ${spec}`,
-      };
-    }),
-    [skus],
+  useEffect(() => {
+    if (!erp || !editable) return;
+    const targets = mappings
+      .filter((row) => (
+        row.id
+        && row.externalOfferId
+        && !getMarketingMixConfig(row)
+        && !row.sourcePayload?.marketingMixAutoAttemptedAt
+        && !autoPurchaseRuleIdsRef.current.has(row.id)
+      ))
+      .slice(0, 2);
+    if (!targets.length) return;
+
+    let cancelled = false;
+    targets.forEach((row) => {
+      autoPurchaseRuleIdsRef.current.add(row.id);
+      void erp.purchase.action({
+        action: "ensure_1688_mix_config_once",
+        sourceId: row.id,
+        accountId: row.accountId,
+        externalOfferId: row.externalOfferId,
+        productId: row.externalOfferId,
+        ...MAPPING_WORKBENCH_PARAMS,
+      }).then((response: any) => {
+        if (cancelled) return;
+        if (Array.isArray(response?.workbench?.sku1688Sources)) {
+          applyMappingSources(response.workbench.sku1688Sources);
+        }
+      }).catch(() => {
+        // The row is marked failed by the backend; keep the page quiet.
+      }).finally(() => {
+        autoPurchaseRuleIdsRef.current.delete(row.id);
+      });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [applyMappingSources, editable, mappings]);
+
+  useEffect(() => {
+    if (!erp || !editable) return;
+    const targets = mappings
+      .filter((row) => needsSupplierProfileAutoSync(row) && !autoSupplierProfileIdsRef.current.has(row.id))
+      .slice(0, 2);
+    if (!targets.length) return;
+
+    let cancelled = false;
+    targets.forEach((row) => {
+      autoSupplierProfileIdsRef.current.add(row.id);
+      void erp.purchase.action({
+        action: "ensure_1688_supplier_profile_once",
+        sourceId: row.id,
+        accountId: row.accountId,
+        externalOfferId: row.externalOfferId,
+        productId: row.externalOfferId,
+        ...MAPPING_WORKBENCH_PARAMS,
+      }).then((response: any) => {
+        if (cancelled) return;
+        if (Array.isArray(response?.workbench?.sku1688Sources)) {
+          applyMappingSources(response.workbench.sku1688Sources);
+        }
+      }).catch(() => {
+        // The backend records failed attempts; avoid interrupting table work.
+      }).finally(() => {
+        autoSupplierProfileIdsRef.current.delete(row.id);
+      });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [applyMappingSources, editable, mappings]);
+
+  const allDisplayRows = useMemo(
+    () => mergeSkuAndMappingRows(skus, mappings),
+    [skus, mappings],
   );
 
-  const openCreate = () => {
+  const displayRows = useMemo(() => {
+    const needle = normalizeSearchText(searchText);
+    if (!needle) return allDisplayRows;
+    return allDisplayRows.filter((row) => getRowSearchText(row).includes(needle));
+  }, [allDisplayRows, searchText]);
+
+  const urlSpecColumns = useMemo<ColumnsType<MappingSpecRow>>(() => [
+    {
+      title: "规格",
+      dataIndex: "specText",
+      render: (value: string | null | undefined, row) => value || row.externalSpecId,
+    },
+    {
+      title: "SKU ID",
+      dataIndex: "externalSkuId",
+      width: 150,
+      render: (value: string | null | undefined) => value || "-",
+    },
+    {
+      title: "Spec ID",
+      dataIndex: "externalSpecId",
+      width: 150,
+    },
+    {
+      title: "价格",
+      dataIndex: "price",
+      width: 110,
+      render: (value: number | null | undefined) => value === null || value === undefined ? "-" : `¥${Number(value).toFixed(2)}`,
+    },
+    {
+      title: "库存",
+      dataIndex: "stock",
+      width: 100,
+      render: (value: number | null | undefined) => value === null || value === undefined ? "-" : Number(value).toLocaleString("zh-CN"),
+    },
+  ], []);
+
+  const openCreateForSku = useCallback((row: Sku1688SourceRow) => {
     setEditingRow(null);
     form.resetFields();
     form.setFieldsValue({
+      skuId: row.skuId,
       status: "active",
       isDefault: true,
-      ourQty: 1,
-      platformQty: 1,
-      moq: 1,
+      ourQty: row.ourQty || 1,
+      platformQty: row.platformQty || 1,
+      moq: row.moq || 1,
     });
     setModalOpen(true);
-  };
+  }, [form]);
 
   const openEdit = (row: Sku1688SourceRow) => {
     setEditingRow(row);
@@ -257,6 +623,113 @@ export default function AlibabaMapping() {
     setModalOpen(true);
   };
 
+  const handleMappingFormValuesChange = useCallback((changedValues: Partial<MappingFormValues>) => {
+    if (!Object.prototype.hasOwnProperty.call(changedValues, "productUrl")) return;
+    const externalOfferId = extract1688OfferId(changedValues.productUrl);
+    if (!externalOfferId) return;
+    const currentOfferId = form.getFieldValue("externalOfferId");
+    form.setFieldsValue({
+      externalOfferId,
+      ...(currentOfferId && currentOfferId !== externalOfferId
+        ? { externalSkuId: undefined, externalSpecId: undefined, platformSkuName: undefined }
+        : {}),
+    });
+  }, [form]);
+
+  const previewSpecsFromUrl = useCallback(async () => {
+    if (!erp) return;
+    const values = form.getFieldsValue() as MappingFormValues;
+    const productUrl = String(values.productUrl || "").trim();
+    const externalOfferId = values.externalOfferId || extract1688OfferId(productUrl);
+    if (!values.skuId) {
+      message.warning("请先选择商品编码");
+      return;
+    }
+    if (!externalOfferId) {
+      message.warning("请先填写可识别商品号的 1688 地址");
+      return;
+    }
+    const sku = skus.find((item) => item.id === values.skuId);
+    if (!sku?.accountId) {
+      message.error("这个商品编码还没有匹配店铺，请先到采购中心维护店铺");
+      return;
+    }
+
+    setSpecPreviewLoading(true);
+    try {
+      const response = await erp.purchase.action({
+        action: "preview_1688_url_specs",
+        skuId: values.skuId,
+        accountId: sku.accountId,
+        externalOfferId,
+        productUrl: productUrl || build1688Link({ ...values, externalOfferId }),
+        supplierName: values.supplierName,
+        productTitle: values.productTitle,
+        imageUrl: values.imageUrl,
+        unitPrice: values.unitPrice,
+        moq: values.moq,
+        ...MAPPING_WORKBENCH_PARAMS,
+      });
+      const result = response?.result || {};
+      const detail = (result.detail || {}) as UrlSpecDialogState["detail"];
+      const rows = productDetailSpecRows(detail);
+      if (!rows.length) {
+        message.warning("这个 1688 地址没有解析到可绑定规格，请换一个地址或检查商品详情权限");
+        return;
+      }
+      const nextOfferId = String(result.externalOfferId || externalOfferId);
+      const nextProductUrl = String(result.productUrl || productUrl || build1688Link({ ...values, externalOfferId: nextOfferId }));
+      form.setFieldsValue({
+        externalOfferId: nextOfferId,
+        productUrl: nextProductUrl,
+        supplierName: values.supplierName || detail.supplierName || undefined,
+        productTitle: values.productTitle || detail.productTitle || undefined,
+        imageUrl: values.imageUrl || detail.imageUrl || undefined,
+        unitPrice: values.unitPrice ?? detail.unitPrice ?? undefined,
+        moq: values.moq ?? detail.moq ?? 1,
+      });
+      setUrlSpecDialog({
+        externalOfferId: nextOfferId,
+        productUrl: nextProductUrl,
+        detail,
+        rows,
+      });
+      setSelectedUrlSpecId(values.externalSpecId || rows[0]?.externalSpecId || null);
+      setUrlSpecOurQty(Math.max(1, Math.floor(Number(values.ourQty || 1))));
+      setUrlSpecPlatformQty(Math.max(1, Math.floor(Number(values.platformQty || 1))));
+    } catch (error: any) {
+      message.error(error?.message || "1688 地址规格解析失败");
+    } finally {
+      setSpecPreviewLoading(false);
+    }
+  }, [form, skus]);
+
+  const applySelectedUrlSpec = useCallback(() => {
+    if (!urlSpecDialog) return;
+    const selected = urlSpecDialog.rows.find((row) => row.externalSpecId === selectedUrlSpecId);
+    if (!selected) {
+      message.warning("请先选择一个 1688 规格");
+      return;
+    }
+    const values = form.getFieldsValue() as MappingFormValues;
+    form.setFieldsValue({
+      externalOfferId: urlSpecDialog.externalOfferId,
+      productUrl: urlSpecDialog.productUrl,
+      externalSkuId: selected.externalSkuId || selected.externalSpecId,
+      externalSpecId: selected.externalSpecId,
+      platformSkuName: selected.specText || selected.externalSpecId,
+      supplierName: values.supplierName || urlSpecDialog.detail.supplierName || undefined,
+      productTitle: values.productTitle || urlSpecDialog.detail.productTitle || undefined,
+      imageUrl: values.imageUrl || urlSpecDialog.detail.imageUrl || undefined,
+      unitPrice: selected.price ?? values.unitPrice ?? urlSpecDialog.detail.unitPrice ?? undefined,
+      moq: values.moq ?? urlSpecDialog.detail.moq ?? 1,
+      ourQty: urlSpecOurQty,
+      platformQty: urlSpecPlatformQty,
+    });
+    setUrlSpecDialog(null);
+    message.success("1688 规格和映射比例已选择，保存后完成供应商绑定");
+  }, [form, selectedUrlSpecId, urlSpecDialog, urlSpecOurQty, urlSpecPlatformQty]);
+
   const handleSubmit = async (values: MappingFormValues) => {
     if (!erp) return;
     const sku = skus.find((item) => item.id === values.skuId);
@@ -268,11 +741,15 @@ export default function AlibabaMapping() {
     try {
       const externalOfferId = values.externalOfferId || extract1688OfferId(values.productUrl);
       if (!externalOfferId) {
-        message.error("请填写可识别商品号的 1688 地址，或手动补 1688 商品ID");
+        message.error("请填写可识别商品号的 1688 地址");
+        return;
+      }
+      if (!values.externalSpecId) {
+        message.error("请先解析 1688 地址并选择要绑定的规格");
         return;
       }
       const productUrl = values.productUrl || build1688Link({ ...values, externalOfferId });
-      await erp.purchase.action({
+      const response = await erp.purchase.action({
         action: "upsert_sku_1688_source",
         id: editingRow?.id,
         skuId: values.skuId,
@@ -292,54 +769,29 @@ export default function AlibabaMapping() {
         platformQty: values.platformQty,
         status: values.status,
         isDefault: values.isDefault,
-        limit: 500,
+        ...MAPPING_WORKBENCH_PARAMS,
+        includeWorkbench: false,
       });
+      const savedSource = response?.result?.sku1688Source as Sku1688SourceRow | undefined;
+      if (savedSource?.id) {
+        updateMappingSources((rows) => {
+          const exists = rows.some((item) => item.id === savedSource.id);
+          return exists
+            ? rows.map((item) => (item.id === savedSource.id ? { ...item, ...savedSource } : item))
+            : [savedSource, ...rows];
+        });
+      }
       message.success("供应商信息已保存");
       setModalOpen(false);
       setEditingRow(null);
       form.resetFields();
-      await loadData();
+      void loadData();
     } catch (error: any) {
       message.error(error?.message || "供应商信息保存失败");
     } finally {
       setSaving(false);
     }
   };
-
-  const queryMixConfig = useCallback(async (row: Sku1688SourceRow) => {
-    if (!erp) return;
-    setMixLoadingId(row.id);
-    try {
-      const response = await erp.purchase.action({
-        action: "query_1688_mix_config",
-        sourceId: row.id,
-        accountId: row.accountId,
-        limit: 500,
-      });
-      if (Array.isArray(response?.workbench?.sku1688Sources)) {
-        setMappings(response.workbench.sku1688Sources);
-      }
-      const config = response?.result?.mixConfig as MarketingMixConfig | undefined;
-      const query = (response?.result?.query || {}) as { sellerMemberId?: string; sellerLoginId?: string };
-      const sellerLabel = query.sellerMemberId || query.sellerLoginId || config?.memberId || row.supplierName || "-";
-      Modal.info({
-        title: "卖家混批设置",
-        content: (
-          <Space direction="vertical" size={6}>
-            <Text>卖家：{sellerLabel}</Text>
-            <Text>状态：{config?.generalHunpi ? "支持混批" : "不支持混批"}</Text>
-            <Text>规则：{formatMixRule(config)}</Text>
-            {query.sellerLoginId ? <Text>旺旺：{query.sellerLoginId}</Text> : null}
-            {config?.memberId ? <Text>MemberId：{config.memberId}</Text> : null}
-          </Space>
-        ),
-      });
-    } catch (error: any) {
-      message.error(error?.message || "查询 1688 混批设置失败");
-    } finally {
-      setMixLoadingId(null);
-    }
-  }, []);
 
   const run1688SourceAction = useCallback(async (
     row: Sku1688SourceRow,
@@ -349,7 +801,33 @@ export default function AlibabaMapping() {
   ) => {
     if (!erp) return null;
     const key = `${action}-${row.id}`;
-    setActionLoadingId(key);
+    const optimisticAction = [
+      "follow_1688_product",
+      "unfollow_1688_product",
+      "add_1688_monitor_product",
+      "delete_1688_monitor_product",
+    ].includes(action);
+    if (optimisticAction) {
+      const now = new Date().toISOString();
+      updateMappingSources((rows) => rows.map((item) => {
+        if (item.id !== row.id) return item;
+        const payload = { ...(item.sourcePayload || {}) };
+        if (action === "follow_1688_product") {
+          payload.followedAt1688 = now;
+          payload.unfollowedAt1688 = null;
+        } else if (action === "unfollow_1688_product") {
+          payload.followedAt1688 = null;
+          payload.unfollowedAt1688 = now;
+        } else if (action === "add_1688_monitor_product") {
+          payload.monitorProduct = { ...((payload.monitorProduct as Record<string, unknown>) || {}), enabled: true };
+        } else if (action === "delete_1688_monitor_product") {
+          payload.monitorProduct = { ...((payload.monitorProduct as Record<string, unknown>) || {}), enabled: false };
+        }
+        return { ...item, sourcePayload: payload, updatedAt: now };
+      }));
+    } else {
+      setActionLoadingId(key);
+    }
     try {
       const response = await erp.purchase.action({
         action,
@@ -362,49 +840,53 @@ export default function AlibabaMapping() {
         keyword: row.productTitle || row.productName || row.externalOfferId,
         imageUrl: row.imageUrl,
         ...extra,
-        limit: 500,
+        ...MAPPING_WORKBENCH_PARAMS,
+        includeWorkbench: false,
       });
-      if (Array.isArray(response?.workbench?.sku1688Sources)) {
-        setMappings(response.workbench.sku1688Sources);
+      if (response?.result?.sku1688Source) {
+        const updatedSource = response.result.sku1688Source as Sku1688SourceRow;
+        updateMappingSources((rows) => rows.map((item) => (item.id === row.id ? updatedSource : item)));
+      } else if (Array.isArray(response?.workbench?.sku1688Sources)) {
+        applyMappingSources(response.workbench.sku1688Sources);
       }
       message.success(successText);
       return response;
     } catch (error: any) {
+      if (optimisticAction) {
+        updateMappingSources((rows) => rows.map((item) => (item.id === row.id ? row : item)));
+      }
       message.error(error?.message || "1688 操作失败");
       return null;
     } finally {
       setActionLoadingId(null);
     }
-  }, []);
+  }, [applyMappingSources, updateMappingSources]);
 
   const deleteMapping = useCallback((row: Sku1688SourceRow) => {
     if (!erp) return;
     Modal.confirm({
       title: "删除供应商绑定",
-      content: "删除后这条 1688 规格绑定会从供应商管理移除，后续推单不会再使用；已生成的采购单和 1688 订单不会删除。",
+      content: "删除后这条 1688 规格绑定会从供应商管理移除；已生成的采购单和 1688 订单不会删除。",
       okText: "删除",
       okButtonProps: { danger: true },
       cancelText: "取消",
-      onOk: async () => {
-        const key = `delete_sku_1688_source-${row.id}`;
-        setActionLoadingId(key);
-        try {
-          await erp.purchase.action({
-            action: "delete_sku_1688_source",
-            sourceId: row.id,
-            limit: 500,
-          });
+      onOk: () => {
+        updateMappingSources((rows) => rows.filter((item) => item.id !== row.id));
+        void erp.purchase.action({
+          action: "delete_sku_1688_source",
+          sourceId: row.id,
+          ...MAPPING_WORKBENCH_PARAMS,
+          includeWorkbench: false,
+        }).then(() => {
           message.success("供应商绑定已删除");
-          await loadData();
-        } catch (error: any) {
+        }).catch((error: any) => {
+          updateMappingSources((rows) => rows.some((item) => item.id === row.id) ? rows : [row, ...rows]);
           message.error(error?.message || "供应商绑定删除失败");
-          throw error;
-        } finally {
-          setActionLoadingId(null);
-        }
+        });
       },
     });
-  }, [loadData]);
+  }, [updateMappingSources]);
+
 
   const searchRelationSuppliers = useCallback(async () => {
     if (!erp) return;
@@ -413,7 +895,8 @@ export default function AlibabaMapping() {
       const response = await erp.purchase.action({
         action: "search_1688_relation_suppliers",
         pageSize: 20,
-        limit: 500,
+        ...MAPPING_WORKBENCH_PARAMS,
+        includeWorkbench: false,
       });
       const suppliers = Array.isArray(response?.result?.suppliers) ? response.result.suppliers : [];
       Modal.info({
@@ -443,7 +926,8 @@ export default function AlibabaMapping() {
       const response = await erp.purchase.action({
         action: "query_1688_monitor_products",
         pageSize: 50,
-        limit: 500,
+        ...MAPPING_WORKBENCH_PARAMS,
+        includeWorkbench: false,
       });
       const products = Array.isArray(response?.result?.products) ? response.result.products : [];
       Modal.info({
@@ -537,22 +1021,21 @@ export default function AlibabaMapping() {
     {
       title: "1688供应商旺旺名称",
       key: "supplier",
-      width: 180,
-      render: (_value, row) => row.supplierName || "-",
-    },
-    {
-      title: "混批",
-      key: "marketingMix",
-      width: 130,
+      width: 240,
       render: (_value, row) => {
-        const config = getMarketingMixConfig(row);
-        if (!config) return <Tag>未查询</Tag>;
+        if (isSkuPlaceholderRow(row)) {
+          return <Text>{row.supplierName || "-"}</Text>;
+        }
+        const ruleState = getPurchaseRuleState(row);
         return (
-          <Tooltip title={formatMixRule(config)}>
-            <Tag color={config.generalHunpi ? "success" : "default"}>
-              {config.generalHunpi ? "支持" : "不支持"}
-            </Tag>
-          </Tooltip>
+          <Space direction="vertical" size={4}>
+            <Text>{row.supplierName || "-"}</Text>
+            <Tooltip title={ruleState.tooltip}>
+              <Tag color={ruleState.color} style={{ marginInlineEnd: 0 }}>
+                {ruleState.label}
+              </Tag>
+            </Tooltip>
+          </Space>
         );
       },
     },
@@ -629,7 +1112,7 @@ export default function AlibabaMapping() {
       render: (_value, row) => row.externalSpecId || "-",
     },
     {
-      title: "品牌",
+      title: "店铺",
       key: "brand",
       width: 100,
       render: (_value, row) => row.accountName || "-",
@@ -649,95 +1132,96 @@ export default function AlibabaMapping() {
     {
       title: "操作",
       key: "actions",
-      width: 260,
+      width: 170,
       fixed: "right",
-      render: (_value, row) => (
-        <Space size={6} wrap>
-          {editable ? (
-            <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(row)}>
-              编辑
-            </Button>
-          ) : null}
-          <Button
-            size="small"
-            icon={<SearchOutlined />}
-            loading={mixLoadingId === row.id}
-            onClick={() => void queryMixConfig(row)}
-          >
-            混批
-          </Button>
-          <Button
-            size="small"
-            loading={actionLoadingId === `run_1688_deep_search_agent-${row.id}`}
-            onClick={() => void run1688SourceAction(row, "run_1688_deep_search_agent", "1688深搜任务已运行")}
-          >
-            深搜
-          </Button>
-          <Button
-            size="small"
-            loading={actionLoadingId === `${row.sourcePayload?.monitorProduct?.enabled ? "delete_1688_monitor_product" : "add_1688_monitor_product"}-${row.id}`}
-            onClick={() => void run1688SourceAction(
-              row,
-              row.sourcePayload?.monitorProduct?.enabled ? "delete_1688_monitor_product" : "add_1688_monitor_product",
-              row.sourcePayload?.monitorProduct?.enabled ? "1688监控已取消" : "1688监控已开启",
-            )}
-          >
-            {row.sourcePayload?.monitorProduct?.enabled ? "取消监控" : "监控"}
-          </Button>
-          <Button
-            size="small"
-            loading={actionLoadingId === `sync_1688_relation_user_info-${row.id}`}
-            onClick={() => void run1688SourceAction(row, "sync_1688_relation_user_info", "1688商家信息已同步")}
-          >
-            商家
-          </Button>
-          <Button
-            size="small"
-            loading={actionLoadingId === `sync_1688_purchased_products-${row.id}`}
-            onClick={() => void run1688SourceAction(row, "sync_1688_purchased_products", "1688已购商品已同步")}
-          >
-            已购
-          </Button>
-          <Button
-            size="small"
-            loading={actionLoadingId === `${row.sourcePayload?.followedAt1688 ? "unfollow_1688_product" : "follow_1688_product"}-${row.id}`}
-            onClick={() => void run1688SourceAction(
-              row,
-              row.sourcePayload?.followedAt1688 ? "unfollow_1688_product" : "follow_1688_product",
-              row.sourcePayload?.followedAt1688 ? "1688商品已取消关注" : "1688商品已关注",
-            )}
-          >
-            {row.sourcePayload?.followedAt1688 ? "取消关注" : "关注"}
-          </Button>
-          <Button
-            size="small"
-            loading={actionLoadingId === `run_1688_supply_change_agent-${row.id}`}
-            onClick={() => void run1688SourceAction(row, "run_1688_supply_change_agent", "1688供给变动任务已运行")}
-          >
-            供给
-          </Button>
-          <Button
-            size="small"
-            loading={actionLoadingId === `feedback_1688_supply_change_agent-${row.id}`}
-            onClick={() => void run1688SourceAction(row, "feedback_1688_supply_change_agent", "1688反馈已提交", { feedbackType: "viewed", feedback: "viewed in ERP" })}
-          >
-            反馈
-          </Button>
-          {editable ? (
+      render: (_value, row) => {
+        const monitorEnabled = Boolean(row.sourcePayload?.monitorProduct?.enabled);
+        const followEnabled = Boolean(row.sourcePayload?.followedAt1688);
+        if (isSkuPlaceholderRow(row)) {
+          return editable ? (
             <Button
               size="small"
-              danger
-              icon={<DeleteOutlined />}
-              loading={actionLoadingId === `delete_sku_1688_source-${row.id}`}
-              onClick={() => deleteMapping(row)}
+              type="primary"
+              icon={<PlusOutlined />}
+              style={supplierActionButtonStyle}
+              onClick={() => openCreateForSku(row)}
             >
-              删除
+              绑定
             </Button>
-          ) : null}
-        </Space>
-      ),
+          ) : <Text type="secondary">-</Text>;
+        }
+        return (
+          <div style={supplierActionGridStyle}>
+            {editable ? (
+              <Button
+                size="small"
+                icon={<EditOutlined />}
+                style={supplierActionButtonStyle}
+                onClick={() => openEdit(row)}
+              >
+                编辑
+              </Button>
+            ) : null}
+            <Tooltip title="搜索更多可用货源">
+              <Button
+                size="small"
+                icon={<SearchOutlined />}
+                loading={actionLoadingId === `run_1688_deep_search_agent-${row.id}`}
+                style={supplierActionButtonStyle}
+                onClick={() => void run1688SourceAction(row, "run_1688_deep_search_agent", "找货已开始")}
+              >
+                找货
+              </Button>
+            </Tooltip>
+            <Tooltip title={monitorEnabled ? "取消商品监控" : "加入商品监控"}>
+              <Button
+                size="small"
+                icon={<BellOutlined />}
+                loading={actionLoadingId === `${monitorEnabled ? "delete_1688_monitor_product" : "add_1688_monitor_product"}-${row.id}`}
+                style={supplierActionButtonStyle}
+                onClick={() => void run1688SourceAction(
+                  row,
+                  monitorEnabled ? "delete_1688_monitor_product" : "add_1688_monitor_product",
+                  monitorEnabled ? "已取消监控" : "已加入监控",
+                )}
+              >
+                {monitorEnabled ? "取消" : "监控"}
+              </Button>
+            </Tooltip>
+            <Tooltip title={followEnabled ? "取消关注商品" : "关注商品"}>
+              <Button
+                size="small"
+                icon={<StarOutlined />}
+                loading={actionLoadingId === `${followEnabled ? "unfollow_1688_product" : "follow_1688_product"}-${row.id}`}
+                style={supplierActionButtonStyle}
+                onClick={() => void run1688SourceAction(
+                  row,
+                  followEnabled ? "unfollow_1688_product" : "follow_1688_product",
+                  followEnabled ? "已取消关注" : "已关注",
+                )}
+              >
+                {followEnabled ? "取关" : "关注"}
+              </Button>
+            </Tooltip>
+            {editable ? (
+              <Button
+                size="small"
+                danger
+                icon={<DeleteOutlined />}
+                loading={actionLoadingId === `delete_sku_1688_source-${row.id}`}
+                style={supplierActionButtonStyle}
+                onClick={() => deleteMapping(row)}
+              >
+                删除
+              </Button>
+            ) : null}
+          </div>
+        );
+      },
     },
-  ], [actionLoadingId, deleteMapping, editable, mixLoadingId, queryMixConfig, run1688SourceAction]);
+  ], [actionLoadingId, deleteMapping, editable, openCreateForSku, run1688SourceAction]);
+
+  const tableLoading = loading && !loadedOnce && displayRows.length > 0;
 
   if (!erp) {
     return (
@@ -754,13 +1238,8 @@ export default function AlibabaMapping() {
         compact
         eyebrow="业务"
         title="供应商管理"
-        meta={[`供应商 ${mappings.length}`]}
+        meta={[`商品 ${skus.length}`, `供应商 ${mappings.length}`]}
         actions={[
-          editable ? (
-            <Button key="new" type="primary" icon={<PlusOutlined />} onClick={openCreate}>
-              新增供应商
-            </Button>
-          ) : null,
           <Button
             key="relation-supply"
             icon={<SearchOutlined />}
@@ -784,12 +1263,25 @@ export default function AlibabaMapping() {
       />
 
       <section className="content-card alibaba-mapping-panel alibaba-mapping-panel--fixed-bottom">
+        <div style={{ alignItems: "center", display: "flex", gap: 12, justifyContent: "space-between", marginBottom: 12 }}>
+          <Input
+            allowClear
+            prefix={<SearchOutlined />}
+            placeholder="搜索商品编码 / 商品名称 / 规格 / 供应商 / 1688货号"
+            value={searchText}
+            onChange={(event) => setSearchText(event.target.value)}
+            style={{ maxWidth: "100%", width: 460 }}
+          />
+          <Text type="secondary" style={{ flex: "0 0 auto" }}>
+            显示 {displayRows.length} / {allDisplayRows.length} 条
+          </Text>
+        </div>
         <Table
           className="alibaba-mapping-table alibaba-mapping-table--fixed-bottom"
           rowKey="id"
-          loading={loading}
+          loading={tableLoading}
           columns={columns}
-          dataSource={mappings}
+          dataSource={displayRows}
           scroll={{ x: 2380, y: "max(220px, calc(100vh - 430px))" }}
           pagination={{ pageSize: 10, showSizeChanger: false }}
         />
@@ -800,6 +1292,7 @@ export default function AlibabaMapping() {
         title={editingRow ? "编辑供应商" : "新增供应商"}
         okText="保存"
         cancelText="取消"
+        centered
         width={860}
         confirmLoading={saving}
         onOk={() => form.submit()}
@@ -809,101 +1302,98 @@ export default function AlibabaMapping() {
         }}
         destroyOnClose
       >
-        <Form form={form} layout="vertical" onFinish={handleSubmit}>
+        <Form form={form} layout="vertical" onFinish={handleSubmit} onValuesChange={handleMappingFormValuesChange}>
           <Row gutter={12}>
-            <Col span={12}>
-              <Form.Item name="skuId" label="商品编码" rules={[{ required: true, message: "请选择商品编码" }]}>
-                <Select
-                  showSearch
-                  disabled={Boolean(editingRow)}
-                  options={skuOptions}
-                  placeholder="选择商品编码"
-                  optionFilterProp="searchText"
-                />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="supplierName" label="1688供应商旺旺名称" rules={[{ required: true, message: "请输入 1688 供应商旺旺名称" }]}>
-                <Input placeholder="1688 供应商旺旺名称" />
-              </Form.Item>
-            </Col>
             <Col span={24}>
-              <Form.Item name="productUrl" label="1688 地址" rules={[{ required: true, message: "请输入 1688 地址" }]}>
-                <Input placeholder="https://detail.1688.com/offer/1234567890.html" />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="externalOfferId" label="1688 商品ID">
-                <Input placeholder="可由 1688 地址自动识别" />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="mappingGroupId" label="组合编号">
-                <Input placeholder="同组规格会一起推单" />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="platformSkuName" label="1688 规格描述">
-                <Input placeholder="例如 蓝色 / 500ml" />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="externalSkuId" label="1688单品货号">
-                <Input placeholder="可选" />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="externalSpecId" label="1688商品规格ID" rules={[{ required: true, message: "请填写 1688 商品规格ID" }]}>
-                <Input placeholder="必须填写具体规格ID" />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="ourQty" label="我方数量" rules={[{ required: true, message: "请输入我方数量" }]}>
-                <InputNumber min={1} precision={0} style={{ width: "100%" }} />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="platformQty" label="1688 数量" rules={[{ required: true, message: "请输入 1688 数量" }]}>
-                <InputNumber min={1} precision={0} style={{ width: "100%" }} />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="unitPrice" label="单价">
-                <InputNumber min={0} precision={2} prefix="¥" style={{ width: "100%" }} />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="moq" label="1688商品起批数量">
-                <InputNumber min={1} precision={0} style={{ width: "100%" }} />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="status" label="状态" rules={[{ required: true, message: "请选择状态" }]}>
-                <Select
-                  options={[
-                    { value: "active", label: "启用" },
-                    { value: "disabled", label: "停用" },
-                  ]}
-                />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="isDefault" label="默认推单供应商" valuePropName="checked">
-                <Switch />
-              </Form.Item>
-            </Col>
-            <Col span={24}>
-              <Form.Item name="productTitle" label="1688 商品标题">
-                <Input placeholder="可选" />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="imageUrl" label="图片链接">
-                <Input placeholder="可选" />
+              <Form.Item label="1688 地址" required>
+                <Space.Compact style={{ width: "100%" }}>
+                  <Form.Item name="productUrl" noStyle rules={[{ required: true, message: "请输入 1688 地址" }]}>
+                    <Input placeholder="https://detail.1688.com/offer/1234567890.html" />
+                  </Form.Item>
+                  <Button
+                    icon={<SearchOutlined />}
+                    loading={specPreviewLoading}
+                    onClick={() => void previewSpecsFromUrl()}
+                  >
+                    解析规格
+                  </Button>
+                </Space.Compact>
               </Form.Item>
             </Col>
           </Row>
+          <Form.Item name="skuId" hidden><Input /></Form.Item>
+          <Form.Item name="mappingGroupId" hidden><Input /></Form.Item>
+          <Form.Item name="externalOfferId" hidden><Input /></Form.Item>
+          <Form.Item name="externalSkuId" hidden><Input /></Form.Item>
+          <Form.Item name="externalSpecId" hidden><Input /></Form.Item>
+          <Form.Item name="platformSkuName" hidden><Input /></Form.Item>
+          <Form.Item name="supplierName" hidden><Input /></Form.Item>
+          <Form.Item name="productTitle" hidden><Input /></Form.Item>
+          <Form.Item name="imageUrl" hidden><Input /></Form.Item>
+          <Form.Item name="unitPrice" hidden><InputNumber /></Form.Item>
+          <Form.Item name="moq" hidden><InputNumber /></Form.Item>
+          <Form.Item name="ourQty" hidden><InputNumber /></Form.Item>
+          <Form.Item name="platformQty" hidden><InputNumber /></Form.Item>
+          <Form.Item name="status" hidden><Input /></Form.Item>
+          <Form.Item name="isDefault" hidden valuePropName="checked"><Switch /></Form.Item>
         </Form>
+      </Modal>
+
+      <Modal
+        open={Boolean(urlSpecDialog)}
+        title="选择 1688 规格和映射比例"
+        okText="确认选择"
+        cancelText="取消"
+        width={860}
+        centered
+        okButtonProps={{ disabled: !selectedUrlSpecId }}
+        onCancel={() => setUrlSpecDialog(null)}
+        onOk={applySelectedUrlSpec}
+        destroyOnClose
+      >
+        <Space direction="vertical" size={14} style={{ width: "100%" }}>
+          <Table<MappingSpecRow>
+            size="small"
+            rowKey="externalSpecId"
+            columns={urlSpecColumns}
+            dataSource={urlSpecDialog?.rows || []}
+            pagination={{ pageSize: 8, hideOnSinglePage: true }}
+            rowSelection={{
+              type: "radio",
+              selectedRowKeys: selectedUrlSpecId ? [selectedUrlSpecId] : [],
+              onChange: (keys) => setSelectedUrlSpecId(String(keys[0] || "")),
+            }}
+            onRow={(row) => ({
+              onClick: () => setSelectedUrlSpecId(row.externalSpecId),
+            })}
+          />
+          <Row gutter={12}>
+            <Col span={12}>
+              <Text type="secondary" style={{ display: "block", marginBottom: 6 }}>本地数量</Text>
+              <InputNumber
+                min={1}
+                precision={0}
+                value={urlSpecOurQty}
+                style={{ width: "100%" }}
+                addonBefore="本地"
+                addonAfter="件"
+                onChange={(value) => setUrlSpecOurQty(Math.max(1, Math.floor(Number(value || 1))))}
+              />
+            </Col>
+            <Col span={12}>
+              <Text type="secondary" style={{ display: "block", marginBottom: 6 }}>1688 数量</Text>
+              <InputNumber
+                min={1}
+                precision={0}
+                value={urlSpecPlatformQty}
+                style={{ width: "100%" }}
+                addonBefore="1688"
+                addonAfter="件"
+                onChange={(value) => setUrlSpecPlatformQty(Math.max(1, Math.floor(Number(value || 1))))}
+              />
+            </Col>
+          </Row>
+        </Space>
       </Modal>
     </div>
   );

@@ -431,6 +431,7 @@ interface ErpAPI {
     workbench: (params?: ErpListParams) => Promise<any>;
     action: (payload: Record<string, any>) => Promise<any>;
     local1688Inquiry?: (payload: Record<string, any>) => Promise<any>;
+    open1688Detail?: (payload: Record<string, any>) => Promise<any>;
   };
   warehouse: {
     workbench: (params?: ErpListParams) => Promise<any>;
