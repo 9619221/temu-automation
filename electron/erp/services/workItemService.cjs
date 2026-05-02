@@ -403,7 +403,7 @@ class WorkItemService {
           type: TYPE.SOURCING_DELAY,
           priority: PRIORITY.P2,
           ownerRole: ERP_ROLES.BUYER,
-          title: `采购申请待寻源：${formatSku(row)}`,
+          title: `采购申请待找货源：${formatSku(row)}`,
           evidence: [`申请数量 ${row.requested_qty}`, `原因 ${row.reason}`],
           relatedDocType: "purchase_request",
           relatedDocId: row.id,

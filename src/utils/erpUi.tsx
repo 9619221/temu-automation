@@ -4,7 +4,7 @@ export const PR_STATUS_LABELS: Record<string, string> = {
   draft: "草稿",
   submitted: "运营已提交",
   buyer_processing: "采购处理中",
-  sourced: "已寻源",
+  sourced: "已找货源",
   waiting_ops_confirm: "待运营确认",
   converted_to_po: "已转采购单",
   rejected: "已驳回",

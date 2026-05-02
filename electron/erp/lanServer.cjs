@@ -48,7 +48,7 @@ const PR_STATUS_LABELS = Object.freeze({
   draft: "草稿",
   submitted: "运营已提交",
   buyer_processing: "采购处理中",
-  sourced: "已寻源",
+  sourced: "已找货源",
   waiting_ops_confirm: "待运营确认",
   converted_to_po: "已转采购单",
   rejected: "已驳回",
@@ -1257,7 +1257,7 @@ function buildWorkspaceCards(kind) {
   const descriptions = {
     purchase: {
       title: "采购工作台",
-      subtitle: "后续用于采购接收运营 PR、记录供应商寻源、推进 PO 和付款审批。",
+      subtitle: "后续用于采购接收运营 PR、记录供应商货源、推进 PO 和付款审批。",
       items: ["待接采购申请", "供应商筛选", "采购单状态", "财务付款审批"],
     },
     warehouse: {
@@ -1796,7 +1796,7 @@ function renderPurchaseRequestActions(row, user, model = {}) {
   if (row.status === "buyer_processing" && canRole(role, ["buyer", "manager", "admin"])) {
     actions.push(renderActionButton({
       action: "mark_sourced",
-      label: "标记已寻源",
+      label: "标记已找到货源",
       fields: { prId: row.id },
       className: "secondary",
     }));
@@ -1817,7 +1817,7 @@ function renderPurchaseRequestActionsV2(row, user, model = {}) {
   if (row.status === "buyer_processing" && canRole(role, ["buyer", "manager", "admin"])) {
     actions.push(renderActionButton({
       action: "mark_sourced",
-      label: "标记已寻源",
+      label: "标记已找到货源",
       fields: { prId: row.id },
       className: "secondary",
     }));
@@ -1909,7 +1909,7 @@ function renderPurchaseWorkbench(model = {}, user = {}) {
       { title: "期望到货", render: (row) => formatDate(row.expectedArrivalDate) },
       { title: "证据", render: renderEvidence },
       {
-        title: "寻源",
+        title: "货源",
         render: (row) => `
           <div class="primary-text">${formatQty(row.candidateCount)} 个候选</div>
           <div class="muted">已选 ${formatQty(row.selectedCandidateCount)}</div>
@@ -1983,7 +1983,7 @@ function renderPurchaseWorkbench(model = {}, user = {}) {
     renderCreatePurchaseRequestForm(model, user),
     renderSection({
       title: "采购申请列表",
-      subtitle: "运营发起的 PR 在这里由采购接收、寻源、推进确认。",
+      subtitle: "运营发起的 PR 在这里由采购接收、找货源、推进确认。",
       badge: `${purchaseRequests.length} 条`,
       table: requestTable,
     }),
@@ -3271,6 +3271,7 @@ async function handleRequest({
   upsertUserResourceScope,
   listAccounts,
   upsertAccount,
+  deleteAccount,
   listSuppliers,
   createSupplier,
   listSkus,
@@ -3686,7 +3687,7 @@ async function handleRequest({
       const status = await get1688AuthStatus();
       writeHtml(res, renderShell({
         title: "1688 授权",
-        subtitle: "绑定 1688 开放平台应用和买家账号，后续采购寻源、下单、订单同步会使用这份云端授权。",
+      subtitle: "绑定 1688 开放平台应用和买家账号，后续采购找货源、下单、订单同步会使用这份云端授权。",
         cards: [],
         currentPath: pathname,
         user: session.user,
