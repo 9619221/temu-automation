@@ -4,8 +4,8 @@
 
 ## 当前打包版本
 
-- 版本：`0.1.96`
-- 安装包：`releases/temu-automation-setup-0.1.96.exe`
+- 版本：`0.2.2`
+- 安装包：`releases/temu-automation-setup-0.2.2.exe`
 
 ## 目录说明
 
