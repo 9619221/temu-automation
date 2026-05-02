@@ -270,6 +270,7 @@ function runFlow() {
     assertColumnExists(db, "erp_accounts", "company_id");
     assertColumnExists(db, "erp_skus", "company_id");
     assertColumnExists(db, "erp_skus", "color_spec");
+    assertColumnExists(db, "erp_skus", "created_by");
     assertColumnNullable(db, "erp_skus", "account_id");
     assertColumnExists(db, "erp_1688_auth_settings", "company_id");
     assertColumnExists(db, "erp_1688_delivery_addresses", "company_id");
