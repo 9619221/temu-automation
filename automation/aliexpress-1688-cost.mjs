@@ -41,7 +41,7 @@ function getDefault1688ProfilePath() {
   return path.join(baseDir, "profiles", "1688");
 }
 
-function resolve1688ProfilePath(profilePath) {
+export function resolve1688ProfilePath(profilePath) {
   return path.resolve(profilePath || getDefault1688ProfilePath());
 }
 
@@ -64,7 +64,7 @@ function robustMedian(nums) {
   return trimmed[Math.floor(trimmed.length / 2)];
 }
 
-async function ensure1688Context(opts = {}) {
+export async function ensure1688Context(opts = {}) {
   const targetProfilePath = resolve1688ProfilePath(opts.profilePath);
 
   if (browserState1688.context && browserState1688.profilePath === targetProfilePath) {
@@ -116,7 +116,7 @@ async function ensure1688Context(opts = {}) {
   return browserState1688.launchPromise;
 }
 
-async function openOrReuse1688Page(context, url) {
+export async function openOrReuse1688Page(context, url) {
   const existing = (context.pages() || []).find((page) => {
     const currentUrl = page.url() || "";
     return currentUrl.includes("1688.com") || currentUrl === "about:blank";

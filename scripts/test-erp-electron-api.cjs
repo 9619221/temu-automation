@@ -712,6 +712,8 @@ async function main() {
               productID: "1688-offer-ipc",
               subject: "1688 API Candidate Detail",
               companyName: "1688 Detail Supplier",
+              sellerMemberId: "b2b-test-member",
+              sellerLoginId: "demo_factory",
               saleInfo: {
                 priceRanges: [
                   { startQuantity: 1, price: "8.80" },
@@ -741,6 +743,35 @@ async function main() {
     assert.equal(detail1688Result.sku1688Source.externalSkuId, "sku-blue");
     assert.equal(detail1688Result.sku1688Source.externalSpecId, "spec-blue");
     assert.equal(detail1688Result.sku1688Source.isDefault, false);
+
+    const mix1688 = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "query_1688_mix_config",
+        sourceId: detail1688Result.sku1688Source.id,
+        mockMixConfigResponse: {
+          result: {
+            toReturn: {
+              generalHunpi: true,
+              mixAmount: "100",
+              mixNumber: 3,
+              memberId: "b2b-test-member",
+            },
+          },
+        },
+      }),
+    });
+    assert.equal(mix1688.statusCode, 200);
+    const mix1688Result = JSON.parse(mix1688.body).result.result;
+    assert.equal(mix1688Result.query.sellerMemberId, "b2b-test-member");
+    assert.equal(mix1688Result.query.sellerLoginId, "demo_factory");
+    assert.equal(mix1688Result.mixConfig.generalHunpi, true);
+    assert.equal(mix1688Result.sku1688Source.sourcePayload.marketingMixConfig.memberId, "b2b-test-member");
 
     const address1688 = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
       method: "POST",

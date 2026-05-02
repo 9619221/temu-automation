@@ -55,6 +55,14 @@ const TRANSITIONS = Object.freeze({
     rule(PO.INBOUNDED, "close_po", PO.CLOSED, BUYER),
     rule([PO.PAID, PO.SUPPLIER_PROCESSING, PO.SHIPPED], "mark_delayed", PO.DELAYED, BUYER),
     rule([PO.DRAFT, PO.PUSHED_PENDING_PRICE, PO.PENDING_FINANCE_APPROVAL, PO.APPROVED_TO_PAY], "cancel_po", PO.CANCELLED, BUYER),
+    rule(PO.PUSHED_PENDING_PRICE, "rollback_po_status", PO.DRAFT, BUYER),
+    rule(PO.PENDING_FINANCE_APPROVAL, "rollback_po_status", PO.DRAFT, BUYER),
+    rule(PO.PENDING_FINANCE_APPROVAL, "rollback_po_status", PO.PUSHED_PENDING_PRICE, BUYER),
+    rule(PO.APPROVED_TO_PAY, "rollback_po_status", PO.PENDING_FINANCE_APPROVAL, FINANCE),
+    rule(PO.PAID, "rollback_po_status", PO.APPROVED_TO_PAY, FINANCE),
+    rule(PO.SUPPLIER_PROCESSING, "rollback_po_status", PO.PAID, BUYER),
+    rule(PO.SHIPPED, "rollback_po_status", PO.SUPPLIER_PROCESSING, BUYER),
+    rule(PO.ARRIVED, "rollback_po_status", PO.SHIPPED, WAREHOUSE),
   ],
 
   inbound_receipt: [

@@ -94,8 +94,8 @@ function normalizeWebOffer(offer = {}) {
 
   return {
     externalOfferId: offerId ? String(offerId) : null,
-    externalSkuId: null,
-    externalSpecId: null,
+    externalSkuId: priceInfo.mainPriceSkuId ? String(priceInfo.mainPriceSkuId) : null,
+    externalSpecId: priceInfo.mainPriceSkuId ? String(priceInfo.mainPriceSkuId) : null,
     supplierName: String(firstPresent(
       offer.supplierName,
       company.name,

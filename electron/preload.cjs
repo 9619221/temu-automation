@@ -232,6 +232,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     purchase: {
       workbench: (params) => ipcRenderer.invoke("erp:purchase:workbench", params || {}),
       action: (payload) => ipcRenderer.invoke("erp:purchase:action", payload || {}),
+      local1688Inquiry: (payload) => ipcRenderer.invoke("erp:purchase:local-1688-inquiry", payload || {}),
     },
     warehouse: {
       workbench: (params) => ipcRenderer.invoke("erp:warehouse:workbench", params || {}),

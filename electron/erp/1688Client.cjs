@@ -385,13 +385,14 @@ async function call1688OpenApi({ credentials, api, params = {}, fetchImpl = fetc
     } catch {
       throw new Error(`1688 API response is not JSON: ${text.slice(0, 200)}`);
     }
-    const errorText = payload.error_message
-      || payload.errorMessage
-      || payload.error_description
-      || payload.message
-      || payload.error;
-    if (!response.ok || payload.error || payload.error_code || payload.errorCode) {
-      throw new Error(errorText || `1688 API request failed with HTTP ${response.status}`);
+    const errorText = get1688ApiErrorText(payload);
+    if (!response.ok || is1688ApiFailure(payload)) {
+      const error = new Error(errorText || `1688 API request failed with HTTP ${response.status}`);
+      error.status = response.status;
+      error.payload = payload;
+      error.request = request;
+      error.errorCode = payload.error_code || payload.errorCode || payload.code || null;
+      throw error;
     }
     return {
       request,
@@ -401,6 +402,64 @@ async function call1688OpenApi({ credentials, api, params = {}, fetchImpl = fetc
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+function is1688ApiFailure(payload = {}) {
+  if (!payload || typeof payload !== "object") return false;
+  return Boolean(
+    payload.error
+      || payload.error_code
+      || payload.errorCode
+      || payload.success === false
+      || payload.result?.success === false,
+  );
+}
+
+function get1688ApiErrorText(payload = {}) {
+  const direct = firstPresent(
+    payload.error_message,
+    payload.errorMessage,
+    payload.error_description,
+    payload.message,
+    payload.msg,
+    payload.errorMsg,
+    payload.error_msg,
+    payload.error,
+  );
+  if (direct && typeof direct !== "object") return String(direct);
+  const nested = find1688ApiErrorValue(payload);
+  if (nested && typeof nested !== "object") return String(nested);
+  if (direct && typeof direct === "object") {
+    try {
+      return JSON.stringify(direct).slice(0, 500);
+    } catch {}
+  }
+  return null;
+}
+
+function find1688ApiErrorValue(value, depth = 0) {
+  if (!value || depth > 6) return null;
+  if (typeof value !== "object") return null;
+  for (const key of [
+    "error_message",
+    "errorMessage",
+    "error_description",
+    "message",
+    "msg",
+    "errorMsg",
+    "error_msg",
+    "returnMessage",
+    "return_message",
+    "reason",
+  ]) {
+    const candidate = value[key];
+    if (candidate !== null && candidate !== undefined && candidate !== "") return candidate;
+  }
+  for (const item of Object.values(value)) {
+    const found = find1688ApiErrorValue(item, depth + 1);
+    if (found) return found;
+  }
+  return null;
 }
 
 function firstPresent(...values) {
@@ -493,9 +552,53 @@ function findOfferArray(value, depth = 0) {
   return [];
 }
 
+function findNested1688Value(value, keys, depth = 0) {
+  if (!value || depth > 6) return null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findNested1688Value(item, keys, depth + 1);
+      if (found !== null) return found;
+    }
+    return null;
+  }
+  if (typeof value !== "object") return null;
+  for (const key of keys) {
+    const candidate = value[key];
+    if (candidate !== null && candidate !== undefined && candidate !== "") return candidate;
+  }
+  for (const item of Object.values(value)) {
+    const found = findNested1688Value(item, keys, depth + 1);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
 function normalize1688Offer(item = {}) {
   const offerId = firstPresent(item.offerId, item.offer_id, item.productId, item.product_id, item.id);
-  const skuId = firstPresent(item.skuId, item.sku_id, item.specId, item.spec_id);
+  const inferredSkuId = findNested1688Value(item, [
+    "skuId",
+    "skuID",
+    "sku_id",
+    "specId",
+    "specID",
+    "spec_id",
+    "cargoSkuId",
+    "cargoSkuID",
+    "cargo_sku_id",
+    "mainPriceSkuId",
+    "offerSkuId",
+    "offer_sku_id",
+  ]);
+  const skuId = firstPresent(item.skuId, item.skuID, item.sku_id, item.specId, item.specID, item.spec_id, inferredSkuId);
+  const specId = firstPresent(
+    item.specId,
+    item.specID,
+    item.spec_id,
+    item.cargoSkuId,
+    item.cargoSkuID,
+    item.cargo_sku_id,
+    inferredSkuId,
+  );
   const supplierName = firstPresent(
     item.supplierName,
     item.companyName,
@@ -546,8 +649,6 @@ function normalize1688Offer(item = {}) {
   );
   return {
     externalOfferId: offerId ? String(offerId) : null,
-    externalSkuId: skuId ? String(skuId) : null,
-    externalSpecId: firstPresent(item.specId, item.spec_id) ? String(firstPresent(item.specId, item.spec_id)) : null,
     supplierName: String(supplierName || "1688 Supplier"),
     productTitle: title ? String(title) : null,
     productUrl: productUrl ? String(productUrl) : null,
@@ -556,6 +657,8 @@ function normalize1688Offer(item = {}) {
     moq,
     leadDays: firstNumber(item.leadDays, item.deliveryDays, item.shipInDays),
     logisticsFee: firstNumber(item.logisticsFee, item.freight, item.shippingFee) ?? 0,
+    externalSkuId: skuId ? String(skuId) : null,
+    externalSpecId: specId ? String(specId) : (skuId ? String(skuId) : null),
     raw: item,
   };
 }
@@ -669,7 +772,7 @@ function normalize1688SkuOptions(product = {}) {
     );
     return {
       externalSkuId: skuId ? String(skuId) : null,
-      externalSpecId: specId ? String(specId) : null,
+      externalSpecId: specId ? String(specId) : (skuId ? String(skuId) : null),
       specText: attributes.map((item) => `${item.name}:${item.value}`).join("; "),
       attributes,
       price,

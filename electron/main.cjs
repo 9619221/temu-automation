@@ -1224,7 +1224,7 @@ function resolveSendCmdTimeout(params, requestOptions) {
   return 0;
 }
 
-const LONG_RUNNING_WORKER_ACTIONS = new Set(["auto_pricing", "workflow_pack_images", "competitor_auto_register"]);
+const LONG_RUNNING_WORKER_ACTIONS = new Set(["auto_pricing", "workflow_pack_images", "competitor_auto_register", "local_1688_inquiry"]);
 
 async function sendCmd(action, params = {}, requestOptions = {}) {
   if (!workerReady) {
@@ -4086,6 +4086,10 @@ ipcMain.handle("automation:close", async () => {
 
 ipcMain.handle("automation:ping", async () => {
   return sendCmd("ping");
+});
+
+ipcMain.handle("erp:purchase:local-1688-inquiry", async (_event, payload) => {
+  return sendCmd("local_1688_inquiry", payload || {}, { timeoutMs: WORKER_LONG_TASK_TIMEOUT_MS });
 });
 
 // ============ 竞品分析 IPC ============

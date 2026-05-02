@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { ClipboardEvent, UIEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ClipboardEvent, PointerEvent, UIEvent } from "react";
 import {
   Alert,
   Badge,
   Button,
+  Checkbox,
   Col,
   DatePicker,
   Drawer,
@@ -12,6 +13,7 @@ import {
   InputNumber,
   Modal,
   Popconfirm,
+  Popover,
   Row,
   Select,
   Space,
@@ -28,7 +30,6 @@ import {
   ApiOutlined,
   CarOutlined,
   CheckCircleOutlined,
-  CloudSyncOutlined,
   CommentOutlined,
   DeleteOutlined,
   DollarOutlined,
@@ -37,14 +38,19 @@ import {
   FileDoneOutlined,
   ImportOutlined,
   LinkOutlined,
+  CloseOutlined,
   PlusOutlined,
   ReloadOutlined,
+  RightOutlined,
+  RollbackOutlined,
   SearchOutlined,
   ShoppingCartOutlined,
+  ShopOutlined,
   StopOutlined,
   UploadOutlined,
 } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
+import StoreManager from "../components/StoreManager";
 import { useErpAuth } from "../contexts/ErpAuthContext";
 import {
   PAYMENT_STATUS_LABELS,
@@ -65,6 +71,32 @@ const MAX_REQUEST_IMAGES = 6;
 const UPLOAD_IMAGE_TARGET_BYTES = 260 * 1024;
 
 const SHOW_KEYWORD_1688_SOURCE = false;
+const AUTO_1688_ORDER_SYNC_INTERVAL_MS = 10 * 60 * 1000;
+const IMAGE_SEARCH_PAGE_SIZE = 10;
+const IMAGE_SEARCH_MAX_PAGE = 10;
+const AUTO_INQUIRY_LIMIT = 5;
+const MAX_COMMENT_IMAGES = 6;
+const CANDIDATE_SCROLL_BOTTOM_PX = 96;
+const CANDIDATE_SCROLL_REARM_PX = 220;
+const MINIMIZED_IMAGE_SEARCH_WIDTH = 132;
+const MINIMIZED_IMAGE_SEARCH_HEIGHT = 58;
+const MINIMIZED_IMAGE_SEARCH_MARGIN = 8;
+const DEFAULT_PURCHASE_INQUIRY_TEMPLATE = [
+  "商品包装方式是什么？商品需要提供哪些资质文件？可以优惠吗？",
+  "整箱包装尺寸和重量是多少？下单需要注意什么？",
+].join("");
+const PURCHASE_INQUIRY_TEMPLATE_VARIABLES = [
+  "{商品名称}",
+  "{商品编码}",
+  "{采购数量}",
+  "{目标成本}",
+  "{候选商品标题}",
+  "{供应商}",
+  "{1688链接}",
+];
+let lastAuto1688OrderSyncAt = 0;
+let auto1688OrderSyncPromise: Promise<void> | null = null;
+type PurchaseRequestDrawerMode = "collaboration" | "imageSearch";
 
 interface SourcingCandidateRow {
   id: string;
@@ -86,6 +118,10 @@ interface SourcingCandidateRow {
   leadDays?: number | null;
   logisticsFee?: number | null;
   remark?: string | null;
+  inquiryStatus?: string | null;
+  inquiryMessage?: string | null;
+  inquirySentAt?: string | null;
+  inquiryResult?: Record<string, any> | null;
   status?: string;
   createdByName?: string;
   updatedAt?: string;
@@ -148,6 +184,7 @@ interface PurchaseOrderRow {
   externalOrderDetailSyncedAt?: string | null;
   externalLogisticsSyncedAt?: string | null;
   mappingCount?: number;
+  deliveryAddressCount?: number;
   refundCount?: number;
   latestRefundId?: string | null;
   latestRefundStatus?: string | null;
@@ -170,6 +207,16 @@ interface PaymentQueueRow {
   updatedAt?: string;
 }
 
+interface PurchaseSettings {
+  id?: string;
+  companyId?: string;
+  inquiryTemplate?: string;
+  alphaShopAccessKey?: string;
+  hasAlphaShopSecretKey?: boolean;
+  hasAlphaShopCredentials?: boolean;
+  updatedAt?: string | null;
+}
+
 interface PurchaseWorkbench {
   generatedAt?: string;
   summary?: Record<string, number>;
@@ -179,6 +226,7 @@ interface PurchaseWorkbench {
   skuOptions?: SkuOption[];
   supplierOptions?: SupplierOption[];
   sku1688Sources?: Sku1688SourceRow[];
+  purchaseSettings?: PurchaseSettings;
   alibaba1688Addresses?: Alibaba1688AddressRow[];
   alibaba1688MessageSubscriptions?: Alibaba1688MessageSubscriptionRow[];
   recent1688MessageEvents?: Alibaba1688MessageEventRow[];
@@ -285,6 +333,10 @@ interface Alibaba1688MessageSubscriptionRow {
   errorCount?: number;
 }
 
+interface PurchaseCenterProps {
+  initialStoreManagerOpen?: boolean;
+}
+
 interface Alibaba1688MessageEventRow {
   id: string;
   topic?: string | null;
@@ -326,6 +378,9 @@ interface Source1688FormValues {
 
 interface PoFormValues {
   candidateId?: string;
+  externalSkuId?: string;
+  externalSpecId?: string;
+  unitPrice?: number;
   qty?: number;
   expectedDeliveryDate?: Dayjs | null;
   remark?: string;
@@ -342,6 +397,14 @@ interface RefundFormValues {
 
 interface OrderNoteFormValues {
   text?: string;
+}
+
+interface PurchaseSettingsFormValues {
+  inquiryTemplate?: string;
+}
+
+interface InquiryDialogFormValues {
+  inquiryMessage?: string;
 }
 
 interface OrderNoteDialogState {
@@ -374,8 +437,39 @@ function candidateLabel(candidate: SourcingCandidateRow) {
   return `${candidate.supplierName || "未命名供应商"} · ${formatCurrency(candidate.unitPrice)} · 起订量 ${formatQty(candidate.moq || 1)}`;
 }
 
-function candidatePayload(candidate: SourcingCandidateRow) {
-  return candidate.sourcePayload && typeof candidate.sourcePayload === "object" ? candidate.sourcePayload : {};
+function candidatePayload(candidate: SourcingCandidateRow): Record<string, any> {
+  const payload = candidate.sourcePayload;
+  return payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
+}
+
+function normalizeImageUrl(value: unknown): string {
+  const text = String(value || "").trim();
+  if (!text || text === "[object Object]") return "";
+  return text.startsWith("//") ? `https:${text}` : text;
+}
+
+function imageValue(value: unknown): string {
+  if (!value) return "";
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const url = imageValue(item);
+      if (url) return url;
+    }
+    return "";
+  }
+  if (typeof value === "object") {
+    const item = value as Record<string, any>;
+    return imageValue(
+      item.imgUrl
+      || item.imageUrl
+      || item.url
+      || item.src
+      || item.pictureUrl
+      || item.originImageUrl
+      || item.fullPath,
+    );
+  }
+  return normalizeImageUrl(value);
 }
 
 function candidateTitle(candidate: SourcingCandidateRow) {
@@ -391,15 +485,31 @@ function candidateTitle(candidate: SourcingCandidateRow) {
 }
 
 function candidateImage(candidate: SourcingCandidateRow) {
-  const raw = candidatePayload(candidate);
-  const offerImage = raw.offerImage && typeof raw.offerImage === "object" ? raw.offerImage : {};
-  return candidate.imageUrl
-    || raw.originImageUrl
-    || raw.aiImageUrl
-    || raw.imageUrl
-    || raw.imgUrl
-    || offerImage.imageUrl
-    || "";
+  const payload = candidatePayload(candidate);
+  const raw = payload.raw && typeof payload.raw === "object" && !Array.isArray(payload.raw) ? payload.raw : payload;
+  return imageValue([
+    candidate.imageUrl,
+    payload.originImageUrl,
+    payload.aiImageUrl,
+    payload.imageUrl,
+    payload.imgUrl,
+    payload.image_url,
+    payload.pictureUrl,
+    payload.picture_url,
+    payload.offerImage,
+    payload.image,
+    payload.imageUrls,
+    raw.originImageUrl,
+    raw.aiImageUrl,
+    raw.imageUrl,
+    raw.imgUrl,
+    raw.image_url,
+    raw.pictureUrl,
+    raw.picture_url,
+    raw.offerImage,
+    raw.image,
+    raw.imageUrls,
+  ]);
 }
 
 function candidateUrl(candidate: SourcingCandidateRow) {
@@ -411,10 +521,258 @@ function candidateUrl(candidate: SourcingCandidateRow) {
     || (candidate.externalOfferId ? `https://detail.1688.com/offer/${candidate.externalOfferId}.html` : "");
 }
 
+function buildLocal1688InquiryCandidate(candidate: SourcingCandidateRow) {
+  return {
+    candidateId: candidate.id,
+    id: candidate.id,
+    externalOfferId: candidate.externalOfferId,
+    productUrl: candidateUrl(candidate),
+    productTitle: candidateTitle(candidate),
+    supplierName: candidate.supplierName,
+    imageUrl: candidateImage(candidate),
+  };
+}
+
 function candidateMetric(candidate: SourcingCandidateRow) {
   const raw = candidatePayload(candidate);
   const sold = raw.soldOut ?? raw.sales ?? raw.salesVolume ?? raw.saleQuantity ?? raw.soldCount;
   return sold ? `销量 ${sold}` : "";
+}
+
+function candidateRawPayload(candidate: SourcingCandidateRow): Record<string, any> {
+  const raw = candidatePayload(candidate);
+  return raw.raw && typeof raw.raw === "object" && !Array.isArray(raw.raw) ? raw.raw as Record<string, any> : raw;
+}
+
+function firstText(...values: unknown[]): string {
+  for (const value of values) {
+    if (value === null || value === undefined || value === false) continue;
+    if (Array.isArray(value)) {
+      const nested: string = firstText(...value);
+      if (nested) return nested;
+      continue;
+    }
+    if (typeof value === "object") {
+      const item = value as Record<string, any>;
+      const nested: string = firstText(item.text, item.label, item.name, item.title, item.value, item.displayName);
+      if (nested) return nested;
+      continue;
+    }
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+function compactMetricValue(value: unknown) {
+  const text = firstText(value);
+  if (!text) return "";
+  if (/[wW万+]/.test(text)) return text.replace(/[wW]/g, "万");
+  const number = Number(text.replace(/[^\d.]/g, ""));
+  if (!Number.isFinite(number) || number <= 0) return text;
+  if (number >= 10000) {
+    const compact = (number / 10000).toFixed(number >= 100000 ? 0 : 1).replace(/\.0$/, "");
+    return `${compact}万+`;
+  }
+  return `${Math.floor(number)}+`;
+}
+
+function metricWithLabel(label: string, value: unknown) {
+  const text = compactMetricValue(value);
+  if (!text) return "";
+  return /[销量成交起批揽收发货理由复购]/.test(text) ? text : `${label}${text}`;
+}
+
+function normalizePercentText(value: unknown) {
+  const text = firstText(value);
+  if (!text) return "";
+  if (text.includes("%")) return text;
+  const number = Number(text);
+  if (!Number.isFinite(number) || number <= 0) return text;
+  const percent = number <= 1 ? number * 100 : number;
+  return `${percent.toFixed(percent >= 10 ? 0 : 1).replace(/\.0$/, "")}%`;
+}
+
+function candidateSalesText(candidate: SourcingCandidateRow) {
+  const raw = candidateRawPayload(candidate);
+  const tradeQuantity = raw.tradeQuantity || {};
+  const labels = collectCandidateLabels(raw);
+  const annualSales = firstText(
+    tradeQuantity.sales360Fuzzify,
+    tradeQuantity.saleQuantity,
+    tradeQuantity.bookedCount,
+    raw.sales360Fuzzify,
+    raw.saleQuantity,
+    raw.salesVolume,
+    raw.soldOut,
+    raw.sales,
+    raw.soldCount,
+  );
+  const recentSales = firstText(
+    tradeQuantity.payOrderCount30d,
+    tradeQuantity.payItemCount30d,
+    tradeQuantity.vaSales90,
+    raw.payOrderCount30d,
+    raw.payItemCount30d,
+    raw.vaSales90,
+    raw.fxOrderCount30d,
+  );
+  return firstText(
+    metricWithLabel("年销量", annualSales),
+    metricWithLabel("30天成交", recentSales),
+    labels.find((label) => /销量|成交/.test(label)),
+    candidateMetric(candidate),
+  );
+}
+
+function candidateServiceTexts(candidate: SourcingCandidateRow) {
+  const raw = candidateRawPayload(candidate);
+  const information = raw.information || {};
+  const tradeService = raw.tradeService || {};
+  const labels = collectCandidateLabels(raw);
+  const deliveryRate = normalizePercentText(firstText(
+    tradeService.deliveryRate48h,
+    tradeService.delivery48hRate,
+    tradeService.deliveryHours48Rate,
+    tradeService.deliveryRate,
+    raw.deliveryRate48h,
+    raw.delivery48hRate,
+    raw.deliveryHours48Rate,
+  ));
+  const deliveryHours = Number(firstText(tradeService.deliveryHours, raw.deliveryHours, information.deliveryHours));
+  const pickupText = deliveryRate
+    ? `48h揽收${deliveryRate}`
+    : (labels.find((label) => /48h|24h|揽收|发货/.test(label))
+      || (Number.isFinite(deliveryHours) && deliveryHours > 0 && deliveryHours <= 48 ? "48h发货" : ""));
+  const returnText = labels.find((label) => /7天|七天|无理由|退货/.test(label))
+    || (firstText(
+      tradeService.sevenDaysReturn,
+      tradeService.sevenDaysRefund,
+      tradeService.supportSevenDaysReturn,
+      tradeService.support7DaysRefund,
+      raw.sevenDaysReturn,
+    ) ? "7天无理由" : "");
+  const repurchaseText = normalizePercentText(information.rePurchaseRate || raw.rePurchaseRate)
+    ? `复购${normalizePercentText(information.rePurchaseRate || raw.rePurchaseRate)}`
+    : "";
+  return [pickupText, returnText, repurchaseText].filter(Boolean).slice(0, 3);
+}
+
+function candidateLocationText(candidate: SourcingCandidateRow) {
+  const raw = candidateRawPayload(candidate);
+  const company = raw.company || {};
+  const information = raw.information || {};
+  const province = firstText(company.province, information.sendProvince, raw.province, raw.sendProvince);
+  const city = firstText(company.city, information.sendCity, raw.city, raw.sendCity);
+  return [province, city].filter(Boolean).join(" ");
+}
+
+function collectCandidateLabels(raw: Record<string, any>) {
+  const values: unknown[] = [
+    raw.position_labels,
+    raw.positionLabels,
+    raw.tags,
+    raw.labels,
+    raw.offerTags,
+    raw.featureTags,
+    raw.features?.tags,
+    raw.features?.featureTags,
+    raw.commonPositionLabels?.beforeTitle,
+    raw.commonPositionLabels?.offerMiddle,
+    raw.commonPositionLabels?.afterTitle,
+  ];
+  const labels: string[] = [];
+  const pushLabel = (value: unknown) => {
+    if (Array.isArray(value)) {
+      value.forEach(pushLabel);
+      return;
+    }
+    const text = firstText(value);
+    if (!text || text.length > 12 || /^\d+$/.test(text)) return;
+    if (!labels.includes(text)) labels.push(text);
+  };
+  values.forEach(pushLabel);
+  return labels;
+}
+
+function candidateSupplierLabelValues(candidate: SourcingCandidateRow) {
+  const raw = candidateRawPayload(candidate);
+  const company = raw.company || {};
+  const shop = raw.shop || {};
+  const values = [
+    candidate.supplierName,
+    raw.supplierName,
+    raw.shopName,
+    raw.shop_name,
+    raw.storeName,
+    raw.sellerName,
+    raw.sellerLoginId,
+    raw.companyName,
+    company.name,
+    company.shopName,
+    company.companyName,
+    company.sellerName,
+    shop.name,
+    shop.shopName,
+  ];
+  return values
+    .map((value) => firstText(value).replace(/\s+/g, ""))
+    .filter(Boolean);
+}
+
+function candidateBadgeTexts(candidate: SourcingCandidateRow) {
+  const raw = candidateRawPayload(candidate);
+  const supplierLabels = candidateSupplierLabelValues(candidate);
+  const labels = collectCandidateLabels(raw).filter((label) => {
+    const normalizedLabel = label.replace(/\s+/g, "");
+    if (!normalizedLabel) return false;
+    if (!/(1688|严选|先采后付|7[xX×*]?24.*响应|深度验厂|实力商家|源头工厂)/.test(normalizedLabel)) return false;
+    return !supplierLabels.some((supplierLabel) => (
+      supplierLabel === normalizedLabel
+      || supplierLabel.includes(normalizedLabel)
+      || normalizedLabel.includes(supplierLabel)
+    ));
+  });
+  return labels.slice(0, 2);
+}
+
+function candidateInquirySent(candidate: SourcingCandidateRow) {
+  return String(candidate.inquiryStatus || "").toLowerCase() === "sent"
+    && Boolean(String(candidate.inquiryResult?.taskId || "").trim());
+}
+
+function candidateInquiryStatusInfo(candidate: SourcingCandidateRow) {
+  const status = String(candidate.inquiryStatus || "").toLowerCase();
+  if (status === "replied" || status === "finished") return { label: "已回复", color: "green" };
+  if (status === "sent") {
+    return String(candidate.inquiryResult?.taskId || "").trim()
+      ? { label: "已询盘", color: "blue" }
+      : null;
+  }
+  if (status === "sending" || status === "pending") return { label: "询盘中", color: "processing" };
+  if (status === "failed" || status === "error") return { label: "询盘失败", color: "red" };
+  if (status) return { label: status, color: "default" };
+  return null;
+}
+
+function candidateInquiryFailureReason(candidate: SourcingCandidateRow) {
+  const result = candidate.inquiryResult || {};
+  const reason = firstText(
+    result.failureReason,
+    result.failReason,
+    result.errorMessage,
+    result.error,
+    result.message,
+    result.reason,
+  );
+  if (reason) return reason;
+  const status = String(candidate.inquiryStatus || "").toLowerCase();
+  return status === "failed" || status === "error" ? "未记录失败原因" : "-";
+}
+
+function candidateInquiryExecutedAt(candidate: SourcingCandidateRow) {
+  const result = candidate.inquiryResult || {};
+  return candidate.inquirySentAt || firstText(result.recordedAt, result.sentAt, result.executedAt, result.createdAt);
 }
 
 function externalOrderStatusLabel(status?: string | null) {
@@ -470,12 +828,73 @@ function parseJsonObjectInput(text?: string) {
   return JSON.parse(value);
 }
 
+function cleanRemoteErrorMessage(error: any) {
+  return String(error?.message || error || "")
+    .replace(/^Error invoking remote method '[^']+':\s*/i, "")
+    .replace(/^Error:\s*/i, "")
+    .trim();
+}
+
+function purchaseActionErrorMessage(error: any, action?: string) {
+  const message = cleanRemoteErrorMessage(error);
+  if (/AppKey is not allowed\(acl\)|not allowed\(acl\)/i.test(message)) {
+    if (action === "refresh_1688_product_detail") {
+      return "当前 1688 AppKey 没有商品详情接口权限，不能同步规格；请在 1688 开放平台开通 alibaba.product.get 接口，或先生成本地采购单。";
+    }
+    if (action === "preview_1688_order" || action === "push_1688_order") {
+      return "当前 1688 AppKey 没有下单接口权限，暂时不能推送 1688；请在 1688 开放平台开通对应交易接口权限。";
+    }
+    return "当前 1688 AppKey 没有这个接口权限，请在 1688 开放平台开通对应 ACL 后重试。";
+  }
+  if (message.includes("Client network socket disconnected before secure TLS connection was established")) {
+    return "1688 网络连接中断，TLS 握手未完成，请稍后重试";
+  }
+  return message || "操作失败";
+}
+
 function firstPoCandidate(row?: PurchaseRequestRow | null) {
   const candidates = row?.candidates || [];
   return candidates.find((item) => item.status === "selected")
     || candidates.find((item) => item.status === "shortlisted")
     || candidates[0]
     || null;
+}
+
+function candidateSpecOptions(candidate?: SourcingCandidateRow | null) {
+  const options = Array.isArray(candidate?.externalSkuOptions) ? candidate.externalSkuOptions : [];
+  return options
+    .filter((item) => item.externalSpecId)
+    .map((item) => ({
+      value: String(item.externalSpecId),
+      externalSkuId: item.externalSkuId || undefined,
+      unitPrice: item.price ?? undefined,
+      label: [
+        item.specText || item.externalSpecId,
+        item.price !== null && item.price !== undefined ? formatCurrency(item.price) : "",
+      ].filter(Boolean).join(" · "),
+    }));
+}
+
+function defaultCandidateSpec(candidate?: SourcingCandidateRow | null) {
+  const options = candidateSpecOptions(candidate);
+  if (candidate?.externalSpecId) {
+    const matched = options.find((item) => item.value === candidate.externalSpecId);
+    return {
+      externalSpecId: candidate.externalSpecId,
+      externalSkuId: matched?.externalSkuId || candidate.externalSkuId || undefined,
+      unitPrice: matched?.unitPrice ?? candidate.unitPrice,
+    };
+  }
+  const first = options[0];
+  return first ? {
+    externalSpecId: first.value,
+    externalSkuId: first.externalSkuId,
+    unitPrice: first.unitPrice ?? candidate?.unitPrice,
+  } : {
+    externalSpecId: undefined,
+    externalSkuId: candidate?.externalSkuId || undefined,
+    unitPrice: candidate?.unitPrice,
+  };
 }
 
 type PurchaseQueueKey =
@@ -537,6 +956,35 @@ function isExceptionOrder(row: PurchaseOrderRow) {
   return EXCEPTION_PO_STATUSES.has(row.status);
 }
 
+function has1688OrderTrace(row?: PurchaseOrderRow | null) {
+  if (!row) return false;
+  if (row.externalOrderId) return true;
+  const status = row.externalOrderStatus || "";
+  return Boolean(status && !["previewed", "price_change_requested"].includes(status));
+}
+
+function getPurchaseOrderRollbackTarget(row?: PurchaseOrderRow | null) {
+  if (!row) return null;
+  switch (row.status) {
+    case "pushed_pending_price":
+      return has1688OrderTrace(row) ? null : "draft";
+    case "pending_finance_approval":
+      return has1688OrderTrace(row) ? "pushed_pending_price" : "draft";
+    case "approved_to_pay":
+      return "pending_finance_approval";
+    case "paid":
+      return "approved_to_pay";
+    case "supplier_processing":
+      return "paid";
+    case "shipped":
+      return "supplier_processing";
+    case "arrived":
+      return Number(row.receivedQty || 0) > 0 ? null : "shipped";
+    default:
+      return null;
+  }
+}
+
 function csvCell(value: unknown) {
   const text = String(value ?? "");
   return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
@@ -587,16 +1035,50 @@ function extractFirstHttpUrl(value: unknown) {
   return match ? match[0].replace(/[),.;，。；、]+$/u, "") : "";
 }
 
+function extractFirstImageUrl(value: unknown) {
+  const text = String(value || "").trim();
+  const dataUrlMatch = text.match(/data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+/i);
+  if (dataUrlMatch) return dataUrlMatch[0];
+  return extractFirstHttpUrl(text);
+}
+
 function getPurchaseRequestDefaultImageUrl(row?: PurchaseRequestRow | null) {
   if (!row) return "";
   for (const item of row.evidence || []) {
-    const url = extractFirstHttpUrl(item);
+    const url = extractFirstImageUrl(item);
     if (url) return url;
   }
   return row.skuImageUrl || "";
 }
 
+function extractMessageImageUrls(value?: string | null) {
+  const text = String(value || "");
+  const urls: string[] = [];
+  const pushUrl = (url: string) => {
+    const normalized = url.trim().replace(/[),.;，。；、]+$/u, "");
+    if (normalized && !urls.includes(normalized)) urls.push(normalized);
+  };
+  for (const line of text.split(/\r?\n/)) {
+    const imageLine = line.match(/^\s*图片\s*[：:]\s*(\S+)/);
+    if (imageLine) pushUrl(imageLine[1]);
+  }
+  const dataUrls = text.match(/data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+/gi) || [];
+  dataUrls.forEach(pushUrl);
+  return urls.slice(0, MAX_COMMENT_IMAGES);
+}
+
+function stripMessageImageLines(value?: string | null) {
+  return String(value || "")
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*图片\s*[：:]\s*\S+/.test(line))
+    .join("\n")
+    .trim();
+}
+
 function imageSearchEmptyText(result: any) {
+  const duplicateSkippedCount = Number(result?.result?.duplicateSkippedCount || 0);
+  const totalFound = Number(result?.result?.totalFound || 0);
+  if (duplicateSkippedCount > 0 || totalFound > 0) return "本页搜到的商品已存在，未新增重复候选。";
   const reason = result?.result?.emptyReason;
   if (reason) return reason;
   return "这张图没有搜到候选，可以换一张更清晰的主图再试。";
@@ -608,6 +1090,59 @@ function latestImageSearchEmptyEvent(row?: PurchaseRequestRow | null) {
     item.eventType === "source_1688_image"
     && /未命中|imported 0|没有搜到|0 个候选/.test(item.message || "")
   ));
+}
+
+function normalizePurchaseSearch(value: unknown) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function buildPurchaseRequestSearchText(row: PurchaseRequestRow) {
+  return [
+    row.id,
+    row.internalSkuCode,
+    row.productName,
+    row.status,
+    PR_STATUS_LABELS[row.status],
+    row.reason,
+    row.requestedByName,
+    row.primaryMappingSupplierName,
+    row.primaryMappingOfferId,
+    row.skuSupplierName,
+    ...(row.evidence || []),
+    ...(row.candidates || []).flatMap((candidate) => [
+      candidate.supplierName,
+      candidate.productTitle,
+      candidate.productUrl,
+      candidate.externalOfferId,
+      candidate.externalSkuId,
+      candidate.externalSpecId,
+    ]),
+  ].map((item) => String(item ?? "")).join(" ");
+}
+
+function buildPurchaseOrderSearchText(row: PurchaseOrderRow) {
+  return [
+    row.id,
+    row.poNo,
+    row.accountName,
+    row.supplierName,
+    row.createdByName,
+    row.status,
+    PO_STATUS_LABELS[row.status],
+    row.paymentStatus,
+    row.paymentStatus ? PAYMENT_STATUS_LABELS[row.paymentStatus] : "",
+    row.skuSummary,
+    row.externalOrderId,
+    row.externalOrderStatus,
+    row.createdAt,
+    row.updatedAt,
+  ].map((item) => String(item ?? "")).join(" ");
+}
+
+function filterPurchaseRows<T>(rows: T[], keyword: string, buildSearchText: (row: T) => string) {
+  const needle = normalizePurchaseSearch(keyword);
+  if (!needle) return rows;
+  return rows.filter((row) => normalizePurchaseSearch(buildSearchText(row)).includes(needle));
 }
 
 async function prepareUploadImage(file: File) {
@@ -643,18 +1178,22 @@ async function prepareUploadImage(file: File) {
   return lastDataUrl;
 }
 
-export default function PurchaseCenter() {
+export default function PurchaseCenter({ initialStoreManagerOpen = false }: PurchaseCenterProps) {
   const auth = useErpAuth();
   const role = auth.currentUser?.role || "";
   const canCreateRequest = canRole(role, ["operations", "manager", "admin"]);
   const canPurchase = canRole(role, ["buyer", "manager", "admin"]);
   const canFinance = canRole(role, ["finance", "manager", "admin"]);
+  const canWarehouse = canRole(role, ["warehouse", "manager", "admin"]);
 
   const [data, setData] = useState<PurchaseWorkbench>({});
   const [loading, setLoading] = useState(false);
   const [actingKey, setActingKey] = useState<string | null>(null);
   const [loadingMorePrId, setLoadingMorePrId] = useState<string | null>(null);
   const [imageSearchNextPageByPrId, setImageSearchNextPageByPrId] = useState<Record<string, number>>({});
+  const candidateScrollLockRef = useRef<Record<string, boolean>>({});
+  const pendingCandidateScrollRestoreRef = useRef<{ prId: string; scrollTop: number; scrollHeight: number } | null>(null);
+  const candidateScrollElRef = useRef<HTMLDivElement | null>(null);
   const [skus, setSkus] = useState<SkuOption[]>([]);
   const [suppliers, setSuppliers] = useState<SupplierOption[]>([]);
   const [accounts, setAccounts] = useState<AccountOption[]>([]);
@@ -664,6 +1203,21 @@ export default function PurchaseCenter() {
   const [requestUploadImages, setRequestUploadImages] = useState<RequestUploadImage[]>([]);
   const [poPrId, setPoPrId] = useState<string | null>(null);
   const [detailPrId, setDetailPrId] = useState<string | null>(null);
+  const [detailDrawerMode, setDetailDrawerMode] = useState<PurchaseRequestDrawerMode>("collaboration");
+  const [detailDrawerOpen, setDetailDrawerOpen] = useState(false);
+  const [minimizedImageSearchPrId, setMinimizedImageSearchPrId] = useState<string | null>(null);
+  const [minimizedImageSearchPosition, setMinimizedImageSearchPosition] = useState(() => ({
+    left: 220,
+    top: typeof window === "undefined" ? 280 : Math.round(window.innerHeight * 0.42),
+  }));
+  const minimizedImageSearchDragRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    originLeft: number;
+    originTop: number;
+    moved: boolean;
+  } | null>(null);
   const [orderMatchDialog, setOrderMatchDialog] = useState<OrderMatchDialogState | null>(null);
   const [selectedExternalOrderId, setSelectedExternalOrderId] = useState<string | null>(null);
   const [refundPoId, setRefundPoId] = useState<string | null>(null);
@@ -672,6 +1226,14 @@ export default function PurchaseCenter() {
   const [importDialogOpen, setImportDialogOpen] = useState(false);
   const [imported1688Orders, setImported1688Orders] = useState<Imported1688OrderRow[]>([]);
   const [activeQueueKey, setActiveQueueKey] = useState<PurchaseQueueKey>("all_orders");
+  const [purchaseSearchText, setPurchaseSearchText] = useState("");
+  const [selectedInquiryCandidateIds, setSelectedInquiryCandidateIds] = useState<string[]>([]);
+  const [inquiryDialogPrId, setInquiryDialogPrId] = useState<string | null>(null);
+  const [inquiryDialogCandidateIds, setInquiryDialogCandidateIds] = useState<string[]>([]);
+  const [collaborationDraft, setCollaborationDraft] = useState("");
+  const [collaborationUploadImages, setCollaborationUploadImages] = useState<RequestUploadImage[]>([]);
+  const [storeManagerOpen, setStoreManagerOpen] = useState(initialStoreManagerOpen);
+  const [purchaseSettingsOpen, setPurchaseSettingsOpen] = useState(false);
 
   const [requestForm] = Form.useForm<RequestFormValues>();
   const [quoteForm] = Form.useForm<QuoteFormValues>();
@@ -679,6 +1241,8 @@ export default function PurchaseCenter() {
   const [poForm] = Form.useForm<PoFormValues>();
   const [refundForm] = Form.useForm<RefundFormValues>();
   const [orderNoteForm] = Form.useForm<OrderNoteFormValues>();
+  const [purchaseSettingsForm] = Form.useForm<PurchaseSettingsFormValues>();
+  const [inquiryDialogForm] = Form.useForm<InquiryDialogFormValues>();
 
   const quotePr = useMemo(
     () => data.purchaseRequests?.find((item) => item.id === quotePrId) || null,
@@ -696,6 +1260,34 @@ export default function PurchaseCenter() {
     () => data.purchaseRequests?.find((item) => item.id === detailPrId) || null,
     [data.purchaseRequests, detailPrId],
   );
+  const inquiryDialogPr = useMemo(
+    () => data.purchaseRequests?.find((item) => item.id === inquiryDialogPrId) || null,
+    [data.purchaseRequests, inquiryDialogPrId],
+  );
+  const inquiryDialogCandidates = useMemo(
+    () => (inquiryDialogPr?.candidates || []).filter((candidate) => inquiryDialogCandidateIds.includes(candidate.id)),
+    [inquiryDialogPr, inquiryDialogCandidateIds],
+  );
+  const minimizedImageSearchPr = useMemo(
+    () => data.purchaseRequests?.find((item) => item.id === minimizedImageSearchPrId) || null,
+    [data.purchaseRequests, minimizedImageSearchPrId],
+  );
+  const detailCandidateCount = detailPr?.candidates?.length || 0;
+  const selectableInquiryCandidateIds = useMemo(
+    () => (detailPr?.candidates || [])
+      .filter((candidate) => !candidateInquirySent(candidate))
+      .map((candidate) => candidate.id),
+    [detailPr],
+  );
+  const selectedInquiryCandidateIdSet = useMemo(
+    () => new Set(selectedInquiryCandidateIds),
+    [selectedInquiryCandidateIds],
+  );
+  const selectedInquiryCount = selectedInquiryCandidateIds.length;
+  const allInquiryCandidatesSelected = selectableInquiryCandidateIds.length > 0
+    && selectedInquiryCount === selectableInquiryCandidateIds.length;
+  const someInquiryCandidatesSelected = selectedInquiryCount > 0
+    && selectedInquiryCount < selectableInquiryCandidateIds.length;
   const refundPo = useMemo(
     () => data.purchaseOrders?.find((item) => item.id === refundPoId) || null,
     [data.purchaseOrders, refundPoId],
@@ -725,6 +1317,17 @@ export default function PurchaseCenter() {
       label: candidateLabel(candidate),
     })),
     [poPr],
+  );
+  const selectedPoCandidateId = Form.useWatch("candidateId", poForm);
+  const selectedPoCandidate = useMemo(
+    () => selectedPoCandidateId
+      ? (poPr?.candidates || []).find((candidate) => candidate.id === selectedPoCandidateId) || null
+      : null,
+    [poPr, selectedPoCandidateId],
+  );
+  const selectedPoCandidateSpecOptions = useMemo(
+    () => candidateSpecOptions(selectedPoCandidate),
+    [selectedPoCandidate],
   );
   const poPrHasMapping = Number(poPr?.mappingCount || 0) > 0;
   const poPrHasSkuSupplier = Boolean(poPr?.skuSupplierId || poPr?.skuSupplierName);
@@ -855,6 +1458,21 @@ export default function PurchaseCenter() {
     ? pendingRequestRows
     : purchaseRequests;
 
+  const filteredActiveRequestRows = useMemo(
+    () => filterPurchaseRows(activeRequestRows, purchaseSearchText, buildPurchaseRequestSearchText),
+    [activeRequestRows, purchaseSearchText],
+  );
+  const filteredActiveOrderRows = useMemo(
+    () => filterPurchaseRows(activeOrderRows, purchaseSearchText, buildPurchaseOrderSearchText),
+    [activeOrderRows, purchaseSearchText],
+  );
+  const hasPurchaseSearch = Boolean(purchaseSearchText.trim());
+  const purchaseSearchResultCount = activeQueue.kind === "request"
+    ? filteredActiveRequestRows.length
+    : activeQueue.kind === "order"
+      ? filteredActiveOrderRows.length
+      : filteredActiveRequestRows.length + filteredActiveOrderRows.length;
+
   const selectedPurchaseOrders = useMemo(
     () => purchaseOrders.filter((row) => selectedPoIds.includes(row.id)),
     [purchaseOrders, selectedPoIds],
@@ -894,9 +1512,80 @@ export default function PurchaseCenter() {
     }
   }, [applyWorkbench]);
 
+  const runAuto1688OrderSync = useCallback(async () => {
+    if (!erp || !canPurchase) return;
+
+    const now = Date.now();
+    if (auto1688OrderSyncPromise) {
+      await auto1688OrderSyncPromise;
+      return;
+    }
+    if (now - lastAuto1688OrderSyncAt < AUTO_1688_ORDER_SYNC_INTERVAL_MS) return;
+
+    lastAuto1688OrderSyncAt = now;
+    const syncPromise = (async () => {
+      try {
+        const result = await erp.purchase.action({
+          action: "import_1688_orders",
+          pageSize: 50,
+          autoGenerate: false,
+          limit: 200,
+        });
+        const workbench = result?.workbench || await erp.purchase.workbench({ limit: 200 });
+        applyWorkbench(workbench);
+        if (Array.isArray(workbench?.skuOptions)) setSkus(workbench.skuOptions);
+        if (Array.isArray(workbench?.supplierOptions)) setSuppliers(workbench.supplierOptions);
+      } catch {
+        // Keep background 1688 sync quiet when auth is missing or the network is unavailable.
+      } finally {
+        auto1688OrderSyncPromise = null;
+      }
+    })();
+    auto1688OrderSyncPromise = syncPromise;
+    await syncPromise;
+  }, [applyWorkbench, canPurchase]);
+
   useEffect(() => {
     void loadData();
   }, [loadData]);
+
+  useEffect(() => {
+    candidateScrollLockRef.current = {};
+    pendingCandidateScrollRestoreRef.current = null;
+    setCollaborationDraft("");
+    setCollaborationUploadImages([]);
+    setSelectedInquiryCandidateIds([]);
+  }, [detailPrId]);
+
+  useEffect(() => {
+    if (minimizedImageSearchPrId && !minimizedImageSearchPr) {
+      setMinimizedImageSearchPrId(null);
+    }
+  }, [minimizedImageSearchPrId, minimizedImageSearchPr]);
+
+  useEffect(() => {
+    const restore = pendingCandidateScrollRestoreRef.current;
+    if (!restore || restore.prId !== detailPrId) return;
+    const frame = window.requestAnimationFrame(() => {
+      const scrollElement = candidateScrollElRef.current;
+      if (!scrollElement) return;
+      scrollElement.scrollTop = Math.min(
+        restore.scrollTop,
+        Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight),
+      );
+      pendingCandidateScrollRestoreRef.current = null;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [detailPrId, detailCandidateCount]);
+
+  useEffect(() => {
+    if (!canPurchase) return;
+    void runAuto1688OrderSync();
+    const timer = window.setInterval(() => {
+      void runAuto1688OrderSync();
+    }, AUTO_1688_ORDER_SYNC_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [canPurchase, runAuto1688OrderSync]);
 
   useEffect(() => {
     if (!erp?.events?.onPurchaseUpdate) {
@@ -932,16 +1621,216 @@ export default function PurchaseCenter() {
       if (successText) message.success(successText);
       return result;
     } catch (error: any) {
-      message.error(error?.message || "操作失败");
+      const errorMessage = purchaseActionErrorMessage(error, payload.action);
+      if (payload.action === "rollback_po_status" && errorMessage.includes("Unsupported purchase action")) {
+        message.error("当前主控端还没更新/重启，暂不支持采购单回退");
+      } else {
+        message.error(errorMessage || "操作失败");
+      }
       return null;
     } finally {
       setActingKey(null);
     }
   };
 
+  const canRollbackPurchaseOrder = (row: PurchaseOrderRow) => {
+    const target = getPurchaseOrderRollbackTarget(row);
+    if (!target) return false;
+    if (["approved_to_pay", "paid"].includes(row.status)) return canFinance;
+    if (row.status === "arrived") return canWarehouse;
+    return canPurchase;
+  };
+
+  const closeDetailDrawer = () => {
+    if (detailDrawerMode === "imageSearch" && detailPrId) {
+      setMinimizedImageSearchPrId(detailPrId);
+      setDetailDrawerOpen(false);
+      return;
+    }
+    setDetailDrawerOpen(false);
+    setDetailPrId(null);
+  };
+
+  const reopenMinimizedImageSearch = () => {
+    if (!minimizedImageSearchPrId) return;
+    setDetailDrawerMode("imageSearch");
+    setDetailPrId(minimizedImageSearchPrId);
+    setDetailDrawerOpen(true);
+    setMinimizedImageSearchPrId(null);
+  };
+
+  const clampMinimizedImageSearchPosition = useCallback((position: { left: number; top: number }) => {
+    if (typeof window === "undefined") return position;
+    const maxLeft = Math.max(
+      MINIMIZED_IMAGE_SEARCH_MARGIN,
+      window.innerWidth - MINIMIZED_IMAGE_SEARCH_WIDTH - MINIMIZED_IMAGE_SEARCH_MARGIN,
+    );
+    const maxTop = Math.max(
+      MINIMIZED_IMAGE_SEARCH_MARGIN,
+      window.innerHeight - MINIMIZED_IMAGE_SEARCH_HEIGHT - MINIMIZED_IMAGE_SEARCH_MARGIN,
+    );
+    return {
+      left: Math.min(Math.max(MINIMIZED_IMAGE_SEARCH_MARGIN, position.left), maxLeft),
+      top: Math.min(Math.max(MINIMIZED_IMAGE_SEARCH_MARGIN, position.top), maxTop),
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleResize = () => {
+      setMinimizedImageSearchPosition((position) => clampMinimizedImageSearchPosition(position));
+    };
+    handleResize();
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, [clampMinimizedImageSearchPosition, minimizedImageSearchPrId]);
+
+  const handleMinimizedImageSearchPointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    minimizedImageSearchDragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originLeft: minimizedImageSearchPosition.left,
+      originTop: minimizedImageSearchPosition.top,
+      moved: false,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const handleMinimizedImageSearchPointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    const drag = minimizedImageSearchDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const deltaX = event.clientX - drag.startX;
+    const deltaY = event.clientY - drag.startY;
+    if (Math.abs(deltaX) > 3 || Math.abs(deltaY) > 3) {
+      drag.moved = true;
+    }
+    if (!drag.moved) return;
+    event.preventDefault();
+    setMinimizedImageSearchPosition(clampMinimizedImageSearchPosition({
+      left: drag.originLeft + deltaX,
+      top: drag.originTop + deltaY,
+    }));
+  };
+
+  const handleMinimizedImageSearchPointerUp = (event: PointerEvent<HTMLDivElement>) => {
+    const drag = minimizedImageSearchDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    minimizedImageSearchDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (drag.moved) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    reopenMinimizedImageSearch();
+  };
+
+  const handleMinimizedImageSearchPointerCancel = (event: PointerEvent<HTMLDivElement>) => {
+    const drag = minimizedImageSearchDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    minimizedImageSearchDragRef.current = null;
+  };
+
+  const rollbackPurchaseOrder = async (row: PurchaseOrderRow) => {
+    const target = getPurchaseOrderRollbackTarget(row);
+    const targetLabel = target ? (PO_STATUS_LABELS[target] || target) : "上一状态";
+    await runAction(
+      `rollback-po-${row.id}`,
+      { action: "rollback_po_status", poId: row.id },
+      `已回退到${targetLabel}`,
+    );
+  };
+
   const openDetail = async (row: PurchaseRequestRow) => {
+    setDetailDrawerMode("collaboration");
     setDetailPrId(row.id);
+    setDetailDrawerOpen(true);
+    setMinimizedImageSearchPrId(null);
     await runAction(`read-${row.id}`, { action: "mark_read", prId: row.id });
+  };
+
+  const openPurchaseSettings = () => {
+    purchaseSettingsForm.setFieldsValue({
+      inquiryTemplate: data.purchaseSettings?.inquiryTemplate || DEFAULT_PURCHASE_INQUIRY_TEMPLATE,
+    });
+    setPurchaseSettingsOpen(true);
+  };
+
+  const savePurchaseSettings = async (values: PurchaseSettingsFormValues) => {
+    const template = String(values.inquiryTemplate || "").trim();
+    const result = await runAction(
+      "save-purchase-settings",
+      {
+        action: "save_purchase_settings",
+        inquiryTemplate: template || DEFAULT_PURCHASE_INQUIRY_TEMPLATE,
+      },
+      "询盘设置已保存",
+    );
+    if (result) setPurchaseSettingsOpen(false);
+  };
+
+  const syncInquiryResults = async () => {
+    const result = await runAction(
+      "sync-inquiry-results",
+      {
+        action: "sync_1688_inquiry_results",
+        limit: 50,
+      },
+    );
+    if (!result) return;
+    const syncedCount = Number(result?.result?.syncedCount || 0);
+    const failedCount = Number(result?.result?.failedCount || 0);
+    if (syncedCount || failedCount) {
+      message.success(`询盘结果已同步 ${syncedCount} 个，失败 ${failedCount} 个`);
+    } else {
+      message.info("没有待同步的询盘结果");
+    }
+  };
+
+  const openInquiryDialog = (row: PurchaseRequestRow, candidateIds: string[] = []) => {
+    const selectableIds = (row.candidates || [])
+      .filter((candidate) => !candidateInquirySent(candidate))
+      .map((candidate) => candidate.id);
+    const selectedIds = (candidateIds.length ? candidateIds : selectableIds.slice(0, AUTO_INQUIRY_LIMIT))
+      .filter((id) => selectableIds.includes(id));
+    if (!selectedIds.length) {
+      message.warning("没有可询盘的候选商品");
+      return;
+    }
+    setInquiryDialogPrId(row.id);
+    setInquiryDialogCandidateIds(selectedIds);
+    setSelectedInquiryCandidateIds(selectedIds);
+    inquiryDialogForm.setFieldsValue({
+      inquiryMessage: data.purchaseSettings?.inquiryTemplate || DEFAULT_PURCHASE_INQUIRY_TEMPLATE,
+    });
+  };
+
+  const closeInquiryDialog = () => {
+    setInquiryDialogPrId(null);
+    setInquiryDialogCandidateIds([]);
+  };
+
+  const submitCollaborationComment = async () => {
+    const body = collaborationDraft.trim();
+    if (!detailPr || (!body && collaborationUploadImages.length === 0)) return;
+    const result = await runAction(
+      `comment-${detailPr.id}`,
+      {
+        action: "add_comment",
+        prId: detailPr.id,
+        body: body || "图片",
+        imageDataUrls: collaborationUploadImages.map((item) => item.dataUrl),
+        imageFileNames: collaborationUploadImages.map((item) => item.fileName),
+      },
+      "协作留言已发送",
+    );
+    if (result) {
+      setCollaborationDraft("");
+      setCollaborationUploadImages([]);
+    }
   };
 
   const deletePurchaseRequest = async (row: PurchaseRequestRow) => {
@@ -951,16 +1840,14 @@ export default function PurchaseCenter() {
       "采购单已删除",
     );
     if (!result) return;
-    if (detailPrId === row.id) setDetailPrId(null);
+    if (detailPrId === row.id) {
+      setDetailDrawerOpen(false);
+      setDetailPrId(null);
+    }
+    if (minimizedImageSearchPrId === row.id) setMinimizedImageSearchPrId(null);
     if (quotePrId === row.id) setQuotePrId(null);
     if (source1688PrId === row.id) setSource1688PrId(null);
     if (poPrId === row.id) setPoPrId(null);
-  };
-
-  const openQuoteModal = (row: PurchaseRequestRow) => {
-    setQuotePrId(row.id);
-    quoteForm.resetFields();
-    quoteForm.setFieldsValue({ moq: 1, logisticsFee: 0 });
   };
 
   const open1688SourceModal = (row: PurchaseRequestRow) => {
@@ -974,10 +1861,14 @@ export default function PurchaseCenter() {
 
   const openPoModal = (row: PurchaseRequestRow, selectedCandidate?: SourcingCandidateRow | null) => {
     const candidate = selectedCandidate || firstPoCandidate(row);
+    const spec = defaultCandidateSpec(candidate);
     setPoPrId(row.id);
     poForm.resetFields();
     poForm.setFieldsValue({
       candidateId: candidate?.id,
+      externalSkuId: spec.externalSkuId,
+      externalSpecId: spec.externalSpecId,
+      unitPrice: spec.unitPrice,
       qty: row.requestedQty,
     });
   };
@@ -995,7 +1886,7 @@ export default function PurchaseCenter() {
       .filter((sku): sku is SkuOption => Boolean(sku));
     const missingStoreSkus = selectedSkus.filter((sku) => !sku.accountId);
     if (missingStoreSkus.length > 0) {
-      message.error("有商品资料还没有匹配采购店铺，请先到商品资料补充店铺");
+      message.error("有商品资料还没有选择所属店铺，请先在商品资料里补齐");
       return;
     }
 
@@ -1105,46 +1996,196 @@ export default function PurchaseCenter() {
       prId: row.id,
       imgUrl,
       beginPage,
-      importLimit: 10,
+      importLimit: IMAGE_SEARCH_PAGE_SIZE,
     });
     if (result) {
       const importedCount = Number(result.result?.importedCount || 0);
       setImageSearchNextPageByPrId((prev) => ({ ...prev, [row.id]: beginPage + 1 }));
       if (importedCount <= 0) {
         if (!silent) message.warning(imageSearchEmptyText(result));
-        return;
+        return result;
       }
       const nextWorkbench = result.workbench || {};
       const nextPr = (nextWorkbench.purchaseRequests || []).find((item: PurchaseRequestRow) => item.id === row.id);
       if (nextPr?.id) {
+        setDetailDrawerMode("imageSearch");
         setDetailPrId(nextPr.id);
+        setDetailDrawerOpen(true);
+        setMinimizedImageSearchPrId(null);
         setActiveQueueKey("pending_requests");
       }
       if (!silent) message.success(beginPage > 1 ? `已追加 ${importedCount} 个候选` : `已导入 ${importedCount} 个候选`);
-      window.setTimeout(() => {
-        void loadData();
-      }, 250);
     }
     return result;
   };
 
-  const loadMoreImageCandidates = async (row: PurchaseRequestRow) => {
+  const handleAutoInquiryForRow = async (row: PurchaseRequestRow, candidateIds: string[] = [], inquiryMessage?: string) => {
+    let searchResult: any = null;
+    const hasCandidates = Boolean(row.candidates?.length || row.candidateCount);
+    const selectedCandidateIds = candidateIds.filter(Boolean);
+    if (!selectedCandidateIds.length && !hasCandidates) {
+      searchResult = await runImageSearchForRow(
+        row,
+        Math.min(nextImageSearchPageForRow(row), IMAGE_SEARCH_MAX_PAGE),
+        true,
+      );
+      const importedCount = Number(searchResult?.result?.importedCount || 0);
+      if (!searchResult || importedCount <= 0) {
+        message.warning(searchResult ? imageSearchEmptyText(searchResult) : "没有可询盘的候选商品");
+        return null;
+      }
+    }
+
+    const nextWorkbench = searchResult?.workbench || {};
+    const sourcePr = (nextWorkbench.purchaseRequests || []).find((item: PurchaseRequestRow) => item.id === row.id)
+      || data.purchaseRequests?.find((item) => item.id === row.id)
+      || row;
+    const availableCandidates = (sourcePr.candidates || []).filter((candidate: SourcingCandidateRow) => !candidateInquirySent(candidate));
+    const selectedSet = new Set(selectedCandidateIds);
+    const inquiryCandidates = selectedCandidateIds.length
+      ? availableCandidates.filter((candidate: SourcingCandidateRow) => selectedSet.has(candidate.id))
+      : availableCandidates.slice(0, AUTO_INQUIRY_LIMIT);
+
+    if (!inquiryCandidates.length) {
+      message.warning("没有可询盘的候选商品");
+      return null;
+    }
+    if (!erp?.purchase?.local1688Inquiry) {
+      message.error("本地 1688 浏览器询盘需要在桌面软件执行，请更新并重启桌面端");
+      return null;
+    }
+
+    const actionKey = `1688-inquiry-${row.id}`;
+    const finalInquiryMessage = inquiryMessage?.trim()
+      || data.purchaseSettings?.inquiryTemplate
+      || DEFAULT_PURCHASE_INQUIRY_TEMPLATE;
+    let localResult: any = null;
+    setActingKey(actionKey);
+    try {
+      localResult = await erp.purchase.local1688Inquiry({
+        prId: row.id,
+        candidates: inquiryCandidates.map(buildLocal1688InquiryCandidate),
+        inquiryMessage: finalInquiryMessage,
+      });
+    } catch (error: any) {
+      message.error(error?.message || "本地 1688 浏览器询盘失败");
+      return null;
+    } finally {
+      setActingKey(null);
+    }
+
+    const returnedCandidateIds = Array.isArray(localResult?.results)
+      ? localResult.results.map((item: any) => String(item?.candidateId || "")).filter(Boolean)
+      : [];
+    const recordCandidateIds = returnedCandidateIds.length
+      ? returnedCandidateIds
+      : inquiryCandidates.map((candidate: SourcingCandidateRow) => candidate.id);
+    const result = await runAction(actionKey, {
+      action: "record_local_1688_inquiry_results",
+      prId: row.id,
+      candidateIds: recordCandidateIds,
+      browserResults: localResult?.results || [],
+      localResult,
+      inquiryMessage: finalInquiryMessage,
+      inquiryTemplate: data.purchaseSettings?.inquiryTemplate || DEFAULT_PURCHASE_INQUIRY_TEMPLATE,
+    });
+    if (!result) return null;
+    const inquiryCount = Number(result?.result?.inquiryCount || 0);
+    const failedCount = Number(result?.result?.failedCount || 0);
+    if (inquiryCount > 0) {
+      message.success(failedCount
+        ? `已发起询盘 ${inquiryCount} 个，失败 ${failedCount} 个`
+        : (selectedCandidateIds.length ? `已批量询盘 ${inquiryCount} 个候选` : `已自动询盘 ${inquiryCount} 个候选`));
+      const nextWorkbench = result.workbench || searchResult?.workbench || {};
+      const nextPr = (nextWorkbench.purchaseRequests || []).find((item: PurchaseRequestRow) => item.id === row.id);
+      if (nextPr?.id) {
+        setDetailDrawerMode("imageSearch");
+        setDetailPrId(nextPr.id);
+        setDetailDrawerOpen(true);
+        setMinimizedImageSearchPrId(null);
+        setActiveQueueKey("pending_requests");
+      }
+      setSelectedInquiryCandidateIds([]);
+    } else {
+      message.warning(failedCount ? `询盘失败 ${failedCount} 个，点候选商品的询盘状态查看原因` : "没有新的候选商品需要询盘");
+    }
+    return result;
+  };
+
+  const submitInquiryDialog = async (values: InquiryDialogFormValues) => {
+    if (!inquiryDialogPr) return;
+    const result = await handleAutoInquiryForRow(
+      inquiryDialogPr,
+      inquiryDialogCandidateIds,
+      values.inquiryMessage || DEFAULT_PURCHASE_INQUIRY_TEMPLATE,
+    );
+    if (result) closeInquiryDialog();
+  };
+
+  const openImageSearchAndInquiry = async (row: PurchaseRequestRow) => {
+    setDetailDrawerMode("imageSearch");
+    setDetailPrId(row.id);
+    setDetailDrawerOpen(true);
+    setMinimizedImageSearchPrId(null);
+    setSelectedInquiryCandidateIds([]);
+    const result = await runImageSearchForRow(row, Math.min(nextImageSearchPageForRow(row), IMAGE_SEARCH_MAX_PAGE));
+    const nextPr = (result?.workbench?.purchaseRequests || []).find((item: PurchaseRequestRow) => item.id === row.id)
+      || data.purchaseRequests?.find((item) => item.id === row.id)
+      || row;
+    if (nextPr?.id && (nextPr.candidates || []).some((candidate: SourcingCandidateRow) => !candidateInquirySent(candidate))) {
+      openInquiryDialog(nextPr);
+    }
+  };
+
+  const toggleInquiryCandidate = (candidateId: string, checked: boolean) => {
+    setSelectedInquiryCandidateIds((current) => {
+      if (checked) return current.includes(candidateId) ? current : [...current, candidateId];
+      return current.filter((id) => id !== candidateId);
+    });
+  };
+
+  const toggleAllInquiryCandidates = (checked: boolean) => {
+    setSelectedInquiryCandidateIds(checked ? selectableInquiryCandidateIds : []);
+  };
+
+  const loadMoreImageCandidates = async (row: PurchaseRequestRow, scrollElement?: HTMLDivElement) => {
     if (loadingMorePrId === row.id || actingKey === `1688-image-${row.id}`) return;
     const candidateCount = row.candidates?.length || row.candidateCount || 0;
-    const nextPage = imageSearchNextPageByPrId[row.id] || Math.floor(candidateCount / 10) + 1;
-    if (nextPage < 2 || nextPage > 10) return;
+    const nextPage = imageSearchNextPageByPrId[row.id] || Math.floor(candidateCount / IMAGE_SEARCH_PAGE_SIZE) + 1;
+    if (nextPage < 2 || nextPage > IMAGE_SEARCH_MAX_PAGE) return;
+    if (scrollElement) {
+      pendingCandidateScrollRestoreRef.current = {
+        prId: row.id,
+        scrollTop: scrollElement.scrollTop,
+        scrollHeight: scrollElement.scrollHeight,
+      };
+    }
     setLoadingMorePrId(row.id);
     try {
-      await runImageSearchForRow(row, nextPage, true);
+      const result = await runImageSearchForRow(row, nextPage, true);
+      if (!Number(result?.result?.importedCount || 0)) {
+        pendingCandidateScrollRestoreRef.current = null;
+      }
     } finally {
       setLoadingMorePrId(null);
     }
   };
 
+  const nextImageSearchPageForRow = (row: PurchaseRequestRow) => {
+    const candidateCount = row.candidates?.length || row.candidateCount || 0;
+    return imageSearchNextPageByPrId[row.id] || Math.floor(candidateCount / IMAGE_SEARCH_PAGE_SIZE) + 1;
+  };
+
   const handleCandidateScroll = (event: UIEvent<HTMLDivElement>, row: PurchaseRequestRow) => {
     const target = event.currentTarget;
-    if (target.scrollTop + target.clientHeight < target.scrollHeight - 96) return;
-    void loadMoreImageCandidates(row);
+    const distanceToBottom = target.scrollHeight - target.scrollTop - target.clientHeight;
+    if (distanceToBottom > CANDIDATE_SCROLL_REARM_PX) {
+      candidateScrollLockRef.current[row.id] = false;
+    }
+    if (distanceToBottom > CANDIDATE_SCROLL_BOTTOM_PX) return;
+    if (candidateScrollLockRef.current[row.id]) return;
+    candidateScrollLockRef.current[row.id] = true;
+    void loadMoreImageCandidates(row, target);
   };
 
   const openCandidateUrl = (candidate: SourcingCandidateRow) => {
@@ -1194,6 +2235,44 @@ export default function PurchaseCenter() {
     void setRequestImageFiles(imageFiles);
   };
 
+  const setCollaborationImageFiles = async (files: File[]) => {
+    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+    if (imageFiles.length === 0) return;
+    const slotsLeft = Math.max(0, MAX_COMMENT_IMAGES - collaborationUploadImages.length);
+    if (slotsLeft === 0) {
+      message.warning(`最多添加 ${MAX_COMMENT_IMAGES} 张图片`);
+      return;
+    }
+    const prepared = await Promise.all(imageFiles.slice(0, slotsLeft).map(async (file) => ({
+      uid: `${file.name || "paste"}-${file.lastModified || Date.now()}-${file.size}-${Math.random().toString(36).slice(2)}`,
+      fileName: file.name || "已粘贴图片",
+      dataUrl: await prepareUploadImage(file),
+    })));
+    setCollaborationUploadImages((previous) => [...previous, ...prepared].slice(0, MAX_COMMENT_IMAGES));
+    message.success(`已添加 ${prepared.length} 张图片`);
+  };
+
+  const handleCollaborationImageUpload = async (file: File) => {
+    try {
+      await setCollaborationImageFiles([file]);
+    } catch (error: any) {
+      message.error(error?.message || "图片处理失败");
+    }
+    return Upload.LIST_IGNORE;
+  };
+
+  const handleCollaborationPaste = (event: ClipboardEvent<HTMLDivElement>) => {
+    const files = Array.from(event.clipboardData?.files || []).filter((file) => file.type.startsWith("image/"));
+    const itemFiles = Array.from(event.clipboardData?.items || [])
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+    const imageFiles = [...files, ...itemFiles];
+    if (imageFiles.length === 0) return;
+    event.preventDefault();
+    void setCollaborationImageFiles(imageFiles);
+  };
+
   const preview1688Order = async (row: PurchaseOrderRow) => {
     await runAction(`1688-preview-${row.id}`, {
       action: "preview_1688_order",
@@ -1201,11 +2280,51 @@ export default function PurchaseCenter() {
     }, "1688 订单已预览");
   };
 
-  const push1688Order = async (row: PurchaseOrderRow) => {
-    await runAction(`1688-push-${row.id}`, {
+  const validate1688OrderPush = async (row: PurchaseOrderRow, quiet = false) => {
+    const result = await runAction(`1688-validate-${row.id}`, {
+      action: "validate_1688_order_push",
+      poId: row.id,
+    });
+    const validation = result?.result;
+    if (validation?.ready) {
+      if (!quiet) message.success("1688 下单校验通过");
+      return validation;
+    }
+    if (validation?.message && !quiet) message.warning(validation.message);
+    return validation || null;
+  };
+
+  const push1688Order = async (row: PurchaseOrderRow, options: { skipValidation?: boolean } = {}) => {
+    if (!options.skipValidation) {
+      const validation = await validate1688OrderPush(row, true);
+      if (!validation?.ready) return null;
+    }
+    const result = await runAction(`1688-push-${row.id}`, {
       action: "push_1688_order",
       poId: row.id,
-    }, "已推送 1688 订单");
+    });
+    const externalOrderId = result?.result?.externalOrderId;
+    if (externalOrderId) {
+      message.success(`已推送 1688 下单：${externalOrderId}`);
+    } else if (result) {
+      message.warning("1688 已接收下单请求，但暂未返回订单号，请稍后同步订单");
+    }
+    return result;
+  };
+
+  const confirmPush1688Order = (row: PurchaseOrderRow, validation?: any) => {
+    Modal.confirm({
+      title: "推送 1688 下单",
+      content: (
+        <Space direction="vertical" size={6}>
+          <Text>采购单 {row.poNo || row.id} 已通过供应商映射和店铺 1688 地址校验。</Text>
+          <Text type="secondary">确认后会调用 1688 创建订单接口。</Text>
+        </Space>
+      ),
+      okText: "推送1688下单",
+      cancelText: "稍后",
+      onOk: () => push1688Order(row, { skipValidation: Boolean(validation?.ready) }),
+    });
   };
 
   const request1688PriceChange = async (row: PurchaseOrderRow) => {
@@ -1375,22 +2494,6 @@ export default function PurchaseCenter() {
     }, "1688 已确认收货");
   };
 
-  const sync1688Addresses = async () => {
-    const result = await runAction("1688-address-sync", {
-      action: "sync_1688_addresses",
-    });
-    const count = Number(result?.result?.addressCount || 0);
-    if (result) message.success(count ? `已同步 ${count} 个 1688 收货地址` : "1688 暂未返回收货地址");
-  };
-
-  const configure1688Messages = async () => {
-    const result = await runAction("1688-message-subscribe", {
-      action: "configure_1688_message_subscriptions",
-    });
-    const count = Number(result?.result?.count || 0);
-    if (result) message.success(`已启用 ${count} 个 1688 消息订阅主题`);
-  };
-
   const import1688Orders = async (autoGenerate = false) => {
     const result = await runAction(autoGenerate ? "1688-import-generate" : "1688-import-orders", {
       action: "import_1688_orders",
@@ -1497,19 +2600,52 @@ export default function PurchaseCenter() {
     }
   };
 
+  const refreshCandidate1688Specs = async (candidate: SourcingCandidateRow) => {
+    const result = await runAction(
+      `1688-detail-${candidate.id}`,
+      { action: "refresh_1688_product_detail", candidateId: candidate.id },
+      "1688规格已同步",
+    );
+    if (!result) return;
+    const nextPr = result?.workbench?.purchaseRequests?.find((item: PurchaseRequestRow) => item.id === poPr?.id);
+    const nextCandidate = nextPr?.candidates?.find((item: SourcingCandidateRow) => item.id === candidate.id);
+    const spec = defaultCandidateSpec(nextCandidate || candidate);
+    poForm.setFieldsValue({
+      candidateId: candidate.id,
+      externalSkuId: spec.externalSkuId,
+      externalSpecId: spec.externalSpecId,
+      unitPrice: spec.unitPrice,
+    });
+  };
+
   const handleGeneratePo = async (values: PoFormValues) => {
     if (!poPr) return;
+    const candidate = values.candidateId
+      ? (poPr.candidates || []).find((item) => item.id === values.candidateId)
+      : null;
+    if (candidate?.externalOfferId && !values.externalSpecId) {
+      message.warning("未选择 1688 规格，将先生成本地采购单；这张单暂不能自动推送 1688");
+    }
     const result = await runAction(`po-${poPr.id}`, {
       action: "generate_po",
       prId: poPr.id,
       candidateId: values.candidateId,
+      externalSkuId: values.externalSkuId,
+      externalSpecId: values.externalSpecId,
+      unitPrice: values.unitPrice,
       qty: values.qty,
       expectedDeliveryDate: toApiDate(values.expectedDeliveryDate),
       remark: values.remark,
     }, "采购单已生成");
     if (result) {
+      const generatedPo = result?.result?.purchaseOrder as PurchaseOrderRow | undefined;
+      const has1688Source = Boolean(result?.result?.sku1688Source);
       setPoPrId(null);
       poForm.resetFields();
+      if (generatedPo?.id && has1688Source) {
+        const validation = await validate1688OrderPush(generatedPo, true);
+        if (validation?.ready) confirmPush1688Order(generatedPo, validation);
+      }
     }
   };
 
@@ -1572,6 +2708,39 @@ export default function PurchaseCenter() {
 
   const requestColumns = useMemo<ColumnsType<PurchaseRequestRow>>(() => [
     {
+      title: "图片",
+      key: "image",
+      width: 76,
+      render: (_value, row) => {
+        const imageUrl = getPurchaseRequestDefaultImageUrl(row);
+        return (
+          <div
+            style={{
+              width: 48,
+              height: 48,
+              borderRadius: 6,
+              overflow: "hidden",
+              background: "#f8fafc",
+              border: "1px solid #e5e7eb",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            {imageUrl ? (
+              <img
+                src={imageUrl}
+                alt={row.productName || row.internalSkuCode || "商品图片"}
+                style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+              />
+            ) : (
+              <Text type="secondary" style={{ fontSize: 12 }}>无图</Text>
+            )}
+          </div>
+        );
+      },
+    },
+    {
       title: "商品编码",
       key: "sku",
       width: 260,
@@ -1584,17 +2753,20 @@ export default function PurchaseCenter() {
       render: (value) => statusTag(value, PR_STATUS_LABELS),
     },
     {
-      title: "采购信息",
+      title: "采购数量",
       key: "request",
-      width: 190,
+      width: 110,
       render: (_value, row) => (
         <Space direction="vertical" size={2}>
           <Text strong>{formatQty(row.requestedQty)} 件</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            {row.requestedByName || "-"}
-          </Text>
         </Space>
       ),
+    },
+    {
+      title: "创建人",
+      dataIndex: "requestedByName",
+      width: 100,
+      render: (value) => value || "-",
     },
     {
       title: "目标成本",
@@ -1603,7 +2775,7 @@ export default function PurchaseCenter() {
       render: formatCurrency,
     },
     {
-      title: "寻源",
+      title: "货源",
       key: "sourcing",
       width: 120,
       render: (_value, row) => (
@@ -1633,7 +2805,7 @@ export default function PurchaseCenter() {
       render: (_value, row) => (
         <Badge count={row.unreadCount || 0} size="small">
           <Button size="small" icon={<CommentOutlined />} onClick={() => openDetail(row)}>
-            详情
+            协作
           </Button>
         </Badge>
       ),
@@ -1641,20 +2813,22 @@ export default function PurchaseCenter() {
     {
       title: "动作",
       key: "actions",
-      width: 260,
+      width: 360,
       fixed: "right",
+      align: "right",
       render: (_value, row) => {
         const hasCandidates = Boolean(row.candidates?.length || row.candidateCount);
         const hasMapping = Number(row.mappingCount || 0) > 0;
         const hasSkuSupplier = Boolean(row.skuSupplierId || row.skuSupplierName);
         const canQuote = canPurchase && ["submitted", "buyer_processing", "sourced"].includes(row.status);
         const canFindSupplier = canQuote && !hasMapping && !hasSkuSupplier;
+        const canImageSearch = canQuote;
         const canGeneratePo = canPurchase
           && (hasCandidates || hasMapping || hasSkuSupplier)
           && ["submitted", "buyer_processing", "sourced", "waiting_ops_confirm"].includes(row.status);
         const canDelete = canCreateRequest && ["submitted", "buyer_processing", "sourced"].includes(row.status);
         return (
-          <Space size={6} wrap>
+          <div className="purchase-action-grid">
             {row.status === "submitted" && canPurchase ? (
               <Button
                 size="small"
@@ -1665,11 +2839,6 @@ export default function PurchaseCenter() {
                 接收
               </Button>
             ) : null}
-            {canFindSupplier ? (
-              <Button size="small" icon={<SearchOutlined />} onClick={() => openQuoteModal(row)}>
-                报价反馈
-              </Button>
-            ) : null}
             {SHOW_KEYWORD_1688_SOURCE && canFindSupplier ? (
               <Button
                 size="small"
@@ -1677,15 +2846,15 @@ export default function PurchaseCenter() {
                 loading={actingKey === `1688-source-${row.id}`}
                 onClick={() => open1688SourceModal(row)}
               >
-                1688 寻源
+                1688 找货源
               </Button>
             ) : null}
-            {canFindSupplier ? (
+            {canImageSearch ? (
               <Button
                 size="small"
                 icon={<SearchOutlined />}
                 loading={actingKey === `1688-image-${row.id}`}
-                onClick={() => runImageSearchForRow(row)}
+                onClick={() => void openImageSearchAndInquiry(row)}
               >
                 以图搜款
               </Button>
@@ -1714,12 +2883,12 @@ export default function PurchaseCenter() {
                 </Button>
               </Popconfirm>
             ) : null}
-            {!canFindSupplier && !canGeneratePo && !canDelete && row.status !== "submitted" ? <Text type="secondary">无待办</Text> : null}
-          </Space>
+            {!canImageSearch && !canGeneratePo && !canDelete && row.status !== "submitted" ? <Text type="secondary">无待办</Text> : null}
+          </div>
         );
       },
     },
-  ], [actingKey, canCreateRequest, canPurchase, detailPrId, poPrId, quotePrId, source1688PrId]);
+  ], [actingKey, canCreateRequest, canPurchase, detailPrId, poPrId, source1688PrId]);
 
   const orderColumns = useMemo<ColumnsType<PurchaseOrderRow>>(() => [
     {
@@ -1776,16 +2945,26 @@ export default function PurchaseCenter() {
     {
       title: "1688单号",
       key: "externalOrderId",
-      width: 180,
+      width: 230,
       ellipsis: true,
-      render: (_value, row) => (
-        <Space direction="vertical" size={2}>
-          <Text strong>{row.externalOrderId || "未绑定"}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            {formatDateTime(row.externalOrderSyncedAt)}
-          </Text>
-        </Space>
-      ),
+      render: (_value, row) => {
+        const mappingCount = Number(row.mappingCount || 0);
+        const deliveryAddressCount = Number(row.deliveryAddressCount || 0);
+        return (
+          <Space direction="vertical" size={2}>
+            <Text strong>{row.externalOrderId || "未绑定"}</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {formatDateTime(row.externalOrderSyncedAt)}
+            </Text>
+            {!row.externalOrderId && canPurchase && mappingCount > 0 && deliveryAddressCount === 0 ? (
+              <Text type="warning" style={{ fontSize: 12 }}>缺店铺1688地址</Text>
+            ) : null}
+            {!row.externalOrderId && canPurchase && mappingCount === 0 ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>缺供应商映射</Text>
+            ) : null}
+          </Space>
+        );
+      },
     },
     {
       title: "线上状态",
@@ -1827,7 +3006,7 @@ export default function PurchaseCenter() {
     {
       title: "状态",
       dataIndex: "status",
-      width: 130,
+      width: 110,
       render: (value) => statusTag(value, PO_STATUS_LABELS),
     },
     {
@@ -1839,10 +3018,64 @@ export default function PurchaseCenter() {
     {
       title: "动作",
       key: "actions",
-      width: 260,
+      width: 330,
       fixed: "right",
-      render: (_value, row) => (
-        <Space size={6} wrap style={{ maxWidth: 236 }}>
+      align: "right",
+      render: (_value, row) => {
+        const rollbackTarget = getPurchaseOrderRollbackTarget(row);
+        const rollbackTargetLabel = rollbackTarget ? (PO_STATUS_LABELS[rollbackTarget] || rollbackTarget) : "";
+        const rollbackVisible = canRollbackPurchaseOrder(row);
+        const mappingCount = Number(row.mappingCount || 0);
+        const deliveryAddressCount = Number(row.deliveryAddressCount || 0);
+        const canPushTo1688 = !row.externalOrderId && canPurchase && mappingCount > 0 && deliveryAddressCount > 0;
+        const pushLoading = actingKey === `1688-push-${row.id}` || actingKey === `1688-validate-${row.id}`;
+        return (
+          <div className="purchase-action-grid">
+          {canPushTo1688 ? (
+            <Popconfirm
+              title="推送 1688 下单"
+              description="会先校验供应商映射和店铺 1688 地址，通过后创建 1688 订单。"
+              okText="推送"
+              cancelText="取消"
+              onConfirm={() => push1688Order(row)}
+            >
+              <Button
+                size="small"
+                type="primary"
+                icon={<ShoppingCartOutlined />}
+                loading={pushLoading}
+              >
+                推送1688下单
+              </Button>
+            </Popconfirm>
+          ) : null}
+          {!row.externalOrderId && canPurchase && mappingCount > 0 ? (
+            <Button
+              size="small"
+              icon={<LinkOutlined />}
+              loading={actingKey === `1688-sync-${row.id}`}
+              onClick={() => sync1688Order(row)}
+            >
+              绑定1688订单
+            </Button>
+          ) : null}
+          {rollbackVisible ? (
+            <Popconfirm
+              title="回退采购单状态"
+              description={`确认回退到${rollbackTargetLabel}？`}
+              okText="回退"
+              cancelText="取消"
+              onConfirm={() => rollbackPurchaseOrder(row)}
+            >
+              <Button
+                size="small"
+                icon={<RollbackOutlined />}
+                loading={actingKey === `rollback-po-${row.id}`}
+              >
+                回退
+              </Button>
+            </Popconfirm>
+          ) : null}
           {row.status === "draft" && canPurchase && Number(row.mappingCount || 0) > 0 ? (
             <Button
               size="small"
@@ -1851,17 +3084,6 @@ export default function PurchaseCenter() {
               onClick={() => preview1688Order(row)}
             >
               1688 预览
-            </Button>
-          ) : null}
-          {row.status === "draft" && canPurchase && Number(row.mappingCount || 0) > 0 ? (
-            <Button
-              size="small"
-              type="primary"
-              icon={<ShoppingCartOutlined />}
-              loading={actingKey === `1688-push-${row.id}`}
-              onClick={() => push1688Order(row)}
-            >
-              1688 推单
             </Button>
           ) : null}
           {row.status === "draft" && canPurchase && Number(row.mappingCount || 0) === 0 ? (
@@ -1877,16 +3099,6 @@ export default function PurchaseCenter() {
               )}
             >
               提交付款
-            </Button>
-          ) : null}
-          {!row.externalOrderId && canPurchase && row.status !== "draft" && Number(row.mappingCount || 0) > 0 ? (
-            <Button
-              size="small"
-              icon={<ReloadOutlined />}
-              loading={actingKey === `1688-sync-${row.id}`}
-              onClick={() => sync1688Order(row)}
-            >
-              同步订单
             </Button>
           ) : null}
           {row.externalOrderId && (canPurchase || canFinance) ? (
@@ -2079,11 +3291,12 @@ export default function PurchaseCenter() {
               确认付款
             </Button>
           ) : null}
-          {!["draft", "pushed_pending_price", "pending_finance_approval", "approved_to_pay"].includes(row.status) && !(row.externalOrderId && canPurchase) ? <Text type="secondary">无待办</Text> : null}
-        </Space>
-      ),
+          {!["draft", "pushed_pending_price", "pending_finance_approval", "approved_to_pay"].includes(row.status) && !(row.externalOrderId && canPurchase) && !rollbackVisible ? <Text type="secondary">无待办</Text> : null}
+        </div>
+        );
+      },
     },
-  ], [actingKey, canFinance, canPurchase]);
+  ], [actingKey, canFinance, canPurchase, canWarehouse]);
 
   const importedOrderColumns = useMemo<ColumnsType<Imported1688OrderRow>>(() => [
     {
@@ -2134,8 +3347,9 @@ export default function PurchaseCenter() {
       key: "actions",
       width: 150,
       fixed: "right",
+      align: "right",
       render: (_value, row) => (
-        <Space size={6}>
+        <Space size={6} style={{ width: "100%", justifyContent: "flex-end" }}>
           {row.localPoId ? (
             <Tag color="success">已关联</Tag>
           ) : (
@@ -2178,6 +3392,14 @@ export default function PurchaseCenter() {
           `付款 ${summary.paymentQueueCount || pendingPaymentRows.length}`,
         ]}
         actions={[
+          <Button key="stores" icon={<ShopOutlined />} onClick={() => setStoreManagerOpen(true)}>
+            店铺
+          </Button>,
+          canPurchase ? (
+            <Button key="inquiry-template" icon={<CommentOutlined />} onClick={openPurchaseSettings}>
+              询盘设置
+            </Button>
+          ) : null,
           canCreateRequest ? (
             <Button
               key="new"
@@ -2195,9 +3417,6 @@ export default function PurchaseCenter() {
               新建采购单
             </Button>
           ) : null,
-          <Button key="refresh" icon={<ReloadOutlined />} loading={loading} onClick={loadData}>
-            刷新
-          </Button>,
         ].filter(Boolean)}
       />
 
@@ -2209,38 +3428,11 @@ export default function PurchaseCenter() {
           <Space size={8} wrap>
             {canPurchase ? (
               <Button
-                icon={<ImportOutlined />}
-                loading={actingKey === "1688-import-orders"}
-                onClick={() => import1688Orders(false)}
+                icon={<CommentOutlined />}
+                loading={actingKey === "sync-inquiry-results"}
+                onClick={() => void syncInquiryResults()}
               >
-                同步1688订单
-              </Button>
-            ) : null}
-            {canPurchase ? (
-              <Button
-                icon={<CloudSyncOutlined />}
-                loading={actingKey === "1688-import-generate"}
-                onClick={() => import1688Orders(true)}
-              >
-                同步并生成
-              </Button>
-            ) : null}
-            {canPurchase ? (
-              <Button
-                icon={<ApiOutlined />}
-                loading={actingKey === "1688-address-sync"}
-                onClick={sync1688Addresses}
-              >
-                同步地址
-              </Button>
-            ) : null}
-            {canPurchase ? (
-              <Button
-                icon={<CloudSyncOutlined />}
-                loading={actingKey === "1688-message-subscribe"}
-                onClick={configure1688Messages}
-              >
-                消息订阅
+                同步询盘结果
               </Button>
             ) : null}
             {canPurchase || canFinance ? (
@@ -2273,9 +3465,23 @@ export default function PurchaseCenter() {
             </Button>
           ))}
         </Space>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, maxWidth: 760 }}>
+          <Input
+            allowClear
+            prefix={<SearchOutlined />}
+            placeholder="搜索商品编码 / 标题规格 / 采购单号 / 供应商 / 1688单号"
+            value={purchaseSearchText}
+            onChange={(event) => setPurchaseSearchText(event.target.value)}
+          />
+          {hasPurchaseSearch ? (
+            <Text type="secondary" style={{ whiteSpace: "nowrap" }}>
+              找到 {purchaseSearchResultCount} 条
+            </Text>
+          ) : null}
+        </div>
         {activeQueue.kind === "mixed" ? (
           <Space direction="vertical" size={16} style={{ width: "100%" }}>
-            {activeRequestRows.length ? (
+            {filteredActiveRequestRows.length ? (
               <div>
                 <Text strong>待处理</Text>
                 <Table
@@ -2283,14 +3489,14 @@ export default function PurchaseCenter() {
                   loading={loading}
                   size="middle"
                   columns={requestColumns}
-                  dataSource={activeRequestRows}
-                  scroll={{ x: 1220 }}
+                  dataSource={filteredActiveRequestRows}
+                  scroll={{ x: 1500 }}
                   pagination={{ pageSize: 10, showSizeChanger: false }}
                   style={{ marginTop: 8 }}
                 />
               </div>
             ) : null}
-            {activeOrderRows.length ? (
+            {filteredActiveOrderRows.length ? (
               <div>
                 <Text strong>采购单</Text>
                 <Table
@@ -2298,15 +3504,15 @@ export default function PurchaseCenter() {
                   loading={loading}
                   size="middle"
                   columns={orderColumns}
-                  dataSource={activeOrderRows}
+                  dataSource={filteredActiveOrderRows}
                   rowSelection={orderRowSelection}
-                  scroll={{ x: 2300 }}
+                  scroll={{ x: 2360 }}
                   pagination={{ pageSize: 10, showSizeChanger: false }}
                   style={{ marginTop: 8 }}
                 />
               </div>
             ) : null}
-            {!activeRequestRows.length && !activeOrderRows.length ? (
+            {!filteredActiveRequestRows.length && !filteredActiveOrderRows.length ? (
               <Table
                 rowKey="id"
                 loading={loading}
@@ -2314,7 +3520,7 @@ export default function PurchaseCenter() {
                 columns={orderColumns}
                 dataSource={[]}
                 rowSelection={orderRowSelection}
-                scroll={{ x: 2300 }}
+                scroll={{ x: 2360 }}
                 pagination={false}
               />
             ) : null}
@@ -2325,8 +3531,8 @@ export default function PurchaseCenter() {
             loading={loading}
             size="middle"
             columns={requestColumns}
-            dataSource={activeRequestRows}
-            scroll={{ x: 1220 }}
+            dataSource={filteredActiveRequestRows}
+            scroll={{ x: 1500 }}
             pagination={{ pageSize: 10, showSizeChanger: false }}
           />
         ) : (
@@ -2335,13 +3541,166 @@ export default function PurchaseCenter() {
             loading={loading}
             size="middle"
             columns={orderColumns}
-            dataSource={activeOrderRows}
+            dataSource={filteredActiveOrderRows}
             rowSelection={orderRowSelection}
-            scroll={{ x: 2300 }}
+            scroll={{ x: 2360 }}
             pagination={{ pageSize: 10, showSizeChanger: false }}
           />
         )}
       </div>
+
+      <Modal
+        open={storeManagerOpen}
+        title="店铺"
+        footer={null}
+        width={860}
+        onCancel={() => setStoreManagerOpen(false)}
+        destroyOnClose
+      >
+        <StoreManager onChanged={loadData} />
+      </Modal>
+
+      <Modal
+        open={purchaseSettingsOpen}
+        title="询盘设置"
+        okText="保存设置"
+        cancelText="取消"
+        width={720}
+        confirmLoading={actingKey === "save-purchase-settings"}
+        onCancel={() => setPurchaseSettingsOpen(false)}
+        onOk={() => purchaseSettingsForm.submit()}
+        destroyOnClose
+      >
+        <Form
+          form={purchaseSettingsForm}
+          layout="vertical"
+          onFinish={savePurchaseSettings}
+          initialValues={{
+            inquiryTemplate: data.purchaseSettings?.inquiryTemplate || DEFAULT_PURCHASE_INQUIRY_TEMPLATE,
+          }}
+        >
+          <Alert
+            type={data.purchaseSettings?.hasAlphaShopCredentials ? "success" : "warning"}
+            showIcon
+            style={{ marginBottom: 16 }}
+            message={data.purchaseSettings?.hasAlphaShopCredentials ? "询盘会复用图搜同款配置" : "需要先配置图搜同款密钥才能真实发起 1688 询盘"}
+            description="这里只设置发给 1688 商家的默认询盘话术，AlphaShop 密钥默认使用图搜同款保存的本地配置。"
+          />
+          <Form.Item
+            name="inquiryTemplate"
+            label="默认询盘话术"
+            rules={[
+              { required: true, message: "请输入询盘话术" },
+              { max: 2000, message: "询盘话术不能超过 2000 字" },
+            ]}
+          >
+            <Input.TextArea
+              rows={7}
+              showCount
+              maxLength={2000}
+              placeholder={DEFAULT_PURCHASE_INQUIRY_TEMPLATE}
+            />
+          </Form.Item>
+          <Space size={[6, 6]} wrap>
+            {PURCHASE_INQUIRY_TEMPLATE_VARIABLES.map((variable) => (
+              <Tag key={variable} color="default" style={{ marginInlineEnd: 0 }}>
+                {variable}
+              </Tag>
+            ))}
+          </Space>
+          <Text type="secondary" style={{ display: "block", marginTop: 8, fontSize: 12 }}>
+            保存后，采购中心里的批量询盘会自动使用这段话术；变量会按当前采购单和候选商品自动替换。
+          </Text>
+        </Form>
+      </Modal>
+
+      <Modal
+        open={Boolean(inquiryDialogPrId)}
+        title="发起批量询盘"
+        okText="发起询盘"
+        cancelText="取消"
+        width={820}
+        confirmLoading={Boolean(inquiryDialogPr && actingKey === `1688-inquiry-${inquiryDialogPr.id}`)}
+        okButtonProps={{ disabled: inquiryDialogCandidates.length === 0 }}
+        onCancel={closeInquiryDialog}
+        onOk={() => inquiryDialogForm.submit()}
+        destroyOnClose
+      >
+        <Space direction="vertical" size={18} style={{ width: "100%" }}>
+          <div
+            style={{
+              display: "flex",
+              gap: 12,
+              overflowX: "auto",
+              padding: 12,
+              background: "#f8fafc",
+              borderRadius: 8,
+            }}
+          >
+            {inquiryDialogCandidates.map((candidate) => {
+              const image = candidateImage(candidate);
+              const title = candidateTitle(candidate);
+              return (
+                <div
+                  key={candidate.id}
+                  style={{
+                    width: 116,
+                    flex: "0 0 116px",
+                    borderRadius: 8,
+                    background: "#fff",
+                    padding: 6,
+                    border: "1px solid #eef2f7",
+                  }}
+                >
+                  <div
+                    style={{
+                      width: "100%",
+                      aspectRatio: "1 / 1",
+                      borderRadius: 6,
+                      background: "#f1f5f9",
+                      overflow: "hidden",
+                    }}
+                  >
+                    {image ? (
+                      <img src={image} alt={title} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                    ) : null}
+                  </div>
+                  <Paragraph ellipsis={{ rows: 1, tooltip: title }} style={{ margin: "6px 0 2px", fontSize: 12 }}>
+                    {title}
+                  </Paragraph>
+                  <Text style={{ color: "#ea580c", fontSize: 12, fontWeight: 700 }}>
+                    {formatCurrency(candidate.unitPrice)}
+                  </Text>
+                </div>
+              );
+            })}
+          </div>
+
+          <Form
+            form={inquiryDialogForm}
+            layout="vertical"
+            onFinish={submitInquiryDialog}
+            initialValues={{ inquiryMessage: data.purchaseSettings?.inquiryTemplate || DEFAULT_PURCHASE_INQUIRY_TEMPLATE }}
+          >
+            <Form.Item
+              name="inquiryMessage"
+              label="询盘诉求"
+              extra="可以在发送前临时修改，本次会按这里的内容记录到候选商品询盘记录。"
+              rules={[
+                { required: true, message: "请输入询盘诉求" },
+                { max: 1000, message: "询盘诉求不能超过 1000 字" },
+              ]}
+            >
+              <Input.TextArea
+                rows={7}
+                showCount
+                maxLength={1000}
+                placeholder={DEFAULT_PURCHASE_INQUIRY_TEMPLATE}
+              />
+            </Form.Item>
+          </Form>
+        </Space>
+      </Modal>
 
       <Modal
         open={importDialogOpen}
@@ -2359,17 +3718,6 @@ export default function PurchaseCenter() {
               onClick={() => import1688Orders(false)}
             >
               重新同步
-            </Button>
-          ) : null,
-          canPurchase ? (
-            <Button
-              key="generate"
-              type="primary"
-              icon={<CloudSyncOutlined />}
-              loading={actingKey === "1688-import-generate"}
-              onClick={() => import1688Orders(true)}
-            >
-              同步并生成
             </Button>
           ) : null,
         ].filter(Boolean)}
@@ -2552,7 +3900,7 @@ export default function PurchaseCenter() {
 
       <Modal
         open={Boolean(source1688Pr)}
-        title="1688 寻源"
+      title="1688 找货源"
         okText="导入候选"
         cancelText="取消"
         confirmLoading={source1688Pr ? actingKey === `1688-source-${source1688Pr.id}` : false}
@@ -2608,21 +3956,96 @@ export default function PurchaseCenter() {
             message={poPr ? `${poPr.productName || poPr.internalSkuCode || "采购单"} · 默认数量 ${formatQty(poPr.requestedQty)}` : ""}
           />
           {poCandidateOptions.length > 0 ? (
-            <Form.Item
-              name="candidateId"
-              label="选择报价"
-              rules={poPrHasMapping || poPrHasSkuSupplier ? [] : [{ required: true, message: "请选择报价" }]}
-            >
-              <Select
-                allowClear={poPrHasMapping || poPrHasSkuSupplier}
-                options={poCandidateOptions}
-                placeholder={poPrHasMapping
-                  ? "不选则使用供应商管理"
-                  : poPrHasSkuSupplier
-                    ? "不选则使用商品资料供应商"
-                    : "选择一个报价生成采购单"}
-              />
-            </Form.Item>
+            <>
+              <Form.Item
+                name="candidateId"
+                label="选择报价"
+                rules={poPrHasMapping || poPrHasSkuSupplier ? [] : [{ required: true, message: "请选择报价" }]}
+              >
+                <Select
+                  allowClear={poPrHasMapping || poPrHasSkuSupplier}
+                  options={poCandidateOptions}
+                  placeholder={poPrHasMapping
+                    ? "不选则使用供应商管理"
+                    : poPrHasSkuSupplier
+                      ? "不选则使用商品资料供应商"
+                      : "选择一个报价生成采购单"}
+                  onChange={(candidateId) => {
+                    const candidate = (poPr?.candidates || []).find((item) => item.id === candidateId) || null;
+                    const spec = defaultCandidateSpec(candidate);
+                    poForm.setFieldsValue({
+                      externalSkuId: spec.externalSkuId,
+                      externalSpecId: spec.externalSpecId,
+                      unitPrice: spec.unitPrice,
+                    });
+                  }}
+                />
+              </Form.Item>
+              {selectedPoCandidate?.externalOfferId ? (
+                selectedPoCandidateSpecOptions.length > 0 ? (
+                  <>
+                    <Form.Item
+                      name="externalSpecId"
+                      label="1688规格"
+                      rules={[{ required: true, message: "请选择 1688 规格" }]}
+                    >
+                      <Select
+                        options={selectedPoCandidateSpecOptions}
+                        placeholder="选择具体规格后再生成采购单"
+                        onChange={(specId) => {
+                          const spec = selectedPoCandidateSpecOptions.find((item) => item.value === specId);
+                          poForm.setFieldsValue({
+                            externalSkuId: spec?.externalSkuId,
+                            unitPrice: spec?.unitPrice ?? selectedPoCandidate.unitPrice,
+                          });
+                        }}
+                      />
+                    </Form.Item>
+                    <Form.Item name="externalSkuId" hidden>
+                      <Input />
+                    </Form.Item>
+                    <Form.Item name="unitPrice" hidden>
+                      <InputNumber />
+                    </Form.Item>
+                  </>
+                ) : selectedPoCandidate.externalSpecId ? (
+                  <>
+                    <Alert
+                      type="success"
+                      showIcon
+                      style={{ marginBottom: 16 }}
+                      message={`已选择 1688 规格：${selectedPoCandidate.externalSpecId}`}
+                    />
+                    <Form.Item name="externalSpecId" hidden>
+                      <Input />
+                    </Form.Item>
+                    <Form.Item name="externalSkuId" hidden>
+                      <Input />
+                    </Form.Item>
+                    <Form.Item name="unitPrice" hidden>
+                      <InputNumber />
+                    </Form.Item>
+                  </>
+                ) : (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginBottom: 16 }}
+                    message="这个候选还没有 1688 规格"
+                    description="可先生成本地采购单；如需自动推送 1688，必须同步并选择具体规格。"
+                    action={(
+                      <Button
+                        size="small"
+                        loading={actingKey === `1688-detail-${selectedPoCandidate.id}`}
+                        onClick={() => refreshCandidate1688Specs(selectedPoCandidate)}
+                      >
+                        同步规格
+                      </Button>
+                    )}
+                  />
+                )
+              ) : null}
+            </>
           ) : (
             <Alert
               type={poPrHasMapping || poPrHasSkuSupplier ? "success" : "warning"}
@@ -2836,11 +4259,106 @@ export default function PurchaseCenter() {
         />
       </Modal>
 
+      {minimizedImageSearchPr ? (() => {
+        const previewImage = getPurchaseRequestDefaultImageUrl(minimizedImageSearchPr);
+        const candidateCount = minimizedImageSearchPr.candidates?.length || minimizedImageSearchPr.candidateCount || 0;
+        return (
+          <div
+            role="button"
+            tabIndex={0}
+            title="拖动调整位置，点击恢复图搜"
+            onPointerDown={handleMinimizedImageSearchPointerDown}
+            onPointerMove={handleMinimizedImageSearchPointerMove}
+            onPointerUp={handleMinimizedImageSearchPointerUp}
+            onPointerCancel={handleMinimizedImageSearchPointerCancel}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                reopenMinimizedImageSearch();
+              }
+            }}
+            style={{
+              position: "fixed",
+              left: minimizedImageSearchPosition.left,
+              top: minimizedImageSearchPosition.top,
+              zIndex: 1100,
+              width: MINIMIZED_IMAGE_SEARCH_WIDTH,
+              height: MINIMIZED_IMAGE_SEARCH_HEIGHT,
+              borderRadius: 8,
+              background: "rgba(15, 23, 42, 0.78)",
+              boxShadow: "0 10px 28px rgba(15, 23, 42, 0.22)",
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "7px 10px 7px 8px",
+              cursor: "grab",
+              userSelect: "none",
+              touchAction: "none",
+              backdropFilter: "blur(6px)",
+            }}
+          >
+            <Button
+              type="text"
+              size="small"
+              icon={<CloseOutlined />}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                setMinimizedImageSearchPrId(null);
+              }}
+              style={{
+                position: "absolute",
+                top: -8,
+                right: -8,
+                width: 18,
+                height: 18,
+                minWidth: 18,
+                borderRadius: 9,
+                padding: 0,
+                color: "#64748b",
+                background: "#fff",
+                boxShadow: "0 2px 8px rgba(15, 23, 42, 0.16)",
+              }}
+            />
+            <div
+              style={{
+                width: 42,
+                height: 42,
+                borderRadius: 6,
+                background: "#fff",
+                overflow: "hidden",
+                flex: "0 0 auto",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              {previewImage ? (
+                <img
+                  src={previewImage}
+                  alt="以图搜款"
+                  style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                />
+              ) : (
+                <SearchOutlined style={{ color: "#ea580c", fontSize: 18 }} />
+              )}
+            </div>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <Text style={{ display: "block", color: "#fff", fontWeight: 700, lineHeight: "18px" }}>图搜</Text>
+              <Text style={{ display: "block", color: "rgba(255, 255, 255, 0.72)", fontSize: 11, lineHeight: "16px" }}>
+                {formatQty(candidateCount)} 候选
+              </Text>
+            </div>
+            <RightOutlined style={{ color: "#fff", fontSize: 14, flex: "0 0 auto" }} />
+          </div>
+        );
+      })() : null}
+
       <Drawer
-        open={Boolean(detailPrId)}
-        title="采购单协作"
+        open={detailDrawerOpen && Boolean(detailPrId)}
+        title={detailDrawerMode === "imageSearch" ? "以图搜款" : "采购单协作"}
         width={1080}
-        onClose={() => setDetailPrId(null)}
+        onClose={closeDetailDrawer}
       >
         {detailPr ? (
           <Space direction="vertical" size={18} style={{ width: "100%" }}>
@@ -2852,24 +4370,200 @@ export default function PurchaseCenter() {
               </Text>
             </div>
 
+            {detailDrawerMode === "collaboration" ? (
+            <div
+              onPaste={handleCollaborationPaste}
+              style={{
+                border: "1px solid #e5e7eb",
+                borderRadius: 8,
+                padding: 12,
+                background: "#fff",
+                minHeight: "calc(100vh - 245px)",
+                display: "flex",
+                flexDirection: "column",
+              }}
+            >
+              <div style={{ display: "flex", flexDirection: "column", gap: 12, flex: 1, minHeight: 0 }}>
+                <div>
+                  <Text strong>聊天记录</Text>
+                  <div>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      可发送文字、添加图片，也可以直接粘贴截图
+                    </Text>
+                  </div>
+                </div>
+                <div style={{ display: "grid", alignContent: "start", gap: 10, flex: 1, minHeight: 160, overflowY: "auto", paddingRight: 4 }}>
+                  {[...(detailPr.timeline || [])]
+                    .filter((item) => item.kind === "comment")
+                    .reverse()
+                    .slice(0, 80)
+                    .map((item) => {
+                      const imageUrls = extractMessageImageUrls(item.message);
+                      const strippedText = stripMessageImageLines(item.message);
+                      const text = imageUrls.length && strippedText === "图片" ? "" : strippedText;
+                      return (
+                        <div
+                          key={item.id}
+                          style={{
+                            borderLeft: "3px solid #f97316",
+                            paddingLeft: 10,
+                            minHeight: 34,
+                          }}
+                        >
+                          <Space size={8} wrap>
+                            <Text strong style={{ fontSize: 13 }}>
+                              {item.actorName || "协作者"}
+                            </Text>
+                            {item.actorRole ? <Tag>{item.actorRole}</Tag> : null}
+                            <Text type="secondary" style={{ fontSize: 12 }}>
+                              {formatDateTime(item.createdAt)}
+                            </Text>
+                          </Space>
+                          {text ? (
+                            <Paragraph style={{ margin: "4px 0 0", whiteSpace: "pre-wrap" }}>
+                              {text}
+                            </Paragraph>
+                          ) : null}
+                          {imageUrls.length ? (
+                            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                              {imageUrls.map((url) => (
+                                <a key={url} href={url} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}>
+                                  <img
+                                    src={url}
+                                    alt="聊天图片"
+                                    style={{
+                                      width: 96,
+                                      height: 96,
+                                      objectFit: "cover",
+                                      borderRadius: 8,
+                                      border: "1px solid #e5e7eb",
+                                      background: "#f8fafc",
+                                    }}
+                                  />
+                                </a>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  {!(detailPr.timeline || []).some((item) => item.kind === "comment") ? (
+                    <Text type="secondary">暂无聊天记录</Text>
+                  ) : null}
+                </div>
+                <div style={{ borderTop: "1px solid #f1f5f9", paddingTop: 12 }}>
+                  <Input.TextArea
+                    value={collaborationDraft}
+                    onChange={(event) => setCollaborationDraft(event.target.value)}
+                    placeholder="输入报价反馈、供应商沟通、价格建议，或直接粘贴截图"
+                    rows={3}
+                    maxLength={500}
+                  />
+                  {collaborationUploadImages.length > 0 ? (
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+                      {collaborationUploadImages.map((item) => (
+                        <div key={item.uid} style={{ position: "relative" }}>
+                          <img
+                            src={item.dataUrl}
+                            alt={item.fileName}
+                            style={{
+                              width: 72,
+                              height: 72,
+                              objectFit: "cover",
+                              borderRadius: 8,
+                              border: "1px solid #e5e7eb",
+                              background: "#f8fafc",
+                            }}
+                          />
+                          <Button
+                            size="small"
+                            danger
+                            type="text"
+                            icon={<DeleteOutlined />}
+                            onClick={() => setCollaborationUploadImages((previous) => previous.filter((image) => image.uid !== item.uid))}
+                            style={{ position: "absolute", right: 2, top: 2, background: "rgba(255,255,255,0.92)" }}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginTop: 12 }}>
+                    <Space size={8} wrap>
+                      <Upload
+                        accept="image/png,image/jpeg,image/webp"
+                        multiple
+                        showUploadList={false}
+                        beforeUpload={handleCollaborationImageUpload}
+                      >
+                        <Button icon={<UploadOutlined />}>添加图片</Button>
+                      </Upload>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        已添加 {collaborationUploadImages.length}/{MAX_COMMENT_IMAGES} 张
+                      </Text>
+                    </Space>
+                    <Space size={10} align="center">
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {collaborationDraft.length}/500
+                      </Text>
+                      <Button
+                        type="primary"
+                        icon={<CommentOutlined />}
+                        loading={Boolean(detailPr && actingKey === `comment-${detailPr.id}`)}
+                        disabled={!collaborationDraft.trim() && collaborationUploadImages.length === 0}
+                        onClick={submitCollaborationComment}
+                      >
+                        发送
+                      </Button>
+                    </Space>
+                  </div>
+                </div>
+              </div>
+            </div>
+            ) : null}
+
+            {detailDrawerMode === "imageSearch" ? (
             <div>
-              <Space align="baseline" size={8}>
-                <Text strong>候选商品</Text>
-                <Text type="secondary">{formatQty((detailPr.candidates || []).length)} 个候选</Text>
-              </Space>
-              {!(detailPr.candidates || []).length ? (
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                <Space align="baseline" size={8}>
+                  <Text strong>候选商品</Text>
+                  <Text type="secondary">{formatQty((detailPr.candidates || []).length)} 个候选</Text>
+                  <Text type="secondary">{selectedInquiryCount ? `已勾选 ${selectedInquiryCount}` : "未勾选"}</Text>
+                </Space>
+                <Space size={8} wrap>
+                  <Checkbox
+                    checked={allInquiryCandidatesSelected}
+                    indeterminate={someInquiryCandidatesSelected}
+                    disabled={!selectableInquiryCandidateIds.length}
+                    onChange={(event) => toggleAllInquiryCandidates(event.target.checked)}
+                  >
+                    全选未询盘
+                  </Checkbox>
+                  <Button
+                    type="primary"
+                    icon={<CommentOutlined />}
+                    disabled={!selectedInquiryCount}
+                    loading={Boolean(detailPr && actingKey === `1688-inquiry-${detailPr.id}`)}
+                    onClick={() => openInquiryDialog(detailPr!, selectedInquiryCandidateIds)}
+                  >
+                    批量询盘
+                  </Button>
+                </Space>
+              </div>
+              {!(detailPr!.candidates || []).length ? (
                 <Alert
                   type="warning"
                   showIcon
                   style={{ marginTop: 8, marginBottom: 8 }}
-                  message={latestImageSearchEmptyEvent(detailPr)?.message || "还没有候选商品"}
+                  message={latestImageSearchEmptyEvent(detailPr!)?.message || "还没有候选商品"}
                 />
               ) : null}
               <div
-                onScroll={(event) => handleCandidateScroll(event, detailPr)}
+                ref={candidateScrollElRef}
+                onScroll={(event) => handleCandidateScroll(event, detailPr!)}
                 style={{
-                  maxHeight: 620,
+                  maxHeight: "calc(100vh - 260px)",
                   overflowY: "auto",
+                  overscrollBehavior: "contain",
                   paddingRight: 6,
                   marginTop: 12,
                 }}
@@ -2877,28 +4571,50 @@ export default function PurchaseCenter() {
                 <div
                   style={{
                     display: "grid",
-                    gridTemplateColumns: "repeat(auto-fill, minmax(188px, 1fr))",
+                    gridTemplateColumns: "repeat(auto-fill, minmax(184px, 1fr))",
                     gap: 16,
                   }}
                 >
-                  {(detailPr.candidates || []).map((candidate, index) => {
+                  {(detailPr!.candidates || []).map((candidate, index) => {
                   const image = candidateImage(candidate);
                   const title = candidateTitle(candidate);
-                  const metric = candidateMetric(candidate);
                   const url = candidateUrl(candidate);
+                  const badges = candidateBadgeTexts(candidate);
+                  const inquiryStatusInfo = candidateInquiryStatusInfo(candidate);
+                  const salesText = candidateSalesText(candidate);
+                  const serviceTexts = candidateServiceTexts(candidate);
+                  const locationText = candidateLocationText(candidate);
+                  const supplierText = [locationText, candidate.supplierName || "供应商"].filter(Boolean).join(" · ");
                   const freightText = Number(candidate.logisticsFee || 0) > 0
                     ? `运费 ${formatCurrency(candidate.logisticsFee)}`
                     : "包邮";
+                  const inquirySent = candidateInquirySent(candidate);
+                  const inquirySelected = selectedInquiryCandidateIdSet.has(candidate.id);
+                  const inquiryExecutedAt = candidateInquiryExecutedAt(candidate);
+                  const inquiryFailureReason = candidateInquiryFailureReason(candidate);
                   return (
                     <div
                       key={candidate.id}
+                      role={url ? "button" : undefined}
+                      tabIndex={url ? 0 : undefined}
+                      onClick={() => {
+                        if (url) openCandidateUrl(candidate);
+                      }}
+                      onKeyDown={(event) => {
+                        if (!url) return;
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          openCandidateUrl(candidate);
+                        }
+                      }}
                       style={{
                         position: "relative",
                         border: "1px solid #e5e7eb",
                         borderRadius: 8,
                         padding: 10,
-                        minHeight: 342,
+                        minHeight: 404,
                         background: "#fff",
+                        cursor: url ? "pointer" : "default",
                         boxShadow: "0 1px 2px rgba(15, 23, 42, 0.04)",
                       }}
                     >
@@ -2922,6 +4638,37 @@ export default function PurchaseCenter() {
                       >
                         {index + 1}
                       </div>
+                      <button
+                        type="button"
+                        aria-pressed={inquirySelected}
+                        aria-label={inquirySelected ? "取消选择候选商品" : "选择候选商品"}
+                        disabled={inquirySent}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          if (!inquirySent) toggleInquiryCandidate(candidate.id, !inquirySelected);
+                        }}
+                        style={{
+                          position: "absolute",
+                          top: 10,
+                          right: 10,
+                          zIndex: 2,
+                          width: 24,
+                          height: 24,
+                          borderRadius: "50%",
+                          border: inquirySelected ? "1px solid #ea580c" : "1px solid rgba(148, 163, 184, 0.45)",
+                          background: inquirySelected ? "#ea580c" : "rgba(255, 255, 255, 0.68)",
+                          color: inquirySelected ? "#fff" : "transparent",
+                          boxShadow: inquirySelected ? "0 2px 8px rgba(234, 88, 12, 0.22)" : "none",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          cursor: inquirySent ? "not-allowed" : "pointer",
+                          opacity: inquirySent ? 0.32 : 1,
+                          padding: 0,
+                        }}
+                      >
+                        <CheckCircleOutlined style={{ fontSize: 15 }} />
+                      </button>
                       <div
                         style={{
                           width: "100%",
@@ -2952,28 +4699,99 @@ export default function PurchaseCenter() {
                         >
                           {title}
                         </Paragraph>
+                        <Space size={4} wrap style={{ marginTop: 6, minHeight: 22 }}>
+                          {badges.map((badge) => (
+                            <Tag key={badge} color="green" style={{ marginInlineEnd: 0, fontSize: 11, lineHeight: "18px" }}>
+                              {badge}
+                            </Tag>
+                          ))}
+                          {inquiryStatusInfo ? (
+                            <Popover
+                              trigger="click"
+                              title="询盘记录"
+                              content={(
+                                <Space direction="vertical" size={8} style={{ width: 300 }}>
+                                  <div>
+                                    <Text type="secondary" style={{ display: "block", fontSize: 12 }}>执行询盘时间</Text>
+                                    <Text>{inquiryExecutedAt ? formatDateTime(inquiryExecutedAt) : "-"}</Text>
+                                  </div>
+                                  <div>
+                                    <Text type="secondary" style={{ display: "block", fontSize: 12 }}>询盘话术</Text>
+                                    <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
+                                      {candidate.inquiryMessage || "-"}
+                                    </Paragraph>
+                                  </div>
+                                  <div>
+                                    <Text type="secondary" style={{ display: "block", fontSize: 12 }}>询盘状态</Text>
+                                    <Tag color={inquiryStatusInfo.color} style={{ marginInlineEnd: 0 }}>
+                                      {inquiryStatusInfo.label}
+                                    </Tag>
+                                  </div>
+                                  <div>
+                                    <Text type="secondary" style={{ display: "block", fontSize: 12 }}>失败原因</Text>
+                                    <Text type={inquiryFailureReason === "-" ? "secondary" : "danger"}>
+                                      {inquiryFailureReason}
+                                    </Text>
+                                  </div>
+                                </Space>
+                              )}
+                            >
+                              <span onClick={(event) => event.stopPropagation()}>
+                                <Tag
+                                  color={inquiryStatusInfo.color}
+                                  style={{ marginInlineEnd: 0, fontSize: 11, lineHeight: "18px", cursor: "pointer" }}
+                                >
+                                  {inquiryStatusInfo.label}
+                                </Tag>
+                              </span>
+                            </Popover>
+                          ) : null}
+                        </Space>
                         <div style={{ marginTop: 8, minHeight: 30 }}>
                           <Text style={{ color: "#ea580c", fontSize: 20, fontWeight: 700 }}>
                             {formatCurrency(candidate.unitPrice)}
                           </Text>
                           <Text style={{ color: "#ea580c", marginLeft: 6, fontSize: 12 }}>{freightText}</Text>
                         </div>
-                        <Space size={8} wrap style={{ marginTop: 4 }}>
-                          <Text type="secondary" style={{ fontSize: 12 }}>起订 {formatQty(candidate.moq || 1)}</Text>
-                          {metric ? <Text type="secondary">{metric}</Text> : null}
-                        </Space>
+                        <div
+                          style={{
+                            display: "grid",
+                            gridTemplateColumns: "1fr 1fr",
+                            gap: "3px 8px",
+                            marginTop: 4,
+                            minHeight: 48,
+                          }}
+                        >
+                          <Text type="secondary" ellipsis style={{ fontSize: 12 }}>
+                            {salesText || "-"}
+                          </Text>
+                          <Text type="secondary" ellipsis style={{ fontSize: 12 }}>
+                            起批 {formatQty(candidate.moq || 1)}
+                          </Text>
+                          <Text type="secondary" ellipsis style={{ fontSize: 12 }}>
+                            {serviceTexts[0] || "-"}
+                          </Text>
+                          <Text type="secondary" ellipsis style={{ fontSize: 12 }}>
+                            {serviceTexts[1] || serviceTexts[2] || "-"}
+                          </Text>
+                        </div>
                         <Text
                           type="secondary"
-                          ellipsis={{ tooltip: candidate.supplierName || "供应商" }}
-                          style={{ display: "block", marginTop: 8, fontSize: 12 }}
+                          ellipsis={{ tooltip: supplierText }}
+                          style={{ display: "block", marginTop: 8, fontSize: 12, minHeight: 20 }}
                         >
-                          {candidate.supplierName || "供应商"}
+                          {supplierText}
                         </Text>
                         <Space size={6} wrap style={{ marginTop: 10 }}>
-                          <Button size="small" icon={<SearchOutlined />} disabled={!url} onClick={() => openCandidateUrl(candidate)}>
-                            打开1688
-                          </Button>
-                          <Button size="small" type="primary" icon={<FileDoneOutlined />} onClick={() => openPoModal(detailPr, candidate)}>
+                          <Button
+                            size="small"
+                            type="primary"
+                            icon={<FileDoneOutlined />}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              openPoModal(detailPr!, candidate);
+                            }}
+                          >
                             生成采购单
                           </Button>
                         </Space>
@@ -2982,13 +4800,14 @@ export default function PurchaseCenter() {
                   );
                   })}
                 </div>
-                {loadingMorePrId === detailPr.id ? (
+                {loadingMorePrId === detailPr!.id ? (
                   <div style={{ padding: "18px 0", textAlign: "center" }}>
                     <Text type="secondary">加载中</Text>
                   </div>
                 ) : null}
               </div>
             </div>
+            ) : null}
 
           </Space>
         ) : (

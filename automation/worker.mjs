@@ -21,6 +21,7 @@ import { parseLocalUrl, readJsonBody, sendJson, sendNoContent } from "./http-jso
 import { scanPriceReview } from "./price-review-scanner.mjs";
 import { listPriceReview, setPriceReviewManualCost, clearPriceReviewManualCost } from "./yunqi-db.mjs";
 import { open1688LoginWindow, close1688Browser } from "./aliexpress-1688-cost.mjs";
+import { runLocal1688Inquiry } from "./local-1688-inquiry.mjs";
 import { optimizeTitle as _optimizeTitle } from "./title-optimizer.mjs";
 import { scrapeCompetitorReviews as _scrapeCompetitorReviews, openTemuLoginPage as _openTemuLoginPage, openTemuSearchPage as _openTemuSearchPage, extractReviewsFromFeed as _extractReviewsFromFeed, dumpFeedForGoods as _dumpFeedForGoods, extractProductFromFeed as _extractProductFromFeed, extractSearchResultsFromFeed as _extractSearchResultsFromFeed } from "./competitor-reviews.mjs";
 const require = createRequire(import.meta.url);
@@ -7816,6 +7817,9 @@ async function handleRequest(body) {
     }
     case "launch": await launch(params.accountId, params.headless); return { status: "launched" };
     case "login": await launch(params.accountId, params.headless); return { success: await loginWithTransientPassword(params.phone, params.password) };
+    case "local_1688_inquiry": {
+      return await runLocal1688Inquiry(params || {});
+    }
     case "scrape_products": {
       console.error("[Worker] scrape_products called, browser:", !!browser, "context:", !!context);
       try {

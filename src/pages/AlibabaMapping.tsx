@@ -19,7 +19,7 @@ import {
   message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { EditOutlined, LinkOutlined, PlusOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons";
+import { DeleteOutlined, EditOutlined, LinkOutlined, PlusOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
 import { useErpAuth } from "../contexts/ErpAuthContext";
 
@@ -261,7 +261,7 @@ export default function AlibabaMapping() {
     if (!erp) return;
     const sku = skus.find((item) => item.id === values.skuId);
     if (!sku?.accountId) {
-      message.error("这个商品编码还没有匹配店铺，先到商品资料补店铺");
+      message.error("这个商品编码还没有匹配店铺，请先到采购中心维护店铺");
       return;
     }
     setSaving(true);
@@ -308,17 +308,11 @@ export default function AlibabaMapping() {
 
   const queryMixConfig = useCallback(async (row: Sku1688SourceRow) => {
     if (!erp) return;
-    const sellerLoginId = row.supplierName?.trim();
-    if (!sellerLoginId) {
-      message.error("请先填写 1688 供应商旺旺名称");
-      return;
-    }
     setMixLoadingId(row.id);
     try {
       const response = await erp.purchase.action({
         action: "query_1688_mix_config",
         sourceId: row.id,
-        sellerLoginId,
         accountId: row.accountId,
         limit: 500,
       });
@@ -326,13 +320,16 @@ export default function AlibabaMapping() {
         setMappings(response.workbench.sku1688Sources);
       }
       const config = response?.result?.mixConfig as MarketingMixConfig | undefined;
+      const query = (response?.result?.query || {}) as { sellerMemberId?: string; sellerLoginId?: string };
+      const sellerLabel = query.sellerMemberId || query.sellerLoginId || config?.memberId || row.supplierName || "-";
       Modal.info({
         title: "卖家混批设置",
         content: (
           <Space direction="vertical" size={6}>
-            <Text>卖家：{sellerLoginId}</Text>
+            <Text>卖家：{sellerLabel}</Text>
             <Text>状态：{config?.generalHunpi ? "支持混批" : "不支持混批"}</Text>
             <Text>规则：{formatMixRule(config)}</Text>
+            {query.sellerLoginId ? <Text>旺旺：{query.sellerLoginId}</Text> : null}
             {config?.memberId ? <Text>MemberId：{config.memberId}</Text> : null}
           </Space>
         ),
@@ -379,6 +376,35 @@ export default function AlibabaMapping() {
       setActionLoadingId(null);
     }
   }, []);
+
+  const deleteMapping = useCallback((row: Sku1688SourceRow) => {
+    if (!erp) return;
+    Modal.confirm({
+      title: "删除供应商绑定",
+      content: "删除后这条 1688 规格绑定会从供应商管理移除，后续推单不会再使用；已生成的采购单和 1688 订单不会删除。",
+      okText: "删除",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: async () => {
+        const key = `delete_sku_1688_source-${row.id}`;
+        setActionLoadingId(key);
+        try {
+          await erp.purchase.action({
+            action: "delete_sku_1688_source",
+            sourceId: row.id,
+            limit: 500,
+          });
+          message.success("供应商绑定已删除");
+          await loadData();
+        } catch (error: any) {
+          message.error(error?.message || "供应商绑定删除失败");
+          throw error;
+        } finally {
+          setActionLoadingId(null);
+        }
+      },
+    });
+  }, [loadData]);
 
   const searchRelationSuppliers = useCallback(async () => {
     if (!erp) return;
@@ -449,7 +475,6 @@ export default function AlibabaMapping() {
       render: (_value, row) => (
         <Space direction="vertical" size={2}>
           <Text strong>{row.internalSkuCode || row.skuId}</Text>
-          {row.skuId && row.skuId !== row.internalSkuCode ? <Text type="secondary" style={{ fontSize: 12 }}>{row.skuId}</Text> : null}
         </Space>
       ),
     },
@@ -462,7 +487,6 @@ export default function AlibabaMapping() {
           {row.imageUrl ? <Image src={row.imageUrl} width={54} height={54} style={{ objectFit: "cover", borderRadius: 6 }} /> : null}
           <Space direction="vertical" size={2}>
             <Text strong ellipsis style={{ maxWidth: 150 }}>{row.productTitle || row.productName || "-"}</Text>
-            <Text type="secondary" style={{ fontSize: 12 }}>{row.externalOfferId ? `1688商品ID ${row.externalOfferId}` : row.productName || "-"}</Text>
           </Space>
         </Space>
       ),
@@ -498,7 +522,7 @@ export default function AlibabaMapping() {
       render: (value) => value || 1,
     },
     {
-      title: "1688????",
+      title: "1688单品货号",
       key: "externalSku",
       width: 150,
       render: (_value, row) => (
@@ -587,86 +611,6 @@ export default function AlibabaMapping() {
       },
     },
     {
-      title: "??",
-      key: "actions",
-      width: 430,
-      fixed: "right",
-      render: (_value, row) => (
-        <Space size={6} wrap>
-          <Button
-            size="small"
-            icon={<SearchOutlined />}
-            loading={mixLoadingId === row.id}
-            onClick={() => void queryMixConfig(row)}
-          >
-            ??
-          </Button>
-          {editable ? (
-            <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(row)}>
-              ??
-            </Button>
-          ) : null}
-          <Button
-            size="small"
-            loading={actionLoadingId === `sync_1688_relation_user_info-${row.id}`}
-            onClick={() => void run1688SourceAction(row, "sync_1688_relation_user_info", "1688 ?????????")}
-          >
-            ????
-          </Button>
-          <Button
-            size="small"
-            loading={actionLoadingId === `sync_1688_purchased_products-${row.id}`}
-            onClick={() => void run1688SourceAction(row, "sync_1688_purchased_products", "1688 ?????????")}
-          >
-            ????
-          </Button>
-          <Button
-            size="small"
-            loading={actionLoadingId === `${row.sourcePayload?.followedAt1688 ? "unfollow_1688_product" : "follow_1688_product"}-${row.id}`}
-            onClick={() => void run1688SourceAction(
-              row,
-              row.sourcePayload?.followedAt1688 ? "unfollow_1688_product" : "follow_1688_product",
-              row.sourcePayload?.followedAt1688 ? "1688 ???????" : "1688 ?????",
-            )}
-          >
-            {row.sourcePayload?.followedAt1688 ? "????" : "??"}
-          </Button>
-          <Button
-            size="small"
-            loading={actionLoadingId === `run_1688_supply_change_agent-${row.id}`}
-            onClick={() => void run1688SourceAction(row, "run_1688_supply_change_agent", "1688 ?? agent ???")}
-          >
-            ??
-          </Button>
-          <Button
-            size="small"
-            loading={actionLoadingId === `run_1688_deep_search_agent-${row.id}`}
-            onClick={() => void run1688SourceAction(row, "run_1688_deep_search_agent", "1688 ??? agent ???")}
-          >
-            ???
-          </Button>
-          <Button
-            size="small"
-            loading={actionLoadingId === `${row.sourcePayload?.monitorProduct?.enabled ? "delete_1688_monitor_product" : "add_1688_monitor_product"}-${row.id}`}
-            onClick={() => void run1688SourceAction(
-              row,
-              row.sourcePayload?.monitorProduct?.enabled ? "delete_1688_monitor_product" : "add_1688_monitor_product",
-              row.sourcePayload?.monitorProduct?.enabled ? "1688 ?????" : "1688 ?????",
-            )}
-          >
-            {row.sourcePayload?.monitorProduct?.enabled ? "???" : "???"}
-          </Button>
-          <Button
-            size="small"
-            loading={actionLoadingId === `feedback_1688_supply_change_agent-${row.id}`}
-            onClick={() => void run1688SourceAction(row, "feedback_1688_supply_change_agent", "1688 ???????", { feedbackType: "viewed", feedback: "viewed in ERP" })}
-          >
-            ??
-          </Button>
-        </Space>
-      ),
-    },
-    {
       title: "1688规格描述",
       key: "platformSku",
       width: 220,
@@ -702,7 +646,98 @@ export default function AlibabaMapping() {
       width: 150,
       render: formatDateTime,
     },
-  ], [actionLoadingId, editable, mixLoadingId, queryMixConfig, run1688SourceAction]);
+    {
+      title: "操作",
+      key: "actions",
+      width: 260,
+      fixed: "right",
+      render: (_value, row) => (
+        <Space size={6} wrap>
+          {editable ? (
+            <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(row)}>
+              编辑
+            </Button>
+          ) : null}
+          <Button
+            size="small"
+            icon={<SearchOutlined />}
+            loading={mixLoadingId === row.id}
+            onClick={() => void queryMixConfig(row)}
+          >
+            混批
+          </Button>
+          <Button
+            size="small"
+            loading={actionLoadingId === `run_1688_deep_search_agent-${row.id}`}
+            onClick={() => void run1688SourceAction(row, "run_1688_deep_search_agent", "1688深搜任务已运行")}
+          >
+            深搜
+          </Button>
+          <Button
+            size="small"
+            loading={actionLoadingId === `${row.sourcePayload?.monitorProduct?.enabled ? "delete_1688_monitor_product" : "add_1688_monitor_product"}-${row.id}`}
+            onClick={() => void run1688SourceAction(
+              row,
+              row.sourcePayload?.monitorProduct?.enabled ? "delete_1688_monitor_product" : "add_1688_monitor_product",
+              row.sourcePayload?.monitorProduct?.enabled ? "1688监控已取消" : "1688监控已开启",
+            )}
+          >
+            {row.sourcePayload?.monitorProduct?.enabled ? "取消监控" : "监控"}
+          </Button>
+          <Button
+            size="small"
+            loading={actionLoadingId === `sync_1688_relation_user_info-${row.id}`}
+            onClick={() => void run1688SourceAction(row, "sync_1688_relation_user_info", "1688商家信息已同步")}
+          >
+            商家
+          </Button>
+          <Button
+            size="small"
+            loading={actionLoadingId === `sync_1688_purchased_products-${row.id}`}
+            onClick={() => void run1688SourceAction(row, "sync_1688_purchased_products", "1688已购商品已同步")}
+          >
+            已购
+          </Button>
+          <Button
+            size="small"
+            loading={actionLoadingId === `${row.sourcePayload?.followedAt1688 ? "unfollow_1688_product" : "follow_1688_product"}-${row.id}`}
+            onClick={() => void run1688SourceAction(
+              row,
+              row.sourcePayload?.followedAt1688 ? "unfollow_1688_product" : "follow_1688_product",
+              row.sourcePayload?.followedAt1688 ? "1688商品已取消关注" : "1688商品已关注",
+            )}
+          >
+            {row.sourcePayload?.followedAt1688 ? "取消关注" : "关注"}
+          </Button>
+          <Button
+            size="small"
+            loading={actionLoadingId === `run_1688_supply_change_agent-${row.id}`}
+            onClick={() => void run1688SourceAction(row, "run_1688_supply_change_agent", "1688供给变动任务已运行")}
+          >
+            供给
+          </Button>
+          <Button
+            size="small"
+            loading={actionLoadingId === `feedback_1688_supply_change_agent-${row.id}`}
+            onClick={() => void run1688SourceAction(row, "feedback_1688_supply_change_agent", "1688反馈已提交", { feedbackType: "viewed", feedback: "viewed in ERP" })}
+          >
+            反馈
+          </Button>
+          {editable ? (
+            <Button
+              size="small"
+              danger
+              icon={<DeleteOutlined />}
+              loading={actionLoadingId === `delete_sku_1688_source-${row.id}`}
+              onClick={() => deleteMapping(row)}
+            >
+              删除
+            </Button>
+          ) : null}
+        </Space>
+      ),
+    },
+  ], [actionLoadingId, deleteMapping, editable, mixLoadingId, queryMixConfig, run1688SourceAction]);
 
   if (!erp) {
     return (
@@ -748,13 +783,14 @@ export default function AlibabaMapping() {
         ].filter(Boolean)}
       />
 
-      <section className="content-card">
+      <section className="content-card alibaba-mapping-panel alibaba-mapping-panel--fixed-bottom">
         <Table
+          className="alibaba-mapping-table alibaba-mapping-table--fixed-bottom"
           rowKey="id"
           loading={loading}
           columns={columns}
           dataSource={mappings}
-          scroll={{ x: 2380 }}
+          scroll={{ x: 2380, y: "max(220px, calc(100vh - 430px))" }}
           pagination={{ pageSize: 10, showSizeChanger: false }}
         />
       </section>
@@ -817,8 +853,8 @@ export default function AlibabaMapping() {
               </Form.Item>
             </Col>
             <Col span={12}>
-              <Form.Item name="externalSpecId" label="1688商品规格ID">
-                <Input placeholder="可选" />
+              <Form.Item name="externalSpecId" label="1688商品规格ID" rules={[{ required: true, message: "请填写 1688 商品规格ID" }]}>
+                <Input placeholder="必须填写具体规格ID" />
               </Form.Item>
             </Col>
             <Col span={12}>

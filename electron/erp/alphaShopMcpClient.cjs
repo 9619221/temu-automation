@@ -43,6 +43,27 @@ function firstText(...values) {
   return null;
 }
 
+function findNestedText(value, keys, depth = 0) {
+  if (!value || depth > 6) return null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findNestedText(item, keys, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof value !== "object") return null;
+  for (const key of keys) {
+    const found = firstText(value[key]);
+    if (found) return found;
+  }
+  for (const item of Object.values(value)) {
+    const found = findNestedText(item, keys, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
 function parseMaybeJson(value) {
   if (typeof value !== "string") return value;
   const trimmed = value.trim();
@@ -144,6 +165,20 @@ function normalizeAlphaShopProduct(item = {}) {
     item.itemId,
     item.id,
   );
+  const specId = findNestedText(item, [
+    "specId",
+    "specID",
+    "spec_id",
+    "skuId",
+    "skuID",
+    "sku_id",
+    "cargoSkuId",
+    "cargoSkuID",
+    "cargo_sku_id",
+    "mainPriceSkuId",
+    "offerSkuId",
+    "offer_sku_id",
+  ]);
   const productUrl = firstText(
     item.productUrl,
     item.detailUrl,
@@ -153,6 +188,8 @@ function normalizeAlphaShopProduct(item = {}) {
   );
   return {
     externalOfferId: productId,
+    externalSkuId: specId,
+    externalSpecId: specId,
     supplierName: firstText(
       item.supplierName,
       item.companyName,

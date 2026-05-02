@@ -430,6 +430,7 @@ interface ErpAPI {
   purchase: {
     workbench: (params?: ErpListParams) => Promise<any>;
     action: (payload: Record<string, any>) => Promise<any>;
+    local1688Inquiry?: (payload: Record<string, any>) => Promise<any>;
   };
   warehouse: {
     workbench: (params?: ErpListParams) => Promise<any>;
