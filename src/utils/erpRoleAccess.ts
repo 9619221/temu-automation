@@ -18,17 +18,16 @@ const ROLE_LABELS: Record<string, string> = {
 };
 
 const DEFAULT_PATH_BY_ROLE: Record<string, string> = {
-  admin: "/daily-command",
-  manager: "/daily-command",
-  operations: "/daily-command",
-  buyer: "/daily-command",
-  finance: "/daily-command",
-  warehouse: "/daily-command",
-  viewer: "/daily-command",
+  admin: "/product-master-data",
+  manager: "/product-master-data",
+  operations: "/product-master-data",
+  buyer: "/purchase-center",
+  finance: "/purchase-center",
+  warehouse: "/warehouse-center",
+  viewer: "/shop",
 };
 
 const ROUTE_ROLES: Record<string, string[]> = {
-  "/daily-command": ["admin", "manager", "operations", "buyer", "finance", "warehouse", "viewer"],
   "/product-master-data": ["admin", "manager", "operations", "buyer"],
   "/stores": ["admin", "manager", "operations", "buyer"],
   "/1688-mapping": ["admin", "manager", "operations", "buyer"],
@@ -58,7 +57,7 @@ export function roleLabel(role?: string | null) {
 }
 
 export function getDefaultPathForRole(role?: string | null) {
-  return DEFAULT_PATH_BY_ROLE[role || ""] || "/daily-command";
+  return DEFAULT_PATH_BY_ROLE[role || ""] || "/product-master-data";
 }
 
 export function canAccessRoute(role: string | null | undefined, pathname: string) {

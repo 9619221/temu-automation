@@ -33,15 +33,14 @@ const { Content, Header, Sider } = Layout;
 
 const menuItems = [
   {
-    type: "group" as const,
+    key: "group-account",
     label: "账号",
     children: [{ key: "/accounts", icon: <UserOutlined />, label: "账号管理" }],
   },
   {
-    type: "group" as const,
+    key: "group-business",
     label: "业务",
     children: [
-      { key: "/daily-command", icon: <BellOutlined />, label: "今日作战台" },
       { key: "/product-master-data", icon: <TagsOutlined />, label: "商品资料" },
       { key: "/1688-mapping", icon: <ApiOutlined />, label: "供应商管理" },
       { key: "/purchase-center", icon: <ShoppingOutlined />, label: "采购中心" },
@@ -50,12 +49,12 @@ const menuItems = [
     ],
   },
   {
-    type: "group" as const,
+    key: "group-data",
     label: "数据",
     children: [{ key: "/collect", icon: <SyncOutlined />, label: "数据采集" }],
   },
   {
-    type: "group" as const,
+    key: "group-operations",
     label: "运营",
     children: [
       { key: "/shop", icon: <DashboardOutlined />, label: "店铺概览" },
@@ -63,7 +62,7 @@ const menuItems = [
     ],
   },
   {
-    type: "group" as const,
+    key: "group-tools",
     label: "工具",
     children: [
       { key: "/create-product", icon: <PlusCircleOutlined />, label: "上品管理" },
@@ -74,7 +73,7 @@ const menuItems = [
     ],
   },
   {
-    type: "group" as const,
+    key: "group-system",
     label: "系统",
     children: [
       { key: "/work-items", icon: <BellOutlined />, label: "事项中心" },
@@ -87,6 +86,7 @@ const menuItems = [
 
 export default function AppLayout() {
   const [collapsed, setCollapsed] = useState(false);
+  const [openKeys, setOpenKeys] = useState<string[]>([]);
   const [activeAccountName, setActiveAccountName] = useState("");
   const [accounts, setAccounts] = useState<{ id: string; name: string }[]>([]);
   const [activeAccountId, setActiveAccountId] = useState<string | null>(null);
@@ -122,6 +122,21 @@ export default function AppLayout() {
   } else if (location.pathname === "/tasks") {
     selectedKey = "/collect";
   }
+
+  const selectedGroupKey = useMemo(() => {
+    const group = visibleMenuItems.find((item) => item.children.some((child) => child.key === selectedKey));
+    return group?.key || "";
+  }, [selectedKey, visibleMenuItems]);
+
+  useEffect(() => {
+    if (!selectedGroupKey || collapsed) return;
+    setOpenKeys([selectedGroupKey]);
+  }, [collapsed, selectedGroupKey]);
+
+  const handleMenuOpenChange = (keys: string[]) => {
+    const latestOpenKey = keys.find((key) => !openKeys.includes(key));
+    setOpenKeys(latestOpenKey ? [latestOpenKey] : []);
+  };
 
   useEffect(() => {
     const store = window.electronAPI?.store;
@@ -310,6 +325,8 @@ export default function AppLayout() {
             <Menu
               mode="inline"
               selectedKeys={[selectedKey]}
+              openKeys={collapsed ? [] : openKeys}
+              onOpenChange={handleMenuOpenChange}
               items={visibleMenuItems}
               onClick={({ key }) => navigate(key)}
               style={{ border: 0 }}
@@ -341,14 +358,16 @@ export default function AppLayout() {
               icon={collecting ? <LoadingOutlined spin /> : <SyncOutlined />}
               style={{ cursor: "pointer", borderRadius: 999, margin: 0, padding: "2px 10px" }}
             >
-              {collecting ? `${completedCount}/${COLLECT_TASKS.length}` : progress === 100 ? "采集完成" : "就绪"}
+              {collecting ? `采集中 ${completedCount}/${COLLECT_TASKS.length}` : progress === 100 ? "采集完成" : "采集就绪"}
             </Tag>
             ) : null}
 
             {canUseCollection ? (
             <Dropdown trigger={["click"]} dropdownRender={() => bellDropdown}>
               <Badge count={errorCount > 0 ? errorCount : 0} size="small" offset={[-2, 2]}>
-                <Button icon={<BellOutlined />} style={{ borderRadius: 10 }} />
+                <Button icon={<BellOutlined />} style={{ borderRadius: 10 }}>
+                  通知
+                </Button>
               </Badge>
             </Dropdown>
             ) : null}
@@ -360,7 +379,7 @@ export default function AppLayout() {
                 icon={<UserOutlined />}
                 style={{ borderRadius: 12, padding: "4px 12px", marginInlineEnd: 0, cursor: "pointer" }}
               >
-                {activeAccountName || "未选择账号"}
+                {activeAccountName ? `账号 ${activeAccountName}` : "未选择账号"}
               </Tag>
             </Dropdown>
             ) : null}
@@ -371,7 +390,9 @@ export default function AppLayout() {
                 onClick={() => navigate("/logs")}
                 style={{ borderRadius: 10 }}
                 title="日志中心"
-              />
+              >
+                日志
+              </Button>
             ) : null}
 
             <Tag color="blue" icon={<UserOutlined />} style={{ borderRadius: 12, padding: "4px 12px", marginInlineEnd: 0 }}>
@@ -379,9 +400,13 @@ export default function AppLayout() {
             </Tag>
 
             {canAccessRoute(currentRole, "/settings") ? (
-              <Button icon={<SettingOutlined />} onClick={() => navigate("/settings")} style={{ borderRadius: 10 }} />
+              <Button icon={<SettingOutlined />} onClick={() => navigate("/settings")} style={{ borderRadius: 10 }}>
+                设置
+              </Button>
             ) : null}
-            <Button icon={<LogoutOutlined />} onClick={handleLogout} style={{ borderRadius: 10 }} />
+            <Button icon={<LogoutOutlined />} onClick={handleLogout} style={{ borderRadius: 10 }}>
+              退出
+            </Button>
           </Space>
         </Header>
 
