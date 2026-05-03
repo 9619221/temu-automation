@@ -7,9 +7,11 @@ import Database from "better-sqlite3";
 import path from "path";
 import fs from "fs";
 
+const APP_DATA_ROOT = process.env.APP_USER_DATA
+  || path.join(process.env.APPDATA || path.join(process.env.HOME || "", ".config"), "temu-automation");
+
 const DB_PATH = path.join(
-  process.env.APPDATA || path.join(process.env.HOME || "", ".config"),
-  "temu-automation",
+  APP_DATA_ROOT,
   "yunqi_products.db"
 );
 
@@ -100,7 +102,215 @@ function initSchema(db) {
       skipped_rows INTEGER DEFAULT 0,
       imported_at TEXT DEFAULT (datetime('now', 'localtime'))
     );
+
+    -- 核价筛选快照（每次扫描一批，sku_id 为主键组件）
+    CREATE TABLE IF NOT EXISTS price_review_snapshot (
+      snapshot_id TEXT NOT NULL,
+      scanned_at INTEGER NOT NULL,
+      spu_id TEXT,
+      sku_id TEXT NOT NULL,
+      skc_id TEXT,
+      title TEXT,
+      main_image TEXT,
+      sku_spec TEXT,
+      original_price REAL,              -- 原申报价
+      seller_current_price REAL,        -- 卖家当前报价
+      reference_price REAL,             -- 平台参考申报价（Temu 给的，非 1688）
+      price_diff REAL,
+      price_diff_pct REAL,
+      review_status TEXT,               -- 仅扫描「价格申报中」
+      change_count INTEGER DEFAULT 0,
+      cost_1688 REAL,                   -- 1688 图搜命中价（取策略后）
+      cost_manual REAL,                 -- 人工手填成本（优先级最高）
+      cost_source TEXT,                 -- 1688_image_search / manual / not_found / pending
+      pass_175 INTEGER,                 -- 0=不通过 1=通过 NULL=未知（无成本）
+      detail_url TEXT,                  -- Temu 后台该 SKU 的核价直达链接
+      PRIMARY KEY (snapshot_id, sku_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_price_review_sku ON price_review_snapshot(sku_id);
+    CREATE INDEX IF NOT EXISTS idx_price_review_snapshot_id ON price_review_snapshot(snapshot_id);
+    CREATE INDEX IF NOT EXISTS idx_price_review_scanned_at ON price_review_snapshot(scanned_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_price_review_pass ON price_review_snapshot(pass_175);
+
+    -- 核价成本缓存（跨快照复用，手填优先）
+    CREATE TABLE IF NOT EXISTS price_review_cost_cache (
+      sku_id TEXT PRIMARY KEY,
+      main_image_hash TEXT,
+      cost_1688 REAL,
+      cost_manual REAL,
+      cost_source TEXT,
+      updated_at INTEGER
+    );
   `);
+}
+
+// ============ 核价筛选器 CRUD ============
+
+/**
+ * 写入一次扫描快照（完整批次）
+ * @param {object} batch - { snapshotId, scannedAt, rows: [...] }
+ */
+export function savePriceReviewSnapshot(batch) {
+  if (!batch || !Array.isArray(batch.rows) || batch.rows.length === 0) {
+    return { inserted: 0 };
+  }
+  const db = getDb();
+  const insert = db.prepare(`
+    INSERT OR REPLACE INTO price_review_snapshot (
+      snapshot_id, scanned_at, spu_id, sku_id, skc_id, title, main_image, sku_spec,
+      original_price, seller_current_price, reference_price,
+      price_diff, price_diff_pct, review_status, change_count,
+      cost_1688, cost_manual, cost_source, pass_175, detail_url
+    ) VALUES (
+      ?, ?, ?, ?, ?, ?, ?, ?,
+      ?, ?, ?,
+      ?, ?, ?, ?,
+      ?, ?, ?, ?, ?
+    )
+  `);
+  let inserted = 0;
+  const tx = db.transaction(() => {
+    for (const r of batch.rows) {
+      if (!r?.skuId) continue;
+      insert.run(
+        batch.snapshotId,
+        batch.scannedAt,
+        r.spuId || "",
+        r.skuId,
+        r.skcId || "",
+        r.title || "",
+        r.mainImage || "",
+        r.skuSpec || "",
+        r.originalPrice ?? null,
+        r.sellerCurrentPrice ?? null,
+        r.referencePrice ?? null,
+        r.priceDiff ?? null,
+        r.priceDiffPct ?? null,
+        r.reviewStatus || "",
+        r.changeCount ?? 0,
+        r.cost1688 ?? null,
+        r.costManual ?? null,
+        r.costSource || "pending",
+        r.pass175 == null ? null : (r.pass175 ? 1 : 0),
+        r.detailUrl || ""
+      );
+      inserted++;
+    }
+  });
+  tx();
+  return { inserted };
+}
+
+/**
+ * 读取最新一次扫描的全部行（或指定 snapshotId）
+ */
+export function listPriceReview({ snapshotId = null, onlyFail = false, onlyPass = false, onlyUnknown = false } = {}) {
+  const db = getDb();
+  let effectiveSnapshotId = snapshotId;
+  if (!effectiveSnapshotId) {
+    const latest = db.prepare(`
+      SELECT snapshot_id FROM price_review_snapshot
+      ORDER BY scanned_at DESC LIMIT 1
+    `).get();
+    effectiveSnapshotId = latest?.snapshot_id || null;
+  }
+  if (!effectiveSnapshotId) return { snapshotId: null, rows: [], summary: { total: 0, pass: 0, fail: 0, unknown: 0 } };
+
+  const conditions = ["snapshot_id = ?"];
+  const values = [effectiveSnapshotId];
+  if (onlyFail) { conditions.push("pass_175 = 0"); }
+  else if (onlyPass) { conditions.push("pass_175 = 1"); }
+  else if (onlyUnknown) { conditions.push("pass_175 IS NULL"); }
+
+  const rows = db.prepare(`
+    SELECT * FROM price_review_snapshot
+    WHERE ${conditions.join(" AND ")}
+    ORDER BY CASE WHEN pass_175 IS NULL THEN 2 ELSE pass_175 END ASC, price_diff_pct DESC
+  `).all(...values);
+
+  const summary = db.prepare(`
+    SELECT
+      COUNT(*) as total,
+      SUM(CASE WHEN pass_175 = 1 THEN 1 ELSE 0 END) as pass,
+      SUM(CASE WHEN pass_175 = 0 THEN 1 ELSE 0 END) as fail,
+      SUM(CASE WHEN pass_175 IS NULL THEN 1 ELSE 0 END) as unknown
+    FROM price_review_snapshot WHERE snapshot_id = ?
+  `).get(effectiveSnapshotId);
+
+  return { snapshotId: effectiveSnapshotId, rows, summary };
+}
+
+/**
+ * 读取最近 N 次扫描的元信息
+ */
+export function listPriceReviewSnapshots(limit = 20) {
+  const db = getDb();
+  return db.prepare(`
+    SELECT snapshot_id, MAX(scanned_at) AS scanned_at, COUNT(*) AS total,
+           SUM(CASE WHEN pass_175 = 1 THEN 1 ELSE 0 END) AS pass,
+           SUM(CASE WHEN pass_175 = 0 THEN 1 ELSE 0 END) AS fail,
+           SUM(CASE WHEN pass_175 IS NULL THEN 1 ELSE 0 END) AS unknown
+    FROM price_review_snapshot
+    GROUP BY snapshot_id
+    ORDER BY scanned_at DESC
+    LIMIT ?
+  `).all(limit);
+}
+
+/**
+ * 读取成本缓存（手填优先）
+ */
+export function getPriceReviewCost(skuId) {
+  if (!skuId) return null;
+  const db = getDb();
+  return db.prepare(`SELECT * FROM price_review_cost_cache WHERE sku_id = ?`).get(skuId) || null;
+}
+
+export function upsertPriceReviewCost({ skuId, mainImageHash, cost1688, costManual, costSource }) {
+  if (!skuId) return;
+  const db = getDb();
+  const existing = getPriceReviewCost(skuId);
+  const now = Date.now();
+  // 手填值永远不被图搜覆盖
+  const nextManual = costManual != null ? costManual : (existing?.cost_manual ?? null);
+  const next1688 = cost1688 != null ? cost1688 : (existing?.cost_1688 ?? null);
+  const nextSource = costSource || existing?.cost_source || "pending";
+  db.prepare(`
+    INSERT INTO price_review_cost_cache (sku_id, main_image_hash, cost_1688, cost_manual, cost_source, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(sku_id) DO UPDATE SET
+      main_image_hash = COALESCE(excluded.main_image_hash, main_image_hash),
+      cost_1688 = ?,
+      cost_manual = ?,
+      cost_source = ?,
+      updated_at = ?
+  `).run(skuId, mainImageHash || null, next1688, nextManual, nextSource, now,
+          next1688, nextManual, nextSource, now);
+}
+
+export function setPriceReviewManualCost(skuId, cost) {
+  if (!skuId) return;
+  const value = cost == null ? null : Number(cost);
+  upsertPriceReviewCost({
+    skuId,
+    costManual: value,
+    costSource: value != null ? "manual" : "pending",
+  });
+}
+
+export function clearPriceReviewManualCost(skuId) {
+  if (!skuId) return;
+  const db = getDb();
+  const existing = getPriceReviewCost(skuId);
+  if (!existing) return;
+  db.prepare(`
+    UPDATE price_review_cost_cache
+    SET cost_manual = NULL,
+        cost_source = CASE WHEN cost_1688 IS NOT NULL THEN '1688_image_search' ELSE 'pending' END,
+        updated_at = ?
+    WHERE sku_id = ?
+  `).run(Date.now(), skuId);
 }
 
 /**

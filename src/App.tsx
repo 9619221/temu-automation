@@ -1,6 +1,8 @@
-import { Suspense, lazy, useEffect, useRef, useState } from "react";
-import { Routes, Route, Navigate } from "react-router-dom";
+import { Suspense, lazy, useEffect, useRef, useState, type ComponentType, type LazyExoticComponent } from "react";
+import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { CollectionProvider } from "./contexts/CollectionContext";
+import { ErpAuthProvider, useErpAuth } from "./contexts/ErpAuthContext";
+import { canAccessRoute, getDefaultPathForRole, roleLabel } from "./utils/erpRoleAccess";
 import {
   ACTIVE_ACCOUNT_CHANGED_EVENT,
   emitActiveAccountChanged,
@@ -11,18 +13,58 @@ import {
 
 const ACCOUNT_STORAGE_KEY = "temu_accounts";
 
-const AppLayout = lazy(() => import("./components/Layout/AppLayout"));
-const Dashboard = lazy(() => import("./pages/Dashboard"));
-const ShopOverview = lazy(() => import("./pages/ShopOverview"));
-const AccountManager = lazy(() => import("./pages/AccountManager"));
-const ProductList = lazy(() => import("./pages/ProductList.tsx"));
-const ProductDetail = lazy(() => import("./pages/ProductDetail"));
-const Settings = lazy(() => import("./pages/Settings"));
-const ProductCreate = lazy(() => import("./pages/ProductCreate"));
-const ImageStudio = lazy(() => import("./pages/ImageStudio"));
-const ImageStudioGPT = lazy(() => import("./pages/ImageStudioGPT"));
-const Logs = lazy(() => import("./pages/Logs"));
-const CompetitorAnalysis = lazy(() => import("./pages/CompetitorAnalysis"));
+type LazyFactory<T extends ComponentType<any>> = () => Promise<{ default: T }>;
+type PreloadableLazy<T extends ComponentType<any>> = LazyExoticComponent<T> & { preload: LazyFactory<T> };
+
+function lazyWithPreload<T extends ComponentType<any>>(factory: LazyFactory<T>) {
+  const component = lazy(factory) as PreloadableLazy<T>;
+  component.preload = factory;
+  return component;
+}
+
+const AppLayout = lazyWithPreload(() => import("./components/Layout/AppLayout"));
+const Dashboard = lazyWithPreload(() => import("./pages/Dashboard"));
+const ShopOverview = lazyWithPreload(() => import("./pages/ShopOverview"));
+const AccountManager = lazyWithPreload(() => import("./pages/AccountManager"));
+const ProductList = lazyWithPreload(() => import("./pages/ProductList.tsx"));
+const ProductDetail = lazyWithPreload(() => import("./pages/ProductDetail"));
+const Settings = lazyWithPreload(() => import("./pages/Settings"));
+const ProductCreate = lazyWithPreload(() => import("./pages/ProductCreate"));
+const ImageStudio = lazyWithPreload(() => import("./pages/ImageStudio"));
+const ImageStudioGPT = lazyWithPreload(() => import("./pages/ImageStudioGPT"));
+const Logs = lazyWithPreload(() => import("./pages/Logs"));
+const CompetitorAnalysis = lazyWithPreload(() => import("./pages/CompetitorAnalysis"));
+const PriceReview = lazyWithPreload(() => import("./pages/PriceReview"));
+const ErpDebug = lazyWithPreload(() => import("./pages/ErpDebug"));
+const ProductMasterData = lazyWithPreload(() => import("./pages/ProductMasterData"));
+const PurchaseCenter = lazyWithPreload(() => import("./pages/PurchaseCenter"));
+const AlibabaMapping = lazyWithPreload(() => import("./pages/AlibabaMapping"));
+const WarehouseCenter = lazyWithPreload(() => import("./pages/WarehouseCenter"));
+const QcOutboundCenter = lazyWithPreload(() => import("./pages/QcOutboundCenter"));
+const WorkItems = lazyWithPreload(() => import("./pages/WorkItems"));
+const UserManagement = lazyWithPreload(() => import("./pages/UserManagement"));
+const ErpLogin = lazyWithPreload(() => import("./pages/ErpLogin"));
+
+const CORE_ROUTE_PRELOADERS = [
+  AppLayout.preload,
+  ShopOverview.preload,
+  ProductList.preload,
+  ProductMasterData.preload,
+  AlibabaMapping.preload,
+  PurchaseCenter.preload,
+  WarehouseCenter.preload,
+  QcOutboundCenter.preload,
+  WorkItems.preload,
+  AccountManager.preload,
+  Logs.preload,
+  Settings.preload,
+  UserManagement.preload,
+  PriceReview.preload,
+  Dashboard.preload,
+  CompetitorAnalysis.preload,
+  ProductCreate.preload,
+  ProductDetail.preload,
+];
 
 function RouteLoading() {
   return (
@@ -60,9 +102,73 @@ function RouteLoading() {
   );
 }
 
+function RequireAuth({ children }: { children: JSX.Element }) {
+  const auth = useErpAuth();
+  const location = useLocation();
+
+  if (auth.loading) return <RouteLoading />;
+  if (!auth.currentUser) {
+    return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+  }
+  return children;
+}
+
+function RoleHomeRedirect() {
+  const { currentUser } = useErpAuth();
+  return <Navigate to={getDefaultPathForRole(currentUser?.role)} replace />;
+}
+
+function AccessDenied() {
+  const { currentUser } = useErpAuth();
+  return (
+    <div
+      style={{
+        minHeight: 360,
+        display: "grid",
+        placeItems: "center",
+        background: "#fff",
+        borderRadius: 10,
+        border: "1px solid #eef0f5",
+      }}
+    >
+      <div style={{ textAlign: "center", padding: 24 }}>
+        <div style={{ fontSize: 22, fontWeight: 800, marginBottom: 8 }}>无权访问</div>
+        <div style={{ color: "#667085", marginBottom: 16 }}>
+          当前角色：{roleLabel(currentUser?.role)}。请切换到有权限的账号。
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RoleRoute({ path, children }: { path: string; children: JSX.Element }) {
+  const { currentUser } = useErpAuth();
+  if (!canAccessRoute(currentUser?.role, path)) return <AccessDenied />;
+  return children;
+}
+
 function App() {
   const [accountViewVersion, setAccountViewVersion] = useState(0);
   const lastEmittedAccountIdRef = useRef<string | null | undefined>(undefined);
+
+  useEffect(() => {
+    let index = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
+
+    const preloadNext = () => {
+      if (cancelled || index >= CORE_ROUTE_PRELOADERS.length) return;
+      const preload = CORE_ROUTE_PRELOADERS[index++];
+      void preload().catch(() => {});
+      timer = setTimeout(preloadNext, 220);
+    };
+
+    timer = setTimeout(preloadNext, 900);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, []);
 
   useEffect(() => {
     const store = window.electronAPI?.store;
@@ -126,33 +232,54 @@ function App() {
   }, []);
 
   return (
-    <CollectionProvider key={`collection-${accountViewVersion}`}>
-      <Suspense fallback={<RouteLoading />}>
-        <Routes>
-          <Route path="/" element={<AppLayout key={`layout-${accountViewVersion}`} />}>
-            <Route index element={<Navigate to="/shop" replace />} />
-            <Route path="shop" element={<ShopOverview />} />
-            <Route path="products" element={<ProductList />} />
-            <Route path="products/:id" element={<ProductDetail />} />
-            <Route path="create-product" element={<ProductCreate />} />
+    <ErpAuthProvider>
+      <CollectionProvider key={`collection-${accountViewVersion}`}>
+        <Suspense fallback={<RouteLoading />}>
+          <Routes>
+            <Route path="/login" element={<ErpLogin />} />
+            <Route
+              path="/"
+              element={(
+                <RequireAuth>
+                  <AppLayout key={`layout-${accountViewVersion}`} />
+                </RequireAuth>
+              )}
+            >
+            <Route index element={<RoleHomeRedirect />} />
+            <Route path="shop" element={<RoleRoute path="/shop"><ShopOverview /></RoleRoute>} />
+            <Route path="products" element={<RoleRoute path="/products"><ProductList /></RoleRoute>} />
+            <Route path="products/:id" element={<RoleRoute path="/products"><ProductDetail /></RoleRoute>} />
+            <Route path="create-product" element={<RoleRoute path="/create-product"><ProductCreate /></RoleRoute>} />
             <Route path="product-create" element={<Navigate to="/create-product" replace />} />
-            <Route path="image-studio" element={<ImageStudio />} />
-            <Route path="image-studio-gpt" element={<ImageStudioGPT />} />
-            <Route path="collect" element={<Dashboard />} />
-            <Route path="accounts" element={<AccountManager />} />
-            <Route path="tasks" element={<Navigate to="/collect" replace />} />
-            <Route path="competitor" element={<CompetitorAnalysis />} />
-            <Route path="logs" element={<Logs />} />
-            <Route path="settings" element={<Settings />} />
+            <Route path="image-studio" element={<RoleRoute path="/image-studio"><ImageStudio /></RoleRoute>} />
+            <Route path="image-studio-gpt" element={<RoleRoute path="/image-studio-gpt"><ImageStudioGPT /></RoleRoute>} />
+            <Route path="collect" element={<RoleRoute path="/collect"><Dashboard /></RoleRoute>} />
+            <Route path="accounts" element={<RoleRoute path="/accounts"><AccountManager /></RoleRoute>} />
+            <Route path="tasks" element={<Navigate to="/work-items" replace />} />
+            <Route path="competitor" element={<RoleRoute path="/competitor"><CompetitorAnalysis /></RoleRoute>} />
+            <Route path="price-review" element={<RoleRoute path="/price-review"><PriceReview /></RoleRoute>} />
+            <Route path="daily-command" element={<RoleHomeRedirect />} />
+            <Route path="product-master-data" element={<RoleRoute path="/product-master-data"><ProductMasterData mode="skus" /></RoleRoute>} />
+            <Route path="stores" element={<RoleRoute path="/stores"><PurchaseCenter initialStoreManagerOpen /></RoleRoute>} />
+            <Route path="1688-mapping" element={<RoleRoute path="/1688-mapping"><AlibabaMapping /></RoleRoute>} />
+            <Route path="purchase-center" element={<RoleRoute path="/purchase-center"><PurchaseCenter /></RoleRoute>} />
+            <Route path="warehouse-center" element={<RoleRoute path="/warehouse-center"><WarehouseCenter /></RoleRoute>} />
+            <Route path="qc-outbound" element={<RoleRoute path="/qc-outbound"><QcOutboundCenter /></RoleRoute>} />
+            <Route path="work-items" element={<RoleRoute path="/work-items"><WorkItems /></RoleRoute>} />
+            <Route path="users" element={<RoleRoute path="/users"><UserManagement /></RoleRoute>} />
+            <Route path="erp-debug" element={<RoleRoute path="/erp-debug"><ErpDebug /></RoleRoute>} />
+            <Route path="logs" element={<RoleRoute path="/logs"><Logs /></RoleRoute>} />
+            <Route path="settings" element={<RoleRoute path="/settings"><Settings /></RoleRoute>} />
             {/* Legacy routes */}
             <Route path="dashboard" element={<Navigate to="/shop" replace />} />
             <Route path="sales" element={<Navigate to="/products" replace />} />
             <Route path="orders" element={<Navigate to="/products" replace />} />
             <Route path="analytics" element={<Navigate to="/shop" replace />} />
           </Route>
-        </Routes>
-      </Suspense>
-    </CollectionProvider>
+          </Routes>
+        </Suspense>
+      </CollectionProvider>
+    </ErpAuthProvider>
   );
 }
 

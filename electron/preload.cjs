@@ -1,5 +1,53 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
+// 给 invoke 调用加软超时：超时后 Promise reject 让 UI 立刻可恢复，
+// 主进程那侧的 IPC 不能真正中断，但渲染端不再卡死，错误能上抛到 catch 给用户提示。
+function invokeWithTimeout(channel, payload, timeoutMs) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return ipcRenderer.invoke(channel, payload);
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      const err = new Error(`IPC ${channel} 调用超时 (${Math.round(timeoutMs / 1000)}s)`);
+      err.code = "IPC_TIMEOUT";
+      err.channel = channel;
+      reject(err);
+    }, timeoutMs);
+    ipcRenderer.invoke(channel, payload).then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
+let erpEventSubscriptionCount = 0;
+
+function retainErpEventSubscription() {
+  erpEventSubscriptionCount += 1;
+  if (erpEventSubscriptionCount === 1) {
+    ipcRenderer.send("erp:events:subscribe");
+  }
+  return () => {
+    erpEventSubscriptionCount = Math.max(0, erpEventSubscriptionCount - 1);
+    if (erpEventSubscriptionCount === 0) {
+      ipcRenderer.send("erp:events:unsubscribe");
+    }
+  };
+}
+
 function createImageStudioApi(profile) {
   const ensureProfile = () => ipcRenderer.invoke("image-studio:switch-profile", profile);
   const withProfile = (fn) => async (...args) => {
@@ -33,6 +81,20 @@ function createImageStudioApi(profile) {
     downloadAll: withProfile((payload) => ipcRenderer.invoke("image-studio:download-all", payload)),
     runDesigner: withProfile((payload) => ipcRenderer.invoke("image-studio:run-designer", payload)),
     composeBriefs: withProfile((payload) => ipcRenderer.invoke("image-studio:compose-briefs", payload)),
+    composeImagePrompts: withProfile((payload) => ipcRenderer.invoke("image-studio:compose-image-prompts", payload)),
+    regenerateSlot: withProfile((payload) => ipcRenderer.invoke("image-studio:regenerate-slot", payload)),
+
+    // 三步式新版（参考老版 SSE 模式）
+    designerAnalyze: withProfile((payload) => ipcRenderer.invoke("image-studio:designer-analyze", payload)),
+    designerPlan: withProfile((payload) => ipcRenderer.invoke("image-studio:designer-plan", payload)),
+    designerGenerateStart: withProfile((payload) => ipcRenderer.invoke("image-studio:designer-generate-start", payload)),
+    designerGenerateCancel: withProfile((jobId) => ipcRenderer.invoke("image-studio:designer-generate-cancel", jobId)),
+    onDesignerGenerateEvent: (handler) => {
+      const channel = "image-studio:designer-generate-event";
+      const listener = (_event, payload) => handler(payload);
+      ipcRenderer.on(channel, listener);
+      return () => ipcRenderer.removeListener(channel, listener);
+    },
   };
 }
 
@@ -154,8 +216,124 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   // 每次调用前显式切到对应 profile，保证普通版/GPT 版不会串用生图凭证。
   imageStudio: createImageStudioApi("default"),
-  imageStudio: createImageStudioApi("default"),
   imageStudioGpt: createImageStudioApi("gpt"),
+
+  erp: {
+    getStatus: () => ipcRenderer.invoke("erp:get-status"),
+    runMigrations: () => ipcRenderer.invoke("erp:run-migrations"),
+    getEnums: () => ipcRenderer.invoke("erp:get-enums"),
+    client: {
+      getStatus: () => ipcRenderer.invoke("erp:client:get-status"),
+      setHostMode: () => ipcRenderer.invoke("erp:client:set-host-mode"),
+      setClientMode: (payload) => ipcRenderer.invoke("erp:client:set-client-mode", payload || {}),
+      discover: (payload) => ipcRenderer.invoke("erp:client:discover", payload || {}),
+    },
+    auth: {
+      getStatus: () => ipcRenderer.invoke("erp:auth:get-status"),
+      getCurrentUser: () => ipcRenderer.invoke("erp:auth:get-current-user"),
+      createFirstAdmin: (payload) => ipcRenderer.invoke("erp:auth:create-first-admin", payload || {}),
+      login: (payload) => ipcRenderer.invoke("erp:auth:login", payload || {}),
+      logout: () => ipcRenderer.invoke("erp:auth:logout"),
+    },
+    company: {
+      list: (params) => ipcRenderer.invoke("erp:company:list", params || {}),
+      upsert: (payload) => ipcRenderer.invoke("erp:company:upsert", payload || {}),
+    },
+    account: {
+      list: (params) => ipcRenderer.invoke("erp:account:list", params || {}),
+      upsert: (payload) => ipcRenderer.invoke("erp:account:upsert", payload || {}),
+      delete: (payload) => ipcRenderer.invoke("erp:account:delete", payload || {}),
+    },
+    user: {
+      list: (params) => ipcRenderer.invoke("erp:user:list", params || {}),
+      upsert: (payload) => ipcRenderer.invoke("erp:user:upsert", payload || {}),
+    },
+    permission: {
+      getProfile: () => ipcRenderer.invoke("erp:permission:get-profile"),
+      upsertRole: (payload) => ipcRenderer.invoke("erp:permission:upsert-role", payload || {}),
+      upsertScope: (payload) => ipcRenderer.invoke("erp:permission:upsert-scope", payload || {}),
+    },
+    supplier: {
+      list: (params) => ipcRenderer.invoke("erp:supplier:list", params || {}),
+      create: (payload) => ipcRenderer.invoke("erp:supplier:create", payload || {}),
+    },
+    sku: {
+      list: (params) => ipcRenderer.invoke("erp:sku:list", params || {}),
+      create: (payload) => ipcRenderer.invoke("erp:sku:create", payload || {}),
+      delete: (payload) => ipcRenderer.invoke("erp:sku:delete", payload || {}),
+    },
+    purchase: {
+      workbench: (params, options) => invokeWithTimeout(
+        "erp:purchase:workbench",
+        params || {},
+        Number.isFinite(options?.timeoutMs) ? options.timeoutMs : 30000,
+      ),
+      action: (payload, options) => invokeWithTimeout(
+        "erp:purchase:action",
+        payload || {},
+        Number.isFinite(options?.timeoutMs) ? options.timeoutMs : 60000,
+      ),
+      local1688Inquiry: (payload) => ipcRenderer.invoke("erp:purchase:local-1688-inquiry", payload || {}),
+      open1688Detail: (payload) => ipcRenderer.invoke("erp:purchase:open-1688-detail", payload || {}),
+    },
+    warehouse: {
+      workbench: (params) => ipcRenderer.invoke("erp:warehouse:workbench", params || {}),
+      action: (payload) => ipcRenderer.invoke("erp:warehouse:action", payload || {}),
+    },
+    qc: {
+      workbench: (params) => ipcRenderer.invoke("erp:qc:workbench", params || {}),
+      action: (payload) => ipcRenderer.invoke("erp:qc:action", payload || {}),
+      decide: (payload) => ipcRenderer.invoke("erp:qc:decide", payload || {}),
+    },
+    outbound: {
+      workbench: (params) => ipcRenderer.invoke("erp:outbound:workbench", params || {}),
+      action: (payload) => ipcRenderer.invoke("erp:outbound:action", payload || {}),
+    },
+    workItem: {
+      list: (params) => ipcRenderer.invoke("erp:workItem:list", params || {}),
+      stats: (params) => ipcRenderer.invoke("erp:workItem:stats", params || {}),
+      generate: (payload) => ipcRenderer.invoke("erp:workItem:generate", payload || {}),
+      updateStatus: (payload) => ipcRenderer.invoke("erp:workItem:update-status", payload || {}),
+    },
+    workflow: {
+      canTransition: (payload) => ipcRenderer.invoke("erp:workflow:can-transition", payload || {}),
+      transition: (payload) => ipcRenderer.invoke("erp:workflow:transition", payload || {}),
+    },
+    lan: {
+      getStatus: () => ipcRenderer.invoke("erp:lan:get-status"),
+      start: (payload) => ipcRenderer.invoke("erp:lan:start", payload || {}),
+      stop: () => ipcRenderer.invoke("erp:lan:stop"),
+    },
+    events: {
+      onPurchaseUpdate: (handler) => {
+        const listener = (_event, payload) => handler(payload);
+        const releaseSubscription = retainErpEventSubscription();
+        ipcRenderer.on("erp:purchase:update", listener);
+        return () => {
+          ipcRenderer.removeListener("erp:purchase:update", listener);
+          releaseSubscription();
+        };
+      },
+      onUserUpdate: (handler) => {
+        const listener = (_event, payload) => handler(payload);
+        const releaseSubscription = retainErpEventSubscription();
+        ipcRenderer.on("erp:user:update", listener);
+        return () => {
+          ipcRenderer.removeListener("erp:user:update", listener);
+          releaseSubscription();
+        };
+      },
+      onAuthExpired: (handler) => {
+        const listener = (_event, payload) => handler(payload);
+        const releaseSubscription = retainErpEventSubscription();
+        ipcRenderer.on("erp:auth:expired", listener);
+        return () => {
+          ipcRenderer.removeListener("erp:auth:expired", listener);
+          releaseSubscription();
+        };
+      },
+    },
+  },
 
   app: {
     getVersion: () => ipcRenderer.invoke("app:get-version"),
@@ -164,6 +342,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
     downloadUpdate: () => ipcRenderer.invoke("app:download-update"),
     quitAndInstallUpdate: () => ipcRenderer.invoke("app:quit-and-install-update"),
     openLogDirectory: () => ipcRenderer.invoke("app:open-log-directory"),
+    openExternal: (url) => ipcRenderer.invoke("app:open-external", url),
+    readWorkflowPackLogs: (params) => ipcRenderer.invoke("app:read-workflow-pack-logs", params || {}),
+    clearWorkflowPackLogs: () => ipcRenderer.invoke("app:clear-workflow-pack-logs"),
   },
 
   onAutomationEvent: (callback) => {
@@ -180,6 +361,25 @@ contextBridge.exposeInMainWorld("electronAPI", {
     const listener = (_, data) => callback(data);
     ipcRenderer.on("image-studio:event", listener);
     return () => ipcRenderer.removeListener("image-studio:event", listener);
+  },
+
+  priceReview: {
+    scanNow: (params) => ipcRenderer.invoke("price-review:scan-now", params || {}),
+    list: (params) => ipcRenderer.invoke("price-review:list", params || {}),
+    setManualCost: (skuId, cost) => ipcRenderer.invoke("price-review:set-manual-cost", { skuId, cost }),
+    clearManualCost: (skuId) => ipcRenderer.invoke("price-review:clear-manual-cost", { skuId }),
+    open1688Login: (profilePath) => ipcRenderer.invoke("price-review:open-1688-login", { profilePath }),
+    restartScheduler: () => ipcRenderer.invoke("price-review:restart-scheduler"),
+    onAutoScanDone: (callback) => {
+      const listener = (_, data) => callback(data);
+      ipcRenderer.on("price-review:auto-scan-done", listener);
+      return () => ipcRenderer.removeListener("price-review:auto-scan-done", listener);
+    },
+    onScanDone: (callback) => {
+      const listener = (_, data) => callback(data);
+      ipcRenderer.on("price-review:scan-done", listener);
+      return () => ipcRenderer.removeListener("price-review:scan-done", listener);
+    },
   },
 
   store: {

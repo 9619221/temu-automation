@@ -1,7 +1,7 @@
 {
   "name": "temu-automation",
   "private": true,
-  "version": "0.1.86",
+  "version": "0.2.3",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -13,6 +13,11 @@
     "build:image-studio": "python scripts/prepare_image_studio_bundle.py",
     "prepare:update-site": "python scripts/prepare_static_update_site.py",
     "verify:data-contracts": "node --experimental-strip-types scripts/verify-data-contracts.ts",
+    "test:erp:flow": "node scripts/test-erp-flow-foundation.cjs",
+    "test:erp:electron-api": "node scripts/test-erp-electron-api.cjs",
+    "test:erp:1688-client": "node scripts/test-erp-1688-client.cjs",
+    "test:erp": "npm run test:erp:flow && npm run test:erp:electron-api && npm run test:erp:1688-client",
+    "probe:1688-purchase": "node scripts/probe-1688-purchase.cjs",
     "test:desktop": "node scripts/test-desktop-regression.cjs",
     "verify:release": "npm run verify:data-contracts && npm run build:node-runtime && node scripts/verify-release-prereqs.cjs",
     "smoke:desktop": "node scripts/smoke-desktop.cjs",
@@ -20,7 +25,8 @@
     "dist:win": "npm run build:resources && npm run build:node-runtime && npm run build:image-studio && npm run verify:release && npm run build && npm run smoke:desktop && electron-builder --win nsis",
     "pack:win": "npm run build:resources && npm run build:node-runtime && npm run build:image-studio && npm run verify:release && npm run build && npm run smoke:desktop && electron-builder --win dir",
     "preview": "vite preview",
-    "electron": "cross-env NODE_ENV=development electron ."
+    "electron": "cross-env NODE_ENV=development electron .",
+    "erp:server": "node scripts/erp-server.cjs"
   },
   "build": {
     "appId": "com.temu.automation",

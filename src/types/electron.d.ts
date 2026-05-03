@@ -94,6 +94,60 @@ interface ImageStudioEventPayload {
   historySaveError?: string | null;
 }
 
+interface DesignerOpsBrief {
+  productName: string;
+  productDescription: string;
+  howToUse: string;
+  sellingPoints: string[];
+  targetAudience: {
+    buyer: string;
+    user: string;
+  };
+  painPointsAndNeeds: string[];
+  imageStyle: string;
+}
+
+interface DesignerTextOverlay {
+  headline?: string;
+  subhead?: string;
+  pillLabels?: string[];
+}
+
+interface DesignerImagePrompt {
+  slot: number;
+  imageType: string;
+  mode: "edit" | "generate";
+  cameraAngle: string;
+  sceneDescription: string;
+  mood: string;
+  prompt: string;
+  textOverlay: DesignerTextOverlay | null;
+}
+
+interface DesignerPlanResponse {
+  ok?: boolean;
+  productIdentity?: string;
+  globalForbidden?: string[];
+  imagePrompts?: DesignerImagePrompt[];
+  warnings?: string[];
+  errors?: string[];
+  elapsedMs?: number;
+  error?: string;
+}
+
+interface DesignerGenerateEventPayload {
+  jobId: string;
+  type: "started" | "event" | "done" | "cancelled" | "error";
+  event?: {
+    slot?: number;
+    status?: string;
+    dataUrl?: string;
+    error?: string;
+    bytes?: number;
+  };
+  error?: string;
+}
+
 interface ImageStudioJob {
   jobId: string;
   status: "pending" | "running" | "done" | "failed" | "cancelled";
@@ -127,9 +181,9 @@ interface ImageStudioAPI {
   updateConfig: (payload: Partial<ImageStudioConfig>) => Promise<ImageStudioConfig>;
   openExternal: () => Promise<string>;
   detectComponents: (payload: { files: NativeImagePayload[] }) => Promise<ImageStudioComponentDetection>;
-  analyze: (payload: { files: NativeImagePayload[]; productMode: string }) => Promise<ImageStudioAnalysis>;
+  analyze: (payload: { files: NativeImagePayload[]; productMode: string; analysisProfile?: string }) => Promise<ImageStudioAnalysis>;
   regenerateAnalysis: (
-    payload: { files: NativeImagePayload[]; productMode: string; analysis: ImageStudioAnalysis }
+    payload: { files: NativeImagePayload[]; productMode: string; analysis: ImageStudioAnalysis; analysisProfile?: string }
   ) => Promise<Partial<ImageStudioAnalysis>>;
   translate: (payload: { texts: string[] }) => Promise<{ translations: string[] }>;
   generatePlans: (payload: { analysis: ImageStudioAnalysis; imageTypes: string[]; salesRegion: string; imageSize: string; productMode: string }) => Promise<ImageStudioPlan[]>;
@@ -139,7 +193,15 @@ interface ImageStudioAPI {
   getHistoryItem: (id: string) => Promise<ImageStudioHistoryItem | null>;
   getHistorySources: (id: string) => Promise<{ files: Array<{ name: string; type: string; dataUrl: string }>; error?: string }>;
   saveHistory: (payload: { productName: string; salesRegion: string; imageCount: number; images: ImageStudioGeneratedImage[] }) => Promise<{ id: string }>;
-  scoreImage: (payload: { imageUrl: string; imageType: string }) => Promise<ImageStudioImageScore>;
+  scoreImage: (payload: {
+    imageUrl: string;
+    imageType: string;
+    plan?: ImageStudioPlan;
+    analysis?: ImageStudioAnalysis;
+    productName?: string;
+    salesRegion?: string;
+    packCount?: number;
+  }) => Promise<ImageStudioImageScore>;
   listJobs: () => Promise<ImageStudioJob[]>;
   getJob: (jobId: string) => Promise<ImageStudioJob | null>;
   clearJob: (jobId: string) => Promise<void>;
@@ -150,6 +212,13 @@ interface ImageStudioAPI {
     sharedDna: SharedDNA | null;
     productImageBase64?: string | null;
   }) => Promise<{ images?: ImageStudioComposedImage[]; error?: string }>;
+  composeImagePrompts?: (payload: { imagePrompts: DesignerImagePrompt[]; productIdentity: string; productImageBase64?: string | null }) => Promise<unknown>;
+  regenerateSlot?: (payload: { imagePrompt: DesignerImagePrompt; productIdentity: string; productImageBase64?: string | null; promptOverride?: string | null }) => Promise<unknown>;
+  designerAnalyze?: (payload: { productImageBase64: string; productInput?: unknown }) => Promise<{ ok?: boolean; opsBrief?: DesignerOpsBrief; elapsedMs?: number; error?: string }>;
+  designerPlan?: (payload: { opsBrief: DesignerOpsBrief; productImageBase64: string; debug?: boolean }) => Promise<DesignerPlanResponse>;
+  designerGenerateStart?: (payload: { jobId?: string; imagePrompts: DesignerImagePrompt[]; productIdentity: string; productImageBase64?: string | null }) => Promise<{ jobId: string }>;
+  designerGenerateCancel?: (jobId: string) => Promise<{ cancelled: boolean; jobId: string }>;
+  onDesignerGenerateEvent?: (handler: (payload: DesignerGenerateEventPayload) => void) => (() => void);
 }
 
 interface AppAPI {
@@ -159,6 +228,19 @@ interface AppAPI {
   downloadUpdate: () => Promise<any>;
   quitAndInstallUpdate: () => Promise<boolean>;
   openLogDirectory: () => Promise<string>;
+  openExternal: (url: string) => Promise<string>;
+  readWorkflowPackLogs?: (params?: { limit?: number }) => Promise<{
+    logFile?: string;
+    diagnosticLogFile?: string;
+    imageStudioLogFile?: string;
+    entries?: any[];
+  }>;
+  clearWorkflowPackLogs?: () => Promise<{
+    logFile?: string;
+    diagnosticLogFile?: string;
+    imageStudioLogFile?: string;
+    cleared?: boolean;
+  }>;
 }
 
 interface StoreAPI {
@@ -166,6 +248,240 @@ interface StoreAPI {
   getMany: (keys: string[]) => Promise<Record<string, any>>;
   set: (key: string, data: any) => Promise<boolean>;
   setMany: (entries: Record<string, any>) => Promise<boolean>;
+}
+
+interface ErpStatus {
+  initialized: boolean;
+  mode?: "unset" | "host" | "client";
+  runtime?: ErpClientStatus;
+  dbPath: string | null;
+  backupPath?: string | null;
+  migrations: Array<{ key: string; status: "success" | "skipped" | "failed" | string }>;
+  error?: { name?: string; code?: string | null; message: string } | null;
+}
+
+interface ErpActor {
+  id?: string | null;
+  role: string;
+}
+
+interface ErpUserSession {
+  id: string;
+  name: string;
+  role: string;
+  status: string;
+}
+
+interface ErpAuthStatus {
+  hasUsers: boolean;
+  currentUser: ErpUserSession | null;
+}
+
+interface ErpClientStatus {
+  mode: "unset" | "host" | "client";
+  isClientMode: boolean;
+  serverUrl?: string;
+  currentUser?: ErpUserSession | null;
+  connected?: boolean;
+  updatedAt?: string | null;
+  dbInitialized?: boolean;
+}
+
+interface ErpDiscoveredController {
+  url: string;
+  service: string;
+  name?: string;
+  startedAt?: string | null;
+}
+
+interface ErpListParams {
+  accountId?: string;
+  limit?: number;
+  offset?: number;
+}
+
+interface ErpWorkflowTransitionPayload {
+  entityType: string;
+  id: string;
+  action: string;
+  toStatus: string;
+  actor: ErpActor;
+  patch?: Record<string, any>;
+}
+
+interface ErpWorkflowCanTransitionPayload {
+  entityType: string;
+  fromStatus: string;
+  toStatus: string;
+  action: string;
+  role: string;
+}
+
+interface ErpLanStatus {
+  running: boolean;
+  port: number;
+  bindAddress: string;
+  startedAt: string | null;
+  localUrl: string;
+  primaryUrl: string;
+  lanUrls: string[];
+  routes: Array<{ path: string; label: string; allowedRoles?: string[] }>;
+  authMode: string;
+  sessionCount?: number;
+  wsClientCount?: number;
+  lastError?: string | null;
+}
+
+interface ErpPurchaseUpdateEvent {
+  type: "purchase:update";
+  action: string;
+  prId?: string | null;
+  poId?: string | null;
+  actorRole?: string | null;
+  at?: string;
+}
+
+interface ErpUserUpdateEvent {
+  type: "user:update";
+  action: string;
+  userId?: string | null;
+  role?: string | null;
+  status?: string | null;
+  actorRole?: string | null;
+  at?: string;
+}
+
+interface ErpAuthExpiredEvent {
+  type: "auth:expired";
+  message?: string | null;
+  path?: string | null;
+  at?: string;
+}
+
+interface ErpAPI {
+  getStatus: () => Promise<ErpStatus>;
+  runMigrations: () => Promise<ErpStatus>;
+  getEnums: () => Promise<Record<string, Record<string, string>>>;
+  client: {
+    getStatus: () => Promise<ErpClientStatus>;
+    setHostMode: () => Promise<ErpClientStatus>;
+    setClientMode: (payload: { serverUrl: string }) => Promise<ErpClientStatus>;
+    discover: (payload?: { port?: number; timeoutMs?: number; concurrency?: number }) => Promise<ErpDiscoveredController[]>;
+  };
+  auth: {
+    getStatus: () => Promise<ErpAuthStatus>;
+    getCurrentUser: () => Promise<ErpUserSession | null>;
+    createFirstAdmin: (payload: { name: string; accessCode: string }) => Promise<ErpAuthStatus>;
+    login: (payload: { login: string; accessCode: string; serverUrl?: string }) => Promise<ErpAuthStatus>;
+    logout: () => Promise<ErpAuthStatus>;
+  };
+  account: {
+    list: (params?: ErpListParams) => Promise<any[]>;
+    upsert: (payload: {
+      id?: string;
+      name: string;
+      phone?: string;
+      status?: string;
+      source?: string;
+    }) => Promise<any>;
+    delete: (payload: { id?: string; accountId?: string }) => Promise<any>;
+  };
+  user: {
+    list: (params?: ErpListParams) => Promise<any[]>;
+    upsert: (payload: {
+      id?: string;
+      name: string;
+      role: string;
+      status?: string;
+      accessCode?: string;
+    }) => Promise<any>;
+  };
+  supplier: {
+    list: (params?: ErpListParams) => Promise<any[]>;
+    create: (payload: {
+      id?: string;
+      name: string;
+      contactName?: string;
+      phone?: string;
+      wechat?: string;
+      address?: string;
+      categories?: string[];
+      status?: string;
+    }) => Promise<any>;
+  };
+  sku: {
+    list: (params?: ErpListParams) => Promise<any[]>;
+    create: (payload: {
+      id?: string;
+      accountId?: string;
+      internalSkuCode?: string;
+      productName: string;
+      temuSkuId?: string;
+      temuProductId?: string;
+      temuSkcId?: string;
+      colorSpec?: string;
+      category?: string;
+      imageUrl?: string;
+      supplierId?: string;
+      status?: string;
+    }) => Promise<any>;
+    delete: (payload: { id?: string; skuId?: string }) => Promise<any>;
+  };
+  purchase: {
+    workbench: (params?: ErpListParams, options?: { timeoutMs?: number }) => Promise<any>;
+    action: (payload: Record<string, any>, options?: { timeoutMs?: number }) => Promise<any>;
+    local1688Inquiry?: (payload: Record<string, any>) => Promise<any>;
+    open1688Detail?: (payload: Record<string, any>) => Promise<any>;
+  };
+  warehouse: {
+    workbench: (params?: ErpListParams) => Promise<any>;
+    action: (payload: Record<string, any>) => Promise<any>;
+  };
+  workflow: {
+    canTransition: (payload: ErpWorkflowCanTransitionPayload) => Promise<boolean>;
+    transition: (payload: ErpWorkflowTransitionPayload) => Promise<any>;
+  };
+  qc: {
+    workbench: (params?: ErpListParams) => Promise<any>;
+    action: (payload: Record<string, any>) => Promise<any>;
+    decide: (payload: {
+      actualSampleQty: number;
+      defectiveQty: number;
+      observationThreshold?: number;
+      failureThreshold?: number;
+    }) => Promise<any>;
+  };
+  outbound: {
+    workbench: (params?: ErpListParams) => Promise<any>;
+    action: (payload: Record<string, any>) => Promise<any>;
+  };
+  workItem: {
+    list: (params?: ErpListParams & {
+      ownerRole?: string;
+      status?: string;
+      priority?: string;
+      activeOnly?: boolean;
+    }) => Promise<any[]>;
+    stats: (params?: ErpListParams) => Promise<any>;
+    generate: (payload?: ErpListParams & { actor?: ErpActor }) => Promise<any>;
+    updateStatus: (payload: {
+      id?: string;
+      workItemId?: string;
+      status: string;
+      remark?: string;
+      actor?: ErpActor;
+    }) => Promise<any>;
+  };
+  lan: {
+    getStatus: () => Promise<ErpLanStatus>;
+    start: (payload?: { port?: number; bindAddress?: string }) => Promise<ErpLanStatus>;
+    stop: () => Promise<ErpLanStatus>;
+  };
+  events?: {
+    onPurchaseUpdate: (handler: (payload: ErpPurchaseUpdateEvent) => void) => () => void;
+    onUserUpdate: (handler: (payload: ErpUserUpdateEvent) => void) => () => void;
+    onAuthExpired: (handler: (payload: ErpAuthExpiredEvent) => void) => () => void;
+  };
 }
 
 interface YunqiPriceEntry {
@@ -354,6 +670,7 @@ interface ElectronAPI {
   yunqiDb: YunqiDbAPI;
   imageStudio: ImageStudioAPI;
   imageStudioGpt: ImageStudioAPI & { switchProfile: () => Promise<{ profile: string; status: unknown }> };
+  erp: ErpAPI;
   app: AppAPI;
   store: StoreAPI;
   onAutomationEvent: (callback: (data: any) => void) => (() => void);

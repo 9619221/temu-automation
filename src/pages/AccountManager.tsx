@@ -98,6 +98,23 @@ function getPasswordRepairMessage(account?: Account | null) {
   return "当前账号还没有可用密码，请先补录密码。";
 }
 
+function getLoginErrorDescription(error: any) {
+  const raw = String(error?.message || error || "");
+  if (/waitForSelector|locator|定位符|选择器|has-text|未找到登录按钮|Timeout/i.test(raw)) {
+    return "没有找到 Temu 登录按钮。可能是登录页加载异常、页面文案变更，或出现验证码/风控拦截。请重新点击登录；如果浏览器里已有验证码，请先手动完成后再重试。";
+  }
+  if (/phone input not found|手机号|手机号码/i.test(raw)) {
+    return "没有找到手机号输入框。请确认 Temu 登录页已正常打开，然后重试。";
+  }
+  if (/password input not found|password|密码/i.test(raw)) {
+    return "没有找到密码输入框。请确认 Temu 登录页已正常打开，或重新录入访问密码后重试。";
+  }
+  if (/captcha|verify|slider|验证码|验证|风控/i.test(raw)) {
+    return "Temu 要求验证码或安全验证，请在弹出的浏览器窗口手动完成后再重试。";
+  }
+  return raw || "请检查账号密码，或在弹出的浏览器中手动完成验证码后重试。";
+}
+
 /** 计算数据新鲜度 */
 function getDataFreshness(syncedAt: string | null): {
   label: string;
@@ -402,7 +419,7 @@ export default function AccountManager() {
       notification.error({
         key: "login",
         message: "登录失败",
-        description: error?.message || "请检查账号密码或手动完成验证码",
+        description: getLoginErrorDescription(error),
       });
     } finally {
       setLoginLoadingId(null);

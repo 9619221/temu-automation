@@ -139,3 +139,36 @@ export interface DesignerResult {
   warnings: string[];
   errors: string[];
 }
+
+export type CameraAngle =
+  | "top-down"
+  | "45-degree"
+  | "eye-level"
+  | "low-angle"
+  | "high-angle";
+
+export interface TextOverlay {
+  headline?: string;
+  subhead?: string;
+  pillLabels?: string[];
+}
+
+export type ImageMode = "edit" | "generate";
+
+export interface ImagePrompt {
+  slot: number;
+  imageType: string;
+  mode: ImageMode;
+  cameraAngle: CameraAngle;
+  sceneDescription: string;
+  mood: string;
+  prompt: string;
+  textOverlay: TextOverlay | null;
+}
+
+export interface ComposedImage {
+  slot: number;
+  imageType: string;
+  dataUrl: string;
+  bytes: number;
+}

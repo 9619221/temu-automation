@@ -11,7 +11,7 @@ import {
   message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { DeleteOutlined, ReloadOutlined } from "@ant-design/icons";
+import { DeleteOutlined, FolderOpenOutlined, ReloadOutlined } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
 import StatCard from "../components/StatCard";
 import EmptyGuide from "../components/EmptyGuide";
@@ -20,11 +20,20 @@ import {
   clearFrontendLogs,
   type FrontendLogEntry,
 } from "../utils/frontendLogger";
+import { hasPageCache, readPageCache, writePageCache } from "../utils/pageCache";
 
 const { Text } = Typography;
 const store = window.electronAPI?.store;
+const appApi = window.electronAPI?.app;
 
 type LevelFilter = "all" | "log" | "info" | "warn" | "error";
+
+interface LogsCache {
+  generatedAt?: string;
+  logs: FrontendLogEntry[];
+}
+
+const LOGS_CACHE_KEY = "page-cache:logs:v1";
 
 function levelLabel(level: FrontendLogEntry["level"] | LevelFilter) {
   switch (level) {
@@ -56,6 +65,18 @@ function levelColor(level: FrontendLogEntry["level"]) {
 
 function sourceLabel(source: FrontendLogEntry["source"]) {
   switch (source) {
+    case "workflow-pack":
+      return "新上品诊断";
+    case "main":
+      return "主进程";
+    case "worker":
+      return "后台 Worker";
+    case "worker-rpc":
+      return "Worker 通信";
+    case "renderer":
+      return "界面进程";
+    case "image-studio":
+      return "图片服务";
     case "window-error":
       return "页面异常";
     case "unhandledrejection":
@@ -67,6 +88,36 @@ function sourceLabel(source: FrontendLogEntry["source"]) {
 
 function explainMessage(log: FrontendLogEntry) {
   const rawMessage = log.message || "";
+  if (log.source === "workflow-pack") {
+    if (rawMessage.includes("失败") || log.level === "error") {
+      return "新上品流程诊断日志：优先看行号、阶段、错误信息和展开后的 debug 摘要。";
+    }
+    return "新上品流程诊断日志：用于定位任务、商品行、素材上传和草稿保存状态。";
+  }
+  if (log.source === "renderer") {
+    if (rawMessage.includes("unresponsive")) {
+      return "界面进程日志：窗口出现未响应，通常表示页面主线程被大数据渲染或同步计算卡住。";
+    }
+    if (rawMessage.includes("responsive again")) {
+      return "界面进程日志：窗口从未响应恢复，可结合上一条未响应时间判断卡顿时长。";
+    }
+    if (rawMessage.includes("Renderer process gone")) {
+      return "界面进程日志：页面进程崩溃或被系统结束，需要优先排查同一时间段的异常。";
+    }
+    return "界面进程日志：用于定位页面加载、控制台错误和窗口卡死问题。";
+  }
+  if (log.source === "worker-rpc") {
+    return "Worker 通信日志：主进程调用后台 Worker 失败，展开后重点看 action、timeout、duration 和 screenshotFile。";
+  }
+  if (log.source === "worker") {
+    return "后台 Worker 日志：记录自动化浏览器、批量上品和任务执行过程中的错误输出。";
+  }
+  if (log.source === "main") {
+    return "主进程日志：记录 Electron 主进程异常、未处理 Promise 和系统级错误。";
+  }
+  if (log.source === "image-studio") {
+    return "图片服务日志：用于定位 AI 出图服务启动、调用或生成失败。";
+  }
   if (rawMessage.includes("[antd: Spin]") && rawMessage.includes("tip")) {
     return "这是界面加载提示的用法提醒，通常不会影响主要功能。";
   }
@@ -83,17 +134,62 @@ function formatTime(timestamp: number) {
   return new Date(timestamp).toLocaleString("zh-CN", { hour12: false });
 }
 
+function normalizeLogEntry(log: any): FrontendLogEntry | null {
+  if (!log) return null;
+  const level = (["log", "info", "warn", "error"].includes(log.level) ? log.level : "log") as FrontendLogEntry["level"];
+  const knownSources: FrontendLogEntry["source"][] = [
+    "console",
+    "window-error",
+    "unhandledrejection",
+    "workflow-pack",
+    "main",
+    "worker",
+    "worker-rpc",
+    "renderer",
+    "image-studio",
+  ];
+  const source = knownSources.includes(log.source)
+    ? log.source
+    : "console" as FrontendLogEntry["source"];
+  return {
+    id: String(log.id || `${source}-${log.timestamp || Date.now()}-${Math.random().toString(16).slice(2)}`),
+    timestamp: Number(log.timestamp) || Date.now(),
+    level,
+    source,
+    message: String(log.message || ""),
+    detail: typeof log.detail === "string" ? log.detail : undefined,
+    taskId: typeof log.taskId === "string" ? log.taskId : undefined,
+  };
+}
+
 export default function Logs() {
-  const [logs, setLogs] = useState<FrontendLogEntry[]>([]);
+  const cached = useMemo(() => readPageCache<LogsCache>(LOGS_CACHE_KEY, { logs: [] }), []);
+  const [logs, setLogs] = useState<FrontendLogEntry[]>(() => cached.logs || []);
   const [loading, setLoading] = useState(false);
+  const [loadedOnce, setLoadedOnce] = useState(() => hasPageCache(cached));
   const [searchText, setSearchText] = useState("");
   const [levelFilter, setLevelFilter] = useState<LevelFilter>("all");
 
   const loadLogs = async () => {
     setLoading(true);
     try {
-      const data = await store?.get?.(FRONTEND_LOG_STORE_KEY);
-      setLogs(Array.isArray(data) ? data.slice().reverse() : []);
+      const [frontendData, workflowData] = await Promise.all([
+        store?.get?.(FRONTEND_LOG_STORE_KEY),
+        appApi?.readWorkflowPackLogs?.({ limit: 1000 }).catch(() => ({ entries: [] })),
+      ]);
+      const frontendLogs = Array.isArray(frontendData) ? frontendData : [];
+      const workflowLogs = Array.isArray(workflowData?.entries) ? workflowData.entries : [];
+      const merged = [...frontendLogs, ...workflowLogs]
+        .map((item) => normalizeLogEntry(item))
+        .filter(Boolean)
+        .sort((a, b) => (b?.timestamp || 0) - (a?.timestamp || 0))
+        .slice(0, 1000) as FrontendLogEntry[];
+      setLogs(merged);
+      setLoadedOnce(true);
+      writePageCache(LOGS_CACHE_KEY, {
+        generatedAt: new Date().toISOString(),
+        logs: merged.slice(0, 500),
+      });
     } finally {
       setLoading(false);
     }
@@ -119,6 +215,8 @@ export default function Logs() {
       const keyword = searchText.trim().toLowerCase();
       return (
         log.message.toLowerCase().includes(keyword)
+        || (log.detail || "").toLowerCase().includes(keyword)
+        || (log.taskId || "").toLowerCase().includes(keyword)
         || log.source.toLowerCase().includes(keyword)
         || log.level.toLowerCase().includes(keyword)
       );
@@ -128,6 +226,7 @@ export default function Logs() {
   const errorCount = logs.filter((log) => log.level === "error").length;
   const warnCount = logs.filter((log) => log.level === "warn").length;
   const latestTime = logs[0]?.timestamp ? formatTime(logs[0].timestamp) : "--";
+  const tableLoading = loading && !loadedOnce && filteredLogs.length > 0;
 
   const columns: ColumnsType<FrontendLogEntry> = [
     {
@@ -203,7 +302,7 @@ export default function Logs() {
         type="info"
         showIcon
         message="这里会记录应用运行中的提醒与异常"
-        description="默认保留最近 500 条。列表里先显示摘要，展开后可以查看完整内容和更易理解的说明。"
+        description="默认展示最近 1000 条。列表里先显示摘要，展开后可以查看完整内容和更易理解的说明。"
       />
 
       <div className="app-panel">
@@ -229,10 +328,19 @@ export default function Logs() {
             刷新
           </Button>
           <Button
+            icon={<FolderOpenOutlined />}
+            onClick={() => {
+              void appApi?.openLogDirectory?.().catch(() => message.error("打开日志目录失败"));
+            }}
+          >
+            打开目录
+          </Button>
+          <Button
             danger
             icon={<DeleteOutlined />}
             onClick={async () => {
               await clearFrontendLogs();
+              await appApi?.clearWorkflowPackLogs?.();
               setLogs([]);
               message.success("运行记录已清空");
             }}
@@ -248,7 +356,7 @@ export default function Logs() {
           <Table
             rowKey="id"
             size="small"
-            loading={loading}
+            loading={tableLoading}
             dataSource={filteredLogs}
             columns={columns}
             pagination={{ pageSize: 24, showSizeChanger: true }}
@@ -260,7 +368,7 @@ export default function Logs() {
                 <Space direction="vertical" size={12} style={{ width: "100%" }}>
                   <div>
                     <Text strong>完整内容</Text>
-                    <div className="app-log-message" style={{ marginTop: 8 }}>{record.message}</div>
+                    <div className="app-log-message" style={{ marginTop: 8 }}>{record.detail || record.message}</div>
                   </div>
                   {explainMessage(record) ? (
                     <div>

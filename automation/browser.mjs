@@ -1,14 +1,15 @@
-/**
- * 浏览器管理：启动/关闭/Cookie/登录/导航
- * 从 worker.mjs 提取，共享 browserState 对象
+﻿/**
+ * 娴忚鍣ㄧ鐞嗭細鍚姩/鍏抽棴/Cookie/鐧诲綍/瀵艰埅
+ * 浠?worker.mjs 鎻愬彇锛屽叡浜?browserState 瀵硅薄
  */
 import { chromium } from "playwright";
+import { execFileSync } from "child_process";
 import fs from "fs";
 import path from "path";
-import { randomDelay, logSilent, getDebugDir } from "./utils.mjs";
+import { randomDelay, logSilent, getAppDataRoot, getDebugDir } from "./utils.mjs";
 import { getDelayScale, getEffectiveHeadless, shouldCaptureErrorScreenshots } from "./runtime-config.mjs";
 
-// 共享状态（被 worker.mjs 引用）
+// 鍏变韩鐘舵€侊紙琚?worker.mjs 寮曠敤锛?
 export const browserState = {
   browser: null,
   context: null,
@@ -97,7 +98,7 @@ function isLikelyCountryCodeInput(meta = {}) {
 
   if (id === "usernameId" || name === "usernameId") return false;
   if (name === "phone" || name === "mobile") return false;
-  if (placeholder.includes("手机") || placeholder.includes("号码")) return false;
+  if (/手机|手机号|手机号码|号码|phone|mobile/i.test(placeholder)) return false;
   if (/^\+\d+$/.test(value)) return true;
   if (!placeholder && !id && !name && width > 0 && width <= 120) return true;
   return false;
@@ -106,7 +107,7 @@ function isLikelyCountryCodeInput(meta = {}) {
 async function findLoginPhoneInput(page) {
   const selectorGroups = [
     ['#usernameId', 'input[name="usernameId"]'],
-    ['input[placeholder="手机号码"]', 'input[placeholder*="手机号码"]', 'input[placeholder*="手机号"]', 'input[placeholder*="手机"]', 'input[placeholder*="号码"]'],
+    ['input[placeholder]', 'input[aria-label]'],
     ['input[name="phone"]', 'input[name="mobile"]', 'input[autocomplete="username"]'],
     ['input[type="tel"]', 'input[inputmode="numeric"]'],
   ];
@@ -136,7 +137,7 @@ async function findLoginPhoneInput(page) {
 
 async function fillInputVerified(input, value, options = {}) {
   const {
-    label = "输入框",
+    label = "input",
     logPrefix = "[input]",
     normalize = (next) => String(next ?? "").trim(),
     delayProvider = () => getTypingDelay(),
@@ -182,7 +183,7 @@ async function fillInputVerified(input, value, options = {}) {
     console.error(`${logPrefix} ${label} mismatch on attempt ${attempt + 1}: expected=${expected} actual=${actual || "<empty>"}`);
   }
 
-  throw new Error(`${label}输入后校验失败`);
+  throw new Error(`${label} input verification failed`);
 }
 
 async function captureBrowserErrorScreenshot(page, prefix) {
@@ -199,23 +200,176 @@ async function captureBrowserErrorScreenshot(page, prefix) {
   }
 }
 
-// ---- 查找系统 Chrome ----
-export function findChromeExe() {
+function normalizeBrowserExePath(value = "") {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const withoutOuterQuotes = raw.replace(/^"(.*)"$/, "$1");
+  const match = withoutOuterQuotes.match(/^"?(.+?(?:chrome|msedge)\.exe)"?(?:\s+.*)?$/i);
+  return path.normalize(match?.[1] || withoutOuterQuotes);
+}
+
+function pickExistingBrowser(candidates = []) {
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const exePath = normalizeBrowserExePath(candidate);
+    if (!exePath || seen.has(exePath.toLowerCase())) continue;
+    seen.add(exePath.toLowerCase());
+    if (!/[\\/](chrome|msedge)\.exe$/i.test(exePath)) continue;
+    try {
+      if (fs.existsSync(exePath)) return exePath;
+    } catch (error) {
+      logSilent("chrome.find.exists", error);
+    }
+  }
+  return "";
+}
+
+function runCommandLines(command, args = []) {
+  try {
+    const output = execFileSync(command, args, {
+      encoding: "utf8",
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return String(output || "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  } catch (error) {
+    logSilent(`chrome.find.${command}`, error);
+    return [];
+  }
+}
+
+function getEnvBrowserCandidates() {
+  return [
+    process.env.CHROME_PATH,
+    process.env.CHROME_BIN,
+    process.env.GOOGLE_CHROME_SHIM,
+    process.env.MSEDGE_PATH,
+    process.env.EDGE_PATH,
+  ].filter(Boolean);
+}
+
+function getStandardBrowserCandidates() {
+  const programFiles = [
+    process.env.ProgramFiles,
+    process.env.PROGRAMFILES,
+    process.env["ProgramFiles(x86)"],
+    process.env["PROGRAMFILES(X86)"],
+  ].filter(Boolean);
+  const localAppData = process.env.LOCALAPPDATA;
   const candidates = [
     "C:/Program Files/Google/Chrome/Application/chrome.exe",
     "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
-    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Google/Chrome/Application/chrome.exe"),
+    localAppData && path.join(localAppData, "Google/Chrome/Application/chrome.exe"),
     "C:/Program Files/Microsoft/Edge/Application/msedge.exe",
-  ].filter(Boolean);
-  for (const p of candidates) {
-    try { if (fs.existsSync(p)) return p; } catch (e) { logSilent("chrome.find", e); }
+    "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
+    localAppData && path.join(localAppData, "Microsoft/Edge/Application/msedge.exe"),
+  ];
+
+  for (const root of programFiles) {
+    candidates.push(path.join(root, "Google/Chrome/Application/chrome.exe"));
+    candidates.push(path.join(root, "Microsoft/Edge/Application/msedge.exe"));
   }
-  throw new Error("未找到系统 Chrome，请安装 Google Chrome");
+
+  return candidates.filter(Boolean);
 }
 
-// ---- Cookie 管理 ----
+function getRegistryBrowserCandidates() {
+  if (process.platform !== "win32") return [];
+  const registryRoots = [
+    "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths",
+    "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths",
+    "HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths",
+  ];
+  const exeNames = ["chrome.exe", "msedge.exe"];
+  const candidates = [];
+
+  for (const root of registryRoots) {
+    for (const exeName of exeNames) {
+      const key = `${root}\\${exeName}`;
+      const lines = runCommandLines("reg.exe", ["query", key, "/ve"]);
+      for (const line of lines) {
+        const match = line.match(/REG_(?:SZ|EXPAND_SZ)\s+(.+)$/i);
+        if (match?.[1]) candidates.push(match[1].trim());
+      }
+    }
+  }
+
+  return candidates;
+}
+
+function getPathBrowserCandidates() {
+  if (process.platform !== "win32") return [];
+  return [
+    ...runCommandLines("where.exe", ["chrome"]),
+    ...runCommandLines("where.exe", ["msedge"]),
+  ];
+}
+
+function quotePowerShellString(value) {
+  return `'${String(value || "").replace(/'/g, "''")}'`;
+}
+
+function getShortcutBrowserCandidates() {
+  if (process.platform !== "win32") return [];
+  const roots = [
+    process.env.USERPROFILE && path.join(process.env.USERPROFILE, "Desktop"),
+    process.env.PUBLIC && path.join(process.env.PUBLIC, "Desktop"),
+    process.env.APPDATA && path.join(process.env.APPDATA, "Microsoft/Windows/Start Menu/Programs"),
+    process.env.PROGRAMDATA && path.join(process.env.PROGRAMDATA, "Microsoft/Windows/Start Menu/Programs"),
+  ].filter(Boolean);
+  if (!roots.length) return [];
+
+  const rootList = roots.map(quotePowerShellString).join(",");
+  const script = [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    "$shell = New-Object -ComObject WScript.Shell",
+    `$roots = @(${rootList})`,
+    "foreach ($root in $roots) {",
+    "  if (Test-Path -LiteralPath $root) {",
+    "    Get-ChildItem -LiteralPath $root -Filter *.lnk -Recurse -ErrorAction SilentlyContinue |",
+    "      Where-Object { $_.Name -match '(?i)(chrome|edge)' } |",
+    "      ForEach-Object {",
+    "        try {",
+    "          $target = $shell.CreateShortcut($_.FullName).TargetPath",
+    "          if ($target) { $target }",
+    "        } catch {}",
+    "      }",
+    "  }",
+    "}",
+  ].join("; ");
+
+  return runCommandLines("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script]);
+}
+
+function findBrowserFromGroups(groups = []) {
+  for (const getCandidates of groups) {
+    const found = pickExistingBrowser(typeof getCandidates === "function" ? getCandidates() : getCandidates);
+    if (found) return found;
+  }
+  return "";
+}
+
+// ---- 鏌ユ壘绯荤粺 Chrome / Edge ----
+export function findChromeExe() {
+  const found = findBrowserFromGroups([
+    [...getEnvBrowserCandidates(), ...getStandardBrowserCandidates()],
+    getRegistryBrowserCandidates,
+    getPathBrowserCandidates,
+    getShortcutBrowserCandidates,
+  ]);
+  if (found) {
+    console.error(`[browser] Using system browser: ${found}`);
+    return found;
+  }
+  throw new Error("未找到系统 Chrome 或 Edge，请安装 Google Chrome / Microsoft Edge，或把浏览器快捷方式放到桌面/开始菜单");
+}
+
+// ---- Cookie 绠＄悊 ----
 export function findLatestCookie() {
-  const dir = path.join(process.env.APPDATA || "", "temu-automation", "cookies");
+  const dir = path.join(getAppDataRoot(), "cookies");
   try {
     if (!fs.existsSync(dir)) return null;
     const files = fs.readdirSync(dir)
@@ -237,11 +391,11 @@ export async function saveCookies() {
   }
 }
 
-// ---- 浏览器生命周期 ----
+// ---- 娴忚鍣ㄧ敓鍛藉懆鏈?----
 let _browserLaunchPromise = null;
 
 export async function ensureBrowser() {
-  // 检查浏览器是否还活着，已关闭则清空引用让下面重新启动
+  // 妫€鏌ユ祻瑙堝櫒鏄惁杩樻椿鐫€锛屽凡鍏抽棴鍒欐竻绌哄紩鐢ㄨ涓嬮潰閲嶆柊鍚姩
   if (browserState.browser && !browserState.browser.isConnected()) {
     console.error("[Browser] Browser disconnected, clearing references...");
     browserState.browser = null;
@@ -262,7 +416,7 @@ export async function ensureBrowser() {
         console.error(`[Worker] Auto-restoring session for: ${accountId}`);
       }
     }
-    if (!accountId) throw new Error("请先登录账号后再操作");
+    if (!accountId) throw new Error("Select and log in to a Temu account before using Price Review");
 
     await launch(accountId);
   })();
@@ -275,23 +429,36 @@ export async function ensureBrowser() {
   }
 
   if (!browserState.browser || !browserState.context) {
-    throw new Error("浏览器启动失败，请重试");
+    throw new Error("browser launch failed, please retry");
   }
 }
 
 export async function launch(accountId, headless) {
-  if (browserState.browser && browserState.browser.isConnected() && browserState.context) return;
-  // 清理断开的旧引用
+  const requestedAccountId = String(accountId || "").trim();
+  const latestCookie = !requestedAccountId && !browserState.lastAccountId ? findLatestCookie() : null;
+  const targetAccountId = requestedAccountId || browserState.lastAccountId || latestCookie?.accountId || "";
+
+  if (!targetAccountId) {
+    throw new Error("missing Temu account id");
+  }
+
+  if (browserState.browser && browserState.browser.isConnected() && browserState.context) {
+    if (browserState.lastAccountId === targetAccountId) return;
+    console.error(`[launch] Account switch requested: ${browserState.lastAccountId || "none"} -> ${targetAccountId}, closing current browser context`);
+    await closeBrowser();
+  }
+
+  // 娓呯悊鏂紑鐨勬棫寮曠敤
   if (browserState.browser && !browserState.browser.isConnected()) {
     console.error("[launch] Browser disconnected, cleaning up before relaunch...");
     browserState.browser = null;
     browserState.context = null;
   }
 
-  browserState.lastAccountId = accountId;
-  const dir = path.join(process.env.APPDATA || "", "temu-automation", "cookies");
+  browserState.lastAccountId = targetAccountId;
+  const dir = path.join(getAppDataRoot(), "cookies");
   fs.mkdirSync(dir, { recursive: true });
-  browserState.cookiePath = path.join(dir, `${accountId}.json`);
+  browserState.cookiePath = path.join(dir, `${targetAccountId}.json`);
 
   const effectiveHeadless = getEffectiveHeadless(headless);
   const slowMo = Math.max(0, Math.round(50 * getDelayScale()));
@@ -335,10 +502,10 @@ export async function closeBrowser() {
   }
 }
 
-// ---- 授权弹窗处理（供 login 和 safeNewPage 共用） ----
+// ---- 鎺堟潈寮圭獥澶勭悊锛堜緵 login 鍜?safeNewPage 鍏辩敤锛?----
 const AUTH_URL_PATTERN = /seller-login|seller\.kuajingmaihuo\.com\/settle|agentseller\.temu/i;
 
-async function tryHandleAuthOnPage(targetPage, tag = "main") {
+export async function handleAuthOnPage(targetPage, tag = "main") {
   try {
     if (!targetPage || targetPage.isClosed()) return false;
     const url = targetPage.url() || "";
@@ -370,7 +537,7 @@ async function tryHandleAuthOnPage(targetPage, tag = "main") {
     await randomDelay(400, 800);
 
     const btnResult = await targetPage.evaluate(() => {
-      const keywords = ["确认授权并前往", "确认授权", "确认并前往", "授权登录", "同意并登录", "同意", "进入"];
+      const keywords = ["确认授权并前往", "确认授权", "确认并前往", "授权登录", "同意并登录", "同意", "进入", "商家中心"];
       const all = [...document.querySelectorAll('button, a, [role="button"], div[class*="btn"], div[class*="Btn"], span[class*="btn"], span[class*="Btn"]')];
       for (const kw of keywords) {
         for (const el of all) {
@@ -396,7 +563,7 @@ async function tryHandleAuthOnPage(targetPage, tag = "main") {
   }
 }
 
-// Promise 超时包装器：超时则 resolve(defaultVal)，不会 reject
+// Promise 瓒呮椂鍖呰鍣細瓒呮椂鍒?resolve(defaultVal)锛屼笉浼?reject
 function withTimeout(promise, ms, defaultVal, label = "op") {
   return Promise.race([
     promise,
@@ -407,7 +574,7 @@ function withTimeout(promise, ms, defaultVal, label = "op") {
   ]);
 }
 
-// 扫描 context 中所有页面，处理掉阻塞的授权弹窗（整体 8 秒硬超时，单页 evaluate 3 秒）
+// 鎵弿 context 涓墍鏈夐〉闈紝澶勭悊鎺夐樆濉炵殑鎺堟潈寮圭獥锛堟暣浣?8 绉掔‖瓒呮椂锛屽崟椤?evaluate 3 绉掞級
 async function drainPendingAuthPopups(context) {
   if (!context) return;
   const overallTimeoutMs = 8000;
@@ -426,7 +593,13 @@ async function drainPendingAuthPopups(context) {
             const all = [...document.querySelectorAll('button, a, [role="button"], div[class*="btn"], div[class*="Btn"], span[class*="btn"], span[class*="Btn"]')];
             return all.some((el) => {
               const t = (el.innerText || el.textContent || "").trim();
-              return t && (t.includes("确认授权") || t.includes("同意并登录") || t.includes("授权登录"));
+              return t && (
+                t.includes("确认授权")
+                || t.includes("授权登录")
+                || t.includes("同意")
+                || t.includes("商家中心")
+                || t.includes("进入")
+              );
             });
           }).catch(() => false),
           perPageEvalTimeoutMs,
@@ -435,7 +608,7 @@ async function drainPendingAuthPopups(context) {
         );
         if (hasBtn) {
           await withTimeout(
-            tryHandleAuthOnPage(p, "drain").catch(() => false),
+            handleAuthOnPage(p, "drain").catch(() => false),
             perPageAuthTimeoutMs,
             false,
             "drain.handleAuth",
@@ -448,11 +621,11 @@ async function drainPendingAuthPopups(context) {
   })(), overallTimeoutMs, undefined, "drain.overall");
 }
 
-// 开新页前的全局互斥：同一时刻只有一个调用在执行 drain + newPage
+// 寮€鏂伴〉鍓嶇殑鍏ㄥ眬浜掓枼锛氬悓涓€鏃跺埢鍙湁涓€涓皟鐢ㄥ湪鎵ц drain + newPage
 let _newPageMutex = Promise.resolve();
 export async function safeNewPage(context, { skipDrain = false } = {}) {
   const target = context || browserState.context;
-  if (!target) throw new Error("浏览器上下文不可用");
+  if (!target) throw new Error("browser context unavailable");
   const previous = _newPageMutex;
   let release;
   _newPageMutex = new Promise((resolve) => { release = resolve; });
@@ -467,17 +640,17 @@ export async function safeNewPage(context, { skipDrain = false } = {}) {
   }
 }
 
-// ---- 登录 ----
+// ---- 鐧诲綍 ----
 export async function login(phone, password) {
   const normalizedPhone = normalizeLoginPhone(phone);
   if (!normalizedPhone || !password) {
-    throw new Error("缺少登录凭据");
+    throw new Error("missing login credentials");
   }
 
   browserState.lastPhone = normalizedPhone;
   browserState.lastPassword = password;
 
-  // 浏览器可能已崩溃或断开，先确保重建
+  // 娴忚鍣ㄥ彲鑳藉凡宕╂簝鎴栨柇寮€锛屽厛纭繚閲嶅缓
   if (!browserState.browser || !browserState.browser.isConnected() || !browserState.context) {
     console.error("[login] Browser not available, restarting...");
     browserState.browser = null;
@@ -490,44 +663,53 @@ export async function login(phone, password) {
     await page.goto(TEMU_LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
     await randomDelay(2000, 4000);
 
-    // 切换到「账号登录」tab
+    // 切换到账号登录 tab。
     try {
-      const accountTab = page.locator('text=账号登录').first();
-      if (await accountTab.isVisible({ timeout: 5000 })) {
-        await accountTab.click();
-        await randomDelay(1000, 2000);
+      const accountTabSelectors = [
+        'text=账号登录',
+        '[role="tab"]:has-text("账号登录")',
+        'button:has-text("账号登录")',
+        'span:has-text("账号登录")',
+      ];
+      for (const selector of accountTabSelectors) {
+        const accountTab = page.locator(selector).first();
+        if (await accountTab.isVisible({ timeout: 1200 }).catch(() => false)) {
+          await accountTab.click();
+          await randomDelay(1000, 2000);
+          break;
+        }
       }
     } catch (e) { logSilent("login.tab", e); }
 
-    // 输入手机号
+    // 输入手机号。
     const phoneTarget = await findLoginPhoneInput(page);
     const ph = phoneTarget?.input || null;
     // Use the dedicated phone selector so we do not target the +86 country-code field.
-    if (!ph) throw new Error("未找到手机号输入框");
+    if (!ph) throw new Error("phone input not found");
     console.error(
       `[login] Using phone input selector=${phoneTarget.selector} index=${phoneTarget.index} id=${phoneTarget.meta?.id || "-"} name=${phoneTarget.meta?.name || "-"} width=${phoneTarget.meta?.width || 0}`
     );
     await ph.click();
     await randomDelay(200, 500);
     await fillInputVerified(ph, normalizedPhone, {
-      label: "手机号",
+      label: "phone",
       logPrefix: "[login]",
       normalize: normalizeFilledLoginPhone,
     });
     await randomDelay(800, 1500);
 
-    // 输入密码
+    // 杈撳叆瀵嗙爜
     const pw = await findVisibleInput(page, ['#passwordId', 'input[type="password"]']);
-    if (!pw) throw new Error("未找到密码输入框");
+    if (!pw) throw new Error("password input not found");
     await pw.click();
     await randomDelay(200, 500);
     await fillInputVerified(pw, password, {
-      label: "密码",
+      label: "瀵嗙爜",
       logPrefix: "[login]",
     });
     await randomDelay(800, 1500);
 
-    // 勾选协议
+    // 鍕鹃€夊崗璁?
     try {
       const checkbox = page.locator('input[type="checkbox"]').first();
       if (await checkbox.isVisible({ timeout: 2000 })) {
@@ -566,9 +748,39 @@ export async function login(phone, password) {
     } catch (e) { logSilent("login.checkbox", e); }
     await randomDelay(300, 600);
 
-    // 点击登录
-    const btn = await page.waitForSelector('button:has-text("登录")', { timeout: 5000 });
-    await btn.click();
+    // 点击登录，兼容 Temu 登录页按钮文案调整。
+    const loginButtonSelectors = [
+      'button:has-text("登录")',
+      'button:has-text("授权登录")',
+      'button:has-text("同意并登录")',
+      '[role="button"]:has-text("登录")',
+      'div[class*="btn"]:has-text("登录")',
+      'span[class*="btn"]:has-text("登录")',
+    ];
+    let clickedLoginButton = false;
+    for (const selector of loginButtonSelectors) {
+      const candidate = page.locator(selector).first();
+      if (await candidate.isVisible({ timeout: 1200 }).catch(() => false)) {
+        await candidate.click();
+        clickedLoginButton = true;
+        break;
+      }
+    }
+    if (!clickedLoginButton) {
+      clickedLoginButton = await page.evaluate(() => {
+        const candidates = [...document.querySelectorAll('button, [role="button"], a, div[class*="btn"], div[class*="Btn"], span[class*="btn"], span[class*="Btn"]')];
+        const target = candidates.find((node) => {
+          const text = (node.textContent || "").replace(/\s+/g, "").trim();
+          return text && /^(登录|授权登录|同意并登录)$/.test(text);
+        });
+        target?.click?.();
+        return Boolean(target);
+      }).catch(() => false);
+    }
+    if (!clickedLoginButton) {
+      const pageHint = await page.evaluate(() => (document.body?.innerText || "").trim().slice(0, 180)).catch(() => "");
+      throw new Error(`未找到登录按钮，请确认 Temu 登录页是否加载完成或是否出现验证码/风控提示。${pageHint ? `页面提示：${pageHint}` : ""}`);
+    }
     await randomDelay(2000, 3000);
 
     try {
@@ -587,9 +799,9 @@ export async function login(phone, password) {
       logSilent("login.hint", e);
     }
 
-    // 处理隐私弹窗
+    // 处理隐私/协议弹窗。
     try {
-      const agreeBtn = page.locator('button:has-text("同意并登录"), button:has-text("同意")').first();
+      const agreeBtn = page.locator('button:has-text("同意"), button:has-text("确认"), a:has-text("同意")').first();
       if (await agreeBtn.isVisible({ timeout: 3000 })) {
         await agreeBtn.click();
         await randomDelay(1000, 2000);
@@ -599,23 +811,23 @@ export async function login(phone, password) {
     await page.waitForLoadState("domcontentloaded", { timeout: 15000 });
     await randomDelay(3000, 5000);
 
-    // 检查登录结果（排除 seller-login 授权页，那是正常流程）
+    // 妫€鏌ョ櫥褰曠粨鏋滐紙鎺掗櫎 seller-login 鎺堟潈椤碉紝閭ｆ槸姝ｅ父娴佺▼锛?
     if (page.url().includes("login") && !page.url().includes("seller-login")) {
       const cap = await page.locator('[class*="captcha"], [class*="verify"], [class*="slider"], iframe[src*="captcha"]').first().isVisible().catch(() => false);
       if (cap) {
         await page.waitForURL((u) => !u.toString().includes("login"), { timeout: 120000 });
       } else {
         const e = await page.locator('[class*="error"], [class*="toast"], [class*="tip"]').first().textContent().catch(() => "");
-        throw new Error(e || "登录失败，请检查账号密码");
+        throw new Error(e || "login failed, please check credentials");
       }
     }
     await saveCookies();
 
-    // 处理履约中心授权（可能在当前 page，也可能弹到新的 window/tab）
-    // 当前页先试一次
-    await tryHandleAuthOnPage(page, "main");
+    // 澶勭悊灞ョ害涓績鎺堟潈锛堝彲鑳藉湪褰撳墠 page锛屼篃鍙兘寮瑰埌鏂扮殑 window/tab锛?
+    // 褰撳墠椤靛厛璇曚竴娆?
+    await handleAuthOnPage(page, "main");
 
-    // 扫描 context 中其它已打开的授权窗口，并等待延迟弹出的新窗口最多 10 秒
+    // 扫描 context 中其他已打开的授权窗口，并等待延迟弹出的新窗口最多 10 秒。
     const authWaitStart = Date.now();
     let authHandled = false;
     while (Date.now() - authWaitStart < 10000) {
@@ -629,11 +841,17 @@ export async function login(phone, password) {
             const all = [...document.querySelectorAll('button, a, [role="button"], div[class*="btn"], div[class*="Btn"], span[class*="btn"], span[class*="Btn"]')];
             return all.some((el) => {
               const t = (el.innerText || el.textContent || "").trim();
-              return t && (t.includes("确认授权") || t.includes("同意并登录") || t.includes("授权登录"));
+              return t && (
+                t.includes("确认授权")
+                || t.includes("授权登录")
+                || t.includes("同意")
+                || t.includes("商家中心")
+                || t.includes("进入")
+              );
             });
           }).catch(() => false);
           if (hasBtn) {
-            const ok = await tryHandleAuthOnPage(p, p === page ? "main-retry" : "popup");
+            const ok = await handleAuthOnPage(p, p === page ? "main-retry" : "popup");
             if (ok) { authHandled = true; break; }
           }
         }

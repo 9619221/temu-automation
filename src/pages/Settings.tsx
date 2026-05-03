@@ -52,6 +52,16 @@ export default function Settings() {
     appAPI?.quitAndInstallUpdate?.();
   };
 
+  const handleManualDownload = async () => {
+    const url = updateStatus.manualDownloadUrl;
+    if (!url) return;
+    try {
+      await appAPI?.openExternal?.(url);
+    } catch (e: any) {
+      message.error(e?.message || "打开下载链接失败");
+    }
+  };
+
   return (
     <div className="dashboard-shell" style={{ maxWidth: 680 }}>
       <PageHeader
@@ -103,7 +113,7 @@ export default function Settings() {
             {updateStatus.status === "error" && updateStatus.manualDownloadUrl && (
               <Button
                 icon={<CloudDownloadOutlined />}
-                onClick={() => window.open(updateStatus.manualDownloadUrl, "_blank")}
+                onClick={handleManualDownload}
               >
                 手动下载最新版
               </Button>

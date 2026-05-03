@@ -57,6 +57,41 @@ export interface ImageStudioConfig {
   gptGenerateModel?: string;
   gptGenerateApiKey?: string;
   gptGenerateBaseUrl?: string;
+  gptGenerateModelOverrides?: string;
+  gptGenerateQualityTier?: string;
+}
+
+export interface ImageStudioProductFacts {
+  productName?: string;
+  category?: string;
+  materials?: string;
+  colors?: string;
+  estimatedDimensions?: string;
+  productForm?: string;
+  countAndConfiguration?: string;
+  packagingEvidence?: string;
+  mountingPlacement?: string;
+  factGuardrails?: string[];
+}
+
+export interface ImageStudioOperatorInsights {
+  sellingPoints?: string[];
+  targetAudience?: string[];
+  usageScenes?: string[];
+  usageActions?: string[];
+  purchaseDrivers?: string[];
+  proofPoints?: string[];
+  buyerQuestions?: string[];
+  riskFlags?: string[];
+}
+
+export interface ImageStudioCreativeDirection {
+  pageGoal?: string;
+  visualStyle?: string;
+  aPlusStory?: string;
+  creativeBriefs?: Record<string, string>;
+  suggestedBadges?: unknown[];
+  imageLayouts?: Record<string, unknown>;
 }
 
 export interface ImageStudioAnalysis {
@@ -68,50 +103,97 @@ export interface ImageStudioAnalysis {
   targetAudience: string[];
   usageScenes: string[];
   estimatedDimensions: string;
-  productForm?: "2d_flat" | "3d_object";
+  productForm?: string;
+  productFacts?: ImageStudioProductFacts;
+  operatorInsights?: ImageStudioOperatorInsights;
+  creativeDirection?: ImageStudioCreativeDirection;
   creativeBriefs?: Record<string, string>;
-  suggestedBadges?: Array<{
-    badge: string;
-    painPoint: string;
-    benefit: string;
-  }>;
+  suggestedBadges?: unknown[];
   imageLayouts?: Record<string, unknown>;
-  productFacts?: {
-    productName: string;
-    category: string;
-    materials: string;
-    colors: string;
-    estimatedDimensions: string;
-    productForm?: "2d_flat" | "3d_object";
-    countAndConfiguration?: string;
-    packagingEvidence?: string;
-    mountingPlacement?: string;
-    factGuardrails?: string[];
-  };
-  operatorInsights?: {
-    sellingPoints: string[];
-    targetAudience: string[];
-    usageScenes: string[];
-    purchaseDrivers?: string[];
-    buyerQuestions?: string[];
-    riskFlags?: string[];
-  };
-  creativeDirection?: {
-    pageGoal?: string;
-    visualStyle?: string;
-    creativeBriefs?: Record<string, string>;
-    suggestedBadges?: Array<{
-      badge: string;
-      painPoint: string;
-      benefit: string;
-    }>;
-    imageLayouts?: Record<string, unknown>;
-  };
+}
+
+export interface ImageStudioOverlayPlan {
+  placement?: string;
+  allowedText?: string[];
+  notes?: string[];
+}
+
+export interface ImageStudioMainImageStrategy {
+  strategyName: string;
+  objective: string;
+  thumbnailPromise: string;
+  selectionReason: string;
+  subjectRatio: string;
+  backgroundPolicy: string;
+  propPolicy: string;
+  cropPolicy: string;
+  anglePolicy: string;
+  lightingPolicy: string;
+  overlayPolicy: string;
+  qaChecks: string[];
+}
+
+export interface ImageStudioReferenceImage {
+  index: number;
+  label: string;
+  role: string;
+  instruction: string;
+  sellableComponent?: boolean;
+}
+
+export interface ImageStudioVisibleTextSpec {
+  mode: "none" | "exact" | "post_production";
+  allowedText: string[];
+  rules: string[];
+}
+
+export interface ImageStudioImage2PromptSpec {
+  templateVersion: string;
+  task: string[];
+  referenceImages: ImageStudioReferenceImage[];
+  productInvariants: string[];
+  imageRequirements: string[];
+  composition: string[];
+  visibleText: ImageStudioVisibleTextSpec;
+  forbidden: string[];
+  runtime: string[];
+}
+
+export interface ImageStudioShotBrief {
+  version: string;
+  targetModel: string;
+  imageType: string;
+  categoryStrategy?: string;
+  proofType?: string;
+  storyIntent?: string;
+  shopperQuestion?: string;
+  conversionRole?: string;
+  mainImageStrategy?: ImageStudioMainImageStrategy;
+  image2Spec?: ImageStudioImage2PromptSpec;
+  productIdentity: string;
+  productFacts: string[];
+  purpose: string;
+  scene: string;
+  humanAction?: string;
+  mirrorReflection?: string;
+  composition: string;
+  camera: string;
+  lighting: string;
+  style: string;
+  requiredElements: string[];
+  forbiddenElements: string[];
+  textPolicy: string;
+  overlayPlan?: ImageStudioOverlayPlan;
+  sourcePlanPrompt?: string;
+  operatorNotes?: string[];
 }
 
 export interface ImageStudioPlan {
   imageType: string;
   prompt: string;
+  shotBrief?: ImageStudioShotBrief;
+  promptSource?: string;
+  compiledPrompt?: string;
   title?: string;
   headline?: string;
   subheadline?: string;
@@ -147,6 +229,17 @@ export interface ImageStudioImageScore {
   compliance: number;
   appeal: number;
   overall: number;
+  productFidelity?: number;
+  componentCompleteness?: number;
+  countAccuracy?: number;
+  imageTypeCorrectness?: number;
+  textAccuracy?: number;
+  platformCompliance?: number;
+  commercialClarity?: number;
+  visualQuality?: number;
+  pass?: boolean;
+  failureReasons?: string[];
+  redrawInstructions?: string[];
   suggestions: string[];
 }
 
@@ -250,6 +343,8 @@ export const EMPTY_IMAGE_STUDIO_CONFIG: ImageStudioConfig = {
   gptGenerateModel: "",
   gptGenerateApiKey: "",
   gptGenerateBaseUrl: "",
+  gptGenerateModelOverrides: "",
+  gptGenerateQualityTier: "",
 };
 
 export const EMPTY_IMAGE_STUDIO_ANALYSIS: ImageStudioAnalysis = {
@@ -279,13 +374,16 @@ export const EMPTY_IMAGE_STUDIO_ANALYSIS: ImageStudioAnalysis = {
     sellingPoints: [],
     targetAudience: [],
     usageScenes: [],
+    usageActions: [],
     purchaseDrivers: [],
+    proofPoints: [],
     buyerQuestions: [],
     riskFlags: [],
   },
   creativeDirection: {
     pageGoal: "",
     visualStyle: "",
+    aPlusStory: "",
     creativeBriefs: {},
     suggestedBadges: [],
     imageLayouts: {},
@@ -430,8 +528,14 @@ export function normalizeImageStudioAnalysis(input?: Partial<ImageStudioAnalysis
       sellingPoints: topSellingPoints.length > 0 ? topSellingPoints : nestedSellingPoints,
       targetAudience: topTargetAudience.length > 0 ? topTargetAudience : nestedTargetAudience,
       usageScenes: topUsageScenes.length > 0 ? topUsageScenes : nestedUsageScenes,
+      usageActions: Array.isArray(input?.operatorInsights?.usageActions)
+        ? input.operatorInsights.usageActions.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+        : [],
       purchaseDrivers: Array.isArray(input?.operatorInsights?.purchaseDrivers)
         ? input.operatorInsights.purchaseDrivers.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+        : [],
+      proofPoints: Array.isArray(input?.operatorInsights?.proofPoints)
+        ? input.operatorInsights.proofPoints.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
         : [],
       buyerQuestions: Array.isArray(input?.operatorInsights?.buyerQuestions)
         ? input.operatorInsights.buyerQuestions.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
@@ -443,6 +547,7 @@ export function normalizeImageStudioAnalysis(input?: Partial<ImageStudioAnalysis
     creativeDirection: {
       pageGoal: typeof input?.creativeDirection?.pageGoal === "string" ? input.creativeDirection.pageGoal : "",
       visualStyle: typeof input?.creativeDirection?.visualStyle === "string" ? input.creativeDirection.visualStyle : "",
+      aPlusStory: typeof input?.creativeDirection?.aPlusStory === "string" ? input.creativeDirection.aPlusStory : "",
       creativeBriefs: Object.keys(topCreativeBriefs).length > 0 ? topCreativeBriefs : nestedCreativeBriefs,
       suggestedBadges: topSuggestedBadges.length > 0 ? topSuggestedBadges : nestedSuggestedBadges,
       imageLayouts: Object.keys(topImageLayouts).length > 0 ? topImageLayouts : nestedImageLayouts,

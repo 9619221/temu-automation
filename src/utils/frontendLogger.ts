@@ -7,8 +7,19 @@ export interface FrontendLogEntry {
   id: string;
   timestamp: number;
   level: FrontendLogLevel;
-  source: "console" | "window-error" | "unhandledrejection";
+  source:
+    | "console"
+    | "window-error"
+    | "unhandledrejection"
+    | "workflow-pack"
+    | "main"
+    | "worker"
+    | "worker-rpc"
+    | "renderer"
+    | "image-studio";
   message: string;
+  detail?: string;
+  taskId?: string;
 }
 
 declare global {
@@ -59,6 +70,38 @@ function normalizeConsoleLevel(level: FrontendLogLevel, message: string): Fronte
   return level;
 }
 
+function shouldIgnoreConsoleMessage(message: string): boolean {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) return false;
+  return (
+    normalized.includes("[antd: dropdown]")
+    || normalized.includes("[antd: message]")
+    || normalized.includes("[antd: card]")
+    || normalized.includes("react router future flag")
+    || normalized.includes("static function can not")
+    || normalized.includes("dropdownrender")
+    || normalized.includes("bodystyle")
+  );
+}
+
+function isDevServerRuntime() {
+  return ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
+}
+
+function shouldIgnoreRuntimeNoise(message: string): boolean {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized || !isDevServerRuntime()) return false;
+
+  return (
+    normalized.includes("[hmr]")
+    || normalized.includes("failed to reload /src/")
+  );
+}
+
+function shouldIgnoreLogEntry(entry: FrontendLogEntry) {
+  return shouldIgnoreRuntimeNoise(entry.message || "");
+}
+
 function flushLogs() {
   if (flushTimer !== null) {
     window.clearTimeout(flushTimer);
@@ -97,7 +140,11 @@ export async function initFrontendLogger() {
   try {
     const existing = await getStore()?.get?.(FRONTEND_LOG_STORE_KEY);
     if (Array.isArray(existing)) {
-      logBuffer = existing.slice(-MAX_FRONTEND_LOGS);
+      const filtered = existing.filter((entry) => !shouldIgnoreLogEntry(entry));
+      logBuffer = filtered.slice(-MAX_FRONTEND_LOGS);
+      if (filtered.length !== existing.length) {
+        await getStore()?.set?.(FRONTEND_LOG_STORE_KEY, logBuffer);
+      }
     }
   } catch {
     // Ignore initialization failures.
@@ -109,6 +156,8 @@ export async function initFrontendLogger() {
     console[method] = (...args: unknown[]) => {
       original(...args);
       const message = formatArgs(args);
+      if (shouldIgnoreConsoleMessage(message)) return;
+      if (shouldIgnoreRuntimeNoise(message)) return;
       appendLog(createLog(normalizeConsoleLevel(method, message), "console", message));
     };
   }
@@ -118,11 +167,14 @@ export async function initFrontendLogger() {
       event.message,
       event.filename ? `@ ${event.filename}:${event.lineno}:${event.colno}` : "",
     ].filter(Boolean).join(" ");
+    if (shouldIgnoreRuntimeNoise(message)) return;
     appendLog(createLog("error", "window-error", message || safeStringify(event.error)));
   });
 
   window.addEventListener("unhandledrejection", (event) => {
-    appendLog(createLog("error", "unhandledrejection", safeStringify(event.reason)));
+    const message = safeStringify(event.reason);
+    if (shouldIgnoreRuntimeNoise(message)) return;
+    appendLog(createLog("error", "unhandledrejection", message));
   });
 }
 

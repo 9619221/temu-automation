@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { createRequire } from "module";
 import { spawn } from "child_process";
+import { findChromeExe } from "./browser.mjs";
 import { importFromRows, importFromApiItems, searchProducts, getStats, getTopProducts, getDbPath, getRowCount } from "./yunqi-db.mjs";
 
 const APPDATA_DIR = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation");
@@ -561,16 +562,12 @@ function closeCdpChrome() {
 }
 
 function findChromeExeForCdp() {
-  const candidates = [
-    "C:/Program Files/Google/Chrome/Application/chrome.exe",
-    "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
-    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Google/Chrome/Application/chrome.exe"),
-    "C:/Program Files/Microsoft/Edge/Application/msedge.exe",
-  ].filter(Boolean);
-  for (const p of candidates) {
-    try { if (fs.existsSync(p)) return p; } catch {}
+  try {
+    return findChromeExe();
+  } catch (error) {
+    console.error("[yunqi-cdp] Browser executable not found:", error?.message || error);
+    return null;
   }
-  return null;
 }
 
 export async function isCdpAlive() {
@@ -583,7 +580,7 @@ export async function isCdpAlive() {
 /** 启动独立 Chrome 带 CDP 调试端口（不影响用户正在用的 Chrome） */
 export async function launchCdpChromeProcess(startUrl) {
   const chromeExe = findChromeExeForCdp();
-  if (!chromeExe) throw new Error("未找到系统 Chrome，请安装 Google Chrome");
+  if (!chromeExe) throw new Error("未找到系统 Chrome 或 Edge，请安装 Google Chrome / Microsoft Edge，或把浏览器快捷方式放到桌面/开始菜单");
   fs.mkdirSync(YUNQI_CDP_USER_DATA, { recursive: true });
 
   if (await isCdpAlive()) {

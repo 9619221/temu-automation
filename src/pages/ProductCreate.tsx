@@ -217,8 +217,8 @@ const ERROR_CATEGORY_HINTS: Record<string, string> = {
   "image_gen:network": "素材准备失败：无法连接服务，请检查网络/代理（常见于系统代理拦截 grsaiapi.com / vectorengine.ai）",
   "image_gen:auth": "素材准备失败：API 密钥无效或已过期，请在设置 → AI 服务中更新密钥",
   "image_gen:quota": "素材准备失败：额度不足或已触发限流，请充值或稍后再试",
-  "image_gen:worker_down": "素材准备失败：处理服务未启动，请重启客户端",
-  "image_gen:timeout": "素材准备超时，上游响应过慢，请稍后重试",
+  "image_gen:worker_down": "素材准备失败：处理服务未启动，请重启软件",
+  "image_gen:timeout": "素材准备超时：AI 出图服务响应过慢，系统已自动重试仍未完成，请稍后重试或减少本批数量",
   "image_gen:unknown": "素材准备失败，请稍后重试",
 
   "image_upload:network": "图片上传卖家中心失败：网络异常，请检查网络后重试",
@@ -448,6 +448,7 @@ function BatchCreate() {
   });
   const progressRef = useRef<any>(null);
   const runningStateRef = useRef(false);
+  const workflowStartInFlightRef = useRef(false);
 
   const stopPolling = () => {
     if (progressRef.current) {
@@ -800,6 +801,11 @@ function BatchCreate() {
       message.warning("请先上传商品表格");
       return;
     }
+    if (workflowStartInFlightRef.current || packGenerating || running) {
+      message.warning("已有新上品流程正在执行，请勿重复启动。");
+      return;
+    }
+    workflowStartInFlightRef.current = true;
     setPackGenerating(true);
     setRunning(true);
     setPaused(false);
@@ -860,6 +866,7 @@ function BatchCreate() {
       });
     };
 
+    let preserveRunningState = false;
     try {
       const response = await api?.generatePackImages?.({
         taskId,
@@ -872,6 +879,15 @@ function BatchCreate() {
         workflowQuantityPriceMultipliers: { 1: 4, 2: 3, 3: 2.5, 4: 2 },
         createDrafts: true,
       });
+      if (response?.accepted === false) {
+        if (response.task) {
+          preserveRunningState = Boolean(response.task?.running || ["running", "pausing", "paused"].includes(response.task?.status));
+          applyTaskSnapshot(response.task);
+          syncTaskHistory(response.task);
+        }
+        message.warning(response.message || "已有新上品流程正在执行，请勿重复启动。");
+        return;
+      }
       const workflowRows = buildWorkflowRows(response);
       const workflowTask = response?.task || (response?.taskId ? {
         taskId: response.taskId,
@@ -933,6 +949,7 @@ function BatchCreate() {
       message.success(`新上品流程完成：完整 ${ok} 个，部分 ${partial} 个`);
     } catch (error: any) {
       if (error?.task) {
+        preserveRunningState = Boolean(error.task?.running || ["running", "pausing", "paused"].includes(error.task?.status));
         applyTaskSnapshot(error.task);
         syncTaskHistory(error.task);
       }
@@ -949,8 +966,9 @@ function BatchCreate() {
       });
       message.error(error?.message || "新上品流程启动失败");
     } finally {
+      workflowStartInFlightRef.current = false;
       setPackGenerating(false);
-      setRunning(false);
+      if (!preserveRunningState) setRunning(false);
     }
   };
 
@@ -1016,6 +1034,7 @@ function BatchCreate() {
   const packPartialCount = packResult?.partialCount || 0;
   const packFailCount = packResult?.failCount || 0;
   const pausePending = progressInfo?.status === "pausing";
+  const workflowTaskActive = packGenerating || running || paused || pausePending;
   const hasTaskProgress = Boolean(
     running
     || paused
@@ -1321,7 +1340,7 @@ function BatchCreate() {
                   </Text>
                 </div>
                 <Space wrap className="app-table-meta">
-                  <Tag color={batchTagColor}>{packGenerating ? "处理中" : batchStatusLabel}</Tag>
+                  <Tag color={batchTagColor}>{batchStatusLabel}</Tag>
                   {hasFile ? <Tag>{currentFileName}</Tag> : <Tag>待上传商品表</Tag>}
                   {hasFile ? <Tag>{`从第 ${startRow + 1} 行开始`}</Tag> : null}
                   {preview?.total ? <Tag color="blue">{`共 ${preview.total} 个商品`}</Tag> : null}
@@ -1376,6 +1395,16 @@ function BatchCreate() {
                 >
                   {packGenerating ? "处理中..." : `开始批量创建（${count} 个）`}
                 </Button>
+                {workflowTaskActive ? (
+                  <Button
+                    icon={paused ? <PlayCircleOutlined /> : <PauseCircleOutlined />}
+                    onClick={togglePause}
+                    className="create-secondary-button"
+                    disabled={pausePending}
+                  >
+                    {pausePending ? "暂停中..." : paused ? "继续处理" : "暂停处理"}
+                  </Button>
+                ) : null}
                 {hasFile ? <Button onClick={resetSheetState}>清空文件</Button> : null}
               </div>
             </div>

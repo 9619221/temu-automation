@@ -8,13 +8,117 @@ const crypto = require("crypto");
 const XLSX = require("xlsx");
 const { autoUpdater } = require("electron-updater");
 const { getDefaultCredentials } = require("./default-credentials.cjs");
+const {
+  closeErp,
+  initializeErp,
+  registerErpIpcHandlers,
+  runScheduledOrderSync,
+  resetScheduledOrderSyncState,
+  runScheduledMessageReprocess,
+} = require("./erp/ipc.cjs");
+
+const MAX_DIAGNOSTIC_LOG_BYTES = 5 * 1024 * 1024;
+
+function getDiagnosticLogFilePath() {
+  try {
+    return path.join(app.getPath("userData"), "diagnostic.log");
+  } catch {
+    return path.join(process.env.APPDATA || process.cwd(), "temu-automation", "diagnostic.log");
+  }
+}
+
+function diagnosticErrorToDetail(value) {
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message,
+      stack: value.stack || "",
+      code: value.code || "",
+    };
+  }
+  if (value && typeof value === "object") {
+    try {
+      return JSON.parse(JSON.stringify(value));
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value ?? "");
+}
+
+function rotateDiagnosticLogIfNeeded(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return;
+    const stat = fs.statSync(filePath);
+    if (stat.size <= MAX_DIAGNOSTIC_LOG_BYTES) return;
+    fs.copyFileSync(filePath, `${filePath}.bak`);
+    fs.writeFileSync(filePath, "", "utf8");
+  } catch {}
+}
+
+function appendDiagnosticLog(entry = {}) {
+  try {
+    const logFile = getDiagnosticLogFilePath();
+    fs.mkdirSync(path.dirname(logFile), { recursive: true });
+    rotateDiagnosticLogIfNeeded(logFile);
+    const payload = {
+      timestamp: new Date().toISOString(),
+      level: entry.level || "info",
+      source: entry.source || "main",
+      message: String(entry.message || ""),
+      detail: entry.detail === undefined ? "" : entry.detail,
+      taskId: entry.taskId || "",
+    };
+    fs.appendFileSync(logFile, `${JSON.stringify(payload)}\n`, "utf8");
+  } catch {}
+}
+
+function inferDiagnosticLevel(message, fallback = "info") {
+  const text = String(message || "");
+  if (/uncaught|unhandled|failed|failure|error|exception|crash|gone|timeout|ECONN|EPIPE|ERR_|HTTP 4|HTTP 5|失败|异常|崩溃|超时/i.test(text)) {
+    return "error";
+  }
+  if (/warn|warning|retry|paused|pause|slow|stuck|interrupted|重试|警告|暂停|中断|慢/i.test(text)) {
+    return "warn";
+  }
+  return fallback;
+}
+
+function appendDiagnosticText(source, text, extra = {}) {
+  const lines = String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  for (const line of lines) {
+    appendDiagnosticLog({
+      source,
+      level: inferDiagnosticLevel(line, extra.level || "info"),
+      message: line.slice(0, 1200),
+      detail: extra.detail || "",
+      taskId: extra.taskId || "",
+    });
+  }
+}
+
+if (process.env.APP_USER_DATA) {
+  app.setPath("userData", process.env.APP_USER_DATA);
+}
 
 // 全局捕获未处理异常，防止 EPIPE 等 pipe 错误崩溃 Electron
 process.on("uncaughtException", (err) => {
   if (err.code === "EPIPE" || err.code === "ERR_STREAM_DESTROYED") return; // 忽略 pipe 错误
+  appendDiagnosticLog({
+    source: "main",
+    level: "error",
+    message: `Uncaught exception: ${err?.message || err}`,
+    detail: diagnosticErrorToDetail(err),
+  });
   console.error("[Main] Uncaught exception:", err.message);
 });
 process.on("unhandledRejection", (reason) => {
+  appendDiagnosticLog({
+    source: "main",
+    level: "error",
+    message: `Unhandled rejection: ${reason?.message || reason}`,
+    detail: diagnosticErrorToDetail(reason),
+  });
   console.error("[Main] Unhandled rejection:", reason);
 });
 
@@ -500,6 +604,14 @@ function filterAutoPricingProductTable(inputPath) {
 // /releases/latest/download/ 是 GitHub 的稳定别名,不用每次发版改 URL
 const UPDATE_FEED_URL = "https://gh-proxy.com/https://github.com/9619221/temu-automation/releases/latest/download/";
 const UPDATE_MANUAL_DOWNLOAD_URL = "https://gh-proxy.com/https://github.com/9619221/temu-automation/releases/latest";
+const UPDATE_CONFIG_FILE_NAME = "app-update.yml";
+const UPDATE_CONFIG_CONTENT = [
+  "owner: '9619221'",
+  "repo: temu-automation",
+  "provider: github",
+  "updaterCacheDirName: temu-automation-updater",
+  "",
+].join("\n");
 
 let updateState = {
   status: "idle",
@@ -517,18 +629,75 @@ function broadcastUpdateState(patch) {
   }
 }
 
+function writeUpdateConfigFile(filePath) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, UPDATE_CONFIG_CONTENT, "utf8");
+}
+
+function ensureAppUpdateConfig() {
+  if (!app.isPackaged) return null;
+
+  const candidates = [];
+  if (process.resourcesPath) {
+    candidates.push(path.join(process.resourcesPath, UPDATE_CONFIG_FILE_NAME));
+  }
+  try {
+    candidates.push(path.join(app.getPath("userData"), UPDATE_CONFIG_FILE_NAME));
+  } catch {}
+
+  for (const filePath of candidates) {
+    if (!filePath) continue;
+    if (fs.existsSync(filePath)) {
+      autoUpdater.updateConfigPath = filePath;
+      return { filePath, generated: false };
+    }
+  }
+
+  for (const filePath of candidates) {
+    if (!filePath) continue;
+    try {
+      writeUpdateConfigFile(filePath);
+      autoUpdater.updateConfigPath = filePath;
+      appendDiagnosticLog({
+        source: "main",
+        level: "warn",
+        message: `Generated missing ${UPDATE_CONFIG_FILE_NAME}`,
+        detail: { filePath },
+      });
+      return { filePath, generated: true };
+    } catch (error) {
+      appendDiagnosticLog({
+        source: "main",
+        level: "warn",
+        message: `Unable to write ${UPDATE_CONFIG_FILE_NAME}: ${error?.message || error}`,
+        detail: { filePath },
+      });
+    }
+  }
+
+  return null;
+}
+
+function applyAutoUpdaterFeedUrl() {
+  autoUpdater.setFeedURL({
+    provider: "generic",
+    url: UPDATE_FEED_URL,
+  });
+}
+
 function configureAutoUpdater() {
   if (!app.isPackaged) {
     broadcastUpdateState({ status: "dev", message: "开发环境不支持自动更新" });
     return;
   }
+  const updateConfig = ensureAppUpdateConfig();
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
-  autoUpdater.setFeedURL({
-    provider: "generic",
-    url: UPDATE_FEED_URL,
+  applyAutoUpdaterFeedUrl();
+  broadcastUpdateState({
+    message: updateConfig?.generated ? "更新源: gh-proxy 镜像（已修复本机更新配置）" : "更新源: gh-proxy 镜像",
+    manualDownloadUrl: UPDATE_MANUAL_DOWNLOAD_URL,
   });
-  broadcastUpdateState({ message: "更新源: gh-proxy 镜像", manualDownloadUrl: UPDATE_MANUAL_DOWNLOAD_URL });
 }
 
 autoUpdater.on("checking-for-update", () => {
@@ -767,6 +936,17 @@ function httpPost(port, body, options = {}) {
               if (json?.action) error.action = json.action;
               if (typeof json?.duration === "number") error.duration = json.duration;
               if (json?.screenshotFile) error.screenshotFile = json.screenshotFile;
+              appendDiagnosticLog({
+                source: "worker-rpc",
+                level: "error",
+                message: `${json?.action || actionLabel} failed: ${error.message}`,
+                detail: {
+                  action: json?.action || actionLabel,
+                  code,
+                  duration: json?.duration,
+                  screenshotFile: json?.screenshotFile,
+                },
+              });
               reject(error);
             }
             else resolve(json.data);
@@ -778,6 +958,22 @@ function httpPost(port, body, options = {}) {
     );
     req.on("error", (e) => reject(new Error("Worker 通信失败: " + e.message)));
     req.on("timeout", () => { req.destroy(); reject(new Error(`Worker 请求超时: ${actionLabel}`)); });
+    req.on("error", (e) => {
+      appendDiagnosticLog({
+        source: "worker-rpc",
+        level: "error",
+        message: `${actionLabel} communication failed: ${e.message}`,
+        detail: diagnosticErrorToDetail(e),
+      });
+    });
+    req.on("timeout", () => {
+      appendDiagnosticLog({
+        source: "worker-rpc",
+        level: "error",
+        message: `${actionLabel} request timed out after ${timeout}ms`,
+        detail: { action: actionLabel, timeout },
+      });
+    });
     req.setTimeout(timeout);
     req.write(data);
     req.end();
@@ -925,7 +1121,11 @@ async function startWorker(options = {}) {
     // 只读 stderr 用于调试日志（安全处理 EPIPE）
     if (worker.stderr) {
       worker.stderr.on("data", (d) => {
-        try { console.error("[Worker]", d.toString()); } catch {}
+        try {
+          const text = d.toString();
+          console.error("[Worker]", text);
+          appendDiagnosticText("worker", text);
+        } catch {}
       });
       worker.stderr.on("error", () => {}); // 忽略 pipe 错误
     }
@@ -935,6 +1135,12 @@ async function startWorker(options = {}) {
 
     worker.on("exit", (code) => {
       console.log(`[Main] Worker exited: ${code}`);
+      appendDiagnosticLog({
+        source: "worker",
+        level: code === 0 ? "warn" : "error",
+        message: `Worker exited with code ${code}`,
+        detail: { code, port: workerPort },
+      });
       markAutoPricingTaskInterrupted(`批量上品任务已中断，worker 进程退出 (code=${code})。请检查 worker 日志后重新发起。`);
       stopAutoPricingTaskSync();
       worker = null;
@@ -945,6 +1151,12 @@ async function startWorker(options = {}) {
 
     worker.on("error", (err) => {
       try { console.error("[Main] Worker spawn error:", err.message); } catch {}
+      appendDiagnosticLog({
+        source: "worker",
+        level: "error",
+        message: `Worker spawn error: ${err?.message || err}`,
+        detail: diagnosticErrorToDetail(err),
+      });
       markAutoPricingTaskInterrupted("批量上品任务已中断，worker 启动失败。");
       stopAutoPricingTaskSync();
       worker = null;
@@ -1019,7 +1231,7 @@ function resolveSendCmdTimeout(params, requestOptions) {
   return 0;
 }
 
-const LONG_RUNNING_WORKER_ACTIONS = new Set(["auto_pricing", "workflow_pack_images", "competitor_auto_register"]);
+const LONG_RUNNING_WORKER_ACTIONS = new Set(["auto_pricing", "workflow_pack_images", "competitor_auto_register", "local_1688_inquiry"]);
 
 async function sendCmd(action, params = {}, requestOptions = {}) {
   if (!workerReady) {
@@ -1064,6 +1276,83 @@ function summarizeAutoPricingResults(results) {
     successCount,
     failCount: list.length - successCount,
   };
+}
+
+function isInlineImageDataUrl(value) {
+  return typeof value === "string" && /^data:image\//i.test(value);
+}
+
+function compactAutoPricingImageForStore(image = {}) {
+  if (!image || typeof image !== "object") return image;
+  const next = { ...image };
+  if (isInlineImageDataUrl(next.imageUrl)) {
+    next.inlineImageBytes = next.imageUrl.length;
+    next.imageUrl = typeof next.kwcdnUrl === "string" && next.kwcdnUrl ? next.kwcdnUrl : "";
+  }
+  if (next.filter && typeof next.filter === "object" && next.filter.raw) {
+    next.filter = { ...next.filter };
+    delete next.filter.raw;
+  }
+  return next;
+}
+
+function pickDraftIdentity(value = {}) {
+  if (!value || typeof value !== "object") return {};
+  return {
+    draftId: value.draftId || value.productDraftId || "",
+    productDraftId: value.productDraftId || value.draftId || "",
+    productId: value.productId || "",
+    skcId: value.skcId || "",
+    skuId: value.skuId || "",
+    step: value.step || "",
+    errorCode: value.errorCode || "",
+    debugFile: value.debugFile || "",
+    draftSaved: Boolean(value.draftSaved),
+    verificationReason: value.verificationReason || "",
+    message: value.message || "",
+    success: value.success,
+  };
+}
+
+function compactAutoPricingResultForStore(item = {}) {
+  if (!item || typeof item !== "object") return item;
+  const next = { ...item };
+  const draftIdentity = pickDraftIdentity(next.draftResult || next.result || {});
+
+  next.draftId = next.draftId || draftIdentity.draftId || "";
+  next.productDraftId = next.productDraftId || draftIdentity.productDraftId || "";
+  next.productId = next.productId || draftIdentity.productId || "";
+  next.skcId = next.skcId || draftIdentity.skcId || "";
+  next.skuId = next.skuId || draftIdentity.skuId || "";
+  next.draftStep = next.draftStep || draftIdentity.step || "";
+  next.errorCode = next.errorCode || draftIdentity.errorCode || "";
+  next.debugFile = next.debugFile || draftIdentity.debugFile || "";
+  next.verificationReason = next.verificationReason || draftIdentity.verificationReason || "";
+  if (typeof next.draftSaved !== "boolean" && draftIdentity.draftSaved) next.draftSaved = true;
+
+  if (Array.isArray(next.images)) {
+    next.images = next.images.map((image) => compactAutoPricingImageForStore(image));
+  }
+  if (next.originalFilter && typeof next.originalFilter === "object" && next.originalFilter.raw) {
+    next.originalFilter = { ...next.originalFilter };
+    delete next.originalFilter.raw;
+  }
+  if (next.result && typeof next.result === "object") {
+    next.result = pickDraftIdentity(next.result);
+  }
+  delete next.draftResult;
+  return next;
+}
+
+function hasHeavyAutoPricingPayload(task = {}) {
+  return Array.isArray(task?.results) && task.results.some((result) => (
+    Boolean(result?.draftResult)
+    || Boolean(result?.originalFilter?.raw)
+    || (Array.isArray(result?.images) && result.images.some((image) => (
+      isInlineImageDataUrl(image?.imageUrl)
+      || Boolean(image?.filter?.raw)
+    )))
+  ));
 }
 
 function isSafeStorageReady() {
@@ -1250,7 +1539,7 @@ function appendCreateHistoryEntries(entries) {
 }
 
 function normalizeAutoPricingTask(task = {}) {
-  const results = Array.isArray(task.results) ? task.results : [];
+  const results = Array.isArray(task.results) ? task.results.map((item) => compactAutoPricingResultForStore(item)) : [];
   const summary = summarizeAutoPricingResults(results);
   const taskId = typeof task.taskId === "string" ? task.taskId : `pricing_${Date.now()}`;
   const flowType = task.flowType === "workflow" || task.mode === "workflow" || /^workflow_pack_/.test(taskId)
@@ -1287,15 +1576,20 @@ function readAutoPricingState() {
       autoPricingCurrentTaskId = null;
       return getDefaultAutoPricingState();
     }
+    const needsCompaction = Array.isArray(raw.tasks) && raw.tasks.some((task) => hasHeavyAutoPricingPayload(task));
     const tasks = Array.isArray(raw.tasks) ? raw.tasks.map((task) => normalizeAutoPricingTask(task)) : [];
     const activeTaskId = typeof raw.activeTaskId === "string"
       ? raw.activeTaskId
       : (tasks[0]?.taskId || null);
     autoPricingCurrentTaskId = activeTaskId;
-    return {
+    const nextState = {
       activeTaskId,
       tasks,
     };
+    if (needsCompaction) {
+      writeStoreJsonAtomic(getStoreFilePath(AUTO_PRICING_TASKS_KEY), nextState);
+    }
+    return nextState;
   } catch {
     autoPricingCurrentTaskId = null;
     return getDefaultAutoPricingState();
@@ -1318,6 +1612,13 @@ function getAutoPricingTask(taskId) {
     return state.tasks.find((task) => task.taskId === taskId) || null;
   }
   return state.tasks.find((task) => task.taskId === state.activeTaskId) || state.tasks[0] || null;
+}
+
+function isAutoPricingTaskActive(task) {
+  return Boolean(
+    task
+    && (task.running || ["running", "pausing", "paused"].includes(task.status))
+  );
 }
 
 function listAutoPricingTasks() {
@@ -1557,6 +1858,14 @@ function getAutoPricingProgressPayload(task) {
   return normalizeAutoPricingTask(task);
 }
 
+function getAutoPricingTaskSummaryPayload(task) {
+  const normalized = getAutoPricingProgressPayload(task);
+  return {
+    ...normalized,
+    results: [],
+  };
+}
+
 function stopWorker() {
   stopAutoPricingTaskSync();
   workerStartPromise = null;
@@ -1594,6 +1903,12 @@ const IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG = Object.freeze({
   generateBaseUrl: "https://grsaiapi.com",
   gptGenerateModel: "gpt-image-2",
   gptGenerateBaseUrl: "https://grsaiapi.com",
+  gptGenerateModelOverrides: JSON.stringify({
+    features: "gpt-image-2",
+    closeup: "gpt-image-2",
+    dimensions: "gpt-image-2",
+  }),
+  gptGenerateQualityTier: "premium",
 });
 const IMAGE_STUDIO_RUNTIME_CONFIG_KEYS = Object.freeze([
   "analyzeModel",
@@ -1605,6 +1920,8 @@ const IMAGE_STUDIO_RUNTIME_CONFIG_KEYS = Object.freeze([
   "gptGenerateModel",
   "gptGenerateApiKey",
   "gptGenerateBaseUrl",
+  "gptGenerateModelOverrides",
+  "gptGenerateQualityTier",
 ]);
 
 // AI 出图 profile：default = 原有生图页，gpt = 新增 GPT 版生图页（共享子进程，切换时重启）
@@ -2189,6 +2506,8 @@ function readImageStudioRuntimeConfig(projectInfo = getImageStudioProjectInfo())
     gptGenerateModel: resolveImageStudioRuntimeConfigValue("gptGenerateModel", envLocalVars.GPT_GENERATE_MODEL, process.env.GPT_GENERATE_MODEL, baked.gptGenerateModel, IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG.gptGenerateModel),
     gptGenerateApiKey: resolveImageStudioRuntimeConfigValue("gptGenerateApiKey", envLocalVars.GPT_GENERATE_API_KEY, process.env.GPT_GENERATE_API_KEY, baked.gptGenerateApiKey, ""),
     gptGenerateBaseUrl: resolveImageStudioRuntimeConfigValue("gptGenerateBaseUrl", envLocalVars.GPT_GENERATE_BASE_URL, process.env.GPT_GENERATE_BASE_URL, baked.gptGenerateBaseUrl, IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG.gptGenerateBaseUrl),
+    gptGenerateModelOverrides: resolveImageStudioRuntimeConfigValue("gptGenerateModelOverrides", envLocalVars.GPT_GENERATE_MODEL_OVERRIDES, process.env.GPT_GENERATE_MODEL_OVERRIDES, baked.gptGenerateModelOverrides, IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG.gptGenerateModelOverrides),
+    gptGenerateQualityTier: resolveImageStudioRuntimeConfigValue("gptGenerateQualityTier", envLocalVars.GPT_GENERATE_QUALITY_TIER, process.env.GPT_GENERATE_QUALITY_TIER, baked.gptGenerateQualityTier, IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG.gptGenerateQualityTier),
   };
   return normalizeImageStudioAnalyzeConfig(config);
 }
@@ -2200,11 +2519,15 @@ function buildImageStudioRuntimeConfigPayload(projectInfo = getImageStudioProjec
     runtimeConfig.generateModel = runtimeConfig.gptGenerateModel || runtimeConfig.generateModel;
     runtimeConfig.generateApiKey = runtimeConfig.gptGenerateApiKey || runtimeConfig.generateApiKey;
     runtimeConfig.generateBaseUrl = runtimeConfig.gptGenerateBaseUrl || runtimeConfig.generateBaseUrl;
+    runtimeConfig.generateModelOverrides = runtimeConfig.gptGenerateModelOverrides || "";
+    runtimeConfig.generateQualityTier = runtimeConfig.gptGenerateQualityTier || "";
   }
 
   delete runtimeConfig.gptGenerateModel;
   delete runtimeConfig.gptGenerateApiKey;
   delete runtimeConfig.gptGenerateBaseUrl;
+  delete runtimeConfig.gptGenerateModelOverrides;
+  delete runtimeConfig.gptGenerateQualityTier;
 
   return Object.fromEntries(
     Object.entries(runtimeConfig).filter(([key, value]) => {
@@ -2258,6 +2581,7 @@ function routeNeedsImageStudioRuntimeConfig(routePath) {
     "/api/regenerate-analysis",
     "/api/translate",
     "/api/plans",
+    "/api/designer/",
     "/api/generate",
     "/api/score",
   ].some((pattern) => routePath.startsWith(pattern));
@@ -2511,6 +2835,8 @@ async function normalizeAnalyzeModelBeforeRequest() {
 const IMAGE_STUDIO_LONG_RUNNING_ROUTES = new Set([
   "/api/designer/run",
   "/api/designer/compose",
+  "/api/designer/generate-stream",
+  "/api/designer/regenerate-slot",
   "/api/generate",
   "/api/regenerate",
   "/api/compose",
@@ -2527,12 +2853,32 @@ function getImageStudioLongRunningFetch() {
       keepAliveTimeout: 10_000,
       keepAliveMaxTimeout: 10_000,
     });
-    imageStudioLongRunningFetchPair = { fetch: undici.fetch, agent };
+    imageStudioLongRunningFetchPair = { fetch: undici.fetch, agent, FormData: undici.FormData };
   } catch (err) {
     console.error("[Main] Failed to init undici long-running fetch:", err?.message || err);
     imageStudioLongRunningFetchPair = null;
   }
   return imageStudioLongRunningFetchPair;
+}
+
+function isNativeFormDataBody(body) {
+  return typeof FormData !== "undefined" && body instanceof FormData;
+}
+
+function createUndiciFormDataBody(body, UndiciFormData) {
+  if (!isNativeFormDataBody(body) || typeof UndiciFormData !== "function") {
+    return body;
+  }
+
+  const formData = new UndiciFormData();
+  for (const [key, value] of body.entries()) {
+    if (typeof value === "string") {
+      formData.append(key, value);
+    } else {
+      formData.append(key, value, value?.name || "file");
+    }
+  }
+  return formData;
 }
 
 async function imageStudioFetch(routePath, init = {}) {
@@ -2552,6 +2898,7 @@ async function imageStudioFetch(routePath, init = {}) {
       return longRunningFetch.fetch(`${status.url}${routePath}`, {
         ...init,
         headers,
+        body: createUndiciFormDataBody(init.body, longRunningFetch.FormData),
         dispatcher: longRunningFetch.agent,
       });
     }
@@ -2565,6 +2912,12 @@ async function imageStudioFetch(routePath, init = {}) {
     return await request();
   } catch (error) {
     if (!isImageStudioLocalServiceConnectionError(error)) {
+      throw error;
+    }
+    // 长任务路由：fetch 失败有可能只是慢/超时，不要立刻重启服务（会让任务白跑）
+    // 长任务的重启-重试改成只对 connect/socket 立即失败这类硬错误生效
+    if (isLongRunning) {
+      appendImageStudioLog(`[http] ${routePath} fetch failed (long route，不重启服务): ${getImageStudioErrorText(error)}`);
       throw error;
     }
     appendImageStudioLog(`[http] ${routePath} local service unavailable，正在重启后重试: ${getImageStudioErrorText(error)}`);
@@ -2783,7 +3136,7 @@ async function streamImageStudioGenerate(target, jobId, payload = {}) {
     generatedImages.push({
       imageType: eventPayload.imageType || "",
       imageUrl: eventPayload.imageUrl,
-      prompt: currentPlan?.prompt || "",
+      prompt: typeof eventPayload.prompt === "string" ? eventPayload.prompt : (currentPlan?.prompt || ""),
       suggestion: typeof currentPlan?.suggestion === "string" ? currentPlan.suggestion : "",
       createdAt: Date.now(),
     });
@@ -3004,9 +3357,15 @@ async function streamImageStudioGenerate(target, jobId, payload = {}) {
 async function createWindow() {
   Menu.setApplicationMenu(null);
 
+  // 多实例区分：通过 TEMU_WINDOW_TITLE 覆盖标题，或通过 TEMU_TITLE_PREFIX 给标题加前缀
+  // 例：TEMU_WINDOW_TITLE="gpt生图" → "gpt生图"
+  // 例：TEMU_TITLE_PREFIX="[Claude 1421]" → "[Claude 1421] Temu 自动化运营工具"
+  const titlePrefix = process.env.TEMU_TITLE_PREFIX ? `${process.env.TEMU_TITLE_PREFIX} ` : "";
+  const finalTitle = process.env.TEMU_WINDOW_TITLE || `${titlePrefix}Temu 自动化运营工具`;
+
   mainWindow = new BrowserWindow({
     width: 1280, height: 800,
-    title: WINDOW_TITLE,
+    title: finalTitle,
     show: false,
     backgroundColor: "#ffffff",
     autoHideMenuBar: true,
@@ -3017,19 +3376,71 @@ async function createWindow() {
     },
   });
 
-  mainWindow.setTitle(WINDOW_TITLE);
+  mainWindow.setTitle(finalTitle);
   mainWindow.setMenuBarVisibility(false);
 
+  // 阻止页面 document.title 覆盖窗口标题（保持前缀一直可见）
+  mainWindow.on("page-title-updated", (event) => {
+    event.preventDefault();
+    mainWindow.setTitle(finalTitle);
+  });
+
   mainWindow.webContents.once("did-finish-load", () => {
-    mainWindow.setTitle(WINDOW_TITLE);
+    mainWindow.setTitle(finalTitle);
     mainWindow.show();
   });
   mainWindow.webContents.on("page-title-updated", (event) => {
     event.preventDefault();
-    mainWindow?.setTitle(WINDOW_TITLE);
+    mainWindow?.setTitle(finalTitle);
   });
 
   // 开发模式：等待 Vite dev server 就绪（最多30秒）
+  mainWindow.on("unresponsive", () => {
+    appendDiagnosticLog({
+      source: "renderer",
+      level: "error",
+      message: "Main window became unresponsive",
+      detail: { url: mainWindow?.webContents?.getURL?.() || "" },
+    });
+  });
+
+  mainWindow.on("responsive", () => {
+    appendDiagnosticLog({
+      source: "renderer",
+      level: "info",
+      message: "Main window became responsive again",
+      detail: { url: mainWindow?.webContents?.getURL?.() || "" },
+    });
+  });
+
+  mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    appendDiagnosticLog({
+      source: "renderer",
+      level: "error",
+      message: `Renderer process gone: ${details?.reason || "unknown"}`,
+      detail: details || {},
+    });
+  });
+
+  mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
+    appendDiagnosticLog({
+      source: "renderer",
+      level: "error",
+      message: `Page load failed: ${errorDescription || errorCode}`,
+      detail: { errorCode, errorDescription, validatedURL },
+    });
+  });
+
+  mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+    if (Number(level) < 2) return;
+    appendDiagnosticLog({
+      source: "renderer",
+      level: Number(level) >= 3 ? "error" : "warn",
+      message: String(message || "").slice(0, 1200),
+      detail: { line, sourceId },
+    });
+  });
+
   const devUrl = process.env.TEMU_DEV_URL || "http://localhost:1420";
   const forcedProduction = process.env.NODE_ENV === "production";
   const isDev = !forcedProduction && (process.env.NODE_ENV === "development" || !app.isPackaged);
@@ -3215,6 +3626,15 @@ function migrateScopedStoreFilesForAccountIdChange() {
 }
 
 app.whenReady().then(async () => {
+  try {
+    const erpInit = initializeErp({ userDataDir: app.getPath("userData") });
+    const applied = (erpInit.migrations || []).filter((item) => item.status === "success").length;
+    const skipped = (erpInit.migrations || []).filter((item) => item.status === "skipped").length;
+    console.log(`[ERP] SQLite initialized: ${erpInit.dbPath} (applied=${applied}, skipped=${skipped})`);
+  } catch (error) {
+    console.error("[ERP] SQLite initialization failed:", error?.message || error);
+  }
+
   // 启动时先做 scoped 数据 id 迁移，避免账号重建后旧数据孤立
   migrateScopedStoreFilesForAccountIdChange();
 
@@ -3248,10 +3668,12 @@ app.whenReady().then(async () => {
     }, 5000);
   }
 });
-app.on("window-all-closed", () => { stopWorker(); stopImageStudioService(); app.quit(); });
+app.on("window-all-closed", () => { closeErp(); stopWorker(); stopImageStudioService(); app.quit(); });
 app.on("activate", () => { if (!mainWindow) createWindow(); });
 
 // ============ IPC ============
+
+registerErpIpcHandlers(ipcMain);
 
 ipcMain.handle("get-app-path", () => app.getPath("userData"));
 
@@ -3320,6 +3742,20 @@ ipcMain.handle("automation:filter-product-table", async (_e, csvPath) => {
 });
 
 ipcMain.handle("automation:generate-pack-images", async (_e, params) => {
+  const existingTask = getAutoPricingTask(autoPricingCurrentTaskId);
+  if (isAutoPricingTaskActive(existingTask)) {
+    const syncedTask = await syncAutoPricingTaskFromWorker(existingTask.taskId, { markInterruptedOnIdle: true }).catch(() => null);
+    const activeTask = syncedTask || getAutoPricingTask(existingTask.taskId) || existingTask;
+    if (isAutoPricingTaskActive(activeTask)) {
+      return {
+        accepted: false,
+        taskId: activeTask.taskId,
+        message: "已有新上品流程正在执行，请先等待完成或暂停后继续查看当前任务。",
+        task: getAutoPricingProgressPayload(activeTask),
+      };
+    }
+  }
+
   const now = new Date().toLocaleString("zh-CN");
   const taskId = typeof params?.taskId === "string" && params.taskId.trim()
     ? params.taskId.trim()
@@ -3547,7 +3983,6 @@ ipcMain.handle("automation:auto-pricing", async (_e, params) => {
 });
 
 ipcMain.handle("automation:pause-pricing", async (_e, taskId) => {
-  await sendCmd("pause_pricing", { taskId });
   const activeTask = getAutoPricingTask(taskId || autoPricingCurrentTaskId);
   if (activeTask) {
     const nextTask = upsertAutoPricingTask({
@@ -3559,13 +3994,16 @@ ipcMain.handle("automation:pause-pricing", async (_e, taskId) => {
       updatedAt: new Date().toLocaleString("zh-CN"),
     });
     startAutoPricingTaskSync();
+    sendCmd("pause_pricing", { taskId: nextTask.taskId }).catch((err) => {
+      console.error(`[Main] pause_pricing failed: ${err?.message || err}`);
+    });
     return getAutoPricingProgressPayload(nextTask);
   }
+  await sendCmd("pause_pricing", { taskId });
   return getAutoPricingProgressPayload(getAutoPricingTask(taskId || autoPricingCurrentTaskId));
 });
 
 ipcMain.handle("automation:resume-pricing", async (_e, taskId) => {
-  await sendCmd("resume_pricing", { taskId });
   const activeTask = getAutoPricingTask(taskId || autoPricingCurrentTaskId);
   if (activeTask) {
     const nextTask = upsertAutoPricingTask({
@@ -3577,8 +4015,12 @@ ipcMain.handle("automation:resume-pricing", async (_e, taskId) => {
       updatedAt: new Date().toLocaleString("zh-CN"),
     });
     startAutoPricingTaskSync();
+    sendCmd("resume_pricing", { taskId: nextTask.taskId }).catch((err) => {
+      console.error(`[Main] resume_pricing failed: ${err?.message || err}`);
+    });
     return getAutoPricingProgressPayload(nextTask);
   }
+  await sendCmd("resume_pricing", { taskId });
   startAutoPricingTaskSync();
   return getAutoPricingProgressPayload(getAutoPricingTask(taskId || autoPricingCurrentTaskId));
 });
@@ -3608,7 +4050,7 @@ ipcMain.handle("automation:get-task-progress", async (_e, taskId) => {
 ipcMain.handle("automation:list-tasks", async () => {
   await syncWorkerTaskSnapshotsToStore();
   await syncActiveAutoPricingTaskFromWorker({ markInterruptedOnIdle: true });
-  return listAutoPricingTasks().map((task) => getAutoPricingProgressPayload(task));
+  return listAutoPricingTasks().map((task) => getAutoPricingTaskSummaryPayload(task));
 });
 
 ipcMain.handle("automation:read-scrape-data", async (_e, key) => {
@@ -3651,6 +4093,14 @@ ipcMain.handle("automation:close", async () => {
 
 ipcMain.handle("automation:ping", async () => {
   return sendCmd("ping");
+});
+
+ipcMain.handle("erp:purchase:local-1688-inquiry", async (_event, payload) => {
+  return sendCmd("local_1688_inquiry", payload || {}, { timeoutMs: WORKER_LONG_TASK_TIMEOUT_MS });
+});
+
+ipcMain.handle("erp:purchase:open-1688-detail", async (_event, payload) => {
+  return sendCmd("open_1688_detail", payload || {}, { timeoutMs: 60000 });
 });
 
 // ============ 竞品分析 IPC ============
@@ -3982,6 +4432,182 @@ ipcMain.handle("yunqi-db:top", async (_e, params) => sendCmd("yunqi_db_top", par
 ipcMain.handle("yunqi-db:info", async () => sendCmd("yunqi_db_info", {}));
 ipcMain.handle("yunqi-db:sync-online", async (_e, params) => sendCmd("yunqi_db_sync_online", params || {}, { timeoutMs: 300000 }));
 
+// ============ 核价筛选器 IPC ============
+ipcMain.handle("price-review:scan-now", async (_e, params) => {
+  const credentials = getActiveWorkerCredentials();
+  const result = await sendCmd("price_review_scan", { ...(params || {}), credentials }, { timeoutMs: 30 * 60 * 1000 });
+  try {
+    const wins = BrowserWindow.getAllWindows();
+    for (const w of wins) w.webContents.send("price-review:scan-done", { summary: result?.summary, snapshotId: result?.snapshotId });
+  } catch {}
+  return result;
+});
+ipcMain.handle("price-review:list", async (_e, params) => sendCmd("price_review_list", params || {}));
+ipcMain.handle("price-review:set-manual-cost", async (_e, params) => sendCmd("price_review_set_manual_cost", params || {}));
+ipcMain.handle("price-review:clear-manual-cost", async (_e, params) => sendCmd("price_review_clear_manual_cost", params || {}));
+ipcMain.handle("price-review:open-1688-login", async (_e, params) => sendCmd("price_review_open_1688_login", params || {}, { timeoutMs: 60000 }));
+
+// 30 分钟定时扫描（可通过 app settings 开关关闭）
+let _priceReviewTimer = null;
+let _priceReviewScanning = false;
+function readPriceReviewSettings() {
+  try {
+    const raw = readStoreJsonWithRecovery(getStoreFilePath("temu_app_settings"));
+    return raw && typeof raw === "object" ? raw : {};
+  } catch { return {}; }
+}
+function isPriceReviewAutoScanEnabled(settings) {
+  return settings?.priceReviewAutoScanEnabled === true;
+}
+async function tickPriceReviewAutoScan() {
+  if (_priceReviewScanning) return;
+  const s = readPriceReviewSettings();
+  if (!isPriceReviewAutoScanEnabled(s)) return;
+  _priceReviewScanning = true;
+  try {
+    const marginRatio = typeof s.priceReviewMarginRatio === "number" ? s.priceReviewMarginRatio : 1.75;
+    const credentials = getActiveWorkerCredentials();
+    await sendCmd("price_review_scan", { marginRatio, credentials }, { timeoutMs: 30 * 60 * 1000 });
+    try {
+      const wins = BrowserWindow.getAllWindows();
+      for (const w of wins) w.webContents.send("price-review:auto-scan-done", { at: Date.now() });
+    } catch {}
+  } catch (e) {
+    console.warn("[price-review] auto scan failed:", e?.message || e);
+  } finally {
+    _priceReviewScanning = false;
+  }
+}
+function startPriceReviewScheduler() {
+  if (_priceReviewTimer) return;
+  const s = readPriceReviewSettings();
+  if (!isPriceReviewAutoScanEnabled(s)) {
+    console.log("[price-review] scheduler disabled");
+    return;
+  }
+  const minutes = typeof s.priceReviewScanIntervalMinutes === "number" && s.priceReviewScanIntervalMinutes >= 5
+    ? s.priceReviewScanIntervalMinutes : 30;
+  _priceReviewTimer = setInterval(tickPriceReviewAutoScan, minutes * 60 * 1000);
+  console.log(`[price-review] scheduler started, interval=${minutes}min`);
+}
+// 应用启动时挂调度（延迟 60s 避开冷启动）
+app.whenReady().then(() => {
+  setTimeout(() => { try { startPriceReviewScheduler(); } catch (e) { console.warn(e); } }, 60 * 1000);
+});
+ipcMain.handle("price-review:restart-scheduler", async () => {
+  if (_priceReviewTimer) { clearInterval(_priceReviewTimer); _priceReviewTimer = null; }
+  startPriceReviewScheduler();
+  return { ok: true };
+});
+
+// 1688 采购单自动绑定订单调度器：扫描 status=pushed_pending_price 且 external_order_id 为空的 PO，
+// 调用 sync_1688_orders 自动匹配。
+let _orderSyncTimer = null;
+let _orderSyncRunning = false;
+function readPurchaseOrderSyncSettings() {
+  try {
+    const raw = readStoreJsonWithRecovery(getStoreFilePath("temu_app_settings"));
+    return raw && typeof raw === "object" ? raw : {};
+  } catch { return {}; }
+}
+function isPurchaseOrderAutoSyncEnabled(settings) {
+  // 默认开启；用户在 settings 里显式写 false 才关闭。
+  return settings?.purchaseOrderAutoSyncEnabled !== false;
+}
+async function tickPurchaseOrderAutoSync() {
+  if (_orderSyncRunning) return;
+  const s = readPurchaseOrderSyncSettings();
+  if (!isPurchaseOrderAutoSyncEnabled(s)) return;
+  _orderSyncRunning = true;
+  try {
+    const maxAgeHours = typeof s.purchaseOrderAutoSyncMaxAgeHours === "number" && s.purchaseOrderAutoSyncMaxAgeHours > 0
+      ? s.purchaseOrderAutoSyncMaxAgeHours : 168;
+    const limit = typeof s.purchaseOrderAutoSyncLimit === "number" && s.purchaseOrderAutoSyncLimit > 0
+      ? Math.min(Math.floor(s.purchaseOrderAutoSyncLimit), 200) : 50;
+    const out = await runScheduledOrderSync({
+      maxAgeHours,
+      limit,
+      logger: (e) => { try { console.log("[order-sync]", JSON.stringify(e)); } catch {} },
+    });
+    if (out && out.processed > 0) {
+      console.log(`[order-sync] tick processed=${out.processed} bound=${out.bound || 0}`);
+      try {
+        const wins = BrowserWindow.getAllWindows();
+        for (const w of wins) w.webContents.send("purchase:order-sync:tick-done", { at: Date.now(), ...out });
+      } catch {}
+    }
+    // 紧接着重跑消息事件：order-sync 刚回填的 external_order_id 让之前 unmatched 的事件能命中。
+    const msgLimit = typeof s.purchaseMessageReprocessLimit === "number" && s.purchaseMessageReprocessLimit > 0
+      ? Math.min(Math.floor(s.purchaseMessageReprocessLimit), 500) : 100;
+    const msgMaxAgeHours = typeof s.purchaseMessageReprocessMaxAgeHours === "number" && s.purchaseMessageReprocessMaxAgeHours > 0
+      ? s.purchaseMessageReprocessMaxAgeHours : maxAgeHours;
+    const msgOut = await runScheduledMessageReprocess({
+      maxAgeHours: msgMaxAgeHours,
+      limit: msgLimit,
+      logger: (e) => { try { console.log("[msg-reprocess]", JSON.stringify(e)); } catch {} },
+    });
+    if (msgOut && msgOut.processed > 0) {
+      console.log(`[msg-reprocess] tick processed=${msgOut.processed} promoted=${msgOut.promoted || 0}`);
+      try {
+        const wins = BrowserWindow.getAllWindows();
+        for (const w of wins) w.webContents.send("purchase:msg-reprocess:tick-done", { at: Date.now(), ...msgOut });
+      } catch {}
+    }
+  } catch (e) {
+    console.warn("[order-sync] tick failed:", e?.message || e);
+  } finally {
+    _orderSyncRunning = false;
+  }
+}
+function startPurchaseOrderSyncScheduler() {
+  if (_orderSyncTimer) return;
+  const s = readPurchaseOrderSyncSettings();
+  if (!isPurchaseOrderAutoSyncEnabled(s)) {
+    console.log("[order-sync] scheduler disabled");
+    return;
+  }
+  const minutes = typeof s.purchaseOrderAutoSyncIntervalMinutes === "number" && s.purchaseOrderAutoSyncIntervalMinutes >= 1
+    ? s.purchaseOrderAutoSyncIntervalMinutes : 10;
+  _orderSyncTimer = setInterval(tickPurchaseOrderAutoSync, minutes * 60 * 1000);
+  console.log(`[order-sync] scheduler started, interval=${minutes}min`);
+  // 启动时立刻跑一次，不等第一个 interval。
+  setImmediate(() => { tickPurchaseOrderAutoSync().catch((e) => console.warn("[order-sync] initial tick failed:", e?.message || e)); });
+}
+app.whenReady().then(() => {
+  setTimeout(() => { try { startPurchaseOrderSyncScheduler(); } catch (e) { console.warn(e); } }, 90 * 1000);
+});
+ipcMain.handle("purchase:order-sync:restart-scheduler", async () => {
+  if (_orderSyncTimer) { clearInterval(_orderSyncTimer); _orderSyncTimer = null; }
+  try { resetScheduledOrderSyncState(); } catch {}
+  startPurchaseOrderSyncScheduler();
+  return { ok: true };
+});
+ipcMain.handle("purchase:order-sync:run-now", async () => {
+  await tickPurchaseOrderAutoSync();
+  return { ok: true };
+});
+ipcMain.handle("purchase:msg-reprocess:run-now", async (_e, params) => {
+  const limit = typeof params?.limit === "number" && params.limit > 0 ? Math.min(Math.floor(params.limit), 500) : 100;
+  const maxAgeHours = typeof params?.maxAgeHours === "number" && params.maxAgeHours > 0 ? params.maxAgeHours : 168;
+  const out = await runScheduledMessageReprocess({
+    maxAgeHours,
+    limit,
+    logger: (e) => { try { console.log("[msg-reprocess]", JSON.stringify(e)); } catch {} },
+  });
+  return { ok: true, ...out };
+});
+ipcMain.handle("purchase:order-sync:get-status", async () => {
+  const s = readPurchaseOrderSyncSettings();
+  return {
+    enabled: isPurchaseOrderAutoSyncEnabled(s),
+    intervalMinutes: typeof s.purchaseOrderAutoSyncIntervalMinutes === "number" ? s.purchaseOrderAutoSyncIntervalMinutes : 10,
+    maxAgeHours: typeof s.purchaseOrderAutoSyncMaxAgeHours === "number" ? s.purchaseOrderAutoSyncMaxAgeHours : 168,
+    limit: typeof s.purchaseOrderAutoSyncLimit === "number" ? s.purchaseOrderAutoSyncLimit : 50,
+    running: _orderSyncRunning,
+    timerArmed: Boolean(_orderSyncTimer),
+  };
+});
+
 // ============ AI 出图 IPC ============
 
 ipcMain.handle("image-studio:get-status", async () => {
@@ -4063,6 +4689,7 @@ ipcMain.handle("image-studio:analyze", async (_event, payload) => {
       files: payload?.files,
       fields: {
         productMode: payload?.productMode || "single",
+        analysisProfile: payload?.analysisProfile || "",
       },
     }),
   });
@@ -4087,6 +4714,7 @@ ipcMain.handle("image-studio:regenerate-analysis", async (_event, payload) => {
       files: payload?.files,
       fields: {
         productMode: payload?.productMode || "single",
+        analysisProfile: payload?.analysisProfile || "",
         analysis: payload?.analysis || {},
       },
     }),
@@ -4164,6 +4792,8 @@ ipcMain.handle("image-studio:run-designer", async (_event, payload) => {
       analysis: payload?.analysis || {},
       extraNotes: typeof payload?.extraNotes === "string" ? payload.extraNotes : "",
       debug: !!payload?.debug,
+      productImageBase64:
+        typeof payload?.productImageBase64 === "string" ? payload.productImageBase64 : null,
     }),
   });
   return result;
@@ -4177,6 +4807,184 @@ ipcMain.handle("image-studio:compose-briefs", async (_event, payload) => {
       briefs: Array.isArray(payload?.briefs) ? payload.briefs : [],
       sharedDna: payload?.sharedDna || null,
       productImageBase64: typeof payload?.productImageBase64 === "string" ? payload.productImageBase64 : null,
+    }),
+  });
+  return result;
+});
+
+// 新版合成：imagePrompts + productIdentity（电商主图版，全 edit）
+ipcMain.handle("image-studio:compose-image-prompts", async (_event, payload) => {
+  const result = await imageStudioJson("/api/designer/compose", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      imagePrompts: Array.isArray(payload?.imagePrompts) ? payload.imagePrompts : [],
+      productIdentity: typeof payload?.productIdentity === "string" ? payload.productIdentity : "",
+      productImageBase64: typeof payload?.productImageBase64 === "string" ? payload.productImageBase64 : null,
+    }),
+  });
+  return result;
+});
+
+// ============ 三步式新版 IPC ============
+
+// 第 1 步：运营 Agent
+ipcMain.handle("image-studio:designer-analyze", async (_event, payload) => {
+  const result = await imageStudioJson("/api/designer/analyze", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      productImageBase64: typeof payload?.productImageBase64 === "string" ? payload.productImageBase64 : null,
+      extraNotes: typeof payload?.extraNotes === "string" ? payload.extraNotes : "",
+      debug: !!payload?.debug,
+    }),
+  });
+  return result;
+});
+
+// 第 2 步：设计师 Agent
+ipcMain.handle("image-studio:designer-plan", async (_event, payload) => {
+  const result = await imageStudioJson("/api/designer/plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      opsBrief: payload?.opsBrief || null,
+      productImageBase64: typeof payload?.productImageBase64 === "string" ? payload.productImageBase64 : null,
+      debug: !!payload?.debug,
+    }),
+  });
+  return result;
+});
+
+// 第 3 步：SSE 流式生图
+const designerGenerateControllers = new Map(); // jobId → AbortController
+
+ipcMain.handle("image-studio:designer-generate-start", async (event, payload) => {
+  const jobId = typeof payload?.jobId === "string" && payload.jobId
+    ? payload.jobId
+    : `designer_job_${Date.now()}`;
+
+  const controller = new AbortController();
+  designerGenerateControllers.set(jobId, controller);
+
+  // 异步起 SSE，立刻返回 jobId
+  (async () => {
+    const sender = (data) => {
+      const win = event.sender;
+      if (win && !win.isDestroyed()) {
+        win.send("image-studio:designer-generate-event", { jobId, ...data });
+      }
+    };
+
+    try {
+      await syncImageStudioRuntimeConfig("/api/designer/generate-stream");
+      const status = await ensureImageStudioService();
+      const projectInfo = getImageStudioProjectInfo();
+      const headers = {
+        ...getImageStudioAuthHeaders(projectInfo),
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      };
+      // 注意：不用 dispatcher 选项，Electron 中 undici fetch 默认 headersTimeout = 5 分钟，
+      // 心跳 15s 间隔保证 body 不会 idle 超过 5 分钟，对 SSE 已足够
+      const response = await fetch(`${status.url}/api/designer/generate-stream`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          imagePrompts: Array.isArray(payload?.imagePrompts) ? payload.imagePrompts : [],
+          productIdentity: typeof payload?.productIdentity === "string" ? payload.productIdentity : "",
+          productImageBase64: typeof payload?.productImageBase64 === "string" ? payload.productImageBase64 : null,
+        }),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const txt = await response.text().catch(() => "");
+        throw new Error(`HTTP ${response.status}: ${txt.slice(0, 300)}`);
+      }
+      if (!response.body) {
+        throw new Error("SSE 响应 body 为空");
+      }
+
+      console.log(`[designer-generate] SSE connected ${status.url}/api/designer/generate-stream status=${response.status}`);
+      sender({ type: "started" });
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // 按 SSE 帧切割：以 \n\n 为分隔
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop() || "";
+        for (const frame of frames) {
+          const trimmed = frame.trim();
+          if (!trimmed) continue;
+          if (trimmed.startsWith(":")) continue; // heartbeat
+          const dataLines = trimmed
+            .split("\n")
+            .filter((l) => l.startsWith("data:"))
+            .map((l) => l.slice(5).trim());
+          if (dataLines.length === 0) continue;
+          const dataStr = dataLines.join("\n");
+          try {
+            const obj = JSON.parse(dataStr);
+            sender({ type: "event", event: obj });
+          } catch (parseErr) {
+            console.warn("[designer-generate] SSE parse error:", parseErr);
+          }
+        }
+      }
+
+      sender({ type: "done" });
+    } catch (error) {
+      const detail = (() => {
+        if (!error || typeof error !== "object") return String(error);
+        const parts = [];
+        if (error.message) parts.push(error.message);
+        if (error.cause) {
+          const c = error.cause;
+          parts.push(`cause: ${c.code || ""} ${c.message || c.toString?.() || ""}`.trim());
+        }
+        if (error.stack) parts.push("stack: " + String(error.stack).split("\n").slice(0, 3).join(" / "));
+        return parts.join(" | ");
+      })();
+      console.error("[designer-generate] SSE failed:", detail);
+      appendImageStudioLog(`[designer-generate] SSE failed: ${detail}`);
+      if (controller.signal.aborted) {
+        sender({ type: "cancelled" });
+      } else {
+        sender({ type: "error", error: detail });
+      }
+    } finally {
+      designerGenerateControllers.delete(jobId);
+    }
+  })();
+
+  return { jobId };
+});
+
+ipcMain.handle("image-studio:designer-generate-cancel", async (_event, jobId) => {
+  const ctrl = designerGenerateControllers.get(jobId);
+  if (ctrl) {
+    ctrl.abort();
+    designerGenerateControllers.delete(jobId);
+    return { cancelled: true, jobId };
+  }
+  return { cancelled: false, jobId };
+});
+
+// 单张重生
+ipcMain.handle("image-studio:regenerate-slot", async (_event, payload) => {
+  const result = await imageStudioJson("/api/designer/regenerate-slot", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      imagePrompt: payload?.imagePrompt || null,
+      productIdentity: typeof payload?.productIdentity === "string" ? payload.productIdentity : "",
+      productImageBase64: typeof payload?.productImageBase64 === "string" ? payload.productImageBase64 : null,
+      promptOverride: typeof payload?.promptOverride === "string" ? payload.promptOverride : null,
     }),
   });
   return result;
@@ -4288,6 +5096,11 @@ ipcMain.handle("image-studio:score-image", async (_event, payload) => {
     body: JSON.stringify({
       imageUrl: payload?.imageUrl || "",
       imageType: payload?.imageType || "main",
+      plan: payload?.plan || null,
+      analysis: payload?.analysis || null,
+      productName: payload?.productName || "",
+      salesRegion: payload?.salesRegion || "",
+      packCount: payload?.packCount || 1,
     }),
   });
 });
@@ -4332,6 +5145,8 @@ ipcMain.handle("app:get-update-status", () => updateState);
 
 ipcMain.handle("app:check-for-updates", async () => {
   try {
+    ensureAppUpdateConfig();
+    applyAutoUpdaterFeedUrl();
     await autoUpdater.checkForUpdates();
     return updateState;
   } catch (e) {
@@ -4342,6 +5157,8 @@ ipcMain.handle("app:check-for-updates", async () => {
 
 ipcMain.handle("app:download-update", async () => {
   try {
+    ensureAppUpdateConfig();
+    applyAutoUpdaterFeedUrl();
     await autoUpdater.downloadUpdate();
   } catch (error) {
     broadcastUpdateState({ status: "error", message: error?.message || "下载更新失败", progressPercent: null });
@@ -4360,14 +5177,166 @@ ipcMain.handle("app:open-log-directory", async () => {
   return logDir;
 });
 
+ipcMain.handle("app:open-external", async (_event, rawUrl) => {
+  const target = String(rawUrl || UPDATE_MANUAL_DOWNLOAD_URL).trim();
+  const url = new URL(target);
+  if (!["http:", "https:"].includes(url.protocol)) {
+    throw new Error("只支持打开 http/https 链接");
+  }
+  await shell.openExternal(url.toString());
+  return url.toString();
+});
+
 // ============ 文件存储 IPC ============
+
+function parseWorkflowPackLogLine(line, index) {
+  const raw = String(line || "").trim();
+  if (!raw) return null;
+  const match = raw.match(/^\[([^\]]+)\]\s+\[([^\]]+)\]\s+([\s\S]*)$/);
+  if (!match) return null;
+  const isoTime = match[1] || "";
+  const taskId = match[2] || "workflow-pack";
+  const body = match[3] || "";
+  if (!body.startsWith("DIAG ") && !body.startsWith("control ")) return null;
+  const timestamp = Number.isFinite(Date.parse(isoTime)) ? Date.parse(isoTime) : Date.now();
+  const level = /row_exception|task_failed|failed|失败|error|exception/i.test(body)
+    ? "error"
+    : (/warning|warn|retry|pause|paused|暂停|重试/i.test(body) ? "warn" : "info");
+
+  let message = body;
+  let detail = raw;
+  const diagMatch = body.match(/^DIAG\s+(\S+)\s+([\s\S]+)$/);
+  if (diagMatch) {
+    const label = diagMatch[1];
+    const jsonText = diagMatch[2];
+    try {
+      const payload = JSON.parse(jsonText);
+      if (label === "task_start") {
+        message = `新上品任务开始：${payload.taskId || taskId}，共 ${payload.total ?? "-"} 条，表格 ${payload.csvPath || "-"}`;
+      } else if (label === "row_result" || label === "row_exception") {
+        const status = payload.success ? "成功" : "失败";
+        message = `新上品第 ${payload.rowNumber || "-"} 行${status}：${payload.stage || "-"}，${payload.message || ""}`;
+      } else if (label === "task_finish") {
+        message = `新上品任务完成：成功 ${payload.successCount ?? 0}，部分 ${payload.partialCount ?? 0}，失败 ${payload.failCount ?? 0}`;
+      } else if (label === "task_failed") {
+        message = `新上品任务失败：${payload.stage || "-"}，${payload.message || ""}`;
+      } else {
+        message = `新上品诊断 ${label}：${jsonText}`;
+      }
+      detail = JSON.stringify({ label, taskId, ...payload }, null, 2);
+    } catch {
+      message = `新上品诊断 ${label}：${jsonText}`;
+    }
+  } else if (body.startsWith("control pause_requested")) {
+    message = `新上品暂停请求：${body.replace(/^control\s+/, "")}`;
+  } else if (body.startsWith("control resume_requested")) {
+    message = `新上品继续请求：${body.replace(/^control\s+/, "")}`;
+  }
+
+  return {
+    id: `workflow-pack-${timestamp}-${index}`,
+    timestamp,
+    level,
+    source: "workflow-pack",
+    message,
+    detail,
+    taskId,
+  };
+}
+
+function parseDiagnosticLogLine(line, index) {
+  const raw = String(line || "").trim();
+  if (!raw) return null;
+  try {
+    const payload = JSON.parse(raw);
+    const timestamp = Number.isFinite(Date.parse(payload.timestamp)) ? Date.parse(payload.timestamp) : Date.now();
+    const detail = typeof payload.detail === "string"
+      ? payload.detail
+      : JSON.stringify(payload.detail || {}, null, 2);
+    return {
+      id: `diagnostic-${timestamp}-${index}`,
+      timestamp,
+      level: ["log", "info", "warn", "error"].includes(payload.level) ? payload.level : inferDiagnosticLevel(payload.message, "info"),
+      source: payload.source || "main",
+      message: String(payload.message || ""),
+      detail,
+      taskId: payload.taskId || undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseImageStudioLogLine(line, index) {
+  const raw = String(line || "").trim();
+  if (!raw) return null;
+  const match = raw.match(/^\[([^\]]+)\]\s+([\s\S]*)$/);
+  const timestampText = match?.[1] || "";
+  const message = match?.[2] || raw;
+  const timestamp = Number.isFinite(Date.parse(timestampText)) ? Date.parse(timestampText) : Date.now();
+  return {
+    id: `image-studio-${timestamp}-${index}`,
+    timestamp,
+    level: inferDiagnosticLevel(message, "info"),
+    source: "image-studio",
+    message: message.slice(0, 1200),
+    detail: raw,
+  };
+}
+
+async function readRecentParsedLogEntries(filePath, limit, parser) {
+  if (!fs.existsSync(filePath)) return [];
+  const text = await fsPromises.readFile(filePath, "utf8").catch(() => "");
+  const lines = text.split(/\r?\n/).filter((line) => line.trim());
+  const entries = [];
+  for (let index = lines.length - 1; index >= 0 && entries.length < limit; index -= 1) {
+    const entry = parser(lines[index], index);
+    if (entry) entries.push(entry);
+  }
+  return entries;
+}
+
+ipcMain.handle("app:read-workflow-pack-logs", async (_e, params = {}) => {
+  const limit = Math.max(1, Math.min(Number(params?.limit) || 500, 2000));
+  const logFile = path.join(app.getPath("userData"), "workflow-pack.log");
+  const diagnosticLogFile = getDiagnosticLogFilePath();
+  const imageStudioLogFile = path.join(app.getPath("userData"), "image-studio.log");
+  const entries = [
+    ...await readRecentParsedLogEntries(logFile, limit, parseWorkflowPackLogLine),
+    ...await readRecentParsedLogEntries(diagnosticLogFile, limit, parseDiagnosticLogLine),
+    ...await readRecentParsedLogEntries(imageStudioLogFile, Math.min(limit, 300), parseImageStudioLogLine),
+  ]
+    .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+    .slice(0, limit);
+  return {
+    logFile,
+    diagnosticLogFile,
+    imageStudioLogFile,
+    entries,
+  };
+});
+
+ipcMain.handle("app:clear-workflow-pack-logs", async () => {
+  const logFile = path.join(app.getPath("userData"), "workflow-pack.log");
+  const diagnosticLogFile = getDiagnosticLogFilePath();
+  const imageStudioLogFile = path.join(app.getPath("userData"), "image-studio.log");
+  await fsPromises.writeFile(logFile, "", "utf8").catch(() => {});
+  await fsPromises.writeFile(diagnosticLogFile, "", "utf8").catch(() => {});
+  await fsPromises.writeFile(imageStudioLogFile, "", "utf8").catch(() => {});
+  return { logFile, diagnosticLogFile, imageStudioLogFile, cleared: true };
+});
 
 function getStoreFilePath(key) {
   const normalizedKey = normalizeStoreKey(key);
-  const baseDir = app.getPath("userData");
+  const sharedKeys = new Set([ACCOUNT_STORE_KEY, ACTIVE_ACCOUNT_ID_KEY, "temu_account_id_history"]);
+  const baseDir = sharedKeys.has(normalizedKey)
+    ? path.join(process.env.APPDATA || app.getPath("appData"), "temu-automation")
+    : app.getPath("userData");
+  fs.mkdirSync(baseDir, { recursive: true });
   const safeFileName = encodeURIComponent(normalizedKey);
-  return ensurePathInside(baseDir, path.join(baseDir, `${safeFileName}.json`), "Store 文件路径");
+  return ensurePathInside(baseDir, path.join(baseDir, `${safeFileName}.json`), "Store file path");
 }
+
 
 function hasMeaningfulStoreData(value, seen = new WeakSet()) {
   if (value === null || value === undefined) return false;
