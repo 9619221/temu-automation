@@ -2802,12 +2802,18 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   };
 
   const cancel1688Order = async (row: PurchaseOrderRow) => {
-    await runAction(`1688-cancel-${row.id}`, {
+    const result = await runAction(`1688-cancel-${row.id}`, {
       action: "cancel_1688_order",
       poId: row.id,
       cancelReason: "other",
       remark: "ERP取消未付款1688订单",
-    }, "1688 订单已取消");
+    });
+    if (!result) return;
+    if (result?.result?.orphanCleared) {
+      message.warning("1688 远端已无此订单，已在本地强制清绑（标记为 orphan_cleared）");
+    } else {
+      message.success("1688 订单已取消");
+    }
   };
 
   const open1688OrderNote = (row: PurchaseOrderRow, mode: OrderNoteDialogState["mode"]) => {

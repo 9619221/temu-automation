@@ -10482,24 +10482,66 @@ async function get1688PaymentUrlAction({ db, services, payload, actor }) {
   };
 }
 
+// 1688 表示订单不存在/找不到的错误码集合。命中这些错误码时，
+// 取消操作不算失败，按"远端已经没了"处理：本地强制清绑 + 置取消。
+const ALIBABA_1688_ORDER_GONE_ERROR_CODES = [
+  "ORDER_NOT_EXIST",
+  "ORDER_NOT_FOUND",
+  "ORDER_HAS_CANCELED",
+  "ORDER_HAS_CANCELLED",
+  "ORDER_NOT_FIND",
+];
+
+function is1688OrderGoneError(error) {
+  const message = String(error?.message || error || "");
+  const code = String(error?.errorCode || error?.payload?.error_code || error?.payload?.errorCode || "");
+  if (ALIBABA_1688_ORDER_GONE_ERROR_CODES.includes(code)) return true;
+  for (const c of ALIBABA_1688_ORDER_GONE_ERROR_CODES) {
+    if (message.includes(`errorCode:${c}`) || message.includes(`"errorCode":"${c}"`) || message.includes(c)) return true;
+  }
+  if (/无法根据订单ID获取订单|订单不存在|订单已取消|订单已关闭/.test(message)) return true;
+  return false;
+}
+
 async function cancel1688OrderAction({ db, services, payload, actor }) {
   assertActorRole(actor, ["buyer", "manager", "admin"], "取消 1688 订单");
   const po = getPurchaseOrder(db, requireString(payload.poId || payload.id, "poId"));
   const apiParams = build1688CancelOrderParams(payload, po);
   if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.CANCEL_ORDER.key, params: apiParams };
-  const rawResponse = payload.mockCancelResponse || payload.mockResponse || await call1688ProcurementApi({
-    db,
-    actor,
-    accountId: po.account_id,
-    action: "cancel_1688_order",
-    api: PROCUREMENT_APIS.CANCEL_ORDER,
-    params: apiParams,
-  });
+  let rawResponse;
+  let remoteAlreadyGone = false;
+  try {
+    rawResponse = payload.mockCancelResponse || payload.mockResponse || await call1688ProcurementApi({
+      db,
+      actor,
+      accountId: po.account_id,
+      action: "cancel_1688_order",
+      api: PROCUREMENT_APIS.CANCEL_ORDER,
+      params: apiParams,
+    });
+  } catch (error) {
+    if (!is1688OrderGoneError(error)) throw error;
+    // 远端早就不在了：把这次"取消失败"当成"远端已不存在"，本地强制清掉。
+    remoteAlreadyGone = true;
+    rawResponse = {
+      orphanCleared: true,
+      reason: "remote_order_not_exist",
+      remoteError: {
+        message: error?.message || String(error),
+        errorCode: error?.errorCode || null,
+        payload: error?.payload || null,
+      },
+      at: nowIso(),
+    };
+  }
   const afterPo = updatePurchaseOrderFrom1688Snapshot({
     db,
     services,
     po,
-    order: { externalOrderId: apiParams.tradeID, status: "cancelled" },
+    order: {
+      externalOrderId: apiParams.tradeID,
+      status: remoteAlreadyGone ? "orphan_cleared" : "cancelled",
+    },
     rawDetail: { cancel: rawResponse },
     action: "cancel_1688_order",
     actor,
@@ -10510,6 +10552,7 @@ async function cancel1688OrderAction({ db, services, payload, actor }) {
     query: apiParams,
     purchaseOrder: toCamelRow(afterPo),
     rawResponse,
+    orphanCleared: remoteAlreadyGone,
   };
 }
 
