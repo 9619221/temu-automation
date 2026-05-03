@@ -1022,6 +1022,12 @@ function purchaseActionErrorMessage(error: any, action?: string) {
     if (action === "query_1688_pay_ways" || action === "query_1688_protocol_pay_status" || action === "prepare_1688_protocol_pay") {
       return "当前 1688 订单状态不支持付款操作，请先确认订单是否已取消或已付款";
     }
+    if (action === "confirm_1688_receive_goods") {
+      return "当前 1688 订单状态不支持确认收货：通常需要订单已付款 → 卖家发货 → 物流妥投后才能确认收货。";
+    }
+    if (action === "create_1688_refund") {
+      return "当前 1688 订单状态不支持退款：通常需要订单至少处于已付款 / 已发货状态。";
+    }
     return "1688 返回业务失败，系统已保留当前数据，请稍后重试";
   }
   return message || "操作失败";
