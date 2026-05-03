@@ -9911,12 +9911,16 @@ function build1688CreateRefundParams(payload = {}, po = {}) {
   // 跟 input 里的同名字段一致，但必须在顶层重复一份才过 ACL。
   const disputeRequest = optionalString(payload.disputeRequest || payload.refundType) || "refund";
   const goodsStatus = optionalString(payload.goodsStatus) || "received";
+  // 1688 资金类字段顶层用 Long 单位 = 分（RMB cents）。amount 是元（可带小数 6.5），
+  // 这里 ×100 取整再交给顶层；input 包装内保留元单位（1688 内部处理 BigDecimal）。
+  const applyPaymentCents = Number.isFinite(amount) ? Math.round(amount * 100) : null;
   return {
     orderId: externalOrderId,
     // orderEntryIds 顶层（Long[] ACL 校验）+ input 内一份。
     ...(orderEntryIds.length ? { orderEntryIds } : {}),
     disputeRequest,
     goodsStatus,
+    ...(applyPaymentCents !== null ? { applyPayment: applyPaymentCents, refundPayment: applyPaymentCents } : {}),
     ...structured,
   };
 }
