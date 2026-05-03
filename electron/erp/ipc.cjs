@@ -10353,7 +10353,15 @@ function updatePurchaseOrderFrom1688Snapshot({
     external_order_synced_at: now,
     external_payment_url: paymentUrl,
     external_payment_url_synced_at: paymentUrl ? now : null,
-    external_order_detail_json: rawDetail ? trimJsonForStorage(rawDetail) : null,
+    // rawDetail 来自不同 action：fetch_1688_order_detail 是完整订单详情（含 productItems），
+    // 而 add_memo/add_feedback 等只带某次操作的 snapshot。直接覆盖会把订单详情擦掉，
+    // 后续 createRefund 取不到 orderEntryIds。这里改成合并：保留旧字段，新字段覆盖同名键。
+    external_order_detail_json: rawDetail
+      ? trimJsonForStorage({
+          ...(parseJsonObject(before.external_order_detail_json) || {}),
+          ...rawDetail,
+        })
+      : null,
     external_order_detail_synced_at: rawDetail ? now : null,
     external_logistics_json: rawLogistics ? trimJsonForStorage(rawLogistics) : null,
     external_logistics_synced_at: rawLogistics ? now : null,
