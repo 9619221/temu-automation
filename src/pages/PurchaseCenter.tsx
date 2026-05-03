@@ -32,7 +32,6 @@ import {
   DeleteOutlined,
   DollarOutlined,
   DownloadOutlined,
-  FileSearchOutlined,
   FileDoneOutlined,
   ImportOutlined,
   LinkOutlined,
@@ -97,7 +96,6 @@ const TABLE_IDENTIFIER_TEXT_STYLE = {
   color: "#0f172a",
 };
 const QUICK_PURCHASE_ACTIONS = new Set([
-  "accept_pr",
   "mark_read",
   "mark_sourced",
   "cancel_pr",
@@ -108,7 +106,7 @@ const QUICK_PURCHASE_ACTIONS = new Set([
   "submit_payment_approval",
   "approve_payment",
   "confirm_paid",
-  "request_1688_price_change",
+  "push_1688_order",
   "get_1688_payment_url",
   "query_1688_pay_ways",
   "query_1688_protocol_pay_status",
@@ -904,7 +902,7 @@ function externalOrderStatusLabel(status?: string | null) {
     success: "交易完成",
     created: "已创建",
     closed: "已关闭",
-    price_modified: "已改价",
+    price_modified: "价格已同步",
     memo_modified: "备注更新",
     feedback_added: "留言已补充",
     refund_synced: "售后已同步",
@@ -987,6 +985,9 @@ function purchaseActionErrorMessage(error: any, action?: string) {
     return "1688 网络连接中断，TLS 握手未完成，请稍后重试";
   }
   if (/1688 API request failed with HTTP 200/i.test(message)) {
+    if (action === "push_1688_order" || action === "preview_1688_order") {
+      return message || "1688 下单接口返回业务失败，请检查采购单商品、规格、地址和账号权限后重试";
+    }
     if (action === "get_1688_payment_url") {
       return "1688 没有返回付款链接，订单可能已取消、已付款或当前账号无权限";
     }
@@ -1349,6 +1350,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const initialWorkbench = getInitialPurchaseWorkbenchCache();
 
   const [data, setData] = useState<PurchaseWorkbench>(initialWorkbench);
+  const [workbenchFresh, setWorkbenchFresh] = useState(() => !hasWorkbenchSnapshot(initialWorkbench));
   const [loading, setLoading] = useState(false);
   const [actingKey, setActingKey] = useState<string | null>(null);
   const [loadingMorePrId, setLoadingMorePrId] = useState<string | null>(null);
@@ -1357,6 +1359,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const pendingCandidateScrollRestoreRef = useRef<{ prId: string; scrollTop: number; scrollHeight: number } | null>(null);
   const candidateScrollElRef = useRef<HTMLDivElement | null>(null);
   const auto1688OrderSupplementKeysRef = useRef<Set<string>>(new Set());
+  const priceSyncingPoIdsRef = useRef<Set<string>>(new Set());
   const supplementalWorkbenchPromiseRef = useRef<Promise<void> | null>(null);
   const [skus, setSkus] = useState<SkuOption[]>(() => (
     Array.isArray(initialWorkbench.skuOptions) ? initialWorkbench.skuOptions : []
@@ -1572,7 +1575,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     },
     {
       key: "draft_orders",
-      title: "待推单/改价",
+      title: "待下单/付款",
       count: draftOrderRows.length,
       kind: "order",
     },
@@ -1678,6 +1681,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   }), [selectedPoIds]);
 
   const applyWorkbench = useCallback((nextData: PurchaseWorkbench) => {
+    setWorkbenchFresh(true);
     setData((prevData) => {
       const nextWorkbench = nextData || {};
       if (!Array.isArray(nextWorkbench.purchaseRequests)) {
@@ -1728,7 +1732,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   }, [applyWorkbench, syncWorkbenchOptions]);
 
   const loadData = useCallback(async (options: { silent?: boolean; withSupplemental?: boolean } = {}) => {
-    if (!erp) return;
+    if (!erp) return null;
     const silent = Boolean(options?.silent);
     if (!silent) setLoading(true);
     try {
@@ -1741,14 +1745,46 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       if (options?.withSupplemental !== false) {
         void loadSupplementalWorkbenchData();
       }
+      return workbench;
     } catch (error: any) {
+      setWorkbenchFresh(false);
       if (!silent) {
         message.error(error?.message || "采购中心读取失败");
       }
+      return null;
     } finally {
       if (!silent) setLoading(false);
     }
   }, [applyWorkbench, loadSupplementalWorkbenchData, syncWorkbenchOptions]);
+
+  const syncLatest1688OrderPrice = useCallback(async (
+    row: PurchaseOrderRow,
+    options: { silent?: boolean } = {},
+  ) => {
+    if (!erp || !row.externalOrderId || priceSyncingPoIdsRef.current.has(row.id)) return null;
+    priceSyncingPoIdsRef.current.add(row.id);
+    try {
+      const result = await erp.purchase.action({
+        action: "sync_1688_order_price",
+        poId: row.id,
+        limit: 200,
+        includeRequestDetails: false,
+        includeOptions: false,
+        include1688Meta: false,
+      });
+      if (result?.workbench) {
+        applyWorkbench(result.workbench);
+        syncWorkbenchOptions(result.workbench);
+      }
+      if (!options.silent) message.success("已同步 1688 最新价格");
+      return result;
+    } catch (error: any) {
+      if (!options.silent) message.warning(error?.message || "1688 最新价格同步失败");
+      return null;
+    } finally {
+      priceSyncingPoIdsRef.current.delete(row.id);
+    }
+  }, [applyWorkbench, syncWorkbenchOptions]);
 
   const runAuto1688OrderSync = useCallback(async () => {
     if (!erp || !canPurchase) return;
@@ -1836,11 +1872,18 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     if (!erp) return;
     const canSyncDetail = canPurchase || canFinance || canWarehouse;
     const canSyncLogistics = canPurchase || canWarehouse;
-    if (!canSyncDetail && !canSyncLogistics) return;
+    const canSyncPrice = canPurchase || canFinance;
+    if (!canSyncDetail && !canSyncLogistics && !canSyncPrice) return;
 
     const jobs: Array<{ key: string; payload: Record<string, unknown> }> = [];
     for (const row of data.purchaseOrders || []) {
       if (!row.externalOrderId) continue;
+      if (canSyncPrice && ["pushed_pending_price", "pending_finance_approval", "approved_to_pay"].includes(row.status)) {
+        jobs.push({
+          key: `price-${row.id}`,
+          payload: { action: "sync_1688_order_price", poId: row.id },
+        });
+      }
       if (canSyncDetail && !row.externalOrderDetailSyncedAt) {
         jobs.push({
           key: `detail-${row.id}`,
@@ -1908,6 +1951,31 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
 
   const runAction = async (key: string, payload: Record<string, any>, successText?: string) => {
     if (!erp) return null;
+    if (!workbenchFresh && hasWorkbenchSnapshot(data) && (payload.poId || payload.prId)) {
+      const refreshedWorkbench = await loadData({ silent: true, withSupplemental: false });
+      if (!refreshedWorkbench) {
+        message.warning("当前列表还没有和主控端确认，请先刷新后再操作");
+        return null;
+      }
+      if (payload.poId) {
+        const poId = String(payload.poId);
+        const refreshedOrders = Array.isArray(refreshedWorkbench.purchaseOrders) ? refreshedWorkbench.purchaseOrders : [];
+        const exists = refreshedOrders.some((row: PurchaseOrderRow) => row.id === poId);
+        if (!exists) {
+          message.warning("这张采购单已不在当前主控端数据里，列表已刷新，请重新生成或选择最新采购单");
+          return null;
+        }
+      }
+      if (payload.prId) {
+        const prId = String(payload.prId);
+        const refreshedRequests = Array.isArray(refreshedWorkbench.purchaseRequests) ? refreshedWorkbench.purchaseRequests : [];
+        const exists = refreshedRequests.some((row: PurchaseRequestRow) => row.id === prId);
+        if (!exists) {
+          message.warning("这条待办已不在当前主控端数据里，列表已刷新，请选择最新待办");
+          return null;
+        }
+      }
+    }
     setActingKey(key);
     try {
       const workbenchParams = {
@@ -1947,6 +2015,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       const errorMessage = purchaseActionErrorMessage(error, payload.action);
       if (payload.action === "rollback_po_status" && errorMessage.includes("Unsupported purchase action")) {
         message.error("当前主控端还没更新/重启，暂不支持采购单回退");
+      } else if (payload.action === "push_1688_order" && errorMessage.includes("Unsupported purchase action")) {
+        message.error("当前主控端还没更新/重启，暂不支持 1688 推单");
       } else if (payload.action === "delete_po" && errorMessage.includes("Unsupported purchase action")) {
         message.error("当前主控端还没更新/重启，暂不支持删除采购单");
       } else if (payload.action === "delete_po" && /Purchase order not found/i.test(errorMessage)) {
@@ -1957,6 +2027,9 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           alreadyMissing: true,
           poId: payload.poId,
         };
+      } else if (/Purchase order not found/i.test(errorMessage)) {
+        await loadData({ silent: true, withSupplemental: false });
+        message.warning("这张采购单已不存在或不属于当前主控端数据，列表已刷新，请重新生成或选择最新采购单");
       } else {
         message.error(errorMessage || "操作失败");
       }
@@ -2621,43 +2694,19 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     void setCollaborationImageFiles(imageFiles);
   };
 
-  const preview1688Order = async (row: PurchaseOrderRow, options: { quiet?: boolean } = {}) => {
-    return runAction(`1688-preview-${row.id}`, {
-      action: "preview_1688_order",
-      poId: row.id,
-    }, options.quiet ? undefined : "1688 订单已预览");
-  };
-
-  const validate1688OrderPush = async (row: PurchaseOrderRow, quiet = false) => {
-    const result = await runAction(`1688-validate-${row.id}`, {
-      action: "validate_1688_order_push",
-      poId: row.id,
-    });
-    const validation = result?.result;
-    if (validation?.ready) {
-      if (!quiet) message.success("1688 下单校验通过");
-      return validation;
-    }
-    if (validation?.message && !quiet) message.warning(validation.message);
-    return validation || null;
-  };
-
   const push1688Order = async (row: PurchaseOrderRow, options: { skipValidation?: boolean } = {}) => {
-    if (!options.skipValidation) {
-      const validation = await validate1688OrderPush(row, true);
-      if (!validation?.ready) {
-        if (validation?.message) message.warning(validation.message);
-        return null;
-      }
+    if (!options.skipValidation && row.externalOrderId) {
+      message.warning(`采购单 ${row.poNo || row.id} 已绑定 1688 订单`);
+      return null;
     }
-    const previewResult = await preview1688Order(row, { quiet: true });
-    if (!previewResult) return null;
     const result = await runAction(`1688-push-${row.id}`, {
       action: "push_1688_order",
       poId: row.id,
     });
     const externalOrderId = result?.result?.externalOrderId;
     if (externalOrderId) {
+      const pushedPo = result?.result?.purchaseOrder as PurchaseOrderRow | undefined;
+      void syncLatest1688OrderPrice(pushedPo || { ...row, externalOrderId }, { silent: true });
       message.success(`已推送 1688 下单：${externalOrderId}`);
     } else if (result) {
       message.warning("1688 已接收下单请求，但暂未返回订单号，请稍后同步订单");
@@ -2665,12 +2714,16 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     return result;
   };
 
-  const request1688PriceChange = async (row: PurchaseOrderRow) => {
-    await runAction(`1688-price-request-${row.id}`, {
-      action: "request_1688_price_change",
-      poId: row.id,
-      remark: "已发起 1688 改价沟通",
-    }, "已记录改价沟通");
+  const submitPaymentApproval = async (row: PurchaseOrderRow) => {
+    const synced = row.externalOrderId
+      ? await syncLatest1688OrderPrice(row, { silent: true })
+      : null;
+    const syncedPo = synced?.result?.purchaseOrder as PurchaseOrderRow | undefined;
+    await runAction(
+      `pay-submit-${row.id}`,
+      { action: "submit_payment_approval", poId: row.id, amount: syncedPo?.totalAmount ?? row.totalAmount },
+      "已提交付款审批",
+    );
   };
 
   const open1688PaymentUrl = async (row: PurchaseOrderRow) => {
@@ -2698,45 +2751,41 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     if (paymentUrl) window.open(paymentUrl, "_blank", "noopener,noreferrer");
   };
 
-  const query1688PayWays = async (row: PurchaseOrderRow) => {
-    const result = await runAction(`1688-pay-ways-${row.id}`, {
-      action: "query_1688_pay_ways",
-      poIds: [row.id],
-    }, "1688 支付渠道已同步");
-    const payWays = Array.isArray(result?.result?.payWays) ? result.result.payWays : [];
-    Modal.info({
-      title: "1688 支付渠道",
-      content: (
-        <Space direction="vertical" size={6}>
-          <Text>订单：{row.externalOrderId || row.poNo || row.id}</Text>
-          <Text>{payWays.length ? payWays.map((item: any) => item.name || item.code).filter(Boolean).join(" / ") : "已返回原始支付渠道数据"}</Text>
-        </Space>
-      ),
-    });
-  };
-
-  const query1688ProtocolPayStatus = async (row: PurchaseOrderRow) => {
-    const result = await runAction(`1688-protocol-status-${row.id}`, {
-      action: "query_1688_protocol_pay_status",
-      poIds: [row.id],
-    }, "1688 代扣协议状态已同步");
-    const isOpen = result?.result?.isOpen;
-    Modal.info({
-      title: "1688 代扣协议",
-      content: (
-        <Space direction="vertical" size={6}>
-          <Text>订单：{row.externalOrderId || row.poNo || row.id}</Text>
-          <Text>状态：{isOpen === true ? "已开通" : isOpen === false ? "未开通" : "已返回原始状态"}</Text>
-        </Space>
-      ),
-    });
-  };
-
-  const prepare1688ProtocolPay = async (row: PurchaseOrderRow) => {
-    await runAction(`1688-protocol-pay-${row.id}`, {
-      action: "prepare_1688_protocol_pay",
-      poIds: [row.id],
-    }, "1688 免密支付已发起");
+  const handle1688Payment = async (row: PurchaseOrderRow) => {
+    if (!row.externalOrderId) {
+      message.warning("请先绑定 1688 订单号");
+      return;
+    }
+    const synced = await syncLatest1688OrderPrice(row, { silent: true });
+    const nextRow = (synced?.result?.purchaseOrder as PurchaseOrderRow | undefined) || row;
+    let protocolOpen: boolean | null = null;
+    if (canFinance) {
+      const protocolResult = await runAction(`1688-pay-${row.id}`, {
+        action: "query_1688_protocol_pay_status",
+        poIds: [row.id],
+      });
+      if (!protocolResult) return;
+      protocolOpen = protocolResult?.result?.isOpen === true;
+    }
+    if (protocolOpen) {
+      Modal.confirm({
+        title: "发起 1688 免密支付",
+        content: "系统会调用 1688 代扣/免密支付接口，扣款结果以后续 1688 消息或订单详情为准。",
+        okText: "发起支付",
+        cancelText: "打开支付链接",
+        onOk: async () => {
+          await runAction(`1688-pay-${row.id}`, {
+            action: "prepare_1688_protocol_pay",
+            poIds: [row.id],
+          }, "1688 免密支付已发起");
+        },
+        onCancel: () => {
+          void open1688PaymentUrl(nextRow);
+        },
+      });
+      return;
+    }
+    await open1688PaymentUrl(nextRow);
   };
 
   const cancel1688Order = async (row: PurchaseOrderRow) => {
@@ -3028,18 +3077,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       preferSku1688Source: hasMapping,
     }, hasMapping ? undefined : "手工采购单已生成");
     if (!result) return;
-    const generatedPo = result?.result?.purchaseOrder as PurchaseOrderRow | undefined;
-    if (!hasMapping) return;
-    if (!generatedPo?.id) {
-      message.warning("采购单已生成，但没有拿到可推送的采购单号，请刷新后手动推单");
-      return;
-    }
-    const validation = await validate1688OrderPush(generatedPo, true);
-    if (validation?.ready) {
-      await push1688Order(generatedPo, { skipValidation: true });
-    } else {
-      message.warning(validation?.message || "采购单已生成，但当前映射还不满足 1688 自动推单条件");
-    }
+    if (hasMapping) message.success("采购单已生成，可在下方手动推送 1688 下单");
+    return;
   };
 
   const exportActiveQueue = () => {
@@ -3226,16 +3265,6 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         const canDelete = canCreateRequest && ["submitted", "buyer_processing", "sourced"].includes(row.status);
         return (
           <div className="purchase-action-grid">
-            {row.status === "submitted" && canPurchase ? (
-              <Button
-                size="small"
-                icon={<ShoppingCartOutlined />}
-                loading={actingKey === `accept-${row.id}`}
-                onClick={() => runAction(`accept-${row.id}`, { action: "accept_pr", prId: row.id }, "已接收采购单")}
-              >
-                接收
-              </Button>
-            ) : null}
             {SHOW_KEYWORD_1688_SOURCE && canFindSupplier ? (
               <Button
                 size="small"
@@ -3486,31 +3515,22 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         const mappingCount = Number(row.mappingCount || 0);
         const deliveryAddressCount = Number(row.deliveryAddressCount || 0);
         const canPushTo1688 = !row.externalOrderId && canPurchase && mappingCount > 0 && deliveryAddressCount > 0;
-        const pushLoading = actingKey === `1688-push-${row.id}`
-          || actingKey === `1688-validate-${row.id}`
-          || actingKey === `1688-preview-${row.id}`;
+        const pushLoading = actingKey === `1688-push-${row.id}`;
         const canUse1688Payment = canUse1688PaymentActions(row);
         const canDeletePo = canPurchase && canDeletePurchaseOrder(row);
         return (
           <div className="purchase-action-grid">
-          {canPushTo1688 ? (
-            <Popconfirm
-              title="推送 1688 下单"
-              description="会先校验供应商映射、店铺 1688 地址并预览订单，通过后创建 1688 订单。"
-              okText="推送"
-              cancelText="取消"
-              onConfirm={() => push1688Order(row)}
-            >
+            {canPushTo1688 ? (
               <Button
                 size="small"
                 type="primary"
                 icon={<ShoppingCartOutlined />}
                 loading={pushLoading}
+                onClick={() => void push1688Order(row)}
               >
                 推送1688下单
               </Button>
-            </Popconfirm>
-          ) : null}
+            ) : null}
           {rollbackVisible ? (
             <Popconfirm
               title="回退采购单状态"
@@ -3565,50 +3585,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           {canUse1688Payment && (canPurchase || canFinance) ? (
             <Button
               size="small"
-              icon={<LinkOutlined />}
-              loading={actingKey === `1688-pay-${row.id}`}
-              onClick={() => open1688PaymentUrl(row)}
-            >
-              支付链接
-            </Button>
-          ) : null}
-          {canUse1688Payment && (canPurchase || canFinance) ? (
-            <Button
-              size="small"
+              type="primary"
               icon={<DollarOutlined />}
-              loading={actingKey === `1688-pay-ways-${row.id}`}
-              onClick={() => query1688PayWays(row)}
+              loading={actingKey === `1688-pay-${row.id}`}
+              onClick={() => handle1688Payment(row)}
             >
-              支付渠道
+              去付款
             </Button>
-          ) : null}
-          {canUse1688Payment && (canPurchase || canFinance) ? (
-            <Button
-              size="small"
-              icon={<FileSearchOutlined />}
-              loading={actingKey === `1688-protocol-status-${row.id}`}
-              onClick={() => query1688ProtocolPayStatus(row)}
-            >
-              代扣
-            </Button>
-          ) : null}
-          {canUse1688Payment && canFinance ? (
-            <Popconfirm
-              title="发起 1688 免密支付"
-              description="会调用 1688 代扣/免密支付接口，扣款结果以后续 1688 消息或订单详情为准。"
-              okText="发起支付"
-              cancelText="返回"
-              onConfirm={() => prepare1688ProtocolPay(row)}
-            >
-              <Button
-                size="small"
-                type="primary"
-                icon={<CheckCircleOutlined />}
-                loading={actingKey === `1688-protocol-pay-${row.id}`}
-              >
-                免密支付
-              </Button>
-            </Popconfirm>
           ) : null}
           {row.externalOrderId && canPurchase ? (
             <Button
@@ -3679,24 +3662,10 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           {row.status === "pushed_pending_price" && canPurchase ? (
             <Button
               size="small"
-              icon={<CommentOutlined />}
-              loading={actingKey === `1688-price-request-${row.id}`}
-              onClick={() => request1688PriceChange(row)}
-            >
-              改价留言
-            </Button>
-          ) : null}
-          {row.status === "pushed_pending_price" && canPurchase ? (
-            <Button
-              size="small"
               type="primary"
               icon={<DollarOutlined />}
               loading={actingKey === `pay-submit-${row.id}`}
-              onClick={() => runAction(
-                `pay-submit-${row.id}`,
-                { action: "submit_payment_approval", poId: row.id, amount: row.totalAmount },
-                "已提交付款审批",
-              )}
+              onClick={() => submitPaymentApproval(row)}
             >
               提交付款
             </Button>

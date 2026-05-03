@@ -2496,7 +2496,49 @@ function normalize1688ProcurementError(error, api = {}) {
     next.cause = error;
     return next;
   }
+  const payloadMessage = extract1688PayloadErrorMessage(error?.payload || error?.response);
+  if (payloadMessage && /1688 API request failed with HTTP 200/i.test(message)) {
+    const next = new Error(payloadMessage);
+    next.status = error?.status;
+    next.payload = error?.payload;
+    next.request = error?.request;
+    next.errorCode = error?.errorCode;
+    next.apiKey = api.key;
+    next.cause = error;
+    return next;
+  }
   return error;
+}
+
+function extract1688PayloadErrorMessage(value, depth = 0) {
+  if (!value || depth > 8) return null;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+      try {
+        return extract1688PayloadErrorMessage(JSON.parse(trimmed), depth + 1) || trimmed;
+      } catch {}
+    }
+    return trimmed;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = extract1688PayloadErrorMessage(item, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof value !== "object") return null;
+  for (const key of ["errorMessage", "error_message", "message", "msg", "errorMsg", "error_msg", "returnMessage", "reason", "error"]) {
+    const found = extract1688PayloadErrorMessage(value[key], depth + 1);
+    if (found) return found;
+  }
+  for (const item of Object.values(value)) {
+    const found = extract1688PayloadErrorMessage(item, depth + 1);
+    if (found) return found;
+  }
+  return null;
 }
 
 function build1688KeywordSearchParams(payload = {}, pr = {}, sku = {}) {
@@ -7344,7 +7386,10 @@ function build1688OrderCargoParamList(po, lines, payload = {}) {
     return payload.cargoParamList.map((item, index) => ({
       ...item,
       offerId: requireString(item.offerId || item.offer_id, `cargoParamList[${index}].offerId`),
-      specId: require1688SpecId(item.specId || item.spec_id || item.cargoSkuId || item.cargo_sku_id, `cargoParamList[${index}]`),
+      specId: require1688OrderSpecId(
+        item.specId || item.spec_id || item.cargoSpecId || item.cargo_spec_id || item.cargoSkuId || item.cargo_sku_id,
+        `cargoParamList[${index}]`,
+      ),
       quantity: optionalPositiveInteger(item.quantity, 1),
     }));
   }
@@ -7363,7 +7408,7 @@ function build1688OrderCargoParamList(po, lines, payload = {}) {
       if (!offerId) {
         throw new Error(`商品编码 ${line.internal_sku_code || line.sku_id} 还没有绑定供应商管理记录`);
       }
-      const specId = require1688SpecId(
+      const specId = require1688OrderSpecId(
         mapping.external_spec_id,
         `商品编码 ${line.internal_sku_code || line.sku_id}`,
       );
@@ -7381,6 +7426,19 @@ function build1688OrderCargoParamList(po, lines, payload = {}) {
 function isLikely1688NumericSkuId(value) {
   const text = optionalString(value);
   return Boolean(text && /^\d{6,}$/.test(text));
+}
+
+function isLikely1688OrderSpecId(value) {
+  const text = optionalString(value);
+  return Boolean(text && !isLikely1688NumericSkuId(text));
+}
+
+function require1688OrderSpecId(value, context = "1688 mapping") {
+  const text = require1688SpecId(value, context);
+  if (!isLikely1688OrderSpecId(text)) {
+    throw new Error(`${context} 保存的是 1688 SKU ID（${text}），不是官方下单 specId；请在供应商管理重新解析/选择规格，或填写 1688 返回的真实 specId`);
+  }
+  return text;
 }
 
 function parse1688WebSkuOptions(html = "") {
@@ -7436,12 +7494,12 @@ function normalize1688SkuMatchOption(option = {}) {
     option.specId
       || option.specID
       || option.spec_id
-      || option.cargoSkuId
-      || option.cargoSkuID
-      || option.cargo_sku_id
+      || option.cargoSpecId
+      || option.cargoSpecID
+      || option.cargo_spec_id
       || option.externalSpecId
       || option.external_spec_id,
-  ) || skuId;
+  );
   if (!skuId && !specId) return null;
   return {
     skuId: skuId || specId,
@@ -7552,14 +7610,14 @@ function updateResolved1688SkuMapping(db, mapping = {}, resolved = {}) {
 function find1688WebSkuMatch(options = [], skuId, specId) {
   const normalizedSkuId = optionalString(skuId);
   const normalizedSpecId = optionalString(specId);
-  return options.find((option) => normalizedSpecId && String(option.specId) === normalizedSpecId)
+  return options.find((option) => isLikely1688OrderSpecId(normalizedSpecId) && String(option.specId) === normalizedSpecId)
     || options.find((option) => normalizedSkuId && String(option.skuId) === normalizedSkuId)
     || null;
 }
 
 function preserveSelected1688Spec(db, mapping = {}, offerId, reason = "web_detail_not_matched") {
   const specId = optionalString(mapping.external_spec_id || mapping.externalSpecId);
-  if (!specId) return null;
+  if (!isLikely1688OrderSpecId(specId)) return null;
   updateResolved1688SkuMapping(db, mapping, {
     offerId,
     skuId: optionalString(mapping.external_sku_id || mapping.externalSkuId),
@@ -7574,21 +7632,7 @@ function preserveSelected1688Spec(db, mapping = {}, offerId, reason = "web_detai
 function fallback1688SkuIdAsSpecId(db, mapping = {}, offerId, skuId, reason = "selected_sku_id_as_spec_id") {
   const normalizedSkuId = optionalString(skuId);
   if (!normalizedSkuId) return null;
-  const specAttrs = optionalString(mapping.platform_sku_name || mapping.platformSkuName) || normalizedSkuId;
-  updateResolved1688SkuMapping(db, mapping, {
-    offerId,
-    skuId: normalizedSkuId,
-    specId: normalizedSkuId,
-    specAttrs,
-    source: reason,
-    webMatch: false,
-  });
-  return {
-    skuId: normalizedSkuId,
-    specId: normalizedSkuId,
-    specAttrs,
-    source: reason,
-  };
+  return null;
 }
 
 async function fetch1688WebSkuOptions(offerId) {
@@ -7614,16 +7658,17 @@ async function fetch1688WebSkuOptions(offerId) {
 async function resolve1688NumericSkuMapping(db, mapping = {}) {
   const offerId = optionalString(mapping.external_offer_id || mapping.externalOfferId);
   const skuId = optionalString(mapping.external_sku_id || mapping.externalSkuId);
-  const specId = optionalString(mapping.external_spec_id || mapping.externalSpecId);
+  const savedSpecId = optionalString(mapping.external_spec_id || mapping.externalSpecId);
   const lookupSkuId = isLikely1688NumericSkuId(skuId) ? skuId : null;
-  if (!offerId || (!lookupSkuId && !specId)) return null;
-  const cachedMatch = findCached1688SkuMatch(mapping, lookupSkuId, specId);
+  const selectedSpecId = isLikely1688OrderSpecId(savedSpecId) ? savedSpecId : null;
+  if (!offerId || (!lookupSkuId && !selectedSpecId)) return null;
+  const cachedMatch = findCached1688SkuMatch(mapping, lookupSkuId, selectedSpecId);
   if (cachedMatch?.specId) {
     updateResolved1688SkuMapping(db, mapping, {
       offerId,
       skuId: cachedMatch.skuId || lookupSkuId || skuId,
       specId: cachedMatch.specId,
-      specAttrs: cachedMatch.specAttrs || specId || cachedMatch.specId,
+      specAttrs: cachedMatch.specAttrs || selectedSpecId || cachedMatch.specId,
       source: cachedMatch.source || "cached_product_detail",
       webMatch: false,
     });
@@ -7633,22 +7678,21 @@ async function resolve1688NumericSkuMapping(db, mapping = {}) {
   try {
     skuOptions = await fetch1688WebSkuOptions(offerId);
   } catch (error) {
-    return preserveSelected1688Spec(db, mapping, offerId, "selected_spec_web_lookup_failed")
-      || fallback1688SkuIdAsSpecId(db, mapping, offerId, lookupSkuId, "selected_sku_web_lookup_failed");
-  }
-  const matched = find1688WebSkuMatch(skuOptions, lookupSkuId, specId);
-  if (!matched?.specId) {
-    const preserved = preserveSelected1688Spec(db, mapping, offerId, "selected_spec_not_in_web_detail");
+    const preserved = preserveSelected1688Spec(db, { ...mapping, external_spec_id: selectedSpecId }, offerId, "selected_spec_web_lookup_failed");
     if (preserved) return preserved;
-    const fallback = fallback1688SkuIdAsSpecId(db, mapping, offerId, lookupSkuId, "selected_sku_not_in_web_detail");
-    if (fallback) return fallback;
-    throw new Error(`1688 商品 ${offerId} 的规格 ${lookupSkuId || specId} 未匹配到可下单 specId，请重新选择规格`);
+    throw new Error(`1688 offer ${offerId} cannot resolve a real order specId (skuId: ${lookupSkuId || skuId || "-"}). Re-parse/select the supplier spec, or enter the true specId returned by 1688.`);
+  }
+  const matched = find1688WebSkuMatch(skuOptions, lookupSkuId, selectedSpecId);
+  if (!matched?.specId) {
+    const preserved = preserveSelected1688Spec(db, { ...mapping, external_spec_id: selectedSpecId }, offerId, "selected_spec_not_in_web_detail");
+    if (preserved) return preserved;
+    throw new Error(`1688 offer ${offerId} skuId/specId ${lookupSkuId || selectedSpecId || "-"} did not match an orderable specId. Re-select the supplier spec.`);
   }
   updateResolved1688SkuMapping(db, mapping, {
     offerId,
     skuId: matched.skuId || lookupSkuId || skuId,
     specId: matched.specId,
-    specAttrs: matched.specAttrs || specId,
+    specAttrs: matched.specAttrs || selectedSpecId,
     source: "1688_web_detail",
     webMatch: true,
   });

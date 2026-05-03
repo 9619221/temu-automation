@@ -579,25 +579,27 @@ function normalize1688Offer(item = {}) {
     "skuId",
     "skuID",
     "sku_id",
-    "specId",
-    "specID",
-    "spec_id",
-    "cargoSkuId",
-    "cargoSkuID",
-    "cargo_sku_id",
     "mainPriceSkuId",
     "offerSkuId",
     "offer_sku_id",
   ]);
-  const skuId = firstPresent(item.skuId, item.skuID, item.sku_id, item.specId, item.specID, item.spec_id, inferredSkuId);
+  const inferredSpecId = findNested1688Value(item, [
+    "specId",
+    "specID",
+    "spec_id",
+    "cargoSpecId",
+    "cargoSpecID",
+    "cargo_spec_id",
+  ]);
+  const skuId = firstPresent(item.skuId, item.skuID, item.sku_id, inferredSkuId);
   const specId = firstPresent(
     item.specId,
     item.specID,
     item.spec_id,
-    item.cargoSkuId,
-    item.cargoSkuID,
-    item.cargo_sku_id,
-    inferredSkuId,
+    item.cargoSpecId,
+    item.cargoSpecID,
+    item.cargo_spec_id,
+    inferredSpecId,
   );
   const supplierName = firstPresent(
     item.supplierName,
@@ -658,7 +660,7 @@ function normalize1688Offer(item = {}) {
     leadDays: firstNumber(item.leadDays, item.deliveryDays, item.shipInDays),
     logisticsFee: firstNumber(item.logisticsFee, item.freight, item.shippingFee) ?? 0,
     externalSkuId: skuId ? String(skuId) : null,
-    externalSpecId: specId ? String(specId) : (skuId ? String(skuId) : null),
+    externalSpecId: specId ? String(specId) : null,
     raw: item,
   };
 }
@@ -772,7 +774,7 @@ function normalize1688SkuOptions(product = {}) {
     );
     return {
       externalSkuId: skuId ? String(skuId) : null,
-      externalSpecId: specId ? String(specId) : (skuId ? String(skuId) : null),
+      externalSpecId: specId ? String(specId) : null,
       specText: attributes.map((item) => `${item.name}:${item.value}`).join("; "),
       attributes,
       price,

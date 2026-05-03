@@ -1,0 +1,14 @@
+{
+  "sku": "sku-demo-001",
+  "order_no": "SO-0001",
+  "sales_qty": 18,
+  "sales_amt": 2599.0,
+  "activity_id": "ACT-001",
+  "activity_name": "example promotion",
+  "period": "2026-05",
+  "payable": 888.88,
+  "currency": "CNY",
+  "claim_id": "COMP-001",
+  "comp_status": "pending",
+  "amount": 12.34
+}

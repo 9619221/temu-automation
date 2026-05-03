@@ -13,7 +13,7 @@ export const PR_STATUS_LABELS: Record<string, string> = {
 
 export const PO_STATUS_LABELS: Record<string, string> = {
   draft: "草稿",
-  pushed_pending_price: "已推单待改价",
+  pushed_pending_price: "已推单待付款",
   pending_finance_approval: "待财务审批",
   approved_to_pay: "已批准付款",
   paid: "已付款",

@@ -261,6 +261,17 @@ function mergeSkuAndMappingRows(skus: SkuOptionRow[], mappings: Sku1688SourceRow
   return rows;
 }
 
+function isPrimarySourceForRow(sku: SkuOptionRow, row: Sku1688SourceRow) {
+  const source = sku.primary1688Source;
+  if (!source) return false;
+  if (source.id && source.id === row.id) return true;
+  if (sku.id !== row.skuId) return false;
+  if (source.externalOfferId && row.externalOfferId && source.externalOfferId !== row.externalOfferId) return false;
+  if (source.externalSpecId && row.externalSpecId && source.externalSpecId !== row.externalSpecId) return false;
+  if (source.externalSkuId && row.externalSkuId && source.externalSkuId !== row.externalSkuId) return false;
+  return Boolean(source.externalOfferId || source.externalSkuId || source.externalSpecId);
+}
+
 function normalizeSearchText(value: unknown) {
   return String(value ?? "").trim().toLowerCase();
 }
@@ -407,6 +418,7 @@ export default function AlibabaMapping() {
   const [loadedOnce, setLoadedOnce] = useState(() => hasPageCache(cachedData));
   const [searchText, setSearchText] = useState("");
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
+  const [deleteConfirmRow, setDeleteConfirmRow] = useState<Sku1688SourceRow | null>(null);
   const [specPreviewLoading, setSpecPreviewLoading] = useState(false);
   const [urlSpecDialog, setUrlSpecDialog] = useState<UrlSpecDialogState | null>(null);
   const [selectedUrlSpecId, setSelectedUrlSpecId] = useState<string | null>(null);
@@ -863,29 +875,47 @@ export default function AlibabaMapping() {
   }, [applyMappingSources, updateMappingSources]);
 
   const deleteMapping = useCallback((row: Sku1688SourceRow) => {
-    if (!erp) return;
-    Modal.confirm({
-      title: "删除供应商绑定",
-      content: "删除后这条 1688 规格绑定会从供应商管理移除；已生成的采购单和 1688 订单不会删除。",
-      okText: "删除",
-      okButtonProps: { danger: true },
-      cancelText: "取消",
-      onOk: () => {
-        updateMappingSources((rows) => rows.filter((item) => item.id !== row.id));
-        void erp.purchase.action({
-          action: "delete_sku_1688_source",
-          sourceId: row.id,
-          ...MAPPING_WORKBENCH_PARAMS,
-          includeWorkbench: false,
-        }).then(() => {
-          message.success("供应商绑定已删除");
-        }).catch((error: any) => {
-          updateMappingSources((rows) => rows.some((item) => item.id === row.id) ? rows : [row, ...rows]);
-          message.error(error?.message || "供应商绑定删除失败");
-        });
-      },
+    if (!erp || isSkuPlaceholderRow(row)) return;
+    setDeleteConfirmRow(row);
+  }, []);
+
+  const removeMappingFromLocalState = useCallback((row: Sku1688SourceRow) => {
+    const nextSkus = skus.map((sku) => (
+      isPrimarySourceForRow(sku, row) ? { ...sku, primary1688Source: null } : sku
+    ));
+    const nextMappings = mappings.filter((item) => item.id !== row.id);
+    setSkus(nextSkus);
+    setMappings(nextMappings);
+    setLoadedOnce(true);
+    writePageCache<AlibabaMappingCache>(ALIBABA_MAPPING_CACHE_KEY, {
+      generatedAt: new Date().toISOString(),
+      skus: nextSkus,
+      mappings: nextMappings,
     });
-  }, [updateMappingSources]);
+  }, [mappings, skus]);
+
+  const confirmDeleteMapping = useCallback(async () => {
+    const row = deleteConfirmRow;
+    if (!erp || !row) return;
+    const key = `delete_sku_1688_source-${row.id}`;
+    setDeleteConfirmRow(null);
+    setActionLoadingId(key);
+    removeMappingFromLocalState(row);
+    try {
+      await erp.purchase.action({
+        action: "delete_sku_1688_source",
+        sourceId: row.id,
+        ...MAPPING_WORKBENCH_PARAMS,
+        includeWorkbench: false,
+      });
+      message.success("供应商绑定已删除");
+    } catch (error: any) {
+      updateMappingSources((rows) => rows.some((item) => item.id === row.id) ? rows : [row, ...rows]);
+      message.error(error?.message || "供应商绑定删除失败");
+    } finally {
+      setActionLoadingId(null);
+    }
+  }, [deleteConfirmRow, removeMappingFromLocalState, updateMappingSources]);
 
 
   const searchRelationSuppliers = useCallback(async () => {
@@ -1286,6 +1316,28 @@ export default function AlibabaMapping() {
           pagination={{ pageSize: 10, showSizeChanger: false }}
         />
       </section>
+
+      <Modal
+        open={Boolean(deleteConfirmRow)}
+        title="删除供应商绑定"
+        okText="删除"
+        cancelText="取消"
+        okButtonProps={{ danger: true }}
+        centered
+        width={420}
+        forceRender
+        onOk={() => void confirmDeleteMapping()}
+        onCancel={() => setDeleteConfirmRow(null)}
+      >
+        <Space direction="vertical" size={8}>
+          <Text>删除后这条 1688 规格绑定会从供应商管理移除；已生成的采购单和 1688 订单不会删除。</Text>
+          {deleteConfirmRow ? (
+            <Text type="secondary">
+              {deleteConfirmRow.internalSkuCode || deleteConfirmRow.productName || deleteConfirmRow.externalOfferId || deleteConfirmRow.id}
+            </Text>
+          ) : null}
+        </Space>
+      </Modal>
 
       <Modal
         open={modalOpen}

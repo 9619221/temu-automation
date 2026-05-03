@@ -870,6 +870,135 @@ async function main() {
     assert.equal(mappedSku.procurementSourceCount, 1);
     assert.equal(mappedSku.primary1688Source.externalOfferId, "1688-offer-ipc");
 
+    const numericSkuId = "5504403696170";
+    const realOrderSpecId = "c8ee3141962fcd1bf8acd097b78cfebe";
+    let original1688Source = null;
+    const numericSkuDb = openErpDatabase({ userDataDir: tempUserData });
+    try {
+      original1688Source = numericSkuDb.prepare("SELECT * FROM erp_sku_1688_sources WHERE id = ?").get(detail1688Result.sku1688Source.id);
+      assert.ok(original1688Source);
+      numericSkuDb.prepare(`
+        UPDATE erp_sku_1688_sources
+        SET external_sku_id = @external_sku_id,
+            external_spec_id = '',
+            platform_sku_name = @platform_sku_name,
+            source_payload_json = @source_payload_json
+        WHERE id = @id
+      `).run({
+        id: detail1688Result.sku1688Source.id,
+        external_sku_id: numericSkuId,
+        platform_sku_name: "Numeric SKU with resolved order spec",
+        source_payload_json: JSON.stringify({
+          skuOptions: [
+            {
+              externalSkuId: numericSkuId,
+              externalSpecId: realOrderSpecId,
+              specText: "Numeric SKU with resolved order spec",
+            },
+          ],
+        }),
+      });
+    } finally {
+      numericSkuDb.close();
+    }
+    const originalFetch = global.fetch;
+    global.fetch = async () => {
+      throw new Error("cached SKU match should avoid web lookup");
+    };
+    try {
+      const validateNumericSkuFallback = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          Cookie: cookie,
+        },
+        body: JSON.stringify({
+          action: "validate_1688_order_push",
+          poId: "po_1688_preview_ipc",
+          dryRun: true,
+        }),
+      });
+      assert.equal(validateNumericSkuFallback.statusCode, 200);
+      const validateNumericSkuResult = JSON.parse(validateNumericSkuFallback.body).result.result;
+      assert.equal(validateNumericSkuResult.ready, true);
+      assert.equal(validateNumericSkuResult.params.cargoParamList[0].offerId, "1688-offer-ipc");
+      assert.equal(validateNumericSkuResult.params.cargoParamList[0].specId, realOrderSpecId);
+      assert.equal(validateNumericSkuResult.params.cargoParamList[0].quantity, 60);
+
+      const pushNumericSkuDryRun = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          Cookie: cookie,
+        },
+        body: JSON.stringify({
+          action: "push_1688_order",
+          poId: "po_1688_preview_ipc",
+          dryRun: true,
+        }),
+      });
+      assert.equal(pushNumericSkuDryRun.statusCode, 200);
+      const pushNumericSkuResult = JSON.parse(pushNumericSkuDryRun.body).result.result;
+      assert.equal(pushNumericSkuResult.dryRun, true);
+      assert.equal(pushNumericSkuResult.params.cargoParamList[0].specId, realOrderSpecId);
+
+      const invalidNumericSkuDb = openErpDatabase({ userDataDir: tempUserData });
+      try {
+        invalidNumericSkuDb.prepare(`
+          UPDATE erp_sku_1688_sources
+          SET external_sku_id = @external_sku_id,
+              external_spec_id = @external_spec_id,
+              source_payload_json = '{}'
+          WHERE id = @id
+        `).run({
+          id: detail1688Result.sku1688Source.id,
+          external_sku_id: numericSkuId,
+          external_spec_id: numericSkuId,
+        });
+      } finally {
+        invalidNumericSkuDb.close();
+      }
+      global.fetch = async () => ({ text: async () => "{}" });
+      const invalidNumericSkuFallback = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          Cookie: cookie,
+        },
+        body: JSON.stringify({
+          action: "validate_1688_order_push",
+          poId: "po_1688_preview_ipc",
+          dryRun: true,
+        }),
+      });
+      assert.equal(invalidNumericSkuFallback.statusCode, 400);
+      assert.match(JSON.parse(invalidNumericSkuFallback.body).error, /orderable specId|official order specId|true specId/);
+    } finally {
+      global.fetch = originalFetch;
+      const restoreNumericSkuDb = openErpDatabase({ userDataDir: tempUserData });
+      try {
+        restoreNumericSkuDb.prepare(`
+          UPDATE erp_sku_1688_sources
+          SET external_sku_id = @external_sku_id,
+              external_spec_id = @external_spec_id,
+              platform_sku_name = @platform_sku_name,
+              source_payload_json = @source_payload_json
+          WHERE id = @id
+        `).run({
+          id: original1688Source.id,
+          external_sku_id: original1688Source.external_sku_id,
+          external_spec_id: original1688Source.external_spec_id,
+          platform_sku_name: original1688Source.platform_sku_name,
+          source_payload_json: original1688Source.source_payload_json,
+        });
+      } finally {
+        restoreNumericSkuDb.close();
+      }
+    }
+
     const preview1688 = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
       method: "POST",
       headers: {
