@@ -1,5 +1,38 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
+// 给 invoke 调用加软超时：超时后 Promise reject 让 UI 立刻可恢复，
+// 主进程那侧的 IPC 不能真正中断，但渲染端不再卡死，错误能上抛到 catch 给用户提示。
+function invokeWithTimeout(channel, payload, timeoutMs) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return ipcRenderer.invoke(channel, payload);
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      const err = new Error(`IPC ${channel} 调用超时 (${Math.round(timeoutMs / 1000)}s)`);
+      err.code = "IPC_TIMEOUT";
+      err.channel = channel;
+      reject(err);
+    }, timeoutMs);
+    ipcRenderer.invoke(channel, payload).then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
 let erpEventSubscriptionCount = 0;
 
 function retainErpEventSubscription() {
@@ -230,8 +263,16 @@ contextBridge.exposeInMainWorld("electronAPI", {
       delete: (payload) => ipcRenderer.invoke("erp:sku:delete", payload || {}),
     },
     purchase: {
-      workbench: (params) => ipcRenderer.invoke("erp:purchase:workbench", params || {}),
-      action: (payload) => ipcRenderer.invoke("erp:purchase:action", payload || {}),
+      workbench: (params, options) => invokeWithTimeout(
+        "erp:purchase:workbench",
+        params || {},
+        Number.isFinite(options?.timeoutMs) ? options.timeoutMs : 30000,
+      ),
+      action: (payload, options) => invokeWithTimeout(
+        "erp:purchase:action",
+        payload || {},
+        Number.isFinite(options?.timeoutMs) ? options.timeoutMs : 60000,
+      ),
       local1688Inquiry: (payload) => ipcRenderer.invoke("erp:purchase:local-1688-inquiry", payload || {}),
       open1688Detail: (payload) => ipcRenderer.invoke("erp:purchase:open-1688-detail", payload || {}),
     },

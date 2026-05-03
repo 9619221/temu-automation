@@ -7,6 +7,7 @@ import {
   Checkbox,
   Col,
   Drawer,
+  Dropdown,
   Form,
   Input,
   InputNumber,
@@ -25,6 +26,7 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type { TableRowSelection } from "antd/es/table/interface";
+import type { MenuProps } from "antd";
 import {
   ApiOutlined,
   CheckCircleOutlined,
@@ -53,6 +55,7 @@ import { useErpAuth } from "../contexts/ErpAuthContext";
 import {
   PAYMENT_STATUS_LABELS,
   PO_STATUS_LABELS,
+  PO_ROLLBACK_BUTTON_LABELS,
   PR_STATUS_LABELS,
   canRole,
   formatDate,
@@ -972,6 +975,30 @@ function is1688AclDeniedError(error: any, message: string) {
   return /AppKey is not allowed\(acl\)|not allowed\(acl\)|当前 1688 AppKey 没有接口权限/i.test(message);
 }
 
+// 1688 业务错误码 → 用户友好中文。匹配 `errorCode:XXX` 子串即翻译。
+const ALIBABA_1688_BUSINESS_ERROR_HINTS: Array<{ code: string; hint: string }> = [
+  { code: "ORDER_NOT_EXIST", hint: "1688 找不到这个订单号；可能已被卖家取消、超时关闭或绑错了账号。建议先在 1688 后台确认订单状态，或在采购单上点「取消1688」后重新推送。" },
+  { code: "ORDER_NOT_PAY", hint: "1688 订单不在「待支付」状态；可能已付款或已关闭。" },
+  { code: "ORDER_HAS_PAID", hint: "1688 订单已经付款过了。在系统上点「确认付款」推进本地状态。" },
+  { code: "ORDER_HAS_CANCELED", hint: "1688 订单已被取消。在采购单上点「取消1688」同步本地，再重新推送。" },
+  { code: "ORDER_NOT_FOUND", hint: "1688 找不到这个订单。检查 OAuth 账号是否跟下单账号一致。" },
+  { code: "PAY_NOT_OPEN", hint: "1688 代扣协议未开通，无法用免密支付；请到 1688 后台签约后重试。" },
+  { code: "INVALID_ACCESS_TOKEN", hint: "1688 OAuth 已过期，请到「设置」重新授权。" },
+  { code: "ACCESS_TOKEN_EXPIRED", hint: "1688 OAuth 已过期，请到「设置」重新授权。" },
+  { code: "ISP_BACK_SERVICE_TIMEOUT", hint: "1688 服务超时，稍后重试。" },
+  { code: "SYSTEM_ERROR", hint: "1688 系统错误，稍后重试；多次出现请检查 OAuth 凭据或换网络环境。" },
+];
+
+function translate1688BusinessError(rawMessage: string): string | null {
+  const msg = rawMessage || "";
+  for (const { code, hint } of ALIBABA_1688_BUSINESS_ERROR_HINTS) {
+    if (msg.includes(`errorCode:${code}`) || msg.includes(`"errorCode":"${code}"`) || msg.includes(code)) {
+      return hint;
+    }
+  }
+  return null;
+}
+
 function purchaseActionErrorMessage(error: any, action?: string) {
   const message = cleanRemoteErrorMessage(error);
   if (is1688AclDeniedError(error, message)) {
@@ -983,6 +1010,8 @@ function purchaseActionErrorMessage(error: any, action?: string) {
     }
     return "当前 1688 AppKey 没有这个接口权限，请在 1688 开放平台开通对应 ACL 后重试。";
   }
+  const businessHint = translate1688BusinessError(message);
+  if (businessHint) return businessHint;
   if (message.includes("Client network socket disconnected before secure TLS connection was established")) {
     return "1688 网络连接中断，TLS 握手未完成，请稍后重试";
   }
@@ -1578,7 +1607,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     },
     {
       key: "pending_payment",
-      title: "付款审批",
+      title: "待付款审批",
       count: pendingPaymentRows.length,
       kind: "order",
     },
@@ -1676,6 +1705,23 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     preserveSelectedRowKeys: true,
     onChange: (keys) => setSelectedPoIds(keys.map(String)),
   }), [selectedPoIds]);
+
+  // 乐观更新：立刻把指定 PO 行的状态改成预期值，让 UI 不等 IPC 来回就刷新。
+  // 后续 broadcast/loadData 会用真实数据覆盖；失败时上层应用调用 revert 回滚。
+  const patchPurchaseOrderRow = useCallback((poId: string, patch: Partial<PurchaseOrderRow>) => {
+    let snapshot: PurchaseOrderRow | null = null;
+    setData((prev) => {
+      const list = prev.purchaseOrders || [];
+      const idx = list.findIndex((row) => row.id === poId);
+      if (idx === -1) return prev;
+      snapshot = list[idx];
+      const nextRow = { ...list[idx], ...patch };
+      const nextList = list.slice();
+      nextList[idx] = nextRow;
+      return { ...prev, purchaseOrders: nextList };
+    });
+    return snapshot;
+  }, []);
 
   const applyWorkbench = useCallback((nextData: PurchaseWorkbench) => {
     setData((prevData) => {
@@ -1966,6 +2012,22 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     }
   };
 
+  // 乐观跑：先把行 patch 成预期状态，再发 IPC，失败时回滚。
+  const runActionOptimistic = async (
+    key: string,
+    payload: Record<string, any>,
+    successText: string | undefined,
+    optimistic: { poId: string; patch: Partial<PurchaseOrderRow> },
+  ) => {
+    const snapshot = patchPurchaseOrderRow(optimistic.poId, optimistic.patch);
+    const result = await runAction(key, payload, successText);
+    if (!result && snapshot) {
+      // runAction 失败时已弹出错误提示且返回 null，把行复位回去。
+      patchPurchaseOrderRow(optimistic.poId, snapshot);
+    }
+    return result;
+  };
+
   const canRollbackPurchaseOrder = (row: PurchaseOrderRow) => {
     const target = getPurchaseOrderRollbackTarget(row);
     if (!target) return false;
@@ -2070,11 +2132,20 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const rollbackPurchaseOrder = async (row: PurchaseOrderRow) => {
     const target = getPurchaseOrderRollbackTarget(row);
     const targetLabel = target ? (PO_STATUS_LABELS[target] || target) : "上一状态";
-    await runAction(
-      `rollback-po-${row.id}`,
-      { action: "rollback_po_status", poId: row.id },
-      `已回退到${targetLabel}`,
-    );
+    if (target) {
+      await runActionOptimistic(
+        `rollback-po-${row.id}`,
+        { action: "rollback_po_status", poId: row.id },
+        `已回退到${targetLabel}`,
+        { poId: row.id, patch: { status: target } },
+      );
+    } else {
+      await runAction(
+        `rollback-po-${row.id}`,
+        { action: "rollback_po_status", poId: row.id },
+        `已回退到${targetLabel}`,
+      );
+    }
   };
 
   const deletePurchaseOrder = async (row: PurchaseOrderRow) => {
@@ -2674,6 +2745,31 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   };
 
   const open1688PaymentUrl = async (row: PurchaseOrderRow) => {
+    // 拉支付链接前先静默自检：渠道是否有可用项、代扣协议是否开通。
+    // 任一异常只提示不阻断，最终仍以是否拿到 paymentUrl 为准。
+    const warnings: string[] = [];
+    try {
+      const payWaysResult = await erp?.purchase?.action({
+        action: "query_1688_pay_ways",
+        poIds: [row.id],
+        includeWorkbench: false,
+      });
+      const payWays = Array.isArray(payWaysResult?.result?.payWays) ? payWaysResult.result.payWays : [];
+      if (!payWays.length) warnings.push("未查到 1688 支付渠道");
+    } catch (e: any) {
+      warnings.push(`支付渠道查询失败：${e?.message || "未知错误"}`);
+    }
+    try {
+      const statusResult = await erp?.purchase?.action({
+        action: "query_1688_protocol_pay_status",
+        poIds: [row.id],
+        includeWorkbench: false,
+      });
+      if (statusResult?.result?.isOpen === false) warnings.push("代扣协议未开通（仅影响免密支付）");
+    } catch (e: any) {
+      warnings.push(`代扣状态查询失败：${e?.message || "未知错误"}`);
+    }
+    if (warnings.length) message.warning(warnings.join("；"));
     const result = await runAction(`1688-pay-${row.id}`, {
       action: "get_1688_payment_url",
       poIds: [row.id],
@@ -2696,40 +2792,6 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     }, "1688 批量支付链接已同步");
     const paymentUrl = result?.result?.paymentUrl;
     if (paymentUrl) window.open(paymentUrl, "_blank", "noopener,noreferrer");
-  };
-
-  const query1688PayWays = async (row: PurchaseOrderRow) => {
-    const result = await runAction(`1688-pay-ways-${row.id}`, {
-      action: "query_1688_pay_ways",
-      poIds: [row.id],
-    }, "1688 支付渠道已同步");
-    const payWays = Array.isArray(result?.result?.payWays) ? result.result.payWays : [];
-    Modal.info({
-      title: "1688 支付渠道",
-      content: (
-        <Space direction="vertical" size={6}>
-          <Text>订单：{row.externalOrderId || row.poNo || row.id}</Text>
-          <Text>{payWays.length ? payWays.map((item: any) => item.name || item.code).filter(Boolean).join(" / ") : "已返回原始支付渠道数据"}</Text>
-        </Space>
-      ),
-    });
-  };
-
-  const query1688ProtocolPayStatus = async (row: PurchaseOrderRow) => {
-    const result = await runAction(`1688-protocol-status-${row.id}`, {
-      action: "query_1688_protocol_pay_status",
-      poIds: [row.id],
-    }, "1688 代扣协议状态已同步");
-    const isOpen = result?.result?.isOpen;
-    Modal.info({
-      title: "1688 代扣协议",
-      content: (
-        <Space direction="vertical" size={6}>
-          <Text>订单：{row.externalOrderId || row.poNo || row.id}</Text>
-          <Text>状态：{isOpen === true ? "已开通" : isOpen === false ? "未开通" : "已返回原始状态"}</Text>
-        </Space>
-      ),
-    });
   };
 
   const prepare1688ProtocolPay = async (row: PurchaseOrderRow) => {
@@ -2779,10 +2841,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   };
 
   const confirm1688ReceiveGoods = async (row: PurchaseOrderRow) => {
-    await runAction(`1688-receive-${row.id}`, {
-      action: "confirm_1688_receive_goods",
-      poId: row.id,
-    }, "1688 已确认收货");
+    await runActionOptimistic(
+      `1688-receive-${row.id}`,
+      { action: "confirm_1688_receive_goods", poId: row.id },
+      "1688 已确认收货",
+      { poId: row.id, patch: { status: "arrived" } },
+    );
   };
 
   const import1688Orders = async (autoGenerate = false) => {
@@ -3482,6 +3546,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       render: (_value, row) => {
         const rollbackTarget = getPurchaseOrderRollbackTarget(row);
         const rollbackTargetLabel = rollbackTarget ? (PO_STATUS_LABELS[rollbackTarget] || rollbackTarget) : "";
+        const rollbackButtonLabel = PO_ROLLBACK_BUTTON_LABELS[row.status] || (rollbackTargetLabel ? `回退到${rollbackTargetLabel}` : "回退");
         const rollbackVisible = canRollbackPurchaseOrder(row);
         const mappingCount = Number(row.mappingCount || 0);
         const deliveryAddressCount = Number(row.deliveryAddressCount || 0);
@@ -3494,39 +3559,26 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         return (
           <div className="purchase-action-grid">
           {canPushTo1688 ? (
-            <Popconfirm
-              title="推送 1688 下单"
-              description="会先校验供应商映射、店铺 1688 地址并预览订单，通过后创建 1688 订单。"
-              okText="推送"
-              cancelText="取消"
-              onConfirm={() => push1688Order(row)}
+            <Button
+              size="small"
+              type="primary"
+              icon={<ShoppingCartOutlined />}
+              loading={pushLoading}
+              onClick={() => push1688Order(row)}
             >
-              <Button
-                size="small"
-                type="primary"
-                icon={<ShoppingCartOutlined />}
-                loading={pushLoading}
-              >
-                推送1688下单
-              </Button>
-            </Popconfirm>
+              推送1688下单
+            </Button>
           ) : null}
           {rollbackVisible ? (
-            <Popconfirm
-              title="回退采购单状态"
-              description={`确认回退到${rollbackTargetLabel}？`}
-              okText="回退"
-              cancelText="取消"
-              onConfirm={() => rollbackPurchaseOrder(row)}
+            <Button
+              size="small"
+              icon={<RollbackOutlined />}
+              loading={actingKey === `rollback-po-${row.id}`}
+              onClick={() => rollbackPurchaseOrder(row)}
+              title={rollbackTargetLabel ? `回退到「${rollbackTargetLabel}」` : undefined}
             >
-              <Button
-                size="small"
-                icon={<RollbackOutlined />}
-                loading={actingKey === `rollback-po-${row.id}`}
-              >
-                回退
-              </Button>
-            </Popconfirm>
+              {rollbackButtonLabel}
+            </Button>
           ) : null}
           {canDeletePo ? (
             <Popconfirm
@@ -3553,63 +3605,52 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               type="primary"
               icon={<DollarOutlined />}
               loading={actingKey === `pay-submit-${row.id}`}
-              onClick={() => runAction(
+              onClick={() => runActionOptimistic(
                 `pay-submit-${row.id}`,
                 { action: "submit_payment_approval", poId: row.id, amount: row.totalAmount },
                 "已提交付款审批",
+                { poId: row.id, patch: { status: "pending_finance_approval" } },
               )}
             >
               提交付款
             </Button>
           ) : null}
-          {canUse1688Payment && (canPurchase || canFinance) ? (
-            <Button
-              size="small"
-              icon={<LinkOutlined />}
-              loading={actingKey === `1688-pay-${row.id}`}
-              onClick={() => open1688PaymentUrl(row)}
-            >
-              支付链接
-            </Button>
-          ) : null}
-          {canUse1688Payment && (canPurchase || canFinance) ? (
-            <Button
-              size="small"
-              icon={<DollarOutlined />}
-              loading={actingKey === `1688-pay-ways-${row.id}`}
-              onClick={() => query1688PayWays(row)}
-            >
-              支付渠道
-            </Button>
-          ) : null}
-          {canUse1688Payment && (canPurchase || canFinance) ? (
-            <Button
-              size="small"
-              icon={<FileSearchOutlined />}
-              loading={actingKey === `1688-protocol-status-${row.id}`}
-              onClick={() => query1688ProtocolPayStatus(row)}
-            >
-              代扣
-            </Button>
-          ) : null}
-          {canUse1688Payment && canFinance ? (
-            <Popconfirm
-              title="发起 1688 免密支付"
-              description="会调用 1688 代扣/免密支付接口，扣款结果以后续 1688 消息或订单详情为准。"
-              okText="发起支付"
-              cancelText="返回"
-              onConfirm={() => prepare1688ProtocolPay(row)}
-            >
-              <Button
-                size="small"
-                type="primary"
-                icon={<CheckCircleOutlined />}
-                loading={actingKey === `1688-protocol-pay-${row.id}`}
-              >
-                免密支付
-              </Button>
-            </Popconfirm>
-          ) : null}
+          {canUse1688Payment && (canPurchase || canFinance) ? (() => {
+            const payMenuItems: MenuProps["items"] = [
+              {
+                key: "pay-link",
+                icon: <LinkOutlined />,
+                label: "支付链接（自动诊断）",
+                onClick: () => open1688PaymentUrl(row),
+              },
+              ...(canFinance ? [{
+                type: "divider" as const,
+              }, {
+                key: "protocol-pay",
+                icon: <CheckCircleOutlined />,
+                label: "免密支付",
+                danger: true,
+                onClick: () => {
+                  Modal.confirm({
+                    title: "发起 1688 免密支付",
+                    content: "会调用 1688 代扣/免密支付接口，扣款结果以后续 1688 消息或订单详情为准。",
+                    okText: "发起支付",
+                    cancelText: "返回",
+                    onOk: () => prepare1688ProtocolPay(row),
+                  });
+                },
+              }] : []),
+            ];
+            const payLoading = actingKey === `1688-pay-${row.id}`
+              || actingKey === `1688-protocol-pay-${row.id}`;
+            return (
+              <Dropdown menu={{ items: payMenuItems }} trigger={["click"]}>
+                <Button size="small" icon={<DollarOutlined />} loading={payLoading}>
+                  1688 支付
+                </Button>
+              </Dropdown>
+            );
+          })() : null}
           {row.externalOrderId && canPurchase ? (
             <Button
               size="small"
@@ -3641,21 +3682,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
             </Button>
           ) : null}
           {row.externalOrderId && canPurchase && ["paid", "shipped", "arrived"].includes(row.status) ? (
-            <Popconfirm
-              title="确认 1688 收货"
-              description="会在 1688 买家侧确认收货，并同步本地采购单状态。"
-              okText="确认收货"
-              cancelText="返回"
-              onConfirm={() => confirm1688ReceiveGoods(row)}
+            <Button
+              size="small"
+              icon={<CheckCircleOutlined />}
+              loading={actingKey === `1688-receive-${row.id}`}
+              onClick={() => confirm1688ReceiveGoods(row)}
             >
-              <Button
-                size="small"
-                icon={<CheckCircleOutlined />}
-                loading={actingKey === `1688-receive-${row.id}`}
-              >
-                确认收货
-              </Button>
-            </Popconfirm>
+              确认收货
+            </Button>
           ) : null}
           {row.externalOrderId && canPurchase && ["pushed_pending_price", "pending_finance_approval", "approved_to_pay"].includes(row.status) ? (
             <Popconfirm
@@ -3692,10 +3726,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               type="primary"
               icon={<DollarOutlined />}
               loading={actingKey === `pay-submit-${row.id}`}
-              onClick={() => runAction(
+              onClick={() => runActionOptimistic(
                 `pay-submit-${row.id}`,
                 { action: "submit_payment_approval", poId: row.id, amount: row.totalAmount },
                 "已提交付款审批",
+                { poId: row.id, patch: { status: "pending_finance_approval" } },
               )}
             >
               提交付款
@@ -3706,7 +3741,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               size="small"
               icon={<CheckCircleOutlined />}
               loading={actingKey === `pay-approve-po-${row.id}`}
-              onClick={() => runAction(`pay-approve-po-${row.id}`, { action: "approve_payment", poId: row.id }, "财务已批准")}
+              onClick={() => runActionOptimistic(
+                `pay-approve-po-${row.id}`,
+                { action: "approve_payment", poId: row.id },
+                "财务已批准",
+                { poId: row.id, patch: { status: "approved_to_pay" } },
+              )}
             >
               财务批准
             </Button>
@@ -3717,7 +3757,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               type="primary"
               icon={<CheckCircleOutlined />}
               loading={actingKey === `paid-po-${row.id}`}
-              onClick={() => runAction(`paid-po-${row.id}`, { action: "confirm_paid", poId: row.id }, "已确认付款")}
+              onClick={() => runActionOptimistic(
+                `paid-po-${row.id}`,
+                { action: "confirm_paid", poId: row.id },
+                "已确认付款",
+                { poId: row.id, patch: { status: "paid" } },
+              )}
             >
               确认付款
             </Button>

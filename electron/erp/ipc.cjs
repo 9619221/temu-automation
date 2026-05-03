@@ -8194,7 +8194,7 @@ function bind1688OrderToPurchaseOrder({ db, services, po, order, actor, action =
 }
 
 async function sync1688OrdersAction({ db, services, payload, actor }) {
-  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 order sync");
+  assertActorRole(actor, ["buyer", "manager", "admin", "system"], "1688 order sync");
   const poId = requireString(payload.poId || payload.id, "poId");
   const po = getPurchaseOrderWithCandidate(db, poId);
   const lines = getPurchaseOrderLines(db, poId);
@@ -8255,6 +8255,173 @@ async function sync1688OrdersAction({ db, services, payload, actor }) {
     })),
     purchaseOrder: toCamelRow(afterPo),
     rawResponse,
+  };
+}
+
+// 自动同步 1688 订单：定时扫描已推单但未绑定外部订单号的 PO，调用 sync 进行匹配回填。
+// 用 in-memory 退避避免对失败 PO 反复请求；同账号内出现授权类错误时跳过该账号余下 PO。
+const ORDER_SYNC_BACKOFF_MINUTES = [0, 5, 15, 30, 60];
+const orderSyncAttemptState = new Map();
+
+function getOrderSyncBackoffMs(attempts) {
+  const idx = Math.min(Math.max(attempts, 0), ORDER_SYNC_BACKOFF_MINUTES.length - 1);
+  return ORDER_SYNC_BACKOFF_MINUTES[idx] * 60 * 1000;
+}
+
+function selectPoIdsForScheduledSync(db, { maxAgeHours, limit }) {
+  const cutoff = new Date(Date.now() - maxAgeHours * 3600 * 1000).toISOString();
+  return db.prepare(`
+    SELECT id, account_id, external_order_synced_at
+    FROM erp_purchase_orders
+    WHERE status = 'pushed_pending_price'
+      AND (external_order_id IS NULL OR external_order_id = '')
+      AND created_at >= @cutoff
+    ORDER BY (external_order_synced_at IS NULL) DESC, external_order_synced_at ASC
+    LIMIT @limit
+  `).all({ cutoff, limit });
+}
+
+async function runScheduledOrderSync({ maxAgeHours = 168, limit = 50, logger } = {}) {
+  if (isClientMode()) return { skipped: "client_mode", processed: 0, results: [] };
+  if (!erpState.db || !erpState.services) return { skipped: "erp_not_ready", processed: 0, results: [] };
+  const { db, services } = requireErp();
+  const candidates = selectPoIdsForScheduledSync(db, { maxAgeHours, limit });
+  if (!candidates.length) return { processed: 0, results: [] };
+  const log = typeof logger === "function" ? logger : () => {};
+  const now = Date.now();
+  const failedAccounts = new Set();
+  const results = [];
+  for (const row of candidates) {
+    const state = orderSyncAttemptState.get(row.id) || { attempts: 0, nextAt: 0 };
+    if (state.nextAt && state.nextAt > now) {
+      results.push({ poId: row.id, status: "backoff_skip", nextAt: state.nextAt });
+      continue;
+    }
+    if (row.account_id && failedAccounts.has(row.account_id)) {
+      results.push({ poId: row.id, status: "account_skip" });
+      continue;
+    }
+    try {
+      const result = await sync1688OrdersAction({
+        db,
+        services,
+        payload: { poId: row.id, includeWorkbench: false },
+        actor: { id: null, role: "system", name: "auto-sync" },
+      });
+      if (result.matchStatus === "bound") {
+        orderSyncAttemptState.delete(row.id);
+        log({ event: "bound", poId: row.id, externalOrderId: result.externalOrderId });
+      } else {
+        const nextAttempts = state.attempts + 1;
+        orderSyncAttemptState.set(row.id, {
+          attempts: nextAttempts,
+          nextAt: now + getOrderSyncBackoffMs(nextAttempts),
+        });
+        log({ event: "no_match", poId: row.id, status: result.matchStatus, attempts: nextAttempts });
+      }
+      results.push({
+        poId: row.id,
+        status: result.matchStatus,
+        externalOrderId: result.externalOrderId || null,
+      });
+    } catch (e) {
+      const nextAttempts = state.attempts + 1;
+      orderSyncAttemptState.set(row.id, {
+        attempts: nextAttempts,
+        nextAt: now + getOrderSyncBackoffMs(nextAttempts),
+      });
+      const errMsg = e?.message || String(e);
+      const looksLikeAuthIssue = /(权限|未授权|授权|access[\s_-]?token|oauth|unauthorized|forbidden|invalid[_\s-]?(?:token|signature))/i.test(errMsg);
+      if (looksLikeAuthIssue && row.account_id) failedAccounts.add(row.account_id);
+      log({ event: "error", poId: row.id, error: errMsg, attempts: nextAttempts });
+      results.push({ poId: row.id, status: "error", error: errMsg });
+    }
+  }
+  return {
+    processed: candidates.length,
+    bound: results.filter((r) => r.status === "bound").length,
+    results,
+  };
+}
+
+function resetScheduledOrderSyncState() {
+  orderSyncAttemptState.clear();
+}
+
+// 1688 消息事件重处理：把状态为 unmatched / error 的事件按原 payload 重跑一次。
+// 对 unmatched 尤其有用——首轮收到消息时 PO 还没绑定 external_order_id，
+// 等订单同步把 external_order_id 回填后，重跑就能命中并推进 PO 状态机。
+function reprocess1688MessageEventRow(row, ctx) {
+  const payload = parseJsonObject(row.payload_json) || {};
+  const query = parseJsonObject(row.query_json) || {};
+  const headers = parseJsonObject(row.headers_json) || {};
+  const input = {
+    payload,
+    query,
+    headers,
+    bodyText: row.body_text || null,
+    sourceIp: row.source_ip || null,
+  };
+  const normalized = normalize1688MessagePayload(input);
+  return process1688MessageEvent({ db: ctx.db, services: ctx.services, input, normalized, row });
+}
+
+async function runScheduledMessageReprocess({ maxAgeHours = 168, limit = 100, logger } = {}) {
+  if (isClientMode()) return { skipped: "client_mode", processed: 0, results: [] };
+  if (!erpState.db || !erpState.services) return { skipped: "erp_not_ready", processed: 0, results: [] };
+  const { db, services } = requireErp();
+  const cutoff = new Date(Date.now() - maxAgeHours * 3600 * 1000).toISOString();
+  const candidates = db.prepare(`
+    SELECT * FROM erp_1688_message_events
+    WHERE status IN ('error', 'unmatched')
+      AND received_at >= @cutoff
+    ORDER BY received_at ASC
+    LIMIT @limit
+  `).all({ cutoff, limit });
+  if (!candidates.length) return { processed: 0, results: [] };
+  const log = typeof logger === "function" ? logger : () => {};
+  const results = [];
+  for (const event of candidates) {
+    try {
+      const processResult = reprocess1688MessageEventRow(event, { db, services });
+      const status = processResult.status === "processed"
+        ? "processed"
+        : (processResult.status === "unmatched" ? "unmatched" : "ignored");
+      db.prepare(`
+        UPDATE erp_1688_message_events
+        SET status = @status,
+            error_message = @error_message,
+            processed_at = @processed_at
+        WHERE id = @id
+      `).run({
+        id: event.id,
+        status,
+        error_message: processResult.reason || null,
+        processed_at: nowIso(),
+      });
+      try { update1688MessageSubscriptionStats(db, event, status); } catch {}
+      log({ event: status, id: event.id, topic: event.topic, prevStatus: event.status });
+      results.push({ id: event.id, prevStatus: event.status, status });
+    } catch (error) {
+      const errMsg = error?.message || String(error);
+      try {
+        db.prepare(`
+          UPDATE erp_1688_message_events
+          SET status = 'error',
+              error_message = @error_message,
+              processed_at = @processed_at
+          WHERE id = @id
+        `).run({ id: event.id, error_message: errMsg, processed_at: nowIso() });
+        update1688MessageSubscriptionStats(db, event, "error");
+      } catch {}
+      log({ event: "error", id: event.id, topic: event.topic, error: errMsg });
+      results.push({ id: event.id, prevStatus: event.status, status: "error", error: errMsg });
+    }
+  }
+  return {
+    processed: candidates.length,
+    promoted: results.filter((r) => r.status === "processed").length,
+    results,
   };
 }
 
@@ -9681,7 +9848,9 @@ function build1688CreateRefundParams(payload = {}, po = {}) {
   const amount = optionalNumber(payload.amount ?? payload.refundPayment ?? payload.applyPayment) ?? optionalNumber(po.total_amount);
   const orderEntryIds = infer1688OrderEntryIds(payload, po);
   const refundReasonId = optionalString(payload.refundReasonId || payload.reasonId || payload.refund_reason_id);
-  return structured1688InputParams(payload, {
+  // 1688 createRefund 把 orderId 当顶层 Long 参数校验，必须放在 input 外面；
+  // 其余字段保留在 input 包装里，跟 SDK 文档示例一致。
+  const structured = structured1688InputParams(payload, {
     orderId: externalOrderId,
     tradeId: externalOrderId,
     orderEntryIds: orderEntryIds.length ? orderEntryIds : undefined,
@@ -9697,6 +9866,10 @@ function build1688CreateRefundParams(payload = {}, po = {}) {
     refundType: optionalString(payload.refundType) || "refund",
     voucherIds: Array.isArray(payload.voucherIds) ? payload.voucherIds : undefined,
   });
+  return {
+    orderId: externalOrderId,
+    ...structured,
+  };
 }
 
 function build1688RefundIdParams(payload = {}, po = {}) {
@@ -12699,4 +12872,7 @@ module.exports = {
   startErpHeadlessServer,
   registerErpIpcHandlers,
   closeErp,
+  runScheduledOrderSync,
+  resetScheduledOrderSyncState,
+  runScheduledMessageReprocess,
 };

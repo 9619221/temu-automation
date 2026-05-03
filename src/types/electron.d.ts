@@ -428,8 +428,8 @@ interface ErpAPI {
     delete: (payload: { id?: string; skuId?: string }) => Promise<any>;
   };
   purchase: {
-    workbench: (params?: ErpListParams) => Promise<any>;
-    action: (payload: Record<string, any>) => Promise<any>;
+    workbench: (params?: ErpListParams, options?: { timeoutMs?: number }) => Promise<any>;
+    action: (payload: Record<string, any>, options?: { timeoutMs?: number }) => Promise<any>;
     local1688Inquiry?: (payload: Record<string, any>) => Promise<any>;
     open1688Detail?: (payload: Record<string, any>) => Promise<any>;
   };

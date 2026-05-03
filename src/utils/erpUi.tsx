@@ -13,9 +13,9 @@ export const PR_STATUS_LABELS: Record<string, string> = {
 
 export const PO_STATUS_LABELS: Record<string, string> = {
   draft: "草稿",
-  pushed_pending_price: "已推单待改价",
-  pending_finance_approval: "待财务审批",
-  approved_to_pay: "已批准付款",
+  pushed_pending_price: "待改价",
+  pending_finance_approval: "待审批",
+  approved_to_pay: "待付款",
   paid: "已付款",
   supplier_processing: "供应商备货",
   shipped: "供应商已发货",
@@ -25,6 +25,18 @@ export const PO_STATUS_LABELS: Record<string, string> = {
   delayed: "已延期",
   exception: "异常",
   cancelled: "已取消",
+};
+
+// 回退按钮按"当前状态"决定语义化标签——撤销的是把单子推到当前状态那一步操作。
+// key = row.status（FROM 状态），value = 该状态对应的撤销动作。
+export const PO_ROLLBACK_BUTTON_LABELS: Record<string, string> = {
+  pushed_pending_price: "撤销推单",
+  pending_finance_approval: "取消财审",
+  approved_to_pay: "撤销审批",
+  paid: "撤销付款",
+  supplier_processing: "撤销备货",
+  shipped: "撤销发货",
+  arrived: "撤销到货",
 };
 
 export const PAYMENT_STATUS_LABELS: Record<string, string> = {

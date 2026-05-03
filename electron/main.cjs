@@ -8,7 +8,14 @@ const crypto = require("crypto");
 const XLSX = require("xlsx");
 const { autoUpdater } = require("electron-updater");
 const { getDefaultCredentials } = require("./default-credentials.cjs");
-const { closeErp, initializeErp, registerErpIpcHandlers } = require("./erp/ipc.cjs");
+const {
+  closeErp,
+  initializeErp,
+  registerErpIpcHandlers,
+  runScheduledOrderSync,
+  resetScheduledOrderSyncState,
+  runScheduledMessageReprocess,
+} = require("./erp/ipc.cjs");
 
 const MAX_DIAGNOSTIC_LOG_BYTES = 5 * 1024 * 1024;
 
@@ -4491,6 +4498,114 @@ ipcMain.handle("price-review:restart-scheduler", async () => {
   if (_priceReviewTimer) { clearInterval(_priceReviewTimer); _priceReviewTimer = null; }
   startPriceReviewScheduler();
   return { ok: true };
+});
+
+// 1688 采购单自动绑定订单调度器：扫描 status=pushed_pending_price 且 external_order_id 为空的 PO，
+// 调用 sync_1688_orders 自动匹配。
+let _orderSyncTimer = null;
+let _orderSyncRunning = false;
+function readPurchaseOrderSyncSettings() {
+  try {
+    const raw = readStoreJsonWithRecovery(getStoreFilePath("temu_app_settings"));
+    return raw && typeof raw === "object" ? raw : {};
+  } catch { return {}; }
+}
+function isPurchaseOrderAutoSyncEnabled(settings) {
+  // 默认开启；用户在 settings 里显式写 false 才关闭。
+  return settings?.purchaseOrderAutoSyncEnabled !== false;
+}
+async function tickPurchaseOrderAutoSync() {
+  if (_orderSyncRunning) return;
+  const s = readPurchaseOrderSyncSettings();
+  if (!isPurchaseOrderAutoSyncEnabled(s)) return;
+  _orderSyncRunning = true;
+  try {
+    const maxAgeHours = typeof s.purchaseOrderAutoSyncMaxAgeHours === "number" && s.purchaseOrderAutoSyncMaxAgeHours > 0
+      ? s.purchaseOrderAutoSyncMaxAgeHours : 168;
+    const limit = typeof s.purchaseOrderAutoSyncLimit === "number" && s.purchaseOrderAutoSyncLimit > 0
+      ? Math.min(Math.floor(s.purchaseOrderAutoSyncLimit), 200) : 50;
+    const out = await runScheduledOrderSync({
+      maxAgeHours,
+      limit,
+      logger: (e) => { try { console.log("[order-sync]", JSON.stringify(e)); } catch {} },
+    });
+    if (out && out.processed > 0) {
+      console.log(`[order-sync] tick processed=${out.processed} bound=${out.bound || 0}`);
+      try {
+        const wins = BrowserWindow.getAllWindows();
+        for (const w of wins) w.webContents.send("purchase:order-sync:tick-done", { at: Date.now(), ...out });
+      } catch {}
+    }
+    // 紧接着重跑消息事件：order-sync 刚回填的 external_order_id 让之前 unmatched 的事件能命中。
+    const msgLimit = typeof s.purchaseMessageReprocessLimit === "number" && s.purchaseMessageReprocessLimit > 0
+      ? Math.min(Math.floor(s.purchaseMessageReprocessLimit), 500) : 100;
+    const msgMaxAgeHours = typeof s.purchaseMessageReprocessMaxAgeHours === "number" && s.purchaseMessageReprocessMaxAgeHours > 0
+      ? s.purchaseMessageReprocessMaxAgeHours : maxAgeHours;
+    const msgOut = await runScheduledMessageReprocess({
+      maxAgeHours: msgMaxAgeHours,
+      limit: msgLimit,
+      logger: (e) => { try { console.log("[msg-reprocess]", JSON.stringify(e)); } catch {} },
+    });
+    if (msgOut && msgOut.processed > 0) {
+      console.log(`[msg-reprocess] tick processed=${msgOut.processed} promoted=${msgOut.promoted || 0}`);
+      try {
+        const wins = BrowserWindow.getAllWindows();
+        for (const w of wins) w.webContents.send("purchase:msg-reprocess:tick-done", { at: Date.now(), ...msgOut });
+      } catch {}
+    }
+  } catch (e) {
+    console.warn("[order-sync] tick failed:", e?.message || e);
+  } finally {
+    _orderSyncRunning = false;
+  }
+}
+function startPurchaseOrderSyncScheduler() {
+  if (_orderSyncTimer) return;
+  const s = readPurchaseOrderSyncSettings();
+  if (!isPurchaseOrderAutoSyncEnabled(s)) {
+    console.log("[order-sync] scheduler disabled");
+    return;
+  }
+  const minutes = typeof s.purchaseOrderAutoSyncIntervalMinutes === "number" && s.purchaseOrderAutoSyncIntervalMinutes >= 1
+    ? s.purchaseOrderAutoSyncIntervalMinutes : 10;
+  _orderSyncTimer = setInterval(tickPurchaseOrderAutoSync, minutes * 60 * 1000);
+  console.log(`[order-sync] scheduler started, interval=${minutes}min`);
+  // 启动时立刻跑一次，不等第一个 interval。
+  setImmediate(() => { tickPurchaseOrderAutoSync().catch((e) => console.warn("[order-sync] initial tick failed:", e?.message || e)); });
+}
+app.whenReady().then(() => {
+  setTimeout(() => { try { startPurchaseOrderSyncScheduler(); } catch (e) { console.warn(e); } }, 90 * 1000);
+});
+ipcMain.handle("purchase:order-sync:restart-scheduler", async () => {
+  if (_orderSyncTimer) { clearInterval(_orderSyncTimer); _orderSyncTimer = null; }
+  try { resetScheduledOrderSyncState(); } catch {}
+  startPurchaseOrderSyncScheduler();
+  return { ok: true };
+});
+ipcMain.handle("purchase:order-sync:run-now", async () => {
+  await tickPurchaseOrderAutoSync();
+  return { ok: true };
+});
+ipcMain.handle("purchase:msg-reprocess:run-now", async (_e, params) => {
+  const limit = typeof params?.limit === "number" && params.limit > 0 ? Math.min(Math.floor(params.limit), 500) : 100;
+  const maxAgeHours = typeof params?.maxAgeHours === "number" && params.maxAgeHours > 0 ? params.maxAgeHours : 168;
+  const out = await runScheduledMessageReprocess({
+    maxAgeHours,
+    limit,
+    logger: (e) => { try { console.log("[msg-reprocess]", JSON.stringify(e)); } catch {} },
+  });
+  return { ok: true, ...out };
+});
+ipcMain.handle("purchase:order-sync:get-status", async () => {
+  const s = readPurchaseOrderSyncSettings();
+  return {
+    enabled: isPurchaseOrderAutoSyncEnabled(s),
+    intervalMinutes: typeof s.purchaseOrderAutoSyncIntervalMinutes === "number" ? s.purchaseOrderAutoSyncIntervalMinutes : 10,
+    maxAgeHours: typeof s.purchaseOrderAutoSyncMaxAgeHours === "number" ? s.purchaseOrderAutoSyncMaxAgeHours : 168,
+    limit: typeof s.purchaseOrderAutoSyncLimit === "number" ? s.purchaseOrderAutoSyncLimit : 50,
+    running: _orderSyncRunning,
+    timerArmed: Boolean(_orderSyncTimer),
+  };
 });
 
 // ============ AI 出图 IPC ============
