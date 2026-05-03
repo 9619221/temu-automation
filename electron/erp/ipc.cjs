@@ -9907,10 +9907,16 @@ function build1688CreateRefundParams(payload = {}, po = {}) {
     refundType: optionalString(payload.refundType) || "refund",
     voucherIds: Array.isArray(payload.voucherIds) ? payload.voucherIds : undefined,
   });
+  // 1688 createRefund 顶层校验的 String 参数：disputeRequest（退款类型）、goodsStatus（货物状态）。
+  // 跟 input 里的同名字段一致，但必须在顶层重复一份才过 ACL。
+  const disputeRequest = optionalString(payload.disputeRequest || payload.refundType) || "refund";
+  const goodsStatus = optionalString(payload.goodsStatus) || "received";
   return {
     orderId: externalOrderId,
-    // orderEntryIds 同样要顶层（Long[] ACL 校验），不是只在 input 里。
+    // orderEntryIds 顶层（Long[] ACL 校验）+ input 内一份。
     ...(orderEntryIds.length ? { orderEntryIds } : {}),
+    disputeRequest,
+    goodsStatus,
     ...structured,
   };
 }
