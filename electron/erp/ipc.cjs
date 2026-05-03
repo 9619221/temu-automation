@@ -9731,15 +9731,23 @@ const ENTRY_ID_KEYS = [
 ];
 
 function pickEntryIdFromItem(item = {}) {
-  for (const key of ENTRY_ID_KEYS) {
+  // 优先级：
+  // 1) 显式 String 类型字段（subItemIDString 等）—— 19 位 Long 精度安全
+  // 2) productSnapshotUrl 里的 ?order_entry_id=（也是字符串，安全）
+  // 3) 数字类型字段（可能因 JSON.parse 精度丢失，最后用）
+  const stringFirstKeys = ["subItemIDString", "subItemIDStr", "orderEntryIdString", "orderEntryIdStr"];
+  for (const key of stringFirstKeys) {
     const v = item[key];
     if (v !== null && v !== undefined && v !== "") return String(v);
   }
-  // 从 productSnapshotUrl 兜底解析：?order_entry_id=XXX
   const snapshot = optionalString(item.productSnapshotUrl);
   if (snapshot) {
     const match = snapshot.match(/[?&]order_entry_id=(\d+)/);
     if (match) return match[1];
+  }
+  for (const key of ENTRY_ID_KEYS) {
+    const v = item[key];
+    if (v !== null && v !== undefined && v !== "") return String(v);
   }
   return "";
 }
@@ -9901,6 +9909,8 @@ function build1688CreateRefundParams(payload = {}, po = {}) {
   });
   return {
     orderId: externalOrderId,
+    // orderEntryIds 同样要顶层（Long[] ACL 校验），不是只在 input 里。
+    ...(orderEntryIds.length ? { orderEntryIds } : {}),
     ...structured,
   };
 }
