@@ -299,6 +299,18 @@ const PROCUREMENT_APIS = Object.freeze({
   }),
 });
 
+// 1688 订单号 / tradeId 是 19 位 Long，超过 JS Number.MAX_SAFE_INTEGER (16 位)。
+// JSON.parse 会把它当 Number 解析导致末位精度丢失（如 ...43584 → ...43600）。
+// 这里在解析前把所有 16+ 位的"裸整数"用引号包成字符串，规避丢精度。
+// 命中位置：冒号后、逗号后、方括号开头后接的 ≥16 位整数（不在已有引号内）。
+function safeParse1688Json(text) {
+  const safe = String(text).replace(
+    /([:\[,]\s*)(-?\d{16,})(?=\s*[,}\]])/g,
+    '$1"$2"',
+  );
+  return JSON.parse(safe);
+}
+
 function normalizeOpenApiValue(value) {
   if (value === null || value === undefined) return null;
   if (typeof value === "object") return JSON.stringify(value);
@@ -381,7 +393,7 @@ async function call1688OpenApi({ credentials, api, params = {}, fetchImpl = fetc
     const text = await response.text();
     let payload = {};
     try {
-      payload = text ? JSON.parse(text) : {};
+      payload = text ? safeParse1688Json(text) : {};
     } catch {
       throw new Error(`1688 API response is not JSON: ${text.slice(0, 200)}`);
     }
