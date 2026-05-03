@@ -10592,7 +10592,6 @@ async function cancel1688OrderAction({ db, services, payload, actor }) {
 function build1688OrderMemoParams(payload = {}, po = {}) {
   const orderId = build1688OrderIdParams(payload, po).orderId;
   const remark = requireString(payload.memo || payload.remark || payload.message, "memo");
-  // 1688 alibaba.trade.addOrderMemo 同样要求复合对象包装。
   const tradeMemoParam = {
     webSite: Number(optionalNumber(payload.webSite) ?? 1688),
     orderId,
@@ -10600,20 +10599,21 @@ function build1688OrderMemoParams(payload = {}, po = {}) {
   };
   const remarkIcon = optionalString(payload.remarkIcon || payload.icon);
   if (remarkIcon) tradeMemoParam.remarkIcon = remarkIcon;
-  return raw1688Params(payload, { tradeMemoParam });
+  // 1688 trade APIs 要求 orderId 在顶层做 Long 类型 ACL 校验，
+  // 同时复合对象 tradeMemoParam 给业务字段使用。两处都要带。
+  return raw1688Params(payload, { orderId, tradeMemoParam });
 }
 
 function build1688OrderFeedbackParams(payload = {}, po = {}) {
   const orderId = build1688OrderIdParams(payload, po).orderId;
   const feedback = requireString(payload.feedback || payload.message || payload.remark, "feedback");
-  // 1688 alibaba.trade.addOrderFeedback 要求把字段塞到 tradeFeedbackParam 复合对象里，
-  // 平铺会被 1688 拒收 "Required argument tradeFeedbackParam : expect ..."
   const tradeFeedbackParam = {
     webSite: Number(optionalNumber(payload.webSite) ?? 1688),
     orderId,
     feedback,
   };
-  return raw1688Params(payload, { tradeFeedbackParam });
+  // orderId 顶层 + 复合对象，跟 memo / createRefund 同模式。
+  return raw1688Params(payload, { orderId, tradeFeedbackParam });
 }
 
 function build1688ConfirmReceiveGoodsParams(payload = {}, po = {}) {
