@@ -4044,6 +4044,68 @@ function approvePaymentApproval({ db, services, payload, actor }) {
   return after;
 }
 
+// 桥接 PO → 入库单：付款确认后自动建一条 inbound_receipt（status=pending_arrival），
+// 让 PO 同步出现在仓库中心，库管不用再手工新建入库单。
+// 已存在则跳过；明细行从 erp_purchase_order_lines 拷贝 expected_qty。
+function ensureInboundReceiptForPo(db, services, po, actor) {
+  if (!po || !po.id) return null;
+  const existing = db.prepare("SELECT id, status FROM erp_inbound_receipts WHERE po_id = ? LIMIT 1").get(po.id);
+  if (existing) return existing;
+  const lines = getPurchaseOrderLines(db, po.id);
+  if (!lines.length) return null;
+  const now = nowIso();
+  const receiptId = createId("ir");
+  const receiptNo = `IR-${po.po_no || po.id}`;
+  try {
+    db.prepare(`
+      INSERT INTO erp_inbound_receipts (
+        id, account_id, po_id, receipt_no, status, created_at, updated_at
+      ) VALUES (
+        @id, @account_id, @po_id, @receipt_no, 'pending_arrival', @now, @now
+      )
+    `).run({
+      id: receiptId,
+      account_id: po.account_id,
+      po_id: po.id,
+      receipt_no: receiptNo,
+      now,
+    });
+  } catch (e) {
+    // 某些罕见情形（receipt_no 重复 / FK 失败等），让付款流程继续，不阻塞。
+    return { error: e?.message || String(e) };
+  }
+  const insertLine = db.prepare(`
+    INSERT INTO erp_inbound_receipt_lines (
+      id, account_id, receipt_id, po_line_id, sku_id, expected_qty, received_qty
+    ) VALUES (
+      @id, @account_id, @receipt_id, @po_line_id, @sku_id, @expected_qty, 0
+    )
+  `);
+  for (const line of lines) {
+    if (!line.sku_id) continue;
+    insertLine.run({
+      id: createId("irl"),
+      account_id: po.account_id,
+      receipt_id: receiptId,
+      po_line_id: line.id,
+      sku_id: line.sku_id,
+      expected_qty: Number(line.qty || 0),
+    });
+  }
+  try {
+    services.workflow.writeAudit({
+      accountId: po.account_id,
+      actor,
+      action: "auto_create_inbound_receipt",
+      entityType: "inbound_receipt",
+      entityId: receiptId,
+      before: null,
+      after: { id: receiptId, po_id: po.id, status: "pending_arrival" },
+    });
+  } catch {}
+  return { id: receiptId, isNew: true };
+}
+
 function confirmPaymentPaid({ db, services, payload, actor }) {
   const before = getLatestPaymentApproval(db, payload);
   if (before.status !== "approved") {
@@ -4075,6 +4137,14 @@ function confirmPaymentPaid({ db, services, payload, actor }) {
     actor,
     action: "confirm_payment_paid",
   });
+  // 同步建对应入库单（仓库中心立即可见）；失败不阻塞付款确认。
+  try {
+    const po = getPurchaseOrder(db, before.po_id);
+    if (po) ensureInboundReceiptForPo(db, services, po, actor);
+  } catch (e) {
+    // 仅日志，不影响付款流程
+    try { console.warn("[purchase] auto-create inbound receipt failed:", e?.message || e); } catch {}
+  }
   return after;
 }
 
