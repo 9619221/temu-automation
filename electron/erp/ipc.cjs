@@ -9711,6 +9711,39 @@ function firstOptionalString(...values) {
   return "";
 }
 
+// 1688 订单子项 ID 的字段名因不同接口而异：
+// - alibaba.trade.get.buyerView 详情里叫 subItemID / subItemIDString / subItemIDStr
+// - 一些较新的 fastCreateOrder 响应里叫 orderEntryId / orderEntryID
+// - productSnapshotUrl 也可以解出 order_entry_id query 参数
+// 这里全都覆盖，且 String 字段优先（19 位 Long 精度安全）。
+const ENTRY_ID_KEYS = [
+  "subItemIDString",
+  "subItemIDStr",
+  "subItemId",
+  "subItemID",
+  "orderEntryIdString",
+  "orderEntryIdStr",
+  "orderEntryId",
+  "orderEntryID",
+  "order_entry_id",
+  "entryId",
+  "entry_id",
+];
+
+function pickEntryIdFromItem(item = {}) {
+  for (const key of ENTRY_ID_KEYS) {
+    const v = item[key];
+    if (v !== null && v !== undefined && v !== "") return String(v);
+  }
+  // 从 productSnapshotUrl 兜底解析：?order_entry_id=XXX
+  const snapshot = optionalString(item.productSnapshotUrl);
+  if (snapshot) {
+    const match = snapshot.match(/[?&]order_entry_id=(\d+)/);
+    if (match) return match[1];
+  }
+  return "";
+}
+
 function infer1688OrderEntryIds(payload = {}, po = {}) {
   const direct = normalizeStringList(
     payload.orderEntryIds
@@ -9725,16 +9758,10 @@ function infer1688OrderEntryIds(payload = {}, po = {}) {
     .concat(normalizeStringList(findFirstDeepValue(payloadJson, ["orderEntryIds", "orderEntryIdList"])));
   if (directFromDetail.length) return Array.from(new Set(directFromDetail));
   const rows = findDeepArray({ detail, payloadJson }, (item) => (
-    hasAnyKey(item, ["orderEntryId", "orderEntryID", "order_entry_id", "entryId", "entry_id"])
-    && hasAnyKey(item, ["offerId", "productId", "skuId", "quantity", "amount", "name", "title"])
+    hasAnyKey(item, ENTRY_ID_KEYS)
+    && hasAnyKey(item, ["offerId", "productId", "productID", "skuId", "skuID", "quantity", "amount", "name", "title"])
   ));
-  return Array.from(new Set(rows.map((item) => firstOptionalString(
-    item.orderEntryId,
-    item.orderEntryID,
-    item.order_entry_id,
-    item.entryId,
-    item.entry_id,
-  )).filter(Boolean)));
+  return Array.from(new Set(rows.map(pickEntryIdFromItem).filter(Boolean)));
 }
 
 function normalize1688MaxRefundFee(rawResponse = {}) {
