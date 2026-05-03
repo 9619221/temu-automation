@@ -2805,6 +2805,37 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     if (paymentUrl) window.open(paymentUrl, "_blank", "noopener,noreferrer");
   };
 
+  // 一键 1688 支付：先调 API 拿付款 URL，拿到就走系统默认浏览器（默认全屏 / 用户上次的窗口状态）；
+  // 拿不到（订单不在待支付 / API 失败）就 fallback 到买家工作台并把订单号复制到剪贴板。
+  const pay1688Combined = async (row: PurchaseOrderRow) => {
+    const orderId = row.externalOrderId;
+    if (!orderId) { message.warning("PO 未绑定 1688 订单号"); return; }
+    navigator.clipboard?.writeText(orderId).catch(() => {});
+    let paymentUrl: string | null = null;
+    try {
+      const result = await runAction(`1688-pay-${row.id}`, {
+        action: "get_1688_payment_url",
+        poIds: [row.id],
+      });
+      paymentUrl = result?.result?.paymentUrl || row.externalPaymentUrl || null;
+    } catch {
+      // runAction 已弹错误 toast，进 fallback。
+    }
+    const externalOpener = (window as any)?.electronAPI?.app?.openExternal;
+    const targetUrl = paymentUrl || "https://work.1688.com/";
+    if (typeof externalOpener === "function") {
+      try { await externalOpener(targetUrl); }
+      catch { window.open(targetUrl, "_blank", "noopener,noreferrer"); }
+    } else {
+      window.open(targetUrl, "_blank", "noopener,noreferrer");
+    }
+    if (paymentUrl) {
+      message.success("已在默认浏览器打开 1688 支付页");
+    } else {
+      message.warning(`API 没拿到付款链接，已打开 1688 工作台；订单号 ${orderId} 已复制，登录后粘贴搜索这单`);
+    }
+  };
+
   const prepare1688ProtocolPay = async (row: PurchaseOrderRow) => {
     await runAction(`1688-protocol-pay-${row.id}`, {
       action: "prepare_1688_protocol_pay",
@@ -3634,89 +3665,17 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               提交付款
             </Button>
           ) : null}
-          {canUse1688Payment && (canPurchase || canFinance) ? (() => {
-            const payMenuItems: MenuProps["items"] = [
-              {
-                key: "pay-link",
-                icon: <LinkOutlined />,
-                label: "API 取付款链接（自动诊断）",
-                onClick: () => open1688PaymentUrl(row),
-              },
-              {
-                key: "open-1688-detail",
-                icon: <ShopOutlined />,
-                label: "去 1688 网页付款",
-                onClick: () => {
-                  const orderId = row.externalOrderId;
-                  if (!orderId) { message.warning("PO 未绑定 1688 订单号"); return; }
-                  navigator.clipboard?.writeText(orderId).catch(() => {});
-                  Modal.info({
-                    title: "去 1688 网页处理订单",
-                    width: 540,
-                    content: (
-                      <Space direction="vertical" size={8} style={{ width: "100%" }}>
-                        <Text>订单号已复制到剪贴板：</Text>
-                        <Text copyable code style={{ fontSize: 14 }}>{orderId}</Text>
-                        <Text type="secondary">下面 3 条任选其一打开 1688，到「我的订单」粘贴这个单号搜索就能看到这单：</Text>
-                        <Space wrap>
-                          <Button
-                            type="primary"
-                            icon={<LinkOutlined />}
-                            onClick={() => window.open("https://work.1688.com/", "_blank", "noopener,noreferrer")}
-                          >
-                            买家工作台
-                          </Button>
-                          <Button
-                            icon={<LinkOutlined />}
-                            onClick={() => window.open("https://www.1688.com/", "_blank", "noopener,noreferrer")}
-                          >
-                            1688 首页
-                          </Button>
-                          <Button
-                            icon={<LinkOutlined />}
-                            onClick={() => window.open("https://login.1688.com/", "_blank", "noopener,noreferrer")}
-                          >
-                            登录页
-                          </Button>
-                        </Space>
-                        <Text type="secondary" style={{ fontSize: 12 }}>
-                          推荐先点「买家工作台」（未登录会自动跳到登录页），登录后顶栏点「我的 1688 → 我的订单」，
-                          粘贴上面的订单号搜索即可。付完款回来点「确认付款」同步本地状态。
-                        </Text>
-                      </Space>
-                    ),
-                    okText: "知道了",
-                  });
-                },
-              },
-              ...(canFinance ? [{
-                type: "divider" as const,
-              }, {
-                key: "protocol-pay",
-                icon: <CheckCircleOutlined />,
-                label: "免密支付",
-                danger: true,
-                onClick: () => {
-                  Modal.confirm({
-                    title: "发起 1688 免密支付",
-                    content: "会调用 1688 代扣/免密支付接口，扣款结果以后续 1688 消息或订单详情为准。",
-                    okText: "发起支付",
-                    cancelText: "返回",
-                    onOk: () => prepare1688ProtocolPay(row),
-                  });
-                },
-              }] : []),
-            ];
-            const payLoading = actingKey === `1688-pay-${row.id}`
-              || actingKey === `1688-protocol-pay-${row.id}`;
-            return (
-              <Dropdown menu={{ items: payMenuItems }} trigger={["click"]}>
-                <Button size="small" icon={<DollarOutlined />} loading={payLoading}>
-                  1688 支付
-                </Button>
-              </Dropdown>
-            );
-          })() : null}
+          {canUse1688Payment && (canPurchase || canFinance) ? (
+            <Button
+              size="small"
+              type="primary"
+              icon={<DollarOutlined />}
+              loading={actingKey === `1688-pay-${row.id}`}
+              onClick={() => pay1688Combined(row)}
+            >
+              1688 支付
+            </Button>
+          ) : null}
           {row.externalOrderId && canPurchase ? (
             <Button
               size="small"
