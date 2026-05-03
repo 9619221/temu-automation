@@ -11,11 +11,12 @@ class PurchaseService {
   }
 
   submitRequest(id, actor) {
+    // 提交即进入采购处理中，不再有独立的"接单"环节。
     return this.workflow.transition({
       entityType: "purchase_request",
       id,
       action: "submit_pr",
-      toStatus: PR.SUBMITTED,
+      toStatus: PR.BUYER_PROCESSING,
       actor,
     });
   }
@@ -81,11 +82,12 @@ class PurchaseService {
   }
 
   submitPaymentApproval(id, actor) {
+    // 已删除财务审批环节：采购"提交付款"后 PO 直接进入待付款。
     return this.workflow.transition({
       entityType: "purchase_order",
       id,
       action: "submit_payment_approval",
-      toStatus: PO.PENDING_FINANCE_APPROVAL,
+      toStatus: PO.APPROVED_TO_PAY,
       actor,
     });
   }

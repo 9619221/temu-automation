@@ -1607,7 +1607,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     },
     {
       key: "pending_payment",
-      title: "待付款审批",
+      title: "待付款",
       count: pendingPaymentRows.length,
       kind: "order",
     },
@@ -2031,7 +2031,10 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const canRollbackPurchaseOrder = (row: PurchaseOrderRow) => {
     const target = getPurchaseOrderRollbackTarget(row);
     if (!target) return false;
-    if (["approved_to_pay", "paid"].includes(row.status)) return canFinance;
+    // 没有了财务审批环节，approved_to_pay 退回 pushed_pending_price 由采购操作；
+    // paid 状态的回退仍由财务（撤销付款确认）。
+    if (row.status === "approved_to_pay") return canPurchase || canFinance;
+    if (row.status === "paid") return canFinance;
     if (row.status === "arrived") return canWarehouse;
     return canPurchase;
   };
@@ -3296,6 +3299,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         const canDelete = canCreateRequest && ["submitted", "buyer_processing", "sourced"].includes(row.status);
         return (
           <div className="purchase-action-grid">
+            {/* 已删除"接单"环节：运营提交后 PR 直接进入采购处理中。
+                历史数据若仍处于 submitted，下面的兜底按钮提供手工接单入口。 */}
             {row.status === "submitted" && canPurchase ? (
               <Button
                 size="small"
@@ -3303,7 +3308,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 loading={actingKey === `accept-${row.id}`}
                 onClick={() => runAction(`accept-${row.id}`, { action: "accept_pr", prId: row.id }, "已接收采购单")}
               >
-                接收
+                接收（历史）
               </Button>
             ) : null}
             {SHOW_KEYWORD_1688_SOURCE && canFindSupplier ? (
@@ -3614,8 +3619,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               onClick={() => runActionOptimistic(
                 `pay-submit-${row.id}`,
                 { action: "submit_payment_approval", poId: row.id, amount: row.totalAmount },
-                "已提交付款审批",
-                { poId: row.id, patch: { status: "pending_finance_approval" } },
+                "已进入待付款",
+                { poId: row.id, patch: { status: "approved_to_pay" } },
               )}
             >
               提交付款
@@ -3735,13 +3740,15 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               onClick={() => runActionOptimistic(
                 `pay-submit-${row.id}`,
                 { action: "submit_payment_approval", poId: row.id, amount: row.totalAmount },
-                "已提交付款审批",
-                { poId: row.id, patch: { status: "pending_finance_approval" } },
+                "已进入待付款",
+                { poId: row.id, patch: { status: "approved_to_pay" } },
               )}
             >
               提交付款
             </Button>
           ) : null}
+          {/* 已删除独立的"财务批准"环节：采购"提交付款"后 PO 直接进入待付款。
+              历史数据若仍卡在 pending_finance_approval，下面的兜底按钮供财务推一把。 */}
           {row.status === "pending_finance_approval" && canFinance ? (
             <Button
               size="small"
@@ -3750,14 +3757,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               onClick={() => runActionOptimistic(
                 `pay-approve-po-${row.id}`,
                 { action: "approve_payment", poId: row.id },
-                "财务已批准",
+                "已推到待付款",
                 { poId: row.id, patch: { status: "approved_to_pay" } },
               )}
             >
-              财务批准
+              批准（历史）
             </Button>
           ) : null}
-          {row.status === "approved_to_pay" && canFinance && (row.externalOrderId || Number(row.mappingCount || 0) === 0) ? (
+          {row.status === "approved_to_pay" && (canFinance || canPurchase) && (row.externalOrderId || Number(row.mappingCount || 0) === 0) ? (
             <Button
               size="small"
               type="primary"

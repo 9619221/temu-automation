@@ -12,6 +12,7 @@ const OPS = [ERP_ROLES.OPERATIONS, ERP_ROLES.MANAGER, ERP_ROLES.ADMIN];
 const BUYER = [ERP_ROLES.BUYER, ERP_ROLES.MANAGER, ERP_ROLES.ADMIN];
 const FINANCE = [ERP_ROLES.FINANCE, ERP_ROLES.MANAGER, ERP_ROLES.ADMIN];
 const WAREHOUSE = [ERP_ROLES.WAREHOUSE, ERP_ROLES.MANAGER, ERP_ROLES.ADMIN];
+const BUYER_OR_FINANCE = [ERP_ROLES.BUYER, ERP_ROLES.FINANCE, ERP_ROLES.MANAGER, ERP_ROLES.ADMIN];
 
 function rule(from, action, to, roles) {
   return {
@@ -24,7 +25,9 @@ function rule(from, action, to, roles) {
 
 const TRANSITIONS = Object.freeze({
   purchase_request: [
-    rule(PR.DRAFT, "submit_pr", PR.SUBMITTED, OPS),
+    // 运营提交需求直接进入"采购处理中"，不再有独立的接单环节。
+    rule(PR.DRAFT, "submit_pr", PR.BUYER_PROCESSING, OPS),
+    // 保留 accept_pr 规则给历史数据：之前已经在 SUBMITTED 状态的 PR 仍可被手工接单。
     rule(PR.SUBMITTED, "accept_pr", PR.BUYER_PROCESSING, BUYER),
     rule(PR.BUYER_PROCESSING, "mark_sourced", PR.SOURCED, BUYER),
     rule(PR.SOURCED, "request_ops_confirm", PR.WAITING_OPS_CONFIRM, BUYER),
@@ -44,10 +47,12 @@ const TRANSITIONS = Object.freeze({
   purchase_order: [
     rule(PO.DRAFT, "push_1688_order", PO.PUSHED_PENDING_PRICE, BUYER),
     rule(PO.PUSHED_PENDING_PRICE, "sync_1688_order_price", PO.PUSHED_PENDING_PRICE, BUYER),
-    rule([PO.DRAFT, PO.PUSHED_PENDING_PRICE], "submit_payment_approval", PO.PENDING_FINANCE_APPROVAL, BUYER),
+    // 采购"提交付款"后直接进入"待付款"，跳过财务审批环节。
+    rule([PO.DRAFT, PO.PUSHED_PENDING_PRICE], "submit_payment_approval", PO.APPROVED_TO_PAY, BUYER),
+    // 保留以下规则给历史数据：已在 PENDING_FINANCE_APPROVAL 的旧 PO 仍可走原通道。
     rule(PO.PENDING_FINANCE_APPROVAL, "approve_payment", PO.APPROVED_TO_PAY, FINANCE),
     rule(PO.PENDING_FINANCE_APPROVAL, "reject_payment", PO.EXCEPTION, FINANCE),
-    rule(PO.APPROVED_TO_PAY, "confirm_paid", PO.PAID, FINANCE),
+    rule(PO.APPROVED_TO_PAY, "confirm_paid", PO.PAID, BUYER_OR_FINANCE),
     rule(PO.PAID, "mark_supplier_processing", PO.SUPPLIER_PROCESSING, BUYER),
     rule(PO.SUPPLIER_PROCESSING, "mark_supplier_shipped", PO.SHIPPED, BUYER),
     rule(PO.SHIPPED, "mark_arrived", PO.ARRIVED, WAREHOUSE),
@@ -58,6 +63,9 @@ const TRANSITIONS = Object.freeze({
     rule(PO.PUSHED_PENDING_PRICE, "rollback_po_status", PO.DRAFT, BUYER),
     rule(PO.PENDING_FINANCE_APPROVAL, "rollback_po_status", PO.DRAFT, BUYER),
     rule(PO.PENDING_FINANCE_APPROVAL, "rollback_po_status", PO.PUSHED_PENDING_PRICE, BUYER),
+    // 没有了财务审批，approved_to_pay 的回退直接退到推单后的 pushed_pending_price。
+    rule(PO.APPROVED_TO_PAY, "rollback_po_status", PO.PUSHED_PENDING_PRICE, BUYER),
+    // 保留旧通道：手工把历史数据从 approved_to_pay 退回 pending_finance_approval。
     rule(PO.APPROVED_TO_PAY, "rollback_po_status", PO.PENDING_FINANCE_APPROVAL, FINANCE),
     rule(PO.PAID, "rollback_po_status", PO.APPROVED_TO_PAY, FINANCE),
     rule(PO.SUPPLIER_PROCESSING, "rollback_po_status", PO.PAID, BUYER),

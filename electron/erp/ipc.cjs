@@ -3976,23 +3976,28 @@ function writePaymentApprovalAudit({ services, before, after, actor, action }) {
 function createPaymentApprovalForPo({ db, services, po, payload, actor }) {
   const now = nowIso();
   const amount = optionalNumber(payload.amount) ?? Number(po.total_amount || 0);
+  // 已删除财务审批环节：审批记录创建即视为已批准，保留作为审计 / 付款追溯凭据。
   const row = {
     id: optionalString(payload.paymentApprovalId) || createId("pay"),
     account_id: po.account_id,
     po_id: po.id,
     amount,
-    status: "pending",
+    status: "approved",
     requested_by: actor.id || null,
+    approved_by: actor.id || null,
+    approved_at: now,
     created_at: now,
     updated_at: now,
   };
 
   db.prepare(`
     INSERT INTO erp_payment_approvals (
-      id, account_id, po_id, amount, status, requested_by, created_at, updated_at
+      id, account_id, po_id, amount, status, requested_by,
+      approved_by, approved_at, created_at, updated_at
     )
     VALUES (
-      @id, @account_id, @po_id, @amount, @status, @requested_by, @created_at, @updated_at
+      @id, @account_id, @po_id, @amount, @status, @requested_by,
+      @approved_by, @approved_at, @created_at, @updated_at
     )
   `).run(row);
 
@@ -4109,7 +4114,8 @@ function getRollbackPurchaseOrderTarget(po, receivedQty = 0) {
   if (status === "pending_finance_approval") {
     return has1688OrderTrace(po) ? "pushed_pending_price" : "draft";
   }
-  if (status === "approved_to_pay") return "pending_finance_approval";
+  // 跳过财务审批，approved_to_pay 直接退回 pushed_pending_price。
+  if (status === "approved_to_pay") return "pushed_pending_price";
   if (status === "paid") return "approved_to_pay";
   if (status === "supplier_processing") return "paid";
   if (status === "shipped") return "supplier_processing";
