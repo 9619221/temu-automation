@@ -10646,9 +10646,12 @@ function build1688OrderFeedbackParams(payload = {}, po = {}) {
 
 function build1688ConfirmReceiveGoodsParams(payload = {}, po = {}) {
   const orderId = build1688OrderIdParams(payload, po).orderId;
+  const orderEntryIds = infer1688OrderEntryIds(payload, po);
   return raw1688Params(payload, {
     webSite: Number(optionalNumber(payload.webSite) ?? 1688),
     orderId,
+    // 1688 confirmReceiveGoods 顶层也要 orderEntryIds (Long[])。
+    ...(orderEntryIds.length ? { orderEntryIds } : {}),
   });
 }
 
