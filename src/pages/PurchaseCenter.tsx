@@ -1884,9 +1884,15 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     const canSyncLogistics = canPurchase || canWarehouse;
     if (!canSyncDetail && !canSyncLogistics) return;
 
+    // 跳过已结束 / 死单 / 异常的 PO，避免把后台 IPC 浪费在永远拉不到的订单上拖慢 UI。
+    const SKIP_PO_STATUSES = new Set(["cancelled", "closed", "inbounded", "exception"]);
+    const SKIP_EXTERNAL_STATUSES = new Set(["cancelled", "orphan_cleared", "closed", "success"]);
+
     const jobs: Array<{ key: string; payload: Record<string, unknown> }> = [];
     for (const row of data.purchaseOrders || []) {
       if (!row.externalOrderId) continue;
+      if (SKIP_PO_STATUSES.has(String(row.status || ""))) continue;
+      if (SKIP_EXTERNAL_STATUSES.has(String(row.externalOrderStatus || ""))) continue;
       if (canSyncDetail && !row.externalOrderDetailSyncedAt) {
         jobs.push({
           key: `detail-${row.id}`,
@@ -1901,13 +1907,15 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       }
     }
 
+    // 单 tick 仅取 1 个任务，串行节流，让 UI 响应不被一阵 IPC 抢完。
     const pendingJobs = jobs
       .filter((job) => !auto1688OrderSupplementKeysRef.current.has(job.key))
-      .slice(0, 2);
+      .slice(0, 1);
     if (!pendingJobs.length) return;
 
     let cancelled = false;
     pendingJobs.forEach((job) => {
+      // 不论成功失败都标记为"试过"，避免对死单 / 一直没物流的单循环重试。
       auto1688OrderSupplementKeysRef.current.add(job.key);
       void (async () => {
         try {
@@ -2760,7 +2768,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       const payWays = Array.isArray(payWaysResult?.result?.payWays) ? payWaysResult.result.payWays : [];
       if (!payWays.length) warnings.push("未查到 1688 支付渠道");
     } catch (e: any) {
-      warnings.push(`支付渠道查询失败：${e?.message || "未知错误"}`);
+      warnings.push(purchaseActionErrorMessage(e, "query_1688_pay_ways"));
     }
     try {
       const statusResult = await erp?.purchase?.action({
@@ -2770,7 +2778,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       });
       if (statusResult?.result?.isOpen === false) warnings.push("代扣协议未开通（仅影响免密支付）");
     } catch (e: any) {
-      warnings.push(`代扣状态查询失败：${e?.message || "未知错误"}`);
+      warnings.push(purchaseActionErrorMessage(e, "query_1688_protocol_pay_status"));
     }
     if (warnings.length) message.warning(warnings.join("；"));
     const result = await runAction(`1688-pay-${row.id}`, {
@@ -3631,8 +3639,55 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               {
                 key: "pay-link",
                 icon: <LinkOutlined />,
-                label: "支付链接（自动诊断）",
+                label: "API 取付款链接（自动诊断）",
                 onClick: () => open1688PaymentUrl(row),
+              },
+              {
+                key: "open-1688-detail",
+                icon: <ShopOutlined />,
+                label: "去 1688 网页付款",
+                onClick: () => {
+                  const orderId = row.externalOrderId;
+                  if (!orderId) { message.warning("PO 未绑定 1688 订单号"); return; }
+                  navigator.clipboard?.writeText(orderId).catch(() => {});
+                  Modal.info({
+                    title: "去 1688 网页处理订单",
+                    width: 540,
+                    content: (
+                      <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                        <Text>订单号已复制到剪贴板：</Text>
+                        <Text copyable code style={{ fontSize: 14 }}>{orderId}</Text>
+                        <Text type="secondary">下面 3 条任选其一打开 1688，到「我的订单」粘贴这个单号搜索就能看到这单：</Text>
+                        <Space wrap>
+                          <Button
+                            type="primary"
+                            icon={<LinkOutlined />}
+                            onClick={() => window.open("https://work.1688.com/", "_blank", "noopener,noreferrer")}
+                          >
+                            买家工作台
+                          </Button>
+                          <Button
+                            icon={<LinkOutlined />}
+                            onClick={() => window.open("https://www.1688.com/", "_blank", "noopener,noreferrer")}
+                          >
+                            1688 首页
+                          </Button>
+                          <Button
+                            icon={<LinkOutlined />}
+                            onClick={() => window.open("https://login.1688.com/", "_blank", "noopener,noreferrer")}
+                          >
+                            登录页
+                          </Button>
+                        </Space>
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          推荐先点「买家工作台」（未登录会自动跳到登录页），登录后顶栏点「我的 1688 → 我的订单」，
+                          粘贴上面的订单号搜索即可。付完款回来点「确认付款」同步本地状态。
+                        </Text>
+                      </Space>
+                    ),
+                    okText: "知道了",
+                  });
+                },
               },
               ...(canFinance ? [{
                 type: "divider" as const,

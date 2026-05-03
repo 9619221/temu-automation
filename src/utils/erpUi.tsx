@@ -32,7 +32,7 @@ export const PO_STATUS_LABELS: Record<string, string> = {
 export const PO_ROLLBACK_BUTTON_LABELS: Record<string, string> = {
   pushed_pending_price: "撤销推单",
   pending_finance_approval: "取消财审",
-  approved_to_pay: "撤销审批",
+  approved_to_pay: "撤销提交",
   paid: "撤销付款",
   supplier_processing: "撤销备货",
   shipped: "撤销发货",
