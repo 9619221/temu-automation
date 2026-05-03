@@ -4047,21 +4047,18 @@ function approvePaymentApproval({ db, services, payload, actor }) {
 // 桥接 PO → 入库单：付款确认后自动建一条 inbound_receipt（status=pending_arrival），
 // 让 PO 同步出现在仓库中心，库管不用再手工新建入库单。
 // 已存在则跳过；明细行从 erp_purchase_order_lines 拷贝 expected_qty。
-// 生成入库单号：RK{YYYYMMDD}{NNN}（账号内当日序号，3 位补零，超过 999 用 4 位）。
-function generateInboundReceiptNo(db, accountId, now = nowIso()) {
-  const date = now.slice(0, 10).replace(/-/g, ""); // YYYYMMDD
-  const prefix = `RK${date}`;
+// 生成入库单号：6 位纯数字账号内自增序号（000001、000002 …）。
+// 历史数据若已有 6 位纯数字，从最大值 +1 开始；超过 999999 自动溢出到 7 位。
+function generateInboundReceiptNo(db, accountId) {
   const row = db.prepare(
-    "SELECT receipt_no FROM erp_inbound_receipts WHERE account_id = @account_id AND receipt_no LIKE @prefix || '%' ORDER BY receipt_no DESC LIMIT 1"
-  ).get({ account_id: accountId, prefix });
+    "SELECT receipt_no FROM erp_inbound_receipts WHERE account_id = @account_id AND receipt_no GLOB '[0-9]*' ORDER BY CAST(receipt_no AS INTEGER) DESC LIMIT 1"
+  ).get({ account_id: accountId });
   let nextSeq = 1;
   if (row?.receipt_no) {
-    const tail = String(row.receipt_no).slice(prefix.length);
-    const n = parseInt(tail, 10);
+    const n = parseInt(row.receipt_no, 10);
     if (Number.isFinite(n)) nextSeq = n + 1;
   }
-  const seqStr = String(nextSeq).padStart(3, "0");
-  return `${prefix}${seqStr}`;
+  return String(nextSeq).padStart(6, "0");
 }
 
 function ensureInboundReceiptForPo(db, services, po, actor) {
