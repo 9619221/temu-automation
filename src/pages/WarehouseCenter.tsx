@@ -175,6 +175,22 @@ export default function WarehouseCenter() {
       ),
     },
     {
+      title: "物流",
+      key: "logistics",
+      width: 200,
+      render: (_value, row) => {
+        const billNo = row?.logistics?.billNo;
+        const company = row?.logistics?.companyName;
+        if (!billNo && !company) return <Text type="secondary">-</Text>;
+        return (
+          <Space direction="vertical" size={2}>
+            <Text style={{ fontSize: 12 }}>{company || "未知物流公司"}</Text>
+            {billNo ? <Text copyable code style={{ fontSize: 12 }}>{billNo}</Text> : <Text type="secondary" style={{ fontSize: 12 }}>无运单号</Text>}
+          </Space>
+        );
+      },
+    },
+    {
       title: "到仓",
       dataIndex: "receivedAt",
       width: 160,

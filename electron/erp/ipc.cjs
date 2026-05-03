@@ -4047,6 +4047,23 @@ function approvePaymentApproval({ db, services, payload, actor }) {
 // 桥接 PO → 入库单：付款确认后自动建一条 inbound_receipt（status=pending_arrival），
 // 让 PO 同步出现在仓库中心，库管不用再手工新建入库单。
 // 已存在则跳过；明细行从 erp_purchase_order_lines 拷贝 expected_qty。
+// 生成入库单号：RK{YYYYMMDD}{NNN}（账号内当日序号，3 位补零，超过 999 用 4 位）。
+function generateInboundReceiptNo(db, accountId, now = nowIso()) {
+  const date = now.slice(0, 10).replace(/-/g, ""); // YYYYMMDD
+  const prefix = `RK${date}`;
+  const row = db.prepare(
+    "SELECT receipt_no FROM erp_inbound_receipts WHERE account_id = @account_id AND receipt_no LIKE @prefix || '%' ORDER BY receipt_no DESC LIMIT 1"
+  ).get({ account_id: accountId, prefix });
+  let nextSeq = 1;
+  if (row?.receipt_no) {
+    const tail = String(row.receipt_no).slice(prefix.length);
+    const n = parseInt(tail, 10);
+    if (Number.isFinite(n)) nextSeq = n + 1;
+  }
+  const seqStr = String(nextSeq).padStart(3, "0");
+  return `${prefix}${seqStr}`;
+}
+
 function ensureInboundReceiptForPo(db, services, po, actor) {
   if (!po || !po.id) return null;
   const existing = db.prepare("SELECT id, status FROM erp_inbound_receipts WHERE po_id = ? LIMIT 1").get(po.id);
@@ -4055,7 +4072,7 @@ function ensureInboundReceiptForPo(db, services, po, actor) {
   if (!lines.length) return null;
   const now = nowIso();
   const receiptId = createId("ir");
-  const receiptNo = `IR-${po.po_no || po.id}`;
+  const receiptNo = generateInboundReceiptNo(db, po.account_id, now);
   try {
     db.prepare(`
       INSERT INTO erp_inbound_receipts (
@@ -11390,8 +11407,36 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
   };
 }
 
+// 把 PO 上同步过来的 1688 物流信息解出关键字段，方便仓库列表直接展示。
+function extractInboundLogisticsSummary(externalLogisticsJson) {
+  const obj = parseJsonObject(externalLogisticsJson);
+  if (!obj || typeof obj !== "object") return null;
+  // 1688 alibaba.trade.getLogisticsInfos.buyerView 的 result.logisticsItems[0]
+  const items = findFirstDeepValue(obj, ["logisticsItems", "logisticsInfos", "items"]);
+  const item = Array.isArray(items) ? items[0] : (items && typeof items === "object" ? items : null);
+  const companyName = optionalString(
+    findFirstDeepValue(obj, ["logisticsCompanyName", "logisticsName", "companyName"])
+    || (item && (item.logisticsCompanyName || item.companyName)),
+  );
+  const billNo = optionalString(
+    findFirstDeepValue(obj, ["logisticsBillNo", "mailNo", "trackingNo", "billNo"])
+    || (item && (item.logisticsBillNo || item.mailNo)),
+  );
+  if (!companyName && !billNo) return null;
+  return {
+    companyName: companyName || null,
+    billNo: billNo || null,
+  };
+}
+
 function toInboundReceipt(row) {
-  return toCamelRow(row);
+  const camel = toCamelRow(row);
+  if (row?.po_external_logistics_json) {
+    const summary = extractInboundLogisticsSummary(row.po_external_logistics_json);
+    if (summary) camel.logistics = summary;
+    delete camel.poExternalLogisticsJson;
+  }
+  return camel;
 }
 
 function getWarehouseWorkbench(params = {}) {
@@ -11420,7 +11465,8 @@ function getWarehouseWorkbench(params = {}) {
       COALESCE(SUM(line.shortage_qty), 0) AS shortage_qty,
       COALESCE(SUM(line.over_qty), 0) AS over_qty,
       SUM(CASE WHEN line.batch_id IS NOT NULL THEN 1 ELSE 0 END) AS batch_line_count,
-      GROUP_CONCAT(DISTINCT sku.internal_sku_code || ' ' || sku.product_name) AS sku_summary
+      GROUP_CONCAT(DISTINCT sku.internal_sku_code || ' ' || sku.product_name) AS sku_summary,
+      po.external_logistics_json AS po_external_logistics_json
     FROM erp_inbound_receipts receipt
     LEFT JOIN erp_accounts acct ON acct.id = receipt.account_id
     LEFT JOIN erp_purchase_orders po ON po.id = receipt.po_id
