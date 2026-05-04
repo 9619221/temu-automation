@@ -4125,47 +4125,6 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
             pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
           />
         )}
-        {selectedPoIds.length > 0 ? (
-          <div className="erp-bulk-bar">
-            <span className="selected">已选 {selectedPoIds.length} 项</span>
-            <span style={{ flex: 1 }} />
-            {(canPurchase || canFinance) ? (
-              <Button
-                size="small"
-                icon={<LinkOutlined />}
-                disabled={!selectedPurchaseOrders.some((row) => row.externalOrderId)}
-                loading={actingKey === "1688-batch-pay"}
-                onClick={openBatch1688PaymentUrl}
-              >
-                批量取支付链接
-              </Button>
-            ) : null}
-            {canPurchase ? (
-              <Button
-                size="small"
-                onClick={() => {
-                  selectedPurchaseOrders
-                    .filter((r) => r.status === "pushed_pending_price")
-                    .forEach((r) => runActionOptimistic(
-                      `pay-submit-${r.id}`,
-                      { action: "submit_payment_approval", poId: r.id, amount: r.totalAmount },
-                      undefined,
-                      { poId: r.id, patch: { status: "approved_to_pay" } },
-                    ));
-                  message.info(`已对 ${selectedPurchaseOrders.filter((r) => r.status === "pushed_pending_price").length} 项触发提交付款`);
-                }}
-              >
-                批量提交付款
-              </Button>
-            ) : null}
-            <Button
-              size="small"
-              onClick={() => setSelectedPoIds([])}
-            >
-              清空选择
-            </Button>
-          </div>
-        ) : null}
       </div>
 
       <Modal
