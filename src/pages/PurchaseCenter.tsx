@@ -1885,17 +1885,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   }, [detailPrId, detailCandidateCount]);
 
   useEffect(() => {
-    if (!canPurchase) return;
-    const startTimer = window.setTimeout(() => {
-      void runAuto1688OrderSync();
-    }, AUTO_1688_ORDER_SYNC_START_DELAY_MS);
-    const timer = window.setInterval(() => {
-      void runAuto1688OrderSync();
-    }, AUTO_1688_ORDER_SYNC_INTERVAL_MS);
-    return () => {
-      window.clearTimeout(startTimer);
-      window.clearInterval(timer);
-    };
+    // 已禁用前端的自动 import_1688_orders 轮询：服务器侧调度器已经接管这件事
+    // (runScheduledOrderSync 每 10 分钟自动同步 + 失败指数退避)，
+    // 前端再轮一次只会重复打 1688 API + 拖慢 UI。
+    // 想手动同步的随时点顶部「同步询盘结果」按钮。
+    return () => {};
   }, [canPurchase, runAuto1688OrderSync]);
 
   useEffect(() => {
@@ -1966,13 +1960,16 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     if (!erp?.events?.onPurchaseUpdate) {
       return;
     }
+    // 大幅延后 broadcast 触发的全量 loadData：从 180ms 延到 1500ms。
+    // 用户操作产生的 broadcast 通常在乐观更新已经把 UI 推到目标状态之后到达，
+    // 紧跟一次全量重拉只是把"还在路上的服务器返回"覆盖掉，徒增 IPC 往返。
     let refreshTimer: number | null = null;
     const unsubscribe = erp.events.onPurchaseUpdate((payload: { type?: string }) => {
       if (payload?.type !== "purchase:update") return;
       if (refreshTimer) window.clearTimeout(refreshTimer);
       refreshTimer = window.setTimeout(() => {
         void loadData({ silent: true, withSupplemental: false });
-      }, 180);
+      }, 1500);
     });
     return () => {
       if (refreshTimer) window.clearTimeout(refreshTimer);
@@ -2774,11 +2771,18 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     }
     const previewResult = await preview1688Order(row, { quiet: true });
     if (!previewResult) return null;
+    // 乐观把 row.status 推到 pushed_pending_price，UI 立刻反馈；
+    // 真实 IPC 几秒后回来会带回 externalOrderId 等真实数据，broadcast 会刷新覆盖。
+    const snapshot = patchPurchaseOrderRow(row.id, { status: "pushed_pending_price" });
     const result = await runAction(`1688-push-${row.id}`, {
       action: "push_1688_order",
       poId: row.id,
       ...(options.deliveryAddressId ? { deliveryAddressId: options.deliveryAddressId } : {}),
     });
+    if (!result && snapshot) {
+      // IPC 失败回滚
+      patchPurchaseOrderRow(row.id, snapshot);
+    }
     const externalOrderId = result?.result?.externalOrderId;
     if (externalOrderId) {
       message.success(`已推送 1688 下单：${externalOrderId}`);
@@ -2788,16 +2792,28 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     return result;
   };
 
-  // 在「推送1688下单」前先弹地址选择 Modal，默认勾选 isDefault 那条；
-  // 没有地址时直接走 push（后端会报"缺收货地址"错误）。
+  // 推送1688下单流程：
+  //  - 没地址 → 直接走 push（后端报缺地址错误）
+  //  - 只有 1 个地址 → 直接用，不弹 Modal（少一步点击）
+  //  - 有默认地址 + 多地址 → 直接用默认地址，不弹 Modal
+  //  - 有多个无默认 → 弹 Modal 让用户选
+  // 想换地址：去「店铺 / 1688 设置」改默认。
   const startPush1688Order = (row: PurchaseOrderRow) => {
     const addresses = data.alibaba1688Addresses || [];
     if (!addresses.length) {
       void push1688Order(row);
       return;
     }
-    const def = addresses.find((a) => a.isDefault) || addresses[0];
-    setPushAddressPicker({ po: row, addressId: def.id });
+    if (addresses.length === 1) {
+      void push1688Order(row, { deliveryAddressId: addresses[0].id });
+      return;
+    }
+    const def = addresses.find((a) => a.isDefault);
+    if (def) {
+      void push1688Order(row, { deliveryAddressId: def.id });
+      return;
+    }
+    setPushAddressPicker({ po: row, addressId: addresses[0].id });
   };
 
   const request1688PriceChange = async (row: PurchaseOrderRow) => {
