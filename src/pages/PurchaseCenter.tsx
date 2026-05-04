@@ -2183,13 +2183,25 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   };
 
   const deletePurchaseOrder = async (row: PurchaseOrderRow) => {
+    // 乐观删除：UI 立即移除该行，IPC 失败再回滚（一并取消未刷新的列表加载）
+    let snapshot: PurchaseOrderRow | null = null;
+    setData((prev) => {
+      const list = prev.purchaseOrders || [];
+      const idx = list.findIndex((r) => r.id === row.id);
+      if (idx === -1) return prev;
+      snapshot = list[idx];
+      return { ...prev, purchaseOrders: list.filter((r) => r.id !== row.id) };
+    });
+    setSelectedPoIds((previous) => previous.filter((id) => id !== row.id));
     const result = await runAction(
       `delete-po-${row.id}`,
       { action: "delete_po", poId: row.id },
       "采购单已删除",
     );
-    if (!result) return;
-    setSelectedPoIds((previous) => previous.filter((id) => id !== row.id));
+    if (!result && snapshot) {
+      // IPC 失败：把行加回去
+      setData((prev) => ({ ...prev, purchaseOrders: [snapshot!, ...(prev.purchaseOrders || [])] }));
+    }
   };
 
   const openDetail = async (row: PurchaseRequestRow) => {
@@ -2287,12 +2299,15 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   };
 
   const deletePurchaseRequest = async (row: PurchaseRequestRow) => {
-    const result = await runAction(
-      `delete-pr-${row.id}`,
-      { action: "cancel_pr", prId: row.id },
-      "采购单已删除",
-    );
-    if (!result) return;
+    // 乐观删除 PR
+    let snapshot: PurchaseRequestRow | null = null;
+    setData((prev) => {
+      const list = prev.purchaseRequests || [];
+      const idx = list.findIndex((r) => r.id === row.id);
+      if (idx === -1) return prev;
+      snapshot = list[idx];
+      return { ...prev, purchaseRequests: list.filter((r) => r.id !== row.id) };
+    });
     if (detailPrId === row.id) {
       setDetailDrawerOpen(false);
       setDetailPrId(null);
@@ -2300,6 +2315,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     if (minimizedImageSearchPrId === row.id) setMinimizedImageSearchPrId(null);
     if (quotePrId === row.id) setQuotePrId(null);
     if (source1688PrId === row.id) setSource1688PrId(null);
+    const result = await runAction(
+      `delete-pr-${row.id}`,
+      { action: "cancel_pr", prId: row.id },
+      "采购单已删除",
+    );
+    if (!result && snapshot) {
+      setData((prev) => ({ ...prev, purchaseRequests: [snapshot!, ...(prev.purchaseRequests || [])] }));
+    }
   };
 
   const open1688SourceModal = (row: PurchaseRequestRow) => {
