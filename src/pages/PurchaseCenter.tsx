@@ -257,6 +257,7 @@ interface PurchaseOrderRow {
   externalPaymentUrlSyncedAt?: string | null;
   externalOrderDetailSyncedAt?: string | null;
   externalLogisticsSyncedAt?: string | null;
+  externalLogisticsJson?: string | object | null;
   mappingCount?: number;
   deliveryAddressCount?: number;
   refundCount?: number;
@@ -3578,6 +3579,46 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       dataIndex: "externalOrderStatus",
       width: 120,
       render: externalOrderStatusLabel,
+    },
+    {
+      title: "物流",
+      key: "logistics",
+      width: 200,
+      render: (_value, row) => {
+        // externalLogisticsJson 来自 sync_1688_logistics 接口，结构嵌套较深，
+        // 这里做一次浅解析提取物流公司名 + 运单号；解析失败显示 -。
+        const raw = row.externalLogisticsJson;
+        if (!raw) return <Text type="secondary">-</Text>;
+        let obj: any = raw;
+        if (typeof raw === "string") {
+          try { obj = JSON.parse(raw); } catch { return <Text type="secondary">-</Text>; }
+        }
+        const findDeep = (o: any, keys: string[]): string => {
+          if (!o || typeof o !== "object") return "";
+          for (const k of keys) if (o[k]) return String(o[k]);
+          for (const v of Object.values(o)) {
+            if (Array.isArray(v)) {
+              for (const item of v) {
+                const r = findDeep(item, keys);
+                if (r) return r;
+              }
+            } else if (typeof v === "object") {
+              const r = findDeep(v, keys);
+              if (r) return r;
+            }
+          }
+          return "";
+        };
+        const company = findDeep(obj, ["logisticsCompanyName", "companyName", "logisticsName"]);
+        const billNo = findDeep(obj, ["logisticsBillNo", "mailNo", "trackingNo", "billNo"]);
+        if (!company && !billNo) return <Text type="secondary">无物流</Text>;
+        return (
+          <Space direction="vertical" size={2}>
+            <Text style={{ fontSize: 12 }}>{company || "未知物流公司"}</Text>
+            {billNo ? <Text copyable code style={{ fontSize: 12 }}>{billNo}</Text> : <Text type="secondary" style={{ fontSize: 12 }}>无运单号</Text>}
+          </Space>
+        );
+      },
     },
     {
       title: "售后",
