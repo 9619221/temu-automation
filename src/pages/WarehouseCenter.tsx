@@ -201,42 +201,33 @@ export default function WarehouseCenter() {
       key: "actions",
       width: 170,
       fixed: "right",
-      render: (_value, row) => (
-        <Space size={6} wrap>
-          {canRole(role, ["warehouse", "manager", "admin"]) && row.status === "pending_arrival" ? (
-            <Button
-              size="small"
-              icon={<InboxOutlined />}
-              loading={actingKey === `arrival-${row.id}`}
-              onClick={() => runAction(`arrival-${row.id}`, { action: "register_arrival", receiptId: row.id }, "已确认到仓")}
-            >
-              确认到仓
-            </Button>
-          ) : null}
-          {canRole(role, ["warehouse", "manager", "admin"]) && row.status === "arrived" ? (
-            <Button
-              size="small"
-              icon={<CheckCircleOutlined />}
-              loading={actingKey === `count-${row.id}`}
-              onClick={() => runAction(`count-${row.id}`, { action: "confirm_count", receiptId: row.id }, "已确认核数")}
-            >
-              确认核数
-            </Button>
-          ) : null}
-          {canRole(role, ["warehouse", "manager", "admin"]) && row.status === "counted" ? (
-            <Button
-              size="small"
-              type="primary"
-              icon={<TagsOutlined />}
-              loading={actingKey === `batches-${row.id}`}
-              onClick={() => runAction(`batches-${row.id}`, { action: "create_batches", receiptId: row.id }, "已创建入库批次")}
-            >
-              创建批次
-            </Button>
-          ) : null}
-          {!["pending_arrival", "arrived", "counted"].includes(row.status) ? <Text type="secondary">无动作</Text> : null}
-        </Space>
-      ),
+      render: (_value, row) => {
+        const allowedStatuses = ["pending_arrival", "arrived", "counted"];
+        if (!allowedStatuses.includes(row.status) || !canRole(role, ["warehouse", "manager", "admin"])) {
+          return <Text type="secondary">无动作</Text>;
+        }
+        // 单按钮接力：不论当前在 pending_arrival / arrived / counted 哪一步，
+        // 后端 register_arrival / confirm_count / create_batches 任意 action 都会
+        // 自动接力到 inbounded_pending_qc 并建批次（缺数量按 PO 自动填）。
+        // 选当前状态对应的合法 action 即可。
+        const action = row.status === "pending_arrival"
+          ? "register_arrival"
+          : row.status === "arrived"
+            ? "confirm_count"
+            : "create_batches";
+        const loading = actingKey === `inbound-${row.id}`;
+        return (
+          <Button
+            size="small"
+            type="primary"
+            icon={<InboxOutlined />}
+            loading={loading}
+            onClick={() => runAction(`inbound-${row.id}`, { action, receiptId: row.id }, "已入库，库存已更新")}
+          >
+            入库
+          </Button>
+        );
+      },
     },
   ], [actingKey, role]);
 
