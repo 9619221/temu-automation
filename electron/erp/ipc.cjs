@@ -12459,7 +12459,15 @@ async function buildClientProductDetailMockPayload(payload = {}) {
       || extract1688OfferIdFromUrl(productUrl),
     "offerId",
   );
-  const credentials = getClientLocalAlphaShopCredentials(payload);
+  // 本机如果没有 AlphaShop 密钥（客户端模式新装机器很常见），不要直接抛错
+  // 阻断整个流程；改成"走远端"——把 payload 原样发给 ERP 服务器，让服务器
+  // 用它自己配的 AlphaShop 密钥去查。服务器没配则会回它自己的错。
+  let credentials;
+  try {
+    credentials = getClientLocalAlphaShopCredentials(payload);
+  } catch {
+    return { ...payload, offerId, productId: offerId, productID: offerId };
+  }
   const alphaShopDetail = await alphaShopProductDetailQuery({
     accessKey: credentials.accessKey,
     secretKey: credentials.secretKey,
