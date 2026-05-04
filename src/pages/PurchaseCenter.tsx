@@ -1431,7 +1431,16 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const [importDialogOpen, setImportDialogOpen] = useState(false);
   const [imported1688Orders, setImported1688Orders] = useState<Imported1688OrderRow[]>([]);
   const [activeQueueKey, setActiveQueueKey] = useState<PurchaseQueueKey>("all_orders");
-  const [purchaseSearchText, setPurchaseSearchText] = useState("");
+  const [purchaseSearchText, setPurchaseSearchText] = useState(() => {
+    // 支持从 WarehouseCenter / 别的页面跳过来时带 ?focusPo=xxx 自动填到搜索框
+    try {
+      const hash = window.location.hash || "";
+      const qIdx = hash.indexOf("?");
+      if (qIdx === -1) return "";
+      const qs = new URLSearchParams(hash.slice(qIdx + 1));
+      return qs.get("focusPo") || "";
+    } catch { return ""; }
+  });
   const [selectedInquiryCandidateIds, setSelectedInquiryCandidateIds] = useState<string[]>([]);
   const [inquiryDialogPrId, setInquiryDialogPrId] = useState<string | null>(null);
   const [inquiryDialogCandidateIds, setInquiryDialogCandidateIds] = useState<string[]>([]);
@@ -3287,6 +3296,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       title: "目标成本",
       dataIndex: "targetUnitCost",
       width: 110,
+      align: "right",
       render: formatCurrency,
     },
     {
@@ -3528,9 +3538,28 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       render: (_value, row) => {
         const mappingCount = Number(row.mappingCount || 0);
         const deliveryAddressCount = Number(row.deliveryAddressCount || 0);
+        const orderId = row.externalOrderId;
         return (
           <Space direction="vertical" size={2}>
-            <Text strong>{row.externalOrderId || "未绑定"}</Text>
+            {orderId ? (
+              <a
+                className="erp-link"
+                title="点击复制单号 + 在浏览器打开 1688 收银台"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  navigator.clipboard?.writeText(String(orderId)).catch(() => {});
+                  const externalOpener = (window as any)?.electronAPI?.app?.openExternal;
+                  const url = `https://trade.1688.com/order/cashier_order_pay.htm?orderId=${encodeURIComponent(String(orderId))}`;
+                  if (typeof externalOpener === "function") externalOpener(url).catch(() => window.open(url, "_blank"));
+                  else window.open(url, "_blank", "noopener,noreferrer");
+                  message.success("订单号已复制，正在打开 1688");
+                }}
+              >
+                {orderId}
+              </a>
+            ) : (
+              <Text strong>未绑定</Text>
+            )}
             <Text type="secondary" style={{ fontSize: 12 }}>
               {formatDateTime(row.externalOrderSyncedAt)}
             </Text>
@@ -3977,6 +4006,34 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
             </Button>
           ))}
         </Space>
+        {(() => {
+          const orders = purchaseOrders;
+          const c = (pred: (r: PurchaseOrderRow) => boolean) => orders.filter(pred).length;
+          const items = [
+            { label: "草稿", count: c((r) => r.status === "draft") },
+            { label: "待改价", count: c((r) => r.status === "pushed_pending_price"), warn: true },
+            { label: "待付款", count: c((r) => r.status === "approved_to_pay"), warn: true },
+            { label: "已付款", count: c((r) => r.status === "paid"), success: true },
+            { label: "待入库", count: c((r) => r.status === "arrived"), warn: true },
+            { label: "已入库", count: c((r) => ["inbounded", "closed"].includes(String(r.status))), success: true },
+            { label: "异常", count: c((r) => r.status === "exception"), danger: true },
+            { label: "死单", count: c((r) => String(r.externalOrderStatus || "") === "orphan_cleared"), danger: true },
+            { label: "已取消", count: c((r) => r.status === "cancelled") },
+          ];
+          if (!orders.length) return null;
+          return (
+            <div className="erp-status-row">
+              <span className="group"><span className="label">采购单</span><span className="count">{orders.length}</span></span>
+              <span className="divider" />
+              {items.map((it, idx) => (
+                <span key={idx} className="group">
+                  <span className="label">{it.label}</span>
+                  <span className={`count ${it.danger ? "danger" : it.warn ? "warn" : it.success ? "success" : ""}`}>{it.count}</span>
+                </span>
+              ))}
+            </div>
+          );
+        })()}
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, maxWidth: 760 }}>
           <Input
             allowClear
@@ -3999,11 +4056,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 <Table
                   rowKey="id"
                   loading={tableLoading}
-                  size="middle"
+                  size="small"
+                  className="erp-compact-table"
                   columns={requestColumns}
                   dataSource={filteredActiveRequestRows}
                   scroll={{ x: 1500 }}
-                  pagination={{ pageSize: 10, showSizeChanger: false }}
+                  pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
                   style={{ marginTop: 8 }}
                 />
               </div>
@@ -4014,12 +4072,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 <Table
                   rowKey="id"
                   loading={tableLoading}
-                  size="middle"
+                  size="small"
+                  className="erp-compact-table"
                   columns={orderColumns}
                   dataSource={filteredActiveOrderRows}
                   rowSelection={orderRowSelection}
                   scroll={{ x: 2360 }}
-                  pagination={{ pageSize: 10, showSizeChanger: false }}
+                  pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
                   style={{ marginTop: 8 }}
                 />
               </div>
@@ -4028,7 +4087,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               <Table
                 rowKey="id"
                 loading={tableLoading}
-                size="middle"
+                size="small"
+                className="erp-compact-table"
                 columns={orderColumns}
                 dataSource={[]}
                 rowSelection={orderRowSelection}
@@ -4041,24 +4101,74 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           <Table
             rowKey="id"
             loading={tableLoading}
-            size="middle"
+            size="small"
+            className="erp-compact-table"
             columns={requestColumns}
             dataSource={filteredActiveRequestRows}
             scroll={{ x: 1500 }}
-            pagination={{ pageSize: 10, showSizeChanger: false }}
+            pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
           />
         ) : (
           <Table
             rowKey="id"
             loading={tableLoading}
-            size="middle"
+            size="small"
+            className="erp-compact-table"
             columns={orderColumns}
             dataSource={filteredActiveOrderRows}
             rowSelection={orderRowSelection}
             scroll={{ x: 2360 }}
-            pagination={{ pageSize: 10, showSizeChanger: false }}
+            pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
           />
         )}
+        {selectedPoIds.length > 0 ? (
+          <div className="erp-bulk-bar">
+            <span className="selected">已选 {selectedPoIds.length} 项</span>
+            <span style={{ flex: 1 }} />
+            {(canPurchase || canFinance) ? (
+              <Button
+                size="small"
+                icon={<LinkOutlined />}
+                disabled={!selectedPurchaseOrders.some((row) => row.externalOrderId)}
+                loading={actingKey === "1688-batch-pay"}
+                onClick={openBatch1688PaymentUrl}
+              >
+                批量取支付链接
+              </Button>
+            ) : null}
+            {canPurchase ? (
+              <Button
+                size="small"
+                onClick={() => {
+                  selectedPurchaseOrders
+                    .filter((r) => r.status === "pushed_pending_price")
+                    .forEach((r) => runActionOptimistic(
+                      `pay-submit-${r.id}`,
+                      { action: "submit_payment_approval", poId: r.id, amount: r.totalAmount },
+                      undefined,
+                      { poId: r.id, patch: { status: "approved_to_pay" } },
+                    ));
+                  message.info(`已对 ${selectedPurchaseOrders.filter((r) => r.status === "pushed_pending_price").length} 项触发提交付款`);
+                }}
+              >
+                批量提交付款
+              </Button>
+            ) : null}
+            <Button
+              size="small"
+              icon={<DownloadOutlined />}
+              onClick={exportActiveQueue}
+            >
+              导出选中
+            </Button>
+            <Button
+              size="small"
+              onClick={() => setSelectedPoIds([])}
+            >
+              清空选择
+            </Button>
+          </div>
+        ) : null}
       </div>
 
       <Modal

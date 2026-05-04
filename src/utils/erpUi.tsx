@@ -114,51 +114,100 @@ export const WORK_ITEM_OWNER_LABELS: Record<string, string> = {
   warehouse: "仓库",
 };
 
+// 状态色谱（参考聚水潭语义）：
+//   橙/金 (gold/orange) = 待办，需要人盯
+//   蓝/青 (blue/cyan/processing) = 进行中
+//   绿 (success/green) = 已完成、已通过
+//   红 (error/red) = 异常、失败、退款类
+//   灰 (default) = 草稿、已取消、已关闭、已归档
 const STATUS_COLOR: Record<string, string> = {
+  // 通用 / 草稿
   draft: "default",
-  submitted: "processing",
-  buyer_processing: "blue",
+  closed: "default",
+  cancelled: "default",
+  unpaid: "default",
+  dismissed: "default",
+  unset: "default",
+  none: "default",
+
+  // PR 状态
+  submitted: "gold",            // 运营已提交（待采购接）
+  buyer_processing: "processing",
   sourced: "cyan",
   waiting_ops_confirm: "gold",
   converted_to_po: "success",
+  rejected: "error",
+
+  // PO 状态
+  pushed_pending_price: "orange",  // 已推单待改价（醒目）
   pending_finance_approval: "gold",
-  approved_to_pay: "cyan",
-  paid: "success",
-  supplier_processing: "blue",
-  shipped: "processing",
-  arrived: "processing",
+  approved_to_pay: "orange",       // 待付款，钱要出去了
+  paid: "blue",                    // 已付款（处理中）
+  supplier_processing: "processing",
+  shipped: "blue",
+  arrived: "cyan",
   inbounded: "success",
-  closed: "default",
+  delayed: "warning",
+  exception: "error",
+  orphan_cleared: "default",       // 死单清理后
+  bound: "blue",
+  created: "blue",
+  previewed: "cyan",
+  price_change_requested: "gold",
+  price_synced: "cyan",
+  refund_requested: "error",
+  partial_shipped: "processing",
+  received_goods: "success",
+  success: "success",
+  logistics_updated: "cyan",
+  memo_modified: "default",
+  imported: "default",
+
+  // 1688 真实状态字符串
+  waitbuyerpay: "orange",
+  waitsellersend: "blue",
+  cancel: "default",
+  signsuccess: "success",
+
+  // 付款审批
   pending: "gold",
-  approved: "success",
-  unpaid: "default",
+  approved: "blue",
+  deposit_paid: "cyan",
+  partial_refund: "error",
+  deducted: "success",
+
+  // 入库
   pending_arrival: "gold",
   counted: "cyan",
   inbounded_pending_qc: "blue",
+  quantity_mismatch: "error",
+  damaged: "error",
+
+  // 质检
   passed: "success",
   passed_with_observation: "cyan",
-  partial_passed: "blue",
+  partial_passed: "warning",
   failed: "error",
   rework_required: "error",
   pending_qc: "gold",
   in_progress: "processing",
+
+  // 出库
   pending_warehouse: "gold",
   picking: "processing",
   packed: "cyan",
   shipped_out: "blue",
   pending_ops_confirm: "gold",
   confirmed: "success",
-  new: "processing",
+
+  // 工单
+  new: "gold",
   done: "success",
-  dismissed: "default",
   waiting_operations: "gold",
   waiting_buyer: "gold",
   waiting_finance: "gold",
   waiting_warehouse: "gold",
   waiting_supplier: "gold",
-  exception: "error",
-  rejected: "error",
-  cancelled: "default",
 };
 
 export function formatDateTime(value?: string | null) {

@@ -2857,3 +2857,134 @@ body {
   justify-content: center;
   width: 140px;
 }
+
+/* ===== ERP 紧凑表格（聚水潭风格）：行 32-40px、字号 13px ===== */
+.erp-compact-table .ant-table-thead > tr > th {
+  padding: 8px 10px !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  background: #f6f8fb !important;
+  color: #374151 !important;
+  border-bottom: 1px solid #e5e9f0 !important;
+  white-space: nowrap;
+}
+.erp-compact-table .ant-table-tbody > tr > td {
+  padding: 6px 10px !important;
+  font-size: 13px !important;
+  vertical-align: middle !important;
+  line-height: 1.45 !important;
+}
+.erp-compact-table .ant-table-tbody > tr.ant-table-row:hover > td {
+  background: #f0f6ff !important;
+}
+.erp-compact-table .ant-table-tbody > tr.ant-table-row-selected > td {
+  background: #e6f4ff !important;
+}
+.erp-compact-table .ant-tag {
+  margin: 0 !important;
+  padding: 0 8px !important;
+  font-size: 12px !important;
+  line-height: 20px !important;
+  border-radius: 3px !important;
+  border: 1px solid transparent;
+}
+.erp-compact-table .ant-btn-sm {
+  height: 24px !important;
+  padding: 0 8px !important;
+  font-size: 12px !important;
+  line-height: 22px !important;
+}
+/* 数字列右对齐辅助 */
+.erp-compact-table th.col-numeric,
+.erp-compact-table td.col-numeric {
+  text-align: right !important;
+  font-variant-numeric: tabular-nums;
+}
+/* 单号链接列：蓝色文字、可点 */
+.erp-compact-table .erp-link {
+  color: #1677ff;
+  cursor: pointer;
+  text-decoration: none;
+}
+.erp-compact-table .erp-link:hover {
+  text-decoration: underline;
+}
+/* 选中行高亮的左侧蓝条 */
+.erp-compact-table .ant-table-tbody > tr.ant-table-row-selected > td:first-child {
+  box-shadow: inset 3px 0 0 0 #1677ff;
+}
+
+/* ===== 顶部状态计数面板 ===== */
+.erp-status-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  padding: 8px 12px;
+  background: #fafbfc;
+  border: 1px solid #e5e9f0;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #6b7280;
+  margin-bottom: 10px;
+}
+.erp-status-row .group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+.erp-status-row .group .label {
+  color: #9ca3af;
+}
+.erp-status-row .group .count {
+  font-weight: 600;
+  color: #1f2937;
+  margin-right: 6px;
+}
+.erp-status-row .group .count.warn {
+  color: #f59e0b;
+}
+.erp-status-row .group .count.danger {
+  color: #ef4444;
+}
+.erp-status-row .group .count.success {
+  color: #10b981;
+}
+.erp-status-row .divider {
+  width: 1px;
+  background: #e5e9f0;
+  margin: 0 4px;
+}
+
+/* ===== 批量操作浮动栏 ===== */
+.erp-bulk-bar {
+  position: sticky;
+  bottom: 12px;
+  z-index: 10;
+  margin: 8px 0;
+  padding: 8px 14px;
+  background: #1f2937;
+  color: #fff;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+.erp-bulk-bar .selected {
+  font-weight: 600;
+}
+.erp-bulk-bar .ant-btn {
+  background: #374151;
+  border-color: #4b5563;
+  color: #fff;
+}
+.erp-bulk-bar .ant-btn:hover {
+  background: #4b5563;
+  border-color: #6b7280;
+  color: #fff;
+}
+.erp-bulk-bar .ant-btn-primary {
+  background: #1677ff;
+  border-color: #1677ff;
+}

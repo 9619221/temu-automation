@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Button, Col, Row, Space, Table, Typography, message } from "antd";
+import { useNavigate } from "react-router-dom";
+import { Alert, Button, Col, Descriptions, Row, Space, Table, Tabs, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
   CheckCircleOutlined,
@@ -63,6 +64,7 @@ interface InventoryBatchRow {
   warehouseId?: string;
   locationCode?: string;
   receivedAt?: string | null;
+  inboundReceiptId?: string | null;
 }
 
 interface WarehouseWorkbench {
@@ -75,6 +77,7 @@ interface WarehouseWorkbench {
 export default function WarehouseCenter() {
   const auth = useErpAuth();
   const role = auth.currentUser?.role || "";
+  const navigate = useNavigate();
   const cachedData = useMemo(
     () => readPageCache<WarehouseWorkbench>(WAREHOUSE_WORKBENCH_CACHE_KEY, {}),
     [],
@@ -83,6 +86,7 @@ export default function WarehouseCenter() {
   const [loadedOnce, setLoadedOnce] = useState(() => hasPageCache(cachedData));
   const [loading, setLoading] = useState(false);
   const [actingKey, setActingKey] = useState<string | null>(null);
+  const [selectedReceiptId, setSelectedReceiptId] = useState<string | null>(null);
 
   const applyWorkbench = useCallback((workbench: WarehouseWorkbench) => {
     const nextWorkbench = workbench || {};
@@ -129,7 +133,21 @@ export default function WarehouseCenter() {
       render: (_value, row) => (
         <Space direction="vertical" size={2}>
           <Text strong>{row.receiptNo || row.id}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>采购单：{row.poNo || row.poId || "-"}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            采购单：
+            {row.poNo ? (
+              <a
+                className="erp-link"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  navigator.clipboard?.writeText(String(row.poNo)).catch(() => {});
+                  navigate(`/purchase-center?focusPo=${encodeURIComponent(String(row.poNo))}`);
+                }}
+              >
+                {row.poNo}
+              </a>
+            ) : (row.poId || "-")}
+          </Text>
         </Space>
       ),
     },
@@ -154,8 +172,9 @@ export default function WarehouseCenter() {
       title: "数量",
       key: "qty",
       width: 180,
+      align: "right",
       render: (_value, row) => (
-        <Space direction="vertical" size={2}>
+        <Space direction="vertical" size={2} style={{ alignItems: "flex-end" }}>
           <Text strong>{formatQty(row.receivedQty)} / {formatQty(row.expectedQty)} 已收</Text>
           <Text type="secondary" style={{ fontSize: 12 }}>
             破损 {formatQty(row.damagedQty)} · 短少 {formatQty(row.shortageQty)} · 多到 {formatQty(row.overQty)}
@@ -167,8 +186,9 @@ export default function WarehouseCenter() {
       title: "批次",
       key: "batch",
       width: 130,
+      align: "right",
       render: (_value, row) => (
-        <Space direction="vertical" size={2}>
+        <Space direction="vertical" size={2} style={{ alignItems: "flex-end" }}>
           <Text>{formatQty(row.batchLineCount)} / {formatQty(row.lineCount)} 已建</Text>
           <Text type="secondary" style={{ fontSize: 12 }}>{row.operatorName || "-"}</Text>
         </Space>
@@ -258,8 +278,9 @@ export default function WarehouseCenter() {
       title: "库存",
       key: "inventory",
       width: 180,
+      align: "right",
       render: (_value, row) => (
-        <Space direction="vertical" size={2}>
+        <Space direction="vertical" size={2} style={{ alignItems: "flex-end" }}>
           <Text>收货 {formatQty(row.receivedQty)} · 可用 {formatQty(row.availableQty)}</Text>
           <Text type="secondary" style={{ fontSize: 12 }}>预留 {formatQty(row.reservedQty)} · 锁定 {formatQty(row.blockedQty)}</Text>
         </Space>
@@ -275,6 +296,7 @@ export default function WarehouseCenter() {
       title: "成本",
       dataIndex: "unitLandedCost",
       width: 110,
+      align: "right",
       render: formatMoney,
     },
     {
@@ -341,12 +363,79 @@ export default function WarehouseCenter() {
         <Table
           rowKey="id"
           loading={tableLoading}
-          size="middle"
+          size="small"
+          className="erp-compact-table"
           columns={receiptColumns}
           dataSource={data.inboundReceipts || []}
           scroll={{ x: 1100 }}
-          pagination={{ pageSize: 10, showSizeChanger: false }}
+          pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
+          rowClassName={(record) => (record.id === selectedReceiptId ? "ant-table-row-selected" : "")}
+          onRow={(record) => ({
+            onClick: () => setSelectedReceiptId((prev) => (prev === record.id ? null : record.id)),
+            style: { cursor: "pointer" },
+          })}
         />
+        {selectedReceiptId ? (() => {
+          const sel = (data.inboundReceipts || []).find((r) => r.id === selectedReceiptId);
+          if (!sel) return null;
+          const relatedBatches = (data.inventoryBatches || []).filter((b) => b.inboundReceiptId === selectedReceiptId);
+          return (
+            <div style={{ marginTop: 12, border: "1px solid #e5e9f0", borderRadius: 6, padding: 8, background: "#fafbfc" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 4px 8px" }}>
+                <Text strong>入库单明细：{sel.receiptNo}</Text>
+                <Button size="small" type="text" onClick={() => setSelectedReceiptId(null)}>收起 ✕</Button>
+              </div>
+              <Tabs
+                size="small"
+                items={[
+                  {
+                    key: "batches",
+                    label: `库存批次 (${relatedBatches.length})`,
+                    children: relatedBatches.length ? (
+                      <Table
+                        rowKey="id"
+                        size="small"
+                        className="erp-compact-table"
+                        columns={batchColumns}
+                        dataSource={relatedBatches}
+                        pagination={false}
+                        scroll={{ x: 980 }}
+                      />
+                    ) : <Text type="secondary">还没有批次（点「入库」按钮一键创建）</Text>,
+                  },
+                  {
+                    key: "logistics",
+                    label: "物流",
+                    children: sel.logistics ? (
+                      <Descriptions size="small" column={2}>
+                        <Descriptions.Item label="物流公司">{sel.logistics.companyName || "-"}</Descriptions.Item>
+                        <Descriptions.Item label="运单号">{sel.logistics.billNo || "-"}</Descriptions.Item>
+                      </Descriptions>
+                    ) : <Text type="secondary">无物流信息（卖家未发货 / 未同步 1688 物流）</Text>,
+                  },
+                  {
+                    key: "meta",
+                    label: "操作信息",
+                    children: (
+                      <Descriptions size="small" column={2}>
+                        <Descriptions.Item label="入库单号">{sel.receiptNo}</Descriptions.Item>
+                        <Descriptions.Item label="状态">{sel.status}</Descriptions.Item>
+                        <Descriptions.Item label="采购单">{sel.poNo || sel.poId || "-"}</Descriptions.Item>
+                        <Descriptions.Item label="供应商">{sel.supplierName || "-"}</Descriptions.Item>
+                        <Descriptions.Item label="操作员">{sel.operatorName || "-"}</Descriptions.Item>
+                        <Descriptions.Item label="到仓时间">{formatDateTime(sel.receivedAt)}</Descriptions.Item>
+                        <Descriptions.Item label="期望数量">{formatQty(sel.expectedQty)}</Descriptions.Item>
+                        <Descriptions.Item label="实收数量">{formatQty(sel.receivedQty)}</Descriptions.Item>
+                        <Descriptions.Item label="破损">{formatQty(sel.damagedQty)}</Descriptions.Item>
+                        <Descriptions.Item label="短少">{formatQty(sel.shortageQty)}</Descriptions.Item>
+                      </Descriptions>
+                    ),
+                  },
+                ]}
+              />
+            </div>
+          );
+        })() : null}
       </div>
 
       <div className="app-panel">
@@ -359,11 +448,12 @@ export default function WarehouseCenter() {
         <Table
           rowKey="id"
           loading={tableLoading}
-          size="middle"
+          size="small"
+          className="erp-compact-table"
           columns={batchColumns}
           dataSource={data.inventoryBatches || []}
           scroll={{ x: 980 }}
-          pagination={{ pageSize: 10, showSizeChanger: false }}
+          pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
         />
       </div>
     </div>
