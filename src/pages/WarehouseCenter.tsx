@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Alert, Button, Col, Descriptions, Row, Space, Table, Tabs, Typography, message } from "antd";
+import { Alert, Button, Col, Descriptions, InputNumber, Modal, Row, Space, Table, Tabs, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
   CheckCircleOutlined,
@@ -87,6 +87,12 @@ export default function WarehouseCenter() {
   const [loading, setLoading] = useState(false);
   const [actingKey, setActingKey] = useState<string | null>(null);
   const [selectedReceiptId, setSelectedReceiptId] = useState<string | null>(null);
+  const [partialReceiveModal, setPartialReceiveModal] = useState<{
+    receiptId: string;
+    receiptNo: string;
+    lines: Array<{ id: string; skuCode?: string; productName?: string; expectedQty: number; receivedQty: number; damagedQty: number }>;
+    loading: boolean;
+  } | null>(null);
 
   const applyWorkbench = useCallback((workbench: WarehouseWorkbench) => {
     const nextWorkbench = workbench || {};
@@ -237,19 +243,46 @@ export default function WarehouseCenter() {
             : "create_batches";
         const loading = actingKey === `inbound-${row.id}`;
         return (
-          <Button
-            size="small"
-            type="primary"
-            icon={<InboxOutlined />}
-            loading={loading}
-            onClick={() => runAction(`inbound-${row.id}`, { action, receiptId: row.id }, "已入库，库存已更新")}
-          >
-            入库
-          </Button>
+          <Space size={6} wrap>
+            <Button
+              size="small"
+              type="primary"
+              icon={<InboxOutlined />}
+              loading={loading}
+              onClick={() => runAction(`inbound-${row.id}`, { action, receiptId: row.id }, "已入库，库存已更新")}
+            >
+              入库
+            </Button>
+            <Button
+              size="small"
+              loading={partialReceiveModal?.receiptId === row.id && partialReceiveModal.loading}
+              onClick={async () => {
+                // 拉这单的明细行，弹"按实数入库"Modal
+                setPartialReceiveModal({ receiptId: row.id, receiptNo: row.receiptNo || row.id, lines: [], loading: true });
+                try {
+                  const result = await erp?.warehouse?.action({ action: "get_inbound_lines", receiptId: row.id });
+                  const lines = (result?.result?.lines || []).map((l: any) => ({
+                    id: String(l.id),
+                    skuCode: l.internalSkuCode,
+                    productName: l.productName,
+                    expectedQty: Number(l.expectedQty || 0),
+                    receivedQty: Number(l.receivedQty || 0) || Number(l.expectedQty || 0),
+                    damagedQty: Number(l.damagedQty || 0),
+                  }));
+                  setPartialReceiveModal({ receiptId: row.id, receiptNo: row.receiptNo || row.id, lines, loading: false });
+                } catch (e: any) {
+                  message.error(e?.message || "拉取入库行失败");
+                  setPartialReceiveModal(null);
+                }
+              }}
+            >
+              按实数入库
+            </Button>
+          </Space>
         );
       },
     },
-  ], [actingKey, role]);
+  ], [actingKey, role, partialReceiveModal]);
 
   const batchColumns = useMemo<ColumnsType<InventoryBatchRow>>(() => [
     {
@@ -456,6 +489,95 @@ export default function WarehouseCenter() {
           pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
         />
       </div>
+
+      <Modal
+        open={!!partialReceiveModal}
+        title={partialReceiveModal ? `按实数入库 · ${partialReceiveModal.receiptNo}` : "按实数入库"}
+        okText="确认入库"
+        cancelText="取消"
+        width={760}
+        confirmLoading={partialReceiveModal?.loading}
+        onCancel={() => setPartialReceiveModal(null)}
+        onOk={async () => {
+          if (!partialReceiveModal) return;
+          const linesPayload = partialReceiveModal.lines.map((l) => ({
+            id: l.id,
+            received_qty: l.receivedQty,
+            damaged_qty: l.damagedQty,
+          }));
+          setPartialReceiveModal({ ...partialReceiveModal, loading: true });
+          await runAction(
+            `inbound-partial-${partialReceiveModal.receiptId}`,
+            { action: "confirm_count", receiptId: partialReceiveModal.receiptId, lines: linesPayload },
+            "已按实际数量入库",
+          );
+          setPartialReceiveModal(null);
+        }}
+        destroyOnClose
+      >
+        {partialReceiveModal ? (
+          <Space direction="vertical" size={10} style={{ width: "100%" }}>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              系统会按你填的"实收"建库存批次。短少 / 多到自动算（实收 vs 期望差），破损独立填，
+              系统不算可用库存。
+            </Text>
+            <Table
+              rowKey="id"
+              size="small"
+              className="erp-compact-table"
+              pagination={false}
+              dataSource={partialReceiveModal.lines}
+              columns={[
+                { title: "SKU", dataIndex: "skuCode", width: 120 },
+                { title: "商品", dataIndex: "productName", ellipsis: true },
+                { title: "期望", dataIndex: "expectedQty", width: 70, align: "right" },
+                {
+                  title: "实收",
+                  width: 110,
+                  align: "right",
+                  render: (_v, r: any) => (
+                    <InputNumber
+                      size="small"
+                      min={0}
+                      value={r.receivedQty}
+                      onChange={(v) => setPartialReceiveModal({
+                        ...partialReceiveModal,
+                        lines: partialReceiveModal.lines.map((l) => l.id === r.id ? { ...l, receivedQty: Number(v || 0) } : l),
+                      })}
+                    />
+                  ),
+                },
+                {
+                  title: "破损",
+                  width: 90,
+                  align: "right",
+                  render: (_v, r: any) => (
+                    <InputNumber
+                      size="small"
+                      min={0}
+                      value={r.damagedQty}
+                      onChange={(v) => setPartialReceiveModal({
+                        ...partialReceiveModal,
+                        lines: partialReceiveModal.lines.map((l) => l.id === r.id ? { ...l, damagedQty: Number(v || 0) } : l),
+                      })}
+                    />
+                  ),
+                },
+                {
+                  title: "差异",
+                  width: 110,
+                  render: (_v, r: any) => {
+                    const diff = (r.receivedQty || 0) - (r.expectedQty || 0);
+                    if (diff > 0) return <Text style={{ color: "#1677ff" }}>多到 +{diff}</Text>;
+                    if (diff < 0) return <Text type="warning">短少 {-diff}</Text>;
+                    return <Text type="secondary">符合</Text>;
+                  },
+                },
+              ]}
+            />
+          </Space>
+        ) : null}
+      </Modal>
     </div>
   );
 }

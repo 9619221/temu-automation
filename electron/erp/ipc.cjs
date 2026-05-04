@@ -11665,9 +11665,7 @@ function performWarehouseAction(payload = {}, actorInput = {}) {
       }
       case "confirm_count": {
         const receiptId = requireString(payload.receiptId || payload.id, "receiptId");
-        // 跟 register_arrival 一样的兜底：缺收货数量自动按 expected 填满，并直接建批次。
-        // 入库数量以"采购单数量"为准：先把 expected_qty 同步成 po_line.qty 的最新值，
-        // 再用 expected_qty 兜 received_qty。手填非 0 的不覆盖。
+        // 入库数量以"采购单数量"为准：先把 expected_qty 同步成 po_line.qty 的最新值。
         db.prepare(`
           UPDATE erp_inbound_receipt_lines
           SET expected_qty = COALESCE(
@@ -11676,11 +11674,45 @@ function performWarehouseAction(payload = {}, actorInput = {}) {
           )
           WHERE receipt_id = ?
         `).run(receiptId);
-        db.prepare(`
-          UPDATE erp_inbound_receipt_lines
-          SET received_qty = CASE WHEN COALESCE(received_qty, 0) > 0 THEN received_qty ELSE COALESCE(expected_qty, 0) END
-          WHERE receipt_id = ?
-        `).run(receiptId);
+        // 如果前端提供了精细到行的数量（部分入库 / 短少 / 多到 / 破损），按行更新；
+        // 否则按 expected 自动充满（旧的简化路径）。
+        const linesPayload = Array.isArray(payload.lines) ? payload.lines : null;
+        if (linesPayload && linesPayload.length) {
+          const updateLine = db.prepare(`
+            UPDATE erp_inbound_receipt_lines
+            SET received_qty = @received_qty,
+                damaged_qty = @damaged_qty,
+                shortage_qty = @shortage_qty,
+                over_qty = @over_qty
+            WHERE id = @id AND receipt_id = @receipt_id
+          `);
+          for (const ln of linesPayload) {
+            const lineId = optionalString(ln.id);
+            if (!lineId) continue;
+            const expectedRow = db.prepare(
+              "SELECT expected_qty FROM erp_inbound_receipt_lines WHERE id = ? AND receipt_id = ?"
+            ).get(lineId, receiptId);
+            const expected = Math.max(0, Math.floor(Number(expectedRow?.expected_qty || 0)));
+            const received = Math.max(0, Math.floor(Number(ln.received_qty ?? 0)));
+            const damaged = Math.max(0, Math.floor(Number(ln.damaged_qty ?? 0)));
+            const shortage = Math.max(0, expected - received);
+            const over = Math.max(0, received - expected);
+            updateLine.run({
+              id: lineId,
+              receipt_id: receiptId,
+              received_qty: received,
+              damaged_qty: damaged,
+              shortage_qty: shortage,
+              over_qty: over,
+            });
+          }
+        } else {
+          db.prepare(`
+            UPDATE erp_inbound_receipt_lines
+            SET received_qty = CASE WHEN COALESCE(received_qty, 0) > 0 THEN received_qty ELSE COALESCE(expected_qty, 0) END
+            WHERE receipt_id = ?
+          `).run(receiptId);
+        }
         const t = services.inventory.confirmCount(receiptId, actor);
         let batches = [];
         try {
@@ -11690,6 +11722,22 @@ function performWarehouseAction(payload = {}, actorInput = {}) {
           try { console.warn("[warehouse] auto create batches failed:", e?.message || e); } catch {}
         }
         return { transition: t, batches };
+      }
+      case "get_inbound_lines": {
+        // 给前端拉某入库单的明细行，用于"按实数入库"Modal 渲染。
+        const receiptId = requireString(payload.receiptId || payload.id, "receiptId");
+        const lines = db.prepare(`
+          SELECT line.id, line.receipt_id, line.po_line_id, line.sku_id,
+                 line.expected_qty, line.received_qty, line.damaged_qty,
+                 line.shortage_qty, line.over_qty,
+                 sku.internal_sku_code, sku.product_name,
+                 sku.image_url AS sku_image_url
+          FROM erp_inbound_receipt_lines line
+          LEFT JOIN erp_skus sku ON sku.id = line.sku_id
+          WHERE line.receipt_id = ?
+          ORDER BY line.id ASC
+        `).all(receiptId);
+        return { lines: lines.map(toCamelRow) };
       }
       case "create_batches": {
         const receiptId = requireString(payload.receiptId || payload.id, "receiptId");

@@ -18,6 +18,7 @@ import {
   Select,
   Space,
   Spin,
+  Steps,
   Table,
   Tag,
   Typography,
@@ -4038,6 +4039,21 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           ) : null,
         ].filter(Boolean)}
       />
+
+      <div style={{ background: "#fff", border: "1px solid #e5e9f0", borderRadius: 8, padding: "14px 18px 6px", marginBottom: 10 }}>
+        <Steps
+          size="small"
+          current={-1}
+          progressDot
+          items={[
+            { title: "新建采购单", description: "运营提交，自动进采购处理" },
+            { title: "推送1688", description: "采购选货源→推单到1688" },
+            { title: "提交付款", description: "采购点确认→进入待付款" },
+            { title: "付款发货", description: "支付链接/代扣 + 卖家发货" },
+            { title: "入库完成", description: "仓管点入库→批次落库存" },
+          ]}
+        />
+      </div>
 
       <div className="app-panel">
         <div className="app-panel__title">
