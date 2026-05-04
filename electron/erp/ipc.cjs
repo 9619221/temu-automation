@@ -11626,6 +11626,16 @@ function performWarehouseAction(payload = {}, actorInput = {}) {
         const receiptId = requireString(payload.receiptId || payload.id, "receiptId");
         const receipt = getInboundReceipt(db, receiptId);
         // 1. 填收货数量（已经手填了的不覆盖；为 0 的按 expected 自动充满）
+        // 入库数量以"采购单数量"为准：先把 expected_qty 同步成 po_line.qty 的最新值，
+        // 再用 expected_qty 兜 received_qty。手填非 0 的不覆盖。
+        db.prepare(`
+          UPDATE erp_inbound_receipt_lines
+          SET expected_qty = COALESCE(
+            (SELECT pol.qty FROM erp_purchase_order_lines pol WHERE pol.id = erp_inbound_receipt_lines.po_line_id),
+            expected_qty
+          )
+          WHERE receipt_id = ?
+        `).run(receiptId);
         db.prepare(`
           UPDATE erp_inbound_receipt_lines
           SET received_qty = CASE WHEN COALESCE(received_qty, 0) > 0 THEN received_qty ELSE COALESCE(expected_qty, 0) END
@@ -11656,6 +11666,16 @@ function performWarehouseAction(payload = {}, actorInput = {}) {
       case "confirm_count": {
         const receiptId = requireString(payload.receiptId || payload.id, "receiptId");
         // 跟 register_arrival 一样的兜底：缺收货数量自动按 expected 填满，并直接建批次。
+        // 入库数量以"采购单数量"为准：先把 expected_qty 同步成 po_line.qty 的最新值，
+        // 再用 expected_qty 兜 received_qty。手填非 0 的不覆盖。
+        db.prepare(`
+          UPDATE erp_inbound_receipt_lines
+          SET expected_qty = COALESCE(
+            (SELECT pol.qty FROM erp_purchase_order_lines pol WHERE pol.id = erp_inbound_receipt_lines.po_line_id),
+            expected_qty
+          )
+          WHERE receipt_id = ?
+        `).run(receiptId);
         db.prepare(`
           UPDATE erp_inbound_receipt_lines
           SET received_qty = CASE WHEN COALESCE(received_qty, 0) > 0 THEN received_qty ELSE COALESCE(expected_qty, 0) END
@@ -11674,6 +11694,16 @@ function performWarehouseAction(payload = {}, actorInput = {}) {
       case "create_batches": {
         const receiptId = requireString(payload.receiptId || payload.id, "receiptId");
         // 兜底：如果还有 received_qty=0 的行，按 expected 自动填，避免"无可建批次"。
+        // 入库数量以"采购单数量"为准：先把 expected_qty 同步成 po_line.qty 的最新值，
+        // 再用 expected_qty 兜 received_qty。手填非 0 的不覆盖。
+        db.prepare(`
+          UPDATE erp_inbound_receipt_lines
+          SET expected_qty = COALESCE(
+            (SELECT pol.qty FROM erp_purchase_order_lines pol WHERE pol.id = erp_inbound_receipt_lines.po_line_id),
+            expected_qty
+          )
+          WHERE receipt_id = ?
+        `).run(receiptId);
         db.prepare(`
           UPDATE erp_inbound_receipt_lines
           SET received_qty = CASE WHEN COALESCE(received_qty, 0) > 0 THEN received_qty ELSE COALESCE(expected_qty, 0) END
