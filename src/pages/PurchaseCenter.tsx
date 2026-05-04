@@ -4018,6 +4018,16 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 同步询盘结果
               </Button>
             ) : null}
+            {(canPurchase || canFinance) ? (
+              <Button
+                icon={<LinkOutlined />}
+                disabled={!selectedPurchaseOrders.some((row) => row.externalOrderId)}
+                loading={actingKey === "1688-batch-pay"}
+                onClick={openBatch1688PaymentUrl}
+              >
+                批量支付
+              </Button>
+            ) : null}
             <Button icon={<DownloadOutlined />} onClick={exportActiveQueue}>
               导出
             </Button>
