@@ -11620,17 +11620,38 @@ function performWarehouseAction(payload = {}, actorInput = {}) {
   const run = db.transaction(() => {
     switch (action) {
       case "register_arrival": {
+        // 一键入仓：默认按"足量收货"（received_qty = expected_qty）→ 状态推到 inbounded_pending_qc →
+        // 自动建批次（库存出现在商品资料）。要部分收货 / 短少 / 破损可以走单独的
+        // confirm_count + create_batches 慢通道（后端仍支持），但 UI 默认快捷一键。
         const receiptId = requireString(payload.receiptId || payload.id, "receiptId");
         const receipt = getInboundReceipt(db, receiptId);
-        const transition = services.inventory.registerArrival(receiptId, actor);
+        // 1. 填收货数量（已经手填了的不覆盖；为 0 的按 expected 自动充满）
+        db.prepare(`
+          UPDATE erp_inbound_receipt_lines
+          SET received_qty = CASE WHEN COALESCE(received_qty, 0) > 0 THEN received_qty ELSE COALESCE(expected_qty, 0) END
+          WHERE receipt_id = ?
+        `).run(receiptId);
+        // 2. 状态机连推：pending_arrival → arrived → counted → inbounded_pending_qc
+        const t1 = services.inventory.registerArrival(receiptId, actor);
+        services.inventory.confirmCount(receiptId, actor);
+        // 3. 建批次 = 立即写入 erp_inventory_batches → 商品资料的实际库存数立刻 +N
+        const reloaded = getInboundReceipt(db, receiptId);
+        let batches = [];
+        try {
+          batches = createBatchesForReceipt({ db, services, receipt: reloaded, actor });
+        } catch (e) {
+          // 没收货数量等异常不阻断 register_arrival 主流程，但提示
+          try { console.warn("[warehouse] auto create batches failed:", e?.message || e); } catch {}
+        }
+        // 4. PO 状态联动：shipped / paid → arrived
         let poTransition = null;
         if (receipt.po_id) {
           const po = getPurchaseOrder(db, receipt.po_id);
-          if (po.status === "shipped") {
-            poTransition = services.purchase.markArrived(po.id, actor);
+          if (["shipped", "paid", "supplier_processing"].includes(po.status)) {
+            try { poTransition = services.purchase.markArrived(po.id, actor); } catch {}
           }
         }
-        return { transition, poTransition };
+        return { transition: t1, poTransition, batches };
       }
       case "confirm_count": {
         const receiptId = requireString(payload.receiptId || payload.id, "receiptId");
