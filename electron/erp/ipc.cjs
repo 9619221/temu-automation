@@ -4352,22 +4352,34 @@ function deletePurchaseOrderAction({ db, services, payload, actor }) {
   const blockers = [];
   const status = optionalString(po.status);
   const paymentStatus = optionalString(po.payment_status) || "unpaid";
-  if (status !== "draft") blockers.push(`当前状态为 ${status || "-"}`);
-  if (paymentStatus !== "unpaid") blockers.push(`付款状态为 ${paymentStatus}`);
-  if (has1688OrderTrace(po)) blockers.push("已有 1688 订单记录");
+  const externalOrderStatus = optionalString(po.external_order_status);
+  // cancelled / orphan_cleared 是死单，跳过 1688 / 付款审批 / 售后记录的"已有"校验，
+  // 让用户能清理掉历史死数据；但仍硬阻止有"入库单 / 入库明细 / 库存批次"的删除，
+  // 防止创建 orphan 库存。
+  const isClearable = status === "cancelled" || externalOrderStatus === "orphan_cleared";
+  if (!isClearable) {
+    if (status !== "draft") blockers.push(`当前状态为 ${status || "-"}`);
+    if (paymentStatus !== "unpaid") blockers.push(`付款状态为 ${paymentStatus}`);
+    if (has1688OrderTrace(po)) blockers.push("已有 1688 订单记录");
+    const paymentApprovalCount = Number(db.prepare("SELECT COUNT(*) AS count FROM erp_payment_approvals WHERE po_id = ?").get(po.id)?.count || 0);
+    if (paymentApprovalCount > 0) blockers.push("已有付款审批记录");
+    const refundCount = Number(db.prepare("SELECT COUNT(*) AS count FROM erp_1688_refunds WHERE po_id = ?").get(po.id)?.count || 0);
+    if (refundCount > 0) blockers.push("已有售后记录");
+  }
   if (getPurchaseOrderReceivedQty(db, po.id) > 0) blockers.push("已有入库数量");
-  const paymentApprovalCount = Number(db.prepare("SELECT COUNT(*) AS count FROM erp_payment_approvals WHERE po_id = ?").get(po.id)?.count || 0);
-  if (paymentApprovalCount > 0) blockers.push("已有付款审批记录");
   const inboundReceiptCount = Number(db.prepare("SELECT COUNT(*) AS count FROM erp_inbound_receipts WHERE po_id = ?").get(po.id)?.count || 0);
   if (inboundReceiptCount > 0) blockers.push("已有入库单");
   const inboundLineCount = countPurchaseOrderInboundLineRefs(db, po.id);
   if (inboundLineCount > 0) blockers.push("已有入库明细");
   const batchCount = Number(db.prepare("SELECT COUNT(*) AS count FROM erp_inventory_batches WHERE po_id = ?").get(po.id)?.count || 0);
   if (batchCount > 0) blockers.push("已有库存批次");
-  const refundCount = Number(db.prepare("SELECT COUNT(*) AS count FROM erp_1688_refunds WHERE po_id = ?").get(po.id)?.count || 0);
-  if (refundCount > 0) blockers.push("已有售后记录");
   if (blockers.length) {
     throw new Error(`采购单不能删除：${blockers.join("、")}`);
+  }
+  // 死单清理：把关联的付款审批 / 1688 退款记录一并清掉（已经做了"硬阻断"的入库类除外）
+  if (isClearable) {
+    db.prepare("DELETE FROM erp_payment_approvals WHERE po_id = ?").run(po.id);
+    db.prepare("DELETE FROM erp_1688_refunds WHERE po_id = ?").run(po.id);
   }
 
   let reopenedPurchaseRequest = null;

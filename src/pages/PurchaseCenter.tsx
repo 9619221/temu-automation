@@ -1126,11 +1126,17 @@ function has1688OrderTrace(row?: PurchaseOrderRow | null) {
 
 function canDeletePurchaseOrder(row?: PurchaseOrderRow | null) {
   if (!row) return false;
+  // 三类可删：
+  // 1) 草稿且没付款 / 没推 1688（原始安全场景）
+  // 2) 已取消（cancelled）—— 单子流程已结束
+  // 3) 死单清理（external_order_status=orphan_cleared）—— 1688 远端已不存在
+  if (Number(row.receivedQty || 0) > 0) return false;
+  if (row.status === "cancelled") return true;
+  if (String(row.externalOrderStatus || "") === "orphan_cleared") return true;
   const paymentStatus = String(row.paymentStatus || "unpaid").toLowerCase();
   return row.status === "draft"
     && paymentStatus === "unpaid"
-    && !has1688OrderTrace(row)
-    && Number(row.receivedQty || 0) <= 0;
+    && !has1688OrderTrace(row);
 }
 
 function getPurchaseOrderRollbackTarget(row?: PurchaseOrderRow | null) {
