@@ -44,6 +44,7 @@ interface InboundReceiptRow {
   operatorName?: string;
   receivedAt?: string | null;
   updatedAt?: string;
+  logistics?: { companyName?: string | null; billNo?: string | null } | null;
 }
 
 interface InventoryBatchRow {

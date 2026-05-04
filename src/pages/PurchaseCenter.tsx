@@ -7,7 +7,6 @@ import {
   Checkbox,
   Col,
   Drawer,
-  Dropdown,
   Form,
   Input,
   InputNumber,
@@ -27,7 +26,6 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type { TableRowSelection } from "antd/es/table/interface";
-import type { MenuProps } from "antd";
 import {
   ApiOutlined,
   CheckCircleOutlined,
@@ -35,7 +33,6 @@ import {
   DeleteOutlined,
   DollarOutlined,
   DownloadOutlined,
-  FileSearchOutlined,
   FileDoneOutlined,
   ImportOutlined,
   LinkOutlined,
@@ -74,7 +71,6 @@ const UPLOAD_IMAGE_TARGET_BYTES = 260 * 1024;
 
 const SHOW_KEYWORD_1688_SOURCE = false;
 const AUTO_1688_ORDER_SYNC_INTERVAL_MS = 10 * 60 * 1000;
-const AUTO_1688_ORDER_SYNC_START_DELAY_MS = 15 * 1000;
 const IMAGE_SEARCH_PAGE_SIZE = 10;
 const IMAGE_SEARCH_MAX_PAGE = 10;
 const AUTO_INQUIRY_LIMIT = 5;
@@ -2857,40 +2853,6 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     }, "已记录改价沟通");
   };
 
-  const open1688PaymentUrl = async (row: PurchaseOrderRow) => {
-    // 拉支付链接前先静默自检：渠道是否有可用项、代扣协议是否开通。
-    // 任一异常只提示不阻断，最终仍以是否拿到 paymentUrl 为准。
-    const warnings: string[] = [];
-    try {
-      const payWaysResult = await erp?.purchase?.action({
-        action: "query_1688_pay_ways",
-        poIds: [row.id],
-        includeWorkbench: false,
-      });
-      const payWays = Array.isArray(payWaysResult?.result?.payWays) ? payWaysResult.result.payWays : [];
-      if (!payWays.length) warnings.push("未查到 1688 支付渠道");
-    } catch (e: any) {
-      warnings.push(purchaseActionErrorMessage(e, "query_1688_pay_ways"));
-    }
-    try {
-      const statusResult = await erp?.purchase?.action({
-        action: "query_1688_protocol_pay_status",
-        poIds: [row.id],
-        includeWorkbench: false,
-      });
-      if (statusResult?.result?.isOpen === false) warnings.push("代扣协议未开通（仅影响免密支付）");
-    } catch (e: any) {
-      warnings.push(purchaseActionErrorMessage(e, "query_1688_protocol_pay_status"));
-    }
-    if (warnings.length) message.warning(warnings.join("；"));
-    const result = await runAction(`1688-pay-${row.id}`, {
-      action: "get_1688_payment_url",
-      poIds: [row.id],
-    }, "1688 支付链接已同步");
-    const paymentUrl = result?.result?.paymentUrl || row.externalPaymentUrl;
-    if (paymentUrl) window.open(paymentUrl, "_blank", "noopener,noreferrer");
-  };
-
   const openBatch1688PaymentUrl = async () => {
     const poIds = selectedPurchaseOrders
       .filter((row) => row.externalOrderId)
@@ -2936,13 +2898,6 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     } else {
       message.warning(`API 没拿到付款链接，已打开 1688 工作台；订单号 ${orderId} 已复制，登录后粘贴搜索这单`);
     }
-  };
-
-  const prepare1688ProtocolPay = async (row: PurchaseOrderRow) => {
-    await runAction(`1688-protocol-pay-${row.id}`, {
-      action: "prepare_1688_protocol_pay",
-      poIds: [row.id],
-    }, "1688 免密支付已发起");
   };
 
   const cancel1688Order = async (row: PurchaseOrderRow) => {
