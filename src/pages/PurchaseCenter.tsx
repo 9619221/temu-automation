@@ -93,6 +93,7 @@ const FAST_PURCHASE_WORKBENCH_PARAMS = {
 const FULL_PURCHASE_WORKBENCH_PARAMS = {
   limit: 200,
   includeRequestDetails: false,
+  include1688Meta: true,
 };
 const TABLE_IDENTIFIER_TEXT_STYLE = {
   fontFamily: "inherit",
@@ -1429,6 +1430,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const [refundMaxAmount, setRefundMaxAmount] = useState<number | null>(null);
   const [orderNoteDialog, setOrderNoteDialog] = useState<OrderNoteDialogState | null>(null);
   const [selectedPoIds, setSelectedPoIds] = useState<string[]>([]);
+  // 推 1688 单时让用户先确认 / 切换收货地址，避免默认地址跑错
+  const [pushAddressPicker, setPushAddressPicker] = useState<{ po: PurchaseOrderRow; addressId: string } | null>(null);
   const [importDialogOpen, setImportDialogOpen] = useState(false);
   const [imported1688Orders, setImported1688Orders] = useState<Imported1688OrderRow[]>([]);
   const [activeQueueKey, setActiveQueueKey] = useState<PurchaseQueueKey>("all_orders");
@@ -2740,7 +2743,10 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     return validation || null;
   };
 
-  const push1688Order = async (row: PurchaseOrderRow, options: { skipValidation?: boolean } = {}) => {
+  const push1688Order = async (
+    row: PurchaseOrderRow,
+    options: { skipValidation?: boolean; deliveryAddressId?: string } = {},
+  ) => {
     if (!options.skipValidation) {
       const validation = await validate1688OrderPush(row, true);
       if (!validation?.ready) {
@@ -2753,6 +2759,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     const result = await runAction(`1688-push-${row.id}`, {
       action: "push_1688_order",
       poId: row.id,
+      ...(options.deliveryAddressId ? { deliveryAddressId: options.deliveryAddressId } : {}),
     });
     const externalOrderId = result?.result?.externalOrderId;
     if (externalOrderId) {
@@ -2761,6 +2768,18 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       message.warning("1688 已接收下单请求，但暂未返回订单号，请稍后同步订单");
     }
     return result;
+  };
+
+  // 在「推送1688下单」前先弹地址选择 Modal，默认勾选 isDefault 那条；
+  // 没有地址时直接走 push（后端会报"缺收货地址"错误）。
+  const startPush1688Order = (row: PurchaseOrderRow) => {
+    const addresses = data.alibaba1688Addresses || [];
+    if (!addresses.length) {
+      void push1688Order(row);
+      return;
+    }
+    const def = addresses.find((a) => a.isDefault) || addresses[0];
+    setPushAddressPicker({ po: row, addressId: def.id });
   };
 
   const request1688PriceChange = async (row: PurchaseOrderRow) => {
@@ -3691,7 +3710,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               type="primary"
               icon={<ShoppingCartOutlined />}
               loading={pushLoading}
-              onClick={() => push1688Order(row)}
+              onClick={() => startPush1688Order(row)}
             >
               推送1688下单
             </Button>
@@ -4136,6 +4155,56 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           />
         )}
       </div>
+
+      <Modal
+        open={!!pushAddressPicker}
+        title={pushAddressPicker ? `推送 1688 下单 · 选择收货地址（${pushAddressPicker.po.poNo || pushAddressPicker.po.id}）` : "选择收货地址"}
+        okText="确认推送"
+        cancelText="取消"
+        confirmLoading={actingKey === `1688-push-${pushAddressPicker?.po.id}`}
+        width={680}
+        onCancel={() => setPushAddressPicker(null)}
+        onOk={async () => {
+          if (!pushAddressPicker) return;
+          const { po, addressId } = pushAddressPicker;
+          setPushAddressPicker(null);
+          await push1688Order(po, { deliveryAddressId: addressId });
+        }}
+        destroyOnClose
+      >
+        {pushAddressPicker ? (
+          <Space direction="vertical" size={10} style={{ width: "100%" }}>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              系统会用下面这个地址推到 1688。要换其他地址点一下下面的卡片即可。
+              没有合适的？去「店铺 / 1688 设置」里维护。
+            </Text>
+            {(data.alibaba1688Addresses || []).map((addr) => {
+              const selected = addr.id === pushAddressPicker.addressId;
+              return (
+                <div
+                  key={addr.id}
+                  onClick={() => setPushAddressPicker({ po: pushAddressPicker.po, addressId: addr.id })}
+                  style={{
+                    padding: "10px 12px",
+                    border: `1px solid ${selected ? "#1677ff" : "#e5e9f0"}`,
+                    borderRadius: 6,
+                    cursor: "pointer",
+                    background: selected ? "#e6f4ff" : "#fff",
+                  }}
+                >
+                  <Space size={6}>
+                    <Text strong>{addr.fullName || "未命名"}</Text>
+                    {addr.mobile ? <Text type="secondary" style={{ fontSize: 12 }}>{addr.mobile}</Text> : null}
+                    {addr.isDefault ? <Tag color="blue">默认</Tag> : null}
+                    {addr.label ? <Tag>{addr.label}</Tag> : null}
+                  </Space>
+                  <div style={{ marginTop: 4, fontSize: 12, color: "#6b7280" }}>{addr.address || "-"}</div>
+                </div>
+              );
+            })}
+          </Space>
+        ) : null}
+      </Modal>
 
       <Modal
         open={storeManagerOpen}
