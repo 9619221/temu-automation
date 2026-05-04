@@ -1858,8 +1858,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   }, [applyWorkbench, canPurchase, syncWorkbenchOptions]);
 
   useEffect(() => {
-    void loadData();
-  }, [loadData]);
+    // 异步加载：如果 localStorage 已经有缓存就走 silent（不显加载条 / 不闪屏），
+    // 用户立刻看到旧数据可点击；后台拉新数据回来再 patch 覆盖。
+    // 缓存为空（首次打开）才走非 silent 显示加载状态。
+    const hasCache = hasWorkbenchSnapshot(initialWorkbench);
+    void loadData({ silent: hasCache });
+  }, [loadData, initialWorkbench]);
 
   useEffect(() => {
     candidateScrollLockRef.current = {};

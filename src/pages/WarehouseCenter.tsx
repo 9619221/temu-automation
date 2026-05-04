@@ -101,21 +101,22 @@ export default function WarehouseCenter() {
     writePageCache(WAREHOUSE_WORKBENCH_CACHE_KEY, nextWorkbench);
   }, []);
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (options: { silent?: boolean } = {}) => {
     if (!erp) return;
-    setLoading(true);
+    if (!options.silent) setLoading(true);
     try {
       applyWorkbench(await erp.warehouse.workbench({ limit: 200 }));
     } catch (error: any) {
-      message.error(error?.message || "仓库中心读取失败");
+      if (!options.silent) message.error(error?.message || "仓库中心读取失败");
     } finally {
-      setLoading(false);
+      if (!options.silent) setLoading(false);
     }
   }, [applyWorkbench]);
 
   useEffect(() => {
-    void loadData();
-  }, [loadData]);
+    // 异步加载：缓存有就 silent，无 spinner / 不闪屏；缓存空才显示加载状态。
+    void loadData({ silent: hasPageCache(cachedData) });
+  }, [loadData, cachedData]);
 
   const runAction = async (key: string, payload: Record<string, any>, successText: string) => {
     if (!erp) return;
@@ -368,7 +369,7 @@ export default function WarehouseCenter() {
         subtitle="仓管确认到仓、核数并创建库存批次；批次默认等待运营抽检。"
         meta={[`更新 ${formatDateTime(data.generatedAt)}`]}
         actions={[
-          <Button key="refresh" icon={<ReloadOutlined />} loading={loading} onClick={loadData}>
+          <Button key="refresh" icon={<ReloadOutlined />} loading={loading} onClick={() => loadData()}>
             刷新
           </Button>,
         ]}
