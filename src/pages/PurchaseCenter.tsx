@@ -4006,34 +4006,6 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
             </Button>
           ))}
         </Space>
-        {(() => {
-          const orders = purchaseOrders;
-          const c = (pred: (r: PurchaseOrderRow) => boolean) => orders.filter(pred).length;
-          const items = [
-            { label: "草稿", count: c((r) => r.status === "draft") },
-            { label: "待改价", count: c((r) => r.status === "pushed_pending_price"), warn: true },
-            { label: "待付款", count: c((r) => r.status === "approved_to_pay"), warn: true },
-            { label: "已付款", count: c((r) => r.status === "paid"), success: true },
-            { label: "待入库", count: c((r) => r.status === "arrived"), warn: true },
-            { label: "已入库", count: c((r) => ["inbounded", "closed"].includes(String(r.status))), success: true },
-            { label: "异常", count: c((r) => r.status === "exception"), danger: true },
-            { label: "死单", count: c((r) => String(r.externalOrderStatus || "") === "orphan_cleared"), danger: true },
-            { label: "已取消", count: c((r) => r.status === "cancelled") },
-          ];
-          if (!orders.length) return null;
-          return (
-            <div className="erp-status-row">
-              <span className="group"><span className="label">采购单</span><span className="count">{orders.length}</span></span>
-              <span className="divider" />
-              {items.map((it, idx) => (
-                <span key={idx} className="group">
-                  <span className="label">{it.label}</span>
-                  <span className={`count ${it.danger ? "danger" : it.warn ? "warn" : it.success ? "success" : ""}`}>{it.count}</span>
-                </span>
-              ))}
-            </div>
-          );
-        })()}
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, maxWidth: 760 }}>
           <Input
             allowClear
