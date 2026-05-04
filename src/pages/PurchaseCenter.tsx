@@ -4018,16 +4018,6 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 同步询盘结果
               </Button>
             ) : null}
-            {canPurchase || canFinance ? (
-              <Button
-                icon={<LinkOutlined />}
-                disabled={!selectedPurchaseOrders.some((row) => row.externalOrderId)}
-                loading={actingKey === "1688-batch-pay"}
-                onClick={openBatch1688PaymentUrl}
-              >
-                批量支付
-              </Button>
-            ) : null}
             <Button icon={<DownloadOutlined />} onClick={exportActiveQueue}>
               导出
             </Button>
@@ -4168,13 +4158,6 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 批量提交付款
               </Button>
             ) : null}
-            <Button
-              size="small"
-              icon={<DownloadOutlined />}
-              onClick={exportActiveQueue}
-            >
-              导出选中
-            </Button>
             <Button
               size="small"
               onClick={() => setSelectedPoIds([])}
