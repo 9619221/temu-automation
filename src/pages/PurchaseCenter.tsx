@@ -2338,8 +2338,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     const imageFileNames = requestUploadImages.map((item) => item.fileName);
     let skippedImages = false;
     setActingKey("create-pr");
+    let lastResult: any = null;
     try {
-      for (const sku of uniqueSelectedSkus) {
+      for (let i = 0; i < uniqueSelectedSkus.length; i++) {
+        const sku = uniqueSelectedSkus[i];
+        const isLast = i === uniqueSelectedSkus.length - 1;
         const payload = {
           action: "create_pr",
           accountId: sku.accountId,
@@ -2348,6 +2351,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           targetUnitCost: values.targetUnitCost,
           reason: "采购单",
           evidenceText: values.evidenceText,
+          // 只在最后一笔请求里要 workbench，省掉中间多余的全量刷新
+          includeWorkbench: isLast,
           ...(skippedImages ? {} : {
             imageDataUrl: imageDataUrls[0],
             imageFileName: imageFileNames[0],
@@ -2356,11 +2361,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           }),
         };
         try {
-          await erp.purchase.action(payload);
+          lastResult = await erp.purchase.action(payload);
         } catch (error) {
           if (!skippedImages && imageDataUrls.length > 0 && isRequestBodyTooLarge(error)) {
             skippedImages = true;
-            await erp.purchase.action({
+            lastResult = await erp.purchase.action({
               action: "create_pr",
               accountId: sku.accountId,
               skuId: sku.id,
@@ -2368,21 +2373,33 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               targetUnitCost: values.targetUnitCost,
               reason: "采购单",
               evidenceText: values.evidenceText,
+              includeWorkbench: isLast,
             });
           } else {
             throw error;
           }
         }
       }
-      const workbench = await erp.purchase.workbench({ limit: 200 });
-      applyWorkbench(workbench);
-      if (Array.isArray(workbench?.skuOptions)) setSkus(workbench.skuOptions);
-      if (Array.isArray(workbench?.supplierOptions)) setSuppliers(workbench.supplierOptions);
+      // 关 Modal + 提示先行；workbench 用 create_pr 接口自带的，
+      // 没有再回退去拉一次（旧后端兼容）
       message.success(uniqueSelectedSkus.length > 1 ? `已创建 ${uniqueSelectedSkus.length} 张采购单` : "采购单已创建");
       if (skippedImages) message.warning("图片过大，采购单已创建，图片未上传");
       setRequestOpen(false);
       setRequestUploadImages([]);
       requestForm.resetFields();
+      const wb = lastResult?.workbench;
+      if (wb && typeof wb === "object") {
+        applyWorkbench(wb);
+        if (Array.isArray(wb.skuOptions)) setSkus(wb.skuOptions);
+        if (Array.isArray(wb.supplierOptions)) setSuppliers(wb.supplierOptions);
+      } else {
+        // 后端没返 workbench 时再补一次（不阻塞 modal 关闭）
+        void erp.purchase.workbench({ limit: 200 }).then((wb2: any) => {
+          applyWorkbench(wb2);
+          if (Array.isArray(wb2?.skuOptions)) setSkus(wb2.skuOptions);
+          if (Array.isArray(wb2?.supplierOptions)) setSuppliers(wb2.supplierOptions);
+        }).catch(() => {});
+      }
     } catch (error: any) {
       message.error(error?.message || "采购单创建失败");
     } finally {
