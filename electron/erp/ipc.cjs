@@ -11655,10 +11655,30 @@ function performWarehouseAction(payload = {}, actorInput = {}) {
       }
       case "confirm_count": {
         const receiptId = requireString(payload.receiptId || payload.id, "receiptId");
-        return services.inventory.confirmCount(receiptId, actor);
+        // 跟 register_arrival 一样的兜底：缺收货数量自动按 expected 填满，并直接建批次。
+        db.prepare(`
+          UPDATE erp_inbound_receipt_lines
+          SET received_qty = CASE WHEN COALESCE(received_qty, 0) > 0 THEN received_qty ELSE COALESCE(expected_qty, 0) END
+          WHERE receipt_id = ?
+        `).run(receiptId);
+        const t = services.inventory.confirmCount(receiptId, actor);
+        let batches = [];
+        try {
+          const reloaded = getInboundReceipt(db, receiptId);
+          batches = createBatchesForReceipt({ db, services, receipt: reloaded, actor });
+        } catch (e) {
+          try { console.warn("[warehouse] auto create batches failed:", e?.message || e); } catch {}
+        }
+        return { transition: t, batches };
       }
       case "create_batches": {
         const receiptId = requireString(payload.receiptId || payload.id, "receiptId");
+        // 兜底：如果还有 received_qty=0 的行，按 expected 自动填，避免"无可建批次"。
+        db.prepare(`
+          UPDATE erp_inbound_receipt_lines
+          SET received_qty = CASE WHEN COALESCE(received_qty, 0) > 0 THEN received_qty ELSE COALESCE(expected_qty, 0) END
+          WHERE receipt_id = ?
+        `).run(receiptId);
         const receipt = getInboundReceipt(db, receiptId);
         const batches = createBatchesForReceipt({
           db,
