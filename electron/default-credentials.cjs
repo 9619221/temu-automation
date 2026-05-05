@@ -24,13 +24,13 @@ function decode(encoded) {
 const ENCODED = Object.freeze({
   analyzeApiKey: "Bw5AOmMKLD1ZFBQyKy1bRSAYEAgUZSIhUDslKgASawJhUQdEBwEzVSggLVcZKiAeHSJp",
   generateApiKey: "Bw5AFB1QTUBZXVMVWlpZGQZDVw9UFQABUQUTW0QSSVcBUwE=",
-  // GPT 版生图 key：留空，由用户在 UI 填写覆盖；如需内置，替换为 encode(...) 结果
-  gptGenerateApiKey: "",
+  // GPT 版生图 key：内置共享 key（grsai gpt-image-2），用户 UI 填写可覆盖
+  gptGenerateApiKey: "Bw5AFB1QTUBZXVMVWlpZGQZDVw9UFQABUQUTW0QSSVcBUwE=",
 });
 
 const PLAINTEXT_DEFAULTS = Object.freeze({
   analyzeBaseUrl: "https://api.vectorengine.cn/v1",
-  analyzeModel: "gpt-5.4",
+  analyzeModel: "gpt-5.5",
   generateBaseUrl: "https://grsaiapi.com",
   generateModel: "gpt-image-2",
   gptGenerateBaseUrl: "https://grsaiapi.com",

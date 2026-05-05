@@ -1891,7 +1891,7 @@ const AUTO_IMAGE_DEFAULT_PORT = normalizeImageStudioPort(
   3210,
 );
 const AUTO_IMAGE_HEALTH_PATH = "/api/history";
-const IMAGE_STUDIO_SAFE_ANALYZE_MODEL = "gpt-5.4";
+const IMAGE_STUDIO_SAFE_ANALYZE_MODEL = "gpt-5.5";
 const IMAGE_STUDIO_SAFE_ANALYZE_BASE_URL = "https://api.vectorengine.cn/v1";
 const IMAGE_STUDIO_LEGACY_DENIED_ANALYZE_MODELS = new Set([
   "gemini-3.1-flash-lite-preview",
