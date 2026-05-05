@@ -3586,16 +3586,17 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
             {orderId ? (
               <a
                 className="erp-link"
-                title="点击复制订单号并打开 1688 买家工作台 (订单详情直链 1688 经常 404，进工作台后到「我的订单」粘贴搜索)"
+                title="点击直接打开 1688 订单详情页（同时复制订单号，万一直链失效可在我的订单里粘贴搜索）"
                 onClick={(e) => {
                   e.stopPropagation();
+                  // 复制兜底，万一直链 404 用户能直接在 1688「我的订单」粘贴搜索
                   navigator.clipboard?.writeText(String(orderId)).catch(() => {});
                   const externalOpener = (window as any)?.electronAPI?.app?.openExternal;
-                  // work.1688.com 是验证过的稳定入口（302→登录→买家工作台）
-                  const url = "https://work.1688.com/";
+                  // 1688 买家订单详情直链（验证过：登录后能直接进订单详情页）
+                  const url = `https://trade.1688.com/order/order_detail.htm?orderId=${encodeURIComponent(String(orderId))}`;
                   if (typeof externalOpener === "function") externalOpener(url).catch(() => window.open(url, "_blank"));
                   else window.open(url, "_blank", "noopener,noreferrer");
-                  message.success(`订单号 ${orderId} 已复制，请在 1688「我的订单」粘贴搜索`);
+                  message.success(`已打开 1688 订单详情 (${orderId})`);
                 }}
               >
                 {orderId}
