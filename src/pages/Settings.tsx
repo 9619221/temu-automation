@@ -1,23 +1,44 @@
 import { useEffect, useState } from "react";
 import { Form, InputNumber, Switch, Button, Tag, Progress, Space, Typography, message } from "antd";
-import { CloudDownloadOutlined, CheckCircleOutlined, SyncOutlined, ReloadOutlined } from "@ant-design/icons";
+import { CloudDownloadOutlined, CheckCircleOutlined, SyncOutlined, ReloadOutlined, LinkOutlined } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
+import { useErpAuth } from "../contexts/ErpAuthContext";
 
 const { Text } = Typography;
 const appAPI = window.electronAPI?.app;
+const erp = window.electronAPI?.erp;
 const store = window.electronAPI?.store;
 
 export default function Settings() {
   const [form] = Form.useForm();
   const [version, setVersion] = useState("");
   const [updateStatus, setUpdateStatus] = useState<any>({ status: "idle", message: "" });
+  const [clientStatus, setClientStatus] = useState<{ isClientMode?: boolean; serverUrl?: string } | null>(null);
+  const auth = useErpAuth();
+  const isAdmin = auth.currentUser?.role === "admin";
 
   useEffect(() => {
     appAPI?.getVersion().then(setVersion).catch(() => {});
     appAPI?.getUpdateStatus?.().then(setUpdateStatus).catch(() => {});
+    erp?.client?.getStatus?.().then((status: any) => setClientStatus(status || null)).catch(() => {});
     const unsub = window.electronAPI?.onUpdateStatus?.((data: any) => setUpdateStatus(data));
     return () => { unsub?.(); };
   }, []);
+
+  const open1688AuthPage = async () => {
+    const serverUrl = String(clientStatus?.serverUrl || "").replace(/\/+$/, "");
+    if (!serverUrl) {
+      message.warning("当前不是客户端模式，或主控端地址未配置，请先在登录页连接到主控端。");
+      return;
+    }
+    const target = `${serverUrl}/1688`;
+    try {
+      await appAPI?.openExternal?.(target);
+      message.info("已在浏览器打开 1688 授权管理页面，请用 admin 账号登录后操作。");
+    } catch (e: any) {
+      message.error(e?.message || "打开 1688 授权页面失败");
+    }
+  };
 
   useEffect(() => {
     store?.get("temu_app_settings").then((data: any) => {
@@ -127,6 +148,28 @@ export default function Settings() {
           )}
         </Space>
       </div>
+
+      {isAdmin && clientStatus?.isClientMode && clientStatus?.serverUrl ? (
+        <div className="app-panel" style={{ marginBottom: 16 }}>
+          <div className="app-panel__title">
+            <div className="app-panel__title-main">1688 授权管理</div>
+          </div>
+          <Space direction="vertical" style={{ width: "100%" }} size={10}>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              切换 1688 买家账号、刷新 access_token、重新走 OAuth 授权 — 全部在主控端 web 页完成。
+              点下面按钮会在浏览器打开主控端的 1688 授权管理页面（需要用 admin 账号登录主控端）。
+            </Text>
+            <Space>
+              <Button icon={<LinkOutlined />} onClick={open1688AuthPage}>
+                打开 1688 授权管理页面
+              </Button>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                目标：<code>{clientStatus.serverUrl}/1688</code>
+              </Text>
+            </Space>
+          </Space>
+        </div>
+      ) : null}
 
       <Form
         form={form}
