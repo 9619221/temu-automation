@@ -20,7 +20,7 @@ import { createAiRuntime } from "./ai-runtime.mjs";
 import { parseLocalUrl, readJsonBody, sendJson, sendNoContent } from "./http-json.mjs";
 import { scanPriceReview } from "./price-review-scanner.mjs";
 import { listPriceReview, setPriceReviewManualCost, clearPriceReviewManualCost } from "./yunqi-db.mjs";
-import { open1688DetailPage, open1688LoginWindow, close1688Browser, ensure1688Context, openOrReuse1688Page } from "./aliexpress-1688-cost.mjs";
+import { open1688DetailPage, open1688LoginWindow, close1688Browser, ensure1688Context, openOrReuse1688Page, search1688OffersByImage } from "./aliexpress-1688-cost.mjs";
 import { runLocal1688Inquiry } from "./local-1688-inquiry.mjs";
 import { optimizeTitle as _optimizeTitle } from "./title-optimizer.mjs";
 import { scrapeCompetitorReviews as _scrapeCompetitorReviews, openTemuLoginPage as _openTemuLoginPage, openTemuSearchPage as _openTemuSearchPage, extractReviewsFromFeed as _extractReviewsFromFeed, dumpFeedForGoods as _dumpFeedForGoods, extractProductFromFeed as _extractProductFromFeed, extractSearchResultsFromFeed as _extractSearchResultsFromFeed } from "./competitor-reviews.mjs";
@@ -7822,6 +7822,25 @@ async function handleRequest(body) {
     }
     case "open_1688_detail": {
       return await open1688DetailPage(params?.url, params || {});
+    }
+    case "search_1688_image": {
+      // 用 Playwright 真 Chrome（带用户登录态）走 1688 air 图搜，绕过 mtop 反爬。
+      // 这是「客户端家用 IP 被 1688 标黑（rgv587_flag/deny_h5）」场景的根因解 ——
+      // 真 Chrome + 真 cookies + 真 fingerprint 就跟正常用户一样，反爬基本不命中；
+      // 即使弹滑块也是在用户已经打开的浏览器窗口里，能手动过。
+      const imgUrl = String(params?.imgUrl || "").trim();
+      if (!imgUrl) return { ok: false, reason: "imgUrl required" };
+      const limit = Math.max(1, Math.min(50, Number(params?.limit) || 20));
+      const timeoutMs = Math.max(5000, Math.min(120000, Number(params?.timeoutMs) || 45000));
+      try {
+        return await search1688OffersByImage(imgUrl, {
+          profilePath: params?.profilePath,
+          limit,
+          timeoutMs,
+        });
+      } catch (error) {
+        return { ok: false, offers: [], error: String(error?.message || error) };
+      }
     }
     case "extract_1688_skus": {
       // 用持久化登录态浏览器打开 1688 商品详情页，从 HTML 抽真实 SKU 三元组（specId/specAttrs/skuId）。

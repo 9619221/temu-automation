@@ -12752,7 +12752,8 @@ async function buildClientImageSearchMockResults(payload = {}) {
   }
   if (!imageBuffer?.length) return null;
 
-  let localResult;
+  let localResult = null;
+  let mtopError = null;
   try {
     localResult = await Promise.race([
       run1688WebImageSearch({
@@ -12764,22 +12765,68 @@ async function buildClientImageSearchMockResults(payload = {}) {
       timeoutSentinel("run1688WebImageSearch"),
     ]);
   } catch (e) {
-    console.error(`[buildClientImageSearchMockResults] 1688 web search failed in ${Date.now() - t0}ms: ${e?.message || e}`);
-    return null;
+    mtopError = e;
+    console.error(`[buildClientImageSearchMockResults] 1688 mtop failed in ${Date.now() - t0}ms: ${e?.message || e}`);
   }
 
-  return {
-    ...payload,
-    imageDataUrl: undefined,
-    imageData: undefined,
-    mockResults: (localResult.products || []).map(toRemoteImageSearchMockResult),
-    localImageSearch: {
-      source: "1688_web_image_client",
-      imageId: localResult.imageId,
-      totalFound: localResult.products?.length || 0,
-      elapsedMs: Date.now() - t0,
-    },
-  };
+  // mtop 拿到候选直接用
+  if (localResult && Array.isArray(localResult.products) && localResult.products.length > 0) {
+    return {
+      ...payload,
+      imageDataUrl: undefined,
+      imageData: undefined,
+      mockResults: localResult.products.map(toRemoteImageSearchMockResult),
+      localImageSearch: {
+        source: "1688_web_image_client",
+        imageId: localResult.imageId,
+        totalFound: localResult.products.length,
+        elapsedMs: Date.now() - t0,
+      },
+    };
+  }
+
+  // mtop 失败 / 命中反爬 / 0 候选 → 尝试 Playwright 真 Chrome 走 1688 air 图搜
+  // 这是「家用 IP 被 1688 反爬黑名单标记」场景下唯一靠谱的根因解：
+  // 真 Chrome + 用户登录态 cookies + 真实 fingerprint，跟正常用户访问一样。
+  // 客户端 (electron 主进程) 才有 workerInvoker；主控端 (Linux 服务器，没图形界面跑不了 Chrome)
+  // 没有 workerInvoker，会跳过这步直接 fallback alphashop。
+  if (erpState.workerInvoker && imgUrl) {
+    const browserBudget = Math.min(remainingBudget() + 60000, 60000);
+    if (browserBudget >= 8000) {
+      console.error(`[buildClientImageSearchMockResults] mtop failed, falling back to Playwright air image search (budget=${browserBudget}ms)`);
+      try {
+        const browserResult = await erpState.workerInvoker(
+          "search_1688_image",
+          { imgUrl, limit: pageSize, timeoutMs: browserBudget },
+          { timeoutMs: browserBudget + 5000 },
+        );
+        if (browserResult && browserResult.ok && Array.isArray(browserResult.offers) && browserResult.offers.length) {
+          return {
+            ...payload,
+            imageDataUrl: undefined,
+            imageData: undefined,
+            mockResults: browserResult.offers.map(toRemoteImageSearchMockResult),
+            localImageSearch: {
+              source: browserResult.source || "1688_air_image_browser",
+              totalFound: browserResult.offers.length,
+              elapsedMs: Date.now() - t0,
+            },
+          };
+        }
+        if (browserResult?.captcha || browserResult?.needsLogin) {
+          // 故意把这条错误透传到上层，前端 message.error 时用户能看到要去解滑块/登录
+          throw new Error(browserResult.error || "1688 真 Chrome 图搜需要人工干预");
+        }
+      } catch (e) {
+        console.error(`[buildClientImageSearchMockResults] Playwright fallback failed: ${e?.message || e}`);
+        // 原始 mtop 错误更重要的话往上抛；否则继续 fallback 主控端
+        if (mtopError && /captcha|punish|需要人工|需要|登录/.test(String(e?.message || ""))) throw e;
+      }
+    }
+  }
+
+  // 最后兜底：让主控端跑 alphashop（外站图永远 0 个，但至少返回快）
+  return null;
 }
 
 function getClientRuntimeActor() {
