@@ -11340,16 +11340,19 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
   }
 
   if (action === "source_1688_image") {
+    const __td0 = Date.now();
     const result = await source1688ImageAction({ db, services, payload, actor });
-    broadcastPurchaseUpdate(action, sanitizeAlphaShopPayload(payload), actor, result);
-    // 默认不返 workbench——source_1688_image 后含 50 个 PR + N 个候选的 workbench 响应
-    // 体可以达到几 MB，反代 caddy 转发时容易 broken pipe（实测）。客户端 runAction 在
-    // result.workbench 缺失时会自动单独调 /api/purchase/workbench 拉数据，传输更稳。
-    return {
-      action,
-      result,
-      workbench: payload.refreshWorkbench === true ? getPurchaseWorkbenchForAction(payload, actor) : null,
-    };
+    const resultLen = JSON.stringify(result || {}).length;
+    console.error(`[source_1688_image dispatch t=${Date.now() - __td0}ms] action ok, resultBytes=${resultLen}`);
+    try {
+      broadcastPurchaseUpdate(action, sanitizeAlphaShopPayload(payload), actor, result);
+    } catch (e) {
+      console.error(`[source_1688_image dispatch t=${Date.now() - __td0}ms] broadcast failed: ${e?.message}`);
+    }
+    const workbench = payload.refreshWorkbench === true ? getPurchaseWorkbenchForAction(payload, actor) : null;
+    const totalLen = JSON.stringify({ action, result, workbench }).length;
+    console.error(`[source_1688_image dispatch t=${Date.now() - __td0}ms] returning, totalBytes=${totalLen}`);
+    return { action, result, workbench };
   }
 
   if (action === "preview_1688_url_specs") {
