@@ -1937,6 +1937,36 @@ function trimJsonForStorage(value, maxLength = 60000) {
   return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
 }
 
+// 网络出参用：从 sourcePayload 里剥掉只对内部审计/兜底有用、UI 完全不读的「重」字段。
+// 1688 web mtop 的 raw（aliTalk/marketOfferTag/trackInfoModel 等）单条就 14-21KB，
+// 一个 PR 累积几百条候选时 workbench 会膨胀到 8MB+，结构化克隆 IPC 走得很慢。
+// 客户端真正用的字段（originTitle / aiTitle / originImageUrl / detailUrl / soldOut / 营销
+// 监控配置等）都在顶层，剥掉 raw / skuInfos / rawAlphaShopResponse 不影响显示。
+const SLIM_SOURCE_PAYLOAD_DROP_KEYS = [
+  "raw",
+  "skuInfos",
+  "rawResponse",
+  "rawAlphaShopResponse",
+  "rawAlphaShopProductDetail",
+  "alphaShopRawResponse",
+  "apiResponse",
+  "mockResponse",
+  "rawOfferDetail",
+  "rawOfferResponse",
+  "rawSearchResponse",
+];
+function slimSourcePayloadForUi(parsed) {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return parsed;
+  let needsCopy = false;
+  for (const key of SLIM_SOURCE_PAYLOAD_DROP_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(parsed, key)) { needsCopy = true; break; }
+  }
+  if (!needsCopy) return parsed;
+  const next = { ...parsed };
+  for (const key of SLIM_SOURCE_PAYLOAD_DROP_KEYS) delete next[key];
+  return next;
+}
+
 function redact1688Request(request = {}) {
   const params = { ...(request.params || {}) };
   if (params.access_token) params.access_token = "***";
@@ -3203,7 +3233,7 @@ function toSku1688Source(row) {
   next.ourQty = Number(row.our_qty || 1);
   next.platformQty = Number(row.platform_qty || 1);
   next.ratioText = `${next.ourQty}:${next.platformQty}`;
-  next.sourcePayload = parseJsonObject(row.source_payload_json);
+  next.sourcePayload = slimSourcePayloadForUi(parseJsonObject(row.source_payload_json));
   delete next.sourcePayloadJson;
   return next;
 }
@@ -3867,7 +3897,7 @@ function getPurchaseWorkbench(params = {}) {
       const candidates = candidateStmt.all(pr.id).map((row) => {
         const next = toCamelRow(row);
         next.supplierName = next.supplierName || next.linkedSupplierName || "";
-        next.sourcePayload = parseJsonObject(row.source_payload_json);
+        next.sourcePayload = slimSourcePayloadForUi(parseJsonObject(row.source_payload_json));
         delete next.sourcePayloadJson;
         next.externalSkuOptions = parseJsonArray(row.external_sku_options_json);
         next.externalPriceRanges = parseJsonArray(row.external_price_ranges_json);
@@ -5017,7 +5047,16 @@ function insert1688SourcingCandidate(db, services, pr, actor, item = {}, options
     before: null,
     after: afterCandidate,
   });
-  return toCamelRow(afterCandidate);
+  // Slim: 别把 1688 web mtop 的 raw 字段塞进 action 响应，否则 10 个候选就 200KB+，
+  // 客户端渲染时还会撞 IPC 结构化克隆瓶颈。
+  const camelCandidate = toCamelRow(afterCandidate);
+  if (camelCandidate?.sourcePayloadJson) {
+    try {
+      const parsed = slimSourcePayloadForUi(JSON.parse(camelCandidate.sourcePayloadJson));
+      camelCandidate.sourcePayloadJson = JSON.stringify(parsed);
+    } catch {}
+  }
+  return camelCandidate;
 }
 
 async function source1688KeywordAction({ db, services, payload, actor }) {
@@ -11349,7 +11388,11 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     } catch (e) {
       console.error(`[source_1688_image dispatch t=${Date.now() - __td0}ms] broadcast failed: ${e?.message}`);
     }
-    const workbench = payload.refreshWorkbench === true ? getPurchaseWorkbenchForAction(payload, actor) : null;
+    // 跟其他 action（source_1688_keyword 等）保持一致：默认带 workbench；客户端可以
+    // 用 includeWorkbench:false / skipWorkbench:true 关掉。这样客户端拿到 action 响应
+    // 时就有最新的 workbench，不需要再发第二次 /api/purchase/workbench（之前那次会把
+    // 9MB+ 的全量 workbench 串两遍 IPC + 走 https，触发 IPC 120s 超时）。
+    const workbench = getPurchaseWorkbenchForAction(payload, actor);
     const totalLen = JSON.stringify({ action, result, workbench }).length;
     console.error(`[source_1688_image dispatch t=${Date.now() - __td0}ms] returning, totalBytes=${totalLen}`);
     return { action, result, workbench };
