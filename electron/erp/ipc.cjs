@@ -5466,6 +5466,9 @@ async function run1688WebImageSearch({ imageBuffer, beginPage, pageSize = 10, ti
 }
 
 async function source1688ImageAction({ db, services, payload, actor }) {
+  const __t0 = Date.now();
+  const __log = (msg) => console.error(`[source_1688_image t=${Date.now() - __t0}ms] ${msg}`);
+  __log("start");
   assertActorRole(actor, ["buyer", "manager", "admin"], "1688 image sourcing");
   const prId = requireString(payload.prId || payload.id, "prId");
   let pr = getPurchaseRequest(db, prId);
@@ -5473,9 +5476,11 @@ async function source1688ImageAction({ db, services, payload, actor }) {
   const importLimit = Math.max(1, Math.min(Math.floor(Number(optionalNumber(payload.importLimit) ?? 10)), 20));
   const pageSize = Math.max(1, Math.min(importLimit, 50));
   const mockResults = Array.isArray(payload.mockResults) ? payload.mockResults : null;
+  __log(`prId=${prId} mockResults=${mockResults?.length || 0} payload.imgUrl=${optionalString(payload.imgUrl || payload.imageUrl)?.slice(0, 80)}`);
   const { imgUrl, imageBuffer } = mockResults
     ? { imgUrl: optionalString(payload.imgUrl || payload.imageUrl), imageBuffer: null }
     : await resolveImageSearchAsset(db, payload, pr);
+  __log(`asset resolved: imgUrl=${imgUrl?.slice(0, 80)} bufferLen=${imageBuffer?.length || 0}`);
 
   let normalized = [];
   let rawResponse = null;
@@ -5489,6 +5494,7 @@ async function source1688ImageAction({ db, services, payload, actor }) {
     sourceMode = optionalString(payload.localImageSearch?.source) || "mock";
   } else {
     if (!isAlibabaImageUrl(imgUrl)) {
+      __log("trying official_1688_image_search");
       try {
         const official = await runOfficial1688ImageSearch({
           db,
@@ -5502,9 +5508,13 @@ async function source1688ImageAction({ db, services, payload, actor }) {
         normalized = Array.isArray(official.products) ? official.products : [];
         rawResponse = official.rawResponse;
         sourceMode = "official_1688_image";
+        __log(`official_1688_image_search done normalized=${normalized.length}`);
       } catch (error) {
         conversionError = error;
+        __log(`official_1688_image_search failed: ${error?.message}`);
       }
+    } else {
+      __log("skip official (alibaba url)");
     }
 
     try {
@@ -5528,6 +5538,7 @@ async function source1688ImageAction({ db, services, payload, actor }) {
 
     try {
       if (normalized.length === 0) {
+        __log("trying alphashop_image_search");
         const imageSearch = await runAlphaShopImageSearch({
           db,
           payload,
@@ -5539,12 +5550,15 @@ async function source1688ImageAction({ db, services, payload, actor }) {
         normalized = Array.isArray(imageSearch.products) ? imageSearch.products : [];
         rawResponse = imageSearch.rawResponse;
         sourceMode = "alphashop_image";
+        __log(`alphashop_image_search done normalized=${normalized.length}`);
       }
     } catch (error) {
       searchError = error;
+      __log(`alphashop_image_search failed: ${error?.message}`);
       if (!rawResponse) throw error;
     }
   }
+  __log(`search phase done normalized=${normalized.length} mode=${sourceMode}`);
   const emptyReason = normalized.length === 0 ? buildImageSearchEmptyReason(conversionError || searchError) : "";
   const candidatesToImport = normalized.slice(0, importLimit);
   const insertCandidates = db.transaction(() => {
