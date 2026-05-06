@@ -92,6 +92,21 @@ function normalizeWebOffer(offer = {}) {
     information.minOrderQuantity,
   ) ?? 1));
 
+  // 客户端把 normalize 结果作为 mockResults 传给主控端，每条会被存进 source_payload_json。
+  // 1688 web mtop 单条 offer 的完整 raw 大约 14-21KB（aliTalk / brand / commonPositionLabels /
+  // marketOfferTag / trackInfoModel / tradeService …），10 条就 200KB+。
+  // 慢上行宽带的客户（ADSL / 4G）上传 200KB 要 15-20 秒，再加 TLS 反复就能撞 IPC 120s 超时。
+  // UI / 主控端只需要顶层抽出来的几个字段（offerId/title/imageUrl/price/sales），不需要原始 raw。
+  const monthlySales = firstNumber(
+    tradeQuantity.tradeQuantity,
+    tradeQuantity.saleAmount,
+    tradeQuantity.monthSold,
+    offer.soldOut,
+    offer.sales,
+    offer.salesVolume,
+    offer.saleQuantity,
+    offer.soldCount,
+  );
   return {
     externalOfferId: offerId ? String(offerId) : null,
     externalSkuId: priceInfo.mainPriceSkuId ? String(priceInfo.mainPriceSkuId) : null,
@@ -124,7 +139,9 @@ function normalizeWebOffer(offer = {}) {
     leadDays: firstNumber(offer.leadDays, offer.deliveryDays, offer.shipInDays),
     logisticsFee: firstNumber(offer.logisticsFee, offer.freight, offer.shippingFee) ?? 0,
     remark: null,
-    raw: offer,
+    soldOut: monthlySales,
+    sales: monthlySales,
+    // 故意不带 raw —— UI 不读，主控端审计需要时，可以通过 detailUrl 反查。
   };
 }
 
