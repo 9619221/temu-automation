@@ -5508,8 +5508,10 @@ async function source1688ImageAction({ db, services, payload, actor }) {
     }
 
     try {
-      if (normalized.length === 0 && imageBuffer?.length) {
-        // 1688 mtop 接口对裸 fetch 易反爬/慢；25s 短超时，失败由后续 alphashop 兜底
+      // 1688 mtop 网页接口对裸 fetch 易反爬，且即使设了 timeoutMs，AbortController 在
+      // socket connect 阶段经常不生效，整体能吃到 IPC 120s 超时。默认跳过这一步直接走
+      // alphashop（1-2 秒就能返回）。想恢复网页图搜行为可以设 ERP_SERVER_WEB_IMAGE_SEARCH=1。
+      if (process.env.ERP_SERVER_WEB_IMAGE_SEARCH === "1" && normalized.length === 0 && imageBuffer?.length) {
         const webImageSearch = await run1688WebImageSearch({
           imageBuffer,
           beginPage,
@@ -12644,6 +12646,10 @@ function toRemoteImageSearchMockResult(item = {}) {
 
 async function buildClientImageSearchMockResults(payload = {}) {
   if (payload.action !== "source_1688_image" || Array.isArray(payload.mockResults)) return null;
+  // 客户端预搜默认关闭：fetchImageBuffer 30s + 1688 mtop 25s 累加可能吃完
+  // IPC 120s 超时窗口；主控端 alphashop 1-2 秒就能返回，不预搜更快。
+  // 想恢复客户端预搜行为可以设环境变量 ERP_CLIENT_IMAGE_PRESEARCH=1。
+  if (process.env.ERP_CLIENT_IMAGE_PRESEARCH !== "1") return null;
   const beginPage = Math.max(1, Math.min(Math.floor(Number(optionalNumber(payload.beginPage) ?? 1)), 10));
   const importLimit = Math.max(1, Math.min(Math.floor(Number(optionalNumber(payload.importLimit) ?? 10)), 20));
   const pageSize = Math.max(1, Math.min(importLimit, 50));
@@ -12651,8 +12657,6 @@ async function buildClientImageSearchMockResults(payload = {}) {
   const imgUrl = optionalString(payload.imgUrl || payload.imageUrl);
   const imageBuffer = parsedUpload?.buffer || (imgUrl ? await fetchImageBuffer(imgUrl) : null);
   if (!imageBuffer?.length) return null;
-  // client 端预搜：1688 mtop 接口对裸 fetch 易反爬/慢，控制在 25s 内；
-  // 失败/超时不阻塞——main flow 会捕获异常并继续走主控端的 alphashop 兜底。
   const localResult = await run1688WebImageSearch({
     imageBuffer,
     beginPage,
