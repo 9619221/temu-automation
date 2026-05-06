@@ -3627,7 +3627,13 @@ function migrateScopedStoreFilesForAccountIdChange() {
 
 app.whenReady().then(async () => {
   try {
-    const erpInit = initializeErp({ userDataDir: app.getPath("userData") });
+    const erpInit = initializeErp({
+      userDataDir: app.getPath("userData"),
+      // 让 ERP IPC 层（client mode 下）可以通过 worker 调起 Playwright 浏览器抓 1688 真 specId。
+      workerInvoker: async (action, params, options = {}) => {
+        return await httpPost(workerPort, { action, params, timeoutMs: options?.timeoutMs }, options);
+      },
+    });
     const applied = (erpInit.migrations || []).filter((item) => item.status === "success").length;
     const skipped = (erpInit.migrations || []).filter((item) => item.status === "skipped").length;
     console.log(`[ERP] SQLite initialized: ${erpInit.dbPath} (applied=${applied}, skipped=${skipped})`);

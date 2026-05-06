@@ -56,6 +56,8 @@ const erpState = {
   auto1688OrderSyncRunning: false,
   auto1688AddressSyncByCompany: new Map(),
   schemaRepairDone: false,
+  // 由 main.cjs 注入的 worker 调用器：(action, params, options) => Promise<result>
+  workerInvoker: null,
 };
 
 const PURCHASE_UPDATE_CHANNEL = "erp:purchase:update";
@@ -624,6 +626,9 @@ function initializeHostErp(options = {}) {
 
 function initializeErp(options = {}) {
   erpState.userDataDir = options.userDataDir || erpState.userDataDir || null;
+  if (typeof options.workerInvoker === "function") {
+    erpState.workerInvoker = options.workerInvoker;
+  }
   configureClientRuntime({ userDataDir: erpState.userDataDir });
 
   const runtime = getRuntimeStatus();
@@ -12555,7 +12560,104 @@ function isUnsupportedRemotePurchaseAction(error) {
   return /Unsupported purchase action|unsupported.*action|不支持.*操作/i.test(message);
 }
 
+// 通过本地 Worker（带登录态浏览器）拉取 1688 商品页里的真实 SKU 三元组（specId/skuId/specAttrs）。
+// 这是绕过 1688 反爬 + 遨虾不返 cargoSpecId 的唯一可靠路径。worker.mjs 暴露 action="extract_1688_skus"。
+async function tryExtract1688SkusViaWorker(offerId) {
+  if (!erpState.workerInvoker || !offerId) return null;
+  try {
+    const workerResult = await erpState.workerInvoker(
+      "extract_1688_skus",
+      { offerId: String(offerId) },
+      { timeoutMs: 60000 },
+    );
+    if (!workerResult || !Array.isArray(workerResult.skus) || !workerResult.skus.length) {
+      return null;
+    }
+    return workerResult;
+  } catch (error) {
+    console.error("[preview_1688_url_specs] worker extract_1688_skus failed:", String(error?.message || error));
+    return null;
+  }
+}
+
+// 把 worker 抽到的真实 SKU 列表组装成前端「解析规格」对话框期望的 detail 结构。
+function build1688DetailFromWorkerSkus(workerResult, offerId, payload = {}) {
+  const skuOptions = workerResult.skus.map((sku) => {
+    const specText = optionalString(sku.specAttrs);
+    return {
+      externalSkuId: optionalString(sku.skuId),
+      externalSpecId: optionalString(sku.specId),
+      specText: specText || optionalString(sku.specId),
+      attributes: specText
+        ? specText.split(/[;；]/).map((part) => {
+          const [name, ...rest] = String(part || "").split(":");
+          return {
+            name: optionalString(name) || "",
+            value: optionalString(rest.join(":")) || optionalString(part) || "",
+          };
+        }).filter((item) => item.name || item.value)
+        : [],
+      price: null,
+      stock: null,
+      raw: sku,
+    };
+  });
+  const productUrl = optionalString(workerResult.url || payload.productUrl) || `https://detail.1688.com/offer/${offerId}.html`;
+  return {
+    externalOfferId: offerId,
+    supplierName: optionalString(workerResult.supplierName) || optionalString(payload.supplierName) || "1688 Supplier",
+    productTitle: optionalString(workerResult.productTitle) || optionalString(payload.productTitle),
+    productUrl,
+    imageUrl: optionalString(workerResult.imageUrl) || optionalString(payload.imageUrl),
+    unitPrice: optionalNumber(payload.unitPrice),
+    moq: optionalNumber(payload.moq) ?? 1,
+    skuOptions,
+    usedFallbackDetail: false,
+    usedAlphaShopProductDetail: false,
+    usedWorkerWebDetail: true,
+  };
+}
+
 async function performClientPreview1688UrlSpecs(payload = {}) {
+  // 第一优先：本地 Worker（带 1688 登录态浏览器）抓真 specId。
+  // 这是唯一能拿到 1688 fastCreateOrder 接受的 cargoSpecId 的路径——
+  // 主控端裸 fetch 1688 详情页会被反爬挡住，遨虾接口只返 skuId。
+  {
+    const productUrlInput = optionalString(payload.productUrl || payload.product_url || payload.url);
+    const offerIdInput = optionalString(
+      payload.externalOfferId
+        || payload.offerId
+        || payload.productId
+        || payload.productID
+        || extract1688OfferIdFromUrl(productUrlInput),
+    );
+    if (offerIdInput) {
+      const workerResult = await tryExtract1688SkusViaWorker(offerIdInput);
+      if (workerResult) {
+        const detail = build1688DetailFromWorkerSkus(workerResult, offerIdInput, payload);
+        const finalProductUrl = detail.productUrl;
+        return {
+          action: "preview_1688_url_specs",
+          result: {
+            apiKey: "worker:1688-web-detail",
+            query: { offerId: offerIdInput, productUrl: finalProductUrl },
+            externalOfferId: offerIdInput,
+            productUrl: finalProductUrl,
+            detail,
+            workerWebDetail: {
+              source: "worker_1688_web_detail",
+              skuOptionCount: detail.skuOptions.length,
+              specIdHits: workerResult.specIdHits,
+              htmlLen: workerResult.htmlLen,
+            },
+          },
+          workbench: {},
+        };
+      }
+    }
+  }
+
+  // 第二优先：主控端官方接口（多数情况会因 ACL 不足 / 反爬 失败）。
   try {
     const response = await remoteRequest("/api/purchase/action", {
       method: "POST",

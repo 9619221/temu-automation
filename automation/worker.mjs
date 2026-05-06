@@ -20,7 +20,7 @@ import { createAiRuntime } from "./ai-runtime.mjs";
 import { parseLocalUrl, readJsonBody, sendJson, sendNoContent } from "./http-json.mjs";
 import { scanPriceReview } from "./price-review-scanner.mjs";
 import { listPriceReview, setPriceReviewManualCost, clearPriceReviewManualCost } from "./yunqi-db.mjs";
-import { open1688DetailPage, open1688LoginWindow, close1688Browser } from "./aliexpress-1688-cost.mjs";
+import { open1688DetailPage, open1688LoginWindow, close1688Browser, ensure1688Context, openOrReuse1688Page } from "./aliexpress-1688-cost.mjs";
 import { runLocal1688Inquiry } from "./local-1688-inquiry.mjs";
 import { optimizeTitle as _optimizeTitle } from "./title-optimizer.mjs";
 import { scrapeCompetitorReviews as _scrapeCompetitorReviews, openTemuLoginPage as _openTemuLoginPage, openTemuSearchPage as _openTemuSearchPage, extractReviewsFromFeed as _extractReviewsFromFeed, dumpFeedForGoods as _dumpFeedForGoods, extractProductFromFeed as _extractProductFromFeed, extractSearchResultsFromFeed as _extractSearchResultsFromFeed } from "./competitor-reviews.mjs";
@@ -7822,6 +7822,96 @@ async function handleRequest(body) {
     }
     case "open_1688_detail": {
       return await open1688DetailPage(params?.url, params || {});
+    }
+    case "extract_1688_skus": {
+      // 用持久化登录态浏览器打开 1688 商品详情页，从 HTML 抽真实 SKU 三元组（specId/specAttrs/skuId）。
+      // specId 才是 1688 fastCreateOrder 接受的 cargoSpecId；遨虾 productDetailQuery 不返这个字段。
+      const offerId = String(params?.offerId || "").trim();
+      if (!/^\d{6,}$/.test(offerId)) {
+        return { ok: false, reason: "offerId required" };
+      }
+      const productUrl = `https://detail.1688.com/offer/${encodeURIComponent(offerId)}.html`;
+      let page = null;
+      try {
+        const context = await ensure1688Context({ profilePath: params?.profilePath });
+        page = await openOrReuse1688Page(context, productUrl);
+        // 等待 SKU 数据片段进入 DOM；同时用 domcontentloaded 兜底。
+        try {
+          await page.waitForFunction(
+            () => /"specId"\s*:/.test(document.documentElement.outerHTML),
+            { timeout: 15000 },
+          );
+        } catch {}
+
+        const result = await page.evaluate(() => {
+          const url = location.href;
+          const isCaptcha = /punish|captcha|tmd/i.test(url);
+          const html = document.documentElement.outerHTML;
+          const text = (html || "").replace(/\\"/g, "\"");
+          const skus = [];
+          const seen = new Set();
+          const reTriplet = /"specId"\s*:\s*"?([^",}]+)"?[^{}]*?"specAttrs"\s*:\s*"([^"]*)"[^{}]*?"skuId"\s*:\s*"?(\d+)"?/g;
+          for (const match of text.matchAll(reTriplet)) {
+            const specId = String(match[1] || "").trim();
+            const specAttrs = String(match[2] || "").trim();
+            const skuId = String(match[3] || "").trim();
+            if (!specId || !skuId) continue;
+            const key = `${skuId}:${specId}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            skus.push({ specId, specAttrs, skuId });
+          }
+          // 反向也尝试一次（skuId 在前 specId 在后）
+          const reReverse = /"skuId"\s*:\s*"?(\d+)"?[^{}]*?"specAttrs"\s*:\s*"([^"]*)"[^{}]*?"specId"\s*:\s*"?([^",}]+)"?/g;
+          for (const match of text.matchAll(reReverse)) {
+            const specId = String(match[3] || "").trim();
+            const specAttrs = String(match[2] || "").trim();
+            const skuId = String(match[1] || "").trim();
+            if (!specId || !skuId) continue;
+            const key = `${skuId}:${specId}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            skus.push({ specId, specAttrs, skuId });
+          }
+          const requiresLogin = /login\.1688\.com|请登录|扫码登录/.test(url + "\n" + (document.body?.innerText || ""))
+            && skus.length === 0;
+
+          // 取一些辅助信息（best-effort）
+          const productTitle = (document.title || "").replace(/\s*[-_].*$/, "").trim();
+          const supplierName = (() => {
+            const cand = document.querySelector('a[href*="winport"], [class*="company-name"], [class*="supplier-name"]');
+            return cand && cand.textContent ? cand.textContent.trim() : "";
+          })();
+          const imageUrl = (() => {
+            const img = document.querySelector('[class*="main-image"] img, [class*="mainImg"] img, [class*="detail-gallery"] img');
+            return img && img.src ? img.src : "";
+          })();
+          return {
+            ok: skus.length > 0,
+            offerId: (url.match(/\/offer\/(\d+)\.html/) || [])[1] || null,
+            url,
+            skus,
+            captcha: isCaptcha,
+            requiresLogin,
+            productTitle,
+            supplierName,
+            imageUrl,
+            htmlLen: html.length,
+            specIdHits: (html.match(/"specId"/g) || []).length,
+          };
+        });
+        if (!result.ok && !result.captcha && !result.requiresLogin) {
+          // best-effort 错误诊断
+          result.reason = "no specId triplets found in DOM";
+        }
+        return result;
+      } catch (error) {
+        return { ok: false, reason: String(error?.message || error) };
+      } finally {
+        if (page) {
+          try { await page.close(); } catch {}
+        }
+      }
     }
     case "scrape_products": {
       console.error("[Worker] scrape_products called, browser:", !!browser, "context:", !!context);

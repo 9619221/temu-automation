@@ -749,9 +749,17 @@ export default function AlibabaMapping() {
         return;
       }
       const productUrl = values.productUrl || build1688Link({ ...values, externalOfferId });
+      // 如果用户重新解析规格选了不同的 specId/skuId/offerId（编辑场景下），不复用旧 id：
+      // 后端的 ON CONFLICT 只看 (account_id, sku_id, offerId, skuId, specId) 联合唯一键，
+      // 联合 key 变化时不会触发 UPDATE，传旧 id 会撞主键 UNIQUE 约束（erp_sku_1688_sources.id）。
+      const norm = (value: unknown) => String(value ?? "").trim();
+      const editingMatchesNewKey = !!editingRow
+        && norm(editingRow.externalOfferId) === norm(externalOfferId)
+        && norm(editingRow.externalSkuId) === norm(values.externalSkuId)
+        && norm(editingRow.externalSpecId) === norm(values.externalSpecId);
       const response = await erp.purchase.action({
         action: "upsert_sku_1688_source",
-        id: editingRow?.id,
+        id: editingMatchesNewKey ? editingRow?.id : undefined,
         skuId: values.skuId,
         accountId: sku.accountId,
         mappingGroupId: values.mappingGroupId,
