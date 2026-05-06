@@ -1989,7 +1989,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     };
   }, [loadData]);
 
-  const runAction = async (key: string, payload: Record<string, any>, successText?: string) => {
+  const runAction = async (
+    key: string,
+    payload: Record<string, any>,
+    successText?: string,
+    options?: { timeoutMs?: number },
+  ) => {
     if (!erp) return null;
     setActingKey(key);
     try {
@@ -2006,11 +2011,16 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           && payload.includeWorkbench !== false
           && !QUICK_PURCHASE_ACTIONS.has(String(payload.action || ""))
         );
+      // source_1688_image / push_1688_order 这种含外部 1688 网络调用的 action 需要更长 IPC 超时
+      const slowActions = new Set(["source_1688_image", "push_1688_order", "preview_1688_order", "preview_1688_url_specs"]);
+      const explicitTimeoutMs = Number.isFinite(options?.timeoutMs) ? options!.timeoutMs : null;
+      const inferredTimeoutMs = slowActions.has(String(payload.action || "")) ? 120000 : null;
+      const finalTimeoutMs = explicitTimeoutMs ?? inferredTimeoutMs ?? undefined;
       const result = await erp.purchase.action({
         ...payload,
         ...workbenchParams,
         includeWorkbench: shouldRefreshWorkbench,
-      });
+      }, finalTimeoutMs ? { timeoutMs: finalTimeoutMs } : undefined);
       if (shouldRefreshWorkbench) {
         const workbench = result?.workbench || await erp.purchase.workbench(workbenchParams);
         applyWorkbench(workbench);
