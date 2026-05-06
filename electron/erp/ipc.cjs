@@ -1300,6 +1300,134 @@ function get1688AuthStatus(actor = erpState.currentUser) {
   return to1688AuthStatus(get1688AuthRow(normalizeCompanyId(actor?.companyId || actor?.company_id, null)));
 }
 
+// === Multi 1688 采购账号支持（v0.2.8+，参 docs/plans/2026-05-06-multi-1688-purchase-accounts.md）===
+
+function to1688PurchaseAccountRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    companyId: row.company_id || DEFAULT_COMPANY_ID,
+    label: row.label || row.member_id || row.ali_id || row.app_key || "",
+    appKey: row.app_key || "",
+    hasAppSecret: Boolean(row.app_secret),
+    redirectUri: row.redirect_uri || "",
+    memberId: row.member_id || "",
+    aliId: row.ali_id || "",
+    resourceOwner: row.resource_owner || "",
+    status: row.status === "disabled" ? "disabled" : "active",
+    configured: Boolean(row.app_key && row.app_secret && row.redirect_uri),
+    authorized: Boolean(row.access_token),
+    accessTokenExpiresAt: row.access_token_expires_at || "",
+    refreshTokenExpiresAt: row.refresh_token_expires_at || "",
+    authorizedAt: row.authorized_at || "",
+    createdAt: row.created_at || "",
+    updatedAt: row.updated_at || "",
+  };
+}
+
+function list1688PurchaseAccounts(companyId) {
+  const { db } = requireErp();
+  const normalizedCompanyId = normalizeCompanyId(companyId, null);
+  const rows = db.prepare(`
+    SELECT *
+    FROM erp_1688_auth_settings
+    WHERE company_id = @company_id
+    ORDER BY status = 'active' DESC, updated_at DESC, created_at DESC
+  `).all({ company_id: normalizedCompanyId });
+  return { accounts: rows.map(to1688PurchaseAccountRow).filter(Boolean) };
+}
+
+function get1688PurchaseAccountByIdScoped(db, id, companyId) {
+  if (!id) return null;
+  return db.prepare(`
+    SELECT * FROM erp_1688_auth_settings
+    WHERE id = @id AND company_id = @company_id
+  `).get({ id, company_id: normalizeCompanyId(companyId, null) }) || null;
+}
+
+function delete1688PurchaseAccount({ id, companyId }, actor) {
+  assertActorRole(actor, ["admin", "manager"], "1688 采购账号删除");
+  const { db } = requireErp();
+  const normalizedCompanyId = normalizeCompanyId(companyId, null);
+  const targetId = requireString(id, "id");
+  const row = get1688PurchaseAccountByIdScoped(db, targetId, normalizedCompanyId);
+  if (!row) throw new Error("1688 purchase account not found");
+  // 拦截：被任意 Temu 店铺当作默认时拒绝
+  const occupants = db.prepare(`
+    SELECT id, name FROM erp_accounts
+    WHERE default_1688_purchase_account_id = @id
+    LIMIT 50
+  `).all({ id: targetId });
+  if (occupants.length) {
+    const error = new Error(
+      `1688 采购账号被以下店铺设为默认，无法删除：${occupants.map((a) => a.name || a.id).join("、")}。请先到「店铺」改默认账号或清空默认。`,
+    );
+    error.code = "PURCHASE_ACCOUNT_IN_USE";
+    error.occupants = occupants;
+    throw error;
+  }
+  db.prepare("DELETE FROM erp_1688_auth_settings WHERE id = @id AND company_id = @company_id").run({
+    id: targetId,
+    company_id: normalizedCompanyId,
+  });
+  return { ok: true, id: targetId };
+}
+
+function update1688PurchaseAccount({ id, companyId, label, status }, actor) {
+  assertActorRole(actor, ["admin", "manager"], "1688 采购账号更新");
+  const { db } = requireErp();
+  const normalizedCompanyId = normalizeCompanyId(companyId, null);
+  const targetId = requireString(id, "id");
+  const row = get1688PurchaseAccountByIdScoped(db, targetId, normalizedCompanyId);
+  if (!row) throw new Error("1688 purchase account not found");
+  const nextLabel = label === undefined ? row.label : (optionalString(label) || "");
+  const allowedStatus = status === "disabled" || status === "active" ? status : null;
+  const nextStatus = allowedStatus || row.status || "active";
+  db.prepare(`
+    UPDATE erp_1688_auth_settings
+    SET label = @label, status = @status, updated_at = @updated_at
+    WHERE id = @id AND company_id = @company_id
+  `).run({
+    id: targetId,
+    company_id: normalizedCompanyId,
+    label: nextLabel,
+    status: nextStatus,
+    updated_at: nowIso(),
+  });
+  return {
+    ok: true,
+    id: targetId,
+    account: to1688PurchaseAccountRow(get1688PurchaseAccountByIdScoped(db, targetId, normalizedCompanyId)),
+  };
+}
+
+function setAccount1688DefaultPurchase({ accountId, default1688AccountId, companyId }, actor) {
+  assertActorRole(actor, ["admin", "manager", "buyer"], "Temu 店铺默认 1688 采购账号设置");
+  const { db } = requireErp();
+  const normalizedCompanyId = normalizeCompanyId(companyId, null);
+  const acctId = requireString(accountId, "accountId");
+  const erpAcct = db.prepare("SELECT id, company_id FROM erp_accounts WHERE id = ?").get(acctId);
+  if (!erpAcct) throw new Error(`Temu account not found: ${acctId}`);
+  if (normalizeCompanyId(erpAcct.company_id, null) !== normalizedCompanyId) {
+    throw new Error("Temu account does not belong to this company");
+  }
+  const default1688 = optionalString(default1688AccountId) || null;
+  if (default1688) {
+    const purchaseRow = get1688PurchaseAccountByIdScoped(db, default1688, normalizedCompanyId);
+    if (!purchaseRow) throw new Error("1688 purchase account not found");
+  }
+  db.prepare(`
+    UPDATE erp_accounts
+    SET default_1688_purchase_account_id = @default_1688_purchase_account_id, updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id: acctId,
+    default_1688_purchase_account_id: default1688,
+    updated_at: nowIso(),
+  });
+  return { ok: true, accountId: acctId, default1688AccountId: default1688 };
+}
+
 function requireHttpUrl(value, fieldName) {
   const text = requireString(value, fieldName);
   let parsed = null;
@@ -1456,7 +1584,19 @@ function extract1688TokenFields(payload = {}, existing = {}) {
 function upsert1688AuthConfig(payload = {}, actor = {}) {
   const { db } = requireErp();
   const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
-  const existing = get1688AuthRow(companyId);
+  // mode=new: 总是创建新行；mode=update + purchase1688AccountId: 定位指定行；
+  // 默认行为兼容老逻辑：在 company 第一行（companySettingId）上 upsert
+  const mode = optionalString(payload.mode);
+  const targetId = optionalString(payload.purchase1688AccountId || payload.purchase_1688_account_id || payload.id);
+  let existing = null;
+  if (mode === "new") {
+    existing = null;
+  } else if (targetId) {
+    existing = get1688AuthRowById(targetId, companyId);
+    if (!existing) throw new Error(`1688 purchase account not found: ${targetId}`);
+  } else {
+    existing = get1688AuthRow(companyId);
+  }
   const appKey = optionalString(payload.appKey) || optionalString(payload.app_key) || existing?.app_key;
   const appSecretInput = optionalString(payload.appSecret) || optionalString(payload.app_secret);
   const appSecret = appSecretInput || existing?.app_secret;
@@ -1469,8 +1609,10 @@ function upsert1688AuthConfig(payload = {}, actor = {}) {
     || Boolean(appSecretInput && appSecretInput !== existing.app_secret)
     || normalizedRedirectUri !== existing.redirect_uri;
   const now = nowIso();
+  const labelInput = optionalString(payload.label);
+  const statusInput = payload.status === "disabled" ? "disabled" : (payload.status === "active" ? "active" : null);
   const row = {
-    id: existing?.id || companySettingId(companyId),
+    id: existing?.id || (mode === "new" ? createId("1688_auth") : companySettingId(companyId)),
     company_id: companyId,
     app_key: appKey,
     app_secret: appSecret,
@@ -1484,6 +1626,8 @@ function upsert1688AuthConfig(payload = {}, actor = {}) {
     access_token_expires_at: credentialsChanged ? null : existing.access_token_expires_at,
     refresh_token_expires_at: credentialsChanged ? null : existing.refresh_token_expires_at,
     authorized_at: credentialsChanged ? null : existing.authorized_at,
+    label: labelInput !== null && labelInput !== undefined ? labelInput : (existing?.label || ""),
+    status: statusInput || existing?.status || "active",
     created_at: existing?.created_at || now,
     updated_at: now,
   };
@@ -1493,12 +1637,14 @@ function upsert1688AuthConfig(payload = {}, actor = {}) {
       id, company_id, app_key, app_secret, redirect_uri, access_token, refresh_token,
       member_id, ali_id, resource_owner, token_payload_json,
       access_token_expires_at, refresh_token_expires_at, authorized_at,
+      label, status,
       created_at, updated_at
     )
     VALUES (
       @id, @company_id, @app_key, @app_secret, @redirect_uri, @access_token, @refresh_token,
       @member_id, @ali_id, @resource_owner, @token_payload_json,
       @access_token_expires_at, @refresh_token_expires_at, @authorized_at,
+      @label, @status,
       @created_at, @updated_at
     )
     ON CONFLICT(id) DO UPDATE SET
@@ -1515,6 +1661,8 @@ function upsert1688AuthConfig(payload = {}, actor = {}) {
       access_token_expires_at = excluded.access_token_expires_at,
       refresh_token_expires_at = excluded.refresh_token_expires_at,
       authorized_at = excluded.authorized_at,
+      label = excluded.label,
+      status = excluded.status,
       updated_at = excluded.updated_at
   `).run(row);
 
@@ -1525,10 +1673,14 @@ function save1688ManualToken(payload = {}, actor = {}) {
   const { db } = requireErp();
   const hasCredentialInput = payload.appKey || payload.app_key || payload.appSecret || payload.app_secret || payload.redirectUri || payload.redirect_uri;
   if (hasCredentialInput) {
+    // 透传 mode/purchase1688AccountId/label，让 upsert 知道是新建还是更新
     upsert1688AuthConfig(payload, actor);
   }
   const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
-  const setting = get1688AuthRow(companyId);
+  const targetId = optionalString(payload.purchase1688AccountId || payload.purchase_1688_account_id || payload.id);
+  const setting = targetId
+    ? get1688AuthRowById(targetId, companyId)
+    : get1688AuthRow(companyId);
   if (!setting?.app_key || !setting?.app_secret) {
     throw new Error("请先保存 1688 AppKey 和 AppSecret");
   }
@@ -1665,10 +1817,54 @@ async function complete1688OAuth(payload = {}) {
   return to1688AuthStatus(get1688AuthRow(companyId));
 }
 
-async function refresh1688AccessToken(actor = {}) {
+// 取指定 ID 的 1688 凭据行（限定 company）
+function get1688AuthRowById(id, companyId) {
+  if (!id) return null;
+  const { db } = requireErp();
+  const normalizedCompanyId = normalizeCompanyId(companyId, null);
+  return db.prepare(`
+    SELECT * FROM erp_1688_auth_settings
+    WHERE id = @id AND company_id = @company_id
+  `).get({ id, company_id: normalizedCompanyId }) || null;
+}
+
+// 推单/预览选 1688 凭据：显式 ID > Temu 店铺默认 > company 第一行兜底
+function resolve1688AuthRowForPurchase({ companyId, purchase1688AccountId, accountId }) {
+  const normalizedCompanyId = normalizeCompanyId(companyId, null);
+  // 1) 显式指定优先
+  if (purchase1688AccountId) {
+    const row = get1688AuthRowById(purchase1688AccountId, normalizedCompanyId);
+    if (!row) {
+      throw new Error(`指定的 1688 采购账号不存在: ${purchase1688AccountId}`);
+    }
+    if (row.status === "disabled") {
+      throw new Error(`指定的 1688 采购账号已被禁用: ${row.label || row.member_id || row.id}`);
+    }
+    return row;
+  }
+  // 2) Temu 店铺设置的默认
+  if (accountId) {
+    const { db } = requireErp();
+    const erpAcct = db.prepare(`
+      SELECT default_1688_purchase_account_id FROM erp_accounts WHERE id = ?
+    `).get(accountId);
+    const storeDefaultId = optionalString(erpAcct?.default_1688_purchase_account_id);
+    if (storeDefaultId) {
+      const row = get1688AuthRowById(storeDefaultId, normalizedCompanyId);
+      if (row && row.status !== "disabled") return row;
+      // 默认账号失效（被删/禁用）就静默回退到第一行
+    }
+  }
+  // 3) Company 第一行兜底（保留 0.2.7 之前的行为）
+  return get1688AuthRow(normalizedCompanyId);
+}
+
+async function refresh1688AccessToken(actor = {}, options = {}) {
   const { db } = requireErp();
   const companyId = normalizeCompanyId(actor?.companyId || actor?.company_id, null);
-  const setting = get1688AuthRow(companyId);
+  const setting = options.purchase1688AccountId
+    ? get1688AuthRowById(options.purchase1688AccountId, companyId)
+    : get1688AuthRow(companyId);
   if (!setting?.app_key || !setting?.app_secret || !setting?.refresh_token) {
     throw new Error("1688 refresh token is not available; authorize again first");
   }
@@ -1707,12 +1903,19 @@ function shouldRefresh1688AccessToken(row) {
   return Number.isFinite(expiresAt) && expiresAt <= Date.now() + 5 * 60 * 1000;
 }
 
-async function getReady1688Credentials(actor = {}) {
+async function getReady1688Credentials(actor = {}, options = {}) {
   const companyId = normalizeCompanyId(actor?.companyId || actor?.company_id, null);
-  let setting = get1688AuthRow(companyId);
+  let setting = resolve1688AuthRowForPurchase({
+    companyId,
+    purchase1688AccountId: options.purchase1688AccountId,
+    accountId: options.accountId,
+  });
   if (shouldRefresh1688AccessToken(setting)) {
-    await refresh1688AccessToken(actor);
-    setting = get1688AuthRow(companyId);
+    await refresh1688AccessToken(actor, { purchase1688AccountId: setting?.id });
+    // 用同一个 ID 重新取，避免 fallback 到第一行
+    setting = setting?.id
+      ? get1688AuthRowById(setting.id, companyId)
+      : get1688AuthRow(companyId);
   }
   if (!setting?.app_key || !setting?.app_secret) {
     throw new Error("1688 AppKey/AppSecret is not configured");
@@ -1724,6 +1927,8 @@ async function getReady1688Credentials(actor = {}) {
     appKey: setting.app_key,
     appSecret: setting.app_secret,
     accessToken: setting.access_token,
+    purchase1688AccountId: setting.id,
+    purchase1688AccountLabel: setting.label || setting.member_id || setting.app_key || "",
   };
 }
 
@@ -2455,8 +2660,11 @@ function receive1688Message(input = {}) {
   }
 }
 
-async function call1688ProcurementApi({ db, actor, accountId, action, api, params }) {
-  const credentials = await getReady1688Credentials(actor);
+async function call1688ProcurementApi({ db, actor, accountId, action, api, params, purchase1688AccountId }) {
+  const credentials = await getReady1688Credentials(actor, {
+    purchase1688AccountId,
+    accountId,
+  });
   const gatewayBase = optionalString(process.env.ERP_1688_GATEWAY_BASE) || DEFAULT_1688_GATEWAY_BASE;
   try {
     const result = await call1688OpenApi({
@@ -7950,6 +8158,7 @@ async function push1688OrderAction({ db, services, payload, actor }) {
     action: "push_1688_order",
     api: PROCUREMENT_APIS.FAST_CREATE_ORDER,
     params: apiParams,
+    purchase1688AccountId: optionalString(payload.purchase1688AccountId || payload.purchase_1688_account_id),
   });
   const externalOrderId = findExternalOrderId(rawResponse);
   const now = nowIso();
@@ -8036,6 +8245,7 @@ async function preview1688OrderAction({ db, services, payload, actor }) {
     action: "preview_1688_order",
     api: PROCUREMENT_APIS.ORDER_PREVIEW,
     params: apiParams,
+    purchase1688AccountId: optionalString(payload.purchase1688AccountId || payload.purchase_1688_account_id),
   });
   const preview = normalize1688OrderPreviewResponse(rawResponse);
   const now = nowIso();
@@ -11172,6 +11382,47 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
 
   if (action === "configure_1688_message_subscriptions") {
     const result = configure1688MessageSubscriptionsAction({ db, payload, actor });
+    broadcastPurchaseUpdate(action, payload, actor, result);
+    return {
+      action,
+      result,
+      workbench: getPurchaseWorkbenchForAction(payload, actor),
+    };
+  }
+
+  // === Multi 1688 采购账号管理（v0.2.8+）===
+
+  if (action === "list_1688_purchase_accounts") {
+    const result = list1688PurchaseAccounts(actor?.companyId);
+    return { action, result, workbench: {} };
+  }
+
+  if (action === "delete_1688_purchase_account") {
+    const result = delete1688PurchaseAccount({
+      id: payload.id,
+      companyId: actor?.companyId,
+    }, actor);
+    broadcastPurchaseUpdate(action, payload, actor, result);
+    return { action, result, workbench: {} };
+  }
+
+  if (action === "update_1688_purchase_account") {
+    const result = update1688PurchaseAccount({
+      id: payload.id,
+      label: payload.label,
+      status: payload.status,
+      companyId: actor?.companyId,
+    }, actor);
+    broadcastPurchaseUpdate(action, payload, actor, result);
+    return { action, result, workbench: {} };
+  }
+
+  if (action === "set_account_default_1688_purchase") {
+    const result = setAccount1688DefaultPurchase({
+      accountId: payload.accountId,
+      default1688AccountId: payload.default1688AccountId,
+      companyId: actor?.companyId,
+    }, actor);
     broadcastPurchaseUpdate(action, payload, actor, result);
     return {
       action,
