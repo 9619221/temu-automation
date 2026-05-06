@@ -12667,10 +12667,14 @@ function toRemoteImageSearchMockResult(item = {}) {
 
 async function buildClientImageSearchMockResults(payload = {}) {
   if (payload.action !== "source_1688_image" || Array.isArray(payload.mockResults)) return null;
-  // 客户端预搜默认关闭：fetchImageBuffer 30s + 1688 mtop 25s 累加可能吃完
-  // IPC 120s 超时窗口；主控端 alphashop 1-2 秒就能返回，不预搜更快。
-  // 想恢复客户端预搜行为可以设环境变量 ERP_CLIENT_IMAGE_PRESEARCH=1。
-  if (process.env.ERP_CLIENT_IMAGE_PRESEARCH !== "1") return null;
+  // 客户端预搜默认开启（v0.2.13 起）。原因：
+  //   1) 主控端走 alphashop imageSearchProduct 时，对非阿里 CDN 的 imgUrl 总是返回空
+  //      数组（实测把 `https://erp.temu.chat/uploads/...` 喂进去拿到 0 个商品）。
+  //   2) 主控端云 IP 又被 1688 mtop 反爬列入 cloud_ip_bl，直接走网页搜款也是 deny。
+  //   3) 客户端宽带 IP 不在反爬黑名单，1688 mtop putImage + searchOffer 都能通。
+  // 上一版默认关掉的原因（IPC 60s 软超时太紧）已经在 v0.2.11 / v0.2.12 解决（IPC 120s）。
+  // 想强制关闭可以设 ERP_CLIENT_IMAGE_PRESEARCH=0。
+  if (process.env.ERP_CLIENT_IMAGE_PRESEARCH === "0") return null;
   const beginPage = Math.max(1, Math.min(Math.floor(Number(optionalNumber(payload.beginPage) ?? 1)), 10));
   const importLimit = Math.max(1, Math.min(Math.floor(Number(optionalNumber(payload.importLimit) ?? 10)), 20));
   const pageSize = Math.max(1, Math.min(importLimit, 50));
@@ -12682,7 +12686,7 @@ async function buildClientImageSearchMockResults(payload = {}) {
     imageBuffer,
     beginPage,
     pageSize,
-    timeoutMs: 25000,
+    timeoutMs: 30000,
   });
   return {
     ...payload,
