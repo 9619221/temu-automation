@@ -711,11 +711,20 @@ export default function AlibabaMapping() {
       message.warning("请先选择一个 1688 规格");
       return;
     }
+    // 防御：不可信的 specId（缺失 / 与 skuId 同值）会被 1688 下单接口拒绝
+    if (!selected.externalSpecId) {
+      message.error("这个 1688 规格没有可信的 specId，1688 下单时会被拒绝；请换一个规格或申请 1688 官方商品详情接口权限");
+      return;
+    }
+    if (selected.externalSkuId && selected.externalSkuId === selected.externalSpecId) {
+      message.error("数据源未提供独立的 specId（与 skuId 同值），1688 下单会失败；建议手工下单或更换数据源");
+      return;
+    }
     const values = form.getFieldsValue() as MappingFormValues;
     form.setFieldsValue({
       externalOfferId: urlSpecDialog.externalOfferId,
       productUrl: urlSpecDialog.productUrl,
-      externalSkuId: selected.externalSkuId || selected.externalSpecId,
+      externalSkuId: selected.externalSkuId || undefined,
       externalSpecId: selected.externalSpecId,
       platformSkuName: selected.specText || selected.externalSpecId,
       supplierName: values.supplierName || urlSpecDialog.detail.supplierName || undefined,

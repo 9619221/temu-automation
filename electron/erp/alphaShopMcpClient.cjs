@@ -190,19 +190,23 @@ function normalizeAlphaShopProduct(item = {}) {
     item.itemId,
     item.id,
   );
+  const skuId = findNestedText(item, [
+    "skuId",
+    "skuID",
+    "sku_id",
+    "offerSkuId",
+    "offer_sku_id",
+    "mainPriceSkuId",
+  ]);
+  // specId 必须来自真正的 spec/cargoSku 字段，不能回退到 skuId——
+  // 否则 1688 下单 API 会拒绝（cargoSkuId ≠ skuId 是 1688 体系内的两个概念）。
   const specId = findNestedText(item, [
     "specId",
     "specID",
     "spec_id",
-    "skuId",
-    "skuID",
-    "sku_id",
     "cargoSkuId",
     "cargoSkuID",
     "cargo_sku_id",
-    "mainPriceSkuId",
-    "offerSkuId",
-    "offer_sku_id",
   ]);
   const productUrl = firstText(
     item.productUrl,
@@ -213,7 +217,7 @@ function normalizeAlphaShopProduct(item = {}) {
   );
   return {
     externalOfferId: productId,
-    externalSkuId: specId,
+    externalSkuId: skuId,
     externalSpecId: specId,
     supplierName: firstText(
       item.supplierName,
@@ -427,7 +431,15 @@ function normalizeSkuAttributes(sku = {}) {
 }
 
 function normalizeAlphaShopSkuOptions(product = {}) {
-  return findSkuArray(product).map((sku) => {
+  const skus = findSkuArray(product);
+  // [DIAG] 暂存——确认遨虾返回里 SKU 上有哪些字段，有没有真正的 cargoSkuId/specId
+  if (skus.length && process.env.ERP_DIAG_ALPHASHOP === "1") {
+    try {
+      console.error("[alphashop-diag] sku[0] keys:", Object.keys(skus[0] || {}));
+      console.error("[alphashop-diag] sku[0] full:", JSON.stringify(skus[0], null, 2).slice(0, 4000));
+    } catch {}
+  }
+  return skus.map((sku) => {
     const attributes = normalizeSkuAttributes(sku);
     const skuId = firstText(
       sku.skuId,
@@ -436,10 +448,9 @@ function normalizeAlphaShopSkuOptions(product = {}) {
       sku.id,
       sku.offerSkuId,
       sku.offer_sku_id,
-      sku.cargoSkuId,
-      sku.cargoSkuID,
-      sku.cargo_sku_id,
     );
+    // specId 必须来自 spec/cargoSku 字段。不再回退到 skuId/offerSkuId——
+    // 1688 下单接口校验时 cargoSkuId 和 skuId 是两个独立概念，混用会被拒绝。
     const specId = firstText(
       sku.specId,
       sku.specID,
@@ -447,9 +458,7 @@ function normalizeAlphaShopSkuOptions(product = {}) {
       sku.cargoSkuId,
       sku.cargoSkuID,
       sku.cargo_sku_id,
-      sku.offerSkuId,
-      sku.offer_sku_id,
-    ) || skuId;
+    );
     const specText = attributes
       .map((item) => (item.name ? `${item.name}:${item.value}` : item.value))
       .filter(Boolean)

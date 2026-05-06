@@ -7474,6 +7474,14 @@ function build1688OrderCargoParamList(po, lines, payload = {}) {
         mapping.external_spec_id,
         `商品编码 ${line.internal_sku_code || line.sku_id}`,
       );
+      // 护栏：specId 与 skuId 同值通常意味着上游（遨虾等第三方接口）没返回真正的 cargoSkuId，
+      // 1688 下单接口会拒绝。在请求送出之前就拦下，并给出明确的修复指引。
+      const externalSkuId = optionalString(mapping.external_sku_id);
+      if (externalSkuId && externalSkuId === specId) {
+        throw new Error(
+          `商品编码 ${line.internal_sku_code || line.sku_id} 的 1688 specId 与 skuId 同值（${specId}），可能不是真实 cargoSkuId；请到「供应商管理」重新「解析规格」、申请 1688 官方商品详情接口权限，或先手工到 1688 下单`,
+        );
+      }
       const ourQty = optionalPositiveInteger(mapping.our_qty, 1);
       const platformQty = optionalPositiveInteger(mapping.platform_qty, 1);
       return {
@@ -12460,7 +12468,8 @@ function getClientLocalAlphaShopCredentials(payload = {}) {
 function alphaShopDetailTo1688MockDetail(detail = {}, rawResponse = {}) {
   const skuInfos = (Array.isArray(detail.skuOptions) ? detail.skuOptions : []).map((sku) => ({
     skuId: optionalString(sku.externalSkuId || sku.skuId || sku.id),
-    specId: optionalString(sku.externalSpecId || sku.specId || sku.cargoSkuId || sku.externalSkuId),
+    // specId 必须来自真实 spec/cargoSku 字段，不再回退到 skuId（与 alphaShopMcpClient 一致，避免 1688 下单时被拒）。
+    specId: optionalString(sku.externalSpecId || sku.specId || sku.cargoSkuId),
     attributes: Array.isArray(sku.attributes) && sku.attributes.length
       ? sku.attributes
       : String(sku.specText || "")
@@ -12662,6 +12671,7 @@ async function performClientPreview1688UrlSpecs(payload = {}) {
     const response = await remoteRequest("/api/purchase/action", {
       method: "POST",
       body: payload,
+      timeoutMs: 120000,
     });
     return normalizePurchaseResultPoNumbers(response.result);
   } catch (error) {
@@ -12714,6 +12724,7 @@ async function performClientBind1688CandidateSpec(payload = {}) {
     const response = await remoteRequest("/api/purchase/action", {
       method: "POST",
       body: payload,
+      timeoutMs: 120000,
     });
     return response.result;
   } catch (error) {
@@ -12728,6 +12739,7 @@ async function performClientBind1688CandidateSpec(payload = {}) {
   const refreshResponse = await remoteRequest("/api/purchase/action", {
     method: "POST",
     body: fallbackPayload,
+    timeoutMs: 120000,
   });
   return {
     ...(refreshResponse.result || {}),
@@ -12765,6 +12777,7 @@ async function performPurchaseActionRuntime(payload = {}) {
     const response = await remoteRequest("/api/purchase/action", {
       method: "POST",
       body: remotePayload,
+      timeoutMs: 120000,
     });
     return normalizePurchaseResultPoNumbers(response.result);
   }
