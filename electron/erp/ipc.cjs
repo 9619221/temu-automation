@@ -12715,7 +12715,6 @@ async function buildClientImageSearchMockResults(payload = {}) {
   //      数组（实测把 `https://erp.temu.chat/uploads/...` 喂进去拿到 0 个商品）。
   //   2) 主控端云 IP 又被 1688 mtop 反爬列入 cloud_ip_bl，直接走网页搜款也是 deny。
   //   3) 客户端宽带 IP 不在反爬黑名单，1688 mtop putImage + searchOffer 都能通。
-  // 上一版默认关掉的原因（IPC 60s 软超时太紧）已经在 v0.2.11 / v0.2.12 解决（IPC 120s）。
   // 想强制关闭可以设 ERP_CLIENT_IMAGE_PRESEARCH=0。
   if (process.env.ERP_CLIENT_IMAGE_PRESEARCH === "0") return null;
   const beginPage = Math.max(1, Math.min(Math.floor(Number(optionalNumber(payload.beginPage) ?? 1)), 10));
@@ -12723,14 +12722,52 @@ async function buildClientImageSearchMockResults(payload = {}) {
   const pageSize = Math.max(1, Math.min(importLimit, 50));
   const parsedUpload = parseErpImageDataUrl(payload);
   const imgUrl = optionalString(payload.imgUrl || payload.imageUrl);
-  const imageBuffer = parsedUpload?.buffer || (imgUrl ? await fetchImageBuffer(imgUrl) : null);
+
+  // 全流程 30s 硬上限：fetch image → 1688 mtop putImage → searchOffer。
+  // 任意一步慢/挂（用户 IP 偶尔被 1688 反爬刷出 deny_h5、token 接口卡住等）超过 30s
+  // 就放弃预搜，让主控端 fallback 走 alphashop。alphashop 对外站图返回空数组但 1-2 秒
+  // 就回，至少不会撞 IPC 120s 超时。两台电脑一台行一台不行多半就是这个。
+  const PRESEARCH_BUDGET_MS = 30000;
+  const t0 = Date.now();
+  function remainingBudget() {
+    return Math.max(1500, PRESEARCH_BUDGET_MS - (Date.now() - t0));
+  }
+  function timeoutSentinel(label) {
+    return new Promise((_, reject) => {
+      setTimeout(() => reject(new Error(`client image presearch timeout at ${label}`)), remainingBudget());
+    });
+  }
+
+  let imageBuffer = parsedUpload?.buffer || null;
+  if (!imageBuffer && imgUrl) {
+    try {
+      imageBuffer = await Promise.race([
+        fetchImageBuffer(imgUrl),
+        timeoutSentinel("fetchImageBuffer"),
+      ]);
+    } catch (e) {
+      console.error(`[buildClientImageSearchMockResults] fetch image failed: ${e?.message || e}`);
+      return null;
+    }
+  }
   if (!imageBuffer?.length) return null;
-  const localResult = await run1688WebImageSearch({
-    imageBuffer,
-    beginPage,
-    pageSize,
-    timeoutMs: 30000,
-  });
+
+  let localResult;
+  try {
+    localResult = await Promise.race([
+      run1688WebImageSearch({
+        imageBuffer,
+        beginPage,
+        pageSize,
+        timeoutMs: Math.min(remainingBudget(), 12000),
+      }),
+      timeoutSentinel("run1688WebImageSearch"),
+    ]);
+  } catch (e) {
+    console.error(`[buildClientImageSearchMockResults] 1688 web search failed in ${Date.now() - t0}ms: ${e?.message || e}`);
+    return null;
+  }
+
   return {
     ...payload,
     imageDataUrl: undefined,
@@ -12740,6 +12777,7 @@ async function buildClientImageSearchMockResults(payload = {}) {
       source: "1688_web_image_client",
       imageId: localResult.imageId,
       totalFound: localResult.products?.length || 0,
+      elapsedMs: Date.now() - t0,
     },
   };
 }
