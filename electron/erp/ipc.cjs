@@ -11340,12 +11340,17 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
   }
 
   if (action === "source_1688_image") {
+    const __td0 = Date.now();
     const result = await source1688ImageAction({ db, services, payload, actor });
+    console.error(`[source_1688_image dispatch t=${Date.now() - __td0}ms] action returned, calling getWorkbench`);
+    const __td1 = Date.now();
     broadcastPurchaseUpdate(action, sanitizeAlphaShopPayload(payload), actor, result);
+    const workbench = getPurchaseWorkbenchForAction(payload, actor);
+    console.error(`[source_1688_image dispatch t=${Date.now() - __td0}ms] workbench done in ${Date.now() - __td1}ms`);
     return {
       action,
       result,
-      workbench: getPurchaseWorkbenchForAction(payload, actor),
+      workbench,
     };
   }
 
