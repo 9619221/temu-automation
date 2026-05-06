@@ -2861,7 +2861,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     try {
       listResult = await erp.purchase.action({ action: "list_1688_purchase_accounts" });
     } catch (error: any) {
-      message.error(error?.message || "读取 1688 采购账号失败");
+      // 主控端旧版本不支持多账号 action — 静默回落到旧行为（用 company 默认 1688 凭据推单）
+      const msg = String(error?.message || "");
+      if (/Unsupported purchase action|unsupported.*action|不支持.*操作/i.test(msg)) {
+        startPush1688Order(row);
+        return;
+      }
+      message.error(msg || "读取 1688 采购账号失败");
       return;
     }
     const all = (listResult?.result?.accounts || []) as Array<{
