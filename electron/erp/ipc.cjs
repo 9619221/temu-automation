@@ -5451,12 +5451,12 @@ async function runAlphaShopProductDetail({ db, payload, actor, offerId }) {
   };
 }
 
-async function run1688WebImageSearch({ imageBuffer, beginPage, pageSize = 10 }) {
+async function run1688WebImageSearch({ imageBuffer, beginPage, pageSize = 10, timeoutMs = 120000 }) {
   const raw = await imageSearch1688Web({
     imageBuffer,
     beginPage,
     pageSize,
-    timeoutMs: 120000,
+    timeoutMs,
   });
   return {
     imageId: raw.imageId,
@@ -5509,10 +5509,12 @@ async function source1688ImageAction({ db, services, payload, actor }) {
 
     try {
       if (normalized.length === 0 && imageBuffer?.length) {
+        // 1688 mtop 接口对裸 fetch 易反爬/慢；25s 短超时，失败由后续 alphashop 兜底
         const webImageSearch = await run1688WebImageSearch({
           imageBuffer,
           beginPage,
           pageSize,
+          timeoutMs: 25000,
         });
         normalized = Array.isArray(webImageSearch.products) ? webImageSearch.products : [];
         rawResponse = webImageSearch.rawResponse;
@@ -12649,10 +12651,13 @@ async function buildClientImageSearchMockResults(payload = {}) {
   const imgUrl = optionalString(payload.imgUrl || payload.imageUrl);
   const imageBuffer = parsedUpload?.buffer || (imgUrl ? await fetchImageBuffer(imgUrl) : null);
   if (!imageBuffer?.length) return null;
+  // client 端预搜：1688 mtop 接口对裸 fetch 易反爬/慢，控制在 25s 内；
+  // 失败/超时不阻塞——main flow 会捕获异常并继续走主控端的 alphashop 兜底。
   const localResult = await run1688WebImageSearch({
     imageBuffer,
     beginPage,
     pageSize,
+    timeoutMs: 25000,
   });
   return {
     ...payload,
