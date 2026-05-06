@@ -12636,11 +12636,12 @@ async function getPurchaseWorkbenchRuntime(params = {}) {
       payload = await remoteRequest("/api/purchase/workbench", {
         method: "POST",
         body: params,
+        timeoutMs: 120000,
       });
     } catch (error) {
       const statusCode = Number(error?.statusCode || 0);
       if (!statusCode || ![404, 405, 502].includes(statusCode)) throw error;
-      payload = await remoteRequest("/api/purchase/workbench");
+      payload = await remoteRequest("/api/purchase/workbench", { timeoutMs: 120000 });
     }
     return normalizePurchaseWorkbenchPoNumbers(payload.workbench || {});
   }

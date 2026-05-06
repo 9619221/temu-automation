@@ -266,7 +266,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
       workbench: (params, options) => invokeWithTimeout(
         "erp:purchase:workbench",
         params || {},
-        Number.isFinite(options?.timeoutMs) ? options.timeoutMs : 30000,
+        // 默认 120s：客户端模式下需要走 https 到主控端再做 SQL 聚合，30s 太紧；
+        // 在采购数据较多 / 网络抖动时会撞超时，导致用户看到 "调用超时 (30s)"。
+        Number.isFinite(options?.timeoutMs) ? options.timeoutMs : 120000,
       ),
       action: (payload, options) => invokeWithTimeout(
         "erp:purchase:action",

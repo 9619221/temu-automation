@@ -3616,11 +3616,15 @@ async function handleRequest({
     }
 
     if (pathname === "/api/purchase/workbench") {
+      const __wbT0 = Date.now();
       const payload = await readOptionalPayload(req);
-      writeJson(res, 200, {
-        ok: true,
-        workbench: await getPurchaseWorkbench({ ...payload, user: session.user }),
-      });
+      const workbench = await getPurchaseWorkbench({ ...payload, user: session.user });
+      const __wbT1 = Date.now();
+      const __wbBody = { ok: true, workbench };
+      const __wbBodyText = JSON.stringify(__wbBody);
+      console.error(`[purchase/workbench] sql=${__wbT1 - __wbT0}ms bodyLen=${__wbBodyText.length}`);
+      writeJson(res, 200, __wbBody);
+      console.error(`[purchase/workbench] writeJson done t=${Date.now() - __wbT0}ms`);
       return;
     }
 
