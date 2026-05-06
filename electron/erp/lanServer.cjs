@@ -3142,10 +3142,19 @@ async function handlePurchaseActionRequest({ req, res, session, performPurchaseA
 
   let payload = {};
   try {
+    const __t0 = Date.now();
     payload = await readLoginPayload(req, 8 * 1024 * 1024);
+    const action = String(payload?.action || "");
+    const __isImg = action === "source_1688_image";
+    if (__isImg) console.error(`[handlePurchaseAction t=${Date.now() - __t0}ms] payload read, action=${action}`);
     const result = await performPurchaseAction(payload, session.user);
+    if (__isImg) console.error(`[handlePurchaseAction t=${Date.now() - __t0}ms] action done`);
     if (wantsJson) {
-      writeJson(res, 200, { ok: true, result });
+      const body = { ok: true, result };
+      const bodyText = JSON.stringify(body);
+      if (__isImg) console.error(`[handlePurchaseAction t=${Date.now() - __t0}ms] writing json bodyLen=${bodyText.length}`);
+      writeJson(res, 200, body);
+      if (__isImg) console.error(`[handlePurchaseAction t=${Date.now() - __t0}ms] writeJson returned`);
       return;
     }
     writeRedirect(res, "/purchase");
