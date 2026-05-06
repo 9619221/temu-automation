@@ -26,6 +26,7 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/1688/token": ["admin", "manager"],
   "/api/1688/start": ["admin", "manager"],
   "/api/1688/refresh": ["admin", "manager"],
+  "/api/1688/accounts/delete": ["admin", "manager"],
   "/purchase": ["admin", "manager", "operations", "buyer", "finance"],
   "/api/purchase/workbench": ["admin", "manager", "operations", "buyer", "finance"],
   "/api/purchase/action": ["admin", "manager", "operations", "buyer", "finance"],
@@ -1471,90 +1472,118 @@ function renderUserManagement(users = [], currentUser = {}) {
   ].join("");
 }
 
-function render1688AuthPage(status = {}, requestOrigin = "") {
+function renderSinglePurchaseAccountCard(account, callbackUrl) {
+  const id = account?.id || "";
+  const label = account?.label || account?.memberId || account?.appKey || account?.id || "未命名";
+  const appKey = account?.appKey || "";
+  const memberId = account?.memberId || account?.resourceOwner || "";
+  const statusText = account?.authorized ? "已授权" : (account?.configured ? "已配置 / 未授权" : "未配置");
+  const statusClass = account?.authorized ? "status-ok" : "status-warn";
+  const isDisabled = account?.status === "disabled";
+  const expiry = account?.accessTokenExpiresAt
+    ? String(account.accessTokenExpiresAt).replace("T", " ").slice(0, 19)
+    : "-";
+  const refreshExpiry = account?.refreshTokenExpiresAt
+    ? String(account.refreshTokenExpiresAt).replace("T", " ").slice(0, 19)
+    : "-";
+  return `
+    <section class="card" style="${isDisabled ? "opacity: 0.65;" : ""}">
+      <div class="card-title" style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+        <span>${escapeHtml(label)}${isDisabled ? ' <span class="status status-warn">已禁用</span>' : ""}</span>
+        <span class="status ${statusClass}">${escapeHtml(statusText)}</span>
+      </div>
+      <div class="card-body">
+        <div class="muted">AppKey：<code>${escapeHtml(appKey || "-")}</code></div>
+        <div class="muted">绑定账号：${escapeHtml(memberId || "-")}</div>
+        <div class="muted">Access Token 到期：${escapeHtml(expiry)}</div>
+        <div class="muted">Refresh Token 到期：${escapeHtml(refreshExpiry)}</div>
+        <div class="muted" style="font-size: 11px;">ID：<code>${escapeHtml(id)}</code></div>
+
+        <details style="margin-top: 12px;">
+          <summary class="muted" style="cursor: pointer;">粘贴新 Access Token / 修改 Label</summary>
+          <form class="stacked-form" method="post" action="/api/1688/token" style="margin-top: 8px;">
+            <input type="hidden" name="purchase1688AccountId" value="${escapeHtml(id)}" />
+            <div class="form-grid">
+              <label class="inline-label">新 Access Token
+                <input class="mini-input full" name="accessToken" type="password" autocomplete="new-password" placeholder="粘贴新 token 覆盖；留空不改" />
+              </label>
+              <label class="inline-label">账号别名 Label
+                <input class="mini-input full" name="label" value="${escapeHtml(account?.label || "")}" placeholder="便于识别的别名" />
+              </label>
+              <label class="inline-label">到期时间
+                <input class="mini-input full" name="accessTokenExpiresAt" placeholder="可选" />
+              </label>
+            </div>
+            <div class="actions">
+              <button class="action-chip success" type="submit">保存修改</button>
+            </div>
+          </form>
+        </details>
+
+        <div class="actions" style="margin-top: 8px;">
+          <form class="inline-form" method="post" action="/api/1688/refresh">
+            <input type="hidden" name="purchase1688AccountId" value="${escapeHtml(id)}" />
+            <button class="action-chip" type="submit" ${account?.authorized ? "" : "disabled"}>刷新 Token</button>
+          </form>
+          <form class="inline-form" method="post" action="/api/1688/accounts/delete" onsubmit="return confirm('确定删除这个 1688 采购账号？被店铺设为默认时会被拒绝。');">
+            <input type="hidden" name="id" value="${escapeHtml(id)}" />
+            <button class="action-chip" style="border-color: #fecaca; color: #b91c1c;" type="submit">删除</button>
+          </form>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function render1688AuthPage(status = {}, requestOrigin = "", purchaseAccounts = []) {
   const origin = requestOrigin || "http://127.0.0.1";
-  const callbackUrl = status.redirectUri || `${origin}/api/1688/oauth/callback`;
-  const appKey = status.appKey || "";
-  const configuredLabel = status.configured ? "已保存配置" : "未配置";
-  const authorizedLabel = status.authorized ? "已授权" : "未授权";
-  const expiryText = status.accessTokenExpiresAt ? String(status.accessTokenExpiresAt).replace("T", " ").slice(0, 19) : "-";
-  const refreshExpiryText = status.refreshTokenExpiresAt ? String(status.refreshTokenExpiresAt).replace("T", " ").slice(0, 19) : "-";
+  const defaultCallbackUrl = status.redirectUri || `${origin}/api/1688/oauth/callback`;
+  const accountCount = purchaseAccounts.length;
+
+  const accountListHtml = accountCount === 0
+    ? `<section class="card"><div class="card-body muted">还没有任何 1688 采购账号。用下面的「新增账号」表单开始添加。</div></section>`
+    : purchaseAccounts.map((acct) => renderSinglePurchaseAccountCard(acct, defaultCallbackUrl)).join("");
 
   return `
     <section class="section">
       <div class="section-head">
         <div>
-          <div class="section-title">1688 开放平台授权</div>
-          <div class="section-subtitle">先在这里保存应用凭证，再跳转到 1688 完成买家账号授权。授权成功后，后续搜索商品、创建订单、同步订单和物流都会共用这份云端 token。</div>
+          <div class="section-title">1688 采购账号 (${accountCount})</div>
+          <div class="section-subtitle">同一公司可以绑定多个 1688 买家账号，每个 Temu 店铺可以指定默认采购账号。客户端推单时按「显式选 → 店铺默认 → 公司第一个」三级取凭据。</div>
         </div>
-        <span class="badge">${escapeHtml(authorizedLabel)}</span>
       </div>
       <div style="padding: 16px; display: grid; gap: 14px;">
         <div class="grid" style="margin-bottom: 0;">
-          <section class="card">
-            <div class="card-title">回调地址</div>
-            <div class="card-body">
-              <div>把下面地址填到 1688 开放平台应用的 OAuth 回调地址中。</div>
-              <p><code>${escapeHtml(callbackUrl)}</code></p>
-            </div>
-          </section>
-          <section class="card">
-            <div class="card-title">授权状态</div>
-            <div class="card-body">
-              <div><span class="status ${status.configured ? "status-ok" : "status-warn"}">${escapeHtml(configuredLabel)}</span></div>
-              <div style="margin-top: 8px;"><span class="status ${status.authorized ? "status-ok" : "status-warn"}">${escapeHtml(authorizedLabel)}</span></div>
-              <div class="muted" style="margin-top: 8px;">会员：${escapeHtml(status.memberId || status.aliId || status.resourceOwner || "-")}</div>
-              <div class="muted">Access Token 到期：${escapeHtml(expiryText)}</div>
-              <div class="muted">Refresh Token 到期：${escapeHtml(refreshExpiryText)}</div>
-            </div>
-          </section>
+          ${accountListHtml}
         </div>
 
-        <form class="stacked-form" method="post" action="/api/1688/config" style="max-width: 760px;">
-          <div class="form-grid">
-            <label class="inline-label">AppKey
-              <input class="mini-input full" name="appKey" value="${escapeHtml(appKey)}" required />
-            </label>
-            <label class="inline-label">AppSecret
-              <input class="mini-input full" name="appSecret" type="password" autocomplete="new-password" placeholder="${status.hasAppSecret ? "留空不修改" : "请输入 AppSecret"}" ${status.hasAppSecret ? "" : "required"} />
-            </label>
-            <label class="inline-label">回调地址
-              <input class="mini-input full" name="redirectUri" value="${escapeHtml(callbackUrl)}" required />
-            </label>
-          </div>
-          <div class="actions">
-            <button class="action-chip" type="submit">保存配置</button>
-          </div>
-        </form>
+        <details>
+          <summary class="action-chip" style="display: inline-block; cursor: pointer;">+ 新增 1688 采购账号</summary>
+          <div style="padding: 12px 0;">
+            <div class="muted" style="margin-bottom: 8px;">两步：先填 AppKey / AppSecret 创建账号；然后用同账号在 1688 开放平台拿 access_token，回到这里在新建出来的卡片上「粘贴新 Access Token」保存。</div>
 
-        <form class="stacked-form" method="post" action="/api/1688/token" style="max-width: 760px;">
-          <div class="section-subtitle" style="margin-bottom: 8px;">已有开放平台永久 Token 时，可以直接粘贴保存；不填到期时间表示长期有效。</div>
-          <div class="form-grid">
-            <label class="inline-label">1688 Token
-              <input class="mini-input full" name="accessToken" type="password" autocomplete="new-password" placeholder="粘贴开放平台已授权 token" required />
-            </label>
-            <label class="inline-label">授权账号
-              <input class="mini-input full" name="memberId" value="${escapeHtml(status.memberId || status.resourceOwner || "")}" placeholder="例如 chenjialin202" />
-            </label>
-            <label class="inline-label">到期时间
-              <input class="mini-input full" name="accessTokenExpiresAt" placeholder="可选；不填表示长期有效" />
-            </label>
+            <form class="stacked-form" method="post" action="/api/1688/config" style="max-width: 760px;">
+              <input type="hidden" name="mode" value="new" />
+              <div class="form-grid">
+                <label class="inline-label">AppKey
+                  <input class="mini-input full" name="appKey" required placeholder="例如 4607218" />
+                </label>
+                <label class="inline-label">AppSecret
+                  <input class="mini-input full" name="appSecret" type="password" autocomplete="new-password" required />
+                </label>
+                <label class="inline-label">账号别名 Label
+                  <input class="mini-input full" name="label" placeholder="便于识别的别名（如 公司主账号 / 代采账号）" />
+                </label>
+                <label class="inline-label">回调地址
+                  <input class="mini-input full" name="redirectUri" value="${escapeHtml(defaultCallbackUrl)}" required />
+                </label>
+              </div>
+              <div class="actions">
+                <button class="action-chip" type="submit">保存为新账号</button>
+              </div>
+            </form>
           </div>
-          <div class="actions">
-            <button class="action-chip success" type="submit" ${status.appKey && status.hasAppSecret ? "" : "disabled"}>保存 Token</button>
-          </div>
-        </form>
-
-        <div class="actions">
-          <form class="inline-form" method="post" action="/api/1688/start">
-            <input type="hidden" name="appKey" value="${escapeHtml(appKey)}" />
-            <input type="hidden" name="redirectUri" value="${escapeHtml(callbackUrl)}" />
-            <button class="action-chip secondary" type="submit" ${status.configured ? "" : "disabled"}>去 1688 授权</button>
-          </form>
-          <form class="inline-form" method="post" action="/api/1688/refresh">
-            <button class="action-chip success" type="submit" ${status.authorized ? "" : "disabled"}>刷新 Token</button>
-          </form>
-        </div>
+        </details>
       </div>
     </section>
   `;
@@ -2589,6 +2618,7 @@ function createRequestHandler(options = {}) {
   const receive1688Message = options.receive1688Message || (() => {
     throw new Error("1688 message handler is not available");
   });
+  const list1688PurchaseAccounts = options.list1688PurchaseAccounts || (() => ({ accounts: [] }));
   const validateSessionUser = options.validateSessionUser || null;
   const verifyLogin = options.verifyLogin || (() => null);
 
@@ -3021,9 +3051,41 @@ async function handle1688RefreshRequest({ req, res, session, refresh1688AccessTo
     return;
   }
   try {
-    const status = await refresh1688AccessToken(session.user);
+    const payload = await readLoginPayload(req);
+    const status = await refresh1688AccessToken(session.user, {
+      purchase1688AccountId: payload?.purchase1688AccountId,
+    });
     if (wantsJson) {
       writeJson(res, 200, { ok: true, status });
+      return;
+    }
+    writeRedirect(res, "/1688");
+  } catch (error) {
+    if (wantsJson) {
+      writeJson(res, 400, { ok: false, error: error?.message || String(error) });
+      return;
+    }
+    render1688Error(res, session, error, 400);
+  }
+}
+
+async function handle1688AccountDeleteRequest({ req, res, session, performPurchaseAction }) {
+  const wantsJson = String(req.headers.accept || "").includes("application/json")
+    || String(req.headers["content-type"] || "").includes("application/json");
+  if (req.method !== "POST") {
+    writeJson(res, 405, { ok: false, error: "Method not allowed" });
+    return;
+  }
+  try {
+    const payload = await readLoginPayload(req);
+    const id = String(payload?.id || "").trim();
+    if (!id) throw new Error("id is required");
+    await performPurchaseAction({
+      action: "delete_1688_purchase_account",
+      id,
+    }, session.user);
+    if (wantsJson) {
+      writeJson(res, 200, { ok: true, id });
       return;
     }
     writeRedirect(res, "/1688");
@@ -3534,6 +3596,16 @@ async function handleRequest({
       return;
     }
 
+    if (pathname === "/api/1688/accounts/delete") {
+      await handle1688AccountDeleteRequest({
+        req,
+        res,
+        session,
+        performPurchaseAction,
+      });
+      return;
+    }
+
     if (pathname === "/api/purchase/workbench") {
       const payload = await readOptionalPayload(req);
       writeJson(res, 200, {
@@ -3685,14 +3757,21 @@ async function handleRequest({
     }
 
     if (pathname === "/1688") {
-      const status = await get1688AuthStatus();
+      const status = await get1688AuthStatus(session.user);
+      let purchaseAccounts = [];
+      try {
+        const result = list1688PurchaseAccounts(session.user?.companyId);
+        purchaseAccounts = Array.isArray(result?.accounts) ? result.accounts : [];
+      } catch {
+        purchaseAccounts = [];
+      }
       writeHtml(res, renderShell({
         title: "1688 授权",
-      subtitle: "绑定 1688 开放平台应用和买家账号，后续采购找货源、下单、订单同步会使用这份云端授权。",
+      subtitle: "绑定 1688 开放平台应用和买家账号；同一公司可以保存多个 1688 采购账号供推单时选择。",
         cards: [],
         currentPath: pathname,
         user: session.user,
-        content: render1688AuthPage(status, getRequestOrigin(req)),
+        content: render1688AuthPage(status, getRequestOrigin(req), purchaseAccounts),
       }));
       return;
     }

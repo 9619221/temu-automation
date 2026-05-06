@@ -13347,6 +13347,7 @@ function startLanService(payload = {}) {
     complete1688OAuth,
     refresh1688AccessToken,
     receive1688Message,
+    list1688PurchaseAccounts,
   });
 }
 
@@ -13486,6 +13487,7 @@ async function startErpHeadlessServer(options = {}) {
     complete1688OAuth,
     refresh1688AccessToken,
     receive1688Message,
+    list1688PurchaseAccounts,
   });
   const auto1688OrderSync = startAuto1688OrderSync(env);
 
