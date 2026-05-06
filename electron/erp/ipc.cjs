@@ -11340,17 +11340,15 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
   }
 
   if (action === "source_1688_image") {
-    const __td0 = Date.now();
     const result = await source1688ImageAction({ db, services, payload, actor });
-    console.error(`[source_1688_image dispatch t=${Date.now() - __td0}ms] action returned, calling getWorkbench`);
-    const __td1 = Date.now();
     broadcastPurchaseUpdate(action, sanitizeAlphaShopPayload(payload), actor, result);
-    const workbench = getPurchaseWorkbenchForAction(payload, actor);
-    console.error(`[source_1688_image dispatch t=${Date.now() - __td0}ms] workbench done in ${Date.now() - __td1}ms`);
+    // 默认不返 workbench——source_1688_image 后含 50 个 PR + N 个候选的 workbench 响应
+    // 体可以达到几 MB，反代 caddy 转发时容易 broken pipe（实测）。客户端 runAction 在
+    // result.workbench 缺失时会自动单独调 /api/purchase/workbench 拉数据，传输更稳。
     return {
       action,
       result,
-      workbench,
+      workbench: payload.refreshWorkbench === true ? getPurchaseWorkbenchForAction(payload, actor) : null,
     };
   }
 
