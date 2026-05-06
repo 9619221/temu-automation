@@ -2011,10 +2011,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           && payload.includeWorkbench !== false
           && !QUICK_PURCHASE_ACTIONS.has(String(payload.action || ""))
         );
-      // source_1688_image / push_1688_order 这种含外部 1688 网络调用的 action 需要更长 IPC 超时
-      const slowActions = new Set(["source_1688_image", "push_1688_order", "preview_1688_order", "preview_1688_url_specs"]);
+      // 所有含外部 1688 / alphashop 网络调用的 action 都用更长 IPC 超时（120s）；
+      // 本地 DB 写动作走默认 60s。命中名字里有 1688/alphashop 即视为慢动作。
+      const actionName = String(payload.action || "");
+      const isSlowAction = /1688|alphashop/i.test(actionName)
+        || actionName === "preview_1688_url_specs"  // 显式列表保险
+        || actionName === "refresh_1688_product_detail";
       const explicitTimeoutMs = Number.isFinite(options?.timeoutMs) ? options!.timeoutMs : null;
-      const inferredTimeoutMs = slowActions.has(String(payload.action || "")) ? 120000 : null;
+      const inferredTimeoutMs = isSlowAction ? 120000 : null;
       const finalTimeoutMs = explicitTimeoutMs ?? inferredTimeoutMs ?? undefined;
       const result = await erp.purchase.action({
         ...payload,

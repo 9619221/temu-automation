@@ -271,7 +271,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
       action: (payload, options) => invokeWithTimeout(
         "erp:purchase:action",
         payload || {},
-        Number.isFinite(options?.timeoutMs) ? options.timeoutMs : 60000,
+        // 默认 120s：很多 1688 / alphashop 相关 action 含外部网络调用，60s 默认偏紧；
+        // 调用方可以传 options.timeoutMs 显式覆盖。
+        Number.isFinite(options?.timeoutMs) ? options.timeoutMs : 120000,
       ),
       local1688Inquiry: (payload) => ipcRenderer.invoke("erp:purchase:local-1688-inquiry", payload || {}),
       open1688Detail: (payload) => ipcRenderer.invoke("erp:purchase:open-1688-detail", payload || {}),
