@@ -1,10 +1,27 @@
 import { useEffect, useState } from "react";
 import { Form, InputNumber, Switch, Button, Tag, Progress, Space, Typography, message } from "antd";
-import { CloudDownloadOutlined, CheckCircleOutlined, SyncOutlined, ReloadOutlined, LinkOutlined } from "@ant-design/icons";
+import { CloudDownloadOutlined, CheckCircleOutlined, SyncOutlined, ReloadOutlined, LinkOutlined, ApiOutlined } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
 import { useErpAuth } from "../contexts/ErpAuthContext";
 
 const { Text } = Typography;
+
+type ProbeRow = {
+  name: string;
+  url: string;
+  elapsedMs: number;
+  status: number;
+  ok: boolean;
+  antiBot?: boolean;
+  bodyPreview?: string;
+  error?: string;
+  causeError?: string;
+};
+type ProbeResult = {
+  runtime?: { node?: string; platform?: string; arch?: string };
+  timestamp?: string;
+  probes: ProbeRow[];
+};
 const appAPI = window.electronAPI?.app;
 const erp = window.electronAPI?.erp;
 const store = window.electronAPI?.store;
@@ -14,8 +31,23 @@ export default function Settings() {
   const [version, setVersion] = useState("");
   const [updateStatus, setUpdateStatus] = useState<any>({ status: "idle", message: "" });
   const [clientStatus, setClientStatus] = useState<{ isClientMode?: boolean; serverUrl?: string } | null>(null);
+  const [diagRunning, setDiagRunning] = useState(false);
+  const [diagResult, setDiagResult] = useState<ProbeResult | null>(null);
   const auth = useErpAuth();
   const isAdmin = auth.currentUser?.role === "admin";
+
+  const runMtopDiagnostic = async () => {
+    setDiagRunning(true);
+    setDiagResult(null);
+    try {
+      const result = await (erp as any)?.diagnostics?.probe1688Mtop?.({ stepTimeoutMs: 12000 });
+      setDiagResult(result || null);
+    } catch (e: any) {
+      message.error(e?.message || "诊断失败");
+    } finally {
+      setDiagRunning(false);
+    }
+  };
 
   useEffect(() => {
     appAPI?.getVersion().then(setVersion).catch(() => {});
@@ -170,6 +202,48 @@ export default function Settings() {
           </Space>
         </div>
       ) : null}
+
+      <div className="app-panel" style={{ marginBottom: 16 }}>
+        <div className="app-panel__title">
+          <div className="app-panel__title-main">1688 网络诊断</div>
+        </div>
+        <Space direction="vertical" style={{ width: "100%" }} size={10}>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            「以图搜款」如果在某台电脑上一直转圈/超时，点这个按钮会从本机依次探 4 个 1688 mtop 端点，每步打耗时和状态。把结果截图发给开发就能定位是哪一步、哪个端点的问题。
+          </Text>
+          <Space>
+            <Button icon={<ApiOutlined />} onClick={runMtopDiagnostic} loading={diagRunning} disabled={diagRunning}>
+              开始 1688 网络诊断
+            </Button>
+            {diagResult?.timestamp ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {new Date(diagResult.timestamp).toLocaleTimeString()} · {diagResult.runtime?.platform || ""} {diagResult.runtime?.arch || ""} · node {diagResult.runtime?.node || "-"}
+              </Text>
+            ) : null}
+          </Space>
+          {diagResult?.probes?.length ? (
+            <div style={{ background: "#f6f7f9", padding: 10, borderRadius: 6, fontFamily: "Consolas, Menlo, monospace", fontSize: 12, lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+              {diagResult.probes.map((row) => {
+                const slow = row.elapsedMs > 5000;
+                const tone = !row.ok ? "#c62828" : (slow ? "#ef6c00" : "#2e7d32");
+                return (
+                  <div key={row.name} style={{ marginBottom: 8 }}>
+                    <div style={{ color: tone, fontWeight: 600 }}>
+                      [{row.elapsedMs}ms] {row.ok ? "OK" : (row.antiBot ? "ANTI-BOT" : "FAIL")} · {row.name}
+                      {slow ? "  *** SLOW ***" : ""}
+                    </div>
+                    <div style={{ color: "#5f6368" }}>HTTP {row.status || "-"} · {row.url}</div>
+                    {row.error ? <div style={{ color: "#c62828" }}>error: {row.error}</div> : null}
+                    {row.causeError ? <div style={{ color: "#c62828" }}>cause: {row.causeError}</div> : null}
+                    {row.antiBot ? <div style={{ color: "#c62828" }}>!!! 命中反爬：响应里出现 rgv587_flag / deny_h5 / punish</div> : null}
+                    {row.bodyPreview ? <div style={{ color: "#5f6368" }}>body: {row.bodyPreview}</div> : null}
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+        </Space>
+      </div>
 
       <Form
         form={form}

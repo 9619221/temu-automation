@@ -13697,6 +13697,81 @@ function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:lan:get-status", () => getLanServiceStatus());
   ipcMain.handle("erp:lan:start", (_event, payload) => startLanService(payload || {}));
   ipcMain.handle("erp:lan:stop", () => stopLanService());
+  ipcMain.handle("erp:diagnostics:probe-1688-mtop", (_event, payload) => probe1688MtopFromClient(payload || {}));
+}
+
+// 在客户端本机依次探 4 个 1688 mtop 端点 + 主控端 health。
+// 每步独立 12s 上限。返回结构：[{ name, url, elapsedMs, status, ok, error, antiBot, bodyPreview }, ...]
+async function probe1688MtopFromClient(options = {}) {
+  const fetchImpl = (typeof fetch === "function" ? fetch : (await import("undici")).fetch);
+  const stepTimeoutMs = Number(options.stepTimeoutMs) || 12000;
+  const probes = [
+    {
+      name: "01-erp-health",
+      url: "https://erp.temu.chat/health",
+    },
+    {
+      name: "02-mmstat-cna",
+      url: `https://log.mmstat.com/eg.js?t=${Date.now()}`,
+      headers: { Referer: "https://www.1688.com/" },
+    },
+    {
+      name: "03-mtop-token",
+      url: `https://h5api.m.1688.com/h5/mtop.ovs.traffic.landing.seotaglist.queryhotsearchword/1.0/?jsv=2.7.2&appKey=12574478&t=${Date.now()}&api=mtop.ovs.traffic.landing.seotaglist.queryHotSearchWord&v=1.0&type=jsonp&dataType=jsonp&callback=mtopjsonp1&preventFallback=true&data=%7B%7D`,
+    },
+    {
+      name: "04-search-image",
+      url: "https://search.1688.com/service/imageSearchOfferResultViewService?tab=imageSearch&imageId=test&beginPage=1&pageSize=10",
+      headers: { Origin: "https://s.1688.com", Referer: "https://s.1688.com/" },
+    },
+  ];
+  const results = [];
+  for (const probe of probes) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), stepTimeoutMs);
+    const t0 = Date.now();
+    try {
+      const res = await fetchImpl(probe.url, {
+        method: "GET",
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+          Accept: "*/*",
+          ...(probe.headers || {}),
+        },
+        signal: controller.signal,
+      });
+      const text = await res.text();
+      const elapsedMs = Date.now() - t0;
+      const antiBot = /rgv587_flag|deny_h5|punish/i.test(text);
+      results.push({
+        name: probe.name,
+        url: probe.url.split("?")[0],
+        elapsedMs,
+        status: res.status,
+        ok: res.ok && !antiBot,
+        antiBot,
+        bodyPreview: text.slice(0, 240).replace(/\s+/g, " "),
+      });
+    } catch (e) {
+      const elapsedMs = Date.now() - t0;
+      results.push({
+        name: probe.name,
+        url: probe.url.split("?")[0],
+        elapsedMs,
+        status: 0,
+        ok: false,
+        error: `${e?.code || ""} ${e?.message || e}`.trim(),
+        causeError: e?.cause ? `${e.cause.code || ""} ${e.cause.message || e.cause}`.trim() : "",
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return {
+    runtime: { node: process.version, platform: process.platform, arch: process.arch },
+    timestamp: new Date().toISOString(),
+    probes: results,
+  };
 }
 
 function closeErp() {

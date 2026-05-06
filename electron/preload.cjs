@@ -308,6 +308,15 @@ contextBridge.exposeInMainWorld("electronAPI", {
       start: (payload) => ipcRenderer.invoke("erp:lan:start", payload || {}),
       stop: () => ipcRenderer.invoke("erp:lan:stop"),
     },
+    diagnostics: {
+      // 跑客户端到 1688 mtop 各端点的连通性 / 反爬探针，返回每步耗时和状态。
+      // 用来定位「以图搜款」在用户家里宽带卡住的根因。
+      probe1688Mtop: (options) => invokeWithTimeout(
+        "erp:diagnostics:probe-1688-mtop",
+        options || {},
+        Number.isFinite(options?.timeoutMs) ? options.timeoutMs : 90000,
+      ),
+    },
     events: {
       onPurchaseUpdate: (handler) => {
         const listener = (_event, payload) => handler(payload);
