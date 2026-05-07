@@ -5598,7 +5598,10 @@ async function source1688ImageAction({ db, services, payload, actor }) {
     }
   }
   __log(`search phase done normalized=${normalized.length} mode=${sourceMode}`);
-  const emptyReason = normalized.length === 0 ? buildImageSearchEmptyReason(conversionError || searchError) : "";
+  const clientEmptyReason = optionalString(payload.localImageSearch?.emptyReason);
+  const emptyReason = normalized.length === 0
+    ? clientEmptyReason || buildImageSearchEmptyReason(conversionError || searchError)
+    : "";
   const candidatesToImport = normalized.slice(0, importLimit);
   const insertCandidates = db.transaction(() => {
     if (pr.status === "submitted") {
@@ -7995,7 +7998,8 @@ async function resolve1688NumericSkuMapping(db, mapping = {}) {
   const offerId = optionalString(mapping.external_offer_id || mapping.externalOfferId);
   const skuId = optionalString(mapping.external_sku_id || mapping.externalSkuId);
   const specId = optionalString(mapping.external_spec_id || mapping.externalSpecId);
-  const lookupSkuId = isLikely1688NumericSkuId(skuId) ? skuId : null;
+  const specLooksLikeSkuId = isLikely1688NumericSkuId(specId) ? specId : null;
+  const lookupSkuId = isLikely1688NumericSkuId(skuId) ? skuId : specLooksLikeSkuId;
   if (!offerId || (!lookupSkuId && !specId)) return null;
   const cachedMatch = findCached1688SkuMatch(mapping, lookupSkuId, specId);
   if (cachedMatch?.specId) {
@@ -12708,6 +12712,20 @@ function toRemoteImageSearchMockResult(item = {}) {
   };
 }
 
+function buildClientImageSearchEmptyPayload(payload = {}, localImageSearch = {}) {
+  return {
+    ...payload,
+    imageDataUrl: undefined,
+    imageData: undefined,
+    mockResults: [],
+    localImageSearch: {
+      source: "client_image_presearch_empty",
+      totalFound: 0,
+      ...localImageSearch,
+    },
+  };
+}
+
 async function buildClientImageSearchMockResults(payload = {}) {
   if (payload.action !== "source_1688_image" || Array.isArray(payload.mockResults)) return null;
   // 客户端预搜默认开启（v0.2.13 起）。原因：
@@ -12727,23 +12745,32 @@ async function buildClientImageSearchMockResults(payload = {}) {
   // 任意一步慢/挂（用户 IP 偶尔被 1688 反爬刷出 deny_h5、token 接口卡住等）超过 30s
   // 就放弃预搜，让主控端 fallback 走 alphashop。alphashop 对外站图返回空数组但 1-2 秒
   // 就回，至少不会撞 IPC 120s 超时。两台电脑一台行一台不行多半就是这个。
-  const PRESEARCH_BUDGET_MS = 30000;
+  const MTOP_BUDGET_MS = 30000;
+  const TOTAL_PRESEARCH_BUDGET_MS = 75000;
   const t0 = Date.now();
-  function remainingBudget() {
-    return Math.max(1500, PRESEARCH_BUDGET_MS - (Date.now() - t0));
+  function elapsedMs() {
+    return Date.now() - t0;
   }
-  function timeoutSentinel(label) {
+  function remainingTotalBudget() {
+    return Math.max(0, TOTAL_PRESEARCH_BUDGET_MS - elapsedMs());
+  }
+  function remainingMtopBudget() {
+    return Math.max(0, Math.min(MTOP_BUDGET_MS - elapsedMs(), remainingTotalBudget()));
+  }
+  function timeoutSentinel(label, budgetMs) {
+    const timeoutMs = Math.max(1, budgetMs);
     return new Promise((_, reject) => {
-      setTimeout(() => reject(new Error(`client image presearch timeout at ${label}`)), remainingBudget());
+      setTimeout(() => reject(new Error(`client image presearch timeout at ${label}`)), timeoutMs);
     });
   }
 
   let imageBuffer = parsedUpload?.buffer || null;
   if (!imageBuffer && imgUrl) {
     try {
+      const fetchBudget = Math.max(1500, Math.min(8000, remainingMtopBudget() || remainingTotalBudget()));
       imageBuffer = await Promise.race([
         fetchImageBuffer(imgUrl),
-        timeoutSentinel("fetchImageBuffer"),
+        timeoutSentinel("fetchImageBuffer", fetchBudget),
       ]);
     } catch (e) {
       console.error(`[buildClientImageSearchMockResults] fetch image failed: ${e?.message || e}`);
@@ -12754,19 +12781,22 @@ async function buildClientImageSearchMockResults(payload = {}) {
 
   let localResult = null;
   let mtopError = null;
-  try {
-    localResult = await Promise.race([
-      run1688WebImageSearch({
-        imageBuffer,
-        beginPage,
-        pageSize,
-        timeoutMs: Math.min(remainingBudget(), 12000),
-      }),
-      timeoutSentinel("run1688WebImageSearch"),
-    ]);
-  } catch (e) {
-    mtopError = e;
-    console.error(`[buildClientImageSearchMockResults] 1688 mtop failed in ${Date.now() - t0}ms: ${e?.message || e}`);
+  const mtopBudget = remainingMtopBudget();
+  if (mtopBudget >= 1500) {
+    try {
+      localResult = await Promise.race([
+        run1688WebImageSearch({
+          imageBuffer,
+          beginPage,
+          pageSize,
+          timeoutMs: Math.min(mtopBudget, 12000),
+        }),
+        timeoutSentinel("run1688WebImageSearch", mtopBudget),
+      ]);
+    } catch (e) {
+      mtopError = e;
+      console.error(`[buildClientImageSearchMockResults] 1688 mtop failed in ${elapsedMs()}ms: ${e?.message || e}`);
+    }
   }
 
   // mtop 拿到候选直接用
@@ -12780,7 +12810,7 @@ async function buildClientImageSearchMockResults(payload = {}) {
         source: "1688_web_image_client",
         imageId: localResult.imageId,
         totalFound: localResult.products.length,
-        elapsedMs: Date.now() - t0,
+        elapsedMs: elapsedMs(),
       },
     };
   }
@@ -12791,7 +12821,7 @@ async function buildClientImageSearchMockResults(payload = {}) {
   // 客户端 (electron 主进程) 才有 workerInvoker；主控端 (Linux 服务器，没图形界面跑不了 Chrome)
   // 没有 workerInvoker，会跳过这步直接 fallback alphashop。
   if (erpState.workerInvoker && imgUrl) {
-    const browserBudget = Math.min(remainingBudget() + 60000, 60000);
+    const browserBudget = Math.min(remainingTotalBudget(), 45000);
     if (browserBudget >= 8000) {
       console.error(`[buildClientImageSearchMockResults] mtop failed, falling back to Playwright air image search (budget=${browserBudget}ms)`);
       try {
@@ -12809,7 +12839,7 @@ async function buildClientImageSearchMockResults(payload = {}) {
             localImageSearch: {
               source: browserResult.source || "1688_air_image_browser",
               totalFound: browserResult.offers.length,
-              elapsedMs: Date.now() - t0,
+              elapsedMs: elapsedMs(),
             },
           };
         }
@@ -12820,12 +12850,20 @@ async function buildClientImageSearchMockResults(payload = {}) {
       } catch (e) {
         console.error(`[buildClientImageSearchMockResults] Playwright fallback failed: ${e?.message || e}`);
         // 原始 mtop 错误更重要的话往上抛；否则继续 fallback 主控端
-        if (mtopError && /captcha|punish|需要人工|需要|登录/.test(String(e?.message || ""))) throw e;
+        if (/captcha|punish|需要人工|需要|登录|人机|滑块|拼图/.test(String(e?.message || ""))) throw e;
       }
     }
   }
 
   // 最后兜底：让主控端跑 alphashop（外站图永远 0 个，但至少返回快）
+  if (erpState.workerInvoker && imgUrl && process.env.ERP_CLIENT_IMAGE_SERVER_FALLBACK !== "1") {
+    return buildClientImageSearchEmptyPayload(payload, {
+      source: "client_image_presearch_empty",
+      elapsedMs: elapsedMs(),
+      emptyReason: "这张图没有搜到候选；如果浏览器里弹出 1688 登录或滑块，请先完成后再重试。",
+      mtopError: optionalString(mtopError?.message || mtopError),
+    });
+  }
   return null;
 }
 
@@ -13183,7 +13221,9 @@ async function performPurchaseActionRuntime(payload = {}) {
     }
     try {
       remotePayload = await buildClientImageSearchMockResults(remotePayload) || remotePayload;
-    } catch {}
+    } catch (error) {
+      if (payload?.action === "source_1688_image") throw error;
+    }
     if (payload?.action === "refresh_1688_product_detail") {
       remotePayload = await buildClientProductDetailMockPayload(remotePayload) || remotePayload;
     }
