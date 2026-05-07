@@ -4218,6 +4218,78 @@ function getPurchaseOrder(db, poId) {
   return row;
 }
 
+function findLatestPurchaseOrderByRequestId(db, prId) {
+  const requestId = optionalString(prId);
+  if (!requestId) return null;
+  return db.prepare(`
+    SELECT *
+    FROM erp_purchase_orders
+    WHERE pr_id = ?
+    ORDER BY
+      COALESCE(updated_at, created_at, '') DESC,
+      id DESC
+    LIMIT 1
+  `).get(requestId) || null;
+}
+
+function getPurchaseOrderActionRow(db, poId) {
+  const id = optionalString(poId);
+  if (!id) return null;
+  return db.prepare(`
+    SELECT
+      po.*,
+      acct.name AS account_name,
+      supplier.name AS supplier_name,
+      creator.name AS created_by_name,
+      pr.status AS pr_status,
+      GROUP_CONCAT(DISTINCT sku.internal_sku_code || ' ' || sku.product_name) AS sku_summary,
+      GROUP_CONCAT(DISTINCT sku.internal_sku_code) AS sku_codes,
+      GROUP_CONCAT(DISTINCT sku.product_name) AS product_names,
+      (
+        SELECT first_sku.image_url
+        FROM erp_purchase_order_lines first_line
+        LEFT JOIN erp_skus first_sku ON first_sku.id = first_line.sku_id
+        WHERE first_line.po_id = po.id
+          AND COALESCE(first_sku.image_url, '') <> ''
+        ORDER BY first_line.id ASC
+        LIMIT 1
+      ) AS sku_image_url,
+      COUNT(DISTINCT line.id) AS line_count,
+      COALESCE(SUM(line.qty), 0) AS total_qty,
+      COALESCE(SUM(line.received_qty), 0) AS received_qty,
+      (
+        SELECT COUNT(*)
+        FROM erp_purchase_order_lines map_line
+        JOIN erp_sku_1688_sources map_source
+          ON map_source.account_id = map_line.account_id
+         AND map_source.sku_id = map_line.sku_id
+         AND map_source.status = 'active'
+        WHERE map_line.po_id = po.id
+      ) AS mapping_count,
+      (
+        SELECT COUNT(*)
+        FROM erp_1688_delivery_addresses addr
+        WHERE addr.account_id = po.account_id
+          AND addr.status = 'active'
+      ) AS delivery_address_count
+    FROM erp_purchase_orders po
+    LEFT JOIN erp_accounts acct ON acct.id = po.account_id
+    LEFT JOIN erp_suppliers supplier ON supplier.id = po.supplier_id
+    LEFT JOIN erp_users creator ON creator.id = po.created_by
+    LEFT JOIN erp_purchase_requests pr ON pr.id = po.pr_id
+    LEFT JOIN erp_purchase_order_lines line ON line.po_id = po.id
+    LEFT JOIN erp_skus sku ON sku.id = line.sku_id
+    WHERE po.id = ?
+    GROUP BY po.id
+  `).get(id) || null;
+}
+
+function toPurchaseOrderResult(db, poOrId) {
+  const poId = typeof poOrId === "object" ? poOrId?.id : poOrId;
+  const row = getPurchaseOrderActionRow(db, poId);
+  return toCamelRow(row || (typeof poOrId === "object" ? poOrId : null));
+}
+
 function getLatestPaymentApproval(db, payload = {}) {
   const paymentApprovalId = optionalString(payload.paymentApprovalId);
   if (paymentApprovalId) {
@@ -7582,6 +7654,17 @@ function generatePurchaseOrderAction({ db, services, payload, actor }) {
   assertActorRole(actor, ["buyer", "manager", "admin"], "生成采购单");
   const prId = requireString(payload.prId || payload.id, "prId");
   let pr = getPurchaseRequest(db, prId);
+  const existingPo = findLatestPurchaseOrderByRequestId(db, prId);
+  if (pr.status === "converted_to_po" && existingPo) {
+    markPurchaseRequestRead(db, pr.id, actor);
+    return {
+      alreadyGenerated: true,
+      purchaseOrder: toPurchaseOrderResult(db, existingPo),
+    };
+  }
+  if (pr.status === "converted_to_po") {
+    throw new Error("这个采购需求已标记为已生成采购单，请刷新采购中心后查看采购单列表");
+  }
   const candidate = applySelected1688SpecToCandidate(
     getCandidateForPo(db, pr, optionalString(payload.candidateId), actor, {
       preferSku1688Source: Boolean(payload.preferSku1688Source || payload.preferSku1688Mapping || payload.useSku1688Source),
@@ -7696,7 +7779,7 @@ function generatePurchaseOrderAction({ db, services, payload, actor }) {
   return {
     transition,
     sku1688Source,
-    purchaseOrder: toCamelRow(afterPo),
+    purchaseOrder: toPurchaseOrderResult(db, afterPo),
   };
 }
 

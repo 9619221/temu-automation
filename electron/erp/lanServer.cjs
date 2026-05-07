@@ -1751,10 +1751,20 @@ function renderQuoteFeedbackForm(row, model = {}, user = {}) {
   `;
 }
 
-function renderGeneratePoForm(row, user = {}) {
+function findPurchaseOrderForRequest(model = {}, prId) {
+  const purchaseOrders = Array.isArray(model.purchaseOrders) ? model.purchaseOrders : [];
+  return purchaseOrders.find((item) => item.prId === prId || item.pr_id === prId) || null;
+}
+
+function renderGeneratePoForm(row, user = {}, model = {}) {
   const role = user?.role || "";
   const candidates = Array.isArray(row.candidates) ? row.candidates : [];
   if (!canRole(role, ["buyer", "manager", "admin"])) return "";
+  const existingPo = findPurchaseOrderForRequest(model, row.id);
+  if (existingPo || row.status === "converted_to_po") {
+    const poNo = existingPo?.poNo || existingPo?.po_no || existingPo?.id || "";
+    return `<span class="status">已生成采购单${poNo ? `：${escapeHtml(poNo)}` : ""}</span>`;
+  }
   if (!candidates.length || !["submitted", "buyer_processing", "sourced", "waiting_ops_confirm"].includes(row.status)) return "";
   return `
     <form class="compact-form" method="post" action="/api/purchase/action">
@@ -1871,7 +1881,7 @@ function renderPurchaseRequestActionsV2(row, user, model = {}) {
     }));
   }
   actions.push(renderQuoteFeedbackForm(row, model, user));
-  actions.push(renderGeneratePoForm(row, user));
+  actions.push(renderGeneratePoForm(row, user, model));
   actions.push(renderCommentForm(row, user));
   const html = actions.filter(Boolean).join("");
   return html ? `<div class="actions">${html}</div>` : renderUnavailableAction("无待办");

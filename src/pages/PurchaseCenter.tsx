@@ -233,6 +233,7 @@ interface PurchaseRequestRow {
 
 interface PurchaseOrderRow {
   id: string;
+  prId?: string | null;
   poNo?: string;
   accountId?: string | null;
   accountName?: string;
@@ -1001,6 +1002,9 @@ function translate1688BusinessError(rawMessage: string): string | null {
 
 function purchaseActionErrorMessage(error: any, action?: string) {
   const message = cleanRemoteErrorMessage(error);
+  if (action === "generate_po" && /Transition denied: purchase_request .* via generate_po/i.test(message)) {
+    return "采购单已生成，请刷新后在采购单列表查看";
+  }
   if (is1688AclDeniedError(error, message)) {
     if (action === "refresh_1688_product_detail") {
       return message || "1688 官方商品详情接口没有权限，已无法从官方接口同步规格；请确认遨虾 productDetailQuery 密钥配置后重试。";
@@ -1318,6 +1322,10 @@ function buildPurchaseRequestSearchText(row: PurchaseRequestRow) {
       candidate.externalSpecId,
     ]),
   ].map((item) => String(item ?? "")).join(" ");
+}
+
+function purchaseOrderBelongsToRequest(row: PurchaseOrderRow, prId: string) {
+  return row.prId === prId || (row as any).pr_id === prId;
 }
 
 function buildPurchaseOrderSearchText(row: PurchaseOrderRow) {
@@ -1751,6 +1759,29 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       return { ...prev, purchaseOrders: nextList };
     });
     return snapshot;
+  }, []);
+
+  const upsertGeneratedPurchaseOrder = useCallback((prId: string, generatedPo?: PurchaseOrderRow | null) => {
+    if (!generatedPo?.id) return;
+    setData((prev) => {
+      const poWithRequest = {
+        ...generatedPo,
+        prId: generatedPo.prId ?? (generatedPo as any).pr_id ?? prId,
+      };
+      const previousOrders = prev.purchaseOrders || [];
+      const orderIndex = previousOrders.findIndex((item) => item.id === poWithRequest.id);
+      const purchaseOrders = orderIndex >= 0
+        ? previousOrders.map((item, index) => (index === orderIndex ? { ...item, ...poWithRequest } : item))
+        : [poWithRequest, ...previousOrders];
+      const purchaseRequests = Array.isArray(prev.purchaseRequests)
+        ? prev.purchaseRequests.map((item) => (
+          item.id === prId ? { ...item, status: "converted_to_po" } : item
+        ))
+        : prev.purchaseRequests;
+      const merged = { ...prev, purchaseOrders, purchaseRequests };
+      writeCachedPurchaseWorkbench(merged);
+      return merged;
+    });
   }, []);
 
   const applyWorkbench = useCallback((nextData: PurchaseWorkbench) => {
@@ -3267,6 +3298,15 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   };
 
   const generatePurchaseOrderForRow = async (row: PurchaseRequestRow) => {
+    const existingPo = purchaseOrders.find((item) => purchaseOrderBelongsToRequest(item, row.id));
+    if (row.status === "converted_to_po" || existingPo) {
+      if (existingPo) {
+        setActiveQueueKey("all_orders");
+        setPurchaseSearchText(existingPo.poNo || existingPo.id);
+      }
+      message.info(existingPo ? `采购单已生成：${existingPo.poNo || existingPo.id}` : "采购单已生成，请刷新后查看采购单列表");
+      return;
+    }
     const hasMapping = Number(row.mappingCount || 0) > 0;
     const result = await runAction(`po-${row.id}`, {
       action: "generate_po",
@@ -3276,6 +3316,17 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     }, hasMapping ? undefined : "手工采购单已生成");
     if (!result) return;
     const generatedPo = result?.result?.purchaseOrder as PurchaseOrderRow | undefined;
+    if (generatedPo?.id) {
+      upsertGeneratedPurchaseOrder(row.id, generatedPo);
+    }
+    if (result?.result?.alreadyGenerated) {
+      if (generatedPo?.id) {
+        setActiveQueueKey("all_orders");
+        setPurchaseSearchText(generatedPo.poNo || generatedPo.id);
+      }
+      message.info(generatedPo?.id ? `采购单已生成：${generatedPo.poNo || generatedPo.id}` : "采购单已生成，请刷新后查看采购单列表");
+      if (!hasMapping || generatedPo?.status !== "draft" || has1688OrderTrace(generatedPo)) return;
+    }
     if (!hasMapping) return;
     if (!generatedPo?.id) {
       message.warning("采购单已生成，但没有拿到可推送的采购单号，请刷新后手动推单");
@@ -3465,10 +3516,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         const hasCandidates = Boolean(row.candidates?.length || row.candidateCount);
         const hasMapping = Number(row.mappingCount || 0) > 0;
         const hasSkuSupplier = Boolean(row.skuSupplierId || row.skuSupplierName);
+        const existingPo = purchaseOrders.find((item) => purchaseOrderBelongsToRequest(item, row.id));
         const canQuote = canPurchase && ["submitted", "buyer_processing", "sourced"].includes(row.status);
         const canFindSupplier = canQuote && !hasMapping && !hasSkuSupplier;
         const canImageSearch = canQuote;
         const canGeneratePo = canPurchase
+          && !existingPo
           && (hasCandidates || hasMapping || hasSkuSupplier)
           && ["submitted", "buyer_processing", "sourced", "waiting_ops_confirm"].includes(row.status);
         const canDelete = canCreateRequest && ["submitted", "buyer_processing", "sourced"].includes(row.status);
@@ -3517,6 +3570,19 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 生成采购单
               </Button>
             ) : null}
+            {existingPo || row.status === "converted_to_po" ? (
+              <Button
+                size="small"
+                icon={<FileDoneOutlined />}
+                onClick={() => {
+                  setActiveQueueKey("all_orders");
+                  setPurchaseSearchText(existingPo?.poNo || existingPo?.id || row.id);
+                  message.info(existingPo ? `采购单已生成：${existingPo.poNo || existingPo.id}` : "采购单已生成");
+                }}
+              >
+                已生成
+              </Button>
+            ) : null}
             {canDelete ? (
               <Popconfirm
                 title="删除采购单"
@@ -3536,12 +3602,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 </Button>
               </Popconfirm>
             ) : null}
-            {!canImageSearch && !canGeneratePo && !canDelete && row.status !== "submitted" ? <Text type="secondary">无待办</Text> : null}
+            {!canImageSearch && !canGeneratePo && !existingPo && row.status !== "converted_to_po" && !canDelete && row.status !== "submitted" ? <Text type="secondary">无待办</Text> : null}
           </div>
         );
       },
     },
-  ], [actingKey, canCreateRequest, canPurchase, detailPrId, source1688PrId]);
+  ], [actingKey, canCreateRequest, canPurchase, detailPrId, purchaseOrders, source1688PrId]);
 
   const orderColumns = useMemo<ColumnsType<PurchaseOrderRow>>(() => [
     {
