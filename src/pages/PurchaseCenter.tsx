@@ -1439,6 +1439,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const [pushAccountPicker, setPushAccountPicker] = useState<{
     po: PurchaseOrderRow;
     accountId: string;
+    addressId?: string | null;
     defaultAccountId?: string | null;
     accounts: Array<{ id: string; label?: string | null; memberId?: string | null; appKey?: string; status?: string; configured?: boolean; authorized?: boolean }>;
   } | null>(null);
@@ -2911,9 +2912,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       // 拉店铺失败不致命，回落到弹窗选
     }
     const validDefaultId = defaultId && active.find((a) => a.id === defaultId) ? defaultId : null;
+    const addresses = data.alibaba1688Addresses || [];
+    const defaultAddress = addresses.find((addr) => addr.isDefault) || addresses[0] || null;
     setPushAccountPicker({
       po: row,
       accountId: validDefaultId || active[0].id,
+      addressId: defaultAddress?.id || null,
       defaultAccountId: validDefaultId,
       accounts: active,
     });
@@ -4322,7 +4326,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         open={!!pushAccountPicker}
         title={(
           <Space direction="vertical" size={2}>
-            <Text strong style={{ fontSize: 18 }}>选择采购账号</Text>
+            <Text strong style={{ fontSize: 18 }}>确认下单信息</Text>
             {pushAccountPicker ? (
               <Text type="secondary" style={{ fontSize: 12 }}>
                 采购单 {pushAccountPicker.po.poNo || pushAccountPicker.po.id}
@@ -4337,17 +4341,18 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         onCancel={() => setPushAccountPicker(null)}
         onOk={async () => {
           if (!pushAccountPicker) return;
-          const { po, accountId } = pushAccountPicker;
+          const { po, accountId, addressId } = pushAccountPicker;
           setPushAccountPicker(null);
-          startPush1688Order(po, accountId);
+          await push1688Order(po, {
+            purchase1688AccountId: accountId,
+            ...(addressId ? { deliveryAddressId: addressId } : {}),
+          });
         }}
         destroyOnClose
       >
         {pushAccountPicker ? (
           <Space direction="vertical" size={14} style={{ width: "100%" }}>
-            <Text type="secondary" style={{ fontSize: 13 }}>
-              请选择本次下单使用的 1688 采购账号。
-            </Text>
+            <Text strong style={{ fontSize: 14 }}>采购账号</Text>
             {pushAccountPicker.accounts.map((acct, index) => {
               const selected = acct.id === pushAccountPicker.accountId;
               const display = acct.label || `采购账号 ${index + 1}`;
@@ -4405,6 +4410,75 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 </div>
               );
             })}
+
+            <Text strong style={{ fontSize: 14, marginTop: 6 }}>收货地址</Text>
+            {(data.alibaba1688Addresses || []).length ? (
+              (data.alibaba1688Addresses || []).map((addr, index) => {
+                const selected = addr.id === pushAccountPicker.addressId;
+                const display = addr.fullName || addr.label || `收货地址 ${index + 1}`;
+                return (
+                  <div
+                    key={addr.id}
+                    onClick={() => setPushAccountPicker((prev) => prev ? { ...prev, addressId: addr.id } : null)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        setPushAccountPicker((prev) => prev ? { ...prev, addressId: addr.id } : null);
+                      }
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: 14,
+                      padding: "14px 16px",
+                      border: `1px solid ${selected ? "#e65a00" : "#e5e9f0"}`,
+                      borderRadius: 10,
+                      cursor: "pointer",
+                      background: selected ? "#fff7ed" : "#fff",
+                      boxShadow: selected ? "0 8px 22px rgba(230, 90, 0, 0.12)" : "0 1px 2px rgba(15, 23, 42, 0.04)",
+                      outline: "none",
+                    }}
+                  >
+                    <Space size={12} align="start">
+                      <div
+                        style={{
+                          width: 36,
+                          height: 36,
+                          borderRadius: 8,
+                          display: "grid",
+                          placeItems: "center",
+                          background: selected ? "#e65a00" : "#f3f4f6",
+                          color: selected ? "#fff" : "#64748b",
+                          fontWeight: 700,
+                          flex: "0 0 auto",
+                        }}
+                      >
+                        {display.slice(0, 1)}
+                      </div>
+                      <Space direction="vertical" size={2}>
+                        <Space size={6} wrap>
+                          <Text strong style={{ fontSize: 15 }}>{display}</Text>
+                          {addr.isDefault ? <Tag color="orange">默认</Tag> : null}
+                          {addr.mobile ? <Text type="secondary" style={{ fontSize: 12 }}>{addr.mobile}</Text> : null}
+                        </Space>
+                        <Text type="secondary" style={{ fontSize: 12 }}>{addr.address || "-"}</Text>
+                      </Space>
+                    </Space>
+                    {selected ? <CheckCircleOutlined style={{ color: "#e65a00", fontSize: 20, flex: "0 0 auto" }} /> : null}
+                  </div>
+                );
+              })
+            ) : (
+              <Alert
+                type="warning"
+                showIcon
+                message="暂无可选收货地址"
+                description="请先维护收货信息后再下单。"
+              />
+            )}
           </Space>
         ) : null}
       </Modal>
