@@ -127,6 +127,9 @@ const QUICK_PURCHASE_ACTIONS = new Set([
   "confirm_1688_receive_goods",
   "link_1688_order_to_po",
 ]);
+const SHORT_WORKBENCH_ACTIONS = new Set([
+  "source_1688_image",
+]);
 const DEFAULT_PURCHASE_INQUIRY_TEMPLATE = [
   "商品包装方式是什么？商品需要提供哪些资质文件？可以优惠吗？",
   "整箱包装尺寸和重量是多少？下单需要注意什么？",
@@ -2044,6 +2047,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           && payload.includeWorkbench !== false
           && !QUICK_PURCHASE_ACTIONS.has(String(payload.action || ""))
         );
+      const shouldRequestWorkbench = shouldRefreshWorkbench
+        || (
+          payload.includeWorkbench !== false
+          && !SHORT_WORKBENCH_ACTIONS.has(String(payload.action || ""))
+        );
       // 所有含外部 1688 / alphashop 网络调用的 action 都用更长 IPC 超时（120s）；
       // 本地 DB 写动作走默认 60s。命中名字里有 1688/alphashop 即视为慢动作。
       const actionName = String(payload.action || "");
@@ -2056,7 +2064,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       const result = await erp.purchase.action({
         ...payload,
         ...workbenchParams,
-        includeWorkbench: shouldRefreshWorkbench,
+        includeWorkbench: shouldRequestWorkbench,
       }, finalTimeoutMs ? { timeoutMs: finalTimeoutMs } : undefined);
       if (shouldRefreshWorkbench) {
         const workbench = result?.workbench || await erp.purchase.workbench(workbenchParams);
@@ -2538,15 +2546,24 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       imgUrl,
       beginPage,
       importLimit: IMAGE_SEARCH_PAGE_SIZE,
-    });
+      includeWorkbench: false,
+    }, undefined, { timeoutMs: 105000 });
     if (result) {
       const importedCount = Number(result.result?.importedCount || 0);
       setImageSearchNextPageByPrId((prev) => ({ ...prev, [row.id]: beginPage + 1 }));
       if (importedCount <= 0) {
+        void loadData({ silent: true, withSupplemental: false });
         if (!silent) message.warning(imageSearchEmptyText(result));
         return result;
       }
-      const nextWorkbench = result.workbench || {};
+      const nextWorkbench = result.workbench || await erp.purchase.workbench({
+        ...FAST_PURCHASE_WORKBENCH_PARAMS,
+        detailPrId: row.id,
+      }, { timeoutMs: 120000 }).catch(() => null) || {};
+      if (hasWorkbenchSnapshot(nextWorkbench)) {
+        applyWorkbench(nextWorkbench);
+        syncWorkbenchOptions(nextWorkbench);
+      }
       const nextPr = (nextWorkbench.purchaseRequests || []).find((item: PurchaseRequestRow) => item.id === row.id);
       if (nextPr?.id) {
         setDetailDrawerMode("imageSearch");

@@ -5568,7 +5568,7 @@ async function runAlphaShopImageSearch({ db, payload, actor, imgUrl, beginPage, 
     imgUrl,
     beginPage,
     pageSize,
-    timeoutMs: 120000,
+    timeoutMs: 25000,
   });
   if (credentials.shouldSave) {
     saveAlphaShopCredentials(db, credentials);
@@ -12862,8 +12862,8 @@ async function buildClientImageSearchMockResults(payload = {}) {
   // 任意一步慢/挂（用户 IP 偶尔被 1688 反爬刷出 deny_h5、token 接口卡住等）超过 30s
   // 就放弃预搜，让主控端 fallback 走 alphashop。alphashop 对外站图返回空数组但 1-2 秒
   // 就回，至少不会撞 IPC 120s 超时。两台电脑一台行一台不行多半就是这个。
-  const MTOP_BUDGET_MS = 30000;
-  const TOTAL_PRESEARCH_BUDGET_MS = 75000;
+  const MTOP_BUDGET_MS = 20000;
+  const TOTAL_PRESEARCH_BUDGET_MS = 45000;
   const t0 = Date.now();
   function elapsedMs() {
     return Date.now() - t0;
@@ -12938,7 +12938,7 @@ async function buildClientImageSearchMockResults(payload = {}) {
   // 客户端 (electron 主进程) 才有 workerInvoker；主控端 (Linux 服务器，没图形界面跑不了 Chrome)
   // 没有 workerInvoker，会跳过这步直接 fallback alphashop。
   if (erpState.workerInvoker && imgUrl) {
-    const browserBudget = Math.min(remainingTotalBudget(), 45000);
+    const browserBudget = Math.min(remainingTotalBudget(), 25000);
     if (browserBudget >= 8000) {
       console.error(`[buildClientImageSearchMockResults] mtop failed, falling back to Playwright air image search (budget=${browserBudget}ms)`);
       try {
@@ -13347,7 +13347,7 @@ async function performPurchaseActionRuntime(payload = {}) {
     const response = await remoteRequest("/api/purchase/action", {
       method: "POST",
       body: remotePayload,
-      timeoutMs: 120000,
+      timeoutMs: payload?.action === "source_1688_image" ? 45000 : 120000,
     });
     return normalizePurchaseResultPoNumbers(response.result);
   }
