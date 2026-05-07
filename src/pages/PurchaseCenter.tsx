@@ -1439,6 +1439,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const [pushAccountPicker, setPushAccountPicker] = useState<{
     po: PurchaseOrderRow;
     accountId: string;
+    defaultAccountId?: string | null;
     accounts: Array<{ id: string; label?: string | null; memberId?: string | null; appKey?: string; status?: string; configured?: boolean; authorized?: boolean }>;
   } | null>(null);
   const [importDialogOpen, setImportDialogOpen] = useState(false);
@@ -2867,8 +2868,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   // 入口：先解决「用哪个 1688 采购账号推单」，再走 startPush1688Order
   // - 0 个账号 → 报错引导去配置
   // - 1 个账号 → 直接用，不弹
-  // - 多账号 + 店铺有默认且有效 → 用默认
-  // - 多账号无默认 / 默认失效 → 弹 Modal 让用户选
+  // - 多账号 → 一律弹 Modal 让用户选；店铺默认账号只作为预选值
   const initiatePush1688Order = async (row: PurchaseOrderRow) => {
     if (!erp) return;
     let listResult: any;
@@ -2910,13 +2910,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     } catch {
       // 拉店铺失败不致命，回落到弹窗选
     }
-    if (defaultId && active.find((a) => a.id === defaultId)) {
-      startPush1688Order(row, defaultId);
-      return;
-    }
+    const validDefaultId = defaultId && active.find((a) => a.id === defaultId) ? defaultId : null;
     setPushAccountPicker({
       po: row,
-      accountId: active[0].id,
+      accountId: validDefaultId || active[0].id,
+      defaultAccountId: validDefaultId,
       accounts: active,
     });
   };
@@ -4323,7 +4321,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       <Modal
         open={!!pushAccountPicker}
         title={pushAccountPicker ? `推送 1688 下单 · 选择 1688 采购账号（${pushAccountPicker.po.poNo || pushAccountPicker.po.id}）` : "选择 1688 采购账号"}
-        okText="下一步：选地址"
+        okText="使用此账号继续"
         cancelText="取消"
         confirmLoading={actingKey === `1688-push-${pushAccountPicker?.po.id}`}
         width={680}
@@ -4339,7 +4337,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         {pushAccountPicker ? (
           <Space direction="vertical" size={10} style={{ width: "100%" }}>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              当前公司有多个 1688 采购账号，请选择用哪一个推送本单。
+              当前公司有多个 1688 采购账号，请选择用哪一个推送本单；店铺默认账号会自动预选。
               想以后免选可以到「店铺」给这家店设默认 1688 采购账号。
             </Text>
             {pushAccountPicker.accounts.map((acct) => {
@@ -4363,6 +4361,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                       ? <Text type="secondary" style={{ fontSize: 12 }}>{acct.memberId}</Text>
                       : null}
                     {acct.appKey ? <Tag>AppKey {acct.appKey}</Tag> : null}
+                    {acct.id === pushAccountPicker.defaultAccountId ? <Tag color="blue">店铺默认</Tag> : null}
                   </Space>
                 </div>
               );
