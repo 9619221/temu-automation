@@ -4320,8 +4320,17 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
 
       <Modal
         open={!!pushAccountPicker}
-        title={pushAccountPicker ? `推送 1688 下单 · 选择 1688 采购账号（${pushAccountPicker.po.poNo || pushAccountPicker.po.id}）` : "选择 1688 采购账号"}
-        okText="使用此账号继续"
+        title={(
+          <Space direction="vertical" size={2}>
+            <Text strong style={{ fontSize: 18 }}>选择采购账号</Text>
+            {pushAccountPicker ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                采购单 {pushAccountPicker.po.poNo || pushAccountPicker.po.id}
+              </Text>
+            ) : null}
+          </Space>
+        )}
+        okText="确认使用"
         cancelText="取消"
         confirmLoading={actingKey === `1688-push-${pushAccountPicker?.po.id}`}
         width={680}
@@ -4335,34 +4344,64 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         destroyOnClose
       >
         {pushAccountPicker ? (
-          <Space direction="vertical" size={10} style={{ width: "100%" }}>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              当前公司有多个 1688 采购账号，请选择用哪一个推送本单；店铺默认账号会自动预选。
-              想以后免选可以到「店铺」给这家店设默认 1688 采购账号。
+          <Space direction="vertical" size={14} style={{ width: "100%" }}>
+            <Text type="secondary" style={{ fontSize: 13 }}>
+              请选择本次下单使用的 1688 采购账号。
             </Text>
-            {pushAccountPicker.accounts.map((acct) => {
+            {pushAccountPicker.accounts.map((acct, index) => {
               const selected = acct.id === pushAccountPicker.accountId;
-              const display = acct.label || acct.memberId || acct.appKey || acct.id;
+              const display = acct.label || `采购账号 ${index + 1}`;
+              const isDefault = acct.id === pushAccountPicker.defaultAccountId;
               return (
                 <div
                   key={acct.id}
                   onClick={() => setPushAccountPicker((prev) => prev ? { ...prev, accountId: acct.id } : null)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      setPushAccountPicker((prev) => prev ? { ...prev, accountId: acct.id } : null);
+                    }
+                  }}
+                  role="button"
+                  tabIndex={0}
                   style={{
-                    padding: "10px 12px",
-                    border: `1px solid ${selected ? "#1677ff" : "#e5e9f0"}`,
-                    borderRadius: 6,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 14,
+                    padding: "14px 16px",
+                    border: `1px solid ${selected ? "#e65a00" : "#e5e9f0"}`,
+                    borderRadius: 10,
                     cursor: "pointer",
-                    background: selected ? "#e6f4ff" : "#fff",
+                    background: selected ? "#fff7ed" : "#fff",
+                    boxShadow: selected ? "0 8px 22px rgba(230, 90, 0, 0.12)" : "0 1px 2px rgba(15, 23, 42, 0.04)",
+                    outline: "none",
                   }}
                 >
-                  <Space size={6}>
-                    <Text strong>{display}</Text>
-                    {acct.memberId && acct.label && acct.memberId !== acct.label
-                      ? <Text type="secondary" style={{ fontSize: 12 }}>{acct.memberId}</Text>
-                      : null}
-                    {acct.appKey ? <Tag>AppKey {acct.appKey}</Tag> : null}
-                    {acct.id === pushAccountPicker.defaultAccountId ? <Tag color="blue">店铺默认</Tag> : null}
+                  <Space size={12}>
+                    <div
+                      style={{
+                        width: 36,
+                        height: 36,
+                        borderRadius: 8,
+                        display: "grid",
+                        placeItems: "center",
+                        background: selected ? "#e65a00" : "#f3f4f6",
+                        color: selected ? "#fff" : "#64748b",
+                        fontWeight: 700,
+                      }}
+                    >
+                      {display.slice(0, 1)}
+                    </div>
+                    <Space direction="vertical" size={2}>
+                      <Space size={6} wrap>
+                        <Text strong style={{ fontSize: 15 }}>{display}</Text>
+                        {isDefault ? <Tag color="orange">默认</Tag> : null}
+                      </Space>
+                      <Text type="secondary" style={{ fontSize: 12 }}>用于本次 1688 采购下单</Text>
+                    </Space>
                   </Space>
+                  {selected ? <CheckCircleOutlined style={{ color: "#e65a00", fontSize: 20 }} /> : null}
                 </div>
               );
             })}
