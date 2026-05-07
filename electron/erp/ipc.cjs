@@ -1279,6 +1279,8 @@ function get1688AuthRow(companyId = erpState.currentUser?.companyId || DEFAULT_C
 
 function to1688AuthStatus(row = get1688AuthRow()) {
   return {
+    id: row?.id || "",
+    purchase1688AccountId: row?.id || "",
     configured: Boolean(row?.app_key && row?.app_secret && row?.redirect_uri),
     authorized: Boolean(row?.access_token),
     companyId: row?.company_id || DEFAULT_COMPANY_ID,
@@ -1291,6 +1293,8 @@ function to1688AuthStatus(row = get1688AuthRow()) {
     authorizedAt: row?.authorized_at || "",
     accessTokenExpiresAt: row?.access_token_expires_at || "",
     refreshTokenExpiresAt: row?.refresh_token_expires_at || "",
+    label: row?.label || "",
+    status: row?.status || "",
     updatedAt: row?.updated_at || "",
   };
 }
@@ -1445,6 +1449,18 @@ function requireHttpUrl(value, fieldName) {
 function cleanupExpired1688OAuthStates() {
   const { db } = requireErp();
   db.prepare("DELETE FROM erp_1688_oauth_states WHERE expires_at <= ?").run(nowIso());
+}
+
+function parse1688OAuthTargetId(redirectAfter) {
+  const raw = optionalString(redirectAfter);
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw, "http://127.0.0.1");
+    return optionalString(parsed.searchParams.get("purchase1688AccountId")
+      || parsed.searchParams.get("purchase_1688_account_id"));
+  } catch {
+    return null;
+  }
 }
 
 function parseAbsoluteTokenTime(value) {
@@ -1725,16 +1741,27 @@ function save1688ManualToken(payload = {}, actor = {}) {
     authorized_at: now,
     updated_at: now,
   });
-  return to1688AuthStatus(get1688AuthRow(companyId));
+  return to1688AuthStatus(get1688AuthRowById(setting.id, companyId) || get1688AuthRow(companyId));
 }
 
 function create1688AuthorizeUrl(payload = {}, actor = {}) {
+  let savedStatus = null;
   if (payload.appKey || payload.app_key || payload.appSecret || payload.app_secret || payload.redirectUri || payload.redirect_uri) {
-    upsert1688AuthConfig(payload, actor);
+    savedStatus = upsert1688AuthConfig(payload, actor);
   }
   const { db } = requireErp();
   const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
-  const setting = get1688AuthRow(companyId);
+  const targetId = optionalString(payload.purchase1688AccountId || payload.purchase_1688_account_id || payload.id)
+    || optionalString(savedStatus?.purchase1688AccountId || savedStatus?.id);
+  const setting = targetId
+    ? get1688AuthRowById(targetId, companyId)
+    : get1688AuthRow(companyId);
+  if (targetId && !setting) {
+    throw new Error(`1688 purchase account not found: ${targetId}`);
+  }
+  if (setting?.status === "disabled") {
+    throw new Error("1688 purchase account is disabled");
+  }
   if (!setting?.app_key || !setting?.app_secret || !setting?.redirect_uri) {
     throw new Error("Save 1688 AppKey, AppSecret and redirect URI first");
   }
@@ -1749,7 +1776,7 @@ function create1688AuthorizeUrl(payload = {}, actor = {}) {
     state,
     company_id: companyId,
     created_by: optionalString(actor?.id),
-    redirect_after: "/1688",
+    redirect_after: `/1688?purchase1688AccountId=${encodeURIComponent(setting.id)}`,
     expires_at: expiresAt,
     created_at: now,
   });
@@ -1764,6 +1791,7 @@ function create1688AuthorizeUrl(payload = {}, actor = {}) {
     authUrl: `${build1688AuthorizeUrl()}?${params.toString()}`,
     state,
     redirectUri: setting.redirect_uri,
+    purchase1688AccountId: setting.id,
     expiresAt,
   };
 }
@@ -1779,9 +1807,15 @@ async function complete1688OAuth(payload = {}) {
     throw new Error("1688 authorization state has expired");
   }
   const companyId = normalizeCompanyId(stateRow.company_id, null);
-  const setting = get1688AuthRow(companyId);
+  const targetId = parse1688OAuthTargetId(stateRow.redirect_after);
+  const setting = targetId
+    ? get1688AuthRowById(targetId, companyId)
+    : get1688AuthRow(companyId);
   if (!setting?.app_key || !setting?.app_secret || !setting?.redirect_uri) {
     throw new Error("1688 authorization config is missing");
+  }
+  if (setting.status === "disabled") {
+    throw new Error("1688 purchase account is disabled");
   }
   const tokenPayload = await exchange1688AuthorizationCode({
     appKey: setting.app_key,
@@ -1814,7 +1848,7 @@ async function complete1688OAuth(payload = {}) {
     updated_at: now,
   });
   db.prepare("DELETE FROM erp_1688_oauth_states WHERE state = ?").run(state);
-  return to1688AuthStatus(get1688AuthRow(companyId));
+  return to1688AuthStatus(get1688AuthRowById(setting.id, companyId) || get1688AuthRow(companyId));
 }
 
 // 取指定 ID 的 1688 凭据行（限定 company）
@@ -1894,7 +1928,7 @@ async function refresh1688AccessToken(actor = {}, options = {}) {
     ...tokenFields,
     updated_at: nowIso(),
   });
-  return to1688AuthStatus(get1688AuthRow(companyId));
+  return to1688AuthStatus(get1688AuthRowById(setting.id, companyId) || get1688AuthRow(companyId));
 }
 
 function shouldRefresh1688AccessToken(row) {

@@ -1480,6 +1480,8 @@ function renderSinglePurchaseAccountCard(account, callbackUrl) {
   const statusText = account?.authorized ? "已授权" : (account?.configured ? "已配置 / 未授权" : "未配置");
   const statusClass = account?.authorized ? "status-ok" : "status-warn";
   const isDisabled = account?.status === "disabled";
+  const canStartOAuth = Boolean(account?.configured && !isDisabled);
+  const oauthLabel = account?.authorized ? "重新授权" : "去 1688 授权";
   const expiry = account?.accessTokenExpiresAt
     ? String(account.accessTokenExpiresAt).replace("T", " ").slice(0, 19)
     : "-";
@@ -1521,6 +1523,10 @@ function renderSinglePurchaseAccountCard(account, callbackUrl) {
         </details>
 
         <div class="actions" style="margin-top: 8px;">
+          <form class="inline-form" method="post" action="/api/1688/start" target="_blank">
+            <input type="hidden" name="purchase1688AccountId" value="${escapeHtml(id)}" />
+            <button class="action-chip success" type="submit" ${canStartOAuth ? "" : "disabled"}>${escapeHtml(oauthLabel)}</button>
+          </form>
           <form class="inline-form" method="post" action="/api/1688/refresh">
             <input type="hidden" name="purchase1688AccountId" value="${escapeHtml(id)}" />
             <button class="action-chip" type="submit" ${account?.authorized ? "" : "disabled"}>刷新 Token</button>
@@ -1538,6 +1544,7 @@ function renderSinglePurchaseAccountCard(account, callbackUrl) {
 function render1688AuthPage(status = {}, requestOrigin = "", purchaseAccounts = []) {
   const origin = requestOrigin || "http://127.0.0.1";
   const defaultCallbackUrl = status.redirectUri || `${origin}/api/1688/oauth/callback`;
+  const openPlatformUrl = "https://open.1688.com/";
   const accountCount = purchaseAccounts.length;
 
   const accountListHtml = accountCount === 0
@@ -1560,7 +1567,10 @@ function render1688AuthPage(status = {}, requestOrigin = "", purchaseAccounts = 
         <details>
           <summary class="action-chip" style="display: inline-block; cursor: pointer;">+ 新增 1688 采购账号</summary>
           <div style="padding: 12px 0;">
-            <div class="muted" style="margin-bottom: 8px;">两步：先填 AppKey / AppSecret 创建账号；然后用同账号在 1688 开放平台拿 access_token，回到这里在新建出来的卡片上「粘贴新 Access Token」保存。</div>
+            <div class="muted" style="margin-bottom: 8px;">先在 1688 开放平台创建应用并把下面的回调地址填到应用里；保存 AppKey / AppSecret 后，可在账号卡片上直接跳转 1688 授权页。</div>
+            <div class="actions" style="margin-bottom: 10px;">
+              <a class="action-chip" href="${escapeHtml(openPlatformUrl)}" target="_blank" rel="noopener noreferrer">打开 1688 开放平台</a>
+            </div>
 
             <form class="stacked-form" method="post" action="/api/1688/config" style="max-width: 760px;">
               <input type="hidden" name="mode" value="new" />
@@ -1580,6 +1590,7 @@ function render1688AuthPage(status = {}, requestOrigin = "", purchaseAccounts = 
               </div>
               <div class="actions">
                 <button class="action-chip" type="submit">保存为新账号</button>
+                <button class="action-chip success" type="submit" formaction="/api/1688/start" formtarget="_blank">保存并去 1688 授权</button>
               </div>
             </form>
           </div>
