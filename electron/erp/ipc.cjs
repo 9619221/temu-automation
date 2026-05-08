@@ -4322,6 +4322,46 @@ function writePaymentApprovalAudit({ services, before, after, actor, action }) {
   });
 }
 
+const PAYMENT_SUBMITTED_PO_STATUSES = new Set([
+  "approved_to_pay",
+  "paid",
+  "supplier_processing",
+  "shipped",
+  "arrived",
+  "inbounded",
+  "closed",
+]);
+const PAYMENT_PAID_OR_LATER_PO_STATUSES = new Set([
+  "paid",
+  "supplier_processing",
+  "shipped",
+  "arrived",
+  "inbounded",
+  "closed",
+]);
+
+function isPaymentSubmittedPurchaseOrder(po = {}) {
+  return PAYMENT_SUBMITTED_PO_STATUSES.has(String(po.status || ""));
+}
+
+function isPaidOrLaterPurchaseOrder(po = {}) {
+  return PAYMENT_PAID_OR_LATER_PO_STATUSES.has(String(po.status || ""))
+    || String(po.payment_status || "") === "paid";
+}
+
+function noOpPurchaseOrderTransition(po = {}, action = "") {
+  return {
+    entityType: "purchase_order",
+    id: po.id,
+    action,
+    fromStatus: po.status,
+    toStatus: po.status,
+    before: po,
+    after: po,
+    idempotent: true,
+  };
+}
+
 function createPaymentApprovalForPo({ db, services, po, payload, actor }) {
   const now = nowIso();
   const amount = optionalNumber(payload.amount) ?? Number(po.total_amount || 0);
@@ -4398,6 +4438,77 @@ function approvePaymentApproval({ db, services, payload, actor }) {
 // 已存在则跳过；明细行从 erp_purchase_order_lines 拷贝 expected_qty。
 // 生成入库单号：6 位纯数字账号内自增序号（000001、000002 …）。
 // 历史数据若已有 6 位纯数字，从最大值 +1 开始；超过 999999 自动溢出到 7 位。
+function markPaymentApprovalApproved({ db, services, before, actor }) {
+  if (!before || before.status === "approved" || before.status === "paid") return before || null;
+  const now = nowIso();
+  db.prepare(`
+    UPDATE erp_payment_approvals
+    SET status = 'approved',
+        approved_by = @approved_by,
+        approved_at = @approved_at,
+        updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id: before.id,
+    approved_by: actor.id || null,
+    approved_at: now,
+    updated_at: now,
+  });
+  const after = db.prepare("SELECT * FROM erp_payment_approvals WHERE id = ?").get(before.id);
+  writePaymentApprovalAudit({
+    services,
+    before,
+    after,
+    actor,
+    action: "approve_payment_approval",
+  });
+  return after;
+}
+
+function markPaymentApprovalPaid({ db, services, before, payload = {}, actor }) {
+  if (!before) return null;
+  if (before.status === "paid") return before;
+  const now = nowIso();
+  db.prepare(`
+    UPDATE erp_payment_approvals
+    SET status = 'paid',
+        paid_at = @paid_at,
+        payment_method = COALESCE(@payment_method, payment_method),
+        payment_reference = COALESCE(@payment_reference, payment_reference),
+        updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id: before.id,
+    paid_at: now,
+    payment_method: optionalString(payload.paymentMethod),
+    payment_reference: optionalString(payload.paymentReference),
+    updated_at: now,
+  });
+  const after = db.prepare("SELECT * FROM erp_payment_approvals WHERE id = ?").get(before.id);
+  writePaymentApprovalAudit({
+    services,
+    before,
+    after,
+    actor,
+    action: "confirm_payment_paid",
+  });
+  return after;
+}
+
+function ensurePaymentApprovalForPo({ db, services, po, payload = {}, actor, status = "approved" }) {
+  let paymentApproval = findLatestPaymentApprovalByPoId(db, po.id);
+  if (!paymentApproval) {
+    paymentApproval = createPaymentApprovalForPo({ db, services, po, payload, actor });
+  }
+  if (status === "paid") {
+    paymentApproval = markPaymentApprovalApproved({ db, services, before: paymentApproval, actor }) || paymentApproval;
+    paymentApproval = markPaymentApprovalPaid({ db, services, before: paymentApproval, payload, actor }) || paymentApproval;
+  } else {
+    paymentApproval = markPaymentApprovalApproved({ db, services, before: paymentApproval, actor }) || paymentApproval;
+  }
+  return paymentApproval;
+}
+
 function generateInboundReceiptNo(db, accountId) {
   const row = db.prepare(
     "SELECT receipt_no FROM erp_inbound_receipts WHERE account_id = @account_id AND receipt_no GLOB '[0-9]*' ORDER BY CAST(receipt_no AS INTEGER) DESC LIMIT 1"
@@ -4470,36 +4581,40 @@ function ensureInboundReceiptForPo(db, services, po, actor) {
 }
 
 function confirmPaymentPaid({ db, services, payload, actor }) {
-  const before = getLatestPaymentApproval(db, payload);
+  const poId = optionalString(payload.poId || payload.id);
+  let before = null;
+  try {
+    before = getLatestPaymentApproval(db, payload);
+  } catch (error) {
+    if (!poId || !/Payment approval not found/i.test(String(error?.message || ""))) throw error;
+    const po = getPurchaseOrder(db, poId);
+    if (po.status !== "approved_to_pay" && !isPaidOrLaterPurchaseOrder(po)) throw error;
+    before = ensurePaymentApprovalForPo({
+      db,
+      services,
+      po,
+      payload,
+      actor,
+      status: isPaidOrLaterPurchaseOrder(po) ? "paid" : "approved",
+    });
+  }
+
+  const currentPo = getPurchaseOrder(db, before.po_id);
+  if (isPaidOrLaterPurchaseOrder(currentPo)) {
+    const alreadyPaid = ensurePaymentApprovalForPo({ db, services, po: currentPo, payload, actor, status: "paid" });
+    try {
+      ensureInboundReceiptForPo(db, services, currentPo, actor);
+    } catch (e) {
+      try { console.warn("[purchase] auto-create inbound receipt failed:", e?.message || e); } catch {}
+    }
+    return alreadyPaid;
+  }
   if (before.status !== "approved") {
     throw new Error(`Payment approval is not approved: ${before.status}`);
   }
 
   services.purchase.confirmPaid(before.po_id, actor);
-  const now = nowIso();
-  db.prepare(`
-    UPDATE erp_payment_approvals
-    SET status = 'paid',
-        paid_at = @paid_at,
-        payment_method = COALESCE(@payment_method, payment_method),
-        payment_reference = COALESCE(@payment_reference, payment_reference),
-        updated_at = @updated_at
-    WHERE id = @id
-  `).run({
-    id: before.id,
-    paid_at: now,
-    payment_method: optionalString(payload.paymentMethod),
-    payment_reference: optionalString(payload.paymentReference),
-    updated_at: now,
-  });
-  const after = db.prepare("SELECT * FROM erp_payment_approvals WHERE id = ?").get(before.id);
-  writePaymentApprovalAudit({
-    services,
-    before,
-    after,
-    actor,
-    action: "confirm_payment_paid",
-  });
+  const after = markPaymentApprovalPaid({ db, services, before, payload, actor });
   // 同步建对应入库单（仓库中心立即可见）；失败不阻塞付款确认。
   try {
     const po = getPurchaseOrder(db, before.po_id);
@@ -11815,6 +11930,23 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
       case "submit_payment_approval": {
         const poId = requireString(payload.poId || payload.id, "poId");
         const po = getPurchaseOrder(db, poId);
+        if (isPaymentSubmittedPurchaseOrder(po)) {
+          const targetPaymentStatus = isPaidOrLaterPurchaseOrder(po) ? "paid" : "approved";
+          const paymentApproval = ensurePaymentApprovalForPo({
+            db,
+            services,
+            po,
+            payload,
+            actor,
+            status: targetPaymentStatus,
+          });
+          return {
+            transition: noOpPurchaseOrderTransition(po, "submit_payment_approval"),
+            paymentApproval: toCamelRow(paymentApproval),
+            purchaseOrder: toPurchaseOrderResult(db, po.id),
+            idempotent: true,
+          };
+        }
         const transition = services.purchase.submitPaymentApproval(poId, actor);
         const paymentApproval = createPaymentApprovalForPo({
           db,

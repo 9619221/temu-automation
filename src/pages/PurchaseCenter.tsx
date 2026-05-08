@@ -1051,6 +1051,20 @@ function canUse1688PaymentActions(row: PurchaseOrderRow) {
   return true;
 }
 
+function canSubmitPaymentApprovalAction(row: PurchaseOrderRow) {
+  const localStatus = String(row.status || "").toLowerCase();
+  const paymentStatus = String(row.paymentStatus || "").toLowerCase();
+  if (["paid", "confirmed", "success"].includes(paymentStatus)) return false;
+  return localStatus === "draft" || localStatus === "pushed_pending_price";
+}
+
+function canConfirmPaidAction(row: PurchaseOrderRow) {
+  const localStatus = String(row.status || "").toLowerCase();
+  const paymentStatus = String(row.paymentStatus || "").toLowerCase();
+  if (["paid", "confirmed", "success"].includes(paymentStatus)) return false;
+  return localStatus === "approved_to_pay";
+}
+
 function candidateSpecRows(candidate?: SourcingCandidateRow | null): BindingSpecRow[] {
   const options = Array.isArray(candidate?.externalSkuOptions) ? candidate.externalSkuOptions : [];
   return options
@@ -3885,6 +3899,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           || actingKey === `1688-validate-${row.id}`
           || actingKey === `1688-preview-${row.id}`;
         const canUse1688Payment = canUse1688PaymentActions(row);
+        const canSubmitPaymentApproval = canPurchase && canSubmitPaymentApprovalAction(row);
+        const canConfirmPaid = (canFinance || canPurchase) && canConfirmPaidAction(row);
         const canDeletePo = canPurchase && canDeletePurchaseOrder(row);
         return (
           <div className="purchase-action-grid">
@@ -3929,7 +3945,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               </Button>
             </Popconfirm>
           ) : null}
-          {row.status === "draft" && canPurchase && Number(row.mappingCount || 0) === 0 ? (
+          {row.status === "draft" && canSubmitPaymentApproval && Number(row.mappingCount || 0) === 0 ? (
             <Button
               size="small"
               type="primary"
@@ -4015,7 +4031,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               </Button>
             </Popconfirm>
           ) : null}
-          {row.status === "pushed_pending_price" && canPurchase ? (
+          {row.status === "pushed_pending_price" && canSubmitPaymentApproval ? (
             <Button
               size="small"
               icon={<CommentOutlined />}
@@ -4058,7 +4074,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               批准（历史）
             </Button>
           ) : null}
-          {row.status === "approved_to_pay" && (canFinance || canPurchase) && (row.externalOrderId || Number(row.mappingCount || 0) === 0) ? (
+          {canConfirmPaid && (row.externalOrderId || Number(row.mappingCount || 0) === 0) ? (
             <Button
               size="small"
               type="primary"

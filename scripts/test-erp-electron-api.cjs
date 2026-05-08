@@ -447,7 +447,7 @@ async function main() {
     const canTransition = await invoke("erp:workflow:can-transition", {
       entityType: "purchase_request",
       fromStatus: "draft",
-      toStatus: "submitted",
+      toStatus: "buyer_processing",
       action: "submit_pr",
       role: "operations",
     });
@@ -705,11 +705,31 @@ async function main() {
     );
     assert.equal(
       buyerActionBody.workbench.purchaseOrders.find((item) => item.id === "po_draft_ipc").status,
-      "pending_finance_approval",
+      "approved_to_pay",
     );
     assert.ok(
-      buyerActionBody.workbench.paymentQueue.some((item) => item.poId === "po_draft_ipc" && item.paymentApprovalStatus === "pending"),
+      buyerActionBody.workbench.paymentQueue.some((item) => item.poId === "po_draft_ipc" && item.paymentApprovalStatus === "approved"),
     );
+
+    const duplicateSubmitPayment = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "submit_payment_approval",
+        poId: "po_draft_ipc",
+        amount: 630,
+      }),
+    });
+    assert.equal(duplicateSubmitPayment.statusCode, 200);
+    const duplicateSubmitBody = JSON.parse(duplicateSubmitPayment.body).result.result;
+    assert.equal(duplicateSubmitBody.idempotent, true);
+    assert.equal(duplicateSubmitBody.transition.fromStatus, "approved_to_pay");
+    assert.equal(duplicateSubmitBody.transition.toStatus, "approved_to_pay");
+    assert.equal(duplicateSubmitBody.paymentApproval.status, "approved");
 
     const source1688 = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
       method: "POST",
@@ -1059,6 +1079,26 @@ async function main() {
       "paid",
     );
 
+    const duplicateSubmitPaid = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: financeCookie,
+      },
+      body: JSON.stringify({
+        action: "submit_payment_approval",
+        poId: "po_ipc",
+        amount: 100,
+      }),
+    });
+    assert.equal(duplicateSubmitPaid.statusCode, 200);
+    const duplicateSubmitPaidBody = JSON.parse(duplicateSubmitPaid.body).result.result;
+    assert.equal(duplicateSubmitPaidBody.idempotent, true);
+    assert.equal(duplicateSubmitPaidBody.transition.fromStatus, "paid");
+    assert.equal(duplicateSubmitPaidBody.transition.toStatus, "paid");
+    assert.equal(duplicateSubmitPaidBody.paymentApproval.status, "paid");
+
     const warehousePage = await requestUrl(`${lanStatus.localUrl}/warehouse`, {
       headers: { Cookie: cookie },
     });
@@ -1102,33 +1142,13 @@ async function main() {
     });
     assert.equal(registerArrival.statusCode, 302);
 
-    const confirmCount = await requestUrl(`${lanStatus.localUrl}/api/warehouse/action`, {
-      method: "POST",
+    const warehouseAfterRegister = await requestUrl(`${lanStatus.localUrl}/api/warehouse/workbench`, {
       headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
         Cookie: warehouseCookie,
       },
-      body: new URLSearchParams({
-        action: "confirm_count",
-        receiptId: "inbound_wh_ipc",
-      }).toString(),
     });
-    assert.equal(confirmCount.statusCode, 302);
-
-    const createBatches = await requestUrl(`${lanStatus.localUrl}/api/warehouse/action`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        Cookie: warehouseCookie,
-      },
-      body: JSON.stringify({
-        action: "create_batches",
-        receiptId: "inbound_wh_ipc",
-      }),
-    });
-    assert.equal(createBatches.statusCode, 200);
-    const warehouseAfterBatches = JSON.parse(createBatches.body).result.workbench;
+    assert.equal(warehouseAfterRegister.statusCode, 200);
+    const warehouseAfterBatches = JSON.parse(warehouseAfterRegister.body).workbench;
     assert.equal(
       warehouseAfterBatches.inboundReceipts.find((item) => item.id === "inbound_wh_ipc").status,
       "inbounded_pending_qc",

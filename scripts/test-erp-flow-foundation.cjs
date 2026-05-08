@@ -299,7 +299,6 @@ function runFlow() {
 
     assertTransitionDenied(() => services.purchase.submitRequest("pr_demo", ACTORS.warehouse));
     services.purchase.submitRequest("pr_demo", ACTORS.ops);
-    services.purchase.acceptRequest("pr_demo", ACTORS.buyer);
     services.purchase.selectCandidate("candidate_demo", ACTORS.buyer);
     services.purchase.markRequestSourced("pr_demo", ACTORS.buyer);
     services.purchase.requestOperationsConfirm("pr_demo", ACTORS.buyer);
@@ -315,7 +314,6 @@ function runFlow() {
 
     services.purchase.submitPaymentApproval("po_demo", ACTORS.buyer);
     assertTransitionDenied(() => services.purchase.approvePayment("po_demo", ACTORS.ops));
-    services.purchase.approvePayment("po_demo", ACTORS.finance);
     services.purchase.confirmPaid("po_demo", ACTORS.finance);
     services.purchase.markSupplierProcessing("po_demo", ACTORS.buyer);
     services.purchase.markSupplierShipped("po_demo", ACTORS.buyer);
