@@ -655,6 +655,44 @@ async function main() {
     assert.equal(purchaseApiBody.workbench.purchaseOrders.some((item) => item.id === "po_delete_ipc"), false);
     assert.equal(purchaseApiBody.workbench.paymentQueue.some((item) => item.paymentApprovalId === "pay_ipc"), true);
 
+    const opsCreateLogin = await requestUrl(`${lanStatus.localUrl}/api/login`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({ login: "Ops", accessCode: "ops-code" }),
+    });
+    assert.equal(opsCreateLogin.statusCode, 200);
+    const opsCreateCookie = Array.isArray(opsCreateLogin.headers["set-cookie"])
+      ? opsCreateLogin.headers["set-cookie"][0]
+      : opsCreateLogin.headers["set-cookie"];
+    assert.ok(opsCreateCookie && opsCreateCookie.includes("temu_erp_lan_session"));
+
+    const createPurchaseRequest = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: opsCreateCookie,
+      },
+      body: JSON.stringify({
+        action: "create_pr",
+        accountId: account.id,
+        skuId: sku.id,
+        requestedQty: 3,
+        targetUnitCost: 12.5,
+        reason: "fast create regression",
+      }),
+    });
+    assert.equal(createPurchaseRequest.statusCode, 200);
+    const createPurchaseRequestBody = JSON.parse(createPurchaseRequest.body).result;
+    assert.equal(createPurchaseRequestBody.result.status, "submitted");
+    assert.equal(createPurchaseRequestBody.workbench.purchaseRequests.some((item) => item.id === createPurchaseRequestBody.result.id), true);
+    assert.equal("skuOptions" in createPurchaseRequestBody.workbench, false);
+    assert.equal("supplierOptions" in createPurchaseRequestBody.workbench, false);
+    assert.equal("alibaba1688Addresses" in createPurchaseRequestBody.workbench, false);
+
     const acceptPr = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
       method: "POST",
       headers: {

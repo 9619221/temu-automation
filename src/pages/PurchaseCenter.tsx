@@ -2446,6 +2446,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         const sku = uniqueSelectedSkus[i];
         const isLast = i === uniqueSelectedSkus.length - 1;
         const payload = {
+          ...FAST_PURCHASE_WORKBENCH_PARAMS,
           action: "create_pr",
           accountId: sku.accountId,
           skuId: sku.id,
@@ -2468,6 +2469,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           if (!skippedImages && imageDataUrls.length > 0 && isRequestBodyTooLarge(error)) {
             skippedImages = true;
             lastResult = await erp.purchase.action({
+              ...FAST_PURCHASE_WORKBENCH_PARAMS,
               action: "create_pr",
               accountId: sku.accountId,
               skuId: sku.id,
@@ -2496,7 +2498,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         if (Array.isArray(wb.supplierOptions)) setSuppliers(wb.supplierOptions);
       } else {
         // 后端没返 workbench 时再补一次（不阻塞 modal 关闭）
-        void erp.purchase.workbench({ limit: 200 }).then((wb2: any) => {
+        void erp.purchase.workbench(FAST_PURCHASE_WORKBENCH_PARAMS).then((wb2: any) => {
           applyWorkbench(wb2);
           if (Array.isArray(wb2?.skuOptions)) setSkus(wb2.skuOptions);
           if (Array.isArray(wb2?.supplierOptions)) setSuppliers(wb2.supplierOptions);

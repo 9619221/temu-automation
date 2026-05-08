@@ -11588,12 +11588,20 @@ async function link1688OrderToPoAction({ db, services, payload, actor }) {
 
 function getPurchaseWorkbenchForAction(payload = {}, actor = {}) {
   if (payload.includeWorkbench === false || payload.skipWorkbench || payload.noWorkbench) return null;
+  const action = optionalString(payload.action);
+  const defaults = action === "create_pr" || action === "create_purchase_request"
+    ? {
+      includeRequestDetails: false,
+      includeOptions: false,
+      include1688Meta: false,
+    }
+    : {};
   return getPurchaseWorkbench({
     limit: payload.limit,
     accountId: payload.accountId || payload.account_id,
-    includeRequestDetails: payload.includeRequestDetails,
-    includeOptions: payload.includeOptions,
-    include1688Meta: payload.include1688Meta,
+    includeRequestDetails: payload.includeRequestDetails ?? defaults.includeRequestDetails,
+    includeOptions: payload.includeOptions ?? defaults.includeOptions,
+    include1688Meta: payload.include1688Meta ?? defaults.include1688Meta,
     detailPrId: payload.detailPrId || payload.detail_pr_id || payload.prId || payload.pr_id,
     user: actor,
   });
