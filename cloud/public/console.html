@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Temu 多店监控 · 控制台</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 0;
+    font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 13px;
+    color: #1f2328;
+    background: #f6f8fa;
+  }
+  header {
+    background: #fff;
+    padding: 14px 24px;
+    border-bottom: 1px solid #d0d7de;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; }
+  header .meta { color: #57606a; font-size: 12px; }
+  .login {
+    max-width: 360px;
+    margin: 80px auto;
+    background: #fff;
+    border: 1px solid #d0d7de;
+    border-radius: 8px;
+    padding: 24px;
+  }
+  .login h2 { margin: 0 0 16px; font-size: 15px; }
+  .login label { display: block; margin-bottom: 12px; }
+  .login label span { display: block; font-size: 12px; color: #57606a; margin-bottom: 4px; }
+  .login input {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    font-size: 13px;
+  }
+  button.primary {
+    background: #0969da;
+    color: white;
+    border: 1px solid #0969da;
+    padding: 8px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  button.primary:hover { background: #0860ca; }
+  button.secondary {
+    background: #f6f8fa;
+    color: #1f2328;
+    border: 1px solid #d0d7de;
+    padding: 6px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .err { color: #cf222e; font-size: 12px; margin-top: 8px; }
+
+  main { padding: 16px 24px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .card {
+    background: #fff;
+    border: 1px solid #d0d7de;
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .card .label { color: #57606a; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .card .value { font-size: 22px; font-weight: 600; margin-top: 4px; }
+
+  .panel {
+    background: #fff;
+    border: 1px solid #d0d7de;
+    border-radius: 8px;
+    margin-bottom: 12px;
+  }
+  .panel h2 {
+    margin: 0;
+    padding: 10px 16px;
+    border-bottom: 1px solid #eef0f3;
+    font-size: 13px;
+    font-weight: 600;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .panel-body { padding: 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { padding: 8px 12px; border-bottom: 1px solid #eef0f3; text-align: left; }
+  th { background: #f6f8fa; font-weight: 500; color: #57606a; font-size: 11px; text-transform: uppercase; letter-spacing: 0.3px; }
+  tr:last-child td { border-bottom: none; }
+  td.mono { font-family: ui-monospace, "Cascadia Code", "Consolas", monospace; font-size: 11px; color: #1f2328; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.dim { color: #8c959f; }
+  .ok { color: #1a7f37; }
+  .err-text { color: #cf222e; }
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    background: #f6f8fa;
+    border: 1px solid #d0d7de;
+  }
+  .pill.green { background: #dafbe1; border-color: #1a7f37; color: #1a7f37; }
+  .pill.red { background: #ffebe9; border-color: #cf222e; color: #cf222e; }
+  .pill.gray { background: #f6f8fa; border-color: #d0d7de; color: #57606a; }
+  .toolbar { display: flex; gap: 8px; align-items: center; }
+  .auto { color: #57606a; font-size: 11px; }
+  .empty { padding: 24px; text-align: center; color: #8c959f; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>Temu 多店监控 · 控制台</h1>
+    <div class="meta" id="meta-line">未连接</div>
+  </div>
+  <div class="toolbar">
+    <span class="auto" id="auto-status">自动刷新中</span>
+    <button class="secondary" id="refresh-btn">立即刷新</button>
+    <button class="secondary" id="logout-btn">退出</button>
+  </div>
+</header>
+
+<div id="login" class="login" style="display:none">
+  <h2>登录</h2>
+  <label><span>用户名</span><input id="login-user" type="text" value="admin" /></label>
+  <label><span>密码</span><input id="login-pass" type="password" /></label>
+  <button class="primary" id="login-btn">登录</button>
+  <div class="err" id="login-err"></div>
+</div>
+
+<main id="main" style="display:none">
+  <div class="grid">
+    <div class="card"><div class="label">总事件数</div><div class="value" id="m-total">—</div></div>
+    <div class="card"><div class="label">最近 24 小时</div><div class="value" id="m-24h">—</div></div>
+    <div class="card"><div class="label">在线设备</div><div class="value" id="m-devices">—</div></div>
+    <div class="card"><div class="label">已识别店铺</div><div class="value" id="m-malls">—</div></div>
+    <div class="card"><div class="label">不同 endpoint 数</div><div class="value" id="m-endpoints">—</div></div>
+  </div>
+
+  <div class="panel">
+    <h2>设备心跳 <span class="auto">(每 5 秒刷新)</span></h2>
+    <div class="panel-body">
+      <table>
+        <thead>
+          <tr><th>设备</th><th>最近心跳</th><th>抓取/上报</th><th>队列</th><th>Hook</th><th>当前页面</th><th>最近抓到</th></tr>
+        </thead>
+        <tbody id="agents-body"><tr><td colspan="7" class="empty">加载中...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>店铺</h2>
+    <div class="panel-body">
+      <table>
+        <thead><tr><th>站点</th><th>店铺 ID</th><th>店铺名</th><th>最近活跃</th></tr></thead>
+        <tbody id="malls-body"><tr><td colspan="4" class="empty">尚未识别到店铺</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>接口调用排行 <span class="auto">(top 30)</span></h2>
+    <div class="panel-body">
+      <table>
+        <thead><tr><th>站点</th><th>方法</th><th>路径</th><th>调用数</th><th>最近</th></tr></thead>
+        <tbody id="endpoints-body"><tr><td colspan="5" class="empty">尚无数据</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>最近事件 <span class="auto">(top 50)</span></h2>
+    <div class="panel-body">
+      <table>
+        <thead><tr><th>时间</th><th>方法</th><th>路径</th><th>状态</th><th>大小</th><th>店铺</th><th>页面</th></tr></thead>
+        <tbody id="events-body"><tr><td colspan="7" class="empty">尚无事件</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<script src="console.js"></script>
+</body>
+</html>
