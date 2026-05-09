@@ -51,6 +51,12 @@ async function tryAutoConfigure() {
 // ---------- 周期上报 ----------
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name !== ALARM_FLUSH) return;
+  // 未配置兜底：onInstalled 阶段 fetch 偶尔失败（network stack 没准备好），
+  // 这里 30s 一次重试，配置成功后立即心跳上来
+  const cfgNow = await getStorage(["cloud_endpoint", "auth_token"]);
+  if (!cfgNow.cloud_endpoint || !cfgNow.auth_token) {
+    await tryAutoConfigure();
+  }
   const result = await flush();
   await bumpStats({
     last_flush_at: Date.now(),
