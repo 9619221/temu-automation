@@ -41,6 +41,7 @@ import { getStoreValue } from "../utils/storeCompat";
 import { ACTIVE_ACCOUNT_CHANGED_EVENT, STORE_VALUE_UPDATED_EVENT } from "../utils/multiStore";
 import { TrafficDriverPanel, buildTrafficDriverSitesFromProduct, type TrafficSiteKey } from "../components/TrafficDriverPanel";
 import ProductFluxOperatorCard from "../components/ProductFluxOperatorCard";
+import { fetchSkcList, loadCloudConfig, type SkcRow } from "../utils/cloudClient";
 
 const store = window.electronAPI?.store;
 const automation = window.electronAPI?.automation;
@@ -1074,6 +1075,27 @@ export default function ProductList() {
   const [products, setProducts] = useState<ProductItem[]>([]);
   const [salesSummary, setSalesSummary] = useState<any>(null);
   const [countSummary, setCountSummary] = useState<ProductCountSummary>(EMPTY_COUNT_SUMMARY);
+  // 扩展 + cloud 抓到的 SKC 主体数据，按 skc_id 索引到本表
+  const [cloudSkcMap, setCloudSkcMap] = useState<Map<string, SkcRow>>(new Map());
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const cfg = await loadCloudConfig();
+      if (!cfg || cancelled) return;
+      try {
+        const r = await fetchSkcList(cfg, { limit: 500 });
+        if (cancelled) return;
+        const m = new Map<string, SkcRow>();
+        for (const row of r.rows || []) m.set(String(row.skc_id), row);
+        setCloudSkcMap(m);
+      } catch {
+        // 云端不通就不显示，不影响主流程
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   const [loading, setLoading] = useState(false);
   const [searchText, setSearchText] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -2457,6 +2479,57 @@ export default function ProductList() {
             </Button>
           </Space>
         );
+      },
+    },
+    // ========== 扩展 + cloud 抓到的 SKC 实时数据（按 skc_id 关联） ==========
+    {
+      title: "扩展更新",
+      key: "cloud_updated",
+      width: 110,
+      render: (_: any, record: any) => {
+        const c = cloudSkcMap.get(String(record.skcId || ""));
+        if (!c) return <span style={{ color: "#bfbfbf" }}>—</span>;
+        const ts = c.last_updated_at;
+        const ago = Math.round((Date.now() - ts) / 60000);
+        return <Tooltip title={new Date(ts).toLocaleString()}><span>{ago < 1 ? "刚刚" : ago < 60 ? `${ago}分前` : ago < 1440 ? `${Math.round(ago / 60)}时前` : `${Math.round(ago / 1440)}天前`}</span></Tooltip>;
+      },
+    },
+    {
+      title: "扩展申报价",
+      key: "cloud_declared",
+      width: 110,
+      align: "right",
+      render: (_: any, record: any) => {
+        const c = cloudSkcMap.get(String(record.skcId || ""));
+        const cents = c?.declared_price_cents;
+        if (cents == null) return <span style={{ color: "#bfbfbf" }}>—</span>;
+        return <span>{(cents / 100).toFixed(2)} {c?.price_currency || ""}</span>;
+      },
+    },
+    {
+      title: "扩展建议价",
+      key: "cloud_suggested",
+      width: 110,
+      align: "right",
+      render: (_: any, record: any) => {
+        const c = cloudSkcMap.get(String(record.skcId || ""));
+        const cents = c?.suggested_price_cents;
+        if (cents == null) return <span style={{ color: "#bfbfbf" }}>—</span>;
+        return <span>{(cents / 100).toFixed(2)} {c?.price_currency || ""}</span>;
+      },
+    },
+    {
+      title: "扩展价差",
+      key: "cloud_gap",
+      width: 90,
+      align: "right",
+      render: (_: any, record: any) => {
+        const c = cloudSkcMap.get(String(record.skcId || ""));
+        const d = c?.declared_price_cents;
+        const s = c?.suggested_price_cents;
+        if (d == null || s == null || s === 0) return <span style={{ color: "#bfbfbf" }}>—</span>;
+        const ratio = (d - s) / s;
+        return <Tag color={ratio > 0 ? "green" : ratio < 0 ? "red" : "default"}>{(ratio * 100).toFixed(1)}%</Tag>;
       },
     },
   ];
