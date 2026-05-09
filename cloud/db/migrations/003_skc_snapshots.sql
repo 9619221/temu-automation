@@ -41,14 +41,3 @@ CREATE TABLE IF NOT EXISTS skc_snapshots (
 CREATE INDEX IF NOT EXISTS idx_skc_tenant_mall ON skc_snapshots(tenant_id, mall_id);
 CREATE INDEX IF NOT EXISTS idx_skc_tenant_updated ON skc_snapshots(tenant_id, last_updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_skc_product ON skc_snapshots(tenant_id, product_id);
-
--- 设备与店铺的关联：扩展端从 userInfo 解出 mall 后写入
--- 用来给历史/未来 capture_events 推断 mall_id
-CREATE TABLE IF NOT EXISTS device_mall_links (
-  tenant_id TEXT NOT NULL,
-  device_id TEXT NOT NULL,
-  mall_id TEXT NOT NULL,
-  last_seen INTEGER NOT NULL,
-  PRIMARY KEY (device_id, mall_id)
-);
-CREATE INDEX IF NOT EXISTS idx_device_mall_tenant ON device_mall_links(tenant_id, last_seen DESC);

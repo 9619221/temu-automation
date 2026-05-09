@@ -3,8 +3,6 @@ import {
   Alert,
   Button,
   Card,
-  Drawer,
-  Empty,
   Image,
   InputNumber,
   Modal,
@@ -21,13 +19,11 @@ import {
 import {
   CheckCircleTwoTone,
   CloseCircleTwoTone,
-  CloudServerOutlined,
   LinkOutlined,
   QuestionCircleTwoTone,
   ReloadOutlined,
   SyncOutlined,
 } from "@ant-design/icons";
-import { CloudConsoleConfig, PriceReviewRow as CloudPriceRow, fetchPriceReview, loadCloudConfig } from "../utils/cloudClient";
 
 const { Text } = Typography;
 
@@ -76,12 +72,6 @@ export default function PriceReview() {
   const [manualCostModal, setManualCostModal] = useState<{ open: boolean; sku: PriceReviewRow | null; value: number | null }>({
     open: false, sku: null, value: null,
   });
-  // 阶段 3 试读：云端 SKC 聚合预览，不替换本地数据源
-  const [cloudOpen, setCloudOpen] = useState(false);
-  const [cloudCfg, setCloudCfg] = useState<CloudConsoleConfig | null>(null);
-  const [cloudRows, setCloudRows] = useState<CloudPriceRow[]>([]);
-  const [cloudLoading, setCloudLoading] = useState(false);
-  const [cloudError, setCloudError] = useState<string | null>(null);
 
   const load = useCallback(async (nextFilter: Filter = filter) => {
     if (!window.electronAPI?.priceReview) {
@@ -106,34 +96,6 @@ export default function PriceReview() {
   }, [filter]);
 
   useEffect(() => { load("all"); }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // 云端预览：打开 Drawer 时按需拉一次
-  const loadCloudPreview = useCallback(async (cfg: CloudConsoleConfig) => {
-    setCloudLoading(true);
-    setCloudError(null);
-    try {
-      const r = await fetchPriceReview(cfg, { limit: 200 });
-      setCloudRows(r.rows || []);
-    } catch (e: any) {
-      setCloudError(e?.message || String(e));
-    } finally {
-      setCloudLoading(false);
-    }
-  }, []);
-
-  const handleOpenCloud = useCallback(async () => {
-    setCloudOpen(true);
-    let cfg = cloudCfg;
-    if (!cfg) {
-      cfg = await loadCloudConfig();
-      setCloudCfg(cfg);
-    }
-    if (!cfg) {
-      setCloudError("尚未配置云端，请先到「多店云监控」页面配置");
-      return;
-    }
-    await loadCloudPreview(cfg);
-  }, [cloudCfg, loadCloudPreview]);
 
   // 监听自动扫描完成
   useEffect(() => {
@@ -331,9 +293,6 @@ export default function PriceReview() {
               </Button>
               <Button icon={<ReloadOutlined />} onClick={() => load(filter)}>刷新</Button>
               <Button onClick={handle1688Login}>1688 登录</Button>
-              <Tooltip title="阶段 3 试读：从云端 SKC 聚合查申报价/建议价，不影响本地核价">
-                <Button icon={<CloudServerOutlined />} onClick={handleOpenCloud}>云端预览</Button>
-              </Tooltip>
             </Space>
             <Text type="secondary" style={{ fontSize: 12 }}>
               每 30 分钟自动扫描「价格申报中」的 SKU · 毛利阈值 ×{MARGIN_RATIO}
@@ -395,86 +354,6 @@ export default function PriceReview() {
           placeholder="填写实际进货成本（元）"
         />
       </Modal>
-
-      <Drawer
-        title={<Space><CloudServerOutlined />云端 SKC 价格预览（试读）</Space>}
-        placement="right"
-        width={1100}
-        open={cloudOpen}
-        onClose={() => setCloudOpen(false)}
-        extra={
-          <Button
-            icon={<ReloadOutlined />}
-            disabled={!cloudCfg || cloudLoading}
-            onClick={() => cloudCfg && loadCloudPreview(cloudCfg)}
-          >
-            刷新
-          </Button>
-        }
-      >
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 12 }}
-          message="只读视图：来自云端 capture_events → SKC 聚合层。本地核价逻辑、扫描、1688 成本未受影响。"
-          description={cloudCfg ? `已连接 ${cloudCfg.endpoint}` : "未配置云端"}
-        />
-        {cloudError && <Alert type="error" showIcon message={cloudError} style={{ marginBottom: 12 }} />}
-        {!cloudError && !cloudLoading && cloudRows.length === 0 ? (
-          <Empty description="云端暂无 SKC 价格数据。让运营在 Temu 后台访问 改价单 / 建议价 页面，扩展会自动上报。" />
-        ) : (
-          <Table
-            rowKey="skc_id"
-            loading={cloudLoading}
-            dataSource={cloudRows}
-            size="small"
-            pagination={{ pageSize: 50 }}
-            scroll={{ x: 1000 }}
-            columns={[
-              {
-                title: "图",
-                dataIndex: "thumb_url",
-                width: 60,
-                render: (url: string | null) => url ? <Image src={url} width={48} height={48} preview={false} /> : null,
-              },
-              { title: "SKC", dataIndex: "skc_id", width: 130 },
-              { title: "商品", dataIndex: "title", ellipsis: true },
-              { title: "店铺", dataIndex: "mall_id", width: 110 },
-              { title: "类目", dataIndex: "category_name", width: 130, ellipsis: true },
-              {
-                title: "申报价",
-                dataIndex: "declared_price_cents",
-                width: 90,
-                align: "right" as const,
-                render: (cents: number | null, r: CloudPriceRow) =>
-                  cents == null ? "—" : `${(cents / 100).toFixed(2)} ${r.price_currency || ""}`,
-              },
-              {
-                title: "建议价",
-                dataIndex: "suggested_price_cents",
-                width: 90,
-                align: "right" as const,
-                render: (cents: number | null, r: CloudPriceRow) =>
-                  cents == null ? "—" : `${(cents / 100).toFixed(2)} ${r.price_currency || ""}`,
-              },
-              {
-                title: "价差",
-                dataIndex: "gap_ratio",
-                width: 90,
-                align: "right" as const,
-                render: (ratio: number | null) =>
-                  ratio == null ? "—" : <Tag color={ratio > 0 ? "green" : ratio < 0 ? "red" : "default"}>{(ratio * 100).toFixed(1)}%</Tag>,
-              },
-              {
-                title: "更新",
-                dataIndex: "last_updated_at",
-                width: 140,
-                render: (ts: number) => new Date(ts).toLocaleString(),
-              },
-            ]}
-          />
-        )}
-      </Drawer>
     </div>
   );
 }

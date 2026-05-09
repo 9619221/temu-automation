@@ -2,7 +2,7 @@ import { Router } from "express";
 import crypto from "crypto";
 import { getDb } from "../db/connection.js";
 import { authMiddleware } from "../middleware/auth.js";
-import { dispatchParsers } from "../parsers/index.js";
+import { dispatchParsers } from "../parsers.js";
 
 const r = Router();
 

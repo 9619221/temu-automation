@@ -47,7 +47,6 @@ const ROUTE_ROLES: Record<string, string[]> = {
   "/users": ["admin", "manager"],
   "/erp-debug": ["admin", "manager"],
   "/logs": ["admin", "manager", "operations"],
-  "/multi-store-cloud": ["admin", "manager"],
   "/settings": ["admin", "manager", "operations"],
 };
 
