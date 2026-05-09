@@ -9,7 +9,8 @@
     "start": "node server.js",
     "seed": "node scripts/seed.js",
     "migrate": "node -e \"import('./db/migrate.js').then(m=>m.migrate()).then(r=>console.log('migrated:', r))\"",
-    "backfill": "node scripts/backfill-parsers.js"
+    "backfill": "node scripts/backfill-parsers.js",
+    "verify": "node scripts/verify.js"
   },
   "dependencies": {
     "better-sqlite3": "^12.8.0",
