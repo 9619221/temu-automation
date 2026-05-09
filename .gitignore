@@ -26,6 +26,10 @@ electron_*.log
 cookies/
 debug/
 
+# 多店云监控运行时产物（cloud server SQLite / 日志 / 扩展商店元数据）
+cloud/data/
+extension/_metadata/
+
 # 本地调试/解包产物
 .claude/worktrees/
 _extracted_asar/

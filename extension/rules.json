@@ -1,0 +1,63 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "Origin", "operation": "set", "value": "https://agentseller.temu.com" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "agentseller.temu.com/*",
+      "initiatorDomains": ["agentseller.temu.com"],
+      "resourceTypes": ["xmlhttprequest", "sub_frame"]
+    }
+  },
+  {
+    "id": 2,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "Origin", "operation": "set", "value": "https://agentseller-us.temu.com" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "agentseller-us.temu.com/*",
+      "initiatorDomains": ["agentseller-us.temu.com"],
+      "resourceTypes": ["xmlhttprequest", "sub_frame"]
+    }
+  },
+  {
+    "id": 3,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "Origin", "operation": "set", "value": "https://agentseller-eu.temu.com" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "agentseller-eu.temu.com/*",
+      "initiatorDomains": ["agentseller-eu.temu.com"],
+      "resourceTypes": ["xmlhttprequest", "sub_frame"]
+    }
+  },
+  {
+    "id": 4,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "Origin", "operation": "set", "value": "https://seller.kuajingmaihuo.com" },
+        { "header": "Referer", "operation": "set", "value": "https://seller.kuajingmaihuo.com/" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "seller.kuajingmaihuo.com/*",
+      "initiatorDomains": ["seller.kuajingmaihuo.com"],
+      "resourceTypes": ["xmlhttprequest", "sub_frame"]
+    }
+  }
+]
