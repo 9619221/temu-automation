@@ -19,6 +19,10 @@ console.log(`[boot] migrations: ${r.ran} ran (${r.total} total)`);
 const app = express();
 app.use(cors({ exposedHeaders: ["ETag"] }));
 app.use(express.json({ limit: "20mb" }));
+app.use((req, _res, next) => {
+  console.log(`[req] ${req.method} ${req.url} ua="${(req.headers["user-agent"] || "").slice(0, 60)}"`);
+  next();
+});
 
 // 静态控制台：访问 /console / /console.html
 app.use("/console", express.static(path.join(__dirname, "public")));

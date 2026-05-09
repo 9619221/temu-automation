@@ -8,7 +8,6 @@ const q1 = (sql) => db.prepare(sql).get().n;
 
 const events = q1("SELECT COUNT(*) AS n FROM capture_events");
 const malls = q1("SELECT COUNT(*) AS n FROM mall_accounts");
-const links = q1("SELECT COUNT(*) AS n FROM device_mall_links");
 const skc = q1("SELECT COUNT(*) AS n FROM skc_snapshots");
 const skcPriced = q1("SELECT COUNT(*) AS n FROM skc_snapshots WHERE declared_price_cents IS NOT NULL OR suggested_price_cents IS NOT NULL");
 const devices = q1("SELECT COUNT(*) AS n FROM devices");
@@ -19,8 +18,7 @@ console.log("");
 console.log("═══ 链路自检 ═══");
 console.log(`${ok(events > 0)} 扩展上报         capture_events    = ${events}`);
 console.log(`${ok(devices > 0)} 设备登记         devices           = ${devices}`);
-console.log(`${ok(malls > 0)} 店铺识别（userInfo parser）  mall_accounts     = ${malls}`);
-console.log(`${ok(links > 0)} 设备↔店铺关联   device_mall_links = ${links}`);
+console.log(`${ok(malls > 0)} 店铺识别         mall_accounts     = ${malls}`);
 console.log(`${ok(skc > 0)} SKC 主体聚合     skc_snapshots     = ${skc}`);
 console.log(`${ok(skcPriced > 0)} SKC 价格已抓     带价格的 SKC      = ${skcPriced}`);
 console.log("");

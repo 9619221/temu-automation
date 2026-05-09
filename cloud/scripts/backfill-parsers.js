@@ -1,11 +1,11 @@
 // 一次性回填脚本：扫历史 capture_events 走 parser dispatcher，
-// 把已有数据填进 skc_snapshots / device_mall_links / mall_accounts。
+// 把已有数据填进 skc_snapshots / mall_accounts。
 //
 // 用法：node scripts/backfill-parsers.js [--tenant=<id>] [--limit=<n>] [--since=<ts_ms>]
 
 import { getDb } from "../db/connection.js";
 import { migrate } from "../db/migrate.js";
-import { dispatchParsers } from "../parsers/index.js";
+import { dispatchParsers } from "../parsers.js";
 
 migrate();
 const db = getDb();
@@ -57,9 +57,7 @@ for (const [key, g] of groups) {
 
 const skcCount = db.prepare("SELECT COUNT(*) AS n FROM skc_snapshots").get().n;
 const mallCount = db.prepare("SELECT COUNT(*) AS n FROM mall_accounts").get().n;
-const linkCount = db.prepare("SELECT COUNT(*) AS n FROM device_mall_links").get().n;
 
 console.log(`\n[backfill] done. processed=${processed} events`);
 console.log(`  skc_snapshots:     ${skcCount} rows`);
 console.log(`  mall_accounts:     ${mallCount} rows`);
-console.log(`  device_mall_links: ${linkCount} rows`);

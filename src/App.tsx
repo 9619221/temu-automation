@@ -45,7 +45,6 @@ const QcOutboundCenter = lazyWithPreload(() => import("./pages/QcOutboundCenter"
 const WorkItems = lazyWithPreload(() => import("./pages/WorkItems"));
 const UserManagement = lazyWithPreload(() => import("./pages/UserManagement"));
 const ErpLogin = lazyWithPreload(() => import("./pages/ErpLogin"));
-const MultiStoreCloud = lazyWithPreload(() => import("./pages/MultiStoreCloud"));
 
 const CORE_ROUTE_PRELOADERS = [
   AppLayout.preload,
@@ -272,7 +271,6 @@ function App() {
             <Route path="users" element={<RoleRoute path="/users"><UserManagement /></RoleRoute>} />
             <Route path="erp-debug" element={<RoleRoute path="/erp-debug"><ErpDebug /></RoleRoute>} />
             <Route path="logs" element={<RoleRoute path="/logs"><Logs /></RoleRoute>} />
-            <Route path="multi-store-cloud" element={<RoleRoute path="/multi-store-cloud"><MultiStoreCloud /></RoleRoute>} />
             <Route path="settings" element={<RoleRoute path="/settings"><Settings /></RoleRoute>} />
             {/* Legacy routes */}
             <Route path="dashboard" element={<Navigate to="/shop" replace />} />
