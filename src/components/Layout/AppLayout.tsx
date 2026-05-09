@@ -7,6 +7,7 @@ import {
   BellOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
+  CloudServerOutlined,
   DashboardOutlined,
   DatabaseOutlined,
   DollarOutlined,
@@ -51,7 +52,10 @@ const menuItems = [
   {
     key: "group-data",
     label: "数据",
-    children: [{ key: "/collect", icon: <SyncOutlined />, label: "数据采集" }],
+    children: [
+      { key: "/collect", icon: <SyncOutlined />, label: "数据采集" },
+      { key: "/multi-store-cloud", icon: <CloudServerOutlined />, label: "多店云监控" },
+    ],
   },
   {
     key: "group-operations",
