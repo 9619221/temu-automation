@@ -13,23 +13,40 @@ const STATS_KEY = "temu_monitor_stats";
 
 // ---------- 启动期初始化 ----------
 chrome.runtime.onInstalled.addListener(async () => {
-  // 周期上报
   chrome.alarms.create(ALARM_FLUSH, { periodInMinutes: 0.5 }); // 30s
-  // 设备 ID（首次安装生成）
   const { device_id } = await getStorage(["device_id"]);
   if (!device_id) {
     await setStorage({ device_id: crypto.randomUUID() });
   }
-  // 默认空白配置（用户在 options 页填入）
-  const cur = await getStorage(["cloud_endpoint", "auth_token"]);
-  if (!cur.cloud_endpoint) {
-    // 留空，不强制
-  }
+  await tryAutoConfigure();
 });
 
-chrome.runtime.onStartup.addListener(() => {
+chrome.runtime.onStartup.addListener(async () => {
   chrome.alarms.create(ALARM_FLUSH, { periodInMinutes: 0.5 });
+  await tryAutoConfigure();
 });
+
+// 装好扩展自动连本地 cloud（dev 默认 localhost:8788 + admin/changeme123）
+// 仅当 storage 还没配置时尝试；失败静默（生产部署改密码 / 改 endpoint 后用户在 options 页手动填）
+async function tryAutoConfigure() {
+  const cur = await getStorage(["cloud_endpoint", "auth_token"]);
+  if (cur.cloud_endpoint && cur.auth_token) return;
+  const defaultEndpoint = "http://localhost:8788";
+  try {
+    const resp = await fetch(defaultEndpoint + "/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: "admin", password: "changeme123" }),
+    });
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (!data?.token) return;
+    await setStorage({ cloud_endpoint: defaultEndpoint, auth_token: data.token });
+    console.log(`[sw] auto-configured to ${defaultEndpoint}`);
+  } catch (e) {
+    console.warn("[sw] auto-configure skipped:", e?.message || e);
+  }
+}
 
 // ---------- 周期上报 ----------
 chrome.alarms.onAlarm.addListener(async (alarm) => {
