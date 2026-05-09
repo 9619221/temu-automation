@@ -1,0 +1,72 @@
+{
+  "manifest_version": 3,
+  "name": "Temu 多店监控",
+  "version": "0.1.0",
+  "description": "在 Temu 卖家后台后台抓取业务接口数据并上传云端，供多店统一汇总。",
+  "permissions": [
+    "storage",
+    "alarms",
+    "scripting",
+    "declarativeNetRequest",
+    "declarativeNetRequestWithHostAccess"
+  ],
+  "host_permissions": [
+    "https://agentseller.temu.com/*",
+    "https://agentseller-eu.temu.com/*",
+    "https://agentseller-us.temu.com/*",
+    "https://seller.kuajingmaihuo.com/*",
+    "https://*.pftk.temu.com/*",
+    "https://pftk-cn.kuajingmaihuo.com/*",
+    "https://thtk-us.seller.temu.com/*"
+  ],
+  "background": {
+    "service_worker": "web/background/sw.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://agentseller.temu.com/*",
+        "https://agentseller-eu.temu.com/*",
+        "https://agentseller-us.temu.com/*",
+        "https://seller.kuajingmaihuo.com/*"
+      ],
+      "js": [
+        "web/content/_config.generated.js",
+        "web/content/bridge.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+  "action": {
+    "default_popup": "web/popup/popup.html",
+    "default_title": "Temu 多店监控",
+    "default_icon": {
+      "16": "web/img/16.png",
+      "48": "web/img/48.png",
+      "128": "web/img/128.png"
+    }
+  },
+  "options_page": "web/options/options.html",
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "ruleset_origin",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["web/page/hook.js"],
+      "matches": [
+        "https://agentseller.temu.com/*",
+        "https://agentseller-eu.temu.com/*",
+        "https://agentseller-us.temu.com/*",
+        "https://seller.kuajingmaihuo.com/*"
+      ]
+    }
+  ]
+}

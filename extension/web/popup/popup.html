@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>Temu 多店监控</title>
+  <style>
+    body { width: 340px; margin: 0; padding: 14px; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 13px; color: #1f2328; }
+    h1 { font-size: 14px; font-weight: 600; margin: 0 0 12px; }
+    .row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #eef0f3; }
+    .row:last-child { border-bottom: none; }
+    .label { color: #57606a; }
+    .value { font-weight: 500; max-width: 180px; text-align: right; word-break: break-word; }
+    .ok { color: #1a7f37; }
+    .err { color: #cf222e; }
+    button { margin-top: 10px; width: 100%; padding: 8px; border: 1px solid #d0d7de; background: #f6f8fa; border-radius: 6px; cursor: pointer; font-size: 13px; }
+    button:hover { background: #eaeef2; }
+    button.primary { background: #0969da; color: white; border-color: #0969da; }
+    button.primary:hover { background: #0860ca; }
+    .footer { margin-top: 10px; color: #8c959f; font-size: 11px; text-align: center; }
+    .footer a { color: #0969da; text-decoration: none; cursor: pointer; }
+    .section-title { font-size: 11px; color: #57606a; text-transform: uppercase; letter-spacing: 0.5px; margin: 14px 0 4px; }
+    .mall-list { max-height: 100px; overflow-y: auto; border: 1px solid #eef0f3; border-radius: 4px; padding: 4px 6px; font-size: 11px; }
+    .mall-item { padding: 2px 0; border-bottom: 1px dashed #eef0f3; }
+    .mall-item:last-child { border-bottom: none; }
+    .empty { color: #8c959f; font-style: italic; padding: 4px; font-size: 11px; text-align: center; }
+  </style>
+</head>
+<body>
+  <h1>Temu 多店监控</h1>
+  <div class="row"><span class="label">配置状态</span><span class="value" id="cfg">—</span></div>
+  <div class="row"><span class="label">已抓接口</span><span class="value" id="captured">—</span></div>
+  <div class="row"><span class="label">已上报</span><span class="value" id="sent">—</span></div>
+  <div class="row"><span class="label">待上报</span><span class="value" id="queue">—</span></div>
+  <div class="row"><span class="label">最近上报</span><span class="value" id="lastFlush">—</span></div>
+  <div class="row"><span class="label">最近结果</span><span class="value" id="lastResult">—</span></div>
+
+  <div class="section-title">已识别店铺 (<span id="mallCount">0</span>)</div>
+  <div class="mall-list" id="mallList"><div class="empty">尚未识别到店铺，需要打开 Temu 后台首页让 userInfo 接口被拦截</div></div>
+
+  <button id="flushBtn" class="primary">立即上报</button>
+  <button id="optBtn">打开设置</button>
+  <div class="footer"><a id="reload">重新读取状态</a></div>
+  <script src="popup.js"></script>
+</body>
+</html>
