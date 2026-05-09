@@ -17,6 +17,8 @@
     xhrSendTotal: 0,
     xhrCaptureHit: 0,
     xhrEmitted: 0,
+    fetchSendTotal: 0,
+    fetchCaptureHit: 0,
     perfSeen: 0,
     lastCaptureUrl: "",
     lastCaptureAt: 0,
@@ -113,6 +115,43 @@
   setTimeout(tryReinstall, 2000);
   setTimeout(tryReinstall, 5000);
 
+  // -------------------- fetch wrap --------------------
+  // 设计：只「窃听」response — 用 resp.clone() 读 body，不动 request、不动 response，
+  // Temu 自家的 anti-content / 签名 wrap 仍在我们外层，不会触发 401（v0.3.0 那次的根因
+  // 是 defineProperty 阻止了 Temu re-wrap，本次不做这件事）。
+  // bypass：业务自己用扩展上下文 fetch 时，在 init 上挂 [Symbol.for(BYPASS_SYMBOL_KEY)]=true。
+  const BYPASS_SYM = Symbol.for(BYPASS_SYMBOL_KEY);
+  const OrigFetch = window.fetch;
+  function TrackedFetch(input, init) {
+    if (init && init[BYPASS_SYM]) { stats.bypassHit++; return OrigFetch.apply(this, arguments); }
+    let url = "";
+    try { url = typeof input === "string" ? input : (input && input.url) || ""; } catch {}
+    const method = String((init && init.method) || (input && input.method) || "GET").toUpperCase();
+    stats.fetchSendTotal++;
+    if (!shouldCapture(url)) return OrigFetch.apply(this, arguments);
+    stats.fetchCaptureHit++;
+    const ts = Date.now();
+    const promise = OrigFetch.apply(this, arguments);
+    return promise.then((resp) => {
+      try {
+        const cloned = resp.clone();
+        cloned.text().then((text) => {
+          try {
+            emit({
+              kind: "fetch", url, method, status: resp.status, ts,
+              site: inferMallSite(), page: location.pathname,
+              body: safeJson(text),
+              bodyText: text.length > 200000 ? null : text,
+              bodySize: text.length,
+            });
+          } catch {}
+        }).catch(() => {});
+      } catch {}
+      return resp;
+    });
+  }
+  try { window.fetch = TrackedFetch; } catch {}
+
   // -------------------- PerformanceObserver --------------------
   const performanceSeen = new Set();
   try {
@@ -147,11 +186,11 @@
   } catch {}
 
   window.__temuMonitor = {
-    version: "0.2.2",
+    version: "0.3.0",
     site: inferMallSite(),
-    healthy: () => window.XMLHttpRequest === TrackedXHR,
+    healthy: () => window.XMLHttpRequest === TrackedXHR && window.fetch === TrackedFetch,
     stats,
-    note: "fetch passthrough (no hook); XHR wrapped; perf observer fallback (no body)",
+    note: "XHR + fetch wrapped; fetch 用 resp.clone() 不消耗原 stream; perf observer 兜底",
   };
 })(
   (function () {
