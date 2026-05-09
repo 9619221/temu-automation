@@ -13,6 +13,9 @@ export interface CollectionTaskDiagnostic {
 
 export interface CollectionDiagnostics {
   syncedAt: string | null;
+  syncedAtIso?: string | null;
+  fullSyncedAt?: string | null;
+  fullSyncedAtIso?: string | null;
   tasks: Record<string, CollectionTaskDiagnostic>;
   summary: {
     totalTasks: number;
@@ -23,6 +26,9 @@ export interface CollectionDiagnostics {
 
 const EMPTY_DIAGNOSTICS: CollectionDiagnostics = {
   syncedAt: null,
+  syncedAtIso: null,
+  fullSyncedAt: null,
+  fullSyncedAtIso: null,
   tasks: {},
   summary: {
     totalTasks: 0,
@@ -63,6 +69,9 @@ export function normalizeCollectionDiagnostics(raw: unknown): CollectionDiagnost
 
   return {
     syncedAt: typeof data.syncedAt === "string" ? data.syncedAt : null,
+    syncedAtIso: typeof data.syncedAtIso === "string" ? data.syncedAtIso : null,
+    fullSyncedAt: typeof data.fullSyncedAt === "string" ? data.fullSyncedAt : null,
+    fullSyncedAtIso: typeof data.fullSyncedAtIso === "string" ? data.fullSyncedAtIso : null,
     tasks,
     summary: {
       totalTasks: typeof summary?.totalTasks === "number" ? summary.totalTasks : Object.keys(tasks).length,
@@ -74,6 +83,20 @@ export function normalizeCollectionDiagnostics(raw: unknown): CollectionDiagnost
         : Object.values(tasks).filter((task) => task.status === "error").length,
     },
   };
+}
+
+export function isCompleteCollectionDiagnostics(diagnostics: CollectionDiagnostics | null | undefined) {
+  if (!diagnostics) return false;
+
+  const totalTasks = Number(diagnostics.summary?.totalTasks) || 0;
+  const successCount = Number(diagnostics.summary?.successCount) || 0;
+  const errorCount = Number(diagnostics.summary?.errorCount) || 0;
+  const taskCount = Object.keys(diagnostics.tasks || {}).length;
+
+  return totalTasks > 0
+    && taskCount >= totalTasks
+    && successCount + errorCount >= totalTasks
+    && successCount > 0;
 }
 
 export function getCollectionDataIssue(

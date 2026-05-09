@@ -1,0 +1,65 @@
+{
+  "manifest_version": 3,
+  "name": "Temu 巡店采集助手",
+  "version": "0.1.0",
+  "description": "在已登录的 Temu 卖家后台窗口中识别当前店铺，采集接口响应，并上传到本地 ERP。",
+  "permissions": [
+    "alarms",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://agentseller.temu.com/*",
+    "https://agentseller-us.temu.com/*",
+    "https://agentseller-eu.temu.com/*",
+    "https://seller.kuajingmaihuo.com/*",
+    "http://127.0.0.1:18731/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://agentseller.temu.com/*",
+        "https://agentseller-us.temu.com/*",
+        "https://agentseller-eu.temu.com/*",
+        "https://seller.kuajingmaihuo.com/*"
+      ],
+      "js": [
+        "page-hook.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://agentseller.temu.com/*",
+        "https://agentseller-us.temu.com/*",
+        "https://agentseller-eu.temu.com/*",
+        "https://seller.kuajingmaihuo.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "page-hook.js"
+      ],
+      "matches": [
+        "https://agentseller.temu.com/*",
+        "https://agentseller-us.temu.com/*",
+        "https://agentseller-eu.temu.com/*",
+        "https://seller.kuajingmaihuo.com/*"
+      ]
+    }
+  ],
+  "action": {
+    "default_title": "Temu 巡店采集助手",
+    "default_popup": "popup.html"
+  }
+}

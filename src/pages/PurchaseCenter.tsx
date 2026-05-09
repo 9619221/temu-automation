@@ -237,6 +237,7 @@ interface PurchaseRequestRow {
 interface PurchaseOrderRow {
   id: string;
   prId?: string | null;
+  selectedCandidatePrId?: string | null;
   poNo?: string;
   accountId?: string | null;
   accountName?: string;
@@ -246,6 +247,7 @@ interface PurchaseOrderRow {
   paymentStatus?: string;
   skuSummary?: string;
   skuImageUrl?: string | null;
+  skuIds?: string | null;
   skuCodes?: string | null;
   productNames?: string | null;
   totalQty?: number;
@@ -981,6 +983,8 @@ function is1688AclDeniedError(error: any, message: string) {
 
 // 1688 业务错误码 → 用户友好中文。匹配 `errorCode:XXX` 子串即翻译。
 const ALIBABA_1688_BUSINESS_ERROR_HINTS: Array<{ code: string; hint: string }> = [
+  { code: "AddressId invalid", hint: "1688 收货地址 ID 无效，请先在「询盘设置」同步 1688 地址，重新选择店铺地址后再推单。" },
+  { code: "ADDRESS_ID_INVALID", hint: "1688 收货地址 ID 无效，请先在「询盘设置」同步 1688 地址，重新选择店铺地址后再推单。" },
   { code: "ORDER_NOT_EXIST", hint: "1688 找不到这个订单号；可能已被卖家取消、超时关闭或绑错了账号。建议先在 1688 后台确认订单状态，或在采购单上点「取消1688」后重新推送。" },
   { code: "ORDER_NOT_PAY", hint: "1688 订单不在「待支付」状态；可能已付款或已关闭。" },
   { code: "ORDER_HAS_PAID", hint: "1688 订单已经付款过了。在系统上点「确认付款」推进本地状态。" },
@@ -1049,6 +1053,20 @@ function canUse1688PaymentActions(row: PurchaseOrderRow) {
   if (["paid", "confirmed", "success"].includes(paymentStatus)) return false;
   if (/cancel|close|terminat|success/.test(externalStatus)) return false;
   return true;
+}
+
+function canSubmitPaymentApprovalAction(row: PurchaseOrderRow) {
+  const localStatus = String(row.status || "").toLowerCase();
+  const paymentStatus = String(row.paymentStatus || "").toLowerCase();
+  if (paymentStatus === "paid" || paymentStatus === "confirmed" || paymentStatus === "success") return false;
+  return localStatus === "draft" || localStatus === "pushed_pending_price";
+}
+
+function canConfirmPaidAction(row: PurchaseOrderRow) {
+  const localStatus = String(row.status || "").toLowerCase();
+  const paymentStatus = String(row.paymentStatus || "").toLowerCase();
+  if (paymentStatus === "paid" || paymentStatus === "confirmed" || paymentStatus === "success") return false;
+  return localStatus === "approved_to_pay";
 }
 
 function candidateSpecRows(candidate?: SourcingCandidateRow | null): BindingSpecRow[] {
@@ -1126,6 +1144,17 @@ function has1688OrderTrace(row?: PurchaseOrderRow | null) {
   if (row.externalOrderId) return true;
   const status = row.externalOrderStatus || "";
   return Boolean(status && !["previewed", "price_change_requested"].includes(status));
+}
+
+function canPushPurchaseOrderTo1688(
+  row: PurchaseOrderRow | null | undefined,
+  options: { canPurchase: boolean; mappingCount?: number; deliveryAddressCount?: number },
+) {
+  if (!row || !options.canPurchase) return false;
+  return row.status === "draft"
+    && !has1688OrderTrace(row)
+    && Number(options.mappingCount ?? row.mappingCount ?? 0) > 0
+    && Number(options.deliveryAddressCount ?? row.deliveryAddressCount ?? 0) > 0;
 }
 
 function canDeletePurchaseOrder(row?: PurchaseOrderRow | null) {
@@ -1327,8 +1356,21 @@ function buildPurchaseRequestSearchText(row: PurchaseRequestRow) {
   ].map((item) => String(item ?? "")).join(" ");
 }
 
-function purchaseOrderBelongsToRequest(row: PurchaseOrderRow, prId: string) {
-  return row.prId === prId || (row as any).pr_id === prId;
+function purchaseOrderBelongsToRequest(row: PurchaseOrderRow, request: PurchaseRequestRow | string) {
+  const prId = typeof request === "string" ? request : request.id;
+  if (row.prId === prId
+    || (row as any).pr_id === prId
+    || row.selectedCandidatePrId === prId
+    || (row as any).selected_candidate_pr_id === prId) {
+    return true;
+  }
+  if (typeof request === "string") return false;
+  const requestSkuId = request.skuId;
+  const requestAccountId = request.accountId;
+  if (!requestSkuId || !requestAccountId) return false;
+  if (row.accountId && row.accountId !== requestAccountId) return false;
+  const rowSkuIds = splitGroupedText(row.skuIds || (row as any).sku_ids);
+  return rowSkuIds.includes(requestSkuId);
 }
 
 function buildPurchaseOrderSearchText(row: PurchaseOrderRow) {
@@ -2432,6 +2474,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         const sku = uniqueSelectedSkus[i];
         const isLast = i === uniqueSelectedSkus.length - 1;
         const payload = {
+          ...FAST_PURCHASE_WORKBENCH_PARAMS,
           action: "create_pr",
           accountId: sku.accountId,
           skuId: sku.id,
@@ -2454,6 +2497,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           if (!skippedImages && imageDataUrls.length > 0 && isRequestBodyTooLarge(error)) {
             skippedImages = true;
             lastResult = await erp.purchase.action({
+              ...FAST_PURCHASE_WORKBENCH_PARAMS,
               action: "create_pr",
               accountId: sku.accountId,
               skuId: sku.id,
@@ -2482,7 +2526,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         if (Array.isArray(wb.supplierOptions)) setSuppliers(wb.supplierOptions);
       } else {
         // 后端没返 workbench 时再补一次（不阻塞 modal 关闭）
-        void erp.purchase.workbench({ limit: 200 }).then((wb2: any) => {
+        void erp.purchase.workbench(FAST_PURCHASE_WORKBENCH_PARAMS).then((wb2: any) => {
           applyWorkbench(wb2);
           if (Array.isArray(wb2?.skuOptions)) setSkus(wb2.skuOptions);
           if (Array.isArray(wb2?.supplierOptions)) setSuppliers(wb2.supplierOptions);
@@ -2862,6 +2906,23 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     row: PurchaseOrderRow,
     options: { skipValidation?: boolean; deliveryAddressId?: string; purchase1688AccountId?: string } = {},
   ) => {
+    if (!canPushPurchaseOrderTo1688(row, {
+      canPurchase,
+      mappingCount: row.mappingCount,
+      deliveryAddressCount: row.deliveryAddressCount,
+    })) {
+      const statusLabel = PO_STATUS_LABELS[row.status] || row.status || "-";
+      if (has1688OrderTrace(row)) {
+        message.warning("该采购单已有 1688 推单记录，不能重复下单");
+      } else if (row.status !== "draft") {
+        message.warning(`当前采购单状态为「${statusLabel}」，不能推送 1688 下单`);
+      } else if (Number(row.mappingCount || 0) <= 0) {
+        message.warning("请先维护 1688 商品映射");
+      } else {
+        message.warning("请先维护 1688 收货地址");
+      }
+      return null;
+    }
     if (!options.skipValidation) {
       const validation = await validate1688OrderPush(row, true);
       if (!validation?.ready) {
@@ -3315,7 +3376,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   };
 
   const generatePurchaseOrderForRow = async (row: PurchaseRequestRow) => {
-    const existingPo = purchaseOrders.find((item) => purchaseOrderBelongsToRequest(item, row.id));
+    const existingPo = purchaseOrders.find((item) => purchaseOrderBelongsToRequest(item, row));
     if (row.status === "converted_to_po" || existingPo) {
       if (existingPo) {
         setActiveQueueKey("all_orders");
@@ -3533,7 +3594,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         const hasCandidates = Boolean(row.candidates?.length || row.candidateCount);
         const hasMapping = Number(row.mappingCount || 0) > 0;
         const hasSkuSupplier = Boolean(row.skuSupplierId || row.skuSupplierName);
-        const existingPo = purchaseOrders.find((item) => purchaseOrderBelongsToRequest(item, row.id));
+        const existingPo = purchaseOrders.find((item) => purchaseOrderBelongsToRequest(item, row));
         const canQuote = canPurchase && ["submitted", "buyer_processing", "sourced"].includes(row.status);
         const canFindSupplier = canQuote && !hasMapping && !hasSkuSupplier;
         const canImageSearch = canQuote;
@@ -3880,11 +3941,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         const rollbackVisible = canRollbackPurchaseOrder(row);
         const mappingCount = Number(row.mappingCount || 0);
         const deliveryAddressCount = Number(row.deliveryAddressCount || 0);
-        const canPushTo1688 = !row.externalOrderId && canPurchase && mappingCount > 0 && deliveryAddressCount > 0;
+        const canPushTo1688 = canPushPurchaseOrderTo1688(row, { canPurchase, mappingCount, deliveryAddressCount });
         const pushLoading = actingKey === `1688-push-${row.id}`
           || actingKey === `1688-validate-${row.id}`
           || actingKey === `1688-preview-${row.id}`;
         const canUse1688Payment = canUse1688PaymentActions(row);
+        const canSubmitPaymentApproval = canPurchase && canSubmitPaymentApprovalAction(row);
+        const canConfirmPaid = (canFinance || canPurchase) && canConfirmPaidAction(row);
         const canDeletePo = canPurchase && canDeletePurchaseOrder(row);
         return (
           <div className="purchase-action-grid">
@@ -3929,7 +3992,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               </Button>
             </Popconfirm>
           ) : null}
-          {row.status === "draft" && canPurchase && Number(row.mappingCount || 0) === 0 ? (
+          {row.status === "draft" && canSubmitPaymentApproval && Number(row.mappingCount || 0) === 0 ? (
             <Button
               size="small"
               type="primary"
@@ -4015,7 +4078,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               </Button>
             </Popconfirm>
           ) : null}
-          {row.status === "pushed_pending_price" && canPurchase ? (
+          {row.status === "pushed_pending_price" && canSubmitPaymentApproval ? (
             <Button
               size="small"
               icon={<CommentOutlined />}
@@ -4058,7 +4121,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               批准（历史）
             </Button>
           ) : null}
-          {row.status === "approved_to_pay" && (canFinance || canPurchase) && (row.externalOrderId || Number(row.mappingCount || 0) === 0) ? (
+          {canConfirmPaid && (row.externalOrderId || Number(row.mappingCount || 0) === 0) ? (
             <Button
               size="small"
               type="primary"

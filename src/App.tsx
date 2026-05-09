@@ -1,8 +1,11 @@
 import { Suspense, lazy, useEffect, useRef, useState, type ComponentType, type LazyExoticComponent } from "react";
-import { Routes, Route, Navigate, useLocation } from "react-router-dom";
+import { Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { CollectionProvider } from "./contexts/CollectionContext";
 import { ErpAuthProvider, useErpAuth } from "./contexts/ErpAuthContext";
 import { canAccessRoute, getDefaultPathForRole, roleLabel } from "./utils/erpRoleAccess";
+import ToolCollectionGatePage from "./components/ToolCollectionGate";
+import { useToolCollectionRequirement } from "./hooks/useToolCollectionGate";
+import { isToolCollectionRoute } from "./utils/toolCollectionGate";
 import {
   ACTIVE_ACCOUNT_CHANGED_EVENT,
   emitActiveAccountChanged,
@@ -25,6 +28,7 @@ function lazyWithPreload<T extends ComponentType<any>>(factory: LazyFactory<T>) 
 const AppLayout = lazyWithPreload(() => import("./components/Layout/AppLayout"));
 const Dashboard = lazyWithPreload(() => import("./pages/Dashboard"));
 const ShopOverview = lazyWithPreload(() => import("./pages/ShopOverview"));
+const StoreConsole = lazyWithPreload(() => import("./pages/StoreConsole"));
 const AccountManager = lazyWithPreload(() => import("./pages/AccountManager"));
 const ProductList = lazyWithPreload(() => import("./pages/ProductList.tsx"));
 const ProductDetail = lazyWithPreload(() => import("./pages/ProductDetail"));
@@ -47,6 +51,7 @@ const ErpLogin = lazyWithPreload(() => import("./pages/ErpLogin"));
 
 const CORE_ROUTE_PRELOADERS = [
   AppLayout.preload,
+  StoreConsole.preload,
   ShopOverview.preload,
   ProductList.preload,
   ProductMasterData.preload,
@@ -144,6 +149,23 @@ function AccessDenied() {
 function RoleRoute({ path, children }: { path: string; children: JSX.Element }) {
   const { currentUser } = useErpAuth();
   if (!canAccessRoute(currentUser?.role, path)) return <AccessDenied />;
+  return children;
+}
+
+function ToolRoute({ path, children }: { path: string; children: JSX.Element }) {
+  const navigate = useNavigate();
+  const toolCollectionRequirement = useToolCollectionRequirement();
+
+  if (toolCollectionRequirement.loading) return <RouteLoading />;
+  if (isToolCollectionRoute(path) && toolCollectionRequirement.active && !toolCollectionRequirement.allowed) {
+    return (
+      <ToolCollectionGatePage
+        state={toolCollectionRequirement}
+        onOpenCollect={() => navigate("/collect")}
+      />
+    );
+  }
+
   return children;
 }
 
@@ -249,15 +271,16 @@ function App() {
             <Route path="shop" element={<RoleRoute path="/shop"><ShopOverview /></RoleRoute>} />
             <Route path="products" element={<RoleRoute path="/products"><ProductList /></RoleRoute>} />
             <Route path="products/:id" element={<RoleRoute path="/products"><ProductDetail /></RoleRoute>} />
-            <Route path="create-product" element={<RoleRoute path="/create-product"><ProductCreate /></RoleRoute>} />
+            <Route path="create-product" element={<RoleRoute path="/create-product"><ToolRoute path="/create-product"><ProductCreate /></ToolRoute></RoleRoute>} />
             <Route path="product-create" element={<Navigate to="/create-product" replace />} />
-            <Route path="image-studio" element={<RoleRoute path="/image-studio"><ImageStudio /></RoleRoute>} />
-            <Route path="image-studio-gpt" element={<RoleRoute path="/image-studio-gpt"><ImageStudioGPT /></RoleRoute>} />
+            <Route path="image-studio" element={<RoleRoute path="/image-studio"><ToolRoute path="/image-studio"><ImageStudio /></ToolRoute></RoleRoute>} />
+            <Route path="image-studio-gpt" element={<RoleRoute path="/image-studio-gpt"><ToolRoute path="/image-studio-gpt"><ImageStudioGPT /></ToolRoute></RoleRoute>} />
             <Route path="collect" element={<RoleRoute path="/collect"><Dashboard /></RoleRoute>} />
+            <Route path="store-console" element={<RoleRoute path="/store-console"><StoreConsole /></RoleRoute>} />
             <Route path="accounts" element={<RoleRoute path="/accounts"><AccountManager /></RoleRoute>} />
             <Route path="tasks" element={<Navigate to="/work-items" replace />} />
             <Route path="competitor" element={<RoleRoute path="/competitor"><CompetitorAnalysis /></RoleRoute>} />
-            <Route path="price-review" element={<RoleRoute path="/price-review"><PriceReview /></RoleRoute>} />
+            <Route path="price-review" element={<RoleRoute path="/price-review"><ToolRoute path="/price-review"><PriceReview /></ToolRoute></RoleRoute>} />
             <Route path="daily-command" element={<RoleHomeRedirect />} />
             <Route path="product-master-data" element={<RoleRoute path="/product-master-data"><ProductMasterData mode="skus" /></RoleRoute>} />
             <Route path="stores" element={<RoleRoute path="/stores"><PurchaseCenter initialStoreManagerOpen /></RoleRoute>} />

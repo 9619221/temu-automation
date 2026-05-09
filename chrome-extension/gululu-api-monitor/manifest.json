@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "咕噜噜接口监听器",
+  "version": "0.1.0",
+  "description": "仅用于监控咕噜噜运行时实际请求了哪些接口，记录 URL、请求体摘要、状态码和发起来源。",
+  "permissions": [
+    "storage",
+    "webRequest",
+    "unlimitedStorage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "咕噜噜接口监听器",
+    "default_popup": "popup.html"
+  }
+}

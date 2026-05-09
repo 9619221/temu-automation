@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const fs = require("fs");
+const http = require("http");
 const path = require("path");
 const { getErpDatabasePath, openErpDatabase } = require("../db/connection.cjs");
 const { runMigrations } = require("../db/migrate.cjs");
@@ -55,6 +56,8 @@ const erpState = {
   auto1688OrderSyncTimer: null,
   auto1688OrderSyncRunning: false,
   auto1688AddressSyncByCompany: new Map(),
+  extensionBridgeServer: null,
+  extensionBridgeStatus: null,
   schemaRepairDone: false,
   // 由 main.cjs 注入的 worker 调用器：(action, params, options) => Promise<result>
   workerInvoker: null,
@@ -65,6 +68,10 @@ const USER_UPDATE_CHANNEL = "erp:user:update";
 const AUTH_EXPIRED_CHANNEL = "erp:auth:expired";
 const AUTO_1688_ADDRESS_SYNC_INTERVAL_MS = 10 * 60 * 1000;
 const ALPHASHOP_API_BASE = "https://api.alphashop.cn";
+const EXTENSION_BRIDGE_HOST = "127.0.0.1";
+const EXTENSION_BRIDGE_DEFAULT_PORT = 18731;
+const EXTENSION_BRIDGE_HEADER = "temu-patrol-v1";
+const EXTENSION_BRIDGE_MAX_BODY_BYTES = 24 * 1024 * 1024;
 const rendererEventSubscribers = new Set();
 const BROADCAST_PURCHASE_ACTIONS = new Set([
   "create_pr",
@@ -292,6 +299,17 @@ async function remoteRequest(requestPath, options = {}) {
     }
     throw error;
   }
+}
+
+function isRemoteNotFoundError(error) {
+  return error?.statusCode === 404 || /not found/i.test(String(error?.message || ""));
+}
+
+function storeCollectionRemoteNotReadyError(error) {
+  const nextError = new Error("Cloud store collection API is not deployed yet. Please update the ERP cloud service first.");
+  nextError.cause = error;
+  nextError.statusCode = error?.statusCode || 404;
+  return nextError;
 }
 
 function broadcastPurchaseUpdate(action, payload = {}, actor = {}, result = {}) {
@@ -552,6 +570,11 @@ function tableHasColumn(db, tableName, columnName) {
     .some((column) => column.name === columnName);
 }
 
+function tableExists(db, tableName) {
+  if (!/^[a-z0-9_]+$/i.test(tableName)) return false;
+  return Boolean(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(tableName));
+}
+
 function ensureRuntimeSchema(db, options = {}) {
   if (!db || (erpState.schemaRepairDone && !options.force)) return;
   if (!tableHasColumn(db, "erp_skus", "created_by")) {
@@ -590,6 +613,13 @@ function ensureRuntimeSchema(db, options = {}) {
     db.exec("ALTER TABLE erp_purchase_settings ADD COLUMN alphashop_secret_key TEXT");
   }
   db.exec("CREATE INDEX IF NOT EXISTS idx_erp_purchase_settings_company ON erp_purchase_settings(company_id)");
+  if (!tableHasColumn(db, "erp_accounts", "owner_name")) {
+    db.exec("ALTER TABLE erp_accounts ADD COLUMN owner_name TEXT");
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_erp_accounts_company_owner ON erp_accounts(company_id, owner_name, status)");
+  if (tableExists(db, "erp_store_collection_snapshots") && !tableHasColumn(db, "erp_store_collection_snapshots", "owner_name")) {
+    db.exec("ALTER TABLE erp_store_collection_snapshots ADD COLUMN owner_name TEXT");
+  }
   erpState.schemaRepairDone = true;
 }
 
@@ -676,6 +706,7 @@ function getErpStatus() {
     dbPath: erpState.initResult?.dbPath || erpState.db?.__erpDbPath || null,
     backupPath: erpState.initResult?.backupPath || null,
     migrations: erpState.initResult?.migrations || [],
+    extensionBridge: erpState.extensionBridgeStatus || null,
     error: serializeError(erpState.initError),
   };
 }
@@ -803,6 +834,7 @@ function upsertAccount(payload = {}, actor = erpState.currentUser) {
     id: optionalString(payload.id) || createId("acct"),
     company_id: companyId,
     name: requireString(payload.name, "name"),
+    owner_name: optionalString(payload.ownerName || payload.owner_name),
     phone: optionalString(payload.phone),
     status: optionalString(payload.status) || "offline",
     source: optionalString(payload.source) || "manual",
@@ -811,11 +843,12 @@ function upsertAccount(payload = {}, actor = erpState.currentUser) {
   };
 
   db.prepare(`
-    INSERT INTO erp_accounts (id, company_id, name, phone, status, source, created_at, updated_at)
-    VALUES (@id, @company_id, @name, @phone, @status, @source, @created_at, @updated_at)
+    INSERT INTO erp_accounts (id, company_id, name, owner_name, phone, status, source, created_at, updated_at)
+    VALUES (@id, @company_id, @name, @owner_name, @phone, @status, @source, @created_at, @updated_at)
     ON CONFLICT(id) DO UPDATE SET
       company_id = excluded.company_id,
       name = excluded.name,
+      owner_name = excluded.owner_name,
       phone = excluded.phone,
       status = excluded.status,
       source = excluded.source,
@@ -853,6 +886,1493 @@ function deleteAccount(payload = {}, actor = erpState.currentUser) {
   return {
     id: accountId,
     deleted: true,
+  };
+}
+
+function parseJsonValue(value, fallback = null) {
+  try {
+    if (value === null || value === undefined || value === "") return fallback;
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function safeJsonStringify(value, fallback = "null") {
+  try {
+    return JSON.stringify(value === undefined ? null : value);
+  } catch {
+    try {
+      return JSON.stringify(String(value));
+    } catch {
+      return fallback;
+    }
+  }
+}
+
+const STORE_COLLECTION_TASK_TYPES = Object.freeze([
+  { key: "deliveryCancel", label: "快递取消" },
+  { key: "returns", label: "退货" },
+  { key: "stock", label: "补货" },
+  { key: "activity", label: "活动" },
+  { key: "violation", label: "违规" },
+]);
+const STORE_COLLECTION_SKC_SUMMARY_KEY = "temu_skc_summary";
+
+const STORE_COLLECTION_TASK_MATCHERS = Object.freeze({
+  deliveryCancel: /快递取消|delivery|shipping|ship|fulfill|fulfilment|logistic|express|cancel/i,
+  returns: /退货|refund|return|after.?sale|salesreturn|returnorder|reverse/i,
+  stock: /补货|stock|inventory|sold.?out|soldout|replenish|warehouse|shortage|lack/i,
+  activity: /活动|activity|marketing|campaign|promotion|coupon|ads?|msgbox|message|feedback|prompt/i,
+  violation: /违规|violation|govern|compliance|quality|penalty|checkup|appeal|qualification|optimize/i,
+});
+
+const STORE_COLLECTION_TASK_VALUE_MATCHERS = Object.freeze({
+  deliveryCancel: [/cancel/i, /fulfill|fulfilment/i, /^total$/i, /delivery|shipping|ship|logistic|express/i],
+  returns: [/return/i, /refund/i, /after.?sale/i, /isMatched/i],
+  stock: [/soonSellOutNum/i, /sellOutNum/i, /sellOutLossNum/i, /sold.?out/i, /stock.?out/i, /replenish/i, /inventory/i, /shortage|lack/i],
+  activity: [/invitationGoodsCouponCount/i, /totalUnreadMsgNum/i, /unread/i, /notReadTotal/i, /activity/i, /coupon/i, /campaign/i, /promotion/i],
+  violation: [/waitOptimizeOrderCount/i, /violation/i, /penalty/i, /govern/i, /quality/i, /appeal/i, /optimize/i],
+});
+
+function emptyStoreCollectionTaskSummary() {
+  const categories = {};
+  for (const definition of STORE_COLLECTION_TASK_TYPES) {
+    categories[definition.key] = {
+      key: definition.key,
+      label: definition.label,
+      count: 0,
+      signalCount: 0,
+      sourceKeys: [],
+      sourceCounts: {},
+    };
+  }
+  return {
+    total: 0,
+    signalTotal: 0,
+    status: "clear",
+    categories,
+  };
+}
+
+function classifyStoreCollectionTaskSource(source = {}) {
+  const text = [
+    source.category,
+    source.data_key,
+    source.dataKey,
+    source.task_key,
+    source.taskKey,
+    source.label,
+  ].map((value) => String(value || "")).join(" ");
+  for (const definition of STORE_COLLECTION_TASK_TYPES) {
+    if (STORE_COLLECTION_TASK_MATCHERS[definition.key].test(text)) return definition.key;
+  }
+  return null;
+}
+
+function storeCollectionPayloadRoots(source = {}) {
+  const payload = source.payload !== undefined
+    ? source.payload
+    : parseJsonValue(source.payload_json ?? source.payloadJson, null);
+  const events = Array.isArray(payload?.events) ? payload.events : [];
+  if (events.length) {
+    return events.map((event) => (
+      event?.response?.result
+      ?? event?.response?.data
+      ?? event?.response
+      ?? event?.body
+      ?? event
+    ));
+  }
+  return [
+    payload?.response?.result
+    ?? payload?.response?.data
+    ?? payload?.response
+    ?? payload?.result
+    ?? payload?.data
+    ?? payload,
+  ].filter((item) => item !== null && item !== undefined);
+}
+
+function isStoreCollectionTaskNumberKey(path, taskKey) {
+  const text = String(path[path.length - 1] || "");
+  if (!text) return false;
+  if (/(ratio|rate|percent|time|timestamp|date|price|amount|fee|id|uin|uid|page|size|offset|limit|status|code)$/i.test(text)) return false;
+  const matchers = STORE_COLLECTION_TASK_VALUE_MATCHERS[taskKey] || [];
+  return matchers.some((matcher) => matcher.test(text));
+}
+
+function collectStoreCollectionTaskNumbers(value, taskKey, path = [], out = []) {
+  if (Array.isArray(value)) {
+    if (value.length && /list|items|rows|records|orders|goods|detail/i.test(path.join("."))) {
+      out.push(value.length);
+    }
+    for (let index = 0; index < Math.min(value.length, 200); index += 1) {
+      collectStoreCollectionTaskNumbers(value[index], taskKey, path.concat(String(index)), out);
+    }
+    return out;
+  }
+  if (!value || typeof value !== "object") return out;
+  for (const [key, child] of Object.entries(value)) {
+    const nextPath = path.concat(key);
+    if (typeof child === "number" && Number.isFinite(child) && child >= 0 && isStoreCollectionTaskNumberKey(nextPath, taskKey)) {
+      out.push(Math.floor(child));
+      continue;
+    }
+    if (typeof child === "boolean" && STORE_COLLECTION_TASK_VALUE_MATCHERS[taskKey]?.some((matcher) => matcher.test(nextPath.join(".")))) {
+      out.push(child ? 1 : 0);
+      continue;
+    }
+    collectStoreCollectionTaskNumbers(child, taskKey, nextPath, out);
+  }
+  return out;
+}
+
+function extractStoreCollectionTaskCount(source = {}, taskKey) {
+  const roots = storeCollectionPayloadRoots(source);
+  const numbers = [];
+  for (const root of roots) {
+    collectStoreCollectionTaskNumbers(root, taskKey, [], numbers);
+  }
+  if (numbers.length) return Math.max(...numbers);
+  return null;
+}
+
+function buildStoreCollectionTaskSummaryFromSources(sources = []) {
+  const summary = emptyStoreCollectionTaskSummary();
+  const sourceKeySets = new Map(STORE_COLLECTION_TASK_TYPES.map((definition) => [definition.key, new Set()]));
+  for (const source of sources) {
+    const taskKey = classifyStoreCollectionTaskSource(source);
+    if (!taskKey) continue;
+    const bucket = summary.categories[taskKey];
+    const sourceKey = optionalString(source.data_key || source.dataKey || source.task_key || source.taskKey || source.id) || taskKey;
+    const signalCount = Math.max(1, normalizeNonNegativeInteger(source.record_count ?? source.recordCount, 1));
+    const extractedCount = extractStoreCollectionTaskCount(source, taskKey);
+    const count = extractedCount === null ? 1 : extractedCount;
+    bucket.signalCount += signalCount;
+    bucket.sourceCounts[sourceKey] = Math.max(Number(bucket.sourceCounts[sourceKey] || 0), count);
+    sourceKeySets.get(taskKey)?.add(sourceKey);
+  }
+  for (const definition of STORE_COLLECTION_TASK_TYPES) {
+    const bucket = summary.categories[definition.key];
+    bucket.sourceKeys = Array.from(sourceKeySets.get(definition.key) || []);
+    bucket.count = Object.values(bucket.sourceCounts || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+    summary.total += bucket.count;
+    summary.signalTotal += bucket.signalCount;
+  }
+  summary.status = summary.total > 0 ? "todo" : "clear";
+  return summary;
+}
+
+function attachStoreCollectionTaskSummaries(db, companyId, snapshots = []) {
+  const ids = snapshots.map((snapshot) => optionalString(snapshot.id)).filter(Boolean);
+  if (!ids.length) return snapshots;
+  const placeholders = ids.map(() => "?").join(",");
+  const sourceRows = db.prepare(`
+    SELECT *
+    FROM erp_store_collection_snapshot_sources
+    WHERE company_id = ?
+      AND snapshot_id IN (${placeholders})
+  `).all(companyId, ...ids);
+  const bySnapshotId = new Map();
+  for (const source of sourceRows) {
+    const list = bySnapshotId.get(source.snapshot_id) || [];
+    list.push(source);
+    bySnapshotId.set(source.snapshot_id, list);
+  }
+  return snapshots.map((snapshot) => ({
+    ...snapshot,
+    taskSummary: buildStoreCollectionTaskSummaryFromSources(bySnapshotId.get(snapshot.id) || []),
+  }));
+}
+
+function normalizeStoreCollectionSkcSummaryPayload(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const rows = Array.isArray(payload.rows) ? payload.rows : [];
+  const totals = payload.totals && typeof payload.totals === "object" ? payload.totals : {};
+  return {
+    ...payload,
+    version: Number(payload.version || 1),
+    totals,
+    rows,
+  };
+}
+
+function normalizeStoreCollectionSkcText(value) {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeStoreNameText(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[>›].*$/, "")
+    .replace(/\s*(?:\u5207\u6362\u5e97\u94fa|\u5e97\u94fa\u5207\u6362|\u5207\u6362)\s*$/u, "")
+    .replace(/\s*(?:Switch Store|Switch)\s*$/i, "")
+    .trim();
+}
+
+function toStoreCollectionSkcNumber(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const text = normalizeStoreCollectionSkcText(value).replace(/,/g, "");
+  if (!text) return 0;
+  const number = Number(text);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function firstStoreCollectionSkcText(...values) {
+  for (const value of values) {
+    const text = normalizeStoreCollectionSkcText(value);
+    if (text) return text;
+  }
+  return "";
+}
+
+function firstStoreCollectionSkcNumber(...values) {
+  for (const value of values) {
+    const number = toStoreCollectionSkcNumber(value);
+    if (number > 0) return number;
+  }
+  return 0;
+}
+
+const NON_STORE_COLLECTION_SKC_NAME_PATTERNS = [
+  /^(?:\u5fd8\u8bb0\u5bc6\u7801|\u627e\u56de\u5bc6\u7801|\u767b\u5f55|\u767b\u9304|\u6ce8\u518c|\u9a8c\u8bc1\u7801|Forgot Password|Reset Password|Login|Log In|Sign In|Register|Verification Code)$/i,
+  /^(?:\u521b\u5efa\u65b0\u5e97\u94fa.*|\u5408\u89c4\u767b\u8bb0(?:\u53ca)?\u9a8c\u8bc1.*|0\u5143\u5f00\u5e97|\u514d\u8d39\u5f00\u5e97|\u6211\u8981\u5f00\u5e97|\u7acb\u5373\u5f00\u5e97|\u53bb\u5f00\u5e97)$/u,
+  /^(?:\u9690\u79c1\u653f\u7b56|\u9690\u79c1\u6761\u6b3e|\u7528\u6237\u534f\u8bae|\u670d\u52a1\u6761\u6b3e|\u6cd5\u5f8b\u58f0\u660e|\u5173\u4e8e\u6211\u4eec|\u8054\u7cfb\u6211\u4eec)$/u,
+  /^(0元开店|免费开店|我要开店|立即开店|去开店|未识别店铺|采集快照)$/i,
+  /(开店|入驻|注册|登录|退出|刷新|通知|日志|设置|账号|业务|数据|管理|全部|搜索|验证码)/i,
+  /(店铺控制台|采集|巡店|帮助|教程|下载|升级|活动报名)/i,
+  /(隐私政策|隐私条款|用户协议|服务条款|法律声明|Privacy Policy|Cookie Policy|Terms of Use|Terms & Conditions|Legal Notice|About Us|Contact Us)/i,
+];
+
+function isReliableStoreCollectionSkcStoreName(value) {
+  const text = normalizeStoreNameText(value);
+  if (text.length < 3 || text.length > 80) return false;
+  if (/^temu_ext_[a-f0-9]+$/i.test(text)) return false;
+  if (/^acct[_:-]/i.test(text)) return false;
+  if (/^\+?\d[\d\s*()-]{3,}$/.test(text)) return false;
+  if (/^\d+$/.test(text)) return false;
+  if (!/[A-Za-z\u4e00-\u9fff]/.test(text)) return false;
+  if (NON_STORE_COLLECTION_SKC_NAME_PATTERNS.some((pattern) => pattern.test(text))) return false;
+  return true;
+}
+
+function requireReliableStoreCollectionStoreName(value) {
+  const text = normalizeStoreNameText(value);
+  if (!isReliableStoreCollectionSkcStoreName(text)) {
+    throw new Error("店铺名称不可靠，已拒收本次巡店快照");
+  }
+  return text;
+}
+
+function isReliableStoreCollectionSnapshot(snapshot = {}) {
+  if (isReliableStoreCollectionSkcStoreName(snapshot.storeName)) return true;
+  const accountText = normalizeStoreNameText(snapshot.accountId);
+  return !/^(temu_ext|acct)_/i.test(accountText) && isReliableStoreCollectionSkcStoreName(accountText);
+}
+
+function readStoreCollectionSkcPath(record, path) {
+  return String(path || "").split(".").reduce((current, key) => (
+    current && typeof current === "object" ? current[key] : undefined
+  ), record);
+}
+
+function sumStoreCollectionSkcMetric(record, paths = []) {
+  const lists = [
+    record?.skuQuantityDetailList,
+    record?.skuQuantityList,
+    record?.skuList,
+    record?.skus,
+  ].filter(Array.isArray);
+  let sum = 0;
+  for (const list of lists) {
+    for (const item of list) {
+      for (const path of paths) {
+        sum += toStoreCollectionSkcNumber(readStoreCollectionSkcPath(item, path));
+      }
+    }
+  }
+  return sum;
+}
+
+function normalizeStoreCollectionSkcImageUrl(value) {
+  const text = firstStoreCollectionSkcText(value);
+  if (!text) return "";
+  const firstUrl = text.split(",").map((item) => item.trim()).find(Boolean) || text;
+  if (/^\/\//.test(firstUrl)) return `https:${firstUrl}`;
+  return firstUrl;
+}
+
+const STORE_COLLECTION_SKC_IMAGE_FIELD_KEYS = [
+  "imageUrl",
+  "mainImageUrl",
+  "materialUrl",
+  "pictureUrl",
+  "picUrl",
+  "coverUrl",
+  "coverPicture",
+  "productImageUrl",
+  "goodsImageUrl",
+  "thumbUrl",
+  "thumbnailUrl",
+  "imgUrl",
+  "image",
+  "mainImage",
+  "mainPicture",
+  "productImage",
+  "productSkcPicture",
+  "goodsImage",
+  "picture",
+  "pic",
+  "cover",
+  "thumbnail",
+  "thumb",
+];
+
+const STORE_COLLECTION_SKC_IMAGE_LIST_FIELD_KEYS = [
+  "imageUrls",
+  "imageUrlList",
+  "images",
+  "imageList",
+  "imgUrls",
+  "imgList",
+  "pics",
+  "picUrls",
+  "picList",
+  "pictures",
+  "pictureList",
+  "materialUrls",
+  "carouselImageUrls",
+  "productImageList.carouselImageUrls",
+  "productImageList",
+  "productImages",
+  "goodsImages",
+  "mainImages",
+  "invitationOrderImageList",
+];
+
+const STORE_COLLECTION_SKC_SOURCE_KEY_PATTERNS = [
+  /temu_products/i,
+  /temu_sales/i,
+  /temu_orders/i,
+  /temu_flux/i,
+  /temu_raw_(?:goodsData|lifecycle|yunduOverall|globalPerformance|yunduActivityList|imageTask|sampleManage|activity|activityLog|activityUS|activityEU|chanceGoods|flowPrice|retailPrice|priceReport|priceCompete|soldout|checkup|governDashboard|governProductQualification|marketingActivity|mallFlux|mallFluxEU|mallFluxUS|fluxEU|fluxUS|flowGrow)/i,
+  /temu_ext_(?:activity|stock|violation|delivery|return)/i,
+  /temu_ext_api_.*(?:product|goods|skc|spu|sku|listing|manage|sale|sales|stock|inventory|soldout|replenish|warehouse|activity|marketing|campaign|coupon|govern|violation|compliance|quality|penalty|checkup|qualification|realtime|flow|performance)/i,
+];
+
+function looksLikeStoreCollectionSkcImageUrl(value) {
+  const text = normalizeStoreCollectionSkcImageUrl(value);
+  if (!text) return "";
+  if (/^(?:https?:)?\/\//i.test(text)) return text;
+  if (/^(?:data:image\/)/i.test(text)) return text;
+  if (/\.(?:jpe?g|png|webp|gif|bmp|avif)(?:[?#].*)?$/i.test(text)) return text;
+  return "";
+}
+
+function pickFirstStoreCollectionSkcImageFromValue(value, depth = 0) {
+  if (value === null || value === undefined || depth > 4) return "";
+  const direct = looksLikeStoreCollectionSkcImageUrl(value);
+  if (direct) return direct;
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 30)) {
+      const image = pickFirstStoreCollectionSkcImageFromValue(item, depth + 1);
+      if (image) return image;
+    }
+    return "";
+  }
+  if (typeof value !== "object") return "";
+  for (const key of STORE_COLLECTION_SKC_IMAGE_FIELD_KEYS) {
+    const image = pickFirstStoreCollectionSkcImageFromValue(value?.[key], depth + 1);
+    if (image) return image;
+  }
+  for (const key of STORE_COLLECTION_SKC_IMAGE_LIST_FIELD_KEYS) {
+    const image = pickFirstStoreCollectionSkcImageFromValue(readStoreCollectionSkcPath(value, key), depth + 1);
+    if (image) return image;
+  }
+  if (depth >= 2) return "";
+  for (const [key, child] of Object.entries(value)) {
+    if (!/image|img|pic|thumb|cover|picture|photo|carousel|materialUrl/i.test(key)) continue;
+    const image = pickFirstStoreCollectionSkcImageFromValue(child, depth + 1);
+    if (image) return image;
+  }
+  return "";
+}
+
+function pickStoreCollectionSkcRecordImageUrl(record = {}) {
+  for (const key of STORE_COLLECTION_SKC_IMAGE_FIELD_KEYS) {
+    const image = pickFirstStoreCollectionSkcImageFromValue(record?.[key]);
+    if (image) return image;
+  }
+  for (const key of STORE_COLLECTION_SKC_IMAGE_LIST_FIELD_KEYS) {
+    const image = pickFirstStoreCollectionSkcImageFromValue(readStoreCollectionSkcPath(record, key));
+    if (image) return image;
+  }
+  return normalizeStoreCollectionSkcImageUrl(pickFirstStoreCollectionSkcImageFromValue(record));
+}
+
+function readStoreCollectionSkcRecordId(record = {}) {
+  const skcId = firstStoreCollectionSkcText(
+    record.skcId,
+    record.skc_id,
+    record.productSkcId,
+    record.product_skc_id,
+    record.goodsSkcId,
+    record.skc,
+    record.skcExtCode,
+  );
+  const skuId = firstStoreCollectionSkcText(record.skuId, record.sku_id, record.productSkuId, record.product_sku_id, record.sku);
+  const goodsId = firstStoreCollectionSkcText(record.goodsId, record.goods_id, record.productId, record.product_id, record.goodsSn);
+  const spuId = firstStoreCollectionSkcText(record.spuId, record.spu_id, record.productSpuId, record.spu);
+  const title = firstStoreCollectionSkcText(record.title, record.productName, record.productTitle, record.goodsName, record.name);
+  return { skcId, skuId, goodsId, spuId, title };
+}
+
+function collectStoreCollectionSkuIds(record = {}) {
+  const ids = new Set();
+  const add = (value) => {
+    const text = firstStoreCollectionSkcText(value);
+    if (text) ids.add(text);
+  };
+  add(record.skuId);
+  add(record.sku_id);
+  add(record.productSkuId);
+  add(record.product_sku_id);
+  add(record.sku);
+  const lists = [
+    record?.skuQuantityDetailList,
+    record?.skuQuantityList,
+    record?.skuList,
+    record?.skus,
+  ].filter(Array.isArray);
+  for (const list of lists) {
+    for (const item of list) {
+      add(item?.skuId);
+      add(item?.sku_id);
+      add(item?.productSkuId);
+      add(item?.product_sku_id);
+      add(item?.sku);
+    }
+  }
+  return Array.from(ids).slice(0, 40);
+}
+
+function isStoreCollectionProductLikeRecord(record) {
+  if (!record || typeof record !== "object" || Array.isArray(record)) return false;
+  const { skcId, goodsId, spuId, title } = readStoreCollectionSkcRecordId(record);
+  if (skcId || goodsId || spuId) return true;
+  if (!title || title.length < 4) return false;
+  return Boolean(
+    pickStoreCollectionSkcRecordImageUrl(record)
+    || record.price || record.todaySales || record.totalSales || record.exposeNum || record.skuQuantityDetailList,
+  );
+}
+
+function collectStoreCollectionProductLikeRecords(value, depth = 0, out = []) {
+  if (!value || depth > 6 || out.length > 1500) return out;
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 1000)) {
+      collectStoreCollectionProductLikeRecords(item, depth + 1, out);
+    }
+    return out;
+  }
+  if (typeof value !== "object") return out;
+  if (isStoreCollectionProductLikeRecord(value)) out.push(value);
+  for (const child of Object.values(value).slice(0, 100)) {
+    collectStoreCollectionProductLikeRecords(child, depth + 1, out);
+  }
+  return out;
+}
+
+function storeCollectionSkcPayloadRoots(source = {}) {
+  const payload = source.payload !== undefined
+    ? source.payload
+    : parseJsonValue(source.payload_json ?? source.payloadJson, null);
+  const events = Array.isArray(payload?.events) ? payload.events : [];
+  if (events.length) {
+    return events.map((event) => (
+      event?.response?.result
+      ?? event?.response?.data
+      ?? event?.response
+      ?? event?.body
+      ?? event?.payload
+      ?? event
+    )).filter((item) => item !== null && item !== undefined);
+  }
+  return [
+    payload?.response?.result
+    ?? payload?.response?.data
+    ?? payload?.response
+    ?? payload?.result
+    ?? payload?.data
+    ?? payload,
+  ].filter((item) => item !== null && item !== undefined);
+}
+
+function emptyStoreCollectionSkcRow(accountId, storeName, ownerName, key) {
+  return {
+    id: `${accountId}:${key}`,
+    accountId,
+    storeName,
+    ownerName: ownerName || null,
+    skcId: "",
+    skuIds: [],
+    goodsId: "",
+    spuId: "",
+    title: "",
+    imageUrl: "",
+    category: "",
+    status: "",
+    siteLabel: "",
+    price: "",
+    todaySales: 0,
+    last7DaysSales: 0,
+    last30DaysSales: 0,
+    totalSales: 0,
+    exposeNum: 0,
+    clickNum: 0,
+    payGoodsNum: 0,
+    warehouseStock: 0,
+    adviceQuantity: 0,
+    lackQuantity: 0,
+    pendingOrderCount: 0,
+    taskFlags: [],
+    sourceCount: 0,
+  };
+}
+
+function mergeStoreCollectionSkcRow(row, record = {}, sourceKey = "") {
+  const ids = readStoreCollectionSkcRecordId(record);
+  const recordStoreName = normalizeStoreNameText(firstStoreCollectionSkcText(record.supplierName, record.mallName, record.storeName, record.shopName, record.merchantName, record.sellerName));
+  if (isReliableStoreCollectionSkcStoreName(recordStoreName)) row.storeName = recordStoreName;
+  row.skcId = row.skcId || ids.skcId;
+  row.skuIds = Array.from(new Set([...(Array.isArray(row.skuIds) ? row.skuIds : []), ...collectStoreCollectionSkuIds(record)])).slice(0, 40);
+  row.goodsId = row.goodsId || ids.goodsId;
+  row.spuId = row.spuId || ids.spuId;
+  row.title = row.title || ids.title;
+  row.category = row.category || firstStoreCollectionSkcText(record.category, record.categories, record.categoryName);
+  row.imageUrl = row.imageUrl || pickStoreCollectionSkcRecordImageUrl(record);
+  row.status = row.status || firstStoreCollectionSkcText(record.status, record.skcSiteStatus, record.removeStatus, record.flowLimitStatus);
+  row.siteLabel = row.siteLabel || firstStoreCollectionSkcText(record.siteLabel, record.siteName, record.regionName);
+  row.price = row.price || firstStoreCollectionSkcText(record.price, record.salePrice, record.retailPrice);
+
+  const skuTodaySales = sumStoreCollectionSkcMetric(record, ["todaySaleVolume", "predictTodaySaleVolume"]);
+  const sku7DaySales = sumStoreCollectionSkcMetric(record, ["lastSevenDaysSaleVolume", "sevenDaysSaleReference", "predictLastSevenDaysSaleVolume"]);
+  const sku30DaySales = sumStoreCollectionSkcMetric(record, ["lastThirtyDaysSaleVolume", "monthSales"]);
+  const skuTotalSales = sumStoreCollectionSkcMetric(record, ["totalSaleVolume", "saleVolume", "salesVolume"]);
+  const skuWarehouseStock = sumStoreCollectionSkcMetric(record, ["inventoryNumInfo.warehouseInventoryNum", "warehouseStock", "stock", "inventory", "sellerWhStock"]);
+  const skuAdviceQuantity = sumStoreCollectionSkcMetric(record, ["adviceQuantity", "predictSaleAdviceQuantity", "suggestPurchaseNumUp", "adviceProduceNum"]);
+  const skuLackQuantity = sumStoreCollectionSkcMetric(record, ["lackQuantity", "shortageQuantity", "lackNum"]);
+
+  row.todaySales += firstStoreCollectionSkcNumber(record.todaySales, record.todaySaleVolume, record.todayPayGoodsNum, record.skuQuantityTotalInfo?.todaySaleVolume, skuTodaySales);
+  row.last7DaysSales += firstStoreCollectionSkcNumber(record.last7DaysSales, record.sevenDaysSaleReference, record.recent7SaleVolume, record.lastSevenDaysSaleVolume, record.skuQuantityTotalInfo?.lastSevenDaysSaleVolume, record.skuQuantityTotalInfo?.sevenDaysSaleReference, sku7DaySales);
+  row.last30DaysSales += firstStoreCollectionSkcNumber(record.last30DaysSales, record.monthSales, record.recent30SaleVolume, record.lastThirtyDaysSaleVolume, record.skuQuantityTotalInfo?.lastThirtyDaysSaleVolume, sku30DaySales);
+  row.totalSales += firstStoreCollectionSkcNumber(record.totalSales, record.saleVolume, record.salesVolume, record.totalSaleVolume, record.skuQuantityTotalInfo?.totalSaleVolume, skuTotalSales);
+  row.exposeNum += firstStoreCollectionSkcNumber(record.exposeNum, record.exposureNum, record.impressionNum);
+  row.clickNum += firstStoreCollectionSkcNumber(record.clickNum, record.clickUserNum);
+  row.payGoodsNum += firstStoreCollectionSkcNumber(record.payGoodsNum, record.payNum, record.buyerNum);
+  row.warehouseStock += firstStoreCollectionSkcNumber(record.warehouseStock, record.stock, record.inventory, record.availableStock, record.inventoryNumInfo?.warehouseInventoryNum, record.skuQuantityTotalInfo?.inventoryNumInfo?.warehouseInventoryNum, skuWarehouseStock);
+  row.adviceQuantity += firstStoreCollectionSkcNumber(record.adviceQuantity, record.suggestStock, record.replenishQuantity, record.predictSaleAdviceQuantity, record.skuQuantityTotalInfo?.adviceQuantity, record.skuQuantityTotalInfo?.predictSaleAdviceQuantity, skuAdviceQuantity);
+  row.lackQuantity += firstStoreCollectionSkcNumber(record.lackQuantity, record.shortageQuantity, record.lackNum, record.skuQuantityTotalInfo?.lackQuantity, skuLackQuantity);
+  row.pendingOrderCount += firstStoreCollectionSkcNumber(record.pendingOrderCount, record.quantity);
+  row.sourceCount += 1;
+
+  const text = `${sourceKey} ${row.status} ${firstStoreCollectionSkcText(record.stockStatus, record.supplyStatus, record.flowLimitStatus, record.illegalReason, record.illegalImpactType)}`.toLowerCase();
+  const flags = new Set(row.taskFlags);
+  if (record.isLack || record.isAdviceStock || row.lackQuantity > 0 || row.adviceQuantity > 0 || /soldout|sold.?out|缺货|售罄|补货|shortage|lack/.test(text)) flags.add("补货");
+  if (record.inBlackList || record.illegalReason || record.illegalImpactType || /govern|violation|checkup|quality|penalty|违规|处罚|治理|质检/.test(text)) flags.add("违规");
+  if (record.isAdProduct || /activity|marketing|campaign|coupon|活动|营销|报名/.test(text)) flags.add("活动");
+  if (/flowprice|price|retail|价格|限价/.test(text)) flags.add("价格");
+  if (row.pendingOrderCount > 0) flags.add("备货单");
+  row.taskFlags = Array.from(flags);
+}
+
+function sanitizeStoreCollectionSkcRow(row) {
+  return {
+    ...row,
+    skuIds: Array.isArray(row.skuIds) ? row.skuIds.slice(0, 40) : [],
+    title: String(row.title || "").slice(0, 240),
+    imageUrl: String(row.imageUrl || "").slice(0, 1000),
+    category: String(row.category || "").slice(0, 240),
+    status: String(row.status || "").slice(0, 120),
+    siteLabel: String(row.siteLabel || "").slice(0, 80),
+    price: String(row.price || "").slice(0, 80),
+    taskFlags: Array.isArray(row.taskFlags) ? row.taskFlags.slice(0, 8) : [],
+  };
+}
+
+function buildStoreCollectionSkcSummaryFromSources(sources = [], options = {}) {
+  const accountId = optionalString(options.accountId) || "unknown";
+  const fallbackStoreName = isReliableStoreCollectionSkcStoreName(options.storeName) ? normalizeStoreNameText(options.storeName) : "";
+  const ownerName = optionalString(options.ownerName) || null;
+  const rows = new Map();
+  const sourceKeys = [];
+  for (const source of sources) {
+    const dataKey = optionalString(source.dataKey || source.data_key || source.taskKey || source.task_key || source.key) || "unknown";
+    if (dataKey === STORE_COLLECTION_SKC_SUMMARY_KEY) continue;
+    if (!STORE_COLLECTION_SKC_SOURCE_KEY_PATTERNS.some((pattern) => pattern.test(dataKey))) continue;
+    sourceKeys.push(dataKey);
+    for (const root of storeCollectionSkcPayloadRoots(source)) {
+      for (const record of collectStoreCollectionProductLikeRecords(root)) {
+        const ids = readStoreCollectionSkcRecordId(record);
+        const skuKey = ids.skuId || collectStoreCollectionSkuIds(record)[0] || "";
+        const key = ids.skcId || skuKey || ids.goodsId || ids.spuId || (ids.title ? `title:${ids.title.slice(0, 40)}` : "");
+        if (!key) continue;
+        const row = rows.get(key) || emptyStoreCollectionSkcRow(accountId, fallbackStoreName, ownerName, key);
+        mergeStoreCollectionSkcRow(row, record, dataKey);
+        rows.set(key, row);
+      }
+    }
+  }
+  const normalizedRows = Array.from(rows.values())
+    .filter((row) => (row.skcId || row.goodsId || row.title) && isReliableStoreCollectionSkcStoreName(row.storeName || fallbackStoreName))
+    .map((row) => {
+      if (!isReliableStoreCollectionSkcStoreName(row.storeName) && fallbackStoreName) row.storeName = fallbackStoreName;
+      return sanitizeStoreCollectionSkcRow(row);
+    })
+    .sort((left, right) => (
+      Number(right.taskFlags.length > 0) - Number(left.taskFlags.length > 0)
+      || right.lackQuantity - left.lackQuantity
+      || right.last30DaysSales - left.last30DaysSales
+      || right.sourceCount - left.sourceCount
+    ))
+    .slice(0, 1000);
+  const summaryStoreName = normalizedRows.find((row) => isReliableStoreCollectionSkcStoreName(row.storeName))?.storeName
+    || fallbackStoreName
+    || normalizeStoreNameText(options.storeName)
+    || accountId;
+  const totals = {
+    accountId,
+    storeName: summaryStoreName,
+    ownerName,
+    skcCount: normalizedRows.length,
+    taskSkcCount: normalizedRows.filter((row) => row.taskFlags.length > 0).length,
+    stockSkcCount: normalizedRows.filter((row) => row.taskFlags.includes("补货")).length,
+    violationSkcCount: normalizedRows.filter((row) => row.taskFlags.includes("违规")).length,
+    activitySkcCount: normalizedRows.filter((row) => row.taskFlags.includes("活动")).length,
+    priceSkcCount: normalizedRows.filter((row) => row.taskFlags.includes("价格")).length,
+    pendingOrderSkcCount: normalizedRows.filter((row) => row.taskFlags.includes("备货单")).length,
+    totalSales: normalizedRows.reduce((sum, row) => sum + Number(row.last30DaysSales || row.totalSales || 0), 0),
+    lackQuantity: normalizedRows.reduce((sum, row) => sum + Number(row.lackQuantity || 0), 0),
+    adviceQuantity: normalizedRows.reduce((sum, row) => sum + Number(row.adviceQuantity || 0), 0),
+    warehouseStock: normalizedRows.reduce((sum, row) => sum + Number(row.warehouseStock || 0), 0),
+    exposeNum: normalizedRows.reduce((sum, row) => sum + Number(row.exposeNum || 0), 0),
+    clickNum: normalizedRows.reduce((sum, row) => sum + Number(row.clickNum || 0), 0),
+    payGoodsNum: normalizedRows.reduce((sum, row) => sum + Number(row.payGoodsNum || 0), 0),
+  };
+  return {
+    version: 1,
+    accountId,
+    storeName: summaryStoreName,
+    ownerName,
+    generatedAt: optionalString(options.generatedAt) || nowIso(),
+    sourceKeys: Array.from(new Set(sourceKeys)),
+    totals,
+    rows: normalizedRows,
+  };
+}
+
+function buildStoreCollectionSkcSummarySource(sources = [], options = {}) {
+  const summary = buildStoreCollectionSkcSummaryFromSources(sources, options);
+  return {
+    dataKey: STORE_COLLECTION_SKC_SUMMARY_KEY,
+    taskKey: "skcSummary",
+    label: "SKC 数据摘要",
+    category: "SKC摘要",
+    recordCount: Array.isArray(summary.rows) ? summary.rows.length : 0,
+    payloadBytes: Buffer.byteLength(safeJsonStringify(summary)),
+    payload: summary,
+  };
+}
+
+function attachStoreCollectionSkcSummaries(db, companyId, snapshots = []) {
+  const ids = snapshots.map((snapshot) => optionalString(snapshot.id)).filter(Boolean);
+  if (!ids.length) return snapshots;
+  const placeholders = ids.map(() => "?").join(",");
+  const sourceRows = db.prepare(`
+    SELECT snapshot_id, payload_json
+    FROM erp_store_collection_snapshot_sources
+    WHERE company_id = ?
+      AND data_key = ?
+      AND snapshot_id IN (${placeholders})
+  `).all(companyId, STORE_COLLECTION_SKC_SUMMARY_KEY, ...ids);
+  const bySnapshotId = new Map();
+  for (const source of sourceRows) {
+    const summary = normalizeStoreCollectionSkcSummaryPayload(parseJsonValue(source.payload_json, null));
+    if (summary) bySnapshotId.set(source.snapshot_id, summary);
+  }
+  return snapshots.map((snapshot) => ({
+    ...snapshot,
+    skcSummary: bySnapshotId.get(snapshot.id) || snapshot.skcSummary || null,
+  }));
+}
+
+function normalizeNonNegativeInteger(value, fallback = 0) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(0, Math.floor(number));
+}
+
+function inferCollectionRecordCount(value) {
+  if (Array.isArray(value)) return value.length;
+  if (!value || typeof value !== "object") return 0;
+  if (Array.isArray(value.items)) return value.items.length;
+  if (Array.isArray(value.list)) return value.list.length;
+  if (Array.isArray(value.data)) return value.data.length;
+  if (Array.isArray(value.apis)) return value.apis.length;
+  if (value.result && typeof value.result === "object") {
+    if (Array.isArray(value.result.items)) return value.result.items.length;
+    if (Array.isArray(value.result.list)) return value.result.list.length;
+    if (Array.isArray(value.result.data)) return value.result.data.length;
+  }
+  return 0;
+}
+
+function toStoreCollectionSnapshot(row) {
+  const snapshot = toCamelRow(row || {});
+  if (!snapshot.storeName && snapshot.accountName) snapshot.storeName = snapshot.accountName;
+  if (!snapshot.ownerName && snapshot.accountOwnerName) snapshot.ownerName = snapshot.accountOwnerName;
+  snapshot.diagnostics = parseJsonValue(row?.diagnostics_json, {});
+  snapshot.summary = parseJsonValue(row?.summary_json, {});
+  snapshot.manifest = parseJsonValue(row?.manifest_json, {});
+  delete snapshot.diagnosticsJson;
+  delete snapshot.summaryJson;
+  delete snapshot.manifestJson;
+  return snapshot;
+}
+
+function loadStoreCollectionAccountMeta(db, companyId, accountIds = []) {
+  const ids = Array.from(new Set(
+    accountIds.map((id) => optionalString(id)).filter(Boolean),
+  ));
+  if (!ids.length) return new Map();
+  const placeholders = ids.map(() => "?").join(",");
+  const rows = db.prepare(`
+    SELECT id, name, owner_name
+    FROM erp_accounts
+    WHERE company_id = ?
+      AND id IN (${placeholders})
+  `).all(companyId, ...ids);
+  return new Map(rows.map((row) => [row.id, {
+    accountName: row.name,
+    accountOwnerName: row.owner_name,
+  }]));
+}
+
+function enrichStoreCollectionSnapshot(snapshot, accountMetaMap) {
+  const meta = accountMetaMap.get(snapshot?.accountId);
+  if (!meta) return snapshot;
+  if (!snapshot.storeName && meta.accountName) snapshot.storeName = meta.accountName;
+  if (!snapshot.ownerName && meta.accountOwnerName) snapshot.ownerName = meta.accountOwnerName;
+  return snapshot;
+}
+
+function toStoreCollectionSource(row, options = {}) {
+  const source = toCamelRow(row || {});
+  if (options.includePayload) {
+    source.payload = parseJsonValue(row?.payload_json, null);
+  }
+  delete source.payloadJson;
+  return source;
+}
+
+function normalizeStoreCollectionSource(source = {}) {
+  const dataKey = requireString(source.dataKey || source.data_key || source.key, "source.dataKey");
+  const payload = Object.prototype.hasOwnProperty.call(source, "payload")
+    ? source.payload
+    : Object.prototype.hasOwnProperty.call(source, "value")
+      ? source.value
+      : null;
+  const payloadJson = safeJsonStringify(payload);
+  return {
+    dataKey: dataKey.slice(0, 160),
+    taskKey: optionalString(source.taskKey || source.task_key) || null,
+    label: optionalString(source.label) || null,
+    category: optionalString(source.category) || null,
+    recordCount: normalizeNonNegativeInteger(
+      source.recordCount || source.record_count,
+      inferCollectionRecordCount(payload),
+    ),
+    payloadBytes: Buffer.byteLength(payloadJson),
+    payloadJson,
+  };
+}
+
+function normalizeStoreCollectionUpload(payload = {}, actor = {}) {
+  const accountId = requireString(payload.accountId || payload.account_id, "accountId").slice(0, 160);
+  const collectedAt = optionalString(payload.collectedAt || payload.collected_at || payload.collectedAtIso || payload.collected_at_iso)
+    || nowIso();
+  const clientSnapshotId = optionalString(payload.clientSnapshotId || payload.client_snapshot_id)
+    || `${accountId}:${collectedAt}`;
+  const rawSources = Array.isArray(payload.sources) ? payload.sources : [];
+  if (rawSources.length === 0) throw new Error("sources is required");
+  if (rawSources.length > 300) throw new Error("sources is too large");
+  const storeName = requireReliableStoreCollectionStoreName(payload.storeName || payload.store_name || payload.accountName || payload.account_name);
+  const ownerName = optionalString(payload.ownerName || payload.owner_name || payload.responsiblePerson || payload.responsible_person);
+  let sources = rawSources.map(normalizeStoreCollectionSource);
+  const incomingSkcSummary = sources.find((source) => source.dataKey === STORE_COLLECTION_SKC_SUMMARY_KEY);
+  const incomingSkcPayload = incomingSkcSummary ? parseJsonValue(incomingSkcSummary.payloadJson, null) : null;
+  const incomingSkcRows = Array.isArray(incomingSkcPayload?.rows) ? incomingSkcPayload.rows.length : 0;
+  const shouldRebuildSkcSummary = !incomingSkcSummary || incomingSkcRows === 0;
+  if (shouldRebuildSkcSummary) {
+    sources = sources
+      .filter((source) => source.dataKey !== STORE_COLLECTION_SKC_SUMMARY_KEY)
+      .concat(normalizeStoreCollectionSource(buildStoreCollectionSkcSummarySource(sources, {
+      accountId,
+      storeName,
+      ownerName,
+      generatedAt: collectedAt,
+    })));
+  }
+  const diagnostics = payload.diagnostics && typeof payload.diagnostics === "object" ? payload.diagnostics : {};
+  const summary = payload.summary && typeof payload.summary === "object"
+    ? payload.summary
+    : diagnostics.summary && typeof diagnostics.summary === "object"
+      ? diagnostics.summary
+      : {};
+  const manifest = payload.manifest && typeof payload.manifest === "object" ? payload.manifest : {};
+  const diagnosticsJson = safeJsonStringify(diagnostics, "{}");
+  const summaryJson = safeJsonStringify(summary, "{}");
+  const manifestJson = safeJsonStringify({
+    ...manifest,
+    sourceKeys: sources.map((source) => source.dataKey),
+  }, "{}");
+  const payloadBytes = sources.reduce((sum, source) => sum + source.payloadBytes, 0)
+    + Buffer.byteLength(diagnosticsJson)
+    + Buffer.byteLength(summaryJson)
+    + Buffer.byteLength(manifestJson);
+  return {
+    companyId: normalizeCompanyId(actor?.companyId || actor?.company_id, actor),
+    accountId,
+    storeName,
+    ownerName,
+    clientUserId: optionalString(actor?.id),
+    clientUserName: optionalString(actor?.name),
+    clientSnapshotId: clientSnapshotId.slice(0, 220),
+    collectedAt,
+    uploadedAt: nowIso(),
+    diagnosticsJson,
+    summaryJson,
+    manifestJson,
+    payloadBytes,
+    sourceCount: sources.length,
+    status: optionalString(payload.status) || "uploaded",
+    sources,
+  };
+}
+
+function uploadStoreCollectionSnapshot(payload = {}, actor = erpState.currentUser) {
+  const { db } = requireErp();
+  const normalized = normalizeStoreCollectionUpload(payload, actor || {});
+  const existing = db.prepare(`
+    SELECT id, created_at
+    FROM erp_store_collection_snapshots
+    WHERE company_id = @companyId
+      AND account_id = @accountId
+      AND client_snapshot_id = @clientSnapshotId
+    LIMIT 1
+  `).get(normalized);
+  const snapshotId = existing?.id || createId("store_snapshot");
+  const createdAt = existing?.created_at || normalized.uploadedAt;
+
+  const saveSnapshot = db.transaction(() => {
+    db.prepare(`
+      INSERT INTO erp_store_collection_snapshots (
+        id, company_id, account_id, store_name, owner_name, client_user_id, client_user_name,
+        client_snapshot_id, collected_at, uploaded_at, diagnostics_json, summary_json,
+        manifest_json, payload_bytes, source_count, status, created_at, updated_at
+      )
+      VALUES (
+        @id, @company_id, @account_id, @store_name, @owner_name, @client_user_id, @client_user_name,
+        @client_snapshot_id, @collected_at, @uploaded_at, @diagnostics_json, @summary_json,
+        @manifest_json, @payload_bytes, @source_count, @status, @created_at, @updated_at
+      )
+      ON CONFLICT(company_id, account_id, client_snapshot_id) DO UPDATE SET
+        store_name = excluded.store_name,
+        owner_name = excluded.owner_name,
+        client_user_id = excluded.client_user_id,
+        client_user_name = excluded.client_user_name,
+        collected_at = excluded.collected_at,
+        uploaded_at = excluded.uploaded_at,
+        diagnostics_json = excluded.diagnostics_json,
+        summary_json = excluded.summary_json,
+        manifest_json = excluded.manifest_json,
+        payload_bytes = excluded.payload_bytes,
+        source_count = excluded.source_count,
+        status = excluded.status,
+        updated_at = excluded.updated_at
+    `).run({
+      id: snapshotId,
+      company_id: normalized.companyId,
+      account_id: normalized.accountId,
+      store_name: normalized.storeName,
+      owner_name: normalized.ownerName,
+      client_user_id: normalized.clientUserId,
+      client_user_name: normalized.clientUserName,
+      client_snapshot_id: normalized.clientSnapshotId,
+      collected_at: normalized.collectedAt,
+      uploaded_at: normalized.uploadedAt,
+      diagnostics_json: normalized.diagnosticsJson,
+      summary_json: normalized.summaryJson,
+      manifest_json: normalized.manifestJson,
+      payload_bytes: normalized.payloadBytes,
+      source_count: normalized.sourceCount,
+      status: normalized.status,
+      created_at: createdAt,
+      updated_at: normalized.uploadedAt,
+    });
+
+    db.prepare("DELETE FROM erp_store_collection_snapshot_sources WHERE snapshot_id = ?").run(snapshotId);
+    const insertSource = db.prepare(`
+      INSERT INTO erp_store_collection_snapshot_sources (
+        id, snapshot_id, company_id, account_id, data_key, task_key, label, category,
+        record_count, payload_bytes, payload_json, created_at
+      )
+      VALUES (
+        @id, @snapshot_id, @company_id, @account_id, @data_key, @task_key, @label, @category,
+        @record_count, @payload_bytes, @payload_json, @created_at
+      )
+    `);
+    for (const source of normalized.sources) {
+      insertSource.run({
+        id: createId("store_source"),
+        snapshot_id: snapshotId,
+        company_id: normalized.companyId,
+        account_id: normalized.accountId,
+        data_key: source.dataKey,
+        task_key: source.taskKey,
+        label: source.label,
+        category: source.category,
+        record_count: source.recordCount,
+        payload_bytes: source.payloadBytes,
+        payload_json: source.payloadJson,
+        created_at: normalized.uploadedAt,
+      });
+    }
+  });
+
+  saveSnapshot();
+
+  const row = db.prepare("SELECT * FROM erp_store_collection_snapshots WHERE id = ?").get(snapshotId);
+  const snapshot = toStoreCollectionSnapshot(row);
+  const skcSource = normalized.sources.find((source) => source.dataKey === STORE_COLLECTION_SKC_SUMMARY_KEY);
+  if (skcSource) {
+    snapshot.skcSummary = normalizeStoreCollectionSkcSummaryPayload(parseJsonValue(skcSource.payloadJson, null));
+  }
+  return snapshot;
+}
+
+function listStoreCollectionSnapshots(params = {}, actor = erpState.currentUser) {
+  const { db } = requireErp();
+  const companyId = normalizeCompanyId(actor?.companyId || actor?.company_id, actor);
+  const accountId = optionalString(params.accountId || params.account_id);
+  const latestOnly = params.latestOnly !== false && params.latest_only !== false;
+  const conditions = ["s.company_id = @company_id"];
+  if (accountId) conditions.push("s.account_id = @account_id");
+  if (latestOnly) {
+    conditions.push(`
+      s.id = (
+        SELECT s2.id
+        FROM erp_store_collection_snapshots s2
+        WHERE s2.company_id = s.company_id
+          AND s2.account_id = s.account_id
+        ORDER BY s2.uploaded_at DESC, s2.updated_at DESC, s2.id DESC
+        LIMIT 1
+      )
+    `);
+  }
+  const rows = db.prepare(`
+    SELECT s.*
+    FROM erp_store_collection_snapshots s
+    WHERE ${conditions.join(" AND ")}
+    ORDER BY s.uploaded_at DESC, s.updated_at DESC
+    LIMIT @limit OFFSET @offset
+  `).all({
+    company_id: companyId,
+    account_id: accountId,
+    limit: normalizeLimit(params.limit, 100),
+    offset: normalizeOffset(params.offset),
+  });
+  const accountMetaMap = loadStoreCollectionAccountMeta(db, companyId, rows.map((row) => row.account_id));
+  const snapshots = rows
+    .map(toStoreCollectionSnapshot)
+    .map((snapshot) => enrichStoreCollectionSnapshot(snapshot, accountMetaMap))
+    .filter(isReliableStoreCollectionSnapshot);
+  return attachStoreCollectionSkcSummaries(
+    db,
+    companyId,
+    attachStoreCollectionTaskSummaries(db, companyId, snapshots),
+  );
+}
+
+function getStoreCollectionSnapshotDetail(params = {}, actor = erpState.currentUser) {
+  const { db } = requireErp();
+  const companyId = normalizeCompanyId(actor?.companyId || actor?.company_id, actor);
+  const snapshotId = requireString(params.id || params.snapshotId || params.snapshot_id, "snapshotId");
+  const snapshot = db.prepare(`
+    SELECT *
+    FROM erp_store_collection_snapshots
+    WHERE id = ?
+      AND company_id = ?
+    LIMIT 1
+  `).get(snapshotId, companyId);
+  if (!snapshot) throw new Error("Store collection snapshot not found");
+  const includePayload = Boolean(params.includePayload || params.include_payload);
+  const sources = db.prepare(`
+    SELECT *
+    FROM erp_store_collection_snapshot_sources
+    WHERE snapshot_id = ?
+      AND company_id = ?
+    ORDER BY category, data_key
+  `).all(snapshotId, companyId);
+  const accountMetaMap = loadStoreCollectionAccountMeta(db, companyId, [snapshot.account_id]);
+  const result = {
+    ...enrichStoreCollectionSnapshot(toStoreCollectionSnapshot(snapshot), accountMetaMap),
+    sources: sources.map((source) => toStoreCollectionSource(source, { includePayload })),
+  };
+  result.taskSummary = buildStoreCollectionTaskSummaryFromSources(sources);
+  const skcSource = sources.find((source) => source.data_key === STORE_COLLECTION_SKC_SUMMARY_KEY);
+  result.skcSummary = skcSource
+    ? normalizeStoreCollectionSkcSummaryPayload(parseJsonValue(skcSource.payload_json, null))
+    : null;
+  return result;
+}
+
+function stableShortHash(value) {
+  return crypto.createHash("sha1").update(String(value || "")).digest("hex").slice(0, 16);
+}
+
+function normalizeExtensionBridgePort(value) {
+  const port = Number(value);
+  return Number.isInteger(port) && port > 0 && port < 65536 ? port : EXTENSION_BRIDGE_DEFAULT_PORT;
+}
+
+function isAllowedExtensionBridgeOrigin(origin) {
+  const text = optionalString(origin);
+  if (!text) return true;
+  return text.startsWith("chrome-extension://")
+    || text.startsWith("http://127.0.0.1:")
+    || text.startsWith("http://localhost:");
+}
+
+function writeExtensionBridgeCors(req, res) {
+  const origin = optionalString(req.headers.origin);
+  if (isAllowedExtensionBridgeOrigin(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin || "*");
+    res.setHeader("Vary", "Origin");
+  }
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Temu-Extension-Bridge");
+  res.setHeader("Access-Control-Max-Age", "86400");
+}
+
+function sendExtensionBridgeJson(req, res, statusCode, payload) {
+  writeExtensionBridgeCors(req, res);
+  res.writeHead(statusCode, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify(payload || {}));
+}
+
+function readExtensionBridgeJson(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+    req.on("data", (chunk) => {
+      total += chunk.length;
+      if (total > EXTENSION_BRIDGE_MAX_BODY_BYTES) {
+        reject(new Error("请求体过大"));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      try {
+        const text = Buffer.concat(chunks).toString("utf8");
+        resolve(text ? JSON.parse(text) : {});
+      } catch (error) {
+        reject(new Error(`JSON 解析失败: ${error.message}`));
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+function extensionBridgeCategoryFromUrl(url) {
+  const text = String(url || "").toLowerCase();
+  if (/refund|return|after.?sale|salesreturn|returnorder|reverse/.test(text)) return "退货";
+  if (/cancel|delivery|shipping|ship|fulfill|urgent|logistic|express/.test(text)) return "快递取消";
+  if (/stock|inventory|soldout|replenish|warehouse|sku/.test(text)) return "补货";
+  if (/activity|marketing|campaign|promotion|coupon|ads?/.test(text)) return "活动";
+  if (/govern|violation|compliance|quality|penalty|checkup|qc|appeal|qualification/.test(text)) return "违规";
+  return "接口响应";
+}
+
+function extensionBridgeDataKeyForEvent(event = {}) {
+  const category = extensionBridgeCategoryFromUrl(event.url);
+  let pathKey = "unknown";
+  try {
+    const parsed = new URL(String(event.url || ""));
+    pathKey = parsed.pathname
+      .replace(/\/+/g, "/")
+      .replace(/[^a-zA-Z0-9/_-]/g, "")
+      .split("/")
+      .filter(Boolean)
+      .slice(-3)
+      .join("_") || parsed.hostname.replace(/[^a-zA-Z0-9_-]/g, "_");
+  } catch {}
+  const prefix = {
+    "退货": "temu_ext_return",
+    "快递取消": "temu_ext_delivery",
+    "补货": "temu_ext_stock",
+    "活动": "temu_ext_activity",
+    "违规": "temu_ext_violation",
+    "接口响应": "temu_ext_api",
+  }[category] || "temu_ext_api";
+  return `${prefix}_${pathKey}`.slice(0, 160);
+}
+
+function normalizeExtensionBridgeEvent(event = {}) {
+  const url = optionalString(event.url);
+  if (!url) return null;
+  const category = optionalString(event.category) || extensionBridgeCategoryFromUrl(url);
+  const dataKey = optionalString(event.dataKey || event.data_key) || extensionBridgeDataKeyForEvent(event);
+  return {
+    dataKey,
+    category,
+    url,
+    method: optionalString(event.method) || "GET",
+    status: Number.isFinite(Number(event.status)) ? Number(event.status) : null,
+    ok: event.ok === undefined ? null : Boolean(event.ok),
+    transport: optionalString(event.transport) || null,
+    requestId: optionalString(event.requestId || event.request_id) || null,
+    capturedAt: optionalString(event.capturedAt || event.captured_at) || nowIso(),
+    elapsedMs: Number.isFinite(Number(event.elapsedMs || event.elapsed_ms)) ? Number(event.elapsedMs || event.elapsed_ms) : null,
+    contentType: optionalString(event.contentType || event.content_type) || null,
+    response: event.response ?? event.body ?? event.payload ?? null,
+    responsePreview: optionalString(event.responsePreview || event.response_preview) || null,
+  };
+}
+
+function groupExtensionBridgeSources(events = []) {
+  const groups = new Map();
+  for (const event of events) {
+    const normalized = normalizeExtensionBridgeEvent(event);
+    if (!normalized) continue;
+    const key = normalized.dataKey;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        dataKey: key,
+        taskKey: key,
+        label: normalized.category,
+        category: normalized.category,
+        events: [],
+      });
+    }
+    groups.get(key).events.push(normalized);
+  }
+  return Array.from(groups.values()).map((group) => ({
+    dataKey: group.dataKey,
+    taskKey: group.taskKey,
+    label: group.label,
+    category: group.category,
+    recordCount: group.events.length,
+    payload: {
+      source: "temu-chrome-extension",
+      category: group.category,
+      events: group.events,
+    },
+  }));
+}
+
+function countExtensionBridgeCategories(events = []) {
+  return events.reduce((acc, event) => {
+    const category = optionalString(event.category) || extensionBridgeCategoryFromUrl(event.url);
+    acc[category] = (acc[category] || 0) + 1;
+    return acc;
+  }, {});
+}
+
+const NON_STORE_EXTENSION_NAME_PATTERNS = [
+  /^(?:\u5fd8\u8bb0\u5bc6\u7801|\u627e\u56de\u5bc6\u7801|\u767b\u5f55|\u767b\u9304|\u6ce8\u518c|\u9a8c\u8bc1\u7801|Forgot Password|Reset Password|Login|Log In|Sign In|Register|Verification Code)$/i,
+  /^(?:\u521b\u5efa\u65b0\u5e97\u94fa.*|\u5408\u89c4\u767b\u8bb0(?:\u53ca)?\u9a8c\u8bc1.*|0\u5143\u5f00\u5e97|\u514d\u8d39\u5f00\u5e97|\u6211\u8981\u5f00\u5e97|\u7acb\u5373\u5f00\u5e97|\u53bb\u5f00\u5e97)$/u,
+  /^(?:\u9690\u79c1\u653f\u7b56|\u9690\u79c1\u6761\u6b3e|\u7528\u6237\u534f\u8bae|\u670d\u52a1\u6761\u6b3e|\u6cd5\u5f8b\u58f0\u660e|\u5173\u4e8e\u6211\u4eec|\u8054\u7cfb\u6211\u4eec)$/u,
+  /^(0元开店|免费开店|我要开店|立即开店|去开店|未识别店铺|采集快照)$/i,
+  /(开店|入驻|注册|登录|退出|刷新|通知|日志|设置|账号|业务|数据|管理|全部|搜索|验证码)/i,
+  /(店铺控制台|采集|巡店|帮助|教程|下载|升级|活动报名)/i,
+  /(隐私政策|隐私条款|用户协议|服务条款|法律声明|Privacy Policy|Cookie Policy|Terms of Use|Terms & Conditions|Legal Notice|About Us|Contact Us)/i,
+];
+
+function isReliableExtensionBridgeStoreName(value) {
+  const text = normalizeStoreNameText(value);
+  if (text.length < 3 || text.length > 80) return false;
+  if (/^temu_ext_[a-f0-9]+$/i.test(text)) return false;
+  if (/^acct[_:-]/i.test(text)) return false;
+  if (/^\+?\d[\d\s*()-]{3,}$/.test(text)) return false;
+  if (/^\d+$/.test(text)) return false;
+  if (!/[A-Za-z\u4e00-\u9fff]/.test(text)) return false;
+  if (NON_STORE_EXTENSION_NAME_PATTERNS.some((pattern) => pattern.test(text))) return false;
+  return true;
+}
+
+function normalizeExtensionBridgeStore(payload = {}) {
+  const store = payload.store && typeof payload.store === "object" ? payload.store : {};
+  const rawStoreName = normalizeStoreNameText(
+    payload.storeName || payload.store_name || store.storeName || store.name || store.mallName || store.shopName || store.merchantName,
+  );
+  const storeName = isReliableExtensionBridgeStoreName(rawStoreName) ? rawStoreName : "";
+  const rawAccountId = optionalString(
+    payload.accountId || payload.account_id || payload.storeId || payload.store_id || store.accountId
+      || store.storeId || store.id || store.mallId || store.shopId || store.merchantId || storeName || rawStoreName,
+  );
+  const accountId = rawAccountId && rawAccountId.startsWith("temu_ext_")
+    ? rawAccountId.slice(0, 160)
+    : `temu_ext_${stableShortHash(rawAccountId || storeName || "unknown_store")}`;
+  return {
+    accountId,
+    storeName,
+    ownerName: optionalString(payload.ownerName || payload.owner_name || store.ownerName || store.responsiblePerson),
+    rawStore: store,
+  };
+}
+
+function requireReliableExtensionBridgeStore(payload = {}) {
+  const store = normalizeExtensionBridgeStore(payload);
+  if (!store.storeName || !isReliableExtensionBridgeStoreName(store.storeName)) {
+    throw new Error("未识别到可靠店铺名，已拒收本次扩展采集");
+  }
+  return store;
+}
+
+function ensureExtensionBridgeAccount(payload = {}, actor = erpState.currentUser || {}) {
+  if (isClientMode()) return { ownerName: payload.ownerName || null };
+  const { db } = requireErp();
+  const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
+  const accountId = requireString(payload.accountId || payload.account_id, "accountId");
+  const incomingStoreName = normalizeStoreNameText(payload.storeName || payload.store_name);
+  const storeName = isReliableExtensionBridgeStoreName(incomingStoreName) ? incomingStoreName : accountId;
+  const ownerName = optionalString(payload.ownerName || payload.owner_name);
+  const existing = db.prepare(`
+    SELECT id, name, owner_name
+    FROM erp_accounts
+    WHERE company_id = ?
+      AND id = ?
+    LIMIT 1
+  `).get(companyId, accountId);
+  const now = nowIso();
+  if (!existing) {
+    db.prepare(`
+      INSERT INTO erp_accounts (id, company_id, name, owner_name, phone, status, source, created_at, updated_at)
+      VALUES (?, ?, ?, ?, NULL, 'online', 'temu-extension', ?, ?)
+    `).run(accountId, companyId, storeName, ownerName, now, now);
+    return { ownerName };
+  }
+  const nextOwnerName = existing.owner_name || ownerName || null;
+  const nextName = isReliableExtensionBridgeStoreName(existing.name) ? normalizeStoreNameText(existing.name) : storeName;
+  if (nextOwnerName !== existing.owner_name || nextName !== existing.name) {
+    db.prepare(`
+      UPDATE erp_accounts
+      SET name = ?,
+          owner_name = ?,
+          updated_at = ?
+      WHERE company_id = ?
+        AND id = ?
+    `).run(nextName, nextOwnerName, now, companyId, accountId);
+  }
+  return { ownerName: nextOwnerName };
+}
+
+function buildExtensionBridgeSnapshotPayload(payload = {}) {
+  const store = requireReliableExtensionBridgeStore(payload);
+  const rawEvents = Array.isArray(payload.events) ? payload.events : [];
+  const events = rawEvents.map(normalizeExtensionBridgeEvent).filter(Boolean);
+  let sources = Array.isArray(payload.sources) && payload.sources.length
+    ? payload.sources
+    : groupExtensionBridgeSources(events);
+  if (!sources.length) throw new Error("至少需要一个接口响应事件或 sources");
+  const collectedAt = optionalString(payload.collectedAt || payload.collected_at || payload.collectedAtIso || payload.collected_at_iso)
+    || events.map((event) => event.capturedAt).sort().pop()
+    || nowIso();
+  const categories = countExtensionBridgeCategories(events);
+  const summary = payload.summary && typeof payload.summary === "object" ? payload.summary : {};
+  const diagnostics = payload.diagnostics && typeof payload.diagnostics === "object" ? payload.diagnostics : {};
+  const incomingSkcSummary = sources.find((source) => optionalString(source.dataKey || source.data_key || source.key) === STORE_COLLECTION_SKC_SUMMARY_KEY);
+  const incomingSkcPayload = incomingSkcSummary?.payload ?? incomingSkcSummary?.value ?? parseJsonValue(incomingSkcSummary?.payloadJson || incomingSkcSummary?.payload_json, null);
+  const incomingSkcRows = Array.isArray(incomingSkcPayload?.rows) ? incomingSkcPayload.rows.length : 0;
+  if (!incomingSkcSummary || incomingSkcRows === 0) {
+    sources = sources
+      .filter((source) => optionalString(source.dataKey || source.data_key || source.key) !== STORE_COLLECTION_SKC_SUMMARY_KEY)
+      .concat(buildStoreCollectionSkcSummarySource(sources, {
+      accountId: store.accountId,
+      storeName: store.storeName,
+      ownerName: store.ownerName,
+      generatedAt: collectedAt,
+    }));
+  }
+  return {
+    accountId: store.accountId,
+    storeName: store.storeName,
+    ownerName: store.ownerName,
+    collectedAt,
+    collectedAtIso: collectedAt,
+    clientSnapshotId: optionalString(payload.clientSnapshotId || payload.client_snapshot_id)
+      || `${store.accountId}:${collectedAt}:temu-extension:${stableShortHash(`${collectedAt}:${events.length}:${sources.length}`)}`,
+    diagnostics: {
+      ...diagnostics,
+      source: "temu-chrome-extension",
+      storeDetected: Boolean(store.storeName),
+      eventCount: events.length,
+      sourceCount: sources.length,
+      categories,
+    },
+    summary: {
+      ...summary,
+      apiEventCount: events.length,
+      categories,
+    },
+    manifest: {
+      ...(payload.manifest && typeof payload.manifest === "object" ? payload.manifest : {}),
+      source: "temu-chrome-extension",
+      extensionVersion: optionalString(payload.extensionVersion || payload.extension_version) || null,
+      receivedAt: nowIso(),
+      rawStore: store.rawStore,
+    },
+    sources,
+  };
+}
+
+async function handleExtensionBridgeSnapshot(payload = {}) {
+  const snapshotPayload = buildExtensionBridgeSnapshotPayload(payload);
+  const accountMeta = ensureExtensionBridgeAccount(snapshotPayload, erpState.currentUser || {});
+  if (!snapshotPayload.ownerName && accountMeta.ownerName) {
+    snapshotPayload.ownerName = accountMeta.ownerName;
+  }
+  const snapshot = await uploadStoreCollectionSnapshotRuntime(snapshotPayload);
+  return { ok: true, snapshot };
+}
+
+async function handleExtensionBridgeStore(payload = {}) {
+  const store = requireReliableExtensionBridgeStore(payload);
+  const accountMeta = ensureExtensionBridgeAccount({
+    accountId: store.accountId,
+    storeName: store.storeName,
+    ownerName: store.ownerName,
+  }, erpState.currentUser || {});
+  return {
+    ok: true,
+    account: {
+      accountId: store.accountId,
+      storeName: store.storeName,
+      ownerName: store.ownerName || accountMeta.ownerName || null,
+    },
+  };
+}
+
+async function handleExtensionBridgeRequest(req, res) {
+  writeExtensionBridgeCors(req, res);
+  if (req.method === "OPTIONS") {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  let pathname = "/";
+  try {
+    pathname = new URL(req.url || "/", `http://${req.headers.host || `${EXTENSION_BRIDGE_HOST}:${EXTENSION_BRIDGE_DEFAULT_PORT}`}`).pathname;
+  } catch {}
+
+  if (req.method === "GET" && (pathname === "/health" || pathname === "/api/temu-extension/health")) {
+    sendExtensionBridgeJson(req, res, 200, {
+      ok: true,
+      service: "temu-extension-bridge",
+      status: erpState.extensionBridgeStatus || null,
+      erp: getErpStatus(),
+    });
+    return;
+  }
+
+  const bridgeHeader = optionalString(req.headers["x-temu-extension-bridge"]);
+  if (bridgeHeader !== EXTENSION_BRIDGE_HEADER) {
+    sendExtensionBridgeJson(req, res, 403, { ok: false, error: "扩展桥接请求缺少校验头" });
+    return;
+  }
+
+  if (req.method !== "POST") {
+    sendExtensionBridgeJson(req, res, 405, { ok: false, error: "Method Not Allowed" });
+    return;
+  }
+
+  try {
+    const payload = await readExtensionBridgeJson(req);
+    if (pathname === "/api/temu-extension/store") {
+      sendExtensionBridgeJson(req, res, 200, await handleExtensionBridgeStore(payload));
+      return;
+    }
+    if (
+      pathname === "/api/temu-extension/events"
+      || pathname === "/api/temu-extension/store-collection/snapshot"
+    ) {
+      sendExtensionBridgeJson(req, res, 200, await handleExtensionBridgeSnapshot(payload));
+      return;
+    }
+    sendExtensionBridgeJson(req, res, 404, { ok: false, error: "Not Found" });
+  } catch (error) {
+    sendExtensionBridgeJson(req, res, 500, { ok: false, error: error?.message || String(error) });
+  }
+}
+
+function startTemuExtensionBridge(options = {}) {
+  if (erpState.extensionBridgeServer) {
+    return erpState.extensionBridgeStatus;
+  }
+  const port = normalizeExtensionBridgePort(options.port || process.env.TEMU_EXTENSION_BRIDGE_PORT);
+  const server = http.createServer((req, res) => {
+    handleExtensionBridgeRequest(req, res).catch((error) => {
+      sendExtensionBridgeJson(req, res, 500, { ok: false, error: error?.message || String(error) });
+    });
+  });
+  server.on("error", (error) => {
+    erpState.extensionBridgeStatus = {
+      running: false,
+      host: EXTENSION_BRIDGE_HOST,
+      port,
+      error: error?.message || String(error),
+      updatedAt: nowIso(),
+    };
+    console.error("[TemuExtensionBridge] failed:", error?.message || error);
+  });
+  server.listen(port, EXTENSION_BRIDGE_HOST, () => {
+    erpState.extensionBridgeStatus = {
+      running: true,
+      host: EXTENSION_BRIDGE_HOST,
+      port,
+      url: `http://${EXTENSION_BRIDGE_HOST}:${port}`,
+      startedAt: nowIso(),
+    };
+    console.log(`[TemuExtensionBridge] listening on http://${EXTENSION_BRIDGE_HOST}:${port}`);
+  });
+  erpState.extensionBridgeServer = server;
+  erpState.extensionBridgeStatus = {
+    running: false,
+    host: EXTENSION_BRIDGE_HOST,
+    port,
+    starting: true,
+    startedAt: nowIso(),
+  };
+  return erpState.extensionBridgeStatus;
+}
+
+function stopTemuExtensionBridge() {
+  const server = erpState.extensionBridgeServer;
+  erpState.extensionBridgeServer = null;
+  if (!server) return;
+  try {
+    server.close();
+  } catch {}
+  erpState.extensionBridgeStatus = {
+    ...(erpState.extensionBridgeStatus || {}),
+    running: false,
+    stoppedAt: nowIso(),
   };
 }
 
@@ -3975,7 +5495,9 @@ function getPurchaseWorkbench(params = {}) {
       supplier.name AS supplier_name,
       creator.name AS created_by_name,
       pr.status AS pr_status,
+      selected_candidate.pr_id AS selected_candidate_pr_id,
       GROUP_CONCAT(DISTINCT sku.internal_sku_code || ' ' || sku.product_name) AS sku_summary,
+      GROUP_CONCAT(DISTINCT line.sku_id) AS sku_ids,
       GROUP_CONCAT(DISTINCT sku.internal_sku_code) AS sku_codes,
       GROUP_CONCAT(DISTINCT sku.product_name) AS product_names,
       (
@@ -4042,6 +5564,7 @@ function getPurchaseWorkbench(params = {}) {
     LEFT JOIN erp_suppliers supplier ON supplier.id = po.supplier_id
     LEFT JOIN erp_users creator ON creator.id = po.created_by
     LEFT JOIN erp_purchase_requests pr ON pr.id = po.pr_id
+    LEFT JOIN erp_sourcing_candidates selected_candidate ON selected_candidate.id = po.selected_candidate_id
     LEFT JOIN erp_purchase_order_lines line ON line.po_id = po.id
     LEFT JOIN erp_skus sku ON sku.id = line.sku_id
     ${poWhereAccount}
@@ -4232,6 +5755,75 @@ function findLatestPurchaseOrderByRequestId(db, prId) {
   `).get(requestId) || null;
 }
 
+function linkPurchaseOrderToRequestIfNeeded(db, po, pr, actor) {
+  if (!po || !pr?.id) return po || null;
+  if (optionalString(po.pr_id) === pr.id) return po;
+  if (optionalString(po.pr_id)) return po;
+  const before = { ...po };
+  const updatedAt = nowIso();
+  const result = db.prepare(`
+    UPDATE erp_purchase_orders
+    SET pr_id = ?, updated_at = ?
+    WHERE id = ?
+      AND (pr_id IS NULL OR TRIM(pr_id) = '')
+  `).run(pr.id, updatedAt, po.id);
+  if (!result.changes) return po;
+  const after = getPurchaseOrder(db, po.id);
+  writePurchaseRequestEvent(db, pr, actor, "link_existing_po", `关联已有采购单：${after.po_no || after.id}`);
+  return { ...before, ...after };
+}
+
+function findExistingPurchaseOrderForRequest(db, pr, actor) {
+  const prId = optionalString(pr?.id);
+  if (!prId) return null;
+  const linked = findLatestPurchaseOrderByRequestId(db, prId);
+  if (linked) return linked;
+  const accountId = optionalString(pr.account_id);
+  if (!accountId) return null;
+
+  const candidateLinked = db.prepare(`
+    SELECT po.*
+    FROM erp_purchase_orders po
+    JOIN erp_sourcing_candidates candidate ON candidate.id = po.selected_candidate_id
+    WHERE candidate.pr_id = @pr_id
+      AND po.account_id = @account_id
+      AND (po.pr_id IS NULL OR TRIM(po.pr_id) = '' OR po.pr_id = @pr_id)
+    ORDER BY
+      COALESCE(po.updated_at, po.created_at, '') DESC,
+      po.id DESC
+    LIMIT 1
+  `).get({ pr_id: prId, account_id: accountId });
+  if (candidateLinked) return linkPurchaseOrderToRequestIfNeeded(db, candidateLinked, pr, actor);
+
+  const skuId = optionalString(pr.sku_id);
+  if (!skuId) return null;
+  const skuLinked = db.prepare(`
+    SELECT po.*
+    FROM erp_purchase_orders po
+    JOIN erp_purchase_order_lines line ON line.po_id = po.id
+    WHERE po.account_id = @account_id
+      AND line.account_id = @account_id
+      AND line.sku_id = @sku_id
+      AND (po.pr_id IS NULL OR TRIM(po.pr_id) = '' OR po.pr_id = @pr_id)
+      AND (
+        po.selected_candidate_id IS NULL
+        OR EXISTS (
+          SELECT 1
+          FROM erp_sourcing_candidates candidate
+          WHERE candidate.id = po.selected_candidate_id
+            AND candidate.pr_id = @pr_id
+        )
+      )
+    GROUP BY po.id
+    ORDER BY
+      CASE WHEN po.selected_candidate_id IS NOT NULL THEN 0 ELSE 1 END,
+      COALESCE(po.updated_at, po.created_at, '') DESC,
+      po.id DESC
+    LIMIT 1
+  `).get({ pr_id: prId, account_id: accountId, sku_id: skuId });
+  return skuLinked ? linkPurchaseOrderToRequestIfNeeded(db, skuLinked, pr, actor) : null;
+}
+
 function getPurchaseOrderActionRow(db, poId) {
   const id = optionalString(poId);
   if (!id) return null;
@@ -4242,7 +5834,9 @@ function getPurchaseOrderActionRow(db, poId) {
       supplier.name AS supplier_name,
       creator.name AS created_by_name,
       pr.status AS pr_status,
+      selected_candidate.pr_id AS selected_candidate_pr_id,
       GROUP_CONCAT(DISTINCT sku.internal_sku_code || ' ' || sku.product_name) AS sku_summary,
+      GROUP_CONCAT(DISTINCT line.sku_id) AS sku_ids,
       GROUP_CONCAT(DISTINCT sku.internal_sku_code) AS sku_codes,
       GROUP_CONCAT(DISTINCT sku.product_name) AS product_names,
       (
@@ -4277,6 +5871,7 @@ function getPurchaseOrderActionRow(db, poId) {
     LEFT JOIN erp_suppliers supplier ON supplier.id = po.supplier_id
     LEFT JOIN erp_users creator ON creator.id = po.created_by
     LEFT JOIN erp_purchase_requests pr ON pr.id = po.pr_id
+    LEFT JOIN erp_sourcing_candidates selected_candidate ON selected_candidate.id = po.selected_candidate_id
     LEFT JOIN erp_purchase_order_lines line ON line.po_id = po.id
     LEFT JOIN erp_skus sku ON sku.id = line.sku_id
     WHERE po.id = ?
@@ -4322,6 +5917,46 @@ function writePaymentApprovalAudit({ services, before, after, actor, action }) {
   });
 }
 
+const PAYMENT_SUBMITTED_PO_STATUSES = new Set([
+  "approved_to_pay",
+  "paid",
+  "supplier_processing",
+  "shipped",
+  "arrived",
+  "inbounded",
+  "closed",
+]);
+const PAYMENT_PAID_OR_LATER_PO_STATUSES = new Set([
+  "paid",
+  "supplier_processing",
+  "shipped",
+  "arrived",
+  "inbounded",
+  "closed",
+]);
+
+function isPaymentSubmittedPurchaseOrder(po = {}) {
+  return PAYMENT_SUBMITTED_PO_STATUSES.has(String(po.status || ""));
+}
+
+function isPaidOrLaterPurchaseOrder(po = {}) {
+  return PAYMENT_PAID_OR_LATER_PO_STATUSES.has(String(po.status || ""))
+    || String(po.payment_status || "") === "paid";
+}
+
+function noOpPurchaseOrderTransition(po = {}, action = "") {
+  return {
+    entityType: "purchase_order",
+    id: po.id,
+    action,
+    fromStatus: po.status,
+    toStatus: po.status,
+    before: po,
+    after: po,
+    idempotent: true,
+  };
+}
+
 function createPaymentApprovalForPo({ db, services, po, payload, actor }) {
   const now = nowIso();
   const amount = optionalNumber(payload.amount) ?? Number(po.total_amount || 0);
@@ -4359,6 +5994,77 @@ function createPaymentApprovalForPo({ db, services, po, payload, actor }) {
     action: "create_payment_approval",
   });
   return after;
+}
+
+function markPaymentApprovalApproved({ db, services, before, actor }) {
+  if (!before || before.status === "approved" || before.status === "paid") return before || null;
+  const now = nowIso();
+  db.prepare(`
+    UPDATE erp_payment_approvals
+    SET status = 'approved',
+        approved_by = @approved_by,
+        approved_at = @approved_at,
+        updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id: before.id,
+    approved_by: actor.id || null,
+    approved_at: now,
+    updated_at: now,
+  });
+  const after = db.prepare("SELECT * FROM erp_payment_approvals WHERE id = ?").get(before.id);
+  writePaymentApprovalAudit({
+    services,
+    before,
+    after,
+    actor,
+    action: "approve_payment_approval",
+  });
+  return after;
+}
+
+function markPaymentApprovalPaid({ db, services, before, payload = {}, actor }) {
+  if (!before) return null;
+  if (before.status === "paid") return before;
+  const now = nowIso();
+  db.prepare(`
+    UPDATE erp_payment_approvals
+    SET status = 'paid',
+        paid_at = @paid_at,
+        payment_method = COALESCE(@payment_method, payment_method),
+        payment_reference = COALESCE(@payment_reference, payment_reference),
+        updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id: before.id,
+    paid_at: now,
+    payment_method: optionalString(payload.paymentMethod),
+    payment_reference: optionalString(payload.paymentReference),
+    updated_at: now,
+  });
+  const after = db.prepare("SELECT * FROM erp_payment_approvals WHERE id = ?").get(before.id);
+  writePaymentApprovalAudit({
+    services,
+    before,
+    after,
+    actor,
+    action: "confirm_payment_paid",
+  });
+  return after;
+}
+
+function ensurePaymentApprovalForPo({ db, services, po, payload = {}, actor, status = "approved" }) {
+  let paymentApproval = findLatestPaymentApprovalByPoId(db, po.id);
+  if (!paymentApproval) {
+    paymentApproval = createPaymentApprovalForPo({ db, services, po, payload, actor });
+  }
+  if (status === "paid") {
+    paymentApproval = markPaymentApprovalApproved({ db, services, before: paymentApproval, actor }) || paymentApproval;
+    paymentApproval = markPaymentApprovalPaid({ db, services, before: paymentApproval, payload, actor }) || paymentApproval;
+  } else {
+    paymentApproval = markPaymentApprovalApproved({ db, services, before: paymentApproval, actor }) || paymentApproval;
+  }
+  return paymentApproval;
 }
 
 function approvePaymentApproval({ db, services, payload, actor }) {
@@ -4470,36 +6176,40 @@ function ensureInboundReceiptForPo(db, services, po, actor) {
 }
 
 function confirmPaymentPaid({ db, services, payload, actor }) {
-  const before = getLatestPaymentApproval(db, payload);
+  const poId = optionalString(payload.poId || payload.id);
+  let before = null;
+  try {
+    before = getLatestPaymentApproval(db, payload);
+  } catch (error) {
+    if (!poId || !/Payment approval not found/i.test(String(error?.message || ""))) throw error;
+    const po = getPurchaseOrder(db, poId);
+    if (po.status !== "approved_to_pay" && !isPaidOrLaterPurchaseOrder(po)) throw error;
+    before = ensurePaymentApprovalForPo({
+      db,
+      services,
+      po,
+      payload,
+      actor,
+      status: isPaidOrLaterPurchaseOrder(po) ? "paid" : "approved",
+    });
+  }
+
+  const currentPo = getPurchaseOrder(db, before.po_id);
+  if (isPaidOrLaterPurchaseOrder(currentPo)) {
+    const alreadyPaid = ensurePaymentApprovalForPo({ db, services, po: currentPo, payload, actor, status: "paid" });
+    try {
+      ensureInboundReceiptForPo(db, services, currentPo, actor);
+    } catch (e) {
+      try { console.warn("[purchase] auto-create inbound receipt failed:", e?.message || e); } catch {}
+    }
+    return alreadyPaid;
+  }
   if (before.status !== "approved") {
     throw new Error(`Payment approval is not approved: ${before.status}`);
   }
 
   services.purchase.confirmPaid(before.po_id, actor);
-  const now = nowIso();
-  db.prepare(`
-    UPDATE erp_payment_approvals
-    SET status = 'paid',
-        paid_at = @paid_at,
-        payment_method = COALESCE(@payment_method, payment_method),
-        payment_reference = COALESCE(@payment_reference, payment_reference),
-        updated_at = @updated_at
-    WHERE id = @id
-  `).run({
-    id: before.id,
-    paid_at: now,
-    payment_method: optionalString(payload.paymentMethod),
-    payment_reference: optionalString(payload.paymentReference),
-    updated_at: now,
-  });
-  const after = db.prepare("SELECT * FROM erp_payment_approvals WHERE id = ?").get(before.id);
-  writePaymentApprovalAudit({
-    services,
-    before,
-    after,
-    actor,
-    action: "confirm_payment_paid",
-  });
+  const after = markPaymentApprovalPaid({ db, services, before, payload, actor });
   // 同步建对应入库单（仓库中心立即可见）；失败不阻塞付款确认。
   try {
     const po = getPurchaseOrder(db, before.po_id);
@@ -4534,6 +6244,32 @@ function has1688OrderTrace(po = {}) {
   if (optionalString(po.external_order_id)) return true;
   const status = optionalString(po.external_order_status);
   return Boolean(status && !["previewed", "price_change_requested"].includes(status));
+}
+
+function get1688OrderPushBlocker(po = {}) {
+  const poLabel = po.po_no || po.id || "-";
+  const externalOrderId = optionalString(po.external_order_id);
+  if (externalOrderId) {
+    return {
+      reason: "already_bound",
+      message: `采购单 ${poLabel} 已绑定 1688 订单 ${externalOrderId}，不能重复推送下单`,
+      externalOrderId,
+    };
+  }
+  if (has1688OrderTrace(po)) {
+    return {
+      reason: "already_submitted",
+      message: `采购单 ${poLabel} 已有 1688 推单记录，不能重复推送下单`,
+    };
+  }
+  const status = optionalString(po.status);
+  if (status !== "draft") {
+    return {
+      reason: "not_draft",
+      message: `采购单 ${poLabel} 当前状态为 ${status || "-"}，只能在草稿状态推送 1688 下单`,
+    };
+  }
+  return null;
 }
 
 function getRollbackPurchaseOrderTarget(po, receivedQty = 0) {
@@ -6953,11 +8689,15 @@ function bind1688CandidateSpecAction({ db, services, payload, actor }) {
 
 function build1688AddressParamFromRow(row = {}) {
   const raw = parseJsonObject(row.raw_address_param_json);
-  const fromRaw = Object.keys(raw).length ? raw : {};
+  const fromRaw = Object.keys(raw).length ? { ...raw } : {};
+  delete fromRaw.addressId;
+  delete fromRaw.addressID;
+  delete fromRaw.receiveAddressId;
+  delete fromRaw.receive_address_id;
+  delete fromRaw.id;
   const addressParam = {
     ...fromRaw,
   };
-  if (row.address_id) addressParam.addressId = row.address_id;
   if (row.full_name) addressParam.fullName = row.full_name;
   if (row.mobile) addressParam.mobile = row.mobile;
   if (row.phone) addressParam.phone = row.phone;
@@ -7654,7 +9394,7 @@ function generatePurchaseOrderAction({ db, services, payload, actor }) {
   assertActorRole(actor, ["buyer", "manager", "admin"], "生成采购单");
   const prId = requireString(payload.prId || payload.id, "prId");
   let pr = getPurchaseRequest(db, prId);
-  const existingPo = findLatestPurchaseOrderByRequestId(db, prId);
+  const existingPo = pr.status === "converted_to_po" ? findExistingPurchaseOrderForRequest(db, pr, actor) : null;
   if (pr.status === "converted_to_po" && existingPo) {
     markPurchaseRequestRead(db, pr.id, actor);
     return {
@@ -8277,12 +10017,13 @@ async function validate1688OrderPushAction({ db, payload, actor }) {
   assertActorRole(actor, ["buyer", "manager", "admin"], "1688 order push validation");
   const poId = requireString(payload.poId || payload.id, "poId");
   const po = getPurchaseOrderWithCandidate(db, poId);
-  if (optionalString(po.external_order_id)) {
+  const pushBlocker = get1688OrderPushBlocker(po);
+  if (pushBlocker) {
     return {
       ready: false,
-      reason: "already_bound",
-      message: `采购单 ${po.po_no || po.id} 已绑定 1688 订单`,
-      externalOrderId: po.external_order_id,
+      reason: pushBlocker.reason,
+      message: pushBlocker.message,
+      ...(pushBlocker.externalOrderId ? { externalOrderId: pushBlocker.externalOrderId } : {}),
     };
   }
   const lines = getPurchaseOrderLines(db, poId);
@@ -8313,6 +10054,10 @@ async function push1688OrderAction({ db, services, payload, actor }) {
   assertActorRole(actor, ["buyer", "manager", "admin"], "1688 order push");
   const poId = requireString(payload.poId || payload.id, "poId");
   const po = getPurchaseOrderWithCandidate(db, poId);
+  const pushBlocker = get1688OrderPushBlocker(po);
+  if (pushBlocker) {
+    throw new Error(pushBlocker.message);
+  }
   const lines = getPurchaseOrderLines(db, poId);
   if (!lines.length) throw new Error(`Purchase order has no lines: ${poId}`);
   await resolve1688OrderLineMappings(db, lines);
@@ -11473,12 +13218,20 @@ async function link1688OrderToPoAction({ db, services, payload, actor }) {
 
 function getPurchaseWorkbenchForAction(payload = {}, actor = {}) {
   if (payload.includeWorkbench === false || payload.skipWorkbench || payload.noWorkbench) return null;
+  const action = optionalString(payload.action);
+  const defaults = action === "create_pr" || action === "create_purchase_request"
+    ? {
+      includeRequestDetails: false,
+      includeOptions: false,
+      include1688Meta: false,
+    }
+    : {};
   return getPurchaseWorkbench({
     limit: payload.limit,
     accountId: payload.accountId || payload.account_id,
-    includeRequestDetails: payload.includeRequestDetails,
-    includeOptions: payload.includeOptions,
-    include1688Meta: payload.include1688Meta,
+    includeRequestDetails: payload.includeRequestDetails ?? defaults.includeRequestDetails,
+    includeOptions: payload.includeOptions ?? defaults.includeOptions,
+    include1688Meta: payload.include1688Meta ?? defaults.include1688Meta,
     detailPrId: payload.detailPrId || payload.detail_pr_id || payload.prId || payload.pr_id,
     user: actor,
   });
@@ -11815,6 +13568,23 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
       case "submit_payment_approval": {
         const poId = requireString(payload.poId || payload.id, "poId");
         const po = getPurchaseOrder(db, poId);
+        if (isPaymentSubmittedPurchaseOrder(po)) {
+          const targetPaymentStatus = isPaidOrLaterPurchaseOrder(po) ? "paid" : "approved";
+          const paymentApproval = ensurePaymentApprovalForPo({
+            db,
+            services,
+            po,
+            payload,
+            actor,
+            status: targetPaymentStatus,
+          });
+          return {
+            transition: noOpPurchaseOrderTransition(po, "submit_payment_approval"),
+            paymentApproval: toCamelRow(paymentApproval),
+            purchaseOrder: toPurchaseOrderResult(db, po.id),
+            idempotent: true,
+          };
+        }
         const transition = services.purchase.submitPaymentApproval(poId, actor);
         const paymentApproval = createPaymentApprovalForPo({
           db,
@@ -13602,6 +15372,58 @@ async function deleteSkuRuntime(payload = {}, actor = {}) {
   return deleteSku(payload || {}, actor);
 }
 
+async function uploadStoreCollectionSnapshotRuntime(payload = {}) {
+  if (isClientMode()) {
+    try {
+      const response = await remoteRequest("/api/store-collection/upload", {
+        method: "POST",
+        body: payload,
+        timeoutMs: 300000,
+      });
+      return response.snapshot || response.result;
+    } catch (error) {
+      if (isRemoteNotFoundError(error)) throw storeCollectionRemoteNotReadyError(error);
+      throw error;
+    }
+  }
+  assertRoleIfLoggedIn(["admin", "manager", "operations"]);
+  return uploadStoreCollectionSnapshot(payload || {}, erpState.currentUser || {});
+}
+
+async function listStoreCollectionSnapshotsRuntime(params = {}) {
+  if (isClientMode()) {
+    try {
+      const payload = await remoteRequest("/api/store-collection/list", {
+        method: "POST",
+        body: params,
+        timeoutMs: 60000,
+      });
+      return payload.snapshots || [];
+    } catch (error) {
+      if (isRemoteNotFoundError(error)) return [];
+      throw error;
+    }
+  }
+  return listStoreCollectionSnapshots(params || {}, erpState.currentUser || {});
+}
+
+async function getStoreCollectionSnapshotDetailRuntime(params = {}) {
+  if (isClientMode()) {
+    try {
+      const payload = await remoteRequest("/api/store-collection/detail", {
+        method: "POST",
+        body: params,
+        timeoutMs: params?.includePayload ? 300000 : 60000,
+      });
+      return payload.snapshot || null;
+    } catch (error) {
+      if (isRemoteNotFoundError(error)) return null;
+      throw error;
+    }
+  }
+  return getStoreCollectionSnapshotDetail(params || {}, erpState.currentUser || {});
+}
+
 function getLanServiceStatus() {
   if (isClientMode()) {
     const runtime = getRuntimeStatus();
@@ -13654,6 +15476,9 @@ function startLanService(payload = {}) {
     listSkus,
     createSku,
     deleteSku,
+    uploadStoreCollectionSnapshot,
+    listStoreCollectionSnapshots,
+    getStoreCollectionSnapshotDetail,
     sessionStore: createLanSessionStore(),
     verifyLogin: verifyLanLogin,
     validateSessionUser: validateLanSessionUser,
@@ -13794,6 +15619,9 @@ async function startErpHeadlessServer(options = {}) {
     listSkus,
     createSku,
     deleteSku,
+    uploadStoreCollectionSnapshot,
+    listStoreCollectionSnapshots,
+    getStoreCollectionSnapshotDetail,
     sessionStore: createLanSessionStore(),
     verifyLogin: verifyLanLogin,
     validateSessionUser: validateLanSessionUser,
@@ -13883,6 +15711,9 @@ function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:sku:list", (_event, params) => listSkusRuntime(params || {}));
   ipcMain.handle("erp:sku:create", (_event, payload) => createSkuRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:sku:delete", (_event, payload) => deleteSkuRuntime(payload || {}, erpState.currentUser || {}));
+  ipcMain.handle("erp:store-collection:upload", (_event, payload) => uploadStoreCollectionSnapshotRuntime(payload || {}));
+  ipcMain.handle("erp:store-collection:list", (_event, params) => listStoreCollectionSnapshotsRuntime(params || {}));
+  ipcMain.handle("erp:store-collection:detail", (_event, params) => getStoreCollectionSnapshotDetailRuntime(params || {}));
   ipcMain.handle("erp:purchase:workbench", (_event, params) => getPurchaseWorkbenchRuntime(params || {}));
   ipcMain.handle("erp:purchase:action", (_event, payload) => performPurchaseActionRuntime(payload || {}));
   ipcMain.handle("erp:warehouse:workbench", (_event, params) => getWarehouseWorkbenchRuntime(params || {}));
@@ -13980,6 +15811,7 @@ async function probe1688MtopFromClient(options = {}) {
 
 function closeErp() {
   stopAuto1688OrderSync();
+  stopTemuExtensionBridge();
   stopLanServer().catch(() => {});
   if (erpState.db) {
     try { erpState.db.close(); } catch {}
@@ -13997,6 +15829,9 @@ module.exports = {
   startErpHeadlessServer,
   registerErpIpcHandlers,
   closeErp,
+  startTemuExtensionBridge,
+  buildStoreCollectionSkcSummaryFromSources,
+  buildStoreCollectionSkcSummarySource,
   runScheduledOrderSync,
   resetScheduledOrderSyncState,
   runScheduledMessageReprocess,

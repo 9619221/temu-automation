@@ -3,15 +3,39 @@ import { message, notification } from "antd";
 import { parseDashboardData, parseProductsData, parseOrdersData, parseSalesData, parseFluxData } from "../utils/parseRawApis";
 import {
   COLLECTION_DIAGNOSTICS_KEY,
+  isCompleteCollectionDiagnostics,
   normalizeCollectionDiagnostics,
+  type CollectionDiagnostics,
   type CollectionTaskDiagnostic,
 } from "../utils/collectionDiagnostics";
+import { persistCollectionUploadError, uploadCurrentCollectionToCloud } from "../utils/cloudCollectionUpload";
 import { setStoreValueForActiveAccount } from "../utils/multiStore";
 
 const api = window.electronAPI?.automation;
 const store = window.electronAPI?.store;
 
 const PARSED_TASK_KEYS = new Set(["dashboard", "products", "orders", "sales", "flux"]);
+
+function getFullCollectionMarkers(diagnostics: CollectionDiagnostics) {
+  if (diagnostics.fullSyncedAt || diagnostics.fullSyncedAtIso) {
+    return {
+      fullSyncedAt: diagnostics.fullSyncedAt || null,
+      fullSyncedAtIso: diagnostics.fullSyncedAtIso || null,
+    };
+  }
+
+  if (isCompleteCollectionDiagnostics(diagnostics)) {
+    return {
+      fullSyncedAt: diagnostics.syncedAt,
+      fullSyncedAtIso: diagnostics.syncedAtIso || null,
+    };
+  }
+
+  return {
+    fullSyncedAt: null,
+    fullSyncedAtIso: null,
+  };
+}
 
 export interface CollectTask {
   key: string;
@@ -298,7 +322,9 @@ export function CollectionProvider({ children }: { children: React.ReactNode }) 
     });
     setTaskStates(initStates);
 
-    const syncedAt = new Date().toLocaleString("zh-CN");
+    const syncedAtDate = new Date();
+    const syncedAt = syncedAtDate.toLocaleString("zh-CN");
+    const syncedAtIso = syncedAtDate.toISOString();
     const diagnosticsTasks: Record<string, CollectionTaskDiagnostic> = {};
 
     try {
@@ -354,7 +380,7 @@ export function CollectionProvider({ children }: { children: React.ReactNode }) 
               if (Array.isArray(storeData)) {
                 await setStoreValueForActiveAccount(store, task.storeKey, storeData);
               } else if (typeof storeData === "object" && storeData !== null) {
-                await setStoreValueForActiveAccount(store, task.storeKey, { ...storeData, syncedAt });
+                await setStoreValueForActiveAccount(store, task.storeKey, { ...storeData, syncedAt, syncedAtIso });
               } else {
                 await setStoreValueForActiveAccount(store, task.storeKey, storeData);
               }
@@ -385,7 +411,7 @@ export function CollectionProvider({ children }: { children: React.ReactNode }) 
                     }));
                     const existing: any[] = (await store!.get("temu_flux_history")) || [];
                     const filtered = existing.filter((s: any) => s.date !== today);
-                    filtered.push({ date: today, syncedAt, items: snapshotItems });
+                    filtered.push({ date: today, syncedAt, syncedAtIso, items: snapshotItems });
                     filtered.sort((a: any, b: any) => a.date.localeCompare(b.date));
                     const trimmed = filtered.slice(-60);
                     await setStoreValueForActiveAccount(store, "temu_flux_history", trimmed);
@@ -395,7 +421,7 @@ export function CollectionProvider({ children }: { children: React.ReactNode }) 
                 }
               }
             } else {
-              await setStoreValueForActiveAccount(store, task.storeKey, { ...data, syncedAt });
+              await setStoreValueForActiveAccount(store, task.storeKey, { ...data, syncedAt, syncedAtIso });
             }
 
             if (isFluxTask) {
@@ -539,15 +565,37 @@ export function CollectionProvider({ children }: { children: React.ReactNode }) 
       try {
         const successTotal = Object.values(diagnosticsTasks).filter((task) => task.status === "success").length;
         const errorTotal = Object.values(diagnosticsTasks).filter((task) => task.status === "error").length;
-        await setStoreValueForActiveAccount(store, COLLECTION_DIAGNOSTICS_KEY, {
+        const diagnostics: CollectionDiagnostics = {
           syncedAt,
+          syncedAtIso,
+          fullSyncedAt: syncedAt,
+          fullSyncedAtIso: syncedAtIso,
           tasks: diagnosticsTasks,
           summary: {
             totalTasks: COLLECT_TASKS.length,
             successCount: successTotal,
             errorCount: errorTotal,
           },
-        });
+        };
+        await setStoreValueForActiveAccount(store, COLLECTION_DIAGNOSTICS_KEY, diagnostics);
+        try {
+          await uploadCurrentCollectionToCloud({
+            tasks: COLLECT_TASKS,
+            diagnostics,
+            collectedAt: syncedAt,
+            collectedAtIso: syncedAtIso,
+          });
+          message.success("采集数据已上传云端");
+        } catch (uploadError: any) {
+          await persistCollectionUploadError(uploadError, syncedAt, syncedAtIso);
+          notification.warning({
+            message: "云端上传失败",
+            description: uploadError?.message || "采集已完成，但上传到 ERP 云端失败，请检查登录状态或网络后重试。",
+            duration: 6,
+            placement: "bottomRight",
+          });
+          console.warn("[CollectionContext] cloud upload failed", uploadError);
+        }
       } catch (error) {
         // 诊断信息持久化失败不阻塞采集主流程
         console.warn("[CollectionContext] persist diagnostics failed", error);
@@ -572,14 +620,19 @@ export function CollectionProvider({ children }: { children: React.ReactNode }) 
       const result = await api.scrapeDashboard();
       const raw = (result as any)?.dashboard || result;
       const data = parseDashboardData(raw);
-      const syncedAt = new Date().toLocaleString("zh-CN");
-      await setStoreValueForActiveAccount(store, "temu_dashboard", { ...data, syncedAt });
+      const syncedAtDate = new Date();
+      const syncedAt = syncedAtDate.toLocaleString("zh-CN");
+      const syncedAtIso = syncedAtDate.toISOString();
+      await setStoreValueForActiveAccount(store, "temu_dashboard", { ...data, syncedAt, syncedAtIso });
       if (store) {
         try {
           const current = normalizeCollectionDiagnostics(await store.get(COLLECTION_DIAGNOSTICS_KEY));
+          const fullCollectionMarkers = getFullCollectionMarkers(current);
           await setStoreValueForActiveAccount(store, COLLECTION_DIAGNOSTICS_KEY, {
             ...current,
+            ...fullCollectionMarkers,
             syncedAt,
+            syncedAtIso,
             tasks: {
               ...current.tasks,
               dashboard: {
@@ -626,10 +679,13 @@ export function CollectionProvider({ children }: { children: React.ReactNode }) 
       message.success("仪表盘数据同步成功");
     } catch (error: any) {
       const detail = error?.message?.substring(0, 50) || "同步失败";
-      const updatedAt = new Date().toLocaleString("zh-CN");
+      const updatedAtDate = new Date();
+      const updatedAt = updatedAtDate.toLocaleString("zh-CN");
+      const updatedAtIso = updatedAtDate.toISOString();
       if (store) {
         try {
           const current = normalizeCollectionDiagnostics(await store.get(COLLECTION_DIAGNOSTICS_KEY));
+          const fullCollectionMarkers = getFullCollectionMarkers(current);
           const nextTasks = {
             ...current.tasks,
             dashboard: {
@@ -641,7 +697,9 @@ export function CollectionProvider({ children }: { children: React.ReactNode }) 
           };
           await setStoreValueForActiveAccount(store, COLLECTION_DIAGNOSTICS_KEY, {
             ...current,
+            ...fullCollectionMarkers,
             syncedAt: updatedAt,
+            syncedAtIso: updatedAtIso,
             tasks: nextTasks,
             summary: {
               totalTasks: Math.max(current.summary.totalTasks, COLLECT_TASKS.length),

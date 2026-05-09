@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <title>咕噜噜接口监听器</title>
+    <style>
+      body {
+        width: 420px;
+        margin: 0;
+        padding: 14px;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #172033;
+        background: #f7f8fb;
+      }
+      h1 {
+        margin: 0 0 10px;
+        font-size: 16px;
+      }
+      .toolbar {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 10px;
+      }
+      button {
+        border: 1px solid #d8dde8;
+        border-radius: 6px;
+        background: #fff;
+        padding: 6px 10px;
+        cursor: pointer;
+      }
+      button.primary {
+        color: #fff;
+        border-color: #2458d3;
+        background: #2458d3;
+      }
+      .meta {
+        margin-bottom: 10px;
+        color: #5d6678;
+        font-size: 12px;
+      }
+      .list {
+        max-height: 420px;
+        overflow: auto;
+        display: grid;
+        gap: 8px;
+      }
+      .item {
+        padding: 8px;
+        border: 1px solid #e2e6ef;
+        border-radius: 6px;
+        background: #fff;
+      }
+      .url {
+        word-break: break-all;
+        font-size: 12px;
+        color: #193a7a;
+      }
+      .line {
+        margin-top: 4px;
+        color: #5d6678;
+        font-size: 12px;
+      }
+      .empty {
+        padding: 28px 10px;
+        text-align: center;
+        color: #7a8496;
+        background: #fff;
+        border: 1px dashed #d8dde8;
+        border-radius: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>咕噜噜接口监听器</h1>
+    <div class="toolbar">
+      <button class="primary" id="refresh">刷新</button>
+      <button id="export">导出 JSON</button>
+      <button id="clear">清空</button>
+    </div>
+    <div class="meta" id="meta">正在读取...</div>
+    <div class="list" id="list"></div>
+    <script src="popup.js"></script>
+  </body>
+</html>

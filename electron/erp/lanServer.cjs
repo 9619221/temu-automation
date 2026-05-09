@@ -20,6 +20,11 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/permissions/scope/upsert": ["admin", "manager"],
   "/api/master-data/workbench": ["admin", "manager", "operations", "buyer"],
   "/api/master-data/action": ["admin", "manager", "operations", "buyer"],
+  "/api/store-collection/upload": ["admin", "manager", "operations"],
+  "/api/store-collection/list": ["admin", "manager", "operations", "viewer"],
+  "/api/store-collection/detail": ["admin", "manager", "operations", "viewer"],
+  "/stores": ["admin", "manager", "operations", "viewer"],
+  "/store-console": ["admin", "manager", "operations", "viewer"],
   "/1688": ["admin", "manager"],
   "/api/1688/status": ["admin", "manager"],
   "/api/1688/config": ["admin", "manager"],
@@ -606,6 +611,7 @@ function renderShell({ title, subtitle, cards = [], currentPath, user, content =
     ["/", "入口"],
     ["/users", "用户"],
     ["/1688", "1688"],
+    ["/stores", "店铺数据"],
     ["/purchase", "采购"],
     ["/warehouse", "仓库"],
     ["/qc", "QC"],
@@ -779,6 +785,96 @@ function renderShell({ title, subtitle, cards = [], currentPath, user, content =
       color: var(--muted);
       font-size: 14px;
       line-height: 1.7;
+    }
+    .visual-panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      margin-top: 16px;
+      padding: 16px;
+    }
+    .visual-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+    }
+    .visual-title {
+      font-size: 17px;
+      font-weight: 800;
+      margin-bottom: 4px;
+    }
+    .visual-subtitle {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .visual-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+    }
+    .visual-card {
+      border: 1px solid #eef0f5;
+      border-radius: 8px;
+      padding: 12px;
+      background: #fcfcfd;
+      min-height: 96px;
+    }
+    .visual-label {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+    .visual-number {
+      color: var(--text);
+      font-size: 24px;
+      font-weight: 850;
+      line-height: 1.2;
+    }
+    .visual-note {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 6px;
+    }
+    .bar-list {
+      display: grid;
+      gap: 10px;
+    }
+    .bar-row {
+      display: grid;
+      grid-template-columns: minmax(120px, 1fr) 2fr auto;
+      gap: 10px;
+      align-items: center;
+      min-height: 28px;
+    }
+    .bar-label {
+      color: #344054;
+      font-size: 12px;
+      font-weight: 750;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .bar-track {
+      height: 10px;
+      background: #eef0f5;
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .bar-fill {
+      height: 100%;
+      min-width: 3px;
+      border-radius: 999px;
+      background: var(--blue);
+    }
+    .bar-value {
+      color: #475467;
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
     }
     .section {
       background: var(--panel);
@@ -1364,6 +1460,572 @@ function renderTable({ columns, rows, emptyText }) {
   `;
 }
 
+const STORE_COLLECTION_TASK_TYPES = [
+  { key: "deliveryCancel", label: "快递取消" },
+  { key: "returns", label: "退货" },
+  { key: "stock", label: "补货" },
+  { key: "activity", label: "活动" },
+  { key: "violation", label: "违规" },
+];
+
+const NON_STORE_COLLECTION_NAME_PATTERNS = [
+  /^(?:\u5fd8\u8bb0\u5bc6\u7801|\u627e\u56de\u5bc6\u7801|\u767b\u5f55|\u767b\u9304|\u6ce8\u518c|\u9a8c\u8bc1\u7801|Forgot Password|Reset Password|Login|Log In|Sign In|Register|Verification Code)$/i,
+  /^(?:\u521b\u5efa\u65b0\u5e97\u94fa.*|\u5408\u89c4\u767b\u8bb0(?:\u53ca)?\u9a8c\u8bc1.*|0\u5143\u5f00\u5e97|\u514d\u8d39\u5f00\u5e97|\u6211\u8981\u5f00\u5e97|\u7acb\u5373\u5f00\u5e97|\u53bb\u5f00\u5e97)$/u,
+  /^(?:\u9690\u79c1\u653f\u7b56|\u9690\u79c1\u6761\u6b3e|\u7528\u6237\u534f\u8bae|\u670d\u52a1\u6761\u6b3e|\u6cd5\u5f8b\u58f0\u660e|\u5173\u4e8e\u6211\u4eec|\u8054\u7cfb\u6211\u4eec)$/u,
+  /^(0元开店|免费开店|我要开店|去开店|立即开店|未识别店铺|采集快照)$/i,
+  /(开店|入驻|注册|登录|退出|刷新|通知|日志|设置|账号|业务|数据|管理|全部|搜索|验证码)/i,
+  /(店铺控制台|采集|巡店|帮助|教程|下载|升级|活动报名)/i,
+  /(隐私政策|隐私条款|用户协议|服务条款|法律声明|Privacy Policy|Cookie Policy|Terms of Use|Terms & Conditions|Legal Notice|About Us|Contact Us)/i,
+];
+
+function normalizeCollectionStoreNameText(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[>›].*$/, "")
+    .replace(/\s*(?:\u5207\u6362\u5e97\u94fa|\u5e97\u94fa\u5207\u6362|\u5207\u6362)\s*$/u, "")
+    .replace(/\s*(?:Switch Store|Switch)\s*$/i, "")
+    .trim();
+}
+
+function emptyCollectionTaskSummary() {
+  return {
+    total: 0,
+    signalTotal: 0,
+    status: "clear",
+    categories: Object.fromEntries(STORE_COLLECTION_TASK_TYPES.map((definition) => [definition.key, {
+      key: definition.key,
+      label: definition.label,
+      count: 0,
+      signalCount: 0,
+      sourceKeys: [],
+      sourceCounts: {},
+    }])),
+  };
+}
+
+function mergeCollectionTaskSummary(target, source = {}) {
+  const categories = source.categories || {};
+  for (const definition of STORE_COLLECTION_TASK_TYPES) {
+    const incoming = categories[definition.key];
+    const bucket = target.categories[definition.key];
+    if (!incoming || !bucket) continue;
+    bucket.signalCount += Number(incoming.signalCount || 0);
+    const keys = new Set(bucket.sourceKeys || []);
+    const counts = incoming.sourceCounts || {};
+    if (Object.keys(counts).length) {
+      for (const [sourceKey, count] of Object.entries(counts)) {
+        const textKey = String(sourceKey);
+        keys.add(textKey);
+        bucket.sourceCounts[textKey] = Math.max(Number(bucket.sourceCounts[textKey] || 0), Number(count || 0));
+      }
+    } else {
+      for (const sourceKey of incoming.sourceKeys || []) {
+        const textKey = String(sourceKey);
+        keys.add(textKey);
+        bucket.sourceCounts[textKey] = Math.max(Number(bucket.sourceCounts[textKey] || 0), Number(incoming.count || 0));
+      }
+    }
+    bucket.sourceKeys = Array.from(keys);
+    bucket.count = Object.values(bucket.sourceCounts || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+  }
+  target.total = STORE_COLLECTION_TASK_TYPES.reduce((sum, definition) => (
+    sum + Number(target.categories[definition.key]?.count || 0)
+  ), 0);
+  target.signalTotal = STORE_COLLECTION_TASK_TYPES.reduce((sum, definition) => (
+    sum + Number(target.categories[definition.key]?.signalCount || 0)
+  ), 0);
+  target.status = target.total > 0 ? "todo" : "clear";
+  return target;
+}
+
+function formatStoreCollectionDay(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value || "").slice(0, 10);
+  const shanghaiTime = new Date(date.getTime() + 8 * 60 * 60 * 1000);
+  return shanghaiTime.toISOString().slice(0, 10);
+}
+
+function formatStoreCollectionTime(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    hour12: false,
+  });
+}
+
+function formatStoreCollectionBytes(value) {
+  const bytes = Number(value || 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function isReliableCollectionStoreName(value) {
+  const text = normalizeCollectionStoreNameText(value);
+  if (text.length < 3 || text.length > 80) return false;
+  if (/^temu_ext_[a-f0-9]+$/i.test(text)) return false;
+  if (/^acct[_:-]/i.test(text)) return false;
+  if (/^\+?\d[\d\s*()-]{3,}$/.test(text)) return false;
+  if (/^\d+$/.test(text)) return false;
+  if (NON_STORE_COLLECTION_NAME_PATTERNS.some((pattern) => pattern.test(text))) return false;
+  return /[A-Za-z\u4e00-\u9fff]/.test(text);
+}
+
+function collectionReliableStoreName(value) {
+  const text = normalizeCollectionStoreNameText(value);
+  return isReliableCollectionStoreName(text) ? text : "";
+}
+
+function collectionSkcSummaryMatchesStore(summary, storeName) {
+  const snapshotStoreName = collectionReliableStoreName(storeName);
+  if (!summary || typeof summary !== "object" || !snapshotStoreName) return true;
+  const summaryStoreName = collectionReliableStoreName(summary.storeName || summary.totals?.storeName);
+  if (summaryStoreName && summaryStoreName !== snapshotStoreName) return false;
+  const rowStoreNames = new Set(
+    (Array.isArray(summary.rows) ? summary.rows : [])
+      .map((row) => collectionReliableStoreName(row?.storeName))
+      .filter(Boolean)
+  );
+  return rowStoreNames.size === 0 || rowStoreNames.has(snapshotStoreName);
+}
+
+function shouldShowCollectionSnapshot(snapshot = {}) {
+  if (isReliableCollectionStoreName(snapshot.storeName)) return true;
+  const accountText = normalizeCollectionStoreNameText(snapshot.accountId);
+  return !/^(temu_ext|acct)_/i.test(accountText) && isReliableCollectionStoreName(accountText);
+}
+
+function addCollectionMetric(map, key, patch) {
+  const current = map.get(key) || {};
+  map.set(key, {
+    ...current,
+    ...patch,
+    packets: Number(current.packets || 0) + Number(patch.packets || 0),
+    records: Number(current.records || 0) + Number(patch.records || 0),
+    bytes: Number(current.bytes || 0) + Number(patch.bytes || 0),
+  });
+}
+
+function mergeStoreCollectionSnapshots(snapshots = [], detailsById = new Map()) {
+  const groups = new Map();
+  for (const snapshot of snapshots.filter(shouldShowCollectionSnapshot)) {
+    const day = formatStoreCollectionDay(snapshot.collectedAt || snapshot.uploadedAt || snapshot.createdAt);
+    const snapshotStoreName = collectionReliableStoreName(snapshot.storeName);
+    const key = snapshotStoreName ? `${day}:${snapshotStoreName}` : `${snapshot.accountId || ""}:${day}:${snapshot.storeName || ""}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        accountId: snapshot.accountId || "",
+        storeName: snapshotStoreName || "未识别店铺",
+        ownerName: snapshot.ownerName || "",
+        day,
+        snapshotCount: 0,
+        sourceCount: 0,
+        payloadBytes: 0,
+        firstCollected: snapshot.collectedAt || snapshot.uploadedAt || snapshot.createdAt,
+        lastCollected: snapshot.collectedAt || snapshot.uploadedAt || snapshot.createdAt,
+        taskSummary: emptyCollectionTaskSummary(),
+        skcSummary: null,
+        categories: new Map(),
+        sources: new Map(),
+      });
+    }
+    const group = groups.get(key);
+    if (snapshotStoreName) group.storeName = snapshotStoreName;
+    const collectedAt = snapshot.collectedAt || snapshot.uploadedAt || snapshot.createdAt;
+    group.snapshotCount += 1;
+    group.sourceCount += Number(snapshot.sourceCount || 0);
+    group.payloadBytes += Number(snapshot.payloadBytes || 0);
+    mergeCollectionTaskSummary(group.taskSummary, snapshot.taskSummary);
+    if (snapshot.ownerName && !group.ownerName) group.ownerName = snapshot.ownerName;
+    if (collectedAt && Date.parse(collectedAt) < Date.parse(group.firstCollected || collectedAt)) {
+      group.firstCollected = collectedAt;
+    }
+    if (collectedAt && Date.parse(collectedAt) > Date.parse(group.lastCollected || collectedAt)) {
+      group.lastCollected = collectedAt;
+    }
+
+    const detail = detailsById.get(snapshot.id);
+    const sources = Array.isArray(detail?.sources) ? detail.sources : [];
+    const nextSummary = detail?.skcSummary || snapshot.skcSummary || null;
+    if (nextSummary && typeof nextSummary === "object" && collectionSkcSummaryMatchesStore(nextSummary, group.storeName)) {
+      const currentRows = Number(group.skcSummary?.rows?.length || 0);
+      const nextRows = Number(nextSummary?.rows?.length || 0);
+      if (!group.skcSummary || nextRows > currentRows) {
+        group.skcSummary = nextSummary;
+      }
+    }
+    for (const source of sources) {
+      const category = String(source.category || "接口响应").trim() || "接口响应";
+      const dataKey = String(source.dataKey || source.taskKey || "unknown").trim() || "unknown";
+      const recordCount = Number(source.recordCount || 0);
+      const payloadBytes = Number(source.payloadBytes || 0);
+      addCollectionMetric(group.categories, category, {
+        category,
+        packets: 1,
+        records: recordCount,
+        bytes: payloadBytes,
+      });
+      addCollectionMetric(group.sources, `${category}:${dataKey}`, {
+        storeName: group.storeName,
+        category,
+        dataKey,
+        packets: 1,
+        records: recordCount,
+        bytes: payloadBytes,
+      });
+    }
+  }
+  return Array.from(groups.values()).sort((left, right) => (
+    Date.parse(right.lastCollected || "") - Date.parse(left.lastCollected || "")
+  ));
+}
+
+async function buildStoreCollectionConsoleModel({
+  listStoreCollectionSnapshots,
+  getStoreCollectionSnapshotDetail,
+  user,
+}) {
+  const day = formatStoreCollectionDay(new Date());
+  const snapshots = await listStoreCollectionSnapshots({ latestOnly: false, limit: 500 }, user);
+  const todaySnapshots = (Array.isArray(snapshots) ? snapshots : [])
+    .filter((snapshot) => formatStoreCollectionDay(snapshot.collectedAt || snapshot.uploadedAt || snapshot.createdAt) === day)
+    .filter(shouldShowCollectionSnapshot);
+  const detailPairs = await Promise.all(todaySnapshots.map(async (snapshot) => {
+    try {
+      return [snapshot.id, await getStoreCollectionSnapshotDetail({ id: snapshot.id, includePayload: false }, user)];
+    } catch {
+      return [snapshot.id, { sources: [] }];
+    }
+  }));
+  const detailsById = new Map(detailPairs);
+  const rows = mergeStoreCollectionSnapshots(todaySnapshots, detailsById);
+  const skcRows = rows.flatMap((row) => {
+    const summary = row.skcSummary && typeof row.skcSummary === "object" ? row.skcSummary : null;
+    const summaryRows = Array.isArray(summary?.rows) ? summary.rows : [];
+    const groupStoreName = collectionReliableStoreName(row.storeName);
+    return summaryRows
+      .filter((item) => {
+        const itemStoreName = collectionReliableStoreName(item?.storeName);
+        return !groupStoreName || !itemStoreName || itemStoreName === groupStoreName;
+      })
+      .map((item, index) => {
+      const itemStoreName = collectionReliableStoreName(item?.storeName) || row.storeName;
+      return {
+        ...item,
+        id: `${row.accountId || "account"}:${String(item?.id || item?.skcId || item?.goodsId || item?.spuId || item?.title || index)}`,
+        accountId: row.accountId,
+        storeName: itemStoreName,
+        ownerName: row.ownerName,
+      };
+    });
+  });
+  const skcTotals = skcRows.reduce((sum, item) => ({
+    skcCount: sum.skcCount + 1,
+    taskSkcCount: sum.taskSkcCount + (Array.isArray(item.taskFlags) && item.taskFlags.length > 0 ? 1 : 0),
+    stockSkcCount: sum.stockSkcCount + (Array.isArray(item.taskFlags) && item.taskFlags.includes("补货") ? 1 : 0),
+    violationSkcCount: sum.violationSkcCount + (Array.isArray(item.taskFlags) && item.taskFlags.includes("违规") ? 1 : 0),
+    activitySkcCount: sum.activitySkcCount + (Array.isArray(item.taskFlags) && item.taskFlags.includes("活动") ? 1 : 0),
+    totalSales: sum.totalSales + Number(item.last30DaysSales || item.totalSales || 0),
+    lackQuantity: sum.lackQuantity + Number(item.lackQuantity || 0),
+    adviceQuantity: sum.adviceQuantity + Number(item.adviceQuantity || 0),
+    exposeNum: sum.exposeNum + Number(item.exposeNum || 0),
+    clickNum: sum.clickNum + Number(item.clickNum || 0),
+    payGoodsNum: sum.payGoodsNum + Number(item.payGoodsNum || 0),
+  }), {
+    skcCount: 0,
+    taskSkcCount: 0,
+    stockSkcCount: 0,
+    violationSkcCount: 0,
+    activitySkcCount: 0,
+    totalSales: 0,
+    lackQuantity: 0,
+    adviceQuantity: 0,
+    exposeNum: 0,
+    clickNum: 0,
+    payGoodsNum: 0,
+  });
+  const totals = rows.reduce((sum, row) => ({
+    stores: sum.stores + 1,
+    snapshots: sum.snapshots + row.snapshotCount,
+    sources: sum.sources + row.sourceCount,
+    bytes: sum.bytes + row.payloadBytes,
+    tasks: sum.tasks + Number(row.taskSummary?.total || 0),
+  }), { stores: 0, snapshots: 0, sources: 0, bytes: 0, tasks: 0 });
+  return {
+    day,
+    rows,
+    skcRows,
+    skcTotals,
+    totals,
+    latestCollectedAt: rows[0]?.lastCollected || null,
+  };
+}
+
+function renderCollectionTaskBadges(taskSummary = {}) {
+  const categories = taskSummary.categories || {};
+  const badges = STORE_COLLECTION_TASK_TYPES.map((definition) => {
+    const item = categories[definition.key] || {};
+    const count = Number(item.count || 0);
+    const signalCount = Number(item.signalCount || 0);
+    const className = count > 0 ? "status status-warn" : signalCount > 0 ? "status" : "status";
+    const value = count > 0 ? count : signalCount > 0 ? 0 : "-";
+    return `<span class="${className}">${escapeHtml(definition.label)} ${escapeHtml(value)}</span>`;
+  });
+  return `<div class="actions">${badges.join("")}</div>`;
+}
+
+function renderCollectionDataKey(value) {
+  return escapeHtml(value || "-").replace(/_/g, "_<wbr/>").replace(/\//g, "/<wbr/>");
+}
+
+function collectionTaskTotal(row = {}) {
+  return Number(row.taskSummary?.total || 0);
+}
+
+function collectionTaskCategoryCount(row = {}, key) {
+  return Number(row.taskSummary?.categories?.[key]?.count || 0);
+}
+
+function renderCollectionMetricCard({ label, value, note }) {
+  return `
+    <div class="visual-card">
+      <div class="visual-label">${escapeHtml(label)}</div>
+      <div class="visual-number">${escapeHtml(value)}</div>
+      ${note ? `<div class="visual-note">${escapeHtml(note)}</div>` : ""}
+    </div>
+  `;
+}
+
+function renderCollectionSkcSummaryCard(summary = {}) {
+  return `
+    <div class="visual-card">
+      <div class="visual-label">SKC 摘要</div>
+      <div class="visual-number">${escapeHtml(Number(summary.skcCount || 0))}</div>
+      <div class="visual-note">任务 ${escapeHtml(Number(summary.taskSkcCount || 0))} · 补货 ${escapeHtml(Number(summary.stockSkcCount || 0))} · 违规 ${escapeHtml(Number(summary.violationSkcCount || 0))}</div>
+    </div>
+  `;
+}
+
+function renderCollectionBarList(items = [], { color = "var(--blue)", emptyText = "暂无数据" } = {}) {
+  const max = items.reduce((current, item) => Math.max(current, Number(item.value || 0)), 0);
+  if (!items.length || max <= 0) return `<div class="muted">${escapeHtml(emptyText)}</div>`;
+  return `
+    <div class="bar-list">
+      ${items.map((item) => {
+        const value = Number(item.value || 0);
+        const width = Math.max(2, Math.round((value / max) * 100));
+        return `
+          <div class="bar-row">
+            <div class="bar-label" title="${escapeHtml(item.label || "-")}">${escapeHtml(item.label || "-")}</div>
+            <div class="bar-track"><div class="bar-fill" style="width:${width}%;background:${escapeHtml(item.color || color)};"></div></div>
+            <div class="bar-value">${escapeHtml(item.valueLabel || value)}</div>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function renderStoreCollectionVisualPanel(model = {}, rows = []) {
+  const totals = model.totals || {};
+  const skcTotals = model.skcTotals || {};
+  const completedStores = rows.filter((row) => Number(row.sourceCount || 0) > 0).length;
+  const taskStores = rows.filter((row) => collectionTaskTotal(row) > 0).length;
+  const skcStores = rows.filter((row) => Number(row.skcSummary?.rows?.length || 0) > 0).length;
+  const completion = Number(totals.stores || 0) > 0
+    ? Math.round((completedStores / Number(totals.stores || 1)) * 100)
+    : 0;
+  const taskItems = STORE_COLLECTION_TASK_TYPES.map((definition) => ({
+    label: definition.label,
+    value: rows.reduce((sum, row) => sum + collectionTaskCategoryCount(row, definition.key), 0),
+  }));
+  const storeTaskItems = [...rows]
+    .sort((left, right) => collectionTaskTotal(right) - collectionTaskTotal(left))
+    .slice(0, 8)
+    .map((row) => ({
+      label: row.storeName || "-",
+      value: collectionTaskTotal(row),
+      valueLabel: `${collectionTaskTotal(row)} 个`,
+      color: collectionTaskTotal(row) > 0 ? "#f97316" : "#16a34a",
+    }));
+  const sourceItems = [...rows]
+    .sort((left, right) => Number(right.sourceCount || 0) - Number(left.sourceCount || 0))
+    .slice(0, 8)
+    .map((row) => ({
+      label: row.storeName || "-",
+      value: Number(row.sourceCount || 0),
+      valueLabel: `${Number(row.sourceCount || 0)} 项`,
+      color: "#13c2c2",
+    }));
+  const ownerMap = new Map();
+  for (const row of rows) {
+    const owner = row.ownerName || "未绑定负责人";
+    const current = ownerMap.get(owner) || { label: owner, value: 0, stores: 0 };
+    current.value += collectionTaskTotal(row);
+    current.stores += 1;
+    ownerMap.set(owner, current);
+  }
+  const ownerItems = Array.from(ownerMap.values())
+    .sort((left, right) => Number(right.value || 0) - Number(left.value || 0))
+    .map((item) => ({
+      label: item.label,
+      value: item.value,
+      valueLabel: `${item.value} 个 / ${item.stores} 店`,
+      color: "#722ed1",
+    }));
+  const skcStoreItems = [...rows]
+    .sort((left, right) => Number(right.skcSummary?.rows?.length || 0) - Number(left.skcSummary?.rows?.length || 0))
+    .slice(0, 8)
+    .map((row) => ({
+      label: row.storeName || "-",
+      value: Number(row.skcSummary?.rows?.length || 0),
+      valueLabel: `${Number(row.skcSummary?.rows?.length || 0)} 个`,
+      color: "#13c2c2",
+    }));
+  return `
+    <section class="visual-panel">
+      <div class="visual-head">
+        <div>
+          <div class="visual-title">店铺数据可视化面板</div>
+          <div class="visual-subtitle">按今日巡店快照聚合，展示店铺任务、采集覆盖、接口响应和负责人压力。</div>
+        </div>
+        <span class="badge">${escapeHtml(model.day || "-")}</span>
+      </div>
+      <div class="visual-grid">
+        ${renderCollectionMetricCard({ label: "巡店完成率", value: `${completion}%`, note: `${completedStores}/${totals.stores || 0} 家已有数据` })}
+        ${renderCollectionMetricCard({ label: "待处理任务", value: totals.tasks || 0, note: `${taskStores} 家店铺有任务` })}
+        ${renderCollectionMetricCard({ label: "接口响应", value: totals.sources || 0, note: `${totals.snapshots || 0} 个采集包` })}
+        ${renderCollectionMetricCard({ label: "云端数据包", value: formatStoreCollectionBytes(totals.bytes || 0), note: model.latestCollectedAt ? `最新 ${formatStoreCollectionTime(model.latestCollectedAt)}` : "等待采集" })}
+        ${renderCollectionMetricCard({ label: "SKC 覆盖店铺", value: skcStores, note: `${skcTotals.skcCount || 0} 个 SKC` })}
+        ${renderCollectionSkcSummaryCard(skcTotals)}
+      </div>
+      <div class="visual-grid" style="margin-top:12px;">
+        <div class="visual-card">
+          <div class="visual-label">任务类型分布</div>
+          ${renderCollectionBarList(taskItems, { color: "#1677ff", emptyText: "暂无任务" })}
+        </div>
+        <div class="visual-card">
+          <div class="visual-label">店铺任务排行</div>
+          ${renderCollectionBarList(storeTaskItems, { color: "#f97316", emptyText: "暂无任务" })}
+        </div>
+        <div class="visual-card">
+          <div class="visual-label">店铺采集数据量</div>
+          ${renderCollectionBarList(sourceItems, { color: "#13c2c2", emptyText: "暂无接口响应" })}
+        </div>
+        <div class="visual-card">
+          <div class="visual-label">负责人任务分布</div>
+          ${renderCollectionBarList(ownerItems, { color: "#722ed1", emptyText: "暂无负责人数据" })}
+        </div>
+        <div class="visual-card">
+          <div class="visual-label">店铺 SKC 排行</div>
+          ${renderCollectionBarList(skcStoreItems, { color: "#13c2c2", emptyText: "暂无 SKC 摘要" })}
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderStoreCollectionConsole(model = {}) {
+  const rows = Array.isArray(model.rows) ? model.rows : [];
+  const sourceRows = rows.flatMap((row) => Array.from(row.sources.values()))
+    .sort((left, right) => Number(right.packets || 0) - Number(left.packets || 0))
+    .slice(0, 120);
+  const skcRows = (Array.isArray(model.skcRows) ? [...model.skcRows] : [])
+    .sort((left, right) => (
+      Number(Array.isArray(right.taskFlags) && right.taskFlags.length > 0) - Number(Array.isArray(left.taskFlags) && left.taskFlags.length > 0)
+      || Number(right.lackQuantity || 0) - Number(left.lackQuantity || 0)
+      || Number(right.last30DaysSales || right.totalSales || 0) - Number(left.last30DaysSales || left.totalSales || 0)
+    ))
+    .slice(0, 200);
+  const storeTable = renderTable({
+    rows,
+    emptyText: "今天还没有采集到店铺数据。请保持 Temu 后台窗口打开，并确认 Chrome 扩展已启用。",
+    columns: [
+      {
+        title: "店铺",
+        render: (row) => `
+          <div class="primary-text">${escapeHtml(row.storeName || "-")}</div>
+          <div class="muted">${escapeHtml(row.accountId || "-")}</div>
+        `,
+      },
+      {
+        title: "负责人",
+        render: (row) => escapeHtml(row.ownerName || "未绑定"),
+      },
+      {
+        title: "今日采集",
+        render: (row) => `
+          <span class="status status-ok">${escapeHtml(row.snapshotCount)} 包</span>
+          <div class="muted">${escapeHtml(row.sourceCount)} 项数据 · ${escapeHtml(formatStoreCollectionBytes(row.payloadBytes))}</div>
+        `,
+      },
+      {
+        title: "任务分类",
+        render: (row) => renderCollectionTaskBadges(row.taskSummary),
+      },
+      {
+        title: "最近采集",
+        render: (row) => escapeHtml(formatStoreCollectionTime(row.lastCollected)),
+      },
+      {
+        title: "状态",
+        render: (row) => Number(row.taskSummary?.total || 0) > 0
+          ? `<span class="status status-warn">有任务</span>`
+          : row.sourceCount > 0
+          ? `<span class="status status-ok">已采集</span>`
+          : `<span class="status status-warn">待采集</span>`,
+      },
+    ],
+  });
+  const sourceTable = renderTable({
+    rows: sourceRows,
+    emptyText: "暂无接口明细。",
+    columns: [
+      { title: "店铺", render: (row) => escapeHtml(row.storeName || "-") },
+      { title: "分类", render: (row) => `<span class="status">${escapeHtml(row.category || "-")}</span>` },
+      { title: "接口 / 数据", render: (row) => `<code>${renderCollectionDataKey(row.dataKey)}</code>` },
+      { title: "包数", render: (row) => escapeHtml(row.packets || 0) },
+      { title: "记录数", render: (row) => escapeHtml(row.records || 0) },
+    ],
+  });
+  const skcTable = renderTable({
+    rows: skcRows,
+    emptyText: "暂无 SKC 摘要。",
+    columns: [
+      { title: "店铺", render: (row) => escapeHtml(row.storeName || "-") },
+      { title: "负责人", render: (row) => escapeHtml(row.ownerName || "未绑定") },
+      { title: "SKC", render: (row) => escapeHtml(row.skcId || row.goodsId || row.spuId || row.title || "-") },
+      { title: "任务", render: (row) => Array.isArray(row.taskFlags) ? row.taskFlags.map((flag) => `<span class="status">${escapeHtml(flag)}</span>`).join("") : "-" },
+      { title: "销量", render: (row) => escapeHtml(Number(row.last30DaysSales || row.totalSales || 0)) },
+      { title: "缺货", render: (row) => escapeHtml(Number(row.lackQuantity || 0)) },
+      { title: "建议补货", render: (row) => escapeHtml(Number(row.adviceQuantity || 0)) },
+    ],
+  });
+  return `
+    ${renderStoreCollectionVisualPanel(model, rows)}
+    ${renderSection({
+      title: "今日店铺数据",
+      subtitle: `${model.day || "-"} 累计 ${model.totals?.stores || 0} 个店铺，${model.totals?.snapshots || 0} 个采集包，${model.totals?.sources || 0} 项数据，${model.totals?.tasks || 0} 个待处理任务。`,
+      badge: model.latestCollectedAt ? `最近 ${formatStoreCollectionTime(model.latestCollectedAt)}` : "等待采集",
+      table: storeTable,
+    })}
+    ${renderSection({
+      title: "接口明细",
+      subtitle: "按店铺和接口汇总，后面会用这些数据生成快递取消、退货、补货、活动、违规等运营任务。",
+      table: sourceTable,
+    })}
+    ${renderSection({
+      title: "SKC 摘要",
+      subtitle: "云端保存的 SKC 汇总，支持按店铺和 SKC 直接查看补货、违规、活动和销量信号。",
+      table: skcTable,
+    })}
+  `;
+}
+
 function renderKeyValueSelectOptions(options, selected) {
   return options.map(([value, label]) => `
     <option value="${escapeHtml(value)}" ${value === selected ? "selected" : ""}>${escapeHtml(label)}</option>
@@ -1753,7 +2415,21 @@ function renderQuoteFeedbackForm(row, model = {}, user = {}) {
 
 function findPurchaseOrderForRequest(model = {}, prId) {
   const purchaseOrders = Array.isArray(model.purchaseOrders) ? model.purchaseOrders : [];
-  return purchaseOrders.find((item) => item.prId === prId || item.pr_id === prId) || null;
+  const directMatch = purchaseOrders.find((item) => (
+    item.prId === prId
+    || item.pr_id === prId
+    || item.selectedCandidatePrId === prId
+    || item.selected_candidate_pr_id === prId
+  ));
+  if (directMatch) return directMatch;
+  const purchaseRequests = Array.isArray(model.purchaseRequests) ? model.purchaseRequests : [];
+  const request = purchaseRequests.find((item) => item.id === prId);
+  if (!request?.skuId || !request?.accountId) return null;
+  return purchaseOrders.find((item) => (
+    item.accountId === request.accountId
+    && item.skuIds
+    && String(item.skuIds).split(",").map((text) => text.trim()).filter(Boolean).includes(request.skuId)
+  )) || null;
 }
 
 function renderGeneratePoForm(row, user = {}, model = {}) {
@@ -2617,6 +3293,13 @@ function createRequestHandler(options = {}) {
   const deleteSku = options.deleteSku || (() => {
     throw new Error("SKU delete handler is not available");
   });
+  const uploadStoreCollectionSnapshot = options.uploadStoreCollectionSnapshot || (() => {
+    throw new Error("Store collection upload handler is not available");
+  });
+  const listStoreCollectionSnapshots = options.listStoreCollectionSnapshots || (() => []);
+  const getStoreCollectionSnapshotDetail = options.getStoreCollectionSnapshotDetail || (() => {
+    throw new Error("Store collection detail handler is not available");
+  });
   const get1688AuthStatus = options.get1688AuthStatus || (() => ({
     configured: false,
     authorized: false,
@@ -2674,6 +3357,9 @@ function createRequestHandler(options = {}) {
       listSkus,
       createSku,
       deleteSku,
+      uploadStoreCollectionSnapshot,
+      listStoreCollectionSnapshots,
+      getStoreCollectionSnapshotDetail,
       get1688AuthStatus,
       upsert1688AuthConfig,
       save1688ManualToken,
@@ -2681,6 +3367,7 @@ function createRequestHandler(options = {}) {
       complete1688OAuth,
       refresh1688AccessToken,
       receive1688Message,
+      list1688PurchaseAccounts,
       validateSessionUser,
       verifyLogin,
     }).catch((error) => {
@@ -3369,6 +4056,9 @@ async function handleRequest({
   listSkus,
   createSku,
   deleteSku,
+  uploadStoreCollectionSnapshot,
+  listStoreCollectionSnapshots,
+  getStoreCollectionSnapshotDetail,
   get1688AuthStatus,
   upsert1688AuthConfig,
   save1688ManualToken,
@@ -3376,6 +4066,7 @@ async function handleRequest({
   complete1688OAuth,
   refresh1688AccessToken,
   receive1688Message,
+  list1688PurchaseAccounts,
   validateSessionUser,
   verifyLogin,
 }) {
@@ -3574,6 +4265,38 @@ async function handleRequest({
         createSupplier,
         createSku,
         deleteSku,
+      });
+      return;
+    }
+
+    if (pathname === "/api/store-collection/upload") {
+      if (req.method !== "POST") {
+        writeJson(res, 405, { ok: false, error: "Method not allowed" });
+        return;
+      }
+      const payload = await readLoginPayload(req, 128 * 1024 * 1024);
+      const snapshot = await uploadStoreCollectionSnapshot(payload, session.user);
+      writeJson(res, 200, {
+        ok: true,
+        snapshot,
+      });
+      return;
+    }
+
+    if (pathname === "/api/store-collection/list") {
+      const payload = await readOptionalPayload(req, 128 * 1024);
+      writeJson(res, 200, {
+        ok: true,
+        snapshots: await listStoreCollectionSnapshots(payload, session.user),
+      });
+      return;
+    }
+
+    if (pathname === "/api/store-collection/detail") {
+      const payload = await readOptionalPayload(req, 256 * 1024);
+      writeJson(res, 200, {
+        ok: true,
+        snapshot: await getStoreCollectionSnapshotDetail(payload, session.user),
       });
       return;
     }
@@ -3786,6 +4509,32 @@ async function handleRequest({
         currentPath: pathname,
         user: session.user,
         content: renderUserManagement(users, session.user),
+      }));
+      return;
+    }
+
+    if (pathname === "/stores" || pathname === "/store-console") {
+      const model = await buildStoreCollectionConsoleModel({
+        listStoreCollectionSnapshots,
+        getStoreCollectionSnapshotDetail,
+        user: session.user,
+      });
+      writeHtml(res, renderShell({
+        title: "店铺数据",
+        subtitle: "每天早上巡店采集到的接口响应会按店铺聚合到这里，先看数据，再生成运营任务。",
+        cards: [
+          {
+            title: "今日采集",
+            body: `<strong>${escapeHtml(model.totals.stores)}</strong> 个店铺，<strong>${escapeHtml(model.totals.snapshots)}</strong> 个采集包，<strong>${escapeHtml(model.totals.sources)}</strong> 项数据，<strong>${escapeHtml(model.totals.tasks)}</strong> 个待处理任务。`,
+          },
+          {
+            title: "最新时间",
+            body: escapeHtml(model.latestCollectedAt ? formatStoreCollectionTime(model.latestCollectedAt) : "等待采集"),
+          },
+        ],
+        currentPath: "/stores",
+        user: session.user,
+        content: renderStoreCollectionConsole(model),
       }));
       return;
     }

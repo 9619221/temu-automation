@@ -35,6 +35,7 @@ const ROUTE_ROLES: Record<string, string[]> = {
   "/warehouse-center": ["admin", "manager", "warehouse"],
   "/qc-outbound": ["admin", "manager", "operations", "warehouse"],
   "/work-items": ["admin", "manager", "operations", "buyer", "finance", "warehouse", "viewer"],
+  "/store-console": ["admin", "manager", "operations", "viewer"],
   "/shop": ["admin", "manager", "operations", "viewer"],
   "/products": ["admin", "manager", "operations", "viewer"],
   "/create-product": ["admin", "manager", "operations"],

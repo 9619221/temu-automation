@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Temu 巡店采集挂机页</title>
+  <style>
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+    }
+    body {
+      display: grid;
+      place-items: center;
+      font-family: Arial, "Microsoft YaHei", sans-serif;
+      color: #153044;
+      background: #f3f6fa;
+    }
+    .wrap {
+      text-align: center;
+    }
+    .screen {
+      width: 400px;
+      height: 160px;
+      border-radius: 16px;
+      background:
+        linear-gradient(90deg, rgba(42, 67, 92, 0.25) 1px, transparent 1px),
+        #0d1820;
+      background-size: 18px 18px;
+      box-shadow: 0 20px 70px rgba(15, 35, 54, 0.12);
+      overflow: hidden;
+      position: relative;
+      margin: 0 auto 28px;
+    }
+    .stream {
+      position: absolute;
+      inset: 0;
+      background-image:
+        linear-gradient(180deg, rgba(77, 184, 255, 0), rgba(77, 184, 255, 0.38), rgba(77, 184, 255, 0));
+      opacity: 0.55;
+      transform: translateY(-70%);
+      animation: scan 2.8s linear infinite;
+    }
+    @keyframes scan {
+      to {
+        transform: translateY(70%);
+      }
+    }
+    h1 {
+      margin: 0 0 18px;
+      font-size: 30px;
+      font-weight: 700;
+    }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: #3477a8;
+      font-size: 15px;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #2f8bcb;
+      box-shadow: 0 0 0 6px rgba(47, 139, 203, 0.12);
+    }
+    .meta {
+      margin-top: 18px;
+      color: #60758a;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <div class="screen"><div class="stream"></div></div>
+    <h1>Temu 巡店采集运行中</h1>
+    <div class="status"><span class="dot"></span><span id="statusText">正在待命 · 每天 09:00 自动采集</span></div>
+    <div class="meta" id="metaText">读取状态中...</div>
+  </main>
+  <script src="keepalive.js"></script>
+</body>
+</html>

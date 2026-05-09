@@ -257,6 +257,15 @@ interface ErpStatus {
   dbPath: string | null;
   backupPath?: string | null;
   migrations: Array<{ key: string; status: "success" | "skipped" | "failed" | string }>;
+  extensionBridge?: {
+    running?: boolean;
+    host?: string;
+    port?: number;
+    url?: string;
+    error?: string;
+    startedAt?: string;
+    stoppedAt?: string;
+  } | null;
   error?: { name?: string; code?: string | null; message: string } | null;
 }
 
@@ -298,6 +307,89 @@ interface ErpListParams {
   accountId?: string;
   limit?: number;
   offset?: number;
+}
+
+interface ErpStoreCollectionSourceUpload {
+  dataKey: string;
+  taskKey?: string;
+  label?: string;
+  category?: string;
+  recordCount?: number;
+  payloadBytes?: number;
+  payload: any;
+}
+
+interface ErpStoreCollectionTaskBucket {
+  key: string;
+  label: string;
+  count: number;
+  signalCount?: number;
+  sourceKeys?: string[];
+  sourceCounts?: Record<string, number>;
+}
+
+interface ErpStoreCollectionTaskSummary {
+  total: number;
+  signalTotal?: number;
+  status?: "clear" | "todo";
+  categories?: Record<string, ErpStoreCollectionTaskBucket>;
+}
+
+interface ErpStoreCollectionSkcSummary {
+  version?: number;
+  accountId?: string;
+  storeName?: string;
+  ownerName?: string | null;
+  generatedAt?: string;
+  sourceKeys?: string[];
+  totals?: Record<string, any>;
+  rows?: Array<Record<string, any>>;
+}
+
+interface ErpStoreCollectionUploadPayload {
+  accountId: string;
+  storeName?: string | null;
+  ownerName?: string | null;
+  collectedAt?: string;
+  collectedAtIso?: string;
+  clientSnapshotId?: string;
+  diagnostics?: Record<string, any>;
+  summary?: Record<string, any>;
+  manifest?: Record<string, any>;
+  sources: ErpStoreCollectionSourceUpload[];
+}
+
+interface ErpStoreCollectionSnapshot {
+  id: string;
+  companyId?: string;
+  accountId: string;
+  storeName?: string | null;
+  ownerName?: string | null;
+  clientUserId?: string | null;
+  clientUserName?: string | null;
+  clientSnapshotId?: string;
+  collectedAt: string;
+  uploadedAt: string;
+  diagnostics?: Record<string, any>;
+  summary?: Record<string, any>;
+  manifest?: Record<string, any>;
+  payloadBytes?: number;
+  sourceCount?: number;
+  taskSummary?: ErpStoreCollectionTaskSummary;
+  skcSummary?: ErpStoreCollectionSkcSummary;
+  status?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  sources?: Array<{
+    id: string;
+    dataKey: string;
+    taskKey?: string | null;
+    label?: string | null;
+    category?: string | null;
+    recordCount?: number;
+    payloadBytes?: number;
+    payload?: any;
+  }>;
 }
 
 interface ErpWorkflowTransitionPayload {
@@ -380,6 +472,7 @@ interface ErpAPI {
     upsert: (payload: {
       id?: string;
       name: string;
+      ownerName?: string;
       phone?: string;
       status?: string;
       source?: string;
@@ -426,6 +519,11 @@ interface ErpAPI {
       status?: string;
     }) => Promise<any>;
     delete: (payload: { id?: string; skuId?: string }) => Promise<any>;
+  };
+  storeCollection: {
+    upload: (payload: ErpStoreCollectionUploadPayload) => Promise<ErpStoreCollectionSnapshot>;
+    list: (params?: ErpListParams & { latestOnly?: boolean }) => Promise<ErpStoreCollectionSnapshot[]>;
+    detail: (params: { id?: string; snapshotId?: string; includePayload?: boolean }) => Promise<ErpStoreCollectionSnapshot | null>;
   };
   purchase: {
     workbench: (params?: ErpListParams, options?: { timeoutMs?: number }) => Promise<any>;

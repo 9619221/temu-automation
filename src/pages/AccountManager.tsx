@@ -31,6 +31,7 @@ import {
   ShoppingOutlined,
   DatabaseOutlined,
   SyncOutlined,
+  UserOutlined,
   WarningOutlined,
   ThunderboltOutlined,
   DashboardOutlined,
@@ -63,6 +64,7 @@ const TEMU_ORANGE = "#e55b00";
 interface Account {
   id: string;
   name: string;
+  ownerName?: string;
   phone: string;
   password: string;
   status: "online" | "offline" | "logging_in" | "error";
@@ -149,9 +151,12 @@ export default function AccountManager() {
   const [passwordModalOpen, setPasswordModalOpen] = useState(false);
   const [passwordModalAccountId, setPasswordModalAccountId] = useState<string | null>(null);
   const [passwordModalAutoLogin, setPasswordModalAutoLogin] = useState(false);
+  const [editModalOpen, setEditModalOpen] = useState(false);
+  const [editModalAccountId, setEditModalAccountId] = useState<string | null>(null);
   const [accountStats, setAccountStats] = useState<Record<string, AccountStats>>({});
   const [form] = Form.useForm();
   const [passwordForm] = Form.useForm();
+  const [editForm] = Form.useForm();
   const navigate = useNavigate();
 
   const api = window.electronAPI?.automation;
@@ -315,6 +320,51 @@ export default function AccountManager() {
     passwordForm.resetFields();
   };
 
+  const closeEditModal = () => {
+    setEditModalOpen(false);
+    setEditModalAccountId(null);
+    editForm.resetFields();
+  };
+
+  const openEditModal = (account: Account) => {
+    setEditModalAccountId(account.id);
+    editForm.resetFields();
+    editForm.setFieldsValue({
+      name: account.name,
+      ownerName: account.ownerName || "",
+      phone: account.phone,
+    });
+    setEditModalOpen(true);
+  };
+
+  const handleSaveAccountInfo = async () => {
+    try {
+      const values = await editForm.validateFields();
+      const accountId = editModalAccountId;
+      if (!accountId) return;
+      const nextAccounts = accounts.map((account) => (
+        account.id === accountId
+          ? {
+            ...account,
+            name: values.name,
+            ownerName: values.ownerName,
+            phone: values.phone,
+          }
+          : account
+      ));
+      setAccounts(nextAccounts);
+      setAccountsDirty(true);
+      if (store) await store.set(STORAGE_KEY, nextAccounts);
+      if (activeAccountId === accountId) {
+        emitActiveAccountChanged(accountId);
+      }
+      closeEditModal();
+      message.success("店铺信息已保存");
+    } catch (error) {
+      console.warn("[AccountManager] edit account validation failed", error);
+    }
+  };
+
   const updateAccountPassword = (accountId: string, password: string) => {
     let updatedAccount: Account | null = null;
     setAccounts((prev) =>
@@ -339,6 +389,7 @@ export default function AccountManager() {
       const newAccount: Account = {
         id: `acc_${Date.now()}`,
         name: values.name,
+        ownerName: values.ownerName,
         phone: values.phone,
         password: values.password,
         status: "offline",
@@ -669,6 +720,11 @@ export default function AccountManager() {
               />
               <Text type="secondary" style={{ fontSize: 11 }}>{status.text}</Text>
             </Space>
+            {account.ownerName ? (
+              <div style={{ marginTop: 2 }}>
+                <Text type="secondary" style={{ fontSize: 11 }}>负责人：{account.ownerName}</Text>
+              </div>
+            ) : null}
           </div>
         </div>
       </div>
@@ -751,6 +807,10 @@ export default function AccountManager() {
                 </div>
                 <Space size={16} style={{ marginTop: 8 }}>
                   <Space size={4}>
+                    <UserOutlined style={{ color: "#bbb", fontSize: 13 }} />
+                    <Text type="secondary">负责人：{selectedAccount.ownerName || "-"}</Text>
+                  </Space>
+                  <Space size={4}>
                     <PhoneOutlined style={{ color: "#bbb", fontSize: 13 }} />
                     <Text type="secondary">{maskPhone(selectedAccount.phone)}</Text>
                   </Space>
@@ -789,6 +849,13 @@ export default function AccountManager() {
                   {"\u5207\u6362\u6570\u636e\u89c6\u56fe"}
                 </Button>
               )}
+              <Button
+                icon={<UserOutlined />}
+                onClick={() => openEditModal(selectedAccount)}
+                style={{ borderRadius: 10 }}
+              >
+                编辑信息
+              </Button>
               <Button
                 icon={<KeyOutlined />}
                 onClick={() => openPasswordModal(selectedAccount)}
@@ -1217,6 +1284,12 @@ export default function AccountManager() {
             <Input placeholder="例：我的Temu店铺" style={{ borderRadius: 8 }} />
           </Form.Item>
           <Form.Item
+            name="ownerName"
+            label="负责人"
+          >
+            <Input placeholder="例：小王" style={{ borderRadius: 8 }} />
+          </Form.Item>
+          <Form.Item
             name="phone"
             label="手机号"
             rules={[
@@ -1232,6 +1305,42 @@ export default function AccountManager() {
             rules={[{ required: true, message: "请输入登录密码" }]}
           >
             <Input.Password placeholder="请输入密码" style={{ borderRadius: 8 }} />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title="编辑店铺信息"
+        open={editModalOpen}
+        onOk={handleSaveAccountInfo}
+        onCancel={closeEditModal}
+        okText="保存"
+        cancelText="取消"
+        styles={{ body: { paddingTop: 16 } }}
+      >
+        <Form form={editForm} layout="vertical">
+          <Form.Item
+            name="name"
+            label="店铺名称"
+            rules={[{ required: true, message: "请输入店铺名称" }]}
+          >
+            <Input style={{ borderRadius: 8 }} />
+          </Form.Item>
+          <Form.Item
+            name="ownerName"
+            label="负责人"
+          >
+            <Input placeholder="例：小王" style={{ borderRadius: 8 }} />
+          </Form.Item>
+          <Form.Item
+            name="phone"
+            label="手机号"
+            rules={[
+              { required: true, message: "请输入手机号" },
+              { pattern: /^1[3-9]\d{9}$/, message: "请输入有效的手机号" },
+            ]}
+          >
+            <Input maxLength={11} style={{ borderRadius: 8 }} />
           </Form.Item>
         </Form>
       </Modal>

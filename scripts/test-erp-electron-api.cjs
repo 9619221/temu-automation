@@ -447,7 +447,7 @@ async function main() {
     const canTransition = await invoke("erp:workflow:can-transition", {
       entityType: "purchase_request",
       fromStatus: "draft",
-      toStatus: "submitted",
+      toStatus: "buyer_processing",
       action: "submit_pr",
       role: "operations",
     });
@@ -705,11 +705,31 @@ async function main() {
     );
     assert.equal(
       buyerActionBody.workbench.purchaseOrders.find((item) => item.id === "po_draft_ipc").status,
-      "pending_finance_approval",
+      "approved_to_pay",
     );
     assert.ok(
-      buyerActionBody.workbench.paymentQueue.some((item) => item.poId === "po_draft_ipc" && item.paymentApprovalStatus === "pending"),
+      buyerActionBody.workbench.paymentQueue.some((item) => item.poId === "po_draft_ipc" && item.paymentApprovalStatus === "approved"),
     );
+
+    const duplicateSubmitPayment = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "submit_payment_approval",
+        poId: "po_draft_ipc",
+        amount: 630,
+      }),
+    });
+    assert.equal(duplicateSubmitPayment.statusCode, 200);
+    const duplicateSubmitBody = JSON.parse(duplicateSubmitPayment.body).result.result;
+    assert.equal(duplicateSubmitBody.idempotent, true);
+    assert.equal(duplicateSubmitBody.transition.fromStatus, "approved_to_pay");
+    assert.equal(duplicateSubmitBody.transition.toStatus, "approved_to_pay");
+    assert.equal(duplicateSubmitBody.paymentApproval.status, "approved");
 
     const source1688 = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
       method: "POST",
@@ -838,13 +858,16 @@ async function main() {
         areaText: "Xihu",
         address: "No. 1 Test Road",
         postCode: "310000",
+        alibabaAddressId: "remote-address-1688-ipc",
         isDefault: true,
       }),
     });
     assert.equal(address1688.statusCode, 200);
     const address1688Result = JSON.parse(address1688.body).result.result;
     assert.equal(address1688Result.id, "addr_1688_ipc");
+    assert.equal(address1688Result.addressId, "remote-address-1688-ipc");
     assert.equal(address1688Result.addressParam.fullName, "Receiver");
+    assert.equal(address1688Result.addressParam.addressId, undefined);
 
     const po1688 = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
       method: "POST",
@@ -869,6 +892,225 @@ async function main() {
     const mappedSku = JSON.parse(po1688.body).result.workbench.skuOptions.find((item) => item.id === sku.id);
     assert.equal(mappedSku.procurementSourceCount, 1);
     assert.equal(mappedSku.primary1688Source.externalOfferId, "1688-offer-ipc");
+
+    const duplicatePo1688 = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "generate_po",
+        prId: "pr_ipc",
+        candidateId: source1688CandidateId,
+        poId: "po_1688_preview_ipc",
+        poNo: "PO-1688-PREVIEW",
+        qty: 60,
+      }),
+    });
+    assert.equal(duplicatePo1688.statusCode, 200);
+    const duplicatePo1688Result = JSON.parse(duplicatePo1688.body).result.result;
+    assert.equal(duplicatePo1688Result.alreadyGenerated, true);
+    assert.equal(duplicatePo1688Result.purchaseOrder.id, "po_1688_preview_ipc");
+    assert.equal(duplicatePo1688Result.purchaseOrder.prId, "pr_ipc");
+    assert.equal(duplicatePo1688Result.purchaseOrder.totalQty, 60);
+
+    const alreadySubmittedPushDb = openErpDatabase({ userDataDir: tempUserData });
+    try {
+      const now = new Date().toISOString();
+      alreadySubmittedPushDb.transaction(() => {
+        alreadySubmittedPushDb.prepare(`
+          INSERT INTO erp_purchase_orders (
+            id, account_id, pr_id, selected_candidate_id, supplier_id, po_no,
+            status, payment_status, expected_delivery_date, total_amount,
+            external_order_status,
+            created_by, created_at, updated_at
+          )
+          VALUES (
+            'po_1688_submitted_ipc', @account_id, 'pr_ipc', @candidate_id, @supplier_id,
+            'PO-1688-SUBMITTED', 'pushed_pending_price', 'unpaid',
+            '2026-05-15', 510, 'submitted', @buyer_id, @now, @now
+          )
+        `).run({
+          account_id: account.id,
+          candidate_id: source1688CandidateId,
+          supplier_id: supplier.id,
+          buyer_id: buyer.id,
+          now,
+        });
+        alreadySubmittedPushDb.prepare(`
+          INSERT INTO erp_purchase_order_lines (
+            id, account_id, po_id, sku_id, qty, unit_cost, expected_qty, received_qty
+          )
+          VALUES (
+            'po_line_1688_submitted_ipc', @account_id, 'po_1688_submitted_ipc',
+            @sku_id, 60, 8.5, 60, 0
+          )
+        `).run({
+          account_id: account.id,
+          sku_id: sku.id,
+        });
+      })();
+    } finally {
+      alreadySubmittedPushDb.close();
+    }
+
+    const validateAlreadySubmittedPush = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "validate_1688_order_push",
+        poId: "po_1688_submitted_ipc",
+      }),
+    });
+    assert.equal(validateAlreadySubmittedPush.statusCode, 200);
+    const validateAlreadySubmittedPushResult = JSON.parse(validateAlreadySubmittedPush.body).result.result;
+    assert.equal(validateAlreadySubmittedPushResult.ready, false);
+    assert.equal(validateAlreadySubmittedPushResult.reason, "already_submitted");
+
+    const duplicatePush1688 = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "push_1688_order",
+        poId: "po_1688_submitted_ipc",
+        mockResponse: {
+          result: {
+            orderId: "should-not-bind",
+          },
+        },
+      }),
+    });
+    assert.equal(duplicatePush1688.statusCode, 400);
+    assert.match(JSON.parse(duplicatePush1688.body).error, /已有 1688 推单记录/);
+    const duplicatePushDb = openErpDatabase({ userDataDir: tempUserData });
+    try {
+      const duplicatePushPo = duplicatePushDb.prepare(`
+        SELECT status, external_order_id, external_order_status
+        FROM erp_purchase_orders
+        WHERE id = ?
+      `).get("po_1688_submitted_ipc");
+      assert.equal(duplicatePushPo.status, "pushed_pending_price");
+      assert.equal(duplicatePushPo.external_order_id, null);
+      assert.equal(duplicatePushPo.external_order_status, "submitted");
+    } finally {
+      duplicatePushDb.close();
+    }
+
+    const unlinkedPoDb = openErpDatabase({ userDataDir: tempUserData });
+    try {
+      const now = new Date().toISOString();
+      unlinkedPoDb.transaction(() => {
+        unlinkedPoDb.prepare(`
+          INSERT INTO erp_purchase_requests (
+            id, account_id, sku_id, requested_by, reason, requested_qty,
+            target_unit_cost, expected_arrival_date, evidence_json, status,
+            created_at, updated_at
+          )
+          VALUES (
+            'pr_unlinked_ipc', @account_id, @sku_id, @requested_by,
+            'unlinked duplicate regression', 38, 2.6, '2026-05-09',
+            '[]', 'converted_to_po', @now, @now
+          )
+        `).run({
+          account_id: account.id,
+          sku_id: sku.id,
+          requested_by: user.id,
+          now,
+        });
+        unlinkedPoDb.prepare(`
+          INSERT INTO erp_sourcing_candidates (
+            id, account_id, pr_id, purchase_source, sourcing_method, supplier_id,
+            supplier_name, product_title, unit_price, moq, lead_days, status,
+            created_by, created_at, updated_at
+          )
+          VALUES (
+            'candidate_unlinked_ipc', @account_id, 'pr_unlinked_ipc',
+            '1688', 'image_search', @supplier_id, @supplier_name,
+            'Unlinked PO Candidate', 2.6, 1, 3, 'selected',
+            @buyer_id, @now, @now
+          )
+        `).run({
+          account_id: account.id,
+          supplier_id: supplier.id,
+          supplier_name: supplier.name,
+          buyer_id: buyer.id,
+          now,
+        });
+        unlinkedPoDb.prepare(`
+          INSERT INTO erp_purchase_orders (
+            id, account_id, pr_id, selected_candidate_id, supplier_id, po_no,
+            status, payment_status, expected_delivery_date, total_amount,
+            created_by, created_at, updated_at
+          )
+          VALUES (
+            'po_unlinked_ipc', @account_id, NULL, 'candidate_unlinked_ipc',
+            @supplier_id, 'PO-UNLINKED-IPC', 'draft', 'unpaid',
+            '2026-05-12', 98.8, @buyer_id, @now, @now
+          )
+        `).run({
+          account_id: account.id,
+          supplier_id: supplier.id,
+          buyer_id: buyer.id,
+          now,
+        });
+        unlinkedPoDb.prepare(`
+          INSERT INTO erp_purchase_order_lines (
+            id, account_id, po_id, sku_id, qty, unit_cost, expected_qty, received_qty
+          )
+          VALUES (
+            'po_line_unlinked_ipc', @account_id, 'po_unlinked_ipc',
+            @sku_id, 38, 2.6, 38, 0
+          )
+        `).run({
+          account_id: account.id,
+          sku_id: sku.id,
+        });
+      })();
+    } finally {
+      unlinkedPoDb.close();
+    }
+
+    const recoveredDuplicatePo = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "generate_po",
+        prId: "pr_unlinked_ipc",
+        candidateId: "candidate_unlinked_ipc",
+        qty: 38,
+      }),
+    });
+    assert.equal(recoveredDuplicatePo.statusCode, 200);
+    const recoveredDuplicatePoBody = JSON.parse(recoveredDuplicatePo.body).result;
+    const recoveredDuplicatePoResult = recoveredDuplicatePoBody.result;
+    assert.equal(recoveredDuplicatePoResult.alreadyGenerated, true);
+    assert.equal(recoveredDuplicatePoResult.purchaseOrder.id, "po_unlinked_ipc");
+    assert.equal(recoveredDuplicatePoResult.purchaseOrder.prId, "pr_unlinked_ipc");
+    assert.equal(recoveredDuplicatePoResult.purchaseOrder.totalQty, 38);
+    assert.equal(
+      recoveredDuplicatePoBody.workbench.purchaseOrders.find((item) => item.id === "po_unlinked_ipc").selectedCandidatePrId,
+      "pr_unlinked_ipc",
+    );
+    const relinkPoDb = openErpDatabase({ userDataDir: tempUserData });
+    try {
+      assert.equal(relinkPoDb.prepare("SELECT pr_id FROM erp_purchase_orders WHERE id = ?").get("po_unlinked_ipc").pr_id, "pr_unlinked_ipc");
+    } finally {
+      relinkPoDb.close();
+    }
 
     const preview1688 = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
       method: "POST",
@@ -1059,6 +1301,26 @@ async function main() {
       "paid",
     );
 
+    const duplicateSubmitPaid = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: financeCookie,
+      },
+      body: JSON.stringify({
+        action: "submit_payment_approval",
+        poId: "po_ipc",
+        amount: 100,
+      }),
+    });
+    assert.equal(duplicateSubmitPaid.statusCode, 200);
+    const duplicateSubmitPaidBody = JSON.parse(duplicateSubmitPaid.body).result.result;
+    assert.equal(duplicateSubmitPaidBody.idempotent, true);
+    assert.equal(duplicateSubmitPaidBody.transition.fromStatus, "paid");
+    assert.equal(duplicateSubmitPaidBody.transition.toStatus, "paid");
+    assert.equal(duplicateSubmitPaidBody.paymentApproval.status, "paid");
+
     const warehousePage = await requestUrl(`${lanStatus.localUrl}/warehouse`, {
       headers: { Cookie: cookie },
     });
@@ -1102,33 +1364,11 @@ async function main() {
     });
     assert.equal(registerArrival.statusCode, 302);
 
-    const confirmCount = await requestUrl(`${lanStatus.localUrl}/api/warehouse/action`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        Cookie: warehouseCookie,
-      },
-      body: new URLSearchParams({
-        action: "confirm_count",
-        receiptId: "inbound_wh_ipc",
-      }).toString(),
+    const warehouseAfterRegister = await requestUrl(`${lanStatus.localUrl}/api/warehouse/workbench`, {
+      headers: { Cookie: warehouseCookie },
     });
-    assert.equal(confirmCount.statusCode, 302);
-
-    const createBatches = await requestUrl(`${lanStatus.localUrl}/api/warehouse/action`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        Cookie: warehouseCookie,
-      },
-      body: JSON.stringify({
-        action: "create_batches",
-        receiptId: "inbound_wh_ipc",
-      }),
-    });
-    assert.equal(createBatches.statusCode, 200);
-    const warehouseAfterBatches = JSON.parse(createBatches.body).result.workbench;
+    assert.equal(warehouseAfterRegister.statusCode, 200);
+    const warehouseAfterBatches = JSON.parse(warehouseAfterRegister.body).workbench;
     assert.equal(
       warehouseAfterBatches.inboundReceipts.find((item) => item.id === "inbound_wh_ipc").status,
       "inbounded_pending_qc",

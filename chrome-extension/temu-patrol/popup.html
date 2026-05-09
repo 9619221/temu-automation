@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Temu 巡店采集助手</title>
+  <style>
+    body {
+      width: 320px;
+      margin: 0;
+      font-family: Arial, "Microsoft YaHei", sans-serif;
+      color: #1f2937;
+      background: #f7f9fc;
+    }
+    main {
+      padding: 14px;
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: 16px;
+    }
+    .panel {
+      border: 1px solid #dde5ef;
+      border-radius: 8px;
+      padding: 10px;
+      background: #fff;
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      margin: 8px 0;
+      font-size: 13px;
+    }
+    .label {
+      color: #64748b;
+    }
+    .value {
+      text-align: right;
+      font-weight: 600;
+    }
+    .actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    button {
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      padding: 8px 10px;
+      background: #fff;
+      color: #1f2937;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    button.primary {
+      border-color: #2563eb;
+      background: #2563eb;
+      color: #fff;
+    }
+    .hint {
+      margin-top: 10px;
+      color: #64748b;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Temu 巡店采集助手</h1>
+    <section class="panel">
+      <div class="row">
+        <span class="label">接口模板</span>
+        <span class="value" id="templateCount">-</span>
+      </div>
+      <div class="row">
+        <span class="label">后台状态</span>
+        <span class="value" id="running">-</span>
+      </div>
+      <div class="row">
+        <span class="label">最近上传</span>
+        <span class="value" id="lastUpload">-</span>
+      </div>
+      <div class="row">
+        <span class="label">成功/失败</span>
+        <span class="value" id="counts">-</span>
+      </div>
+      <div class="actions">
+        <button class="primary" id="collectNow">立即采集</button>
+        <button id="openKeepalive">打开挂机页</button>
+        <button id="refresh">刷新状态</button>
+        <button id="clearTemplates">清空重学</button>
+      </div>
+    </section>
+    <div class="hint">
+      第一次使用先打开 Temu 卖家后台，让扩展学习商品、库存、销量、活动、违规接口；之后可挂着扩展页自动采集。
+    </div>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

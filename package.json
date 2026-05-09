@@ -1,7 +1,7 @@
 {
   "name": "temu-automation",
   "private": true,
-  "version": "0.2.20",
+  "version": "0.2.23",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -49,6 +49,7 @@
     "files": [
       "electron/**/*",
       "automation/**/*",
+      "chrome-extension/**/*",
       "node_modules/**/*",
       "package.json",
       "!src/**/*",

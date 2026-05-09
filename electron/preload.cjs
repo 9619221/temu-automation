@@ -262,6 +262,19 @@ contextBridge.exposeInMainWorld("electronAPI", {
       create: (payload) => ipcRenderer.invoke("erp:sku:create", payload || {}),
       delete: (payload) => ipcRenderer.invoke("erp:sku:delete", payload || {}),
     },
+    storeCollection: {
+      upload: (payload) => invokeWithTimeout(
+        "erp:store-collection:upload",
+        payload || {},
+        300000,
+      ),
+      list: (params) => ipcRenderer.invoke("erp:store-collection:list", params || {}),
+      detail: (params) => invokeWithTimeout(
+        "erp:store-collection:detail",
+        params || {},
+        params?.includePayload ? 300000 : 60000,
+      ),
+    },
     purchase: {
       workbench: (params, options) => invokeWithTimeout(
         "erp:purchase:workbench",

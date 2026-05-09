@@ -28,6 +28,8 @@ import { ACTIVE_ACCOUNT_CHANGED_EVENT, readActiveAccountId } from "../../utils/m
 import { COLLECT_TASKS, useCollection } from "../../contexts/CollectionContext";
 import { useErpAuth } from "../../contexts/ErpAuthContext";
 import { canAccessRoute, roleLabel } from "../../utils/erpRoleAccess";
+import { useToolCollectionRequirement } from "../../hooks/useToolCollectionGate";
+import { isToolCollectionRoute } from "../../utils/toolCollectionGate";
 
 const { Content, Header, Sider } = Layout;
 
@@ -52,6 +54,11 @@ const menuItems = [
     key: "group-data",
     label: "数据",
     children: [{ key: "/collect", icon: <SyncOutlined />, label: "数据采集" }],
+  },
+  {
+    key: "group-store-console",
+    label: "店铺",
+    children: [{ key: "/store-console", icon: <DatabaseOutlined />, label: "店铺控制台" }],
   },
   {
     key: "group-operations",
@@ -95,6 +102,9 @@ export default function AppLayout() {
   const auth = useErpAuth();
   const currentRole = auth.currentUser?.role || "";
   const { collecting, progress, successCount, errorCount, taskStates } = useCollection();
+  const toolCollectionRequirement = useToolCollectionRequirement();
+  const toolCollectionLocked = toolCollectionRequirement.active && !toolCollectionRequirement.allowed;
+  const toolCollectionLockReason = toolCollectionRequirement.reason || "请先完成今天 9:00 后的完整采集";
   const completedCount = successCount + errorCount;
   const canUseCollection = canAccessRoute(currentRole, "/collect");
   const canManageAccounts = canAccessRoute(currentRole, "/accounts");
@@ -104,10 +114,22 @@ export default function AppLayout() {
     menuItems
       .map((group) => ({
         ...group,
-        children: group.children.filter((item) => canAccessRoute(currentRole, item.key)),
+        children: group.children
+          .filter((item) => canAccessRoute(currentRole, item.key))
+          .map((item) => {
+            const requiresCollection = isToolCollectionRoute(item.key);
+            if (!requiresCollection || !toolCollectionLocked) {
+              return item;
+            }
+            return {
+              ...item,
+              disabled: true,
+              title: toolCollectionLockReason,
+            };
+          }),
       }))
       .filter((group) => group.children.length > 0)
-  ), [currentRole]);
+  ), [currentRole, toolCollectionLockReason, toolCollectionLocked]);
 
   const recentErrors = Object.entries(taskStates)
     .filter(([, state]) => state.status === "error")

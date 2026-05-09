@@ -18,6 +18,7 @@ const ADDRESS_WORKBENCH_PARAMS = {
 interface ErpAccountRow {
   id: string;
   name: string;
+  ownerName?: string | null;
   phone?: string | null;
   status?: string;
   source?: string;
@@ -100,6 +101,8 @@ interface SkuFilters {
 }
 
 interface StoreAddressValues {
+  name?: string;
+  ownerName?: string;
   selected1688AddressId?: string;
   alibabaAddressId?: string;
   label: string;
@@ -384,6 +387,7 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
   const canManageSkus = canRole(role, ["admin", "manager", "operations"]);
 
   const [accountForm] = Form.useForm();
+  const [accountInfoForm] = Form.useForm<{ name: string; ownerName?: string; status?: string }>();
   const [storeAddressForm] = Form.useForm<StoreAddressValues>();
   const [supplierForm] = Form.useForm();
   const [skuForm] = Form.useForm();
@@ -398,8 +402,10 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
   const [skuModalOpen, setSkuModalOpen] = useState(false);
   const [accountModalOpen, setAccountModalOpen] = useState(false);
   const [accountCreateModalOpen, setAccountCreateModalOpen] = useState(false);
+  const [accountInfoModalOpen, setAccountInfoModalOpen] = useState(false);
   const [storeAddressModalOpen, setStoreAddressModalOpen] = useState(false);
   const [editingStoreAddressAccount, setEditingStoreAddressAccount] = useState<ErpAccountRow | null>(null);
+  const [editingAccountInfo, setEditingAccountInfo] = useState<ErpAccountRow | null>(null);
   const [skuFilters, setSkuFilters] = useState<SkuFilters>({ keyword: "" });
   const accountOptions = useMemo(
     () => accounts.map((account) => ({ label: account.name || account.id, value: account.id })),
@@ -520,6 +526,17 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
     if (!alibaba1688Addresses.length) void refresh1688Addresses(true);
   };
 
+  const openAccountInfoModal = (row: ErpAccountRow) => {
+    setEditingAccountInfo(row);
+    accountInfoForm.resetFields();
+    accountInfoForm.setFieldsValue({
+      name: row.name,
+      ownerName: row.ownerName || "",
+      status: row.status || "online",
+    });
+    setAccountInfoModalOpen(true);
+  };
+
   const handleCreateAccount = async () => {
     if (!erp) return;
     const values = await accountForm.validateFields() as StoreAddressValues & { name: string; status?: string };
@@ -527,6 +544,7 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
     try {
       const account = await erp.account.upsert({
         name: values.name,
+        ownerName: values.ownerName,
         status: values.status || "online",
         source: "product_master_data",
       });
@@ -537,6 +555,31 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
       await loadAll();
     } catch (error: any) {
       message.error(error?.message || "店铺保存失败");
+    } finally {
+      setSubmitting(null);
+    }
+  };
+
+  const handleSaveAccountInfo = async () => {
+    if (!erp || !editingAccountInfo) return;
+    const values = await accountInfoForm.validateFields();
+    setSubmitting(`account-info:${editingAccountInfo.id}`);
+    try {
+      await erp.account.upsert({
+        id: editingAccountInfo.id,
+        name: values.name,
+        ownerName: values.ownerName,
+        phone: editingAccountInfo.phone || undefined,
+        status: values.status || editingAccountInfo.status || "online",
+        source: editingAccountInfo.source || "product_master_data",
+      });
+      message.success("店铺负责人已保存");
+      setAccountInfoModalOpen(false);
+      setEditingAccountInfo(null);
+      accountInfoForm.resetFields();
+      await loadAll();
+    } catch (error: any) {
+      message.error(error?.message || "店铺信息保存失败");
     } finally {
       setSubmitting(null);
     }
@@ -608,6 +651,7 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
         await erp.account.upsert({
           id: row.id,
           name: row.name,
+          ownerName: row.ownerName || undefined,
           phone: row.phone,
           status: "deleted",
           source: row.source || "product_master_data",
@@ -673,6 +717,7 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
 
   const accountColumns: ColumnsType<ErpAccountRow> = [
     { title: "店铺", dataIndex: "name", key: "name", width: 180, ellipsis: true },
+    { title: "负责人", dataIndex: "ownerName", key: "ownerName", width: 120, ellipsis: true, render: (value) => value || "-" },
     { title: "状态", dataIndex: "status", key: "status", width: 92, render: (value) => <Tag color={statusColor(value)}>{statusLabel(value)}</Tag> },
     {
       title: "1688 地址",
@@ -694,9 +739,19 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
     ...(canManageStoreAddress ? [{
       title: "操作",
       key: "actions",
-      width: 190,
+      width: 250,
       render: (_value: unknown, row: ErpAccountRow) => (
         <Space size={6}>
+          {canManageAccounts ? (
+            <Button
+              size="small"
+              icon={<EditOutlined />}
+              loading={submitting === `account-info:${row.id}`}
+              onClick={() => openAccountInfoModal(row)}
+            >
+              信息
+            </Button>
+          ) : null}
           <Button
             size="small"
             icon={<EditOutlined />}
@@ -828,7 +883,12 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
             <Input placeholder="例如：主店铺" />
           </Form.Item>
         </Col>
-        <Col xs={24} md={14}>
+        <Col xs={24} md={6}>
+          <Form.Item name="ownerName" label="负责人">
+            <Input placeholder="例如：小王" />
+          </Form.Item>
+        </Col>
+        <Col xs={24} md={8}>
           <Form.Item name="selected1688AddressId" label="选择 1688 地址">
             <Select
               allowClear
@@ -1114,6 +1174,37 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
         destroyOnClose
       >
         {renderAccountCreateForm()}
+      </Modal>
+
+      <Modal
+        title={editingAccountInfo ? `编辑店铺：${editingAccountInfo.name}` : "编辑店铺"}
+        open={accountInfoModalOpen}
+        okText="保存"
+        cancelText="取消"
+        confirmLoading={editingAccountInfo ? submitting === `account-info:${editingAccountInfo.id}` : false}
+        onOk={handleSaveAccountInfo}
+        onCancel={() => {
+          setAccountInfoModalOpen(false);
+          setEditingAccountInfo(null);
+        }}
+        destroyOnClose
+      >
+        <Form form={accountInfoForm} layout="vertical">
+          <Form.Item name="name" label="店铺名称" rules={[{ required: true, message: "请输入店铺名称" }]}>
+            <Input />
+          </Form.Item>
+          <Form.Item name="ownerName" label="负责人">
+            <Input placeholder="例如：小王" />
+          </Form.Item>
+          <Form.Item name="status" label="状态">
+            <Select
+              options={[
+                { label: "启用", value: "online" },
+                { label: "停用", value: "blocked" },
+              ]}
+            />
+          </Form.Item>
+        </Form>
       </Modal>
 
       <Modal

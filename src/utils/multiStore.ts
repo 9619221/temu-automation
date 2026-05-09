@@ -7,6 +7,7 @@ export const STORE_VALUES_UPDATED_EVENT = "temu:store-values-updated";
 export interface MultiStoreAccount {
   id: string;
   name: string;
+  ownerName?: string;
   phone?: string;
   password?: string;
   status?: "online" | "offline" | "logging_in" | "error";
@@ -20,11 +21,16 @@ export const ACCOUNT_SCOPED_BASE_KEYS = [
   "temu_products",
   "temu_orders",
   "temu_sales",
+  "temu_raw_salesChart",
   "temu_flux",
   "temu_flux_history",
+  "temu_flux_product_history_cache",
   "temu_raw_goodsData",
   "temu_raw_lifecycle",
+  "temu_raw_yunduOverall",
   "temu_raw_globalPerformance",
+  "temu_raw_yunduActivityList",
+  "temu_raw_yunduQualityMetrics",
   "temu_raw_imageTask",
   "temu_raw_sampleManage",
   "temu_raw_activity",
@@ -87,6 +93,8 @@ export const ACCOUNT_SCOPED_BASE_KEYS = [
   "temu_competitor_keyword_pool",
   "temu_competitor_tracked",
   "temu_competitor_reports",
+  "temu_collection_cloud_upload_status",
+  "temu_skc_summary",
 ] as const;
 
 type StoreLike = {

@@ -15,6 +15,7 @@ const {
   runScheduledOrderSync,
   resetScheduledOrderSyncState,
   runScheduledMessageReprocess,
+  startTemuExtensionBridge,
 } = require("./erp/ipc.cjs");
 
 const MAX_DIAGNOSTIC_LOG_BYTES = 5 * 1024 * 1024;
@@ -155,7 +156,10 @@ const ACCOUNT_SCOPED_STORE_KEYS = new Set([
   "temu_products",
   "temu_orders",
   "temu_sales",
+  "temu_raw_salesChart",
   "temu_flux",
+  "temu_flux_history",
+  "temu_flux_product_history_cache",
   "temu_raw_goodsData",
   "temu_raw_lifecycle",
   "temu_raw_yunduOverall",
@@ -220,6 +224,7 @@ const ACCOUNT_SCOPED_STORE_KEYS = new Set([
   "temu_raw_adsHelp",
   "temu_raw_adsNotification",
   "temu_raw_usRetrieval",
+  "temu_collection_cloud_upload_status",
 ]);
 let autoPricingTaskPromise = null;
 let autoPricingTaskSyncTimer = null;
@@ -3637,8 +3642,10 @@ app.whenReady().then(async () => {
     const applied = (erpInit.migrations || []).filter((item) => item.status === "success").length;
     const skipped = (erpInit.migrations || []).filter((item) => item.status === "skipped").length;
     console.log(`[ERP] SQLite initialized: ${erpInit.dbPath} (applied=${applied}, skipped=${skipped})`);
+    startTemuExtensionBridge();
   } catch (error) {
     console.error("[ERP] SQLite initialization failed:", error?.message || error);
+    startTemuExtensionBridge();
   }
 
   // 启动时先做 scoped 数据 id 迁移，避免账号重建后旧数据孤立
