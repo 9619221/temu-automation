@@ -45,6 +45,7 @@ import {
   ShoppingCartOutlined,
   ShopOutlined,
   StopOutlined,
+  SyncOutlined,
   UploadOutlined,
 } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
@@ -981,6 +982,10 @@ function is1688AclDeniedError(error: any, message: string) {
 
 // 1688 业务错误码 → 用户友好中文。匹配 `errorCode:XXX` 子串即翻译。
 const ALIBABA_1688_BUSINESS_ERROR_HINTS: Array<{ code: string; hint: string }> = [
+  { code: "AddressId invalid", hint: "1688 收货地址 ID 无效，请到「询盘设置」点「同步 1688 地址」后重新选择地址再推单。" },
+  { code: "ADDRESS_ID_INVALID", hint: "1688 收货地址 ID 无效，请到「询盘设置」点「同步 1688 地址」后重新选择地址再推单。" },
+  { code: "ADDRESS_INACTIVE", hint: "该 1688 收货地址已失效（远端可能已被删除），请到「询盘设置」点「同步 1688 地址」后重新选择再推单。" },
+  { code: "ADDRESS_REMOTE_ID_MISSING", hint: "该收货地址还没有 1688 远端 ID，请到「询盘设置」点「同步 1688 地址」拉一份完整数据后重新选择再推单。" },
   { code: "ORDER_NOT_EXIST", hint: "1688 找不到这个订单号；可能已被卖家取消、超时关闭或绑错了账号。建议先在 1688 后台确认订单状态，或在采购单上点「取消1688」后重新推送。" },
   { code: "ORDER_NOT_PAY", hint: "1688 订单不在「待支付」状态；可能已付款或已关闭。" },
   { code: "ORDER_HAS_PAID", hint: "1688 订单已经付款过了。在系统上点「确认付款」推进本地状态。" },
@@ -2097,6 +2102,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       return result;
     } catch (error: any) {
       const errorMessage = purchaseActionErrorMessage(error, payload.action);
+      const rawErrorString = String(error?.message || error || "");
+      const errorCode = String(error?.code || "");
+      const isAddressFailure = (payload.action === "push_1688_order" || payload.action === "preview_1688_order")
+        && (
+          /errorCode:(?:AddressId invalid|ADDRESS_ID_INVALID|ADDRESS_INACTIVE|ADDRESS_REMOTE_ID_MISSING)/i.test(rawErrorString)
+          || /(?:^|[^A-Z_])(?:ADDRESS_INACTIVE|ADDRESS_REMOTE_ID_MISSING|ADDRESS_ID_INVALID)(?:$|[^A-Z_])/.test(rawErrorString)
+          || ["ADDRESS_INACTIVE", "ADDRESS_REMOTE_ID_MISSING", "ADDRESS_ID_INVALID"].includes(errorCode)
+        );
       if (payload.action === "rollback_po_status" && errorMessage.includes("Unsupported purchase action")) {
         message.error("当前主控端还没更新/重启，暂不支持采购单回退");
       } else if (payload.action === "delete_po" && errorMessage.includes("Unsupported purchase action")) {
@@ -2109,6 +2122,22 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           alreadyMissing: true,
           poId: payload.poId,
         };
+      } else if (isAddressFailure) {
+        // 推单/预览撞到 1688 地址相关错误：后台静默 sync 一遍把失效地址打掉，
+        // 错误提示里直接给出恢复指引；下一次推单用户重新选地址即可。
+        message.error(errorMessage || "1688 收货地址无效，请同步 1688 地址后重新选择");
+        void erp.purchase.action({ action: "sync_1688_addresses" })
+          .then(async (syncResult: any) => {
+            const summary = syncResult?.result || syncResult || {};
+            const deactivated = Number(summary.deactivatedCount || 0);
+            if (deactivated > 0) {
+              message.warning(`已自动同步 1688 地址：${deactivated} 条失效地址被清理，请重新选择地址再推单`);
+            } else {
+              message.info("已自动同步 1688 地址，请重新选择地址再推单");
+            }
+            await loadData({ silent: true }).catch(() => {});
+          })
+          .catch(() => {});
       } else {
         message.error(errorMessage || "操作失败");
       }
@@ -2310,6 +2339,28 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       "询盘设置已保存",
     );
     if (result) setPurchaseSettingsOpen(false);
+  };
+
+  const sync1688Addresses = async () => {
+    const result = await runAction("sync-1688-addresses", { action: "sync_1688_addresses" });
+    if (!result) return result;
+    const summary = result?.result || result || {};
+    const added = Number(summary.addedCount || 0);
+    const updated = Number(summary.updatedCount || 0);
+    const deactivated = Number(summary.deactivatedCount || 0);
+    const total = Number(summary.addressCount || 0);
+    if (added || deactivated) {
+      message.success(`1688 地址已同步：新增 ${added}、更新 ${updated}、失效 ${deactivated}（共 ${total} 条）`);
+    } else if (total) {
+      message.info(`1688 地址已是最新（共 ${total} 条）`);
+    } else {
+      message.warning("未拉到 1688 收货地址，请到 1688 后台先维护一条收货地址再同步");
+    }
+    return result;
+  };
+
+  const open1688AddressBackend = () => {
+    window.open("https://work.1688.com/", "_blank", "noopener,noreferrer");
   };
 
   const syncInquiryResults = async () => {
@@ -4647,6 +4698,29 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
             保存后，采购中心里的批量询盘会自动使用这段话术；变量会按当前采购单和候选商品自动替换。
           </Text>
         </Form>
+        <div style={{ borderTop: "1px solid #f0f0f0", marginTop: 16, paddingTop: 16 }}>
+          <Space direction="vertical" size={8} style={{ width: "100%" }}>
+            <Text strong>1688 收货地址</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              地址只能在 1688 后台维护（开放平台未提供创建接口）。在 1688 后台建好后回到这里点「同步 1688 地址」拉回最新数据；已不存在于远端的本地地址会被自动标记为失效。当前本地共 {data.alibaba1688Addresses?.length || 0} 条。
+            </Text>
+            <Space wrap>
+              <Button
+                icon={<SyncOutlined />}
+                loading={actingKey === "sync-1688-addresses"}
+                onClick={sync1688Addresses}
+              >
+                同步 1688 地址
+              </Button>
+              <Button
+                icon={<LinkOutlined />}
+                onClick={open1688AddressBackend}
+              >
+                打开 1688 后台
+              </Button>
+            </Space>
+          </Space>
+        </div>
       </Modal>
 
       <Modal

@@ -7467,12 +7467,15 @@ async function sync1688DeliveryAddressesAction({ db, payload, actor }) {
     params,
   });
   const addresses = normalize1688ReceiveAddressResponse(rawResponse);
+  let addedCount = 0;
+  let updatedCount = 0;
   const saved = addresses.map((address) => {
     const existingId = findExisting1688AddressId(db, {
       companyId,
       accountId,
       alibabaAddressId: address.alibabaAddressId,
     });
+    if (existingId) updatedCount += 1; else addedCount += 1;
     return save1688DeliveryAddressAction({
       db,
       actor,
@@ -7484,11 +7487,43 @@ async function sync1688DeliveryAddressesAction({ db, payload, actor }) {
       },
     });
   });
+  // diff: 远端没回来的本地行打 inactive。
+  // 安全策略：只有当远端确实返回过地址（addresses.length > 0）才做反向标记，避免一次接口失败就把所有本地地址全废掉。
+  // 范围严格限定在「同 (company_id, account_id)」，跨账号互不影响。
+  let deactivatedCount = 0;
+  if (addresses.length > 0 && !payload.skipDeactivate) {
+    const remoteAddressIds = new Set(
+      addresses.map((address) => optionalString(address.alibabaAddressId)).filter(Boolean),
+    );
+    const localActiveRows = db.prepare(`
+      SELECT id, address_id
+      FROM erp_1688_delivery_addresses
+      WHERE company_id = @company_id
+        AND COALESCE(account_id, '') = COALESCE(@account_id, '')
+        AND status = 'active'
+        AND COALESCE(address_id, '') != ''
+    `).all({ company_id: companyId, account_id: accountId || "" });
+    const deactivateStmt = db.prepare(`
+      UPDATE erp_1688_delivery_addresses
+      SET status = 'inactive', updated_at = @updated_at
+      WHERE id = @id
+    `);
+    const now = nowIso();
+    for (const row of localActiveRows) {
+      const remoteId = optionalString(row.address_id);
+      if (!remoteId || remoteAddressIds.has(remoteId)) continue;
+      deactivateStmt.run({ id: row.id, updated_at: now });
+      deactivatedCount += 1;
+    }
+  }
   return {
     apiKey: PROCUREMENT_APIS.RECEIVE_ADDRESS.key,
     query: params,
     addressCount: saved.length,
     addresses: saved,
+    addedCount,
+    updatedCount,
+    deactivatedCount,
     rawResponse,
   };
 }
@@ -8288,6 +8323,22 @@ function resolve1688AddressParam(db, payload = {}, actor = {}, po = {}) {
   const accountId = optionalString(payload.accountId || payload.account_id || po.account_id || po.accountId);
   try {
     const row = get1688DeliveryAddress(db, addressId, companyId, accountId);
+    // 推单前预校验：先在本地拦掉肯定不能成功的请求，错误码与 ALIBABA_1688_BUSINESS_ERROR_HINTS 对齐。
+    const status = optionalString(row.status) || "active";
+    if (status !== "active") {
+      const error = new Error(
+        "errorCode:ADDRESS_INACTIVE 该 1688 收货地址已失效（远端可能已被删除），请到「询盘设置」点「同步 1688 地址」后重新选择再推单。",
+      );
+      error.code = "ADDRESS_INACTIVE";
+      throw error;
+    }
+    if (!optionalString(row.address_id)) {
+      const error = new Error(
+        "errorCode:ADDRESS_REMOTE_ID_MISSING 该收货地址还没有 1688 远端 ID，请到「询盘设置」点「同步 1688 地址」拉一份完整数据后重新选择再推单。",
+      );
+      error.code = "ADDRESS_REMOTE_ID_MISSING";
+      throw error;
+    }
     return build1688AddressParamFromRow(row);
   } catch (error) {
     if (payload.dryRun || payload.mockResponse || payload.mockPreviewResponse) return null;
