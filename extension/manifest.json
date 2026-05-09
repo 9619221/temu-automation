@@ -17,7 +17,9 @@
     "https://seller.kuajingmaihuo.com/*",
     "https://*.pftk.temu.com/*",
     "https://pftk-cn.kuajingmaihuo.com/*",
-    "https://thtk-us.seller.temu.com/*"
+    "https://thtk-us.seller.temu.com/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
   ],
   "background": {
     "service_worker": "web/background/sw.js",
