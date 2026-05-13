@@ -705,7 +705,26 @@ autoUpdater.on("checking-for-update", () => {
 });
 autoUpdater.on("update-available", (info) => {
   broadcastUpdateState({ status: "available", message: `发现新版本 ${info?.version || ""}`, releaseVersion: info?.version });
-  // 不自动下载，等用户手动点击下载按钮
+  // 发现新版本立即弹窗提醒用户，避免依赖 UI 角落标记被忽略；
+  // 用户选「稍后」不持久化跳过——下次启动还会再弹一次。
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    dialog.showMessageBox(mainWindow, {
+      type: "info",
+      title: "发现新版本",
+      message: `新版本 ${info?.version || ""} 已发布`,
+      detail: "现在下载更新？下载完成后会再次提示你重启安装。",
+      buttons: ["稍后", "下载更新"],
+      defaultId: 1,
+      cancelId: 0,
+    }).then(({ response }) => {
+      if (response === 1) {
+        broadcastUpdateState({ status: "downloading", message: "正在下载更新…", progressPercent: 0 });
+        autoUpdater.downloadUpdate().catch((e) => {
+          broadcastUpdateState({ status: "error", message: e?.message || "下载更新失败", progressPercent: null });
+        });
+      }
+    }).catch(() => {});
+  }
 });
 autoUpdater.on("update-not-available", () => {
   broadcastUpdateState({ status: "up-to-date", message: "当前已是最新版本", releaseVersion: null, progressPercent: null });
