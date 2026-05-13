@@ -62,6 +62,12 @@
         "to": "dist"
       }
     ],
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://gh-proxy.com/https://github.com/9619221/temu-automation/releases/latest/download/"
+      }
+    ],
     "win": {
       "target": [
         {
