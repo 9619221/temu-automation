@@ -663,21 +663,38 @@ export async function login(phone, password) {
     await page.goto(TEMU_LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
     await randomDelay(2000, 4000);
 
-    // 切换到账号登录 tab。
+    // 切换到「账号密码登录」tab。Temu 2026-05 改版后默认 tab 是「扫码登录」，
+    // 账号密码 tab 实际文案是「手机号登录」，老版本是「账号登录」，两套都兜底。
     try {
       const accountTabSelectors = [
+        '[class*="tabItem"]:has-text("手机号登录")',
+        '[class*="tabItem"]:has-text("账号登录")',
+        'text=手机号登录',
         'text=账号登录',
+        '[role="tab"]:has-text("手机号登录")',
         '[role="tab"]:has-text("账号登录")',
+        'button:has-text("手机号登录")',
         'button:has-text("账号登录")',
+        'span:has-text("手机号登录")',
         'span:has-text("账号登录")',
       ];
+      let switched = false;
       for (const selector of accountTabSelectors) {
         const accountTab = page.locator(selector).first();
         if (await accountTab.isVisible({ timeout: 1200 }).catch(() => false)) {
           await accountTab.click();
-          await randomDelay(1000, 2000);
+          await randomDelay(800, 1200);
+          switched = true;
           break;
         }
+      }
+      // 切换后等密码登录表单真正渲染出来，避免还停在扫码 tab 上继续走。
+      if (switched) {
+        await page
+          .locator('#usernameId, input[name="usernameId"], input[type="password"]')
+          .first()
+          .waitFor({ state: "visible", timeout: 5000 })
+          .catch(() => {});
       }
     } catch (e) { logSilent("login.tab", e); }
 
