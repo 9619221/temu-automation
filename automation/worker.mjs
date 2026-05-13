@@ -11506,12 +11506,16 @@ async function prepareWorkflowSourceImages(rawCandidates, outputPath, options = 
   let firstDownloaded = null;
   let lastDownloadError = null;
   const acceptedOriginals = [];
+  // 桌面备份用：所有下载成功的候选路径（不经 filter）。Filter 是素材中心上传的逻辑，
+  // 跟"人工换图备份"语义无关，不应该影响桌面备份的张数。
+  const allDownloaded = [];
 
   for (let index = 0; index < candidates.length; index += 1) {
     const candidate = candidates[index];
     const candidatePath = `${tmpBase}_candidate_${index}.jpg`;
     try {
       await materializeWorkflowImageCandidate(candidate, candidatePath);
+      allDownloaded.push({ candidate, path: candidatePath });
       if (!firstDownloaded) firstDownloaded = { candidate, path: candidatePath };
       const filter = await classifyWorkflowOriginalMaterialImage(candidatePath, {
         candidate,
@@ -11546,6 +11550,7 @@ async function prepareWorkflowSourceImages(rawCandidates, outputPath, options = 
       originalUploadEligible: true,
       originalFilter: acceptedOriginals[0].originalFilter,
       originals: acceptedOriginals,
+      allDownloaded,
       rejectedOriginals,
       candidateCount: candidates.length,
     };
@@ -11558,6 +11563,7 @@ async function prepareWorkflowSourceImages(rawCandidates, outputPath, options = 
       sourceImagePath: outputPath,
       originalUploadEligible: false,
       originals: [],
+      allDownloaded,
       originalFilter: {
         uploadEligible: false,
         reasons: ["所有原图候选均为尺寸图/白底图/带数量图或不可用，不上传原图到素材中心"],
@@ -11895,6 +11901,56 @@ function saveWorkflowOriginalMaterialImage(sourceImagePath, outputDir, rowIndex,
     imageUrl: `data:${mimeType};base64,${buffer.toString("base64")}`,
     localPath: outputPath,
   };
+}
+
+// 新上品流程：把每行已下载到的原图额外复制一份到桌面，方便人工核对/二次使用。
+// 目录结构：桌面/新上品原图/{productDraftId}/original.jpg（单图）或 original_N.{ext}（多图）。
+// 取图源优先级：allDownloaded（所有下载成功的候选）→ originals（filter 通过的）→ fallbackPath（兜底首张）。
+// 桌面备份是给人工换图挑素材，不应该被 filter 限制；filter 只服务于素材中心上传决策。
+// 失败时只记日志，不阻塞主流程；同名文件追加时间戳，绝不覆盖。
+function saveWorkflowRowOriginalsToDesktop({ rowNumber, productDraftId, allDownloaded, originals, fallbackPath, taskId }) {
+  const draftIdStr = String(productDraftId || "").trim();
+  if (!draftIdStr) {
+    logWorkflowPack(taskId, `desktop originals skipped row=${rowNumber}: missing productDraftId`);
+    return { saved: 0, dir: "", fallback: false };
+  }
+  const pickPaths = (arr, key) => Array.isArray(arr)
+    ? arr.map((item) => item?.[key]).filter((p) => typeof p === "string" && p && fs.existsSync(p))
+    : [];
+  const downloadedList = pickPaths(allDownloaded, "path");
+  let usingFallback = false;
+  let list = downloadedList;
+  if (list.length === 0) {
+    const acceptedList = pickPaths(originals, "sourceImagePath");
+    if (acceptedList.length > 0) {
+      list = acceptedList;
+    } else if (typeof fallbackPath === "string" && fallbackPath && fs.existsSync(fallbackPath)) {
+      list = [fallbackPath];
+      usingFallback = true;
+    }
+  }
+  if (list.length === 0) return { saved: 0, dir: "", fallback: false };
+  // 行级目录直接用 productDraftId，不再嵌套任务时间戳和商品名。
+  const rowDir = path.join(os.homedir(), "Desktop", "新上品原图", draftIdStr);
+  fs.mkdirSync(rowDir, { recursive: true });
+  let saved = 0;
+  for (let i = 0; i < list.length; i += 1) {
+    const src = list[i];
+    const ext = path.extname(src) || ".jpg";
+    // 单张图用 original.ext，多张时 original_N.ext；冲突追加时间戳，绝不覆盖。
+    const baseName = list.length === 1 ? "original" : `original_${i + 1}`;
+    let target = path.join(rowDir, `${baseName}${ext}`);
+    if (fs.existsSync(target)) {
+      target = path.join(rowDir, `${baseName}_${Date.now()}${ext}`);
+    }
+    try {
+      fs.copyFileSync(src, target);
+      saved += 1;
+    } catch (e) {
+      logWorkflowPack(taskId, `desktop original copy failed row=${rowNumber} src=${src} err=${e?.message || e}`);
+    }
+  }
+  return { saved, dir: rowDir, fallback: usingFallback };
 }
 
 function isInlineWorkflowImageUrl(value) {
@@ -12409,6 +12465,26 @@ async function generateWorkflowPackImages(params = {}) {
             const draftFailureStage = isDraftImageMaterialPendingError(rowResult.message) ? "image_upload" : "draft";
             rowResult.errorCategory = draftResult?.success ? "" : classifyAutoPricingError(draftFailureStage, rowResult.message);
             logWorkflowPack(taskId, `row=${rowNumber} draft ${draftResult?.success ? "ok" : "failed"} ${rowResult.draftId || rowResult.message}`);
+            // 草稿保存成功后，把本行原图复制一份到桌面，目录用 productDraftId 便于将来换图对照。
+            if (draftResult?.success && rowResult.draftId) {
+              try {
+                const desktopSaved = saveWorkflowRowOriginalsToDesktop({
+                  rowNumber,
+                  productDraftId: rowResult.draftId,
+                  allDownloaded: source.allDownloaded,
+                  originals: source.originals,
+                  fallbackPath: source.sourceImagePath,
+                  taskId,
+                });
+                if (desktopSaved.saved > 0) {
+                  logWorkflowPack(taskId, `row=${rowNumber} desktop originals saved=${desktopSaved.saved}${desktopSaved.fallback ? " (fallback)" : ""} dir=${desktopSaved.dir}`);
+                } else {
+                  logWorkflowPack(taskId, `row=${rowNumber} desktop originals: nothing to copy`);
+                }
+              } catch (e) {
+                logWorkflowPack(taskId, `row=${rowNumber} desktop originals failed: ${e?.message || e}`);
+              }
+            }
           }
         }
         const compactRowResult = compactWorkflowRowResultForProgress(rowResult);
