@@ -1250,7 +1250,7 @@ function resolveSendCmdTimeout(params, requestOptions) {
   return 0;
 }
 
-const LONG_RUNNING_WORKER_ACTIONS = new Set(["auto_pricing", "workflow_pack_images", "competitor_auto_register", "local_1688_inquiry"]);
+const LONG_RUNNING_WORKER_ACTIONS = new Set(["auto_pricing", "workflow_pack_images", "competitor_auto_register", "local_1688_inquiry", "auto_image_swap"]);
 
 async function sendCmd(action, params = {}, requestOptions = {}) {
   if (!workerReady) {
@@ -3709,6 +3709,29 @@ ipcMain.handle("select-file", async (_e, filters) => {
   });
   if (result.canceled || !result.filePaths.length) return null;
   return result.filePaths[0];
+});
+
+ipcMain.handle("auto-image-swap:pick-dir", async (_e, defaultPath) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ["openDirectory"],
+    defaultPath: typeof defaultPath === "string" && defaultPath ? defaultPath : undefined,
+    title: "选择图片根目录（子文件夹按 SPU/SKC 命名）",
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  return result.filePaths[0];
+});
+
+ipcMain.handle("auto-image-swap:run", async (_e, params) => {
+  await ensureWorkerStarted();
+  const taskId = typeof params?.taskId === "string" && params.taskId.trim()
+    ? params.taskId.trim()
+    : `auto_image_swap_${Date.now()}`;
+  const result = await sendCmd("auto_image_swap", { ...(params || {}), taskId }, { timeoutMs: WORKER_LONG_TASK_TIMEOUT_MS });
+  return { ...result, taskId };
+});
+
+ipcMain.handle("auto-image-swap:get-progress", async (_e, taskId) => {
+  return await requestWorkerProgressSnapshot(taskId);
 });
 
 ipcMain.handle("automation:login", async (_, accountId, phone, password) => {

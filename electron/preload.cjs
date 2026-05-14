@@ -395,6 +395,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
     },
   },
 
+  autoImageSwap: {
+    pickDir: (defaultPath) => ipcRenderer.invoke("auto-image-swap:pick-dir", defaultPath || ""),
+    run: (params) => invokeWithTimeout("auto-image-swap:run", params || {}, 24 * 60 * 60 * 1000),
+    getProgress: (taskId) => ipcRenderer.invoke("auto-image-swap:get-progress", taskId || ""),
+  },
+
   store: {
     get: (key) => ipcRenderer.invoke("store:get", key),
     getMany: (keys) => ipcRenderer.invoke("store:get-many", Array.isArray(keys) ? keys : []),

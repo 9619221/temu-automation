@@ -13,6 +13,7 @@ export interface AppSettings {
   priceReviewScanIntervalMinutes: number;    // 扫描间隔（分钟），默认 30
   priceReviewMarginRatio: number;            // 毛利倍率，默认 1.75
   priceReview1688ProfilePath: string;        // 1688 图搜专用 Chrome user-data-dir
+  autoImageSwapRootDir: string;              // 批量替换图片：本地图片根目录（子文件夹按 SPU/SKC 命名）
 }
 
 const LEGACY_UPDATE_FEED_URLS = new Set([
@@ -50,6 +51,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   priceReviewScanIntervalMinutes: 30,
   priceReviewMarginRatio: 1.75,
   priceReview1688ProfilePath: "",
+  autoImageSwapRootDir: "",
 };
 
 export function normalizeAppSettings(raw: unknown): AppSettings {
@@ -75,5 +77,8 @@ export function normalizeAppSettings(raw: unknown): AppSettings {
     priceReview1688ProfilePath: typeof data.priceReview1688ProfilePath === "string"
       ? data.priceReview1688ProfilePath
       : DEFAULT_APP_SETTINGS.priceReview1688ProfilePath,
+    autoImageSwapRootDir: typeof data.autoImageSwapRootDir === "string"
+      ? data.autoImageSwapRootDir
+      : DEFAULT_APP_SETTINGS.autoImageSwapRootDir,
   };
 }

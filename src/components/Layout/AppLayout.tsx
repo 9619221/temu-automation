@@ -68,6 +68,7 @@ const menuItems = [
       { key: "/create-product", icon: <PlusCircleOutlined />, label: "上品管理" },
       { key: "/image-studio", icon: <PictureOutlined />, label: "AI 出图" },
       { key: "/image-studio-gpt", icon: <PictureOutlined />, label: "AI 生图 GPT 版" },
+      { key: "/auto-image-swap", icon: <PictureOutlined />, label: "批量替换图片" },
       { key: "/price-review", icon: <DollarOutlined />, label: "核价筛选" },
       { key: "/logs", icon: <FileTextOutlined />, label: "日志中心" },
     ],

@@ -662,6 +662,50 @@ interface YunqiDbAPI {
   }>;
 }
 
+interface AutoImageSwapResultItem {
+  spuId: string;
+  success: boolean;
+  status: "pending" | "processing" | "done" | "error" | "missing" | "empty";
+  files: number;
+  message: string;
+}
+
+interface AutoImageSwapProgress {
+  taskId: string;
+  flowType: string;
+  running: boolean;
+  paused: boolean;
+  status: string;
+  total: number;
+  completed: number;
+  current: string;
+  step: string;
+  message: string;
+  results: AutoImageSwapResultItem[];
+  successCount: number;
+  failCount: number;
+  startedAt?: string;
+  updatedAt?: string;
+  finishedAt?: string;
+}
+
+interface AutoImageSwapAPI {
+  pickDir: (defaultPath?: string) => Promise<string | null>;
+  run: (params: {
+    taskId?: string;
+    rootDir: string;
+    identifiers: string[];
+  }) => Promise<{
+    success: boolean;
+    taskId: string;
+    total: number;
+    successCount: number;
+    failCount: number;
+    results: AutoImageSwapResultItem[];
+  }>;
+  getProgress: (taskId?: string) => Promise<AutoImageSwapProgress>;
+}
+
 interface ElectronAPI {
   getAppPath: () => Promise<string>;
   selectFile: (filters?: any) => Promise<string | null>;
@@ -673,6 +717,7 @@ interface ElectronAPI {
   erp: ErpAPI;
   app: AppAPI;
   store: StoreAPI;
+  autoImageSwap: AutoImageSwapAPI;
   onAutomationEvent: (callback: (data: any) => void) => (() => void);
   onUpdateStatus?: (callback: (data: any) => void) => (() => void);
   onImageStudioEvent?: (callback: (data: ImageStudioEventPayload) => void) => (() => void);

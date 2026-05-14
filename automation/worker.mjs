@@ -22,6 +22,7 @@ import { scanPriceReview } from "./price-review-scanner.mjs";
 import { listPriceReview, setPriceReviewManualCost, clearPriceReviewManualCost } from "./yunqi-db.mjs";
 import { open1688DetailPage, open1688LoginWindow, close1688Browser, ensure1688Context, openOrReuse1688Page, search1688OffersByImage } from "./aliexpress-1688-cost.mjs";
 import { runLocal1688Inquiry } from "./local-1688-inquiry.mjs";
+import { listSpuImageFiles, submitProductImageEdit, CAROUSEL_MIN, CAROUSEL_MAX } from "./temu-image-swap.mjs";
 import { optimizeTitle as _optimizeTitle } from "./title-optimizer.mjs";
 import { scrapeCompetitorReviews as _scrapeCompetitorReviews, openTemuLoginPage as _openTemuLoginPage, openTemuSearchPage as _openTemuSearchPage, extractReviewsFromFeed as _extractReviewsFromFeed, dumpFeedForGoods as _dumpFeedForGoods, extractProductFromFeed as _extractProductFromFeed, extractSearchResultsFromFeed as _extractSearchResultsFromFeed } from "./competitor-reviews.mjs";
 const require = createRequire(import.meta.url);
@@ -1362,6 +1363,7 @@ const BROWSER_ACCOUNT_ACTIONS = new Set([
   "batch_create_api",
   "workflow_pack_images",
   "auto_pricing",
+  "auto_image_swap",
   "probe_create_flow",
   "capture_add_payload",
   "test_api",
@@ -8654,6 +8656,11 @@ async function handleRequest(body) {
       __fatalLoginError = null;
       await ensureBrowser();
       return await autoPricingFromCSV(params);
+    }
+    case "auto_image_swap": {
+      __fatalLoginError = null;
+      await ensureBrowser();
+      return await runAutoImageSwap(params || {});
     }
     case "probe_create_flow": {
       // 打开商品创建页面，拦截所有 API 请求，用于发现真实端点
@@ -17218,6 +17225,166 @@ server.listen(PORT, "127.0.0.1", () => {
   console.error(`WORKER_PORT=${PORT}`);
   console.log(`Worker ready on port ${PORT}`);
 });
+
+// ============ 批量替换 Temu SPU 主图/轮播图 ============
+
+async function runAutoImageSwap(params) {
+  const identifiers = Array.isArray(params?.identifiers)
+    ? Array.from(new Set(params.identifiers.map((v) => String(v || "").trim()).filter(Boolean)))
+    : [];
+  const rootDir = String(params?.rootDir || "").trim();
+  const taskId = typeof params?.taskId === "string" && params.taskId.trim()
+    ? params.taskId.trim()
+    : `auto_image_swap_${Date.now()}`;
+  const now = getProgressTimestamp();
+
+  if (!rootDir) throw new Error("缺少图片根目录 rootDir");
+  if (!fs.existsSync(rootDir) || !fs.statSync(rootDir).isDirectory()) {
+    throw new Error(`图片根目录不存在或不是目录: ${rootDir}`);
+  }
+  if (identifiers.length === 0) throw new Error("没有可处理的 SPU/SKC 号");
+
+  const initialResults = identifiers.map((id) => ({
+    spuId: id,
+    success: false,
+    status: "pending",
+    files: 0,
+    message: "",
+  }));
+
+  replaceCurrentProgress({
+    taskId,
+    flowType: "auto_image_swap",
+    running: true,
+    paused: false,
+    status: "running",
+    total: identifiers.length,
+    completed: 0,
+    current: "准备开始",
+    step: "批量换图",
+    message: "正在扫描本地图片",
+    results: initialResults,
+    createdAt: now,
+    startedAt: now,
+    updatedAt: now,
+  });
+
+  const results = [...initialResults];
+
+  for (let i = 0; i < identifiers.length; i++) {
+    const id = identifiers[i];
+    const scan = listSpuImageFiles(rootDir, id);
+
+    if (!scan.exists) {
+      results[i] = { spuId: id, success: false, status: "missing", files: 0, message: `找不到子文件夹: ${scan.dir}` };
+      updateCurrentProgress({
+        completed: i + 1,
+        current: `${id} 缺少子文件夹`,
+        results: [...results],
+        message: `第 ${i + 1}/${identifiers.length} 个：缺子文件夹`,
+      });
+      continue;
+    }
+    if (scan.files.length === 0) {
+      results[i] = { spuId: id, success: false, status: "empty", files: 0, message: `子文件夹内无支持的图片: ${scan.dir}` };
+      updateCurrentProgress({
+        completed: i + 1,
+        current: `${id} 文件夹为空`,
+        results: [...results],
+        message: `第 ${i + 1}/${identifiers.length} 个：无图`,
+      });
+      continue;
+    }
+    if (scan.files.length < CAROUSEL_MIN || scan.files.length > CAROUSEL_MAX) {
+      results[i] = { spuId: id, success: false, status: "error", files: scan.files.length, message: `轮播图必须 ${CAROUSEL_MIN}-${CAROUSEL_MAX} 张，实际 ${scan.files.length} 张` };
+      updateCurrentProgress({
+        completed: i + 1,
+        current: `${id} 图片数量不合规`,
+        results: [...results],
+        message: `第 ${i + 1}/${identifiers.length} 个：图片数 ${scan.files.length} 不在 ${CAROUSEL_MIN}-${CAROUSEL_MAX}`,
+      });
+      continue;
+    }
+
+    results[i] = { ...results[i], status: "processing", files: scan.files.length, message: "" };
+    updateCurrentProgress({
+      completed: i,
+      current: `正在处理 ${id}（${scan.files.length} 张）`,
+      results: [...results],
+      message: `第 ${i + 1}/${identifiers.length} 个：开始上传素材`,
+    });
+
+    const page = await safeNewPage(context);
+    try {
+      // 步骤 A：把本地图依字典序逐张上传到 Temu 素材中心
+      await navigateToSellerCentral(page, "/material/image-task");
+      const uploadedUrls = [];
+      const uploadErrors = [];
+      for (let j = 0; j < scan.files.length; j++) {
+        const file = scan.files[j];
+        updateCurrentProgress({
+          current: `${id} 上传图片 ${j + 1}/${scan.files.length}: ${path.basename(file)}`,
+          results: [...results],
+        });
+        const r = await uploadImageToMaterial(page, file, { maxRetries: 3 });
+        if (r.success && r.url) {
+          uploadedUrls.push(r.url);
+        } else {
+          uploadErrors.push(`${path.basename(file)}: ${r.error || "unknown"}`);
+        }
+      }
+      if (uploadErrors.length > 0) {
+        throw new Error(`素材中心上传失败 ${uploadErrors.length}/${scan.files.length}: ${uploadErrors.slice(0, 3).join("; ")}`);
+      }
+
+      // 步骤 B：提交图片更新（替换 carouselImageUrls + materialImgUrl）
+      updateCurrentProgress({
+        current: `${id} 提交图片更新任务`,
+        results: [...results],
+      });
+      const submit = await submitProductImageEdit(page, id, uploadedUrls);
+      if (!submit.success) {
+        throw new Error(`提交失败: ${submit.errorMsg || `errorCode=${submit.errorCode}`}`);
+      }
+
+      results[i] = { spuId: id, success: true, status: "done", files: scan.files.length, message: `替换完成（${uploadedUrls.length} 张）` };
+    } catch (err) {
+      const message = err && err.message ? err.message : String(err);
+      results[i] = { spuId: id, success: false, status: "error", files: scan.files.length, message };
+      console.error(`[auto-image-swap] ${id} FAILED: ${message}`);
+    } finally {
+      try { await page.close(); } catch { /* ignore */ }
+    }
+
+    updateCurrentProgress({
+      completed: i + 1,
+      current: results[i].success ? `${id} 完成` : `${id} 失败`,
+      results: [...results],
+      message: `已处理 ${i + 1}/${identifiers.length}`,
+    });
+  }
+
+  const summary = summarizeProgressResults(results);
+  const finishedAt = getProgressTimestamp();
+  updateCurrentProgress({
+    running: false,
+    status: summary.failCount === 0 ? "completed" : (summary.successCount === 0 ? "error" : "partial"),
+    completed: identifiers.length,
+    current: "全部处理完成",
+    message: `成功 ${summary.successCount} / 失败 ${summary.failCount}`,
+    finishedAt,
+    updatedAt: finishedAt,
+  });
+
+  return {
+    success: true,
+    taskId,
+    total: identifiers.length,
+    successCount: summary.successCount,
+    failCount: summary.failCount,
+    results,
+  };
+}
 
 // ============ 核价筛选器 worker handlers ============
 
