@@ -73,7 +73,7 @@ export async function submitProductImageEdit(page, productId, newImageUrls) {
     const headers = { "Content-Type": "application/json", "mallid": mallid };
     const productIdNum = Number(pid);
 
-    // Step 1: 拿当前商品 schema（保留语言/SKC/分类等不动，只替换图字段）
+    // Step 1: 拿当前商品 schema (skcList / skuCommonReqList 等需要保留原结构)
     const queryResp = await fetch("/visage-agent-seller/product/queryForImage", {
       method: "POST",
       headers,
@@ -93,30 +93,54 @@ export async function submitProductImageEdit(page, productId, newImageUrls) {
     }
     const cur = queryData.result;
 
-    // Step 2: 拿对应任务 ID（image/edit 必须带 optimizeTaskUid，从 phoenix-mms 任务列表反查）
-    let optimizeTaskUid = null;
-    try {
-      const taskResp = await fetch("/phoenix-mms/picture/task/pageQuery", {
-        method: "POST",
-        headers,
-        credentials: "include",
-        body: JSON.stringify({ pageInfo: { pageNo: 1, pageSize: 10 }, productIdList: [productIdNum] }),
-      });
-      const taskData = await taskResp.json();
-      const t0 = taskData?.result?.detailList?.[0]?.taskList?.[0];
-      optimizeTaskUid = t0?.taskId ?? null;
-    } catch (_) { /* 拿不到 task 也尝试提交 */ }
+    // Step 2: 按真实 image/edit payload 结构构造（抓包验证过的字段名）
+    // 注意：carouselGalleryList 才是真实字段名（不是 carouselImageUrls，那是 queryForImage 返回字段）
+    // skcList 从 cur.productSkcList 转换：每个 SKC 一个 entry，含 skcId + skcPreviewImgUrls + skuCommonReqList
+    const skcList = Array.isArray(cur.productSkcList) ? cur.productSkcList.map((skc) => {
+      const skuCommonReqList = Array.isArray(skc.productSkuList) ? skc.productSkuList.map((sku) => ({
+        skuId: sku.skuId ?? sku.productSkuId ?? 0,
+        thumbUrl: sku.thumbUrl || sku.skuThumbUrl || urls[0],
+        productSkuThumbUrlI18nReqs: [],
+      })) : [];
+      return {
+        skcId: skc.skcId ?? skc.productSkcId ?? 0,
+        skcPreviewImgUrls: [{ imageUrl: urls[0], imageTag: 0 }],
+        productSkcCarouselImageI18nReqs: [],
+        skuCommonReqList,
+      };
+    }) : [];
 
-    // Step 3: 构造 image/edit payload
-    // TODO(image-swap): 当前 payload 报 errorCode 1000002 "Image task cannot be empty"，
-    //   推断需要按 SKC 维度组装 productSkcList[].productSkcCarouselImageI18nVOList
-    //   （form 内部叫 carouselImgsI18n.common[].{status,uid,url,beautifyTag,isTranslate}）。
-    //   待用户在 Electron 真实跑一次提交、抓 HAR 拿到完整 payload 后补完。
+    // imageTaskInfo: 占位结构 (所有 boolean=false, 列表/map 为空)。来自真实抓包样本。
+    const imageTaskInfo = {
+      goodsLayerDecoeationCanUpload: false,
+      productSkuCanUpload: false,
+      lang2ProductSkuCanUpload: {
+        de: false, sv: false, ko: false, it: false, fr: false, es: false, cs: false,
+        ar: false, ja: false, pl: false, "en-ME": false, nl: false, "en-GB": false,
+      },
+      productSkcCarouselGalleryCanUpload: false,
+      lang2ProductSkcCarouselGalleryCanUpload: {
+        de: false, sv: false, ko: false, it: false, fr: false, es: false, cs: false,
+        ar: false, ja: false, pl: false, "en-ME": false, nl: false, "en-GB": false,
+      },
+      productSkcIdList: [],
+      lang2ProductSkcIdMap: {},
+      productCarouseVideoCanUpload: false,
+      productDetailVideoCanUpload: false,
+    };
+
     const payload = {
-      ...cur,
-      optimizeTaskUid,
-      carouselImageUrls: urls,
+      productId: productIdNum,
       materialImgUrl: urls[0],
+      carouselGalleryList: urls,
+      carouselImageI18nReqs: [],
+      goodsLayerDecorationReqs: [],
+      goodsLayerDecorationCustomizeI18nReqs: [],
+      skcList,
+      productCarouseVideoReqList: [],
+      productDetailVideoReqList: [],
+      imageTaskInfo,
+      businessType: 1,
     };
 
     const editResp = await fetch("/visage-agent-seller/product/image/edit", {
@@ -138,3 +162,4 @@ export async function submitProductImageEdit(page, productId, newImageUrls) {
     };
   }, { pid, urls });
 }
+

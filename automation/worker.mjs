@@ -8721,6 +8721,193 @@ async function handleRequest(body) {
         if (!params.keepOpen) await page.close();
       }
     }
+    case "capture_image_edit_payload": {
+      // 走真实 selfTask UI 流程，page.route 拦截 image/edit 抓 req/resp body 写盘。
+      // 调试用：拿到真实 payload 后再改 temu-image-swap.mjs 的 submitProductImageEdit。
+      await ensureBrowser();
+      const productId = String(params.productId || params.spuId || "").trim();
+      if (!productId) throw new Error("缺少 productId");
+
+      const saveDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
+      fs.mkdirSync(saveDir, { recursive: true });
+      const outputFile = path.join(saveDir, `image_edit_payload_${productId}_${Date.now()}.json`);
+
+      const popupMonitor = registerSellerAuthPopupMonitor("[capture-image-edit]");
+      let capturedReq = null;
+      let capturedResp = null;
+      let listPage = null;
+      let editPage = null;
+
+      try {
+        await establishSellerCentralSession("[capture-image-edit-session]");
+
+        // Step 1: 打开 image-task 列表页
+        listPage = await safeNewPage(context);
+        await navigateToSellerCentral(listPage, "/material/image-task");
+        await randomDelay(2000, 3000);
+
+        // Step 2: 关闭可能弹的引导窗
+        for (let i = 0; i < 5; i++) {
+          try {
+            const btn = listPage.locator('button:has-text("知道了"), button:has-text("确定"), button:has-text("关闭"), button:has-text("暂不"), button:has-text("不使用")').first();
+            if (await btn.isVisible({ timeout: 500 })) await btn.click();
+            else break;
+          } catch { break; }
+        }
+
+        // Step 3: 预先注册新 page 监听（确保 selfTask 跳出新 tab 时不漏）
+        const ctx = listPage.context();
+        const newPagePromise = ctx.waitForEvent("page", { timeout: 60000 });
+
+        // Step 4: 点"发起图片/视频更新"
+        await listPage.locator('button:has-text("发起图片/视频更新")').first().click();
+        await randomDelay(500, 1000);
+
+        // Step 5: 在 modal 输入框填 SPU（用真实键盘事件）
+        const spuInput = listPage.locator('input[placeholder*="可输入SPU"]').first();
+        await spuInput.waitFor({ state: "visible", timeout: 10000 });
+        await spuInput.click();
+        await spuInput.fill(productId);
+        await randomDelay(300, 600);
+
+        // Step 6: 点确认
+        await listPage.locator('button:has-text("确认")').last().click();
+
+        // Step 7: 等新 tab 打开
+        editPage = await newPagePromise;
+        await editPage.waitForLoadState("domcontentloaded", { timeout: 30000 });
+        console.error(`[capture-image-edit] new page url=${editPage.url()}`);
+
+        // Step 8a: page.route 拦截 image/edit 拿完整 body（listener 拿不到 postData）
+        await editPage.route("**/visage-agent-seller/product/image/edit", async (route) => {
+          try {
+            const req = route.request();
+            const body = req.postData();
+            capturedReq = { url: req.url(), method: req.method(), body, bodyLen: body?.length || 0 };
+            console.error(`[capture-image-edit] route captured image/edit body len=${body?.length || 0}`);
+          } catch (e) {
+            console.error(`[capture-image-edit] route err: ${e?.message || e}`);
+          }
+          await route.continue();
+        });
+
+        // Step 8b: 监听所有 POST 请求（拿 metadata，body 可能 null 但 URL 一定有）
+        const allPosts = [];
+        const allResps = [];
+        editPage.on("request", (req) => {
+          if (req.method() !== "POST") return;
+          const url = req.url();
+          if (!/agentseller\.temu\.com|kuajingmaihuo\.com/.test(url)) return;
+          if (/anti-content|track|monitor|\/log\/|metric/.test(url)) return;
+          const body = req.postData();
+          allPosts.push({
+            url,
+            method: req.method(),
+            bodyLen: body?.length || 0,
+            body: body?.slice(0, 8000) ?? null,
+            ts: Date.now(),
+          });
+        });
+        editPage.on("response", async (resp) => {
+          if (resp.request().method() !== "POST") return;
+          const url = resp.url();
+          if (!/agentseller\.temu\.com|kuajingmaihuo\.com/.test(url)) return;
+          if (/anti-content|track|monitor|\/log\/|metric/.test(url)) return;
+          try {
+            const body = await resp.text();
+            allResps.push({
+              url,
+              status: resp.status(),
+              bodyPreview: body?.slice(0, 2000) ?? null,
+              ts: Date.now(),
+            });
+            // 兼容旧字段：如果有 image/edit 也单独存一份
+            if (/visage-agent-seller\/product\/image\/edit/.test(url)) {
+              const req = allPosts.find((p) => p.url === url);
+              capturedReq = req || null;
+              capturedResp = { status: resp.status(), body };
+            }
+          } catch (_) {}
+        });
+
+        // Step 9: 等编辑页"提交"按钮可见（部分页面也叫"保存"）
+        const saveBtn = editPage.locator('button:has-text("提交"), button:has-text("保存")').first();
+        await saveBtn.waitFor({ state: "visible", timeout: 30000 });
+        await randomDelay(1500, 2500);
+
+        // Step 9.5: 取消指定素材语言（默认：德语/日语/阿拉伯语），让 form 真有变化
+        const langsToUncheck = Array.isArray(params.uncheckLanguages) && params.uncheckLanguages.length > 0
+          ? params.uncheckLanguages
+          : ["德语", "日语", "阿拉伯语"];
+        const uncheckResult = await editPage.evaluate((langs) => {
+          const out = [];
+          const checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]'));
+          for (const lang of langs) {
+            let matched = false;
+            for (const cb of checkboxes) {
+              let cur = cb.parentElement;
+              for (let i = 0; i < 8 && cur; i++) {
+                const txt = (cur.textContent || '').trim();
+                if (txt === lang) {
+                  matched = true;
+                  if (cb.checked) {
+                    cb.click();
+                    out.push({ lang, action: 'unchecked' });
+                  } else {
+                    out.push({ lang, action: 'already_unchecked' });
+                  }
+                  break;
+                }
+                cur = cur.parentElement;
+              }
+              if (matched) break;
+            }
+            if (!matched) out.push({ lang, action: 'not_found' });
+          }
+          return out;
+        }, langsToUncheck);
+        console.error(`[capture-image-edit] language toggles: ${JSON.stringify(uncheckResult)}`);
+        await randomDelay(800, 1200);
+
+        // Step 10: 点提交
+        await saveBtn.click();
+
+        // Step 11: 最多等 30 秒抓到 image/edit
+        for (let i = 0; i < 60; i++) {
+          if (capturedReq && capturedResp) break;
+          await new Promise(r => setTimeout(r, 500));
+        }
+
+        // Step 12: 写盘 — 包含所有 POST 请求/响应，方便对照找真实保存接口
+        fs.writeFileSync(outputFile, JSON.stringify({
+          productId,
+          request: capturedReq,
+          response: capturedResp,
+          allPosts,
+          allResps,
+          timestamp: new Date().toISOString(),
+          editPageUrl: editPage?.url() || null,
+        }, null, 2));
+        console.error(`[capture-image-edit] saved => ${outputFile} (posts=${allPosts.length}, resps=${allResps.length})`);
+
+        return {
+          success: allPosts.length > 0,
+          captured: !!capturedReq,
+          allPostsCount: allPosts.length,
+          allRespsCount: allResps.length,
+          outputFile,
+          reqBodyLen: capturedReq?.bodyLen || 0,
+          respStatus: capturedResp?.status ?? null,
+          respPreview: capturedResp?.body?.slice(0, 400) ?? null,
+        };
+      } finally {
+        popupMonitor?.();
+        if (!params.keepOpen) {
+          try { await editPage?.close(); } catch {}
+          try { await listPage?.close(); } catch {}
+        }
+      }
+    }
     case "test_api": {
       // 在已登录页面中调用指定 API 端点，用于调试
       await ensureBrowser();
