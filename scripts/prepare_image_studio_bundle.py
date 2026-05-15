@@ -151,7 +151,9 @@ def main() -> None:
     copy_tree(static_root, OUTPUT / ".next" / "static")
     copy_tree(public_root, OUTPUT / "public")
     copy_file(source / ".env.local", OUTPUT / ".env.local")
-    copy_tree(source / "data", OUTPUT / "data")
+    # data/ 是运行时累积的 AI 生图任务产物（agent-jobs/test-runs），不打进发布包
+    # 运行时 image-studio 会在用户 userData 目录下自建 data 目录
+    ensure_dir(OUTPUT / "data")
     (OUTPUT / "bootstrap.cjs").write_text(BOOTSTRAP_CONTENT, encoding="utf-8")
 
     print(f"Prepared AI image runtime at: {OUTPUT} (source: {source})")
