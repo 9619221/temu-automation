@@ -424,6 +424,96 @@ async function runUiChecks(page) {
   console.log("[ok] 账号管理页面");
 }
 
+const PURCHASE_FLOW_PAGES = [
+  {
+    hash: "/product-master-data",
+    expectedTitle: "商品资料",
+    label: "商品资料",
+  },
+  {
+    hash: "/1688-mapping",
+    expectedTitle: "供应商管理",
+    label: "供应商管理",
+  },
+  {
+    hash: "/purchase-center",
+    expectedTitle: "采购中心",
+    label: "采购中心",
+  },
+  {
+    hash: "/warehouse-center",
+    expectedTitle: "待到货、入库、库存批次",
+    label: "仓库中心",
+  },
+  {
+    hash: "/qc-outbound",
+    expectedTitle: "抽检、锁定/释放库存、出库计划",
+    label: "质检发仓",
+  },
+];
+
+const SERVICE_NOT_READY_HINT = "服务未就绪";
+
+async function gotoHash(page, hash) {
+  await page.evaluate((targetHash) => {
+    window.location.hash = `#${targetHash}`;
+  }, hash);
+  await waitFor(
+    async () => {
+      const current = await page.evaluate(() => window.location.hash || "");
+      if (!current.includes(hash)) {
+        throw new Error(`current hash: ${current}`);
+      }
+    },
+    15000,
+    `route ${hash}`,
+  );
+}
+
+async function runPurchaseFlowChecks(page) {
+  const issues = [];
+  console.log("");
+  console.log("== 采购流程页面渲染检查 ==");
+
+  for (const target of PURCHASE_FLOW_PAGES) {
+    try {
+      await gotoHash(page, target.hash);
+      await page.waitForTimeout(500);
+
+      const titleFound = await page
+        .locator(".app-page-header")
+        .getByText(target.expectedTitle, { exact: false })
+        .first()
+        .isVisible()
+        .catch(() => false);
+      if (!titleFound) {
+        issues.push(`${target.label} 标题未渲染（期望「${target.expectedTitle}」）`);
+        console.log(`[fail] ${target.label}: 标题未渲染`);
+        continue;
+      }
+
+      const serviceNotReady = await page
+        .getByText(SERVICE_NOT_READY_HINT, { exact: false })
+        .first()
+        .isVisible()
+        .catch(() => false);
+      if (serviceNotReady) {
+        issues.push(`${target.label} 显示「${SERVICE_NOT_READY_HINT}」，ERP 服务未初始化`);
+        console.log(`[fail] ${target.label}: ERP 服务未就绪`);
+        continue;
+      }
+
+      console.log(`[ok] ${target.label} 页面渲染正常`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error || "unknown error");
+      issues.push(`${target.label} 渲染检查异常: ${message}`);
+      console.log(`[fail] ${target.label}: ${message}`);
+    }
+  }
+
+  return issues;
+}
+
 async function main() {
   ensureFileExists(distIndex, "dist index");
 
@@ -459,11 +549,18 @@ async function main() {
       "electron bridge ready",
     );
 
-    await page.locator(".ant-layout-sider").getByText("店铺概览", { exact: true }).first().waitFor({ state: "visible", timeout: 30000 });
+    await page.locator(".ant-layout-sider .ant-menu-submenu-title").first().waitFor({ state: "visible", timeout: 30000 });
 
     issues.push(...await runBridgeChecks(page));
     await seedRegressionData(page);
-    await runUiChecks(page);
+    try {
+      await runUiChecks(page);
+    } catch (uiError) {
+      const message = uiError instanceof Error ? uiError.message : String(uiError || "unknown error");
+      issues.push(`runUiChecks 失败（历史菜单/选择器变更）: ${message}`);
+      console.log(`[warn] runUiChecks 失败但已捕获，继续后续检查: ${message}`);
+    }
+    issues.push(...await runPurchaseFlowChecks(page));
 
     if (issues.length > 0) {
       throw new Error(`Detected regression issues:\n- ${issues.join("\n- ")}`);

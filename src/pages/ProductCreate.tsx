@@ -1284,7 +1284,7 @@ function BatchCreate() {
               </div>
               <div className="create-flow-toolbar__input">
                 <span className="create-flow-toolbar__label">处理数量</span>
-                <InputNumber min={1} max={100} value={count} onChange={(value) => setCount(value || 1)} style={{ width: "100%" }} />
+                <InputNumber min={1} value={count} onChange={(value) => setCount(value || 1)} style={{ width: "100%" }} />
               </div>
             </div>
 
@@ -1354,7 +1354,7 @@ function BatchCreate() {
                 </div>
                 <div>
                   <div className="create-flow-toolbar__label">处理数量</div>
-                  <InputNumber min={1} max={100} value={count} onChange={(value) => setCount(value || 1)} style={{ width: "100%" }} />
+                  <InputNumber min={1} value={count} onChange={(value) => setCount(value || 1)} style={{ width: "100%" }} />
                 </div>
               </div>
 
@@ -1648,7 +1648,7 @@ function BatchCreate() {
                     </div>
                     <div>
                       <div className="create-flow-toolbar__label">处理数量</div>
-                      <InputNumber min={1} max={100} value={count} onChange={(value) => setCount(value || 1)} style={{ width: "100%" }} />
+                      <InputNumber min={1} value={count} onChange={(value) => setCount(value || 1)} style={{ width: "100%" }} />
                     </div>
                   </div>
                   <Space wrap className="app-table-meta">

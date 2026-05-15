@@ -8721,6 +8721,80 @@ async function handleRequest(body) {
         if (!params.keepOpen) await page.close();
       }
     }
+    case "auto_image_swap_openapi": {
+      // 用 Temu 开放平台官方 API 换图（绕开 web 反爬 + selfTask 流程）
+      // params: { productId, newImageUrls: string[], credentials?: {...}, useSandbox?: boolean }
+      const { swapProductImagesViaOpenApi, SANDBOX_ACCOUNT_FULL_1 } = await import("./temu-open-api.mjs");
+      const productId = String(params?.productId || "").trim();
+      const urls = Array.isArray(params?.newImageUrls) ? params.newImageUrls : [];
+      if (!productId) throw new Error("缺少 productId");
+      if (urls.length < 5 || urls.length > 10) {
+        throw new Error(`newImageUrls 必须 5-10 张，实际 ${urls.length}`);
+      }
+      const creds = params.useSandbox ? {
+        appKey: SANDBOX_ACCOUNT_FULL_1.appKey,
+        appSecret: SANDBOX_ACCOUNT_FULL_1.appSecret,
+        accessToken: SANDBOX_ACCOUNT_FULL_1.accessToken,
+        region: params.region || SANDBOX_ACCOUNT_FULL_1.region,
+      } : {
+        appKey: params.credentials?.appKey || params.appKey,
+        appSecret: params.credentials?.appSecret || params.appSecret,
+        accessToken: params.credentials?.accessToken || params.accessToken,
+        region: params.credentials?.region || params.region || "CN",
+      };
+      const result = await swapProductImagesViaOpenApi(creds, productId, urls);
+      return {
+        success: result.success,
+        errorCode: result.errorCode,
+        errorMsg: result.errorMsg,
+        result: result.result,
+        // 不回送签名/凭据
+        detail_summary: {
+          productId: result.detail?.productId,
+          materialImgUrl: result.detail?.materialImgUrl,
+          carouselImageUrls_count: result.detail?.carouselImageUrls?.length || 0,
+          skcCount: result.detail?.productSkcList?.length || 0,
+        },
+      };
+    }
+    case "openapi_call": {
+      // Temu 开放平台官方 API 通用调用（验证签名/鉴权后用于换图等）
+      const { callOpenApi, SANDBOX_ACCOUNT_FULL_1 } = await import("./temu-open-api.mjs");
+      const apiType = String(params?.type || "").trim();
+      if (!apiType) throw new Error("缺少 params.type，如 bg.mall.info.get");
+      const useSandbox = !!params?.useSandbox;
+      const creds = useSandbox ? {
+        appKey: SANDBOX_ACCOUNT_FULL_1.appKey,
+        appSecret: SANDBOX_ACCOUNT_FULL_1.appSecret,
+        accessToken: SANDBOX_ACCOUNT_FULL_1.accessToken,
+        region: params.region || SANDBOX_ACCOUNT_FULL_1.region,
+      } : {
+        appKey: params.appKey,
+        appSecret: params.appSecret,
+        accessToken: params.accessToken,
+        region: params.region || "CN",
+      };
+      const result = await callOpenApi({
+        ...creds,
+        type: apiType,
+        bizParams: params.bizParams || {},
+        version: params.version || "V1",
+      });
+      return {
+        ok: result.ok,
+        status: result.status,
+        response: result.response,
+        // 不回送 access_token 等敏感字段
+        signedParamsPreview: {
+          type: result.signedParams.type,
+          app_key: result.signedParams.app_key,
+          timestamp: result.signedParams.timestamp,
+          version: result.signedParams.version,
+          bizKeys: Object.keys(params.bizParams || {}),
+          sign: result.signedParams.sign,
+        },
+      };
+    }
     case "capture_image_edit_payload": {
       // 走真实 selfTask UI 流程，page.route 拦截 image/edit 抓 req/resp body 写盘。
       // 调试用：拿到真实 payload 后再改 temu-image-swap.mjs 的 submitProductImageEdit。
@@ -12378,7 +12452,7 @@ async function generateWorkflowPackImages(params = {}) {
   }
 
   const startRow = Math.max(0, Number(params.startRow) || 0);
-  const count = Math.max(1, Math.min(Number(params.count) || 1, 20));
+  const count = Math.max(1, Number(params.count) || 1);
   const table = getWorkflowProductRows(csvPath);
   if (table.imageIdx < 0) {
     return {
