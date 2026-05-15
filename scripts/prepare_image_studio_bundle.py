@@ -136,7 +136,12 @@ def main() -> None:
     ensure_dir(OUTPUT)
 
     # standalone 根目录本身就是一个可启动运行时，直接复制其内容。
+    # data/ 是运行时累积的 AI 生图任务产物（agent-jobs/test-runs），开发期会鼓到几百 MB，
+    # 必须在复制阶段就跳过，否则会被 electron-builder 整个打进安装包（0.3.3 翻车记）。
+    SKIP_TOP_LEVEL = {"data"}
     for child in standalone_root.iterdir():
+      if child.name in SKIP_TOP_LEVEL:
+        continue
       target_name = "runtime_node_modules" if child.name == "node_modules" else child.name
       target = OUTPUT / target_name
       if target_name in preserved_names and target.exists():
