@@ -602,8 +602,10 @@ function filterAutoPricingProductTable(inputPath) {
 
 // 走 gh-proxy.com 反代 GitHub Release,避免大陆用户直连 github.com 超时
 // /releases/latest/download/ 是 GitHub 的稳定别名,不用每次发版改 URL
-const UPDATE_FEED_URL = "https://gh-proxy.com/https://github.com/9619221/temu-automation/releases/latest/download/";
+const DEFAULT_UPDATE_FEED_URL = "https://gh-proxy.com/https://github.com/9619221/temu-automation/releases/latest/download/";
 const UPDATE_MANUAL_DOWNLOAD_URL = "https://gh-proxy.com/https://github.com/9619221/temu-automation/releases/latest";
+const UPDATE_SETTINGS_KEY = "temu_app_settings";
+const UPDATE_UPDATER_SESSION_PARTITION = "electron-updater";
 const UPDATE_CONFIG_FILE_NAME = "app-update.yml";
 const UPDATE_CONFIG_CONTENT = [
   "owner: '9619221'",
@@ -620,6 +622,8 @@ let updateState = {
   releaseVersion: null,
   progressPercent: null,
   manualDownloadUrl: UPDATE_MANUAL_DOWNLOAD_URL,
+  feedUrl: DEFAULT_UPDATE_FEED_URL,
+  proxyRules: "",
 };
 
 function broadcastUpdateState(patch) {
@@ -678,14 +682,70 @@ function ensureAppUpdateConfig() {
   return null;
 }
 
-function applyAutoUpdaterFeedUrl() {
-  autoUpdater.setFeedURL({
-    provider: "generic",
-    url: UPDATE_FEED_URL,
-  });
+function normalizeUpdateFeedUrl(raw) {
+  if (typeof raw !== "string") return DEFAULT_UPDATE_FEED_URL;
+  const trimmed = raw.trim();
+  if (!trimmed) return DEFAULT_UPDATE_FEED_URL;
+  return trimmed.endsWith("/") ? trimmed : `${trimmed}/`;
 }
 
-function configureAutoUpdater() {
+function normalizeUpdateProxyRules(raw) {
+  if (typeof raw !== "string") return "";
+  return raw.trim();
+}
+
+function readUpdateSettings() {
+  try {
+    const raw = readStoreJsonWithRecovery(getStoreFilePath(UPDATE_SETTINGS_KEY), UPDATE_SETTINGS_KEY);
+    return raw && typeof raw === "object" ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
+function getEffectiveUpdateNetworkSettings() {
+  const settings = readUpdateSettings();
+  return {
+    feedUrl: normalizeUpdateFeedUrl(settings.updateFeedUrl),
+    proxyRules: normalizeUpdateProxyRules(settings.updateProxyRules),
+  };
+}
+
+async function applyAutoUpdaterNetworkSettings() {
+  const updateNetwork = getEffectiveUpdateNetworkSettings();
+  const updaterSession = electronSession.fromPartition(UPDATE_UPDATER_SESSION_PARTITION, { cache: false });
+  try {
+    if (updateNetwork.proxyRules) {
+      await updaterSession.setProxy({
+        proxyRules: updateNetwork.proxyRules,
+        proxyBypassRules: "<local>",
+      });
+    } else {
+      await updaterSession.setProxy({ mode: "system" });
+    }
+    await updaterSession.forceReloadProxyConfig?.();
+  } catch (error) {
+    appendDiagnosticLog({
+      source: "main",
+      level: "warn",
+      message: `Unable to apply updater proxy: ${error?.message || error}`,
+      detail: { proxyRules: updateNetwork.proxyRules },
+    });
+  }
+
+  autoUpdater.setFeedURL({
+    provider: "generic",
+    url: updateNetwork.feedUrl,
+  });
+  broadcastUpdateState({
+    feedUrl: updateNetwork.feedUrl,
+    proxyRules: updateNetwork.proxyRules,
+    manualDownloadUrl: UPDATE_MANUAL_DOWNLOAD_URL,
+  });
+  return updateNetwork;
+}
+
+async function configureAutoUpdater() {
   if (!app.isPackaged) {
     broadcastUpdateState({ status: "dev", message: "开发环境不支持自动更新" });
     return;
@@ -693,10 +753,12 @@ function configureAutoUpdater() {
   const updateConfig = ensureAppUpdateConfig();
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
-  applyAutoUpdaterFeedUrl();
+  const updateNetwork = await applyAutoUpdaterNetworkSettings();
   broadcastUpdateState({
     message: updateConfig?.generated ? "更新源: gh-proxy 镜像（已修复本机更新配置）" : "更新源: gh-proxy 镜像",
     manualDownloadUrl: UPDATE_MANUAL_DOWNLOAD_URL,
+    feedUrl: updateNetwork.feedUrl,
+    proxyRules: updateNetwork.proxyRules,
   });
 }
 
@@ -719,7 +781,7 @@ autoUpdater.on("update-available", (info) => {
     }).then(({ response }) => {
       if (response === 1) {
         broadcastUpdateState({ status: "downloading", message: "正在下载更新…", progressPercent: 0 });
-        autoUpdater.downloadUpdate().catch((e) => {
+        applyAutoUpdaterNetworkSettings().then(() => autoUpdater.downloadUpdate()).catch((e) => {
           broadcastUpdateState({ status: "error", message: e?.message || "下载更新失败", progressPercent: null });
         });
       }
@@ -3686,7 +3748,7 @@ app.whenReady().then(async () => {
     console.error("[Main] Worker auto-start failed (will retry on demand):", e.message);
   }
   // 自动检查更新（延迟5秒，避免阻塞启动）
-  configureAutoUpdater();
+  await configureAutoUpdater();
   if (app.isPackaged) {
     setTimeout(() => {
       autoUpdater.checkForUpdates().catch(() => {});
@@ -5195,7 +5257,7 @@ ipcMain.handle("app:get-update-status", () => updateState);
 ipcMain.handle("app:check-for-updates", async () => {
   try {
     ensureAppUpdateConfig();
-    applyAutoUpdaterFeedUrl();
+    await applyAutoUpdaterNetworkSettings();
     await autoUpdater.checkForUpdates();
     return updateState;
   } catch (e) {
@@ -5207,7 +5269,7 @@ ipcMain.handle("app:check-for-updates", async () => {
 ipcMain.handle("app:download-update", async () => {
   try {
     ensureAppUpdateConfig();
-    applyAutoUpdaterFeedUrl();
+    await applyAutoUpdaterNetworkSettings();
     await autoUpdater.downloadUpdate();
   } catch (error) {
     broadcastUpdateState({ status: "error", message: error?.message || "下载更新失败", progressPercent: null });

@@ -8,6 +8,7 @@ export interface AppSettings {
   lowStockThreshold: number;
   screenshotOnError: boolean;
   updateFeedUrl: string;
+  updateProxyRules: string;
   // 核价筛选器
   priceReviewAutoScanEnabled: boolean;       // 是否每 30 分钟自动扫核价页
   priceReviewScanIntervalMinutes: number;    // 扫描间隔（分钟），默认 30
@@ -41,6 +42,10 @@ function normalizeUpdateFeedUrl(raw: unknown): string {
   return normalized;
 }
 
+function normalizeStringSetting(raw: unknown, fallback = ""): string {
+  return typeof raw === "string" ? raw.trim() : fallback;
+}
+
 export const DEFAULT_APP_SETTINGS: AppSettings = {
   operationDelay: 1500,
   maxRetries: 3,
@@ -49,6 +54,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   lowStockThreshold: 10,
   screenshotOnError: true,
   updateFeedUrl: "",
+  updateProxyRules: "",
   priceReviewAutoScanEnabled: false,
   priceReviewScanIntervalMinutes: 30,
   priceReviewMarginRatio: 1.75,
@@ -69,6 +75,7 @@ export function normalizeAppSettings(raw: unknown): AppSettings {
     lowStockThreshold: typeof data.lowStockThreshold === "number" ? data.lowStockThreshold : DEFAULT_APP_SETTINGS.lowStockThreshold,
     screenshotOnError: typeof data.screenshotOnError === "boolean" ? data.screenshotOnError : DEFAULT_APP_SETTINGS.screenshotOnError,
     updateFeedUrl: normalizeUpdateFeedUrl(data.updateFeedUrl),
+    updateProxyRules: normalizeStringSetting(data.updateProxyRules),
     priceReviewAutoScanEnabled: typeof data.priceReviewAutoScanEnabled === "boolean"
       ? data.priceReviewAutoScanEnabled
       : DEFAULT_APP_SETTINGS.priceReviewAutoScanEnabled,
