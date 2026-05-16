@@ -7112,7 +7112,7 @@ function get1688DeliveryAddress(db, addressId = null, companyId = DEFAULT_COMPAN
     const row = db.prepare("SELECT * FROM erp_1688_delivery_addresses WHERE id = ? AND company_id = ?").get(id, normalizedCompanyId);
     if (!row) throw new Error(`1688 delivery address not found: ${id}`);
     const rowAccountId = optionalString(row.account_id);
-    if (normalizedAccountId && rowAccountId && rowAccountId !== normalizedAccountId) {
+    if (normalizedAccountId && rowAccountId !== normalizedAccountId) {
       throw new Error("1688 delivery address does not belong to this store");
     }
     return row;
@@ -7122,20 +7122,9 @@ function get1688DeliveryAddress(db, addressId = null, companyId = DEFAULT_COMPAN
       SELECT *
       FROM erp_1688_delivery_addresses
       WHERE company_id = @company_id
-        AND (
-          account_id = @account_id
-          OR account_id IS NULL
-          OR account_id = ''
-        )
+        AND account_id = @account_id
         AND status = 'active'
-      ORDER BY
-        CASE
-          WHEN account_id = @account_id AND COALESCE(address_id, '') != '' THEN 0
-          WHEN (account_id IS NULL OR account_id = '') AND COALESCE(address_id, '') != '' THEN 1
-          WHEN account_id = @account_id THEN 2
-          ELSE 3
-        END,
-        is_default DESC,
+      ORDER BY is_default DESC,
         updated_at DESC,
         created_at DESC
       LIMIT 1
@@ -7462,6 +7451,7 @@ async function sync1688DeliveryAddressesAction({ db, payload, actor }) {
     db,
     actor,
     accountId,
+    purchase1688AccountId: optionalString(payload.purchase1688AccountId || payload.purchase_1688_account_id),
     action: "sync_1688_addresses",
     api: PROCUREMENT_APIS.RECEIVE_ADDRESS,
     params,
@@ -7501,7 +7491,6 @@ async function sync1688DeliveryAddressesAction({ db, payload, actor }) {
       WHERE company_id = @company_id
         AND COALESCE(account_id, '') = COALESCE(@account_id, '')
         AND status = 'active'
-        AND COALESCE(address_id, '') != ''
     `).all({ company_id: companyId, account_id: accountId || "" });
     const deactivateStmt = db.prepare(`
       UPDATE erp_1688_delivery_addresses
@@ -7511,7 +7500,7 @@ async function sync1688DeliveryAddressesAction({ db, payload, actor }) {
     const now = nowIso();
     for (const row of localActiveRows) {
       const remoteId = optionalString(row.address_id);
-      if (!remoteId || remoteAddressIds.has(remoteId)) continue;
+      if (remoteId && remoteAddressIds.has(remoteId)) continue;
       deactivateStmt.run({ id: row.id, updated_at: now });
       deactivatedCount += 1;
     }
@@ -10958,10 +10947,10 @@ function map1688StatusToLocal(status, currentStatus, logistics = {}) {
   if (["closed", "cancelled", "inbounded"].includes(current)) return null;
   if (/CANCEL|TERMINATED|CLOSE/.test(text)) return "cancelled";
   if (logistics.signed) return "arrived";
-  if (/CONFIRM_RECEIVE|RECEIVEGOODS|RECEIVED|SIGNED/.test(text)) return "arrived";
-  if (/WAIT_BUYER_RECEIVE|SELLER_SEND|SHIPPED|SENDGOODS/.test(text) || logistics.shipped) return "shipped";
-  if (/WAIT_SELLER_SEND|PAID|PAYED|WAIT_SELLER_DELIVER|SUCCESS/.test(text)) return "paid";
-  if (/WAIT_BUYER_PAY|UNPAID|CREATED|PREVIEW/.test(text)) {
+  if (/CONFIRM_?RECEIVE|RECEIVEGOODS|RECEIVED|SIGNED/.test(text)) return "arrived";
+  if (/WAIT_?BUYER_?RECEIVE|SELLER_?SEND|SHIPPED|SENDGOODS/.test(text) || logistics.shipped) return "shipped";
+  if (/WAIT_?SELLER_?SEND|PAID|PAYED|WAIT_?SELLER_?DELIVER|SUCCESS/.test(text)) return "paid";
+  if (/WAIT_?BUYER_?PAY|UNPAID|CREATED|PREVIEW/.test(text)) {
     return current === "draft" ? "pushed_pending_price" : null;
   }
   return null;
@@ -10969,7 +10958,7 @@ function map1688StatusToLocal(status, currentStatus, logistics = {}) {
 
 function map1688StatusToPaymentStatus(status, currentPaymentStatus) {
   const text = String(status || "").toUpperCase();
-  if (/WAIT_SELLER_SEND|WAIT_BUYER_RECEIVE|PAID|PAYED|SUCCESS|SELLER_SEND|SHIPPED/.test(text)) return "paid";
+  if (/WAIT_?SELLER_?SEND|WAIT_?BUYER_?RECEIVE|PAID|PAYED|SUCCESS|SELLER_?SEND|SHIPPED/.test(text)) return "paid";
   return null;
 }
 
@@ -11181,6 +11170,7 @@ async function get1688PaymentUrlAction({ db, services, payload, actor }) {
     action: "get_1688_payment_url",
     api: PROCUREMENT_APIS.PAYMENT_URL,
     params: apiParams,
+    purchase1688AccountId: optionalString(payload.purchase1688AccountId || payload.purchase_1688_account_id),
   });
   const paymentUrl = extract1688PaymentUrl(rawResponse);
   if (!paymentUrl) throw new Error("1688 没有返回支付链接，请检查订单是否待付款");
@@ -11223,7 +11213,7 @@ function is1688OrderGoneError(error) {
   for (const c of ALIBABA_1688_ORDER_GONE_ERROR_CODES) {
     if (message.includes(`errorCode:${c}`) || message.includes(`"errorCode":"${c}"`) || message.includes(c)) return true;
   }
-  if (/无法根据订单ID获取订单|订单不存在|订单已取消|订单已关闭/.test(message)) return true;
+  if (/无法根据订单ID获取订单|订单不存在|订单已取消|订单已经取消|该订单已经取消|订单已关闭/.test(message)) return true;
   return false;
 }
 
@@ -11548,6 +11538,7 @@ async function import1688OrdersAction({ db, services, payload, actor }) {
     db,
     actor,
     accountId: optionalString(payload.accountId || payload.account_id),
+    purchase1688AccountId: optionalString(payload.purchase1688AccountId || payload.purchase_1688_account_id),
     action: "import_1688_orders",
     api: PROCUREMENT_APIS.ORDER_LIST,
     params: apiParams,
@@ -13535,11 +13526,30 @@ async function performPurchaseActionRuntime(payload = {}) {
     if (payload?.action === "refresh_1688_product_detail") {
       remotePayload = await buildClientProductDetailMockPayload(remotePayload) || remotePayload;
     }
-    const response = await remoteRequest("/api/purchase/action", {
-      method: "POST",
-      body: remotePayload,
-      timeoutMs: payload?.action === "source_1688_image" ? 45000 : 120000,
-    });
+    let response;
+    try {
+      response = await remoteRequest("/api/purchase/action", {
+        method: "POST",
+        body: remotePayload,
+        timeoutMs: payload?.action === "source_1688_image" ? 45000 : 120000,
+      });
+    } catch (error) {
+      if (payload?.action !== "cancel_1688_order" || !is1688OrderGoneError(error)) throw error;
+      response = await remoteRequest("/api/purchase/action", {
+        method: "POST",
+        body: {
+          ...remotePayload,
+          mockCancelResponse: {
+            success: true,
+            alreadyCancelled: true,
+            reason: "remote_order_already_cancelled",
+            remoteError: error?.payload || { message: error?.message || String(error) },
+            at: nowIso(),
+          },
+        },
+        timeoutMs: 120000,
+      });
+    }
     return normalizePurchaseResultPoNumbers(response.result);
   }
   const actor = getCurrentSessionActor(payload?.actor || {});
@@ -13910,14 +13920,39 @@ async function runAuto1688OrderSyncOnce() {
   if (erpState.auto1688OrderSyncRunning) return null;
   erpState.auto1688OrderSyncRunning = true;
   try {
-    return await performPurchaseAction({
-      action: "import_1688_orders",
-      pageSize: 50,
-      autoGenerate: false,
-      limit: 200,
-    }, { role: "admin" });
-  } catch {
-    return null;
+    const accounts = list1688PurchaseAccounts(DEFAULT_COMPANY_ID).accounts
+      .filter((account) => account.status !== "disabled" && account.authorized);
+    const targets = accounts.length ? accounts : [{ id: null, label: "" }];
+    const results = [];
+    for (const account of targets) {
+      try {
+        const result = await performPurchaseAction({
+          action: "import_1688_orders",
+          pageSize: 50,
+          autoGenerate: false,
+          limit: 200,
+          includeWorkbench: false,
+          ...(account.id ? { purchase1688AccountId: account.id } : {}),
+        }, { role: "admin" });
+        results.push({
+          purchase1688AccountId: account.id || null,
+          label: account.label || account.memberId || account.appKey || "",
+          status: "success",
+          importedCount: Number(result?.result?.importedCount || 0),
+        });
+      } catch (error) {
+        results.push({
+          purchase1688AccountId: account.id || null,
+          label: account.label || account.memberId || account.appKey || "",
+          status: "failed",
+          error: error?.message || String(error),
+        });
+      }
+    }
+    return {
+      accountCount: targets.length,
+      results,
+    };
   } finally {
     erpState.auto1688OrderSyncRunning = false;
   }
