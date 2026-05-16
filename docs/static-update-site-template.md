@@ -79,6 +79,8 @@ https://download.example.com/temu-desktop/releases/
 4. 上传 `deploy/static-update-site` 整个目录
 5. 用测试机点一次 `检查更新`
 
+`prepare:update-site` 会先归一化 `release/latest.yml`，确保安装包地址使用相对文件名。这样客户端填写 `/releases/` 目录后，`latest.yml`、安装包和 `.blockmap` 都会从同一个更新源下载。
+
 ## 说明
 
 这套模板的目标不是做官网，而是给桌面客户端提供一个稳定、清楚、低维护的静态更新源。

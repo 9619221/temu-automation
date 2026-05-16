@@ -25,6 +25,7 @@
 1. 更新 [package.json](C:/Users/Administrator/temu-automation/package.json) 里的 `version`
 2. 执行：
    - `npm run dist:win`
+   - 这一步会自动执行 `npm run normalize:update-yml`，把 `release/latest.yml` 里的安装包地址改成相对文件名，避免客户端下载大安装包时绕回 GitHub 直连。
 3. 在 GitHub 仓库里创建一个新的 Release（例如 `v0.1.1`）
 4. 将 [release](C:/Users/Administrator/temu-automation/release) 目录中的这些文件作为 Release assets 上传：
    - `latest.yml`
@@ -46,6 +47,7 @@
 ## 注意事项
 
 - 更新源必须能被客户端直接访问
+- 上传前确认 `latest.yml` 里的 `url` 和 `path` 是 `temu-automation-setup-<version>.exe` 这种相对文件名，不要是 `https://github.com/...exe`。否则检查更新会走镜像，但下载安装包仍会走 GitHub 直连，速度会很慢。
 - 建议把旧版本安装包也保留一段时间，方便回滚
 - 如果版本号没变，客户端不会把它当成新版本
 - 发布后可以先在一台测试机里点一次 `检查更新` 做验证

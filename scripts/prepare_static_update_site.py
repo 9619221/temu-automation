@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -11,12 +12,20 @@ SITE_RELEASES_DIR = SITE_DIR / "releases"
 INDEX_FILE = SITE_DIR / "index.html"
 
 
+def installer_name_from_update_path(value: str) -> str:
+    raw = value.strip().strip("\"'")
+    parsed = urlparse(raw)
+    if parsed.scheme in {"http", "https"}:
+        return Path(unquote(parsed.path)).name
+    return Path(raw.replace("\\", "/")).name
+
+
 def find_latest_installer() -> Path:
     latest_yml = RELEASE_DIR / "latest.yml"
     if latest_yml.exists():
         for line in latest_yml.read_text(encoding="utf-8").splitlines():
             if line.startswith("path: "):
-                installer_name = line.split("path: ", 1)[1].strip()
+                installer_name = installer_name_from_update_path(line.split("path: ", 1)[1])
                 installer = RELEASE_DIR / installer_name
                 if installer.exists():
                     return installer
@@ -46,7 +55,18 @@ def copy_required_files(installer: Path) -> tuple[Path, Path, Path]:
     installer_target = SITE_RELEASES_DIR / installer.name
     blockmap_target = SITE_RELEASES_DIR / blockmap.name
 
-    shutil.copy2(latest_yml, latest_target)
+    latest_content = latest_yml.read_text(encoding="utf-8")
+    latest_content = latest_content.replace(
+        next((line for line in latest_content.splitlines() if line.strip().startswith("- url:")), f"  - url: {installer.name}"),
+        f"  - url: {installer.name}",
+        1,
+    )
+    latest_content = latest_content.replace(
+        next((line for line in latest_content.splitlines() if line.startswith("path: ")), f"path: {installer.name}"),
+        f"path: {installer.name}",
+        1,
+    )
+    latest_target.write_text(latest_content if latest_content.endswith("\n") else f"{latest_content}\n", encoding="utf-8")
     shutil.copy2(installer, installer_target)
     shutil.copy2(blockmap, blockmap_target)
 
