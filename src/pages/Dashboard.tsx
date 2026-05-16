@@ -16,6 +16,7 @@ import {
   WarningOutlined,
 } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
+import ExtensionInstallGuide from "../components/ExtensionInstallGuide";
 import {
   COLLECT_GROUPS,
   COLLECT_TASKS,
@@ -222,6 +223,8 @@ export default function Dashboard() {
           </Tooltip>,
         ].filter(Boolean)}
       />
+
+      <ExtensionInstallGuide />
 
       <div className="app-panel">
         <div className="app-panel__title">

@@ -28,6 +28,7 @@ import { ACTIVE_ACCOUNT_CHANGED_EVENT, readActiveAccountId } from "../../utils/m
 import { COLLECT_TASKS, useCollection } from "../../contexts/CollectionContext";
 import { useErpAuth } from "../../contexts/ErpAuthContext";
 import { canAccessRoute, roleLabel } from "../../utils/erpRoleAccess";
+import ExtensionInstallGuide from "../ExtensionInstallGuide";
 
 const { Content, Header, Sider } = Layout;
 
@@ -180,6 +181,7 @@ export default function AppLayout() {
   }, []);
 
   const noAccount = accounts.length === 0;
+  const showExtensionBanner = canUseCollection && location.pathname !== "/collect";
 
   const accountMenuItems = [
     ...accounts.map((account) => ({
@@ -442,6 +444,10 @@ export default function AppLayout() {
             </Button>
           </div>
         )}
+
+        {showExtensionBanner ? (
+          <ExtensionInstallGuide variant="banner" />
+        ) : null}
 
         <Content
           className="app-layout-content"

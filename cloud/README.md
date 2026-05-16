@@ -22,6 +22,7 @@
 | `GET /api/dashboard/stats` | ✓ | 总览 |
 | `GET /api/dashboard/events` | ✓ | 时序事件查询 |
 | `GET /api/dashboard/event/:id/body` | ✓ | 单条原始 body |
+| `GET /api/dashboard/agent` | ✓ | 扩展心跳 / 安装状态 |
 
 ## 数据库
 

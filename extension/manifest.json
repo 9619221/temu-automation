@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Temu 多店监控",
-  "version": "0.1.0",
+  "version": "0.3.7",
   "description": "在 Temu 卖家后台后台抓取业务接口数据并上传云端，供多店统一汇总。",
   "permissions": [
     "storage",

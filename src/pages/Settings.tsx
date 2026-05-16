@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
-import { Form, InputNumber, Switch, Button, Tag, Progress, Space, Typography, message } from "antd";
+import { Form, Input, InputNumber, Switch, Button, Tag, Progress, Space, Typography, message } from "antd";
 import { CloudDownloadOutlined, CheckCircleOutlined, SyncOutlined, ReloadOutlined, LinkOutlined, ApiOutlined } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
 import { useErpAuth } from "../contexts/ErpAuthContext";
+import { clearCloudConfig, loadCloudConfig, saveCloudConfig } from "../utils/cloudClient";
+import { normalizeExtensionInstallUrl, openExternalUrl } from "../utils/extensionInstall";
 
 const { Text } = Typography;
 
@@ -76,12 +78,42 @@ export default function Settings() {
     store?.get("temu_app_settings").then((data: any) => {
       if (data && typeof data === "object") form.setFieldsValue(data);
     }).catch(() => {});
+    loadCloudConfig().then((cfg) => {
+      if (cfg) {
+        form.setFieldsValue({
+          cloudEndpoint: cfg.endpoint,
+          cloudToken: cfg.token,
+        });
+      }
+    }).catch(() => {});
   }, []);
 
   const handleSave = async () => {
     const values = form.getFieldsValue();
     await store?.set("temu_app_settings", values);
+    if (values.cloudEndpoint && values.cloudToken) {
+      await saveCloudConfig({
+        endpoint: values.cloudEndpoint,
+        token: values.cloudToken,
+      });
+    } else if (!values.cloudEndpoint && !values.cloudToken) {
+      await clearCloudConfig();
+    }
     message.success("设置已保存");
+  };
+
+  const handleOpenExtensionInstall = async () => {
+    const url = normalizeExtensionInstallUrl(form.getFieldValue("extensionPackageUrl"))
+      || normalizeExtensionInstallUrl(form.getFieldValue("extensionInstallUrl"));
+    if (!url) {
+      message.warning("请先填写有效的扩展文件或 Chrome Web Store 安装链接");
+      return;
+    }
+    try {
+      await openExternalUrl(url);
+    } catch (e: any) {
+      message.error(e?.message || "打开扩展链接失败");
+    }
   };
 
   const handleCheckUpdate = async () => {
@@ -256,6 +288,37 @@ export default function Settings() {
           screenshotOnError: true,
         }}
       >
+        <div className="app-panel" style={{ marginBottom: 16 }}>
+          <div className="app-panel__title">
+            <div>
+              <div className="app-panel__title-main">浏览器扩展安装</div>
+              <div className="app-panel__title-sub">用于在数据采集页引导用户安装 Chrome 采集助手，并检测扩展心跳状态。</div>
+            </div>
+          </div>
+          <Space direction="vertical" style={{ width: "100%" }} size={10}>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              正式分发建议用 Chrome Web Store 非公开链接；内测或临时分发可以填扩展文件下载链接，让用户下载压缩包后手动“加载已解压的扩展程序”。
+            </Text>
+            <Form.Item name="extensionPackageUrl" label="扩展文件下载链接" help="指向 .zip 压缩包；用户下载后需要先解压，再在 Chrome 扩展管理页加载解压后的目录。">
+              <Input placeholder="https://your-cloud.example.com/downloads/temu-monitor-extension.zip" />
+            </Form.Item>
+            <Form.Item name="extensionInstallUrl" label="扩展安装链接" help="示例：https://chromewebstore.google.com/detail/...">
+              <Input placeholder="https://chromewebstore.google.com/detail/..." />
+            </Form.Item>
+            <Form.Item name="cloudEndpoint" label="云端地址" help="用于读取 /api/dashboard/agent 心跳状态">
+              <Input placeholder="https://your-cloud.example.com" />
+            </Form.Item>
+            <Form.Item name="cloudToken" label="云端 Token">
+              <Input.Password placeholder="粘贴云端 JWT" />
+            </Form.Item>
+            <Space wrap>
+              <Button icon={<LinkOutlined />} onClick={handleOpenExtensionInstall}>
+                测试打开扩展链接
+              </Button>
+            </Space>
+          </Space>
+        </div>
+
         <div className="app-panel" style={{ marginBottom: 16 }}>
           <div className="app-panel__title">
             <div className="app-panel__title-main">浏览器设置</div>

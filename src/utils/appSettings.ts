@@ -14,6 +14,8 @@ export interface AppSettings {
   priceReviewMarginRatio: number;            // 毛利倍率，默认 1.75
   priceReview1688ProfilePath: string;        // 1688 图搜专用 Chrome user-data-dir
   autoImageSwapRootDir: string;              // 批量替换图片：本地图片根目录（子文件夹按 SPU/SKC 命名）
+  extensionPackageUrl: string;               // 浏览器扩展 ZIP/压缩包下载链接
+  extensionInstallUrl: string;                // Chrome Web Store 扩展安装链接
 }
 
 const LEGACY_UPDATE_FEED_URLS = new Set([
@@ -52,6 +54,8 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   priceReviewMarginRatio: 1.75,
   priceReview1688ProfilePath: "",
   autoImageSwapRootDir: "",
+  extensionPackageUrl: "",
+  extensionInstallUrl: "",
 };
 
 export function normalizeAppSettings(raw: unknown): AppSettings {
@@ -80,5 +84,11 @@ export function normalizeAppSettings(raw: unknown): AppSettings {
     autoImageSwapRootDir: typeof data.autoImageSwapRootDir === "string"
       ? data.autoImageSwapRootDir
       : DEFAULT_APP_SETTINGS.autoImageSwapRootDir,
+    extensionPackageUrl: typeof data.extensionPackageUrl === "string"
+      ? data.extensionPackageUrl
+      : DEFAULT_APP_SETTINGS.extensionPackageUrl,
+    extensionInstallUrl: typeof data.extensionInstallUrl === "string"
+      ? data.extensionInstallUrl
+      : DEFAULT_APP_SETTINGS.extensionInstallUrl,
   };
 }
