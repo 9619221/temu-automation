@@ -4514,8 +4514,9 @@ async function tickPriceReviewAutoScan() {
   _priceReviewScanning = true;
   try {
     const marginRatio = typeof s.priceReviewMarginRatio === "number" ? s.priceReviewMarginRatio : 1.75;
+    const profilePath = typeof s.priceReview1688ProfilePath === "string" ? s.priceReview1688ProfilePath.trim() : "";
     const credentials = getActiveWorkerCredentials();
-    await sendCmd("price_review_scan", { marginRatio, credentials }, { timeoutMs: 30 * 60 * 1000 });
+    await sendCmd("price_review_scan", { marginRatio, profilePath, credentials }, { timeoutMs: 30 * 60 * 1000 });
     try {
       const wins = BrowserWindow.getAllWindows();
       for (const w of wins) w.webContents.send("price-review:auto-scan-done", { at: Date.now() });

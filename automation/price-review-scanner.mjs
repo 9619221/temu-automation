@@ -61,6 +61,7 @@ export async function scanPriceReview(opts = {}) {
     skip1688Search = false,
     onProgress = () => {},
   } = opts;
+  const profilePath = typeof opts.profilePath === "string" ? opts.profilePath.trim() : "";
 
   const snapshotId = `pr_${Date.now()}`;
   const scannedAt = Date.now();
@@ -129,7 +130,7 @@ export async function scanPriceReview(opts = {}) {
     // 鎵嬪～鍊兼案杩滀笉琚鐩栵紱1688 鍥炬悳浣跨敤鐙珛鎸佷箙鍖栫櫥褰曚細璇濓紝閬垮厤鍜?Temu 涓婁笅鏂囦覆椤?
     if (costManual == null && cost1688 == null && !skip1688Search && r.mainImage) {
       try {
-        const searched = await fetch1688CostByImage(r.mainImage);
+        const searched = await fetch1688CostByImage(r.mainImage, { profilePath: profilePath || undefined });
         if (searched && searched.cost != null) {
           cost1688 = searched.cost;
           costSource = searched.source || "1688_image_search";

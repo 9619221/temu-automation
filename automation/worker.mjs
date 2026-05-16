@@ -17652,6 +17652,7 @@ async function runAutoImageSwap(params) {
 async function handlePriceReviewScan(params) {
   const marginRatio = typeof params?.marginRatio === "number" ? params.marginRatio : 1.75;
   const skip1688Search = !!params?.skip1688Search;
+  const profilePath = typeof params?.profilePath === "string" ? params.profilePath.trim() : "";
 
   await _ensureBrowser();
 
@@ -17661,6 +17662,7 @@ async function handlePriceReviewScan(params) {
     return await scanPriceReview({
       marginRatio,
       skip1688Search,
+      profilePath,
       onProgress: (stage, detail) => logSilent(`[price-review] ${stage}`, detail),
     });
   } finally {

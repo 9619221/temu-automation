@@ -24,6 +24,7 @@ import {
   ReloadOutlined,
   SyncOutlined,
 } from "@ant-design/icons";
+import { APP_SETTINGS_KEY, normalizeAppSettings } from "../utils/appSettings";
 
 const { Text } = Typography;
 
@@ -60,7 +61,7 @@ declare global {
   }
 }
 
-const MARGIN_RATIO = 1.75;
+const DEFAULT_PRICE_REVIEW_SETTINGS = normalizeAppSettings(null);
 
 export default function PriceReview() {
   const [rows, setRows] = useState<PriceReviewRow[]>([]);
@@ -69,9 +70,29 @@ export default function PriceReview() {
   const [filter, setFilter] = useState<Filter>("all");
   const [loading, setLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
+  const [appSettings, setAppSettings] = useState(DEFAULT_PRICE_REVIEW_SETTINGS);
   const [manualCostModal, setManualCostModal] = useState<{ open: boolean; sku: PriceReviewRow | null; value: number | null }>({
     open: false, sku: null, value: null,
   });
+  const marginRatio = appSettings.priceReviewMarginRatio;
+  const profilePath = appSettings.priceReview1688ProfilePath.trim();
+  const autoScanText = appSettings.priceReviewAutoScanEnabled
+    ? `每 ${appSettings.priceReviewScanIntervalMinutes} 分钟自动扫描「价格申报中」的 SKU`
+    : "自动扫描未开启";
+
+  useEffect(() => {
+    const store = window.electronAPI?.store;
+    if (!store) return;
+    let cancelled = false;
+
+    store.get(APP_SETTINGS_KEY).then((raw: unknown) => {
+      if (!cancelled) setAppSettings(normalizeAppSettings(raw));
+    }).catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const load = useCallback(async (nextFilter: Filter = filter) => {
     if (!window.electronAPI?.priceReview) {
@@ -111,7 +132,10 @@ export default function PriceReview() {
   const handleScanNow = useCallback(async () => {
     setScanning(true);
     try {
-      await window.electronAPI.priceReview.scanNow({ marginRatio: MARGIN_RATIO });
+      await window.electronAPI.priceReview.scanNow({
+        marginRatio,
+        profilePath: profilePath || undefined,
+      });
       message.success("扫描完成");
       await load(filter);
     } catch (e: any) {
@@ -119,16 +143,16 @@ export default function PriceReview() {
     } finally {
       setScanning(false);
     }
-  }, [filter, load]);
+  }, [filter, load, marginRatio, profilePath]);
 
   const handle1688Login = useCallback(async () => {
     try {
-      await window.electronAPI.priceReview.open1688Login();
+      await window.electronAPI.priceReview.open1688Login(profilePath || undefined);
       message.info("已打开 1688 登录页，扫码登录后关闭窗口即可");
     } catch (e: any) {
       message.error("打开 1688 登录页失败：" + (e?.message || String(e)));
     }
-  }, []);
+  }, [profilePath]);
 
   const handleSaveManualCost = useCallback(async () => {
     const { sku, value } = manualCostModal;
@@ -208,13 +232,13 @@ export default function PriceReview() {
       },
     },
     {
-      title: `×${MARGIN_RATIO}`,
+      title: `×${marginRatio}`,
       width: 100,
       align: "right" as const,
       render: (_: any, r: PriceReviewRow) => {
         const effective = r.cost_manual != null ? r.cost_manual : r.cost_1688;
         if (effective == null) return "-";
-        return `¥${(effective * MARGIN_RATIO).toFixed(2)}`;
+        return `¥${(effective * marginRatio).toFixed(2)}`;
       },
     },
     {
@@ -271,7 +295,7 @@ export default function PriceReview() {
         </Space>
       ),
     },
-  ], [handleClearManualCost]);
+  ], [handleClearManualCost, marginRatio]);
 
   return (
     <div style={{ padding: 16 }}>
@@ -295,7 +319,7 @@ export default function PriceReview() {
               <Button onClick={handle1688Login}>1688 登录</Button>
             </Space>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              每 30 分钟自动扫描「价格申报中」的 SKU · 毛利阈值 ×{MARGIN_RATIO}
+              {autoScanText} · 毛利阈值 ×{marginRatio}
             </Text>
           </Space>
         </Space>
