@@ -447,8 +447,8 @@ const PURCHASE_FLOW_PAGES = [
   },
   {
     hash: "/qc-outbound",
-    expectedTitle: "抽检、锁定/释放库存、出库计划",
-    label: "质检发仓",
+    expectedTitle: "可出库批次与发货单",
+    label: "出库中心",
   },
 ];
 

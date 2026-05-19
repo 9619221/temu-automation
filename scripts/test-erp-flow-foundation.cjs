@@ -144,25 +144,6 @@ function insertSeedData(db) {
   insert();
 }
 
-function insertQcInspection(db, batchId) {
-  const now = nowIso();
-  db.prepare(`
-    INSERT INTO erp_qc_inspections (
-      id, account_id, batch_id, sku_id, status, suggested_sample_qty,
-      actual_sample_qty, defective_qty, defect_rate, inspector_id,
-      created_at, updated_at
-    )
-    VALUES (
-      'qc_demo', 'acct_demo', @batch_id, 'sku_demo', 'pending_qc', 20,
-      0, 0, 0, @inspector_id, @now, @now
-    )
-  `).run({
-    batch_id: batchId,
-    inspector_id: ACTORS.ops.id,
-    now,
-  });
-}
-
 function insertOutboundShipment(db, batchId) {
   const now = nowIso();
   db.prepare(`
@@ -334,24 +315,12 @@ function runFlow() {
       locationCode: "A-01",
       actor: ACTORS.warehouse,
     });
-    assert.equal(batch.available_qty, 0);
-    assert.equal(batch.blocked_qty, 100);
-    assert.equal(batch.qc_status, BATCH_QC_STATUS.PENDING);
+    // 已去掉入库 QC 闸门：入库后批次直接进可用桶、qc_status=passed，可立即出库。
+    assert.equal(batch.available_qty, 100);
+    assert.equal(batch.blocked_qty, 0);
+    assert.equal(batch.qc_status, BATCH_QC_STATUS.PASSED);
 
     services.purchase.markInbounded("po_demo", ACTORS.warehouse);
-    insertQcInspection(db, batch.id);
-    services.qc.startInspection("qc_demo", ACTORS.ops);
-    const qcResult = services.qc.submitByPercent({
-      id: "qc_demo",
-      actualSampleQty: 20,
-      defectiveQty: 1,
-      actor: ACTORS.ops,
-    });
-    assert.equal(qcResult.recommendedStatus, QC_INSPECTION_STATUS.PASSED_WITH_OBSERVATION);
-    const batchAfterQc = services.inventory.getBatch(batch.id);
-    assert.equal(batchAfterQc.available_qty, 100);
-    assert.equal(batchAfterQc.blocked_qty, 0);
-    assert.equal(batchAfterQc.qc_status, BATCH_QC_STATUS.PASSED_WITH_OBSERVATION);
 
     insertOutboundShipment(db, batch.id);
     services.outbound.submitOutbound("outbound_demo", ACTORS.ops);
@@ -394,7 +363,6 @@ function runFlow() {
       return acc;
     }, {});
     assert.equal(ledgerTypes[INVENTORY_LEDGER_TYPE.PURCHASE_INBOUND], 1);
-    assert.equal(ledgerTypes[INVENTORY_LEDGER_TYPE.QC_RELEASE], 1);
     assert.equal(ledgerTypes[INVENTORY_LEDGER_TYPE.OUTBOUND_RESERVE], 1);
     assert.equal(ledgerTypes[INVENTORY_LEDGER_TYPE.OUTBOUND_TO_TEMU], 1);
 
