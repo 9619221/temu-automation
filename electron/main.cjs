@@ -600,17 +600,16 @@ function filterAutoPricingProductTable(inputPath) {
 
 // ============ 自动更新 ============
 
-// 走 gh-proxy.com 反代 GitHub Release,避免大陆用户直连 github.com 超时
-// /releases/latest/download/ 是 GitHub 的稳定别名,不用每次发版改 URL
-const DEFAULT_UPDATE_FEED_URL = "https://gh-proxy.com/https://github.com/9619221/temu-automation/releases/latest/download/";
-const UPDATE_MANUAL_DOWNLOAD_URL = "https://gh-proxy.com/https://github.com/9619221/temu-automation/releases/latest";
+// 默认更新源走自建服务器 erp.temu.chat,完全可控,不依赖 GitHub + gh-proxy 第三方反代
+// 用户仍可在设置里通过 updateFeedUrl 覆盖
+const DEFAULT_UPDATE_FEED_URL = "https://erp.temu.chat/releases/";
+const UPDATE_MANUAL_DOWNLOAD_URL = "https://erp.temu.chat/releases/";
 const UPDATE_SETTINGS_KEY = "temu_app_settings";
 const UPDATE_UPDATER_SESSION_PARTITION = "electron-updater";
 const UPDATE_CONFIG_FILE_NAME = "app-update.yml";
 const UPDATE_CONFIG_CONTENT = [
-  "owner: '9619221'",
-  "repo: temu-automation",
-  "provider: github",
+  "provider: generic",
+  "url: https://erp.temu.chat/releases/",
   "updaterCacheDirName: temu-automation-updater",
   "",
 ].join("\n");
@@ -755,7 +754,7 @@ async function configureAutoUpdater() {
   autoUpdater.autoInstallOnAppQuit = true;
   const updateNetwork = await applyAutoUpdaterNetworkSettings();
   broadcastUpdateState({
-    message: updateConfig?.generated ? "更新源: gh-proxy 镜像（已修复本机更新配置）" : "更新源: gh-proxy 镜像",
+    message: updateConfig?.generated ? "更新源: 官方服务器（已修复本机更新配置）" : "更新源: 官方服务器",
     manualDownloadUrl: UPDATE_MANUAL_DOWNLOAD_URL,
     feedUrl: updateNetwork.feedUrl,
     proxyRules: updateNetwork.proxyRules,
