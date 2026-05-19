@@ -30,6 +30,7 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/purchase": ["admin", "manager", "operations", "buyer", "finance"],
   "/api/purchase/workbench": ["admin", "manager", "operations", "buyer", "finance"],
   "/api/purchase/action": ["admin", "manager", "operations", "buyer", "finance"],
+  "/api/temu/sales-sync": ["admin", "manager", "operations"],
   "/warehouse": ["admin", "manager", "warehouse"],
   "/api/warehouse/workbench": ["admin", "manager", "warehouse"],
   "/api/warehouse/action": ["admin", "manager", "warehouse"],
@@ -3208,6 +3209,26 @@ async function handlePurchaseActionRequest({ req, res, session, performPurchaseA
   }
 }
 
+async function handleTemuSalesSyncRequest({ req, res, db }) {
+  if (req.method !== "POST") {
+    writeJson(res, 405, { ok: false, error: "Method not allowed" });
+    return;
+  }
+
+  try {
+    const payload = await readLoginPayload(req, 8 * 1024 * 1024);
+    const { TemuSalesBridge } = require("./services/temuSalesBridge.cjs");
+    const result = new TemuSalesBridge({ db }).sync(payload || {});
+    writeJson(res, 200, { ok: true, result });
+  } catch (error) {
+    writeJson(res, error?.statusCode || 400, {
+      ok: false,
+      error: error?.message || String(error),
+      code: error?.code || null,
+    });
+  }
+}
+
 async function handleWarehouseActionRequest({ req, res, session, performWarehouseAction }) {
   const wantsJson = String(req.headers.accept || "").includes("application/json")
     || String(req.headers["content-type"] || "").includes("application/json");
@@ -3657,6 +3678,15 @@ async function handleRequest({
         res,
         session,
         performPurchaseAction,
+      });
+      return;
+    }
+
+    if (pathname === "/api/temu/sales-sync") {
+      await handleTemuSalesSyncRequest({
+        req,
+        res,
+        db,
       });
       return;
     }

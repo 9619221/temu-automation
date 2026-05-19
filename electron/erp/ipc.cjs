@@ -14061,6 +14061,23 @@ function registerErpIpcHandlers(ipcMain) {
     assertHostMode("Migration");
     return rerunMigrations();
   });
+  ipcMain.handle("erp:sync-temu-sales", async (_event, payload) => {
+    try {
+      if (isClientMode()) {
+        return await remoteRequest("/api/temu/sales-sync", {
+          method: "POST",
+          body: payload || {},
+        });
+      }
+      requireErp();
+      const { TemuSalesBridge } = require("./services/temuSalesBridge.cjs");
+      const bridge = new TemuSalesBridge({ db: erpState.db });
+      const result = bridge.sync(payload || {});
+      return { ok: true, result };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
   ipcMain.handle("erp:get-enums", () => enums);
   ipcMain.handle("erp:auth:get-status", () => getAuthStatus());
   ipcMain.handle("erp:auth:get-current-user", () => (

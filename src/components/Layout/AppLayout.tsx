@@ -52,7 +52,10 @@ const menuItems = [
   {
     key: "group-data",
     label: "数据",
-    children: [{ key: "/collect", icon: <SyncOutlined />, label: "数据采集" }],
+    children: [
+      { key: "/collect", icon: <SyncOutlined />, label: "数据采集" },
+      { key: "/temu-robots", icon: <DatabaseOutlined />, label: "TEMU 机器人" },
+    ],
   },
   {
     key: "group-operations",

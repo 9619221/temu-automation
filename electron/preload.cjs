@@ -221,6 +221,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   erp: {
     getStatus: () => ipcRenderer.invoke("erp:get-status"),
     runMigrations: () => ipcRenderer.invoke("erp:run-migrations"),
+    syncTemuSales: (payload) => ipcRenderer.invoke("erp:sync-temu-sales", payload || {}),
     getEnums: () => ipcRenderer.invoke("erp:get-enums"),
     client: {
       getStatus: () => ipcRenderer.invoke("erp:client:get-status"),

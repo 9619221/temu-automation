@@ -37,6 +37,7 @@ const Logs = lazyWithPreload(() => import("./pages/Logs"));
 const CompetitorAnalysis = lazyWithPreload(() => import("./pages/CompetitorAnalysis"));
 const PriceReview = lazyWithPreload(() => import("./pages/PriceReview"));
 const ErpDebug = lazyWithPreload(() => import("./pages/ErpDebug"));
+const TemuRobots = lazyWithPreload(() => import("./pages/TemuRobots"));
 const ProductMasterData = lazyWithPreload(() => import("./pages/ProductMasterData"));
 const PurchaseCenter = lazyWithPreload(() => import("./pages/PurchaseCenter"));
 const AlibabaMapping = lazyWithPreload(() => import("./pages/AlibabaMapping"));
@@ -256,6 +257,7 @@ function App() {
             <Route path="image-studio-gpt" element={<RoleRoute path="/image-studio-gpt"><ImageStudioGPT /></RoleRoute>} />
             <Route path="auto-image-swap" element={<RoleRoute path="/auto-image-swap"><AutoImageSwap /></RoleRoute>} />
             <Route path="collect" element={<RoleRoute path="/collect"><Dashboard /></RoleRoute>} />
+            <Route path="temu-robots" element={<RoleRoute path="/collect"><TemuRobots /></RoleRoute>} />
             <Route path="accounts" element={<RoleRoute path="/accounts"><AccountManager /></RoleRoute>} />
             <Route path="tasks" element={<Navigate to="/work-items" replace />} />
             <Route path="competitor" element={<RoleRoute path="/competitor"><CompetitorAnalysis /></RoleRoute>} />
