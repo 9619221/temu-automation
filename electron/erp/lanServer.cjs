@@ -2873,6 +2873,7 @@ function createRequestHandler(options = {}) {
       refresh1688AccessToken,
       receive1688Message,
       ingestJushuitanExtensionBatch,
+      list1688PurchaseAccounts,
       validateSessionUser,
       verifyLogin,
     }).catch((error) => {
@@ -3629,6 +3630,7 @@ async function handleRequest({
   refresh1688AccessToken,
   receive1688Message,
   ingestJushuitanExtensionBatch,
+  list1688PurchaseAccounts,
   validateSessionUser,
   verifyLogin,
 }) {
