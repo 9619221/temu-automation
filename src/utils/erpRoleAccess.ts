@@ -33,6 +33,7 @@ const ROUTE_ROLES: Record<string, string[]> = {
   "/1688-mapping": ["admin", "manager", "operations", "buyer"],
   "/purchase-center": ["admin", "manager", "operations", "buyer", "finance"],
   "/warehouse-center": ["admin", "manager", "warehouse"],
+  "/temu-stock-orders": ["admin", "manager", "operations", "warehouse"],
   "/qc-outbound": ["admin", "manager", "operations", "warehouse"],
   "/work-items": ["admin", "manager", "operations", "buyer", "finance", "warehouse", "viewer"],
   "/shop": ["admin", "manager", "operations", "viewer"],

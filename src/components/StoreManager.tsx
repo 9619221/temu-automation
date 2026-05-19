@@ -301,6 +301,7 @@ export default function StoreManager({ onChanged }: StoreManagerProps) {
   const [storeAddressForm] = Form.useForm<StoreAddressValues>();
   const [accounts, setAccounts] = useState<StoreAccountRow[]>(() => cachedData.accounts || []);
   const [alibaba1688Addresses, setAlibaba1688Addresses] = useState<Alibaba1688AddressRow[]>(() => cachedData.alibaba1688Addresses || []);
+  const [temuAccounts, setTemuAccounts] = useState<{ id: string; name: string }[]>([]);
   const [loadedOnce, setLoadedOnce] = useState(() => hasPageCache(cachedData));
   const [loading, setLoading] = useState(false);
   const [addressLoading, setAddressLoading] = useState(false);
@@ -333,6 +334,18 @@ export default function StoreManager({ onChanged }: StoreManagerProps) {
       setAccounts(nextAccountRows);
       const nextAddresses = get1688AddressRows(purchaseWorkbench);
       if (nextAddresses.length) setAlibaba1688Addresses(nextAddresses);
+      try {
+        const store = window.electronAPI?.store;
+        if (store) {
+          const raw = await store.get("temu_accounts");
+          const list = Array.isArray(raw) ? raw : [];
+          setTemuAccounts(list.filter((a) => a && a.id).map((a) => ({ id: String(a.id), name: String(a.name || a.id) })));
+        } else {
+          setTemuAccounts([]);
+        }
+      } catch {
+        setTemuAccounts([]);
+      }
       setLoadedOnce(true);
       writePageCache<StoreManagerCache>(STORE_MANAGER_CACHE_KEY, {
         generatedAt: new Date().toISOString(),
@@ -392,10 +405,11 @@ export default function StoreManager({ onChanged }: StoreManagerProps) {
 
   const handleCreateAccount = async () => {
     if (!erp) return;
-    const values = await accountForm.validateFields() as StoreAddressValues & { name: string; status?: string };
+    const values = await accountForm.validateFields() as StoreAddressValues & { name: string; status?: string; temuAccountId?: string };
     setSubmitting("account");
     try {
       const account = await erp.account.upsert({
+        ...(values.temuAccountId ? { id: String(values.temuAccountId) } : {}),
         name: values.name,
         status: values.status || "online",
         source: "purchase_center",
@@ -597,6 +611,21 @@ export default function StoreManager({ onChanged }: StoreManagerProps) {
             <Input />
           </Form.Item>
           <Row gutter={12}>
+            <Col xs={24} md={10}>
+              <Form.Item name="temuAccountId" label="关联采集店铺（可选，建议选）">
+                <Select
+                  allowClear
+                  showSearch
+                  optionFilterProp="label"
+                  placeholder="从已采集的 Temu 店铺中选择，使账号与采集数据同源"
+                  options={temuAccounts.map((a) => ({ value: a.id, label: a.name }))}
+                  onChange={(v) => {
+                    const hit = temuAccounts.find((x) => x.id === v);
+                    if (hit) accountForm.setFieldsValue({ name: hit.name });
+                  }}
+                />
+              </Form.Item>
+            </Col>
             <Col xs={24} md={10}>
               <Form.Item name="name" label="店铺名称" rules={[{ required: true, message: "请输入店铺名称" }]}>
                 <Input placeholder="例如：主店铺" />
