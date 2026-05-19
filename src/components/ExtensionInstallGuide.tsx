@@ -5,9 +5,7 @@ import {
   CheckCircleOutlined,
   ChromeOutlined,
   CloudSyncOutlined,
-  DownloadOutlined,
   ReloadOutlined,
-  SettingOutlined,
   WarningOutlined,
 } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
@@ -17,7 +15,7 @@ import {
   type AgentHeartbeat,
   type CloudConsoleConfig,
 } from "../utils/cloudClient";
-import { loadExtensionInstallConfig, openExternalUrl } from "../utils/extensionInstall";
+import { openExternalUrl } from "../utils/extensionInstall";
 
 const { Text } = Typography;
 const ONLINE_WINDOW_MS = 90_000;
@@ -30,8 +28,6 @@ interface ExtensionInstallGuideProps {
 
 interface ExtensionGuideState {
   loading: boolean;
-  installUrl: string;
-  packageUrl: string;
   cloudConfig: CloudConsoleConfig | null;
   agents: AgentHeartbeat[];
   error: string;
@@ -69,8 +65,6 @@ export default function ExtensionInstallGuide({ variant = "panel" }: ExtensionIn
   const navigate = useNavigate();
   const [state, setState] = useState<ExtensionGuideState>({
     loading: true,
-    installUrl: "",
-    packageUrl: "",
     cloudConfig: null,
     agents: [],
     error: "",
@@ -81,15 +75,10 @@ export default function ExtensionInstallGuide({ variant = "panel" }: ExtensionIn
       setState((prev) => ({ ...prev, loading: true, error: "" }));
     }
     try {
-      const [installConfig, cloudConfig] = await Promise.all([
-        loadExtensionInstallConfig(),
-        loadCloudConfig(),
-      ]);
+      const cloudConfig = await loadCloudConfig();
       const agents = cloudConfig ? await fetchAgentHeartbeats(cloudConfig, { limit: 160 }) : [];
       setState({
         loading: false,
-        installUrl: installConfig.storeUrl,
-        packageUrl: installConfig.packageUrl,
         cloudConfig,
         agents,
         error: "",
@@ -124,47 +113,7 @@ export default function ExtensionInstallGuide({ variant = "panel" }: ExtensionIn
       ? { label: "采集助手已连接", color: "success" as const, icon: <CheckCircleOutlined /> }
       : hasAnyAgent
         ? { label: "采集助手离线", color: "warning" as const, icon: <WarningOutlined /> }
-        : { label: "未检测到采集助手", color: "warning" as const, icon: <WarningOutlined /> };
-
-  const hasPackageUrl = Boolean(state.packageUrl);
-  const hasStoreUrl = Boolean(state.installUrl);
-  const primaryInstallLabel = hasPackageUrl ? "下载扩展文件" : "安装采集助手";
-  const primaryInstallDisabled = !hasPackageUrl && !hasStoreUrl;
-  const openPrimaryInstall = async () => {
-    const targetUrl = state.packageUrl || state.installUrl;
-    if (!targetUrl) {
-      message.warning("请先在设置里配置扩展文件或 Chrome Web Store 安装链接");
-      navigate("/settings");
-      return;
-    }
-    try {
-      await openExternalUrl(targetUrl);
-    } catch (error: any) {
-      message.error(error?.message || "打开扩展链接失败");
-    }
-  };
-
-  const openStoreInstall = async () => {
-    if (!state.installUrl) {
-      message.warning("请先在设置里配置 Chrome Web Store 安装链接");
-      navigate("/settings");
-      return;
-    }
-    try {
-      await openExternalUrl(state.installUrl);
-    } catch (error: any) {
-      message.error(error?.message || "打开商店安装页失败");
-    }
-  };
-
-  const copyExtensionsUrl = async () => {
-    try {
-      await navigator.clipboard.writeText("chrome://extensions");
-      message.success("已复制 chrome://extensions");
-    } catch {
-      message.info("请手动在 Chrome 地址栏输入 chrome://extensions");
-    }
-  };
+        : { label: "等待采集助手上线", color: "warning" as const, icon: <WarningOutlined /> };
 
   const openTemuSeller = async () => {
     try {
@@ -180,16 +129,16 @@ export default function ExtensionInstallGuide({ variant = "panel" }: ExtensionIn
     return (
       <div className="extension-install-banner">
         <ChromeOutlined style={{ color: "#1677ff", fontSize: 16 }} />
-        <span style={{ fontWeight: 700, color: "var(--color-text)", fontSize: 13 }}>安装采集助手：</span>
+        <span style={{ fontWeight: 700, color: "var(--color-text)", fontSize: 13 }}>采集助手：</span>
         <Text type="secondary" style={{ fontSize: 13 }}>
-          需要安装 Chrome 扩展并打开 Temu 卖家后台，系统才会持续收到店铺数据。
+          采集助手随本软件自动安装。若未连接，请重启 Chrome / Edge，再打开 Temu 卖家后台。
         </Text>
         <Tag color={status.color} icon={status.icon} style={{ borderRadius: 999, margin: 0 }}>
           {status.label}
         </Tag>
         <Space size={8} wrap style={{ marginLeft: "auto" }}>
-          <Button size="small" icon={<DownloadOutlined />} onClick={openPrimaryInstall} disabled={primaryInstallDisabled}>
-            {primaryInstallLabel}
+          <Button size="small" icon={<ApiOutlined />} onClick={openTemuSeller}>
+            打开 Temu 后台
           </Button>
           <Button size="small" type="link" onClick={() => navigate("/collect")} style={{ paddingInline: 0 }}>
             查看指引
@@ -211,7 +160,7 @@ export default function ExtensionInstallGuide({ variant = "panel" }: ExtensionIn
         <div>
           <div className="app-panel__title-main">浏览器采集助手</div>
           <div className="app-panel__title-sub">
-            安装扩展后，在 Temu 卖家后台正常浏览页面，接口数据会自动进入云端队列。
+            采集助手已随本软件自动安装，在 Temu 卖家后台正常浏览页面，接口数据会自动进入云端队列。
           </div>
         </div>
         <Space size={8} wrap>
@@ -225,28 +174,27 @@ export default function ExtensionInstallGuide({ variant = "panel" }: ExtensionIn
       <div className="extension-install-guide__body">
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
           <Space size={8} wrap>
-            <Tag icon={<DownloadOutlined />} style={{ borderRadius: 999, padding: "3px 10px", margin: 0 }}>
-              1 {hasPackageUrl ? "下载并解压扩展文件" : "安装扩展"}
+            <Tag icon={<CheckCircleOutlined />} style={{ borderRadius: 999, padding: "3px 10px", margin: 0 }}>
+              1 已随软件自动安装（无需手动操作）
             </Tag>
-            <Tag icon={<ApiOutlined />} style={{ borderRadius: 999, padding: "3px 10px", margin: 0 }}>
-              2 {hasPackageUrl ? "加载已解压扩展" : "打开 Temu 后台"}
+            <Tag icon={<ChromeOutlined />} style={{ borderRadius: 999, padding: "3px 10px", margin: 0 }}>
+              2 重启 Chrome / Edge 让策略生效
             </Tag>
             <Tag icon={<CloudSyncOutlined />} style={{ borderRadius: 999, padding: "3px 10px", margin: 0 }}>
-              3 等待心跳变绿
+              3 打开 Temu 后台，等心跳变绿
             </Tag>
           </Space>
 
           <Text type="secondary" style={{ lineHeight: 1.8 }}>
-            {hasPackageUrl
-              ? "点击下载扩展文件后，先解压到一个固定文件夹。然后在 Chrome 打开 chrome://extensions，开启开发者模式，点“加载已解压的扩展程序”，选择解压后包含 manifest.json 的文件夹。"
-              : hasStoreUrl
-                ? "点击安装后会跳到 Chrome Web Store。安装完成后，回到 Temu 卖家后台刷新一次页面，通常 30 秒内这里会显示已连接。"
-                : "管理员还没有配置扩展文件或商店安装链接。先在系统设置里填入下载链接，再让用户从这里安装。"}
+            采集助手由本软件通过浏览器策略强制安装，首次安装后需完全退出并重启 Chrome / Edge
+            才会生效（通常重启后 1-2 分钟内出现在浏览器扩展列表）。它在浏览器扩展页由“企业策略”
+            管理、显示为不可手动删除，属正常现象。随后登录并停留在 Temu 卖家后台即可持续采集。
           </Text>
 
           {!state.cloudConfig ? (
             <Text type="secondary" style={{ lineHeight: 1.8 }}>
-              当前也没有配置云端地址和 Token，所以只能展示安装指引，暂时不能自动判断是否已安装。
+              当前没有配置云端地址和 Token，暂时无法自动判断采集助手是否已连接。请在系统设置里
+              配置云端地址与 Token。
             </Text>
           ) : null}
 
@@ -255,30 +203,12 @@ export default function ExtensionInstallGuide({ variant = "panel" }: ExtensionIn
           ) : null}
 
           <Space size={10} wrap>
-            <Button type="primary" icon={<DownloadOutlined />} onClick={openPrimaryInstall} disabled={primaryInstallDisabled}>
-              {primaryInstallLabel}
-            </Button>
-            {hasPackageUrl ? (
-              <Button onClick={copyExtensionsUrl}>
-                复制扩展管理页地址
-              </Button>
-            ) : null}
-            {hasPackageUrl && hasStoreUrl ? (
-              <Button icon={<ChromeOutlined />} onClick={openStoreInstall}>
-                商店安装
-              </Button>
-            ) : null}
-            <Button icon={<ApiOutlined />} onClick={openTemuSeller}>
+            <Button type="primary" icon={<ApiOutlined />} onClick={openTemuSeller}>
               打开 Temu 后台
             </Button>
             <Button icon={<ReloadOutlined />} loading={state.loading} onClick={() => refresh(false)}>
               重新检测
             </Button>
-            {!hasPackageUrl && !hasStoreUrl ? (
-              <Button icon={<SettingOutlined />} onClick={() => navigate("/settings")}>
-                去配置链接
-              </Button>
-            ) : null}
           </Space>
         </Space>
 

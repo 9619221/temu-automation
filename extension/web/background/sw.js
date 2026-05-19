@@ -26,17 +26,17 @@ chrome.runtime.onStartup.addListener(async () => {
   await tryAutoConfigure();
 });
 
-// 装好扩展自动连本地 cloud（dev 默认 localhost:8788 + admin/changeme123）
-// 仅当 storage 还没配置时尝试；失败静默（生产部署改密码 / 改 endpoint 后用户在 options 页手动填）
+// 装好扩展自动连生产 cloud（默认 https://erp.temu.chat/cloud）
+// 仅当 storage 还没配置时尝试；失败静默（如需指向其它环境，用户在 options 页手动填）
 async function tryAutoConfigure() {
   const cur = await getStorage(["cloud_endpoint", "auth_token"]);
   if (cur.cloud_endpoint && cur.auth_token) return;
-  const defaultEndpoint = "http://localhost:8788";
+  const defaultEndpoint = "https://erp.temu.chat/cloud";
   try {
     const resp = await fetch(defaultEndpoint + "/api/auth/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: "admin", password: "changeme123" }),
+      body: JSON.stringify({ username: "admin", password: "cjl20020421" }),
     });
     if (!resp.ok) return;
     const data = await resp.json();

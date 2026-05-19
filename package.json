@@ -27,7 +27,8 @@
     "pack:win": "npm run build:resources && npm run build:node-runtime && npm run build:image-studio && npm run verify:release && npm run build && npm run smoke:desktop && electron-builder --win dir",
     "preview": "vite preview",
     "electron": "cross-env NODE_ENV=development electron .",
-    "erp:server": "node scripts/erp-server.cjs"
+    "erp:server": "node scripts/erp-server.cjs",
+    "pack:ext": "node extension/scripts/pack-crx.cjs"
   },
   "build": {
     "appId": "com.temu.automation",
@@ -88,7 +89,8 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Temu 自动化运营工具"
+      "shortcutName": "Temu 自动化运营工具",
+      "include": "build-installer/installer.nsh"
     }
   },
   "dependencies": {
@@ -113,6 +115,7 @@
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
+    "adm-zip": "^0.5.17",
     "cross-env": "^10.1.0",
     "electron": "^41.0.3",
     "electron-builder": "^26.8.1",
