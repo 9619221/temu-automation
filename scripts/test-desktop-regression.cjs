@@ -424,6 +424,96 @@ async function runUiChecks(page) {
   console.log("[ok] 账号管理页面");
 }
 
+const PURCHASE_FLOW_PAGES = [
+  {
+    hash: "/product-master-data",
+    expectedTitle: "商品资料",
+    label: "商品资料",
+  },
+  {
+    hash: "/1688-mapping",
+    expectedTitle: "供应商管理",
+    label: "供应商管理",
+  },
+  {
+    hash: "/purchase-center",
+    expectedTitle: "采购中心",
+    label: "采购中心",
+  },
+  {
+    hash: "/warehouse-center",
+    expectedTitle: "待到货、入库、库存批次",
+    label: "仓库中心",
+  },
+  {
+    hash: "/qc-outbound",
+    expectedTitle: "可出库批次与发货单",
+    label: "出库中心",
+  },
+];
+
+const SERVICE_NOT_READY_HINT = "服务未就绪";
+
+async function gotoHash(page, hash) {
+  await page.evaluate((targetHash) => {
+    window.location.hash = `#${targetHash}`;
+  }, hash);
+  await waitFor(
+    async () => {
+      const current = await page.evaluate(() => window.location.hash || "");
+      if (!current.includes(hash)) {
+        throw new Error(`current hash: ${current}`);
+      }
+    },
+    15000,
+    `route ${hash}`,
+  );
+}
+
+async function runPurchaseFlowChecks(page) {
+  const issues = [];
+  console.log("");
+  console.log("== 采购流程页面渲染检查 ==");
+
+  for (const target of PURCHASE_FLOW_PAGES) {
+    try {
+      await gotoHash(page, target.hash);
+      await page.waitForTimeout(500);
+
+      const titleFound = await page
+        .locator(".app-page-header")
+        .getByText(target.expectedTitle, { exact: false })
+        .first()
+        .isVisible()
+        .catch(() => false);
+      if (!titleFound) {
+        issues.push(`${target.label} 标题未渲染（期望「${target.expectedTitle}」）`);
+        console.log(`[fail] ${target.label}: 标题未渲染`);
+        continue;
+      }
+
+      const serviceNotReady = await page
+        .getByText(SERVICE_NOT_READY_HINT, { exact: false })
+        .first()
+        .isVisible()
+        .catch(() => false);
+      if (serviceNotReady) {
+        issues.push(`${target.label} 显示「${SERVICE_NOT_READY_HINT}」，ERP 服务未初始化`);
+        console.log(`[fail] ${target.label}: ERP 服务未就绪`);
+        continue;
+      }
+
+      console.log(`[ok] ${target.label} 页面渲染正常`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error || "unknown error");
+      issues.push(`${target.label} 渲染检查异常: ${message}`);
+      console.log(`[fail] ${target.label}: ${message}`);
+    }
+  }
+
+  return issues;
+}
+
 async function main() {
   ensureFileExists(distIndex, "dist index");
 

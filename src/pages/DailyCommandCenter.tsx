@@ -110,8 +110,8 @@ function centerCards(navigate: (path: string) => void) {
       path: "/warehouse-center",
     },
     {
-      title: "质检发仓",
-      text: "抽检 / 出库计划 / 发货",
+      title: "出库中心",
+      text: "出库计划 / 拣货打包 / 发货",
       icon: <ExportOutlined />,
       path: "/qc-outbound",
     },

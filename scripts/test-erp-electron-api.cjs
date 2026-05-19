@@ -1193,7 +1193,9 @@ async function main() {
     );
     assert.equal(warehouseAfterBatches.inventoryBatches.length, 1);
     assert.equal(warehouseAfterBatches.inventoryBatches[0].receivedQty, 40);
-    assert.equal(warehouseAfterBatches.inventoryBatches[0].blockedQty, 40);
+    // 已去掉入库 QC 闸门：入库后数量直接进可用桶、qc_status=passed。
+    assert.equal(warehouseAfterBatches.inventoryBatches[0].blockedQty, 0);
+    assert.equal(warehouseAfterBatches.inventoryBatches[0].availableQty, 40);
     const qcBatchId = warehouseAfterBatches.inventoryBatches[0].id;
 
     const qcDeniedForWarehouse = await requestUrl(`${lanStatus.localUrl}/qc`, {
@@ -1219,65 +1221,19 @@ async function main() {
       : opsLogin.headers["set-cookie"];
     assert.ok(opsCookie && opsCookie.includes("temu_erp_lan_session"));
 
+    // QC 路由与 RBAC 仍在（仅去掉了入库→出库之间的强制闸门），ops 可访问；
+    // 但入库已不再产生待质检批次，QC 工作台恒为空。
     const qcPage = await requestUrl(`${lanStatus.localUrl}/qc`, {
       headers: { Cookie: opsCookie },
     });
     assert.equal(qcPage.statusCode, 200);
-    assert.match(qcPage.body, /IN-WH-001/);
 
     const qcWorkbench = await requestUrl(`${lanStatus.localUrl}/api/qc/workbench`, {
       headers: { Cookie: opsCookie },
     });
     assert.equal(qcWorkbench.statusCode, 200);
     const qcWorkbenchBody = JSON.parse(qcWorkbench.body).workbench;
-    assert.equal(qcWorkbenchBody.pendingBatches.length, 1);
-    assert.equal(qcWorkbenchBody.pendingBatches[0].id, qcBatchId);
-
-    const startQc = await requestUrl(`${lanStatus.localUrl}/api/qc/action`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        Cookie: opsCookie,
-      },
-      body: new URLSearchParams({
-        action: "start_qc",
-        batchId: qcBatchId,
-      }).toString(),
-    });
-    assert.equal(startQc.statusCode, 302);
-
-    const qcInProgress = await requestUrl(`${lanStatus.localUrl}/api/qc/workbench`, {
-      headers: { Cookie: opsCookie },
-    });
-    const qcInProgressBody = JSON.parse(qcInProgress.body).workbench;
-    assert.equal(qcInProgressBody.pendingBatches[0].qcStatusValue, "in_progress");
-    const qcInspectionId = qcInProgressBody.pendingBatches[0].qcId;
-    assert.ok(qcInspectionId);
-
-    const submitQc = await requestUrl(`${lanStatus.localUrl}/api/qc/action`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        Cookie: opsCookie,
-      },
-      body: JSON.stringify({
-        action: "submit_qc_percent",
-        qcId: qcInspectionId,
-        actualSampleQty: 20,
-        defectiveQty: 2,
-        remark: "IPC QC partial release",
-      }),
-    });
-    assert.equal(submitQc.statusCode, 200);
-    const submitQcBody = JSON.parse(submitQc.body).result;
-    assert.equal(submitQcBody.result.decision.recommendedStatus, "partial_passed");
-    assert.equal(submitQcBody.result.batch.availableQty, 36);
-    assert.equal(submitQcBody.result.batch.blockedQty, 4);
-    assert.equal(
-      submitQcBody.workbench.inspections.find((item) => item.id === qcInspectionId).status,
-      "partial_passed",
-    );
+    assert.equal(qcWorkbenchBody.pendingBatches.length, 0);
 
     const outboundPage = await requestUrl(`${lanStatus.localUrl}/outbound`, {
       headers: { Cookie: opsCookie },
@@ -1292,7 +1248,7 @@ async function main() {
     const outboundWorkbenchBody = JSON.parse(outboundWorkbench.body).workbench;
     assert.equal(outboundWorkbenchBody.availableBatches.length, 1);
     assert.equal(outboundWorkbenchBody.availableBatches[0].id, qcBatchId);
-    assert.equal(outboundWorkbenchBody.availableBatches[0].availableQty, 36);
+    assert.equal(outboundWorkbenchBody.availableBatches[0].availableQty, 40);
 
     const createOutbound = await requestUrl(`${lanStatus.localUrl}/api/outbound/action`, {
       method: "POST",
@@ -1316,7 +1272,7 @@ async function main() {
     assert.equal(createOutboundBody.result.shipment.status, "pending_warehouse");
     assert.equal(
       createOutboundBody.workbench.availableBatches.find((item) => item.id === qcBatchId).availableQty,
-      26,
+      30,
     );
     assert.equal(
       createOutboundBody.workbench.outboundShipments.find((item) => item.id === outboundId).status,
