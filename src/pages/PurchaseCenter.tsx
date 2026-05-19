@@ -15,6 +15,7 @@ import {
   Popover,
   Row,
   Select,
+  Skeleton,
   Space,
   Spin,
   Steps,
@@ -72,6 +73,7 @@ const UPLOAD_IMAGE_TARGET_BYTES = 260 * 1024;
 
 const SHOW_KEYWORD_1688_SOURCE = false;
 const AUTO_1688_ORDER_SYNC_INTERVAL_MS = 10 * 60 * 1000;
+const PAYMENT_URL_CACHE_MAX_AGE_MS = 30 * 60 * 1000;
 const IMAGE_SEARCH_PAGE_SIZE = 10;
 const IMAGE_SEARCH_MAX_PAGE = 10;
 const AUTO_INQUIRY_LIMIT = 5;
@@ -81,15 +83,15 @@ const CANDIDATE_SCROLL_REARM_PX = 220;
 const MINIMIZED_IMAGE_SEARCH_WIDTH = 132;
 const MINIMIZED_IMAGE_SEARCH_HEIGHT = 58;
 const MINIMIZED_IMAGE_SEARCH_MARGIN = 8;
-const PURCHASE_WORKBENCH_CACHE_KEY = "temu.purchase.workbench.cache.v2";
+const PURCHASE_WORKBENCH_CACHE_KEY = "temu.purchase.workbench.cache.v3";
 const FAST_PURCHASE_WORKBENCH_PARAMS = {
-  limit: 200,
+  limit: 2000,
   includeRequestDetails: false,
   includeOptions: false,
   include1688Meta: false,
 };
 const FULL_PURCHASE_WORKBENCH_PARAMS = {
-  limit: 200,
+  limit: 2000,
   includeRequestDetails: false,
   include1688Meta: true,
 };
@@ -129,6 +131,7 @@ const QUICK_PURCHASE_ACTIONS = new Set([
   "link_1688_order_to_po",
 ]);
 const SHORT_WORKBENCH_ACTIONS = new Set([
+  "rollback_po_status",
   "source_1688_image",
 ]);
 const DEFAULT_PURCHASE_INQUIRY_TEMPLATE = [
@@ -377,6 +380,9 @@ interface SkuOption {
     unitPrice?: number | null;
     moq?: number | null;
   } | null;
+  jstCostPrice?: number | null;
+  jstSupplierName?: string | null;
+  jstActualStockQty?: number | null;
 }
 
 interface SupplierOption {
@@ -1056,6 +1062,54 @@ function canUse1688PaymentActions(row: PurchaseOrderRow) {
   return true;
 }
 
+const REFUND_READY_LOCAL_STATUSES = new Set(["paid", "shipped", "arrived", "received", "success", "completed"]);
+const REFUND_READY_PAYMENT_STATUSES = new Set(["paid", "confirmed", "success"]);
+
+function canUse1688RefundActions(row: PurchaseOrderRow) {
+  if (!row.externalOrderId) return false;
+  const localStatus = String(row.status || "").toLowerCase();
+  const paymentStatus = String(row.paymentStatus || "").toLowerCase();
+  const externalStatus = String(row.externalOrderStatus || "");
+  const externalUpper = externalStatus.toUpperCase();
+  if (["cancelled", "canceled", "closed"].includes(localStatus)) return false;
+  if (/CANCEL|CLOSE|TERMINAT/.test(externalUpper)) return false;
+  if (REFUND_READY_PAYMENT_STATUSES.has(paymentStatus)) return true;
+  if (REFUND_READY_LOCAL_STATUSES.has(localStatus)) return true;
+  if (/WAIT_BUYER_PAY|WAITSELLERPUSH|WAIT_SELLER_PUSH|UNPAID|CREATED|PREVIEW/.test(externalUpper)) return false;
+  return /WAIT_SELLER_SEND|WAIT_BUYER_RECEIVE|SELLER_SEND|SENDGOODS|SHIPPED|RECEIVE|RECEIVED|SUCCESS|PAID|PAYED/.test(externalUpper);
+}
+
+function getCached1688PaymentUrl(row: PurchaseOrderRow) {
+  const value = typeof row.externalPaymentUrl === "string" ? row.externalPaymentUrl.trim() : "";
+  if (!value) return null;
+  const syncedAt = row.externalPaymentUrlSyncedAt ? Date.parse(row.externalPaymentUrlSyncedAt) : NaN;
+  if (Number.isFinite(syncedAt) && Date.now() - syncedAt > PAYMENT_URL_CACHE_MAX_AGE_MS) return null;
+  return value;
+}
+
+function get1688PaymentResultPayload(result: any) {
+  return result?.result && typeof result.result === "object" ? result.result : result;
+}
+
+function get1688PaymentUrlFromResult(result: any) {
+  const payload = get1688PaymentResultPayload(result);
+  const value = typeof payload?.paymentUrl === "string" ? payload.paymentUrl.trim() : "";
+  return value || null;
+}
+
+async function openExternalUrl(url: string) {
+  const externalOpener = (window as any)?.electronAPI?.app?.openExternal;
+  if (typeof externalOpener === "function") {
+    try {
+      await externalOpener(url);
+      return;
+    } catch {
+      // Fall through to the browser fallback below.
+    }
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
 function canSubmitPaymentApprovalAction(row: PurchaseOrderRow) {
   const localStatus = String(row.status || "").toLowerCase();
   const paymentStatus = String(row.paymentStatus || "").toLowerCase();
@@ -1170,7 +1224,7 @@ function getPurchaseOrderRollbackTarget(row?: PurchaseOrderRow | null) {
     case "pending_finance_approval":
       return has1688OrderTrace(row) ? "pushed_pending_price" : "draft";
     case "approved_to_pay":
-      return "pending_finance_approval";
+      return "pushed_pending_price";
     case "paid":
       return "approved_to_pay";
     case "supplier_processing":
@@ -1419,8 +1473,10 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const canWarehouse = canRole(role, ["warehouse", "manager", "admin"]);
   const initialWorkbench = getInitialPurchaseWorkbenchCache();
 
-  const [data, setData] = useState<PurchaseWorkbench>(initialWorkbench);
-  const [loading, setLoading] = useState(false);
+  // 不用缓存快照播种可见列表，避免进页面闪一下旧行；缓存仅保留给下拉选项。
+  const [data, setData] = useState<PurchaseWorkbench>({});
+  // 初始即 true：挂载首帧就进骨架，避免「空表格/计数 0」闪一帧后才进加载态。
+  const [loading, setLoading] = useState(true);
   const [actingKey, setActingKey] = useState<string | null>(null);
   const [loadingMorePrId, setLoadingMorePrId] = useState<string | null>(null);
   const [imageSearchNextPageByPrId, setImageSearchNextPageByPrId] = useState<Record<string, number>>({});
@@ -1432,6 +1488,34 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const [skus, setSkus] = useState<SkuOption[]>(() => (
     Array.isArray(initialWorkbench.skuOptions) ? initialWorkbench.skuOptions : []
   ));
+  const [skuSearching, setSkuSearching] = useState(false);
+  const skuSearchTimerRef = useRef<number | null>(null);
+  const skuSearchSeqRef = useRef(0);
+  const handleSkuSearch = (keyword: string) => {
+    const term = String(keyword || "").trim();
+    if (skuSearchTimerRef.current) window.clearTimeout(skuSearchTimerRef.current);
+    if (!term) return;
+    const seq = ++skuSearchSeqRef.current;
+    skuSearchTimerRef.current = window.setTimeout(async () => {
+      setSkuSearching(true);
+      try {
+        const list = await erp?.sku?.list?.({ search: term, limit: 50 });
+        if (seq !== skuSearchSeqRef.current) return;
+        const rows: SkuOption[] = Array.isArray(list) ? list : [];
+        if (rows.length) {
+          setSkus((prev) => {
+            const map = new Map(prev.map((item) => [item.id, item]));
+            for (const row of rows) map.set(row.id, row);
+            return Array.from(map.values());
+          });
+        }
+      } catch {
+        /* 忽略搜索失败,沿用已加载选项 */
+      } finally {
+        if (seq === skuSearchSeqRef.current) setSkuSearching(false);
+      }
+    }, 300);
+  };
   const [suppliers, setSuppliers] = useState<SupplierOption[]>(() => (
     Array.isArray(initialWorkbench.supplierOptions) ? initialWorkbench.supplierOptions : []
   ));
@@ -1560,6 +1644,10 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         value: sku.id,
         label: code,
         searchText: `${code} ${name} ${sku.primary1688Source?.externalOfferId || ""}`,
+        skuName: name,
+        skuCost: sku.jstCostPrice ?? null,
+        skuSupplier: sku.jstSupplierName || "",
+        skuStock: sku.jstActualStockQty ?? null,
       };
     }),
     [skus],
@@ -1783,6 +1871,25 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     return snapshot;
   }, []);
 
+  const patchPurchaseOrderFromResult = useCallback((result: any) => {
+    const purchaseOrder = result?.result?.purchaseOrder || result?.purchaseOrder;
+    if (purchaseOrder?.id) {
+      patchPurchaseOrderRow(purchaseOrder.id, purchaseOrder);
+    }
+  }, [patchPurchaseOrderRow]);
+
+  const upsertPurchaseRequestRow = useCallback((row?: PurchaseRequestRow | null) => {
+    if (!row?.id) return;
+    setData((prev) => {
+      const previousRows = prev.purchaseRequests || [];
+      const index = previousRows.findIndex((item) => item.id === row.id);
+      const purchaseRequests = index >= 0
+        ? previousRows.map((item, itemIndex) => (itemIndex === index ? { ...item, ...row } : item))
+        : [row, ...previousRows];
+      return { ...prev, purchaseRequests };
+    });
+  }, []);
+
   const upsertGeneratedPurchaseOrder = useCallback((prId: string, generatedPo?: PurchaseOrderRow | null) => {
     if (!generatedPo?.id) return;
     setData((prev) => {
@@ -1915,12 +2022,9 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   }, [applyWorkbench, canPurchase, syncWorkbenchOptions]);
 
   useEffect(() => {
-    // 异步加载：如果 localStorage 已经有缓存就走 silent（不显加载条 / 不闪屏），
-    // 用户立刻看到旧数据可点击；后台拉新数据回来再 patch 覆盖。
-    // 缓存为空（首次打开）才走非 silent 显示加载状态。
-    const hasCache = hasWorkbenchSnapshot(initialWorkbench);
-    void loadData({ silent: hasCache });
-  }, [loadData, initialWorkbench]);
+    // 首屏统一走非 silent：先显示加载态（不渲染旧快照），新数据到了再一次性渲染。
+    void loadData();
+  }, [loadData]);
 
   useEffect(() => {
     candidateScrollLockRef.current = {};
@@ -2155,10 +2259,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     optimistic: { poId: string; patch: Partial<PurchaseOrderRow> },
   ) => {
     const snapshot = patchPurchaseOrderRow(optimistic.poId, optimistic.patch);
-    const result = await runAction(key, payload, successText);
+    const result = await runAction(key, { includeWorkbench: false, ...payload }, successText);
     if (!result && snapshot) {
       // runAction 失败时已弹出错误提示且返回 null，把行复位回去。
       patchPurchaseOrderRow(optimistic.poId, snapshot);
+    } else {
+      patchPurchaseOrderFromResult(result);
     }
     return result;
   };
@@ -2299,12 +2405,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     setSelectedPoIds((previous) => previous.filter((id) => id !== row.id));
     const result = await runAction(
       `delete-po-${row.id}`,
-      { action: "delete_po", poId: row.id },
+      { action: "delete_po", poId: row.id, includeWorkbench: false },
       "采购单已删除",
     );
     if (!result && snapshot) {
       // IPC 失败：把行加回去
       setData((prev) => ({ ...prev, purchaseOrders: [snapshot!, ...(prev.purchaseOrders || [])] }));
+    } else {
+      upsertPurchaseRequestRow(result?.result?.purchaseRequest || result?.purchaseRequest);
     }
   };
 
@@ -3039,11 +3147,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   };
 
   const request1688PriceChange = async (row: PurchaseOrderRow) => {
-    await runAction(`1688-price-request-${row.id}`, {
+    const result = await runAction(`1688-price-request-${row.id}`, {
       action: "request_1688_price_change",
       poId: row.id,
+      includeWorkbench: false,
       remark: "已发起 1688 改价沟通",
     }, "已记录改价沟通");
+    patchPurchaseOrderFromResult(result);
   };
 
   const openBatch1688PaymentUrl = async () => {
@@ -3057,9 +3167,10 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     const result = await runAction("1688-batch-pay", {
       action: "get_1688_payment_url",
       poIds,
+      includeWorkbench: false,
     }, "1688 批量支付链接已同步");
-    const paymentUrl = result?.result?.paymentUrl;
-    if (paymentUrl) window.open(paymentUrl, "_blank", "noopener,noreferrer");
+    const paymentUrl = get1688PaymentUrlFromResult(result);
+    if (paymentUrl) await openExternalUrl(paymentUrl);
   };
 
   // 一键 1688 支付：先调 API 拿付款 URL，拿到就走系统默认浏览器（默认全屏 / 用户上次的窗口状态）；
@@ -3068,24 +3179,44 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     const orderId = row.externalOrderId;
     if (!orderId) { message.warning("PO 未绑定 1688 订单号"); return; }
     navigator.clipboard?.writeText(orderId).catch(() => {});
+    const cachedPaymentUrl = getCached1688PaymentUrl(row);
+    if (cachedPaymentUrl) {
+      void openExternalUrl(cachedPaymentUrl);
+      message.success("\u5df2\u6253\u5f00 1688 \u652f\u4ed8\u9875");
+      void erp?.purchase?.action?.({
+        action: "get_1688_payment_url",
+        poIds: [row.id],
+        includeWorkbench: false,
+      }, { timeoutMs: 120000 }).then((result: any) => {
+        const nextPaymentUrl = get1688PaymentUrlFromResult(result);
+        if (nextPaymentUrl) {
+          patchPurchaseOrderRow(row.id, {
+            externalPaymentUrl: nextPaymentUrl,
+            externalPaymentUrlSyncedAt: new Date().toISOString(),
+          });
+        }
+      }).catch(() => {});
+      return;
+    }
     let paymentUrl: string | null = null;
     try {
       const result = await runAction(`1688-pay-${row.id}`, {
         action: "get_1688_payment_url",
         poIds: [row.id],
+        includeWorkbench: false,
       });
-      paymentUrl = result?.result?.paymentUrl || row.externalPaymentUrl || null;
+      paymentUrl = get1688PaymentUrlFromResult(result) || row.externalPaymentUrl || null;
+      if (paymentUrl) {
+        patchPurchaseOrderRow(row.id, {
+          externalPaymentUrl: paymentUrl,
+          externalPaymentUrlSyncedAt: new Date().toISOString(),
+        });
+      }
     } catch {
       // runAction 已弹错误 toast，进 fallback。
     }
-    const externalOpener = (window as any)?.electronAPI?.app?.openExternal;
     const targetUrl = paymentUrl || "https://work.1688.com/";
-    if (typeof externalOpener === "function") {
-      try { await externalOpener(targetUrl); }
-      catch { window.open(targetUrl, "_blank", "noopener,noreferrer"); }
-    } else {
-      window.open(targetUrl, "_blank", "noopener,noreferrer");
-    }
+    await openExternalUrl(targetUrl);
     if (paymentUrl) {
       message.success("已在默认浏览器打开 1688 支付页");
     } else {
@@ -3097,10 +3228,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     const result = await runAction(`1688-cancel-${row.id}`, {
       action: "cancel_1688_order",
       poId: row.id,
+      includeWorkbench: false,
       cancelReason: "other",
       remark: "ERP取消未付款1688订单",
     });
     if (!result) return;
+    patchPurchaseOrderFromResult(result);
     if (result?.result?.orphanCleared) {
       message.warning("1688 远端已无此订单，已在本地强制清绑（标记为 orphan_cleared）");
     } else {
@@ -3130,9 +3263,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     const result = await runAction(`1688-${mode}-${poId}`, {
       action: mode === "memo" ? "add_1688_order_memo" : "add_1688_order_feedback",
       poId,
+      includeWorkbench: false,
       ...(mode === "memo" ? { memo: text } : { feedback: text }),
     }, mode === "memo" ? "1688 备忘已更新" : "1688 买家留言已补充");
     if (result) {
+      patchPurchaseOrderFromResult(result);
       setOrderNoteDialog(null);
       orderNoteForm.resetFields();
     }
@@ -3183,6 +3318,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       message.warning("请先同步或绑定 1688 订单号");
       return;
     }
+    if (!canUse1688RefundActions(row)) {
+      if (canUse1688PaymentActions(row)) {
+        message.info("未付款的 1688 订单请使用「取消1688」，付款后才可以发起退款售后。");
+      } else {
+        message.warning("当前 1688 订单状态不支持退款售后。");
+      }
+      return;
+    }
     setRefundPoId(row.id);
     setRefundReasonOptions([]);
     setRefundMaxAmount(null);
@@ -3202,7 +3345,9 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     const result = await runAction(`1688-refund-sync-${row.id}`, {
       action: "sync_1688_refunds",
       poId: row.id,
+      includeWorkbench: false,
     });
+    patchPurchaseOrderFromResult(result);
     const count = Number(result?.result?.refundCount || 0);
     if (result && !silent) message.success(count ? `已同步 ${count} 条退款售后` : "暂未查到退款售后");
     return result;
@@ -3212,6 +3357,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     const result = await runAction(`1688-refund-max-${row.id}`, {
       action: "get_1688_max_refund_fee",
       poId: row.id,
+      includeWorkbench: false,
       refundType: overrides.refundType || refundForm.getFieldValue("refundType"),
       goodsStatus: overrides.goodsStatus || refundForm.getFieldValue("goodsStatus"),
     });
@@ -3227,6 +3373,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     const result = await runAction(`1688-refund-reasons-${row.id}`, {
       action: "get_1688_refund_reasons",
       poId: row.id,
+      includeWorkbench: false,
       refundType: overrides.refundType || refundForm.getFieldValue("refundType"),
       goodsStatus: overrides.goodsStatus || refundForm.getFieldValue("goodsStatus"),
     });
@@ -3282,6 +3429,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     const result = await runAction(`1688-refund-create-${refundPo.id}`, {
       action: "create_1688_refund",
       poId: refundPo.id,
+      includeWorkbench: false,
       refundType: values.refundType,
       goodsStatus: values.goodsStatus,
       amount: values.amount,
@@ -3291,6 +3439,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       ...(rawParams ? { params: rawParams } : {}),
     }, "退款售后已提交");
     if (result) {
+      patchPurchaseOrderFromResult(result);
       setRefundPoId(null);
       refundForm.resetFields();
     }
@@ -4025,7 +4174,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               1688 支付
             </Button>
           ) : null}
-          {row.externalOrderId && canPurchase ? (
+          {row.externalOrderId && canPurchase && canUse1688RefundActions(row) ? (
             <Button
               size="small"
               icon={<ApiOutlined />}
@@ -4221,9 +4370,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   ], [actingKey]);
 
   const summary = data.summary || {};
-  const tableLoading = loading
-    && !hasWorkbenchSnapshot(data)
-    && (filteredActiveRequestRows.length + filteredActiveOrderRows.length > 0);
+  // 首屏（无快照）加载时显示加载态；已有数据的手动刷新保持原内容，不空屏闪烁。
+  const tableLoading = loading && !hasWorkbenchSnapshot(data);
 
   if (!erp) {
     return (
@@ -4240,12 +4388,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         compact
         eyebrow="系统"
         title="采购中心"
-        meta={[
-          `更新 ${formatDateTime(data.generatedAt)}`,
-          `采购单 ${purchaseOrders.length}`,
-          `待处理 ${pendingRequestRows.length}`,
-          `付款 ${summary.paymentQueueCount || pendingPaymentRows.length}`,
-        ]}
+        meta={tableLoading
+          ? ["更新 —", "采购单 —", "待处理 —", "付款 —"]
+          : [
+            `更新 ${formatDateTime(data.generatedAt)}`,
+            `采购单 ${purchaseOrders.length}`,
+            `待处理 ${pendingRequestRows.length}`,
+            `付款 ${summary.paymentQueueCount || pendingPaymentRows.length}`,
+          ]}
         actions={[
           <Button key="stores" icon={<ShopOutlined />} onClick={() => setStoreManagerOpen(true)}>
             店铺
@@ -4331,7 +4481,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               type={activeQueue.key === item.key ? "primary" : "default"}
               onClick={() => setActiveQueueKey(item.key)}
             >
-              {item.title} {item.count}
+              {item.title} {tableLoading ? "—" : item.count}
             </Button>
           ))}
         </Space>
@@ -4349,7 +4499,9 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
             </Text>
           ) : null}
         </div>
-        {activeQueue.kind === "mixed" ? (
+        {tableLoading ? (
+          <Skeleton active paragraph={{ rows: 8 }} title={false} style={{ padding: "12px 0" }} />
+        ) : activeQueue.kind === "mixed" ? (
           <Space direction="vertical" size={16} style={{ width: "100%" }}>
             {filteredActiveRequestRows.length ? (
               <div>
@@ -4871,13 +5023,27 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
             <Select
               mode="tags"
               showSearch
-              open={false}
+              filterOption={false}
+              onSearch={handleSkuSearch}
+              loading={skuSearching}
               maxTagCount="responsive"
               optionFilterProp="searchText"
               options={skuOptions}
+              optionRender={(option) => {
+                const d = option as any;
+                return (
+                  <div style={{ lineHeight: 1.3 }}>
+                    <div>{String(d.value)} · {d?.skuName || "-"}</div>
+                    <div style={{ fontSize: 12, color: "#888" }}>
+                      成本 {d?.skuCost == null ? "-" : `¥${d.skuCost}`} · 供应商 {d?.skuSupplier || "-"} · 库存 {d?.skuStock == null ? "-" : d.skuStock}
+                    </div>
+                  </div>
+                );
+              }}
               suffixIcon={<SearchOutlined />}
               tokenSeparators={[",", "，", " ", "\n"]}
-              placeholder="输入商品编码，回车添加，可多选"
+              notFoundContent={skuSearching ? "搜索中…" : "输入编码或名称搜索"}
+              placeholder="输入商品编码或名称搜索，回车添加，可多选"
             />
           </Form.Item>
           <Form.Item label="采购图片">
