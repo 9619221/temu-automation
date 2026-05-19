@@ -2681,6 +2681,7 @@ function createRequestHandler(options = {}) {
       complete1688OAuth,
       refresh1688AccessToken,
       receive1688Message,
+      list1688PurchaseAccounts,
       validateSessionUser,
       verifyLogin,
     }).catch((error) => {
@@ -3376,6 +3377,7 @@ async function handleRequest({
   complete1688OAuth,
   refresh1688AccessToken,
   receive1688Message,
+  list1688PurchaseAccounts,
   validateSessionUser,
   verifyLogin,
 }) {
