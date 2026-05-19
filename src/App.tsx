@@ -42,6 +42,7 @@ const PurchaseCenter = lazyWithPreload(() => import("./pages/PurchaseCenter"));
 const AlibabaMapping = lazyWithPreload(() => import("./pages/AlibabaMapping"));
 const WarehouseCenter = lazyWithPreload(() => import("./pages/WarehouseCenter"));
 const QcOutboundCenter = lazyWithPreload(() => import("./pages/QcOutboundCenter"));
+const TemuStockOrders = lazyWithPreload(() => import("./pages/TemuStockOrders"));
 const WorkItems = lazyWithPreload(() => import("./pages/WorkItems"));
 const UserManagement = lazyWithPreload(() => import("./pages/UserManagement"));
 const ErpLogin = lazyWithPreload(() => import("./pages/ErpLogin"));
@@ -55,6 +56,7 @@ const CORE_ROUTE_PRELOADERS = [
   PurchaseCenter.preload,
   WarehouseCenter.preload,
   QcOutboundCenter.preload,
+  TemuStockOrders.preload,
   WorkItems.preload,
   AccountManager.preload,
   Logs.preload,
@@ -267,6 +269,7 @@ function App() {
             <Route path="purchase-center" element={<RoleRoute path="/purchase-center"><PurchaseCenter /></RoleRoute>} />
             <Route path="warehouse-center" element={<RoleRoute path="/warehouse-center"><WarehouseCenter /></RoleRoute>} />
             <Route path="qc-outbound" element={<RoleRoute path="/qc-outbound"><QcOutboundCenter /></RoleRoute>} />
+            <Route path="temu-stock-orders" element={<RoleRoute path="/temu-stock-orders"><TemuStockOrders /></RoleRoute>} />
             <Route path="work-items" element={<RoleRoute path="/work-items"><WorkItems /></RoleRoute>} />
             <Route path="users" element={<RoleRoute path="/users"><UserManagement /></RoleRoute>} />
             <Route path="erp-debug" element={<RoleRoute path="/erp-debug"><ErpDebug /></RoleRoute>} />

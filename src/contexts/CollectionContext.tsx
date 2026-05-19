@@ -6,10 +6,11 @@ import {
   normalizeCollectionDiagnostics,
   type CollectionTaskDiagnostic,
 } from "../utils/collectionDiagnostics";
-import { setStoreValueForActiveAccount } from "../utils/multiStore";
+import { setStoreValueForActiveAccount, readActiveAccountId } from "../utils/multiStore";
 
 const api = window.electronAPI?.automation;
 const store = window.electronAPI?.store;
+const erp = window.electronAPI?.erp;
 
 const PARSED_TASK_KEYS = new Set(["dashboard", "products", "orders", "sales", "flux"]);
 
@@ -357,6 +358,22 @@ export function CollectionProvider({ children }: { children: React.ReactNode }) 
                 await setStoreValueForActiveAccount(store, task.storeKey, { ...storeData, syncedAt });
               } else {
                 await setStoreValueForActiveAccount(store, task.storeKey, storeData);
+              }
+
+              // 备货单解析后自动同步进 ERP 镜像表（账号已同源：active temu 账号 id == erp accountId）。
+              // 尽力而为：ERP 未就绪 / 该店未在 ERP 绑定（办法2）时静默跳过，绝不影响采集本身。
+              if (task.key === "orders" && Array.isArray(storeData) && storeData.length > 0) {
+                try {
+                  const erpAccountId = await readActiveAccountId(store);
+                  if (erp?.temuStockOrder?.sync && erpAccountId) {
+                    await erp.temuStockOrder.sync({ accountId: erpAccountId, orders: storeData });
+                  }
+                } catch (syncError: any) {
+                  console.warn(
+                    "[collection] 备货单同步 ERP 失败（不影响采集，可能该店未在 ERP 绑定/同源）:",
+                    syncError?.message || syncError,
+                  );
+                }
               }
 
               // 流量日快照：将"今日"数据追加到 temu_flux_history

@@ -12889,6 +12889,60 @@ function performOutboundAction(payload = {}, actorInput = {}) {
   };
 }
 
+function syncTemuStockOrders(payload = {}) {
+  const { services } = requireErp();
+  const actor = normalizeActor(payload.actor);
+  return services.temuStockOrder.syncFromCollection({
+    accountId: requireString(payload.accountId, "accountId"),
+    orders: Array.isArray(payload.orders) ? payload.orders : [],
+    actor,
+  });
+}
+
+function listTemuStockOrders(payload = {}) {
+  const { services } = requireErp();
+  const rows = services.temuStockOrder.list({
+    accountId: requireString(payload.accountId, "accountId"),
+    status: optionalString(payload.status),
+    limit: payload.limit,
+  });
+  return rows.map(toCamelRow);
+}
+
+function createTemuStockOrderOutbound(payload = {}) {
+  const { db, services } = requireErp();
+  const actor = normalizeActor(payload.actor);
+  const run = db.transaction(() => {
+    const { stockOrder, batch } = services.temuStockOrder.resolveOutboundTarget(
+      requireString(payload.stockOrderId, "stockOrderId"),
+    );
+    const result = createOutboundPlan({
+      db,
+      services,
+      payload: {
+        batchId: batch.id,
+        qty: stockOrder.demand_qty,
+        boxes: 1,
+        remark: `Temu备货单 ${stockOrder.temu_purchase_order_no}`,
+      },
+      actor,
+    });
+    const shipmentId = result.shipment.id;
+    db.prepare(`
+      UPDATE erp_outbound_shipments
+      SET temu_stock_order_no = @no, temu_sync_status = 'ship_pending'
+      WHERE id = @id
+    `).run({ no: stockOrder.temu_purchase_order_no, id: shipmentId });
+    db.prepare(`
+      UPDATE erp_temu_stock_orders
+      SET sync_status = 'outbound_created', updated_at = @updated_at
+      WHERE id = @id
+    `).run({ id: stockOrder.id, updated_at: nowIso() });
+    return { shipment: toCamelRow(getOutboundShipment(db, shipmentId)) };
+  });
+  return run();
+}
+
 function toWorkItem(row) {
   const next = toCamelRow(row);
   next.evidence = parseJsonArray(row.evidence_json);
@@ -14117,6 +14171,9 @@ function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:qc:action", (_event, payload) => performQcActionRuntime(payload || {}));
   ipcMain.handle("erp:outbound:workbench", (_event, params) => getOutboundWorkbenchRuntime(params || {}));
   ipcMain.handle("erp:outbound:action", (_event, payload) => performOutboundActionRuntime(payload || {}));
+  ipcMain.handle("erp:temu-order:sync", (_event, payload) => syncTemuStockOrders(payload || {}));
+  ipcMain.handle("erp:temu-order:list", (_event, payload) => listTemuStockOrders(payload || {}));
+  ipcMain.handle("erp:temu-order:create-outbound", (_event, payload) => createTemuStockOrderOutbound(payload || {}));
   ipcMain.handle("erp:workItem:list", (_event, params) => listWorkItemsRuntime(params || {}));
   ipcMain.handle("erp:workItem:stats", (_event, params) => getWorkItemStatsRuntime(params || {}));
   ipcMain.handle("erp:workItem:generate", (_event, payload) => generateWorkItemsRuntime(payload || {}));

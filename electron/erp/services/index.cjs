@@ -4,6 +4,7 @@ const { InventoryService } = require("./inventoryService.cjs");
 const { QcService } = require("./qcService.cjs");
 const { OutboundService } = require("./outboundService.cjs");
 const { WorkItemService } = require("./workItemService.cjs");
+const { TemuStockOrderService } = require("./temuStockOrderService.cjs");
 
 function createErpServices(db) {
   const workflow = new ErpWorkflowService({ db });
@@ -12,6 +13,7 @@ function createErpServices(db) {
   const qc = new QcService({ db, workflow, inventory });
   const outbound = new OutboundService({ db, workflow, inventory });
   const workItem = new WorkItemService({ db });
+  const temuStockOrder = new TemuStockOrderService({ db, workflow });
 
   return {
     workflow,
@@ -20,6 +22,7 @@ function createErpServices(db) {
     qc,
     outbound,
     workItem,
+    temuStockOrder,
   };
 }
 
@@ -31,4 +34,5 @@ module.exports = {
   QcService,
   OutboundService,
   WorkItemService,
+  TemuStockOrderService,
 };

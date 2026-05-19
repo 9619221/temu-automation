@@ -46,6 +46,7 @@ const menuItems = [
       { key: "/1688-mapping", icon: <ApiOutlined />, label: "供应商管理" },
       { key: "/purchase-center", icon: <ShoppingOutlined />, label: "采购中心" },
       { key: "/warehouse-center", icon: <InboxOutlined />, label: "仓库中心" },
+      { key: "/temu-stock-orders", icon: <InboxOutlined />, label: "备货单" },
       { key: "/qc-outbound", icon: <SafetyCertificateOutlined />, label: "质检发仓" },
     ],
   },

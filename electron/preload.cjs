@@ -293,6 +293,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
       workbench: (params) => ipcRenderer.invoke("erp:outbound:workbench", params || {}),
       action: (payload) => ipcRenderer.invoke("erp:outbound:action", payload || {}),
     },
+    temuStockOrder: {
+      sync: (payload) => ipcRenderer.invoke("erp:temu-order:sync", payload || {}),
+      list: (payload) => ipcRenderer.invoke("erp:temu-order:list", payload || {}),
+      createOutbound: (payload) => ipcRenderer.invoke("erp:temu-order:create-outbound", payload || {}),
+    },
     workItem: {
       list: (params) => ipcRenderer.invoke("erp:workItem:list", params || {}),
       stats: (params) => ipcRenderer.invoke("erp:workItem:stats", params || {}),
