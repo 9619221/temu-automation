@@ -7804,12 +7804,16 @@ function generatePurchaseOrderAction({ db, services, payload, actor }) {
   if (pr.status === "converted_to_po") {
     throw new Error("这个采购需求已标记为已生成采购单，请刷新采购中心后查看采购单列表");
   }
-  const candidate = applySelected1688SpecToCandidate(
-    getCandidateForPo(db, pr, optionalString(payload.candidateId), actor, {
-      preferSku1688Source: Boolean(payload.preferSku1688Source || payload.preferSku1688Mapping || payload.useSku1688Source),
-    }),
-    payload,
-  );
+  // 线下采购：不绑定 1688 货源/候选，用一个空候选直接生成手工采购单
+  const offlinePurchase = Boolean(payload.offlinePurchase);
+  const candidate = offlinePurchase
+    ? { id: null, status: "selected", unit_price: 0, logistics_fee: 0, supplier_id: null }
+    : applySelected1688SpecToCandidate(
+      getCandidateForPo(db, pr, optionalString(payload.candidateId), actor, {
+        preferSku1688Source: Boolean(payload.preferSku1688Source || payload.preferSku1688Mapping || payload.useSku1688Source),
+      }),
+      payload,
+    );
 
   if (candidate.status === "candidate" || candidate.status === "shortlisted") {
     services.purchase.selectCandidate(candidate.id, actor);

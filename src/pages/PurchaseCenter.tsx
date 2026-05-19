@@ -3567,7 +3567,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     setSpecBindingDialog(null);
   };
 
-  const generatePurchaseOrderForRow = async (row: PurchaseRequestRow) => {
+  const generatePurchaseOrderForRow = async (row: PurchaseRequestRow, offline = false) => {
     const existingPo = purchaseOrders.find((item) => purchaseOrderBelongsToRequest(item, row.id));
     if (row.status === "converted_to_po" || existingPo) {
       if (existingPo) {
@@ -3577,13 +3577,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       message.info(existingPo ? `采购单已生成：${existingPo.poNo || existingPo.id}` : "采购单已生成，请刷新后查看采购单列表");
       return;
     }
-    const hasMapping = Number(row.mappingCount || 0) > 0;
+    const hasMapping = !offline && Number(row.mappingCount || 0) > 0;
     const result = await runAction(`po-${row.id}`, {
       action: "generate_po",
       prId: row.id,
       qty: row.requestedQty,
       preferSku1688Source: hasMapping,
-    }, hasMapping ? undefined : "手工采购单已生成");
+      ...(offline ? { offlinePurchase: true } : {}),
+    }, hasMapping ? undefined : (offline ? "线下采购单已生成" : "手工采购单已生成"));
     if (!result) return;
     const generatedPo = result?.result?.purchaseOrder as PurchaseOrderRow | undefined;
     if (generatedPo?.id) {
@@ -3794,6 +3795,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           && !existingPo
           && (hasCandidates || hasMapping || hasSkuSupplier)
           && ["submitted", "buyer_processing", "sourced", "waiting_ops_confirm"].includes(row.status);
+        // 线下采购：无候选/映射/SKU供应商时，可跳过 1688 直接生成手工采购单
+        const canGenerateOfflinePo = canPurchase
+          && !existingPo
+          && !hasCandidates && !hasMapping && !hasSkuSupplier
+          && ["submitted", "buyer_processing", "sourced", "waiting_ops_confirm"].includes(row.status);
         const canDelete = canCreateRequest && ["submitted", "buyer_processing", "sourced"].includes(row.status);
         return (
           <div className="purchase-action-grid">
@@ -3840,6 +3846,23 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 生成采购单
               </Button>
             ) : null}
+            {canGenerateOfflinePo ? (
+              <Popconfirm
+                title="线下采购（跳过 1688）"
+                description="不绑定 1688 货源，直接生成手工采购单，后续走提交付款流程。"
+                okText="生成"
+                cancelText="取消"
+                onConfirm={() => void generatePurchaseOrderForRow(row, true)}
+              >
+                <Button
+                  size="small"
+                  icon={<FileDoneOutlined />}
+                  loading={actingKey === `po-${row.id}`}
+                >
+                  线下采购
+                </Button>
+              </Popconfirm>
+            ) : null}
             {existingPo || row.status === "converted_to_po" ? (
               <Button
                 size="small"
@@ -3872,7 +3895,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 </Button>
               </Popconfirm>
             ) : null}
-            {!canImageSearch && !canGeneratePo && !existingPo && row.status !== "converted_to_po" && !canDelete && row.status !== "submitted" ? <Text type="secondary">无待办</Text> : null}
+            {!canImageSearch && !canGeneratePo && !canGenerateOfflinePo && !existingPo && row.status !== "converted_to_po" && !canDelete && row.status !== "submitted" ? <Text type="secondary">无待办</Text> : null}
           </div>
         );
       },
