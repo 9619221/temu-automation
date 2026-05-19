@@ -76,6 +76,13 @@ export const URL_WHITELIST = [
   "/marvel-mms/cn/api/kiana/songbird/DeliveryOrderHttpService/queryRedNotice",
   "/bg-supplier-delivery-api/supplier/config/respondent/queryDeliveryEntityAcceptConfig",
 
+  // === Phase B 送仓发货逆向：按前缀加宽，覆盖加入发货台/创建发货单/装箱发货等写操作 ===
+  // 子串包含匹配；与上方具体 deliverGoods 读接口重叠无害，目的是把写接口请求体也抓到。
+  "/bgSongbird-api/supplier/deliverGoods/",
+  "/bgSongbird-api/supplier/delivery/",
+  "/bgSongbird-api/supplier/address/",
+  "/bg-supplier-delivery-api/supplier/",
+
   // === 销售 / 售罄 / 履约 ===
   "/mms/venom/api/supplier/sales/management/listOverall",
   "/mms/venom/api/supplier/sales/management/queryFulfilmentFormStatistic",
