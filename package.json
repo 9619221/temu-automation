@@ -89,7 +89,8 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Temu 自动化运营工具"
+      "shortcutName": "Temu 自动化运营工具",
+      "include": "build-installer/installer.nsh"
     }
   },
   "dependencies": {
