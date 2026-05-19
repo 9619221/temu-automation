@@ -40,6 +40,25 @@
     return whitelistRe.test(url);
   }
   function safeJson(text) { try { return JSON.parse(text); } catch { return null; } }
+  // 仅采集逆向必需的请求头，绝不采 cookie / authorization / token，避免凭据外泄
+  const REQ_HEADER_ALLOW = ["anti-content", "content-type", "mallid", "x-requested-with"];
+  function pickReqHeaders(getter) {
+    const out = {};
+    try {
+      for (const name of REQ_HEADER_ALLOW) {
+        const v = getter(name);
+        if (v) out[name] = String(v).slice(0, 4000);
+      }
+    } catch {}
+    return out;
+  }
+  function reqBodyStr(body) {
+    try {
+      if (body == null) return null;
+      if (typeof body === "string") return body.length > 60000 ? body.slice(0, 60000) + "...[TRUNC]" : body;
+      return "[non-string body]";
+    } catch { return null; }
+  }
   function emit(payload) {
     try {
       window.dispatchEvent(new CustomEvent(EVENT_NAME, { detail: payload }));
@@ -62,6 +81,8 @@
   function TrackedXHR() {
     const xhr = new OrigXHR();
     let _url = "", _method = "GET", _bypass = false;
+    const _reqHeaders = {};
+    let _reqBody = null;
     const _ts = Date.now();
     const origOpen = xhr.open;
     xhr.open = function (method, url) {
@@ -69,15 +90,21 @@
       return origOpen.apply(this, arguments);
     };
     const origSetHdr = xhr.setRequestHeader;
-    xhr.setRequestHeader = function (name) {
+    xhr.setRequestHeader = function (name, value) {
       if (name === BYPASS_SYMBOL_KEY) { _bypass = true; stats.bypassHit++; return; }
+      try {
+        if (name && REQ_HEADER_ALLOW.indexOf(String(name).toLowerCase()) >= 0) {
+          _reqHeaders[String(name).toLowerCase()] = String(value).slice(0, 4000);
+        }
+      } catch {}
       return origSetHdr.apply(this, arguments);
     };
     const origSend = xhr.send;
-    xhr.send = function () {
+    xhr.send = function (body) {
       stats.xhrSendTotal++;
       if (!_bypass && shouldCapture(_url)) {
         stats.xhrCaptureHit++;
+        try { _reqBody = reqBodyStr(body); } catch {}
         xhr.addEventListener("readystatechange", function () {
           if (xhr.readyState !== 4) return;
           try {
@@ -85,6 +112,8 @@
             emit({
               kind: "xhr", url: _url, method: _method, status: xhr.status, ts: _ts,
               site: inferMallSite(), page: location.pathname,
+              reqBody: _reqBody,
+              reqHeaders: _reqHeaders,
               body: safeJson(text),
               bodyText: text.length > 200000 ? null : text,
               bodySize: text.length,
@@ -131,6 +160,16 @@
     if (!shouldCapture(url)) return OrigFetch.apply(this, arguments);
     stats.fetchCaptureHit++;
     const ts = Date.now();
+    const reqBody = reqBodyStr(init && init.body);
+    const hdrSrc = (init && init.headers) || (input && input.headers) || null;
+    const reqHeaders = pickReqHeaders((n) => {
+      try {
+        if (!hdrSrc) return null;
+        if (typeof hdrSrc.get === "function") return hdrSrc.get(n);
+        const lk = Object.keys(hdrSrc).find((k) => k.toLowerCase() === n.toLowerCase());
+        return lk ? hdrSrc[lk] : null;
+      } catch { return null; }
+    });
     const promise = OrigFetch.apply(this, arguments);
     return promise.then((resp) => {
       try {
@@ -140,6 +179,8 @@
             emit({
               kind: "fetch", url, method, status: resp.status, ts,
               site: inferMallSite(), page: location.pathname,
+              reqBody,
+              reqHeaders,
               body: safeJson(text),
               bodyText: text.length > 200000 ? null : text,
               bodySize: text.length,
@@ -186,11 +227,11 @@
   } catch {}
 
   window.__temuMonitor = {
-    version: "0.3.0",
+    version: "0.3.3",
     site: inferMallSite(),
     healthy: () => window.XMLHttpRequest === TrackedXHR && window.fetch === TrackedFetch,
     stats,
-    note: "XHR + fetch wrapped; fetch 用 resp.clone() 不消耗原 stream; perf observer 兜底",
+    note: "XHR + fetch wrapped; v0.3.3 增白名单内请求体+anti-content/content-type 头采集(不采凭据); fetch 用 resp.clone() 不消耗原 stream; perf observer 兜底",
   };
 })(
   (function () {
