@@ -9075,12 +9075,33 @@ function selectPoIdsForScheduledSync(db, { maxAgeHours, limit }) {
   `).all({ cutoff, limit });
 }
 
+// 第二阶段候选：已绑定 1688 订单号、但工作流尚未走到 paid 的单。
+// 为什么需要它：selectPoIdsForScheduledSync 只负责"未绑定"单的首次绑定，
+// 一旦 PO 绑定了 external_order_id（或离开 pushed_pending_price），它就不再被定时任务触碰。
+// 而用户的 1688 线上支付通常发生在订单已绑定之后，没有任何机制再去拉它的最新状态，
+// PO 会永久卡住、必须人工点「确认付款」。这里把这些"已绑定待付款"单也纳入定时同步，
+// 拉最新 1688 状态，已支付则用现有工作流自动推进到 paid（含建入库单）。
+function selectBoundPoIdsForPaymentSync(db, { maxAgeHours, limit }) {
+  const cutoff = new Date(Date.now() - maxAgeHours * 3600 * 1000).toISOString();
+  return db.prepare(`
+    SELECT id, account_id, external_order_synced_at
+    FROM erp_purchase_orders
+    WHERE external_order_id IS NOT NULL
+      AND external_order_id != ''
+      AND status IN ('pushed_pending_price', 'approved_to_pay')
+      AND created_at >= @cutoff
+    ORDER BY (external_order_synced_at IS NULL) DESC, external_order_synced_at ASC
+    LIMIT @limit
+  `).all({ cutoff, limit });
+}
+
 async function runScheduledOrderSync({ maxAgeHours = 168, limit = 50, logger } = {}) {
   if (isClientMode()) return { skipped: "client_mode", processed: 0, results: [] };
   if (!erpState.db || !erpState.services) return { skipped: "erp_not_ready", processed: 0, results: [] };
   const { db, services } = requireErp();
   const candidates = selectPoIdsForScheduledSync(db, { maxAgeHours, limit });
-  if (!candidates.length) return { processed: 0, results: [] };
+  const boundCandidates = selectBoundPoIdsForPaymentSync(db, { maxAgeHours, limit });
+  if (!candidates.length && !boundCandidates.length) return { processed: 0, results: [] };
   const log = typeof logger === "function" ? logger : () => {};
   const now = Date.now();
   const failedAccounts = new Set();
@@ -9131,9 +9152,78 @@ async function runScheduledOrderSync({ maxAgeHours = 168, limit = 50, logger } =
       results.push({ poId: row.id, status: "error", error: errMsg });
     }
   }
+  // 第二阶段：处理"已绑定 1688 订单号、尚未 paid"的单——拉最新 1688 状态，
+  // 若已支付则用现有工作流（submitPaymentApproval → confirmPaymentPaid）自动推进到 paid。
+  // 全程用系统 actor，不裸改 status；退避 state key 用 "pay:" 前缀与绑定阶段隔离。
+  const sysActor = { id: null, role: "system", name: "auto-sync" };
+  for (const row of boundCandidates) {
+    const stateKey = "pay:" + row.id;
+    const state = orderSyncAttemptState.get(stateKey) || { attempts: 0, nextAt: 0 };
+    if (state.nextAt && state.nextAt > now) {
+      results.push({ poId: row.id, status: "backoff_skip", nextAt: state.nextAt });
+      continue;
+    }
+    if (row.account_id && failedAccounts.has(row.account_id)) {
+      results.push({ poId: row.id, status: "account_skip" });
+      continue;
+    }
+    try {
+      const po = getPurchaseOrder(db, row.id);
+      if (isPaidOrLaterPurchaseOrder(po)) {
+        orderSyncAttemptState.delete(stateKey);
+        results.push({ poId: row.id, status: "already_paid" });
+        continue;
+      }
+      await fetch1688OrderDetailForPo({
+        db,
+        services,
+        po,
+        payload: {},
+        actor: sysActor,
+        action: "sync_1688_payment",
+      });
+      const fresh = getPurchaseOrder(db, row.id);
+      const paid =
+        map1688StatusToPaymentStatus(fresh.external_order_status, fresh.payment_status) === "paid" ||
+        fresh.payment_status === "paid";
+      if (paid) {
+        let target = fresh;
+        if (target.status === "pushed_pending_price") {
+          services.purchase.submitPaymentApproval(row.id, sysActor);
+          target = getPurchaseOrder(db, row.id);
+        }
+        if (target.status === "approved_to_pay" || isPaidOrLaterPurchaseOrder(target)) {
+          confirmPaymentPaid({ db, services, payload: { poId: row.id }, actor: sysActor });
+        }
+        orderSyncAttemptState.delete(stateKey);
+        log({ event: "paid_advanced", poId: row.id });
+        results.push({ poId: row.id, status: "paid_advanced" });
+      } else {
+        const nextAttempts = state.attempts + 1;
+        orderSyncAttemptState.set(stateKey, {
+          attempts: nextAttempts,
+          nextAt: now + getOrderSyncBackoffMs(nextAttempts),
+        });
+        log({ event: "not_paid_yet", poId: row.id, attempts: nextAttempts });
+        results.push({ poId: row.id, status: "not_paid_yet" });
+      }
+    } catch (e) {
+      const nextAttempts = state.attempts + 1;
+      orderSyncAttemptState.set(stateKey, {
+        attempts: nextAttempts,
+        nextAt: now + getOrderSyncBackoffMs(nextAttempts),
+      });
+      const errMsg = e?.message || String(e);
+      const looksLikeAuthIssue = /(权限|未授权|授权|access[\s_-]?token|oauth|unauthorized|forbidden|invalid[_\s-]?(?:token|signature))/i.test(errMsg);
+      if (looksLikeAuthIssue && row.account_id) failedAccounts.add(row.account_id);
+      log({ event: "error", poId: row.id, error: errMsg, attempts: nextAttempts });
+      results.push({ poId: row.id, status: "error", error: errMsg });
+    }
+  }
   return {
-    processed: candidates.length,
+    processed: candidates.length + boundCandidates.length,
     bound: results.filter((r) => r.status === "bound").length,
+    paidAdvanced: results.filter((r) => r.status === "paid_advanced").length,
     results,
   };
 }
