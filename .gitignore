@@ -43,3 +43,4 @@ tmp-*.py
 tmp-*.cmd
 tmp_*.cjs
 worker.mjs
+extension/dist/
