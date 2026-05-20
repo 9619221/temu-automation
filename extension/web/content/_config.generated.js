@@ -1,5 +1,5 @@
 // ! 自动生成，勿手改 — 由 scripts/build-bridge.cjs 同步自 hook-config.js
-// 生成时间: 2026-05-20T10:01:02.099Z
+// 生成时间: 2026-05-20T10:10:01.279Z
 // 白名单数量: 182
 window.__TEMU_MONITOR_BUILD_CONFIG__ = {
   "URL_WHITELIST": [
@@ -209,6 +209,6 @@ window.__TEMU_MONITOR_BUILD_CONFIG__ = {
   ],
   "EVENT_NAME": "temu-monitor.captured",
   "BYPASS_SYMBOL_KEY": "temu-monitor.fetch.bypass",
-  "GENERATED_AT": "2026-05-20T10:01:02.099Z",
+  "GENERATED_AT": "2026-05-20T10:10:01.279Z",
   "WHITELIST_COUNT": 182
 };
