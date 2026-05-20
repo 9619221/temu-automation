@@ -5110,88 +5110,106 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         onOk={() => void runBatchPush1688()}
         destroyOnClose
       >
-        {batchPushPicker ? (
-          <Space direction="vertical" size={14} style={{ width: "100%" }}>
-            {batchPushPicker.progress.done > 0 ? (
-              <div style={{ padding: "8px 12px", background: "#f9fafb", border: "1px solid #e5e9f0", borderRadius: 8, fontSize: 13 }}>
-                已推送 {batchPushPicker.progress.done}/{batchPushPicker.progress.total}
-                {" · 成功 "}<Text strong style={{ color: "#16a34a" }}>{batchPushPicker.progress.ok}</Text>
-                {" · 失败 "}<Text strong style={{ color: "#dc2626" }}>{batchPushPicker.progress.fail}</Text>
-              </div>
-            ) : null}
+        {batchPushPicker ? (() => {
+          // 按所选 1688 采购账号（OAuth）过滤地址——跨 OAuth 1688 会报 AddressId invalid。
+          // 多组时取并集（所有组当前选的 OAuth 下的地址），用户在地址下拉只能选有效的。
+          const oauthsInPlay = Array.from(new Set(
+            batchPushPicker.groups.map((g) => g.selectedPurchaseAccountId).filter(Boolean) as string[],
+          ));
+          const filteredAddrs = (data.alibaba1688Addresses || []).filter((a) => {
+            if (oauthsInPlay.length === 0) return true;
+            return oauthsInPlay.includes(String((a as any).purchase1688AccountId || ""));
+          });
+          return (
+            <Space direction="vertical" size={16} style={{ width: "100%" }}>
+              {batchPushPicker.progress.done > 0 ? (
+                <div style={{ padding: "8px 12px", background: "#f9fafb", border: "1px solid #e5e9f0", borderRadius: 8, fontSize: 13 }}>
+                  已推送 {batchPushPicker.progress.done}/{batchPushPicker.progress.total}
+                  {" · 成功 "}<Text strong style={{ color: "#16a34a" }}>{batchPushPicker.progress.ok}</Text>
+                  {" · 失败 "}<Text strong style={{ color: "#dc2626" }}>{batchPushPicker.progress.fail}</Text>
+                </div>
+              ) : null}
 
-            <div>
-              <Text strong style={{ fontSize: 14 }}>收货地址（所有组共用）</Text>
-              <div style={{ marginTop: 8 }}>
-                {(data.alibaba1688Addresses || []).length ? (
+              {/* 顺序跟单推 Modal 一致：账号在上、地址在下 */}
+              {!batchPushPicker.fallbackMode ? (
+                <div>
+                  <Text strong style={{ fontSize: 13 }}>1688 采购账号（按店铺分组 {batchPushPicker.groups.length} 组）</Text>
+                  {batchPushPicker.groups.map((group) => (
+                    <div key={group.accountId || "unknown"} style={{ marginTop: 8 }}>
+                      <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 4 }}>
+                        {group.accountName}（{group.pos.length} 单：{group.pos.slice(0, 3).map((po) => po.poNo || po.id).join("、")}{group.pos.length > 3 ? ` 等 ${group.pos.length} 单` : ""}）
+                      </div>
+                      <Select
+                        style={{ width: "100%" }}
+                        value={group.selectedPurchaseAccountId || undefined}
+                        onChange={(value) => setBatchPushPicker((prev) => {
+                          if (!prev) return prev;
+                          // 切换账号后,如果当前选的地址不在新账号下,重置 addressId 为新账号下的默认
+                          const newOauths = Array.from(new Set(
+                            prev.groups.map((g) => g.accountId === group.accountId ? (value || null) : g.selectedPurchaseAccountId)
+                              .filter(Boolean) as string[],
+                          ));
+                          const newFiltered = (data.alibaba1688Addresses || []).filter((a) =>
+                            !newOauths.length || newOauths.includes(String((a as any).purchase1688AccountId || "")),
+                          );
+                          const currentAddrStillValid = prev.addressId
+                            && newFiltered.some((a) => a.id === prev.addressId);
+                          const nextAddrId = currentAddrStillValid ? prev.addressId : (newFiltered.find((a) => a.isDefault)?.id || newFiltered[0]?.id || null);
+                          return {
+                            ...prev,
+                            addressId: nextAddrId,
+                            groups: prev.groups.map((item) => item.accountId === group.accountId
+                              ? { ...item, selectedPurchaseAccountId: value || null }
+                              : item),
+                          };
+                        })}
+                        placeholder="选 1688 采购账号"
+                        options={batchPushPicker.accounts.map((acct) => ({
+                          value: acct.id,
+                          label: `${acct.label || acct.id}${acct.id === group.defaultPurchaseAccountId ? "（店铺默认）" : ""}`,
+                        }))}
+                        disabled={batchPushPicker.running}
+                      />
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <Text type="secondary" style={{ fontSize: 12 }}>使用 company 默认 1688 凭据推送（主控不支持多账号）</Text>
+              )}
+
+              <div>
+                <Text strong style={{ fontSize: 13 }}>收货地址（所有组共用）</Text>
+                {filteredAddrs.length ? (
                   <Select
-                    style={{ width: "100%" }}
+                    style={{ width: "100%", marginTop: 6 }}
                     value={batchPushPicker.addressId || undefined}
                     onChange={(value) => setBatchPushPicker((prev) => prev ? { ...prev, addressId: value || null } : prev)}
-                    placeholder="选收货地址"
-                    options={(data.alibaba1688Addresses || []).map((addr) => ({
-                      value: addr.id,
-                      label: `${addr.fullName || addr.label || addr.id}${addr.isDefault ? "（默认）" : ""}`,
-                    }))}
+                    placeholder="请选择收货地址"
+                    options={filteredAddrs.map((addr, i) => {
+                      const remoteId = (addr as any).addressId || (addr as any).address_id;
+                      const display = addr.fullName || addr.label || `地址 ${i + 1}`;
+                      const summary = [
+                        display,
+                        addr.mobile || "",
+                        (addr.address || "-").slice(0, 30),
+                      ].filter(Boolean).join(" · ");
+                      return {
+                        value: addr.id,
+                        label: summary + (addr.isDefault ? "（默认）" : "") + (remoteId ? "" : "（未绑 1688，不可推单）"),
+                        disabled: !remoteId,
+                      };
+                    })}
                     disabled={batchPushPicker.running}
                   />
                 ) : (
-                  <Text type="secondary" style={{ fontSize: 12 }}>当前没有 1688 收货地址，将由后端默认逻辑兜底（可能直接报错）。</Text>
+                  <div style={{ marginTop: 6, padding: 12, background: "#fff2f0", border: "1px solid #ffccc7", borderRadius: 6, color: "#cf1322", fontSize: 12 }}>
+                    所选 1688 采购账号下还没有可用收货地址。请去「店铺 / 1688 设置」点「同步 1688 地址」拉一份后再推。
+                  </div>
                 )}
               </div>
-            </div>
-
-            <div>
-              <Text strong style={{ fontSize: 14 }}>按店铺分组（{batchPushPicker.groups.length} 组）</Text>
-            </div>
-
-            {batchPushPicker.groups.map((group) => (
-              <div
-                key={group.accountId || "unknown"}
-                style={{
-                  padding: "12px 14px",
-                  border: "1px solid #e5e9f0",
-                  borderRadius: 10,
-                  background: "#fff",
-                }}
-              >
-                <Space direction="vertical" size={8} style={{ width: "100%" }}>
-                  <Space size={8} wrap>
-                    <Text strong style={{ fontSize: 14 }}>{group.accountName}</Text>
-                    <Tag>共 {group.pos.length} 单</Tag>
-                  </Space>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    {group.pos.slice(0, 3).map((po) => po.poNo || po.id).join("、")}
-                    {group.pos.length > 3 ? ` 等 ${group.pos.length} 单` : ""}
-                  </Text>
-                  {batchPushPicker.fallbackMode ? (
-                    <Text type="secondary" style={{ fontSize: 12 }}>使用 company 默认 1688 凭据（旧版主控）</Text>
-                  ) : (
-                    <Select
-                      style={{ width: "100%" }}
-                      value={group.selectedPurchaseAccountId || undefined}
-                      onChange={(value) => setBatchPushPicker((prev) => {
-                        if (!prev) return prev;
-                        return {
-                          ...prev,
-                          groups: prev.groups.map((item) => item.accountId === group.accountId
-                            ? { ...item, selectedPurchaseAccountId: value || null }
-                            : item),
-                        };
-                      })}
-                      placeholder="选 1688 采购账号"
-                      options={batchPushPicker.accounts.map((acct) => ({
-                        value: acct.id,
-                        label: `${acct.label || acct.id}${acct.id === group.defaultPurchaseAccountId ? "（店铺默认）" : ""}`,
-                      }))}
-                      disabled={batchPushPicker.running}
-                    />
-                  )}
-                </Space>
-              </div>
-            ))}
-          </Space>
-        ) : null}
+            </Space>
+          );
+        })() : null}
       </Modal>
 
       <Modal
