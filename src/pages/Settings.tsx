@@ -1,8 +1,7 @@
 import { useEffect, useState } from "react";
 import { Form, Input, InputNumber, Switch, Button, Tag, Progress, Space, Typography, message } from "antd";
-import { CloudDownloadOutlined, CheckCircleOutlined, SyncOutlined, ReloadOutlined, LinkOutlined, ApiOutlined } from "@ant-design/icons";
+import { CloudDownloadOutlined, CheckCircleOutlined, SyncOutlined, ReloadOutlined, LinkOutlined } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
-import { useErpAuth } from "../contexts/ErpAuthContext";
 import { clearCloudConfig, loadCloudConfig, saveCloudConfig } from "../utils/cloudClient";
 import { normalizeExtensionInstallUrl, openExternalUrl } from "../utils/extensionInstall";
 
@@ -129,13 +128,6 @@ export default function Settings() {
             <Progress percent={updateStatus.progressPercent} strokeColor="var(--color-brand)" size="small" />
           )}
 
-          {updateStatus.feedUrl ? (
-            <Text type="secondary" style={{ fontSize: 12, wordBreak: "break-all" }}>
-              更新源：<code>{updateStatus.feedUrl}</code>
-              {updateStatus.proxyRules ? <> · 代理：<code>{updateStatus.proxyRules}</code></> : null}
-            </Text>
-          ) : null}
-
           <Space wrap>
             <Button icon={<ReloadOutlined />} onClick={handleCheckUpdate} disabled={updateStatus.status === "downloading"}>
               检查更新
@@ -177,33 +169,8 @@ export default function Settings() {
           headless: false,
           autoLoginRetry: true,
           screenshotOnError: true,
-          updateFeedUrl: "",
-          updateProxyRules: "",
         }}
       >
-        <div className="app-panel" style={{ marginBottom: 16 }}>
-          <div className="app-panel__title">
-            <div>
-              <div className="app-panel__title-main">更新网络</div>
-              <div className="app-panel__title-sub">更新下载专用，不影响采集浏览器。</div>
-            </div>
-          </div>
-          <Form.Item
-            name="updateFeedUrl"
-            label="更新源 URL"
-            help="留空使用默认 GitHub Release 镜像。自定义源需要是包含 latest.yml 的 generic feed 目录。"
-          >
-            <Input placeholder="https://gh-proxy.com/https://github.com/9619221/temu-automation/releases/latest/download/" />
-          </Form.Item>
-          <Form.Item
-            name="updateProxyRules"
-            label="更新代理"
-            help="可填 http://127.0.0.1:7890 或 socks5://127.0.0.1:7890；留空使用系统代理/VPN。"
-          >
-            <Input placeholder="http://127.0.0.1:7890" />
-          </Form.Item>
-        </div>
-
         <div className="app-panel" style={{ marginBottom: 16 }}>
           <div className="app-panel__title">
             <div>
@@ -216,7 +183,7 @@ export default function Settings() {
               正式分发建议用 Chrome Web Store 非公开链接；内测或临时分发可以填扩展文件下载链接，让用户下载压缩包后手动“加载已解压的扩展程序”。
             </Text>
             <Form.Item name="extensionPackageUrl" label="扩展文件下载链接" help="指向 .zip 压缩包；用户下载后需要先解压，再在 Chrome 扩展管理页加载解压后的目录。">
-              <Input placeholder="https://your-cloud.example.com/downloads/temu-monitor-extension.zip" />
+              <Input placeholder="https://erp.temu.chat/releases/temu-monitor-extension-0.4.0.zip" />
             </Form.Item>
             <Form.Item name="extensionInstallUrl" label="扩展安装链接" help="示例：https://chromewebstore.google.com/detail/...">
               <Input placeholder="https://chromewebstore.google.com/detail/..." />
