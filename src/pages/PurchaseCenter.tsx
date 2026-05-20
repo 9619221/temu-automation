@@ -130,10 +130,6 @@ const QUICK_PURCHASE_ACTIONS = new Set([
   "confirm_1688_receive_goods",
   "link_1688_order_to_po",
 ]);
-const SHORT_WORKBENCH_ACTIONS = new Set([
-  "rollback_po_status",
-  "source_1688_image",
-]);
 const DEFAULT_PURCHASE_INQUIRY_TEMPLATE = [
   "商品包装方式是什么？商品需要提供哪些资质文件？可以优惠吗？",
   "整箱包装尺寸和重量是多少？下单需要注意什么？",
@@ -2291,11 +2287,6 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           && payload.includeWorkbench !== false
           && !QUICK_PURCHASE_ACTIONS.has(String(payload.action || ""))
         );
-      const shouldRequestWorkbench = shouldRefreshWorkbench
-        || (
-          payload.includeWorkbench !== false
-          && !SHORT_WORKBENCH_ACTIONS.has(String(payload.action || ""))
-        );
       // 所有含外部 1688 / alphashop 网络调用的 action 都用更长 IPC 超时（120s）；
       // 本地 DB 写动作走默认 60s。命中名字里有 1688/alphashop 即视为慢动作。
       const actionName = String(payload.action || "");
@@ -2305,18 +2296,24 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       const explicitTimeoutMs = Number.isFinite(options?.timeoutMs) ? options!.timeoutMs : null;
       const inferredTimeoutMs = isSlowAction ? 120000 : null;
       const finalTimeoutMs = explicitTimeoutMs ?? inferredTimeoutMs ?? undefined;
+      // 性能优化：action 不带 workbench（减小 response body 3.4 MB → ~几 KB），
+      // 按钮 IPC 立即返回，UI 即时反馈。workbench 在后台 lazy refresh（fire-and-forget），
+      // 1-2 秒后 PO 状态/tab 计数自动更新。避免「按钮等 3-5 秒 SQL + 跨海传 3.4 MB」感觉慢。
       const result = await erp.purchase.action({
         ...payload,
         ...workbenchParams,
-        includeWorkbench: shouldRequestWorkbench,
+        includeWorkbench: false,
       }, finalTimeoutMs ? { timeoutMs: finalTimeoutMs } : undefined);
-      if (shouldRefreshWorkbench) {
-        const workbench = result?.workbench || await erp.purchase.workbench(workbenchParams);
-        applyWorkbench(workbench);
-        syncWorkbenchOptions(workbench);
-      } else if (result?.workbench) {
+      // 如果服务器还是把 workbench 顺手返了（不该），用它，省一次后台拉
+      if (result?.workbench) {
         applyWorkbench(result.workbench);
         syncWorkbenchOptions(result.workbench);
+      } else if (shouldRefreshWorkbench) {
+        // 后台异步刷新，不阻塞 UI
+        void erp.purchase.workbench(workbenchParams).then((workbench: any) => {
+          applyWorkbench(workbench);
+          syncWorkbenchOptions(workbench);
+        }).catch(() => {});
       }
       if (accounts.length === 0) {
         void erp.account.list({ limit: 500 })
