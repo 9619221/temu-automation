@@ -7187,7 +7187,7 @@ function get1688DeliveryAddress(db, addressId = null, companyId = DEFAULT_COMPAN
     const row = db.prepare("SELECT * FROM erp_1688_delivery_addresses WHERE id = ? AND company_id = ?").get(id, normalizedCompanyId);
     if (!row) throw new Error(`1688 delivery address not found: ${id}`);
     const rowAccountId = optionalString(row.account_id);
-    if (normalizedAccountId && rowAccountId !== normalizedAccountId) {
+    if (normalizedAccountId && rowAccountId && rowAccountId !== normalizedAccountId) {
       throw new Error("1688 delivery address does not belong to this store");
     }
     return row;
@@ -7197,9 +7197,20 @@ function get1688DeliveryAddress(db, addressId = null, companyId = DEFAULT_COMPAN
       SELECT *
       FROM erp_1688_delivery_addresses
       WHERE company_id = @company_id
-        AND account_id = @account_id
+        AND (
+          account_id = @account_id
+          OR account_id IS NULL
+          OR account_id = ''
+        )
         AND status = 'active'
-      ORDER BY is_default DESC,
+      ORDER BY
+        CASE
+          WHEN account_id = @account_id AND COALESCE(address_id, '') != '' THEN 0
+          WHEN (account_id IS NULL OR account_id = '') AND COALESCE(address_id, '') != '' THEN 1
+          WHEN account_id = @account_id THEN 2
+          ELSE 3
+        END,
+        is_default DESC,
         updated_at DESC,
         created_at DESC
       LIMIT 1
