@@ -332,6 +332,55 @@ interface ErpLanStatus {
   lastError?: string | null;
 }
 
+interface ErpJushuitanSource {
+  id: string;
+  companyId: string;
+  sourceKey: string;
+  method: string;
+  label: string;
+  category: string;
+  enabled: boolean;
+  syncMode: string;
+  pageSize: number;
+  lastSyncedAt?: string | null;
+  lastSuccessAt?: string | null;
+  lastError?: string | null;
+  totalSynced?: number;
+  rawCount?: number;
+}
+
+interface ErpJushuitanStatus {
+  companyId: string;
+  configured?: boolean;
+  rawCount?: number;
+  auth?: Record<string, any>;
+  sources: ErpJushuitanSource[];
+  latestJobs: any[];
+}
+
+interface ErpJushuitanAPI {
+  getStatus: (params?: Record<string, any>) => Promise<ErpJushuitanStatus>;
+  saveSource: (payload: Record<string, any>) => Promise<ErpJushuitanSource>;
+  importFile: (payload: { filePath: string; sourceKey?: string }, options?: { timeoutMs?: number }) => Promise<any>;
+  openWebCollector: (payload?: { url?: string }, options?: { timeoutMs?: number }) => Promise<any>;
+  collectWebPage: (
+    payload?: {
+      url?: string;
+      sourceKey?: string;
+      maxPages?: number;
+      maxScrolls?: number;
+      maxRecords?: number;
+      autoNext?: boolean;
+      captureNetwork?: boolean;
+    },
+    options?: { timeoutMs?: number },
+  ) => Promise<any>;
+  closeWebCollector: (payload?: Record<string, any>) => Promise<any>;
+  syncOperational: (payload?: { sourceKeys?: string[] }, options?: { timeoutMs?: number }) => Promise<any>;
+  listJobs: (params?: Record<string, any>) => Promise<any[]>;
+  listRaw: (params?: Record<string, any>) => Promise<any[]>;
+}
+
 interface ErpPurchaseUpdateEvent {
   type: "purchase:update";
   action: string;
@@ -361,6 +410,7 @@ interface ErpAuthExpiredEvent {
 interface ErpAPI {
   getStatus: () => Promise<ErpStatus>;
   runMigrations: () => Promise<ErpStatus>;
+  syncTemuSales?: (payload: any) => Promise<{ ok: boolean; result?: any; error?: string }>;
   getEnums: () => Promise<Record<string, Record<string, string>>>;
   client: {
     getStatus: () => Promise<ErpClientStatus>;
@@ -477,6 +527,7 @@ interface ErpAPI {
     start: (payload?: { port?: number; bindAddress?: string }) => Promise<ErpLanStatus>;
     stop: () => Promise<ErpLanStatus>;
   };
+  jushuitan: ErpJushuitanAPI;
   events?: {
     onPurchaseUpdate: (handler: (payload: ErpPurchaseUpdateEvent) => void) => () => void;
     onUserUpdate: (handler: (payload: ErpUserUpdateEvent) => void) => () => void;

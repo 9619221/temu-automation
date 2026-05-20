@@ -11603,7 +11603,7 @@ function getWorkflowOriginalFilterModelChain() {
   const candidates = [
     process.env.WORKFLOW_ORIGINAL_FILTER_MODEL,
     process.env.VECTORENGINE_ORIGINAL_FILTER_MODEL,
-    "gpt-5.4",
+    "gpt-5.5",
     ATTRIBUTE_AI_MODEL,
     AI_MODEL,
     ...COMPARE_MODEL_CHAIN,
@@ -11623,7 +11623,7 @@ function getWorkflowOriginalFilterModelChain() {
 
 function getAttributeFillModelChain() {
   const candidates = [
-    "gpt-5.4",
+    "gpt-5.5",
     process.env.WORKFLOW_ATTRIBUTE_MODEL,
     process.env.WORKFLOW_PROPERTY_MODEL,
     process.env.VECTORENGINE_ATTRIBUTE_MODEL,

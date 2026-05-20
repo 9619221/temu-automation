@@ -45,9 +45,12 @@ const TRANSITIONS = Object.freeze({
   ],
 
   purchase_order: [
+    // 推单成功进「已推送 1688,待提交付款」,然后采购点「提交付款」才进「待付款」,中间没有审核环节。
     rule(PO.DRAFT, "push_1688_order", PO.PUSHED_PENDING_PRICE, BUYER),
     rule(PO.PUSHED_PENDING_PRICE, "sync_1688_order_price", PO.PUSHED_PENDING_PRICE, BUYER),
-    // 采购"提交付款"后直接进入"待付款"，跳过财务审批环节。
+    // 兼容:历史数据若卡在 pending_finance_approval,1688 改价同步进来不改本地状态。
+    rule(PO.PENDING_FINANCE_APPROVAL, "sync_1688_order_price", PO.PENDING_FINANCE_APPROVAL, BUYER),
+    // 采购「提交付款」→ 直接进「待付款」(approved_to_pay)。手工单(DRAFT 无 1688)和 1688 单(PUSHED_PENDING_PRICE)都走这步。
     rule([PO.DRAFT, PO.PUSHED_PENDING_PRICE], "submit_payment_approval", PO.APPROVED_TO_PAY, BUYER),
     // 保留以下规则给历史数据：已在 PENDING_FINANCE_APPROVAL 的旧 PO 仍可走原通道。
     rule(PO.PENDING_FINANCE_APPROVAL, "approve_payment", PO.APPROVED_TO_PAY, FINANCE),
@@ -55,7 +58,7 @@ const TRANSITIONS = Object.freeze({
     rule(PO.APPROVED_TO_PAY, "confirm_paid", PO.PAID, BUYER_OR_FINANCE),
     rule(PO.PAID, "mark_supplier_processing", PO.SUPPLIER_PROCESSING, BUYER),
     rule(PO.SUPPLIER_PROCESSING, "mark_supplier_shipped", PO.SHIPPED, BUYER),
-    rule(PO.SHIPPED, "mark_arrived", PO.ARRIVED, WAREHOUSE),
+    rule([PO.PAID, PO.SUPPLIER_PROCESSING, PO.SHIPPED], "mark_arrived", PO.ARRIVED, WAREHOUSE),
     rule(PO.ARRIVED, "mark_inbounded", PO.INBOUNDED, WAREHOUSE),
     rule(PO.INBOUNDED, "close_po", PO.CLOSED, BUYER),
     rule([PO.PAID, PO.SUPPLIER_PROCESSING, PO.SHIPPED], "mark_delayed", PO.DELAYED, BUYER),

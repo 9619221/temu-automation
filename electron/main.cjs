@@ -637,6 +637,30 @@ function writeUpdateConfigFile(filePath) {
   fs.writeFileSync(filePath, UPDATE_CONFIG_CONTENT, "utf8");
 }
 
+function ensureUpdateConfigFile(filePath) {
+  if (!fs.existsSync(filePath)) {
+    writeUpdateConfigFile(filePath);
+    return { filePath, generated: true };
+  }
+
+  try {
+    const existing = fs.readFileSync(filePath, "utf8");
+    if (existing === UPDATE_CONFIG_CONTENT) {
+      return { filePath, generated: false };
+    }
+    writeUpdateConfigFile(filePath);
+    return { filePath, generated: true };
+  } catch (error) {
+    appendDiagnosticLog({
+      source: "main",
+      level: "warn",
+      message: `Unable to refresh ${UPDATE_CONFIG_FILE_NAME}: ${error?.message || error}`,
+      detail: { filePath },
+    });
+    return { filePath, generated: false };
+  }
+}
+
 function ensureAppUpdateConfig() {
   if (!app.isPackaged) return null;
 
@@ -651,8 +675,9 @@ function ensureAppUpdateConfig() {
   for (const filePath of candidates) {
     if (!filePath) continue;
     if (fs.existsSync(filePath)) {
+      const result = ensureUpdateConfigFile(filePath);
       autoUpdater.updateConfigPath = filePath;
-      return { filePath, generated: false };
+      return result;
     }
   }
 
@@ -750,7 +775,7 @@ async function configureAutoUpdater() {
     return;
   }
   const updateConfig = ensureAppUpdateConfig();
-  autoUpdater.autoDownload = false;
+  autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
   const updateNetwork = await applyAutoUpdaterNetworkSettings();
   broadcastUpdateState({
@@ -2093,11 +2118,19 @@ function appendImageStudioLog(message) {
   } catch {}
 }
 
+function shouldSuppressImageStudioLogLine(line) {
+  const text = String(line || "");
+  return text.includes("[DEP0169]")
+    || text.includes("url.parse() behavior is not standardized")
+    || text.includes("CVEs are not issued for `url.parse()` vulnerabilities");
+}
+
 function getImageStudioProcessOutputHandlers(prefix) {
   return (chunk) => {
     const text = chunk.toString("utf8").trim();
     if (!text) return;
     text.split(/\r?\n/).filter(Boolean).forEach((line) => {
+      if (shouldSuppressImageStudioLogLine(line)) return;
       appendImageStudioLog(`${prefix}: ${line}`);
     });
   };
@@ -5267,6 +5300,9 @@ ipcMain.handle("app:check-for-updates", async () => {
 
 ipcMain.handle("app:download-update", async () => {
   try {
+    if (updateState.status === "downloading" || updateState.status === "downloaded") {
+      return updateState;
+    }
     ensureAppUpdateConfig();
     await applyAutoUpdaterNetworkSettings();
     await autoUpdater.downloadUpdate();

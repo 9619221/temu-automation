@@ -23,7 +23,7 @@
 不要填首页地址，客户端应填写：
 
 ```text
-https://your-domain.com/releases/
+https://erp.temu.chat/releases/
 ```
 
 ## 部署方法

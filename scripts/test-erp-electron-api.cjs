@@ -400,6 +400,62 @@ async function main() {
           account_id: account.id,
           sku_id: sku.id,
         });
+
+        seedDb.prepare(`
+          INSERT INTO erp_purchase_orders (
+            id, account_id, pr_id, selected_candidate_id, supplier_id, po_no,
+            status, payment_status, expected_delivery_date, total_amount,
+            created_by, created_at, updated_at
+          )
+          VALUES (
+            'po_partial_ipc', @account_id, 'pr_ipc', 'candidate_ipc', @supplier_id,
+            'PO-PARTIAL-001', 'paid', 'paid',
+            '2026-05-14', 100, @buyer_id, @now, @now
+          )
+        `).run({
+          account_id: account.id,
+          supplier_id: supplier.id,
+          buyer_id: buyer.id,
+          now,
+        });
+
+        seedDb.prepare(`
+          INSERT INTO erp_purchase_order_lines (
+            id, account_id, po_id, sku_id, qty, unit_cost, expected_qty, received_qty
+          )
+          VALUES (
+            'po_line_partial_ipc', @account_id, 'po_partial_ipc', @sku_id, 10, 10, 10, 0
+          )
+        `).run({
+          account_id: account.id,
+          sku_id: sku.id,
+        });
+
+        seedDb.prepare(`
+          INSERT INTO erp_inbound_receipts (
+            id, account_id, po_id, receipt_no, status, created_at, updated_at
+          )
+          VALUES (
+            'inbound_partial_ipc', @account_id, 'po_partial_ipc', 'IN-PARTIAL-001',
+            'pending_arrival', @now, @now
+          )
+        `).run({
+          account_id: account.id,
+          now,
+        });
+
+        seedDb.prepare(`
+          INSERT INTO erp_inbound_receipt_lines (
+            id, account_id, receipt_id, po_line_id, sku_id, expected_qty, received_qty
+          )
+          VALUES (
+            'inbound_line_partial_ipc', @account_id, 'inbound_partial_ipc',
+            'po_line_partial_ipc', @sku_id, 10, 0
+          )
+        `).run({
+          account_id: account.id,
+          sku_id: sku.id,
+        });
       })();
     } finally {
       seedDb.close();
@@ -418,7 +474,7 @@ async function main() {
 
     const purchaseWorkbench = await invoke("erp:purchase:workbench");
     assert.equal(purchaseWorkbench.purchaseRequests.length, 1);
-    assert.equal(purchaseWorkbench.purchaseOrders.length, 4);
+    assert.equal(purchaseWorkbench.purchaseOrders.length, 5);
     assert.equal(purchaseWorkbench.paymentQueue.length, 1);
     assert.equal(purchaseWorkbench.paymentQueue[0].paymentApprovalId, "pay_ipc");
 
@@ -440,8 +496,9 @@ async function main() {
     }
 
     const warehouseWorkbench = await invoke("erp:warehouse:workbench");
-    assert.equal(warehouseWorkbench.inboundReceipts.length, 1);
-    assert.equal(warehouseWorkbench.inboundReceipts[0].id, "inbound_wh_ipc");
+    assert.equal(warehouseWorkbench.inboundReceipts.length, 2);
+    assert.equal(warehouseWorkbench.inboundReceipts.some((item) => item.id === "inbound_wh_ipc"), true);
+    assert.equal(warehouseWorkbench.inboundReceipts.some((item) => item.id === "inbound_partial_ipc"), true);
     assert.equal(warehouseWorkbench.inventoryBatches.length, 0);
 
     const canTransition = await invoke("erp:workflow:can-transition", {
@@ -464,9 +521,9 @@ async function main() {
       actor: { id: user.id, role: user.role },
       limit: 100,
     });
-    assert.equal(generatedWorkItems.summary.created, 4);
-    assert.equal(generatedWorkItems.items.length, 4);
-    assert.equal(generatedWorkItems.stats.active, 4);
+    assert.equal(generatedWorkItems.summary.created, 5);
+    assert.equal(generatedWorkItems.items.length, 5);
+    assert.equal(generatedWorkItems.stats.active, 5);
 
     const buyerWorkItems = await invoke("erp:workItem:list", {
       ownerRole: "buyer",
@@ -1051,6 +1108,32 @@ async function main() {
     assert.equal(bind1688OrderResult.purchaseOrder.externalOrderId, "1688-order-ipc-alt");
     assert.equal(bind1688OrderResult.purchaseOrder.externalOrderStatus, "waitsellerpush");
 
+    const createRefundDryRun = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "create_1688_refund",
+        poId: "po_1688_preview_ipc",
+        refundType: "refund",
+        goodsStatus: "received",
+        amount: 4.26,
+        refundReasonId: "reason-ipc",
+        reason: "not needed",
+        dryRun: true,
+      }),
+    });
+    assert.equal(createRefundDryRun.statusCode, 200);
+    const createRefundParams = JSON.parse(createRefundDryRun.body).result.result.params;
+    assert.equal(createRefundParams.orderId, "1688-order-ipc-alt");
+    assert.equal(createRefundParams.applyPayment, 426);
+    assert.equal(createRefundParams.refundPayment, 426);
+    assert.equal(createRefundParams.applyCarriage, 0);
+    assert.equal(createRefundParams.input.applyCarriage, 0);
+
     const buyerApproveDenied = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
       method: "POST",
       headers: {
@@ -1193,8 +1276,19 @@ async function main() {
     );
     assert.equal(warehouseAfterBatches.inventoryBatches.length, 1);
     assert.equal(warehouseAfterBatches.inventoryBatches[0].receivedQty, 40);
-    assert.equal(warehouseAfterBatches.inventoryBatches[0].blockedQty, 40);
+    // 已去掉入库 QC 闸门：入库后数量直接进可用桶、qc_status=passed。
+    assert.equal(warehouseAfterBatches.inventoryBatches[0].blockedQty, 0);
+    assert.equal(warehouseAfterBatches.inventoryBatches[0].availableQty, 40);
     const qcBatchId = warehouseAfterBatches.inventoryBatches[0].id;
+
+    const purchaseAfterInbound = await requestUrl(`${lanStatus.localUrl}/api/purchase/workbench`, {
+      headers: { Cookie: cookie },
+    });
+    assert.equal(purchaseAfterInbound.statusCode, 200);
+    assert.equal(
+      JSON.parse(purchaseAfterInbound.body).workbench.purchaseOrders.find((item) => item.id === "po_wh_ipc").status,
+      "inbounded",
+    );
 
     const qcDeniedForWarehouse = await requestUrl(`${lanStatus.localUrl}/qc`, {
       headers: { Cookie: warehouseCookie },
@@ -1219,65 +1313,19 @@ async function main() {
       : opsLogin.headers["set-cookie"];
     assert.ok(opsCookie && opsCookie.includes("temu_erp_lan_session"));
 
+    // QC 路由与 RBAC 仍在（仅去掉了入库→出库之间的强制闸门），ops 可访问；
+    // 但入库已不再产生待质检批次，QC 工作台恒为空。
     const qcPage = await requestUrl(`${lanStatus.localUrl}/qc`, {
       headers: { Cookie: opsCookie },
     });
     assert.equal(qcPage.statusCode, 200);
-    assert.match(qcPage.body, /IN-WH-001/);
 
     const qcWorkbench = await requestUrl(`${lanStatus.localUrl}/api/qc/workbench`, {
       headers: { Cookie: opsCookie },
     });
     assert.equal(qcWorkbench.statusCode, 200);
     const qcWorkbenchBody = JSON.parse(qcWorkbench.body).workbench;
-    assert.equal(qcWorkbenchBody.pendingBatches.length, 1);
-    assert.equal(qcWorkbenchBody.pendingBatches[0].id, qcBatchId);
-
-    const startQc = await requestUrl(`${lanStatus.localUrl}/api/qc/action`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        Cookie: opsCookie,
-      },
-      body: new URLSearchParams({
-        action: "start_qc",
-        batchId: qcBatchId,
-      }).toString(),
-    });
-    assert.equal(startQc.statusCode, 302);
-
-    const qcInProgress = await requestUrl(`${lanStatus.localUrl}/api/qc/workbench`, {
-      headers: { Cookie: opsCookie },
-    });
-    const qcInProgressBody = JSON.parse(qcInProgress.body).workbench;
-    assert.equal(qcInProgressBody.pendingBatches[0].qcStatusValue, "in_progress");
-    const qcInspectionId = qcInProgressBody.pendingBatches[0].qcId;
-    assert.ok(qcInspectionId);
-
-    const submitQc = await requestUrl(`${lanStatus.localUrl}/api/qc/action`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        Cookie: opsCookie,
-      },
-      body: JSON.stringify({
-        action: "submit_qc_percent",
-        qcId: qcInspectionId,
-        actualSampleQty: 20,
-        defectiveQty: 2,
-        remark: "IPC QC partial release",
-      }),
-    });
-    assert.equal(submitQc.statusCode, 200);
-    const submitQcBody = JSON.parse(submitQc.body).result;
-    assert.equal(submitQcBody.result.decision.recommendedStatus, "partial_passed");
-    assert.equal(submitQcBody.result.batch.availableQty, 36);
-    assert.equal(submitQcBody.result.batch.blockedQty, 4);
-    assert.equal(
-      submitQcBody.workbench.inspections.find((item) => item.id === qcInspectionId).status,
-      "partial_passed",
-    );
+    assert.equal(qcWorkbenchBody.pendingBatches.length, 0);
 
     const outboundPage = await requestUrl(`${lanStatus.localUrl}/outbound`, {
       headers: { Cookie: opsCookie },
@@ -1292,7 +1340,7 @@ async function main() {
     const outboundWorkbenchBody = JSON.parse(outboundWorkbench.body).workbench;
     assert.equal(outboundWorkbenchBody.availableBatches.length, 1);
     assert.equal(outboundWorkbenchBody.availableBatches[0].id, qcBatchId);
-    assert.equal(outboundWorkbenchBody.availableBatches[0].availableQty, 36);
+    assert.equal(outboundWorkbenchBody.availableBatches[0].availableQty, 40);
 
     const createOutbound = await requestUrl(`${lanStatus.localUrl}/api/outbound/action`, {
       method: "POST",
@@ -1316,7 +1364,7 @@ async function main() {
     assert.equal(createOutboundBody.result.shipment.status, "pending_warehouse");
     assert.equal(
       createOutboundBody.workbench.availableBatches.find((item) => item.id === qcBatchId).availableQty,
-      26,
+      30,
     );
     assert.equal(
       createOutboundBody.workbench.outboundShipments.find((item) => item.id === outboundId).status,
@@ -1401,6 +1449,44 @@ async function main() {
       JSON.parse(confirmOutboundDone.body).result.workbench.outboundShipments.find((item) => item.id === outboundId).status,
       "confirmed",
     );
+
+    const partialInbound = await requestUrl(`${lanStatus.localUrl}/api/warehouse/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: warehouseCookie,
+      },
+      body: JSON.stringify({
+        action: "confirm_count",
+        receiptId: "inbound_partial_ipc",
+        lines: [
+          {
+            id: "inbound_line_partial_ipc",
+            received_qty: 6,
+            damaged_qty: 1,
+          },
+        ],
+      }),
+    });
+    assert.equal(partialInbound.statusCode, 200);
+    const partialWarehouseBody = JSON.parse(partialInbound.body).result.workbench;
+    assert.equal(
+      partialWarehouseBody.inboundReceipts.find((item) => item.id === "inbound_partial_ipc").status,
+      "inbounded_pending_qc",
+    );
+    assert.equal(
+      partialWarehouseBody.inventoryBatches.find((item) => item.inboundReceiptId === "inbound_partial_ipc").receivedQty,
+      6,
+    );
+
+    const purchaseAfterPartialInbound = await requestUrl(`${lanStatus.localUrl}/api/purchase/workbench`, {
+      headers: { Cookie: cookie },
+    });
+    assert.equal(purchaseAfterPartialInbound.statusCode, 200);
+    const partialPo = JSON.parse(purchaseAfterPartialInbound.body).workbench.purchaseOrders.find((item) => item.id === "po_partial_ipc");
+    assert.equal(partialPo.status, "arrived");
+    assert.equal(partialPo.receivedQty, 6);
 
     lanStatus = await invoke("erp:lan:stop");
     assert.equal(lanStatus.running, false);
