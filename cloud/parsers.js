@@ -40,6 +40,24 @@ function toCents(raw, fieldName) {
   return Math.round(n * 100);
 }
 
+function toNullableNumber(raw) {
+  if (raw == null || raw === "") return null;
+  if (typeof raw === "string" && raw.trim() === "") return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+function toNullableInteger(raw) {
+  const n = toNullableNumber(raw);
+  return n == null ? null : Math.trunc(n);
+}
+
+function toNullableString(raw, max) {
+  if (raw == null || raw === "") return null;
+  const s = String(raw);
+  return max ? s.slice(0, max) : s;
+}
+
 function pickPriceCents(row, candidateKeys) {
   for (const k of candidateKeys) {
     const v = row?.[k];
@@ -178,6 +196,129 @@ function parseSkcList(db, ctx, evt, body) {
   }
 }
 
+// ---------- TEMU sales/management ----------
+
+function parseSalesManagement(db, ctx, evt, body) {
+  const list = pickList(body);
+  if (!Array.isArray(list) || !list.length) return;
+  const upsertSales = db.prepare(`
+    INSERT INTO temu_sales_snapshot (
+      id, tenant_id, skc_id, product_id, goods_id, mall_supplier_id,
+      title, category_name, thumb_url, sku_ext_code,
+      today_sales, last7d_sales, last30d_sales, total_sales,
+      warehouse_stock, occupy_stock, unavailable_stock, advice_qty, available_sale_days,
+      declared_price_cents, price_currency, asf_score, comment_num, quality_after_sales_rate,
+      supply_status, stock_status, close_jit_status, stat_date, sources_json
+    ) VALUES (
+      @id, @tenant_id, @skc_id, @product_id, @goods_id, @mall_supplier_id,
+      @title, @category_name, @thumb_url, @sku_ext_code,
+      @today_sales, @last7d_sales, @last30d_sales, @total_sales,
+      @warehouse_stock, @occupy_stock, @unavailable_stock, @advice_qty, @available_sale_days,
+      @declared_price_cents, @price_currency, @asf_score, @comment_num, @quality_after_sales_rate,
+      @supply_status, @stock_status, @close_jit_status, @stat_date, @sources_json
+    )
+    ON CONFLICT(tenant_id, skc_id, stat_date) DO UPDATE SET
+      product_id               = COALESCE(excluded.product_id, product_id),
+      goods_id                 = COALESCE(excluded.goods_id, goods_id),
+      mall_supplier_id         = COALESCE(excluded.mall_supplier_id, mall_supplier_id),
+      title                    = COALESCE(excluded.title, title),
+      category_name            = COALESCE(excluded.category_name, category_name),
+      thumb_url                = COALESCE(excluded.thumb_url, thumb_url),
+      sku_ext_code             = COALESCE(excluded.sku_ext_code, sku_ext_code),
+      today_sales              = COALESCE(excluded.today_sales, today_sales),
+      last7d_sales             = COALESCE(excluded.last7d_sales, last7d_sales),
+      last30d_sales            = COALESCE(excluded.last30d_sales, last30d_sales),
+      total_sales              = COALESCE(excluded.total_sales, total_sales),
+      warehouse_stock          = COALESCE(excluded.warehouse_stock, warehouse_stock),
+      occupy_stock             = COALESCE(excluded.occupy_stock, occupy_stock),
+      unavailable_stock        = COALESCE(excluded.unavailable_stock, unavailable_stock),
+      advice_qty               = COALESCE(excluded.advice_qty, advice_qty),
+      available_sale_days      = COALESCE(excluded.available_sale_days, available_sale_days),
+      declared_price_cents     = COALESCE(excluded.declared_price_cents, declared_price_cents),
+      price_currency           = COALESCE(excluded.price_currency, price_currency),
+      asf_score                = COALESCE(excluded.asf_score, asf_score),
+      comment_num              = COALESCE(excluded.comment_num, comment_num),
+      quality_after_sales_rate = COALESCE(excluded.quality_after_sales_rate, quality_after_sales_rate),
+      supply_status            = COALESCE(excluded.supply_status, supply_status),
+      stock_status             = COALESCE(excluded.stock_status, stock_status),
+      close_jit_status         = COALESCE(excluded.close_jit_status, close_jit_status),
+      sources_json             = json_patch(COALESCE(sources_json, '{}'), COALESCE(excluded.sources_json, '{}')),
+      last_updated_at          = datetime('now')
+  `);
+  const upsertSkc = buildSkcUpsert(db);
+  const stat_date = new Date().toISOString().slice(0, 10);
+  const now = Date.now();
+  const sources_json = JSON.stringify({ [evt.url_path]: evt.id });
+  for (const row of list) {
+    const skc_id = toNullableString(row?.productSkcId);
+    if (!skc_id) continue;
+    const sku = Array.isArray(row?.skuQuantityDetailList) ? row.skuQuantityDetailList[0] : null;
+    const declared_price_cents = sku ? toCents(sku.supplierPrice, "supplierPrice") : null;
+    const price_currency = toNullableString(sku?.currencyType, 8);
+    const title = toNullableString(row.productName, 500);
+    const category_name = toNullableString(row.category, 200);
+    const thumb_url = toNullableString(row.productSkcPicture, 1000);
+    const supply_status = toNullableString(row.supplyStatus, 50);
+    const total_sales = toNullableInteger(row.totalSales);
+    const warehouse_stock = toNullableInteger(row.warehouseStock);
+    const sku_ext_code = toNullableString(
+      row.skcExtCode != null && row.skcExtCode !== "" ? row.skcExtCode : sku?.skuExtCode
+    );
+    upsertSales.run({
+      id: crypto.randomUUID(),
+      tenant_id: ctx.tenant_id,
+      skc_id,
+      product_id: toNullableString(row.productId),
+      goods_id: toNullableString(row.goodsId),
+      mall_supplier_id: toNullableString(row.supplierId),
+      title,
+      category_name,
+      thumb_url,
+      sku_ext_code,
+      today_sales: toNullableInteger(row.todaySales),
+      last7d_sales: toNullableInteger(row.last7DaysSales),
+      last30d_sales: toNullableInteger(row.last30DaysSales),
+      total_sales,
+      warehouse_stock,
+      occupy_stock: toNullableInteger(row.occupyStock),
+      unavailable_stock: toNullableInteger(row.unavailableStock),
+      advice_qty: toNullableInteger(row.adviceQuantity),
+      available_sale_days: toNullableNumber(row.availableSaleDays),
+      declared_price_cents,
+      price_currency,
+      asf_score: toNullableString(row.asfScore),
+      comment_num: toNullableInteger(row.commentNum),
+      quality_after_sales_rate: toNullableString(row.qualityAfterSalesRate),
+      supply_status,
+      stock_status: toNullableString(row.stockStatus),
+      close_jit_status: toNullableString(row.closeJitStatus),
+      stat_date,
+      sources_json,
+    });
+    upsertSkc.run({
+      tenant_id: ctx.tenant_id,
+      skc_id,
+      product_id: toNullableString(row.productId),
+      mall_id: ctx.mall_id || evt.mall_id || null,
+      site: evt.site || null,
+      title,
+      category_id: null,
+      category_name,
+      status: supply_status,
+      thumb_url,
+      spec_summary: null,
+      declared_price_cents,
+      suggested_price_cents: null,
+      price_currency,
+      sales_total: total_sales,
+      stock_available: warehouse_stock,
+      compliance_status: null,
+      sources_json,
+      now,
+    });
+  }
+}
+
 // ---------- magneto/price-adjust：申报价 ----------
 
 function parsePriceAdjust(db, ctx, evt, body) {
@@ -246,6 +387,7 @@ function parseSuggestedPrice(db, ctx, evt, body) {
 const PARSERS = [
   { match: /\/auth\/userInfo|\/mms\/userInfo|\/mms\/account\/menu/, fn: parseUserInfo, name: "userInfo" },
   { match: /\/product\/skc\/pageQuery|\/product\/draft\/pageQuery|\/product\/notAllEu\/pageQuery/, fn: parseSkcList, name: "skcList" },
+  { match: /\/mms\/venom\/api\/supplier\/sales\/management\/(listOverall|querySkuSalesNumber|queryFulfilmentFormStatistic)/, fn: parseSalesManagement, name: "salesManagement" },
   { match: /\/magneto\/price-adjust\/page-query/, fn: parsePriceAdjust, name: "priceAdjust" },
   { match: /\/product\/sku\/site\/suggestedPrice\/pageQuery/, fn: parseSuggestedPrice, name: "suggestedPrice" },
 ];

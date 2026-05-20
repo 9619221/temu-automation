@@ -77,6 +77,29 @@ r.get("/agent", (req, res) => {
 
 // ================= SKC 主体聚合查询 =================
 
+// TEMU sales snapshots: ?date=YYYY-MM-DD
+r.get("/temu-sales", (req, res) => {
+  const db = getDb();
+  const tid = req.user.tid;
+  const requestedDate = req.query.date;
+  const date = typeof requestedDate === "string" && requestedDate
+    ? requestedDate
+    : new Date().toISOString().slice(0, 10);
+  const rows = db.prepare(`
+    SELECT skc_id, product_id, goods_id, mall_supplier_id, title, category_name,
+           thumb_url, sku_ext_code, today_sales, last7d_sales, last30d_sales,
+           total_sales, warehouse_stock, occupy_stock, unavailable_stock,
+           advice_qty, available_sale_days, declared_price_cents, price_currency,
+           asf_score, comment_num, quality_after_sales_rate, supply_status,
+           stock_status, close_jit_status, stat_date, last_updated_at
+    FROM temu_sales_snapshot
+    WHERE tenant_id = ? AND stat_date = ?
+    ORDER BY total_sales DESC
+    LIMIT 200
+  `).all(tid, date);
+  res.json({ date, rows });
+});
+
 // 列表：?mall_id=&q=&limit=&offset=
 r.get("/skc", (req, res) => {
   const db = getDb();
