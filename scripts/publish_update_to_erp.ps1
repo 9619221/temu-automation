@@ -331,6 +331,15 @@ $concatCommand = $concatCommand.Replace("__PARTS__", $partArguments)
 $concatCommand = $concatCommand.Replace("__TMP__", (Quote-Sh $remoteTempInstallerPath))
 $concatCommand = $concatCommand.Replace("__FINAL__", (Quote-Sh $remoteInstallerPath))
 $concatCommand = $concatCommand.Replace("__SHA__", $installerSha256)
+# 折成单行：Windows OpenSSH 把含真换行的 argv 传到远端时，远端 bash 会把换行
+# 拼进 set 的参数里（报错 "set: pipefail<换行>: invalid option name"）。
+# 其他单行 ssh 调用没踩这个坑，单独这条 concatCommand 用 here-string 多行才出问题。
+# 用 "; " 串成单行，set -e 仍然让任一命令失败时整体非 0 退出，语义不变。
+# 注意 then/else/do 后面的换行只能换成空格，bash 不允许 `then;` 直接接命令。
+$concatCommand = $concatCommand `
+  -replace "(then|else|do)`r?`n\s*", '$1 ' `
+  -replace "`r?`n\s*", "; "
+$concatCommand = $concatCommand.Trim("; ".ToCharArray())
 Invoke-NativeChecked "ssh" @($Target, $concatCommand)
 
 Copy-RemoteAtomic -LocalPath $blockmapPath -RemotePath "$RemoteDir/$installerName.blockmap" -Target $Target
