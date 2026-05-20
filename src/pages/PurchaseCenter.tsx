@@ -3565,12 +3565,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       message.warning("采购单已生成，但没有拿到可推送的采购单号，请刷新后手动推单");
       return;
     }
+    // 按用户要求：生成采购单后不自动推 1688/不自动弹账号地址 Modal。
+    // 推单走下方「采购单」列表里的「推送1688下单」按钮显式触发，那里会弹账号+地址选择。
     const validation = await validate1688OrderPush(generatedPo, true);
     if (validation?.ready) {
-      // 走多账号/地址选择入口，避免静默用默认账号 + 默认地址下单
-      await initiatePush1688Order(generatedPo);
+      message.success(`采购单已生成：${generatedPo.poNo || generatedPo.id}，可在下方「采购单」列表点「推送1688下单」继续`);
     } else {
-      message.warning(validation?.message || "采购单已生成，但当前映射还不满足 1688 自动推单条件");
+      message.warning(validation?.message || "采购单已生成，但当前映射还不满足 1688 推单条件");
     }
   };
 
