@@ -856,6 +856,7 @@ function normalize1688ProductDetailResponse(payload = {}) {
 
 function looksLikeBuyerOrder(item) {
   if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+  const baseInfo = item.baseInfo && typeof item.baseInfo === "object" ? item.baseInfo : null;
   return Boolean(
     item.orderId
     || item.order_id
@@ -868,6 +869,15 @@ function looksLikeBuyerOrder(item) {
     || item.sellerCompanyName
     || item.sellerLoginId
     || item.buyerOrder
+    || (baseInfo && (
+      baseInfo.orderId
+      || baseInfo.order_id
+      || baseInfo.tradeId
+      || baseInfo.trade_id
+      || baseInfo.idOfStr
+      || baseInfo.id
+      || baseInfo.status
+    ))
   );
 }
 
@@ -929,6 +939,8 @@ function normalizeOrderLineIds(rawLine = {}) {
 
 function normalize1688BuyerOrder(item = {}) {
   const nested = item.buyerOrder && typeof item.buyerOrder === "object" ? item.buyerOrder : item;
+  const baseInfo = nested.baseInfo && typeof nested.baseInfo === "object" ? nested.baseInfo : {};
+  const sellerInfo = nested.sellerInfo && typeof nested.sellerInfo === "object" ? nested.sellerInfo : {};
   const externalOrderId = firstPresent(
     nested.orderId,
     nested.order_id,
@@ -936,6 +948,12 @@ function normalize1688BuyerOrder(item = {}) {
     nested.trade_id,
     nested.id,
     nested.orderid,
+    baseInfo.orderId,
+    baseInfo.order_id,
+    baseInfo.tradeId,
+    baseInfo.trade_id,
+    baseInfo.idOfStr,
+    baseInfo.id,
   );
   const rawLines = normalizeArray(firstPresent(
     nested.products,
@@ -951,7 +969,14 @@ function normalize1688BuyerOrder(item = {}) {
   ));
   return {
     externalOrderId: externalOrderId ? String(externalOrderId) : null,
-    status: firstPresent(nested.orderStatus, nested.status, nested.baseStatus, nested.tradeStatus),
+    status: firstPresent(
+      nested.orderStatus,
+      nested.status,
+      nested.baseStatus,
+      nested.tradeStatus,
+      baseInfo.status,
+      baseInfo.statusStr,
+    ),
     supplierName: firstPresent(
       nested.sellerCompany,
       nested.sellerCompanyName,
@@ -959,6 +984,13 @@ function normalize1688BuyerOrder(item = {}) {
       nested.companyName,
       nested.sellerLoginId,
       nested.sellerMemberId,
+      baseInfo.sellerCompany,
+      baseInfo.sellerCompanyName,
+      baseInfo.sellerLoginId,
+      baseInfo.sellerMemberId,
+      sellerInfo.companyName,
+      sellerInfo.sellerLoginId,
+      sellerInfo.memberId,
     ),
     totalAmount: firstNumber(
       nested.totalAmount,
@@ -967,9 +999,24 @@ function normalize1688BuyerOrder(item = {}) {
       nested.orderAmount,
       nested.payment,
       nested.price,
+      baseInfo.totalAmount,
+      baseInfo.sumPayment,
+      baseInfo.actualPayFee,
+      baseInfo.orderAmount,
+      baseInfo.payment,
+      baseInfo.price,
     ),
     freight: firstNumber(nested.freight, nested.postFee, nested.shippingFee, nested.carriage),
-    createdAt: firstPresent(nested.createTime, nested.gmtCreate, nested.orderCreateTime, nested.tradeCreateTime),
+    createdAt: firstPresent(
+      nested.createTime,
+      nested.gmtCreate,
+      nested.orderCreateTime,
+      nested.tradeCreateTime,
+      baseInfo.createTime,
+      baseInfo.gmtCreate,
+      baseInfo.orderCreateTime,
+      baseInfo.tradeCreateTime,
+    ),
     productIds: Array.from(new Set(lines.map((line) => line.productId).filter(Boolean))),
     skuIds: Array.from(new Set(lines.map((line) => line.skuId).filter(Boolean))),
     specIds: Array.from(new Set(lines.map((line) => line.specId).filter(Boolean))),

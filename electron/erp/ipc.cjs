@@ -7150,7 +7150,7 @@ function build1688AddressParamFromRow(row = {}) {
   if (!addressParam.provinceText || !addressParam.cityText || !addressParam.areaText) {
     const text = String(addressParam.addressCodeText || raw.addressCodeText || "").trim();
     if (text) {
-      const parts = text.split(/s+/).filter(Boolean);
+      const parts = text.split(/\s+/).filter(Boolean);
       if (!addressParam.provinceText && parts[0]) addressParam.provinceText = parts[0];
       if (!addressParam.cityText && parts[1]) addressParam.cityText = parts[1];
       if (!addressParam.areaText && parts[2]) addressParam.areaText = parts[2];
