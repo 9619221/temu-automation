@@ -394,6 +394,20 @@ interface AccountOption {
   id: string;
   name?: string;
   status?: string;
+  // 店铺默认的 1688 采购账号（推单时作为预选值），erp.account.list 返回带这个字段
+  default1688PurchaseAccountId?: string | null;
+}
+
+// 1688 采购账号（用于推单时让用户选哪个买家账号下单）
+// list_1688_purchase_accounts action 返回的 accounts 数组元素结构
+interface Purchase1688Account {
+  id: string;
+  label?: string | null;
+  memberId?: string | null;
+  appKey?: string;
+  status?: string;
+  configured?: boolean;
+  authorized?: boolean;
 }
 
 interface Alibaba1688AddressRow {
@@ -988,6 +1002,8 @@ function is1688AclDeniedError(error: any, message: string) {
 }
 
 // 1688 业务错误码 → 用户友好中文。匹配 `errorCode:XXX` 子串即翻译。
+// 注：code 字段最终走的是 `msg.includes(code)` 子串匹配，所以也可以塞中文片段
+// 用来兜 1688 那种不带 errorCode、只回一句中文的业务错误。
 const ALIBABA_1688_BUSINESS_ERROR_HINTS: Array<{ code: string; hint: string }> = [
   { code: "AddressId invalid", hint: "1688 收货地址 ID 无效，请到「询盘设置」点「同步 1688 地址」后重新选择地址再推单。" },
   { code: "ADDRESS_ID_INVALID", hint: "1688 收货地址 ID 无效，请到「询盘设置」点「同步 1688 地址」后重新选择地址再推单。" },
@@ -1003,6 +1019,9 @@ const ALIBABA_1688_BUSINESS_ERROR_HINTS: Array<{ code: string; hint: string }> =
   { code: "ACCESS_TOKEN_EXPIRED", hint: "1688 OAuth 已过期，请到「设置」重新授权。" },
   { code: "ISP_BACK_SERVICE_TIMEOUT", hint: "1688 服务超时，稍后重试。" },
   { code: "SYSTEM_ERROR", hint: "1688 系统错误，稍后重试；多次出现请检查 OAuth 凭据或换网络环境。" },
+  // 1688 没有给 errorCode、只回了中文「没有权限取消该订单」这种业务拒绝：通常是当前 OAuth 授权的
+  // 1688 账号 ≠ 该订单下单账号，或订单状态已不可取消（已付款/已发货/已完结/卖家已确认）。
+  { code: "没有权限取消", hint: "1688 拒绝取消该订单：通常是当前授权的 1688 账号跟订单下单账号不一致，或订单当前状态已不可取消（已付款/已发货/已完结）。请到 1688 后台核对订单归属和状态，或在「设置」检查 OAuth 是否换过账号。" },
 ];
 
 function translate1688BusinessError(rawMessage: string): string | null {
@@ -1057,7 +1076,8 @@ function canUse1688PaymentActions(row: PurchaseOrderRow) {
   const localStatus = String(row.status || "").toLowerCase();
   const paymentStatus = String(row.paymentStatus || "").toLowerCase();
   const externalStatus = String(row.externalOrderStatus || "").toLowerCase();
-  if (["cancelled", "canceled", "closed", "success", "received", "arrived", "paid"].includes(localStatus)) return false;
+  // 审核通过(进入 approved_to_pay 待付款)之后才能点 1688 支付,避免审核中状态就放出付款入口。
+  if (localStatus !== "approved_to_pay") return false;
   if (["paid", "confirmed", "success"].includes(paymentStatus)) return false;
   if (/cancel|close|terminat|success/.test(externalStatus)) return false;
   return true;
@@ -1485,7 +1505,26 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       try {
         const list = await erp?.sku?.list?.({ search: term, limit: 50, excludeJst: true } as any);
         if (seq !== skuSearchSeqRef.current) return;
-        const rows: SkuOption[] = Array.isArray(list) ? list : [];
+        // 同一个 internal_sku_code 有时会同时存在两条：纯数字 id 的 ERP 原生 + jst:skuprofile: 前缀的聚水潭副本。
+        // 搜索框只想露一条，按 internal_sku_code 去重，纯数字那条优先（不带 jst:skuprofile: 前缀的更原生）。
+        const rawRows: SkuOption[] = Array.isArray(list) ? list : [];
+        const rows: SkuOption[] = (() => {
+          const byCode = new Map<string, SkuOption>();
+          for (const row of rawRows) {
+            const code = String(row?.internalSkuCode || row?.id || "");
+            if (!code) continue;
+            const existing = byCode.get(code);
+            if (!existing) {
+              byCode.set(code, row);
+              continue;
+            }
+            // 已有同 code 的记录：只在「现有是 jst:skuprofile: 副本、当前是纯数字」时替换
+            const existingIsJst = String(existing.id || "").startsWith("jst:skuprofile:");
+            const currentIsJst = String(row.id || "").startsWith("jst:skuprofile:");
+            if (existingIsJst && !currentIsJst) byCode.set(code, row);
+          }
+          return Array.from(byCode.values());
+        })();
         // 替换式：只显示当前搜索结果 + 已选中的项（防 Select tag 变 raw ID）
         // 不再累积历史搜索结果，避免不相关 SKU 一直挂在下拉里
         setSkus((prev) => {
@@ -1493,7 +1532,10 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           const map = new Map<string, SkuOption>();
           for (const row of rows) map.set(row.id, row);
           for (const sku of prev) {
-            if (selectedIds.includes(sku.id) && !map.has(sku.id)) map.set(sku.id, sku);
+            // form value 现在用 internal_sku_code（见下方 skuOptions），按 id 或 code 任一命中都算已选中
+            const isSelected = selectedIds.includes(sku.id)
+              || (sku.internalSkuCode != null && selectedIds.includes(sku.internalSkuCode));
+            if (isSelected && !map.has(sku.id)) map.set(sku.id, sku);
           }
           return Array.from(map.values());
         });
@@ -1508,6 +1550,9 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     Array.isArray(initialWorkbench.supplierOptions) ? initialWorkbench.supplierOptions : []
   ));
   const [accounts, setAccounts] = useState<AccountOption[]>([]);
+  // 1688 采购账号列表（推单 Modal 用）。loadData 时随店铺列表一起 fire-and-forget 预拉，
+  // 让用户点「推送1688下单」时直接 0 RTT 弹 Modal。state 空时各调用处会回退到现拉。
+  const [purchase1688Accounts, setPurchase1688Accounts] = useState<Purchase1688Account[]>([]);
   const [requestOpen, setRequestOpen] = useState(false);
   const [quotePrId, setQuotePrId] = useState<string | null>(null);
   const [source1688PrId, setSource1688PrId] = useState<string | null>(null);
@@ -1646,7 +1691,10 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       const code = sku.internalSkuCode || sku.id;
       const name = sku.productName || "-";
       return {
-        value: sku.id,
+        // value 用 internal_sku_code（纯数字），跟用户输入的 keyword 对齐，
+        // antd mode="tags" 才不会再插一条「新建标签」虚拟项。
+        // 下游 handleCreateRequest 用 `sku.id === skuId || sku.internalSkuCode === skuId` 双匹配，兼容。
+        value: code,
         label: code,
         searchText: `${code} ${name} ${sku.primary1688Source?.externalOfferId || ""}`,
         skuName: name,
@@ -1715,7 +1763,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     [purchaseRequests],
   );
   // 7 个业务流 tab 用的分组：
-  // 待找品 / 已找品 是 PR 阶段；待确认 / 已确认未付款 / 已付款 / 已完成 是 PO 阶段。
+  // 待找品 / 已找品 是 PR 阶段；待推单 / 待付款 / 已付款 / 已完成 是 PO 阶段。
   const pendingSourcingRequestRows = useMemo(
     () => purchaseRequests.filter((row) => row.status === "submitted" || row.status === "buyer_processing"),
     [purchaseRequests],
@@ -1777,8 +1825,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     { key: "all", title: "全部", count: pendingRequestRows.length + purchaseOrders.length, kind: "mixed" },
     { key: "request_pending_sourcing", title: "待找品", count: pendingSourcingRequestRows.length, kind: "request" },
     { key: "request_sourced", title: "已找品", count: sourcedRequestRows.length, kind: "request" },
-    { key: "po_draft", title: "待确认", count: draftOnlyOrderRows.length, kind: "order" },
-    { key: "po_pending_payment", title: "已确认未付款", count: confirmedPendingPaymentOrderRows.length, kind: "order" },
+    { key: "po_draft", title: "待推单", count: draftOnlyOrderRows.length, kind: "order" },
+    { key: "po_pending_payment", title: "待付款", count: confirmedPendingPaymentOrderRows.length, kind: "order" },
     { key: "po_paid", title: "已付款", count: paidOrderRows.length, kind: "order" },
     { key: "po_completed", title: "已完成", count: completedOrderRows.length, kind: "order" },
     // 已取消是 mixed：PR(cancelled+rejected) + PO(cancelled) 上下两段
@@ -2039,6 +2087,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       void erp.account.list({ limit: 500 })
         .then((accountRows: unknown) => setAccounts(Array.isArray(accountRows) ? accountRows : []))
         .catch(() => {});
+      // 预拉 1688 采购账号列表（推单按钮要用）。失败/旧主控 Unsupported 都静默，
+      // 推单时若 state 仍为空会兜底再拉一次（保留 fallback 分支）。
+      void erp.purchase.action({ action: "list_1688_purchase_accounts" })
+        .then((res: any) => {
+          const list = Array.isArray(res?.result?.accounts) ? (res.result.accounts as Purchase1688Account[]) : [];
+          setPurchase1688Accounts(list);
+        })
+        .catch(() => {});
       if (options?.withSupplemental !== false) {
         void loadSupplementalWorkbenchData();
       }
@@ -2217,7 +2273,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     key: string,
     payload: Record<string, any>,
     successText?: string,
-    options?: { timeoutMs?: number },
+    options?: { timeoutMs?: number; onAddressFailure?: () => void | Promise<void> },
   ) => {
     if (!erp) return null;
     setActingKey(key);
@@ -2292,26 +2348,39 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           poId: payload.poId,
         };
       } else if (isAddressFailure) {
-        // 推单/预览撞到 1688 地址相关错误：后台静默 sync 一遍把失效地址打掉，
-        // 错误提示里直接给出恢复指引；下一次推单用户重新选地址即可。
-        // 透传 purchase1688AccountId / accountId，让后端按本次实际推单的 1688 账号去拉地址，
-        // 而不是回落到公司默认账号——否则跨账号同步出来对不上号，失效地址清不掉。
-        message.error(errorMessage || "1688 收货地址无效，请同步 1688 地址后重新选择");
+        // 推单/预览撞到 1688 地址相关错误：自动同步一遍把失效地址打掉，刷新本地数据，
+        // 然后通过 onAddressFailure 回调让调用方（push1688Order）重新弹出地址选择 Modal，
+        // 用户只用挑一条新地址即可。透传 purchase1688AccountId / accountId 给 sync，
+        // 让后端按本次实际推单的 1688 账号去拉地址，而不是回落到公司默认账号——
+        // 否则跨账号同步出来对不上号，失效地址清不掉。
+        message.error(errorMessage || "1688 收货地址无效，正在自动同步…");
         const syncPayload: any = { action: "sync_1688_addresses" };
         if ((payload as any).purchase1688AccountId) syncPayload.purchase1688AccountId = (payload as any).purchase1688AccountId;
         if ((payload as any).accountId) syncPayload.accountId = (payload as any).accountId;
-        void erp.purchase.action(syncPayload)
-          .then(async (syncResult: any) => {
-            const summary = syncResult?.result || syncResult || {};
-            const deactivated = Number(summary.deactivatedCount || 0);
-            if (deactivated > 0) {
-              message.warning(`已自动同步 1688 地址：${deactivated} 条失效地址被清理，请重新选择地址再推单`);
-            } else {
-              message.info("已自动同步 1688 地址，请重新选择地址再推单");
-            }
-            await loadData({ silent: true }).catch(() => {});
-          })
-          .catch(() => {});
+        try {
+          const syncResult: any = await erp.purchase.action(syncPayload, { timeoutMs: 120000 });
+          const summary = syncResult?.result || syncResult || {};
+          const deactivated = Number(summary.deactivatedCount || 0);
+          const total = Number(summary.addressCount || 0);
+          if (deactivated > 0) {
+            message.warning(`已自动同步 1688 地址：清理了 ${deactivated} 条失效，当前可用 ${total} 条，请重新选择地址`);
+          } else if (total > 0) {
+            message.info(`已自动同步 1688 地址：当前可用 ${total} 条，请重新选择地址`);
+          } else {
+            message.warning("1688 没返回该买家账号的地址，请先到 1688 后台维护好收货地址再重试");
+          }
+          await loadData({ silent: true }).catch(() => {});
+        } catch (syncError: any) {
+          const syncMsg = cleanRemoteErrorMessage(syncError) || "未知错误";
+          message.error(`1688 地址自动同步失败：${syncMsg}`);
+        }
+        if (typeof options?.onAddressFailure === "function") {
+          try {
+            await options.onAddressFailure();
+          } catch {
+            // 重弹 picker 失败不致命，至少前面的 toast 已经把信息告诉用户了
+          }
+        }
       } else {
         message.error(errorMessage || "操作失败");
       }
@@ -2342,6 +2411,10 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const canRollbackPurchaseOrder = (row: PurchaseOrderRow) => {
     const target = getPurchaseOrderRollbackTarget(row);
     if (!target) return false;
+    // pending_finance_approval 是历史遗留状态（财审环节已合并进「提交付款」一步），
+    // 新单不会进；旧单上的回退按钮（原「取消财审」）已无业务价值，直接隐藏，
+    // 历史单只露「提交付款」一个推进入口即可。
+    if (row.status === "pending_finance_approval") return false;
     // 没有了财务审批环节，approved_to_pay 退回 pushed_pending_price 由采购操作；
     // paid 状态的回退仍由财务（撤销付款确认）。
     if (row.status === "approved_to_pay") return canPurchase || canFinance;
@@ -3081,12 +3154,15 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     void setCollaborationImageFiles(imageFiles);
   };
 
-  const preview1688Order = async (row: PurchaseOrderRow, options: { quiet?: boolean; purchase1688AccountId?: string } = {}) => {
+  const preview1688Order = async (
+    row: PurchaseOrderRow,
+    options: { quiet?: boolean; purchase1688AccountId?: string; onAddressFailure?: () => void | Promise<void> } = {},
+  ) => {
     return runAction(`1688-preview-${row.id}`, {
       action: "preview_1688_order",
       poId: row.id,
       ...(options.purchase1688AccountId ? { purchase1688AccountId: options.purchase1688AccountId } : {}),
-    }, options.quiet ? undefined : "1688 订单已预览");
+    }, options.quiet ? undefined : "1688 订单已预览", { onAddressFailure: options.onAddressFailure });
   };
 
   const validate1688OrderPush = async (row: PurchaseOrderRow, quiet = false) => {
@@ -3114,15 +3190,23 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         return null;
       }
     }
-    const previewResult = await preview1688Order(row, { quiet: true, purchase1688AccountId: options.purchase1688AccountId });
+    // 地址失效自救：sync 完后重新弹地址选择 Modal，保留刚选过的 1688 采购账号，
+    // 用户只需挑一条新地址再按确认即可，不用从头再点一次「推送1688下单」。
+    const reopenPickerAfterSync = () => startPush1688Order(row, options.purchase1688AccountId);
+    const previewResult = await preview1688Order(row, {
+      quiet: true,
+      purchase1688AccountId: options.purchase1688AccountId,
+      onAddressFailure: reopenPickerAfterSync,
+    });
     if (!previewResult) return null;
+    // 推单后进「已推送 1688,待提交付款」状态(配合 workflow:DRAFT→PUSHED_PENDING_PRICE)。
     const snapshot = patchPurchaseOrderRow(row.id, { status: "pushed_pending_price" });
     const result = await runAction(`1688-push-${row.id}`, {
       action: "push_1688_order",
       poId: row.id,
       ...(options.deliveryAddressId ? { deliveryAddressId: options.deliveryAddressId } : {}),
       ...(options.purchase1688AccountId ? { purchase1688AccountId: options.purchase1688AccountId } : {}),
-    });
+    }, undefined, { onAddressFailure: reopenPickerAfterSync });
     if (!result && snapshot) {
       patchPurchaseOrderRow(row.id, snapshot);
     }
@@ -3155,59 +3239,71 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   // - 多账号 → 一律弹 Modal 让用户选；店铺默认账号只作为预选值
   const initiatePush1688Order = async (row: PurchaseOrderRow) => {
     if (!erp) return;
-    let listResult: any;
+    // 按钮立即转圈：state 命中时几乎瞬间弹 Modal；state 空（首次/拉失败）时需要现拉，
+    // 这一步走云端 HTTP，不上 loading 用户会以为没反应。
+    // 用与 pushLoading 共用的 key，复用既有判断逻辑（参见上方 pushLoading 定义）。
+    setActingKey(`1688-push-${row.id}`);
     try {
-      listResult = await erp.purchase.action({ action: "list_1688_purchase_accounts" });
-    } catch (error: any) {
-      // 主控端旧版本不支持多账号 action — 静默回落到旧行为（用 company 默认 1688 凭据推单）
-      const msg = String(error?.message || "");
-      if (/Unsupported purchase action|unsupported.*action|不支持.*操作/i.test(msg)) {
-        startPush1688Order(row);
+      // 优先用 loadData 已预拉的 state；为空才现拉（含旧主控 Unsupported 回落）
+      let all: Purchase1688Account[] = purchase1688Accounts;
+      if (!all.length) {
+        let listResult: any;
+        try {
+          listResult = await erp.purchase.action({ action: "list_1688_purchase_accounts" });
+        } catch (error: any) {
+          // 主控端旧版本不支持多账号 action — 静默回落到旧行为（用 company 默认 1688 凭据推单）
+          const msg = String(error?.message || "");
+          if (/Unsupported purchase action|unsupported.*action|不支持.*操作/i.test(msg)) {
+            startPush1688Order(row);
+            return;
+          }
+          message.error(msg || "读取 1688 采购账号失败");
+          return;
+        }
+        all = (listResult?.result?.accounts || []) as Purchase1688Account[];
+        if (all.length) setPurchase1688Accounts(all);
+      }
+      const active = all.filter((a) => a.status !== "disabled" && a.configured && a.authorized);
+      if (active.length === 0) {
+        message.error("还没有可用的 1688 采购账号，请到「设置 → 1688 授权管理」绑定");
         return;
       }
-      message.error(msg || "读取 1688 采购账号失败");
-      return;
+      if (active.length === 1) {
+        startPush1688Order(row, active[0].id);
+        return;
+      }
+      // 店铺默认 1688 账号优先读已加载的 accounts state（loadData 进页面时已拉过）；
+      // 仅在 state 还没回填（用户刚进页就立即点）时现拉一次兜底，避免多花一个云端 RTT。
+      let accountList: AccountOption[] = accounts;
+      if (!accountList.length) {
+        try {
+          const fetched = await erp.account.list({ limit: 500 });
+          accountList = Array.isArray(fetched) ? (fetched as AccountOption[]) : [];
+          if (accountList.length) setAccounts(accountList);
+        } catch {
+          // 拉店铺失败不致命，回落到弹窗手选
+          accountList = [];
+        }
+      }
+      const accountRow = accountList.find((acct) => acct.id === row.accountId);
+      const defaultId: string | null = accountRow?.default1688PurchaseAccountId || null;
+      const validDefaultId = defaultId && active.find((a) => a.id === defaultId) ? defaultId : null;
+      const initialAcctId = validDefaultId || active[0].id;
+      // 初始地址必须按选中的 1688 买家账号过滤,避免落到别的 buyer 的地址(推单时 1688 报 ADDRESS_ID_INVALID)
+      const filteredForBuyer = (data.alibaba1688Addresses || []).filter(
+        (addr) => String((addr as any).purchase1688AccountId || "") === initialAcctId,
+      );
+      const defaultAddress = filteredForBuyer.find((addr) => addr.isDefault) || filteredForBuyer[0] || null;
+      setPushAccountPicker({
+        po: row,
+        accountId: initialAcctId,
+        addressId: defaultAddress?.id || null,
+        defaultAccountId: validDefaultId,
+        accounts: active,
+      });
+    } finally {
+      setActingKey(null);
     }
-    const all = (listResult?.result?.accounts || []) as Array<{
-      id: string;
-      label?: string | null;
-      memberId?: string | null;
-      appKey?: string;
-      status?: string;
-      configured?: boolean;
-      authorized?: boolean;
-    }>;
-    const active = all.filter((a) => a.status !== "disabled" && a.configured && a.authorized);
-    if (active.length === 0) {
-      message.error("还没有可用的 1688 采购账号，请到「设置 → 1688 授权管理」绑定");
-      return;
-    }
-    if (active.length === 1) {
-      startPush1688Order(row, active[0].id);
-      return;
-    }
-    let defaultId: string | null = null;
-    try {
-      const accountList = await erp.account.list({ limit: 500 });
-      const accountRow = (Array.isArray(accountList) ? accountList : []).find((acct: any) => acct.id === row.accountId);
-      defaultId = accountRow?.default1688PurchaseAccountId || null;
-    } catch {
-      // 拉店铺失败不致命，回落到弹窗选
-    }
-    const validDefaultId = defaultId && active.find((a) => a.id === defaultId) ? defaultId : null;
-    const initialAcctId = validDefaultId || active[0].id;
-    // 初始地址必须按选中的 1688 买家账号过滤,避免落到别的 buyer 的地址(推单时 1688 报 ADDRESS_ID_INVALID)
-    const filteredForBuyer = (data.alibaba1688Addresses || []).filter(
-      (addr) => String((addr as any).purchase1688AccountId || "") === initialAcctId,
-    );
-    const defaultAddress = filteredForBuyer.find((addr) => addr.isDefault) || filteredForBuyer[0] || null;
-    setPushAccountPicker({
-      po: row,
-      accountId: initialAcctId,
-      addressId: defaultAddress?.id || null,
-      defaultAccountId: validDefaultId,
-      accounts: active,
-    });
   };
 
   const request1688PriceChange = async (row: PurchaseOrderRow) => {
@@ -3246,37 +3342,53 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       return;
     }
 
-    let activeAccounts: Array<{ id: string; label?: string | null; status?: string; configured?: boolean; authorized?: boolean }> = [];
+    let activeAccounts: Purchase1688Account[] = [];
     let fallbackMode = false;
-    try {
-      const listResult: any = await erp.purchase.action({ action: "list_1688_purchase_accounts" });
-      const all = (listResult?.result?.accounts || []) as typeof activeAccounts;
-      activeAccounts = all.filter((a) => a.status !== "disabled" && a.configured && a.authorized);
+    // 优先用 loadData 已预拉的 state；为空才现拉（含旧主控 Unsupported 回落）
+    if (purchase1688Accounts.length) {
+      activeAccounts = purchase1688Accounts.filter((a) => a.status !== "disabled" && a.configured && a.authorized);
       if (!activeAccounts.length) {
         message.error("还没有可用的 1688 采购账号，请到「设置 → 1688 授权管理」绑定");
         return;
       }
-    } catch (error: any) {
-      const msg = String(error?.message || "");
-      if (/Unsupported purchase action|unsupported.*action|不支持.*操作/i.test(msg)) {
-        // 旧版主控不返回账号列表，回落到 company 默认 1688 凭据
-        fallbackMode = true;
-      } else {
-        message.error(msg || "读取 1688 采购账号失败");
-        return;
+    } else {
+      try {
+        const listResult: any = await erp.purchase.action({ action: "list_1688_purchase_accounts" });
+        const all = (listResult?.result?.accounts || []) as Purchase1688Account[];
+        if (all.length) setPurchase1688Accounts(all);
+        activeAccounts = all.filter((a) => a.status !== "disabled" && a.configured && a.authorized);
+        if (!activeAccounts.length) {
+          message.error("还没有可用的 1688 采购账号，请到「设置 → 1688 授权管理」绑定");
+          return;
+        }
+      } catch (error: any) {
+        const msg = String(error?.message || "");
+        if (/Unsupported purchase action|unsupported.*action|不支持.*操作/i.test(msg)) {
+          // 旧版主控不返回账号列表，回落到 company 默认 1688 凭据
+          fallbackMode = true;
+        } else {
+          message.error(msg || "读取 1688 采购账号失败");
+          return;
+        }
       }
     }
 
-    // 拉店铺列表拿每个店铺的默认 1688 账号；失败不致命，让用户手选
+    // 店铺列表优先复用已加载的 accounts state（loadData 进页面时已拉过）；
+    // state 为空时才现拉一次兜底，避免多花一个云端 RTT。
     const shopDefaultAccountMap = new Map<string, string | null>();
-    try {
-      const accountList = await erp.account.list({ limit: 500 });
-      (Array.isArray(accountList) ? accountList : []).forEach((acct: any) => {
-        shopDefaultAccountMap.set(String(acct.id), acct.default1688PurchaseAccountId || null);
-      });
-    } catch {
-      // 拉店铺失败 → defaultPurchaseAccountId 留空
+    let accountList: AccountOption[] = accounts;
+    if (!accountList.length) {
+      try {
+        const fetched = await erp.account.list({ limit: 500 });
+        accountList = Array.isArray(fetched) ? (fetched as AccountOption[]) : [];
+        if (accountList.length) setAccounts(accountList);
+      } catch {
+        accountList = [];
+      }
     }
+    accountList.forEach((acct) => {
+      shopDefaultAccountMap.set(String(acct.id), acct.default1688PurchaseAccountId || null);
+    });
 
     const groupMap = new Map<string, { accountId: string; accountName: string; pos: PurchaseOrderRow[] }>();
     for (const po of selectedPushableOrders) {
@@ -4422,8 +4534,10 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               提交付款
             </Button>
           ) : null}
-          {/* 已删除独立的"财务批准"环节：采购"提交付款"后 PO 直接进入待付款。
-              历史数据若仍卡在 pending_finance_approval，下面的兜底按钮供财务推一把。 */}
+          {/* 没有审核环节:推单→提交付款→待付款→1688 支付/线下付款→确认付款。
+              仅给历史卡在 pending_finance_approval 的旧数据留兜底:财务点一下推到待付款。
+              按钮名跟正常单的「提交付款」保持一致——对用户都是"推到待付款"，
+              底层 action 不同（这里走 approve_payment，正常单走 submit_payment_approval）。 */}
           {row.status === "pending_finance_approval" && canFinance ? (
             <Button
               size="small"
@@ -4432,11 +4546,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               onClick={() => runActionOptimistic(
                 `pay-approve-po-${row.id}`,
                 { action: "approve_payment", poId: row.id },
-                "已推到待付款",
+                "已进入待付款",
                 { poId: row.id, patch: { status: "approved_to_pay" } },
               )}
             >
-              批准（历史）
+              提交付款
             </Button>
           ) : null}
           {canConfirmPaid && (row.externalOrderId || Number(row.mappingCount || 0) === 0) ? (
@@ -4594,11 +4708,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           current={-1}
           progressDot
           items={[
-            { title: "新建采购单", description: "运营提交，自动进采购处理" },
-            { title: "推送1688", description: "采购选货源→推单到1688" },
-            { title: "提交付款", description: "采购点确认→进入待付款" },
-            { title: "付款发货", description: "支付链接/代扣 + 卖家发货" },
-            { title: "入库完成", description: "仓管点入库→批次落库存" },
+            { title: "新建采购单", description: "运营提交" },
+            { title: "已找品", description: "找到 1688 映射或线下货源" },
+            { title: "推单/线下", description: "推 1688 或线下采购" },
+            { title: "提交付款", description: "进入待付款" },
+            { title: "付款入库", description: "付款→发货→入库" },
           ]}
         />
       </div>
@@ -5348,9 +5462,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               options={skuOptions}
               optionRender={(option) => {
                 const d = option as any;
+                // 优先用 label（=internal_sku_code，纯数字外观），兜底才回退到 value（可能带 jst:skuprofile: 前缀）
+                const displayCode = String(d?.label || d?.value || "");
                 return (
                   <div style={{ lineHeight: 1.3 }}>
-                    <div>{String(d.value)} · {d?.skuName || "-"}</div>
+                    <div>{displayCode} · {d?.skuName || "-"}</div>
                     <div style={{ fontSize: 12, color: "#888" }}>
                       成本 {d?.skuCost == null ? "-" : `¥${d.skuCost}`} · 供应商 {d?.skuSupplier || "-"} · 库存 {d?.skuStock == null ? "-" : d.skuStock}
                     </div>
