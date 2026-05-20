@@ -1363,8 +1363,6 @@ const BROWSER_ACCOUNT_ACTIONS = new Set([
   "workflow_pack_images",
   "auto_pricing",
   "auto_image_swap",
-  "probe_create_flow",
-  "capture_add_payload",
   "test_api",
   "eval",
   "yundu_list_overall",
@@ -8657,85 +8655,24 @@ async function handleRequest(body) {
       await ensureBrowser();
       return await runAutoImageSwap(params || {});
     }
-    case "probe_create_flow": {
-      // 打开商品创建页面，拦截所有 API 请求，用于发现真实端点
-      await ensureBrowser();
-      return await probeCreateFlow(params);
-    }
-    case "capture_add_payload": {
-      // 专门捕获 product/add 的完整请求体（用 route 拦截）
-      await ensureBrowser();
-      const page = await safeNewPage(context);
-      const capturedBodies = [];
-      const saveDir = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation", "debug");
-      fs.mkdirSync(saveDir, { recursive: true });
-      try {
-        // 用 route 拦截 product/add 和 draft/add 请求
-        await page.route("**/product/add", async (route) => {
-          const req = route.request();
-          const postBody = req.postDataJSON();
-          capturedBodies.push({ path: "/product/add", body: postBody, timestamp: Date.now() });
-          console.error("[capture] Got product/add body: " + JSON.stringify(postBody)?.length + " bytes");
-          const outputFile = path.join(saveDir, "real_product_add_payload.json");
-          fs.writeFileSync(outputFile, JSON.stringify(postBody, null, 2));
-          console.error("[capture] Saved to: " + outputFile);
-          await route.continue();
-        });
-        await page.route("**/product/draft/add", async (route) => {
-          const req = route.request();
-          const postBody = req.postDataJSON();
-          capturedBodies.push({ path: "/draft/add", body: postBody, timestamp: Date.now() });
-          console.error("[capture] Got draft/add body: " + JSON.stringify(postBody)?.length + " bytes");
-          const outputFile = path.join(saveDir, "real_draft_add_payload.json");
-          fs.writeFileSync(outputFile, JSON.stringify(postBody, null, 2));
-          await route.continue();
-        });
-        await page.route("**/store_image", async (route) => {
-          console.error("[capture] Got store_image request");
-          capturedBodies.push({ path: "/store_image", timestamp: Date.now() });
-          await route.continue();
-        });
-
-        await navigateToSellerCentral(page, "/goods/create/category");
-        await randomDelay(3000, 5000);
-        // 关闭弹窗
-        for (let i = 0; i < 5; i++) {
-          try {
-            const btn = page.locator('button:has-text("知道了"), button:has-text("确定"), button:has-text("关闭"), button:has-text("暂不"), button:has-text("不使用")').first();
-            if (await btn.isVisible({ timeout: 500 })) await btn.click();
-            else break;
-          } catch { break; }
-        }
-
-        const waitMinutes = params.waitMinutes || 10;
-        console.error("[capture] Ready. Please create product and submit. Waiting " + waitMinutes + " min...");
-        await new Promise(r => setTimeout(r, waitMinutes * 60000));
-
-        return { success: true, captured: capturedBodies.length, bodies: capturedBodies };
-      } finally {
-        if (!params.keepOpen) await page.close();
-      }
-    }
     case "auto_image_swap_openapi": {
-      // 用 Temu 开放平台官方 API 换图（绕开 web 反爬 + selfTask 流程）
-      // params: { productId, newImageUrls: string[], credentials?: {...}, useSandbox?: boolean }
       const { swapProductImagesViaOpenApi, SANDBOX_ACCOUNT_FULL_1 } = await import("./temu-open-api.mjs");
       const productId = String(params?.productId || "").trim();
       const urls = Array.isArray(params?.newImageUrls) ? params.newImageUrls : [];
       if (!productId) throw new Error("缺少 productId");
-      if (urls.length < 5 || urls.length > 10) {
-        throw new Error(`newImageUrls 必须 5-10 张，实际 ${urls.length}`);
+      if (urls.length < CAROUSEL_MIN || urls.length > CAROUSEL_MAX) {
+        throw new Error(`newImageUrls 必须 ${CAROUSEL_MIN}-${CAROUSEL_MAX} 张，实际 ${urls.length}`);
       }
-      const creds = params.useSandbox ? {
+      const creds = params?.useSandbox ? {
         appKey: SANDBOX_ACCOUNT_FULL_1.appKey,
         appSecret: SANDBOX_ACCOUNT_FULL_1.appSecret,
         accessToken: SANDBOX_ACCOUNT_FULL_1.accessToken,
         region: params.region || SANDBOX_ACCOUNT_FULL_1.region,
       } : {
-        appKey: params.credentials?.appKey || params.appKey,
-        appSecret: params.credentials?.appSecret || params.appSecret,
-        accessToken: params.credentials?.accessToken || params.accessToken,
-        region: params.credentials?.region || params.region || "CN",
+        appKey: params?.credentials?.appKey || params?.appKey,
+        appSecret: params?.credentials?.appSecret || params?.appSecret,
+        accessToken: params?.credentials?.accessToken || params?.accessToken,
+        region: params?.credentials?.region || params?.region || "CN",
       };
       const result = await swapProductImagesViaOpenApi(creds, productId, urls);
       return {
@@ -8743,49 +8680,44 @@ async function handleRequest(body) {
         errorCode: result.errorCode,
         errorMsg: result.errorMsg,
         result: result.result,
-        // 不回送签名/凭据
         detail_summary: {
-          productId: result.detail?.productId,
-          materialImgUrl: result.detail?.materialImgUrl,
-          carouselImageUrls_count: result.detail?.carouselImageUrls?.length || 0,
-          skcCount: result.detail?.productSkcList?.length || 0,
+          productId,
+          materialImgUrl: result.payload?.materialImgUrl,
+          carouselImageUrls_count: urls.length,
         },
       };
     }
     case "openapi_call": {
-      // Temu 开放平台官方 API 通用调用（验证签名/鉴权后用于换图等）
       const { callOpenApi, SANDBOX_ACCOUNT_FULL_1 } = await import("./temu-open-api.mjs");
       const apiType = String(params?.type || "").trim();
       if (!apiType) throw new Error("缺少 params.type，如 bg.mall.info.get");
-      const useSandbox = !!params?.useSandbox;
-      const creds = useSandbox ? {
+      const creds = params?.useSandbox ? {
         appKey: SANDBOX_ACCOUNT_FULL_1.appKey,
         appSecret: SANDBOX_ACCOUNT_FULL_1.appSecret,
         accessToken: SANDBOX_ACCOUNT_FULL_1.accessToken,
         region: params.region || SANDBOX_ACCOUNT_FULL_1.region,
       } : {
-        appKey: params.appKey,
-        appSecret: params.appSecret,
-        accessToken: params.accessToken,
-        region: params.region || "CN",
+        appKey: params?.appKey,
+        appSecret: params?.appSecret,
+        accessToken: params?.accessToken,
+        region: params?.region || "CN",
       };
       const result = await callOpenApi({
         ...creds,
         type: apiType,
-        bizParams: params.bizParams || {},
-        version: params.version || "V1",
+        bizParams: params?.bizParams || {},
+        version: params?.version || "V1",
       });
       return {
         ok: result.ok,
         status: result.status,
         response: result.response,
-        // 不回送 access_token 等敏感字段
         signedParamsPreview: {
           type: result.signedParams.type,
           app_key: result.signedParams.app_key,
           timestamp: result.signedParams.timestamp,
           version: result.signedParams.version,
-          bizKeys: Object.keys(params.bizParams || {}),
+          bizKeys: Object.keys(params?.bizParams || {}),
           sign: result.signedParams.sign,
         },
       };
