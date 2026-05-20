@@ -3567,7 +3567,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     }
     const validation = await validate1688OrderPush(generatedPo, true);
     if (validation?.ready) {
-      await push1688Order(generatedPo, { skipValidation: true });
+      // 走多账号/地址选择入口，避免静默用默认账号 + 默认地址下单
+      await initiatePush1688Order(generatedPo);
     } else {
       message.warning(validation?.message || "采购单已生成，但当前映射还不满足 1688 自动推单条件");
     }

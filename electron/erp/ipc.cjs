@@ -7454,6 +7454,9 @@ async function sync1688DeliveryAddressesAction({ db, payload, actor }) {
   assertActorRole(actor, ["buyer", "manager", "admin"], "1688 receive address sync");
   const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
   const accountId = optionalString(payload.accountId || payload.account_id);
+  const purchase1688AccountId = optionalString(
+    payload.purchase1688AccountId || payload.purchase_1688_account_id,
+  ) || null;
   const params = raw1688Params(payload, {
     webSite: optionalString(payload.webSite) || "1688",
   });
@@ -7462,6 +7465,7 @@ async function sync1688DeliveryAddressesAction({ db, payload, actor }) {
     db,
     actor,
     accountId,
+    purchase1688AccountId,
     action: "sync_1688_addresses",
     api: PROCUREMENT_APIS.RECEIVE_ADDRESS,
     params,
@@ -7484,6 +7488,7 @@ async function sync1688DeliveryAddressesAction({ db, payload, actor }) {
         id: existingId || undefined,
         companyId,
         accountId,
+        purchase1688AccountId,
       },
     });
   });
