@@ -24,7 +24,7 @@ import {
 
 const { Text } = Typography;
 const erp = window.electronAPI?.erp;
-const WAREHOUSE_WORKBENCH_CACHE_KEY = "temu.warehouse.workbench.cache.v1";
+const WAREHOUSE_WORKBENCH_CACHE_KEY = "temu.warehouse.workbench.cache.v2";
 
 interface InboundReceiptRow {
   id: string;
@@ -106,7 +106,7 @@ export default function WarehouseCenter() {
     if (!erp) return;
     if (!options.silent) setLoading(true);
     try {
-      applyWorkbench(await erp.warehouse.workbench({ limit: 200 }));
+      applyWorkbench(await erp.warehouse.workbench({ limit: 2000 }));
     } catch (error: any) {
       if (!options.silent) message.error(error?.message || "仓库中心读取失败");
     } finally {
@@ -123,8 +123,8 @@ export default function WarehouseCenter() {
     if (!erp) return;
     setActingKey(key);
     try {
-      const result = await erp.warehouse.action({ ...payload, limit: 200 });
-      applyWorkbench(result?.workbench || await erp.warehouse.workbench({ limit: 200 }));
+      const result = await erp.warehouse.action({ ...payload, limit: 2000 });
+      applyWorkbench(result?.workbench || await erp.warehouse.workbench({ limit: 2000 }));
       message.success(successText);
     } catch (error: any) {
       message.error(error?.message || "操作失败");

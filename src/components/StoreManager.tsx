@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Button, Col, Form, Input, Modal, Popconfirm, Row, Select, Space, Table, Tag, message } from "antd";
+import { Alert, Button, Col, Form, Input, Modal, Popconfirm, Row, Select, Space, Table, Tag, Tooltip, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { DeleteOutlined, EditOutlined, PlusOutlined } from "@ant-design/icons";
 import { canRole } from "../utils/erpUi";
@@ -34,6 +34,16 @@ interface StoreAccountRow {
   alibaba1688Address?: string | null;
   alibaba1688AddressRemoteId?: string | null;
   default1688PurchaseAccountId?: string | null;
+}
+
+interface Purchase1688AccountRow {
+  id: string;
+  label?: string | null;
+  appKey?: string;
+  memberId?: string | null;
+  status?: string;
+  configured?: boolean;
+  authorized?: boolean;
 }
 
 interface Alibaba1688AddressRow {
@@ -76,6 +86,7 @@ interface StoreManagerCache {
   generatedAt?: string;
   accounts?: StoreAccountRow[];
   alibaba1688Addresses?: Alibaba1688AddressRow[];
+  purchase1688Accounts?: Purchase1688AccountRow[];
 }
 
 function statusColor(status?: string) {
@@ -100,15 +111,6 @@ function statusLabel(status?: string) {
     deleted: "已删除",
   };
   return labels[status || ""] || status || "-";
-}
-
-function sourceLabel(source?: string | null) {
-  const labels: Record<string, string> = {
-    manual: "手动",
-    product_master_data: "商品资料",
-    purchase_center: "采购中心",
-  };
-  return labels[source || ""] || source || "-";
 }
 
 function storeAddressSummary(row: StoreAccountRow) {
@@ -301,6 +303,7 @@ export default function StoreManager({ onChanged }: StoreManagerProps) {
   const [storeAddressForm] = Form.useForm<StoreAddressValues>();
   const [accounts, setAccounts] = useState<StoreAccountRow[]>(() => cachedData.accounts || []);
   const [alibaba1688Addresses, setAlibaba1688Addresses] = useState<Alibaba1688AddressRow[]>(() => cachedData.alibaba1688Addresses || []);
+  const [purchase1688Accounts, setPurchase1688Accounts] = useState<Purchase1688AccountRow[]>(() => cachedData.purchase1688Accounts || []);
   const [loadedOnce, setLoadedOnce] = useState(() => hasPageCache(cachedData));
   const [loading, setLoading] = useState(false);
   const [addressLoading, setAddressLoading] = useState(false);
@@ -325,19 +328,25 @@ export default function StoreManager({ onChanged }: StoreManagerProps) {
     if (!erp) return;
     setLoading(true);
     try {
-      const [nextAccounts, purchaseWorkbench] = await Promise.all([
+      const [nextAccounts, purchaseWorkbench, purchase1688AccountsResult] = await Promise.all([
         erp.account.list({ limit: 500 }),
         erp.purchase.workbench(ADDRESS_WORKBENCH_PARAMS).catch(() => null),
+        erp.purchase.action({ action: "list_1688_purchase_accounts" }).catch(() => null),
       ]);
       const nextAccountRows = Array.isArray(nextAccounts) ? nextAccounts as StoreAccountRow[] : [];
       setAccounts(nextAccountRows);
       const nextAddresses = get1688AddressRows(purchaseWorkbench);
       if (nextAddresses.length) setAlibaba1688Addresses(nextAddresses);
+      const nextPurchase1688Accounts = Array.isArray(purchase1688AccountsResult?.result?.accounts)
+        ? (purchase1688AccountsResult.result.accounts as Purchase1688AccountRow[])
+        : [];
+      setPurchase1688Accounts(nextPurchase1688Accounts);
       setLoadedOnce(true);
       writePageCache<StoreManagerCache>(STORE_MANAGER_CACHE_KEY, {
         generatedAt: new Date().toISOString(),
         accounts: nextAccountRows,
         alibaba1688Addresses: nextAddresses.length ? nextAddresses : cachedData.alibaba1688Addresses,
+        purchase1688Accounts: nextPurchase1688Accounts.length ? nextPurchase1688Accounts : cachedData.purchase1688Accounts,
       });
     } catch (error: any) {
       message.error(error?.message || "店铺读取失败");
@@ -496,6 +505,25 @@ export default function StoreManager({ onChanged }: StoreManagerProps) {
     }
   };
 
+  const handleSetDefault1688PurchaseAccount = async (row: StoreAccountRow, default1688AccountId: string | null) => {
+    if (!erp) return;
+    setSubmitting(`store-1688-account:${row.id}`);
+    try {
+      await erp.purchase.action({
+        action: "set_account_default_1688_purchase",
+        accountId: row.id,
+        default1688AccountId: default1688AccountId || null,
+      });
+      // 乐观更新本地状态
+      setAccounts((prev) => prev.map((item) => (item.id === row.id ? { ...item, default1688PurchaseAccountId: default1688AccountId } : item)));
+      message.success(default1688AccountId ? "默认 1688 采购账号已设置" : "已清空默认 1688 采购账号");
+    } catch (error: any) {
+      message.error(error?.message || "设置默认 1688 采购账号失败");
+    } finally {
+      setSubmitting(null);
+    }
+  };
+
   const accountColumns: ColumnsType<StoreAccountRow> = [
     { title: "店铺", dataIndex: "name", key: "name", width: 180, ellipsis: true },
     { title: "状态", dataIndex: "status", key: "status", width: 92, render: (value) => <Tag color={statusColor(value)}>{statusLabel(value)}</Tag> },
@@ -515,7 +543,38 @@ export default function StoreManager({ onChanged }: StoreManagerProps) {
         ) : <Tag color="warning">未绑定</Tag>;
       },
     },
-    { title: "来源", dataIndex: "source", key: "source", width: 120, render: sourceLabel },
+    {
+      title: "默认 1688 采购账号",
+      key: "default1688PurchaseAccount",
+      width: 220,
+      render: (_value, row) => {
+        const activeAccounts = purchase1688Accounts.filter((acct) => acct.status !== "disabled" && acct.configured && acct.authorized);
+        if (activeAccounts.length === 0) {
+          return (
+            <Tooltip title="还没有可用的 1688 采购账号。请到「设置 → 1688 授权管理」绑定，或让 admin 在主控端添加。">
+              <Tag color="default">暂无可用账号</Tag>
+            </Tooltip>
+          );
+        }
+        const options = [
+          { label: "（不指定 / 用第一个有效账号）", value: "" },
+          ...activeAccounts.map((acct) => ({
+            label: acct.label || acct.memberId || acct.appKey || acct.id,
+            value: acct.id,
+          })),
+        ];
+        return (
+          <Select
+            size="small"
+            style={{ width: "100%" }}
+            value={row.default1688PurchaseAccountId || ""}
+            options={options}
+            disabled={!canManageStoreAddress || submitting === `store-1688-account:${row.id}`}
+            onChange={(val) => handleSetDefault1688PurchaseAccount(row, val || null)}
+          />
+        );
+      },
+    },
     ...(canManageStoreAddress ? [{
       title: "操作",
       key: "actions",

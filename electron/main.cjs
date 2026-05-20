@@ -2093,11 +2093,19 @@ function appendImageStudioLog(message) {
   } catch {}
 }
 
+function shouldSuppressImageStudioLogLine(line) {
+  const text = String(line || "");
+  return text.includes("[DEP0169]")
+    || text.includes("url.parse() behavior is not standardized")
+    || text.includes("CVEs are not issued for `url.parse()` vulnerabilities");
+}
+
 function getImageStudioProcessOutputHandlers(prefix) {
   return (chunk) => {
     const text = chunk.toString("utf8").trim();
     if (!text) return;
     text.split(/\r?\n/).filter(Boolean).forEach((line) => {
+      if (shouldSuppressImageStudioLogLine(line)) return;
       appendImageStudioLog(`${prefix}: ${line}`);
     });
   };

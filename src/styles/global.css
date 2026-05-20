@@ -2188,7 +2188,7 @@ body {
 
 .extension-install-guide__body {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.34fr);
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 0.48fr);
   gap: 16px;
   align-items: start;
 }

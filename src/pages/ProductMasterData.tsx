@@ -7,7 +7,8 @@ import { useErpAuth } from "../contexts/ErpAuthContext";
 import { hasPageCache, readPageCache, writePageCache } from "../utils/pageCache";
 
 const erp = window.electronAPI?.erp;
-const PRODUCT_MASTER_DATA_CACHE_KEY = "temu.product-master-data.cache.v1";
+const PRODUCT_MASTER_DATA_CACHE_KEY = "temu.product-master-data.cache.v2";
+const JST_ACCOUNT_ID = "jst:account:default";
 const ADDRESS_WORKBENCH_PARAMS = {
   limit: 20,
   includeRequestDetails: false,
@@ -65,6 +66,7 @@ interface ErpSupplierRow {
   wechat?: string | null;
   categories?: string[];
   status?: string;
+  source?: string | null;
   updatedAt?: string;
 }
 
@@ -81,7 +83,13 @@ interface ErpSkuRow {
   actualStockQty?: number | null;
   warehouseLocation?: string | null;
   costPrice?: number | null;
+  jstActualStockQty?: number | null;
+  jstCostPrice?: number | null;
+  jstSupplierName?: string | null;
+  jstMainBin?: string | null;
+  jstCreator?: string | null;
   createdByName?: string | null;
+  source?: string | null;
   status?: string;
   createdAt?: string;
   updatedAt?: string;
@@ -160,12 +168,10 @@ function statusLabel(status?: string | null) {
   return STATUS_LABELS[status] || "未知状态";
 }
 
-function sourceLabel(source?: string | null) {
-  if (!source) return "-";
-  const labels: Record<string, string> = {
-    product_master_data: "商品资料",
-  };
-  return labels[source] || "其他来源";
+function inferMasterDataSource(row?: { source?: string | null; id?: string | null; accountId?: string | null }) {
+  if (row?.source) return row.source;
+  if (row?.accountId === JST_ACCOUNT_ID || String(row?.id || "").startsWith("jst:")) return "jushuitan";
+  return null;
 }
 
 function canRole(role: string | undefined, roles: string[]) {
@@ -439,37 +445,53 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
       return searchableText.includes(keyword);
     });
   }, [accountNameById, skuFilters, skus]);
+  const jushuitanSupplierCount = suppliers.filter((row) => inferMasterDataSource(row) === "jushuitan").length;
+  const jushuitanSkuCount = skus.filter((row) => inferMasterDataSource(row) === "jushuitan").length;
   const pageTitle = mode === "suppliers" ? "供应商" : mode === "stores" ? "店铺" : "商品资料";
   const pageMeta = mode === "suppliers"
-    ? [`供应商 ${suppliers.length}`]
+    ? [`供应商 ${suppliers.length}`, `聚水潭 ${jushuitanSupplierCount}`]
     : mode === "stores"
       ? [`店铺 ${accounts.length}`]
-      : [hasSkuFilters ? `商品 ${filteredSkus.length}/${skus.length}` : `商品 ${skus.length}`];
+      : [hasSkuFilters ? `商品 ${filteredSkus.length}/${skus.length}` : `商品 ${skus.length}`, `聚水潭 ${jushuitanSkuCount}`];
 
   const loadAll = useCallback(async () => {
     if (!erp) return;
     setLoading(true);
     try {
-      const [nextAccounts, nextSuppliers, nextSkus, purchaseWorkbench] = await Promise.all([
-        erp.account.list({ limit: 500 }),
-        erp.supplier.list({ limit: 500 }),
-        erp.sku.list({ limit: 500 }),
+      const [nextAccounts, nextSuppliers, purchaseWorkbench] = await Promise.all([
+        erp.account.list({ limit: 10000 }),
+        erp.supplier.list({ limit: 10000 }),
         erp.purchase.workbench(ADDRESS_WORKBENCH_PARAMS).catch(() => null),
       ]);
       const nextAddresses = get1688AddressRows(purchaseWorkbench);
       const nextAccountRows = nextAccounts as ErpAccountRow[];
       const nextSupplierRows = nextSuppliers as ErpSupplierRow[];
-      const nextSkuRows = nextSkus as ErpSkuRow[];
       setAccounts(nextAccountRows);
       setSuppliers(nextSupplierRows);
-      setSkus(nextSkuRows);
       if (nextAddresses.length) setAlibaba1688Addresses(nextAddresses);
       setLoadedOnce(true);
+      const CHUNK = 500;
+      const allSkuRows: ErpSkuRow[] = [];
+      for (let offset = 0; offset < 200000; offset += CHUNK) {
+        let rows: ErpSkuRow[] | null = null;
+        for (let attempt = 0; attempt < 3 && rows === null; attempt++) {
+          try {
+            const page = (await erp.sku.list({ limit: CHUNK, offset } as any)) as ErpSkuRow[];
+            rows = Array.isArray(page) ? page : [];
+          } catch {
+            if (attempt < 2) await new Promise((r) => setTimeout(r, 800));
+          }
+        }
+        if (rows === null || !rows.length) break;
+        allSkuRows.push(...rows);
+        setSkus(allSkuRows.slice());
+        if (rows.length < CHUNK) break;
+      }
       writePageCache<ProductMasterDataCache>(PRODUCT_MASTER_DATA_CACHE_KEY, {
         generatedAt: new Date().toISOString(),
         accounts: nextAccountRows,
         suppliers: nextSupplierRows,
-        skus: nextSkuRows,
+        skus: allSkuRows,
         alibaba1688Addresses: nextAddresses.length ? nextAddresses : cachedData.alibaba1688Addresses,
       });
     } catch (error: any) {
@@ -690,7 +712,6 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
         ) : <Tag color="warning">未绑定</Tag>;
       },
     },
-    { title: "来源", dataIndex: "source", key: "source", width: 140, render: sourceLabel },
     ...(canManageStoreAddress ? [{
       title: "操作",
       key: "actions",
@@ -786,7 +807,9 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
       dataIndex: "actualStockQty",
       key: "actualStockQty",
       width: 112,
-      render: (value) => Number(value || 0),
+      sorter: (left, right) => Number(left.actualStockQty || left.jstActualStockQty || 0) - Number(right.actualStockQty || right.jstActualStockQty || 0),
+      sortDirections: ["descend", "ascend"],
+      render: (value, row) => Number(value || row.jstActualStockQty || 0),
     },
     {
       title: "仓位",
@@ -794,9 +817,9 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
       key: "warehouseLocation",
       width: 140,
       ellipsis: true,
-      render: (value) => value || "-",
+      render: (value, row) => value || row.jstMainBin || "-",
     },
-    { title: "颜色及规格", dataIndex: "colorSpec", key: "colorSpec", width: 160, ellipsis: true, render: (value, row) => value || row.category || "-" },
+    { title: "颜色及规格", dataIndex: "colorSpec", key: "colorSpec", width: 200, ellipsis: true, render: (value, row) => { const t = value || row.category || "-"; return <span title={t}>{t}</span>; } },
     {
       title: "店铺",
       dataIndex: "accountId",
@@ -810,11 +833,11 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
       dataIndex: "costPrice",
       key: "costPrice",
       width: 112,
-      render: formatMoney,
+      render: (value, row) => formatMoney(value ?? row.jstCostPrice),
     },
     { title: "创建时间", dataIndex: "createdAt", key: "createdAt", width: 142, render: formatDateTime },
     { title: "修改时间", dataIndex: "updatedAt", key: "updatedAt", width: 142, render: formatDateTime },
-    { title: "创建人", dataIndex: "createdByName", key: "createdByName", width: 120, ellipsis: true, render: (value) => value || "-" },
+    { title: "创建人", dataIndex: "createdByName", key: "createdByName", width: 120, ellipsis: true, render: (value, row) => value || row.jstCreator || "-" },
   ];
 
   const renderAccountCreateForm = () => (
@@ -1007,8 +1030,13 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
             loading={tableLoading}
             columns={skuColumns}
             dataSource={filteredSkus}
-            scroll={{ x: 1500, y: "max(220px, calc(100vh - 470px))" }}
-            pagination={{ pageSize: 8, showSizeChanger: false, showTotal: (total) => `共 ${total} 条` }}
+            scroll={{ x: 1600, y: "max(220px, calc(100vh - 470px))" }}
+            pagination={{
+              defaultPageSize: 20,
+              pageSizeOptions: [10, 20, 50, 100, 200],
+              showSizeChanger: true,
+              showTotal: (total) => `共 ${total} 条`,
+            }}
           />
         </div>
         ) : null}

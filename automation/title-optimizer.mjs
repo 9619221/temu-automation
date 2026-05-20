@@ -145,7 +145,7 @@ export async function optimizeTitle(params, opts = {}) {
     category,
   });
 
-  const model = opts.model || "gpt-5.4";
+  const model = opts.model || "gpt-5.5";
 
   const resp = await client.chat.completions.create({
     model,

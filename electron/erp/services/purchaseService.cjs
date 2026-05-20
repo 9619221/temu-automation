@@ -82,7 +82,7 @@ class PurchaseService {
   }
 
   submitPaymentApproval(id, actor) {
-    // 已删除财务审批环节：采购"提交付款"后 PO 直接进入待付款。
+    // 采购「提交付款」→ 直接进「待付款」(approved_to_pay),没有审核环节。手工单和 1688 单都走这步。
     return this.workflow.transition({
       entityType: "purchase_order",
       id,

@@ -10,6 +10,7 @@ RELEASE_DIR = ROOT / "release"
 SITE_DIR = ROOT / "deploy" / "static-update-site"
 SITE_RELEASES_DIR = SITE_DIR / "releases"
 INDEX_FILE = SITE_DIR / "index.html"
+PUBLIC_UPDATE_FEED_URL = "https://erp.temu.chat/releases/"
 
 
 def installer_name_from_update_path(value: str) -> str:
@@ -203,7 +204,7 @@ def write_index(installer_name: str, version: str) -> None:
     <section class="hero">
       <div class="badge">Temu Desktop Updates</div>
       <h1>Temu 自动化运营工具更新源</h1>
-      <p>这是给桌面客户端使用的静态更新站点模板。客户端中的更新源地址应填写为 <code>https://your-domain.com/releases/</code> 这种目录地址。</p>
+      <p>这是给桌面客户端使用的静态更新站点模板。客户端中的更新源地址应填写为 <code>{PUBLIC_UPDATE_FEED_URL}</code> 这种目录地址。</p>
 
       <div class="grid">
         <div class="card">
@@ -260,7 +261,7 @@ def write_readme(version: str, installer_name: str) -> None:
 不要填首页地址，客户端应填写：
 
 ```text
-https://your-domain.com/releases/
+{PUBLIC_UPDATE_FEED_URL}
 ```
 
 ## 部署方法

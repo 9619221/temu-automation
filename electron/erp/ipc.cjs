@@ -529,7 +529,7 @@ function toCompany(row) {
 function normalizeLimit(value, fallback = 100) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
-  return Math.max(1, Math.min(Math.floor(number), 500));
+  return Math.max(1, Math.min(Math.floor(number), 10000));
 }
 
 function normalizeOffset(value) {
@@ -750,9 +750,30 @@ function listAccounts(params = {}) {
   const { db } = requireErp();
   const companyId = optionalString(params.companyId || params.company_id);
   const includeDeleted = Boolean(params.includeDeleted || params.include_deleted);
+  const includeJushuitanRawAccounts = Boolean(params.includeJushuitanRawAccounts || params.include_jushuitan_raw_accounts);
   const conditions = [];
   if (companyId) conditions.push("acct.company_id = @company_id");
   if (!includeDeleted) conditions.push("acct.status != 'deleted'");
+  if (!includeJushuitanRawAccounts) {
+    const hasJushuitanBrandAccounts = companyId
+      ? db.prepare(`
+        SELECT 1
+        FROM erp_accounts
+        WHERE source = 'jushuitan_brand'
+          AND company_id = @company_id
+        LIMIT 1
+      `).get({ company_id: companyId })
+      : db.prepare(`
+        SELECT 1
+        FROM erp_accounts
+        WHERE source = 'jushuitan_brand'
+        LIMIT 1
+      `).get();
+    if (hasJushuitanBrandAccounts) {
+      conditions.push("acct.id != 'jst:account:default'");
+      conditions.push("acct.id NOT LIKE 'jst:shop:%'");
+    }
+  }
   const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const rows = db.prepare(`
     SELECT
@@ -3014,11 +3035,19 @@ function listSkus(params = {}) {
   const { db } = requireErp();
   const accountId = optionalString(params.accountId || params.account_id);
   const companyId = optionalString(params.companyId || params.company_id);
+  const search = optionalString(params.search);
   const includeDeleted = Boolean(params.includeDeleted || params.include_deleted);
+  // 桌面端商品资料/采购单列表展示的是纯数字 id 的 SKU（ERP 原生）。
+  // 聚水潭同步的 jst:skuprofile: 前缀那一份是底层副本，搜索时要排除掉，
+  // 否则同一个 internal_sku_code 会同时出现两条记录。
+  const excludeJst = Boolean(params.excludeJst || params.exclude_jst);
   const conditions = [];
   if (accountId) conditions.push("(sku.account_id = @account_id OR sku.account_id IS NULL)");
   if (companyId) conditions.push("sku.company_id = @company_id");
   if (!includeDeleted) conditions.push("sku.status != 'deleted'");
+  if (excludeJst) conditions.push("sku.id NOT LIKE 'jst:skuprofile:%'");
+  // 关键词模糊匹配：SKU 编码 / 内部 ID / 商品名
+  if (search) conditions.push("(sku.internal_sku_code LIKE @search OR sku.id LIKE @search OR sku.product_name LIKE @search)");
   const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const rows = db.prepare(`
     SELECT
@@ -3081,6 +3110,7 @@ function listSkus(params = {}) {
   `).all({
     account_id: accountId,
     company_id: companyId,
+    ...(search ? { search: `%${search}%` } : {}),
     limit: normalizeLimit(params.limit),
     offset: normalizeOffset(params.offset),
   });
@@ -3691,6 +3721,9 @@ function to1688DeliveryAddress(row) {
   next.rawAddressParam = parseJsonObject(row.raw_address_param_json);
   delete next.rawAddressParamJson;
   next.addressParam = build1688AddressParamFromRow(row);
+  // toCamelKey 的正则只认 _[a-z],"_1688"前的下划线没被去掉 → 显式补一个干净的 purchase1688AccountId。
+  next.purchase1688AccountId = row.purchase_1688_account_id || null;
+  delete next.purchase_1688AccountId;
   return next;
 }
 
@@ -4062,7 +4095,22 @@ function getPurchaseWorkbench(params = {}) {
       END,
       po.updated_at DESC
     LIMIT @limit
-  `).all(baseParams).map(toCamelRow);
+  `).all(baseParams).map((row) => {
+    const next = toCamelRow(row);
+    if (row.account_id === "jst:account:default") {
+      const raw = parseJsonObject(row.external_order_payload_json, {});
+      const rawQty = Number(raw.qty_count || raw.total_qty || raw.enable_follow_qty || 0);
+      if (rawQty > 0 && Number(next.totalQty || 0) <= 0) next.totalQty = rawQty;
+      const rawReceived = Number(raw.total_in_qty || raw.plan_arrive_qty || 0);
+      if (rawReceived > 0 && Number(next.receivedQty || 0) <= 0) next.receivedQty = rawReceived;
+      if (!next.skuSummary) {
+        next.skuSummary = [raw.item_type, raw.labels].filter(Boolean).join(" / ") || "聚水潭采购单";
+      }
+      if (!next.skuCodes) next.skuCodes = raw.merge_sku_id || raw.merge_i_id || "";
+      if (!next.productNames) next.productNames = next.skuSummary;
+    }
+    return next;
+  });
 
   const paymentApprovals = db.prepare(`
     SELECT
@@ -4643,6 +4691,20 @@ function getPurchaseOrderReceivedQty(db, poId) {
     WHERE po_id = ?
   `).get(poId);
   return Number(row?.received_qty || 0);
+}
+
+function getPurchaseOrderQtySummary(db, poId) {
+  const row = db.prepare(`
+    SELECT
+      COALESCE(SUM(COALESCE(expected_qty, qty, 0)), 0) AS total_qty,
+      COALESCE(SUM(received_qty), 0) AS received_qty
+    FROM erp_purchase_order_lines
+    WHERE po_id = ?
+  `).get(poId);
+  return {
+    totalQty: Number(row?.total_qty || 0),
+    receivedQty: Number(row?.received_qty || 0),
+  };
 }
 
 function has1688OrderTrace(po = {}) {
@@ -7082,6 +7144,19 @@ function build1688AddressParamFromRow(row = {}) {
   if (row.area_text) addressParam.areaText = row.area_text;
   if (row.town_text) addressParam.townText = row.town_text;
   if (row.address) addressParam.address = row.address;
+  // 兜底:1688 receiveAddress.get 只返回合并文本 addressCodeText("广东省 广州市 黄埔区"),没拆 province/city/area。
+  // createOrder.preview 又要求 provinceText/cityText/areaText 非空,否则报 AddressId invalid。
+  // 从 addressCodeText 拆开兜底补上。
+  if (!addressParam.provinceText || !addressParam.cityText || !addressParam.areaText) {
+    const text = String(addressParam.addressCodeText || raw.addressCodeText || "").trim();
+    if (text) {
+      const parts = text.split(/\s+/).filter(Boolean);
+      if (!addressParam.provinceText && parts[0]) addressParam.provinceText = parts[0];
+      if (!addressParam.cityText && parts[1]) addressParam.cityText = parts[1];
+      if (!addressParam.areaText && parts[2]) addressParam.areaText = parts[2];
+      if (!addressParam.townText && parts[3]) addressParam.townText = parts[3];
+    }
+  }
   return addressParam;
 }
 
@@ -7112,7 +7187,7 @@ function get1688DeliveryAddress(db, addressId = null, companyId = DEFAULT_COMPAN
     const row = db.prepare("SELECT * FROM erp_1688_delivery_addresses WHERE id = ? AND company_id = ?").get(id, normalizedCompanyId);
     if (!row) throw new Error(`1688 delivery address not found: ${id}`);
     const rowAccountId = optionalString(row.account_id);
-    if (normalizedAccountId && rowAccountId !== normalizedAccountId) {
+    if (normalizedAccountId && rowAccountId && rowAccountId !== normalizedAccountId) {
       throw new Error("1688 delivery address does not belong to this store");
     }
     return row;
@@ -7122,9 +7197,20 @@ function get1688DeliveryAddress(db, addressId = null, companyId = DEFAULT_COMPAN
       SELECT *
       FROM erp_1688_delivery_addresses
       WHERE company_id = @company_id
-        AND account_id = @account_id
+        AND (
+          account_id = @account_id
+          OR account_id IS NULL
+          OR account_id = ''
+        )
         AND status = 'active'
-      ORDER BY is_default DESC,
+      ORDER BY
+        CASE
+          WHEN account_id = @account_id AND COALESCE(address_id, '') != '' THEN 0
+          WHEN (account_id IS NULL OR account_id = '') AND COALESCE(address_id, '') != '' THEN 1
+          WHEN account_id = @account_id THEN 2
+          ELSE 3
+        END,
+        is_default DESC,
         updated_at DESC,
         created_at DESC
       LIMIT 1
@@ -7177,6 +7263,7 @@ function save1688DeliveryAddressAction({ db, payload, actor }) {
     raw_address_param_json: trimJsonForStorage(rawAddressParam || {}),
     is_default: payload.isDefault === false ? 0 : (payload.isDefault || payload.default ? 1 : 0),
     status: optionalString(payload.status) || "active",
+    purchase_1688_account_id: optionalString(payload.purchase1688AccountId || payload.purchase_1688_account_id) || null,
     created_by: optionalString(actor.id),
     created_at: now,
     updated_at: now,
@@ -7201,12 +7288,12 @@ function save1688DeliveryAddressAction({ db, payload, actor }) {
     INSERT INTO erp_1688_delivery_addresses (
       id, company_id, account_id, label, full_name, mobile, phone, post_code, province_text, city_text,
       area_text, town_text, address, address_id, raw_address_param_json,
-      is_default, status, created_by, created_at, updated_at
+      is_default, status, purchase_1688_account_id, created_by, created_at, updated_at
     )
     VALUES (
       @id, @company_id, @account_id, @label, @full_name, @mobile, @phone, @post_code, @province_text, @city_text,
       @area_text, @town_text, @address, @address_id, @raw_address_param_json,
-      @is_default, @status, @created_by, @created_at, @updated_at
+      @is_default, @status, @purchase_1688_account_id, @created_by, @created_at, @updated_at
     )
     ON CONFLICT(id) DO UPDATE SET
       company_id = excluded.company_id,
@@ -7225,6 +7312,7 @@ function save1688DeliveryAddressAction({ db, payload, actor }) {
       raw_address_param_json = excluded.raw_address_param_json,
       is_default = excluded.is_default,
       status = excluded.status,
+      purchase_1688_account_id = COALESCE(NULLIF(excluded.purchase_1688_account_id, ''), erp_1688_delivery_addresses.purchase_1688_account_id),
       updated_at = excluded.updated_at
   `).run({
     ...row,
@@ -7443,6 +7531,9 @@ async function sync1688DeliveryAddressesAction({ db, payload, actor }) {
   assertActorRole(actor, ["buyer", "manager", "admin"], "1688 receive address sync");
   const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
   const accountId = optionalString(payload.accountId || payload.account_id);
+  const purchase1688AccountId = optionalString(
+    payload.purchase1688AccountId || payload.purchase_1688_account_id,
+  ) || null;
   const params = raw1688Params(payload, {
     webSite: optionalString(payload.webSite) || "1688",
   });
@@ -7474,6 +7565,7 @@ async function sync1688DeliveryAddressesAction({ db, payload, actor }) {
         id: existingId || undefined,
         companyId,
         accountId,
+        purchase1688AccountId,
       },
     });
   });
@@ -7485,11 +7577,14 @@ async function sync1688DeliveryAddressesAction({ db, payload, actor }) {
     const remoteAddressIds = new Set(
       addresses.map((address) => optionalString(address.alibabaAddressId)).filter(Boolean),
     );
+    // 关键:deactivate scope 必须也按 purchase_1688_account_id 限定。否则两个 1688 买家账号(明舵/优雅哥)
+    // 给同一个店铺同步时,后同步的会把前同步的地址全部标 inactive(它们的 address_id 不在自己的远端列表里)。
     const localActiveRows = db.prepare(`
       SELECT id, address_id
       FROM erp_1688_delivery_addresses
       WHERE company_id = @company_id
         AND COALESCE(account_id, '') = COALESCE(@account_id, '')
+        AND COALESCE(purchase_1688_account_id, '') = COALESCE(@purchase_1688_account_id, '')
         AND status = 'active'
     `).all({ company_id: companyId, account_id: accountId || "" });
     const deactivateStmt = db.prepare(`
@@ -7732,6 +7827,46 @@ function normalizePurchaseWorkbenchPoNumbers(workbench = {}) {
     ...workbench,
     purchaseOrders: nextOrders,
     paymentQueue: nextPaymentQueue,
+  };
+}
+
+function normalizeJstPurchaseWorkbench(workbench = {}) {
+  const purchaseOrders = Array.isArray(workbench.purchaseOrders) ? workbench.purchaseOrders : [];
+  if (!purchaseOrders.length) return workbench;
+  const normalizeOrder = (row = {}) => {
+    const accountId = row.accountId || row.account_id;
+    if (accountId !== "jst:account:default") return row;
+    const raw = parseJsonObject(row.externalOrderPayloadJson || row.external_order_payload_json, {});
+    const totalQty = Number(raw.qty_count || raw.total_qty || raw.enable_follow_qty || 0);
+    const receivedQty = Number(raw.total_in_qty || raw.plan_arrive_qty || 0);
+    const skuSummary = [raw.item_type, raw.labels].filter(Boolean).join(" / ") || "聚水潭采购单";
+    const skuCodes = optionalString(raw.merge_sku_id || raw.merge_i_id);
+    const next = { ...row };
+    if (totalQty > 0 && Number(next.totalQty || next.total_qty || 0) <= 0) {
+      next.totalQty = totalQty;
+      if (next.total_qty !== undefined) next.total_qty = totalQty;
+    }
+    if (receivedQty > 0 && Number(next.receivedQty || next.received_qty || 0) <= 0) {
+      next.receivedQty = receivedQty;
+      if (next.received_qty !== undefined) next.received_qty = receivedQty;
+    }
+    if (!next.skuSummary && !next.sku_summary) {
+      next.skuSummary = skuSummary;
+      if (next.sku_summary !== undefined) next.sku_summary = skuSummary;
+    }
+    if (skuCodes && !next.skuCodes && !next.sku_codes) {
+      next.skuCodes = skuCodes;
+      if (next.sku_codes !== undefined) next.sku_codes = skuCodes;
+    }
+    if (!next.productNames && !next.product_names) {
+      next.productNames = skuSummary;
+      if (next.product_names !== undefined) next.product_names = skuSummary;
+    }
+    return next;
+  };
+  return {
+    ...workbench,
+    purchaseOrders: purchaseOrders.map(normalizeOrder),
   };
 }
 
@@ -10633,6 +10768,14 @@ function build1688CreateRefundParams(payload = {}, po = {}) {
     "externalOrderId",
   );
   const amount = optionalNumber(payload.amount ?? payload.refundPayment ?? payload.applyPayment) ?? optionalNumber(po.total_amount);
+  const carriageAmount = optionalNumber(
+    payload.applyCarriage
+      ?? payload.refundCarriage
+      ?? payload.carriage
+      ?? payload.freight
+      ?? payload.shippingFee
+      ?? payload.postFee,
+  ) ?? 0;
   const orderEntryIds = infer1688OrderEntryIds(payload, po);
   const refundReasonId = optionalString(payload.refundReasonId || payload.reasonId || payload.refund_reason_id);
   // 1688 createRefund 把 orderId 当顶层 Long 参数校验，必须放在 input 外面；
@@ -10644,6 +10787,7 @@ function build1688CreateRefundParams(payload = {}, po = {}) {
     orderEntryIdList: orderEntryIds.length ? orderEntryIds : undefined,
     refundPayment: amount,
     applyPayment: amount,
+    applyCarriage: carriageAmount,
     refundReasonId: refundReasonId || undefined,
     reasonId: refundReasonId || undefined,
     refundReason: optionalString(payload.reason || payload.refundReason),
@@ -10660,6 +10804,7 @@ function build1688CreateRefundParams(payload = {}, po = {}) {
   // 1688 资金类字段顶层用 Long 单位 = 分（RMB cents）。amount 是元（可带小数 6.5），
   // 这里 ×100 取整再交给顶层；input 包装内保留元单位（1688 内部处理 BigDecimal）。
   const applyPaymentCents = Number.isFinite(amount) ? Math.round(amount * 100) : null;
+  const applyCarriageCents = Math.round(carriageAmount * 100);
   return {
     orderId: externalOrderId,
     // orderEntryIds 顶层（Long[] ACL 校验）+ input 内一份。
@@ -10667,6 +10812,7 @@ function build1688CreateRefundParams(payload = {}, po = {}) {
     disputeRequest,
     goodsStatus,
     ...(applyPaymentCents !== null ? { applyPayment: applyPaymentCents, refundPayment: applyPaymentCents } : {}),
+    applyCarriage: applyCarriageCents,
     ...structured,
   };
 }
@@ -12168,6 +12314,19 @@ function extractInboundLogisticsSummary(externalLogisticsJson) {
 
 function toInboundReceipt(row) {
   const camel = toCamelRow(row);
+  const jstRemark = parseJsonObject(row?.remark, null);
+  if (jstRemark?.source === "jushuitan") {
+    const totalQty = Number(jstRemark.totalQty || 0);
+    if (totalQty > 0 && Number(camel.expectedQty || 0) <= 0) camel.expectedQty = totalQty;
+    if (totalQty > 0 && Number(camel.receivedQty || 0) <= 0) camel.receivedQty = totalQty;
+    if (!camel.skuSummary) camel.skuSummary = jstRemark.warehouse ? `聚水潭入库 / ${jstRemark.warehouse}` : "聚水潭入库";
+    if (!camel.logistics && (jstRemark.logisticsCompany || jstRemark.trackingNo)) {
+      camel.logistics = {
+        companyName: jstRemark.logisticsCompany || null,
+        billNo: jstRemark.trackingNo || null,
+      };
+    }
+  }
   if (row?.po_external_logistics_json) {
     const summary = extractInboundLogisticsSummary(row.po_external_logistics_json);
     if (summary) camel.logistics = summary;
@@ -12263,6 +12422,47 @@ function getWarehouseWorkbench(params = {}) {
   };
 }
 
+function normalizeJstWarehouseWorkbench(workbench = {}) {
+  const inboundReceipts = Array.isArray(workbench.inboundReceipts) ? workbench.inboundReceipts : [];
+  if (!inboundReceipts.length) return workbench;
+  const normalizedReceipts = inboundReceipts.map((row = {}) => {
+    const accountId = row.accountId || row.account_id;
+    const jstRemark = parseJsonObject(row.remark, null);
+    if (accountId !== "jst:account:default" && jstRemark?.source !== "jushuitan") return row;
+    const totalQty = Number(jstRemark?.totalQty || jstRemark?.total_qty || 0);
+    const next = { ...row };
+    if (totalQty > 0 && Number(next.expectedQty || next.expected_qty || 0) <= 0) {
+      next.expectedQty = totalQty;
+      if (next.expected_qty !== undefined) next.expected_qty = totalQty;
+    }
+    if (totalQty > 0 && Number(next.receivedQty || next.received_qty || 0) <= 0) {
+      next.receivedQty = totalQty;
+      if (next.received_qty !== undefined) next.received_qty = totalQty;
+    }
+    if (!next.skuSummary && !next.sku_summary) {
+      const skuSummary = jstRemark?.warehouse ? `聚水潭入库 / ${jstRemark.warehouse}` : "聚水潭入库";
+      next.skuSummary = skuSummary;
+      if (next.sku_summary !== undefined) next.sku_summary = skuSummary;
+    }
+    if (!next.logistics && (jstRemark?.logisticsCompany || jstRemark?.trackingNo)) {
+      next.logistics = {
+        companyName: jstRemark.logisticsCompany || null,
+        billNo: jstRemark.trackingNo || null,
+      };
+    }
+    return next;
+  });
+  const summary = {
+    ...(workbench.summary || {}),
+    receivedQty: normalizedReceipts.reduce((sum, item) => sum + Number(item.receivedQty || item.received_qty || 0), 0),
+  };
+  return {
+    ...workbench,
+    summary,
+    inboundReceipts: normalizedReceipts,
+  };
+}
+
 function getInboundReceipt(db, receiptId) {
   const row = db.prepare("SELECT * FROM erp_inbound_receipts WHERE id = ?").get(receiptId);
   if (!row) throw new Error(`Inbound receipt not found: ${receiptId}`);
@@ -12343,8 +12543,15 @@ function createBatchesForReceipt({ db, services, receipt, actor }) {
   });
 
   if (receipt.po_id) {
-    const po = getPurchaseOrder(db, receipt.po_id);
-    if (po.status === "arrived") {
+    let po = getPurchaseOrder(db, receipt.po_id);
+    if (["paid", "supplier_processing", "shipped"].includes(po.status)) {
+      try {
+        services.purchase.markArrived(po.id, actor);
+        po = getPurchaseOrder(db, receipt.po_id);
+      } catch {}
+    }
+    const qtySummary = getPurchaseOrderQtySummary(db, po.id);
+    if (po.status === "arrived" && qtySummary.totalQty > 0 && qtySummary.receivedQty >= qtySummary.totalQty) {
       services.purchase.markInbounded(po.id, actor);
     }
   }
@@ -12393,15 +12600,7 @@ function performWarehouseAction(payload = {}, actorInput = {}) {
           // 没收货数量等异常不阻断 register_arrival 主流程，但提示
           try { console.warn("[warehouse] auto create batches failed:", e?.message || e); } catch {}
         }
-        // 4. PO 状态联动：shipped / paid → arrived
-        let poTransition = null;
-        if (receipt.po_id) {
-          const po = getPurchaseOrder(db, receipt.po_id);
-          if (["shipped", "paid", "supplier_processing"].includes(po.status)) {
-            try { poTransition = services.purchase.markArrived(po.id, actor); } catch {}
-          }
-        }
-        return { transition: t1, poTransition, batches };
+        return { transition: t1, batches };
       }
       case "confirm_count": {
         const receiptId = requireString(payload.receiptId || payload.id, "receiptId");
@@ -12453,7 +12652,14 @@ function performWarehouseAction(payload = {}, actorInput = {}) {
             WHERE receipt_id = ?
           `).run(receiptId);
         }
-        const t = services.inventory.confirmCount(receiptId, actor);
+        let receipt = getInboundReceipt(db, receiptId);
+        if (receipt.status === "pending_arrival") {
+          services.inventory.registerArrival(receiptId, actor);
+          receipt = getInboundReceipt(db, receiptId);
+        }
+        const t = receipt.status === "arrived"
+          ? services.inventory.confirmCount(receiptId, actor)
+          : null;
         let batches = [];
         try {
           const reloaded = getInboundReceipt(db, receiptId);
@@ -12497,7 +12703,15 @@ function performWarehouseAction(payload = {}, actorInput = {}) {
           SET received_qty = CASE WHEN COALESCE(received_qty, 0) > 0 THEN received_qty ELSE COALESCE(expected_qty, 0) END
           WHERE receipt_id = ?
         `).run(receiptId);
-        const receipt = getInboundReceipt(db, receiptId);
+        let receipt = getInboundReceipt(db, receiptId);
+        if (receipt.status === "pending_arrival") {
+          services.inventory.registerArrival(receiptId, actor);
+          receipt = getInboundReceipt(db, receiptId);
+        }
+        if (receipt.status === "arrived") {
+          services.inventory.confirmCount(receiptId, actor);
+          receipt = getInboundReceipt(db, receiptId);
+        }
         const batches = createBatchesForReceipt({
           db,
           services,
@@ -13083,7 +13297,7 @@ async function getPurchaseWorkbenchRuntime(params = {}) {
       if (!statusCode || ![404, 405, 502].includes(statusCode)) throw error;
       payload = await remoteRequest("/api/purchase/workbench", { timeoutMs: 120000 });
     }
-    return normalizePurchaseWorkbenchPoNumbers(payload.workbench || {});
+    return normalizePurchaseWorkbenchPoNumbers(normalizeJstPurchaseWorkbench(payload.workbench || {}));
   }
   return getPurchaseWorkbench(params);
 }
@@ -13653,7 +13867,7 @@ async function performPurchaseActionRuntime(payload = {}) {
 async function getWarehouseWorkbenchRuntime(params = {}) {
   if (isClientMode()) {
     const payload = await remoteRequest("/api/warehouse/workbench");
-    return payload.workbench || {};
+    return normalizeJstWarehouseWorkbench(payload.workbench || {});
   }
   return getWarehouseWorkbench(params);
 }
@@ -13785,6 +13999,7 @@ async function getMasterDataWorkbenchRuntime(params = {}) {
     const payload = await remoteRequest("/api/master-data/workbench", {
       method: "POST",
       body: params,
+      timeoutMs: 60000,
     });
     return payload.workbench || {};
   }
@@ -13924,6 +14139,7 @@ function startLanService(payload = {}) {
   return startLanServer({
     port: Number(payload.port) || undefined,
     bindAddress: optionalString(payload.bindAddress) || undefined,
+    db: erpState.db,
     getErpStatus,
     getPurchaseWorkbench,
     getWarehouseWorkbench,
@@ -13962,6 +14178,7 @@ function startLanService(payload = {}) {
     refresh1688AccessToken,
     receive1688Message,
     list1688PurchaseAccounts,
+    ingestJushuitanExtensionBatch,
   });
 }
 
@@ -14089,6 +14306,7 @@ async function startErpHeadlessServer(options = {}) {
   const lanStatus = await startLanServer({
     port: Number(options.port || env.ERP_PORT) || DEFAULT_LAN_PORT,
     bindAddress: optionalString(options.bindAddress || env.ERP_BIND_ADDRESS) || DEFAULT_BIND_ADDRESS,
+    db: erpState.db,
     getErpStatus,
     getPurchaseWorkbench,
     getWarehouseWorkbench,
@@ -14127,6 +14345,7 @@ async function startErpHeadlessServer(options = {}) {
     refresh1688AccessToken,
     receive1688Message,
     list1688PurchaseAccounts,
+    ingestJushuitanExtensionBatch,
   });
   const auto1688OrderSync = startAuto1688OrderSync(env);
 
@@ -14143,6 +14362,76 @@ function stopLanService() {
   return stopLanServer();
 }
 
+function getJushuitanService() {
+  const { services } = requireErp();
+  if (!services?.jushuitan) throw new Error("聚水潭数据服务未初始化");
+  return services.jushuitan;
+}
+
+function getJushuitanActor(actorInput = {}) {
+  const actor = getCurrentSessionActor(actorInput || {});
+  if (!actor.role) return { role: "admin" };
+  return actor;
+}
+
+function ingestJushuitanExtensionBatch(payload = {}, actor = {}) {
+  assertHostMode("Jushuitan extension ingest");
+  const service = getJushuitanService();
+  const nextActor = actor && actor.role ? actor : { role: "admin", companyId: payload.companyId || payload.company_id || DEFAULT_COMPANY_ID };
+  return service.ingestExtensionBatch(payload, nextActor);
+}
+
+function getJushuitanStatusRuntime(params = {}) {
+  assertHostMode("聚水潭数据导入");
+  return getJushuitanService().getAuthStatus(getJushuitanActor(params.actor || {}));
+}
+
+function saveJushuitanSourceRuntime(payload = {}) {
+  assertHostMode("聚水潭数据导入");
+  assertRoleIfLoggedIn(["admin", "manager", "operations"]);
+  return getJushuitanService().saveSource(payload, getJushuitanActor(payload.actor || {}));
+}
+
+function importJushuitanFileRuntime(payload = {}) {
+  assertHostMode("聚水潭数据导入");
+  assertRoleIfLoggedIn(["admin", "manager", "operations"]);
+  return getJushuitanService().importFile(payload, getJushuitanActor(payload.actor || {}));
+}
+
+function openJushuitanWebCollectorRuntime(payload = {}) {
+  assertHostMode("聚水潭网页采集");
+  assertRoleIfLoggedIn(["admin", "manager", "operations"]);
+  return getJushuitanService().openWebCollector(payload, getJushuitanActor(payload.actor || {}));
+}
+
+function collectJushuitanWebPageRuntime(payload = {}) {
+  assertHostMode("聚水潭网页采集");
+  assertRoleIfLoggedIn(["admin", "manager", "operations"]);
+  return getJushuitanService().collectWebPage(payload, getJushuitanActor(payload.actor || {}));
+}
+
+function closeJushuitanWebCollectorRuntime(payload = {}) {
+  assertHostMode("聚水潭网页采集");
+  assertRoleIfLoggedIn(["admin", "manager", "operations"]);
+  return getJushuitanService().closeWebCollector(payload, getJushuitanActor(payload.actor || {}));
+}
+
+function syncJushuitanOperationalRuntime(payload = {}) {
+  assertHostMode("Jushuitan operational bridge");
+  assertRoleIfLoggedIn(["admin", "manager", "operations"]);
+  return getJushuitanService().syncToOperationalTables(payload, getJushuitanActor(payload.actor || {}));
+}
+
+function listJushuitanJobsRuntime(params = {}) {
+  assertHostMode("聚水潭数据导入");
+  return getJushuitanService().listJobs(params, getJushuitanActor(params.actor || {}));
+}
+
+function listJushuitanRawRuntime(params = {}) {
+  assertHostMode("聚水潭数据导入");
+  return getJushuitanService().listRawRecords(params, getJushuitanActor(params.actor || {}));
+}
+
 function registerErpIpcHandlers(ipcMain) {
   ipcMain.on("erp:events:subscribe", (event) => subscribeRendererEvents(event.sender));
   ipcMain.on("erp:events:unsubscribe", (event) => unsubscribeRendererEvents(event.sender));
@@ -14150,6 +14439,23 @@ function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:run-migrations", () => {
     assertHostMode("Migration");
     return rerunMigrations();
+  });
+  ipcMain.handle("erp:sync-temu-sales", async (_event, payload) => {
+    try {
+      if (isClientMode()) {
+        return await remoteRequest("/api/temu/sales-sync", {
+          method: "POST",
+          body: payload || {},
+        });
+      }
+      requireErp();
+      const { TemuSalesBridge } = require("./services/temuSalesBridge.cjs");
+      const bridge = new TemuSalesBridge({ db: erpState.db });
+      const result = bridge.sync(payload || {});
+      return { ok: true, result };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
   });
   ipcMain.handle("erp:get-enums", () => enums);
   ipcMain.handle("erp:auth:get-status", () => getAuthStatus());
@@ -14221,6 +14527,15 @@ function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:lan:get-status", () => getLanServiceStatus());
   ipcMain.handle("erp:lan:start", (_event, payload) => startLanService(payload || {}));
   ipcMain.handle("erp:lan:stop", () => stopLanService());
+  ipcMain.handle("erp:jushuitan:get-status", (_event, params) => getJushuitanStatusRuntime(params || {}));
+  ipcMain.handle("erp:jushuitan:save-source", (_event, payload) => saveJushuitanSourceRuntime(payload || {}));
+  ipcMain.handle("erp:jushuitan:import-file", (_event, payload) => importJushuitanFileRuntime(payload || {}));
+  ipcMain.handle("erp:jushuitan:open-web-collector", (_event, payload) => openJushuitanWebCollectorRuntime(payload || {}));
+  ipcMain.handle("erp:jushuitan:collect-web-page", (_event, payload) => collectJushuitanWebPageRuntime(payload || {}));
+  ipcMain.handle("erp:jushuitan:close-web-collector", (_event, payload) => closeJushuitanWebCollectorRuntime(payload || {}));
+  ipcMain.handle("erp:jushuitan:sync-operational", (_event, payload) => syncJushuitanOperationalRuntime(payload || {}));
+  ipcMain.handle("erp:jushuitan:list-jobs", (_event, params) => listJushuitanJobsRuntime(params || {}));
+  ipcMain.handle("erp:jushuitan:list-raw", (_event, params) => listJushuitanRawRuntime(params || {}));
   ipcMain.handle("erp:diagnostics:probe-1688-mtop", (_event, payload) => probe1688MtopFromClient(payload || {}));
 }
 

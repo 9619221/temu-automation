@@ -447,8 +447,8 @@ const PURCHASE_FLOW_PAGES = [
   },
   {
     hash: "/qc-outbound",
-    expectedTitle: "抽检、锁定/释放库存、出库计划",
-    label: "质检发仓",
+    expectedTitle: "可出库批次与发货单",
+    label: "出库中心",
   },
 ];
 
@@ -549,7 +549,7 @@ async function main() {
       "electron bridge ready",
     );
 
-    await page.locator(".ant-layout-sider .ant-menu-submenu-title").first().waitFor({ state: "visible", timeout: 30000 });
+    await page.locator(".ant-layout-sider").getByText("店铺概览", { exact: true }).first().waitFor({ state: "visible", timeout: 30000 });
 
     issues.push(...await runBridgeChecks(page));
     await seedRegressionData(page);
