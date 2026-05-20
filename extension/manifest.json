@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Temu 多店监控",
-  "version": "0.1.0",
-  "description": "在 Temu 卖家后台后台抓取业务接口数据并上传云端，供多店统一汇总。",
+  "name": "Temu / 聚水潭采集助手",
+  "version": "0.4.0",
+  "description": "采集 Temu 与聚水潭业务接口数据；聚水潭仅在手动开启的本次采集窗口内入队。",
   "permissions": [
     "storage",
     "alarms",
@@ -15,6 +15,9 @@
     "https://agentseller-eu.temu.com/*",
     "https://agentseller-us.temu.com/*",
     "https://seller.kuajingmaihuo.com/*",
+    "https://*.erp321.com/*",
+    "https://*.jushuitan.com/*",
+    "https://*.scm121.com/*",
     "https://*.pftk.temu.com/*",
     "https://pftk-cn.kuajingmaihuo.com/*",
     "https://thtk-us.seller.temu.com/*",
@@ -31,19 +34,22 @@
         "https://agentseller.temu.com/*",
         "https://agentseller-eu.temu.com/*",
         "https://agentseller-us.temu.com/*",
-        "https://seller.kuajingmaihuo.com/*"
+        "https://seller.kuajingmaihuo.com/*",
+        "https://*.erp321.com/*",
+        "https://*.jushuitan.com/*",
+        "https://*.scm121.com/*"
       ],
       "js": [
         "web/content/_config.generated.js",
         "web/content/bridge.js"
       ],
       "run_at": "document_start",
-      "all_frames": false
+      "all_frames": true
     }
   ],
   "action": {
     "default_popup": "web/popup/popup.html",
-    "default_title": "Temu 多店监控",
+    "default_title": "采集助手",
     "default_icon": {
       "16": "web/img/16.png",
       "48": "web/img/48.png",
@@ -67,7 +73,10 @@
         "https://agentseller.temu.com/*",
         "https://agentseller-eu.temu.com/*",
         "https://agentseller-us.temu.com/*",
-        "https://seller.kuajingmaihuo.com/*"
+        "https://seller.kuajingmaihuo.com/*",
+        "https://*.erp321.com/*",
+        "https://*.jushuitan.com/*",
+        "https://*.scm121.com/*"
       ]
     }
   ]

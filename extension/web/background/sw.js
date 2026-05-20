@@ -10,6 +10,8 @@ import { enqueue, queueDepth, flush } from "./ingest-queue.js";
 
 const ALARM_FLUSH = "temu-monitor.flush";
 const STATS_KEY = "temu_monitor_stats";
+const JST_ONCE_CAPTURE_KEY = "jst_once_capture_until";
+const JST_ONCE_CAPTURE_WINDOW_MS = 10 * 60 * 1000;
 
 // ---------- 启动期初始化 ----------
 chrome.runtime.onInstalled.addListener(async () => {
@@ -31,6 +33,28 @@ chrome.runtime.onStartup.addListener(async () => {
 async function tryAutoConfigure() {
   const cur = await getStorage(["cloud_endpoint", "auth_token"]);
   if (cur.cloud_endpoint && cur.auth_token) return;
+
+  const erpToken = "temu-jst-extension-v1";
+  const erpEndpoints = [
+    "http://127.0.0.1:19380",
+    "http://localhost:19380",
+    "https://erp.temu.chat",
+  ];
+  for (const erpEndpoint of erpEndpoints) {
+    try {
+      const resp = await fetch(erpEndpoint + "/api/ingest/v1/health", {
+        headers: { Authorization: `Bearer ${erpToken}` },
+      });
+      if (resp.ok) {
+        await setStorage({ cloud_endpoint: erpEndpoint, auth_token: erpToken });
+        console.log(`[sw] auto-configured to ${erpEndpoint}`);
+        return;
+      }
+    } catch (e) {
+      console.warn(`[sw] erp auto-configure skipped ${erpEndpoint}:`, e?.message || e);
+    }
+  }
+
   const defaultEndpoint = "http://localhost:8788";
   try {
     const resp = await fetch(defaultEndpoint + "/api/auth/login", {
@@ -70,13 +94,20 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 // 在任意 Temu tab 上抓 page world stats（供心跳用）
 async function probePageStats() {
   try {
+    const jstOnceCapture = await getJushuitanOnceCaptureStatus();
+    const tabUrls = [
+      "https://agentseller.temu.com/*",
+      "https://agentseller-eu.temu.com/*",
+      "https://agentseller-us.temu.com/*",
+      "https://seller.kuajingmaihuo.com/*",
+      ...(jstOnceCapture.active ? [
+        "https://*.erp321.com/*",
+        "https://*.jushuitan.com/*",
+        "https://*.scm121.com/*",
+      ] : []),
+    ];
     const tabs = await chrome.tabs.query({
-      url: [
-        "https://agentseller.temu.com/*",
-        "https://agentseller-eu.temu.com/*",
-        "https://agentseller-us.temu.com/*",
-        "https://seller.kuajingmaihuo.com/*",
-      ],
+      url: tabUrls,
     });
     if (!tabs.length) return null;
     const tab = tabs.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
@@ -177,13 +208,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false; // 不需要响应
   }
 
+  if (msg.type === "START_JST_ONCE_CAPTURE") {
+    startJushuitanOnceCapture(msg).then((result) => sendResponse(result));
+    return true;
+  }
+
+  if (msg.type === "QUERY_JST_ONCE_CAPTURE") {
+    getJushuitanOnceCaptureStatus().then((result) => sendResponse(result));
+    return true;
+  }
+
   if (msg.type === "QUERY_STATUS") {
-    Promise.all([queueDepth(), getStorage([STATS_KEY, "cloud_endpoint", "auth_token"])])
-      .then(([depth, cfg]) => {
+    Promise.all([queueDepth(), getStorage([STATS_KEY, "cloud_endpoint", "auth_token"]), getJushuitanOnceCaptureStatus()])
+      .then(([depth, cfg, jstOnceCapture]) => {
         sendResponse({
           queueDepth: depth,
           stats: cfg[STATS_KEY] || {},
           configured: !!(cfg.cloud_endpoint && cfg.auth_token),
+          jstOnceCapture,
         });
       })
       .catch(() => sendResponse({ queueDepth: -1, stats: {}, configured: false }));
@@ -199,6 +241,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 async function handleCaptured(payload, sender) {
+  if (isJushuitanCapture(payload, sender)) {
+    const status = await getJushuitanOnceCaptureStatus();
+    if (!status.active) {
+      await bumpStats({ jst_ignored_count_delta: 1 });
+      return;
+    }
+  }
   // 注入店铺/账号上下文：从发送 tab 推断（mall_id 等需要从 cookie 或 userInfo 响应里拿，
   // M1 简单做：把 sender.tab.id / 域名 / 路径附上，云端再做归属推断）
   const enriched = {
@@ -212,6 +261,38 @@ async function handleCaptured(payload, sender) {
 }
 
 // ---------- 工具：storage / 累计统计 ----------
+function isJushuitanCapture(payload = {}, sender = {}) {
+  const haystack = [
+    payload.url,
+    payload.page,
+    payload.tab_url,
+    payload.site,
+    sender?.tab?.url,
+  ].map((value) => String(value || "").toLowerCase()).join(" ");
+  return /erp321\.com|jushuitan\.com|scm121\.com|jushuitan/.test(haystack);
+}
+
+async function startJushuitanOnceCapture(message = {}) {
+  const durationMs = Math.max(
+    60_000,
+    Math.min(Number(message.durationMs) || JST_ONCE_CAPTURE_WINDOW_MS, 30 * 60 * 1000),
+  );
+  const until = Date.now() + durationMs;
+  await setStorage({ [JST_ONCE_CAPTURE_KEY]: until });
+  return { ok: true, active: true, until, durationMs };
+}
+
+async function getJushuitanOnceCaptureStatus() {
+  const cfg = await getStorage([JST_ONCE_CAPTURE_KEY]);
+  const until = Number(cfg[JST_ONCE_CAPTURE_KEY] || 0);
+  const now = Date.now();
+  return {
+    active: Number.isFinite(until) && until > now,
+    until: Number.isFinite(until) ? until : 0,
+    remainingMs: Number.isFinite(until) ? Math.max(0, until - now) : 0,
+  };
+}
+
 function getStorage(keys) {
   return new Promise((resolve) => chrome.storage.local.get(keys, (v) => resolve(v || {})));
 }
@@ -229,6 +310,9 @@ async function bumpStats(patch) {
   if (patch.captured_count_delta) {
     cur.captured_count = (cur.captured_count || 0) + patch.captured_count_delta;
     cur.last_capture_at = Date.now();
+  }
+  if (patch.jst_ignored_count_delta) {
+    cur.jst_ignored_count = (cur.jst_ignored_count || 0) + patch.jst_ignored_count_delta;
   }
   if (patch.last_flush_at) cur.last_flush_at = patch.last_flush_at;
   if (patch.last_flush_result) cur.last_flush_result = patch.last_flush_result;

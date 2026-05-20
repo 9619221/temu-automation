@@ -17,6 +17,16 @@
   };
   const EVENT_NAME = WHITELIST_PAYLOAD.EVENT_NAME || "temu-monitor.captured";
 
+  function isJushuitanPage() {
+    return /(\.|^)erp321\.com$|(\.|^)jushuitan\.com$|(\.|^)scm121\.com$/i.test(location.hostname);
+  }
+
+  function hasOnceCaptureMarker() {
+    return /(?:[?#&]|^)temu-jst-collect-once(?:=1|&|$)|(?:[?#&]|^)tm_collect_once(?:=1|&|$)/i.test(
+      `${location.search || ""}${location.hash || ""}`,
+    );
+  }
+
   // ---------- 1. 注入 page world hook ----------
   // 不用 inline script（page CSP 通常拦），改用 chrome-extension URL + dataset 传配置：
   // hook.js 启动时读 document.currentScript.dataset.cfgB64 拿白名单
@@ -36,6 +46,14 @@
   }
 
   injectHook();
+
+  if (isJushuitanPage() && hasOnceCaptureMarker()) {
+    try {
+      chrome.runtime.sendMessage({ type: "START_JST_ONCE_CAPTURE", durationMs: 10 * 60 * 1000 }, () => {
+        void chrome.runtime.lastError;
+      });
+    } catch {}
+  }
 
   // ---------- 2. 异步从 SW 拉远端版本（可选） ----------
   try {

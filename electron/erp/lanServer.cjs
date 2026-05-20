@@ -30,6 +30,7 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/purchase": ["admin", "manager", "operations", "buyer", "finance"],
   "/api/purchase/workbench": ["admin", "manager", "operations", "buyer", "finance"],
   "/api/purchase/action": ["admin", "manager", "operations", "buyer", "finance"],
+  "/api/temu/sales-sync": ["admin", "manager", "operations"],
   "/warehouse": ["admin", "manager", "warehouse"],
   "/api/warehouse/workbench": ["admin", "manager", "warehouse"],
   "/api/warehouse/action": ["admin", "manager", "warehouse"],
@@ -230,7 +231,7 @@ function writeJson(res, statusCode, payload, headers = {}) {
     "Content-Length": Buffer.byteLength(body),
     "Cache-Control": "no-store",
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Device-Id",
     "X-Content-Type-Options": "nosniff",
     ...headers,
   });
@@ -258,12 +259,173 @@ function uploadRootDir() {
   return path.join(dataDir, "uploads");
 }
 
+function updateReleaseRootDir() {
+  const explicit = process.env.TEMU_UPDATE_RELEASES_DIR || process.env.ERP_UPDATE_RELEASES_DIR;
+  if (explicit) return path.resolve(explicit);
+  if (process.platform !== "win32") return "/opt/temu-updates/releases";
+
+  const appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+  const userDataDir = process.env.APP_USER_DATA || process.env.TEMU_USER_DATA || path.join(appData, "temu-automation");
+  const dataDir = process.env.ERP_DATA_DIR || process.env.ERP_DATA_PATH || path.join(userDataDir, "data");
+  return path.join(dataDir, "releases");
+}
+
 function imageContentType(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   if (ext === ".png") return "image/png";
   if (ext === ".webp") return "image/webp";
   if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
   return "application/octet-stream";
+}
+
+function updateReleaseContentType(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".yml" || ext === ".yaml") return "text/yaml; charset=utf-8";
+  if (ext === ".html") return "text/html; charset=utf-8";
+  if (ext === ".zip") return "application/zip";
+  return "application/octet-stream";
+}
+
+function updateReleaseCacheControl(filePath) {
+  return path.basename(filePath).toLowerCase() === "latest.yml"
+    ? "no-cache, no-store, must-revalidate"
+    : "public, max-age=31536000, immutable";
+}
+
+function parseHttpRange(rangeHeader, size) {
+  const match = String(rangeHeader || "").match(/^bytes=(\d*)-(\d*)$/);
+  if (!match) return null;
+  let start = match[1] === "" ? null : Number(match[1]);
+  let end = match[2] === "" ? null : Number(match[2]);
+
+  if (start === null && end === null) return null;
+  if (start === null) {
+    const suffixLength = end;
+    if (!Number.isFinite(suffixLength) || suffixLength <= 0) return null;
+    start = Math.max(size - suffixLength, 0);
+    end = size - 1;
+  } else {
+    if (!Number.isFinite(start) || start < 0) return null;
+    if (end === null || end >= size) end = size - 1;
+  }
+  if (!Number.isFinite(end) || start > end || start >= size) return null;
+  return { start, end };
+}
+
+function resolveUpdateReleasePath(pathname) {
+  const root = updateReleaseRootDir();
+  const relativePath = decodeURIComponent(pathname.replace(/^\/releases\/?/, ""));
+  if (!relativePath || relativePath.includes("\0")) return { root, target: null };
+  const resolvedRoot = path.resolve(root);
+  const target = path.resolve(resolvedRoot, relativePath);
+  if (target !== resolvedRoot && !target.startsWith(`${resolvedRoot}${path.sep}`)) {
+    return { root, target: null, forbidden: true };
+  }
+  return { root, target };
+}
+
+function renderUpdateReleaseIndex() {
+  const root = updateReleaseRootDir();
+  const latestPath = path.join(root, "latest.yml");
+  let installerName = "";
+  let version = "";
+  try {
+    const latest = fs.readFileSync(latestPath, "utf8");
+    version = latest.match(/^version:\s*(.+)$/m)?.[1]?.trim() || "";
+    installerName = latest.match(/^path:\s*(.+)$/m)?.[1]?.trim() || "";
+  } catch {}
+
+  const installerLink = installerName
+    ? `<a href="/releases/${encodeURIComponent(installerName)}">${escapeHtml(installerName)}</a>`
+    : "No installer has been published yet.";
+
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Temu 更新源</title>
+  <style>
+    body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; margin: 40px; color: #1f2329; }
+    code, a { word-break: break-all; }
+    .box { max-width: 760px; border: 1px solid #e5e7eb; border-radius: 10px; padding: 24px; }
+    .muted { color: #6b7280; }
+  </style>
+</head>
+<body>
+  <main class="box">
+    <h1>Temu 桌面端更新源</h1>
+    <p class="muted">客户端更新源地址：<code>https://erp.temu.chat/releases/</code></p>
+    <p>当前版本：<strong>${escapeHtml(version || "-")}</strong></p>
+    <p>安装包：${installerLink}</p>
+    <p><a href="/releases/latest.yml">latest.yml</a></p>
+  </main>
+</body>
+</html>`;
+}
+
+function serveUpdateReleaseFile(req, res, pathname) {
+  if (pathname === "/releases" || pathname === "/releases/") {
+    writeHtml(res, renderUpdateReleaseIndex());
+    return;
+  }
+
+  const { target, forbidden } = resolveUpdateReleasePath(pathname);
+  if (forbidden) {
+    writeText(res, 403, "Forbidden");
+    return;
+  }
+  if (!target) {
+    writeText(res, 404, "Not found");
+    return;
+  }
+
+  fs.stat(target, (statError, stat) => {
+    if (statError || !stat.isFile()) {
+      writeText(res, 404, "Not found");
+      return;
+    }
+
+    const baseHeaders = {
+      "Content-Type": updateReleaseContentType(target),
+      "Accept-Ranges": "bytes",
+      "Cache-Control": updateReleaseCacheControl(target),
+      "X-Content-Type-Options": "nosniff",
+    };
+    const range = parseHttpRange(req.headers.range, stat.size);
+    if (req.headers.range && !range) {
+      res.writeHead(416, {
+        ...baseHeaders,
+        "Content-Range": `bytes */${stat.size}`,
+      });
+      res.end();
+      return;
+    }
+
+    if (range) {
+      res.writeHead(206, {
+        ...baseHeaders,
+        "Content-Length": range.end - range.start + 1,
+        "Content-Range": `bytes ${range.start}-${range.end}/${stat.size}`,
+      });
+      if (req.method === "HEAD") {
+        res.end();
+        return;
+      }
+      fs.createReadStream(target, { start: range.start, end: range.end }).pipe(res);
+      return;
+    }
+
+    res.writeHead(200, {
+      ...baseHeaders,
+      "Content-Length": stat.size,
+    });
+    if (req.method === "HEAD") {
+      res.end();
+      return;
+    }
+    fs.createReadStream(target).pipe(res);
+  });
 }
 
 function serveUploadedFile(_req, res, pathname) {
@@ -1231,6 +1393,32 @@ function getRequestOrigin(req) {
   const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
   const proto = forwardedProto || (req.socket?.encrypted ? "https" : "http");
   return `${proto}://${host}`;
+}
+
+function getExtensionIngestToken() {
+  return String(
+    process.env.ERP_EXTENSION_INGEST_TOKEN
+      || process.env.TEMU_EXTENSION_INGEST_TOKEN
+      || "temu-jst-extension-v1"
+  ).trim();
+}
+
+function readBearerToken(req) {
+  const header = String(req.headers.authorization || "").trim();
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  return match ? match[1].trim() : String(req.headers["x-extension-token"] || "").trim();
+}
+
+function safeTokenEqual(left, right) {
+  const a = Buffer.from(String(left || ""));
+  const b = Buffer.from(String(right || ""));
+  return a.length === b.length && a.length > 0 && crypto.timingSafeEqual(a, b);
+}
+
+function isExtensionIngestAuthorized(req) {
+  const expected = getExtensionIngestToken();
+  const actual = readBearerToken(req);
+  return safeTokenEqual(actual, expected);
 }
 
 function buildLandingCards() {
@@ -2546,6 +2734,7 @@ function createRequestHandler(options = {}) {
   const performPurchaseAction = options.performPurchaseAction || (() => {
     throw new Error("Purchase action handler is not available");
   });
+  const db = options.db || null;
   const getWarehouseWorkbench = options.getWarehouseWorkbench || (() => ({
     summary: {},
     inboundReceipts: [],
@@ -2640,6 +2829,7 @@ function createRequestHandler(options = {}) {
     throw new Error("1688 message handler is not available");
   });
   const list1688PurchaseAccounts = options.list1688PurchaseAccounts || (() => ({ accounts: [] }));
+  const ingestJushuitanExtensionBatch = options.ingestJushuitanExtensionBatch || null;
   const validateSessionUser = options.validateSessionUser || null;
   const verifyLogin = options.verifyLogin || (() => null);
 
@@ -2648,6 +2838,7 @@ function createRequestHandler(options = {}) {
       req,
       res,
       getErpStatus,
+      db,
       getPurchaseWorkbench,
       performPurchaseAction,
       getWarehouseWorkbench,
@@ -2681,6 +2872,7 @@ function createRequestHandler(options = {}) {
       complete1688OAuth,
       refresh1688AccessToken,
       receive1688Message,
+      ingestJushuitanExtensionBatch,
       validateSessionUser,
       verifyLogin,
     }).catch((error) => {
@@ -3207,6 +3399,26 @@ async function handlePurchaseActionRequest({ req, res, session, performPurchaseA
   }
 }
 
+async function handleTemuSalesSyncRequest({ req, res, db }) {
+  if (req.method !== "POST") {
+    writeJson(res, 405, { ok: false, error: "Method not allowed" });
+    return;
+  }
+
+  try {
+    const payload = await readLoginPayload(req, 8 * 1024 * 1024);
+    const { TemuSalesBridge } = require("./services/temuSalesBridge.cjs");
+    const result = new TemuSalesBridge({ db }).sync(payload || {});
+    writeJson(res, 200, { ok: true, result });
+  } catch (error) {
+    writeJson(res, error?.statusCode || 400, {
+      ok: false,
+      error: error?.message || String(error),
+      code: error?.code || null,
+    });
+  }
+}
+
 async function handleWarehouseActionRequest({ req, res, session, performWarehouseAction }) {
   const wantsJson = String(req.headers.accept || "").includes("application/json")
     || String(req.headers["content-type"] || "").includes("application/json");
@@ -3339,10 +3551,50 @@ async function handleOutboundActionRequest({ req, res, session, performOutboundA
   }
 }
 
+async function handleExtensionIngestRequest({ req, res, pathname, ingestJushuitanExtensionBatch }) {
+  if (!isExtensionIngestAuthorized(req)) {
+    writeJson(res, 401, { ok: false, error: "Unauthorized" });
+    return;
+  }
+  if (pathname === "/api/ingest/v1/health") {
+    writeJson(res, 200, { ok: true, service: "temu-erp-extension-ingest", ts: Date.now() });
+    return;
+  }
+  if (pathname === "/api/ingest/v1/heartbeat") {
+    writeJson(res, 200, {
+      ok: true,
+      needs_reload: false,
+      reload_version: 0,
+      reconfig: null,
+      reconfig_version: 0,
+    });
+    return;
+  }
+  if (pathname !== "/api/ingest/v1/batch") {
+    writeJson(res, 404, { ok: false, error: "Not found" });
+    return;
+  }
+  if (req.method !== "POST") {
+    writeJson(res, 405, { ok: false, error: "Method not allowed" });
+    return;
+  }
+  if (typeof ingestJushuitanExtensionBatch !== "function") {
+    writeJson(res, 503, { ok: false, error: "Extension ingest is not available" });
+    return;
+  }
+  const payload = await readOptionalPayload(req, 25 * 1024 * 1024);
+  const result = await ingestJushuitanExtensionBatch(payload, {
+    role: "admin",
+    companyId: payload.companyId || payload.company_id || "company_default",
+  });
+  writeJson(res, 200, { ok: true, ...result });
+}
+
 async function handleRequest({
   req,
   res,
   getErpStatus,
+  db,
   getPurchaseWorkbench,
   performPurchaseAction,
   getWarehouseWorkbench,
@@ -3376,13 +3628,14 @@ async function handleRequest({
   complete1688OAuth,
   refresh1688AccessToken,
   receive1688Message,
+  ingestJushuitanExtensionBatch,
   validateSessionUser,
   verifyLogin,
 }) {
     if (req.method === "OPTIONS") {
       res.writeHead(204, {
         "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Device-Id",
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
         "X-Content-Type-Options": "nosniff",
       });
@@ -3431,6 +3684,11 @@ async function handleRequest({
       return;
     }
 
+    if (pathname === "/releases" || pathname.startsWith("/releases/")) {
+      serveUpdateReleaseFile(req, res, pathname);
+      return;
+    }
+
     if (pathname.startsWith("/uploads/")) {
       serveUploadedFile(req, res, pathname);
       return;
@@ -3443,6 +3701,16 @@ async function handleRequest({
         lan: getLanStatus(),
         erp: getErpStatus(),
         user: session?.user || null,
+      });
+      return;
+    }
+
+    if (pathname.startsWith("/api/ingest/v1/")) {
+      await handleExtensionIngestRequest({
+        req,
+        res,
+        pathname,
+        ingestJushuitanExtensionBatch,
       });
       return;
     }
@@ -3655,6 +3923,15 @@ async function handleRequest({
         res,
         session,
         performPurchaseAction,
+      });
+      return;
+    }
+
+    if (pathname === "/api/temu/sales-sync") {
+      await handleTemuSalesSyncRequest({
+        req,
+        res,
+        db,
       });
       return;
     }

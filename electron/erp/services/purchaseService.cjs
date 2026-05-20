@@ -82,12 +82,12 @@ class PurchaseService {
   }
 
   submitPaymentApproval(id, actor) {
-    // 采购"提交付款" → 「待审核」中间态;审核员(finance/manager/admin)通过后才进「待付款」。
+    // 采购「提交付款」→ 直接进「待付款」(approved_to_pay),没有审核环节。手工单和 1688 单都走这步。
     return this.workflow.transition({
       entityType: "purchase_order",
       id,
       action: "submit_payment_approval",
-      toStatus: PO.PENDING_FINANCE_APPROVAL,
+      toStatus: PO.APPROVED_TO_PAY,
       actor,
     });
   }

@@ -113,15 +113,6 @@ function statusLabel(status?: string) {
   return labels[status || ""] || status || "-";
 }
 
-function sourceLabel(source?: string | null) {
-  const labels: Record<string, string> = {
-    manual: "手动",
-    product_master_data: "商品资料",
-    purchase_center: "采购中心",
-  };
-  return labels[source || ""] || source || "-";
-}
-
 function storeAddressSummary(row: StoreAccountRow) {
   return [row.alibaba1688ProvinceText, row.alibaba1688CityText, row.alibaba1688AreaText, row.alibaba1688Address]
     .filter(Boolean)
@@ -584,7 +575,6 @@ export default function StoreManager({ onChanged }: StoreManagerProps) {
         );
       },
     },
-    { title: "来源", dataIndex: "source", key: "source", width: 120, render: sourceLabel },
     ...(canManageStoreAddress ? [{
       title: "操作",
       key: "actions",

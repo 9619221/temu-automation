@@ -28,6 +28,7 @@ import { ACTIVE_ACCOUNT_CHANGED_EVENT, readActiveAccountId } from "../../utils/m
 import { COLLECT_TASKS, useCollection } from "../../contexts/CollectionContext";
 import { useErpAuth } from "../../contexts/ErpAuthContext";
 import { canAccessRoute, roleLabel } from "../../utils/erpRoleAccess";
+import ExtensionInstallGuide from "../ExtensionInstallGuide";
 
 const { Content, Header, Sider } = Layout;
 
@@ -51,7 +52,10 @@ const menuItems = [
   {
     key: "group-data",
     label: "数据",
-    children: [{ key: "/collect", icon: <SyncOutlined />, label: "数据采集" }],
+    children: [
+      { key: "/collect", icon: <SyncOutlined />, label: "数据采集" },
+      { key: "/temu-robots", icon: <DatabaseOutlined />, label: "TEMU 机器人" },
+    ],
   },
   {
     key: "group-operations",
@@ -68,6 +72,7 @@ const menuItems = [
       { key: "/create-product", icon: <PlusCircleOutlined />, label: "上品管理" },
       { key: "/image-studio", icon: <PictureOutlined />, label: "AI 出图" },
       { key: "/image-studio-gpt", icon: <PictureOutlined />, label: "AI 生图 GPT 版" },
+      { key: "/auto-image-swap", icon: <PictureOutlined />, label: "批量替换图片" },
       { key: "/price-review", icon: <DollarOutlined />, label: "核价筛选" },
       { key: "/logs", icon: <FileTextOutlined />, label: "日志中心" },
     ],
@@ -441,6 +446,10 @@ export default function AppLayout() {
             </Button>
           </div>
         )}
+
+        {canUseCollection && location.pathname !== "/collect" ? (
+          <ExtensionInstallGuide variant="banner" />
+        ) : null}
 
         <Content
           className="app-layout-content"

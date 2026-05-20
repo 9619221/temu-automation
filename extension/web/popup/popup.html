@@ -2,14 +2,14 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <title>Temu 多店监控</title>
+  <title>采集助手</title>
   <style>
     body { width: 340px; margin: 0; padding: 14px; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 13px; color: #1f2328; }
     h1 { font-size: 14px; font-weight: 600; margin: 0 0 12px; }
-    .row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #eef0f3; }
+    .row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 6px 0; border-bottom: 1px solid #eef0f3; }
     .row:last-child { border-bottom: none; }
     .label { color: #57606a; }
-    .value { font-weight: 500; max-width: 180px; text-align: right; word-break: break-word; }
+    .value { font-weight: 500; max-width: 190px; text-align: right; word-break: break-word; }
     .ok { color: #1a7f37; }
     .err { color: #cf222e; }
     button { margin-top: 10px; width: 100%; padding: 8px; border: 1px solid #d0d7de; background: #f6f8fa; border-radius: 6px; cursor: pointer; font-size: 13px; }
@@ -18,27 +18,23 @@
     button.primary:hover { background: #0860ca; }
     .footer { margin-top: 10px; color: #8c959f; font-size: 11px; text-align: center; }
     .footer a { color: #0969da; text-decoration: none; cursor: pointer; }
-    .section-title { font-size: 11px; color: #57606a; text-transform: uppercase; letter-spacing: 0.5px; margin: 14px 0 4px; }
-    .mall-list { max-height: 100px; overflow-y: auto; border: 1px solid #eef0f3; border-radius: 4px; padding: 4px 6px; font-size: 11px; }
-    .mall-item { padding: 2px 0; border-bottom: 1px dashed #eef0f3; }
-    .mall-item:last-child { border-bottom: none; }
-    .empty { color: #8c959f; font-style: italic; padding: 4px; font-size: 11px; text-align: center; }
+    .hint { margin-top: 10px; padding: 8px; border-radius: 6px; background: #fff8c5; color: #57606a; font-size: 12px; line-height: 1.6; }
   </style>
 </head>
 <body>
-  <h1>Temu 多店监控</h1>
-  <div class="row"><span class="label">配置状态</span><span class="value" id="cfg">—</span></div>
-  <div class="row"><span class="label">已抓接口</span><span class="value" id="captured">—</span></div>
-  <div class="row"><span class="label">已上报</span><span class="value" id="sent">—</span></div>
-  <div class="row"><span class="label">待上报</span><span class="value" id="queue">—</span></div>
-  <div class="row"><span class="label">最近上报</span><span class="value" id="lastFlush">—</span></div>
-  <div class="row"><span class="label">最近结果</span><span class="value" id="lastResult">—</span></div>
+  <h1>浏览器采集助手</h1>
+  <div class="row"><span class="label">配置状态</span><span class="value" id="cfg">-</span></div>
+  <div class="row"><span class="label">已捕获接口</span><span class="value" id="captured">-</span></div>
+  <div class="row"><span class="label">已上报</span><span class="value" id="sent">-</span></div>
+  <div class="row"><span class="label">待上报</span><span class="value" id="queue">-</span></div>
+  <div class="row"><span class="label">最近上报</span><span class="value" id="lastFlush">-</span></div>
+  <div class="row"><span class="label">最近结果</span><span class="value" id="lastResult">-</span></div>
+  <div class="row"><span class="label">聚水潭本次采集</span><span class="value" id="jstOnce">未开启</span></div>
 
-  <div class="section-title">已识别店铺 (<span id="mallCount">0</span>)</div>
-  <div class="mall-list" id="mallList"><div class="empty">尚未识别到店铺，需要打开 Temu 后台首页让 userInfo 接口被拦截</div></div>
-
-  <button id="flushBtn" class="primary">立即上报</button>
+  <button id="jstOnceBtn" class="primary">开始本次聚水潭采集（10 分钟）</button>
+  <button id="flushBtn">立即上报</button>
   <button id="optBtn">打开设置</button>
+  <div class="hint">聚水潭不会长期采集。只有点“开始本次聚水潭采集”或使用带采集标记的链接打开页面后，10 分钟窗口内的数据才会入队。</div>
   <div class="footer"><a id="reload">重新读取状态</a></div>
   <script src="popup.js"></script>
 </body>

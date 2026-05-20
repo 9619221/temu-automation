@@ -32,10 +32,12 @@ const Settings = lazyWithPreload(() => import("./pages/Settings"));
 const ProductCreate = lazyWithPreload(() => import("./pages/ProductCreate"));
 const ImageStudio = lazyWithPreload(() => import("./pages/ImageStudio"));
 const ImageStudioGPT = lazyWithPreload(() => import("./pages/ImageStudioGPT"));
+const AutoImageSwap = lazyWithPreload(() => import("./pages/AutoImageSwap"));
 const Logs = lazyWithPreload(() => import("./pages/Logs"));
 const CompetitorAnalysis = lazyWithPreload(() => import("./pages/CompetitorAnalysis"));
 const PriceReview = lazyWithPreload(() => import("./pages/PriceReview"));
 const ErpDebug = lazyWithPreload(() => import("./pages/ErpDebug"));
+const TemuRobots = lazyWithPreload(() => import("./pages/TemuRobots"));
 const ProductMasterData = lazyWithPreload(() => import("./pages/ProductMasterData"));
 const PurchaseCenter = lazyWithPreload(() => import("./pages/PurchaseCenter"));
 const AlibabaMapping = lazyWithPreload(() => import("./pages/AlibabaMapping"));
@@ -253,7 +255,10 @@ function App() {
             <Route path="product-create" element={<Navigate to="/create-product" replace />} />
             <Route path="image-studio" element={<RoleRoute path="/image-studio"><ImageStudio /></RoleRoute>} />
             <Route path="image-studio-gpt" element={<RoleRoute path="/image-studio-gpt"><ImageStudioGPT /></RoleRoute>} />
+            <Route path="auto-image-swap" element={<RoleRoute path="/auto-image-swap"><AutoImageSwap /></RoleRoute>} />
             <Route path="collect" element={<RoleRoute path="/collect"><Dashboard /></RoleRoute>} />
+            <Route path="temu-robots" element={<RoleRoute path="/collect"><TemuRobots /></RoleRoute>} />
+            <Route path="jushuitan-import" element={<Navigate to="/product-master-data" replace />} />
             <Route path="accounts" element={<RoleRoute path="/accounts"><AccountManager /></RoleRoute>} />
             <Route path="tasks" element={<Navigate to="/work-items" replace />} />
             <Route path="competitor" element={<RoleRoute path="/competitor"><CompetitorAnalysis /></RoleRoute>} />

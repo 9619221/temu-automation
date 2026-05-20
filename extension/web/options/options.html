@@ -2,54 +2,52 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <title>Temu 多店监控 · 设置</title>
+  <title>采集助手设置</title>
   <style>
     body { max-width: 640px; margin: 32px auto; padding: 0 24px; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; color: #1f2328; }
     h1 { font-size: 18px; margin-bottom: 24px; }
     .field { margin-bottom: 20px; }
     label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
-    input[type=text], input[type=password], textarea {
+    input[type=text], input[type=password] {
       width: 100%; padding: 8px 10px; box-sizing: border-box;
       border: 1px solid #d0d7de; border-radius: 6px; font-size: 13px; font-family: inherit;
     }
-    input:focus, textarea:focus { outline: none; border-color: #0969da; box-shadow: 0 0 0 3px rgba(9,105,218,0.15); }
-    .hint { color: #57606a; font-size: 12px; margin-top: 4px; }
+    input:focus { outline: none; border-color: #0969da; box-shadow: 0 0 0 3px rgba(9,105,218,0.15); }
+    .hint { color: #57606a; font-size: 12px; margin-top: 4px; line-height: 1.6; }
     button { padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; border: 1px solid #d0d7de; background: #f6f8fa; }
     button.primary { background: #0969da; color: white; border-color: #0969da; }
-    button.primary:hover { background: #0860ca; }
     button.danger { background: #fff; color: #cf222e; border-color: #cf222e; }
-    .row { display: flex; gap: 8px; }
-    .info { background: #ddf4ff; border: 1px solid #54aeff; padding: 12px; border-radius: 6px; font-size: 12px; margin-bottom: 20px; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    .info { background: #ddf4ff; border: 1px solid #54aeff; padding: 12px; border-radius: 6px; font-size: 12px; margin-bottom: 20px; line-height: 1.7; }
     code { background: #f6f8fa; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
     .ok-banner { color: #1a7f37; margin-top: 8px; font-size: 13px; }
     .err-banner { color: #cf222e; margin-top: 8px; font-size: 13px; }
-    hr { border: none; border-top: 1px solid #eef0f3; margin: 28px 0; }
   </style>
 </head>
 <body>
-  <h1>Temu 多店监控 · 设置</h1>
+  <h1>采集助手设置</h1>
 
   <div class="info">
-    扩展会拦截 Temu 卖家后台请求，把白名单内的接口响应加入队列，每 30s 批量上报到下面的云端。
-    设备 ID 在首次安装时自动生成，用于云端识别同一台机器多次安装。
+    Temu 仍按现有队列上报；聚水潭不会长期抓取。只有在扩展弹窗点击“开始本次聚水潭采集”，或用
+    <code>#temu-jst-collect-once=1</code> 链接打开聚水潭时，10 分钟窗口内的聚水潭接口才会入队。
   </div>
 
   <div class="field">
-    <label for="cloud_endpoint">云端 Ingest URL</label>
-    <input type="text" id="cloud_endpoint" placeholder="https://your-cloud.example.com" value="http://localhost:8788" />
-    <div class="hint">扩展会向 <code>{URL}/api/ingest/v1/batch</code> 发 POST，body 是 <code>{items:[...]}</code></div>
+    <label for="cloud_endpoint">Ingest URL</label>
+    <input type="text" id="cloud_endpoint" placeholder="http://127.0.0.1:19380" />
+    <div class="hint">扩展会向 <code>{URL}/api/ingest/v1/batch</code> POST，body 为 <code>{items:[...]}</code>。</div>
   </div>
 
   <div class="field">
-    <label for="auth_token">访问 Token (JWT)</label>
-    <input type="password" id="auth_token" placeholder="ey..." />
-    <div class="hint">附在 <code>Authorization: Bearer {token}</code> 头里</div>
+    <label for="auth_token">访问 Token</label>
+    <input type="password" id="auth_token" placeholder="temu-jst-extension-v1" />
+    <div class="hint">附在 <code>Authorization: Bearer {token}</code> 请求头里。</div>
   </div>
 
   <div class="field">
     <label>设备 ID</label>
     <input type="text" id="device_id" readonly />
-    <div class="hint">只读，云端用它把同一物理机器的不同店铺归并</div>
+    <div class="hint">只读，用于服务端识别同一台机器。</div>
   </div>
 
   <div class="row">
@@ -58,13 +56,6 @@
     <button class="danger" id="purge">清空待上报队列</button>
   </div>
   <div id="banner"></div>
-
-  <hr />
-  <h2 style="font-size: 14px;">监控范围</h2>
-  <div class="hint">
-    URL 白名单与黑名单当前内置在 <code>web/background/hook-config.js</code>，热更下发会在 M3 阶段引入。
-    当前白名单覆盖 218 个接口（基于你浏览器中实测），其中 phantom / pftk / thtk 等反爬埋点路径在黑名单中，不上报。
-  </div>
   <script src="options.js"></script>
 </body>
 </html>

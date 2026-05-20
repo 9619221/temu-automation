@@ -30,6 +30,10 @@ export async function saveCloudConfig(cfg: CloudConsoleConfig): Promise<void> {
   });
 }
 
+export async function clearCloudConfig(): Promise<void> {
+  await window.electronAPI?.store?.set(STORE_KEY, null);
+}
+
 async function request<T = any>(cfg: CloudConsoleConfig, path: string, init?: RequestInit): Promise<T> {
   const url = cfg.endpoint.replace(/\/$/, "") + path;
   const r = await fetch(url, {
@@ -64,6 +68,26 @@ export interface SkcRow {
   last_updated_at: number;
 }
 
+export interface AgentHeartbeat {
+  id?: string;
+  device_id?: string | null;
+  device_uuid?: string | null;
+  user_agent?: string | null;
+  captured_count?: number | null;
+  total_sent?: number | null;
+  queue_depth?: number | null;
+  last_capture_url?: string | null;
+  last_capture_at?: number | null;
+  last_flush_at?: number | null;
+  last_flush_ok?: number | null;
+  last_flush_reason?: string | null;
+  hook_xhr_alive?: number | null;
+  hook_perf_seen?: number | null;
+  page_url?: string | null;
+  ts?: number | null;
+  received_at?: number | null;
+}
+
 export const fetchSkcList = (
   cfg: CloudConsoleConfig,
   params: { mall_id?: string; q?: string; limit?: number; offset?: number } = {},
@@ -77,4 +101,13 @@ export const fetchSkcList = (
     cfg,
     `/api/dashboard/skc?${qs.toString()}`,
   );
+};
+
+export const fetchAgentHeartbeats = (
+  cfg: CloudConsoleConfig,
+  params: { limit?: number } = {},
+) => {
+  const qs = new URLSearchParams();
+  qs.set("limit", String(params.limit || 120));
+  return request<AgentHeartbeat[]>(cfg, `/api/dashboard/agent?${qs.toString()}`);
 };

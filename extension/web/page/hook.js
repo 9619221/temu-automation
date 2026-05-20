@@ -34,10 +34,24 @@
     : null;
 
   function shouldCapture(url) {
-    if (!url || typeof url !== "string") return false;
-    if (blacklistRe && blacklistRe.test(url)) return false;
+    const fullUrl = toAbsoluteUrl(url);
+    if (!fullUrl || typeof fullUrl !== "string") return false;
+    if (blacklistRe && blacklistRe.test(fullUrl)) return false;
     if (!whitelistRe) return false;
-    return whitelistRe.test(url);
+    return whitelistRe.test(fullUrl);
+  }
+  function toAbsoluteUrl(url) {
+    try { return new URL(String(url || ""), location.href).href; } catch { return String(url || ""); }
+  }
+  function compactRequestBody(value) {
+    try {
+      if (typeof value === "string") return value.length > 200000 ? null : value;
+      if (value instanceof URLSearchParams) {
+        const text = value.toString();
+        return text.length > 200000 ? null : text;
+      }
+    } catch {}
+    return null;
   }
   function safeJson(text) { try { return JSON.parse(text); } catch { return null; } }
   function emit(payload) {
@@ -49,6 +63,9 @@
     } catch {}
   }
   function inferMallSite() {
+    if (/(\.|^)erp321\.com$|(\.|^)jushuitan\.com$|(\.|^)scm121\.com$/i.test(location.hostname)) {
+      return "jushuitan";
+    }
     const m = location.host.match(/agentseller(-eu|-us)?\.temu\.com|seller\.kuajingmaihuo\.com/);
     if (!m) return location.host;
     if (m[1] === "-eu") return "agentseller-eu";
@@ -65,7 +82,7 @@
     const _ts = Date.now();
     const origOpen = xhr.open;
     xhr.open = function (method, url) {
-      _url = url; _method = (method || "GET").toUpperCase();
+      _url = toAbsoluteUrl(url); _method = (method || "GET").toUpperCase();
       return origOpen.apply(this, arguments);
     };
     const origSetHdr = xhr.setRequestHeader;
@@ -75,6 +92,7 @@
     };
     const origSend = xhr.send;
     xhr.send = function () {
+      const requestBodyText = compactRequestBody(arguments[0]);
       stats.xhrSendTotal++;
       if (!_bypass && shouldCapture(_url)) {
         stats.xhrCaptureHit++;
@@ -85,6 +103,7 @@
             emit({
               kind: "xhr", url: _url, method: _method, status: xhr.status, ts: _ts,
               site: inferMallSite(), page: location.pathname,
+              requestBodyText,
               body: safeJson(text),
               bodyText: text.length > 200000 ? null : text,
               bodySize: text.length,
@@ -125,8 +144,9 @@
   function TrackedFetch(input, init) {
     if (init && init[BYPASS_SYM]) { stats.bypassHit++; return OrigFetch.apply(this, arguments); }
     let url = "";
-    try { url = typeof input === "string" ? input : (input && input.url) || ""; } catch {}
+    try { url = toAbsoluteUrl(typeof input === "string" ? input : (input && input.url) || ""); } catch {}
     const method = String((init && init.method) || (input && input.method) || "GET").toUpperCase();
+    const requestBodyText = compactRequestBody(init && init.body);
     stats.fetchSendTotal++;
     if (!shouldCapture(url)) return OrigFetch.apply(this, arguments);
     stats.fetchCaptureHit++;
@@ -140,6 +160,7 @@
             emit({
               kind: "fetch", url, method, status: resp.status, ts,
               site: inferMallSite(), page: location.pathname,
+              requestBodyText,
               body: safeJson(text),
               bodyText: text.length > 200000 ? null : text,
               bodySize: text.length,
@@ -186,7 +207,7 @@
   } catch {}
 
   window.__temuMonitor = {
-    version: "0.3.0",
+    version: "0.4.0",
     site: inferMallSite(),
     healthy: () => window.XMLHttpRequest === TrackedXHR && window.fetch === TrackedFetch,
     stats,
