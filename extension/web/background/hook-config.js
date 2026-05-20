@@ -12,6 +12,11 @@ export const URL_WHITELIST = [
   "/bg/quiet/api/mms/account/menu",
   "/api/merchant/agreement/not/sign/query",
 
+  // === Jushuitan ERP (capture real XHR/fetch responses, not visible table DOM) ===
+  "erp321.com/",
+  "jushuitan.com/",
+  "scm121.com/",
+
   // === 商品 / SKC / SKU ===
   "/visage-agent-seller/product/skc/pageQuery",
   "/visage-agent-seller/product/draft/pageQuery",
@@ -222,6 +227,9 @@ export const URL_BLACKLIST = [
   "/b/th",
   "/bert/api/page/info/",
   "/bg/quiet/api/titan/token/",
+  "/token/",
+  "/login",
+  "/logout",
   "/temu-sca-config/",
   "/bgb-sc-leo/",
   "/bgb-oversea-similar-common-main/",
