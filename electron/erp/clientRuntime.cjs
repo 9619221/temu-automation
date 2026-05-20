@@ -151,7 +151,7 @@ function requestJson(serverUrl, requestPath, options = {}) {
       port: url.port,
       path: `${url.pathname}${url.search}`,
       method: options.method || (body === null ? "GET" : "POST"),
-      timeout: Number(options.timeoutMs) || 8000,
+      timeout: Number(options.timeoutMs) || 30000,
       headers,
     }, (res) => {
       const chunks = [];

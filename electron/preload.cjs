@@ -221,6 +221,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   erp: {
     getStatus: () => ipcRenderer.invoke("erp:get-status"),
     runMigrations: () => ipcRenderer.invoke("erp:run-migrations"),
+    syncTemuSales: (payload) => ipcRenderer.invoke("erp:sync-temu-sales", payload || {}),
     getEnums: () => ipcRenderer.invoke("erp:get-enums"),
     client: {
       getStatus: () => ipcRenderer.invoke("erp:client:get-status"),
@@ -308,6 +309,33 @@ contextBridge.exposeInMainWorld("electronAPI", {
       start: (payload) => ipcRenderer.invoke("erp:lan:start", payload || {}),
       stop: () => ipcRenderer.invoke("erp:lan:stop"),
     },
+    jushuitan: {
+      getStatus: (params) => ipcRenderer.invoke("erp:jushuitan:get-status", params || {}),
+      saveSource: (payload) => ipcRenderer.invoke("erp:jushuitan:save-source", payload || {}),
+      importFile: (payload, options) => invokeWithTimeout(
+        "erp:jushuitan:import-file",
+        payload || {},
+        Number.isFinite(options?.timeoutMs) ? options.timeoutMs : 120000,
+      ),
+      openWebCollector: (payload, options) => invokeWithTimeout(
+        "erp:jushuitan:open-web-collector",
+        payload || {},
+        Number.isFinite(options?.timeoutMs) ? options.timeoutMs : 120000,
+      ),
+      collectWebPage: (payload, options) => invokeWithTimeout(
+        "erp:jushuitan:collect-web-page",
+        payload || {},
+        Number.isFinite(options?.timeoutMs) ? options.timeoutMs : 300000,
+      ),
+      closeWebCollector: (payload) => ipcRenderer.invoke("erp:jushuitan:close-web-collector", payload || {}),
+      syncOperational: (payload, options) => invokeWithTimeout(
+        "erp:jushuitan:sync-operational",
+        payload || {},
+        Number.isFinite(options?.timeoutMs) ? options.timeoutMs : 300000,
+      ),
+      listJobs: (params) => ipcRenderer.invoke("erp:jushuitan:list-jobs", params || {}),
+      listRaw: (params) => ipcRenderer.invoke("erp:jushuitan:list-raw", params || {}),
+    },
     diagnostics: {
       // 跑客户端到 1688 mtop 各端点的连通性 / 反爬探针，返回每步耗时和状态。
       // 用来定位「以图搜款」在用户家里宽带卡住的根因。
@@ -358,6 +386,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
     openExternal: (url) => ipcRenderer.invoke("app:open-external", url),
     readWorkflowPackLogs: (params) => ipcRenderer.invoke("app:read-workflow-pack-logs", params || {}),
     clearWorkflowPackLogs: () => ipcRenderer.invoke("app:clear-workflow-pack-logs"),
+  },
+
+  autoImageSwap: {
+    pickDir: (defaultPath) => ipcRenderer.invoke("auto-image-swap:pick-dir", defaultPath || ""),
+    run: (params) => invokeWithTimeout("auto-image-swap:run", params || {}, 24 * 60 * 60 * 1000),
+    getProgress: (taskId) => ipcRenderer.invoke("auto-image-swap:get-progress", taskId || ""),
   },
 
   onAutomationEvent: (callback) => {

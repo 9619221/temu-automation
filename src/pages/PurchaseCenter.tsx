@@ -404,6 +404,7 @@ interface Alibaba1688AddressRow {
   address?: string;
   addressId?: string | null;
   isDefault?: boolean;
+  purchase1688AccountId?: string | null;
 }
 
 interface Alibaba1688MessageSubscriptionRow {
@@ -1136,14 +1137,15 @@ function candidateSpecRows(candidate?: SourcingCandidateRow | null): BindingSpec
 }
 
 type PurchaseQueueKey =
-  | "all_orders"
-  | "pending_requests"
-  | "draft_orders"
-  | "pending_payment"
-  | "waiting_delivery"
-  | "waiting_inbound"
-  | "completed"
-  | "exceptions";
+  | "all"
+  | "request_pending_sourcing"
+  | "request_sourced"
+  | "po_draft"
+  | "po_pending_payment"
+  | "po_paid"
+  | "po_completed"
+  | "po_cancelled"
+  | "po_exception";
 
 interface PurchaseQueueItem {
   key: PurchaseQueueKey;
@@ -1153,12 +1155,8 @@ interface PurchaseQueueItem {
 }
 
 const ACTIVE_REQUEST_STATUSES = new Set(["submitted", "buyer_processing", "sourced", "waiting_ops_confirm"]);
-const DRAFT_ORDER_STATUSES = new Set(["draft", "pushed_pending_price"]);
 const PAYMENT_QUEUE_STATUSES = new Set(["pending_finance_approval", "approved_to_pay"]);
-const DELIVERY_QUEUE_STATUSES = new Set(["paid", "supplier_processing", "shipped"]);
-const INBOUND_QUEUE_STATUSES = new Set(["arrived"]);
 const COMPLETED_PO_STATUSES = new Set(["inbounded", "closed"]);
-const EXCEPTION_PO_STATUSES = new Set(["delayed", "exception", "cancelled"]);
 
 function isPendingPurchaseRequest(row: PurchaseRequestRow) {
   return ACTIVE_REQUEST_STATUSES.has(row.status);
@@ -1166,18 +1164,6 @@ function isPendingPurchaseRequest(row: PurchaseRequestRow) {
 
 function isPendingPaymentOrder(row: PurchaseOrderRow) {
   return PAYMENT_QUEUE_STATUSES.has(row.status);
-}
-
-function isWaitingDeliveryOrder(row: PurchaseOrderRow) {
-  return DELIVERY_QUEUE_STATUSES.has(row.status) && !isFullyReceived(row);
-}
-
-function isWaitingInboundOrder(row: PurchaseOrderRow) {
-  return INBOUND_QUEUE_STATUSES.has(row.status) || (
-    Number(row.totalQty || 0) > 0
-    && Number(row.receivedQty || 0) < Number(row.totalQty || 0)
-    && !["draft", "pushed_pending_price", "pending_finance_approval", "approved_to_pay", "cancelled", "closed", "inbounded"].includes(row.status)
-  );
 }
 
 function isFullyReceived(row: PurchaseOrderRow) {
@@ -1188,10 +1174,6 @@ function isFullyReceived(row: PurchaseOrderRow) {
 
 function isCompletedOrder(row: PurchaseOrderRow) {
   return COMPLETED_PO_STATUSES.has(row.status) || isFullyReceived(row);
-}
-
-function isExceptionOrder(row: PurchaseOrderRow) {
-  return EXCEPTION_PO_STATUSES.has(row.status);
 }
 
 function has1688OrderTrace(row?: PurchaseOrderRow | null) {
@@ -1474,7 +1456,9 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const initialWorkbench = getInitialPurchaseWorkbenchCache();
 
   // 不用缓存快照播种可见列表，避免进页面闪一下旧行；缓存仅保留给下拉选项。
-  const [data, setData] = useState<PurchaseWorkbench>({});
+  // 用 localStorage 缓存的 workbench 做初始值:含上次同步的 alibaba1688Addresses,
+  // 这样推单 Modal 切账号时能立即看到该账号已经同步过的地址,无需再触发自动同步。
+  const [data, setData] = useState<PurchaseWorkbench>(() => getInitialPurchaseWorkbenchCache());
   // 初始即 true：挂载首帧就进骨架，避免「空表格/计数 0」闪一帧后才进加载态。
   const [loading, setLoading] = useState(true);
   const [actingKey, setActingKey] = useState<string | null>(null);
@@ -1499,16 +1483,20 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     skuSearchTimerRef.current = window.setTimeout(async () => {
       setSkuSearching(true);
       try {
-        const list = await erp?.sku?.list?.({ search: term, limit: 50 });
+        const list = await erp?.sku?.list?.({ search: term, limit: 50, excludeJst: true } as any);
         if (seq !== skuSearchSeqRef.current) return;
         const rows: SkuOption[] = Array.isArray(list) ? list : [];
-        if (rows.length) {
-          setSkus((prev) => {
-            const map = new Map(prev.map((item) => [item.id, item]));
-            for (const row of rows) map.set(row.id, row);
-            return Array.from(map.values());
-          });
-        }
+        // 替换式：只显示当前搜索结果 + 已选中的项（防 Select tag 变 raw ID）
+        // 不再累积历史搜索结果，避免不相关 SKU 一直挂在下拉里
+        setSkus((prev) => {
+          const selectedIds: string[] = requestForm.getFieldValue("skuIds") || [];
+          const map = new Map<string, SkuOption>();
+          for (const row of rows) map.set(row.id, row);
+          for (const sku of prev) {
+            if (selectedIds.includes(sku.id) && !map.has(sku.id)) map.set(sku.id, sku);
+          }
+          return Array.from(map.values());
+        });
       } catch {
         /* 忽略搜索失败,沿用已加载选项 */
       } finally {
@@ -1557,9 +1545,26 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     defaultAccountId?: string | null;
     accounts: Array<{ id: string; label?: string | null; memberId?: string | null; appKey?: string; status?: string; configured?: boolean; authorized?: boolean }>;
   } | null>(null);
+  // 切账号时自动同步该账号的地址(每个账号本 Modal 周期内最多自动同步一次,避免循环)。
+  const pickerAutoSyncedRef = useRef<Set<string>>(new Set());
+  // 批量推 1688：按店铺分组，每组共用 1688 采购账号；地址全局共一份。
+  const [batchPushPicker, setBatchPushPicker] = useState<{
+    addressId: string | null;
+    groups: Array<{
+      accountId: string;
+      accountName: string;
+      pos: PurchaseOrderRow[];
+      selectedPurchaseAccountId: string | null;
+      defaultPurchaseAccountId: string | null;
+    }>;
+    accounts: Array<{ id: string; label?: string | null; configured?: boolean; authorized?: boolean; status?: string }>;
+    fallbackMode: boolean;
+    running: boolean;
+    progress: { done: number; total: number; ok: number; fail: number };
+  } | null>(null);
   const [importDialogOpen, setImportDialogOpen] = useState(false);
   const [imported1688Orders, setImported1688Orders] = useState<Imported1688OrderRow[]>([]);
-  const [activeQueueKey, setActiveQueueKey] = useState<PurchaseQueueKey>("all_orders");
+  const [activeQueueKey, setActiveQueueKey] = useState<PurchaseQueueKey>("all");
   const [purchaseSearchText, setPurchaseSearchText] = useState(() => {
     // 支持从 WarehouseCenter / 别的页面跳过来时带 ?focusPo=xxx 自动填到搜索框
     try {
@@ -1709,124 +1714,145 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     () => purchaseRequests.filter(isPendingPurchaseRequest),
     [purchaseRequests],
   );
-  const draftOrderRows = useMemo(
-    () => purchaseOrders.filter((row) => DRAFT_ORDER_STATUSES.has(row.status)),
+  // 7 个业务流 tab 用的分组：
+  // 待找品 / 已找品 是 PR 阶段；待确认 / 已确认未付款 / 已付款 / 已完成 是 PO 阶段。
+  const pendingSourcingRequestRows = useMemo(
+    () => purchaseRequests.filter((row) => row.status === "submitted" || row.status === "buyer_processing"),
+    [purchaseRequests],
+  );
+  const sourcedRequestRows = useMemo(
+    () => purchaseRequests.filter((row) => row.status === "sourced" || row.status === "waiting_ops_confirm"),
+    [purchaseRequests],
+  );
+  const draftOnlyOrderRows = useMemo(
+    () => purchaseOrders.filter((row) => row.status === "draft"),
     [purchaseOrders],
   );
+  // 已推 1688 但还没付款（含改价中、待财务审、已批待付）
+  const confirmedPendingPaymentOrderRows = useMemo(
+    () => purchaseOrders.filter((row) =>
+      row.status === "pushed_pending_price"
+      || row.status === "pending_finance_approval"
+      || row.status === "approved_to_pay",
+    ),
+    [purchaseOrders],
+  );
+  // 已付款到入库前的中间态全归这里
+  const paidOrderRows = useMemo(
+    () => purchaseOrders.filter((row) =>
+      row.status === "paid"
+      || row.status === "supplier_processing"
+      || row.status === "shipped"
+      || row.status === "arrived",
+    ),
+    [purchaseOrders],
+  );
+  // pendingPaymentRows 还被 PageHeader 顶部 meta 用着，保留不删
   const pendingPaymentRows = useMemo(
     () => purchaseOrders.filter(isPendingPaymentOrder),
-    [purchaseOrders],
-  );
-  const waitingDeliveryRows = useMemo(
-    () => purchaseOrders.filter(isWaitingDeliveryOrder),
-    [purchaseOrders],
-  );
-  const waitingInboundRows = useMemo(
-    () => purchaseOrders.filter(isWaitingInboundOrder),
     [purchaseOrders],
   );
   const completedOrderRows = useMemo(
     () => purchaseOrders.filter(isCompletedOrder),
     [purchaseOrders],
   );
+  const cancelledOrderRows = useMemo(
+    () => purchaseOrders.filter((row) => row.status === "cancelled"),
+    [purchaseOrders],
+  );
+  // 已取消 tab 是 mixed kind：PR 段含已取消+已驳回，PO 段含已取消
+  const cancelledRequestRows = useMemo(
+    () => purchaseRequests.filter((row) => row.status === "cancelled" || row.status === "rejected"),
+    [purchaseRequests],
+  );
+  // 异常 tab：仅 PO 的延期+异常状态
   const exceptionOrderRows = useMemo(
-    () => purchaseOrders.filter(isExceptionOrder),
+    () => purchaseOrders.filter((row) => row.status === "delayed" || row.status === "exception"),
     [purchaseOrders],
   );
 
   const queueItems = useMemo<PurchaseQueueItem[]>(() => [
-    {
-      key: "all_orders",
-      title: "全部待办",
-      count: pendingRequestRows.length + purchaseOrders.length,
-      kind: "mixed",
-    },
-    {
-      key: "pending_requests",
-      title: "待处理采购单",
-      count: pendingRequestRows.length,
-      kind: "request",
-    },
-    {
-      key: "draft_orders",
-      title: "待推单/改价",
-      count: draftOrderRows.length,
-      kind: "order",
-    },
-    {
-      key: "pending_payment",
-      title: "待付款",
-      count: pendingPaymentRows.length,
-      kind: "order",
-    },
-    {
-      key: "waiting_delivery",
-      title: "待发货",
-      count: waitingDeliveryRows.length,
-      kind: "order",
-    },
-    {
-      key: "waiting_inbound",
-      title: "待入库",
-      count: waitingInboundRows.length,
-      kind: "order",
-    },
-    {
-      key: "completed",
-      title: "已完成",
-      count: completedOrderRows.length,
-      kind: "order",
-    },
-    {
-      key: "exceptions",
-      title: "异常",
-      count: exceptionOrderRows.length,
-      kind: "order",
-    },
+    // 全部 = 活跃 PR（待找品+已找品）+ 全部 PO，确保跟各分类 tab 合计一致。
+    // converted_to_po 状态的 PR 不再显示，看它们变身后的 PO 即可。
+    { key: "all", title: "全部", count: pendingRequestRows.length + purchaseOrders.length, kind: "mixed" },
+    { key: "request_pending_sourcing", title: "待找品", count: pendingSourcingRequestRows.length, kind: "request" },
+    { key: "request_sourced", title: "已找品", count: sourcedRequestRows.length, kind: "request" },
+    { key: "po_draft", title: "待确认", count: draftOnlyOrderRows.length, kind: "order" },
+    { key: "po_pending_payment", title: "已确认未付款", count: confirmedPendingPaymentOrderRows.length, kind: "order" },
+    { key: "po_paid", title: "已付款", count: paidOrderRows.length, kind: "order" },
+    { key: "po_completed", title: "已完成", count: completedOrderRows.length, kind: "order" },
+    // 已取消是 mixed：PR(cancelled+rejected) + PO(cancelled) 上下两段
+    { key: "po_cancelled", title: "已取消", count: cancelledRequestRows.length + cancelledOrderRows.length, kind: "mixed" },
+    { key: "po_exception", title: "异常", count: exceptionOrderRows.length, kind: "order" },
   ], [
+    cancelledOrderRows,
+    cancelledRequestRows,
     completedOrderRows,
-    draftOrderRows,
+    confirmedPendingPaymentOrderRows,
+    draftOnlyOrderRows,
     exceptionOrderRows,
-    pendingPaymentRows,
+    paidOrderRows,
     pendingRequestRows,
+    pendingSourcingRequestRows,
     purchaseOrders,
-    waitingDeliveryRows,
-    waitingInboundRows,
+    sourcedRequestRows,
   ]);
 
   const activeQueue = queueItems.find((item) => item.key === activeQueueKey) || queueItems[0];
 
   const activeOrderRows = useMemo(() => {
     switch (activeQueueKey) {
-      case "draft_orders":
-        return draftOrderRows;
-      case "pending_payment":
-        return pendingPaymentRows;
-      case "waiting_delivery":
-        return waitingDeliveryRows;
-      case "waiting_inbound":
-        return waitingInboundRows;
-      case "completed":
+      case "po_draft":
+        return draftOnlyOrderRows;
+      case "po_pending_payment":
+        return confirmedPendingPaymentOrderRows;
+      case "po_paid":
+        return paidOrderRows;
+      case "po_completed":
         return completedOrderRows;
-      case "exceptions":
+      case "po_cancelled":
+        return cancelledOrderRows;
+      case "po_exception":
         return exceptionOrderRows;
       default:
+        // "all" 显示全部 PO；request 类 tab 走 order 表也兜底全部（实际不渲染）
         return purchaseOrders;
     }
   }, [
     activeQueueKey,
+    cancelledOrderRows,
     completedOrderRows,
-    draftOrderRows,
+    confirmedPendingPaymentOrderRows,
+    draftOnlyOrderRows,
     exceptionOrderRows,
-    pendingPaymentRows,
+    paidOrderRows,
     purchaseOrders,
-    waitingDeliveryRows,
-    waitingInboundRows,
   ]);
 
-  const activeRequestRows = activeQueueKey === "all_orders" || activeQueueKey === "pending_requests"
-    ? pendingRequestRows
-    : purchaseRequests;
+  const activeRequestRows = useMemo(() => {
+    switch (activeQueueKey) {
+      case "request_pending_sourcing":
+        return pendingSourcingRequestRows;
+      case "request_sourced":
+        return sourcedRequestRows;
+      case "all":
+        // "全部" 只显示活跃 PR（converted_to_po 已变身为 PO，看 PO 即可）
+        return pendingRequestRows;
+      case "po_cancelled":
+        // 已取消 tab 上段：被取消 + 被驳回的 PR
+        return cancelledRequestRows;
+      default:
+        // order 类 tab 走 request 表的兜底（实际不渲染）
+        return purchaseRequests;
+    }
+  }, [
+    activeQueueKey,
+    cancelledRequestRows,
+    pendingRequestRows,
+    pendingSourcingRequestRows,
+    purchaseRequests,
+    sourcedRequestRows,
+  ]);
 
   const filteredActiveRequestRows = useMemo(
     () => filterPurchaseRows(activeRequestRows, purchaseSearchText, buildPurchaseRequestSearchText),
@@ -1846,6 +1872,17 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const selectedPurchaseOrders = useMemo(
     () => purchaseOrders.filter((row) => selectedPoIds.includes(row.id)),
     [purchaseOrders, selectedPoIds],
+  );
+
+  // 批量推 1688 用：把"还能推"的单子筛出来。条件与单行 canPushTo1688（约 4099 行）一致。
+  const selectedPushableOrders = useMemo(
+    () => selectedPurchaseOrders.filter((row) =>
+      !row.externalOrderId
+      && canPurchase
+      && Number(row.mappingCount || 0) > 0
+      && Number(row.deliveryAddressCount || 0) > 0,
+    ),
+    [selectedPurchaseOrders, canPurchase],
   );
 
   const orderRowSelection = useMemo<TableRowSelection<PurchaseOrderRow>>(() => ({
@@ -1962,6 +1999,34 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     supplementalWorkbenchPromiseRef.current = promise;
     await promise;
   }, [applyWorkbench, syncWorkbenchOptions]);
+
+  // 推单 Modal:切到一个还没本地地址的 1688 账号时,自动触发一次同步,
+  // 用 pickerAutoSyncedRef 限制每个账号本周期最多自动同步一次,避免循环。
+  useEffect(() => {
+    if (!pushAccountPicker) {
+      pickerAutoSyncedRef.current = new Set();
+      return;
+    }
+    const acctId = pushAccountPicker.accountId;
+    if (!acctId || pickerAutoSyncedRef.current.has(acctId)) return;
+    const filtered = (data.alibaba1688Addresses || []).filter((a) => String((a as any).purchase1688AccountId || "") === acctId);
+    if (filtered.length > 0) return;
+    pickerAutoSyncedRef.current.add(acctId);
+    const poAcctId = pushAccountPicker.po.accountId;
+    (async () => {
+      try {
+        await erp?.purchase?.action?.({
+          action: "sync_1688_addresses",
+          accountId: poAcctId,
+          purchase1688AccountId: acctId,
+          includeWorkbench: false,
+        }, { timeoutMs: 120000 });
+        await loadSupplementalWorkbenchData();
+      } catch {
+        // 自动同步失败保持安静,用户可点 Alert 里的按钮手动重试
+      }
+    })();
+  }, [pushAccountPicker, data.alibaba1688Addresses, loadSupplementalWorkbenchData]);
 
   const loadData = useCallback(async (options: { silent?: boolean; withSupplemental?: boolean } = {}) => {
     if (!erp) return;
@@ -2229,8 +2294,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       } else if (isAddressFailure) {
         // 推单/预览撞到 1688 地址相关错误：后台静默 sync 一遍把失效地址打掉，
         // 错误提示里直接给出恢复指引；下一次推单用户重新选地址即可。
+        // 透传 purchase1688AccountId / accountId，让后端按本次实际推单的 1688 账号去拉地址，
+        // 而不是回落到公司默认账号——否则跨账号同步出来对不上号，失效地址清不掉。
         message.error(errorMessage || "1688 收货地址无效，请同步 1688 地址后重新选择");
-        void erp.purchase.action({ action: "sync_1688_addresses" })
+        const syncPayload: any = { action: "sync_1688_addresses" };
+        if ((payload as any).purchase1688AccountId) syncPayload.purchase1688AccountId = (payload as any).purchase1688AccountId;
+        if ((payload as any).accountId) syncPayload.accountId = (payload as any).accountId;
+        void erp.purchase.action(syncPayload)
           .then(async (syncResult: any) => {
             const summary = syncResult?.result || syncResult || {};
             const deactivated = Number(summary.deactivatedCount || 0);
@@ -2745,7 +2815,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         setDetailPrId(nextPr.id);
         setDetailDrawerOpen(true);
         setMinimizedImageSearchPrId(null);
-        setActiveQueueKey("pending_requests");
+        setActiveQueueKey("all");
       }
       if (!silent) message.success(beginPage > 1 ? `已追加 ${importedCount} 个候选` : `已导入 ${importedCount} 个候选`);
     }
@@ -2836,7 +2906,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         setDetailPrId(nextPr.id);
         setDetailDrawerOpen(true);
         setMinimizedImageSearchPrId(null);
-        setActiveQueueKey("pending_requests");
+        setActiveQueueKey("all");
       }
       setSelectedInquiryCandidateIds([]);
     } else {
@@ -3065,11 +3135,9 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     return result;
   };
 
-  // 推送1688下单流程：
-  //  - 没地址 → 直接走 push（后端报缺地址错误）
-  //  - 只有 1 个地址 → 直接用，不弹 Modal（少一步点击）
-  //  - 有默认地址 + 多地址 → 直接用默认地址，不弹 Modal
-  //  - 有多个无默认 → 弹 Modal 让用户选
+  // 推送1688下单流程（按用户要求：每次都让我选，不再走"有默认就跳过"的捷径）：
+  //  - 没地址 → 直接走 push（后端报缺地址错误，引导去同步）
+  //  - 否则一律弹 Modal 让用户挑收货地址；默认/单地址只做预选不绕过
   // purchase1688AccountId 由前置的 1688 采购账号选择流程决定。
   const startPush1688Order = (row: PurchaseOrderRow, purchase1688AccountId?: string) => {
     const addresses = data.alibaba1688Addresses || [];
@@ -3077,16 +3145,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       void push1688Order(row, { purchase1688AccountId });
       return;
     }
-    if (addresses.length === 1) {
-      void push1688Order(row, { deliveryAddressId: addresses[0].id, purchase1688AccountId });
-      return;
-    }
-    const def = addresses.find((a) => a.isDefault);
-    if (def) {
-      void push1688Order(row, { deliveryAddressId: def.id, purchase1688AccountId });
-      return;
-    }
-    setPushAddressPicker({ po: row, addressId: addresses[0].id, purchase1688AccountId });
+    const preselect = (addresses.find((a) => a.isDefault) || addresses[0]).id;
+    setPushAddressPicker({ po: row, addressId: preselect, purchase1688AccountId });
   };
 
   // 入口：先解决「用哪个 1688 采购账号推单」，再走 startPush1688Order
@@ -3135,11 +3195,15 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       // 拉店铺失败不致命，回落到弹窗选
     }
     const validDefaultId = defaultId && active.find((a) => a.id === defaultId) ? defaultId : null;
-    const addresses = data.alibaba1688Addresses || [];
-    const defaultAddress = addresses.find((addr) => addr.isDefault) || addresses[0] || null;
+    const initialAcctId = validDefaultId || active[0].id;
+    // 初始地址必须按选中的 1688 买家账号过滤,避免落到别的 buyer 的地址(推单时 1688 报 ADDRESS_ID_INVALID)
+    const filteredForBuyer = (data.alibaba1688Addresses || []).filter(
+      (addr) => String((addr as any).purchase1688AccountId || "") === initialAcctId,
+    );
+    const defaultAddress = filteredForBuyer.find((addr) => addr.isDefault) || filteredForBuyer[0] || null;
     setPushAccountPicker({
       po: row,
-      accountId: validDefaultId || active[0].id,
+      accountId: initialAcctId,
       addressId: defaultAddress?.id || null,
       defaultAccountId: validDefaultId,
       accounts: active,
@@ -3171,6 +3235,115 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     }, "1688 批量支付链接已同步");
     const paymentUrl = get1688PaymentUrlFromResult(result);
     if (paymentUrl) await openExternalUrl(paymentUrl);
+  };
+
+  // 批量推 1688：按店铺分组，每组共用 1688 采购账号；地址全局共一份。
+  // 串行执行（避免账号撞频被风控）；推完不自动关 Modal，让用户看汇总。
+  const openBatchPush1688Picker = async () => {
+    if (!erp) return;
+    if (!selectedPushableOrders.length) {
+      message.warning("没有可推送 1688 的采购单（要求：未推过、有 1688 映射、有收货地址）");
+      return;
+    }
+
+    let activeAccounts: Array<{ id: string; label?: string | null; status?: string; configured?: boolean; authorized?: boolean }> = [];
+    let fallbackMode = false;
+    try {
+      const listResult: any = await erp.purchase.action({ action: "list_1688_purchase_accounts" });
+      const all = (listResult?.result?.accounts || []) as typeof activeAccounts;
+      activeAccounts = all.filter((a) => a.status !== "disabled" && a.configured && a.authorized);
+      if (!activeAccounts.length) {
+        message.error("还没有可用的 1688 采购账号，请到「设置 → 1688 授权管理」绑定");
+        return;
+      }
+    } catch (error: any) {
+      const msg = String(error?.message || "");
+      if (/Unsupported purchase action|unsupported.*action|不支持.*操作/i.test(msg)) {
+        // 旧版主控不返回账号列表，回落到 company 默认 1688 凭据
+        fallbackMode = true;
+      } else {
+        message.error(msg || "读取 1688 采购账号失败");
+        return;
+      }
+    }
+
+    // 拉店铺列表拿每个店铺的默认 1688 账号；失败不致命，让用户手选
+    const shopDefaultAccountMap = new Map<string, string | null>();
+    try {
+      const accountList = await erp.account.list({ limit: 500 });
+      (Array.isArray(accountList) ? accountList : []).forEach((acct: any) => {
+        shopDefaultAccountMap.set(String(acct.id), acct.default1688PurchaseAccountId || null);
+      });
+    } catch {
+      // 拉店铺失败 → defaultPurchaseAccountId 留空
+    }
+
+    const groupMap = new Map<string, { accountId: string; accountName: string; pos: PurchaseOrderRow[] }>();
+    for (const po of selectedPushableOrders) {
+      const key = String(po.accountId || "");
+      const name = po.accountName || "未关联店铺";
+      if (!groupMap.has(key)) groupMap.set(key, { accountId: key, accountName: name, pos: [] });
+      groupMap.get(key)!.pos.push(po);
+    }
+
+    const groups = Array.from(groupMap.values()).map((g) => {
+      const defaultId = shopDefaultAccountMap.get(g.accountId) || null;
+      const validDefault = !fallbackMode && defaultId && activeAccounts.find((a) => a.id === defaultId)
+        ? defaultId
+        : null;
+      return {
+        accountId: g.accountId,
+        accountName: g.accountName,
+        pos: g.pos,
+        selectedPurchaseAccountId: fallbackMode ? null : (validDefault || activeAccounts[0]?.id || null),
+        defaultPurchaseAccountId: validDefault,
+      };
+    });
+
+    const addresses = data.alibaba1688Addresses || [];
+    const defaultAddress = addresses.find((a) => a.isDefault) || addresses[0] || null;
+
+    setBatchPushPicker({
+      addressId: defaultAddress?.id || null,
+      groups,
+      accounts: activeAccounts,
+      fallbackMode,
+      running: false,
+      progress: { done: 0, total: selectedPushableOrders.length, ok: 0, fail: 0 },
+    });
+  };
+
+  const runBatchPush1688 = async () => {
+    if (!batchPushPicker) return;
+    if (!batchPushPicker.fallbackMode) {
+      const missing = batchPushPicker.groups.find((g) => !g.selectedPurchaseAccountId);
+      if (missing) {
+        message.warning(`店铺「${missing.accountName}」还没选 1688 采购账号`);
+        return;
+      }
+    }
+    setBatchPushPicker((prev) => prev ? { ...prev, running: true, progress: { ...prev.progress, done: 0, ok: 0, fail: 0 } } : prev);
+    let ok = 0;
+    let fail = 0;
+    const addressId = batchPushPicker.addressId || undefined;
+    for (const group of batchPushPicker.groups) {
+      for (const po of group.pos) {
+        const result = await push1688Order(po, {
+          purchase1688AccountId: group.selectedPurchaseAccountId || undefined,
+          ...(addressId ? { deliveryAddressId: addressId } : {}),
+        });
+        if (result) ok += 1; else fail += 1;
+        setBatchPushPicker((prev) => prev ? { ...prev, progress: { ...prev.progress, done: prev.progress.done + 1, ok, fail } } : prev);
+      }
+    }
+    setBatchPushPicker((prev) => prev ? { ...prev, running: false } : prev);
+    if (fail === 0) {
+      message.success(`批量推送完成：成功 ${ok} 单`);
+    } else {
+      message.warning(`批量推送完成：成功 ${ok} 单 / 失败 ${fail} 单（失败详情见单条提示）`);
+    }
+    void loadData();
+    setSelectedPoIds([]);
   };
 
   // 一键 1688 支付：先调 API 拿付款 URL，拿到就走系统默认浏览器（默认全屏 / 用户上次的窗口状态）；
@@ -3534,7 +3707,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     const existingPo = purchaseOrders.find((item) => purchaseOrderBelongsToRequest(item, row.id));
     if (row.status === "converted_to_po" || existingPo) {
       if (existingPo) {
-        setActiveQueueKey("all_orders");
+        setActiveQueueKey("po_draft");
         setPurchaseSearchText(existingPo.poNo || existingPo.id);
       }
       message.info(existingPo ? `采购单已生成：${existingPo.poNo || existingPo.id}` : "采购单已生成，请刷新后查看采购单列表");
@@ -3554,7 +3727,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     }
     if (result?.result?.alreadyGenerated) {
       if (generatedPo?.id) {
-        setActiveQueueKey("all_orders");
+        setActiveQueueKey("po_draft");
         setPurchaseSearchText(generatedPo.poNo || generatedPo.id);
       }
       message.info(generatedPo?.id ? `采购单已生成：${generatedPo.poNo || generatedPo.id}` : "采购单已生成，请刷新后查看采购单列表");
@@ -3762,18 +3935,6 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         const canDelete = canCreateRequest && ["submitted", "buyer_processing", "sourced"].includes(row.status);
         return (
           <div className="purchase-action-grid">
-            {/* 已删除"接单"环节：运营提交后 PR 直接进入采购处理中。
-                历史数据若仍处于 submitted，下面的兜底按钮提供手工接单入口。 */}
-            {row.status === "submitted" && canPurchase ? (
-              <Button
-                size="small"
-                icon={<ShoppingCartOutlined />}
-                loading={actingKey === `accept-${row.id}`}
-                onClick={() => runAction(`accept-${row.id}`, { action: "accept_pr", prId: row.id }, "已接收采购单")}
-              >
-                接收（历史）
-              </Button>
-            ) : null}
             {SHOW_KEYWORD_1688_SOURCE && canFindSupplier ? (
               <Button
                 size="small"
@@ -3810,7 +3971,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 size="small"
                 icon={<FileDoneOutlined />}
                 onClick={() => {
-                  setActiveQueueKey("all_orders");
+                  setActiveQueueKey("po_draft");
                   setPurchaseSearchText(existingPo?.poNo || existingPo?.id || row.id);
                   message.info(existingPo ? `采购单已生成：${existingPo.poNo || existingPo.id}` : "采购单已生成");
                 }}
@@ -4457,6 +4618,15 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 同步询盘结果
               </Button>
             ) : null}
+            {canPurchase ? (
+              <Button
+                icon={<ShoppingCartOutlined />}
+                disabled={!selectedPushableOrders.length}
+                onClick={() => void openBatchPush1688Picker()}
+              >
+                批量推送 1688{selectedPushableOrders.length ? ` (${selectedPushableOrders.length})` : ""}
+              </Button>
+            ) : null}
             {(canPurchase || canFinance) ? (
               <Button
                 icon={<LinkOutlined />}
@@ -4504,10 +4674,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         {tableLoading ? (
           <Skeleton active paragraph={{ rows: 8 }} title={false} style={{ padding: "12px 0" }} />
         ) : activeQueue.kind === "mixed" ? (
+          // "全部" tab：上下两段表同屏排列，空段不显示
           <Space direction="vertical" size={16} style={{ width: "100%" }}>
             {filteredActiveRequestRows.length ? (
               <div>
-                <Text strong>待处理</Text>
+                <Text strong>采购请求 {filteredActiveRequestRows.length}</Text>
                 <Table
                   rowKey="id"
                   loading={tableLoading}
@@ -4523,7 +4694,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
             ) : null}
             {filteredActiveOrderRows.length ? (
               <div>
-                <Text strong>采购单</Text>
+                <Text strong>采购单 {filteredActiveOrderRows.length}</Text>
                 <Table
                   rowKey="id"
                   loading={tableLoading}
@@ -4666,11 +4837,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               return (
                 <div
                   key={acct.id}
-                  onClick={() => setPushAccountPicker((prev) => prev ? { ...prev, accountId: acct.id } : null)}
+                  onClick={() => setPushAccountPicker((prev) => { if (!prev) return null; const matched = (data.alibaba1688Addresses || []).filter((a) => String((a as any).purchase1688AccountId || "") === acct.id); const nextAddrId = matched.find((a) => a.isDefault)?.id || matched[0]?.id || null; return { ...prev, accountId: acct.id, addressId: nextAddrId }; })}
                   onKeyDown={(event) => {
                     if (event.key === "Enter" || event.key === " ") {
                       event.preventDefault();
-                      setPushAccountPicker((prev) => prev ? { ...prev, accountId: acct.id } : null);
+                      setPushAccountPicker((prev) => { if (!prev) return null; const matched = (data.alibaba1688Addresses || []).filter((a) => String((a as any).purchase1688AccountId || "") === acct.id); const nextAddrId = matched.find((a) => a.isDefault)?.id || matched[0]?.id || null; return { ...prev, accountId: acct.id, addressId: nextAddrId }; });
                     }
                   }}
                   role="button"
@@ -4717,9 +4888,9 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               );
             })}
 
-            <Text strong style={{ fontSize: 14, marginTop: 6 }}>收货地址</Text>
-            {(data.alibaba1688Addresses || []).length ? (
-              (data.alibaba1688Addresses || []).map((addr, index) => {
+            <Text strong style={{ fontSize: 14, marginTop: 6 }}>收货地址(该 1688 账号同步过来的)</Text>
+            {((data.alibaba1688Addresses || []).filter((a) => String((a as any).purchase1688AccountId || "") === pushAccountPicker.accountId)).length ? (
+              (data.alibaba1688Addresses || []).filter((a) => String((a as any).purchase1688AccountId || "") === pushAccountPicker.accountId).map((addr, index) => {
                 const selected = addr.id === pushAccountPicker.addressId;
                 const display = addr.fullName || addr.label || `收货地址 ${index + 1}`;
                 return (
@@ -4781,10 +4952,154 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               <Alert
                 type="warning"
                 showIcon
-                message="暂无可选收货地址"
-                description="请先维护收货信息后再下单。"
+                message="该 1688 账号下还没同步过地址"
+                description={(
+                  <Space direction="vertical" size={6}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      点下面按钮从 1688 拉一次该买家账号的地址簿,完成后再选地址点「确认使用」。
+                    </Text>
+                    <Button
+                      size="small"
+                      type="primary"
+                      onClick={async () => {
+                        if (!erp || !pushAccountPicker) return;
+                        try {
+                          const r: any = await erp.purchase.action({
+                            action: "sync_1688_addresses",
+                            accountId: pushAccountPicker.po.accountId,
+                            purchase1688AccountId: pushAccountPicker.accountId,
+                            includeWorkbench: false,
+                          }, { timeoutMs: 120000 });
+                          const n = Number(r?.result?.addressCount || 0);
+                          await loadSupplementalWorkbenchData();
+                          if (n > 0) message.success(`已同步 ${n} 条地址`);
+                          else message.warning("1688 没返回地址数据,请先在 1688 后台维护好该账号的收货地址(work.1688.com → 个人中心 → 收货地址簿)");
+                        } catch (e: any) {
+                          message.error(e?.message || "1688 地址同步失败");
+                        }
+                      }}
+                    >
+                      从该账号同步地址
+                    </Button>
+                  </Space>
+                )}
               />
             )}
+          </Space>
+        ) : null}
+      </Modal>
+
+      <Modal
+        open={!!batchPushPicker}
+        title={(
+          <Space direction="vertical" size={2}>
+            <Text strong style={{ fontSize: 18 }}>批量推送 1688</Text>
+            {batchPushPicker ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                共 {batchPushPicker.progress.total} 单 · 按店铺分组 {batchPushPicker.groups.length} 组
+                {batchPushPicker.fallbackMode ? "（主控不支持多账号，将用 company 默认 1688 凭据推送）" : ""}
+              </Text>
+            ) : null}
+          </Space>
+        )}
+        okText={batchPushPicker?.running
+          ? `推送中 ${batchPushPicker.progress.done}/${batchPushPicker.progress.total}`
+          : "开始批量推送"}
+        cancelText="取消"
+        confirmLoading={!!batchPushPicker?.running}
+        okButtonProps={{ disabled: !batchPushPicker?.groups.length }}
+        width={760}
+        maskClosable={false}
+        onCancel={() => {
+          if (batchPushPicker?.running) {
+            message.info("正在推送中，请等一会儿");
+            return;
+          }
+          setBatchPushPicker(null);
+        }}
+        onOk={() => void runBatchPush1688()}
+        destroyOnClose
+      >
+        {batchPushPicker ? (
+          <Space direction="vertical" size={14} style={{ width: "100%" }}>
+            {batchPushPicker.progress.done > 0 ? (
+              <div style={{ padding: "8px 12px", background: "#f9fafb", border: "1px solid #e5e9f0", borderRadius: 8, fontSize: 13 }}>
+                已推送 {batchPushPicker.progress.done}/{batchPushPicker.progress.total}
+                {" · 成功 "}<Text strong style={{ color: "#16a34a" }}>{batchPushPicker.progress.ok}</Text>
+                {" · 失败 "}<Text strong style={{ color: "#dc2626" }}>{batchPushPicker.progress.fail}</Text>
+              </div>
+            ) : null}
+
+            <div>
+              <Text strong style={{ fontSize: 14 }}>收货地址（所有组共用）</Text>
+              <div style={{ marginTop: 8 }}>
+                {(data.alibaba1688Addresses || []).length ? (
+                  <Select
+                    style={{ width: "100%" }}
+                    value={batchPushPicker.addressId || undefined}
+                    onChange={(value) => setBatchPushPicker((prev) => prev ? { ...prev, addressId: value || null } : prev)}
+                    placeholder="选收货地址"
+                    options={(data.alibaba1688Addresses || []).map((addr) => ({
+                      value: addr.id,
+                      label: `${addr.fullName || addr.label || addr.id}${addr.isDefault ? "（默认）" : ""}`,
+                    }))}
+                    disabled={batchPushPicker.running}
+                  />
+                ) : (
+                  <Text type="secondary" style={{ fontSize: 12 }}>当前没有 1688 收货地址，将由后端默认逻辑兜底（可能直接报错）。</Text>
+                )}
+              </div>
+            </div>
+
+            <div>
+              <Text strong style={{ fontSize: 14 }}>按店铺分组（{batchPushPicker.groups.length} 组）</Text>
+            </div>
+
+            {batchPushPicker.groups.map((group) => (
+              <div
+                key={group.accountId || "unknown"}
+                style={{
+                  padding: "12px 14px",
+                  border: "1px solid #e5e9f0",
+                  borderRadius: 10,
+                  background: "#fff",
+                }}
+              >
+                <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                  <Space size={8} wrap>
+                    <Text strong style={{ fontSize: 14 }}>{group.accountName}</Text>
+                    <Tag>共 {group.pos.length} 单</Tag>
+                  </Space>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {group.pos.slice(0, 3).map((po) => po.poNo || po.id).join("、")}
+                    {group.pos.length > 3 ? ` 等 ${group.pos.length} 单` : ""}
+                  </Text>
+                  {batchPushPicker.fallbackMode ? (
+                    <Text type="secondary" style={{ fontSize: 12 }}>使用 company 默认 1688 凭据（旧版主控）</Text>
+                  ) : (
+                    <Select
+                      style={{ width: "100%" }}
+                      value={group.selectedPurchaseAccountId || undefined}
+                      onChange={(value) => setBatchPushPicker((prev) => {
+                        if (!prev) return prev;
+                        return {
+                          ...prev,
+                          groups: prev.groups.map((item) => item.accountId === group.accountId
+                            ? { ...item, selectedPurchaseAccountId: value || null }
+                            : item),
+                        };
+                      })}
+                      placeholder="选 1688 采购账号"
+                      options={batchPushPicker.accounts.map((acct) => ({
+                        value: acct.id,
+                        label: `${acct.label || acct.id}${acct.id === group.defaultPurchaseAccountId ? "（店铺默认）" : ""}`,
+                      }))}
+                      disabled={batchPushPicker.running}
+                    />
+                  )}
+                </Space>
+              </div>
+            ))}
           </Space>
         ) : null}
       </Modal>
