@@ -44,3 +44,10 @@ tmp-*.cmd
 tmp_*.cjs
 worker.mjs
 extension/dist/
+
+# 5-20 阶段补充：本地数据库 / 调试日志 / 抓包文本 / codex tmp
+/data/
+/backups/
+/logs/
+.temu_partner_*.txt
+.codex-tmp-*
