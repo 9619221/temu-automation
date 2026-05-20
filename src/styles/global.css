@@ -2176,6 +2176,10 @@ body {
   color: var(--color-text);
 }
 
+.extension-install-guide__body {
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 0.48fr);
+}
+
 .app-two-column {
   display: grid;
   grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
@@ -2623,6 +2627,10 @@ body {
   .app-toolbar__count {
     text-align: left;
     justify-self: start;
+  }
+
+  .extension-install-guide__body {
+    grid-template-columns: 1fr;
   }
 
   .metric-strip {

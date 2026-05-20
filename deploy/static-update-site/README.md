@@ -4,8 +4,8 @@
 
 ## 当前打包版本
 
-- 版本：`0.2.19`
-- 安装包：`releases/temu-automation-setup-0.2.19.exe`
+- 版本：`0.3.9`
+- 安装包：`releases/temu-automation-setup-0.3.9.exe`
 
 ## 目录说明
 
@@ -23,7 +23,7 @@
 不要填首页地址，客户端应填写：
 
 ```text
-https://your-domain.com/releases/
+https://erp.temu.chat/releases/
 ```
 
 ## 部署方法

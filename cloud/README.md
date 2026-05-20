@@ -20,6 +20,7 @@
 | `GET /api/hook/v1/inject.js` | ✓ | 扩展拉远端 page world hook（带 ETag） |
 | `GET /api/hook/v1/config` | ✓ | 白名单/黑名单 JSON |
 | `GET /api/dashboard/stats` | ✓ | 总览 |
+| `GET /api/dashboard/agent` | ✓ | 扩展心跳 / 安装状态 |
 | `GET /api/dashboard/events` | ✓ | 时序事件查询 |
 | `GET /api/dashboard/event/:id/body` | ✓ | 单条原始 body |
 

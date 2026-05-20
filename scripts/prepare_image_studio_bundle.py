@@ -23,6 +23,16 @@ if (!fs.existsSync(packagedNodeModules) && fs.existsSync(legacyRuntimeNodeModule
   } catch {}
 }
 
+const originalEmitWarning = process.emitWarning.bind(process);
+process.emitWarning = function patchedEmitWarning(warning, type, code, ...args) {
+  const warningCode = code || (warning && warning.code) || "";
+  const warningText = typeof warning === "string" ? warning : String(warning?.message || warning || "");
+  if (warningCode === "DEP0169" || (type === "DeprecationWarning" && warningText.includes("url.parse()"))) {
+    return;
+  }
+  return originalEmitWarning(warning, type, code, ...args);
+};
+
 const moduleRoots = [packagedNodeModules, legacyRuntimeNodeModules].filter((item) => fs.existsSync(item));
 const existingNodePath = process.env.NODE_PATH ? process.env.NODE_PATH.split(path.delimiter) : [];
 const mergedNodePath = [...moduleRoots, ...existingNodePath.filter(Boolean)].filter((item, index, list) => list.indexOf(item) === index);

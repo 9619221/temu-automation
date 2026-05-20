@@ -600,15 +600,14 @@ function filterAutoPricingProductTable(inputPath) {
 
 // ============ 自动更新 ============
 
-// 走 gh-proxy.com 反代 GitHub Release,避免大陆用户直连 github.com 超时
-// /releases/latest/download/ 是 GitHub 的稳定别名,不用每次发版改 URL
-const UPDATE_FEED_URL = "https://gh-proxy.com/https://github.com/9619221/temu-automation/releases/latest/download/";
-const UPDATE_MANUAL_DOWNLOAD_URL = "https://gh-proxy.com/https://github.com/9619221/temu-automation/releases/latest";
+// Default to the production ERP host so domestic clients can use our own
+// static update feed and electron-updater differential downloads.
+const UPDATE_FEED_URL = "https://erp.temu.chat/releases/";
+const UPDATE_MANUAL_DOWNLOAD_URL = UPDATE_FEED_URL;
 const UPDATE_CONFIG_FILE_NAME = "app-update.yml";
 const UPDATE_CONFIG_CONTENT = [
-  "owner: '9619221'",
-  "repo: temu-automation",
-  "provider: github",
+  "provider: generic",
+  `url: ${UPDATE_FEED_URL}`,
   "updaterCacheDirName: temu-automation-updater",
   "",
 ].join("\n");
@@ -634,6 +633,30 @@ function writeUpdateConfigFile(filePath) {
   fs.writeFileSync(filePath, UPDATE_CONFIG_CONTENT, "utf8");
 }
 
+function ensureUpdateConfigFile(filePath) {
+  if (!fs.existsSync(filePath)) {
+    writeUpdateConfigFile(filePath);
+    return { filePath, generated: true };
+  }
+
+  try {
+    const existing = fs.readFileSync(filePath, "utf8");
+    if (existing === UPDATE_CONFIG_CONTENT) {
+      return { filePath, generated: false };
+    }
+    writeUpdateConfigFile(filePath);
+    return { filePath, generated: true };
+  } catch (error) {
+    appendDiagnosticLog({
+      source: "main",
+      level: "warn",
+      message: `Unable to refresh ${UPDATE_CONFIG_FILE_NAME}: ${error?.message || error}`,
+      detail: { filePath },
+    });
+    return { filePath, generated: false };
+  }
+}
+
 function ensureAppUpdateConfig() {
   if (!app.isPackaged) return null;
 
@@ -648,8 +671,9 @@ function ensureAppUpdateConfig() {
   for (const filePath of candidates) {
     if (!filePath) continue;
     if (fs.existsSync(filePath)) {
+      const result = ensureUpdateConfigFile(filePath);
       autoUpdater.updateConfigPath = filePath;
-      return { filePath, generated: false };
+      return result;
     }
   }
 
@@ -691,11 +715,11 @@ function configureAutoUpdater() {
     return;
   }
   const updateConfig = ensureAppUpdateConfig();
-  autoUpdater.autoDownload = false;
+  autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
   applyAutoUpdaterFeedUrl();
   broadcastUpdateState({
-    message: updateConfig?.generated ? "更新源: gh-proxy 镜像（已修复本机更新配置）" : "更新源: gh-proxy 镜像",
+    message: updateConfig?.generated ? "更新源: erp.temu.chat（已修复本机更新配置）" : "更新源: erp.temu.chat",
     manualDownloadUrl: UPDATE_MANUAL_DOWNLOAD_URL,
   });
 }
@@ -704,8 +728,7 @@ autoUpdater.on("checking-for-update", () => {
   broadcastUpdateState({ status: "checking", message: "正在检查更新…" });
 });
 autoUpdater.on("update-available", (info) => {
-  broadcastUpdateState({ status: "available", message: `发现新版本 ${info?.version || ""}`, releaseVersion: info?.version });
-  // 不自动下载，等用户手动点击下载按钮
+  broadcastUpdateState({ status: "downloading", message: `发现新版本 ${info?.version || ""}，正在后台下载`, releaseVersion: info?.version, progressPercent: 0 });
 });
 autoUpdater.on("update-not-available", () => {
   broadcastUpdateState({ status: "up-to-date", message: "当前已是最新版本", releaseVersion: null, progressPercent: null });
@@ -1231,7 +1254,7 @@ function resolveSendCmdTimeout(params, requestOptions) {
   return 0;
 }
 
-const LONG_RUNNING_WORKER_ACTIONS = new Set(["auto_pricing", "workflow_pack_images", "competitor_auto_register", "local_1688_inquiry"]);
+const LONG_RUNNING_WORKER_ACTIONS = new Set(["auto_pricing", "workflow_pack_images", "competitor_auto_register", "local_1688_inquiry", "auto_image_swap"]);
 
 async function sendCmd(action, params = {}, requestOptions = {}) {
   if (!workerReady) {
@@ -2013,11 +2036,19 @@ function appendImageStudioLog(message) {
   } catch {}
 }
 
+function shouldSuppressImageStudioLogLine(line) {
+  const text = String(line || "");
+  return text.includes("[DEP0169]")
+    || text.includes("url.parse() behavior is not standardized")
+    || text.includes("CVEs are not issued for `url.parse()` vulnerabilities");
+}
+
 function getImageStudioProcessOutputHandlers(prefix) {
   return (chunk) => {
     const text = chunk.toString("utf8").trim();
     if (!text) return;
     text.split(/\r?\n/).filter(Boolean).forEach((line) => {
+      if (shouldSuppressImageStudioLogLine(line)) return;
       appendImageStudioLog(`${prefix}: ${line}`);
     });
   };
@@ -3692,6 +3723,29 @@ ipcMain.handle("select-file", async (_e, filters) => {
   return result.filePaths[0];
 });
 
+ipcMain.handle("auto-image-swap:pick-dir", async (_e, defaultPath) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ["openDirectory"],
+    defaultPath: typeof defaultPath === "string" && defaultPath ? defaultPath : undefined,
+    title: "选择批量替换图片根目录",
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  return result.filePaths[0];
+});
+
+ipcMain.handle("auto-image-swap:run", async (_e, params) => {
+  await ensureWorkerStarted();
+  const taskId = typeof params?.taskId === "string" && params.taskId.trim()
+    ? params.taskId.trim()
+    : `auto_image_swap_${Date.now()}`;
+  const result = await sendCmd("auto_image_swap", { ...(params || {}), taskId }, { timeoutMs: WORKER_LONG_TASK_TIMEOUT_MS });
+  return { ...result, taskId };
+});
+
+ipcMain.handle("auto-image-swap:get-progress", async (_e, taskId) => {
+  return await requestWorkerProgressSnapshot(taskId);
+});
+
 ipcMain.handle("automation:login", async (_, accountId, phone, password) => {
   return sendCmd("login", { accountId, phone, password });
 });
@@ -5163,6 +5217,9 @@ ipcMain.handle("app:check-for-updates", async () => {
 
 ipcMain.handle("app:download-update", async () => {
   try {
+    if (updateState.status === "downloading" || updateState.status === "downloaded") {
+      return updateState;
+    }
     ensureAppUpdateConfig();
     applyAutoUpdaterFeedUrl();
     await autoUpdater.downloadUpdate();

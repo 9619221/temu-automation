@@ -246,8 +246,18 @@ function appendVariantToMap(
   if (!imageType || !image.imageUrl) return previous;
 
   const current = Array.isArray(previous[imageType]) ? previous[imageType] : [];
-  if (current.some((item) => item.imageUrl === image.imageUrl)) {
-    return previous;
+  const duplicateIndex = current.findIndex((item) => item.imageUrl === image.imageUrl);
+  if (duplicateIndex >= 0) {
+    const next = [...current];
+    next[duplicateIndex] = buildImageVariant(image, {
+      ...options,
+      variantId: options.variantId || image.variantId || current[duplicateIndex].variantId,
+      createdAt: options.createdAt || image.createdAt || current[duplicateIndex].createdAt,
+    });
+    return {
+      ...previous,
+      [imageType]: next,
+    };
   }
 
   return {
@@ -849,8 +859,8 @@ export default function ImageStudio() {
       const isRedrawJob = Boolean(redrawMeta);
       if (!isForegroundJob && !isRedrawJob) return;
 
-      if (payload.type === "generate:event" && payload.event?.imageType) {
-        const imageType = payload.event.imageType || "";
+      if (payload.type === "generate:event" && payload.event && (payload.event.imageType || redrawMeta?.imageType)) {
+        const imageType = redrawMeta?.imageType || payload.event?.imageType || "";
         startTransition(() => {
           setResults((prev) => {
             const next = { ...prev };
