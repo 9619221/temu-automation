@@ -2333,6 +2333,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         && (
           /errorCode:(?:AddressId invalid|ADDRESS_ID_INVALID|ADDRESS_INACTIVE|ADDRESS_REMOTE_ID_MISSING)/i.test(rawErrorString)
           || /(?:^|[^A-Z_])(?:ADDRESS_INACTIVE|ADDRESS_REMOTE_ID_MISSING|ADDRESS_ID_INVALID)(?:$|[^A-Z_])/.test(rawErrorString)
+          // 兜底：1688 有时不带 errorCode: 前缀，只回裸字串「AddressId invalid」/「Address id invalid」之类
+          || /\baddress\s*id\s+invalid\b/i.test(rawErrorString)
           || ["ADDRESS_INACTIVE", "ADDRESS_REMOTE_ID_MISSING", "ADDRESS_ID_INVALID"].includes(errorCode)
         );
       if (payload.action === "rollback_po_status" && errorMessage.includes("Unsupported purchase action")) {
@@ -2743,6 +2745,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     let skippedImages = false;
     setActingKey("create-pr");
     let lastResult: any = null;
+    const createdPrIds: string[] = [];
     try {
       for (let i = 0; i < uniqueSelectedSkus.length; i++) {
         const sku = uniqueSelectedSkus[i];
@@ -2785,6 +2788,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
             throw error;
           }
         }
+        // 收集刚创建的 PR id，等 workbench 同步后用于自动触发 generate PO + 推 1688
+        const newPrId = String(
+          lastResult?.result?.purchaseRequest?.id
+          || lastResult?.purchaseRequest?.id
+          || lastResult?.result?.id
+          || "",
+        );
+        if (newPrId) createdPrIds.push(newPrId);
       }
       // 关 Modal + 提示先行；workbench 用 create_pr 接口自带的，
       // 没有再回退去拉一次（旧后端兼容）
@@ -2805,6 +2816,22 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           if (Array.isArray(wb2?.skuOptions)) setSkus(wb2.skuOptions);
           if (Array.isArray(wb2?.supplierOptions)) setSuppliers(wb2.supplierOptions);
         }).catch(() => {});
+      }
+      // 单 PR 创建时自动 generate PO + 自动推 1688（绑映射的会弹账号/地址 Modal；
+      // 未绑映射的 silent 退出留在「待找品」tab）。多 PR 不自动触发推单 Modal，
+      // 避免多个 Modal 互相覆盖；用户去列表逐个推。
+      if (createdPrIds.length === 1) {
+        const targetPrId = createdPrIds[0];
+        const refreshedRequests = wb && Array.isArray((wb as any).purchaseRequests)
+          ? ((wb as any).purchaseRequests as any[])
+          : [];
+        const row = refreshedRequests.find((r: any) => String(r?.id || "") === targetPrId);
+        if (row) {
+          // setTimeout 0：先让 Modal close + workbench apply 渲染稳定，再触发后续 Modal
+          setTimeout(() => {
+            void generatePurchaseOrderForRow(row as PurchaseRequestRow, { silent: true });
+          }, 0);
+        }
       }
     } catch (error: any) {
       message.error(error?.message || "采购单创建失败");
@@ -3224,7 +3251,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   //  - 否则一律弹 Modal 让用户挑收货地址；默认/单地址只做预选不绕过
   // purchase1688AccountId 由前置的 1688 采购账号选择流程决定。
   const startPush1688Order = (row: PurchaseOrderRow, purchase1688AccountId?: string) => {
-    const addresses = data.alibaba1688Addresses || [];
+    const allAddrs = data.alibaba1688Addresses || [];
+    // 按当前选定的 1688 采购账号过滤——跨 OAuth 选地址(比如默认地址恰好属于另一个 OAuth) 1688
+    // 那边会报 AddressId invalid。只保留同 OAuth 的地址参与预选和 picker 展示。
+    const addresses = purchase1688AccountId
+      ? allAddrs.filter((a) => String((a as any).purchase1688AccountId || "") === purchase1688AccountId)
+      : allAddrs;
     if (!addresses.length) {
       void push1688Order(row, { purchase1688AccountId });
       return;
@@ -3815,14 +3847,17 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     setSpecBindingDialog(null);
   };
 
-  const generatePurchaseOrderForRow = async (row: PurchaseRequestRow) => {
+  const generatePurchaseOrderForRow = async (row: PurchaseRequestRow, options?: { silent?: boolean }) => {
+    const silent = options?.silent === true;
     const existingPo = purchaseOrders.find((item) => purchaseOrderBelongsToRequest(item, row.id));
     if (row.status === "converted_to_po" || existingPo) {
       if (existingPo) {
         setActiveQueueKey("po_draft");
         setPurchaseSearchText(existingPo.poNo || existingPo.id);
       }
-      message.info(existingPo ? `采购单已生成：${existingPo.poNo || existingPo.id}` : "采购单已生成，请刷新后查看采购单列表");
+      if (!silent) {
+        message.info(existingPo ? `采购单已生成：${existingPo.poNo || existingPo.id}` : "采购单已生成，请刷新后查看采购单列表");
+      }
       return;
     }
     const hasMapping = Number(row.mappingCount || 0) > 0;
@@ -3842,21 +3877,23 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         setActiveQueueKey("po_draft");
         setPurchaseSearchText(generatedPo.poNo || generatedPo.id);
       }
-      message.info(generatedPo?.id ? `采购单已生成：${generatedPo.poNo || generatedPo.id}` : "采购单已生成，请刷新后查看采购单列表");
+      if (!silent) {
+        message.info(generatedPo?.id ? `采购单已生成：${generatedPo.poNo || generatedPo.id}` : "采购单已生成，请刷新后查看采购单列表");
+      }
       if (!hasMapping || generatedPo?.status !== "draft" || has1688OrderTrace(generatedPo)) return;
     }
     if (!hasMapping) return;
     if (!generatedPo?.id) {
-      message.warning("采购单已生成，但没有拿到可推送的采购单号，请刷新后手动推单");
+      if (!silent) message.warning("采购单已生成，但没有拿到可推送的采购单号，请刷新后手动推单");
       return;
     }
-    // 按用户要求：生成采购单后不自动推 1688/不自动弹账号地址 Modal。
-    // 推单走下方「采购单」列表里的「推送1688下单」按钮显式触发，那里会弹账号+地址选择。
+    // 生成采购单成功后自动调 initiatePush1688Order，走多账号/地址选择入口
+    // 静默模式（PR 新建时自动触发）validation 失败不弹 warning，让用户去找品/手工处理
     const validation = await validate1688OrderPush(generatedPo, true);
     if (validation?.ready) {
-      message.success(`采购单已生成：${generatedPo.poNo || generatedPo.id}，可在下方「采购单」列表点「推送1688下单」继续`);
-    } else {
-      message.warning(validation?.message || "采购单已生成，但当前映射还不满足 1688 推单条件");
+      await initiatePush1688Order(generatedPo);
+    } else if (!silent) {
+      message.warning(validation?.message || "采购单已生成，但当前映射还不满足 1688 自动推单条件");
     }
   };
 
@@ -4879,38 +4916,46 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         }}
         destroyOnClose
       >
-        {pushAddressPicker ? (
-          <Space direction="vertical" size={10} style={{ width: "100%" }}>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              系统会用下面这个地址推到 1688。要换其他地址点一下下面的卡片即可。
-              没有合适的？去「店铺 / 1688 设置」里维护。
-            </Text>
-            {(data.alibaba1688Addresses || []).map((addr) => {
-              const selected = addr.id === pushAddressPicker.addressId;
-              return (
-                <div
-                  key={addr.id}
-                  onClick={() => setPushAddressPicker((prev) => prev ? { ...prev, addressId: addr.id } : null)}
-                  style={{
-                    padding: "10px 12px",
-                    border: `1px solid ${selected ? "#1677ff" : "#e5e9f0"}`,
-                    borderRadius: 6,
-                    cursor: "pointer",
-                    background: selected ? "#e6f4ff" : "#fff",
-                  }}
-                >
-                  <Space size={6}>
-                    <Text strong>{addr.fullName || "未命名"}</Text>
-                    {addr.mobile ? <Text type="secondary" style={{ fontSize: 12 }}>{addr.mobile}</Text> : null}
-                    {addr.isDefault ? <Tag color="blue">默认</Tag> : null}
-                    {addr.label ? <Tag>{addr.label}</Tag> : null}
-                  </Space>
-                  <div style={{ marginTop: 4, fontSize: 12, color: "#6b7280" }}>{addr.address || "-"}</div>
+        {pushAddressPicker ? (() => {
+          // 跨 OAuth 选地址 1688 会报 AddressId invalid——按当前 purchase1688AccountId 过滤
+          const pickerOAuth = pushAddressPicker.purchase1688AccountId;
+          const filtered = (data.alibaba1688Addresses || []).filter((addr) => {
+            if (!pickerOAuth) return true;
+            return String((addr as any).purchase1688AccountId || "") === pickerOAuth;
+          });
+          return (
+            <Space direction="vertical" size={10} style={{ width: "100%" }}>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                选择推到 1688 的收货地址。没有合适的去「店铺 / 1688 设置」维护。
+              </Text>
+              {filtered.length > 0 ? (
+                <Select
+                  style={{ width: "100%" }}
+                  value={pushAddressPicker.addressId}
+                  onChange={(newId: string) => setPushAddressPicker((prev) => prev ? { ...prev, addressId: newId } : null)}
+                  options={filtered.map((addr, i) => {
+                    const remoteId = (addr as any).addressId || (addr as any).address_id;
+                    const display = addr.fullName || addr.label || `地址 ${i + 1}`;
+                    const summary = [
+                      display,
+                      addr.mobile || "",
+                      (addr.address || "-").slice(0, 30),
+                    ].filter(Boolean).join(" · ");
+                    return {
+                      value: addr.id,
+                      label: summary + (addr.isDefault ? "（默认）" : "") + (remoteId ? "" : "（未绑 1688，不可推单）"),
+                      disabled: !remoteId,
+                    };
+                  })}
+                />
+              ) : (
+                <div style={{ padding: 16, background: "#fff2f0", border: "1px solid #ffccc7", borderRadius: 6, color: "#cf1322", fontSize: 13 }}>
+                  当前 1688 采购账号下还没有可用收货地址。请去「店铺 / 1688 设置」点「同步 1688 地址」拉一份，再回来选择。
                 </div>
-              );
-            })}
-          </Space>
-        ) : null}
+              )}
+            </Space>
+          );
+        })() : null}
       </Modal>
 
       <Modal
@@ -4941,166 +4986,100 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         }}
         destroyOnClose
       >
-        {pushAccountPicker ? (
-          <Space direction="vertical" size={14} style={{ width: "100%" }}>
-            <Text strong style={{ fontSize: 14 }}>采购账号</Text>
-            {pushAccountPicker.accounts.map((acct, index) => {
-              const selected = acct.id === pushAccountPicker.accountId;
-              const display = acct.label || `采购账号 ${index + 1}`;
-              const isDefault = acct.id === pushAccountPicker.defaultAccountId;
-              return (
-                <div
-                  key={acct.id}
-                  onClick={() => setPushAccountPicker((prev) => { if (!prev) return null; const matched = (data.alibaba1688Addresses || []).filter((a) => String((a as any).purchase1688AccountId || "") === acct.id); const nextAddrId = matched.find((a) => a.isDefault)?.id || matched[0]?.id || null; return { ...prev, accountId: acct.id, addressId: nextAddrId }; })}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      setPushAccountPicker((prev) => { if (!prev) return null; const matched = (data.alibaba1688Addresses || []).filter((a) => String((a as any).purchase1688AccountId || "") === acct.id); const nextAddrId = matched.find((a) => a.isDefault)?.id || matched[0]?.id || null; return { ...prev, accountId: acct.id, addressId: nextAddrId }; });
-                    }
+        {pushAccountPicker ? (() => {
+          // 按当前选定 OAuth 过滤地址（跨 OAuth 1688 那边会报 AddressId invalid）
+          const filteredAddrs = (data.alibaba1688Addresses || []).filter(
+            (a) => String((a as any).purchase1688AccountId || "") === pushAccountPicker.accountId,
+          );
+          return (
+            <Space direction="vertical" size={16} style={{ width: "100%" }}>
+              <div>
+                <Text strong style={{ fontSize: 13 }}>1688 采购账号</Text>
+                <Select
+                  style={{ width: "100%", marginTop: 6 }}
+                  value={pushAccountPicker.accountId}
+                  onChange={(newId: string) => {
+                    setPushAccountPicker((prev) => {
+                      if (!prev) return null;
+                      const matched = (data.alibaba1688Addresses || []).filter(
+                        (a) => String((a as any).purchase1688AccountId || "") === newId,
+                      );
+                      const nextAddrId = matched.find((a) => a.isDefault)?.id || matched[0]?.id || null;
+                      return { ...prev, accountId: newId, addressId: nextAddrId };
+                    });
                   }}
-                  role="button"
-                  tabIndex={0}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    gap: 14,
-                    padding: "14px 16px",
-                    border: `1px solid ${selected ? "#e65a00" : "#e5e9f0"}`,
-                    borderRadius: 10,
-                    cursor: "pointer",
-                    background: selected ? "#fff7ed" : "#fff",
-                    boxShadow: selected ? "0 8px 22px rgba(230, 90, 0, 0.12)" : "0 1px 2px rgba(15, 23, 42, 0.04)",
-                    outline: "none",
-                  }}
-                >
-                  <Space size={12}>
-                    <div
-                      style={{
-                        width: 36,
-                        height: 36,
-                        borderRadius: 8,
-                        display: "grid",
-                        placeItems: "center",
-                        background: selected ? "#e65a00" : "#f3f4f6",
-                        color: selected ? "#fff" : "#64748b",
-                        fontWeight: 700,
-                      }}
-                    >
-                      {display.slice(0, 1)}
-                    </div>
-                    <Space direction="vertical" size={2}>
-                      <Space size={6} wrap>
-                        <Text strong style={{ fontSize: 15 }}>{display}</Text>
-                        {isDefault ? <Tag color="orange">默认</Tag> : null}
+                  options={pushAccountPicker.accounts.map((acct, i) => ({
+                    value: acct.id,
+                    label: (acct.label || `采购账号 ${i + 1}`)
+                      + (acct.id === pushAccountPicker.defaultAccountId ? "（店铺默认）" : ""),
+                  }))}
+                />
+              </div>
+              <div>
+                <Text strong style={{ fontSize: 13 }}>收货地址</Text>
+                {filteredAddrs.length > 0 ? (
+                  <Select
+                    style={{ width: "100%", marginTop: 6 }}
+                    value={pushAccountPicker.addressId || undefined}
+                    placeholder="请选择收货地址"
+                    onChange={(newId: string) => setPushAccountPicker((prev) => prev ? { ...prev, addressId: newId } : null)}
+                    options={filteredAddrs.map((addr, i) => {
+                      const remoteId = (addr as any).addressId || (addr as any).address_id;
+                      const display = addr.fullName || addr.label || `地址 ${i + 1}`;
+                      const summary = [
+                        display,
+                        addr.mobile || "",
+                        (addr.address || "-").slice(0, 30),
+                      ].filter(Boolean).join(" · ");
+                      return {
+                        value: addr.id,
+                        label: summary + (addr.isDefault ? "（默认）" : "") + (remoteId ? "" : "（未绑 1688，不可推单）"),
+                        disabled: !remoteId,
+                      };
+                    })}
+                  />
+                ) : (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginTop: 6 }}
+                    message="该 1688 账号下还没同步过地址"
+                    description={(
+                      <Space direction="vertical" size={6}>
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          点下面按钮从 1688 拉一次该买家账号的地址簿,完成后再选地址点「确认使用」。
+                        </Text>
+                        <Button
+                          size="small"
+                          type="primary"
+                          onClick={async () => {
+                            if (!erp || !pushAccountPicker) return;
+                            try {
+                              const r: any = await erp.purchase.action({
+                                action: "sync_1688_addresses",
+                                accountId: pushAccountPicker.po.accountId,
+                                purchase1688AccountId: pushAccountPicker.accountId,
+                                includeWorkbench: false,
+                              }, { timeoutMs: 120000 });
+                              const n = Number(r?.result?.addressCount || 0);
+                              await loadSupplementalWorkbenchData();
+                              if (n > 0) message.success(`已同步 ${n} 条地址`);
+                              else message.warning("1688 没返回地址数据,请先在 1688 后台维护好该账号的收货地址(work.1688.com → 个人中心 → 收货地址簿)");
+                            } catch (e: any) {
+                              message.error(e?.message || "1688 地址同步失败");
+                            }
+                          }}
+                        >
+                          从该账号同步地址
+                        </Button>
                       </Space>
-                      <Text type="secondary" style={{ fontSize: 12 }}>用于本次 1688 采购下单</Text>
-                    </Space>
-                  </Space>
-                  {selected ? <CheckCircleOutlined style={{ color: "#e65a00", fontSize: 20 }} /> : null}
-                </div>
-              );
-            })}
-
-            <Text strong style={{ fontSize: 14, marginTop: 6 }}>收货地址(该 1688 账号同步过来的)</Text>
-            {((data.alibaba1688Addresses || []).filter((a) => String((a as any).purchase1688AccountId || "") === pushAccountPicker.accountId)).length ? (
-              (data.alibaba1688Addresses || []).filter((a) => String((a as any).purchase1688AccountId || "") === pushAccountPicker.accountId).map((addr, index) => {
-                const selected = addr.id === pushAccountPicker.addressId;
-                const display = addr.fullName || addr.label || `收货地址 ${index + 1}`;
-                return (
-                  <div
-                    key={addr.id}
-                    onClick={() => setPushAccountPicker((prev) => prev ? { ...prev, addressId: addr.id } : null)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        setPushAccountPicker((prev) => prev ? { ...prev, addressId: addr.id } : null);
-                      }
-                    }}
-                    role="button"
-                    tabIndex={0}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "space-between",
-                      gap: 14,
-                      padding: "14px 16px",
-                      border: `1px solid ${selected ? "#e65a00" : "#e5e9f0"}`,
-                      borderRadius: 10,
-                      cursor: "pointer",
-                      background: selected ? "#fff7ed" : "#fff",
-                      boxShadow: selected ? "0 8px 22px rgba(230, 90, 0, 0.12)" : "0 1px 2px rgba(15, 23, 42, 0.04)",
-                      outline: "none",
-                    }}
-                  >
-                    <Space size={12} align="start">
-                      <div
-                        style={{
-                          width: 36,
-                          height: 36,
-                          borderRadius: 8,
-                          display: "grid",
-                          placeItems: "center",
-                          background: selected ? "#e65a00" : "#f3f4f6",
-                          color: selected ? "#fff" : "#64748b",
-                          fontWeight: 700,
-                          flex: "0 0 auto",
-                        }}
-                      >
-                        {display.slice(0, 1)}
-                      </div>
-                      <Space direction="vertical" size={2}>
-                        <Space size={6} wrap>
-                          <Text strong style={{ fontSize: 15 }}>{display}</Text>
-                          {addr.isDefault ? <Tag color="orange">默认</Tag> : null}
-                          {addr.mobile ? <Text type="secondary" style={{ fontSize: 12 }}>{addr.mobile}</Text> : null}
-                        </Space>
-                        <Text type="secondary" style={{ fontSize: 12 }}>{addr.address || "-"}</Text>
-                      </Space>
-                    </Space>
-                    {selected ? <CheckCircleOutlined style={{ color: "#e65a00", fontSize: 20, flex: "0 0 auto" }} /> : null}
-                  </div>
-                );
-              })
-            ) : (
-              <Alert
-                type="warning"
-                showIcon
-                message="该 1688 账号下还没同步过地址"
-                description={(
-                  <Space direction="vertical" size={6}>
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      点下面按钮从 1688 拉一次该买家账号的地址簿,完成后再选地址点「确认使用」。
-                    </Text>
-                    <Button
-                      size="small"
-                      type="primary"
-                      onClick={async () => {
-                        if (!erp || !pushAccountPicker) return;
-                        try {
-                          const r: any = await erp.purchase.action({
-                            action: "sync_1688_addresses",
-                            accountId: pushAccountPicker.po.accountId,
-                            purchase1688AccountId: pushAccountPicker.accountId,
-                            includeWorkbench: false,
-                          }, { timeoutMs: 120000 });
-                          const n = Number(r?.result?.addressCount || 0);
-                          await loadSupplementalWorkbenchData();
-                          if (n > 0) message.success(`已同步 ${n} 条地址`);
-                          else message.warning("1688 没返回地址数据,请先在 1688 后台维护好该账号的收货地址(work.1688.com → 个人中心 → 收货地址簿)");
-                        } catch (e: any) {
-                          message.error(e?.message || "1688 地址同步失败");
-                        }
-                      }}
-                    >
-                      从该账号同步地址
-                    </Button>
-                  </Space>
+                    )}
+                  />
                 )}
-              />
-            )}
-          </Space>
-        ) : null}
+              </div>
+            </Space>
+          );
+        })() : null}
       </Modal>
 
       <Modal
