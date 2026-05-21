@@ -14499,6 +14499,49 @@ function listJushuitanRawRuntime(params = {}) {
   return getJushuitanService().listRawRecords(params, getJushuitanActor(params.actor || {}));
 }
 
+// 0.3.22 诊断：把高频出问题的 IPC handler 包一层 try/catch + 超时 + 落本地日志。
+//   - 把 "reply was never sent"（promise 永不 settle）变成具体超时错误传给 renderer
+//   - 错误同时写到 <userData>/diagnostics/erp-ipc.log，现场可直接拷回查堆栈
+// 只在 registerErpIpcHandlers 内被用到，因此本函数定义紧跟在它之前。
+function wrapErpHandler(name, fn, { timeoutMs = 180000 } = {}) {
+  return async (event, ...args) => {
+    const t0 = Date.now();
+    let timer = null;
+    try {
+      return await Promise.race([
+        Promise.resolve().then(() => fn(event, ...args)),
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`handler timeout after ${timeoutMs}ms`)),
+            timeoutMs,
+          );
+          if (timer.unref) timer.unref();
+        }),
+      ]);
+    } catch (error) {
+      const elapsedMs = Date.now() - t0;
+      const message = error?.message || String(error);
+      const stack = error?.stack || "";
+      try {
+        console.error(`[ERP-IPC] ${name} failed in ${elapsedMs}ms: ${message}\n${stack}`);
+      } catch {}
+      try {
+        if (erpState.userDataDir) {
+          const dir = path.join(erpState.userDataDir, "diagnostics");
+          fs.mkdirSync(dir, { recursive: true });
+          const line = `[${new Date().toISOString()}] ${name} ${elapsedMs}ms ${message}\n${stack}\n\n`;
+          fs.appendFileSync(path.join(dir, "erp-ipc.log"), line);
+        }
+      } catch {}
+      const wrapped = new Error(`[${name}] ${message}`);
+      wrapped.cause = error;
+      throw wrapped;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+}
+
 function registerErpIpcHandlers(ipcMain) {
   ipcMain.on("erp:events:subscribe", (event) => subscribeRendererEvents(event.sender));
   ipcMain.on("erp:events:unsubscribe", (event) => unsubscribeRendererEvents(event.sender));
@@ -14545,7 +14588,7 @@ function registerErpIpcHandlers(ipcMain) {
     assertRoleIfLoggedIn(["admin", "manager"]);
     return upsertCompany(payload || {});
   });
-  ipcMain.handle("erp:account:list", (_event, params) => listAccountsRuntime(params || {}));
+  ipcMain.handle("erp:account:list", wrapErpHandler("erp:account:list", (_event, params) => listAccountsRuntime(params || {})));
   ipcMain.handle("erp:account:upsert", (_event, payload) => upsertAccountRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:account:delete", (_event, payload) => deleteAccountRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:user:list", (_event, params) => {
@@ -14571,12 +14614,12 @@ function registerErpIpcHandlers(ipcMain) {
     assertRoleIfLoggedIn(["admin", "manager"]);
     return upsertUserResourceScope(payload || {}, erpState.currentUser || {});
   });
-  ipcMain.handle("erp:supplier:list", (_event, params) => listSuppliersRuntime(params || {}));
+  ipcMain.handle("erp:supplier:list", wrapErpHandler("erp:supplier:list", (_event, params) => listSuppliersRuntime(params || {})));
   ipcMain.handle("erp:supplier:create", (_event, payload) => createSupplierRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:sku:list", (_event, params) => listSkusRuntime(params || {}));
   ipcMain.handle("erp:sku:create", (_event, payload) => createSkuRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:sku:delete", (_event, payload) => deleteSkuRuntime(payload || {}, erpState.currentUser || {}));
-  ipcMain.handle("erp:purchase:workbench", (_event, params) => getPurchaseWorkbenchRuntime(params || {}));
+  ipcMain.handle("erp:purchase:workbench", wrapErpHandler("erp:purchase:workbench", (_event, params) => getPurchaseWorkbenchRuntime(params || {})));
   ipcMain.handle("erp:purchase:action", (_event, payload) => performPurchaseActionRuntime(payload || {}));
   ipcMain.handle("erp:warehouse:workbench", (_event, params) => getWarehouseWorkbenchRuntime(params || {}));
   ipcMain.handle("erp:warehouse:action", (_event, payload) => performWarehouseActionRuntime(payload || {}));
