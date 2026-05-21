@@ -3086,7 +3086,10 @@ function listSkus(params = {}) {
       source.unit_price AS primary_1688_unit_price,
       source.moq AS primary_1688_moq
     FROM erp_skus sku
-    LEFT JOIN erp_accounts acct ON acct.id = sku.account_id
+    -- jst:account:default 是聚水潭导入的"无品牌兜底"，不是真店铺/品牌；
+    -- 关联到它的 SKU 在 UI 应该跟 account_id IS NULL 一样显示为"-"，
+    -- 所以这里 JOIN 时把它过滤掉，让 acct.name 落回 NULL，前端 fallback 到 "-"。
+    LEFT JOIN erp_accounts acct ON acct.id = sku.account_id AND acct.id != 'jst:account:default'
     LEFT JOIN erp_suppliers supplier ON supplier.id = sku.supplier_id
     LEFT JOIN (
       SELECT account_id, sku_id, COUNT(*) AS source_count
