@@ -10,6 +10,14 @@ const DEFAULT_PORT = 19380;
 const SESSION_COOKIE_NAME = "temu_erp_lan_session";
 const REMOTE_SESSION_EXPIRED_MESSAGE = "Cloud login expired, please reconnect.";
 
+// 已停服的旧 ERP 主控端地址。老桌面端首次启动会把当时的 ERP_CLOUD_SERVER_URL
+// 写进 erp-runtime.json，writeRuntimeConfig 是 read-then-merge，旧值会一直残留。
+// 5-21 迁香港后老 SG 机停服 → 残留旧值的客户端 refresh() 会卡 ETIMEDOUT。
+// 启动读盘时一次性把残留改回 unset，让客户端走当前 ERP_CLOUD_SERVER_URL。
+const DEPRECATED_SERVER_URL_PATTERNS = [
+  /^https?:\/\/43\.156\.121\.172(:\d+)?(\/.*)?$/i, // 旧 SG 机 (5-28 后清退)
+];
+
 let userDataDir = null;
 
 function configureClientRuntime(options = {}) {
@@ -57,7 +65,15 @@ function readRuntimeConfig() {
   const configPath = getConfigPath();
   if (!fs.existsSync(configPath)) return normalizeConfig();
   try {
-    return normalizeConfig(JSON.parse(fs.readFileSync(configPath, "utf8")));
+    const raw = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    // 残留的旧 serverUrl 一次性清掉，回到 unset 让客户端走 ERP_CLOUD_SERVER_URL 默认。
+    if (raw?.serverUrl && DEPRECATED_SERVER_URL_PATTERNS.some((re) => re.test(String(raw.serverUrl)))) {
+      raw.mode = "unset";
+      raw.serverUrl = "";
+      raw.sessionCookie = "";
+      raw.currentUser = null;
+    }
+    return normalizeConfig(raw);
   } catch {
     return normalizeConfig();
   }
