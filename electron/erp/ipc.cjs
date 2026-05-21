@@ -648,22 +648,34 @@ function initializeErp(options = {}) {
     return erpState.initResult;
   }
 
-  if (runtime.mode === "unset" && !hasExistingErpDatabase(options)) {
-    erpState.initResult = {
-      mode: "unset",
-      dbPath: null,
-      backupPath: null,
-      migrations: [],
-      runtime,
-    };
-    erpState.initError = null;
-    erpState.db = null;
-    erpState.services = null;
-    return erpState.initResult;
-  }
-
   if (runtime.mode === "unset") {
-    setHostMode();
+    // 0.3.23：新机首次启动默认切到云端 client 模式。
+    // 历史上这里在 mode=unset && 无本地 db 时静默返回 unset，等用户去
+    // "主控/客户端" 选择 UI 做决定，但前端从来没把这个 UI 做出来（src/
+    // 里搜不到调用 erp:client:set-host-mode / set-client-mode 的入口），
+    // 导致新装机器永远卡在 unset：erp.sqlite 不创建、IPC handler
+    // 拿不到 db、商品资料页 loading 不结束。
+    // 改后行为：
+    //   - 无本地 db (全新机)：默认 setClientMode 指向 erp.temu.chat，
+    //     前端 RequireAuth 看到没 sessionCookie 自然跳登录页。
+    //   - 已有本地 db (老 host 用户)：保留 host 模式，不破坏老数据。
+    // 与 src/config/erpCloud.ts 保持同步：ERP_CLOUD_SERVER_URL。
+    if (hasExistingErpDatabase(options)) {
+      setHostMode();
+    } else {
+      setClientMode({ serverUrl: "https://erp.temu.chat" });
+      erpState.initResult = {
+        mode: "client",
+        dbPath: null,
+        backupPath: null,
+        migrations: [],
+        runtime: getRuntimeStatus(),
+      };
+      erpState.initError = null;
+      erpState.db = null;
+      erpState.services = null;
+      return erpState.initResult;
+    }
   }
 
   return initializeHostErp(options);
