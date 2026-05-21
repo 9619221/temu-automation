@@ -614,7 +614,12 @@ class JushuitanOperationalBridge {
   upsertSku(companyId, raw, now) {
     const skuCode = firstText(raw, ["sku_code", "sku_id", "skuId", "i_id", "iId"]);
     const productName = firstText(raw, ["name", "product_name", "title"]);
-    if (!skuCode && !productName) return null;
+    // 硬护栏：缺少 sku_code/sku_id/i_id 的 raw 一律拒绝。
+    // 历史原因：聚水潭 web sniff 会把字段定义 schema / 菜单项也错打 source_key='inventory'，
+    // 这些条目只有 name（"图片"/"商品编码"/"齐点包装制品有限公司" 等字段标签或供应商名）没有 sku_code，
+    // 走 stableId fallback "x" 就会灌出 jst:sku:x:<hash> 这种伪 SKU 污染 erp_skus 与 erp_inventory_batches。
+    // 合法 SKU 永远来自 jushuitan-sku-profile-import.cjs（id 前缀 jst:skuprofile:），该路径不经过本函数。
+    if (!skuCode) return null;
     const supplierId = firstText(raw, ["supplier_id", "supplierId"])
       ? this.upsertSupplier(companyId, raw, now)
       : null;
@@ -766,9 +771,12 @@ class JushuitanOperationalBridge {
   }
 
   upsertInventoryBatch(companyId, raw, now) {
+    // 硬护栏：跟 upsertSku 同源 —— inventory 源里的字段定义 schema / 菜单条目 没有 sku_code 也没有 qty，
+    // 不是真库存数据，直接放行。
+    const skuCode = firstText(raw, ["sku_code", "sku_id", "skuId", "i_id", "iId"]);
+    if (!skuCode) return false;
     const skuId = this.upsertSku(companyId, raw, now);
     if (!skuId) return false;
-    const skuCode = firstText(raw, ["sku_code", "sku_id", "skuId", "i_id", "iId"]) || skuId;
     const warehouseCode = firstText(raw, ["wh_id", "warehouse_id", "wms_co_id", "warehouse", "bin"]) || "default";
     const totalQty = integerQty(first(raw, ["qty", "stock_qty", "actual_qty", "unlock_qty"]));
     const lockedQty = integerQty(first(raw, ["lock_qty", "locked_qty"]));
