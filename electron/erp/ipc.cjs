@@ -13390,7 +13390,9 @@ async function getPurchaseWorkbenchRuntime(params = {}) {
     } catch (error) {
       const statusCode = Number(error?.statusCode || 0);
       if (!statusCode || ![404, 405, 502].includes(statusCode)) throw error;
-      payload = await remoteRequest("/api/purchase/workbench", { timeoutMs: 120000 });
+      // 0.3.25：fallback 也带上原始 params，避免老 body=空时服务器按 default（includeOptions=true,
+      // include1688Meta=true）返回 4.6MB 全量包，跨海撑爆 timeout、按钮卡 3-10 秒。
+      payload = await remoteRequest("/api/purchase/workbench", { method: "POST", body: params, timeoutMs: 120000 });
     }
     return normalizePurchaseWorkbenchPoNumbers(normalizeJstPurchaseWorkbench(payload.workbench || {}));
   }
@@ -13911,9 +13913,12 @@ async function performPurchaseActionRuntime(payload = {}) {
     let remotePayload = payload;
     if ((payload?.action === "generate_po" || payload?.action === "generate_purchase_order") && !optionalString(payload.poNo || payload.po_no)) {
       try {
+        // 0.3.25 性能：只为挑下一个空闲 PO 号，不需要 SKU/supplier options 或 1688 元数据。
+        // 老版本默认拉 4.6MB workbench，每次「生成采购单」按钮慢 3-10 秒；关掉 options
+        // + 1688Meta 后只剩 PR/PO 表，~50KB 跨海。
         const current = await remoteRequest("/api/purchase/workbench", {
           method: "POST",
-          body: { limit: 500, includeRequestDetails: false },
+          body: { limit: 500, includeRequestDetails: false, includeOptions: false, include1688Meta: false },
         });
         remotePayload = {
           ...remotePayload,

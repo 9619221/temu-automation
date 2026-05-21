@@ -3,6 +3,7 @@ const http = require("http");
 const https = require("https");
 const os = require("os");
 const path = require("path");
+const zlib = require("zlib");
 
 const CONFIG_FILE_NAME = "erp-runtime.json";
 const DEFAULT_PORT = 19380;
@@ -136,6 +137,9 @@ function requestJson(serverUrl, requestPath, options = {}) {
   const transport = url.protocol === "https:" ? https : http;
   const headers = {
     Accept: "application/json",
+    // 0.3.25 跨海带宽优化：声明支持 gzip，服务器（lanServer.writeJson）会按这个头决定是否压缩。
+    // 老版本服务器不识别此头，会按原样返回 raw JSON——下方 content-encoding 判断兼容两端。
+    "Accept-Encoding": "gzip",
     "User-Agent": "temu-erp-electron-client",
     ...(options.headers || {}),
   };
@@ -157,7 +161,19 @@ function requestJson(serverUrl, requestPath, options = {}) {
       const chunks = [];
       res.on("data", (chunk) => chunks.push(chunk));
       res.on("end", () => {
-        const text = Buffer.concat(chunks).toString("utf8");
+        let buf = Buffer.concat(chunks);
+        // 服务器若按 Accept-Encoding 协商了 gzip，则 content-encoding=gzip，需要手动解压。
+        // Node http 模块不自动解 gzip；服务器端 <4KB 走 raw 时此头不存在，按原样处理。
+        const enc = String(res.headers["content-encoding"] || "").toLowerCase();
+        if (enc === "gzip") {
+          try {
+            buf = zlib.gunzipSync(buf);
+          } catch (gzErr) {
+            reject(new Error(`gzip 解压失败: ${gzErr?.message || gzErr}`));
+            return;
+          }
+        }
+        const text = buf.toString("utf8");
         let payload = null;
         try {
           payload = text ? JSON.parse(text) : null;
