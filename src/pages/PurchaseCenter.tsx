@@ -3859,12 +3859,18 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       return;
     }
     const hasMapping = Number(row.mappingCount || 0) > 0;
+    const hasCandidates = Boolean(row.candidates?.length || row.candidateCount);
+    const hasSkuSupplier = Boolean(row.skuSupplierId || row.skuSupplierName);
+    // 三者都没有时走线下采购：后端用空候选生成 placeholder PO，
+    // 用户后续在采购单详情里手工补供应商 / 价格。
+    const offlinePurchase = !hasMapping && !hasCandidates && !hasSkuSupplier;
     const result = await runAction(`po-${row.id}`, {
       action: "generate_po",
       prId: row.id,
       qty: row.requestedQty,
       preferSku1688Source: hasMapping,
-    }, hasMapping ? undefined : "手工采购单已生成");
+      offlinePurchase,
+    }, offlinePurchase ? "线下采购单已生成" : (hasMapping ? undefined : "手工采购单已生成"));
     if (!result) return;
     const generatedPo = result?.result?.purchaseOrder as PurchaseOrderRow | undefined;
     if (generatedPo?.id) {
@@ -4071,13 +4077,15 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         const hasCandidates = Boolean(row.candidates?.length || row.candidateCount);
         const hasMapping = Number(row.mappingCount || 0) > 0;
         const hasSkuSupplier = Boolean(row.skuSupplierId || row.skuSupplierName);
+        const hasAnySource = hasCandidates || hasMapping || hasSkuSupplier;
         const existingPo = purchaseOrders.find((item) => purchaseOrderBelongsToRequest(item, row.id));
         const canQuote = canPurchase && ["submitted", "buyer_processing", "sourced"].includes(row.status);
         const canFindSupplier = canQuote && !hasMapping && !hasSkuSupplier;
         const canImageSearch = canQuote;
+        // 无关联 (hasAnySource=false) 时也允许生成采购单，走"线下采购单"
+        // 路径——后端用空候选创建 placeholder PO，用户后续手工补供应商/价格。
         const canGeneratePo = canPurchase
           && !existingPo
-          && (hasCandidates || hasMapping || hasSkuSupplier)
           && ["submitted", "buyer_processing", "sourced", "waiting_ops_confirm"].includes(row.status);
         const canDelete = canCreateRequest && ["submitted", "buyer_processing", "sourced"].includes(row.status);
         return (
@@ -4110,7 +4118,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 loading={actingKey === `po-${row.id}`}
                 onClick={() => void generatePurchaseOrderForRow(row)}
               >
-                生成采购单
+                {hasAnySource ? "生成采购单" : "线下采购单"}
               </Button>
             ) : null}
             {existingPo || row.status === "converted_to_po" ? (
