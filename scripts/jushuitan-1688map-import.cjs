@@ -23,6 +23,16 @@ const DRY = process.env.DRY === "1";
 
 function s(v) { return v === null || v === undefined ? "" : String(v).trim(); }
 function intOr(v, d) { const n = Number(v); return Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : d; }
+// 用于映射比例:依次试每个候选值,取第一个能解析成正整数 (>=1) 的;全无则返回 1。
+// 修掉 intOr 把 null/0/空串当合法值返回 0 的坑,确保 pack_qty=null 时能 fallback 到 plat_map_qty。
+function pickPositiveInt(...vals) {
+  for (const v of vals) {
+    if (v === null || v === undefined || v === "") continue;
+    const n = Number(v);
+    if (Number.isFinite(n) && n >= 1) return Math.trunc(n);
+  }
+  return 1;
+}
 
 function main() {
   const jsonPath = process.argv[2];
@@ -105,8 +115,8 @@ function main() {
         is_default: s(r.is_default_supplier) === "是" ? 1 : 0,
         source_payload_json: JSON.stringify(r),
         platform_sku_name: s(r.manage_name_1688) || null,
-        our_qty: intOr(r.base_qty, 1) || 1,
-        platform_qty: intOr(r.pack_qty, intOr(r.plat_map_qty, 1)) || 1,
+        our_qty: pickPositiveInt(r.base_qty),
+        platform_qty: pickPositiveInt(r.pack_qty, r.plat_map_qty),
         remark: s(r.plat_supplier_remark) || s(r.pack_qty_remark) || s(r.healthCheckResult) || null,
         created_at: now,
         updated_at: now,
