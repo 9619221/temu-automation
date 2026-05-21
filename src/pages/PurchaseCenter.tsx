@@ -1005,6 +1005,7 @@ const ALIBABA_1688_BUSINESS_ERROR_HINTS: Array<{ code: string; hint: string }> =
   { code: "ADDRESS_ID_INVALID", hint: "1688 收货地址 ID 无效，请到「询盘设置」点「同步 1688 地址」后重新选择地址再推单。" },
   { code: "ADDRESS_INACTIVE", hint: "该 1688 收货地址已失效（远端可能已被删除），请到「询盘设置」点「同步 1688 地址」后重新选择再推单。" },
   { code: "ADDRESS_REMOTE_ID_MISSING", hint: "该收货地址还没有 1688 远端 ID，请到「询盘设置」点「同步 1688 地址」拉一份完整数据后重新选择再推单。" },
+  { code: "does not belong to this store", hint: "选的 1688 收货地址不属于当前店铺/采购账号。请重新选地址（picker 会按当前 1688 采购账号过滤），或到「询盘设置」用对应 1688 账号同步一次地址。" },
   { code: "ORDER_NOT_EXIST", hint: "1688 找不到这个订单号；可能已被卖家取消、超时关闭或绑错了账号。建议先在 1688 后台确认订单状态，或在采购单上点「取消1688」后重新推送。" },
   { code: "ORDER_NOT_PAY", hint: "1688 订单不在「待支付」状态；可能已付款或已关闭。" },
   { code: "ORDER_HAS_PAID", hint: "1688 订单已经付款过了。在系统上点「确认付款」推进本地状态。" },

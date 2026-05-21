@@ -7165,10 +7165,13 @@ function list1688DeliveryAddresses(params = {}) {
   const status = optionalString(params.status);
   const companyId = normalizeCompanyId(params.companyId || params.company_id, erpState.currentUser);
   const accountId = optionalString(params.accountId || params.account_id);
+  // [OAuth 维度 2026-05-21] 加 OAuth filter；caller 通常按 OAuth 列地址（picker）。
+  const purchase1688AccountId = optionalString(params.purchase1688AccountId || params.purchase_1688_account_id);
   const conditions = ["addr.company_id = @company_id"];
-  const values = { company_id: companyId, status, account_id: accountId };
+  const values = { company_id: companyId, status, account_id: accountId, oauth_id: purchase1688AccountId };
   if (status) conditions.push("addr.status = @status");
   if (accountId) conditions.push("addr.account_id = @account_id");
+  if (purchase1688AccountId) conditions.push("addr.purchase_1688_account_id = @oauth_id");
   const rows = db.prepare(`
     SELECT addr.*, acct.name AS account_name
     FROM erp_1688_delivery_addresses addr
@@ -7179,38 +7182,40 @@ function list1688DeliveryAddresses(params = {}) {
   return rows.map(to1688DeliveryAddress);
 }
 
-function get1688DeliveryAddress(db, addressId = null, companyId = DEFAULT_COMPANY_ID, accountId = null) {
+function get1688DeliveryAddress(db, addressId = null, companyId = DEFAULT_COMPANY_ID, accountId = null, purchase1688AccountId = null) {
   const id = optionalString(addressId);
   const normalizedCompanyId = normalizeCompanyId(companyId, null);
   const normalizedAccountId = optionalString(accountId);
+  const normalizedOauth = optionalString(purchase1688AccountId);
   if (id) {
+    // [OAuth 维度 2026-05-21] 取消 account_id 硬校验。地址按 1688 OAuth 归属，跨 ERP
+    // 店铺共用同一仓库地址是常态；resolve1688AddressParam 的 cross-OAuth fallback 兜底
+    // OAuth 维度的不一致。这里只要拿到地址行就返回，跨账号判断交给上游。
     const row = db.prepare("SELECT * FROM erp_1688_delivery_addresses WHERE id = ? AND company_id = ?").get(id, normalizedCompanyId);
     if (!row) throw new Error(`1688 delivery address not found: ${id}`);
-    const rowAccountId = optionalString(row.account_id);
-    if (normalizedAccountId && rowAccountId && rowAccountId !== normalizedAccountId) {
-      throw new Error("1688 delivery address does not belong to this store");
-    }
     return row;
+  }
+  // [OAuth 维度 2026-05-21] 默认地址查询：优先按 OAuth；OAuth 没传退回老的 account_id 路径。
+  if (normalizedOauth) {
+    const row = db.prepare(`
+      SELECT *
+      FROM erp_1688_delivery_addresses
+      WHERE company_id = @company_id
+        AND purchase_1688_account_id = @oauth_id
+        AND status = 'active'
+      ORDER BY is_default DESC, updated_at DESC, created_at DESC
+      LIMIT 1
+    `).get({ company_id: normalizedCompanyId, oauth_id: normalizedOauth });
+    if (row) return row;
   }
   if (normalizedAccountId) {
     const row = db.prepare(`
       SELECT *
       FROM erp_1688_delivery_addresses
       WHERE company_id = @company_id
-        AND (
-          account_id = @account_id
-          OR account_id IS NULL
-          OR account_id = ''
-        )
+        AND account_id = @account_id
         AND status = 'active'
-      ORDER BY
-        CASE
-          WHEN account_id = @account_id AND COALESCE(address_id, '') != '' THEN 0
-          WHEN (account_id IS NULL OR account_id = '') AND COALESCE(address_id, '') != '' THEN 1
-          WHEN account_id = @account_id THEN 2
-          ELSE 3
-        END,
-        is_default DESC,
+      ORDER BY is_default DESC,
         updated_at DESC,
         created_at DESC
       LIMIT 1
@@ -7237,11 +7242,18 @@ function save1688DeliveryAddressAction({ db, payload, actor }) {
   const now = nowIso();
   const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
   const accountId = optionalString(payload.accountId || payload.account_id);
+  // [OAuth 维度 2026-05-21] 新逻辑：地址按 1688 OAuth (purchase_1688_account_id) 归属，
+  // 不再硬绑 ERP 店铺 (account_id)。同步路径会传 purchase1688AccountId 进来；旧 caller
+  // 没传时，从 account_id 反查店铺挂的默认 OAuth 兜底。account_id 字段保留兼容旧客户端。
+  let purchase1688AccountId = optionalString(payload.purchase1688AccountId || payload.purchase_1688_account_id);
   if (accountId) {
-    const account = db.prepare("SELECT id, company_id FROM erp_accounts WHERE id = ?").get(accountId);
+    const account = db.prepare("SELECT id, company_id, default_1688_purchase_account_id FROM erp_accounts WHERE id = ?").get(accountId);
     if (!account) throw new Error("店铺不存在，无法绑定 1688 地址");
     if (normalizeCompanyId(account.company_id, actor) !== companyId) {
       throw new Error("店铺不属于当前公司，无法绑定 1688 地址");
+    }
+    if (!purchase1688AccountId) {
+      purchase1688AccountId = optionalString(account.default_1688_purchase_account_id);
     }
   }
   const rawAddressParam = payload.rawAddressParam || payload.addressParam || {};
@@ -7249,6 +7261,7 @@ function save1688DeliveryAddressAction({ db, payload, actor }) {
     id: optionalString(payload.addressId || payload.id) || createId("1688_addr"),
     company_id: companyId,
     account_id: accountId || null,
+    purchase_1688_account_id: purchase1688AccountId || null,
     label: requireString(payload.label || payload.name, "label"),
     full_name: requireString(payload.fullName || payload.receiverName || rawAddressParam.fullName, "fullName"),
     mobile: optionalString(payload.mobile || rawAddressParam.mobile),
@@ -7263,7 +7276,6 @@ function save1688DeliveryAddressAction({ db, payload, actor }) {
     raw_address_param_json: trimJsonForStorage(rawAddressParam || {}),
     is_default: payload.isDefault === false ? 0 : (payload.isDefault || payload.default ? 1 : 0),
     status: optionalString(payload.status) || "active",
-    purchase_1688_account_id: optionalString(payload.purchase1688AccountId || payload.purchase_1688_account_id) || null,
     created_by: optionalString(actor.id),
     created_at: now,
     updated_at: now,
@@ -7276,7 +7288,11 @@ function save1688DeliveryAddressAction({ db, payload, actor }) {
   }
   const existing = db.prepare("SELECT created_at, created_by FROM erp_1688_delivery_addresses WHERE id = ?").get(row.id);
   if (row.is_default) {
-    if (row.account_id) {
+    // [OAuth 维度 2026-05-21] is_default 重置范围改成按 OAuth；OAuth 未知时退回旧的 account_id 范围。
+    if (row.purchase_1688_account_id) {
+      db.prepare("UPDATE erp_1688_delivery_addresses SET is_default = 0 WHERE company_id = ? AND purchase_1688_account_id = ? AND id != ?")
+        .run(row.company_id, row.purchase_1688_account_id, row.id);
+    } else if (row.account_id) {
       db.prepare("UPDATE erp_1688_delivery_addresses SET is_default = 0 WHERE company_id = ? AND account_id = ? AND id != ?")
         .run(row.company_id, row.account_id, row.id);
     } else {
@@ -7286,18 +7302,19 @@ function save1688DeliveryAddressAction({ db, payload, actor }) {
   }
   db.prepare(`
     INSERT INTO erp_1688_delivery_addresses (
-      id, company_id, account_id, label, full_name, mobile, phone, post_code, province_text, city_text,
+      id, company_id, account_id, purchase_1688_account_id, label, full_name, mobile, phone, post_code, province_text, city_text,
       area_text, town_text, address, address_id, raw_address_param_json,
-      is_default, status, purchase_1688_account_id, created_by, created_at, updated_at
+      is_default, status, created_by, created_at, updated_at
     )
     VALUES (
-      @id, @company_id, @account_id, @label, @full_name, @mobile, @phone, @post_code, @province_text, @city_text,
+      @id, @company_id, @account_id, @purchase_1688_account_id, @label, @full_name, @mobile, @phone, @post_code, @province_text, @city_text,
       @area_text, @town_text, @address, @address_id, @raw_address_param_json,
-      @is_default, @status, @purchase_1688_account_id, @created_by, @created_at, @updated_at
+      @is_default, @status, @created_by, @created_at, @updated_at
     )
     ON CONFLICT(id) DO UPDATE SET
       company_id = excluded.company_id,
       account_id = excluded.account_id,
+      purchase_1688_account_id = excluded.purchase_1688_account_id,
       label = excluded.label,
       full_name = excluded.full_name,
       mobile = excluded.mobile,
@@ -7312,7 +7329,6 @@ function save1688DeliveryAddressAction({ db, payload, actor }) {
       raw_address_param_json = excluded.raw_address_param_json,
       is_default = excluded.is_default,
       status = excluded.status,
-      purchase_1688_account_id = COALESCE(NULLIF(excluded.purchase_1688_account_id, ''), erp_1688_delivery_addresses.purchase_1688_account_id),
       updated_at = excluded.updated_at
   `).run({
     ...row,
@@ -7508,9 +7524,24 @@ function normalize1688ReceiveAddressResponse(rawResponse = {}) {
   return rows.map(normalize1688RemoteAddress).filter((item) => item.address || item.alibabaAddressId);
 }
 
-function findExisting1688AddressId(db, { companyId, accountId, alibabaAddressId }) {
+function findExisting1688AddressId(db, { companyId, accountId, purchase1688AccountId, alibabaAddressId }) {
   const remoteId = optionalString(alibabaAddressId);
   if (!remoteId) return null;
+  // [OAuth 维度 2026-05-21] 优先按 OAuth 匹配。同一个 OAuth 下 (address_id) 应该唯一。
+  // 没传 OAuth 时退回按 account_id 兼容旧逻辑。
+  const oauth = optionalString(purchase1688AccountId);
+  if (oauth) {
+    const row = db.prepare(`
+      SELECT id
+      FROM erp_1688_delivery_addresses
+      WHERE company_id = @company_id
+        AND purchase_1688_account_id = @oauth_id
+        AND address_id = @address_id
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `).get({ company_id: companyId, oauth_id: oauth, address_id: remoteId });
+    if (row?.id) return row.id;
+  }
   const row = db.prepare(`
     SELECT id
     FROM erp_1688_delivery_addresses
@@ -7531,9 +7562,13 @@ async function sync1688DeliveryAddressesAction({ db, payload, actor }) {
   assertActorRole(actor, ["buyer", "manager", "admin"], "1688 receive address sync");
   const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
   const accountId = optionalString(payload.accountId || payload.account_id);
-  const purchase1688AccountId = optionalString(
-    payload.purchase1688AccountId || payload.purchase_1688_account_id,
-  ) || null;
+  // [OAuth 维度 2026-05-21] 同步以 OAuth 为单位。caller 未传 OAuth 时，按 accountId
+  // 反查店铺挂的默认 OAuth；都没有就让 call1688ProcurementApi 走公司默认 OAuth。
+  let purchase1688AccountId = optionalString(payload.purchase1688AccountId || payload.purchase_1688_account_id);
+  if (!purchase1688AccountId && accountId) {
+    const acct = db.prepare("SELECT default_1688_purchase_account_id FROM erp_accounts WHERE id = ?").get(accountId);
+    purchase1688AccountId = optionalString(acct?.default_1688_purchase_account_id);
+  }
   const params = raw1688Params(payload, {
     webSite: optionalString(payload.webSite) || "1688",
   });
@@ -7542,7 +7577,7 @@ async function sync1688DeliveryAddressesAction({ db, payload, actor }) {
     db,
     actor,
     accountId,
-    purchase1688AccountId: optionalString(payload.purchase1688AccountId || payload.purchase_1688_account_id),
+    purchase1688AccountId,
     action: "sync_1688_addresses",
     api: PROCUREMENT_APIS.RECEIVE_ADDRESS,
     params,
@@ -7554,6 +7589,7 @@ async function sync1688DeliveryAddressesAction({ db, payload, actor }) {
     const existingId = findExisting1688AddressId(db, {
       companyId,
       accountId,
+      purchase1688AccountId,
       alibabaAddressId: address.alibabaAddressId,
     });
     if (existingId) updatedCount += 1; else addedCount += 1;
@@ -7570,21 +7606,26 @@ async function sync1688DeliveryAddressesAction({ db, payload, actor }) {
     });
   });
   // diff: 远端没回来的本地行打 inactive。
-  // 安全策略：只有当远端确实返回过地址（addresses.length > 0）才做反向标记，避免一次接口失败就把所有本地地址全废掉。
-  // 范围严格限定在「同 (company_id, account_id)」，跨账号互不影响。
+  // [OAuth 维度 2026-05-21] 反向反激活范围改成按 OAuth（同一个 OAuth 名下的所有
+  // 地址）；OAuth 未知时退回老的 account_id 范围保持兼容。
   let deactivatedCount = 0;
   if (addresses.length > 0 && !payload.skipDeactivate) {
     const remoteAddressIds = new Set(
       addresses.map((address) => optionalString(address.alibabaAddressId)).filter(Boolean),
     );
-    // 关键:deactivate scope 必须也按 purchase_1688_account_id 限定。否则两个 1688 买家账号(明舵/优雅哥)
-    // 给同一个店铺同步时,后同步的会把前同步的地址全部标 inactive(它们的 address_id 不在自己的远端列表里)。
-    const localActiveRows = db.prepare(`
+    const localActiveRows = purchase1688AccountId
+      ? db.prepare(`
+        SELECT id, address_id
+        FROM erp_1688_delivery_addresses
+        WHERE company_id = @company_id
+          AND purchase_1688_account_id = @oauth_id
+          AND status = 'active'
+      `).all({ company_id: companyId, oauth_id: purchase1688AccountId })
+      : db.prepare(`
       SELECT id, address_id
       FROM erp_1688_delivery_addresses
       WHERE company_id = @company_id
         AND COALESCE(account_id, '') = COALESCE(@account_id, '')
-        AND COALESCE(purchase_1688_account_id, '') = COALESCE(@purchase_1688_account_id, '')
         AND status = 'active'
     `).all({ company_id: companyId, account_id: accountId || "" });
     const deactivateStmt = db.prepare(`
@@ -8449,8 +8490,10 @@ function resolve1688AddressParam(db, payload = {}, actor = {}, po = {}) {
   const addressId = optionalString(payload.deliveryAddressId || payload.erpAddressId || payload.addressId);
   const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
   const accountId = optionalString(payload.accountId || payload.account_id || po.account_id || po.accountId);
+  // [OAuth 维度 2026-05-21] 传 OAuth 给 get1688DeliveryAddress，让默认地址查询优先按 OAuth 走。
+  const purchase1688AccountId = optionalString(payload.purchase1688AccountId || payload.purchase_1688_account_id || po.purchase_1688_account_id);
   try {
-    const row = get1688DeliveryAddress(db, addressId, companyId, accountId);
+    const row = get1688DeliveryAddress(db, addressId, companyId, accountId, purchase1688AccountId);
     // 推单前预校验：先在本地拦掉肯定不能成功的请求，错误码与 ALIBABA_1688_BUSINESS_ERROR_HINTS 对齐。
     const status = optionalString(row.status) || "active";
     if (status !== "active") {
@@ -8466,6 +8509,28 @@ function resolve1688AddressParam(db, payload = {}, actor = {}, po = {}) {
       );
       error.code = "ADDRESS_REMOTE_ID_MISSING";
       throw error;
+    }
+    // [Cross-OAuth fallback 2026-05-21] 选的地址绑在别的 OAuth 上时，自动 fallback 到
+    // 当前 OAuth 下的有效地址（同公司、active、有远端 ID，优先 isDefault 再按 updated_at）。
+    const rowOauth = optionalString(row.purchase_1688_account_id);
+    if (purchase1688AccountId && rowOauth && rowOauth !== purchase1688AccountId) {
+      const fb = db.prepare(`
+        SELECT *
+        FROM erp_1688_delivery_addresses
+        WHERE company_id = @company_id
+          AND purchase_1688_account_id = @oauth_id
+          AND status = 'active'
+          AND address_id IS NOT NULL AND address_id != ''
+        ORDER BY is_default DESC, updated_at DESC
+        LIMIT 1
+      `).get({ company_id: companyId, oauth_id: purchase1688AccountId });
+      if (fb) {
+        console.log(`[1688-push] cross-OAuth fallback: ${row.id} (oauth=${rowOauth}) -> ${fb.id} (oauth=${purchase1688AccountId})`);
+        return build1688AddressParamFromRow(fb);
+      }
+      const crossErr = new Error("errorCode:ADDRESS_INACTIVE 当前 1688 采购账号下没有可用的收货地址（之前选的地址绑定在别的 OAuth 上），请到「询盘设置」点「同步 1688 地址」后重新选择。");
+      crossErr.code = "ADDRESS_INACTIVE";
+      throw crossErr;
     }
     return build1688AddressParamFromRow(row);
   } catch (error) {
