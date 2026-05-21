@@ -58,6 +58,13 @@ function main() {
       try { p = JSON.parse(r.source_payload_json || "null") || {}; }
       catch { stats.badJson++; continue; }
 
+      // 护栏:只重算"聚水潭原始 payload"——至少含一个聚水潭比例字段才动。
+      // 否则可能是被找货/采购等链路覆盖了 source_payload 的行,它们当前
+      // our_qty/platform_qty 是用户真实值,pickPositiveInt 兜底成 1 会冲掉。
+      const hasJstFields =
+        p.base_qty != null || p.pack_qty != null || p.plat_map_qty != null;
+      if (!hasJstFields) { stats.unchanged++; continue; }
+
       const newOur = pickPositiveInt(p.base_qty);
       const newPlatform = pickPositiveInt(p.pack_qty, p.plat_map_qty);
 

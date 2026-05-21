@@ -3542,8 +3542,11 @@ function upsertSku1688SourceRow(db, payload = {}, actor = {}) {
     moq: optionalNumber(payload.moq),
     lead_days: optionalNumber(payload.leadDays ?? payload.lead_days),
     logistics_fee: optionalNumber(payload.logisticsFee ?? payload.logistics_fee),
-    our_qty: optionalPositiveInteger(payload.ourQty ?? payload.our_qty, 1),
-    platform_qty: optionalPositiveInteger(payload.platformQty ?? payload.platform_qty, 1),
+    // 默认 null 表示"调用方未提供";UPDATE 时保留原值,避免找货/刷新等
+    // 不关心 ratio 的回写路径拿前端默认 1 把 db 里的真值冲掉(回写循环 bug)。
+    // 首次 INSERT 时再由 SQL 的 COALESCE 兜到 1。
+    our_qty: optionalPositiveInteger(payload.ourQty ?? payload.our_qty, null),
+    platform_qty: optionalPositiveInteger(payload.platformQty ?? payload.platform_qty, null),
     status: optionalString(payload.status) || "active",
     is_default: payload.isDefault === false || payload.is_default === false ? 0 : (payload.isDefault || payload.is_default ? 1 : 0),
     remark: optionalString(payload.remark),
@@ -3558,8 +3561,12 @@ function upsertSku1688SourceRow(db, payload = {}, actor = {}) {
   if (row.moq !== null && (!Number.isInteger(Number(row.moq)) || Number(row.moq) <= 0)) {
     throw new Error("moq must be a positive integer");
   }
-  if (!Number.isInteger(row.our_qty) || row.our_qty <= 0 || !Number.isInteger(row.platform_qty) || row.platform_qty <= 0) {
-    throw new Error("1688 mapping ratio must be positive integers");
+  // 允许 null(=未提供,UPDATE 保留原值);提供了就必须是正整数。
+  if (row.our_qty !== null && (!Number.isInteger(row.our_qty) || row.our_qty <= 0)) {
+    throw new Error("1688 mapping our_qty must be a positive integer");
+  }
+  if (row.platform_qty !== null && (!Number.isInteger(row.platform_qty) || row.platform_qty <= 0)) {
+    throw new Error("1688 mapping platform_qty must be a positive integer");
   }
   if (row.is_default) {
     db.prepare(`
@@ -3585,7 +3592,7 @@ function upsertSku1688SourceRow(db, payload = {}, actor = {}) {
     VALUES (
       @id, @account_id, @sku_id, @mapping_group_id, @external_offer_id, @external_sku_id, @external_spec_id,
       @platform_sku_name, @supplier_name, @product_title, @product_url, @image_url, @unit_price, @moq,
-      @lead_days, @logistics_fee, @our_qty, @platform_qty, @status, @is_default, @remark, @source_payload_json,
+      @lead_days, @logistics_fee, COALESCE(@our_qty, 1), COALESCE(@platform_qty, 1), @status, @is_default, @remark, @source_payload_json,
       @created_by, @created_at, @updated_at
     )
     ON CONFLICT(account_id, sku_id, external_offer_id, external_sku_id, external_spec_id) DO UPDATE SET
@@ -3599,8 +3606,10 @@ function upsertSku1688SourceRow(db, payload = {}, actor = {}) {
       moq = COALESCE(excluded.moq, moq),
       lead_days = COALESCE(excluded.lead_days, lead_days),
       logistics_fee = COALESCE(excluded.logistics_fee, logistics_fee),
-      our_qty = excluded.our_qty,
-      platform_qty = excluded.platform_qty,
+      -- 用 @parameter 而不是 excluded:VALUES 里已 COALESCE 成 1,excluded 拿不到 null。
+      -- 直接读绑定参数才能区分"未提供"(保留原值) vs "提供 1"(覆盖)。
+      our_qty = COALESCE(@our_qty, our_qty),
+      platform_qty = COALESCE(@platform_qty, platform_qty),
       status = excluded.status,
       is_default = excluded.is_default,
       remark = COALESCE(excluded.remark, remark),
