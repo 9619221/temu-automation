@@ -2833,9 +2833,10 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           if (Array.isArray(wb2?.supplierOptions)) setSuppliers(wb2.supplierOptions);
         }).catch(() => {});
       }
-      // 单 PR 创建时自动 generate PO + 自动推 1688（绑映射的会弹账号/地址 Modal；
-      // 未绑映射的 silent 退出留在「待找品」tab）。多 PR 不自动触发推单 Modal，
-      // 避免多个 Modal 互相覆盖；用户去列表逐个推。
+      // 单 PR 创建时：有映射 / 候选 / SKU 供应商才自动 generate PO + 自动推 1688
+      // （绑映射的会弹账号/地址 Modal）。三者都没有的 PR 留在「待找品」tag，
+      // 用户主动点「线下采购单」才建 PO，避免堆出一堆 supplier_id=NULL 占位 draft。
+      // 多 PR 不自动触发推单 Modal，避免多个 Modal 互相覆盖；用户去列表逐个推。
       if (createdPrIds.length === 1) {
         const targetPrId = createdPrIds[0];
         const refreshedRequests = wb && Array.isArray((wb as any).purchaseRequests)
@@ -2843,10 +2844,15 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           : [];
         const row = refreshedRequests.find((r: any) => String(r?.id || "") === targetPrId);
         if (row) {
-          // setTimeout 0：先让 Modal close + workbench apply 渲染稳定，再触发后续 Modal
-          setTimeout(() => {
-            void generatePurchaseOrderForRow(row as PurchaseRequestRow, { silent: true });
-          }, 0);
+          const hasMapping = Number(row.mappingCount || 0) > 0;
+          const hasCandidates = Boolean(row.candidates?.length || row.candidateCount);
+          const hasSkuSupplier = Boolean(row.skuSupplierId || row.skuSupplierName);
+          if (hasMapping || hasCandidates || hasSkuSupplier) {
+            // setTimeout 0：先让 Modal close + workbench apply 渲染稳定，再触发后续 Modal
+            setTimeout(() => {
+              void generatePurchaseOrderForRow(row as PurchaseRequestRow, { silent: true });
+            }, 0);
+          }
         }
       }
     } catch (error: any) {
@@ -4053,25 +4059,31 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       title: "货源",
       key: "sourcing",
       width: 120,
-      render: (_value, row) => (
-        <Space direction="vertical" size={2}>
-          <Text>{formatQty(row.mappingCount)} 个映射</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            {formatQty(row.candidateCount)} 个报价
-          </Text>
-          {row.primaryMappingSupplierName || row.primaryMappingOfferId ? (
+      render: (_value, row) => {
+        const noSource = !Number(row.mappingCount || 0)
+          && !(row.candidates?.length || row.candidateCount)
+          && !(row.skuSupplierId || row.skuSupplierName);
+        return (
+          <Space direction="vertical" size={2}>
+            {noSource ? <Tag color="orange" style={{ marginInlineEnd: 0 }}>待找品</Tag> : null}
+            <Text>{formatQty(row.mappingCount)} 个映射</Text>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              {row.primaryMappingSupplierName || row.primaryMappingOfferId}
+              {formatQty(row.candidateCount)} 个报价
             </Text>
-          ) : null}
-          {!row.mappingCount && (row.skuSupplierName || row.skuSupplierId) ? (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {row.skuSupplierName || "商品资料供应商"}
-            </Text>
-          ) : null}
-          <Text type="secondary" style={{ fontSize: 12 }}>已选 {formatQty(row.selectedCandidateCount)}</Text>
-        </Space>
-      ),
+            {row.primaryMappingSupplierName || row.primaryMappingOfferId ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {row.primaryMappingSupplierName || row.primaryMappingOfferId}
+              </Text>
+            ) : null}
+            {!row.mappingCount && (row.skuSupplierName || row.skuSupplierId) ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {row.skuSupplierName || "商品资料供应商"}
+              </Text>
+            ) : null}
+            <Text type="secondary" style={{ fontSize: 12 }}>已选 {formatQty(row.selectedCandidateCount)}</Text>
+          </Space>
+        );
+      },
     },
     {
       title: "协作",
