@@ -3060,6 +3060,10 @@ function listSkus(params = {}) {
   if (companyId) conditions.push("sku.company_id = @company_id");
   if (!includeDeleted) conditions.push("sku.status != 'deleted'");
   if (excludeJst) conditions.push("sku.id NOT LIKE 'jst:skuprofile:%'");
+  // 永久护栏：排除 jushuitanOperationalBridge.upsertSku 历史灌入的 jst:sku:<slug>: 污染行。
+  // 合法 SKU 只有两种 id 形态：ERP 原生（前缀 sku_）和聚水潭权威导入（前缀 jst:skuprofile:）。
+  // 此 LIKE 'jst:sku:%' 不会误伤 jst:skuprofile:（因为后者前 8 字符是 'jst:skup'，不等于 'jst:sku:'）。
+  conditions.push("sku.id NOT LIKE 'jst:sku:%'");
   // 关键词模糊匹配：SKU 编码 / 内部 ID / 商品名
   if (search) conditions.push("(sku.internal_sku_code LIKE @search OR sku.id LIKE @search OR sku.product_name LIKE @search)");
   const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
