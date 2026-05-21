@@ -43,11 +43,10 @@
 
 1. 主仓 worktree（`C:\Users\Administrator\Desktop\temu-automation`）切到 `master`
 2. `git fetch origin && git reset --hard origin/master`（让本地 master 跟远端完全同步）
-3. **如果用 `goofy-wing-cec9e0` 作为发版临时分支**：必须先 `git reset --hard origin/master` 让它 == master，**禁止在 goofy-wing 上直接 commit 功能代码**
-4. 跑 `npx tsc --noEmit` 验证 0 错
-5. 跑 `npm run dist:win` 打 NSIS 安装包
-6. 跑 `npm run publish:update:erp` 推自建服务器（推 GitHub Releases 用 `publish:update:github`）
-7. 验证 `https://erp.temu.chat/releases/latest.yml` 显示新版本号
+3. 跑 `npx tsc --noEmit` 验证 0 错
+4. 跑 `npm run dist:win` 打 NSIS 安装包
+5. 跑 `npm run publish:update:erp` 推自建服务器（推 GitHub Releases 用 `publish:update:github`）
+6. 验证 `https://erp.temu.chat/releases/latest.yml` 显示新版本号
 
 ## 版本号 bump 在哪做
 
