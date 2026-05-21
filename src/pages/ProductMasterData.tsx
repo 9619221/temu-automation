@@ -408,7 +408,10 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
   const [editingStoreAddressAccount, setEditingStoreAddressAccount] = useState<ErpAccountRow | null>(null);
   const [skuFilters, setSkuFilters] = useState<SkuFilters>({ keyword: "" });
   const accountOptions = useMemo(
-    () => accounts.map((account) => ({ label: account.name || account.id, value: account.id })),
+    () => accounts
+      .map((account) => ({ label: account.name || account.id, value: account.id }))
+      // 店铺名前缀通常是数字（"028店"/"045店"），用 numeric 让自然顺序生效，避免按字符串排出 044→045→032 这种乱序。
+      .sort((a, b) => String(a.label).localeCompare(String(b.label), "zh-Hans-CN", { numeric: true })),
     [accounts],
   );
   const accountNameById = useMemo(

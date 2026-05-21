@@ -93,6 +93,10 @@ const FAST_PURCHASE_WORKBENCH_PARAMS = {
 const FULL_PURCHASE_WORKBENCH_PARAMS = {
   limit: 2000,
   includeRequestDetails: false,
+  // 性能：跨海 client mode 下，options（skuOptions/supplierOptions/sku1688Sources 各 500 条带长字段）
+  // 把响应体撑到 3MB+，下载 1-3 秒。SKU 选择器已改服务端搜索（handleSkuSearch），
+  // supplier 下拉也走 erp.supplier.list 按需拉，主页不再需要这一坨。
+  includeOptions: false,
   include1688Meta: true,
 };
 const TABLE_IDENTIFIER_TEXT_STYLE = {
@@ -1490,6 +1494,9 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     Array.isArray(initialWorkbench.skuOptions) ? initialWorkbench.skuOptions : []
   ));
   const [skuSearching, setSkuSearching] = useState(false);
+  // 0.3.25 性能：FULL_PURCHASE_WORKBENCH_PARAMS 关 includeOptions 后 skus 初始为空，
+  // 不能再用 skus.length === 0 当「数据库没数据」信号；改成「搜过且无结果」才提示新建商品资料。
+  const [hasAttemptedSkuSearch, setHasAttemptedSkuSearch] = useState(false);
   const skuSearchTimerRef = useRef<number | null>(null);
   const skuSearchSeqRef = useRef(0);
   const handleSkuSearch = (keyword: string) => {
@@ -1499,8 +1506,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     const seq = ++skuSearchSeqRef.current;
     skuSearchTimerRef.current = window.setTimeout(async () => {
       setSkuSearching(true);
+      setHasAttemptedSkuSearch(true);
       try {
-        const list = await erp?.sku?.list?.({ search: term, limit: 50, excludeJst: true } as any);
+        // 0.3.25 bug fix：erp_skus 表里 22560/22614 条都是 jst:skuprofile: 前缀（聚水潭导入是主力）。
+        // 旧版加 excludeJst:true 等于屏蔽 99% SKU，搜不到任何聚水潭来源商品。下面 1520-1538 行
+        // 的客户端 dedup 已经处理同 code 双胞胎（优先 ERP 原生），不需要服务端再排除。
+        const list = await erp?.sku?.list?.({ search: term, limit: 50 } as any);
         if (seq !== skuSearchSeqRef.current) return;
         // 同一个 internal_sku_code 有时会同时存在两条：纯数字 id 的 ERP 原生 + jst:skuprofile: 前缀的聚水潭副本。
         // 搜索框只想露一条，按 internal_sku_code 去重，纯数字那条优先（不带 jst:skuprofile: 前缀的更原生）。
@@ -2083,6 +2094,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       syncWorkbenchOptions(workbench);
       void erp.account.list({ limit: 500 })
         .then((accountRows: unknown) => setAccounts(Array.isArray(accountRows) ? accountRows : []))
+        .catch(() => {});
+      // 0.3.25 性能：FULL_PURCHASE_WORKBENCH_PARAMS 关掉了 includeOptions（详见 86 行注释），
+      // suppliers 不再随 workbench 返回，这里 fire-and-forget 单独拉一次给新建采购单 Modal 用。
+      void erp.supplier.list({ limit: 500 })
+        .then((supplierRows: unknown) => {
+          if (Array.isArray(supplierRows) && supplierRows.length) setSuppliers(supplierRows as SupplierOption[]);
+        })
         .catch(() => {});
       // 预拉 1688 采购账号列表（推单按钮要用）。失败/旧主控 Unsupported 都静默，
       // 推单时若 state 仍为空会兜底再拉一次（保留 fallback 分支）。
@@ -5442,7 +5460,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         onOk={() => requestForm.submit()}
         destroyOnClose
       >
-        {skuOptions.length === 0 ? (
+        {hasAttemptedSkuSearch && !skuSearching && skuOptions.length === 0 ? (
           <Alert
             type="warning"
             showIcon

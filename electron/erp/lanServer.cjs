@@ -3,6 +3,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const zlib = require("zlib");
 
 const DEFAULT_LAN_PORT = 19380;
 const DEFAULT_BIND_ADDRESS = "0.0.0.0";
@@ -226,16 +227,31 @@ function getLanStatus(extra = {}) {
 
 function writeJson(res, statusCode, payload, headers = {}) {
   const body = JSON.stringify(payload, null, 2);
-  res.writeHead(statusCode, {
+  let buf = Buffer.from(body);
+  const respHeaders = {
     "Content-Type": "application/json; charset=utf-8",
-    "Content-Length": Buffer.byteLength(body),
     "Cache-Control": "no-store",
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Device-Id",
     "X-Content-Type-Options": "nosniff",
     ...headers,
-  });
-  res.end(body);
+  };
+  // 0.3.25 跨海带宽优化：对 >=4KB 的 JSON 响应按 Accept-Encoding 协商 gzip。
+  // 采购/商品 workbench 经常 1-4MB，gzip 后通常压到 1/5 - 1/10，跨海下载尤其受益。
+  // <4KB 走 raw，避免 gzip 头部反而变大；客户端 Electron / Node http 默认带 gzip 自动解压。
+  const acceptEnc = String(res.req?.headers?.["accept-encoding"] || "").toLowerCase();
+  if (buf.length >= 4096 && acceptEnc.includes("gzip")) {
+    try {
+      buf = zlib.gzipSync(buf);
+      respHeaders["Content-Encoding"] = "gzip";
+      respHeaders["Vary"] = "Accept-Encoding";
+    } catch {
+      // 压缩失败回退 raw body
+    }
+  }
+  respHeaders["Content-Length"] = buf.length;
+  res.writeHead(statusCode, respHeaders);
+  res.end(buf);
 }
 
 function writeText(res, statusCode, body, headers = {}) {
