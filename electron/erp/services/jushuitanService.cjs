@@ -50,7 +50,9 @@ function normalizeCompanyId(value, actor = {}) {
 }
 
 function toCamelKey(key) {
-  return String(key).replace(/_([a-z])/g, (_, char) => char.toUpperCase());
+  // 含数字段（如 default_1688_purchase_account_id / alibaba_1688_address_id）也要并入前一段，
+  // 否则会产生 default_1688PurchaseAccountId 这种半生不熟的字段名，前端读不到。
+  return String(key).replace(/_([a-z0-9])/g, (_, char) => char.toUpperCase());
 }
 
 function toCamelRow(row) {
