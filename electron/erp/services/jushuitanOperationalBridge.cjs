@@ -669,8 +669,10 @@ class JushuitanOperationalBridge {
       updated_at: now,
       mapping_group_id: "",
       platform_sku_name: firstText(raw, ["manage_name_1688", "platform_sku_name"]) || null,
+      // 聚水潭 pack_qty 实际全是 null,真实映射比例在 plat_map_qty;漏 fallback
+      // 会让 platform_qty 永远被算成 1,bridge 跑一次就把外部正确写入的值冲掉。
       our_qty: Math.max(1, Math.floor(toNumber(first(raw, ["base_qty", "our_qty"])) || 1)),
-      platform_qty: Math.max(1, Math.floor(toNumber(first(raw, ["pack_qty", "platform_qty"])) || 1)),
+      platform_qty: Math.max(1, Math.floor(toNumber(first(raw, ["pack_qty", "plat_map_qty", "platform_qty"])) || 1)),
       remark: firstText(raw, ["plat_supplier_remark", "pack_qty_remark", "healthCheckResult"]) || null,
     });
     return true;
