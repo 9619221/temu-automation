@@ -14111,7 +14111,12 @@ async function getMasterDataWorkbenchRuntime(params = {}) {
 }
 
 async function listAccountsRuntime(params = {}) {
-  const workbench = await getMasterDataWorkbenchRuntime(params);
+  // 0.3.23 修 N+1：client mode 透传 part 给主控，让 master-data/workbench
+  // 只返回 accounts 这一段（68 条 vs 52MB 全量），避免每次 list IPC 都拉
+  // accounts+suppliers+skus 三套响应把 main process IPC 卡死。
+  // host mode 下 getMasterDataWorkbenchRuntime 走本地 SQL，全量查询很快，
+  // 多查的两项忽略即可，不影响性能。
+  const workbench = await getMasterDataWorkbenchRuntime({ ...params, part: "accounts" });
   return workbench.accounts || [];
 }
 
@@ -14146,7 +14151,8 @@ async function deleteAccountRuntime(payload = {}, actor = {}) {
 }
 
 async function listSuppliersRuntime(params = {}) {
-  const workbench = await getMasterDataWorkbenchRuntime(params);
+  // 0.3.23 修 N+1：见 listAccountsRuntime 注释。
+  const workbench = await getMasterDataWorkbenchRuntime({ ...params, part: "suppliers" });
   return workbench.suppliers || [];
 }
 
@@ -14166,7 +14172,8 @@ async function createSupplierRuntime(payload = {}, actor = {}) {
 }
 
 async function listSkusRuntime(params = {}) {
-  const workbench = await getMasterDataWorkbenchRuntime(params);
+  // 0.3.23 修 N+1：见 listAccountsRuntime 注释。
+  const workbench = await getMasterDataWorkbenchRuntime({ ...params, part: "skus" });
   return workbench.skus || [];
 }
 
