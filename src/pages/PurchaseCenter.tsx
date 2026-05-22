@@ -215,6 +215,7 @@ interface TimelineRow {
 interface PurchaseRequestRow {
   id: string;
   accountId?: string | null;
+  accountName?: string | null;
   skuId?: string | null;
   internalSkuCode?: string;
   productName?: string;
@@ -250,6 +251,7 @@ interface PurchaseOrderRow {
   createdByName?: string;
   status: string;
   paymentStatus?: string;
+  paidAt?: string | null;
   skuSummary?: string;
   skuImageUrl?: string | null;
   skuCodes?: string | null;
@@ -1823,15 +1825,17 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     ),
     [purchaseRequests],
   );
-  const draftOnlyOrderRows = useMemo(
-    () => purchaseOrders.filter((row) => row.status === "draft"),
+  // 待提交 = 还没提交付款的：草稿(draft，含线下手工单) + 已推 1688 待提交付款(pushed_pending_price)。
+  const unsubmittedOrderRows = useMemo(
+    () => purchaseOrders.filter((row) =>
+      row.status === "draft" || row.status === "pushed_pending_price"),
     [purchaseOrders],
   );
-  // 已推 1688 但还没付款（含改价中、待财务审、已批待付）
+  // 已提交付款、待支付（含历史财审 pending_finance_approval、已批待付 approved_to_pay）。
+  // pushed_pending_price(已推但还没提交付款)已移到「待提交」tab。
   const confirmedPendingPaymentOrderRows = useMemo(
     () => purchaseOrders.filter((row) =>
-      row.status === "pushed_pending_price"
-      || row.status === "pending_finance_approval"
+      row.status === "pending_finance_approval"
       || row.status === "approved_to_pay",
     ),
     [purchaseOrders],
@@ -1876,7 +1880,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     { key: "all", title: "全部", count: pendingRequestRows.length + purchaseOrders.length, kind: "mixed" },
     { key: "request_pending_sourcing", title: "待找品", count: pendingSourcingRequestRows.length, kind: "request" },
     { key: "request_sourced", title: "已找品", count: sourcedRequestRows.length, kind: "request" },
-    { key: "po_draft", title: "待推单", count: draftOnlyOrderRows.length, kind: "order" },
+    { key: "po_draft", title: "待提交", count: unsubmittedOrderRows.length, kind: "order" },
     { key: "po_pending_payment", title: "待付款", count: confirmedPendingPaymentOrderRows.length, kind: "order" },
     { key: "po_paid", title: "已付款", count: paidOrderRows.length, kind: "order" },
     { key: "po_completed", title: "已完成", count: completedOrderRows.length, kind: "order" },
@@ -1888,7 +1892,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     cancelledRequestRows,
     completedOrderRows,
     confirmedPendingPaymentOrderRows,
-    draftOnlyOrderRows,
+    unsubmittedOrderRows,
     exceptionOrderRows,
     paidOrderRows,
     pendingRequestRows,
@@ -1902,7 +1906,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const activeOrderRows = useMemo(() => {
     switch (activeQueueKey) {
       case "po_draft":
-        return draftOnlyOrderRows;
+        return unsubmittedOrderRows;
       case "po_pending_payment":
         return confirmedPendingPaymentOrderRows;
       case "po_paid":
@@ -1922,7 +1926,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     cancelledOrderRows,
     completedOrderRows,
     confirmedPendingPaymentOrderRows,
-    draftOnlyOrderRows,
+    unsubmittedOrderRows,
     exceptionOrderRows,
     paidOrderRows,
     purchaseOrders,
@@ -4174,6 +4178,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       render: (value) => value || "-",
     },
     {
+      title: "店铺",
+      dataIndex: "accountName",
+      width: 130,
+      ellipsis: true,
+      render: (value) => value || "-",
+    },
+    {
       title: "目标成本",
       dataIndex: "targetUnitCost",
       width: 110,
@@ -4276,6 +4287,16 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 {hasAnySource ? "生成采购单" : "线下采购单"}
               </Button>
             ) : null}
+            {canGeneratePo && hasAnySource ? (
+              // 已绑映射/有货源时也允许走线下采购：弹框填价生成手工单，不推 1688。
+              <Button
+                size="small"
+                icon={<DollarOutlined />}
+                onClick={() => openOfflinePoCreate(row)}
+              >
+                线下采购
+              </Button>
+            ) : null}
             {existingPo || row.status === "converted_to_po" ? (
               <Button
                 size="small"
@@ -4336,6 +4357,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       title: "采购员",
       dataIndex: "createdByName",
       width: 100,
+      render: (value) => value || "-",
+    },
+    {
+      title: "店铺",
+      dataIndex: "accountName",
+      width: 130,
+      ellipsis: true,
       render: (value) => value || "-",
     },
     {
@@ -4543,6 +4571,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       dataIndex: "paymentStatus",
       width: 120,
       render: (value) => statusTag(value, PAYMENT_STATUS_LABELS),
+    },
+    {
+      title: "付款时间",
+      dataIndex: "paidAt",
+      width: 150,
+      render: formatDateTime,
     },
     {
       title: "状态",

@@ -779,6 +779,11 @@ export default function AlibabaMapping() {
       setModalOpen(false);
       setEditingRow(null);
       form.resetFields();
+      // 写走云端、读走本地 cache.db：保存后先等一次增量同步把刚写的行拉进缓存，
+      // 否则随后读分页缓存会拿到旧值（如映射数量被打回 1、未绑定列表没及时移除）。
+      if (erp.mapping?.sync) {
+        await erp.mapping.sync({ mode: "incremental" }).catch(() => {});
+      }
       await reloadBothPages();
     } catch (error: any) {
       message.error(error?.message || "供应商信息保存失败");
