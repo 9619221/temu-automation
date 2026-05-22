@@ -21,6 +21,8 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/permissions/scope/upsert": ["admin", "manager"],
   "/api/master-data/workbench": ["admin", "manager", "operations", "buyer"],
   "/api/master-data/sku-ids": ["admin", "manager", "operations", "buyer"],
+  "/api/master-data/mappings": ["admin", "manager", "operations", "buyer"],
+  "/api/master-data/mapping-ids": ["admin", "manager", "operations", "buyer"],
   "/api/master-data/action": ["admin", "manager", "operations", "buyer"],
   "/1688": ["admin", "manager"],
   "/api/1688/status": ["admin", "manager"],
@@ -2817,6 +2819,7 @@ function createRequestHandler(options = {}) {
     throw new Error("Supplier action handler is not available");
   });
   const listSkus = options.listSkus || (() => []);
+  const listSku1688Sources = options.listSku1688Sources || (() => []);
   const createSku = options.createSku || (() => {
     throw new Error("SKU action handler is not available");
   });
@@ -2880,6 +2883,7 @@ function createRequestHandler(options = {}) {
       listSuppliers,
       createSupplier,
       listSkus,
+      listSku1688Sources,
       createSku,
       deleteSku,
       get1688AuthStatus,
@@ -3636,6 +3640,7 @@ async function handleRequest({
   listSuppliers,
   createSupplier,
   listSkus,
+  listSku1688Sources,
   createSku,
   deleteSku,
   get1688AuthStatus,
@@ -3860,6 +3865,37 @@ async function handleRequest({
         WHERE status != 'deleted'
           AND id NOT LIKE 'jst:sku:%'
           ${companyId ? "AND company_id = @company_id" : ""}
+      `).all(companyId ? { company_id: companyId } : {});
+      writeJson(res, 200, { ok: true, ids: idRows.map((row) => row.id) });
+      return;
+    }
+
+    if (pathname === "/api/master-data/mappings") {
+      // 映射增量同步：since 游标 + includeDeleted（拿软删行）+ 分页。
+      // 复用 listSku1688Sources（与 purchase workbench 同口径，返回 camelCase）。
+      const payload = await readOptionalPayload(req);
+      const companyId = session.user?.companyId;
+      const mappings = listSku1688Sources({
+        since: payload?.since,
+        includeDeleted: Boolean(payload?.includeDeleted),
+        limit: Number(payload?.limit) || 1000,
+        offset: Number(payload?.offset) || 0,
+        companyId,
+      });
+      writeJson(res, 200, { ok: true, mappings });
+      return;
+    }
+
+    if (pathname === "/api/master-data/mapping-ids") {
+      // 映射删除对账端点：返回当前未删除映射的 id 全集，客户端 diff 出硬删的清缓存。
+      const companyId = session.user?.companyId;
+      const idRows = db.prepare(`
+        SELECT source.id AS id
+        FROM erp_sku_1688_sources source
+        LEFT JOIN erp_skus sku ON sku.id = source.sku_id
+        LEFT JOIN erp_accounts acct ON acct.id = source.account_id
+        WHERE source.status != 'deleted'
+          ${companyId ? "AND (sku.company_id = @company_id OR acct.company_id = @company_id)" : ""}
       `).all(companyId ? { company_id: companyId } : {});
       writeJson(res, 200, { ok: true, ids: idRows.map((row) => row.id) });
       return;
