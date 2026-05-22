@@ -260,6 +260,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     },
     sku: {
       list: (params) => ipcRenderer.invoke("erp:sku:list", params || {}),
+      // 供应商管理「未绑定」Tab 服务端分页，返回 { rows, total }。
+      listUnmappedPage: (params) => ipcRenderer.invoke("erp:sku:unmapped-page", params || {}),
       create: (payload) => ipcRenderer.invoke("erp:sku:create", payload || {}),
       delete: (payload) => ipcRenderer.invoke("erp:sku:delete", payload || {}),
       sync: (options) => ipcRenderer.invoke("erp:sku:sync", options || {}),
@@ -267,6 +269,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     },
     mapping: {
       list: (params) => ipcRenderer.invoke("erp:mapping:list", params || {}),
+      // 供应商管理「已绑定」Tab 服务端分页，返回 { rows, total }。
+      page: (params) => ipcRenderer.invoke("erp:mapping:page", params || {}),
       sync: (options) => ipcRenderer.invoke("erp:mapping:sync", options || {}),
       cacheStatus: (options) => ipcRenderer.invoke("erp:mapping:cache-status", options || {}),
     },

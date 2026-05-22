@@ -296,8 +296,14 @@ interface ErpDiscoveredController {
 
 interface ErpListParams {
   accountId?: string;
+  search?: string;
   limit?: number;
   offset?: number;
+}
+
+interface ErpPageResult<T = any> {
+  rows: T[];
+  total: number;
 }
 
 interface ErpWorkflowTransitionPayload {
@@ -461,6 +467,7 @@ interface ErpAPI {
   };
   sku: {
     list: (params?: ErpListParams) => Promise<any[]>;
+    listUnmappedPage: (params?: ErpListParams) => Promise<ErpPageResult>;
     create: (payload: {
       id?: string;
       accountId?: string;
@@ -490,6 +497,7 @@ interface ErpAPI {
   };
   mapping: {
     list: (params?: ErpListParams) => Promise<any[]>;
+    page: (params?: ErpListParams) => Promise<ErpPageResult>;
     sync: (options?: { mode?: "full" | "incremental"; companyId?: string }) => Promise<any>;
     cacheStatus: (options?: { companyId?: string }) => Promise<{
       companyId: string | null;

@@ -12,6 +12,7 @@ import {
   Space,
   Switch,
   Table,
+  Tabs,
   Tag,
   Tooltip,
   Typography,
@@ -21,12 +22,11 @@ import type { ColumnsType } from "antd/es/table";
 import { BellOutlined, DeleteOutlined, EditOutlined, LinkOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, StarOutlined } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
 import { useErpAuth } from "../contexts/ErpAuthContext";
-import { hasPageCache, readPageCache, writePageCache } from "../utils/pageCache";
 
 const { Text } = Typography;
 const erp = window.electronAPI?.erp;
 const appAPI = window.electronAPI?.app;
-const ALIBABA_MAPPING_CACHE_KEY = "temu.alibaba-mapping.cache.v1";
+const ALIBABA_MAPPING_PAGE_SIZE = 20;
 const MAPPING_WORKBENCH_PARAMS = {
   limit: 500,
   includeRequestDetails: false,
@@ -119,12 +119,6 @@ interface Sku1688SourceRow {
   isSkuPlaceholder?: boolean;
 }
 
-interface AlibabaMappingCache {
-  generatedAt?: string;
-  skus?: SkuOptionRow[];
-  mappings?: Sku1688SourceRow[];
-}
-
 interface MarketingMixConfig {
   generalHunpi?: boolean;
   mixAmount?: number | null;
@@ -136,6 +130,7 @@ interface MarketingMixConfig {
 
 interface MappingFormValues {
   skuId: string;
+  accountId?: string;
   mappingGroupId?: string;
   externalOfferId?: string;
   externalSkuId?: string;
@@ -174,6 +169,13 @@ interface UrlSpecDialogState {
     skuOptions?: Array<Partial<MappingSpecRow>>;
   };
   rows: MappingSpecRow[];
+}
+
+type MappingTabKey = "bound" | "unbound";
+
+interface PageResult<T> {
+  rows: T[];
+  total: number;
 }
 
 function canManage(role?: string | null) {
@@ -234,53 +236,6 @@ function buildSkuDisplayRow(sku: SkuOptionRow): Sku1688SourceRow {
     sourcePayload: null,
     isSkuPlaceholder: !sourceId,
   };
-}
-
-function mergeSkuAndMappingRows(skus: SkuOptionRow[], mappings: Sku1688SourceRow[]) {
-  const skusById = new Map(skus.map((sku) => [sku.id, sku]));
-  const rows: Sku1688SourceRow[] = mappings.map((row): Sku1688SourceRow => {
-    const sku = skusById.get(row.skuId);
-    return {
-      ...row,
-      accountId: row.accountId || sku?.accountId || null,
-      accountName: row.accountName || sku?.accountName || null,
-      internalSkuCode: row.internalSkuCode || sku?.internalSkuCode,
-      productName: row.productName || sku?.productName,
-      colorSpec: row.colorSpec ?? sku?.colorSpec ?? null,
-      systemSupplierName: row.systemSupplierName || sku?.systemSupplierName || null,
-      imageUrl: row.imageUrl || sku?.imageUrl || null,
-      isSkuPlaceholder: false,
-    };
-  });
-  const mappedSkuIds = new Set(rows.map((row) => row.skuId));
-  for (const sku of skus) {
-    if (!mappedSkuIds.has(sku.id)) {
-      rows.push(buildSkuDisplayRow(sku));
-    }
-  }
-  return rows;
-}
-
-function normalizeSearchText(value: unknown) {
-  return String(value ?? "").trim().toLowerCase();
-}
-
-function getRowSearchText(row: Sku1688SourceRow) {
-  return [
-    row.internalSkuCode,
-    row.skuId,
-    row.productName,
-    row.productTitle,
-    row.colorSpec,
-    row.systemSupplierName,
-    row.supplierName,
-    row.platformSkuName,
-    row.externalOfferId,
-    row.externalSkuId,
-    row.externalSpecId,
-    row.accountName,
-    row.isSkuPlaceholder ? "未绑定 未匹配 无1688供应商" : "",
-  ].map((value) => String(value ?? "")).join(" ").toLowerCase();
 }
 
 async function openExternalUrl(url: string) {
@@ -390,105 +345,132 @@ function needsSupplierProfileAutoSync(row: Sku1688SourceRow) {
   );
 }
 
+function buildPageParams(page: number, search: string) {
+  const keyword = search.trim();
+  return {
+    limit: ALIBABA_MAPPING_PAGE_SIZE,
+    offset: Math.max(0, (page - 1) * ALIBABA_MAPPING_PAGE_SIZE),
+    ...(keyword ? { search: keyword } : {}),
+  };
+}
+
 export default function AlibabaMapping() {
   const auth = useErpAuth();
   const editable = canManage(auth.currentUser?.role);
-  const cachedData = useMemo(
-    () => readPageCache<AlibabaMappingCache>(ALIBABA_MAPPING_CACHE_KEY, {}),
-    [],
-  );
   const [form] = Form.useForm<MappingFormValues>();
-  const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editingRow, setEditingRow] = useState<Sku1688SourceRow | null>(null);
-  const [skus, setSkus] = useState<SkuOptionRow[]>(() => cachedData.skus || []);
-  const [mappings, setMappings] = useState<Sku1688SourceRow[]>(() => cachedData.mappings || []);
-  const [loadedOnce, setLoadedOnce] = useState(() => hasPageCache(cachedData));
-  const [searchText, setSearchText] = useState("");
+  const [activeTab, setActiveTab] = useState<MappingTabKey>("bound");
+  const [boundRows, setBoundRows] = useState<Sku1688SourceRow[]>([]);
+  const [boundTotal, setBoundTotal] = useState(0);
+  const [boundPage, setBoundPage] = useState(1);
+  const [boundSearch, setBoundSearch] = useState("");
+  const [boundDebouncedSearch, setBoundDebouncedSearch] = useState("");
+  const [boundLoading, setBoundLoading] = useState(false);
+  const [unboundRows, setUnboundRows] = useState<Sku1688SourceRow[]>([]);
+  const [unboundTotal, setUnboundTotal] = useState(0);
+  const [unboundPage, setUnboundPage] = useState(1);
+  const [unboundSearch, setUnboundSearch] = useState("");
+  const [unboundDebouncedSearch, setUnboundDebouncedSearch] = useState("");
+  const [unboundLoading, setUnboundLoading] = useState(false);
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
   const [specPreviewLoading, setSpecPreviewLoading] = useState(false);
   const [urlSpecDialog, setUrlSpecDialog] = useState<UrlSpecDialogState | null>(null);
   const [selectedUrlSpecId, setSelectedUrlSpecId] = useState<string | null>(null);
   const [urlSpecOurQty, setUrlSpecOurQty] = useState(1);
   const [urlSpecPlatformQty, setUrlSpecPlatformQty] = useState(1);
+  const boundRequestIdRef = useRef(0);
+  const unboundRequestIdRef = useRef(0);
   const autoPurchaseRuleIdsRef = useRef<Set<string>>(new Set());
   const autoSupplierProfileIdsRef = useRef<Set<string>>(new Set());
 
-  const applyMappingRows = useCallback((nextSkus: SkuOptionRow[], nextMappings: Sku1688SourceRow[]) => {
-    setSkus(nextSkus);
-    setMappings(nextMappings);
-    setLoadedOnce(true);
-    // 全量数据由 cache.db(PR-M2)承担首屏，localStorage 只留壳避免 ~5MB 配额被撑爆。
-    writePageCache<AlibabaMappingCache>(ALIBABA_MAPPING_CACHE_KEY, {
-      generatedAt: new Date().toISOString(),
-      skus: [],
-      mappings: [],
-    });
-  }, []);
-
-  // 按 id patch 合并：后台档案同步 / CRUD 返回的可能是 limit 截断的部分映射，
-  // 只更新对应行、追加新行，不丢失 cache.db 来的全量。
-  const applyMappingSources = useCallback((incoming: Sku1688SourceRow[]) => {
-    setMappings((current) => {
-      const incomingById = new Map(incoming.map((row) => [row.id, row]));
-      const merged = current.map((row) => incomingById.get(row.id) || row);
-      const currentIds = new Set(current.map((row) => row.id));
-      for (const row of incoming) {
-        if (!currentIds.has(row.id)) merged.push(row);
-      }
-      return merged;
-    });
-    setLoadedOnce(true);
-  }, []);
-
-  const updateMappingSources = useCallback((updater: (rows: Sku1688SourceRow[]) => Sku1688SourceRow[]) => {
-    setMappings((current) => {
-      const nextMappings = updater(current);
-      setLoadedOnce(true);
-      return nextMappings;
-    });
-  }, []);
-
-  const loadData = useCallback(async () => {
-    if (!erp) return;
-    setLoading(true);
+  const loadBoundPage = useCallback(async (page: number, search: string) => {
+    if (!erp?.mapping?.page) return;
+    const requestId = boundRequestIdRef.current + 1;
+    boundRequestIdRef.current = requestId;
+    setBoundLoading(true);
     try {
-      // 商品 + 映射都走本地 cache.db(PR-M2，client 模式秒返回)，分页拿全量。
-      const CHUNK = 10000;
-      const allSkus: SkuOptionRow[] = [];
-      for (let offset = 0; offset < 200000; offset += CHUNK) {
-        const page = (await erp.sku.list({ limit: CHUNK, offset } as any)) as SkuOptionRow[];
-        const rows = Array.isArray(page) ? page : [];
-        if (!rows.length) break;
-        allSkus.push(...rows);
-        if (rows.length < CHUNK) break;
-      }
-      const allMappings: Sku1688SourceRow[] = [];
-      for (let offset = 0; offset < 500000; offset += CHUNK) {
-        const page = erp.mapping?.list
-          ? ((await erp.mapping.list({ limit: CHUNK, offset } as any)) as Sku1688SourceRow[])
-          : [];
-        const rows = Array.isArray(page) ? page : [];
-        if (!rows.length) break;
-        allMappings.push(...rows);
-        if (rows.length < CHUNK) break;
-      }
-      applyMappingRows(allSkus, allMappings);
+      const result = (await erp.mapping.page(buildPageParams(page, search))) as PageResult<Sku1688SourceRow>;
+      if (requestId !== boundRequestIdRef.current) return;
+      setBoundRows(Array.isArray(result?.rows) ? result.rows : []);
+      setBoundTotal(Number(result?.total || 0));
     } catch (error: any) {
-      message.error(error?.message || "供应商管理读取失败");
+      if (requestId === boundRequestIdRef.current) {
+        message.error(error?.message || "已绑定供应商读取失败");
+      }
     } finally {
-      setLoading(false);
+      if (requestId === boundRequestIdRef.current) {
+        setBoundLoading(false);
+      }
     }
-  }, [applyMappingRows]);
+  }, []);
+
+  const loadUnboundPage = useCallback(async (page: number, search: string) => {
+    if (!erp?.sku?.listUnmappedPage) return;
+    const requestId = unboundRequestIdRef.current + 1;
+    unboundRequestIdRef.current = requestId;
+    setUnboundLoading(true);
+    try {
+      const result = (await erp.sku.listUnmappedPage(buildPageParams(page, search))) as PageResult<SkuOptionRow>;
+      if (requestId !== unboundRequestIdRef.current) return;
+      const rows = Array.isArray(result?.rows) ? result.rows.map(buildSkuDisplayRow) : [];
+      setUnboundRows(rows);
+      setUnboundTotal(Number(result?.total || 0));
+    } catch (error: any) {
+      if (requestId === unboundRequestIdRef.current) {
+        message.error(error?.message || "未绑定商品读取失败");
+      }
+    } finally {
+      if (requestId === unboundRequestIdRef.current) {
+        setUnboundLoading(false);
+      }
+    }
+  }, []);
 
   useEffect(() => {
-    void loadData();
-  }, [loadData, updateMappingSources]);
+    const timer = window.setTimeout(() => {
+      setBoundPage(1);
+      setBoundDebouncedSearch(boundSearch.trim());
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [boundSearch]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setUnboundPage(1);
+      setUnboundDebouncedSearch(unboundSearch.trim());
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [unboundSearch]);
+
+  useEffect(() => {
+    void loadBoundPage(boundPage, boundDebouncedSearch);
+  }, [boundDebouncedSearch, boundPage, loadBoundPage]);
+
+  useEffect(() => {
+    void loadUnboundPage(unboundPage, unboundDebouncedSearch);
+  }, [loadUnboundPage, unboundDebouncedSearch, unboundPage]);
+
+  const reloadCurrentPage = useCallback(async () => {
+    if (activeTab === "bound") {
+      await loadBoundPage(boundPage, boundDebouncedSearch);
+      return;
+    }
+    await loadUnboundPage(unboundPage, unboundDebouncedSearch);
+  }, [activeTab, boundDebouncedSearch, boundPage, loadBoundPage, loadUnboundPage, unboundDebouncedSearch, unboundPage]);
+
+  // 绑定 / 解绑会让 SKU 在「已绑定」「未绑定」两边迁移，两个 Tab 都要刷新，避免切过去看到旧数据。
+  const reloadBothPages = useCallback(async () => {
+    await Promise.all([
+      loadBoundPage(boundPage, boundDebouncedSearch),
+      loadUnboundPage(unboundPage, unboundDebouncedSearch),
+    ]);
+  }, [boundDebouncedSearch, boundPage, loadBoundPage, loadUnboundPage, unboundDebouncedSearch, unboundPage]);
 
   useEffect(() => {
     if (!erp || !editable) return;
-    const targets = mappings
+    const targets = boundRows
       .filter((row) => (
         row.id
         && row.externalOfferId
@@ -509,13 +491,11 @@ export default function AlibabaMapping() {
         externalOfferId: row.externalOfferId,
         productId: row.externalOfferId,
         ...MAPPING_WORKBENCH_PARAMS,
-      }).then((response: any) => {
-        if (cancelled) return;
-        if (Array.isArray(response?.workbench?.sku1688Sources)) {
-          applyMappingSources(response.workbench.sku1688Sources);
-        }
+      }).then(() => {
+        if (!cancelled) void loadBoundPage(boundPage, boundDebouncedSearch);
       }).catch(() => {
         // The row is marked failed by the backend; keep the page quiet.
+        if (!cancelled) void loadBoundPage(boundPage, boundDebouncedSearch);
       }).finally(() => {
         autoPurchaseRuleIdsRef.current.delete(row.id);
       });
@@ -524,11 +504,11 @@ export default function AlibabaMapping() {
     return () => {
       cancelled = true;
     };
-  }, [applyMappingSources, editable, mappings]);
+  }, [boundDebouncedSearch, boundPage, boundRows, editable, loadBoundPage]);
 
   useEffect(() => {
     if (!erp || !editable) return;
-    const targets = mappings
+    const targets = boundRows
       .filter((row) => needsSupplierProfileAutoSync(row) && !autoSupplierProfileIdsRef.current.has(row.id))
       .slice(0, 2);
     if (!targets.length) return;
@@ -543,13 +523,11 @@ export default function AlibabaMapping() {
         externalOfferId: row.externalOfferId,
         productId: row.externalOfferId,
         ...MAPPING_WORKBENCH_PARAMS,
-      }).then((response: any) => {
-        if (cancelled) return;
-        if (Array.isArray(response?.workbench?.sku1688Sources)) {
-          applyMappingSources(response.workbench.sku1688Sources);
-        }
+      }).then(() => {
+        if (!cancelled) void loadBoundPage(boundPage, boundDebouncedSearch);
       }).catch(() => {
         // The backend records failed attempts; avoid interrupting table work.
+        if (!cancelled) void loadBoundPage(boundPage, boundDebouncedSearch);
       }).finally(() => {
         autoSupplierProfileIdsRef.current.delete(row.id);
       });
@@ -558,18 +536,7 @@ export default function AlibabaMapping() {
     return () => {
       cancelled = true;
     };
-  }, [applyMappingSources, editable, mappings]);
-
-  const allDisplayRows = useMemo(
-    () => mergeSkuAndMappingRows(skus, mappings),
-    [skus, mappings],
-  );
-
-  const displayRows = useMemo(() => {
-    const needle = normalizeSearchText(searchText);
-    if (!needle) return allDisplayRows;
-    return allDisplayRows.filter((row) => getRowSearchText(row).includes(needle));
-  }, [allDisplayRows, searchText]);
+  }, [boundDebouncedSearch, boundPage, boundRows, editable, loadBoundPage]);
 
   const urlSpecColumns = useMemo<ColumnsType<MappingSpecRow>>(() => [
     {
@@ -607,6 +574,7 @@ export default function AlibabaMapping() {
     form.resetFields();
     form.setFieldsValue({
       skuId: row.skuId,
+      accountId: row.accountId || undefined,
       status: "active",
       isDefault: true,
       ourQty: row.ourQty || 1,
@@ -621,6 +589,7 @@ export default function AlibabaMapping() {
     form.resetFields();
     form.setFieldsValue({
       skuId: row.skuId,
+      accountId: row.accountId || undefined,
       mappingGroupId: row.mappingGroupId || "",
       externalOfferId: row.externalOfferId || "",
       externalSkuId: row.externalSkuId || "",
@@ -666,8 +635,8 @@ export default function AlibabaMapping() {
       message.warning("请先填写可识别商品号的 1688 地址");
       return;
     }
-    const sku = skus.find((item) => item.id === values.skuId);
-    if (!sku?.accountId) {
+    const accountId = String(values.accountId || "").trim();
+    if (!accountId) {
       message.error("这个商品编码还没有匹配店铺，请先到采购中心维护店铺");
       return;
     }
@@ -677,7 +646,7 @@ export default function AlibabaMapping() {
       const response = await erp.purchase.action({
         action: "preview_1688_url_specs",
         skuId: values.skuId,
-        accountId: sku.accountId,
+        accountId,
         externalOfferId,
         productUrl: productUrl || build1688Link({ ...values, externalOfferId }),
         supplierName: values.supplierName,
@@ -719,7 +688,7 @@ export default function AlibabaMapping() {
     } finally {
       setSpecPreviewLoading(false);
     }
-  }, [form, skus]);
+  }, [form]);
 
   const applySelectedUrlSpec = useCallback(() => {
     if (!urlSpecDialog) return;
@@ -758,8 +727,8 @@ export default function AlibabaMapping() {
 
   const handleSubmit = async (values: MappingFormValues) => {
     if (!erp) return;
-    const sku = skus.find((item) => item.id === values.skuId);
-    if (!sku?.accountId) {
+    const accountId = String(values.accountId || "").trim();
+    if (!accountId) {
       message.error("这个商品编码还没有匹配店铺，请先到采购中心维护店铺");
       return;
     }
@@ -783,11 +752,11 @@ export default function AlibabaMapping() {
         && norm(editingRow.externalOfferId) === norm(externalOfferId)
         && norm(editingRow.externalSkuId) === norm(values.externalSkuId)
         && norm(editingRow.externalSpecId) === norm(values.externalSpecId);
-      const response = await erp.purchase.action({
+      await erp.purchase.action({
         action: "upsert_sku_1688_source",
         id: editingMatchesNewKey ? editingRow?.id : undefined,
         skuId: values.skuId,
-        accountId: sku.accountId,
+        accountId,
         mappingGroupId: values.mappingGroupId,
         externalOfferId,
         externalSkuId: values.externalSkuId,
@@ -806,25 +775,16 @@ export default function AlibabaMapping() {
         ...MAPPING_WORKBENCH_PARAMS,
         includeWorkbench: false,
       });
-      const savedSource = response?.result?.sku1688Source as Sku1688SourceRow | undefined;
-      if (savedSource?.id) {
-        updateMappingSources((rows) => {
-          const exists = rows.some((item) => item.id === savedSource.id);
-          return exists
-            ? rows.map((item) => (item.id === savedSource.id ? { ...item, ...savedSource } : item))
-            : [savedSource, ...rows];
-        });
-      }
       message.success("供应商信息已保存");
       setModalOpen(false);
       setEditingRow(null);
       form.resetFields();
       // 写走云端、读走本地 cache.db：保存后先等一次增量同步把刚写的行拉进缓存，
-      // 否则 loadData 立刻读旧缓存，会把乐观更新的正确值覆盖回旧值（如映射数量被打回 1）。
+      // 否则随后读分页缓存会拿到旧值（如映射数量被打回 1、未绑定列表没及时移除）。
       if (erp.mapping?.sync) {
         await erp.mapping.sync({ mode: "incremental" }).catch(() => {});
       }
-      await loadData();
+      await reloadBothPages();
     } catch (error: any) {
       message.error(error?.message || "供应商信息保存失败");
     } finally {
@@ -840,33 +800,7 @@ export default function AlibabaMapping() {
   ) => {
     if (!erp) return null;
     const key = `${action}-${row.id}`;
-    const optimisticAction = [
-      "follow_1688_product",
-      "unfollow_1688_product",
-      "add_1688_monitor_product",
-      "delete_1688_monitor_product",
-    ].includes(action);
-    if (optimisticAction) {
-      const now = new Date().toISOString();
-      updateMappingSources((rows) => rows.map((item) => {
-        if (item.id !== row.id) return item;
-        const payload = { ...(item.sourcePayload || {}) };
-        if (action === "follow_1688_product") {
-          payload.followedAt1688 = now;
-          payload.unfollowedAt1688 = null;
-        } else if (action === "unfollow_1688_product") {
-          payload.followedAt1688 = null;
-          payload.unfollowedAt1688 = now;
-        } else if (action === "add_1688_monitor_product") {
-          payload.monitorProduct = { ...((payload.monitorProduct as Record<string, unknown>) || {}), enabled: true };
-        } else if (action === "delete_1688_monitor_product") {
-          payload.monitorProduct = { ...((payload.monitorProduct as Record<string, unknown>) || {}), enabled: false };
-        }
-        return { ...item, sourcePayload: payload, updatedAt: now };
-      }));
-    } else {
-      setActionLoadingId(key);
-    }
+    setActionLoadingId(key);
     try {
       const response = await erp.purchase.action({
         action,
@@ -882,24 +816,16 @@ export default function AlibabaMapping() {
         ...MAPPING_WORKBENCH_PARAMS,
         includeWorkbench: false,
       });
-      if (response?.result?.sku1688Source) {
-        const updatedSource = response.result.sku1688Source as Sku1688SourceRow;
-        updateMappingSources((rows) => rows.map((item) => (item.id === row.id ? updatedSource : item)));
-      } else if (Array.isArray(response?.workbench?.sku1688Sources)) {
-        applyMappingSources(response.workbench.sku1688Sources);
-      }
       message.success(successText);
+      await reloadCurrentPage();
       return response;
     } catch (error: any) {
-      if (optimisticAction) {
-        updateMappingSources((rows) => rows.map((item) => (item.id === row.id ? row : item)));
-      }
       message.error(error?.message || "1688 操作失败");
       return null;
     } finally {
       setActionLoadingId(null);
     }
-  }, [applyMappingSources, updateMappingSources]);
+  }, [reloadCurrentPage]);
 
   const deleteMapping = useCallback((row: Sku1688SourceRow) => {
     if (!erp) return;
@@ -909,22 +835,26 @@ export default function AlibabaMapping() {
       okText: "删除",
       okButtonProps: { danger: true },
       cancelText: "取消",
-      onOk: () => {
-        updateMappingSources((rows) => rows.filter((item) => item.id !== row.id));
-        void erp.purchase.action({
-          action: "delete_sku_1688_source",
-          sourceId: row.id,
-          ...MAPPING_WORKBENCH_PARAMS,
-          includeWorkbench: false,
-        }).then(() => {
+      onOk: async () => {
+        const key = `delete_sku_1688_source-${row.id}`;
+        setActionLoadingId(key);
+        try {
+          await erp.purchase.action({
+            action: "delete_sku_1688_source",
+            sourceId: row.id,
+            ...MAPPING_WORKBENCH_PARAMS,
+            includeWorkbench: false,
+          });
           message.success("供应商绑定已删除");
-        }).catch((error: any) => {
-          updateMappingSources((rows) => rows.some((item) => item.id === row.id) ? rows : [row, ...rows]);
+          await reloadBothPages();
+        } catch (error: any) {
           message.error(error?.message || "供应商绑定删除失败");
-        });
+        } finally {
+          setActionLoadingId(null);
+        }
       },
     });
-  }, [updateMappingSources]);
+  }, [reloadCurrentPage]);
 
 
   const searchRelationSuppliers = useCallback(async () => {
@@ -1260,7 +1190,50 @@ export default function AlibabaMapping() {
     },
   ], [actionLoadingId, deleteMapping, editable, openCreateForSku, run1688SourceAction]);
 
-  const tableLoading = loading && !loadedOnce && displayRows.length > 0;
+  const currentLoading = activeTab === "bound" ? boundLoading : unboundLoading;
+  const searchPlaceholder = "搜索商品编码 / 商品名称 / 规格 / 供应商 / 1688货号";
+
+  const renderPagedTable = (
+    rows: Sku1688SourceRow[],
+    total: number,
+    page: number,
+    loading: boolean,
+    search: string,
+    setSearch: (value: string) => void,
+    setPage: (value: number) => void,
+  ) => (
+    <>
+      <div style={{ alignItems: "center", display: "flex", gap: 12, justifyContent: "space-between", marginBottom: 12 }}>
+        <Input
+          allowClear
+          prefix={<SearchOutlined />}
+          placeholder={searchPlaceholder}
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          style={{ maxWidth: "100%", width: 460 }}
+        />
+        <Text type="secondary" style={{ flex: "0 0 auto" }}>
+          共 {total} 条
+        </Text>
+      </div>
+      <Table
+        className="alibaba-mapping-table alibaba-mapping-table--fixed-bottom"
+        rowKey="id"
+        loading={loading}
+        columns={columns}
+        dataSource={rows}
+        scroll={{ x: 2380, y: "max(220px, calc(100vh - 470px))" }}
+        pagination={{
+          current: page,
+          pageSize: ALIBABA_MAPPING_PAGE_SIZE,
+          total,
+          showSizeChanger: false,
+          showTotal: (nextTotal, range) => `显示 ${range[0]}-${range[1]} / ${nextTotal} 条`,
+          onChange: (nextPage) => setPage(nextPage),
+        }}
+      />
+    </>
+  );
 
   if (!erp) {
     return (
@@ -1277,7 +1250,7 @@ export default function AlibabaMapping() {
         compact
         eyebrow="业务"
         title="供应商管理"
-        meta={[`商品 ${skus.length}`, `供应商 ${mappings.length}`]}
+        meta={[`已绑定 ${boundTotal}`, `未绑定 ${unboundTotal}`]}
         actions={[
           <Button
             key="relation-supply"
@@ -1295,34 +1268,28 @@ export default function AlibabaMapping() {
           >
             监控列表
           </Button>,
-          <Button key="refresh" icon={<ReloadOutlined />} loading={loading} onClick={loadData}>
+          <Button key="refresh" icon={<ReloadOutlined />} loading={currentLoading} onClick={() => void reloadCurrentPage()}>
             刷新
           </Button>,
         ].filter(Boolean)}
       />
 
       <section className="content-card alibaba-mapping-panel alibaba-mapping-panel--fixed-bottom">
-        <div style={{ alignItems: "center", display: "flex", gap: 12, justifyContent: "space-between", marginBottom: 12 }}>
-          <Input
-            allowClear
-            prefix={<SearchOutlined />}
-            placeholder="搜索商品编码 / 商品名称 / 规格 / 供应商 / 1688货号"
-            value={searchText}
-            onChange={(event) => setSearchText(event.target.value)}
-            style={{ maxWidth: "100%", width: 460 }}
-          />
-          <Text type="secondary" style={{ flex: "0 0 auto" }}>
-            显示 {displayRows.length} / {allDisplayRows.length} 条
-          </Text>
-        </div>
-        <Table
-          className="alibaba-mapping-table alibaba-mapping-table--fixed-bottom"
-          rowKey="id"
-          loading={tableLoading}
-          columns={columns}
-          dataSource={displayRows}
-          scroll={{ x: 2380, y: "max(220px, calc(100vh - 430px))" }}
-          pagination={{ pageSize: 10, showSizeChanger: false }}
+        <Tabs
+          activeKey={activeTab}
+          onChange={(key) => setActiveTab(key as MappingTabKey)}
+          items={[
+            {
+              key: "bound",
+              label: "已绑定",
+              children: renderPagedTable(boundRows, boundTotal, boundPage, boundLoading, boundSearch, setBoundSearch, setBoundPage),
+            },
+            {
+              key: "unbound",
+              label: "未绑定",
+              children: renderPagedTable(unboundRows, unboundTotal, unboundPage, unboundLoading, unboundSearch, setUnboundSearch, setUnboundPage),
+            },
+          ]}
         />
       </section>
 
@@ -1361,6 +1328,7 @@ export default function AlibabaMapping() {
             </Col>
           </Row>
           <Form.Item name="skuId" hidden><Input /></Form.Item>
+          <Form.Item name="accountId" hidden><Input /></Form.Item>
           <Form.Item name="mappingGroupId" hidden><Input /></Form.Item>
           <Form.Item name="externalOfferId" hidden><Input /></Form.Item>
           <Form.Item name="externalSkuId" hidden><Input /></Form.Item>
