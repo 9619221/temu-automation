@@ -34,6 +34,7 @@ import {
   DeleteOutlined,
   DollarOutlined,
   DownloadOutlined,
+  EditOutlined,
   FileDoneOutlined,
   ImportOutlined,
   LinkOutlined,
@@ -244,6 +245,7 @@ interface PurchaseOrderRow {
   poNo?: string;
   accountId?: string | null;
   accountName?: string;
+  supplierId?: string | null;
   supplierName?: string;
   createdByName?: string;
   status: string;
@@ -255,6 +257,8 @@ interface PurchaseOrderRow {
   totalQty?: number;
   receivedQty?: number;
   totalAmount?: number;
+  unitCost?: number | null;
+  logisticsFee?: number | null;
   expectedDeliveryDate?: string | null;
   externalOrderId?: string | null;
   externalOrderStatus?: string | null;
@@ -467,6 +471,14 @@ interface QuoteFormValues {
   productTitle?: string;
   productUrl?: string;
   remark?: string;
+}
+
+interface OfflinePoFormValues {
+  supplierId?: string;
+  supplierName?: string;
+  unitPrice: number;
+  logisticsFee?: number;
+  qty: number;
 }
 
 interface Source1688FormValues {
@@ -1582,6 +1594,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const [purchase1688Accounts, setPurchase1688Accounts] = useState<Purchase1688Account[]>([]);
   const [requestOpen, setRequestOpen] = useState(false);
   const [quotePrId, setQuotePrId] = useState<string | null>(null);
+  const [offlinePoTarget, setOfflinePoTarget] = useState<
+    | { mode: "create"; pr: PurchaseRequestRow }
+    | { mode: "edit"; po: PurchaseOrderRow }
+    | null
+  >(null);
   const [source1688PrId, setSource1688PrId] = useState<string | null>(null);
   const [requestUploadImages, setRequestUploadImages] = useState<RequestUploadImage[]>([]);
   const [detailPrId, setDetailPrId] = useState<string | null>(null);
@@ -1661,6 +1678,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
 
   const [requestForm] = Form.useForm<RequestFormValues>();
   const [quoteForm] = Form.useForm<QuoteFormValues>();
+  const [offlinePoForm] = Form.useForm<OfflinePoFormValues>();
   const [source1688Form] = Form.useForm<Source1688FormValues>();
   const [refundForm] = Form.useForm<RefundFormValues>();
   const [orderNoteForm] = Form.useForm<OrderNoteFormValues>();
@@ -2904,6 +2922,66 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     }
   };
 
+  const offlinePoInitialValues = useMemo<Partial<OfflinePoFormValues>>(() => {
+    if (!offlinePoTarget) return {};
+    if (offlinePoTarget.mode === "create") {
+      const pr = offlinePoTarget.pr;
+      return { unitPrice: pr.targetUnitCost ?? undefined, qty: pr.requestedQty ?? 1 };
+    }
+    const po = offlinePoTarget.po;
+    return {
+      supplierId: po.supplierId ?? undefined,
+      supplierName: po.supplierName || undefined,
+      unitPrice: po.unitCost ?? undefined,
+      logisticsFee: po.logisticsFee ?? undefined,
+      qty: po.totalQty ?? 1,
+    };
+  }, [offlinePoTarget]);
+
+  const offlinePoSubmitting = offlinePoTarget
+    ? (offlinePoTarget.mode === "create"
+      ? actingKey === `po-${offlinePoTarget.pr.id}`
+      : actingKey === `edit-po-${offlinePoTarget.po.id}`)
+    : false;
+
+  const openOfflinePoCreate = (pr: PurchaseRequestRow) => setOfflinePoTarget({ mode: "create", pr });
+  const openOfflinePoEdit = (po: PurchaseOrderRow) => setOfflinePoTarget({ mode: "edit", po });
+
+  const handleOfflinePoSubmit = async (values: OfflinePoFormValues) => {
+    if (!offlinePoTarget) return;
+    const supplierId = values.supplierId || undefined;
+    const supplierName = values.supplierName?.trim() || undefined;
+    if (offlinePoTarget.mode === "create") {
+      const pr = offlinePoTarget.pr;
+      const result = await runAction(`po-${pr.id}`, {
+        action: "generate_po",
+        prId: pr.id,
+        qty: values.qty,
+        offlinePurchase: true,
+        supplierId,
+        supplierName,
+        unitPrice: values.unitPrice,
+        logisticsFee: values.logisticsFee,
+      }, "线下采购单已生成");
+      if (!result) return;
+      const generatedPo = result?.result?.purchaseOrder as PurchaseOrderRow | undefined;
+      if (generatedPo?.id) upsertGeneratedPurchaseOrder(pr.id, generatedPo);
+    } else {
+      const po = offlinePoTarget.po;
+      const result = await runAction(`edit-po-${po.id}`, {
+        action: "update_offline_po",
+        poId: po.id,
+        qty: values.qty,
+        supplierId,
+        supplierName,
+        unitPrice: values.unitPrice,
+        logisticsFee: values.logisticsFee,
+      }, "采购单已更新");
+      if (!result) return;
+    }
+    setOfflinePoTarget(null);
+  };
+
   const handleQuoteFeedback = async (values: QuoteFormValues) => {
     if (!quotePr) return;
     const result = await runAction(`quote-${quotePr.id}`, {
@@ -3930,6 +4008,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     // 三者都没有时走线下采购：后端用空候选生成 placeholder PO，
     // 用户后续在采购单详情里手工补供应商 / 价格。
     const offlinePurchase = !hasMapping && !hasCandidates && !hasSkuSupplier;
+    // 线下采购：弹框让用户填供应商/单价/数量，提交后才建单（避免直接生成 ¥0.00 空壳）。
+    if (offlinePurchase && !silent) {
+      openOfflinePoCreate(row);
+      return;
+    }
     const result = await runAction(`po-${row.id}`, {
       action: "generate_po",
       prId: row.id,
@@ -4536,6 +4619,16 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 删除
               </Button>
             </Popconfirm>
+          ) : null}
+          {row.status === "draft" && Number(row.mappingCount || 0) === 0 && canPurchase ? (
+            <Button
+              size="small"
+              icon={<EditOutlined />}
+              loading={actingKey === `edit-po-${row.id}`}
+              onClick={() => openOfflinePoEdit(row)}
+            >
+              编辑
+            </Button>
           ) : null}
           {row.status === "draft" && canSubmitPaymentApproval && Number(row.mappingCount || 0) === 0 ? (
             <Button
@@ -5622,6 +5715,48 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           </Form.Item>
         </Form>
         </div>
+      </Modal>
+
+      <Modal
+        open={Boolean(offlinePoTarget)}
+        title={offlinePoTarget?.mode === "edit" ? "编辑采购单" : "线下采购单"}
+        okText={offlinePoTarget?.mode === "edit" ? "保存" : "生成采购单"}
+        cancelText="取消"
+        confirmLoading={offlinePoSubmitting}
+        onCancel={() => setOfflinePoTarget(null)}
+        onOk={() => offlinePoForm.submit()}
+        destroyOnClose
+      >
+        <Form
+          form={offlinePoForm}
+          layout="vertical"
+          initialValues={offlinePoInitialValues}
+          onFinish={handleOfflinePoSubmit}
+        >
+          <Form.Item name="supplierId" label="已有供应商">
+            <Select allowClear showSearch optionFilterProp="label" options={supplierOptions} placeholder="可选；没有就在下面手填供应商名称" />
+          </Form.Item>
+          <Form.Item name="supplierName" label="供应商名称">
+            <Input placeholder="手填供应商或平台店铺名称（线下采购可不绑已有供应商）" />
+          </Form.Item>
+          <Row gutter={12}>
+            <Col span={8}>
+              <Form.Item name="unitPrice" label="采购单价" rules={[{ required: true, message: "请输入采购单价" }]}>
+                <InputNumber min={0} precision={2} prefix="¥" style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="logisticsFee" label="运费">
+                <InputNumber min={0} precision={2} prefix="¥" style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="qty" label="采购数量" rules={[{ required: true, message: "请输入采购数量" }]}>
+                <InputNumber min={1} precision={0} style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+          </Row>
+        </Form>
       </Modal>
 
       <Modal
