@@ -2,6 +2,7 @@
  * 自动化 Worker - 通过 HTTP 服务通信，避免 stdio pipe 继承问题
  */
 import { chromium } from "playwright";
+import http from "http";
 import https from "https";
 import fs from "fs";
 import path from "path";
