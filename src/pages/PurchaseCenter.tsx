@@ -4278,6 +4278,16 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 {hasAnySource ? "生成采购单" : "线下采购单"}
               </Button>
             ) : null}
+            {canGeneratePo && hasAnySource ? (
+              // 已绑映射/有货源时也允许走线下采购：弹框填价生成手工单，不推 1688。
+              <Button
+                size="small"
+                icon={<DollarOutlined />}
+                onClick={() => openOfflinePoCreate(row)}
+              >
+                线下采购
+              </Button>
+            ) : null}
             {existingPo || row.status === "converted_to_po" ? (
               <Button
                 size="small"
