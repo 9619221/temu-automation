@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Form, Input, InputNumber, Switch, Button, Tag, Progress, Space, Typography, message } from "antd";
 import { CloudDownloadOutlined, CheckCircleOutlined, SyncOutlined, ReloadOutlined, LinkOutlined } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
-import { clearCloudConfig, loadCloudConfig, saveCloudConfig } from "../utils/cloudClient";
+import { clearCloudConfig, DEFAULT_CLOUD_ENDPOINT, loadCloudConfig, saveCloudConfig } from "../utils/cloudClient";
 import { normalizeExtensionInstallUrl, openExternalUrl } from "../utils/extensionInstall";
 
 const { Text } = Typography;
@@ -26,13 +26,13 @@ export default function Settings() {
       if (data && typeof data === "object") form.setFieldsValue(data);
     }).catch(() => {});
     loadCloudConfig().then((cfg) => {
-      if (cfg) {
-        form.setFieldsValue({
-          cloudEndpoint: cfg.endpoint,
-          cloudToken: cfg.token,
-        });
-      }
-    }).catch(() => {});
+      form.setFieldsValue({
+        cloudEndpoint: cfg?.endpoint || DEFAULT_CLOUD_ENDPOINT,
+        cloudToken: cfg?.token || "",
+      });
+    }).catch(() => {
+      form.setFieldsValue({ cloudEndpoint: DEFAULT_CLOUD_ENDPOINT });
+    });
   }, []);
 
   const handleSave = async () => {

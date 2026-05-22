@@ -8,6 +8,10 @@
 
 const STORE_KEY = "temu_cloud_console_cfg";
 
+// 云端采集监控默认地址：erp.temu.chat 的 /cloud 路径
+// （Caddy handle_path /cloud/* 反代到本机 temu-cloud 服务 8788，会剥掉 /cloud 前缀）
+export const DEFAULT_CLOUD_ENDPOINT = "https://erp.temu.chat/cloud";
+
 export interface CloudConsoleConfig {
   endpoint: string;
   token: string;
@@ -16,7 +20,10 @@ export interface CloudConsoleConfig {
 export async function loadCloudConfig(): Promise<CloudConsoleConfig | null> {
   try {
     const v = await window.electronAPI?.store?.get(STORE_KEY);
-    if (v && typeof v === "object" && v.endpoint && v.token) return v as CloudConsoleConfig;
+    // 只要有 token 即可工作，endpoint 缺省回退到默认地址
+    if (v && typeof v === "object" && v.token) {
+      return { endpoint: v.endpoint || DEFAULT_CLOUD_ENDPOINT, token: v.token };
+    }
     return null;
   } catch {
     return null;
