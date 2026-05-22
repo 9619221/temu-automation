@@ -29,6 +29,7 @@ const {
   setClientMode,
   setHostMode,
 } = require("./clientRuntime.cjs");
+const skuCache = require("./skuCache.cjs");
 const {
   DEFAULT_1688_GATEWAY_BASE,
   PROCUREMENT_APIS,
@@ -632,6 +633,7 @@ function initializeErp(options = {}) {
     erpState.workerInvoker = options.workerInvoker;
   }
   configureClientRuntime({ userDataDir: erpState.userDataDir });
+  skuCache.configureSkuCache({ userDataDir: erpState.userDataDir });
 
   const runtime = getRuntimeStatus();
   if (runtime.mode === "client") {
@@ -2914,6 +2916,10 @@ async function loginElectronUser(payload = {}) {
   if (payload.serverUrl || isClientMode()) {
     const status = await remoteLogin(payload);
     erpState.currentUser = status.currentUser || null;
+    // 登录后预热商品资料缓存（fire-and-forget）：用户进商品资料/采购页前缓存就开始建，
+    // 进页时多半已就绪可秒开。失败静默，listSkusRuntime 仍会按需触发兜底。
+    void skuCache.triggerSync({ mode: "incremental" }).catch(() => {});
+    void skuCache.triggerReconcile().catch(() => {});
     return status;
   }
   ensureHostModeForLogin();
@@ -14184,6 +14190,25 @@ async function createSupplierRuntime(payload = {}, actor = {}) {
 }
 
 async function listSkusRuntime(params = {}) {
+  // client 模式：优先读本地 cache.db（秒返回），后台 fire-and-forget 增量同步；
+  // 缓存未建（首次）则同步等一次全量再返回。host 模式直接走本地 SQL。
+  if (isClientMode()) {
+    try {
+      const cached = skuCache.getCachedSkus(params);
+      if (cached) {
+        // 缓存命中：立即返回，后台悄悄追增量（不阻塞 UI），失败静默。
+        void skuCache.triggerSync({ mode: "incremental" }).catch(() => {});
+        return cached;
+      }
+      // 缓存空（首次）：等一次全量建基线，再读缓存返回。
+      await skuCache.triggerSync({ mode: "full" });
+      void skuCache.triggerReconcile().catch(() => {});
+      const afterFull = skuCache.getCachedSkus(params);
+      if (afterFull) return afterFull;
+    } catch {
+      // 缓存损坏 / 同步异常 → 降级回跨海全量，保证不阻塞。
+    }
+  }
   // 0.3.23 修 N+1：见 listAccountsRuntime 注释。
   const workbench = await getMasterDataWorkbenchRuntime({ ...params, part: "skus" });
   return workbench.skus || [];
@@ -14659,6 +14684,9 @@ function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:sku:list", (_event, params) => listSkusRuntime(params || {}));
   ipcMain.handle("erp:sku:create", (_event, payload) => createSkuRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:sku:delete", (_event, payload) => deleteSkuRuntime(payload || {}, erpState.currentUser || {}));
+  // 商品资料本地缓存（client 模式）：手动强刷 + 状态查询。
+  ipcMain.handle("erp:sku:sync", (_event, options) => skuCache.triggerSync(options || {}));
+  ipcMain.handle("erp:sku:cache-status", (_event, options) => skuCache.getCacheStatus(options || {}));
   ipcMain.handle("erp:purchase:workbench", wrapErpHandler("erp:purchase:workbench", (_event, params) => getPurchaseWorkbenchRuntime(params || {})));
   ipcMain.handle("erp:purchase:action", (_event, payload) => performPurchaseActionRuntime(payload || {}));
   ipcMain.handle("erp:warehouse:workbench", (_event, params) => getWarehouseWorkbenchRuntime(params || {}));
