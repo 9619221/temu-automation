@@ -23,15 +23,16 @@ const DRY = process.env.DRY === "1";
 
 function s(v) { return v === null || v === undefined ? "" : String(v).trim(); }
 function intOr(v, d) { const n = Number(v); return Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : d; }
-// 用于映射比例:依次试每个候选值,取第一个能解析成正整数 (>=1) 的;全无则返回 1。
-// 修掉 intOr 把 null/0/空串当合法值返回 0 的坑,确保 pack_qty=null 时能 fallback 到 plat_map_qty。
-function pickPositiveInt(...vals) {
+// 用于映射比例:依次试每个候选值,取第一个能解析成正整数 (>=1) 的;全无则返回 null。
+// 返回 null(而非兜底 1)用于区分"聚水潭确实给了比例"和"没给"——没给时不能用兜底值
+// 覆盖用户在供应商管理里手改的比例(见 upsert 的 DO UPDATE CASE)。
+function pickRatioOrNull(...vals) {
   for (const v of vals) {
     if (v === null || v === undefined || v === "") continue;
     const n = Number(v);
     if (Number.isFinite(n) && n >= 1) return Math.trunc(n);
   }
-  return 1;
+  return null;
 }
 
 function main() {
@@ -73,7 +74,8 @@ function main() {
       moq=excluded.moq, status=excluded.status, is_default=excluded.is_default,
       source_payload_json=excluded.source_payload_json,
       platform_sku_name=excluded.platform_sku_name,
-      our_qty=excluded.our_qty, platform_qty=excluded.platform_qty,
+      our_qty = CASE WHEN @ratio_from_jst = 1 THEN excluded.our_qty ELSE erp_sku_1688_sources.our_qty END,
+      platform_qty = CASE WHEN @ratio_from_jst = 1 THEN excluded.platform_qty ELSE erp_sku_1688_sources.platform_qty END,
       remark=excluded.remark, updated_at=excluded.updated_at
   `);
 
@@ -100,6 +102,11 @@ function main() {
         .digest("hex")
         .slice(0, 24);
 
+      // 聚水潭没给比例(base_qty/pack_qty/plat_map_qty 全空)时 jstOur/jstPlat 为 null。
+      // INSERT 新行兜底 1:1;已存在的行靠 ratio_from_jst 在 DO UPDATE 里决定是否覆盖——
+      // 没给比例就保留库里现有值,不再把用户手改的比例冲回 1:1。
+      const jstOur = pickRatioOrNull(r.base_qty);
+      const jstPlat = pickRatioOrNull(r.pack_qty, r.plat_map_qty);
       upsert.run({
         id,
         account_id: hit.account_id,
@@ -115,8 +122,9 @@ function main() {
         is_default: s(r.is_default_supplier) === "是" ? 1 : 0,
         source_payload_json: JSON.stringify(r),
         platform_sku_name: s(r.manage_name_1688) || null,
-        our_qty: pickPositiveInt(r.base_qty),
-        platform_qty: pickPositiveInt(r.pack_qty, r.plat_map_qty),
+        our_qty: jstOur !== null ? jstOur : 1,
+        platform_qty: jstPlat !== null ? jstPlat : 1,
+        ratio_from_jst: jstOur !== null || jstPlat !== null ? 1 : 0,
         remark: s(r.plat_supplier_remark) || s(r.pack_qty_remark) || s(r.healthCheckResult) || null,
         created_at: now,
         updated_at: now,
