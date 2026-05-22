@@ -215,6 +215,7 @@ interface TimelineRow {
 interface PurchaseRequestRow {
   id: string;
   accountId?: string | null;
+  accountName?: string | null;
   skuId?: string | null;
   internalSkuCode?: string;
   productName?: string;
@@ -4174,6 +4175,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       render: (value) => value || "-",
     },
     {
+      title: "店铺",
+      dataIndex: "accountName",
+      width: 130,
+      ellipsis: true,
+      render: (value) => value || "-",
+    },
+    {
       title: "目标成本",
       dataIndex: "targetUnitCost",
       width: 110,
@@ -4336,6 +4344,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       title: "采购员",
       dataIndex: "createdByName",
       width: 100,
+      render: (value) => value || "-",
+    },
+    {
+      title: "店铺",
+      dataIndex: "accountName",
+      width: 130,
+      ellipsis: true,
       render: (value) => value || "-",
     },
     {
