@@ -1501,8 +1501,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const skuSearchSeqRef = useRef(0);
   const handleSkuSearch = (keyword: string) => {
     const term = String(keyword || "").trim();
-    if (skuSearchTimerRef.current) window.clearTimeout(skuSearchTimerRef.current);
+    // 空 term 直接返回，不要 clearTimeout 掉正在 pending 的上一次搜索。
+    // mode="tags" 下用户输入编码后回车，antd 会清空搜索框触发 onSearch("")，
+    // 若在这里 clearTimeout 会把刚排的后端搜索取消，skus 永远拿不到这条，
+    // 提交时本地 find 落空误报「未找到」。
     if (!term) return;
+    if (skuSearchTimerRef.current) window.clearTimeout(skuSearchTimerRef.current);
     const seq = ++skuSearchSeqRef.current;
     skuSearchTimerRef.current = window.setTimeout(async () => {
       setSkuSearching(true);
@@ -2739,12 +2743,23 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       return;
     }
 
-    const selectedSkus = selectedSkuIds
-      .map((skuId) => skus.find((sku) => sku.id === skuId || sku.internalSkuCode === skuId))
-      .filter((sku): sku is SkuOption => Boolean(sku));
-    const missingSkuIds = selectedSkuIds.filter((skuId) => (
-      !skus.some((sku) => sku.id === skuId || sku.internalSkuCode === skuId)
-    ));
+    // mode="tags" 允许用户输入编码后立即回车成 tag，此时 handleSkuSearch 的
+    // 异步搜索结果可能还没进 skus（跨海 client 模式 RTT 1-2s），本地 find 会落空。
+    // 对本地找不到的 code 按编码同步兜底查一次后端，避免明明有商品资料却误报「未找到」。
+    const selectedSkus: SkuOption[] = [];
+    const missingSkuIds: string[] = [];
+    for (const skuId of selectedSkuIds) {
+      let found = skus.find((sku) => sku.id === skuId || sku.internalSkuCode === skuId);
+      if (!found) {
+        try {
+          const list = await erp?.sku?.list?.({ search: skuId, limit: 50 } as any);
+          const rows: SkuOption[] = Array.isArray(list) ? list : [];
+          found = rows.find((sku) => sku.id === skuId || sku.internalSkuCode === skuId);
+        } catch { /* 兜底查询失败按未找到处理 */ }
+      }
+      if (found) selectedSkus.push(found);
+      else missingSkuIds.push(skuId);
+    }
     if (missingSkuIds.length > 0) {
       message.error(`未找到商品编码：${missingSkuIds.slice(0, 3).join("、")}`);
       return;
