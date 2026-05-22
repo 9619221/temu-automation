@@ -3391,17 +3391,25 @@ function listSku1688Sources(params = {}) {
   const accountId = optionalString(params.accountId || params.account_id);
   const skuId = optionalString(params.skuId || params.sku_id);
   const includeDeleted = Boolean(params.includeDeleted || params.include_deleted);
+  const since = optionalString(params.since);
+  const companyId = optionalString(params.companyId || params.company_id);
   const conditions = [];
   const values = {
     account_id: accountId,
     sku_id: skuId,
     status: optionalString(params.status),
+    since,
+    company_id: companyId,
     limit: normalizeLimit(params.limit, 500),
     offset: normalizeOffset(params.offset),
   };
   if (accountId) conditions.push("source.account_id = @account_id");
   if (skuId) conditions.push("source.sku_id = @sku_id");
   if (values.status) conditions.push("source.status = @status");
+  // company 分区：映射表本身没有 company_id，靠 sku / account 任一归属命中。
+  if (companyId) conditions.push("(sku.company_id = @company_id OR acct.company_id = @company_id)");
+  // 增量游标：只取 since 之后变化的行（含软删，由 includeDeleted 控制）。
+  if (since) conditions.push("source.updated_at > @since");
   if (!includeDeleted) {
     conditions.push("source.status != 'deleted'");
     conditions.push("(sku.status IS NULL OR sku.status != 'deleted')");
@@ -14504,6 +14512,7 @@ function startLanService(payload = {}) {
     listSuppliers,
     createSupplier,
     listSkus,
+    listSku1688Sources,
     createSku,
     deleteSku,
     sessionStore: createLanSessionStore(),
@@ -14671,6 +14680,7 @@ async function startErpHeadlessServer(options = {}) {
     listSuppliers,
     createSupplier,
     listSkus,
+    listSku1688Sources,
     createSku,
     deleteSku,
     sessionStore: createLanSessionStore(),
