@@ -488,6 +488,20 @@ interface ErpAPI {
       syncing?: boolean;
     }>;
   };
+  mapping: {
+    list: (params?: ErpListParams) => Promise<any[]>;
+    sync: (options?: { mode?: "full" | "incremental"; companyId?: string }) => Promise<any>;
+    cacheStatus: (options?: { companyId?: string }) => Promise<{
+      companyId: string | null;
+      count: number;
+      populated: boolean;
+      cursor?: string | null;
+      lastFullAt?: string | null;
+      lastSyncAt?: string | null;
+      lastReconcileAt?: string | null;
+      syncing?: boolean;
+    }>;
+  };
   purchase: {
     workbench: (params?: ErpListParams, options?: { timeoutMs?: number }) => Promise<any>;
     action: (payload: Record<string, any>, options?: { timeoutMs?: number }) => Promise<any>;

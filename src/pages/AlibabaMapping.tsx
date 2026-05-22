@@ -419,45 +419,62 @@ export default function AlibabaMapping() {
     setSkus(nextSkus);
     setMappings(nextMappings);
     setLoadedOnce(true);
+    // 全量数据由 cache.db(PR-M2)承担首屏，localStorage 只留壳避免 ~5MB 配额被撑爆。
     writePageCache<AlibabaMappingCache>(ALIBABA_MAPPING_CACHE_KEY, {
       generatedAt: new Date().toISOString(),
-      skus: nextSkus,
-      mappings: nextMappings,
+      skus: [],
+      mappings: [],
     });
   }, []);
 
-  const applyMappingSources = useCallback((nextMappings: Sku1688SourceRow[]) => {
-    setMappings(nextMappings);
-    setLoadedOnce(true);
-    writePageCache<AlibabaMappingCache>(ALIBABA_MAPPING_CACHE_KEY, {
-      generatedAt: new Date().toISOString(),
-      skus,
-      mappings: nextMappings,
+  // 按 id patch 合并：后台档案同步 / CRUD 返回的可能是 limit 截断的部分映射，
+  // 只更新对应行、追加新行，不丢失 cache.db 来的全量。
+  const applyMappingSources = useCallback((incoming: Sku1688SourceRow[]) => {
+    setMappings((current) => {
+      const incomingById = new Map(incoming.map((row) => [row.id, row]));
+      const merged = current.map((row) => incomingById.get(row.id) || row);
+      const currentIds = new Set(current.map((row) => row.id));
+      for (const row of incoming) {
+        if (!currentIds.has(row.id)) merged.push(row);
+      }
+      return merged;
     });
-  }, [skus]);
+    setLoadedOnce(true);
+  }, []);
 
   const updateMappingSources = useCallback((updater: (rows: Sku1688SourceRow[]) => Sku1688SourceRow[]) => {
     setMappings((current) => {
       const nextMappings = updater(current);
       setLoadedOnce(true);
-      writePageCache<AlibabaMappingCache>(ALIBABA_MAPPING_CACHE_KEY, {
-        generatedAt: new Date().toISOString(),
-        skus,
-        mappings: nextMappings,
-      });
       return nextMappings;
     });
-  }, [skus]);
+  }, []);
 
   const loadData = useCallback(async () => {
     if (!erp) return;
     setLoading(true);
     try {
-      const workbench = await erp.purchase.workbench(MAPPING_WORKBENCH_PARAMS);
-      applyMappingRows(
-        Array.isArray(workbench?.skuOptions) ? workbench.skuOptions : [],
-        Array.isArray(workbench?.sku1688Sources) ? workbench.sku1688Sources : [],
-      );
+      // 商品 + 映射都走本地 cache.db(PR-M2，client 模式秒返回)，分页拿全量。
+      const CHUNK = 10000;
+      const allSkus: SkuOptionRow[] = [];
+      for (let offset = 0; offset < 200000; offset += CHUNK) {
+        const page = (await erp.sku.list({ limit: CHUNK, offset } as any)) as SkuOptionRow[];
+        const rows = Array.isArray(page) ? page : [];
+        if (!rows.length) break;
+        allSkus.push(...rows);
+        if (rows.length < CHUNK) break;
+      }
+      const allMappings: Sku1688SourceRow[] = [];
+      for (let offset = 0; offset < 500000; offset += CHUNK) {
+        const page = erp.mapping?.list
+          ? ((await erp.mapping.list({ limit: CHUNK, offset } as any)) as Sku1688SourceRow[])
+          : [];
+        const rows = Array.isArray(page) ? page : [];
+        if (!rows.length) break;
+        allMappings.push(...rows);
+        if (rows.length < CHUNK) break;
+      }
+      applyMappingRows(allSkus, allMappings);
     } catch (error: any) {
       message.error(error?.message || "供应商管理读取失败");
     } finally {
