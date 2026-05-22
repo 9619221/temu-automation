@@ -1,4 +1,8 @@
+-- @idempotent
 -- 1688 收货地址改按 OAuth 维度归属
+--
+-- 注意：031_1688_address_purchase_account 也会 ADD COLUMN purchase_1688_account_id，
+-- 两条迁移撞同一列。靠 @idempotent 逐语句容错：列已存在则跳过 ADD COLUMN，回填与建索引照跑。
 --
 -- 背景：erp_1688_delivery_addresses 当前用 account_id（ERP 店铺）维度强绑地址，
 -- 但 1688 那边收货地址是挂在 buyer 账号（OAuth）下的。当多个 ERP 店铺共享同一
