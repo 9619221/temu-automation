@@ -1327,6 +1327,23 @@ export default function AlibabaMapping() {
               </Form.Item>
             </Col>
           </Row>
+          <Row gutter={12}>
+            <Col span={24}>
+              <Text type="secondary" style={{ display: "block", marginBottom: 8 }}>
+                下单时按「本地 : 1688」比例换算采购数量（如本地 1 件 = 1688 2 件，需采购 10 件则下单 20 件）
+              </Text>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="ourQty" label="本地数量" rules={[{ required: true, message: "请输入本地数量" }]}>
+                <InputNumber min={1} precision={0} style={{ width: "100%" }} addonBefore="本地" addonAfter="件" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="platformQty" label="1688 数量" rules={[{ required: true, message: "请输入 1688 数量" }]}>
+                <InputNumber min={1} precision={0} style={{ width: "100%" }} addonBefore="1688" addonAfter="件" />
+              </Form.Item>
+            </Col>
+          </Row>
           <Form.Item name="skuId" hidden><Input /></Form.Item>
           <Form.Item name="accountId" hidden><Input /></Form.Item>
           <Form.Item name="mappingGroupId" hidden><Input /></Form.Item>
@@ -1339,8 +1356,6 @@ export default function AlibabaMapping() {
           <Form.Item name="imageUrl" hidden><Input /></Form.Item>
           <Form.Item name="unitPrice" hidden><InputNumber /></Form.Item>
           <Form.Item name="moq" hidden><InputNumber /></Form.Item>
-          <Form.Item name="ourQty" hidden><InputNumber /></Form.Item>
-          <Form.Item name="platformQty" hidden><InputNumber /></Form.Item>
           <Form.Item name="status" hidden><Input /></Form.Item>
           <Form.Item name="isDefault" hidden valuePropName="checked"><Switch /></Form.Item>
         </Form>

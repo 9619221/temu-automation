@@ -390,8 +390,8 @@ class JushuitanOperationalBridge {
         status = excluded.status,
         source_payload_json = excluded.source_payload_json,
         platform_sku_name = COALESCE(NULLIF(excluded.platform_sku_name, ''), erp_sku_1688_sources.platform_sku_name),
-        our_qty = excluded.our_qty,
-        platform_qty = excluded.platform_qty,
+        our_qty = CASE WHEN @ratio_from_jst = 1 THEN excluded.our_qty ELSE erp_sku_1688_sources.our_qty END,
+        platform_qty = CASE WHEN @ratio_from_jst = 1 THEN excluded.platform_qty ELSE erp_sku_1688_sources.platform_qty END,
         remark = COALESCE(NULLIF(excluded.remark, ''), erp_sku_1688_sources.remark),
         updated_at = excluded.updated_at
     `);
@@ -651,6 +651,11 @@ class JushuitanOperationalBridge {
     const skuId = this.upsertSku(companyId, raw, now);
     if (!skuId) return false;
     const accountId = this.resolveSkuAccountId(companyId, raw, now);
+    // 聚水潭对很多行没有比例字段(base_qty/pack_qty/plat_map_qty 全空)。这些行兜底成 1:1,
+    // 但绝不能用兜底值无条件覆盖用户在供应商管理里手改的比例(见下方 DO UPDATE 的 CASE)。
+    const jstOurQty = toNumber(first(raw, ["base_qty", "our_qty"]));
+    const jstPlatformQty = toNumber(first(raw, ["pack_qty", "plat_map_qty", "platform_qty"]));
+    const ratioFromJst = jstOurQty != null || jstPlatformQty != null ? 1 : 0;
     this.upsertSku1688SourceStmt.run({
       id: stableId("sku1688", `${skuId}:${offerId}:${firstText(raw, ["plat_sku_id"])}:${firstText(raw, ["plat_spec_id"])}`),
       account_id: accountId,
@@ -674,10 +679,11 @@ class JushuitanOperationalBridge {
       updated_at: now,
       mapping_group_id: "",
       platform_sku_name: firstText(raw, ["manage_name_1688", "platform_sku_name"]) || null,
-      // 聚水潭 pack_qty 实际全是 null,真实映射比例在 plat_map_qty;漏 fallback
-      // 会让 platform_qty 永远被算成 1,bridge 跑一次就把外部正确写入的值冲掉。
-      our_qty: Math.max(1, Math.floor(toNumber(first(raw, ["base_qty", "our_qty"])) || 1)),
-      platform_qty: Math.max(1, Math.floor(toNumber(first(raw, ["pack_qty", "plat_map_qty", "platform_qty"])) || 1)),
+      // 聚水潭 pack_qty 实际全是 null,真实映射比例在 plat_map_qty。聚水潭没给比例时兜底 1:1
+      // (仅用于 INSERT 新行);已存在的行靠 ratio_from_jst 在 DO UPDATE 里决定是否覆盖。
+      our_qty: jstOurQty != null ? Math.max(1, Math.floor(jstOurQty)) : 1,
+      platform_qty: jstPlatformQty != null ? Math.max(1, Math.floor(jstPlatformQty)) : 1,
+      ratio_from_jst: ratioFromJst,
       remark: firstText(raw, ["plat_supplier_remark", "pack_qty_remark", "healthCheckResult"]) || null,
     });
     return true;
