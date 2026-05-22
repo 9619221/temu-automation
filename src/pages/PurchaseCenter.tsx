@@ -1556,7 +1556,9 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       } finally {
         if (seq === skuSearchSeqRef.current) setSkuSearching(false);
       }
-    }, 300);
+      // PR2 后 client 模式 erp.sku.list 走本地 cache.db 搜索（毫秒级），debounce 从
+      // 跨海时代的 300ms 降到 120ms，搜索更跟手；仍留少量防抖避免每字符一次查询。
+    }, 120);
   };
   const [suppliers, setSuppliers] = useState<SupplierOption[]>(() => (
     Array.isArray(initialWorkbench.supplierOptions) ? initialWorkbench.supplierOptions : []
@@ -2165,6 +2167,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     // 首屏统一走非 silent：先显示加载态（不渲染旧快照），新数据到了再一次性渲染。
     void loadData();
   }, [loadData]);
+
+  useEffect(() => {
+    // 采购页挂载即预热商品资料缓存（client 模式 fire-and-forget；host 模式 no-op）。
+    // 让 SKU 选择器首次搜索也走本地 cache.db、不卡跨海建基线。单飞锁防重复。
+    void erp?.sku?.sync?.({ mode: "incremental" }).catch(() => {});
+  }, []);
 
   useEffect(() => {
     candidateScrollLockRef.current = {};
