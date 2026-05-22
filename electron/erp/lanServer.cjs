@@ -20,6 +20,7 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/permissions/role/upsert": ["admin", "manager"],
   "/api/permissions/scope/upsert": ["admin", "manager"],
   "/api/master-data/workbench": ["admin", "manager", "operations", "buyer"],
+  "/api/master-data/sku-ids": ["admin", "manager", "operations", "buyer"],
   "/api/master-data/action": ["admin", "manager", "operations", "buyer"],
   "/1688": ["admin", "manager"],
   "/api/1688/status": ["admin", "manager"],
@@ -3845,6 +3846,22 @@ async function handleRequest({
         workbench,
         ...workbench,
       });
+      return;
+    }
+
+    if (pathname === "/api/master-data/sku-ids") {
+      // 增量同步的删除对账端点：只返回当前未删除 SKU 的 id 全集（不含字段，
+      // 22576 个 id raw ~700KB，writeJson gzip 后 ~100KB，一次跨海可接受）。
+      // 客户端 cache.db 拿它跟本地 id diff，本地有、服务器没有的就是被硬删的，清缓存。
+      // 排除 jst:sku: 污染前缀，跟 listSkus 护栏口径一致。
+      const companyId = session.user?.companyId;
+      const idRows = db.prepare(`
+        SELECT id FROM erp_skus
+        WHERE status != 'deleted'
+          AND id NOT LIKE 'jst:sku:%'
+          ${companyId ? "AND company_id = @company_id" : ""}
+      `).all(companyId ? { company_id: companyId } : {});
+      writeJson(res, 200, { ok: true, ids: idRows.map((row) => row.id) });
       return;
     }
 

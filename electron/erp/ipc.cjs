@@ -3051,6 +3051,10 @@ function listSkus(params = {}) {
   const companyId = optionalString(params.companyId || params.company_id);
   const search = optionalString(params.search);
   const includeDeleted = Boolean(params.includeDeleted || params.include_deleted);
+  // 增量同步游标：只返回 updated_at 严格晚于 since 的行。客户端 cache.db 用它
+  // 增量拉变化。配合 includeDeleted:true 可拿到软删行（status='deleted'），让
+  // 客户端把缓存里对应行清掉。不传 since 时行为不变，向后兼容老桌面端。
+  const since = optionalString(params.since || params.updated_since);
   // 桌面端商品资料/采购单列表展示的是纯数字 id 的 SKU（ERP 原生）。
   // 聚水潭同步的 jst:skuprofile: 前缀那一份是底层副本，搜索时要排除掉，
   // 否则同一个 internal_sku_code 会同时出现两条记录。
@@ -3066,6 +3070,7 @@ function listSkus(params = {}) {
   conditions.push("sku.id NOT LIKE 'jst:sku:%'");
   // 关键词模糊匹配：SKU 编码 / 内部 ID / 商品名
   if (search) conditions.push("(sku.internal_sku_code LIKE @search OR sku.id LIKE @search OR sku.product_name LIKE @search)");
+  if (since) conditions.push("sku.updated_at > @since");
   const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const rows = db.prepare(`
     SELECT
@@ -3132,6 +3137,7 @@ function listSkus(params = {}) {
     account_id: accountId,
     company_id: companyId,
     ...(search ? { search: `%${search}%` } : {}),
+    ...(since ? { since } : {}),
     limit: normalizeLimit(params.limit),
     offset: normalizeOffset(params.offset),
   });
