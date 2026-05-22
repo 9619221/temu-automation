@@ -265,6 +265,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
       sync: (options) => ipcRenderer.invoke("erp:sku:sync", options || {}),
       cacheStatus: (options) => ipcRenderer.invoke("erp:sku:cache-status", options || {}),
     },
+    mapping: {
+      list: (params) => ipcRenderer.invoke("erp:mapping:list", params || {}),
+      sync: (options) => ipcRenderer.invoke("erp:mapping:sync", options || {}),
+      cacheStatus: (options) => ipcRenderer.invoke("erp:mapping:cache-status", options || {}),
+    },
     purchase: {
       workbench: (params, options) => invokeWithTimeout(
         "erp:purchase:workbench",

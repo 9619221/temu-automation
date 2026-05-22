@@ -30,6 +30,7 @@ const {
   setHostMode,
 } = require("./clientRuntime.cjs");
 const skuCache = require("./skuCache.cjs");
+const mappingCache = require("./mappingCache.cjs");
 const {
   DEFAULT_1688_GATEWAY_BASE,
   PROCUREMENT_APIS,
@@ -635,6 +636,7 @@ function initializeErp(options = {}) {
   }
   configureClientRuntime({ userDataDir: erpState.userDataDir });
   skuCache.configureSkuCache({ userDataDir: erpState.userDataDir });
+  mappingCache.configureMappingCache({ userDataDir: erpState.userDataDir });
 
   const runtime = getRuntimeStatus();
   if (runtime.mode === "client") {
@@ -14431,6 +14433,38 @@ async function listSkusRuntime(params = {}) {
   return workbench.skus || [];
 }
 
+async function listMappingsRuntime(params = {}) {
+  // client 模式：优先读本地 cache.db（秒返回），后台 fire-and-forget 增量同步；
+  // 缓存未建（首次）则同步等一次全量再返回。host 模式直接走本地 SQL。
+  if (isClientMode()) {
+    try {
+      const cached = mappingCache.getCachedMappings(params);
+      if (cached) {
+        void mappingCache.triggerSync({ mode: "incremental" }).catch(() => {});
+        return cached;
+      }
+      await mappingCache.triggerSync({ mode: "full" });
+      void mappingCache.triggerReconcile().catch(() => {});
+      const afterFull = mappingCache.getCachedMappings(params);
+      if (afterFull) return afterFull;
+    } catch {
+      // 缓存损坏 / 同步异常 → 降级回跨海全量，保证不阻塞。
+    }
+    // client 降级：跨海全量拉映射。
+    const payload = await remoteRequest("/api/master-data/mappings", {
+      method: "POST",
+      body: { limit: 100000 },
+    });
+    return (payload && payload.mappings) || [];
+  }
+  // host 模式：本地 SQL 全量。
+  return listSku1688Sources({
+    ...params,
+    companyId: params.companyId || erpState.currentUser?.companyId,
+    limit: params.limit || 100000,
+  });
+}
+
 async function createSkuRuntime(payload = {}, actor = {}) {
   if (isClientMode()) {
     const response = await remoteRequest("/api/master-data/action", {
@@ -14906,6 +14940,9 @@ function registerErpIpcHandlers(ipcMain) {
   // 商品资料本地缓存（client 模式）：手动强刷 + 状态查询。
   ipcMain.handle("erp:sku:sync", (_event, options) => skuCache.triggerSync(options || {}));
   ipcMain.handle("erp:sku:cache-status", (_event, options) => skuCache.getCacheStatus(options || {}));
+  ipcMain.handle("erp:mapping:list", (_event, params) => listMappingsRuntime(params || {}));
+  ipcMain.handle("erp:mapping:sync", (_event, options) => mappingCache.triggerSync(options || {}));
+  ipcMain.handle("erp:mapping:cache-status", (_event, options) => mappingCache.getCacheStatus(options || {}));
   ipcMain.handle("erp:purchase:workbench", wrapErpHandler("erp:purchase:workbench", (_event, params) => getPurchaseWorkbenchRuntime(params || {})));
   ipcMain.handle("erp:purchase:action", (_event, payload) => performPurchaseActionRuntime(payload || {}));
   ipcMain.handle("erp:warehouse:workbench", (_event, params) => getWarehouseWorkbenchRuntime(params || {}));
