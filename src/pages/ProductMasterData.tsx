@@ -457,10 +457,14 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
       ? [`店铺 ${accounts.length}`]
       : [hasSkuFilters ? `商品 ${filteredSkus.length}/${skus.length}` : `商品 ${skus.length}`, `聚水潭 ${jushuitanSkuCount}`];
 
-  const loadAll = useCallback(async () => {
+  const loadAll = useCallback(async (options?: { forceFull?: boolean }) => {
     if (!erp) return;
     setLoading(true);
     try {
+      // 强刷：先让 client 缓存做一次全量重拉（host 模式 sync 是 no-op，静默跳过）。
+      if (options?.forceFull) {
+        await erp.sku.sync?.({ mode: "full" }).catch(() => {});
+      }
       const [nextAccounts, nextSuppliers, purchaseWorkbench] = await Promise.all([
         erp.account.list({ limit: 10000 }),
         erp.supplier.list({ limit: 10000 }),
@@ -473,7 +477,10 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
       setSuppliers(nextSupplierRows);
       if (nextAddresses.length) setAlibaba1688Addresses(nextAddresses);
       setLoadedOnce(true);
-      const CHUNK = 500;
+      // SKU 一次性拿全：client 模式 erp.sku.list 走本地 cache.db（秒返回，PR2），
+      // host 走本地 SQL。CHUNK=10000 贴 normalizeLimit 上限，22576 条约 3 页
+      // （旧版 500/页要 46 次 IPC；client 模式那时还每页跨海）。
+      const CHUNK = 10000;
       const allSkuRows: ErpSkuRow[] = [];
       for (let offset = 0; offset < 200000; offset += CHUNK) {
         let rows: ErpSkuRow[] | null = null;
@@ -490,11 +497,13 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
         setSkus(allSkuRows.slice());
         if (rows.length < CHUNK) break;
       }
+      // SKU 不写 localStorage：22576 条会撑爆 ~5MB 配额，导致整个 pageCache 写失败、
+      // accounts/suppliers/addresses 连带丢。SKU 由 client 模式 cache.db 承担首屏。
       writePageCache<ProductMasterDataCache>(PRODUCT_MASTER_DATA_CACHE_KEY, {
         generatedAt: new Date().toISOString(),
         accounts: nextAccountRows,
         suppliers: nextSupplierRows,
-        skus: allSkuRows,
+        skus: [],
         alibaba1688Addresses: nextAddresses.length ? nextAddresses : cachedData.alibaba1688Addresses,
       });
     } catch (error: any) {
@@ -969,7 +978,7 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
               新增商品
             </Button>
           ) : null,
-          <Button key="refresh" icon={<ReloadOutlined />} loading={loading} onClick={loadAll}>
+          <Button key="refresh" icon={<ReloadOutlined />} loading={loading} onClick={() => void loadAll({ forceFull: true })}>
             刷新
           </Button>,
         ].filter(Boolean)}
