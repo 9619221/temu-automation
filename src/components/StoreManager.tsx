@@ -312,6 +312,12 @@ export default function StoreManager({ onChanged }: StoreManagerProps) {
   const [storeAddressModalOpen, setStoreAddressModalOpen] = useState(false);
   const [editingStoreAddressAccount, setEditingStoreAddressAccount] = useState<StoreAccountRow | null>(null);
 
+  const sortedAccounts = useMemo(
+    () => [...accounts].sort((a, b) =>
+      (a.name || "").localeCompare(b.name || "", "zh-Hans-CN", { numeric: true }),
+    ),
+    [accounts],
+  );
   const addressById = useMemo(
     () => new Map(alibaba1688Addresses.map((address) => [address.id, address])),
     [alibaba1688Addresses],
@@ -636,7 +642,7 @@ export default function StoreManager({ onChanged }: StoreManagerProps) {
         rowKey="id"
         loading={tableLoading}
         columns={accountColumns}
-        dataSource={accounts}
+        dataSource={sortedAccounts}
         pagination={{ pageSize: 5, showSizeChanger: false }}
       />
 
