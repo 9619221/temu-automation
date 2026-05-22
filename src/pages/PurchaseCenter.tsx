@@ -1183,6 +1183,19 @@ function isPendingPurchaseRequest(row: PurchaseRequestRow) {
   return ACTIVE_REQUEST_STATUSES.has(row.status);
 }
 
+// 是否已绑任意货源：1688 映射 / 报价候选 / SKU 供应商三者任一。
+// 口径跟货源列橙色「待找品」Tag (noSource) 完全一致，取反即「有货源」。
+function purchaseRequestHasSource(row: PurchaseRequestRow) {
+  return Number(row.mappingCount || 0) > 0
+    || Boolean(row.candidates?.length || row.candidateCount)
+    || Boolean(row.skuSupplierId || row.skuSupplierName);
+}
+
+// PR 早期阶段（还没流转到 sourced）：运营刚提交 / 采购处理中。
+function isEarlyStagePurchaseRequest(row: PurchaseRequestRow) {
+  return row.status === "submitted" || row.status === "buyer_processing";
+}
+
 function isPendingPaymentOrder(row: PurchaseOrderRow) {
   return PAYMENT_QUEUE_STATUSES.has(row.status);
 }
@@ -1778,12 +1791,18 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   );
   // 7 个业务流 tab 用的分组：
   // 待找品 / 已找品 是 PR 阶段；待推单 / 待付款 / 已付款 / 已完成 是 PO 阶段。
+  // 待找品 = 早期阶段 PR 且没有任何货源（无映射/无报价/无供应商）。
+  // 已绑货源的早期 PR 即便状态没流转，也归到「已找品」，避免有映射的需求混在待找品里。
   const pendingSourcingRequestRows = useMemo(
-    () => purchaseRequests.filter((row) => row.status === "submitted" || row.status === "buyer_processing"),
+    () => purchaseRequests.filter((row) => isEarlyStagePurchaseRequest(row) && !purchaseRequestHasSource(row)),
     [purchaseRequests],
   );
   const sourcedRequestRows = useMemo(
-    () => purchaseRequests.filter((row) => row.status === "sourced" || row.status === "waiting_ops_confirm"),
+    () => purchaseRequests.filter((row) =>
+      row.status === "sourced"
+      || row.status === "waiting_ops_confirm"
+      || (isEarlyStagePurchaseRequest(row) && purchaseRequestHasSource(row)),
+    ),
     [purchaseRequests],
   );
   const draftOnlyOrderRows = useMemo(
