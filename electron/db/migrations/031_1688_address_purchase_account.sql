@@ -1,4 +1,8 @@
+-- @idempotent
 -- 多 1688 采购账号(v0.2.8+) 漏补的 erp_1688_delivery_addresses 字段。
+--
+-- 注意：030_1688_addresses_oauth_dim 也会 ADD COLUMN purchase_1688_account_id，
+-- 两条迁移撞同一列。靠 @idempotent 逐语句容错：列已存在则跳过 ADD COLUMN，建索引照跑。
 --
 -- 背景：026_1688_purchase_accounts.sql 只动了 erp_1688_auth_settings 与 erp_accounts，
 --       忘了给 erp_1688_delivery_addresses 加 purchase_1688_account_id。

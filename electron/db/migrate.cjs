@@ -70,6 +70,63 @@ function shouldRunWithoutWrapperTransaction(sql) {
   return /--\s*@no-transaction\b/i.test(sql);
 }
 
+function shouldRunIdempotent(sql) {
+  return /--\s*@idempotent\b/i.test(sql);
+}
+
+// 仅吞掉「对象已存在」类幂等错误（重复加列 / 表或索引已存在），其余照常抛出
+function isIgnorableIdempotentError(message) {
+  return /duplicate column name|already exists/i.test(String(message || ""));
+}
+
+// 按分号拆分 SQL，跳过单引号字符串与 -- 行注释里的分号
+function splitSqlStatements(sql) {
+  const statements = [];
+  let current = "";
+  let inString = false;
+  let inLineComment = false;
+  for (let i = 0; i < sql.length; i += 1) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+    if (inLineComment) {
+      current += ch;
+      if (ch === "\n") inLineComment = false;
+      continue;
+    }
+    if (inString) {
+      current += ch;
+      if (ch === "'") {
+        if (next === "'") { current += next; i += 1; }
+        else inString = false;
+      }
+      continue;
+    }
+    if (ch === "-" && next === "-") { inLineComment = true; current += ch; continue; }
+    if (ch === "'") { inString = true; current += ch; continue; }
+    if (ch === ";") {
+      if (current.trim()) statements.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim()) statements.push(current.trim());
+  return statements;
+}
+
+// @idempotent 迁移逐语句执行：单条遇「已存在」类错误跳过，其余抛出
+function execStatementsIdempotently(db, sql) {
+  for (const statement of splitSqlStatements(sql)) {
+    if (!statement.replace(/--[^\n]*/g, "").trim()) continue;
+    try {
+      db.exec(statement);
+    } catch (error) {
+      if (isIgnorableIdempotentError(error && error.message)) continue;
+      throw error;
+    }
+  }
+}
+
 function backupDatabaseIfNeeded(dbPath, options = {}) {
   if (options.backup === false) return null;
   if (!fs.existsSync(dbPath)) return null;
@@ -102,14 +159,17 @@ function runMigrations(options = {}) {
       }
 
       const sql = fs.readFileSync(migration.path, "utf8");
+      const runSql = shouldRunIdempotent(sql)
+        ? () => execStatementsIdempotently(db, sql)
+        : () => db.exec(sql);
 
       try {
         if (shouldRunWithoutWrapperTransaction(sql)) {
-          db.exec(sql);
+          runSql();
           writeMigrationLog(db, migration.key, "success", "");
         } else {
           const applyMigration = db.transaction(() => {
-            db.exec(sql);
+            runSql();
             writeMigrationLog(db, migration.key, "success", "");
           });
           applyMigration();
