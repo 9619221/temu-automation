@@ -14450,12 +14450,24 @@ async function listMappingsRuntime(params = {}) {
     } catch {
       // 缓存损坏 / 同步异常 → 降级回跨海全量，保证不阻塞。
     }
-    // client 降级：跨海全量拉映射。
-    const payload = await remoteRequest("/api/master-data/mappings", {
-      method: "POST",
-      body: { limit: 100000 },
-    });
-    return (payload && payload.mappings) || [];
+    // client 降级：先试映射端点；老服务器(尚未 patch /api/master-data/mappings，返回 404)
+    // 回退到 purchase workbench 的 sku1688Sources，保证供应商管理在服务器升级前也能用。
+    try {
+      const payload = await remoteRequest("/api/master-data/mappings", {
+        method: "POST",
+        body: { limit: 100000 },
+      });
+      return (payload && payload.mappings) || [];
+    } catch (error) {
+      if (error?.statusCode === 404 || /not found/i.test(error?.message || "")) {
+        const wb = await remoteRequest("/api/purchase/workbench", {
+          method: "POST",
+          body: { limit: 100000, includeRequestDetails: false, include1688Meta: false },
+        });
+        return (wb && wb.sku1688Sources) || [];
+      }
+      throw error;
+    }
   }
   // host 模式：本地 SQL 全量。
   return listSku1688Sources({
