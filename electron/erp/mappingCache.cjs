@@ -81,6 +81,9 @@ function openCacheDb() {
       PRIMARY KEY (company_id, id)
     );
     CREATE INDEX IF NOT EXISTS idx_mapping_cache_sku ON mapping_cache(company_id, sku_id);
+    -- 同 skuCache：列表按 updated_at DESC 排序，缺索引会 USE TEMP B-TREE 全表排序，
+    -- 加 (company_id, updated_at) 走索引提速。IF NOT EXISTS 让旧 cache.db 自动补建。
+    CREATE INDEX IF NOT EXISTS idx_mapping_cache_updated ON mapping_cache(company_id, updated_at);
     CREATE TABLE IF NOT EXISTS mapping_sync_meta (
       company_id TEXT PRIMARY KEY,
       cursor TEXT,
@@ -135,6 +138,29 @@ function isCachePopulated(companyId) {
   }
 }
 
+// 构建 WHERE 条件（list 与 count 共用，保证两者口径一致）。search 走 payload_json LIKE：
+// mapping_cache 没有 internal_sku_code / supplier_name 等单列，但 payload 是整条映射的
+// JSON，前端搜的所有字段都在里面；16385 条全表扫 LIKE 仅几十毫秒，可接受。
+function buildMappingConditions(params, args) {
+  const conditions = ["company_id = @company_id", "status != 'deleted'"];
+  const skuId = optionalString(params.skuId || params.sku_id);
+  if (skuId) {
+    conditions.push("sku_id = @sku_id");
+    args.sku_id = skuId;
+  }
+  const accountId = optionalString(params.accountId || params.account_id);
+  if (accountId) {
+    conditions.push("account_id = @account_id");
+    args.account_id = accountId;
+  }
+  const search = optionalString(params.search);
+  if (search) {
+    conditions.push("payload_json LIKE @search");
+    args.search = `%${search}%`;
+  }
+  return conditions;
+}
+
 // 读缓存。返回 null 表示无法用缓存（无 companyId / 缓存空 / 打开失败），调用方据此降级回跨海。
 function getCachedMappings(params = {}) {
   const companyId = optionalString(params.companyId) || getCurrentCompanyId();
@@ -147,18 +173,8 @@ function getCachedMappings(params = {}) {
   }
   if (!isCachePopulated(companyId)) return null;
 
-  const conditions = ["company_id = @company_id", "status != 'deleted'"];
   const args = { company_id: companyId };
-  const skuId = optionalString(params.skuId || params.sku_id);
-  if (skuId) {
-    conditions.push("sku_id = @sku_id");
-    args.sku_id = skuId;
-  }
-  const accountId = optionalString(params.accountId || params.account_id);
-  if (accountId) {
-    conditions.push("account_id = @account_id");
-    args.account_id = accountId;
-  }
+  const conditions = buildMappingConditions(params, args);
   const limit = Math.max(1, Math.min(Number(params.limit) || 100000, 500000));
   const offset = Math.max(0, Number(params.offset) || 0);
   const rows = db.prepare(`
@@ -168,6 +184,27 @@ function getCachedMappings(params = {}) {
     LIMIT @limit OFFSET @offset
   `).all({ ...args, limit, offset });
   return rows.map((row) => JSON.parse(row.payload_json));
+}
+
+// 计数（配合分页器，与 getCachedMappings 同口径）。返回 null 同样表示无法用缓存、调用方降级。
+function getCachedMappingsCount(params = {}) {
+  const companyId = optionalString(params.companyId) || getCurrentCompanyId();
+  if (!companyId) return null;
+  let db;
+  try {
+    db = openCacheDb();
+  } catch {
+    return null;
+  }
+  if (!isCachePopulated(companyId)) return null;
+
+  const args = { company_id: companyId };
+  const conditions = buildMappingConditions(params, args);
+  const row = db.prepare(`
+    SELECT COUNT(*) AS c FROM mapping_cache
+    WHERE ${conditions.join(" AND ")}
+  `).get(args);
+  return row ? row.c : 0;
 }
 
 function upsertMappings(companyId, rows) {
@@ -369,6 +406,7 @@ module.exports = {
   configureMappingCache,
   closeCacheDb,
   getCachedMappings,
+  getCachedMappingsCount,
   isCachePopulated,
   triggerSync,
   triggerReconcile,

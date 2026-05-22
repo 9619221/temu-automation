@@ -3080,6 +3080,9 @@ function listSkus(params = {}) {
   // 关键词模糊匹配：SKU 编码 / 内部 ID / 商品名
   if (search) conditions.push("(sku.internal_sku_code LIKE @search OR sku.id LIKE @search OR sku.product_name LIKE @search)");
   if (since) conditions.push("sku.updated_at > @since");
+  // 未绑定：没有任何 active 1688 映射的 SKU（供应商管理「未绑定」Tab，host 模式）。
+  const unmappedOnly = Boolean(params.unmappedOnly || params.unmapped_only);
+  if (unmappedOnly) conditions.push("NOT EXISTS (SELECT 1 FROM erp_sku_1688_sources s2 WHERE s2.sku_id = sku.id AND s2.status != 'deleted')");
   const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const rows = db.prepare(`
     SELECT
@@ -3412,6 +3415,12 @@ function listSku1688Sources(params = {}) {
   if (companyId) conditions.push("(sku.company_id = @company_id OR acct.company_id = @company_id)");
   // 增量游标：只取 since 之后变化的行（含软删，由 includeDeleted 控制）。
   if (since) conditions.push("source.updated_at > @since");
+  // 关键词搜索（供应商管理「已绑定」Tab，host 模式）：覆盖 client 端 payload LIKE 的主要字段。
+  const search = optionalString(params.search);
+  if (search) {
+    values.search = `%${search}%`;
+    conditions.push("(sku.internal_sku_code LIKE @search OR sku.product_name LIKE @search OR source.supplier_name LIKE @search OR source.product_title LIKE @search OR source.external_offer_id LIKE @search OR source.external_sku_id LIKE @search OR source.external_spec_id LIKE @search OR source.platform_sku_name LIKE @search OR acct.name LIKE @search)");
+  }
   if (!includeDeleted) {
     conditions.push("source.status != 'deleted'");
     conditions.push("(sku.status IS NULL OR sku.status != 'deleted')");
@@ -3434,6 +3443,66 @@ function listSku1688Sources(params = {}) {
     LIMIT @limit OFFSET @offset
   `).all(values);
   return rows.map(toSku1688Source);
+}
+
+// 与 listSku1688Sources 同口径的计数（分页器总数，host 模式）。只 join company 分区/搜索所需的表。
+function countSku1688Sources(params = {}) {
+  const { db } = requireErp();
+  const accountId = optionalString(params.accountId || params.account_id);
+  const skuId = optionalString(params.skuId || params.sku_id);
+  const includeDeleted = Boolean(params.includeDeleted || params.include_deleted);
+  const companyId = optionalString(params.companyId || params.company_id);
+  const conditions = [];
+  const values = {
+    account_id: accountId,
+    sku_id: skuId,
+    status: optionalString(params.status),
+    company_id: companyId,
+  };
+  if (accountId) conditions.push("source.account_id = @account_id");
+  if (skuId) conditions.push("source.sku_id = @sku_id");
+  if (values.status) conditions.push("source.status = @status");
+  if (companyId) conditions.push("(sku.company_id = @company_id OR acct.company_id = @company_id)");
+  const search = optionalString(params.search);
+  if (search) {
+    values.search = `%${search}%`;
+    conditions.push("(sku.internal_sku_code LIKE @search OR sku.product_name LIKE @search OR source.supplier_name LIKE @search OR source.product_title LIKE @search OR source.external_offer_id LIKE @search OR source.external_sku_id LIKE @search OR source.external_spec_id LIKE @search OR source.platform_sku_name LIKE @search OR acct.name LIKE @search)");
+  }
+  if (!includeDeleted) {
+    conditions.push("source.status != 'deleted'");
+    conditions.push("(sku.status IS NULL OR sku.status != 'deleted')");
+  }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const row = db.prepare(`
+    SELECT COUNT(*) AS c
+    FROM erp_sku_1688_sources source
+    LEFT JOIN erp_skus sku ON sku.id = source.sku_id
+    LEFT JOIN erp_accounts acct ON acct.id = source.account_id
+    ${where}
+  `).get(values);
+  return row ? row.c : 0;
+}
+
+// 与 listSkus(unmappedOnly) 同口径的未绑定 SKU 计数（分页器总数，host 模式）。
+function countUnmappedSkus(params = {}) {
+  const { db } = requireErp();
+  const accountId = optionalString(params.accountId || params.account_id);
+  const companyId = optionalString(params.companyId || params.company_id);
+  const conditions = ["sku.id NOT LIKE 'jst:sku:%'", "sku.status != 'deleted'"];
+  const values = { account_id: accountId, company_id: companyId };
+  if (accountId) conditions.push("(sku.account_id = @account_id OR sku.account_id IS NULL)");
+  if (companyId) conditions.push("sku.company_id = @company_id");
+  const search = optionalString(params.search);
+  if (search) {
+    values.search = `%${search}%`;
+    conditions.push("(sku.internal_sku_code LIKE @search OR sku.id LIKE @search OR sku.product_name LIKE @search)");
+  }
+  conditions.push("NOT EXISTS (SELECT 1 FROM erp_sku_1688_sources s2 WHERE s2.sku_id = sku.id AND s2.status != 'deleted')");
+  const row = db.prepare(`
+    SELECT COUNT(*) AS c FROM erp_skus sku
+    WHERE ${conditions.join(" AND ")}
+  `).get(values);
+  return row ? row.c : 0;
 }
 
 function getActiveSku1688SourceRows(db, accountId, skuId) {
@@ -14465,6 +14534,61 @@ async function listMappingsRuntime(params = {}) {
   });
 }
 
+// 供应商管理「已绑定」Tab 服务端分页：返回 { rows, total }。一次调用同时拿当页和总数，
+// 避免 list / count 分两个 IPC 出现游标竞态。client 走本地 cache.db 分页，host 走本地 SQL。
+async function listMappingsPageRuntime(params = {}) {
+  if (isClientMode()) {
+    try {
+      // 首页等一次增量同步保证数据新鲜（无游标自动转全量建基线）；翻页后台静默追增量。
+      if (!Number(params.offset)) await mappingCache.triggerSync({ mode: "incremental" });
+      else void mappingCache.triggerSync({ mode: "incremental" }).catch(() => {});
+      void mappingCache.triggerReconcile().catch(() => {});
+      const rows = mappingCache.getCachedMappings(params);
+      const total = mappingCache.getCachedMappingsCount(params);
+      if (rows !== null && total !== null) return { rows, total };
+    } catch {
+      // 缓存损坏 / 同步异常 → 降级跨海全量，本地切片返回。
+    }
+    const payload = await remoteRequest("/api/master-data/mappings", { method: "POST", body: { limit: 100000 } });
+    const all = (payload && payload.mappings) || [];
+    const offset = Math.max(0, Number(params.offset) || 0);
+    const limit = Math.max(1, Number(params.limit) || 500);
+    return { rows: all.slice(offset, offset + limit), total: all.length };
+  }
+  const companyId = params.companyId || erpState.currentUser?.companyId;
+  return {
+    rows: listSku1688Sources({ ...params, companyId, limit: params.limit || 500 }),
+    total: countSku1688Sources({ ...params, companyId }),
+  };
+}
+
+// 供应商管理「未绑定」Tab 服务端分页：返回 { rows, total }。未绑定 = sku 减去 mapping，
+// 依赖 sku_cache 与 mapping_cache 两份本地缓存，首页同时等两者就绪后再求差。
+async function listUnmappedSkusPageRuntime(params = {}) {
+  if (isClientMode()) {
+    try {
+      if (!Number(params.offset)) {
+        await skuCache.triggerSync({ mode: "incremental" });
+        await mappingCache.triggerSync({ mode: "incremental" });
+      } else {
+        void skuCache.triggerSync({ mode: "incremental" }).catch(() => {});
+        void mappingCache.triggerSync({ mode: "incremental" }).catch(() => {});
+      }
+      const rows = skuCache.getCachedUnmappedSkus(params);
+      const total = skuCache.getCachedUnmappedSkusCount(params);
+      if (rows !== null && total !== null) return { rows, total };
+    } catch {
+      // 双表求差依赖本地缓存，跨海无对应接口；降级返回空，前端提示刷新。
+    }
+    return { rows: [], total: 0 };
+  }
+  const companyId = params.companyId || erpState.currentUser?.companyId;
+  return {
+    rows: listSkus({ ...params, companyId, unmappedOnly: true, limit: params.limit || 500 }),
+    total: countUnmappedSkus({ ...params, companyId }),
+  };
+}
+
 async function createSkuRuntime(payload = {}, actor = {}) {
   if (isClientMode()) {
     const response = await remoteRequest("/api/master-data/action", {
@@ -14937,10 +15061,14 @@ function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:sku:list", (_event, params) => listSkusRuntime(params || {}));
   ipcMain.handle("erp:sku:create", (_event, payload) => createSkuRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:sku:delete", (_event, payload) => deleteSkuRuntime(payload || {}, erpState.currentUser || {}));
+  // 供应商管理「未绑定」Tab 服务端分页：返回 { rows, total }。
+  ipcMain.handle("erp:sku:unmapped-page", (_event, params) => listUnmappedSkusPageRuntime(params || {}));
   // 商品资料本地缓存（client 模式）：手动强刷 + 状态查询。
   ipcMain.handle("erp:sku:sync", (_event, options) => skuCache.triggerSync(options || {}));
   ipcMain.handle("erp:sku:cache-status", (_event, options) => skuCache.getCacheStatus(options || {}));
   ipcMain.handle("erp:mapping:list", (_event, params) => listMappingsRuntime(params || {}));
+  // 供应商管理「已绑定」Tab 服务端分页：返回 { rows, total }。
+  ipcMain.handle("erp:mapping:page", (_event, params) => listMappingsPageRuntime(params || {}));
   ipcMain.handle("erp:mapping:sync", (_event, options) => mappingCache.triggerSync(options || {}));
   ipcMain.handle("erp:mapping:cache-status", (_event, options) => mappingCache.getCacheStatus(options || {}));
   ipcMain.handle("erp:purchase:workbench", wrapErpHandler("erp:purchase:workbench", (_event, params) => getPurchaseWorkbenchRuntime(params || {})));
