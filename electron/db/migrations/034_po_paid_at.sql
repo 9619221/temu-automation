@@ -1,0 +1,12 @@
+-- @idempotent
+-- 补 erp_purchase_orders.paid_at 列。
+--
+-- 背景：002_erp_purchase.sql 的 CREATE TABLE 里后来补了 paid_at 列，但早于该补充
+-- 建库的老库（含生产 erp.temu.chat）002 早已 applied、不会重跑 CREATE TABLE，
+-- 导致这些库一直缺 paid_at 列。
+--
+-- 后果：confirmPaid（PR#45）确认付款时 patch paid_at，在缺列的库会撞
+-- "no such column: paid_at"，把"确认付款"功能搞坏。
+--
+-- @idempotent 逐语句容错：列已存在（新库）跳过，缺列（老库）补上。
+ALTER TABLE erp_purchase_orders ADD COLUMN paid_at TEXT;
