@@ -138,6 +138,7 @@ const BROADCAST_PURCHASE_ACTIONS = new Set([
   "approve_payment",
   "confirm_paid",
   "rollback_po_status",
+  "update_offline_po",
 ]);
 
 const ACCESS_CODE_ITERATIONS = 120000;
@@ -4047,7 +4048,7 @@ function getPurchaseWorkbench(params = {}) {
     SELECT
       po.*,
       acct.name AS account_name,
-      supplier.name AS supplier_name,
+      COALESCE(supplier.name, cand.supplier_name) AS supplier_name,
       creator.name AS created_by_name,
       pr.status AS pr_status,
       GROUP_CONCAT(DISTINCT sku.internal_sku_code || ' ' || sku.product_name) AS sku_summary,
@@ -4111,10 +4112,25 @@ function getPurchaseWorkbench(params = {}) {
           OR (po.external_order_id IS NOT NULL AND latest_refund.external_order_id = po.external_order_id)
         ORDER BY latest_refund.updated_at DESC
         LIMIT 1
-      ) AS latest_refund_amount
+      ) AS latest_refund_amount,
+      (
+        SELECT cost_line.unit_cost
+        FROM erp_purchase_order_lines cost_line
+        WHERE cost_line.po_id = po.id
+        ORDER BY cost_line.id ASC
+        LIMIT 1
+      ) AS unit_cost,
+      (
+        SELECT fee_line.logistics_fee
+        FROM erp_purchase_order_lines fee_line
+        WHERE fee_line.po_id = po.id
+        ORDER BY fee_line.id ASC
+        LIMIT 1
+      ) AS logistics_fee
     FROM erp_purchase_orders po
     LEFT JOIN erp_accounts acct ON acct.id = po.account_id
     LEFT JOIN erp_suppliers supplier ON supplier.id = po.supplier_id
+    LEFT JOIN erp_sourcing_candidates cand ON cand.id = po.selected_candidate_id
     LEFT JOIN erp_users creator ON creator.id = po.created_by
     LEFT JOIN erp_purchase_requests pr ON pr.id = po.pr_id
     LEFT JOIN erp_purchase_order_lines line ON line.po_id = po.id
@@ -4329,7 +4345,7 @@ function getPurchaseOrderActionRow(db, poId) {
     SELECT
       po.*,
       acct.name AS account_name,
-      supplier.name AS supplier_name,
+      COALESCE(supplier.name, cand.supplier_name) AS supplier_name,
       creator.name AS created_by_name,
       pr.status AS pr_status,
       GROUP_CONCAT(DISTINCT sku.internal_sku_code || ' ' || sku.product_name) AS sku_summary,
@@ -4361,10 +4377,25 @@ function getPurchaseOrderActionRow(db, poId) {
         FROM erp_1688_delivery_addresses addr
         WHERE addr.account_id = po.account_id
           AND addr.status = 'active'
-      ) AS delivery_address_count
+      ) AS delivery_address_count,
+      (
+        SELECT cost_line.unit_cost
+        FROM erp_purchase_order_lines cost_line
+        WHERE cost_line.po_id = po.id
+        ORDER BY cost_line.id ASC
+        LIMIT 1
+      ) AS unit_cost,
+      (
+        SELECT fee_line.logistics_fee
+        FROM erp_purchase_order_lines fee_line
+        WHERE fee_line.po_id = po.id
+        ORDER BY fee_line.id ASC
+        LIMIT 1
+      ) AS logistics_fee
     FROM erp_purchase_orders po
     LEFT JOIN erp_accounts acct ON acct.id = po.account_id
     LEFT JOIN erp_suppliers supplier ON supplier.id = po.supplier_id
+    LEFT JOIN erp_sourcing_candidates cand ON cand.id = po.selected_candidate_id
     LEFT JOIN erp_users creator ON creator.id = po.created_by
     LEFT JOIN erp_purchase_requests pr ON pr.id = po.pr_id
     LEFT JOIN erp_purchase_order_lines line ON line.po_id = po.id
@@ -8007,6 +8038,58 @@ function resolveExpectedDeliveryDate(candidate, payload = {}) {
   return date.toISOString().slice(0, 10);
 }
 
+// 线下手工单候选：带了单价/供应商时落一条 selected 状态的手工候选，
+// 供应商名只能挂在候选上（PO 表不存名字），不填则退回空候选占位（保持旧行为）。
+function buildOfflineCandidateForPo(db, pr, payload, actor) {
+  const supplierId = optionalString(payload.supplierId);
+  const supplierName = optionalString(payload.supplierName);
+  const unitPrice = optionalNumber(payload.unitPrice);
+  const logisticsFee = optionalNumber(payload.logisticsFee);
+  const hasOfflineDetails = Boolean(supplierId || supplierName || unitPrice != null || logisticsFee != null);
+  if (!hasOfflineDetails) {
+    return { id: null, status: "selected", unit_price: 0, logistics_fee: 0, supplier_id: null };
+  }
+  const supplier = supplierId ? db.prepare("SELECT * FROM erp_suppliers WHERE id = ?").get(supplierId) : null;
+  const now = nowIso();
+  const row = {
+    id: createId("source"),
+    account_id: pr.account_id,
+    pr_id: pr.id,
+    purchase_source: supplierId ? "existing_supplier" : "other_manual",
+    sourcing_method: "manual",
+    supplier_id: supplierId || null,
+    supplier_name: supplierName || supplier?.name || "线下供应商",
+    product_title: optionalString(payload.productTitle) || null,
+    product_url: null,
+    image_url: null,
+    unit_price: unitPrice ?? 0,
+    moq: 1,
+    lead_days: null,
+    logistics_fee: logisticsFee ?? 0,
+    remark: optionalString(payload.remark) || null,
+    status: "selected",
+    created_by: actor.id || null,
+    created_at: now,
+    updated_at: now,
+  };
+  if (!Number.isFinite(row.unit_price) || row.unit_price < 0) {
+    throw new Error("unitPrice must be greater than or equal to 0");
+  }
+  db.prepare(`
+    INSERT INTO erp_sourcing_candidates (
+      id, account_id, pr_id, purchase_source, sourcing_method, supplier_id, supplier_name,
+      product_title, product_url, image_url, unit_price, moq, lead_days,
+      logistics_fee, remark, status, created_by, created_at, updated_at
+    )
+    VALUES (
+      @id, @account_id, @pr_id, @purchase_source, @sourcing_method, @supplier_id, @supplier_name,
+      @product_title, @product_url, @image_url, @unit_price, @moq, @lead_days,
+      @logistics_fee, @remark, @status, @created_by, @created_at, @updated_at
+    )
+  `).run(row);
+  return row;
+}
+
 function generatePurchaseOrderAction({ db, services, payload, actor }) {
   assertActorRole(actor, ["buyer", "manager", "admin"], "生成采购单");
   const prId = requireString(payload.prId || payload.id, "prId");
@@ -8022,10 +8105,11 @@ function generatePurchaseOrderAction({ db, services, payload, actor }) {
   if (pr.status === "converted_to_po") {
     throw new Error("这个采购需求已标记为已生成采购单，请刷新采购中心后查看采购单列表");
   }
-  // 线下采购：不绑定 1688 货源/候选，用一个空候选直接生成手工采购单
+  // 线下采购：不绑定 1688 货源/候选。带了单价/供应商就落一条手工候选，
+  // 让采购单直接有金额和供应商；什么都没填则退回空候选占位。
   const offlinePurchase = Boolean(payload.offlinePurchase);
   const candidate = offlinePurchase
-    ? { id: null, status: "selected", unit_price: 0, logistics_fee: 0, supplier_id: null }
+    ? buildOfflineCandidateForPo(db, pr, payload, actor)
     : applySelected1688SpecToCandidate(
       getCandidateForPo(db, pr, optionalString(payload.candidateId), actor, {
         preferSku1688Source: Boolean(payload.preferSku1688Source || payload.preferSku1688Mapping || payload.useSku1688Source),
@@ -8142,6 +8226,122 @@ function generatePurchaseOrderAction({ db, services, payload, actor }) {
     sku1688Source,
     purchaseOrder: toPurchaseOrderResult(db, afterPo),
   };
+}
+
+// 编辑线下手工单：改单价/运费/数量/供应商，重算金额。仅限草稿(draft)未推单的手工单。
+// 供应商名挂在候选上：有候选就更新，没有就新建一条并回填 selected_candidate_id。
+function updateOfflinePurchaseOrderAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "编辑采购单");
+  const poId = requireString(payload.poId || payload.id, "poId");
+  const po = getPurchaseOrder(db, poId);
+  if (po.status !== "draft") {
+    throw new Error("只能编辑草稿状态的手工采购单");
+  }
+  if (optionalString(po.external_order_id)) {
+    throw new Error("已推送 1688 的采购单不能在这里改价");
+  }
+  const lines = db.prepare(
+    "SELECT * FROM erp_purchase_order_lines WHERE po_id = ? ORDER BY id ASC",
+  ).all(poId);
+  if (!lines.length) throw new Error("采购单没有明细行");
+  const line = lines[0];
+
+  const unitCost = optionalNumber(payload.unitPrice) ?? Number(line.unit_cost || 0);
+  const logisticsFee = optionalNumber(payload.logisticsFee) ?? Number(line.logistics_fee || 0);
+  const qty = optionalNumber(payload.qty) ?? Number(line.qty || 0);
+  if (!Number.isFinite(unitCost) || unitCost < 0) throw new Error("unitPrice must be greater than or equal to 0");
+  if (!Number.isFinite(logisticsFee) || logisticsFee < 0) throw new Error("logisticsFee must be greater than or equal to 0");
+  if (!Number.isInteger(qty) || qty <= 0) throw new Error("qty must be a positive integer");
+
+  const supplierId = optionalString(payload.supplierId);
+  const supplier = supplierId ? db.prepare("SELECT * FROM erp_suppliers WHERE id = ?").get(supplierId) : null;
+  const supplierName = optionalString(payload.supplierName) || supplier?.name || "线下供应商";
+  const now = nowIso();
+  const before = getPurchaseOrder(db, poId);
+
+  let candidateId = optionalString(po.selected_candidate_id);
+  if (candidateId) {
+    db.prepare(`
+      UPDATE erp_sourcing_candidates
+      SET purchase_source = @purchase_source, supplier_id = @supplier_id, supplier_name = @supplier_name,
+          unit_price = @unit_price, logistics_fee = @logistics_fee, updated_at = @updated_at
+      WHERE id = @id
+    `).run({
+      id: candidateId,
+      purchase_source: supplierId ? "existing_supplier" : "other_manual",
+      supplier_id: supplierId || null,
+      supplier_name: supplierName,
+      unit_price: unitCost,
+      logistics_fee: logisticsFee,
+      updated_at: now,
+    });
+  } else {
+    candidateId = createId("source");
+    db.prepare(`
+      INSERT INTO erp_sourcing_candidates (
+        id, account_id, pr_id, purchase_source, sourcing_method, supplier_id, supplier_name,
+        product_title, product_url, image_url, unit_price, moq, lead_days,
+        logistics_fee, remark, status, created_by, created_at, updated_at
+      )
+      VALUES (
+        @id, @account_id, @pr_id, @purchase_source, @sourcing_method, @supplier_id, @supplier_name,
+        @product_title, @product_url, @image_url, @unit_price, @moq, @lead_days,
+        @logistics_fee, @remark, @status, @created_by, @created_at, @updated_at
+      )
+    `).run({
+      id: candidateId,
+      account_id: po.account_id,
+      pr_id: po.pr_id,
+      purchase_source: supplierId ? "existing_supplier" : "other_manual",
+      sourcing_method: "manual",
+      supplier_id: supplierId || null,
+      supplier_name: supplierName,
+      product_title: null,
+      product_url: null,
+      image_url: null,
+      unit_price: unitCost,
+      moq: 1,
+      lead_days: null,
+      logistics_fee: logisticsFee,
+      remark: null,
+      status: "selected",
+      created_by: actor.id || null,
+      created_at: now,
+      updated_at: now,
+    });
+  }
+
+  const totalAmount = qty * unitCost + logisticsFee;
+  db.prepare(`
+    UPDATE erp_purchase_order_lines
+    SET qty = @qty, expected_qty = @qty, unit_cost = @unit_cost, logistics_fee = @logistics_fee
+    WHERE id = @id
+  `).run({ id: line.id, qty, unit_cost: unitCost, logistics_fee: logisticsFee });
+
+  db.prepare(`
+    UPDATE erp_purchase_orders
+    SET supplier_id = @supplier_id, selected_candidate_id = @candidate_id,
+        total_amount = @total_amount, updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id: poId,
+    supplier_id: supplierId || null,
+    candidate_id: candidateId,
+    total_amount: totalAmount,
+    updated_at: now,
+  });
+
+  const afterPo = getPurchaseOrder(db, poId);
+  services.workflow.writeAudit({
+    accountId: po.account_id,
+    actor,
+    action: "update_offline_po",
+    entityType: "purchase_order",
+    entityId: poId,
+    before,
+    after: afterPo,
+  });
+  return { purchaseOrder: toPurchaseOrderResult(db, afterPo) };
 }
 
 function getPurchaseOrderWithCandidate(db, poId) {
@@ -12317,6 +12517,9 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
       }
       case "delete_po": {
         return deletePurchaseOrderAction({ db, services, payload, actor });
+      }
+      case "update_offline_po": {
+        return updateOfflinePurchaseOrderAction({ db, services, payload, actor });
       }
       case "request_1688_price_change": {
         return request1688PriceChangeAction({ db, services, payload, actor });
