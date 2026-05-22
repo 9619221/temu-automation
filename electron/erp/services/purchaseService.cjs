@@ -111,6 +111,7 @@ class PurchaseService {
       actor,
       patch: {
         payment_status: "paid",
+        paid_at: new Date().toISOString(),
       },
     });
   }

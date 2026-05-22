@@ -251,6 +251,7 @@ interface PurchaseOrderRow {
   createdByName?: string;
   status: string;
   paymentStatus?: string;
+  paidAt?: string | null;
   skuSummary?: string;
   skuImageUrl?: string | null;
   skuCodes?: string | null;
@@ -4570,6 +4571,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       dataIndex: "paymentStatus",
       width: 120,
       render: (value) => statusTag(value, PAYMENT_STATUS_LABELS),
+    },
+    {
+      title: "付款时间",
+      dataIndex: "paidAt",
+      width: 150,
+      render: formatDateTime,
     },
     {
       title: "状态",
