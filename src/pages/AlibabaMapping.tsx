@@ -582,6 +582,12 @@ export default function AlibabaMapping() {
     });
   }, []);
 
+  const selectedUrlSpecs = useMemo(() => {
+    if (!urlSpecDialog) return [];
+    const selectedIds = new Set(selectedUrlSpecIds);
+    return urlSpecDialog.rows.filter((row) => selectedIds.has(row.externalSpecId));
+  }, [selectedUrlSpecIds, urlSpecDialog]);
+
   const urlSpecColumns = useMemo<ColumnsType<MappingSpecRow>>(() => [
     {
       title: "规格",
@@ -600,29 +606,6 @@ export default function AlibabaMapping() {
       width: 150,
     },
     {
-      title: "1688数量",
-      key: "platformQty",
-      width: 130,
-      render: (_value, row) => {
-        const selected = selectedUrlSpecIds.includes(row.externalSpecId);
-        if (!selected) return <Text type="secondary">-</Text>;
-        return (
-          <InputNumber
-            min={1}
-            precision={0}
-            value={toPositiveInteger(urlSpecQtyBySpecId[row.externalSpecId], 1)}
-            style={{ width: "100%" }}
-            addonAfter="件"
-            onClick={(event) => event.stopPropagation()}
-            onChange={(value) => setUrlSpecQtyBySpecId((previous) => ({
-              ...previous,
-              [row.externalSpecId]: toPositiveInteger(value, 1),
-            }))}
-          />
-        );
-      },
-    },
-    {
       title: "价格",
       dataIndex: "price",
       width: 110,
@@ -634,7 +617,7 @@ export default function AlibabaMapping() {
       width: 100,
       render: (value: number | null | undefined) => value === null || value === undefined ? "-" : Number(value).toLocaleString("zh-CN"),
     },
-  ], [selectedUrlSpecIds, urlSpecQtyBySpecId]);
+  ], []);
 
   const openCreateForSku = useCallback((row: Sku1688SourceRow) => {
     setEditingRow(null);
@@ -1512,6 +1495,55 @@ export default function AlibabaMapping() {
                 addonAfter="件"
                 onChange={(value) => setUrlSpecOurQty(toPositiveInteger(value, 1))}
               />
+            </Col>
+            <Col span={12}>
+              <Text type="secondary" style={{ display: "block", marginBottom: 6 }}>1688 组合数量</Text>
+              <div
+                style={{
+                  border: "1px solid #d9d9d9",
+                  borderRadius: 6,
+                  minHeight: 40,
+                  overflow: "hidden",
+                  background: "#fff",
+                }}
+              >
+                {selectedUrlSpecs.length ? selectedUrlSpecs.map((row, index) => (
+                  <div
+                    key={row.externalSpecId}
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "minmax(0, 1fr) 104px",
+                      gap: 8,
+                      alignItems: "center",
+                      padding: "8px 10px",
+                      borderTop: index === 0 ? undefined : "1px solid #f0f0f0",
+                      background: "#fff7ed",
+                    }}
+                  >
+                    <Text
+                      ellipsis={{ tooltip: row.specText || row.externalSpecId }}
+                      style={{ minWidth: 0 }}
+                    >
+                      {row.specText || row.externalSpecId}
+                    </Text>
+                    <InputNumber
+                      min={1}
+                      precision={0}
+                      value={toPositiveInteger(urlSpecQtyBySpecId[row.externalSpecId], 1)}
+                      style={{ width: "100%" }}
+                      addonAfter="件"
+                      onChange={(value) => setUrlSpecQtyBySpecId((previous) => ({
+                        ...previous,
+                        [row.externalSpecId]: toPositiveInteger(value, 1),
+                      }))}
+                    />
+                  </div>
+                )) : (
+                  <div style={{ padding: "9px 10px" }}>
+                    <Text type="secondary">未选择</Text>
+                  </div>
+                )}
+              </div>
             </Col>
           </Row>
         </Space>
