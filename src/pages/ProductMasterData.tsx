@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Col, Form, Image, Input, Modal, Popconfirm, Row, Select, Space, Table, Tag, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
@@ -15,6 +15,9 @@ const ADDRESS_WORKBENCH_PARAMS = {
   includeOptions: false,
   include1688Meta: true,
 };
+const SKU_LOAD_CHUNK_SIZE = 1000;
+const SKU_LOAD_MAX_OFFSET = 200000;
+const SKU_LOAD_YIELD_MS = 60;
 
 interface ErpAccountRow {
   id: string;
@@ -87,6 +90,8 @@ interface ErpSkuRow {
   jstCostPrice?: number | null;
   jstSupplierName?: string | null;
   jstMainBin?: string | null;
+  jstCreatedAt?: string | null;
+  jstModifiedAt?: string | null;
   jstCreator?: string | null;
   createdByName?: string | null;
   source?: string | null;
@@ -377,6 +382,10 @@ function isDeleteAccountHandlerMissing(error: any) {
   return /deleteAccount is not defined/i.test(String(error?.message || error || ""));
 }
 
+function waitForSkuLoadYield() {
+  return new Promise((resolve) => window.setTimeout(resolve, SKU_LOAD_YIELD_MS));
+}
+
 export default function ProductMasterData({ mode = "skus" }: ProductMasterDataProps) {
   const auth = useErpAuth();
   const role = auth.currentUser?.role;
@@ -407,6 +416,8 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
   const [storeAddressModalOpen, setStoreAddressModalOpen] = useState(false);
   const [editingStoreAddressAccount, setEditingStoreAddressAccount] = useState<ErpAccountRow | null>(null);
   const [skuFilters, setSkuFilters] = useState<SkuFilters>({ keyword: "" });
+  const mountedRef = useRef(true);
+  const loadSeqRef = useRef(0);
   const accountOptions = useMemo(
     () => accounts
       .map((account) => ({ label: account.name || account.id, value: account.id }))
@@ -457,61 +468,86 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
       ? [`店铺 ${accounts.length}`]
       : [hasSkuFilters ? `商品 ${filteredSkus.length}/${skus.length}` : `商品 ${skus.length}`, `聚水潭 ${jushuitanSkuCount}`];
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      loadSeqRef.current += 1;
+    };
+  }, []);
+
   const loadAll = useCallback(async (options?: { forceFull?: boolean }) => {
     if (!erp) return;
+    const loadSeq = loadSeqRef.current + 1;
+    loadSeqRef.current = loadSeq;
+    const isCurrentLoad = () => mountedRef.current && loadSeqRef.current === loadSeq;
     setLoading(true);
     try {
-      // 强刷：先让 client 缓存做一次全量重拉（host 模式 sync 是 no-op，静默跳过）。
+      // 强刷先让页面读现有缓存/服务器分页；全量同步放后台跑，避免服务器 2 万+ SKU 时首屏一直空白。
       if (options?.forceFull) {
-        await erp.sku.sync?.({ mode: "full" }).catch(() => {});
+        void erp.sku.sync?.({ mode: "full" }).catch((error: any) => {
+          console.warn("[ProductMasterData] background SKU sync failed:", error?.message || error);
+        });
       }
-      const [nextAccounts, nextSuppliers, purchaseWorkbench] = await Promise.all([
-        erp.account.list({ limit: 10000 }),
-        erp.supplier.list({ limit: 10000 }),
-        erp.purchase.workbench(ADDRESS_WORKBENCH_PARAMS).catch(() => null),
-      ]);
-      const nextAddresses = get1688AddressRows(purchaseWorkbench);
-      const nextAccountRows = nextAccounts as ErpAccountRow[];
-      const nextSupplierRows = nextSuppliers as ErpSupplierRow[];
-      setAccounts(nextAccountRows);
-      setSuppliers(nextSupplierRows);
-      if (nextAddresses.length) setAlibaba1688Addresses(nextAddresses);
-      setLoadedOnce(true);
+      const loadAuxiliaryData = async () => {
+        try {
+          const [nextAccounts, nextSuppliers, purchaseWorkbench] = await Promise.all([
+            erp.account.list({ limit: 10000 }),
+            erp.supplier.list({ limit: 10000 }),
+            erp.purchase.workbench(ADDRESS_WORKBENCH_PARAMS).catch(() => null),
+          ]);
+          if (!isCurrentLoad()) return;
+          const nextAddresses = get1688AddressRows(purchaseWorkbench);
+          const nextAccountRows = nextAccounts as ErpAccountRow[];
+          const nextSupplierRows = nextSuppliers as ErpSupplierRow[];
+          setAccounts(nextAccountRows);
+          setSuppliers(nextSupplierRows);
+          if (nextAddresses.length) setAlibaba1688Addresses(nextAddresses);
+          setLoadedOnce(true);
+          writePageCache<ProductMasterDataCache>(PRODUCT_MASTER_DATA_CACHE_KEY, {
+            generatedAt: new Date().toISOString(),
+            accounts: nextAccountRows,
+            suppliers: nextSupplierRows,
+            skus: [],
+            alibaba1688Addresses: nextAddresses.length ? nextAddresses : cachedData.alibaba1688Addresses,
+          });
+        } catch (error: any) {
+          console.warn("[ProductMasterData] auxiliary load failed:", error?.message || error);
+        }
+      };
+      const auxiliaryLoad = loadAuxiliaryData();
+      if (mode !== "skus") {
+        await auxiliaryLoad;
+        return;
+      }
       // SKU 一次性拿全：client 模式 erp.sku.list 走本地 cache.db（秒返回，PR2），
-      // host 走本地 SQL。CHUNK=10000 贴 normalizeLimit 上限，22576 条约 3 页
-      // （旧版 500/页要 46 次 IPC；client 模式那时还每页跨海）。
-      const CHUNK = 10000;
+      // host 走本地 SQL。小分片让页面切走后能尽快停止，避免继续拖慢采购/供应商页首屏。
       const allSkuRows: ErpSkuRow[] = [];
-      for (let offset = 0; offset < 200000; offset += CHUNK) {
+      await waitForSkuLoadYield();
+      for (let offset = 0; offset < SKU_LOAD_MAX_OFFSET; offset += SKU_LOAD_CHUNK_SIZE) {
+        if (!isCurrentLoad()) return;
         let rows: ErpSkuRow[] | null = null;
         for (let attempt = 0; attempt < 3 && rows === null; attempt++) {
           try {
-            const page = (await erp.sku.list({ limit: CHUNK, offset } as any)) as ErpSkuRow[];
+            const page = (await erp.sku.list({ limit: SKU_LOAD_CHUNK_SIZE, offset } as any)) as ErpSkuRow[];
+            if (!isCurrentLoad()) return;
             rows = Array.isArray(page) ? page : [];
           } catch {
-            if (attempt < 2) await new Promise((r) => setTimeout(r, 800));
+            if (attempt < 2) await new Promise((r) => window.setTimeout(r, 800));
           }
         }
         if (rows === null || !rows.length) break;
         allSkuRows.push(...rows);
         setSkus(allSkuRows.slice());
-        if (rows.length < CHUNK) break;
+        if (rows.length < SKU_LOAD_CHUNK_SIZE) break;
+        await waitForSkuLoadYield();
       }
-      // SKU 不写 localStorage：22576 条会撑爆 ~5MB 配额，导致整个 pageCache 写失败、
-      // accounts/suppliers/addresses 连带丢。SKU 由 client 模式 cache.db 承担首屏。
-      writePageCache<ProductMasterDataCache>(PRODUCT_MASTER_DATA_CACHE_KEY, {
-        generatedAt: new Date().toISOString(),
-        accounts: nextAccountRows,
-        suppliers: nextSupplierRows,
-        skus: [],
-        alibaba1688Addresses: nextAddresses.length ? nextAddresses : cachedData.alibaba1688Addresses,
-      });
     } catch (error: any) {
-      message.error(error?.message || "商品资料读取失败");
+      if (isCurrentLoad()) message.error(error?.message || "商品资料读取失败");
     } finally {
-      setLoading(false);
+      if (isCurrentLoad()) setLoading(false);
     }
-  }, [cachedData.alibaba1688Addresses]);
+  }, [cachedData.alibaba1688Addresses, mode]);
 
   const refresh1688Addresses = useCallback(async (syncIfEmpty = false) => {
     if (!erp) return [];
@@ -847,8 +883,8 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
       width: 112,
       render: (value, row) => formatMoney(value ?? row.jstCostPrice),
     },
-    { title: "创建时间", dataIndex: "createdAt", key: "createdAt", width: 142, render: formatDateTime },
-    { title: "修改时间", dataIndex: "updatedAt", key: "updatedAt", width: 142, render: formatDateTime },
+    { title: "创建时间", dataIndex: "createdAt", key: "createdAt", width: 142, render: (_value, row) => formatDateTime(row.jstCreatedAt || row.createdAt) },
+    { title: "修改时间", dataIndex: "updatedAt", key: "updatedAt", width: 142, render: (_value, row) => formatDateTime(row.jstModifiedAt || row.updatedAt) },
     { title: "创建人", dataIndex: "createdByName", key: "createdByName", width: 120, ellipsis: true, render: (value, row) => value || row.jstCreator || "-" },
   ];
 

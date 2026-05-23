@@ -359,6 +359,30 @@ function optionalNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+function roundMoney(value) {
+  const number = optionalNumber(value);
+  if (number === null) return null;
+  return Math.round(number * 100) / 100;
+}
+
+function splitOrderMoney(totalAmount, freightAmount, fallbackGoodsAmount = null) {
+  const paidAmount = roundMoney(totalAmount);
+  const freight = roundMoney(freightAmount) ?? 0;
+  const fallbackGoods = roundMoney(fallbackGoodsAmount);
+  if (paidAmount === null) {
+    return {
+      goodsAmount: fallbackGoods,
+      paidAmount: fallbackGoods === null ? null : roundMoney(fallbackGoods + freight),
+      freightAmount: freight,
+    };
+  }
+  return {
+    goodsAmount: roundMoney(Math.max(0, paidAmount - freight)),
+    paidAmount,
+    freightAmount: freight,
+  };
+}
+
 function optionalPositiveInteger(value, fallback = null) {
   const number = optionalNumber(value);
   if (number === null) return fallback;
@@ -3862,10 +3886,11 @@ function assertActorRole(actor, roles, actionName = "该操作") {
 function getActorProfile(db, actor = {}) {
   const id = optionalString(actor.id);
   const row = id ? db.prepare("SELECT id, name, role FROM erp_users WHERE id = ?").get(id) : null;
+  const role = row?.role || optionalString(actor.role);
   return {
     id: row?.id || id || null,
-    name: row?.name || null,
-    role: row?.role || optionalString(actor.role),
+    name: row?.name || optionalString(actor.name || actor.actorName) || (role === "system" ? "系统" : null),
+    role,
   };
 }
 
@@ -3918,6 +3943,36 @@ function writePurchaseRequestEvent(db, pr, actor, eventType, message) {
   return row;
 }
 
+function writePurchaseOrderFlowEvent(db, poOrId, actor, eventType, message) {
+  const po = typeof poOrId === "string"
+    ? db.prepare("SELECT * FROM erp_purchase_orders WHERE id = ?").get(poOrId)
+    : poOrId;
+  if (!po?.pr_id) return null;
+  const pr = db.prepare("SELECT * FROM erp_purchase_requests WHERE id = ?").get(po.pr_id);
+  if (!pr) return null;
+  const event = writePurchaseRequestEvent(db, pr, actor, eventType, message);
+  markPurchaseRequestRead(db, pr.id, actor);
+  return event;
+}
+
+function writeInboundReceiptFlowEvent(db, receiptOrId, actor, eventType, message) {
+  const receipt = typeof receiptOrId === "string"
+    ? db.prepare("SELECT * FROM erp_inbound_receipts WHERE id = ?").get(receiptOrId)
+    : receiptOrId;
+  if (!receipt?.po_id) return null;
+  return writePurchaseOrderFlowEvent(db, receipt.po_id, actor, eventType, message);
+}
+
+function writeOutboundFlowEvent(db, shipmentOrId, actor, eventType, message) {
+  const shipment = typeof shipmentOrId === "string"
+    ? db.prepare("SELECT * FROM erp_outbound_shipments WHERE id = ?").get(shipmentOrId)
+    : shipmentOrId;
+  if (!shipment?.batch_id) return null;
+  const batch = db.prepare("SELECT po_id FROM erp_inventory_batches WHERE id = ?").get(shipment.batch_id);
+  if (!batch?.po_id) return null;
+  return writePurchaseOrderFlowEvent(db, batch.po_id, actor, eventType, message);
+}
+
 function addPurchaseRequestComment(db, pr, actor, body) {
   const actorProfile = getActorProfile(db, actor);
   const row = {
@@ -3948,17 +4003,100 @@ function getPurchaseWorkbench(params = {}) {
   const accountId = optionalString(params.accountId);
   const companyId = normalizeCompanyId(params.user?.companyId || params.companyId || params.company_id, erpState.currentUser);
   const limit = normalizeLimit(params.limit, 50);
+  const purchaseOrderLimit = normalizeLimit(params.purchaseOrderLimit || params.purchase_order_limit || params.poLimit || params.po_limit || params.limit, 50);
+  const purchaseOrderOffset = normalizeOffset(params.purchaseOrderOffset || params.purchase_order_offset || params.poOffset || params.po_offset || params.offset);
+  const purchaseOrderQueue = optionalString(params.purchaseOrderQueue || params.purchase_order_queue || params.poQueue || params.po_queue);
+  const purchaseOrderSearch = optionalString(params.purchaseOrderSearch || params.purchase_order_search || params.poSearch || params.po_search || params.search);
+  const purchaseOrderNo = optionalString(params.purchaseOrderNo || params.purchase_order_no || params.poNo || params.po_no || params.orderNo || params.order_no);
+  const purchaseOrderDateFrom = optionalString(params.purchaseOrderDateFrom || params.purchase_order_date_from || params.poDateFrom || params.po_date_from || params.dateFrom || params.date_from);
+  const purchaseOrderDateTo = optionalString(params.purchaseOrderDateTo || params.purchase_order_date_to || params.poDateTo || params.po_date_to || params.dateTo || params.date_to);
+  const purchaseOrderPurchaser = optionalString(params.purchaseOrderPurchaser || params.purchase_order_purchaser || params.purchaser || params.buyer || params.createdByName || params.created_by_name);
+  const includePurchaseOrders = params.includePurchaseOrders !== false && params.include_purchase_orders !== false;
   const includeRequestDetails = params.includeRequestDetails !== false && params.include_request_details !== false;
   const includeOptions = params.includeOptions !== false && params.include_options !== false;
   const include1688Meta = params.include1688Meta !== false && params.include_1688_meta !== false;
   const detailPrId = optionalString(params.detailPrId || params.detail_pr_id || params.prId || params.pr_id);
   const whereAccount = accountId ? "WHERE pr.account_id = @account_id" : "";
-  const poWhereAccount = accountId ? "WHERE po.account_id = @account_id" : "";
   const paymentWhereAccount = accountId ? "AND po.account_id = @account_id" : "";
   const baseParams = {
     account_id: accountId,
     limit,
   };
+  const poConditions = [];
+  const poPaidSignalSql = `(po.status IN ('paid', 'supplier_processing', 'shipped', 'arrived')
+    OR LOWER(COALESCE(po.payment_status, '')) IN ('paid', 'confirmed', 'success')
+    OR NULLIF(TRIM(COALESCE(po.paid_at, '')), '') IS NOT NULL)`;
+  const poActivePaidSql = `(${poPaidSignalSql} AND po.status NOT IN ('inbounded', 'closed', 'cancelled', 'delayed', 'exception'))`;
+  const poDraftSql = `(po.status IN ('draft', 'pushed_pending_price') AND NOT ${poPaidSignalSql})`;
+  const poPendingPaymentSql = `(po.status IN ('pending_finance_approval', 'approved_to_pay') AND NOT ${poPaidSignalSql})`;
+  if (accountId) poConditions.push("po.account_id = @account_id");
+  switch (purchaseOrderQueue) {
+    case "po_draft":
+      poConditions.push(poDraftSql);
+      break;
+    case "po_pending_payment":
+      poConditions.push(poPendingPaymentSql);
+      break;
+    case "po_paid":
+      poConditions.push(poActivePaidSql);
+      break;
+    case "po_completed":
+      poConditions.push("po.status IN ('inbounded', 'closed')");
+      break;
+    case "po_cancelled":
+      poConditions.push("po.status = 'cancelled'");
+      break;
+    case "po_exception":
+      poConditions.push("po.status IN ('delayed', 'exception')");
+      break;
+    default:
+      break;
+  }
+  const poParams = {
+    account_id: accountId,
+    limit: purchaseOrderLimit,
+    offset: purchaseOrderOffset,
+    po_search: purchaseOrderSearch ? `%${purchaseOrderSearch}%` : "",
+    po_no_filter: purchaseOrderNo ? `%${purchaseOrderNo}%` : "",
+    po_date_from: purchaseOrderDateFrom,
+    po_date_to: purchaseOrderDateTo,
+    po_purchaser_filter: purchaseOrderPurchaser ? `%${purchaseOrderPurchaser}%` : "",
+  };
+  if (purchaseOrderSearch) {
+    poConditions.push(`(
+      po.id LIKE @po_search
+      OR po.po_no LIKE @po_search
+      OR po.external_order_id LIKE @po_search
+      OR po.external_order_status LIKE @po_search
+      OR po.jst_purchaser_name LIKE @po_search
+      OR acct.name LIKE @po_search
+      OR supplier.name LIKE @po_search
+      OR cand.supplier_name LIKE @po_search
+      OR sku.internal_sku_code LIKE @po_search
+      OR sku.product_name LIKE @po_search
+    )`);
+  }
+  if (purchaseOrderNo) {
+    poConditions.push(`(
+      po.id LIKE @po_no_filter
+      OR po.po_no LIKE @po_no_filter
+      OR po.external_order_id LIKE @po_no_filter
+    )`);
+  }
+  if (purchaseOrderDateFrom) {
+    poConditions.push("DATE(COALESCE(po.created_at, po.updated_at)) >= DATE(@po_date_from)");
+  }
+  if (purchaseOrderDateTo) {
+    poConditions.push("DATE(COALESCE(po.created_at, po.updated_at)) <= DATE(@po_date_to)");
+  }
+  if (purchaseOrderPurchaser) {
+    poConditions.push(`(
+      creator.name LIKE @po_purchaser_filter
+      OR po.jst_purchaser_name LIKE @po_purchaser_filter
+    )`);
+  }
+  const poWhereSql = poConditions.length ? `WHERE ${poConditions.join(" AND ")}` : "";
+  const poBaseWhereSql = accountId ? "WHERE po.account_id = @account_id" : "";
 
   const purchaseRequests = db.prepare(`
     SELECT
@@ -4100,6 +4238,7 @@ function getPurchaseWorkbench(params = {}) {
         ...events.map((item) => ({
           id: item.id,
           kind: "event",
+          actorId: item.actorId,
           actorName: item.actorName,
           actorRole: item.actorRole,
           message: item.message,
@@ -4109,6 +4248,7 @@ function getPurchaseWorkbench(params = {}) {
         ...comments.map((item) => ({
           id: item.id,
           kind: "comment",
+          actorId: item.authorId,
           actorName: item.authorName,
           actorRole: item.authorRole,
           message: item.body,
@@ -4123,12 +4263,48 @@ function getPurchaseWorkbench(params = {}) {
     }
   }
 
-  const purchaseOrders = db.prepare(`
+  const purchaseOrderTotalRow = db.prepare(`
+    SELECT COUNT(DISTINCT po.id) AS total
+    FROM erp_purchase_orders po
+    LEFT JOIN erp_accounts acct ON acct.id = po.account_id
+    LEFT JOIN erp_suppliers supplier ON supplier.id = po.supplier_id
+    LEFT JOIN erp_sourcing_candidates cand ON cand.id = po.selected_candidate_id
+    LEFT JOIN erp_users creator ON creator.id = po.created_by
+    LEFT JOIN erp_purchase_order_lines line ON line.po_id = po.id
+    LEFT JOIN erp_skus sku ON sku.id = line.sku_id
+    ${poWhereSql}
+  `).get(poParams);
+  const purchaseOrderStatusCounts = db.prepare(`
+    SELECT
+      COUNT(*) AS all_count,
+      SUM(CASE WHEN ${poDraftSql} THEN 1 ELSE 0 END) AS draft_count,
+      SUM(CASE WHEN ${poPendingPaymentSql} THEN 1 ELSE 0 END) AS pending_payment_count,
+      SUM(CASE WHEN ${poActivePaidSql} THEN 1 ELSE 0 END) AS paid_count,
+      SUM(CASE WHEN po.status IN ('inbounded', 'closed') THEN 1 ELSE 0 END) AS completed_count,
+      SUM(CASE WHEN po.status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_count,
+      SUM(CASE WHEN po.status IN ('delayed', 'exception') THEN 1 ELSE 0 END) AS exception_count,
+      SUM(CASE WHEN po.status NOT IN ('closed', 'cancelled') THEN 1 ELSE 0 END) AS open_count
+    FROM erp_purchase_orders po
+    ${poBaseWhereSql}
+  `).get({ account_id: accountId }) || {};
+  const purchaseOrderCounts = {
+    all: Number(purchaseOrderStatusCounts.all_count || 0),
+    draft: Number(purchaseOrderStatusCounts.draft_count || 0),
+    pendingPayment: Number(purchaseOrderStatusCounts.pending_payment_count || 0),
+    paid: Number(purchaseOrderStatusCounts.paid_count || 0),
+    completed: Number(purchaseOrderStatusCounts.completed_count || 0),
+    cancelled: Number(purchaseOrderStatusCounts.cancelled_count || 0),
+    exception: Number(purchaseOrderStatusCounts.exception_count || 0),
+    open: Number(purchaseOrderStatusCounts.open_count || 0),
+  };
+  const purchaseOrderTotal = Number(purchaseOrderTotalRow?.total || 0);
+
+  const purchaseOrders = includePurchaseOrders ? db.prepare(`
     SELECT
       po.*,
       acct.name AS account_name,
       COALESCE(supplier.name, cand.supplier_name) AS supplier_name,
-      creator.name AS created_by_name,
+      COALESCE(creator.name, po.jst_purchaser_name) AS created_by_name,
       pr.status AS pr_status,
       GROUP_CONCAT(DISTINCT sku.internal_sku_code || ' ' || sku.product_name) AS sku_summary,
       GROUP_CONCAT(DISTINCT sku.internal_sku_code) AS sku_codes,
@@ -4214,7 +4390,7 @@ function getPurchaseWorkbench(params = {}) {
     LEFT JOIN erp_purchase_requests pr ON pr.id = po.pr_id
     LEFT JOIN erp_purchase_order_lines line ON line.po_id = po.id
     LEFT JOIN erp_skus sku ON sku.id = line.sku_id
-    ${poWhereAccount}
+    ${poWhereSql}
     GROUP BY po.id
     ORDER BY
       CASE po.status
@@ -4230,9 +4406,10 @@ function getPurchaseWorkbench(params = {}) {
         WHEN 'closed' THEN 9
         ELSE 9
       END,
-      po.updated_at DESC
-    LIMIT @limit
-  `).all(baseParams).map((row) => {
+      po.updated_at DESC,
+      po.id DESC
+    LIMIT @limit OFFSET @offset
+  `).all(poParams).map((row) => {
     const next = toCamelRow(row);
     if (row.account_id === "jst:account:default") {
       const raw = parseJsonObject(row.external_order_payload_json, {});
@@ -4247,7 +4424,7 @@ function getPurchaseWorkbench(params = {}) {
       if (!next.productNames) next.productNames = next.skuSummary;
     }
     return next;
-  });
+  }) : undefined;
 
   const paymentApprovals = db.prepare(`
     SELECT
@@ -4286,6 +4463,8 @@ function getPurchaseWorkbench(params = {}) {
       po.status AS po_status,
       po.payment_status AS po_payment_status,
       po.total_amount,
+      po.paid_amount,
+      po.freight_amount,
       po.expected_delivery_date,
       supplier.name AS supplier_name,
       payment.id AS payment_approval_id,
@@ -4327,21 +4506,20 @@ function getPurchaseWorkbench(params = {}) {
     LIMIT @limit
   `).all(baseParams).map(toCamelRow);
 
+  const purchaseOrdersForSummary = Array.isArray(purchaseOrders) ? purchaseOrders : [];
   const summary = {
     purchaseRequestCount: purchaseRequests.length,
     pendingPurchaseRequestCount: purchaseRequests.filter((item) => (
       ["submitted", "buyer_processing", "sourced", "waiting_ops_confirm"].includes(item.status)
     )).length,
-    purchaseOrderCount: purchaseOrders.length,
-    openPurchaseOrderCount: purchaseOrders.filter((item) => (
-      !["closed", "cancelled"].includes(item.status)
-    )).length,
+    purchaseOrderCount: purchaseOrderCounts.all,
+    openPurchaseOrderCount: purchaseOrderCounts.open,
     paymentApprovalCount: paymentApprovals.length,
     paymentQueueCount: paymentQueue.length,
     paymentQueueAmount: paymentQueue.reduce((sum, item) => (
-      sum + Number(item.paymentAmount ?? item.totalAmount ?? 0)
+      sum + Number(item.paymentAmount ?? item.paidAmount ?? item.totalAmount ?? 0)
     ), 0),
-    refundOrderCount: purchaseOrders.filter((item) => Number(item.refundCount || 0) > 0).length,
+    refundOrderCount: purchaseOrdersForSummary.filter((item) => Number(item.refundCount || 0) > 0).length,
     unreadPurchaseRequestCount: purchaseRequests.reduce((sum, item) => (
       sum + Number(item.unreadCount || 0)
     ), 0),
@@ -4379,11 +4557,23 @@ function getPurchaseWorkbench(params = {}) {
     generatedAt: nowIso(),
     summary,
     purchaseRequests,
-    purchaseOrders,
+    purchaseOrderCounts,
+    purchaseOrderPage: {
+      limit: purchaseOrderLimit,
+      offset: purchaseOrderOffset,
+      total: purchaseOrderTotal,
+      queue: purchaseOrderQueue || "all",
+      search: purchaseOrderSearch,
+      poNo: purchaseOrderNo,
+      dateFrom: purchaseOrderDateFrom,
+      dateTo: purchaseOrderDateTo,
+      purchaser: purchaseOrderPurchaser,
+    },
     paymentApprovals,
     paymentQueue,
     purchaseSettings,
   };
+  if (includePurchaseOrders) workbench.purchaseOrders = purchaseOrders;
   if (includeOptions) {
     workbench.skuOptions = skuOptions;
     workbench.sku1688Sources = sku1688Sources;
@@ -4425,7 +4615,7 @@ function getPurchaseOrderActionRow(db, poId) {
       po.*,
       acct.name AS account_name,
       COALESCE(supplier.name, cand.supplier_name) AS supplier_name,
-      creator.name AS created_by_name,
+      COALESCE(creator.name, po.jst_purchaser_name) AS created_by_name,
       pr.status AS pr_status,
       GROUP_CONCAT(DISTINCT sku.internal_sku_code || ' ' || sku.product_name) AS sku_summary,
       GROUP_CONCAT(DISTINCT sku.internal_sku_code) AS sku_codes,
@@ -4564,7 +4754,7 @@ function noOpPurchaseOrderTransition(po = {}, action = "") {
 
 function createPaymentApprovalForPo({ db, services, po, payload, actor }) {
   const now = nowIso();
-  const amount = optionalNumber(payload.amount) ?? Number(po.total_amount || 0);
+  const amount = optionalNumber(payload.amount) ?? optionalNumber(po.paid_amount) ?? Number(po.total_amount || 0);
   // 已删除财务审批环节：审批记录创建即视为已批准，保留作为审计 / 付款追溯凭据。
   const row = {
     id: optionalString(payload.paymentApprovalId) || createId("pay"),
@@ -4598,6 +4788,7 @@ function createPaymentApprovalForPo({ db, services, po, payload, actor }) {
     actor,
     action: "create_payment_approval",
   });
+  writePurchaseOrderFlowEvent(db, po, actor, "submit_payment_approval", `采购提交付款：${po.po_no || po.id}`);
   return after;
 }
 
@@ -4630,6 +4821,8 @@ function approvePaymentApproval({ db, services, payload, actor }) {
     actor,
     action: "approve_payment_approval",
   });
+  const po = getPurchaseOrder(db, after.po_id);
+  writePurchaseOrderFlowEvent(db, po, actor, "approve_payment", `财务确认付款申请：${po.po_no || po.id}`);
   return after;
 }
 
@@ -4692,6 +4885,8 @@ function markPaymentApprovalPaid({ db, services, before, payload = {}, actor }) 
     actor,
     action: "confirm_payment_paid",
   });
+  const po = getPurchaseOrder(db, after.po_id);
+  writePurchaseOrderFlowEvent(db, po, actor, "confirm_paid", `财务确认已付款：${po.po_no || po.id}`);
   return after;
 }
 
@@ -4777,6 +4972,7 @@ function ensureInboundReceiptForPo(db, services, po, actor) {
       after: { id: receiptId, po_id: po.id, status: "pending_arrival" },
     });
   } catch {}
+  writePurchaseOrderFlowEvent(db, po, actor, "auto_create_inbound_receipt", `付款后自动生成入库单：${receiptNo}`);
   return { id: receiptId, isNew: true };
 }
 
@@ -4815,6 +5011,17 @@ function confirmPaymentPaid({ db, services, payload, actor }) {
 
   services.purchase.confirmPaid(before.po_id, actor);
   const after = markPaymentApprovalPaid({ db, services, before, payload, actor });
+  const paidAmount = optionalNumber(payload.amount) ?? optionalNumber(after?.amount);
+  if (paidAmount !== null) {
+    db.prepare(`
+      UPDATE erp_purchase_orders
+      SET paid_amount = COALESCE(paid_amount, @paid_amount)
+      WHERE id = @id
+    `).run({
+      id: before.po_id,
+      paid_amount: paidAmount,
+    });
+  }
   // 同步建对应入库单（仓库中心立即可见）；失败不阻塞付款确认。
   try {
     const po = getPurchaseOrder(db, before.po_id);
@@ -8224,7 +8431,8 @@ function generatePurchaseOrderAction({ db, services, payload, actor }) {
   if (!Number.isInteger(qty) || qty <= 0) throw new Error("qty must be a positive integer");
   const unitCost = Number(candidate.unit_price || 0);
   const logisticsFee = Number(candidate.logistics_fee || 0);
-  const totalAmount = qty * unitCost + logisticsFee;
+  const goodsAmount = qty * unitCost;
+  const totalAmount = goodsAmount + logisticsFee;
   const po = {
     id: optionalString(payload.poId) || createId("po"),
     account_id: pr.account_id,
@@ -8236,7 +8444,9 @@ function generatePurchaseOrderAction({ db, services, payload, actor }) {
     payment_status: "unpaid",
     expected_delivery_date: resolveExpectedDeliveryDate(candidate, payload),
     actual_delivery_date: null,
-    total_amount: totalAmount,
+    total_amount: goodsAmount,
+    paid_amount: totalAmount,
+    freight_amount: logisticsFee,
     created_by: actor.id || null,
     created_at: now,
     updated_at: now,
@@ -8246,12 +8456,12 @@ function generatePurchaseOrderAction({ db, services, payload, actor }) {
     INSERT INTO erp_purchase_orders (
       id, account_id, pr_id, selected_candidate_id, supplier_id, po_no,
       status, payment_status, expected_delivery_date, actual_delivery_date,
-      total_amount, created_by, created_at, updated_at
+      total_amount, paid_amount, freight_amount, created_by, created_at, updated_at
     )
     VALUES (
       @id, @account_id, @pr_id, @selected_candidate_id, @supplier_id, @po_no,
       @status, @payment_status, @expected_delivery_date, @actual_delivery_date,
-      @total_amount, @created_by, @created_at, @updated_at
+      @total_amount, @paid_amount, @freight_amount, @created_by, @created_at, @updated_at
     )
   `).run(po);
 
@@ -8390,7 +8600,8 @@ function updateOfflinePurchaseOrderAction({ db, services, payload, actor }) {
     });
   }
 
-  const totalAmount = qty * unitCost + logisticsFee;
+  const goodsAmount = qty * unitCost;
+  const totalAmount = goodsAmount + logisticsFee;
   db.prepare(`
     UPDATE erp_purchase_order_lines
     SET qty = @qty, expected_qty = @qty, unit_cost = @unit_cost, logistics_fee = @logistics_fee
@@ -8400,13 +8611,18 @@ function updateOfflinePurchaseOrderAction({ db, services, payload, actor }) {
   db.prepare(`
     UPDATE erp_purchase_orders
     SET supplier_id = @supplier_id, selected_candidate_id = @candidate_id,
-        total_amount = @total_amount, updated_at = @updated_at
+        total_amount = @total_amount,
+        paid_amount = @paid_amount,
+        freight_amount = @freight_amount,
+        updated_at = @updated_at
     WHERE id = @id
   `).run({
     id: poId,
     supplier_id: supplierId || null,
     candidate_id: candidateId,
-    total_amount: totalAmount,
+    total_amount: goodsAmount,
+    paid_amount: totalAmount,
+    freight_amount: logisticsFee,
     updated_at: now,
   });
 
@@ -8420,6 +8636,7 @@ function updateOfflinePurchaseOrderAction({ db, services, payload, actor }) {
     before,
     after: afterPo,
   });
+  writePurchaseOrderFlowEvent(db, afterPo, actor, "update_offline_po", `线下采购单已更新：${afterPo.po_no || afterPo.id}`);
   return { purchaseOrder: toPurchaseOrderResult(db, afterPo) };
 }
 
@@ -8758,6 +8975,14 @@ async function resolve1688NumericSkuMapping(db, mapping = {}) {
   const specLooksLikeSkuId = isLikely1688NumericSkuId(specId) ? specId : null;
   const lookupSkuId = isLikely1688NumericSkuId(skuId) ? skuId : specLooksLikeSkuId;
   if (!offerId || (!lookupSkuId && !specId)) return null;
+  if (specId && !specLooksLikeSkuId && (!skuId || skuId !== specId)) {
+    return {
+      skuId: skuId || null,
+      specId,
+      specAttrs: specId,
+      source: "selected_spec",
+    };
+  }
   const cachedMatch = findCached1688SkuMatch(mapping, lookupSkuId, specId);
   if (cachedMatch?.specId) {
     updateResolved1688SkuMapping(db, mapping, {
@@ -9020,6 +9245,8 @@ async function push1688OrderAction({ db, services, payload, actor }) {
   });
   const externalOrderId = findExternalOrderId(rawResponse);
   const now = nowIso();
+  const manualFreight = optionalNumber(payload.freight ?? payload.freightAmount);
+  const money = splitOrderMoney(amount, manualFreight ?? optionalNumber(po.freight_amount), amount);
   let transition = null;
   if (po.status === "draft") {
     transition = services.workflow.transition({
@@ -9219,13 +9446,17 @@ async function sync1688OrderPriceAction({ db, services, payload, actor }) {
   db.prepare(`
     UPDATE erp_purchase_orders
     SET total_amount = @total_amount,
+        paid_amount = @paid_amount,
+        freight_amount = COALESCE(@freight_amount, freight_amount),
         external_order_status = @external_order_status,
         external_order_synced_at = @external_order_synced_at,
         updated_at = @updated_at
     WHERE id = @id
   `).run({
     id: po.id,
-    total_amount: amount,
+    total_amount: money.goodsAmount ?? amount,
+    paid_amount: money.paidAmount ?? amount,
+    freight_amount: manualFreight,
     external_order_status: optionalString(payload.externalOrderStatus) || "price_synced",
     external_order_synced_at: now,
     updated_at: now,
@@ -11606,6 +11837,7 @@ function updatePurchaseOrderFrom1688Snapshot({
   const now = nowIso();
   const nextStatus = forceCancel ? "cancelled" : map1688StatusToLocal(order.status, before.status, logistics || {});
   const nextPaymentStatus = map1688StatusToPaymentStatus(order.status, before.payment_status);
+  const money = splitOrderMoney(order.totalAmount, order.freight, before.total_amount);
   const payloadJson = {
     ...(parseJsonObject(before.external_order_payload_json) || {}),
     ...(rawPayment ? { payment: rawPayment } : {}),
@@ -11618,6 +11850,8 @@ function updatePurchaseOrderFrom1688Snapshot({
     SET status = @status,
         payment_status = @payment_status,
         total_amount = COALESCE(@total_amount, total_amount),
+        paid_amount = COALESCE(@paid_amount, paid_amount),
+        freight_amount = COALESCE(@freight_amount, freight_amount),
         external_order_id = COALESCE(@external_order_id, external_order_id),
         external_order_status = COALESCE(@external_order_status, external_order_status),
         external_order_payload_json = @external_order_payload_json,
@@ -11634,7 +11868,9 @@ function updatePurchaseOrderFrom1688Snapshot({
     id: before.id,
     status: nextStatus || before.status,
     payment_status: nextPaymentStatus || before.payment_status,
-    total_amount: optionalNumber(order.totalAmount),
+    total_amount: money.goodsAmount,
+    paid_amount: money.paidAmount,
+    freight_amount: optionalNumber(order.freight),
     external_order_id: optionalString(order.externalOrderId),
     external_order_status: forceCancel ? "cancelled" : optionalString(order.status),
     external_order_payload_json: trimJsonForStorage(payloadJson),
@@ -12072,9 +12308,12 @@ function createPurchaseOrderFrom1688Order({ db, services, order, payload = {}, a
   if (!usableLines.length) throw new Error(`1688订单 ${externalOrderId} 没有匹配到本地SKU`);
   const finalAccountId = accountId || usableLines[0].source.account_id;
   const totalQty = usableLines.reduce((sum, item) => sum + Math.max(1, Math.floor(Number(item.line.quantity || 1))), 0);
-  const totalAmount = optionalNumber(order.totalAmount) ?? usableLines.reduce((sum, item) => (
+  const sourceGoodsAmount = usableLines.reduce((sum, item) => (
     sum + Math.max(1, Math.floor(Number(item.line.quantity || 1))) * Number(item.source.unit_price || 0)
   ), 0);
+  const money = splitOrderMoney(order.totalAmount, order.freight, sourceGoodsAmount);
+  const totalAmount = money.goodsAmount ?? sourceGoodsAmount;
+  const paidAmount = money.paidAmount ?? roundMoney(totalAmount + money.freightAmount);
   const unitFallback = totalQty > 0 && totalAmount > 0 ? totalAmount / totalQty : 0;
   const now = nowIso();
   const po = {
@@ -12089,6 +12328,8 @@ function createPurchaseOrderFrom1688Order({ db, services, order, payload = {}, a
     expected_delivery_date: null,
     actual_delivery_date: null,
     total_amount: totalAmount,
+    paid_amount: paidAmount,
+    freight_amount: money.freightAmount,
     created_by: actor.id || null,
     created_at: now,
     updated_at: now,
@@ -12103,14 +12344,14 @@ function createPurchaseOrderFrom1688Order({ db, services, order, payload = {}, a
     INSERT INTO erp_purchase_orders (
       id, account_id, pr_id, selected_candidate_id, supplier_id, po_no,
       status, payment_status, expected_delivery_date, actual_delivery_date,
-      total_amount, created_by, created_at, updated_at,
+      total_amount, paid_amount, freight_amount, created_by, created_at, updated_at,
       external_order_id, external_order_status, external_order_payload_json,
       external_order_synced_at, external_order_detail_json, external_order_detail_synced_at
     )
     VALUES (
       @id, @account_id, @pr_id, @selected_candidate_id, @supplier_id, @po_no,
       @status, @payment_status, @expected_delivery_date, @actual_delivery_date,
-      @total_amount, @created_by, @created_at, @updated_at,
+      @total_amount, @paid_amount, @freight_amount, @created_by, @created_at, @updated_at,
       @external_order_id, @external_order_status, @external_order_payload_json,
       @external_order_synced_at, @external_order_detail_json, @external_order_detail_synced_at
     )
@@ -12133,7 +12374,7 @@ function createPurchaseOrderFrom1688Order({ db, services, order, payload = {}, a
       sku_id: item.source.sku_id,
       qty,
       unit_cost: optionalNumber(item.source.unit_price) ?? unitFallback,
-      logistics_fee: index === 0 ? (optionalNumber(order.freight) ?? 0) : 0,
+      logistics_fee: index === 0 ? money.freightAmount : 0,
       expected_qty: qty,
       received_qty: 0,
       remark: item.line.title || item.source.product_title || null,
@@ -12937,13 +13178,24 @@ function createBatchesForReceipt({ db, services, receipt, actor }) {
       try {
         services.purchase.markArrived(po.id, actor);
         po = getPurchaseOrder(db, receipt.po_id);
+        writePurchaseOrderFlowEvent(db, po, actor, "mark_arrived", `采购单已到仓：${po.po_no || po.id}`);
       } catch {}
     }
     const qtySummary = getPurchaseOrderQtySummary(db, po.id);
     if (po.status === "arrived" && qtySummary.totalQty > 0 && qtySummary.receivedQty >= qtySummary.totalQty) {
       services.purchase.markInbounded(po.id, actor);
+      po = getPurchaseOrder(db, receipt.po_id);
+      writePurchaseOrderFlowEvent(db, po, actor, "mark_inbounded", `采购单已完成入库：${po.po_no || po.id}`);
     }
   }
+
+  writeInboundReceiptFlowEvent(
+    db,
+    receipt,
+    actor,
+    "create_batches",
+    `仓库创建入库批次：${receipt.receipt_no || receipt.id}（${batches.length} 个）`,
+  );
 
   return batches;
 }
@@ -12979,7 +13231,9 @@ function performWarehouseAction(payload = {}, actorInput = {}) {
         `).run(receiptId);
         // 2. 状态机连推：pending_arrival → arrived → counted → inbounded_pending_qc
         const t1 = services.inventory.registerArrival(receiptId, actor);
+        writeInboundReceiptFlowEvent(db, receipt, actor, "register_arrival", `仓库确认到仓：${receipt.receipt_no || receipt.id}`);
         services.inventory.confirmCount(receiptId, actor);
+        writeInboundReceiptFlowEvent(db, receipt, actor, "confirm_count", `仓库确认实收：${receipt.receipt_no || receipt.id}`);
         // 3. 建批次 = 立即写入 erp_inventory_batches → 商品资料的实际库存数立刻 +N
         const reloaded = getInboundReceipt(db, receiptId);
         let batches = [];
@@ -13044,11 +13298,15 @@ function performWarehouseAction(payload = {}, actorInput = {}) {
         let receipt = getInboundReceipt(db, receiptId);
         if (receipt.status === "pending_arrival") {
           services.inventory.registerArrival(receiptId, actor);
+          writeInboundReceiptFlowEvent(db, receipt, actor, "register_arrival", `仓库确认到仓：${receipt.receipt_no || receipt.id}`);
           receipt = getInboundReceipt(db, receiptId);
         }
         const t = receipt.status === "arrived"
           ? services.inventory.confirmCount(receiptId, actor)
           : null;
+        if (t) {
+          writeInboundReceiptFlowEvent(db, receipt, actor, "confirm_count", `仓库确认实收：${receipt.receipt_no || receipt.id}`);
+        }
         let batches = [];
         try {
           const reloaded = getInboundReceipt(db, receiptId);
@@ -13095,10 +13353,12 @@ function performWarehouseAction(payload = {}, actorInput = {}) {
         let receipt = getInboundReceipt(db, receiptId);
         if (receipt.status === "pending_arrival") {
           services.inventory.registerArrival(receiptId, actor);
+          writeInboundReceiptFlowEvent(db, receipt, actor, "register_arrival", `仓库确认到仓：${receipt.receipt_no || receipt.id}`);
           receipt = getInboundReceipt(db, receiptId);
         }
         if (receipt.status === "arrived") {
           services.inventory.confirmCount(receiptId, actor);
+          writeInboundReceiptFlowEvent(db, receipt, actor, "confirm_count", `仓库确认实收：${receipt.receipt_no || receipt.id}`);
           receipt = getInboundReceipt(db, receiptId);
         }
         const batches = createBatchesForReceipt({
@@ -13531,9 +13791,12 @@ function createOutboundPlan({ db, services, payload, actor }) {
   });
 
   const transition = services.outbound.submitOutbound(beforeSubmit.id, actor);
+  const afterSubmit = getOutboundShipment(db, row.id);
+  writeOutboundFlowEvent(db, afterSubmit, actor, "create_outbound_plan", `运营创建出库计划：${afterSubmit.shipment_no || afterSubmit.id}`);
+  writeOutboundFlowEvent(db, afterSubmit, actor, "submit_outbound", `出库计划已提交仓库：${afterSubmit.shipment_no || afterSubmit.id}`);
   return {
     transition,
-    shipment: toCamelRow(getOutboundShipment(db, row.id)),
+    shipment: toCamelRow(afterSubmit),
   };
 }
 
@@ -13548,14 +13811,20 @@ function performOutboundAction(payload = {}, actorInput = {}) {
         return createOutboundPlan({ db, services, payload, actor });
       case "start_picking": {
         const outboundId = requireString(payload.outboundId || payload.id, "outboundId");
-        return services.outbound.startPicking(outboundId, actor);
+        const transition = services.outbound.startPicking(outboundId, actor);
+        const shipment = getOutboundShipment(db, outboundId);
+        writeOutboundFlowEvent(db, shipment, actor, "start_picking", `仓库开始拣货：${shipment.shipment_no || shipment.id}`);
+        return transition;
       }
       case "mark_packed": {
         const outboundId = requireString(payload.outboundId || payload.id, "outboundId");
-        return services.outbound.markPacked(outboundId, actor, {
+        const transition = services.outbound.markPacked(outboundId, actor, {
           boxes: optionalNumber(payload.boxes),
           photos: [],
         });
+        const shipment = getOutboundShipment(db, outboundId);
+        writeOutboundFlowEvent(db, shipment, actor, "mark_packed", `仓库打包完成：${shipment.shipment_no || shipment.id}`);
+        return transition;
       }
       case "confirm_shipped_out": {
         const outboundId = requireString(payload.outboundId || payload.id, "outboundId");
@@ -13563,7 +13832,11 @@ function performOutboundAction(payload = {}, actorInput = {}) {
           logisticsProvider: optionalString(payload.logisticsProvider),
           trackingNo: optionalString(payload.trackingNo),
         });
+        const shipped = getOutboundShipment(db, outboundId);
+        writeOutboundFlowEvent(db, shipped, actor, "confirm_shipped_out", `仓库确认发出：${shipped.shipment_no || shipped.id}`);
         const confirmRequest = services.outbound.requestOperationsConfirm(outboundId, actor);
+        const pendingConfirm = getOutboundShipment(db, outboundId);
+        writeOutboundFlowEvent(db, pendingConfirm, actor, "request_ops_confirm", `出库等待运营确认：${pendingConfirm.shipment_no || pendingConfirm.id}`);
         return {
           shipTransition,
           confirmRequest,
@@ -13571,7 +13844,10 @@ function performOutboundAction(payload = {}, actorInput = {}) {
       }
       case "confirm_outbound_done": {
         const outboundId = requireString(payload.outboundId || payload.id, "outboundId");
-        return services.outbound.confirmDone(outboundId, actor);
+        const transition = services.outbound.confirmDone(outboundId, actor);
+        const shipment = getOutboundShipment(db, outboundId);
+        writeOutboundFlowEvent(db, shipment, actor, "confirm_outbound_done", `运营确认出库完成：${shipment.shipment_no || shipment.id}`);
+        return transition;
       }
       default:
         throw new Error(`Unsupported outbound action: ${action}`);
@@ -14479,7 +14755,7 @@ async function createSupplierRuntime(payload = {}, actor = {}) {
 
 async function listSkusRuntime(params = {}) {
   // client 模式：优先读本地 cache.db（秒返回），后台 fire-and-forget 增量同步；
-  // 缓存未建（首次）则同步等一次全量再返回。host 模式直接走本地 SQL。
+  // 缓存未建（首次）先走服务器分页返回，后台再全量建 cache。host 模式直接走本地 SQL。
   if (isClientMode()) {
     try {
       const cached = skuCache.getCachedSkus(params);
@@ -14488,11 +14764,10 @@ async function listSkusRuntime(params = {}) {
         void skuCache.triggerSync({ mode: "incremental" }).catch(() => {});
         return cached;
       }
-      // 缓存空（首次）：等一次全量建基线，再读缓存返回。
-      await skuCache.triggerSync({ mode: "full" });
-      void skuCache.triggerReconcile().catch(() => {});
-      const afterFull = skuCache.getCachedSkus(params);
-      if (afterFull) return afterFull;
+      // 缓存空（首次/损坏）：不等 2w+ SKU 全量 cache 建完，避免服务器模式首屏一直 0。
+      void skuCache.triggerSync({ mode: "full" })
+        .then(() => skuCache.triggerReconcile().catch(() => {}))
+        .catch(() => {});
     } catch {
       // 缓存损坏 / 同步异常 → 降级回跨海全量，保证不阻塞。
     }

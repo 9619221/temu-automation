@@ -71,6 +71,14 @@ function summarizeCandidate(candidate) {
   };
 }
 
+function pickFirstBindableSpec(candidate = {}) {
+  const options = Array.isArray(candidate.externalSkuOptions) ? candidate.externalSkuOptions : [];
+  return options.find((item) => (
+    item
+      && (item.externalSpecId || item.external_spec_id || item.specId || item.spec_id)
+  )) || null;
+}
+
 async function main() {
   const keyword = process.argv[2] || process.env.ERP_1688_PROBE_KEYWORD || "cup";
   const requestedQty = Number(process.env.ERP_1688_PROBE_QTY || 2);
@@ -165,7 +173,25 @@ async function main() {
   } catch (error) {
     detailError = error?.message || String(error);
   }
-  const candidateForPo = detailResult?.result?.candidate || selectedCandidate;
+  let candidateForPo = detailResult?.result?.candidate || selectedCandidate;
+  let specBindingResult = null;
+  if (!candidateForPo.externalSpecId) {
+    const selectedSpec = pickFirstBindableSpec(candidateForPo);
+    if (selectedSpec) {
+      specBindingResult = await invoke("erp:purchase:action", {
+        action: "bind_1688_candidate_spec",
+        candidateId: candidateForPo.id,
+        externalSkuId: selectedSpec.externalSkuId || selectedSpec.external_sku_id || selectedSpec.skuId || selectedSpec.sku_id,
+        externalSpecId: selectedSpec.externalSpecId || selectedSpec.external_spec_id || selectedSpec.specId || selectedSpec.spec_id,
+        unitPrice: selectedSpec.price || selectedSpec.unitPrice || selectedSpec.unit_price,
+        actor: {
+          id: "probe_buyer",
+          role: "buyer",
+        },
+      });
+      candidateForPo = specBindingResult.result.candidate;
+    }
+  }
   const addressResult = await invoke("erp:purchase:action", {
     action: "save_1688_address",
     id: "probe_1688_address",
@@ -263,6 +289,10 @@ async function main() {
       selectedSpec: candidateForPo.externalSpecId || null,
       priceRanges: candidateForPo.externalPriceRanges || [],
     },
+    specBinding: specBindingResult ? {
+      selectedSpec: specBindingResult.result.selectedSpec,
+      sku1688SourceId: specBindingResult.result.sku1688Source?.id || null,
+    } : null,
     address: {
       id: addressResult.result.id,
       label: addressResult.result.label,

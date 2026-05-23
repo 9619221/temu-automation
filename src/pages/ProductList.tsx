@@ -3,8 +3,10 @@ import { Alert, Button, Card, Checkbox, Col, Drawer, Empty, Image, Input, Modal,
 import type { ColumnsType } from "antd/es/table";
 import {
   AppstoreOutlined,
+  BarChartOutlined,
   FireOutlined,
   PictureOutlined,
+  RiseOutlined,
   SearchOutlined,
   SettingOutlined,
   ShoppingCartOutlined,
@@ -33,7 +35,6 @@ import {
 } from "../utils/parseRawApis";
 import {
   COLLECTION_DIAGNOSTICS_KEY,
-  getCollectionDataIssue,
   normalizeCollectionDiagnostics,
   type CollectionDiagnostics,
 } from "../utils/collectionDiagnostics";
@@ -41,7 +42,7 @@ import { getStoreValue } from "../utils/storeCompat";
 import { ACTIVE_ACCOUNT_CHANGED_EVENT, STORE_VALUE_UPDATED_EVENT } from "../utils/multiStore";
 import { TrafficDriverPanel, buildTrafficDriverSitesFromProduct, type TrafficSiteKey } from "../components/TrafficDriverPanel";
 import ProductFluxOperatorCard from "../components/ProductFluxOperatorCard";
-import { fetchSkcList, loadCloudConfig, type SkcRow } from "../utils/cloudClient";
+import { fetchSkcList, fetchTemuSales, fetchTemuShopSales, loadCloudConfig, type SkcRow, type TemuSalesRow, type TemuShopSalesRow } from "../utils/cloudClient";
 
 const store = window.electronAPI?.store;
 const automation = window.electronAPI?.automation;
@@ -173,6 +174,9 @@ interface ProductItem {
   fluxItems?: any[];
   fluxSyncedAt?: string;
   fluxSites?: ProductFluxSiteData[];
+  adviceQuantity?: number;
+  cloudSkc?: SkcRow;
+  cloudSales?: TemuSalesRow;
 }
 
 interface ProductSourceState {
@@ -188,6 +192,17 @@ interface ProductCountSummary {
   offSaleCount: number;
 }
 
+interface CloudProductBundle {
+  skcRows: SkcRow[];
+  salesRows: TemuSalesRow[];
+  shopSales: TemuShopSalesRow | null;
+  skcMap: Map<string, SkcRow>;
+  salesMap: Map<string, TemuSalesRow>;
+  latestAt: string;
+  error: string;
+  configured: boolean;
+}
+
 const EMPTY_SOURCES: ProductSourceState = {
   products: false,
   sales: false,
@@ -200,6 +215,8 @@ const EMPTY_COUNT_SUMMARY: ProductCountSummary = {
   notPublishedCount: 0,
   offSaleCount: 0,
 };
+
+const CLOUD_PRODUCTS_ONLY: boolean = true;
 
 const PRODUCT_ID_LOOKUP_FIELDS = [
   "skcId",
@@ -345,6 +362,390 @@ function getPrimaryCategory(product: ProductItem) {
 
 function formatSyncedAt(value?: string | null) {
   return value ? `最近同步：${value}` : "等待首次采集";
+}
+
+function formatTimestamp(value?: number | string | null) {
+  if (!value) return "";
+  const time = typeof value === "number" ? value : Date.parse(value);
+  if (!Number.isFinite(time) || time <= 0) return "";
+  return new Date(time).toLocaleString("zh-CN", { hour12: false });
+}
+
+function latestCloudTimestamp(skcRows: SkcRow[], salesRows: TemuSalesRow[]) {
+  let latest = 0;
+  for (const row of skcRows) latest = Math.max(latest, Number(row.last_updated_at || 0));
+  for (const row of salesRows) {
+    const time = row.last_updated_at ? Date.parse(row.last_updated_at) : 0;
+    if (Number.isFinite(time)) latest = Math.max(latest, time);
+  }
+  return latest ? formatTimestamp(latest) : "";
+}
+
+function firstCloudValue<T>(...values: Array<T | null | undefined | "">): T | undefined {
+  for (const value of values) {
+    if (value !== null && value !== undefined && value !== "") return value as T;
+  }
+  return undefined;
+}
+
+function cloudNumber(value: unknown, fallback = 0) {
+  if (value === null || value === undefined || value === "") return fallback;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+}
+
+function cloudMoney(cents?: number | null) {
+  if (cents === null || cents === undefined) return "";
+  return (Number(cents) / 100).toFixed(2);
+}
+
+function formatSkuSupplierPrice(value: unknown, fallback = "") {
+  if (value === null || value === undefined || value === "") return fallback;
+  const num = Number(value);
+  if (!Number.isFinite(num)) return String(value);
+  const yuan = Number.isInteger(num) && Math.abs(num) >= 100 ? num / 100 : num;
+  return yuan.toFixed(2);
+}
+
+function isDiagnosticCloudProduct(skc?: SkcRow | null, sales?: TemuSalesRow | null) {
+  const values = [
+    skc?.mall_id,
+    skc?.site,
+    skc?.skc_id,
+    skc?.product_id,
+    skc?.title,
+    sales?.mall_supplier_id,
+    sales?.skc_id,
+    sales?.product_id,
+    sales?.title,
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+
+  return values.some((value) => (
+    value.startsWith("MALL-DBG")
+    || value.startsWith("MALL-EXT-E2E")
+    || value.includes("EXT-E2E")
+    || value === "debug"
+    || value === "local-e2e"
+    || value.startsWith("127.0.0.1")
+    || value.toLowerCase().includes("codex extension e2e")
+  ));
+}
+
+async function loadCloudProductBundle(): Promise<CloudProductBundle> {
+  const empty = {
+    skcRows: [],
+    salesRows: [],
+    shopSales: null,
+    skcMap: new Map<string, SkcRow>(),
+    salesMap: new Map<string, TemuSalesRow>(),
+    latestAt: "",
+    error: "",
+    configured: false,
+  };
+
+  try {
+    const cfg = await loadCloudConfig();
+    if (!cfg) return empty;
+    const [skc, sales, shopSales] = await Promise.all([
+      fetchSkcList(cfg, { limit: 500 }),
+      fetchTemuSales(cfg),
+      fetchTemuShopSales(cfg),
+    ]);
+    const rawSkcRows = Array.isArray(skc?.rows) ? skc.rows : [];
+    const diagnosticSkcIds = new Set(
+      rawSkcRows
+        .filter((row) => isDiagnosticCloudProduct(row, null))
+        .map((row) => String(row.skc_id || "")),
+    );
+    const skcRows = rawSkcRows.filter((row) => !isDiagnosticCloudProduct(row, null));
+    const salesRows = (Array.isArray(sales?.rows) ? sales.rows : []).filter((row) => (
+      !isDiagnosticCloudProduct(null, row) && !diagnosticSkcIds.has(String(row.skc_id || ""))
+    ));
+    const skcMap = new Map<string, SkcRow>();
+    const salesMap = new Map<string, TemuSalesRow>();
+    for (const row of skcRows) {
+      if (row.skc_id) skcMap.set(String(row.skc_id), row);
+    }
+    for (const row of salesRows) {
+      if (row.skc_id) salesMap.set(String(row.skc_id), row);
+    }
+    return {
+      skcRows,
+      salesRows,
+      shopSales: shopSales?.row || null,
+      skcMap,
+      salesMap,
+      latestAt: latestCloudTimestamp(skcRows, salesRows),
+      error: "",
+      configured: true,
+    };
+  } catch (error: any) {
+    return {
+      ...empty,
+      error: error?.message || "读取云端商品数据失败",
+      configured: true,
+    };
+  }
+}
+
+function buildCloudSalesRaw(previousRaw: any, skc: SkcRow | undefined, sales: TemuSalesRow | undefined) {
+  const rawItem = sales?.raw_item && typeof sales.raw_item === "object" ? sales.raw_item : {};
+  const baseRaw = {
+    ...(previousRaw && typeof previousRaw === "object" ? previousRaw : {}),
+    ...rawItem,
+  } as any;
+  const declaredPrice = firstCloudValue<number>(sales?.declared_price_cents, skc?.declared_price_cents);
+  const currency = firstCloudValue<string>(sales?.price_currency, skc?.price_currency, baseRaw.currencyType) || "CNY";
+  const warehouseStock = firstCloudValue<number>(sales?.warehouse_stock, skc?.stock_available) ?? 0;
+  const cloudSku = {
+    productSkuId: baseRaw.productSkuId || "",
+    className: baseRaw.className || "",
+    skuExtCode: sales?.sku_ext_code || baseRaw.skcExtCode || "",
+    supplierPrice: declaredPrice ?? undefined,
+    currencyType: currency,
+    todaySaleVolume: sales?.today_sales ?? 0,
+    lastSevenDaysSaleVolume: sales?.last7d_sales ?? 0,
+    lastThirtyDaysSaleVolume: sales?.last30d_sales ?? 0,
+    sellerWhStock: warehouseStock,
+    inventoryNumInfo: {
+      expectedOccupiedInventoryNum: sales?.occupy_stock ?? 0,
+      unavailableWarehouseInventoryNum: sales?.unavailable_stock ?? 0,
+      waitReceiveNum: 0,
+    },
+    lackQuantity: 0,
+    adviceQuantity: sales?.advice_qty ?? 0,
+  };
+  const rawSkuList = Array.isArray(baseRaw.skuQuantityDetailList) ? baseRaw.skuQuantityDetailList : [];
+  const rawTotalInfo = baseRaw.skuQuantityTotalInfo && typeof baseRaw.skuQuantityTotalInfo === "object"
+    ? baseRaw.skuQuantityTotalInfo
+    : {};
+  const rawInventoryInfo = rawTotalInfo.inventoryNumInfo && typeof rawTotalInfo.inventoryNumInfo === "object"
+    ? rawTotalInfo.inventoryNumInfo
+    : {};
+
+  return {
+    ...baseRaw,
+    isCloudProduct: true,
+    cloudSourceEvent: sales?.raw_source || null,
+    supplierId: sales?.mall_supplier_id || skc?.mall_id || baseRaw.supplierId,
+    productSkcId: sales?.skc_id || skc?.skc_id || baseRaw.productSkcId,
+    productId: sales?.product_id || skc?.product_id || baseRaw.productId,
+    goodsId: sales?.goods_id || baseRaw.goodsId,
+    productName: sales?.title || skc?.title || baseRaw.productName,
+    category: sales?.category_name || skc?.category_name || baseRaw.category,
+    productSkcPicture: sales?.thumb_url || skc?.thumb_url || baseRaw.productSkcPicture,
+    skcExtCode: sales?.sku_ext_code || baseRaw.skcExtCode,
+    productReviewScore: sales?.asf_score ?? baseRaw.productReviewScore ?? baseRaw.goodsScore ?? baseRaw.score ?? baseRaw.avgScore,
+    commentNum: sales?.comment_num ?? baseRaw.commentNum,
+    qualityAfterSalesRate: sales?.quality_after_sales_rate ?? baseRaw.qualityAfterSalesRate,
+    stockStatus: sales?.stock_status ?? baseRaw.stockStatus,
+    supplyStatus: sales?.supply_status ?? baseRaw.supplyStatus,
+    closeJitStatus: sales?.close_jit_status ?? baseRaw.closeJitStatus,
+    skuQuantityDetailList: rawSkuList.length > 0 ? rawSkuList : [cloudSku],
+    skuQuantityTotalInfo: {
+      ...rawTotalInfo,
+      todaySaleVolume: rawTotalInfo.todaySaleVolume ?? sales?.today_sales ?? 0,
+      lastSevenDaysSaleVolume: rawTotalInfo.lastSevenDaysSaleVolume ?? sales?.last7d_sales ?? 0,
+      lastThirtyDaysSaleVolume: rawTotalInfo.lastThirtyDaysSaleVolume ?? sales?.last30d_sales ?? 0,
+      totalSaleVolume: rawTotalInfo.totalSaleVolume ?? firstCloudValue<number>(sales?.total_sales, skc?.sales_total) ?? 0,
+      adviceQuantity: rawTotalInfo.adviceQuantity ?? sales?.advice_qty ?? 0,
+      availableSaleDays: rawTotalInfo.availableSaleDays ?? sales?.available_sale_days ?? undefined,
+      inventoryNumInfo: {
+        ...rawInventoryInfo,
+        expectedOccupiedInventoryNum: rawInventoryInfo.expectedOccupiedInventoryNum ?? sales?.occupy_stock ?? 0,
+        unavailableWarehouseInventoryNum: rawInventoryInfo.unavailableWarehouseInventoryNum ?? sales?.unavailable_stock ?? 0,
+        warehouseInventoryNum: rawInventoryInfo.warehouseInventoryNum ?? warehouseStock,
+      },
+    },
+  };
+}
+
+function applyCloudProduct(product: ProductItem, skc: SkcRow | undefined, sales: TemuSalesRow | undefined) {
+  if (!skc && !sales) return;
+  const raw = sales?.raw_item && typeof sales.raw_item === "object" ? sales.raw_item as any : {};
+  const rawSkuList = Array.isArray(raw.skuQuantityDetailList) ? raw.skuQuantityDetailList : [];
+  const rawSku = rawSkuList[0] || {};
+  const skcId = firstCloudValue<string>(sales?.skc_id, skc?.skc_id);
+  const declaredPrice = firstCloudValue<number>(sales?.declared_price_cents, skc?.declared_price_cents);
+  const title = firstCloudValue<string>(sales?.title, skc?.title, raw.productName, raw.goodsName, raw.title);
+  const category = firstCloudValue<string>(sales?.category_name, skc?.category_name, raw.category, raw.categoryName);
+  const imageUrl = normalizeImageUrl(firstCloudValue<string>(sales?.thumb_url, skc?.thumb_url, raw.productSkcPicture, raw.imageUrl, raw.thumbUrl));
+
+  product.cloudSkc = skc;
+  product.cloudSales = sales;
+  product.title = title || product.title;
+  product.category = category || product.category;
+  product.categories = category || product.categories;
+  product.skcId = skcId || normalizeText(raw.productSkcId || raw.skcId) || product.skcId;
+  product.spuId = firstCloudValue<string>(sales?.product_id, skc?.product_id, raw.productId, raw.spuId) || product.spuId;
+  product.goodsId = firstCloudValue<string>(sales?.goods_id, raw.goodsId) || product.goodsId;
+  product.sku = firstCloudValue<string>(rawSku.skuExtCode, rawSku.productSkuId, raw.skuCode) || product.sku;
+  product.extCode = firstCloudValue<string>(sales?.sku_ext_code, raw.skcExtCode, rawSku.skuExtCode) || product.extCode;
+  product.skuId = firstCloudValue<string>(rawSku.productSkuId, raw.productSkuId) || product.skuId;
+  product.skuName = firstCloudValue<string>(rawSku.className, rawSku.specName, raw.skuName) || product.skuName;
+  product.imageUrl = imageUrl || product.imageUrl;
+  product.siteLabel = skc?.site || product.siteLabel;
+  product.productType = firstCloudValue<string>(raw.productType, raw.goodsType) || product.productType;
+  product.sourceType = firstCloudValue<string>(raw.sourceType, raw.productSourceType) || product.sourceType;
+  product.status = firstCloudValue<string>(sales?.supply_status, sales?.stock_status, skc?.status, raw.supplyStatus, raw.stockStatus) || product.status;
+  product.skcSiteStatus = firstCloudValue<string>(sales?.stock_status, skc?.status, raw.stockStatus) || product.skcSiteStatus;
+  product.removeStatus = firstCloudValue<string>(raw.removeStatus, raw.offlineStatus) || product.removeStatus;
+  product.flowLimitStatus = firstCloudValue<string>(raw.flowLimitStatus, raw.highPriceFlowLimitStatus) || product.flowLimitStatus;
+  product.todaySales = cloudNumber(firstCloudValue<number>(sales?.today_sales, raw.todaySales, raw.skuQuantityTotalInfo?.todaySaleVolume), product.todaySales);
+  product.last7DaysSales = cloudNumber(firstCloudValue<number>(sales?.last7d_sales, raw.last7DaysSales, raw.skuQuantityTotalInfo?.lastSevenDaysSaleVolume), product.last7DaysSales);
+  product.last30DaysSales = cloudNumber(firstCloudValue<number>(sales?.last30d_sales, raw.last30DaysSales, raw.skuQuantityTotalInfo?.lastThirtyDaysSaleVolume), product.last30DaysSales);
+  product.totalSales = cloudNumber(firstCloudValue<number>(sales?.total_sales, skc?.sales_total, raw.totalSales, raw.skuQuantityTotalInfo?.totalSaleVolume), product.totalSales);
+  product.warehouseStock = cloudNumber(firstCloudValue<number>(sales?.warehouse_stock, skc?.stock_available, raw.warehouseStock, raw.skuQuantityTotalInfo?.inventoryNumInfo?.warehouseInventoryNum), product.warehouseStock);
+  product.occupyStock = cloudNumber(firstCloudValue<number>(sales?.occupy_stock, raw.occupyStock, raw.skuQuantityTotalInfo?.inventoryNumInfo?.expectedOccupiedInventoryNum), product.occupyStock);
+  product.unavailableStock = cloudNumber(firstCloudValue<number>(sales?.unavailable_stock, raw.unavailableStock, raw.skuQuantityTotalInfo?.inventoryNumInfo?.unavailableWarehouseInventoryNum), product.unavailableStock);
+  product.lackQuantity = cloudNumber(firstCloudValue<number>(raw.lackQuantity, raw.skuQuantityTotalInfo?.lackQuantity), product.lackQuantity);
+  product.price = cloudMoney(declaredPrice) || product.price;
+  product.stockStatus = sales?.stock_status || product.stockStatus;
+  product.supplyStatus = sales?.supply_status || skc?.status || product.supplyStatus;
+  product.availableSaleDays = firstCloudValue<number>(sales?.available_sale_days, raw.availableSaleDays, raw.skuQuantityTotalInfo?.availableSaleDays) ?? product.availableSaleDays;
+  product.asfScore = firstCloudValue<string>(sales?.asf_score, raw.asfScore, raw.productReviewScore, raw.goodsScore) ?? product.asfScore;
+  product.buyerName = firstCloudValue<string>(raw.buyerName, raw.purchaseBuyerName, raw.purchaserName) || product.buyerName;
+  product.buyerUid = firstCloudValue<string>(raw.buyerUid, raw.buyerId, raw.purchaseBuyerUid) || product.buyerUid;
+  product.commentNum = cloudNumber(firstCloudValue<number>(sales?.comment_num, raw.commentNum), product.commentNum);
+  product.inBlackList = firstCloudValue<string>(raw.inBlackList, raw.blackListStatus) || product.inBlackList;
+  product.pictureAuditStatus = firstCloudValue<string>(raw.pictureAuditStatus, raw.imageAuditStatus) || product.pictureAuditStatus;
+  product.qualityAfterSalesRate = firstCloudValue<string>(sales?.quality_after_sales_rate, raw.qualityAfterSalesRate) ?? product.qualityAfterSalesRate;
+  product.hotTag = firstCloudValue<string>(raw.hotTag, raw.hotSaleTag) || product.hotTag;
+  product.adviceQuantity = firstCloudValue<number>(sales?.advice_qty, raw.adviceQuantity, raw.skuQuantityTotalInfo?.adviceQuantity) ?? product.adviceQuantity ?? 0;
+  product.syncedAt = formatTimestamp(sales?.last_updated_at) || formatTimestamp(skc?.last_updated_at) || product.syncedAt;
+  product.hasSalesSnapshot = Boolean(sales || skc || product.hasSalesSnapshot);
+  product.salesRaw = buildCloudSalesRaw(product.salesRaw, skc, sales);
+  product.salesRawSku = rawSku || product.salesRawSku;
+  if (Array.isArray(raw.trendDaily) && raw.trendDaily.length > 0) {
+    product.trendDaily = raw.trendDaily;
+  }
+  if (rawSkuList.length > 0) {
+    product.skuSummaries = normalizeSkuSummaryList(rawSkuList.map((item: any) => ({
+      productSkuId: item.productSkuId,
+      thumbUrl: item.thumbUrl || raw.productSkcPicture || raw.productPicture,
+      specText: item.className || item.specText,
+      specName: item.className || item.specName,
+      extCode: item.skuExtCode,
+      productSkuSpecList: item.productSkuSpecList,
+    })));
+  }
+}
+
+function createProductItem(source: Partial<ProductItem> = {}): ProductItem {
+  const skuSummaries = normalizeSkuSummaryList(source.skuSummaries);
+  return {
+    title: source.title || "",
+    category: source.category || "",
+    categories: source.categories || "",
+    spuId: source.spuId || "",
+    skcId: source.skcId || "",
+    goodsId: source.goodsId || "",
+    sku: source.sku || "",
+    extCode: source.extCode || "",
+    skuId: source.skuId || "",
+    skuName: source.skuName || "",
+    imageUrl: normalizeImageUrl(source.imageUrl) || skuSummaries[0]?.thumbUrl || "",
+    siteLabel: source.siteLabel || "",
+    productType: source.productType || "",
+    sourceType: source.sourceType || "",
+    removeStatus: source.removeStatus || "",
+    status: source.status || "",
+    skcSiteStatus: source.skcSiteStatus || "",
+    flowLimitStatus: source.flowLimitStatus || "",
+    skuSummaries,
+    todaySales: source.todaySales || 0,
+    last30DaysSales: source.last30DaysSales || 0,
+    totalSales: source.totalSales || 0,
+    last7DaysSales: source.last7DaysSales || 0,
+    syncedAt: source.syncedAt || "",
+    warehouseStock: source.warehouseStock || 0,
+    occupyStock: source.occupyStock || 0,
+    unavailableStock: source.unavailableStock || 0,
+    lackQuantity: source.lackQuantity || 0,
+    price: source.price || "",
+    stockStatus: source.stockStatus || "",
+    supplyStatus: source.supplyStatus || "",
+    pendingOrderCount: source.pendingOrderCount || 0,
+    hotTag: source.hotTag || "",
+    availableSaleDays: source.availableSaleDays ?? "",
+    asfScore: source.asfScore,
+    buyerName: source.buyerName || "",
+    buyerUid: source.buyerUid || "",
+    operatorContact: source.operatorContact || "",
+    operatorNick: source.operatorNick || "",
+    highPriceFlowLimit: source.highPriceFlowLimit,
+    highPriceFlowInfo: source.highPriceFlowInfo,
+    commentNum: source.commentNum ?? 0,
+    inBlackList: source.inBlackList || "",
+    pictureAuditStatus: source.pictureAuditStatus || "",
+    qualityAfterSalesRate: source.qualityAfterSalesRate ?? "",
+    predictTodaySaleVolume: source.predictTodaySaleVolume ?? 0,
+    sevenDaysSaleReference: source.sevenDaysSaleReference ?? 0,
+    sevenDaysAddCartNum: source.sevenDaysAddCartNum ?? 0,
+    hasSalesSnapshot: Boolean(source.hasSalesSnapshot),
+    salesRaw: source.salesRaw,
+    salesRawSku: source.salesRawSku,
+    trendDaily: source.trendDaily,
+    fluxItems: source.fluxItems,
+    fluxSyncedAt: source.fluxSyncedAt,
+    fluxSites: source.fluxSites,
+    adviceQuantity: source.adviceQuantity ?? 0,
+    cloudSkc: source.cloudSkc,
+    cloudSales: source.cloudSales,
+  };
+}
+
+function buildCloudProductRows(bundle: CloudProductBundle) {
+  const ids = new Set<string>();
+  for (const row of bundle.skcRows) {
+    if (row.skc_id) ids.add(String(row.skc_id));
+  }
+  for (const row of bundle.salesRows) {
+    if (row.skc_id) ids.add(String(row.skc_id));
+  }
+
+  const rows: ProductItem[] = [];
+  for (const skcId of ids) {
+    const skc = bundle.skcMap.get(skcId);
+    const sales = bundle.salesMap.get(skcId);
+    const product = createProductItem({
+      skcId,
+      title: sales?.title || skc?.title || "",
+      category: sales?.category_name || skc?.category_name || "",
+      categories: sales?.category_name || skc?.category_name || "",
+      imageUrl: sales?.thumb_url || skc?.thumb_url || "",
+      siteLabel: skc?.site || "",
+      syncedAt: formatTimestamp(sales?.last_updated_at) || formatTimestamp(skc?.last_updated_at),
+      hasSalesSnapshot: Boolean(sales),
+    });
+    applyCloudProduct(product, skc, sales);
+    rows.push(product);
+  }
+
+  return rows.sort((a, b) => {
+    if ((b.last30DaysSales || 0) !== (a.last30DaysSales || 0)) return (b.last30DaysSales || 0) - (a.last30DaysSales || 0);
+    if ((b.totalSales || 0) !== (a.totalSales || 0)) return (b.totalSales || 0) - (a.totalSales || 0);
+    return (a.title || "").localeCompare(b.title || "", "zh-CN");
+  });
+}
+
+function buildCloudSalesSummary(products: ProductItem[]) {
+  return {
+    addedToSiteSkcNum: products.length,
+    saleOutSkcNum: products.filter((product) => {
+      const status = `${product.stockStatus || ""} ${product.supplyStatus || ""}`;
+      return /售罄|断货|SOLD[_\s-]?OUT/i.test(status);
+    }).length,
+    soonSaleOutSkcNum: products.filter((product) => {
+      const days = Number(product.availableSaleDays);
+      return Number.isFinite(days) && days > 0 && days < 7;
+    }).length,
+    shortageSkcNum: products.filter((product) => (product.lackQuantity || 0) > 0).length,
+    adviceStockSkcNum: products.filter((product) => (product.adviceQuantity || 0) > 0).length,
+    adSkcNum: 0,
+  };
 }
 
 function renderSnapshotField(label: string, value: unknown, accent = false) {
@@ -1075,33 +1476,18 @@ export default function ProductList() {
   const [products, setProducts] = useState<ProductItem[]>([]);
   const [salesSummary, setSalesSummary] = useState<any>(null);
   const [countSummary, setCountSummary] = useState<ProductCountSummary>(EMPTY_COUNT_SUMMARY);
-  // 扩展 + cloud 抓到的 SKC 主体数据，按 skc_id 索引到本表
+  // 云端采集到的 SKC / 销售数据，按 skc_id 覆盖商品管理主字段。
   const [cloudSkcMap, setCloudSkcMap] = useState<Map<string, SkcRow>>(new Map());
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const cfg = await loadCloudConfig();
-      if (!cfg || cancelled) return;
-      try {
-        const r = await fetchSkcList(cfg, { limit: 500 });
-        if (cancelled) return;
-        const m = new Map<string, SkcRow>();
-        for (const row of r.rows || []) m.set(String(row.skc_id), row);
-        setCloudSkcMap(m);
-      } catch {
-        // 云端不通就不显示，不影响主流程
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []);
+  const [cloudSalesMap, setCloudSalesMap] = useState<Map<string, TemuSalesRow>>(new Map());
+  const [cloudShopSales, setCloudShopSales] = useState<TemuShopSalesRow | null>(null);
+  const [cloudProductMeta, setCloudProductMeta] = useState({ latestAt: "", error: "" });
 
   const [loading, setLoading] = useState(false);
   const [searchText, setSearchText] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [hasAccount, setHasAccount] = useState<boolean | null>(null);
   const [diagnostics, setDiagnostics] = useState<CollectionDiagnostics | null>(null);
-  const [sourceState, setSourceState] = useState<ProductSourceState>(EMPTY_SOURCES);
+  const [, setSourceState] = useState<ProductSourceState>(EMPTY_SOURCES);
   const [selectedProduct, setSelectedProduct] = useState<ProductItem | null>(null);
   const [drawerTab, setDrawerTab] = useState<string>("overview");
   const [activeFluxSiteKey, setActiveFluxSiteKey] = useState<FluxSiteKey>("global");
@@ -1276,6 +1662,34 @@ export default function ProductList() {
   const loadProducts = async () => {
     setLoading(true);
     try {
+      if (CLOUD_PRODUCTS_ONLY) {
+        const cloudBundle = await loadCloudProductBundle();
+        const cloudProducts = buildCloudProductRows(cloudBundle);
+        setCloudSkcMap(cloudBundle.skcMap);
+        setCloudSalesMap(cloudBundle.salesMap);
+        setCloudShopSales(cloudBundle.shopSales);
+        setCloudProductMeta({ latestAt: cloudBundle.latestAt, error: cloudBundle.error });
+        setHasAccount(cloudBundle.configured);
+        setDiagnostics(null);
+        setSourceState({
+          products: true,
+          sales: true,
+          orders: true,
+        });
+        setSalesSummary(buildCloudSalesSummary(cloudProducts));
+        setCountSummary({
+          totalCount: cloudProducts.length,
+          onSaleCount: cloudProducts.length,
+          notPublishedCount: 0,
+          offSaleCount: 0,
+        });
+        setProducts(cloudProducts);
+        setFluxHistoryData([]);
+        setProductHistoryCache({});
+        setSiteTrendListBySite({});
+        return;
+      }
+
       const [
         accounts,
         rawProducts,
@@ -2011,14 +2425,12 @@ export default function ProductList() {
   const totalSales = products.reduce((sum, product) => sum + (product.totalSales || 0), 0);
   void totalSales; // 保留
   const onSaleCount = salesSummary?.addedToSiteSkcNum || products.filter((product) => product.hasSalesSnapshot).length;
-  const latestSyncedAt = getLatestSyncedAt(products, diagnostics);
-  const salesAttachedCount = products.filter((product) => product.hasSalesSnapshot).length;
+  const latestSyncedAt = cloudProductMeta.latestAt || getLatestSyncedAt(products, diagnostics);
+  const salesAttachedCount = cloudSalesMap.size;
 
-  const dataIssues = [
-    getCollectionDataIssue(diagnostics, "products", "商品列表", sourceState.products),
-    getCollectionDataIssue(diagnostics, "sales", "销售数据", sourceState.sales),
-    getCollectionDataIssue(diagnostics, "orders", "备货单数据", sourceState.orders),
-  ].filter((issue): issue is string => Boolean(issue));
+  const dataIssues = cloudProductMeta.error
+    ? [`云端商品数据读取失败：${cloudProductMeta.error}`]
+    : [];
 
   const numColor = (val: number, base = "#389e0d") => ({ color: val > 0 ? base : "#bfbfbf", fontWeight: val > 0 ? 600 : 400 });
 
@@ -2050,9 +2462,7 @@ export default function ProductList() {
               skuId: sku?.productSkuId || "",
               skuSpec: sku?.className || "",
               skuExtCode: sku?.skuExtCode || "",
-              skuPrice: sku?.supplierPrice != null
-                ? (Number(sku.supplierPrice) / 100).toFixed(2)
-                : product.price,
+              skuPrice: formatSkuSupplierPrice(sku?.supplierPrice, product.price),
               today: fb(skuToday, product.todaySales),
               d7: fb(sku7d, product.last7DaysSales),
               d30: fb(sku30d, product.last30DaysSales),
@@ -2481,9 +2891,9 @@ export default function ProductList() {
         );
       },
     },
-    // ========== 扩展 + cloud 抓到的 SKC 实时数据（按 skc_id 关联） ==========
+    // ========== 云端 SKC 快照（按 skc_id 关联） ==========
     {
-      title: "扩展更新",
+      title: "云端更新",
       key: "cloud_updated",
       width: 110,
       render: (_: any, record: any) => {
@@ -2495,7 +2905,7 @@ export default function ProductList() {
       },
     },
     {
-      title: "扩展申报价",
+      title: "云端申报价",
       key: "cloud_declared",
       width: 110,
       align: "right",
@@ -2507,7 +2917,7 @@ export default function ProductList() {
       },
     },
     {
-      title: "扩展建议价",
+      title: "建议价",
       key: "cloud_suggested",
       width: 110,
       align: "right",
@@ -2519,7 +2929,7 @@ export default function ProductList() {
       },
     },
     {
-      title: "扩展价差",
+      title: "申报价差",
       key: "cloud_gap",
       width: 90,
       align: "right",
@@ -3270,6 +3680,8 @@ export default function ProductList() {
           { label: "Goods ID", value: record.goodsId },
           { label: "Product ID", value: raw.productId },
           { label: "SKC 货号", value: raw.skcExtCode || record.extCode },
+          { label: "云端来源事件", value: raw.cloudSourceEvent?.id },
+          { label: "云端来源接口", value: raw.cloudSourceEvent?.url_path },
           { label: "创建时间", value: raw.createdAtStr || raw.createdAt },
           { label: "上架时长", value: raw.onSalesDurationOffline },
           { label: "商品周期", value: raw.productCycleDays },
@@ -3451,12 +3863,15 @@ export default function ProductList() {
     <div className="dashboard-shell">
       <PageHeader
         compact
-        eyebrow="商品数据"
+        eyebrow="云端商品数据"
         title="商品管理"
-        subtitle="紧凑表格 + 详情抽屉，集中查看商品基础资料、销量趋势和 SKU 字段。"
+        subtitle="直接读取云端扩展上报的店铺商品，按 SKC 展示商品基础资料、销量和库存。"
         meta={[
           formatSyncedAt(latestSyncedAt),
-          hasAccount === false ? "本地历史数据" : null,
+          `云端 SKC ${cloudSkcMap.size}`,
+          `销售快照 ${cloudSalesMap.size}`,
+          cloudShopSales?.stat_date ? `店铺销量 ${cloudShopSales.stat_date}` : null,
+          hasAccount === false ? "未连接云端" : null,
         ].filter(Boolean)}
         actions={(
           <Button type="primary" icon={<SyncOutlined />} loading={loading} onClick={loadProducts}>
@@ -3469,7 +3884,7 @@ export default function ProductList() {
           style={{ marginBottom: 16 }}
           type="warning"
           showIcon
-          message="当前没有绑定账号，正在展示本地历史数据"
+          message="当前没有连接云端，商品管理只展示云端数据"
         />
       ) : null}
 
@@ -3481,7 +3896,7 @@ export default function ProductList() {
           message="部分商品数据还没有准备好"
           description={dataIssues.slice(0, 3).join("；")}
           action={(
-            <Button type="link" onClick={() => navigate("/collect")}>前往采集</Button>
+            <Button type="link" onClick={() => navigate("/multi-store-cloud")}>查看云端采集</Button>
           )}
         />
       ) : null}
@@ -3490,18 +3905,18 @@ export default function ProductList() {
         <div className="app-panel">
           <EmptyGuide
             icon={<AppstoreOutlined />}
-            title={hasAccount === false ? "先绑定店铺账号" : "先执行一次数据采集"}
+            title={hasAccount === false ? "先连接云端" : "云端还没有商品数据"}
             description={
               hasAccount === false
-                ? "绑定 Temu 店铺账号后，商品列表会自动汇总商品、销量和库存数据。"
-                : "执行商品列表、销售数据和备货单采集后，这里会自动出现统计指标和商品表格。"
+                ? "在设置里配置云端地址和令牌后，商品管理会直接读取扩展上报的店铺商品。"
+                : "浏览器扩展上传店铺后台数据后，这里会按商品 SKC 自动展示商品、销量和库存。"
             }
             action={(
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "center" }}>
                 {hasAccount === false ? (
-                  <Button type="primary" onClick={() => navigate("/accounts")}>前往绑定店铺</Button>
+                  <Button type="primary" onClick={() => navigate("/settings")}>前往设置云端</Button>
                 ) : (
-                  <Button type="primary" onClick={() => navigate("/collect")}>前往数据采集</Button>
+                  <Button type="primary" onClick={() => navigate("/multi-store-cloud")}>查看云端采集</Button>
                 )}
                 <Button onClick={loadProducts}>重新检查</Button>
               </div>
@@ -3543,6 +3958,26 @@ export default function ProductList() {
               </Card>
             </Col>
           </Row>
+
+          {cloudShopSales ? (
+            <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+              <Col xs={24} md={8}>
+                <Card size="small">
+                  <Statistic title="店铺今日销量" value={cloudShopSales.sale_volume ?? 0} prefix={<RiseOutlined />} suffix="件" valueStyle={{ color: "#389e0d" }} />
+                </Card>
+              </Col>
+              <Col xs={24} md={8}>
+                <Card size="small">
+                  <Statistic title="店铺7日销量" value={cloudShopSales.seven_days_sale_volume ?? 0} prefix={<BarChartOutlined />} suffix="件" valueStyle={{ color: "#1677ff" }} />
+                </Card>
+              </Col>
+              <Col xs={24} md={8}>
+                <Card size="small">
+                  <Statistic title="店铺30日销量" value={cloudShopSales.thirty_days_sale_volume ?? 0} prefix={<FireOutlined />} suffix="件" valueStyle={{ color: "#722ed1" }} />
+                </Card>
+              </Col>
+            </Row>
+          ) : null}
 
 
           {/* 工具栏 - SalesManagement 风格 */}

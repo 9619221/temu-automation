@@ -6,6 +6,7 @@ import {
   ArrowRightOutlined,
   BellOutlined,
   CheckCircleOutlined,
+  CloudSyncOutlined,
   CloseCircleOutlined,
   DashboardOutlined,
   DatabaseOutlined,
@@ -18,6 +19,7 @@ import {
   PictureOutlined,
   PlusCircleOutlined,
   RocketOutlined,
+  SearchOutlined,
   SettingOutlined,
   ShoppingOutlined,
   SyncOutlined,
@@ -44,7 +46,8 @@ const menuItems = [
     children: [
       { key: "/product-master-data", icon: <TagsOutlined />, label: "商品资料" },
       { key: "/1688-mapping", icon: <ApiOutlined />, label: "供应商管理" },
-      { key: "/purchase-center", icon: <ShoppingOutlined />, label: "采购中心" },
+      { key: "/sourcing-center", icon: <SearchOutlined />, label: "找品" },
+      { key: "/purchase-center", icon: <ShoppingOutlined />, label: "采购单" },
       { key: "/warehouse-center", icon: <InboxOutlined />, label: "仓库中心" },
       { key: "/qc-outbound", icon: <ExportOutlined />, label: "出库中心" },
     ],
@@ -54,6 +57,7 @@ const menuItems = [
     label: "数据",
     children: [
       { key: "/collect", icon: <SyncOutlined />, label: "数据采集" },
+      { key: "/multi-store-cloud", icon: <CloudSyncOutlined />, label: "云端采集" },
       { key: "/temu-robots", icon: <DatabaseOutlined />, label: "TEMU 机器人" },
     ],
   },

@@ -16,6 +16,11 @@
     BYPASS_SYMBOL_KEY: "temu-monitor.fetch.bypass",
   };
   const EVENT_NAME = WHITELIST_PAYLOAD.EVENT_NAME || "temu-monitor.captured";
+  const ALLOWED_HOST_RE = /(^|\.)agentseller(-eu|-us)?\.temu\.com$|^seller\.kuajingmaihuo\.com$|(^|\.)erp321\.com$|(^|\.)jushuitan\.com$|(^|\.)scm121\.com$|(^|\.)pftk\.temu\.com$|^pftk-cn\.kuajingmaihuo\.com$|^thtk-us\.seller\.temu\.com$/i;
+
+  if (!ALLOWED_HOST_RE.test(location.hostname)) {
+    return;
+  }
 
   // ---------- 1. 注入 page world hook ----------
   // 不用 inline script（page CSP 通常拦），改用 chrome-extension URL + dataset 传配置：

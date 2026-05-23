@@ -19,9 +19,11 @@ function pickList(body) {
     body?.result?.dataList ||
     body?.result?.list ||
     body?.result?.items ||
+    body?.result?.subOrderList ||
     body?.data?.pageItems ||
     body?.data?.list ||
     body?.data?.items ||
+    body?.data?.subOrderList ||
     body?.pageItems ||
     body?.list ||
     body?.items ||
@@ -252,6 +254,8 @@ function parseSalesManagement(db, ctx, evt, body) {
   for (const row of list) {
     const skc_id = toNullableString(row?.productSkcId);
     if (!skc_id) continue;
+    const totalInfo = row?.skuQuantityTotalInfo || {};
+    const inventoryInfo = totalInfo?.inventoryNumInfo || {};
     const sku = Array.isArray(row?.skuQuantityDetailList) ? row.skuQuantityDetailList[0] : null;
     const declared_price_cents = sku ? toCents(sku.supplierPrice, "supplierPrice") : null;
     const price_currency = toNullableString(sku?.currencyType, 8);
@@ -259,8 +263,9 @@ function parseSalesManagement(db, ctx, evt, body) {
     const category_name = toNullableString(row.category, 200);
     const thumb_url = toNullableString(row.productSkcPicture, 1000);
     const supply_status = toNullableString(row.supplyStatus, 50);
-    const total_sales = toNullableInteger(row.totalSales);
-    const warehouse_stock = toNullableInteger(row.warehouseStock);
+    const mall_id = ctx.mall_id || evt.mall_id || toNullableString(row.supplierId) || null;
+    const total_sales = toNullableInteger(row.totalSales ?? totalInfo.totalSaleVolume);
+    const warehouse_stock = toNullableInteger(row.warehouseStock ?? inventoryInfo.warehouseInventoryNum);
     const sku_ext_code = toNullableString(
       row.skcExtCode != null && row.skcExtCode !== "" ? row.skcExtCode : sku?.skuExtCode
     );
@@ -275,15 +280,15 @@ function parseSalesManagement(db, ctx, evt, body) {
       category_name,
       thumb_url,
       sku_ext_code,
-      today_sales: toNullableInteger(row.todaySales),
-      last7d_sales: toNullableInteger(row.last7DaysSales),
-      last30d_sales: toNullableInteger(row.last30DaysSales),
+      today_sales: toNullableInteger(row.todaySales ?? totalInfo.todaySaleVolume),
+      last7d_sales: toNullableInteger(row.last7DaysSales ?? totalInfo.lastSevenDaysSaleVolume),
+      last30d_sales: toNullableInteger(row.last30DaysSales ?? totalInfo.lastThirtyDaysSaleVolume),
       total_sales,
       warehouse_stock,
-      occupy_stock: toNullableInteger(row.occupyStock),
-      unavailable_stock: toNullableInteger(row.unavailableStock),
-      advice_qty: toNullableInteger(row.adviceQuantity),
-      available_sale_days: toNullableNumber(row.availableSaleDays),
+      occupy_stock: toNullableInteger(row.occupyStock ?? inventoryInfo.expectedOccupiedInventoryNum ?? inventoryInfo.normalLockNumber),
+      unavailable_stock: toNullableInteger(row.unavailableStock ?? inventoryInfo.unavailableWarehouseInventoryNum),
+      advice_qty: toNullableInteger(row.adviceQuantity ?? totalInfo.adviceQuantity),
+      available_sale_days: toNullableNumber(row.availableSaleDays ?? totalInfo.availableSaleDays),
       declared_price_cents,
       price_currency,
       asf_score: toNullableString(row.asfScore),
@@ -299,7 +304,7 @@ function parseSalesManagement(db, ctx, evt, body) {
       tenant_id: ctx.tenant_id,
       skc_id,
       product_id: toNullableString(row.productId),
-      mall_id: ctx.mall_id || evt.mall_id || null,
+      mall_id,
       site: evt.site || null,
       title,
       category_id: null,
@@ -317,6 +322,92 @@ function parseSalesManagement(db, ctx, evt, body) {
       now,
     });
   }
+}
+
+// ---------- TEMU shop statistics ----------
+
+function eventStatDate(evt) {
+  const ts = Number(evt?.ts);
+  const time = Number.isFinite(ts) && ts > 946684800000 ? ts : Date.now();
+  return new Date(time).toISOString().slice(0, 10);
+}
+
+function parseShopStatistics(db, ctx, evt, body) {
+  const result = body?.result || body?.data || body;
+  if (!result || typeof result !== "object") return;
+  const sale_volume = toNullableInteger(firstDefined(result, ["saleVolume", "todaySaleVolume", "todaySales"]));
+  const seven_days_sale_volume = toNullableInteger(firstDefined(result, ["sevenDaysSaleVolume", "lastSevenDaysSaleVolume", "last7DaysSales"]));
+  const thirty_days_sale_volume = toNullableInteger(firstDefined(result, ["thirtyDaysSaleVolume", "lastThirtyDaysSaleVolume", "last30DaysSales"]));
+  const on_sale_product_number = toNullableInteger(firstDefined(result, ["onSaleProductNumber", "onSaleProducts"]));
+  const wait_product_number = toNullableInteger(firstDefined(result, ["waitProductNumber"]));
+  const lack_skc_number = toNullableInteger(firstDefined(result, ["lackSkcNumber"]));
+  const advice_prepare_skc_number = toNullableInteger(firstDefined(result, ["advicePrepareSkcNumber"]));
+  const about_to_sell_out_number = toNullableInteger(firstDefined(result, ["aboutToSellOutNumber"]));
+  const already_sold_out_number = toNullableInteger(firstDefined(result, ["alreadySoldOutNumber"]));
+  const high_price_limit_number = toNullableInteger(firstDefined(result, ["highPriceLimitNumber"]));
+  const quality_after_sale_ratio_90d = toNullableNumber(firstDefined(result, ["qualityAfterSaleRatio90d"]));
+  const hasAnyMetric = [
+    sale_volume,
+    seven_days_sale_volume,
+    thirty_days_sale_volume,
+    on_sale_product_number,
+    wait_product_number,
+    lack_skc_number,
+    advice_prepare_skc_number,
+    about_to_sell_out_number,
+    already_sold_out_number,
+    high_price_limit_number,
+  ].some((value) => value != null);
+  if (!hasAnyMetric) return;
+
+  const upsert = db.prepare(`
+    INSERT INTO temu_shop_stats (
+      id, tenant_id, mall_id, site, stat_date,
+      sale_volume, seven_days_sale_volume, thirty_days_sale_volume,
+      on_sale_product_number, wait_product_number, lack_skc_number,
+      advice_prepare_skc_number, about_to_sell_out_number, already_sold_out_number,
+      high_price_limit_number, quality_after_sale_ratio_90d, sources_json
+    ) VALUES (
+      @id, @tenant_id, @mall_id, @site, @stat_date,
+      @sale_volume, @seven_days_sale_volume, @thirty_days_sale_volume,
+      @on_sale_product_number, @wait_product_number, @lack_skc_number,
+      @advice_prepare_skc_number, @about_to_sell_out_number, @already_sold_out_number,
+      @high_price_limit_number, @quality_after_sale_ratio_90d, @sources_json
+    )
+    ON CONFLICT(tenant_id, mall_id, site, stat_date) DO UPDATE SET
+      sale_volume                  = COALESCE(excluded.sale_volume, sale_volume),
+      seven_days_sale_volume       = COALESCE(excluded.seven_days_sale_volume, seven_days_sale_volume),
+      thirty_days_sale_volume      = COALESCE(excluded.thirty_days_sale_volume, thirty_days_sale_volume),
+      on_sale_product_number       = COALESCE(excluded.on_sale_product_number, on_sale_product_number),
+      wait_product_number          = COALESCE(excluded.wait_product_number, wait_product_number),
+      lack_skc_number              = COALESCE(excluded.lack_skc_number, lack_skc_number),
+      advice_prepare_skc_number    = COALESCE(excluded.advice_prepare_skc_number, advice_prepare_skc_number),
+      about_to_sell_out_number     = COALESCE(excluded.about_to_sell_out_number, about_to_sell_out_number),
+      already_sold_out_number      = COALESCE(excluded.already_sold_out_number, already_sold_out_number),
+      high_price_limit_number      = COALESCE(excluded.high_price_limit_number, high_price_limit_number),
+      quality_after_sale_ratio_90d = COALESCE(excluded.quality_after_sale_ratio_90d, quality_after_sale_ratio_90d),
+      sources_json                 = json_patch(COALESCE(sources_json, '{}'), COALESCE(excluded.sources_json, '{}')),
+      last_updated_at              = datetime('now')
+  `);
+  upsert.run({
+    id: crypto.randomUUID(),
+    tenant_id: ctx.tenant_id,
+    mall_id: String(ctx.mall_id || evt.mall_id || ""),
+    site: String(evt.site || ""),
+    stat_date: eventStatDate(evt),
+    sale_volume,
+    seven_days_sale_volume,
+    thirty_days_sale_volume,
+    on_sale_product_number,
+    wait_product_number,
+    lack_skc_number,
+    advice_prepare_skc_number,
+    about_to_sell_out_number,
+    already_sold_out_number,
+    high_price_limit_number,
+    quality_after_sale_ratio_90d,
+    sources_json: JSON.stringify({ [evt.url_path]: evt.id }),
+  });
 }
 
 // ---------- magneto/price-adjust：申报价 ----------
@@ -388,6 +479,7 @@ const PARSERS = [
   { match: /\/auth\/userInfo|\/mms\/userInfo|\/mms\/account\/menu/, fn: parseUserInfo, name: "userInfo" },
   { match: /\/product\/skc\/pageQuery|\/product\/draft\/pageQuery|\/product\/notAllEu\/pageQuery/, fn: parseSkcList, name: "skcList" },
   { match: /\/mms\/venom\/api\/supplier\/sales\/management\/(listOverall|querySkuSalesNumber|queryFulfilmentFormStatistic)/, fn: parseSalesManagement, name: "salesManagement" },
+  { match: /\/bg\/swift\/api\/common\/statistics\/web\/queryStatisticDataFullManaged|\/visage-agent-seller\/product\/statisticsData/, fn: parseShopStatistics, name: "shopStatistics" },
   { match: /\/magneto\/price-adjust\/page-query/, fn: parsePriceAdjust, name: "priceAdjust" },
   { match: /\/product\/sku\/site\/suggestedPrice\/pageQuery/, fn: parseSuggestedPrice, name: "suggestedPrice" },
 ];

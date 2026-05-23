@@ -228,6 +228,9 @@ interface AppAPI {
   downloadUpdate: () => Promise<any>;
   quitAndInstallUpdate: () => Promise<boolean>;
   openLogDirectory: () => Promise<string>;
+  getExtensionDirectory?: () => Promise<string>;
+  openExtensionDirectory?: () => Promise<string>;
+  openChromeExtensions?: () => Promise<string>;
   openExternal: (url: string) => Promise<string>;
   readWorkflowPackLogs?: (params?: { limit?: number }) => Promise<{
     logFile?: string;

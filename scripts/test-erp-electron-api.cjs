@@ -1011,6 +1011,47 @@ async function main() {
     assert.equal(preview1688Result.purchaseOrder.externalOrderStatus, "previewed");
     assert.equal(preview1688Result.purchaseOrder.externalOrderPreviewedAt.length > 0, true);
 
+    const validate1688Push = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "validate_1688_order_push",
+        poId: "po_1688_preview_ipc",
+        dryRun: true,
+      }),
+    });
+    assert.equal(validate1688Push.statusCode, 200);
+    const validate1688PushResult = JSON.parse(validate1688Push.body).result.result;
+    assert.equal(validate1688PushResult.ready, true);
+    assert.equal(validate1688PushResult.cargoCount, 1);
+
+    const push1688 = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "push_1688_order",
+        poId: "po_1688_preview_ipc",
+        mockResponse: {
+          result: {
+            orderId: "1688-pushed-ipc",
+          },
+        },
+      }),
+    });
+    assert.equal(push1688.statusCode, 200);
+    const push1688Result = JSON.parse(push1688.body).result.result;
+    assert.equal(push1688Result.externalOrderId, "1688-pushed-ipc");
+    assert.equal(push1688Result.purchaseOrder.status, "pushed_pending_price");
+    assert.equal(push1688Result.purchaseOrder.externalOrderStatus, "created");
+
     const sync1688Order = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
       method: "POST",
       headers: {
@@ -1487,6 +1528,96 @@ async function main() {
     const partialPo = JSON.parse(purchaseAfterPartialInbound.body).workbench.purchaseOrders.find((item) => item.id === "po_partial_ipc");
     assert.equal(partialPo.status, "arrived");
     assert.equal(partialPo.receivedQty, 6);
+
+    const operationLogDb = openErpDatabase({ userDataDir: tempUserData });
+    try {
+      const eventTypes = new Set(operationLogDb.prepare(`
+        SELECT event_type
+        FROM erp_purchase_request_events
+        WHERE pr_id = 'pr_ipc'
+      `).all().map((row) => row.event_type));
+      for (const eventType of [
+        "delete_po",
+        "accept_request",
+        "mark_sourced",
+        "submit_payment_approval",
+        "refresh_1688_product_detail",
+        "generate_po",
+        "preview_1688_order",
+        "push_1688_order",
+        "sync_1688_orders",
+        "approve_payment",
+        "confirm_paid",
+        "auto_create_inbound_receipt",
+        "register_arrival",
+        "confirm_count",
+        "create_batches",
+        "mark_arrived",
+        "mark_inbounded",
+        "create_outbound_plan",
+        "submit_outbound",
+        "start_picking",
+        "mark_packed",
+        "confirm_shipped_out",
+        "request_ops_confirm",
+        "confirm_outbound_done",
+      ]) {
+        assert.ok(eventTypes.has(eventType), `missing purchase request event: ${eventType}`);
+      }
+
+      const operationEvents = operationLogDb.prepare(`
+        SELECT event_type, actor_id, actor_name, actor_role, message
+        FROM erp_purchase_request_events
+        WHERE pr_id = 'pr_ipc'
+      `).all();
+      for (const row of operationEvents) {
+        assert.ok(row.actor_role, `missing actor role for event: ${row.event_type}`);
+        assert.ok(
+          row.actor_name || row.actor_id || row.actor_role,
+          `missing operator identity for event: ${row.event_type}`,
+        );
+        assert.ok(row.message, `missing event message: ${row.event_type}`);
+      }
+
+      const auditActions = new Set(operationLogDb.prepare(`
+        SELECT action
+        FROM erp_audit_logs
+      `).all().map((row) => row.action));
+      for (const action of [
+        "submit_payment_approval",
+        "create_payment_approval",
+        "approve_payment",
+        "approve_payment_approval",
+        "confirm_paid",
+        "confirm_payment_paid",
+        "auto_create_inbound_receipt",
+        "preview_1688_order",
+        "push_1688_order",
+        "register_arrival",
+        "confirm_count",
+        "create_batches",
+        "create_outbound_plan",
+        "submit_outbound",
+        "start_picking",
+        "mark_packed",
+        "confirm_shipped_out",
+        "request_ops_confirm",
+        "confirm_outbound_done",
+      ]) {
+        assert.ok(auditActions.has(action), `missing audit action: ${action}`);
+      }
+
+      const ledgerTypes = new Set(operationLogDb.prepare(`
+        SELECT type
+        FROM erp_inventory_ledger_entries
+        WHERE source_doc_type IN ('inbound_receipt', 'outbound_shipment')
+      `).all().map((row) => row.type));
+      for (const type of ["purchase_inbound", "outbound_reserve", "outbound_to_temu"]) {
+        assert.ok(ledgerTypes.has(type), `missing inventory ledger type: ${type}`);
+      }
+    } finally {
+      operationLogDb.close();
+    }
 
     lanStatus = await invoke("erp:lan:stop");
     assert.equal(lanStatus.running, false);

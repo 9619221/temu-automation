@@ -54,6 +54,8 @@ CREATE TABLE IF NOT EXISTS erp_purchase_orders (
   expected_delivery_date TEXT,
   actual_delivery_date TEXT,
   total_amount REAL NOT NULL DEFAULT 0,
+  paid_amount REAL,
+  freight_amount REAL NOT NULL DEFAULT 0,
   created_by TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,

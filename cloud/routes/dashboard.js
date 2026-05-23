@@ -5,6 +5,119 @@ import { authMiddleware } from "../middleware/auth.js";
 const r = Router();
 r.use(authMiddleware);
 
+function safeJsonParse(text, fallback = null) {
+  if (!text) return fallback;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return fallback;
+  }
+}
+
+function pickList(body) {
+  return (
+    body?.result?.pageItems ||
+    body?.result?.dataList ||
+    body?.result?.list ||
+    body?.result?.items ||
+    body?.result?.subOrderList ||
+    body?.data?.pageItems ||
+    body?.data?.list ||
+    body?.data?.items ||
+    body?.data?.subOrderList ||
+    body?.pageItems ||
+    body?.list ||
+    body?.items ||
+    (Array.isArray(body) ? body : [])
+  );
+}
+
+function normalizeId(value) {
+  if (value == null || value === "") return "";
+  return String(value).trim();
+}
+
+function rawItemIds(item) {
+  return [
+    item?.productSkcId,
+    item?.skcId,
+    item?.productSKCId,
+    item?.skc_id,
+    item?.productId,
+    item?.product_id,
+    item?.goodsId,
+    item?.goods_id,
+  ].map(normalizeId).filter(Boolean);
+}
+
+function rowIds(row) {
+  return [row?.skc_id, row?.product_id, row?.goods_id].map(normalizeId).filter(Boolean);
+}
+
+function rawItemMatchesRow(item, row) {
+  const wanted = new Set(rowIds(row));
+  if (wanted.size === 0) return false;
+  return rawItemIds(item).some((id) => wanted.has(id));
+}
+
+function deepFindRawItem(body, row) {
+  const directList = pickList(body);
+  if (Array.isArray(directList)) {
+    const found = directList.find((item) => item && typeof item === "object" && rawItemMatchesRow(item, row));
+    if (found) return found;
+  }
+
+  const stack = [{ node: body, depth: 0 }];
+  const seen = new Set();
+  while (stack.length) {
+    const { node, depth } = stack.pop();
+    if (!node || depth > 6 || seen.has(node)) continue;
+    if (typeof node !== "object") continue;
+    seen.add(node);
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        if (item && typeof item === "object" && rawItemMatchesRow(item, row)) return item;
+        stack.push({ node: item, depth: depth + 1 });
+      }
+      continue;
+    }
+    for (const value of Object.values(node)) {
+      if (value && typeof value === "object") stack.push({ node: value, depth: depth + 1 });
+    }
+  }
+  return null;
+}
+
+function sourceEventIds(row) {
+  const sources = safeJsonParse(row?.sources_json, {});
+  if (!sources || typeof sources !== "object") return [];
+  return Array.from(new Set(Object.values(sources).map(normalizeId).filter(Boolean)));
+}
+
+function getRawProductPayload(db, tenantId, row) {
+  const ids = sourceEventIds(row);
+  if (ids.length === 0) return {};
+  const placeholders = ids.map(() => "?").join(",");
+  const events = db.prepare(`
+    SELECT id, url_path, method, status, ts, body_size, body_json
+    FROM capture_events
+    WHERE tenant_id = ? AND id IN (${placeholders})
+    ORDER BY ts DESC
+  `).all(tenantId, ...ids);
+
+  for (const event of events) {
+    const body = safeJsonParse(event.body_json);
+    const rawItem = deepFindRawItem(body, row);
+    if (!rawItem) continue;
+    const { body_json: _bodyJson, ...rawSource } = event;
+    return {
+      raw_item: rawItem,
+      raw_source: rawSource,
+    };
+  }
+  return {};
+}
+
 r.get("/stats", (req, res) => {
   const db = getDb();
   const tid = req.user.tid;
@@ -82,22 +195,95 @@ r.get("/temu-sales", (req, res) => {
   const db = getDb();
   const tid = req.user.tid;
   const requestedDate = req.query.date;
-  const date = typeof requestedDate === "string" && requestedDate
-    ? requestedDate
-    : new Date().toISOString().slice(0, 10);
+  const requestedMallId = req.query.mall_id ? String(req.query.mall_id) : "";
+  const explicitDate = typeof requestedDate === "string" && requestedDate;
+  let date = explicitDate ? requestedDate : "";
+  if (!date) {
+    const latestWhere = ["tenant_id = ?"];
+    const latestParams = [tid];
+    if (requestedMallId) {
+      latestWhere.push("mall_supplier_id = ?");
+      latestParams.push(requestedMallId);
+    }
+    const latest = db.prepare(`
+      SELECT stat_date AS date
+      FROM temu_sales_snapshot
+      WHERE ${latestWhere.join(" AND ")}
+      ORDER BY stat_date DESC
+      LIMIT 1
+    `).get(...latestParams);
+    date = latest?.date || new Date().toISOString().slice(0, 10);
+  }
+  const where = ["tenant_id = ?", "stat_date = ?"];
+  const params = [tid, date];
+  if (requestedMallId) {
+    where.push("mall_supplier_id = ?");
+    params.push(requestedMallId);
+  }
   const rows = db.prepare(`
     SELECT skc_id, product_id, goods_id, mall_supplier_id, title, category_name,
            thumb_url, sku_ext_code, today_sales, last7d_sales, last30d_sales,
            total_sales, warehouse_stock, occupy_stock, unavailable_stock,
            advice_qty, available_sale_days, declared_price_cents, price_currency,
            asf_score, comment_num, quality_after_sales_rate, supply_status,
-           stock_status, close_jit_status, stat_date, last_updated_at
+           stock_status, close_jit_status, stat_date, sources_json, last_updated_at
     FROM temu_sales_snapshot
-    WHERE tenant_id = ? AND stat_date = ?
+    WHERE ${where.join(" AND ")}
     ORDER BY total_sales DESC
     LIMIT 200
-  `).all(tid, date);
-  res.json({ date, rows });
+  `).all(...params);
+  res.json({
+    date,
+    rows: rows.map((row) => ({
+      ...row,
+      ...getRawProductPayload(db, tid, row),
+    })),
+  });
+});
+
+r.get("/shop-sales", (req, res) => {
+  const db = getDb();
+  const tid = req.user.tid;
+  const requestedDate = req.query.date;
+  const requestedMallId = req.query.mall_id ? String(req.query.mall_id) : "";
+  const explicitDate = typeof requestedDate === "string" && requestedDate;
+  const where = ["tenant_id = ?"];
+  const params = [tid];
+  if (explicitDate) {
+    where.push("stat_date = ?");
+    params.push(requestedDate);
+  }
+  if (requestedMallId) {
+    where.push("mall_id = ?");
+    params.push(requestedMallId);
+  }
+  const row = db.prepare(`
+    SELECT id, tenant_id, mall_id, site, stat_date,
+           sale_volume, seven_days_sale_volume, thirty_days_sale_volume,
+           on_sale_product_number, wait_product_number, lack_skc_number,
+           advice_prepare_skc_number, about_to_sell_out_number,
+           already_sold_out_number, high_price_limit_number,
+           quality_after_sale_ratio_90d, sources_json, last_updated_at
+    FROM temu_shop_stats
+    WHERE ${where.join(" AND ")}
+    ORDER BY stat_date DESC, last_updated_at DESC
+    LIMIT 1
+  `).get(...params);
+  res.json({ date: row?.stat_date || "", row: row || null });
+});
+
+r.get("/event/:id/body", (req, res) => {
+  const db = getDb();
+  const tid = req.user.tid;
+  const row = db.prepare(`
+    SELECT id, mall_id, site, page, kind, method, url, url_path, status, body_size, ts, captured_at, received_at, body_json
+    FROM capture_events
+    WHERE tenant_id = ? AND id = ?
+  `).get(tid, req.params.id);
+  if (!row) return res.status(404).json({ error: "not_found" });
+  const body = safeJsonParse(row.body_json, null);
+  const { body_json: _bodyJson, ...event } = row;
+  res.json({ event, body });
 });
 
 // 列表：?mall_id=&q=&limit=&offset=

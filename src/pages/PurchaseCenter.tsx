@@ -6,6 +6,7 @@ import {
   Button,
   Checkbox,
   Col,
+  DatePicker,
   Drawer,
   Form,
   Input,
@@ -15,6 +16,7 @@ import {
   Popover,
   Row,
   Select,
+  Segmented,
   Skeleton,
   Space,
   Spin,
@@ -27,6 +29,7 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type { TableRowSelection } from "antd/es/table/interface";
+import { useNavigate } from "react-router-dom";
 import {
   ApiOutlined,
   CheckCircleOutlined,
@@ -68,6 +71,7 @@ import {
 const { Paragraph, Text } = Typography;
 const { TextArea } = Input;
 const { Dragger } = Upload;
+const { RangePicker } = DatePicker;
 const erp = window.electronAPI?.erp;
 const MAX_REQUEST_IMAGES = 6;
 const UPLOAD_IMAGE_TARGET_BYTES = 260 * 1024;
@@ -85,14 +89,18 @@ const MINIMIZED_IMAGE_SEARCH_WIDTH = 132;
 const MINIMIZED_IMAGE_SEARCH_HEIGHT = 58;
 const MINIMIZED_IMAGE_SEARCH_MARGIN = 8;
 const PURCHASE_WORKBENCH_CACHE_KEY = "temu.purchase.workbench.cache.v3";
+const PURCHASE_ORDER_PAGE_SIZE = 20;
 const FAST_PURCHASE_WORKBENCH_PARAMS = {
   limit: 2000,
+  purchaseOrderLimit: PURCHASE_ORDER_PAGE_SIZE,
   includeRequestDetails: false,
   includeOptions: false,
   include1688Meta: false,
 };
 const FULL_PURCHASE_WORKBENCH_PARAMS = {
   limit: 2000,
+  purchaseOrderLimit: PURCHASE_ORDER_PAGE_SIZE,
+  includePurchaseOrders: false,
   includeRequestDetails: false,
   // 性能：跨海 client mode 下，options（skuOptions/supplierOptions/sku1688Sources 各 500 条带长字段）
   // 把响应体撑到 3MB+，下载 1-3 秒。SKU 选择器已改服务端搜索（handleSkuSearch），
@@ -205,6 +213,7 @@ interface SourcingCandidateRow {
 interface TimelineRow {
   id: string;
   kind: "event" | "comment";
+  actorId?: string | null;
   actorName?: string | null;
   actorRole?: string | null;
   message?: string;
@@ -240,6 +249,46 @@ interface PurchaseRequestRow {
   updatedAt?: string;
 }
 
+const PURCHASE_EVENT_TYPE_LABELS: Record<string, string> = {
+  create_request: "新建需求",
+  accept_request: "接收需求",
+  mark_sourced: "找到货源",
+  quote_feedback: "报价反馈",
+  source_1688_keyword: "1688 找款",
+  source_1688_image: "1688 图搜",
+  refresh_1688_product_detail: "解析规格",
+  bind_1688_candidate_spec: "绑定规格",
+  generate_po: "生成采购单",
+  update_offline_po: "更新线下单",
+  delete_po: "删除采购单",
+  preview_1688_order: "1688 预览",
+  push_1688_order: "1688 推单",
+  sync_1688_orders: "同步 1688",
+  request_1688_price_change: "申请改价",
+  sync_1688_order_price: "同步金额",
+  submit_payment_approval: "提交付款",
+  approve_payment: "确认付款申请",
+  confirm_paid: "确认已付款",
+  auto_create_inbound_receipt: "生成入库单",
+  register_arrival: "确认到仓",
+  confirm_count: "确认实收",
+  create_batches: "创建批次",
+  mark_arrived: "采购到仓",
+  mark_inbounded: "完成入库",
+  create_outbound_plan: "创建出库计划",
+  submit_outbound: "提交出库",
+  start_picking: "开始拣货",
+  mark_packed: "打包完成",
+  confirm_shipped_out: "确认发出",
+  request_ops_confirm: "等待运营确认",
+  confirm_outbound_done: "运营确认出库",
+};
+
+function purchaseEventTypeLabel(eventType?: string | null) {
+  if (!eventType) return null;
+  return PURCHASE_EVENT_TYPE_LABELS[eventType] || eventType;
+}
+
 interface PurchaseOrderRow {
   id: string;
   prId?: string | null;
@@ -259,6 +308,8 @@ interface PurchaseOrderRow {
   totalQty?: number;
   receivedQty?: number;
   totalAmount?: number;
+  paidAmount?: number | null;
+  freightAmount?: number | null;
   unitCost?: number | null;
   logisticsFee?: number | null;
   expectedDeliveryDate?: string | null;
@@ -290,6 +341,8 @@ interface PaymentQueueRow {
   paymentApprovalStatus?: string;
   paymentAmount?: number;
   totalAmount?: number;
+  paidAmount?: number | null;
+  freightAmount?: number | null;
   requestedByName?: string;
   approvedByName?: string;
   updatedAt?: string;
@@ -305,11 +358,45 @@ interface PurchaseSettings {
   updatedAt?: string | null;
 }
 
+interface PurchaseOrderCounts {
+  all?: number;
+  draft?: number;
+  pendingPayment?: number;
+  paid?: number;
+  completed?: number;
+  cancelled?: number;
+  exception?: number;
+  open?: number;
+}
+
+interface PurchaseOrderPageMeta {
+  limit?: number;
+  offset?: number;
+  total?: number;
+  queue?: string;
+  search?: string;
+}
+
+interface PurchaseOrderFilterDraft {
+  poNo: string;
+  dateRange: any;
+  purchaser: string;
+}
+
+interface PurchaseOrderFilters {
+  poNo: string;
+  dateFrom: string;
+  dateTo: string;
+  purchaser: string;
+}
+
 interface PurchaseWorkbench {
   generatedAt?: string;
   summary?: Record<string, number>;
   purchaseRequests?: PurchaseRequestRow[];
   purchaseOrders?: PurchaseOrderRow[];
+  purchaseOrderCounts?: PurchaseOrderCounts;
+  purchaseOrderPage?: PurchaseOrderPageMeta;
   paymentQueue?: PaymentQueueRow[];
   skuOptions?: SkuOption[];
   supplierOptions?: SupplierOption[];
@@ -441,6 +528,7 @@ interface Alibaba1688MessageSubscriptionRow {
 
 interface PurchaseCenterProps {
   initialStoreManagerOpen?: boolean;
+  workArea?: PurchaseWorkArea;
 }
 
 interface Alibaba1688MessageEventRow {
@@ -579,6 +667,37 @@ function formatCurrency(value?: number | string | null) {
   const number = Number(value ?? 0);
   if (!Number.isFinite(number)) return "-";
   return `¥${number.toFixed(2)}`;
+}
+
+function formatOptionalCurrency(value?: number | string | null) {
+  if (value === null || value === undefined || value === "") return "-";
+  return formatCurrency(value);
+}
+
+function readFocusPoFromHash() {
+  try {
+    const hash = window.location.hash || "";
+    const qIdx = hash.indexOf("?");
+    if (qIdx === -1) return "";
+    const qs = new URLSearchParams(hash.slice(qIdx + 1));
+    return qs.get("focusPo") || "";
+  } catch {
+    return "";
+  }
+}
+
+function formatFilterDate(value: any) {
+  return value && typeof value.format === "function" ? value.format("YYYY-MM-DD") : "";
+}
+
+function toPurchaseOrderFilters(draft: PurchaseOrderFilterDraft): PurchaseOrderFilters {
+  const range = Array.isArray(draft.dateRange) ? draft.dateRange : [];
+  return {
+    poNo: draft.poNo.trim(),
+    dateFrom: formatFilterDate(range[0]),
+    dateTo: formatFilterDate(range[1]),
+    purchaser: draft.purchaser.trim(),
+  };
 }
 
 function skuText(row: { internalSkuCode?: string; productName?: string }) {
@@ -1182,6 +1301,8 @@ type PurchaseQueueKey =
   | "po_cancelled"
   | "po_exception";
 
+type PurchaseWorkArea = "sourcing" | "orders";
+
 interface PurchaseQueueItem {
   key: PurchaseQueueKey;
   title: string;
@@ -1192,6 +1313,10 @@ interface PurchaseQueueItem {
 const ACTIVE_REQUEST_STATUSES = new Set(["submitted", "buyer_processing", "sourced", "waiting_ops_confirm"]);
 const PAYMENT_QUEUE_STATUSES = new Set(["pending_finance_approval", "approved_to_pay"]);
 const COMPLETED_PO_STATUSES = new Set(["inbounded", "closed"]);
+
+function purchaseOrderQueueForWorkbench(key: PurchaseQueueKey) {
+  return key.startsWith("po_") || key === "all" ? key : "all";
+}
 
 function isPendingPurchaseRequest(row: PurchaseRequestRow) {
   return ACTIVE_REQUEST_STATUSES.has(row.status);
@@ -1434,27 +1559,6 @@ function purchaseOrderBelongsToRequest(row: PurchaseOrderRow, prId: string) {
   return row.prId === prId || (row as any).pr_id === prId;
 }
 
-function buildPurchaseOrderSearchText(row: PurchaseOrderRow) {
-  return [
-    row.id,
-    row.poNo,
-    row.accountName,
-    row.supplierName,
-    row.createdByName,
-    row.status,
-    PO_STATUS_LABELS[row.status],
-    row.paymentStatus,
-    row.paymentStatus ? PAYMENT_STATUS_LABELS[row.paymentStatus] : "",
-    row.skuSummary,
-    row.skuCodes,
-    row.productNames,
-    row.externalOrderId,
-    row.externalOrderStatus,
-    row.createdAt,
-    row.updatedAt,
-  ].map((item) => String(item ?? "")).join(" ");
-}
-
 function filterPurchaseRows<T>(rows: T[], keyword: string, buildSearchText: (row: T) => string) {
   const needle = normalizePurchaseSearch(keyword);
   if (!needle) return rows;
@@ -1494,7 +1598,8 @@ async function prepareUploadImage(file: File) {
   return lastDataUrl;
 }
 
-export default function PurchaseCenter({ initialStoreManagerOpen = false }: PurchaseCenterProps) {
+export default function PurchaseCenter({ initialStoreManagerOpen = false, workArea }: PurchaseCenterProps) {
+  const navigate = useNavigate();
   const auth = useErpAuth();
   const role = auth.currentUser?.role || "";
   const canCreateRequest = canRole(role, ["operations", "manager", "admin"]);
@@ -1517,6 +1622,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const candidateScrollElRef = useRef<HTMLDivElement | null>(null);
   const auto1688OrderSupplementKeysRef = useRef<Set<string>>(new Set());
   const supplementalWorkbenchPromiseRef = useRef<Promise<void> | null>(null);
+  const purchaseWorkbenchAutoLoadRef = useRef(false);
   const [skus, setSkus] = useState<SkuOption[]>(() => (
     Array.isArray(initialWorkbench.skuOptions) ? initialWorkbench.skuOptions : []
   ));
@@ -1655,16 +1761,30 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   } | null>(null);
   const [importDialogOpen, setImportDialogOpen] = useState(false);
   const [imported1688Orders, setImported1688Orders] = useState<Imported1688OrderRow[]>([]);
+  const [activeWorkArea, setActiveWorkArea] = useState<PurchaseWorkArea>(() => workArea || "sourcing");
   const [activeQueueKey, setActiveQueueKey] = useState<PurchaseQueueKey>("all");
+  const [purchaseOrderPage, setPurchaseOrderPage] = useState(() => (
+    Math.floor(Number(initialWorkbench.purchaseOrderPage?.offset || 0) / PURCHASE_ORDER_PAGE_SIZE) + 1
+  ));
+  const [purchaseOrderTotal, setPurchaseOrderTotal] = useState(() => (
+    Number(initialWorkbench.purchaseOrderPage?.total ?? initialWorkbench.summary?.purchaseOrderCount ?? initialWorkbench.purchaseOrders?.length ?? 0)
+  ));
+  const [purchaseOrderCounts, setPurchaseOrderCounts] = useState<PurchaseOrderCounts>(() => initialWorkbench.purchaseOrderCounts || {});
+  const [purchaseOrderPageLoading, setPurchaseOrderPageLoading] = useState(false);
+  const initialFocusPo = readFocusPoFromHash();
+  const [purchaseOrderFilterDraft, setPurchaseOrderFilterDraft] = useState<PurchaseOrderFilterDraft>(() => ({
+    poNo: activeWorkArea === "orders" ? initialFocusPo : "",
+    dateRange: null,
+    purchaser: "",
+  }));
+  const [purchaseOrderFilters, setPurchaseOrderFilters] = useState<PurchaseOrderFilters>(() => ({
+    poNo: activeWorkArea === "orders" ? initialFocusPo : "",
+    dateFrom: "",
+    dateTo: "",
+    purchaser: "",
+  }));
   const [purchaseSearchText, setPurchaseSearchText] = useState(() => {
-    // 支持从 WarehouseCenter / 别的页面跳过来时带 ?focusPo=xxx 自动填到搜索框
-    try {
-      const hash = window.location.hash || "";
-      const qIdx = hash.indexOf("?");
-      if (qIdx === -1) return "";
-      const qs = new URLSearchParams(hash.slice(qIdx + 1));
-      return qs.get("focusPo") || "";
-    } catch { return ""; }
+    return activeWorkArea === "sourcing" ? initialFocusPo : "";
   });
   const [selectedInquiryCandidateIds, setSelectedInquiryCandidateIds] = useState<string[]>([]);
   const [inquiryDialogPrId, setInquiryDialogPrId] = useState<string | null>(null);
@@ -1684,6 +1804,18 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const [source1688Form] = Form.useForm<Source1688FormValues>();
   const [refundForm] = Form.useForm<RefundFormValues>();
   const [orderNoteForm] = Form.useForm<OrderNoteFormValues>();
+
+  const switchWorkArea = useCallback((nextWorkArea: PurchaseWorkArea) => {
+    setActiveWorkArea(nextWorkArea);
+    setActiveQueueKey("all");
+    setSelectedPoIds([]);
+    setPurchaseOrderPage(1);
+  }, []);
+
+  useEffect(() => {
+    if (!workArea) return;
+    switchWorkArea(workArea);
+  }, [switchWorkArea, workArea]);
   const [purchaseSettingsForm] = Form.useForm<PurchaseSettingsFormValues>();
   const [inquiryDialogForm] = Form.useForm<InquiryDialogFormValues>();
 
@@ -1804,7 +1936,6 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   ], []);
   const purchaseRequests = data.purchaseRequests || [];
   const purchaseOrders = data.purchaseOrders || [];
-
   const pendingRequestRows = useMemo(
     () => purchaseRequests.filter(isPendingPurchaseRequest),
     [purchaseRequests],
@@ -1873,21 +2004,34 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     () => purchaseOrders.filter((row) => row.status === "delayed" || row.status === "exception"),
     [purchaseOrders],
   );
+  const orderCountAll = Number(purchaseOrderCounts.all ?? data.summary?.purchaseOrderCount ?? purchaseOrderTotal ?? purchaseOrders.length);
+  const orderCountDraft = Number(purchaseOrderCounts.draft ?? unsubmittedOrderRows.length);
+  const orderCountPendingPayment = Number(purchaseOrderCounts.pendingPayment ?? confirmedPendingPaymentOrderRows.length);
+  const orderCountPaid = Number(purchaseOrderCounts.paid ?? paidOrderRows.length);
+  const orderCountCompleted = Number(purchaseOrderCounts.completed ?? completedOrderRows.length);
+  const orderCountCancelled = Number(purchaseOrderCounts.cancelled ?? cancelledOrderRows.length);
+  const orderCountException = Number(purchaseOrderCounts.exception ?? exceptionOrderRows.length);
 
-  const queueItems = useMemo<PurchaseQueueItem[]>(() => [
-    // 全部 = 活跃 PR（待找品+已找品）+ 全部 PO，确保跟各分类 tab 合计一致。
-    // converted_to_po 状态的 PR 不再显示，看它们变身后的 PO 即可。
-    { key: "all", title: "全部", count: pendingRequestRows.length + purchaseOrders.length, kind: "mixed" },
-    { key: "request_pending_sourcing", title: "待找品", count: pendingSourcingRequestRows.length, kind: "request" },
-    { key: "request_sourced", title: "已找品", count: sourcedRequestRows.length, kind: "request" },
-    { key: "po_draft", title: "待提交", count: unsubmittedOrderRows.length, kind: "order" },
-    { key: "po_pending_payment", title: "待付款", count: confirmedPendingPaymentOrderRows.length, kind: "order" },
-    { key: "po_paid", title: "已付款", count: paidOrderRows.length, kind: "order" },
-    { key: "po_completed", title: "已完成", count: completedOrderRows.length, kind: "order" },
-    // 已取消是 mixed：PR(cancelled+rejected) + PO(cancelled) 上下两段
-    { key: "po_cancelled", title: "已取消", count: cancelledRequestRows.length + cancelledOrderRows.length, kind: "mixed" },
-    { key: "po_exception", title: "异常", count: exceptionOrderRows.length, kind: "order" },
-  ], [
+  const queueItems = useMemo<PurchaseQueueItem[]>(() => {
+    if (activeWorkArea === "sourcing") {
+      return [
+        { key: "all", title: "全部", count: pendingRequestRows.length, kind: "request" },
+        { key: "request_pending_sourcing", title: "待找品", count: pendingSourcingRequestRows.length, kind: "request" },
+        { key: "request_sourced", title: "已找品", count: sourcedRequestRows.length, kind: "request" },
+        { key: "po_cancelled", title: "已取消", count: cancelledRequestRows.length, kind: "request" },
+      ];
+    }
+    return [
+      { key: "all", title: "全部", count: orderCountAll, kind: "order" },
+      { key: "po_draft", title: "待提交", count: orderCountDraft, kind: "order" },
+      { key: "po_pending_payment", title: "待付款", count: orderCountPendingPayment, kind: "order" },
+      { key: "po_paid", title: "已付款", count: orderCountPaid, kind: "order" },
+      { key: "po_completed", title: "已完成", count: orderCountCompleted, kind: "order" },
+      { key: "po_cancelled", title: "已取消", count: orderCountCancelled, kind: "order" },
+      { key: "po_exception", title: "异常", count: orderCountException, kind: "order" },
+    ];
+  }, [
+    activeWorkArea,
     cancelledOrderRows,
     cancelledRequestRows,
     completedOrderRows,
@@ -1897,13 +2041,20 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     paidOrderRows,
     pendingRequestRows,
     pendingSourcingRequestRows,
-    purchaseOrders,
+    orderCountAll,
+    orderCountCancelled,
+    orderCountCompleted,
+    orderCountDraft,
+    orderCountException,
+    orderCountPaid,
+    orderCountPendingPayment,
     sourcedRequestRows,
   ]);
 
   const activeQueue = queueItems.find((item) => item.key === activeQueueKey) || queueItems[0];
 
   const activeOrderRows = useMemo(() => {
+    if (activeWorkArea !== "orders") return [];
     switch (activeQueueKey) {
       case "po_draft":
         return unsubmittedOrderRows;
@@ -1918,10 +2069,10 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       case "po_exception":
         return exceptionOrderRows;
       default:
-        // "all" 显示全部 PO；request 类 tab 走 order 表也兜底全部（实际不渲染）
         return purchaseOrders;
     }
   }, [
+    activeWorkArea,
     activeQueueKey,
     cancelledOrderRows,
     completedOrderRows,
@@ -1933,6 +2084,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   ]);
 
   const activeRequestRows = useMemo(() => {
+    if (activeWorkArea !== "sourcing") return [];
     switch (activeQueueKey) {
       case "request_pending_sourcing":
         return pendingSourcingRequestRows;
@@ -1945,15 +2097,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         // 已取消 tab 上段：被取消 + 被驳回的 PR
         return cancelledRequestRows;
       default:
-        // order 类 tab 走 request 表的兜底（实际不渲染）
-        return purchaseRequests;
+        return pendingRequestRows;
     }
   }, [
+    activeWorkArea,
     activeQueueKey,
     cancelledRequestRows,
     pendingRequestRows,
     pendingSourcingRequestRows,
-    purchaseRequests,
     sourcedRequestRows,
   ]);
 
@@ -1961,16 +2112,35 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     () => filterPurchaseRows(activeRequestRows, purchaseSearchText, buildPurchaseRequestSearchText),
     [activeRequestRows, purchaseSearchText],
   );
-  const filteredActiveOrderRows = useMemo(
-    () => filterPurchaseRows(activeOrderRows, purchaseSearchText, buildPurchaseOrderSearchText),
-    [activeOrderRows, purchaseSearchText],
-  );
-  const hasPurchaseSearch = Boolean(purchaseSearchText.trim());
-  const purchaseSearchResultCount = activeQueue.kind === "request"
-    ? filteredActiveRequestRows.length
-    : activeQueue.kind === "order"
-      ? filteredActiveOrderRows.length
-      : filteredActiveRequestRows.length + filteredActiveOrderRows.length;
+  const filteredActiveOrderRows = activeOrderRows;
+  const hasPurchaseSearch = activeWorkArea === "sourcing" && Boolean(purchaseSearchText.trim());
+  const activeOrderTotal = activeWorkArea === "orders" ? Number(purchaseOrderTotal || filteredActiveOrderRows.length) : 0;
+  const purchaseSearchResultCount = filteredActiveRequestRows.length;
+  const orderTablePagination = useMemo(() => ({
+    current: purchaseOrderPage,
+    pageSize: PURCHASE_ORDER_PAGE_SIZE,
+    total: activeOrderTotal,
+    showSizeChanger: false,
+    showTotal: (total: number, range: [number, number]) => `显示 ${range[0]}-${range[1]} / ${total} 条`,
+    onChange: (nextPage: number) => {
+      setSelectedPoIds([]);
+      setPurchaseOrderPage(nextPage);
+    },
+  }), [activeOrderTotal, purchaseOrderPage]);
+
+  const applyPurchaseOrderFilters = useCallback(() => {
+    setSelectedPoIds([]);
+    setPurchaseOrderPage(1);
+    setPurchaseOrderFilters(toPurchaseOrderFilters(purchaseOrderFilterDraft));
+  }, [purchaseOrderFilterDraft]);
+
+  const resetPurchaseOrderFilters = useCallback(() => {
+    const emptyDraft = { poNo: "", dateRange: null, purchaser: "" };
+    setSelectedPoIds([]);
+    setPurchaseOrderPage(1);
+    setPurchaseOrderFilterDraft(emptyDraft);
+    setPurchaseOrderFilters(toPurchaseOrderFilters(emptyDraft));
+  }, []);
 
   const selectedPurchaseOrders = useMemo(
     () => purchaseOrders.filter((row) => selectedPoIds.includes(row.id)),
@@ -2053,7 +2223,17 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     });
   }, []);
 
+  const syncPurchaseOrderPageMeta = useCallback((workbench: PurchaseWorkbench) => {
+    if (workbench?.purchaseOrderPage) {
+      setPurchaseOrderTotal(Number(workbench.purchaseOrderPage.total || 0));
+    }
+    if (workbench?.purchaseOrderCounts) {
+      setPurchaseOrderCounts(workbench.purchaseOrderCounts);
+    }
+  }, []);
+
   const applyWorkbench = useCallback((nextData: PurchaseWorkbench) => {
+    syncPurchaseOrderPageMeta(nextData || {});
     setData((prevData) => {
       const nextWorkbench = nextData || {};
       if (!Array.isArray(nextWorkbench.purchaseRequests)) {
@@ -2075,12 +2255,23 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       writeCachedPurchaseWorkbench(merged);
       return merged;
     });
-  }, []);
+  }, [syncPurchaseOrderPageMeta]);
 
   const syncWorkbenchOptions = useCallback((workbench: PurchaseWorkbench) => {
     if (Array.isArray(workbench?.skuOptions)) setSkus(workbench.skuOptions);
     if (Array.isArray(workbench?.supplierOptions)) setSuppliers(workbench.supplierOptions);
   }, []);
+
+  const buildPurchaseWorkbenchParams = useCallback(() => ({
+    ...FAST_PURCHASE_WORKBENCH_PARAMS,
+    purchaseOrderLimit: PURCHASE_ORDER_PAGE_SIZE,
+    purchaseOrderOffset: Math.max(0, purchaseOrderPage - 1) * PURCHASE_ORDER_PAGE_SIZE,
+    purchaseOrderQueue: activeWorkArea === "orders" ? purchaseOrderQueueForWorkbench(activeQueueKey) : "all",
+    purchaseOrderNo: activeWorkArea === "orders" ? purchaseOrderFilters.poNo : "",
+    purchaseOrderDateFrom: activeWorkArea === "orders" ? purchaseOrderFilters.dateFrom : "",
+    purchaseOrderDateTo: activeWorkArea === "orders" ? purchaseOrderFilters.dateTo : "",
+    purchaseOrderPurchaser: activeWorkArea === "orders" ? purchaseOrderFilters.purchaser : "",
+  }), [activeQueueKey, activeWorkArea, purchaseOrderFilters, purchaseOrderPage]);
 
   const loadSupplementalWorkbenchData = useCallback(async () => {
     if (!erp) return;
@@ -2131,32 +2322,40 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     })();
   }, [pushAccountPicker, data.alibaba1688Addresses, loadSupplementalWorkbenchData]);
 
-  const loadData = useCallback(async (options: { silent?: boolean; withSupplemental?: boolean } = {}) => {
+  const loadData = useCallback(async (options: { silent?: boolean; withSupplemental?: boolean; sideLoads?: boolean } = {}) => {
     if (!erp) return;
     const silent = Boolean(options?.silent);
+    const sideLoads = options?.sideLoads !== false;
     if (!silent) setLoading(true);
+    else setPurchaseOrderPageLoading(true);
     try {
-      const workbench = await erp.purchase.workbench(FAST_PURCHASE_WORKBENCH_PARAMS);
+      const workbench = await erp.purchase.workbench(buildPurchaseWorkbenchParams());
       applyWorkbench(workbench);
       syncWorkbenchOptions(workbench);
-      void erp.account.list({ limit: 500 })
-        .then((accountRows: unknown) => setAccounts(Array.isArray(accountRows) ? accountRows : []))
-        .catch(() => {});
+      if (sideLoads) {
+        void erp.account.list({ limit: 500 })
+          .then((accountRows: unknown) => setAccounts(Array.isArray(accountRows) ? accountRows : []))
+          .catch(() => {});
+      }
       // 0.3.25 性能：FULL_PURCHASE_WORKBENCH_PARAMS 关掉了 includeOptions（详见 86 行注释），
       // suppliers 不再随 workbench 返回，这里 fire-and-forget 单独拉一次给新建采购单 Modal 用。
-      void erp.supplier.list({ limit: 500 })
-        .then((supplierRows: unknown) => {
-          if (Array.isArray(supplierRows) && supplierRows.length) setSuppliers(supplierRows as SupplierOption[]);
-        })
-        .catch(() => {});
+      if (sideLoads) {
+        void erp.supplier.list({ limit: 500 })
+          .then((supplierRows: unknown) => {
+            if (Array.isArray(supplierRows) && supplierRows.length) setSuppliers(supplierRows as SupplierOption[]);
+          })
+          .catch(() => {});
+      }
       // 预拉 1688 采购账号列表（推单按钮要用）。失败/旧主控 Unsupported 都静默，
       // 推单时若 state 仍为空会兜底再拉一次（保留 fallback 分支）。
-      void erp.purchase.action({ action: "list_1688_purchase_accounts" })
-        .then((res: any) => {
-          const list = Array.isArray(res?.result?.accounts) ? (res.result.accounts as Purchase1688Account[]) : [];
-          setPurchase1688Accounts(list);
-        })
-        .catch(() => {});
+      if (sideLoads) {
+        void erp.purchase.action({ action: "list_1688_purchase_accounts" })
+          .then((res: any) => {
+            const list = Array.isArray(res?.result?.accounts) ? (res.result.accounts as Purchase1688Account[]) : [];
+            setPurchase1688Accounts(list);
+          })
+          .catch(() => {});
+      }
       if (options?.withSupplemental !== false) {
         void loadSupplementalWorkbenchData();
       }
@@ -2166,8 +2365,9 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       }
     } finally {
       if (!silent) setLoading(false);
+      else setPurchaseOrderPageLoading(false);
     }
-  }, [applyWorkbench, loadSupplementalWorkbenchData, syncWorkbenchOptions]);
+  }, [applyWorkbench, buildPurchaseWorkbenchParams, loadSupplementalWorkbenchData, syncWorkbenchOptions]);
 
   const runAuto1688OrderSync = useCallback(async () => {
     if (!erp || !canPurchase) return;
@@ -2191,7 +2391,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           includeOptions: false,
           include1688Meta: false,
         });
-        const workbench = result?.workbench || await erp.purchase.workbench(FAST_PURCHASE_WORKBENCH_PARAMS);
+        const workbench = result?.workbench || await erp.purchase.workbench(buildPurchaseWorkbenchParams());
         applyWorkbench(workbench);
         syncWorkbenchOptions(workbench);
       } catch {
@@ -2202,11 +2402,16 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     })();
     auto1688OrderSyncPromise = syncPromise;
     await syncPromise;
-  }, [applyWorkbench, canPurchase, syncWorkbenchOptions]);
+  }, [applyWorkbench, buildPurchaseWorkbenchParams, canPurchase, syncWorkbenchOptions]);
 
   useEffect(() => {
     // 首屏统一走非 silent：先显示加载态（不渲染旧快照），新数据到了再一次性渲染。
-    void loadData();
+    if (!purchaseWorkbenchAutoLoadRef.current) {
+      purchaseWorkbenchAutoLoadRef.current = true;
+      void loadData();
+      return;
+    }
+    void loadData({ silent: true, withSupplemental: false, sideLoads: false });
   }, [loadData]);
 
   useEffect(() => {
@@ -2301,7 +2506,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
             include1688Meta: false,
           });
           if (cancelled) return;
-          const workbench = result?.workbench || await erp.purchase.workbench(FAST_PURCHASE_WORKBENCH_PARAMS);
+          const workbench = result?.workbench || await erp.purchase.workbench(buildPurchaseWorkbenchParams());
           if (cancelled) return;
           applyWorkbench(workbench);
           syncWorkbenchOptions(workbench);
@@ -2314,7 +2519,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     return () => {
       cancelled = true;
     };
-  }, [applyWorkbench, canFinance, canPurchase, canWarehouse, data.purchaseOrders, syncWorkbenchOptions]);
+  }, [applyWorkbench, buildPurchaseWorkbenchParams, canFinance, canPurchase, canWarehouse, data.purchaseOrders, syncWorkbenchOptions]);
 
   useEffect(() => {
     if (!erp?.events?.onPurchaseUpdate) {
@@ -2766,7 +2971,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     const result = await runAction(
       `delete-pr-${row.id}`,
       { action: "cancel_pr", prId: row.id },
-      "采购单已删除",
+      "找品已删除",
     );
     if (!result && snapshot) {
       setData((prev) => ({ ...prev, purchaseRequests: [snapshot!, ...(prev.purchaseRequests || [])] }));
@@ -2837,7 +3042,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           skuId: sku.id,
           requestedQty: values.requestedQty,
           targetUnitCost: values.targetUnitCost,
-          reason: "采购单",
+          reason: "找品",
           evidenceText: values.evidenceText,
           // 只在最后一笔请求里要 workbench，省掉中间多余的全量刷新
           includeWorkbench: isLast,
@@ -2860,7 +3065,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               skuId: sku.id,
               requestedQty: values.requestedQty,
               targetUnitCost: values.targetUnitCost,
-              reason: "采购单",
+              reason: "找品",
               evidenceText: values.evidenceText,
               includeWorkbench: isLast,
             });
@@ -2879,8 +3084,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       }
       // 关 Modal + 提示先行；workbench 用 create_pr 接口自带的，
       // 没有再回退去拉一次（旧后端兼容）
-      message.success(uniqueSelectedSkus.length > 1 ? `已创建 ${uniqueSelectedSkus.length} 张采购单` : "采购单已创建");
-      if (skippedImages) message.warning("图片过大，采购单已创建，图片未上传");
+      message.success(uniqueSelectedSkus.length > 1 ? `已提交 ${uniqueSelectedSkus.length} 条找品` : "找品已提交");
+      if (skippedImages) message.warning("图片过大，找品已提交，图片未上传");
       setRequestOpen(false);
       setRequestUploadImages([]);
       requestForm.resetFields();
@@ -2891,7 +3096,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         if (Array.isArray(wb.supplierOptions)) setSuppliers(wb.supplierOptions);
       } else {
         // 后端没返 workbench 时再补一次（不阻塞 modal 关闭）
-        void erp.purchase.workbench(FAST_PURCHASE_WORKBENCH_PARAMS).then((wb2: any) => {
+        void erp.purchase.workbench(buildPurchaseWorkbenchParams()).then((wb2: any) => {
           applyWorkbench(wb2);
           if (Array.isArray(wb2?.skuOptions)) setSkus(wb2.skuOptions);
           if (Array.isArray(wb2?.supplierOptions)) setSuppliers(wb2.supplierOptions);
@@ -3048,7 +3253,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         return result;
       }
       const nextWorkbench = result.workbench || await erp.purchase.workbench({
-        ...FAST_PURCHASE_WORKBENCH_PARAMS,
+        ...buildPurchaseWorkbenchParams(),
         detailPrId: row.id,
       }, { timeoutMs: 120000 }).catch(() => null) || {};
       if (hasWorkbenchSnapshot(nextWorkbench)) {
@@ -3796,7 +4001,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
     refundForm.setFieldsValue({
       refundType: "refund",
       goodsStatus: "received",
-      amount: row.latestRefundAmount ?? row.totalAmount,
+      amount: row.latestRefundAmount ?? row.paidAmount ?? row.totalAmount,
       reason: "",
       refundReasonId: "",
       description: "",
@@ -4057,7 +4262,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const exportActiveQueue = () => {
     if (activeQueue.kind === "mixed") {
       downloadCsv(`purchase-todos-${activeQueueKey}.csv`, [
-        ["类型", "商品编码/采购单号", "商品名称", "商品图片", "状态", "数量", "金额/目标成本", "负责人"],
+        ["类型", "商品编码/采购单号", "商品名称", "商品图片", "状态", "数量", "商品金额/目标成本", "运费", "实付总金额", "负责人"],
         ...activeRequestRows.map((row) => [
           "待处理",
           row.internalSkuCode || "",
@@ -4066,6 +4271,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           PR_STATUS_LABELS[row.status] || row.status,
           row.requestedQty || 0,
           row.targetUnitCost ?? "",
+          "",
+          "",
           row.requestedByName || "",
         ]),
         ...activeOrderRows.map((row) => [
@@ -4076,6 +4283,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           PO_STATUS_LABELS[row.status] || row.status,
           row.totalQty || 0,
           row.totalAmount ?? "",
+          row.freightAmount ?? "",
+          row.paidAmount ?? "",
           row.createdByName || "",
         ]),
       ]);
@@ -4096,10 +4305,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       return;
     }
     downloadCsv(`purchase-orders-${activeQueueKey}.csv`, [
-      ["采购日期", "采购单号", "采购员", "供应商", "商品图片", "商品编码", "商品名称", "总数量", "已入库", "金额", "1688订单号", "线上状态", "状态"],
+      ["采购日期", "采购单号", "付款状态", "付款时间", "采购员", "供应商", "商品图片", "商品编码", "商品名称", "总数量", "已入库", "商品金额", "运费", "实付总金额", "1688订单号", "线上状态", "状态"],
       ...activeOrderRows.map((row) => [
         formatDateTime(row.createdAt || row.updatedAt),
         row.poNo || row.id,
+        PAYMENT_STATUS_LABELS[row.paymentStatus || ""] || row.paymentStatus || "",
+        formatDateTime(row.paidAt),
         row.createdByName || "",
         row.supplierName || "",
         row.skuImageUrl || "",
@@ -4108,6 +4319,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         row.totalQty || 0,
         row.receivedQty || 0,
         row.totalAmount ?? "",
+        row.freightAmount ?? "",
+        row.paidAmount ?? "",
         row.externalOrderId || "",
         row.externalOrderStatus || "",
         PO_STATUS_LABELS[row.status] || row.status,
@@ -4222,13 +4435,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       },
     },
     {
-      title: "协作",
+      title: "日志",
       key: "collaboration",
       width: 110,
       render: (_value, row) => (
         <Badge count={row.unreadCount || 0} size="small">
           <Button size="small" icon={<CommentOutlined />} onClick={() => openDetail(row)}>
-            协作
+            日志/协作
           </Button>
         </Badge>
       ),
@@ -4302,8 +4515,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 size="small"
                 icon={<FileDoneOutlined />}
                 onClick={() => {
+                  const focusPo = existingPo?.poNo || existingPo?.id || row.id;
+                  if (activeWorkArea === "sourcing") {
+                    navigate(`/purchase-center?focusPo=${encodeURIComponent(focusPo)}`);
+                    return;
+                  }
                   setActiveQueueKey("po_draft");
-                  setPurchaseSearchText(existingPo?.poNo || existingPo?.id || row.id);
+                  setPurchaseSearchText(focusPo);
                   message.info(existingPo ? `采购单已生成：${existingPo.poNo || existingPo.id}` : "采购单已生成");
                 }}
               >
@@ -4334,7 +4552,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         );
       },
     },
-  ], [actingKey, canCreateRequest, canPurchase, detailPrId, purchaseOrders, source1688PrId]);
+  ], [actingKey, activeWorkArea, canCreateRequest, canPurchase, detailPrId, navigate, purchaseOrders, source1688PrId]);
 
   const orderColumns = useMemo<ColumnsType<PurchaseOrderRow>>(() => [
     {
@@ -4352,6 +4570,24 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           {row.poNo || row.id}
         </Text>
       ),
+    },
+    {
+      title: "状态",
+      dataIndex: "status",
+      width: 110,
+      render: (value) => statusTag(value, PO_STATUS_LABELS),
+    },
+    {
+      title: "付款",
+      dataIndex: "paymentStatus",
+      width: 120,
+      render: (value) => statusTag(value, PAYMENT_STATUS_LABELS),
+    },
+    {
+      title: "付款时间",
+      dataIndex: "paidAt",
+      width: 150,
+      render: formatDateTime,
     },
     {
       title: "采购员",
@@ -4444,11 +4680,25 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       render: formatQty,
     },
     {
-      title: "金额",
+      title: "商品金额",
       dataIndex: "totalAmount",
       width: 110,
       align: "right",
       render: formatCurrency,
+    },
+    {
+      title: "运费",
+      dataIndex: "freightAmount",
+      width: 92,
+      align: "right",
+      render: formatOptionalCurrency,
+    },
+    {
+      title: "实付总金额",
+      dataIndex: "paidAmount",
+      width: 116,
+      align: "right",
+      render: formatOptionalCurrency,
     },
     {
       title: "1688单号",
@@ -4567,24 +4817,6 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       render: (_value, row) => `${formatQty(row.receivedQty)} / ${formatQty(row.totalQty)}`,
     },
     {
-      title: "付款",
-      dataIndex: "paymentStatus",
-      width: 120,
-      render: (value) => statusTag(value, PAYMENT_STATUS_LABELS),
-    },
-    {
-      title: "付款时间",
-      dataIndex: "paidAt",
-      width: 150,
-      render: formatDateTime,
-    },
-    {
-      title: "状态",
-      dataIndex: "status",
-      width: 110,
-      render: (value) => statusTag(value, PO_STATUS_LABELS),
-    },
-    {
       title: "预计到货",
       dataIndex: "expectedDeliveryDate",
       width: 120,
@@ -4672,7 +4904,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               loading={actingKey === `pay-submit-${row.id}`}
               onClick={() => runActionOptimistic(
                 `pay-submit-${row.id}`,
-                { action: "submit_payment_approval", poId: row.id, amount: row.totalAmount },
+                { action: "submit_payment_approval", poId: row.id, amount: row.paidAmount ?? row.totalAmount },
                 "已进入待付款",
                 { poId: row.id, patch: { status: "approved_to_pay" } },
               )}
@@ -4768,7 +5000,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               loading={actingKey === `pay-submit-${row.id}`}
               onClick={() => runActionOptimistic(
                 `pay-submit-${row.id}`,
-                { action: "submit_payment_approval", poId: row.id, amount: row.totalAmount },
+                { action: "submit_payment_approval", poId: row.id, amount: row.paidAmount ?? row.totalAmount },
                 "已进入待付款",
                 { poId: row.id, patch: { status: "approved_to_pay" } },
               )}
@@ -4891,11 +5123,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
   const summary = data.summary || {};
   // 首屏（无快照）加载时显示加载态；已有数据的手动刷新保持原内容，不空屏闪烁。
   const tableLoading = loading && !hasWorkbenchSnapshot(data);
+  const tableBusy = tableLoading || purchaseOrderPageLoading;
+  const workAreaTitle = activeWorkArea === "sourcing" ? "找品" : "采购单";
 
   if (!erp) {
     return (
       <div className="dashboard-shell">
-        <PageHeader compact eyebrow="系统" title="采购中心" subtitle="服务未就绪，请重启软件" />
+        <PageHeader compact eyebrow="系统" title={workAreaTitle} subtitle="服务未就绪，请重启软件" />
         <Alert type="error" showIcon message="当前环境缺少本地服务接口" />
       </div>
     );
@@ -4906,15 +5140,24 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       <PageHeader
         compact
         eyebrow="系统"
-        title="采购中心"
+        title={workAreaTitle}
         meta={tableLoading
-          ? ["更新 —", "采购单 —", "待处理 —", "付款 —"]
-          : [
-            `更新 ${formatDateTime(data.generatedAt)}`,
-            `采购单 ${purchaseOrders.length}`,
-            `待处理 ${pendingRequestRows.length}`,
-            `付款 ${summary.paymentQueueCount || pendingPaymentRows.length}`,
-          ]}
+          ? (activeWorkArea === "sourcing"
+            ? ["更新 —", "找品 —", "待找品 —", "已找品 —"]
+            : ["更新 —", "采购单 —", "付款 —", "已完成 —"])
+          : (activeWorkArea === "sourcing"
+            ? [
+              `更新 ${formatDateTime(data.generatedAt)}`,
+              `找品 ${pendingRequestRows.length}`,
+              `待找品 ${pendingSourcingRequestRows.length}`,
+              `已找品 ${sourcedRequestRows.length}`,
+            ]
+            : [
+              `更新 ${formatDateTime(data.generatedAt)}`,
+              `采购单 ${orderCountAll}`,
+              `付款 ${summary.paymentQueueCount || pendingPaymentRows.length}`,
+              `已完成 ${orderCountCompleted}`,
+            ])}
         actions={[
           <Button key="stores" icon={<ShopOutlined />} onClick={() => setStoreManagerOpen(true)}>
             店铺
@@ -4924,7 +5167,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
               询盘设置
             </Button>
           ) : null,
-          canCreateRequest ? (
+          activeWorkArea === "sourcing" && canCreateRequest ? (
             <Button
               key="new"
               type="primary"
@@ -4938,7 +5181,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 setRequestOpen(true);
               }}
             >
-              新建采购单
+              新建找品
             </Button>
           ) : null,
         ].filter(Boolean)}
@@ -4950,11 +5193,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           current={-1}
           progressDot
           items={[
-            { title: "新建采购单", description: "运营提交" },
-            { title: "已找品", description: "找到 1688 映射或线下货源" },
-            { title: "推单/线下", description: "推 1688 或线下采购" },
-            { title: "提交付款", description: "进入待付款" },
-            { title: "付款入库", description: "付款→发货→入库" },
+            { title: "找品", description: "提交需求并找货源" },
+            { title: "已找品", description: "绑定映射或线下货源" },
+            { title: "生成采购单", description: "线上 1688 或线下采购" },
+            { title: "付款", description: "提交付款并支付" },
+            { title: "入库", description: "发货到货后入库" },
           ]}
         />
       </div>
@@ -4962,10 +5205,10 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
       <div className="app-panel">
         <div className="app-panel__title">
           <div>
-            <div className="app-panel__title-main">{activeQueue.title}</div>
+            <div className="app-panel__title-main">{workAreaTitle} · {activeQueue.title}</div>
           </div>
           <Space size={8} wrap>
-            {canPurchase ? (
+            {activeWorkArea === "sourcing" && canPurchase ? (
               <Button
                 icon={<CommentOutlined />}
                 loading={actingKey === "sync-inquiry-results"}
@@ -4974,7 +5217,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 同步询盘结果
               </Button>
             ) : null}
-            {canPurchase ? (
+            {activeWorkArea === "orders" && canPurchase ? (
               <Button
                 icon={<ShoppingCartOutlined />}
                 disabled={!selectedPushableOrders.length}
@@ -4983,7 +5226,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 批量推送 1688{selectedPushableOrders.length ? ` (${selectedPushableOrders.length})` : ""}
               </Button>
             ) : null}
-            {(canPurchase || canFinance) ? (
+            {activeWorkArea === "orders" && (canPurchase || canFinance) ? (
               <Button
                 icon={<LinkOutlined />}
                 disabled={!selectedPurchaseOrders.some((row) => row.externalOrderId)}
@@ -5001,32 +5244,84 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
             </Button>
           </Space>
         </div>
-        <Space size={[8, 8]} wrap style={{ marginBottom: 12 }}>
-          {queueItems.map((item) => (
-            <Button
-              key={item.key}
-              size="small"
-              type={activeQueue.key === item.key ? "primary" : "default"}
-              onClick={() => setActiveQueueKey(item.key)}
-            >
-              {item.title} {tableLoading ? "—" : item.count}
-            </Button>
-          ))}
-        </Space>
-        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, maxWidth: 760 }}>
-          <Input
-            allowClear
-            prefix={<SearchOutlined />}
-            placeholder="搜索商品编码 / 标题规格 / 采购单号 / 供应商 / 1688单号"
-            value={purchaseSearchText}
-            onChange={(event) => setPurchaseSearchText(event.target.value)}
+        {!workArea ? (
+          <Segmented
+            value={activeWorkArea}
+            onChange={(value) => switchWorkArea(value as PurchaseWorkArea)}
+            options={[
+              { label: `找品 ${pendingRequestRows.length}`, value: "sourcing" },
+              { label: `采购单 ${orderCountAll}`, value: "orders" },
+            ]}
+            style={{ marginBottom: 12 }}
           />
-          {hasPurchaseSearch ? (
-            <Text type="secondary" style={{ whiteSpace: "nowrap" }}>
-              找到 {purchaseSearchResultCount} 条
-            </Text>
-          ) : null}
+        ) : null}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+          <Text strong>{activeWorkArea === "sourcing" ? "找品状态" : "采购单状态"}</Text>
+          <Space size={[8, 8]} wrap>
+            {queueItems.map((item) => (
+              <Button
+                key={item.key}
+                size="small"
+                type={activeQueue.key === item.key ? "primary" : "default"}
+                onClick={() => {
+                  setSelectedPoIds([]);
+                  setPurchaseOrderPage(1);
+                  setActiveQueueKey(item.key);
+                }}
+              >
+                {item.title} {tableLoading ? "—" : item.count}
+              </Button>
+            ))}
+          </Space>
         </div>
+        {activeWorkArea === "orders" ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+            <Input
+              allowClear
+              placeholder="采购单号"
+              value={purchaseOrderFilterDraft.poNo}
+              onChange={(event) => setPurchaseOrderFilterDraft((prev) => ({ ...prev, poNo: event.target.value }))}
+              onPressEnter={applyPurchaseOrderFilters}
+              style={{ width: 180 }}
+            />
+            <RangePicker
+              value={purchaseOrderFilterDraft.dateRange}
+              onChange={(dates) => setPurchaseOrderFilterDraft((prev) => ({ ...prev, dateRange: dates }))}
+              allowClear
+              placeholder={["开始日期", "结束日期"]}
+              style={{ width: 260 }}
+            />
+            <Input
+              allowClear
+              placeholder="采购员"
+              value={purchaseOrderFilterDraft.purchaser}
+              onChange={(event) => setPurchaseOrderFilterDraft((prev) => ({ ...prev, purchaser: event.target.value }))}
+              onPressEnter={applyPurchaseOrderFilters}
+              style={{ width: 160 }}
+            />
+            <Button type="primary" icon={<SearchOutlined />} onClick={applyPurchaseOrderFilters}>
+              查询
+            </Button>
+            <Button onClick={resetPurchaseOrderFilters}>
+              重置
+            </Button>
+          </div>
+        ) : (
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, maxWidth: 760 }}>
+            <Input
+              allowClear
+              prefix={<SearchOutlined />}
+              placeholder="搜索商品编码 / 标题规格 / 找品发起人 / 店铺 / 货源"
+              value={purchaseSearchText}
+              onChange={(event) => setPurchaseSearchText(event.target.value)}
+            />
+            {hasPurchaseSearch ? (
+              <Text type="secondary" style={{ whiteSpace: "nowrap" }}>
+                找到 {purchaseSearchResultCount} 条
+              </Text>
+            ) : null}
+          </div>
+        )}
         {tableLoading ? (
           <Skeleton active paragraph={{ rows: 8 }} title={false} style={{ padding: "12px 0" }} />
         ) : activeQueue.kind === "mixed" ? (
@@ -5034,7 +5329,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
           <Space direction="vertical" size={16} style={{ width: "100%" }}>
             {filteredActiveRequestRows.length ? (
               <div>
-                <Text strong>采购请求 {filteredActiveRequestRows.length}</Text>
+                <Text strong>找品 {filteredActiveRequestRows.length}</Text>
                 <Table
                   rowKey="id"
                   loading={tableLoading}
@@ -5048,33 +5343,33 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                 />
               </div>
             ) : null}
-            {filteredActiveOrderRows.length ? (
+            {(filteredActiveOrderRows.length || activeOrderTotal || purchaseOrderPageLoading) ? (
               <div>
-                <Text strong>采购单 {filteredActiveOrderRows.length}</Text>
+                <Text strong>采购单 {activeOrderTotal}</Text>
                 <Table
                   rowKey="id"
-                  loading={tableLoading}
+                  loading={tableBusy}
                   size="small"
                   className="erp-compact-table"
                   columns={orderColumns}
                   dataSource={filteredActiveOrderRows}
                   rowSelection={orderRowSelection}
-                  scroll={{ x: 2360 }}
-                  pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
+                  scroll={{ x: 2560 }}
+                  pagination={orderTablePagination}
                   style={{ marginTop: 8 }}
                 />
               </div>
             ) : null}
-            {!filteredActiveRequestRows.length && !filteredActiveOrderRows.length ? (
+            {!filteredActiveRequestRows.length && !filteredActiveOrderRows.length && !activeOrderTotal && !purchaseOrderPageLoading ? (
               <Table
                 rowKey="id"
-                loading={tableLoading}
+                loading={tableBusy}
                 size="small"
                 className="erp-compact-table"
                 columns={orderColumns}
                 dataSource={[]}
                 rowSelection={orderRowSelection}
-                scroll={{ x: 2360 }}
+                scroll={{ x: 2560 }}
                 pagination={false}
               />
             ) : null}
@@ -5093,14 +5388,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
         ) : (
           <Table
             rowKey="id"
-            loading={tableLoading}
+            loading={tableBusy}
             size="small"
             className="erp-compact-table"
             columns={orderColumns}
             dataSource={filteredActiveOrderRows}
             rowSelection={orderRowSelection}
-            scroll={{ x: 2360 }}
-            pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
+            scroll={{ x: 2560 }}
+            pagination={orderTablePagination}
           />
         )}
       </div>
@@ -5630,8 +5925,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
 
       <Modal
         open={requestOpen}
-        title="新建采购单"
-        okText="创建采购单"
+        title="新建找品"
+        okText="提交找品"
         cancelText="取消"
         confirmLoading={actingKey === "create-pr"}
         onCancel={() => {
@@ -5646,7 +5941,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
             type="warning"
             showIcon
             message="还没有商品资料"
-            description="请先到左侧商品资料创建商品编码，再回来新建采购单。"
+            description="请先到左侧商品资料创建商品编码，再回来新建找品。"
             style={{ marginBottom: 12 }}
           />
         ) : null}
@@ -6245,7 +6540,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
 
       <Drawer
         open={detailDrawerOpen && Boolean(detailPrId)}
-        title={detailDrawerMode === "imageSearch" ? "以图搜款" : "采购单协作"}
+        title={detailDrawerMode === "imageSearch" ? "以图搜款" : "采购单日志与协作"}
         width={1080}
         onClose={closeDetailDrawer}
       >
@@ -6274,6 +6569,43 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
             >
               <div style={{ display: "flex", flexDirection: "column", gap: 12, flex: 1, minHeight: 0 }}>
                 <div>
+                  <Text strong>操作日志</Text>
+                </div>
+                <div style={{ display: "grid", alignContent: "start", gap: 10, maxHeight: 260, overflowY: "auto", paddingRight: 4 }}>
+                  {[...(detailPr.timeline || [])]
+                    .filter((item) => item.kind === "event")
+                    .reverse()
+                    .slice(0, 120)
+                    .map((item) => (
+                      <div
+                        key={item.id}
+                        style={{
+                          borderLeft: "3px solid #2563eb",
+                          paddingLeft: 10,
+                          minHeight: 34,
+                        }}
+                      >
+                        <Space size={8} wrap>
+                          <FileDoneOutlined style={{ color: "#2563eb" }} />
+                          <Text strong style={{ fontSize: 13 }}>
+                            {item.actorName || item.actorId || item.actorRole || "系统"}
+                          </Text>
+                          {item.actorRole ? <Tag>{item.actorRole}</Tag> : null}
+                          {item.eventType ? <Tag color="blue">{purchaseEventTypeLabel(item.eventType)}</Tag> : null}
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            {formatDateTime(item.createdAt)}
+                          </Text>
+                        </Space>
+                        <Paragraph style={{ margin: "4px 0 0", whiteSpace: "pre-wrap" }}>
+                          {item.message || "已记录操作"}
+                        </Paragraph>
+                      </div>
+                    ))}
+                  {!(detailPr.timeline || []).some((item) => item.kind === "event") ? (
+                    <Text type="secondary">暂无操作日志</Text>
+                  ) : null}
+                </div>
+                <div style={{ borderTop: "1px solid #f1f5f9", paddingTop: 12 }}>
                   <Text strong>聊天记录</Text>
                   <div>
                     <Text type="secondary" style={{ fontSize: 12 }}>
@@ -6281,7 +6613,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                     </Text>
                   </div>
                 </div>
-                <div style={{ display: "grid", alignContent: "start", gap: 10, flex: 1, minHeight: 160, overflowY: "auto", paddingRight: 4 }}>
+                <div style={{ display: "grid", alignContent: "start", gap: 10, flex: 1, minHeight: 120, overflowY: "auto", paddingRight: 4 }}>
                   {[...(detailPr.timeline || [])]
                     .filter((item) => item.kind === "comment")
                     .reverse()
@@ -6301,7 +6633,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false }: Purc
                         >
                           <Space size={8} wrap>
                             <Text strong style={{ fontSize: 13 }}>
-                              {item.actorName || "协作者"}
+                              {item.actorName || item.actorId || item.actorRole || "协作者"}
                             </Text>
                             {item.actorRole ? <Tag>{item.actorRole}</Tag> : null}
                             <Text type="secondary" style={{ fontSize: 12 }}>

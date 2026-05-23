@@ -38,6 +38,7 @@ const CompetitorAnalysis = lazyWithPreload(() => import("./pages/CompetitorAnaly
 const PriceReview = lazyWithPreload(() => import("./pages/PriceReview"));
 const ErpDebug = lazyWithPreload(() => import("./pages/ErpDebug"));
 const TemuRobots = lazyWithPreload(() => import("./pages/TemuRobots"));
+const MultiStoreCloud = lazyWithPreload(() => import("./pages/MultiStoreCloud"));
 const ProductMasterData = lazyWithPreload(() => import("./pages/ProductMasterData"));
 const PurchaseCenter = lazyWithPreload(() => import("./pages/PurchaseCenter"));
 const AlibabaMapping = lazyWithPreload(() => import("./pages/AlibabaMapping"));
@@ -258,6 +259,7 @@ function App() {
             <Route path="auto-image-swap" element={<RoleRoute path="/auto-image-swap"><AutoImageSwap /></RoleRoute>} />
             <Route path="collect" element={<RoleRoute path="/collect"><Dashboard /></RoleRoute>} />
             <Route path="temu-robots" element={<RoleRoute path="/collect"><TemuRobots /></RoleRoute>} />
+            <Route path="multi-store-cloud" element={<RoleRoute path="/multi-store-cloud"><MultiStoreCloud /></RoleRoute>} />
             <Route path="jushuitan-import" element={<Navigate to="/product-master-data" replace />} />
             <Route path="accounts" element={<RoleRoute path="/accounts"><AccountManager /></RoleRoute>} />
             <Route path="tasks" element={<Navigate to="/work-items" replace />} />
@@ -265,9 +267,10 @@ function App() {
             <Route path="price-review" element={<RoleRoute path="/price-review"><PriceReview /></RoleRoute>} />
             <Route path="daily-command" element={<RoleHomeRedirect />} />
             <Route path="product-master-data" element={<RoleRoute path="/product-master-data"><ProductMasterData mode="skus" /></RoleRoute>} />
-            <Route path="stores" element={<RoleRoute path="/stores"><PurchaseCenter initialStoreManagerOpen /></RoleRoute>} />
+            <Route path="stores" element={<RoleRoute path="/stores"><PurchaseCenter workArea="orders" initialStoreManagerOpen /></RoleRoute>} />
             <Route path="1688-mapping" element={<RoleRoute path="/1688-mapping"><AlibabaMapping /></RoleRoute>} />
-            <Route path="purchase-center" element={<RoleRoute path="/purchase-center"><PurchaseCenter /></RoleRoute>} />
+            <Route path="sourcing-center" element={<RoleRoute path="/sourcing-center"><PurchaseCenter workArea="sourcing" /></RoleRoute>} />
+            <Route path="purchase-center" element={<RoleRoute path="/purchase-center"><PurchaseCenter workArea="orders" /></RoleRoute>} />
             <Route path="warehouse-center" element={<RoleRoute path="/warehouse-center"><WarehouseCenter /></RoleRoute>} />
             <Route path="qc-outbound" element={<RoleRoute path="/qc-outbound"><QcOutboundCenter /></RoleRoute>} />
             <Route path="work-items" element={<RoleRoute path="/work-items"><WorkItems /></RoleRoute>} />

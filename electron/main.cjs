@@ -5295,6 +5295,32 @@ ipcMain.handle("app:open-log-directory", async () => {
   return logDir;
 });
 
+function resolveExtensionDirectory() {
+  const candidates = [
+    path.join(app.getAppPath(), "extension"),
+    path.join(process.resourcesPath || "", "extension"),
+    path.join(process.cwd(), "extension"),
+  ];
+  return candidates.find((dir) => dir && fs.existsSync(dir)) || candidates[0];
+}
+
+ipcMain.handle("app:get-extension-directory", async () => {
+  return resolveExtensionDirectory();
+});
+
+ipcMain.handle("app:open-extension-directory", async () => {
+  const extensionDir = resolveExtensionDirectory();
+  const error = await shell.openPath(extensionDir);
+  if (error) throw new Error(error);
+  return extensionDir;
+});
+
+ipcMain.handle("app:open-chrome-extensions", async () => {
+  const url = "chrome://extensions/";
+  await shell.openExternal(url);
+  return url;
+});
+
 ipcMain.handle("app:open-external", async (_event, rawUrl) => {
   const target = String(rawUrl || UPDATE_MANUAL_DOWNLOAD_URL).trim();
   const url = new URL(target);

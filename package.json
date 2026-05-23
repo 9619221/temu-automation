@@ -18,6 +18,8 @@
     "test:erp:1688-client": "node scripts/test-erp-1688-client.cjs",
     "test:erp": "npm run test:erp:flow && npm run test:erp:electron-api && npm run test:erp:1688-client",
     "probe:1688-purchase": "node scripts/probe-1688-purchase.cjs",
+    "probe:1688-mapped-purchase": "node scripts/probe-1688-mapped-purchase.cjs",
+    "import:jst-purchase": "node scripts/jushuitan-purchase-import.cjs",
     "test:desktop": "node scripts/test-desktop-regression.cjs",
     "verify:release": "npm run verify:data-contracts && npm run build:node-runtime && node scripts/verify-release-prereqs.cjs",
     "smoke:desktop": "node scripts/smoke-desktop.cjs",

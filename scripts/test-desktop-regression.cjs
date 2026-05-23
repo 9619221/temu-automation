@@ -20,6 +20,25 @@ const SEEDED_PRODUCT_PATH = "Regression Test Category > Subcategory";
 const SEEDED_ACCOUNT_NAME = "Regression Account";
 const REGRESSION_PHONE = "13800138000";
 const REGRESSION_PASSWORD = "Regression#123";
+const ERP_ADMIN_NAME = "Desktop Regression Admin";
+const ERP_ADMIN_ACCESS_CODE = "desktop-regression-code";
+const ERP_FLOW_ACCOUNT_ID = "acct_desktop_regression_flow";
+const ERP_FLOW_ACCOUNT_NAME = "Desktop Regression Flow Account";
+const ERP_FLOW_SUPPLIER_ID = "supplier_desktop_regression_flow";
+const ERP_FLOW_SUPPLIER_NAME = "Desktop Regression Flow Supplier";
+const ERP_FLOW_SKU_ID = "sku_desktop_regression_flow";
+const ERP_FLOW_SKU_CODE = "DESKTOP-FLOW-001";
+const ERP_FLOW_PRODUCT_NAME = "Desktop Regression Flow SKU";
+const ERP_FLOW_PO_ID = "po_desktop_regression_flow";
+const ERP_FLOW_TRACKING_NO = "TRACK-DESKTOP-FLOW";
+const ERP_MAPPING_SKU_ID = "sku_desktop_regression_mapping";
+const ERP_MAPPING_SKU_CODE = "DESKTOP-MAP-001";
+const ERP_MAPPING_PRODUCT_NAME = "Desktop Regression Mapping SKU";
+const ERP_MAPPING_PO_ID = "po_desktop_regression_mapping";
+const ERP_FLOW_1688_OFFER_ID = "1688-desktop-flow-offer";
+const ERP_FLOW_1688_SKU_ID = "1688-desktop-flow-sku";
+const ERP_FLOW_1688_SPEC_ID = "1688-desktop-flow-spec";
+const ERP_FLOW_1688_PRODUCT_TITLE = "1688 Desktop Flow Product";
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -79,7 +98,8 @@ function createIsolatedEnv(workerPort) {
   const appDataRoot = path.join(tmpRoot, "appdata");
   const localAppDataRoot = path.join(tmpRoot, "localappdata");
   const tempRoot = path.join(tmpRoot, "temp");
-  [appDataRoot, localAppDataRoot, tempRoot].forEach((dir) => fs.mkdirSync(dir, { recursive: true }));
+  const appUserDataRoot = path.join(tmpRoot, "user-data");
+  [appDataRoot, localAppDataRoot, tempRoot, appUserDataRoot].forEach((dir) => fs.mkdirSync(dir, { recursive: true }));
 
   return {
     ...process.env,
@@ -88,6 +108,8 @@ function createIsolatedEnv(workerPort) {
     LOCALAPPDATA: localAppDataRoot,
     TEMP: tempRoot,
     TMP: tempRoot,
+    APP_USER_DATA: appUserDataRoot,
+    TEMU_USER_DATA: appUserDataRoot,
     TEMU_WORKER_PORT: String(workerPort),
     ELECTRON_DISABLE_SECURITY_WARNINGS: "true",
   };
@@ -111,7 +133,17 @@ async function waitForHashContains(page, fragment, timeout = 45000) {
 }
 
 async function clickMenuItem(page, label) {
-  const item = page.locator(".ant-layout-sider").getByText(label, { exact: true }).first();
+  const sider = page.locator(".ant-layout-sider");
+  const item = sider.getByText(label, { exact: true }).first();
+  if (!await item.isVisible().catch(() => false)) {
+    const groupTitles = sider.locator(".ant-menu-submenu-title");
+    const count = await groupTitles.count();
+    for (let index = 0; index < count; index += 1) {
+      await groupTitles.nth(index).click();
+      await page.waitForTimeout(120);
+      if (await item.isVisible().catch(() => false)) break;
+    }
+  }
   await item.waitFor({ state: "visible", timeout: 30000 });
   await item.click();
   await page.waitForTimeout(250);
@@ -231,6 +263,330 @@ async function seedRegressionData(page) {
       seededProductPath: SEEDED_PRODUCT_PATH,
     },
   );
+}
+
+async function waitForElectronBridgeReady(page) {
+  await waitFor(
+    async () => {
+      const ready = await page.evaluate(() => Boolean(window.electronAPI));
+      if (!ready) {
+        throw new Error("window.electronAPI not ready");
+      }
+    },
+    30000,
+    "electron bridge ready",
+  );
+}
+
+async function seedErpPurchaseFlow(page) {
+  const flow = await page.evaluate(
+    async ({
+      adminName,
+      adminAccessCode,
+      accountId,
+      accountName,
+      supplierId,
+      supplierName,
+      skuId,
+      skuCode,
+      productName,
+      poId,
+      trackingNo,
+      mappingSkuId,
+      mappingSkuCode,
+      mappingProductName,
+      mappingPoId,
+      offerId,
+      externalSkuId,
+      externalSpecId,
+      externalProductTitle,
+    }) => {
+      const erp = window.electronAPI?.erp;
+      if (!erp?.client || !erp?.auth || !erp?.purchase || !erp?.warehouse || !erp?.outbound) {
+        throw new Error("ERP bridge unavailable");
+      }
+
+      const beforeClient = await erp.client.getStatus();
+      if (beforeClient?.isClientMode) {
+        await erp.client.setHostMode();
+      }
+
+      let authStatus = await erp.auth.getStatus();
+      if (!authStatus.currentUser) {
+        if (!authStatus.hasUsers) {
+          authStatus = await erp.auth.createFirstAdmin({
+            name: adminName,
+            accessCode: adminAccessCode,
+          });
+        } else {
+          authStatus = await erp.auth.login({
+            login: adminName,
+            accessCode: adminAccessCode,
+          });
+        }
+      }
+      if (!authStatus.currentUser) {
+        throw new Error("ERP local admin session was not established");
+      }
+
+      const account = await erp.account.upsert({
+        id: accountId,
+        name: accountName,
+        source: "desktop-regression",
+      });
+      const supplier = await erp.supplier.create({
+        id: supplierId,
+        name: supplierName,
+        categories: ["desktop-regression"],
+      });
+      const sku = await erp.sku.create({
+        id: skuId,
+        accountId: account.id,
+        internalSkuCode: skuCode,
+        productName,
+        colorSpec: "Black / Regression",
+        supplierId: supplier.id,
+      });
+
+      const prResult = await erp.purchase.action({
+        action: "create_pr",
+        accountId: account.id,
+        skuId: sku.id,
+        requestedQty: 4,
+        targetUnitCost: 12.5,
+        reason: "desktop full flow regression",
+        includeWorkbench: false,
+      });
+      const prId = prResult?.result?.id;
+      if (!prId) throw new Error("create_pr did not return a purchase request id");
+
+      const poResult = await erp.purchase.action({
+        action: "generate_po",
+        prId,
+        offlinePurchase: true,
+        supplierName: supplier.name,
+        unitPrice: 12.5,
+        qty: 4,
+        poId,
+        includeWorkbench: false,
+      });
+      const purchaseOrderId = poResult?.result?.purchaseOrder?.id;
+      if (!purchaseOrderId) throw new Error("generate_po did not return a purchase order id");
+      if (poResult?.result?.sku1688Source) {
+        throw new Error("offline purchase order unexpectedly used a 1688 mapping");
+      }
+
+      const submitPayment = await erp.purchase.action({
+        action: "submit_payment_approval",
+        poId: purchaseOrderId,
+        amount: 50,
+        includeWorkbench: false,
+      });
+      const paymentApprovalId = submitPayment?.result?.paymentApproval?.id;
+      if (!paymentApprovalId) throw new Error("submit_payment_approval did not return a payment approval id");
+
+      await erp.purchase.action({
+        action: "confirm_paid",
+        paymentApprovalId,
+        paymentMethod: "desktop-regression",
+        paymentReference: "PAY-DESKTOP-FLOW",
+        includeWorkbench: false,
+      });
+
+      const warehouseBefore = await erp.warehouse.workbench({ limit: 50 });
+      const receipt = (warehouseBefore.inboundReceipts || []).find((item) => item.poId === purchaseOrderId);
+      if (!receipt?.id) throw new Error("confirm_paid did not create an inbound receipt");
+
+      await erp.warehouse.action({
+        action: "register_arrival",
+        receiptId: receipt.id,
+        limit: 50,
+      });
+      const warehouseAfter = await erp.warehouse.workbench({ limit: 50 });
+      const batch = (warehouseAfter.inventoryBatches || []).find((item) => item.poId === purchaseOrderId);
+      if (!batch?.id) throw new Error("register_arrival did not create an inventory batch");
+
+      const outboundBefore = await erp.outbound.workbench({ limit: 50 });
+      const availableBatch = (outboundBefore.availableBatches || []).find((item) => item.id === batch.id);
+      if (!availableBatch?.id) throw new Error("inbounded batch was not available for outbound");
+
+      const outboundPlan = await erp.outbound.action({
+        action: "create_outbound_plan",
+        batchId: batch.id,
+        qty: 1,
+        boxes: 1,
+        remark: "desktop full flow regression",
+        limit: 50,
+      });
+      const outboundId = outboundPlan?.result?.shipment?.id;
+      if (!outboundId) throw new Error("create_outbound_plan did not return a shipment id");
+
+      await erp.outbound.action({ action: "start_picking", outboundId, limit: 50 });
+      await erp.outbound.action({ action: "mark_packed", outboundId, boxes: 1, limit: 50 });
+      await erp.outbound.action({
+        action: "confirm_shipped_out",
+        outboundId,
+        logisticsProvider: "Regression Logistics",
+        trackingNo,
+        limit: 50,
+      });
+      await erp.outbound.action({ action: "confirm_outbound_done", outboundId, limit: 50 });
+
+      const mappingSku = await erp.sku.create({
+        id: mappingSkuId,
+        accountId: account.id,
+        internalSkuCode: mappingSkuCode,
+        productName: mappingProductName,
+        colorSpec: "Mapped / Regression",
+      });
+      const mappingResult = await erp.purchase.action({
+        action: "upsert_sku_1688_source",
+        skuId: mappingSku.id,
+        accountId: account.id,
+        mappingGroupId: `map_${mappingSku.id}_${offerId}_${externalSpecId}`,
+        externalOfferId: offerId,
+        externalSkuId,
+        externalSpecId,
+        platformSkuName: "Mapped / Regression",
+        supplierName: supplier.name,
+        productTitle: externalProductTitle,
+        productUrl: `https://detail.1688.com/offer/${offerId}.html`,
+        unitPrice: 8.8,
+        moq: 1,
+        logisticsFee: 0,
+        ourQty: 1,
+        platformQty: 1,
+        isDefault: true,
+        includeWorkbench: false,
+      });
+      const mappingSource = mappingResult?.result?.sku1688Source;
+      if (!mappingSource?.id) throw new Error("upsert_sku_1688_source did not return a mapping id");
+      const mappingPrResult = await erp.purchase.action({
+        action: "create_pr",
+        accountId: account.id,
+        skuId: mappingSku.id,
+        requestedQty: 4,
+        targetUnitCost: 8.8,
+        reason: "desktop 1688 mapping regression",
+        includeWorkbench: false,
+      });
+      const mappingPrId = mappingPrResult?.result?.id;
+      if (!mappingPrId) throw new Error("mapped create_pr did not return a purchase request id");
+      const mappingPoResult = await erp.purchase.action({
+        action: "generate_po",
+        prId: mappingPrId,
+        preferSku1688Source: true,
+        qty: 4,
+        poId: mappingPoId,
+        includeWorkbench: false,
+      });
+      const mappingPurchaseOrderId = mappingPoResult?.result?.purchaseOrder?.id;
+      if (!mappingPurchaseOrderId) throw new Error("mapped generate_po did not return a purchase order id");
+      const generatedSource = mappingPoResult?.result?.sku1688Source;
+      if (generatedSource?.externalOfferId !== offerId) {
+        throw new Error("mapped generate_po did not use the default 1688 mapping");
+      }
+
+      const purchase = await erp.purchase.workbench({
+        limit: 50,
+        includeRequestDetails: false,
+        includeOptions: true,
+        include1688Meta: false,
+      }, { timeoutMs: 120000 });
+      const warehouse = await erp.warehouse.workbench({ limit: 50 });
+      const outbound = await erp.outbound.workbench({ limit: 50 });
+
+      const purchaseRequest = (purchase.purchaseRequests || []).find((item) => item.id === prId);
+      const purchaseOrder = (purchase.purchaseOrders || []).find((item) => item.id === purchaseOrderId);
+      const mappingPurchaseRequest = (purchase.purchaseRequests || []).find((item) => item.id === mappingPrId);
+      const mappingPurchaseOrder = (purchase.purchaseOrders || []).find((item) => item.id === mappingPurchaseOrderId);
+      const mappingSkuOption = (purchase.skuOptions || []).find((item) => item.id === mappingSku.id);
+      const inboundReceipt = (warehouse.inboundReceipts || []).find((item) => item.id === receipt.id);
+      const inventoryBatch = (warehouse.inventoryBatches || []).find((item) => item.id === batch.id);
+      const outboundShipment = (outbound.outboundShipments || []).find((item) => item.id === outboundId);
+
+      return {
+        accountId: account.id,
+        supplierId: supplier.id,
+        skuId: sku.id,
+        skuCode,
+        productName,
+        mappingSourceId: mappingSource.id,
+        mappingSkuId: mappingSku.id,
+        mappingSkuCode,
+        mappingProductName,
+        mappingPrId,
+        mappingPoId: mappingPurchaseOrderId,
+        externalOfferId: offerId,
+        externalSpecId,
+        supplierName: supplier.name,
+        prId,
+        poId: purchaseOrderId,
+        paymentApprovalId,
+        receiptId: receipt.id,
+        batchId: batch.id,
+        outboundId,
+        trackingNo,
+        purchaseRequestStatus: purchaseRequest?.status || null,
+        purchaseOrderStatus: purchaseOrder?.status || null,
+        paymentStatus: purchaseOrder?.paymentStatus || null,
+        receiptStatus: inboundReceipt?.status || null,
+        batchQcStatus: inventoryBatch?.qcStatus || null,
+        batchAvailableQty: Number(inventoryBatch?.availableQty || 0),
+        shipmentStatus: outboundShipment?.status || null,
+        offlinePurchaseOrderMappingCount: Number(purchaseOrder?.mappingCount || 0),
+        mappingPurchaseRequestStatus: mappingPurchaseRequest?.status || null,
+        mappingPurchaseRequestMappingCount: Number(mappingPurchaseRequest?.mappingCount || 0),
+        mappingPurchaseRequestPrimaryOfferId: mappingPurchaseRequest?.primaryMappingOfferId || null,
+        mappingPurchaseOrderStatus: mappingPurchaseOrder?.status || null,
+        mappingPurchaseOrderMappingCount: Number(mappingPurchaseOrder?.mappingCount || 0),
+        mappingPurchaseOrderSupplierName: mappingPurchaseOrder?.supplierName || null,
+        mappingSkuProcurementSourceCount: Number(mappingSkuOption?.procurementSourceCount || 0),
+        mappingSkuPrimaryOfferId: mappingSkuOption?.primary1688Source?.externalOfferId || null,
+      };
+    },
+    {
+      adminName: ERP_ADMIN_NAME,
+      adminAccessCode: ERP_ADMIN_ACCESS_CODE,
+      accountId: ERP_FLOW_ACCOUNT_ID,
+      accountName: ERP_FLOW_ACCOUNT_NAME,
+      supplierId: ERP_FLOW_SUPPLIER_ID,
+      supplierName: ERP_FLOW_SUPPLIER_NAME,
+      skuId: ERP_FLOW_SKU_ID,
+      skuCode: ERP_FLOW_SKU_CODE,
+      productName: ERP_FLOW_PRODUCT_NAME,
+      poId: ERP_FLOW_PO_ID,
+      trackingNo: ERP_FLOW_TRACKING_NO,
+      mappingSkuId: ERP_MAPPING_SKU_ID,
+      mappingSkuCode: ERP_MAPPING_SKU_CODE,
+      mappingProductName: ERP_MAPPING_PRODUCT_NAME,
+      mappingPoId: ERP_MAPPING_PO_ID,
+      offerId: ERP_FLOW_1688_OFFER_ID,
+      externalSkuId: ERP_FLOW_1688_SKU_ID,
+      externalSpecId: ERP_FLOW_1688_SPEC_ID,
+      externalProductTitle: ERP_FLOW_1688_PRODUCT_TITLE,
+    },
+  );
+
+  assert(flow.purchaseRequestStatus === "converted_to_po", `unexpected PR status: ${flow.purchaseRequestStatus}`);
+  assert(flow.purchaseOrderStatus === "inbounded", `unexpected PO status: ${flow.purchaseOrderStatus}`);
+  assert(flow.paymentStatus === "paid", `unexpected payment status: ${flow.paymentStatus}`);
+  assert(flow.receiptStatus === "inbounded_pending_qc", `unexpected receipt status: ${flow.receiptStatus}`);
+  assert(flow.batchQcStatus === "passed", `unexpected batch QC status: ${flow.batchQcStatus}`);
+  assert(flow.batchAvailableQty === 3, `unexpected available qty after outbound: ${flow.batchAvailableQty}`);
+  assert(flow.shipmentStatus === "confirmed", `unexpected shipment status: ${flow.shipmentStatus}`);
+  assert(flow.offlinePurchaseOrderMappingCount === 0, `offline PO should not bind 1688 mapping: ${flow.offlinePurchaseOrderMappingCount}`);
+  assert(flow.mappingPurchaseRequestStatus === "converted_to_po", `unexpected mapped PR status: ${flow.mappingPurchaseRequestStatus}`);
+  assert(flow.mappingPurchaseRequestMappingCount >= 1, `mapped PR did not keep 1688 mapping: ${flow.mappingPurchaseRequestMappingCount}`);
+  assert(flow.mappingPurchaseRequestPrimaryOfferId === ERP_FLOW_1688_OFFER_ID, `mapped PR offer mismatch: ${flow.mappingPurchaseRequestPrimaryOfferId}`);
+  assert(flow.mappingPurchaseOrderStatus === "draft", `unexpected mapped PO status: ${flow.mappingPurchaseOrderStatus}`);
+  assert(flow.mappingPurchaseOrderMappingCount >= 1, `mapped PO did not keep 1688 mapping: ${flow.mappingPurchaseOrderMappingCount}`);
+  assert(flow.mappingPurchaseOrderSupplierName === ERP_FLOW_SUPPLIER_NAME, `mapped PO supplier mismatch: ${flow.mappingPurchaseOrderSupplierName}`);
+  assert(flow.mappingSkuProcurementSourceCount >= 1, `mapped SKU option did not expose 1688 source: ${flow.mappingSkuProcurementSourceCount}`);
+  assert(flow.mappingSkuPrimaryOfferId === ERP_FLOW_1688_OFFER_ID, `mapped SKU primary offer mismatch: ${flow.mappingSkuPrimaryOfferId}`);
+  console.log("[ok] ERP 本地采购→付款→入库→出库数据链路");
+  console.log("[ok] ERP 1688 映射→采购单数据链路");
+  return flow;
 }
 
 async function runBridgeChecks(page) {
@@ -470,12 +826,127 @@ async function gotoHash(page, hash) {
   );
 }
 
-async function runPurchaseFlowChecks(page) {
+async function verifySeededErpFlowState(page, flow) {
+  if (!flow?.skuCode) return [];
+  const issues = [];
+  try {
+    const state = await page.evaluate(
+      async ({
+        prId,
+        poId,
+        receiptId,
+        batchId,
+        outboundId,
+        mappingSourceId,
+        mappingSkuCode,
+        mappingPrId,
+        mappingPoId,
+        externalOfferId,
+      }) => {
+        const erp = window.electronAPI?.erp;
+        if (!erp?.purchase || !erp?.warehouse || !erp?.outbound || !erp?.mapping || !erp?.sku) {
+          throw new Error("ERP bridge unavailable");
+        }
+        const [purchase, warehouse, outbound, boundMappingPage, unboundSkuPage] = await Promise.all([
+          erp.purchase.workbench({
+            limit: 50,
+            includeRequestDetails: false,
+            includeOptions: true,
+            include1688Meta: false,
+          }, { timeoutMs: 120000 }),
+          erp.warehouse.workbench({ limit: 50 }),
+          erp.outbound.workbench({ limit: 50 }),
+          erp.mapping.page({ limit: 20, offset: 0, search: mappingSkuCode }),
+          erp.sku.listUnmappedPage({ limit: 20, offset: 0, search: mappingSkuCode }),
+        ]);
+        const purchaseRequest = (purchase.purchaseRequests || []).find((item) => item.id === prId);
+        const purchaseOrder = (purchase.purchaseOrders || []).find((item) => item.id === poId);
+        const mappingPurchaseRequest = (purchase.purchaseRequests || []).find((item) => item.id === mappingPrId);
+        const mappingPurchaseOrder = (purchase.purchaseOrders || []).find((item) => item.id === mappingPoId);
+        const inboundReceipt = (warehouse.inboundReceipts || []).find((item) => item.id === receiptId);
+        const inventoryBatch = (warehouse.inventoryBatches || []).find((item) => item.id === batchId);
+        const outboundShipment = (outbound.outboundShipments || []).find((item) => item.id === outboundId);
+        const mappingSkuOption = (purchase.skuOptions || []).find((item) => item.internalSkuCode === mappingSkuCode);
+        const boundMapping = (boundMappingPage.rows || []).find((item) => item.id === mappingSourceId);
+        const stillUnmapped = (unboundSkuPage.rows || []).some((item) => item.internalSkuCode === mappingSkuCode);
+        return {
+          purchaseRequestStatus: purchaseRequest?.status || null,
+          purchaseOrderStatus: purchaseOrder?.status || null,
+          paymentStatus: purchaseOrder?.paymentStatus || null,
+          offlinePurchaseOrderMappingCount: Number(purchaseOrder?.mappingCount || 0),
+          receiptStatus: inboundReceipt?.status || null,
+          batchQcStatus: inventoryBatch?.qcStatus || null,
+          batchAvailableQty: Number(inventoryBatch?.availableQty || 0),
+          shipmentStatus: outboundShipment?.status || null,
+          mappingPurchaseRequestStatus: mappingPurchaseRequest?.status || null,
+          mappingPurchaseRequestMappingCount: Number(mappingPurchaseRequest?.mappingCount || 0),
+          mappingPurchaseRequestPrimaryOfferId: mappingPurchaseRequest?.primaryMappingOfferId || null,
+          mappingPurchaseOrderStatus: mappingPurchaseOrder?.status || null,
+          mappingPurchaseOrderMappingCount: Number(mappingPurchaseOrder?.mappingCount || 0),
+          mappingPurchaseOrderSupplierName: mappingPurchaseOrder?.supplierName || null,
+          mappingSkuProcurementSourceCount: Number(mappingSkuOption?.procurementSourceCount || 0),
+          mappingSkuPrimaryOfferId: mappingSkuOption?.primary1688Source?.externalOfferId || null,
+          boundMappingOfferId: boundMapping?.externalOfferId || null,
+          stillUnmapped,
+        };
+      },
+      flow,
+    );
+    if (state.purchaseRequestStatus !== "converted_to_po") issues.push(`采购需求状态异常: ${state.purchaseRequestStatus}`);
+    if (state.purchaseOrderStatus !== "inbounded") issues.push(`采购单状态异常: ${state.purchaseOrderStatus}`);
+    if (state.paymentStatus !== "paid") issues.push(`付款状态异常: ${state.paymentStatus}`);
+    if (state.offlinePurchaseOrderMappingCount !== 0) issues.push(`线下采购单不应绑定 1688 映射: ${state.offlinePurchaseOrderMappingCount}`);
+    if (state.receiptStatus !== "inbounded_pending_qc") issues.push(`入库单状态异常: ${state.receiptStatus}`);
+    if (state.batchQcStatus !== "passed") issues.push(`库存批次 QC 状态异常: ${state.batchQcStatus}`);
+    if (state.batchAvailableQty !== 3) issues.push(`库存批次可用数异常: ${state.batchAvailableQty}`);
+    if (state.shipmentStatus !== "confirmed") issues.push(`出库单状态异常: ${state.shipmentStatus}`);
+    if (state.mappingPurchaseRequestStatus !== "converted_to_po") issues.push(`映射采购需求状态异常: ${state.mappingPurchaseRequestStatus}`);
+    if (state.mappingPurchaseRequestMappingCount < 1) issues.push(`映射采购需求未关联 1688 映射: ${state.mappingPurchaseRequestMappingCount}`);
+    if (state.mappingPurchaseRequestPrimaryOfferId !== flow.externalOfferId) issues.push(`映射采购需求 1688 货号异常: ${state.mappingPurchaseRequestPrimaryOfferId}`);
+    if (state.mappingPurchaseOrderStatus !== "draft") issues.push(`映射采购单状态异常: ${state.mappingPurchaseOrderStatus}`);
+    if (state.mappingPurchaseOrderMappingCount < 1) issues.push(`映射采购单未关联 1688 映射: ${state.mappingPurchaseOrderMappingCount}`);
+    if (state.mappingPurchaseOrderSupplierName !== flow.supplierName) issues.push(`映射采购单供应商异常: ${state.mappingPurchaseOrderSupplierName}`);
+    if (state.mappingSkuProcurementSourceCount < 1) issues.push(`采购中心映射 SKU 选项未带 1688 货源: ${state.mappingSkuProcurementSourceCount}`);
+    if (state.mappingSkuPrimaryOfferId !== flow.externalOfferId) issues.push(`采购中心映射 SKU 主货源货号异常: ${state.mappingSkuPrimaryOfferId}`);
+    if (state.boundMappingOfferId !== flow.externalOfferId) issues.push(`供应商管理已绑定分页未找到映射: ${state.boundMappingOfferId}`);
+    if (state.stillUnmapped) issues.push("供应商管理未绑定分页仍出现已绑定 SKU");
+    if (!issues.length) console.log("[ok] 采购流程 API 状态验证");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error || "unknown error");
+    issues.push(`采购流程 API 状态验证异常: ${message}`);
+    console.log(`[fail] 采购流程 API 状态验证: ${message}`);
+  }
+  return issues;
+}
+
+async function verifySeededFlowOnPage(page, target, flow) {
+  if (!flow?.skuCode) return;
+  if (target.hash === "/qc-outbound") {
+    await waitForVisibleText(page, flow.trackingNo, 45000);
+    return;
+  }
+  if (target.hash === "/1688-mapping") {
+    await waitForVisibleText(page, flow.supplierName, 45000);
+    await waitForVisibleText(page, flow.externalOfferId, 45000);
+    await waitForVisibleText(page, flow.mappingSkuCode, 45000);
+    return;
+  }
+  if (target.hash === "/product-master-data" || target.hash === "/purchase-center") {
+    await waitForVisibleText(page, flow.skuCode, 45000);
+    await waitForVisibleText(page, flow.mappingSkuCode, 45000);
+    return;
+  }
+  await waitForVisibleText(page, flow.skuCode, 45000);
+}
+
+async function runPurchaseFlowChecks(page, flow = null) {
   const issues = [];
   console.log("");
-  console.log("== 采购流程页面渲染检查 ==");
+  console.log("== 采购流程页面与数据链路检查 ==");
+  issues.push(...await verifySeededErpFlowState(page, flow));
 
   for (const target of PURCHASE_FLOW_PAGES) {
+    const startedAt = Date.now();
     try {
       await gotoHash(page, target.hash);
       await page.waitForTimeout(500);
@@ -488,7 +959,7 @@ async function runPurchaseFlowChecks(page) {
         .catch(() => false);
       if (!titleFound) {
         issues.push(`${target.label} 标题未渲染（期望「${target.expectedTitle}」）`);
-        console.log(`[fail] ${target.label}: 标题未渲染`);
+        console.log(`[fail] ${target.label}: 标题未渲染 (${Date.now() - startedAt}ms)`);
         continue;
       }
 
@@ -499,15 +970,19 @@ async function runPurchaseFlowChecks(page) {
         .catch(() => false);
       if (serviceNotReady) {
         issues.push(`${target.label} 显示「${SERVICE_NOT_READY_HINT}」，ERP 服务未初始化`);
-        console.log(`[fail] ${target.label}: ERP 服务未就绪`);
+        console.log(`[fail] ${target.label}: ERP 服务未就绪 (${Date.now() - startedAt}ms)`);
         continue;
       }
 
-      console.log(`[ok] ${target.label} 页面渲染正常`);
+      await verifySeededFlowOnPage(page, target, flow);
+      const durationMs = Date.now() - startedAt;
+      console.log(flow?.skuCode
+        ? `[ok] ${target.label} 页面渲染与回归数据正常 (${durationMs}ms)`
+        : `[ok] ${target.label} 页面渲染正常 (${durationMs}ms)`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error || "unknown error");
       issues.push(`${target.label} 渲染检查异常: ${message}`);
-      console.log(`[fail] ${target.label}: ${message}`);
+      console.log(`[fail] ${target.label}: ${message} (${Date.now() - startedAt}ms)`);
     }
   }
 
@@ -538,18 +1013,13 @@ async function main() {
     page = await electronApp.firstWindow();
     await page.waitForLoadState("domcontentloaded");
 
-    await waitFor(
-      async () => {
-        const ready = await page.evaluate(() => Boolean(window.electronAPI));
-        if (!ready) {
-          throw new Error("window.electronAPI not ready");
-        }
-      },
-      30000,
-      "electron bridge ready",
-    );
+    await waitForElectronBridgeReady(page);
+    const erpFlow = await seedErpPurchaseFlow(page);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await waitForElectronBridgeReady(page);
 
-    await page.locator(".ant-layout-sider").getByText("店铺概览", { exact: true }).first().waitFor({ state: "visible", timeout: 30000 });
+    await page.locator(".ant-layout-sider").waitFor({ state: "visible", timeout: 30000 });
+    await page.locator(".app-layout-header").waitFor({ state: "visible", timeout: 30000 });
 
     issues.push(...await runBridgeChecks(page));
     await seedRegressionData(page);
@@ -560,7 +1030,7 @@ async function main() {
       issues.push(`runUiChecks 失败（历史菜单/选择器变更）: ${message}`);
       console.log(`[warn] runUiChecks 失败但已捕获，继续后续检查: ${message}`);
     }
-    issues.push(...await runPurchaseFlowChecks(page));
+    issues.push(...await runPurchaseFlowChecks(page, erpFlow));
 
     if (issues.length > 0) {
       throw new Error(`Detected regression issues:\n- ${issues.join("\n- ")}`);

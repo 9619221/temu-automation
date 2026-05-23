@@ -10,6 +10,7 @@ import { enqueue, queueDepth, flush } from "./ingest-queue.js";
 
 const ALARM_FLUSH = "temu-monitor.flush";
 const STATS_KEY = "temu_monitor_stats";
+const MALLS_KEY = "temu_monitor_malls";
 
 // ---------- 启动期初始化 ----------
 chrome.runtime.onInstalled.addListener(async () => {
@@ -178,16 +179,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "QUERY_STATUS") {
-    Promise.all([queueDepth(), getStorage([STATS_KEY, "cloud_endpoint", "auth_token"])])
+    Promise.all([queueDepth(), getStorage([STATS_KEY, "cloud_endpoint", "auth_token", MALLS_KEY])])
       .then(([depth, cfg]) => {
         sendResponse({
           queueDepth: depth,
           stats: cfg[STATS_KEY] || {},
+          malls: cfg[MALLS_KEY] || [],
           configured: !!(cfg.cloud_endpoint && cfg.auth_token),
         });
       })
       .catch(() => sendResponse({ queueDepth: -1, stats: {}, configured: false }));
     return true; // async
+  }
+
+  if (msg.type === "FETCHSCRIPT") {
+    fetchRemoteHook()
+      .then((r) => sendResponse(r))
+      .catch((e) => sendResponse({ success: false, error: String(e?.message || e).slice(0, 200) }));
+    return true;
   }
 
   if (msg.type === "FLUSH_NOW") {
@@ -200,15 +209,44 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 async function handleCaptured(payload, sender) {
   // 注入店铺/账号上下文：从发送 tab 推断（mall_id 等需要从 cookie 或 userInfo 响应里拿，
-  // M1 简单做：把 sender.tab.id / 域名 / 路径附上，云端再做归属推断）
+  // userInfo 响应命中后记住店铺，后续同站点单店事件自动带上 mall_id）
+  const knownMalls = (await getStorage([MALLS_KEY]))[MALLS_KEY] || [];
+  const parsedMalls = collectMallInfos(payload);
+  const matchedMall = parsedMalls[0] || inferMallFromKnownMalls(knownMalls, payload?.site);
   const enriched = {
     ...payload,
+    mall_id: payload?.mall_id || payload?.mallId || matchedMall?.mallId || null,
+    mall_name: payload?.mall_name || payload?.mallName || matchedMall?.mallName || null,
     tab_id: sender?.tab?.id,
     tab_url: sender?.tab?.url,
     captured_at: Date.now(),
   };
+  if (parsedMalls.length) await rememberMalls(parsedMalls);
   await enqueue(enriched);
   await bumpStats({ captured_count_delta: 1 });
+}
+
+async function fetchRemoteHook() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", "device_id"]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) {
+    return { success: false, error: "未配置云端" };
+  }
+  const base = cfg.cloud_endpoint.replace(/\/$/, "");
+  const headers = {
+    Authorization: `Bearer ${cfg.auth_token}`,
+    "X-Device-Id": cfg.device_id || "",
+  };
+  const [configResp, scriptResp] = await Promise.all([
+    fetch(base + "/api/hook/v1/config", { headers }),
+    fetch(base + "/api/hook/v1/inject.js", { headers }),
+  ]);
+  if (!configResp.ok) return { success: false, error: `config HTTP ${configResp.status}` };
+  if (!scriptResp.ok) return { success: false, error: `hook HTTP ${scriptResp.status}` };
+  return {
+    success: true,
+    config: await configResp.json(),
+    scriptContent: await scriptResp.text(),
+  };
 }
 
 // ---------- 工具：storage / 累计统计 ----------
@@ -217,6 +255,68 @@ function getStorage(keys) {
 }
 function setStorage(obj) {
   return new Promise((resolve) => chrome.storage.local.set(obj, resolve));
+}
+
+function collectMallInfos(payload) {
+  const body = payload?.body || safeParseJson(payload?.bodyText);
+  const out = [];
+  const seen = new Set();
+  const stack = [body];
+  let steps = 0;
+  while (stack.length && steps < 8000) {
+    steps++;
+    const node = stack.pop();
+    if (!node || typeof node !== "object") continue;
+    if (Array.isArray(node)) {
+      for (const item of node) stack.push(item);
+      continue;
+    }
+
+    const rawMallId = node.mallId ?? node.mall_id ?? node.mallSupplierId ?? node.supplierId;
+    if (rawMallId != null && rawMallId !== "") {
+      const mallId = String(rawMallId).trim();
+      if (mallId && !seen.has(mallId)) {
+        seen.add(mallId);
+        out.push({
+          mallId,
+          mallName: node.mallName || node.mall_name || node.shopName || node.storeName || node.supplierName || null,
+          site: node.site || node.siteId || node.siteName || payload?.site || null,
+          lastSeen: Date.now(),
+        });
+      }
+    }
+    for (const key of Object.keys(node)) stack.push(node[key]);
+  }
+  return out;
+}
+
+function safeParseJson(text) {
+  if (!text || typeof text !== "string") return null;
+  try { return JSON.parse(text); } catch { return null; }
+}
+
+function inferMallFromKnownMalls(malls, site) {
+  if (!Array.isArray(malls) || !site) return null;
+  const sameSite = malls.filter((m) => m?.site === site);
+  return sameSite.length === 1 ? sameSite[0] : null;
+}
+
+async function rememberMalls(malls) {
+  const cur = (await getStorage([MALLS_KEY]))[MALLS_KEY] || [];
+  const map = new Map();
+  for (const item of Array.isArray(cur) ? cur : []) {
+    if (!item?.mallId) continue;
+    map.set(`${item.site || ""}|${item.mallId}`, item);
+  }
+  for (const item of malls) {
+    if (!item?.mallId) continue;
+    const key = `${item.site || ""}|${item.mallId}`;
+    map.set(key, { ...(map.get(key) || {}), ...item, lastSeen: Date.now() });
+  }
+  const next = Array.from(map.values())
+    .sort((a, b) => Number(b.lastSeen || 0) - Number(a.lastSeen || 0))
+    .slice(0, 50);
+  await setStorage({ [MALLS_KEY]: next });
 }
 
 async function bumpStats(patch) {

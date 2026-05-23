@@ -382,6 +382,8 @@ export default function AlibabaMapping() {
   const [urlSpecPlatformQty, setUrlSpecPlatformQty] = useState(1);
   const boundRequestIdRef = useRef(0);
   const unboundRequestIdRef = useRef(0);
+  const boundLoadedRef = useRef(false);
+  const unboundLoadedRef = useRef(false);
   const autoPurchaseRuleIdsRef = useRef<Set<string>>(new Set());
   const autoSupplierProfileIdsRef = useRef<Set<string>>(new Set());
 
@@ -395,6 +397,7 @@ export default function AlibabaMapping() {
       if (requestId !== boundRequestIdRef.current) return;
       setBoundRows(Array.isArray(result?.rows) ? result.rows : []);
       setBoundTotal(Number(result?.total || 0));
+      boundLoadedRef.current = true;
     } catch (error: any) {
       if (requestId === boundRequestIdRef.current) {
         message.error(error?.message || "已绑定供应商读取失败");
@@ -417,6 +420,7 @@ export default function AlibabaMapping() {
       const rows = Array.isArray(result?.rows) ? result.rows.map(buildSkuDisplayRow) : [];
       setUnboundRows(rows);
       setUnboundTotal(Number(result?.total || 0));
+      unboundLoadedRef.current = true;
     } catch (error: any) {
       if (requestId === unboundRequestIdRef.current) {
         message.error(error?.message || "未绑定商品读取失败");
@@ -445,12 +449,30 @@ export default function AlibabaMapping() {
   }, [unboundSearch]);
 
   useEffect(() => {
+    if (activeTab !== "bound" && !boundLoadedRef.current) return;
     void loadBoundPage(boundPage, boundDebouncedSearch);
-  }, [boundDebouncedSearch, boundPage, loadBoundPage]);
+  }, [activeTab, boundDebouncedSearch, boundPage, loadBoundPage]);
 
   useEffect(() => {
+    if (activeTab !== "unbound" && !unboundLoadedRef.current) return;
     void loadUnboundPage(unboundPage, unboundDebouncedSearch);
-  }, [loadUnboundPage, unboundDebouncedSearch, unboundPage]);
+  }, [activeTab, loadUnboundPage, unboundDebouncedSearch, unboundPage]);
+
+  useEffect(() => {
+    if (activeTab !== "bound" || boundLoading || unboundLoadedRef.current) return;
+    const timer = window.setTimeout(() => {
+      void loadUnboundPage(unboundPage, unboundDebouncedSearch);
+    }, 1500);
+    return () => window.clearTimeout(timer);
+  }, [activeTab, boundLoading, loadUnboundPage, unboundDebouncedSearch, unboundPage]);
+
+  useEffect(() => {
+    if (activeTab !== "unbound" || unboundLoading || boundLoadedRef.current) return;
+    const timer = window.setTimeout(() => {
+      void loadBoundPage(boundPage, boundDebouncedSearch);
+    }, 1500);
+    return () => window.clearTimeout(timer);
+  }, [activeTab, boundDebouncedSearch, boundPage, loadBoundPage, unboundLoading]);
 
   const reloadCurrentPage = useCallback(async () => {
     if (activeTab === "bound") {

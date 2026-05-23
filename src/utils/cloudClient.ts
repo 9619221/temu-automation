@@ -17,12 +17,23 @@ export interface CloudConsoleConfig {
   token: string;
 }
 
+interface LegacyCloudConfig {
+  cloudEndpoint?: string;
+  cloudToken?: string;
+}
+
 export async function loadCloudConfig(): Promise<CloudConsoleConfig | null> {
   try {
     const v = await window.electronAPI?.store?.get(STORE_KEY);
     // 只要有 token 即可工作，endpoint 缺省回退到默认地址
     if (v && typeof v === "object" && v.token) {
       return { endpoint: v.endpoint || DEFAULT_CLOUD_ENDPOINT, token: v.token };
+    }
+    const legacy = await window.electronAPI?.store?.get("temu_app_settings") as LegacyCloudConfig | null | undefined;
+    if (legacy && typeof legacy === "object" && legacy.cloudToken) {
+      const cfg = { endpoint: legacy.cloudEndpoint || DEFAULT_CLOUD_ENDPOINT, token: legacy.cloudToken };
+      await saveCloudConfig(cfg);
+      return cfg;
     }
     return null;
   } catch {
@@ -39,6 +50,26 @@ export async function saveCloudConfig(cfg: CloudConsoleConfig): Promise<void> {
 
 export async function clearCloudConfig(): Promise<void> {
   await window.electronAPI?.store?.set(STORE_KEY, null);
+}
+
+export async function loginCloud(
+  endpoint: string,
+  username: string,
+  password: string,
+): Promise<CloudConsoleConfig> {
+  const base = (endpoint || DEFAULT_CLOUD_ENDPOINT).replace(/\/$/, "");
+  const r = await fetch(base + "/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!r.ok) {
+    const text = await r.text().catch(() => "");
+    throw new Error(`HTTP ${r.status} ${text.slice(0, 200)}`);
+  }
+  const data = await r.json();
+  if (!data?.token) throw new Error("Cloud login response did not include a token");
+  return { endpoint: base, token: data.token };
 }
 
 async function request<T = any>(cfg: CloudConsoleConfig, path: string, init?: RequestInit): Promise<T> {
@@ -75,6 +106,108 @@ export interface SkcRow {
   last_updated_at: number;
 }
 
+export interface CloudMall {
+  site: string | null;
+  mall_id: string | null;
+  mall_name: string | null;
+  last_seen: string | null;
+}
+
+export interface CloudEndpointStat {
+  site: string | null;
+  method: string;
+  url_path: string;
+  count_total: number;
+  last_seen: number | null;
+}
+
+export interface CloudDevice {
+  device_uuid: string;
+  last_seen: string | null;
+  user_agent: string | null;
+}
+
+export interface CloudDashboardStats {
+  total: number;
+  last24h: number;
+  malls: CloudMall[];
+  topEndpoints: CloudEndpointStat[];
+  devices: CloudDevice[];
+}
+
+export interface CaptureEventRow {
+  id: string;
+  ts: number;
+  mall_id: string | null;
+  site: string | null;
+  page: string | null;
+  method: string;
+  url_path: string;
+  status: number | null;
+  body_size: number | null;
+}
+
+export interface TemuSalesRow {
+  skc_id: string;
+  product_id: string | null;
+  goods_id: string | null;
+  mall_supplier_id: string | null;
+  title: string | null;
+  category_name: string | null;
+  thumb_url: string | null;
+  sku_ext_code: string | null;
+  today_sales: number | null;
+  last7d_sales: number | null;
+  last30d_sales: number | null;
+  total_sales: number | null;
+  warehouse_stock: number | null;
+  occupy_stock: number | null;
+  unavailable_stock: number | null;
+  advice_qty: number | null;
+  available_sale_days: number | null;
+  declared_price_cents: number | null;
+  price_currency: string | null;
+  asf_score: string | null;
+  comment_num: number | null;
+  quality_after_sales_rate: string | null;
+  supply_status: string | null;
+  stock_status: string | null;
+  close_jit_status: string | null;
+  stat_date: string;
+  sources_json?: string | null;
+  last_updated_at: string | null;
+  raw_item?: Record<string, any> | null;
+  raw_source?: {
+    id?: string;
+    url_path?: string;
+    method?: string;
+    status?: number | null;
+    ts?: number | null;
+    body_size?: number | null;
+  } | null;
+}
+
+export interface TemuShopSalesRow {
+  id: string;
+  tenant_id: string;
+  mall_id: string | null;
+  site: string | null;
+  stat_date: string;
+  sale_volume: number | null;
+  seven_days_sale_volume: number | null;
+  thirty_days_sale_volume: number | null;
+  on_sale_product_number: number | null;
+  wait_product_number: number | null;
+  lack_skc_number: number | null;
+  advice_prepare_skc_number: number | null;
+  about_to_sell_out_number: number | null;
+  already_sold_out_number: number | null;
+  high_price_limit_number: number | null;
+  quality_after_sale_ratio_90d: number | null;
+  sources_json?: string | null;
+  last_updated_at: string | null;
+}
+
 export interface AgentHeartbeat {
   id?: string;
   device_id?: string | null;
@@ -95,6 +228,22 @@ export interface AgentHeartbeat {
   received_at?: number | null;
 }
 
+export const fetchCloudStats = (cfg: CloudConsoleConfig) => (
+  request<CloudDashboardStats>(cfg, "/api/dashboard/stats")
+);
+
+export const fetchCaptureEvents = (
+  cfg: CloudConsoleConfig,
+  params: { url_path?: string; mall_id?: string; limit?: number; since?: number } = {},
+) => {
+  const qs = new URLSearchParams();
+  if (params.url_path) qs.set("url_path", params.url_path);
+  if (params.mall_id) qs.set("mall_id", params.mall_id);
+  if (params.limit) qs.set("limit", String(params.limit));
+  if (params.since) qs.set("since", String(params.since));
+  return request<CaptureEventRow[]>(cfg, `/api/dashboard/events?${qs.toString()}`);
+};
+
 export const fetchSkcList = (
   cfg: CloudConsoleConfig,
   params: { mall_id?: string; q?: string; limit?: number; offset?: number } = {},
@@ -108,6 +257,40 @@ export const fetchSkcList = (
     cfg,
     `/api/dashboard/skc?${qs.toString()}`,
   );
+};
+
+export const fetchTemuSales = async (
+  cfg: CloudConsoleConfig,
+  params: { date?: string; mall_id?: string } = {},
+) => {
+  const qs = new URLSearchParams();
+  if (params.date) qs.set("date", params.date);
+  if (params.mall_id) qs.set("mall_id", params.mall_id);
+  try {
+    return await request<{ date: string; rows: TemuSalesRow[] }>(cfg, `/api/dashboard/temu-sales?${qs.toString()}`);
+  } catch (error: any) {
+    if (String(error?.message || "").includes("HTTP 404")) {
+      return { date: params.date || "", rows: [] };
+    }
+    throw error;
+  }
+};
+
+export const fetchTemuShopSales = async (
+  cfg: CloudConsoleConfig,
+  params: { date?: string; mall_id?: string } = {},
+) => {
+  const qs = new URLSearchParams();
+  if (params.date) qs.set("date", params.date);
+  if (params.mall_id) qs.set("mall_id", params.mall_id);
+  try {
+    return await request<{ date: string; row: TemuShopSalesRow | null }>(cfg, `/api/dashboard/shop-sales?${qs.toString()}`);
+  } catch (error: any) {
+    if (String(error?.message || "").includes("HTTP 404")) {
+      return { date: params.date || "", row: null };
+    }
+    throw error;
+  }
 };
 
 export const fetchAgentHeartbeats = (

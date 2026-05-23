@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { Form, Input, InputNumber, Switch, Button, Tag, Progress, Space, Typography, message } from "antd";
-import { CloudDownloadOutlined, CheckCircleOutlined, SyncOutlined, ReloadOutlined, LinkOutlined } from "@ant-design/icons";
+import { CloudDownloadOutlined, CheckCircleOutlined, SyncOutlined, ReloadOutlined, LinkOutlined, CloudSyncOutlined, CopyOutlined, FolderOpenOutlined, ChromeOutlined } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
-import { clearCloudConfig, DEFAULT_CLOUD_ENDPOINT, loadCloudConfig, saveCloudConfig } from "../utils/cloudClient";
+import { clearCloudConfig, DEFAULT_CLOUD_ENDPOINT, loadCloudConfig, loginCloud, saveCloudConfig } from "../utils/cloudClient";
 import { normalizeExtensionInstallUrl, openExternalUrl } from "../utils/extensionInstall";
 
 const { Text } = Typography;
@@ -14,9 +14,14 @@ export default function Settings() {
   const [form] = Form.useForm();
   const [version, setVersion] = useState("");
   const [updateStatus, setUpdateStatus] = useState<any>({ status: "idle", message: "" });
+  const [cloudLoginLoading, setCloudLoginLoading] = useState(false);
+  const [extensionDir, setExtensionDir] = useState("");
   useEffect(() => {
     appAPI?.getVersion().then(setVersion).catch(() => {});
     appAPI?.getUpdateStatus?.().then(setUpdateStatus).catch(() => {});
+    appAPI?.getExtensionDirectory?.()
+      .then((dir: string) => setExtensionDir(dir))
+      .catch(() => {});
     const unsub = window.electronAPI?.onUpdateStatus?.((data: any) => setUpdateStatus(data));
     return () => { unsub?.(); };
   }, []);
@@ -37,7 +42,8 @@ export default function Settings() {
 
   const handleSave = async () => {
     const values = form.getFieldsValue();
-    await store?.set("temu_app_settings", values);
+    const { cloudPassword: _cloudPassword, ...persistedValues } = values;
+    await store?.set("temu_app_settings", persistedValues);
     if (values.cloudEndpoint && values.cloudToken) {
       await saveCloudConfig({
         endpoint: values.cloudEndpoint,
@@ -47,6 +53,34 @@ export default function Settings() {
       await clearCloudConfig();
     }
     message.success("设置已保存");
+  };
+
+  const handleCloudLogin = async () => {
+    const endpoint = form.getFieldValue("cloudEndpoint") || DEFAULT_CLOUD_ENDPOINT;
+    const username = String(form.getFieldValue("cloudUsername") || "").trim();
+    const password = String(form.getFieldValue("cloudPassword") || "");
+    if (!username || !password) {
+      message.warning("请填写云端账号和密码");
+      return;
+    }
+    setCloudLoginLoading(true);
+    try {
+      const cfg = await loginCloud(endpoint, username, password);
+      await saveCloudConfig(cfg);
+      form.setFieldsValue({
+        cloudEndpoint: cfg.endpoint,
+        cloudToken: cfg.token,
+        cloudPassword: "",
+      });
+      const values = form.getFieldsValue();
+      const { cloudPassword: _cloudPassword, ...persistedValues } = values;
+      await store?.set("temu_app_settings", persistedValues);
+      message.success("云端已连接，Token 已保存");
+    } catch (e: any) {
+      message.error(e?.message || "云端登录失败");
+    } finally {
+      setCloudLoginLoading(false);
+    }
   };
 
   const handleOpenExtensionInstall = async () => {
@@ -60,6 +94,33 @@ export default function Settings() {
       await openExternalUrl(url);
     } catch (e: any) {
       message.error(e?.message || "打开扩展链接失败");
+    }
+  };
+
+  const copyText = async (value: string, successText = "已复制") => {
+    if (!value) return;
+    try {
+      await navigator.clipboard?.writeText(value);
+      message.success(successText);
+    } catch {
+      message.error("复制失败");
+    }
+  };
+
+  const handleOpenExtensionDir = async () => {
+    try {
+      const dir = await appAPI?.openExtensionDirectory?.();
+      if (dir) setExtensionDir(dir);
+    } catch (e: any) {
+      message.error(e?.message || "打开扩展目录失败");
+    }
+  };
+
+  const handleOpenChromeExtensions = async () => {
+    try {
+      await appAPI?.openChromeExtensions?.();
+    } catch (e: any) {
+      message.error(e?.message || "打开 Chrome 扩展管理页失败");
     }
   };
 
@@ -182,6 +243,17 @@ export default function Settings() {
             <Text type="secondary" style={{ fontSize: 12 }}>
               正式分发建议用 Chrome Web Store 非公开链接；内测或临时分发可以填扩展文件下载链接，让用户下载压缩包后手动“加载已解压的扩展程序”。
             </Text>
+            {extensionDir ? (
+              <div style={{ border: "1px solid var(--color-border)", borderRadius: 8, padding: 12, background: "var(--color-surface-subtle)" }}>
+                <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                  <Text strong>本机调试扩展目录</Text>
+                  <Text code copyable={{ text: extensionDir }} style={{ whiteSpace: "normal" }}>{extensionDir}</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    在 Chrome 扩展管理页打开开发者模式，选择“加载已解压的扩展程序”，加载这个目录；安装后刷新 Temu 卖家中心。
+                  </Text>
+                </Space>
+              </div>
+            ) : null}
             <Form.Item name="extensionPackageUrl" label="扩展文件下载链接" help="指向 .zip 压缩包；用户下载后需要先解压，再在 Chrome 扩展管理页加载解压后的目录。">
               <Input placeholder="https://erp.temu.chat/releases/temu-monitor-extension-0.4.0.zip" />
             </Form.Item>
@@ -191,10 +263,36 @@ export default function Settings() {
             <Form.Item name="cloudEndpoint" label="云端地址" help="用于读取 /api/dashboard/agent 心跳状态">
               <Input placeholder="https://your-cloud.example.com" />
             </Form.Item>
+            <div style={{ display: "grid", gridTemplateColumns: "minmax(160px, 1fr) minmax(160px, 1fr)", gap: 12 }}>
+              <Form.Item name="cloudUsername" label="云端账号">
+                <Input placeholder="admin" autoComplete="username" />
+              </Form.Item>
+              <Form.Item name="cloudPassword" label="云端密码">
+                <Input.Password placeholder="用于换取 Token，不会保存密码" autoComplete="current-password" />
+              </Form.Item>
+            </div>
             <Form.Item name="cloudToken" label="云端 Token">
               <Input.Password placeholder="粘贴云端 JWT" />
             </Form.Item>
             <Space wrap>
+              <Button icon={<CloudSyncOutlined />} loading={cloudLoginLoading} onClick={handleCloudLogin}>
+                登录云端并保存 Token
+              </Button>
+              <Button icon={<FolderOpenOutlined />} onClick={handleOpenExtensionDir}>
+                打开本机扩展目录
+              </Button>
+              <Button icon={<ChromeOutlined />} onClick={handleOpenChromeExtensions}>
+                打开 Chrome 扩展管理
+              </Button>
+              <Button icon={<CopyOutlined />} onClick={() => copyText(extensionDir, "扩展目录已复制")} disabled={!extensionDir}>
+                复制扩展目录
+              </Button>
+              <Button icon={<CopyOutlined />} onClick={() => copyText(form.getFieldValue("cloudEndpoint") || DEFAULT_CLOUD_ENDPOINT, "云端地址已复制")}>
+                复制云端地址
+              </Button>
+              <Button icon={<CopyOutlined />} onClick={() => copyText(form.getFieldValue("cloudToken") || "", "Token 已复制")} disabled={!form.getFieldValue("cloudToken")}>
+                复制 Token
+              </Button>
               <Button icon={<LinkOutlined />} onClick={handleOpenExtensionInstall}>
                 测试打开扩展链接
               </Button>
