@@ -292,70 +292,6 @@ export interface AgentHeartbeat {
   received_at?: number | null;
 }
 
-export interface JstPurchaseInboundRow {
-  line_id: string;
-  receipt_no: string;
-  purchase_no: string | null;
-  online_purchase_no: string | null;
-  account_name: string | null;
-  supplier_name: string | null;
-  supplier_code: string | null;
-  operation_warehouse_name: string | null;
-  warehouse_name: string | null;
-  status: string | null;
-  finance_status: string | null;
-  inbound_type: string | null;
-  created_at: string | null;
-  inbound_at: string | null;
-  archived_at: string | null;
-  sku_code: string | null;
-  product_name: string | null;
-  style_code: string | null;
-  color_spec: string | null;
-  image_url: string | null;
-  product_tag: string | null;
-  qty: number | null;
-  unit_price: number | null;
-  amount: number | null;
-  warehouse_available_qty: number | null;
-  bind_location: string | null;
-  remark: string | null;
-  order_total_qty: number | null;
-  order_total_amount: number | null;
-  order_freight_amount: number | null;
-  order_paid_amount: number | null;
-  purchaser_name: string | null;
-  creator_name: string | null;
-  logistics_company: string | null;
-  tracking_no: string | null;
-  labels: string | null;
-}
-
-export interface JstPurchaseInboundSummary {
-  line_count: number;
-  receipt_count: number;
-  total_qty: number;
-  total_amount: number;
-}
-
-export interface JstPurchaseInboundOption {
-  value: string;
-  count: number;
-}
-
-export interface JstPurchaseInboundResponse {
-  rows: JstPurchaseInboundRow[];
-  total: number;
-  limit: number;
-  offset: number;
-  summary: JstPurchaseInboundSummary;
-  options: {
-    accounts: JstPurchaseInboundOption[];
-    statuses: JstPurchaseInboundOption[];
-    suppliers: JstPurchaseInboundOption[];
-  };
-}
-
 export const fetchCloudStats = (cfg: CloudConsoleConfig) => (
   request<CloudDashboardStats>(cfg, "/api/dashboard/stats")
 );
@@ -450,43 +386,4 @@ export const fetchAgentHeartbeats = (
   const qs = new URLSearchParams();
   qs.set("limit", String(params.limit || 120));
   return request<AgentHeartbeat[]>(cfg, `/api/dashboard/agent?${qs.toString()}`);
-};
-
-export const fetchJstPurchaseInbound = async (
-  cfg: CloudConsoleConfig,
-  params: {
-    q?: string;
-    account_name?: string;
-    supplier?: string;
-    status?: string;
-    date_from?: string;
-    date_to?: string;
-    limit?: number;
-    offset?: number;
-  } = {},
-) => {
-  const qs = new URLSearchParams();
-  if (params.q) qs.set("q", params.q);
-  if (params.account_name) qs.set("account_name", params.account_name);
-  if (params.supplier) qs.set("supplier", params.supplier);
-  if (params.status) qs.set("status", params.status);
-  if (params.date_from) qs.set("date_from", params.date_from);
-  if (params.date_to) qs.set("date_to", params.date_to);
-  if (params.limit) qs.set("limit", String(params.limit));
-  if (params.offset) qs.set("offset", String(params.offset));
-  try {
-    return await request<JstPurchaseInboundResponse>(cfg, `/api/dashboard/jst-purchase-inbound?${qs.toString()}`);
-  } catch (error: any) {
-    if (String(error?.message || "").includes("HTTP 404")) {
-      return {
-        rows: [],
-        total: 0,
-        limit: params.limit || 50,
-        offset: params.offset || 0,
-        summary: { line_count: 0, receipt_count: 0, total_qty: 0, total_amount: 0 },
-        options: { accounts: [], statuses: [], suppliers: [] },
-      };
-    }
-    throw error;
-  }
 };

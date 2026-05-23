@@ -44,7 +44,6 @@ const ROUTE_ROLES: Record<string, string[]> = {
   "/auto-image-swap": ["admin", "manager", "operations"],
   "/collect": ["admin", "manager", "operations"],
   "/multi-store-cloud": ["admin", "manager", "operations"],
-  "/jst-purchase-inbound": ["admin", "manager", "operations", "buyer", "warehouse"],
   "/accounts": ["admin", "manager", "operations"],
   "/competitor": ["admin", "manager", "operations"],
   "/price-review": ["admin", "manager", "operations"],

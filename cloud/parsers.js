@@ -54,6 +54,14 @@ function toNullableInteger(raw) {
   return n == null ? null : Math.trunc(n);
 }
 
+function occupiedInventoryInteger(expected, normalLock, fallback) {
+  const expectedNum = toNullableInteger(expected);
+  const normalNum = toNullableInteger(normalLock);
+  const occupied = Math.max(0, expectedNum || 0) + Math.max(0, normalNum || 0);
+  if (occupied > 0) return occupied;
+  return expectedNum ?? normalNum ?? toNullableInteger(fallback);
+}
+
 function toNullableString(raw, max) {
   if (raw == null || raw === "") return null;
   const s = String(raw);
@@ -434,7 +442,7 @@ function parseSalesManagement(db, ctx, evt, body) {
       last30d_sales: toNullableInteger(row.last30DaysSales ?? totalInfo.lastThirtyDaysSaleVolume),
       total_sales,
       warehouse_stock,
-      occupy_stock: toNullableInteger(row.occupyStock ?? inventoryInfo.expectedOccupiedInventoryNum ?? inventoryInfo.normalLockNumber),
+      occupy_stock: occupiedInventoryInteger(inventoryInfo.expectedOccupiedInventoryNum, inventoryInfo.normalLockNumber, row.occupyStock),
       unavailable_stock: toNullableInteger(row.unavailableStock ?? inventoryInfo.unavailableWarehouseInventoryNum),
       advice_qty: toNullableInteger(row.adviceQuantity ?? totalInfo.adviceQuantity),
       available_sale_days: toNullableNumber(row.availableSaleDays ?? totalInfo.availableSaleDays),

@@ -401,6 +401,14 @@ function optionalNumber(value: unknown): number | null {
   return Number.isFinite(num) ? num : null;
 }
 
+function occupiedInventoryNumber(expected: unknown, normalLock: unknown, fallback?: unknown): number | null {
+  const expectedNum = optionalNumber(expected);
+  const normalNum = optionalNumber(normalLock);
+  const occupied = Math.max(0, expectedNum || 0) + Math.max(0, normalNum || 0);
+  if (occupied > 0) return occupied;
+  return expectedNum ?? normalNum ?? optionalNumber(fallback);
+}
+
 function formatOptionalNumber(value: unknown) {
   const num = optionalNumber(value);
   return num === null ? "-" : num;
@@ -579,6 +587,7 @@ function buildCloudSalesRaw(previousRaw: any, skc: SkcRow | undefined, sales: Te
     lastThirtyDaysSaleVolume: sales?.last30d_sales ?? null,
     sellerWhStock: warehouseStock,
     inventoryNumInfo: {
+      warehouseInventoryNum: warehouseStock ?? null,
       expectedOccupiedInventoryNum: sales?.occupy_stock ?? null,
       unavailableWarehouseInventoryNum: sales?.unavailable_stock ?? null,
       waitReceiveNum: null,
@@ -687,7 +696,11 @@ function applyCloudProduct(product: ProductItem, skc: SkcRow | undefined, sales:
   product.last30DaysSales = cloudNumber(firstCloudValue<number>(sales?.last30d_sales, raw.last30DaysSales, raw.skuQuantityTotalInfo?.lastThirtyDaysSaleVolume), product.last30DaysSales);
   product.totalSales = cloudNumber(firstCloudValue<number>(sales?.total_sales, raw.totalSales, raw.skuQuantityTotalInfo?.totalSaleVolume), product.totalSales);
   product.warehouseStock = cloudNumber(firstCloudValue<number>(sales?.warehouse_stock, raw.warehouseStock, raw.skuQuantityTotalInfo?.inventoryNumInfo?.warehouseInventoryNum), product.warehouseStock);
-  product.occupyStock = cloudNumber(firstCloudValue<number>(sales?.occupy_stock, raw.occupyStock, raw.skuQuantityTotalInfo?.inventoryNumInfo?.expectedOccupiedInventoryNum), product.occupyStock);
+  product.occupyStock = cloudNumber(occupiedInventoryNumber(
+    raw.skuQuantityTotalInfo?.inventoryNumInfo?.expectedOccupiedInventoryNum,
+    raw.skuQuantityTotalInfo?.inventoryNumInfo?.normalLockNumber,
+    firstCloudValue<number>(sales?.occupy_stock, raw.occupyStock),
+  ), product.occupyStock);
   product.unavailableStock = cloudNumber(firstCloudValue<number>(sales?.unavailable_stock, raw.unavailableStock, raw.skuQuantityTotalInfo?.inventoryNumInfo?.unavailableWarehouseInventoryNum), product.unavailableStock);
   product.lackQuantity = cloudNumber(firstCloudValue<number>(raw.lackQuantity, raw.skuQuantityTotalInfo?.lackQuantity), product.lackQuantity);
   product.price = cloudMoney(declaredPrice) || product.price;
@@ -2540,7 +2553,7 @@ export default function ProductList() {
       const product7d = optionalNumber(product.cloudSales?.last7d_sales ?? totalInfo.lastSevenDaysSaleVolume);
       const product30d = optionalNumber(product.cloudSales?.last30d_sales ?? totalInfo.lastThirtyDaysSaleVolume);
       const productStock = optionalNumber(product.cloudSales?.warehouse_stock ?? inventoryInfo.warehouseInventoryNum);
-      const productOccupy = optionalNumber(product.cloudSales?.occupy_stock ?? inventoryInfo.expectedOccupiedInventoryNum);
+      const productOccupy = occupiedInventoryNumber(inventoryInfo.expectedOccupiedInventoryNum, inventoryInfo.normalLockNumber, product.cloudSales?.occupy_stock);
       const productUnavail = optionalNumber(product.cloudSales?.unavailable_stock ?? inventoryInfo.unavailableWarehouseInventoryNum);
       const productInTransit = optionalNumber(inventoryInfo.waitReceiveNum);
       const productLack = optionalNumber(totalInfo.lackQuantity);
@@ -2552,10 +2565,11 @@ export default function ProductList() {
             const skuToday = optionalNumber(sku?.todaySaleVolume);
             const sku7d = optionalNumber(sku?.lastSevenDaysSaleVolume);
             const sku30d = optionalNumber(sku?.lastThirtyDaysSaleVolume);
-            const skuStock = optionalNumber(sku?.sellerWhStock);
-            const skuOccupy = optionalNumber(sku?.inventoryNumInfo?.expectedOccupiedInventoryNum);
-            const skuUnavail = optionalNumber(sku?.inventoryNumInfo?.unavailableWarehouseInventoryNum);
-            const skuInTransit = optionalNumber(sku?.inventoryNumInfo?.waitReceiveNum);
+            const skuInventoryInfo = sku?.inventoryNumInfo || {};
+            const skuStock = optionalNumber(skuInventoryInfo.warehouseInventoryNum ?? sku?.warehouseInventoryNum ?? sku?.sellerWhStock);
+            const skuOccupy = occupiedInventoryNumber(skuInventoryInfo.expectedOccupiedInventoryNum, skuInventoryInfo.normalLockNumber);
+            const skuUnavail = optionalNumber(skuInventoryInfo.unavailableWarehouseInventoryNum);
+            const skuInTransit = optionalNumber(skuInventoryInfo.waitReceiveNum);
             const skuLack = optionalNumber(sku?.lackQuantity);
             const skuAdvice = optionalNumber(sku?.adviceQuantity);
             // 单 SKU 商品：若 SKU 自身无数据则用商品级兜底
@@ -3062,7 +3076,8 @@ export default function ProductList() {
 
   // ============ 列配置（显示/隐藏 + 排序） ============
   const COLUMN_STORAGE_KEY = "product-list-column-config";
-  const allColumnKeys = columns.map((c: any) => c.key as string).filter(Boolean);
+  const removedCloudColumnKeys = new Set(["cloud_updated", "cloud_declared", "cloud_suggested", "cloud_gap"]);
+  const allColumnKeys = columns.map((c: any) => c.key as string).filter((key) => Boolean(key) && !removedCloudColumnKeys.has(key));
 
   // 列分组定义
   const columnGroups: Array<{ label: string; keys: string[] }> = [
@@ -3128,7 +3143,7 @@ export default function ProductList() {
 
   // 根据配置过滤 + 排序列
   const configuredColumns = useMemo(() => {
-    const colMap = new Map(columns.map((c: any) => [c.key, c]));
+    const colMap = new Map(columns.filter((c: any) => !removedCloudColumnKeys.has(c.key)).map((c: any) => [c.key, c]));
     const knownKeys = new Set(columnConfig.order);
     const mergedOrder = [...columnConfig.order, ...allColumnKeys.filter((k) => !knownKeys.has(k))];
     return mergedOrder
@@ -3175,7 +3190,7 @@ export default function ProductList() {
   const visibleCount = allColumnKeys.filter((k) => !tempHidden.includes(k)).length;
   const allSelected = tempHidden.length === 0;
 
-  const colMap = new Map(columns.map((c: any) => [c.key, c]));
+  const colMap = new Map(columns.filter((c: any) => !removedCloudColumnKeys.has(c.key)).map((c: any) => [c.key, c]));
 
   // 拖拽排序
   const dragRef = useRef<{ key: string; groupLabel: string } | null>(null);
