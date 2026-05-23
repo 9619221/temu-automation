@@ -71,6 +71,22 @@ function toNullableBooleanInteger(raw) {
   return null;
 }
 
+function formatDateInTimeZone(ms, timeZone = "Asia/Shanghai") {
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) return "";
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const get = (type) => parts.find((part) => part.type === type)?.value || "";
+  const year = get("year");
+  const month = get("month");
+  const day = get("day");
+  return year && month && day ? `${year}-${month}-${day}` : "";
+}
+
 function categoryNameFromValue(raw) {
   if (raw == null || raw === "") return null;
   let value = raw;
@@ -111,8 +127,8 @@ function normalizeStatDate(raw, fallbackEvt) {
     const n = Number(raw);
     if (Number.isFinite(n)) {
       const ms = n > 946684800000 ? n : n * 1000;
-      const d = new Date(ms);
-      if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+      const date = formatDateInTimeZone(ms);
+      if (date) return date;
     }
   }
   return eventStatDate(fallbackEvt);
