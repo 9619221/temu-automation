@@ -25,6 +25,8 @@
     "smoke:desktop": "node scripts/smoke-desktop.cjs",
     "build": "tsc && vite build --base ./",
     "dist:win": "npm run build:resources && npm run build:node-runtime && npm run build:image-studio && npm run verify:release && npm run build && npm run smoke:desktop && electron-builder --win nsis",
+    "verify:update-feeds": "node scripts/verify-update-feeds.cjs",
+    "verify:update-feeds:erp": "node scripts/verify-update-feeds.cjs --check-erp",
     "publish:update:erp": "powershell -ExecutionPolicy Bypass -File scripts/publish_update_to_erp.ps1",
     "publish:update:github": "powershell -ExecutionPolicy Bypass -File scripts/publish_update_to_github.ps1",
     "publish:update": "npm run publish:update:erp && npm run publish:update:github",
