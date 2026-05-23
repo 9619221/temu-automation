@@ -4097,17 +4097,30 @@ h6 {
   bottom: 12px;
   z-index: 10;
   margin: 8px 0;
-  padding: 8px 14px;
+  padding: 10px 14px;
   background: #1f2937;
   color: #fff;
   border-radius: 6px;
   display: flex;
+  justify-content: space-between;
   align-items: center;
   gap: 12px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
 }
+.erp-bulk-bar__summary,
+.erp-bulk-bar__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
 .erp-bulk-bar .selected {
   font-weight: 600;
+}
+.erp-bulk-bar .muted {
+  color: rgba(255, 255, 255, 0.72);
+  border-bottom: 1px dotted rgba(255, 255, 255, 0.46);
+  cursor: help;
 }
 .erp-bulk-bar .ant-btn {
   background: #374151;
@@ -4122,6 +4135,13 @@ h6 {
 .erp-bulk-bar .ant-btn-primary {
   background: #1a73e8;
   border-color: #1a73e8;
+}
+
+@media (max-width: 760px) {
+  .erp-bulk-bar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }
 
 .dashboard-shell .ant-input,
