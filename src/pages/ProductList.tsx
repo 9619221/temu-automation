@@ -399,8 +399,8 @@ function cloudMoney(cents?: number | null) {
   return (Number(cents) / 100).toFixed(2);
 }
 
-function formatSkuSupplierPrice(value: unknown, fallback = "") {
-  if (value === null || value === undefined || value === "") return fallback;
+function formatSkuSupplierPrice(value: unknown, fallback: string | number = "") {
+  if (value === null || value === undefined || value === "") return String(fallback ?? "");
   const num = Number(value);
   if (!Number.isFinite(num)) return String(value);
   const yuan = Number.isInteger(num) && Math.abs(num) >= 100 ? num / 100 : num;
