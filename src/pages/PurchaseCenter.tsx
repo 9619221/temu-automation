@@ -2306,15 +2306,21 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     [purchaseOrders, selectedPoIds],
   );
 
+  const hasUsable1688Address = useMemo(
+    () => (data.alibaba1688Addresses || []).some((addr) =>
+      Boolean((addr as any).addressId || (addr as any).address_id)),
+    [data.alibaba1688Addresses],
+  );
+
   // 批量推 1688 用：把"还能推"的单子筛出来。条件与单行 canPushTo1688（约 4099 行）一致。
   const selectedPushableOrders = useMemo(
     () => selectedPurchaseOrders.filter((row) =>
       !row.externalOrderId
       && canPurchase
       && Number(row.mappingCount || 0) > 0
-      && Number(row.deliveryAddressCount || 0) > 0,
+      && (Number(row.deliveryAddressCount || 0) > 0 || hasUsable1688Address),
     ),
-    [selectedPurchaseOrders, canPurchase],
+    [selectedPurchaseOrders, canPurchase, hasUsable1688Address],
   );
 
   const orderRowSelection = useMemo<TableRowSelection<PurchaseOrderRow>>(() => ({
@@ -3984,6 +3990,10 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     const poIds = selectedPurchaseOrders
       .filter((row) => row.externalOrderId)
       .map((row) => row.id);
+    const orderIds = selectedPurchaseOrders
+      .map((row) => row.externalOrderId)
+      .filter(Boolean)
+      .map(String);
     if (!poIds.length) {
       message.warning("请先勾选已绑定 1688 单号的采购单");
       return;
@@ -3992,9 +4002,23 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       action: "get_1688_payment_url",
       poIds,
       includeWorkbench: false,
-    }, "1688 批量支付链接已同步");
+    });
     const paymentUrl = get1688PaymentUrlFromResult(result);
-    if (paymentUrl) await openExternalUrl(paymentUrl);
+    if (paymentUrl) {
+      await openExternalUrl(paymentUrl);
+      selectedPurchaseOrders.forEach((row) => {
+        if (!row.externalOrderId) return;
+        patchPurchaseOrderRow(row.id, {
+          externalPaymentUrl: paymentUrl,
+          externalPaymentUrlSyncedAt: new Date().toISOString(),
+        });
+      });
+      message.success("已打开 1688 批量支付页");
+      return;
+    }
+    navigator.clipboard?.writeText(orderIds.join("\n")).catch(() => {});
+    await openExternalUrl("https://work.1688.com/");
+    message.warning("API 没拿到批量付款链接，已打开 1688 工作台；已复制所选 1688 订单号，登录后可粘贴搜索");
   };
 
   // 批量推 1688：按店铺分组，每组共用 1688 采购账号；地址全局共一份。
@@ -4077,7 +4101,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     });
 
     const addresses = data.alibaba1688Addresses || [];
-    const defaultAddress = addresses.find((a) => a.isDefault) || addresses[0] || null;
+    const oauthsInPlay = fallbackMode
+      ? []
+      : Array.from(new Set(groups.map((group) => group.selectedPurchaseAccountId).filter(Boolean) as string[]));
+    const filteredAddresses = addresses.filter((addr) => {
+      if (!oauthsInPlay.length) return true;
+      return oauthsInPlay.includes(String((addr as any).purchase1688AccountId || ""));
+    });
+    const defaultAddress = filteredAddresses.find((a) => a.isDefault) || filteredAddresses[0] || null;
 
     setBatchPushPicker({
       addressId: defaultAddress?.id || null,
@@ -4097,6 +4128,10 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         message.warning(`店铺「${missing.accountName}」还没选 1688 采购账号`);
         return;
       }
+    }
+    if (!batchPushPicker.addressId) {
+      message.warning("请选择收货地址后再批量推送");
+      return;
     }
     setBatchPushPicker((prev) => prev ? { ...prev, running: true, progress: { ...prev.progress, done: 0, ok: 0, fail: 0 } } : prev);
     let ok = 0;
@@ -5059,7 +5094,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
             <Text type="secondary" style={{ fontSize: 12 }}>
               {formatDateTime(row.externalOrderSyncedAt)}
             </Text>
-            {!row.externalOrderId && canPurchase && mappingCount > 0 && deliveryAddressCount === 0 ? (
+            {!row.externalOrderId && canPurchase && mappingCount > 0 && deliveryAddressCount === 0 && !hasUsable1688Address ? (
               <Text type="warning" style={{ fontSize: 12 }}>缺店铺1688地址</Text>
             ) : null}
             {!row.externalOrderId && canPurchase && mappingCount === 0 ? (
@@ -5159,7 +5194,10 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         const rollbackVisible = canRollbackPurchaseOrder(row);
         const mappingCount = Number(row.mappingCount || 0);
         const deliveryAddressCount = Number(row.deliveryAddressCount || 0);
-        const canPushTo1688 = !row.externalOrderId && canPurchase && mappingCount > 0 && deliveryAddressCount > 0;
+        const canPushTo1688 = !row.externalOrderId
+          && canPurchase
+          && mappingCount > 0
+          && (deliveryAddressCount > 0 || hasUsable1688Address);
         const pushLoading = actingKey === `1688-push-${row.id}`
           || actingKey === `1688-validate-${row.id}`
           || actingKey === `1688-preview-${row.id}`;
@@ -5372,7 +5410,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         );
       },
     },
-  ], [actingKey, canFinance, canPurchase, canWarehouse]);
+  ], [actingKey, canFinance, canPurchase, canWarehouse, hasUsable1688Address]);
 
   const importedOrderColumns = useMemo<ColumnsType<Imported1688OrderRow>>(() => [
     {
@@ -5493,6 +5531,16 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               询盘设置
             </Button>
           ) : null,
+          activeWorkArea === "orders" && canPurchase ? (
+            <Button
+              key="new-po"
+              type="primary"
+              icon={<PlusOutlined />}
+              onClick={openDirectPoCreateModal}
+            >
+              创建采购单
+            </Button>
+          ) : null,
           activeWorkArea === "sourcing" && canCreateRequest ? (
             <Button
               key="new-optimization"
@@ -5537,15 +5585,6 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
             <div className="app-panel__title-main">{workAreaTitle} · {activeQueue.title}</div>
           </div>
           <Space size={8} wrap>
-            {activeWorkArea === "orders" && canPurchase ? (
-              <Button
-                type="primary"
-                icon={<PlusOutlined />}
-                onClick={openDirectPoCreateModal}
-              >
-                创建采购单
-              </Button>
-            ) : null}
             {activeWorkArea === "sourcing" && canPurchase ? (
               <Button
                 icon={<CommentOutlined />}
@@ -5995,7 +6034,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
           : "开始批量推送"}
         cancelText="取消"
         confirmLoading={!!batchPushPicker?.running}
-        okButtonProps={{ disabled: !batchPushPicker?.groups.length }}
+        okButtonProps={{ disabled: !batchPushPicker?.groups.length || !batchPushPicker?.addressId }}
         width={760}
         maskClosable={false}
         onCancel={() => {

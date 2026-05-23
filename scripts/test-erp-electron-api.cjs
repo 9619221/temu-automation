@@ -1291,6 +1291,73 @@ async function main() {
     assert.equal(bind1688OrderResult.purchaseOrder.externalOrderId, "1688-order-ipc-alt");
     assert.equal(bind1688OrderResult.purchaseOrder.externalOrderStatus, "waitsellerpush");
 
+    const batchPayDb = openErpDatabase({ userDataDir: tempUserData });
+    try {
+      const now = new Date().toISOString();
+      batchPayDb.prepare(`
+        INSERT INTO erp_purchase_orders (
+          id, account_id, pr_id, selected_candidate_id, supplier_id, po_no,
+          status, payment_status, expected_delivery_date, total_amount, paid_amount,
+          external_order_id, external_order_status,
+          created_by, created_at, updated_at
+        )
+        VALUES (
+          'po_1688_batch_pay_ipc', @account_id, 'pr_ipc', 'candidate_ipc', @supplier_id,
+          'PO-1688-BATCH-PAY', 'pushed_pending_price', 'unpaid',
+          '2026-05-20', 88, 90, '1688-order-ipc-batch', 'waitbuyerpay',
+          @buyer_id, @now, @now
+        )
+      `).run({
+        account_id: account.id,
+        supplier_id: supplier.id,
+        buyer_id: buyer.id,
+        now,
+      });
+    } finally {
+      batchPayDb.close();
+    }
+
+    const batchPaymentUrl = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "get_1688_payment_url",
+        poIds: ["po_1688_preview_ipc", "po_1688_batch_pay_ipc"],
+        mockPaymentResponse: {
+          result: {
+            payUrl: "https://pay.1688.test/batch?orders=2",
+          },
+        },
+      }),
+    });
+    assert.equal(batchPaymentUrl.statusCode, 200);
+    const batchPaymentUrlResult = JSON.parse(batchPaymentUrl.body).result.result;
+    assert.equal(batchPaymentUrlResult.paymentUrl, "https://pay.1688.test/batch?orders=2");
+    assert.deepEqual(
+      [...batchPaymentUrlResult.query.orderIdList].sort(),
+      ["1688-order-ipc-alt", "1688-order-ipc-batch"].sort(),
+    );
+    assert.equal(batchPaymentUrlResult.purchaseOrders.length, 2);
+    const batchPaymentDb = openErpDatabase({ userDataDir: tempUserData });
+    try {
+      const savedUrls = batchPaymentDb.prepare(`
+        SELECT external_payment_url
+        FROM erp_purchase_orders
+        WHERE id IN ('po_1688_preview_ipc', 'po_1688_batch_pay_ipc')
+        ORDER BY id
+      `).all().map((row) => row.external_payment_url);
+      assert.deepEqual(savedUrls, [
+        "https://pay.1688.test/batch?orders=2",
+        "https://pay.1688.test/batch?orders=2",
+      ]);
+    } finally {
+      batchPaymentDb.close();
+    }
+
     const createRefundDryRun = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
       method: "POST",
       headers: {
