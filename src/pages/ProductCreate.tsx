@@ -1402,7 +1402,7 @@ function BatchCreate() {
                     className="create-secondary-button"
                     disabled={pausePending}
                   >
-                    {pausePending ? "暂停中..." : paused ? "继续处理" : "暂停处理"}
+                    {pausePending ? "暂停中…" : paused ? "继续处理" : "暂停处理"}
                   </Button>
                 ) : null}
                 {hasFile ? <Button onClick={resetSheetState}>清空文件</Button> : null}

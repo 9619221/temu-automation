@@ -8,6 +8,7 @@ import authRoute from "./routes/auth.js";
 import ingestRoute from "./routes/ingest.js";
 import hookRoute from "./routes/hook.js";
 import dashboardRoute from "./routes/dashboard.js";
+import notifyRoute from "./routes/notify.js";
 
 dotenv.config();
 
@@ -38,6 +39,7 @@ app.use("/api/auth", authRoute);
 app.use("/api/ingest", ingestRoute);
 app.use("/api/hook", hookRoute);
 app.use("/api/dashboard", dashboardRoute);
+app.use("/api/notify", notifyRoute);
 
 app.use((err, _req, res, _next) => {
   console.error("[err]", err);

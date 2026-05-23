@@ -71,36 +71,9 @@ const CORE_ROUTE_PRELOADERS = [
 
 function RouteLoading() {
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 12,
-        background: "#f0f2f5",
-      }}
-    >
-      <div
-        style={{
-          width: 36,
-          height: 36,
-          borderRadius: "50%",
-          border: "4px solid #d9d9d9",
-          borderTopColor: "#1677ff",
-          animation: "temu-route-loading-spin 0.8s linear infinite",
-        }}
-      />
-      <span style={{ color: "#8c8c8c", fontSize: 14 }}>正在加载页面...</span>
-      <style>
-        {`
-          @keyframes temu-route-loading-spin {
-            from { transform: rotate(0deg); }
-            to { transform: rotate(360deg); }
-          }
-        `}
-      </style>
+    <div className="app-route-loading" aria-live="polite">
+      <div className="app-route-loading__spinner" aria-hidden="true" />
+      <span>正在加载页面…</span>
     </div>
   );
 }
@@ -124,19 +97,10 @@ function RoleHomeRedirect() {
 function AccessDenied() {
   const { currentUser } = useErpAuth();
   return (
-    <div
-      style={{
-        minHeight: 360,
-        display: "grid",
-        placeItems: "center",
-        background: "#fff",
-        borderRadius: 10,
-        border: "1px solid #eef0f5",
-      }}
-    >
-      <div style={{ textAlign: "center", padding: 24 }}>
-        <div style={{ fontSize: 22, fontWeight: 800, marginBottom: 8 }}>无权访问</div>
-        <div style={{ color: "#667085", marginBottom: 16 }}>
+    <div className="app-access-denied">
+      <div className="app-access-denied__content">
+        <div className="app-access-denied__title">无权访问</div>
+        <div className="app-access-denied__desc">
           当前角色：{roleLabel(currentUser?.role)}。请切换到有权限的账号。
         </div>
       </div>

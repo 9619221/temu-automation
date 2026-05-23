@@ -137,6 +137,14 @@ export default function AppLayout() {
     return group?.key || "";
   }, [selectedKey, visibleMenuItems]);
 
+  const selectedMenuItem = useMemo(() => {
+    for (const group of visibleMenuItems) {
+      const child = group.children.find((item) => item.key === selectedKey);
+      if (child) return { groupLabel: group.label, label: child.label };
+    }
+    return { groupLabel: "工作台", label: "运营助手" };
+  }, [selectedKey, visibleMenuItems]);
+
   useEffect(() => {
     if (!selectedGroupKey || collapsed) return;
     setOpenKeys([selectedGroupKey]);
@@ -226,28 +234,12 @@ export default function AppLayout() {
   };
 
   const bellDropdown = (
-    <div
-      style={{
-        background: "#fff",
-        borderRadius: 12,
-        boxShadow: "0 8px 24px rgba(0,0,0,0.12)",
-        minWidth: 280,
-        padding: "12px 0",
-      }}
-    >
-      <div
-        style={{
-          padding: "0 16px 10px",
-          fontWeight: 700,
-          fontSize: 13,
-          color: "#1a1a2e",
-          borderBottom: "1px solid #f0f0f0",
-        }}
-      >
+    <div className="app-notification-popover">
+      <div className="app-notification-popover__title">
         采集失败记录
       </div>
       {recentErrors.length === 0 ? (
-        <div style={{ padding: "20px 16px", color: "#8c8c8c", fontSize: 13, textAlign: "center" }}>暂无失败记录</div>
+        <div className="app-notification-popover__empty">暂无失败记录</div>
       ) : (
         <List
           size="small"
@@ -264,7 +256,7 @@ export default function AppLayout() {
           )}
         />
       )}
-      <div style={{ padding: "8px 16px 0", borderTop: "1px solid #f0f0f0" }}>
+      <div className="app-notification-popover__footer">
         <Button size="small" type="link" style={{ padding: 0 }} onClick={() => navigate("/collect")}>
           查看全部采集任务
         </Button>
@@ -280,58 +272,29 @@ export default function AppLayout() {
         collapsed={collapsed}
         onCollapse={setCollapsed}
         theme="light"
-        width={220}
-        style={{
-          borderRight: "none",
-          boxShadow: "2px 0 12px rgba(0,0,0,0.04)",
-          background: "#fff",
-          zIndex: 10,
-        }}
+        width={236}
+        collapsedWidth={72}
+        style={{ zIndex: 10 }}
       >
-        <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+        <div className="app-layout-sider__inner">
           <div
+            className="app-layout-brand"
             style={{
-              height: 64,
-              display: "flex",
-              alignItems: "center",
               justifyContent: collapsed ? "center" : "flex-start",
               padding: collapsed ? 0 : "0 20px",
-              borderBottom: "1px solid #f5f5f5",
-              flexShrink: 0,
             }}
           >
-            <div
-              style={{
-                width: 36,
-                height: 36,
-                borderRadius: 10,
-                background: "linear-gradient(135deg, #e55b00, #ff8534)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                flexShrink: 0,
-              }}
-            >
-              <RocketOutlined style={{ fontSize: 18, color: "#fff" }} />
+            <div className="app-layout-brand__mark">
+              <RocketOutlined aria-hidden="true" />
             </div>
             {!collapsed && (
-              <span
-                style={{
-                  marginLeft: 12,
-                  fontSize: 16,
-                  fontWeight: 700,
-                  background: "linear-gradient(135deg, #e55b00, #ff8534)",
-                  WebkitBackgroundClip: "text",
-                  WebkitTextFillColor: "transparent",
-                  whiteSpace: "nowrap",
-                }}
-              >
+              <span className="app-layout-brand__text">
                 Temu 运营助手
               </span>
             )}
           </div>
 
-          <div style={{ flex: 1, overflow: "auto", paddingTop: 8 }}>
+          <div className="app-layout-menu-scroll">
             <Menu
               mode="inline"
               selectedKeys={[selectedKey]}
@@ -345,37 +308,33 @@ export default function AppLayout() {
         </div>
       </Sider>
 
-      <Layout className="app-layout-main" style={{ background: "linear-gradient(180deg, #f8f9fc 0%, #f4f6fa 100%)" }}>
-        <Header
-          className="app-layout-header"
-          style={{
-            background: "#fff",
-            padding: "0 28px",
-            borderBottom: "1px solid #f0f0f0",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "flex-end",
-            height: 64,
-            boxShadow: "0 1px 4px rgba(0,0,0,0.03)",
-            zIndex: 5,
-          }}
-        >
-          <Space size={12}>
+      <Layout className="app-layout-main">
+        <Header className="app-layout-header">
+          <div className="app-layout-header__context">
+            <span>{selectedMenuItem.groupLabel}</span>
+            <strong>{selectedMenuItem.label}</strong>
+          </div>
+          <Space size={10} wrap className="app-layout-toolbar">
             {canUseCollection ? (
-            <Tag
+            <Button
+              type="text"
               onClick={() => navigate("/collect")}
-              color={collecting ? "processing" : progress === 100 ? (errorCount > 0 ? "warning" : "success") : "default"}
+              className={[
+                "app-status-chip",
+                collecting ? "is-processing" : "",
+                !collecting && progress === 100 && errorCount === 0 ? "is-success" : "",
+                !collecting && progress === 100 && errorCount > 0 ? "is-warning" : "",
+              ].filter(Boolean).join(" ")}
               icon={collecting ? <LoadingOutlined spin /> : <SyncOutlined />}
-              style={{ cursor: "pointer", borderRadius: 999, margin: 0, padding: "2px 10px" }}
             >
               {collecting ? `采集中 ${completedCount}/${COLLECT_TASKS.length}` : progress === 100 ? "采集完成" : "采集就绪"}
-            </Tag>
+            </Button>
             ) : null}
 
             {canUseCollection ? (
             <Dropdown trigger={["click"]} dropdownRender={() => bellDropdown}>
               <Badge count={errorCount > 0 ? errorCount : 0} size="small" offset={[-2, 2]}>
-                <Button icon={<BellOutlined />} style={{ borderRadius: 10 }}>
+                <Button icon={<BellOutlined />} className="app-header-button">
                   通知
                 </Button>
               </Badge>
@@ -384,13 +343,13 @@ export default function AppLayout() {
 
             {canManageAccounts ? (
             <Dropdown menu={{ items: accountMenuItems, onClick: handleAccountMenuClick }} trigger={["click"]}>
-              <Tag
-                color={activeAccountName ? "blue" : "default"}
+              <Button
+                type="text"
+                className={activeAccountName ? "app-account-chip is-active" : "app-account-chip"}
                 icon={<UserOutlined />}
-                style={{ borderRadius: 12, padding: "4px 12px", marginInlineEnd: 0, cursor: "pointer" }}
               >
                 {activeAccountName ? `账号 ${activeAccountName}` : "未选择账号"}
-              </Tag>
+              </Button>
             </Dropdown>
             ) : null}
 
@@ -398,54 +357,44 @@ export default function AppLayout() {
               <Button
                 icon={<FileTextOutlined />}
                 onClick={() => navigate("/logs")}
-                style={{ borderRadius: 10 }}
+                className="app-header-button"
                 title="日志中心"
               >
                 日志
               </Button>
             ) : null}
 
-            <Tag color="blue" icon={<UserOutlined />} style={{ borderRadius: 12, padding: "4px 12px", marginInlineEnd: 0 }}>
+            <Tag color="blue" icon={<UserOutlined />} className="app-user-chip">
               {auth.currentUser?.name || "-"} · {roleLabel(currentRole)}
             </Tag>
 
             {canAccessRoute(currentRole, "/settings") ? (
-              <Button icon={<SettingOutlined />} onClick={() => navigate("/settings")} style={{ borderRadius: 10 }}>
+              <Button icon={<SettingOutlined />} onClick={() => navigate("/settings")} className="app-header-button">
                 设置
               </Button>
             ) : null}
-            <Button icon={<LogoutOutlined />} onClick={handleLogout} style={{ borderRadius: 10 }}>
+            <Button icon={<LogoutOutlined />} onClick={handleLogout} className="app-header-button">
               退出
             </Button>
           </Space>
         </Header>
 
         {noAccount && canManageAccounts && (
-          <div
-            style={{
-              background: "linear-gradient(90deg, #fff7f0, #fff)",
-              borderBottom: "1px solid #ffd9b8",
-              padding: "10px 28px",
-              display: "flex",
-              alignItems: "center",
-              gap: 12,
-              flexWrap: "wrap",
-            }}
-          >
-            <RocketOutlined style={{ color: "#e55b00", fontSize: 16 }} />
-            <span style={{ fontWeight: 600, color: "#1a1a2e", fontSize: 13 }}>快速开始：</span>
+          <div className="app-setup-banner">
+            <RocketOutlined className="app-setup-banner__icon" />
+            <span className="app-setup-banner__title">快速开始：</span>
             <Space size={6} wrap>
-              <Tag style={{ borderRadius: 999, padding: "2px 10px" }}>① 添加账号</Tag>
-              <ArrowRightOutlined style={{ color: "#bbb", fontSize: 11 }} />
-              <Tag style={{ borderRadius: 999, padding: "2px 10px" }}>② 登录</Tag>
-              <ArrowRightOutlined style={{ color: "#bbb", fontSize: 11 }} />
-              <Tag style={{ borderRadius: 999, padding: "2px 10px" }}>③ 一键采集</Tag>
+              <Tag className="app-setup-banner__step">① 添加账号</Tag>
+              <ArrowRightOutlined className="app-setup-banner__arrow" />
+              <Tag className="app-setup-banner__step">② 登录</Tag>
+              <ArrowRightOutlined className="app-setup-banner__arrow" />
+              <Tag className="app-setup-banner__step">③ 一键采集</Tag>
             </Space>
             <Button
               size="small"
               type="primary"
               onClick={() => navigate("/accounts")}
-              style={{ marginLeft: "auto", borderRadius: 8, background: "#e55b00", border: "none" }}
+              className="app-setup-banner__action"
             >
               去添加账号
             </Button>

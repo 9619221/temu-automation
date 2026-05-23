@@ -209,7 +209,7 @@ export default function Dashboard() {
             onClick={startCollectAll}
             loading={collecting}
           >
-            {collecting ? "采集中..." : "一键采集全部数据"}
+            {collecting ? "采集中…" : "一键采集全部数据"}
           </Button>,
           collecting ? (
             <Button key="cancel" danger onClick={cancelCollection}>
@@ -218,7 +218,7 @@ export default function Dashboard() {
           ) : null,
           <Tooltip key="sync-dashboard" title="仅采集仪表盘核心数据，约需 30 秒，适合快速查看最新概览" placement="bottomRight">
             <Button onClick={startSyncDashboard} loading={syncingDashboard}>
-              {syncingDashboard ? "刷新中..." : "快速刷新概览"}
+              {syncingDashboard ? "刷新中…" : "快速刷新概览"}
             </Button>
           </Tooltip>,
         ].filter(Boolean)}

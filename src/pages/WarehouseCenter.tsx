@@ -25,6 +25,7 @@ import {
 const { Text } = Typography;
 const erp = window.electronAPI?.erp;
 const WAREHOUSE_WORKBENCH_CACHE_KEY = "temu.warehouse.workbench.cache.v2";
+const DEFAULT_INBOUND_RECEIPT_PAGE_SIZE = 20;
 
 interface InboundReceiptRow {
   id: string;
@@ -71,6 +72,7 @@ interface InventoryBatchRow {
 interface WarehouseWorkbench {
   generatedAt?: string;
   summary?: Record<string, number>;
+  inboundReceiptPage?: { limit?: number; offset?: number; total?: number };
   inboundReceipts?: InboundReceiptRow[];
   inventoryBatches?: InventoryBatchRow[];
 }
@@ -84,6 +86,16 @@ export default function WarehouseCenter() {
     [],
   );
   const [data, setData] = useState<WarehouseWorkbench>(cachedData);
+  const [inboundReceiptPageSize, setInboundReceiptPageSize] = useState(() => (
+    Math.max(1, Number(cachedData.inboundReceiptPage?.limit || DEFAULT_INBOUND_RECEIPT_PAGE_SIZE))
+  ));
+  const [inboundReceiptPage, setInboundReceiptPage] = useState(() => {
+    const limit = Math.max(1, Number(cachedData.inboundReceiptPage?.limit || DEFAULT_INBOUND_RECEIPT_PAGE_SIZE));
+    return Math.floor(Number(cachedData.inboundReceiptPage?.offset || 0) / limit) + 1;
+  });
+  const [inboundReceiptTotal, setInboundReceiptTotal] = useState(() => (
+    Number(cachedData.inboundReceiptPage?.total ?? cachedData.summary?.inboundReceiptCount ?? cachedData.inboundReceipts?.length ?? 0)
+  ));
   const [loadedOnce, setLoadedOnce] = useState(() => hasPageCache(cachedData));
   const [loading, setLoading] = useState(false);
   const [actingKey, setActingKey] = useState<string | null>(null);
@@ -95,8 +107,18 @@ export default function WarehouseCenter() {
     loading: boolean;
   } | null>(null);
 
+  const buildWorkbenchParams = useCallback(() => ({
+    inboundReceiptLimit: inboundReceiptPageSize,
+    inboundReceiptOffset: (Math.max(1, inboundReceiptPage) - 1) * inboundReceiptPageSize,
+  }), [inboundReceiptPage, inboundReceiptPageSize]);
+
   const applyWorkbench = useCallback((workbench: WarehouseWorkbench) => {
     const nextWorkbench = workbench || {};
+    if (nextWorkbench.inboundReceiptPage) {
+      setInboundReceiptTotal(Number(nextWorkbench.inboundReceiptPage.total || 0));
+    } else if (nextWorkbench.summary?.inboundReceiptCount !== undefined) {
+      setInboundReceiptTotal(Number(nextWorkbench.summary.inboundReceiptCount || 0));
+    }
     setData(nextWorkbench);
     setLoadedOnce(true);
     writePageCache(WAREHOUSE_WORKBENCH_CACHE_KEY, nextWorkbench);
@@ -106,13 +128,13 @@ export default function WarehouseCenter() {
     if (!erp) return;
     if (!options.silent) setLoading(true);
     try {
-      applyWorkbench(await erp.warehouse.workbench({ limit: 2000 }));
+      applyWorkbench(await erp.warehouse.workbench(buildWorkbenchParams()));
     } catch (error: any) {
       if (!options.silent) message.error(error?.message || "仓库中心读取失败");
     } finally {
       if (!options.silent) setLoading(false);
     }
-  }, [applyWorkbench]);
+  }, [applyWorkbench, buildWorkbenchParams]);
 
   useEffect(() => {
     // 异步加载：缓存有就 silent，无 spinner / 不闪屏；缓存空才显示加载状态。
@@ -123,8 +145,8 @@ export default function WarehouseCenter() {
     if (!erp) return;
     setActingKey(key);
     try {
-      const result = await erp.warehouse.action({ ...payload, limit: 2000 });
-      applyWorkbench(result?.workbench || await erp.warehouse.workbench({ limit: 2000 }));
+      const result = await erp.warehouse.action({ ...payload, ...buildWorkbenchParams() });
+      applyWorkbench(result?.workbench || await erp.warehouse.workbench(buildWorkbenchParams()));
       message.success(successText);
     } catch (error: any) {
       message.error(error?.message || "操作失败");
@@ -403,7 +425,23 @@ export default function WarehouseCenter() {
           columns={receiptColumns}
           dataSource={data.inboundReceipts || []}
           scroll={{ x: 1100 }}
-          pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
+          pagination={{
+            current: inboundReceiptPage,
+            pageSize: inboundReceiptPageSize,
+            total: inboundReceiptTotal,
+            showSizeChanger: true,
+            pageSizeOptions: [20, 50, 100, 200],
+            showTotal: (total, range) => `显示 ${range[0]}-${range[1]} / ${total} 条`,
+            onChange: (nextPage, nextPageSize) => {
+              setSelectedReceiptId(null);
+              if (nextPageSize !== inboundReceiptPageSize) {
+                setInboundReceiptPageSize(nextPageSize);
+                setInboundReceiptPage(1);
+                return;
+              }
+              setInboundReceiptPage(nextPage);
+            },
+          }}
           rowClassName={(record) => (record.id === selectedReceiptId ? "ant-table-row-selected" : "")}
           onRow={(record) => ({
             onClick: () => setSelectedReceiptId((prev) => (prev === record.id ? null : record.id)),

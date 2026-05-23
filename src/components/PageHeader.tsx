@@ -22,12 +22,12 @@ export default function PageHeader({
 }: PageHeaderProps) {
   const actionList = Array.isArray(actions) ? actions : actions ? [actions] : [];
   const metaList = Array.isArray(meta) ? meta : meta ? [meta] : [];
-  const rootClassName = ["app-page-header", "app-surface", compact ? "app-page-header--compact" : "", className]
+  const rootClassName = ["app-page-header", compact ? "app-page-header--compact" : "", className]
     .filter(Boolean)
     .join(" ");
 
   return (
-    <div className={rootClassName}>
+    <header className={rootClassName}>
       <div className="app-page-header__content">
         {eyebrow ? <div className="app-page-header__eyebrow">{eyebrow}</div> : null}
         <h1 className="app-page-header__title">{title}</h1>
@@ -47,6 +47,6 @@ export default function PageHeader({
           ))}
         </Space>
       ) : null}
-    </div>
+    </header>
   );
 }

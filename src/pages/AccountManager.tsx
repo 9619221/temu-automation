@@ -74,7 +74,7 @@ interface Account {
 const statusConfig = {
   online: { color: "#52c41a", text: "在线", dot: "#52c41a" },
   offline: { color: "default", text: "离线", dot: "#d9d9d9" },
-  logging_in: { color: "processing", text: "登录中...", dot: "#1890ff" },
+  logging_in: { color: "processing", text: "登录中…", dot: "#1890ff" },
   error: { color: "red", text: "异常", dot: "#ff4d4f" },
 };
 
@@ -370,7 +370,7 @@ export default function AccountManager() {
     notification.info({
       key: "login",
       message: "正在启动浏览器",
-      description: `正在为「${account.name}」启动浏览器并登录 Temu 卖家后台...`,
+      description: `正在为「${account.name}」启动浏览器并登录 Temu 卖家后台…`,
       duration: 0,
     });
     try {

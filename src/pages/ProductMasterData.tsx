@@ -907,7 +907,7 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
                   optionFilterProp="label"
                   options={alibaba1688AddressOptions}
                   loading={addressLoading}
-                  notFoundContent={addressLoading ? "正在加载 1688 地址..." : "暂无 1688 地址"}
+                  notFoundContent={addressLoading ? "正在加载 1688 地址…" : "暂无 1688 地址"}
                   placeholder="从已同步地址选择"
                   onChange={applySelected1688AddressToAccountForm}
                 />
@@ -1218,7 +1218,7 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
                   optionFilterProp="label"
                   options={alibaba1688AddressOptions}
                   loading={addressLoading}
-                  notFoundContent={addressLoading ? "正在加载 1688 地址..." : "暂无 1688 地址"}
+                  notFoundContent={addressLoading ? "正在加载 1688 地址…" : "暂无 1688 地址"}
                   placeholder="从已同步地址选择"
                   onChange={applySelected1688AddressToStoreForm}
                 />

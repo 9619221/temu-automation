@@ -92,6 +92,12 @@ const BROADCAST_PURCHASE_ACTIONS = new Set([
   "ensure_1688_supplier_profile_once",
   "save_1688_address",
   "sync_1688_addresses",
+  "list_1688_purchase_accounts",
+  "delete_1688_purchase_account",
+  "update_1688_purchase_account",
+  "update_1688_purchase_account_label",
+  "set_account_default_1688_purchase",
+  "set_default_1688_purchase_account",
   "upsert_sku_1688_source",
   "delete_sku_1688_source",
   "bind_1688_candidate_spec",
@@ -1473,7 +1479,7 @@ function update1688PurchaseAccount({ id, companyId, label, status }, actor) {
 }
 
 function setAccount1688DefaultPurchase({ accountId, default1688AccountId, companyId }, actor) {
-  assertActorRole(actor, ["admin", "manager", "buyer"], "Temu 店铺默认 1688 采购账号设置");
+  assertActorRole(actor, ["admin", "manager"], "Temu 店铺默认 1688 采购账号设置");
   const { db } = requireErp();
   const normalizedCompanyId = normalizeCompanyId(companyId, null);
   const acctId = requireString(accountId, "accountId");
@@ -8421,6 +8427,32 @@ function buildPurchaseOrderNo(db) {
   return String(nextSerial).padStart(6, "0");
 }
 
+function purchaseOrderNoExists(db, accountId, poNo) {
+  const normalizedPoNo = optionalString(poNo);
+  if (!normalizedPoNo) return false;
+  const row = db.prepare(`
+    SELECT id
+    FROM erp_purchase_orders
+    WHERE account_id = ? AND po_no = ?
+    LIMIT 1
+  `).get(accountId, normalizedPoNo);
+  return Boolean(row?.id);
+}
+
+function resolvePurchaseOrderNo(db, accountId, requestedPoNo) {
+  const requested = optionalString(requestedPoNo);
+  if (requested && !purchaseOrderNoExists(db, accountId, requested)) return requested;
+  let nextPoNo = buildPurchaseOrderNo(db);
+  while (purchaseOrderNoExists(db, accountId, nextPoNo)) {
+    const nextSerial = Number(nextPoNo) + 1;
+    if (!Number.isFinite(nextSerial) || nextSerial > 999999) {
+      throw new Error("采购单号流水已超过 999999，请调整编号规则");
+    }
+    nextPoNo = String(nextSerial).padStart(6, "0");
+  }
+  return nextPoNo;
+}
+
 function resolveExpectedDeliveryDate(candidate, payload = {}) {
   const explicit = optionalString(payload.expectedDeliveryDate);
   if (explicit) return explicit;
@@ -8546,7 +8578,7 @@ function generatePurchaseOrderAction({ db, services, payload, actor }) {
     pr_id: pr.id,
     selected_candidate_id: candidate.id,
     supplier_id: candidate.supplier_id || null,
-    po_no: optionalString(payload.poNo) || buildPurchaseOrderNo(db),
+    po_no: resolvePurchaseOrderNo(db, pr.account_id, payload.poNo || payload.po_no),
     status: "draft",
     payment_status: "unpaid",
     expected_delivery_date: resolveExpectedDeliveryDate(candidate, payload),
@@ -12733,6 +12765,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
   // === Multi 1688 采购账号管理（v0.2.8+）===
 
   if (action === "list_1688_purchase_accounts") {
+    assertActorRole(actor, ["admin", "manager", "buyer"], "1688 采购账号列表");
     const result = list1688PurchaseAccounts(actor?.companyId);
     return { action, result, workbench: {} };
   }
@@ -12746,7 +12779,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return { action, result, workbench: {} };
   }
 
-  if (action === "update_1688_purchase_account") {
+  if (action === "update_1688_purchase_account" || action === "update_1688_purchase_account_label") {
     const result = update1688PurchaseAccount({
       id: payload.id,
       label: payload.label,
@@ -12757,7 +12790,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     return { action, result, workbench: {} };
   }
 
-  if (action === "set_account_default_1688_purchase") {
+  if (action === "set_account_default_1688_purchase" || action === "set_default_1688_purchase_account") {
     const result = setAccount1688DefaultPurchase({
       accountId: payload.accountId,
       default1688AccountId: payload.default1688AccountId,
@@ -13088,13 +13121,45 @@ function toInboundReceipt(row) {
 function getWarehouseWorkbench(params = {}) {
   const { db } = requireErp();
   const accountId = optionalString(params.accountId);
-  const limit = normalizeLimit(params.limit, 50);
+  const rawInboundReceiptLimit = params.inboundReceiptLimit
+    ?? params.inbound_receipt_limit
+    ?? params.receiptLimit
+    ?? params.receipt_limit
+    ?? params.limit;
+  const hasInboundReceiptLimit = rawInboundReceiptLimit !== undefined
+    && rawInboundReceiptLimit !== null
+    && rawInboundReceiptLimit !== ""
+    && Number(rawInboundReceiptLimit) > 0;
+  const inboundReceiptLimit = hasInboundReceiptLimit ? normalizeLimit(rawInboundReceiptLimit, 20) : null;
+  const inboundReceiptOffset = normalizeOffset(
+    params.inboundReceiptOffset || params.inbound_receipt_offset || params.receiptOffset || params.receipt_offset || params.offset,
+  );
+  const inboundReceiptLimitClause = hasInboundReceiptLimit ? "LIMIT @receipt_limit OFFSET @receipt_offset" : "";
   const receiptWhereAccount = accountId ? "WHERE receipt.account_id = @account_id" : "";
   const batchWhereAccount = accountId ? "WHERE batch.account_id = @account_id" : "";
   const baseParams = {
     account_id: accountId,
-    limit,
+    receipt_limit: inboundReceiptLimit,
+    receipt_offset: inboundReceiptOffset,
   };
+
+  const receiptSummary = db.prepare(`
+    SELECT
+      COUNT(DISTINCT receipt.id) AS inbound_receipt_count,
+      COUNT(DISTINCT CASE WHEN receipt.status = 'pending_arrival' THEN receipt.id END) AS pending_arrival_count,
+      COUNT(DISTINCT CASE WHEN receipt.status = 'arrived' THEN receipt.id END) AS arrived_count,
+      COUNT(DISTINCT CASE WHEN receipt.status = 'counted' THEN receipt.id END) AS counted_count,
+      COUNT(DISTINCT CASE WHEN receipt.status = 'inbounded_pending_qc' THEN receipt.id END) AS inbounded_pending_qc_count,
+      COALESCE(SUM(line.received_qty), 0) AS received_qty
+    FROM erp_inbound_receipts receipt
+    LEFT JOIN erp_inbound_receipt_lines line ON line.receipt_id = receipt.id
+    ${receiptWhereAccount}
+  `).get(baseParams) || {};
+  const inventoryBatchSummary = db.prepare(`
+    SELECT COUNT(*) AS inventory_batch_count
+    FROM erp_inventory_batches batch
+    ${batchWhereAccount}
+  `).get(baseParams) || {};
 
   const inboundReceipts = db.prepare(`
     SELECT
@@ -13123,17 +13188,10 @@ function getWarehouseWorkbench(params = {}) {
     ${receiptWhereAccount}
     GROUP BY receipt.id
     ORDER BY
-      CASE receipt.status
-        WHEN 'pending_arrival' THEN 0
-        WHEN 'arrived' THEN 1
-        WHEN 'counted' THEN 2
-        WHEN 'inbounded_pending_qc' THEN 3
-        WHEN 'quantity_mismatch' THEN 4
-        WHEN 'damaged' THEN 5
-        ELSE 9
-      END,
+      CASE WHEN NULLIF(TRIM(COALESCE(receipt.received_at, '')), '') IS NULL THEN 1 ELSE 0 END,
+      receipt.received_at DESC,
       receipt.updated_at DESC
-    LIMIT @limit
+    ${inboundReceiptLimitClause}
   `).all(baseParams).map(toInboundReceipt);
 
   const inventoryBatches = db.prepare(`
@@ -13151,22 +13209,26 @@ function getWarehouseWorkbench(params = {}) {
     LEFT JOIN erp_suppliers supplier ON supplier.id = po.supplier_id
     ${batchWhereAccount}
     ORDER BY batch.created_at DESC
-    LIMIT @limit
   `).all(baseParams).map(toCamelRow);
 
   const summary = {
-    inboundReceiptCount: inboundReceipts.length,
-    pendingArrivalCount: inboundReceipts.filter((item) => item.status === "pending_arrival").length,
-    arrivedCount: inboundReceipts.filter((item) => item.status === "arrived").length,
-    countedCount: inboundReceipts.filter((item) => item.status === "counted").length,
-    inboundedPendingQcCount: inboundReceipts.filter((item) => item.status === "inbounded_pending_qc").length,
-    inventoryBatchCount: inventoryBatches.length,
-    receivedQty: inboundReceipts.reduce((sum, item) => sum + Number(item.receivedQty || 0), 0),
+    inboundReceiptCount: Number(receiptSummary.inbound_receipt_count || 0),
+    pendingArrivalCount: Number(receiptSummary.pending_arrival_count || 0),
+    arrivedCount: Number(receiptSummary.arrived_count || 0),
+    countedCount: Number(receiptSummary.counted_count || 0),
+    inboundedPendingQcCount: Number(receiptSummary.inbounded_pending_qc_count || 0),
+    inventoryBatchCount: Number(inventoryBatchSummary.inventory_batch_count || 0),
+    receivedQty: Number(receiptSummary.received_qty || 0),
   };
 
   return {
     generatedAt: nowIso(),
     summary,
+    inboundReceiptPage: {
+      limit: inboundReceiptLimit || inboundReceipts.length,
+      offset: hasInboundReceiptLimit ? inboundReceiptOffset : 0,
+      total: Number(receiptSummary.inbound_receipt_count || 0),
+    },
     inboundReceipts,
     inventoryBatches,
   };
@@ -14656,7 +14718,11 @@ async function performPurchaseActionRuntime(payload = {}) {
 
 async function getWarehouseWorkbenchRuntime(params = {}) {
   if (isClientMode()) {
-    const payload = await remoteRequest("/api/warehouse/workbench");
+    const payload = await remoteRequest("/api/warehouse/workbench", {
+      method: "POST",
+      body: params,
+      timeoutMs: 120000,
+    });
     return normalizeJstWarehouseWorkbench(payload.workbench || {});
   }
   return getWarehouseWorkbench(params);

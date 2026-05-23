@@ -99,25 +99,42 @@ function sourceEventIds(row) {
   return Array.from(new Set(Object.values(sources).map(normalizeId).filter(Boolean)));
 }
 
-function getRawProductPayload(db, tenantId, row) {
-  const ids = sourceEventIds(row);
-  if (ids.length === 0) return {};
-  const placeholders = ids.map(() => "?").join(",");
-  const events = db.prepare(`
+function getCachedRawEvent(db, tenantId, eventId, eventCache) {
+  const id = normalizeId(eventId);
+  if (!id) return null;
+  const key = `${tenantId}|${id}`;
+  if (eventCache && eventCache.has(key)) return eventCache.get(key);
+  const event = db.prepare(`
     SELECT id, url_path, method, status, ts, body_size, body_json
     FROM capture_events
-    WHERE tenant_id = ? AND id IN (${placeholders})
-    ORDER BY ts DESC
-  `).all(tenantId, ...ids);
+    WHERE tenant_id = ? AND id = ?
+  `).get(tenantId, id);
+  if (!event) {
+    if (eventCache) eventCache.set(key, null);
+    return null;
+  }
+  const body = safeJsonParse(event.body_json);
+  const { body_json: _bodyJson, ...rawSource } = event;
+  const cached = { body, rawSource };
+  if (eventCache) eventCache.set(key, cached);
+  return cached;
+}
+
+function getRawProductPayload(db, tenantId, row, eventCache = null) {
+  const ids = sourceEventIds(row);
+  if (ids.length === 0) return {};
+  const events = ids
+    .map((id) => getCachedRawEvent(db, tenantId, id, eventCache))
+    .filter(Boolean)
+    .sort((left, right) => Number(right.rawSource?.ts || 0) - Number(left.rawSource?.ts || 0));
 
   for (const event of events) {
-    const body = safeJsonParse(event.body_json);
+    const body = event.body;
     const rawItem = deepFindRawItem(body, row);
     if (!rawItem) continue;
-    const { body_json: _bodyJson, ...rawSource } = event;
     return {
       raw_item: rawItem,
-      raw_source: rawSource,
+      raw_source: event.rawSource,
     };
   }
   return {};
@@ -515,12 +532,13 @@ r.get("/temu-sales", (req, res) => {
     }
   }
   const usedFlowKeys = new Set();
+  const rawEventCache = new Map();
   const payloadRows = rows.map((row) => {
     const flow = productFlowKeys(row).map((key) => flowByKey.get(key)).find(Boolean);
     if (flow) {
       for (const key of productFlowKeys(flow)) usedFlowKeys.add(key);
     }
-    const rawPayload = getRawProductPayload(db, tid, row);
+    const rawPayload = getRawProductPayload(db, tid, row, rawEventCache);
     const trendPayload = getSkuSalesTrendPayload(db, tid, rawPayload.raw_item, row.mall_supplier_id);
     return withTrendSalesFallback(withProductFlowFallback({
       ...row,
@@ -534,7 +552,7 @@ r.get("/temu-sales", (req, res) => {
       const flowRow = buildProductFlowSalesRow(flow);
       payloadRows.push({
         ...flowRow,
-        ...getRawProductPayload(db, tid, flowRow),
+        ...getRawProductPayload(db, tid, flowRow, rawEventCache),
       });
       for (const key of keys) usedFlowKeys.add(key);
     }

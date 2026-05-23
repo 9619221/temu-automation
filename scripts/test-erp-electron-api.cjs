@@ -119,6 +119,142 @@ async function main() {
     });
     assert.equal(financeUser.role, "finance");
 
+    const authSeedDb = openErpDatabase({ userDataDir: tempUserData });
+    try {
+      const authNow = new Date().toISOString();
+      authSeedDb.transaction(() => {
+        const insertAuth = authSeedDb.prepare(`
+          INSERT INTO erp_1688_auth_settings (
+            id, company_id, app_key, app_secret, redirect_uri, access_token,
+            refresh_token, member_id, ali_id, resource_owner, token_payload_json,
+            access_token_expires_at, refresh_token_expires_at, authorized_at,
+            label, status, created_at, updated_at
+          )
+          VALUES (
+            @id, 'company_default', @app_key, @app_secret, @redirect_uri, @access_token,
+            @refresh_token, @member_id, @ali_id, @resource_owner, '{}',
+            @access_token_expires_at, @refresh_token_expires_at, @authorized_at,
+            @label, @status, @created_at, @updated_at
+          )
+        `);
+        insertAuth.run({
+          id: "1688_auth_ipc_a",
+          app_key: "app_key_a",
+          app_secret: "app_secret_a",
+          redirect_uri: "http://127.0.0.1:8788/1688/callback-a",
+          access_token: "access_token_a",
+          refresh_token: "refresh_token_a",
+          member_id: "member_a",
+          ali_id: "ali_a",
+          resource_owner: "owner_a",
+          access_token_expires_at: "2099-01-01T00:00:00.000Z",
+          refresh_token_expires_at: "2099-01-01T00:00:00.000Z",
+          authorized_at: authNow,
+          label: "账号 A",
+          status: "active",
+          created_at: authNow,
+          updated_at: authNow,
+        });
+        insertAuth.run({
+          id: "1688_auth_ipc_b",
+          app_key: "app_key_b",
+          app_secret: "app_secret_b",
+          redirect_uri: "http://127.0.0.1:8788/1688/callback-b",
+          access_token: "access_token_b",
+          refresh_token: "refresh_token_b",
+          member_id: "member_b",
+          ali_id: "ali_b",
+          resource_owner: "owner_b",
+          access_token_expires_at: "2099-01-01T00:00:00.000Z",
+          refresh_token_expires_at: "2099-01-01T00:00:00.000Z",
+          authorized_at: authNow,
+          label: "账号 B",
+          status: "active",
+          created_at: authNow,
+          updated_at: authNow,
+        });
+      })();
+    } finally {
+      authSeedDb.close();
+    }
+
+    const purchaseAccounts = await invoke("erp:purchase:action", {
+      action: "list_1688_purchase_accounts",
+      actor: { id: buyer.id, role: buyer.role },
+    });
+    assert.equal(purchaseAccounts.result.accounts.length, 2);
+    const purchaseAccountA = purchaseAccounts.result.accounts.find((item) => item.id === "1688_auth_ipc_a");
+    assert.ok(purchaseAccountA);
+    assert.equal(purchaseAccountA.configured, true);
+    assert.equal(purchaseAccountA.authorized, true);
+    assert.equal(Object.prototype.hasOwnProperty.call(purchaseAccountA, "accessToken"), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(purchaseAccountA, "refreshToken"), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(purchaseAccountA, "appSecret"), false);
+
+    await assert.rejects(
+      () => invoke("erp:purchase:action", {
+        action: "list_1688_purchase_accounts",
+        actor: { id: financeUser.id, role: financeUser.role },
+      }),
+      /admin, manager, buyer/,
+    );
+
+    const renamedPurchaseAccount = await invoke("erp:purchase:action", {
+      action: "update_1688_purchase_account_label",
+      id: "1688_auth_ipc_a",
+      label: "主买手账号",
+      status: "active",
+      actor: { id: user.id, role: "admin" },
+    });
+    assert.equal(renamedPurchaseAccount.result.account.label, "主买手账号");
+
+    await assert.rejects(
+      () => invoke("erp:purchase:action", {
+        action: "set_default_1688_purchase_account",
+        accountId: account.id,
+        default1688AccountId: "1688_auth_ipc_a",
+        actor: { id: buyer.id, role: buyer.role },
+      }),
+      /admin, manager/,
+    );
+
+    const setDefault1688PurchaseAccount = await invoke("erp:purchase:action", {
+      action: "set_default_1688_purchase_account",
+      accountId: account.id,
+      default1688AccountId: "1688_auth_ipc_a",
+      actor: { id: user.id, role: "admin" },
+    });
+    assert.equal(setDefault1688PurchaseAccount.result.ok, true);
+    assert.equal(setDefault1688PurchaseAccount.result.default1688AccountId, "1688_auth_ipc_a");
+
+    await assert.rejects(
+      () => invoke("erp:purchase:action", {
+        action: "delete_1688_purchase_account",
+        id: "1688_auth_ipc_a",
+        actor: { id: user.id, role: "admin" },
+      }),
+      (error) => {
+        assert.equal(error.code, "PURCHASE_ACCOUNT_IN_USE");
+        assert.equal(error.occupants?.[0]?.id, account.id);
+        assert.match(error.message, /无法删除/);
+        return true;
+      },
+    );
+
+    await invoke("erp:purchase:action", {
+      action: "set_default_1688_purchase_account",
+      accountId: account.id,
+      default1688AccountId: null,
+      actor: { id: user.id, role: "admin" },
+    });
+    const deletedPurchaseAccount = await invoke("erp:purchase:action", {
+      action: "delete_1688_purchase_account",
+      id: "1688_auth_ipc_a",
+      actor: { id: user.id, role: "admin" },
+    });
+    assert.equal(deletedPurchaseAccount.result.ok, true);
+    assert.equal(deletedPurchaseAccount.result.id, "1688_auth_ipc_a");
+
     const accountScope = await invoke("erp:permission:upsert-scope", {
       userId: buyer.id,
       resourceType: "account",
@@ -1610,6 +1746,29 @@ async function main() {
     });
     assert.equal(ratioPo.result.sku1688Source.ourQty, 2);
     assert.equal(ratioPo.result.sku1688Source.platformQty, 5);
+
+    const duplicatePoNoPr = await invoke("erp:purchase:action", {
+      action: "create_pr",
+      actor: { id: user.id, role: user.role },
+      accountId: account.id,
+      skuId: ratioSku.id,
+      requestedQty: 2,
+      targetUnitCost: 8,
+      reason: "duplicate po no regression",
+      includeWorkbench: false,
+    });
+    const duplicatePoNoResult = await invoke("erp:purchase:action", {
+      action: "generate_po",
+      actor: { id: buyer.id, role: buyer.role },
+      prId: duplicatePoNoPr.result.id,
+      preferSku1688Source: true,
+      qty: 2,
+      poId: "po_duplicate_no_ipc",
+      poNo: "PO-RATIO-IPC",
+      includeWorkbench: false,
+    });
+    assert.notEqual(duplicatePoNoResult.result.purchaseOrder.poNo, "PO-RATIO-IPC");
+    assert.match(duplicatePoNoResult.result.purchaseOrder.poNo, /^\d{6}$/);
 
     const ratioValidation = await invoke("erp:purchase:action", {
       action: "validate_1688_order_push",

@@ -4357,7 +4357,7 @@ export default function ProductList() {
             </Space>
             {gpDetailLoading ? (
               <div style={{ height: 240, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                <Spin tip="正在读取缓存..." />
+                <Spin tip="正在读取缓存…" />
               </div>
             ) : gpDetailData && gpDetailData.rows?.length > 0 ? (
               <>

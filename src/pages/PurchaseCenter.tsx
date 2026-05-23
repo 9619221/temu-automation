@@ -29,7 +29,7 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type { TableRowSelection } from "antd/es/table/interface";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import {
   ApiOutlined,
   CheckCircleOutlined,
@@ -90,6 +90,8 @@ const MINIMIZED_IMAGE_SEARCH_HEIGHT = 58;
 const MINIMIZED_IMAGE_SEARCH_MARGIN = 8;
 const PURCHASE_WORKBENCH_CACHE_KEY = "temu.purchase.workbench.cache.v3";
 const PURCHASE_ORDER_DEFAULT_PAGE_SIZE = 20;
+const PURCHASE_REQUEST_REASON_SOURCING = "找品";
+const PURCHASE_REQUEST_REASON_OPTIMIZATION = "优化";
 const FAST_PURCHASE_WORKBENCH_PARAMS = {
   limit: 2000,
   purchaseOrderLimit: PURCHASE_ORDER_DEFAULT_PAGE_SIZE,
@@ -594,6 +596,11 @@ interface OfflinePoFormValues {
   unitPrice: number;
   logisticsFee?: number;
   qty: number;
+}
+
+interface DirectPoFormValues extends OfflinePoFormValues {
+  skuIds: string[];
+  specText?: string;
 }
 
 interface Source1688FormValues {
@@ -1331,6 +1338,7 @@ type PurchaseQueueKey =
   | "po_exception";
 
 type PurchaseWorkArea = "sourcing" | "orders";
+type RequestCreateMode = "sourcing" | "optimization";
 
 interface PurchaseQueueItem {
   key: PurchaseQueueKey;
@@ -1351,8 +1359,24 @@ function isPendingPurchaseRequest(row: PurchaseRequestRow) {
   return ACTIVE_REQUEST_STATUSES.has(row.status);
 }
 
-// 是否已绑任意货源：1688 映射 / 报价候选 / SKU 供应商三者任一。
-// 口径跟货源列橙色「待找品」Tag (noSource) 完全一致，取反即「有货源」。
+function purchaseRequestMode(row: PurchaseRequestRow): RequestCreateMode {
+  const reason = String(row.reason || "").trim();
+  return /优化|optim/i.test(reason) ? "optimization" : "sourcing";
+}
+
+function isSourcingPurchaseRequest(row: PurchaseRequestRow) {
+  return purchaseRequestMode(row) === "sourcing";
+}
+
+function isOptimizationPurchaseRequest(row: PurchaseRequestRow) {
+  return purchaseRequestMode(row) === "optimization";
+}
+
+function isCompletedRequestStage(row: PurchaseRequestRow) {
+  return row.status === "sourced" || row.status === "waiting_ops_confirm";
+}
+
+// 是否已有任意可用货源：只用于货源信息展示和采购单路径，不再决定找品/优化分组。
 function purchaseRequestHasSource(row: PurchaseRequestRow) {
   return Number(row.mappingCount || 0) > 0
     || Boolean(row.candidates?.length || row.candidateCount)
@@ -1361,7 +1385,8 @@ function purchaseRequestHasSource(row: PurchaseRequestRow) {
 }
 
 function purchaseRequestIsOptimized(row: PurchaseRequestRow) {
-  if (!purchaseRequestHasSource(row)) return false;
+  if (!isOptimizationPurchaseRequest(row)) return false;
+  if (isCompletedRequestStage(row)) return true;
   if (Number(row.selectedCandidateCount || 0) > 0) return true;
 
   const targetUnitCost = optionalFiniteNumber(row.targetUnitCost);
@@ -1374,8 +1399,19 @@ function purchaseRequestIsOptimized(row: PurchaseRequestRow) {
 
 function purchaseRequestNeedsOptimization(row: PurchaseRequestRow) {
   return isPendingPurchaseRequest(row)
-    && purchaseRequestHasSource(row)
+    && isOptimizationPurchaseRequest(row)
     && !purchaseRequestIsOptimized(row);
+}
+
+function purchaseRequestTaskStage(row: PurchaseRequestRow) {
+  if (isOptimizationPurchaseRequest(row)) {
+    return purchaseRequestIsOptimized(row)
+      ? { label: "已优化", color: "green" }
+      : { label: "待优化", color: "gold" };
+  }
+  return isCompletedRequestStage(row)
+    ? { label: "已找品", color: "cyan" }
+    : { label: "待找品", color: "orange" };
 }
 
 // PR 早期阶段（还没流转到 sourced）：运营刚提交 / 采购处理中。
@@ -1659,6 +1695,7 @@ async function prepareUploadImage(file: File) {
 
 export default function PurchaseCenter({ initialStoreManagerOpen = false, workArea }: PurchaseCenterProps) {
   const navigate = useNavigate();
+  const location = useLocation();
   const auth = useErpAuth();
   const role = auth.currentUser?.role || "";
   const canCreateRequest = canRole(role, ["operations", "manager", "admin"]);
@@ -1761,6 +1798,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   // 让用户点「推送1688下单」时直接 0 RTT 弹 Modal。state 空时各调用处会回退到现拉。
   const [purchase1688Accounts, setPurchase1688Accounts] = useState<Purchase1688Account[]>([]);
   const [requestOpen, setRequestOpen] = useState(false);
+  const [requestCreateMode, setRequestCreateMode] = useState<RequestCreateMode>("sourcing");
+  const [directPoOpen, setDirectPoOpen] = useState(false);
   const [quotePrId, setQuotePrId] = useState<string | null>(null);
   const [offlinePoTarget, setOfflinePoTarget] = useState<
     | { mode: "create"; pr: PurchaseRequestRow }
@@ -1867,6 +1906,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   const [bindingPlatformQty, setBindingPlatformQty] = useState(1);
 
   const [requestForm] = Form.useForm<RequestFormValues>();
+  const [directPoForm] = Form.useForm<DirectPoFormValues>();
   const [quoteForm] = Form.useForm<QuoteFormValues>();
   const [offlinePoForm] = Form.useForm<OfflinePoFormValues>();
   const [source1688Form] = Form.useForm<Source1688FormValues>();
@@ -1880,10 +1920,42 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     setPurchaseOrderPage(1);
   }, []);
 
+  const routeFocusPo = useMemo(() => {
+    const fromSearch = new URLSearchParams(location.search || "").get("focusPo");
+    return String(fromSearch || readFocusPoFromHash() || "").trim();
+  }, [location.search, location.key]);
+
+  const focusPurchaseOrder = useCallback((po?: PurchaseOrderRow | null, fallbackId?: string | null) => {
+    const focusPo = String(po?.poNo || po?.id || fallbackId || "").trim();
+    if (workArea === "sourcing") {
+      navigate(`/purchase-center${focusPo ? `?focusPo=${encodeURIComponent(focusPo)}` : ""}`);
+      return;
+    }
+    switchWorkArea("orders");
+    setActiveQueueKey("all");
+    if (focusPo) {
+      setPurchaseOrderFilterDraft((prev) => ({ ...prev, poNo: focusPo }));
+      setPurchaseOrderFilters((prev) => ({ ...prev, poNo: focusPo }));
+    }
+  }, [navigate, switchWorkArea, workArea]);
+
   useEffect(() => {
     if (!workArea) return;
     switchWorkArea(workArea);
   }, [switchWorkArea, workArea]);
+
+  useEffect(() => {
+    if (activeWorkArea !== "orders" || !routeFocusPo) return;
+    setActiveQueueKey("all");
+    setPurchaseOrderPage(1);
+    setPurchaseOrderFilterDraft((prev) => (
+      prev.poNo === routeFocusPo ? prev : { ...prev, poNo: routeFocusPo }
+    ));
+    setPurchaseOrderFilters((prev) => (
+      prev.poNo === routeFocusPo ? prev : { ...prev, poNo: routeFocusPo }
+    ));
+  }, [activeWorkArea, routeFocusPo]);
+
   const [purchaseSettingsForm] = Form.useForm<PurchaseSettingsFormValues>();
   const [inquiryDialogForm] = Form.useForm<InquiryDialogFormValues>();
 
@@ -2008,19 +2080,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     () => purchaseRequests.filter(isPendingPurchaseRequest),
     [purchaseRequests],
   );
-  // 业务流 tab 用的分组：
-  // 待找品 / 已找品 / 待优化 / 已优化 是 PR 阶段；待推单 / 待付款 / 已付款 / 已完成 是 PO 阶段。
-  // 待找品 = 早期阶段 PR 且没有任何货源（无映射/无报价/无供应商）。
-  // 已绑货源的早期 PR 即便状态没流转，也归到「已找品」，避免有映射的需求混在待找品里。
+  // 找品/优化按新建时写入的 reason 区分，不再用是否绑定映射来改业务阶段。
   const pendingSourcingRequestRows = useMemo(
-    () => purchaseRequests.filter((row) => isEarlyStagePurchaseRequest(row) && !purchaseRequestHasSource(row)),
+    () => purchaseRequests.filter((row) => isSourcingPurchaseRequest(row) && isEarlyStagePurchaseRequest(row)),
     [purchaseRequests],
   );
   const sourcedRequestRows = useMemo(
     () => purchaseRequests.filter((row) =>
-      row.status === "sourced"
-      || row.status === "waiting_ops_confirm"
-      || (isEarlyStagePurchaseRequest(row) && purchaseRequestHasSource(row)),
+      isSourcingPurchaseRequest(row) && isCompletedRequestStage(row),
     ),
     [purchaseRequests],
   );
@@ -3002,6 +3069,22 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     }
   };
 
+  const openRequestCreateModal = (mode: RequestCreateMode) => {
+    setRequestCreateMode(mode);
+    requestForm.resetFields();
+    setRequestUploadImages([]);
+    requestForm.setFieldsValue({
+      requestedQty: 1,
+    });
+    setRequestOpen(true);
+  };
+
+  const openDirectPoCreateModal = () => {
+    directPoForm.resetFields();
+    directPoForm.setFieldsValue({ qty: 1 });
+    setDirectPoOpen(true);
+  };
+
   const openInquiryDialog = (row: PurchaseRequestRow, candidateIds: string[] = []) => {
     const selectableIds = (row.candidates || [])
       .filter((candidate) => !candidateInquirySent(candidate))
@@ -3081,6 +3164,29 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     });
   };
 
+  const resolveSkuForPurchaseInput = async (skuInput: string) => {
+    const value = String(skuInput || "").trim();
+    if (!value) return null;
+    let found = skus.find((sku) => sku.id === value || sku.internalSkuCode === value) || null;
+    if (!found) {
+      try {
+        const list = await erp?.sku?.list?.({ search: value, limit: 50 } as any);
+        const rows: SkuOption[] = Array.isArray(list) ? list : [];
+        found = rows.find((sku) => sku.id === value || sku.internalSkuCode === value) || null;
+        if (found) {
+          setSkus((previous) => {
+            const map = new Map(previous.map((sku) => [sku.id, sku]));
+            map.set(found!.id, found!);
+            return Array.from(map.values());
+          });
+        }
+      } catch {
+        found = null;
+      }
+    }
+    return found;
+  };
+
   const handleCreateRequest = async (values: RequestFormValues) => {
     if (!erp) return;
     const selectedSkuIds = Array.isArray(values.skuIds)
@@ -3121,6 +3227,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
 
     const imageDataUrls = requestUploadImages.map((item) => item.dataUrl);
     const imageFileNames = requestUploadImages.map((item) => item.fileName);
+    const isOptimizationCreate = requestCreateMode === "optimization";
+    const requestReason = isOptimizationCreate ? PURCHASE_REQUEST_REASON_OPTIMIZATION : PURCHASE_REQUEST_REASON_SOURCING;
     let skippedImages = false;
     setActingKey("create-pr");
     let lastResult: any = null;
@@ -3137,7 +3245,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
           requestedQty: values.requestedQty,
           targetUnitCost: values.targetUnitCost,
           specText: values.specText,
-          reason: "找品",
+          reason: requestReason,
           evidenceText: values.evidenceText,
           // 只在最后一笔请求里要 workbench，省掉中间多余的全量刷新
           includeWorkbench: isLast,
@@ -3161,7 +3269,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               requestedQty: values.requestedQty,
               targetUnitCost: values.targetUnitCost,
               specText: values.specText,
-              reason: "找品",
+              reason: requestReason,
               evidenceText: values.evidenceText,
               includeWorkbench: isLast,
             });
@@ -3180,11 +3288,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       }
       // 关 Modal + 提示先行；workbench 用 create_pr 接口自带的，
       // 没有再回退去拉一次（旧后端兼容）
-      message.success(uniqueSelectedSkus.length > 1 ? `已提交 ${uniqueSelectedSkus.length} 条找品` : "找品已提交");
-      if (skippedImages) message.warning("图片过大，找品已提交，图片未上传");
+      message.success(uniqueSelectedSkus.length > 1 ? `已提交 ${uniqueSelectedSkus.length} 条${requestReason}` : `${requestReason}已提交`);
+      if (skippedImages) message.warning(`图片过大，${requestReason}已提交，图片未上传`);
       setRequestOpen(false);
       setRequestUploadImages([]);
       requestForm.resetFields();
+      setActiveQueueKey(isOptimizationCreate ? "request_pending_optimization" : "request_pending_sourcing");
       const wb = lastResult?.workbench;
       if (wb && typeof wb === "object") {
         applyWorkbench(wb);
@@ -3198,11 +3307,10 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
           if (Array.isArray(wb2?.supplierOptions)) setSuppliers(wb2.supplierOptions);
         }).catch(() => {});
       }
-      // 单 PR 创建时：有映射 / 候选 / SKU 供应商才自动 generate PO + 自动推 1688
-      // （绑映射的会弹账号/地址 Modal）。三者都没有的 PR 留在「待找品」tag，
-      // 用户主动点「线下采购单」才建 PO，避免堆出一堆 supplier_id=NULL 占位 draft。
+      // 单条找品创建时：有映射 / 候选 / SKU 供应商才自动 generate PO + 自动推 1688。
+      // 优化需求只进入优化队列，避免刚新建就因为历史映射被直接转成采购单。
       // 多 PR 不自动触发推单 Modal，避免多个 Modal 互相覆盖；用户去列表逐个推。
-      if (createdPrIds.length === 1) {
+      if (!isOptimizationCreate && createdPrIds.length === 1) {
         const targetPrId = createdPrIds[0];
         const refreshedRequests = wb && Array.isArray((wb as any).purchaseRequests)
           ? ((wb as any).purchaseRequests as any[])
@@ -3224,6 +3332,78 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       message.error(error?.message || "采购单创建失败");
     } finally {
       setActingKey(null);
+    }
+  };
+
+  const handleDirectPoSubmit = async (values: DirectPoFormValues) => {
+    if (!erp) return;
+    const skuInput = Array.isArray(values.skuIds)
+      ? String(values.skuIds[0] || "").trim()
+      : "";
+    if (!skuInput) {
+      message.error("请选择商品编码");
+      return;
+    }
+    const sku = await resolveSkuForPurchaseInput(skuInput);
+    if (!sku) {
+      message.error(`未找到商品编码：${skuInput}`);
+      return;
+    }
+    if (!sku.accountId) {
+      message.error("这个商品资料还没有选择所属店铺，请先在商品资料里补齐");
+      return;
+    }
+    const qty = Number(values.qty || 0);
+    if (!Number.isInteger(qty) || qty <= 0) {
+      message.error("请输入采购数量");
+      return;
+    }
+    const supplierName = values.supplierName?.trim() || undefined;
+    const createResult = await runAction("direct-po", {
+      ...FAST_PURCHASE_WORKBENCH_PARAMS,
+      action: "create_pr",
+      accountId: sku.accountId,
+      skuId: sku.id,
+      requestedQty: qty,
+      targetUnitCost: values.unitPrice,
+      specText: values.specText,
+      reason: "直接创建采购单",
+      evidenceText: "采购单页直接创建",
+      includeWorkbench: false,
+      refreshWorkbench: false,
+    });
+    if (!createResult) return;
+    const prId = String(
+      createResult?.result?.purchaseRequest?.id
+      || createResult?.purchaseRequest?.id
+      || createResult?.result?.id
+      || "",
+    );
+    if (!prId) {
+      message.error("采购需求已创建，但没有拿到编号，请刷新后再生成采购单");
+      return;
+    }
+    const poResult = await runAction("direct-po", {
+      action: "generate_po",
+      prId,
+      qty,
+      offlinePurchase: true,
+      supplierId: values.supplierId || undefined,
+      supplierName,
+      unitPrice: values.unitPrice,
+      logisticsFee: values.logisticsFee,
+      includeWorkbench: false,
+      refreshWorkbench: false,
+    }, "采购单已创建");
+    if (!poResult) return;
+    const generatedPo = poResult?.result?.purchaseOrder as PurchaseOrderRow | undefined;
+    setDirectPoOpen(false);
+    directPoForm.resetFields();
+    if (generatedPo?.id) {
+      upsertGeneratedPurchaseOrder(prId, generatedPo);
+      focusPurchaseOrder(generatedPo, prId);
+    } else {
+      void loadData({ silent: true, withSupplemental: false });
     }
   };
 
@@ -3270,7 +3450,10 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       }, "线下采购单已生成");
       if (!result) return;
       const generatedPo = result?.result?.purchaseOrder as PurchaseOrderRow | undefined;
-      if (generatedPo?.id) upsertGeneratedPurchaseOrder(pr.id, generatedPo);
+      if (generatedPo?.id) {
+        upsertGeneratedPurchaseOrder(pr.id, generatedPo);
+        focusPurchaseOrder(generatedPo, pr.id);
+      }
     } else {
       const po = offlinePoTarget.po;
       const result = await runAction(`edit-po-${po.id}`, {
@@ -4076,6 +4259,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
           ? { ...item, localPoId: po.id, localPoNo: po.poNo || po.id, generated: true, error: null }
           : item
       )));
+      setImportDialogOpen(false);
+      focusPurchaseOrder(po as PurchaseOrderRow, po.id);
     }
   };
 
@@ -4300,10 +4485,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     const silent = options?.silent === true;
     const existingPo = purchaseOrders.find((item) => purchaseOrderBelongsToRequest(item, row.id));
     if (row.status === "converted_to_po" || existingPo) {
-      if (existingPo) {
-        setActiveQueueKey("po_draft");
-        setPurchaseSearchText(existingPo.poNo || existingPo.id);
-      }
+      focusPurchaseOrder(existingPo, row.id);
       if (!silent) {
         message.info(existingPo ? `采购单已生成：${existingPo.poNo || existingPo.id}` : "采购单已生成，请刷新后查看采购单列表");
       }
@@ -4331,11 +4513,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     const generatedPo = result?.result?.purchaseOrder as PurchaseOrderRow | undefined;
     if (generatedPo?.id) {
       upsertGeneratedPurchaseOrder(row.id, generatedPo);
+      focusPurchaseOrder(generatedPo, row.id);
     }
     if (result?.result?.alreadyGenerated) {
       if (generatedPo?.id) {
-        setActiveQueueKey("po_draft");
-        setPurchaseSearchText(generatedPo.poNo || generatedPo.id);
+        focusPurchaseOrder(generatedPo, row.id);
       }
       if (!silent) {
         message.info(generatedPo?.id ? `采购单已生成：${generatedPo.poNo || generatedPo.id}` : "采购单已生成，请刷新后查看采购单列表");
@@ -4563,10 +4745,10 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       key: "sourcing",
       width: 120,
       render: (_value, row) => {
-        const noSource = !purchaseRequestHasSource(row);
+        const taskStage = purchaseRequestTaskStage(row);
         return (
           <Space direction="vertical" size={2}>
-            {noSource ? <Tag color="orange" style={{ marginInlineEnd: 0 }}>待找品</Tag> : null}
+            <Tag color={taskStage.color} style={{ marginInlineEnd: 0 }}>{taskStage.label}</Tag>
             <Text>{formatQty(row.mappingCount)} 个映射</Text>
             <Text type="secondary" style={{ fontSize: 12 }}>
               {formatQty(row.candidateCount)} 个报价
@@ -4605,15 +4787,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       fixed: "right",
       align: "right",
       render: (_value, row) => {
-        const hasMapping = Number(row.mappingCount || 0) > 0;
-        const hasSkuSupplier = Boolean(row.skuSupplierId || row.skuSupplierName);
         const hasAnySource = purchaseRequestHasSource(row);
         const existingPo = purchaseOrders.find((item) => purchaseOrderBelongsToRequest(item, row.id));
         const canQuote = canPurchase && ["submitted", "buyer_processing", "sourced"].includes(row.status);
-        const canFindSupplier = canQuote && !hasMapping && !hasSkuSupplier;
+        const canFindSupplier = canQuote;
         const canImageSearch = canQuote;
-        // 无关联 (hasAnySource=false) 时也允许生成采购单，走"线下采购单"
-        // 路径——后端用空候选创建 placeholder PO，用户后续手工补供应商/价格。
+        // 即使还没绑定货源也允许生成采购单，后端会走线下采购单占位路径。
         const canGeneratePo = canPurchase
           && !existingPo
           && ["submitted", "buyer_processing", "sourced", "waiting_ops_confirm"].includes(row.status);
@@ -4648,7 +4827,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
                 loading={actingKey === `po-${row.id}`}
                 onClick={() => void generatePurchaseOrderForRow(row)}
               >
-                {hasAnySource ? "生成采购单" : "线下采购单"}
+                {hasAnySource ? "创建采购单" : "线下采购单"}
               </Button>
             ) : null}
             {canGeneratePo && hasAnySource ? (
@@ -4666,13 +4845,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
                 size="small"
                 icon={<FileDoneOutlined />}
                 onClick={() => {
-                  const focusPo = existingPo?.poNo || existingPo?.id || row.id;
-                  if (activeWorkArea === "sourcing") {
-                    navigate(`/purchase-center?focusPo=${encodeURIComponent(focusPo)}`);
-                    return;
-                  }
-                  setActiveQueueKey("po_draft");
-                  setPurchaseSearchText(focusPo);
+                  focusPurchaseOrder(existingPo, row.id);
                   message.info(existingPo ? `采购单已生成：${existingPo.poNo || existingPo.id}` : "采购单已生成");
                 }}
               >
@@ -4703,7 +4876,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         );
       },
     },
-  ], [actingKey, activeWorkArea, canCreateRequest, canPurchase, detailPrId, navigate, purchaseOrders, source1688PrId]);
+  ], [actingKey, canCreateRequest, canPurchase, detailPrId, focusPurchaseOrder, purchaseOrders, source1688PrId]);
 
   const orderColumns = useMemo<ColumnsType<PurchaseOrderRow>>(() => [
     {
@@ -5294,7 +5467,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         title={workAreaTitle}
         meta={tableLoading
           ? (activeWorkArea === "sourcing"
-            ? ["更新 —", "找品 —", "待找品 —", "已找品 —"]
+            ? ["更新 —", "找品 —", "待找品 —", "已找品 —", "待优化 —", "已优化 —"]
             : ["更新 —", "采购单 —", "付款 —", "已完成 —"])
           : (activeWorkArea === "sourcing"
             ? [
@@ -5302,6 +5475,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               `找品 ${pendingRequestRows.length}`,
               `待找品 ${pendingSourcingRequestRows.length}`,
               `已找品 ${sourcedRequestRows.length}`,
+              `待优化 ${pendingOptimizationRequestRows.length}`,
+              `已优化 ${optimizedRequestRows.length}`,
             ]
             : [
               `更新 ${formatDateTime(data.generatedAt)}`,
@@ -5320,17 +5495,19 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
           ) : null,
           activeWorkArea === "sourcing" && canCreateRequest ? (
             <Button
+              key="new-optimization"
+              icon={<PlusOutlined />}
+              onClick={() => openRequestCreateModal("optimization")}
+            >
+              新建优化
+            </Button>
+          ) : null,
+          activeWorkArea === "sourcing" && canCreateRequest ? (
+            <Button
               key="new"
               type="primary"
               icon={<PlusOutlined />}
-              onClick={() => {
-                requestForm.resetFields();
-                setRequestUploadImages([]);
-                requestForm.setFieldsValue({
-                  requestedQty: 1,
-                });
-                setRequestOpen(true);
-              }}
+              onClick={() => openRequestCreateModal("sourcing")}
             >
               新建找品
             </Button>
@@ -5345,8 +5522,9 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
           progressDot
           items={[
             { title: "找品", description: "提交需求并找货源" },
-            { title: "已找品", description: "绑定映射或线下货源" },
-            { title: "生成采购单", description: "线上 1688 或线下采购" },
+            { title: "已找品", description: "采购确认完成找品" },
+            { title: "创建采购单", description: "线上 1688 或线下采购" },
+            { title: "采购单", description: "确认供应商和金额" },
             { title: "付款", description: "提交付款并支付" },
             { title: "入库", description: "发货到货后入库" },
           ]}
@@ -5359,6 +5537,15 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
             <div className="app-panel__title-main">{workAreaTitle} · {activeQueue.title}</div>
           </div>
           <Space size={8} wrap>
+            {activeWorkArea === "orders" && canPurchase ? (
+              <Button
+                type="primary"
+                icon={<PlusOutlined />}
+                onClick={openDirectPoCreateModal}
+              >
+                创建采购单
+              </Button>
+            ) : null}
             {activeWorkArea === "sourcing" && canPurchase ? (
               <Button
                 icon={<CommentOutlined />}
@@ -6132,9 +6319,96 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       </Modal>
 
       <Modal
+        open={directPoOpen}
+        title="创建采购单"
+        okText="创建采购单"
+        cancelText="取消"
+        confirmLoading={actingKey === "direct-po"}
+        onCancel={() => setDirectPoOpen(false)}
+        onOk={() => directPoForm.submit()}
+        destroyOnClose
+      >
+        {hasAttemptedSkuSearch && !skuSearching && skuOptions.length === 0 ? (
+          <Alert
+            type="warning"
+            showIcon
+            message="还没有商品资料"
+            description="请先到左侧商品资料创建商品编码，再回来创建采购单。"
+            style={{ marginBottom: 12 }}
+          />
+        ) : null}
+        <Form
+          form={directPoForm}
+          layout="vertical"
+          initialValues={{ qty: 1 }}
+          onFinish={handleDirectPoSubmit}
+        >
+          <Form.Item name="skuIds" label="商品编码" rules={[{ required: true, message: "请选择商品编码" }]}>
+            <Select
+              mode="tags"
+              showSearch
+              filterOption={false}
+              onSearch={handleSkuSearch}
+              onChange={(values) => {
+                directPoForm.setFieldsValue({
+                  skuIds: Array.isArray(values) ? values.slice(-1) : [],
+                });
+              }}
+              loading={skuSearching}
+              maxTagCount={1}
+              optionFilterProp="searchText"
+              options={skuOptions}
+              optionRender={(option) => {
+                const d = option as any;
+                const displayCode = String(d?.label || d?.value || "");
+                return (
+                  <div style={{ lineHeight: 1.3 }}>
+                    <div>{displayCode} · {d?.skuName || "-"}</div>
+                    <div style={{ fontSize: 12, color: "#888" }}>
+                      成本 {d?.skuCost == null ? "-" : `¥${d.skuCost}`} · 供应商 {d?.skuSupplier || "-"} · 库存 {d?.skuStock == null ? "-" : d.skuStock}
+                    </div>
+                  </div>
+                );
+              }}
+              suffixIcon={<SearchOutlined />}
+              tokenSeparators={[",", "，", " ", "\n"]}
+              notFoundContent={skuSearching ? "搜索中…" : "输入编码或名称搜索"}
+              placeholder="输入商品编码或名称搜索"
+            />
+          </Form.Item>
+          <Form.Item name="specText" label="规格">
+            <Input placeholder="颜色 / 尺寸 / 包装，可选" allowClear />
+          </Form.Item>
+          <Form.Item name="supplierId" label="已有供应商">
+            <Select allowClear showSearch optionFilterProp="label" options={supplierOptions} placeholder="可选；没有就在下面手填供应商名称" />
+          </Form.Item>
+          <Form.Item name="supplierName" label="供应商名称">
+            <Input placeholder="手填供应商或平台店铺名称" />
+          </Form.Item>
+          <Row gutter={12}>
+            <Col span={8}>
+              <Form.Item name="unitPrice" label="采购单价" rules={[{ required: true, message: "请输入采购单价" }]}>
+                <InputNumber min={0} precision={2} prefix="¥" style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="logisticsFee" label="运费">
+                <InputNumber min={0} precision={2} prefix="¥" style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="qty" label="采购数量" rules={[{ required: true, message: "请输入采购数量" }]}>
+                <InputNumber min={1} precision={0} style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+          </Row>
+        </Form>
+      </Modal>
+
+      <Modal
         open={requestOpen}
-        title="新建找品"
-        okText="提交找品"
+        title={requestCreateMode === "optimization" ? "新建优化" : "新建找品"}
+        okText={requestCreateMode === "optimization" ? "提交优化" : "提交找品"}
         cancelText="取消"
         confirmLoading={actingKey === "create-pr"}
         onCancel={() => {
@@ -6149,7 +6423,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
             type="warning"
             showIcon
             message="还没有商品资料"
-            description="请先到左侧商品资料创建商品编码，再回来新建找品。"
+            description={`请先到左侧商品资料创建商品编码，再回来新建${requestCreateMode === "optimization" ? "优化" : "找品"}。`}
             style={{ marginBottom: 12 }}
           />
         ) : null}
@@ -6184,8 +6458,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               placeholder="输入商品编码或名称搜索，回车添加，可多选"
             />
           </Form.Item>
-          <Form.Item name="specText" label="找品规格">
-            <Input placeholder="颜色 / 尺寸 / 几个装，例如：蓝色 30cm 2个装" allowClear />
+          <Form.Item name="specText" label={requestCreateMode === "optimization" ? "优化规格" : "找品规格"}>
+            <Input
+              placeholder={requestCreateMode === "optimization"
+                ? "要优化的颜色 / 尺寸 / 包装 / 成本目标"
+                : "颜色 / 尺寸 / 几个装，例如：蓝色 30cm 2个装"}
+              allowClear
+            />
           </Form.Item>
           <Form.Item label="采购图片">
             <Dragger
@@ -6250,8 +6529,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               </Form.Item>
             </Col>
           </Row>
-          <Form.Item name="evidenceText" label="证据 / 链接">
-            <TextArea rows={3} placeholder="每行一条：销量截图、竞品链接、站内数据结论等" />
+          <Form.Item name="evidenceText" label={requestCreateMode === "optimization" ? "优化诉求 / 链接" : "证据 / 链接"}>
+            <TextArea
+              rows={3}
+              placeholder={requestCreateMode === "optimization"
+                ? "每行一条：现有货源问题、目标价格、竞品链接、需要替换的供应商等"
+                : "每行一条：销量截图、竞品链接、站内数据结论等"}
+            />
           </Form.Item>
         </Form>
         </div>
@@ -6260,7 +6544,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       <Modal
         open={Boolean(offlinePoTarget)}
         title={offlinePoTarget?.mode === "edit" ? "编辑采购单" : "线下采购单"}
-        okText={offlinePoTarget?.mode === "edit" ? "保存" : "生成采购单"}
+        okText={offlinePoTarget?.mode === "edit" ? "保存" : "创建采购单"}
         cancelText="取消"
         confirmLoading={offlinePoSubmitting}
         onCancel={() => setOfflinePoTarget(null)}
@@ -6502,7 +6786,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               description={`当前线上状态：${externalOrderStatusLabel(refundPo.externalOrderStatus)}；售后：${refundPo.refundCount ? `${refundPo.refundCount} 条` : "暂无记录"}${refundPo.latestRefundStatus ? `，${refundStatusLabel(refundPo.latestRefundStatus)}` : ""}`}
             />
             {refundAutoLoadingPoId === refundPo.id ? (
-              <Text type="secondary">正在自动读取售后、可退金额和退款原因...</Text>
+              <Text type="secondary">正在自动读取售后、可退金额和退款原因…</Text>
             ) : null}
             <Form form={refundForm} layout="vertical" onFinish={handleCreate1688Refund}>
               <Row gutter={12}>

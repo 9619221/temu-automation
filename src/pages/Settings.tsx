@@ -257,8 +257,8 @@ export default function Settings() {
             <Form.Item name="extensionPackageUrl" label="扩展文件下载链接" help="指向 .zip 压缩包；用户下载后需要先解压，再在 Chrome 扩展管理页加载解压后的目录。">
               <Input placeholder="https://erp.temu.chat/releases/temu-monitor-extension-0.4.0.zip" />
             </Form.Item>
-            <Form.Item name="extensionInstallUrl" label="扩展安装链接" help="示例：https://chromewebstore.google.com/detail/...">
-              <Input placeholder="https://chromewebstore.google.com/detail/..." />
+            <Form.Item name="extensionInstallUrl" label="扩展安装链接" help="示例：https://chromewebstore.google.com/detail/…">
+              <Input placeholder="https://chromewebstore.google.com/detail/…" />
             </Form.Item>
             <Form.Item name="cloudEndpoint" label="云端地址" help="用于读取 /api/dashboard/agent 心跳状态">
               <Input placeholder="https://your-cloud.example.com" />

@@ -3222,7 +3222,12 @@ async function handle1688ConfigRequest({ req, res, session, upsert1688AuthConfig
     writeRedirect(res, "/1688");
   } catch (error) {
     if (wantsJson) {
-      writeJson(res, 400, { ok: false, error: error?.message || String(error) });
+      writeJson(res, 400, {
+        ok: false,
+        error: error?.message || String(error),
+        code: error?.code || null,
+        ...(Array.isArray(error?.occupants) ? { occupants: error.occupants } : {}),
+      });
       return;
     }
     render1688Error(res, session, error, 400);
@@ -3398,6 +3403,7 @@ async function handlePurchaseActionRequest({ req, res, session, performPurchaseA
         ok: false,
         error: error?.message || String(error),
         code: error?.code || null,
+        ...(Array.isArray(error?.occupants) ? { occupants: error.occupants } : {}),
       });
       return;
     }
@@ -4006,9 +4012,10 @@ async function handleRequest({
     }
 
     if (pathname === "/api/warehouse/workbench") {
+      const payload = await readOptionalPayload(req);
       writeJson(res, 200, {
         ok: true,
-        workbench: await getWarehouseWorkbench({ user: session.user }),
+        workbench: await getWarehouseWorkbench({ ...payload, user: session.user }),
       });
       return;
     }
