@@ -262,6 +262,10 @@ function runFlow() {
     assertColumnExists(db, "erp_purchase_orders", "external_order_id");
     assertColumnExists(db, "erp_purchase_orders", "external_order_payload_json");
     assertColumnExists(db, "erp_purchase_orders", "external_order_preview_json");
+    assertColumnExists(db, "erp_outbound_shipments", "temu_stock_order_no");
+    assertColumnExists(db, "erp_outbound_shipments", "temu_delivery_order_sn");
+    assertColumnExists(db, "erp_outbound_shipments", "temu_delivery_batch_sn");
+    assertColumnExists(db, "erp_outbound_shipments", "temu_sync_status");
 
     assertQcThresholds();
     insertSeedData(db);

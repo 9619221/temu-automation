@@ -278,6 +278,10 @@ const activityEvt = {
           productSkcId: "123456789",
           startTime: "2026-05-20 00:00:00",
           endTime: "2026-06-20 23:59:59",
+          activityTypeName: "Full Managed Deals",
+          enrollPrice: 277,
+          suggestedPrice: 300,
+          activityStock: 126,
           activityGoodsOrderCount: 6,
         },
       ],
@@ -286,18 +290,74 @@ const activityEvt = {
 };
 dispatchParsers(db, { tenant_id: "tenant-verify", device_id: "device-verify" }, [activityEvt]);
 const activityRow = db.prepare(`
-  SELECT mall_id, activity_kind, activity_id, activity_title, activity_status, product_id, skc_id
+  SELECT mall_id, activity_kind, activity_id, activity_title, activity_type, activity_status,
+         product_id, skc_id, signup_price_cents, suggested_price_cents, activity_stock,
+         signup_price_diff_cents
   FROM temu_activity_snapshot
   WHERE tenant_id = ? AND mall_id = ?
 `).get("tenant-verify", "mall-1");
 assert.equal(activityRow.activity_kind, "activity");
 assert.equal(activityRow.activity_id, "act-100");
 assert.equal(activityRow.skc_id, "123456789");
+assert.equal(activityRow.activity_type, "Full Managed Deals");
+assert.equal(activityRow.signup_price_cents, 27700);
+assert.equal(activityRow.suggested_price_cents, 30000);
+assert.equal(activityRow.activity_stock, 126);
+assert.equal(activityRow.signup_price_diff_cents, -2300);
+
+const stockOrderEvt = {
+  id: "evt-stock-order-1",
+  url_path: "/bgSongbird-api/supplier/deliverGoods/platform/pageQuerySubPurchaseOrder",
+  mall_id: "mall-1",
+  site: "CN",
+  ts: Date.UTC(2026, 4, 23),
+  body_json: JSON.stringify({
+    result: {
+      pageItems: [
+        {
+          subPurchaseOrderSn: "SO-VERIFY-001",
+          parentPurchaseOrderSn: "PO-VERIFY-001",
+          deliveryOrderSn: "DO-VERIFY-001",
+          deliveryBatchSn: "DB-VERIFY-001",
+          productId: "PROD-VERIFY-001",
+          productSkcId: "SKC-VERIFY-001",
+          productSkuId: "SKU-VERIFY-001",
+          skuExtCode: "SKU-EXT-VERIFY",
+          productName: "Verify Stock Product",
+          specName: "White / Standard",
+          demandQty: "16",
+          deliveredQty: 4,
+          statusName: "待发货",
+          receiveWarehouseName: "Temu Verify Warehouse",
+          latestDeliveryTime: "2026-05-25 18:00:00",
+        },
+      ],
+    },
+  }),
+};
+dispatchParsers(db, { tenant_id: "tenant-verify", device_id: "device-verify" }, [stockOrderEvt]);
+const stockOrderRow = db.prepare(`
+  SELECT mall_id, stock_order_no, parent_order_no, delivery_order_sn, delivery_batch_sn,
+         product_id, skc_id, sku_id, sku_ext_code, product_name, spec_name,
+         demand_qty, delivered_qty, temu_status, receive_warehouse_name, latest_ship_at
+  FROM temu_stock_order_snapshot
+  WHERE tenant_id = ? AND mall_id = ? AND stock_order_no = ?
+`).get("tenant-verify", "mall-1", "SO-VERIFY-001");
+assert.equal(stockOrderRow.delivery_order_sn, "DO-VERIFY-001");
+assert.equal(stockOrderRow.delivery_batch_sn, "DB-VERIFY-001");
+assert.equal(stockOrderRow.product_id, "PROD-VERIFY-001");
+assert.equal(stockOrderRow.skc_id, "SKC-VERIFY-001");
+assert.equal(stockOrderRow.sku_id, "SKU-VERIFY-001");
+assert.equal(stockOrderRow.sku_ext_code, "SKU-EXT-VERIFY");
+assert.equal(stockOrderRow.demand_qty, 16);
+assert.equal(stockOrderRow.delivered_qty, 4);
+assert.equal(stockOrderRow.receive_warehouse_name, "Temu Verify Warehouse");
 
 const result = {
   ok: true,
   dbPath,
   salesCount: db.prepare("SELECT COUNT(*) AS n FROM temu_sales_snapshot").get().n,
+  stockOrderCount: db.prepare("SELECT COUNT(*) AS n FROM temu_stock_order_snapshot").get().n,
   upsertKeptRowCount: countAfterSecond === countAfterFirst,
   salesRow,
   subOrderSalesRow,
@@ -305,6 +365,7 @@ const result = {
   flowRow,
   sameSkcRows,
   activityRow,
+  stockOrderRow,
 };
 
 db.close();

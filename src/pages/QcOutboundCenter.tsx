@@ -8,33 +8,46 @@ import {
   InputNumber,
   Modal,
   Row,
+  Segmented,
+  Select,
   Space,
   Table,
+  Tabs,
+  Tag,
   Typography,
   message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
   CheckCircleOutlined,
+  CloudSyncOutlined,
   ExportOutlined,
+  FileDoneOutlined,
   InboxOutlined,
   ReloadOutlined,
+  SearchOutlined,
+  ShoppingCartOutlined,
 } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
 import StatCard from "../components/StatCard";
 import { useErpAuth } from "../contexts/ErpAuthContext";
 import { hasPageCache, readPageCache, writePageCache } from "../utils/pageCache";
 import {
-  OUTBOUND_STATUS_LABELS,
-  canRole,
-  formatDateTime,
-  formatQty,
-  statusTag,
-} from "../utils/erpUi";
+  fetchTemuStockOrders,
+  loadCloudConfig,
+  type TemuStockOrderRow,
+  type TemuStockOrderSummaryRow,
+} from "../utils/cloudClient";
 
 const { Text } = Typography;
 const erp = window.electronAPI?.erp;
-const OUTBOUND_CACHE_KEY = "temu.qc-outbound.workbench.cache.v1";
+const OUTBOUND_CACHE_KEY = "temu.qc-outbound.workbench.cache.v2";
+
+interface AccountRow {
+  id: string;
+  name?: string;
+  source?: string;
+}
 
 interface OutboundBatchRow {
   id: string;
@@ -65,6 +78,10 @@ interface OutboundShipmentRow {
   trackingNo?: string;
   warehouseOperatorName?: string;
   confirmedByName?: string;
+  temuStockOrderNo?: string | null;
+  temuDeliveryOrderSn?: string | null;
+  temuDeliveryBatchSn?: string | null;
+  temuSyncStatus?: string | null;
   updatedAt?: string;
 }
 
@@ -78,6 +95,74 @@ interface OutboundWorkbench {
 interface OutboundCache {
   generatedAt?: string;
   outboundData?: OutboundWorkbench;
+  stockOrders?: TemuStockOrderRow[];
+  stockOrderSummary?: TemuStockOrderSummaryRow[];
+  accounts?: AccountRow[];
+}
+
+const OUTBOUND_STATUS_LABELS: Record<string, string> = {
+  draft: "草稿",
+  pending_warehouse: "待仓库处理",
+  picking: "拣货中",
+  packed: "已打包",
+  shipped_out: "已发出",
+  pending_ops_confirm: "待运营确认",
+  confirmed: "已确认",
+  exception: "异常",
+  cancelled: "已取消",
+};
+
+const OUTBOUND_STATUS_COLORS: Record<string, string> = {
+  draft: "default",
+  pending_warehouse: "gold",
+  picking: "processing",
+  packed: "cyan",
+  shipped_out: "blue",
+  pending_ops_confirm: "gold",
+  confirmed: "success",
+  exception: "error",
+  cancelled: "default",
+};
+
+function canRole(role: string, allowed: string[]) {
+  return allowed.includes(role) || (role === "admin" && allowed.includes("manager"));
+}
+
+function formatQty(value: unknown) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number)) return "0";
+  return new Intl.NumberFormat("zh-CN").format(number);
+}
+
+function formatDateTime(value?: string | null) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function stockOrderIdentity(row: TemuStockOrderRow) {
+  return row.stock_order_no || row.delivery_order_sn || row.delivery_batch_sn || row.row_key || row.id;
+}
+
+function stockOrderDemand(row: TemuStockOrderRow) {
+  const demand = Number(row.demand_qty || 0);
+  const delivered = Number(row.delivered_qty || 0);
+  return Math.max(0, demand - delivered) || demand || 1;
+}
+
+function stockStatusColor(status?: string | null) {
+  const text = String(status || "");
+  if (!text) return "default";
+  if (/取消|cancel/i.test(text)) return "default";
+  if (/完成|已发|shipped|done|complete/i.test(text)) return "success";
+  if (/待|未|pending|wait/i.test(text)) return "gold";
+  return "processing";
+}
+
+function outboundStatusTag(status?: string) {
+  const key = String(status || "draft");
+  return <Tag color={OUTBOUND_STATUS_COLORS[key] || "default"}>{OUTBOUND_STATUS_LABELS[key] || key}</Tag>;
 }
 
 export default function QcOutboundCenter() {
@@ -88,21 +173,44 @@ export default function QcOutboundCenter() {
     [],
   );
   const [outboundData, setOutboundData] = useState<OutboundWorkbench>(() => cachedData.outboundData || {});
+  const [stockOrders, setStockOrders] = useState<TemuStockOrderRow[]>(() => cachedData.stockOrders || []);
+  const [stockOrderSummary, setStockOrderSummary] = useState<TemuStockOrderSummaryRow[]>(() => cachedData.stockOrderSummary || []);
+  const [accounts, setAccounts] = useState<AccountRow[]>(() => cachedData.accounts || []);
   const [loadedOnce, setLoadedOnce] = useState(() => hasPageCache(cachedData));
   const [loading, setLoading] = useState(false);
   const [actingKey, setActingKey] = useState<string | null>(null);
+  const [stockStatus, setStockStatus] = useState("");
+  const [stockQuery, setStockQuery] = useState("");
+  const [cloudConfigured, setCloudConfigured] = useState(false);
+  const [cloudError, setCloudError] = useState<string | null>(null);
+  const [selectedAccountId, setSelectedAccountId] = useState("");
   const [planTarget, setPlanTarget] = useState<OutboundBatchRow | null>(null);
+  const [stockOrderTarget, setStockOrderTarget] = useState<TemuStockOrderRow | null>(null);
   const [shipTarget, setShipTarget] = useState<OutboundShipmentRow | null>(null);
   const [planForm] = Form.useForm();
+  const [stockOrderForm] = Form.useForm();
   const [shipForm] = Form.useForm();
 
-  const applyWorkbench = useCallback((nextOutbound: OutboundWorkbench) => {
-    const outboundWorkbench = nextOutbound || {};
-    setOutboundData(outboundWorkbench);
+  const canCreateOutbound = canRole(role, ["operations", "manager", "admin"]);
+  const canWarehouseAction = canRole(role, ["warehouse", "manager", "admin"]);
+
+  const applyCache = useCallback((
+    nextOutbound: OutboundWorkbench,
+    nextStockOrders: TemuStockOrderRow[],
+    nextStockSummary: TemuStockOrderSummaryRow[],
+    nextAccounts: AccountRow[],
+  ) => {
+    setOutboundData(nextOutbound || {});
+    setStockOrders(nextStockOrders || []);
+    setStockOrderSummary(nextStockSummary || []);
+    setAccounts(nextAccounts || []);
     setLoadedOnce(true);
     writePageCache<OutboundCache>(OUTBOUND_CACHE_KEY, {
       generatedAt: new Date().toISOString(),
-      outboundData: outboundWorkbench,
+      outboundData: nextOutbound || {},
+      stockOrders: nextStockOrders || [],
+      stockOrderSummary: nextStockSummary || [],
+      accounts: nextAccounts || [],
     });
   }, []);
 
@@ -110,14 +218,42 @@ export default function QcOutboundCenter() {
     if (!erp) return;
     setLoading(true);
     try {
-      const nextOutbound = await erp.outbound.workbench({ limit: 200 });
-      applyWorkbench(nextOutbound);
+      const [nextOutbound, nextAccounts, cfg] = await Promise.all([
+        erp.outbound.workbench({ limit: 200 }),
+        erp.account.list({ limit: 500 }),
+        loadCloudConfig(),
+      ]);
+      let nextStockOrders: TemuStockOrderRow[] = [];
+      let nextStockSummary: TemuStockOrderSummaryRow[] = [];
+      if (cfg) {
+        setCloudConfigured(true);
+        try {
+          const stockResult = await fetchTemuStockOrders(cfg, {
+            status: stockStatus || undefined,
+            q: stockQuery || undefined,
+            limit: 500,
+          });
+          nextStockOrders = stockResult.rows || [];
+          nextStockSummary = stockResult.summary || [];
+          setCloudError(null);
+        } catch (error: any) {
+          setCloudError(error?.message || "云端备货单读取失败");
+        }
+      } else {
+        setCloudConfigured(false);
+        setCloudError("还没有配置云端连接");
+      }
+      const accountRows = Array.isArray(nextAccounts) ? nextAccounts : [];
+      if (!selectedAccountId && accountRows[0]?.id) {
+        setSelectedAccountId(accountRows[0].id);
+      }
+      applyCache(nextOutbound, nextStockOrders, nextStockSummary, accountRows);
     } catch (error: any) {
-      message.error(error?.message || "出库数据读取失败");
+      message.error(error?.message || "出库中心数据读取失败");
     } finally {
       setLoading(false);
     }
-  }, [applyWorkbench]);
+  }, [applyCache, selectedAccountId, stockQuery, stockStatus]);
 
   useEffect(() => {
     void loadData();
@@ -140,7 +276,7 @@ export default function QcOutboundCenter() {
   const openPlanModal = (row: OutboundBatchRow) => {
     setPlanTarget(row);
     planForm.setFieldsValue({
-      qty: row.availableQty || 1,
+      qty: Math.max(1, Number(row.availableQty || 1)),
       boxes: 1,
       remark: "",
     });
@@ -158,10 +294,41 @@ export default function QcOutboundCenter() {
         boxes: Number(values.boxes || 1),
         remark: values.remark,
       },
-      "出库计划已创建",
+      "出库单已创建",
     );
     setPlanTarget(null);
     planForm.resetFields();
+  };
+
+  const openStockOrderModal = (row: TemuStockOrderRow) => {
+    const accountId = selectedAccountId || accounts[0]?.id || "";
+    setStockOrderTarget(row);
+    stockOrderForm.setFieldsValue({
+      accountId,
+      qty: stockOrderDemand(row),
+      boxes: 1,
+      remark: `Temu 云端备货单 ${stockOrderIdentity(row)}`,
+    });
+  };
+
+  const submitStockOrderPlan = async () => {
+    if (!stockOrderTarget) return;
+    const values = await stockOrderForm.validateFields();
+    setSelectedAccountId(values.accountId);
+    await runOutboundAction(
+      `stock-${stockOrderTarget.id}`,
+      {
+        action: "create_outbound_plan_from_temu_stock_order",
+        accountId: values.accountId,
+        stockOrder: stockOrderTarget,
+        qty: Number(values.qty),
+        boxes: Number(values.boxes || 1),
+        remark: values.remark,
+      },
+      "已从云端备货单生成出库单",
+    );
+    setStockOrderTarget(null);
+    stockOrderForm.resetFields();
   };
 
   const openShipModal = (row: OutboundShipmentRow) => {
@@ -183,17 +350,117 @@ export default function QcOutboundCenter() {
         logisticsProvider: values.logisticsProvider,
         trackingNo: values.trackingNo,
       },
-      "已确认发出，等待运营确认完成",
+      "已确认发出，等待运营确认",
     );
     setShipTarget(null);
     shipForm.resetFields();
   };
 
+  const summary = outboundData.summary || {};
+  const cloudDemandQty = useMemo(
+    () => stockOrders.reduce((sum, row) => sum + Number(row.demand_qty || 0), 0),
+    [stockOrders],
+  );
+  const stockStatusOptions = useMemo(() => {
+    const options = [{ label: `全部 ${stockOrders.length}`, value: "" }];
+    for (const item of stockOrderSummary) {
+      const status = item.temu_status || "未标记";
+      options.push({ label: `${status} ${item.count}`, value: item.temu_status || "__empty__" });
+    }
+    return options;
+  }, [stockOrderSummary, stockOrders.length]);
+
+  const cloudStockColumns = useMemo<ColumnsType<TemuStockOrderRow>>(() => [
+    {
+      title: "备货单",
+      key: "order",
+      width: 220,
+      render: (_value, row) => (
+        <Space direction="vertical" size={2}>
+          <Text strong>{stockOrderIdentity(row)}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            店铺 {row.mall_id || "-"} / {formatDateTime(row.order_time)}
+          </Text>
+        </Space>
+      ),
+    },
+    {
+      title: "商品",
+      key: "product",
+      width: 340,
+      render: (_value, row) => (
+        <Space direction="vertical" size={3}>
+          <Text>{row.product_name || "-"}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>{row.spec_name || "-"}</Text>
+          <Space size={4} wrap>
+            {row.skc_id ? <Tag>SKC {row.skc_id}</Tag> : null}
+            {row.sku_id ? <Tag>SKU {row.sku_id}</Tag> : null}
+            {row.sku_ext_code ? <Tag>{row.sku_ext_code}</Tag> : null}
+          </Space>
+        </Space>
+      ),
+    },
+    {
+      title: "需求",
+      key: "qty",
+      width: 130,
+      render: (_value, row) => (
+        <Space direction="vertical" size={2}>
+          <Text strong>{formatQty(row.demand_qty)} 件</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>已发 {formatQty(row.delivered_qty)}</Text>
+        </Space>
+      ),
+    },
+    {
+      title: "收货仓",
+      key: "warehouse",
+      width: 220,
+      render: (_value, row) => (
+        <Space direction="vertical" size={2}>
+          <Text>{row.receive_warehouse_name || row.warehouse_group || "-"}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>{row.urgency_info || row.receive_warehouse_id || "-"}</Text>
+        </Space>
+      ),
+    },
+    {
+      title: "状态",
+      key: "status",
+      width: 120,
+      render: (_value, row) => (
+        <Tag color={stockStatusColor(row.temu_status)}>{row.temu_status || "未标记"}</Tag>
+      ),
+    },
+    {
+      title: "更新",
+      key: "updated",
+      width: 170,
+      render: (_value, row) => formatDateTime(row.last_updated_at),
+    },
+    {
+      title: "操作",
+      key: "actions",
+      width: 150,
+      fixed: "right",
+      render: (_value, row) => (
+        <Button
+          size="small"
+          type="primary"
+          icon={<ExportOutlined />}
+          loading={actingKey === `stock-${row.id}`}
+          disabled={!canCreateOutbound || accounts.length === 0}
+          onClick={() => openStockOrderModal(row)}
+        >
+          生成出库单
+        </Button>
+      ),
+    },
+  ], [accounts.length, actingKey, canCreateOutbound]);
+
   const availableBatchColumns = useMemo<ColumnsType<OutboundBatchRow>>(() => [
     {
       title: "批次",
       key: "batch",
-      width: 200,
+      width: 210,
       render: (_value, row) => (
         <Space direction="vertical" size={2}>
           <Text strong>{row.batchCode || row.id}</Text>
@@ -204,7 +471,7 @@ export default function QcOutboundCenter() {
     {
       title: "商品",
       key: "sku",
-      ellipsis: true,
+      width: 300,
       render: (_value, row) => (
         <Space direction="vertical" size={2}>
           <Text>{row.productName || "-"}</Text>
@@ -215,68 +482,76 @@ export default function QcOutboundCenter() {
     {
       title: "库存",
       key: "inventory",
-      width: 170,
+      width: 180,
       render: (_value, row) => (
         <Space direction="vertical" size={2}>
           <Text>可用 {formatQty(row.availableQty)}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>预留 {formatQty(row.reservedQty)} · 锁定 {formatQty(row.blockedQty)}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            预留 {formatQty(row.reservedQty)} / 锁定 {formatQty(row.blockedQty)}
+          </Text>
         </Space>
       ),
     },
     {
       title: "供应商",
       dataIndex: "supplierName",
-      width: 160,
+      width: 180,
       render: (value) => value || "-",
     },
     {
-      title: "动作",
+      title: "入库时间",
+      dataIndex: "receivedAt",
+      width: 170,
+      render: formatDateTime,
+    },
+    {
+      title: "操作",
       key: "actions",
-      width: 150,
+      width: 140,
       fixed: "right",
       render: (_value, row) => (
-        canRole(role, ["operations", "manager", "admin"]) ? (
-          <Button
-            size="small"
-            type="primary"
-            icon={<ExportOutlined />}
-            loading={actingKey === `plan-${row.id}`}
-            onClick={() => openPlanModal(row)}
-          >
-            创建计划
-          </Button>
-        ) : <Text type="secondary">无权限</Text>
+        <Button
+          size="small"
+          type="primary"
+          icon={<ExportOutlined />}
+          loading={actingKey === `plan-${row.id}`}
+          disabled={!canCreateOutbound}
+          onClick={() => openPlanModal(row)}
+        >
+          创建出库单
+        </Button>
       ),
     },
-  ], [actingKey, role]);
+  ], [actingKey, canCreateOutbound]);
 
   const shipmentColumns = useMemo<ColumnsType<OutboundShipmentRow>>(() => [
     {
-      title: "发货单",
+      title: "出库单",
       key: "shipment",
-      width: 210,
+      width: 230,
       render: (_value, row) => (
         <Space direction="vertical" size={2}>
           <Text strong>{row.shipmentNo || row.id}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{row.id}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>{row.batchCode || row.batchId || "-"}</Text>
+          {row.temuStockOrderNo ? <Tag color="blue">Temu {row.temuStockOrderNo}</Tag> : null}
         </Space>
       ),
     },
     {
-      title: "商品 / 批次",
+      title: "商品",
       key: "sku",
-      ellipsis: true,
+      width: 280,
       render: (_value, row) => (
         <Space direction="vertical" size={2}>
           <Text>{row.productName || "-"}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{row.internalSkuCode || "-"} · {row.batchCode || row.batchId || "-"}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>{row.internalSkuCode || "-"}</Text>
         </Space>
       ),
     },
     {
       title: "数量",
       key: "qty",
-      width: 120,
+      width: 130,
       render: (_value, row) => (
         <Space direction="vertical" size={2}>
           <Text>{formatQty(row.qty)} 件</Text>
@@ -287,13 +562,13 @@ export default function QcOutboundCenter() {
     {
       title: "状态",
       dataIndex: "status",
-      width: 130,
-      render: (value) => statusTag(value, OUTBOUND_STATUS_LABELS),
+      width: 140,
+      render: outboundStatusTag,
     },
     {
       title: "物流",
       key: "logistics",
-      width: 180,
+      width: 210,
       render: (_value, row) => (
         <Space direction="vertical" size={2}>
           <Text>{row.logisticsProvider || "-"}</Text>
@@ -302,152 +577,199 @@ export default function QcOutboundCenter() {
       ),
     },
     {
-      title: "处理人",
-      key: "operator",
-      width: 160,
-      render: (_value, row) => (
-        <Space direction="vertical" size={2}>
-          <Text type="secondary">仓库：{row.warehouseOperatorName || "-"}</Text>
-          <Text type="secondary">运营：{row.confirmedByName || "-"}</Text>
-        </Space>
-      ),
+      title: "更新",
+      dataIndex: "updatedAt",
+      width: 170,
+      render: formatDateTime,
     },
     {
-      title: "动作",
+      title: "操作",
       key: "actions",
-      width: 210,
+      width: 240,
       fixed: "right",
-      render: (_value, row) => (
-        <Space size={6} wrap>
-          {row.status === "pending_warehouse" && canRole(role, ["warehouse", "manager", "admin"]) ? (
+      render: (_value, row) => {
+        const status = row.status || "";
+        if (status === "pending_warehouse") {
+          return (
             <Button
               size="small"
               icon={<InboxOutlined />}
               loading={actingKey === `pick-${row.id}`}
+              disabled={!canWarehouseAction}
               onClick={() => runOutboundAction(`pick-${row.id}`, { action: "start_picking", outboundId: row.id }, "已开始拣货")}
             >
               开始拣货
             </Button>
-          ) : null}
-          {row.status === "picking" && canRole(role, ["warehouse", "manager", "admin"]) ? (
+          );
+        }
+        if (status === "picking") {
+          return (
             <Button
               size="small"
               icon={<CheckCircleOutlined />}
               loading={actingKey === `pack-${row.id}`}
+              disabled={!canWarehouseAction}
               onClick={() => runOutboundAction(`pack-${row.id}`, { action: "mark_packed", outboundId: row.id, boxes: row.boxes || 1 }, "已打包")}
             >
-              打包完成
+              标记打包
             </Button>
-          ) : null}
-          {row.status === "packed" && canRole(role, ["warehouse", "manager", "admin"]) ? (
+          );
+        }
+        if (status === "packed") {
+          return (
             <Button
               size="small"
               type="primary"
               icon={<ExportOutlined />}
-              loading={actingKey === `ship-${row.id}`}
+              disabled={!canWarehouseAction}
               onClick={() => openShipModal(row)}
             >
               确认发出
             </Button>
-          ) : null}
-          {row.status === "pending_ops_confirm" && canRole(role, ["operations", "manager", "admin"]) ? (
+          );
+        }
+        if (status === "pending_ops_confirm") {
+          return (
             <Button
               size="small"
               type="primary"
               icon={<CheckCircleOutlined />}
               loading={actingKey === `done-${row.id}`}
+              disabled={!canCreateOutbound}
               onClick={() => runOutboundAction(`done-${row.id}`, { action: "confirm_outbound_done", outboundId: row.id }, "出库已确认完成")}
             >
               运营确认
             </Button>
-          ) : null}
-          {!["pending_warehouse", "picking", "packed", "pending_ops_confirm"].includes(row.status || "") ? <Text type="secondary">等待</Text> : null}
-        </Space>
-      ),
+          );
+        }
+        return <Text type="secondary">-</Text>;
+      },
     },
-  ], [actingKey, role]);
-
-  const outboundSummary = outboundData.summary || {};
-  const tableLoading = loading
-    && !loadedOnce
-    && (
-      (outboundData.availableBatches?.length || 0)
-      + (outboundData.outboundShipments?.length || 0)
-      > 0
-    );
+  ], [actingKey, canCreateOutbound, canWarehouseAction]);
 
   if (!erp) {
     return (
-      <div className="dashboard-shell">
-        <PageHeader compact eyebrow="系统" title="出库中心" subtitle="服务未就绪，请重启软件" />
-        <Alert type="error" showIcon message="当前环境缺少本地服务接口" />
-      </div>
+      <PageHeader compact eyebrow="系统" title="出库中心" subtitle="服务未就绪，请重启软件" />
     );
   }
 
   return (
-    <div className="dashboard-shell">
+    <div className="app-workspace-shell">
       <PageHeader
         compact
-        eyebrow="出库中心"
-        title="可出库批次与发货单"
-        subtitle="入库批次直接可出库；运营创建出库计划，仓库拣货打包发出，运营确认完成。"
-        meta={[`出库更新 ${formatDateTime(outboundData.generatedAt)}`]}
+        eyebrow="系统"
+        title="出库中心"
+        subtitle="云端备货单上传入库后，桌面端拉取并生成本地出库单"
+        meta={[
+          `更新 ${formatDateTime(outboundData.generatedAt)}`,
+          `云端备货 ${stockOrders.length}`,
+          `本地出库 ${summary.outboundShipmentCount || 0}`,
+        ]}
         actions={[
-          <Button key="refresh" icon={<ReloadOutlined />} loading={loading} onClick={loadData}>
+          <Button key="refresh" icon={<ReloadOutlined />} loading={loading} onClick={() => void loadData()}>
             刷新
           </Button>,
         ]}
       />
 
-      <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
-        <Col xs={24} md={12}>
-          <StatCard title="可出库库存" value={outboundSummary.availableQty || 0} color="success" icon={<ExportOutlined />} compact />
+      {!cloudConfigured || cloudError ? (
+        <Alert
+          style={{ marginBottom: 12 }}
+          type={cloudConfigured ? "warning" : "info"}
+          showIcon
+          message={cloudError || "还没有配置云端连接"}
+        />
+      ) : null}
+
+      <Row gutter={[12, 12]} className="material-kpi-row" style={{ marginBottom: 12 }}>
+        <Col xs={24} sm={12} lg={6}>
+          <StatCard title="云端备货单" value={stockOrders.length} color="blue" icon={<CloudSyncOutlined />} compact />
         </Col>
-        <Col xs={24} md={12}>
-          <StatCard title="待仓库/运营" value={(outboundSummary.pendingWarehouseCount || 0) + (outboundSummary.pendingOpsConfirmCount || 0)} color="purple" icon={<CheckCircleOutlined />} compact />
+        <Col xs={24} sm={12} lg={6}>
+          <StatCard title="云端需求" value={formatQty(cloudDemandQty)} suffix="件" color="brand" icon={<ShoppingCartOutlined />} compact />
+        </Col>
+        <Col xs={24} sm={12} lg={6}>
+          <StatCard title="可出库库存" value={formatQty(summary.availableQty || 0)} suffix="件" color="success" icon={<InboxOutlined />} compact />
+        </Col>
+        <Col xs={24} sm={12} lg={6}>
+          <StatCard title="待仓库/运营" value={(summary.pendingWarehouseCount || 0) + (summary.pendingOpsConfirmCount || 0)} color="purple" icon={<FileDoneOutlined />} compact />
         </Col>
       </Row>
 
-      <div className="app-panel" style={{ marginBottom: 16 }}>
-        <div className="app-panel__title">
-          <div>
-            <div className="app-panel__title-main">可出库批次</div>
-            <div className="app-panel__title-sub">运营从可用库存批次创建出库计划，系统会预留库存给仓库处理。</div>
-          </div>
-        </div>
-        <Table
-          rowKey="id"
-          loading={tableLoading}
-          size="middle"
-          columns={availableBatchColumns}
-          dataSource={outboundData.availableBatches || []}
-          scroll={{ x: 940 }}
-          pagination={{ pageSize: 8, showSizeChanger: false }}
-        />
-      </div>
-
-      <div className="app-panel">
-        <div className="app-panel__title">
-          <div>
-            <div className="app-panel__title-main">出库 / 发货单</div>
-            <div className="app-panel__title-sub">仓库拣货、打包、确认发出后，由运营确认出库完成。</div>
-          </div>
-        </div>
-        <Table
-          rowKey="id"
-          loading={tableLoading}
-          size="middle"
-          columns={shipmentColumns}
-          dataSource={outboundData.outboundShipments || []}
-          scroll={{ x: 1180 }}
-          pagination={{ pageSize: 8, showSizeChanger: false }}
-        />
-      </div>
+      <Tabs
+        defaultActiveKey="cloud"
+        items={[
+          {
+            key: "cloud",
+            label: "云端备货单",
+            children: (
+              <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                <div className="material-filter-bar material-filter-bar--search">
+                  <Input.Search
+                    allowClear
+                    prefix={<SearchOutlined />}
+                    placeholder="搜索备货单 / 商品 / SKC / SKU"
+                    enterButton="搜索"
+                    onSearch={(value) => setStockQuery(value.trim())}
+                    style={{ maxWidth: 520 }}
+                  />
+                  <Segmented
+                    value={stockStatus || ""}
+                    options={stockStatusOptions}
+                    onChange={(value) => setStockStatus(value === "__empty__" ? "" : String(value))}
+                  />
+                </div>
+                <Table
+                  className="erp-compact-table"
+                  rowKey="id"
+                  size="middle"
+                  loading={loading && !loadedOnce}
+                  columns={cloudStockColumns}
+                  dataSource={stockOrders}
+                  scroll={{ x: 1400 }}
+                  pagination={{ pageSize: 20, showSizeChanger: true }}
+                />
+              </Space>
+            ),
+          },
+          {
+            key: "inventory",
+            label: "可出库库存",
+            children: (
+              <Table
+                className="erp-compact-table"
+                rowKey="id"
+                size="middle"
+                loading={loading && !loadedOnce}
+                columns={availableBatchColumns}
+                dataSource={outboundData.availableBatches || []}
+                scroll={{ x: 1100 }}
+                pagination={{ pageSize: 20, showSizeChanger: true }}
+              />
+            ),
+          },
+          {
+            key: "shipments",
+            label: "本地出库单",
+            children: (
+              <Table
+                className="erp-compact-table"
+                rowKey="id"
+                size="middle"
+                loading={loading && !loadedOnce}
+                columns={shipmentColumns}
+                dataSource={outboundData.outboundShipments || []}
+                scroll={{ x: 1400 }}
+                pagination={{ pageSize: 20, showSizeChanger: true }}
+              />
+            ),
+          },
+        ]}
+      />
 
       <Modal
-        title="创建出库计划"
-        open={!!planTarget}
+        title="创建出库单"
+        open={Boolean(planTarget)}
         onCancel={() => setPlanTarget(null)}
         onOk={submitPlan}
         confirmLoading={actingKey === `plan-${planTarget?.id}`}
@@ -455,20 +777,47 @@ export default function QcOutboundCenter() {
       >
         <Form form={planForm} layout="vertical">
           <Form.Item label="出库数量" name="qty" rules={[{ required: true, message: "请输入出库数量" }]}>
-            <InputNumber min={1} max={Number(planTarget?.availableQty || 1)} precision={0} style={{ width: "100%" }} />
+            <InputNumber min={1} max={Math.max(1, Number(planTarget?.availableQty || 1))} precision={0} style={{ width: "100%" }} />
           </Form.Item>
           <Form.Item label="箱数" name="boxes">
             <InputNumber min={1} precision={0} style={{ width: "100%" }} />
           </Form.Item>
           <Form.Item label="备注" name="remark">
-            <Input.TextArea rows={3} placeholder="可填写发仓说明" />
+            <Input.TextArea rows={3} />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title="从云端备货单生成出库单"
+        open={Boolean(stockOrderTarget)}
+        onCancel={() => setStockOrderTarget(null)}
+        onOk={submitStockOrderPlan}
+        confirmLoading={actingKey === `stock-${stockOrderTarget?.id}`}
+        destroyOnClose
+      >
+        <Form form={stockOrderForm} layout="vertical">
+          <Form.Item label="ERP 店铺" name="accountId" rules={[{ required: true, message: "请选择 ERP 店铺" }]}>
+            <Select
+              options={accounts.map((account) => ({ label: account.name || account.id, value: account.id }))}
+              placeholder="选择承接出库的店铺"
+            />
+          </Form.Item>
+          <Form.Item label="出库数量" name="qty" rules={[{ required: true, message: "请输入出库数量" }]}>
+            <InputNumber min={1} precision={0} style={{ width: "100%" }} />
+          </Form.Item>
+          <Form.Item label="箱数" name="boxes">
+            <InputNumber min={1} precision={0} style={{ width: "100%" }} />
+          </Form.Item>
+          <Form.Item label="备注" name="remark">
+            <Input.TextArea rows={3} />
           </Form.Item>
         </Form>
       </Modal>
 
       <Modal
         title="确认发出"
-        open={!!shipTarget}
+        open={Boolean(shipTarget)}
         onCancel={() => setShipTarget(null)}
         onOk={submitShip}
         confirmLoading={actingKey === `ship-${shipTarget?.id}`}
@@ -476,10 +825,10 @@ export default function QcOutboundCenter() {
       >
         <Form form={shipForm} layout="vertical">
           <Form.Item label="物流商" name="logisticsProvider">
-            <Input placeholder="例如：顺丰 / 德邦 / 其他" />
+            <Input />
           </Form.Item>
-          <Form.Item label="物流单号" name="trackingNo">
-            <Input placeholder="填写发货单号" />
+          <Form.Item label="运单号" name="trackingNo">
+            <Input />
           </Form.Item>
         </Form>
       </Modal>

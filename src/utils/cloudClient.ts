@@ -121,6 +121,17 @@ export interface CloudEndpointStat {
   last_seen: number | null;
 }
 
+export interface CloudEndpointCandidate {
+  site: string | null;
+  method: string;
+  url_path: string;
+  count_total: number;
+  last_seen: number | null;
+  last_status: number | null;
+  last_body_size: number | null;
+  last_page: string | null;
+}
+
 export interface CloudDevice {
   device_uuid: string;
   last_seen: string | null;
@@ -254,10 +265,16 @@ export interface TemuActivityRow {
   activity_kind: string | null;
   activity_id: string | null;
   activity_title: string | null;
+  activity_type?: string | null;
   activity_status: string | null;
   product_id: string | null;
   skc_id: string | null;
   goods_id: string | null;
+  signup_price_cents?: number | null;
+  suggested_price_cents?: number | null;
+  price_currency?: string | null;
+  activity_stock?: number | null;
+  signup_price_diff_cents?: number | null;
   start_at: string | null;
   end_at: string | null;
   metric_json?: string | null;
@@ -270,6 +287,180 @@ export interface TemuActivityRow {
 export interface TemuActivitySummaryRow {
   activity_kind: string | null;
   count: number;
+}
+
+export interface TemuOperationRiskRow {
+  id: string;
+  mall_id: string | null;
+  site: string | null;
+  stat_date: string;
+  risk_type: string;
+  risk_key: string;
+  risk_title: string | null;
+  risk_status: string | null;
+  severity: string | null;
+  product_id: string | null;
+  skc_id: string | null;
+  goods_id: string | null;
+  order_id: string | null;
+  quantity: number | null;
+  metric_json?: string | null;
+  raw_json?: string | null;
+  source_event_id?: string | null;
+  sources_json?: string | null;
+  last_updated_at: string | null;
+}
+
+export interface TemuOperationRiskSummaryRow {
+  risk_type: string | null;
+  severity: string | null;
+  count: number;
+}
+
+export interface TemuStockOrderRow {
+  id: string;
+  mall_id: string | null;
+  site: string | null;
+  row_key: string;
+  stock_order_no: string | null;
+  parent_order_no: string | null;
+  delivery_order_sn: string | null;
+  delivery_batch_sn: string | null;
+  product_id: string | null;
+  skc_id: string | null;
+  sku_id: string | null;
+  sku_ext_code: string | null;
+  product_name: string | null;
+  spec_name: string | null;
+  demand_qty: number | null;
+  delivered_qty: number | null;
+  temu_status: string | null;
+  warehouse_group: string | null;
+  receive_warehouse_id: string | null;
+  receive_warehouse_name: string | null;
+  urgency_info: string | null;
+  order_time: string | null;
+  latest_ship_at: string | null;
+  raw_json?: string | null;
+  source_event_id?: string | null;
+  sources_json?: string | null;
+  first_seen_at: string | null;
+  last_updated_at: string | null;
+}
+
+export interface TemuStockOrderSummaryRow {
+  temu_status: string | null;
+  count: number;
+  demand_qty: number | null;
+}
+
+export interface CloudShopMonitorRow {
+  mall_id: string;
+  site: string | null;
+  mall_name: string | null;
+  last_seen: string | number | null;
+  last_capture_at: string | number | null;
+  capture_count_24h: number;
+  stat_date: string | null;
+  sale_volume: number;
+  seven_days_sale_volume: number;
+  thirty_days_sale_volume: number;
+  on_sale_product_number: number;
+  wait_product_number: number;
+  lack_skc_number: number;
+  advice_prepare_skc_number: number;
+  about_to_sell_out_number: number;
+  already_sold_out_number: number;
+  high_price_limit_number: number;
+  quality_after_sale_ratio_90d: number | null;
+  product_skc_count: number;
+  product_stock_available: number;
+  product_occupy_stock: number;
+  product_unavailable_stock: number;
+  flow_product_count: number;
+  flow_expose_num: number;
+  flow_click_num: number;
+  flow_detail_visit_num: number;
+  flow_detail_visitor_num: number;
+  flow_add_to_cart_user_num: number;
+  flow_collect_user_num: number;
+  flow_pay_goods_num: number;
+  flow_pay_order_num: number;
+  flow_buyer_num: number;
+  flow_expose_pay_conversion_rate: number | null;
+  flow_expose_click_conversion_rate: number | null;
+  flow_click_pay_conversion_rate: number | null;
+  flow_search_expose_num: number;
+  flow_search_click_num: number;
+  flow_search_pay_goods_num: number;
+  flow_search_pay_order_num: number;
+  flow_recommend_expose_num: number;
+  flow_recommend_click_num: number;
+  flow_recommend_pay_goods_num: number;
+  flow_recommend_pay_order_num: number;
+  activity_count: number;
+  bidding_activity_count: number;
+  coupon_activity_count: number;
+  activity_stock: number;
+  risk_count: number;
+  high_risk_count: number;
+  medium_risk_count: number;
+  stock_order_count: number;
+  pending_stock_order_count: number;
+  stock_order_demand_qty: number;
+  stock_order_delivered_qty: number;
+  last_flow_at: string | null;
+  last_activity_at: string | null;
+  last_risk_at: string | null;
+  last_stock_order_at: string | null;
+  last_updated_at: string | null;
+}
+
+export interface CloudShopMonitorTotals {
+  mall_count: number;
+  capture_count_24h: number;
+  device_count: number;
+  sale_volume: number;
+  seven_days_sale_volume: number;
+  thirty_days_sale_volume: number;
+  on_sale_product_number: number;
+  lack_skc_number: number;
+  advice_prepare_skc_number: number;
+  already_sold_out_number: number;
+  flow_product_count: number;
+  flow_expose_num: number;
+  flow_click_num: number;
+  flow_detail_visit_num: number;
+  flow_detail_visitor_num: number;
+  flow_add_to_cart_user_num: number;
+  flow_collect_user_num: number;
+  flow_pay_goods_num: number;
+  flow_pay_order_num: number;
+  flow_buyer_num: number;
+  flow_expose_pay_conversion_rate: number | null;
+  flow_expose_click_conversion_rate: number | null;
+  flow_click_pay_conversion_rate: number | null;
+  flow_search_expose_num: number;
+  flow_search_click_num: number;
+  flow_search_pay_goods_num: number;
+  flow_search_pay_order_num: number;
+  flow_recommend_expose_num: number;
+  flow_recommend_click_num: number;
+  flow_recommend_pay_goods_num: number;
+  flow_recommend_pay_order_num: number;
+  activity_count: number;
+  risk_count: number;
+  high_risk_count: number;
+  stock_order_count: number;
+  pending_stock_order_count: number;
+  stock_order_demand_qty: number;
+  stock_order_delivered_qty: number;
+}
+
+export interface CloudShopMonitorPayload {
+  generated_at: string;
+  rows: CloudShopMonitorRow[];
+  totals: CloudShopMonitorTotals;
 }
 
 export interface AgentHeartbeat {
@@ -357,6 +548,15 @@ export const fetchTemuShopSales = async (
   }
 };
 
+export const fetchEndpointCandidates = (
+  cfg: CloudConsoleConfig,
+  params: { limit?: number } = {},
+) => {
+  const qs = new URLSearchParams();
+  qs.set("limit", String(params.limit || 120));
+  return request<CloudEndpointCandidate[]>(cfg, `/api/dashboard/endpoint-candidates?${qs.toString()}`);
+};
+
 export const fetchTemuActivity = async (
   cfg: CloudConsoleConfig,
   params: { date?: string; mall_id?: string; kind?: string; limit?: number } = {},
@@ -374,6 +574,106 @@ export const fetchTemuActivity = async (
   } catch (error: any) {
     if (String(error?.message || "").includes("HTTP 404")) {
       return { date: params.date || "", rows: [], summary: [] };
+    }
+    throw error;
+  }
+};
+
+export const fetchTemuOperationRisks = async (
+  cfg: CloudConsoleConfig,
+  params: { date?: string; mall_id?: string; type?: string; limit?: number } = {},
+) => {
+  const qs = new URLSearchParams();
+  if (params.date) qs.set("date", params.date);
+  if (params.mall_id) qs.set("mall_id", params.mall_id);
+  if (params.type) qs.set("type", params.type);
+  if (params.limit) qs.set("limit", String(params.limit));
+  try {
+    return await request<{ date: string; rows: TemuOperationRiskRow[]; summary: TemuOperationRiskSummaryRow[] }>(
+      cfg,
+      `/api/dashboard/operation-risks?${qs.toString()}`,
+    );
+  } catch (error: any) {
+    if (String(error?.message || "").includes("HTTP 404")) {
+      return { date: params.date || "", rows: [], summary: [] };
+    }
+    throw error;
+  }
+};
+
+export const fetchTemuStockOrders = async (
+  cfg: CloudConsoleConfig,
+  params: { mall_id?: string; status?: string; q?: string; limit?: number } = {},
+) => {
+  const qs = new URLSearchParams();
+  if (params.mall_id) qs.set("mall_id", params.mall_id);
+  if (params.status) qs.set("status", params.status);
+  if (params.q) qs.set("q", params.q);
+  if (params.limit) qs.set("limit", String(params.limit));
+  try {
+    return await request<{ rows: TemuStockOrderRow[]; summary: TemuStockOrderSummaryRow[] }>(
+      cfg,
+      `/api/dashboard/stock-orders?${qs.toString()}`,
+    );
+  } catch (error: any) {
+    if (String(error?.message || "").includes("HTTP 404")) {
+      return { rows: [], summary: [] };
+    }
+    throw error;
+  }
+};
+
+export const fetchCloudShopMonitor = async (
+  cfg: CloudConsoleConfig,
+) => {
+  try {
+    return await request<CloudShopMonitorPayload>(cfg, "/api/dashboard/shop-monitor");
+  } catch (error: any) {
+    if (String(error?.message || "").includes("HTTP 404")) {
+      return {
+        generated_at: "",
+        rows: [],
+        totals: {
+          mall_count: 0,
+          capture_count_24h: 0,
+          device_count: 0,
+          sale_volume: 0,
+          seven_days_sale_volume: 0,
+          thirty_days_sale_volume: 0,
+          on_sale_product_number: 0,
+          lack_skc_number: 0,
+          advice_prepare_skc_number: 0,
+          already_sold_out_number: 0,
+          flow_product_count: 0,
+          flow_expose_num: 0,
+          flow_click_num: 0,
+          flow_detail_visit_num: 0,
+          flow_detail_visitor_num: 0,
+          flow_add_to_cart_user_num: 0,
+          flow_collect_user_num: 0,
+          flow_pay_goods_num: 0,
+          flow_pay_order_num: 0,
+          flow_buyer_num: 0,
+          flow_expose_pay_conversion_rate: null,
+          flow_expose_click_conversion_rate: null,
+          flow_click_pay_conversion_rate: null,
+          flow_search_expose_num: 0,
+          flow_search_click_num: 0,
+          flow_search_pay_goods_num: 0,
+          flow_search_pay_order_num: 0,
+          flow_recommend_expose_num: 0,
+          flow_recommend_click_num: 0,
+          flow_recommend_pay_goods_num: 0,
+          flow_recommend_pay_order_num: 0,
+          activity_count: 0,
+          risk_count: 0,
+          high_risk_count: 0,
+          stock_order_count: 0,
+          pending_stock_order_count: 0,
+          stock_order_demand_qty: 0,
+          stock_order_delivered_qty: 0,
+        },
+      };
     }
     throw error;
   }

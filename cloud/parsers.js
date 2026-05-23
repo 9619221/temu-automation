@@ -13,20 +13,45 @@ function firstDefined(obj, keys) {
   return null;
 }
 
+function firstDeepDefined(obj, keys, maxDepth = 3) {
+  const seen = new Set();
+  const stack = [{ value: obj, depth: 0 }];
+  while (stack.length) {
+    const { value, depth } = stack.shift();
+    if (!value || typeof value !== "object" || seen.has(value)) continue;
+    seen.add(value);
+    const direct = firstDefined(value, keys);
+    if (direct != null && direct !== "") return direct;
+    if (depth >= maxDepth) continue;
+    for (const child of Object.values(value)) {
+      if (child && typeof child === "object") stack.push({ value: child, depth: depth + 1 });
+    }
+  }
+  return null;
+}
+
 function pickList(body) {
   const candidates = [
     body?.result?.pageItems,
     body?.result?.dataList,
     body?.result?.list,
     body?.result?.items,
+    body?.result?.records,
+    body?.result?.rows,
     body?.result?.subOrderList,
+    body?.result?.page?.records,
+    body?.result?.page?.rows,
     body?.data?.pageItems,
     body?.data?.list,
     body?.data?.items,
+    body?.data?.records,
+    body?.data?.rows,
     body?.data?.subOrderList,
     body?.pageItems,
     body?.list,
     body?.items,
+    body?.records,
+    body?.rows,
   ];
   return candidates.find((value) => Array.isArray(value) && value.length > 0) || null;
 }
@@ -409,58 +434,79 @@ function parseSalesManagement(db, ctx, evt, body) {
   const now = Date.now();
   const sources_json = JSON.stringify({ [evt.url_path]: evt.id });
   for (const row of list) {
-    const skc_id = toNullableString(row?.productSkcId);
+    const skc_id = toNullableString(firstDefined(row, [
+      "productSkcId", "productSKCId", "productSkcIdStr", "skcId", "skc_id",
+    ]));
     if (!skc_id) continue;
     const totalInfo = row?.skuQuantityTotalInfo || {};
-    const inventoryInfo = totalInfo?.inventoryNumInfo || {};
-    const sku = Array.isArray(row?.skuQuantityDetailList) ? row.skuQuantityDetailList[0] : null;
-    const declared_price_cents = sku ? toCents(sku.supplierPrice, "supplierPrice") : null;
-    const price_currency = toNullableString(sku?.currencyType, 8);
-    const title = toNullableString(row.productName, 500);
-    const category_name = toNullableString(row.category, 200);
-    const thumb_url = toNullableString(row.productSkcPicture, 1000);
-    const supply_status = toNullableString(row.supplyStatus, 50);
-    const mall_id = eventMallId(ctx, evt, row.supplierId);
-    const total_sales = toNullableInteger(row.totalSales ?? totalInfo.totalSaleVolume);
-    const warehouse_stock = toNullableInteger(row.warehouseStock ?? inventoryInfo.warehouseInventoryNum);
+    const inventoryInfo = totalInfo?.inventoryNumInfo || row?.inventoryNumInfo || row?.skuInventoryInfo || {};
+    const skuList = Array.isArray(row?.skuQuantityDetailList)
+      ? row.skuQuantityDetailList
+      : Array.isArray(row?.skuList)
+        ? row.skuList
+        : Array.isArray(row?.skuInfoList)
+          ? row.skuInfoList
+          : [];
+    const sku = skuList[0] || null;
+    const declared_price_cents = pickPriceCents({ ...(sku || {}), ...row }, [
+      "supplierPriceCents", "supplierPriceCent", "supplierPrice",
+      "salePriceCents", "salePriceCent", "salePrice",
+      "currentPriceCents", "currentPrice", "priceCents", "price",
+    ]);
+    const price_currency = toNullableString(firstDefined({ ...(sku || {}), ...row }, [
+      "currencyType", "currency", "currencyCode", "siteCurrency", "priceCurrency",
+    ]), 8);
+    const title = toNullableString(firstDefined(row, ["productName", "goodsName", "title", "name"]), 500);
+    const category_name = toNullableString(categoryNameFromValue(firstDefined(row, ["category", "categoryName", "catName"])), 200);
+    const thumb_url = toNullableString(firstDefined(row, ["productSkcPicture", "goodsImageUrl", "imageUrl", "thumbUrl"]), 1000);
+    const supply_status = toNullableString(firstDefined(row, ["supplyStatus", "status", "saleStatus"]), 50);
+    const mall_id = eventMallId(ctx, evt, firstDefined(row, ["supplierId", "mallSupplierId", "mallId"]));
+    const total_sales = toNullableInteger(firstDefined(row, ["totalSales", "totalSaleVolume", "salesTotal"]) ?? totalInfo.totalSaleVolume);
+    const warehouse_stock = toNullableInteger(firstDefined(row, [
+      "warehouseStock", "warehouseInventoryNum", "sellerWhStock", "stockAvailable",
+    ]) ?? inventoryInfo.warehouseInventoryNum);
     const sku_ext_code = toNullableString(
-      row.skcExtCode != null && row.skcExtCode !== "" ? row.skcExtCode : sku?.skuExtCode
+      firstDefined(row, ["skcExtCode", "skuExtCode", "skuCode"]) ?? sku?.skuExtCode
     );
     upsertSales.run({
       id: crypto.randomUUID(),
       tenant_id: ctx.tenant_id,
       skc_id,
-      product_id: toNullableString(row.productId),
-      goods_id: toNullableString(row.goodsId) || "",
+      product_id: toNullableString(firstDefined(row, ["productId", "productSpuId", "spuId"])),
+      goods_id: toNullableString(firstDefined(row, ["goodsId", "goods_id"])) || "",
       mall_supplier_id: mall_id,
       title,
       category_name,
       thumb_url,
       sku_ext_code,
-      today_sales: toNullableInteger(row.todaySales ?? totalInfo.todaySaleVolume),
-      last7d_sales: toNullableInteger(row.last7DaysSales ?? totalInfo.lastSevenDaysSaleVolume),
-      last30d_sales: toNullableInteger(row.last30DaysSales ?? totalInfo.lastThirtyDaysSaleVolume),
+      today_sales: toNullableInteger(firstDefined(row, ["todaySales", "todaySaleVolume", "saleVolume"]) ?? totalInfo.todaySaleVolume),
+      last7d_sales: toNullableInteger(firstDefined(row, ["last7DaysSales", "sevenDaysSaleVolume", "lastSevenDaysSaleVolume"]) ?? totalInfo.lastSevenDaysSaleVolume),
+      last30d_sales: toNullableInteger(firstDefined(row, ["last30DaysSales", "thirtyDaysSaleVolume", "lastThirtyDaysSaleVolume"]) ?? totalInfo.lastThirtyDaysSaleVolume),
       total_sales,
       warehouse_stock,
-      occupy_stock: occupiedInventoryInteger(inventoryInfo.expectedOccupiedInventoryNum, inventoryInfo.normalLockNumber, row.occupyStock),
-      unavailable_stock: toNullableInteger(row.unavailableStock ?? inventoryInfo.unavailableWarehouseInventoryNum),
-      advice_qty: toNullableInteger(row.adviceQuantity ?? totalInfo.adviceQuantity),
-      available_sale_days: toNullableNumber(row.availableSaleDays ?? totalInfo.availableSaleDays),
+      occupy_stock: occupiedInventoryInteger(
+        inventoryInfo.expectedOccupiedInventoryNum ?? row.expectedOccupiedInventoryNum,
+        inventoryInfo.normalLockNumber ?? row.normalLockNumber,
+        row.occupyStock ?? row.occupiedStock,
+      ),
+      unavailable_stock: toNullableInteger(firstDefined(row, ["unavailableStock", "unavailableWarehouseInventoryNum"]) ?? inventoryInfo.unavailableWarehouseInventoryNum),
+      advice_qty: toNullableInteger(firstDefined(row, ["adviceQuantity", "adviceQty", "suggestPrepareQuantity"]) ?? totalInfo.adviceQuantity),
+      available_sale_days: toNullableNumber(firstDefined(row, ["availableSaleDays", "warehouseAvailableSaleDays"]) ?? totalInfo.availableSaleDays),
       declared_price_cents,
       price_currency,
-      asf_score: toNullableString(row.asfScore),
-      comment_num: toNullableInteger(row.commentNum),
-      quality_after_sales_rate: toNullableString(row.qualityAfterSalesRate),
+      asf_score: toNullableString(firstDefined(row, ["asfScore", "score"])),
+      comment_num: toNullableInteger(firstDefined(row, ["commentNum", "reviewNum"])),
+      quality_after_sales_rate: toNullableString(firstDefined(row, ["qualityAfterSalesRate", "afterSalesRate"])),
       supply_status,
-      stock_status: toNullableString(row.stockStatus),
-      close_jit_status: toNullableString(row.closeJitStatus),
+      stock_status: toNullableString(firstDefined(row, ["stockStatus", "inventoryStatus"])),
+      close_jit_status: toNullableString(firstDefined(row, ["closeJitStatus", "jitStatus"])),
       stat_date,
       sources_json,
     });
     upsertSkc.run({
       tenant_id: ctx.tenant_id,
       skc_id,
-      product_id: toNullableString(row.productId),
+      product_id: toNullableString(firstDefined(row, ["productId", "productSpuId", "spuId"])),
       mall_id,
       site: evt.site || null,
       title,
@@ -737,6 +783,293 @@ function parseSuggestedPrice(db, ctx, evt, body) {
 
 // ---------- 调度器 ----------
 
+// ---------- TEMU operation risks / shop inspection ----------
+
+function operationRiskTypeFromPath(path) {
+  const text = String(path || "");
+  if (/tmod_punish|merchant_appeal/i.test(text)) return "violation_goods";
+  if (/pageQueryDeliveryBatch|pageQueryDeliveryOrders/i.test(text)) return "delivery_order";
+  if (/queryAllFeedbackRecordInfo|pageQueryProblemWaybills/i.test(text)) return "logistics_feedback";
+  if (/searchQcSubBillHistory/i.test(text)) return "spot_check_history";
+  if (/searchQcSubBill|querySubOrderList/i.test(text)) return "spot_check";
+  if (/queryWeekInboundExceptionDetailInfo|supplier\/exception/i.test(text)) return "inbound_exception";
+  if (/returnSupplier/i.test(text)) return "return_package";
+  if (/high\/price\/flow\/reduce|queryCompetitor|querySiteTargetPrice|batchQueryCustomerQueryLimit/i.test(text)) return "high_price_flow";
+  if (/bg-brando-mms\/supplier\/data\/center\/skc\/sales\/data/i.test(text)) return "regional_sales";
+  return "operation";
+}
+
+function operationRiskSeverity(type, row) {
+  const statusText = [
+    row?.status, row?.state, row?.auditStatus, row?.orderStatus, row?.exceptionStatus,
+    row?.reason, row?.exceptionReason, row?.punishReason, row?.feedbackType,
+  ].map((value) => String(value || "")).join(" ");
+  if (/违规|处罚|异常|失败|超时|未签收|限流|拒绝|退回|待处理|failed|timeout|abnormal|reject/i.test(statusText)) return "high";
+  if (["violation_goods", "inbound_exception", "high_price_flow"].includes(type)) return "high";
+  if (["logistics_feedback", "spot_check", "return_package"].includes(type)) return "medium";
+  return "low";
+}
+
+function operationRiskItems(body) {
+  const direct = pickList(body);
+  if (Array.isArray(direct) && direct.length) return direct;
+  const root = body?.result ?? body?.data ?? body;
+  if (!root || typeof root !== "object") return [];
+  const out = [];
+  const seen = new Set();
+  const stack = [{ node: root, depth: 0 }];
+  while (stack.length && out.length < 2000) {
+    const { node, depth } = stack.pop();
+    if (!node || typeof node !== "object" || seen.has(node) || depth > 5) continue;
+    seen.add(node);
+    if (Array.isArray(node)) {
+      const objectRows = node.filter((item) => item && typeof item === "object" && !Array.isArray(item));
+      if (objectRows.length) out.push(...objectRows);
+      continue;
+    }
+    for (const value of Object.values(node)) {
+      if (value && typeof value === "object") stack.push({ node: value, depth: depth + 1 });
+    }
+  }
+  if (out.length) return out;
+  return root && typeof root === "object" && !Array.isArray(root) ? [root] : [];
+}
+
+function operationRiskKey(type, row, evt, index) {
+  const key = firstDefined(row, [
+    "deliveryOrderSn", "deliveryBatchSn", "subPurchaseOrderSn", "subOrderSn", "purchaseOrderSn",
+    "parentOrderSn", "orderSn", "returnPackageSn", "packageSn", "waybillNo", "trackingNumber",
+    "qcSubBillId", "qcBillId", "appealId", "punishId", "productSkcId", "skcId", "productId", "id",
+  ]);
+  return [type, key || evt.id, index].map((part) => String(part ?? "")).join("|").slice(0, 500);
+}
+
+function stockOrderItems(body) {
+  const direct = pickList(body);
+  if (Array.isArray(direct) && direct.length) return direct;
+  return operationRiskItems(body);
+}
+
+function stockOrderRowKey(row, evt, index) {
+  const key = firstDeepDefined(row, [
+    "subPurchaseOrderSn", "subPurchaseOrderNo", "purchaseOrderSn", "purchaseOrderNo",
+    "stockOrderNo", "stockOrderSn", "deliveryOrderSn", "deliveryBatchSn", "orderSn", "id",
+  ], 3);
+  const skc = firstDeepDefined(row, ["productSkcId", "productSKCId", "skcId", "skc_id"], 3);
+  const sku = firstDeepDefined(row, ["productSkuId", "prodSkuId", "skuId", "sku_id"], 3);
+  return [key || evt.id, skc || "", sku || "", index].map((part) => String(part ?? "")).join("|").slice(0, 500);
+}
+
+function parseTemuStockOrders(db, ctx, evt, body) {
+  const items = stockOrderItems(body);
+  if (!items.length) return;
+  const upsert = db.prepare(`
+    INSERT INTO temu_stock_order_snapshot (
+      id, tenant_id, mall_id, site, row_key, stock_order_no, parent_order_no,
+      delivery_order_sn, delivery_batch_sn, product_id, skc_id, sku_id, sku_ext_code,
+      product_name, spec_name, demand_qty, delivered_qty, temu_status, warehouse_group,
+      receive_warehouse_id, receive_warehouse_name, urgency_info, order_time, latest_ship_at,
+      raw_json, source_event_id, sources_json
+    ) VALUES (
+      @id, @tenant_id, @mall_id, @site, @row_key, @stock_order_no, @parent_order_no,
+      @delivery_order_sn, @delivery_batch_sn, @product_id, @skc_id, @sku_id, @sku_ext_code,
+      @product_name, @spec_name, @demand_qty, @delivered_qty, @temu_status, @warehouse_group,
+      @receive_warehouse_id, @receive_warehouse_name, @urgency_info, @order_time, @latest_ship_at,
+      @raw_json, @source_event_id, @sources_json
+    )
+    ON CONFLICT(tenant_id, mall_id, row_key) DO UPDATE SET
+      site                   = COALESCE(excluded.site, site),
+      stock_order_no         = COALESCE(excluded.stock_order_no, stock_order_no),
+      parent_order_no        = COALESCE(excluded.parent_order_no, parent_order_no),
+      delivery_order_sn      = COALESCE(excluded.delivery_order_sn, delivery_order_sn),
+      delivery_batch_sn      = COALESCE(excluded.delivery_batch_sn, delivery_batch_sn),
+      product_id             = COALESCE(excluded.product_id, product_id),
+      skc_id                 = COALESCE(excluded.skc_id, skc_id),
+      sku_id                 = COALESCE(excluded.sku_id, sku_id),
+      sku_ext_code           = COALESCE(excluded.sku_ext_code, sku_ext_code),
+      product_name           = COALESCE(excluded.product_name, product_name),
+      spec_name              = COALESCE(excluded.spec_name, spec_name),
+      demand_qty             = COALESCE(excluded.demand_qty, demand_qty),
+      delivered_qty          = COALESCE(excluded.delivered_qty, delivered_qty),
+      temu_status            = COALESCE(excluded.temu_status, temu_status),
+      warehouse_group        = COALESCE(excluded.warehouse_group, warehouse_group),
+      receive_warehouse_id   = COALESCE(excluded.receive_warehouse_id, receive_warehouse_id),
+      receive_warehouse_name = COALESCE(excluded.receive_warehouse_name, receive_warehouse_name),
+      urgency_info           = COALESCE(excluded.urgency_info, urgency_info),
+      order_time             = COALESCE(excluded.order_time, order_time),
+      latest_ship_at         = COALESCE(excluded.latest_ship_at, latest_ship_at),
+      raw_json               = COALESCE(excluded.raw_json, raw_json),
+      source_event_id        = COALESCE(excluded.source_event_id, source_event_id),
+      sources_json           = json_patch(COALESCE(sources_json, '{}'), COALESCE(excluded.sources_json, '{}')),
+      last_updated_at        = datetime('now')
+  `);
+  const mall_id = eventMallId(ctx, evt);
+  const sources_json = JSON.stringify({ [evt.url_path]: evt.id });
+  items.forEach((row, index) => {
+    if (!row || typeof row !== "object") return;
+    const stock_order_no = toNullableString(firstDeepDefined(row, [
+      "subPurchaseOrderSn", "subPurchaseOrderNo", "purchaseOrderSn", "purchaseOrderNo",
+      "stockOrderNo", "stockOrderSn", "platformPurchaseOrderSn", "platformPurchaseOrderNo",
+    ], 3));
+    const delivery_order_sn = toNullableString(firstDeepDefined(row, [
+      "deliveryOrderSn", "deliveryOrderNo", "shipOrderSn", "shipOrderNo", "deliverOrderSn",
+    ], 3));
+    const delivery_batch_sn = toNullableString(firstDeepDefined(row, [
+      "deliveryBatchSn", "deliveryBatchNo", "batchSn", "batchNo",
+    ], 3));
+    const skc_id = toNullableString(firstDeepDefined(row, [
+      "productSkcId", "productSKCId", "skcId", "skc_id",
+    ], 3));
+    const sku_id = toNullableString(firstDeepDefined(row, [
+      "productSkuId", "prodSkuId", "skuId", "sku_id",
+    ], 3));
+    if (!stock_order_no && !delivery_order_sn && !delivery_batch_sn && !skc_id && !sku_id) return;
+    upsert.run({
+      id: crypto.randomUUID(),
+      tenant_id: ctx.tenant_id,
+      mall_id,
+      site: evt.site || null,
+      row_key: stockOrderRowKey(row, evt, index),
+      stock_order_no,
+      parent_order_no: toNullableString(firstDeepDefined(row, [
+        "parentOrderSn", "parentOrderNo", "parentPurchaseOrderSn", "parentPurchaseOrderNo",
+      ], 3)),
+      delivery_order_sn,
+      delivery_batch_sn,
+      product_id: toNullableString(firstDeepDefined(row, ["productId", "productSpuId", "spuId"], 3)),
+      skc_id,
+      sku_id,
+      sku_ext_code: toNullableString(firstDeepDefined(row, [
+        "skuExtCode", "extCode", "externalSkuCode", "supplierSkuCode", "skuCode", "specCode",
+      ], 3), 200),
+      product_name: toNullableString(firstDeepDefined(row, [
+        "productName", "goodsName", "productTitle", "title", "name",
+      ], 3), 500),
+      spec_name: toNullableString(firstDeepDefined(row, [
+        "specName", "skuSpecName", "productSkuSpec", "colorSpec", "skuName",
+      ], 3), 500),
+      demand_qty: toNullableInteger(firstDeepDefined(row, [
+        "demandQty", "demandQuantity", "purchaseQuantity", "subPurchaseQuantity",
+        "expectQuantity", "expectedQuantity", "requiredQuantity", "quantity", "qty",
+        "waitDeliverQuantity", "waitDeliveryNum", "stockUpNum", "applyStockNum",
+      ], 3)),
+      delivered_qty: toNullableInteger(firstDeepDefined(row, [
+        "deliveredQty", "deliveredQuantity", "deliverQuantity", "deliveryQuantity",
+        "shippedQty", "shippedQuantity", "actualQuantity",
+      ], 3)),
+      temu_status: toNullableString(firstDeepDefined(row, [
+        "status", "statusName", "orderStatus", "orderStatusName", "state", "stateName",
+        "deliveryStatus", "deliveryStatusName",
+      ], 3), 100),
+      warehouse_group: toNullableString(firstDeepDefined(row, [
+        "warehouseGroup", "warehouseGroupName", "warehouse", "warehouseName", "siteName",
+      ], 3), 200),
+      receive_warehouse_id: toNullableString(firstDeepDefined(row, [
+        "receiveWarehouseId", "receiveSubWarehouseId", "subWarehouseId", "warehouseId",
+      ], 3), 100),
+      receive_warehouse_name: toNullableString(firstDeepDefined(row, [
+        "receiveWarehouseName", "receiveSubWarehouseName", "subWarehouseName", "warehouseName",
+      ], 3), 200),
+      urgency_info: toNullableString(firstDeepDefined(row, [
+        "urgencyInfo", "urgentInfo", "urgentType", "priority", "tag", "label",
+      ], 3), 200),
+      order_time: toNullableString(firstDeepDefined(row, [
+        "orderTime", "createdAt", "createTime", "gmtCreate", "purchaseTime",
+      ], 3), 100),
+      latest_ship_at: toNullableString(firstDeepDefined(row, [
+        "latestShipAt", "latestDeliveryTime", "expectShipTime", "expectedShipTime",
+        "deliveryDeadline", "shipDeadline",
+      ], 3), 100),
+      raw_json: toJsonText(row),
+      source_event_id: evt.id,
+      sources_json,
+    });
+  });
+}
+
+function parseOperationRisk(db, ctx, evt, body) {
+  const type = operationRiskTypeFromPath(evt.url_path);
+  const items = operationRiskItems(body);
+  if (!items.length) return;
+  const upsert = db.prepare(`
+    INSERT INTO temu_operation_risk_snapshot (
+      id, tenant_id, mall_id, site, stat_date, risk_type, risk_key,
+      risk_title, risk_status, severity, product_id, skc_id, goods_id,
+      order_id, quantity, metric_json, raw_json, source_event_id, sources_json
+    ) VALUES (
+      @id, @tenant_id, @mall_id, @site, @stat_date, @risk_type, @risk_key,
+      @risk_title, @risk_status, @severity, @product_id, @skc_id, @goods_id,
+      @order_id, @quantity, @metric_json, @raw_json, @source_event_id, @sources_json
+    )
+    ON CONFLICT(tenant_id, mall_id, risk_type, risk_key, stat_date) DO UPDATE SET
+      site            = COALESCE(excluded.site, site),
+      risk_title      = COALESCE(excluded.risk_title, risk_title),
+      risk_status     = COALESCE(excluded.risk_status, risk_status),
+      severity        = COALESCE(excluded.severity, severity),
+      product_id      = COALESCE(excluded.product_id, product_id),
+      skc_id          = COALESCE(excluded.skc_id, skc_id),
+      goods_id        = COALESCE(excluded.goods_id, goods_id),
+      order_id        = COALESCE(excluded.order_id, order_id),
+      quantity        = COALESCE(excluded.quantity, quantity),
+      metric_json     = COALESCE(excluded.metric_json, metric_json),
+      raw_json        = COALESCE(excluded.raw_json, raw_json),
+      source_event_id = COALESCE(excluded.source_event_id, source_event_id),
+      sources_json    = json_patch(COALESCE(sources_json, '{}'), COALESCE(excluded.sources_json, '{}')),
+      last_updated_at = datetime('now')
+  `);
+  const stat_date = normalizeStatDate(firstDefined(body?.result || body?.data || {}, ["statDate", "date", "dataDate", "updateTime"]), evt);
+  const sources_json = JSON.stringify({ [evt.url_path]: evt.id });
+  const mall_id = eventMallId(ctx, evt);
+  items.forEach((row, index) => {
+    if (!row || typeof row !== "object") return;
+    const order_id = toNullableString(firstDeepDefined(row, [
+      "deliveryOrderSn", "deliveryBatchSn", "subPurchaseOrderSn", "subOrderSn", "purchaseOrderSn",
+      "parentOrderSn", "orderSn", "returnPackageSn", "packageSn", "waybillNo", "trackingNumber",
+      "qcSubBillId", "qcBillId", "appealId", "punishId", "id",
+    ], 2));
+    const product_id = toNullableString(firstDeepDefined(row, ["productId", "productSpuId", "spuId"], 2));
+    const skc_id = toNullableString(firstDeepDefined(row, ["productSkcId", "productSKCId", "skcId", "skc_id"], 2));
+    const goods_id = toNullableString(firstDeepDefined(row, ["goodsId", "goods_id"], 2));
+    upsert.run({
+      id: crypto.randomUUID(),
+      tenant_id: ctx.tenant_id,
+      mall_id,
+      site: evt.site || null,
+      stat_date,
+      risk_type: type,
+      risk_key: operationRiskKey(type, row, evt, index),
+      risk_title: toNullableString(firstDeepDefined(row, [
+        "productName", "goodsName", "title", "name", "exceptionReason", "reason",
+        "punishReason", "feedbackReason", "qcReason", "warehouseName", "siteName",
+      ], 2), 500),
+      risk_status: toNullableString(firstDeepDefined(row, [
+        "status", "state", "auditStatus", "orderStatus", "exceptionStatus", "qcStatus", "feedbackStatus",
+      ], 2), 100),
+      severity: operationRiskSeverity(type, row),
+      product_id,
+      skc_id,
+      goods_id,
+      order_id,
+      quantity: toNullableInteger(firstDeepDefined(row, [
+        "quantity", "qty", "expectQuantity", "expectedQuantity", "actualQuantity", "deliverQuantity",
+        "purchaseQuantity", "returnQuantity", "stockNum", "lackNum",
+      ], 2)),
+      metric_json: toJsonText({
+        sourcePath: evt.url_path,
+        status: firstDeepDefined(row, ["status", "state", "auditStatus", "orderStatus", "exceptionStatus"], 2),
+        reason: firstDeepDefined(row, ["reason", "exceptionReason", "punishReason", "feedbackReason", "qcReason"], 2),
+        supplierName: firstDeepDefined(row, ["supplierName", "mallName", "warehouseName"], 2),
+        logisticsNo: firstDeepDefined(row, ["waybillNo", "trackingNumber", "logisticsNo", "expressNo"], 2),
+        createdAt: firstDeepDefined(row, ["createdAt", "createTime", "gmtCreate", "orderCreateTime"], 2),
+        updatedAt: firstDeepDefined(row, ["updatedAt", "updateTime", "gmtModified", "operateTime"], 2),
+      }, 20000),
+      raw_json: toJsonText(row),
+      source_event_id: evt.id,
+      sources_json,
+    });
+  });
+}
+
 // ---------- TEMU activity / marketing ----------
 
 function activityKindFromPath(path) {
@@ -757,24 +1090,216 @@ function toJsonText(value, max = 200000) {
   }
 }
 
-function pickActivityItems(body) {
+function isRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value);
+}
+
+const ACTIVITY_ARRAY_META = {
+  goodsCouponGoodsVOS: { activityTitle: "商品券推荐商品", activityType: "商品券" },
+  mallCouponGoodsVOS: { activityTitle: "店铺券推荐商品", activityType: "店铺券" },
+  rcActivityGoodsVOS: { activityTitle: "资源位推荐商品", activityType: "资源位活动" },
+  activityList: { activityType: "活动报名" },
+  thematicList: { activityType: "活动主题" },
+  sessionList: { activityType: "活动场次" },
+  sessionAggList: { activityType: "活动场次" },
+  matchList: { activityTitle: "活动匹配", activityType: "活动匹配" },
+  productList: {},
+  goodsList: {},
+  pageItems: {},
+  dataList: {},
+  items: {},
+  subOrderList: {},
+  list: {},
+};
+
+function activityMetaForPath(path, arrayKey = "") {
+  const text = String(path || "");
+  const meta = { ...(ACTIVITY_ARRAY_META[arrayKey] || {}) };
+  if (/\/api\/activity\/data\/goods\/detail/i.test(text)) {
+    meta.activityTitle = meta.activityTitle || "活动商品数据";
+    meta.activityType = meta.activityType || "活动数据";
+  } else if (/\/api\/activity\/data\/market\//i.test(text)) {
+    meta.activityTitle = meta.activityTitle || "活动大盘数据";
+    meta.activityType = meta.activityType || "活动数据";
+  } else if (/activity\/tool\/home\/picksGoods/i.test(text)) {
+    meta.activityType = meta.activityType || "活动推荐";
+  } else if (/activity\/list\/for\/home/i.test(text)) {
+    meta.activityType = meta.activityType || "活动报名";
+  } else if (/biddingInvitation/i.test(text)) {
+    meta.activityType = meta.activityType || "竞价活动";
+  }
+  return meta;
+}
+
+function mergeActivityMeta(base, next) {
+  return Object.fromEntries(
+    Object.entries({ ...(base || {}), ...(next || {}) }).filter(([, value]) => value != null && value !== ""),
+  );
+}
+
+function activityMetaFromRequest(body) {
+  const req = body?.__request;
+  if (!isRecord(req)) return {};
+  const productIds = Array.isArray(req.productIds) ? req.productIds : [];
+  return {
+    activityId: firstDefined(req, ["activityThematicId", "activityId", "themeId", "topicId"]),
+    activityType: firstDefined(req, ["activityType", "activityTypeName"]),
+    productId: productIds[0] ?? firstDefined(req, ["productId", "spuId"]),
+  };
+}
+
+function activityListFromRoot(root) {
+  const out = [];
+  if (Array.isArray(root)) out.push(["result", root]);
+  if (!isRecord(root)) return out;
+  for (const key of Object.keys(ACTIVITY_ARRAY_META)) {
+    if (Array.isArray(root[key]) && root[key].length) out.push([key, root[key]]);
+  }
+  return out;
+}
+
+function normalizeActivityItem(item, meta) {
+  if (!isRecord(item)) return null;
+  const order = isRecord(item.biddingInvitationOrder) ? item.biddingInvitationOrder : null;
+  if (!order) return { ...item, __activity_meta: meta };
+  return {
+    ...order,
+    ...Object.fromEntries(Object.entries(item).filter(([key]) => key !== "biddingInvitationOrder")),
+    biddingInvitationOrder: order,
+    __activity_meta: mergeActivityMeta(meta, {
+      activityId: firstDefined(order, ["biddingInvitationOrderSn", "orderSn", "invitationTopicId", "topicId", "id"]),
+      activityTitle: firstDefined(order, ["topicName", "activityName", "title", "name"]),
+    }),
+  };
+}
+
+function pushActivityItem(out, item, meta, evt) {
+  if (!isRecord(item)) return;
+  const localMeta = mergeActivityMeta(meta, item.__activity_meta);
+  const order = isRecord(item.biddingInvitationOrder) ? item.biddingInvitationOrder : null;
+  const nestedActivityLists = [
+    ["thematicList", item.thematicList],
+    ["sessionList", item.sessionList],
+    ["sessionAggList", item.sessionAggList],
+  ].filter(([, value]) => Array.isArray(value) && value.length);
+  if (nestedActivityLists.length) {
+    for (const [arrayKey, list] of nestedActivityLists) {
+      const childMeta = mergeActivityMeta(localMeta, activityMetaForPath(evt.url_path, arrayKey));
+      for (const child of list) {
+        if (!isRecord(child)) continue;
+        out.push({
+          ...item,
+          ...child,
+          __activity_parent: item,
+          __activity_meta: mergeActivityMeta(childMeta, {
+            activityId: firstDefined(child, ["activityThematicId", "activityId", "themeId", "topicId"]),
+            activityTitle: firstDefined(child, ["activityThematicName", "activityName", "themeName", "topicName"]) || firstDefined(item, ["activityName", "activityTitle", "name", "title"]),
+            activityType: firstDefined(child, ["activityType", "activityTypeName"]) ?? firstDefined(item, ["activityType", "activityTypeName"]),
+          }),
+        });
+      }
+    }
+    return;
+  }
+  const skcList = Array.isArray(item.skcList) ? item.skcList : [];
+  if (skcList.length) {
+    for (const skc of skcList) {
+      if (!isRecord(skc)) continue;
+      const skuList = Array.isArray(skc.skuList) && skc.skuList.length ? skc.skuList : [null];
+      for (const sku of skuList) {
+        const skuObj = isRecord(sku) ? sku : {};
+        out.push({
+          ...item,
+          ...skc,
+          ...skuObj,
+          productId: firstDefined(item, ["productId", "productSpuId", "spuId"]) ?? localMeta.productId,
+          productSkcId: firstDefined(skc, ["productSkcId", "skcId"]) ?? firstDefined(item, ["productSkcId", "skcId"]),
+          __activity_parent: item,
+          __activity_meta: mergeActivityMeta(localMeta, {
+            activityId: localMeta.activityId,
+            activityType: localMeta.activityType || "活动匹配",
+          }),
+        });
+      }
+    }
+    return;
+  }
+  const productLists = [
+    ["biddingProductList", item.biddingProductList],
+    ["productList", item.productList],
+    ["goodsList", item.goodsList],
+  ].filter(([, value]) => Array.isArray(value) && value.length);
+  if (productLists.length) {
+    for (const [arrayKey, list] of productLists) {
+      const productMeta = mergeActivityMeta(localMeta, activityMetaForPath(evt.url_path, arrayKey));
+      for (const product of list) {
+        if (!isRecord(product)) continue;
+        out.push({
+          ...(order || {}),
+          ...product,
+          __activity_meta: productMeta,
+          __activity_parent: order || item,
+        });
+      }
+    }
+    return;
+  }
+  const normalized = normalizeActivityItem(item, localMeta);
+  if (normalized) out.push(normalized);
+}
+
+function pickActivityItems(body, evt) {
+  const requestMeta = activityMetaFromRequest(body);
   const list = pickList(body);
-  if (Array.isArray(list) && list.length) return list;
+  if (Array.isArray(list) && list.length) {
+    const out = [];
+    const meta = mergeActivityMeta(activityMetaForPath(evt.url_path, "list"), requestMeta);
+    for (const item of list) pushActivityItem(out, item, meta, evt);
+    if (out.length) return out;
+    return list;
+  }
   const result = body?.result ?? body?.data ?? body;
-  return result && typeof result === "object" ? [result] : [];
+  const out = [];
+  for (const [arrayKey, array] of activityListFromRoot(result)) {
+    const meta = mergeActivityMeta(activityMetaForPath(evt.url_path, arrayKey), requestMeta);
+    for (const item of array) pushActivityItem(out, item, meta, evt);
+  }
+  if (out.length) return out;
+  return result && typeof result === "object"
+    ? [{ ...result, __activity_meta: mergeActivityMeta(activityMetaForPath(evt.url_path), requestMeta) }]
+    : [];
+}
+
+function pickActivityPriceCents(item, keys) {
+  for (const key of keys) {
+    const raw = firstDeepDefined(item, [key], 3);
+    if (raw == null || raw === "") continue;
+    const value = raw && typeof raw === "object"
+      ? firstDefined(raw, ["priceCents", "priceCent", "cent", "cents", "amount", "value", "price"])
+      : raw;
+    const cents = toCents(value, key);
+    if (cents != null) return cents;
+  }
+  return null;
+}
+
+function pickActivityInteger(item, keys) {
+  const raw = firstDeepDefined(item, keys, 3);
+  return toNullableInteger(raw);
 }
 
 function activityRowKey(item, evt, index) {
   const activityId = firstDefined(item, [
     "activityThematicId", "activityId", "activityThemeId", "themeId", "topicId",
-    "couponId", "promotionId", "campaignId", "biddingInvitationOrderSn", "orderSn", "id",
+    "invitationTopicId", "couponId", "promotionId", "campaignId", "biddingInvitationOrderSn", "orderSn", "id",
   ]);
-  const productId = firstDefined(item, ["productId", "productSpuId", "spuId"]);
-  const skcId = firstDefined(item, ["productSkcId", "skcId"]);
-  const goodsId = firstDefined(item, ["goodsId"]);
+  const meta = isRecord(item.__activity_meta) ? item.__activity_meta : {};
+  const productId = firstDefined(item, ["productId", "productSpuId", "spuId", "spu_id", "goodsSpuId"]) ?? meta.productId;
+  const skcId = firstDefined(item, ["productSkcId", "skcId", "skc_id"]);
+  const goodsId = firstDefined(item, ["goodsId", "goods_id"]);
   return [
     activityKindFromPath(evt.url_path),
-    activityId || evt.id,
+    activityId || meta.activityId || evt.id,
     productId || "",
     skcId || "",
     goodsId || "",
@@ -783,16 +1308,20 @@ function activityRowKey(item, evt, index) {
 }
 
 function parseActivitySnapshot(db, ctx, evt, body) {
-  const items = pickActivityItems(body);
+  const items = pickActivityItems(body, evt);
   if (!items.length) return;
   const upsert = db.prepare(`
     INSERT INTO temu_activity_snapshot (
       id, tenant_id, mall_id, site, stat_date, row_key, activity_kind,
-      activity_id, activity_title, activity_status, product_id, skc_id, goods_id,
+      activity_id, activity_title, activity_type, activity_status, product_id, skc_id, goods_id,
+      signup_price_cents, suggested_price_cents, price_currency, activity_stock,
+      signup_price_diff_cents,
       start_at, end_at, metric_json, raw_json, source_event_id, sources_json
     ) VALUES (
       @id, @tenant_id, @mall_id, @site, @stat_date, @row_key, @activity_kind,
-      @activity_id, @activity_title, @activity_status, @product_id, @skc_id, @goods_id,
+      @activity_id, @activity_title, @activity_type, @activity_status, @product_id, @skc_id, @goods_id,
+      @signup_price_cents, @suggested_price_cents, @price_currency, @activity_stock,
+      @signup_price_diff_cents,
       @start_at, @end_at, @metric_json, @raw_json, @source_event_id, @sources_json
     )
     ON CONFLICT(tenant_id, mall_id, row_key, stat_date) DO UPDATE SET
@@ -800,10 +1329,16 @@ function parseActivitySnapshot(db, ctx, evt, body) {
       activity_kind   = COALESCE(excluded.activity_kind, activity_kind),
       activity_id     = COALESCE(excluded.activity_id, activity_id),
       activity_title  = COALESCE(excluded.activity_title, activity_title),
+      activity_type   = COALESCE(excluded.activity_type, activity_type),
       activity_status = COALESCE(excluded.activity_status, activity_status),
       product_id      = COALESCE(excluded.product_id, product_id),
       skc_id          = COALESCE(excluded.skc_id, skc_id),
       goods_id        = COALESCE(excluded.goods_id, goods_id),
+      signup_price_cents = COALESCE(excluded.signup_price_cents, signup_price_cents),
+      suggested_price_cents = COALESCE(excluded.suggested_price_cents, suggested_price_cents),
+      price_currency  = COALESCE(excluded.price_currency, price_currency),
+      activity_stock  = COALESCE(excluded.activity_stock, activity_stock),
+      signup_price_diff_cents = COALESCE(excluded.signup_price_diff_cents, signup_price_diff_cents),
       start_at        = COALESCE(excluded.start_at, start_at),
       end_at          = COALESCE(excluded.end_at, end_at),
       metric_json     = COALESCE(excluded.metric_json, metric_json),
@@ -818,6 +1353,47 @@ function parseActivitySnapshot(db, ctx, evt, body) {
   const activity_kind = activityKindFromPath(evt.url_path);
   items.forEach((item, index) => {
     if (!item || typeof item !== "object") return;
+    const meta = isRecord(item.__activity_meta) ? item.__activity_meta : {};
+    const activity_type = toNullableString(meta.activityType ?? firstDeepDefined(item, [
+      "activityTypeName", "activityType", "activityCategory", "promotionType",
+      "marketingType", "campaignType", "enrollType", "bizType", "typeName", "type",
+    ], 2), 100);
+    const signup_price_cents = pickActivityPriceCents(item, [
+      "signupPriceCents", "signupPriceCent", "signupPrice",
+      "enrollPriceCents", "enrollPriceCent", "enrollPrice",
+      "applyPriceCents", "applyPriceCent", "applyPrice",
+      "activityPriceCents", "activityPriceCent", "activityPrice",
+      "campaignPriceCents", "campaignPriceCent", "campaignPrice",
+      "promotionPriceCents", "promotionPriceCent", "promotionPrice",
+      "salePriceCents", "salePriceCent", "salePrice",
+      "supplierActivityPrice", "skuActivityPrice", "skcActivityPrice",
+      "inputPrice", "declarePrice", "declaredPrice",
+    ]);
+    const suggested_price_cents = pickActivityPriceCents(item, [
+      "suggestedPriceCents", "suggestedPriceCent", "suggestedPrice",
+      "suggestPriceCents", "suggestPriceCent", "suggestPrice",
+      "recommendPriceCents", "recommendPriceCent", "recommendPrice",
+      "recommendedPriceCents", "recommendedPriceCent", "recommendedPrice",
+      "referencePriceCents", "referencePriceCent", "referencePrice",
+      "advicePriceCents", "advicePriceCent", "advicePrice",
+      "activitySuggestPrice", "suggestActivityPrice", "maxEnrollPrice", "maxPrice",
+    ]);
+    const explicit_diff_cents = pickActivityPriceCents(item, [
+      "signupPriceDiffCents", "signupPriceDiffCent", "signupPriceDiff",
+      "priceDiffCents", "priceDiffCent", "priceDiff",
+      "enrollPriceDiff", "applyPriceDiff", "declarePriceDiff",
+    ]);
+    const signup_price_diff_cents = explicit_diff_cents
+      ?? (signup_price_cents != null && suggested_price_cents != null ? signup_price_cents - suggested_price_cents : null);
+    const activity_stock = pickActivityInteger(item, [
+      "activityStock", "enrollStock", "signupStock", "applyStock",
+      "activityInventory", "promotionStock", "campaignStock", "saleStock",
+      "stockNum", "stock", "inventoryNum", "inventory", "availableStock",
+      "activityGoodsStock", "goodsStock", "quantity",
+    ]);
+    const price_currency = toNullableString(firstDeepDefined(item, [
+      "currency", "currencyCode", "currencyType", "siteCurrency", "priceCurrency",
+    ], 3), 16);
     upsert.run({
       id: crypto.randomUUID(),
       tenant_id: ctx.tenant_id,
@@ -828,26 +1404,45 @@ function parseActivitySnapshot(db, ctx, evt, body) {
       activity_kind,
       activity_id: toNullableString(firstDefined(item, [
         "activityThematicId", "activityId", "activityThemeId", "themeId", "topicId",
-        "couponId", "promotionId", "campaignId", "biddingInvitationOrderSn", "orderSn", "id",
-      ])),
-      activity_title: toNullableString(firstDefined(item, [
+        "invitationTopicId", "couponId", "promotionId", "campaignId", "biddingInvitationOrderSn", "orderSn", "id",
+      ]) ?? meta.activityId),
+      activity_title: toNullableString(meta.activityTitle ?? firstDefined(item, [
         "activityName", "activityTitle", "themeName", "topicName", "couponName",
         "name", "title", "productName", "goodsName",
       ]), 500),
+      activity_type,
       activity_status: toNullableString(firstDefined(item, [
         "status", "activityStatus", "enrollStatus", "auditStatus", "state", "stage", "orderStatus",
       ]), 100),
-      product_id: toNullableString(firstDefined(item, ["productId", "productSpuId", "spuId"])),
-      skc_id: toNullableString(firstDefined(item, ["productSkcId", "skcId"])),
-      goods_id: toNullableString(firstDefined(item, ["goodsId"])),
-      start_at: toNullableString(firstDefined(item, ["startTime", "beginTime", "activityStartTime", "validStartTime"])),
-      end_at: toNullableString(firstDefined(item, ["endTime", "finishTime", "activityEndTime", "validEndTime"])),
+      product_id: toNullableString(firstDefined(item, ["productId", "productSpuId", "spuId", "spu_id", "goodsSpuId"]) ?? meta.productId),
+      skc_id: toNullableString(firstDefined(item, ["productSkcId", "skcId", "skc_id"])),
+      goods_id: toNullableString(firstDefined(item, ["goodsId", "goods_id"])),
+      signup_price_cents,
+      suggested_price_cents,
+      price_currency,
+      activity_stock,
+      signup_price_diff_cents,
+      start_at: toNullableString(firstDefined(item, ["startTime", "beginTime", "sessionStartTime", "activityStartTime", "validStartTime"])),
+      end_at: toNullableString(firstDefined(item, ["endTime", "finishTime", "sessionEndTime", "activityEndTime", "validEndTime"])),
       metric_json: toJsonText({
+        activityType: activity_type,
+        signupPriceCents: signup_price_cents,
+        suggestedPriceCents: suggested_price_cents,
+        priceCurrency: price_currency,
+        activityStock: activity_stock,
+        signupPriceDiffCents: signup_price_diff_cents,
         payAmount: firstDefined(item, ["payAmount", "activityPayAmountTotal", "gmv"]),
         orderCount: firstDefined(item, ["orderCount", "activityGoodsOrderCount"]),
-        goodsCount: firstDefined(item, ["goodsCount", "activityGoodsCount"]),
+        goodsCount: firstDefined(item, ["goodsCount", "activityGoodsCount", "activityGoodsQuantity"]),
         cartCount: firstDefined(item, ["cartCount", "activityGoodsCartCount"]),
         productCount: firstDefined(item, ["productCount", "goodsNum"]),
+        activitySales: firstDefined(item, ["activitySales", "goodsSales", "sales", "saleCount"]),
+        activityTransactionAmount: firstDefined(item, ["activityTransactionAmount", "transactionAmount", "payAmount", "gmv"]),
+        totalVisitorsNum: firstDefined(item, ["totalVisitorsNum", "activityGoodsVisitorsNum", "visitorsNum"]),
+        clickVisitorsNum: firstDefined(item, ["clickVisitorsNum", "clickVisitorNum"]),
+        payVisitorsNum: firstDefined(item, ["payVisitorsNum", "payVisitorNum"]),
+        visitorsClickConversionRate: firstDefined(item, ["visitorsClickConversionRate", "clickConversionRate"]),
+        visitorsPayConversionRate: firstDefined(item, ["visitorsPayConversionRate", "payConversionRate"]),
       }, 20000),
       raw_json: toJsonText(item),
       source_event_id: evt.id,
@@ -859,12 +1454,14 @@ function parseActivitySnapshot(db, ctx, evt, body) {
 const PARSERS = [
   { match: /\/auth\/userInfo|\/mms\/userInfo|\/mms\/account\/menu/, fn: parseUserInfo, name: "userInfo" },
   { match: /\/product\/skc\/pageQuery|\/product\/draft\/pageQuery|\/product\/notAllEu\/pageQuery/, fn: parseSkcList, name: "skcList" },
-  { match: /\/mms\/venom\/api\/supplier\/sales\/management\/(listOverall|querySkuSalesNumber|queryFulfilmentFormStatistic)/, fn: parseSalesManagement, name: "salesManagement" },
+  { match: /\/mms\/venom\/api\/supplier\/sales\/management\/(listOverall|listWarehouse|querySkuSalesNumber|queryFulfilmentFormStatistic)/, fn: parseSalesManagement, name: "salesManagement" },
   { match: /\/api\/seller\/full\/flow\/analysis\/goods\/list/, fn: parseProductFlowGoods, name: "productFlowGoods" },
   { match: /\/api\/activity\/data\/|\/gamblers\/|\/gambit\/|\/colossus\/bsr\/|\/biddingInvitationSupplierRpcService|\/sale\/manage\/supplier\/api\/activity\//, fn: parseActivitySnapshot, name: "activitySnapshot" },
   { match: /\/bg\/swift\/api\/common\/statistics\/web\/queryStatisticDataFullManaged|\/visage-agent-seller\/product\/statisticsData/, fn: parseShopStatistics, name: "shopStatistics" },
   { match: /\/magneto\/price-adjust\/page-query/, fn: parsePriceAdjust, name: "priceAdjust" },
   { match: /\/product\/sku\/site\/suggestedPrice\/pageQuery/, fn: parseSuggestedPrice, name: "suggestedPrice" },
+  { match: /deliverGoods\/platform\/pageQuerySubPurchaseOrder|deliverGoods\/management\/pageQueryDeliveryOrders|deliverGoods\/management\/pageQueryDeliveryBatch/, fn: parseTemuStockOrders, name: "temuStockOrders" },
+  { match: /\/tmod_punish\/|pageQueryDeliveryBatch|queryAllFeedbackRecordInfo|searchQcSubBill|queryWeekInboundExceptionDetailInfo|returnSupplier|high\/price\/flow\/reduce|queryCompetitor|querySiteTargetPrice|batchQueryCustomerQueryLimit|bg-brando-mms\/supplier\/data\/center\/skc\/sales\/data|purchase\/manager\/querySubOrderList/, fn: parseOperationRisk, name: "operationRisk" },
 ];
 
 export function dispatchParsers(db, ctx, items) {

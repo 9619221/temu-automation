@@ -293,6 +293,8 @@
   const {
     URL_WHITELIST = [],
     URL_BLACKLIST = [],
+    URL_DISCOVERY_ALLOWLIST = [],
+    DISCOVERY_MAX_BODY_CHARS = 60000,
     EVENT_NAME = "temu-monitor.captured",
     BYPASS_SYMBOL_KEY = "temu-monitor.fetch.bypass",
   } = config || {};
@@ -300,10 +302,13 @@
   const stats = {
     xhrSendTotal: 0,
     xhrCaptureHit: 0,
+    xhrDiscoveryHit: 0,
     xhrEmitted: 0,
     fetchSendTotal: 0,
     fetchCaptureHit: 0,
+    fetchDiscoveryHit: 0,
     perfSeen: 0,
+    perfDiscoverySeen: 0,
     lastCaptureUrl: "",
     lastCaptureAt: 0,
     bypassHit: 0,
@@ -316,12 +321,38 @@
   const blacklistRe = URL_BLACKLIST.length
     ? new RegExp(URL_BLACKLIST.map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"))
     : null;
+  const discoveryRe = URL_DISCOVERY_ALLOWLIST.length
+    ? new RegExp(URL_DISCOVERY_ALLOWLIST.map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"))
+    : null;
 
   function shouldCapture(url) {
     if (!url || typeof url !== "string") return false;
     if (blacklistRe && blacklistRe.test(url)) return false;
     if (!whitelistRe) return false;
     return whitelistRe.test(url);
+  }
+  function isTemuSellerHost() {
+    return /(^|\.)agentseller(-eu|-us)?\.temu\.com$|^seller\.kuajingmaihuo\.com$/i.test(location.hostname);
+  }
+  function shouldDiscover(url) {
+    if (!isTemuSellerHost()) return false;
+    if (!url || typeof url !== "string") return false;
+    if (blacklistRe && blacklistRe.test(url)) return false;
+    if (whitelistRe && whitelistRe.test(url)) return false;
+    return Boolean(discoveryRe && discoveryRe.test(url));
+  }
+  function buildCapturedPayload(base, text, requestBodyText, discovery) {
+    const maxChars = Math.max(1000, Number(DISCOVERY_MAX_BODY_CHARS) || 60000);
+    const keepBody = !discovery || String(text || "").length <= maxChars;
+    const bodyText = keepBody ? text : null;
+    return {
+      ...base,
+      body: keepBody ? safeJson(text) : null,
+      bodyText,
+      bodyTruncated: !keepBody,
+      bodySize: String(text || "").length,
+      requestBodyText,
+    };
   }
   window.__temuMonitorWhitelist = URL_WHITELIST.slice();
   function safeJson(text) { try { return JSON.parse(text); } catch { return null; } }
@@ -572,20 +603,19 @@
     xhr.send = function (body) {
       _requestBodyText = bodyToText(body);
       stats.xhrSendTotal++;
-      if (!_bypass && shouldCapture(_url)) {
-        stats.xhrCaptureHit++;
+      const captureMode = !_bypass && shouldCapture(_url) ? "capture" : (!_bypass && shouldDiscover(_url) ? "discovery" : "");
+      if (captureMode) {
+        if (captureMode === "capture") stats.xhrCaptureHit++;
+        else stats.xhrDiscoveryHit++;
         xhr.addEventListener("readystatechange", function () {
           if (xhr.readyState !== 4) return;
           try {
             const text = xhr.responseText || "";
-            emit({
-              kind: "xhr", url: _url, method: _method, status: xhr.status, ts: _ts,
+            emit(buildCapturedPayload({
+              kind: captureMode === "discovery" ? "xhr-discovery" : "xhr",
+              url: _url, method: _method, status: xhr.status, ts: _ts,
               site: inferMallSite(), page: location.pathname,
-              body: safeJson(text),
-              bodyText: text.length > 200000 ? null : text,
-              bodySize: text.length,
-              requestBodyText: _requestBodyText,
-            });
+            }, text, _requestBodyText, captureMode === "discovery"));
           } catch {}
         });
       }
@@ -625,8 +655,10 @@
     try { url = typeof input === "string" ? input : (input && input.url) || ""; } catch {}
     const method = String((init && init.method) || (input && input.method) || "GET").toUpperCase();
     stats.fetchSendTotal++;
-    if (!shouldCapture(url)) return OrigFetch.apply(this, arguments);
-    stats.fetchCaptureHit++;
+    const captureMode = shouldCapture(url) ? "capture" : (shouldDiscover(url) ? "discovery" : "");
+    if (!captureMode) return OrigFetch.apply(this, arguments);
+    if (captureMode === "capture") stats.fetchCaptureHit++;
+    else stats.fetchDiscoveryHit++;
     const ts = Date.now();
     const requestBodyText = fetchRequestBodyText(input, init);
     const promise = OrigFetch.apply(this, arguments);
@@ -635,16 +667,13 @@
         const cloned = resp.clone();
         cloned.text().then((text) => {
           try {
-            const parsedBody = safeJson(text);
-            emit({
-              kind: "fetch", url, method, status: resp.status, ts,
+            const parsedBody = captureMode === "capture" ? safeJson(text) : null;
+            emit(buildCapturedPayload({
+              kind: captureMode === "discovery" ? "fetch-discovery" : "fetch",
+              url, method, status: resp.status, ts,
               site: inferMallSite(), page: location.pathname,
-              body: parsedBody,
-              bodyText: text.length > 200000 ? null : text,
-              bodySize: text.length,
-              requestBodyText,
-            });
-            maybeAutoPaginate(url, method, input, init, requestBodyText, parsedBody);
+            }, text, requestBodyText, captureMode === "discovery"));
+            if (captureMode === "capture") maybeAutoPaginate(url, method, input, init, requestBodyText, parsedBody);
           } catch {}
         }).catch(() => {});
       } catch {}
@@ -660,17 +689,19 @@
       for (const e of list.getEntries()) {
         if (e.entryType !== "resource") continue;
         if (e.initiatorType !== "fetch" && e.initiatorType !== "xmlhttprequest") continue;
-        if (!shouldCapture(e.name)) continue;
+        const captureMode = shouldCapture(e.name) ? "capture" : (shouldDiscover(e.name) ? "discovery" : "");
+        if (!captureMode) continue;
         const key = e.name + "|" + Math.round(e.startTime);
         if (performanceSeen.has(key)) continue;
         performanceSeen.add(key);
-        stats.perfSeen++;
+        if (captureMode === "capture") stats.perfSeen++;
+        else stats.perfDiscoverySeen++;
         if (performanceSeen.size > 5000) {
           const it = performanceSeen.values();
           for (let i = 0; i < 1000; i++) performanceSeen.delete(it.next().value);
         }
         emit({
-          kind: "perf",
+          kind: captureMode === "discovery" ? "perf-discovery" : "perf",
           url: e.name,
           method: (e.initiatorType === "xmlhttprequest") ? "?" : "GET",
           status: e.responseStatus || 0,

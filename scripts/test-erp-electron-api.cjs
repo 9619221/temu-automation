@@ -8,6 +8,7 @@ const { relaunchUnderElectronIfNeeded } = require("./ensure-electron-runtime.cjs
 relaunchUnderElectronIfNeeded(__filename);
 
 const { openErpDatabase } = require("../electron/db/connection.cjs");
+const { createErpServices } = require("../electron/erp/services/index.cjs");
 const {
   closeErp,
   initializeErp,
@@ -314,6 +315,9 @@ async function main() {
       id: "sku_ipc",
       accountId: account.id,
       internalSkuCode: "SKU-IPC-001",
+      temuProductId: "PROD-IPC-001",
+      temuSkcId: "SKC-IPC-001",
+      temuSkuId: "SKU-TEMU-IPC",
       productName: "IPC Demo SKU",
       colorSpec: "White / Standard",
       supplierId: supplier.id,
@@ -616,6 +620,50 @@ async function main() {
     assert.equal(purchaseWorkbench.purchaseOrders.length, 5);
     assert.equal(purchaseWorkbench.paymentQueue.length, 1);
     assert.equal(purchaseWorkbench.paymentQueue[0].paymentApprovalId, "pay_ipc");
+
+    const sortedByAmountWorkbench = await invoke("erp:purchase:workbench", {
+      purchaseOrderSortField: "paidAmount",
+      purchaseOrderSortDirection: "ascend",
+    });
+    assert.deepEqual(
+      sortedByAmountWorkbench.purchaseOrders.slice(0, 3).map((item) => item.id),
+      ["po_partial_ipc", "po_delete_ipc", "po_wh_ipc"],
+    );
+    assert.equal(sortedByAmountWorkbench.purchaseOrderPage.sortField, "paidAmount");
+    assert.equal(sortedByAmountWorkbench.purchaseOrderPage.sortDirection, "ascend");
+
+    const sortedByRiskWorkbench = await invoke("erp:purchase:workbench", {
+      purchaseOrderSortField: "riskTags",
+      purchaseOrderSortDirection: "descend",
+    });
+    assert.equal(sortedByRiskWorkbench.purchaseOrders[0].id, "po_ipc");
+
+    const paidPurchaseOrderWorkbench = await invoke("erp:purchase:workbench", {
+      purchaseOrderPaymentState: "paid",
+    });
+    assert.deepEqual(
+      new Set(paidPurchaseOrderWorkbench.purchaseOrders.map((item) => item.id)),
+      new Set(["po_wh_ipc", "po_partial_ipc"]),
+    );
+
+    const offlinePurchaseOrderWorkbench = await invoke("erp:purchase:workbench", {
+      purchaseOrderSourceState: "offline",
+    });
+    assert.equal(offlinePurchaseOrderWorkbench.purchaseOrderPage.total, 4);
+    assert.equal(offlinePurchaseOrderWorkbench.purchaseOrders.every((item) => !item.externalOrderId), true);
+
+    const missingAddressWorkbench = await invoke("erp:purchase:workbench", {
+      purchaseOrderRiskState: "missing_address",
+    });
+    assert.equal(missingAddressWorkbench.purchaseOrderPage.total, 0);
+
+    const highAmountWorkbench = await invoke("erp:purchase:workbench", {
+      purchaseOrderAmountMin: 600,
+    });
+    assert.deepEqual(
+      new Set(highAmountWorkbench.purchaseOrders.map((item) => item.id)),
+      new Set(["po_ipc", "po_draft_ipc"]),
+    );
 
     const deleteDraftPo = await invoke("erp:purchase:action", {
       action: "delete_po",
@@ -1524,12 +1572,40 @@ async function main() {
       warehouseAfterBatches.inboundReceipts.find((item) => item.id === "inbound_wh_ipc").status,
       "inbounded_pending_qc",
     );
-    assert.equal(warehouseAfterBatches.inventoryBatches.length, 1);
-    assert.equal(warehouseAfterBatches.inventoryBatches[0].receivedQty, 40);
+    assert.equal(warehouseAfterBatches.inventoryBatches.length, 0);
+
+    const outboundSeedDb = openErpDatabase({ userDataDir: tempUserData });
+    let qcBatchId;
+    try {
+      const outboundSeedServices = createErpServices(outboundSeedDb);
+      const seededBatch = outboundSeedServices.inventory.createBatchFromInbound({
+        id: "batch_wh_ipc",
+        accountId: account.id,
+        batchCode: "BATCH-WH-001",
+        skuId: sku.id,
+        poId: "po_wh_ipc",
+        inboundReceiptId: "inbound_wh_ipc",
+        receivedQty: 40,
+        unitLandedCost: 10.5,
+        locationCode: "A-IPC",
+        actor: { id: warehouseUser.id, role: warehouseUser.role },
+      });
+      outboundSeedDb.prepare("UPDATE erp_inbound_receipt_lines SET batch_id = ? WHERE id = ?").run(seededBatch.id, "inbound_line_wh_ipc");
+      qcBatchId = seededBatch.id;
+    } finally {
+      outboundSeedDb.close();
+    }
+
+    const warehouseAfterSeededBatch = await requestUrl(`${lanStatus.localUrl}/api/warehouse/workbench`, {
+      headers: { Cookie: warehouseCookie },
+    });
+    assert.equal(warehouseAfterSeededBatch.statusCode, 200);
+    const warehouseSeededBatchBody = JSON.parse(warehouseAfterSeededBatch.body).workbench;
+    assert.equal(warehouseSeededBatchBody.inventoryBatches.length, 1);
+    assert.equal(warehouseSeededBatchBody.inventoryBatches[0].receivedQty, 40);
     // 已去掉入库 QC 闸门：入库后数量直接进可用桶、qc_status=passed。
-    assert.equal(warehouseAfterBatches.inventoryBatches[0].blockedQty, 0);
-    assert.equal(warehouseAfterBatches.inventoryBatches[0].availableQty, 40);
-    const qcBatchId = warehouseAfterBatches.inventoryBatches[0].id;
+    assert.equal(warehouseSeededBatchBody.inventoryBatches[0].blockedQty, 0);
+    assert.equal(warehouseSeededBatchBody.inventoryBatches[0].availableQty, 40);
 
     const purchaseAfterInbound = await requestUrl(`${lanStatus.localUrl}/api/purchase/workbench`, {
       headers: { Cookie: cookie },
@@ -1700,6 +1776,47 @@ async function main() {
       "confirmed",
     );
 
+    const createCloudStockOutbound = await requestUrl(`${lanStatus.localUrl}/api/outbound/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: opsCookie,
+      },
+      body: JSON.stringify({
+        action: "create_outbound_plan_from_temu_stock_order",
+        accountId: account.id,
+        stockOrder: {
+          id: "cloud-stock-order-ipc",
+          stock_order_no: "SO-IPC-001",
+          delivery_order_sn: "DO-IPC-001",
+          delivery_batch_sn: "DB-IPC-001",
+          product_id: "PROD-IPC-001",
+          skc_id: "SKC-IPC-001",
+          sku_id: "SKU-TEMU-IPC",
+          sku_ext_code: "SKU-IPC-001",
+          product_name: "IPC Demo SKU",
+          spec_name: "White / Standard",
+          demand_qty: 6,
+          delivered_qty: 0,
+        },
+        qty: 6,
+        boxes: 1,
+      }),
+    });
+    assert.equal(createCloudStockOutbound.statusCode, 200);
+    const createCloudStockOutboundBody = JSON.parse(createCloudStockOutbound.body).result;
+    const cloudOutboundShipment = createCloudStockOutboundBody.result.shipment;
+    assert.equal(cloudOutboundShipment.temuStockOrderNo, "SO-IPC-001");
+    assert.equal(cloudOutboundShipment.temuDeliveryOrderSn, "DO-IPC-001");
+    assert.equal(cloudOutboundShipment.temuDeliveryBatchSn, "DB-IPC-001");
+    assert.equal(cloudOutboundShipment.temuSyncStatus, "cloud_stock_order_outbound_created");
+    assert.equal(cloudOutboundShipment.status, "pending_warehouse");
+    assert.equal(
+      createCloudStockOutboundBody.workbench.availableBatches.find((item) => item.id === qcBatchId).availableQty,
+      24,
+    );
+
     const partialInbound = await requestUrl(`${lanStatus.localUrl}/api/warehouse/action`, {
       method: "POST",
       headers: {
@@ -1723,11 +1840,11 @@ async function main() {
     const partialWarehouseBody = JSON.parse(partialInbound.body).result.workbench;
     assert.equal(
       partialWarehouseBody.inboundReceipts.find((item) => item.id === "inbound_partial_ipc").status,
-      "inbounded_pending_qc",
+      "damaged",
     );
     assert.equal(
-      partialWarehouseBody.inventoryBatches.find((item) => item.inboundReceiptId === "inbound_partial_ipc").receivedQty,
-      6,
+      partialWarehouseBody.inventoryBatches.some((item) => item.inboundReceiptId === "inbound_partial_ipc"),
+      false,
     );
 
     const purchaseAfterPartialInbound = await requestUrl(`${lanStatus.localUrl}/api/purchase/workbench`, {
@@ -1891,7 +2008,6 @@ async function main() {
         "auto_create_inbound_receipt",
         "register_arrival",
         "confirm_count",
-        "create_batches",
         "mark_arrived",
         "mark_inbounded",
         "create_outbound_plan",
@@ -1935,7 +2051,6 @@ async function main() {
         "push_1688_order",
         "register_arrival",
         "confirm_count",
-        "create_batches",
         "create_outbound_plan",
         "submit_outbound",
         "start_picking",

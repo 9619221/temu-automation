@@ -6,6 +6,31 @@ import { dispatchParsers } from "../parsers.js";
 
 const r = Router();
 
+function parseRequestBodyText(text) {
+  if (!text || typeof text !== "string") return null;
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try { return JSON.parse(trimmed); } catch { return null; }
+  }
+  try {
+    const params = new URLSearchParams(trimmed);
+    const value = params.get("data") || params.get("param") || params.get("params");
+    return value ? JSON.parse(value) : null;
+  } catch {
+    return null;
+  }
+}
+
+function attachRequestBody(responseBody, requestBodyText) {
+  const requestBody = parseRequestBodyText(requestBodyText);
+  if (!requestBody) return responseBody;
+  if (responseBody && typeof responseBody === "object" && !Array.isArray(responseBody)) {
+    return { ...responseBody, __request: requestBody };
+  }
+  return { result: responseBody, __request: requestBody };
+}
+
 r.get("/v1/health", authMiddleware, (req, res) => {
   res.json({ ok: true, ts: Date.now(), tenant_id: req.user.tid });
 });
@@ -158,7 +183,8 @@ r.post("/v1/batch", authMiddleware, (req, res) => {
     const url = it.url || "";
     const url_path = url.replace(/^https?:\/\/[^/]+/, "").split("?")[0] || url;
     const method = (it.method || "GET").toUpperCase();
-    const body_json = it.body ? JSON.stringify(it.body).slice(0, 1_000_000) : null;
+    const storedBody = attachRequestBody(it.body || null, it.requestBodyText);
+    const body_json = storedBody ? JSON.stringify(storedBody).slice(0, 1_000_000) : null;
     return {
       id: crypto.randomUUID(),
       url, url_path, method, body_json,

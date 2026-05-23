@@ -66,6 +66,7 @@ export const URL_WHITELIST = [
   "/mms/turbo/supplier/pick/out/config/judgeIfUserHasReadPromptInfo",
   "/mms/turbo/supplier/pick/out/config/showEditExpectReceiveAreaButton",
   "/bgSongbird-api/supplier/deliverGoods/platform/pageQuerySubPurchaseOrder",
+  "/bgSongbird-api/supplier/deliverGoods/management/pageQueryDeliveryBatch",
   "/bgSongbird-api/supplier/deliverGoods/management/pageQueryDeliveryOrders",
   "/bgSongbird-api/supplier/deliverGoods/management/queryReceiveSubWarehouseList",
   "/bgSongbird-api/supplier/deliverGoods/management/queryPlatformExpressStaticInfo",
@@ -74,6 +75,7 @@ export const URL_WHITELIST = [
   "/bgSongbird-api/supplier/deliverGoods/platform/querySupplierAddressInfo",
   "/bgSongbird-api/supplier/deliverGoods/platform/queryRecommendExpressCompanyV3",
   "/bgSongbird-api/supplier/delivery/confirm/pageQueryProblemWaybills",
+  "/bgSongbird-api/supplier/delivery/feedback/queryAllFeedbackRecordInfo",
   "/bgSongbird-api/supplier/config/queryDeliveryProcessDisplayConfig",
   "/bgSongbird-api/supplier/address/pageQuerySupplierDriverInfoList",
   "/oms/bg/venom/api/supplier/sales/management/queryRedNotice",
@@ -83,11 +85,13 @@ export const URL_WHITELIST = [
 
   // === 销售 / 售罄 / 履约 ===
   "/mms/venom/api/supplier/sales/management/listOverall",
+  "/mms/venom/api/supplier/sales/management/listWarehouse",
   "/mms/venom/api/supplier/sales/management/querySkuSalesNumber",
   "/mms/venom/api/supplier/sales/management/queryFulfilmentFormStatistic",
   "/mms/venom/api/supplier/sales/management/exportShow",
   "/mms/venom/api/supplier/sales/management/cmall/queryMall",
   "/mms/venom/api/supplier/sales/management/querySuggestCloseJitSkc",
+  "/bg-brando-mms/supplier/data/center/skc/sales/data",
   "/marvel-mms/cn/api/kiana/venom/sales/management/queryMallFollowerNum",
   "/scp/purchase/web/board/sold/out/querySoldOutOverview",
   "/scp/purchase/web/board/sold/out/querySoldOutDetail",
@@ -99,10 +103,12 @@ export const URL_WHITELIST = [
   "/mms/api/appalachian/afs/queryPageV3",
   "/dunland/api/gmp/returnSupplier/package/pageQueryReturnSupplierPackage",
   "/dunland/api/gmp/returnSupplier/package/pageReturnPackageSkuDetailList",
+  "/dunland/api/gmp/returnSupplier/package/queryDeliveryDetail",
   "/dunland/api/gmp/returnSupplier/package/countToPickUpSupplierPackage",
   "/dunland/api/gmp/returnSupplier/popup/countRedPointForCollectPackage",
   "/dunland/api/gmp/returnSupplier/popup/countToBeCollectPackage",
   "/dunland/api/gmp/return/Supplier/confirm/countSupplierConfirmOrder",
+  "/dunland/api/gmp/returnSupplier/supplierException/querySupplierFeedBack",
 
   // === 物流 / 发货考核 ===
   "/mms/api/andes/delivery/assessment/queryDeliveryAssessmentPeriod",
@@ -126,6 +132,7 @@ export const URL_WHITELIST = [
   "/api/activity/data/market/trend",
   "/api/activity/data/market/monitor",
   "/api/activity/data/goods/detail",
+  "/api/kiana/gamblers/marketing/enroll/activity/list",
   "/api/kiana/gamblers/marketing/enroll/list",
   "/api/kiana/gamblers/marketing/enroll/scroll/match",
   "/api/kiana/gamblers/marketing/enroll/submit",
@@ -164,6 +171,9 @@ export const URL_WHITELIST = [
   "/marvel-mms/cn/api/kiana/magneto/price-adjust/status-count-4point",
   "/marvel-mms/us/api/kiana/direnjie/high/price/flow/reduce/queryFullHighPriceFlowReduceOverview",
   "/marvel-mms/us/api/kiana/direnjie/high/price/flow/reduce/queryFullHighPriceFlowReduceList",
+  "/api/kiana/direnjie/high/price/flow/reduce/full/queryCompetitor",
+  "/marvel-mms/us/api/kiana/direnjie/high/price/flow/reduce/full/querySiteTargetPrice",
+  "/marvel-mms/us/api/kiana/gmp/bg/magneto/api/customer/query/limit/batchQueryCustomerQueryLimitV2",
   "/visage-agent-seller/product/sku/site/suggestedPrice/pageQuery",
   "/visage-agent-seller/product/sku/site/suggestedPrice/statQuery",
   "/visage-agent-seller/product/sku/site/suggestedPrice/supplier/status/query",
@@ -180,6 +190,10 @@ export const URL_WHITELIST = [
   "/hawk/mms/course/exam/queryTotalExam",
   "/hawk/mms/course/page-query",
   "/marvel-mms/cn/api/kiana/gmp/bg/spiderman/api/sample/manage/toDoCount",
+  "/oms/bg/venom/api/supplier/purchase/manager/querySubOrderList",
+  "/marvel-mms/cn/api/kiana/wolverine/OmsQcTransferInSupplierCenterGatewayHttpService/searchQcSubBill",
+  "/marvel-mms/cn/api/kiana/wolverine/OmsQcTransferInSupplierCenterGatewayHttpService/searchQcSubBillHistory",
+  "/scp/purchase/board/supplier/exception/queryWeekInboundExceptionDetailInfo",
 
   // === 消息 / 客服 / 工单 ===
   "/bg/cute/api/merchantService/chat/queryMessage",
@@ -202,6 +216,7 @@ export const URL_WHITELIST = [
   "/bg-brando-agent-seller/retrieval/board/retrieval/reason/list",
   "/bg-brando-agent-seller/retrieval/board/supplierRetrievedEvaluationInfo",
   "/bg-luna-mms/goods/quality/optimize/order/wait/optimize/count",
+  "/mms/tmod_punish/agent/merchant_appeal/entrance/list",
 
   // === 灰度 / 配置 ===
   "/api/kiana/direnjie/common/gray/match",
@@ -244,6 +259,33 @@ export const URL_BLACKLIST = [
 ];
 
 // page world hook 与扩展之间的事件名（CustomEvent 总线）
+// Discovery mode only runs on Temu seller pages. It uploads small samples of
+// business-looking APIs that are not in URL_WHITELIST, so we can find useful
+// endpoints the reference extension never captured.
+export const URL_DISCOVERY_ALLOWLIST = [
+  "/api/",
+  "/mms/",
+  "/bg/",
+  "/bgSongbird-api/",
+  "/bg-supplier-delivery-api/",
+  "/marvel-mms/",
+  "/visage-agent-seller/",
+  "/darwin-mms/",
+  "/lich-mms/",
+  "/phoenix-mms/",
+  "/scp/",
+  "/oms/",
+  "/dunland/",
+  "/gambit/",
+  "/hawk/",
+  "/anniston-agent-seller/",
+  "/bg-anniston-agent-seller/",
+  "/bg-brando-",
+  "/bg-luna-",
+];
+
+export const DISCOVERY_MAX_BODY_CHARS = 60000;
+
 export const EVENT_NAME = "temu-monitor.captured";
 
 // page world hook 自调时用的 bypass key（Symbol）

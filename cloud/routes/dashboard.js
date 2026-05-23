@@ -41,6 +41,36 @@ function normalizeId(value) {
   return String(value).trim();
 }
 
+function optionalAll(db, sql, params = []) {
+  try {
+    return db.prepare(sql).all(...params);
+  } catch (error) {
+    if (/no such table|no such column/i.test(String(error?.message || ""))) return [];
+    throw error;
+  }
+}
+
+function optionalGet(db, sql, params = [], fallback = null) {
+  try {
+    return db.prepare(sql).get(...params) || fallback;
+  } catch (error) {
+    if (/no such table|no such column/i.test(String(error?.message || ""))) return fallback;
+    throw error;
+  }
+}
+
+function latestText(...values) {
+  return values
+    .map((value) => (value == null ? "" : String(value)))
+    .filter(Boolean)
+    .sort((left, right) => right.localeCompare(left))[0] || null;
+}
+
+function toNum(value) {
+  const num = Number(value || 0);
+  return Number.isFinite(num) ? num : 0;
+}
+
 function rawItemIds(item) {
   return [
     item?.productSkcId,
@@ -447,6 +477,30 @@ r.get("/events", (req, res) => {
   res.json(db.prepare(sql).all(...params));
 });
 
+r.get("/endpoint-candidates", (req, res) => {
+  const db = getDb();
+  const tid = req.user.tid;
+  const limit = Math.min(300, Math.max(1, Number(req.query.limit) || 120));
+  const rows = db.prepare(`
+    SELECT
+      site,
+      method,
+      url_path,
+      COUNT(*) AS count_total,
+      MAX(ts) AS last_seen,
+      MAX(status) AS last_status,
+      MAX(body_size) AS last_body_size,
+      MAX(page) AS last_page
+    FROM capture_events
+    WHERE tenant_id = ?
+      AND kind LIKE '%discovery%'
+    GROUP BY site, method, url_path
+    ORDER BY last_seen DESC
+    LIMIT ?
+  `).all(tid, limit);
+  res.json(rows);
+});
+
 r.get("/agent", (req, res) => {
   const db = getDb();
   const tid = req.user.tid;
@@ -477,6 +531,614 @@ r.get("/agent", (req, res) => {
     LIMIT ?
   `).all(tid, limit);
   res.json(rows);
+});
+
+r.get("/shop-monitor", (req, res) => {
+  const db = getDb();
+  const tid = req.user.tid;
+  const now = Date.now();
+  const last24 = now - 86400000;
+  const rowsByMall = new Map();
+
+  const ensureRow = (mallId, patch = {}) => {
+    const id = normalizeId(mallId);
+    if (!id || /^MALL-(DBG|EXT-E2E)/i.test(id)) return null;
+    const current = rowsByMall.get(id) || {
+      mall_id: id,
+      site: null,
+      mall_name: null,
+      last_seen: null,
+      last_capture_at: null,
+      capture_count_24h: 0,
+      stat_date: null,
+      sale_volume: 0,
+      seven_days_sale_volume: 0,
+      thirty_days_sale_volume: 0,
+      on_sale_product_number: 0,
+      wait_product_number: 0,
+      lack_skc_number: 0,
+      advice_prepare_skc_number: 0,
+      about_to_sell_out_number: 0,
+      already_sold_out_number: 0,
+      high_price_limit_number: 0,
+      quality_after_sale_ratio_90d: null,
+      product_skc_count: 0,
+      product_stock_available: 0,
+      product_occupy_stock: 0,
+      product_unavailable_stock: 0,
+      flow_product_count: 0,
+      flow_expose_num: 0,
+      flow_click_num: 0,
+      flow_detail_visit_num: 0,
+      flow_detail_visitor_num: 0,
+      flow_add_to_cart_user_num: 0,
+      flow_collect_user_num: 0,
+      flow_pay_goods_num: 0,
+      flow_pay_order_num: 0,
+      flow_buyer_num: 0,
+      flow_expose_pay_conversion_rate: null,
+      flow_expose_click_conversion_rate: null,
+      flow_click_pay_conversion_rate: null,
+      flow_search_expose_num: 0,
+      flow_search_click_num: 0,
+      flow_search_pay_goods_num: 0,
+      flow_search_pay_order_num: 0,
+      flow_recommend_expose_num: 0,
+      flow_recommend_click_num: 0,
+      flow_recommend_pay_goods_num: 0,
+      flow_recommend_pay_order_num: 0,
+      activity_count: 0,
+      bidding_activity_count: 0,
+      coupon_activity_count: 0,
+      activity_stock: 0,
+      risk_count: 0,
+      high_risk_count: 0,
+      medium_risk_count: 0,
+      stock_order_count: 0,
+      pending_stock_order_count: 0,
+      stock_order_demand_qty: 0,
+      stock_order_delivered_qty: 0,
+      last_activity_at: null,
+      last_flow_at: null,
+      last_risk_at: null,
+      last_stock_order_at: null,
+      last_updated_at: null,
+    };
+    rowsByMall.set(id, { ...current, ...patch, mall_id: id });
+    return rowsByMall.get(id);
+  };
+
+  const mallRows = optionalAll(db, `
+    SELECT
+      m.mall_id,
+      m.site,
+      m.mall_name,
+      m.last_seen,
+      COALESCE(e.capture_count_24h, 0) AS capture_count_24h,
+      e.last_capture_at
+    FROM mall_accounts m
+    LEFT JOIN (
+      SELECT
+        mall_id,
+        SUM(CASE WHEN received_at >= ? THEN 1 ELSE 0 END) AS capture_count_24h,
+        MAX(ts) AS last_capture_at
+      FROM capture_events
+      WHERE tenant_id = ? AND mall_id <> ''
+      GROUP BY mall_id
+    ) e ON e.mall_id = m.mall_id
+    WHERE m.tenant_id = ?
+      AND m.mall_id <> ''
+      AND m.mall_id NOT LIKE 'MALL-DBG%'
+      AND m.mall_id NOT LIKE 'MALL-EXT-E2E%'
+  `, [last24, tid, tid]);
+  for (const row of mallRows) ensureRow(row.mall_id, row);
+
+  const captureOnlyRows = optionalAll(db, `
+    SELECT
+      mall_id,
+      MAX(site) AS site,
+      SUM(CASE WHEN received_at >= ? THEN 1 ELSE 0 END) AS capture_count_24h,
+      MAX(ts) AS last_capture_at
+    FROM capture_events
+    WHERE tenant_id = ?
+      AND mall_id <> ''
+      AND mall_id NOT LIKE 'MALL-DBG%'
+      AND mall_id NOT LIKE 'MALL-EXT-E2E%'
+    GROUP BY mall_id
+  `, [last24, tid]);
+  for (const row of captureOnlyRows) {
+    const current = ensureRow(row.mall_id);
+    if (!current) continue;
+    Object.assign(current, {
+      site: current.site || row.site || null,
+      capture_count_24h: toNum(row.capture_count_24h),
+      last_capture_at: row.last_capture_at || current.last_capture_at,
+      last_seen: current.last_seen || row.last_capture_at || null,
+    });
+  }
+
+  const shopRows = optionalAll(db, `
+    SELECT *
+    FROM (
+      SELECT
+        id, tenant_id, mall_id, site, stat_date,
+        sale_volume, seven_days_sale_volume, thirty_days_sale_volume,
+        on_sale_product_number, wait_product_number, lack_skc_number,
+        advice_prepare_skc_number, about_to_sell_out_number,
+        already_sold_out_number, high_price_limit_number,
+        quality_after_sale_ratio_90d, last_updated_at,
+        ROW_NUMBER() OVER (PARTITION BY mall_id ORDER BY stat_date DESC, last_updated_at DESC) AS rn
+      FROM temu_shop_stats
+      WHERE tenant_id = ? AND ${realMallWhere}
+    )
+    WHERE rn = 1
+  `, [tid]);
+  for (const row of shopRows) {
+    const current = ensureRow(row.mall_id);
+    if (!current) continue;
+    Object.assign(current, {
+      site: current.site || row.site || null,
+      stat_date: row.stat_date || current.stat_date,
+      sale_volume: toNum(row.sale_volume),
+      seven_days_sale_volume: toNum(row.seven_days_sale_volume),
+      thirty_days_sale_volume: toNum(row.thirty_days_sale_volume),
+      on_sale_product_number: toNum(row.on_sale_product_number),
+      wait_product_number: toNum(row.wait_product_number),
+      lack_skc_number: toNum(row.lack_skc_number),
+      advice_prepare_skc_number: toNum(row.advice_prepare_skc_number),
+      about_to_sell_out_number: toNum(row.about_to_sell_out_number),
+      already_sold_out_number: toNum(row.already_sold_out_number),
+      high_price_limit_number: toNum(row.high_price_limit_number),
+      quality_after_sale_ratio_90d: row.quality_after_sale_ratio_90d,
+      last_updated_at: latestText(current.last_updated_at, row.last_updated_at),
+    });
+  }
+
+  const salesRows = optionalAll(db, `
+    WITH latest AS (
+      SELECT mall_supplier_id AS mall_id, MAX(stat_date) AS stat_date
+      FROM temu_sales_snapshot
+      WHERE tenant_id = ? AND ${realSalesWhere}
+      GROUP BY mall_supplier_id
+    )
+    SELECT
+      s.mall_supplier_id AS mall_id,
+      MAX(s.stat_date) AS stat_date,
+      COUNT(DISTINCT s.skc_id) AS product_skc_count,
+      SUM(COALESCE(s.today_sales, 0)) AS sale_volume,
+      SUM(COALESCE(s.last7d_sales, 0)) AS seven_days_sale_volume,
+      SUM(COALESCE(s.last30d_sales, 0)) AS thirty_days_sale_volume,
+      SUM(COALESCE(s.warehouse_stock, 0)) AS product_stock_available,
+      SUM(COALESCE(s.occupy_stock, 0)) AS product_occupy_stock,
+      SUM(COALESCE(s.unavailable_stock, 0)) AS product_unavailable_stock,
+      SUM(CASE WHEN COALESCE(s.warehouse_stock, 0) <= 0 THEN 1 ELSE 0 END) AS already_sold_out_number,
+      SUM(CASE WHEN COALESCE(s.advice_qty, 0) > 0 THEN 1 ELSE 0 END) AS advice_prepare_skc_number,
+      MAX(s.last_updated_at) AS last_updated_at
+    FROM temu_sales_snapshot s
+    JOIN latest l ON l.mall_id = s.mall_supplier_id AND l.stat_date = s.stat_date
+    WHERE s.tenant_id = ? AND ${realSalesWhere}
+    GROUP BY s.mall_supplier_id
+  `, [tid, tid]);
+  for (const row of salesRows) {
+    const current = ensureRow(row.mall_id);
+    if (!current) continue;
+    Object.assign(current, {
+      stat_date: current.stat_date || row.stat_date || null,
+      product_skc_count: toNum(row.product_skc_count),
+      sale_volume: current.sale_volume || toNum(row.sale_volume),
+      seven_days_sale_volume: current.seven_days_sale_volume || toNum(row.seven_days_sale_volume),
+      thirty_days_sale_volume: current.thirty_days_sale_volume || toNum(row.thirty_days_sale_volume),
+      on_sale_product_number: current.on_sale_product_number || toNum(row.product_skc_count),
+      product_stock_available: toNum(row.product_stock_available),
+      product_occupy_stock: toNum(row.product_occupy_stock),
+      product_unavailable_stock: toNum(row.product_unavailable_stock),
+      already_sold_out_number: current.already_sold_out_number || toNum(row.already_sold_out_number),
+      advice_prepare_skc_number: current.advice_prepare_skc_number || toNum(row.advice_prepare_skc_number),
+      last_updated_at: latestText(current.last_updated_at, row.last_updated_at),
+    });
+  }
+
+  const flowRows = optionalAll(db, `
+    WITH latest AS (
+      SELECT mall_id, MAX(stat_date) AS stat_date
+      FROM temu_product_flow_snapshot
+      WHERE tenant_id = ? AND ${realMallWhere}
+      GROUP BY mall_id
+    )
+    SELECT
+      f.mall_id,
+      MAX(f.stat_date) AS flow_stat_date,
+      COUNT(DISTINCT COALESCE(NULLIF(f.goods_id, ''), f.product_id)) AS flow_product_count,
+      SUM(COALESCE(f.expose_num, 0)) AS flow_expose_num,
+      SUM(COALESCE(f.click_num, 0)) AS flow_click_num,
+      SUM(COALESCE(f.detail_visit_num, 0)) AS flow_detail_visit_num,
+      SUM(COALESCE(f.detail_visitor_num, 0)) AS flow_detail_visitor_num,
+      SUM(COALESCE(f.add_to_cart_user_num, 0)) AS flow_add_to_cart_user_num,
+      SUM(COALESCE(f.collect_user_num, 0)) AS flow_collect_user_num,
+      SUM(COALESCE(f.pay_goods_num, 0)) AS flow_pay_goods_num,
+      SUM(COALESCE(f.pay_order_num, 0)) AS flow_pay_order_num,
+      SUM(COALESCE(f.buyer_num, 0)) AS flow_buyer_num,
+      CASE
+        WHEN SUM(COALESCE(f.expose_num, 0)) > 0
+          THEN SUM(COALESCE(f.expose_pay_conversion_rate, 0) * COALESCE(f.expose_num, 0)) / SUM(COALESCE(f.expose_num, 0))
+        ELSE AVG(f.expose_pay_conversion_rate)
+      END AS flow_expose_pay_conversion_rate,
+      CASE
+        WHEN SUM(COALESCE(f.expose_num, 0)) > 0
+          THEN SUM(COALESCE(f.expose_click_conversion_rate, 0) * COALESCE(f.expose_num, 0)) / SUM(COALESCE(f.expose_num, 0))
+        ELSE AVG(f.expose_click_conversion_rate)
+      END AS flow_expose_click_conversion_rate,
+      CASE
+        WHEN SUM(COALESCE(f.click_num, 0)) > 0
+          THEN SUM(COALESCE(f.click_pay_conversion_rate, 0) * COALESCE(f.click_num, 0)) / SUM(COALESCE(f.click_num, 0))
+        ELSE AVG(f.click_pay_conversion_rate)
+      END AS flow_click_pay_conversion_rate,
+      SUM(COALESCE(f.search_expose_num, 0)) AS flow_search_expose_num,
+      SUM(COALESCE(f.search_click_num, 0)) AS flow_search_click_num,
+      SUM(COALESCE(f.search_pay_goods_num, 0)) AS flow_search_pay_goods_num,
+      SUM(COALESCE(f.search_pay_order_num, 0)) AS flow_search_pay_order_num,
+      SUM(COALESCE(f.recommend_expose_num, 0)) AS flow_recommend_expose_num,
+      SUM(COALESCE(f.recommend_click_num, 0)) AS flow_recommend_click_num,
+      SUM(COALESCE(f.recommend_pay_goods_num, 0)) AS flow_recommend_pay_goods_num,
+      SUM(COALESCE(f.recommend_pay_order_num, 0)) AS flow_recommend_pay_order_num,
+      MAX(f.last_updated_at) AS last_flow_at
+    FROM temu_product_flow_snapshot f
+    JOIN latest l ON l.mall_id = f.mall_id AND l.stat_date = f.stat_date
+    WHERE f.tenant_id = ? AND f.mall_id <> ''
+    GROUP BY f.mall_id
+  `, [tid, tid]);
+  for (const row of flowRows) {
+    const current = ensureRow(row.mall_id);
+    if (!current) continue;
+    Object.assign(current, {
+      stat_date: current.stat_date || row.flow_stat_date || null,
+      flow_product_count: toNum(row.flow_product_count),
+      flow_expose_num: toNum(row.flow_expose_num),
+      flow_click_num: toNum(row.flow_click_num),
+      flow_detail_visit_num: toNum(row.flow_detail_visit_num),
+      flow_detail_visitor_num: toNum(row.flow_detail_visitor_num),
+      flow_add_to_cart_user_num: toNum(row.flow_add_to_cart_user_num),
+      flow_collect_user_num: toNum(row.flow_collect_user_num),
+      flow_pay_goods_num: toNum(row.flow_pay_goods_num),
+      flow_pay_order_num: toNum(row.flow_pay_order_num),
+      flow_buyer_num: toNum(row.flow_buyer_num),
+      flow_expose_pay_conversion_rate: row.flow_expose_pay_conversion_rate == null ? null : Number(row.flow_expose_pay_conversion_rate),
+      flow_expose_click_conversion_rate: row.flow_expose_click_conversion_rate == null ? null : Number(row.flow_expose_click_conversion_rate),
+      flow_click_pay_conversion_rate: row.flow_click_pay_conversion_rate == null ? null : Number(row.flow_click_pay_conversion_rate),
+      flow_search_expose_num: toNum(row.flow_search_expose_num),
+      flow_search_click_num: toNum(row.flow_search_click_num),
+      flow_search_pay_goods_num: toNum(row.flow_search_pay_goods_num),
+      flow_search_pay_order_num: toNum(row.flow_search_pay_order_num),
+      flow_recommend_expose_num: toNum(row.flow_recommend_expose_num),
+      flow_recommend_click_num: toNum(row.flow_recommend_click_num),
+      flow_recommend_pay_goods_num: toNum(row.flow_recommend_pay_goods_num),
+      flow_recommend_pay_order_num: toNum(row.flow_recommend_pay_order_num),
+      last_flow_at: row.last_flow_at || current.last_flow_at,
+      last_updated_at: latestText(current.last_updated_at, row.last_flow_at),
+    });
+  }
+
+  const activityRows = optionalAll(db, `
+    WITH latest AS (
+      SELECT mall_id, MAX(stat_date) AS stat_date
+      FROM temu_activity_snapshot
+      WHERE tenant_id = ? AND ${realMallWhere}
+      GROUP BY mall_id
+    )
+    SELECT
+      a.mall_id,
+      COUNT(*) AS activity_count,
+      SUM(CASE WHEN a.activity_kind = 'bidding' THEN 1 ELSE 0 END) AS bidding_activity_count,
+      SUM(CASE WHEN a.activity_kind = 'coupon' THEN 1 ELSE 0 END) AS coupon_activity_count,
+      SUM(COALESCE(a.activity_stock, 0)) AS activity_stock,
+      MAX(a.last_updated_at) AS last_activity_at
+    FROM temu_activity_snapshot a
+    JOIN latest l ON l.mall_id = a.mall_id AND l.stat_date = a.stat_date
+    WHERE a.tenant_id = ? AND a.mall_id <> ''
+    GROUP BY a.mall_id
+  `, [tid, tid]);
+  for (const row of activityRows) {
+    const current = ensureRow(row.mall_id);
+    if (!current) continue;
+    Object.assign(current, {
+      activity_count: toNum(row.activity_count),
+      bidding_activity_count: toNum(row.bidding_activity_count),
+      coupon_activity_count: toNum(row.coupon_activity_count),
+      activity_stock: toNum(row.activity_stock),
+      last_activity_at: row.last_activity_at || current.last_activity_at,
+      last_updated_at: latestText(current.last_updated_at, row.last_activity_at),
+    });
+  }
+
+  const riskRows = optionalAll(db, `
+    WITH latest AS (
+      SELECT mall_id, MAX(stat_date) AS stat_date
+      FROM temu_operation_risk_snapshot
+      WHERE tenant_id = ? AND ${realMallWhere}
+      GROUP BY mall_id
+    )
+    SELECT
+      r.mall_id,
+      COUNT(*) AS risk_count,
+      SUM(CASE WHEN r.severity = 'high' THEN 1 ELSE 0 END) AS high_risk_count,
+      SUM(CASE WHEN r.severity = 'medium' THEN 1 ELSE 0 END) AS medium_risk_count,
+      MAX(r.last_updated_at) AS last_risk_at
+    FROM temu_operation_risk_snapshot r
+    JOIN latest l ON l.mall_id = r.mall_id AND l.stat_date = r.stat_date
+    WHERE r.tenant_id = ? AND r.mall_id <> ''
+    GROUP BY r.mall_id
+  `, [tid, tid]);
+  for (const row of riskRows) {
+    const current = ensureRow(row.mall_id);
+    if (!current) continue;
+    Object.assign(current, {
+      risk_count: toNum(row.risk_count),
+      high_risk_count: toNum(row.high_risk_count),
+      medium_risk_count: toNum(row.medium_risk_count),
+      last_risk_at: row.last_risk_at || current.last_risk_at,
+      last_updated_at: latestText(current.last_updated_at, row.last_risk_at),
+    });
+  }
+
+  const stockRows = optionalAll(db, `
+    SELECT
+      mall_id,
+      COUNT(*) AS stock_order_count,
+      SUM(COALESCE(demand_qty, 0)) AS stock_order_demand_qty,
+      SUM(COALESCE(delivered_qty, 0)) AS stock_order_delivered_qty,
+      SUM(CASE
+        WHEN COALESCE(temu_status, '') LIKE '%完成%' THEN 0
+        WHEN COALESCE(temu_status, '') LIKE '%取消%' THEN 0
+        ELSE 1
+      END) AS pending_stock_order_count,
+      MAX(last_updated_at) AS last_stock_order_at
+    FROM temu_stock_order_snapshot
+    WHERE tenant_id = ? AND ${realMallWhere}
+    GROUP BY mall_id
+  `, [tid]);
+  for (const row of stockRows) {
+    const current = ensureRow(row.mall_id);
+    if (!current) continue;
+    Object.assign(current, {
+      stock_order_count: toNum(row.stock_order_count),
+      pending_stock_order_count: toNum(row.pending_stock_order_count),
+      stock_order_demand_qty: toNum(row.stock_order_demand_qty),
+      stock_order_delivered_qty: toNum(row.stock_order_delivered_qty),
+      last_stock_order_at: row.last_stock_order_at || current.last_stock_order_at,
+      last_updated_at: latestText(current.last_updated_at, row.last_stock_order_at),
+    });
+  }
+
+  const deviceRow = optionalGet(db, `
+    SELECT COUNT(*) AS device_count
+    FROM devices
+    WHERE tenant_id = ?
+  `, [tid], { device_count: 0 });
+
+  const rows = Array.from(rowsByMall.values()).map((row) => ({
+    ...row,
+    last_seen: latestText(row.last_seen, row.last_capture_at, row.last_updated_at, row.last_flow_at, row.last_activity_at, row.last_risk_at, row.last_stock_order_at),
+  })).sort((left, right) => {
+    const riskDiff = toNum(right.high_risk_count) - toNum(left.high_risk_count);
+    if (riskDiff !== 0) return riskDiff;
+    const activityDiff = toNum(right.activity_count) - toNum(left.activity_count);
+    if (activityDiff !== 0) return activityDiff;
+    return String(right.last_seen || "").localeCompare(String(left.last_seen || ""));
+  });
+
+  const totals = rows.reduce((acc, row) => ({
+    mall_count: acc.mall_count + 1,
+    capture_count_24h: acc.capture_count_24h + toNum(row.capture_count_24h),
+    sale_volume: acc.sale_volume + toNum(row.sale_volume),
+    seven_days_sale_volume: acc.seven_days_sale_volume + toNum(row.seven_days_sale_volume),
+    thirty_days_sale_volume: acc.thirty_days_sale_volume + toNum(row.thirty_days_sale_volume),
+    on_sale_product_number: acc.on_sale_product_number + toNum(row.on_sale_product_number),
+    lack_skc_number: acc.lack_skc_number + toNum(row.lack_skc_number),
+    advice_prepare_skc_number: acc.advice_prepare_skc_number + toNum(row.advice_prepare_skc_number),
+    already_sold_out_number: acc.already_sold_out_number + toNum(row.already_sold_out_number),
+    flow_product_count: acc.flow_product_count + toNum(row.flow_product_count),
+    flow_expose_num: acc.flow_expose_num + toNum(row.flow_expose_num),
+    flow_click_num: acc.flow_click_num + toNum(row.flow_click_num),
+    flow_detail_visit_num: acc.flow_detail_visit_num + toNum(row.flow_detail_visit_num),
+    flow_detail_visitor_num: acc.flow_detail_visitor_num + toNum(row.flow_detail_visitor_num),
+    flow_add_to_cart_user_num: acc.flow_add_to_cart_user_num + toNum(row.flow_add_to_cart_user_num),
+    flow_collect_user_num: acc.flow_collect_user_num + toNum(row.flow_collect_user_num),
+    flow_pay_goods_num: acc.flow_pay_goods_num + toNum(row.flow_pay_goods_num),
+    flow_pay_order_num: acc.flow_pay_order_num + toNum(row.flow_pay_order_num),
+    flow_buyer_num: acc.flow_buyer_num + toNum(row.flow_buyer_num),
+    flow_search_expose_num: acc.flow_search_expose_num + toNum(row.flow_search_expose_num),
+    flow_search_click_num: acc.flow_search_click_num + toNum(row.flow_search_click_num),
+    flow_search_pay_goods_num: acc.flow_search_pay_goods_num + toNum(row.flow_search_pay_goods_num),
+    flow_search_pay_order_num: acc.flow_search_pay_order_num + toNum(row.flow_search_pay_order_num),
+    flow_recommend_expose_num: acc.flow_recommend_expose_num + toNum(row.flow_recommend_expose_num),
+    flow_recommend_click_num: acc.flow_recommend_click_num + toNum(row.flow_recommend_click_num),
+    flow_recommend_pay_goods_num: acc.flow_recommend_pay_goods_num + toNum(row.flow_recommend_pay_goods_num),
+    flow_recommend_pay_order_num: acc.flow_recommend_pay_order_num + toNum(row.flow_recommend_pay_order_num),
+    activity_count: acc.activity_count + toNum(row.activity_count),
+    risk_count: acc.risk_count + toNum(row.risk_count),
+    high_risk_count: acc.high_risk_count + toNum(row.high_risk_count),
+    stock_order_count: acc.stock_order_count + toNum(row.stock_order_count),
+    pending_stock_order_count: acc.pending_stock_order_count + toNum(row.pending_stock_order_count),
+    stock_order_demand_qty: acc.stock_order_demand_qty + toNum(row.stock_order_demand_qty),
+    stock_order_delivered_qty: acc.stock_order_delivered_qty + toNum(row.stock_order_delivered_qty),
+  }), {
+    mall_count: 0,
+    capture_count_24h: 0,
+    sale_volume: 0,
+    seven_days_sale_volume: 0,
+    thirty_days_sale_volume: 0,
+    on_sale_product_number: 0,
+    lack_skc_number: 0,
+    advice_prepare_skc_number: 0,
+    already_sold_out_number: 0,
+    flow_product_count: 0,
+    flow_expose_num: 0,
+    flow_click_num: 0,
+    flow_detail_visit_num: 0,
+    flow_detail_visitor_num: 0,
+    flow_add_to_cart_user_num: 0,
+    flow_collect_user_num: 0,
+    flow_pay_goods_num: 0,
+    flow_pay_order_num: 0,
+    flow_buyer_num: 0,
+    flow_search_expose_num: 0,
+    flow_search_click_num: 0,
+    flow_search_pay_goods_num: 0,
+    flow_search_pay_order_num: 0,
+    flow_recommend_expose_num: 0,
+    flow_recommend_click_num: 0,
+    flow_recommend_pay_goods_num: 0,
+    flow_recommend_pay_order_num: 0,
+    activity_count: 0,
+    risk_count: 0,
+    high_risk_count: 0,
+    stock_order_count: 0,
+    pending_stock_order_count: 0,
+    stock_order_demand_qty: 0,
+    stock_order_delivered_qty: 0,
+  });
+  totals.flow_expose_click_conversion_rate = totals.flow_expose_num > 0
+    ? totals.flow_click_num / totals.flow_expose_num
+    : null;
+  totals.flow_click_pay_conversion_rate = totals.flow_click_num > 0
+    ? totals.flow_pay_goods_num / totals.flow_click_num
+    : null;
+  totals.flow_expose_pay_conversion_rate = totals.flow_expose_num > 0
+    ? totals.flow_pay_goods_num / totals.flow_expose_num
+    : null;
+  totals.device_count = toNum(deviceRow?.device_count);
+
+  res.json({
+    generated_at: new Date().toISOString(),
+    rows,
+    totals,
+  });
+});
+
+r.get("/stock-orders", (req, res) => {
+  const db = getDb();
+  const tid = req.user.tid;
+  const requestedMallId = req.query.mall_id ? String(req.query.mall_id) : "";
+  const requestedStatus = req.query.status ? String(req.query.status) : "";
+  const q = req.query.q ? String(req.query.q).trim() : "";
+  const limit = Math.min(1000, Math.max(1, Number(req.query.limit) || 300));
+  const where = ["tenant_id = ?", realMallWhere];
+  const params = [tid];
+  if (requestedMallId) {
+    where.push("mall_id = ?");
+    params.push(requestedMallId);
+  }
+  if (requestedStatus) {
+    where.push("COALESCE(temu_status, '') = ?");
+    params.push(requestedStatus);
+  }
+  if (q) {
+    where.push(`(
+      stock_order_no LIKE ?
+      OR parent_order_no LIKE ?
+      OR delivery_order_sn LIKE ?
+      OR delivery_batch_sn LIKE ?
+      OR product_name LIKE ?
+      OR skc_id LIKE ?
+      OR sku_id LIKE ?
+      OR sku_ext_code LIKE ?
+    )`);
+    const like = `%${q}%`;
+    params.push(like, like, like, like, like, like, like, like);
+  }
+
+  try {
+    const rows = db.prepare(`
+      SELECT id, mall_id, site, row_key, stock_order_no, parent_order_no,
+             delivery_order_sn, delivery_batch_sn, product_id, skc_id, sku_id, sku_ext_code,
+             product_name, spec_name, demand_qty, delivered_qty, temu_status, warehouse_group,
+             receive_warehouse_id, receive_warehouse_name, urgency_info, order_time, latest_ship_at,
+             raw_json, source_event_id, sources_json, first_seen_at, last_updated_at
+      FROM temu_stock_order_snapshot
+      WHERE ${where.join(" AND ")}
+      ORDER BY
+        CASE
+          WHEN COALESCE(temu_status, '') LIKE '%取消%' THEN 5
+          WHEN COALESCE(temu_status, '') LIKE '%完成%' THEN 4
+          WHEN COALESCE(temu_status, '') LIKE '%已发%' THEN 3
+          ELSE 1
+        END,
+        last_updated_at DESC
+      LIMIT ?
+    `).all(...params, limit);
+    const summary = db.prepare(`
+      SELECT COALESCE(temu_status, '') AS temu_status, COUNT(*) AS count, COALESCE(SUM(demand_qty), 0) AS demand_qty
+      FROM temu_stock_order_snapshot
+      WHERE ${where.join(" AND ")}
+      GROUP BY COALESCE(temu_status, '')
+      ORDER BY count DESC
+    `).all(...params);
+    res.json({ rows, summary });
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) return res.json({ rows: [], summary: [] });
+    throw error;
+  }
+});
+
+r.get("/operation-risks", (req, res) => {
+  const db = getDb();
+  const tid = req.user.tid;
+  const requestedDate = req.query.date;
+  const requestedMallId = req.query.mall_id ? String(req.query.mall_id) : "";
+  const requestedType = req.query.type ? String(req.query.type) : "";
+  const limit = Math.min(1000, Math.max(1, Number(req.query.limit) || 300));
+  const explicitDate = typeof requestedDate === "string" && requestedDate;
+  let date = explicitDate ? requestedDate : "";
+  try {
+    if (!date) {
+      const latestWhere = ["tenant_id = ?", realMallWhere];
+      const latestParams = [tid];
+      if (requestedMallId) {
+        latestWhere.push("mall_id = ?");
+        latestParams.push(requestedMallId);
+      }
+      const latest = db.prepare(`
+        SELECT stat_date AS date
+        FROM temu_operation_risk_snapshot
+        WHERE ${latestWhere.join(" AND ")}
+        ORDER BY stat_date DESC, last_updated_at DESC
+        LIMIT 1
+      `).get(...latestParams);
+      date = latest?.date || new Date().toISOString().slice(0, 10);
+    }
+    const where = ["tenant_id = ?", "stat_date = ?", realMallWhere];
+    const params = [tid, date];
+    if (requestedMallId) {
+      where.push("mall_id = ?");
+      params.push(requestedMallId);
+    }
+    if (requestedType) {
+      where.push("risk_type = ?");
+      params.push(requestedType);
+    }
+    const rows = db.prepare(`
+      SELECT id, mall_id, site, stat_date, risk_type, risk_key, risk_title,
+             risk_status, severity, product_id, skc_id, goods_id, order_id,
+             quantity, metric_json, raw_json, source_event_id, sources_json, last_updated_at
+      FROM temu_operation_risk_snapshot
+      WHERE ${where.join(" AND ")}
+      ORDER BY
+        CASE severity WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END DESC,
+        last_updated_at DESC
+      LIMIT ?
+    `).all(...params, limit);
+    const summary = db.prepare(`
+      SELECT risk_type, severity, COUNT(*) AS count
+      FROM temu_operation_risk_snapshot
+      WHERE ${where.join(" AND ")}
+      GROUP BY risk_type, severity
+      ORDER BY count DESC
+    `).all(...params);
+    res.json({ date, rows, summary });
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) return res.json({ date, rows: [], summary: [] });
+    throw error;
+  }
 });
 
 // ================= SKC 主体聚合查询 =================
@@ -606,7 +1268,7 @@ r.get("/activity", (req, res) => {
   const requestedDate = req.query.date;
   const requestedMallId = req.query.mall_id ? String(req.query.mall_id) : "";
   const requestedKind = req.query.kind ? String(req.query.kind) : "";
-  const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
+  const limit = Math.min(5000, Math.max(1, Number(req.query.limit) || 1000));
   const explicitDate = typeof requestedDate === "string" && requestedDate;
   let date = explicitDate ? requestedDate : "";
   try {
@@ -638,7 +1300,9 @@ r.get("/activity", (req, res) => {
     }
     const rows = db.prepare(`
       SELECT id, mall_id, site, stat_date, row_key, activity_kind, activity_id,
-             activity_title, activity_status, product_id, skc_id, goods_id,
+             activity_title, activity_type, activity_status, product_id, skc_id, goods_id,
+             signup_price_cents, suggested_price_cents, price_currency, activity_stock,
+             signup_price_diff_cents,
              start_at, end_at, metric_json, raw_json, source_event_id,
              sources_json, last_updated_at
       FROM temu_activity_snapshot

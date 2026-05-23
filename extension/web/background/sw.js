@@ -5,7 +5,14 @@
 // 周期任务用 chrome.alarms（setInterval 不可靠）
 // ============================================================
 
-import { URL_WHITELIST, URL_BLACKLIST, EVENT_NAME, BYPASS_SYMBOL_KEY } from "./hook-config.js";
+import {
+  URL_WHITELIST,
+  URL_BLACKLIST,
+  URL_DISCOVERY_ALLOWLIST,
+  DISCOVERY_MAX_BODY_CHARS,
+  EVENT_NAME,
+  BYPASS_SYMBOL_KEY,
+} from "./hook-config.js";
 import { enqueue, queueDepth, flush } from "./ingest-queue.js";
 
 const ALARM_FLUSH = "temu-monitor.flush";
@@ -24,6 +31,8 @@ const COLLECTOR_TARGETS = [
   { key: "marketing_activity", url: "https://agentseller.temu.com/activity/marketing-activity" },
   { key: "chance_goods", url: "https://agentseller.temu.com/activity/marketing-activity/chance-goods" },
   { key: "bidding", url: "https://agentseller.temu.com/newon/invite-bids/list" },
+  { key: "inbound_exception", url: "https://agentseller.temu.com/scp/purchase/board/supplier/exception" },
+  { key: "product_select", url: "https://agentseller.temu.com/newon/product-select" },
 ];
 
 ensureRuntimeDefaults().catch((e) => console.warn("[sw] bootstrap skipped:", e?.message || e));
@@ -203,6 +212,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({
       URL_WHITELIST,
       URL_BLACKLIST,
+      URL_DISCOVERY_ALLOWLIST,
+      DISCOVERY_MAX_BODY_CHARS,
       EVENT_NAME,
       BYPASS_SYMBOL_KEY,
     });

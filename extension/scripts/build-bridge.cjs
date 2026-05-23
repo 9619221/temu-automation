@@ -26,6 +26,8 @@ vm.runInContext(cjsified, sandbox);
 const cfg = {
   URL_WHITELIST: sandbox.exports.URL_WHITELIST || [],
   URL_BLACKLIST: sandbox.exports.URL_BLACKLIST || [],
+  URL_DISCOVERY_ALLOWLIST: sandbox.exports.URL_DISCOVERY_ALLOWLIST || [],
+  DISCOVERY_MAX_BODY_CHARS: sandbox.exports.DISCOVERY_MAX_BODY_CHARS || 60000,
   EVENT_NAME: sandbox.exports.EVENT_NAME,
   BYPASS_SYMBOL_KEY: sandbox.exports.BYPASS_SYMBOL_KEY,
   GENERATED_AT: new Date().toISOString(),
