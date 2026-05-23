@@ -83,6 +83,7 @@ export const URL_WHITELIST = [
 
   // === 销售 / 售罄 / 履约 ===
   "/mms/venom/api/supplier/sales/management/listOverall",
+  "/mms/venom/api/supplier/sales/management/querySkuSalesNumber",
   "/mms/venom/api/supplier/sales/management/queryFulfilmentFormStatistic",
   "/mms/venom/api/supplier/sales/management/exportShow",
   "/mms/venom/api/supplier/sales/management/cmall/queryMall",

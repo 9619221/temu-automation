@@ -22,7 +22,7 @@ function decode(encoded) {
 }
 
 const ENCODED = Object.freeze({
-  analyzeApiKey: "Bw5AOmMKLD1ZFBQyKy1bRSAYEAgUZSIhUDslKgASawJhUQdEBwEzVSggLVcZKiAeHSJp",
+  analyzeApiKey: "Bw5AG38xMzsFFzQ8HB40HCpCMTYBfSVWXyIBLxIefQNxeVMwFC8QGDsURhYrEjE+AhtF",
   generateApiKey: "Bw5AFB1QTUBZXVMVWlpZGQZDVw9UFQABUQUTW0QSSVcBUwE=",
   // GPT 版生图 key：内置共享 key（grsai gpt-image-2），用户 UI 填写可覆盖
   gptGenerateApiKey: "Bw5AFB1QTUBZXVMVWlpZGQZDVw9UFQABUQUTW0QSSVcBUwE=",

@@ -176,6 +176,18 @@ export interface TemuSalesRow {
   stat_date: string;
   sources_json?: string | null;
   last_updated_at: string | null;
+  trend_daily?: Array<{ date: string; salesNumber: number }>;
+  trend_latest_date?: string | null;
+  trend_today_sales?: number | null;
+  trend_last7d_sales?: number | null;
+  trend_last30d_sales?: number | null;
+  sku_sales_trends?: Record<string, {
+    trend_daily?: Array<{ date: string; salesNumber: number }>;
+    latest_date?: string | null;
+    today_sales?: number | null;
+    last7d_sales?: number | null;
+    last30d_sales?: number | null;
+  }>;
   raw_item?: Record<string, any> | null;
   raw_source?: {
     id?: string;

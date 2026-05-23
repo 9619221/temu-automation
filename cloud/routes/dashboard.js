@@ -118,6 +118,130 @@ function getRawProductPayload(db, tenantId, row) {
   return {};
 }
 
+function collectProductSkuIds(rawItem) {
+  const out = new Set();
+  const add = (value) => {
+    const id = normalizeId(value);
+    if (id) out.add(id);
+  };
+  add(rawItem?.productSkuId);
+  add(rawItem?.prodSkuId);
+  const lists = [
+    rawItem?.skuQuantityDetailList,
+    rawItem?.skuQuantityDetailForSupplierList,
+    rawItem?.skuList,
+    rawItem?.skuInfoList,
+  ];
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue;
+    for (const sku of list) {
+      add(sku?.productSkuId);
+      add(sku?.prodSkuId);
+      add(sku?.skuId);
+    }
+  }
+  return Array.from(out);
+}
+
+function aggregateTrendRows(rows) {
+  const daily = new Map();
+  for (const row of rows) {
+    if (Number(row.is_predict || 0) === 1) continue;
+    const date = normalizeId(row.stat_date);
+    if (!date) continue;
+    daily.set(date, (daily.get(date) || 0) + (Number(row.sales_number) || 0));
+  }
+  const trendDaily = Array.from(daily.entries())
+    .map(([date, salesNumber]) => ({ date, salesNumber }))
+    .sort((left, right) => left.date.localeCompare(right.date));
+  if (!trendDaily.length) {
+    return {
+      trend_daily: [],
+      trend_latest_date: null,
+      trend_today_sales: null,
+      trend_last7d_sales: null,
+      trend_last30d_sales: null,
+    };
+  }
+  const latest = trendDaily[trendDaily.length - 1].date;
+  const latestMs = Date.parse(`${latest}T00:00:00Z`);
+  const sumWindow = (days) => {
+    if (!Number.isFinite(latestMs)) return trendDaily.slice(-days).reduce((sum, item) => sum + item.salesNumber, 0);
+    const cutoff = latestMs - (days - 1) * 86400000;
+    return trendDaily.reduce((sum, item) => {
+      const ms = Date.parse(`${item.date}T00:00:00Z`);
+      return Number.isFinite(ms) && ms >= cutoff && ms <= latestMs ? sum + item.salesNumber : sum;
+    }, 0);
+  };
+  return {
+    trend_daily: trendDaily,
+    trend_latest_date: latest,
+    trend_today_sales: daily.get(latest) || 0,
+    trend_last7d_sales: sumWindow(7),
+    trend_last30d_sales: sumWindow(30),
+  };
+}
+
+function getSkuSalesTrendPayload(db, tenantId, rawItem) {
+  const skuIds = collectProductSkuIds(rawItem);
+  if (!skuIds.length) return {};
+  const placeholders = skuIds.map(() => "?").join(",");
+  let rows = [];
+  try {
+    rows = db.prepare(`
+      SELECT product_sku_id, stat_date, sales_number, is_predict, sold_out
+      FROM temu_sku_sales_trend
+      WHERE tenant_id = ? AND product_sku_id IN (${placeholders})
+      ORDER BY stat_date ASC
+    `).all(tenantId, ...skuIds);
+  } catch (error) {
+    if (!/no such table/i.test(String(error?.message || ""))) throw error;
+    return {};
+  }
+  if (!rows.length) return {};
+
+  const sku_sales_trends = {};
+  for (const skuId of skuIds) {
+    const skuRows = rows.filter((row) => normalizeId(row.product_sku_id) === skuId);
+    if (!skuRows.length) continue;
+    const metrics = aggregateTrendRows(skuRows);
+    if (metrics.trend_daily.length) {
+      sku_sales_trends[skuId] = {
+        trend_daily: metrics.trend_daily,
+        latest_date: metrics.trend_latest_date,
+        today_sales: metrics.trend_today_sales,
+        last7d_sales: metrics.trend_last7d_sales,
+        last30d_sales: metrics.trend_last30d_sales,
+      };
+    }
+  }
+  const aggregate = aggregateTrendRows(rows);
+  if (!aggregate.trend_daily.length) return {};
+  return {
+    trend_daily: aggregate.trend_daily,
+    trend_latest_date: aggregate.trend_latest_date,
+    trend_today_sales: aggregate.trend_today_sales,
+    trend_last7d_sales: aggregate.trend_last7d_sales,
+    trend_last30d_sales: aggregate.trend_last30d_sales,
+    sku_sales_trends,
+  };
+}
+
+function withTrendSalesFallback(row, trendPayload) {
+  if (!trendPayload?.trend_daily?.length) return row;
+  const next = { ...row, ...trendPayload };
+  if ((Number(next.today_sales) || 0) <= 0 && trendPayload.trend_today_sales != null) {
+    next.today_sales = trendPayload.trend_today_sales;
+  }
+  if ((Number(next.last7d_sales) || 0) <= 0 && trendPayload.trend_last7d_sales != null) {
+    next.last7d_sales = trendPayload.trend_last7d_sales;
+  }
+  if ((Number(next.last30d_sales) || 0) <= 0 && trendPayload.trend_last30d_sales != null) {
+    next.last30d_sales = trendPayload.trend_last30d_sales;
+  }
+  return next;
+}
+
 r.get("/stats", (req, res) => {
   const db = getDb();
   const tid = req.user.tid;
@@ -234,10 +358,14 @@ r.get("/temu-sales", (req, res) => {
   `).all(...params);
   res.json({
     date,
-    rows: rows.map((row) => ({
-      ...row,
-      ...getRawProductPayload(db, tid, row),
-    })),
+    rows: rows.map((row) => {
+      const rawPayload = getRawProductPayload(db, tid, row);
+      const trendPayload = getSkuSalesTrendPayload(db, tid, rawPayload.raw_item);
+      return withTrendSalesFallback({
+        ...row,
+        ...rawPayload,
+      }, trendPayload);
+    }),
   });
 });
 

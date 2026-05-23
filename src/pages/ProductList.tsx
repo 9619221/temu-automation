@@ -519,7 +519,22 @@ function buildCloudSalesRaw(previousRaw: any, skc: SkcRow | undefined, sales: Te
     lackQuantity: 0,
     adviceQuantity: sales?.advice_qty ?? 0,
   };
-  const rawSkuList = Array.isArray(baseRaw.skuQuantityDetailList) ? baseRaw.skuQuantityDetailList : [];
+  const skuTrendMap = sales?.sku_sales_trends && typeof sales.sku_sales_trends === "object"
+    ? sales.sku_sales_trends
+    : {};
+  const rawSkuListSource = Array.isArray(baseRaw.skuQuantityDetailList) ? baseRaw.skuQuantityDetailList : [];
+  const rawSkuList = rawSkuListSource.map((sku: any) => {
+    const skuId = String(sku?.productSkuId || sku?.prodSkuId || sku?.skuId || "");
+    const trend = skuId ? skuTrendMap[skuId] : null;
+    if (!trend) return sku;
+    return {
+      ...sku,
+      todaySaleVolume: trend.today_sales ?? sku.todaySaleVolume,
+      lastSevenDaysSaleVolume: trend.last7d_sales ?? sku.lastSevenDaysSaleVolume,
+      lastThirtyDaysSaleVolume: trend.last30d_sales ?? sku.lastThirtyDaysSaleVolume,
+      trendDaily: Array.isArray(trend.trend_daily) ? trend.trend_daily : sku.trendDaily,
+    };
+  });
   const rawTotalInfo = baseRaw.skuQuantityTotalInfo && typeof baseRaw.skuQuantityTotalInfo === "object"
     ? baseRaw.skuQuantityTotalInfo
     : {};
@@ -545,12 +560,14 @@ function buildCloudSalesRaw(previousRaw: any, skc: SkcRow | undefined, sales: Te
     stockStatus: sales?.stock_status ?? baseRaw.stockStatus,
     supplyStatus: sales?.supply_status ?? baseRaw.supplyStatus,
     closeJitStatus: sales?.close_jit_status ?? baseRaw.closeJitStatus,
+    trendDaily: Array.isArray(sales?.trend_daily) ? sales?.trend_daily : baseRaw.trendDaily,
+    trendLatestDate: sales?.trend_latest_date || baseRaw.trendLatestDate,
     skuQuantityDetailList: rawSkuList.length > 0 ? rawSkuList : [cloudSku],
     skuQuantityTotalInfo: {
       ...rawTotalInfo,
-      todaySaleVolume: rawTotalInfo.todaySaleVolume ?? sales?.today_sales ?? 0,
-      lastSevenDaysSaleVolume: rawTotalInfo.lastSevenDaysSaleVolume ?? sales?.last7d_sales ?? 0,
-      lastThirtyDaysSaleVolume: rawTotalInfo.lastThirtyDaysSaleVolume ?? sales?.last30d_sales ?? 0,
+      todaySaleVolume: sales?.today_sales ?? rawTotalInfo.todaySaleVolume ?? 0,
+      lastSevenDaysSaleVolume: sales?.last7d_sales ?? rawTotalInfo.lastSevenDaysSaleVolume ?? 0,
+      lastThirtyDaysSaleVolume: sales?.last30d_sales ?? rawTotalInfo.lastThirtyDaysSaleVolume ?? 0,
       totalSaleVolume: rawTotalInfo.totalSaleVolume ?? firstCloudValue<number>(sales?.total_sales, skc?.sales_total) ?? 0,
       adviceQuantity: rawTotalInfo.adviceQuantity ?? sales?.advice_qty ?? 0,
       availableSaleDays: rawTotalInfo.availableSaleDays ?? sales?.available_sale_days ?? undefined,
@@ -620,7 +637,9 @@ function applyCloudProduct(product: ProductItem, skc: SkcRow | undefined, sales:
   product.hasSalesSnapshot = Boolean(sales || skc || product.hasSalesSnapshot);
   product.salesRaw = buildCloudSalesRaw(product.salesRaw, skc, sales);
   product.salesRawSku = rawSku || product.salesRawSku;
-  if (Array.isArray(raw.trendDaily) && raw.trendDaily.length > 0) {
+  if (Array.isArray(sales?.trend_daily) && sales.trend_daily.length > 0) {
+    product.trendDaily = sales.trend_daily;
+  } else if (Array.isArray(raw.trendDaily) && raw.trendDaily.length > 0) {
     product.trendDaily = raw.trendDaily;
   }
   if (rawSkuList.length > 0) {

@@ -60,6 +60,58 @@ function toNullableString(raw, max) {
   return max ? s.slice(0, max) : s;
 }
 
+function toNullableBooleanInteger(raw) {
+  if (raw == null || raw === "") return null;
+  if (typeof raw === "boolean") return raw ? 1 : 0;
+  if (typeof raw === "number") return raw ? 1 : 0;
+  const text = String(raw).trim().toLowerCase();
+  if (!text) return null;
+  if (["1", "true", "yes", "y"].includes(text)) return 1;
+  if (["0", "false", "no", "n"].includes(text)) return 0;
+  return null;
+}
+
+function normalizeStatDate(raw, fallbackEvt) {
+  if (raw != null && raw !== "") {
+    const text = String(raw).trim();
+    const match = text.match(/^\d{4}-\d{2}-\d{2}/);
+    if (match) return match[0];
+    const n = Number(raw);
+    if (Number.isFinite(n)) {
+      const ms = n > 946684800000 ? n : n * 1000;
+      const d = new Date(ms);
+      if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+    }
+  }
+  return eventStatDate(fallbackEvt);
+}
+
+function collectSkuSalesTrendPoints(body) {
+  const out = [];
+  const stack = [body];
+  const seen = new Set();
+  let steps = 0;
+  while (stack.length && steps < 20000) {
+    steps++;
+    const node = stack.pop();
+    if (!node || seen.has(node)) continue;
+    if (typeof node !== "object") continue;
+    seen.add(node);
+    if (Array.isArray(node)) {
+      for (const item of node) stack.push(item);
+      continue;
+    }
+    const skuId = firstDefined(node, ["prodSkuId", "productSkuId", "skuId", "product_sku_id"]);
+    const salesNumber = firstDefined(node, ["salesNumber", "saleNumber", "sales", "saleVolume"]);
+    const date = firstDefined(node, ["date", "statDate", "stat_date", "saleDate"]);
+    if (skuId != null && salesNumber != null && date != null) out.push(node);
+    for (const value of Object.values(node)) {
+      if (value && typeof value === "object") stack.push(value);
+    }
+  }
+  return out;
+}
+
 function pickPriceCents(row, candidateKeys) {
   for (const k of candidateKeys) {
     const v = row?.[k];
@@ -200,7 +252,54 @@ function parseSkcList(db, ctx, evt, body) {
 
 // ---------- TEMU sales/management ----------
 
+function parseSkuSalesTrend(db, ctx, evt, body) {
+  const points = collectSkuSalesTrendPoints(body);
+  if (!points.length) return;
+  const upsert = db.prepare(`
+    INSERT INTO temu_sku_sales_trend (
+      id, tenant_id, mall_id, site, product_sku_id, stat_date,
+      sales_number, is_predict, sold_out, source_event_id, sources_json
+    ) VALUES (
+      @id, @tenant_id, @mall_id, @site, @product_sku_id, @stat_date,
+      @sales_number, @is_predict, @sold_out, @source_event_id, @sources_json
+    )
+    ON CONFLICT(tenant_id, product_sku_id, stat_date) DO UPDATE SET
+      mall_id         = COALESCE(excluded.mall_id, mall_id),
+      site            = COALESCE(excluded.site, site),
+      sales_number    = COALESCE(excluded.sales_number, sales_number),
+      is_predict      = COALESCE(excluded.is_predict, is_predict),
+      sold_out        = COALESCE(excluded.sold_out, sold_out),
+      source_event_id = COALESCE(excluded.source_event_id, source_event_id),
+      sources_json    = json_patch(COALESCE(sources_json, '{}'), COALESCE(excluded.sources_json, '{}')),
+      last_updated_at = datetime('now')
+  `);
+  const sources_json = JSON.stringify({ [evt.url_path]: evt.id });
+  for (const point of points) {
+    const product_sku_id = toNullableString(firstDefined(point, ["prodSkuId", "productSkuId", "skuId", "product_sku_id"]));
+    if (!product_sku_id) continue;
+    const stat_date = normalizeStatDate(firstDefined(point, ["date", "statDate", "stat_date", "saleDate"]), evt);
+    if (!stat_date) continue;
+    upsert.run({
+      id: crypto.randomUUID(),
+      tenant_id: ctx.tenant_id,
+      mall_id: ctx.mall_id || evt.mall_id || null,
+      site: evt.site || null,
+      product_sku_id,
+      stat_date,
+      sales_number: toNullableInteger(firstDefined(point, ["salesNumber", "saleNumber", "sales", "saleVolume"])),
+      is_predict: toNullableBooleanInteger(firstDefined(point, ["isPredict", "predict", "is_predict"])),
+      sold_out: toNullableBooleanInteger(firstDefined(point, ["soldOut", "isSoldOut", "sold_out"])),
+      source_event_id: evt.id,
+      sources_json,
+    });
+  }
+}
+
 function parseSalesManagement(db, ctx, evt, body) {
+  if (String(evt?.url_path || "").includes("querySkuSalesNumber")) {
+    parseSkuSalesTrend(db, ctx, evt, body);
+    return;
+  }
   const list = pickList(body);
   if (!Array.isArray(list) || !list.length) return;
   const upsertSales = db.prepare(`

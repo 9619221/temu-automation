@@ -1,6 +1,6 @@
 // ! 自动生成，勿手改 — 由 scripts/build-bridge.cjs 同步自 hook-config.js
-// 生成时间: 2026-05-22T13:36:43.447Z
-// 白名单数量: 182
+// 生成时间: 2026-05-23T01:54:44.742Z
+// 白名单数量: 183
 window.__TEMU_MONITOR_BUILD_CONFIG__ = {
   "URL_WHITELIST": [
     "/api/seller/auth/userInfo",
@@ -73,6 +73,7 @@ window.__TEMU_MONITOR_BUILD_CONFIG__ = {
     "/marvel-mms/cn/api/kiana/songbird/DeliveryOrderHttpService/queryRedNotice",
     "/bg-supplier-delivery-api/supplier/config/respondent/queryDeliveryEntityAcceptConfig",
     "/mms/venom/api/supplier/sales/management/listOverall",
+    "/mms/venom/api/supplier/sales/management/querySkuSalesNumber",
     "/mms/venom/api/supplier/sales/management/queryFulfilmentFormStatistic",
     "/mms/venom/api/supplier/sales/management/exportShow",
     "/mms/venom/api/supplier/sales/management/cmall/queryMall",
@@ -209,6 +210,6 @@ window.__TEMU_MONITOR_BUILD_CONFIG__ = {
   ],
   "EVENT_NAME": "temu-monitor.captured",
   "BYPASS_SYMBOL_KEY": "temu-monitor.fetch.bypass",
-  "GENERATED_AT": "2026-05-22T13:36:43.447Z",
-  "WHITELIST_COUNT": 182
+  "GENERATED_AT": "2026-05-23T01:54:44.742Z",
+  "WHITELIST_COUNT": 183
 };
