@@ -2267,12 +2267,8 @@ function buildWarehouseSummaryCards(model) {
       body: `<div class="primary-text">${formatQty(summary.pendingArrivalCount)} 单待确认</div><div class="muted">入库单共 ${formatQty(summary.inboundReceiptCount)} 张</div>`,
     },
     {
-      title: "待核数 / 建批次",
+      title: "待核数 / 入库",
       body: `<div class="primary-text">${formatQty(summary.arrivedCount + summary.countedCount)} 单处理中</div><div class="muted">已收数量 ${formatQty(summary.receivedQty)} 件</div>`,
-    },
-    {
-      title: "库存批次",
-      body: `<div class="primary-text">${formatQty(summary.inventoryBatchCount)} 个批次</div><div class="muted">新批次默认进入待 QC 锁定库存</div>`,
     },
   ];
 }
@@ -2298,21 +2294,11 @@ function renderWarehouseReceiptActions(row, user) {
       className: "secondary",
     }));
   }
-  if (row.status === "counted") {
-    actions.push(renderActionButton({
-      endpoint: "/api/warehouse/action",
-      action: "create_batches",
-      label: "创建批次",
-      fields: { receiptId: row.id },
-      className: "success",
-    }));
-  }
   return actions.length ? `<div class="actions">${actions.join("")}</div>` : renderUnavailableAction("无动作");
 }
 
 function renderWarehouseWorkbench(model = {}, user = {}) {
   const inboundReceipts = Array.isArray(model.inboundReceipts) ? model.inboundReceipts : [];
-  const inventoryBatches = Array.isArray(model.inventoryBatches) ? model.inventoryBatches : [];
 
   const receiptTable = renderTable({
     rows: inboundReceipts,
@@ -2340,61 +2326,17 @@ function renderWarehouseWorkbench(model = {}, user = {}) {
           <div class="muted">破损 ${formatQty(row.damagedQty)} · 短少 ${formatQty(row.shortageQty)} · 多到 ${formatQty(row.overQty)}</div>
         `,
       },
-      {
-        title: "批次",
-        render: (row) => `
-          <div class="primary-text">${formatQty(row.batchLineCount)} / ${formatQty(row.lineCount)} 已建</div>
-          <div class="muted">${escapeHtml(row.operatorName || "-")}</div>
-        `,
-      },
       { title: "到仓", render: (row) => formatDate(row.receivedAt) },
       { title: "动作", render: (row) => renderWarehouseReceiptActions(row, user) },
-    ],
-  });
-
-  const batchTable = renderTable({
-    rows: inventoryBatches,
-    emptyText: "暂无库存批次。点击创建批次后会出现在这里。",
-    columns: [
-      {
-        title: "批次",
-        render: (row) => `
-          <div class="primary-text">${escapeHtml(row.batchCode || row.id)}</div>
-          <div class="muted">${escapeHtml(row.receiptNo || "-")}</div>
-        `,
-      },
-      {
-        title: "SKU",
-        render: (row) => `
-          <div class="primary-text">${escapeHtml(row.productName || "-")}</div>
-          <div class="muted">${escapeHtml(row.internalSkuCode || row.skuId || "-")}</div>
-        `,
-      },
-      {
-        title: "数量",
-        render: (row) => `
-          <div class="primary-text">${formatQty(row.receivedQty)} 件</div>
-          <div class="muted">可用 ${formatQty(row.availableQty)} · 锁定 ${formatQty(row.blockedQty)}</div>
-        `,
-      },
-      { title: "QC", render: (row) => statusPill(row.qcStatus, BATCH_QC_STATUS_LABELS) },
-      { title: "库位", render: (row) => escapeHtml(row.locationCode || "-") },
-      { title: "入库时间", render: (row) => formatDate(row.receivedAt) },
     ],
   });
 
   return [
     renderSection({
       title: "待到货 / 入库单",
-      subtitle: "仓管在这里确认到仓、核对数量，并把已核数的入库单创建为库存批次。",
+      subtitle: "仓管在这里确认到仓、核对数量，并对照采购单查看入库数据。",
       badge: `${inboundReceipts.length} 张`,
       table: receiptTable,
-    }),
-    renderSection({
-      title: "库存批次",
-      subtitle: "批次创建后默认进入锁定库存，等待运营抽检/QC 放行。",
-      badge: `${inventoryBatches.length} 个`,
-      table: batchTable,
     }),
   ].join("");
 }
@@ -4180,7 +4122,7 @@ async function handleRequest({
       const model = await getWarehouseWorkbench({ user: session.user });
       writeHtml(res, renderShell({
         title: "仓库工作台",
-        subtitle: "仓管在这里处理待到货、确认到仓、核数和创建库存批次。",
+        subtitle: "仓管在这里处理待到货、确认到仓和核数。",
         cards: buildWarehouseSummaryCards(model),
         currentPath: pathname,
         user: session.user,

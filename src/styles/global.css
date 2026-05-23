@@ -183,6 +183,22 @@ h6 {
   line-height: 1.7;
 }
 
+.app-route-error__detail {
+  max-height: 96px;
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid rgba(60, 60, 67, 0.10);
+  border-radius: 8px;
+  background: rgba(245, 245, 247, 0.78);
+  color: var(--color-text-ter);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  text-align: left;
+  white-space: pre-wrap;
+}
+
 .app-route-error__button {
   min-width: 120px;
   height: 40px;

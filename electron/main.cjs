@@ -146,6 +146,7 @@ if (process.env.APP_USER_DATA) {
 }
 
 let mainWindow = null;
+let rendererBlankRecoveryCount = 0;
 let worker = null;
 const configuredWorkerPort = Number(process.env.TEMU_WORKER_PORT || process.env.WORKER_PORT);
 const DEFAULT_WORKER_PORT = configuredWorkerPort > 0 ? configuredWorkerPort : 19280;
@@ -3488,6 +3489,189 @@ function registerDistProtocol(distRoot) {
   distProtocolRegistered = true;
 }
 
+function escapeHtmlForRenderer(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\"": "&quot;",
+    "'": "&#39;",
+  }[char] || char));
+}
+
+function createRendererFailurePageUrl({ title, message, detail, retryUrl }) {
+  const safeTitle = escapeHtmlForRenderer(title || "桌面端启动失败");
+  const safeMessage = escapeHtmlForRenderer(message || "页面资源没有完成加载。");
+  const safeDetail = escapeHtmlForRenderer(detail || "");
+  const safeRetryUrl = JSON.stringify(retryUrl || `${DIST_PROTOCOL}://app/index.html`);
+  const html = `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${safeTitle}</title>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    body {
+      display: grid;
+      place-items: center;
+      padding: 28px;
+      box-sizing: border-box;
+      background: #f5f5f7;
+      color: #1d1d1f;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    .panel {
+      width: min(100%, 420px);
+      padding: 32px 30px 30px;
+      border: 1px solid rgba(60, 60, 67, 0.12);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.9);
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 18px 50px rgba(0, 0, 0, 0.08);
+      text-align: center;
+    }
+    .mark {
+      position: relative;
+      display: inline-grid;
+      width: 44px;
+      height: 44px;
+      margin-bottom: 16px;
+      place-items: center;
+      border-radius: 8px;
+      background: #111114;
+      color: #fff;
+      font-size: 22px;
+      font-weight: 650;
+    }
+    .mark::after {
+      content: "";
+      position: absolute;
+      right: 8px;
+      bottom: 8px;
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: #007aff;
+    }
+    h1 { margin: 0; font-size: 20px; line-height: 1.35; }
+    p { margin: 10px 0 0; color: #6e6e73; font-size: 14px; line-height: 1.7; }
+    pre {
+      max-height: 120px;
+      margin: 14px 0 0;
+      padding: 10px 12px;
+      overflow: auto;
+      border: 1px solid rgba(60, 60, 67, 0.10);
+      border-radius: 8px;
+      background: rgba(245, 245, 247, 0.78);
+      color: #86868b;
+      font: 12px/1.55 Consolas, "SFMono-Regular", monospace;
+      text-align: left;
+      white-space: pre-wrap;
+    }
+    button {
+      height: 40px;
+      margin-top: 20px;
+      padding: 0 18px;
+      border: 0;
+      border-radius: 8px;
+      background: #007aff;
+      color: #fff;
+      cursor: pointer;
+      font: inherit;
+      font-size: 14px;
+      font-weight: 650;
+    }
+  </style>
+</head>
+<body>
+  <main class="panel" role="alert">
+    <div class="mark" aria-hidden="true">T</div>
+    <h1>${safeTitle}</h1>
+    <p>${safeMessage}</p>
+    ${safeDetail ? `<pre>${safeDetail}</pre>` : ""}
+    <button type="button" onclick="window.location.href = ${safeRetryUrl}">重新加载</button>
+  </main>
+</body>
+</html>`;
+  return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+}
+
+function loadRendererFailurePage(browserWindow, options) {
+  try {
+    if (!browserWindow || browserWindow.isDestroyed()) return;
+    void browserWindow.loadURL(createRendererFailurePageUrl(options));
+  } catch (error) {
+    appendDiagnosticLog({
+      source: "renderer",
+      level: "error",
+      message: "Failed to load renderer failure page",
+      detail: diagnosticErrorToDetail(error),
+    });
+  }
+}
+
+function scheduleBlankRendererRecovery(browserWindow, reason, retryUrl) {
+  const webContents = browserWindow?.webContents;
+  if (!webContents || webContents.isDestroyed()) return;
+  const scheduledUrl = webContents.getURL();
+
+  setTimeout(async () => {
+    try {
+      if (!browserWindow || browserWindow.isDestroyed() || webContents.isDestroyed()) return;
+      const currentUrl = webContents.getURL();
+      if (scheduledUrl && currentUrl && scheduledUrl !== currentUrl) return;
+
+      const snapshot = await webContents.executeJavaScript(`
+        (() => {
+          const root = document.getElementById("root");
+          const stable = root && root.querySelector(".app-layout-root, .erp-login-shell, .app-route-loading, .app-route-error, .app-access-denied, .temu-boot-fallback");
+          const bodyText = document.body && document.body.innerText ? document.body.innerText.trim() : "";
+          return {
+            href: location.href,
+            readyState: document.readyState,
+            rootChildren: root ? root.children.length : -1,
+            textLength: bodyText.length,
+            stable: Boolean(stable),
+          };
+        })()
+      `, true);
+
+      const looksBlank = !snapshot?.stable && (snapshot?.rootChildren <= 0 || snapshot?.textLength === 0);
+      if (!looksBlank) {
+        rendererBlankRecoveryCount = 0;
+        return;
+      }
+
+      rendererBlankRecoveryCount += 1;
+      appendDiagnosticLog({
+        source: "renderer",
+        level: "error",
+        message: `Renderer stayed blank after load (${reason})`,
+        detail: { ...snapshot, recoveryCount: rendererBlankRecoveryCount },
+      });
+
+      if (rendererBlankRecoveryCount <= 2) {
+        webContents.reloadIgnoringCache();
+        return;
+      }
+
+      loadRendererFailurePage(browserWindow, {
+        title: "桌面端没有完成渲染",
+        message: "页面连续启动后仍为空白，已切换到恢复页。请重新加载，或关闭所有 Temu Ops 窗口后再启动。",
+        detail: JSON.stringify(snapshot, null, 2),
+        retryUrl: retryUrl || currentUrl,
+      });
+    } catch (error) {
+      appendDiagnosticLog({
+        source: "renderer",
+        level: "error",
+        message: "Blank renderer recovery check failed",
+        detail: diagnosticErrorToDetail(error),
+      });
+    }
+  }, 5000);
+}
+
 async function createWindow() {
   Menu.setApplicationMenu(null);
 
@@ -3512,6 +3696,13 @@ async function createWindow() {
 
   mainWindow.setTitle(finalTitle);
   mainWindow.setMenuBarVisibility(false);
+  mainWindow.webContents.setZoomFactor(1);
+
+  let currentEntryUrl = "";
+  const loadEntryUrl = (url) => {
+    currentEntryUrl = url;
+    void mainWindow.loadURL(url);
+  };
 
   // 阻止页面 document.title 覆盖窗口标题（保持前缀一直可见）
   mainWindow.on("page-title-updated", (event) => {
@@ -3521,7 +3712,9 @@ async function createWindow() {
 
   mainWindow.webContents.once("did-finish-load", () => {
     mainWindow.setTitle(finalTitle);
+    mainWindow.webContents.setZoomFactor(1);
     mainWindow.show();
+    scheduleBlankRendererRecovery(mainWindow, "did-finish-load", currentEntryUrl);
   });
   mainWindow.webContents.on("page-title-updated", (event) => {
     event.preventDefault();
@@ -3578,13 +3771,21 @@ async function createWindow() {
     }
   });
 
-  mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
+  mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
     appendDiagnosticLog({
       source: "renderer",
       level: "error",
       message: `Page load failed: ${errorDescription || errorCode}`,
       detail: { errorCode, errorDescription, validatedURL },
     });
+    if (isMainFrame && errorCode !== -3) {
+      loadRendererFailurePage(mainWindow, {
+        title: "桌面端资源加载失败",
+        message: "主页面没有加载成功。请重新加载，或关闭所有 Temu Ops 窗口后再启动。",
+        detail: `${errorCode} ${errorDescription || ""}\n${validatedURL || ""}`,
+        retryUrl: currentEntryUrl || validatedURL,
+      });
+    }
   });
 
   mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
@@ -3618,7 +3819,7 @@ async function createWindow() {
       }
     }
     console.log("[Main] Loading from Vite dev server");
-    mainWindow.loadURL(devUrl);
+    loadEntryUrl(devUrl);
   } else {
     // 打包后 dist 在 app 根目录（extraFiles），开发时在项目根目录
     const distCandidates = [
@@ -3629,10 +3830,19 @@ async function createWindow() {
     if (distPath) {
       console.log("[Main] Loading from dist:", distPath);
       registerDistProtocol(path.dirname(distPath));
-      mainWindow.loadURL(`${DIST_PROTOCOL}://app/index.html`);
+      loadEntryUrl(`${DIST_PROTOCOL}://app/index.html`);
     } else {
       console.log("[Main] Fallback to dev URL");
-      mainWindow.loadURL(devUrl);
+      if (app.isPackaged || forcedProduction) {
+        loadRendererFailurePage(mainWindow, {
+          title: "桌面端资源缺失",
+          message: "没有找到打包后的前端资源 dist/index.html。请重新打包或安装最新版本。",
+          detail: distCandidates.join("\n"),
+          retryUrl: devUrl,
+        });
+      } else {
+        loadEntryUrl(devUrl);
+      }
     }
   }
 
