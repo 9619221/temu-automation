@@ -587,6 +587,9 @@ function ensureRuntimeSchema(db, options = {}) {
     db.exec("ALTER TABLE erp_skus ADD COLUMN created_by TEXT");
   }
   db.exec("CREATE INDEX IF NOT EXISTS idx_erp_skus_created_by ON erp_skus(created_by)");
+  if (!tableHasColumn(db, "erp_purchase_requests", "spec_text")) {
+    db.exec("ALTER TABLE erp_purchase_requests ADD COLUMN spec_text TEXT");
+  }
   if (!tableHasColumn(db, "erp_sourcing_candidates", "inquiry_status")) {
     db.exec("ALTER TABLE erp_sourcing_candidates ADD COLUMN inquiry_status TEXT");
   }
@@ -4165,6 +4168,7 @@ function getPurchaseWorkbench(params = {}) {
       acct.name AS account_name,
       sku.internal_sku_code,
       sku.product_name,
+      sku.color_spec,
       sku.image_url AS sku_image_url,
       sku.supplier_id AS sku_supplier_id,
       sku_supplier.name AS sku_supplier_name,
@@ -4195,7 +4199,47 @@ function getPurchaseWorkbench(params = {}) {
           AND source.status = 'active'
         ORDER BY source.is_default DESC, source.updated_at DESC, source.created_at DESC
         LIMIT 1
-      ) AS primary_mapping_offer_id
+      ) AS primary_mapping_offer_id,
+      (
+        SELECT source.unit_price
+        FROM erp_sku_1688_sources source
+        WHERE source.account_id = pr.account_id
+          AND source.sku_id = pr.sku_id
+          AND source.status = 'active'
+        ORDER BY source.is_default DESC, source.updated_at DESC, source.created_at DESC
+        LIMIT 1
+      ) AS primary_mapping_unit_price,
+      (
+        SELECT candidate_price.unit_price
+        FROM erp_sourcing_candidates candidate_price
+        WHERE candidate_price.pr_id = pr.id
+        ORDER BY
+          CASE candidate_price.status
+            WHEN 'selected' THEN 0
+            WHEN 'shortlisted' THEN 1
+            WHEN 'candidate' THEN 2
+            ELSE 9
+          END,
+          candidate_price.updated_at DESC,
+          candidate_price.created_at DESC
+        LIMIT 1
+      ) AS primary_candidate_unit_price,
+      (
+        SELECT COALESCE(candidate_supplier.name, candidate_supplier_row.supplier_name)
+        FROM erp_sourcing_candidates candidate_supplier_row
+        LEFT JOIN erp_suppliers candidate_supplier ON candidate_supplier.id = candidate_supplier_row.supplier_id
+        WHERE candidate_supplier_row.pr_id = pr.id
+        ORDER BY
+          CASE candidate_supplier_row.status
+            WHEN 'selected' THEN 0
+            WHEN 'shortlisted' THEN 1
+            WHEN 'candidate' THEN 2
+            ELSE 9
+          END,
+          candidate_supplier_row.updated_at DESC,
+          candidate_supplier_row.created_at DESC
+        LIMIT 1
+      ) AS primary_candidate_supplier_name
     FROM erp_purchase_requests pr
     LEFT JOIN erp_accounts acct ON acct.id = pr.account_id
     LEFT JOIN erp_skus sku ON sku.id = pr.sku_id
@@ -5474,6 +5518,7 @@ function createPurchaseRequestAction({ db, services, payload, actor }) {
     sku_id: skuId,
     requested_by: actor.id || null,
     reason: requireString(payload.reason, "reason"),
+    spec_text: optionalString(payload.specText || payload.spec_text),
     requested_qty: Number(requireString(payload.requestedQty, "requestedQty")),
     target_unit_cost: optionalNumber(payload.targetUnitCost),
     expected_arrival_date: optionalString(payload.expectedArrivalDate),
@@ -5488,11 +5533,11 @@ function createPurchaseRequestAction({ db, services, payload, actor }) {
 
   db.prepare(`
     INSERT INTO erp_purchase_requests (
-      id, account_id, sku_id, requested_by, reason, requested_qty,
+      id, account_id, sku_id, requested_by, reason, spec_text, requested_qty,
       target_unit_cost, expected_arrival_date, evidence_json, status, created_at, updated_at
     )
     VALUES (
-      @id, @account_id, @sku_id, @requested_by, @reason, @requested_qty,
+      @id, @account_id, @sku_id, @requested_by, @reason, @spec_text, @requested_qty,
       @target_unit_cost, @expected_arrival_date, @evidence_json, @status, @created_at, @updated_at
     )
   `).run(row);

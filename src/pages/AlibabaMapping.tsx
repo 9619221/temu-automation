@@ -157,6 +157,10 @@ interface MappingSpecRow {
   stock?: number | null;
 }
 
+interface PendingMappingSpecRow extends MappingSpecRow {
+  platformQty?: number;
+}
+
 interface UrlSpecDialogState {
   externalOfferId: string;
   productUrl: string;
@@ -280,6 +284,11 @@ function productDetailSpecRows(detail?: UrlSpecDialogState["detail"] | null): Ma
     });
 }
 
+function toPositiveInteger(value: unknown, fallback = 1) {
+  const numberValue = Math.floor(Number(value));
+  return Number.isFinite(numberValue) && numberValue > 0 ? numberValue : fallback;
+}
+
 function mappingStatus(row: Sku1688SourceRow) {
   if (!row.supplierName || !build1688Link(row) || !row.externalOfferId) {
     return { label: "未匹配", color: "default" };
@@ -377,9 +386,10 @@ export default function AlibabaMapping() {
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
   const [specPreviewLoading, setSpecPreviewLoading] = useState(false);
   const [urlSpecDialog, setUrlSpecDialog] = useState<UrlSpecDialogState | null>(null);
-  const [selectedUrlSpecId, setSelectedUrlSpecId] = useState<string | null>(null);
+  const [selectedUrlSpecIds, setSelectedUrlSpecIds] = useState<string[]>([]);
+  const [pendingUrlSpecs, setPendingUrlSpecs] = useState<PendingMappingSpecRow[]>([]);
   const [urlSpecOurQty, setUrlSpecOurQty] = useState(1);
-  const [urlSpecPlatformQty, setUrlSpecPlatformQty] = useState(1);
+  const [urlSpecQtyBySpecId, setUrlSpecQtyBySpecId] = useState<Record<string, number>>({});
   const boundRequestIdRef = useRef(0);
   const unboundRequestIdRef = useRef(0);
   const boundLoadedRef = useRef(false);
@@ -560,6 +570,18 @@ export default function AlibabaMapping() {
     };
   }, [boundDebouncedSearch, boundPage, boundRows, editable, loadBoundPage]);
 
+  const updateSelectedUrlSpecIds = useCallback((ids: string[]) => {
+    const nextIds = Array.from(new Set(ids.filter(Boolean)));
+    setSelectedUrlSpecIds(nextIds);
+    setUrlSpecQtyBySpecId((previous) => {
+      const next = { ...previous };
+      nextIds.forEach((id) => {
+        next[id] = toPositiveInteger(next[id], 1);
+      });
+      return next;
+    });
+  }, []);
+
   const urlSpecColumns = useMemo<ColumnsType<MappingSpecRow>>(() => [
     {
       title: "规格",
@@ -578,6 +600,29 @@ export default function AlibabaMapping() {
       width: 150,
     },
     {
+      title: "1688数量",
+      key: "platformQty",
+      width: 130,
+      render: (_value, row) => {
+        const selected = selectedUrlSpecIds.includes(row.externalSpecId);
+        if (!selected) return <Text type="secondary">-</Text>;
+        return (
+          <InputNumber
+            min={1}
+            precision={0}
+            value={toPositiveInteger(urlSpecQtyBySpecId[row.externalSpecId], 1)}
+            style={{ width: "100%" }}
+            addonAfter="件"
+            onClick={(event) => event.stopPropagation()}
+            onChange={(value) => setUrlSpecQtyBySpecId((previous) => ({
+              ...previous,
+              [row.externalSpecId]: toPositiveInteger(value, 1),
+            }))}
+          />
+        );
+      },
+    },
+    {
       title: "价格",
       dataIndex: "price",
       width: 110,
@@ -589,10 +634,13 @@ export default function AlibabaMapping() {
       width: 100,
       render: (value: number | null | undefined) => value === null || value === undefined ? "-" : Number(value).toLocaleString("zh-CN"),
     },
-  ], []);
+  ], [selectedUrlSpecIds, urlSpecQtyBySpecId]);
 
   const openCreateForSku = useCallback((row: Sku1688SourceRow) => {
     setEditingRow(null);
+    setPendingUrlSpecs([]);
+    setSelectedUrlSpecIds([]);
+    setUrlSpecQtyBySpecId({});
     form.resetFields();
     form.setFieldsValue({
       skuId: row.skuId,
@@ -608,6 +656,9 @@ export default function AlibabaMapping() {
 
   const openEdit = (row: Sku1688SourceRow) => {
     setEditingRow(row);
+    setPendingUrlSpecs([]);
+    setSelectedUrlSpecIds(row.externalSpecId ? [row.externalSpecId] : []);
+    setUrlSpecQtyBySpecId(row.externalSpecId ? { [row.externalSpecId]: toPositiveInteger(row.platformQty, 1) } : {});
     form.resetFields();
     form.setFieldsValue({
       skuId: row.skuId,
@@ -633,6 +684,9 @@ export default function AlibabaMapping() {
 
   const handleMappingFormValuesChange = useCallback((changedValues: Partial<MappingFormValues>) => {
     if (!Object.prototype.hasOwnProperty.call(changedValues, "productUrl")) return;
+    setPendingUrlSpecs([]);
+    setSelectedUrlSpecIds([]);
+    setUrlSpecQtyBySpecId({});
     const externalOfferId = extract1688OfferId(changedValues.productUrl);
     if (!externalOfferId) return;
     const currentOfferId = form.getFieldValue("externalOfferId");
@@ -702,9 +756,12 @@ export default function AlibabaMapping() {
         detail,
         rows,
       });
-      setSelectedUrlSpecId(values.externalSpecId || rows[0]?.externalSpecId || null);
-      setUrlSpecOurQty(Math.max(1, Math.floor(Number(values.ourQty || 1))));
-      setUrlSpecPlatformQty(Math.max(1, Math.floor(Number(values.platformQty || 1))));
+      const initialSpecIds = values.externalSpecId ? [values.externalSpecId] : (rows[0]?.externalSpecId ? [rows[0].externalSpecId] : []);
+      const initialPlatformQty = toPositiveInteger(values.platformQty, 1);
+      setSelectedUrlSpecIds(initialSpecIds);
+      setUrlSpecQtyBySpecId(Object.fromEntries(initialSpecIds.map((id) => [id, initialPlatformQty])));
+      setPendingUrlSpecs([]);
+      setUrlSpecOurQty(toPositiveInteger(values.ourQty, 1));
     } catch (error: any) {
       message.error(error?.message || "1688 地址规格解析失败");
     } finally {
@@ -714,20 +771,27 @@ export default function AlibabaMapping() {
 
   const applySelectedUrlSpec = useCallback(() => {
     if (!urlSpecDialog) return;
-    const selected = urlSpecDialog.rows.find((row) => row.externalSpecId === selectedUrlSpecId);
-    if (!selected) {
-      message.warning("请先选择一个 1688 规格");
+    const selectedRows = urlSpecDialog.rows.filter((row) => selectedUrlSpecIds.includes(row.externalSpecId));
+    if (!selectedRows.length) {
+      message.warning("请先选择 1688 规格");
       return;
     }
+    const selected = selectedRows[0];
     // 防御：不可信的 specId（缺失 / 与 skuId 同值）会被 1688 下单接口拒绝
-    if (!selected.externalSpecId) {
+    const invalidMissingSpec = selectedRows.find((row) => !row.externalSpecId);
+    if (invalidMissingSpec) {
       message.error("这个 1688 规格没有可信的 specId，1688 下单时会被拒绝；请换一个规格或申请 1688 官方商品详情接口权限");
       return;
     }
-    if (selected.externalSkuId && selected.externalSkuId === selected.externalSpecId) {
+    const invalidSameSkuSpec = selectedRows.find((row) => row.externalSkuId && row.externalSkuId === row.externalSpecId);
+    if (invalidSameSkuSpec) {
       message.error("数据源未提供独立的 specId（与 skuId 同值），1688 下单会失败；建议手工下单或更换数据源");
       return;
     }
+    const selectedRowsWithQty = selectedRows.map((row) => ({
+      ...row,
+      platformQty: toPositiveInteger(urlSpecQtyBySpecId[row.externalSpecId], 1),
+    }));
     const values = form.getFieldsValue() as MappingFormValues;
     form.setFieldsValue({
       externalOfferId: urlSpecDialog.externalOfferId,
@@ -741,11 +805,12 @@ export default function AlibabaMapping() {
       unitPrice: selected.price ?? values.unitPrice ?? urlSpecDialog.detail.unitPrice ?? undefined,
       moq: values.moq ?? urlSpecDialog.detail.moq ?? 1,
       ourQty: urlSpecOurQty,
-      platformQty: urlSpecPlatformQty,
+      platformQty: selectedRowsWithQty[0]?.platformQty || 1,
     });
+    setPendingUrlSpecs(selectedRowsWithQty);
     setUrlSpecDialog(null);
-    message.success("1688 规格和映射比例已选择，保存后完成供应商绑定");
-  }, [form, selectedUrlSpecId, urlSpecDialog, urlSpecOurQty, urlSpecPlatformQty]);
+    message.success(selectedRows.length > 1 ? `已选择 ${selectedRows.length} 个 1688 规格，保存后会一起绑定` : "1688 规格和映射比例已选择，保存后完成供应商绑定");
+  }, [form, selectedUrlSpecIds, urlSpecDialog, urlSpecOurQty, urlSpecQtyBySpecId]);
 
   const handleSubmit = async (values: MappingFormValues) => {
     if (!erp) return;
@@ -766,40 +831,57 @@ export default function AlibabaMapping() {
         return;
       }
       const productUrl = values.productUrl || build1688Link({ ...values, externalOfferId });
+      const specsToSave: PendingMappingSpecRow[] = pendingUrlSpecs.length
+        ? pendingUrlSpecs
+        : [{
+          key: values.externalSpecId,
+          externalSkuId: values.externalSkuId,
+          externalSpecId: values.externalSpecId,
+          specText: values.platformSkuName || values.externalSpecId,
+          price: values.unitPrice ?? null,
+          platformQty: toPositiveInteger(values.platformQty, 1),
+        }];
       // 如果用户重新解析规格选了不同的 specId/skuId/offerId（编辑场景下），不复用旧 id：
       // 后端的 ON CONFLICT 只看 (account_id, sku_id, offerId, skuId, specId) 联合唯一键，
       // 联合 key 变化时不会触发 UPDATE，传旧 id 会撞主键 UNIQUE 约束（erp_sku_1688_sources.id）。
       const norm = (value: unknown) => String(value ?? "").trim();
-      const editingMatchesNewKey = !!editingRow
-        && norm(editingRow.externalOfferId) === norm(externalOfferId)
-        && norm(editingRow.externalSkuId) === norm(values.externalSkuId)
-        && norm(editingRow.externalSpecId) === norm(values.externalSpecId);
-      await erp.purchase.action({
-        action: "upsert_sku_1688_source",
-        id: editingMatchesNewKey ? editingRow?.id : undefined,
-        skuId: values.skuId,
-        accountId,
-        mappingGroupId: values.mappingGroupId,
-        externalOfferId,
-        externalSkuId: values.externalSkuId,
-        externalSpecId: values.externalSpecId,
-        platformSkuName: values.platformSkuName,
-        supplierName: values.supplierName,
-        productTitle: values.productTitle,
-        productUrl,
-        imageUrl: values.imageUrl,
-        unitPrice: values.unitPrice,
-        moq: values.moq,
-        ourQty: values.ourQty,
-        platformQty: values.platformQty,
-        status: values.status,
-        isDefault: values.isDefault,
-        ...MAPPING_WORKBENCH_PARAMS,
-        includeWorkbench: false,
-      });
-      message.success("供应商信息已保存");
+      for (const [index, spec] of specsToSave.entries()) {
+        const platformQty = toPositiveInteger(spec.platformQty ?? values.platformQty, 1);
+        const editingMatchesNewKey = specsToSave.length === 1
+          && !!editingRow
+          && norm(editingRow.externalOfferId) === norm(externalOfferId)
+          && norm(editingRow.externalSkuId) === norm(spec.externalSkuId)
+          && norm(editingRow.externalSpecId) === norm(spec.externalSpecId);
+        await erp.purchase.action({
+          action: "upsert_sku_1688_source",
+          id: editingMatchesNewKey ? editingRow?.id : undefined,
+          skuId: values.skuId,
+          accountId,
+          mappingGroupId: values.mappingGroupId,
+          externalOfferId,
+          externalSkuId: spec.externalSkuId || undefined,
+          externalSpecId: spec.externalSpecId,
+          platformSkuName: spec.specText || spec.externalSpecId,
+          supplierName: values.supplierName,
+          productTitle: values.productTitle,
+          productUrl,
+          imageUrl: values.imageUrl,
+          unitPrice: spec.price ?? values.unitPrice,
+          moq: values.moq,
+          ourQty: toPositiveInteger(values.ourQty, 1),
+          platformQty,
+          status: values.status,
+          isDefault: Boolean(values.isDefault) || index === 0,
+          ...MAPPING_WORKBENCH_PARAMS,
+          includeWorkbench: false,
+        });
+      }
+      message.success(specsToSave.length > 1 ? `供应商信息已保存：${specsToSave.length} 个规格` : "供应商信息已保存");
       setModalOpen(false);
       setEditingRow(null);
+      setPendingUrlSpecs([]);
+      setSelectedUrlSpecIds([]);
+      setUrlSpecQtyBySpecId({});
       form.resetFields();
       // 写走云端、读走本地 cache.db：保存后先等一次增量同步把刚写的行拉进缓存，
       // 否则随后读分页缓存会拿到旧值（如映射数量被打回 1、未绑定列表没及时移除）。
@@ -1327,6 +1409,9 @@ export default function AlibabaMapping() {
         onCancel={() => {
           setModalOpen(false);
           setEditingRow(null);
+          setPendingUrlSpecs([]);
+          setSelectedUrlSpecIds([]);
+          setUrlSpecQtyBySpecId({});
         }}
         destroyOnClose
       >
@@ -1390,7 +1475,7 @@ export default function AlibabaMapping() {
         cancelText="取消"
         width={860}
         centered
-        okButtonProps={{ disabled: !selectedUrlSpecId }}
+        okButtonProps={{ disabled: selectedUrlSpecIds.length === 0 }}
         onCancel={() => setUrlSpecDialog(null)}
         onOk={applySelectedUrlSpec}
         destroyOnClose
@@ -1403,12 +1488,16 @@ export default function AlibabaMapping() {
             dataSource={urlSpecDialog?.rows || []}
             pagination={{ pageSize: 8, hideOnSinglePage: true }}
             rowSelection={{
-              type: "radio",
-              selectedRowKeys: selectedUrlSpecId ? [selectedUrlSpecId] : [],
-              onChange: (keys) => setSelectedUrlSpecId(String(keys[0] || "")),
+              type: "checkbox",
+              selectedRowKeys: selectedUrlSpecIds,
+              onChange: (keys) => updateSelectedUrlSpecIds(keys.map((key) => String(key))),
             }}
             onRow={(row) => ({
-              onClick: () => setSelectedUrlSpecId(row.externalSpecId),
+              onClick: () => updateSelectedUrlSpecIds(
+                selectedUrlSpecIds.includes(row.externalSpecId)
+                  ? selectedUrlSpecIds.filter((id) => id !== row.externalSpecId)
+                  : [...selectedUrlSpecIds, row.externalSpecId],
+              ),
             })}
           />
           <Row gutter={12}>
@@ -1421,19 +1510,7 @@ export default function AlibabaMapping() {
                 style={{ width: "100%" }}
                 addonBefore="本地"
                 addonAfter="件"
-                onChange={(value) => setUrlSpecOurQty(Math.max(1, Math.floor(Number(value || 1))))}
-              />
-            </Col>
-            <Col span={12}>
-              <Text type="secondary" style={{ display: "block", marginBottom: 6 }}>1688 数量</Text>
-              <InputNumber
-                min={1}
-                precision={0}
-                value={urlSpecPlatformQty}
-                style={{ width: "100%" }}
-                addonBefore="1688"
-                addonAfter="件"
-                onChange={(value) => setUrlSpecPlatformQty(Math.max(1, Math.floor(Number(value || 1))))}
+                onChange={(value) => setUrlSpecOurQty(toPositiveInteger(value, 1))}
               />
             </Col>
           </Row>

@@ -474,6 +474,9 @@ async function main() {
 
     const purchaseWorkbench = await invoke("erp:purchase:workbench");
     assert.equal(purchaseWorkbench.purchaseRequests.length, 1);
+    assert.equal(purchaseWorkbench.purchaseRequests[0].colorSpec, "White / Standard");
+    assert.equal(purchaseWorkbench.purchaseRequests[0].primaryCandidateUnitPrice, 10.5);
+    assert.equal(purchaseWorkbench.purchaseRequests[0].primaryCandidateSupplierName, supplier.name);
     assert.equal(purchaseWorkbench.purchaseOrders.length, 5);
     assert.equal(purchaseWorkbench.paymentQueue.length, 1);
     assert.equal(purchaseWorkbench.paymentQueue[0].paymentApprovalId, "pay_ipc");
@@ -739,13 +742,16 @@ async function main() {
         skuId: sku.id,
         requestedQty: 3,
         targetUnitCost: 12.5,
+        specText: "红色 / 30cm / 2个装",
         reason: "fast create regression",
       }),
     });
     assert.equal(createPurchaseRequest.statusCode, 200);
     const createPurchaseRequestBody = JSON.parse(createPurchaseRequest.body).result;
     assert.equal(createPurchaseRequestBody.result.status, "submitted");
-    assert.equal(createPurchaseRequestBody.workbench.purchaseRequests.some((item) => item.id === createPurchaseRequestBody.result.id), true);
+    const createdRequestRow = createPurchaseRequestBody.workbench.purchaseRequests.find((item) => item.id === createPurchaseRequestBody.result.id);
+    assert.ok(createdRequestRow);
+    assert.equal(createdRequestRow.specText, "红色 / 30cm / 2个装");
     assert.equal("skuOptions" in createPurchaseRequestBody.workbench, false);
     assert.equal("supplierOptions" in createPurchaseRequestBody.workbench, false);
     assert.equal("alibaba1688Addresses" in createPurchaseRequestBody.workbench, false);
@@ -1559,6 +1565,28 @@ async function main() {
     });
     assert.equal(ratioMapping.result.sku1688Source.ourQty, 2);
     assert.equal(ratioMapping.result.sku1688Source.platformQty, 5);
+    const ratioSecondMapping = await invoke("erp:purchase:action", {
+      action: "upsert_sku_1688_source",
+      actor: { id: buyer.id, role: buyer.role },
+      skuId: ratioSku.id,
+      accountId: account.id,
+      mappingGroupId: "map_ratio_ipc",
+      externalOfferId: "1688-offer-ratio-ipc",
+      externalSkuId: "sku-ratio-red",
+      externalSpecId: "spec-ratio-red",
+      platformSkuName: "Ratio / 1688 Red",
+      supplierName: supplier.name,
+      productTitle: "IPC Ratio 1688 Product",
+      productUrl: "https://detail.1688.com/offer/1688-offer-ratio-ipc.html",
+      unitPrice: 8.5,
+      moq: 1,
+      ourQty: 2,
+      platformQty: 7,
+      isDefault: false,
+      includeWorkbench: false,
+    });
+    assert.equal(ratioSecondMapping.result.sku1688Source.mappingGroupId, "map_ratio_ipc");
+    assert.equal(ratioSecondMapping.result.sku1688Source.platformQty, 7);
 
     const ratioPr = await invoke("erp:purchase:action", {
       action: "create_pr",
@@ -1591,7 +1619,9 @@ async function main() {
       includeWorkbench: false,
     });
     assert.equal(ratioValidation.result.ready, true);
+    assert.equal(ratioValidation.result.params.cargoParamList.length, 2);
     assert.equal(ratioValidation.result.params.cargoParamList[0].quantity, 10);
+    assert.equal(ratioValidation.result.params.cargoParamList[1].quantity, 14);
 
     const ratioDb = openErpDatabase({ userDataDir: tempUserData });
     try {
@@ -1599,6 +1629,16 @@ async function main() {
       assert.equal(row.our_qty, 2);
       assert.equal(row.platform_qty, 5);
       assert.equal(row.mapping_group_id, "map_ratio_ipc");
+      const groupedRows = ratioDb.prepare(`
+        SELECT external_spec_id, platform_qty
+        FROM erp_sku_1688_sources
+        WHERE mapping_group_id = ?
+      `).all("map_ratio_ipc");
+      const platformQtyBySpecId = new Map(groupedRows.map((sourceRow) => [sourceRow.external_spec_id, sourceRow.platform_qty]));
+      assert.equal(platformQtyBySpecId.get("spec-ratio"), 5);
+      assert.equal(platformQtyBySpecId.get("spec-ratio-red"), 7);
+      const groupedCount = ratioDb.prepare("SELECT COUNT(*) AS count FROM erp_sku_1688_sources WHERE mapping_group_id = ?").get("map_ratio_ipc").count;
+      assert.equal(groupedCount, 2);
     } finally {
       ratioDb.close();
     }

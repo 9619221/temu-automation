@@ -229,6 +229,8 @@ interface PurchaseRequestRow {
   skuId?: string | null;
   internalSkuCode?: string;
   productName?: string;
+  colorSpec?: string | null;
+  specText?: string | null;
   skuImageUrl?: string | null;
   status: string;
   reason?: string;
@@ -242,6 +244,9 @@ interface PurchaseRequestRow {
   mappingCount?: number;
   primaryMappingSupplierName?: string | null;
   primaryMappingOfferId?: string | null;
+  primaryMappingUnitPrice?: number | null;
+  primaryCandidateUnitPrice?: number | null;
+  primaryCandidateSupplierName?: string | null;
   skuSupplierId?: string | null;
   skuSupplierName?: string | null;
   unreadCount?: number;
@@ -469,6 +474,7 @@ interface SkuOption {
   accountId?: string | null;
   internalSkuCode?: string;
   productName?: string;
+  colorSpec?: string | null;
   procurementSourceCount?: number;
   primary1688Source?: {
     externalOfferId?: string;
@@ -564,6 +570,7 @@ interface RequestUploadImage {
 
 interface RequestFormValues {
   skuIds: string[];
+  specText?: string;
   requestedQty: number;
   targetUnitCost?: number;
   evidenceText?: string;
@@ -1314,6 +1321,8 @@ type PurchaseQueueKey =
   | "all"
   | "request_pending_sourcing"
   | "request_sourced"
+  | "request_pending_optimization"
+  | "request_optimized"
   | "po_draft"
   | "po_pending_payment"
   | "po_paid"
@@ -1348,6 +1357,24 @@ function purchaseRequestHasSource(row: PurchaseRequestRow) {
   return Number(row.mappingCount || 0) > 0
     || Boolean(row.candidates?.length || row.candidateCount)
     || Boolean(row.skuSupplierId || row.skuSupplierName);
+}
+
+function purchaseRequestIsOptimized(row: PurchaseRequestRow) {
+  if (!purchaseRequestHasSource(row)) return false;
+  if (Number(row.selectedCandidateCount || 0) > 0) return true;
+
+  const targetUnitCost = optionalFiniteNumber(row.targetUnitCost);
+  const foundUnitPrice = optionalFiniteNumber(getPurchaseRequestFoundUnitPrice(row));
+  return targetUnitCost !== null
+    && targetUnitCost > 0
+    && foundUnitPrice !== null
+    && foundUnitPrice <= targetUnitCost;
+}
+
+function purchaseRequestNeedsOptimization(row: PurchaseRequestRow) {
+  return isPendingPurchaseRequest(row)
+    && purchaseRequestHasSource(row)
+    && !purchaseRequestIsOptimized(row);
 }
 
 // PR 早期阶段（还没流转到 sourced）：运营刚提交 / 采购处理中。
@@ -1479,6 +1506,14 @@ function getPurchaseRequestDefaultImageUrl(row?: PurchaseRequestRow | null) {
   return row.skuImageUrl || "";
 }
 
+function getPurchaseRequestSpecText(row?: PurchaseRequestRow | null) {
+  return String(row?.specText || row?.colorSpec || "").trim();
+}
+
+function getPurchaseRequestFoundUnitPrice(row?: PurchaseRequestRow | null) {
+  return row?.primaryCandidateUnitPrice ?? row?.primaryMappingUnitPrice ?? null;
+}
+
 function splitGroupedText(value?: string | null) {
   return String(value || "")
     .split(",")
@@ -1556,12 +1591,15 @@ function buildPurchaseRequestSearchText(row: PurchaseRequestRow) {
     row.id,
     row.internalSkuCode,
     row.productName,
+    row.specText,
+    row.colorSpec,
     row.status,
     PR_STATUS_LABELS[row.status],
     row.reason,
     row.requestedByName,
     row.primaryMappingSupplierName,
     row.primaryMappingOfferId,
+    row.primaryCandidateSupplierName,
     row.skuSupplierName,
     ...(row.evidence || []),
     ...(row.candidates || []).flatMap((candidate) => [
@@ -1730,6 +1768,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   >(null);
   const [source1688PrId, setSource1688PrId] = useState<string | null>(null);
   const [requestUploadImages, setRequestUploadImages] = useState<RequestUploadImage[]>([]);
+  const [requestImagePreview, setRequestImagePreview] = useState<{ src: string; alt: string } | null>(null);
   const [detailPrId, setDetailPrId] = useState<string | null>(null);
   const [detailDrawerMode, setDetailDrawerMode] = useState<PurchaseRequestDrawerMode>("collaboration");
   const [detailDrawerOpen, setDetailDrawerOpen] = useState(false);
@@ -1968,8 +2007,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     () => purchaseRequests.filter(isPendingPurchaseRequest),
     [purchaseRequests],
   );
-  // 7 个业务流 tab 用的分组：
-  // 待找品 / 已找品 是 PR 阶段；待推单 / 待付款 / 已付款 / 已完成 是 PO 阶段。
+  // 业务流 tab 用的分组：
+  // 待找品 / 已找品 / 待优化 / 已优化 是 PR 阶段；待推单 / 待付款 / 已付款 / 已完成 是 PO 阶段。
   // 待找品 = 早期阶段 PR 且没有任何货源（无映射/无报价/无供应商）。
   // 已绑货源的早期 PR 即便状态没流转，也归到「已找品」，避免有映射的需求混在待找品里。
   const pendingSourcingRequestRows = useMemo(
@@ -1982,6 +2021,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       || row.status === "waiting_ops_confirm"
       || (isEarlyStagePurchaseRequest(row) && purchaseRequestHasSource(row)),
     ),
+    [purchaseRequests],
+  );
+  const pendingOptimizationRequestRows = useMemo(
+    () => purchaseRequests.filter(purchaseRequestNeedsOptimization),
+    [purchaseRequests],
+  );
+  const optimizedRequestRows = useMemo(
+    () => purchaseRequests.filter((row) => isPendingPurchaseRequest(row) && purchaseRequestIsOptimized(row)),
     [purchaseRequests],
   );
   // 待提交 = 还没提交付款的：草稿(draft，含线下手工单) + 已推 1688 待提交付款(pushed_pending_price)。
@@ -2046,6 +2093,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         { key: "all", title: "全部", count: pendingRequestRows.length, kind: "request" },
         { key: "request_pending_sourcing", title: "待找品", count: pendingSourcingRequestRows.length, kind: "request" },
         { key: "request_sourced", title: "已找品", count: sourcedRequestRows.length, kind: "request" },
+        { key: "request_pending_optimization", title: "待优化", count: pendingOptimizationRequestRows.length, kind: "request" },
+        { key: "request_optimized", title: "已优化", count: optimizedRequestRows.length, kind: "request" },
         { key: "po_cancelled", title: "已取消", count: cancelledRequestRows.length, kind: "request" },
       ];
     }
@@ -2068,6 +2117,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     exceptionOrderRows,
     paidOrderRows,
     pendingRequestRows,
+    pendingOptimizationRequestRows,
     pendingSourcingRequestRows,
     orderCountAll,
     orderCountCancelled,
@@ -2076,6 +2126,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     orderCountException,
     orderCountPaid,
     orderCountPendingPayment,
+    optimizedRequestRows,
     sourcedRequestRows,
   ]);
 
@@ -2118,6 +2169,10 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         return pendingSourcingRequestRows;
       case "request_sourced":
         return sourcedRequestRows;
+      case "request_pending_optimization":
+        return pendingOptimizationRequestRows;
+      case "request_optimized":
+        return optimizedRequestRows;
       case "all":
         // "全部" 只显示活跃 PR（converted_to_po 已变身为 PO，看 PO 即可）
         return pendingRequestRows;
@@ -2131,7 +2186,9 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     activeWorkArea,
     activeQueueKey,
     cancelledRequestRows,
+    optimizedRequestRows,
     pendingRequestRows,
+    pendingOptimizationRequestRows,
     pendingSourcingRequestRows,
     sourcedRequestRows,
   ]);
@@ -3078,6 +3135,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
           skuId: sku.id,
           requestedQty: values.requestedQty,
           targetUnitCost: values.targetUnitCost,
+          specText: values.specText,
           reason: "找品",
           evidenceText: values.evidenceText,
           // 只在最后一笔请求里要 workbench，省掉中间多余的全量刷新
@@ -3101,6 +3159,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               skuId: sku.id,
               requestedQty: values.requestedQty,
               targetUnitCost: values.targetUnitCost,
+              specText: values.specText,
               reason: "找品",
               evidenceText: values.evidenceText,
               includeWorkbench: isLast,
@@ -3570,11 +3629,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
 
   const preview1688Order = async (
     row: PurchaseOrderRow,
-    options: { quiet?: boolean; purchase1688AccountId?: string; onAddressFailure?: () => void | Promise<void> } = {},
+    options: { quiet?: boolean; deliveryAddressId?: string; purchase1688AccountId?: string; onAddressFailure?: () => void | Promise<void> } = {},
   ) => {
     return runAction(`1688-preview-${row.id}`, {
       action: "preview_1688_order",
       poId: row.id,
+      ...(options.deliveryAddressId ? { deliveryAddressId: options.deliveryAddressId } : {}),
       ...(options.purchase1688AccountId ? { purchase1688AccountId: options.purchase1688AccountId } : {}),
     }, options.quiet ? undefined : "1688 订单已预览", { onAddressFailure: options.onAddressFailure });
   };
@@ -3609,6 +3669,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     const reopenPickerAfterSync = () => startPush1688Order(row, options.purchase1688AccountId);
     const previewResult = await preview1688Order(row, {
       quiet: true,
+      deliveryAddressId: options.deliveryAddressId,
       purchase1688AccountId: options.purchase1688AccountId,
       onAddressFailure: reopenPickerAfterSync,
     });
@@ -4298,15 +4359,17 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   const exportActiveQueue = () => {
     if (activeQueue.kind === "mixed") {
       downloadCsv(`purchase-todos-${activeQueueKey}.csv`, [
-        ["类型", "商品编码/采购单号", "商品名称", "商品图片", "状态", "数量", "商品金额/目标成本", "运费", "实付总金额", "负责人"],
+        ["类型", "商品编码/采购单号", "商品名称", "规格", "商品图片", "状态", "数量", "商品金额/目标成本", "找品单价", "运费", "实付总金额", "负责人"],
         ...activeRequestRows.map((row) => [
           "待处理",
           row.internalSkuCode || "",
           row.productName || "",
+          getPurchaseRequestSpecText(row),
           getPurchaseRequestDefaultImageUrl(row),
           PR_STATUS_LABELS[row.status] || row.status,
           row.requestedQty || 0,
           row.targetUnitCost ?? "",
+          getPurchaseRequestFoundUnitPrice(row) ?? "",
           "",
           "",
           row.requestedByName || "",
@@ -4315,10 +4378,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
           "采购单",
           row.poNo || row.id,
           joinGroupedText(getPurchaseOrderProductNames(row)),
+          "",
           row.skuImageUrl || "",
           PO_STATUS_LABELS[row.status] || row.status,
           row.totalQty || 0,
           row.totalAmount ?? "",
+          "",
           row.freightAmount ?? "",
           row.paidAmount ?? "",
           row.createdByName || "",
@@ -4328,13 +4393,15 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     }
     if (activeQueue.kind === "request") {
       downloadCsv(`purchase-requests-${activeQueueKey}.csv`, [
-        ["商品编码", "商品名称", "状态", "采购数量", "目标成本", "发起人"],
+        ["商品编码", "商品名称", "规格", "状态", "采购数量", "目标成本", "找品单价", "发起人"],
         ...activeRequestRows.map((row) => [
           row.internalSkuCode || "",
           row.productName || "",
+          getPurchaseRequestSpecText(row),
           PR_STATUS_LABELS[row.status] || row.status,
           row.requestedQty || 0,
           row.targetUnitCost ?? "",
+          getPurchaseRequestFoundUnitPrice(row) ?? "",
           row.requestedByName || "",
         ]),
       ]);
@@ -4386,11 +4453,28 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
             }}
           >
             {imageUrl ? (
-              <img
-                src={imageUrl}
-                alt={row.productName || row.internalSkuCode || "商品图片"}
-                style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-              />
+              <button
+                type="button"
+                onClick={() => setRequestImagePreview({
+                  src: imageUrl,
+                  alt: row.productName || row.internalSkuCode || "商品图片",
+                })}
+                style={{
+                  border: 0,
+                  padding: 0,
+                  margin: 0,
+                  width: "100%",
+                  height: "100%",
+                  background: "transparent",
+                  cursor: "zoom-in",
+                }}
+              >
+                <img
+                  src={imageUrl}
+                  alt={row.productName || row.internalSkuCode || "商品图片"}
+                  style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                />
+              </button>
             ) : (
               <Text type="secondary" style={{ fontSize: 12 }}>无图</Text>
             )}
@@ -4403,6 +4487,19 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       key: "sku",
       width: 260,
       render: (_value, row) => skuText(row),
+    },
+    {
+      title: "规格",
+      key: "spec",
+      width: 180,
+      render: (_value, row) => {
+        const spec = getPurchaseRequestSpecText(row);
+        return spec ? (
+          <Text style={{ fontSize: 12 }} ellipsis={{ tooltip: spec }}>{spec}</Text>
+        ) : (
+          <Text type="secondary" style={{ fontSize: 12 }}>-</Text>
+        );
+      },
     },
     {
       title: "状态",
@@ -4439,6 +4536,26 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       width: 110,
       align: "right",
       render: formatCurrency,
+    },
+    {
+      title: "找品单价",
+      key: "candidatePrice",
+      width: 120,
+      align: "right",
+      render: (_value, row) => {
+        const unitPrice = getPurchaseRequestFoundUnitPrice(row);
+        const supplierName = row.primaryCandidateSupplierName || row.primaryMappingSupplierName || "";
+        return (
+          <Space direction="vertical" size={2} style={{ width: "100%" }}>
+            <Text>{unitPrice == null ? "-" : formatCurrency(unitPrice)}</Text>
+            {supplierName ? (
+              <Text type="secondary" style={{ fontSize: 12 }} ellipsis={{ tooltip: supplierName }}>
+                {supplierName}
+              </Text>
+            ) : null}
+          </Space>
+        );
+      },
     },
     {
       title: "货源",
@@ -5394,7 +5511,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
                   className="erp-compact-table"
                   columns={requestColumns}
                   dataSource={filteredActiveRequestRows}
-                  scroll={{ x: 1500 }}
+                  scroll={{ x: 1800 }}
                   pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
                   style={{ marginTop: 8 }}
                 />
@@ -5439,7 +5556,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
             className="erp-compact-table"
             columns={requestColumns}
             dataSource={filteredActiveRequestRows}
-            scroll={{ x: 1500 }}
+            scroll={{ x: 1800 }}
             pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
           />
         ) : (
@@ -5456,6 +5573,42 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
           />
         )}
       </div>
+
+      <Modal
+        open={Boolean(requestImagePreview)}
+        title={requestImagePreview?.alt || "商品图片"}
+        footer={null}
+        centered
+        width="92vw"
+        onCancel={() => setRequestImagePreview(null)}
+        destroyOnClose
+        styles={{ body: { padding: 0 } }}
+      >
+        {requestImagePreview ? (
+          <div
+            style={{
+              height: "82vh",
+              padding: 12,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "#0f172a",
+              borderRadius: "0 0 8px 8px",
+            }}
+          >
+            <img
+              src={requestImagePreview.src}
+              alt={requestImagePreview.alt}
+              style={{
+                width: "100%",
+                height: "100%",
+                objectFit: "contain",
+                display: "block",
+              }}
+            />
+          </div>
+        ) : null}
+      </Modal>
 
       <Modal
         open={!!pushAddressPicker}
@@ -6032,6 +6185,9 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               notFoundContent={skuSearching ? "搜索中…" : "输入编码或名称搜索"}
               placeholder="输入商品编码或名称搜索，回车添加，可多选"
             />
+          </Form.Item>
+          <Form.Item name="specText" label="找品规格">
+            <Input placeholder="颜色 / 尺寸 / 几个装，例如：蓝色 30cm 2个装" allowClear />
           </Form.Item>
           <Form.Item label="采购图片">
             <Dragger
