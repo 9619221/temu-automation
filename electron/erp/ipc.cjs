@@ -3817,10 +3817,35 @@ function deleteSku1688SourceRow(db, payload = {}, actor = {}) {
   };
 }
 
+function findSku1688SourceByIdentity(db, params = {}) {
+  const accountId = optionalString(params.accountId || params.account_id);
+  const skuId = optionalString(params.skuId || params.sku_id);
+  const externalOfferId = optionalString(params.externalOfferId || params.external_offer_id);
+  if (!accountId || !skuId || !externalOfferId) return null;
+  return db.prepare(`
+    SELECT *
+    FROM erp_sku_1688_sources
+    WHERE account_id = @account_id
+      AND sku_id = @sku_id
+      AND external_offer_id = @external_offer_id
+      AND external_sku_id = @external_sku_id
+      AND external_spec_id = @external_spec_id
+    LIMIT 1
+  `).get({
+    account_id: accountId,
+    sku_id: skuId,
+    external_offer_id: externalOfferId,
+    external_sku_id: optionalString(params.externalSkuId || params.external_sku_id) || "",
+    external_spec_id: optionalString(params.externalSpecId || params.external_spec_id) || "",
+  });
+}
+
 function upsertSku1688SourceFromCandidate(db, candidate = {}, pr = {}, actor = {}, options = {}) {
   const externalOfferId = optionalString(candidate.external_offer_id || candidate.externalOfferId);
   if (!externalOfferId || !pr?.sku_id) return null;
-  const sourcePayload = parseJsonObject(candidate.source_payload_json) || parseJsonObject(candidate.external_detail_json);
+  const candidateSourcePayload = parseJsonObject(candidate.source_payload_json);
+  const candidateDetailPayload = parseJsonObject(candidate.external_detail_json);
+  const sourcePayload = Object.keys(candidateSourcePayload).length ? candidateSourcePayload : candidateDetailPayload;
   const inferredCandidate = {
     ...candidate,
     raw: sourcePayload,
@@ -3830,25 +3855,44 @@ function upsertSku1688SourceFromCandidate(db, candidate = {}, pr = {}, actor = {
     "候选货源",
   );
   const externalSkuId = optionalString(candidate.external_sku_id || candidate.externalSkuId || infer1688CandidateSkuId(inferredCandidate));
-  return upsertSku1688SourceRow(db, {
-    accountId: candidate.account_id || pr.account_id,
+  const accountId = optionalString(candidate.account_id || candidate.accountId || pr.account_id || pr.accountId);
+  const existingSource = findSku1688SourceByIdentity(db, {
+    accountId,
     skuId: pr.sku_id,
-    mappingGroupId: candidate.mapping_group_id || candidate.mappingGroupId || `map_${pr.sku_id}_${externalOfferId}_${externalSpecId}`,
     externalOfferId,
     externalSkuId,
     externalSpecId,
-    platformSkuName: options.platformSkuName || options.platform_sku_name || candidate.platform_sku_name || candidate.platformSkuName || externalSpecId || externalSkuId,
-    supplierName: candidate.supplier_name || candidate.supplierName,
-    productTitle: candidate.product_title || candidate.productTitle,
-    productUrl: candidate.product_url || candidate.productUrl,
-    imageUrl: candidate.image_url || candidate.imageUrl,
-    unitPrice: candidate.unit_price ?? candidate.unitPrice,
-    moq: candidate.moq,
-    leadDays: candidate.lead_days ?? candidate.leadDays,
-    logisticsFee: candidate.logistics_fee ?? candidate.logisticsFee,
-    ourQty: optionalPositiveInteger(options.ourQty ?? options.our_qty ?? candidate.our_qty ?? candidate.ourQty, 1),
-    platformQty: optionalPositiveInteger(options.platformQty ?? options.platform_qty ?? candidate.platform_qty ?? candidate.platformQty, 1),
-    sourcePayload,
+  });
+  const existingPayload = existingSource ? parseJsonObject(existingSource.source_payload_json) : {};
+  const finalSourcePayload = Object.keys(sourcePayload).length ? sourcePayload : existingPayload;
+  const ourQty = optionalPositiveInteger(options.ourQty ?? options.our_qty, null)
+    ?? optionalPositiveInteger(candidate.our_qty ?? candidate.ourQty, null)
+    ?? optionalPositiveInteger(existingSource?.our_qty, null);
+  const platformQty = optionalPositiveInteger(options.platformQty ?? options.platform_qty, null)
+    ?? optionalPositiveInteger(candidate.platform_qty ?? candidate.platformQty, null)
+    ?? optionalPositiveInteger(existingSource?.platform_qty, null);
+  return upsertSku1688SourceRow(db, {
+    accountId: accountId || pr.account_id,
+    skuId: pr.sku_id,
+    mappingGroupId: options.mappingGroupId || options.mapping_group_id
+      || candidate.mapping_group_id || candidate.mappingGroupId
+      || existingSource?.mapping_group_id
+      || `map_${pr.sku_id}_${externalOfferId}_${externalSpecId}`,
+    externalOfferId,
+    externalSkuId,
+    externalSpecId,
+    platformSkuName: options.platformSkuName || options.platform_sku_name || candidate.platform_sku_name || candidate.platformSkuName || existingSource?.platform_sku_name || externalSpecId || externalSkuId,
+    supplierName: candidate.supplier_name || candidate.supplierName || existingSource?.supplier_name,
+    productTitle: candidate.product_title || candidate.productTitle || existingSource?.product_title,
+    productUrl: candidate.product_url || candidate.productUrl || existingSource?.product_url,
+    imageUrl: candidate.image_url || candidate.imageUrl || existingSource?.image_url,
+    unitPrice: candidate.unit_price ?? candidate.unitPrice ?? existingSource?.unit_price,
+    moq: candidate.moq ?? existingSource?.moq,
+    leadDays: candidate.lead_days ?? candidate.leadDays ?? existingSource?.lead_days,
+    logisticsFee: candidate.logistics_fee ?? candidate.logisticsFee ?? existingSource?.logistics_fee,
+    ourQty,
+    platformQty,
+    sourcePayload: finalSourcePayload,
     isDefault: Boolean(options.isDefault),
     status: "active",
   }, actor);

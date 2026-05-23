@@ -1529,6 +1529,80 @@ async function main() {
     assert.equal(partialPo.status, "arrived");
     assert.equal(partialPo.receivedQty, 6);
 
+    const ratioSku = await invoke("erp:sku:create", {
+      id: "sku_ratio_ipc",
+      accountId: account.id,
+      internalSkuCode: "SKU-RATIO-IPC",
+      productName: "IPC Ratio Mapping SKU",
+      colorSpec: "Ratio / Standard",
+      supplierId: supplier.id,
+    });
+    const ratioMapping = await invoke("erp:purchase:action", {
+      action: "upsert_sku_1688_source",
+      actor: { id: buyer.id, role: buyer.role },
+      skuId: ratioSku.id,
+      accountId: account.id,
+      mappingGroupId: "map_ratio_ipc",
+      externalOfferId: "1688-offer-ratio-ipc",
+      externalSkuId: "sku-ratio",
+      externalSpecId: "spec-ratio",
+      platformSkuName: "Ratio / 1688",
+      supplierName: supplier.name,
+      productTitle: "IPC Ratio 1688 Product",
+      productUrl: "https://detail.1688.com/offer/1688-offer-ratio-ipc.html",
+      unitPrice: 8,
+      moq: 1,
+      ourQty: 2,
+      platformQty: 5,
+      isDefault: true,
+      includeWorkbench: false,
+    });
+    assert.equal(ratioMapping.result.sku1688Source.ourQty, 2);
+    assert.equal(ratioMapping.result.sku1688Source.platformQty, 5);
+
+    const ratioPr = await invoke("erp:purchase:action", {
+      action: "create_pr",
+      actor: { id: user.id, role: user.role },
+      accountId: account.id,
+      skuId: ratioSku.id,
+      requestedQty: 4,
+      targetUnitCost: 8,
+      reason: "1688 ratio mapping regression",
+      includeWorkbench: false,
+    });
+    const ratioPo = await invoke("erp:purchase:action", {
+      action: "generate_po",
+      actor: { id: buyer.id, role: buyer.role },
+      prId: ratioPr.result.id,
+      preferSku1688Source: true,
+      qty: 4,
+      poId: "po_ratio_ipc",
+      poNo: "PO-RATIO-IPC",
+      includeWorkbench: false,
+    });
+    assert.equal(ratioPo.result.sku1688Source.ourQty, 2);
+    assert.equal(ratioPo.result.sku1688Source.platformQty, 5);
+
+    const ratioValidation = await invoke("erp:purchase:action", {
+      action: "validate_1688_order_push",
+      actor: { id: buyer.id, role: buyer.role },
+      poId: "po_ratio_ipc",
+      dryRun: true,
+      includeWorkbench: false,
+    });
+    assert.equal(ratioValidation.result.ready, true);
+    assert.equal(ratioValidation.result.params.cargoParamList[0].quantity, 10);
+
+    const ratioDb = openErpDatabase({ userDataDir: tempUserData });
+    try {
+      const row = ratioDb.prepare("SELECT our_qty, platform_qty, mapping_group_id FROM erp_sku_1688_sources WHERE id = ?").get(ratioMapping.result.sku1688Source.id);
+      assert.equal(row.our_qty, 2);
+      assert.equal(row.platform_qty, 5);
+      assert.equal(row.mapping_group_id, "map_ratio_ipc");
+    } finally {
+      ratioDb.close();
+    }
+
     const operationLogDb = openErpDatabase({ userDataDir: tempUserData });
     try {
       const eventTypes = new Set(operationLogDb.prepare(`
