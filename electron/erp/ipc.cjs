@@ -4011,6 +4011,7 @@ function getPurchaseWorkbench(params = {}) {
   const purchaseOrderDateFrom = optionalString(params.purchaseOrderDateFrom || params.purchase_order_date_from || params.poDateFrom || params.po_date_from || params.dateFrom || params.date_from);
   const purchaseOrderDateTo = optionalString(params.purchaseOrderDateTo || params.purchase_order_date_to || params.poDateTo || params.po_date_to || params.dateTo || params.date_to);
   const purchaseOrderPurchaser = optionalString(params.purchaseOrderPurchaser || params.purchase_order_purchaser || params.purchaser || params.buyer || params.createdByName || params.created_by_name);
+  const purchaseOrderAccountId = optionalString(params.purchaseOrderAccountId || params.purchase_order_account_id || params.poAccountId || params.po_account_id || params.storeId || params.store_id || params.shopId || params.shop_id);
   const includePurchaseOrders = params.includePurchaseOrders !== false && params.include_purchase_orders !== false;
   const includeRequestDetails = params.includeRequestDetails !== false && params.include_request_details !== false;
   const includeOptions = params.includeOptions !== false && params.include_options !== false;
@@ -4030,6 +4031,7 @@ function getPurchaseWorkbench(params = {}) {
   const poDraftSql = `(po.status IN ('draft', 'pushed_pending_price') AND NOT ${poPaidSignalSql})`;
   const poPendingPaymentSql = `(po.status IN ('pending_finance_approval', 'approved_to_pay') AND NOT ${poPaidSignalSql})`;
   if (accountId) poConditions.push("po.account_id = @account_id");
+  if (purchaseOrderAccountId) poConditions.push("po.account_id = @po_account_id");
   switch (purchaseOrderQueue) {
     case "po_draft":
       poConditions.push(poDraftSql);
@@ -4061,6 +4063,7 @@ function getPurchaseWorkbench(params = {}) {
     po_date_from: purchaseOrderDateFrom,
     po_date_to: purchaseOrderDateTo,
     po_purchaser_filter: purchaseOrderPurchaser ? `%${purchaseOrderPurchaser}%` : "",
+    po_account_id: purchaseOrderAccountId,
   };
   if (purchaseOrderSearch) {
     poConditions.push(`(
@@ -11837,7 +11840,20 @@ function updatePurchaseOrderFrom1688Snapshot({
   const now = nowIso();
   const nextStatus = forceCancel ? "cancelled" : map1688StatusToLocal(order.status, before.status, logistics || {});
   const nextPaymentStatus = map1688StatusToPaymentStatus(order.status, before.payment_status);
-  const money = splitOrderMoney(order.totalAmount, order.freight, before.total_amount);
+  const rawDetailRoot = rawDetail?.result || rawDetail || {};
+  const rawDetailBaseInfo = rawDetailRoot.baseInfo || rawDetailRoot;
+  const snapshotFreight = optionalNumber(
+    order.freight
+      ?? order.freightAmount
+      ?? order.shippingFee
+      ?? rawDetailBaseInfo?.shippingFee
+      ?? rawDetailBaseInfo?.postFee
+      ?? before.freight_amount,
+  );
+  const snapshotPaidAmount = optionalNumber(order.totalAmount);
+  const money = snapshotPaidAmount === null
+    ? { goodsAmount: null, paidAmount: null, freightAmount: snapshotFreight }
+    : splitOrderMoney(snapshotPaidAmount, snapshotFreight, before.total_amount);
   const payloadJson = {
     ...(parseJsonObject(before.external_order_payload_json) || {}),
     ...(rawPayment ? { payment: rawPayment } : {}),
@@ -11870,7 +11886,7 @@ function updatePurchaseOrderFrom1688Snapshot({
     payment_status: nextPaymentStatus || before.payment_status,
     total_amount: money.goodsAmount,
     paid_amount: money.paidAmount,
-    freight_amount: optionalNumber(order.freight),
+    freight_amount: money.freightAmount,
     external_order_id: optionalString(order.externalOrderId),
     external_order_status: forceCancel ? "cancelled" : optionalString(order.status),
     external_order_payload_json: trimJsonForStorage(payloadJson),

@@ -113,6 +113,7 @@ const TABLE_IDENTIFIER_TEXT_STYLE = {
   fontWeight: 500,
   color: "#0f172a",
 };
+const STORE_NAME_COLLATOR = new Intl.Collator("zh-Hans-CN", { numeric: true, sensitivity: "base" });
 const QUICK_PURCHASE_ACTIONS = new Set([
   "accept_pr",
   "mark_read",
@@ -381,6 +382,7 @@ interface PurchaseOrderFilterDraft {
   poNo: string;
   dateRange: any;
   purchaser: string;
+  accountId: string;
 }
 
 interface PurchaseOrderFilters {
@@ -388,6 +390,7 @@ interface PurchaseOrderFilters {
   dateFrom: string;
   dateTo: string;
   purchaser: string;
+  accountId: string;
 }
 
 interface PurchaseWorkbench {
@@ -489,6 +492,18 @@ interface AccountOption {
   status?: string;
   // 店铺默认的 1688 采购账号（推单时作为预选值），erp.account.list 返回带这个字段
   default1688PurchaseAccountId?: string | null;
+}
+
+function storeAccountSortLabel(account: Pick<AccountOption, "id" | "name">) {
+  return String(account.name || account.id || "").trim();
+}
+
+function sortStoreAccounts<T extends Pick<AccountOption, "id" | "name">>(rows: T[]) {
+  return [...rows].sort((left, right) => {
+    const byName = STORE_NAME_COLLATOR.compare(storeAccountSortLabel(left), storeAccountSortLabel(right));
+    if (byName !== 0) return byName;
+    return STORE_NAME_COLLATOR.compare(String(left.id || ""), String(right.id || ""));
+  });
 }
 
 // 1688 采购账号（用于推单时让用户选哪个买家账号下单）
@@ -697,6 +712,7 @@ function toPurchaseOrderFilters(draft: PurchaseOrderFilterDraft): PurchaseOrderF
     dateFrom: formatFilterDate(range[0]),
     dateTo: formatFilterDate(range[1]),
     purchaser: draft.purchaser.trim(),
+    accountId: draft.accountId.trim(),
   };
 }
 
@@ -1697,6 +1713,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     Array.isArray(initialWorkbench.supplierOptions) ? initialWorkbench.supplierOptions : []
   ));
   const [accounts, setAccounts] = useState<AccountOption[]>([]);
+  const sortedAccounts = useMemo(() => sortStoreAccounts(accounts), [accounts]);
   // 1688 采购账号列表（推单 Modal 用）。loadData 时随店铺列表一起 fire-and-forget 预拉，
   // 让用户点「推送1688下单」时直接 0 RTT 弹 Modal。state 空时各调用处会回退到现拉。
   const [purchase1688Accounts, setPurchase1688Accounts] = useState<Purchase1688Account[]>([]);
@@ -1776,12 +1793,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     poNo: activeWorkArea === "orders" ? initialFocusPo : "",
     dateRange: null,
     purchaser: "",
+    accountId: "",
   }));
   const [purchaseOrderFilters, setPurchaseOrderFilters] = useState<PurchaseOrderFilters>(() => ({
     poNo: activeWorkArea === "orders" ? initialFocusPo : "",
     dateFrom: "",
     dateTo: "",
     purchaser: "",
+    accountId: "",
   }));
   const [purchaseSearchText, setPurchaseSearchText] = useState(() => {
     return activeWorkArea === "sourcing" ? initialFocusPo : "";
@@ -2135,7 +2154,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   }, [purchaseOrderFilterDraft]);
 
   const resetPurchaseOrderFilters = useCallback(() => {
-    const emptyDraft = { poNo: "", dateRange: null, purchaser: "" };
+    const emptyDraft = { poNo: "", dateRange: null, purchaser: "", accountId: "" };
     setSelectedPoIds([]);
     setPurchaseOrderPage(1);
     setPurchaseOrderFilterDraft(emptyDraft);
@@ -2271,6 +2290,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     purchaseOrderDateFrom: activeWorkArea === "orders" ? purchaseOrderFilters.dateFrom : "",
     purchaseOrderDateTo: activeWorkArea === "orders" ? purchaseOrderFilters.dateTo : "",
     purchaseOrderPurchaser: activeWorkArea === "orders" ? purchaseOrderFilters.purchaser : "",
+    purchaseOrderAccountId: activeWorkArea === "orders" ? purchaseOrderFilters.accountId : "",
   }), [activeQueueKey, activeWorkArea, purchaseOrderFilters, purchaseOrderPage]);
 
   const loadSupplementalWorkbenchData = useCallback(async () => {
@@ -2334,7 +2354,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       syncWorkbenchOptions(workbench);
       if (sideLoads) {
         void erp.account.list({ limit: 500 })
-          .then((accountRows: unknown) => setAccounts(Array.isArray(accountRows) ? accountRows : []))
+          .then((accountRows: unknown) => setAccounts(Array.isArray(accountRows) ? sortStoreAccounts(accountRows as AccountOption[]) : []))
           .catch(() => {});
       }
       // 0.3.25 性能：FULL_PURCHASE_WORKBENCH_PARAMS 关掉了 includeOptions（详见 86 行注释），
@@ -2594,7 +2614,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       }
       if (accounts.length === 0) {
         void erp.account.list({ limit: 500 })
-          .then((accountRows: unknown) => setAccounts(Array.isArray(accountRows) ? accountRows : []))
+          .then((accountRows: unknown) => setAccounts(Array.isArray(accountRows) ? sortStoreAccounts(accountRows as AccountOption[]) : []))
           .catch(() => {});
       }
       if (successText) message.success(successText);
@@ -3662,7 +3682,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         try {
           const fetched = await erp.account.list({ limit: 500 });
           accountList = Array.isArray(fetched) ? (fetched as AccountOption[]) : [];
-          if (accountList.length) setAccounts(accountList);
+          if (accountList.length) setAccounts(sortStoreAccounts(accountList));
         } catch {
           // 拉店铺失败不致命，回落到弹窗手选
           accountList = [];
@@ -3759,12 +3779,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     // 店铺列表优先复用已加载的 accounts state（loadData 进页面时已拉过）；
     // state 为空时才现拉一次兜底，避免多花一个云端 RTT。
     const shopDefaultAccountMap = new Map<string, string | null>();
-    let accountList: AccountOption[] = accounts;
+    let accountList: AccountOption[] = sortedAccounts;
     if (!accountList.length) {
       try {
         const fetched = await erp.account.list({ limit: 500 });
         accountList = Array.isArray(fetched) ? (fetched as AccountOption[]) : [];
-        if (accountList.length) setAccounts(accountList);
+        if (accountList.length) setAccounts(sortStoreAccounts(accountList));
       } catch {
         accountList = [];
       }
@@ -5298,6 +5318,19 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               onChange={(event) => setPurchaseOrderFilterDraft((prev) => ({ ...prev, purchaser: event.target.value }))}
               onPressEnter={applyPurchaseOrderFilters}
               style={{ width: 160 }}
+            />
+            <Select
+              allowClear
+              showSearch
+              placeholder="店铺"
+              value={purchaseOrderFilterDraft.accountId || undefined}
+              optionFilterProp="label"
+              options={sortedAccounts.map((account) => ({
+                label: account.name || account.id,
+                value: account.id,
+              }))}
+              onChange={(value) => setPurchaseOrderFilterDraft((prev) => ({ ...prev, accountId: value || "" }))}
+              style={{ width: 150 }}
             />
             <Button type="primary" icon={<SearchOutlined />} onClick={applyPurchaseOrderFilters}>
               查询
