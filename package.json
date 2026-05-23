@@ -1,7 +1,7 @@
 {
   "name": "temu-automation",
   "private": true,
-  "version": "0.3.31",
+  "version": "0.3.32",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -50,7 +50,10 @@
       {
         "from": "build/auto-image-gen-runtime",
         "to": "auto-image-gen-runtime",
-        "filter": ["**/*", "!data/**"]
+        "filter": [
+          "**/*",
+          "!data/**"
+        ]
       }
     ],
     "files": [
@@ -107,6 +110,8 @@
     "dayjs": "^1.11.12",
     "electron-store": "^11.0.2",
     "electron-updater": "^6.8.3",
+    "fs-extra": "^10.1.0",
+    "graceful-fs": "^4.2.11",
     "playwright": "^1.58.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
