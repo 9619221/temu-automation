@@ -39,7 +39,6 @@ const CompetitorAnalysis = lazyWithPreload(() => import("./pages/CompetitorAnaly
 const PriceReview = lazyWithPreload(() => import("./pages/PriceReview"));
 const ErpDebug = lazyWithPreload(() => import("./pages/ErpDebug"));
 const TemuRobots = lazyWithPreload(() => import("./pages/TemuRobots"));
-const MultiStoreCloud = lazyWithPreload(() => import("./pages/MultiStoreCloud"));
 const ProductMasterData = lazyWithPreload(() => import("./pages/ProductMasterData"));
 const PurchaseCenter = lazyWithPreload(() => import("./pages/PurchaseCenter"));
 const AlibabaMapping = lazyWithPreload(() => import("./pages/AlibabaMapping"));
@@ -296,7 +295,7 @@ function App() {
               <Route path="auto-image-swap" element={<RoleRoute path="/auto-image-swap"><AutoImageSwap /></RoleRoute>} />
               <Route path="collect" element={<RoleRoute path="/collect"><Dashboard /></RoleRoute>} />
               <Route path="temu-robots" element={<RoleRoute path="/collect"><TemuRobots /></RoleRoute>} />
-              <Route path="multi-store-cloud" element={<RoleRoute path="/multi-store-cloud"><MultiStoreCloud /></RoleRoute>} />
+              <Route path="multi-store-cloud" element={<Navigate to="/collect" replace />} />
               <Route path="jushuitan-import" element={<Navigate to="/product-master-data" replace />} />
               <Route path="accounts" element={<RoleRoute path="/accounts"><AccountManager /></RoleRoute>} />
               <Route path="tasks" element={<Navigate to="/work-items" replace />} />

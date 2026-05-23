@@ -89,9 +89,13 @@ const store = window.electronAPI?.store;
 const competitor = window.electronAPI?.competitor;
 const yunqiDb = window.electronAPI?.yunqiDb;
 
-const TEMU_ORANGE = "#e55b00";
-const CARD_STYLE: React.CSSProperties = { borderRadius: 16, boxShadow: "0 2px 8px rgba(0,0,0,0.06)" };
-const PRICE_COLORS = ["#ff7300", "#ff9500", "#ffb700", "#ffd900", "#52c41a", "#1677ff", "#722ed1", "#eb2f96"];
+const TEMU_ORANGE = "#1a73e8";
+const CARD_STYLE: React.CSSProperties = {
+  borderRadius: 8,
+  borderColor: "var(--google-border-soft)",
+  boxShadow: "var(--shadow-card)",
+};
+const PRICE_COLORS = ["#ea4335", "#fbbc04", "#34a853", "#1a73e8", "#7c3aed", "#30b0c7", "#137333", "#a50e0e"];
 const KEYWORD_POOL_STORE_KEY = "temu_competitor_keyword_pool";
 const MAX_KEYWORD_POOL_ITEMS = 30;
 const MAX_COMPETITOR_REPORTS = 20;
@@ -278,7 +282,7 @@ function getYunqiTokenStatusMeta(status: YunqiTokenStatus) {
       return {
         title: "正在校验 Yunqi Token",
         description: "正在验证 Token 是否可用，请稍等。",
-        icon: <KeyOutlined style={{ color: "#1677ff", fontSize: 16 }} />,
+        icon: <KeyOutlined style={{ color: "#1a73e8", fontSize: 16 }} />,
         background: "linear-gradient(90deg, #f0f5ff, #fff)",
         tagColor: "blue" as const,
         actionLabel: "修改 Token",
@@ -288,7 +292,7 @@ function getYunqiTokenStatusMeta(status: YunqiTokenStatus) {
         title: "Yunqi Token 已保存",
         description: "Token 已保存，需要时会自动验证。",
         icon: <KeyOutlined style={{ color: TEMU_ORANGE, fontSize: 16 }} />,
-        background: "linear-gradient(90deg, #fff7e6, #fff)",
+        background: "linear-gradient(90deg, rgba(255, 159, 10, 0.10), #fff)",
         tagColor: "orange" as const,
         actionLabel: "修改 Token",
       };
@@ -296,7 +300,7 @@ function getYunqiTokenStatusMeta(status: YunqiTokenStatus) {
       return {
         title: "Yunqi Token 已失效",
         description: "请重新粘贴最新 Token 后继续使用。",
-        icon: <KeyOutlined style={{ color: "#ff4d4f", fontSize: 16 }} />,
+        icon: <KeyOutlined style={{ color: "#ea4335", fontSize: 16 }} />,
         background: "linear-gradient(90deg, #fff1f0, #fff)",
         tagColor: "red" as const,
         actionLabel: "重新填写",
@@ -306,7 +310,7 @@ function getYunqiTokenStatusMeta(status: YunqiTokenStatus) {
         title: "配置 Yunqi 数据 Token",
         description: "登录 yunqishuju.com 后复制 Token。",
         icon: <KeyOutlined style={{ color: TEMU_ORANGE, fontSize: 16 }} />,
-        background: "linear-gradient(90deg, #fff7f0, #fff)",
+        background: "linear-gradient(90deg, rgba(26, 115, 232, 0.08), #fff)",
         tagColor: "default" as const,
         actionLabel: "配置 Token",
       };
@@ -432,7 +436,7 @@ function ProductDetailDrawer({ item, open, onClose }: { item: any; open: boolean
                 <XAxis dataKey="day" fontSize={10} />
                 <YAxis fontSize={10} />
                 <RTooltip />
-                <Area type="monotone" dataKey="sales" stroke={TEMU_ORANGE} fill="#fff2e8" strokeWidth={2} />
+                <Area type="monotone" dataKey="sales" stroke={TEMU_ORANGE} fill="rgba(26, 115, 232, 0.10)" strokeWidth={2} />
               </AreaChart>
             </ResponsiveContainer>
           </Card>
@@ -728,7 +732,7 @@ export function _KeywordSearchTab() {
       key: "dailySales",
       width: 80,
       sorter: (left: any, right: any) => toSafeNumber(left.dailySales) - toSafeNumber(right.dailySales),
-      render: (value: number) => value > 0 ? <Text style={{ color: "#ff4d4f" }}>{value.toLocaleString()}</Text> : <Text type="secondary">0</Text>,
+      render: (value: number) => value > 0 ? <Text style={{ color: "#ea4335" }}>{value.toLocaleString()}</Text> : <Text type="secondary">0</Text>,
     },
     {
       title: "周销",
@@ -736,7 +740,7 @@ export function _KeywordSearchTab() {
       key: "weeklySales",
       width: 80,
       sorter: (left: any, right: any) => toSafeNumber(left.weeklySales) - toSafeNumber(right.weeklySales),
-      render: (value: number) => value > 0 ? <Text style={{ color: "#fa8c16" }}>{value.toLocaleString()}</Text> : <Text type="secondary">0</Text>,
+      render: (value: number) => value > 0 ? <Text style={{ color: "#fbbc04" }}>{value.toLocaleString()}</Text> : <Text type="secondary">0</Text>,
     },
     {
       title: "月销",
@@ -744,7 +748,7 @@ export function _KeywordSearchTab() {
       key: "monthlySales",
       width: 80,
       sorter: (left: any, right: any) => toSafeNumber(left.monthlySales) - toSafeNumber(right.monthlySales),
-      render: (value: number) => value > 0 ? <Text style={{ color: "#1677ff" }}>{value.toLocaleString()}</Text> : <Text type="secondary">0</Text>,
+      render: (value: number) => value > 0 ? <Text style={{ color: "#1a73e8" }}>{value.toLocaleString()}</Text> : <Text type="secondary">0</Text>,
     },
     {
       title: "评分",
@@ -761,7 +765,7 @@ export function _KeywordSearchTab() {
       width: 95,
       sorter: (left: any, right: any) => toSafeNumber(left.weeklySalesPercentage) - toSafeNumber(right.weeklySalesPercentage),
       render: (value: number) => value
-        ? <Text style={{ color: value >= 0 ? "#52c41a" : "#ff4d4f", fontSize: 13 }}>{value >= 0 ? "+" : ""}{value}%</Text>
+        ? <Text style={{ color: value >= 0 ? "#52c41a" : "#ea4335", fontSize: 13 }}>{value >= 0 ? "+" : ""}{value}%</Text>
         : <Text type="secondary">-</Text>,
     },
     {
@@ -850,8 +854,8 @@ export function _KeywordSearchTab() {
             <Col span={3}><Card style={CARD_STYLE} size="small"><Statistic title="均价" value={avgPrice} prefix="$" precision={2} valueStyle={{ fontSize: 18 }} /></Card></Col>
             <Col span={3}><Card style={CARD_STYLE} size="small"><Statistic title="最低价" value={products.length ? Math.min(...products.map((product: any) => product.price || Infinity)) : 0} prefix="$" precision={2} valueStyle={{ fontSize: 18 }} /></Card></Col>
             <Col span={3}><Card style={CARD_STYLE} size="small"><Statistic title="最高价" value={products.length ? Math.max(...products.map((product: any) => product.price || 0)) : 0} prefix="$" precision={2} valueStyle={{ fontSize: 18 }} /></Card></Col>
-            <Col span={3}><Card style={CARD_STYLE} size="small"><Statistic title="日销总量" value={totalDailySales} valueStyle={{ fontSize: 18, color: "#ff4d4f" }} /></Card></Col>
-            <Col span={3}><Card style={CARD_STYLE} size="small"><Statistic title="月销总量" value={totalMonthlySales} valueStyle={{ fontSize: 18, color: "#1677ff" }} /></Card></Col>
+            <Col span={3}><Card style={CARD_STYLE} size="small"><Statistic title="日销总量" value={totalDailySales} valueStyle={{ fontSize: 18, color: "#ea4335" }} /></Card></Col>
+            <Col span={3}><Card style={CARD_STYLE} size="small"><Statistic title="月销总量" value={totalMonthlySales} valueStyle={{ fontSize: 18, color: "#1a73e8" }} /></Card></Col>
             <Col span={3}><Card style={CARD_STYLE} size="small"><Statistic title="GMV 总计" value={totalGmv} prefix="$" valueStyle={{ fontSize: 18 }} /></Card></Col>
             <Col span={3}><Card style={CARD_STYLE} size="small"><Statistic title="有视频" value={products.filter((product: any) => product.videoUrl).length} suffix={`/${products.length}`} valueStyle={{ fontSize: 18 }} /></Card></Col>
             {marketInsight ? <Col span={6}><Card style={CARD_STYLE} size="small"><Statistic title="机会分" value={marketInsight.opportunityScore} suffix="/100" valueStyle={{ fontSize: 18, color: TEMU_ORANGE }} /></Card></Col> : null}
@@ -980,7 +984,7 @@ export function _KeywordSearchTab() {
                       size="small"
                       onClick={() => setDetailItem(item)}
                       cover={item.imageUrl ? (
-                        <div style={{ height: 160, overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center", background: "#fafafa" }}>
+                        <div style={{ height: 160, overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center", background: "#f8fbff" }}>
                           <Image src={item.imageUrl} alt={item.title} style={{ maxHeight: 160, objectFit: "contain" }} preview={false} fallback="data:image/svg+xml,<svg/>" />
                         </div>
                       ) : undefined}
@@ -1236,9 +1240,9 @@ function CompetitorTrackTab() {
 
       <Row gutter={[12, 12]} style={{ marginTop: 16 }}>
         <Col span={6}><Card style={CARD_STYLE} size="small"><Statistic title="跟踪竞品" value={trackedRows.length} /></Card></Col>
-        <Col span={6}><Card style={CARD_STYLE} size="small"><Statistic title="P0 重点盯盘" value={p0Count} valueStyle={{ color: "#ff4d4f" }} /></Card></Col>
+        <Col span={6}><Card style={CARD_STYLE} size="small"><Statistic title="P0 重点盯盘" value={p0Count} valueStyle={{ color: "#ea4335" }} /></Card></Col>
         <Col span={6}><Card style={CARD_STYLE} size="small"><Statistic title="视频驱动型" value={videoDrivers} valueStyle={{ color: "#722ed1" }} /></Card></Col>
-        <Col span={6}><Card style={CARD_STYLE} size="small"><Statistic title="高评分信任型" value={trustDrivers} valueStyle={{ color: "#1677ff" }} /></Card></Col>
+        <Col span={6}><Card style={CARD_STYLE} size="small"><Statistic title="高评分信任型" value={trustDrivers} valueStyle={{ color: "#1a73e8" }} /></Card></Col>
         <Col span={6}><Card style={CARD_STYLE} size="small"><Statistic title="活动投流型" value={campaignDrivers} valueStyle={{ color: TEMU_ORANGE }} /></Card></Col>
       </Row>
 
@@ -1307,7 +1311,7 @@ function CompetitorTrackTab() {
                 <YAxis yAxisId="monthlySales" orientation="right" fontSize={11} domain={["auto", "auto"]} />
                 <RTooltip />
                 <Line yAxisId="price" type="monotone" dataKey="price" stroke={TEMU_ORANGE} strokeWidth={2} name="价格 ($)" />
-                <Line yAxisId="monthlySales" type="monotone" dataKey="monthlySales" stroke="#1677ff" strokeWidth={2} name="月销" />
+                <Line yAxisId="monthlySales" type="monotone" dataKey="monthlySales" stroke="#1a73e8" strokeWidth={2} name="月销" />
               </LineChart>
             </ResponsiveContainer>
           </Space>
@@ -1823,21 +1827,21 @@ function YunqiDbTab() {
       dataIndex: "daily_sales",
       key: "daily_sales",
       width: 80,
-      render: (value: number) => value > 0 ? <Text style={{ color: "#ff4d4f" }}>{value.toLocaleString()}</Text> : <Text type="secondary">0</Text>,
+      render: (value: number) => value > 0 ? <Text style={{ color: "#ea4335" }}>{value.toLocaleString()}</Text> : <Text type="secondary">0</Text>,
     },
     {
       title: "周销",
       dataIndex: "weekly_sales",
       key: "weekly_sales",
       width: 80,
-      render: (value: number) => value > 0 ? <Text style={{ color: "#fa8c16" }}>{value.toLocaleString()}</Text> : <Text type="secondary">0</Text>,
+      render: (value: number) => value > 0 ? <Text style={{ color: "#fbbc04" }}>{value.toLocaleString()}</Text> : <Text type="secondary">0</Text>,
     },
     {
       title: "月销",
       dataIndex: "monthly_sales",
       key: "monthly_sales",
       width: 80,
-      render: (value: number) => value > 0 ? <Text style={{ color: "#1677ff" }}>{value.toLocaleString()}</Text> : <Text type="secondary">0</Text>,
+      render: (value: number) => value > 0 ? <Text style={{ color: "#1a73e8" }}>{value.toLocaleString()}</Text> : <Text type="secondary">0</Text>,
     },
     {
       title: "评分",
@@ -1893,8 +1897,8 @@ function YunqiDbTab() {
           <Col span={3}><Card style={CARD_STYLE} size="small"><Statistic title="商品总数" value={stats.totalProducts} valueStyle={{ fontSize: 16 }} /></Card></Col>
           <Col span={3}><Card style={CARD_STYLE} size="small"><Statistic title="店铺数" value={stats.totalMalls} valueStyle={{ fontSize: 16 }} /></Card></Col>
           <Col span={3}><Card style={CARD_STYLE} size="small"><Statistic title="均价" value={stats.avgPrice} prefix="$" valueStyle={{ fontSize: 16 }} /></Card></Col>
-          <Col span={3}><Card style={CARD_STYLE} size="small"><Statistic title="日销总量" value={stats.totalDailySales} valueStyle={{ fontSize: 16, color: "#ff4d4f" }} /></Card></Col>
-          <Col span={3}><Card style={CARD_STYLE} size="small"><Statistic title="月销总量" value={stats.totalMonthlySales} valueStyle={{ fontSize: 16, color: "#1677ff" }} /></Card></Col>
+          <Col span={3}><Card style={CARD_STYLE} size="small"><Statistic title="日销总量" value={stats.totalDailySales} valueStyle={{ fontSize: 16, color: "#ea4335" }} /></Card></Col>
+          <Col span={3}><Card style={CARD_STYLE} size="small"><Statistic title="月销总量" value={stats.totalMonthlySales} valueStyle={{ fontSize: 16, color: "#1a73e8" }} /></Card></Col>
           <Col span={3}><Card style={CARD_STYLE} size="small"><Statistic title="总 GMV" value={stats.totalGmv} prefix="$" valueStyle={{ fontSize: 16 }} /></Card></Col>
           <Col span={3}><Card style={CARD_STYLE} size="small"><Statistic title="平均评分" value={stats.avgScore} valueStyle={{ fontSize: 16 }} /></Card></Col>
           <Col span={3}><Card style={CARD_STYLE} size="small"><Statistic title="有视频" value={stats.withVideo} suffix={`/${stats.totalProducts}`} valueStyle={{ fontSize: 16 }} /></Card></Col>
@@ -2063,6 +2067,38 @@ export default function CompetitorAnalysis() {
     if (!state?.prefillProduct || typeof state.prefillProduct !== "object") return null;
     return state.prefillProduct;
   }, [location.state]);
+
+  const handleProductWorkbenchStepStateChange = useCallback((nextState: ProductWorkbenchStepState) => {
+    setProductWorkbenchStepState((prevState) => {
+      if (!prevState) return nextState;
+      const sameStepItems =
+        prevState.stepItems.length === nextState.stepItems.length &&
+        prevState.stepItems.every((item, index) => {
+          const nextItem = nextState.stepItems[index];
+          return (
+            nextItem &&
+            item.key === nextItem.key &&
+            item.title === nextItem.title &&
+            item.desc === nextItem.desc &&
+            item.enabled === nextItem.enabled &&
+            item.completed === nextItem.completed
+          );
+        });
+
+      if (
+        prevState.activeStep === nextState.activeStep &&
+        prevState.nextStepTarget === nextState.nextStepTarget &&
+        prevState.nextStepLabel === nextState.nextStepLabel &&
+        prevState.canGoNext === nextState.canGoNext &&
+        prevState.currentStepMeta.key === nextState.currentStepMeta.key &&
+        sameStepItems
+      ) {
+        return prevState;
+      }
+
+      return nextState;
+    });
+  }, []);
 
   useEffect(() => {
     if (!routePrefillProduct) return;
@@ -2298,13 +2334,14 @@ export default function CompetitorAnalysis() {
   };
 
   return (
-    <div style={{ maxWidth: 1440, margin: "0 auto" }}>
+    <div className="competitor-analysis-shell">
       {isProductTab ? (
         <Card
+          className="competitor-analysis-hero-card"
           style={{
             ...CARD_STYLE,
-            background: "linear-gradient(135deg, rgba(255,248,240,0.98) 0%, rgba(255,255,255,1) 68%, rgba(255,244,230,0.95) 100%)",
-            border: "1px solid rgba(229,91,0,0.12)",
+            background: "linear-gradient(135deg, rgba(26, 115, 232, 0.08) 0%, #ffffff 62%, rgba(52, 168, 83, 0.05) 100%)",
+            border: "1px solid rgba(26, 115, 232, 0.16)",
             marginBottom: 16,
           }}
         >
@@ -2384,7 +2421,7 @@ export default function CompetitorAnalysis() {
                       padding: "14px 16px",
                       borderRadius: 16,
                       border: isActive ? `1px solid ${TEMU_ORANGE}` : "1px solid #ebeef5",
-                      background: isActive ? "rgba(229,91,0,0.08)" : item.completed ? "#fff7e8" : "#fff",
+                      background: isActive ? "rgba(26, 115, 232, 0.08)" : item.completed ? "rgba(26, 115, 232, 0.04)" : "#fff",
                       cursor: isClickable ? "pointer" : "not-allowed",
                       opacity: isClickable ? 1 : 0.55,
                     }}
@@ -2468,7 +2505,7 @@ export default function CompetitorAnalysis() {
               <CompetitorProductWorkbench
                 activeStep={productWorkbenchActiveStep}
                 onActiveStepChange={setProductWorkbenchActiveStep}
-                onStepStateChange={setProductWorkbenchStepState}
+                onStepStateChange={handleProductWorkbenchStepStateChange}
                 hideStepShell
                 onYunqiRequestStart={handleYunqiRequestStart}
                 onYunqiRequestFinish={handleYunqiRequestFinish}

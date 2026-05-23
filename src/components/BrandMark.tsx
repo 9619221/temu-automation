@@ -12,12 +12,62 @@ export default function BrandMark({ size = 36, className = "" }: BrandMarkProps)
     >
       <svg
         className="brand-mark-system__svg"
-        viewBox="0 0 48 48"
+        viewBox="0 0 64 64"
         focusable="false"
       >
-        <path
-          className="brand-mark-system__shape"
-          d="M13.4 12.4h21.2c1.95 0 3.5 1.55 3.5 3.5s-1.55 3.5-3.5 3.5h-7.15v16.2c0 2-1.58 3.6-3.55 3.6s-3.55-1.6-3.55-3.6V19.4H13.4c-1.95 0-3.5-1.55-3.5-3.5s1.55-3.5 3.5-3.5Z"
+        <rect
+          className="brand-mark-system__bar"
+          x="15"
+          y="15"
+          width="34"
+          height="10"
+          rx="5"
+        />
+        <rect
+          className="brand-mark-system__stem"
+          x="28"
+          y="23"
+          width="8"
+          height="29"
+          rx="4"
+        />
+        <rect
+          className="brand-mark-system__join"
+          x="28"
+          y="23"
+          width="8"
+          height="10"
+          rx="2"
+        />
+        <circle
+          className="brand-mark-system__accent"
+          cx="45"
+          cy="45"
+          r="6"
+        />
+        <circle
+          className="brand-mark-system__node"
+          cx="20"
+          cy="20"
+          r="3"
+        />
+        <circle
+          className="brand-mark-system__node"
+          cx="32"
+          cy="20"
+          r="3"
+        />
+        <circle
+          className="brand-mark-system__node"
+          cx="32"
+          cy="49"
+          r="3"
+        />
+        <circle
+          className="brand-mark-system__node"
+          cx="45"
+          cy="45"
+          r="2.2"
         />
       </svg>
     </span>

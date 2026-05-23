@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Form, Input, InputNumber, Switch, Button, Tag, Progress, Space, Typography, message } from "antd";
-import { CloudDownloadOutlined, CheckCircleOutlined, SyncOutlined, ReloadOutlined, LinkOutlined, CloudSyncOutlined, CopyOutlined, FolderOpenOutlined, ChromeOutlined } from "@ant-design/icons";
+import { CloudDownloadOutlined, CheckCircleOutlined, SyncOutlined, ReloadOutlined, LinkOutlined, CloudSyncOutlined, CopyOutlined, FolderOpenOutlined, ChromeOutlined, SaveOutlined } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
 import { clearCloudConfig, DEFAULT_CLOUD_ENDPOINT, loadCloudConfig, loginCloud, saveCloudConfig } from "../utils/cloudClient";
 import { normalizeExtensionInstallUrl, openExternalUrl } from "../utils/extensionInstall";
@@ -156,74 +156,24 @@ export default function Settings() {
   };
 
   return (
-    <div className="dashboard-shell" style={{ maxWidth: 680 }}>
+    <div className="dashboard-shell settings-shell">
       <PageHeader
         compact
         eyebrow="系统"
         title="设置"
-        subtitle="浏览器参数与账号配置"
+        subtitle="连接云端、扩展安装、浏览器运行参数与账号策略统一在这里管理。"
         meta={[version ? `v${version}` : "开发模式"]}
+        actions={(
+          <Button type="primary" icon={<SaveOutlined />} onClick={handleSave}>
+            保存设置
+          </Button>
+        )}
       />
-
-      <div className="app-panel" style={{ marginBottom: 16 }}>
-        <div className="app-panel__title">
-          <div className="app-panel__title-main">版本与更新</div>
-        </div>
-        <Space direction="vertical" style={{ width: "100%" }} size={12}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <Text>当前版本</Text>
-            <Text strong>{version || "开发模式"}</Text>
-          </div>
-
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <Text>更新状态</Text>
-            {updateStatus.status === "up-to-date" && <Tag icon={<CheckCircleOutlined />} color="success">已是最新</Tag>}
-            {updateStatus.status === "available" && <Tag color="blue">发现新版本 {updateStatus.releaseVersion}</Tag>}
-            {updateStatus.status === "downloading" && <Tag icon={<SyncOutlined spin />} color="processing">下载中</Tag>}
-            {updateStatus.status === "downloaded" && <Tag icon={<CloudDownloadOutlined />} color="orange">更新已就绪</Tag>}
-            {updateStatus.status === "error" && <Tag color="error" title={updateStatus.message}>更新失败：{updateStatus.message || "未知错误"}</Tag>}
-            {(updateStatus.status === "idle" || updateStatus.status === "dev") && <Tag>{updateStatus.message || "未检查"}</Tag>}
-          </div>
-
-          {updateStatus.status === "downloading" && updateStatus.progressPercent != null && (
-            <Progress percent={updateStatus.progressPercent} strokeColor="var(--color-brand)" size="small" />
-          )}
-
-          <Space wrap>
-            <Button icon={<ReloadOutlined />} onClick={handleCheckUpdate} disabled={updateStatus.status === "downloading"}>
-              检查更新
-            </Button>
-            {updateStatus.status === "available" && (
-              <Button type="primary" icon={<CloudDownloadOutlined />} onClick={handleDownloadUpdate}>
-                下载更新
-              </Button>
-            )}
-            {updateStatus.status === "downloaded" && (
-              <Button type="primary" icon={<CloudDownloadOutlined />} onClick={handleInstall}>
-                立即安装更新
-              </Button>
-            )}
-            {updateStatus.status === "error" && updateStatus.manualDownloadUrl && (
-              <Button
-                icon={<CloudDownloadOutlined />}
-                onClick={handleManualDownload}
-              >
-                手动下载最新版
-              </Button>
-            )}
-          </Space>
-
-          {updateStatus.status === "error" && (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              若自动更新多次失败,可点击"手动下载最新版"从镜像站点直接下载安装包。
-            </Text>
-          )}
-        </Space>
-      </div>
 
       <Form
         form={form}
         layout="vertical"
+        className="settings-grid"
         initialValues={{
           operationDelay: 1500,
           maxRetries: 3,
@@ -232,19 +182,19 @@ export default function Settings() {
           screenshotOnError: true,
         }}
       >
-        <div className="app-panel" style={{ marginBottom: 16 }}>
-          <div className="app-panel__title">
-            <div>
-              <div className="app-panel__title-main">浏览器扩展安装</div>
-              <div className="app-panel__title-sub">用于在数据采集页引导用户安装 Chrome 采集助手，并检测扩展心跳状态。</div>
+        <div className="settings-stack settings-stack--main">
+          <div className="app-panel settings-panel settings-panel--cloud">
+            <div className="app-panel__title">
+              <div>
+                <div className="app-panel__title-main">浏览器扩展安装</div>
+                <div className="app-panel__title-sub">配置 Chrome 采集助手与云端连接，让采集状态在桌面端与云端保持一致。</div>
+              </div>
             </div>
-          </div>
-          <Space direction="vertical" style={{ width: "100%" }} size={10}>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              正式分发建议用 Chrome Web Store 非公开链接；内测或临时分发可以填扩展文件下载链接，让用户下载压缩包后手动“加载已解压的扩展程序”。
-            </Text>
+            <div className="settings-note">
+              正式分发建议使用 Chrome Web Store 非公开链接；内测可填扩展文件下载链接，让用户下载后手动加载解压目录。
+            </div>
             {extensionDir ? (
-              <div style={{ border: "1px solid var(--color-border)", borderRadius: 8, padding: 12, background: "var(--color-surface-subtle)" }}>
+              <div className="settings-path-box">
                 <Space direction="vertical" size={8} style={{ width: "100%" }}>
                   <Text strong>本机调试扩展目录</Text>
                   <Text code copyable={{ text: extensionDir }} style={{ whiteSpace: "normal" }}>{extensionDir}</Text>
@@ -254,16 +204,18 @@ export default function Settings() {
                 </Space>
               </div>
             ) : null}
-            <Form.Item name="extensionPackageUrl" label="扩展文件下载链接" help="指向 .zip 压缩包；用户下载后需要先解压，再在 Chrome 扩展管理页加载解压后的目录。">
-              <Input placeholder="https://erp.temu.chat/releases/temu-monitor-extension-0.4.0.zip" />
-            </Form.Item>
-            <Form.Item name="extensionInstallUrl" label="扩展安装链接" help="示例：https://chromewebstore.google.com/detail/…">
-              <Input placeholder="https://chromewebstore.google.com/detail/…" />
-            </Form.Item>
-            <Form.Item name="cloudEndpoint" label="云端地址" help="用于读取 /api/dashboard/agent 心跳状态">
-              <Input placeholder="https://your-cloud.example.com" />
-            </Form.Item>
-            <div style={{ display: "grid", gridTemplateColumns: "minmax(160px, 1fr) minmax(160px, 1fr)", gap: 12 }}>
+            <div className="settings-form-list">
+              <Form.Item name="extensionPackageUrl" label="扩展文件下载链接" help="指向 .zip 压缩包；用户下载后需要先解压，再在 Chrome 扩展管理页加载解压后的目录。">
+                <Input placeholder="https://erp.temu.chat/releases/temu-monitor-extension-0.4.0.zip" />
+              </Form.Item>
+              <Form.Item name="extensionInstallUrl" label="扩展安装链接" help="示例：https://chromewebstore.google.com/detail/…">
+                <Input placeholder="https://chromewebstore.google.com/detail/…" />
+              </Form.Item>
+              <Form.Item name="cloudEndpoint" label="云端地址" help="用于读取 /api/dashboard/agent 心跳状态">
+                <Input placeholder="https://your-cloud.example.com" />
+              </Form.Item>
+            </div>
+            <div className="settings-credential-grid">
               <Form.Item name="cloudUsername" label="云端账号">
                 <Input placeholder="admin" autoComplete="username" />
               </Form.Item>
@@ -274,7 +226,7 @@ export default function Settings() {
             <Form.Item name="cloudToken" label="云端 Token">
               <Input.Password placeholder="粘贴云端 JWT" />
             </Form.Item>
-            <Space wrap>
+            <Space wrap className="settings-action-row">
               <Button icon={<CloudSyncOutlined />} loading={cloudLoginLoading} onClick={handleCloudLogin}>
                 登录云端并保存 Token
               </Button>
@@ -290,46 +242,108 @@ export default function Settings() {
               <Button icon={<CopyOutlined />} onClick={() => copyText(form.getFieldValue("cloudEndpoint") || DEFAULT_CLOUD_ENDPOINT, "云端地址已复制")}>
                 复制云端地址
               </Button>
-              <Button icon={<CopyOutlined />} onClick={() => copyText(form.getFieldValue("cloudToken") || "", "Token 已复制")} disabled={!form.getFieldValue("cloudToken")}>
+              <Button icon={<CopyOutlined />} onClick={() => copyText(form.getFieldValue("cloudToken") || "", "Token 已复制")}>
                 复制 Token
               </Button>
               <Button icon={<LinkOutlined />} onClick={handleOpenExtensionInstall}>
                 测试打开扩展链接
               </Button>
             </Space>
-          </Space>
-        </div>
-
-        <div className="app-panel" style={{ marginBottom: 16 }}>
-          <div className="app-panel__title">
-            <div className="app-panel__title-main">浏览器设置</div>
           </div>
-          <Form.Item name="operationDelay" label="操作间隔（毫秒）" help="每次操作之间的随机等待时间基准值，越大越安全但越慢">
-            <InputNumber min={500} max={10000} step={100} style={{ width: "100%" }} />
-          </Form.Item>
-          <Form.Item name="maxRetries" label="最大重试次数" help="操作失败后的重试次数">
-            <InputNumber min={1} max={10} style={{ width: "100%" }} />
-          </Form.Item>
-          <Form.Item name="headless" label="无头模式" valuePropName="checked" help="开启后浏览器在后台运行，不显示窗口">
-            <Switch />
-          </Form.Item>
-          <Form.Item name="screenshotOnError" label="错误截图" valuePropName="checked" help="操作出错时自动截图保存，便于排查问题">
-            <Switch />
-          </Form.Item>
         </div>
 
-        <div className="app-panel" style={{ marginBottom: 16 }}>
-          <div className="app-panel__title">
-            <div className="app-panel__title-main">账号设置</div>
+        <div className="settings-stack">
+          <div className="app-panel settings-panel">
+            <div className="app-panel__title">
+              <div className="app-panel__title-main">版本与更新</div>
+            </div>
+            <Space direction="vertical" style={{ width: "100%" }} size={12}>
+              <div className="settings-status-row">
+                <Text>当前版本</Text>
+                <Text strong>{version || "开发模式"}</Text>
+              </div>
+
+              <div className="settings-status-row">
+                <Text>更新状态</Text>
+                {updateStatus.status === "up-to-date" && <Tag icon={<CheckCircleOutlined />} color="success">已是最新</Tag>}
+                {updateStatus.status === "available" && <Tag color="blue">发现新版本 {updateStatus.releaseVersion}</Tag>}
+                {updateStatus.status === "downloading" && <Tag icon={<SyncOutlined spin />} color="processing">下载中</Tag>}
+                {updateStatus.status === "downloaded" && <Tag icon={<CloudDownloadOutlined />} color="orange">更新已就绪</Tag>}
+                {updateStatus.status === "error" && <Tag color="error" title={updateStatus.message}>更新失败：{updateStatus.message || "未知错误"}</Tag>}
+                {(updateStatus.status === "idle" || updateStatus.status === "dev") && <Tag>{updateStatus.message || "未检查"}</Tag>}
+              </div>
+
+              {updateStatus.status === "downloading" && updateStatus.progressPercent != null && (
+                <Progress percent={updateStatus.progressPercent} strokeColor="#1a73e8" size="small" />
+              )}
+
+              <Space wrap>
+                <Button icon={<ReloadOutlined />} onClick={handleCheckUpdate} disabled={updateStatus.status === "downloading"}>
+                  检查更新
+                </Button>
+                {updateStatus.status === "available" && (
+                  <Button type="primary" icon={<CloudDownloadOutlined />} onClick={handleDownloadUpdate}>
+                    下载更新
+                  </Button>
+                )}
+                {updateStatus.status === "downloaded" && (
+                  <Button type="primary" icon={<CloudDownloadOutlined />} onClick={handleInstall}>
+                    立即安装更新
+                  </Button>
+                )}
+                {updateStatus.status === "error" && updateStatus.manualDownloadUrl && (
+                  <Button
+                    icon={<CloudDownloadOutlined />}
+                    onClick={handleManualDownload}
+                  >
+                    手动下载最新版
+                  </Button>
+                )}
+              </Space>
+
+              {updateStatus.status === "error" && (
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  若自动更新多次失败，可点击“手动下载最新版”从镜像站点直接下载安装包。
+                </Text>
+              )}
+            </Space>
           </div>
-          <Form.Item name="autoLoginRetry" label="自动重新登录" valuePropName="checked" help="登录态过期时自动重新登录">
-            <Switch />
-          </Form.Item>
-        </div>
 
-        <Button type="primary" onClick={handleSave}>
-          保存设置
-        </Button>
+          <div className="app-panel settings-panel">
+            <div className="app-panel__title">
+              <div className="app-panel__title-main">浏览器设置</div>
+            </div>
+            <Form.Item name="operationDelay" label="操作间隔（毫秒）" help="每次操作之间的随机等待时间基准值，越大越安全但越慢">
+              <InputNumber min={500} max={10000} step={100} style={{ width: "100%" }} />
+            </Form.Item>
+            <Form.Item name="maxRetries" label="最大重试次数" help="操作失败后的重试次数">
+              <InputNumber min={1} max={10} style={{ width: "100%" }} />
+            </Form.Item>
+            <div className="settings-toggle-list">
+              <Form.Item name="headless" label="无头模式" valuePropName="checked" help="开启后浏览器在后台运行，不显示窗口">
+                <Switch />
+              </Form.Item>
+              <Form.Item name="screenshotOnError" label="错误截图" valuePropName="checked" help="操作出错时自动截图保存，便于排查问题">
+                <Switch />
+              </Form.Item>
+            </div>
+          </div>
+
+          <div className="app-panel settings-panel">
+            <div className="app-panel__title">
+              <div className="app-panel__title-main">账号设置</div>
+            </div>
+            <Form.Item name="autoLoginRetry" label="自动重新登录" valuePropName="checked" help="登录态过期时自动重新登录">
+              <Switch />
+            </Form.Item>
+          </div>
+
+          <div className="settings-save-panel">
+            <Button type="primary" icon={<SaveOutlined />} onClick={handleSave}>
+              保存设置
+            </Button>
+          </div>
+        </div>
       </Form>
     </div>
   );

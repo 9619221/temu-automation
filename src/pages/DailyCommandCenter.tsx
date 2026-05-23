@@ -429,7 +429,7 @@ export default function DailyCommandCenter() {
             </div>
             <Space direction="vertical" style={{ width: "100%" }} size={8}>
               {Object.entries(stats?.byOwnerRole || {}).map(([roleKey, count]) => (
-                <div key={roleKey} style={{ display: "flex", justifyContent: "space-between", borderBottom: "1px solid #f5f5f5", paddingBottom: 8 }}>
+                <div key={roleKey} style={{ display: "flex", justifyContent: "space-between", borderBottom: "1px solid #f8fbff", paddingBottom: 8 }}>
                   <Text>{WORK_ITEM_OWNER_LABELS[roleKey] || "未知角色"}</Text>
                   <Text strong>{count}</Text>
                 </div>

@@ -189,7 +189,7 @@ export default function PriceReview() {
       title: "主图",
       dataIndex: "main_image",
       width: 80,
-      render: (url: string) => url ? <Image src={url} width={56} height={56} /> : <div style={{ width: 56, height: 56, background: "#f5f5f5" }} />,
+      render: (url: string) => url ? <Image src={url} width={56} height={56} /> : <div style={{ width: 56, height: 56, background: "#f8fbff" }} />,
     },
     {
       title: "商品",
@@ -248,7 +248,7 @@ export default function PriceReview() {
       align: "center" as const,
       render: (v: number | null) => {
         if (v === 1) return <Tag icon={<CheckCircleTwoTone twoToneColor="#52c41a" />} color="success">通过</Tag>;
-        if (v === 0) return <Tag icon={<CloseCircleTwoTone twoToneColor="#ff4d4f" />} color="error">不通过</Tag>;
+        if (v === 0) return <Tag icon={<CloseCircleTwoTone twoToneColor="#ea4335" />} color="error">不通过</Tag>;
         return <Tag icon={<QuestionCircleTwoTone twoToneColor="#d9d9d9" />} color="default">未知</Tag>;
       },
       filters: [
@@ -303,7 +303,7 @@ export default function PriceReview() {
         <Space size="large" wrap>
           <Statistic title="扫描总数" value={summary.total} />
           <Statistic title="通过" value={summary.pass} valueStyle={{ color: "#52c41a" }} />
-          <Statistic title="不通过" value={summary.fail} valueStyle={{ color: "#ff4d4f" }} />
+          <Statistic title="不通过" value={summary.fail} valueStyle={{ color: "#ea4335" }} />
           <Statistic title="未知（无成本）" value={summary.unknown} valueStyle={{ color: "#8c8c8c" }} />
           <Statistic title="通过率" value={summary.total > 0 ? ((summary.pass / summary.total) * 100).toFixed(1) : 0} suffix="%" />
           <div style={{ paddingLeft: 16, borderLeft: "1px solid #f0f0f0" }}>

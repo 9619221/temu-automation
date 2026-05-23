@@ -22,6 +22,7 @@ import type { ColumnsType } from "antd/es/table";
 import { BellOutlined, DeleteOutlined, EditOutlined, LinkOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, StarOutlined } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
 import { useErpAuth } from "../contexts/ErpAuthContext";
+import ProductMasterData from "./ProductMasterData";
 
 const { Text } = Typography;
 const erp = window.electronAPI?.erp;
@@ -175,7 +176,7 @@ interface UrlSpecDialogState {
   rows: MappingSpecRow[];
 }
 
-type MappingTabKey = "bound" | "unbound";
+type MappingTabKey = "profiles" | "bound" | "unbound";
 
 interface PageResult<T> {
   rows: T[];
@@ -184,6 +185,10 @@ interface PageResult<T> {
 
 function canManage(role?: string | null) {
   return Boolean(role && ["admin", "manager", "buyer"].includes(role));
+}
+
+function canViewSupplierProfiles(role?: string | null) {
+  return Boolean(role && ["admin", "buyer"].includes(role));
 }
 
 function formatDateTime(value?: string | null) {
@@ -365,12 +370,14 @@ function buildPageParams(page: number, search: string) {
 
 export default function AlibabaMapping() {
   const auth = useErpAuth();
-  const editable = canManage(auth.currentUser?.role);
+  const currentRole = auth.currentUser?.role;
+  const editable = canManage(currentRole);
+  const supplierProfilesVisible = canViewSupplierProfiles(currentRole);
   const [form] = Form.useForm<MappingFormValues>();
   const [saving, setSaving] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editingRow, setEditingRow] = useState<Sku1688SourceRow | null>(null);
-  const [activeTab, setActiveTab] = useState<MappingTabKey>("bound");
+  const [activeTab, setActiveTab] = useState<MappingTabKey>(() => (supplierProfilesVisible ? "profiles" : "bound"));
   const [boundRows, setBoundRows] = useState<Sku1688SourceRow[]>([]);
   const [boundTotal, setBoundTotal] = useState(0);
   const [boundPage, setBoundPage] = useState(1);
@@ -457,6 +464,12 @@ export default function AlibabaMapping() {
     }, 400);
     return () => window.clearTimeout(timer);
   }, [unboundSearch]);
+
+  useEffect(() => {
+    if (activeTab === "profiles" && !supplierProfilesVisible) {
+      setActiveTab("bound");
+    }
+  }, [activeTab, supplierProfilesVisible]);
 
   useEffect(() => {
     if (activeTab !== "bound" && !boundLoadedRef.current) return;
@@ -1277,7 +1290,7 @@ export default function AlibabaMapping() {
     },
   ], [actionLoadingId, deleteMapping, editable, openCreateForSku, run1688SourceAction]);
 
-  const currentLoading = activeTab === "bound" ? boundLoading : unboundLoading;
+  const currentLoading = activeTab === "bound" ? boundLoading : activeTab === "unbound" ? unboundLoading : false;
   const searchPlaceholder = "搜索商品编码 / 商品名称 / 规格 / 供应商 / 1688货号";
 
   const renderPagedTable = (
@@ -1337,8 +1350,10 @@ export default function AlibabaMapping() {
         compact
         eyebrow="业务"
         title="供应商管理"
-        meta={[`已绑定 ${boundTotal}`, `未绑定 ${unboundTotal}`]}
-        actions={[
+        meta={activeTab === "profiles"
+          ? ["供应商档案", "主数据 / 结算 / 采购关系"]
+          : [`已绑定 ${boundTotal}`, `未绑定 ${unboundTotal}`]}
+        actions={activeTab === "profiles" ? [] : [
           <Button
             key="relation-supply"
             icon={<SearchOutlined />}
@@ -1364,8 +1379,17 @@ export default function AlibabaMapping() {
       <section className="content-card alibaba-mapping-panel alibaba-mapping-panel--fixed-bottom">
         <Tabs
           activeKey={activeTab}
-          onChange={(key) => setActiveTab(key as MappingTabKey)}
+          onChange={(key) => {
+            const nextTab = key as MappingTabKey;
+            if (nextTab === "profiles" && !supplierProfilesVisible) return;
+            setActiveTab(nextTab);
+          }}
           items={[
+            ...(supplierProfilesVisible ? [{
+              key: "profiles" as const,
+              label: "供应商档案",
+              children: <ProductMasterData mode="suppliers" embedded />,
+            }] : []),
             {
               key: "bound",
               label: "已绑定",

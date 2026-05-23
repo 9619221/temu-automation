@@ -43,7 +43,6 @@ const ROUTE_ROLES: Record<string, string[]> = {
   "/image-studio-gpt": ["admin", "manager", "operations"],
   "/auto-image-swap": ["admin", "manager", "operations"],
   "/collect": ["admin", "manager", "operations"],
-  "/multi-store-cloud": ["admin", "manager", "operations"],
   "/accounts": ["admin", "manager", "operations"],
   "/competitor": ["admin", "manager", "operations"],
   "/price-review": ["admin", "manager", "operations"],

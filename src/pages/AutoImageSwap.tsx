@@ -2,17 +2,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button,
-  Card,
   Form,
   Input,
+  Progress,
   Space,
-  Statistic,
   Table,
   Tag,
   Typography,
   message,
 } from "antd";
-import { FolderOpenOutlined, PlayCircleOutlined } from "@ant-design/icons";
+import { CheckCircleOutlined, CloseCircleOutlined, FolderOpenOutlined, PlayCircleOutlined, SyncOutlined } from "@ant-design/icons";
+import PageHeader from "../components/PageHeader";
 import {
   APP_SETTINGS_KEY,
   normalizeAppSettings,
@@ -205,25 +205,44 @@ export default function AutoImageSwap() {
     const completed = progress?.completed ?? 0;
     return { total, success, fail, completed };
   }, [progress, identifiers.length]);
+  const progressPercent = summary.total > 0 ? Math.round((summary.completed / summary.total) * 100) : 0;
+  const progressStatus = running ? "active" : summary.fail > 0 ? "exception" : progressPercent === 100 && summary.total > 0 ? "success" : "normal";
 
   return (
-    <Space direction="vertical" size={16} style={{ width: "100%" }}>
-      <Card title="批量替换 Temu SPU 主图/轮播图" bordered={false}>
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 16 }}
-          message="使用说明"
-          description={
+    <div className="dashboard-shell auto-swap-shell">
+      <PageHeader
+        compact
+        eyebrow="工具"
+        title="批量替换图片"
+        subtitle="按 SPU/SKC 批量替换 Temu 主图与轮播图，适合大批量素材上新或统一换季。"
+        meta={[`${identifiers.length} 个已识别`, running ? "执行中" : "待执行"]}
+        actions={(
+          <Button
+            type="primary"
+            icon={<PlayCircleOutlined />}
+            loading={running}
+            disabled={!rootDir.trim() || identifiers.length === 0}
+            onClick={handleRun}
+          >
+            开始替换
+          </Button>
+        )}
+      />
+
+      <div className="auto-swap-layout">
+        <section className="app-panel auto-swap-input-panel">
+          <div className="app-panel__title">
             <div>
-              <div>1. 选择图片根目录；在根目录下为每个 SPU/SKC 创建同名子文件夹，把要替换的图片放进去。</div>
-              <div>2. 子文件夹内所有图按文件名字典序排序，作为新的轮播图顺序（第一张即新主图）。</div>
-              <div>3. 在下方贴 SPU/SKC 清单（换行、逗号、空格、分号都支持），点开始。</div>
-              <div>4. 任务会自动复用已登录的 Temu 卖家后台 Session。运行中请勿手工操作浏览器。</div>
+              <div className="app-panel__title-main">任务输入</div>
+              <div className="app-panel__title-sub">选择图片根目录，再粘贴需要替换图片的 SPU/SKC 清单。</div>
             </div>
-          }
-        />
-        <Form layout="vertical" disabled={running || !bootstrapped}>
+          </div>
+          <div className="auto-swap-guide">
+            <div><strong>1</strong><span>根目录下为每个 SPU/SKC 创建同名子文件夹。</span></div>
+            <div><strong>2</strong><span>子文件夹图片按文件名字典序成为轮播图顺序。</span></div>
+            <div><strong>3</strong><span>任务会复用已登录的 Temu 卖家后台 Session。</span></div>
+          </div>
+          <Form layout="vertical" disabled={running || !bootstrapped}>
           <Form.Item label="图片根目录">
             <Space.Compact style={{ width: "100%" }}>
               <Input
@@ -260,49 +279,72 @@ export default function AutoImageSwap() {
             开始替换
           </Button>
         </Form>
-      </Card>
+        </section>
 
-      {(progress || running) && (
-        <Card
-          title={
-            <Space>
-              <span>执行进度</span>
-              {taskId && <Text type="secondary" style={{ fontSize: 12 }}>{taskId}</Text>}
-            </Space>
-          }
-          bordered={false}
-        >
-          <Space size={32} style={{ marginBottom: 16 }}>
-            <Statistic title="总数" value={summary.total} />
-            <Statistic title="已完成" value={summary.completed} />
-            <Statistic title="成功" value={summary.success} valueStyle={{ color: "#3f8600" }} />
-            <Statistic title="失败" value={summary.fail} valueStyle={{ color: "#cf1322" }} />
-          </Space>
+        <section className="app-panel auto-swap-progress-panel">
+          <div className="app-panel__title">
+            <div>
+              <div className="app-panel__title-main">执行进度</div>
+              <div className="app-panel__title-sub">{taskId || "任务启动后会显示本次任务 ID 与处理进度。"}</div>
+            </div>
+          </div>
+          <div className="auto-swap-metric-grid">
+            <div className="auto-swap-metric">
+              <span>总数</span>
+              <strong>{summary.total}</strong>
+            </div>
+            <div className="auto-swap-metric is-running">
+              <span>已完成</span>
+              <strong>{summary.completed}</strong>
+            </div>
+            <div className="auto-swap-metric is-success">
+              <span>成功</span>
+              <strong>{summary.success}</strong>
+            </div>
+            <div className="auto-swap-metric is-danger">
+              <span>失败</span>
+              <strong>{summary.fail}</strong>
+            </div>
+          </div>
+          <Progress
+            percent={progressPercent}
+            status={progressStatus}
+            strokeColor={summary.fail > 0 ? "#ea4335" : "#1a73e8"}
+            showInfo={false}
+          />
           {progress?.current && (
             <Alert type="info" showIcon style={{ marginBottom: 12 }} message={progress.current} />
           )}
-          <Table
-            size="small"
-            rowKey="spuId"
-            dataSource={rows}
-            pagination={{ pageSize: 20 }}
-            columns={[
-              { title: "SPU / SKC", dataIndex: "spuId", width: 200 },
-              {
-                title: "状态",
-                dataIndex: "status",
-                width: 110,
-                render: (v: ResultRow["status"]) => {
-                  const tag = STATUS_TAG[v] || { color: "default", text: v };
-                  return <Tag color={tag.color}>{tag.text}</Tag>;
+          {rows.length > 0 ? (
+            <Table
+              size="small"
+              rowKey="spuId"
+              dataSource={rows}
+              pagination={{ pageSize: 20 }}
+              columns={[
+                { title: "SPU / SKC", dataIndex: "spuId", width: 200 },
+                {
+                  title: "状态",
+                  dataIndex: "status",
+                  width: 110,
+                  render: (v: ResultRow["status"]) => {
+                    const tag = STATUS_TAG[v] || { color: "default", text: v };
+                    const icon = v === "done" ? <CheckCircleOutlined /> : v === "error" || v === "missing" || v === "empty" ? <CloseCircleOutlined /> : v === "processing" ? <SyncOutlined spin /> : undefined;
+                    return <Tag color={tag.color} icon={icon}>{tag.text}</Tag>;
+                  },
                 },
-              },
-              { title: "图片数", dataIndex: "files", width: 90 },
-              { title: "信息", dataIndex: "message", ellipsis: true },
-            ]}
-          />
-        </Card>
-      )}
-    </Space>
+                { title: "图片数", dataIndex: "files", width: 90 },
+                { title: "信息", dataIndex: "message", ellipsis: true },
+              ]}
+            />
+          ) : (
+            <div className="auto-swap-empty-state">
+              <PlayCircleOutlined />
+              <span>配置任务后点击开始替换。</span>
+            </div>
+          )}
+        </section>
+      </div>
+    </div>
   );
 }

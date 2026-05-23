@@ -38,8 +38,8 @@ const fmtCompact = (v: number) => {
   return `${Math.round(v)}`;
 };
 
-const PRIORITY_COLOR = { P0: "#ff4d4f", P1: "#fa8c16", P2: "#1677ff" };
-const TEMU_ORANGE = "#e55b00";
+const PRIORITY_COLOR = { P0: "#ea4335", P1: "#fbbc04", P2: "#1a73e8" };
+const TEMU_ORANGE = "#1a73e8";
 
 interface ActionItem {
   priority: "P0" | "P1" | "P2";
@@ -207,7 +207,7 @@ const ProductFluxOperatorCard: React.FC<Props> = ({
   const hasCrossSiteGap = productRows.length >= 2 && winner.clickPayRate - loser.clickPayRate >= 3 && winner.click >= 30;
 
   const healthScore = computeHealthScore(activeRow, benchmark);
-  const healthColor = healthScore >= 75 ? "#52c41a" : healthScore >= 50 ? "#1677ff" : healthScore >= 30 ? "#faad14" : "#ff4d4f";
+  const healthColor = healthScore >= 75 ? "#52c41a" : healthScore >= 50 ? "#1a73e8" : healthScore >= 30 ? "#faad14" : "#ea4335";
   const healthLabel = healthScore >= 75 ? "优秀" : healthScore >= 50 ? "良好" : healthScore >= 30 ? "需改进" : "亟需优化";
   const opportunity = quantifyOpportunity(activeRow, benchmark);
   const sitePool = report.rows.filter((r) => r.site === activeRow.site);
@@ -217,7 +217,7 @@ const ProductFluxOperatorCard: React.FC<Props> = ({
   const anomalies = detectAnomalies(activeRow.daily);
   const actions = buildActionList(activeRow, benchmark, anomalies);
 
-  const rankColor = (p: number) => (p >= 70 ? "#52c41a" : p >= 30 ? "#1677ff" : "#fa541c");
+  const rankColor = (p: number) => (p >= 70 ? "#52c41a" : p >= 30 ? "#1a73e8" : "#fa541c");
   const rankLabel = (p: number) => (p >= 70 ? "TOP" : p >= 30 ? "中位" : "末位");
 
   return (
@@ -271,13 +271,13 @@ const ProductFluxOperatorCard: React.FC<Props> = ({
             <Tag color={BOTTLENECK_COLOR[activeRow.bottleneck]} style={{ fontSize: 12, fontWeight: 600, border: "none" }}>
               瓶颈：{activeRow.bottleneck}
             </Tag>
-            <Tag style={{ background: "#fafafa", border: "none", color: "#595959", fontSize: 11 }}>
+            <Tag style={{ background: "#f8fbff", border: "none", color: "#595959", fontSize: 11 }}>
               曝光 <b style={{ color: rankColor(exposeRank) }}>{rankLabel(exposeRank)} {exposeRank}</b>
             </Tag>
-            <Tag style={{ background: "#fafafa", border: "none", color: "#595959", fontSize: 11 }}>
+            <Tag style={{ background: "#f8fbff", border: "none", color: "#595959", fontSize: 11 }}>
               CTR <b style={{ color: rankColor(ctrRank) }}>{rankLabel(ctrRank)} {ctrRank}</b>
             </Tag>
-            <Tag style={{ background: "#fafafa", border: "none", color: "#595959", fontSize: 11 }}>
+            <Tag style={{ background: "#f8fbff", border: "none", color: "#595959", fontSize: 11 }}>
               点击支付率 <b style={{ color: rankColor(cpcRank) }}>{rankLabel(cpcRank)} {cpcRank}</b>
             </Tag>
             <Tooltip title={`同站点共 ${sitePool.length} 个商品参与排名`}>
@@ -301,8 +301,8 @@ const ProductFluxOperatorCard: React.FC<Props> = ({
           </div>
 
           {opportunity && (
-            <div style={{ background: "linear-gradient(90deg, #fffbe6 0%, #fff7e6 100%)", border: "1px solid #ffe58f", borderRadius: 8, padding: "8px 12px" }}>
-              <FireOutlined style={{ color: "#fa8c16", marginRight: 6 }} />
+            <div style={{ background: "rgba(255, 159, 10, 0.10)", border: "1px solid rgba(255, 159, 10, 0.22)", borderRadius: 8, padding: "8px 12px" }}>
+              <FireOutlined style={{ color: "#fbbc04", marginRight: 6 }} />
               <Text style={{ fontSize: 13 }}>
                 <b>机会测算：</b>{opportunity.label} → 预计日新增买家
                 <span style={{ color: "#fa541c", fontSize: 18, fontWeight: 700, margin: "0 6px" }}>+{opportunity.lift.toFixed(1)}</span>
@@ -332,8 +332,8 @@ const ProductFluxOperatorCard: React.FC<Props> = ({
                 gap: 10,
                 alignItems: "center",
                 padding: "10px 12px",
-                background: i % 2 === 0 ? "#fff" : "#fafafa",
-                borderTop: i > 0 ? "1px solid #f5f5f5" : "none",
+                background: i % 2 === 0 ? "#fff" : "#f8fbff",
+                borderTop: i > 0 ? "1px solid #f8fbff" : "none",
                 fontSize: 13,
               }}
             >
@@ -341,7 +341,7 @@ const ProductFluxOperatorCard: React.FC<Props> = ({
                 {a.priority}
               </Tag>
               <span style={{ color: "#262626", lineHeight: 1.5 }}>{a.text}</span>
-              <Tag style={{ background: "#f0f5ff", border: "none", color: "#1677ff", margin: 0, textAlign: "center" }}>
+              <Tag style={{ background: "#f0f5ff", border: "none", color: "#1a73e8", margin: 0, textAlign: "center" }}>
                 {a.impact}
               </Tag>
             </div>
@@ -397,14 +397,14 @@ const ProductFluxOperatorCard: React.FC<Props> = ({
               }
               const isActive = row.site === activeRow.site;
               const isWinner = winner && row.site === winner.site && hasCrossSiteGap;
-              const slopeColor = row.exposeSlope > 5 ? "#52c41a" : row.exposeSlope < -10 ? "#ff4d4f" : "#8c8c8c";
+              const slopeColor = row.exposeSlope > 5 ? "#52c41a" : row.exposeSlope < -10 ? "#ea4335" : "#8c8c8c";
               return (
                 <div
                   key={site}
                   style={{
                     padding: "8px 12px",
                     border: isActive ? `1px solid ${TEMU_ORANGE}` : "1px solid #f0f0f0",
-                    background: isActive ? "#fff7e6" : "#fff",
+                    background: isActive ? "rgba(26, 115, 232, 0.06)" : "#fff",
                     borderRadius: 8,
                     display: "flex",
                     alignItems: "center",

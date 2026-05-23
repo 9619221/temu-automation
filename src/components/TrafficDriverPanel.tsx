@@ -8,12 +8,12 @@ import { toSafeNumber, average } from "../utils/dataTransform";
 
 const { Text } = Typography;
 
-const TEMU_ORANGE = "#e55b00";
+const TEMU_ORANGE = "#1a73e8";
 const TRAFFIC_CHART_COLORS = {
-  expose: "#ff8a1f",
+  expose: "#0a84ff",
   clickRate: "#4e79a7",
   clickPayRate: "#f6c343",
-  search: "#ff8a1f",
+  search: "#5ac8fa",
   recommend: "#5b7fa3",
   other: "#f6c343",
   grid: "#d9d9d9",
@@ -600,7 +600,7 @@ export function TrafficDriverPanel({
   return (
     <Card
       size="small"
-      style={{ borderRadius: 16, background: "#fafafa", border: "1px solid #f0f0f0" }}
+      style={{ borderRadius: 16, background: "#f8fbff", border: "1px solid #f0f0f0" }}
       bodyStyle={{ padding: 16 }}
     >
       <Space direction="vertical" size="middle" style={{ width: "100%" }}>
@@ -654,12 +654,12 @@ export function TrafficDriverPanel({
         </div>
 
         {activeSite?.summary?.growDataText ? (
-          <div style={{ borderRadius: 12, background: "#fff7e6", border: "1px solid #ffe7ba", padding: "10px 12px", color: "#ad4e00" }}>
+          <div style={{ borderRadius: 8, background: "rgba(255, 159, 10, 0.10)", border: "1px solid rgba(255, 159, 10, 0.22)", padding: "10px 12px", color: "#9a6700" }}>
             增长潜力：{activeSite.summary.growDataText}
           </div>
         ) : null}
         {todayFallbackText ? (
-          <div style={{ borderRadius: 12, background: "#fffbe6", border: "1px solid #ffe58f", padding: "10px 12px", color: "#ad6800" }}>
+          <div style={{ borderRadius: 8, background: "rgba(255, 204, 0, 0.12)", border: "1px solid rgba(255, 204, 0, 0.24)", padding: "10px 12px", color: "#8a6d00" }}>
             {todayFallbackText}
           </div>
         ) : null}
@@ -761,12 +761,12 @@ export function TrafficDriverPanel({
                       }}
                     >
                       <Text strong>{step.displayLabel}</Text>
-                      <div style={{ height: 12, background: "#f5f5f5", borderRadius: 999, overflow: "hidden" }}>
+                      <div style={{ height: 12, background: "#f8fbff", borderRadius: 999, overflow: "hidden" }}>
                         <div
                           style={{
                             width: `${step.widthPercent}%`,
                             height: "100%",
-                            background: index === 0 ? "#fa8c16" : index === 1 ? "#ffb347" : index === 2 ? "#69b1ff" : index === 3 ? "#95de64" : "#36cfc9",
+                            background: index === 0 ? "#1a73e8" : index === 1 ? "#5ac8fa" : index === 2 ? "#34a853" : index === 3 ? "#fbbc04" : "#af52de",
                             borderRadius: 999,
                           }}
                         />
@@ -796,8 +796,8 @@ export function TrafficDriverPanel({
                       onClick={() => onActiveSiteKeyChange(site.siteKey)}
                       style={{
                         border: selected ? `1px solid ${TEMU_ORANGE}` : "1px solid #f0f0f0",
-                        background: selected ? "#fff7e6" : "#fff",
-                        borderRadius: 12,
+                        background: selected ? "rgba(26, 115, 232, 0.06)" : "#fff",
+                        borderRadius: 8,
                         padding: 12,
                         cursor: "pointer",
                       }}

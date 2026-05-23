@@ -82,13 +82,13 @@ const store = window.electronAPI?.store;
 const automation = window.electronAPI?.automation;
 const competitor = window.electronAPI?.competitor;
 
-const TEMU_ORANGE = "#e55b00";
-const CARD_STYLE: React.CSSProperties = { borderRadius: 16, boxShadow: "0 2px 8px rgba(0,0,0,0.06)" };
+const TEMU_ORANGE = "#1a73e8";
+const CARD_STYLE: React.CSSProperties = { borderRadius: 8, boxShadow: "0 1px 2px rgba(0,0,0,0.04), 0 12px 32px rgba(0,0,0,0.06)" };
 const TRAFFIC_CHART_COLORS = {
-  expose: "#ff8a1f",
+  expose: "#0a84ff",
   clickRate: "#4e79a7",
   clickPayRate: "#f6c343",
-  search: "#ff8a1f",
+  search: "#5ac8fa",
   recommend: "#5b7fa3",
   other: "#f6c343",
   grid: "#d9d9d9",
@@ -97,7 +97,7 @@ const TRAFFIC_CHART_COLORS = {
 };
 const PRODUCT_WORKSPACE_STORE_KEY = "temu_competitor_product_workspaces";
 const COMPETITOR_TRACKED_UPDATED_EVENT = "temu:competitor-tracked-updated";
-const PRICE_COLORS = ["#ff7300", "#ff9500", "#ffb700", "#ffd900", "#52c41a", "#1677ff", "#722ed1", "#eb2f96"];
+const PRICE_COLORS = ["#1a73e8", "#5ac8fa", "#34a853", "#fbbc04", "#fbbc04", "#af52de", "#ff2d55", "#8e8e93"];
 const YUNQI_AUTH_INVALID_CODE = "YUNQI_AUTH_INVALID";
 const YUNQI_NOT_MATCHED_MESSAGE = "云启在线当前没有返回这件商品的精确详情，请先确认 goodsId 是否正确，或重新登录云启后再试。";
 const DEFAULT_WAREHOUSE_TYPE = 0;
@@ -703,7 +703,7 @@ export function _buildTrafficSourceOverview(summary: any) {
       label: "搜索曝光",
       value: searchExpose,
       share: searchExpose / total,
-      color: "#fa8c16",
+      color: "#fbbc04",
     },
     {
       key: "recommend",
@@ -3495,10 +3495,10 @@ export default function CompetitorProductWorkbench({
                       height={68}
                       preview={false}
                       style={{ objectFit: "cover", borderRadius: 10, flexShrink: 0 }}
-                      fallback="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='68' height='68'><rect width='100%' height='100%' fill='#f5f5f5'/></svg>"
+                      fallback="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='68' height='68'><rect width='100%' height='100%' fill='#f8fbff'/></svg>"
                     />
                   ) : (
-                    <div style={{ width: 68, height: 68, borderRadius: 10, background: "#f5f5f5", flexShrink: 0 }} />
+                    <div style={{ width: 68, height: 68, borderRadius: 10, background: "#f8fbff", flexShrink: 0 }} />
                   )}
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <Text strong style={{ display: "block", lineHeight: 1.5 }}>
@@ -3573,8 +3573,8 @@ export default function CompetitorProductWorkbench({
       <div
         style={{
           borderRadius: 12,
-          border: "1px dashed rgba(229,91,0,0.4)",
-          background: "rgba(255,247,240,0.5)",
+          border: "1px dashed rgba(26, 115, 232, 0.28)",
+          background: "rgba(26, 115, 232, 0.05)",
           padding: 14,
         }}
       >
@@ -3730,14 +3730,14 @@ export default function CompetitorProductWorkbench({
                         { label: "周销", value: toSafeNumber(selectedYunqiDetail.weeklySales), color: "#262626" },
                         { label: "月销", value: toSafeNumber(selectedYunqiDetail.monthlySales), color: "#262626" },
                         { label: "累计", value: toSafeNumber(selectedYunqiDetail.totalSales), color: "#262626" },
-                        { label: "评分", value: toSafeNumber(selectedYunqiDetail.score ?? selectedYunqiDetail.rating), precision: 1, color: "#fa8c16" },
+                        { label: "评分", value: toSafeNumber(selectedYunqiDetail.score ?? selectedYunqiDetail.rating), precision: 1, color: "#fbbc04" },
                         { label: "USD GMV", value: toSafeNumber(selectedYunqiDetail.usdGmv), prefix: "$", precision: 2, color: "#389e0d" },
                         { label: "EUR GMV", value: toSafeNumber(selectedYunqiDetail.eurGmv), prefix: "€", precision: 2, color: "#389e0d" },
                         { label: "评论", value: toSafeNumber(selectedYunqiDetail.reviewCount), color: "#595959" },
                         { label: "同款数", value: toSafeNumber(selectedYunqiDetail.sameNum), color: "#595959" },
                         { label: "广告", value: Array.isArray(selectedYunqiDetail.adRecords) ? selectedYunqiDetail.adRecords.length : 0, color: "#595959" },
                       ].map((item) => (
-                        <div key={item.label} style={{ background: "#fafafa", borderRadius: 10, padding: "8px 10px", border: "1px solid #f0f0f0" }}>
+                        <div key={item.label} style={{ background: "#f8fbff", borderRadius: 10, padding: "8px 10px", border: "1px solid #f0f0f0" }}>
                           <div style={{ fontSize: 11, color: "#8c8c8c", marginBottom: 2 }}>{item.label}</div>
                           <div style={{ fontSize: 17, fontWeight: 600, color: item.color, lineHeight: 1.3 }}>
                             {item.prefix || ""}{item.precision != null ? Number(item.value || 0).toLocaleString(undefined, { minimumFractionDigits: item.precision, maximumFractionDigits: item.precision }) : (item.value || 0).toLocaleString()}
@@ -3748,7 +3748,7 @@ export default function CompetitorProductWorkbench({
 
                     {/* ── 原始标题 ── */}
                     <Paragraph
-                      style={{ margin: 0, padding: "8px 12px", background: "#fafafa", borderRadius: 10, border: "1px solid #f0f0f0", lineHeight: 1.8, fontSize: 13, color: "#595959" }}
+                      style={{ margin: 0, padding: "8px 12px", background: "#f8fbff", borderRadius: 10, border: "1px solid #f0f0f0", lineHeight: 1.8, fontSize: 13, color: "#595959" }}
                       ellipsis={{ rows: 2, expandable: true, symbol: "展开" }}
                     >
                       {firstTextValue(selectedYunqiDetail.titleZh, selectedYunqiDetail.titleEn, selectedYunqiDetail.originalTitle, selectedYunqiDetail.title) || "-"}
@@ -3759,7 +3759,7 @@ export default function CompetitorProductWorkbench({
                       size="small"
                       bordered
                       column={{ xs: 2, sm: 3, md: 3, lg: 3 }}
-                      labelStyle={{ fontSize: 12, color: "#8c8c8c", padding: "6px 10px", background: "#fafafa" }}
+                      labelStyle={{ fontSize: 12, color: "#8c8c8c", padding: "6px 10px", background: "#f8fbff" }}
                       contentStyle={{ fontSize: 13, padding: "6px 10px", fontWeight: 500 }}
                     >
                       <Descriptions.Item label="美元价">{formatMoneyDisplay(selectedYunqiDetail.usdPrice)}</Descriptions.Item>
@@ -3796,7 +3796,7 @@ export default function CompetitorProductWorkbench({
                             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>分站价格</div>
                             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(100px, 1fr))", gap: 6 }}>
                               {selectedYunqiPriceItems.map((item: any) => (
-                                <div key={item.key} style={{ borderRadius: 8, border: "1px solid #f0f0f0", background: "#fafafa", padding: "6px 10px" }}>
+                                <div key={item.key} style={{ borderRadius: 8, border: "1px solid #f0f0f0", background: "#f8fbff", padding: "6px 10px" }}>
                                   <div style={{ fontSize: 11, color: "#8c8c8c" }}>{item.site}</div>
                                   <div style={{ fontSize: 15, fontWeight: 600, color: "#262626", marginTop: 2 }}>{item.priceLabel}</div>
                                 </div>
@@ -3809,7 +3809,7 @@ export default function CompetitorProductWorkbench({
                             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>近日销量走势</div>
                             <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 4 }}>
                               {selectedYunqiSalesTrendItems.map((item: any) => (
-                                <div key={item.key} style={{ minWidth: 72, borderRadius: 8, border: "1px solid #f0f0f0", background: "#fafafa", padding: "6px 10px", flexShrink: 0, textAlign: "center" }}>
+                                <div key={item.key} style={{ minWidth: 72, borderRadius: 8, border: "1px solid #f0f0f0", background: "#f8fbff", padding: "6px 10px", flexShrink: 0, textAlign: "center" }}>
                                   <div style={{ fontSize: 11, color: "#8c8c8c", whiteSpace: "nowrap" }}>{item.date}</div>
                                   <div style={{ fontSize: 15, fontWeight: 600, color: "#262626", marginTop: 2 }}>{item.sales}</div>
                                 </div>
@@ -3828,7 +3828,7 @@ export default function CompetitorProductWorkbench({
 
             <Card
               size="small"
-              style={{ borderRadius: 16, background: "#fafafa", border: "1px solid #f0f0f0" }}
+              style={{ borderRadius: 16, background: "#f8fbff", border: "1px solid #f0f0f0" }}
               bodyStyle={{ padding: 16 }}
             >
               <Space direction="vertical" size="middle" style={{ width: "100%" }}>
@@ -4159,7 +4159,7 @@ export default function CompetitorProductWorkbench({
                       style={{
                         borderRadius: 16,
                         border: "1px solid #f0f0f0",
-                        background: "#fafafa",
+                        background: "#f8fbff",
                         padding: 16,
                       }}
                     >
@@ -4227,7 +4227,7 @@ export default function CompetitorProductWorkbench({
                                     style={{
                                       borderRadius: 12,
                                       border: "1px solid #f0f0f0",
-                                      background: "#fafafa",
+                                      background: "#f8fbff",
                                       padding: "10px 12px",
                                     }}
                                   >
@@ -4263,7 +4263,7 @@ export default function CompetitorProductWorkbench({
                                       minWidth: 96,
                                       borderRadius: 12,
                                       border: "1px solid #f0f0f0",
-                                      background: "#fafafa",
+                                      background: "#f8fbff",
                                       padding: "10px 12px",
                                       flexShrink: 0,
                                     }}
@@ -4296,7 +4296,7 @@ export default function CompetitorProductWorkbench({
 
             <Card
               size="small"
-              style={{ borderRadius: 16, background: "#fafafa", border: "1px solid #f0f0f0" }}
+              style={{ borderRadius: 16, background: "#f8fbff", border: "1px solid #f0f0f0" }}
               bodyStyle={{ padding: 16 }}
             >
               <Space direction="vertical" size="middle" style={{ width: "100%" }}>
@@ -4354,9 +4354,9 @@ export default function CompetitorProductWorkbench({
                 {activeTrafficSite?.summary?.growDataText ? (
                   <div
                     style={{
-                      borderRadius: 12,
-                      background: "#fff7e6",
-                      border: "1px solid #ffe7ba",
+                      borderRadius: 8,
+                      background: "rgba(255, 159, 10, 0.10)",
+                      border: "1px solid rgba(255, 159, 10, 0.22)",
                       padding: "10px 12px",
                       color: "#ad4e00",
                     }}
@@ -4367,9 +4367,9 @@ export default function CompetitorProductWorkbench({
                 {activeTrafficTodayFallbackText ? (
                   <div
                     style={{
-                      borderRadius: 12,
-                      background: "#fffbe6",
-                      border: "1px solid #ffe58f",
+                      borderRadius: 8,
+                      background: "rgba(255, 204, 0, 0.12)",
+                      border: "1px solid rgba(255, 204, 0, 0.24)",
                       padding: "10px 12px",
                       color: "#ad6800",
                     }}
@@ -4478,12 +4478,12 @@ export default function CompetitorProductWorkbench({
                               }}
                             >
                               <Text strong>{step.displayLabel}</Text>
-                              <div style={{ height: 12, background: "#f5f5f5", borderRadius: 999, overflow: "hidden" }}>
+                              <div style={{ height: 12, background: "#f8fbff", borderRadius: 999, overflow: "hidden" }}>
                                 <div
                                   style={{
                                     width: `${step.widthPercent}%`,
                                     height: "100%",
-                                    background: index === 0 ? "#fa8c16" : index === 1 ? "#ffb347" : index === 2 ? "#69b1ff" : index === 3 ? "#95de64" : "#36cfc9",
+                                    background: index === 0 ? "#1a73e8" : index === 1 ? "#5ac8fa" : index === 2 ? "#34a853" : index === 3 ? "#fbbc04" : "#af52de",
                                     borderRadius: 999,
                                   }}
                                 />
@@ -4513,8 +4513,8 @@ export default function CompetitorProductWorkbench({
                               onClick={() => setTrafficActiveSiteKey(site.siteKey)}
                               style={{
                                 border: selected ? `1px solid ${TEMU_ORANGE}` : "1px solid #f0f0f0",
-                                background: selected ? "#fff7e6" : "#fff",
-                                borderRadius: 12,
+                                background: selected ? "rgba(26, 115, 232, 0.06)" : "#fff",
+                                borderRadius: 8,
                                 padding: 12,
                                 cursor: "pointer",
                               }}
@@ -4770,19 +4770,19 @@ export default function CompetitorProductWorkbench({
     const softPanelStyle: React.CSSProperties = {
       borderRadius: 14,
       border: "1px solid #f0f0f0",
-      background: "#fafafa",
+      background: "#f8fbff",
       padding: 16,
       height: "100%",
     };
     const accentPanelStyle: React.CSSProperties = {
       ...softPanelStyle,
-      border: "1px solid rgba(229,91,0,0.16)",
-      background: "linear-gradient(180deg, rgba(255,247,240,0.92) 0%, rgba(255,255,255,1) 100%)",
+      border: "1px solid rgba(26, 115, 232, 0.16)",
+      background: "linear-gradient(180deg, rgba(26, 115, 232, 0.07) 0%, rgba(255,255,255,1) 100%)",
     };
     const outlinePanelStyle: React.CSSProperties = {
       ...softPanelStyle,
       background: "#fff",
-      border: "1px solid rgba(229,91,0,0.12)",
+      border: "1px solid rgba(26, 115, 232, 0.12)",
     };
     void outlinePanelStyle; // 保留备用样式
     const sectionTitleStyle: React.CSSProperties = { fontSize: 13, color: "#8c8c8c" };
@@ -4873,8 +4873,8 @@ export default function CompetitorProductWorkbench({
     const OPP_FACTOR_COLORS: Record<string, string> = {
       crowd: "#eb2f96",
       concentration: "#cf1322",
-      score: "#fa8c16",
-      video: "#d48806",
+      score: "#fbbc04",
+      video: "#fbbc04",
       review: "#faad14",
       priceBand: "#52c41a",
     };
@@ -4904,7 +4904,7 @@ export default function CompetitorProductWorkbench({
                 {opportunityBreakdown.map((factor) => {
                   const denom = factor.direction === "negative" ? 38 : 18; // 最大扣分 38（拥挤度），最大加分 ~18
                   const widthPct = Math.min(100, (factor.contribution / denom) * 100);
-                  const color = OPP_FACTOR_COLORS[factor.key] || "#1677ff";
+                  const color = OPP_FACTOR_COLORS[factor.key] || "#1a73e8";
                   return (
                     <div key={factor.key}>
                       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 12, marginBottom: 4 }}>
@@ -4916,7 +4916,7 @@ export default function CompetitorProductWorkbench({
                           <Text type="secondary">{factor.rawLabel}</Text>
                         </Space>
                       </div>
-                      <div style={{ background: "#f5f5f5", borderRadius: 4, height: 8, overflow: "hidden" }}>
+                      <div style={{ background: "#f8fbff", borderRadius: 4, height: 8, overflow: "hidden" }}>
                         <div style={{ width: `${widthPct}%`, height: "100%", background: color, opacity: factor.contribution > 0 ? 1 : 0.25 }} />
                       </div>
                       <div style={{ marginTop: 4, fontSize: 12, color: "#8c8c8c", lineHeight: 1.6 }}>
@@ -4942,8 +4942,8 @@ export default function CompetitorProductWorkbench({
               // 热力：销量占比越高颜色越橙；商品占比越高边框越重
               const bg = band.isRecommended
                 ? `rgba(82,196,26,${0.12 + heat * 0.35})`
-                : `rgba(229,91,0,${0.06 + heat * 0.4})`;
-              const borderColor = band.isRecommended ? "#52c41a" : "rgba(229,91,0,0.4)";
+                : `rgba(0,122,255,${0.05 + heat * 0.22})`;
+              const borderColor = band.isRecommended ? "#34a853" : "rgba(0,122,255,0.28)";
               // 商品占比与销量占比的差：正数 = 供给过剩，负数 = 蓝海
               const gap = band.countShare - band.salesShare;
               const gapText = gap > 0.08
@@ -5131,8 +5131,8 @@ export default function CompetitorProductWorkbench({
                     <PolarGrid />
                     <PolarAngleAxis dataKey="axis" tick={{ fontSize: 12 }} />
                     <PolarRadiusAxis angle={90} domain={[0, 100]} tick={{ fontSize: 10 }} />
-                    <Radar name="竞品中位数" dataKey="peer" stroke="#ff8a1f" fill="#ff8a1f" fillOpacity={0.25} />
-                    <Radar name="我" dataKey="me" stroke="#1677ff" fill="#1677ff" fillOpacity={0.35} />
+                    <Radar name="竞品中位数" dataKey="peer" stroke="#5ac8fa" fill="#5ac8fa" fillOpacity={0.25} />
+                    <Radar name="我" dataKey="me" stroke="#1a73e8" fill="#1a73e8" fillOpacity={0.35} />
                     <Legend />
                     <RTooltip />
                   </RadarChart>
@@ -5255,7 +5255,7 @@ export default function CompetitorProductWorkbench({
                         <div style={{ fontWeight: 600, marginBottom: 4 }}>{p.title || "-"}</div>
                         <div>价格：${Number(p.price || 0).toFixed(2)}</div>
                         <div>月销：{Number(p.sales || 0).toLocaleString()}</div>
-                        {p.hasVideo ? <div style={{ color: "#1677ff" }}>含视频素材</div> : null}
+                        {p.hasVideo ? <div style={{ color: "#1a73e8" }}>含视频素材</div> : null}
                       </div>
                     );
                   }}
@@ -5266,9 +5266,9 @@ export default function CompetitorProductWorkbench({
                     <ReferenceLine x={recommendedBandCell.max} stroke="#52c41a" strokeDasharray="4 4" label={{ value: `推荐带上限 $${recommendedBandCell.max.toFixed(2)}`, position: "insideTopRight", fontSize: 10, fill: "#52c41a" }} />
                   </>
                 ) : null}
-                <Scatter name="样本" data={scatterPoints} fill="#ff8a1f" fillOpacity={0.65} />
+                <Scatter name="样本" data={scatterPoints} fill="#5ac8fa" fillOpacity={0.65} />
                 {myScatterPoint && myScatterPoint.price > 0 ? (
-                  <Scatter name="我的商品" data={[myScatterPoint]} fill="#1677ff" shape="star" />
+                  <Scatter name="我的商品" data={[myScatterPoint]} fill="#1a73e8" shape="star" />
                 ) : null}
                 <Legend />
               </ScatterChart>
@@ -5569,7 +5569,7 @@ export default function CompetitorProductWorkbench({
             </Col>
             {/* 右列：持续监控 */}
             <Col xs={24} xl={8}>
-              <div style={{ ...softPanelStyle, background: "#fafafa" }}>
+              <div style={{ ...softPanelStyle, background: "#f8fbff" }}>
                 <Text strong style={{ fontSize: 13 }}>📊 持续监控</Text>
                 {monitorSections.map((section) => (
                   <div key={section.key} style={{ marginTop: 10 }}>
@@ -5608,7 +5608,7 @@ export default function CompetitorProductWorkbench({
               <div style={{ overflowX: "auto" }}>
                 <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse", minWidth: 880 }}>
                   <thead>
-                    <tr style={{ color: "#8c8c8c", background: "#fafafa" }}>
+                    <tr style={{ color: "#8c8c8c", background: "#f8fbff" }}>
                       <th style={{ padding: "8px 10px", textAlign: "left" }}>样本</th>
                       <th style={{ padding: "8px 10px" }}>价格差</th>
                       <th style={{ padding: "8px 10px" }}>月销差</th>
@@ -5864,8 +5864,8 @@ export default function CompetitorProductWorkbench({
         <Card
           style={{
             ...CARD_STYLE,
-            background: "linear-gradient(135deg, rgba(255,248,240,0.98) 0%, rgba(255,255,255,1) 68%, rgba(255,244,230,0.95) 100%)",
-            border: "1px solid rgba(229,91,0,0.12)",
+            background: "linear-gradient(135deg, rgba(0,122,255,0.06) 0%, rgba(255,255,255,1) 68%, rgba(245,245,247,0.96) 100%)",
+            border: "1px solid rgba(0,122,255,0.12)",
           }}
         >
           <Space direction="vertical" size="middle" style={{ width: "100%" }}>
@@ -5912,9 +5912,9 @@ export default function CompetitorProductWorkbench({
                     style={{
                       textAlign: "left",
                       padding: "14px 16px",
-                      borderRadius: 16,
+                      borderRadius: 8,
                       border: isActive ? `1px solid ${TEMU_ORANGE}` : "1px solid #ebeef5",
-                      background: isActive ? "rgba(229,91,0,0.08)" : item.completed ? "#fff7e8" : "#fff",
+                      background: isActive ? "rgba(26, 115, 232, 0.08)" : item.completed ? "rgba(26, 115, 232, 0.04)" : "#fff",
                       cursor: isClickable ? "pointer" : "not-allowed",
                       opacity: isClickable ? 1 : 0.55,
                     }}

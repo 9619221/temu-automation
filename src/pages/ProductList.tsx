@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Card, Checkbox, Col, Drawer, Empty, Image, Input, Modal, Radio, Row, Segmented, Space, Spin, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from "antd";
+import { Alert, Button, Card, Checkbox, Col, Descriptions, Drawer, Empty, Image, Input, Modal, Radio, Row, Segmented, Space, Spin, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
   AppstoreOutlined,
@@ -42,7 +42,23 @@ import { getStoreValue } from "../utils/storeCompat";
 import { ACTIVE_ACCOUNT_CHANGED_EVENT, STORE_VALUE_UPDATED_EVENT } from "../utils/multiStore";
 import { TrafficDriverPanel, buildTrafficDriverSitesFromProduct, type TrafficSiteKey } from "../components/TrafficDriverPanel";
 import ProductFluxOperatorCard from "../components/ProductFluxOperatorCard";
-import { fetchSkcList, fetchTemuActivity, fetchTemuSales, fetchTemuShopSales, loadCloudConfig, type SkcRow, type TemuActivityRow, type TemuSalesRow, type TemuShopSalesRow } from "../utils/cloudClient";
+import {
+  fetchSkcList,
+  fetchTemuAfterSales,
+  fetchTemuActivity,
+  fetchTemuOperationRisks,
+  fetchTemuSales,
+  fetchTemuShopSales,
+  fetchTemuStockOrders,
+  loadCloudConfig,
+  type SkcRow,
+  type TemuAfterSaleRow,
+  type TemuActivityRow,
+  type TemuOperationRiskRow,
+  type TemuSalesRow,
+  type TemuShopSalesRow,
+  type TemuStockOrderRow,
+} from "../utils/cloudClient";
 
 const store = window.electronAPI?.store;
 const automation = window.electronAPI?.automation;
@@ -179,6 +195,9 @@ interface ProductItem {
   cloudSkc?: SkcRow;
   cloudSales?: TemuSalesRow;
   cloudActivities?: TemuActivityRow[];
+  cloudRisks?: TemuOperationRiskRow[];
+  cloudStockOrders?: TemuStockOrderRow[];
+  cloudAfterSales?: TemuAfterSaleRow[];
 }
 
 interface ProductSourceState {
@@ -198,10 +217,16 @@ interface CloudProductBundle {
   skcRows: SkcRow[];
   salesRows: TemuSalesRow[];
   activityRows: TemuActivityRow[];
+  riskRows: TemuOperationRiskRow[];
+  stockOrderRows: TemuStockOrderRow[];
+  afterSaleRows: TemuAfterSaleRow[];
   shopSales: TemuShopSalesRow | null;
   skcMap: Map<string, SkcRow>;
   salesMap: Map<string, TemuSalesRow>;
   activityMap: Map<string, TemuActivityRow[]>;
+  riskMap: Map<string, TemuOperationRiskRow[]>;
+  stockOrderMap: Map<string, TemuStockOrderRow[]>;
+  afterSaleMap: Map<string, TemuAfterSaleRow[]>;
   latestAt: string;
   error: string;
   configured: boolean;
@@ -288,18 +313,18 @@ function pickPreferredFluxSource(primarySource: any, fallbackSource: any) {
 }
 
 const PRODUCT_TRAFFIC_COLORS = {
-  expose: "#ff8a1f",
-  clickRate: "#4e79a7",
-  clickPayRate: "#16a34a",
-  detail: "#2563eb",
-  cart: "#9333ea",
-  collect: "#ec4899",
-  order: "#0f766e",
-  search: "#ff8a1f",
-  recommend: "#4e79a7",
-  other: "#f6bd16",
-  grid: "#eceef2",
-  axis: "#8c8c8c",
+  expose: "#1a73e8",
+  clickRate: "#5f6368",
+  clickPayRate: "#34a853",
+  detail: "#1a73e8",
+  cart: "#7c3aed",
+  collect: "#ea4335",
+  order: "#137333",
+  search: "#1a73e8",
+  recommend: "#34a853",
+  other: "#fbbc04",
+  grid: "#e8eaed",
+  axis: "#5f6368",
 };
 
 function normalizeLookupValue(value: string) {
@@ -370,19 +395,26 @@ function formatSyncedAt(value?: string | null) {
 
 function formatTimestamp(value?: number | string | null) {
   if (!value) return "";
-  const time = typeof value === "number" ? value : Date.parse(value);
+  const numeric = typeof value === "number"
+    ? value
+    : (/^\d+$/.test(String(value).trim()) ? Number(String(value).trim()) : NaN);
+  const rawTime = Number.isFinite(numeric) ? numeric : Date.parse(String(value));
+  const time = rawTime > 0 && rawTime < 10_000_000_000 ? rawTime * 1000 : rawTime;
   if (!Number.isFinite(time) || time <= 0) return "";
   return new Date(time).toLocaleString("zh-CN", { hour12: false });
 }
 
-function latestCloudTimestamp(skcRows: SkcRow[], salesRows: TemuSalesRow[], activityRows: TemuActivityRow[] = []) {
+function latestCloudTimestamp(
+  skcRows: SkcRow[],
+  salesRows: TemuSalesRow[],
+  activityRows: TemuActivityRow[] = [],
+  riskRows: TemuOperationRiskRow[] = [],
+  stockOrderRows: TemuStockOrderRow[] = [],
+  afterSaleRows: TemuAfterSaleRow[] = [],
+) {
   let latest = 0;
   for (const row of skcRows) latest = Math.max(latest, Number(row.last_updated_at || 0));
-  for (const row of salesRows) {
-    const time = row.last_updated_at ? Date.parse(row.last_updated_at) : 0;
-    if (Number.isFinite(time)) latest = Math.max(latest, time);
-  }
-  for (const row of activityRows) {
+  for (const row of [...salesRows, ...activityRows, ...riskRows, ...stockOrderRows, ...afterSaleRows]) {
     const time = row.last_updated_at ? Date.parse(row.last_updated_at) : 0;
     if (Number.isFinite(time)) latest = Math.max(latest, time);
   }
@@ -452,6 +484,31 @@ function activityLookupKeys(row?: TemuActivityRow | null) {
   ].filter(Boolean);
 }
 
+function riskLookupKeys(row?: TemuOperationRiskRow | null) {
+  if (!row) return [];
+  return [
+    cloudActivityKey("skc", row.mall_id, row.skc_id),
+    cloudActivityKey("product", row.mall_id, row.product_id),
+    cloudActivityKey("goods", row.mall_id, row.goods_id),
+  ].filter(Boolean);
+}
+
+function stockOrderLookupKeys(row?: TemuStockOrderRow | null) {
+  if (!row) return [];
+  return [
+    cloudActivityKey("skc", row.mall_id, row.skc_id),
+    cloudActivityKey("product", row.mall_id, row.product_id),
+  ].filter(Boolean);
+}
+
+function afterSaleLookupKeys(row?: TemuAfterSaleRow | null) {
+  if (!row) return [];
+  return [
+    cloudActivityKey("skc", row.mall_id, row.skc_id),
+    cloudActivityKey("product", row.mall_id, row.product_id),
+  ].filter(Boolean);
+}
+
 function productActivityLookupKeys(source: {
   mallId?: string | null;
   skcId?: string | null;
@@ -484,6 +541,66 @@ function buildCloudActivityMap(rows: TemuActivityRow[]) {
   return activityMap;
 }
 
+function buildCloudRiskMap(rows: TemuOperationRiskRow[]) {
+  const riskMap = new Map<string, TemuOperationRiskRow[]>();
+  for (const row of rows) {
+    for (const key of riskLookupKeys(row)) {
+      const bucket = riskMap.get(key) || [];
+      bucket.push(row);
+      riskMap.set(key, bucket);
+    }
+  }
+  for (const bucket of riskMap.values()) {
+    bucket.sort((left, right) => {
+      const severityScore = (value?: string | null) => value === "high" ? 3 : value === "medium" ? 2 : 1;
+      const severityDiff = severityScore(right.severity) - severityScore(left.severity);
+      if (severityDiff !== 0) return severityDiff;
+      const leftTime = left.last_updated_at ? Date.parse(left.last_updated_at) : 0;
+      const rightTime = right.last_updated_at ? Date.parse(right.last_updated_at) : 0;
+      return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
+    });
+  }
+  return riskMap;
+}
+
+function buildCloudStockOrderMap(rows: TemuStockOrderRow[]) {
+  const stockOrderMap = new Map<string, TemuStockOrderRow[]>();
+  for (const row of rows) {
+    for (const key of stockOrderLookupKeys(row)) {
+      const bucket = stockOrderMap.get(key) || [];
+      bucket.push(row);
+      stockOrderMap.set(key, bucket);
+    }
+  }
+  for (const bucket of stockOrderMap.values()) {
+    bucket.sort((left, right) => {
+      const leftTime = Date.parse(String(left.last_updated_at || left.latest_ship_at || left.order_time || ""));
+      const rightTime = Date.parse(String(right.last_updated_at || right.latest_ship_at || right.order_time || ""));
+      return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
+    });
+  }
+  return stockOrderMap;
+}
+
+function buildCloudAfterSaleMap(rows: TemuAfterSaleRow[]) {
+  const afterSaleMap = new Map<string, TemuAfterSaleRow[]>();
+  for (const row of rows) {
+    for (const key of afterSaleLookupKeys(row)) {
+      const bucket = afterSaleMap.get(key) || [];
+      bucket.push(row);
+      afterSaleMap.set(key, bucket);
+    }
+  }
+  for (const bucket of afterSaleMap.values()) {
+    bucket.sort((left, right) => {
+      const leftTime = Date.parse(String(left.last_updated_at || left.updated_at_text || left.created_at_text || ""));
+      const rightTime = Date.parse(String(right.last_updated_at || right.updated_at_text || right.created_at_text || ""));
+      return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
+    });
+  }
+  return afterSaleMap;
+}
+
 function getCloudActivities(
   bundle: Pick<CloudProductBundle, "activityMap">,
   source: { mallId?: string | null; skcId?: string | null; productId?: string | null; goodsId?: string | null },
@@ -500,6 +617,60 @@ function getCloudActivities(
   }
   return rows;
 }
+
+function getCloudRisks(
+  bundle: Pick<CloudProductBundle, "riskMap">,
+  source: { mallId?: string | null; skcId?: string | null; productId?: string | null; goodsId?: string | null },
+) {
+  const seen = new Set<string>();
+  const rows: TemuOperationRiskRow[] = [];
+  for (const key of productActivityLookupKeys(source)) {
+    for (const row of bundle.riskMap.get(key) || []) {
+      const rowId = row.id || row.risk_key;
+      if (seen.has(rowId)) continue;
+      seen.add(rowId);
+      rows.push(row);
+    }
+  }
+  return rows;
+}
+
+function getCloudStockOrders(
+  bundle: Pick<CloudProductBundle, "stockOrderMap">,
+  source: { mallId?: string | null; skcId?: string | null; productId?: string | null; goodsId?: string | null },
+) {
+  const seen = new Set<string>();
+  const rows: TemuStockOrderRow[] = [];
+  for (const key of productActivityLookupKeys(source)) {
+    for (const row of bundle.stockOrderMap.get(key) || []) {
+      const rowId = row.id || row.row_key;
+      if (seen.has(rowId)) continue;
+      seen.add(rowId);
+      rows.push(row);
+    }
+  }
+  return rows;
+}
+
+function getCloudAfterSales(
+  bundle: Pick<CloudProductBundle, "afterSaleMap">,
+  source: { mallId?: string | null; skcId?: string | null; productId?: string | null; goodsId?: string | null },
+) {
+  const seen = new Set<string>();
+  const rows: TemuAfterSaleRow[] = [];
+  for (const key of productActivityLookupKeys(source)) {
+    for (const row of bundle.afterSaleMap.get(key) || []) {
+      const rowId = row.id || row.row_key;
+      if (seen.has(rowId)) continue;
+      seen.add(rowId);
+      rows.push(row);
+    }
+  }
+  return rows;
+}
+
+void getCloudStockOrders;
+void getCloudAfterSales;
 
 const productOrderCollator = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
 
@@ -572,15 +743,92 @@ function isDiagnosticCloudActivity(row?: TemuActivityRow | null) {
   return values.some(isDiagnosticCloudValue);
 }
 
+function isDiagnosticCloudRisk(row?: TemuOperationRiskRow | null) {
+  const values = [
+    row?.mall_id,
+    row?.site,
+    row?.skc_id,
+    row?.product_id,
+    row?.goods_id,
+    row?.risk_title,
+    row?.risk_key,
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+
+  return values.some(isDiagnosticCloudValue);
+}
+
+function isDiagnosticCloudStockOrder(row?: TemuStockOrderRow | null) {
+  const values = [
+    row?.mall_id,
+    row?.site,
+    row?.skc_id,
+    row?.sku_id,
+    row?.product_id,
+    row?.product_name,
+    row?.stock_order_no,
+    row?.delivery_order_sn,
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+
+  return values.some(isDiagnosticCloudValue);
+}
+
+function isDiagnosticCloudAfterSale(row?: TemuAfterSaleRow | null) {
+  const values = [
+    row?.mall_id,
+    row?.site,
+    row?.skc_id,
+    row?.sku_id,
+    row?.product_id,
+    row?.product_name,
+    row?.package_no,
+    row?.order_id,
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+
+  return values.some(isDiagnosticCloudValue);
+}
+
+function operationRiskLabel(value?: string | null) {
+  const labels: Record<string, string> = {
+    violation_goods: "违规",
+    delivery_order: "发货",
+    logistics_feedback: "物流",
+    spot_check: "质检",
+    spot_check_history: "质检",
+    inbound_exception: "入库",
+    return_package: "退货",
+    high_price_flow: "限流",
+    regional_sales: "区域",
+  };
+  return labels[value || ""] || value || "风险";
+}
+
+function operationRiskColor(value?: string | null) {
+  if (value === "high") return "red";
+  if (value === "medium") return "orange";
+  return "default";
+}
+
 async function loadCloudProductBundle(): Promise<CloudProductBundle> {
   const empty = {
     skcRows: [],
     salesRows: [],
     activityRows: [],
+    riskRows: [],
+    stockOrderRows: [],
+    afterSaleRows: [],
     shopSales: null,
     skcMap: new Map<string, SkcRow>(),
     salesMap: new Map<string, TemuSalesRow>(),
     activityMap: new Map<string, TemuActivityRow[]>(),
+    riskMap: new Map<string, TemuOperationRiskRow[]>(),
+    stockOrderMap: new Map<string, TemuStockOrderRow[]>(),
+    afterSaleMap: new Map<string, TemuAfterSaleRow[]>(),
     latestAt: "",
     error: "",
     configured: false,
@@ -589,11 +837,14 @@ async function loadCloudProductBundle(): Promise<CloudProductBundle> {
   try {
     const cfg = await loadCloudConfig();
     if (!cfg) return empty;
-    const [skc, sales, shopSales, activity] = await Promise.all([
-      fetchSkcList(cfg, { limit: 500 }),
-      fetchTemuSales(cfg),
+    const [skc, sales, shopSales, activity, risks, stockOrders, afterSales] = await Promise.all([
+      fetchSkcList(cfg, { limit: 5000 }),
+      fetchTemuSales(cfg, { include_flow_only: true, limit: 5000 }),
       fetchTemuShopSales(cfg),
-      fetchTemuActivity(cfg, { limit: 500 }),
+      fetchTemuActivity(cfg, { limit: 3000 }),
+      fetchTemuOperationRisks(cfg, { limit: 3000 }),
+      fetchTemuStockOrders(cfg, { limit: 3000 }),
+      fetchTemuAfterSales(cfg, { limit: 3000 }),
     ]);
     const rawSkcRows = Array.isArray(skc?.rows) ? skc.rows : [];
     const diagnosticSkcIds = new Set(
@@ -606,9 +857,15 @@ async function loadCloudProductBundle(): Promise<CloudProductBundle> {
       !isDiagnosticCloudProduct(null, row) && !diagnosticSkcIds.has(cloudKeyFromSales(row))
     ));
     const activityRows = (Array.isArray(activity?.rows) ? activity.rows : []).filter((row) => !isDiagnosticCloudActivity(row));
+    const riskRows = (Array.isArray(risks?.rows) ? risks.rows : []).filter((row) => !isDiagnosticCloudRisk(row));
+    const stockOrderRows = (Array.isArray(stockOrders?.rows) ? stockOrders.rows : []).filter((row) => !isDiagnosticCloudStockOrder(row));
+    const afterSaleRows = (Array.isArray(afterSales?.rows) ? afterSales.rows : []).filter((row) => !isDiagnosticCloudAfterSale(row));
     const skcMap = new Map<string, SkcRow>();
     const salesMap = new Map<string, TemuSalesRow>();
     const activityMap = buildCloudActivityMap(activityRows);
+    const riskMap = buildCloudRiskMap(riskRows);
+    const stockOrderMap = buildCloudStockOrderMap(stockOrderRows);
+    const afterSaleMap = buildCloudAfterSaleMap(afterSaleRows);
     for (const row of skcRows) {
       if (row.skc_id) skcMap.set(cloudKeyFromSkc(row), row);
     }
@@ -619,11 +876,17 @@ async function loadCloudProductBundle(): Promise<CloudProductBundle> {
       skcRows,
       salesRows,
       activityRows,
+      riskRows,
+      stockOrderRows,
+      afterSaleRows,
       shopSales: shopSales?.row || null,
       skcMap,
       salesMap,
       activityMap,
-      latestAt: latestCloudTimestamp(skcRows, salesRows, activityRows),
+      riskMap,
+      stockOrderMap,
+      afterSaleMap,
+      latestAt: latestCloudTimestamp(skcRows, salesRows, activityRows, riskRows, stockOrderRows, afterSaleRows),
       error: "",
       configured: true,
     };
@@ -662,6 +925,7 @@ function buildCloudSalesRaw(previousRaw: any, skc: SkcRow | undefined, sales: Te
     flowGrowStatus: sales?.flow_grow_status,
     growDataText: sales?.flow_grow_data_text,
     bsrGoods: sales?.flow_bsr_goods,
+    flowTrendDaily: sales?.flow_trend_daily,
   };
   const baseRaw = {
     ...(previousRaw && typeof previousRaw === "object" ? previousRaw : {}),
@@ -755,8 +1019,109 @@ function buildCloudSalesRaw(previousRaw: any, skc: SkcRow | undefined, sales: Te
   };
 }
 
-function applyCloudProduct(product: ProductItem, skc: SkcRow | undefined, sales: TemuSalesRow | undefined, activities: TemuActivityRow[] = []) {
-  if (!skc && !sales && activities.length === 0) return;
+function cloudFlowSummarySource(sales?: TemuSalesRow) {
+  if (!sales) return null;
+  return {
+    dataDate: sales.flow_stat_date || sales.stat_date,
+    updateTime: sales.last_updated_at || "",
+    payGoodsNum: sales.flow_pay_goods_num,
+    payOrderNum: sales.flow_pay_order_num,
+    buyerNum: sales.flow_buyer_num,
+    exposeNum: sales.flow_expose_num,
+    clickNum: sales.flow_click_num,
+    detailVisitNum: sales.flow_detail_visit_num,
+    detailVisitorNum: sales.flow_detail_visitor_num,
+    addToCartUserNum: sales.flow_add_to_cart_user_num,
+    collectUserNum: sales.flow_collect_user_num,
+    exposeClickRate: sales.flow_expose_click_conversion_rate,
+    clickPayRate: sales.flow_click_pay_conversion_rate,
+    exposePayRate: sales.flow_expose_pay_conversion_rate,
+    searchExposeNum: sales.flow_search_expose_num,
+    searchClickNum: sales.flow_search_click_num,
+    searchPayGoodsNum: sales.flow_search_pay_goods_num,
+    searchPayOrderNum: sales.flow_search_pay_order_num,
+    recommendExposeNum: sales.flow_recommend_expose_num,
+    recommendClickNum: sales.flow_recommend_click_num,
+    recommendPayGoodsNum: sales.flow_recommend_pay_goods_num,
+    recommendPayOrderNum: sales.flow_recommend_pay_order_num,
+    growDataText: sales.flow_grow_data_text,
+    flowGrowStatus: sales.flow_grow_status,
+    bsrGoods: sales.flow_bsr_goods,
+    _cloudFlow: true,
+  };
+}
+
+function hasCloudFlowSummary(source: Record<string, any> | null) {
+  if (!source) return false;
+  return [
+    source.exposeNum,
+    source.clickNum,
+    source.detailVisitNum,
+    source.detailVisitorNum,
+    source.addToCartUserNum,
+    source.collectUserNum,
+    source.payGoodsNum,
+    source.payOrderNum,
+    source.buyerNum,
+  ].some((value) => Number(value || 0) > 0);
+}
+
+function cloudFlowTrendRows(sales?: TemuSalesRow) {
+  const rows = Array.isArray(sales?.flow_trend_daily) ? sales.flow_trend_daily : [];
+  return rows
+    .filter((row) => row && row.date)
+    .map((row) => ({
+      ...row,
+      fullDate: row.date,
+      dataDate: row.date,
+      updateTime: (row as any).updatedAt || sales?.last_updated_at || "",
+      _cloudFlowTrend: true,
+    }))
+    .sort((left, right) => String(left.fullDate || "").localeCompare(String(right.fullDate || "")));
+}
+
+function buildCloudFlowSite(sales?: TemuSalesRow): ProductFluxSiteData | null {
+  const source = cloudFlowSummarySource(sales);
+  const trendRows = cloudFlowTrendRows(sales);
+  if (!hasCloudFlowSummary(source) && trendRows.length === 0) return null;
+  const syncedAt = formatTimestamp(sales?.last_updated_at) || "";
+  const latestLabel = "最新";
+  const trendLabel = trendRows.length ? `近${Math.min(trendRows.length, 60)}日` : "";
+  const summaryByRange: Record<string, ProductTrafficSummary> = {};
+  const itemsByRange: Record<string, any[]> = {};
+  if (trendRows.length > 0) {
+    summaryByRange[trendLabel] = summarizeFluxItems(trendRows, "global", "全球", syncedAt);
+    itemsByRange[trendLabel] = trendRows;
+  }
+  if (source && hasCloudFlowSummary(source)) {
+    summaryByRange[latestLabel] = buildTrafficSummary(source, "global", "全球", syncedAt);
+    itemsByRange[latestLabel] = [source];
+  }
+  const availableRanges = sortFluxRangeLabels(Object.keys(summaryByRange));
+  const primaryRangeLabel = trendLabel || latestLabel;
+  return {
+    siteKey: "global",
+    siteLabel: "全球",
+    syncedAt,
+    summary: summaryByRange[primaryRangeLabel] || summaryByRange[latestLabel] || null,
+    summaryByRange,
+    items: itemsByRange[primaryRangeLabel] || itemsByRange[latestLabel] || [],
+    itemsByRange,
+    availableRanges,
+    primaryRangeLabel,
+  };
+}
+
+function applyCloudProduct(
+  product: ProductItem,
+  skc: SkcRow | undefined,
+  sales: TemuSalesRow | undefined,
+  activities: TemuActivityRow[] = [],
+  risks: TemuOperationRiskRow[] = [],
+  stockOrders: TemuStockOrderRow[] = [],
+  afterSales: TemuAfterSaleRow[] = [],
+) {
+  if (!skc && !sales && activities.length === 0 && risks.length === 0 && stockOrders.length === 0 && afterSales.length === 0) return;
   const raw = sales?.raw_item && typeof sales.raw_item === "object" ? sales.raw_item as any : {};
   const rawSkuList = Array.isArray(raw.skuQuantityDetailList) ? raw.skuQuantityDetailList : [];
   const rawSku = rawSkuList[0] || {};
@@ -771,6 +1136,9 @@ function applyCloudProduct(product: ProductItem, skc: SkcRow | undefined, sales:
   product.cloudSkc = skc;
   product.cloudSales = sales;
   product.cloudActivities = activities;
+  product.cloudRisks = risks;
+  product.cloudStockOrders = stockOrders;
+  product.cloudAfterSales = afterSales;
   product.mallId = firstCloudValue<string>(sales?.mall_supplier_id, skc?.mall_id, raw.supplierId) || product.mallId;
   product.title = title || product.title;
   product.category = category || product.category;
@@ -820,12 +1188,19 @@ function applyCloudProduct(product: ProductItem, skc: SkcRow | undefined, sales:
   product.salesRaw = {
     ...buildCloudSalesRaw(product.salesRaw, skc, sales),
     cloudActivities: activities,
+    cloudRisks: risks,
   };
   product.salesRawSku = rawSku || product.salesRawSku;
   if (Array.isArray(sales?.trend_daily) && sales.trend_daily.length > 0) {
     product.trendDaily = sales.trend_daily;
   } else if (Array.isArray(raw.trendDaily) && raw.trendDaily.length > 0) {
     product.trendDaily = raw.trendDaily;
+  }
+  const cloudFlowSite = buildCloudFlowSite(sales);
+  if (cloudFlowSite) {
+    product.fluxSites = [cloudFlowSite];
+    product.fluxItems = cloudFlowSite.items || [];
+    product.fluxSyncedAt = cloudFlowSite.syncedAt || "";
   }
   if (rawSkuList.length > 0) {
     product.skuSummaries = normalizeSkuSummaryList(rawSkuList.map((item: any) => ({
@@ -902,11 +1277,15 @@ function createProductItem(source: Partial<ProductItem> = {}): ProductItem {
     cloudSkc: source.cloudSkc,
     cloudSales: source.cloudSales,
     cloudActivities: source.cloudActivities || [],
+    cloudRisks: source.cloudRisks || [],
+    cloudStockOrders: source.cloudStockOrders || [],
+    cloudAfterSales: source.cloudAfterSales || [],
   };
 }
 
 function buildCloudProductRows(bundle: CloudProductBundle) {
   const ids = new Set<string>();
+  const riskOnlyRows = new Map<string, TemuOperationRiskRow>();
   for (const row of bundle.skcRows) {
     if (row.skc_id && row.mall_id) ids.add(cloudKeyFromSkc(row));
   }
@@ -916,33 +1295,76 @@ function buildCloudProductRows(bundle: CloudProductBundle) {
   for (const row of bundle.activityRows) {
     if (row.skc_id && row.mall_id) ids.add(cloudProductKey(row.mall_id, row.skc_id));
   }
+  for (const row of bundle.stockOrderRows) {
+    if (row.skc_id && row.mall_id) ids.add(cloudProductKey(row.mall_id, row.skc_id));
+  }
+  for (const row of bundle.afterSaleRows) {
+    if (row.skc_id && row.mall_id) ids.add(cloudProductKey(row.mall_id, row.skc_id));
+  }
+  for (const row of bundle.riskRows) {
+    if (row.skc_id && row.mall_id) {
+      ids.add(cloudProductKey(row.mall_id, row.skc_id));
+      continue;
+    }
+    const id = String(row.product_id || row.goods_id || row.risk_key || row.id || "").trim();
+    if (row.mall_id && id) {
+      const key = `risk:${row.mall_id}|${id}`;
+      ids.add(key);
+      riskOnlyRows.set(key, row);
+    }
+  }
 
   const rows: ProductItem[] = [];
   for (const rowKey of ids) {
     const skc = bundle.skcMap.get(rowKey);
     const sales = bundle.salesMap.get(rowKey);
-    const mallId = sales?.mall_supplier_id || skc?.mall_id || rowKey.split("|")[0] || "";
-    const skcId = sales?.skc_id || skc?.skc_id || "";
+    const riskOnly = riskOnlyRows.get(rowKey);
+    const mallId = sales?.mall_supplier_id || skc?.mall_id || riskOnly?.mall_id || rowKey.replace(/^risk:/, "").split("|")[0] || "";
+    const skcId = sales?.skc_id || skc?.skc_id || riskOnly?.skc_id || "";
     const activities = getCloudActivities(bundle, {
       mallId,
       skcId: skcId || rowKey.split("|")[1] || "",
-      productId: sales?.product_id || skc?.product_id || "",
-      goodsId: sales?.goods_id || "",
+      productId: sales?.product_id || skc?.product_id || riskOnly?.product_id || "",
+      goodsId: sales?.goods_id || riskOnly?.goods_id || "",
+    });
+    const risks = getCloudRisks(bundle, {
+      mallId,
+      skcId: skcId || rowKey.split("|")[1] || "",
+      productId: sales?.product_id || skc?.product_id || riskOnly?.product_id || "",
+      goodsId: sales?.goods_id || riskOnly?.goods_id || "",
+    });
+    const stockOrders = getCloudStockOrders(bundle, {
+      mallId,
+      skcId: skcId || rowKey.split("|")[1] || "",
+      productId: sales?.product_id || skc?.product_id || riskOnly?.product_id || "",
+      goodsId: sales?.goods_id || riskOnly?.goods_id || "",
+    });
+    const afterSales = getCloudAfterSales(bundle, {
+      mallId,
+      skcId: skcId || rowKey.split("|")[1] || "",
+      productId: sales?.product_id || skc?.product_id || riskOnly?.product_id || "",
+      goodsId: sales?.goods_id || riskOnly?.goods_id || "",
     });
     const firstActivity = activities[0];
+    const firstRisk = risks[0] || riskOnly;
+    const firstStockOrder = stockOrders[0];
+    const firstAfterSale = afterSales[0];
     const product = createProductItem({
-      skcId: skcId || firstActivity?.skc_id || "",
+      skcId: skcId || firstActivity?.skc_id || firstRisk?.skc_id || firstStockOrder?.skc_id || firstAfterSale?.skc_id || "",
       mallId,
-      title: sales?.title || skc?.title || firstActivity?.activity_title || "",
+      title: sales?.title || skc?.title || firstStockOrder?.product_name || firstAfterSale?.product_name || firstActivity?.activity_title || firstRisk?.risk_title || "",
       category: sales?.category_name || skc?.category_name || "",
       categories: sales?.category_name || skc?.category_name || "",
       imageUrl: sales?.thumb_url || skc?.thumb_url || "",
-      siteLabel: skc?.site || "",
-      syncedAt: formatTimestamp(sales?.last_updated_at) || formatTimestamp(skc?.last_updated_at) || formatTimestamp(firstActivity?.last_updated_at),
+      siteLabel: skc?.site || firstStockOrder?.site || firstAfterSale?.site || firstActivity?.site || firstRisk?.site || "",
+      syncedAt: formatTimestamp(sales?.last_updated_at) || formatTimestamp(skc?.last_updated_at) || formatTimestamp(firstStockOrder?.last_updated_at) || formatTimestamp(firstAfterSale?.last_updated_at) || formatTimestamp(firstActivity?.last_updated_at) || formatTimestamp(firstRisk?.last_updated_at),
       hasSalesSnapshot: Boolean(sales),
       cloudActivities: activities,
+      cloudRisks: risks,
+      cloudStockOrders: stockOrders,
+      cloudAfterSales: afterSales,
     });
-    applyCloudProduct(product, skc, sales, activities);
+    applyCloudProduct(product, skc, sales, activities, risks, stockOrders, afterSales);
     rows.push(product);
   }
 
@@ -987,19 +1409,232 @@ function parseCloudJsonObject(text?: string | null) {
   }
 }
 
-function activityMetricParts(activity: TemuActivityRow) {
+function firstDeepValue(source: unknown, keys: string[], maxDepth = 3): unknown {
+  if (!source || typeof source !== "object") return null;
+  const seen = new Set<object>();
+  const queue: Array<{ value: any; depth: number }> = [{ value: source, depth: 0 }];
+  while (queue.length) {
+    const { value, depth } = queue.shift()!;
+    if (!value || typeof value !== "object" || seen.has(value)) continue;
+    seen.add(value);
+    for (const key of keys) {
+      const next = value[key];
+      if (next !== null && next !== undefined && next !== "") return next;
+    }
+    if (depth >= maxDepth) continue;
+    for (const child of Object.values(value)) {
+      if (child && typeof child === "object") queue.push({ value: child, depth: depth + 1 });
+    }
+  }
+  return null;
+}
+
+function scalarActivityValue(value: unknown): unknown {
+  if (!value || typeof value !== "object") return value;
+  return firstDeepValue(value, ["priceCents", "priceCent", "cent", "cents", "amount", "value", "price"], 1);
+}
+
+function toActivityCents(value: unknown, fieldName = "") {
+  const scalar = scalarActivityValue(value);
+  if (scalar === null || scalar === undefined || scalar === "") return null;
+  const number = typeof scalar === "string" ? parseFloat(scalar.replace(/,/g, "")) : Number(scalar);
+  if (!Number.isFinite(number)) return null;
+  if (/cents?|cent$/i.test(fieldName)) return Math.round(number);
+  if (Number.isInteger(number) && Math.abs(number) >= 1000) return number;
+  return Math.round(number * 100);
+}
+
+function firstNumberValue(...values: unknown[]) {
+  for (const value of values) {
+    if (value === null || value === undefined || value === "") continue;
+    const number = Number(value);
+    if (Number.isFinite(number)) return number;
+  }
+  return null;
+}
+
+function pickActivityCents(activity: TemuActivityRow, directValue: unknown, keys: string[]) {
+  const direct = firstNumberValue(directValue);
+  if (direct !== null) return direct;
   const metric = parseCloudJsonObject(activity.metric_json);
-  return [
-    metric.orderCount != null ? `订单 ${metric.orderCount}` : "",
-    metric.payAmount != null ? `支付 ${metric.payAmount}` : "",
-    metric.goodsCount != null ? `商品 ${metric.goodsCount}` : "",
-    metric.cartCount != null ? `加购 ${metric.cartCount}` : "",
-  ].filter(Boolean);
+  const raw = parseCloudJsonObject(activity.raw_json);
+  for (const source of [metric, raw]) {
+    for (const key of keys) {
+      const cents = toActivityCents(firstDeepValue(source, [key], 3), key);
+      if (cents !== null) return cents;
+    }
+  }
+  return null;
+}
+
+function pickActivityNumber(activity: TemuActivityRow, directValue: unknown, keys: string[]) {
+  const direct = firstNumberValue(directValue);
+  if (direct !== null) return direct;
+  const metric = parseCloudJsonObject(activity.metric_json);
+  const raw = parseCloudJsonObject(activity.raw_json);
+  for (const source of [metric, raw]) {
+    const value = firstDeepValue(source, keys, 3);
+    const number = firstNumberValue(value);
+    if (number !== null) return number;
+  }
+  return null;
+}
+
+function formatActivityMoney(cents: number | null, currency?: string | null) {
+  if (cents === null || cents === undefined) return "-";
+  return `${(Number(cents) / 100).toFixed(2)} ${currency || "CNY"}`;
+}
+
+function formatActivityDiff(cents: number | null, currency?: string | null) {
+  if (cents === null || cents === undefined) return "-";
+  const sign = cents > 0 ? "+" : "";
+  return `${sign}${(Number(cents) / 100).toFixed(2)} ${currency || "CNY"}`;
+}
+
+function formatActivityAmount(value: number | null, currency?: string | null) {
+  if (value === null || value === undefined) return "-";
+  return `${Number(value).toLocaleString("zh-CN", { maximumFractionDigits: 2 })} ${currency || "CNY"}`;
+}
+
+function activitySourcePath(activity: TemuActivityRow) {
+  const sources = parseCloudJsonObject(activity.sources_json);
+  return Object.keys(sources || {})[0] || "";
+}
+
+function inferredActivityTitle(activity: TemuActivityRow, raw: Record<string, any>) {
+  const sourcePath = activitySourcePath(activity);
+  const rawGoodsName = String(firstDeepValue(raw, ["goodsName", "productName"], 1) || "");
+  const currentTitle = String(activity.activity_title || "").trim();
+  if (/\/api\/activity\/data\/goods\/detail/i.test(sourcePath) && (!currentTitle || currentTitle === rawGoodsName)) {
+    return "活动商品数据";
+  }
+  if (/activity\/tool\/home\/picksGoods/i.test(sourcePath)) return currentTitle || "活动推荐商品";
+  if (/activity\/list\/for\/home/i.test(sourcePath)) return currentTitle || "可报名活动";
+  if (/biddingInvitation/i.test(sourcePath)) return currentTitle || "竞价活动";
+  return currentTitle || activity.activity_id || activity.row_key || "-";
+}
+
+function inferredActivityType(activity: TemuActivityRow) {
+  const sourcePath = activitySourcePath(activity);
+  if (/\/api\/activity\/data\/goods\/detail/i.test(sourcePath)) return "活动数据";
+  if (/activity\/tool\/home\/picksGoods/i.test(sourcePath)) return "活动推荐";
+  if (/activity\/list\/for\/home/i.test(sourcePath)) return "活动报名";
+  if (/coupon/i.test(sourcePath)) return "优惠券";
+  if (/biddingInvitation/i.test(sourcePath)) return "竞价活动";
+  return activity.activity_type || activityKindLabel(activity.activity_kind);
+}
+
+function activityKindLabel(kind?: string | null) {
+  const text = String(kind || "").trim();
+  const labels: Record<string, string> = {
+    activity: "活动",
+    bidding: "竞价",
+    coupon: "优惠券",
+    bsr: "BSR",
+    marketing: "营销",
+  };
+  return labels[text] || text || "-";
+}
+
+function activityStatusColor(status?: string | null) {
+  const text = String(status || "").toLowerCase();
+  if (/reject|fail|cancel|disable|close|end|expired|驳回|失败|取消|结束/.test(text)) return "red";
+  if (/pass|success|approved|active|online|running|available|通过|成功|进行|生效/.test(text)) return "green";
+  if (/pending|wait|review|audit|待|审核/.test(text)) return "orange";
+  return "default";
+}
+
+function businessStatusColor(status?: string | null) {
+  const text = String(status || "").toLowerCase();
+  if (/abnormal|cancel|close|fail|reject|timeout|取消|关闭|拒绝|失败|退回|异常|逾期|超时|驳回/.test(text)) return "red";
+  if (/complete|done|finish|signed|success|完成|通过|签收|已发|已入库|成功/.test(text)) return "green";
+  if (/audit|pending|processing|review|wait|待|处理中|审核|取件|发货|入库/.test(text)) return "orange";
+  return "default";
+}
+
+function isPendingBusinessStatus(status?: string | null) {
+  return /audit|pending|processing|review|wait|待|处理中|审核|取件|发货|入库/i.test(String(status || ""));
+}
+
+function activityDisplayInfo(activity: TemuActivityRow) {
+  const metric = parseCloudJsonObject(activity.metric_json);
+  const raw = parseCloudJsonObject(activity.raw_json);
+  const currency = String(activity.price_currency || firstDeepValue(metric, ["priceCurrency", "currency", "currencyCode"], 2) || firstDeepValue(raw, ["priceCurrency", "currency", "currencyCode", "currencyType"], 3) || "CNY");
+  const signupPrice = pickActivityCents(activity, activity.signup_price_cents, [
+    "signupPriceCents", "signupPriceCent", "signupPrice",
+    "enrollPriceCents", "enrollPriceCent", "enrollPrice",
+    "applyPriceCents", "applyPriceCent", "applyPrice",
+    "activityPriceCents", "activityPriceCent", "activityPrice",
+    "campaignPriceCents", "campaignPriceCent", "campaignPrice",
+    "promotionPriceCents", "promotionPriceCent", "promotionPrice",
+    "salePriceCents", "salePriceCent", "salePrice",
+    "supplierActivityPrice", "skuActivityPrice", "skcActivityPrice",
+    "inputPrice", "declarePrice", "declaredPrice",
+  ]);
+  const suggestedPrice = pickActivityCents(activity, activity.suggested_price_cents, [
+    "suggestedPriceCents", "suggestedPriceCent", "suggestedPrice",
+    "suggestPriceCents", "suggestPriceCent", "suggestPrice",
+    "recommendPriceCents", "recommendPriceCent", "recommendPrice",
+    "recommendedPriceCents", "recommendedPriceCent", "recommendedPrice",
+    "referencePriceCents", "referencePriceCent", "referencePrice",
+    "advicePriceCents", "advicePriceCent", "advicePrice",
+    "activitySuggestPrice", "suggestActivityPrice", "maxEnrollPrice", "maxPrice",
+  ]);
+  const stock = pickActivityNumber(activity, activity.activity_stock, [
+    "activityStock", "enrollStock", "signupStock", "applyStock",
+    "activityInventory", "promotionStock", "campaignStock", "saleStock",
+    "stockNum", "stock", "inventoryNum", "inventory", "availableStock",
+    "activityGoodsStock", "goodsStock", "quantity",
+  ]);
+  const explicitDiff = pickActivityCents(activity, activity.signup_price_diff_cents, [
+    "signupPriceDiffCents", "signupPriceDiffCent", "signupPriceDiff",
+    "priceDiffCents", "priceDiffCent", "priceDiff",
+    "enrollPriceDiff", "applyPriceDiff", "declarePriceDiff",
+  ]);
+  const diff = explicitDiff ?? (signupPrice !== null && suggestedPrice !== null ? signupPrice - suggestedPrice : null);
+  const activitySales = pickActivityNumber(activity, null, ["activitySales", "goodsSales", "saleCount", "sales"]);
+  const transactionAmount = pickActivityNumber(activity, null, ["activityTransactionAmount", "transactionAmount", "payAmount", "gmv"]);
+  const totalVisitors = pickActivityNumber(activity, null, ["totalVisitorsNum", "activityGoodsVisitorsNum", "visitorsNum"]);
+  const clickVisitors = pickActivityNumber(activity, null, ["clickVisitorsNum", "clickVisitorNum"]);
+  const payVisitors = pickActivityNumber(activity, null, ["payVisitorsNum", "payVisitorNum"]);
+  return {
+    title: inferredActivityTitle(activity, raw),
+    type: inferredActivityType(activity),
+    kind: activityKindLabel(activity.activity_kind),
+    status: activity.activity_status || "-",
+    signupPrice,
+    suggestedPrice,
+    currency,
+    stock,
+    diff,
+    activitySales,
+    transactionAmount,
+    totalVisitors,
+    clickVisitors,
+    payVisitors,
+    startText: formatTimestamp(activity.start_at),
+    endText: formatTimestamp(activity.end_at),
+    updatedText: formatTimestamp(activity.last_updated_at),
+  };
+}
+
+function activityMetricParts(activity: TemuActivityRow) {
+  const info = activityDisplayInfo(activity);
+  const parts: string[] = [];
+  if (info.activitySales !== null) parts.push(`活动销量 ${Number(info.activitySales).toLocaleString("zh-CN")}`);
+  if (info.transactionAmount !== null) parts.push(`活动成交 ${formatActivityAmount(info.transactionAmount, info.currency)}`);
+  if (info.totalVisitors !== null) parts.push(`访客 ${Number(info.totalVisitors).toLocaleString("zh-CN")}`);
+  if (info.signupPrice !== null) parts.push(`报名价 ${formatActivityMoney(info.signupPrice, info.currency)}`);
+  if (info.suggestedPrice !== null) parts.push(`建议价 ${formatActivityMoney(info.suggestedPrice, info.currency)}`);
+  if (info.stock !== null) parts.push(`活动库存 ${Number(info.stock).toLocaleString("zh-CN")}`);
+  if (info.diff !== null) parts.push(`差异 ${formatActivityDiff(info.diff, info.currency)}`);
+  return parts;
 }
 
 function activityTimeText(activity: TemuActivityRow) {
-  const start = formatTimestamp(activity.start_at);
-  const end = formatTimestamp(activity.end_at);
+  const info = activityDisplayInfo(activity);
+  const start = info.startText;
+  const end = info.endText;
   if (start && end) return `${start} - ${end}`;
   return start || end || "";
 }
@@ -1099,7 +1734,41 @@ function buildSearchIndex(product: ProductItem) {
     activity.activity_title,
     activity.activity_id,
     activity.activity_kind,
+    activity.activity_type,
     activity.activity_status,
+    activity.signup_price_cents,
+    activity.suggested_price_cents,
+    activity.activity_stock,
+  ]);
+  const riskTexts = (product.cloudRisks || []).flatMap((risk) => [
+    risk.risk_type,
+    risk.risk_key,
+    risk.risk_title,
+    risk.risk_status,
+    risk.severity,
+    risk.product_id,
+    risk.goods_id,
+    risk.order_id,
+  ]);
+  const stockOrderTexts = (product.cloudStockOrders || []).flatMap((row) => [
+    row.stock_order_no,
+    row.parent_order_no,
+    row.delivery_order_sn,
+    row.delivery_batch_sn,
+    row.temu_status,
+    row.receive_warehouse_name,
+    row.sku_id,
+    row.sku_ext_code,
+  ]);
+  const afterSaleTexts = (product.cloudAfterSales || []).flatMap((row) => [
+    row.after_sale_type,
+    row.package_no,
+    row.order_id,
+    row.status,
+    row.reason,
+    row.logistics_no,
+    row.warehouse_name,
+    row.sku_id,
   ]);
 
   return [
@@ -1124,6 +1793,9 @@ function buildSearchIndex(product: ProductItem) {
     product.buyerUid,
     ...skuTexts,
     ...activityTexts,
+    ...riskTexts,
+    ...stockOrderTexts,
+    ...afterSaleTexts,
   ]
     .map((item) => normalizeLookupValue(String(item || "")))
     .filter(Boolean)
@@ -1732,6 +2404,9 @@ export default function ProductList() {
   const [cloudSkcMap, setCloudSkcMap] = useState<Map<string, SkcRow>>(new Map());
   const [cloudSalesMap, setCloudSalesMap] = useState<Map<string, TemuSalesRow>>(new Map());
   const [cloudActivityCount, setCloudActivityCount] = useState(0);
+  const [cloudRiskCount, setCloudRiskCount] = useState(0);
+  const [cloudStockOrderCount, setCloudStockOrderCount] = useState(0);
+  const [cloudAfterSaleCount, setCloudAfterSaleCount] = useState(0);
   const [cloudShopSales, setCloudShopSales] = useState<TemuShopSalesRow | null>(null);
   const [cloudProductMeta, setCloudProductMeta] = useState({ latestAt: "", error: "" });
 
@@ -1742,6 +2417,7 @@ export default function ProductList() {
   const [diagnostics, setDiagnostics] = useState<CollectionDiagnostics | null>(null);
   const [, setSourceState] = useState<ProductSourceState>(EMPTY_SOURCES);
   const [selectedProduct, setSelectedProduct] = useState<ProductItem | null>(null);
+  const [activityDetailProduct, setActivityDetailProduct] = useState<ProductItem | null>(null);
   const [drawerTab, setDrawerTab] = useState<string>("overview");
   const [activeFluxSiteKey, setActiveFluxSiteKey] = useState<FluxSiteKey>("global");
   const [activeFluxRangeLabel, setActiveFluxRangeLabel] = useState("");
@@ -1921,6 +2597,9 @@ export default function ProductList() {
         setCloudSkcMap(cloudBundle.skcMap);
         setCloudSalesMap(cloudBundle.salesMap);
         setCloudActivityCount(cloudBundle.activityRows.length);
+        setCloudRiskCount(cloudBundle.riskRows.length);
+        setCloudStockOrderCount(cloudBundle.stockOrderRows.length);
+        setCloudAfterSaleCount(cloudBundle.afterSaleRows.length);
         setCloudShopSales(cloudBundle.shopSales);
         setCloudProductMeta({ latestAt: cloudBundle.latestAt, error: cloudBundle.error });
         setHasAccount(cloudBundle.configured);
@@ -2685,7 +3364,7 @@ export default function ProductList() {
       ? ["云端暂无活动快照：需要扩展采集命中活动、营销、报名、竞价相关接口"]
     : [];
 
-  const metricColor = (value: unknown, base = "#389e0d", zeroColor = "#bfbfbf", positiveWeight = 600) => {
+  const metricColor = (value: unknown, base = "var(--color-success)", zeroColor = "var(--color-text-muted)", positiveWeight = 600) => {
     const num = optionalNumber(value);
     if (num === null) return { color: "#bfbfbf", fontWeight: 400 };
     return { color: num > 0 ? base : zeroColor, fontWeight: num > 0 ? positiveWeight : 400 };
@@ -2818,7 +3497,7 @@ export default function ProductList() {
             <Image src={url} width={80} height={80} style={{ objectFit: "cover", borderRadius: 8 }} preview={{ mask: false }} fallback={EMPTY_IMAGE_FALLBACK} />
           </div>
         ) : (
-          <div style={{ width: 80, height: 80, background: "#f0f0f0", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center" }}><PictureOutlined /></div>
+          <div style={{ width: 80, height: 80, background: "#f8fbff", border: "1px solid var(--color-border)", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center" }}><PictureOutlined /></div>
         );
       },
     },
@@ -2851,18 +3530,18 @@ export default function ProductList() {
                 {text || "-"}
               </div>
             </Tooltip>
-            {getPrimaryCategory(record) && <div style={{ color: "#8c8c8c" }}>{getPrimaryCategory(record)}</div>}
+            {getPrimaryCategory(record) && <div style={{ color: "var(--color-text-muted)" }}>{getPrimaryCategory(record)}</div>}
             {(score != null || comment != null) && (
-              <div style={{ color: "#faad14" }}>
-                {score != null ? <span>★ {score}分</span> : <span style={{ color: "#8c8c8c" }}>暂无评分</span>}
-                {comment != null && <span style={{ color: "#8c8c8c" }}> · 评论 {comment}</span>}
+              <div style={{ color: "#fbbc04" }}>
+                {score != null ? <span>★ {score}分</span> : <span style={{ color: "var(--color-text-muted)" }}>暂无评分</span>}
+                {comment != null && <span style={{ color: "var(--color-text-muted)" }}> · 评论 {comment}</span>}
               </div>
             )}
-            {record.skcId && <div style={{ color: "#8c8c8c" }}>SKC：<span style={{ fontFamily: "monospace" }}>{record.skcId}</span></div>}
-            {record.mallId && <div style={{ color: "#8c8c8c" }}>店铺：<span style={{ fontFamily: "monospace" }}>{record.mallId}</span></div>}
-            {productDays != null && productDays !== "" && <div style={{ color: "#8c8c8c" }}>加入站点时长：{productDays}天</div>}
-            {record.spuId && <div style={{ color: "#8c8c8c" }}>SPU：<span style={{ fontFamily: "monospace" }}>{record.spuId}</span></div>}
-            {seasonTag && <div style={{ color: "#8c8c8c" }}>节日/季节标签：{seasonTag}</div>}
+            {record.skcId && <div style={{ color: "var(--color-text-muted)" }}>SKC：<span style={{ fontFamily: "monospace" }}>{record.skcId}</span></div>}
+            {record.mallId && <div style={{ color: "var(--color-text-muted)" }}>店铺：<span style={{ fontFamily: "monospace" }}>{record.mallId}</span></div>}
+            {productDays != null && productDays !== "" && <div style={{ color: "var(--color-text-muted)" }}>加入站点时长：{productDays}天</div>}
+            {record.spuId && <div style={{ color: "var(--color-text-muted)" }}>SPU：<span style={{ fontFamily: "monospace" }}>{record.spuId}</span></div>}
+            {seasonTag && <div style={{ color: "var(--color-text-muted)" }}>节日/季节标签：{seasonTag}</div>}
 
             {/* 状态标签行 */}
             <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", gap: 3 }}>
@@ -2874,28 +3553,48 @@ export default function ProductList() {
               {(y?.punishList || []).slice(0, 2).map((p: any, i: number) => (
                 <Tag key={`pn${i}`} color="red" style={{ fontSize: 12, margin: 0 }}>处罚:{p.reason || p.type}</Tag>
               ))}
+              {(record.cloudRisks || []).slice(0, 3).map((risk: TemuOperationRiskRow, i: number) => (
+                <Tooltip key={risk.id || risk.risk_key || `risk-${i}`} title={risk.risk_title || risk.order_id || risk.risk_key}>
+                  <Tag color={operationRiskColor(risk.severity)} style={{ fontSize: 12, margin: 0 }}>
+                    {operationRiskLabel(risk.risk_type)}
+                  </Tag>
+                </Tooltip>
+              ))}
+              {(record.cloudRisks || []).length > 3 ? (
+                <Tag color="red" style={{ fontSize: 12, margin: 0 }}>风险+{(record.cloudRisks || []).length - 3}</Tag>
+              ) : null}
+              {(record.cloudStockOrders || []).length > 0 ? (
+                <Tag color={(record.cloudStockOrders || []).some((row: TemuStockOrderRow) => isPendingBusinessStatus(row.temu_status)) ? "orange" : "blue"} style={{ fontSize: 12, margin: 0 }}>
+                  备货{(record.cloudStockOrders || []).length}
+                </Tag>
+              ) : null}
+              {(record.cloudAfterSales || []).length > 0 ? (
+                <Tag color={(record.cloudAfterSales || []).some((row: TemuAfterSaleRow) => isPendingBusinessStatus(row.status)) ? "red" : "orange"} style={{ fontSize: 12, margin: 0 }}>
+                  售后{(record.cloudAfterSales || []).length}
+                </Tag>
+              ) : null}
             </div>
 
             {/* 云舵卡区块 */}
             {(y || gp) && (
-              <div style={{ marginTop: 5, padding: "5px 8px", background: "#fafafa", borderRadius: 6, border: "1px solid #f0f0f0", fontSize: 13, lineHeight: 1.55 }}>
+              <div style={{ marginTop: 5, padding: "5px 8px", background: "#f8fbff", borderRadius: 6, border: "1px solid var(--color-border)", fontSize: 13, lineHeight: 1.55 }}>
                 {buyerLine && <div><span style={{ color: "#888" }}>买手：</span><Tag color="orange" style={{ fontSize: 12, margin: 0 }}>{buyerLine}</Tag></div>}
                 {y?.category && (
                   <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
                     <span style={{ color: "#888", flexShrink: 0 }}>类目：</span>
                     <Tooltip title={y.category}><span style={{ flex: 1, color: "#555", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{y.category}</span></Tooltip>
-                    <a style={{ fontSize: 12, color: "#1677ff", flexShrink: 0 }} onClick={(e) => { e.stopPropagation(); navigator.clipboard?.writeText(y.category); message.success("已复制"); }}>复制</a>
+                    <a style={{ fontSize: 12, color: "#1a73e8", flexShrink: 0 }} onClick={(e) => { e.stopPropagation(); navigator.clipboard?.writeText(y.category); message.success("已复制"); }}>复制</a>
                   </div>
                 )}
                 {sites.length > 0 && (
-                  <div><span style={{ color: "#888" }}>销售：</span><span style={{ color: "#1677ff" }}>{sites.slice(0, 3).map(siteName).join("，")}</span>{sites.length > 3 && <Tag color="blue" style={{ fontSize: 12, marginLeft: 4 }}>共 {sites.length} 站</Tag>}</div>
+                  <div><span style={{ color: "#888" }}>销售：</span><span style={{ color: "#1a73e8" }}>{sites.slice(0, 3).map(siteName).join("，")}</span>{sites.length > 3 && <Tag color="blue" style={{ fontSize: 12, marginLeft: 4 }}>共 {sites.length} 站</Tag>}</div>
                 )}
                 {offSites.length > 0 && (
-                  <div><span style={{ color: "#888" }}>下架：</span><span style={{ color: "#8c8c8c" }}>{offSites.slice(0, 3).map(siteName).join("，")}{offSites.length > 3 ? `…` : ""}</span></div>
+                  <div><span style={{ color: "var(--color-text-muted)" }}>下架：</span><span style={{ color: "var(--color-text-muted)" }}>{offSites.slice(0, 3).map(siteName).join("，")}{offSites.length > 3 ? `…` : ""}</span></div>
                 )}
                 {gp && (
                   <div style={{ textAlign: "right" }}>
-                    <a style={{ fontSize: 13, color: "#1677ff" }} onClick={(e) => { e.stopPropagation(); openGpDetail(record); }}>动销详情 →</a>
+                    <a style={{ fontSize: 13, color: "#1a73e8" }} onClick={(e) => { e.stopPropagation(); openGpDetail(record); }}>动销详情 →</a>
                   </div>
                 )}
               </div>
@@ -3033,7 +3732,7 @@ export default function ProductList() {
       sorter: (a: any, b: any) => (a.totalSales || 0) - (b.totalSales || 0),
       render: (_val: number, record: any) => {
         const value = optionalNumber(record.cloudSales?.total_sales ?? record.salesRaw?.skuQuantityTotalInfo?.totalSaleVolume);
-        return <span style={{ fontSize: 18, fontWeight: value !== null && value > 0 ? 700 : 400, color: value !== null && value > 0 ? "#1677ff" : "#bfbfbf" }}>{formatOptionalNumber(value)}</span>;
+        return <span style={{ fontSize: 18, fontWeight: value !== null && value > 0 ? 700 : 400, color: value !== null && value > 0 ? "#1a73e8" : "#bfbfbf" }}>{formatOptionalNumber(value)}</span>;
       },
     },
     {
@@ -3046,7 +3745,7 @@ export default function ProductList() {
         <div className="sku-stack">
           {(record._skuRows || []).map((s: any) => (
             <div className={`sku-cell${s._isTotal ? " sku-cell-total" : ""}`} key={s._skuKey} style={{ justifyContent: "center" }}>
-              <span style={{ fontSize: 15, ...metricColor(s.stock, "#1677ff", "#ff4d4f") }}>{formatOptionalNumber(s.stock)}</span>
+              <span style={{ fontSize: 15, ...metricColor(s.stock, "#1a73e8", "#ea4335") }}>{formatOptionalNumber(s.stock)}</span>
             </div>
           ))}
         </div>
@@ -3091,7 +3790,7 @@ export default function ProductList() {
         <div className="sku-stack">
           {(record._skuRows || []).map((s: any) => (
             <div className={`sku-cell${s._isTotal ? " sku-cell-total" : ""}`} key={s._skuKey} style={{ justifyContent: "center" }}>
-              <span style={{ fontSize: 15, ...metricColor(s.inTransit, "#1677ff") }}>{formatOptionalNumber(s.inTransit)}</span>
+              <span style={{ fontSize: 15, ...metricColor(s.inTransit, "#1a73e8") }}>{formatOptionalNumber(s.inTransit)}</span>
             </div>
           ))}
         </div>
@@ -3106,7 +3805,7 @@ export default function ProductList() {
         <div className="sku-stack">
           {(record._skuRows || []).map((s: any) => (
             <div className={`sku-cell${s._isTotal ? " sku-cell-total" : ""}`} key={s._skuKey} style={{ justifyContent: "center" }}>
-              <span style={{ fontSize: 15, ...metricColor(s.lack, "#cf1322", "#bfbfbf", 700) }}>{formatOptionalNumber(s.lack)}</span>
+              <span style={{ fontSize: 15, ...metricColor(s.lack, "var(--color-danger)", "var(--color-text-muted)", 700) }}>{formatOptionalNumber(s.lack)}</span>
             </div>
           ))}
         </div>
@@ -3128,36 +3827,117 @@ export default function ProductList() {
       ),
     },
     {
+      title: "履约/售后",
+      key: "fulfillment",
+      width: 280,
+      render: (_: any, record: ProductItem) => {
+        const stockOrders: TemuStockOrderRow[] = Array.isArray(record.cloudStockOrders) ? record.cloudStockOrders : [];
+        const afterSales: TemuAfterSaleRow[] = Array.isArray(record.cloudAfterSales) ? record.cloudAfterSales : [];
+        if (stockOrders.length === 0 && afterSales.length === 0) return <span style={{ color: "#bfbfbf" }}>-</span>;
+        const pendingStock = stockOrders.filter((row) => isPendingBusinessStatus(row.temu_status)).length;
+        const pendingAfter = afterSales.filter((row) => isPendingBusinessStatus(row.status)).length;
+        const demandQty = stockOrders.reduce((sum, row) => sum + Number(row.demand_qty || 0), 0);
+        const deliveredQty = stockOrders.reduce((sum, row) => sum + Number(row.delivered_qty || 0), 0);
+        const afterQty = afterSales.reduce((sum, row) => sum + Number(row.quantity || 0), 0);
+        const hasAfterAmount = afterSales.some((row) => row.amount_cents !== null && row.amount_cents !== undefined);
+        const amountCents = afterSales.reduce((sum, row) => sum + Number(row.amount_cents || 0), 0);
+        const currency = afterSales.find((row) => row.currency)?.currency || "CNY";
+        const latestStock = stockOrders[0];
+        const latestAfter = afterSales[0];
+        return (
+          <Space direction="vertical" size={4} style={{ maxWidth: 260 }}>
+            <Space size={4} wrap>
+              {stockOrders.length ? <Tag color={pendingStock ? "orange" : "blue"}>备货 {pendingStock}/{stockOrders.length}</Tag> : null}
+              {afterSales.length ? <Tag color={pendingAfter ? "red" : "orange"}>售后 {pendingAfter}/{afterSales.length}</Tag> : null}
+            </Space>
+            {stockOrders.length ? (
+              <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>
+                需求 {demandQty.toLocaleString("zh-CN")} / 已发 {deliveredQty.toLocaleString("zh-CN")}
+              </div>
+            ) : null}
+            {afterSales.length ? (
+              <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>
+                售后件数 {afterQty.toLocaleString("zh-CN")} / 金额 {hasAfterAmount ? formatActivityMoney(amountCents, currency) : "-"}
+              </div>
+            ) : null}
+            {latestStock ? (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                {(latestStock.stock_order_no || latestStock.delivery_order_sn || latestStock.delivery_batch_sn || "-")} · {latestStock.temu_status || "-"}
+              </Typography.Text>
+            ) : null}
+            {latestAfter ? (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                {latestAfter.after_sale_type || "售后"} · {latestAfter.status || "-"}
+              </Typography.Text>
+            ) : null}
+            <Button
+              type="link"
+              size="small"
+              style={{ padding: 0, height: "auto", fontWeight: 600 }}
+              onClick={(event) => {
+                event.stopPropagation();
+                setSelectedProduct(record);
+                setDrawerTab("fulfillment");
+              }}
+            >
+              查看明细
+            </Button>
+          </Space>
+        );
+      },
+    },
+    {
       title: "活动",
       key: "activity",
-      width: 260,
+      width: 380,
       render: (_: any, record: any) => {
         const activities: TemuActivityRow[] = Array.isArray(record.cloudActivities) ? record.cloudActivities : [];
         if (activities.length === 0) return <span style={{ color: "#bfbfbf" }}>-</span>;
         const first = activities[0];
+        const info = activityDisplayInfo(first);
         const metrics = activityMetricParts(first);
         const timeText = activityTimeText(first);
         return (
-          <Space direction="vertical" size={4} style={{ maxWidth: 240 }}>
+          <Space direction="vertical" size={4} style={{ maxWidth: 360 }}>
             <Space size={4} wrap>
               <Tag color="purple">{activities.length} 条</Tag>
-              {first.activity_kind ? <Tag color="blue">{first.activity_kind}</Tag> : null}
-              {first.activity_status ? <Tag>{first.activity_status}</Tag> : null}
+              <Tag color="blue">{info.type}</Tag>
+              <Tag color={activityStatusColor(info.status)}>{info.status}</Tag>
             </Space>
-            <Tooltip title={first.activity_title || first.activity_id || first.row_key}>
-              <div className="app-line-clamp-2" style={{ fontWeight: 600, color: "var(--color-text)" }}>
-                {first.activity_title || first.activity_id || first.row_key}
-              </div>
+            <Tooltip title={info.title}>
+              <Button
+                type="link"
+                size="small"
+                className="app-line-clamp-2"
+                style={{ padding: 0, height: "auto", textAlign: "left", fontWeight: 700, whiteSpace: "normal" }}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setActivityDetailProduct(record);
+                }}
+              >
+                {info.title}
+              </Button>
             </Tooltip>
             {metrics.length > 0 ? (
               <div style={{ color: "var(--color-text-sec)", fontSize: 12 }}>{metrics.join(" / ")}</div>
             ) : null}
+            <div style={{ color: "var(--color-text-sec)", fontSize: 12 }}>
+              最近采集 {info.updatedText || "-"}
+            </div>
             {timeText ? (
               <div style={{ color: "var(--color-text-sec)", fontSize: 12 }}>{timeText}</div>
             ) : null}
-            {activities.length > 1 ? (
-              <div style={{ color: "var(--color-brand)", fontSize: 12 }}>另 {activities.length - 1} 条活动</div>
-            ) : null}
+            <Button
+              type="link"
+              size="small"
+              style={{ padding: 0, height: "auto", fontWeight: 600 }}
+              onClick={(event) => {
+                event.stopPropagation();
+                setActivityDetailProduct(record);
+              }}
+            >
+              查看明细{activities.length > 1 ? `（另 ${activities.length - 1} 条）` : ""}
+            </Button>
           </Space>
         );
       },
@@ -3275,7 +4055,7 @@ export default function ProductList() {
     { label: "销售数据", keys: ["todaySales", "last7DaysSales", "last30DaysSales", "totalSales"] },
     { label: "缺货数量", keys: ["lackQuantity"] },
     { label: "库存数据", keys: ["warehouseStock", "occupy", "unavail", "inTransit"] },
-    { label: "备货建议", keys: ["advice"] },
+    { label: "备货履约", keys: ["advice", "fulfillment"] },
     { label: "活动数据", keys: ["activity"] },
     { label: "其他", keys: ["actions"] },
   ];
@@ -3380,6 +4160,136 @@ export default function ProductList() {
   const allSelected = tempHidden.length === 0;
 
   const colMap = new Map(columns.filter((c: any) => !removedCloudColumnKeys.has(c.key)).map((c: any) => [c.key, c]));
+  const activityDetailRows = useMemo(
+    () => (Array.isArray(activityDetailProduct?.cloudActivities) ? activityDetailProduct.cloudActivities : []),
+    [activityDetailProduct],
+  );
+  const activityDetailColumns = useMemo<ColumnsType<TemuActivityRow>>(() => [
+    {
+      title: "活动名称",
+      key: "title",
+      width: 280,
+      render: (_value, row) => {
+        const info = activityDisplayInfo(row);
+        return (
+          <Space direction="vertical" size={2}>
+            <Tooltip title={info.title}>
+              <Typography.Text strong ellipsis style={{ maxWidth: 260 }}>{info.title}</Typography.Text>
+            </Tooltip>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              {row.activity_id || row.row_key || "-"}
+            </Typography.Text>
+          </Space>
+        );
+      },
+    },
+    {
+      title: "活动类型",
+      key: "type",
+      width: 120,
+      render: (_value, row) => {
+        const info = activityDisplayInfo(row);
+        return <Tag color="blue">{info.type}</Tag>;
+      },
+    },
+    {
+      title: "状态",
+      key: "status",
+      width: 110,
+      render: (_value, row) => {
+        const info = activityDisplayInfo(row);
+        return <Tag color={activityStatusColor(info.status)}>{info.status}</Tag>;
+      },
+    },
+    {
+      title: "活动销量",
+      key: "activitySales",
+      width: 110,
+      align: "right",
+      render: (_value, row) => {
+        const value = activityDisplayInfo(row).activitySales;
+        return value === null ? "-" : Number(value).toLocaleString("zh-CN");
+      },
+    },
+    {
+      title: "活动成交",
+      key: "transactionAmount",
+      width: 120,
+      align: "right",
+      render: (_value, row) => {
+        const info = activityDisplayInfo(row);
+        return formatActivityAmount(info.transactionAmount, info.currency);
+      },
+    },
+    {
+      title: "访客",
+      key: "totalVisitors",
+      width: 100,
+      align: "right",
+      render: (_value, row) => {
+        const value = activityDisplayInfo(row).totalVisitors;
+        return value === null ? "-" : Number(value).toLocaleString("zh-CN");
+      },
+    },
+    {
+      title: "报名价",
+      key: "signupPrice",
+      width: 120,
+      align: "right",
+      render: (_value, row) => {
+        const info = activityDisplayInfo(row);
+        return formatActivityMoney(info.signupPrice, info.currency);
+      },
+    },
+    {
+      title: "建议价",
+      key: "suggestedPrice",
+      width: 120,
+      align: "right",
+      render: (_value, row) => {
+        const info = activityDisplayInfo(row);
+        return formatActivityMoney(info.suggestedPrice, info.currency);
+      },
+    },
+    {
+      title: "库存",
+      key: "stock",
+      width: 90,
+      align: "right",
+      render: (_value, row) => activityDisplayInfo(row).stock ?? "-",
+    },
+    {
+      title: "报名差异",
+      key: "diff",
+      width: 120,
+      align: "right",
+      render: (_value, row) => {
+        const info = activityDisplayInfo(row);
+        const color = info.diff == null ? "var(--color-text-muted)" : info.diff > 0 ? "var(--color-danger)" : info.diff < 0 ? "var(--color-success)" : "var(--color-text-sec)";
+        return <span style={{ color, fontWeight: info.diff ? 700 : 400 }}>{formatActivityDiff(info.diff, info.currency)}</span>;
+      },
+    },
+    {
+      title: "开始/结束时间",
+      key: "time",
+      width: 260,
+      render: (_value, row) => {
+        const info = activityDisplayInfo(row);
+        return (
+          <Space direction="vertical" size={2}>
+            <span>{info.startText || "-"}</span>
+            <Typography.Text type="secondary">{info.endText || "-"}</Typography.Text>
+          </Space>
+        );
+      },
+    },
+    {
+      title: "最近采集",
+      key: "updated",
+      width: 170,
+      render: (_value, row) => activityDisplayInfo(row).updatedText || "-",
+    },
+  ], []);
 
   // 拖拽排序
   const dragRef = useRef<{ key: string; groupLabel: string } | null>(null);
@@ -3424,6 +4334,22 @@ export default function ProductList() {
     const raw: any = record.salesRaw || {};
     const qty: any = raw.skuQuantityTotalInfo || {};
     const inv: any = qty.inventoryNumInfo || raw.inventoryNumInfo || {};
+    const stockOrderRows: TemuStockOrderRow[] = Array.isArray(record.cloudStockOrders) ? record.cloudStockOrders : [];
+    const afterSaleRows: TemuAfterSaleRow[] = Array.isArray(record.cloudAfterSales) ? record.cloudAfterSales : [];
+    const pendingStockOrderCount = stockOrderRows.filter((row) => isPendingBusinessStatus(row.temu_status)).length;
+    const pendingAfterSaleCount = afterSaleRows.filter((row) => isPendingBusinessStatus(row.status)).length;
+    const stockDemandQty = stockOrderRows.reduce((sum, row) => sum + Number(row.demand_qty || 0), 0);
+    const stockDeliveredQty = stockOrderRows.reduce((sum, row) => sum + Number(row.delivered_qty || 0), 0);
+    const afterSaleQty = afterSaleRows.reduce((sum, row) => sum + Number(row.quantity || 0), 0);
+    const afterSaleAmountCents = afterSaleRows.reduce((sum, row) => sum + Number(row.amount_cents || 0), 0);
+    const afterSaleCurrency = afterSaleRows.find((row) => row.currency)?.currency || "CNY";
+    void pendingStockOrderCount;
+    void pendingAfterSaleCount;
+    void stockDemandQty;
+    void stockDeliveredQty;
+    void afterSaleQty;
+    void afterSaleAmountCents;
+    void afterSaleCurrency;
     const trend = Array.isArray(record.trendDaily) ? record.trendDaily : [];
     const fluxSites = Array.isArray(record.fluxSites) ? record.fluxSites : [];
     const activeFluxSite = fluxSites.find((site) => site.siteKey === activeFluxSiteKey) || fluxSites[0] || null;
@@ -3523,10 +4449,30 @@ export default function ProductList() {
         [record.title].map((v) => String(v || "").replace(/\s+/g, "").trim().toLowerCase()).filter(Boolean),
       );
 
-      // 方法0（最高优先级）: 从 temu_flux_product_history_cache 直接读取商品级 30 天日趋势
+      // 方法0（最高优先级）: 从云端流量趋势接口读取商品级日趋势
+      const selectedRangeRows = activeFluxSite && selectedFluxRange
+        ? (activeFluxSite.itemsByRange?.[selectedFluxRange] || [])
+        : [];
+      const cloudTrendRows = selectedRangeRows.filter((item: any) => item?._cloudFlowTrend && item.fullDate);
+      if (cloudTrendRows.length > 0) {
+        dailyTrendData = cloudTrendRows.map((d: any) => ({
+          date: String(d.fullDate || d.date || "").slice(5),
+          fullDate: String(d.fullDate || d.date || ""),
+          曝光: toNumberValue(d.exposeNum),
+          点击: toNumberValue(d.clickNum),
+          详情访客: toNumberValue(d.detailVisitNum || d.detailVisitorNum),
+          支付买家: toNumberValue(d.buyerNum),
+          支付件数: toNumberValue(d.payGoodsNum),
+          搜索曝光: toNumberValue(d.searchExposeNum),
+          推荐曝光: toNumberValue(d.recommendExposeNum),
+          _fromCloud: true,
+        })).sort((a: any, b: any) => String(a.fullDate).localeCompare(String(b.fullDate)));
+      }
+
+      // 方法1: 从 temu_flux_product_history_cache 直接读取商品级 30 天日趋势
       // cache 结构: { goodsId: { stations: { 全球|美国|欧区: { daily: [{date,exposeNum,...}] } } } }
       const cacheSiteLabel = activeFluxSite?.siteLabel;
-      if (cacheSiteLabel && productHistoryCache && Object.keys(productHistoryCache).length > 0) {
+      if (dailyTrendData.length === 0 && cacheSiteLabel && productHistoryCache && Object.keys(productHistoryCache).length > 0) {
         for (const goodsId of idSet) {
           const entry = productHistoryCache[goodsId];
           const dailyArr = entry?.stations?.[cacheSiteLabel]?.daily;
@@ -3548,7 +4494,7 @@ export default function ProductList() {
         }
       }
 
-      // 方法1: 从 flux_history 日快照获取历史数据（只有 cache 没命中时才用）
+      // 方法2: 从 flux_history 日快照获取历史数据（只有 cache 没命中时才用）
       const historyRows: any[] = [];
       if (dailyTrendData.length === 0) {
       for (const snapshot of fluxHistoryData) {
@@ -3809,7 +4755,7 @@ export default function ProductList() {
             title: "当前短板",
             value: currentFluxSummary.exposeClickRate < 3 ? "点击承接" : currentFluxSummary.clickPayRate < 5 ? "支付转化" : "站点放量",
             helper: currentFluxSummary.exposeClickRate < 3 ? "先优化主图、标题前 12 字和价格锚点" : currentFluxSummary.clickPayRate < 5 ? "先补详情图、评价和卖点承接" : "可以扩大有效来源和站点预算",
-            accent: currentFluxSummary.exposeClickRate < 3 ? "#e11d48" : currentFluxSummary.clickPayRate < 5 ? "#f97316" : "#2563eb",
+            accent: currentFluxSummary.exposeClickRate < 3 ? "#e11d48" : currentFluxSummary.clickPayRate < 5 ? "#fbbc04" : "#1a73e8",
           },
           {
             title: "下一步动作",
@@ -3860,7 +4806,7 @@ export default function ProductList() {
     void actionChecklist; // 保留
 
     const renderMetric = (label: string, value: any, accent?: boolean) => (
-      <div style={{ padding: "8px 12px", background: "var(--color-bg-1, #fafafa)", borderRadius: 8 }}>
+      <div style={{ padding: "8px 12px", background: "var(--color-bg-1, #f8fbff)", borderRadius: 8 }}>
         <div style={{ fontSize: 13, color: "var(--color-text-sec)" }}>{label}</div>
         <div style={{ fontSize: 16, fontWeight: 700, color: accent ? "var(--color-brand)" : "var(--color-text)" }}>
           {formatTextValue(value)}
@@ -3873,7 +4819,8 @@ export default function ProductList() {
       <Card
         size="small"
         bodyStyle={{ padding: 14 }}
-        style={{ borderRadius: 16, borderColor: "rgba(255,138,31,0.12)", boxShadow: "0 10px 30px rgba(15,23,42,0.04)" }}
+        className="material-metric-card"
+        style={{ borderColor: "var(--color-border)", boxShadow: "var(--shadow-card)" }}
       >
         <div style={{ display: "grid", gap: 6 }}>
           <div style={{ fontSize: 12, color: "var(--color-text-sec)" }}>{label}</div>
@@ -3887,7 +4834,7 @@ export default function ProductList() {
     const overviewTab = (
       <div style={{ display: "grid", gap: 16 }}>
         {trend.length > 0 ? (
-          <div className="app-surface" style={{ padding: 16, borderRadius: 18 }}>
+          <div className="app-surface material-chart-panel" style={{ padding: 16 }}>
             <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 8 }}>
               <div>
                 <div style={{ fontSize: 16, fontWeight: 700 }}>销售趋势</div>
@@ -3899,15 +4846,15 @@ export default function ProductList() {
               <AreaChart data={trend} margin={{ top: 10, right: 16, left: -8, bottom: 0 }}>
                 <defs>
                   <linearGradient id="salesTrendFill" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#ff8a1f" stopOpacity={0.38} />
-                    <stop offset="100%" stopColor="#ff8a1f" stopOpacity={0.02} />
+                    <stop offset="0%" stopColor="#1a73e8" stopOpacity={0.24} />
+                    <stop offset="100%" stopColor="#1a73e8" stopOpacity={0.02} />
                   </linearGradient>
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke={PRODUCT_TRAFFIC_COLORS.grid} />
                 <XAxis dataKey="date" tick={{ fontSize: 12, fill: PRODUCT_TRAFFIC_COLORS.axis }} interval="preserveStartEnd" />
                 <YAxis tick={{ fontSize: 12, fill: PRODUCT_TRAFFIC_COLORS.axis }} allowDecimals={false} />
                 <ReTooltip formatter={(value: any) => [formatTrafficNumber(value), "销量"]} />
-                <Area type="monotone" dataKey="salesNumber" stroke="#ff8a1f" strokeWidth={2.5} fill="url(#salesTrendFill)" />
+                <Area type="monotone" dataKey="salesNumber" stroke="#1a73e8" strokeWidth={2.5} fill="url(#salesTrendFill)" />
               </AreaChart>
             </ResponsiveContainer>
           </div>
@@ -3971,7 +4918,7 @@ export default function ProductList() {
     ) : record.skuSummaries.length > 0 ? (
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 8 }}>
         {record.skuSummaries.map((s) => (
-          <div key={`${s.productSkuId}-${s.extCode}`} style={{ display: "flex", gap: 8, alignItems: "center", padding: 8, background: "var(--color-bg-1, #fafafa)", borderRadius: 8 }}>
+          <div key={`${s.productSkuId}-${s.extCode}`} style={{ display: "flex", gap: 8, alignItems: "center", padding: 8, background: "var(--color-bg-1, #f8fbff)", borderRadius: 8 }}>
             {s.thumbUrl ? <Image src={s.thumbUrl} width={36} height={36} preview={false} fallback={EMPTY_IMAGE_FALLBACK} /> : <Tag>无图</Tag>}
             <div style={{ display: "grid", gap: 4, fontSize: 13 }}>
               <div style={{ fontFamily: "Consolas, monospace" }}>{s.productSkuId || "-"}</div>
@@ -3984,6 +4931,157 @@ export default function ProductList() {
     ) : (
       <Alert type="info" showIcon message="暂无 SKU 明细" />
     );
+
+    const fulfillmentTab = stockOrderRows.length > 0 || afterSaleRows.length > 0 ? (
+      <Space direction="vertical" size={12} style={{ width: "100%" }}>
+        <div className="app-surface material-detail-section" style={{ padding: 12 }}>
+          <Space size={8} wrap>
+            <Tag color={pendingStockOrderCount ? "orange" : "blue"}>备货单 {pendingStockOrderCount}/{stockOrderRows.length}</Tag>
+            <Tag color={pendingAfterSaleCount ? "red" : "orange"}>售后单 {pendingAfterSaleCount}/{afterSaleRows.length}</Tag>
+            <Tag>备货需求 {stockDemandQty.toLocaleString("zh-CN")}</Tag>
+            <Tag>已发 {stockDeliveredQty.toLocaleString("zh-CN")}</Tag>
+            <Tag>售后件数 {afterSaleQty.toLocaleString("zh-CN")}</Tag>
+            <Tag>售后金额 {afterSaleRows.some((row) => row.amount_cents !== null && row.amount_cents !== undefined) ? formatActivityMoney(afterSaleAmountCents, afterSaleCurrency) : "-"}</Tag>
+          </Space>
+        </div>
+        {stockOrderRows.length > 0 ? (
+          <div className="app-surface material-detail-section" style={{ padding: 12 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>备货/入仓单据</div>
+            <Table<TemuStockOrderRow>
+              size="small"
+              rowKey={(row) => row.id || row.row_key || row.stock_order_no || row.delivery_order_sn || ""}
+              dataSource={stockOrderRows}
+              pagination={{ pageSize: 6, showSizeChanger: false }}
+              scroll={{ x: 960 }}
+              columns={[
+                {
+                  title: "单号",
+                  key: "order",
+                  width: 180,
+                  render: (_value, row) => (
+                    <Space direction="vertical" size={2}>
+                      <Typography.Text strong>{row.stock_order_no || row.delivery_order_sn || row.delivery_batch_sn || "-"}</Typography.Text>
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>{row.parent_order_no || row.delivery_batch_sn || "-"}</Typography.Text>
+                    </Space>
+                  ),
+                },
+                {
+                  title: "状态",
+                  dataIndex: "temu_status",
+                  width: 110,
+                  render: (value) => <Tag color={businessStatusColor(value)}>{value || "-"}</Tag>,
+                },
+                {
+                  title: "需求/已发",
+                  key: "qty",
+                  width: 110,
+                  align: "right",
+                  render: (_value, row) => `${Number(row.demand_qty || 0).toLocaleString("zh-CN")} / ${Number(row.delivered_qty || 0).toLocaleString("zh-CN")}`,
+                },
+                {
+                  title: "SKU/货号",
+                  key: "sku",
+                  width: 160,
+                  render: (_value, row) => (
+                    <Space direction="vertical" size={2}>
+                      <span>{row.sku_id || row.skc_id || "-"}</span>
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>{row.sku_ext_code || row.spec_name || "-"}</Typography.Text>
+                    </Space>
+                  ),
+                },
+                {
+                  title: "收货仓",
+                  key: "warehouse",
+                  width: 160,
+                  render: (_value, row) => row.receive_warehouse_name || row.receive_warehouse_id || row.warehouse_group || "-",
+                },
+                {
+                  title: "要求发货",
+                  key: "latest_ship_at",
+                  width: 160,
+                  render: (_value, row) => formatTimestamp(row.latest_ship_at) || row.latest_ship_at || "-",
+                },
+                {
+                  title: "最近采集",
+                  key: "updated",
+                  width: 160,
+                  render: (_value, row) => formatTimestamp(row.last_updated_at) || "-",
+                },
+              ]}
+            />
+          </div>
+        ) : null}
+        {afterSaleRows.length > 0 ? (
+          <div className="app-surface material-detail-section" style={{ padding: 12 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>售后记录</div>
+            <Table<TemuAfterSaleRow>
+              size="small"
+              rowKey={(row) => row.id || row.row_key || row.package_no || row.order_id || ""}
+              dataSource={afterSaleRows}
+              pagination={{ pageSize: 6, showSizeChanger: false }}
+              scroll={{ x: 920 }}
+              columns={[
+                {
+                  title: "类型/单号",
+                  key: "type",
+                  width: 190,
+                  render: (_value, row) => (
+                    <Space direction="vertical" size={2}>
+                      <Typography.Text strong>{row.after_sale_type || "售后"}</Typography.Text>
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>{row.package_no || row.order_id || "-"}</Typography.Text>
+                    </Space>
+                  ),
+                },
+                {
+                  title: "状态",
+                  dataIndex: "status",
+                  width: 110,
+                  render: (value) => <Tag color={businessStatusColor(value)}>{value || "-"}</Tag>,
+                },
+                {
+                  title: "原因",
+                  dataIndex: "reason",
+                  width: 200,
+                  render: (value) => <Typography.Text ellipsis style={{ maxWidth: 180 }}>{value || "-"}</Typography.Text>,
+                },
+                {
+                  title: "数量/金额",
+                  key: "amount",
+                  width: 130,
+                  align: "right",
+                  render: (_value, row) => (
+                    <Space direction="vertical" size={2}>
+                      <span>{Number(row.quantity || 0).toLocaleString("zh-CN")} 件</span>
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>{formatActivityMoney(row.amount_cents, row.currency)}</Typography.Text>
+                    </Space>
+                  ),
+                },
+                {
+                  title: "物流/仓",
+                  key: "logistics",
+                  width: 180,
+                  render: (_value, row) => (
+                    <Space direction="vertical" size={2}>
+                      <span>{row.logistics_no || "-"}</span>
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>{row.warehouse_name || "-"}</Typography.Text>
+                    </Space>
+                  ),
+                },
+                {
+                  title: "最近采集",
+                  key: "updated",
+                  width: 170,
+                  render: (_value, row) => formatTimestamp(row.last_updated_at || row.updated_at_text || row.created_at_text) || row.updated_at_text || row.created_at_text || "-",
+                },
+              ]}
+            />
+          </div>
+        ) : null}
+      </Space>
+    ) : (
+      <Alert type="info" showIcon message="暂无云端备货或售后数据" description="扩展采集到备货单、入仓履约或售后记录后，会按店铺和 SKC 自动关联到这里。" />
+    );
+
     // ----- 全部字段 Tab -----
     const groups: { title: string; fields: Array<{ label: string; value: any; accent?: boolean }> }[] = [
       {
@@ -4067,6 +5165,18 @@ export default function ProductList() {
         ],
       },
       {
+        title: "履约/售后",
+        fields: [
+          { label: "备货单", value: stockOrderRows.length || "" },
+          { label: "备货未完成", value: pendingStockOrderCount || "" },
+          { label: "备货进度", value: stockDemandQty ? `${stockDeliveredQty}/${stockDemandQty}` : "" },
+          { label: "售后单", value: afterSaleRows.length || "" },
+          { label: "售后未完结", value: pendingAfterSaleCount || "" },
+          { label: "售后件数", value: afterSaleQty || "" },
+          { label: "售后金额", value: afterSaleAmountCents ? formatActivityMoney(afterSaleAmountCents, afterSaleCurrency) : "" },
+        ],
+      },
+      {
         title: "状态/合规",
         fields: [
           { label: "商品状态", value: record.status || normalizeStatusText(record.removeStatus) },
@@ -4089,7 +5199,7 @@ export default function ProductList() {
           const visibleFields = group.fields.filter((f) => hasMeaningfulSnapshotValue(f.value));
           if (visibleFields.length === 0) return null;
           return (
-            <div key={group.title} className="app-surface" style={{ padding: 12, borderRadius: 12 }}>
+            <div key={group.title} className="app-surface material-detail-section" style={{ padding: 12 }}>
               <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10, color: "var(--color-brand)" }}>{group.title}</div>
               <div style={{ display: "grid", gap: 8 }}>
                 {visibleFields.map((field) => (
@@ -4117,7 +5227,7 @@ export default function ProductList() {
     const labelTab = labelGroups.length > 0 ? (
       <div style={{ display: "grid", gap: 12 }}>
         {labelGroups.map((g) => (
-          <div key={g.title} className="app-surface" style={{ padding: 12, borderRadius: 12 }}>
+          <div key={g.title} className="app-surface material-detail-section" style={{ padding: 12 }}>
             <div style={{ fontSize: 12, color: "var(--color-text-sec)", marginBottom: 6 }}>{g.title}</div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
               {g.items.map((item: any, idx: number) => {
@@ -4135,6 +5245,7 @@ export default function ProductList() {
     const drawerItems = [
       { key: "overview", label: "概览", children: overviewTab },
       { key: "flux", label: "流量驾驶舱", children: fluxTab },
+      { key: "fulfillment", label: `履约售后${stockOrderRows.length + afterSaleRows.length ? ` ${stockOrderRows.length + afterSaleRows.length}` : ""}`, children: fulfillmentTab },
       { key: "sku", label: "SKU", children: skuTab },
       { key: "fields", label: "全部字段", children: allFieldsTab },
       { key: "labels", label: "标签", children: labelTab },
@@ -4191,6 +5302,9 @@ export default function ProductList() {
           `云端 SKC ${cloudSkcMap.size}`,
           `销售快照 ${cloudSalesMap.size}`,
           `活动快照 ${cloudActivityCount}`,
+          `风险快照 ${cloudRiskCount}`,
+          `备货单 ${cloudStockOrderCount}`,
+          `售后 ${cloudAfterSaleCount}`,
           cloudShopSales?.stat_date ? `店铺销量 ${cloudShopSales.stat_date}` : null,
           hasAccount === false ? "未连接云端" : null,
         ].filter(Boolean)}
@@ -4217,7 +5331,7 @@ export default function ProductList() {
           message="部分商品数据还没有准备好"
           description={dataIssues.slice(0, 3).join("；")}
           action={(
-            <Button type="link" onClick={() => navigate("/multi-store-cloud")}>查看云端采集</Button>
+            <Button type="link" onClick={() => navigate("/collect")}>查看采集状态</Button>
           )}
         />
       ) : null}
@@ -4237,7 +5351,7 @@ export default function ProductList() {
                 {hasAccount === false ? (
                   <Button type="primary" onClick={() => navigate("/settings")}>前往设置云端</Button>
                 ) : (
-                  <Button type="primary" onClick={() => navigate("/multi-store-cloud")}>查看云端采集</Button>
+                  <Button type="primary" onClick={() => navigate("/collect")}>查看采集状态</Button>
                 )}
                 <Button onClick={loadProducts}>重新检查</Button>
               </div>
@@ -4247,54 +5361,54 @@ export default function ProductList() {
       ) : (
         <>
           {/* 汇总指标卡片 - SalesManagement 风格 */}
-          <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+          <Row gutter={[12, 12]} className="material-kpi-row" style={{ marginBottom: 16 }}>
             <Col span={4}>
-              <Card size="small">
-                <Statistic title="商品总数" value={totalProducts} prefix={<ShoppingCartOutlined />} valueStyle={{ color: "#1890ff" }} />
+              <Card size="small" className="material-kpi-card">
+                <Statistic title="商品总数" value={totalProducts} prefix={<ShoppingCartOutlined />} valueStyle={{ color: "var(--color-blue)" }} />
               </Card>
             </Col>
             <Col span={4}>
-              <Card size="small">
-                <Statistic title="售罄" value={saleOutCount} prefix={<StopOutlined />} valueStyle={{ color: "#ff4d4f" }} />
+              <Card size="small" className="material-kpi-card material-kpi-card--danger">
+                <Statistic title="售罄" value={saleOutCount} prefix={<StopOutlined />} valueStyle={{ color: "#ea4335" }} />
               </Card>
             </Col>
             <Col span={4}>
-              <Card size="small">
-                <Statistic title="即将售罄" value={salesSummary?.soonSaleOutSkcNum || 0} prefix={<WarningOutlined />} valueStyle={{ color: "#fa8c16" }} />
+              <Card size="small" className="material-kpi-card material-kpi-card--warning">
+                <Statistic title="即将售罄" value={salesSummary?.soonSaleOutSkcNum || 0} prefix={<WarningOutlined />} valueStyle={{ color: "#fbbc04" }} />
               </Card>
             </Col>
             <Col span={4}>
-              <Card size="small">
-                <Statistic title="缺货" value={shortageCount} valueStyle={{ color: "#fa541c" }} />
+              <Card size="small" className="material-kpi-card material-kpi-card--danger">
+                <Statistic title="缺货" value={shortageCount} valueStyle={{ color: "var(--color-danger)" }} />
               </Card>
             </Col>
             <Col span={4}>
-              <Card size="small">
-                <Statistic title="建议备货" value={adviceCount} valueStyle={{ color: "#fa541c" }} />
+              <Card size="small" className="material-kpi-card material-kpi-card--danger">
+                <Statistic title="建议备货" value={adviceCount} valueStyle={{ color: "var(--color-danger)" }} />
               </Card>
             </Col>
             <Col span={4}>
-              <Card size="small">
-                <Statistic title="广告商品" value={salesSummary?.adSkcNum || 0} prefix={<FireOutlined />} valueStyle={{ color: "#722ed1" }} />
+              <Card size="small" className="material-kpi-card">
+                <Statistic title="广告商品" value={salesSummary?.adSkcNum || 0} prefix={<FireOutlined />} valueStyle={{ color: "var(--color-purple)" }} />
               </Card>
             </Col>
           </Row>
 
           {cloudShopSales ? (
-            <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+            <Row gutter={[12, 12]} className="material-kpi-row material-kpi-row--wide" style={{ marginBottom: 16 }}>
               <Col xs={24} md={8}>
-                <Card size="small">
-                  <Statistic title="店铺今日销量" value={cloudShopSales.sale_volume ?? 0} prefix={<RiseOutlined />} suffix="件" valueStyle={{ color: "#389e0d" }} />
+                <Card size="small" className="material-kpi-card material-kpi-card--success">
+                  <Statistic title="店铺今日销量" value={cloudShopSales.sale_volume ?? 0} prefix={<RiseOutlined />} suffix="件" valueStyle={{ color: "var(--color-success)" }} />
                 </Card>
               </Col>
               <Col xs={24} md={8}>
-                <Card size="small">
-                  <Statistic title="店铺7日销量" value={cloudShopSales.seven_days_sale_volume ?? 0} prefix={<BarChartOutlined />} suffix="件" valueStyle={{ color: "#1677ff" }} />
+                <Card size="small" className="material-kpi-card">
+                  <Statistic title="店铺7日销量" value={cloudShopSales.seven_days_sale_volume ?? 0} prefix={<BarChartOutlined />} suffix="件" valueStyle={{ color: "#1a73e8" }} />
                 </Card>
               </Col>
               <Col xs={24} md={8}>
-                <Card size="small">
-                  <Statistic title="店铺30日销量" value={cloudShopSales.thirty_days_sale_volume ?? 0} prefix={<FireOutlined />} suffix="件" valueStyle={{ color: "#722ed1" }} />
+                <Card size="small" className="material-kpi-card">
+                  <Statistic title="店铺30日销量" value={cloudShopSales.thirty_days_sale_volume ?? 0} prefix={<FireOutlined />} suffix="件" valueStyle={{ color: "var(--color-purple)" }} />
                 </Card>
               </Col>
             </Row>
@@ -4302,7 +5416,7 @@ export default function ProductList() {
 
 
           {/* 工具栏 - SalesManagement 风格 */}
-          <Card size="small" style={{ marginBottom: 16 }}>
+          <Card size="small" className="material-toolbar-card" style={{ marginBottom: 16 }}>
             <Space wrap>
               <Input
                 placeholder="搜索商品名称/SKC/SKU/货号/买手"
@@ -4327,11 +5441,11 @@ export default function ProductList() {
                 刷新数据
               </Button>
               <Button icon={<SettingOutlined />} onClick={openColSettings}>列设置</Button>
-              <span style={{ color: "#8c8c8c", fontSize: 13 }}>
-                共 {products.length} 条 · 已接销售 {salesAttachedCount} · 活动 {cloudActivityCount}
+              <span className="material-toolbar-meta">
+                共 {products.length} 条 · 已接销售 {salesAttachedCount} · 活动 {cloudActivityCount} · 备货 {cloudStockOrderCount} · 售后 {cloudAfterSaleCount}
               </span>
               {filteredProducts.length !== products.length && (
-                <span style={{ color: "#8c8c8c", fontSize: 13 }}>
+                <span className="material-toolbar-meta">
                   显示 {filteredProducts.length} / {products.length}
                 </span>
               )}
@@ -4358,7 +5472,7 @@ export default function ProductList() {
                 .product-list-table .ant-table-tbody > tr > td {
                   background: #ffffff;
                   padding: 0 !important;
-                  border-bottom: 2px solid #e4e9f0 !important;
+                  border-bottom: 1px solid #e8eaed !important;
                 }
                 /* 含 sku-stack 的 td：高度 1px 触发 "子元素 100% 撑满真实行高" 技巧 */
                 .product-list-table .ant-table-tbody > tr > td:has(.sku-stack) {
@@ -4383,23 +5497,23 @@ export default function ProductList() {
                   min-height: 54px;
                   display: flex;
                   align-items: center;
-                  border-bottom: 1px dashed #e8e8e8;
-                  color: #262626;
+                  border-bottom: 1px solid #eef2f7;
+                  color: #202124;
                 }
                 .sku-cell:last-child { border-bottom: none; }
                 /* 合计行样式：固定高度（不拉伸），浅灰底、加粗、顶边实线 */
                 .sku-cell-total {
                   flex: 0 0 auto !important;
-                  background: #fafbfc;
-                  border-top: 1px solid #e4e9f0 !important;
+                  background: #f8fbff;
+                  border-top: 1px solid #e8eaed !important;
                   border-bottom: none !important;
                   font-weight: 600;
                   min-height: 40px;
                 }
                 .sku-cell-total span { font-weight: 600 !important; }
                 /* 行悬停淡蓝 */
-                .product-list-table .ant-table-tbody > tr:hover > td { background: #f5faff !important; }
-                .product-list-table .ant-table-tbody > tr:hover .sku-cell-total { background: #e6f4ff !important; }
+                .product-list-table .ant-table-tbody > tr:hover > td { background: #f8fbff !important; }
+                .product-list-table .ant-table-tbody > tr:hover .sku-cell-total { background: #e8f0fe !important; }
               `}</style>
               <Table
                 className="product-list-table"
@@ -4415,7 +5529,7 @@ export default function ProductList() {
                   pageSizeOptions: [30, 50, 100, 200],
                   showTotal: (total) => `共 ${total} 个商品`,
                 }}
-                scroll={{ x: 2300 }}
+                scroll={{ x: 2450 }}
                 locale={{ emptyText: "暂无商品数据" }}
               />
               </>
@@ -4423,6 +5537,63 @@ export default function ProductList() {
           </div>
 
           {renderDrawer()}
+
+          <Modal
+            title="活动明细"
+            open={Boolean(activityDetailProduct)}
+            onCancel={() => setActivityDetailProduct(null)}
+            footer={null}
+            width={1280}
+            destroyOnClose
+          >
+            <Space direction="vertical" size={12} style={{ width: "100%" }}>
+              <div>
+                <Typography.Text strong>{activityDetailProduct?.title || "-"}</Typography.Text>
+                <Typography.Text type="secondary" style={{ marginLeft: 8 }}>
+                  店铺 {activityDetailProduct?.mallId || "-"} · SKC {activityDetailProduct?.skcId || "-"} · 共 {activityDetailRows.length} 条活动
+                </Typography.Text>
+              </div>
+              <Table
+                rowKey={(row) => row.id || row.row_key}
+                size="small"
+                columns={activityDetailColumns}
+                dataSource={activityDetailRows}
+                pagination={false}
+                scroll={{ x: 1270 }}
+                expandable={{
+                  expandedRowRender: (row) => {
+                    const info = activityDisplayInfo(row);
+                    const rawPreview = row.raw_json ? row.raw_json.slice(0, 1200) : "";
+                    return (
+                      <Descriptions size="small" bordered column={2}>
+                        <Descriptions.Item label="活动ID">{row.activity_id || "-"}</Descriptions.Item>
+                        <Descriptions.Item label="采集事件">{row.source_event_id || "-"}</Descriptions.Item>
+                        <Descriptions.Item label="Product ID">{row.product_id || "-"}</Descriptions.Item>
+                        <Descriptions.Item label="Goods ID">{row.goods_id || "-"}</Descriptions.Item>
+                        <Descriptions.Item label="SKC">{row.skc_id || "-"}</Descriptions.Item>
+                        <Descriptions.Item label="站点">{row.site || "-"}</Descriptions.Item>
+                        <Descriptions.Item label="活动类型">{info.type}</Descriptions.Item>
+                        <Descriptions.Item label="活动来源">{info.kind}</Descriptions.Item>
+                        <Descriptions.Item label="报名价">{formatActivityMoney(info.signupPrice, info.currency)}</Descriptions.Item>
+                        <Descriptions.Item label="建议价">{formatActivityMoney(info.suggestedPrice, info.currency)}</Descriptions.Item>
+                        <Descriptions.Item label="库存">{info.stock ?? "-"}</Descriptions.Item>
+                        <Descriptions.Item label="报名差异">{formatActivityDiff(info.diff, info.currency)}</Descriptions.Item>
+                        <Descriptions.Item label="开始时间">{info.startText || "-"}</Descriptions.Item>
+                        <Descriptions.Item label="结束时间">{info.endText || "-"}</Descriptions.Item>
+                        <Descriptions.Item label="最近采集">{info.updatedText || "-"}</Descriptions.Item>
+                        <Descriptions.Item label="快照日期">{row.stat_date || "-"}</Descriptions.Item>
+                        <Descriptions.Item label="原始快照" span={2}>
+                          <pre style={{ margin: 0, maxHeight: 180, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                            {rawPreview || "-"}
+                          </pre>
+                        </Descriptions.Item>
+                      </Descriptions>
+                    );
+                  },
+                }}
+              />
+            </Space>
+          </Modal>
 
           {/* 列设置抽屉 */}
           <Drawer
@@ -4433,15 +5604,15 @@ export default function ProductList() {
             styles={{ body: { padding: 0, display: "flex", flexDirection: "column" } }}
             closable={false}
           >
-            <div style={{ padding: "16px 20px", borderBottom: "1px solid #f0f0f0", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <div style={{ padding: "16px 20px", borderBottom: "1px solid var(--color-border)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               <span style={{ fontSize: 16, fontWeight: 600 }}>自定义列</span>
               <Button type="link" size="small" onClick={() => setColSettingsOpen(false)} style={{ fontSize: 18, padding: 0 }}>✕</Button>
             </div>
-            <div style={{ padding: "8px 20px", borderBottom: "1px solid #f0f0f0", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <span style={{ color: "#8c8c8c", fontSize: 13 }}>请勾选需要显示的字段，可拖换调整顺序</span>
+            <div style={{ padding: "8px 20px", borderBottom: "1px solid var(--color-border)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <span style={{ color: "var(--color-text-muted)", fontSize: 13 }}>请勾选需要显示的字段，可拖换调整顺序</span>
               <Button type="link" size="small" onClick={resetColSettings}>重置</Button>
             </div>
-            <div style={{ padding: "8px 20px", borderBottom: "1px solid #f0f0f0", display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ padding: "8px 20px", borderBottom: "1px solid var(--color-border)", display: "flex", alignItems: "center", gap: 8 }}>
               <Checkbox
                 checked={allSelected}
                 indeterminate={!allSelected && tempHidden.length < allColumnKeys.length}
@@ -4451,7 +5622,7 @@ export default function ProductList() {
                 }}
               />
               <span style={{ fontWeight: 500 }}>全选</span>
-              <span style={{ color: "#8c8c8c", marginLeft: "auto", fontSize: 13 }}>{visibleCount}/{allColumnKeys.length}</span>
+              <span style={{ color: "var(--color-text-muted)", marginLeft: "auto", fontSize: 13 }}>{visibleCount}/{allColumnKeys.length}</span>
             </div>
             <div style={{ flex: 1, overflow: "auto", padding: "0 0 80px 0" }}>
               {columnGroups.map((group) => {
@@ -4464,14 +5635,14 @@ export default function ProductList() {
                 const groupAllVisible = validKeys.every((k) => !tempHidden.includes(k));
                 const groupSomeVisible = validKeys.some((k) => !tempHidden.includes(k));
                 return (
-                  <div key={group.label} style={{ borderBottom: "1px solid #f5f5f5" }}>
-                    <div style={{ padding: "10px 20px", display: "flex", alignItems: "center", gap: 8, background: "#fafafa" }}>
+                  <div key={group.label} style={{ borderBottom: "1px solid #f8fbff" }}>
+                    <div style={{ padding: "10px 20px", display: "flex", alignItems: "center", gap: 8, background: "#f8fbff" }}>
                       <Checkbox
                         checked={groupAllVisible}
                         indeterminate={!groupAllVisible && groupSomeVisible}
                         onChange={() => tempToggleGroup(validKeys)}
                       />
-                      <span style={{ fontWeight: 600, fontSize: 14, color: "#1677ff" }}>{group.label}</span>
+                      <span style={{ fontWeight: 600, fontSize: 14, color: "#1a73e8" }}>{group.label}</span>
                     </div>
                     {validKeys.map((key) => {
                       const col = colMap.get(key)!;
@@ -4491,7 +5662,7 @@ export default function ProductList() {
                             display: "flex",
                             alignItems: "center",
                             gap: 8,
-                            borderTop: isDragOver ? "2px solid #1677ff" : "2px solid transparent",
+                            borderTop: isDragOver ? "2px solid #1a73e8" : "2px solid transparent",
                             background: isDragOver ? "#e6f4ff" : "transparent",
                             transition: "background 0.15s",
                             cursor: "grab",
@@ -4507,7 +5678,7 @@ export default function ProductList() {
                 );
               })}
             </div>
-            <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, padding: "12px 20px", borderTop: "1px solid #f0f0f0", background: "#fff", display: "flex", gap: 12, justifyContent: "center" }}>
+            <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, padding: "12px 20px", borderTop: "1px solid var(--color-border)", background: "#fff", display: "flex", gap: 12, justifyContent: "center" }}>
               <Button type="primary" onClick={confirmColSettings} style={{ minWidth: 80 }}>确认</Button>
               <Button onClick={() => setColSettingsOpen(false)} style={{ minWidth: 80 }}>取消</Button>
             </div>
@@ -4573,7 +5744,7 @@ export default function ProductList() {
                               {rows.map((r: any) => (
                                 <tr key={r.regionId}>
                                   <td style={{ padding: "4px 6px" }}>{r.regionName}</td>
-                                  <td style={{ padding: "4px 6px", textAlign: "right", color: "#1677ff", fontWeight: 600 }}>{r.sales}</td>
+                                  <td style={{ padding: "4px 6px", textAlign: "right", color: "#1a73e8", fontWeight: 600 }}>{r.sales}</td>
                                 </tr>
                               ))}
                             </tbody>

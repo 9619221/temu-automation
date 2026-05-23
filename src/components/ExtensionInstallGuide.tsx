@@ -61,6 +61,16 @@ function isAgentOnline(agent: AgentHeartbeat) {
   return Number.isFinite(ts) && Date.now() - ts < ONLINE_WINDOW_MS;
 }
 
+function parseCollectorTargets(agent: AgentHeartbeat | null) {
+  if (!agent?.collector_last_targets_json) return [];
+  try {
+    const parsed = JSON.parse(agent.collector_last_targets_json);
+    return Array.isArray(parsed) ? parsed.filter((item) => item && typeof item === "object") : [];
+  } catch {
+    return [];
+  }
+}
+
 export default function ExtensionInstallGuide({ variant = "panel" }: ExtensionInstallGuideProps) {
   const navigate = useNavigate();
   const [state, setState] = useState<ExtensionGuideState>({
@@ -106,6 +116,11 @@ export default function ExtensionInstallGuide({ variant = "panel" }: ExtensionIn
   const hasOnlineAgent = onlineAgents.length > 0;
   const hasAnyAgent = latestAgents.length > 0;
   const queueDepth = onlineAgents.reduce((sum, agent) => sum + Number(agent.queue_depth || 0), 0);
+  const collectorTargets = parseCollectorTargets(newestAgent);
+  const collectorTaskText = collectorTargets
+    .map((target) => String(target.key || "").trim())
+    .filter(Boolean)
+    .join("、") || newestAgent?.collector_last_target_key || "";
 
   const status = !state.cloudConfig
     ? { label: "云端未配置", color: "warning" as const, icon: <WarningOutlined /> }
@@ -128,7 +143,7 @@ export default function ExtensionInstallGuide({ variant = "panel" }: ExtensionIn
   if (variant === "banner") {
     return (
       <div className="extension-install-banner">
-        <ChromeOutlined style={{ color: "#1677ff", fontSize: 16 }} />
+        <ChromeOutlined style={{ color: "#1a73e8", fontSize: 16 }} />
         <span style={{ fontWeight: 700, color: "var(--color-text)", fontSize: 13 }}>采集助手：</span>
         <Text type="secondary" style={{ fontSize: 13 }}>
           采集助手随本软件自动安装。若未连接，请重启 Chrome / Edge，再打开 Temu 卖家后台。
@@ -153,7 +168,7 @@ export default function ExtensionInstallGuide({ variant = "panel" }: ExtensionIn
       className="app-panel"
       style={{
         borderColor: hasOnlineAgent ? "rgba(0, 185, 107, 0.24)" : "#ffd9b8",
-        background: hasOnlineAgent ? "linear-gradient(135deg, #f5fffa, #ffffff)" : "linear-gradient(135deg, #fff7f0, #ffffff)",
+        background: hasOnlineAgent ? "linear-gradient(135deg, #f5fffa, #ffffff)" : "linear-gradient(135deg, rgba(26, 115, 232, 0.08), #ffffff)",
       }}
     >
       <div className="app-panel__title">
@@ -231,6 +246,24 @@ export default function ExtensionInstallGuide({ variant = "panel" }: ExtensionIn
               {newestAgent?.hook_xhr_alive === 1 ? "XHR 正常" : newestAgent?.hook_xhr_alive === 0 ? "XHR 异常" : "等待 Temu 页面"}
             </span>
           </div>
+          <div className="app-kv">
+            <span className="app-kv__label">自动采集</span>
+            <span className="app-kv__value">
+              {newestAgent?.collector_enabled === 0 ? "已关闭" : collectorTaskText ? "运行中" : "等待任务"}
+            </span>
+          </div>
+          {collectorTaskText ? (
+            <div className="app-kv">
+              <span className="app-kv__label">本轮任务</span>
+              <span className="app-kv__value" title={collectorTaskText}>{collectorTaskText}</span>
+            </div>
+          ) : null}
+          {newestAgent?.collector_last_target_url ? (
+            <div className="app-kv">
+              <span className="app-kv__label">采集页面</span>
+              <span className="app-kv__value" title={newestAgent.collector_last_target_url}>{newestAgent.collector_last_target_url}</span>
+            </div>
+          ) : null}
           {newestAgent?.page_url ? (
             <div className="app-kv">
               <span className="app-kv__label">最近页面</span>

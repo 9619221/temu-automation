@@ -6,7 +6,6 @@ import {
   ArrowRightOutlined,
   BellOutlined,
   CheckCircleOutlined,
-  CloudSyncOutlined,
   CloseCircleOutlined,
   DashboardOutlined,
   DatabaseOutlined,
@@ -58,7 +57,6 @@ const menuItems = [
     label: "数据",
     children: [
       { key: "/collect", icon: <SyncOutlined />, label: "数据采集" },
-      { key: "/multi-store-cloud", icon: <CloudSyncOutlined />, label: "云端采集" },
       { key: "/temu-robots", icon: <DatabaseOutlined />, label: "TEMU 机器人" },
     ],
   },
@@ -109,6 +107,7 @@ export default function AppLayout() {
   const canUseCollection = canAccessRoute(currentRole, "/collect");
   const canManageAccounts = canAccessRoute(currentRole, "/accounts");
   const canViewLogs = canAccessRoute(currentRole, "/logs");
+  const isStudioRoute = location.pathname.startsWith("/image-studio");
 
   const visibleMenuItems = useMemo(() => (
     menuItems
@@ -205,7 +204,7 @@ export default function AppLayout() {
       label: (
         <Space>
           {account.id === activeAccountId ? (
-            <CheckCircleOutlined style={{ color: "#e55b00" }} />
+            <CheckCircleOutlined style={{ color: "var(--color-blue)" }} />
           ) : (
             <UserOutlined style={{ color: "#bbb" }} />
           )}
@@ -214,7 +213,7 @@ export default function AppLayout() {
       ),
     })),
     { type: "divider" as const },
-    { key: "__manage__", label: <span style={{ color: "#1677ff" }}>管理账号</span> },
+    { key: "__manage__", label: <span style={{ color: "#1a73e8" }}>管理账号</span> },
   ];
 
   const handleAccountMenuClick = async ({ key }: { key: string }) => {
@@ -248,7 +247,7 @@ export default function AppLayout() {
           renderItem={(item) => (
             <List.Item style={{ padding: "8px 16px", borderBottom: "none" }}>
               <Space>
-                <CloseCircleOutlined style={{ color: "#ff4d4f", fontSize: 13 }} />
+                <CloseCircleOutlined style={{ color: "#ea4335", fontSize: 13 }} />
                 <span style={{ fontSize: 12, color: "#555" }}>
                   {item.key}：{item.message}
                 </span>
@@ -331,7 +330,7 @@ export default function AppLayout() {
             ) : null}
 
             {canUseCollection ? (
-            <Dropdown trigger={["click"]} dropdownRender={() => bellDropdown}>
+            <Dropdown trigger={["click"]} popupRender={() => bellDropdown}>
               <Badge count={errorCount > 0 ? errorCount : 0} size="small" offset={[-2, 2]}>
                 <Button icon={<BellOutlined />} className="app-header-button">
                   通知
@@ -413,7 +412,7 @@ export default function AppLayout() {
             minHeight: 280,
           }}
         >
-          <div className="app-workspace-shell">
+          <div className={`app-workspace-shell${isStudioRoute ? " app-workspace-shell--studio" : ""}`}>
             <Outlet />
           </div>
         </Content>

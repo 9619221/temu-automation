@@ -84,8 +84,10 @@ r.post("/v1/heartbeat", authMiddleware, (req, res) => {
     INSERT INTO agent_heartbeats
     (id, tenant_id, device_id, device_uuid, captured_count, total_sent, queue_depth,
      last_capture_url, last_capture_at, last_flush_at, last_flush_ok, last_flush_reason,
-     hook_xhr_alive, hook_perf_seen, page_url, ts, received_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     hook_xhr_alive, hook_perf_seen, page_url, collector_enabled, collector_index,
+     collector_last_target_key, collector_last_target_url, collector_last_targets_json,
+     collector_updated_at, ts, received_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     crypto.randomUUID(), tenant_id, device_id, deviceUuid,
     b.captured_count ?? null, b.total_sent ?? null, b.queue_depth ?? null,
@@ -96,6 +98,12 @@ r.post("/v1/heartbeat", authMiddleware, (req, res) => {
     b.hook_xhr_alive == null ? null : (b.hook_xhr_alive ? 1 : 0),
     Number(b.hook_perf_seen) || null,
     b.page_url || null,
+    b.collector_enabled == null ? null : (b.collector_enabled ? 1 : 0),
+    Number.isFinite(Number(b.collector_index)) ? Number(b.collector_index) : null,
+    b.collector_last_target_key || null,
+    b.collector_last_target_url || null,
+    Array.isArray(b.collector_last_targets) ? JSON.stringify(b.collector_last_targets).slice(0, 8000) : null,
+    Number(b.collector_updated_at) || null,
     Number(b.ts) || now,
     now
   );

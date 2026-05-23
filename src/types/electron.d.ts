@@ -478,6 +478,20 @@ interface ErpAPI {
       remark?: string;
       status?: string;
     }) => Promise<any>;
+    importFeishuOnce: (payload: {
+      filePath: string;
+      sourceUrl?: string;
+    }) => Promise<{
+      source: "feishu";
+      sourceUrl?: string | null;
+      filePath: string;
+      total: number;
+      imported: number;
+      created: number;
+      updated: number;
+      skipped: number;
+      errors?: Array<{ row: number; reason: string }>;
+    }>;
   };
   sku: {
     list: (params?: ErpListParams) => Promise<any[]>;

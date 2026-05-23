@@ -92,7 +92,7 @@ const INBOUND_STATUS_LABELS = Object.freeze({
   pending_arrival: "待到货",
   arrived: "已到仓",
   counted: "已核数",
-  inbounded_pending_qc: "已入库待 QC",
+  inbounded_pending_qc: "已入库",
   quantity_mismatch: "数量异常",
   damaged: "破损异常",
   exception: "异常",
@@ -823,7 +823,7 @@ function renderShell({ title, subtitle, cards = [], currentPath, user, content =
       --line: #e6e8ef;
       --text: #1f2937;
       --muted: #667085;
-      --brand: #e55b00;
+      --brand: #007aff;
       --blue: #1677ff;
       --green: #16a34a;
     }
@@ -1061,7 +1061,7 @@ function renderShell({ title, subtitle, cards = [], currentPath, user, content =
       border: 0;
       border-radius: 7px;
       padding: 4px 10px;
-      background: #e55b00;
+      background: #007aff;
       color: #fff;
       font-size: 12px;
       font-weight: 800;
@@ -1159,7 +1159,7 @@ function renderShell({ title, subtitle, cards = [], currentPath, user, content =
       justify-content: center;
       margin-left: 6px;
       border-radius: 999px;
-      background: #e55b00;
+      background: #007aff;
       color: #fff;
       font-size: 11px;
       font-weight: 800;
@@ -1352,7 +1352,7 @@ function renderLoginPage({ error = "", next = "/" } = {}) {
       height: 42px;
       border: 0;
       border-radius: 8px;
-      background: #e55b00;
+      background: #007aff;
       color: #fff;
       font-size: 15px;
       font-weight: 750;

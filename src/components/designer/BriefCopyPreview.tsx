@@ -24,7 +24,7 @@ export function BriefCopyPreview({ brief }: Props) {
         display: "grid",
         gap: 6,
         padding: 8,
-        background: "#fafafa",
+        background: "#f8fbff",
         borderRadius: 6,
       }}
     >

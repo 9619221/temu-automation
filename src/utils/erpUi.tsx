@@ -54,7 +54,7 @@ export const INBOUND_STATUS_LABELS: Record<string, string> = {
   pending_arrival: "待到货",
   arrived: "已到仓",
   counted: "已核数",
-  inbounded_pending_qc: "已入库待质检",
+  inbounded_pending_qc: "已入库",
   quantity_mismatch: "数量异常",
   damaged: "破损异常",
   exception: "异常",

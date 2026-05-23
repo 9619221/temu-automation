@@ -17,6 +17,14 @@ export const URL_WHITELIST = [
   "jushuitan.com/",
   "scm121.com/",
 
+  // === Feishu Base：供应商档案一次性接入（浏览器登录态内采集） ===
+  "feishu.cn/base/",
+  "/space/api/bitable/",
+  "/space/api/base/",
+  "/space/api/box/",
+  "/base/api/",
+  "/bitable/",
+
   // === 商品 / SKC / SKU ===
   "/visage-agent-seller/product/skc/pageQuery",
   "/visage-agent-seller/product/draft/pageQuery",

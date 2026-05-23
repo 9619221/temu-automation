@@ -22,16 +22,34 @@ const MALLS_KEY = "temu_monitor_malls";
 const COLLECTOR_STATE_KEY = "temu_monitor_collector_state";
 const COLLECTOR_WINDOW_KEY = "temu_monitor_collector_window";
 const COLLECTOR_QUERY = "__temu_monitor_collector=1";
+const COLLECTOR_ALARM_MINUTES = 2;
+const COLLECTOR_BATCH_SIZE = 4;
+const LOCAL_ERP_ENDPOINT = "http://127.0.0.1:8799";
+const LOCAL_ERP_EXTENSION_TOKEN = "temu-jst-extension-v1";
+const FEISHU_SUPPLIER_TABLE_URL = "https://mcn24onb5t1o.feishu.cn/base/RLy7bndc4aCXhtsx4yAcr2d8nSg?table=tbl0UhZRpR0niDSt&view=vew5Spjz7c";
 
 const COLLECTOR_TARGETS = [
+  { key: "products", url: "https://agentseller.temu.com/goods/list" },
   { key: "sales", url: "https://agentseller.temu.com/stock/fully-mgt/sale-manage/main" },
+  { key: "orders", url: "https://agentseller.temu.com/stock/fully-mgt/order-manage" },
+  { key: "urgent_orders", url: "https://agentseller.temu.com/stock/fully-mgt/order-manage-urgency" },
   { key: "traffic_goods", url: "https://agentseller.temu.com/main/flux-analysis-full" },
   { key: "traffic_mall", url: "https://agentseller.temu.com/main/mall-flux-analysis-full" },
+  { key: "flow_price", url: "https://agentseller.temu.com/newon/compete-manager" },
   { key: "activity_data", url: "https://agentseller.temu.com/main/act/data-full" },
   { key: "marketing_activity", url: "https://agentseller.temu.com/activity/marketing-activity" },
   { key: "chance_goods", url: "https://agentseller.temu.com/activity/marketing-activity/chance-goods" },
   { key: "bidding", url: "https://agentseller.temu.com/newon/invite-bids/list" },
+  { key: "price_adjust", url: "https://agentseller.temu.com/main/adjust-price-manage/order-price" },
+  { key: "high_price", url: "https://agentseller.temu.com/main/adjust-price-manage/high-price" },
   { key: "inbound_exception", url: "https://agentseller.temu.com/scp/purchase/board/supplier/exception" },
+  { key: "after_sales", url: "https://agentseller.temu.com/main/aftersales/information" },
+  { key: "sales_return", url: "https://agentseller.temu.com/activity/sales-return" },
+  { key: "soldout", url: "https://agentseller.temu.com/stock/fully-mgt/sale-manage/board/sku-sale-out" },
+  { key: "receive_abnormal", url: "https://agentseller.temu.com/stock/fully-mgt/sale-manage/board/receive-abnormal" },
+  { key: "delivery_assessment", url: "https://agentseller.temu.com/wms/deliver-examine-board" },
+  { key: "quality_dashboard", url: "https://agentseller.temu.com/main/quality/dashboard" },
+  { key: "goods_checkup", url: "https://agentseller.temu.com/goods/checkup-center" },
   { key: "product_select", url: "https://agentseller.temu.com/newon/product-select" },
 ];
 
@@ -48,7 +66,7 @@ chrome.runtime.onStartup.addListener(async () => {
 
 async function ensureRuntimeDefaults() {
   chrome.alarms.create(ALARM_FLUSH, { periodInMinutes: 0.5 });
-  chrome.alarms.create(ALARM_COLLECT, { periodInMinutes: 5 });
+  chrome.alarms.create(ALARM_COLLECT, { periodInMinutes: COLLECTOR_ALARM_MINUTES });
   const cur = await getStorage(["device_id", COLLECTOR_STATE_KEY]);
   const patch = {};
   if (!cur.device_id) patch.device_id = crypto.randomUUID();
@@ -73,6 +91,7 @@ async function ensureRuntimeDefaults() {
 async function tryAutoConfigure() {
   const cur = await getStorage(["cloud_endpoint", "auth_token"]);
   if (cur.cloud_endpoint && cur.auth_token) return;
+  if (await configureLocalErpIfAvailable()) return;
   const defaultEndpoint = "https://erp.temu.chat/cloud";
   try {
     const resp = await fetch(defaultEndpoint + "/api/auth/login", {
@@ -87,6 +106,21 @@ async function tryAutoConfigure() {
     console.log(`[sw] auto-configured to ${defaultEndpoint}`);
   } catch (e) {
     console.warn("[sw] auto-configure skipped:", e?.message || e);
+  }
+}
+
+async function configureLocalErpIfAvailable() {
+  try {
+    const resp = await fetch(LOCAL_ERP_ENDPOINT + "/api/ingest/v1/health", {
+      method: "GET",
+      headers: { Authorization: `Bearer ${LOCAL_ERP_EXTENSION_TOKEN}` },
+    });
+    if (!resp.ok) return false;
+    await setStorage({ cloud_endpoint: LOCAL_ERP_ENDPOINT, auth_token: LOCAL_ERP_EXTENSION_TOKEN });
+    console.log(`[sw] configured local ERP ${LOCAL_ERP_ENDPOINT}`);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -150,9 +184,10 @@ const RELOAD_VERSION_KEY = "last_reload_version";
 const RECONFIG_VERSION_KEY = "last_reconfig_version";
 
 async function sendHeartbeat() {
-  const cfg = await getStorage(["cloud_endpoint", "auth_token", "device_id", STATS_KEY, RELOAD_VERSION_KEY, RECONFIG_VERSION_KEY]);
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", "device_id", STATS_KEY, COLLECTOR_STATE_KEY, RELOAD_VERSION_KEY, RECONFIG_VERSION_KEY]);
   if (!cfg.cloud_endpoint || !cfg.auth_token) return;
   const stats = cfg[STATS_KEY] || {};
+  const collector = cfg[COLLECTOR_STATE_KEY] || {};
   const depth = await queueDepth();
   const probe = await probePageStats();
   const payload = {
@@ -167,6 +202,12 @@ async function sendHeartbeat() {
     hook_xhr_alive: probe?.healthy ? 1 : (probe ? 0 : null),
     hook_perf_seen: probe?.stats?.perfSeen || 0,
     page_url: probe?.pageUrl || null,
+    collector_enabled: collector.enabled === false ? 0 : 1,
+    collector_index: Number.isFinite(Number(collector.index)) ? Number(collector.index) : null,
+    collector_last_target_key: collector.last_target_key || null,
+    collector_last_target_url: collector.last_target_url || null,
+    collector_last_targets: Array.isArray(collector.last_targets) ? collector.last_targets : [],
+    collector_updated_at: Number(collector.updated_at) || null,
     last_reload_version: cfg[RELOAD_VERSION_KEY] || 0,
     last_reconfig_version: cfg[RECONFIG_VERSION_KEY] || 0,
     ts: Date.now(),
@@ -267,31 +308,129 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .catch((e) => sendResponse({ ok: false, reason: String(e?.message || e).slice(0, 200) }));
     return true;
   }
+
+  if (msg.type === "OPEN_FEISHU_SUPPLIER_TABLE") {
+    openFeishuSupplierTable()
+      .then((r) => sendResponse(r))
+      .catch((e) => sendResponse({ ok: false, reason: String(e?.message || e).slice(0, 200) }));
+    return true;
+  }
+
+  if (msg.type === "SYNC_FEISHU_SUPPLIERS") {
+    syncFeishuSuppliers()
+      .then((r) => sendResponse(r))
+      .catch((e) => sendResponse({ ok: false, reason: String(e?.message || e).slice(0, 200) }));
+    return true;
+  }
+
+  if (msg.type === "FEISHU_SUPPLIERS_CAPTURED" && msg.payload) {
+    handleFeishuSuppliersCaptured(msg.payload, sender)
+      .then((r) => sendResponse(r))
+      .catch((e) => sendResponse({ ok: false, reason: String(e?.message || e).slice(0, 200) }));
+    return true;
+  }
 });
 
+async function openFeishuSupplierTable() {
+  const tabs = await chrome.tabs.query({ url: ["https://*.feishu.cn/base/*"] });
+  const matched = tabs.find((tab) => tab?.url && tab.url.includes("/base/RLy7bndc4aCXhtsx4yAcr2d8nSg"));
+  if (matched?.id) {
+    await chrome.tabs.update(matched.id, { active: true, url: FEISHU_SUPPLIER_TABLE_URL });
+    if (matched.windowId) await chrome.windows.update(matched.windowId, { focused: true });
+    return { ok: true, opened: false, tabId: matched.id };
+  }
+  const tab = await chrome.tabs.create({ url: FEISHU_SUPPLIER_TABLE_URL, active: true });
+  return { ok: true, opened: true, tabId: tab?.id || null };
+}
+
+async function syncFeishuSuppliers() {
+  if (!(await configureLocalErpIfAvailable())) await tryAutoConfigure();
+  let [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.url || !/feishu\.cn\/base\//i.test(tab.url)) {
+    const opened = await openFeishuSupplierTable();
+    return { ok: true, opened: true, reason: "已打开飞书表，请登录后再次点击同步", ...opened };
+  }
+  const response = await sendMessageToTab(tab.id, {
+    type: "COLLECT_FEISHU_SUPPLIERS",
+    maxSteps: 50,
+    delayMs: 300,
+  });
+  await flush();
+  return {
+    ok: Boolean(response?.ok),
+    rows: response?.rows || 0,
+    sourceUrl: response?.sourceUrl || tab.url,
+    flushRequested: true,
+    reason: response?.reason || null,
+  };
+}
+
+function sendMessageToTab(tabId, message) {
+  return new Promise((resolve) => {
+    if (!tabId) return resolve({ ok: false, reason: "缺少当前标签页" });
+    chrome.tabs.sendMessage(tabId, message, (response) => {
+      if (chrome.runtime.lastError) {
+        resolve({ ok: false, reason: chrome.runtime.lastError.message || "页面脚本未就绪，请刷新飞书页" });
+        return;
+      }
+      resolve(response || { ok: false, reason: "页面没有返回数据" });
+    });
+  });
+}
+
+async function handleFeishuSuppliersCaptured(payload, sender) {
+  const enriched = {
+    kind: "feishu-supplier-table",
+    url: payload.sourceUrl || sender?.tab?.url || FEISHU_SUPPLIER_TABLE_URL,
+    method: "EXTENSION",
+    status: 200,
+    ts: Date.now(),
+    site: "feishu",
+    page: "/base/RLy7bndc4aCXhtsx4yAcr2d8nSg",
+    body: {
+      source: "feishu_supplier_table",
+      sourceUrl: payload.sourceUrl || sender?.tab?.url || FEISHU_SUPPLIER_TABLE_URL,
+      table: payload.table || "tbl0UhZRpR0niDSt",
+      view: payload.view || "vew5Spjz7c",
+      rows: Array.isArray(payload.rows) ? payload.rows : [],
+    },
+    tab_id: sender?.tab?.id,
+    tab_url: sender?.tab?.url || payload.sourceUrl || "",
+    captured_at: Date.now(),
+  };
+  await enqueue(enriched);
+  await bumpStats({ captured_count_delta: 1 });
+  return { ok: true, rows: enriched.body.rows.length };
+}
+
 async function startCollector() {
+  const now = Date.now();
   const state = {
     enabled: true,
     index: 0,
-    last_started_at: Date.now(),
+    last_started_at: now,
     last_step_at: 0,
     last_target_key: "",
     last_target_url: "",
+    last_targets: [],
+    updated_at: now,
   };
   await setStorage({ [COLLECTOR_STATE_KEY]: state });
-  chrome.alarms.create(ALARM_COLLECT, { periodInMinutes: 5 });
+  chrome.alarms.create(ALARM_COLLECT, { periodInMinutes: COLLECTOR_ALARM_MINUTES });
   await runCollectorStep(true);
   return { ok: true };
 }
 
 async function stopCollector() {
   const cfg = await getStorage([COLLECTOR_STATE_KEY, COLLECTOR_WINDOW_KEY]);
-  await setStorage({ [COLLECTOR_STATE_KEY]: { ...(cfg[COLLECTOR_STATE_KEY] || {}), enabled: false, stopped_at: Date.now() } });
+  const now = Date.now();
+  await setStorage({ [COLLECTOR_STATE_KEY]: { ...(cfg[COLLECTOR_STATE_KEY] || {}), enabled: false, stopped_at: now, updated_at: now } });
   const windowId = cfg[COLLECTOR_WINDOW_KEY];
   if (windowId) {
     try { await chrome.windows.remove(windowId); } catch {}
   }
   await setStorage({ [COLLECTOR_WINDOW_KEY]: null });
+  sendHeartbeat().catch((e) => console.warn("[sw] collector stop heartbeat err", e?.message || e));
   return { ok: true };
 }
 
@@ -300,21 +439,22 @@ async function runCollectorStep(force = false) {
   const state = cfg[COLLECTOR_STATE_KEY] || {};
   if (!state.enabled && !force) return { ok: false, reason: "collector_disabled" };
   const index = Number.isFinite(Number(state.index)) ? Number(state.index) : 0;
-  const target = COLLECTOR_TARGETS[index % COLLECTOR_TARGETS.length];
-  const targetUrl = markCollectorUrl(target.url);
+  const batchSize = Math.min(COLLECTOR_BATCH_SIZE, COLLECTOR_TARGETS.length);
+  const targets = Array.from({ length: batchSize }, (_, offset) => COLLECTOR_TARGETS[(index + offset) % COLLECTOR_TARGETS.length]);
+  const targetUrls = targets.map((target) => markCollectorUrl(target.url));
   let windowId = cfg[COLLECTOR_WINDOW_KEY] || null;
-  let tabId = null;
+  let tabs = [];
   if (windowId) {
     try {
       const win = await chrome.windows.get(windowId, { populate: true });
-      tabId = win?.tabs?.[0]?.id || null;
+      tabs = Array.isArray(win?.tabs) ? win.tabs : [];
     } catch {
       windowId = null;
     }
   }
-  if (!windowId || !tabId) {
+  if (!windowId || !tabs.length) {
     const win = await chrome.windows.create({
-      url: targetUrl,
+      url: targetUrls[0],
       type: "popup",
       focused: false,
       width: 360,
@@ -323,20 +463,35 @@ async function runCollectorStep(force = false) {
       top: 0,
     });
     windowId = win.id;
-    tabId = win.tabs?.[0]?.id || null;
-  } else {
-    await chrome.tabs.update(tabId, { url: targetUrl, active: true });
+    tabs = Array.isArray(win?.tabs) ? win.tabs : [];
+  }
+  for (let i = 0; i < targetUrls.length; i++) {
+    const tab = tabs[i];
+    if (tab?.id) {
+      await chrome.tabs.update(tab.id, { url: targetUrls[i], active: i === 0 });
+    } else if (windowId) {
+      const created = await chrome.tabs.create({ windowId, url: targetUrls[i], active: i === 0 });
+      tabs[i] = created;
+    }
+  }
+  const extraTabs = tabs.slice(targetUrls.length).map((tab) => tab?.id).filter(Boolean);
+  for (const tabId of extraTabs) {
+    try { await chrome.tabs.remove(tabId); } catch {}
   }
   const nextState = {
     ...state,
     enabled: true,
-    index: (index + 1) % COLLECTOR_TARGETS.length,
+    index: (index + batchSize) % COLLECTOR_TARGETS.length,
     last_step_at: Date.now(),
-    last_target_key: target.key,
-    last_target_url: targetUrl,
+    last_target_key: targets.map((target) => target.key).join(","),
+    last_target_url: targetUrls[0],
+    last_targets: targets.map((target, i) => ({ ...target, url: targetUrls[i] })),
+    updated_at: Date.now(),
+    last_error: null,
   };
   await setStorage({ [COLLECTOR_STATE_KEY]: nextState, [COLLECTOR_WINDOW_KEY]: windowId });
-  return { ok: true, target: { ...target, url: targetUrl } };
+  sendHeartbeat().catch((e) => console.warn("[sw] collector heartbeat err", e?.message || e));
+  return { ok: true, targets: nextState.last_targets };
 }
 
 function markCollectorUrl(url) {

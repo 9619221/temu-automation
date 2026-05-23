@@ -150,7 +150,7 @@ const FluxOperatorPanel: React.FC<Props> = ({ cache, region, onRegionChange }) =
           ))}
         </div>
         {benchmark && (
-          <div style={{ marginTop: 12, padding: "8px 12px", background: "#fafafa", borderRadius: 8, fontSize: 12, color: "#595959" }}>
+          <div style={{ marginTop: 12, padding: "8px 12px", background: "#f8fbff", borderRadius: 8, fontSize: 12, color: "#595959" }}>
             <Text type="secondary">站点中位数基准 — </Text>
             CTR <b>{fmtPct(benchmark.ctrMedian, 2)}</b>
             <span style={{ margin: "0 8px" }}>·</span>
@@ -173,8 +173,8 @@ const FluxOperatorPanel: React.FC<Props> = ({ cache, region, onRegionChange }) =
               <YAxis tickFormatter={(v) => `${v}%`} domain={[0, 100]} />
               <RTooltip formatter={(v: number) => `${v.toFixed(1)}%`} />
               <Legend />
-              <Bar dataKey="search" name="搜索" stackId="a" fill="#1677ff" />
-              <Bar dataKey="recommend" name="推荐" stackId="a" fill="#e55b00" />
+              <Bar dataKey="search" name="搜索" stackId="a" fill="#1a73e8" />
+              <Bar dataKey="recommend" name="推荐" stackId="a" fill="#1a73e8" />
               <Bar dataKey="other" name="其它" stackId="a" fill="#bfbfbf" />
             </BarChart>
           </ResponsiveContainer>
@@ -296,7 +296,7 @@ const FluxOperatorPanel: React.FC<Props> = ({ cache, region, onRegionChange }) =
               align: "right",
               sorter: (a, b) => a.exposeSlope - b.exposeSlope,
               render: (v: number) => {
-                const color = v >= 15 ? "#00b96b" : v <= -25 ? "#ff4d4f" : "#8c8c8c";
+                const color = v >= 15 ? "#00b96b" : v <= -25 ? "#ea4335" : "#8c8c8c";
                 const arrow = v >= 5 ? "↑" : v <= -5 ? "↓" : "→";
                 return <span style={{ color }}>{arrow} {v >= 0 ? "+" : ""}{v.toFixed(0)}%</span>;
               },
@@ -323,7 +323,7 @@ const FluxOperatorPanel: React.FC<Props> = ({ cache, region, onRegionChange }) =
           ]}
           expandable={{
             expandedRowRender: (r) => (
-              <div style={{ padding: "8px 12px", background: "#fafafa" }}>
+              <div style={{ padding: "8px 12px", background: "#f8fbff" }}>
                 <Paragraph style={{ marginBottom: 4 }}>
                   <Text strong>建议：</Text>{r.decisionReason}
                 </Paragraph>

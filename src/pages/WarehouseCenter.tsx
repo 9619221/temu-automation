@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Alert, Button, Col, DatePicker, Input, InputNumber, Modal, Row, Select, Space, Table, Tag, Timeline, Typography, message } from "antd";
+import { Alert, Button, Col, DatePicker, Drawer, Input, InputNumber, Modal, Row, Select, Space, Steps, Table, Tag, Timeline, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type { TableRowSelection } from "antd/es/table/interface";
 import {
@@ -133,6 +133,10 @@ interface InboundReceiptRow {
   ageHours?: number;
   isOverdue?: boolean | number;
   isToday?: boolean | number;
+  priorityRank?: number;
+  priorityLabel?: string;
+  nextActionKey?: string;
+  nextActionLabel?: string;
   logistics?: { companyName?: string | null; billNo?: string | null } | null;
 }
 
@@ -191,6 +195,17 @@ function normalizeInboundTimeline(rows: any[] = []): InboundReceiptTimelineRow[]
   }));
 }
 
+function toPartialReceiveLines(lines: InboundReceiptLineRow[]) {
+  return lines.map((line) => ({
+    id: line.id,
+    skuCode: line.skuCode,
+    productName: line.productName,
+    expectedQty: line.expectedQty,
+    receivedQty: line.receivedQty || line.expectedQty,
+    damagedQty: line.damagedQty,
+  }));
+}
+
 function getIssueTags(record: { damagedQty?: number; shortageQty?: number; overQty?: number }) {
   const tags: Array<{ key: string; label: string; color: string }> = [];
   if (Number(record.shortageQty || 0) > 0) tags.push({ key: "shortage", label: `短少 ${formatQty(record.shortageQty)}`, color: "gold" });
@@ -212,13 +227,142 @@ function roleLabel(role?: string) {
   return labels[String(role || "")] || role || "-";
 }
 
+function getReceiptTaskState(row: InboundReceiptRow) {
+  const status = String(row.status || "");
+  const backendLabel = String(row.priorityLabel || "").trim();
+  const backendNextAction = String(row.nextActionLabel || "").trim();
+  if (INBOUND_EXCEPTION_STATUSES.has(status)) {
+    return {
+      label: backendLabel || "异常优先",
+      meta: backendNextAction || "填写说明后入库",
+      tone: "red",
+      rowClass: "warehouse-receipt-row--exception",
+    };
+  }
+  if (row.isOverdue && INBOUND_ACTION_STATUSES.has(status)) {
+    return {
+      label: backendLabel || "超期优先",
+      meta: backendNextAction ? `${backendNextAction} · ${formatAgeHours(row.ageHours)}` : `已等待 ${formatAgeHours(row.ageHours)}`,
+      tone: "red",
+      rowClass: "warehouse-receipt-row--overdue",
+    };
+  }
+  if (status === "pending_arrival") {
+    return {
+      label: backendLabel || "待到货",
+      meta: backendNextAction || "确认到仓",
+      tone: "amber",
+      rowClass: "warehouse-receipt-row--pending",
+    };
+  }
+  if (status === "arrived") {
+    return {
+      label: backendLabel || "待核数",
+      meta: backendNextAction || "核对实收数量",
+      tone: "blue",
+      rowClass: "warehouse-receipt-row--actionable",
+    };
+  }
+  if (status === "counted") {
+    return {
+      label: backendLabel || "可入库",
+      meta: backendNextAction || "确认入库",
+      tone: "blue",
+      rowClass: "warehouse-receipt-row--actionable",
+    };
+  }
+  if (status === "inbounded_pending_qc") {
+    return {
+      label: backendLabel || "已入库",
+      meta: backendNextAction || "进入质检",
+      tone: "green",
+      rowClass: "warehouse-receipt-row--completed",
+    };
+  }
+  if (status === "cancelled") {
+    return {
+      label: backendLabel || "已取消",
+      meta: backendNextAction || "无需处理",
+      tone: "neutral",
+      rowClass: "warehouse-receipt-row--muted",
+    };
+  }
+  return {
+    label: backendLabel || INBOUND_STATUS_LABELS[status] || "待跟进",
+    meta: backendNextAction || "查看明细",
+    tone: "neutral",
+    rowClass: "warehouse-receipt-row--muted",
+  };
+}
+
+function getReceiptPrimaryAction(row: InboundReceiptRow) {
+  const status = String(row.status || "");
+  if (status === "pending_arrival") {
+    return {
+      action: "register_arrival",
+      label: "确认到仓",
+      successText: "已确认到仓",
+      helper: "先确认货已到仓，再进入核数和入库。",
+      allowPartialReceive: false,
+    };
+  }
+  if (status === "arrived") {
+    return {
+      action: "confirm_count",
+      label: "提交核数",
+      successText: "已提交核数",
+      helper: "按采购单核对实收，数量一致后进入待入库确认。",
+      allowPartialReceive: true,
+    };
+  }
+  if (status === "counted") {
+    return {
+      action: "confirm_inbound",
+      label: "确认入库",
+      successText: "已确认入库",
+      helper: "核数已完成，确认后进入已入库状态。",
+      allowPartialReceive: false,
+    };
+  }
+  return {
+    action: "confirm_count",
+    label: "入库",
+    successText: "已确认入库",
+    helper: "查看单据明细后处理。",
+    allowPartialReceive: false,
+  };
+}
+
+function getReceiptFlowState(row: InboundReceiptRow) {
+  const status = String(row.status || "");
+  if (status === "pending_arrival") {
+    return { current: 0, status: "process" as const, helper: "采购单已生成，等待货物到仓。" };
+  }
+  if (status === "arrived") {
+    return { current: 1, status: "process" as const, helper: "货物已到仓，下一步核对实收数量。" };
+  }
+  if (status === "counted") {
+    return { current: 2, status: "process" as const, helper: "核数已完成，等待确认入库。" };
+  }
+  if (status === "inbounded_pending_qc") {
+    return { current: 4, status: "process" as const, helper: "已完成入库，等待或进入质检。" };
+  }
+  if (INBOUND_EXCEPTION_STATUSES.has(status)) {
+    return { current: 2, status: "error" as const, helper: "核数存在差异，需处理异常并留痕。" };
+  }
+  if (status === "cancelled") {
+    return { current: 0, status: "error" as const, helper: "单据已取消，无需继续入库。" };
+  }
+  return { current: 0, status: "wait" as const, helper: "查看单据状态后处理。" };
+}
+
 function getBulkInboundBlockReason(row: InboundReceiptRow, role: string): string | null {
-  if (!canRole(role, ["warehouse", "manager", "admin"])) return "当前角色无批量入库权限";
+  if (!canRole(role, ["warehouse", "manager", "admin"])) return "当前角色无批量处理权限";
   if (INBOUND_ACTION_STATUSES.has(row.status)) return null;
   if (INBOUND_EXCEPTION_STATUSES.has(row.status)) return "异常单需单独处理并填写说明";
   if (row.status === "inbounded_pending_qc") return "已入库单不可重复入库";
   if (row.status === "cancelled") return "已取消单据不可入库";
-  return `${INBOUND_STATUS_LABELS[row.status] || row.status || "当前状态"}不可批量入库`;
+  return `${INBOUND_STATUS_LABELS[row.status] || row.status || "当前状态"}不可批量处理`;
 }
 
 export default function WarehouseCenter() {
@@ -255,10 +399,14 @@ export default function WarehouseCenter() {
   const [receiptDateFrom, setReceiptDateFrom] = useState("");
   const [receiptDateTo, setReceiptDateTo] = useState("");
   const [selectedReceiptId, setSelectedReceiptId] = useState<string | null>(null);
+  const [receiptDetailDrawerOpen, setReceiptDetailDrawerOpen] = useState(false);
   const [selectedReceiptIds, setSelectedReceiptIds] = useState<string[]>([]);
   const [receiptLinesById, setReceiptLinesById] = useState<Record<string, InboundReceiptLineRow[]>>({});
   const [receiptTimelineById, setReceiptTimelineById] = useState<Record<string, InboundReceiptTimelineRow[]>>({});
   const [detailLoadingReceiptId, setDetailLoadingReceiptId] = useState<string | null>(null);
+  const [bulkInboundReviewOpen, setBulkInboundReviewOpen] = useState(false);
+  const receiptLinesByIdRef = useRef(receiptLinesById);
+  const receiptPrefetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const receiptLineLoadingIdsRef = useRef(new Set<string>());
   const [partialReceiveModal, setPartialReceiveModal] = useState<{
     receiptId: string;
@@ -362,9 +510,13 @@ export default function WarehouseCenter() {
     void loadData({ silent: hasPageCache(cachedData) });
   }, []);
 
+  useEffect(() => {
+    receiptLinesByIdRef.current = receiptLinesById;
+  }, [receiptLinesById]);
+
   const loadReceiptLines = useCallback(async (receiptId: string, force = false) => {
     if (!erp || !receiptId) return;
-    if (!force && receiptLinesById[receiptId]) return;
+    if (!force && receiptLinesByIdRef.current[receiptId]) return;
     if (receiptLineLoadingIdsRef.current.has(receiptId)) return;
     receiptLineLoadingIdsRef.current.add(receiptId);
     setDetailLoadingReceiptId(receiptId);
@@ -373,10 +525,12 @@ export default function WarehouseCenter() {
         action: "get_inbound_lines",
         receiptId,
       });
-      setReceiptLinesById((prev) => ({
-        ...prev,
-        [receiptId]: normalizeInboundLines(result?.result?.lines || []),
-      }));
+      const normalizedLines = normalizeInboundLines(result?.result?.lines || []);
+      setReceiptLinesById((prev) => {
+        const next = { ...prev, [receiptId]: normalizedLines };
+        receiptLinesByIdRef.current = next;
+        return next;
+      });
       setReceiptTimelineById((prev) => ({
         ...prev,
         [receiptId]: normalizeInboundTimeline(result?.result?.timeline || []),
@@ -387,15 +541,42 @@ export default function WarehouseCenter() {
       receiptLineLoadingIdsRef.current.delete(receiptId);
       setDetailLoadingReceiptId((current) => (current === receiptId ? null : current));
     }
-  }, [receiptLinesById]);
+  }, []);
+
+  const clearReceiptPrefetchTimer = useCallback(() => {
+    if (!receiptPrefetchTimerRef.current) return;
+    clearTimeout(receiptPrefetchTimerRef.current);
+    receiptPrefetchTimerRef.current = null;
+  }, []);
+
+  const scheduleReceiptDetailPrefetch = useCallback((receiptId: string) => {
+    clearReceiptPrefetchTimer();
+    if (!receiptId || receiptLinesByIdRef.current[receiptId] || receiptLineLoadingIdsRef.current.has(receiptId)) return;
+    receiptPrefetchTimerRef.current = setTimeout(() => {
+      receiptPrefetchTimerRef.current = null;
+      void loadReceiptLines(receiptId);
+    }, 180);
+  }, [clearReceiptPrefetchTimer, loadReceiptLines]);
+
+  useEffect(() => () => clearReceiptPrefetchTimer(), [clearReceiptPrefetchTimer]);
+
+  const closeReceiptDetail = useCallback(() => {
+    setReceiptDetailDrawerOpen(false);
+    setSelectedReceiptId(null);
+  }, []);
 
   const openReceiptDetail = useCallback((row: InboundReceiptRow) => {
     setSelectedReceiptId((current) => {
-      const nextId = current === row.id ? null : row.id;
-      if (nextId) void loadReceiptLines(row.id);
-      return nextId;
+      const closingCurrent = current === row.id && receiptDetailDrawerOpen;
+      if (closingCurrent) {
+        setReceiptDetailDrawerOpen(false);
+        return null;
+      }
+      setReceiptDetailDrawerOpen(true);
+      void loadReceiptLines(row.id);
+      return row.id;
     });
-  }, [loadReceiptLines]);
+  }, [loadReceiptLines, receiptDetailDrawerOpen]);
 
   const runAction = async (key: string, payload: Record<string, any>, successText: string) => {
     if (!erp) return false;
@@ -405,12 +586,13 @@ export default function WarehouseCenter() {
     try {
       const result = await erp.warehouse.action({ ...payload, ...params });
       applyWorkbench(result?.workbench || await erp.warehouse.workbench(params), params);
-      if (receiptId) {
-        setReceiptLinesById((prev) => {
-          const next = { ...prev };
-          delete next[receiptId];
-          return next;
-        });
+        if (receiptId) {
+          setReceiptLinesById((prev) => {
+            const next = { ...prev };
+            delete next[receiptId];
+            receiptLinesByIdRef.current = next;
+            return next;
+          });
         setReceiptTimelineById((prev) => {
           const next = { ...prev };
           delete next[receiptId];
@@ -471,23 +653,30 @@ export default function WarehouseCenter() {
   }, [resolveExceptionModal]);
 
   const openPartialReceiveModal = useCallback(async (row: InboundReceiptRow) => {
+    const cachedLines = receiptLinesByIdRef.current[row.id];
+    if (cachedLines) {
+      setPartialReceiveModal({
+        receiptId: row.id,
+        receiptNo: row.receiptNo || row.id,
+        lines: toPartialReceiveLines(cachedLines),
+        loading: false,
+      });
+      return;
+    }
     setPartialReceiveModal({ receiptId: row.id, receiptNo: row.receiptNo || row.id, lines: [], loading: true });
     try {
       const result = await erp?.warehouse?.action({ action: "get_inbound_lines", receiptId: row.id });
       const normalizedLines = normalizeInboundLines(result?.result?.lines || []);
-      setReceiptLinesById((prev) => ({ ...prev, [row.id]: normalizedLines }));
+      setReceiptLinesById((prev) => {
+        const next = { ...prev, [row.id]: normalizedLines };
+        receiptLinesByIdRef.current = next;
+        return next;
+      });
       setReceiptTimelineById((prev) => ({
         ...prev,
         [row.id]: normalizeInboundTimeline(result?.result?.timeline || []),
       }));
-      const lines = normalizedLines.map((line) => ({
-        id: line.id,
-        skuCode: line.skuCode,
-        productName: line.productName,
-        expectedQty: line.expectedQty,
-        receivedQty: line.receivedQty || line.expectedQty,
-        damagedQty: line.damagedQty,
-      }));
+      const lines = toPartialReceiveLines(normalizedLines);
       setPartialReceiveModal({ receiptId: row.id, receiptNo: row.receiptNo || row.id, lines, loading: false });
     } catch (error: any) {
       message.error(error?.message || "拉取入库行失败");
@@ -502,6 +691,7 @@ export default function WarehouseCenter() {
       inboundReceiptLimit: pageSize,
       inboundReceiptOffset: (page - 1) * pageSize,
     });
+    setReceiptDetailDrawerOpen(false);
     setSelectedReceiptId(null);
     setSelectedReceiptIds([]);
     setInboundReceiptPageSize(pageSize);
@@ -509,8 +699,8 @@ export default function WarehouseCenter() {
     void loadData({ params });
   }, [buildWorkbenchParams, inboundReceiptPageSize, loadData]);
 
-  const updateInboundReceiptPagination = useCallback((nextPage: number) => {
-    applyInboundReceiptPagination(nextPage, inboundReceiptPageSize);
+  const updateInboundReceiptPagination = useCallback((nextPage: number, nextPageSize?: number) => {
+    applyInboundReceiptPagination(nextPage, nextPageSize || inboundReceiptPageSize);
   }, [applyInboundReceiptPagination, inboundReceiptPageSize]);
 
   const updateInboundReceiptPageSize = useCallback((nextPageSize: number) => {
@@ -522,6 +712,7 @@ export default function WarehouseCenter() {
       inboundReceiptOffset: 0,
       inboundReceiptStatus: RECEIPT_QUEUE_STATUS[key],
     });
+    setReceiptDetailDrawerOpen(false);
     setSelectedReceiptId(null);
     setSelectedReceiptIds([]);
     setReceiptQueueKey(key);
@@ -534,6 +725,7 @@ export default function WarehouseCenter() {
       inboundReceiptOffset: 0,
       inboundReceiptScope: key,
     });
+    setReceiptDetailDrawerOpen(false);
     setSelectedReceiptId(null);
     setSelectedReceiptIds([]);
     setReceiptScopeKey(key);
@@ -547,6 +739,7 @@ export default function WarehouseCenter() {
       inboundReceiptOffset: 0,
       inboundReceiptKeyword: keyword,
     });
+    setReceiptDetailDrawerOpen(false);
     setSelectedReceiptId(null);
     setSelectedReceiptIds([]);
     setReceiptKeyword(keyword);
@@ -567,6 +760,7 @@ export default function WarehouseCenter() {
       inboundReceiptDateTo: dateTo,
       inboundReceiptIssue: issue,
     });
+    setReceiptDetailDrawerOpen(false);
     setSelectedReceiptId(null);
     setSelectedReceiptIds([]);
     setReceiptSupplierFilter(supplier);
@@ -588,6 +782,7 @@ export default function WarehouseCenter() {
       inboundReceiptIssue: "all",
       inboundReceiptScope: DEFAULT_RECEIPT_SCOPE,
     });
+    setReceiptDetailDrawerOpen(false);
     setSelectedReceiptId(null);
     setSelectedReceiptIds([]);
     setReceiptScopeKey(DEFAULT_RECEIPT_SCOPE);
@@ -610,32 +805,84 @@ export default function WarehouseCenter() {
     return (data.inboundReceipts || []).filter((row) => selectedSet.has(row.id));
   }, [data.inboundReceipts, selectedReceiptIds]);
 
+  const selectedReceipt = useMemo(() => (
+    (data.inboundReceipts || []).find((row) => row.id === selectedReceiptId) || null
+  ), [data.inboundReceipts, selectedReceiptId]);
+
+  useEffect(() => {
+    if (receiptDetailDrawerOpen && selectedReceiptId && !selectedReceipt) {
+      setReceiptDetailDrawerOpen(false);
+      setSelectedReceiptId(null);
+    }
+  }, [receiptDetailDrawerOpen, selectedReceipt, selectedReceiptId]);
+
   const selectedActionableRows = useMemo(() => (
     selectedReceiptRows.filter((row) => (
       !getBulkInboundBlockReason(row, role)
     ))
   ), [role, selectedReceiptRows]);
 
+  const currentPageActionableRows = useMemo(() => (
+    (data.inboundReceipts || []).filter((row) => !getBulkInboundBlockReason(row, role))
+  ), [data.inboundReceipts, role]);
+
   const currentPageBulkSummary = useMemo(() => {
     const rows = data.inboundReceipts || [];
     const blockedCounts = new Map<string, number>();
-    let actionable = 0;
     rows.forEach((row) => {
       const reason = getBulkInboundBlockReason(row, role);
-      if (!reason) {
-        actionable += 1;
-        return;
-      }
+      if (!reason) return;
       blockedCounts.set(reason, (blockedCounts.get(reason) || 0) + 1);
     });
     return {
-      actionable,
-      blocked: rows.length - actionable,
+      actionable: currentPageActionableRows.length,
+      blocked: rows.length - currentPageActionableRows.length,
       blockedText: Array.from(blockedCounts.entries())
         .map(([reason, count]) => `${reason} ${count}单`)
         .join("；"),
     };
-  }, [data.inboundReceipts, role]);
+  }, [currentPageActionableRows.length, data.inboundReceipts, role]);
+
+  const selectedBulkTotals = useMemo(() => (
+    selectedActionableRows.reduce(
+      (acc, row) => {
+        acc.expectedQty += Number(row.expectedQty || 0);
+        acc.receivedQty += Number(row.receivedQty || 0);
+        acc.damagedQty += Number(row.damagedQty || 0);
+        return acc;
+      },
+      { expectedQty: 0, receivedQty: 0, damagedQty: 0 },
+    )
+  ), [selectedActionableRows]);
+
+  const selectedBulkTaskSummary = useMemo(() => {
+    const counts = new Map<string, number>();
+    selectedActionableRows.forEach((row) => {
+      const action = getReceiptPrimaryAction(row);
+      counts.set(action.label, (counts.get(action.label) || 0) + 1);
+    });
+    return Array.from(counts.entries()).map(([label, count]) => ({ label, count }));
+  }, [selectedActionableRows]);
+
+  const selectedBulkPreviewRows = useMemo(() => selectedActionableRows.slice(0, 5), [selectedActionableRows]);
+  const selectedBlockedCount = Math.max(0, selectedReceiptIds.length - selectedActionableRows.length);
+
+  const selectCurrentPageActionable = useCallback(() => {
+    const nextIds = currentPageActionableRows.map((row) => row.id);
+    if (!nextIds.length) {
+      message.warning("当前页没有可批量处理单据");
+      return;
+    }
+    setSelectedReceiptIds(nextIds);
+  }, [currentPageActionableRows]);
+
+  const openBulkInboundReview = useCallback(() => {
+    if (!selectedActionableRows.length) {
+      message.warning("请选择待处理单据");
+      return;
+    }
+    setBulkInboundReviewOpen(true);
+  }, [selectedActionableRows.length]);
 
   const receiptRowSelection = useMemo<TableRowSelection<InboundReceiptRow>>(() => ({
     selectedRowKeys: selectedReceiptIds,
@@ -645,28 +892,30 @@ export default function WarehouseCenter() {
       const blockReason = getBulkInboundBlockReason(row, role);
       return {
         disabled: Boolean(blockReason),
-        title: blockReason || "可批量入库",
+        title: blockReason || "可批量处理",
       };
     },
   }), [role, selectedReceiptIds]);
 
   const runBulkInbound = useCallback(async () => {
-    if (!erp) return;
+    if (!erp) return false;
     const receiptIds = selectedActionableRows.map((row) => row.id);
     if (!receiptIds.length) {
-      message.warning("请选择待入库单据");
-      return;
+      message.warning("请选择待处理单据");
+      return false;
     }
     const params = buildWorkbenchParams();
     setActingKey("bulk-inbound");
     try {
       const result = await erp.warehouse.action({ action: "confirm_inbound_bulk", receiptIds, ...params });
       applyWorkbench(result?.workbench || await erp.warehouse.workbench(params), params);
+      setReceiptDetailDrawerOpen(false);
       setSelectedReceiptId(null);
       setSelectedReceiptIds([]);
       setReceiptLinesById((prev) => {
         const next = { ...prev };
         receiptIds.forEach((id) => { delete next[id]; });
+        receiptLinesByIdRef.current = next;
         return next;
       });
       setReceiptTimelineById((prev) => {
@@ -674,9 +923,11 @@ export default function WarehouseCenter() {
         receiptIds.forEach((id) => { delete next[id]; });
         return next;
       });
-      message.success(`已批量入库 ${result?.result?.count || receiptIds.length} 单`);
+      message.success(`已批量处理 ${result?.result?.count || receiptIds.length} 单`);
+      return true;
     } catch (error: any) {
-      message.error(error?.message || "批量入库失败");
+      message.error(error?.message || "批量处理失败");
+      return false;
     } finally {
       setActingKey(null);
     }
@@ -713,6 +964,20 @@ export default function WarehouseCenter() {
       dataIndex: "status",
       width: 130,
       render: (value) => statusTag(value, INBOUND_STATUS_LABELS),
+    },
+    {
+      title: "任务",
+      key: "task",
+      width: 150,
+      render: (_value, row) => {
+        const task = getReceiptTaskState(row);
+        return (
+          <div className={`warehouse-task-pill warehouse-task-pill--${task.tone}`}>
+            <span className="warehouse-task-pill__label">{task.label}</span>
+            <span className="warehouse-task-pill__meta">{task.meta}</span>
+          </div>
+        );
+      },
     },
     {
       title: "供应商 / 商品",
@@ -797,7 +1062,7 @@ export default function WarehouseCenter() {
                   openReceiptDetail(row);
                 }}
               >
-                {selectedReceiptId === row.id ? "收起" : "明细"}
+                {receiptDetailDrawerOpen && selectedReceiptId === row.id ? "收起" : "明细"}
               </Button>
               <Button
                 size="small"
@@ -825,12 +1090,11 @@ export default function WarehouseCenter() {
                 openReceiptDetail(row);
               }}
             >
-              {selectedReceiptId === row.id ? "收起" : "明细"}
+              {receiptDetailDrawerOpen && selectedReceiptId === row.id ? "收起" : "明细"}
             </Button>
           );
         }
-        // 单按钮接力：后端会按当前状态依次确认到仓、核数、确认入库，不再生成库存批次。
-        const action = "confirm_count";
+        const primaryAction = getReceiptPrimaryAction(row);
         const loading = actingKey === `inbound-${row.id}`;
         return (
           <Space size={6} wrap>
@@ -843,7 +1107,7 @@ export default function WarehouseCenter() {
                 openReceiptDetail(row);
               }}
             >
-              {selectedReceiptId === row.id ? "收起" : "明细"}
+              {receiptDetailDrawerOpen && selectedReceiptId === row.id ? "收起" : "明细"}
             </Button>
             <Button
               size="small"
@@ -852,38 +1116,84 @@ export default function WarehouseCenter() {
               loading={loading}
               onClick={(e) => {
                 e.stopPropagation();
-                void runAction(`inbound-${row.id}`, { action, receiptId: row.id }, "已确认入库");
+                void runAction(`inbound-${row.id}`, { action: primaryAction.action, receiptId: row.id }, primaryAction.successText);
               }}
             >
-              入库
+              {primaryAction.label}
             </Button>
-            <Button
-              size="small"
-              loading={partialReceiveModal?.receiptId === row.id && partialReceiveModal.loading}
-              onClick={(e) => {
-                e.stopPropagation();
-                void openPartialReceiveModal(row);
-              }}
-            >
-              按实数入库
-            </Button>
+            {primaryAction.allowPartialReceive ? (
+              <Button
+                size="small"
+                loading={partialReceiveModal?.receiptId === row.id && partialReceiveModal.loading}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void openPartialReceiveModal(row);
+                }}
+              >
+                按实数核数
+              </Button>
+            ) : null}
           </Space>
         );
       },
     },
-  ], [actingKey, detailLoadingReceiptId, openPartialReceiveModal, openReceiptDetail, openResolveExceptionModal, partialReceiveModal, role, selectedReceiptId]);
+  ], [actingKey, detailLoadingReceiptId, openPartialReceiveModal, openReceiptDetail, openResolveExceptionModal, partialReceiveModal, receiptDetailDrawerOpen, role, selectedReceiptId]);
 
-  const renderReceiptDetail = (sel: InboundReceiptRow) => {
+  const renderReceiptDetail = (sel: InboundReceiptRow, mode: "inline" | "drawer" = "inline") => {
     const canInbound = INBOUND_ACTION_STATUSES.has(sel.status)
       && canRole(role, ["warehouse", "manager", "admin"]);
     const canResolveException = INBOUND_EXCEPTION_STATUSES.has(sel.status)
       && canRole(role, ["warehouse", "manager", "admin"]);
+    const taskState = getReceiptTaskState(sel);
+    const primaryAction = getReceiptPrimaryAction(sel);
+    const flowState = getReceiptFlowState(sel);
     const selectedLines = receiptLinesById[sel.id] || [];
     const selectedTimeline = receiptTimelineById[sel.id] || [];
     const detailLoading = detailLoadingReceiptId === sel.id;
     const receiptIssueTags = getIssueTags(sel);
+    const detailIssueSummary = selectedLines.reduce(
+      (acc, line) => {
+        const shortageQty = Number(line.shortageQty || 0);
+        const overQty = Number(line.overQty || 0);
+        const damagedQty = Number(line.damagedQty || 0);
+        const hasIssue = shortageQty > 0 || overQty > 0 || damagedQty > 0;
+        if (hasIssue) acc.issueLines += 1;
+        if (shortageQty > 0) {
+          acc.shortageLines += 1;
+          acc.shortageQty += shortageQty;
+        }
+        if (overQty > 0) {
+          acc.overLines += 1;
+          acc.overQty += overQty;
+        }
+        if (damagedQty > 0) {
+          acc.damagedLines += 1;
+          acc.damagedQty += damagedQty;
+        }
+        return acc;
+      },
+      {
+        issueLines: 0,
+        shortageLines: 0,
+        shortageQty: 0,
+        overLines: 0,
+        overQty: 0,
+        damagedLines: 0,
+        damagedQty: 0,
+      },
+    );
+    const detailIssueCards = [
+      { label: "差异行", value: detailIssueSummary.issueLines, meta: `${formatQty(selectedLines.length)} 行商品`, tone: "neutral" },
+      { label: "短少", value: detailIssueSummary.shortageQty, meta: `${formatQty(detailIssueSummary.shortageLines)} 行`, tone: "amber" },
+      { label: "多到", value: detailIssueSummary.overQty, meta: `${formatQty(detailIssueSummary.overLines)} 行`, tone: "blue" },
+      { label: "破损", value: detailIssueSummary.damagedQty, meta: `${formatQty(detailIssueSummary.damagedLines)} 行`, tone: "red" },
+    ];
+    const detailClassName = [
+      "warehouse-receipt-detail",
+      mode === "drawer" ? "warehouse-receipt-detail--drawer" : "",
+    ].filter(Boolean).join(" ");
     return (
-      <div className="warehouse-receipt-detail">
+      <div className={detailClassName}>
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, marginBottom: 12 }}>
           <Space direction="vertical" size={4}>
             <Space size={8} wrap>
@@ -905,16 +1215,18 @@ export default function WarehouseCenter() {
                   type="primary"
                   icon={<InboxOutlined />}
                   loading={actingKey === `detail-inbound-${sel.id}`}
-                  onClick={() => runAction(`detail-inbound-${sel.id}`, { action: "confirm_count", receiptId: sel.id }, "已确认入库")}
+                  onClick={() => runAction(`detail-inbound-${sel.id}`, { action: primaryAction.action, receiptId: sel.id }, primaryAction.successText)}
                 >
-                  入库
+                  {primaryAction.label}
                 </Button>
-                <Button
-                  loading={partialReceiveModal?.receiptId === sel.id && partialReceiveModal.loading}
-                  onClick={() => void openPartialReceiveModal(sel)}
-                >
-                  按实数入库
-                </Button>
+                {primaryAction.allowPartialReceive ? (
+                  <Button
+                    loading={partialReceiveModal?.receiptId === sel.id && partialReceiveModal.loading}
+                    onClick={() => void openPartialReceiveModal(sel)}
+                  >
+                    按实数核数
+                  </Button>
+                ) : null}
               </>
             ) : canResolveException ? (
               <Button
@@ -928,8 +1240,35 @@ export default function WarehouseCenter() {
             ) : (
               <Text type="secondary">已入库，无需操作</Text>
             )}
-            <Button size="small" type="text" onClick={() => setSelectedReceiptId(null)}>收起</Button>
+            <Button size="small" type="text" onClick={closeReceiptDetail}>收起</Button>
           </Space>
+        </div>
+        <div className="warehouse-flow-panel">
+          <Steps
+            size="small"
+            current={flowState.current}
+            status={flowState.status}
+            items={[
+              { title: "待到货", description: "采购单" },
+              { title: "已到仓", description: "收货确认" },
+              { title: "已核数", description: "实收差异" },
+              { title: "已入库", description: "库存确认" },
+              { title: "待质检", description: "质检流转" },
+            ]}
+          />
+          <Text type="secondary" className="warehouse-flow-panel__helper">{flowState.helper}</Text>
+        </div>
+        <div className={`warehouse-action-guide warehouse-action-guide--${taskState.tone}`}>
+          <div>
+            <Text type="secondary" style={{ fontSize: 12 }}>当前任务</Text>
+            <div className="warehouse-action-guide__title">{taskState.label}</div>
+            <Text type="secondary" style={{ fontSize: 12 }}>{taskState.meta}</Text>
+          </div>
+          <div>
+            <Text type="secondary" style={{ fontSize: 12 }}>下一步动作</Text>
+            <div className="warehouse-action-guide__title">{canInbound ? primaryAction.label : canResolveException ? "处理异常并入库" : "无需操作"}</div>
+            <Text type="secondary" style={{ fontSize: 12 }}>{canInbound ? primaryAction.helper : canResolveException ? "填写处理说明，留痕后入库。" : "该单据已完成或不可操作。"}</Text>
+          </div>
         </div>
         <Row gutter={[8, 8]} style={{ marginBottom: 12 }}>
           {[
@@ -947,6 +1286,18 @@ export default function WarehouseCenter() {
             </Col>
           ))}
         </Row>
+        <div className="warehouse-detail-issue-strip">
+          {detailIssueCards.map((item) => (
+            <div
+              key={item.label}
+              className={`warehouse-detail-issue-card warehouse-detail-issue-card--${item.tone}`}
+            >
+              <Text type="secondary" style={{ fontSize: 12 }}>{item.label}</Text>
+              <div className="warehouse-detail-issue-card__value">{formatQty(item.value)}</div>
+              <Text type="secondary" style={{ fontSize: 12 }}>{item.meta}</Text>
+            </div>
+          ))}
+        </div>
         <Table
           rowKey="id"
           size="small"
@@ -1048,6 +1399,8 @@ export default function WarehouseCenter() {
     { value: "today", label: "今日", count: todayReceiptCount, meta: "今日到仓", tone: "green" },
     { value: "overdue", label: "超期", count: overdueReceiptCount, meta: "优先处理", tone: "red" },
   ]), [actionableCount, overdueReceiptCount, summary.inboundReceiptCount, todayReceiptCount]);
+  const activeReceiptScope = receiptScopeItems.find((item) => item.value === receiptScopeKey) || receiptScopeItems[0];
+  const activeReceiptQueue = receiptQueueItems.find((item) => item.value === receiptQueueKey) || receiptQueueItems[0];
   const activeFilterLabels = useMemo(() => ([
     receiptScopeKey !== DEFAULT_RECEIPT_SCOPE ? "工作视图" : "",
     receiptQueueKey !== "all" ? "状态队列" : "",
@@ -1159,6 +1512,25 @@ export default function WarehouseCenter() {
           </Space>
         </div>
         <div className="warehouse-queue-panel">
+          <div className="warehouse-queue-panel__header">
+            <div>
+              <div className="warehouse-queue-panel__title">状态筛选</div>
+              <div className="warehouse-queue-panel__subtitle">
+                当前：{activeReceiptScope?.label || "全部"} / {activeReceiptQueue?.label || "全部"}，点击下面卡片切换列表。
+              </div>
+            </div>
+            <div className="warehouse-queue-panel__badges" aria-label="关键入库状态">
+              <span className="warehouse-queue-badge warehouse-queue-badge--amber">
+                待到货 {formatQty(summary.pendingArrivalCount || 0)}
+              </span>
+              <span className="warehouse-queue-badge warehouse-queue-badge--blue">
+                待入库 {formatQty(pendingInboundCount)}
+              </span>
+              <span className="warehouse-queue-badge warehouse-queue-badge--red">
+                异常 {formatQty(summary.exceptionCount || 0)}
+              </span>
+            </div>
+          </div>
           <div className="warehouse-queue-group">
             <div className="warehouse-queue-group__label">工作视图</div>
             <div className="warehouse-queue-tabs" role="tablist" aria-label="入库工作视图">
@@ -1176,7 +1548,10 @@ export default function WarehouseCenter() {
                     aria-pressed={active}
                     onClick={() => switchReceiptScope(item.value)}
                   >
-                    <span className="warehouse-queue-tab__label">{item.label}</span>
+                    <span className="warehouse-queue-tab__top">
+                      <span className="warehouse-queue-tab__label">{item.label}</span>
+                      {active ? <span className="warehouse-queue-tab__selected">已选中</span> : null}
+                    </span>
                     <span className="warehouse-queue-tab__count">{formatQty(item.count)}</span>
                     <span className="warehouse-queue-tab__meta">{item.meta || "-"}</span>
                   </button>
@@ -1201,7 +1576,10 @@ export default function WarehouseCenter() {
                     aria-pressed={active}
                     onClick={() => switchReceiptQueue(item.value)}
                   >
-                    <span className="warehouse-queue-tab__label">{item.label}</span>
+                    <span className="warehouse-queue-tab__top">
+                      <span className="warehouse-queue-tab__label">{item.label}</span>
+                      {active ? <span className="warehouse-queue-tab__selected">已选中</span> : null}
+                    </span>
                     <span className="warehouse-queue-tab__count">{formatQty(item.count)}</span>
                     <span className="warehouse-queue-tab__meta">{item.meta || "-"}</span>
                   </button>
@@ -1235,6 +1613,50 @@ export default function WarehouseCenter() {
             应用筛选
           </Button>
         </div>
+        <div className="warehouse-execution-bar">
+          <div className="warehouse-execution-bar__summary">
+            <span className="warehouse-execution-bar__label">入库执行</span>
+            <span>当前页 {formatQty((data.inboundReceipts || []).length)} 单</span>
+            <span>可处理 {formatQty(currentPageBulkSummary.actionable)} 单</span>
+            {summary.urgentReceiptCount ? <span className="danger">紧急 {formatQty(summary.urgentReceiptCount)} 单</span> : null}
+            {currentPageBulkSummary.blocked ? (
+              <span className="muted" title={currentPageBulkSummary.blockedText}>
+                已排除 {formatQty(currentPageBulkSummary.blocked)} 单
+              </span>
+            ) : null}
+            {selectedReceiptIds.length ? (
+              <>
+                <span className="selected">已选 {formatQty(selectedReceiptIds.length)} 单</span>
+                <span>实收 {formatQty(selectedBulkTotals.receivedQty)} / 期望 {formatQty(selectedBulkTotals.expectedQty)}</span>
+                {selectedBulkTotals.damagedQty ? <span>破损 {formatQty(selectedBulkTotals.damagedQty)}</span> : null}
+              </>
+            ) : (
+              <span className="muted">先选单据再批量确认</span>
+            )}
+          </div>
+          <div className="warehouse-execution-bar__actions">
+            <Button
+              size="small"
+              disabled={!currentPageBulkSummary.actionable}
+              onClick={selectCurrentPageActionable}
+            >
+              选择本页可处理
+            </Button>
+            <Button
+              size="small"
+              type="primary"
+              icon={<InboxOutlined />}
+              loading={actingKey === "bulk-inbound"}
+              disabled={!selectedActionableRows.length}
+              onClick={openBulkInboundReview}
+            >
+              批量处理
+            </Button>
+            <Button size="small" disabled={!selectedReceiptIds.length} onClick={() => setSelectedReceiptIds([])}>
+              清空
+            </Button>
+          </div>
+        </div>
         <Table
           rowKey="id"
           loading={tableLoading}
@@ -1244,81 +1666,117 @@ export default function WarehouseCenter() {
           dataSource={data.inboundReceipts || []}
           locale={{ emptyText: receiptTableEmptyText }}
           rowSelection={receiptRowSelection}
-          scroll={{ x: 1240 }}
+          scroll={{ x: 1390 }}
           pagination={{
             current: inboundReceiptPage,
             pageSize: inboundReceiptPageSize,
             total: inboundReceiptTotal,
-            showSizeChanger: false,
-            showTotal: (total, range) => (
-              <Space className="warehouse-pagination-total" size={12}>
-                <span>{`显示 ${range[0]}-${range[1]} / ${total} 条`}</span>
-                <Space className="warehouse-page-size-control" size={6}>
-                  <span>每页记录数</span>
-                  <Select
-                    size="small"
-                    value={inboundReceiptPageSize}
-                    options={INBOUND_RECEIPT_PAGE_SIZE_OPTIONS.map((value) => ({
-                      label: `${value}`,
-                      value,
-                    }))}
-                    style={{ width: 76 }}
-                    popupMatchSelectWidth={96}
-                    onChange={updateInboundReceiptPageSize}
-                    onMouseDown={(event) => event.stopPropagation()}
-                  />
-                </Space>
-              </Space>
-            ),
+            showSizeChanger: true,
+            pageSizeOptions: INBOUND_RECEIPT_PAGE_SIZE_OPTIONS.map(String),
+            showTotal: (total, range) => `显示 ${range[0]}-${range[1]} / ${total} 条`,
             onChange: updateInboundReceiptPagination,
+            onShowSizeChange: (_current, size) => updateInboundReceiptPageSize(size),
           }}
-          rowClassName={(record) => (record.id === selectedReceiptId ? "ant-table-row-selected" : "")}
+          rowClassName={(record) => [
+            getReceiptTaskState(record).rowClass,
+            record.id === selectedReceiptId ? "ant-table-row-selected" : "",
+          ].filter(Boolean).join(" ")}
           onRow={(record) => ({
             onClick: () => openReceiptDetail(record),
+            onMouseEnter: () => scheduleReceiptDetailPrefetch(record.id),
+            onMouseLeave: clearReceiptPrefetchTimer,
             style: { cursor: "pointer" },
           })}
-          expandable={{
-            expandedRowKeys: selectedReceiptId ? [selectedReceiptId] : [],
-            expandedRowRender: renderReceiptDetail,
-            rowExpandable: () => true,
-            showExpandColumn: false,
-          }}
         />
-        {selectedReceiptIds.length ? (
-          <div className="erp-bulk-bar">
-            <div className="erp-bulk-bar__summary">
-              <span className="selected">已选 {selectedReceiptIds.length} 单</span>
-              <span>可入库 {selectedActionableRows.length} 单</span>
-              <span>当前页可批量 {currentPageBulkSummary.actionable} 单</span>
-              {currentPageBulkSummary.blocked ? (
-                <span className="muted" title={currentPageBulkSummary.blockedText}>
-                  已排除 {currentPageBulkSummary.blocked} 单
-                </span>
+      </div>
+
+      <Drawer
+        open={receiptDetailDrawerOpen && Boolean(selectedReceipt)}
+        title={selectedReceipt ? `入库单 · ${selectedReceipt.receiptNo || selectedReceipt.id}` : "入库明细"}
+        width={980}
+        destroyOnClose={false}
+        onClose={closeReceiptDetail}
+        className="warehouse-detail-drawer"
+      >
+        {selectedReceipt ? renderReceiptDetail(selectedReceipt, "drawer") : null}
+      </Drawer>
+
+      <Modal
+        open={bulkInboundReviewOpen}
+        title="批量处理复核"
+        okText="确认批量处理"
+        cancelText="返回检查"
+        width={720}
+        confirmLoading={actingKey === "bulk-inbound"}
+        okButtonProps={{ disabled: !selectedActionableRows.length }}
+        onCancel={() => {
+          if (actingKey !== "bulk-inbound") setBulkInboundReviewOpen(false);
+        }}
+        onOk={async () => {
+          const ok = await runBulkInbound();
+          if (ok) setBulkInboundReviewOpen(false);
+        }}
+        destroyOnClose
+      >
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Alert
+            type="info"
+            showIcon
+            message={`将处理 ${formatQty(selectedActionableRows.length)} 张入库单`}
+            description="系统会按每张单据的当前状态只推进下一步：待到货确认到仓，已到仓提交核数，已核数确认入库；异常单仍需单独填写处理说明。"
+          />
+          <div className="warehouse-bulk-review-grid">
+            {[
+              ["可处理", selectedActionableRows.length],
+              ["期望数量", selectedBulkTotals.expectedQty],
+              ["实收数量", selectedBulkTotals.receivedQty],
+              ["破损数量", selectedBulkTotals.damagedQty],
+            ].map(([label, value]) => (
+              <div key={String(label)} className="warehouse-bulk-review-card">
+                <Text type="secondary" style={{ fontSize: 12 }}>{label}</Text>
+                <div className="warehouse-bulk-review-card__value">{formatQty(Number(value || 0))}</div>
+              </div>
+            ))}
+          </div>
+          <div className="warehouse-bulk-review-section">
+            <Text strong>任务分布</Text>
+            <Space size={6} wrap style={{ marginTop: 8 }}>
+              {selectedBulkTaskSummary.length ? selectedBulkTaskSummary.map((item) => (
+                <Tag key={item.label} color={item.label.includes("确认入库") ? "green" : item.label.includes("核数") ? "blue" : "gold"}>
+                  {item.label} {formatQty(item.count)}
+                </Tag>
+              )) : <Tag>无可处理单</Tag>}
+              {selectedBlockedCount ? <Tag color="default">已排除 {formatQty(selectedBlockedCount)}</Tag> : null}
+            </Space>
+          </div>
+          <div className="warehouse-bulk-review-section">
+            <Text strong>单据预览</Text>
+            <div className="warehouse-bulk-review-list">
+              {selectedBulkPreviewRows.map((row) => {
+                const action = getReceiptPrimaryAction(row);
+                return (
+                  <div key={row.id} className="warehouse-bulk-review-line">
+                    <span className="warehouse-bulk-review-line__receipt">{row.receiptNo || row.id}</span>
+                    <span>{row.supplierName || "-"}</span>
+                    <span>{action.label}</span>
+                    <span>{formatQty(row.receivedQty)} / {formatQty(row.expectedQty)}</span>
+                  </div>
+                );
+              })}
+              {selectedActionableRows.length > selectedBulkPreviewRows.length ? (
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  另有 {formatQty(selectedActionableRows.length - selectedBulkPreviewRows.length)} 张未展示
+                </Text>
               ) : null}
             </div>
-            <div className="erp-bulk-bar__actions">
-              <Button
-                size="small"
-                type="primary"
-                icon={<InboxOutlined />}
-                loading={actingKey === "bulk-inbound"}
-                disabled={!selectedActionableRows.length}
-                onClick={() => void runBulkInbound()}
-              >
-                批量入库
-              </Button>
-              <Button size="small" onClick={() => setSelectedReceiptIds([])}>
-                清空
-              </Button>
-            </div>
           </div>
-        ) : null}
-      </div>
+        </Space>
+      </Modal>
 
       <Modal
         open={!!partialReceiveModal}
-        title={partialReceiveModal ? `按实数入库 · ${partialReceiveModal.receiptNo}` : "按实数入库"}
-        okText="确认入库"
+        title={partialReceiveModal ? `按实数核数 · ${partialReceiveModal.receiptNo}` : "按实数核数"}
+        okText="提交核数"
         cancelText="取消"
         width={760}
         confirmLoading={partialReceiveModal?.loading}
@@ -1351,7 +1809,7 @@ export default function WarehouseCenter() {
         {partialReceiveModal ? (
           <Space direction="vertical" size={10} style={{ width: "100%" }}>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              系统会按你填的"实收"更新入库单。短少 / 多到自动算（实收 vs 期望差），破损独立填。
+              系统会按你填的"实收"更新入库单。短少 / 多到自动算（实收 vs 期望差），破损独立填；核数后再确认入库。
             </Text>
             <Table
               rowKey="id"

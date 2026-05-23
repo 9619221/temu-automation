@@ -217,6 +217,26 @@ export interface TemuSalesRow {
   trend_today_sales?: number | null;
   trend_last7d_sales?: number | null;
   trend_last30d_sales?: number | null;
+  flow_trend_daily?: Array<{
+    date: string;
+    exposeNum?: number | null;
+    clickNum?: number | null;
+    detailVisitNum?: number | null;
+    detailVisitorNum?: number | null;
+    addToCartUserNum?: number | null;
+    collectUserNum?: number | null;
+    payGoodsNum?: number | null;
+    payOrderNum?: number | null;
+    buyerNum?: number | null;
+    searchExposeNum?: number | null;
+    searchClickNum?: number | null;
+    searchPayGoodsNum?: number | null;
+    searchPayOrderNum?: number | null;
+    recommendExposeNum?: number | null;
+    recommendClickNum?: number | null;
+    recommendPayGoodsNum?: number | null;
+    recommendPayOrderNum?: number | null;
+  }>;
   sku_sales_trends?: Record<string, {
     trend_daily?: Array<{ date: string; salesNumber: number }>;
     latest_date?: string | null;
@@ -354,6 +374,42 @@ export interface TemuStockOrderSummaryRow {
   demand_qty: number | null;
 }
 
+export interface TemuAfterSaleRow {
+  id: string;
+  mall_id: string | null;
+  site: string | null;
+  row_key: string;
+  after_sale_type: string | null;
+  package_no: string | null;
+  order_id: string | null;
+  product_id: string | null;
+  skc_id: string | null;
+  sku_id: string | null;
+  product_name: string | null;
+  quantity: number | null;
+  status: string | null;
+  reason: string | null;
+  logistics_no: string | null;
+  warehouse_name: string | null;
+  amount_cents: number | null;
+  currency: string | null;
+  created_at_text: string | null;
+  updated_at_text: string | null;
+  raw_json?: string | null;
+  source_event_id?: string | null;
+  sources_json?: string | null;
+  first_seen_at: string | null;
+  last_updated_at: string | null;
+}
+
+export interface TemuAfterSaleSummaryRow {
+  after_sale_type: string | null;
+  status: string | null;
+  count: number;
+  quantity: number | null;
+  amount_cents: number | null;
+}
+
 export interface CloudShopMonitorRow {
   mall_id: string;
   site: string | null;
@@ -409,10 +465,16 @@ export interface CloudShopMonitorRow {
   pending_stock_order_count: number;
   stock_order_demand_qty: number;
   stock_order_delivered_qty: number;
+  after_sale_count: number;
+  pending_after_sale_count: number;
+  return_package_count: number;
+  after_sale_quantity: number;
+  after_sale_amount_cents: number;
   last_flow_at: string | null;
   last_activity_at: string | null;
   last_risk_at: string | null;
   last_stock_order_at: string | null;
+  last_after_sale_at: string | null;
   last_updated_at: string | null;
 }
 
@@ -455,6 +517,11 @@ export interface CloudShopMonitorTotals {
   pending_stock_order_count: number;
   stock_order_demand_qty: number;
   stock_order_delivered_qty: number;
+  after_sale_count: number;
+  pending_after_sale_count: number;
+  return_package_count: number;
+  after_sale_quantity: number;
+  after_sale_amount_cents: number;
 }
 
 export interface CloudShopMonitorPayload {
@@ -479,6 +546,12 @@ export interface AgentHeartbeat {
   hook_xhr_alive?: number | null;
   hook_perf_seen?: number | null;
   page_url?: string | null;
+  collector_enabled?: number | null;
+  collector_index?: number | null;
+  collector_last_target_key?: string | null;
+  collector_last_target_url?: string | null;
+  collector_last_targets_json?: string | null;
+  collector_updated_at?: number | null;
   ts?: number | null;
   received_at?: number | null;
 }
@@ -516,11 +589,13 @@ export const fetchSkcList = (
 
 export const fetchTemuSales = async (
   cfg: CloudConsoleConfig,
-  params: { date?: string; mall_id?: string } = {},
+  params: { date?: string; mall_id?: string; include_flow_only?: boolean; limit?: number } = {},
 ) => {
   const qs = new URLSearchParams();
   if (params.date) qs.set("date", params.date);
   if (params.mall_id) qs.set("mall_id", params.mall_id);
+  if (params.include_flow_only) qs.set("include_flow_only", "1");
+  if (params.limit) qs.set("limit", String(params.limit));
   try {
     return await request<{ date: string; rows: TemuSalesRow[] }>(cfg, `/api/dashboard/temu-sales?${qs.toString()}`);
   } catch (error: any) {
@@ -623,6 +698,29 @@ export const fetchTemuStockOrders = async (
   }
 };
 
+export const fetchTemuAfterSales = async (
+  cfg: CloudConsoleConfig,
+  params: { mall_id?: string; status?: string; type?: string; q?: string; limit?: number } = {},
+) => {
+  const qs = new URLSearchParams();
+  if (params.mall_id) qs.set("mall_id", params.mall_id);
+  if (params.status) qs.set("status", params.status);
+  if (params.type) qs.set("type", params.type);
+  if (params.q) qs.set("q", params.q);
+  if (params.limit) qs.set("limit", String(params.limit));
+  try {
+    return await request<{ rows: TemuAfterSaleRow[]; summary: TemuAfterSaleSummaryRow[] }>(
+      cfg,
+      `/api/dashboard/after-sales?${qs.toString()}`,
+    );
+  } catch (error: any) {
+    if (String(error?.message || "").includes("HTTP 404")) {
+      return { rows: [], summary: [] };
+    }
+    throw error;
+  }
+};
+
 export const fetchCloudShopMonitor = async (
   cfg: CloudConsoleConfig,
 ) => {
@@ -672,6 +770,11 @@ export const fetchCloudShopMonitor = async (
           pending_stock_order_count: 0,
           stock_order_demand_qty: 0,
           stock_order_delivered_qty: 0,
+          after_sale_count: 0,
+          pending_after_sale_count: 0,
+          return_package_count: 0,
+          after_sale_quantity: 0,
+          after_sale_amount_cents: 0,
         },
       };
     }

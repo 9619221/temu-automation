@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useState } from "react";
 import {
   Button,
   Collapse,
@@ -18,6 +19,13 @@ import {
 import PageHeader from "../components/PageHeader";
 import ExtensionInstallGuide from "../components/ExtensionInstallGuide";
 import {
+  fetchEndpointCandidates,
+  fetchTemuOperationRisks,
+  loadCloudConfig,
+  type CloudEndpointCandidate,
+  type TemuOperationRiskSummaryRow,
+} from "../utils/cloudClient";
+import {
   COLLECT_GROUPS,
   COLLECT_TASKS,
   COLLECT_TASKS_BY_KEY,
@@ -27,6 +35,29 @@ import {
 } from "../contexts/CollectionContext";
 
 const { Text } = Typography;
+
+interface CloudProbeState {
+  loading: boolean;
+  configured: boolean;
+  endpoints: CloudEndpointCandidate[];
+  risks: TemuOperationRiskSummaryRow[];
+  error: string;
+}
+
+const riskTypeLabel = (value?: string | null) => {
+  const map: Record<string, string> = {
+    violation_goods: "违规商品",
+    delivery_order: "发货履约",
+    logistics_feedback: "物流反馈",
+    spot_check: "质检抽检",
+    spot_check_history: "质检历史",
+    inbound_exception: "入库异常",
+    return_package: "退货包裹",
+    high_price_flow: "高价限流",
+    regional_sales: "区域销量",
+  };
+  return map[value || ""] || value || "其他风险";
+};
 
 type PageTaskStatus = "pending" | "running" | "success" | "partial" | "blocked" | "error";
 
@@ -52,7 +83,7 @@ const getTaskIcon = (status: TaskStatus) => {
     case "error":
       return <CloseCircleOutlined style={{ color: "var(--color-danger)" }} />;
     default:
-      return <ClockCircleOutlined style={{ color: "#b8bfcc" }} />;
+      return <ClockCircleOutlined style={{ color: "var(--google-muted, #5f6368)" }} />;
   }
 };
 
@@ -100,6 +131,45 @@ export default function Dashboard() {
     startSyncDashboard,
     syncingDashboard,
   } = useCollection();
+  const [cloudProbe, setCloudProbe] = useState<CloudProbeState>({
+    loading: true,
+    configured: false,
+    endpoints: [],
+    risks: [],
+    error: "",
+  });
+
+  const refreshCloudProbe = useCallback(async () => {
+    setCloudProbe((prev) => ({ ...prev, loading: true, error: "" }));
+    try {
+      const cfg = await loadCloudConfig();
+      if (!cfg) {
+        setCloudProbe({ loading: false, configured: false, endpoints: [], risks: [], error: "" });
+        return;
+      }
+      const [endpoints, risks] = await Promise.all([
+        fetchEndpointCandidates(cfg, { limit: 12 }),
+        fetchTemuOperationRisks(cfg, { limit: 1 }),
+      ]);
+      setCloudProbe({
+        loading: false,
+        configured: true,
+        endpoints: endpoints || [],
+        risks: risks.summary || [],
+        error: "",
+      });
+    } catch (error: any) {
+      setCloudProbe((prev) => ({
+        ...prev,
+        loading: false,
+        error: error?.message || "读取云端诊断失败",
+      }));
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshCloudProbe();
+  }, [refreshCloudProbe]);
 
   const pageTaskSummaries = COLLECT_GROUPS.map((group) => {
     const tasks = group.taskKeys
@@ -226,7 +296,57 @@ export default function Dashboard() {
 
       <ExtensionInstallGuide />
 
-      <div className="app-panel">
+      <div className="app-panel collect-cloud-panel">
+        <div className="app-panel__title">
+          <div>
+            <div className="app-panel__title-main">接口发现与店铺风险</div>
+            <div className="app-panel__title-sub">
+              独立的云端采集入口已合并到这里：扩展发现的新接口和店铺巡检风险会直接进入云端，后续用于商品管理和店铺监控展示。
+            </div>
+          </div>
+          <Button size="small" icon={<SyncOutlined />} loading={cloudProbe.loading} onClick={refreshCloudProbe}>
+            刷新诊断
+          </Button>
+        </div>
+
+        {!cloudProbe.configured ? (
+          <Tag color="warning" style={{ borderRadius: 999, margin: 0 }}>云端未配置</Tag>
+        ) : cloudProbe.error ? (
+          <Tag color="error" style={{ borderRadius: 999, margin: 0 }}>{cloudProbe.error}</Tag>
+        ) : (
+          <div className="collect-cloud-grid">
+            <div className="collect-cloud-block">
+              <Text strong>新发现接口</Text>
+              <div className="collect-chip-row">
+                {cloudProbe.endpoints.length ? cloudProbe.endpoints.map((endpoint) => (
+                  <Tooltip key={`${endpoint.method}-${endpoint.url_path}`} title={`${endpoint.method} ${endpoint.url_path}`}>
+                    <Tag color="blue" style={{ maxWidth: 320, borderRadius: 999, margin: 0 }}>
+                      {endpoint.url_path} · {endpoint.count_total}
+                    </Tag>
+                  </Tooltip>
+                )) : <Text type="secondary">暂无未白名单接口样本</Text>}
+              </div>
+            </div>
+
+            <div className="collect-cloud-block">
+              <Text strong>店铺风险入库</Text>
+              <div className="collect-chip-row">
+                {cloudProbe.risks.length ? cloudProbe.risks.map((risk) => (
+                  <Tag
+                    key={`${risk.risk_type}-${risk.severity}`}
+                    color={risk.severity === "high" ? "red" : risk.severity === "medium" ? "orange" : "default"}
+                    style={{ borderRadius: 999, margin: 0 }}
+                  >
+                    {riskTypeLabel(risk.risk_type)} {risk.count}
+                  </Tag>
+                )) : <Text type="secondary">暂无店铺风险快照</Text>}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="app-panel collect-progress-panel">
         <div className="app-panel__title">
           <div>
             <div className="app-panel__title-main">页面任务进度</div>
@@ -250,25 +370,19 @@ export default function Dashboard() {
         </div>
 
         <Progress
+          className="collect-main-progress"
           percent={progress}
           status={collecting ? "active" : progress === 100 ? (pageBlockedCount + pageErrorCount > 0 ? "exception" : "success") : "normal"}
-          strokeColor={{ "0%": "#e55b00", "100%": "#00b96b" }}
+          strokeColor={{ "0%": "#1a73e8", "100%": "#34a853" }}
+          trailColor="#e8f0fe"
           showInfo={false}
           style={{ marginBottom: 16 }}
         />
 
-        <div style={{ display: "grid", gap: 18 }}>
+        <div className="collect-category-stack">
           {categorySummaries.map((category) => (
-            <div key={category.category} style={{ display: "grid", gap: 10 }}>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 16,
-                  flexWrap: "wrap",
-                }}
-              >
+            <div key={category.category} className="collect-category-section">
+              <div className="collect-category-header">
                 <Space size={10} wrap>
                   <Text strong style={{ fontSize: 16 }}>{category.category}</Text>
                   <Tag style={{ borderRadius: 999, margin: 0 }}>
@@ -287,9 +401,9 @@ export default function Dashboard() {
                 </Space>
               </div>
 
-              <div style={{ display: "grid", gap: 10 }}>
+              <div className="collect-page-task-list">
                 {category.groups.map((group) => (
-                  <div key={group.key} className="group-progress-row">
+                  <div key={group.key} className={`group-progress-row is-${group.status}`}>
                     <div className="group-progress-row__head">
                       <div>
                         <div className="group-progress-row__title">
@@ -322,14 +436,14 @@ export default function Dashboard() {
                       showInfo={false}
                       strokeColor={
                         group.status === "blocked"
-                          ? "#ffb75e"
+                          ? "#fbbc04"
                           : group.error > 0
-                            ? "#ff9f9f"
+                            ? "#ea4335"
                             : group.running > 0 || group.status === "partial"
-                              ? "#e55b00"
-                              : "#00b96b"
+                              ? "#1a73e8"
+                              : "#34a853"
                       }
-                      trailColor="#f1f3f7"
+                      trailColor="#e8f0fe"
                     />
                   </div>
                 ))}
@@ -339,7 +453,7 @@ export default function Dashboard() {
         </div>
       </div>
 
-      <div className="app-panel">
+      <div className="app-panel collect-detail-panel">
         <div className="app-panel__title">
           <div>
             <div className="app-panel__title-main">底层子任务</div>
@@ -402,15 +516,12 @@ export default function Dashboard() {
                             {group.tasks.map(({ task, state }) => (
                               <div
                                 key={task.key}
+                                className={`collect-task-detail-row is-${state.status}`}
                                 style={{
                                   display: "flex",
                                   alignItems: "center",
                                   justifyContent: "space-between",
                                   gap: 16,
-                                  padding: "12px 14px",
-                                  border: "1px solid var(--color-border)",
-                                  borderRadius: "var(--radius-md)",
-                                  background: state.status === "running" ? "var(--color-brand-light)" : "#fff",
                                 }}
                               >
                                 <Space size={10}>

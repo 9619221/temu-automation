@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-type StatCardColor = "brand" | "success" | "blue" | "purple" | "danger" | "neutral";
+type StatCardColor = "brand" | "success" | "blue" | "purple" | "danger" | "neutral" | "warning" | "orange" | "red";
 
 interface StatCardProps {
   title: string;
@@ -22,6 +22,9 @@ const COLOR_CLASS_MAP: Record<StatCardColor, string> = {
   purple: "purple",
   danger: "danger",
   neutral: "neutral",
+  warning: "warning",
+  orange: "warning",
+  red: "danger",
 };
 
 function isEmptyValue(value: ReactNode) {

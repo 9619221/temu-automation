@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const XLSX = require("xlsx");
 const { getErpDatabasePath, openErpDatabase } = require("../db/connection.cjs");
 const { runMigrations } = require("../db/migrate.cjs");
 const { createErpServices } = require("./services/index.cjs");
@@ -216,6 +217,9 @@ function toSupplier(row) {
   } catch {
     next.categories = [];
   }
+  if (!next.source && String(next.id || "").startsWith("feishu:")) {
+    next.source = "feishu";
+  }
   return next;
 }
 
@@ -363,6 +367,332 @@ function optionalNumber(value) {
   if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+function normalizeImportHeader(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s\r\n\t:：()（）【】\[\]{}_\-—/\\|.,，。;；]+/g, "");
+}
+
+function normalizeImportCell(value) {
+  if (value === null || value === undefined) return "";
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map(normalizeImportCell).filter(Boolean).join("、");
+  if (typeof value === "object") {
+    if (value.fullPhoneNum) return normalizeImportCell(value.fullPhoneNum);
+    if (value.phoneNumber) return normalizeImportCell(value.phoneNumber);
+    if (value.email) return normalizeImportCell(value.email);
+    if (value.text) return normalizeImportCell(value.text);
+    if (value.name) return normalizeImportCell(value.name);
+    if (value.title) return normalizeImportCell(value.title);
+    if (value.value) return normalizeImportCell(value.value);
+    if (value.url) return normalizeImportCell(value.url);
+    if (value.link) return normalizeImportCell(value.link);
+    return Object.values(value).map(normalizeImportCell).filter(Boolean).join("、");
+  }
+  return String(value).trim();
+}
+
+const FEISHU_SUPPLIER_COLUMN_ALIASES = {
+  supplierCode: ["供应商编号", "供应商编码", "供应商代码", "供应商id", "供应商ID", "供方编号", "供方编码", "编码", "编号", "代码", "id"],
+  name: ["供应商名称", "供应商名", "供应商", "供方名称", "供方", "公司名称", "厂家名称", "厂家", "店铺名称", "店铺", "名称"],
+  contactName: ["联系人", "联系人姓名", "对接人", "负责人", "采购联系人", "业务联系人"],
+  phone: ["电话", "联系电话", "手机", "手机号", "手机号码", "联系方式", "联系电话/微信", "联系方式电话"],
+  wechat: ["微信", "微信号", "微信号码"],
+  address: ["地址", "供应商地址", "公司地址", "详细地址"],
+  categories: ["经营类目", "供应类目", "类目", "主营类目", "品类", "分类", "供应商分类", "供方分类"],
+  supplierLevel: ["供应商等级", "等级", "供应商级别", "级别", "分级"],
+  paymentTerms: ["结算方式", "付款方式", "支付方式", "账期", "付款账期"],
+  leadDays: ["交期", "标准交期", "供货周期", "发货周期", "交货天数", "生产周期"],
+  taxRate: ["税率", "开票税率", "发票税率"],
+  status: ["状态", "供应商状态", "启用状态"],
+  remark: ["备注", "说明", "备注说明", "标签", "标记"],
+};
+
+function importValueByAliases(row, aliases) {
+  const entries = Object.entries(row || {}).map(([key, value]) => ({
+    key,
+    normalizedKey: normalizeImportHeader(key),
+    value,
+  }));
+  const normalizedAliases = aliases.map(normalizeImportHeader).filter(Boolean);
+  for (const alias of normalizedAliases) {
+    const exact = entries.find((entry) => entry.normalizedKey === alias);
+    if (exact) return normalizeImportCell(exact.value);
+  }
+  for (const alias of normalizedAliases) {
+    const fuzzy = entries.find((entry) => (
+      entry.normalizedKey.length >= 2
+      && alias.length >= 4
+      && (entry.normalizedKey.includes(alias) || alias.includes(entry.normalizedKey))
+    ));
+    if (fuzzy) return normalizeImportCell(fuzzy.value);
+  }
+  return "";
+}
+
+function splitSupplierCategories(value) {
+  const text = normalizeImportCell(value);
+  if (!text) return [];
+  return Array.from(new Set(
+    text
+      .split(/[\n\r,，、;；|/]+/)
+      .map((item) => item.trim())
+      .filter(Boolean),
+  ));
+}
+
+function normalizeSupplierLevel(value) {
+  const text = normalizeImportCell(value).toLowerCase();
+  if (!text) return null;
+  if (/战略|strategic|s级|s\b/.test(text)) return "strategic";
+  if (/优选|preferred|a级|a\b/.test(text)) return "preferred";
+  if (/观察|待观察|watch/.test(text)) return "watch";
+  if (/普通|标准|standard|b级|b\b/.test(text)) return "standard";
+  return text;
+}
+
+function normalizePaymentTerms(value) {
+  const text = normalizeImportCell(value).toLowerCase();
+  if (!text) return null;
+  if (/现款|现付|预付|prepaid/.test(text)) return "prepaid";
+  if (/货到|到付|cod/.test(text)) return "cod";
+  if (/周结|weekly/.test(text)) return "weekly";
+  if (/月结|monthly/.test(text)) return "monthly";
+  return text;
+}
+
+function normalizeSupplierStatus(value) {
+  const text = normalizeImportCell(value).toLowerCase();
+  if (!text) return null;
+  if (/停用|禁用|拉黑|黑名单|blocked|inactive|disabled|作废/.test(text)) return "blocked";
+  return "active";
+}
+
+function parseImportNumber(value) {
+  const text = normalizeImportCell(value).replace(/,/g, "");
+  if (!text) return null;
+  const matched = text.match(/-?\d+(?:\.\d+)?/);
+  if (!matched) return null;
+  const number = Number(matched[0]);
+  return Number.isFinite(number) ? number : null;
+}
+
+function normalizeFeishuSupplierImportRow(raw = {}) {
+  const read = (key) => importValueByAliases(raw, FEISHU_SUPPLIER_COLUMN_ALIASES[key] || []);
+  const supplierCode = optionalString(read("supplierCode"));
+  const name = optionalString(read("name"));
+  return {
+    supplierCode,
+    name,
+    contactName: optionalString(read("contactName")),
+    phone: optionalString(read("phone")),
+    wechat: optionalString(read("wechat")),
+    address: optionalString(read("address")),
+    categories: splitSupplierCategories(read("categories")),
+    supplierLevel: normalizeSupplierLevel(read("supplierLevel")),
+    paymentTerms: normalizePaymentTerms(read("paymentTerms")),
+    leadDays: parseImportNumber(read("leadDays")),
+    taxRate: parseImportNumber(read("taxRate")),
+    status: normalizeSupplierStatus(read("status")),
+    remark: optionalString(read("remark")),
+  };
+}
+
+function readSupplierImportRowsFromSpreadsheet(filePath) {
+  const resolvedPath = path.resolve(String(filePath || ""));
+  if (!fs.existsSync(resolvedPath)) {
+    throw new Error(`导入文件不存在：${resolvedPath}`);
+  }
+  const workbook = XLSX.readFile(resolvedPath, { cellDates: true });
+  const sheetName = workbook.SheetNames[0];
+  if (!sheetName) return [];
+  return XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
+    defval: "",
+    raw: false,
+  });
+}
+
+const FEISHU_SUPPLIER_BASE_URL = "https://mcn24onb5t1o.feishu.cn/base/RLy7bndc4aCXhtsx4yAcr2d8nSg?table=tbl0UhZRpR0niDSt&view=vew5Spjz7c";
+
+function safeJsonParse(value) {
+  if (!value || typeof value !== "string") return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function looksLikeFeishuSupplierSource(value = {}) {
+  const text = [
+    value.url,
+    value.tab_url,
+    value.page,
+    value.sourceUrl,
+    value.source_url,
+    value?.body?.sourceUrl,
+    value?.body?.source_url,
+  ].filter(Boolean).join(" ");
+  if (/feishu\.cn\/base\/RLy7bndc4aCXhtsx4yAcr2d8nSg/i.test(text)) return true;
+  if (/feishu\.cn/i.test(text) && /tbl0UhZRpR0niDSt|vew5Spjz7c/i.test(text)) return true;
+  if (value?.body?.source === "feishu_supplier_table") return true;
+  return false;
+}
+
+function collectFeishuFieldNameMap(root) {
+  const map = new Map();
+  const stack = [root];
+  let steps = 0;
+  const remember = (id, name) => {
+    const key = optionalString(id);
+    const label = optionalString(name);
+    if (!key || !label) return;
+    if (!/^fld|^field/i.test(key) && !/field/i.test(key)) return;
+    map.set(key, label);
+  };
+  while (stack.length && steps < 30000) {
+    steps += 1;
+    const node = stack.pop();
+    if (!node || typeof node !== "object") continue;
+    if (Array.isArray(node)) {
+      for (const item of node) stack.push(item);
+      continue;
+    }
+    remember(
+      node.fieldId ?? node.field_id ?? node.fieldID ?? node.id ?? node.key,
+      node.fieldName ?? node.field_name ?? node.name ?? node.title ?? node.label,
+    );
+    for (const [key, value] of Object.entries(node)) {
+      if (value && typeof value === "object") {
+        if (/^fld|^field/i.test(key)) {
+          remember(key, value.fieldName ?? value.field_name ?? value.name ?? value.title ?? value.label);
+        }
+        stack.push(value);
+      }
+    }
+  }
+  return map;
+}
+
+function normalizeFeishuRecordFields(fields = {}, fieldNameMap = new Map()) {
+  const out = {};
+  if (!fields || typeof fields !== "object" || Array.isArray(fields)) return out;
+  for (const [key, value] of Object.entries(fields)) {
+    const label = fieldNameMap.get(key) || key;
+    out[label] = normalizeImportCell(value);
+  }
+  return out;
+}
+
+function knownSupplierHeaderScore(cells = []) {
+  const aliases = Object.values(FEISHU_SUPPLIER_COLUMN_ALIASES)
+    .flat()
+    .map(normalizeImportHeader)
+    .filter(Boolean);
+  let score = 0;
+  for (const cell of cells) {
+    const normalized = normalizeImportHeader(cell);
+    if (!normalized) continue;
+    if (aliases.some((alias) => normalized === alias || (alias.length >= 3 && (normalized.includes(alias) || alias.includes(normalized))))) {
+      score += 1;
+    }
+  }
+  return score;
+}
+
+function visibleFeishuRowsToObjects(rows = []) {
+  const snapshots = rows
+    .map((row) => Array.isArray(row?.__visibleCells) ? row.__visibleCells.map(normalizeImportCell).filter(Boolean) : null)
+    .filter((cells) => Array.isArray(cells) && cells.length >= 2);
+  if (!snapshots.length) return [];
+  const headerIndex = snapshots.findIndex((cells) => knownSupplierHeaderScore(cells) >= 2);
+  if (headerIndex < 0) return [];
+  const headers = snapshots[headerIndex];
+  return snapshots.slice(headerIndex + 1).map((cells) => {
+    const row = {};
+    headers.forEach((header, index) => {
+      if (header && cells[index] !== undefined) row[header] = cells[index];
+    });
+    return row;
+  }).filter((row) => optionalString(importValueByAliases(row, FEISHU_SUPPLIER_COLUMN_ALIASES.name)));
+}
+
+function collectFeishuSupplierRowsFromRoot(root, fieldNameMap = new Map()) {
+  const rows = [];
+  const stack = [root];
+  let steps = 0;
+  const pushRow = (row) => {
+    if (!row || typeof row !== "object" || Array.isArray(row)) return;
+    if (optionalString(importValueByAliases(row, FEISHU_SUPPLIER_COLUMN_ALIASES.name))) {
+      rows.push(row);
+    }
+  };
+  while (stack.length && steps < 50000) {
+    steps += 1;
+    const node = stack.pop();
+    if (!node || typeof node !== "object") continue;
+    if (Array.isArray(node)) {
+      for (const item of node) stack.push(item);
+      continue;
+    }
+    if (Array.isArray(node.rows) && node.source === "feishu_supplier_table") {
+      rows.push(...visibleFeishuRowsToObjects(node.rows));
+      for (const row of node.rows) pushRow(row);
+    }
+    const fields = node.fields || node.fieldValues || node.field_values || node.values;
+    if (fields && typeof fields === "object" && !Array.isArray(fields)) {
+      pushRow(normalizeFeishuRecordFields(fields, fieldNameMap));
+    }
+    pushRow(node);
+    for (const value of Object.values(node)) {
+      if (value && typeof value === "object") stack.push(value);
+    }
+  }
+  return rows;
+}
+
+function dedupeFeishuSupplierRows(rows = []) {
+  const seen = new Set();
+  const out = [];
+  for (const row of rows) {
+    const normalized = normalizeFeishuSupplierImportRow(row);
+    const key = normalizeImportHeader(normalized.supplierCode || normalized.name);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(row);
+  }
+  return out;
+}
+
+function extractFeishuSupplierRowsFromExtensionPayload(payload = {}) {
+  const items = Array.isArray(payload.items) ? payload.items : [payload];
+  const roots = [];
+  for (const item of items) {
+    if (!looksLikeFeishuSupplierSource(item)) continue;
+    const body = item.body || safeJsonParse(item.bodyText) || {};
+    roots.push(body);
+  }
+  const fieldNameMap = new Map();
+  for (const root of roots) {
+    for (const [key, value] of collectFeishuFieldNameMap(root)) fieldNameMap.set(key, value);
+  }
+  const rows = [];
+  for (const root of roots) {
+    rows.push(...collectFeishuSupplierRowsFromRoot(root, fieldNameMap));
+  }
+  return dedupeFeishuSupplierRows(rows);
+}
+
+function stableFeishuSupplierId(companyId, key) {
+  const digest = crypto
+    .createHash("sha1")
+    .update(`${companyId || DEFAULT_COMPANY_ID}:${key}`)
+    .digest("hex")
+    .slice(0, 24);
+  return `feishu:supplier:${digest}`;
 }
 
 function roundMoney(value) {
@@ -13461,7 +13791,10 @@ function getInboundReceiptTimeline(db, receiptId) {
     .slice(-30);
 }
 
-const WAREHOUSE_ACTIONABLE_STATUSES = Object.freeze(["pending_arrival", "arrived", "counted", "quantity_mismatch", "damaged", "exception"]);
+const WAREHOUSE_EXCEPTION_STATUSES = Object.freeze(["quantity_mismatch", "damaged", "exception"]);
+const WAREHOUSE_ACTIONABLE_STATUSES = Object.freeze(["pending_arrival", "arrived", "counted", ...WAREHOUSE_EXCEPTION_STATUSES]);
+const WAREHOUSE_EXCEPTION_STATUS_SQL = "('quantity_mismatch', 'damaged', 'exception')";
+const WAREHOUSE_ACTIONABLE_STATUS_SQL = "('pending_arrival', 'arrived', 'counted', 'quantity_mismatch', 'damaged', 'exception')";
 const WAREHOUSE_RECEIPT_DATE_EXPR = "datetime(COALESCE(NULLIF(receipt.received_at, ''), receipt.updated_at, receipt.created_at))";
 const WAREHOUSE_RECEIPT_OVERDUE_HOURS = 24;
 
@@ -13628,13 +13961,17 @@ function getWarehouseWorkbench(params = {}) {
       COUNT(DISTINCT CASE WHEN receipt.status = 'arrived' THEN receipt.id END) AS arrived_count,
       COUNT(DISTINCT CASE WHEN receipt.status = 'counted' THEN receipt.id END) AS counted_count,
       COUNT(DISTINCT CASE WHEN receipt.status = 'inbounded_pending_qc' THEN receipt.id END) AS inbounded_pending_qc_count,
-      COUNT(DISTINCT CASE WHEN receipt.status IN ('quantity_mismatch', 'damaged', 'exception') THEN receipt.id END) AS exception_count,
+      COUNT(DISTINCT CASE WHEN receipt.status IN ${WAREHOUSE_EXCEPTION_STATUS_SQL} THEN receipt.id END) AS exception_count,
       COUNT(DISTINCT CASE WHEN receipt.status = 'cancelled' THEN receipt.id END) AS cancelled_count,
-      COUNT(DISTINCT CASE WHEN receipt.status IN ('pending_arrival', 'arrived', 'counted', 'quantity_mismatch', 'damaged', 'exception') THEN receipt.id END) AS actionable_count,
+      COUNT(DISTINCT CASE WHEN receipt.status IN ${WAREHOUSE_ACTIONABLE_STATUS_SQL} THEN receipt.id END) AS actionable_count,
       COUNT(DISTINCT CASE WHEN date(${WAREHOUSE_RECEIPT_DATE_EXPR}, 'localtime') = date('now', 'localtime') THEN receipt.id END) AS today_receipt_count,
-      COUNT(DISTINCT CASE WHEN receipt.status IN ('pending_arrival', 'arrived', 'counted', 'quantity_mismatch', 'damaged', 'exception')
+      COUNT(DISTINCT CASE WHEN receipt.status IN ${WAREHOUSE_ACTIONABLE_STATUS_SQL}
         AND ((julianday('now') - julianday(${WAREHOUSE_RECEIPT_DATE_EXPR})) * 24) >= @receipt_overdue_hours
         THEN receipt.id END) AS overdue_receipt_count,
+      COUNT(DISTINCT CASE WHEN receipt.status IN ${WAREHOUSE_EXCEPTION_STATUS_SQL}
+        OR (receipt.status IN ${WAREHOUSE_ACTIONABLE_STATUS_SQL}
+          AND ((julianday('now') - julianday(${WAREHOUSE_RECEIPT_DATE_EXPR})) * 24) >= @receipt_overdue_hours)
+        THEN receipt.id END) AS urgent_receipt_count,
       COUNT(DISTINCT CASE WHEN COALESCE(line.shortage_qty, 0) > 0 OR COALESCE(line.over_qty, 0) > 0 OR COALESCE(line.damaged_qty, 0) > 0 THEN receipt.id END) AS issue_receipt_count,
       COALESCE(SUM(line.received_qty), 0) AS received_qty
     FROM erp_inbound_receipts receipt
@@ -13675,9 +14012,46 @@ function getWarehouseWorkbench(params = {}) {
       po.external_logistics_json AS po_external_logistics_json,
       ROUND(MAX(0, (julianday('now') - julianday(${WAREHOUSE_RECEIPT_DATE_EXPR})) * 24), 1) AS age_hours,
       CASE WHEN date(${WAREHOUSE_RECEIPT_DATE_EXPR}, 'localtime') = date('now', 'localtime') THEN 1 ELSE 0 END AS is_today,
-      CASE WHEN receipt.status IN ('pending_arrival', 'arrived', 'counted', 'quantity_mismatch', 'damaged', 'exception')
+      CASE WHEN receipt.status IN ${WAREHOUSE_ACTIONABLE_STATUS_SQL}
         AND ((julianday('now') - julianday(${WAREHOUSE_RECEIPT_DATE_EXPR})) * 24) >= @receipt_overdue_hours
-        THEN 1 ELSE 0 END AS is_overdue
+        THEN 1 ELSE 0 END AS is_overdue,
+      CASE
+        WHEN receipt.status IN ${WAREHOUSE_EXCEPTION_STATUS_SQL} THEN 0
+        WHEN receipt.status IN ${WAREHOUSE_ACTIONABLE_STATUS_SQL}
+          AND ((julianday('now') - julianday(${WAREHOUSE_RECEIPT_DATE_EXPR})) * 24) >= @receipt_overdue_hours THEN 1
+        WHEN receipt.status = 'counted' THEN 2
+        WHEN receipt.status = 'arrived' THEN 3
+        WHEN receipt.status = 'pending_arrival' THEN 4
+        WHEN receipt.status = 'inbounded_pending_qc' THEN 8
+        ELSE 9
+      END AS priority_rank,
+      CASE
+        WHEN receipt.status IN ${WAREHOUSE_EXCEPTION_STATUS_SQL} THEN '异常优先'
+        WHEN receipt.status IN ${WAREHOUSE_ACTIONABLE_STATUS_SQL}
+          AND ((julianday('now') - julianday(${WAREHOUSE_RECEIPT_DATE_EXPR})) * 24) >= @receipt_overdue_hours THEN '超期优先'
+        WHEN receipt.status = 'counted' THEN '可入库'
+        WHEN receipt.status = 'arrived' THEN '待核数'
+        WHEN receipt.status = 'pending_arrival' THEN '待到货'
+        WHEN receipt.status = 'inbounded_pending_qc' THEN '已入库'
+        WHEN receipt.status = 'cancelled' THEN '已取消'
+        ELSE '待跟进'
+      END AS priority_label,
+      CASE
+        WHEN receipt.status IN ${WAREHOUSE_EXCEPTION_STATUS_SQL} THEN 'resolve_exception'
+        WHEN receipt.status = 'pending_arrival' THEN 'confirm_arrival'
+        WHEN receipt.status = 'arrived' THEN 'confirm_count'
+        WHEN receipt.status = 'counted' THEN 'confirm_inbound'
+        WHEN receipt.status = 'inbounded_pending_qc' THEN 'qc_pending'
+        ELSE 'view_detail'
+      END AS next_action_key,
+      CASE
+        WHEN receipt.status IN ${WAREHOUSE_EXCEPTION_STATUS_SQL} THEN '填写说明后入库'
+        WHEN receipt.status = 'pending_arrival' THEN '确认到仓'
+        WHEN receipt.status = 'arrived' THEN '核对实收数量'
+        WHEN receipt.status = 'counted' THEN '确认入库'
+        WHEN receipt.status = 'inbounded_pending_qc' THEN '进入质检'
+        ELSE '查看明细'
+      END AS next_action_label
     FROM erp_inbound_receipts receipt
     LEFT JOIN erp_accounts acct ON acct.id = receipt.account_id
     LEFT JOIN erp_purchase_orders po ON po.id = receipt.po_id
@@ -13688,10 +14062,9 @@ function getWarehouseWorkbench(params = {}) {
     ${receiptWhereClause}
     GROUP BY receipt.id
     ORDER BY
-      CASE WHEN receipt.status IN ('pending_arrival', 'arrived', 'counted', 'quantity_mismatch', 'damaged', 'exception') THEN 0 ELSE 1 END,
-      is_overdue DESC,
-      CASE WHEN NULLIF(TRIM(COALESCE(receipt.received_at, '')), '') IS NULL THEN 1 ELSE 0 END,
-      receipt.received_at DESC,
+      priority_rank ASC,
+      CASE WHEN receipt.status IN ${WAREHOUSE_ACTIONABLE_STATUS_SQL} THEN ${WAREHOUSE_RECEIPT_DATE_EXPR} END ASC,
+      CASE WHEN receipt.status NOT IN ${WAREHOUSE_ACTIONABLE_STATUS_SQL} THEN ${WAREHOUSE_RECEIPT_DATE_EXPR} END DESC,
       receipt.updated_at DESC
     ${inboundReceiptLimitClause}
   `).all(baseParams).map(toInboundReceipt);
@@ -13854,21 +14227,11 @@ function createBatchesForReceipt({ db, services, receipt, actor }) {
       batch_id: batch.id,
     });
 
-    if (line.po_line_id) {
-      db.prepare(`
-        UPDATE erp_purchase_order_lines
-        SET received_qty = received_qty + @received_qty
-        WHERE id = @po_line_id
-      `).run({
-        po_line_id: line.po_line_id,
-        received_qty: line.received_qty,
-      });
-    }
-
     batches.push(toCamelRow(batch));
   });
 
   if (receipt.po_id) {
+    syncPurchaseReceivedQtyFromInbound(db, receipt.po_id);
     let po = getPurchaseOrder(db, receipt.po_id);
     if (["paid", "supplier_processing", "shipped"].includes(po.status)) {
       try {
@@ -13974,6 +14337,7 @@ function syncPurchaseAfterInboundReceipt(db, services, receipt, actor, options =
 
 function completeInboundReceiptWithoutBatch({ db, services, receipt, actor }) {
   let current = receipt;
+  let batches = [];
   if (current.status === "pending_arrival") {
     services.inventory.registerArrival(current.id, actor);
     writeInboundReceiptFlowEvent(db, current, actor, "register_arrival", `仓库确认到仓：${current.receipt_no || current.id}`);
@@ -13998,14 +14362,97 @@ function completeInboundReceiptWithoutBatch({ db, services, receipt, actor }) {
     return { receipt: toCamelRow(current), batches: [], issue };
   }
   if (current.status === "counted") {
-    services.inventory.markInboundConfirmed(current.id, actor);
     writeInboundReceiptFlowEvent(db, current, actor, "confirm_inbound", `仓库确认入库：${current.receipt_no || current.id}`);
+    batches = createBatchesForReceipt({ db, services, receipt: current, actor });
     current = getInboundReceipt(db, current.id);
   }
 
   syncPurchaseAfterInboundReceipt(db, services, current, actor, { allowMarkInbounded: true });
 
+  return { receipt: toCamelRow(current), batches };
+}
+
+function registerInboundReceiptArrivalWithoutBatch({ db, services, receipt, actor }) {
+  let current = receipt;
+  if (current.status !== "pending_arrival") {
+    return { receipt: toCamelRow(current), batches: [] };
+  }
+  services.inventory.registerArrival(current.id, actor);
+  writeInboundReceiptFlowEvent(db, current, actor, "register_arrival", `仓库确认到仓：${current.receipt_no || current.id}`);
+  current = getInboundReceipt(db, current.id);
+  syncPurchaseAfterInboundReceipt(db, services, current, actor, { allowMarkInbounded: false });
   return { receipt: toCamelRow(current), batches: [] };
+}
+
+function confirmInboundReceiptCountWithoutBatch({ db, services, receipt, actor }) {
+  let current = receipt;
+  if (current.status !== "arrived") {
+    throw new Error("请先确认到仓后再核数");
+  }
+  services.inventory.confirmCount(current.id, actor);
+  writeInboundReceiptFlowEvent(db, current, actor, "confirm_count", `仓库确认实收：${current.receipt_no || current.id}`);
+  current = getInboundReceipt(db, current.id);
+  const issue = getInboundReceiptIssueSummary(db, current.id);
+  if (hasInboundReceiptIssue(issue)) {
+    if (Number(issue.damagedQty || 0) > 0) {
+      services.inventory.markDamaged(current.id, actor);
+      writeInboundReceiptFlowEvent(db, current, actor, "mark_damaged", `入库发现破损：${current.receipt_no || current.id}`);
+    } else {
+      services.inventory.markQuantityMismatch(current.id, actor);
+      writeInboundReceiptFlowEvent(db, current, actor, "mark_quantity_mismatch", `入库数量异常：${current.receipt_no || current.id}`);
+    }
+    current = getInboundReceipt(db, current.id);
+    syncPurchaseAfterInboundReceipt(db, services, current, actor, { allowMarkInbounded: false });
+    return { receipt: toCamelRow(current), batches: [], issue };
+  }
+  syncPurchaseAfterInboundReceipt(db, services, current, actor, { allowMarkInbounded: false });
+  return { receipt: toCamelRow(current), batches: [], issue };
+}
+
+function confirmInboundReceiptFinalWithoutBatch({ db, services, receipt, actor }) {
+  let current = receipt;
+  if (current.status !== "counted") {
+    throw new Error("请先完成核数后再确认入库");
+  }
+  const issue = getInboundReceiptIssueSummary(db, current.id);
+  if (hasInboundReceiptIssue(issue)) {
+    if (Number(issue.damagedQty || 0) > 0) {
+      services.inventory.markDamaged(current.id, actor);
+      writeInboundReceiptFlowEvent(db, current, actor, "mark_damaged", `入库发现破损：${current.receipt_no || current.id}`);
+    } else {
+      services.inventory.markQuantityMismatch(current.id, actor);
+      writeInboundReceiptFlowEvent(db, current, actor, "mark_quantity_mismatch", `入库数量异常：${current.receipt_no || current.id}`);
+    }
+    current = getInboundReceipt(db, current.id);
+    syncPurchaseAfterInboundReceipt(db, services, current, actor, { allowMarkInbounded: false });
+    return { receipt: toCamelRow(current), batches: [], issue };
+  }
+  writeInboundReceiptFlowEvent(db, current, actor, "confirm_inbound", `仓库确认入库：${current.receipt_no || current.id}`);
+  const batches = createBatchesForReceipt({ db, services, receipt: current, actor });
+  current = getInboundReceipt(db, current.id);
+  syncPurchaseAfterInboundReceipt(db, services, current, actor, { allowMarkInbounded: true });
+  return { receipt: toCamelRow(current), batches };
+}
+
+function advanceInboundReceiptOneStepWithoutBatch({ db, services, receipt, actor }) {
+  const current = receipt;
+  if (current.status === "pending_arrival") {
+    return registerInboundReceiptArrivalWithoutBatch({ db, services, receipt: current, actor });
+  }
+  if (current.status === "arrived") {
+    syncInboundLineExpectedQty(db, current.id);
+    fillInboundLineReceivedQty(db, current.id);
+    return confirmInboundReceiptCountWithoutBatch({
+      db,
+      services,
+      receipt: getInboundReceipt(db, current.id),
+      actor,
+    });
+  }
+  if (current.status === "counted") {
+    return confirmInboundReceiptFinalWithoutBatch({ db, services, receipt: current, actor });
+  }
+  throw new Error(`${current.status || "当前状态"}不可批量处理`);
 }
 
 function resolveInboundExceptionWithoutBatch({ db, services, receipt, actor, resolutionRemark }) {
@@ -14039,12 +14486,8 @@ function performWarehouseAction(payload = {}, actorInput = {}) {
   const run = db.transaction(() => {
     switch (action) {
       case "register_arrival": {
-        // 一键入库：默认按"足量收货"（received_qty = expected_qty）确认入库。
-        // 现在仓库中心只做采购/入库对账，不再自动生成库存批次。
         const receiptId = requireString(payload.receiptId || payload.id, "receiptId");
-        syncInboundLineExpectedQty(db, receiptId);
-        fillInboundLineReceivedQty(db, receiptId);
-        return completeInboundReceiptWithoutBatch({
+        return registerInboundReceiptArrivalWithoutBatch({
           db,
           services,
           receipt: getInboundReceipt(db, receiptId),
@@ -14090,7 +14533,16 @@ function performWarehouseAction(payload = {}, actorInput = {}) {
         } else {
           fillInboundLineReceivedQty(db, receiptId);
         }
-        return completeInboundReceiptWithoutBatch({
+        return confirmInboundReceiptCountWithoutBatch({
+          db,
+          services,
+          receipt: getInboundReceipt(db, receiptId),
+          actor,
+        });
+      }
+      case "confirm_inbound": {
+        const receiptId = requireString(payload.receiptId || payload.id, "receiptId");
+        return confirmInboundReceiptFinalWithoutBatch({
           db,
           services,
           receipt: getInboundReceipt(db, receiptId),
@@ -14105,18 +14557,21 @@ function performWarehouseAction(payload = {}, actorInput = {}) {
         ));
         if (!receiptIds.length) throw new Error("请选择要入库的单据");
         const receipts = [];
+        const actionCounts = { register_arrival: 0, confirm_count: 0, confirm_inbound: 0 };
         receiptIds.forEach((receiptId) => {
-          syncInboundLineExpectedQty(db, receiptId);
-          fillInboundLineReceivedQty(db, receiptId);
-          const result = completeInboundReceiptWithoutBatch({
+          const before = getInboundReceipt(db, receiptId);
+          if (before.status === "pending_arrival") actionCounts.register_arrival += 1;
+          if (before.status === "arrived") actionCounts.confirm_count += 1;
+          if (before.status === "counted") actionCounts.confirm_inbound += 1;
+          const result = advanceInboundReceiptOneStepWithoutBatch({
             db,
             services,
-            receipt: getInboundReceipt(db, receiptId),
+            receipt: before,
             actor,
           });
           receipts.push(result.receipt);
         });
-        return { receipts, count: receipts.length, batches: [] };
+        return { receipts, count: receipts.length, actionCounts, batches: [] };
       }
       case "resolve_inbound_exception": {
         const receiptId = requireString(payload.receiptId || payload.id, "receiptId");
@@ -15844,6 +16299,105 @@ async function createSupplierRuntime(payload = {}, actor = {}) {
   return createSupplier(payload || {}, actor);
 }
 
+async function importFeishuSupplierRowsOnce(rawRows = [], payload = {}, actor = {}) {
+  const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
+  const existingSuppliers = await listSuppliersRuntime({ companyId, limit: 10000 });
+  const supplierByCode = new Map();
+  const supplierByName = new Map();
+
+  for (const supplier of existingSuppliers) {
+    const codeKey = optionalString(supplier.supplierCode)?.toLowerCase();
+    const nameKey = optionalString(supplier.name)?.toLowerCase();
+    if (codeKey && !supplierByCode.has(codeKey)) supplierByCode.set(codeKey, supplier);
+    if (nameKey && !supplierByName.has(nameKey)) supplierByName.set(nameKey, supplier);
+  }
+
+  const errors = [];
+  let imported = 0;
+  let created = 0;
+  let updated = 0;
+  let skipped = 0;
+
+  for (let index = 0; index < rawRows.length; index += 1) {
+    const rowNumber = index + Number(payload.rowNumberBase || payload.row_number_base || 2);
+    const normalized = normalizeFeishuSupplierImportRow(rawRows[index]);
+    if (!normalized.name) {
+      skipped += 1;
+      errors.push({ row: rowNumber, reason: "缺少供应商名称" });
+      continue;
+    }
+
+    const codeKey = optionalString(normalized.supplierCode)?.toLowerCase();
+    const nameKey = optionalString(normalized.name)?.toLowerCase();
+    const existing = (codeKey && supplierByCode.get(codeKey)) || (nameKey && supplierByName.get(nameKey)) || null;
+    const supplierId = existing?.id || stableFeishuSupplierId(companyId, normalized.supplierCode || normalized.name);
+    const supplierPayload = {
+      id: supplierId,
+      companyId,
+      supplierCode: normalized.supplierCode || existing?.supplierCode || "",
+      name: normalized.name || existing?.name,
+      contactName: normalized.contactName || existing?.contactName || "",
+      phone: normalized.phone || existing?.phone || "",
+      wechat: normalized.wechat || existing?.wechat || "",
+      address: normalized.address || existing?.address || "",
+      categories: normalized.categories.length ? normalized.categories : (existing?.categories || []),
+      supplierLevel: normalized.supplierLevel || existing?.supplierLevel || "standard",
+      paymentTerms: normalized.paymentTerms || existing?.paymentTerms || "",
+      leadDays: normalized.leadDays ?? existing?.leadDays ?? null,
+      taxRate: normalized.taxRate ?? existing?.taxRate ?? null,
+      settlementCurrency: existing?.settlementCurrency || "CNY",
+      remark: normalized.remark || existing?.remark || "",
+      status: normalized.status || existing?.status || "active",
+    };
+
+    try {
+      const saved = await createSupplierRuntime(supplierPayload, actor);
+      imported += 1;
+      if (existing) {
+        updated += 1;
+      } else {
+        created += 1;
+        const savedCodeKey = optionalString(saved?.supplierCode || supplierPayload.supplierCode)?.toLowerCase();
+        const savedNameKey = optionalString(saved?.name || supplierPayload.name)?.toLowerCase();
+        if (savedCodeKey) supplierByCode.set(savedCodeKey, saved || supplierPayload);
+        if (savedNameKey) supplierByName.set(savedNameKey, saved || supplierPayload);
+      }
+    } catch (error) {
+      skipped += 1;
+      errors.push({ row: rowNumber, reason: error?.message || String(error) });
+    }
+  }
+
+  return {
+    source: "feishu",
+    sourceUrl: optionalString(payload.sourceUrl || payload.source_url) || null,
+    filePath: optionalString(payload.filePath || payload.file_path) || null,
+    total: rawRows.length,
+    imported,
+    created,
+    updated,
+    skipped,
+    errors: errors.slice(0, 30),
+  };
+}
+
+async function importFeishuSuppliersOnceRuntime(payload = {}, actor = {}) {
+  assertRoleIfLoggedIn(["admin", "buyer"]);
+  const filePath = requireString(payload.filePath || payload.file_path, "filePath");
+  const rawRows = readSupplierImportRowsFromSpreadsheet(filePath);
+  return importFeishuSupplierRowsOnce(rawRows, { ...payload, filePath }, actor);
+}
+
+async function importFeishuSuppliersFromExtensionRuntime(payload = {}, actor = {}) {
+  assertHostMode("Feishu extension ingest");
+  const rows = extractFeishuSupplierRowsFromExtensionPayload(payload);
+  return importFeishuSupplierRowsOnce(rows, {
+    ...payload,
+    sourceUrl: optionalString(payload.sourceUrl || payload.source_url) || FEISHU_SUPPLIER_BASE_URL,
+    rowNumberBase: 1,
+  }, actor && actor.role ? actor : { role: "admin", companyId: payload.companyId || payload.company_id || DEFAULT_COMPANY_ID });
+}
+
 async function listSkusRuntime(params = {}) {
   // client 模式：优先读本地 cache.db（秒返回），后台 fire-and-forget 增量同步；
   // 缓存未建（首次）先走服务器分页返回，后台再全量建 cache。host 模式直接走本地 SQL。
@@ -16262,10 +16816,44 @@ function getJushuitanActor(actorInput = {}) {
 }
 
 function ingestJushuitanExtensionBatch(payload = {}, actor = {}) {
-  assertHostMode("Jushuitan extension ingest");
-  const service = getJushuitanService();
+  assertHostMode("Extension ingest");
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  const feishuItems = items.filter(looksLikeFeishuSupplierSource);
+  const otherItems = items.filter((item) => !looksLikeFeishuSupplierSource(item));
   const nextActor = actor && actor.role ? actor : { role: "admin", companyId: payload.companyId || payload.company_id || DEFAULT_COMPANY_ID };
-  return service.ingestExtensionBatch(payload, nextActor);
+  const result = {
+    source: "extension",
+    feishu: null,
+    jushuitan: null,
+  };
+
+  if (feishuItems.length || looksLikeFeishuSupplierSource(payload)) {
+    result.feishu = importFeishuSuppliersFromExtensionRuntime({
+      ...payload,
+      items: feishuItems.length ? feishuItems : items,
+    }, nextActor);
+  }
+
+  if (otherItems.length || (!feishuItems.length && !looksLikeFeishuSupplierSource(payload))) {
+    const service = getJushuitanService();
+    result.jushuitan = service.ingestExtensionBatch({
+      ...payload,
+      items: otherItems.length ? otherItems : items,
+    }, nextActor);
+  }
+
+  return Promise.all([
+    Promise.resolve(result.feishu),
+    Promise.resolve(result.jushuitan),
+  ]).then(([feishu, jushuitan]) => ({
+    source: "extension",
+    feishu,
+    jushuitan,
+    imported: Number(feishu?.imported || 0),
+    created: Number(feishu?.created || 0),
+    updated: Number(feishu?.updated || 0),
+    skipped: Number(feishu?.skipped || 0),
+  }));
 }
 
 function getJushuitanStatusRuntime(params = {}) {
@@ -16436,6 +17024,7 @@ function registerErpIpcHandlers(ipcMain) {
   });
   ipcMain.handle("erp:supplier:list", wrapErpHandler("erp:supplier:list", (_event, params) => listSuppliersRuntime(params || {})));
   ipcMain.handle("erp:supplier:create", (_event, payload) => createSupplierRuntime(payload || {}, erpState.currentUser || {}));
+  ipcMain.handle("erp:supplier:import-feishu-once", (_event, payload) => importFeishuSuppliersOnceRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:sku:list", (_event, params) => listSkusRuntime(params || {}));
   ipcMain.handle("erp:sku:create", (_event, payload) => createSkuRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:sku:delete", (_event, payload) => deleteSkuRuntime(payload || {}, erpState.currentUser || {}));

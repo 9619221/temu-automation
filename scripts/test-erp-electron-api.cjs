@@ -1175,6 +1175,37 @@ async function main() {
     assert.equal(mappedSku.procurementSourceCount, 1);
     assert.equal(mappedSku.primary1688Source.externalOfferId, "1688-offer-ipc");
 
+    const createOptimizationRequest = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: opsCreateCookie,
+      },
+      body: JSON.stringify({
+        action: "create_pr",
+        accountId: account.id,
+        skuId: sku.id,
+        requestedQty: 2,
+        targetUnitCost: 7.5,
+        specText: "lower cost supplier",
+        reason: "optimization - cost target",
+      }),
+    });
+    assert.equal(createOptimizationRequest.statusCode, 200);
+    const createOptimizationRequestBody = JSON.parse(createOptimizationRequest.body).result;
+    const createdOptimizationRow = createOptimizationRequestBody.workbench.purchaseRequests.find(
+      (item) => item.id === createOptimizationRequestBody.result.id,
+    );
+    assert.ok(createdOptimizationRow);
+    assert.equal(createdOptimizationRow.reason, "optimization - cost target");
+    assert.equal(createdOptimizationRow.status, "submitted");
+    assert.ok(Number(createdOptimizationRow.mappingCount || 0) > 0);
+    assert.equal(
+      createOptimizationRequestBody.workbench.purchaseOrders.some((item) => item.prId === createdOptimizationRow.id),
+      false,
+    );
+
     const preview1688 = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
       method: "POST",
       headers: {
@@ -1567,45 +1598,72 @@ async function main() {
       },
     });
     assert.equal(warehouseAfterRegister.statusCode, 200);
-    const warehouseAfterBatches = JSON.parse(warehouseAfterRegister.body).workbench;
+    const warehouseAfterArrival = JSON.parse(warehouseAfterRegister.body).workbench;
+    assert.equal(
+      warehouseAfterArrival.inboundReceipts.find((item) => item.id === "inbound_wh_ipc").status,
+      "arrived",
+    );
+    assert.equal(warehouseAfterArrival.inventoryBatches.length, 0);
+
+    const confirmCount = await requestUrl(`${lanStatus.localUrl}/api/warehouse/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Cookie: warehouseCookie,
+      },
+      body: new URLSearchParams({
+        action: "confirm_count",
+        receiptId: "inbound_wh_ipc",
+      }).toString(),
+    });
+    assert.equal(confirmCount.statusCode, 302);
+
+    const warehouseAfterCount = await requestUrl(`${lanStatus.localUrl}/api/warehouse/workbench`, {
+      headers: {
+        Cookie: warehouseCookie,
+      },
+    });
+    assert.equal(warehouseAfterCount.statusCode, 200);
+    const warehouseAfterCountBody = JSON.parse(warehouseAfterCount.body).workbench;
+    assert.equal(
+      warehouseAfterCountBody.inboundReceipts.find((item) => item.id === "inbound_wh_ipc").status,
+      "counted",
+    );
+    assert.equal(warehouseAfterCountBody.inventoryBatches.length, 0);
+
+    const confirmInbound = await requestUrl(`${lanStatus.localUrl}/api/warehouse/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Cookie: warehouseCookie,
+      },
+      body: new URLSearchParams({
+        action: "confirm_inbound",
+        receiptId: "inbound_wh_ipc",
+      }).toString(),
+    });
+    assert.equal(confirmInbound.statusCode, 302);
+
+    const warehouseAfterInbound = await requestUrl(`${lanStatus.localUrl}/api/warehouse/workbench`, {
+      headers: {
+        Cookie: warehouseCookie,
+      },
+    });
+    assert.equal(warehouseAfterInbound.statusCode, 200);
+    const warehouseAfterBatches = JSON.parse(warehouseAfterInbound.body).workbench;
     assert.equal(
       warehouseAfterBatches.inboundReceipts.find((item) => item.id === "inbound_wh_ipc").status,
       "inbounded_pending_qc",
     );
-    assert.equal(warehouseAfterBatches.inventoryBatches.length, 0);
+    assert.equal(warehouseAfterBatches.inventoryBatches.length, 1);
+    const autoBatch = warehouseAfterBatches.inventoryBatches.find((item) => item.inboundReceiptId === "inbound_wh_ipc");
+    assert.ok(autoBatch?.id);
+    const qcBatchId = autoBatch.id;
+    assert.equal(autoBatch.receivedQty, 40);
 
-    const outboundSeedDb = openErpDatabase({ userDataDir: tempUserData });
-    let qcBatchId;
-    try {
-      const outboundSeedServices = createErpServices(outboundSeedDb);
-      const seededBatch = outboundSeedServices.inventory.createBatchFromInbound({
-        id: "batch_wh_ipc",
-        accountId: account.id,
-        batchCode: "BATCH-WH-001",
-        skuId: sku.id,
-        poId: "po_wh_ipc",
-        inboundReceiptId: "inbound_wh_ipc",
-        receivedQty: 40,
-        unitLandedCost: 10.5,
-        locationCode: "A-IPC",
-        actor: { id: warehouseUser.id, role: warehouseUser.role },
-      });
-      outboundSeedDb.prepare("UPDATE erp_inbound_receipt_lines SET batch_id = ? WHERE id = ?").run(seededBatch.id, "inbound_line_wh_ipc");
-      qcBatchId = seededBatch.id;
-    } finally {
-      outboundSeedDb.close();
-    }
-
-    const warehouseAfterSeededBatch = await requestUrl(`${lanStatus.localUrl}/api/warehouse/workbench`, {
-      headers: { Cookie: warehouseCookie },
-    });
-    assert.equal(warehouseAfterSeededBatch.statusCode, 200);
-    const warehouseSeededBatchBody = JSON.parse(warehouseAfterSeededBatch.body).workbench;
-    assert.equal(warehouseSeededBatchBody.inventoryBatches.length, 1);
-    assert.equal(warehouseSeededBatchBody.inventoryBatches[0].receivedQty, 40);
     // 已去掉入库 QC 闸门：入库后数量直接进可用桶、qc_status=passed。
-    assert.equal(warehouseSeededBatchBody.inventoryBatches[0].blockedQty, 0);
-    assert.equal(warehouseSeededBatchBody.inventoryBatches[0].availableQty, 40);
+    assert.equal(autoBatch.blockedQty, 0);
+    assert.equal(autoBatch.availableQty, 40);
 
     const purchaseAfterInbound = await requestUrl(`${lanStatus.localUrl}/api/purchase/workbench`, {
       headers: { Cookie: cookie },
@@ -1972,6 +2030,24 @@ async function main() {
     } finally {
       multiBatchCheckDb.close();
     }
+
+    const partialRegisterArrival = await requestUrl(`${lanStatus.localUrl}/api/warehouse/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: warehouseCookie,
+      },
+      body: JSON.stringify({
+        action: "register_arrival",
+        receiptId: "inbound_partial_ipc",
+      }),
+    });
+    assert.equal(partialRegisterArrival.statusCode, 200);
+    assert.equal(
+      JSON.parse(partialRegisterArrival.body).result.workbench.inboundReceipts.find((item) => item.id === "inbound_partial_ipc").status,
+      "arrived",
+    );
 
     const partialInbound = await requestUrl(`${lanStatus.localUrl}/api/warehouse/action`, {
       method: "POST",

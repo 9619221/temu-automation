@@ -454,16 +454,16 @@ function emptyReport(): OperatorReport {
 
 export const DECISION_COLOR: Record<Decision, string> = {
   加仓: "#00b96b",
-  优化: "#1677ff",
+  优化: "#1a73e8",
   维持: "#8c8c8c",
   减仓: "#faad14",
-  清退: "#ff4d4f",
+  清退: "#ea4335",
   观察: "#bfbfbf",
 };
 
 export const BOTTLENECK_COLOR: Record<Bottleneck, string> = {
   "曝光不足": "#faad14",
-  "点击率低": "#fa8c16",
+  "点击率低": "#fbbc04",
   "加购率低": "#13c2c2",
   "支付转化低": "#eb2f96",
   "全链路健康": "#00b96b",

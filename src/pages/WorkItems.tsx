@@ -1,28 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  Alert,
-  Button,
-  Col,
-  Row,
-  Select,
-  Space,
-  Table,
-  Tag,
-  Tooltip,
-  Typography,
-  message,
-} from "antd";
+import { Alert, Button, Empty, Select, Space, Table, Tag, Tooltip, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
-  BellOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
+  ClockCircleOutlined,
   LinkOutlined,
   PlayCircleOutlined,
   ReloadOutlined,
   SyncOutlined,
 } from "@ant-design/icons";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
 import StatCard from "../components/StatCard";
 import { useErpAuth } from "../contexts/ErpAuthContext";
@@ -54,6 +42,9 @@ const STATUS_OPTIONS = [
   { label: "已关闭", value: "dismissed" },
   { label: "全部", value: "__all" },
 ];
+
+const ROLE_OPTION_VALUES = new Set(ROLE_OPTIONS.map((option) => option.value));
+const STATUS_OPTION_VALUES = new Set(STATUS_OPTIONS.map((option) => option.value));
 
 const PRIORITY_COLOR: Record<string, string> = {
   P0: "red",
@@ -182,11 +173,42 @@ function relatedPath(type?: string) {
   return "/work-items";
 }
 
+function getOptionLabel(options: Array<{ label: string; value: string }>, value: string) {
+  return options.find((option) => option.value === value)?.label || value;
+}
+
+function getInitialOwnerRole(param: string | null, fallbackRole: string, canViewAll: boolean) {
+  if (canViewAll && param && ROLE_OPTION_VALUES.has(param)) return param;
+  return fallbackRole;
+}
+
+function getInitialStatusFilter(param: string | null) {
+  if (param && STATUS_OPTION_VALUES.has(param)) return param;
+  return "__active";
+}
+
+function getQueueTone(activeCount: number, p0Count: number, waitingCount: number) {
+  if (p0Count > 0) return "danger";
+  if (waitingCount > 0) return "warning";
+  if (activeCount > 0) return "active";
+  return "success";
+}
+
+function getQueueLabel(tone: string) {
+  if (tone === "danger") return "有紧急事项";
+  if (tone === "warning") return "等待协同";
+  if (tone === "active") return "队列运行中";
+  return "队列清爽";
+}
+
 export default function WorkItems() {
   const auth = useErpAuth();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const defaultOwnerRole = getDefaultWorkItemOwnerRole(auth.currentUser?.role);
   const canViewAll = canViewAllWorkItems(auth.currentUser?.role);
+  const ownerParam = searchParams.get("owner");
+  const statusParam = searchParams.get("status");
   const cachedData = useMemo(
     () => readPageCache<WorkItemsCache>(WORK_ITEMS_CACHE_KEY, {}),
     [],
@@ -195,15 +217,48 @@ export default function WorkItems() {
   const [stats, setStats] = useState<WorkItemStats | null>(() => cachedData.stats || null);
   const [lanStatus, setLanStatus] = useState<LanStatus | null>(() => cachedData.lanStatus || null);
   const [loadedOnce, setLoadedOnce] = useState(() => hasPageCache(cachedData));
-  const [ownerRole, setOwnerRole] = useState(defaultOwnerRole);
-  const [statusFilter, setStatusFilter] = useState("__active");
+  const [ownerRole, setOwnerRole] = useState(() => getInitialOwnerRole(ownerParam, defaultOwnerRole, canViewAll));
+  const [statusFilter, setStatusFilter] = useState(() => getInitialStatusFilter(statusParam));
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
 
   useEffect(() => {
-    setOwnerRole(defaultOwnerRole);
-  }, [defaultOwnerRole]);
+    const nextOwnerRole = getInitialOwnerRole(ownerParam, defaultOwnerRole, canViewAll);
+    setOwnerRole((prev) => (prev === nextOwnerRole ? prev : nextOwnerRole));
+  }, [canViewAll, defaultOwnerRole, ownerParam]);
+
+  useEffect(() => {
+    const nextStatusFilter = getInitialStatusFilter(statusParam);
+    setStatusFilter((prev) => (prev === nextStatusFilter ? prev : nextStatusFilter));
+  }, [statusParam]);
+
+  const syncFilterSearch = useCallback((nextOwnerRole: string, nextStatusFilter: string) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (nextOwnerRole === defaultOwnerRole) {
+        next.delete("owner");
+      } else {
+        next.set("owner", nextOwnerRole);
+      }
+      if (nextStatusFilter === "__active") {
+        next.delete("status");
+      } else {
+        next.set("status", nextStatusFilter);
+      }
+      return next;
+    }, { replace: true });
+  }, [defaultOwnerRole, setSearchParams]);
+
+  const handleOwnerRoleChange = (value: string) => {
+    setOwnerRole(value);
+    syncFilterSearch(value, statusFilter);
+  };
+
+  const handleStatusFilterChange = (value: string) => {
+    setStatusFilter(value);
+    syncFilterSearch(ownerRole, value);
+  };
 
   const loadItems = useCallback(async () => {
     if (!erp) return;
@@ -293,14 +348,28 @@ export default function WorkItems() {
     window.open(`${baseUrl}${path}`, "_blank", "noopener,noreferrer");
   }, [lanStatus, navigate]);
 
-  const activeCount = stats?.active || 0;
-  const p0Count = stats?.byPriority?.P0 || 0;
+  const totalCount = stats?.total ?? items.length;
+  const activeCount = stats?.active ?? items.filter((item) => !["done", "dismissed"].includes(item.status)).length;
+  const p0Count = stats?.byPriority?.P0 ?? items.filter((item) => item.priority === "P0").length;
   const waitingCount = useMemo(() => (
     Object.entries(stats?.byStatus || {})
       .filter(([key]) => key.startsWith("waiting_"))
       .reduce((sum, [, count]) => sum + Number(count || 0), 0)
   ), [stats]);
-  const tableLoading = (loading || generating) && !loadedOnce && items.length > 0;
+  const doneCount = stats?.byStatus?.done ?? items.filter((item) => item.status === "done").length;
+  const completionRate = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0;
+  const queueTone = getQueueTone(activeCount, p0Count, waitingCount);
+  const queueLabel = getQueueLabel(queueTone);
+  const tableLoading = (loading || generating) && (!loadedOnce || items.length > 0);
+  const ownerFilterLabel = getOptionLabel(ROLE_OPTIONS, ownerRole);
+  const statusFilterLabel = getOptionLabel(STATUS_OPTIONS, statusFilter);
+  const generatedAtLabel = cachedData.generatedAt ? formatTime(cachedData.generatedAt) : "等待生成";
+  const roleQueues = useMemo(() => (
+    Object.entries(stats?.byOwnerRole || {})
+      .filter(([, count]) => Number(count || 0) > 0)
+      .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))
+      .slice(0, 5)
+  ), [stats]);
 
   const columns = useMemo<ColumnsType<WorkItemRow>>(() => [
     {
@@ -308,7 +377,11 @@ export default function WorkItems() {
       dataIndex: "priority",
       key: "priority",
       width: 86,
-      render: (value) => <Tag color={PRIORITY_COLOR[value] || "default"}>{priorityLabel(value)}</Tag>,
+      render: (value) => (
+        <Tag color={PRIORITY_COLOR[value] || "default"} className={`work-item-priority work-item-priority--${String(value || "P3").toLowerCase()}`}>
+          {priorityLabel(value)}
+        </Tag>
+      ),
     },
     {
       title: "事项",
@@ -316,12 +389,12 @@ export default function WorkItems() {
       key: "title",
       ellipsis: true,
       render: (_value, row) => (
-        <Space direction="vertical" size={2}>
-          <Text strong>{row.title}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>
+        <div className="work-item-title">
+          <Text strong className="work-item-title__main">{row.title || "未命名事项"}</Text>
+          <Text type="secondary" className="work-item-title__sub">
             {row.internalSkuCode || row.skuId || "-"} {row.productName ? `· ${row.productName}` : ""}
           </Text>
-        </Space>
+        </div>
       ),
     },
     {
@@ -330,9 +403,9 @@ export default function WorkItems() {
       key: "ownerRole",
       width: 105,
       render: (value, row) => (
-        <Space direction="vertical" size={2}>
+        <Space direction="vertical" size={2} className="work-item-owner">
           <Tag>{roleLabel(value)}</Tag>
-          {row.ownerUserName ? <Text type="secondary" style={{ fontSize: 12 }}>{row.ownerUserName}</Text> : null}
+          {row.ownerUserName ? <Text type="secondary" className="work-item-muted">{row.ownerUserName}</Text> : null}
         </Space>
       ),
     },
@@ -349,9 +422,9 @@ export default function WorkItems() {
       key: "evidence",
       ellipsis: true,
       render: (value: string[] = []) => (
-        <Space direction="vertical" size={1}>
+        <Space direction="vertical" size={1} className="work-item-evidence">
           {value.slice(0, 3).map((item) => (
-            <Text type="secondary" style={{ fontSize: 12 }} key={item}>{item}</Text>
+            <Text type="secondary" className="work-item-muted" key={item}>{item}</Text>
           ))}
           {value.length === 0 ? <Text type="secondary">-</Text> : null}
         </Space>
@@ -362,9 +435,9 @@ export default function WorkItems() {
       key: "related",
       width: 170,
       render: (_value, row) => (
-        <Space direction="vertical" size={2}>
+        <Space direction="vertical" size={2} className="work-item-related">
           <Text>{relatedDocLabel(row.relatedDocType)}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{row.relatedDocId || "-"}</Text>
+          <Text type="secondary" className="work-item-muted">{row.relatedDocId || "-"}</Text>
         </Space>
       ),
     },
@@ -383,11 +456,19 @@ export default function WorkItems() {
       render: (_value, row) => (
         <Space size={6} wrap>
           <Tooltip title="打开对应工作台">
-            <Button size="small" icon={<LinkOutlined />} onClick={() => openRelated(row)} />
+            <Button
+              size="small"
+              aria-label="打开对应工作台"
+              className="work-item-action-button"
+              icon={<LinkOutlined />}
+              onClick={() => openRelated(row)}
+            />
           </Tooltip>
           {row.status === "new" ? (
             <Button
               size="small"
+              aria-label="开始处理事项"
+              className="work-item-action-button"
               icon={<PlayCircleOutlined />}
               loading={updatingId === row.id}
               onClick={() => handleUpdateStatus(row, "in_progress")}
@@ -397,6 +478,8 @@ export default function WorkItems() {
             <Button
               size="small"
               type="primary"
+              aria-label="标记事项完成"
+              className="work-item-action-button"
               icon={<CheckCircleOutlined />}
               loading={updatingId === row.id}
               onClick={() => handleUpdateStatus(row, "done")}
@@ -406,6 +489,8 @@ export default function WorkItems() {
             <Button
               size="small"
               danger
+              aria-label="关闭事项"
+              className="work-item-action-button"
               icon={<CloseCircleOutlined />}
               loading={updatingId === row.id}
               onClick={() => handleUpdateStatus(row, "dismissed")}
@@ -418,7 +503,7 @@ export default function WorkItems() {
 
   if (!erp) {
     return (
-      <div className="dashboard-shell">
+      <div className="dashboard-shell work-items-shell">
         <PageHeader compact eyebrow="系统" title="事项中心" subtitle="服务未就绪，请重启软件" />
         <Alert type="error" showIcon message="当前环境缺少本地服务接口" />
       </div>
@@ -426,7 +511,7 @@ export default function WorkItems() {
   }
 
   return (
-    <div className="dashboard-shell">
+    <div className="dashboard-shell work-items-shell">
       <PageHeader
         compact
         eyebrow="系统"
@@ -446,19 +531,56 @@ export default function WorkItems() {
         ]}
       />
 
-      <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
-        <Col xs={24} md={8}>
-          <StatCard title="未完成事项" value={activeCount} color="blue" icon={<BellOutlined />} />
-        </Col>
-        <Col xs={24} md={8}>
-          <StatCard title="紧急风险" value={p0Count} color={p0Count > 0 ? "danger" : "success"} icon={<CloseCircleOutlined />} />
-        </Col>
-        <Col xs={24} md={8}>
-          <StatCard title="等待状态" value={waitingCount} color="purple" icon={<PlayCircleOutlined />} />
-        </Col>
-      </Row>
+      <section className="work-items-command-grid" aria-label="事项队列概览">
+        <div className={`work-items-command-panel is-${queueTone}`}>
+          <div className="work-items-command-panel__head">
+            <div>
+              <div className="work-items-command-panel__eyebrow">Work Queue</div>
+              <div className="work-items-command-panel__title">今日事项队列</div>
+            </div>
+            <span className={`work-items-command-status is-${queueTone}`}>{queueLabel}</span>
+          </div>
+          <div className="work-items-command-panel__value">{activeCount}</div>
+          <div className="work-items-command-panel__meta">
+            <span>当前筛选：{ownerFilterLabel} · {statusFilterLabel}</span>
+            <span>上次生成：{generatedAtLabel}</span>
+          </div>
+          <div className="work-items-command-panel__queues">
+            {roleQueues.length > 0 ? roleQueues.map(([role, count]) => (
+              <span className="work-items-role-chip" key={role}>{roleLabel(role)} {count}</span>
+            )) : (
+              <span className="work-items-role-chip is-empty">暂无角色积压</span>
+            )}
+          </div>
+        </div>
+        <StatCard
+          title="紧急风险"
+          value={p0Count}
+          color={p0Count > 0 ? "danger" : "success"}
+          icon={<CloseCircleOutlined />}
+          trend={p0Count > 0 ? "优先处理 P0" : "没有 P0 阻塞"}
+          className="work-items-metric-card"
+        />
+        <StatCard
+          title="等待协同"
+          value={waitingCount}
+          color="warning"
+          icon={<ClockCircleOutlined />}
+          trend={waitingCount > 0 ? "需要跨角色推进" : "暂无等待队列"}
+          className="work-items-metric-card"
+        />
+        <StatCard
+          title="完成率"
+          value={completionRate}
+          suffix="%"
+          color="blue"
+          icon={<CheckCircleOutlined />}
+          trend={`${doneCount}/${totalCount || 0} 已完成`}
+          className="work-items-metric-card"
+        />
+      </section>
 
-      <div className="app-panel">
+      <div className="app-panel work-items-filter-panel">
         <div className="app-panel__title">
           <div>
             <div className="app-panel__title-main">当前事项</div>
@@ -466,28 +588,47 @@ export default function WorkItems() {
           </div>
           <Space wrap>
             <Select
+              aria-label="按负责人角色筛选"
               value={ownerRole}
               options={ROLE_OPTIONS}
-              onChange={setOwnerRole}
+              onChange={handleOwnerRoleChange}
               disabled={!canViewAll}
               style={{ width: 132 }}
             />
             <Select
+              aria-label="按事项状态筛选"
               value={statusFilter}
               options={STATUS_OPTIONS}
-              onChange={setStatusFilter}
+              onChange={handleStatusFilterChange}
               style={{ width: 132 }}
             />
           </Space>
         </div>
+      </div>
+
+      <div className="app-panel work-items-table-panel">
         <Table
           size="middle"
           rowKey="id"
           loading={tableLoading}
           columns={columns}
           dataSource={items}
+          className="work-items-table"
+          rowClassName={(row) => `work-items-table-row work-items-table-row--${row.priority || "P3"} work-items-table-row--${row.status}`}
           scroll={{ x: 1180 }}
-          pagination={{ pageSize: 12, showSizeChanger: false }}
+          locale={{
+            emptyText: (
+              <Empty
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                description="暂无事项，点击生成事项后显示"
+              />
+            ),
+          }}
+          pagination={{
+            pageSize: 12,
+            showSizeChanger: false,
+            showTotal: (total, range) => `${range[0]}-${range[1]} / ${total} 条`,
+          }}
         />
       </div>
     </div>

@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button,
-  Card,
   Checkbox,
   Collapse,
   Empty,
@@ -219,6 +218,8 @@ export default function TemuRobots() {
   ), [selectedKeys, taskStates]);
   const progressPercent = selectedTotal > 0 ? Math.round((completedCount / selectedTotal) * 100) : 0;
   const failureCount = selectedKeys.filter((key) => taskStates[key].status === "error" || taskStates[key].status === "unavailable").length;
+  const successCount = selectedKeys.filter((key) => taskStates[key].status === "success").length;
+  const runningCount = selectedKeys.filter((key) => taskStates[key].status === "running").length;
 
   const handleToggleTask = (key: RobotTaskKey, checked: boolean) => {
     setSelectedKeys((prev) => (
@@ -370,12 +371,24 @@ export default function TemuRobots() {
   };
 
   return (
-    <div className="dashboard-shell">
+    <div className="dashboard-shell temu-robots-shell">
       <PageHeader
         compact
         eyebrow="数据工作台"
         title="TEMU 机器人 · 销量数据(robot1)"
         subtitle="手动触发现有 TEMU 采集 IPC，展示进度与结果；采集完成后自动回灌 ERP，不做定时调度。"
+        meta={[activeAccountId ? "已选择账号" : "等待账号", collecting ? "采集中" : "手动模式"]}
+        actions={(
+          <Button
+            type="primary"
+            icon={<SyncOutlined />}
+            loading={collecting}
+            disabled={collecting || selectedTotal === 0 || noActiveAccount}
+            onClick={handleStart}
+          >
+            开始采集
+          </Button>
+        )}
       />
 
       {noActiveAccount ? (
@@ -388,72 +401,106 @@ export default function TemuRobots() {
         />
       ) : null}
 
-      <Card
-        title={(
-          <Space size={8}>
-            <DatabaseOutlined />
-            <span>robot1 采集面板</span>
-          </Space>
-        )}
-        extra={(
-          <Button
-            type="primary"
-            icon={<SyncOutlined />}
-            loading={collecting}
-            disabled={collecting || selectedTotal === 0 || noActiveAccount}
-            onClick={handleStart}
-          >
-            开始采集
-          </Button>
-        )}
-      >
-        <Space size={[16, 8]} wrap style={{ marginBottom: 16 }}>
-          {ROBOT_TASKS.map((task) => (
-            <Checkbox
-              key={task.key}
-              checked={selectedKeys.includes(task.key)}
-              disabled={collecting}
-              onChange={(event) => handleToggleTask(task.key, event.target.checked)}
-            >
-              {task.label}
-            </Checkbox>
-          ))}
-        </Space>
+      <div className="robot-dashboard-grid">
+        <section className="app-panel robot-control-panel">
+          <div className="app-panel__title">
+            <div>
+              <div className="app-panel__title-main">
+                <Space size={8}>
+                  <DatabaseOutlined />
+                  <span>采集面板</span>
+                </Space>
+              </div>
+              <div className="app-panel__title-sub">选择要触发的采集模块，系统会按顺序执行并写回本地数据。</div>
+            </div>
+          </div>
 
-        <div style={{ marginBottom: 16 }}>
-          <Space style={{ width: "100%", justifyContent: "space-between", marginBottom: 8 }} wrap>
-            <Text strong>整体进度</Text>
-            <Text type="secondary">
-              已完成 {completedCount}/{selectedTotal}
-            </Text>
-          </Space>
-          <Progress
-            percent={progressPercent}
-            status={collecting ? "active" : failureCount > 0 ? "exception" : progressPercent === 100 && selectedTotal > 0 ? "success" : "normal"}
-            showInfo={false}
-          />
+          <div className="robot-task-selector">
+            {ROBOT_TASKS.map((task) => {
+              const selected = selectedKeys.includes(task.key);
+              return (
+                <div
+                  key={task.key}
+                  role="button"
+                  tabIndex={collecting ? -1 : 0}
+                  className={`robot-task-toggle${selected ? " is-selected" : ""}`}
+                  aria-disabled={collecting}
+                  onClick={() => { if (!collecting) handleToggleTask(task.key, !selected); }}
+                  onKeyDown={(event) => {
+                    if (collecting) return;
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      handleToggleTask(task.key, !selected);
+                    }
+                  }}
+                >
+                  <Checkbox checked={selected} disabled={collecting} onClick={(event) => event.stopPropagation()} onChange={(event) => handleToggleTask(task.key, event.target.checked)} />
+                  <span className="robot-task-toggle__label">{task.label}</span>
+                  <span className="robot-task-toggle__meta">{task.storeKeys[0]}</span>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="robot-progress-card">
+            <div className="robot-progress-card__head">
+              <Text strong>整体进度</Text>
+              <Text type="secondary">已完成 {completedCount}/{selectedTotal}</Text>
+            </div>
+            <Progress
+              percent={progressPercent}
+              status={collecting ? "active" : failureCount > 0 ? "exception" : progressPercent === 100 && selectedTotal > 0 ? "success" : "normal"}
+              strokeColor={failureCount > 0 ? "#ea4335" : "#1a73e8"}
+              showInfo={false}
+            />
+          </div>
+
+          <div className="robot-metric-grid">
+            <div className="robot-metric">
+              <span>已选</span>
+              <strong>{selectedTotal}</strong>
+            </div>
+            <div className="robot-metric is-running">
+              <span>运行中</span>
+              <strong>{runningCount}</strong>
+            </div>
+            <div className="robot-metric is-success">
+              <span>成功</span>
+              <strong>{successCount}</strong>
+            </div>
+            <div className="robot-metric is-danger">
+              <span>异常</span>
+              <strong>{failureCount}</strong>
+            </div>
+          </div>
+        </section>
+
+        <section className="app-panel robot-log-panel">
+          <div className="app-panel__title">
+            <div>
+              <div className="app-panel__title-main">执行日志</div>
+              <div className="app-panel__title-sub">展示本次采集的关键事件与错误信息。</div>
+            </div>
+          </div>
+          <div className="robot-log-stream">
+            {logs.length > 0 ? logs.map((line, index) => (
+              <div key={`${line}-${index}`} className="robot-log-line">{line}</div>
+            )) : (
+              <div className="robot-log-empty">等待开始采集。</div>
+            )}
+          </div>
+        </section>
+      </div>
+
+      <section className="app-panel robot-results-panel">
+        <div className="app-panel__title">
+          <div>
+            <div className="app-panel__title-main">采集结果</div>
+            <div className="app-panel__title-sub">每个模块完成后可展开查看前 20 行数据预览。</div>
+          </div>
         </div>
 
-        <div
-          style={{
-            marginBottom: 18,
-            border: "1px solid #f0f0f0",
-            borderRadius: 8,
-            background: "#111827",
-            color: "#e5e7eb",
-            minHeight: 120,
-            maxHeight: 220,
-            overflow: "auto",
-            padding: 12,
-            fontFamily: "Consolas, monospace",
-            fontSize: 12,
-            whiteSpace: "pre-wrap",
-          }}
-        >
-          {logs.length > 0 ? logs.join("\n") : "等待开始采集。"}
-        </div>
-
-        <div style={{ display: "grid", gap: 12 }}>
+        <div className="robot-result-list">
           {ROBOT_TASKS.map((task) => {
             const state = taskStates[task.key];
             const statusMeta = STATUS_META[state.status];
@@ -463,22 +510,9 @@ export default function TemuRobots() {
             return (
               <div
                 key={task.key}
-                style={{
-                  border: "1px solid #f0f0f0",
-                  borderRadius: 8,
-                  padding: 12,
-                  background: state.status === "running" ? "#fff7e6" : "#fff",
-                }}
+                className={`robot-task-row is-${state.status}`}
               >
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    gap: 12,
-                    alignItems: "center",
-                    flexWrap: "wrap",
-                  }}
-                >
+                <div className="robot-task-row__head">
                   <Space size={10}>
                     <Text strong>{task.label}</Text>
                     <Text type="secondary" style={{ fontSize: 12 }}>{task.storeKeys[0]}</Text>
@@ -527,7 +561,7 @@ export default function TemuRobots() {
             );
           })}
         </div>
-      </Card>
+      </section>
     </div>
   );
 }

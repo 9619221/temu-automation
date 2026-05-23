@@ -632,6 +632,159 @@ function parseProductFlowGoods(db, ctx, evt, body) {
   }
 }
 
+function flowValue(row, keys) {
+  return firstDeepDefined(row, keys, 2);
+}
+
+function flowInteger(row, keys) {
+  return toNullableInteger(flowValue(row, keys));
+}
+
+function flowNumber(row, keys) {
+  return toNullableNumber(flowValue(row, keys));
+}
+
+function hasFlowMetrics(row) {
+  if (!row || typeof row !== "object") return false;
+  return flowValue(row, [
+    "exposeNum", "exposureNum", "impressionNum", "showNum",
+    "clickNum", "goodsDetailVisitNum", "goodsDetailVisitorNum",
+    "payGoodsNum", "payOrderNum", "buyerNum",
+  ]) != null;
+}
+
+function flowProductMeta(body) {
+  const request = body?.__request || {};
+  const result = body?.result || body?.data || body || {};
+  return {
+    product_id: toNullableString(firstDeepDefined(request, ["productSpuId", "productId", "spuId"], 3)
+      ?? firstDeepDefined(result, ["productSpuId", "productId", "spuId"], 3)),
+    goods_id: toNullableString(firstDeepDefined(request, ["goodsId", "goods_id"], 3)
+      ?? firstDeepDefined(result, ["goodsId", "goods_id"], 3)),
+  };
+}
+
+function collectProductFlowTrendRows(body) {
+  const result = body?.result || body?.data || body;
+  const rows = [];
+  const seen = new Set();
+  const stack = [result];
+  let steps = 0;
+  while (stack.length && steps < 12000 && rows.length < 500) {
+    steps++;
+    const node = stack.shift();
+    if (!node || typeof node !== "object" || seen.has(node)) continue;
+    seen.add(node);
+    if (Array.isArray(node)) {
+      const metricRows = node.filter((item) => item && typeof item === "object" && hasFlowMetrics(item));
+      if (metricRows.length > 0) rows.push(...metricRows);
+      continue;
+    }
+    for (const key of [
+      "trendList", "trendData", "dailyList", "dailyTrend", "dataList",
+      "list", "items", "records", "rows", "chartData", "dateList",
+    ]) {
+      const value = node[key];
+      if (Array.isArray(value)) stack.push(value);
+    }
+    for (const value of Object.values(node)) {
+      if (value && typeof value === "object" && !Array.isArray(value)) stack.push(value);
+    }
+  }
+  if (rows.length === 0 && hasFlowMetrics(result)) rows.push(result);
+  return rows;
+}
+
+function parseProductFlowTrend(db, ctx, evt, body) {
+  const rows = collectProductFlowTrendRows(body);
+  if (!rows.length) return;
+  const meta = flowProductMeta(body);
+  const root = body?.result || body?.data || body || {};
+  const fallbackDate = firstDeepDefined(root, ["statDate", "dataDate", "date", "dt", "updateAt"], 2);
+  const sources_json = JSON.stringify({ [evt.url_path]: evt.id });
+  const upsert = db.prepare(`
+    INSERT INTO temu_product_flow_trend (
+      id, tenant_id, mall_id, site, product_id, goods_id, stat_date,
+      expose_num, click_num, detail_visit_num, detail_visitor_num,
+      add_to_cart_user_num, collect_user_num, pay_goods_num, pay_order_num, buyer_num,
+      expose_pay_conversion_rate, expose_click_conversion_rate, click_pay_conversion_rate,
+      search_expose_num, search_click_num, search_pay_goods_num, search_pay_order_num,
+      recommend_expose_num, recommend_click_num, recommend_pay_goods_num, recommend_pay_order_num,
+      source_event_id, sources_json
+    ) VALUES (
+      @id, @tenant_id, @mall_id, @site, @product_id, @goods_id, @stat_date,
+      @expose_num, @click_num, @detail_visit_num, @detail_visitor_num,
+      @add_to_cart_user_num, @collect_user_num, @pay_goods_num, @pay_order_num, @buyer_num,
+      @expose_pay_conversion_rate, @expose_click_conversion_rate, @click_pay_conversion_rate,
+      @search_expose_num, @search_click_num, @search_pay_goods_num, @search_pay_order_num,
+      @recommend_expose_num, @recommend_click_num, @recommend_pay_goods_num, @recommend_pay_order_num,
+      @source_event_id, @sources_json
+    )
+    ON CONFLICT(tenant_id, mall_id, product_id, goods_id, stat_date, site) DO UPDATE SET
+      expose_num                    = COALESCE(excluded.expose_num, expose_num),
+      click_num                     = COALESCE(excluded.click_num, click_num),
+      detail_visit_num              = COALESCE(excluded.detail_visit_num, detail_visit_num),
+      detail_visitor_num            = COALESCE(excluded.detail_visitor_num, detail_visitor_num),
+      add_to_cart_user_num          = COALESCE(excluded.add_to_cart_user_num, add_to_cart_user_num),
+      collect_user_num              = COALESCE(excluded.collect_user_num, collect_user_num),
+      pay_goods_num                 = COALESCE(excluded.pay_goods_num, pay_goods_num),
+      pay_order_num                 = COALESCE(excluded.pay_order_num, pay_order_num),
+      buyer_num                     = COALESCE(excluded.buyer_num, buyer_num),
+      expose_pay_conversion_rate    = COALESCE(excluded.expose_pay_conversion_rate, expose_pay_conversion_rate),
+      expose_click_conversion_rate  = COALESCE(excluded.expose_click_conversion_rate, expose_click_conversion_rate),
+      click_pay_conversion_rate     = COALESCE(excluded.click_pay_conversion_rate, click_pay_conversion_rate),
+      search_expose_num             = COALESCE(excluded.search_expose_num, search_expose_num),
+      search_click_num              = COALESCE(excluded.search_click_num, search_click_num),
+      search_pay_goods_num          = COALESCE(excluded.search_pay_goods_num, search_pay_goods_num),
+      search_pay_order_num          = COALESCE(excluded.search_pay_order_num, search_pay_order_num),
+      recommend_expose_num          = COALESCE(excluded.recommend_expose_num, recommend_expose_num),
+      recommend_click_num           = COALESCE(excluded.recommend_click_num, recommend_click_num),
+      recommend_pay_goods_num       = COALESCE(excluded.recommend_pay_goods_num, recommend_pay_goods_num),
+      recommend_pay_order_num       = COALESCE(excluded.recommend_pay_order_num, recommend_pay_order_num),
+      source_event_id               = COALESCE(excluded.source_event_id, source_event_id),
+      sources_json                  = json_patch(COALESCE(sources_json, '{}'), COALESCE(excluded.sources_json, '{}')),
+      last_updated_at               = datetime('now')
+  `);
+
+  for (const row of rows) {
+    const product_id = toNullableString(flowValue(row, ["productSpuId", "productId", "spuId"]) ?? meta.product_id) || "";
+    const goods_id = toNullableString(flowValue(row, ["goodsId", "goods_id"]) ?? meta.goods_id) || "";
+    if (!product_id && !goods_id) continue;
+    const stat_date = normalizeStatDate(flowValue(row, ["statDate", "dataDate", "date", "dt", "time", "dateTime"]) ?? fallbackDate, evt);
+    upsert.run({
+      id: crypto.randomUUID(),
+      tenant_id: ctx.tenant_id,
+      mall_id: eventMallId(ctx, evt),
+      site: evt.site || "",
+      product_id,
+      goods_id,
+      stat_date,
+      expose_num: flowInteger(row, ["exposeNum", "exposureNum", "impressionNum", "showNum"]),
+      click_num: flowInteger(row, ["clickNum"]),
+      detail_visit_num: flowInteger(row, ["goodsDetailVisitNum", "detailVisitNum", "detailVisits"]),
+      detail_visitor_num: flowInteger(row, ["goodsDetailVisitorNum", "detailVisitorNum", "detailVisitors"]),
+      add_to_cart_user_num: flowInteger(row, ["addToCartUserNum", "cartUserNum"]),
+      collect_user_num: flowInteger(row, ["collectUserNum", "favoriteUserNum"]),
+      pay_goods_num: flowInteger(row, ["payGoodsNum", "payGoodsNumber", "paidGoodsNum"]),
+      pay_order_num: flowInteger(row, ["payOrderNum", "paidOrderNum", "orderNum"]),
+      buyer_num: flowInteger(row, ["buyerNum", "payUserNum", "paidUserNum"]),
+      expose_pay_conversion_rate: flowNumber(row, ["exposePayConversionRate", "exposePayRate"]),
+      expose_click_conversion_rate: flowNumber(row, ["exposeClickConversionRate", "exposeClickRate"]),
+      click_pay_conversion_rate: flowNumber(row, ["clickPayConversionRate", "clickPayRate"]),
+      search_expose_num: flowInteger(row, ["searchExposeNum"]),
+      search_click_num: flowInteger(row, ["searchClickNum"]),
+      search_pay_goods_num: flowInteger(row, ["searchPayGoodsNum"]),
+      search_pay_order_num: flowInteger(row, ["searchPayOrderNum"]),
+      recommend_expose_num: flowInteger(row, ["recommendExposeNum"]),
+      recommend_click_num: flowInteger(row, ["recommendClickNum"]),
+      recommend_pay_goods_num: flowInteger(row, ["recommendPayGoodsNum"]),
+      recommend_pay_order_num: flowInteger(row, ["recommendPayOrderNum"]),
+      source_event_id: evt.id,
+      sources_json,
+    });
+  }
+}
+
 // ---------- TEMU shop statistics ----------
 
 function eventStatDate(evt) {
@@ -952,14 +1105,18 @@ function parseTemuStockOrders(db, ctx, evt, body) {
         "demandQty", "demandQuantity", "purchaseQuantity", "subPurchaseQuantity",
         "expectQuantity", "expectedQuantity", "requiredQuantity", "quantity", "qty",
         "waitDeliverQuantity", "waitDeliveryNum", "stockUpNum", "applyStockNum",
+        "shouldDeliverQuantity", "planQuantity", "orderQuantity", "skuQuantity",
       ], 3)),
       delivered_qty: toNullableInteger(firstDeepDefined(row, [
         "deliveredQty", "deliveredQuantity", "deliverQuantity", "deliveryQuantity",
-        "shippedQty", "shippedQuantity", "actualQuantity",
+        "shippedQty", "shippedQuantity", "actualQuantity", "receivedQuantity",
+        "arrivedQuantity", "arrivalQuantity", "inboundQuantity", "inStockQuantity",
       ], 3)),
       temu_status: toNullableString(firstDeepDefined(row, [
         "status", "statusName", "orderStatus", "orderStatusName", "state", "stateName",
-        "deliveryStatus", "deliveryStatusName",
+        "deliveryStatus", "deliveryStatusName", "purchaseStatus", "purchaseStatusName",
+        "subOrderStatus", "subOrderStatusName", "fulfillStatus", "fulfillStatusName",
+        "payStatus", "payStatusName", "inboundStatus", "inboundStatusName",
       ], 3), 100),
       warehouse_group: toNullableString(firstDeepDefined(row, [
         "warehouseGroup", "warehouseGroupName", "warehouse", "warehouseName", "siteName",
@@ -974,11 +1131,144 @@ function parseTemuStockOrders(db, ctx, evt, body) {
         "urgencyInfo", "urgentInfo", "urgentType", "priority", "tag", "label",
       ], 3), 200),
       order_time: toNullableString(firstDeepDefined(row, [
-        "orderTime", "createdAt", "createTime", "gmtCreate", "purchaseTime",
+        "orderTime", "createdAt", "createTime", "gmtCreate", "purchaseTime", "submitTime",
+        "payTime", "paymentTime",
       ], 3), 100),
       latest_ship_at: toNullableString(firstDeepDefined(row, [
         "latestShipAt", "latestDeliveryTime", "expectShipTime", "expectedShipTime",
-        "deliveryDeadline", "shipDeadline",
+        "deliveryDeadline", "shipDeadline", "expectArriveTime", "expectedArriveTime",
+        "expectReceiveTime", "expectedReceiveTime",
+      ], 3), 100),
+      raw_json: toJsonText(row),
+      source_event_id: evt.id,
+      sources_json,
+    });
+  });
+}
+
+function afterSaleTypeFromPath(path) {
+  const text = String(path || "");
+  if (/returnSupplier\/package/i.test(text)) return "return_package";
+  if (/returnSupplier\/supplierException/i.test(text)) return "return_exception";
+  if (/afs\/queryPage/i.test(text)) return "after_sale";
+  return "after_sale";
+}
+
+function afterSaleRowKey(type, row, evt, index) {
+  const key = firstDeepDefined(row, [
+    "returnPackageSn", "returnPackageNo", "packageSn", "packageNo",
+    "afterSaleOrderSn", "afterSaleNo", "afsOrderSn", "afsNo",
+    "orderSn", "parentOrderSn", "subOrderSn", "waybillNo", "trackingNumber", "id",
+  ], 3);
+  const skc = firstDeepDefined(row, ["productSkcId", "productSKCId", "skcId", "skc_id"], 3);
+  const sku = firstDeepDefined(row, ["productSkuId", "prodSkuId", "skuId", "sku_id"], 3);
+  return [type, key || evt.id, skc || "", sku || "", index].map((part) => String(part ?? "")).join("|").slice(0, 500);
+}
+
+function parseTemuAfterSales(db, ctx, evt, body) {
+  const items = operationRiskItems(body);
+  if (!items.length) return;
+  const upsert = db.prepare(`
+    INSERT INTO temu_after_sale_snapshot (
+      id, tenant_id, mall_id, site, row_key, after_sale_type, package_no, order_id,
+      product_id, skc_id, sku_id, product_name, quantity, status, reason,
+      logistics_no, warehouse_name, amount_cents, currency, created_at_text,
+      updated_at_text, raw_json, source_event_id, sources_json
+    ) VALUES (
+      @id, @tenant_id, @mall_id, @site, @row_key, @after_sale_type, @package_no, @order_id,
+      @product_id, @skc_id, @sku_id, @product_name, @quantity, @status, @reason,
+      @logistics_no, @warehouse_name, @amount_cents, @currency, @created_at_text,
+      @updated_at_text, @raw_json, @source_event_id, @sources_json
+    )
+    ON CONFLICT(tenant_id, mall_id, row_key) DO UPDATE SET
+      site             = COALESCE(excluded.site, site),
+      after_sale_type  = COALESCE(excluded.after_sale_type, after_sale_type),
+      package_no       = COALESCE(excluded.package_no, package_no),
+      order_id         = COALESCE(excluded.order_id, order_id),
+      product_id       = COALESCE(excluded.product_id, product_id),
+      skc_id           = COALESCE(excluded.skc_id, skc_id),
+      sku_id           = COALESCE(excluded.sku_id, sku_id),
+      product_name     = COALESCE(excluded.product_name, product_name),
+      quantity         = COALESCE(excluded.quantity, quantity),
+      status           = COALESCE(excluded.status, status),
+      reason           = COALESCE(excluded.reason, reason),
+      logistics_no     = COALESCE(excluded.logistics_no, logistics_no),
+      warehouse_name   = COALESCE(excluded.warehouse_name, warehouse_name),
+      amount_cents     = COALESCE(excluded.amount_cents, amount_cents),
+      currency         = COALESCE(excluded.currency, currency),
+      created_at_text  = COALESCE(excluded.created_at_text, created_at_text),
+      updated_at_text  = COALESCE(excluded.updated_at_text, updated_at_text),
+      raw_json         = COALESCE(excluded.raw_json, raw_json),
+      source_event_id  = COALESCE(excluded.source_event_id, source_event_id),
+      sources_json     = json_patch(COALESCE(sources_json, '{}'), COALESCE(excluded.sources_json, '{}')),
+      last_updated_at  = datetime('now')
+  `);
+  const mall_id = eventMallId(ctx, evt);
+  const site = evt.site || null;
+  const after_sale_type = afterSaleTypeFromPath(evt.url_path);
+  const sources_json = JSON.stringify({ [evt.url_path]: evt.id });
+  items.forEach((row, index) => {
+    if (!row || typeof row !== "object") return;
+    const package_no = toNullableString(firstDeepDefined(row, [
+      "returnPackageSn", "returnPackageNo", "packageSn", "packageNo",
+      "afterSaleOrderSn", "afterSaleNo", "afsOrderSn", "afsNo",
+    ], 3));
+    const order_id = toNullableString(firstDeepDefined(row, [
+      "orderSn", "orderNo", "parentOrderSn", "parentOrderNo", "subOrderSn", "subOrderNo",
+      "purchaseOrderSn", "purchaseOrderNo",
+    ], 3));
+    const skc_id = toNullableString(firstDeepDefined(row, [
+      "productSkcId", "productSKCId", "skcId", "skc_id",
+    ], 3));
+    const sku_id = toNullableString(firstDeepDefined(row, [
+      "productSkuId", "prodSkuId", "skuId", "sku_id",
+    ], 3));
+    if (!package_no && !order_id && !skc_id && !sku_id) return;
+    upsert.run({
+      id: crypto.randomUUID(),
+      tenant_id: ctx.tenant_id,
+      mall_id,
+      site,
+      row_key: afterSaleRowKey(after_sale_type, row, evt, index),
+      after_sale_type,
+      package_no,
+      order_id,
+      product_id: toNullableString(firstDeepDefined(row, ["productId", "productSpuId", "spuId"], 3)),
+      skc_id,
+      sku_id,
+      product_name: toNullableString(firstDeepDefined(row, [
+        "productName", "goodsName", "productTitle", "title", "name",
+      ], 3), 500),
+      quantity: toNullableInteger(firstDeepDefined(row, [
+        "quantity", "qty", "returnQuantity", "returnQty", "refundQuantity", "refundQty",
+        "goodsQuantity", "skuQuantity", "applyQuantity",
+      ], 3)),
+      status: toNullableString(firstDeepDefined(row, [
+        "status", "statusName", "state", "stateName", "afterSaleStatus",
+        "returnStatus", "packageStatus", "auditStatus",
+      ], 3), 100),
+      reason: toNullableString(firstDeepDefined(row, [
+        "reason", "returnReason", "refundReason", "afterSaleReason", "feedbackReason",
+        "exceptionReason", "remark",
+      ], 3), 500),
+      logistics_no: toNullableString(firstDeepDefined(row, [
+        "waybillNo", "trackingNumber", "trackingNo", "logisticsNo", "expressNo", "mailNo",
+      ], 3), 200),
+      warehouse_name: toNullableString(firstDeepDefined(row, [
+        "warehouseName", "receiveWarehouseName", "returnWarehouseName", "siteName",
+      ], 3), 200),
+      amount_cents: pickPriceCents(row, [
+        "amountCents", "refundAmountCents", "returnAmountCents", "refundFeeCents",
+        "amount", "refundAmount", "returnAmount", "refundFee",
+      ]),
+      currency: toNullableString(firstDeepDefined(row, [
+        "currency", "currencyCode", "currencyType", "priceCurrency",
+      ], 3), 20),
+      created_at_text: toNullableString(firstDeepDefined(row, [
+        "createdAt", "createTime", "gmtCreate", "applyTime", "returnCreateTime",
+      ], 3), 100),
+      updated_at_text: toNullableString(firstDeepDefined(row, [
+        "updatedAt", "updateTime", "gmtModified", "operateTime", "finishTime",
       ], 3), 100),
       raw_json: toJsonText(row),
       source_event_id: evt.id,
@@ -1456,11 +1746,13 @@ const PARSERS = [
   { match: /\/product\/skc\/pageQuery|\/product\/draft\/pageQuery|\/product\/notAllEu\/pageQuery/, fn: parseSkcList, name: "skcList" },
   { match: /\/mms\/venom\/api\/supplier\/sales\/management\/(listOverall|listWarehouse|querySkuSalesNumber|queryFulfilmentFormStatistic)/, fn: parseSalesManagement, name: "salesManagement" },
   { match: /\/api\/seller\/full\/flow\/analysis\/goods\/list/, fn: parseProductFlowGoods, name: "productFlowGoods" },
+  { match: /\/api\/seller\/full\/flow\/analysis\/goods\/(detail|trend)/, fn: parseProductFlowTrend, name: "productFlowTrend" },
   { match: /\/api\/activity\/data\/|\/gamblers\/|\/gambit\/|\/colossus\/bsr\/|\/biddingInvitationSupplierRpcService|\/sale\/manage\/supplier\/api\/activity\//, fn: parseActivitySnapshot, name: "activitySnapshot" },
   { match: /\/bg\/swift\/api\/common\/statistics\/web\/queryStatisticDataFullManaged|\/visage-agent-seller\/product\/statisticsData/, fn: parseShopStatistics, name: "shopStatistics" },
   { match: /\/magneto\/price-adjust\/page-query/, fn: parsePriceAdjust, name: "priceAdjust" },
   { match: /\/product\/sku\/site\/suggestedPrice\/pageQuery/, fn: parseSuggestedPrice, name: "suggestedPrice" },
-  { match: /deliverGoods\/platform\/pageQuerySubPurchaseOrder|deliverGoods\/management\/pageQueryDeliveryOrders|deliverGoods\/management\/pageQueryDeliveryBatch/, fn: parseTemuStockOrders, name: "temuStockOrders" },
+  { match: /deliverGoods\/platform\/pageQuerySubPurchaseOrder|deliverGoods\/management\/pageQueryDeliveryOrders|deliverGoods\/management\/pageQueryDeliveryBatch|\/purchase\/manager\/querySubOrderList/, fn: parseTemuStockOrders, name: "temuStockOrders" },
+  { match: /\/mms\/api\/appalachian\/afs\/queryPageV3|\/dunland\/api\/gmp\/returnSupplier\//, fn: parseTemuAfterSales, name: "temuAfterSales" },
   { match: /\/tmod_punish\/|pageQueryDeliveryBatch|queryAllFeedbackRecordInfo|searchQcSubBill|queryWeekInboundExceptionDetailInfo|returnSupplier|high\/price\/flow\/reduce|queryCompetitor|querySiteTargetPrice|batchQueryCustomerQueryLimit|bg-brando-mms\/supplier\/data\/center\/skc\/sales\/data|purchase\/manager\/querySubOrderList/, fn: parseOperationRisk, name: "operationRisk" },
 ];
 

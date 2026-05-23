@@ -43,7 +43,7 @@ function renderBootFailure(error: unknown, rootElement = document.getElementById
           <svg viewBox="0 0 64 64" width="42" height="42" role="presentation">
             <rect width="64" height="64" rx="14" fill="#111114"></rect>
             <path d="M18 19h28v7H35v23h-7V26H18z" fill="#fff"></path>
-            <circle cx="46" cy="45" r="5" fill="#007aff"></circle>
+            <circle cx="46" cy="45" r="5" fill="#1a73e8"></circle>
           </svg>
         </span>
         <div class="app-route-error__title">桌面端没有完成渲染</div>
@@ -91,23 +91,23 @@ try {
         locale={zhCN}
         theme={{
           token: {
-            colorPrimary: "#007aff",
-            colorSuccess: "#34c759",
-            colorWarning: "#ff9f0a",
-            colorError: "#ff3b30",
-            colorInfo: "#007aff",
+            colorPrimary: "#1a73e8",
+            colorSuccess: "#34a853",
+            colorWarning: "#fbbc04",
+            colorError: "#ea4335",
+            colorInfo: "#1a73e8",
             borderRadius: 8,
             fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif',
             fontSize: 16,
             colorBgContainer: "#ffffff",
-            colorBgLayout: "#f5f5f7",
-            colorText: "#1d1d1f",
-            colorTextSecondary: "#6e6e73",
-            colorTextTertiary: "#86868b",
-            colorBorder: "rgba(60, 60, 67, 0.12)",
-            colorBorderSecondary: "rgba(60, 60, 67, 0.10)",
+            colorBgLayout: "#ffffff",
+            colorText: "#202124",
+            colorTextSecondary: "#5f6368",
+            colorTextTertiary: "#80868b",
+            colorBorder: "#dadce0",
+            colorBorderSecondary: "#e8eaed",
             controlHeight: 38,
-            controlOutline: "rgba(0, 122, 255, 0.18)",
+            controlOutline: "rgba(26, 115, 232, 0.18)",
             wireframe: false,
           },
           components: {
@@ -117,8 +117,8 @@ try {
             },
             Table: {
               borderRadiusLG: 8,
-              headerBg: "#f5f5f7",
-              headerColor: "#6e6e73",
+              headerBg: "#f8fbff",
+              headerColor: "#5f6368",
               fontSize: 14,
               cellPaddingBlock: 12,
               cellPaddingInline: 12,

@@ -16,7 +16,7 @@
     BYPASS_SYMBOL_KEY: "temu-monitor.fetch.bypass",
   };
   const EVENT_NAME = WHITELIST_PAYLOAD.EVENT_NAME || "temu-monitor.captured";
-  const ALLOWED_HOST_RE = /(^|\.)agentseller(-eu|-us)?\.temu\.com$|^seller\.kuajingmaihuo\.com$|(^|\.)erp321\.com$|(^|\.)jushuitan\.com$|(^|\.)scm121\.com$|(^|\.)pftk\.temu\.com$|^pftk-cn\.kuajingmaihuo\.com$|^thtk-us\.seller\.temu\.com$/i;
+  const ALLOWED_HOST_RE = /(^|\.)agentseller(-eu|-us)?\.temu\.com$|^seller\.kuajingmaihuo\.com$|(^|\.)erp321\.com$|(^|\.)jushuitan\.com$|(^|\.)scm121\.com$|(^|\.)feishu\.cn$|(^|\.)pftk\.temu\.com$|^pftk-cn\.kuajingmaihuo\.com$|^thtk-us\.seller\.temu\.com$/i;
 
   if (!ALLOWED_HOST_RE.test(location.hostname)) {
     return;
@@ -88,7 +88,14 @@
 
   // ---------- 4. SW 探针：拉 page world stats ----------
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    if (!msg || msg.type !== "GET_PAGE_STATS") return;
+    if (!msg) return;
+    if (msg.type === "COLLECT_FEISHU_SUPPLIERS") {
+      collectFeishuSupplierRows(msg || {})
+        .then((result) => sendResponse(result))
+        .catch((error) => sendResponse({ ok: false, reason: String(error?.message || error).slice(0, 200) }));
+      return true;
+    }
+    if (msg.type !== "GET_PAGE_STATS") return;
     let settled = false;
     try {
       const probeId = "p" + Date.now() + Math.random().toString(36).slice(2, 8);
@@ -141,4 +148,87 @@
       }
     }
   });
+
+  async function collectFeishuSupplierRows(options) {
+    if (!/(^|\.)feishu\.cn$/i.test(location.hostname) || !/\/base\//i.test(location.pathname)) {
+      return { ok: false, reason: "当前页面不是飞书 Base" };
+    }
+    const maxSteps = Math.max(2, Math.min(80, Number(options.maxSteps) || 30));
+    const delayMs = Math.max(150, Math.min(1200, Number(options.delayMs) || 350));
+    const scroller = findMainScrollContainer();
+    const snapshots = [];
+    let lastTop = -1;
+    for (let step = 0; step < maxSteps; step += 1) {
+      snapshots.push(...readVisibleTableRows());
+      if (!scroller) break;
+      const currentTop = Math.round(scroller.scrollTop || 0);
+      const nextTop = Math.min(scroller.scrollHeight || 0, currentTop + Math.max(260, Math.round((scroller.clientHeight || window.innerHeight || 600) * 0.85)));
+      if (nextTop === currentTop || currentTop === lastTop) break;
+      lastTop = currentTop;
+      scroller.scrollTop = nextTop;
+      scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    const rows = dedupeRows(snapshots);
+    if (rows.length) {
+      try {
+        chrome.runtime.sendMessage({
+          type: "FEISHU_SUPPLIERS_CAPTURED",
+          payload: {
+            source: "feishu_supplier_table",
+            sourceUrl: location.href,
+            table: new URLSearchParams(location.search).get("table") || "",
+            view: new URLSearchParams(location.search).get("view") || "",
+            rows,
+            capturedAt: Date.now(),
+          },
+        }, () => { void chrome.runtime.lastError; });
+      } catch {}
+    }
+    return { ok: true, rows: rows.length, sourceUrl: location.href };
+  }
+
+  function findMainScrollContainer() {
+    const candidates = Array.from(document.querySelectorAll("div, main, section"))
+      .filter((el) => {
+        const style = getComputedStyle(el);
+        const overflow = `${style.overflowY} ${style.overflow}`;
+        return /(auto|scroll)/i.test(overflow) && el.scrollHeight > el.clientHeight + 120;
+      })
+      .sort((a, b) => (b.clientHeight * b.clientWidth) - (a.clientHeight * a.clientWidth));
+    return candidates[0] || document.scrollingElement || document.documentElement;
+  }
+
+  function readVisibleTableRows() {
+    const rows = [];
+    const looseHeaders = Array.from(document.querySelectorAll('[role="columnheader"], th'))
+      .map((cell) => normalizeVisibleText(cell.innerText || cell.textContent || ""))
+      .filter(Boolean);
+    if (looseHeaders.length >= 2) rows.push({ __visibleCells: looseHeaders });
+    const tableRows = Array.from(document.querySelectorAll('[role="row"], tr'));
+    for (const row of tableRows) {
+      const cells = Array.from(row.querySelectorAll('[role="columnheader"], [role="gridcell"], [role="cell"], th, td'));
+      if (cells.length < 2) continue;
+      const texts = cells.map((cell) => normalizeVisibleText(cell.innerText || cell.textContent || "")).filter(Boolean);
+      if (texts.length < 2) continue;
+      rows.push({ __visibleCells: texts });
+    }
+    return rows;
+  }
+
+  function normalizeVisibleText(value) {
+    return String(value || "").replace(/\s+/g, " ").trim();
+  }
+
+  function dedupeRows(rows) {
+    const seen = new Set();
+    const out = [];
+    for (const row of rows) {
+      const key = JSON.stringify(row);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(row);
+    }
+    return out;
+  }
 })();

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Temu 多店监控",
-  "version": "0.3.26",
+  "version": "0.3.27",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAutXJDwX3WuTMz8VAZ9e5ygNcV+MgwWO2cvNx/O1e8GGkm9o938kbwBuVsfPqzFweWxCH3+AIFyPGcQUIx+ZrRjURyvqw0Ao+QeRx0OcDGYf7y304bGhmzHV7HgjASS4Qx96jBnAztMIWkD5MKQIuZlE9tFOwP8kOEylmTCVPPlFLkFiPqfXjEom5vxc4AIl4Cuk7ZAnMmCQZIJk6yZXzPpGe9WjlNuk5iPwdCRkMC+RgYom971tJ71gwwukcDEKAAFjRc8v8IAe9hz1Q2quT9WTde9GRVma+hQ/wUWkPjevQ6LJdC+ZYxc+ANsRil4U0QzzV4vKlyQ/452OR7kMlKwIDAQAB",
   "description": "在 Temu 卖家后台后台抓取业务接口数据并上传云端，供多店统一汇总。",
   "permissions": [
@@ -21,6 +21,9 @@
     "https://*.erp321.com/*",
     "https://*.jushuitan.com/*",
     "https://*.scm121.com/*",
+    "https://*.feishu.cn/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*",
     "https://*.pftk.temu.com/*",
     "https://pftk-cn.kuajingmaihuo.com/*",
     "https://thtk-us.seller.temu.com/*"
@@ -39,6 +42,7 @@
         "https://*.erp321.com/*",
         "https://*.jushuitan.com/*",
         "https://*.scm121.com/*",
+        "https://*.feishu.cn/*",
         "https://*.pftk.temu.com/*",
         "https://pftk-cn.kuajingmaihuo.com/*",
         "https://thtk-us.seller.temu.com/*"
@@ -81,6 +85,7 @@
         "https://*.erp321.com/*",
         "https://*.jushuitan.com/*",
         "https://*.scm121.com/*",
+        "https://*.feishu.cn/*",
         "https://*.pftk.temu.com/*",
         "https://pftk-cn.kuajingmaihuo.com/*",
         "https://thtk-us.seller.temu.com/*"

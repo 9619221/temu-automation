@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Key } from "react";
 import { Alert, Button, Col, Descriptions, Drawer, Form, Image, Input, InputNumber, Modal, Popconfirm, Progress, Row, Select, Space, Table, Tag, Tooltip, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
+import { DeleteOutlined, EditOutlined, LineChartOutlined, LinkOutlined, PlusOutlined, ReloadOutlined, UploadOutlined } from "@ant-design/icons";
+import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip as RechartsTooltip, XAxis, YAxis } from "recharts";
 import PageHeader from "../components/PageHeader";
 import { useErpAuth } from "../contexts/ErpAuthContext";
 import { hasPageCache, readPageCache, writePageCache } from "../utils/pageCache";
 
 const erp = window.electronAPI?.erp;
 const PRODUCT_MASTER_DATA_CACHE_KEY = "temu.product-master-data.cache.v2";
-const JST_ACCOUNT_ID = "jst:account:default";
+const FEISHU_SUPPLIER_SOURCE_URL = "https://mcn24onb5t1o.feishu.cn/base/RLy7bndc4aCXhtsx4yAcr2d8nSg?table=tbl0UhZRpR0niDSt&view=vew5Spjz7c";
 const ADDRESS_WORKBENCH_PARAMS = {
   limit: 20,
   includeRequestDetails: false,
@@ -120,14 +121,15 @@ interface SkuDialogValues {
   accountId?: string;
 }
 
-type SkuIssueKey = "missing_image" | "missing_spec" | "missing_cost" | "zero_stock" | "missing_supplier";
-type SkuWorkState = "pending" | "ready";
+type SkuIssueKey = "missing_image" | "missing_spec" | "missing_cost" | "zero_stock" | "missing_supplier" | "stale_data";
+type SupplierRiskLevel = "high" | "medium" | "low";
+type SupplierPerformanceBand = "core" | "growth" | "trial" | "governance";
 
 interface SkuFilters {
   keyword: string;
   accountId?: string;
   status?: string;
-  workState?: SkuWorkState;
+  hasIssue?: boolean;
   issue?: SkuIssueKey;
 }
 
@@ -135,17 +137,40 @@ interface SkuQualityCard {
   label: string;
   value: number | string;
   tone: string;
+  hasIssue?: boolean;
   issue?: SkuIssueKey;
-  workState?: SkuWorkState;
+}
+
+interface SkuActiveFilterTag {
+  key: string;
+  label: string;
+  color?: string;
+  clear: (current: SkuFilters) => SkuFilters;
+}
+
+interface SupplierWorkLogItem {
+  key: string;
+  color: string;
+  title: string;
+  description: string;
+}
+
+interface SkuCostRecord {
+  key: string;
+  label: string;
+  amount: number;
+  at?: string | null;
+  note: string;
 }
 
 interface SupplierFilters {
   keyword: string;
   status?: string;
   supplierLevel?: string;
-  source?: string;
   category?: string;
   attention?: string;
+  riskLevel?: SupplierRiskLevel;
+  performanceBand?: SupplierPerformanceBand;
 }
 
 interface StoreAddressValues {
@@ -167,6 +192,7 @@ type MasterDataMode = "skus" | "suppliers" | "stores";
 
 interface ProductMasterDataProps {
   mode?: MasterDataMode;
+  embedded?: boolean;
 }
 
 interface ProductMasterDataCache {
@@ -209,18 +235,13 @@ function statusLabel(status?: string | null) {
   return STATUS_LABELS[status] || "未知状态";
 }
 
-function inferMasterDataSource(row?: { source?: string | null; id?: string | null; accountId?: string | null }) {
-  if (row?.source) return row.source;
-  if (row?.accountId === JST_ACCOUNT_ID || String(row?.id || "").startsWith("jst:")) return "jushuitan";
-  return null;
-}
-
 const SKU_ISSUE_META: Record<SkuIssueKey, { label: string; color: string }> = {
   missing_image: { label: "缺图片", color: "orange" },
   missing_spec: { label: "缺规格", color: "gold" },
   missing_cost: { label: "缺成本", color: "red" },
   zero_stock: { label: "零库存", color: "volcano" },
   missing_supplier: { label: "未绑供应商", color: "purple" },
+  stale_data: { label: "久未更新", color: "blue" },
 };
 
 const SKU_ISSUE_KEYS = Object.keys(SKU_ISSUE_META) as SkuIssueKey[];
@@ -231,30 +252,39 @@ const SKU_ISSUE_CARD_TONES: Record<SkuIssueKey, string> = {
   missing_cost: "#dc2626",
   zero_stock: "#7c3aed",
   missing_supplier: "#9333ea",
+  stale_data: "#2563eb",
 };
-
-const SKU_ISSUE_OPTIONS = SKU_ISSUE_KEYS.map((key) => ({
-  value: key,
-  label: SKU_ISSUE_META[key].label,
-}));
-
-const SKU_WORK_STATE_META: Record<SkuWorkState, { label: string; color: string }> = {
-  pending: { label: "待处理", color: "orange" },
-  ready: { label: "可流转", color: "green" },
-};
-
-const SKU_WORK_STATE_OPTIONS = (Object.keys(SKU_WORK_STATE_META) as SkuWorkState[]).map((key) => ({
-  value: key,
-  label: SKU_WORK_STATE_META[key].label,
-}));
 
 const SUPPLIER_ATTENTION_META: Record<string, { label: string; color: string; detail: string }> = {
   missing_contact: { label: "缺联系人", color: "orange", detail: "联系人、电话、微信至少维护一项" },
-  missing_category: { label: "缺类目", color: "gold", detail: "补充经营类目后更方便采购筛选" },
+  missing_category: { label: "缺类目", color: "gold", detail: "经营类目为空，采购筛选不完整" },
   no_sku: { label: "无商品", color: "purple", detail: "还没有关联商品资料" },
-  no_mapping: { label: "无货源", color: "volcano", detail: "还没有绑定 1688 货源" },
+  no_mapping: { label: "无货源", color: "volcano", detail: "还没有关联 1688 货源" },
   missing_terms: { label: "缺结算", color: "red", detail: "缺少账期、交期或税率信息" },
 };
+
+const SUPPLIER_RISK_META: Record<SupplierRiskLevel, { label: string; color: string; tone: string }> = {
+  high: { label: "高风险", color: "red", tone: "#dc2626" },
+  medium: { label: "中风险", color: "orange", tone: "#ea580c" },
+  low: { label: "低风险", color: "green", tone: "#16a34a" },
+};
+
+const SUPPLIER_RISK_OPTIONS = (Object.keys(SUPPLIER_RISK_META) as SupplierRiskLevel[]).map((key) => ({
+  value: key,
+  label: SUPPLIER_RISK_META[key].label,
+}));
+
+const SUPPLIER_PERFORMANCE_META: Record<SupplierPerformanceBand, { label: string; color: string; tone: string; detail: string }> = {
+  core: { label: "核心供应商", color: "green", tone: "#16a34a", detail: "采购沉淀、货源覆盖和资料完整度较好，可优先维护长期合作。" },
+  growth: { label: "成长供应商", color: "blue", tone: "#2563eb", detail: "已有合作基础，货源、账期和履约数据可继续沉淀。" },
+  trial: { label: "待验证", color: "gold", tone: "#d97706", detail: "缺少稳定采购沉淀，适合小批量验证交期、质量和售后。" },
+  governance: { label: "风险治理", color: "red", tone: "#dc2626", detail: "风险、资料缺口或履约沉淀不足，需要先治理再放大采购。" },
+};
+
+const SUPPLIER_PERFORMANCE_OPTIONS = (Object.keys(SUPPLIER_PERFORMANCE_META) as SupplierPerformanceBand[]).map((key) => ({
+  value: key,
+  label: SUPPLIER_PERFORMANCE_META[key].label,
+}));
 
 const SUPPLIER_LEVEL_OPTIONS = [
   { label: "战略", value: "strategic", color: "purple" },
@@ -273,6 +303,8 @@ const PAYMENT_TERM_OPTIONS = [
   { label: "30 天账期", value: "net_30" },
   { label: "月结", value: "monthly" },
 ];
+
+const SKU_STALE_DAYS = 90;
 
 function optionLabel(options: Array<{ label: string; value: string }>, value?: string | null) {
   if (!value) return "-";
@@ -303,8 +335,53 @@ function getSkuCostPrice(row: ErpSkuRow) {
   return toOptionalNumber(cost);
 }
 
+function getSkuCostRecords(row: ErpSkuRow): SkuCostRecord[] {
+  const records: SkuCostRecord[] = [];
+  const jstCostPrice = toOptionalNumber(row.jstCostPrice);
+  const erpCostPrice = toOptionalNumber(row.costPrice);
+  if (jstCostPrice !== null) {
+    records.push({
+      key: "jst",
+      label: "同步成本",
+      amount: jstCostPrice,
+      at: row.jstModifiedAt || row.jstCreatedAt || row.updatedAt || row.createdAt,
+      note: "同步成本",
+    });
+  }
+  if (erpCostPrice !== null) {
+    records.push({
+      key: "erp",
+      label: "当前资料成本",
+      amount: erpCostPrice,
+      at: row.updatedAt || row.createdAt || row.jstModifiedAt || row.jstCreatedAt,
+      note: "当前资料成本",
+    });
+  }
+  return records;
+}
+
 function getSkuSupplierText(row: ErpSkuRow) {
   return row.jstSupplierName || row.supplierId || "";
+}
+
+function getSkuTouchedAt(row: ErpSkuRow) {
+  return row.jstModifiedAt || row.updatedAt || row.jstCreatedAt || row.createdAt || null;
+}
+
+function getDaysSince(value?: string | null) {
+  if (!value) return null;
+  const time = new Date(value).getTime();
+  if (!Number.isFinite(time)) return null;
+  return Math.floor((Date.now() - time) / 86400000);
+}
+
+function getSkuStaleDays(row: ErpSkuRow) {
+  return getDaysSince(getSkuTouchedAt(row));
+}
+
+function isSkuDataStale(row: ErpSkuRow) {
+  const staleDays = getSkuStaleDays(row);
+  return staleDays !== null && staleDays >= SKU_STALE_DAYS;
 }
 
 function getSkuDataIssues(row: ErpSkuRow): SkuIssueKey[] {
@@ -314,31 +391,8 @@ function getSkuDataIssues(row: ErpSkuRow): SkuIssueKey[] {
   if (getSkuCostPrice(row) === null) issues.push("missing_cost");
   if (getSkuStockQty(row) <= 0) issues.push("zero_stock");
   if (!getSkuSupplierText(row)) issues.push("missing_supplier");
+  if (isSkuDataStale(row)) issues.push("stale_data");
   return issues;
-}
-
-function getSkuWorkState(row: ErpSkuRow): SkuWorkState {
-  return getSkuDataIssues(row).length ? "pending" : "ready";
-}
-
-function getSkuCompleteness(row: ErpSkuRow) {
-  const total = 6;
-  const filled = [
-    row.productName,
-    row.internalSkuCode,
-    row.imageUrl,
-    row.colorSpec || row.category,
-    getSkuCostPrice(row) !== null ? "cost" : "",
-    getSkuSupplierText(row),
-  ].filter(Boolean).length;
-  return Math.round((filled / total) * 100);
-}
-
-function getSupplierSourceLabel(row: ErpSupplierRow) {
-  const source = inferMasterDataSource(row);
-  if (source === "jushuitan") return "聚水潭";
-  if (source) return source;
-  return "本地";
 }
 
 function getSupplierCompleteness(row: ErpSupplierRow) {
@@ -370,6 +424,172 @@ function getSupplierAttentionKeys(row: ErpSupplierRow) {
   return keys;
 }
 
+function getSupplierRiskSignals(row: ErpSupplierRow) {
+  const signals: Array<{ key: string; label: string; detail: string; weight: number; color: string }> = [];
+  const attentionKeys = getSupplierAttentionKeys(row);
+  const completeness = getSupplierCompleteness(row);
+  const leadDays = Number(row.leadDays || 0);
+  const purchaseOrderCount = Number(row.purchaseOrderCount || 0);
+  const skuCount = Number(row.skuCount || 0);
+
+  if (row.status === "blocked") {
+    signals.push({ key: "blocked", label: "已停用", detail: "供应商当前为停用状态，不应继续进入采购履约。", weight: 90, color: "red" });
+  }
+  if (completeness < 60) {
+    signals.push({ key: "low_profile", label: "资料低完整度", detail: `资料完整度 ${completeness}%，关键联系方式或结算信息不足。`, weight: 28, color: "orange" });
+  }
+  if (attentionKeys.includes("missing_terms")) {
+    signals.push({ key: "missing_terms", label: "结算规则缺失", detail: SUPPLIER_ATTENTION_META.missing_terms.detail, weight: 22, color: "red" });
+  }
+  if (attentionKeys.includes("missing_contact")) {
+    signals.push({ key: "missing_contact", label: "联系链路缺失", detail: SUPPLIER_ATTENTION_META.missing_contact.detail, weight: 18, color: "orange" });
+  }
+  if (attentionKeys.includes("no_sku")) {
+    signals.push({ key: "no_sku", label: "未关联商品", detail: SUPPLIER_ATTENTION_META.no_sku.detail, weight: 20, color: "purple" });
+  }
+  if (attentionKeys.includes("no_mapping")) {
+    signals.push({ key: "no_mapping", label: "缺 1688 货源", detail: SUPPLIER_ATTENTION_META.no_mapping.detail, weight: 15, color: "volcano" });
+  }
+  if (leadDays > 14) {
+    signals.push({ key: "long_lead", label: "交期偏长", detail: `标准交期 ${leadDays} 天，供货响应慢。`, weight: 12, color: "gold" });
+  }
+  if (skuCount > 0 && purchaseOrderCount <= 0) {
+    signals.push({ key: "no_purchase", label: "暂无采购记录", detail: "已有商品关联但暂无采购单沉淀，履约稳定性未验证。", weight: 10, color: "blue" });
+  }
+
+  return signals;
+}
+
+function getSupplierRiskScore(row: ErpSupplierRow) {
+  return Math.min(100, getSupplierRiskSignals(row).reduce((score, item) => score + item.weight, 0));
+}
+
+function getSupplierRiskLevel(row: ErpSupplierRow): SupplierRiskLevel {
+  const score = getSupplierRiskScore(row);
+  if (score >= 60) return "high";
+  if (score >= 25) return "medium";
+  return "low";
+}
+
+function getSupplierMappedRate(row: ErpSupplierRow) {
+  const skuCount = Number(row.skuCount || 0);
+  if (skuCount <= 0) return 0;
+  return Math.round((Number(row.mappedSkuCount || 0) / skuCount) * 100);
+}
+
+function getSupplierPerformanceScore(row: ErpSupplierRow) {
+  const purchaseOrderCount = Number(row.purchaseOrderCount || 0);
+  const purchaseAmount = Number(row.purchaseAmount || 0);
+  const skuCount = Number(row.skuCount || 0);
+  const mappedRate = getSupplierMappedRate(row);
+  const completeness = getSupplierCompleteness(row);
+  const leadDays = toOptionalNumber(row.leadDays);
+  const riskLevel = getSupplierRiskLevel(row);
+  let score = 0;
+
+  if (purchaseOrderCount >= 20) score += 25;
+  else if (purchaseOrderCount >= 5) score += 18;
+  else if (purchaseOrderCount > 0) score += 10;
+
+  if (purchaseAmount >= 100000) score += 25;
+  else if (purchaseAmount >= 10000) score += 18;
+  else if (purchaseAmount > 0) score += 10;
+
+  if (skuCount >= 50) score += 15;
+  else if (skuCount >= 10) score += 10;
+  else if (skuCount > 0) score += 6;
+
+  if (mappedRate >= 80) score += 10;
+  else if (mappedRate >= 40) score += 6;
+
+  if (completeness >= 80) score += 15;
+  else if (completeness >= 60) score += 8;
+
+  if (leadDays !== null && leadDays <= 7) score += 10;
+  else if (leadDays !== null && leadDays <= 14) score += 6;
+
+  if (riskLevel === "high") score -= 35;
+  else if (riskLevel === "medium") score -= 15;
+  if (row.status === "blocked") score -= 40;
+
+  return Math.max(0, Math.min(100, score));
+}
+
+function getSupplierPerformanceBand(row: ErpSupplierRow): SupplierPerformanceBand {
+  const score = getSupplierPerformanceScore(row);
+  const purchaseOrderCount = Number(row.purchaseOrderCount || 0);
+  const riskLevel = getSupplierRiskLevel(row);
+  if (row.status === "blocked" || riskLevel === "high" || score < 35) return "governance";
+  if (purchaseOrderCount <= 0) return "trial";
+  if (score >= 75) return "core";
+  return "growth";
+}
+
+function getSupplierPerformanceReasons(row: ErpSupplierRow) {
+  const reasons: string[] = [];
+  const purchaseOrderCount = Number(row.purchaseOrderCount || 0);
+  const purchaseAmount = Number(row.purchaseAmount || 0);
+  const skuCount = Number(row.skuCount || 0);
+  const mappedRate = getSupplierMappedRate(row);
+  const completeness = getSupplierCompleteness(row);
+  const leadDays = toOptionalNumber(row.leadDays);
+  const riskLevel = getSupplierRiskLevel(row);
+
+  if (purchaseOrderCount > 0) reasons.push(`累计采购 ${purchaseOrderCount} 单`);
+  else reasons.push("暂无采购沉淀");
+  if (purchaseAmount > 0) reasons.push(`采购金额 ${formatMoney(purchaseAmount)}`);
+  if (skuCount > 0) reasons.push(`关联 ${skuCount} 个商品，货源覆盖 ${mappedRate}%`);
+  else reasons.push("未关联商品");
+  reasons.push(`资料完整度 ${completeness}%`);
+  if (leadDays !== null) reasons.push(`标准交期 ${leadDays} 天`);
+  if (riskLevel !== "low") reasons.push(SUPPLIER_RISK_META[riskLevel].label);
+  return reasons;
+}
+
+function getSupplierWorkLogItems(row: ErpSupplierRow): SupplierWorkLogItem[] {
+  const riskSignals = getSupplierRiskSignals(row);
+  const performanceBand = getSupplierPerformanceBand(row);
+  const performanceMeta = SUPPLIER_PERFORMANCE_META[performanceBand];
+  const items = riskSignals.map((signal) => ({
+    key: `risk:${signal.key}`,
+    color: signal.color,
+    title: `问题：${signal.label}`,
+    description: signal.detail,
+  }));
+
+  if (!items.length) {
+    items.push({
+      key: "ready",
+      color: "green",
+      title: "合作状态可用",
+      description: "资料、结算和货源关系完整，可正常进入采购履约。",
+    });
+  }
+
+  items.push({
+    key: "performance",
+    color: performanceMeta.color,
+    title: `绩效分层：${performanceMeta.label}`,
+    description: `${performanceMeta.detail} ${getSupplierPerformanceReasons(row).join("；")}。`,
+  });
+  items.push({
+    key: "purchase",
+    color: "blue",
+    title: "最近采购记录",
+    description: row.lastPurchaseAt
+      ? `最近采购 ${formatDateTime(row.lastPurchaseAt)}，累计采购单 ${Number(row.purchaseOrderCount || 0)} 单。`
+      : "暂无最近采购记录，可结合商品关联数量判断是否需要验证履约稳定性。",
+  });
+  items.push({
+    key: "updated",
+    color: "blue",
+    title: "最近资料更新",
+    description: formatDateTime(row.updatedAt || row.createdAt),
+  });
+
+  return items;
+}
+
 function canRole(role: string | undefined, roles: string[]) {
   return Boolean(role && roles.includes(role));
 }
@@ -395,12 +615,13 @@ function formatMoney(value?: number | string | null) {
   return `¥${amount.toFixed(2)}`;
 }
 
-const SKU_ISSUE_ACTIONS: Record<SkuIssueKey, string> = {
-  missing_image: "补商品主图；没有图时，采购、仓库和运营都很难快速确认是不是同一个货。",
-  missing_spec: "补颜色、尺寸、数量组合或关键规格；否则下单和拣货容易看错。",
-  missing_cost: "补成本价；没有成本，运营看利润和采购比价都会失真。",
-  zero_stock: "确认库存或补采购计划；实际库存为 0 的商品要么等入库，要么先暂停继续推。",
-  missing_supplier: "绑定供应商；没有供应商，后续采购、售后追责和补货都接不上。",
+const SKU_ISSUE_NOTES: Record<SkuIssueKey, string> = {
+  missing_image: "商品主图为空，采购、仓库和运营难以快速识别货品。",
+  missing_spec: "颜色、尺寸、数量组合或关键规格为空，下单和拣货容易看错。",
+  missing_cost: "成本价为空，利润判断和采购比价会失真。",
+  zero_stock: "实际库存为 0，当前不可直接流转到发货。",
+  missing_supplier: "供应商为空，采购、售后追责和后续供货关系不完整。",
+  stale_data: `超过 ${SKU_STALE_DAYS} 天未更新，成本、供应商、规格或库存口径可能已经变旧。`,
 };
 
 const SKU_ISSUE_PRIORITY: Record<SkuIssueKey, number> = {
@@ -408,6 +629,7 @@ const SKU_ISSUE_PRIORITY: Record<SkuIssueKey, number> = {
   missing_supplier: 35,
   zero_stock: 30,
   missing_spec: 25,
+  stale_data: 20,
   missing_image: 15,
 };
 
@@ -415,14 +637,6 @@ function getSkuWorkPriority(row: ErpSkuRow) {
   const issues = getSkuDataIssues(row);
   if (!issues.length) return 0;
   return issues.reduce((score, issue) => score + SKU_ISSUE_PRIORITY[issue], 0) + issues.length;
-}
-
-function getSkuWorkPriorityMeta(row: ErpSkuRow) {
-  const score = getSkuWorkPriority(row);
-  if (score >= 70) return { label: "高优先级", color: "red" };
-  if (score >= 35) return { label: "中优先级", color: "orange" };
-  if (score > 0) return { label: "低优先级", color: "gold" };
-  return { label: "可流转", color: "green" };
 }
 
 function getSkuWorkLogItems(row: ErpSkuRow) {
@@ -434,8 +648,10 @@ function getSkuWorkLogItems(row: ErpSkuRow) {
   const items = issues.map((issue) => ({
     key: `issue:${issue}`,
     color: SKU_ISSUE_META[issue].color,
-    title: `待处理：${SKU_ISSUE_META[issue].label}`,
-    description: SKU_ISSUE_ACTIONS[issue],
+    title: `问题：${SKU_ISSUE_META[issue].label}`,
+    description: issue === "stale_data"
+      ? `${SKU_ISSUE_NOTES[issue]} 最近更新 ${formatDateTime(getSkuTouchedAt(row))}。`
+      : SKU_ISSUE_NOTES[issue],
   }));
 
   if (!issues.length) {
@@ -451,7 +667,7 @@ function getSkuWorkLogItems(row: ErpSkuRow) {
     key: "updated",
     color: "blue",
     title: "最近资料更新",
-    description: formatDateTime(row.jstModifiedAt || row.updatedAt || row.jstCreatedAt || row.createdAt),
+    description: formatDateTime(getSkuTouchedAt(row)),
   });
 
   if (stockQty > 0) {
@@ -482,36 +698,6 @@ function getSkuWorkLogItems(row: ErpSkuRow) {
   }
 
   return items;
-}
-
-function getSkuPrimaryWorkAction(row: ErpSkuRow) {
-  const issues = getSkuDataIssues(row);
-  const priority = getSkuWorkPriorityMeta(row);
-  if (issues.length) {
-    const issue = issues[0];
-    return {
-      color: SKU_ISSUE_META[issue].color,
-      label: SKU_ISSUE_META[issue].label,
-      priority,
-      title: `先处理${SKU_ISSUE_META[issue].label}`,
-      description: SKU_ISSUE_ACTIONS[issue],
-    };
-  }
-
-  const stockQty = getSkuStockQty(row);
-  const costPrice = getSkuCostPrice(row);
-  const supplierText = getSkuSupplierText(row);
-  return {
-    color: "green",
-    label: "可流转",
-    priority,
-    title: "资料可继续流转",
-    description: [
-      `库存 ${stockQty}`,
-      `成本 ${formatMoney(costPrice)}`,
-      `供应商 ${supplierText || "-"}`,
-    ].join(" · "),
-  };
 }
 
 function storeAddressSummary(row: ErpAccountRow) {
@@ -696,7 +882,7 @@ function waitForSkuLoadYield() {
   return new Promise((resolve) => window.setTimeout(resolve, SKU_LOAD_YIELD_MS));
 }
 
-export default function ProductMasterData({ mode = "skus" }: ProductMasterDataProps) {
+export default function ProductMasterData({ mode = "skus", embedded = false }: ProductMasterDataProps) {
   const auth = useErpAuth();
   const role = auth.currentUser?.role;
   const cachedData = useMemo(
@@ -705,7 +891,8 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
   );
   const canManageAccounts = canRole(role, ["admin", "manager"]);
   const canManageStoreAddress = canRole(role, ["admin", "manager", "buyer"]);
-  const canManageSuppliers = canRole(role, ["admin", "manager", "buyer"]);
+  const canViewSuppliers = canRole(role, ["admin", "buyer"]);
+  const canManageSuppliers = canViewSuppliers;
   const canManageSkus = canRole(role, ["admin", "manager", "operations"]);
 
   const [accountForm] = Form.useForm();
@@ -728,6 +915,7 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
   const [storeAddressModalOpen, setStoreAddressModalOpen] = useState(false);
   const [editingStoreAddressAccount, setEditingStoreAddressAccount] = useState<ErpAccountRow | null>(null);
   const [skuDetailRow, setSkuDetailRow] = useState<ErpSkuRow | null>(null);
+  const [costDetailRow, setCostDetailRow] = useState<ErpSkuRow | null>(null);
   const [supplierDetailRow, setSupplierDetailRow] = useState<ErpSupplierRow | null>(null);
   const [skuFilters, setSkuFilters] = useState<SkuFilters>({ keyword: "" });
   const [selectedSkuRowKeys, setSelectedSkuRowKeys] = useState<Key[]>([]);
@@ -760,16 +948,61 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
     skuFilters.keyword.trim()
     || skuFilters.accountId
     || skuFilters.status
-    || skuFilters.workState
+    || skuFilters.hasIssue
     || skuFilters.issue,
   );
+  const skuActiveFilterTags = useMemo<SkuActiveFilterTag[]>(() => {
+    const tags: SkuActiveFilterTag[] = [];
+    const keyword = skuFilters.keyword.trim();
+    if (keyword) {
+      tags.push({
+        key: "keyword",
+        label: `搜索：${keyword}`,
+        clear: (current) => ({ ...current, keyword: "" }),
+      });
+    }
+    if (skuFilters.accountId) {
+      tags.push({
+        key: "accountId",
+        label: `店铺：${accountNameById.get(skuFilters.accountId) || skuFilters.accountId}`,
+        color: "blue",
+        clear: (current) => ({ ...current, accountId: undefined }),
+      });
+    }
+    if (skuFilters.status) {
+      tags.push({
+        key: "status",
+        label: `状态：${statusLabel(skuFilters.status)}`,
+        color: statusColor(skuFilters.status),
+        clear: (current) => ({ ...current, status: undefined }),
+      });
+    }
+    if (skuFilters.hasIssue) {
+      tags.push({
+        key: "hasIssue",
+        label: "有问题",
+        color: "orange",
+        clear: (current) => ({ ...current, hasIssue: undefined }),
+      });
+    }
+    if (skuFilters.issue) {
+      tags.push({
+        key: "issue",
+        label: `问题：${SKU_ISSUE_META[skuFilters.issue].label}`,
+        color: SKU_ISSUE_META[skuFilters.issue].color,
+        clear: (current) => ({ ...current, issue: undefined }),
+      });
+    }
+    return tags;
+  }, [accountNameById, skuFilters]);
   const filteredSkus = useMemo(() => {
     const keyword = skuFilters.keyword.trim().toLowerCase();
     return skus.filter((sku) => {
       if (skuFilters.accountId && sku.accountId !== skuFilters.accountId) return false;
       if (skuFilters.status && sku.status !== skuFilters.status) return false;
-      if (skuFilters.workState && getSkuWorkState(sku) !== skuFilters.workState) return false;
-      if (skuFilters.issue && !getSkuDataIssues(sku).includes(skuFilters.issue)) return false;
+      const issues = getSkuDataIssues(sku);
+      if (skuFilters.hasIssue && !issues.length) return false;
+      if (skuFilters.issue && !issues.includes(skuFilters.issue)) return false;
       if (!keyword) return true;
       const accountName = sku.accountId ? accountNameById.get(sku.accountId) : "";
       const searchableText = [
@@ -781,8 +1014,8 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
         sku.jstSupplierName,
         sku.warehouseLocation,
         sku.jstMainBin,
-        SKU_WORK_STATE_META[getSkuWorkState(sku)].label,
-        ...getSkuDataIssues(sku).map((issue) => SKU_ISSUE_META[issue].label),
+        issues.length ? "有问题" : "正常",
+        ...issues.map((issue) => SKU_ISSUE_META[issue].label),
         sku.status ? statusLabel(sku.status) : "",
       ].filter(Boolean).join(" ").toLowerCase();
       return searchableText.includes(keyword);
@@ -790,50 +1023,53 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
   }, [accountNameById, skuFilters, skus]);
   const skuQualitySummary = useMemo(() => {
     const issueCounts = Object.fromEntries(SKU_ISSUE_KEYS.map((key) => [key, 0])) as Record<SkuIssueKey, number>;
-    let completionTotal = 0;
-    let completeCount = 0;
     let pendingCount = 0;
-    let readyCount = 0;
     skus.forEach((sku) => {
       const issues = getSkuDataIssues(sku);
       issues.forEach((issue) => {
         issueCounts[issue] += 1;
       });
-      const completeness = getSkuCompleteness(sku);
-      completionTotal += completeness;
       if (issues.length) pendingCount += 1;
-      else readyCount += 1;
-      if (completeness >= 90 && issues.length === 0) completeCount += 1;
     });
-    const avgCompleteness = skus.length ? Math.round(completionTotal / skus.length) : 0;
     return {
       total: skus.length,
-      avgCompleteness,
-      completeCount,
       pendingCount,
-      readyCount,
       issueCounts,
     };
   }, [skus]);
   const skuQualityCards = useMemo<SkuQualityCard[]>(() => [
-    { label: "商品总数", value: skuQualitySummary.total, tone: "#2563eb", issue: undefined },
-    { label: "平均完整度", value: `${skuQualitySummary.avgCompleteness}%`, tone: "#16a34a", issue: undefined },
-    { label: "资料完整", value: skuQualitySummary.completeCount, tone: "#0891b2", issue: undefined },
-    { label: "待处理", value: skuQualitySummary.pendingCount, tone: "#ea580c", workState: "pending" },
-    { label: "可流转", value: skuQualitySummary.readyCount, tone: "#16a34a", workState: "ready" },
-    ...SKU_ISSUE_KEYS.map((issue) => ({
-      label: SKU_ISSUE_META[issue].label,
-      value: skuQualitySummary.issueCounts[issue],
-      tone: SKU_ISSUE_CARD_TONES[issue],
-      issue,
-    })),
+    { label: "商品", value: skuQualitySummary.total, tone: "#2563eb" },
+    { label: "有问题", value: skuQualitySummary.pendingCount, tone: "#ea580c", hasIssue: true },
+    { label: "缺成本", value: skuQualitySummary.issueCounts.missing_cost, tone: SKU_ISSUE_CARD_TONES.missing_cost, issue: "missing_cost" },
+    { label: "零库存", value: skuQualitySummary.issueCounts.zero_stock, tone: SKU_ISSUE_CARD_TONES.zero_stock, issue: "zero_stock" },
   ], [skuQualitySummary]);
-  const skuDetailIssues = useMemo(() => (
-    skuDetailRow ? getSkuDataIssues(skuDetailRow) : []
-  ), [skuDetailRow]);
   const skuDetailWorkLogItems = useMemo(() => (
     skuDetailRow ? getSkuWorkLogItems(skuDetailRow) : []
   ), [skuDetailRow]);
+  const costDetailRecords = useMemo(() => (
+    costDetailRow ? getSkuCostRecords(costDetailRow) : []
+  ), [costDetailRow]);
+  const costTrendData = useMemo(() => (
+    costDetailRecords.map((record, index) => ({
+      ...record,
+      chartLabel: record.label,
+      price: record.amount,
+      sequence: index + 1,
+    }))
+  ), [costDetailRecords]);
+  const costChangeSummary = useMemo(() => {
+    if (costDetailRecords.length < 2) return null;
+    const first = costDetailRecords[0];
+    const latest = costDetailRecords[costDetailRecords.length - 1];
+    const diff = latest.amount - first.amount;
+    const rate = first.amount !== 0 ? (diff / first.amount) * 100 : null;
+    return {
+      diff,
+      rate,
+      label: diff > 0 ? "上涨" : diff < 0 ? "下降" : "持平",
+      color: diff > 0 ? "#dc2626" : diff < 0 ? "#16a34a" : "#64748b",
+    };
+  }, [costDetailRecords]);
   const selectedSkuKeySet = useMemo(
     () => new Set(selectedSkuRowKeys.map((key) => String(key))),
     [selectedSkuRowKeys],
@@ -843,38 +1079,27 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
     [selectedSkuKeySet, skus],
   );
   const selectedSkuSummary = useMemo(() => {
-    const issueCounts = Object.fromEntries(SKU_ISSUE_KEYS.map((key) => [key, 0])) as Record<SkuIssueKey, number>;
     let totalStock = 0;
     let pendingCount = 0;
-    let readyCount = 0;
     const stores = new Set<string>();
     selectedSkus.forEach((sku) => {
       const issues = getSkuDataIssues(sku);
-      issues.forEach((issue) => {
-        issueCounts[issue] += 1;
-      });
       if (issues.length) pendingCount += 1;
-      else readyCount += 1;
       totalStock += getSkuStockQty(sku);
       if (sku.accountId) stores.add(sku.accountId);
     });
     return {
-      issueCounts,
       totalStock,
       pendingCount,
-      readyCount,
       storeCount: stores.size,
     };
   }, [selectedSkus]);
   const supplierDetailAttention = useMemo(() => (
     supplierDetailRow ? getSupplierAttentionKeys(supplierDetailRow) : []
   ), [supplierDetailRow]);
-  const supplierSourceOptions = useMemo(() => {
-    const labels = new Set(suppliers.map(getSupplierSourceLabel).filter(Boolean));
-    return Array.from(labels)
-      .sort((left, right) => left.localeCompare(right, "zh-Hans-CN", { numeric: true }))
-      .map((label) => ({ label, value: label }));
-  }, [suppliers]);
+  const supplierDetailWorkLogItems = useMemo(() => (
+    supplierDetailRow ? getSupplierWorkLogItems(supplierDetailRow) : []
+  ), [supplierDetailRow]);
   const supplierCategoryOptions = useMemo(() => {
     const labels = new Set<string>();
     suppliers.forEach((supplier) => {
@@ -890,19 +1115,23 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
     supplierFilters.keyword.trim()
     || supplierFilters.status
     || supplierFilters.supplierLevel
-    || supplierFilters.source
     || supplierFilters.category
-    || supplierFilters.attention,
+    || supplierFilters.attention
+    || supplierFilters.riskLevel
+    || supplierFilters.performanceBand,
   );
   const filteredSuppliers = useMemo(() => {
     const keyword = supplierFilters.keyword.trim().toLowerCase();
     return suppliers.filter((supplier) => {
       if (supplierFilters.status && supplier.status !== supplierFilters.status) return false;
       if (supplierFilters.supplierLevel && (supplier.supplierLevel || "standard") !== supplierFilters.supplierLevel) return false;
-      if (supplierFilters.source && getSupplierSourceLabel(supplier) !== supplierFilters.source) return false;
       if (supplierFilters.category && !(supplier.categories || []).includes(supplierFilters.category)) return false;
       if (supplierFilters.attention && !getSupplierAttentionKeys(supplier).includes(supplierFilters.attention)) return false;
+      if (supplierFilters.riskLevel && getSupplierRiskLevel(supplier) !== supplierFilters.riskLevel) return false;
+      if (supplierFilters.performanceBand && getSupplierPerformanceBand(supplier) !== supplierFilters.performanceBand) return false;
       if (!keyword) return true;
+      const riskLevel = getSupplierRiskLevel(supplier);
+      const performanceBand = getSupplierPerformanceBand(supplier);
       const searchableText = [
         supplier.supplierCode,
         supplier.name,
@@ -915,7 +1144,10 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
         optionLabel(PAYMENT_TERM_OPTIONS, supplier.paymentTerms),
         supplier.settlementCurrency,
         supplier.remark,
-        getSupplierSourceLabel(supplier),
+        SUPPLIER_RISK_META[riskLevel].label,
+        SUPPLIER_PERFORMANCE_META[performanceBand].label,
+        ...getSupplierPerformanceReasons(supplier),
+        ...getSupplierRiskSignals(supplier).map((item) => item.label),
         supplier.status ? statusLabel(supplier.status) : "",
       ].filter(Boolean).join(" ").toLowerCase();
       return searchableText.includes(keyword);
@@ -932,9 +1164,13 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
     let preferredCount = 0;
     let leadDaysTotal = 0;
     let leadDaysCount = 0;
+    const riskCounts = { high: 0, medium: 0, low: 0 };
+    const performanceCounts = { core: 0, growth: 0, trial: 0, governance: 0 };
     suppliers.forEach((supplier) => {
       if (supplier.status === "blocked") blockedCount += 1;
       else activeCount += 1;
+      riskCounts[getSupplierRiskLevel(supplier)] += 1;
+      performanceCounts[getSupplierPerformanceBand(supplier)] += 1;
       if (["strategic", "preferred"].includes(String(supplier.supplierLevel || ""))) preferredCount += 1;
       if (!supplier.contactName && !supplier.phone && !supplier.wechat) missingContactCount += 1;
       if (Number(supplier.skuCount || 0) <= 0) noSkuCount += 1;
@@ -956,17 +1192,17 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
       totalMappedSkuCount,
       purchaseAmount,
       preferredCount,
+      riskCounts,
+      performanceCounts,
       avgLeadDays: leadDaysCount ? Math.round(leadDaysTotal / leadDaysCount) : null,
     };
   }, [suppliers]);
-  const jushuitanSupplierCount = suppliers.filter((row) => inferMasterDataSource(row) === "jushuitan").length;
-  const jushuitanSkuCount = skus.filter((row) => inferMasterDataSource(row) === "jushuitan").length;
   const pageTitle = mode === "suppliers" ? "供应商" : mode === "stores" ? "店铺" : "商品资料";
   const pageMeta = mode === "suppliers"
-    ? [hasSupplierFilters ? `供应商 ${filteredSuppliers.length}/${suppliers.length}` : `供应商 ${suppliers.length}`, `聚水潭 ${jushuitanSupplierCount}`]
+    ? [hasSupplierFilters ? `供应商 ${filteredSuppliers.length}/${suppliers.length}` : `供应商 ${suppliers.length}`]
     : mode === "stores"
       ? [`店铺 ${accounts.length}`]
-      : [hasSkuFilters ? `商品 ${filteredSkus.length}/${skus.length}` : `商品 ${skus.length}`, `聚水潭 ${jushuitanSkuCount}`];
+      : [hasSkuFilters ? `商品 ${filteredSkus.length}/${skus.length}` : `商品 ${skus.length}`];
 
   useEffect(() => {
     mountedRef.current = true;
@@ -1258,6 +1494,42 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
     }
   };
 
+  const handleImportFeishuSuppliersOnce = async () => {
+    if (!erp?.supplier?.importFeishuOnce || !window.electronAPI?.selectFile) {
+      message.error("当前版本缺少飞书供应商导入接口");
+      return;
+    }
+    const filePath = await window.electronAPI.selectFile([
+      { name: "飞书导出表格", extensions: ["xlsx", "xls", "csv"] },
+    ]);
+    if (!filePath) return;
+    setSubmitting("supplier-import-feishu");
+    try {
+      const result = await erp.supplier.importFeishuOnce({
+        filePath,
+        sourceUrl: FEISHU_SUPPLIER_SOURCE_URL,
+      });
+      message.success(`飞书表已导入 ${result.imported} 条，新增 ${result.created} 条，更新 ${result.updated} 条`);
+      if (result.skipped) {
+        const reason = result.errors?.slice(0, 3).map((item: { row?: number | string; reason?: string }) => `第 ${item.row} 行：${item.reason}`).join("；");
+        message.warning(`跳过 ${result.skipped} 条${reason ? `，${reason}` : ""}`);
+      }
+      await loadAll();
+    } catch (error: any) {
+      message.error(error?.message || "飞书供应商导入失败");
+    } finally {
+      setSubmitting(null);
+    }
+  };
+
+  const handleOpenFeishuSupplierTable = async () => {
+    try {
+      await window.electronAPI?.app?.openExternal?.(FEISHU_SUPPLIER_SOURCE_URL);
+    } catch (error: any) {
+      message.error(error?.message || "打开飞书表失败");
+    }
+  };
+
   const handleToggleSupplierStatus = async (row: ErpSupplierRow) => {
     if (!erp) return;
     const nextStatus = row.status === "blocked" ? "active" : "blocked";
@@ -1371,7 +1643,7 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
 
   const supplierColumns: ColumnsType<ErpSupplierRow> = [
     {
-      title: "供应商档案",
+      title: "供应商资料",
       key: "supplier",
       width: 260,
       fixed: "left",
@@ -1382,9 +1654,6 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
             <Space size={6} wrap>
               <span style={{ fontWeight: 700 }}>{row.name}</span>
               <Tag color={level.color} style={{ marginInlineEnd: 0 }}>{level.label}</Tag>
-              <Tag color={getSupplierSourceLabel(row) === "聚水潭" ? "blue" : "default"} style={{ marginInlineEnd: 0 }}>
-                {getSupplierSourceLabel(row)}
-              </Tag>
             </Space>
             <span style={{ color: "#667085", fontSize: 12 }}>{row.supplierCode || row.id}</span>
           </Space>
@@ -1459,7 +1728,61 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
       ),
     },
     {
-      title: "档案健康度",
+      title: "绩效分层",
+      key: "performance",
+      width: 180,
+      sorter: (left, right) => getSupplierPerformanceScore(left) - getSupplierPerformanceScore(right),
+      render: (_value, row) => {
+        const band = getSupplierPerformanceBand(row);
+        const meta = SUPPLIER_PERFORMANCE_META[band];
+        const score = getSupplierPerformanceScore(row);
+        return (
+          <Space direction="vertical" size={4}>
+            <Space size={6} wrap>
+              <Tag color={meta.color} style={{ marginInlineEnd: 0 }}>{meta.label}</Tag>
+              <span style={{ color: "#64748b", fontSize: 12 }}>{score} 分</span>
+            </Space>
+            <Tooltip title={getSupplierPerformanceReasons(row).join("；")}>
+              <span style={{ color: "#64748b", fontSize: 12 }}>
+                货源覆盖 {getSupplierMappedRate(row)}% · {Number(row.purchaseOrderCount || 0)} 单
+              </span>
+            </Tooltip>
+          </Space>
+        );
+      },
+    },
+    {
+      title: "风险等级",
+      key: "risk",
+      width: 170,
+      sorter: (left, right) => getSupplierRiskScore(left) - getSupplierRiskScore(right),
+      render: (_value, row) => {
+        const riskLevel = getSupplierRiskLevel(row);
+        const meta = SUPPLIER_RISK_META[riskLevel];
+        const score = getSupplierRiskScore(row);
+        const signals = getSupplierRiskSignals(row);
+        return (
+          <Space direction="vertical" size={4}>
+            <Space size={6} wrap>
+              <Tag color={meta.color} style={{ marginInlineEnd: 0 }}>{meta.label}</Tag>
+              <span style={{ color: "#64748b", fontSize: 12 }}>{score} 分</span>
+            </Space>
+            {signals.length ? (
+              <Tooltip title={signals.map((item) => item.detail).join("；")}>
+                <span style={{ color: "#64748b", fontSize: 12 }}>
+                  {signals.slice(0, 2).map((item) => item.label).join(" / ")}
+                  {signals.length > 2 ? ` +${signals.length - 2}` : ""}
+                </span>
+              </Tooltip>
+            ) : (
+              <span style={{ color: "#16a34a", fontSize: 12 }}>可正常合作</span>
+            )}
+          </Space>
+        );
+      },
+    },
+    {
+      title: "资料健康度",
       key: "health",
       width: 180,
       render: (_value, row) => {
@@ -1490,7 +1813,7 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
       render: (_value: unknown, row: ErpSupplierRow) => (
         <Space size={6}>
           <Button size="small" onClick={() => setSupplierDetailRow(row)}>
-            档案
+            日志
           </Button>
           {canManageSuppliers ? (
             <>
@@ -1548,91 +1871,68 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
       width: 72,
       render: (_value, row) => renderSkuImage(row),
     },
-    { title: "标题", dataIndex: "productName", key: "productName", width: 220, ellipsis: true },
-    { title: "商品编码", dataIndex: "internalSkuCode", key: "internalSkuCode", width: 138, ellipsis: true },
     {
-      title: "资料完整度",
-      key: "dataQuality",
-      width: 170,
+      title: "商品",
+      key: "product",
+      width: 320,
       render: (_value, row) => {
-        const percent = getSkuCompleteness(row);
-        const issues = getSkuDataIssues(row);
+        const title = row.productName || "-";
+        const code = row.internalSkuCode || "-";
         return (
-          <Space direction="vertical" size={4} style={{ width: "100%" }}>
-            <Progress
-              percent={percent}
-              size="small"
-              status={issues.length ? "exception" : "success"}
-              strokeColor={issues.length ? undefined : "#16a34a"}
-            />
-            <Space size={[4, 4]} wrap>
-              {issues.length ? issues.slice(0, 2).map((issue) => (
-                <Tag key={issue} color={SKU_ISSUE_META[issue].color} style={{ marginInlineEnd: 0 }}>
-                  {SKU_ISSUE_META[issue].label}
-                </Tag>
-              )) : (
-                <Tag color="success" style={{ marginInlineEnd: 0 }}>资料完整</Tag>
-              )}
-              {issues.length > 2 ? (
-                <Tooltip title={issues.slice(2).map((issue) => SKU_ISSUE_META[issue].label).join("、")}>
-                  <Tag style={{ marginInlineEnd: 0 }}>+{issues.length - 2}</Tag>
-                </Tooltip>
-              ) : null}
-            </Space>
+          <Space direction="vertical" size={2} style={{ width: "100%" }}>
+            <span
+              title={title}
+              style={{
+                color: "#0f172a",
+                display: "block",
+                fontWeight: 600,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {title}
+            </span>
+            <span style={{ color: "#64748b", fontSize: 12 }}>{code}</span>
           </Space>
         );
       },
     },
+    { title: "规格", dataIndex: "colorSpec", key: "colorSpec", width: 190, ellipsis: true, render: (value, row) => { const text = value || row.category || "-"; return <span title={text}>{text}</span>; } },
     {
-      title: "处理建议",
-      key: "workAction",
-      width: 240,
-      sorter: (left, right) => getSkuWorkPriority(left) - getSkuWorkPriority(right),
-      defaultSortOrder: "descend",
+      title: "库存 / 仓位",
+      key: "stockLocation",
+      width: 150,
+      sorter: (left, right) => getSkuStockQty(left) - getSkuStockQty(right),
       sortDirections: ["descend", "ascend"],
       render: (_value, row) => {
-        const action = getSkuPrimaryWorkAction(row);
+        const location = row.warehouseLocation || row.jstMainBin || "-";
         return (
-          <Space direction="vertical" size={3} style={{ width: "100%" }}>
-            <Space size={6} wrap>
-              <Tag color={action.priority.color} style={{ marginInlineEnd: 0 }}>
-                {action.priority.label}
-              </Tag>
-              <Tag color={action.color} style={{ marginInlineEnd: 0 }}>
-                {action.label}
-              </Tag>
-              <span style={{ color: "#0f172a", fontWeight: 600 }}>{action.title}</span>
-            </Space>
-            <span style={{ color: "#64748b", fontSize: 12, lineHeight: "18px" }}>
-              {action.description}
+          <Space direction="vertical" size={2}>
+            <span style={{ color: "#0f172a", fontWeight: 700 }}>{getSkuStockQty(row)}</span>
+            <span
+              title={location}
+              style={{
+                color: "#64748b",
+                display: "block",
+                fontSize: 12,
+                maxWidth: 120,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {location}
             </span>
           </Space>
         );
       },
     },
     {
-      title: "实际库存数",
-      dataIndex: "actualStockQty",
-      key: "actualStockQty",
-      width: 112,
-      sorter: (left, right) => getSkuStockQty(left) - getSkuStockQty(right),
-      sortDirections: ["descend", "ascend"],
-      render: (_value, row) => getSkuStockQty(row),
-    },
-    {
-      title: "仓位",
-      dataIndex: "warehouseLocation",
-      key: "warehouseLocation",
-      width: 140,
-      ellipsis: true,
-      render: (value, row) => value || row.jstMainBin || "-",
-    },
-    { title: "颜色及规格", dataIndex: "colorSpec", key: "colorSpec", width: 200, ellipsis: true, render: (value, row) => { const t = value || row.category || "-"; return <span title={t}>{t}</span>; } },
-    {
       title: "店铺",
       dataIndex: "accountId",
       key: "accountId",
-      width: 140,
+      width: 120,
       ellipsis: true,
       render: (value, row) => row.accountName || accountNameById.get(value) || "-",
     },
@@ -1648,12 +1948,54 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
       title: "成本价",
       dataIndex: "costPrice",
       key: "costPrice",
-      width: 112,
-      render: (value, row) => formatMoney(value ?? row.jstCostPrice),
+      width: 100,
+      render: (value, row) => {
+        const costText = formatMoney(value ?? row.jstCostPrice);
+        const hasCost = getSkuCostPrice(row) !== null;
+        return (
+          <Button
+            type="link"
+            size="small"
+            icon={<LineChartOutlined />}
+            onClick={(event) => {
+              event.stopPropagation();
+              setCostDetailRow(row);
+            }}
+            style={{
+              color: hasCost ? "#2563eb" : "#dc2626",
+              fontWeight: 700,
+              height: "auto",
+              padding: 0,
+            }}
+          >
+            {hasCost ? costText : "缺成本"}
+          </Button>
+        );
+      },
     },
-    { title: "创建时间", dataIndex: "createdAt", key: "createdAt", width: 142, render: (_value, row) => formatDateTime(row.jstCreatedAt || row.createdAt) },
-    { title: "修改时间", dataIndex: "updatedAt", key: "updatedAt", width: 142, render: (_value, row) => formatDateTime(row.jstModifiedAt || row.updatedAt) },
-    { title: "创建人", dataIndex: "createdByName", key: "createdByName", width: 120, ellipsis: true, render: (value, row) => value || row.jstCreator || "-" },
+    {
+      title: "问题",
+      key: "workAction",
+      width: 120,
+      sorter: (left, right) => getSkuWorkPriority(left) - getSkuWorkPriority(right),
+      defaultSortOrder: "descend",
+      sortDirections: ["descend", "ascend"],
+      render: (_value, row) => {
+        const issues = getSkuDataIssues(row);
+        const issue = issues[0];
+        if (!issue) return <Tag color="green">正常</Tag>;
+        const title = issues.map((item) => SKU_ISSUE_META[item].label).join("、");
+        return (
+          <Tooltip title={title}>
+            <Tag color={SKU_ISSUE_META[issue].color} style={{ marginInlineEnd: 0 }}>
+              {SKU_ISSUE_META[issue].label}
+              {issues.length > 1 ? ` +${issues.length - 1}` : ""}
+            </Tag>
+          </Tooltip>
+        );
+      },
+    },
+    { title: "更新", dataIndex: "updatedAt", key: "updatedAt", width: 128, render: (_value, row) => formatDateTime(getSkuTouchedAt(row)) },
     {
       title: "操作",
       key: "actions",
@@ -1766,18 +2108,28 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
     </Space>
   );
 
+  if (mode === "suppliers" && !canViewSuppliers) {
+    return (
+      <div className={embedded ? "product-master-data-embedded" : "dashboard-shell"}>
+        {!embedded ? <PageHeader compact eyebrow="系统" title={pageTitle} /> : null}
+        <Alert type="warning" showIcon message="供应商资料仅采购和管理员可见" />
+      </div>
+    );
+  }
+
   if (!erp) {
     return (
-      <div className="dashboard-shell">
-        <PageHeader compact eyebrow="系统" title={pageTitle} subtitle="服务未就绪，请重启软件" />
+      <div className={embedded ? "product-master-data-embedded" : "dashboard-shell"}>
+        {!embedded ? <PageHeader compact eyebrow="系统" title={pageTitle} subtitle="服务未就绪，请重启软件" /> : null}
         <Alert type="error" showIcon message="当前环境缺少本地服务接口" />
       </div>
     );
   }
 
   return (
-    <div className="dashboard-shell">
-      <PageHeader
+    <div className={embedded ? "product-master-data-embedded" : "dashboard-shell"}>
+      {!embedded ? (
+        <PageHeader
         compact
         eyebrow="系统"
         title={pageTitle}
@@ -1800,6 +2152,21 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
             </Button>
           ) : null,
           mode === "suppliers" && canManageSuppliers ? (
+            <Button key="open-feishu-suppliers" icon={<LinkOutlined />} onClick={handleOpenFeishuSupplierTable}>
+              打开飞书表
+            </Button>
+          ) : null,
+          mode === "suppliers" && canManageSuppliers ? (
+            <Button
+              key="import-feishu-suppliers"
+              icon={<UploadOutlined />}
+              loading={submitting === "supplier-import-feishu"}
+              onClick={handleImportFeishuSuppliersOnce}
+            >
+              导入飞书表
+            </Button>
+          ) : null,
+          mode === "suppliers" && canManageSuppliers ? (
             <Button key="new-supplier" type="primary" icon={<PlusOutlined />} onClick={() => openSupplierModal()}>
               新增供应商
             </Button>
@@ -1808,7 +2175,8 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
             刷新
           </Button>,
         ].filter(Boolean)}
-      />
+        />
+      ) : null}
 
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
         {mode === "skus" ? (
@@ -1824,22 +2192,27 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))",
+              gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
               gap: 8,
               marginBottom: 12,
             }}
           >
             {skuQualityCards.map((item) => {
-              const clickable = Boolean(item.issue || item.workState);
+              const clickable = Boolean(item.issue || item.hasIssue);
+              const active = Boolean(
+                (item.issue && skuFilters.issue === item.issue)
+                || (item.hasIssue && skuFilters.hasIssue && !skuFilters.issue),
+              );
               const applyCardFilter = () => setSkuFilters((current) => ({
                 ...current,
                 issue: item.issue,
-                workState: item.workState,
+                hasIssue: item.hasIssue,
               }));
               return (
                 <div
                   key={item.label}
                   role={clickable ? "button" : undefined}
+                  aria-pressed={clickable ? active : undefined}
                   tabIndex={clickable ? 0 : undefined}
                   onClick={clickable ? applyCardFilter : undefined}
                   onKeyDown={clickable ? (event) => {
@@ -1849,11 +2222,12 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
                     }
                   } : undefined}
                   style={{
-                    border: "1px solid #e5e7eb",
+                    border: `1px solid ${active ? item.tone : "#e5e7eb"}`,
                     borderLeft: `3px solid ${item.tone}`,
                     borderRadius: 6,
                     padding: "8px 10px",
-                    background: "#fff",
+                    background: active ? "#f8fafc" : "#fff",
+                    boxShadow: active ? "0 0 0 2px rgba(37, 99, 235, 0.08)" : undefined,
                     cursor: clickable ? "pointer" : "default",
                     minWidth: 0,
                   }}
@@ -1865,7 +2239,7 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
             })}
           </div>
           <Row gutter={[8, 8]} style={{ marginBottom: 12 }}>
-            <Col xs={24} md={6}>
+            <Col xs={24} md={10}>
               <Input
                 allowClear
                 placeholder="商品编码 / 标题 / 规格 / 供应商"
@@ -1873,7 +2247,7 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
                 onChange={(event) => setSkuFilters((current) => ({ ...current, keyword: event.target.value }))}
               />
             </Col>
-            <Col xs={24} sm={12} md={4}>
+            <Col xs={24} sm={12} md={6}>
               <Select
                 allowClear
                 showSearch
@@ -1885,7 +2259,7 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
                 onChange={(value) => setSkuFilters((current) => ({ ...current, accountId: value }))}
               />
             </Col>
-            <Col xs={12} sm={8} md={3}>
+            <Col xs={12} sm={8} md={4}>
               <Select
                 allowClear
                 placeholder="状态"
@@ -1898,32 +2272,46 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
                 onChange={(value) => setSkuFilters((current) => ({ ...current, status: value }))}
               />
             </Col>
-            <Col xs={12} sm={8} md={3}>
-              <Select
-                allowClear
-                placeholder="工作状态"
-                style={{ width: "100%" }}
-                value={skuFilters.workState}
-                options={SKU_WORK_STATE_OPTIONS}
-                onChange={(value) => setSkuFilters((current) => ({ ...current, workState: value, issue: undefined }))}
-              />
-            </Col>
-            <Col xs={24} sm={8} md={4}>
-              <Select
-                allowClear
-                placeholder="资料问题"
-                style={{ width: "100%" }}
-                value={skuFilters.issue}
-                options={SKU_ISSUE_OPTIONS}
-                onChange={(value) => setSkuFilters((current) => ({ ...current, issue: value, workState: undefined }))}
-              />
-            </Col>
-            <Col xs={24} md={3}>
+            <Col xs={12} sm={8} md={4}>
               <Button block disabled={!hasSkuFilters} onClick={() => setSkuFilters({ keyword: "" })}>
                 清空
               </Button>
             </Col>
           </Row>
+          {skuActiveFilterTags.length ? (
+            <div
+              style={{
+                alignItems: "center",
+                background: "#f8fafc",
+                border: "1px solid #e5e7eb",
+                borderRadius: 6,
+                display: "flex",
+                flexWrap: "wrap",
+                gap: 8,
+                justifyContent: "space-between",
+                marginBottom: 12,
+                padding: "7px 10px",
+              }}
+            >
+              <Space size={[6, 6]} wrap>
+                <span style={{ color: "#64748b", fontSize: 12 }}>当前筛选</span>
+                {skuActiveFilterTags.map((tag) => (
+                  <Tag
+                    key={tag.key}
+                    closable
+                    color={tag.color}
+                    onClose={() => setSkuFilters(tag.clear)}
+                    style={{ marginInlineEnd: 0 }}
+                  >
+                    {tag.label}
+                  </Tag>
+                ))}
+              </Space>
+              <Button size="small" type="text" onClick={() => setSkuFilters({ keyword: "" })}>
+                清空
+              </Button>
+            </div>
+          ) : null}
           {selectedSkus.length ? (
             <div
               style={{
@@ -1943,45 +2331,20 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
                 <span style={{ color: "#0f172a", fontWeight: 700 }}>已选 {selectedSkus.length} 个</span>
                 <Tag color="blue" style={{ marginInlineEnd: 0 }}>店铺 {selectedSkuSummary.storeCount || "-"}</Tag>
                 <Tag color="geekblue" style={{ marginInlineEnd: 0 }}>库存 {selectedSkuSummary.totalStock}</Tag>
-                <Tag color={SKU_WORK_STATE_META.pending.color} style={{ marginInlineEnd: 0 }}>
-                  待处理 {selectedSkuSummary.pendingCount}
+                <Tag color="orange" style={{ marginInlineEnd: 0 }}>
+                  问题 {selectedSkuSummary.pendingCount}
                 </Tag>
-                <Tag color={SKU_WORK_STATE_META.ready.color} style={{ marginInlineEnd: 0 }}>
-                  可流转 {selectedSkuSummary.readyCount}
-                </Tag>
-                {SKU_ISSUE_KEYS.map((issue) => (
-                  <Tag key={issue} color={SKU_ISSUE_META[issue].color} style={{ marginInlineEnd: 0 }}>
-                    {SKU_ISSUE_META[issue].label} {selectedSkuSummary.issueCounts[issue]}
-                  </Tag>
-                ))}
               </Space>
               <Space size={6} wrap>
                 <Button
                   size="small"
                   disabled={!selectedSkuSummary.pendingCount}
-                  onClick={() => setSkuFilters((current) => ({ ...current, workState: "pending", issue: undefined }))}
+                  onClick={() => setSkuFilters((current) => ({ ...current, hasIssue: true, issue: undefined }))}
                 >
-                  筛待处理
+                  只看问题
                 </Button>
-                <Button
-                  size="small"
-                  disabled={!selectedSkuSummary.readyCount}
-                  onClick={() => setSkuFilters((current) => ({ ...current, workState: "ready", issue: undefined }))}
-                >
-                  筛可流转
-                </Button>
-                {SKU_ISSUE_KEYS.map((issue) => (
-                  <Button
-                    key={issue}
-                    size="small"
-                    disabled={!selectedSkuSummary.issueCounts[issue]}
-                    onClick={() => setSkuFilters((current) => ({ ...current, issue, workState: undefined }))}
-                  >
-                    筛{SKU_ISSUE_META[issue].label}
-                  </Button>
-                ))}
                 <Button size="small" onClick={() => setSkuDetailRow(selectedSkus[0])}>
-                  打开首个日志
+                  打开日志
                 </Button>
                 <Button size="small" onClick={() => setSelectedSkuRowKeys([])}>
                   取消选择
@@ -2000,7 +2363,7 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
             onRow={(row) => ({
               onDoubleClick: () => setSkuDetailRow(row),
             })}
-            scroll={{ x: 2240, y: "max(220px, calc(100vh - 520px))" }}
+            scroll={{ x: 1540, y: "max(220px, calc(100vh - 500px))" }}
             pagination={{
               defaultPageSize: 20,
               pageSizeOptions: [10, 20, 50, 100, 200],
@@ -2016,8 +2379,32 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
           <div className="app-panel__title">
             <div>
               <div className="app-panel__title-main">供应商</div>
-              <div className="app-panel__title-sub">维护供应商档案、联系方式、经营类目和采购关系。</div>
+              <div className="app-panel__title-sub">维护供应商资料、联系方式、经营类目和采购关系。</div>
             </div>
+            {embedded ? (
+              <Space size={8} wrap>
+                {canManageSuppliers ? (
+                  <>
+                    <Button icon={<LinkOutlined />} onClick={handleOpenFeishuSupplierTable}>
+                      打开飞书表
+                    </Button>
+                    <Button
+                      icon={<UploadOutlined />}
+                      loading={submitting === "supplier-import-feishu"}
+                      onClick={handleImportFeishuSuppliersOnce}
+                    >
+                      导入飞书表
+                    </Button>
+                    <Button type="primary" icon={<PlusOutlined />} onClick={() => openSupplierModal()}>
+                      新增供应商
+                    </Button>
+                  </>
+                ) : null}
+                <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void loadAll({ forceFull: true })}>
+                  刷新
+                </Button>
+              </Space>
+            ) : null}
           </div>
           <div
             style={{
@@ -2030,6 +2417,9 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
             {[
               { label: "供应商总数", value: supplierSummary.total, tone: "#2563eb" },
               { label: "优选/战略", value: supplierSummary.preferredCount, tone: "#16a34a" },
+              { label: "核心供应商", value: supplierSummary.performanceCounts.core, tone: SUPPLIER_PERFORMANCE_META.core.tone },
+              { label: "待验证", value: supplierSummary.performanceCounts.trial, tone: SUPPLIER_PERFORMANCE_META.trial.tone },
+              { label: "高风险", value: supplierSummary.riskCounts.high, tone: SUPPLIER_RISK_META.high.tone },
               { label: "平均交期", value: supplierSummary.avgLeadDays === null ? "-" : `${supplierSummary.avgLeadDays} 天`, tone: "#64748b" },
               { label: "关联商品", value: supplierSummary.totalSkuCount, tone: "#0891b2" },
               { label: "1688 货源", value: supplierSummary.totalMappedSkuCount, tone: "#7c3aed" },
@@ -2091,14 +2481,24 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
             <Col xs={12} sm={8} md={3}>
               <Select
                 allowClear
-                placeholder="来源"
+                placeholder="绩效分层"
                 style={{ width: "100%" }}
-                value={supplierFilters.source}
-                options={supplierSourceOptions}
-                onChange={(value) => setSupplierFilters((current) => ({ ...current, source: value }))}
+                value={supplierFilters.performanceBand}
+                options={SUPPLIER_PERFORMANCE_OPTIONS}
+                onChange={(value) => setSupplierFilters((current) => ({ ...current, performanceBand: value }))}
               />
             </Col>
-            <Col xs={12} sm={8} md={4}>
+            <Col xs={12} sm={8} md={3}>
+              <Select
+                allowClear
+                placeholder="风险等级"
+                style={{ width: "100%" }}
+                value={supplierFilters.riskLevel}
+                options={SUPPLIER_RISK_OPTIONS}
+                onChange={(value) => setSupplierFilters((current) => ({ ...current, riskLevel: value }))}
+              />
+            </Col>
+            <Col xs={12} sm={8} md={3}>
               <Select
                 allowClear
                 showSearch
@@ -2126,7 +2526,7 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
                 onChange={(value) => setSupplierFilters((current) => ({ ...current, attention: value }))}
               />
             </Col>
-            <Col xs={24} md={3}>
+            <Col xs={24} md={2}>
               <Button block disabled={!hasSupplierFilters} onClick={() => setSupplierFilters({ keyword: "" })}>
                 清空
               </Button>
@@ -2138,7 +2538,7 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
             loading={tableLoading}
             columns={supplierColumns}
             dataSource={filteredSuppliers}
-            scroll={{ x: 1500, y: "max(220px, calc(100vh - 540px))" }}
+            scroll={{ x: 1850, y: "max(220px, calc(100vh - 540px))" }}
             pagination={{
               defaultPageSize: 20,
               pageSizeOptions: [10, 20, 50, 100, 200],
@@ -2185,26 +2585,34 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
               </div>
             </Space>
 
-            <div>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-                <span style={{ color: "#0f172a", fontWeight: 600 }}>资料完整度</span>
-                <span style={{ color: "#64748b" }}>{getSkuCompleteness(skuDetailRow)}%</span>
-              </div>
-              <Progress
-                percent={getSkuCompleteness(skuDetailRow)}
-                status={skuDetailIssues.length ? "exception" : "success"}
-                strokeColor={skuDetailIssues.length ? undefined : "#16a34a"}
-              />
-              <Space size={[6, 6]} wrap>
-                {skuDetailIssues.length ? skuDetailIssues.map((issue) => (
-                  <Tag key={issue} color={SKU_ISSUE_META[issue].color}>
-                    {SKU_ISSUE_META[issue].label}
-                  </Tag>
-                )) : (
-                  <Tag color="success">资料完整</Tag>
-                )}
-              </Space>
-            </div>
+            <Descriptions
+              bordered
+              size="small"
+              column={1}
+              items={[
+                { key: "spec", label: "颜色/规格", children: skuDetailRow.colorSpec || skuDetailRow.category || "-" },
+                { key: "store", label: "店铺", children: skuDetailRow.accountName || accountNameById.get(skuDetailRow.accountId || "") || "-" },
+                { key: "supplier", label: "供应商", children: getSkuSupplierText(skuDetailRow) || "-" },
+                { key: "stock", label: "实际库存", children: getSkuStockQty(skuDetailRow) },
+                { key: "location", label: "仓位", children: skuDetailRow.warehouseLocation || skuDetailRow.jstMainBin || "-" },
+                {
+                  key: "cost",
+                  label: "成本价",
+                  children: (
+                    <Button
+                      type="link"
+                      size="small"
+                      icon={<LineChartOutlined />}
+                      onClick={() => setCostDetailRow(skuDetailRow)}
+                      style={{ height: "auto", padding: 0, fontWeight: 700 }}
+                    >
+                      {formatMoney(skuDetailRow.costPrice ?? skuDetailRow.jstCostPrice)}
+                    </Button>
+                  ),
+                },
+                { key: "updated", label: "修改时间", children: formatDateTime(skuDetailRow.jstModifiedAt || skuDetailRow.updatedAt) },
+              ]}
+            />
 
             <div
               style={{
@@ -2227,7 +2635,7 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
                     }}
                   >
                     <Tag color={item.color} style={{ marginInlineEnd: 0 }}>
-                      {item.title.startsWith("待处理") ? "待办" : "记录"}
+                      {item.title.startsWith("问题") ? "问题" : "记录"}
                     </Tag>
                     <div style={{ minWidth: 0 }}>
                       <div style={{ color: "#0f172a", fontWeight: 600, lineHeight: "20px" }}>{item.title}</div>
@@ -2238,28 +2646,148 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
               </Space>
             </div>
 
-            <Descriptions
-              bordered
-              size="small"
-              column={1}
-              items={[
-                { key: "spec", label: "颜色/规格", children: skuDetailRow.colorSpec || skuDetailRow.category || "-" },
-                { key: "store", label: "店铺", children: skuDetailRow.accountName || accountNameById.get(skuDetailRow.accountId || "") || "-" },
-                { key: "supplier", label: "供应商", children: getSkuSupplierText(skuDetailRow) || "-" },
-                { key: "stock", label: "实际库存", children: getSkuStockQty(skuDetailRow) },
-                { key: "location", label: "仓位", children: skuDetailRow.warehouseLocation || skuDetailRow.jstMainBin || "-" },
-                { key: "cost", label: "成本价", children: formatMoney(skuDetailRow.costPrice ?? skuDetailRow.jstCostPrice) },
-                { key: "creator", label: "创建人", children: skuDetailRow.createdByName || skuDetailRow.jstCreator || "-" },
-                { key: "created", label: "创建时间", children: formatDateTime(skuDetailRow.jstCreatedAt || skuDetailRow.createdAt) },
-                { key: "updated", label: "修改时间", children: formatDateTime(skuDetailRow.jstModifiedAt || skuDetailRow.updatedAt) },
-              ]}
-            />
           </Space>
         ) : null}
       </Drawer>
 
       <Drawer
-        title="供应商档案"
+        title="成本价趋势"
+        open={Boolean(costDetailRow)}
+        width={620}
+        onClose={() => setCostDetailRow(null)}
+        destroyOnClose
+      >
+        {costDetailRow ? (
+          <Space direction="vertical" size={16} style={{ width: "100%" }}>
+            <Space align="start" size={12}>
+              {renderSkuImage(costDetailRow, 64)}
+              <div style={{ minWidth: 0 }}>
+                <div style={{ color: "#0f172a", fontSize: 16, fontWeight: 700, lineHeight: "24px" }}>
+                  {costDetailRow.productName || "-"}
+                </div>
+                <div style={{ color: "#64748b", marginTop: 4 }}>
+                  {costDetailRow.internalSkuCode || costDetailRow.id}
+                </div>
+                <div style={{ color: "#64748b", fontSize: 12, marginTop: 6 }}>
+                  {costDetailRow.colorSpec || costDetailRow.category || "-"}
+                </div>
+              </div>
+            </Space>
+
+            <div
+              style={{
+                border: "1px solid #e5e7eb",
+                borderRadius: 6,
+                display: "flex",
+                justifyContent: "space-between",
+                gap: 16,
+                padding: 12,
+              }}
+            >
+              <div>
+                <div style={{ color: "#64748b", fontSize: 12 }}>当前成本</div>
+                <div style={{ color: "#0f172a", fontSize: 20, fontWeight: 700, marginTop: 4 }}>
+                  {formatMoney(getSkuCostPrice(costDetailRow))}
+                </div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ color: "#64748b", fontSize: 12 }}>变化</div>
+                <div style={{ color: costChangeSummary?.color || "#64748b", fontSize: 16, fontWeight: 700, marginTop: 4 }}>
+                  {costChangeSummary
+                    ? `${costChangeSummary.label} ${formatMoney(Math.abs(costChangeSummary.diff))}`
+                    : "暂无"}
+                </div>
+                {costChangeSummary?.rate !== null && costChangeSummary?.rate !== undefined ? (
+                  <div style={{ color: "#64748b", fontSize: 12, marginTop: 2 }}>
+                    {costChangeSummary.rate.toFixed(1)}%
+                  </div>
+                ) : null}
+              </div>
+            </div>
+
+            <div style={{ border: "1px solid #e5e7eb", borderRadius: 6, padding: 12 }}>
+              <div style={{ color: "#0f172a", fontWeight: 700, marginBottom: 10 }}>趋势</div>
+              <div style={{ height: 220 }}>
+                {costTrendData.length ? (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={costTrendData} margin={{ top: 10, right: 16, left: 0, bottom: 8 }}>
+                      <CartesianGrid stroke="#eef2f7" vertical={false} />
+                      <XAxis dataKey="chartLabel" tick={{ fill: "#64748b", fontSize: 12 }} axisLine={false} tickLine={false} />
+                      <YAxis
+                        width={72}
+                        tick={{ fill: "#64748b", fontSize: 12 }}
+                        axisLine={false}
+                        tickLine={false}
+                        tickFormatter={(value) => formatMoney(value)}
+                      />
+                      <RechartsTooltip formatter={(value) => [formatMoney(value as number | string), "成本价"]} />
+                      <Line
+                        type="monotone"
+                        dataKey="price"
+                        stroke="#2563eb"
+                        strokeWidth={2}
+                        dot={{ r: 4, strokeWidth: 2 }}
+                        activeDot={{ r: 5 }}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div
+                    style={{
+                      height: "100%",
+                      border: "1px dashed #d8dee9",
+                      borderRadius: 6,
+                      color: "#94a3b8",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                    }}
+                  >
+                    暂无成本记录
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div style={{ border: "1px solid #e5e7eb", borderRadius: 6, padding: 12 }}>
+              <div style={{ color: "#0f172a", fontWeight: 700, marginBottom: 10 }}>明细</div>
+              {costDetailRecords.length ? (
+                <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                  {costDetailRecords.map((record) => (
+                    <div
+                      key={record.key}
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "120px minmax(0, 1fr) 110px",
+                        gap: 10,
+                        alignItems: "center",
+                        borderBottom: "1px solid #f1f5f9",
+                        paddingBottom: 8,
+                      }}
+                    >
+                      <Tag color={record.key === "erp" ? "blue" : "default"} style={{ marginInlineEnd: 0 }}>
+                        {record.note}
+                      </Tag>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ color: "#0f172a", fontWeight: 600 }}>{record.label}</div>
+                        <div style={{ color: "#64748b", fontSize: 12, marginTop: 2 }}>{formatDateTime(record.at)}</div>
+                      </div>
+                      <div style={{ color: "#0f172a", fontWeight: 700, textAlign: "right" }}>
+                        {formatMoney(record.amount)}
+                      </div>
+                    </div>
+                  ))}
+                </Space>
+              ) : (
+                <div style={{ color: "#94a3b8" }}>还没有可展示的成本明细。</div>
+              )}
+            </div>
+          </Space>
+        ) : null}
+      </Drawer>
+
+      <Drawer
+        title="供应商工作日志"
         open={Boolean(supplierDetailRow)}
         width={620}
         onClose={() => setSupplierDetailRow(null)}
@@ -2267,14 +2795,40 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
       >
         {supplierDetailRow ? (
           <Space direction="vertical" size={16} style={{ width: "100%" }}>
+            {(() => {
+              const riskLevel = getSupplierRiskLevel(supplierDetailRow);
+              const riskMeta = SUPPLIER_RISK_META[riskLevel];
+              const riskScore = getSupplierRiskScore(supplierDetailRow);
+              const riskSignals = getSupplierRiskSignals(supplierDetailRow);
+              return (
+                <Alert
+                  type={riskLevel === "high" ? "error" : riskLevel === "medium" ? "warning" : "success"}
+                  showIcon
+                  message={`供应商风险：${riskMeta.label}（${riskScore} 分）`}
+                  description={riskSignals.length
+                    ? riskSignals.map((item) => item.detail).join("；")
+                    : "资料、结算和货源关系完整，可正常进入采购履约。"}
+                />
+              );
+            })()}
+            {(() => {
+              const band = getSupplierPerformanceBand(supplierDetailRow);
+              const meta = SUPPLIER_PERFORMANCE_META[band];
+              const score = getSupplierPerformanceScore(supplierDetailRow);
+              return (
+                <Alert
+                  type={band === "governance" ? "warning" : band === "core" ? "success" : "info"}
+                  showIcon
+                  message={`ERP 绩效分层：${meta.label}（${score} 分）`}
+                  description={`${meta.detail} ${getSupplierPerformanceReasons(supplierDetailRow).join("；")}。`}
+                />
+              );
+            })()}
             <div>
               <Space size={[6, 6]} wrap>
                 <span style={{ color: "#0f172a", fontSize: 18, fontWeight: 700 }}>{supplierDetailRow.name}</span>
                 <Tag color={supplierLevelMeta(supplierDetailRow.supplierLevel).color}>
                   {supplierLevelMeta(supplierDetailRow.supplierLevel).label}
-                </Tag>
-                <Tag color={getSupplierSourceLabel(supplierDetailRow) === "聚水潭" ? "blue" : "default"}>
-                  {getSupplierSourceLabel(supplierDetailRow)}
                 </Tag>
                 <Tag color={statusColor(supplierDetailRow.status)}>{statusLabel(supplierDetailRow.status)}</Tag>
               </Space>
@@ -2283,7 +2837,7 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
 
             <div>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-                <span style={{ color: "#0f172a", fontWeight: 600 }}>档案健康度</span>
+                <span style={{ color: "#0f172a", fontWeight: 600 }}>资料健康度</span>
                 <span style={{ color: "#64748b" }}>{getSupplierCompleteness(supplierDetailRow)}%</span>
               </div>
               <Progress
@@ -2300,8 +2854,40 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
                     </Tooltip>
                   );
                 }) : (
-                  <Tag color="success">档案完整</Tag>
+                  <Tag color="success">资料完整</Tag>
                 )}
+              </Space>
+            </div>
+
+            <div
+              style={{
+                border: "1px solid #e5e7eb",
+                borderRadius: 6,
+                background: "#fff",
+                padding: 12,
+              }}
+            >
+              <div style={{ color: "#0f172a", fontWeight: 700, marginBottom: 10 }}>工作日志</div>
+              <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                {supplierDetailWorkLogItems.map((item) => (
+                  <div
+                    key={item.key}
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "auto minmax(0, 1fr)",
+                      gap: 8,
+                      alignItems: "start",
+                    }}
+                  >
+                    <Tag color={item.color} style={{ marginInlineEnd: 0 }}>
+                      {item.title.startsWith("问题") ? "问题" : "记录"}
+                    </Tag>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ color: "#0f172a", fontWeight: 600, lineHeight: "20px" }}>{item.title}</div>
+                      <div style={{ color: "#64748b", fontSize: 12, lineHeight: "18px", marginTop: 2 }}>{item.description}</div>
+                    </div>
+                  </div>
+                ))}
               </Space>
             </div>
 
@@ -2315,6 +2901,8 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
               {[
                 { label: "关联商品", value: Number(supplierDetailRow.skuCount || 0) },
                 { label: "1688 货源", value: Number(supplierDetailRow.mappedSkuCount || 0) },
+                { label: "货源覆盖", value: `${getSupplierMappedRate(supplierDetailRow)}%` },
+                { label: "绩效得分", value: getSupplierPerformanceScore(supplierDetailRow) },
                 { label: "采购单", value: Number(supplierDetailRow.purchaseOrderCount || 0) },
                 { label: "采购金额", value: formatMoney(supplierDetailRow.purchaseAmount) },
               ].map((item) => (
@@ -2341,6 +2929,7 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
               items={[
                 { key: "code", label: "供应商编码", children: supplierDetailRow.supplierCode || "-" },
                 { key: "level", label: "供应商等级", children: supplierLevelMeta(supplierDetailRow.supplierLevel).label },
+                { key: "performance", label: "绩效分层", children: SUPPLIER_PERFORMANCE_META[getSupplierPerformanceBand(supplierDetailRow)].label },
                 { key: "contact", label: "联系人", children: supplierDetailRow.contactName || "-" },
                 { key: "phone", label: "电话", children: supplierDetailRow.phone || "-" },
                 { key: "wechat", label: "微信", children: supplierDetailRow.wechat || "-" },

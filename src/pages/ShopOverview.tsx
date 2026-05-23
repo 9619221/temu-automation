@@ -14,7 +14,7 @@ import {
   Segmented,
   message,
 } from "antd";
-import { ReloadOutlined } from "@ant-design/icons";
+import { CloudSyncOutlined, ReloadOutlined, RiseOutlined, ShopOutlined, WarningOutlined } from "@ant-design/icons";
 import { parseDashboardData, parseFluxData, parseSalesData } from "../utils/parseRawApis";
 import { APP_SETTINGS_KEY, normalizeAppSettings } from "../utils/appSettings";
 import {
@@ -33,8 +33,31 @@ import StatCard from "../components/StatCard";
 import EmptyGuide from "../components/EmptyGuide";
 import FluxOperatorPanel from "../components/FluxOperatorPanel";
 import type { RegionKey } from "../utils/fluxOperator";
+import {
+  fetchCloudShopMonitor,
+  fetchTemuAfterSales,
+  fetchTemuActivity,
+  fetchTemuOperationRisks,
+  fetchTemuStockOrders,
+  loadCloudConfig,
+  type CloudShopMonitorPayload,
+  type CloudShopMonitorRow,
+  type TemuAfterSaleRow,
+  type TemuAfterSaleSummaryRow,
+  type TemuActivityRow,
+  type TemuActivitySummaryRow,
+  type TemuOperationRiskRow,
+  type TemuOperationRiskSummaryRow,
+  type TemuStockOrderRow,
+  type TemuStockOrderSummaryRow,
+} from "../utils/cloudClient";
 
 const { Text, Paragraph } = Typography;
+
+void CloudSyncOutlined;
+void RiseOutlined;
+void ShopOutlined;
+void WarningOutlined;
 
 const store = window.electronAPI?.store;
 
@@ -108,6 +131,93 @@ function extractFluxSummary(rawData: any) {
   };
 }
 
+function formatCloudNumber(value: unknown) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "-";
+  return num.toLocaleString("zh-CN");
+}
+
+function formatCloudRate(value: unknown) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "-";
+  const percent = Math.abs(num) <= 1 ? num * 100 : num;
+  return `${percent.toFixed(2)}%`;
+}
+
+function formatCloudMoney(cents?: number | null, currency?: string | null) {
+  if (cents === null || cents === undefined) return "-";
+  return `${(Number(cents) / 100).toFixed(2)} ${currency || "CNY"}`;
+}
+
+function formatCloudTime(value?: string | number | null) {
+  if (!value) return "-";
+  const date = typeof value === "number" ? new Date(value) : new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString("zh-CN");
+}
+
+function cloudActivityLabel(value?: string | null) {
+  const labels: Record<string, string> = {
+    activity: "活动",
+    bidding: "竞价",
+    coupon: "优惠券",
+    bsr: "BSR",
+    marketing: "营销",
+  };
+  return labels[String(value || "")] || value || "-";
+}
+
+function cloudRiskLabel(value?: string | null) {
+  const labels: Record<string, string> = {
+    violation_goods: "违规商品",
+    delivery_order: "发货履约",
+    logistics_feedback: "物流反馈",
+    spot_check: "质检抽检",
+    spot_check_history: "历史质检",
+    inbound_exception: "入库异常",
+    return_package: "退货包裹",
+    high_price_flow: "高价限流",
+    regional_sales: "区域销售",
+    operation: "运营风险",
+  };
+  return labels[String(value || "")] || value || "风险";
+}
+
+function cloudRiskColor(value?: string | null) {
+  if (value === "high") return "red";
+  if (value === "medium") return "orange";
+  return "default";
+}
+
+function cloudActivityStatusColor(value?: string | null) {
+  const text = String(value || "").toLowerCase();
+  if (/reject|fail|cancel|disable|close|end|expired|驳回|失败|取消|结束/.test(text)) return "red";
+  if (/pass|success|approved|active|online|running|available|通过|成功|进行|生效/.test(text)) return "green";
+  if (/pending|wait|review|audit|待|审核/.test(text)) return "orange";
+  return "blue";
+}
+
+function cloudBusinessStatusColor(value?: string | null) {
+  const text = String(value || "").toLowerCase();
+  if (/abnormal|cancel|close|fail|reject|timeout|取消|关闭|拒绝|失败|退回|异常|逾期|超时|驳回/.test(text)) return "red";
+  if (/complete|done|finish|signed|success|完成|通过|签收|已发|已入库|成功/.test(text)) return "green";
+  if (/audit|pending|processing|review|wait|待|处理中|审核|取件|发货|入库/.test(text)) return "orange";
+  return "default";
+}
+
+function isDiagnosticCloudText(value?: string | null) {
+  const text = String(value || "").trim();
+  if (!text) return false;
+  return (
+    text.startsWith("MALL-DBG")
+    || text.startsWith("MALL-EXT-E2E")
+    || text.startsWith("SKC-DBG")
+    || text.includes("EXT-E2E")
+    || text.toLowerCase().includes("debug")
+    || text.toLowerCase().includes("codex extension e2e")
+  );
+}
+
 const ShopOverview: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [dashboard, setDashboard] = useState<any>(null);
@@ -128,6 +238,18 @@ const ShopOverview: React.FC = () => {
   const [qcDetail, setQcDetail] = useState<any>(null);
   const [diagnostics, setDiagnostics] = useState<CollectionDiagnostics | null>(null);
   const [productHistoryCache, setProductHistoryCache] = useState<Record<string, any> | null>(null);
+  const [cloudConfigured, setCloudConfigured] = useState(false);
+  const [cloudError, setCloudError] = useState("");
+  const [cloudMonitorRows, setCloudMonitorRows] = useState<CloudShopMonitorRow[]>([]);
+  const [cloudMonitorTotals, setCloudMonitorTotals] = useState<CloudShopMonitorPayload["totals"] | null>(null);
+  const [cloudActivities, setCloudActivities] = useState<TemuActivityRow[]>([]);
+  const [cloudActivitySummary, setCloudActivitySummary] = useState<TemuActivitySummaryRow[]>([]);
+  const [cloudRisks, setCloudRisks] = useState<TemuOperationRiskRow[]>([]);
+  const [cloudRiskSummary, setCloudRiskSummary] = useState<TemuOperationRiskSummaryRow[]>([]);
+  const [cloudStockOrders, setCloudStockOrders] = useState<TemuStockOrderRow[]>([]);
+  const [cloudStockOrderSummary, setCloudStockOrderSummary] = useState<TemuStockOrderSummaryRow[]>([]);
+  const [cloudAfterSales, setCloudAfterSales] = useState<TemuAfterSaleRow[]>([]);
+  const [cloudAfterSaleSummary, setCloudAfterSaleSummary] = useState<TemuAfterSaleSummaryRow[]>([]);
 
   // 商品动态 / 库存预警
   const [lowStockItems, setLowStockItems] = useState<any[]>([]);
@@ -154,6 +276,18 @@ const ShopOverview: React.FC = () => {
     setQualityEU(null);
     setCheckup(null);
     setQcDetail(null);
+    setCloudConfigured(false);
+    setCloudError("");
+    setCloudMonitorRows([]);
+    setCloudMonitorTotals(null);
+    setCloudActivities([]);
+    setCloudActivitySummary([]);
+    setCloudRisks([]);
+    setCloudRiskSummary([]);
+    setCloudStockOrders([]);
+    setCloudStockOrderSummary([]);
+    setCloudAfterSales([]);
+    setCloudAfterSaleSummary([]);
     try {
       const storeValues = await getStoreValues(store, [
         "temu_dashboard",
@@ -219,6 +353,35 @@ const ShopOverview: React.FC = () => {
       const appSettings = normalizeAppSettings(appSettingsRaw);
       setStockThreshold(appSettings.lowStockThreshold);
       setSavedStockThreshold(appSettings.lowStockThreshold);
+
+      try {
+        const cfg = await loadCloudConfig();
+        if (!cfg) {
+          setCloudConfigured(false);
+        } else {
+          setCloudConfigured(true);
+          const [monitorResult, activityResult, riskResult, stockOrderResult, afterSaleResult] = await Promise.all([
+            fetchCloudShopMonitor(cfg),
+            fetchTemuActivity(cfg, { limit: 500 }),
+            fetchTemuOperationRisks(cfg, { limit: 500 }),
+            fetchTemuStockOrders(cfg, { limit: 500 }),
+            fetchTemuAfterSales(cfg, { limit: 500 }),
+          ]);
+          setCloudMonitorRows((monitorResult.rows || []).filter((row) => !isDiagnosticCloudText(row.mall_id)));
+          setCloudMonitorTotals(monitorResult.totals || null);
+          setCloudActivities((activityResult.rows || []).filter((row) => !isDiagnosticCloudText(row.mall_id) && !isDiagnosticCloudText(row.skc_id)));
+          setCloudActivitySummary(activityResult.summary || []);
+          setCloudRisks((riskResult.rows || []).filter((row) => !isDiagnosticCloudText(row.mall_id) && !isDiagnosticCloudText(row.skc_id)));
+          setCloudRiskSummary(riskResult.summary || []);
+          setCloudStockOrders((stockOrderResult.rows || []).filter((row) => !isDiagnosticCloudText(row.mall_id) && !isDiagnosticCloudText(row.skc_id)));
+          setCloudStockOrderSummary(stockOrderResult.summary || []);
+          setCloudAfterSales((afterSaleResult.rows || []).filter((row) => !isDiagnosticCloudText(row.mall_id) && !isDiagnosticCloudText(row.skc_id)));
+          setCloudAfterSaleSummary(afterSaleResult.summary || []);
+        }
+      } catch (error: any) {
+        setCloudConfigured(true);
+        setCloudError(error?.message || "云端店铺数据读取失败");
+      }
     } catch (e) {
       console.error("加载店铺概览数据失败", e);
       setDiagnostics(null);
@@ -340,9 +503,262 @@ const ShopOverview: React.FC = () => {
     getCollectionDataIssue(diagnostics, "qcDetail", "抽检结果", Boolean(qcDetail)),
   ].filter((issue): issue is string => Boolean(issue));
 
+  const cloudActivityCount = cloudActivities.length || cloudActivitySummary.reduce((sum, row) => sum + Number(row.count || 0), 0);
+  const cloudRiskCount = cloudRisks.length || cloudRiskSummary.reduce((sum, row) => sum + Number(row.count || 0), 0);
+  const cloudHighRiskCount = cloudRisks.filter((row) => row.severity === "high").length
+    || cloudRiskSummary.filter((row) => row.severity === "high").reduce((sum, row) => sum + Number(row.count || 0), 0);
+  const cloudQualityRisks = cloudRisks.filter((row) => ["spot_check", "spot_check_history", "violation_goods", "return_package"].includes(String(row.risk_type || "")));
+  const cloudDeliveryRisks = cloudRisks.filter((row) => ["delivery_order", "logistics_feedback", "inbound_exception"].includes(String(row.risk_type || "")));
+  const cloudPendingAfterSaleCount = cloudAfterSales.filter((row) => cloudBusinessStatusColor(row.status) !== "green").length;
+  const cloudPendingStockOrderCount = cloudStockOrders.filter((row) => cloudBusinessStatusColor(row.temu_status) !== "green").length;
+  const cloudStockDemandQty = cloudStockOrders.reduce((sum, row) => sum + Number(row.demand_qty || 0), 0);
+  const cloudStockDeliveredQty = cloudStockOrders.reduce((sum, row) => sum + Number(row.delivered_qty || 0), 0);
+  const cloudLatestAt = [
+    ...cloudMonitorRows.flatMap((row) => [row.last_seen, row.last_updated_at, row.last_flow_at, row.last_activity_at, row.last_risk_at, row.last_stock_order_at, row.last_after_sale_at]),
+    ...cloudActivities.map((row) => row.last_updated_at),
+    ...cloudRisks.map((row) => row.last_updated_at),
+    ...cloudStockOrders.map((row) => row.last_updated_at),
+    ...cloudAfterSales.map((row) => row.last_updated_at),
+  ]
+    .filter(Boolean)
+    .sort((left, right) => String(right).localeCompare(String(left)))[0] || "";
+  const cloudTotals = cloudMonitorTotals || cloudMonitorRows.reduce((acc, row) => ({
+    mall_count: acc.mall_count + 1,
+    capture_count_24h: acc.capture_count_24h + Number(row.capture_count_24h || 0),
+    device_count: acc.device_count,
+    sale_volume: acc.sale_volume + Number(row.sale_volume || 0),
+    seven_days_sale_volume: acc.seven_days_sale_volume + Number(row.seven_days_sale_volume || 0),
+    thirty_days_sale_volume: acc.thirty_days_sale_volume + Number(row.thirty_days_sale_volume || 0),
+    on_sale_product_number: acc.on_sale_product_number + Number(row.on_sale_product_number || 0),
+    lack_skc_number: acc.lack_skc_number + Number(row.lack_skc_number || 0),
+    advice_prepare_skc_number: acc.advice_prepare_skc_number + Number(row.advice_prepare_skc_number || 0),
+    already_sold_out_number: acc.already_sold_out_number + Number(row.already_sold_out_number || 0),
+    flow_product_count: acc.flow_product_count + Number(row.flow_product_count || 0),
+    flow_expose_num: acc.flow_expose_num + Number(row.flow_expose_num || 0),
+    flow_click_num: acc.flow_click_num + Number(row.flow_click_num || 0),
+    flow_detail_visit_num: acc.flow_detail_visit_num + Number(row.flow_detail_visit_num || 0),
+    flow_detail_visitor_num: acc.flow_detail_visitor_num + Number(row.flow_detail_visitor_num || 0),
+    flow_add_to_cart_user_num: acc.flow_add_to_cart_user_num + Number(row.flow_add_to_cart_user_num || 0),
+    flow_collect_user_num: acc.flow_collect_user_num + Number(row.flow_collect_user_num || 0),
+    flow_pay_goods_num: acc.flow_pay_goods_num + Number(row.flow_pay_goods_num || 0),
+    flow_pay_order_num: acc.flow_pay_order_num + Number(row.flow_pay_order_num || 0),
+    flow_buyer_num: acc.flow_buyer_num + Number(row.flow_buyer_num || 0),
+    flow_expose_pay_conversion_rate: acc.flow_expose_pay_conversion_rate,
+    flow_expose_click_conversion_rate: acc.flow_expose_click_conversion_rate,
+    flow_click_pay_conversion_rate: acc.flow_click_pay_conversion_rate,
+    flow_search_expose_num: acc.flow_search_expose_num + Number(row.flow_search_expose_num || 0),
+    flow_search_click_num: acc.flow_search_click_num + Number(row.flow_search_click_num || 0),
+    flow_search_pay_goods_num: acc.flow_search_pay_goods_num + Number(row.flow_search_pay_goods_num || 0),
+    flow_search_pay_order_num: acc.flow_search_pay_order_num + Number(row.flow_search_pay_order_num || 0),
+    flow_recommend_expose_num: acc.flow_recommend_expose_num + Number(row.flow_recommend_expose_num || 0),
+    flow_recommend_click_num: acc.flow_recommend_click_num + Number(row.flow_recommend_click_num || 0),
+    flow_recommend_pay_goods_num: acc.flow_recommend_pay_goods_num + Number(row.flow_recommend_pay_goods_num || 0),
+    flow_recommend_pay_order_num: acc.flow_recommend_pay_order_num + Number(row.flow_recommend_pay_order_num || 0),
+    activity_count: acc.activity_count + Number(row.activity_count || 0),
+    risk_count: acc.risk_count + Number(row.risk_count || 0),
+    high_risk_count: acc.high_risk_count + Number(row.high_risk_count || 0),
+    stock_order_count: acc.stock_order_count + Number(row.stock_order_count || 0),
+    pending_stock_order_count: acc.pending_stock_order_count + Number(row.pending_stock_order_count || 0),
+    stock_order_demand_qty: acc.stock_order_demand_qty + Number(row.stock_order_demand_qty || 0),
+    stock_order_delivered_qty: acc.stock_order_delivered_qty + Number(row.stock_order_delivered_qty || 0),
+    after_sale_count: acc.after_sale_count + Number(row.after_sale_count || 0),
+    pending_after_sale_count: acc.pending_after_sale_count + Number(row.pending_after_sale_count || 0),
+    return_package_count: acc.return_package_count + Number(row.return_package_count || 0),
+    after_sale_quantity: acc.after_sale_quantity + Number(row.after_sale_quantity || 0),
+    after_sale_amount_cents: acc.after_sale_amount_cents + Number(row.after_sale_amount_cents || 0),
+  }), {
+    mall_count: 0,
+    capture_count_24h: 0,
+    device_count: 0,
+    sale_volume: 0,
+    seven_days_sale_volume: 0,
+    thirty_days_sale_volume: 0,
+    on_sale_product_number: 0,
+    lack_skc_number: 0,
+    advice_prepare_skc_number: 0,
+    already_sold_out_number: 0,
+    flow_product_count: 0,
+    flow_expose_num: 0,
+    flow_click_num: 0,
+    flow_detail_visit_num: 0,
+    flow_detail_visitor_num: 0,
+    flow_add_to_cart_user_num: 0,
+    flow_collect_user_num: 0,
+    flow_pay_goods_num: 0,
+    flow_pay_order_num: 0,
+    flow_buyer_num: 0,
+    flow_expose_pay_conversion_rate: null,
+    flow_expose_click_conversion_rate: null,
+    flow_click_pay_conversion_rate: null,
+    flow_search_expose_num: 0,
+    flow_search_click_num: 0,
+    flow_search_pay_goods_num: 0,
+    flow_search_pay_order_num: 0,
+    flow_recommend_expose_num: 0,
+    flow_recommend_click_num: 0,
+    flow_recommend_pay_goods_num: 0,
+    flow_recommend_pay_order_num: 0,
+    activity_count: 0,
+    risk_count: 0,
+    high_risk_count: 0,
+    stock_order_count: 0,
+    pending_stock_order_count: 0,
+    stock_order_demand_qty: 0,
+    stock_order_delivered_qty: 0,
+    after_sale_count: 0,
+    pending_after_sale_count: 0,
+    return_package_count: 0,
+    after_sale_quantity: 0,
+    after_sale_amount_cents: 0,
+  });
+
+  const renderCloudMonitorPanel = () => (
+    <div className="app-panel">
+      <div className="app-panel__title">
+        <div className="app-panel__title-main">云端店铺监控</div>
+        <div className="app-panel__title-sub">{cloudLatestAt ? `最近更新：${formatCloudTime(cloudLatestAt)}` : ""}</div>
+      </div>
+      {!cloudConfigured ? (
+        <Alert type="warning" showIcon message="云端未配置" />
+      ) : cloudError ? (
+        <Alert type="warning" showIcon message="云端读取失败" description={cloudError} />
+      ) : (
+        <Space direction="vertical" size={16} style={{ width: "100%" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
+            <StatCard compact title="云端店铺" value={formatCloudNumber(cloudTotals.mall_count || cloudMonitorRows.length)} color="brand" />
+            <StatCard compact title="24小时上报" value={formatCloudNumber(cloudTotals.capture_count_24h)} color="blue" />
+            <StatCard compact title="采集设备" value={formatCloudNumber(cloudTotals.device_count)} color="purple" />
+            <StatCard compact title="今日销量" value={formatCloudNumber(cloudTotals.sale_volume)} color="success" />
+            <StatCard compact title="30日销量" value={formatCloudNumber(cloudTotals.thirty_days_sale_volume)} color="success" />
+            <StatCard compact title="曝光" value={formatCloudNumber(cloudTotals.flow_expose_num)} color="blue" />
+            <StatCard compact title="点击" value={formatCloudNumber(cloudTotals.flow_click_num)} color="blue" />
+            <StatCard compact title="买家" value={formatCloudNumber(cloudTotals.flow_buyer_num)} color="purple" />
+            <StatCard compact title="点击率" value={formatCloudRate(cloudTotals.flow_expose_click_conversion_rate)} color="brand" />
+            <StatCard compact title="活动快照" value={formatCloudNumber(cloudTotals.activity_count || cloudActivityCount)} color="orange" />
+            <StatCard compact title="风险快照" value={formatCloudNumber(cloudTotals.risk_count || cloudRiskCount)} color={(cloudTotals.high_risk_count || cloudHighRiskCount) ? "danger" : "neutral"} />
+            <StatCard compact title="待发备货单" value={formatCloudNumber(cloudTotals.pending_stock_order_count)} color={cloudTotals.pending_stock_order_count ? "orange" : "neutral"} />
+            <StatCard compact title="售后待处理" value={formatCloudNumber(cloudTotals.pending_after_sale_count || cloudTotals.after_sale_count)} color={cloudTotals.pending_after_sale_count ? "danger" : cloudTotals.after_sale_count ? "orange" : "neutral"} />
+          </div>
+          {cloudMonitorRows.length > 0 ? (
+            <Table
+              rowKey={(row: CloudShopMonitorRow) => row.mall_id}
+              dataSource={cloudMonitorRows}
+              size="small"
+              pagination={false}
+              scroll={{ x: 1760 }}
+              columns={[
+                {
+                  title: "店铺",
+                  key: "mall",
+                  width: 180,
+                  render: (_value: any, row: CloudShopMonitorRow) => (
+                    <Space direction="vertical" size={0}>
+                      <Text strong>{row.mall_name || row.mall_id || "-"}</Text>
+                      {row.mall_name ? <Text type="secondary" style={{ fontSize: 12 }}>{row.mall_id}</Text> : null}
+                      <Text type="secondary" style={{ fontSize: 12 }}>{row.site || "-"}</Text>
+                    </Space>
+                  ),
+                },
+                { title: "统计日", dataIndex: "stat_date", key: "date", width: 120 },
+                { title: "在售商品", dataIndex: "on_sale_product_number", key: "onSale", width: 110, render: formatCloudNumber },
+                { title: "今日销量", dataIndex: "sale_volume", key: "sale", width: 110, render: formatCloudNumber },
+                { title: "7日销量", dataIndex: "seven_days_sale_volume", key: "seven", width: 110, render: formatCloudNumber },
+                { title: "30日销量", dataIndex: "thirty_days_sale_volume", key: "thirty", width: 110, render: formatCloudNumber },
+                {
+                  title: "流量",
+                  key: "flow",
+                  width: 170,
+                  render: (_value: any, row: CloudShopMonitorRow) => (
+                    <Space direction="vertical" size={2}>
+                      <Text>曝 {formatCloudNumber(row.flow_expose_num)} / 点 {formatCloudNumber(row.flow_click_num)}</Text>
+                      <Text type="secondary" style={{ fontSize: 12 }}>访客 {formatCloudNumber(row.flow_detail_visitor_num)}</Text>
+                    </Space>
+                  ),
+                },
+                {
+                  title: "转化",
+                  key: "flowConversion",
+                  width: 160,
+                  render: (_value: any, row: CloudShopMonitorRow) => (
+                    <Space direction="vertical" size={2}>
+                      <Text>买家 {formatCloudNumber(row.flow_buyer_num)} / 件 {formatCloudNumber(row.flow_pay_goods_num)}</Text>
+                      <Text type="secondary" style={{ fontSize: 12 }}>点击支付 {formatCloudRate(row.flow_click_pay_conversion_rate)}</Text>
+                    </Space>
+                  ),
+                },
+                {
+                  title: "库存预警",
+                  key: "stock",
+                  width: 180,
+                  render: (_value: any, row: CloudShopMonitorRow) => (
+                    <Space size={4} wrap>
+                      <Tag color={Number(row.lack_skc_number || 0) > 0 ? "red" : "default"}>缺货 {formatCloudNumber(row.lack_skc_number)}</Tag>
+                      <Tag color={Number(row.advice_prepare_skc_number || 0) > 0 ? "orange" : "default"}>备货 {formatCloudNumber(row.advice_prepare_skc_number)}</Tag>
+                      <Tag color={Number(row.already_sold_out_number || 0) > 0 ? "red" : "default"}>售罄 {formatCloudNumber(row.already_sold_out_number)}</Tag>
+                    </Space>
+                  ),
+                },
+                {
+                  title: "活动/风险",
+                  key: "activityRisk",
+                  width: 170,
+                  render: (_value: any, row: CloudShopMonitorRow) => (
+                    <Space size={4} wrap>
+                      <Tag color={Number(row.activity_count || 0) > 0 ? "blue" : "default"}>活动 {formatCloudNumber(row.activity_count)}</Tag>
+                      <Tag color={Number(row.high_risk_count || 0) > 0 ? "red" : Number(row.risk_count || 0) > 0 ? "orange" : "default"}>
+                        风险 {formatCloudNumber(row.risk_count)}
+                      </Tag>
+                    </Space>
+                  ),
+                },
+                {
+                  title: "备货单",
+                  key: "stockOrders",
+                  width: 170,
+                  render: (_value: any, row: CloudShopMonitorRow) => (
+                    <Space direction="vertical" size={2}>
+                      <Text>{formatCloudNumber(row.pending_stock_order_count)} / {formatCloudNumber(row.stock_order_count)} 单待处理</Text>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {formatCloudNumber(row.stock_order_delivered_qty)} / {formatCloudNumber(row.stock_order_demand_qty)} 已发
+                      </Text>
+                    </Space>
+                  ),
+                },
+                {
+                  title: "售后退货",
+                  key: "afterSales",
+                  width: 190,
+                  render: (_value: any, row: CloudShopMonitorRow) => (
+                    <Space direction="vertical" size={2}>
+                      <Text>
+                        {formatCloudNumber(row.pending_after_sale_count)} / {formatCloudNumber(row.after_sale_count)} 单待处理
+                      </Text>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        退货包裹 {formatCloudNumber(row.return_package_count)} / 件 {formatCloudNumber(row.after_sale_quantity)}
+                      </Text>
+                      {Number(row.after_sale_amount_cents || 0) > 0 ? (
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          金额 {(Number(row.after_sale_amount_cents || 0) / 100).toFixed(2)}
+                        </Text>
+                      ) : null}
+                    </Space>
+                  ),
+                },
+                { title: "最近上报", dataIndex: "last_seen", key: "seen", width: 180, render: formatCloudTime },
+              ]}
+            />
+          ) : (
+            <EmptyGuide title="暂无云端店铺快照" description="扩展上报店铺概览或销售管理数据后会显示" />
+          )}
+        </Space>
+      )}
+    </div>
+  );
+
   // ========== Tab 1: 数据概览 ==========
   const renderOverviewTab = () => (
-    <Space direction="vertical" size="large" style={{ width: "100%" }}>
+    <div className="shop-overview-dashboard">
+      {renderCloudMonitorPanel()}
       {/* 核心统计 */}
       <div className="app-panel">
         <div className="app-panel__title">
@@ -456,7 +872,7 @@ const ShopOverview: React.FC = () => {
               </div>
             </div>
             <div style={{ textAlign: "center" }}>
-              <div style={{ display: "inline-block", padding: 12, borderRadius: "50%", background: "#fff7f0" }}>
+              <div style={{ display: "inline-block", padding: 12, borderRadius: "50%", background: "rgba(26, 115, 232, 0.08)" }}>
                 <Progress
                   type="circle"
                   percent={ranking.saleOutRate ? Math.min(100, ranking.saleOutRate) : 0}
@@ -473,7 +889,7 @@ const ShopOverview: React.FC = () => {
           <EmptyGuide title="暂无排名数据" description="采集数据后将在此展示" />
         )}
       </div>
-    </Space>
+    </div>
   );
 
   // ========== Tab 2: 流量分析（运营助手）==========
@@ -515,9 +931,9 @@ const ShopOverview: React.FC = () => {
               }))}
               columns={[
                 { title: "日期", dataIndex: "date", key: "date", width: 120 },
-                { title: "访客数", dataIndex: "visitors", key: "visitors", render: (v: number) => <span style={{ color: "#1677ff", fontWeight: 600 }}>{v?.toLocaleString() ?? "-"}</span> },
+                { title: "访客数", dataIndex: "visitors", key: "visitors", render: (v: number) => <span style={{ color: "#1a73e8", fontWeight: 600 }}>{v?.toLocaleString() ?? "-"}</span> },
                 { title: "买家数", dataIndex: "buyers", key: "buyers", render: (v: number) => <span style={{ color: "#00b96b", fontWeight: 600 }}>{v?.toLocaleString() ?? "-"}</span> },
-                { title: "转化率", dataIndex: "conversionRate", key: "conversionRate", render: (v: number) => <span style={{ color: "#e55b00", fontWeight: 600 }}>{v ? (v * 100).toFixed(2) + "%" : "-"}</span> },
+                { title: "转化率", dataIndex: "conversionRate", key: "conversionRate", render: (v: number) => <span style={{ color: "#1a73e8", fontWeight: 600 }}>{v ? (v * 100).toFixed(2) + "%" : "-"}</span> },
               ]}
               bordered={false}
               pagination={{ pageSize: 10 }}
@@ -532,9 +948,9 @@ const ShopOverview: React.FC = () => {
   // ========== Tab 3: 质量与履约 ==========
   const scoreEnumMap: Record<number, { label: string; color: string }> = {
     1: { label: "优秀", color: "#00b96b" },
-    2: { label: "良好", color: "#1677ff" },
+    2: { label: "良好", color: "#1a73e8" },
     3: { label: "一般", color: "#faad14" },
-    4: { label: "较差", color: "#ff4d4f" },
+    4: { label: "较差", color: "#ea4335" },
     5: { label: "极差", color: "#cf1322" },
   };
 
@@ -551,6 +967,95 @@ const ShopOverview: React.FC = () => {
           ]}
           style={{ borderRadius: 8 }}
         />
+      </div>
+
+      <div className="app-panel">
+        <div className="app-panel__title">
+          <div>
+            <div className="app-panel__title-main">云端售后与质检</div>
+            <div className="app-panel__title-sub">浏览器扩展上报的售后、退货、抽检、违规风险，按店铺和 SKC 汇总展示。</div>
+          </div>
+        </div>
+        {cloudAfterSales.length > 0 || cloudQualityRisks.length > 0 ? (
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
+              <StatCard compact title="售后记录" value={formatCloudNumber(cloudAfterSales.length)} color="danger" />
+              <StatCard compact title="售后待处理" value={formatCloudNumber(cloudPendingAfterSaleCount)} color={cloudPendingAfterSaleCount ? "danger" : "neutral"} />
+              <StatCard compact title="质检/违规风险" value={formatCloudNumber(cloudQualityRisks.length)} color={cloudQualityRisks.length ? "orange" : "neutral"} />
+            </div>
+            {cloudAfterSaleSummary.length > 0 ? (
+              <Space wrap>
+                {cloudAfterSaleSummary.map((item) => (
+                  <Tag key={`${item.after_sale_type || "after"}-${item.status || "status"}`} color={cloudBusinessStatusColor(item.status)}>
+                    {item.after_sale_type || "售后"} {item.status || "未知"} {formatCloudNumber(item.count)}条
+                  </Tag>
+                ))}
+              </Space>
+            ) : null}
+            {cloudAfterSales.length > 0 ? (
+              <Table
+                rowKey={(row: TemuAfterSaleRow) => row.id || row.row_key}
+                dataSource={cloudAfterSales.slice(0, 120)}
+                size="small"
+                pagination={{ pageSize: 10 }}
+                scroll={{ x: 1260 }}
+                columns={[
+                  {
+                    title: "商品",
+                    key: "product",
+                    width: 360,
+                    render: (_value: any, row: TemuAfterSaleRow) => (
+                      <Space direction="vertical" size={0} style={{ width: "100%" }}>
+                        <Paragraph ellipsis={{ rows: 2, tooltip: row.product_name || "-" }} style={{ marginBottom: 0, fontWeight: 600, lineHeight: 1.4 }}>
+                          {row.product_name || "-"}
+                        </Paragraph>
+                        <Text type="secondary" style={{ fontSize: 12 }}>SKC: {row.skc_id || "-"} / SKU: {row.sku_id || "-"}</Text>
+                      </Space>
+                    ),
+                  },
+                  { title: "类型", dataIndex: "after_sale_type", key: "type", width: 120, render: (value: string | null) => value || "-" },
+                  { title: "状态", dataIndex: "status", key: "status", width: 120, render: (value: string | null) => <Tag color={cloudBusinessStatusColor(value)}>{value || "-"}</Tag> },
+                  { title: "原因", dataIndex: "reason", key: "reason", width: 180, ellipsis: true, render: (value: string | null) => value || "-" },
+                  { title: "数量", dataIndex: "quantity", key: "quantity", width: 90, render: (value: number | null) => formatCloudNumber(value) },
+                  { title: "金额", key: "amount", width: 120, render: (_value: any, row: TemuAfterSaleRow) => formatCloudMoney(row.amount_cents, row.currency) },
+                  {
+                    title: "物流/仓",
+                    key: "logistics",
+                    width: 190,
+                    render: (_value: any, row: TemuAfterSaleRow) => (
+                      <Space direction="vertical" size={0}>
+                        <Text style={{ fontSize: 12 }}>{row.logistics_no || "-"}</Text>
+                        <Text type="secondary" style={{ fontSize: 12 }}>{row.warehouse_name || "-"}</Text>
+                      </Space>
+                    ),
+                  },
+                  { title: "更新时间", dataIndex: "last_updated_at", key: "updated", width: 170, render: (value: string | null) => formatCloudTime(value) },
+                ]}
+              />
+            ) : null}
+            {cloudQualityRisks.length > 0 ? (
+              <Table
+                rowKey={(row: TemuOperationRiskRow) => row.id || row.risk_key}
+                dataSource={cloudQualityRisks.slice(0, 120)}
+                size="small"
+                pagination={{ pageSize: 8 }}
+                scroll={{ x: 1100 }}
+                columns={[
+                  { title: "风险类型", dataIndex: "risk_type", key: "riskType", width: 150, render: (value: string | null) => cloudRiskLabel(value) },
+                  { title: "等级", dataIndex: "severity", key: "severity", width: 90, render: (value: string | null) => <Tag color={cloudRiskColor(value)}>{value || "default"}</Tag> },
+                  { title: "标题/编号", key: "title", width: 300, render: (_value: any, row: TemuOperationRiskRow) => row.risk_title || row.risk_key || "-" },
+                  { title: "状态", dataIndex: "risk_status", key: "status", width: 120, render: (value: string | null) => <Tag color={cloudBusinessStatusColor(value)}>{value || "-"}</Tag> },
+                  { title: "店铺", dataIndex: "mall_id", key: "mall", width: 140, render: (value: string | null) => value || "-" },
+                  { title: "SKC", dataIndex: "skc_id", key: "skc", width: 140, render: (value: string | null) => value || "-" },
+                  { title: "数量", dataIndex: "quantity", key: "quantity", width: 90, render: (value: number | null) => formatCloudNumber(value) },
+                  { title: "更新时间", dataIndex: "last_updated_at", key: "updated", width: 170, render: (value: string | null) => formatCloudTime(value) },
+                ]}
+              />
+            ) : null}
+          </Space>
+        ) : (
+          <EmptyGuide title="暂无云端售后/质检数据" description="扩展命中售后、退货、抽检或违规接口后会显示在这里" />
+        )}
       </div>
 
       {/* 质量评分卡片 */}
@@ -650,10 +1155,10 @@ const ShopOverview: React.FC = () => {
                     {rule.childCheckRuleList?.length > 0 && (
                       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
                         {rule.childCheckRuleList.map((child: any, ci: number) => (
-                          <Card key={ci} size="small" style={{ borderRadius: 8, borderLeft: `3px solid ${child.number > 50 ? "#ff4d4f" : child.number > 10 ? "#faad14" : "#00b96b"}` }}>
+                          <Card key={ci} size="small" style={{ borderRadius: 8, borderLeft: `3px solid ${child.number > 50 ? "#ea4335" : child.number > 10 ? "#faad14" : "#00b96b"}` }}>
                             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                               <span style={{ fontSize: 13, color: "#333" }}>{child.ruleName}</span>
-                              <span style={{ fontSize: 20, fontWeight: 700, color: child.number > 50 ? "#ff4d4f" : child.number > 10 ? "#faad14" : "#00b96b" }}>
+                              <span style={{ fontSize: 20, fontWeight: 700, color: child.number > 50 ? "#ea4335" : child.number > 10 ? "#faad14" : "#00b96b" }}>
                                 {child.number}
                               </span>
                             </div>
@@ -797,7 +1302,7 @@ const ShopOverview: React.FC = () => {
                     title: "结果", dataIndex: "checkResult", key: "result", width: 100,
                     render: (v: any) => {
                       const text = v === 1 || v === "合格" ? "合格" : v === 2 || v === "不合格" ? "不合格" : safeVal(v);
-                      const color = text === "合格" ? "#00b96b" : text === "不合格" ? "#ff4d4f" : "#666";
+                      const color = text === "合格" ? "#00b96b" : text === "不合格" ? "#ea4335" : "#666";
                       return <Tag color={color} style={{ borderRadius: 4 }}>{text}</Tag>;
                     },
                   },
@@ -817,6 +1322,69 @@ const ShopOverview: React.FC = () => {
   // ========== Tab 4: 营销活动 ==========
   const renderMarketingTab = () => (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
+      <div className="app-panel">
+        <div className="app-panel__title">
+          <div className="app-panel__title-main">云端活动快照</div>
+          <div className="app-panel__title-sub">{cloudActivities.length ? `${cloudActivities.length} 条` : ""}</div>
+        </div>
+        {cloudActivities.length > 0 ? (
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            {cloudActivitySummary.length > 0 ? (
+              <Space wrap>
+                {cloudActivitySummary.map((item) => (
+                  <Tag key={item.activity_kind || "unknown"} color="blue">
+                    {cloudActivityLabel(item.activity_kind)} {formatCloudNumber(item.count)}
+                  </Tag>
+                ))}
+              </Space>
+            ) : null}
+            <Table
+              rowKey={(row: TemuActivityRow) => row.id || row.row_key}
+              dataSource={cloudActivities.slice(0, 120)}
+              size="small"
+              pagination={{ pageSize: 10 }}
+              scroll={{ x: 1120 }}
+              columns={[
+                {
+                  title: "活动",
+                  key: "title",
+                  width: 300,
+                  render: (_value: any, row: TemuActivityRow) => (
+                    <Space direction="vertical" size={2}>
+                      <Paragraph ellipsis={{ rows: 2, tooltip: row.activity_title || row.activity_id || "-" }} style={{ marginBottom: 0 }}>
+                        {row.activity_title || row.activity_id || "-"}
+                      </Paragraph>
+                      <Text type="secondary" style={{ fontSize: 12 }}>{row.activity_id || row.row_key}</Text>
+                    </Space>
+                  ),
+                },
+                { title: "店铺", dataIndex: "mall_id", key: "mall", width: 140 },
+                { title: "SKC", dataIndex: "skc_id", key: "skc", width: 130 },
+                {
+                  title: "类型",
+                  key: "kind",
+                  width: 110,
+                  render: (_value: any, row: TemuActivityRow) => <Tag color="blue">{row.activity_type || cloudActivityLabel(row.activity_kind)}</Tag>,
+                },
+                {
+                  title: "状态",
+                  dataIndex: "activity_status",
+                  key: "status",
+                  width: 110,
+                  render: (value: string | null) => <Tag color={cloudActivityStatusColor(value)}>{value || "-"}</Tag>,
+                },
+                { title: "报名价", dataIndex: "signup_price_cents", key: "signup", width: 120, render: (value: number | null, row: TemuActivityRow) => formatCloudMoney(value, row.price_currency) },
+                { title: "建议价", dataIndex: "suggested_price_cents", key: "suggested", width: 120, render: (value: number | null, row: TemuActivityRow) => formatCloudMoney(value, row.price_currency) },
+                { title: "活动库存", dataIndex: "activity_stock", key: "stock", width: 110, render: formatCloudNumber },
+                { title: "更新时间", dataIndex: "last_updated_at", key: "updated", width: 180, render: formatCloudTime },
+              ]}
+            />
+          </Space>
+        ) : (
+          <EmptyGuide title="暂无云端活动数据" description="扩展命中活动、营销、报名或竞价接口后会显示" />
+        )}
+      </div>
+
       <div className="app-panel">
         <div className="app-panel__title">
           <div className="app-panel__title-main">昨日营销数据</div>
@@ -865,6 +1433,69 @@ const ShopOverview: React.FC = () => {
       <Space direction="vertical" size="large" style={{ width: "100%" }}>
         <div className="app-panel">
           <div className="app-panel__title">
+            <div className="app-panel__title-main">云端风险快照</div>
+            <div className="app-panel__title-sub">{cloudRisks.length ? `${cloudRisks.length} 条` : ""}</div>
+          </div>
+          {cloudRisks.length > 0 ? (
+            <Space direction="vertical" size={12} style={{ width: "100%" }}>
+              {cloudRiskSummary.length > 0 ? (
+                <Space wrap>
+                  {cloudRiskSummary.map((item) => (
+                    <Tag key={`${item.risk_type || "risk"}-${item.severity || "level"}`} color={cloudRiskColor(item.severity)}>
+                      {cloudRiskLabel(item.risk_type)} {formatCloudNumber(item.count)}
+                    </Tag>
+                  ))}
+                </Space>
+              ) : null}
+              <Table
+                rowKey={(row: TemuOperationRiskRow) => row.id || row.risk_key}
+                dataSource={cloudRisks.slice(0, 160)}
+                size="small"
+                pagination={{ pageSize: 10 }}
+                scroll={{ x: 1180 }}
+                columns={[
+                  {
+                    title: "风险类型",
+                    dataIndex: "risk_type",
+                    key: "type",
+                    width: 130,
+                    render: (value: string | null) => <Tag color="orange">{cloudRiskLabel(value)}</Tag>,
+                  },
+                  {
+                    title: "等级",
+                    dataIndex: "severity",
+                    key: "severity",
+                    width: 90,
+                    render: (value: string | null) => <Tag color={cloudRiskColor(value)}>{value || "-"}</Tag>,
+                  },
+                  {
+                    title: "风险内容",
+                    key: "title",
+                    width: 320,
+                    render: (_value: any, row: TemuOperationRiskRow) => (
+                      <Space direction="vertical" size={2}>
+                        <Paragraph ellipsis={{ rows: 2, tooltip: row.risk_title || row.risk_key }} style={{ marginBottom: 0 }}>
+                          {row.risk_title || row.risk_key || "-"}
+                        </Paragraph>
+                        <Text type="secondary" style={{ fontSize: 12 }}>{row.risk_status || row.order_id || "-"}</Text>
+                      </Space>
+                    ),
+                  },
+                  { title: "店铺", dataIndex: "mall_id", key: "mall", width: 140 },
+                  { title: "SKC", dataIndex: "skc_id", key: "skc", width: 130 },
+                  { title: "货号", dataIndex: "goods_id", key: "goods", width: 130 },
+                  { title: "数量", dataIndex: "quantity", key: "qty", width: 90, render: formatCloudNumber },
+                  { title: "更新时间", dataIndex: "last_updated_at", key: "updated", width: 180, render: formatCloudTime },
+                ]}
+              />
+            </Space>
+          ) : (
+            <EmptyGuide title="暂无云端风险数据" description="扩展命中入库、发货、物流、质检、限流等接口后会显示" />
+          )}
+        </div>
+
+        <div className="app-panel">
+          <div className="app-panel__title">
             <div className="app-panel__title-main">合规看板</div>
           </div>
           {Array.isArray(boardList) && boardList.length > 0 ? (
@@ -904,6 +1535,104 @@ const ShopOverview: React.FC = () => {
   // ========== Tab 6: 物流发货 ==========
   const renderDeliveryTab = () => (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
+      <div className="app-panel">
+        <div className="app-panel__title">
+          <div>
+            <div className="app-panel__title-main">云端备货与履约</div>
+            <div className="app-panel__title-sub">浏览器扩展上报的备货单、发货单、入库异常和物流反馈。</div>
+          </div>
+        </div>
+        {cloudStockOrders.length > 0 || cloudDeliveryRisks.length > 0 ? (
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12 }}>
+              <StatCard compact title="备货/发货单" value={formatCloudNumber(cloudStockOrders.length)} color="brand" />
+              <StatCard compact title="待处理" value={formatCloudNumber(cloudPendingStockOrderCount)} color={cloudPendingStockOrderCount ? "orange" : "neutral"} />
+              <StatCard compact title="需求件数" value={formatCloudNumber(cloudStockDemandQty)} color="blue" />
+              <StatCard compact title="已发件数" value={formatCloudNumber(cloudStockDeliveredQty)} color="success" />
+              <StatCard compact title="物流/入库风险" value={formatCloudNumber(cloudDeliveryRisks.length)} color={cloudDeliveryRisks.length ? "danger" : "neutral"} />
+            </div>
+            {cloudStockOrderSummary.length > 0 ? (
+              <Space wrap>
+                {cloudStockOrderSummary.map((item) => (
+                  <Tag key={item.temu_status || "unknown"} color={cloudBusinessStatusColor(item.temu_status)}>
+                    {item.temu_status || "未知"} {formatCloudNumber(item.count)}单 / {formatCloudNumber(item.demand_qty)}件
+                  </Tag>
+                ))}
+              </Space>
+            ) : null}
+            {cloudStockOrders.length > 0 ? (
+              <Table
+                rowKey={(row: TemuStockOrderRow) => row.id || row.row_key}
+                dataSource={cloudStockOrders.slice(0, 160)}
+                size="small"
+                pagination={{ pageSize: 10 }}
+                scroll={{ x: 1400 }}
+                columns={[
+                  {
+                    title: "单号",
+                    key: "order",
+                    width: 210,
+                    render: (_value: any, row: TemuStockOrderRow) => (
+                      <Space direction="vertical" size={0}>
+                        <Text strong>{row.stock_order_no || row.delivery_order_sn || row.delivery_batch_sn || "-"}</Text>
+                        <Text type="secondary" style={{ fontSize: 12 }}>{row.parent_order_no || row.delivery_batch_sn || "-"}</Text>
+                      </Space>
+                    ),
+                  },
+                  {
+                    title: "商品",
+                    key: "product",
+                    width: 360,
+                    render: (_value: any, row: TemuStockOrderRow) => (
+                      <Space direction="vertical" size={0} style={{ width: "100%" }}>
+                        <Paragraph ellipsis={{ rows: 2, tooltip: row.product_name || "-" }} style={{ marginBottom: 0, fontWeight: 600, lineHeight: 1.4 }}>
+                          {row.product_name || "-"}
+                        </Paragraph>
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          SKC: {row.skc_id || "-"} / SKU: {row.sku_id || "-"} / 货号: {row.sku_ext_code || "-"}
+                        </Text>
+                      </Space>
+                    ),
+                  },
+                  { title: "状态", dataIndex: "temu_status", key: "status", width: 120, render: (value: string | null) => <Tag color={cloudBusinessStatusColor(value)}>{value || "-"}</Tag> },
+                  { title: "需求", dataIndex: "demand_qty", key: "demand", width: 90, render: (value: number | null) => formatCloudNumber(value) },
+                  { title: "已发", dataIndex: "delivered_qty", key: "delivered", width: 90, render: (value: number | null) => formatCloudNumber(value) },
+                  {
+                    title: "收货仓",
+                    key: "warehouse",
+                    width: 180,
+                    render: (_value: any, row: TemuStockOrderRow) => row.receive_warehouse_name || row.warehouse_group || "-",
+                  },
+                  { title: "要求发货", key: "shipAt", width: 170, render: (_value: any, row: TemuStockOrderRow) => formatCloudTime(row.latest_ship_at || row.order_time) },
+                  { title: "更新时间", dataIndex: "last_updated_at", key: "updated", width: 170, render: (value: string | null) => formatCloudTime(value) },
+                ]}
+              />
+            ) : null}
+            {cloudDeliveryRisks.length > 0 ? (
+              <Table
+                rowKey={(row: TemuOperationRiskRow) => row.id || row.risk_key}
+                dataSource={cloudDeliveryRisks.slice(0, 120)}
+                size="small"
+                pagination={{ pageSize: 8 }}
+                scroll={{ x: 1100 }}
+                columns={[
+                  { title: "风险类型", dataIndex: "risk_type", key: "riskType", width: 150, render: (value: string | null) => cloudRiskLabel(value) },
+                  { title: "等级", dataIndex: "severity", key: "severity", width: 90, render: (value: string | null) => <Tag color={cloudRiskColor(value)}>{value || "default"}</Tag> },
+                  { title: "标题/编号", key: "title", width: 300, render: (_value: any, row: TemuOperationRiskRow) => row.risk_title || row.risk_key || "-" },
+                  { title: "状态", dataIndex: "risk_status", key: "status", width: 120, render: (value: string | null) => <Tag color={cloudBusinessStatusColor(value)}>{value || "-"}</Tag> },
+                  { title: "店铺", dataIndex: "mall_id", key: "mall", width: 140, render: (value: string | null) => value || "-" },
+                  { title: "订单", dataIndex: "order_id", key: "order", width: 160, render: (value: string | null) => value || "-" },
+                  { title: "数量", dataIndex: "quantity", key: "quantity", width: 90, render: (value: number | null) => formatCloudNumber(value) },
+                  { title: "更新时间", dataIndex: "last_updated_at", key: "updated", width: 170, render: (value: string | null) => formatCloudTime(value) },
+                ]}
+              />
+            ) : null}
+          </Space>
+        ) : (
+          <EmptyGuide title="暂无云端备货/履约数据" description="扩展命中备货、发货、物流或入库接口后会显示在这里" />
+        )}
+      </div>
+
       <div className="app-panel">
         <div className="app-panel__title">
           <div className="app-panel__title-main">发货概览</div>
@@ -1122,18 +1851,84 @@ const ShopOverview: React.FC = () => {
       children: renderProductTab(),
     },
   ];
+  const commandSaleValue = cloudConfigured ? formatCloudNumber(cloudTotals.sale_volume) : safeVal(stats?.sevenDaysSales);
+  const commandThirtyDayValue = cloudConfigured ? formatCloudNumber(cloudTotals.thirty_days_sale_volume) : safeVal(stats?.thirtyDaysSales);
+  const commandFlowValue = cloudConfigured ? formatCloudNumber(cloudTotals.flow_expose_num) : safeVal(fluxSummary?.todayVisitors);
+  const commandRiskValue = cloudConfigured ? formatCloudNumber(cloudTotals.risk_count || cloudRiskCount) : formatCloudNumber(dataIssues.length);
+  const commandStatusText = dataIssues.length > 0
+    ? "数据待补齐"
+    : cloudHighRiskCount > 0
+      ? "存在高风险"
+      : "经营状态稳定";
+  const commandStatusTone = dataIssues.length > 0 || cloudHighRiskCount > 0 ? "is-warning" : "is-success";
 
   return (
-    <div className="dashboard-shell">
+    <div className="dashboard-shell shop-overview-shell">
       <PageHeader
         compact
         eyebrow="运营"
         title="店铺概览"
-        subtitle={diagnostics?.syncedAt ? `最近采集：${diagnostics.syncedAt}` : "核心经营数据、预警信息、流量与合规一览"}
+        subtitle={cloudLatestAt ? `云端最近更新：${formatCloudTime(cloudLatestAt)}` : diagnostics?.syncedAt ? `最近采集：${diagnostics.syncedAt}` : "核心经营数据、预警信息、流量与合规一览"}
+        meta={[
+          cloudConfigured ? `云端店铺 ${cloudTotals.mall_count || cloudMonitorRows.length}` : "云端未配置",
+          cloudConfigured ? `活动 ${cloudTotals.activity_count || cloudActivityCount}` : null,
+          cloudConfigured ? `风险 ${cloudTotals.risk_count || cloudRiskCount}` : null,
+          cloudConfigured ? `备货单 ${cloudTotals.stock_order_count}` : null,
+          cloudConfigured ? `售后 ${cloudTotals.after_sale_count}` : null,
+        ].filter(Boolean)}
+        actions={<Button icon={<ReloadOutlined />} onClick={loadAllData}>刷新数据</Button>}
       />
+      <section className="shop-command-grid">
+        <div className="shop-command-panel shop-command-panel--primary">
+          <div className="shop-command-panel__head">
+            <div>
+              <div className="shop-command-panel__eyebrow">今日经营</div>
+              <div className="shop-command-panel__title">店铺运行状态</div>
+            </div>
+            <span className={`shop-command-status ${commandStatusTone}`}>{commandStatusText}</span>
+          </div>
+          <div className="shop-command-panel__value">{commandSaleValue}</div>
+          <div className="shop-command-panel__meta">
+            <span>今日销量</span>
+            <span>{cloudLatestAt ? `云端 ${formatCloudTime(cloudLatestAt)}` : diagnostics?.syncedAt ? `本地 ${diagnostics.syncedAt}` : "等待采集"}</span>
+          </div>
+        </div>
+        <div className="shop-command-card">
+          <div className="shop-command-card__icon"><RiseOutlined /></div>
+          <div>
+            <div className="shop-command-card__label">30日销量</div>
+            <div className="shop-command-card__value">{commandThirtyDayValue}</div>
+            <div className="shop-command-card__hint">最近周期表现</div>
+          </div>
+        </div>
+        <div className="shop-command-card">
+          <div className="shop-command-card__icon"><ShopOutlined /></div>
+          <div>
+            <div className="shop-command-card__label">{cloudConfigured ? "曝光" : "今日访客"}</div>
+            <div className="shop-command-card__value">{commandFlowValue}</div>
+            <div className="shop-command-card__hint">流量入口状态</div>
+          </div>
+        </div>
+        <div className="shop-command-card">
+          <div className="shop-command-card__icon"><WarningOutlined /></div>
+          <div>
+            <div className="shop-command-card__label">{cloudConfigured ? "云端风险" : "待采集模块"}</div>
+            <div className="shop-command-card__value">{commandRiskValue}</div>
+            <div className="shop-command-card__hint">需要关注的事项</div>
+          </div>
+        </div>
+        <div className="shop-command-card">
+          <div className="shop-command-card__icon"><CloudSyncOutlined /></div>
+          <div>
+            <div className="shop-command-card__label">云端状态</div>
+            <div className="shop-command-card__value">{cloudConfigured ? formatCloudNumber(cloudTotals.mall_count || cloudMonitorRows.length) : "--"}</div>
+            <div className="shop-command-card__hint">{cloudConfigured ? "已连接店铺" : "尚未配置"}</div>
+          </div>
+        </div>
+      </section>
       {dataIssues.length > 0 && (
         <Alert
-          style={{ marginBottom: 16 }}
+          className="shop-data-alert"
           type="warning"
           showIcon
           message="部分模块暂无可用数据"
@@ -1145,6 +1940,7 @@ const ShopOverview: React.FC = () => {
         />
       )}
       <Tabs
+        className="shop-overview-tabs"
         defaultActiveKey="overview"
         items={tabItems}
         tabBarStyle={{ marginBottom: 24 }}

@@ -58,7 +58,7 @@ import { useCollection, COLLECT_TASKS } from "../contexts/CollectionContext";
 
 const { Text, Title } = Typography;
 
-const TEMU_ORANGE = "#e55b00";
+const TEMU_ORANGE = "#1a73e8";
 
 interface Account {
   id: string;
@@ -75,7 +75,7 @@ const statusConfig = {
   online: { color: "#52c41a", text: "在线", dot: "#52c41a" },
   offline: { color: "default", text: "离线", dot: "#d9d9d9" },
   logging_in: { color: "processing", text: "登录中…", dot: "#1890ff" },
-  error: { color: "red", text: "异常", dot: "#ff4d4f" },
+  error: { color: "red", text: "异常", dot: "#ea4335" },
 };
 
 const STORAGE_KEY = "temu_accounts";
@@ -127,7 +127,7 @@ function getDataFreshness(syncedAt: string | null): {
   if (hours < 6) return { label: `${hours < 1 ? "刚刚" : Math.floor(hours) + "小时前"}`, color: "#52c41a", level: "fresh" };
   if (hours < 24) return { label: `${Math.floor(hours)}小时前`, color: "#faad14", level: "stale" };
   const days = Math.floor(hours / 24);
-  return { label: `${days}天前`, color: "#ff4d4f", level: "expired" };
+  return { label: `${days}天前`, color: "#ea4335", level: "expired" };
 }
 
 interface AccountStats {
@@ -619,9 +619,9 @@ export default function AccountManager() {
         style={{
           padding: "14px 16px",
           cursor: "pointer",
-          borderRadius: 12,
+          borderRadius: 8,
           marginBottom: 6,
-          background: isSelected ? "#fff7f0" : "transparent",
+          background: isSelected ? "rgba(26, 115, 232, 0.08)" : "transparent",
           border: isSelected ? `1.5px solid ${TEMU_ORANGE}` : "1.5px solid transparent",
           transition: "all 0.2s",
         }}
@@ -631,10 +631,10 @@ export default function AccountManager() {
             style={{
               width: 38,
               height: 38,
-              borderRadius: 10,
+              borderRadius: 8,
               background: isActive
-                ? `linear-gradient(135deg, ${TEMU_ORANGE}, #ff8534)`
-                : "#f5f5f5",
+                ? `linear-gradient(180deg, #0a84ff 0%, ${TEMU_ORANGE} 100%)`
+                : "#f8fbff",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
@@ -694,7 +694,7 @@ export default function AccountManager() {
       <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
         {/* 账号信息头部 */}
         <Card
-          style={{ borderRadius: 16, border: "none", boxShadow: "0 2px 12px rgba(0,0,0,0.04)" }}
+          style={{ borderRadius: 8, border: "none", boxShadow: "0 1px 2px rgba(0,0,0,0.035), 0 8px 24px rgba(0,0,0,0.035)" }}
           styles={{ body: { padding: "24px 28px" } }}
         >
           <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 16 }}>
@@ -703,10 +703,10 @@ export default function AccountManager() {
                 style={{
                   width: 56,
                   height: 56,
-                  borderRadius: 14,
+                  borderRadius: 8,
                   background: isSelectedActive
-                    ? `linear-gradient(135deg, ${TEMU_ORANGE}, #ff8534)`
-                    : "#f5f5f5",
+                    ? `linear-gradient(180deg, #0a84ff 0%, ${TEMU_ORANGE} 100%)`
+                    : "#f8fbff",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
@@ -737,7 +737,7 @@ export default function AccountManager() {
                     {status.text}
                   </Tag>
                   {isSelectedActive && (
-                    <Tag color="orange" style={{ borderRadius: 999, margin: 0 }}>
+                    <Tag color="blue" style={{ borderRadius: 999, margin: 0 }}>
                       <CheckCircleOutlined style={{ marginRight: 4 }} />
                       当前数据视图
                     </Tag>
@@ -784,7 +784,7 @@ export default function AccountManager() {
                 <Button
                   icon={<EyeOutlined />}
                   onClick={() => handleActivateAccount(selectedAccount.id)}
-                  style={{ borderRadius: 10 }}
+                  style={{ borderRadius: 8 }}
                 >
                   {"\u5207\u6362\u6570\u636e\u89c6\u56fe"}
                 </Button>
@@ -792,7 +792,7 @@ export default function AccountManager() {
               <Button
                 icon={<KeyOutlined />}
                 onClick={() => openPasswordModal(selectedAccount)}
-                style={{ borderRadius: 10 }}
+                style={{ borderRadius: 8 }}
               >
                 {selectedAccountNeedsPasswordRepair ? "\u8865\u5f55\u5bc6\u7801" : "\u66f4\u65b0\u5bc6\u7801"}
               </Button>
@@ -800,7 +800,7 @@ export default function AccountManager() {
                 <Button
                   icon={<LogoutOutlined />}
                   onClick={() => handleLogout(selectedAccount.id)}
-                  style={{ borderRadius: 10 }}
+                  style={{ borderRadius: 8 }}
                 >
                   {"\u65ad\u5f00\u8fde\u63a5"}
                 </Button>
@@ -811,8 +811,8 @@ export default function AccountManager() {
                   loading={isLoggingIn}
                   onClick={() => handleLogin(selectedAccount)}
                   style={{
-                    borderRadius: 10,
-                    background: `linear-gradient(135deg, ${TEMU_ORANGE}, #ff8534)`,
+                    borderRadius: 8,
+                    background: `linear-gradient(180deg, #0a84ff 0%, ${TEMU_ORANGE} 100%)`,
                     border: "none",
                   }}
                 >
@@ -824,7 +824,7 @@ export default function AccountManager() {
                 description={"\u5220\u9664\u540e\u8be5\u8d26\u53f7\u7684\u91c7\u96c6\u6570\u636e\u4ecd\u4f1a\u4fdd\u7559"}
                 onConfirm={() => handleDelete(selectedAccount.id)}
               >
-                <Button danger icon={<DeleteOutlined />} style={{ borderRadius: 10 }}>
+                <Button danger icon={<DeleteOutlined />} style={{ borderRadius: 8 }}>
                   {"\u5220\u9664"}
                 </Button>
               </Popconfirm>
@@ -837,13 +837,13 @@ export default function AccountManager() {
           {/* 商品数 */}
           <Card
             size="small"
-            style={{ borderRadius: 12, border: "none", boxShadow: "0 2px 8px rgba(0,0,0,0.04)" }}
+            style={{ borderRadius: 8, border: "none", boxShadow: "0 1px 2px rgba(0,0,0,0.035), 0 8px 20px rgba(0,0,0,0.035)" }}
             styles={{ body: { padding: "16px 20px" } }}
           >
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <div style={{
                 width: 36, height: 36, borderRadius: 10,
-                background: "#fff7f0",
+                background: "rgba(26, 115, 232, 0.08)",
                 display: "flex", alignItems: "center", justifyContent: "center",
               }}>
                 <ShoppingOutlined style={{ color: TEMU_ORANGE, fontSize: 17 }} />
@@ -898,7 +898,7 @@ export default function AccountManager() {
                 display: "flex", alignItems: "center", justifyContent: "center",
               }}>
                 {collectionDisplay.error > 0
-                  ? <ExclamationCircleOutlined style={{ color: "#ff4d4f", fontSize: 17 }} />
+                  ? <ExclamationCircleOutlined style={{ color: "#ea4335", fontSize: 17 }} />
                   : <SafetyCertificateOutlined style={{ color: "#52c41a", fontSize: 17 }} />
                 }
               </div>
@@ -908,7 +908,7 @@ export default function AccountManager() {
                 </Text>
                 <div style={{
                   fontSize: 22, fontWeight: 700, lineHeight: 1.2,
-                  color: collectionDisplay.error > 0 ? "#ff4d4f" : "#52c41a",
+                  color: collectionDisplay.error > 0 ? "#ea4335" : "#52c41a",
                 }}>
                   {collectionDisplay.error > 0 ? collectionDisplay.error : "正常"}
                 </div>
@@ -927,7 +927,7 @@ export default function AccountManager() {
                 width: 36, height: 36, borderRadius: 10,
                 background: freshness.level === "fresh" ? "#f6ffed"
                   : freshness.level === "stale" ? "#fffbe6"
-                  : freshness.level === "expired" ? "#fff2f0" : "#f5f5f5",
+                  : freshness.level === "expired" ? "#fff2f0" : "#f8fbff",
                 display: "flex", alignItems: "center", justifyContent: "center",
               }}>
                 <ClockCircleOutlined style={{ color: freshness.color, fontSize: 17 }} />
@@ -957,7 +957,7 @@ export default function AccountManager() {
             }
             size="small"
             style={{ borderRadius: 14, border: "none", boxShadow: "0 2px 8px rgba(0,0,0,0.04)" }}
-            styles={{ header: { borderBottom: "1px solid #f5f5f5" } }}
+            styles={{ header: { borderBottom: "1px solid #f8fbff" } }}
           >
             <div style={{ padding: "8px 0" }}>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
@@ -970,7 +970,7 @@ export default function AccountManager() {
               </div>
               <Progress
                 percent={progressPercent}
-                strokeColor={collectionDisplay.error > 0 ? { "0%": TEMU_ORANGE, "100%": "#ff4d4f" } : TEMU_ORANGE}
+                strokeColor={collectionDisplay.error > 0 ? { "0%": TEMU_ORANGE, "100%": "#ea4335" } : TEMU_ORANGE}
                 size="small"
                 status={collectionDisplay.isRealtime ? "active" : undefined}
               />
@@ -980,14 +980,14 @@ export default function AccountManager() {
                   <Text style={{ fontSize: 12, color: "#52c41a" }}>{collectionDisplay.success} 成功</Text>
                 </Space>
                 <Space size={4}>
-                  <ExclamationCircleOutlined style={{ color: collectionDisplay.error > 0 ? "#ff4d4f" : "#d9d9d9", fontSize: 13 }} />
-                  <Text style={{ fontSize: 12, color: collectionDisplay.error > 0 ? "#ff4d4f" : "#8c8c8c" }}>
+                  <ExclamationCircleOutlined style={{ color: collectionDisplay.error > 0 ? "#ea4335" : "#d9d9d9", fontSize: 13 }} />
+                  <Text style={{ fontSize: 12, color: collectionDisplay.error > 0 ? "#ea4335" : "#8c8c8c" }}>
                     {collectionDisplay.error} 失败
                   </Text>
                 </Space>
               </div>
               {collectionDisplay.syncedAt && (
-                <div style={{ marginTop: 12, padding: "8px 12px", background: "#fafafa", borderRadius: 8 }}>
+                <div style={{ marginTop: 12, padding: "8px 12px", background: "#f8fbff", borderRadius: 8 }}>
                   <Text type="secondary" style={{ fontSize: 11 }}>
                     上次采集时间：{collectionDisplay.syncedAt}
                   </Text>
@@ -1006,7 +1006,7 @@ export default function AccountManager() {
             }
             size="small"
             style={{ borderRadius: 14, border: "none", boxShadow: "0 2px 8px rgba(0,0,0,0.04)" }}
-            styles={{ header: { borderBottom: "1px solid #f5f5f5" } }}
+            styles={{ header: { borderBottom: "1px solid #f8fbff" } }}
           >
             {taskCategories.length === 0 ? (
               <div style={{ padding: "20px 0", textAlign: "center" }}>
@@ -1054,7 +1054,7 @@ export default function AccountManager() {
           }
           size="small"
           style={{ borderRadius: 14, border: "none", boxShadow: "0 2px 8px rgba(0,0,0,0.04)" }}
-          styles={{ header: { borderBottom: "1px solid #f5f5f5" } }}
+          styles={{ header: { borderBottom: "1px solid #f8fbff" } }}
         >
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap", padding: "8px 0" }}>
             <Button
@@ -1116,12 +1116,12 @@ export default function AccountManager() {
             size="large"
             onClick={() => setModalOpen(true)}
             style={{
-              borderRadius: 14,
+              borderRadius: 8,
               height: 46,
               paddingInline: 28,
-              background: `linear-gradient(135deg, ${TEMU_ORANGE}, #ff8534)`,
+              background: `linear-gradient(180deg, #0a84ff 0%, ${TEMU_ORANGE} 100%)`,
               border: "none",
-              boxShadow: "0 8px 18px rgba(255, 106, 0, 0.22)",
+              boxShadow: "0 8px 18px rgba(26, 115, 232, 0.18)",
             }}
           >
             添加账号
@@ -1132,7 +1132,7 @@ export default function AccountManager() {
       {accounts.length === 0 ? (
         <Card
           style={{
-            borderRadius: 16,
+            borderRadius: 8,
             textAlign: "center",
             padding: "60px 0",
             border: "1px dashed #e0e0e0",

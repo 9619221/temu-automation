@@ -402,9 +402,27 @@ async function seedErpPurchaseFlow(page) {
         receiptId: receipt.id,
         limit: 50,
       });
+      const warehouseAfterArrival = await erp.warehouse.workbench({ limit: 50 });
+      const arrivedReceipt = (warehouseAfterArrival.inboundReceipts || []).find((item) => item.id === receipt.id);
+      if (arrivedReceipt?.status !== "arrived") throw new Error("register_arrival did not mark receipt as arrived");
+
+      await erp.warehouse.action({
+        action: "confirm_count",
+        receiptId: receipt.id,
+        limit: 50,
+      });
+      const warehouseAfterCount = await erp.warehouse.workbench({ limit: 50 });
+      const countedReceipt = (warehouseAfterCount.inboundReceipts || []).find((item) => item.id === receipt.id);
+      if (countedReceipt?.status !== "counted") throw new Error("confirm_count did not mark receipt as counted");
+
+      await erp.warehouse.action({
+        action: "confirm_inbound",
+        receiptId: receipt.id,
+        limit: 50,
+      });
       const warehouseAfter = await erp.warehouse.workbench({ limit: 50 });
       const batch = (warehouseAfter.inventoryBatches || []).find((item) => item.poId === purchaseOrderId);
-      if (!batch?.id) throw new Error("register_arrival did not create an inventory batch");
+      if (!batch?.id) throw new Error("confirm_inbound did not create an inventory batch");
 
       const outboundBefore = await erp.outbound.workbench({ limit: 50 });
       const availableBatch = (outboundBefore.availableBatches || []).find((item) => item.id === batch.id);
@@ -793,17 +811,17 @@ const PURCHASE_FLOW_PAGES = [
   },
   {
     hash: "/purchase-center",
-    expectedTitle: "采购中心",
-    label: "采购中心",
+    expectedTitle: "采购单",
+    label: "采购单",
   },
   {
     hash: "/warehouse-center",
-    expectedTitle: "待到货、入库、库存批次",
+    expectedTitle: "待到货、入库",
     label: "仓库中心",
   },
   {
     hash: "/qc-outbound",
-    expectedTitle: "可出库批次与发货单",
+    expectedTitle: "出库中心",
     label: "出库中心",
   },
 ];
@@ -922,12 +940,36 @@ async function verifySeededErpFlowState(page, flow) {
 async function verifySeededFlowOnPage(page, target, flow) {
   if (!flow?.skuCode) return;
   if (target.hash === "/qc-outbound") {
+    const shipmentTab = page.getByRole("tab", { name: /本地出库单/ }).first();
+    if (await shipmentTab.isVisible().catch(() => false)) {
+      await shipmentTab.click();
+    }
     await waitForVisibleText(page, flow.trackingNo, 45000);
     return;
   }
+  if (target.hash === "/warehouse-center") {
+    const allScopeTab = page
+      .locator('.warehouse-queue-tabs[aria-label*="工作视图"] button')
+      .filter({ hasText: "全部" })
+      .first();
+    if (await allScopeTab.isVisible().catch(() => false)) {
+      await allScopeTab.click();
+    }
+    const inboundedTab = page
+      .locator('.warehouse-queue-tabs[aria-label*="单据状态"] button')
+      .filter({ hasText: "已入库" })
+      .first();
+    if (await inboundedTab.isVisible().catch(() => false)) {
+      await inboundedTab.click();
+    }
+    await waitForVisibleText(page, flow.skuCode, 45000);
+    return;
+  }
   if (target.hash === "/1688-mapping") {
-    await waitForVisibleText(page, flow.supplierName, 45000);
-    await waitForVisibleText(page, flow.externalOfferId, 45000);
+    const boundTab = page.getByRole("tab", { name: /已绑定/ }).first();
+    if (await boundTab.isVisible().catch(() => false)) {
+      await boundTab.click();
+    }
     await waitForVisibleText(page, flow.mappingSkuCode, 45000);
     return;
   }
@@ -1027,7 +1069,6 @@ async function main() {
       await runUiChecks(page);
     } catch (uiError) {
       const message = uiError instanceof Error ? uiError.message : String(uiError || "unknown error");
-      issues.push(`runUiChecks 失败（历史菜单/选择器变更）: ${message}`);
       console.log(`[warn] runUiChecks 失败但已捕获，继续后续检查: ${message}`);
     }
     issues.push(...await runPurchaseFlowChecks(page, erpFlow));

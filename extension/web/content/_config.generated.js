@@ -1,6 +1,6 @@
 // ! 自动生成，勿手改 — 由 scripts/build-bridge.cjs 同步自 hook-config.js
-// 生成时间: 2026-05-23T11:08:29.803Z
-// 白名单数量: 198
+// 生成时间: 2026-05-23T12:54:00.079Z
+// 白名单数量: 204
 window.__TEMU_MONITOR_BUILD_CONFIG__ = {
   "URL_WHITELIST": [
     "/api/seller/auth/userInfo",
@@ -12,6 +12,12 @@ window.__TEMU_MONITOR_BUILD_CONFIG__ = {
     "erp321.com/",
     "jushuitan.com/",
     "scm121.com/",
+    "feishu.cn/base/",
+    "/space/api/bitable/",
+    "/space/api/base/",
+    "/space/api/box/",
+    "/base/api/",
+    "/bitable/",
     "/visage-agent-seller/product/skc/pageQuery",
     "/visage-agent-seller/product/draft/pageQuery",
     "/visage-agent-seller/product/skc/listForCrueltyFree",
@@ -247,6 +253,6 @@ window.__TEMU_MONITOR_BUILD_CONFIG__ = {
   "DISCOVERY_MAX_BODY_CHARS": 60000,
   "EVENT_NAME": "temu-monitor.captured",
   "BYPASS_SYMBOL_KEY": "temu-monitor.fetch.bypass",
-  "GENERATED_AT": "2026-05-23T11:08:29.803Z",
-  "WHITELIST_COUNT": 198
+  "GENERATED_AT": "2026-05-23T12:54:00.079Z",
+  "WHITELIST_COUNT": 204
 };

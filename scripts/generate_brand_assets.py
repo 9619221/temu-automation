@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,13 +15,32 @@ def ensure_build_dir() -> None:
 
 def draw_background(size: int) -> Image.Image:
     image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    shadow = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    shadow_draw = ImageDraw.Draw(shadow)
     draw = ImageDraw.Draw(image)
     margin = int(size * 0.08)
     radius = int(size * 0.22)
+
+    shadow_draw.rounded_rectangle(
+        (margin, margin + int(size * 0.018), size - margin, size - margin + int(size * 0.018)),
+        radius=radius,
+        fill=(60, 64, 67, 42),
+    )
+    shadow = shadow.filter(ImageFilter.GaussianBlur(int(size * 0.024)))
+    image.alpha_composite(shadow)
+
     draw.rounded_rectangle(
         (margin, margin, size - margin, size - margin),
         radius=radius,
-        fill="#FF6A00",
+        fill="#FFFFFF",
+        outline="#D2E3FC",
+        width=max(2, int(size * 0.012)),
+    )
+    draw.rounded_rectangle(
+        (margin + int(size * 0.032), margin + int(size * 0.032), size - margin - int(size * 0.032), size - margin - int(size * 0.032)),
+        radius=int(size * 0.18),
+        outline=(232, 240, 254, 180),
+        width=max(1, int(size * 0.006)),
     )
     return image
 
@@ -30,58 +49,70 @@ def draw_mark(size: int) -> Image.Image:
     layer = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
 
-    body = (
-        int(size * 0.23),
-        int(size * 0.41),
-        int(size * 0.61),
-        int(size * 0.57),
+    blue = "#1A73E8"
+    green = "#34A853"
+    yellow = "#FBBC04"
+    red = "#EA4335"
+
+    bar = (
+        int(size * 0.255),
+        int(size * 0.255),
+        int(size * 0.745),
+        int(size * 0.355),
     )
-    body_radius = int(size * 0.09)
-    draw.rounded_rectangle(body, radius=body_radius, fill="white")
-
-    nose = [
-        (int(size * 0.61), int(size * 0.39)),
-        (int(size * 0.78), int(size * 0.49)),
-        (int(size * 0.61), int(size * 0.59)),
-    ]
-    draw.polygon(nose, fill="white")
-
-    tail_top = [
-        (int(size * 0.24), int(size * 0.41)),
-        (int(size * 0.12), int(size * 0.31)),
-        (int(size * 0.28), int(size * 0.47)),
-    ]
-    tail_bottom = [
-        (int(size * 0.24), int(size * 0.57)),
-        (int(size * 0.12), int(size * 0.67)),
-        (int(size * 0.28), int(size * 0.51)),
-    ]
-    draw.polygon(tail_top, fill="white")
-    draw.polygon(tail_bottom, fill="white")
-
-    flame = [
-        (int(size * 0.09), int(size * 0.49)),
-        (int(size * 0.18), int(size * 0.41)),
-        (int(size * 0.18), int(size * 0.57)),
-    ]
-    draw.polygon(flame, fill="#FFD166")
-
-    window_outer = (
-        int(size * 0.44),
-        int(size * 0.43),
-        int(size * 0.55),
-        int(size * 0.54),
+    stem = (
+        int(size * 0.445),
+        int(size * 0.332),
+        int(size * 0.555),
+        int(size * 0.735),
     )
-    window_inner = (
-        int(size * 0.47),
-        int(size * 0.46),
-        int(size * 0.52),
-        int(size * 0.51),
+    join = (
+        int(size * 0.445),
+        int(size * 0.332),
+        int(size * 0.555),
+        int(size * 0.445),
     )
-    draw.ellipse(window_outer, fill="#FF6A00")
-    draw.ellipse(window_inner, fill="#FFD9BF")
+    draw.rounded_rectangle(bar, radius=int(size * 0.05), fill=blue)
+    draw.rounded_rectangle(stem, radius=int(size * 0.055), fill=green)
+    draw.rounded_rectangle(join, radius=int(size * 0.028), fill=yellow)
 
-    return layer.rotate(-28, resample=Image.Resampling.BICUBIC, center=(size // 2, size // 2))
+    accent_r = int(size * 0.066)
+    accent_center = (int(size * 0.68), int(size * 0.68))
+    draw.ellipse(
+        (
+            accent_center[0] - accent_r,
+            accent_center[1] - accent_r,
+            accent_center[0] + accent_r,
+            accent_center[1] + accent_r,
+        ),
+        fill=red,
+    )
+    draw.ellipse(
+        (
+            accent_center[0] - int(accent_r * 0.42),
+            accent_center[1] - int(accent_r * 0.42),
+            accent_center[0] + int(accent_r * 0.42),
+            accent_center[1] + int(accent_r * 0.42),
+        ),
+        fill="#FFFFFF",
+    )
+
+    node_r = int(size * 0.025)
+    for center, color in [
+        ((int(size * 0.30), int(size * 0.30)), yellow),
+        ((int(size * 0.50), int(size * 0.30)), blue),
+        ((int(size * 0.50), int(size * 0.71)), green),
+    ]:
+        draw.ellipse(
+            (center[0] - node_r, center[1] - node_r, center[0] + node_r, center[1] + node_r),
+            fill="#FFFFFF",
+        )
+        draw.ellipse(
+            (center[0] - int(node_r * 0.55), center[1] - int(node_r * 0.55), center[0] + int(node_r * 0.55), center[1] + int(node_r * 0.55)),
+            fill=color,
+        )
+
+    return layer
 
 
 def create_icon(size: int = 512) -> Image.Image:

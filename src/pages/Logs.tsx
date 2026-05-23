@@ -11,7 +11,15 @@ import {
   message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { DeleteOutlined, FolderOpenOutlined, ReloadOutlined } from "@ant-design/icons";
+import {
+  BugOutlined,
+  ClockCircleOutlined,
+  DeleteOutlined,
+  FolderOpenOutlined,
+  InfoCircleOutlined,
+  ReloadOutlined,
+  WarningOutlined,
+} from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
 import StatCard from "../components/StatCard";
 import EmptyGuide from "../components/EmptyGuide";
@@ -162,6 +170,16 @@ function normalizeLogEntry(log: any): FrontendLogEntry | null {
   };
 }
 
+function withStableLogIds(logs: FrontendLogEntry[]) {
+  const seen = new Map<string, number>();
+  return logs.map((log) => {
+    const baseId = String(log.id || `${log.source}-${log.timestamp}`);
+    const nextCount = seen.get(baseId) || 0;
+    seen.set(baseId, nextCount + 1);
+    return nextCount === 0 ? { ...log, id: baseId } : { ...log, id: `${baseId}-${nextCount}` };
+  });
+}
+
 export default function Logs() {
   const cached = useMemo(() => readPageCache<LogsCache>(LOGS_CACHE_KEY, { logs: [] }), []);
   const [logs, setLogs] = useState<FrontendLogEntry[]>(() => cached.logs || []);
@@ -179,11 +197,11 @@ export default function Logs() {
       ]);
       const frontendLogs = Array.isArray(frontendData) ? frontendData : [];
       const workflowLogs = Array.isArray(workflowData?.entries) ? workflowData.entries : [];
-      const merged = [...frontendLogs, ...workflowLogs]
+      const merged = withStableLogIds([...frontendLogs, ...workflowLogs]
         .map((item) => normalizeLogEntry(item))
         .filter(Boolean)
         .sort((a, b) => (b?.timestamp || 0) - (a?.timestamp || 0))
-        .slice(0, 1000) as FrontendLogEntry[];
+        .slice(0, 1000) as FrontendLogEntry[]);
       setLogs(merged);
       setLoadedOnce(true);
       writePageCache(LOGS_CACHE_KEY, {
@@ -199,7 +217,7 @@ export default function Logs() {
     void loadLogs();
 
     const handleLog = (event: WindowEventMap["temu-frontend-log"]) => {
-      setLogs((prev) => [event.detail, ...prev].slice(0, 500));
+      setLogs((prev) => withStableLogIds([event.detail, ...prev]).slice(0, 500));
     };
 
     window.addEventListener("temu-frontend-log", handleLog as EventListener);
@@ -226,6 +244,11 @@ export default function Logs() {
   const errorCount = logs.filter((log) => log.level === "error").length;
   const warnCount = logs.filter((log) => log.level === "warn").length;
   const latestTime = logs[0]?.timestamp ? formatTime(logs[0].timestamp) : "--";
+  const sourceCount = useMemo(() => new Set(logs.map((log) => log.source)).size, [logs]);
+  const healthLabel = errorCount > 0 ? "需要关注" : warnCount > 0 ? "有提醒" : "运行平稳";
+  const healthTone = errorCount > 0 ? "danger" : warnCount > 0 ? "warning" : "success";
+  const latestSource = logs[0]?.source ? sourceLabel(logs[0].source) : "等待记录";
+  const filteredCountText = `${filteredLogs.length}/${logs.length}`;
   const tableLoading = loading && !loadedOnce && filteredLogs.length > 0;
 
   const columns: ColumnsType<FrontendLogEntry> = [
@@ -278,7 +301,7 @@ export default function Logs() {
   ];
 
   return (
-    <div className="dashboard-shell">
+    <div className="dashboard-shell logs-shell">
       <PageHeader
         compact
         eyebrow="运行记录"
@@ -291,21 +314,36 @@ export default function Logs() {
         ]}
       />
 
-      <div className="app-form-grid">
-        <StatCard compact title="异常数量" value={errorCount} color="danger" trend="优先查看会影响页面使用的问题" />
-        <StatCard compact title="提醒数量" value={warnCount} color="brand" trend="用于查看界面和流程中的温和提醒" />
-        <StatCard compact title="最近一条" value={latestTime} color="blue" trend={logs[0]?.source ? `来源：${sourceLabel(logs[0].source)}` : "等待新的运行记录"} />
+      <div className="logs-command-grid">
+        <section className={`logs-command-panel is-${healthTone}`}>
+          <div className="logs-command-panel__head">
+            <div>
+              <div className="logs-command-panel__eyebrow">当前状态</div>
+              <div className="logs-command-panel__title">{healthLabel}</div>
+            </div>
+            <span className={`logs-command-status is-${healthTone}`}>{levelLabel(levelFilter)}</span>
+          </div>
+          <div className="logs-command-panel__value">{filteredCountText}</div>
+          <div className="logs-command-panel__meta">
+            <span>最近：{latestSource}</span>
+            <span>{latestTime}</span>
+          </div>
+        </section>
+        <StatCard compact className="logs-metric-card" title="异常数量" value={errorCount} color="danger" icon={<BugOutlined />} trend="优先处理会影响页面使用的问题" />
+        <StatCard compact className="logs-metric-card" title="提醒数量" value={warnCount} color="warning" icon={<WarningOutlined />} trend="用于定位流程中的非阻塞提醒" />
+        <StatCard compact className="logs-metric-card" title="来源模块" value={sourceCount} color="blue" icon={<InfoCircleOutlined />} trend="按来源快速缩小排查范围" />
+        <StatCard compact className="logs-metric-card" title="最近一条" value={latestTime} color="success" icon={<ClockCircleOutlined />} trend={`来源：${latestSource}`} />
       </div>
 
       <Alert
-        className="friendly-alert"
-        type="info"
+        className="logs-signal-alert"
+        type={errorCount > 0 ? "error" : warnCount > 0 ? "warning" : "success"}
         showIcon
-        message="这里会记录应用运行中的提醒与异常"
-        description="默认展示最近 1000 条。列表里先显示摘要，展开后可以查看完整内容和更易理解的说明。"
+        message={errorCount > 0 ? "存在需要优先查看的异常" : warnCount > 0 ? "当前有提醒记录" : "当前没有异常记录"}
+        description={logs.length > 0 ? `已载入最近 ${logs.length} 条记录，当前筛选显示 ${filteredLogs.length} 条。` : "暂无运行记录。"}
       />
 
-      <div className="app-panel">
+      <div className="app-panel logs-filter-panel">
         <div className="app-toolbar app-toolbar--logs">
           <Input.Search
             allowClear
@@ -347,14 +385,16 @@ export default function Logs() {
           >
             清空
           </Button>
-          <div className="app-toolbar__count">共 {filteredLogs.length} 条</div>
+          <div className="app-toolbar__count">显示 {filteredLogs.length} 条</div>
         </div>
       </div>
 
-      <div className="app-panel">
+      <div className="app-panel logs-table-panel">
         {filteredLogs.length > 0 ? (
           <Table
             rowKey="id"
+            className="logs-table"
+            rowClassName={(record) => `logs-table-row logs-table-row--${record.level}`}
             size="small"
             loading={tableLoading}
             dataSource={filteredLogs}
@@ -365,15 +405,15 @@ export default function Logs() {
               expandRowByClick: true,
               rowExpandable: (record) => Boolean(record.message || explainMessage(record)),
               expandedRowRender: (record) => (
-                <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                <Space direction="vertical" size={12} className="logs-expanded-row">
                   <div>
                     <Text strong>完整内容</Text>
-                    <div className="app-log-message" style={{ marginTop: 8 }}>{record.detail || record.message}</div>
+                    <div className="app-log-message logs-expanded-row__message">{record.detail || record.message}</div>
                   </div>
                   {explainMessage(record) ? (
                     <div>
                       <Text strong>说明</Text>
-                      <div style={{ marginTop: 8, fontSize: 13, color: "var(--color-text-sec)", lineHeight: 1.7 }}>
+                      <div className="logs-expanded-row__explain">
                         {explainMessage(record)}
                       </div>
                     </div>

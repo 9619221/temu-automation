@@ -897,12 +897,12 @@ export default function ProductDetail() {
           : fluxItems.map((item: any, i: number) => ({ ...item, key: i }));
 
         const CHART_COLORS: Record<string, string> = {
-          曝光量: "#1677ff",
+          曝光量: "#1a73e8",
           点击量: "#722ed1",
           商品访问: "#13c2c2",
           加购人数: "#faad14",
           支付买家: "#52c41a",
-          支付件数: "#e55b00",
+          支付件数: "#1a73e8",
         };
 
         return (

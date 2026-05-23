@@ -61,13 +61,13 @@ import {
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
 const imageStudioAPI = window.electronAPI?.imageStudio;
-const TEMU_ORANGE = "#e55b00";
-const TEMU_TEXT = "#1f2329";
-const TEMU_CARD_RADIUS = 22;
-const TEMU_CARD_SHADOW = "0 12px 30px rgba(15, 23, 42, 0.08)";
-const TEMU_BUTTON_GRADIENT = "linear-gradient(135deg, #ff922b 0%, #ff6a00 100%)";
-const TEMU_BUTTON_SHADOW = "0 10px 24px rgba(255, 106, 0, 0.24)";
-const TEMU_UPLOAD_BG = "radial-gradient(circle at top, #fff9f3 0%, #ffffff 72%)";
+const TEMU_ORANGE = "#1a73e8";
+const TEMU_TEXT = "#1d1d1f";
+const TEMU_CARD_RADIUS = 8;
+const TEMU_CARD_SHADOW = "0 1px 2px rgba(0, 0, 0, 0.035), 0 8px 24px rgba(0, 0, 0, 0.035)";
+const TEMU_BUTTON_GRADIENT = "linear-gradient(180deg, #0a84ff 0%, #1a73e8 100%)";
+const TEMU_BUTTON_SHADOW = "0 6px 16px rgba(26, 115, 232, 0.18)";
+const TEMU_UPLOAD_BG = "radial-gradient(circle at top, rgba(26, 115, 232, 0.08) 0%, #ffffff 72%)";
 const IMAGE_STUDIO_FAST_MAX_SIDE = 1600;
 const IMAGE_STUDIO_FAST_RAW_BYTES = 2.5 * 1024 * 1024;
 const IMAGE_STUDIO_FAST_QUALITY = 0.88;
@@ -1870,12 +1870,12 @@ export default function ImageStudio() {
                         minHeight: 64,
                         padding: "10px 8px",
                         borderRadius: 12,
-                        border: isSelected ? "1px solid #ff8c3a" : "1px solid #d9e1ea",
+                        border: isSelected ? "1px solid #1a73e8" : "1px solid #d9e1ea",
                         background: isSelected ? TEMU_BUTTON_GRADIENT : "#ffffff",
                         color: isSelected ? "#ffffff" : "#314156",
                         cursor: "pointer",
                         textAlign: "center",
-                        boxShadow: isSelected ? "0 10px 20px rgba(255, 106, 0, 0.18)" : "none",
+                        boxShadow: isSelected ? "0 8px 20px rgba(26, 115, 232, 0.14)" : "none",
                         transition: "background-color 0.2s, color 0.2s, box-shadow 0.2s, border-color 0.2s",
                       }}
                     >
@@ -1936,7 +1936,7 @@ export default function ImageStudio() {
   );
 
   const renderStepZero = () => (
-    <div className="studio-step-zero">
+    <div className={`studio-step-zero${hasUploads ? " has-uploads" : ""}`}>
       <div className="studio-intake-sticky">
         <div className="studio-intake-sticky__meta">
           <div className="studio-intake-sticky__title">
@@ -2350,7 +2350,7 @@ export default function ImageStudio() {
                   controls={false}
                   style={{ width: 48 }}
                 />
-                <Text style={{ fontSize: 12, color: packCount > 1 ? "#fa8c16" : "#bfbfbf" }}>
+                <Text style={{ fontSize: 12, color: packCount > 1 ? "#fbbc04" : "#bfbfbf" }}>
                   {packCount > 1 ? `${packCount}PC` : "单件"}
                 </Text>
               </div>
@@ -2458,7 +2458,7 @@ export default function ImageStudio() {
                           alignItems: "center",
                           justifyContent: "center",
                           fontWeight: 700,
-                          boxShadow: "0 10px 18px rgba(255, 106, 0, 0.18)",
+                          boxShadow: "0 8px 18px rgba(26, 115, 232, 0.14)",
                         }}
                       >
                         {index + 1}
@@ -2683,7 +2683,7 @@ export default function ImageStudio() {
                                   borderColor: "#ffd2ad",
                                   background: "#fff7ef",
                                   color: TEMU_ORANGE,
-                                  boxShadow: "0 10px 24px rgba(255, 106, 0, 0.18)",
+                                  boxShadow: "0 8px 20px rgba(26, 115, 232, 0.14)",
                                 }}
                               />
                             </Tooltip>
@@ -2868,7 +2868,7 @@ export default function ImageStudio() {
                       background: index === 1 ? "#fff8f2" : "#fff",
                       borderRadius: 18,
                       padding: 18,
-                      boxShadow: index === 1 ? "0 10px 24px rgba(255, 106, 0, 0.08)" : "none",
+                      boxShadow: index === 1 ? "0 8px 20px rgba(26, 115, 232, 0.10)" : "none",
                     }}
                   >
                     <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
@@ -2969,7 +2969,7 @@ export default function ImageStudio() {
           )}
         </Card>
       ) : (
-        <div style={{ maxWidth: 1180, margin: "0 auto", width: "100%" }}>
+        <div className="studio-fullframe">
           <Card
             className="studio-workspace-card"
             style={{
@@ -2978,7 +2978,7 @@ export default function ImageStudio() {
               boxShadow: TEMU_CARD_SHADOW,
               background: "#ffffff",
             }}
-            bodyStyle={{ padding: 18 }}
+            styles={{ body: { padding: 18 } }}
           >
             {activeStep !== 0 ? (
               <div className="studio-topbar">

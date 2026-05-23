@@ -152,15 +152,15 @@ function computeAdvisor(site: any): AdvisorResult {
 
 function getHealthColor(score: number): { color: string; label: string; tagColor: "success" | "processing" | "warning" | "error" } {
   if (score >= 80) return { color: "#389e0d", label: "健康", tagColor: "success" };
-  if (score >= 60) return { color: "#fa8c16", label: "一般", tagColor: "processing" };
+  if (score >= 60) return { color: "#fbbc04", label: "一般", tagColor: "processing" };
   if (score >= 40) return { color: "#d46b08", label: "有短板", tagColor: "warning" };
   return { color: "#cf1322", label: "需优化", tagColor: "error" };
 }
 
 function getSeverityTag(severity: Severity): { color: string; label: string } {
   if (severity === "critical") return { color: "#cf1322", label: "🔴 急" };
-  if (severity === "warning") return { color: "#fa8c16", label: "🟡 注意" };
-  return { color: "#1677ff", label: "🔵 提示" };
+  if (severity === "warning") return { color: "#fbbc04", label: "🟡 注意" };
+  return { color: "#1a73e8", label: "🔵 提示" };
 }
 
 export function OperationAdvisor({ site, productContext }: OperationAdvisorProps) {
@@ -203,7 +203,7 @@ export function OperationAdvisor({ site, productContext }: OperationAdvisorProps
       size="small"
       style={{
         borderRadius: 14,
-        background: "linear-gradient(135deg, rgba(255,247,237,1) 0%, rgba(255,255,255,1) 55%, rgba(240,247,255,0.95) 100%)",
+        background: "linear-gradient(135deg, rgba(246,250,255,1) 0%, rgba(255,255,255,1) 58%, rgba(248,250,252,0.96) 100%)",
         border: `1px solid ${healthMeta.color}33`,
       }}
       bodyStyle={{ padding: 16 }}
@@ -237,7 +237,7 @@ export function OperationAdvisor({ site, productContext }: OperationAdvisorProps
                   key={issue.id}
                   style={{
                     background: "#fff",
-                    borderRadius: 12,
+                    borderRadius: 8,
                     padding: "12px 14px",
                     border: `1px solid ${sevMeta.color}22`,
                     display: "flex",
@@ -257,7 +257,7 @@ export function OperationAdvisor({ site, productContext }: OperationAdvisorProps
                     type="primary"
                     icon={<RocketOutlined />}
                     size="small"
-                    style={{ background: "#e55b00", borderColor: "#e55b00" }}
+                    style={{ background: "#1a73e8", borderColor: "#1a73e8" }}
                     onClick={() => handleGenerateImage(issue)}
                   >
                     AI 生图修复

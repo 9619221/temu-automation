@@ -328,7 +328,7 @@ function WorkflowPanel(props: {
 }) {
   const { color, label } = getWorkflowStatusMeta(props.status);
   return (
-    <Card style={{ borderRadius: 20, borderColor: "#eceff4" }} bodyStyle={{ padding: 20, height: "100%" }}>
+    <Card className="workflow-panel-card" style={{ borderRadius: 20, borderColor: "#eceff4" }} bodyStyle={{ padding: 20, height: "100%" }}>
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
           <Space wrap>
@@ -1189,7 +1189,7 @@ function BatchCreate() {
           const title = [reason, ...meta].filter(Boolean).join("\n");
           return (
             <div title={title || undefined}>
-              <span style={{ color: "#ff4d4f" }}>{reason}</span>
+              <span style={{ color: "#ea4335" }}>{reason}</span>
               {meta.length > 0 ? (
                 <div style={{ fontSize: 12, color: "var(--color-text-sec)", marginTop: 4, lineHeight: 1.5 }}>
                   {meta.join(" · ")}
@@ -1237,7 +1237,7 @@ function BatchCreate() {
 
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
-      <Card style={{ borderRadius: 22, borderColor: "#eceff4" }} bodyStyle={{ padding: 20 }}>
+      <Card className="create-mode-card" style={{ borderRadius: 22, borderColor: "#eceff4" }} bodyStyle={{ padding: 20 }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 16, flexWrap: "wrap", alignItems: "center" }}>
           <div style={{ minWidth: 0, flex: 1 }}>
             <Text className="create-flow-toolbar__eyebrow">上品流程模式</Text>
@@ -1926,7 +1926,7 @@ function BatchCreate() {
                         {task.updatedAt ? ` · 最近更新 ${task.updatedAt}` : ""}
                       </div>
                       {task.message ? (
-                        <div className="create-history-item__meta" style={{ color: task.status === "failed" || task.status === "interrupted" ? "#ff4d4f" : "#66758a" }}>
+                        <div className="create-history-item__meta" style={{ color: task.status === "failed" || task.status === "interrupted" ? "#ea4335" : "#66758a" }}>
                           {normalizeBatchReason(task.message, task.errorCategory)}
                         </div>
                       ) : null}
