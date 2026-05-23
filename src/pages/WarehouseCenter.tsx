@@ -212,6 +212,15 @@ function roleLabel(role?: string) {
   return labels[String(role || "")] || role || "-";
 }
 
+function getBulkInboundBlockReason(row: InboundReceiptRow, role: string): string | null {
+  if (!canRole(role, ["warehouse", "manager", "admin"])) return "当前角色无批量入库权限";
+  if (INBOUND_ACTION_STATUSES.has(row.status)) return null;
+  if (INBOUND_EXCEPTION_STATUSES.has(row.status)) return "异常单需单独处理并填写说明";
+  if (row.status === "inbounded_pending_qc") return "已入库单不可重复入库";
+  if (row.status === "cancelled") return "已取消单据不可入库";
+  return `${INBOUND_STATUS_LABELS[row.status] || row.status || "当前状态"}不可批量入库`;
+}
+
 export default function WarehouseCenter() {
   const auth = useErpAuth();
   const role = auth.currentUser?.role || "";
@@ -603,18 +612,42 @@ export default function WarehouseCenter() {
 
   const selectedActionableRows = useMemo(() => (
     selectedReceiptRows.filter((row) => (
-      INBOUND_ACTION_STATUSES.has(row.status)
-      && canRole(role, ["warehouse", "manager", "admin"])
+      !getBulkInboundBlockReason(row, role)
     ))
   ), [role, selectedReceiptRows]);
+
+  const currentPageBulkSummary = useMemo(() => {
+    const rows = data.inboundReceipts || [];
+    const blockedCounts = new Map<string, number>();
+    let actionable = 0;
+    rows.forEach((row) => {
+      const reason = getBulkInboundBlockReason(row, role);
+      if (!reason) {
+        actionable += 1;
+        return;
+      }
+      blockedCounts.set(reason, (blockedCounts.get(reason) || 0) + 1);
+    });
+    return {
+      actionable,
+      blocked: rows.length - actionable,
+      blockedText: Array.from(blockedCounts.entries())
+        .map(([reason, count]) => `${reason} ${count}单`)
+        .join("；"),
+    };
+  }, [data.inboundReceipts, role]);
 
   const receiptRowSelection = useMemo<TableRowSelection<InboundReceiptRow>>(() => ({
     selectedRowKeys: selectedReceiptIds,
     preserveSelectedRowKeys: false,
     onChange: (keys) => setSelectedReceiptIds(keys.map(String)),
-    getCheckboxProps: (row) => ({
-      disabled: !INBOUND_ACTION_STATUSES.has(row.status) || !canRole(role, ["warehouse", "manager", "admin"]),
-    }),
+    getCheckboxProps: (row) => {
+      const blockReason = getBulkInboundBlockReason(row, role);
+      return {
+        disabled: Boolean(blockReason),
+        title: blockReason || "可批量入库",
+      };
+    },
   }), [role, selectedReceiptIds]);
 
   const runBulkInbound = useCallback(async () => {
@@ -1253,21 +1286,31 @@ export default function WarehouseCenter() {
         />
         {selectedReceiptIds.length ? (
           <div className="erp-bulk-bar">
-            <span className="selected">已选 {selectedReceiptIds.length} 单</span>
-            <span>可入库 {selectedActionableRows.length} 单</span>
-            <Button
-              size="small"
-              type="primary"
-              icon={<InboxOutlined />}
-              loading={actingKey === "bulk-inbound"}
-              disabled={!selectedActionableRows.length}
-              onClick={() => void runBulkInbound()}
-            >
-              批量入库
-            </Button>
-            <Button size="small" onClick={() => setSelectedReceiptIds([])}>
-              清空
-            </Button>
+            <div className="erp-bulk-bar__summary">
+              <span className="selected">已选 {selectedReceiptIds.length} 单</span>
+              <span>可入库 {selectedActionableRows.length} 单</span>
+              <span>当前页可批量 {currentPageBulkSummary.actionable} 单</span>
+              {currentPageBulkSummary.blocked ? (
+                <span className="muted" title={currentPageBulkSummary.blockedText}>
+                  已排除 {currentPageBulkSummary.blocked} 单
+                </span>
+              ) : null}
+            </div>
+            <div className="erp-bulk-bar__actions">
+              <Button
+                size="small"
+                type="primary"
+                icon={<InboxOutlined />}
+                loading={actingKey === "bulk-inbound"}
+                disabled={!selectedActionableRows.length}
+                onClick={() => void runBulkInbound()}
+              >
+                批量入库
+              </Button>
+              <Button size="small" onClick={() => setSelectedReceiptIds([])}>
+                清空
+              </Button>
+            </div>
           </div>
         ) : null}
       </div>

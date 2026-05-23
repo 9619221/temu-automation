@@ -403,6 +403,28 @@ const SKU_ISSUE_ACTIONS: Record<SkuIssueKey, string> = {
   missing_supplier: "绑定供应商；没有供应商，后续采购、售后追责和补货都接不上。",
 };
 
+const SKU_ISSUE_PRIORITY: Record<SkuIssueKey, number> = {
+  missing_cost: 40,
+  missing_supplier: 35,
+  zero_stock: 30,
+  missing_spec: 25,
+  missing_image: 15,
+};
+
+function getSkuWorkPriority(row: ErpSkuRow) {
+  const issues = getSkuDataIssues(row);
+  if (!issues.length) return 0;
+  return issues.reduce((score, issue) => score + SKU_ISSUE_PRIORITY[issue], 0) + issues.length;
+}
+
+function getSkuWorkPriorityMeta(row: ErpSkuRow) {
+  const score = getSkuWorkPriority(row);
+  if (score >= 70) return { label: "高优先级", color: "red" };
+  if (score >= 35) return { label: "中优先级", color: "orange" };
+  if (score > 0) return { label: "低优先级", color: "gold" };
+  return { label: "可流转", color: "green" };
+}
+
 function getSkuWorkLogItems(row: ErpSkuRow) {
   const issues = getSkuDataIssues(row);
   const stockQty = getSkuStockQty(row);
@@ -464,11 +486,13 @@ function getSkuWorkLogItems(row: ErpSkuRow) {
 
 function getSkuPrimaryWorkAction(row: ErpSkuRow) {
   const issues = getSkuDataIssues(row);
+  const priority = getSkuWorkPriorityMeta(row);
   if (issues.length) {
     const issue = issues[0];
     return {
       color: SKU_ISSUE_META[issue].color,
       label: SKU_ISSUE_META[issue].label,
+      priority,
       title: `先处理${SKU_ISSUE_META[issue].label}`,
       description: SKU_ISSUE_ACTIONS[issue],
     };
@@ -480,6 +504,7 @@ function getSkuPrimaryWorkAction(row: ErpSkuRow) {
   return {
     color: "green",
     label: "可流转",
+    priority,
     title: "资料可继续流转",
     description: [
       `库存 ${stockQty}`,
@@ -1562,11 +1587,17 @@ export default function ProductMasterData({ mode = "skus" }: ProductMasterDataPr
       title: "处理建议",
       key: "workAction",
       width: 240,
+      sorter: (left, right) => getSkuWorkPriority(left) - getSkuWorkPriority(right),
+      defaultSortOrder: "descend",
+      sortDirections: ["descend", "ascend"],
       render: (_value, row) => {
         const action = getSkuPrimaryWorkAction(row);
         return (
           <Space direction="vertical" size={3} style={{ width: "100%" }}>
             <Space size={6} wrap>
+              <Tag color={action.priority.color} style={{ marginInlineEnd: 0 }}>
+                {action.priority.label}
+              </Tag>
               <Tag color={action.color} style={{ marginInlineEnd: 0 }}>
                 {action.label}
               </Tag>
