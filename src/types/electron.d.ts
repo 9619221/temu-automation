@@ -469,6 +469,13 @@ interface ErpAPI {
       wechat?: string;
       address?: string;
       categories?: string[];
+      supplierCode?: string;
+      supplierLevel?: string;
+      paymentTerms?: string;
+      leadDays?: number | null;
+      taxRate?: number | null;
+      settlementCurrency?: string;
+      remark?: string;
       status?: string;
     }) => Promise<any>;
   };
