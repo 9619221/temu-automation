@@ -425,9 +425,11 @@ function isDiagnosticCloudProduct(skc?: SkcRow | null, sales?: TemuSalesRow | nu
   return values.some((value) => (
     value.startsWith("MALL-DBG")
     || value.startsWith("MALL-EXT-E2E")
+    || value.startsWith("SKC-DBG")
     || value.includes("EXT-E2E")
     || value === "debug"
     || value === "local-e2e"
+    || value.toLowerCase() === "debug product"
     || value.startsWith("127.0.0.1")
     || value.toLowerCase().includes("codex extension e2e")
   ));

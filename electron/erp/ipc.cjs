@@ -9245,8 +9245,6 @@ async function push1688OrderAction({ db, services, payload, actor }) {
   });
   const externalOrderId = findExternalOrderId(rawResponse);
   const now = nowIso();
-  const manualFreight = optionalNumber(payload.freight ?? payload.freightAmount);
-  const money = splitOrderMoney(amount, manualFreight ?? optionalNumber(po.freight_amount), amount);
   let transition = null;
   if (po.status === "draft") {
     transition = services.workflow.transition({
@@ -9433,6 +9431,8 @@ async function sync1688OrderPriceAction({ db, services, payload, actor }) {
   }
   if (amount < 0) throw new Error("请填写正确的 1688 订单金额");
   const now = nowIso();
+  const manualFreight = optionalNumber(payload.freight ?? payload.freightAmount);
+  const money = splitOrderMoney(amount, manualFreight ?? optionalNumber(po.freight_amount), amount);
   let transition = null;
   if (po.status === "pushed_pending_price") {
     transition = services.workflow.transition({
