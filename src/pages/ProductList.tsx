@@ -42,7 +42,7 @@ import { getStoreValue } from "../utils/storeCompat";
 import { ACTIVE_ACCOUNT_CHANGED_EVENT, STORE_VALUE_UPDATED_EVENT } from "../utils/multiStore";
 import { TrafficDriverPanel, buildTrafficDriverSitesFromProduct, type TrafficSiteKey } from "../components/TrafficDriverPanel";
 import ProductFluxOperatorCard from "../components/ProductFluxOperatorCard";
-import { fetchSkcList, fetchTemuSales, fetchTemuShopSales, loadCloudConfig, type SkcRow, type TemuSalesRow, type TemuShopSalesRow } from "../utils/cloudClient";
+import { fetchSkcList, fetchTemuActivity, fetchTemuSales, fetchTemuShopSales, loadCloudConfig, type SkcRow, type TemuActivityRow, type TemuSalesRow, type TemuShopSalesRow } from "../utils/cloudClient";
 
 const store = window.electronAPI?.store;
 const automation = window.electronAPI?.automation;
@@ -178,6 +178,7 @@ interface ProductItem {
   adviceQuantity?: number;
   cloudSkc?: SkcRow;
   cloudSales?: TemuSalesRow;
+  cloudActivities?: TemuActivityRow[];
 }
 
 interface ProductSourceState {
@@ -196,9 +197,11 @@ interface ProductCountSummary {
 interface CloudProductBundle {
   skcRows: SkcRow[];
   salesRows: TemuSalesRow[];
+  activityRows: TemuActivityRow[];
   shopSales: TemuShopSalesRow | null;
   skcMap: Map<string, SkcRow>;
   salesMap: Map<string, TemuSalesRow>;
+  activityMap: Map<string, TemuActivityRow[]>;
   latestAt: string;
   error: string;
   configured: boolean;
@@ -372,10 +375,14 @@ function formatTimestamp(value?: number | string | null) {
   return new Date(time).toLocaleString("zh-CN", { hour12: false });
 }
 
-function latestCloudTimestamp(skcRows: SkcRow[], salesRows: TemuSalesRow[]) {
+function latestCloudTimestamp(skcRows: SkcRow[], salesRows: TemuSalesRow[], activityRows: TemuActivityRow[] = []) {
   let latest = 0;
   for (const row of skcRows) latest = Math.max(latest, Number(row.last_updated_at || 0));
   for (const row of salesRows) {
+    const time = row.last_updated_at ? Date.parse(row.last_updated_at) : 0;
+    if (Number.isFinite(time)) latest = Math.max(latest, time);
+  }
+  for (const row of activityRows) {
     const time = row.last_updated_at ? Date.parse(row.last_updated_at) : 0;
     if (Number.isFinite(time)) latest = Math.max(latest, time);
   }
@@ -418,6 +425,12 @@ function cloudProductKey(mallId?: string | null, skcId?: string | null) {
   return `${String(mallId || "")}|${String(skcId || "")}`;
 }
 
+function cloudActivityKey(kind: "skc" | "product" | "goods", mallId?: string | null, id?: string | null) {
+  const mall = String(mallId || "").trim();
+  const value = String(id || "").trim();
+  return mall && value ? `${kind}:${mall}|${value}` : "";
+}
+
 function cloudKeyFromSkc(row?: SkcRow | null) {
   return cloudProductKey(row?.mall_id, row?.skc_id);
 }
@@ -428,6 +441,64 @@ function cloudKeyFromSales(row?: TemuSalesRow | null) {
 
 function cloudKeyFromProduct(product?: Partial<ProductItem> | null) {
   return cloudProductKey(product?.mallId || product?.cloudSales?.mall_supplier_id || product?.cloudSkc?.mall_id, product?.skcId);
+}
+
+function activityLookupKeys(row?: TemuActivityRow | null) {
+  if (!row) return [];
+  return [
+    cloudActivityKey("skc", row.mall_id, row.skc_id),
+    cloudActivityKey("product", row.mall_id, row.product_id),
+    cloudActivityKey("goods", row.mall_id, row.goods_id),
+  ].filter(Boolean);
+}
+
+function productActivityLookupKeys(source: {
+  mallId?: string | null;
+  skcId?: string | null;
+  productId?: string | null;
+  goodsId?: string | null;
+}) {
+  return [
+    cloudActivityKey("skc", source.mallId, source.skcId),
+    cloudActivityKey("product", source.mallId, source.productId),
+    cloudActivityKey("goods", source.mallId, source.goodsId),
+  ].filter(Boolean);
+}
+
+function buildCloudActivityMap(rows: TemuActivityRow[]) {
+  const activityMap = new Map<string, TemuActivityRow[]>();
+  for (const row of rows) {
+    for (const key of activityLookupKeys(row)) {
+      const bucket = activityMap.get(key) || [];
+      bucket.push(row);
+      activityMap.set(key, bucket);
+    }
+  }
+  for (const bucket of activityMap.values()) {
+    bucket.sort((left, right) => {
+      const leftTime = left.last_updated_at ? Date.parse(left.last_updated_at) : 0;
+      const rightTime = right.last_updated_at ? Date.parse(right.last_updated_at) : 0;
+      return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
+    });
+  }
+  return activityMap;
+}
+
+function getCloudActivities(
+  bundle: Pick<CloudProductBundle, "activityMap">,
+  source: { mallId?: string | null; skcId?: string | null; productId?: string | null; goodsId?: string | null },
+) {
+  const seen = new Set<string>();
+  const rows: TemuActivityRow[] = [];
+  for (const key of productActivityLookupKeys(source)) {
+    for (const row of bundle.activityMap.get(key) || []) {
+      const rowId = row.id || row.row_key;
+      if (seen.has(rowId)) continue;
+      seen.add(rowId);
+      rows.push(row);
+    }
+  }
+  return rows;
 }
 
 const productOrderCollator = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
@@ -453,6 +524,20 @@ function formatSkuSupplierPrice(value: unknown, fallback: string | number = "") 
   return yuan.toFixed(2);
 }
 
+function isDiagnosticCloudValue(value: string) {
+  return (
+    value.startsWith("MALL-DBG")
+    || value.startsWith("MALL-EXT-E2E")
+    || value.startsWith("SKC-DBG")
+    || value.includes("EXT-E2E")
+    || value === "debug"
+    || value === "local-e2e"
+    || value.toLowerCase() === "debug product"
+    || value.startsWith("127.0.0.1")
+    || value.toLowerCase().includes("codex extension e2e")
+  );
+}
+
 function isDiagnosticCloudProduct(skc?: SkcRow | null, sales?: TemuSalesRow | null) {
   const values = [
     skc?.mall_id,
@@ -468,26 +553,34 @@ function isDiagnosticCloudProduct(skc?: SkcRow | null, sales?: TemuSalesRow | nu
     .map((value) => String(value || "").trim())
     .filter(Boolean);
 
-  return values.some((value) => (
-    value.startsWith("MALL-DBG")
-    || value.startsWith("MALL-EXT-E2E")
-    || value.startsWith("SKC-DBG")
-    || value.includes("EXT-E2E")
-    || value === "debug"
-    || value === "local-e2e"
-    || value.toLowerCase() === "debug product"
-    || value.startsWith("127.0.0.1")
-    || value.toLowerCase().includes("codex extension e2e")
-  ));
+  return values.some(isDiagnosticCloudValue);
+}
+
+function isDiagnosticCloudActivity(row?: TemuActivityRow | null) {
+  const values = [
+    row?.mall_id,
+    row?.site,
+    row?.skc_id,
+    row?.product_id,
+    row?.goods_id,
+    row?.activity_id,
+    row?.activity_title,
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+
+  return values.some(isDiagnosticCloudValue);
 }
 
 async function loadCloudProductBundle(): Promise<CloudProductBundle> {
   const empty = {
     skcRows: [],
     salesRows: [],
+    activityRows: [],
     shopSales: null,
     skcMap: new Map<string, SkcRow>(),
     salesMap: new Map<string, TemuSalesRow>(),
+    activityMap: new Map<string, TemuActivityRow[]>(),
     latestAt: "",
     error: "",
     configured: false,
@@ -496,10 +589,11 @@ async function loadCloudProductBundle(): Promise<CloudProductBundle> {
   try {
     const cfg = await loadCloudConfig();
     if (!cfg) return empty;
-    const [skc, sales, shopSales] = await Promise.all([
+    const [skc, sales, shopSales, activity] = await Promise.all([
       fetchSkcList(cfg, { limit: 500 }),
       fetchTemuSales(cfg),
       fetchTemuShopSales(cfg),
+      fetchTemuActivity(cfg, { limit: 500 }),
     ]);
     const rawSkcRows = Array.isArray(skc?.rows) ? skc.rows : [];
     const diagnosticSkcIds = new Set(
@@ -511,8 +605,10 @@ async function loadCloudProductBundle(): Promise<CloudProductBundle> {
     const salesRows = (Array.isArray(sales?.rows) ? sales.rows : []).filter((row) => (
       !isDiagnosticCloudProduct(null, row) && !diagnosticSkcIds.has(cloudKeyFromSales(row))
     ));
+    const activityRows = (Array.isArray(activity?.rows) ? activity.rows : []).filter((row) => !isDiagnosticCloudActivity(row));
     const skcMap = new Map<string, SkcRow>();
     const salesMap = new Map<string, TemuSalesRow>();
+    const activityMap = buildCloudActivityMap(activityRows);
     for (const row of skcRows) {
       if (row.skc_id) skcMap.set(cloudKeyFromSkc(row), row);
     }
@@ -522,10 +618,12 @@ async function loadCloudProductBundle(): Promise<CloudProductBundle> {
     return {
       skcRows,
       salesRows,
+      activityRows,
       shopSales: shopSales?.row || null,
       skcMap,
       salesMap,
-      latestAt: latestCloudTimestamp(skcRows, salesRows),
+      activityMap,
+      latestAt: latestCloudTimestamp(skcRows, salesRows, activityRows),
       error: "",
       configured: true,
     };
@@ -657,8 +755,8 @@ function buildCloudSalesRaw(previousRaw: any, skc: SkcRow | undefined, sales: Te
   };
 }
 
-function applyCloudProduct(product: ProductItem, skc: SkcRow | undefined, sales: TemuSalesRow | undefined) {
-  if (!skc && !sales) return;
+function applyCloudProduct(product: ProductItem, skc: SkcRow | undefined, sales: TemuSalesRow | undefined, activities: TemuActivityRow[] = []) {
+  if (!skc && !sales && activities.length === 0) return;
   const raw = sales?.raw_item && typeof sales.raw_item === "object" ? sales.raw_item as any : {};
   const rawSkuList = Array.isArray(raw.skuQuantityDetailList) ? raw.skuQuantityDetailList : [];
   const rawSku = rawSkuList[0] || {};
@@ -672,11 +770,12 @@ function applyCloudProduct(product: ProductItem, skc: SkcRow | undefined, sales:
 
   product.cloudSkc = skc;
   product.cloudSales = sales;
+  product.cloudActivities = activities;
   product.mallId = firstCloudValue<string>(sales?.mall_supplier_id, skc?.mall_id, raw.supplierId) || product.mallId;
   product.title = title || product.title;
   product.category = category || product.category;
   product.categories = category || product.categories;
-  product.skcId = displayedSkcId || "";
+  product.skcId = displayedSkcId || product.skcId || "";
   product.spuId = firstCloudValue<string>(sales?.product_id, skc?.product_id, raw.productId, raw.productSpuId, raw.spuId) || product.spuId;
   product.goodsId = firstCloudValue<string>(sales?.goods_id, raw.goodsId) || product.goodsId;
   product.sku = firstCloudValue<string>(rawSku.skuExtCode, rawSku.productSkuId, raw.skuCode) || product.sku;
@@ -718,7 +817,10 @@ function applyCloudProduct(product: ProductItem, skc: SkcRow | undefined, sales:
   product.adviceQuantity = firstCloudValue<number>(sales?.advice_qty, raw.adviceQuantity, raw.skuQuantityTotalInfo?.adviceQuantity) ?? product.adviceQuantity ?? 0;
   product.syncedAt = formatTimestamp(sales?.last_updated_at) || formatTimestamp(skc?.last_updated_at) || product.syncedAt;
   product.hasSalesSnapshot = Boolean(sales || skc || product.hasSalesSnapshot);
-  product.salesRaw = buildCloudSalesRaw(product.salesRaw, skc, sales);
+  product.salesRaw = {
+    ...buildCloudSalesRaw(product.salesRaw, skc, sales),
+    cloudActivities: activities,
+  };
   product.salesRawSku = rawSku || product.salesRawSku;
   if (Array.isArray(sales?.trend_daily) && sales.trend_daily.length > 0) {
     product.trendDaily = sales.trend_daily;
@@ -799,6 +901,7 @@ function createProductItem(source: Partial<ProductItem> = {}): ProductItem {
     adviceQuantity: source.adviceQuantity ?? 0,
     cloudSkc: source.cloudSkc,
     cloudSales: source.cloudSales,
+    cloudActivities: source.cloudActivities || [],
   };
 }
 
@@ -810,24 +913,36 @@ function buildCloudProductRows(bundle: CloudProductBundle) {
   for (const row of bundle.salesRows) {
     if (row.skc_id && row.mall_supplier_id) ids.add(cloudKeyFromSales(row));
   }
+  for (const row of bundle.activityRows) {
+    if (row.skc_id && row.mall_id) ids.add(cloudProductKey(row.mall_id, row.skc_id));
+  }
 
   const rows: ProductItem[] = [];
   for (const rowKey of ids) {
     const skc = bundle.skcMap.get(rowKey);
     const sales = bundle.salesMap.get(rowKey);
+    const mallId = sales?.mall_supplier_id || skc?.mall_id || rowKey.split("|")[0] || "";
     const skcId = sales?.skc_id || skc?.skc_id || "";
+    const activities = getCloudActivities(bundle, {
+      mallId,
+      skcId: skcId || rowKey.split("|")[1] || "",
+      productId: sales?.product_id || skc?.product_id || "",
+      goodsId: sales?.goods_id || "",
+    });
+    const firstActivity = activities[0];
     const product = createProductItem({
-      skcId,
-      mallId: sales?.mall_supplier_id || skc?.mall_id || "",
-      title: sales?.title || skc?.title || "",
+      skcId: skcId || firstActivity?.skc_id || "",
+      mallId,
+      title: sales?.title || skc?.title || firstActivity?.activity_title || "",
       category: sales?.category_name || skc?.category_name || "",
       categories: sales?.category_name || skc?.category_name || "",
       imageUrl: sales?.thumb_url || skc?.thumb_url || "",
       siteLabel: skc?.site || "",
-      syncedAt: formatTimestamp(sales?.last_updated_at) || formatTimestamp(skc?.last_updated_at),
+      syncedAt: formatTimestamp(sales?.last_updated_at) || formatTimestamp(skc?.last_updated_at) || formatTimestamp(firstActivity?.last_updated_at),
       hasSalesSnapshot: Boolean(sales),
+      cloudActivities: activities,
     });
-    applyCloudProduct(product, skc, sales);
+    applyCloudProduct(product, skc, sales, activities);
     rows.push(product);
   }
 
@@ -860,6 +975,33 @@ function renderSnapshotField(label: string, value: unknown, accent = false) {
       </div>
     </div>
   );
+}
+
+function parseCloudJsonObject(text?: string | null) {
+  if (!text) return {};
+  try {
+    const value = JSON.parse(text);
+    return value && typeof value === "object" ? value as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
+function activityMetricParts(activity: TemuActivityRow) {
+  const metric = parseCloudJsonObject(activity.metric_json);
+  return [
+    metric.orderCount != null ? `订单 ${metric.orderCount}` : "",
+    metric.payAmount != null ? `支付 ${metric.payAmount}` : "",
+    metric.goodsCount != null ? `商品 ${metric.goodsCount}` : "",
+    metric.cartCount != null ? `加购 ${metric.cartCount}` : "",
+  ].filter(Boolean);
+}
+
+function activityTimeText(activity: TemuActivityRow) {
+  const start = formatTimestamp(activity.start_at);
+  const end = formatTimestamp(activity.end_at);
+  if (start && end) return `${start} - ${end}`;
+  return start || end || "";
 }
 
 function hasMeaningfulSnapshotValue(value: unknown) {
@@ -953,6 +1095,12 @@ function buildSearchIndex(product: ProductItem) {
     sku.specText,
     ...sku.productSkuSpecList.map((spec: ProductSkuSpec) => spec.specName),
   ]);
+  const activityTexts = (product.cloudActivities || []).flatMap((activity) => [
+    activity.activity_title,
+    activity.activity_id,
+    activity.activity_kind,
+    activity.activity_status,
+  ]);
 
   return [
     product.title,
@@ -975,6 +1123,7 @@ function buildSearchIndex(product: ProductItem) {
     product.buyerName,
     product.buyerUid,
     ...skuTexts,
+    ...activityTexts,
   ]
     .map((item) => normalizeLookupValue(String(item || "")))
     .filter(Boolean)
@@ -1582,6 +1731,7 @@ export default function ProductList() {
   // 云端采集到的 SKC / 销售数据，按 skc_id 覆盖商品管理主字段。
   const [cloudSkcMap, setCloudSkcMap] = useState<Map<string, SkcRow>>(new Map());
   const [cloudSalesMap, setCloudSalesMap] = useState<Map<string, TemuSalesRow>>(new Map());
+  const [cloudActivityCount, setCloudActivityCount] = useState(0);
   const [cloudShopSales, setCloudShopSales] = useState<TemuShopSalesRow | null>(null);
   const [cloudProductMeta, setCloudProductMeta] = useState({ latestAt: "", error: "" });
 
@@ -1770,6 +1920,7 @@ export default function ProductList() {
         const cloudProducts = buildCloudProductRows(cloudBundle);
         setCloudSkcMap(cloudBundle.skcMap);
         setCloudSalesMap(cloudBundle.salesMap);
+        setCloudActivityCount(cloudBundle.activityRows.length);
         setCloudShopSales(cloudBundle.shopSales);
         setCloudProductMeta({ latestAt: cloudBundle.latestAt, error: cloudBundle.error });
         setHasAccount(cloudBundle.configured);
@@ -2530,6 +2681,8 @@ export default function ProductList() {
 
   const dataIssues = cloudProductMeta.error
     ? [`云端商品数据读取失败：${cloudProductMeta.error}`]
+    : (products.length > 0 && cloudActivityCount === 0)
+      ? ["云端暂无活动快照：需要扩展采集命中活动、营销、报名、竞价相关接口"]
     : [];
 
   const metricColor = (value: unknown, base = "#389e0d", zeroColor = "#bfbfbf", positiveWeight = 600) => {
@@ -2975,6 +3128,41 @@ export default function ProductList() {
       ),
     },
     {
+      title: "活动",
+      key: "activity",
+      width: 260,
+      render: (_: any, record: any) => {
+        const activities: TemuActivityRow[] = Array.isArray(record.cloudActivities) ? record.cloudActivities : [];
+        if (activities.length === 0) return <span style={{ color: "#bfbfbf" }}>-</span>;
+        const first = activities[0];
+        const metrics = activityMetricParts(first);
+        const timeText = activityTimeText(first);
+        return (
+          <Space direction="vertical" size={4} style={{ maxWidth: 240 }}>
+            <Space size={4} wrap>
+              <Tag color="purple">{activities.length} 条</Tag>
+              {first.activity_kind ? <Tag color="blue">{first.activity_kind}</Tag> : null}
+              {first.activity_status ? <Tag>{first.activity_status}</Tag> : null}
+            </Space>
+            <Tooltip title={first.activity_title || first.activity_id || first.row_key}>
+              <div className="app-line-clamp-2" style={{ fontWeight: 600, color: "var(--color-text)" }}>
+                {first.activity_title || first.activity_id || first.row_key}
+              </div>
+            </Tooltip>
+            {metrics.length > 0 ? (
+              <div style={{ color: "var(--color-text-sec)", fontSize: 12 }}>{metrics.join(" / ")}</div>
+            ) : null}
+            {timeText ? (
+              <div style={{ color: "var(--color-text-sec)", fontSize: 12 }}>{timeText}</div>
+            ) : null}
+            {activities.length > 1 ? (
+              <div style={{ color: "var(--color-brand)", fontSize: 12 }}>另 {activities.length - 1} 条活动</div>
+            ) : null}
+          </Space>
+        );
+      },
+    },
+    {
       title: "操作",
       key: "actions",
       width: 110,
@@ -3088,6 +3276,7 @@ export default function ProductList() {
     { label: "缺货数量", keys: ["lackQuantity"] },
     { label: "库存数据", keys: ["warehouseStock", "occupy", "unavail", "inTransit"] },
     { label: "备货建议", keys: ["advice"] },
+    { label: "活动数据", keys: ["activity"] },
     { label: "其他", keys: ["actions"] },
   ];
 
@@ -4001,6 +4190,7 @@ export default function ProductList() {
           formatSyncedAt(latestSyncedAt),
           `云端 SKC ${cloudSkcMap.size}`,
           `销售快照 ${cloudSalesMap.size}`,
+          `活动快照 ${cloudActivityCount}`,
           cloudShopSales?.stat_date ? `店铺销量 ${cloudShopSales.stat_date}` : null,
           hasAccount === false ? "未连接云端" : null,
         ].filter(Boolean)}
@@ -4138,7 +4328,7 @@ export default function ProductList() {
               </Button>
               <Button icon={<SettingOutlined />} onClick={openColSettings}>列设置</Button>
               <span style={{ color: "#8c8c8c", fontSize: 13 }}>
-                共 {products.length} 条 · 已接销售 {salesAttachedCount}
+                共 {products.length} 条 · 已接销售 {salesAttachedCount} · 活动 {cloudActivityCount}
               </span>
               {filteredProducts.length !== products.length && (
                 <span style={{ color: "#8c8c8c", fontSize: 13 }}>
