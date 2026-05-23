@@ -1356,6 +1356,7 @@ function isPendingPurchaseRequest(row: PurchaseRequestRow) {
 function purchaseRequestHasSource(row: PurchaseRequestRow) {
   return Number(row.mappingCount || 0) > 0
     || Boolean(row.candidates?.length || row.candidateCount)
+    || Boolean(row.primaryMappingSupplierName || row.primaryMappingOfferId || row.primaryCandidateSupplierName)
     || Boolean(row.skuSupplierId || row.skuSupplierName);
 }
 
@@ -4562,9 +4563,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       key: "sourcing",
       width: 120,
       render: (_value, row) => {
-        const noSource = !Number(row.mappingCount || 0)
-          && !(row.candidates?.length || row.candidateCount)
-          && !(row.skuSupplierId || row.skuSupplierName);
+        const noSource = !purchaseRequestHasSource(row);
         return (
           <Space direction="vertical" size={2}>
             {noSource ? <Tag color="orange" style={{ marginInlineEnd: 0 }}>待找品</Tag> : null}
@@ -4609,7 +4608,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         const hasCandidates = Boolean(row.candidates?.length || row.candidateCount);
         const hasMapping = Number(row.mappingCount || 0) > 0;
         const hasSkuSupplier = Boolean(row.skuSupplierId || row.skuSupplierName);
-        const hasAnySource = hasCandidates || hasMapping || hasSkuSupplier;
+        const hasAnySource = purchaseRequestHasSource(row);
         const existingPo = purchaseOrders.find((item) => purchaseOrderBelongsToRequest(item, row.id));
         const canQuote = canPurchase && ["submitted", "buyer_processing", "sourced"].includes(row.status);
         const canFindSupplier = canQuote && !hasMapping && !hasSkuSupplier;
