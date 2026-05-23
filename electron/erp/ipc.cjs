@@ -13560,7 +13560,7 @@ function performWarehouseAction(payload = {}, actorInput = {}) {
   return {
     action,
     result,
-    workbench: getWarehouseWorkbench({ limit: payload.limit }),
+    workbench: getWarehouseWorkbench(payload),
   };
 }
 
