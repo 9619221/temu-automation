@@ -66,6 +66,7 @@ interface OutboundBatchRow {
 
 interface OutboundShipmentRow {
   id: string;
+  accountId?: string;
   shipmentNo?: string;
   batchCode?: string;
   batchId?: string;
@@ -83,6 +84,29 @@ interface OutboundShipmentRow {
   temuDeliveryBatchSn?: string | null;
   temuSyncStatus?: string | null;
   updatedAt?: string;
+}
+
+interface TemuStockOrderPreview {
+  requestedQty?: number;
+  demandRemainingQty?: number | null;
+  existingQty?: number;
+  remainingQty?: number;
+  availableQty?: number;
+  shortageQty?: number;
+  matchedSku?: {
+    id?: string;
+    internalSkuCode?: string;
+    productName?: string;
+  };
+  existingShipments?: OutboundShipmentRow[];
+  allocationPlan?: Array<{
+    qty: number;
+    batch?: {
+      id?: string;
+      batchCode?: string;
+      availableQty?: number;
+    };
+  }>;
 }
 
 interface OutboundWorkbench {
@@ -145,6 +169,18 @@ function stockOrderIdentity(row: TemuStockOrderRow) {
   return row.stock_order_no || row.delivery_order_sn || row.delivery_batch_sn || row.row_key || row.id;
 }
 
+function stockOrderKeys(row: TemuStockOrderRow) {
+  return [row.stock_order_no, row.delivery_order_sn, row.delivery_batch_sn]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+}
+
+function shipmentKeys(row: OutboundShipmentRow) {
+  return [row.temuStockOrderNo, row.temuDeliveryOrderSn, row.temuDeliveryBatchSn]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+}
+
 function stockOrderDemand(row: TemuStockOrderRow) {
   const demand = Number(row.demand_qty || 0);
   const delivered = Number(row.delivered_qty || 0);
@@ -186,6 +222,9 @@ export default function QcOutboundCenter() {
   const [selectedAccountId, setSelectedAccountId] = useState("");
   const [planTarget, setPlanTarget] = useState<OutboundBatchRow | null>(null);
   const [stockOrderTarget, setStockOrderTarget] = useState<TemuStockOrderRow | null>(null);
+  const [stockOrderPreview, setStockOrderPreview] = useState<TemuStockOrderPreview | null>(null);
+  const [stockOrderPreviewError, setStockOrderPreviewError] = useState<string | null>(null);
+  const [stockOrderPreviewLoading, setStockOrderPreviewLoading] = useState(false);
   const [shipTarget, setShipTarget] = useState<OutboundShipmentRow | null>(null);
   const [planForm] = Form.useForm();
   const [stockOrderForm] = Form.useForm();
@@ -303,32 +342,85 @@ export default function QcOutboundCenter() {
   const openStockOrderModal = (row: TemuStockOrderRow) => {
     const accountId = selectedAccountId || accounts[0]?.id || "";
     setStockOrderTarget(row);
+    setStockOrderPreview(null);
+    setStockOrderPreviewError(null);
     stockOrderForm.setFieldsValue({
       accountId,
       qty: stockOrderDemand(row),
       boxes: 1,
       remark: `Temu 云端备货单 ${stockOrderIdentity(row)}`,
     });
+    if (accountId) {
+      void previewStockOrderPlan(row, accountId, stockOrderDemand(row));
+    }
+  };
+
+  const previewStockOrderPlan = async (
+    row = stockOrderTarget,
+    accountId?: string,
+    qty?: number,
+  ) => {
+    if (!erp || !row) return;
+    const values = stockOrderForm.getFieldsValue();
+    const nextAccountId = accountId || values.accountId || selectedAccountId || accounts[0]?.id || "";
+    const nextQty = Number(qty || values.qty || stockOrderDemand(row));
+    if (!nextAccountId || !nextQty) return;
+    setStockOrderPreviewLoading(true);
+    setStockOrderPreviewError(null);
+    try {
+      const response = await erp.outbound.action({
+        action: "preview_temu_stock_order_outbound",
+        accountId: nextAccountId,
+        stockOrder: row,
+        qty: nextQty,
+        includeWorkbench: false,
+        limit: 200,
+      });
+      setStockOrderPreview(response?.result || null);
+    } catch (error: any) {
+      setStockOrderPreview(null);
+      setStockOrderPreviewError(error?.message || "预检失败");
+    } finally {
+      setStockOrderPreviewLoading(false);
+    }
+  };
+
+  const closeStockOrderModal = () => {
+    setStockOrderTarget(null);
+    setStockOrderPreview(null);
+    setStockOrderPreviewError(null);
+    setStockOrderPreviewLoading(false);
+    stockOrderForm.resetFields();
   };
 
   const submitStockOrderPlan = async () => {
-    if (!stockOrderTarget) return;
+    if (!erp || !stockOrderTarget) return;
     const values = await stockOrderForm.validateFields();
     setSelectedAccountId(values.accountId);
-    await runOutboundAction(
-      `stock-${stockOrderTarget.id}`,
-      {
+    setActingKey(`stock-${stockOrderTarget.id}`);
+    try {
+      const response = await erp.outbound.action({
         action: "create_outbound_plan_from_temu_stock_order",
         accountId: values.accountId,
         stockOrder: stockOrderTarget,
         qty: Number(values.qty),
         boxes: Number(values.boxes || 1),
         remark: values.remark,
-      },
-      "已从云端备货单生成出库单",
-    );
-    setStockOrderTarget(null);
-    stockOrderForm.resetFields();
+        limit: 200,
+      });
+      await loadData();
+      const result = response?.result || {};
+      if (result.idempotent) {
+        message.info("该备货单已生成本地出库单，未重复创建");
+      } else {
+        message.success(`已生成 ${formatQty(result.createdQty || values.qty)} 件出库单`);
+      }
+      closeStockOrderModal();
+    } catch (error: any) {
+      message.error(error?.message || "生成出库单失败");
+    } finally {
+      setActingKey(null);
+    }
   };
 
   const openShipModal = (row: OutboundShipmentRow) => {
@@ -357,6 +449,24 @@ export default function QcOutboundCenter() {
   };
 
   const summary = outboundData.summary || {};
+  const stockOrderLinkIndex = useMemo(() => {
+    const index = new Map<string, { qty: number; shipments: OutboundShipmentRow[] }>();
+    for (const shipment of outboundData.outboundShipments || []) {
+      if (selectedAccountId && shipment.accountId && shipment.accountId !== selectedAccountId) continue;
+      for (const key of shipmentKeys(shipment)) {
+        const current = index.get(key) || { qty: 0, shipments: [] };
+        current.qty += Number(shipment.qty || 0);
+        current.shipments.push(shipment);
+        index.set(key, current);
+      }
+    }
+    return index;
+  }, [outboundData.outboundShipments, selectedAccountId]);
+  const resolveStockOrderLink = useCallback((row: TemuStockOrderRow) => (
+    stockOrderKeys(row)
+      .map((key) => stockOrderLinkIndex.get(key))
+      .find(Boolean)
+  ), [stockOrderLinkIndex]);
   const cloudDemandQty = useMemo(
     () => stockOrders.reduce((sum, row) => sum + Number(row.demand_qty || 0), 0),
     [stockOrders],
@@ -407,7 +517,7 @@ export default function QcOutboundCenter() {
       render: (_value, row) => (
         <Space direction="vertical" size={2}>
           <Text strong>{formatQty(row.demand_qty)} 件</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>已发 {formatQty(row.delivered_qty)}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>云端已发 {formatQty(row.delivered_qty)}</Text>
         </Space>
       ),
     },
@@ -431,6 +541,28 @@ export default function QcOutboundCenter() {
       ),
     },
     {
+      title: "本地承接",
+      key: "localLink",
+      width: 140,
+      render: (_value, row) => {
+        const localLink = resolveStockOrderLink(row);
+        const localQty = Number(localLink?.qty || 0);
+        const demandQty = Math.max(1, stockOrderDemand(row));
+        const isDone = localQty >= demandQty;
+        const isPartial = localQty > 0 && localQty < demandQty;
+        return (
+          <Space direction="vertical" size={2}>
+            <Tag color={isDone ? "success" : isPartial ? "warning" : "default"}>
+              {isDone ? "已生成" : isPartial ? "部分生成" : "未生成"}
+            </Tag>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {formatQty(localQty)} / {formatQty(demandQty)} 件
+            </Text>
+          </Space>
+        );
+      },
+    },
+    {
       title: "更新",
       key: "updated",
       width: 170,
@@ -441,20 +573,24 @@ export default function QcOutboundCenter() {
       key: "actions",
       width: 150,
       fixed: "right",
-      render: (_value, row) => (
-        <Button
-          size="small"
-          type="primary"
-          icon={<ExportOutlined />}
-          loading={actingKey === `stock-${row.id}`}
-          disabled={!canCreateOutbound || accounts.length === 0}
-          onClick={() => openStockOrderModal(row)}
-        >
-          生成出库单
-        </Button>
-      ),
+      render: (_value, row) => {
+        const localLink = resolveStockOrderLink(row);
+        const isDone = Number(localLink?.qty || 0) >= Math.max(1, stockOrderDemand(row));
+        return (
+          <Button
+            size="small"
+            type="primary"
+            icon={<ExportOutlined />}
+            loading={actingKey === `stock-${row.id}`}
+            disabled={!canCreateOutbound || accounts.length === 0}
+            onClick={() => openStockOrderModal(row)}
+          >
+            {isDone ? "查看承接" : "生成出库单"}
+          </Button>
+        );
+      },
     },
-  ], [accounts.length, actingKey, canCreateOutbound]);
+  ], [accounts.length, actingKey, canCreateOutbound, resolveStockOrderLink]);
 
   const availableBatchColumns = useMemo<ColumnsType<OutboundBatchRow>>(() => [
     {
@@ -726,7 +862,7 @@ export default function QcOutboundCenter() {
                   loading={loading && !loadedOnce}
                   columns={cloudStockColumns}
                   dataSource={stockOrders}
-                  scroll={{ x: 1400 }}
+                  scroll={{ x: 1540 }}
                   pagination={{ pageSize: 20, showSizeChanger: true }}
                 />
               </Space>
@@ -791,12 +927,23 @@ export default function QcOutboundCenter() {
       <Modal
         title="从云端备货单生成出库单"
         open={Boolean(stockOrderTarget)}
-        onCancel={() => setStockOrderTarget(null)}
-        onOk={submitStockOrderPlan}
+        onCancel={closeStockOrderModal}
+        onOk={stockOrderPreview && Number(stockOrderPreview.remainingQty || 0) <= 0 ? closeStockOrderModal : submitStockOrderPlan}
+        okText={stockOrderPreview && Number(stockOrderPreview.remainingQty || 0) <= 0 ? "关闭" : "生成出库单"}
+        okButtonProps={{
+          disabled: Boolean(stockOrderPreviewError) || Number(stockOrderPreview?.shortageQty || 0) > 0,
+        }}
         confirmLoading={actingKey === `stock-${stockOrderTarget?.id}`}
         destroyOnClose
       >
-        <Form form={stockOrderForm} layout="vertical">
+        <Form
+          form={stockOrderForm}
+          layout="vertical"
+          onValuesChange={() => {
+            setStockOrderPreview(null);
+            setStockOrderPreviewError(null);
+          }}
+        >
           <Form.Item label="ERP 店铺" name="accountId" rules={[{ required: true, message: "请选择 ERP 店铺" }]}>
             <Select
               options={accounts.map((account) => ({ label: account.name || account.id, value: account.id }))}
@@ -812,6 +959,42 @@ export default function QcOutboundCenter() {
           <Form.Item label="备注" name="remark">
             <Input.TextArea rows={3} />
           </Form.Item>
+          <Space direction="vertical" size={10} style={{ width: "100%" }}>
+            <Button
+              size="small"
+              icon={<SearchOutlined />}
+              loading={stockOrderPreviewLoading}
+              onClick={() => void previewStockOrderPlan()}
+            >
+              刷新出库预检
+            </Button>
+            {stockOrderPreviewError ? (
+              <Alert type="error" showIcon message="出库预检失败" description={stockOrderPreviewError} />
+            ) : stockOrderPreview ? (
+              <Alert
+                type={Number(stockOrderPreview.shortageQty || 0) > 0 ? "warning" : "success"}
+                showIcon
+                message={Number(stockOrderPreview.shortageQty || 0) > 0 ? "库存不足，需调整数量或批次" : "库存可覆盖本次出库"}
+                description={(
+                  <Space direction="vertical" size={4}>
+                    <Text>
+                      匹配 SKU：{stockOrderPreview.matchedSku?.internalSkuCode || stockOrderPreview.matchedSku?.productName || "-"}
+                    </Text>
+                    <Text type="secondary">
+                      需求 {formatQty(stockOrderPreview.requestedQty)} · 可用 {formatQty(stockOrderPreview.availableQty)} · 已占用 {formatQty(stockOrderPreview.existingQty)} · 缺口 {formatQty(stockOrderPreview.shortageQty)}
+                    </Text>
+                    {stockOrderPreview.allocationPlan?.length ? (
+                      <Text type="secondary">
+                        批次分配：{stockOrderPreview.allocationPlan.map((item) => `${item.batch?.batchCode || item.batch?.id || "批次"} ${formatQty(item.qty)}`).join("；")}
+                      </Text>
+                    ) : null}
+                  </Space>
+                )}
+              />
+            ) : (
+              <Alert type="info" showIcon message="选择店铺和数量后，可先预检库存覆盖情况。" />
+            )}
+          </Space>
         </Form>
       </Modal>
 

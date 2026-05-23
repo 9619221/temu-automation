@@ -1816,6 +1816,162 @@ async function main() {
       createCloudStockOutboundBody.workbench.availableBatches.find((item) => item.id === qcBatchId).availableQty,
       24,
     );
+    assert.equal(
+      createCloudStockOutboundBody.workbench.outboundShipments.filter((item) => item.temuStockOrderNo === "SO-IPC-001").length,
+      1,
+    );
+
+    const duplicateCloudStockOutbound = await requestUrl(`${lanStatus.localUrl}/api/outbound/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: opsCookie,
+      },
+      body: JSON.stringify({
+        action: "create_outbound_plan_from_temu_stock_order",
+        accountId: account.id,
+        stockOrder: {
+          id: "cloud-stock-order-ipc",
+          stock_order_no: "SO-IPC-001",
+          delivery_order_sn: "DO-IPC-001",
+          delivery_batch_sn: "DB-IPC-001",
+          product_id: "PROD-IPC-001",
+          skc_id: "SKC-IPC-001",
+          sku_id: "SKU-TEMU-IPC",
+          sku_ext_code: "SKU-IPC-001",
+          product_name: "IPC Demo SKU",
+          spec_name: "White / Standard",
+          demand_qty: 6,
+          delivered_qty: 0,
+        },
+        qty: 6,
+        boxes: 1,
+      }),
+    });
+    assert.equal(duplicateCloudStockOutbound.statusCode, 200);
+    const duplicateCloudStockOutboundBody = JSON.parse(duplicateCloudStockOutbound.body).result;
+    assert.equal(duplicateCloudStockOutboundBody.result.idempotent, true);
+    assert.equal(duplicateCloudStockOutboundBody.result.createdQty, 0);
+    assert.equal(
+      duplicateCloudStockOutboundBody.workbench.outboundShipments.filter((item) => item.temuStockOrderNo === "SO-IPC-001").length,
+      1,
+    );
+    assert.equal(
+      duplicateCloudStockOutboundBody.workbench.availableBatches.find((item) => item.id === qcBatchId).availableQty,
+      24,
+    );
+
+    const multiSku = await invoke("erp:sku:create", {
+      id: "sku_multi_ipc",
+      accountId: account.id,
+      internalSkuCode: "SKU-MULTI-IPC",
+      temuProductId: "PROD-MULTI-IPC",
+      temuSkcId: "SKC-MULTI-IPC",
+      temuSkuId: "SKU-TEMU-MULTI-IPC",
+      productName: "IPC Multi Batch SKU",
+      colorSpec: "Multi / Standard",
+      supplierId: supplier.id,
+    });
+    const multiBatchSeedDb = openErpDatabase({ userDataDir: tempUserData });
+    try {
+      const multiBatchServices = createErpServices(multiBatchSeedDb);
+      multiBatchServices.inventory.createBatchFromInbound({
+        id: "batch_multi_ipc_a",
+        accountId: account.id,
+        batchCode: "BATCH-MULTI-A",
+        skuId: multiSku.id,
+        receivedQty: 3,
+        unitLandedCost: 2.1,
+        locationCode: "M-A",
+        receivedAt: "2026-05-20T01:00:00.000Z",
+        actor: { id: warehouseUser.id, role: warehouseUser.role },
+      });
+      multiBatchServices.inventory.createBatchFromInbound({
+        id: "batch_multi_ipc_b",
+        accountId: account.id,
+        batchCode: "BATCH-MULTI-B",
+        skuId: multiSku.id,
+        receivedQty: 4,
+        unitLandedCost: 2.2,
+        locationCode: "M-B",
+        receivedAt: "2026-05-21T01:00:00.000Z",
+        actor: { id: warehouseUser.id, role: warehouseUser.role },
+      });
+    } finally {
+      multiBatchSeedDb.close();
+    }
+
+    const multiStockOrder = {
+      id: "cloud-stock-order-multi-ipc",
+      stock_order_no: "SO-IPC-MULTI",
+      delivery_order_sn: "DO-IPC-MULTI",
+      delivery_batch_sn: "DB-IPC-MULTI",
+      product_id: "PROD-MULTI-IPC",
+      skc_id: "SKC-MULTI-IPC",
+      sku_id: "SKU-TEMU-MULTI-IPC",
+      sku_ext_code: "SKU-MULTI-IPC",
+      product_name: "IPC Multi Batch SKU",
+      spec_name: "Multi / Standard",
+      demand_qty: 5,
+      delivered_qty: 0,
+    };
+    const previewMultiCloudStockOutbound = await requestUrl(`${lanStatus.localUrl}/api/outbound/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: opsCookie,
+      },
+      body: JSON.stringify({
+        action: "preview_temu_stock_order_outbound",
+        accountId: account.id,
+        stockOrder: multiStockOrder,
+        qty: 5,
+      }),
+    });
+    assert.equal(previewMultiCloudStockOutbound.statusCode, 200);
+    const previewMultiCloudStockOutboundBody = JSON.parse(previewMultiCloudStockOutbound.body).result.result;
+    assert.equal(previewMultiCloudStockOutboundBody.allocationPlan.length, 2);
+    assert.equal(previewMultiCloudStockOutboundBody.availableQty, 7);
+    assert.equal(previewMultiCloudStockOutboundBody.remainingQty, 5);
+    assert.equal(previewMultiCloudStockOutboundBody.shortageQty, 0);
+
+    const createMultiCloudStockOutbound = await requestUrl(`${lanStatus.localUrl}/api/outbound/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: opsCookie,
+      },
+      body: JSON.stringify({
+        action: "create_outbound_plan_from_temu_stock_order",
+        accountId: account.id,
+        stockOrder: multiStockOrder,
+        qty: 5,
+        boxes: 1,
+      }),
+    });
+    assert.equal(createMultiCloudStockOutbound.statusCode, 200);
+    const createMultiCloudStockOutboundBody = JSON.parse(createMultiCloudStockOutbound.body).result;
+    assert.equal(createMultiCloudStockOutboundBody.result.idempotent, false);
+    assert.equal(createMultiCloudStockOutboundBody.result.createdQty, 5);
+    assert.equal(createMultiCloudStockOutboundBody.result.createdShipments.length, 2);
+    assert.equal(
+      createMultiCloudStockOutboundBody.workbench.outboundShipments.filter((item) => item.temuStockOrderNo === "SO-IPC-MULTI").length,
+      2,
+    );
+    const multiBatchCheckDb = openErpDatabase({ userDataDir: tempUserData });
+    try {
+      const batchA = multiBatchCheckDb.prepare("SELECT available_qty, reserved_qty FROM erp_inventory_batches WHERE id = ?").get("batch_multi_ipc_a");
+      const batchB = multiBatchCheckDb.prepare("SELECT available_qty, reserved_qty FROM erp_inventory_batches WHERE id = ?").get("batch_multi_ipc_b");
+      assert.equal(batchA.available_qty, 0);
+      assert.equal(batchA.reserved_qty, 3);
+      assert.equal(batchB.available_qty, 2);
+      assert.equal(batchB.reserved_qty, 2);
+    } finally {
+      multiBatchCheckDb.close();
+    }
 
     const partialInbound = await requestUrl(`${lanStatus.localUrl}/api/warehouse/action`, {
       method: "POST",

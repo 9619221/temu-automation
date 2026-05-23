@@ -14551,6 +14551,7 @@ function normalizeTemuStockOrderPayload(payload = {}) {
   const readString = (keys) => optionalString(readFlatField(stockOrder, payload, keys));
   const readNumber = (keys) => positiveInteger(readFlatField(stockOrder, payload, keys));
   const demandQty = readNumber(["demandQty", "demand_qty", "quantity", "qty", "purchaseQuantity", "purchase_quantity"]);
+  const deliveredQty = readNumber(["deliveredQty", "delivered_qty", "deliveredQuantity", "delivered_quantity"], 0) || 0;
   const requestedQty = positiveInteger(payload.qty || payload.quantity, demandQty);
   return {
     stockOrderNo: readString(["stockOrderNo", "stock_order_no", "subPurchaseOrderSn", "sub_purchase_order_sn", "purchaseOrderSn", "purchase_order_sn"]),
@@ -14564,6 +14565,7 @@ function normalizeTemuStockOrderPayload(payload = {}) {
     specName: readString(["specName", "spec_name", "skuSpecName", "sku_spec_name", "colorSpec", "color_spec"]),
     mallId: readString(["mallId", "mall_id"]),
     demandQty,
+    deliveredQty,
     qty: requestedQty,
   };
 }
@@ -14641,6 +14643,109 @@ function findTemuOutboundBatch(db, { accountId, skuId, qty }) {
   throw new Error(`可用库存不足，当前可用 ${Number(stock?.available_qty || 0)}，需要 ${qty}`);
 }
 
+function selectTemuOutboundBatches(db, { accountId, skuId, qty }) {
+  const rows = db.prepare(`
+    SELECT *
+    FROM erp_inventory_batches
+    WHERE account_id = @account_id
+      AND sku_id = @sku_id
+      AND available_qty > 0
+      AND qc_status IN ('passed', 'passed_with_observation', 'partial_passed')
+    ORDER BY received_at ASC, created_at ASC, id ASC
+  `).all({
+    account_id: accountId,
+    sku_id: skuId,
+  });
+  let remaining = qty;
+  let availableQty = 0;
+  const batches = [];
+  for (const row of rows) {
+    const available = Math.max(0, Math.floor(Number(row.available_qty || 0)));
+    availableQty += available;
+    if (remaining <= 0) continue;
+    const take = Math.min(available, remaining);
+    if (take > 0) {
+      batches.push({ batch: row, qty: take });
+      remaining -= take;
+    }
+  }
+  return {
+    availableQty,
+    batches,
+    shortageQty: Math.max(0, remaining),
+  };
+}
+
+function getExistingTemuOutboundShipments(db, { accountId, skuId, stockOrder }) {
+  const conditions = [];
+  const params = {
+    account_id: accountId,
+    sku_id: skuId,
+    temu_stock_order_no: stockOrder.stockOrderNo,
+    temu_delivery_order_sn: stockOrder.deliveryOrderSn,
+    temu_delivery_batch_sn: stockOrder.deliveryBatchSn,
+  };
+  if (stockOrder.stockOrderNo) conditions.push("shipment.temu_stock_order_no = @temu_stock_order_no");
+  if (stockOrder.deliveryOrderSn) conditions.push("shipment.temu_delivery_order_sn = @temu_delivery_order_sn");
+  if (stockOrder.deliveryBatchSn) conditions.push("shipment.temu_delivery_batch_sn = @temu_delivery_batch_sn");
+  if (!conditions.length) return [];
+  return db.prepare(`
+    SELECT
+      shipment.*,
+      batch.batch_code,
+      batch.available_qty AS batch_available_qty,
+      batch.reserved_qty AS batch_reserved_qty
+    FROM erp_outbound_shipments shipment
+    LEFT JOIN erp_inventory_batches batch ON batch.id = shipment.batch_id
+    WHERE shipment.account_id = @account_id
+      AND shipment.sku_id = @sku_id
+      AND shipment.status != 'cancelled'
+      AND (${conditions.join(" OR ")})
+    ORDER BY shipment.created_at ASC, shipment.id ASC
+  `).all(params);
+}
+
+function previewTemuStockOrderOutbound({ db, payload }) {
+  const accountId = requireString(payload.accountId || payload.account_id, "accountId");
+  const stockOrder = normalizeTemuStockOrderPayload(payload);
+  const requestedQty = positiveInteger(payload.qty || payload.quantity, stockOrder.qty);
+  if (!requestedQty) throw new Error("出库数量必须大于 0");
+  const demandRemainingQty = stockOrder.demandQty
+    ? Math.max(0, Number(stockOrder.demandQty || 0) - Number(stockOrder.deliveredQty || 0))
+    : null;
+  if (demandRemainingQty !== null && requestedQty > demandRemainingQty) {
+    throw new Error(`出库数量不能超过 Temu 剩余需求：${demandRemainingQty}`);
+  }
+  const sku = findTemuOutboundSku(db, {
+    accountId,
+    skcId: stockOrder.skcId,
+    skuId: stockOrder.skuId,
+    productId: stockOrder.productId,
+    skuExtCode: stockOrder.skuExtCode,
+  });
+  const existingRows = getExistingTemuOutboundShipments(db, { accountId, skuId: sku.id, stockOrder });
+  const existingQty = existingRows.reduce((sum, row) => sum + Number(row.qty || 0), 0);
+  const remainingQty = Math.max(0, requestedQty - existingQty);
+  const allocation = remainingQty > 0
+    ? selectTemuOutboundBatches(db, { accountId, skuId: sku.id, qty: remainingQty })
+    : { availableQty: 0, batches: [], shortageQty: 0 };
+  return {
+    stockOrder,
+    requestedQty,
+    demandRemainingQty,
+    matchedSku: toCamelRow(sku),
+    existingQty,
+    remainingQty,
+    existingShipments: existingRows.map(toCamelRow),
+    availableQty: allocation.availableQty,
+    shortageQty: allocation.shortageQty,
+    allocationPlan: allocation.batches.map((item) => ({
+      batch: toCamelRow(item.batch),
+      qty: item.qty,
+    })),
+  };
+}
+
 function createOutboundPlan({ db, services, payload, actor }) {
   const batchId = requireString(payload.batchId, "batchId");
   const batch = getInventoryBatch(db, batchId);
@@ -14710,67 +14815,71 @@ function createOutboundPlan({ db, services, payload, actor }) {
 }
 
 function createOutboundPlanFromTemuStockOrder({ db, services, payload, actor }) {
-  const accountId = requireString(payload.accountId || payload.account_id, "accountId");
-  const stockOrder = normalizeTemuStockOrderPayload(payload);
-  const qty = positiveInteger(payload.qty || payload.quantity, stockOrder.qty);
-  if (!qty) throw new Error("出库数量必须大于 0");
-  const sku = findTemuOutboundSku(db, {
-    accountId,
-    skcId: stockOrder.skcId,
-    skuId: stockOrder.skuId,
-    productId: stockOrder.productId,
-    skuExtCode: stockOrder.skuExtCode,
-  });
-  const batch = findTemuOutboundBatch(db, {
-    accountId,
-    skuId: sku.id,
-    qty,
-  });
+  const preview = previewTemuStockOrderOutbound({ db, payload });
+  const stockOrder = preview.stockOrder;
+  if (preview.remainingQty <= 0) {
+    return {
+      ...preview,
+      idempotent: true,
+      createdQty: 0,
+      shipments: preview.existingShipments,
+      shipment: preview.existingShipments[0] || null,
+    };
+  }
+  if (preview.shortageQty > 0) {
+    throw new Error(`可用库存不足，当前可用 ${preview.availableQty}，还缺 ${preview.shortageQty}`);
+  }
   const sourceLabel = stockOrder.stockOrderNo || stockOrder.deliveryOrderSn || stockOrder.deliveryBatchSn || stockOrder.skcId || "云端备货单";
-  const remark = optionalString(payload.remark)
-    || `Temu 云端备货单 ${sourceLabel}`;
-  const result = createOutboundPlan({
-    db,
-    services,
-    payload: {
-      ...payload,
-      batchId: batch.id,
-      qty,
-      boxes: positiveInteger(payload.boxes, 1),
-      remark,
-    },
-    actor,
-  });
-  const now = nowIso();
-  db.prepare(`
-    UPDATE erp_outbound_shipments
-    SET temu_stock_order_no = @temu_stock_order_no,
-        temu_delivery_order_sn = @temu_delivery_order_sn,
-        temu_delivery_batch_sn = @temu_delivery_batch_sn,
-        temu_sync_status = @temu_sync_status,
-        updated_at = @updated_at
-    WHERE id = @id
-  `).run({
-    id: result.shipment.id,
-    temu_stock_order_no: stockOrder.stockOrderNo,
-    temu_delivery_order_sn: stockOrder.deliveryOrderSn,
-    temu_delivery_batch_sn: stockOrder.deliveryBatchSn,
-    temu_sync_status: "cloud_stock_order_outbound_created",
-    updated_at: now,
-  });
-  const linked = getOutboundShipment(db, result.shipment.id);
-  writeOutboundFlowEvent(
-    db,
-    linked,
-    actor,
-    "link_temu_stock_order",
-    `已关联 Temu 云端备货单：${sourceLabel}`,
-  );
+  const remark = optionalString(payload.remark) || `Temu 云端备货单 ${sourceLabel}`;
+  const shipments = [];
+  for (const [index, item] of preview.allocationPlan.entries()) {
+    const result = createOutboundPlan({
+      db,
+      services,
+      payload: {
+        ...payload,
+        outboundId: preview.allocationPlan.length === 1 ? payload.outboundId : undefined,
+        batchId: item.batch.id,
+        qty: item.qty,
+        boxes: preview.allocationPlan.length === 1 ? positiveInteger(payload.boxes, 1) : 1,
+        remark: preview.allocationPlan.length === 1 ? remark : `${remark} / 批次 ${index + 1}`,
+      },
+      actor,
+    });
+    const now = nowIso();
+    db.prepare(`
+      UPDATE erp_outbound_shipments
+      SET temu_stock_order_no = @temu_stock_order_no,
+          temu_delivery_order_sn = @temu_delivery_order_sn,
+          temu_delivery_batch_sn = @temu_delivery_batch_sn,
+          temu_sync_status = @temu_sync_status,
+          updated_at = @updated_at
+      WHERE id = @id
+    `).run({
+      id: result.shipment.id,
+      temu_stock_order_no: stockOrder.stockOrderNo,
+      temu_delivery_order_sn: stockOrder.deliveryOrderSn,
+      temu_delivery_batch_sn: stockOrder.deliveryBatchSn,
+      temu_sync_status: "cloud_stock_order_outbound_created",
+      updated_at: now,
+    });
+    const linked = getOutboundShipment(db, result.shipment.id);
+    writeOutboundFlowEvent(
+      db,
+      linked,
+      actor,
+      "link_temu_stock_order",
+      `已关联 Temu 云端备货单：${sourceLabel}`,
+    );
+    shipments.push(toCamelRow(linked));
+  }
   return {
-    ...result,
-    matchedSku: toCamelRow(sku),
-    matchedBatch: toCamelRow(batch),
-    shipment: toCamelRow(linked),
+    ...preview,
+    idempotent: false,
+    createdQty: shipments.reduce((sum, row) => sum + Number(row.qty || 0), 0),
+    shipments: [...preview.existingShipments, ...shipments],
+    createdShipments: shipments,
+    shipment: shipments[0] || null,
   };
 }
 
@@ -14783,6 +14892,8 @@ function performOutboundAction(payload = {}, actorInput = {}) {
     switch (action) {
       case "create_outbound_plan":
         return createOutboundPlan({ db, services, payload, actor });
+      case "preview_temu_stock_order_outbound":
+        return previewTemuStockOrderOutbound({ db, payload });
       case "create_outbound_plan_from_temu_stock_order":
         return createOutboundPlanFromTemuStockOrder({ db, services, payload, actor });
       case "start_picking": {
