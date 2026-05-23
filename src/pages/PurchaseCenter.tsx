@@ -4605,7 +4605,6 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       fixed: "right",
       align: "right",
       render: (_value, row) => {
-        const hasCandidates = Boolean(row.candidates?.length || row.candidateCount);
         const hasMapping = Number(row.mappingCount || 0) > 0;
         const hasSkuSupplier = Boolean(row.skuSupplierId || row.skuSupplierName);
         const hasAnySource = purchaseRequestHasSource(row);
