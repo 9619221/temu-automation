@@ -53,6 +53,71 @@ class InventoryService {
     });
   }
 
+  markInboundConfirmed(id, actor) {
+    return this.workflow.transition({
+      entityType: "inbound_receipt",
+      id,
+      action: "confirm_inbound",
+      toStatus: IR.INBOUNDED_PENDING_QC,
+      actor,
+      patch: {
+        operator_id: actor?.id || null,
+      },
+    });
+  }
+
+  markQuantityMismatch(id, actor) {
+    return this.workflow.transition({
+      entityType: "inbound_receipt",
+      id,
+      action: "mark_quantity_mismatch",
+      toStatus: IR.QUANTITY_MISMATCH,
+      actor,
+      patch: {
+        operator_id: actor?.id || null,
+      },
+    });
+  }
+
+  markDamaged(id, actor) {
+    return this.workflow.transition({
+      entityType: "inbound_receipt",
+      id,
+      action: "mark_damaged",
+      toStatus: IR.DAMAGED,
+      actor,
+      patch: {
+        operator_id: actor?.id || null,
+      },
+    });
+  }
+
+  markInboundException(id, actor) {
+    return this.workflow.transition({
+      entityType: "inbound_receipt",
+      id,
+      action: "mark_inbound_exception",
+      toStatus: IR.EXCEPTION,
+      actor,
+      patch: {
+        operator_id: actor?.id || null,
+      },
+    });
+  }
+
+  resolveInboundException(id, actor) {
+    return this.workflow.transition({
+      entityType: "inbound_receipt",
+      id,
+      action: "resolve_inbound_exception",
+      toStatus: IR.INBOUNDED_PENDING_QC,
+      actor,
+      patch: {
+        operator_id: actor?.id || null,
+      },
+    });
+  }
+
   createBatchFromInbound(input = {}) {
     const receivedQty = ensurePositiveInteger(input.receivedQty, "receivedQty");
     const now = nowIso();

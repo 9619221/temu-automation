@@ -79,10 +79,12 @@ const TRANSITIONS = Object.freeze({
   inbound_receipt: [
     rule(IR.PENDING_ARRIVAL, "register_arrival", IR.ARRIVED, WAREHOUSE),
     rule(IR.ARRIVED, "confirm_count", IR.COUNTED, WAREHOUSE),
+    rule(IR.COUNTED, "confirm_inbound", IR.INBOUNDED_PENDING_QC, WAREHOUSE),
     rule(IR.COUNTED, "create_batches", IR.INBOUNDED_PENDING_QC, WAREHOUSE),
     rule([IR.ARRIVED, IR.COUNTED], "mark_quantity_mismatch", IR.QUANTITY_MISMATCH, WAREHOUSE),
     rule([IR.ARRIVED, IR.COUNTED], "mark_damaged", IR.DAMAGED, WAREHOUSE),
     rule([IR.PENDING_ARRIVAL, IR.ARRIVED, IR.COUNTED], "mark_inbound_exception", IR.EXCEPTION, WAREHOUSE),
+    rule([IR.QUANTITY_MISMATCH, IR.DAMAGED, IR.EXCEPTION], "resolve_inbound_exception", IR.INBOUNDED_PENDING_QC, WAREHOUSE),
   ],
 
   qc_inspection: [

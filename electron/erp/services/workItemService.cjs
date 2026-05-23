@@ -483,35 +483,52 @@ class WorkItemService {
         po.po_no,
         supplier.name AS supplier_name,
         GROUP_CONCAT(DISTINCT sku.internal_sku_code || ' ' || sku.product_name) AS sku_summary,
-        COALESCE(SUM(line.received_qty), 0) AS received_qty
+        COALESCE(SUM(line.expected_qty), 0) AS expected_qty,
+        COALESCE(SUM(line.received_qty), 0) AS received_qty,
+        COALESCE(SUM(line.shortage_qty), 0) AS shortage_qty,
+        COALESCE(SUM(line.over_qty), 0) AS over_qty,
+        COALESCE(SUM(line.damaged_qty), 0) AS damaged_qty
       FROM erp_inbound_receipts receipt
       LEFT JOIN erp_purchase_orders po ON po.id = receipt.po_id
       LEFT JOIN erp_suppliers supplier ON supplier.id = po.supplier_id
       LEFT JOIN erp_inbound_receipt_lines line ON line.receipt_id = receipt.id
       LEFT JOIN erp_skus sku ON sku.id = line.sku_id
-      WHERE receipt.status IN ('pending_arrival', 'arrived', 'counted')
+      WHERE receipt.status IN ('pending_arrival', 'arrived', 'counted', 'quantity_mismatch', 'damaged', 'exception')
         ${accountClause("receipt")}
       GROUP BY receipt.id
     `).all(baseParams);
 
     for (const row of inboundReceipts) {
       const statusConfig = {
-        pending_arrival: [TYPE.WAREHOUSE_RECEIVE_PENDING, "仓库待确认到仓", "erp:inbound_receipt:pending_arrival"],
-        arrived: [TYPE.WAREHOUSE_COUNT_PENDING, "仓库待核数", "erp:inbound_receipt:arrived"],
-        counted: [TYPE.WAREHOUSE_INBOUND_PENDING, "仓库待创建入库批次", "erp:inbound_receipt:counted"],
+        pending_arrival: [TYPE.WAREHOUSE_RECEIVE_PENDING, PRIORITY.P1, "仓库待确认到仓", "erp:inbound_receipt:pending_arrival"],
+        arrived: [TYPE.WAREHOUSE_COUNT_PENDING, PRIORITY.P1, "仓库待核数", "erp:inbound_receipt:arrived"],
+        counted: [TYPE.WAREHOUSE_INBOUND_PENDING, PRIORITY.P1, "仓库待确认入库", "erp:inbound_receipt:counted"],
+        quantity_mismatch: [TYPE.WAREHOUSE_INBOUND_PENDING, PRIORITY.P0, "入库数量异常待处理", "erp:inbound_receipt:quantity_mismatch"],
+        damaged: [TYPE.WAREHOUSE_INBOUND_PENDING, PRIORITY.P0, "入库破损异常待处理", "erp:inbound_receipt:damaged"],
+        exception: [TYPE.WAREHOUSE_INBOUND_PENDING, PRIORITY.P0, "入库异常待处理", "erp:inbound_receipt:exception"],
       }[row.status];
       if (!statusConfig) continue;
+      const issueEvidence = [];
+      if (Number(row.shortage_qty || 0) > 0) issueEvidence.push(`短少 ${row.shortage_qty}`);
+      if (Number(row.over_qty || 0) > 0) issueEvidence.push(`多到 ${row.over_qty}`);
+      if (Number(row.damaged_qty || 0) > 0) issueEvidence.push(`破损 ${row.damaged_qty}`);
       pushTask(tasks, {
         accountId: row.account_id,
         type: statusConfig[0],
-        priority: PRIORITY.P1,
+        priority: statusConfig[1],
         ownerRole: ERP_ROLES.WAREHOUSE,
-        title: `${statusConfig[1]}：${row.receipt_no}`,
-        evidence: [`PO ${row.po_no || "-"}`, `供应商 ${row.supplier_name || "-"}`, `数量 ${row.received_qty || 0}`, row.sku_summary || ""],
+        title: `${statusConfig[2]}：${row.receipt_no}`,
+        evidence: [
+          `PO ${row.po_no || "-"}`,
+          `供应商 ${row.supplier_name || "-"}`,
+          `实收 ${row.received_qty || 0} / 应收 ${row.expected_qty || 0}`,
+          ...issueEvidence,
+          row.sku_summary || "",
+        ],
         relatedDocType: "inbound_receipt",
         relatedDocId: row.id,
         dueAt: row.received_at,
-        sourceRule: statusConfig[2],
+        sourceRule: statusConfig[3],
         dedupeKey: `inbound_receipt:${row.id}:${row.status}`,
       });
     }
