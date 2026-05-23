@@ -3,7 +3,97 @@
 // 关键差异 vs v0.3.0：不用 defineProperty + setter no-op，避免阻止 Temu wrap 导致大量 401
 
 (function injectHook(config) {
-  if (window.__temuMonitorInstalled) return;
+  if (window.__temuMonitorInstalled) {
+    try {
+      const known = new Set(Array.isArray(window.__temuMonitorWhitelist) ? window.__temuMonitorWhitelist : []);
+      const extraWhitelist = (Array.isArray(config?.URL_WHITELIST) ? config.URL_WHITELIST : [])
+        .filter((item) => /querySkuSalesNumber/.test(String(item || "")) && !known.has(item));
+      if (!window.__temuMonitorSkuTrendSupplemental && extraWhitelist.length > 0) {
+        window.__temuMonitorSkuTrendSupplemental = true;
+        const eventName = config?.EVENT_NAME || "temu-monitor.captured";
+        const bypassSymbolKey = config?.BYPASS_SYMBOL_KEY || "temu-monitor.fetch.bypass";
+        const extraRe = new RegExp(extraWhitelist.map((s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"));
+        const safeJson = (text) => { try { return JSON.parse(text); } catch { return null; } };
+        const site = () => {
+          const m = location.host.match(/agentseller(-eu|-us)?\.temu\.com|seller\.kuajingmaihuo\.com/);
+          if (!m) return location.host;
+          if (m[1] === "-eu") return "agentseller-eu";
+          if (m[1] === "-us") return "agentseller-us";
+          if (m[0].includes("kuajing")) return "kuajingmaihuo";
+          return "agentseller";
+        };
+        const emit = (payload) => {
+          window.dispatchEvent(new CustomEvent(eventName, { detail: payload }));
+          if (window.__temuMonitorStats) {
+            window.__temuMonitorStats.lastCaptureUrl = String(payload?.url || "").slice(0, 200);
+            window.__temuMonitorStats.lastCaptureAt = payload?.ts || Date.now();
+          }
+        };
+        const shouldCaptureExtra = (url) => url && extraRe.test(String(url));
+
+        const BaseXHR = window.XMLHttpRequest;
+        function SupplementalXHR() {
+          const xhr = new BaseXHR();
+          let _url = "", _method = "GET", _bypass = false;
+          const _ts = Date.now();
+          const origOpen = xhr.open;
+          xhr.open = function (method, url) {
+            _url = url; _method = (method || "GET").toUpperCase();
+            return origOpen.apply(this, arguments);
+          };
+          const origSetHdr = xhr.setRequestHeader;
+          xhr.setRequestHeader = function (name) {
+            if (name === bypassSymbolKey) { _bypass = true; return; }
+            return origSetHdr.apply(this, arguments);
+          };
+          const origSend = xhr.send;
+          xhr.send = function () {
+            if (!_bypass && shouldCaptureExtra(_url)) {
+              xhr.addEventListener("readystatechange", function () {
+                if (xhr.readyState !== 4) return;
+                const text = xhr.responseText || "";
+                emit({
+                  kind: "xhr", url: _url, method: _method, status: xhr.status, ts: _ts,
+                  site: site(), page: location.pathname,
+                  body: safeJson(text),
+                  bodyText: text.length > 200000 ? null : text,
+                  bodySize: text.length,
+                });
+              });
+            }
+            return origSend.apply(this, arguments);
+          };
+          return xhr;
+        }
+        window.XMLHttpRequest = SupplementalXHR;
+
+        const BaseFetch = window.fetch;
+        window.fetch = function (input, init) {
+          const url = typeof input === "string" ? input : (input && input.url) || "";
+          const bypass = init && init[Symbol.for(bypassSymbolKey)];
+          const method = (init && init.method) || (input && input.method) || "GET";
+          const ts = Date.now();
+          return BaseFetch.apply(this, arguments).then((resp) => {
+            if (!bypass && shouldCaptureExtra(url)) {
+              resp.clone().text().then((text) => {
+                emit({
+                  kind: "fetch", url, method: String(method).toUpperCase(), status: resp.status, ts,
+                  site: site(), page: location.pathname,
+                  body: safeJson(text),
+                  bodyText: text.length > 200000 ? null : text,
+                  bodySize: text.length,
+                });
+              }).catch(() => {});
+            }
+            return resp;
+          });
+        };
+
+        window.__temuMonitorSkuTrendSupplementalInfo = { extraWhitelist, installedAt: Date.now() };
+      }
+    } catch {}
+    return;
+  }
   window.__temuMonitorInstalled = true;
 
   const {
@@ -39,6 +129,7 @@
     if (!whitelistRe) return false;
     return whitelistRe.test(url);
   }
+  window.__temuMonitorWhitelist = URL_WHITELIST.slice();
   function safeJson(text) { try { return JSON.parse(text); } catch { return null; } }
   function emit(payload) {
     try {
