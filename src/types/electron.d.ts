@@ -302,6 +302,10 @@ interface ErpListParams {
   search?: string;
   limit?: number;
   offset?: number;
+  inboundReceiptLimit?: number;
+  inboundReceiptOffset?: number;
+  inventoryBatchLimit?: number;
+  inventoryBatchOffset?: number;
 }
 
 interface ErpPageResult<T = any> {

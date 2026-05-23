@@ -784,9 +784,13 @@ class JushuitanOperationalBridge {
     const skuId = this.upsertSku(companyId, raw, now);
     if (!skuId) return false;
     const warehouseCode = firstText(raw, ["wh_id", "warehouse_id", "wms_co_id", "warehouse", "bin"]) || "default";
-    const totalQty = integerQty(first(raw, ["qty", "stock_qty", "actual_qty", "unlock_qty"]));
-    const lockedQty = integerQty(first(raw, ["lock_qty", "locked_qty"]));
-    const availableQty = integerQty(first(raw, ["unlock_qty", "available_qty"]), Math.max(0, totalQty - lockedQty));
+    const rawTotalQty = first(raw, ["qty", "stock_qty", "actual_qty", "unlock_qty"]);
+    const rawLockedQty = first(raw, ["lock_qty", "locked_qty"]);
+    const rawAvailableQty = first(raw, ["unlock_qty", "available_qty"]);
+    if (rawTotalQty === "" && rawLockedQty === "" && rawAvailableQty === "") return false;
+    const totalQty = integerQty(rawTotalQty);
+    const lockedQty = integerQty(rawLockedQty);
+    const availableQty = integerQty(rawAvailableQty, Math.max(0, totalQty - lockedQty));
     const batchCode = `JST-STOCK-${String(warehouseCode).slice(0, 36)}-${String(skuCode).slice(0, 48)}`;
     this.upsertInventoryBatchStmt.run({
       id: stableId("batch", batchCode),

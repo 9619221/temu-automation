@@ -13134,13 +13134,24 @@ function getWarehouseWorkbench(params = {}) {
   const inboundReceiptOffset = normalizeOffset(
     params.inboundReceiptOffset || params.inbound_receipt_offset || params.receiptOffset || params.receipt_offset || params.offset,
   );
+  const rawInventoryBatchLimit = params.inventoryBatchLimit
+    ?? params.inventory_batch_limit
+    ?? params.batchLimit
+    ?? params.batch_limit;
+  const inventoryBatchLimit = Math.min(normalizeLimit(rawInventoryBatchLimit, 20), 500);
+  const inventoryBatchOffset = normalizeOffset(
+    params.inventoryBatchOffset || params.inventory_batch_offset || params.batchOffset || params.batch_offset,
+  );
   const inboundReceiptLimitClause = hasInboundReceiptLimit ? "LIMIT @receipt_limit OFFSET @receipt_offset" : "";
+  const inventoryBatchLimitClause = "LIMIT @batch_limit OFFSET @batch_offset";
   const receiptWhereAccount = accountId ? "WHERE receipt.account_id = @account_id" : "";
   const batchWhereAccount = accountId ? "WHERE batch.account_id = @account_id" : "";
   const baseParams = {
     account_id: accountId,
     receipt_limit: inboundReceiptLimit,
     receipt_offset: inboundReceiptOffset,
+    batch_limit: inventoryBatchLimit,
+    batch_offset: inventoryBatchOffset,
   };
 
   const receiptSummary = db.prepare(`
@@ -13209,6 +13220,7 @@ function getWarehouseWorkbench(params = {}) {
     LEFT JOIN erp_suppliers supplier ON supplier.id = po.supplier_id
     ${batchWhereAccount}
     ORDER BY batch.created_at DESC
+    ${inventoryBatchLimitClause}
   `).all(baseParams).map(toCamelRow);
 
   const summary = {
@@ -13228,6 +13240,11 @@ function getWarehouseWorkbench(params = {}) {
       limit: inboundReceiptLimit || inboundReceipts.length,
       offset: hasInboundReceiptLimit ? inboundReceiptOffset : 0,
       total: Number(receiptSummary.inbound_receipt_count || 0),
+    },
+    inventoryBatchPage: {
+      limit: inventoryBatchLimit,
+      offset: inventoryBatchOffset,
+      total: Number(inventoryBatchSummary.inventory_batch_count || 0),
     },
     inboundReceipts,
     inventoryBatches,

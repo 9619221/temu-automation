@@ -64,13 +64,13 @@ import {
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
 const imageStudioAPI = window.electronAPI?.imageStudioGpt;
-const TEMU_ORANGE = "#e55b00";
-const TEMU_TEXT = "#1f2329";
-const TEMU_CARD_RADIUS = 22;
-const TEMU_CARD_SHADOW = "0 12px 30px rgba(15, 23, 42, 0.08)";
-const TEMU_BUTTON_GRADIENT = "linear-gradient(135deg, #ff922b 0%, #ff6a00 100%)";
-const TEMU_BUTTON_SHADOW = "0 10px 24px rgba(255, 106, 0, 0.24)";
-const TEMU_UPLOAD_BG = "radial-gradient(circle at top, #fff9f3 0%, #ffffff 72%)";
+const TEMU_ORANGE = "#007aff";
+const TEMU_TEXT = "#1d1d1f";
+const TEMU_CARD_RADIUS = 8;
+const TEMU_CARD_SHADOW = "0 1px 2px rgba(0, 0, 0, 0.035), 0 8px 24px rgba(0, 0, 0, 0.035)";
+const TEMU_BUTTON_GRADIENT = "linear-gradient(180deg, #0a84ff 0%, #007aff 100%)";
+const TEMU_BUTTON_SHADOW = "0 6px 16px rgba(0, 122, 255, 0.18)";
+const TEMU_UPLOAD_BG = "radial-gradient(circle at top, rgba(0, 122, 255, 0.06) 0%, #ffffff 72%)";
 const IMAGE_STUDIO_FAST_MAX_SIDE = 1600;
 const IMAGE_STUDIO_FAST_RAW_BYTES = 2.5 * 1024 * 1024;
 const IMAGE_STUDIO_FAST_QUALITY = 0.88;
@@ -8534,7 +8534,7 @@ export default function ImageStudioGPT() {
             maxWidth: 680,
             width: "100%",
             margin: "0 auto",
-            border: "1.5px dashed #ff9f5a",
+            border: "1.5px dashed rgba(0, 122, 255, 0.26)",
             borderRadius: 28,
             background: TEMU_UPLOAD_BG,
             boxShadow: "inset 0 1px 0 rgba(255,255,255,0.9)",
@@ -8651,12 +8651,12 @@ export default function ImageStudioGPT() {
                         minHeight: 64,
                         padding: "10px 8px",
                         borderRadius: 12,
-                        border: isSelected ? "1px solid #ff8c3a" : "1px solid #d9e1ea",
+                        border: isSelected ? "1px solid rgba(0, 122, 255, 0.28)" : "1px solid #d9e1ea",
                         background: isSelected ? TEMU_BUTTON_GRADIENT : "#ffffff",
                         color: isSelected ? "#ffffff" : "#314156",
                         cursor: "pointer",
                         textAlign: "center",
-                        boxShadow: isSelected ? "0 10px 20px rgba(255, 106, 0, 0.18)" : "none",
+                        boxShadow: isSelected ? "0 10px 20px rgba(0, 122, 255, 0.14)" : "none",
                         transition: "background-color 0.2s, color 0.2s, box-shadow 0.2s, border-color 0.2s",
                       }}
                     >
@@ -8941,7 +8941,7 @@ export default function ImageStudioGPT() {
                       style={{
                         borderRadius: 14,
                         border: "1px solid #e6ebf2",
-                        background: "#fffaf6",
+                        background: "#f5f9ff",
                         padding: 14,
                       }}
                     >
@@ -8988,7 +8988,7 @@ export default function ImageStudioGPT() {
                                       display: "inline-flex",
                                       alignItems: "center",
                                       justifyContent: "center",
-                                      background: "#ff6a00",
+                                      background: "#007aff",
                                       color: "#fff",
                                       fontSize: 12,
                                       fontWeight: 700,
@@ -9033,8 +9033,8 @@ export default function ImageStudioGPT() {
                             width: `${component.width * 100}%`,
                             height: `${component.height * 100}%`,
                             borderRadius: 12,
-                            border: selected ? "2px solid #ff6a00" : "2px solid rgba(37, 99, 235, 0.9)",
-                            background: selected ? "rgba(255,106,0,0.14)" : "rgba(37,99,235,0.08)",
+                            border: selected ? "2px solid #007aff" : "2px solid rgba(37, 99, 235, 0.9)",
+                            background: selected ? "rgba(0,122,255,0.14)" : "rgba(37,99,235,0.08)",
                             boxShadow: selected ? "0 0 0 2px rgba(255,255,255,0.85) inset" : "none",
                             cursor: "pointer",
                           }}
@@ -9051,7 +9051,7 @@ export default function ImageStudioGPT() {
                               display: "inline-flex",
                               alignItems: "center",
                               justifyContent: "center",
-                              background: selected ? "#ff6a00" : "#2563eb",
+                              background: selected ? "#007aff" : "#2563eb",
                               color: "#fff",
                               fontSize: 14,
                               fontWeight: 700,
@@ -9097,8 +9097,8 @@ export default function ImageStudioGPT() {
                             textAlign: "left",
                             padding: "12px 14px",
                             borderRadius: 14,
-                            border: selected ? "1px solid #ff8c3a" : "1px solid #e6ebf2",
-                            background: selected ? "rgba(255,106,0,0.08)" : "#fff",
+                            border: selected ? "1px solid rgba(0, 122, 255, 0.28)" : "1px solid #e6ebf2",
+                            background: selected ? "rgba(0,122,255,0.08)" : "#fff",
                             cursor: "pointer",
                             transition: "all .2s ease",
                           }}
@@ -9113,7 +9113,7 @@ export default function ImageStudioGPT() {
                                   display: "inline-flex",
                                   alignItems: "center",
                                   justifyContent: "center",
-                                  background: selected ? "#ff6a00" : "#eff6ff",
+                                  background: selected ? "#007aff" : "#eff6ff",
                                   color: selected ? "#fff" : "#2563eb",
                                   fontWeight: 700,
                                   flexShrink: 0,
@@ -9261,7 +9261,7 @@ export default function ImageStudioGPT() {
                   width: 24,
                   height: 24,
                   borderRadius: 999,
-                  background: "#fff5ec",
+                  background: "#f5f9ff",
                   color: TEMU_ORANGE,
                   display: "flex",
                   alignItems: "center",
@@ -9360,7 +9360,7 @@ export default function ImageStudioGPT() {
                   width: 24,
                   height: 24,
                   borderRadius: 999,
-                  background: tone === "danger" ? "#fff1f2" : tone === "warn" ? "#fff7e8" : "#fff5ec",
+                  background: tone === "danger" ? "#fff1f2" : tone === "warn" ? "#fff7e8" : "#f5f9ff",
                   color: tone === "danger" ? "#cf1322" : TEMU_ORANGE,
                   display: "flex",
                   alignItems: "center",
@@ -9656,7 +9656,7 @@ export default function ImageStudioGPT() {
                           alignItems: "center",
                           justifyContent: "center",
                           fontWeight: 700,
-                          boxShadow: "0 10px 18px rgba(255, 106, 0, 0.18)",
+                          boxShadow: "0 10px 18px rgba(0, 122, 255, 0.14)",
                         }}
                       >
                         {index + 1}
@@ -9923,10 +9923,10 @@ export default function ImageStudioGPT() {
                                     style={{
                                       width: 38,
                                       height: 38,
-                                      borderColor: "#ffd2ad",
-                                      background: "#fff7ef",
+                                      borderColor: "rgba(0, 122, 255, 0.18)",
+                                      background: "#f5f9ff",
                                       color: TEMU_ORANGE,
-                                      boxShadow: "0 10px 24px rgba(255, 106, 0, 0.18)",
+                                      boxShadow: "0 10px 24px rgba(0, 122, 255, 0.14)",
                                     }}
                                   />
                                 </Tooltip>
@@ -10128,11 +10128,11 @@ export default function ImageStudioGPT() {
                   <div
                     key={item.key}
                     style={{
-                      border: index === 1 ? "1px solid #ffb279" : "1px solid #edf0f4",
-                      background: index === 1 ? "#fff8f2" : "#fff",
+                      border: index === 1 ? "1px solid rgba(0, 122, 255, 0.22)" : "1px solid #edf0f4",
+                      background: index === 1 ? "#f5f9ff" : "#fff",
                       borderRadius: 18,
                       padding: 18,
-                      boxShadow: index === 1 ? "0 10px 24px rgba(255, 106, 0, 0.08)" : "none",
+                      boxShadow: index === 1 ? "0 10px 24px rgba(0, 122, 255, 0.10)" : "none",
                     }}
                   >
                     <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>

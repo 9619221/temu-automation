@@ -30,6 +30,7 @@ import { ACTIVE_ACCOUNT_CHANGED_EVENT, readActiveAccountId } from "../../utils/m
 import { COLLECT_TASKS, useCollection } from "../../contexts/CollectionContext";
 import { useErpAuth } from "../../contexts/ErpAuthContext";
 import { canAccessRoute, roleLabel } from "../../utils/erpRoleAccess";
+import BrandMark from "../BrandMark";
 import ExtensionInstallGuide from "../ExtensionInstallGuide";
 
 const { Content, Header, Sider } = Layout;
@@ -284,12 +285,10 @@ export default function AppLayout() {
               padding: collapsed ? 0 : "0 20px",
             }}
           >
-            <div className="app-layout-brand__mark">
-              <RocketOutlined aria-hidden="true" />
-            </div>
+            <BrandMark size={34} className="app-layout-brand__mark" />
             {!collapsed && (
               <span className="app-layout-brand__text">
-                Temu 运营助手
+                Temu Ops
               </span>
             )}
           </div>

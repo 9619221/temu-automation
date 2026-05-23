@@ -7,7 +7,98 @@
     <title>Temu 自动化运营工具</title>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <style>
+        .temu-boot-fallback {
+          position: fixed;
+          inset: 0;
+          display: grid;
+          place-items: center;
+          padding: 28px;
+          background: #f5f5f7;
+          color: #1d1d1f;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+          opacity: 0;
+          animation: temuBootFallbackReveal 180ms ease 1200ms forwards;
+        }
+
+        .temu-boot-fallback__panel {
+          width: min(100%, 360px);
+          padding: 32px 30px 30px;
+          border: 1px solid rgba(60, 60, 67, 0.12);
+          border-radius: 8px;
+          background: rgba(255, 255, 255, 0.88);
+          box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 18px 50px rgba(0, 0, 0, 0.08);
+          text-align: center;
+        }
+
+        .temu-boot-fallback__mark {
+          position: relative;
+          display: inline-grid;
+          width: 44px;
+          height: 44px;
+          margin-bottom: 16px;
+          place-items: center;
+          border-radius: 8px;
+          background: #111114;
+          color: #fff;
+          font-size: 22px;
+          font-weight: 650;
+          letter-spacing: 0;
+        }
+
+        .temu-boot-fallback__mark::after {
+          content: "";
+          position: absolute;
+          right: 8px;
+          bottom: 8px;
+          width: 7px;
+          height: 7px;
+          border-radius: 999px;
+          background: #007aff;
+        }
+
+        .temu-boot-fallback__title {
+          margin: 0;
+          font-size: 18px;
+          font-weight: 650;
+          line-height: 1.35;
+        }
+
+        .temu-boot-fallback__desc {
+          margin: 8px 0 0;
+          color: #6e6e73;
+          font-size: 14px;
+          line-height: 1.7;
+        }
+
+        .temu-boot-fallback__button {
+          height: 38px;
+          margin-top: 18px;
+          padding: 0 18px;
+          border: 0;
+          border-radius: 8px;
+          background: #007aff;
+          color: #fff;
+          cursor: pointer;
+          font: inherit;
+          font-size: 14px;
+          font-weight: 600;
+        }
+
+        @keyframes temuBootFallbackReveal {
+          to { opacity: 1; }
+        }
+      </style>
+      <div class="temu-boot-fallback" role="status" aria-live="polite">
+        <div class="temu-boot-fallback__panel">
+          <div class="temu-boot-fallback__mark" aria-hidden="true">T</div>
+          <h1 class="temu-boot-fallback__title">Temu Ops 正在启动</h1>
+          <p class="temu-boot-fallback__desc">如果页面停在这里，说明桌面端资源没有完成加载。可以重新加载一次。</p>
+          <button class="temu-boot-fallback__button" type="button" onclick="window.location.reload()">重新加载</button>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

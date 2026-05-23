@@ -1,5 +1,6 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, Menu, net: electronNet, session: electronSession } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, Menu, net: electronNet, session: electronSession, protocol } = require("electron");
 const path = require("path");
+const { pathToFileURL } = require("url");
 const { spawn } = require("child_process");
 const http = require("http");
 const net = require("net");
@@ -18,6 +19,20 @@ const {
 } = require("./erp/ipc.cjs");
 
 const MAX_DIAGNOSTIC_LOG_BYTES = 5 * 1024 * 1024;
+const DIST_PROTOCOL = "temu-app";
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: DIST_PROTOCOL,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+    },
+  },
+]);
 
 function getDiagnosticLogFilePath() {
   try {
@@ -3442,6 +3457,37 @@ async function streamImageStudioGenerate(target, jobId, payload = {}) {
 }
 // ============ 窗口 ============
 
+let distProtocolRegistered = false;
+let distProtocolRoot = "";
+
+function registerDistProtocol(distRoot) {
+  distProtocolRoot = path.resolve(distRoot);
+  if (distProtocolRegistered) return;
+
+  protocol.handle(DIST_PROTOCOL, async (request) => {
+    if (!distProtocolRoot) {
+      return new Response("Renderer dist root is not configured", { status: 500 });
+    }
+
+    const url = new URL(request.url);
+    const rawPath = decodeURIComponent(url.pathname || "/");
+    const relativePath = rawPath === "/" ? "index.html" : rawPath.replace(/^\/+/, "");
+    const normalizedPath = path.normalize(relativePath);
+    const filePath = path.resolve(distProtocolRoot, normalizedPath);
+
+    if (filePath !== distProtocolRoot && !filePath.startsWith(`${distProtocolRoot}${path.sep}`)) {
+      return new Response("Forbidden", { status: 403 });
+    }
+
+    if (!fs.existsSync(filePath)) {
+      return new Response("Not found", { status: 404 });
+    }
+
+    return electronNet.fetch(pathToFileURL(filePath).toString());
+  });
+  distProtocolRegistered = true;
+}
+
 async function createWindow() {
   Menu.setApplicationMenu(null);
 
@@ -3455,7 +3501,7 @@ async function createWindow() {
     width: 1280, height: 800,
     title: finalTitle,
     show: false,
-    backgroundColor: "#ffffff",
+    backgroundColor: "#f5f5f7",
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
@@ -3508,6 +3554,28 @@ async function createWindow() {
       message: `Renderer process gone: ${details?.reason || "unknown"}`,
       detail: details || {},
     });
+    const shouldRecover = ["crashed", "oom", "killed"].includes(details?.reason || "");
+    if (shouldRecover) {
+      setTimeout(() => {
+        try {
+          if (!mainWindow || mainWindow.isDestroyed()) return;
+          appendDiagnosticLog({
+            source: "renderer",
+            level: "warn",
+            message: "Reloading main window after renderer crash",
+            detail: { reason: details?.reason || "unknown" },
+          });
+          mainWindow.webContents.reloadIgnoringCache();
+        } catch (error) {
+          appendDiagnosticLog({
+            source: "renderer",
+            level: "error",
+            message: "Failed to reload renderer after crash",
+            detail: diagnosticErrorToDetail(error),
+          });
+        }
+      }, 500);
+    }
   });
 
   mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
@@ -3560,7 +3628,8 @@ async function createWindow() {
     const distPath = distCandidates.find(p => fs.existsSync(p));
     if (distPath) {
       console.log("[Main] Loading from dist:", distPath);
-      mainWindow.loadFile(distPath);
+      registerDistProtocol(path.dirname(distPath));
+      mainWindow.loadURL(`${DIST_PROTOCOL}://app/index.html`);
     } else {
       console.log("[Main] Fallback to dev URL");
       mainWindow.loadURL(devUrl);

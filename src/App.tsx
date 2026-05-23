@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useRef, useState, type ComponentType, type LazyExoticComponent } from "react";
+import { Component, Suspense, lazy, useEffect, useRef, useState, type ComponentType, type ErrorInfo, type LazyExoticComponent, type ReactNode } from "react";
 import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { CollectionProvider } from "./contexts/CollectionContext";
 import { ErpAuthProvider, useErpAuth } from "./contexts/ErpAuthContext";
@@ -10,6 +10,7 @@ import {
   syncScopedDataToGlobalStore,
   writeActiveAccountId,
 } from "./utils/multiStore";
+import BrandMark from "./components/BrandMark";
 
 const ACCOUNT_STORAGE_KEY = "temu_accounts";
 
@@ -69,6 +70,33 @@ const CORE_ROUTE_PRELOADERS = [
   ProductDetail.preload,
 ];
 
+function PremiumRouteLoading() {
+  const [isSlow, setIsSlow] = useState(false);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setIsSlow(true), 8000);
+    return () => clearTimeout(timer);
+  }, []);
+
+  return (
+    <div className="app-route-loading" aria-live="polite">
+      <div className="app-route-loading__panel">
+        <BrandMark size={42} className="app-route-loading__mark" />
+        <div className="app-route-loading__spinner" aria-hidden="true" />
+        <div className="app-route-loading__title">Temu Ops 正在启动</div>
+        <div className="app-route-loading__desc">
+          {isSlow ? "加载比平时慢一些，可以重新加载桌面端页面。" : "正在加载工作台与本地服务..."}
+        </div>
+        {isSlow ? (
+          <button type="button" className="app-route-loading__button" onClick={() => window.location.reload()}>
+            重新加载
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function RouteLoading() {
   return (
     <div className="app-route-loading" aria-live="polite">
@@ -78,11 +106,13 @@ function RouteLoading() {
   );
 }
 
+void RouteLoading;
+
 function RequireAuth({ children }: { children: JSX.Element }) {
   const auth = useErpAuth();
   const location = useLocation();
 
-  if (auth.loading) return <RouteLoading />;
+  if (auth.loading) return <PremiumRouteLoading />;
   if (!auth.currentUser) {
     return <Navigate to="/login" replace state={{ from: location.pathname }} />;
   }
@@ -108,6 +138,47 @@ function AccessDenied() {
   );
 }
 
+class AppRouteErrorBoundary extends Component<
+  { children: ReactNode; resetKey: string },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("[AppRouteErrorBoundary]", error, info.componentStack);
+  }
+
+  componentDidUpdate(prevProps: { resetKey: string }) {
+    if (prevProps.resetKey !== this.props.resetKey && this.state.error) {
+      this.setState({ error: null });
+    }
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    const message = this.state.error.message || "页面加载失败";
+    return (
+      <div className="app-route-error" role="alert">
+        <div className="app-route-error__panel">
+          <div className="app-route-error__title">页面没有加载成功</div>
+          <div className="app-route-error__desc">
+            {message.includes("dynamically imported module")
+              ? "开发服务刚刚热更新，页面模块需要重新加载。"
+              : message}
+          </div>
+          <button type="button" className="app-route-error__button" onClick={() => window.location.reload()}>
+            重新加载
+          </button>
+        </div>
+      </div>
+    );
+  }
+}
+
 function RoleRoute({ path, children }: { path: string; children: JSX.Element }) {
   const { currentUser } = useErpAuth();
   if (!canAccessRoute(currentUser?.role, path)) return <AccessDenied />;
@@ -115,6 +186,7 @@ function RoleRoute({ path, children }: { path: string; children: JSX.Element }) 
 }
 
 function App() {
+  const location = useLocation();
   const [accountViewVersion, setAccountViewVersion] = useState(0);
   const lastEmittedAccountIdRef = useRef<string | null | undefined>(undefined);
 
@@ -201,55 +273,57 @@ function App() {
   return (
     <ErpAuthProvider>
       <CollectionProvider key={`collection-${accountViewVersion}`}>
-        <Suspense fallback={<RouteLoading />}>
-          <Routes>
-            <Route path="/login" element={<ErpLogin />} />
-            <Route
-              path="/"
-              element={(
-                <RequireAuth>
-                  <AppLayout key={`layout-${accountViewVersion}`} />
-                </RequireAuth>
-              )}
-            >
-            <Route index element={<RoleHomeRedirect />} />
-            <Route path="shop" element={<RoleRoute path="/shop"><ShopOverview /></RoleRoute>} />
-            <Route path="products" element={<RoleRoute path="/products"><ProductList /></RoleRoute>} />
-            <Route path="products/:id" element={<RoleRoute path="/products"><ProductDetail /></RoleRoute>} />
-            <Route path="create-product" element={<RoleRoute path="/create-product"><ProductCreate /></RoleRoute>} />
-            <Route path="product-create" element={<Navigate to="/create-product" replace />} />
-            <Route path="image-studio" element={<RoleRoute path="/image-studio"><ImageStudio /></RoleRoute>} />
-            <Route path="image-studio-gpt" element={<RoleRoute path="/image-studio-gpt"><ImageStudioGPT /></RoleRoute>} />
-            <Route path="auto-image-swap" element={<RoleRoute path="/auto-image-swap"><AutoImageSwap /></RoleRoute>} />
-            <Route path="collect" element={<RoleRoute path="/collect"><Dashboard /></RoleRoute>} />
-            <Route path="temu-robots" element={<RoleRoute path="/collect"><TemuRobots /></RoleRoute>} />
-            <Route path="multi-store-cloud" element={<RoleRoute path="/multi-store-cloud"><MultiStoreCloud /></RoleRoute>} />
-            <Route path="jushuitan-import" element={<Navigate to="/product-master-data" replace />} />
-            <Route path="accounts" element={<RoleRoute path="/accounts"><AccountManager /></RoleRoute>} />
-            <Route path="tasks" element={<Navigate to="/work-items" replace />} />
-            <Route path="competitor" element={<RoleRoute path="/competitor"><CompetitorAnalysis /></RoleRoute>} />
-            <Route path="price-review" element={<RoleRoute path="/price-review"><PriceReview /></RoleRoute>} />
-            <Route path="daily-command" element={<RoleHomeRedirect />} />
-            <Route path="product-master-data" element={<RoleRoute path="/product-master-data"><ProductMasterData mode="skus" /></RoleRoute>} />
-            <Route path="stores" element={<RoleRoute path="/stores"><PurchaseCenter workArea="orders" initialStoreManagerOpen /></RoleRoute>} />
-            <Route path="1688-mapping" element={<RoleRoute path="/1688-mapping"><AlibabaMapping /></RoleRoute>} />
-            <Route path="sourcing-center" element={<RoleRoute path="/sourcing-center"><PurchaseCenter workArea="sourcing" /></RoleRoute>} />
-            <Route path="purchase-center" element={<RoleRoute path="/purchase-center"><PurchaseCenter workArea="orders" /></RoleRoute>} />
-            <Route path="warehouse-center" element={<RoleRoute path="/warehouse-center"><WarehouseCenter /></RoleRoute>} />
-            <Route path="qc-outbound" element={<RoleRoute path="/qc-outbound"><QcOutboundCenter /></RoleRoute>} />
-            <Route path="work-items" element={<RoleRoute path="/work-items"><WorkItems /></RoleRoute>} />
-            <Route path="users" element={<RoleRoute path="/users"><UserManagement /></RoleRoute>} />
-            <Route path="erp-debug" element={<RoleRoute path="/erp-debug"><ErpDebug /></RoleRoute>} />
-            <Route path="logs" element={<RoleRoute path="/logs"><Logs /></RoleRoute>} />
-            <Route path="settings" element={<RoleRoute path="/settings"><Settings /></RoleRoute>} />
-            {/* Legacy routes */}
-            <Route path="dashboard" element={<Navigate to="/shop" replace />} />
-            <Route path="sales" element={<Navigate to="/products" replace />} />
-            <Route path="orders" element={<Navigate to="/products" replace />} />
-            <Route path="analytics" element={<Navigate to="/shop" replace />} />
-          </Route>
-          </Routes>
-        </Suspense>
+        <AppRouteErrorBoundary resetKey={`${location.pathname}${location.search}`}>
+          <Suspense fallback={<PremiumRouteLoading />}>
+            <Routes>
+              <Route path="/login" element={<ErpLogin />} />
+              <Route
+                path="/"
+                element={(
+                  <RequireAuth>
+                    <AppLayout key={`layout-${accountViewVersion}`} />
+                  </RequireAuth>
+                )}
+              >
+              <Route index element={<RoleHomeRedirect />} />
+              <Route path="shop" element={<RoleRoute path="/shop"><ShopOverview /></RoleRoute>} />
+              <Route path="products" element={<RoleRoute path="/products"><ProductList /></RoleRoute>} />
+              <Route path="products/:id" element={<RoleRoute path="/products"><ProductDetail /></RoleRoute>} />
+              <Route path="create-product" element={<RoleRoute path="/create-product"><ProductCreate /></RoleRoute>} />
+              <Route path="product-create" element={<Navigate to="/create-product" replace />} />
+              <Route path="image-studio" element={<RoleRoute path="/image-studio"><ImageStudio /></RoleRoute>} />
+              <Route path="image-studio-gpt" element={<RoleRoute path="/image-studio-gpt"><ImageStudioGPT /></RoleRoute>} />
+              <Route path="auto-image-swap" element={<RoleRoute path="/auto-image-swap"><AutoImageSwap /></RoleRoute>} />
+              <Route path="collect" element={<RoleRoute path="/collect"><Dashboard /></RoleRoute>} />
+              <Route path="temu-robots" element={<RoleRoute path="/collect"><TemuRobots /></RoleRoute>} />
+              <Route path="multi-store-cloud" element={<RoleRoute path="/multi-store-cloud"><MultiStoreCloud /></RoleRoute>} />
+              <Route path="jushuitan-import" element={<Navigate to="/product-master-data" replace />} />
+              <Route path="accounts" element={<RoleRoute path="/accounts"><AccountManager /></RoleRoute>} />
+              <Route path="tasks" element={<Navigate to="/work-items" replace />} />
+              <Route path="competitor" element={<RoleRoute path="/competitor"><CompetitorAnalysis /></RoleRoute>} />
+              <Route path="price-review" element={<RoleRoute path="/price-review"><PriceReview /></RoleRoute>} />
+              <Route path="daily-command" element={<RoleHomeRedirect />} />
+              <Route path="product-master-data" element={<RoleRoute path="/product-master-data"><ProductMasterData mode="skus" /></RoleRoute>} />
+              <Route path="stores" element={<RoleRoute path="/stores"><PurchaseCenter workArea="orders" initialStoreManagerOpen /></RoleRoute>} />
+              <Route path="1688-mapping" element={<RoleRoute path="/1688-mapping"><AlibabaMapping /></RoleRoute>} />
+              <Route path="sourcing-center" element={<RoleRoute path="/sourcing-center"><PurchaseCenter workArea="sourcing" /></RoleRoute>} />
+              <Route path="purchase-center" element={<RoleRoute path="/purchase-center"><PurchaseCenter workArea="orders" /></RoleRoute>} />
+              <Route path="warehouse-center" element={<RoleRoute path="/warehouse-center"><WarehouseCenter /></RoleRoute>} />
+              <Route path="qc-outbound" element={<RoleRoute path="/qc-outbound"><QcOutboundCenter /></RoleRoute>} />
+              <Route path="work-items" element={<RoleRoute path="/work-items"><WorkItems /></RoleRoute>} />
+              <Route path="users" element={<RoleRoute path="/users"><UserManagement /></RoleRoute>} />
+              <Route path="erp-debug" element={<RoleRoute path="/erp-debug"><ErpDebug /></RoleRoute>} />
+              <Route path="logs" element={<RoleRoute path="/logs"><Logs /></RoleRoute>} />
+              <Route path="settings" element={<RoleRoute path="/settings"><Settings /></RoleRoute>} />
+              {/* Legacy routes */}
+              <Route path="dashboard" element={<Navigate to="/shop" replace />} />
+              <Route path="sales" element={<Navigate to="/products" replace />} />
+              <Route path="orders" element={<Navigate to="/products" replace />} />
+              <Route path="analytics" element={<Navigate to="/shop" replace />} />
+            </Route>
+            </Routes>
+          </Suspense>
+        </AppRouteErrorBoundary>
       </CollectionProvider>
     </ErpAuthProvider>
   );

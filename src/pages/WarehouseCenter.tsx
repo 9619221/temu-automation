@@ -1,31 +1,50 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Alert, Button, Col, Descriptions, InputNumber, Modal, Row, Space, Table, Tabs, Typography, message } from "antd";
+import { Alert, Button, Col, Descriptions, InputNumber, Modal, Row, Space, Table, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
   CheckCircleOutlined,
   InboxOutlined,
   ReloadOutlined,
-  TagsOutlined,
 } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
 import StatCard from "../components/StatCard";
 import { useErpAuth } from "../contexts/ErpAuthContext";
 import { hasPageCache, readPageCache, writePageCache } from "../utils/pageCache";
 import {
-  BATCH_QC_STATUS_LABELS,
   INBOUND_STATUS_LABELS,
   canRole,
   formatDateTime,
-  formatMoney,
   formatQty,
   statusTag,
 } from "../utils/erpUi";
 
 const { Text } = Typography;
 const erp = window.electronAPI?.erp;
-const WAREHOUSE_WORKBENCH_CACHE_KEY = "temu.warehouse.workbench.cache.v2";
+const WAREHOUSE_WORKBENCH_CACHE_KEY = "temu.warehouse.workbench.cache.v3";
 const DEFAULT_INBOUND_RECEIPT_PAGE_SIZE = 20;
+
+type WarehouseWorkbenchParams = {
+  inboundReceiptLimit: number;
+  inboundReceiptOffset: number;
+};
+
+function normalizePositiveNumber(value: unknown, fallback: number): number {
+  const next = Number(value);
+  return Number.isFinite(next) && next > 0 ? Math.floor(next) : fallback;
+}
+
+function normalizeOffsetNumber(value: unknown, fallback = 0): number {
+  const next = Number(value);
+  return Number.isFinite(next) && next >= 0 ? Math.floor(next) : fallback;
+}
+
+function takePageRows<T>(rows: T[] | undefined, limit: number, offset = 0): T[] | undefined {
+  if (!Array.isArray(rows)) return rows;
+  const safeLimit = normalizePositiveNumber(limit, rows.length || 1);
+  const safeOffset = normalizeOffsetNumber(offset);
+  return rows.slice(safeOffset, safeOffset + safeLimit);
+}
 
 interface InboundReceiptRow {
   id: string;
@@ -48,33 +67,11 @@ interface InboundReceiptRow {
   logistics?: { companyName?: string | null; billNo?: string | null } | null;
 }
 
-interface InventoryBatchRow {
-  id: string;
-  batchCode?: string;
-  receiptNo?: string;
-  poNo?: string;
-  supplierName?: string;
-  internalSkuCode?: string;
-  productName?: string;
-  receivedQty?: number;
-  availableQty?: number;
-  reservedQty?: number;
-  blockedQty?: number;
-  defectiveQty?: number;
-  unitLandedCost?: number;
-  qcStatus?: string;
-  warehouseId?: string;
-  locationCode?: string;
-  receivedAt?: string | null;
-  inboundReceiptId?: string | null;
-}
-
 interface WarehouseWorkbench {
   generatedAt?: string;
   summary?: Record<string, number>;
   inboundReceiptPage?: { limit?: number; offset?: number; total?: number };
   inboundReceipts?: InboundReceiptRow[];
-  inventoryBatches?: InventoryBatchRow[];
 }
 
 export default function WarehouseCenter() {
@@ -107,28 +104,52 @@ export default function WarehouseCenter() {
     loading: boolean;
   } | null>(null);
 
-  const buildWorkbenchParams = useCallback(() => ({
-    inboundReceiptLimit: inboundReceiptPageSize,
-    inboundReceiptOffset: (Math.max(1, inboundReceiptPage) - 1) * inboundReceiptPageSize,
+  const buildWorkbenchParams = useCallback((overrides: Partial<WarehouseWorkbenchParams> = {}): WarehouseWorkbenchParams => ({
+    inboundReceiptLimit: normalizePositiveNumber(overrides.inboundReceiptLimit, inboundReceiptPageSize),
+    inboundReceiptOffset: normalizeOffsetNumber(
+      overrides.inboundReceiptOffset,
+      (Math.max(1, inboundReceiptPage) - 1) * inboundReceiptPageSize,
+    ),
   }), [inboundReceiptPage, inboundReceiptPageSize]);
 
-  const applyWorkbench = useCallback((workbench: WarehouseWorkbench) => {
-    const nextWorkbench = workbench || {};
-    if (nextWorkbench.inboundReceiptPage) {
-      setInboundReceiptTotal(Number(nextWorkbench.inboundReceiptPage.total || 0));
-    } else if (nextWorkbench.summary?.inboundReceiptCount !== undefined) {
-      setInboundReceiptTotal(Number(nextWorkbench.summary.inboundReceiptCount || 0));
-    }
+  const applyWorkbench = useCallback((workbench: WarehouseWorkbench, params: WarehouseWorkbenchParams = buildWorkbenchParams()) => {
+    const sourceWorkbench = workbench || {};
+    const receiptLimit = normalizePositiveNumber(
+      sourceWorkbench.inboundReceiptPage?.limit,
+      params.inboundReceiptLimit,
+    );
+    const receiptOffset = normalizeOffsetNumber(
+      sourceWorkbench.inboundReceiptPage?.offset,
+      params.inboundReceiptOffset,
+    );
+    const receiptTotal = Number(
+      sourceWorkbench.inboundReceiptPage?.total
+      ?? sourceWorkbench.summary?.inboundReceiptCount
+      ?? sourceWorkbench.inboundReceipts?.length
+      ?? 0,
+    );
+    const receiptRowsOffset = sourceWorkbench.inboundReceiptPage ? 0 : receiptOffset;
+    const nextWorkbench = {
+      ...sourceWorkbench,
+      inboundReceiptPage: {
+        limit: receiptLimit,
+        offset: receiptOffset,
+        total: receiptTotal,
+      },
+      inboundReceipts: takePageRows(sourceWorkbench.inboundReceipts, receiptLimit, receiptRowsOffset),
+    };
+    setInboundReceiptTotal(receiptTotal);
     setData(nextWorkbench);
     setLoadedOnce(true);
     writePageCache(WAREHOUSE_WORKBENCH_CACHE_KEY, nextWorkbench);
-  }, []);
+  }, [buildWorkbenchParams]);
 
-  const loadData = useCallback(async (options: { silent?: boolean } = {}) => {
+  const loadData = useCallback(async (options: { silent?: boolean; params?: WarehouseWorkbenchParams } = {}) => {
     if (!erp) return;
+    const params = options.params || buildWorkbenchParams();
     if (!options.silent) setLoading(true);
     try {
-      applyWorkbench(await erp.warehouse.workbench(buildWorkbenchParams()));
+      applyWorkbench(await erp.warehouse.workbench(params), params);
     } catch (error: any) {
       if (!options.silent) message.error(error?.message || "仓库中心读取失败");
     } finally {
@@ -139,14 +160,15 @@ export default function WarehouseCenter() {
   useEffect(() => {
     // 异步加载：缓存有就 silent，无 spinner / 不闪屏；缓存空才显示加载状态。
     void loadData({ silent: hasPageCache(cachedData) });
-  }, [loadData, cachedData]);
+  }, []);
 
   const runAction = async (key: string, payload: Record<string, any>, successText: string) => {
     if (!erp) return;
+    const params = buildWorkbenchParams();
     setActingKey(key);
     try {
-      const result = await erp.warehouse.action({ ...payload, ...buildWorkbenchParams() });
-      applyWorkbench(result?.workbench || await erp.warehouse.workbench(buildWorkbenchParams()));
+      const result = await erp.warehouse.action({ ...payload, ...params });
+      applyWorkbench(result?.workbench || await erp.warehouse.workbench(params), params);
       message.success(successText);
     } catch (error: any) {
       message.error(error?.message || "操作失败");
@@ -154,6 +176,19 @@ export default function WarehouseCenter() {
       setActingKey(null);
     }
   };
+
+  const updateInboundReceiptPagination = useCallback((nextPage: number, nextPageSize?: number) => {
+    const pageSize = normalizePositiveNumber(nextPageSize, inboundReceiptPageSize);
+    const page = pageSize !== inboundReceiptPageSize ? 1 : normalizePositiveNumber(nextPage, 1);
+    const params = buildWorkbenchParams({
+      inboundReceiptLimit: pageSize,
+      inboundReceiptOffset: (page - 1) * pageSize,
+    });
+    setSelectedReceiptId(null);
+    setInboundReceiptPageSize(pageSize);
+    setInboundReceiptPage(page);
+    void loadData({ params });
+  }, [buildWorkbenchParams, inboundReceiptPageSize, loadData]);
 
   const receiptColumns = useMemo<ColumnsType<InboundReceiptRow>>(() => [
     {
@@ -213,18 +248,6 @@ export default function WarehouseCenter() {
       ),
     },
     {
-      title: "批次",
-      key: "batch",
-      width: 130,
-      align: "right",
-      render: (_value, row) => (
-        <Space direction="vertical" size={2} style={{ alignItems: "flex-end" }}>
-          <Text>{formatQty(row.batchLineCount)} / {formatQty(row.lineCount)} 已建</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{row.operatorName || "-"}</Text>
-        </Space>
-      ),
-    },
-    {
       title: "物流",
       key: "logistics",
       width: 200,
@@ -257,8 +280,7 @@ export default function WarehouseCenter() {
           return <Text type="secondary">无动作</Text>;
         }
         // 单按钮接力：不论当前在 pending_arrival / arrived / counted 哪一步，
-        // 后端 register_arrival / confirm_count / create_batches 任意 action 都会
-        // 自动接力到 inbounded_pending_qc 并建批次（缺数量按 PO 自动填）。
+        // 后端 register_arrival / confirm_count / create_batches 任意 action 都会处理到下一步。
         // 选当前状态对应的合法 action 即可。
         const action = row.status === "pending_arrival"
           ? "register_arrival"
@@ -308,72 +330,8 @@ export default function WarehouseCenter() {
     },
   ], [actingKey, role, partialReceiveModal]);
 
-  const batchColumns = useMemo<ColumnsType<InventoryBatchRow>>(() => [
-    {
-      title: "批次",
-      key: "batch",
-      width: 210,
-      render: (_value, row) => (
-        <Space direction="vertical" size={2}>
-          <Text strong>{row.batchCode || row.id}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{row.receiptNo || row.poNo || "-"}</Text>
-        </Space>
-      ),
-    },
-    {
-      title: "商品",
-      key: "sku",
-      ellipsis: true,
-      render: (_value, row) => (
-        <Space direction="vertical" size={2}>
-          <Text>{row.productName || "-"}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{row.internalSkuCode || "-"}</Text>
-        </Space>
-      ),
-    },
-    {
-      title: "库存",
-      key: "inventory",
-      width: 180,
-      align: "right",
-      render: (_value, row) => (
-        <Space direction="vertical" size={2} style={{ alignItems: "flex-end" }}>
-          <Text>收货 {formatQty(row.receivedQty)} · 可用 {formatQty(row.availableQty)}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>预留 {formatQty(row.reservedQty)} · 锁定 {formatQty(row.blockedQty)}</Text>
-        </Space>
-      ),
-    },
-    {
-      title: "质检",
-      dataIndex: "qcStatus",
-      width: 130,
-      render: (value) => statusTag(value, BATCH_QC_STATUS_LABELS),
-    },
-    {
-      title: "成本",
-      dataIndex: "unitLandedCost",
-      width: 110,
-      align: "right",
-      render: formatMoney,
-    },
-    {
-      title: "库位",
-      dataIndex: "locationCode",
-      width: 120,
-      render: (value) => value || "-",
-    },
-    {
-      title: "入库时间",
-      dataIndex: "receivedAt",
-      width: 160,
-      render: formatDateTime,
-    },
-  ], []);
-
   const summary = data.summary || {};
-  const tableLoading = loading
-    && !loadedOnce
-    && ((data.inboundReceipts?.length || 0) + (data.inventoryBatches?.length || 0) > 0);
+  const tableLoading = loading && !loadedOnce;
   if (!erp) {
     return (
       <div className="dashboard-shell">
@@ -388,8 +346,8 @@ export default function WarehouseCenter() {
       <PageHeader
         compact
         eyebrow="仓库中心"
-        title="待到货、入库、库存批次"
-        subtitle="仓管确认到仓、核数并创建库存批次；批次默认等待运营抽检。"
+        title="待到货、入库"
+        subtitle="仓管确认到仓、核数，并对照采购单查看入库数据。"
         meta={[`更新 ${formatDateTime(data.generatedAt)}`]}
         actions={[
           <Button key="refresh" icon={<ReloadOutlined />} loading={loading} onClick={() => loadData()}>
@@ -399,14 +357,11 @@ export default function WarehouseCenter() {
       />
 
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
-        <Col xs={24} md={8}>
+        <Col xs={24} md={12}>
           <StatCard title="待到货" value={summary.pendingArrivalCount || 0} color="blue" icon={<InboxOutlined />} compact />
         </Col>
-        <Col xs={24} md={8}>
-          <StatCard title="待核数 / 建批次" value={(summary.arrivedCount || 0) + (summary.countedCount || 0)} color="purple" icon={<CheckCircleOutlined />} compact />
-        </Col>
-        <Col xs={24} md={8}>
-          <StatCard title="库存批次" value={summary.inventoryBatchCount || 0} suffix={`已收 ${formatQty(summary.receivedQty)}`} color="success" icon={<TagsOutlined />} compact />
+        <Col xs={24} md={12}>
+          <StatCard title="待核数 / 入库" value={(summary.arrivedCount || 0) + (summary.countedCount || 0)} suffix={`已收 ${formatQty(summary.receivedQty)}`} color="purple" icon={<CheckCircleOutlined />} compact />
         </Col>
       </Row>
 
@@ -414,7 +369,7 @@ export default function WarehouseCenter() {
         <div className="app-panel__title">
           <div>
             <div className="app-panel__title-main">待到货 / 入库单</div>
-            <div className="app-panel__title-sub">仓管按顺序确认到仓、确认核数、创建入库批次。</div>
+            <div className="app-panel__title-sub">仓管按顺序确认到仓、确认核数，并查看采购单关联信息。</div>
           </div>
         </div>
         <Table
@@ -432,15 +387,8 @@ export default function WarehouseCenter() {
             showSizeChanger: true,
             pageSizeOptions: [20, 50, 100, 200],
             showTotal: (total, range) => `显示 ${range[0]}-${range[1]} / ${total} 条`,
-            onChange: (nextPage, nextPageSize) => {
-              setSelectedReceiptId(null);
-              if (nextPageSize !== inboundReceiptPageSize) {
-                setInboundReceiptPageSize(nextPageSize);
-                setInboundReceiptPage(1);
-                return;
-              }
-              setInboundReceiptPage(nextPage);
-            },
+            onChange: updateInboundReceiptPagination,
+            onShowSizeChange: updateInboundReceiptPagination,
           }}
           rowClassName={(record) => (record.id === selectedReceiptId ? "ant-table-row-selected" : "")}
           onRow={(record) => ({
@@ -451,83 +399,29 @@ export default function WarehouseCenter() {
         {selectedReceiptId ? (() => {
           const sel = (data.inboundReceipts || []).find((r) => r.id === selectedReceiptId);
           if (!sel) return null;
-          const relatedBatches = (data.inventoryBatches || []).filter((b) => b.inboundReceiptId === selectedReceiptId);
           return (
             <div style={{ marginTop: 12, border: "1px solid #e5e9f0", borderRadius: 6, padding: 8, background: "#fafbfc" }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 4px 8px" }}>
                 <Text strong>入库单明细：{sel.receiptNo}</Text>
                 <Button size="small" type="text" onClick={() => setSelectedReceiptId(null)}>收起 ✕</Button>
               </div>
-              <Tabs
-                size="small"
-                items={[
-                  {
-                    key: "batches",
-                    label: `库存批次 (${relatedBatches.length})`,
-                    children: relatedBatches.length ? (
-                      <Table
-                        rowKey="id"
-                        size="small"
-                        className="erp-compact-table"
-                        columns={batchColumns}
-                        dataSource={relatedBatches}
-                        pagination={false}
-                        scroll={{ x: 980 }}
-                      />
-                    ) : <Text type="secondary">还没有批次（点「入库」按钮一键创建）</Text>,
-                  },
-                  {
-                    key: "logistics",
-                    label: "物流",
-                    children: sel.logistics ? (
-                      <Descriptions size="small" column={2}>
-                        <Descriptions.Item label="物流公司">{sel.logistics.companyName || "-"}</Descriptions.Item>
-                        <Descriptions.Item label="运单号">{sel.logistics.billNo || "-"}</Descriptions.Item>
-                      </Descriptions>
-                    ) : <Text type="secondary">无物流信息（卖家未发货 / 未同步 1688 物流）</Text>,
-                  },
-                  {
-                    key: "meta",
-                    label: "操作信息",
-                    children: (
-                      <Descriptions size="small" column={2}>
-                        <Descriptions.Item label="入库单号">{sel.receiptNo}</Descriptions.Item>
-                        <Descriptions.Item label="状态">{sel.status}</Descriptions.Item>
-                        <Descriptions.Item label="采购单">{sel.poNo || sel.poId || "-"}</Descriptions.Item>
-                        <Descriptions.Item label="供应商">{sel.supplierName || "-"}</Descriptions.Item>
-                        <Descriptions.Item label="操作员">{sel.operatorName || "-"}</Descriptions.Item>
-                        <Descriptions.Item label="到仓时间">{formatDateTime(sel.receivedAt)}</Descriptions.Item>
-                        <Descriptions.Item label="期望数量">{formatQty(sel.expectedQty)}</Descriptions.Item>
-                        <Descriptions.Item label="实收数量">{formatQty(sel.receivedQty)}</Descriptions.Item>
-                        <Descriptions.Item label="破损">{formatQty(sel.damagedQty)}</Descriptions.Item>
-                        <Descriptions.Item label="短少">{formatQty(sel.shortageQty)}</Descriptions.Item>
-                      </Descriptions>
-                    ),
-                  },
-                ]}
-              />
+              <Descriptions size="small" column={2}>
+                <Descriptions.Item label="入库单号">{sel.receiptNo}</Descriptions.Item>
+                <Descriptions.Item label="状态">{INBOUND_STATUS_LABELS[sel.status] || sel.status}</Descriptions.Item>
+                <Descriptions.Item label="采购单">{sel.poNo || sel.poId || "-"}</Descriptions.Item>
+                <Descriptions.Item label="供应商">{sel.supplierName || "-"}</Descriptions.Item>
+                <Descriptions.Item label="操作员">{sel.operatorName || "-"}</Descriptions.Item>
+                <Descriptions.Item label="到仓时间">{formatDateTime(sel.receivedAt)}</Descriptions.Item>
+                <Descriptions.Item label="期望数量">{formatQty(sel.expectedQty)}</Descriptions.Item>
+                <Descriptions.Item label="实收数量">{formatQty(sel.receivedQty)}</Descriptions.Item>
+                <Descriptions.Item label="破损">{formatQty(sel.damagedQty)}</Descriptions.Item>
+                <Descriptions.Item label="短少">{formatQty(sel.shortageQty)}</Descriptions.Item>
+                <Descriptions.Item label="物流公司">{sel.logistics?.companyName || "-"}</Descriptions.Item>
+                <Descriptions.Item label="运单号">{sel.logistics?.billNo || "-"}</Descriptions.Item>
+              </Descriptions>
             </div>
           );
         })() : null}
-      </div>
-
-      <div className="app-panel">
-        <div className="app-panel__title">
-          <div>
-            <div className="app-panel__title-main">库存批次</div>
-            <div className="app-panel__title-sub">每批货可追溯到采购单、入库单和供应商，并展示可用、预留、锁定库存。</div>
-          </div>
-        </div>
-        <Table
-          rowKey="id"
-          loading={tableLoading}
-          size="small"
-          className="erp-compact-table"
-          columns={batchColumns}
-          dataSource={data.inventoryBatches || []}
-          scroll={{ x: 980 }}
-          pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
-        />
       </div>
 
       <Modal
@@ -558,8 +452,7 @@ export default function WarehouseCenter() {
         {partialReceiveModal ? (
           <Space direction="vertical" size={10} style={{ width: "100%" }}>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              系统会按你填的"实收"建库存批次。短少 / 多到自动算（实收 vs 期望差），破损独立填，
-              系统不算可用库存。
+              系统会按你填的"实收"更新入库单。短少 / 多到自动算（实收 vs 期望差），破损独立填。
             </Text>
             <Table
               rowKey="id"
