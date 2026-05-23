@@ -9,23 +9,55 @@ import { URL_WHITELIST, URL_BLACKLIST, EVENT_NAME, BYPASS_SYMBOL_KEY } from "./h
 import { enqueue, queueDepth, flush } from "./ingest-queue.js";
 
 const ALARM_FLUSH = "temu-monitor.flush";
+const ALARM_COLLECT = "temu-monitor.collect";
 const STATS_KEY = "temu_monitor_stats";
 const MALLS_KEY = "temu_monitor_malls";
+const COLLECTOR_STATE_KEY = "temu_monitor_collector_state";
+const COLLECTOR_WINDOW_KEY = "temu_monitor_collector_window";
+const COLLECTOR_QUERY = "__temu_monitor_collector=1";
+
+const COLLECTOR_TARGETS = [
+  { key: "sales", url: "https://agentseller.temu.com/stock/fully-mgt/sale-manage/main" },
+  { key: "traffic_goods", url: "https://agentseller.temu.com/main/flux-analysis-full" },
+  { key: "traffic_mall", url: "https://agentseller.temu.com/main/mall-flux-analysis-full" },
+  { key: "activity_data", url: "https://agentseller.temu.com/main/act/data-full" },
+  { key: "marketing_activity", url: "https://agentseller.temu.com/activity/marketing-activity" },
+  { key: "chance_goods", url: "https://agentseller.temu.com/activity/marketing-activity/chance-goods" },
+  { key: "bidding", url: "https://agentseller.temu.com/newon/invite-bids/list" },
+];
+
+ensureRuntimeDefaults().catch((e) => console.warn("[sw] bootstrap skipped:", e?.message || e));
 
 // ---------- 启动期初始化 ----------
 chrome.runtime.onInstalled.addListener(async () => {
-  chrome.alarms.create(ALARM_FLUSH, { periodInMinutes: 0.5 }); // 30s
-  const { device_id } = await getStorage(["device_id"]);
-  if (!device_id) {
-    await setStorage({ device_id: crypto.randomUUID() });
-  }
-  await tryAutoConfigure();
+  await ensureRuntimeDefaults();
 });
 
 chrome.runtime.onStartup.addListener(async () => {
-  chrome.alarms.create(ALARM_FLUSH, { periodInMinutes: 0.5 });
-  await tryAutoConfigure();
+  await ensureRuntimeDefaults();
 });
+
+async function ensureRuntimeDefaults() {
+  chrome.alarms.create(ALARM_FLUSH, { periodInMinutes: 0.5 });
+  chrome.alarms.create(ALARM_COLLECT, { periodInMinutes: 5 });
+  const cur = await getStorage(["device_id", COLLECTOR_STATE_KEY]);
+  const patch = {};
+  if (!cur.device_id) patch.device_id = crypto.randomUUID();
+  if (!cur[COLLECTOR_STATE_KEY]) {
+    patch[COLLECTOR_STATE_KEY] = {
+      enabled: true,
+      index: 0,
+      updated_at: Date.now(),
+      reason: "auto_default",
+    };
+  }
+  if (Object.keys(patch).length) await setStorage(patch);
+  await tryAutoConfigure();
+  const collectorState = patch[COLLECTOR_STATE_KEY] || cur[COLLECTOR_STATE_KEY];
+  if (collectorState?.enabled !== false) {
+    await runCollectorStep().catch((e) => console.warn("[sw] collector bootstrap err", e?.message || e));
+  }
+}
 
 // 装好扩展自动连生产 cloud（默认 https://erp.temu.chat/cloud）
 // 仅当 storage 还没配置时尝试；失败静默（如需指向其它环境，用户在 options 页手动填）
@@ -51,6 +83,10 @@ async function tryAutoConfigure() {
 
 // ---------- 周期上报 ----------
 chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === ALARM_COLLECT) {
+    await runCollectorStep().catch((e) => console.warn("[sw] collector err", e));
+    return;
+  }
   if (alarm.name !== ALARM_FLUSH) return;
   // 未配置兜底：onInstalled 阶段 fetch 偶尔失败（network stack 没准备好），
   // 这里 30s 一次重试，配置成功后立即心跳上来
@@ -179,12 +215,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "QUERY_STATUS") {
-    Promise.all([queueDepth(), getStorage([STATS_KEY, "cloud_endpoint", "auth_token", MALLS_KEY])])
+    Promise.all([queueDepth(), getStorage([STATS_KEY, "cloud_endpoint", "auth_token", MALLS_KEY, COLLECTOR_STATE_KEY])])
       .then(([depth, cfg]) => {
         sendResponse({
           queueDepth: depth,
           stats: cfg[STATS_KEY] || {},
           malls: cfg[MALLS_KEY] || [],
+          collector: cfg[COLLECTOR_STATE_KEY] || { enabled: false },
           configured: !!(cfg.cloud_endpoint && cfg.auth_token),
         });
       })
@@ -205,7 +242,102 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .catch((e) => sendResponse({ ok: false, reason: String(e) }));
     return true;
   }
+
+  if (msg.type === "START_COLLECTOR") {
+    startCollector()
+      .then((r) => sendResponse(r))
+      .catch((e) => sendResponse({ ok: false, reason: String(e?.message || e).slice(0, 200) }));
+    return true;
+  }
+
+  if (msg.type === "STOP_COLLECTOR") {
+    stopCollector()
+      .then((r) => sendResponse(r))
+      .catch((e) => sendResponse({ ok: false, reason: String(e?.message || e).slice(0, 200) }));
+    return true;
+  }
 });
+
+async function startCollector() {
+  const state = {
+    enabled: true,
+    index: 0,
+    last_started_at: Date.now(),
+    last_step_at: 0,
+    last_target_key: "",
+    last_target_url: "",
+  };
+  await setStorage({ [COLLECTOR_STATE_KEY]: state });
+  chrome.alarms.create(ALARM_COLLECT, { periodInMinutes: 5 });
+  await runCollectorStep(true);
+  return { ok: true };
+}
+
+async function stopCollector() {
+  const cfg = await getStorage([COLLECTOR_STATE_KEY, COLLECTOR_WINDOW_KEY]);
+  await setStorage({ [COLLECTOR_STATE_KEY]: { ...(cfg[COLLECTOR_STATE_KEY] || {}), enabled: false, stopped_at: Date.now() } });
+  const windowId = cfg[COLLECTOR_WINDOW_KEY];
+  if (windowId) {
+    try { await chrome.windows.remove(windowId); } catch {}
+  }
+  await setStorage({ [COLLECTOR_WINDOW_KEY]: null });
+  return { ok: true };
+}
+
+async function runCollectorStep(force = false) {
+  const cfg = await getStorage([COLLECTOR_STATE_KEY, COLLECTOR_WINDOW_KEY]);
+  const state = cfg[COLLECTOR_STATE_KEY] || {};
+  if (!state.enabled && !force) return { ok: false, reason: "collector_disabled" };
+  const index = Number.isFinite(Number(state.index)) ? Number(state.index) : 0;
+  const target = COLLECTOR_TARGETS[index % COLLECTOR_TARGETS.length];
+  const targetUrl = markCollectorUrl(target.url);
+  let windowId = cfg[COLLECTOR_WINDOW_KEY] || null;
+  let tabId = null;
+  if (windowId) {
+    try {
+      const win = await chrome.windows.get(windowId, { populate: true });
+      tabId = win?.tabs?.[0]?.id || null;
+    } catch {
+      windowId = null;
+    }
+  }
+  if (!windowId || !tabId) {
+    const win = await chrome.windows.create({
+      url: targetUrl,
+      type: "popup",
+      focused: false,
+      width: 360,
+      height: 300,
+      left: 0,
+      top: 0,
+    });
+    windowId = win.id;
+    tabId = win.tabs?.[0]?.id || null;
+  } else {
+    await chrome.tabs.update(tabId, { url: targetUrl, active: true });
+  }
+  const nextState = {
+    ...state,
+    enabled: true,
+    index: (index + 1) % COLLECTOR_TARGETS.length,
+    last_step_at: Date.now(),
+    last_target_key: target.key,
+    last_target_url: targetUrl,
+  };
+  await setStorage({ [COLLECTOR_STATE_KEY]: nextState, [COLLECTOR_WINDOW_KEY]: windowId });
+  return { ok: true, target: { ...target, url: targetUrl } };
+}
+
+function markCollectorUrl(url) {
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.set(COLLECTOR_QUERY.split("=")[0], COLLECTOR_QUERY.split("=")[1]);
+    return parsed.toString();
+  } catch {
+    const sep = String(url || "").includes("?") ? "&" : "?";
+    return String(url || "") + sep + COLLECTOR_QUERY;
+  }
+}
 
 async function handleCaptured(payload, sender) {
   // 注入店铺/账号上下文：从发送 tab 推断（mall_id 等需要从 cookie 或 userInfo 响应里拿，
@@ -298,7 +430,8 @@ function safeParseJson(text) {
 function inferMallFromKnownMalls(malls, site) {
   if (!Array.isArray(malls) || !site) return null;
   const sameSite = malls.filter((m) => m?.site === site);
-  return sameSite.length === 1 ? sameSite[0] : null;
+  if (!sameSite.length) return null;
+  return sameSite.sort((a, b) => Number(b?.lastSeen || 0) - Number(a?.lastSeen || 0))[0] || null;
 }
 
 async function rememberMalls(malls) {

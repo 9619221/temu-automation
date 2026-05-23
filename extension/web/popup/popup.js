@@ -29,6 +29,15 @@ function refresh() {
     else if (r.ok) { el.textContent = `✓ ${r.sent || 0} 条`; el.className = "value ok"; }
     else { el.textContent = r.reason || "失败"; el.className = "value err"; }
 
+    const collector = resp.collector || {};
+    const collectorEl = document.getElementById("collector");
+    if (collectorEl) {
+      collectorEl.textContent = collector.enabled
+        ? `运行中 ${collector.last_target_key || ""}`
+        : "未启动";
+      collectorEl.className = "value " + (collector.enabled ? "ok" : "");
+    }
+
     const malls = (resp.malls || []).filter((m) => m && m.mallId);
     document.getElementById("mallCount").textContent = malls.length;
     const listEl = document.getElementById("mallList");
@@ -54,6 +63,14 @@ document.getElementById("flushBtn").addEventListener("click", () => {
     btn.textContent = "立即上报";
     refresh();
   });
+});
+
+document.getElementById("startCollectorBtn")?.addEventListener("click", () => {
+  chrome.runtime.sendMessage({ type: "START_COLLECTOR" }, () => refresh());
+});
+
+document.getElementById("stopCollectorBtn")?.addEventListener("click", () => {
+  chrome.runtime.sendMessage({ type: "STOP_COLLECTOR" }, () => refresh());
 });
 
 document.getElementById("optBtn").addEventListener("click", () => {

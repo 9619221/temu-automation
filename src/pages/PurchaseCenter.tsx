@@ -89,17 +89,17 @@ const MINIMIZED_IMAGE_SEARCH_WIDTH = 132;
 const MINIMIZED_IMAGE_SEARCH_HEIGHT = 58;
 const MINIMIZED_IMAGE_SEARCH_MARGIN = 8;
 const PURCHASE_WORKBENCH_CACHE_KEY = "temu.purchase.workbench.cache.v3";
-const PURCHASE_ORDER_PAGE_SIZE = 20;
+const PURCHASE_ORDER_DEFAULT_PAGE_SIZE = 20;
 const FAST_PURCHASE_WORKBENCH_PARAMS = {
   limit: 2000,
-  purchaseOrderLimit: PURCHASE_ORDER_PAGE_SIZE,
+  purchaseOrderLimit: PURCHASE_ORDER_DEFAULT_PAGE_SIZE,
   includeRequestDetails: false,
   includeOptions: false,
   include1688Meta: false,
 };
 const FULL_PURCHASE_WORKBENCH_PARAMS = {
   limit: 2000,
-  purchaseOrderLimit: PURCHASE_ORDER_PAGE_SIZE,
+  purchaseOrderLimit: PURCHASE_ORDER_DEFAULT_PAGE_SIZE,
   includePurchaseOrders: false,
   includeRequestDetails: false,
   // 性能：跨海 client mode 下，options（skuOptions/supplierOptions/sku1688Sources 各 500 条带长字段）
@@ -376,6 +376,7 @@ interface PurchaseOrderPageMeta {
   total?: number;
   queue?: string;
   search?: string;
+  productCode?: string;
 }
 
 interface PurchaseOrderFilterDraft {
@@ -383,6 +384,7 @@ interface PurchaseOrderFilterDraft {
   dateRange: any;
   purchaser: string;
   accountId: string;
+  productCode: string;
 }
 
 interface PurchaseOrderFilters {
@@ -391,6 +393,7 @@ interface PurchaseOrderFilters {
   dateTo: string;
   purchaser: string;
   accountId: string;
+  productCode: string;
 }
 
 interface PurchaseWorkbench {
@@ -713,6 +716,7 @@ function toPurchaseOrderFilters(draft: PurchaseOrderFilterDraft): PurchaseOrderF
     dateTo: formatFilterDate(range[1]),
     purchaser: draft.purchaser.trim(),
     accountId: draft.accountId.trim(),
+    productCode: draft.productCode.trim(),
   };
 }
 
@@ -1780,8 +1784,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   const [imported1688Orders, setImported1688Orders] = useState<Imported1688OrderRow[]>([]);
   const [activeWorkArea, setActiveWorkArea] = useState<PurchaseWorkArea>(() => workArea || "sourcing");
   const [activeQueueKey, setActiveQueueKey] = useState<PurchaseQueueKey>("all");
+  const [purchaseOrderPageSize, setPurchaseOrderPageSize] = useState(() => (
+    Math.max(1, Number(initialWorkbench.purchaseOrderPage?.limit || PURCHASE_ORDER_DEFAULT_PAGE_SIZE))
+  ));
   const [purchaseOrderPage, setPurchaseOrderPage] = useState(() => (
-    Math.floor(Number(initialWorkbench.purchaseOrderPage?.offset || 0) / PURCHASE_ORDER_PAGE_SIZE) + 1
+    Math.floor(Number(initialWorkbench.purchaseOrderPage?.offset || 0) / Math.max(1, Number(initialWorkbench.purchaseOrderPage?.limit || PURCHASE_ORDER_DEFAULT_PAGE_SIZE))) + 1
   ));
   const [purchaseOrderTotal, setPurchaseOrderTotal] = useState(() => (
     Number(initialWorkbench.purchaseOrderPage?.total ?? initialWorkbench.summary?.purchaseOrderCount ?? initialWorkbench.purchaseOrders?.length ?? 0)
@@ -1794,6 +1801,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     dateRange: null,
     purchaser: "",
     accountId: "",
+    productCode: "",
   }));
   const [purchaseOrderFilters, setPurchaseOrderFilters] = useState<PurchaseOrderFilters>(() => ({
     poNo: activeWorkArea === "orders" ? initialFocusPo : "",
@@ -1801,6 +1809,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     dateTo: "",
     purchaser: "",
     accountId: "",
+    productCode: "",
   }));
   const [purchaseSearchText, setPurchaseSearchText] = useState(() => {
     return activeWorkArea === "sourcing" ? initialFocusPo : "";
@@ -2137,15 +2146,21 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   const purchaseSearchResultCount = filteredActiveRequestRows.length;
   const orderTablePagination = useMemo(() => ({
     current: purchaseOrderPage,
-    pageSize: PURCHASE_ORDER_PAGE_SIZE,
+    pageSize: purchaseOrderPageSize,
     total: activeOrderTotal,
-    showSizeChanger: false,
+    showSizeChanger: true,
+    pageSizeOptions: [20, 25, 50, 100, 200],
     showTotal: (total: number, range: [number, number]) => `显示 ${range[0]}-${range[1]} / ${total} 条`,
-    onChange: (nextPage: number) => {
+    onChange: (nextPage: number, nextPageSize: number) => {
       setSelectedPoIds([]);
+      if (nextPageSize !== purchaseOrderPageSize) {
+        setPurchaseOrderPageSize(nextPageSize);
+        setPurchaseOrderPage(1);
+        return;
+      }
       setPurchaseOrderPage(nextPage);
     },
-  }), [activeOrderTotal, purchaseOrderPage]);
+  }), [activeOrderTotal, purchaseOrderPage, purchaseOrderPageSize]);
 
   const applyPurchaseOrderFilters = useCallback(() => {
     setSelectedPoIds([]);
@@ -2154,7 +2169,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   }, [purchaseOrderFilterDraft]);
 
   const resetPurchaseOrderFilters = useCallback(() => {
-    const emptyDraft = { poNo: "", dateRange: null, purchaser: "", accountId: "" };
+    const emptyDraft = { poNo: "", dateRange: null, purchaser: "", accountId: "", productCode: "" };
     setSelectedPoIds([]);
     setPurchaseOrderPage(1);
     setPurchaseOrderFilterDraft(emptyDraft);
@@ -2283,15 +2298,16 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
 
   const buildPurchaseWorkbenchParams = useCallback(() => ({
     ...FAST_PURCHASE_WORKBENCH_PARAMS,
-    purchaseOrderLimit: PURCHASE_ORDER_PAGE_SIZE,
-    purchaseOrderOffset: Math.max(0, purchaseOrderPage - 1) * PURCHASE_ORDER_PAGE_SIZE,
+    purchaseOrderLimit: purchaseOrderPageSize,
+    purchaseOrderOffset: Math.max(0, purchaseOrderPage - 1) * purchaseOrderPageSize,
     purchaseOrderQueue: activeWorkArea === "orders" ? purchaseOrderQueueForWorkbench(activeQueueKey) : "all",
     purchaseOrderNo: activeWorkArea === "orders" ? purchaseOrderFilters.poNo : "",
     purchaseOrderDateFrom: activeWorkArea === "orders" ? purchaseOrderFilters.dateFrom : "",
     purchaseOrderDateTo: activeWorkArea === "orders" ? purchaseOrderFilters.dateTo : "",
     purchaseOrderPurchaser: activeWorkArea === "orders" ? purchaseOrderFilters.purchaser : "",
     purchaseOrderAccountId: activeWorkArea === "orders" ? purchaseOrderFilters.accountId : "",
-  }), [activeQueueKey, activeWorkArea, purchaseOrderFilters, purchaseOrderPage]);
+    purchaseOrderProductCode: activeWorkArea === "orders" ? purchaseOrderFilters.productCode : "",
+  }), [activeQueueKey, activeWorkArea, purchaseOrderFilters, purchaseOrderPage, purchaseOrderPageSize]);
 
   const loadSupplementalWorkbenchData = useCallback(async () => {
     if (!erp) return;
@@ -5331,6 +5347,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               }))}
               onChange={(value) => setPurchaseOrderFilterDraft((prev) => ({ ...prev, accountId: value || "" }))}
               style={{ width: 150 }}
+            />
+            <Input
+              allowClear
+              placeholder="商品编码"
+              value={purchaseOrderFilterDraft.productCode}
+              onChange={(event) => setPurchaseOrderFilterDraft((prev) => ({ ...prev, productCode: event.target.value }))}
+              onPressEnter={applyPurchaseOrderFilters}
+              style={{ width: 160 }}
             />
             <Button type="primary" icon={<SearchOutlined />} onClick={applyPurchaseOrderFilters}>
               查询

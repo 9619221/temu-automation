@@ -4056,6 +4056,7 @@ function getPurchaseWorkbench(params = {}) {
   const purchaseOrderDateTo = optionalString(params.purchaseOrderDateTo || params.purchase_order_date_to || params.poDateTo || params.po_date_to || params.dateTo || params.date_to);
   const purchaseOrderPurchaser = optionalString(params.purchaseOrderPurchaser || params.purchase_order_purchaser || params.purchaser || params.buyer || params.createdByName || params.created_by_name);
   const purchaseOrderAccountId = optionalString(params.purchaseOrderAccountId || params.purchase_order_account_id || params.poAccountId || params.po_account_id || params.storeId || params.store_id || params.shopId || params.shop_id);
+  const purchaseOrderProductCode = optionalString(params.purchaseOrderProductCode || params.purchase_order_product_code || params.poProductCode || params.po_product_code || params.productCode || params.product_code || params.skuCode || params.sku_code);
   const includePurchaseOrders = params.includePurchaseOrders !== false && params.include_purchase_orders !== false;
   const includeRequestDetails = params.includeRequestDetails !== false && params.include_request_details !== false;
   const includeOptions = params.includeOptions !== false && params.include_options !== false;
@@ -4108,6 +4109,7 @@ function getPurchaseWorkbench(params = {}) {
     po_date_to: purchaseOrderDateTo,
     po_purchaser_filter: purchaseOrderPurchaser ? `%${purchaseOrderPurchaser}%` : "",
     po_account_id: purchaseOrderAccountId,
+    po_product_code_filter: purchaseOrderProductCode ? `%${purchaseOrderProductCode}%` : "",
   };
   if (purchaseOrderSearch) {
     poConditions.push(`(
@@ -4140,6 +4142,18 @@ function getPurchaseWorkbench(params = {}) {
     poConditions.push(`(
       creator.name LIKE @po_purchaser_filter
       OR po.jst_purchaser_name LIKE @po_purchaser_filter
+    )`);
+  }
+  if (purchaseOrderProductCode) {
+    poConditions.push(`EXISTS (
+      SELECT 1
+      FROM erp_purchase_order_lines code_line
+      LEFT JOIN erp_skus code_sku ON code_sku.id = code_line.sku_id
+      WHERE code_line.po_id = po.id
+        AND (
+          code_sku.internal_sku_code LIKE @po_product_code_filter
+          OR code_line.sku_id LIKE @po_product_code_filter
+        )
     )`);
   }
   const poWhereSql = poConditions.length ? `WHERE ${poConditions.join(" AND ")}` : "";
@@ -4615,6 +4629,7 @@ function getPurchaseWorkbench(params = {}) {
       dateFrom: purchaseOrderDateFrom,
       dateTo: purchaseOrderDateTo,
       purchaser: purchaseOrderPurchaser,
+      productCode: purchaseOrderProductCode,
     },
     paymentApprovals,
     paymentQueue,

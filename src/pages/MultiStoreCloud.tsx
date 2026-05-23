@@ -19,6 +19,7 @@ import {
   fetchAgentHeartbeats,
   fetchCaptureEvents,
   fetchCloudStats,
+  fetchTemuActivity,
   fetchSkcList,
   fetchTemuSales,
   loadCloudConfig,
@@ -29,6 +30,8 @@ import {
   type CloudEndpointStat,
   type CloudMall,
   type SkcRow,
+  type TemuActivityRow,
+  type TemuActivitySummaryRow,
   type TemuSalesRow,
 } from "../utils/cloudClient";
 
@@ -45,6 +48,8 @@ interface CloudPageState {
   skcTotal: number;
   salesDate: string;
   salesRows: TemuSalesRow[];
+  activityRows: TemuActivityRow[];
+  activitySummary: TemuActivitySummaryRow[];
   error: string;
 }
 
@@ -73,6 +78,16 @@ function formatDateTime(ts?: number | string | null) {
 function formatMoney(cents?: number | null, currency?: string | null) {
   if (cents == null) return "-";
   return `${(cents / 100).toFixed(2)}${currency || ""}`;
+}
+
+function parseJsonObject(text?: string | null) {
+  if (!text) return {};
+  try {
+    const value = JSON.parse(text);
+    return value && typeof value === "object" ? value : {};
+  } catch {
+    return {};
+  }
 }
 
 function getLatestAgents(agents: AgentHeartbeat[]) {
@@ -157,6 +172,8 @@ export default function MultiStoreCloud() {
     skcTotal: 0,
     salesDate: getLocalDate(),
     salesRows: [],
+    activityRows: [],
+    activitySummary: [],
     error: "",
   });
 
@@ -175,17 +192,20 @@ export default function MultiStoreCloud() {
           skcRows: [],
           skcTotal: 0,
           salesRows: [],
+          activityRows: [],
+          activitySummary: [],
           error: "",
         }));
         return true;
       }
 
-      const [stats, agents, events, skc, sales] = await Promise.all([
+      const [stats, agents, events, skc, sales, activity] = await Promise.all([
         fetchCloudStats(cfg),
         fetchAgentHeartbeats(cfg, { limit: 200 }),
         fetchCaptureEvents(cfg, { limit: 160 }),
         fetchSkcList(cfg, { mall_id: mallId, q: query.trim() || undefined, limit: 200 }),
         fetchTemuSales(cfg, { date: salesDate, mall_id: mallId }),
+        fetchTemuActivity(cfg, { date: salesDate, mall_id: mallId, limit: 300 }),
       ]);
 
       setState({
@@ -198,6 +218,8 @@ export default function MultiStoreCloud() {
         skcTotal: skc.total || 0,
         salesDate: sales.date,
         salesRows: sales.rows || [],
+        activityRows: activity.rows || [],
+        activitySummary: activity.summary || [],
         error: "",
       });
       return true;
@@ -351,6 +373,45 @@ export default function MultiStoreCloud() {
     { title: "更新", dataIndex: "last_updated_at", width: 180, render: formatDateTime },
   ];
 
+  const activityColumns: ColumnsType<TemuActivityRow> = [
+    {
+      title: "活动",
+      dataIndex: "activity_title",
+      width: 320,
+      render: (_value, row) => (
+        <Space direction="vertical" size={2}>
+          <Text strong className="app-line-clamp-2">{row.activity_title || row.activity_id || row.row_key}</Text>
+          <Space size={4} wrap>
+            {row.activity_kind ? <Tag color="purple">{row.activity_kind}</Tag> : null}
+            {row.activity_status ? <Tag>{row.activity_status}</Tag> : null}
+            {row.activity_id ? <Text type="secondary">{row.activity_id}</Text> : null}
+          </Space>
+        </Space>
+      ),
+    },
+    { title: "店铺", dataIndex: "mall_id", width: 140, render: (value) => value || "-" },
+    { title: "SKC", dataIndex: "skc_id", width: 130, render: (value) => value || "-" },
+    { title: "SPU", dataIndex: "product_id", width: 130, render: (value) => value || "-" },
+    {
+      title: "指标",
+      dataIndex: "metric_json",
+      width: 220,
+      render: (value) => {
+        const m: any = parseJsonObject(value);
+        const parts = [
+          m.payAmount != null ? `支付 ${m.payAmount}` : "",
+          m.orderCount != null ? `订单 ${m.orderCount}` : "",
+          m.goodsCount != null ? `商品 ${m.goodsCount}` : "",
+          m.cartCount != null ? `加购 ${m.cartCount}` : "",
+        ].filter(Boolean);
+        return parts.length ? parts.join(" / ") : "-";
+      },
+    },
+    { title: "开始", dataIndex: "start_at", width: 160, render: (value) => value || "-" },
+    { title: "结束", dataIndex: "end_at", width: 160, render: (value) => value || "-" },
+    { title: "更新", dataIndex: "last_updated_at", width: 180, render: formatDateTime },
+  ];
+
   const handleRefresh = async () => {
     const ok = await refresh(false);
     if (ok) message.success("云端采集数据已刷新");
@@ -456,6 +517,7 @@ export default function MultiStoreCloud() {
             <StatCard compact title="店铺" value={storeOptions.length} icon={<ShopOutlined />} color="blue" footer={activeStore ? activeStore.label : "请选择店铺"} />
             <StatCard compact title="商品 SKC" value={state.skcTotal} icon={<DatabaseOutlined />} color="purple" footer={`当前显示 ${state.skcRows.length} 条`} />
             <StatCard compact title="销售快照" value={state.salesRows.length} icon={<CloudSyncOutlined />} color="brand" footer={state.salesDate || salesDate} />
+            <StatCard compact title="活动快照" value={state.activityRows.length} icon={<CloudSyncOutlined />} color="purple" footer={state.activitySummary.map((row) => `${row.activity_kind || "other"} ${row.count}`).slice(0, 2).join(" / ") || state.salesDate || salesDate} />
             <StatCard compact title="上报事件" value={state.stats?.total ?? 0} icon={<ApiOutlined />} color="neutral" footer={`24小时 ${state.stats?.last24h ?? 0} 条`} />
             <StatCard compact title="在线设备" value={onlineAgents.length} icon={<ChromeOutlined />} color="success" footer={`总设备 ${latestAgents.length}`} />
             <StatCard compact title="待上报队列" value={queueDepth} icon={<ApiOutlined />} color={queueDepth > 0 ? "danger" : "neutral"} footer={queueDepth > 0 ? "等待扩展 flush" : "队列清空"} />
@@ -539,6 +601,22 @@ export default function MultiStoreCloud() {
                       pagination={{ pageSize: 10 }}
                       scroll={{ x: 1280 }}
                       locale={{ emptyText: <Empty description={`${state.salesDate} 暂无销售快照`} /> }}
+                    />
+                  ),
+                },
+                {
+                  key: "activity",
+                  label: `活动快照 ${state.activityRows.length}`,
+                  children: (
+                    <Table
+                      rowKey={(row) => `${row.stat_date}-${row.mall_id || "-"}-${row.row_key}`}
+                      size="small"
+                      loading={state.loading}
+                      columns={activityColumns}
+                      dataSource={state.activityRows}
+                      pagination={{ pageSize: 10 }}
+                      scroll={{ x: 1420 }}
+                      locale={{ emptyText: <Empty description={`${state.salesDate} 暂无活动快照`} /> }}
                     />
                   ),
                 },

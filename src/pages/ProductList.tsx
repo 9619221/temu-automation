@@ -130,6 +130,7 @@ interface ProductItem {
   skuId: string;
   skuName: string;
   imageUrl: string;
+  mallId: string;
   siteLabel: string;
   productType: string;
   sourceType: string;
@@ -394,6 +395,43 @@ function cloudNumber(value: unknown, fallback = 0) {
   return Number.isFinite(num) ? num : fallback;
 }
 
+function optionalNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function formatOptionalNumber(value: unknown) {
+  const num = optionalNumber(value);
+  return num === null ? "-" : num;
+}
+
+function cloudProductKey(mallId?: string | null, skcId?: string | null) {
+  return `${String(mallId || "")}|${String(skcId || "")}`;
+}
+
+function cloudKeyFromSkc(row?: SkcRow | null) {
+  return cloudProductKey(row?.mall_id, row?.skc_id);
+}
+
+function cloudKeyFromSales(row?: TemuSalesRow | null) {
+  return cloudProductKey(row?.mall_supplier_id, row?.skc_id);
+}
+
+function cloudKeyFromProduct(product?: Partial<ProductItem> | null) {
+  return cloudProductKey(product?.mallId || product?.cloudSales?.mall_supplier_id || product?.cloudSkc?.mall_id, product?.skcId);
+}
+
+const productOrderCollator = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
+
+function compareCloudProductOrder(a: Partial<ProductItem>, b: Partial<ProductItem>) {
+  const mallCompare = productOrderCollator.compare(String(a.mallId || ""), String(b.mallId || ""));
+  if (mallCompare !== 0) return mallCompare;
+  const skcCompare = productOrderCollator.compare(String(a.skcId || ""), String(b.skcId || ""));
+  if (skcCompare !== 0) return skcCompare;
+  return productOrderCollator.compare(String(a.title || ""), String(b.title || ""));
+}
+
 function cloudMoney(cents?: number | null) {
   if (cents === null || cents === undefined) return "";
   return (Number(cents) / 100).toFixed(2);
@@ -459,19 +497,19 @@ async function loadCloudProductBundle(): Promise<CloudProductBundle> {
     const diagnosticSkcIds = new Set(
       rawSkcRows
         .filter((row) => isDiagnosticCloudProduct(row, null))
-        .map((row) => String(row.skc_id || "")),
+        .map((row) => cloudKeyFromSkc(row)),
     );
     const skcRows = rawSkcRows.filter((row) => !isDiagnosticCloudProduct(row, null));
     const salesRows = (Array.isArray(sales?.rows) ? sales.rows : []).filter((row) => (
-      !isDiagnosticCloudProduct(null, row) && !diagnosticSkcIds.has(String(row.skc_id || ""))
+      !isDiagnosticCloudProduct(null, row) && !diagnosticSkcIds.has(cloudKeyFromSales(row))
     ));
     const skcMap = new Map<string, SkcRow>();
     const salesMap = new Map<string, TemuSalesRow>();
     for (const row of skcRows) {
-      if (row.skc_id) skcMap.set(String(row.skc_id), row);
+      if (row.skc_id) skcMap.set(cloudKeyFromSkc(row), row);
     }
     for (const row of salesRows) {
-      if (row.skc_id) salesMap.set(String(row.skc_id), row);
+      if (row.skc_id) salesMap.set(cloudKeyFromSales(row), row);
     }
     return {
       skcRows,
@@ -526,7 +564,7 @@ function buildCloudSalesRaw(previousRaw: any, skc: SkcRow | undefined, sales: Te
   } as any;
   const declaredPrice = firstCloudValue<number>(sales?.declared_price_cents, skc?.declared_price_cents);
   const currency = firstCloudValue<string>(sales?.price_currency, skc?.price_currency, baseRaw.currencyType) || "CNY";
-  const warehouseStock = firstCloudValue<number>(sales?.warehouse_stock, skc?.stock_available) ?? 0;
+  const warehouseStock = firstCloudValue<number>(sales?.warehouse_stock);
   const displayedSkcId = sales?.flow_only
     ? firstCloudValue<string>(baseRaw.productSkcId, baseRaw.skcId, skc?.skc_id)
     : firstCloudValue<string>(sales?.skc_id, skc?.skc_id, baseRaw.productSkcId);
@@ -536,17 +574,17 @@ function buildCloudSalesRaw(previousRaw: any, skc: SkcRow | undefined, sales: Te
     skuExtCode: sales?.sku_ext_code || baseRaw.skcExtCode || "",
     supplierPrice: declaredPrice ?? undefined,
     currencyType: currency,
-    todaySaleVolume: sales?.today_sales ?? 0,
-    lastSevenDaysSaleVolume: sales?.last7d_sales ?? 0,
-    lastThirtyDaysSaleVolume: sales?.last30d_sales ?? 0,
+    todaySaleVolume: sales?.today_sales ?? null,
+    lastSevenDaysSaleVolume: sales?.last7d_sales ?? null,
+    lastThirtyDaysSaleVolume: sales?.last30d_sales ?? null,
     sellerWhStock: warehouseStock,
     inventoryNumInfo: {
-      expectedOccupiedInventoryNum: sales?.occupy_stock ?? 0,
-      unavailableWarehouseInventoryNum: sales?.unavailable_stock ?? 0,
-      waitReceiveNum: 0,
+      expectedOccupiedInventoryNum: sales?.occupy_stock ?? null,
+      unavailableWarehouseInventoryNum: sales?.unavailable_stock ?? null,
+      waitReceiveNum: null,
     },
-    lackQuantity: 0,
-    adviceQuantity: sales?.advice_qty ?? 0,
+    lackQuantity: null,
+    adviceQuantity: sales?.advice_qty ?? null,
   };
   const skuTrendMap = sales?.sku_sales_trends && typeof sales.sku_sales_trends === "object"
     ? sales.sku_sales_trends
@@ -594,17 +632,17 @@ function buildCloudSalesRaw(previousRaw: any, skc: SkcRow | undefined, sales: Te
     skuQuantityDetailList: rawSkuList.length > 0 ? rawSkuList : [cloudSku],
     skuQuantityTotalInfo: {
       ...rawTotalInfo,
-      todaySaleVolume: sales?.today_sales ?? rawTotalInfo.todaySaleVolume ?? 0,
-      lastSevenDaysSaleVolume: sales?.last7d_sales ?? rawTotalInfo.lastSevenDaysSaleVolume ?? 0,
-      lastThirtyDaysSaleVolume: sales?.last30d_sales ?? rawTotalInfo.lastThirtyDaysSaleVolume ?? 0,
-      totalSaleVolume: rawTotalInfo.totalSaleVolume ?? firstCloudValue<number>(sales?.total_sales, skc?.sales_total) ?? 0,
-      adviceQuantity: rawTotalInfo.adviceQuantity ?? sales?.advice_qty ?? 0,
+      todaySaleVolume: sales?.today_sales ?? rawTotalInfo.todaySaleVolume ?? null,
+      lastSevenDaysSaleVolume: sales?.last7d_sales ?? rawTotalInfo.lastSevenDaysSaleVolume ?? null,
+      lastThirtyDaysSaleVolume: sales?.last30d_sales ?? rawTotalInfo.lastThirtyDaysSaleVolume ?? null,
+      totalSaleVolume: rawTotalInfo.totalSaleVolume ?? sales?.total_sales ?? null,
+      adviceQuantity: rawTotalInfo.adviceQuantity ?? sales?.advice_qty ?? null,
       availableSaleDays: rawTotalInfo.availableSaleDays ?? sales?.available_sale_days ?? undefined,
       inventoryNumInfo: {
         ...rawInventoryInfo,
-        expectedOccupiedInventoryNum: rawInventoryInfo.expectedOccupiedInventoryNum ?? sales?.occupy_stock ?? 0,
-        unavailableWarehouseInventoryNum: rawInventoryInfo.unavailableWarehouseInventoryNum ?? sales?.unavailable_stock ?? 0,
-        warehouseInventoryNum: rawInventoryInfo.warehouseInventoryNum ?? warehouseStock,
+        expectedOccupiedInventoryNum: rawInventoryInfo.expectedOccupiedInventoryNum ?? sales?.occupy_stock ?? null,
+        unavailableWarehouseInventoryNum: rawInventoryInfo.unavailableWarehouseInventoryNum ?? sales?.unavailable_stock ?? null,
+        warehouseInventoryNum: rawInventoryInfo.warehouseInventoryNum ?? warehouseStock ?? null,
       },
     },
   };
@@ -625,6 +663,7 @@ function applyCloudProduct(product: ProductItem, skc: SkcRow | undefined, sales:
 
   product.cloudSkc = skc;
   product.cloudSales = sales;
+  product.mallId = firstCloudValue<string>(sales?.mall_supplier_id, skc?.mall_id, raw.supplierId) || product.mallId;
   product.title = title || product.title;
   product.category = category || product.category;
   product.categories = category || product.categories;
@@ -646,8 +685,8 @@ function applyCloudProduct(product: ProductItem, skc: SkcRow | undefined, sales:
   product.todaySales = cloudNumber(firstCloudValue<number>(sales?.today_sales, raw.todaySales, raw.skuQuantityTotalInfo?.todaySaleVolume), product.todaySales);
   product.last7DaysSales = cloudNumber(firstCloudValue<number>(sales?.last7d_sales, raw.last7DaysSales, raw.skuQuantityTotalInfo?.lastSevenDaysSaleVolume), product.last7DaysSales);
   product.last30DaysSales = cloudNumber(firstCloudValue<number>(sales?.last30d_sales, raw.last30DaysSales, raw.skuQuantityTotalInfo?.lastThirtyDaysSaleVolume), product.last30DaysSales);
-  product.totalSales = cloudNumber(firstCloudValue<number>(sales?.total_sales, skc?.sales_total, raw.totalSales, raw.skuQuantityTotalInfo?.totalSaleVolume), product.totalSales);
-  product.warehouseStock = cloudNumber(firstCloudValue<number>(sales?.warehouse_stock, skc?.stock_available, raw.warehouseStock, raw.skuQuantityTotalInfo?.inventoryNumInfo?.warehouseInventoryNum), product.warehouseStock);
+  product.totalSales = cloudNumber(firstCloudValue<number>(sales?.total_sales, raw.totalSales, raw.skuQuantityTotalInfo?.totalSaleVolume), product.totalSales);
+  product.warehouseStock = cloudNumber(firstCloudValue<number>(sales?.warehouse_stock, raw.warehouseStock, raw.skuQuantityTotalInfo?.inventoryNumInfo?.warehouseInventoryNum), product.warehouseStock);
   product.occupyStock = cloudNumber(firstCloudValue<number>(sales?.occupy_stock, raw.occupyStock, raw.skuQuantityTotalInfo?.inventoryNumInfo?.expectedOccupiedInventoryNum), product.occupyStock);
   product.unavailableStock = cloudNumber(firstCloudValue<number>(sales?.unavailable_stock, raw.unavailableStock, raw.skuQuantityTotalInfo?.inventoryNumInfo?.unavailableWarehouseInventoryNum), product.unavailableStock);
   product.lackQuantity = cloudNumber(firstCloudValue<number>(raw.lackQuantity, raw.skuQuantityTotalInfo?.lackQuantity), product.lackQuantity);
@@ -699,6 +738,7 @@ function createProductItem(source: Partial<ProductItem> = {}): ProductItem {
     skuId: source.skuId || "",
     skuName: source.skuName || "",
     imageUrl: normalizeImageUrl(source.imageUrl) || skuSummaries[0]?.thumbUrl || "",
+    mallId: source.mallId || "",
     siteLabel: source.siteLabel || "",
     productType: source.productType || "",
     sourceType: source.sourceType || "",
@@ -752,18 +792,20 @@ function createProductItem(source: Partial<ProductItem> = {}): ProductItem {
 function buildCloudProductRows(bundle: CloudProductBundle) {
   const ids = new Set<string>();
   for (const row of bundle.skcRows) {
-    if (row.skc_id) ids.add(String(row.skc_id));
+    if (row.skc_id && row.mall_id) ids.add(cloudKeyFromSkc(row));
   }
   for (const row of bundle.salesRows) {
-    if (row.skc_id) ids.add(String(row.skc_id));
+    if (row.skc_id && row.mall_supplier_id) ids.add(cloudKeyFromSales(row));
   }
 
   const rows: ProductItem[] = [];
-  for (const skcId of ids) {
-    const skc = bundle.skcMap.get(skcId);
-    const sales = bundle.salesMap.get(skcId);
+  for (const rowKey of ids) {
+    const skc = bundle.skcMap.get(rowKey);
+    const sales = bundle.salesMap.get(rowKey);
+    const skcId = sales?.skc_id || skc?.skc_id || "";
     const product = createProductItem({
       skcId,
+      mallId: sales?.mall_supplier_id || skc?.mall_id || "",
       title: sales?.title || skc?.title || "",
       category: sales?.category_name || skc?.category_name || "",
       categories: sales?.category_name || skc?.category_name || "",
@@ -776,11 +818,7 @@ function buildCloudProductRows(bundle: CloudProductBundle) {
     rows.push(product);
   }
 
-  return rows.sort((a, b) => {
-    if ((b.last30DaysSales || 0) !== (a.last30DaysSales || 0)) return (b.last30DaysSales || 0) - (a.last30DaysSales || 0);
-    if ((b.totalSales || 0) !== (a.totalSales || 0)) return (b.totalSales || 0) - (a.totalSales || 0);
-    return (a.title || "").localeCompare(b.title || "", "zh-CN");
-  });
+  return rows.sort(compareCloudProductOrder);
 }
 
 function buildCloudSalesSummary(products: ProductItem[]) {
@@ -2002,6 +2040,7 @@ export default function ProductList() {
           skuId: source.skuId || "",
           skuName: source.skuName || "",
           imageUrl: normalizeImageUrl(source.imageUrl) || skuSummaries[0]?.thumbUrl || "",
+          mallId: source.mallId || "",
           siteLabel: source.siteLabel || "",
           productType: source.productType || "",
           sourceType: source.sourceType || "",
@@ -2288,11 +2327,7 @@ export default function ProductList() {
         mergedProducts.push(item);
       }
 
-      mergedProducts.sort((a, b) => {
-        if ((b.totalSales || 0) !== (a.totalSales || 0)) return (b.totalSales || 0) - (a.totalSales || 0);
-        if ((b.last7DaysSales || 0) !== (a.last7DaysSales || 0)) return (b.last7DaysSales || 0) - (a.last7DaysSales || 0);
-        return (a.title || "").localeCompare(b.title || "", "zh-CN");
-      });
+      mergedProducts.sort(compareCloudProductOrder);
 
       // 把云舵 listOverall 数据按 skcId 注入到每个 product 上
       if (yunduSkcMap.size > 0) {
@@ -2484,7 +2519,11 @@ export default function ProductList() {
     ? [`云端商品数据读取失败：${cloudProductMeta.error}`]
     : [];
 
-  const numColor = (val: number, base = "#389e0d") => ({ color: val > 0 ? base : "#bfbfbf", fontWeight: val > 0 ? 600 : 400 });
+  const metricColor = (value: unknown, base = "#389e0d", zeroColor = "#bfbfbf", positiveWeight = 600) => {
+    const num = optionalNumber(value);
+    if (num === null) return { color: "#bfbfbf", fontWeight: 400 };
+    return { color: num > 0 ? base : zeroColor, fontWeight: num > 0 ? positiveWeight : 400 };
+  };
 
   // 一个商品一行；每行内部把 SKU 列表作为 _skuRows 保留，供列渲染时纵向堆叠。
   // 第一条永远是 "合计" 汇总行。
@@ -2493,37 +2532,49 @@ export default function ProductList() {
       const skuList: any[] = Array.isArray(product.salesRaw?.skuQuantityDetailList)
         ? product.salesRaw.skuQuantityDetailList
         : [];
-      const groupKey = product.skcId || product.goodsId || product.spuId || product.title || `p${productIdx}`;
+      const groupKey = [product.mallId, product.skcId || product.goodsId || product.spuId || product.title || `p${productIdx}`].filter(Boolean).join("|");
+
+      const totalInfo = product.salesRaw?.skuQuantityTotalInfo || {};
+      const inventoryInfo = totalInfo?.inventoryNumInfo || {};
+      const productToday = optionalNumber(product.cloudSales?.today_sales ?? totalInfo.todaySaleVolume);
+      const product7d = optionalNumber(product.cloudSales?.last7d_sales ?? totalInfo.lastSevenDaysSaleVolume);
+      const product30d = optionalNumber(product.cloudSales?.last30d_sales ?? totalInfo.lastThirtyDaysSaleVolume);
+      const productStock = optionalNumber(product.cloudSales?.warehouse_stock ?? inventoryInfo.warehouseInventoryNum);
+      const productOccupy = optionalNumber(product.cloudSales?.occupy_stock ?? inventoryInfo.expectedOccupiedInventoryNum);
+      const productUnavail = optionalNumber(product.cloudSales?.unavailable_stock ?? inventoryInfo.unavailableWarehouseInventoryNum);
+      const productInTransit = optionalNumber(inventoryInfo.waitReceiveNum);
+      const productLack = optionalNumber(totalInfo.lackQuantity);
+      const productAdvice = optionalNumber(product.cloudSales?.advice_qty ?? totalInfo.adviceQuantity);
 
       const isSingle = skuList.length === 1;
       const realSkus = skuList.length > 0
         ? skuList.map((sku: any, idx: number) => {
-            const skuToday = Number(sku?.todaySaleVolume || 0);
-            const sku7d = Number(sku?.lastSevenDaysSaleVolume || 0);
-            const sku30d = Number(sku?.lastThirtyDaysSaleVolume || 0);
-            const skuStock = Number(sku?.sellerWhStock || 0);
-            const skuOccupy = Number(sku?.inventoryNumInfo?.expectedOccupiedInventoryNum || 0);
-            const skuUnavail = Number(sku?.inventoryNumInfo?.unavailableWarehouseInventoryNum || 0);
-            const skuInTransit = Number(sku?.inventoryNumInfo?.waitReceiveNum || 0);
-            const skuLack = Number(sku?.lackQuantity || 0);
-            const skuAdvice = Number(sku?.adviceQuantity || 0);
+            const skuToday = optionalNumber(sku?.todaySaleVolume);
+            const sku7d = optionalNumber(sku?.lastSevenDaysSaleVolume);
+            const sku30d = optionalNumber(sku?.lastThirtyDaysSaleVolume);
+            const skuStock = optionalNumber(sku?.sellerWhStock);
+            const skuOccupy = optionalNumber(sku?.inventoryNumInfo?.expectedOccupiedInventoryNum);
+            const skuUnavail = optionalNumber(sku?.inventoryNumInfo?.unavailableWarehouseInventoryNum);
+            const skuInTransit = optionalNumber(sku?.inventoryNumInfo?.waitReceiveNum);
+            const skuLack = optionalNumber(sku?.lackQuantity);
+            const skuAdvice = optionalNumber(sku?.adviceQuantity);
             // 单 SKU 商品：若 SKU 自身无数据则用商品级兜底
-            const fb = (skuVal: number, prodVal: any) => (isSingle && !skuVal ? Number(prodVal || 0) : skuVal);
+            const fb = (skuVal: number | null, prodVal: any) => (isSingle && skuVal === null ? optionalNumber(prodVal) : skuVal);
             return {
               _skuKey: `${groupKey}-sku-${sku?.productSkuId || idx}`,
               skuId: sku?.productSkuId || "",
               skuSpec: sku?.className || "",
               skuExtCode: sku?.skuExtCode || "",
               skuPrice: formatSkuSupplierPrice(sku?.supplierPrice, product.price),
-              today: fb(skuToday, product.todaySales),
-              d7: fb(sku7d, product.last7DaysSales),
-              d30: fb(sku30d, product.last30DaysSales),
-              stock: fb(skuStock, product.warehouseStock),
-              occupy: fb(skuOccupy, product.occupyStock),
-              unavail: fb(skuUnavail, product.unavailableStock),
-              inTransit: skuInTransit,
-              lack: fb(skuLack, product.lackQuantity),
-              advice: skuAdvice,
+              today: fb(skuToday, productToday),
+              d7: fb(sku7d, product7d),
+              d30: fb(sku30d, product30d),
+              stock: fb(skuStock, productStock),
+              occupy: fb(skuOccupy, productOccupy),
+              unavail: fb(skuUnavail, productUnavail),
+              inTransit: fb(skuInTransit, productInTransit),
+              lack: fb(skuLack, productLack),
+              advice: fb(skuAdvice, productAdvice),
             };
           })
         : [{
@@ -2532,22 +2583,31 @@ export default function ProductList() {
             skuSpec: product.skuName || "",
             skuExtCode: product.extCode || "",
             skuPrice: product.price,
-            today: Number(product.todaySales || 0),
-            d7: Number(product.last7DaysSales || 0),
-            d30: Number(product.last30DaysSales || 0),
-            stock: Number(product.warehouseStock || 0),
-            occupy: Number(product.occupyStock || 0),
-            unavail: Number(product.unavailableStock || 0),
-            inTransit: 0,
-            lack: Number(product.lackQuantity || 0),
-            advice: 0,
+            today: productToday,
+            d7: product7d,
+            d30: product30d,
+            stock: productStock,
+            occupy: productOccupy,
+            unavail: productUnavail,
+            inTransit: productInTransit,
+            lack: productLack,
+            advice: productAdvice,
           }];
 
       // 汇总行：优先用 SKU 加总，若 SKU 里该字段全为 0 则回退到商品级总值
-      const sum = (pick: (s: any) => number) => realSkus.reduce((acc, s) => acc + (Number(pick(s)) || 0), 0);
-      const sumOrFallback = (pick: (s: any) => number, fallback: number) => {
+      const sum = (pick: (s: any) => unknown) => {
+        let hasValue = false;
+        const total = realSkus.reduce((acc, s) => {
+          const value = optionalNumber(pick(s));
+          if (value === null) return acc;
+          hasValue = true;
+          return acc + value;
+        }, 0);
+        return hasValue ? total : null;
+      };
+      const sumOrFallback = (pick: (s: any) => unknown, fallback: number | null) => {
         const v = sum(pick);
-        return v > 0 ? v : Number(fallback || 0);
+        return v !== null ? v : fallback;
       };
       const totalRow = {
         _skuKey: `${groupKey}-total`,
@@ -2556,15 +2616,15 @@ export default function ProductList() {
         skuSpec: "合计",
         skuExtCode: "",
         skuPrice: "",
-        today: sumOrFallback((s) => s.today, product.todaySales || 0),
-        d7: sumOrFallback((s) => s.d7, product.last7DaysSales || 0),
-        d30: sumOrFallback((s) => s.d30, product.last30DaysSales || 0),
-        stock: sumOrFallback((s) => s.stock, product.warehouseStock || 0),
-        occupy: sumOrFallback((s) => s.occupy, product.occupyStock || 0),
-        unavail: sumOrFallback((s) => s.unavail, product.unavailableStock || 0),
-        inTransit: sum((s) => s.inTransit),
-        lack: sumOrFallback((s) => s.lack, product.lackQuantity || 0),
-        advice: sum((s) => s.advice),
+        today: sumOrFallback((s) => s.today, productToday),
+        d7: sumOrFallback((s) => s.d7, product7d),
+        d30: sumOrFallback((s) => s.d30, product30d),
+        stock: sumOrFallback((s) => s.stock, productStock),
+        occupy: sumOrFallback((s) => s.occupy, productOccupy),
+        unavail: sumOrFallback((s) => s.unavail, productUnavail),
+        inTransit: sumOrFallback((s) => s.inTransit, productInTransit),
+        lack: sumOrFallback((s) => s.lack, productLack),
+        advice: sumOrFallback((s) => s.advice, productAdvice),
       };
 
       const skuRows = [...realSkus, totalRow];
@@ -2632,6 +2692,7 @@ export default function ProductList() {
               </div>
             )}
             {record.skcId && <div style={{ color: "#8c8c8c" }}>SKC：<span style={{ fontFamily: "monospace" }}>{record.skcId}</span></div>}
+            {record.mallId && <div style={{ color: "#8c8c8c" }}>店铺：<span style={{ fontFamily: "monospace" }}>{record.mallId}</span></div>}
             {productDays != null && productDays !== "" && <div style={{ color: "#8c8c8c" }}>加入站点时长：{productDays}天</div>}
             {record.spuId && <div style={{ color: "#8c8c8c" }}>SPU：<span style={{ fontFamily: "monospace" }}>{record.spuId}</span></div>}
             {seasonTag && <div style={{ color: "#8c8c8c" }}>节日/季节标签：{seasonTag}</div>}
@@ -2757,7 +2818,7 @@ export default function ProductList() {
         <div className="sku-stack">
           {(record._skuRows || []).map((s: any) => (
             <div className={`sku-cell${s._isTotal ? " sku-cell-total" : ""}`} key={s._skuKey} style={{ justifyContent: "center" }}>
-              <span style={{ fontSize: 15, ...numColor(s.today) }}>{s.today}</span>
+              <span style={{ fontSize: 15, ...metricColor(s.today) }}>{formatOptionalNumber(s.today)}</span>
             </div>
           ))}
         </div>
@@ -2773,7 +2834,7 @@ export default function ProductList() {
         <div className="sku-stack">
           {(record._skuRows || []).map((s: any) => (
             <div className={`sku-cell${s._isTotal ? " sku-cell-total" : ""}`} key={s._skuKey} style={{ justifyContent: "center" }}>
-              <span style={{ fontSize: 15, ...numColor(s.d7) }}>{s.d7}</span>
+              <span style={{ fontSize: 15, ...metricColor(s.d7) }}>{formatOptionalNumber(s.d7)}</span>
             </div>
           ))}
         </div>
@@ -2790,7 +2851,7 @@ export default function ProductList() {
         <div className="sku-stack">
           {(record._skuRows || []).map((s: any) => (
             <div className={`sku-cell${s._isTotal ? " sku-cell-total" : ""}`} key={s._skuKey} style={{ justifyContent: "center" }}>
-              <span style={{ fontSize: 15, ...numColor(s.d30) }}>{s.d30}</span>
+              <span style={{ fontSize: 15, ...metricColor(s.d30) }}>{formatOptionalNumber(s.d30)}</span>
             </div>
           ))}
         </div>
@@ -2803,7 +2864,10 @@ export default function ProductList() {
       width: 110,
       align: "center",
       sorter: (a: any, b: any) => (a.totalSales || 0) - (b.totalSales || 0),
-      render: (val: number) => <span style={{ fontSize: 18, fontWeight: 700, color: (val || 0) > 0 ? "#1677ff" : "#bfbfbf" }}>{val || 0}</span>,
+      render: (_val: number, record: any) => {
+        const value = optionalNumber(record.cloudSales?.total_sales ?? record.salesRaw?.skuQuantityTotalInfo?.totalSaleVolume);
+        return <span style={{ fontSize: 18, fontWeight: value !== null && value > 0 ? 700 : 400, color: value !== null && value > 0 ? "#1677ff" : "#bfbfbf" }}>{formatOptionalNumber(value)}</span>;
+      },
     },
     {
       title: "仓内可用库存",
@@ -2815,7 +2879,7 @@ export default function ProductList() {
         <div className="sku-stack">
           {(record._skuRows || []).map((s: any) => (
             <div className={`sku-cell${s._isTotal ? " sku-cell-total" : ""}`} key={s._skuKey} style={{ justifyContent: "center" }}>
-              <span style={{ fontSize: 15, color: s.stock > 0 ? "#1677ff" : "#ff4d4f", fontWeight: 600 }}>{s.stock}</span>
+              <span style={{ fontSize: 15, ...metricColor(s.stock, "#1677ff", "#ff4d4f") }}>{formatOptionalNumber(s.stock)}</span>
             </div>
           ))}
         </div>
@@ -2830,7 +2894,7 @@ export default function ProductList() {
         <div className="sku-stack">
           {(record._skuRows || []).map((s: any) => (
             <div className={`sku-cell${s._isTotal ? " sku-cell-total" : ""}`} key={s._skuKey} style={{ justifyContent: "center" }}>
-              <span style={{ fontSize: 15, color: s.occupy > 0 ? "#08979c" : "#bfbfbf", fontWeight: s.occupy > 0 ? 600 : 400 }}>{s.occupy}</span>
+              <span style={{ fontSize: 15, ...metricColor(s.occupy, "#08979c") }}>{formatOptionalNumber(s.occupy)}</span>
             </div>
           ))}
         </div>
@@ -2845,7 +2909,7 @@ export default function ProductList() {
         <div className="sku-stack">
           {(record._skuRows || []).map((s: any) => (
             <div className={`sku-cell${s._isTotal ? " sku-cell-total" : ""}`} key={s._skuKey} style={{ justifyContent: "center" }}>
-              <span style={{ fontSize: 15, color: s.unavail > 0 ? "#d46b08" : "#bfbfbf", fontWeight: s.unavail > 0 ? 600 : 400 }}>{s.unavail}</span>
+              <span style={{ fontSize: 15, ...metricColor(s.unavail, "#d46b08") }}>{formatOptionalNumber(s.unavail)}</span>
             </div>
           ))}
         </div>
@@ -2860,7 +2924,7 @@ export default function ProductList() {
         <div className="sku-stack">
           {(record._skuRows || []).map((s: any) => (
             <div className={`sku-cell${s._isTotal ? " sku-cell-total" : ""}`} key={s._skuKey} style={{ justifyContent: "center" }}>
-              <span style={{ fontSize: 15, color: s.inTransit > 0 ? "#1677ff" : "#bfbfbf", fontWeight: s.inTransit > 0 ? 600 : 400 }}>{s.inTransit}</span>
+              <span style={{ fontSize: 15, ...metricColor(s.inTransit, "#1677ff") }}>{formatOptionalNumber(s.inTransit)}</span>
             </div>
           ))}
         </div>
@@ -2875,7 +2939,7 @@ export default function ProductList() {
         <div className="sku-stack">
           {(record._skuRows || []).map((s: any) => (
             <div className={`sku-cell${s._isTotal ? " sku-cell-total" : ""}`} key={s._skuKey} style={{ justifyContent: "center" }}>
-              <span style={{ fontSize: 15, color: s.lack > 0 ? "#cf1322" : "#bfbfbf", fontWeight: s.lack > 0 ? 700 : 400 }}>{s.lack}</span>
+              <span style={{ fontSize: 15, ...metricColor(s.lack, "#cf1322", "#bfbfbf", 700) }}>{formatOptionalNumber(s.lack)}</span>
             </div>
           ))}
         </div>
@@ -2890,7 +2954,7 @@ export default function ProductList() {
         <div className="sku-stack">
           {(record._skuRows || []).map((s: any) => (
             <div className={`sku-cell${s._isTotal ? " sku-cell-total" : ""}`} key={s._skuKey} style={{ justifyContent: "center" }}>
-              <span style={{ fontSize: 15, color: s.advice > 0 ? "#d4380d" : "#bfbfbf", fontWeight: s.advice > 0 ? 700 : 400 }}>{s.advice || "-"}</span>
+              <span style={{ fontSize: 15, ...metricColor(s.advice, "#d4380d", "#bfbfbf", 700) }}>{formatOptionalNumber(s.advice)}</span>
             </div>
           ))}
         </div>
@@ -2949,7 +3013,7 @@ export default function ProductList() {
       key: "cloud_updated",
       width: 110,
       render: (_: any, record: any) => {
-        const c = cloudSkcMap.get(String(record.skcId || ""));
+        const c = record.cloudSkc || cloudSkcMap.get(cloudKeyFromProduct(record));
         if (!c) return <span style={{ color: "#bfbfbf" }}>—</span>;
         const ts = c.last_updated_at;
         const ago = Math.round((Date.now() - ts) / 60000);
@@ -2962,7 +3026,7 @@ export default function ProductList() {
       width: 110,
       align: "right",
       render: (_: any, record: any) => {
-        const c = cloudSkcMap.get(String(record.skcId || ""));
+        const c = record.cloudSkc || cloudSkcMap.get(cloudKeyFromProduct(record));
         const cents = c?.declared_price_cents;
         if (cents == null) return <span style={{ color: "#bfbfbf" }}>—</span>;
         return <span>{(cents / 100).toFixed(2)} {c?.price_currency || ""}</span>;
@@ -2974,7 +3038,7 @@ export default function ProductList() {
       width: 110,
       align: "right",
       render: (_: any, record: any) => {
-        const c = cloudSkcMap.get(String(record.skcId || ""));
+        const c = record.cloudSkc || cloudSkcMap.get(cloudKeyFromProduct(record));
         const cents = c?.suggested_price_cents;
         if (cents == null) return <span style={{ color: "#bfbfbf" }}>—</span>;
         return <span>{(cents / 100).toFixed(2)} {c?.price_currency || ""}</span>;
@@ -2986,7 +3050,7 @@ export default function ProductList() {
       width: 90,
       align: "right",
       render: (_: any, record: any) => {
-        const c = cloudSkcMap.get(String(record.skcId || ""));
+        const c = record.cloudSkc || cloudSkcMap.get(cloudKeyFromProduct(record));
         const d = c?.declared_price_cents;
         const s = c?.suggested_price_cents;
         if (d == null || s == null || s === 0) return <span style={{ color: "#bfbfbf" }}>—</span>;

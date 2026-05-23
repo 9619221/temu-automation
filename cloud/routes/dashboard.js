@@ -5,6 +5,9 @@ import { authMiddleware } from "../middleware/auth.js";
 const r = Router();
 r.use(authMiddleware);
 
+const realMallWhere = "mall_id <> ''";
+const realSalesWhere = "mall_supplier_id <> '' AND mall_supplier_id NOT IN ('MALL-EXT-E2E') AND skc_id NOT IN ('SKC-EXT-E2E', 'SKC-DBG')";
+
 function safeJsonParse(text, fallback = null) {
   if (!text) return fallback;
   try {
@@ -15,21 +18,22 @@ function safeJsonParse(text, fallback = null) {
 }
 
 function pickList(body) {
-  return (
-    body?.result?.pageItems ||
-    body?.result?.dataList ||
-    body?.result?.list ||
-    body?.result?.items ||
-    body?.result?.subOrderList ||
-    body?.data?.pageItems ||
-    body?.data?.list ||
-    body?.data?.items ||
-    body?.data?.subOrderList ||
-    body?.pageItems ||
-    body?.list ||
-    body?.items ||
-    (Array.isArray(body) ? body : [])
-  );
+  const candidates = [
+    body?.result?.pageItems,
+    body?.result?.dataList,
+    body?.result?.list,
+    body?.result?.items,
+    body?.result?.subOrderList,
+    body?.data?.pageItems,
+    body?.data?.list,
+    body?.data?.items,
+    body?.data?.subOrderList,
+    body?.pageItems,
+    body?.list,
+    body?.items,
+    Array.isArray(body) ? body : null,
+  ];
+  return candidates.find((value) => Array.isArray(value) && value.length > 0) || [];
 }
 
 function normalizeId(value) {
@@ -183,18 +187,25 @@ function aggregateTrendRows(rows) {
   };
 }
 
-function getSkuSalesTrendPayload(db, tenantId, rawItem) {
+function getSkuSalesTrendPayload(db, tenantId, rawItem, mallId = "") {
   const skuIds = collectProductSkuIds(rawItem);
   if (!skuIds.length) return {};
   const placeholders = skuIds.map(() => "?").join(",");
+  const wantedMallId = normalizeId(mallId);
   let rows = [];
   try {
+    const where = ["tenant_id = ?", `product_sku_id IN (${placeholders})`];
+    const params = [tenantId, ...skuIds];
+    if (wantedMallId) {
+      where.push("mall_id = ?");
+      params.push(wantedMallId);
+    }
     rows = db.prepare(`
       SELECT product_sku_id, stat_date, sales_number, is_predict, sold_out
       FROM temu_sku_sales_trend
-      WHERE tenant_id = ? AND product_sku_id IN (${placeholders})
+      WHERE ${where.join(" AND ")}
       ORDER BY stat_date ASC
-    `).all(tenantId, ...skuIds);
+    `).all(...params);
   } catch (error) {
     if (!/no such table/i.test(String(error?.message || ""))) throw error;
     return {};
@@ -245,10 +256,12 @@ function withTrendSalesFallback(row, trendPayload) {
 
 function productFlowKeys(row) {
   const keys = [];
+  const mallId = normalizeId(row?.mall_supplier_id ?? row?.mall_id);
   const productId = normalizeId(row?.product_id);
   const goodsId = normalizeId(row?.goods_id);
-  if (productId) keys.push(`product:${productId}`);
-  if (goodsId) keys.push(`goods:${goodsId}`);
+  const prefix = mallId ? `mall:${mallId}|` : "";
+  if (productId) keys.push(`${prefix}product:${productId}`);
+  if (goodsId) keys.push(`${prefix}goods:${goodsId}`);
   return keys;
 }
 
@@ -256,7 +269,7 @@ function getProductFlowRows(db, tenantId, requestedMallId, requestedDate, explic
   try {
     let date = requestedDate;
     if (!explicitDate) {
-      const latestWhere = ["tenant_id = ?"];
+      const latestWhere = ["tenant_id = ?", realMallWhere];
       const latestParams = [tenantId];
       if (requestedMallId) {
         latestWhere.push("mall_id = ?");
@@ -272,7 +285,7 @@ function getProductFlowRows(db, tenantId, requestedMallId, requestedDate, explic
       date = latest?.date || "";
     }
     if (!date) return [];
-    const where = ["tenant_id = ?", "stat_date = ?"];
+    const where = ["tenant_id = ?", "stat_date = ?", realMallWhere];
     const params = [tenantId, date];
     if (requestedMallId) {
       where.push("mall_id = ?");
@@ -340,12 +353,6 @@ function withProductFlowFallback(row, flow) {
   next.thumb_url = next.thumb_url || flow.thumb_url || null;
   next.product_id = next.product_id || flow.product_id || null;
   next.goods_id = next.goods_id || flow.goods_id || null;
-  if ((Number(next.today_sales) || 0) <= 0 && flow.pay_goods_num != null) {
-    next.today_sales = flow.pay_goods_num;
-  }
-  if ((Number(next.total_sales) || 0) <= 0 && flow.pay_goods_num != null) {
-    next.total_sales = flow.pay_goods_num;
-  }
   return next;
 }
 
@@ -362,10 +369,10 @@ function buildProductFlowSalesRow(flow) {
     category_name: flow.category_name || null,
     thumb_url: flow.thumb_url || null,
     sku_ext_code: null,
-    today_sales: flow.pay_goods_num,
+    today_sales: null,
     last7d_sales: null,
     last30d_sales: null,
-    total_sales: flow.pay_goods_num,
+    total_sales: null,
     warehouse_stock: null,
     occupy_stock: null,
     unavailable_stock: null,
@@ -464,9 +471,10 @@ r.get("/temu-sales", (req, res) => {
   const requestedDate = req.query.date;
   const requestedMallId = req.query.mall_id ? String(req.query.mall_id) : "";
   const explicitDate = typeof requestedDate === "string" && requestedDate;
+  const includeFlowOnly = req.query.include_flow_only === "1";
   let date = explicitDate ? requestedDate : "";
   if (!date) {
-    const latestWhere = ["tenant_id = ?"];
+    const latestWhere = ["tenant_id = ?", realSalesWhere];
     const latestParams = [tid];
     if (requestedMallId) {
       latestWhere.push("mall_supplier_id = ?");
@@ -481,7 +489,7 @@ r.get("/temu-sales", (req, res) => {
     `).get(...latestParams);
     date = latest?.date || new Date().toISOString().slice(0, 10);
   }
-  const where = ["tenant_id = ?", "stat_date = ?"];
+  const where = ["tenant_id = ?", "stat_date = ?", realSalesWhere];
   const params = [tid, date];
   if (requestedMallId) {
     where.push("mall_supplier_id = ?");
@@ -513,21 +521,23 @@ r.get("/temu-sales", (req, res) => {
       for (const key of productFlowKeys(flow)) usedFlowKeys.add(key);
     }
     const rawPayload = getRawProductPayload(db, tid, row);
-    const trendPayload = getSkuSalesTrendPayload(db, tid, rawPayload.raw_item);
+    const trendPayload = getSkuSalesTrendPayload(db, tid, rawPayload.raw_item, row.mall_supplier_id);
     return withTrendSalesFallback(withProductFlowFallback({
       ...row,
       ...rawPayload,
     }, flow), trendPayload);
   });
-  for (const flow of flowRows) {
-    const keys = productFlowKeys(flow);
-    if (keys.some((key) => usedFlowKeys.has(key))) continue;
-    const flowRow = buildProductFlowSalesRow(flow);
-    payloadRows.push({
-      ...flowRow,
-      ...getRawProductPayload(db, tid, flowRow),
-    });
-    for (const key of keys) usedFlowKeys.add(key);
+  if (includeFlowOnly) {
+    for (const flow of flowRows) {
+      const keys = productFlowKeys(flow);
+      if (keys.some((key) => usedFlowKeys.has(key))) continue;
+      const flowRow = buildProductFlowSalesRow(flow);
+      payloadRows.push({
+        ...flowRow,
+        ...getRawProductPayload(db, tid, flowRow),
+      });
+      for (const key of keys) usedFlowKeys.add(key);
+    }
   }
   payloadRows.sort((left, right) => {
     const leftSales = Number(left.today_sales ?? left.total_sales ?? 0) || 0;
@@ -572,6 +582,212 @@ r.get("/shop-sales", (req, res) => {
   res.json({ date: row?.stat_date || "", row: row || null });
 });
 
+r.get("/activity", (req, res) => {
+  const db = getDb();
+  const tid = req.user.tid;
+  const requestedDate = req.query.date;
+  const requestedMallId = req.query.mall_id ? String(req.query.mall_id) : "";
+  const requestedKind = req.query.kind ? String(req.query.kind) : "";
+  const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
+  const explicitDate = typeof requestedDate === "string" && requestedDate;
+  let date = explicitDate ? requestedDate : "";
+  try {
+    if (!date) {
+      const latestWhere = ["tenant_id = ?", realMallWhere];
+      const latestParams = [tid];
+      if (requestedMallId) {
+        latestWhere.push("mall_id = ?");
+        latestParams.push(requestedMallId);
+      }
+      const latest = db.prepare(`
+        SELECT stat_date AS date
+        FROM temu_activity_snapshot
+        WHERE ${latestWhere.join(" AND ")}
+        ORDER BY stat_date DESC, last_updated_at DESC
+        LIMIT 1
+      `).get(...latestParams);
+      date = latest?.date || new Date().toISOString().slice(0, 10);
+    }
+    const where = ["tenant_id = ?", "stat_date = ?", realMallWhere];
+    const params = [tid, date];
+    if (requestedMallId) {
+      where.push("mall_id = ?");
+      params.push(requestedMallId);
+    }
+    if (requestedKind) {
+      where.push("activity_kind = ?");
+      params.push(requestedKind);
+    }
+    const rows = db.prepare(`
+      SELECT id, mall_id, site, stat_date, row_key, activity_kind, activity_id,
+             activity_title, activity_status, product_id, skc_id, goods_id,
+             start_at, end_at, metric_json, raw_json, source_event_id,
+             sources_json, last_updated_at
+      FROM temu_activity_snapshot
+      WHERE ${where.join(" AND ")}
+      ORDER BY last_updated_at DESC
+      LIMIT ?
+    `).all(...params, limit);
+    const summary = db.prepare(`
+      SELECT activity_kind, COUNT(*) AS count
+      FROM temu_activity_snapshot
+      WHERE ${where.join(" AND ")}
+      GROUP BY activity_kind
+      ORDER BY count DESC
+    `).all(...params);
+    res.json({ date, rows, summary });
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) return res.json({ date, rows: [], summary: [] });
+    throw error;
+  }
+});
+
+r.get("/jst-purchase-inbound", (req, res) => {
+  const db = getDb();
+  const tid = req.user.tid;
+  const q = normalizeId(req.query.q);
+  const accountName = normalizeId(req.query.account_name || req.query.accountName);
+  const supplier = normalizeId(req.query.supplier);
+  const status = normalizeId(req.query.status);
+  const dateFrom = normalizeId(req.query.date_from || req.query.dateFrom);
+  const dateTo = normalizeId(req.query.date_to || req.query.dateTo);
+  const limit = Math.max(1, Number(req.query.limit) || 50);
+  const offset = Math.max(0, Number(req.query.offset) || 0);
+
+  const where = ["line.tenant_id = @tenant_id"];
+  const params = {
+    tenant_id: tid,
+    q: `%${q}%`,
+    account_name: accountName,
+    supplier: `%${supplier}%`,
+    status,
+    date_from: dateFrom,
+    date_to: dateTo,
+    limit,
+    offset,
+  };
+  if (q) {
+    where.push(`(
+      line.receipt_no LIKE @q
+      OR line.purchase_no LIKE @q
+      OR line.online_purchase_no LIKE @q
+      OR line.sku_code LIKE @q
+      OR line.product_name LIKE @q
+      OR line.supplier_name LIKE @q
+      OR orders.tracking_no LIKE @q
+    )`);
+  }
+  if (accountName) where.push("line.account_name = @account_name");
+  if (supplier) where.push("line.supplier_name LIKE @supplier");
+  if (status) where.push("line.status = @status");
+  if (dateFrom) where.push("DATE(COALESCE(line.inbound_at, line.created_at)) >= DATE(@date_from)");
+  if (dateTo) where.push("DATE(COALESCE(line.inbound_at, line.created_at)) <= DATE(@date_to)");
+  const whereSql = where.join(" AND ");
+
+  try {
+    const rows = db.prepare(`
+      SELECT
+        line.line_id,
+        line.receipt_no,
+        line.purchase_no,
+        line.online_purchase_no,
+        line.account_name,
+        line.supplier_name,
+        line.supplier_code,
+        line.operation_warehouse_name,
+        line.warehouse_name,
+        line.status,
+        line.finance_status,
+        line.inbound_type,
+        line.created_at,
+        line.inbound_at,
+        line.archived_at,
+        line.sku_code,
+        line.product_name,
+        line.style_code,
+        line.color_spec,
+        line.image_url,
+        line.product_tag,
+        line.qty,
+        line.unit_price,
+        line.amount,
+        line.warehouse_available_qty,
+        line.bind_location,
+        line.remark,
+        orders.total_qty AS order_total_qty,
+        orders.total_amount AS order_total_amount,
+        orders.freight_amount AS order_freight_amount,
+        orders.paid_amount AS order_paid_amount,
+        orders.purchaser_name,
+        orders.creator_name,
+        orders.logistics_company,
+        orders.tracking_no,
+        orders.labels
+      FROM jst_purchase_inbound_lines line
+      LEFT JOIN jst_purchase_inbound_orders orders
+        ON orders.tenant_id = line.tenant_id AND orders.receipt_no = line.receipt_no
+      WHERE ${whereSql}
+      ORDER BY COALESCE(line.inbound_at, line.created_at) DESC, CAST(line.receipt_no AS INTEGER) DESC, line.line_id ASC
+      LIMIT @limit OFFSET @offset
+    `).all(params);
+    const total = db.prepare(`
+      SELECT COUNT(*) AS total
+      FROM jst_purchase_inbound_lines line
+      LEFT JOIN jst_purchase_inbound_orders orders
+        ON orders.tenant_id = line.tenant_id AND orders.receipt_no = line.receipt_no
+      WHERE ${whereSql}
+    `).get(params).total;
+    const summary = db.prepare(`
+      SELECT
+        COUNT(*) AS line_count,
+        COUNT(DISTINCT line.receipt_no) AS receipt_count,
+        COALESCE(SUM(line.qty), 0) AS total_qty,
+        COALESCE(SUM(line.amount), 0) AS total_amount
+      FROM jst_purchase_inbound_lines line
+      LEFT JOIN jst_purchase_inbound_orders orders
+        ON orders.tenant_id = line.tenant_id AND orders.receipt_no = line.receipt_no
+      WHERE ${whereSql}
+    `).get(params);
+    const options = {
+      accounts: db.prepare(`
+        SELECT account_name AS value, COUNT(*) AS count
+        FROM jst_purchase_inbound_lines
+        WHERE tenant_id = ? AND NULLIF(TRIM(COALESCE(account_name, '')), '') IS NOT NULL
+        GROUP BY account_name
+        ORDER BY account_name COLLATE NOCASE
+      `).all(tid),
+      statuses: db.prepare(`
+        SELECT status AS value, COUNT(*) AS count
+        FROM jst_purchase_inbound_lines
+        WHERE tenant_id = ? AND NULLIF(TRIM(COALESCE(status, '')), '') IS NOT NULL
+        GROUP BY status
+        ORDER BY count DESC, status
+      `).all(tid),
+      suppliers: db.prepare(`
+        SELECT supplier_name AS value, COUNT(*) AS count
+        FROM jst_purchase_inbound_lines
+        WHERE tenant_id = ? AND NULLIF(TRIM(COALESCE(supplier_name, '')), '') IS NOT NULL
+        GROUP BY supplier_name
+        ORDER BY count DESC, supplier_name
+        LIMIT 300
+      `).all(tid),
+    };
+    res.json({ rows, total, limit, offset, summary, options });
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) {
+      return res.json({
+        rows: [],
+        total: 0,
+        limit,
+        offset,
+        summary: { line_count: 0, receipt_count: 0, total_qty: 0, total_amount: 0 },
+        options: { accounts: [], statuses: [], suppliers: [] },
+      });
+    }
+    throw error;
+  }
+});
+
 r.get("/event/:id/body", (req, res) => {
   const db = getDb();
   const tid = req.user.tid;
@@ -594,7 +810,7 @@ r.get("/skc", (req, res) => {
   const limit = Math.min(500, Number(req.query.limit) || 100);
   const offset = Math.max(0, Number(req.query.offset) || 0);
 
-  const where = ["tenant_id = ?"];
+  const where = ["tenant_id = ?", realMallWhere, "skc_id NOT IN ('SKC-EXT-E2E', 'SKC-DBG')"];
   const params = [tid];
   if (mall_id) { where.push("mall_id = ?"); params.push(mall_id); }
   if (q) {
@@ -619,9 +835,18 @@ r.get("/skc", (req, res) => {
 r.get("/skc/:id", (req, res) => {
   const db = getDb();
   const tid = req.user.tid;
+  const requestedMallId = req.query.mall_id ? String(req.query.mall_id) : "";
+  const where = ["tenant_id = ?", "skc_id = ?", realMallWhere, "skc_id NOT IN ('SKC-EXT-E2E', 'SKC-DBG')"];
+  const params = [tid, req.params.id];
+  if (requestedMallId) {
+    where.push("mall_id = ?");
+    params.push(requestedMallId);
+  }
   const row = db.prepare(`
-    SELECT * FROM skc_snapshots WHERE tenant_id = ? AND skc_id = ?
-  `).get(tid, req.params.id);
+    SELECT * FROM skc_snapshots WHERE ${where.join(" AND ")}
+    ORDER BY last_updated_at DESC
+    LIMIT 1
+  `).get(...params);
   if (!row) return res.status(404).json({ error: "not_found" });
   let sources = {};
   try { sources = JSON.parse(row.sources_json || "{}"); } catch {}

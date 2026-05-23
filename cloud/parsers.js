@@ -14,21 +14,21 @@ function firstDefined(obj, keys) {
 }
 
 function pickList(body) {
-  return (
-    body?.result?.pageItems ||
-    body?.result?.dataList ||
-    body?.result?.list ||
-    body?.result?.items ||
-    body?.result?.subOrderList ||
-    body?.data?.pageItems ||
-    body?.data?.list ||
-    body?.data?.items ||
-    body?.data?.subOrderList ||
-    body?.pageItems ||
-    body?.list ||
-    body?.items ||
-    null
-  );
+  const candidates = [
+    body?.result?.pageItems,
+    body?.result?.dataList,
+    body?.result?.list,
+    body?.result?.items,
+    body?.result?.subOrderList,
+    body?.data?.pageItems,
+    body?.data?.list,
+    body?.data?.items,
+    body?.data?.subOrderList,
+    body?.pageItems,
+    body?.list,
+    body?.items,
+  ];
+  return candidates.find((value) => Array.isArray(value) && value.length > 0) || null;
 }
 
 // 价格统一成 cents：字段名带 Cents / 整数 >= 1000 当 cents，否则 ×100
@@ -58,6 +58,10 @@ function toNullableString(raw, max) {
   if (raw == null || raw === "") return null;
   const s = String(raw);
   return max ? s.slice(0, max) : s;
+}
+
+function eventMallId(ctx, evt, fallback = null) {
+  return toNullableString(ctx?.mall_id || evt?.mall_id || fallback) || "";
 }
 
 function toNullableBooleanInteger(raw) {
@@ -187,9 +191,8 @@ function buildSkcUpsert(db) {
       @sales_total, @stock_available, @compliance_status,
       @sources_json, @now, @now
     )
-    ON CONFLICT(tenant_id, skc_id) DO UPDATE SET
+    ON CONFLICT(tenant_id, mall_id, skc_id) DO UPDATE SET
       product_id           = COALESCE(excluded.product_id, product_id),
-      mall_id              = COALESCE(excluded.mall_id, mall_id),
       site                 = COALESCE(excluded.site, site),
       title                = COALESCE(excluded.title, title),
       category_id          = COALESCE(excluded.category_id, category_id),
@@ -278,7 +281,7 @@ function parseSkcList(db, ctx, evt, body) {
       tenant_id: ctx.tenant_id,
       skc_id,
       product_id,
-      mall_id: ctx.mall_id || evt.mall_id || null,
+      mall_id: eventMallId(ctx, evt),
       site: evt.site || null,
       title: title ? String(title).slice(0, 500) : null,
       category_id,
@@ -311,8 +314,7 @@ function parseSkuSalesTrend(db, ctx, evt, body) {
       @id, @tenant_id, @mall_id, @site, @product_sku_id, @stat_date,
       @sales_number, @is_predict, @sold_out, @source_event_id, @sources_json
     )
-    ON CONFLICT(tenant_id, product_sku_id, stat_date) DO UPDATE SET
-      mall_id         = COALESCE(excluded.mall_id, mall_id),
+    ON CONFLICT(tenant_id, mall_id, product_sku_id, stat_date) DO UPDATE SET
       site            = COALESCE(excluded.site, site),
       sales_number    = COALESCE(excluded.sales_number, sales_number),
       is_predict      = COALESCE(excluded.is_predict, is_predict),
@@ -330,7 +332,7 @@ function parseSkuSalesTrend(db, ctx, evt, body) {
     upsert.run({
       id: crypto.randomUUID(),
       tenant_id: ctx.tenant_id,
-      mall_id: ctx.mall_id || evt.mall_id || null,
+      mall_id: eventMallId(ctx, evt),
       site: evt.site || null,
       product_sku_id,
       stat_date,
@@ -366,7 +368,7 @@ function parseSalesManagement(db, ctx, evt, body) {
       @declared_price_cents, @price_currency, @asf_score, @comment_num, @quality_after_sales_rate,
       @supply_status, @stock_status, @close_jit_status, @stat_date, @sources_json
     )
-    ON CONFLICT(tenant_id, skc_id, stat_date) DO UPDATE SET
+    ON CONFLICT(tenant_id, mall_supplier_id, skc_id, stat_date) DO UPDATE SET
       product_id               = COALESCE(excluded.product_id, product_id),
       goods_id                 = COALESCE(excluded.goods_id, goods_id),
       mall_supplier_id         = COALESCE(excluded.mall_supplier_id, mall_supplier_id),
@@ -410,7 +412,7 @@ function parseSalesManagement(db, ctx, evt, body) {
     const category_name = toNullableString(row.category, 200);
     const thumb_url = toNullableString(row.productSkcPicture, 1000);
     const supply_status = toNullableString(row.supplyStatus, 50);
-    const mall_id = ctx.mall_id || evt.mall_id || toNullableString(row.supplierId) || null;
+    const mall_id = eventMallId(ctx, evt, row.supplierId);
     const total_sales = toNullableInteger(row.totalSales ?? totalInfo.totalSaleVolume);
     const warehouse_stock = toNullableInteger(row.warehouseStock ?? inventoryInfo.warehouseInventoryNum);
     const sku_ext_code = toNullableString(
@@ -421,8 +423,8 @@ function parseSalesManagement(db, ctx, evt, body) {
       tenant_id: ctx.tenant_id,
       skc_id,
       product_id: toNullableString(row.productId),
-      goods_id: toNullableString(row.goodsId),
-      mall_supplier_id: toNullableString(row.supplierId),
+      goods_id: toNullableString(row.goodsId) || "",
+      mall_supplier_id: mall_id,
       title,
       category_name,
       thumb_url,
@@ -501,7 +503,7 @@ function parseProductFlowGoods(db, ctx, evt, body) {
       @recommend_expose_num, @recommend_click_num, @recommend_pay_goods_num, @recommend_pay_order_num,
       @flow_grow_status, @grow_data_text, @bsr_goods, @source_event_id, @sources_json
     )
-    ON CONFLICT(tenant_id, product_id, goods_id, stat_date, site) DO UPDATE SET
+    ON CONFLICT(tenant_id, mall_id, product_id, goods_id, stat_date, site) DO UPDATE SET
       mall_id                       = COALESCE(excluded.mall_id, mall_id),
       title                         = COALESCE(excluded.title, title),
       category_name                 = COALESCE(excluded.category_name, category_name),
@@ -539,11 +541,11 @@ function parseProductFlowGoods(db, ctx, evt, body) {
     upsert.run({
       id: crypto.randomUUID(),
       tenant_id: ctx.tenant_id,
-      mall_id: ctx.mall_id || evt.mall_id || null,
+      mall_id: eventMallId(ctx, evt),
       site: evt.site || null,
       stat_date,
       product_id,
-      goods_id: toNullableString(row.goodsId),
+      goods_id: toNullableString(row.goodsId) || "",
       title: toNullableString(firstDefined(row, ["goodsName", "productName", "title"]), 500),
       category_name: categoryNameFromValue(row.category),
       thumb_url: toNullableString(firstDefined(row, ["goodsImageUrl", "productSkcPicture", "imageUrl", "thumbUrl"]), 1000),
@@ -644,7 +646,7 @@ function parseShopStatistics(db, ctx, evt, body) {
   upsert.run({
     id: crypto.randomUUID(),
     tenant_id: ctx.tenant_id,
-    mall_id: String(ctx.mall_id || evt.mall_id || ""),
+    mall_id: eventMallId(ctx, evt),
     site: String(evt.site || ""),
     stat_date: eventStatDate(evt),
     sale_volume,
@@ -684,7 +686,7 @@ function parsePriceAdjust(db, ctx, evt, body) {
     upsert.run({
       tenant_id: ctx.tenant_id, skc_id,
       product_id: String(firstDefined(row, ["productId", "spuId"]) || "") || null,
-      mall_id: ctx.mall_id || evt.mall_id || null, site: evt.site || null,
+      mall_id: eventMallId(ctx, evt), site: evt.site || null,
       title: null, category_id: null, category_name: null, status: null, thumb_url: null, spec_summary: null,
       declared_price_cents, suggested_price_cents: null,
       price_currency: currency ? String(currency).slice(0, 8) : null,
@@ -715,7 +717,7 @@ function parseSuggestedPrice(db, ctx, evt, body) {
     upsert.run({
       tenant_id: ctx.tenant_id, skc_id,
       product_id: String(firstDefined(row, ["productId", "spuId"]) || "") || null,
-      mall_id: ctx.mall_id || evt.mall_id || null, site: evt.site || null,
+      mall_id: eventMallId(ctx, evt), site: evt.site || null,
       title: null, category_id: null, category_name: null, status: null, thumb_url: null, spec_summary: null,
       declared_price_cents: null, suggested_price_cents,
       price_currency: currency ? String(currency).slice(0, 8) : null,
@@ -727,11 +729,131 @@ function parseSuggestedPrice(db, ctx, evt, body) {
 
 // ---------- 调度器 ----------
 
+// ---------- TEMU activity / marketing ----------
+
+function activityKindFromPath(path) {
+  const text = String(path || "");
+  if (/coupon/i.test(text)) return "coupon";
+  if (/bidding|Bidding|ace/i.test(text)) return "bidding";
+  if (/bsr|colossus/i.test(text)) return "bsr";
+  if (/gambit|gamblers|marketing|activity|sale\/manage\/supplier\/api\/activity/i.test(text)) return "activity";
+  return "marketing";
+}
+
+function toJsonText(value, max = 200000) {
+  if (value == null) return null;
+  try {
+    return JSON.stringify(value).slice(0, max);
+  } catch {
+    return null;
+  }
+}
+
+function pickActivityItems(body) {
+  const list = pickList(body);
+  if (Array.isArray(list) && list.length) return list;
+  const result = body?.result ?? body?.data ?? body;
+  return result && typeof result === "object" ? [result] : [];
+}
+
+function activityRowKey(item, evt, index) {
+  const activityId = firstDefined(item, [
+    "activityThematicId", "activityId", "activityThemeId", "themeId", "topicId",
+    "couponId", "promotionId", "campaignId", "biddingInvitationOrderSn", "orderSn", "id",
+  ]);
+  const productId = firstDefined(item, ["productId", "productSpuId", "spuId"]);
+  const skcId = firstDefined(item, ["productSkcId", "skcId"]);
+  const goodsId = firstDefined(item, ["goodsId"]);
+  return [
+    activityKindFromPath(evt.url_path),
+    activityId || evt.id,
+    productId || "",
+    skcId || "",
+    goodsId || "",
+    index,
+  ].map((part) => String(part ?? "")).join("|").slice(0, 500);
+}
+
+function parseActivitySnapshot(db, ctx, evt, body) {
+  const items = pickActivityItems(body);
+  if (!items.length) return;
+  const upsert = db.prepare(`
+    INSERT INTO temu_activity_snapshot (
+      id, tenant_id, mall_id, site, stat_date, row_key, activity_kind,
+      activity_id, activity_title, activity_status, product_id, skc_id, goods_id,
+      start_at, end_at, metric_json, raw_json, source_event_id, sources_json
+    ) VALUES (
+      @id, @tenant_id, @mall_id, @site, @stat_date, @row_key, @activity_kind,
+      @activity_id, @activity_title, @activity_status, @product_id, @skc_id, @goods_id,
+      @start_at, @end_at, @metric_json, @raw_json, @source_event_id, @sources_json
+    )
+    ON CONFLICT(tenant_id, mall_id, row_key, stat_date) DO UPDATE SET
+      site            = COALESCE(excluded.site, site),
+      activity_kind   = COALESCE(excluded.activity_kind, activity_kind),
+      activity_id     = COALESCE(excluded.activity_id, activity_id),
+      activity_title  = COALESCE(excluded.activity_title, activity_title),
+      activity_status = COALESCE(excluded.activity_status, activity_status),
+      product_id      = COALESCE(excluded.product_id, product_id),
+      skc_id          = COALESCE(excluded.skc_id, skc_id),
+      goods_id        = COALESCE(excluded.goods_id, goods_id),
+      start_at        = COALESCE(excluded.start_at, start_at),
+      end_at          = COALESCE(excluded.end_at, end_at),
+      metric_json     = COALESCE(excluded.metric_json, metric_json),
+      raw_json        = COALESCE(excluded.raw_json, raw_json),
+      source_event_id = COALESCE(excluded.source_event_id, source_event_id),
+      sources_json    = json_patch(COALESCE(sources_json, '{}'), COALESCE(excluded.sources_json, '{}')),
+      last_updated_at = datetime('now')
+  `);
+  const stat_date = normalizeStatDate(firstDefined(body?.result || body?.data || {}, ["statDate", "date", "dataDate", "updateTime"]), evt);
+  const sources_json = JSON.stringify({ [evt.url_path]: evt.id });
+  const mall_id = eventMallId(ctx, evt);
+  const activity_kind = activityKindFromPath(evt.url_path);
+  items.forEach((item, index) => {
+    if (!item || typeof item !== "object") return;
+    upsert.run({
+      id: crypto.randomUUID(),
+      tenant_id: ctx.tenant_id,
+      mall_id,
+      site: evt.site || null,
+      stat_date,
+      row_key: activityRowKey(item, evt, index),
+      activity_kind,
+      activity_id: toNullableString(firstDefined(item, [
+        "activityThematicId", "activityId", "activityThemeId", "themeId", "topicId",
+        "couponId", "promotionId", "campaignId", "biddingInvitationOrderSn", "orderSn", "id",
+      ])),
+      activity_title: toNullableString(firstDefined(item, [
+        "activityName", "activityTitle", "themeName", "topicName", "couponName",
+        "name", "title", "productName", "goodsName",
+      ]), 500),
+      activity_status: toNullableString(firstDefined(item, [
+        "status", "activityStatus", "enrollStatus", "auditStatus", "state", "stage", "orderStatus",
+      ]), 100),
+      product_id: toNullableString(firstDefined(item, ["productId", "productSpuId", "spuId"])),
+      skc_id: toNullableString(firstDefined(item, ["productSkcId", "skcId"])),
+      goods_id: toNullableString(firstDefined(item, ["goodsId"])),
+      start_at: toNullableString(firstDefined(item, ["startTime", "beginTime", "activityStartTime", "validStartTime"])),
+      end_at: toNullableString(firstDefined(item, ["endTime", "finishTime", "activityEndTime", "validEndTime"])),
+      metric_json: toJsonText({
+        payAmount: firstDefined(item, ["payAmount", "activityPayAmountTotal", "gmv"]),
+        orderCount: firstDefined(item, ["orderCount", "activityGoodsOrderCount"]),
+        goodsCount: firstDefined(item, ["goodsCount", "activityGoodsCount"]),
+        cartCount: firstDefined(item, ["cartCount", "activityGoodsCartCount"]),
+        productCount: firstDefined(item, ["productCount", "goodsNum"]),
+      }, 20000),
+      raw_json: toJsonText(item),
+      source_event_id: evt.id,
+      sources_json,
+    });
+  });
+}
+
 const PARSERS = [
   { match: /\/auth\/userInfo|\/mms\/userInfo|\/mms\/account\/menu/, fn: parseUserInfo, name: "userInfo" },
   { match: /\/product\/skc\/pageQuery|\/product\/draft\/pageQuery|\/product\/notAllEu\/pageQuery/, fn: parseSkcList, name: "skcList" },
   { match: /\/mms\/venom\/api\/supplier\/sales\/management\/(listOverall|querySkuSalesNumber|queryFulfilmentFormStatistic)/, fn: parseSalesManagement, name: "salesManagement" },
   { match: /\/api\/seller\/full\/flow\/analysis\/goods\/list/, fn: parseProductFlowGoods, name: "productFlowGoods" },
+  { match: /\/api\/activity\/data\/|\/gamblers\/|\/gambit\/|\/colossus\/bsr\/|\/biddingInvitationSupplierRpcService|\/sale\/manage\/supplier\/api\/activity\//, fn: parseActivitySnapshot, name: "activitySnapshot" },
   { match: /\/bg\/swift\/api\/common\/statistics\/web\/queryStatisticDataFullManaged|\/visage-agent-seller\/product\/statisticsData/, fn: parseShopStatistics, name: "shopStatistics" },
   { match: /\/magneto\/price-adjust\/page-query/, fn: parsePriceAdjust, name: "priceAdjust" },
   { match: /\/product\/sku\/site\/suggestedPrice\/pageQuery/, fn: parseSuggestedPrice, name: "suggestedPrice" },

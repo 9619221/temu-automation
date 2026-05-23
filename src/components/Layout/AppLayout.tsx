@@ -58,6 +58,7 @@ const menuItems = [
     children: [
       { key: "/collect", icon: <SyncOutlined />, label: "数据采集" },
       { key: "/multi-store-cloud", icon: <CloudSyncOutlined />, label: "云端采集" },
+      { key: "/jst-purchase-inbound", icon: <InboxOutlined />, label: "聚水潭入库" },
       { key: "/temu-robots", icon: <DatabaseOutlined />, label: "TEMU 机器人" },
     ],
   },
