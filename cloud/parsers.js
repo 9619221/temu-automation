@@ -71,6 +71,38 @@ function toNullableBooleanInteger(raw) {
   return null;
 }
 
+function categoryNameFromValue(raw) {
+  if (raw == null || raw === "") return null;
+  let value = raw;
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!text) return null;
+    if (text.startsWith("{") || text.startsWith("[")) {
+      try {
+        value = JSON.parse(text);
+      } catch {
+        return text.slice(0, 200);
+      }
+    } else {
+      return text.slice(0, 200);
+    }
+  }
+  if (Array.isArray(value)) {
+    const parts = value.map(categoryNameFromValue).filter(Boolean);
+    return parts.join(">").slice(0, 200) || null;
+  }
+  if (value && typeof value === "object") {
+    const parts = [];
+    for (let i = 1; i <= 10; i++) {
+      const name = value[`cat${i}Name`];
+      if (name) parts.push(String(name));
+    }
+    if (parts.length) return parts.join(">").slice(0, 200);
+    return toNullableString(value.catName || value.categoryName || value.name, 200);
+  }
+  return String(value).slice(0, 200);
+}
+
 function normalizeStatDate(raw, fallbackEvt) {
   if (raw != null && raw !== "") {
     const text = String(raw).trim();
@@ -423,6 +455,111 @@ function parseSalesManagement(db, ctx, evt, body) {
   }
 }
 
+// ---------- TEMU product flow ----------
+
+function parseProductFlowGoods(db, ctx, evt, body) {
+  const list = body?.result?.list || pickList(body);
+  if (!Array.isArray(list) || !list.length) return;
+  const stat_date = normalizeStatDate(
+    firstDefined(body?.result || {}, ["updateAt", "statDate", "date", "dataDate"]),
+    evt
+  );
+  const sources_json = JSON.stringify({ [evt.url_path]: evt.id });
+  const upsert = db.prepare(`
+    INSERT INTO temu_product_flow_snapshot (
+      id, tenant_id, mall_id, site, stat_date, product_id, goods_id,
+      title, category_name, thumb_url,
+      expose_num, click_num, detail_visit_num, detail_visitor_num,
+      add_to_cart_user_num, collect_user_num, pay_goods_num, pay_order_num, buyer_num,
+      expose_pay_conversion_rate, expose_click_conversion_rate, click_pay_conversion_rate,
+      search_expose_num, search_click_num, search_pay_goods_num, search_pay_order_num,
+      recommend_expose_num, recommend_click_num, recommend_pay_goods_num, recommend_pay_order_num,
+      flow_grow_status, grow_data_text, bsr_goods, source_event_id, sources_json
+    ) VALUES (
+      @id, @tenant_id, @mall_id, @site, @stat_date, @product_id, @goods_id,
+      @title, @category_name, @thumb_url,
+      @expose_num, @click_num, @detail_visit_num, @detail_visitor_num,
+      @add_to_cart_user_num, @collect_user_num, @pay_goods_num, @pay_order_num, @buyer_num,
+      @expose_pay_conversion_rate, @expose_click_conversion_rate, @click_pay_conversion_rate,
+      @search_expose_num, @search_click_num, @search_pay_goods_num, @search_pay_order_num,
+      @recommend_expose_num, @recommend_click_num, @recommend_pay_goods_num, @recommend_pay_order_num,
+      @flow_grow_status, @grow_data_text, @bsr_goods, @source_event_id, @sources_json
+    )
+    ON CONFLICT(tenant_id, product_id, goods_id, stat_date, site) DO UPDATE SET
+      mall_id                       = COALESCE(excluded.mall_id, mall_id),
+      title                         = COALESCE(excluded.title, title),
+      category_name                 = COALESCE(excluded.category_name, category_name),
+      thumb_url                     = COALESCE(excluded.thumb_url, thumb_url),
+      expose_num                    = COALESCE(excluded.expose_num, expose_num),
+      click_num                     = COALESCE(excluded.click_num, click_num),
+      detail_visit_num              = COALESCE(excluded.detail_visit_num, detail_visit_num),
+      detail_visitor_num            = COALESCE(excluded.detail_visitor_num, detail_visitor_num),
+      add_to_cart_user_num          = COALESCE(excluded.add_to_cart_user_num, add_to_cart_user_num),
+      collect_user_num              = COALESCE(excluded.collect_user_num, collect_user_num),
+      pay_goods_num                 = COALESCE(excluded.pay_goods_num, pay_goods_num),
+      pay_order_num                 = COALESCE(excluded.pay_order_num, pay_order_num),
+      buyer_num                     = COALESCE(excluded.buyer_num, buyer_num),
+      expose_pay_conversion_rate    = COALESCE(excluded.expose_pay_conversion_rate, expose_pay_conversion_rate),
+      expose_click_conversion_rate  = COALESCE(excluded.expose_click_conversion_rate, expose_click_conversion_rate),
+      click_pay_conversion_rate     = COALESCE(excluded.click_pay_conversion_rate, click_pay_conversion_rate),
+      search_expose_num             = COALESCE(excluded.search_expose_num, search_expose_num),
+      search_click_num              = COALESCE(excluded.search_click_num, search_click_num),
+      search_pay_goods_num          = COALESCE(excluded.search_pay_goods_num, search_pay_goods_num),
+      search_pay_order_num          = COALESCE(excluded.search_pay_order_num, search_pay_order_num),
+      recommend_expose_num          = COALESCE(excluded.recommend_expose_num, recommend_expose_num),
+      recommend_click_num           = COALESCE(excluded.recommend_click_num, recommend_click_num),
+      recommend_pay_goods_num       = COALESCE(excluded.recommend_pay_goods_num, recommend_pay_goods_num),
+      recommend_pay_order_num       = COALESCE(excluded.recommend_pay_order_num, recommend_pay_order_num),
+      flow_grow_status              = COALESCE(excluded.flow_grow_status, flow_grow_status),
+      grow_data_text                = COALESCE(excluded.grow_data_text, grow_data_text),
+      bsr_goods                     = COALESCE(excluded.bsr_goods, bsr_goods),
+      source_event_id               = COALESCE(excluded.source_event_id, source_event_id),
+      sources_json                  = json_patch(COALESCE(sources_json, '{}'), COALESCE(excluded.sources_json, '{}')),
+      last_updated_at               = datetime('now')
+  `);
+  for (const row of list) {
+    const product_id = toNullableString(firstDefined(row, ["productSpuId", "productId", "spuId"]));
+    if (!product_id) continue;
+    upsert.run({
+      id: crypto.randomUUID(),
+      tenant_id: ctx.tenant_id,
+      mall_id: ctx.mall_id || evt.mall_id || null,
+      site: evt.site || null,
+      stat_date,
+      product_id,
+      goods_id: toNullableString(row.goodsId),
+      title: toNullableString(firstDefined(row, ["goodsName", "productName", "title"]), 500),
+      category_name: categoryNameFromValue(row.category),
+      thumb_url: toNullableString(firstDefined(row, ["goodsImageUrl", "productSkcPicture", "imageUrl", "thumbUrl"]), 1000),
+      expose_num: toNullableInteger(row.exposeNum),
+      click_num: toNullableInteger(row.clickNum),
+      detail_visit_num: toNullableInteger(row.goodsDetailVisitNum),
+      detail_visitor_num: toNullableInteger(row.goodsDetailVisitorNum),
+      add_to_cart_user_num: toNullableInteger(row.addToCartUserNum),
+      collect_user_num: toNullableInteger(row.collectUserNum),
+      pay_goods_num: toNullableInteger(row.payGoodsNum),
+      pay_order_num: toNullableInteger(row.payOrderNum),
+      buyer_num: toNullableInteger(row.buyerNum),
+      expose_pay_conversion_rate: toNullableNumber(row.exposePayConversionRate),
+      expose_click_conversion_rate: toNullableNumber(row.exposeClickConversionRate),
+      click_pay_conversion_rate: toNullableNumber(row.clickPayConversionRate),
+      search_expose_num: toNullableInteger(row.searchExposeNum),
+      search_click_num: toNullableInteger(row.searchClickNum),
+      search_pay_goods_num: toNullableInteger(row.searchPayGoodsNum),
+      search_pay_order_num: toNullableInteger(row.searchPayOrderNum),
+      recommend_expose_num: toNullableInteger(row.recommendExposeNum),
+      recommend_click_num: toNullableInteger(row.recommendClickNum),
+      recommend_pay_goods_num: toNullableInteger(row.recommendPayGoodsNum),
+      recommend_pay_order_num: toNullableInteger(row.recommendPayOrderNum),
+      flow_grow_status: toNullableString(row.flowGrowStatus, 50),
+      grow_data_text: toNullableString(row.growDataText, 100),
+      bsr_goods: toNullableBooleanInteger(row.bsrGoods),
+      source_event_id: evt.id,
+      sources_json,
+    });
+  }
+}
+
 // ---------- TEMU shop statistics ----------
 
 function eventStatDate(evt) {
@@ -578,6 +715,7 @@ const PARSERS = [
   { match: /\/auth\/userInfo|\/mms\/userInfo|\/mms\/account\/menu/, fn: parseUserInfo, name: "userInfo" },
   { match: /\/product\/skc\/pageQuery|\/product\/draft\/pageQuery|\/product\/notAllEu\/pageQuery/, fn: parseSkcList, name: "skcList" },
   { match: /\/mms\/venom\/api\/supplier\/sales\/management\/(listOverall|querySkuSalesNumber|queryFulfilmentFormStatistic)/, fn: parseSalesManagement, name: "salesManagement" },
+  { match: /\/api\/seller\/full\/flow\/analysis\/goods\/list/, fn: parseProductFlowGoods, name: "productFlowGoods" },
   { match: /\/bg\/swift\/api\/common\/statistics\/web\/queryStatisticDataFullManaged|\/visage-agent-seller\/product\/statisticsData/, fn: parseShopStatistics, name: "shopStatistics" },
   { match: /\/magneto\/price-adjust\/page-query/, fn: parsePriceAdjust, name: "priceAdjust" },
   { match: /\/product\/sku\/site\/suggestedPrice\/pageQuery/, fn: parseSuggestedPrice, name: "suggestedPrice" },

@@ -93,6 +93,61 @@ assert.equal(skcRow.stock_available, 88);
 assert.equal(skcRow.declared_price_cents, 1234);
 assert.equal(skcRow.price_currency, "CNY");
 
+const flowEvt = {
+  id: "evt-flow-1",
+  url_path: "/api/seller/full/flow/analysis/goods/list",
+  mall_id: "mall-1",
+  site: "CN",
+  ts: Date.UTC(2026, 4, 23),
+  body_json: JSON.stringify({
+    result: {
+      updateAt: Date.UTC(2026, 4, 21),
+      total: 1,
+      list: [
+        {
+          goodsId: 605835619077337,
+          goodsName: "Flow Product",
+          goodsImageUrl: "https://example.test/flow.jpg",
+          category: { cat1Name: "Home", cat2Name: "Locks" },
+          productSpuId: 8925143939,
+          exposeNum: 6149,
+          clickNum: 170,
+          goodsDetailVisitNum: 116,
+          goodsDetailVisitorNum: 96,
+          addToCartUserNum: 47,
+          collectUserNum: 0,
+          payGoodsNum: 12,
+          payOrderNum: 11,
+          buyerNum: 11,
+          searchPayGoodsNum: 1,
+          recommendPayGoodsNum: 4,
+          clickPayConversionRate: 0.0647,
+          bsrGoods: true,
+          growDataText: "205%",
+          flowGrowStatus: 1,
+        },
+      ],
+    },
+  }),
+};
+
+dispatchParsers(db, { tenant_id: "tenant-verify", device_id: "device-verify" }, [flowEvt]);
+
+const flowRow = db.prepare(`
+  SELECT product_id, goods_id, stat_date, pay_goods_num, pay_order_num, buyer_num,
+         category_name, bsr_goods
+  FROM temu_product_flow_snapshot
+  WHERE tenant_id = ?
+`).get("tenant-verify");
+assert.equal(flowRow.product_id, "8925143939");
+assert.equal(flowRow.goods_id, "605835619077337");
+assert.equal(flowRow.stat_date, "2026-05-21");
+assert.equal(flowRow.pay_goods_num, 12);
+assert.equal(flowRow.pay_order_num, 11);
+assert.equal(flowRow.buyer_num, 11);
+assert.equal(flowRow.category_name, "Home>Locks");
+assert.equal(flowRow.bsr_goods, 1);
+
 const result = {
   ok: true,
   dbPath,
@@ -100,6 +155,7 @@ const result = {
   upsertKeptRowCount: countAfterSecond === countAfterFirst,
   salesRow,
   skcRow,
+  flowRow,
 };
 
 db.close();

@@ -494,13 +494,42 @@ async function loadCloudProductBundle(): Promise<CloudProductBundle> {
 
 function buildCloudSalesRaw(previousRaw: any, skc: SkcRow | undefined, sales: TemuSalesRow | undefined) {
   const rawItem = sales?.raw_item && typeof sales.raw_item === "object" ? sales.raw_item : {};
+  const flowRaw = {
+    payGoodsNum: sales?.flow_pay_goods_num,
+    payOrderNum: sales?.flow_pay_order_num,
+    buyerNum: sales?.flow_buyer_num,
+    exposeNum: sales?.flow_expose_num,
+    clickNum: sales?.flow_click_num,
+    goodsDetailVisitNum: sales?.flow_detail_visit_num,
+    goodsDetailVisitorNum: sales?.flow_detail_visitor_num,
+    addToCartUserNum: sales?.flow_add_to_cart_user_num,
+    collectUserNum: sales?.flow_collect_user_num,
+    exposePayConversionRate: sales?.flow_expose_pay_conversion_rate,
+    exposeClickConversionRate: sales?.flow_expose_click_conversion_rate,
+    clickPayConversionRate: sales?.flow_click_pay_conversion_rate,
+    searchExposeNum: sales?.flow_search_expose_num,
+    searchClickNum: sales?.flow_search_click_num,
+    searchPayGoodsNum: sales?.flow_search_pay_goods_num,
+    searchPayOrderNum: sales?.flow_search_pay_order_num,
+    recommendExposeNum: sales?.flow_recommend_expose_num,
+    recommendClickNum: sales?.flow_recommend_click_num,
+    recommendPayGoodsNum: sales?.flow_recommend_pay_goods_num,
+    recommendPayOrderNum: sales?.flow_recommend_pay_order_num,
+    flowGrowStatus: sales?.flow_grow_status,
+    growDataText: sales?.flow_grow_data_text,
+    bsrGoods: sales?.flow_bsr_goods,
+  };
   const baseRaw = {
     ...(previousRaw && typeof previousRaw === "object" ? previousRaw : {}),
     ...rawItem,
+    ...Object.fromEntries(Object.entries(flowRaw).filter(([, value]) => value !== null && value !== undefined && value !== "")),
   } as any;
   const declaredPrice = firstCloudValue<number>(sales?.declared_price_cents, skc?.declared_price_cents);
   const currency = firstCloudValue<string>(sales?.price_currency, skc?.price_currency, baseRaw.currencyType) || "CNY";
   const warehouseStock = firstCloudValue<number>(sales?.warehouse_stock, skc?.stock_available) ?? 0;
+  const displayedSkcId = sales?.flow_only
+    ? firstCloudValue<string>(baseRaw.productSkcId, baseRaw.skcId, skc?.skc_id)
+    : firstCloudValue<string>(sales?.skc_id, skc?.skc_id, baseRaw.productSkcId);
   const cloudSku = {
     productSkuId: baseRaw.productSkuId || "",
     className: baseRaw.className || "",
@@ -547,8 +576,8 @@ function buildCloudSalesRaw(previousRaw: any, skc: SkcRow | undefined, sales: Te
     isCloudProduct: true,
     cloudSourceEvent: sales?.raw_source || null,
     supplierId: sales?.mall_supplier_id || skc?.mall_id || baseRaw.supplierId,
-    productSkcId: sales?.skc_id || skc?.skc_id || baseRaw.productSkcId,
-    productId: sales?.product_id || skc?.product_id || baseRaw.productId,
+    productSkcId: displayedSkcId || baseRaw.productSkcId,
+    productId: sales?.product_id || skc?.product_id || baseRaw.productId || baseRaw.productSpuId,
     goodsId: sales?.goods_id || baseRaw.goodsId,
     productName: sales?.title || skc?.title || baseRaw.productName,
     category: sales?.category_name || skc?.category_name || baseRaw.category,
@@ -586,19 +615,21 @@ function applyCloudProduct(product: ProductItem, skc: SkcRow | undefined, sales:
   const raw = sales?.raw_item && typeof sales.raw_item === "object" ? sales.raw_item as any : {};
   const rawSkuList = Array.isArray(raw.skuQuantityDetailList) ? raw.skuQuantityDetailList : [];
   const rawSku = rawSkuList[0] || {};
-  const skcId = firstCloudValue<string>(sales?.skc_id, skc?.skc_id);
+  const displayedSkcId = sales?.flow_only
+    ? firstCloudValue<string>(raw.productSkcId, raw.skcId, skc?.skc_id)
+    : firstCloudValue<string>(sales?.skc_id, skc?.skc_id, raw.productSkcId, raw.skcId);
   const declaredPrice = firstCloudValue<number>(sales?.declared_price_cents, skc?.declared_price_cents);
   const title = firstCloudValue<string>(sales?.title, skc?.title, raw.productName, raw.goodsName, raw.title);
   const category = firstCloudValue<string>(sales?.category_name, skc?.category_name, raw.category, raw.categoryName);
-  const imageUrl = normalizeImageUrl(firstCloudValue<string>(sales?.thumb_url, skc?.thumb_url, raw.productSkcPicture, raw.imageUrl, raw.thumbUrl));
+  const imageUrl = normalizeImageUrl(firstCloudValue<string>(sales?.thumb_url, skc?.thumb_url, raw.productSkcPicture, raw.goodsImageUrl, raw.imageUrl, raw.thumbUrl));
 
   product.cloudSkc = skc;
   product.cloudSales = sales;
   product.title = title || product.title;
   product.category = category || product.category;
   product.categories = category || product.categories;
-  product.skcId = skcId || normalizeText(raw.productSkcId || raw.skcId) || product.skcId;
-  product.spuId = firstCloudValue<string>(sales?.product_id, skc?.product_id, raw.productId, raw.spuId) || product.spuId;
+  product.skcId = displayedSkcId || "";
+  product.spuId = firstCloudValue<string>(sales?.product_id, skc?.product_id, raw.productId, raw.productSpuId, raw.spuId) || product.spuId;
   product.goodsId = firstCloudValue<string>(sales?.goods_id, raw.goodsId) || product.goodsId;
   product.sku = firstCloudValue<string>(rawSku.skuExtCode, rawSku.productSkuId, raw.skuCode) || product.sku;
   product.extCode = firstCloudValue<string>(sales?.sku_ext_code, raw.skcExtCode, rawSku.skuExtCode) || product.extCode;

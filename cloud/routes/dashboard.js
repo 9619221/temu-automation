@@ -45,6 +45,7 @@ function rawItemIds(item) {
     item?.skc_id,
     item?.productId,
     item?.product_id,
+    item?.productSpuId,
     item?.goodsId,
     item?.goods_id,
   ].map(normalizeId).filter(Boolean);
@@ -242,6 +243,148 @@ function withTrendSalesFallback(row, trendPayload) {
   return next;
 }
 
+function productFlowKeys(row) {
+  const keys = [];
+  const productId = normalizeId(row?.product_id);
+  const goodsId = normalizeId(row?.goods_id);
+  if (productId) keys.push(`product:${productId}`);
+  if (goodsId) keys.push(`goods:${goodsId}`);
+  return keys;
+}
+
+function getProductFlowRows(db, tenantId, requestedMallId, requestedDate, explicitDate) {
+  try {
+    let date = requestedDate;
+    if (!explicitDate) {
+      const latestWhere = ["tenant_id = ?"];
+      const latestParams = [tenantId];
+      if (requestedMallId) {
+        latestWhere.push("mall_id = ?");
+        latestParams.push(requestedMallId);
+      }
+      const latest = db.prepare(`
+        SELECT stat_date AS date
+        FROM temu_product_flow_snapshot
+        WHERE ${latestWhere.join(" AND ")}
+        ORDER BY stat_date DESC, last_updated_at DESC
+        LIMIT 1
+      `).get(...latestParams);
+      date = latest?.date || "";
+    }
+    if (!date) return [];
+    const where = ["tenant_id = ?", "stat_date = ?"];
+    const params = [tenantId, date];
+    if (requestedMallId) {
+      where.push("mall_id = ?");
+      params.push(requestedMallId);
+    }
+    return db.prepare(`
+      SELECT mall_id, site, stat_date, product_id, goods_id, title, category_name, thumb_url,
+             expose_num, click_num, detail_visit_num, detail_visitor_num,
+             add_to_cart_user_num, collect_user_num, pay_goods_num, pay_order_num, buyer_num,
+             expose_pay_conversion_rate, expose_click_conversion_rate, click_pay_conversion_rate,
+             search_expose_num, search_click_num, search_pay_goods_num, search_pay_order_num,
+             recommend_expose_num, recommend_click_num, recommend_pay_goods_num, recommend_pay_order_num,
+             flow_grow_status, grow_data_text, bsr_goods, source_event_id,
+             sources_json, last_updated_at
+      FROM temu_product_flow_snapshot
+      WHERE ${where.join(" AND ")}
+      ORDER BY COALESCE(pay_goods_num, 0) DESC, COALESCE(pay_order_num, 0) DESC
+      LIMIT 200
+    `).all(...params);
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) return [];
+    throw error;
+  }
+}
+
+function productFlowPayload(flow) {
+  if (!flow) return {};
+  return {
+    flow_stat_date: flow.stat_date,
+    flow_pay_goods_num: flow.pay_goods_num,
+    flow_pay_order_num: flow.pay_order_num,
+    flow_buyer_num: flow.buyer_num,
+    flow_expose_num: flow.expose_num,
+    flow_click_num: flow.click_num,
+    flow_detail_visit_num: flow.detail_visit_num,
+    flow_detail_visitor_num: flow.detail_visitor_num,
+    flow_add_to_cart_user_num: flow.add_to_cart_user_num,
+    flow_collect_user_num: flow.collect_user_num,
+    flow_expose_pay_conversion_rate: flow.expose_pay_conversion_rate,
+    flow_expose_click_conversion_rate: flow.expose_click_conversion_rate,
+    flow_click_pay_conversion_rate: flow.click_pay_conversion_rate,
+    flow_search_expose_num: flow.search_expose_num,
+    flow_search_click_num: flow.search_click_num,
+    flow_search_pay_goods_num: flow.search_pay_goods_num,
+    flow_search_pay_order_num: flow.search_pay_order_num,
+    flow_recommend_expose_num: flow.recommend_expose_num,
+    flow_recommend_click_num: flow.recommend_click_num,
+    flow_recommend_pay_goods_num: flow.recommend_pay_goods_num,
+    flow_recommend_pay_order_num: flow.recommend_pay_order_num,
+    flow_grow_status: flow.flow_grow_status,
+    flow_grow_data_text: flow.grow_data_text,
+    flow_bsr_goods: flow.bsr_goods,
+  };
+}
+
+function withProductFlowFallback(row, flow) {
+  if (!flow) return row;
+  const next = {
+    ...row,
+    ...productFlowPayload(flow),
+  };
+  next.mall_supplier_id = next.mall_supplier_id || flow.mall_id || null;
+  next.title = next.title || flow.title || null;
+  next.category_name = next.category_name || flow.category_name || null;
+  next.thumb_url = next.thumb_url || flow.thumb_url || null;
+  next.product_id = next.product_id || flow.product_id || null;
+  next.goods_id = next.goods_id || flow.goods_id || null;
+  if ((Number(next.today_sales) || 0) <= 0 && flow.pay_goods_num != null) {
+    next.today_sales = flow.pay_goods_num;
+  }
+  if ((Number(next.total_sales) || 0) <= 0 && flow.pay_goods_num != null) {
+    next.total_sales = flow.pay_goods_num;
+  }
+  return next;
+}
+
+function buildProductFlowSalesRow(flow) {
+  const productId = normalizeId(flow.product_id);
+  const goodsId = normalizeId(flow.goods_id);
+  return withProductFlowFallback({
+    flow_only: true,
+    skc_id: productId ? `SPU-${productId}` : `GOODS-${goodsId}`,
+    product_id: productId || null,
+    goods_id: goodsId || null,
+    mall_supplier_id: flow.mall_id || null,
+    title: flow.title || null,
+    category_name: flow.category_name || null,
+    thumb_url: flow.thumb_url || null,
+    sku_ext_code: null,
+    today_sales: flow.pay_goods_num,
+    last7d_sales: null,
+    last30d_sales: null,
+    total_sales: flow.pay_goods_num,
+    warehouse_stock: null,
+    occupy_stock: null,
+    unavailable_stock: null,
+    advice_qty: null,
+    available_sale_days: null,
+    declared_price_cents: null,
+    price_currency: null,
+    asf_score: null,
+    comment_num: null,
+    quality_after_sales_rate: null,
+    supply_status: null,
+    stock_status: null,
+    close_jit_status: null,
+    stat_date: flow.stat_date,
+    sources_json: flow.sources_json,
+    last_updated_at: flow.last_updated_at,
+  }, flow);
+}
+
 r.get("/stats", (req, res) => {
   const db = getDb();
   const tid = req.user.tid;
@@ -356,16 +499,45 @@ r.get("/temu-sales", (req, res) => {
     ORDER BY total_sales DESC
     LIMIT 200
   `).all(...params);
+  const flowRows = getProductFlowRows(db, tid, requestedMallId, date, Boolean(explicitDate));
+  const flowByKey = new Map();
+  for (const flow of flowRows) {
+    for (const key of productFlowKeys(flow)) {
+      if (!flowByKey.has(key)) flowByKey.set(key, flow);
+    }
+  }
+  const usedFlowKeys = new Set();
+  const payloadRows = rows.map((row) => {
+    const flow = productFlowKeys(row).map((key) => flowByKey.get(key)).find(Boolean);
+    if (flow) {
+      for (const key of productFlowKeys(flow)) usedFlowKeys.add(key);
+    }
+    const rawPayload = getRawProductPayload(db, tid, row);
+    const trendPayload = getSkuSalesTrendPayload(db, tid, rawPayload.raw_item);
+    return withTrendSalesFallback(withProductFlowFallback({
+      ...row,
+      ...rawPayload,
+    }, flow), trendPayload);
+  });
+  for (const flow of flowRows) {
+    const keys = productFlowKeys(flow);
+    if (keys.some((key) => usedFlowKeys.has(key))) continue;
+    const flowRow = buildProductFlowSalesRow(flow);
+    payloadRows.push({
+      ...flowRow,
+      ...getRawProductPayload(db, tid, flowRow),
+    });
+    for (const key of keys) usedFlowKeys.add(key);
+  }
+  payloadRows.sort((left, right) => {
+    const leftSales = Number(left.today_sales ?? left.total_sales ?? 0) || 0;
+    const rightSales = Number(right.today_sales ?? right.total_sales ?? 0) || 0;
+    if (rightSales !== leftSales) return rightSales - leftSales;
+    return String(left.title || "").localeCompare(String(right.title || ""), "zh-CN");
+  });
   res.json({
     date,
-    rows: rows.map((row) => {
-      const rawPayload = getRawProductPayload(db, tid, row);
-      const trendPayload = getSkuSalesTrendPayload(db, tid, rawPayload.raw_item);
-      return withTrendSalesFallback({
-        ...row,
-        ...rawPayload,
-      }, trendPayload);
-    }),
+    rows: payloadRows,
   });
 });
 
