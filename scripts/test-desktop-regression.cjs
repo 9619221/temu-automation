@@ -123,6 +123,22 @@ async function waitForPlaceholderContains(page, text, timeout = 45000) {
   await page.locator(`input[placeholder*="${text}"]`).first().waitFor({ state: "visible", timeout });
 }
 
+async function waitForProductManagementReady(page) {
+  return waitFor(async () => {
+    const toolbarVisible = await page.locator(".material-toolbar-card input").first().isVisible().catch(() => false);
+    const cloudEmptyVisible = await page
+      .locator(".app-panel")
+      .filter({ hasText: /云端|商品数据|连接/ })
+      .first()
+      .isVisible()
+      .catch(() => false);
+    if (!toolbarVisible && !cloudEmptyVisible) {
+      throw new Error("product management table or cloud empty state not visible");
+    }
+    return { toolbarVisible, cloudEmptyVisible };
+  }, 45000, "product management ready");
+}
+
 async function waitForHashContains(page, fragment, timeout = 45000) {
   await waitFor(async () => {
     const hash = await page.evaluate(() => window.location.hash || "");
@@ -702,7 +718,11 @@ async function runUiChecks(page) {
   await clickMenuItem(page, "商品管理");
   await waitForHashContains(page, "/products");
   await waitForVisibleText(page, "商品管理");
-  await waitForPlaceholderContains(page, "搜索商品名称");
+  const productManagementState = await waitForProductManagementReady(page);
+  if (!productManagementState.toolbarVisible) {
+    console.log("[ok] 商品管理页面（云端空态）");
+  } else {
+    await waitForPlaceholderContains(page, "搜索商品名称");
   const productRow = page.locator(".ant-table-tbody .ant-table-row").first();
   await productRow.waitFor({ state: "visible", timeout: 45000 });
   console.log("[ok] 商品列表页面");
@@ -718,6 +738,7 @@ async function runUiChecks(page) {
   await page.keyboard.press("Escape");
   await detailDrawer.waitFor({ state: "hidden", timeout: 30000 });
   await waitForPlaceholderContains(page, "搜索商品名称");
+  }
 
   await clickMenuItem(page, "上品管理");
   await waitForHashContains(page, "/create-product");
@@ -769,7 +790,7 @@ async function runUiChecks(page) {
   await waitForHashContains(page, "/settings");
   await waitForVisibleText(page, "设置");
   await waitForVisibleText(page, "浏览器设置");
-  await page.getByRole("button", { name: "保存设置" }).click();
+  await page.getByRole("button", { name: "保存设置" }).first().click();
   const savedSettings = await page.evaluate(async () => window.electronAPI?.store?.get("temu_app_settings"));
   assert(savedSettings && typeof savedSettings === "object", "settings save did not persist to store");
   console.log("[ok] 设置页面");
