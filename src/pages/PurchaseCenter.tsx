@@ -31,6 +31,7 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import type { TableRowSelection } from "antd/es/table/interface";
 import { useLocation, useNavigate } from "react-router-dom";
+import { createPortal } from "react-dom";
 import {
   ApiOutlined,
   CheckCircleOutlined,
@@ -1467,6 +1468,12 @@ const PURCHASE_ORDER_RISK_FILTER_OPTIONS = [
   { label: "售后跟进", value: "refund" },
   { label: "履约异常", value: "exception" },
 ];
+const PURCHASE_ORDER_COLUMN_MENU_WIDTH = 280;
+const PURCHASE_ORDER_COLUMN_MENU_EDGE_GAP = 12;
+const PURCHASE_ORDER_COLUMN_MENU_OFFSET = 8;
+const PURCHASE_ORDER_COLUMN_MENU_CHROME_HEIGHT = 96;
+const PURCHASE_ORDER_COLUMN_MENU_MIN_BODY_HEIGHT = 180;
+const PURCHASE_ORDER_COLUMN_MENU_MAX_BODY_HEIGHT = 430;
 const PURCHASE_WORKFLOW_STEP_ITEMS = [
   { title: "找品", description: "提交需求并找货源" },
   { title: "已找品", description: "采购确认完成找品" },
@@ -1529,6 +1536,47 @@ const PURCHASE_ORDER_COLUMN_LABELS: Record<string, string> = {
 interface PurchaseOrderColumnConfig {
   order: string[];
   visible: string[];
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function purchaseOrderColumnMenuPosition(clientX: number, clientY: number) {
+  const maxLeft = Math.max(
+    PURCHASE_ORDER_COLUMN_MENU_EDGE_GAP,
+    window.innerWidth - PURCHASE_ORDER_COLUMN_MENU_WIDTH - PURCHASE_ORDER_COLUMN_MENU_EDGE_GAP,
+  );
+  const maxTop = Math.max(
+    PURCHASE_ORDER_COLUMN_MENU_EDGE_GAP,
+    window.innerHeight
+      - PURCHASE_ORDER_COLUMN_MENU_CHROME_HEIGHT
+      - PURCHASE_ORDER_COLUMN_MENU_MIN_BODY_HEIGHT
+      - PURCHASE_ORDER_COLUMN_MENU_EDGE_GAP,
+  );
+  const x = clampNumber(
+    clientX + PURCHASE_ORDER_COLUMN_MENU_OFFSET,
+    PURCHASE_ORDER_COLUMN_MENU_EDGE_GAP,
+    maxLeft,
+  );
+  const y = clampNumber(
+    clientY + PURCHASE_ORDER_COLUMN_MENU_OFFSET,
+    PURCHASE_ORDER_COLUMN_MENU_EDGE_GAP,
+    maxTop,
+  );
+  const availableBodyHeight = window.innerHeight
+    - y
+    - PURCHASE_ORDER_COLUMN_MENU_CHROME_HEIGHT
+    - PURCHASE_ORDER_COLUMN_MENU_EDGE_GAP;
+  return {
+    x,
+    y,
+    bodyMaxHeight: clampNumber(
+      availableBodyHeight,
+      PURCHASE_ORDER_COLUMN_MENU_MIN_BODY_HEIGHT,
+      PURCHASE_ORDER_COLUMN_MENU_MAX_BODY_HEIGHT,
+    ),
+  };
 }
 
 function normalizePurchaseOrderColumnOrder(value: unknown) {
@@ -2061,7 +2109,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   const [expandedPoIds, setExpandedPoIds] = useState<string[]>([]);
   const [purchaseOrderColumnConfig, setPurchaseOrderColumnConfig] = useState<PurchaseOrderColumnConfig>(readPurchaseOrderColumnConfig);
   const [purchaseOrderColumnDraft, setPurchaseOrderColumnDraft] = useState<PurchaseOrderColumnConfig | null>(null);
-  const [purchaseOrderColumnMenu, setPurchaseOrderColumnMenu] = useState({ open: false, x: 0, y: 0 });
+  const [purchaseOrderColumnMenu, setPurchaseOrderColumnMenu] = useState({ open: false, x: 0, y: 0, bodyMaxHeight: PURCHASE_ORDER_COLUMN_MENU_MAX_BODY_HEIGHT });
   const [purchaseOrderDraggedColumn, setPurchaseOrderDraggedColumn] = useState<string | null>(null);
   // 推 1688 单时让用户先确认 / 切换收货地址，避免默认地址跑错
   const [pushAddressPicker, setPushAddressPicker] = useState<{ po: PurchaseOrderRow; addressId: string; purchase1688AccountId?: string } | null>(null);
@@ -2613,14 +2661,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   const openPurchaseOrderColumnMenu = useCallback((event: MouseEvent<HTMLElement>) => {
     event.preventDefault();
     event.stopPropagation();
+    const position = purchaseOrderColumnMenuPosition(event.clientX, event.clientY);
     setPurchaseOrderColumnDraft({
       order: [...purchaseOrderColumnConfig.order],
       visible: [...purchaseOrderColumnConfig.visible],
     });
     setPurchaseOrderColumnMenu({
       open: true,
-      x: Math.min(event.clientX, Math.max(16, window.innerWidth - 320)),
-      y: Math.min(event.clientY, Math.max(16, window.innerHeight - 520)),
+      ...position,
     });
   }, [purchaseOrderColumnConfig]);
 
@@ -6450,7 +6498,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
             </Button>
           </div>
         ) : null}
-        {purchaseOrderColumnMenu.open ? (
+        {purchaseOrderColumnMenu.open && typeof document !== "undefined" ? createPortal(
           <div
             className="purchase-order-column-menu"
             style={{ left: purchaseOrderColumnMenu.x, top: purchaseOrderColumnMenu.y }}
@@ -6458,7 +6506,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
             onContextMenu={(event) => event.preventDefault()}
           >
             <div className="purchase-order-column-menu__head">自定义字段显示信息</div>
-            <div className="purchase-order-column-menu__body">
+            <div className="purchase-order-column-menu__body" style={{ maxHeight: purchaseOrderColumnMenu.bodyMaxHeight }}>
               {activePurchaseOrderColumnConfig.order.map((field) => {
                 const checked = activePurchaseOrderColumnConfig.visible.includes(field);
                 return (
@@ -6488,7 +6536,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               <Button size="small" type="primary" onClick={savePurchaseOrderColumnConfig}>保存</Button>
               <Button size="small" onClick={restorePurchaseOrderColumnConfig}>还原</Button>
             </div>
-          </div>
+          </div>,
+          document.body,
         ) : null}
       </div>
 
