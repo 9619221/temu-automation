@@ -5619,13 +5619,14 @@ function openChromiumInternalPage(url) {
   if (!browserExe) {
     throw new Error("Chrome / Edge not found. Open chrome://extensions/ manually.");
   }
-  const child = spawn(browserExe, [url], {
+  const args = ["--new-window", url];
+  const child = spawn(browserExe, args, {
     detached: true,
     stdio: "ignore",
     windowsHide: false,
   });
   child.unref();
-  return browserExe;
+  return `${browserExe} ${args.join(" ")}`;
 }
 
 ipcMain.handle("app:get-extension-directory", async () => {
@@ -5641,8 +5642,7 @@ ipcMain.handle("app:open-extension-directory", async () => {
 
 ipcMain.handle("app:open-chrome-extensions", async () => {
   const url = "chrome://extensions/";
-  const browserExe = openChromiumInternalPage(url);
-  return `${browserExe} ${url}`;
+  return openChromiumInternalPage(url);
 });
 
 ipcMain.handle("app:open-external", async (_event, rawUrl) => {
