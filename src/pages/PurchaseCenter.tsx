@@ -577,8 +577,22 @@ interface Alibaba1688AddressRow {
   mobile?: string | null;
   address?: string;
   addressId?: string | null;
+  address_id?: string | null;
   isDefault?: boolean;
   purchase1688AccountId?: string | null;
+}
+
+function get1688AddressRemoteId(address?: Alibaba1688AddressRow | null) {
+  return String(address?.addressId || address?.address_id || "").trim();
+}
+
+function isUsable1688Address(address?: Alibaba1688AddressRow | null) {
+  return Boolean(get1688AddressRemoteId(address));
+}
+
+function pickDefaultUsable1688Address<T extends Alibaba1688AddressRow>(addresses: T[]) {
+  const usable = addresses.filter(isUsable1688Address);
+  return usable.find((address) => address.isDefault) || usable[0] || null;
 }
 
 interface Alibaba1688MessageSubscriptionRow {
@@ -2725,8 +2739,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   const activeOrderTotal = activeWorkArea === "orders" ? Number(purchaseOrderTotal || filteredActiveOrderRows.length) : 0;
   const purchaseSearchResultCount = filteredActiveRequestRows.length;
   const hasUsable1688Address = useMemo(
-    () => (data.alibaba1688Addresses || []).some((addr) =>
-      Boolean((addr as any).addressId || (addr as any).address_id)),
+    () => (data.alibaba1688Addresses || []).some(isUsable1688Address),
     [data.alibaba1688Addresses],
   );
   const orderTablePagination = useMemo(() => ({
@@ -4493,7 +4506,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       void push1688Order(row, { purchase1688AccountId });
       return;
     }
-    const preselect = (addresses.find((a) => a.isDefault) || addresses[0]).id;
+    const preselect = pickDefaultUsable1688Address(addresses)?.id || "";
     setPushAddressPicker({ po: row, addressId: preselect, purchase1688AccountId });
   };
 
@@ -4557,7 +4570,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       const filteredForBuyer = (data.alibaba1688Addresses || []).filter(
         (addr) => String((addr as any).purchase1688AccountId || "") === initialAcctId,
       );
-      const defaultAddress = filteredForBuyer.find((addr) => addr.isDefault) || filteredForBuyer[0] || null;
+      const defaultAddress = pickDefaultUsable1688Address(filteredForBuyer);
       setPushAccountPicker({
         po: row,
         accountId: initialAcctId,
@@ -4702,7 +4715,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       if (!oauthsInPlay.length) return true;
       return oauthsInPlay.includes(String((addr as any).purchase1688AccountId || ""));
     });
-    const defaultAddress = filteredAddresses.find((a) => a.isDefault) || filteredAddresses[0] || null;
+    const defaultAddress = pickDefaultUsable1688Address(filteredAddresses);
 
     setBatchPushPicker({
       addressId: defaultAddress?.id || null,
@@ -6722,6 +6735,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         okText="确认推送"
         cancelText="取消"
         confirmLoading={actingKey === `1688-push-${pushAddressPicker?.po.id}`}
+        okButtonProps={{
+          disabled: !pushAddressPicker || !(data.alibaba1688Addresses || []).some((addr) => (
+            addr.id === pushAddressPicker.addressId
+            && isUsable1688Address(addr)
+            && (!pushAddressPicker.purchase1688AccountId || String((addr as any).purchase1688AccountId || "") === pushAddressPicker.purchase1688AccountId)
+          )),
+        }}
         width={680}
         onCancel={() => setPushAddressPicker(null)}
         onOk={async () => {
@@ -6739,6 +6759,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
             if (!pickerOAuth) return true;
             return String((addr as any).purchase1688AccountId || "") === pickerOAuth;
           });
+          const hasRemoteAddress = filtered.some(isUsable1688Address);
           return (
             <Space direction="vertical" size={10} style={{ width: "100%" }}>
               <Text type="secondary" style={{ fontSize: 12 }}>
@@ -6747,10 +6768,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               {filtered.length > 0 ? (
                 <Select
                   style={{ width: "100%" }}
-                  value={pushAddressPicker.addressId}
+                  value={pushAddressPicker.addressId || undefined}
+                  placeholder="请选择带 1688 远端 ID 的收货地址"
                   onChange={(newId: string) => setPushAddressPicker((prev) => prev ? { ...prev, addressId: newId } : null)}
                   options={filtered.map((addr, i) => {
-                    const remoteId = (addr as any).addressId || (addr as any).address_id;
+                    const remoteId = get1688AddressRemoteId(addr);
                     const display = addr.fullName || addr.label || `地址 ${i + 1}`;
                     const summary = [
                       display,
@@ -6769,6 +6791,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
                   当前 1688 采购账号下还没有可用收货地址。请去「店铺 / 1688 设置」点「同步 1688 地址」拉一份，再回来选择。
                 </div>
               )}
+              {filtered.length > 0 && !hasRemoteAddress ? (
+                <Alert
+                  type="warning"
+                  showIcon
+                  message="这些地址还缺 1688 远端 ID"
+                  description="请先点「同步 1688 地址」拉取远端完整地址；只有带远端 ID 的地址才能推送 1688 下单。"
+                />
+              ) : null}
             </Space>
           );
         })() : null}
@@ -6789,6 +6819,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         okText="确认使用"
         cancelText="取消"
         confirmLoading={actingKey === `1688-push-${pushAccountPicker?.po.id}`}
+        okButtonProps={{
+          disabled: !pushAccountPicker || !(data.alibaba1688Addresses || []).some((addr) => (
+            addr.id === pushAccountPicker.addressId
+            && isUsable1688Address(addr)
+            && String((addr as any).purchase1688AccountId || "") === pushAccountPicker.accountId
+          )),
+        }}
         width={680}
         onCancel={() => setPushAccountPicker(null)}
         onOk={async () => {
@@ -6807,6 +6844,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
           const filteredAddrs = (data.alibaba1688Addresses || []).filter(
             (a) => String((a as any).purchase1688AccountId || "") === pushAccountPicker.accountId,
           );
+          const hasRemoteAddress = filteredAddrs.some(isUsable1688Address);
           return (
             <Space direction="vertical" size={16} style={{ width: "100%" }}>
               <div>
@@ -6820,7 +6858,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
                       const matched = (data.alibaba1688Addresses || []).filter(
                         (a) => String((a as any).purchase1688AccountId || "") === newId,
                       );
-                      const nextAddrId = matched.find((a) => a.isDefault)?.id || matched[0]?.id || null;
+                      const nextAddrId = pickDefaultUsable1688Address(matched)?.id || null;
                       return { ...prev, accountId: newId, addressId: nextAddrId };
                     });
                   }}
@@ -6834,26 +6872,37 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               <div>
                 <Text strong style={{ fontSize: 13 }}>收货地址</Text>
                 {filteredAddrs.length > 0 ? (
-                  <Select
-                    style={{ width: "100%", marginTop: 6 }}
-                    value={pushAccountPicker.addressId || undefined}
-                    placeholder="请选择收货地址"
-                    onChange={(newId: string) => setPushAccountPicker((prev) => prev ? { ...prev, addressId: newId } : null)}
-                    options={filteredAddrs.map((addr, i) => {
-                      const remoteId = (addr as any).addressId || (addr as any).address_id;
-                      const display = addr.fullName || addr.label || `地址 ${i + 1}`;
-                      const summary = [
-                        display,
-                        addr.mobile || "",
-                        (addr.address || "-").slice(0, 30),
-                      ].filter(Boolean).join(" · ");
-                      return {
-                        value: addr.id,
-                        label: summary + (addr.isDefault ? "（默认）" : "") + (remoteId ? "" : "（未绑 1688，不可推单）"),
-                        disabled: !remoteId,
-                      };
-                    })}
-                  />
+                  <>
+                    <Select
+                      style={{ width: "100%", marginTop: 6 }}
+                      value={pushAccountPicker.addressId || undefined}
+                      placeholder="请选择收货地址"
+                      onChange={(newId: string) => setPushAccountPicker((prev) => prev ? { ...prev, addressId: newId } : null)}
+                      options={filteredAddrs.map((addr, i) => {
+                        const remoteId = get1688AddressRemoteId(addr);
+                        const display = addr.fullName || addr.label || `地址 ${i + 1}`;
+                        const summary = [
+                          display,
+                          addr.mobile || "",
+                          (addr.address || "-").slice(0, 30),
+                        ].filter(Boolean).join(" · ");
+                        return {
+                          value: addr.id,
+                          label: summary + (addr.isDefault ? "（默认）" : "") + (remoteId ? "" : "（未绑 1688，不可推单）"),
+                          disabled: !remoteId,
+                        };
+                      })}
+                    />
+                    {filteredAddrs.length > 0 && !hasRemoteAddress ? (
+                      <Alert
+                        type="warning"
+                        showIcon
+                        style={{ marginTop: 8 }}
+                        message="这些地址还缺 1688 远端 ID"
+                        description="请点下面「同步地址」重新从 1688 拉取完整地址；只有带远端 ID 的地址才能推送下单。"
+                      />
+                    ) : null}
+                  </>
                 ) : (
                   <Alert
                     type="warning"
@@ -6916,7 +6965,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
           : "开始批量推送"}
         cancelText="取消"
         confirmLoading={!!batchPushPicker?.running}
-        okButtonProps={{ disabled: !batchPushPicker?.groups.length || !batchPushPicker?.addressId }}
+        okButtonProps={{
+          disabled: !batchPushPicker?.groups.length
+            || !batchPushPicker?.addressId
+            || !(data.alibaba1688Addresses || []).some((addr) =>
+              addr.id === batchPushPicker?.addressId && isUsable1688Address(addr)),
+        }}
         width={760}
         maskClosable={false}
         onCancel={() => {
@@ -6972,8 +7026,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
                             !newOauths.length || newOauths.includes(String((a as any).purchase1688AccountId || "")),
                           );
                           const currentAddrStillValid = prev.addressId
-                            && newFiltered.some((a) => a.id === prev.addressId);
-                          const nextAddrId = currentAddrStillValid ? prev.addressId : (newFiltered.find((a) => a.isDefault)?.id || newFiltered[0]?.id || null);
+                            && newFiltered.some((a) => a.id === prev.addressId && isUsable1688Address(a));
+                          const nextAddrId = currentAddrStillValid ? prev.addressId : (pickDefaultUsable1688Address(newFiltered)?.id || null);
                           return {
                             ...prev,
                             addressId: nextAddrId,
@@ -7005,7 +7059,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
                     onChange={(value) => setBatchPushPicker((prev) => prev ? { ...prev, addressId: value || null } : prev)}
                     placeholder="请选择收货地址"
                     options={filteredAddrs.map((addr, i) => {
-                      const remoteId = (addr as any).addressId || (addr as any).address_id;
+                      const remoteId = get1688AddressRemoteId(addr);
                       const display = addr.fullName || addr.label || `地址 ${i + 1}`;
                       const summary = [
                         display,

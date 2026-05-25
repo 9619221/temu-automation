@@ -8228,7 +8228,11 @@ function get1688DeliveryAddress(db, addressId = null, companyId = DEFAULT_COMPAN
       WHERE company_id = @company_id
         AND purchase_1688_account_id = @oauth_id
         AND status = 'active'
-      ORDER BY is_default DESC, updated_at DESC, created_at DESC
+      ORDER BY
+        CASE WHEN address_id IS NOT NULL AND address_id != '' THEN 0 ELSE 1 END,
+        is_default DESC,
+        updated_at DESC,
+        created_at DESC
       LIMIT 1
     `).get({ company_id: normalizedCompanyId, oauth_id: normalizedOauth });
     if (row) return row;
@@ -8240,7 +8244,9 @@ function get1688DeliveryAddress(db, addressId = null, companyId = DEFAULT_COMPAN
       WHERE company_id = @company_id
         AND account_id = @account_id
         AND status = 'active'
-      ORDER BY is_default DESC,
+      ORDER BY
+        CASE WHEN address_id IS NOT NULL AND address_id != '' THEN 0 ELSE 1 END,
+        is_default DESC,
         updated_at DESC,
         created_at DESC
       LIMIT 1
@@ -8255,7 +8261,11 @@ function get1688DeliveryAddress(db, addressId = null, companyId = DEFAULT_COMPAN
     WHERE company_id = @company_id
       AND (account_id IS NULL OR account_id = '')
       AND status = 'active'
-    ORDER BY is_default DESC, updated_at DESC, created_at DESC
+    ORDER BY
+      CASE WHEN address_id IS NOT NULL AND address_id != '' THEN 0 ELSE 1 END,
+      is_default DESC,
+      updated_at DESC,
+      created_at DESC
     LIMIT 1
   `).get({ company_id: normalizedCompanyId });
   if (!row) throw new Error("1688 delivery address is not configured");
