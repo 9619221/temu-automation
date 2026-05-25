@@ -24,6 +24,7 @@ const { Text } = Typography;
 const ONLINE_WINDOW_MS = 90_000;
 const REFRESH_INTERVAL_MS = 15_000;
 const OPERATIONS_EXTENSION_FREE_ROUTES = new Set(["/collect", "/settings"]);
+const CHROME_EXTENSIONS_URL = "chrome://extensions/";
 
 interface OperationsExtensionGateProps {
   role?: string | null;
@@ -144,10 +145,23 @@ export default function OperationsExtensionGate({ role, routePath, children }: O
   };
 
   const openChromeExtensions = async () => {
+    let copied = false;
+    try {
+      await navigator.clipboard?.writeText(CHROME_EXTENSIONS_URL);
+      copied = true;
+    } catch {}
     try {
       await window.electronAPI?.app?.openChromeExtensions?.();
+      message.success(
+        "已复制 chrome://extensions/。如果 Chrome 还停在首页，请直接粘贴到地址栏并回车。",
+        8,
+      );
     } catch (error: any) {
-      message.error(error?.message || "打开 Chrome 扩展管理页失败");
+      if (copied) {
+        message.warning("已复制 chrome://extensions/，请粘贴到 Chrome 地址栏并回车。", 8);
+      } else {
+        message.error(error?.message || "打开 Chrome 扩展管理页失败");
+      }
     }
   };
 
@@ -200,6 +214,9 @@ export default function OperationsExtensionGate({ role, routePath, children }: O
         <div className="operations-extension-gate__notice">
           扩展目录：{extensionDir || "未获取到目录，请点击“本机扩展目录”"}
         </div>
+        <div className="operations-extension-gate__notice">
+          扩展管理地址：{CHROME_EXTENSIONS_URL}。如果按钮没有自动跳转，就在 Chrome 地址栏粘贴并回车。
+        </div>
 
         <div className="operations-extension-gate__steps">
           <div className="operations-extension-gate__step">
@@ -237,7 +254,7 @@ export default function OperationsExtensionGate({ role, routePath, children }: O
             本机扩展目录
           </Button>
           <Button icon={<ChromeOutlined />} onClick={openChromeExtensions}>
-            扩展管理
+            复制并打开扩展页
           </Button>
           <Button icon={<CopyOutlined />} onClick={copyExtensionDirectory}>
             复制目录
