@@ -24,7 +24,7 @@ if (args.since) { where.push("ts >= ?"); params.push(Number(args.since)); }
 const limit = Number(args.limit) || 50000;
 
 const rows = db.prepare(`
-  SELECT id, tenant_id, device_id, mall_id, site, url_path, body_json, ts
+  SELECT id, tenant_id, device_id, mall_id, site, page, url_path, body_json, ts
   FROM capture_events
   WHERE ${where.join(" AND ")}
   ORDER BY ts ASC
@@ -41,6 +41,7 @@ for (const r of rows) {
   groups.get(key).items.push({
     id: r.id,
     url_path: r.url_path,
+    page: r.page,
     body_json: r.body_json,
     ts: r.ts,
     mall_id: r.mall_id,

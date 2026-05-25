@@ -3436,6 +3436,18 @@ function getLocalAuthStatus() {
 }
 
 async function getAuthStatus() {
+  if (process.env.TEMU_DESKTOP_REGRESSION_AUTH === "1") {
+    const currentUser = {
+      id: "user_desktop_regression_admin",
+      name: "Desktop Regression Admin",
+      role: "admin",
+      companyId: DEFAULT_COMPANY_ID,
+      companyName: DEFAULT_COMPANY_NAME,
+      companyCode: DEFAULT_COMPANY_CODE,
+    };
+    erpState.currentUser = currentUser;
+    return { hasUsers: true, currentUser };
+  }
   if (!isClientMode()) {
     setClientMode({ serverUrl: HK_SERVER_URL });
   }
@@ -3445,7 +3457,7 @@ async function getAuthStatus() {
 }
 
 function createBootstrapAdmin(payload = {}) {
-  assertHostMode("initial admin bootstrap");
+  assertHostMode("首个管理员创建");
   if (!erpState.db) {
     setHostMode();
     initializeHostErp({ userDataDir: erpState.userDataDir });
@@ -3473,19 +3485,26 @@ function createBootstrapAdmin(payload = {}) {
 }
 
 function createFirstAdmin() {
-  throw new Error("Desktop local admin creation was removed. Create users in HK cloud.");
+  throw new Error("桌面端已移除本地管理员创建，请在 HK 云端用户管理中创建账号");
 }
 
 async function loginElectronUser(payload = {}) {
+  if (process.env.TEMU_DESKTOP_REGRESSION_AUTH === "1") {
+    return getAuthStatus();
+  }
   const status = await remoteLogin({ ...payload, serverUrl: HK_SERVER_URL });
   erpState.currentUser = status.currentUser || null;
-  // Warm SKU cache after cloud login; failures fall back to on-demand sync.
+  // 登录后预热商品资料缓存（fire-and-forget）：用户进商品资料/采购页前缓存就开始建，
+  // 进页时多半已就绪可秒开。失败静默，listSkusRuntime 仍会按需触发兜底。
   void skuCache.triggerSync({ mode: "incremental" }).catch(() => {});
   void skuCache.triggerReconcile().catch(() => {});
   return status;
 }
 
 async function logoutElectronUser() {
+  if (process.env.TEMU_DESKTOP_REGRESSION_AUTH === "1") {
+    return getAuthStatus();
+  }
   if (!isClientMode()) {
     setClientMode({ serverUrl: HK_SERVER_URL });
   }
@@ -13513,6 +13532,127 @@ function getPurchaseOrdersForPayment(db, payload = {}) {
   return db.prepare(`SELECT * FROM erp_purchase_orders WHERE id IN (${placeholders})`).all(poIds);
 }
 
+function get1688PaymentErrorText(error) {
+  const payload = error?.payload || error?.response || {};
+  return optionalString(firstDefinedValue(
+    error?.message,
+    payload.erroMsg,
+    payload.errorMsg,
+    payload.error_msg,
+    payload.errorMessage,
+    payload.message,
+    payload.msg,
+    payload.error,
+  )) || String(error || "");
+}
+
+function isRecoverable1688BatchPaymentError(error) {
+  const text = get1688PaymentErrorText(error);
+  return /订单不存在|不是待支付|待支付状态|待付款|createAliPayUrl|ORDER_NOT_PAY|ORDER_HAS_PAID|已付款|已取消|无权限/i.test(text);
+}
+
+async function request1688PaymentUrl({ db, payload, actor, accountId, orderIds }) {
+  const apiParams = build1688PaymentUrlParams(payload, orderIds);
+  const rawResponse = payload.mockPaymentResponse || payload.mockResponse || await call1688ProcurementApi({
+    db,
+    actor,
+    accountId,
+    action: "get_1688_payment_url",
+    api: PROCUREMENT_APIS.PAYMENT_URL,
+    params: apiParams,
+    purchase1688AccountId: optionalString(payload.purchase1688AccountId || payload.purchase_1688_account_id),
+  });
+  const paymentUrl = extract1688PaymentUrl(rawResponse);
+  if (!paymentUrl) {
+    const error = new Error("1688 没有返回支付链接，请检查订单是否待付款");
+    error.payload = rawResponse;
+    error.requestParams = apiParams;
+    throw error;
+  }
+  return { apiParams, rawResponse, paymentUrl };
+}
+
+async function recover1688PaymentUrlBySingleOrders({ db, payload, actor, accountId, orderIds }) {
+  const attempts = [];
+  for (const orderId of orderIds) {
+    try {
+      const result = await request1688PaymentUrl({
+        db,
+        payload,
+        actor,
+        accountId,
+        orderIds: [orderId],
+      });
+      attempts.push({
+        orderId,
+        ok: true,
+        paymentUrl: result.paymentUrl,
+        rawResponse: result.rawResponse,
+      });
+    } catch (error) {
+      attempts.push({
+        orderId,
+        ok: false,
+        error: get1688PaymentErrorText(error),
+        errorCode: optionalString(error?.errorCode || error?.payload?.errorCode || error?.payload?.error_code || error?.payload?.code),
+      });
+    }
+  }
+
+  const payableAttempts = attempts.filter((item) => item.ok && item.paymentUrl);
+  if (!payableAttempts.length) {
+    const failureText = attempts
+      .map((item) => `${item.orderId}: ${item.error || "不可付款"}`)
+      .join("; ");
+    const error = new Error(`1688 没有可付款订单。${failureText}`);
+    error.partialPaymentFailures = attempts;
+    throw error;
+  }
+
+  const payableOrderIds = payableAttempts.map((item) => item.orderId);
+  if (payableOrderIds.length > 1) {
+    try {
+      const grouped = await request1688PaymentUrl({
+        db,
+        payload,
+        actor,
+        accountId,
+        orderIds: payableOrderIds,
+      });
+      return {
+        ...grouped,
+        paymentUrlSource: "batch_partial",
+        payableOrderIds,
+        paymentUrls: payableAttempts.map((item) => ({ orderId: item.orderId, paymentUrl: item.paymentUrl })),
+        partialPaymentFailures: attempts.filter((item) => !item.ok),
+      };
+    } catch (error) {
+      return {
+        apiParams: build1688PaymentUrlParams(payload, payableOrderIds),
+        rawResponse: {
+          singleOrderPaymentAttempts: attempts,
+          groupedPaymentError: get1688PaymentErrorText(error),
+        },
+        paymentUrl: payableAttempts[0].paymentUrl,
+        paymentUrlSource: "individual",
+        payableOrderIds,
+        paymentUrls: payableAttempts.map((item) => ({ orderId: item.orderId, paymentUrl: item.paymentUrl })),
+        partialPaymentFailures: attempts.filter((item) => !item.ok),
+      };
+    }
+  }
+
+  return {
+    apiParams: build1688PaymentUrlParams(payload, payableOrderIds),
+    rawResponse: payableAttempts[0].rawResponse,
+    paymentUrl: payableAttempts[0].paymentUrl,
+    paymentUrlSource: "individual",
+    payableOrderIds,
+    paymentUrls: payableAttempts.map((item) => ({ orderId: item.orderId, paymentUrl: item.paymentUrl })),
+    partialPaymentFailures: attempts.filter((item) => !item.ok),
+  };
+}
+
 async function get1688PaymentUrlAction({ db, services, payload, actor }) {
   assertActorRole(actor, ["finance", "manager", "admin", "buyer"], "1688 支付链接");
   const purchaseOrders = getPurchaseOrdersForPayment(db, payload);
@@ -13523,36 +13663,41 @@ async function get1688PaymentUrlAction({ db, services, payload, actor }) {
   ].map((item) => optionalString(item)).filter(Boolean)));
   const apiParams = build1688PaymentUrlParams(payload, orderIds);
   if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.PAYMENT_URL.key, params: apiParams };
-  const rawResponse = payload.mockPaymentResponse || payload.mockResponse || await call1688ProcurementApi({
-    db,
-    actor,
-    accountId: purchaseOrders[0]?.account_id || optionalString(payload.accountId),
-    action: "get_1688_payment_url",
-    api: PROCUREMENT_APIS.PAYMENT_URL,
-    params: apiParams,
-    purchase1688AccountId: optionalString(payload.purchase1688AccountId || payload.purchase_1688_account_id),
-  });
-  const paymentUrl = extract1688PaymentUrl(rawResponse);
-  if (!paymentUrl) throw new Error("1688 没有返回支付链接，请检查订单是否待付款");
+  const accountId = purchaseOrders[0]?.account_id || optionalString(payload.accountId);
+  let paymentResult;
+  try {
+    paymentResult = await request1688PaymentUrl({ db, payload, actor, accountId, orderIds });
+  } catch (error) {
+    if (orderIds.length <= 1 || !isRecoverable1688BatchPaymentError(error)) throw error;
+    paymentResult = await recover1688PaymentUrlBySingleOrders({ db, payload, actor, accountId, orderIds });
+  }
+  const paymentUrl = paymentResult.paymentUrl;
+  const payableOrderIds = Array.isArray(paymentResult.payableOrderIds) && paymentResult.payableOrderIds.length
+    ? paymentResult.payableOrderIds
+    : orderIds;
   const updated = purchaseOrders
-    .filter((po) => orderIds.includes(String(po.external_order_id || "")))
+    .filter((po) => payableOrderIds.includes(String(po.external_order_id || "")))
     .map((po) => updatePurchaseOrderFrom1688Snapshot({
       db,
       services,
       po,
       order: { externalOrderId: po.external_order_id, status: po.external_order_status },
       paymentUrl,
-      rawPayment: rawResponse,
+      rawPayment: paymentResult.rawResponse,
       action: "get_1688_payment_url",
       actor,
     }));
   return {
     apiKey: PROCUREMENT_APIS.PAYMENT_URL.key,
-    query: apiParams,
+    query: paymentResult.apiParams,
     paymentUrl,
+    paymentUrlSource: paymentResult.paymentUrlSource || "batch",
+    paymentUrls: paymentResult.paymentUrls || [],
+    partialPaymentFailures: paymentResult.partialPaymentFailures || [],
     externalOrderIds: orderIds,
+    payableOrderIds,
     purchaseOrders: updated.map(toCamelRow),
-    rawResponse,
+    rawResponse: paymentResult.rawResponse,
   };
 }
 
@@ -16294,11 +16439,9 @@ function selectTemuOutboundBatches(db, { accountId, skuId, qty }) {
   };
 }
 
-function getExistingTemuOutboundShipments(db, { accountId, skuId, stockOrder }) {
+function buildTemuOutboundIdentityConditions(stockOrder = {}) {
   const conditions = [];
   const params = {
-    account_id: accountId,
-    sku_id: skuId,
     temu_stock_order_no: stockOrder.stockOrderNo,
     temu_delivery_order_sn: stockOrder.deliveryOrderSn,
     temu_delivery_batch_sn: stockOrder.deliveryBatchSn,
@@ -16306,7 +16449,17 @@ function getExistingTemuOutboundShipments(db, { accountId, skuId, stockOrder }) 
   if (stockOrder.stockOrderNo) conditions.push("shipment.temu_stock_order_no = @temu_stock_order_no");
   if (stockOrder.deliveryOrderSn) conditions.push("shipment.temu_delivery_order_sn = @temu_delivery_order_sn");
   if (stockOrder.deliveryBatchSn) conditions.push("shipment.temu_delivery_batch_sn = @temu_delivery_batch_sn");
+  return { conditions, params };
+}
+
+function getExistingTemuOutboundShipments(db, { accountId = null, skuId = null, stockOrder }) {
+  const { conditions, params } = buildTemuOutboundIdentityConditions(stockOrder);
   if (!conditions.length) return [];
+  if (accountId) params.account_id = accountId;
+  if (skuId) params.sku_id = skuId;
+  const scope = [];
+  if (accountId) scope.push("shipment.account_id = @account_id");
+  if (skuId) scope.push("shipment.sku_id = @sku_id");
   return db.prepare(`
     SELECT
       shipment.*,
@@ -16315,9 +16468,8 @@ function getExistingTemuOutboundShipments(db, { accountId, skuId, stockOrder }) 
       batch.reserved_qty AS batch_reserved_qty
     FROM erp_outbound_shipments shipment
     LEFT JOIN erp_inventory_batches batch ON batch.id = shipment.batch_id
-    WHERE shipment.account_id = @account_id
-      AND shipment.sku_id = @sku_id
-      AND shipment.status != 'cancelled'
+    WHERE shipment.status != 'cancelled'
+      ${scope.length ? `AND ${scope.join(" AND ")}` : ""}
       AND (${conditions.join(" OR ")})
     ORDER BY shipment.created_at ASC, shipment.id ASC
   `).all(params);
@@ -16334,6 +16486,22 @@ function previewTemuStockOrderOutbound({ db, payload }) {
   if (demandRemainingQty !== null && requestedQty > demandRemainingQty) {
     throw new Error(`出库数量不能超过 Temu 剩余需求：${demandRemainingQty}`);
   }
+  const existingRowsAcrossAccounts = getExistingTemuOutboundShipments(db, { stockOrder });
+  const existingQtyAcrossAccounts = existingRowsAcrossAccounts.reduce((sum, row) => sum + Number(row.qty || 0), 0);
+  if (existingQtyAcrossAccounts >= requestedQty) {
+    return {
+      stockOrder,
+      requestedQty,
+      demandRemainingQty,
+      matchedSku: null,
+      existingQty: existingQtyAcrossAccounts,
+      remainingQty: 0,
+      existingShipments: existingRowsAcrossAccounts.map(toCamelRow),
+      availableQty: 0,
+      shortageQty: 0,
+      allocationPlan: [],
+    };
+  }
   const sku = findTemuOutboundSku(db, {
     accountId,
     skcId: stockOrder.skcId,
@@ -16341,7 +16509,9 @@ function previewTemuStockOrderOutbound({ db, payload }) {
     productId: stockOrder.productId,
     skuExtCode: stockOrder.skuExtCode,
   });
-  const existingRows = getExistingTemuOutboundShipments(db, { accountId, skuId: sku.id, stockOrder });
+  const existingRows = existingRowsAcrossAccounts.length
+    ? existingRowsAcrossAccounts
+    : getExistingTemuOutboundShipments(db, { accountId, skuId: sku.id, stockOrder });
   const existingQty = existingRows.reduce((sum, row) => sum + Number(row.qty || 0), 0);
   const remainingQty = Math.max(0, requestedQty - existingQty);
   const allocation = remainingQty > 0
@@ -17275,7 +17445,8 @@ async function performPurchaseActionRuntime(payload = {}) {
 }
 
 async function getWarehouseWorkbenchRuntime(params = {}) {
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     const payload = await remoteRequest("/api/warehouse/workbench", {
       method: "POST",
       body: params,
@@ -17287,7 +17458,8 @@ async function getWarehouseWorkbenchRuntime(params = {}) {
 }
 
 async function performWarehouseActionRuntime(payload = {}) {
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     const response = await remoteRequest("/api/warehouse/action", {
       method: "POST",
       body: payload,
@@ -17299,7 +17471,8 @@ async function performWarehouseActionRuntime(payload = {}) {
 }
 
 async function getQcWorkbenchRuntime(params = {}) {
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     const payload = await remoteRequest("/api/qc/workbench");
     return payload.workbench || {};
   }
@@ -17307,7 +17480,8 @@ async function getQcWorkbenchRuntime(params = {}) {
 }
 
 async function performQcActionRuntime(payload = {}) {
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     const response = await remoteRequest("/api/qc/action", {
       method: "POST",
       body: payload,
@@ -17319,7 +17493,8 @@ async function performQcActionRuntime(payload = {}) {
 }
 
 async function getOutboundWorkbenchRuntime(params = {}) {
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     const payload = await remoteRequest("/api/outbound/workbench");
     return payload.workbench || {};
   }
@@ -17327,7 +17502,8 @@ async function getOutboundWorkbenchRuntime(params = {}) {
 }
 
 async function performOutboundActionRuntime(payload = {}) {
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     const response = await remoteRequest("/api/outbound/action", {
       method: "POST",
       body: payload,
@@ -17387,7 +17563,8 @@ async function updateWorkItemStatusRuntime(payload = {}) {
 }
 
 async function listUsersRuntime(params = {}) {
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     const payload = await remoteRequest("/api/users/list", {
       method: "POST",
       body: params,
@@ -17401,7 +17578,8 @@ async function listUsersRuntime(params = {}) {
 }
 
 async function upsertUserRuntime(payload = {}, actor = {}) {
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     const response = await remoteRequest("/api/users/upsert", {
       method: "POST",
       body: payload,
@@ -17413,7 +17591,8 @@ async function upsertUserRuntime(payload = {}, actor = {}) {
 }
 
 async function getMasterDataWorkbenchRuntime(params = {}) {
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     const payload = await remoteRequest("/api/master-data/workbench", {
       method: "POST",
       body: params,
@@ -17451,7 +17630,8 @@ async function listAccountsRuntime(params = {}) {
 }
 
 async function upsertAccountRuntime(payload = {}, actor = {}) {
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     const response = await remoteRequest("/api/master-data/action", {
       method: "POST",
       body: {
@@ -17466,7 +17646,8 @@ async function upsertAccountRuntime(payload = {}, actor = {}) {
 }
 
 async function deleteAccountRuntime(payload = {}, actor = {}) {
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     const response = await remoteRequest("/api/master-data/action", {
       method: "POST",
       body: {
@@ -17487,7 +17668,8 @@ async function listSuppliersRuntime(params = {}) {
 }
 
 async function createSupplierRuntime(payload = {}, actor = {}) {
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     const response = await remoteRequest("/api/master-data/action", {
       method: "POST",
       body: {
@@ -17603,7 +17785,8 @@ async function importFeishuSuppliersFromExtensionRuntime(payload = {}, actor = {
 async function listSkusRuntime(params = {}) {
   // client 模式：优先读本地 cache.db（秒返回），后台 fire-and-forget 增量同步；
   // 缓存未建（首次）先走服务器分页返回，后台再全量建 cache。host 模式直接走本地 SQL。
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     try {
       const cached = skuCache.getCachedSkus(params);
       if (cached) {
@@ -17624,10 +17807,28 @@ async function listSkusRuntime(params = {}) {
   return workbench.skus || [];
 }
 
+async function listSkuStockDetailsRuntime(params = {}) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    try {
+      const payload = await remoteRequest("/api/master-data/sku-stock-details", {
+        method: "POST",
+        body: params,
+        timeoutMs: 60000,
+      });
+      return payload.result || payload.stockDetails || payload;
+    } catch (error) {
+      if (error?.statusCode && error.statusCode !== 404) throw error;
+    }
+  }
+  return listSkuStockDetails(params);
+}
+
 async function listMappingsRuntime(params = {}) {
   // client 模式：优先读本地 cache.db（秒返回），后台 fire-and-forget 增量同步；
   // 缓存未建（首次）则同步等一次全量再返回。host 模式直接走本地 SQL。
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     try {
       const cached = mappingCache.getCachedMappings(params);
       if (cached) {
@@ -17671,7 +17872,8 @@ async function listMappingsRuntime(params = {}) {
 // 供应商管理「已绑定」Tab 服务端分页：返回 { rows, total }。一次调用同时拿当页和总数，
 // 避免 list / count 分两个 IPC 出现游标竞态。client 走本地 cache.db 分页，host 走本地 SQL。
 async function listMappingsPageRuntime(params = {}) {
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     try {
       // 首页等一次增量同步保证数据新鲜（无游标自动转全量建基线）；翻页后台静默追增量。
       if (!Number(params.offset)) await mappingCache.triggerSync({ mode: "incremental" });
@@ -17699,7 +17901,8 @@ async function listMappingsPageRuntime(params = {}) {
 // 供应商管理「未绑定」Tab 服务端分页：返回 { rows, total }。未绑定 = sku 减去 mapping，
 // 依赖 sku_cache 与 mapping_cache 两份本地缓存，首页同时等两者就绪后再求差。
 async function listUnmappedSkusPageRuntime(params = {}) {
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     try {
       if (!Number(params.offset)) {
         await skuCache.triggerSync({ mode: "incremental" });
@@ -17724,7 +17927,8 @@ async function listUnmappedSkusPageRuntime(params = {}) {
 }
 
 async function createSkuRuntime(payload = {}, actor = {}) {
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     const response = await remoteRequest("/api/master-data/action", {
       method: "POST",
       body: {
@@ -17739,7 +17943,8 @@ async function createSkuRuntime(payload = {}, actor = {}) {
 }
 
 async function saveSkuBundleRuntime(payload = {}, actor = {}) {
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     const response = await remoteRequest("/api/master-data/action", {
       method: "POST",
       body: {
@@ -17755,7 +17960,8 @@ async function saveSkuBundleRuntime(payload = {}, actor = {}) {
 }
 
 async function listSkuBundleComponentsRuntime(params = {}) {
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     const response = await remoteRequest("/api/master-data/action", {
       method: "POST",
       body: {
@@ -17769,7 +17975,8 @@ async function listSkuBundleComponentsRuntime(params = {}) {
 }
 
 async function deleteSkuRuntime(payload = {}, actor = {}) {
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     const response = await remoteRequest("/api/master-data/action", {
       method: "POST",
       body: {
@@ -17784,7 +17991,8 @@ async function deleteSkuRuntime(payload = {}, actor = {}) {
 }
 
 function getLanServiceStatus() {
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     const runtime = getRuntimeStatus();
     return {
       running: Boolean(runtime.serverUrl),
@@ -17834,6 +18042,7 @@ function startLanService(payload = {}) {
     listSuppliers,
     createSupplier,
     listSkus,
+    listSkuStockDetails,
     listSku1688Sources,
     createSku,
     deleteSku,
@@ -18004,6 +18213,7 @@ async function startErpHeadlessServer(options = {}) {
     listSuppliers,
     createSupplier,
     listSkus,
+    listSkuStockDetails,
     listSku1688Sources,
     createSku,
     deleteSku,
@@ -18196,7 +18406,8 @@ function registerErpIpcHandlers(ipcMain) {
   });
   ipcMain.handle("erp:sync-temu-sales", async (_event, payload) => {
     try {
-      if (isClientMode()) {
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
         return await remoteRequest("/api/temu/sales-sync", {
           method: "POST",
           body: payload || {},
@@ -18237,16 +18448,19 @@ function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:account:upsert", (_event, payload) => upsertAccountRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:account:delete", (_event, payload) => deleteAccountRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:user:list", (_event, params) => {
-    if (!isClientMode()) assertHostMode("用户管理");
+    if (!shouldUseClientRuntime()) assertHostMode("用户管理");
     return listUsersRuntime(params || {});
   });
   ipcMain.handle("erp:user:upsert", (_event, payload) => {
-    if (!isClientMode()) assertHostMode("用户管理");
+    if (!shouldUseClientRuntime()) assertHostMode("用户管理");
     return upsertUserRuntime(payload || {}, erpState.currentUser || {});
   });
   ipcMain.handle("erp:permission:get-profile", () => {
-    if (!isClientMode()) assertHostMode("权限档案");
-    if (isClientMode()) return remoteRequest("/api/permissions/profile");
+    if (shouldUseClientRuntime()) {
+      ensureClientRuntime();
+      return remoteRequest("/api/permissions/profile");
+    }
+    assertHostMode("权限档案");
     return getPermissionProfile(erpState.currentUser);
   });
   ipcMain.handle("erp:permission:upsert-role", (_event, payload) => {
@@ -18263,6 +18477,7 @@ function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:supplier:create", (_event, payload) => createSupplierRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:supplier:import-feishu-once", (_event, payload) => importFeishuSuppliersOnceRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:sku:list", (_event, params) => listSkusRuntime(params || {}));
+  ipcMain.handle("erp:sku:stock-details", (_event, params) => listSkuStockDetailsRuntime(params || {}));
   ipcMain.handle("erp:sku:create", (_event, payload) => createSkuRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:sku:delete", (_event, payload) => deleteSkuRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:sku:bundle-save", (_event, payload) => saveSkuBundleRuntime(payload || {}, erpState.currentUser || {}));

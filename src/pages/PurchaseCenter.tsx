@@ -1491,6 +1491,39 @@ function get1688PaymentUrlFromResult(result: any) {
   return value || null;
 }
 
+function get1688PaymentUrlSourceFromResult(result: any) {
+  const payload = get1688PaymentResultPayload(result);
+  return typeof payload?.paymentUrlSource === "string" ? payload.paymentUrlSource : "";
+}
+
+function get1688PaymentUrlsFromResult(result: any): Array<{ orderId: string; paymentUrl: string }> {
+  const payload = get1688PaymentResultPayload(result);
+  if (!Array.isArray(payload?.paymentUrls)) return [];
+  return payload.paymentUrls
+    .map((item: any) => ({
+      orderId: String(item?.orderId || "").trim(),
+      paymentUrl: String(item?.paymentUrl || "").trim(),
+    }))
+    .filter((item: any) => item.orderId && item.paymentUrl);
+}
+
+function get1688PayableOrderIdsFromResult(result: any): string[] {
+  const payload = get1688PaymentResultPayload(result);
+  if (!Array.isArray(payload?.payableOrderIds)) return [];
+  return payload.payableOrderIds.map((item: any) => String(item || "").trim()).filter(Boolean);
+}
+
+function get1688PaymentFailuresFromResult(result: any): Array<{ orderId: string; error: string }> {
+  const payload = get1688PaymentResultPayload(result);
+  if (!Array.isArray(payload?.partialPaymentFailures)) return [];
+  return payload.partialPaymentFailures
+    .map((item: any) => ({
+      orderId: String(item?.orderId || "").trim(),
+      error: String(item?.error || "不可付款").trim(),
+    }))
+    .filter((item: any) => item.orderId);
+}
+
 async function openExternalUrl(url: string) {
   const externalOpener = (window as any)?.electronAPI?.app?.openExternal;
   if (typeof externalOpener === "function") {
@@ -2413,6 +2446,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   } | null>(null);
   // 切账号时自动同步该账号的地址(每个账号本 Modal 周期内最多自动同步一次,避免循环)。
   const pickerAutoSyncedRef = useRef<Set<string>>(new Set());
+  const addressPickerAutoSyncedRef = useRef<Set<string>>(new Set());
   // 批量推 1688：按店铺分组，每组共用 1688 采购账号；地址全局共一份。
   const [batchPushPicker, setBatchPushPicker] = useState<{
     addressId: string | null;
@@ -3275,6 +3309,35 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       }
     })();
   }, [pushAccountPicker, data.alibaba1688Addresses, loadSupplementalWorkbenchData]);
+
+  useEffect(() => {
+    if (!pushAddressPicker) {
+      addressPickerAutoSyncedRef.current = new Set();
+      return;
+    }
+    const acctId = pushAddressPicker.purchase1688AccountId || "";
+    const scopeKey = acctId || `account:${pushAddressPicker.po.accountId || ""}`;
+    if (!scopeKey || addressPickerAutoSyncedRef.current.has(scopeKey)) return;
+    const filtered = (data.alibaba1688Addresses || []).filter((a) => {
+      if (!acctId) return true;
+      return String((a as any).purchase1688AccountId || "") === acctId;
+    });
+    if (filtered.some(isUsable1688Address)) return;
+    addressPickerAutoSyncedRef.current.add(scopeKey);
+    (async () => {
+      try {
+        await erp?.purchase?.action?.({
+          action: "sync_1688_addresses",
+          accountId: pushAddressPicker.po.accountId,
+          purchase1688AccountId: acctId || undefined,
+          includeWorkbench: false,
+        }, { timeoutMs: 120000 });
+        await loadSupplementalWorkbenchData();
+      } catch {
+        // 保持弹窗可见，用户仍可从询盘设置手动同步。
+      }
+    })();
+  }, [pushAddressPicker, data.alibaba1688Addresses, loadSupplementalWorkbenchData]);
 
   const loadData = useCallback(async (options: { silent?: boolean; withSupplemental?: boolean; sideLoads?: boolean } = {}) => {
     if (!erp) return;
@@ -4680,7 +4743,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       ? allAddrs.filter((a) => String((a as any).purchase1688AccountId || "") === purchase1688AccountId)
       : allAddrs;
     if (!addresses.length) {
-      void push1688Order(row, { purchase1688AccountId });
+      setPushAddressPicker({ po: row, addressId: "", purchase1688AccountId });
       return;
     }
     const preselect = pickDefaultUsable1688Address(addresses)?.id || "";
@@ -4787,17 +4850,50 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       poIds,
       includeWorkbench: false,
     });
+    if (!result) return;
+    const paymentUrlSource = get1688PaymentUrlSourceFromResult(result);
+    const paymentUrls = get1688PaymentUrlsFromResult(result);
+    const partialFailures = get1688PaymentFailuresFromResult(result);
+    if (paymentUrlSource === "individual" && paymentUrls.length) {
+      const uniquePaymentUrlMap = new Map<string, { orderId: string; paymentUrl: string }>();
+      paymentUrls.forEach((item) => uniquePaymentUrlMap.set(item.paymentUrl, item));
+      const uniquePaymentUrls = Array.from(uniquePaymentUrlMap.values());
+      for (const item of uniquePaymentUrls) {
+        await openExternalUrl(item.paymentUrl);
+      }
+      selectedPurchaseOrders.forEach((row) => {
+        const match = paymentUrls.find((item) => item.orderId === String(row.externalOrderId || ""));
+        if (!match) return;
+        patchPurchaseOrderRow(row.id, {
+          externalPaymentUrl: match.paymentUrl,
+          externalPaymentUrlSyncedAt: new Date().toISOString(),
+        });
+      });
+      if (partialFailures.length) {
+        message.warning(`已打开 ${uniquePaymentUrls.length} 个可付款订单；${partialFailures.length} 个订单不在待付款或账号不匹配`);
+      } else {
+        message.success(`已打开 ${uniquePaymentUrls.length} 个 1688 支付页`);
+      }
+      return;
+    }
     const paymentUrl = get1688PaymentUrlFromResult(result);
     if (paymentUrl) {
       await openExternalUrl(paymentUrl);
+      const payableOrderIds = get1688PayableOrderIdsFromResult(result);
+      const payableOrderIdSet = new Set(payableOrderIds);
       selectedPurchaseOrders.forEach((row) => {
         if (!row.externalOrderId) return;
+        if (payableOrderIdSet.size && !payableOrderIdSet.has(String(row.externalOrderId))) return;
         patchPurchaseOrderRow(row.id, {
           externalPaymentUrl: paymentUrl,
           externalPaymentUrlSyncedAt: new Date().toISOString(),
         });
       });
-      message.success("已打开 1688 批量支付页");
+      if (partialFailures.length) {
+        message.warning(`已打开可付款订单的 1688 支付页；${partialFailures.length} 个订单不在待付款或账号不匹配`);
+      } else {
+        message.success("已打开 1688 批量支付页");
+      }
       return;
     }
     navigator.clipboard?.writeText(orderIds.join("\n")).catch(() => {});

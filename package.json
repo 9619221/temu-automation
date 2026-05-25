@@ -1,7 +1,7 @@
 {
   "name": "temu-automation",
   "private": true,
-  "version": "0.3.39",
+  "version": "0.3.41",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -34,7 +34,8 @@
     "preview": "vite preview",
     "electron": "cross-env NODE_ENV=development electron .",
     "erp:server": "node scripts/erp-server.cjs",
-    "pack:ext": "node extension/scripts/pack-crx.cjs"
+    "pack:ext": "node extension/scripts/pack-crx.cjs",
+    "pack:webstore": "node extension/scripts/pack-webstore.cjs"
   },
   "build": {
     "appId": "com.temu.automation",
@@ -95,6 +96,8 @@
     },
     "nsis": {
       "oneClick": false,
+      "perMachine": true,
+      "allowElevation": true,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,

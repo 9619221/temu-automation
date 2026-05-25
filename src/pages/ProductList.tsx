@@ -31,6 +31,7 @@ import {
   normalizeCollectionDiagnostics,
   type CollectionDiagnostics,
 } from "../utils/collectionDiagnostics";
+import { readPageCache, writePageCache } from "../utils/pageCache";
 import { getStoreValue } from "../utils/storeCompat";
 import { ACTIVE_ACCOUNT_CHANGED_EVENT, STORE_VALUE_UPDATED_EVENT } from "../utils/multiStore";
 import { TrafficDriverPanel, buildTrafficDriverSitesFromProduct, type TrafficSiteKey } from "../components/TrafficDriverPanel";
@@ -57,6 +58,7 @@ const store = window.electronAPI?.store;
 const automation = window.electronAPI?.automation;
 
 type StatusFilter = "all" | "在售" | "已下架" | "未发布" | "other" | "saleOut" | "soonSaleOut" | "shortage" | "advice";
+type ActivityDetailFilter = "all" | "running" | "notStarted";
 
 type ProductSkuSpec = {
   parentSpecName: string;
@@ -71,6 +73,23 @@ type ProductSkuSummary = {
   specText: string;
   specName: string;
   extCode: string;
+};
+
+type ActivitySkuPriceRow = {
+  id: string;
+  activity: TemuActivityRow;
+  skuId: string;
+  skuExtCode: string;
+  skuAttr: string;
+  dailyPriceCents: number | null;
+  activityPriceCents: number | null;
+  suggestedPriceCents: number | null;
+  priceDiffCents: number | null;
+  currency: string;
+  reportedQty: number | null;
+  remainingQty: number | null;
+  signupTimeText: string;
+  sourceScore: number;
 };
 
 type FluxSiteKey = "global" | "us" | "eu";
@@ -225,6 +244,18 @@ interface CloudProductBundle {
   configured: boolean;
 }
 
+interface CloudProductBundleCache {
+  generatedAt: string;
+  latestAt: string;
+  skcRows: SkcRow[];
+  salesRows: TemuSalesRow[];
+  activityRows: TemuActivityRow[];
+  riskRows: TemuOperationRiskRow[];
+  stockOrderRows: TemuStockOrderRow[];
+  afterSaleRows: TemuAfterSaleRow[];
+  shopSales: TemuShopSalesRow | null;
+}
+
 const EMPTY_SOURCES: ProductSourceState = {
   products: false,
   sales: false,
@@ -239,6 +270,8 @@ const EMPTY_COUNT_SUMMARY: ProductCountSummary = {
 };
 
 const CLOUD_PRODUCTS_ONLY: boolean = true;
+const CLOUD_PRODUCT_BUNDLE_CACHE_KEY = "temu.product-list.cloud-bundle.cache.v1";
+const CLOUD_PRODUCT_FETCH_TIMEOUT_MS = 10000;
 
 const PRODUCT_ID_LOOKUP_FIELDS = [
   "skcId",
@@ -807,38 +840,158 @@ function operationRiskColor(value?: string | null) {
   return "default";
 }
 
-async function loadCloudProductBundle(): Promise<CloudProductBundle> {
-  const empty = {
-    skcRows: [],
-    salesRows: [],
-    activityRows: [],
-    riskRows: [],
-    stockOrderRows: [],
-    afterSaleRows: [],
-    shopSales: null,
-    skcMap: new Map<string, SkcRow>(),
-    salesMap: new Map<string, TemuSalesRow>(),
-    activityMap: new Map<string, TemuActivityRow[]>(),
-    riskMap: new Map<string, TemuOperationRiskRow[]>(),
-    stockOrderMap: new Map<string, TemuStockOrderRow[]>(),
-    afterSaleMap: new Map<string, TemuAfterSaleRow[]>(),
-    latestAt: "",
-    error: "",
-    configured: false,
+function cloudProductBundleHasData(bundle: Pick<CloudProductBundleCache, "skcRows" | "salesRows" | "activityRows" | "riskRows" | "stockOrderRows" | "afterSaleRows" | "shopSales">) {
+  return (
+    bundle.skcRows.length > 0
+    || bundle.salesRows.length > 0
+    || bundle.activityRows.length > 0
+    || bundle.riskRows.length > 0
+    || bundle.stockOrderRows.length > 0
+    || bundle.afterSaleRows.length > 0
+    || Boolean(bundle.shopSales)
+  );
+}
+
+function hydrateCloudProductBundle(
+  source: Partial<CloudProductBundleCache>,
+  meta: { configured: boolean; error?: string; latestAt?: string },
+): CloudProductBundle {
+  const skcRows = Array.isArray(source.skcRows) ? source.skcRows : [];
+  const salesRows = Array.isArray(source.salesRows) ? source.salesRows : [];
+  const activityRows = Array.isArray(source.activityRows) ? source.activityRows : [];
+  const riskRows = Array.isArray(source.riskRows) ? source.riskRows : [];
+  const stockOrderRows = Array.isArray(source.stockOrderRows) ? source.stockOrderRows : [];
+  const afterSaleRows = Array.isArray(source.afterSaleRows) ? source.afterSaleRows : [];
+  const skcMap = new Map<string, SkcRow>();
+  const salesMap = new Map<string, TemuSalesRow>();
+  for (const row of skcRows) {
+    if (row.skc_id) skcMap.set(cloudKeyFromSkc(row), row);
+  }
+  for (const row of salesRows) {
+    if (row.skc_id) salesMap.set(cloudKeyFromSales(row), row);
+  }
+  return {
+    skcRows,
+    salesRows,
+    activityRows,
+    riskRows,
+    stockOrderRows,
+    afterSaleRows,
+    shopSales: source.shopSales || null,
+    skcMap,
+    salesMap,
+    activityMap: buildCloudActivityMap(activityRows),
+    riskMap: buildCloudRiskMap(riskRows),
+    stockOrderMap: buildCloudStockOrderMap(stockOrderRows),
+    afterSaleMap: buildCloudAfterSaleMap(afterSaleRows),
+    latestAt: meta.latestAt || source.latestAt || latestCloudTimestamp(skcRows, salesRows, activityRows, riskRows, stockOrderRows, afterSaleRows),
+    error: meta.error || "",
+    configured: meta.configured,
   };
+}
+
+function snapshotCloudProductBundle(bundle: CloudProductBundle): CloudProductBundleCache {
+  return {
+    generatedAt: new Date().toISOString(),
+    latestAt: bundle.latestAt,
+    skcRows: bundle.skcRows,
+    salesRows: bundle.salesRows,
+    activityRows: bundle.activityRows,
+    riskRows: bundle.riskRows,
+    stockOrderRows: bundle.stockOrderRows,
+    afterSaleRows: bundle.afterSaleRows,
+    shopSales: bundle.shopSales,
+  };
+}
+
+function normalizeCloudProductBundleCache(value: unknown): CloudProductBundleCache | null {
+  if (!value || typeof value !== "object") return null;
+  const source = value as Partial<CloudProductBundleCache>;
+  const cache: CloudProductBundleCache = {
+    generatedAt: String(source.generatedAt || ""),
+    latestAt: String(source.latestAt || ""),
+    skcRows: Array.isArray(source.skcRows) ? source.skcRows : [],
+    salesRows: Array.isArray(source.salesRows) ? source.salesRows : [],
+    activityRows: Array.isArray(source.activityRows) ? source.activityRows : [],
+    riskRows: Array.isArray(source.riskRows) ? source.riskRows : [],
+    stockOrderRows: Array.isArray(source.stockOrderRows) ? source.stockOrderRows : [],
+    afterSaleRows: Array.isArray(source.afterSaleRows) ? source.afterSaleRows : [],
+    shopSales: source.shopSales || null,
+  };
+  return cache.generatedAt && cloudProductBundleHasData(cache) ? cache : null;
+}
+
+async function readCachedCloudProductBundle(error: string, configured: boolean): Promise<CloudProductBundle | null> {
+  const pageCache = normalizeCloudProductBundleCache(
+    readPageCache<CloudProductBundleCache | null>(CLOUD_PRODUCT_BUNDLE_CACHE_KEY, null),
+  );
+  if (pageCache) {
+    return hydrateCloudProductBundle(pageCache, {
+      configured,
+      error,
+      latestAt: pageCache.latestAt || pageCache.generatedAt,
+    });
+  }
+
+  try {
+    const storeValue = await store?.get?.(CLOUD_PRODUCT_BUNDLE_CACHE_KEY);
+    const storeCache = normalizeCloudProductBundleCache(storeValue);
+    if (storeCache) {
+      writePageCache<CloudProductBundleCache>(CLOUD_PRODUCT_BUNDLE_CACHE_KEY, storeCache);
+      return hydrateCloudProductBundle(storeCache, {
+        configured,
+        error,
+        latestAt: storeCache.latestAt || storeCache.generatedAt,
+      });
+    }
+  } catch {
+    // Cache is display-only. If one backend is unavailable, keep going.
+  }
+  return null;
+}
+
+async function writeCachedCloudProductBundle(bundle: CloudProductBundle) {
+  if (!cloudProductBundleHasData(bundle)) return;
+  const snapshot = snapshotCloudProductBundle(bundle);
+  writePageCache<CloudProductBundleCache>(CLOUD_PRODUCT_BUNDLE_CACHE_KEY, snapshot);
+  try {
+    await store?.set?.(CLOUD_PRODUCT_BUNDLE_CACHE_KEY, snapshot);
+  } catch {
+    // localStorage already has the same display snapshot.
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, messageText: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(messageText)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+async function loadCloudProductBundle(): Promise<CloudProductBundle> {
+  const empty = hydrateCloudProductBundle({}, { configured: false });
 
   try {
     const cfg = await loadCloudConfig();
-    if (!cfg) return empty;
-    const [skc, sales, shopSales, activity, risks, stockOrders, afterSales] = await Promise.all([
-      fetchSkcList(cfg, { limit: 5000 }),
-      fetchTemuSales(cfg, { include_flow_only: true, limit: 5000 }),
-      fetchTemuShopSales(cfg),
-      fetchTemuActivity(cfg, { limit: 3000 }),
-      fetchTemuOperationRisks(cfg, { limit: 3000 }),
-      fetchTemuStockOrders(cfg, { limit: 3000 }),
-      fetchTemuAfterSales(cfg, { limit: 3000 }),
-    ]);
+    if (!cfg) {
+      return await readCachedCloudProductBundle("云端未配置，显示上次云端缓存", false) || empty;
+    }
+    const [skc, sales, shopSales, activity, risks, stockOrders, afterSales] = await withTimeout(
+      Promise.all([
+        fetchSkcList(cfg, { limit: 5000 }),
+        fetchTemuSales(cfg, { include_flow_only: true, limit: 5000 }),
+        fetchTemuShopSales(cfg),
+        fetchTemuActivity(cfg, { limit: 3000 }),
+        fetchTemuOperationRisks(cfg, { limit: 3000 }),
+        fetchTemuStockOrders(cfg, { limit: 3000 }),
+        fetchTemuAfterSales(cfg, { limit: 3000 }),
+      ]),
+      CLOUD_PRODUCT_FETCH_TIMEOUT_MS,
+      "云端读取超时，已显示上次云端缓存",
+    );
     const rawSkcRows = Array.isArray(skc?.rows) ? skc.rows : [];
     const diagnosticSkcIds = new Set(
       rawSkcRows
@@ -853,19 +1006,7 @@ async function loadCloudProductBundle(): Promise<CloudProductBundle> {
     const riskRows = (Array.isArray(risks?.rows) ? risks.rows : []).filter((row) => !isDiagnosticCloudRisk(row));
     const stockOrderRows = (Array.isArray(stockOrders?.rows) ? stockOrders.rows : []).filter((row) => !isDiagnosticCloudStockOrder(row));
     const afterSaleRows = (Array.isArray(afterSales?.rows) ? afterSales.rows : []).filter((row) => !isDiagnosticCloudAfterSale(row));
-    const skcMap = new Map<string, SkcRow>();
-    const salesMap = new Map<string, TemuSalesRow>();
-    const activityMap = buildCloudActivityMap(activityRows);
-    const riskMap = buildCloudRiskMap(riskRows);
-    const stockOrderMap = buildCloudStockOrderMap(stockOrderRows);
-    const afterSaleMap = buildCloudAfterSaleMap(afterSaleRows);
-    for (const row of skcRows) {
-      if (row.skc_id) skcMap.set(cloudKeyFromSkc(row), row);
-    }
-    for (const row of salesRows) {
-      if (row.skc_id) salesMap.set(cloudKeyFromSales(row), row);
-    }
-    return {
+    const bundle = hydrateCloudProductBundle({
       skcRows,
       salesRows,
       activityRows,
@@ -873,20 +1014,20 @@ async function loadCloudProductBundle(): Promise<CloudProductBundle> {
       stockOrderRows,
       afterSaleRows,
       shopSales: shopSales?.row || null,
-      skcMap,
-      salesMap,
-      activityMap,
-      riskMap,
-      stockOrderMap,
-      afterSaleMap,
-      latestAt: latestCloudTimestamp(skcRows, salesRows, activityRows, riskRows, stockOrderRows, afterSaleRows),
-      error: "",
-      configured: true,
+    }, { configured: true });
+    if (cloudProductBundleHasData(bundle)) {
+      await writeCachedCloudProductBundle(bundle);
+      return bundle;
+    }
+    return await readCachedCloudProductBundle("云端本次返回为空，已显示上次云端缓存", true) || {
+      ...bundle,
+      error: "云端本次返回为空，未找到可用缓存",
     };
   } catch (error: any) {
-    return {
+    const messageText = error?.message || "读取云端商品数据失败";
+    return await readCachedCloudProductBundle(`读取云端失败，已显示上次云端缓存：${messageText}`, true) || {
       ...empty,
-      error: error?.message || "读取云端商品数据失败",
+      error: messageText,
       configured: true,
     };
   }
@@ -1590,6 +1731,10 @@ function activityDisplayInfo(activity: TemuActivityRow) {
   const totalVisitors = pickActivityNumber(activity, null, ["totalVisitorsNum", "activityGoodsVisitorsNum", "visitorsNum"]);
   const clickVisitors = pickActivityNumber(activity, null, ["clickVisitorsNum", "clickVisitorNum"]);
   const payVisitors = pickActivityNumber(activity, null, ["payVisitorsNum", "payVisitorNum"]);
+  const canEnrollSessionCount = pickActivityNumber(activity, null, ["canEnrollSessionCount"]);
+  const stockThreshold = pickActivityNumber(activity, null, ["stockThreshold"]);
+  const discountThreshold = pickActivityNumber(activity, null, ["discountThreshold"]);
+  const activityStarLevel = pickActivityNumber(activity, null, ["activityStarLevel"]);
   return {
     title: inferredActivityTitle(activity, raw),
     type: inferredActivityType(activity),
@@ -1605,6 +1750,10 @@ function activityDisplayInfo(activity: TemuActivityRow) {
     totalVisitors,
     clickVisitors,
     payVisitors,
+    canEnrollSessionCount,
+    stockThreshold,
+    discountThreshold,
+    activityStarLevel,
     startText: formatTimestamp(activity.start_at),
     endText: formatTimestamp(activity.end_at),
     updatedText: formatTimestamp(activity.last_updated_at),
@@ -1617,9 +1766,12 @@ function activityMetricParts(activity: TemuActivityRow) {
   if (info.activitySales !== null) parts.push(`活动销量 ${Number(info.activitySales).toLocaleString("zh-CN")}`);
   if (info.transactionAmount !== null) parts.push(`活动成交 ${formatActivityAmount(info.transactionAmount, info.currency)}`);
   if (info.totalVisitors !== null) parts.push(`访客 ${Number(info.totalVisitors).toLocaleString("zh-CN")}`);
+  if (info.canEnrollSessionCount !== null) parts.push(`可报名场次 ${Number(info.canEnrollSessionCount).toLocaleString("zh-CN")}`);
   if (info.signupPrice !== null) parts.push(`报名价 ${formatActivityMoney(info.signupPrice, info.currency)}`);
   if (info.suggestedPrice !== null) parts.push(`建议价 ${formatActivityMoney(info.suggestedPrice, info.currency)}`);
   if (info.stock !== null) parts.push(`活动库存 ${Number(info.stock).toLocaleString("zh-CN")}`);
+  if (info.stockThreshold !== null) parts.push(`库存门槛 ${Number(info.stockThreshold).toLocaleString("zh-CN")}`);
+  if (info.discountThreshold !== null) parts.push(`折扣门槛 ${Number(info.discountThreshold).toLocaleString("zh-CN")}`);
   if (info.diff !== null) parts.push(`差异 ${formatActivityDiff(info.diff, info.currency)}`);
   return parts;
 }
@@ -1630,6 +1782,371 @@ function activityTimeText(activity: TemuActivityRow) {
   const end = info.endText;
   if (start && end) return `${start} - ${end}`;
   return start || end || "";
+}
+
+function activityUsefulnessScore(activity: TemuActivityRow) {
+  const info = activityDisplayInfo(activity);
+  const sourcePath = activitySourcePath(activity);
+  const statusText = String(info.status || "").toLowerCase();
+  let score = 0;
+  if (/marketing\/enroll\/scroll\/match/i.test(sourcePath)) score += 160;
+  if (activity.skc_id) score += 80;
+  if (activity.product_id) score += 60;
+  if (activity.goods_id) score += 30;
+  if (/available|active|running|pass|success|can|可报名|通过|进行|成功/i.test(statusText)) score += 70;
+  if (/pending|wait|review|audit|待|审核/i.test(statusText)) score += 30;
+  if (info.signupPrice !== null) score += 35;
+  if (info.suggestedPrice !== null) score += 25;
+  if (info.stock !== null) score += 30;
+  if (info.diff !== null) score += 25;
+  if (info.canEnrollSessionCount !== null) score += 20;
+  if (info.activitySales !== null || info.transactionAmount !== null || info.totalVisitors !== null) score += 20;
+  return score;
+}
+
+function parseActivityTimeMs(value?: number | string | null) {
+  if (value === null || value === undefined || value === "") return null;
+  const raw = String(value).trim();
+  const numeric = typeof value === "number" ? value : (/^\d+$/.test(raw) ? Number(raw) : NaN);
+  const parsed = Number.isFinite(numeric) ? numeric : Date.parse(raw.replace(/\//g, "-"));
+  const ms = parsed > 0 && parsed < 10_000_000_000 ? parsed * 1000 : parsed;
+  return Number.isFinite(ms) && ms > 0 ? ms : null;
+}
+
+function activityLifecycle(activity: TemuActivityRow): "running" | "notStarted" | "other" {
+  const info = activityDisplayInfo(activity);
+  const statusText = `${info.status || ""} ${activity.activity_status || ""}`.toLowerCase();
+  if (/未开始|待开始|可报名|not\s*start|upcoming/.test(statusText)) return "notStarted";
+  if (/进行|running|active|生效/.test(statusText)) return "running";
+  const startMs = parseActivityTimeMs(activity.start_at);
+  const endMs = parseActivityTimeMs(activity.end_at);
+  const now = Date.now();
+  if (startMs && startMs > now) return "notStarted";
+  if (startMs && startMs <= now && (!endMs || endMs >= now)) return "running";
+  return "other";
+}
+
+function activityDerivedStatusText(activity: TemuActivityRow) {
+  const info = activityDisplayInfo(activity);
+  if (info.status && info.status !== "-") return info.status;
+  const lifecycle = activityLifecycle(activity);
+  if (lifecycle === "running") return "进行中";
+  if (lifecycle === "notStarted") return "未开始";
+  return "-";
+}
+
+function parseDisplayPriceCents(value: unknown) {
+  if (value === null || value === undefined || value === "") return null;
+  const numeric = typeof value === "number" ? value : parseFloat(String(value).replace(/[^\d.-]/g, ""));
+  if (!Number.isFinite(numeric)) return null;
+  if (Math.abs(numeric) >= 1000 && Number.isInteger(numeric)) return Math.round(numeric);
+  return Math.round(numeric * 100);
+}
+
+function stringifyActivitySpecValue(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "";
+  if (typeof value !== "object") return normalizeText(value);
+  if (Array.isArray(value)) {
+    return value.map(stringifyActivitySpecValue).filter(Boolean).join(" / ");
+  }
+  const record = value as Record<string, any>;
+  const direct = normalizeText(firstDeepValue(record, ["specText", "skuAttr", "skuAttrText", "skuAttribute", "skuName", "className", "attrName"], 1));
+  if (direct) return direct;
+  const label = normalizeText(firstDeepValue(record, ["parentSpecName", "specKey", "key", "name", "label"], 1));
+  const text = normalizeText(firstDeepValue(record, ["specName", "unitSpecName", "value", "text", "title"], 1));
+  if (label && text) return `${label}: ${text}`;
+  return text || label;
+}
+
+function activitySignupTimeText(activity: TemuActivityRow) {
+  const metric = parseCloudJsonObject(activity.metric_json);
+  const raw = parseCloudJsonObject(activity.raw_json);
+  const value = firstDeepValue(
+    raw,
+    ["enrollTime", "signupTime", "signUpTime", "applyTime", "submitTime", "reportTime", "createTime", "createdAt", "gmtCreate"],
+    4,
+  ) ?? firstDeepValue(metric, ["enrollTime", "signupTime", "applyTime", "submitTime", "reportTime"], 3);
+  return formatTimestamp(value as any) || activityDisplayInfo(activity).updatedText || "-";
+}
+
+function activitySessionTexts(activity: TemuActivityRow) {
+  const metric = parseCloudJsonObject(activity.metric_json);
+  const raw = parseCloudJsonObject(activity.raw_json);
+  const rows = [raw, metric]
+    .flatMap((source) => {
+      const value = firstDeepValue(source, [
+        "sessionList", "sessionAggList", "siteSessionList", "activitySessionList", "enrollSessionList",
+        "sessionInfoList", "siteActivityList", "enrollSiteList",
+      ], 5);
+      return Array.isArray(value) ? value : [];
+    })
+    .filter((row, index, arr) => arr.findIndex((item) => JSON.stringify(item) === JSON.stringify(row)) === index);
+
+  if (rows.length === 0) {
+    const info = activityDisplayInfo(activity);
+    const timeText = activityTimeText(activity);
+    return timeText ? [`${activity.site || ""}${activity.site ? "-" : ""}${timeText}${info.status && info.status !== "-" ? `,${info.status}` : ""}`] : [];
+  }
+
+  return rows.map((row: any) => {
+    const site = normalizeText(firstDeepValue(row, ["siteName", "site", "regionName", "countryName", "marketName"], 2));
+    const start = formatTimestamp(firstDeepValue(row, ["startTime", "beginTime", "sessionStartTime", "activityStartTime", "validStartTime"], 2) as any);
+    const end = formatTimestamp(firstDeepValue(row, ["endTime", "finishTime", "sessionEndTime", "activityEndTime", "validEndTime"], 2) as any);
+    const status = normalizeText(firstDeepValue(row, ["statusName", "sessionStatusName", "activityStatusName", "status"], 2));
+    const range = start && end ? `${start}-${end}` : start || end;
+    return [site, range, status].filter(Boolean).join(",");
+  }).filter(Boolean);
+}
+
+function activityHasCouponRows(rows: TemuActivityRow[]) {
+  return rows.some((row) => /coupon|券|优惠/.test(`${row.activity_kind || ""} ${row.activity_type || ""} ${row.activity_title || ""}`));
+}
+
+const ACTIVITY_SKU_ID_KEYS = ["productSkuId", "prodSkuId", "skuId", "sku_id"];
+const ACTIVITY_SKU_EXT_KEYS = ["skuExtCode", "skuCode", "extCode", "externalSkuCode", "skuNo"];
+const ACTIVITY_SKU_ATTR_KEYS = [
+  "skuAttrText", "skuAttributeText", "skuPropertyText", "skuPropText",
+  "skuName", "className", "specText", "specName",
+  "productSkuSpecList", "skuSpecList", "skuAttrList", "skuAttrs",
+  "skuProperties", "skuPropertyList",
+];
+const ACTIVITY_SKU_DAILY_PRICE_KEYS = [
+  "dailyDeclarePriceCents", "dailyDeclarePriceCent", "dailyDeclarePrice",
+  "normalDeclarePriceCents", "normalDeclarePriceCent", "normalDeclarePrice",
+  "dailyPriceCents", "dailyPriceCent", "dailyPrice",
+  "normalPriceCents", "normalPriceCent", "normalPrice",
+  "basePriceCents", "basePriceCent", "basePrice",
+  "supplierPriceCents", "supplierPriceCent", "supplierPrice",
+  "declaredPriceCents", "declaredPriceCent", "declaredPrice",
+  "declarePriceCents", "declarePriceCent", "declarePrice",
+  "skuSupplierPrice", "skuDeclaredPrice",
+];
+const ACTIVITY_SKU_ACTIVITY_PRICE_KEYS = [
+  "signupPriceCents", "signupPriceCent", "signupPrice",
+  "enrollPriceCents", "enrollPriceCent", "enrollPrice",
+  "applyPriceCents", "applyPriceCent", "applyPrice",
+  "activityPriceCents", "activityPriceCent", "activityPrice",
+  "campaignPriceCents", "campaignPriceCent", "campaignPrice",
+  "promotionPriceCents", "promotionPriceCent", "promotionPrice",
+  "salePriceCents", "salePriceCent", "salePrice",
+  "supplierActivityPrice", "skuActivityPrice", "skcActivityPrice",
+  "inputPrice",
+];
+const ACTIVITY_SKU_SUGGESTED_PRICE_KEYS = [
+  "suggestedPriceCents", "suggestedPriceCent", "suggestedPrice",
+  "suggestPriceCents", "suggestPriceCent", "suggestPrice",
+  "recommendPriceCents", "recommendPriceCent", "recommendPrice",
+  "recommendedPriceCents", "recommendedPriceCent", "recommendedPrice",
+  "referencePriceCents", "referencePriceCent", "referencePrice",
+  "advicePriceCents", "advicePriceCent", "advicePrice",
+  "activitySuggestPrice", "suggestActivityPrice", "maxEnrollPrice", "maxPrice",
+];
+
+function isPlainRecord(value: unknown): value is Record<string, any> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function pickActivitySkuCentsFromSource(source: unknown, keys: string[]) {
+  if (!source || typeof source !== "object") return null;
+  for (const key of keys) {
+    const cents = toActivityCents(firstDeepValue(source, [key], 2), key);
+    if (cents !== null) return cents;
+  }
+  return null;
+}
+
+function pickActivitySkuNumberFromSource(source: unknown, keys: string[]) {
+  if (!source || typeof source !== "object") return null;
+  const value = firstDeepValue(source, keys, 2);
+  return firstNumberValue(value);
+}
+
+function activitySkuRecordHasSignal(source: unknown) {
+  if (!source || typeof source !== "object") return false;
+  if (firstDeepValue(source, ACTIVITY_SKU_ID_KEYS, 1)) return true;
+  if (firstDeepValue(source, ACTIVITY_SKU_EXT_KEYS, 1)) return true;
+  if (firstDeepValue(source, ACTIVITY_SKU_ATTR_KEYS, 2)) return true;
+  if (pickActivitySkuCentsFromSource(source, ACTIVITY_SKU_ACTIVITY_PRICE_KEYS) !== null) return true;
+  if (pickActivitySkuCentsFromSource(source, ACTIVITY_SKU_DAILY_PRICE_KEYS) !== null) return true;
+  return false;
+}
+
+function collectActivitySkuCandidates(source: unknown, out: Record<string, any>[], depth = 0) {
+  if (!isPlainRecord(source) || depth > 5) return;
+  if (activitySkuRecordHasSignal(source)) out.push(source);
+  for (const [key, value] of Object.entries(source)) {
+    if (Array.isArray(value)) {
+      const shouldScanArray = /sku|skc|goods|product|activity|enroll|price|session|list|items|vos?/i.test(key)
+        || value.some(activitySkuRecordHasSignal);
+      if (!shouldScanArray) continue;
+      for (const item of value) collectActivitySkuCandidates(item, out, depth + 1);
+      continue;
+    }
+    if (isPlainRecord(value) && /sku|skc|goods|product|activity|enroll|price|session|detail|info|vo/i.test(key)) {
+      collectActivitySkuCandidates(value, out, depth + 1);
+    }
+  }
+}
+
+function findProductSkuSummary(product: ProductItem | null | undefined, skuId: string, skuExtCode: string, skuAttr: string) {
+  const rows = Array.isArray(product?.skuSummaries) ? product!.skuSummaries : [];
+  const normSkuId = normalizeLookupValue(skuId);
+  const normExt = normalizeLookupValue(skuExtCode);
+  const normAttr = normalizeLookupValue(skuAttr);
+  return rows.find((row) => {
+    const rowSkuId = normalizeLookupValue(row.productSkuId);
+    const rowExt = normalizeLookupValue(row.extCode);
+    const rowAttr = normalizeLookupValue(row.specText || row.specName);
+    return Boolean(
+      (normSkuId && rowSkuId === normSkuId)
+      || (normExt && rowExt === normExt)
+      || (normAttr && rowAttr === normAttr)
+    );
+  }) || null;
+}
+
+function activitySkuCandidateAttr(source: unknown, activity: TemuActivityRow, product?: ProductItem | null) {
+  const sourceAttr = stringifyActivitySpecValue(firstDeepValue(source, ACTIVITY_SKU_ATTR_KEYS, 2));
+  if (sourceAttr) return sourceAttr;
+  if (activity.sku_attr_text) return activity.sku_attr_text;
+  const sourceSkuId = normalizeText(firstDeepValue(source, ACTIVITY_SKU_ID_KEYS, 1) || activity.sku_id);
+  const sourceSkuExt = normalizeText(firstDeepValue(source, ACTIVITY_SKU_EXT_KEYS, 1) || activity.sku_ext_code);
+  const match = findProductSkuSummary(product, sourceSkuId, sourceSkuExt, "");
+  if (match?.specText || match?.specName) return match.specText || match.specName;
+  if (product?.skuSummaries?.length === 1) return product.skuSummaries[0].specText || product.skuSummaries[0].specName;
+  return "-";
+}
+
+function buildActivitySkuPriceRow(activity: TemuActivityRow, source: Record<string, any>, index: number, product?: ProductItem | null): ActivitySkuPriceRow {
+  const info = activityDisplayInfo(activity);
+  const skuId = normalizeText(firstDeepValue(source, ACTIVITY_SKU_ID_KEYS, 1) || activity.sku_id);
+  const skuExtCode = normalizeText(firstDeepValue(source, ACTIVITY_SKU_EXT_KEYS, 1) || activity.sku_ext_code);
+  const skuAttr = activitySkuCandidateAttr(source, activity, product);
+  const matchedSku = findProductSkuSummary(product, skuId, skuExtCode, skuAttr);
+  const productPriceFallback = matchedSku || product?.skuSummaries?.length === 1 ? parseDisplayPriceCents(product?.price) : null;
+  const dailyPriceCents = pickActivitySkuCentsFromSource(source, ACTIVITY_SKU_DAILY_PRICE_KEYS)
+    ?? firstNumberValue(activity.daily_price_cents)
+    ?? productPriceFallback;
+  const activityPriceCents = pickActivitySkuCentsFromSource(source, ACTIVITY_SKU_ACTIVITY_PRICE_KEYS)
+    ?? info.signupPrice;
+  const suggestedPriceCents = pickActivitySkuCentsFromSource(source, ACTIVITY_SKU_SUGGESTED_PRICE_KEYS)
+    ?? info.suggestedPrice;
+  const priceDiffCents = pickActivitySkuCentsFromSource(source, [
+    "signupPriceDiffCents", "signupPriceDiffCent", "signupPriceDiff",
+    "priceDiffCents", "priceDiffCent", "priceDiff",
+    "enrollPriceDiff", "applyPriceDiff", "declarePriceDiff",
+  ]) ?? (activityPriceCents !== null && suggestedPriceCents !== null ? activityPriceCents - suggestedPriceCents : info.diff);
+  const reportedQty = pickActivitySkuNumberFromSource(source, [
+    "submitQuantity", "submitQty", "reportQuantity", "reportedQuantity", "signupQuantity", "applyQuantity",
+    "enrollQuantity", "activityStock", "activityStockNum", "enrollStock", "signupStock", "applyStock",
+  ]) ?? firstNumberValue(activity.activity_stock);
+  const remainingQty = pickActivitySkuNumberFromSource(source, [
+    "remainingQuantity", "remainQuantity", "leftQuantity", "surplusQuantity", "availableQuantity",
+    "remainingStock", "remainStock", "leftStock", "surplusStock", "availableActivityStock", "canEnrollStock",
+  ]);
+  const signupTime = formatTimestamp(firstDeepValue(source, [
+    "enrollTime", "signupTime", "signUpTime", "applyTime", "submitTime", "reportTime", "createTime", "createdAt", "gmtCreate",
+  ], 2) as any) || activitySignupTimeText(activity);
+  const sourceScore = [
+    skuId,
+    skuExtCode,
+    skuAttr && skuAttr !== "-" ? skuAttr : "",
+    dailyPriceCents,
+    activityPriceCents,
+    suggestedPriceCents,
+    remainingQty,
+  ].filter((value) => value !== null && value !== undefined && value !== "").length;
+  return {
+    id: [
+      activity.id || activity.row_key,
+      skuId || skuExtCode || skuAttr || "sku",
+      activityPriceCents ?? "",
+      dailyPriceCents ?? "",
+      index,
+    ].join("|"),
+    activity,
+    skuId,
+    skuExtCode,
+    skuAttr,
+    dailyPriceCents,
+    activityPriceCents,
+    suggestedPriceCents,
+    priceDiffCents,
+    currency: info.currency,
+    reportedQty,
+    remainingQty,
+    signupTimeText: signupTime,
+    sourceScore,
+  };
+}
+
+function activitySkuRowKey(row: ActivitySkuPriceRow) {
+  return [
+    row.activity.activity_id || row.activity.row_key,
+    row.activity.product_id || "",
+    row.activity.skc_id || "",
+    row.skuId || "",
+    row.skuExtCode || "",
+    row.skuAttr || "",
+    row.activityPriceCents ?? "",
+    row.dailyPriceCents ?? "",
+  ].join("|");
+}
+
+function activitySkuRowHasUsefulValue(row: ActivitySkuPriceRow) {
+  return Boolean(
+    row.skuId
+    || row.skuExtCode
+    || (row.skuAttr && row.skuAttr !== "-")
+    || row.activityPriceCents !== null
+    || row.dailyPriceCents !== null
+    || row.reportedQty !== null
+  );
+}
+
+function extractActivitySkuPriceRows(activity: TemuActivityRow, product?: ProductItem | null): ActivitySkuPriceRow[] {
+  const raw = parseCloudJsonObject(activity.raw_json);
+  const metric = parseCloudJsonObject(activity.metric_json);
+  const direct = {
+    ...metric,
+    ...raw,
+    productSkuId: activity.sku_id || (metric as any).skuId || (raw as any).productSkuId,
+    skuExtCode: activity.sku_ext_code || (metric as any).skuExtCode || (raw as any).skuExtCode,
+    skuAttrText: activity.sku_attr_text || (metric as any).skuAttrText || (raw as any).skuAttrText,
+    dailyPriceCents: activity.daily_price_cents ?? (metric as any).dailyPriceCents,
+    signupPriceCents: activity.signup_price_cents ?? (metric as any).signupPriceCents,
+    suggestedPriceCents: activity.suggested_price_cents ?? (metric as any).suggestedPriceCents,
+    activityStock: activity.activity_stock ?? (metric as any).activityStock,
+  };
+  const candidates: Record<string, any>[] = [direct];
+  collectActivitySkuCandidates(raw, candidates);
+  collectActivitySkuCandidates(metric, candidates);
+  const byKey = new Map<string, ActivitySkuPriceRow>();
+  candidates.forEach((source, index) => {
+    const row = buildActivitySkuPriceRow(activity, source, index, product);
+    if (!activitySkuRowHasUsefulValue(row)) return;
+    const key = activitySkuRowKey(row);
+    const prev = byKey.get(key);
+    if (!prev || row.sourceScore > prev.sourceScore) byKey.set(key, row);
+  });
+  return [...byKey.values()];
+}
+
+function filterActivitySkuPriceRows(rows: ActivitySkuPriceRow[], filter: ActivityDetailFilter) {
+  return [...rows]
+    .filter((row) => {
+      const lifecycle = activityLifecycle(row.activity);
+      if (filter === "running") return lifecycle === "running";
+      if (filter === "notStarted") return lifecycle === "notStarted";
+      return true;
+    })
+    .sort((left, right) => {
+      const activityScore = activityUsefulnessScore(right.activity) - activityUsefulnessScore(left.activity);
+      if (activityScore !== 0) return activityScore;
+      const priceScore = Number(right.activityPriceCents !== null) - Number(left.activityPriceCents !== null);
+      if (priceScore !== 0) return priceScore;
+      return `${left.skuAttr}${left.skuId}`.localeCompare(`${right.skuAttr}${right.skuId}`, "zh-Hans-CN");
+    });
 }
 
 function hasMeaningfulSnapshotValue(value: unknown) {
@@ -2396,6 +2913,7 @@ export default function ProductList() {
   // 云端采集到的 SKC / 销售数据，按 skc_id 覆盖商品管理主字段。
   const [cloudSkcMap, setCloudSkcMap] = useState<Map<string, SkcRow>>(new Map());
   const [cloudSalesMap, setCloudSalesMap] = useState<Map<string, TemuSalesRow>>(new Map());
+  const [cloudActivityRows, setCloudActivityRows] = useState<TemuActivityRow[]>([]);
   const [cloudActivityCount, setCloudActivityCount] = useState(0);
   const [cloudRiskCount, setCloudRiskCount] = useState(0);
   const [cloudStockOrderCount, setCloudStockOrderCount] = useState(0);
@@ -2411,6 +2929,10 @@ export default function ProductList() {
   const [, setSourceState] = useState<ProductSourceState>(EMPTY_SOURCES);
   const [selectedProduct, setSelectedProduct] = useState<ProductItem | null>(null);
   const [activityDetailProduct, setActivityDetailProduct] = useState<ProductItem | null>(null);
+  const [activityDetailFilter, setActivityDetailFilter] = useState<ActivityDetailFilter>("all");
+  const [activityCatalogOpen, setActivityCatalogOpen] = useState(false);
+  const [activityCatalogFilter, setActivityCatalogFilter] = useState<ActivityDetailFilter>("all");
+  const loadProductsInFlightRef = useRef(false);
   const [drawerTab, setDrawerTab] = useState<string>("overview");
   const [activeFluxSiteKey, setActiveFluxSiteKey] = useState<FluxSiteKey>("global");
   const [activeFluxRangeLabel, setActiveFluxRangeLabel] = useState("");
@@ -2501,6 +3023,7 @@ export default function ProductList() {
     };
     let reloadTimer: ReturnType<typeof setTimeout> | null = null;
     const handleStoreValueUpdated = (event: Event) => {
+      if (CLOUD_PRODUCTS_ONLY) return;
       const detail = (event as CustomEvent<{ baseKey?: string | null }>)?.detail;
       if (!detail?.baseKey || ![
         "temu_products",
@@ -2581,38 +3104,51 @@ export default function ProductList() {
     return result;
   }, [selectedProduct, productHistoryCache]);
 
+  const applyCloudProductBundleToState = (cloudBundle: CloudProductBundle) => {
+    const cloudProducts = buildCloudProductRows(cloudBundle);
+    setCloudSkcMap(cloudBundle.skcMap);
+    setCloudSalesMap(cloudBundle.salesMap);
+    setCloudActivityRows(cloudBundle.activityRows);
+    setCloudActivityCount(cloudBundle.activityRows.length);
+    setCloudRiskCount(cloudBundle.riskRows.length);
+    setCloudStockOrderCount(cloudBundle.stockOrderRows.length);
+    setCloudAfterSaleCount(cloudBundle.afterSaleRows.length);
+    setCloudShopSales(cloudBundle.shopSales);
+    setCloudProductMeta({ latestAt: cloudBundle.latestAt, error: cloudBundle.error });
+    setHasAccount(cloudBundle.configured);
+    setDiagnostics(null);
+    setSourceState({
+      products: true,
+      sales: true,
+      orders: true,
+    });
+    setSalesSummary(buildCloudSalesSummary(cloudProducts));
+    setCountSummary({
+      totalCount: cloudProducts.length,
+      onSaleCount: cloudProducts.length,
+      notPublishedCount: 0,
+      offSaleCount: 0,
+    });
+    setProducts(cloudProducts);
+    setFluxHistoryData([]);
+    setProductHistoryCache({});
+    setSiteTrendListBySite({});
+  };
+
   const loadProducts = async () => {
+    if (loadProductsInFlightRef.current) return;
+    loadProductsInFlightRef.current = true;
     setLoading(true);
     try {
       if (CLOUD_PRODUCTS_ONLY) {
+        if (products.length === 0) {
+          const cachedBundle = await readCachedCloudProductBundle("", true);
+          if (cachedBundle) {
+            applyCloudProductBundleToState(cachedBundle);
+          }
+        }
         const cloudBundle = await loadCloudProductBundle();
-        const cloudProducts = buildCloudProductRows(cloudBundle);
-        setCloudSkcMap(cloudBundle.skcMap);
-        setCloudSalesMap(cloudBundle.salesMap);
-        setCloudActivityCount(cloudBundle.activityRows.length);
-        setCloudRiskCount(cloudBundle.riskRows.length);
-        setCloudStockOrderCount(cloudBundle.stockOrderRows.length);
-        setCloudAfterSaleCount(cloudBundle.afterSaleRows.length);
-        setCloudShopSales(cloudBundle.shopSales);
-        setCloudProductMeta({ latestAt: cloudBundle.latestAt, error: cloudBundle.error });
-        setHasAccount(cloudBundle.configured);
-        setDiagnostics(null);
-        setSourceState({
-          products: true,
-          sales: true,
-          orders: true,
-        });
-        setSalesSummary(buildCloudSalesSummary(cloudProducts));
-        setCountSummary({
-          totalCount: cloudProducts.length,
-          onSaleCount: cloudProducts.length,
-          notPublishedCount: 0,
-          offSaleCount: 0,
-        });
-        setProducts(cloudProducts);
-        setFluxHistoryData([]);
-        setProductHistoryCache({});
-        setSiteTrendListBySite({});
+        applyCloudProductBundleToState(cloudBundle);
         return;
       }
 
@@ -3310,6 +3846,7 @@ export default function ProductList() {
       setDiagnostics(null);
       setSourceState(EMPTY_SOURCES);
     } finally {
+      loadProductsInFlightRef.current = false;
       setLoading(false);
     }
   };
@@ -3886,7 +4423,9 @@ export default function ProductList() {
       render: (_: any, record: any) => {
         const activities: TemuActivityRow[] = Array.isArray(record.cloudActivities) ? record.cloudActivities : [];
         if (activities.length === 0) return <span style={{ color: "#bfbfbf" }}>-</span>;
+        const skuPriceRows = activities.flatMap((activity) => extractActivitySkuPriceRows(activity, record));
         const first = activities[0];
+        const firstSkuPrice = skuPriceRows[0] || null;
         const info = activityDisplayInfo(first);
         const metrics = activityMetricParts(first);
         const timeText = activityTimeText(first);
@@ -3894,6 +4433,7 @@ export default function ProductList() {
           <Space direction="vertical" size={4} style={{ maxWidth: 360 }}>
             <Space size={4} wrap>
               <Tag color="purple">{activities.length} 条</Tag>
+              {skuPriceRows.length > 0 ? <Tag color="geekblue">SKU价 {skuPriceRows.length}</Tag> : null}
               <Tag color="blue">{info.type}</Tag>
               <Tag color={activityStatusColor(info.status)}>{info.status}</Tag>
             </Space>
@@ -3914,6 +4454,12 @@ export default function ProductList() {
             {metrics.length > 0 ? (
               <div style={{ color: "var(--color-text-sec)", fontSize: 12 }}>{metrics.join(" / ")}</div>
             ) : null}
+            {firstSkuPrice ? (
+              <div style={{ color: "var(--color-text-sec)", fontSize: 12 }}>
+                SKU活动价 {formatActivityMoney(firstSkuPrice.activityPriceCents, firstSkuPrice.currency)}
+                {firstSkuPrice.dailyPriceCents !== null ? ` / 日常 ${formatActivityMoney(firstSkuPrice.dailyPriceCents, firstSkuPrice.currency)}` : ""}
+              </div>
+            ) : null}
             <div style={{ color: "var(--color-text-sec)", fontSize: 12 }}>
               最近采集 {info.updatedText || "-"}
             </div>
@@ -3929,7 +4475,7 @@ export default function ProductList() {
                 setActivityDetailProduct(record);
               }}
             >
-              查看明细{activities.length > 1 ? `（另 ${activities.length - 1} 条）` : ""}
+              查看SKU活动价{skuPriceRows.length > 1 ? `（${skuPriceRows.length} 条）` : ""}
             </Button>
           </Space>
         );
@@ -4153,134 +4699,279 @@ export default function ProductList() {
   const allSelected = tempHidden.length === 0;
 
   const colMap = new Map(columns.filter((c: any) => !removedCloudColumnKeys.has(c.key)).map((c: any) => [c.key, c]));
-  const activityDetailRows = useMemo(
+  const activityDetailAllRows = useMemo(
     () => (Array.isArray(activityDetailProduct?.cloudActivities) ? activityDetailProduct.cloudActivities : []),
     [activityDetailProduct],
   );
-  const activityDetailColumns = useMemo<ColumnsType<TemuActivityRow>>(() => [
+  const activityDetailSkuAllRows = useMemo(
+    () => activityDetailAllRows.flatMap((row) => extractActivitySkuPriceRows(row, activityDetailProduct)),
+    [activityDetailAllRows, activityDetailProduct],
+  );
+  const activityDetailRows = useMemo(
+    () => filterActivitySkuPriceRows(activityDetailSkuAllRows, activityDetailFilter),
+    [activityDetailSkuAllRows, activityDetailFilter],
+  );
+  const activityDetailCounts = useMemo(() => ({
+    all: activityDetailSkuAllRows.length,
+    running: filterActivitySkuPriceRows(activityDetailSkuAllRows, "running").length,
+    notStarted: filterActivitySkuPriceRows(activityDetailSkuAllRows, "notStarted").length,
+  }), [activityDetailSkuAllRows]);
+  const activityDetailColumns = useMemo<ColumnsType<ActivitySkuPriceRow>>(() => [
     {
-      title: "活动名称",
-      key: "title",
-      width: 280,
+      title: "SKU属性集",
+      key: "skuAttr",
+      width: 150,
+      render: (_value, row) => (
+        <Space direction="vertical" size={1} style={{ maxWidth: 142 }}>
+          <Typography.Text ellipsis={{ tooltip: row.skuAttr }}>{row.skuAttr || "-"}</Typography.Text>
+          {row.skuId ? <Typography.Text type="secondary" style={{ fontSize: 12 }}>SKU ID: {row.skuId}</Typography.Text> : null}
+          {row.skuExtCode ? <Typography.Text type="secondary" style={{ fontSize: 12 }}>货号: {row.skuExtCode}</Typography.Text> : null}
+        </Space>
+      ),
+    },
+    {
+      title: "日常申报价",
+      key: "dailyPrice",
+      width: 112,
+      align: "right",
       render: (_value, row) => {
-        const info = activityDisplayInfo(row);
+        return formatActivityMoney(row.dailyPriceCents, row.currency);
+      },
+    },
+    {
+      title: "活动申报价",
+      key: "signupPrice",
+      width: 112,
+      align: "right",
+      render: (_value, row) => {
+        return formatActivityMoney(row.activityPriceCents, row.currency);
+      },
+    },
+    {
+      title: "报名时间",
+      key: "signupTime",
+      width: 170,
+      render: (_value, row) => row.signupTimeText,
+    },
+    {
+      title: "活动类型",
+      key: "activity",
+      width: 500,
+      render: (_value, row) => {
+        const info = activityDisplayInfo(row.activity);
         return (
-          <Space direction="vertical" size={2}>
-            <Tooltip title={info.title}>
-              <Typography.Text strong ellipsis style={{ maxWidth: 260 }}>{info.title}</Typography.Text>
-            </Tooltip>
+          <Space direction="vertical" size={2} style={{ maxWidth: 480 }}>
+            <Typography.Text strong ellipsis={{ tooltip: info.title }}>
+              {info.type}{info.title && info.title !== info.type ? `  ${info.title}` : ""}
+            </Typography.Text>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              {row.activity_id || row.row_key || "-"}
+              {row.activity.activity_id || row.activity.row_key || "-"}
             </Typography.Text>
           </Space>
         );
       },
     },
     {
-      title: "活动类型",
-      key: "type",
-      width: 120,
+      title: "报名场次",
+      key: "sessions",
+      width: 360,
       render: (_value, row) => {
-        const info = activityDisplayInfo(row);
-        return <Tag color="blue">{info.type}</Tag>;
-      },
-    },
-    {
-      title: "状态",
-      key: "status",
-      width: 110,
-      render: (_value, row) => {
-        const info = activityDisplayInfo(row);
-        return <Tag color={activityStatusColor(info.status)}>{info.status}</Tag>;
-      },
-    },
-    {
-      title: "活动销量",
-      key: "activitySales",
-      width: 110,
-      align: "right",
-      render: (_value, row) => {
-        const value = activityDisplayInfo(row).activitySales;
-        return value === null ? "-" : Number(value).toLocaleString("zh-CN");
-      },
-    },
-    {
-      title: "活动成交",
-      key: "transactionAmount",
-      width: 120,
-      align: "right",
-      render: (_value, row) => {
-        const info = activityDisplayInfo(row);
-        return formatActivityAmount(info.transactionAmount, info.currency);
-      },
-    },
-    {
-      title: "访客",
-      key: "totalVisitors",
-      width: 100,
-      align: "right",
-      render: (_value, row) => {
-        const value = activityDisplayInfo(row).totalVisitors;
-        return value === null ? "-" : Number(value).toLocaleString("zh-CN");
-      },
-    },
-    {
-      title: "报名价",
-      key: "signupPrice",
-      width: 120,
-      align: "right",
-      render: (_value, row) => {
-        const info = activityDisplayInfo(row);
-        return formatActivityMoney(info.signupPrice, info.currency);
-      },
-    },
-    {
-      title: "建议价",
-      key: "suggestedPrice",
-      width: 120,
-      align: "right",
-      render: (_value, row) => {
-        const info = activityDisplayInfo(row);
-        return formatActivityMoney(info.suggestedPrice, info.currency);
-      },
-    },
-    {
-      title: "库存",
-      key: "stock",
-      width: 90,
-      align: "right",
-      render: (_value, row) => activityDisplayInfo(row).stock ?? "-",
-    },
-    {
-      title: "报名差异",
-      key: "diff",
-      width: 120,
-      align: "right",
-      render: (_value, row) => {
-        const info = activityDisplayInfo(row);
-        const color = info.diff == null ? "var(--color-text-muted)" : info.diff > 0 ? "var(--color-danger)" : info.diff < 0 ? "var(--color-success)" : "var(--color-text-sec)";
-        return <span style={{ color, fontWeight: info.diff ? 700 : 400 }}>{formatActivityDiff(info.diff, info.currency)}</span>;
-      },
-    },
-    {
-      title: "开始/结束时间",
-      key: "time",
-      width: 260,
-      render: (_value, row) => {
-        const info = activityDisplayInfo(row);
+        const sessions = activitySessionTexts(row.activity);
         return (
-          <Space direction="vertical" size={2}>
-            <span>{info.startText || "-"}</span>
-            <Typography.Text type="secondary">{info.endText || "-"}</Typography.Text>
+          <Space direction="vertical" size={1} style={{ maxWidth: 340 }}>
+            {sessions.length > 0 ? sessions.slice(0, 3).map((text, index) => (
+              <Typography.Text key={`${row.id}-session-${index}`} style={{ fontSize: 12 }} ellipsis={{ tooltip: text }}>
+                {text}
+              </Typography.Text>
+            )) : <span>-</span>}
+            {sessions.length > 3 ? (
+              <Tooltip title={<div>{sessions.slice(3).map((text, index) => <div key={index}>{text}</div>)}</div>}>
+                <Button type="link" size="small" style={{ padding: 0, height: "auto" }}>更多</Button>
+              </Tooltip>
+            ) : null}
           </Space>
         );
       },
     },
     {
+      title: "提报数量",
+      key: "reportedQty",
+      width: 96,
+      align: "right",
+      render: (_value, row) => {
+        const value = row.reportedQty;
+        return value === null ? "-" : Number(value).toLocaleString("zh-CN");
+      },
+    },
+    {
+      title: "剩余数量",
+      key: "remainingQty",
+      width: 96,
+      align: "right",
+      render: (_value, row) => {
+        const value = row.remainingQty;
+        return value === null ? "-" : Number(value).toLocaleString("zh-CN");
+      },
+    },
+    {
+      title: "活动状态",
+      key: "status",
+      width: 110,
+      render: (_value, row) => {
+        const status = activityDerivedStatusText(row.activity);
+        return <Tag color={activityStatusColor(status)}>{status}</Tag>;
+      },
+    },
+  ], [activityDetailProduct]);
+  const activityCatalogSkuAllRows = useMemo(
+    () => cloudActivityRows.flatMap((row) => extractActivitySkuPriceRows(row, null)),
+    [cloudActivityRows],
+  );
+  const activityCatalogRows = useMemo(
+    () => filterActivitySkuPriceRows(activityCatalogSkuAllRows, activityCatalogFilter),
+    [activityCatalogSkuAllRows, activityCatalogFilter],
+  );
+  const activityCatalogCounts = useMemo(() => ({
+    all: activityCatalogSkuAllRows.length,
+    running: filterActivitySkuPriceRows(activityCatalogSkuAllRows, "running").length,
+    notStarted: filterActivitySkuPriceRows(activityCatalogSkuAllRows, "notStarted").length,
+    linked: activityCatalogSkuAllRows.filter((row) => row.activity.skc_id || row.activity.product_id || row.activity.goods_id || row.skuId).length,
+  }), [activityCatalogSkuAllRows]);
+  const activityCatalogColumns = useMemo<ColumnsType<ActivitySkuPriceRow>>(() => [
+    {
+      title: "店铺",
+      key: "mall",
+      width: 110,
+      render: (_value, row) => (
+        <Space direction="vertical" size={1}>
+          <Typography.Text strong>{row.activity.mall_id || "-"}</Typography.Text>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>{row.activity.site || "-"}</Typography.Text>
+        </Space>
+      ),
+    },
+    {
+      title: "商品/SKC",
+      key: "product",
+      width: 180,
+      render: (_value, row) => (
+        <Space direction="vertical" size={1}>
+          <Typography.Text>SKC: {row.activity.skc_id || "-"}</Typography.Text>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>SKU: {row.skuId || "-"}</Typography.Text>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            Product {row.activity.product_id || "-"} / Goods {row.activity.goods_id || "-"}
+          </Typography.Text>
+        </Space>
+      ),
+    },
+    {
+      title: "活动明细",
+      key: "activity",
+      width: 360,
+      render: (_value, row) => {
+        const info = activityDisplayInfo(row.activity);
+        return (
+          <Space direction="vertical" size={2} style={{ maxWidth: 340 }}>
+            <Typography.Text strong ellipsis={{ tooltip: info.title }}>
+              {info.type}{info.title && info.title !== info.type ? `  ${info.title}` : ""}
+            </Typography.Text>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              {row.activity.activity_id || row.activity.row_key || "-"}
+            </Typography.Text>
+          </Space>
+        );
+      },
+    },
+    {
+      title: "SKU属性集",
+      key: "skuAttr",
+      width: 150,
+      render: (_value, row) => (
+        <Space direction="vertical" size={1} style={{ maxWidth: 142 }}>
+          <Typography.Text ellipsis={{ tooltip: row.skuAttr }}>{row.skuAttr || "-"}</Typography.Text>
+          {row.skuExtCode ? <Typography.Text type="secondary" style={{ fontSize: 12 }}>货号: {row.skuExtCode}</Typography.Text> : null}
+        </Space>
+      ),
+    },
+    {
+      title: "日常申报价",
+      key: "dailyPrice",
+      width: 112,
+      align: "right",
+      render: (_value, row) => {
+        return formatActivityMoney(row.dailyPriceCents, row.currency);
+      },
+    },
+    {
+      title: "活动申报价",
+      key: "signupPrice",
+      width: 112,
+      align: "right",
+      render: (_value, row) => {
+        return formatActivityMoney(row.activityPriceCents, row.currency);
+      },
+    },
+    {
+      title: "报名时间",
+      key: "signupTime",
+      width: 170,
+      render: (_value, row) => row.signupTimeText,
+    },
+    {
+      title: "报名场次",
+      key: "sessions",
+      width: 360,
+      render: (_value, row) => {
+        const sessions = activitySessionTexts(row.activity);
+        return (
+          <Space direction="vertical" size={1} style={{ maxWidth: 340 }}>
+            {sessions.length > 0 ? sessions.slice(0, 3).map((text, index) => (
+              <Typography.Text key={`${row.id}-catalog-session-${index}`} style={{ fontSize: 12 }} ellipsis={{ tooltip: text }}>
+                {text}
+              </Typography.Text>
+            )) : <span>-</span>}
+            {sessions.length > 3 ? (
+              <Tooltip title={<div>{sessions.slice(3).map((text, index) => <div key={index}>{text}</div>)}</div>}>
+                <Button type="link" size="small" style={{ padding: 0, height: "auto" }}>更多</Button>
+              </Tooltip>
+            ) : null}
+          </Space>
+        );
+      },
+    },
+    {
+      title: "提报数量",
+      key: "reportedQty",
+      width: 96,
+      align: "right",
+      render: (_value, row) => {
+        const value = row.reportedQty;
+        return value === null ? "-" : Number(value).toLocaleString("zh-CN");
+      },
+    },
+    {
+      title: "剩余数量",
+      key: "remainingQty",
+      width: 96,
+      align: "right",
+      render: (_value, row) => {
+        const value = row.remainingQty;
+        return value === null ? "-" : Number(value).toLocaleString("zh-CN");
+      },
+    },
+    {
+      title: "活动状态",
+      key: "status",
+      width: 110,
+      render: (_value, row) => {
+        const status = activityDerivedStatusText(row.activity);
+        return <Tag color={activityStatusColor(status)}>{status}</Tag>;
+      },
+    },
+    {
       title: "最近采集",
       key: "updated",
-      width: 170,
-      render: (_value, row) => activityDisplayInfo(row).updatedText || "-",
+      width: 160,
+      render: (_value, row) => formatTimestamp(row.activity.last_updated_at) || "-",
     },
   ], []);
 
@@ -5334,6 +6025,12 @@ export default function ProductList() {
       detail: "当前广告覆盖商品",
     },
     {
+      label: "活动数据",
+      value: activityCatalogCounts.all || cloudActivityCount,
+      detail: `${cloudActivityCount} 条活动快照 · ${activityCatalogCounts.linked} 条SKU价已关联`,
+      tone: (activityCatalogCounts.all || cloudActivityCount) > 0 ? "success" : "warning",
+    },
+    {
       label: "今日销量",
       value: `${cloudShopSales?.sale_volume ?? 0} 件`,
       detail: cloudShopSales?.stat_date ? `店铺销量 ${cloudShopSales.stat_date}` : "店铺今日销量",
@@ -5370,15 +6067,20 @@ export default function ProductList() {
           <div className="product-list-command__meta">
             <span>{formatSyncedAt(latestSyncedAt)}</span>
             <span>销售快照 {cloudSalesMap.size}</span>
-            <span>活动 {cloudActivityCount}</span>
+            <span>SKU活动价 {activityCatalogCounts.all || cloudActivityCount}</span>
             <span>风险 {cloudRiskCount}</span>
             <span>备货 {cloudStockOrderCount}</span>
             <span>售后 {cloudAfterSaleCount}</span>
             {cloudShopSales?.stat_date ? <span>店铺销量 {cloudShopSales.stat_date}</span> : null}
           </div>
-          <Button type="primary" icon={<SyncOutlined spin={loading} />} loading={loading} onClick={loadProducts}>
-            刷新数据
-          </Button>
+          <Space wrap>
+            <Button onClick={() => setActivityCatalogOpen(true)}>
+              活动数据 {activityCatalogCounts.all || cloudActivityCount}
+            </Button>
+            <Button type="primary" icon={<SyncOutlined spin={loading} />} loading={loading} onClick={loadProducts}>
+              刷新数据
+            </Button>
+          </Space>
         </div>
         {productCommandMetrics.map((metric) => (
           <button
@@ -5386,6 +6088,7 @@ export default function ProductList() {
             type="button"
             className={`product-list-command__metric${metric.tone ? ` is-${metric.tone}` : ""}${metric.filter ? " is-clickable" : ""}`}
             onClick={() => {
+              if (metric.label === "活动数据") setActivityCatalogOpen(true);
               if (metric.filter) setStatusFilter(metric.filter);
             }}
           >
@@ -5466,9 +6169,10 @@ export default function ProductList() {
               <Button type="primary" icon={<SyncOutlined spin={loading} />} loading={loading} onClick={loadProducts}>
                 刷新数据
               </Button>
+              <Button onClick={() => setActivityCatalogOpen(true)}>活动数据 {activityCatalogCounts.all || cloudActivityCount}</Button>
               <Button icon={<SettingOutlined />} onClick={openColSettings}>列设置</Button>
               <span className="material-toolbar-meta">
-                共 {products.length} 条 · 已接销售 {salesAttachedCount} · 活动 {cloudActivityCount} · 备货 {cloudStockOrderCount} · 售后 {cloudAfterSaleCount}
+                共 {products.length} 条 · 已接销售 {salesAttachedCount} · SKU活动价 {activityCatalogCounts.all || cloudActivityCount} · 备货 {cloudStockOrderCount} · 售后 {cloudAfterSaleCount}
               </span>
               {filteredProducts.length !== products.length && (
                 <span className="material-toolbar-meta">
@@ -5565,49 +6269,166 @@ export default function ProductList() {
           {renderDrawer()}
 
           <Modal
-            title="活动明细"
+            title={null}
+            open={activityCatalogOpen}
+            onCancel={() => setActivityCatalogOpen(false)}
+            footer={null}
+            width="calc(100vw - 96px)"
+            destroyOnClose
+            closable={false}
+            className="activity-price-modal"
+          >
+            <Space direction="vertical" size={12} style={{ width: "100%" }}>
+              <div className="activity-price-modal__top">
+                <div className="activity-price-modal__tabs">
+                  <Segmented
+                    value={activityCatalogFilter}
+                    onChange={(value) => setActivityCatalogFilter(value as ActivityDetailFilter)}
+                    options={[
+                      { label: "全部", value: "all" },
+                      { label: "进行中", value: "running" },
+                      { label: "未开始", value: "notStarted" },
+                    ]}
+                  />
+                </div>
+                <Button danger type="primary" size="small" onClick={() => setActivityCatalogOpen(false)}>关闭</Button>
+              </div>
+              <div className="activity-price-modal__coupon-empty">暂无可显示的券信息</div>
+              <div className="activity-price-modal__context">
+                SKU级活动价 {activityCatalogCounts.all} 条 · 已关联商品 {activityCatalogCounts.linked} 条
+              </div>
+              <div style={{ display: "none" }}>
+                <div style={{ minWidth: 0 }}>
+                  <Typography.Text strong>扩展已上报的SKU级活动价格</Typography.Text>
+                  <Typography.Text type="secondary" style={{ marginLeft: 8 }}>
+                    共 {activityCatalogCounts.all} 条 · 已关联商品 {activityCatalogCounts.linked} 条
+                  </Typography.Text>
+                  <div style={{ marginTop: 8 }}>
+                    <Typography.Text type="secondary">
+                    来源为浏览器扩展上传到云端的活动、营销、报名、竞价接口；优先展示 SKU ID、SKU属性集、日常申报价和活动申报价。
+                    </Typography.Text>
+                  </div>
+                </div>
+                <Segmented
+                  value={activityCatalogFilter}
+                  onChange={(value) => setActivityCatalogFilter(value as ActivityDetailFilter)}
+                  options={[
+                    { label: `全部 ${activityCatalogCounts.all}`, value: "all" },
+                    { label: `进行中 ${activityCatalogCounts.running}`, value: "running" },
+                    { label: `未开始 ${activityCatalogCounts.notStarted}`, value: "notStarted" },
+                  ]}
+                />
+              </div>
+              <Table
+                className="activity-price-table"
+                rowKey={(row) => row.id}
+                size="small"
+                columns={activityCatalogColumns}
+                dataSource={activityCatalogRows}
+                pagination={{ pageSize: 20, showSizeChanger: false }}
+                scroll={{ x: 2060, y: 560 }}
+                locale={{ emptyText: "暂无云端活动数据" }}
+              />
+            </Space>
+          </Modal>
+
+          <Modal
+            title={null}
             open={Boolean(activityDetailProduct)}
             onCancel={() => setActivityDetailProduct(null)}
             footer={null}
-            width={1280}
+            width="calc(100vw - 96px)"
             destroyOnClose
+            closable={false}
+            className="activity-price-modal"
           >
             <Space direction="vertical" size={12} style={{ width: "100%" }}>
-              <div>
-                <Typography.Text strong>{activityDetailProduct?.title || "-"}</Typography.Text>
-                <Typography.Text type="secondary" style={{ marginLeft: 8 }}>
-                  店铺 {activityDetailProduct?.mallId || "-"} · SKC {activityDetailProduct?.skcId || "-"} · 共 {activityDetailRows.length} 条活动
-                </Typography.Text>
+              <div className="activity-price-modal__top">
+                <div className="activity-price-modal__tabs">
+                  <Segmented
+                    value={activityDetailFilter}
+                    onChange={(value) => setActivityDetailFilter(value as ActivityDetailFilter)}
+                    options={[
+                      { label: "全部", value: "all" },
+                      { label: "进行中", value: "running" },
+                      { label: "未开始", value: "notStarted" },
+                    ]}
+                  />
+                </div>
+                <Button danger type="primary" size="small" onClick={() => setActivityDetailProduct(null)}>关闭</Button>
+              </div>
+              <div className="activity-price-modal__coupon-empty">暂无可显示的券信息</div>
+              <div className="activity-price-modal__context">
+                <span>{activityDetailProduct?.title || "-"}</span>
+                <span>店铺 {activityDetailProduct?.mallId || "-"} · SKC {activityDetailProduct?.skcId || "-"} · SKU活动价 {activityDetailRows.length} 条</span>
+              </div>
+              <div style={{ display: "none" }}>
+                <div style={{ minWidth: 0 }}>
+                  <Typography.Text strong>{activityDetailProduct?.title || "-"}</Typography.Text>
+                  <Typography.Text type="secondary" style={{ marginLeft: 8 }}>
+                    店铺 {activityDetailProduct?.mallId || "-"} · SKC {activityDetailProduct?.skcId || "-"} · 共 {activityDetailRows.length} 条SKU活动价 · 活动快照 {activityDetailAllRows.length} 条
+                  </Typography.Text>
+                  <div style={{ marginTop: 8 }}>
+                    <Typography.Text type="secondary">
+                      {activityHasCouponRows(activityDetailAllRows) ? "已采集到券活动相关数据，活动价按 SKU 展示" : "展示该商品已按 SKC/Product/Goods 匹配到的云端 SKU 级活动价格"}
+                    </Typography.Text>
+                  </div>
+                </div>
+                <Segmented
+                  value={activityDetailFilter}
+                  onChange={(value) => setActivityDetailFilter(value as ActivityDetailFilter)}
+                  options={[
+                    { label: `全部 ${activityDetailCounts.all}`, value: "all" },
+                    { label: `进行中 ${activityDetailCounts.running}`, value: "running" },
+                    { label: `未开始 ${activityDetailCounts.notStarted}`, value: "notStarted" },
+                  ]}
+                />
               </div>
               <Table
-                rowKey={(row) => row.id || row.row_key}
+                className="activity-price-table"
+                rowKey={(row) => row.id}
                 size="small"
                 columns={activityDetailColumns}
                 dataSource={activityDetailRows}
                 pagination={false}
-                scroll={{ x: 1270 }}
+                scroll={{ x: 1760, y: 520 }}
+                locale={{ emptyText: "暂无活动数据" }}
                 expandable={{
                   expandedRowRender: (row) => {
-                    const info = activityDisplayInfo(row);
-                    const rawPreview = row.raw_json ? row.raw_json.slice(0, 1200) : "";
+                    const activity = row.activity;
+                    const info = activityDisplayInfo(activity);
+                    const rawPreview = activity.raw_json ? activity.raw_json.slice(0, 1200) : "";
                     return (
                       <Descriptions size="small" bordered column={2}>
-                        <Descriptions.Item label="活动ID">{row.activity_id || "-"}</Descriptions.Item>
-                        <Descriptions.Item label="采集事件">{row.source_event_id || "-"}</Descriptions.Item>
-                        <Descriptions.Item label="Product ID">{row.product_id || "-"}</Descriptions.Item>
-                        <Descriptions.Item label="Goods ID">{row.goods_id || "-"}</Descriptions.Item>
-                        <Descriptions.Item label="SKC">{row.skc_id || "-"}</Descriptions.Item>
-                        <Descriptions.Item label="站点">{row.site || "-"}</Descriptions.Item>
+                        <Descriptions.Item label="活动ID">{activity.activity_id || "-"}</Descriptions.Item>
+                        <Descriptions.Item label="采集事件">{activity.source_event_id || "-"}</Descriptions.Item>
+                        <Descriptions.Item label="Product ID">{activity.product_id || "-"}</Descriptions.Item>
+                        <Descriptions.Item label="Goods ID">{activity.goods_id || "-"}</Descriptions.Item>
+                        <Descriptions.Item label="SKC">{activity.skc_id || "-"}</Descriptions.Item>
+                        <Descriptions.Item label="SKU ID">{row.skuId || "-"}</Descriptions.Item>
+                        <Descriptions.Item label="SKU货号">{row.skuExtCode || "-"}</Descriptions.Item>
+                        <Descriptions.Item label="SKU属性集">{row.skuAttr || "-"}</Descriptions.Item>
+                        <Descriptions.Item label="站点">{activity.site || "-"}</Descriptions.Item>
                         <Descriptions.Item label="活动类型">{info.type}</Descriptions.Item>
                         <Descriptions.Item label="活动来源">{info.kind}</Descriptions.Item>
-                        <Descriptions.Item label="报名价">{formatActivityMoney(info.signupPrice, info.currency)}</Descriptions.Item>
+                        <Descriptions.Item label="可报名场次">{info.canEnrollSessionCount ?? "-"}</Descriptions.Item>
+                        <Descriptions.Item label="提报数量">{row.reportedQty ?? "-"}</Descriptions.Item>
+                        <Descriptions.Item label="剩余数量">{row.remainingQty ?? "-"}</Descriptions.Item>
+                        <Descriptions.Item label="报名时间">{row.signupTimeText}</Descriptions.Item>
+                        <Descriptions.Item label="SKU日常申报价">{formatActivityMoney(row.dailyPriceCents, row.currency)}</Descriptions.Item>
+                        <Descriptions.Item label="SKU活动申报价">{formatActivityMoney(row.activityPriceCents, row.currency)}</Descriptions.Item>
                         <Descriptions.Item label="建议价">{formatActivityMoney(info.suggestedPrice, info.currency)}</Descriptions.Item>
                         <Descriptions.Item label="库存">{info.stock ?? "-"}</Descriptions.Item>
-                        <Descriptions.Item label="报名差异">{formatActivityDiff(info.diff, info.currency)}</Descriptions.Item>
+                        <Descriptions.Item label="报名差异">{formatActivityDiff(row.priceDiffCents, row.currency)}</Descriptions.Item>
+                        <Descriptions.Item label="活动销量">{info.activitySales ?? "-"}</Descriptions.Item>
+                        <Descriptions.Item label="访客">{info.totalVisitors ?? "-"}</Descriptions.Item>
+                        <Descriptions.Item label="活动成交">{formatActivityAmount(info.transactionAmount, info.currency)}</Descriptions.Item>
+                        <Descriptions.Item label="库存门槛">{info.stockThreshold ?? "-"}</Descriptions.Item>
+                        <Descriptions.Item label="折扣门槛">{info.discountThreshold ?? "-"}</Descriptions.Item>
                         <Descriptions.Item label="开始时间">{info.startText || "-"}</Descriptions.Item>
                         <Descriptions.Item label="结束时间">{info.endText || "-"}</Descriptions.Item>
                         <Descriptions.Item label="最近采集">{info.updatedText || "-"}</Descriptions.Item>
-                        <Descriptions.Item label="快照日期">{row.stat_date || "-"}</Descriptions.Item>
+                        <Descriptions.Item label="快照日期">{activity.stat_date || "-"}</Descriptions.Item>
                         <Descriptions.Item label="原始快照" span={2}>
                           <pre style={{ margin: 0, maxHeight: 180, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
                             {rawPreview || "-"}

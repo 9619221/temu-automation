@@ -393,6 +393,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   app: {
     getVersion: () => ipcRenderer.invoke("app:get-version"),
+    getBrowserExtensionPolicy: () => ipcRenderer.invoke("app:get-browser-extension-policy"),
+    ensureBrowserExtensionPolicy: () => ipcRenderer.invoke("app:ensure-browser-extension-policy"),
     getUpdateStatus: () => ipcRenderer.invoke("app:get-update-status"),
     checkForUpdates: () => ipcRenderer.invoke("app:check-for-updates"),
     downloadUpdate: () => ipcRenderer.invoke("app:download-update"),

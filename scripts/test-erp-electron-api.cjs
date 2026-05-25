@@ -280,7 +280,7 @@ async function main() {
         name: "Another Admin",
         accessCode: "another-code",
       }),
-      /removed/,
+      /已移除本地管理员创建/,
     );
 
     const supplier = await invoke("erp:supplier:create", {
@@ -2025,6 +2025,48 @@ async function main() {
     assert.equal(
       duplicateCloudStockOutboundBody.workbench.availableBatches.find((item) => item.id === qcBatchId).availableQty,
       24,
+    );
+
+    const otherAccount = await invoke("erp:account:upsert", {
+      id: "acct_ipc_other",
+      name: "IPC Other Account",
+      source: "test",
+    });
+    const duplicateCloudStockOutboundAcrossAccount = await requestUrl(`${lanStatus.localUrl}/api/outbound/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: opsCookie,
+      },
+      body: JSON.stringify({
+        action: "create_outbound_plan_from_temu_stock_order",
+        accountId: otherAccount.id,
+        stockOrder: {
+          id: "cloud-stock-order-ipc-other-account",
+          stock_order_no: "SO-IPC-001",
+          delivery_order_sn: "DO-IPC-001",
+          delivery_batch_sn: "DB-IPC-001",
+          product_id: "PROD-IPC-001",
+          skc_id: "SKC-IPC-001",
+          sku_id: "SKU-TEMU-IPC",
+          sku_ext_code: "SKU-IPC-001",
+          product_name: "IPC Demo SKU",
+          spec_name: "White / Standard",
+          demand_qty: 6,
+          delivered_qty: 0,
+        },
+        qty: 6,
+        boxes: 1,
+      }),
+    });
+    assert.equal(duplicateCloudStockOutboundAcrossAccount.statusCode, 200);
+    const duplicateCloudStockOutboundAcrossAccountBody = JSON.parse(duplicateCloudStockOutboundAcrossAccount.body).result;
+    assert.equal(duplicateCloudStockOutboundAcrossAccountBody.result.idempotent, true);
+    assert.equal(duplicateCloudStockOutboundAcrossAccountBody.result.createdQty, 0);
+    assert.equal(
+      duplicateCloudStockOutboundAcrossAccountBody.workbench.outboundShipments.filter((item) => item.temuStockOrderNo === "SO-IPC-001").length,
+      1,
     );
 
     const multiSku = await invoke("erp:sku:create", {

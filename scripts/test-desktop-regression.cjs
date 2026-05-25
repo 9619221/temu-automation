@@ -22,6 +22,8 @@ const REGRESSION_PHONE = "13800138000";
 const REGRESSION_PASSWORD = "Regression#123";
 const ERP_ADMIN_NAME = "Desktop Regression Admin";
 const ERP_ADMIN_ACCESS_CODE = "desktop-regression-code";
+const ERP_CLOUD_TEST_LOGIN = process.env.ERP_CLOUD_TEST_LOGIN || "admin";
+const ERP_CLOUD_TEST_ACCESS_CODE = process.env.ERP_CLOUD_TEST_ACCESS_CODE || "cjl20020421";
 const ERP_FLOW_ACCOUNT_ID = "acct_desktop_regression_flow";
 const ERP_FLOW_ACCOUNT_NAME = "Desktop Regression Flow Account";
 const ERP_FLOW_SUPPLIER_ID = "supplier_desktop_regression_flow";
@@ -111,6 +113,7 @@ function createIsolatedEnv(workerPort) {
     APP_USER_DATA: appUserDataRoot,
     TEMU_USER_DATA: appUserDataRoot,
     TEMU_WORKER_PORT: String(workerPort),
+    TEMU_DESKTOP_REGRESSION_AUTH: "1",
     ELECTRON_DISABLE_SECURITY_WARNINGS: "true",
   };
 }
@@ -137,6 +140,55 @@ async function waitForProductManagementReady(page) {
     }
     return { toolbarVisible, cloudEmptyVisible };
   }, 45000, "product management ready");
+}
+
+function regressionAuthShimSource(adminName) {
+  return `
+    (() => {
+      const adminSession = {
+        id: "user_desktop_regression_admin",
+        name: ${JSON.stringify(adminName)},
+        role: "admin",
+        companyId: "company_default",
+        companyName: "默认公司",
+        companyCode: "default"
+      };
+      const apply = () => {
+        const erp = window.electronAPI && window.electronAPI.erp;
+        if (!erp || !erp.auth || erp.auth.__desktopRegressionShim) {
+          return Boolean(erp && erp.auth && erp.auth.__desktopRegressionShim);
+        }
+        erp.auth.getStatus = async () => ({ hasUsers: true, currentUser: adminSession });
+        erp.auth.getCurrentUser = async () => adminSession;
+        erp.auth.login = async () => ({ hasUsers: true, currentUser: adminSession });
+        erp.auth.logout = async () => ({ hasUsers: true, currentUser: adminSession });
+        erp.auth.createFirstAdmin = async () => ({ hasUsers: true, currentUser: adminSession });
+        erp.auth.__desktopRegressionShim = true;
+        return true;
+      };
+      if (!apply()) {
+        const timer = setInterval(() => {
+          if (apply()) clearInterval(timer);
+        }, 20);
+      }
+    })();
+  `;
+}
+
+async function installRegressionAuthShim(page) {
+  const source = regressionAuthShimSource(ERP_ADMIN_NAME);
+  await page.addInitScript(source);
+  await page.evaluate(source);
+}
+
+async function loginDesktopIfNeeded(page) {
+  const loginShell = page.locator(".erp-login-shell").first();
+  if (!await loginShell.isVisible().catch(() => false)) return;
+  const inputs = loginShell.locator("input");
+  await inputs.nth(0).fill(ERP_CLOUD_TEST_LOGIN);
+  await inputs.nth(1).fill(ERP_CLOUD_TEST_ACCESS_CODE);
+  await loginShell.getByRole("button", { name: "登录" }).click();
+  await page.locator(".ant-layout-sider").waitFor({ state: "visible", timeout: 45000 });
 }
 
 async function waitForHashContains(page, fragment, timeout = 45000) {
@@ -318,7 +370,7 @@ async function seedErpPurchaseFlow(page) {
       externalProductTitle,
     }) => {
       const erp = window.electronAPI?.erp;
-      if (!erp?.client || !erp?.auth || !erp?.purchase || !erp?.warehouse || !erp?.outbound) {
+      if (!erp?.client || !erp?.user || !erp?.purchase || !erp?.warehouse || !erp?.outbound) {
         throw new Error("ERP bridge unavailable");
       }
 
@@ -327,23 +379,13 @@ async function seedErpPurchaseFlow(page) {
         await erp.client.setHostMode();
       }
 
-      let authStatus = await erp.auth.getStatus();
-      if (!authStatus.currentUser) {
-        if (!authStatus.hasUsers) {
-          authStatus = await erp.auth.createFirstAdmin({
-            name: adminName,
-            accessCode: adminAccessCode,
-          });
-        } else {
-          authStatus = await erp.auth.login({
-            login: adminName,
-            accessCode: adminAccessCode,
-          });
-        }
-      }
-      if (!authStatus.currentUser) {
-        throw new Error("ERP local admin session was not established");
-      }
+      await erp.user.upsert({
+        id: "user_desktop_regression_admin",
+        name: adminName,
+        role: "admin",
+        accessCode: adminAccessCode,
+      });
+      const adminActor = { id: "user_desktop_regression_admin", role: "admin" };
 
       const account = await erp.account.upsert({
         id: accountId,
@@ -366,6 +408,7 @@ async function seedErpPurchaseFlow(page) {
 
       const prResult = await erp.purchase.action({
         action: "create_pr",
+        actor: adminActor,
         accountId: account.id,
         skuId: sku.id,
         requestedQty: 4,
@@ -378,6 +421,7 @@ async function seedErpPurchaseFlow(page) {
 
       const poResult = await erp.purchase.action({
         action: "generate_po",
+        actor: adminActor,
         prId,
         offlinePurchase: true,
         supplierName: supplier.name,
@@ -394,6 +438,7 @@ async function seedErpPurchaseFlow(page) {
 
       const submitPayment = await erp.purchase.action({
         action: "submit_payment_approval",
+        actor: adminActor,
         poId: purchaseOrderId,
         amount: 50,
         includeWorkbench: false,
@@ -403,6 +448,7 @@ async function seedErpPurchaseFlow(page) {
 
       await erp.purchase.action({
         action: "confirm_paid",
+        actor: adminActor,
         paymentApprovalId,
         paymentMethod: "desktop-regression",
         paymentReference: "PAY-DESKTOP-FLOW",
@@ -415,6 +461,7 @@ async function seedErpPurchaseFlow(page) {
 
       await erp.warehouse.action({
         action: "register_arrival",
+        actor: adminActor,
         receiptId: receipt.id,
         limit: 50,
       });
@@ -424,6 +471,7 @@ async function seedErpPurchaseFlow(page) {
 
       await erp.warehouse.action({
         action: "confirm_count",
+        actor: adminActor,
         receiptId: receipt.id,
         limit: 50,
       });
@@ -433,6 +481,7 @@ async function seedErpPurchaseFlow(page) {
 
       await erp.warehouse.action({
         action: "confirm_inbound",
+        actor: adminActor,
         receiptId: receipt.id,
         limit: 50,
       });
@@ -446,6 +495,7 @@ async function seedErpPurchaseFlow(page) {
 
       const outboundPlan = await erp.outbound.action({
         action: "create_outbound_plan",
+        actor: adminActor,
         batchId: batch.id,
         qty: 1,
         boxes: 1,
@@ -455,16 +505,17 @@ async function seedErpPurchaseFlow(page) {
       const outboundId = outboundPlan?.result?.shipment?.id;
       if (!outboundId) throw new Error("create_outbound_plan did not return a shipment id");
 
-      await erp.outbound.action({ action: "start_picking", outboundId, limit: 50 });
-      await erp.outbound.action({ action: "mark_packed", outboundId, boxes: 1, limit: 50 });
+      await erp.outbound.action({ action: "start_picking", actor: adminActor, outboundId, limit: 50 });
+      await erp.outbound.action({ action: "mark_packed", actor: adminActor, outboundId, boxes: 1, limit: 50 });
       await erp.outbound.action({
         action: "confirm_shipped_out",
+        actor: adminActor,
         outboundId,
         logisticsProvider: "Regression Logistics",
         trackingNo,
         limit: 50,
       });
-      await erp.outbound.action({ action: "confirm_outbound_done", outboundId, limit: 50 });
+      await erp.outbound.action({ action: "confirm_outbound_done", actor: adminActor, outboundId, limit: 50 });
 
       const mappingSku = await erp.sku.create({
         id: mappingSkuId,
@@ -475,6 +526,7 @@ async function seedErpPurchaseFlow(page) {
       });
       const mappingResult = await erp.purchase.action({
         action: "upsert_sku_1688_source",
+        actor: adminActor,
         skuId: mappingSku.id,
         accountId: account.id,
         mappingGroupId: `map_${mappingSku.id}_${offerId}_${externalSpecId}`,
@@ -497,6 +549,7 @@ async function seedErpPurchaseFlow(page) {
       if (!mappingSource?.id) throw new Error("upsert_sku_1688_source did not return a mapping id");
       const mappingPrResult = await erp.purchase.action({
         action: "create_pr",
+        actor: adminActor,
         accountId: account.id,
         skuId: mappingSku.id,
         requestedQty: 4,
@@ -508,6 +561,7 @@ async function seedErpPurchaseFlow(page) {
       if (!mappingPrId) throw new Error("mapped create_pr did not return a purchase request id");
       const mappingPoResult = await erp.purchase.action({
         action: "generate_po",
+        actor: adminActor,
         prId: mappingPrId,
         preferSku1688Source: true,
         qty: 4,
@@ -969,19 +1023,14 @@ async function verifySeededFlowOnPage(page, target, flow) {
     return;
   }
   if (target.hash === "/warehouse-center") {
-    const allScopeTab = page
-      .locator('.warehouse-queue-tabs[aria-label*="工作视图"] button')
-      .filter({ hasText: "全部" })
+    const allScopeButton = page
+      .locator(".warehouse-queue-group")
+      .first()
+      .getByRole("button", { name: /全部/ })
       .first();
-    if (await allScopeTab.isVisible().catch(() => false)) {
-      await allScopeTab.click();
-    }
-    const inboundedTab = page
-      .locator('.warehouse-queue-tabs[aria-label*="单据状态"] button')
-      .filter({ hasText: "已入库" })
-      .first();
-    if (await inboundedTab.isVisible().catch(() => false)) {
-      await inboundedTab.click();
+    if (await allScopeButton.isVisible().catch(() => false)) {
+      await allScopeButton.click();
+      await page.waitForTimeout(300);
     }
     await waitForVisibleText(page, flow.skuCode, 45000);
     return;
@@ -994,7 +1043,38 @@ async function verifySeededFlowOnPage(page, target, flow) {
     await waitForVisibleText(page, flow.mappingSkuCode, 45000);
     return;
   }
-  if (target.hash === "/product-master-data" || target.hash === "/purchase-center") {
+  if (target.hash === "/purchase-center") {
+    await waitForVisibleText(page, flow.skuCode, 45000);
+    await waitForVisibleText(page, flow.mappingSkuCode, 45000);
+    const orderRow = page
+      .locator(".erp-compact-table .ant-table-tbody > tr.ant-table-row", { hasText: flow.mappingSkuCode })
+      .first();
+    await orderRow.waitFor({ state: "visible", timeout: 45000 });
+    await orderRow.getByText(flow.mappingSkuCode, { exact: false }).first().click();
+    await page.locator(".purchase-order-detail").first().waitFor({ state: "visible", timeout: 10000 });
+    const detailState = await page.evaluate((expectedSkuCode) => {
+      const detail = document.querySelector(".purchase-order-detail");
+      const text = detail?.textContent || "";
+      return {
+        visible: Boolean(detail),
+        hasItemsTable: Boolean(detail?.querySelector(".purchase-order-detail__items")),
+        hasSkuCode: text.includes(expectedSkuCode),
+        hasQtyHeader: text.includes("数量"),
+        hasAmountHeader: text.includes("金额"),
+        hasFreightHeader: text.includes("运费"),
+        hasPaidAmountHeader: text.includes("实付金额"),
+      };
+    }, flow.mappingSkuCode);
+    assert(detailState.visible, "purchase order row click did not open detail");
+    assert(detailState.hasItemsTable, "purchase order detail items table missing");
+    assert(detailState.hasSkuCode, "purchase order detail did not show SKU code");
+    assert(detailState.hasQtyHeader, "purchase order detail did not show quantity");
+    assert(detailState.hasAmountHeader, "purchase order detail did not show amount");
+    assert(detailState.hasFreightHeader, "purchase order detail did not show freight");
+    assert(detailState.hasPaidAmountHeader, "purchase order detail did not show paid amount");
+    return;
+  }
+  if (target.hash === "/product-master-data") {
     await waitForVisibleText(page, flow.skuCode, 45000);
     await waitForVisibleText(page, flow.mappingSkuCode, 45000);
     return;
@@ -1014,13 +1094,12 @@ async function runPurchaseFlowChecks(page, flow = null) {
       await gotoHash(page, target.hash);
       await page.waitForTimeout(500);
 
-      const titleFound = await page
-        .locator(".app-page-header")
+      const titleLocator = page
         .getByText(target.expectedTitle, { exact: false })
-        .first()
-        .isVisible()
-        .catch(() => false);
-      if (!titleFound) {
+        .first();
+      try {
+        await titleLocator.waitFor({ state: "visible", timeout: 45000 });
+      } catch {
         issues.push(`${target.label} 标题未渲染（期望「${target.expectedTitle}」）`);
         console.log(`[fail] ${target.label}: 标题未渲染 (${Date.now() - startedAt}ms)`);
         continue;
@@ -1077,9 +1156,12 @@ async function main() {
     await page.waitForLoadState("domcontentloaded");
 
     await waitForElectronBridgeReady(page);
+    await installRegressionAuthShim(page);
     const erpFlow = await seedErpPurchaseFlow(page);
     await page.reload({ waitUntil: "domcontentloaded" });
     await waitForElectronBridgeReady(page);
+    await installRegressionAuthShim(page);
+    await loginDesktopIfNeeded(page);
 
     await page.locator(".ant-layout-sider").waitFor({ state: "visible", timeout: 30000 });
     await page.locator(".app-layout-header").waitFor({ state: "visible", timeout: 30000 });

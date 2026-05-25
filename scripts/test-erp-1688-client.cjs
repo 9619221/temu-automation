@@ -3,13 +3,14 @@ const assert = require("node:assert/strict");
 const {
   PROCUREMENT_APIS,
   build1688OpenApiRequest,
+  call1688OpenApi,
   normalize1688MarketingMixConfigResponse,
   normalize1688ProductDetailResponse,
   normalize1688SearchResponse,
   sign1688Request,
 } = require("../electron/erp/1688Client.cjs");
 
-function run() {
+async function run() {
   const apiPath = "param2/1/com.alibaba.fenxiao/product.keywords.search/123456";
   const params = {
     access_token: "token",
@@ -158,13 +159,46 @@ function run() {
     assert.equal(nextRequest.apiPath, expectedPath);
     assert.equal(nextRequest.url, `https://gw.open.1688.com/openapi/${expectedPath}`);
   }
+
+  const longOrderResult = await call1688OpenApi({
+    credentials: {
+      appKey: "123456",
+      appSecret: "secret",
+      accessToken: "token",
+    },
+    api: PROCUREMENT_APIS.PAYMENT_URL,
+    params: { orderIdList: ["3300510110241543584"] },
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => '{"result":{"orderId":3300510110241543584},"success":true}',
+    }),
+  });
+  assert.equal(longOrderResult.response.result.orderId, "3300510110241543584");
+
+  await assert.rejects(
+    () => call1688OpenApi({
+      credentials: {
+        appKey: "123456",
+        appSecret: "secret",
+        accessToken: "token",
+      },
+      api: PROCUREMENT_APIS.PAYMENT_URL,
+      params: { orderIdList: ["3300510110241543584"] },
+      fetchImpl: async () => ({
+        ok: false,
+        status: 400,
+        text: async () => '{"erroMsg":"订单不存在或者订单不是待支付状态。[3300510110241543584]","errorCode":"createAliPayUrl Error!","success":false}',
+      }),
+    }),
+    /订单不存在或者订单不是待支付状态/,
+  );
 }
 
-try {
-  run();
+run().then(() => {
   console.log("ERP 1688 client checks passed.");
   process.exit(0);
-} catch (error) {
+}).catch((error) => {
   console.error(error);
   process.exit(1);
-}
+});

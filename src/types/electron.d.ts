@@ -223,6 +223,8 @@ interface ImageStudioAPI {
 
 interface AppAPI {
   getVersion: () => Promise<string>;
+  getBrowserExtensionPolicy?: () => Promise<any>;
+  ensureBrowserExtensionPolicy?: () => Promise<any>;
   getUpdateStatus: () => Promise<any>;
   checkForUpdates: () => Promise<any>;
   downloadUpdate: () => Promise<any>;

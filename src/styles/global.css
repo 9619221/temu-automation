@@ -3185,6 +3185,133 @@ h6 {
   font-weight: 700;
 }
 
+.activity-price-modal .ant-modal-content {
+  padding: 0;
+  overflow: hidden;
+  border-radius: 6px;
+}
+
+.activity-price-modal .ant-modal-body {
+  padding: 16px 20px 18px;
+}
+
+.activity-price-modal__top {
+  position: relative;
+  min-height: 36px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+}
+
+.activity-price-modal__tabs {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+  padding-right: 76px;
+  padding-left: 76px;
+}
+
+.activity-price-modal__top .ant-btn {
+  position: absolute;
+  top: -4px;
+  right: 0;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.activity-price-modal__tabs .ant-segmented {
+  background: transparent;
+}
+
+.activity-price-modal__tabs .ant-segmented-group {
+  gap: 20px;
+}
+
+.activity-price-modal__tabs .ant-segmented-item {
+  min-width: 66px;
+  height: 36px;
+  padding: 0 14px;
+  border: 1px solid #d6d9de;
+  border-radius: 4px;
+  color: #333;
+  background: #fff;
+}
+
+.activity-price-modal__tabs .ant-segmented-item-selected {
+  color: #111;
+  background: #fff;
+  box-shadow: none;
+  border-color: #bfc5ce;
+}
+
+.activity-price-modal__tabs .ant-segmented-thumb {
+  display: none;
+}
+
+.activity-price-modal__coupon-empty {
+  height: 54px;
+  display: grid;
+  place-items: center;
+  color: #8a8f98;
+  font-size: 13px;
+}
+
+.activity-price-modal__context {
+  min-height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: #606977;
+  font-size: 12px;
+}
+
+.activity-price-modal__context span:first-child {
+  max-width: 620px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #1f2937;
+  font-weight: 600;
+}
+
+.activity-price-table .ant-table {
+  border-radius: 0;
+}
+
+.activity-price-table .ant-table-container {
+  border-start-start-radius: 0 !important;
+  border-start-end-radius: 0 !important;
+}
+
+.activity-price-table .ant-table-thead > tr > th {
+  height: 44px;
+  padding: 10px 12px !important;
+  color: #111827 !important;
+  font-size: 15px;
+  font-weight: 700 !important;
+  background: #f5f6f8 !important;
+  border-bottom: 1px solid #d8dbe0 !important;
+}
+
+.activity-price-table .ant-table-tbody > tr > td {
+  min-height: 82px;
+  padding: 12px !important;
+  color: #111827;
+  font-size: 14px;
+  border-bottom: 1px solid #e3e5e8 !important;
+  vertical-align: middle;
+}
+
+.activity-price-table .ant-table-tbody > tr:hover > td {
+  background: #fafbfc !important;
+}
+
+.activity-price-table .ant-table-cell-scrollbar {
+  box-shadow: none;
+}
+
 .app-log-message {
   white-space: pre-wrap;
   word-break: break-word;

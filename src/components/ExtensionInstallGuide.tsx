@@ -31,6 +31,7 @@ interface ExtensionGuideState {
   cloudConfig: CloudConsoleConfig | null;
   agents: AgentHeartbeat[];
   error: string;
+  policyStatus: any | null;
 }
 
 function formatRelativeTime(ts?: number | null) {
@@ -78,20 +79,29 @@ export default function ExtensionInstallGuide({ variant = "panel" }: ExtensionIn
     cloudConfig: null,
     agents: [],
     error: "",
+    policyStatus: null,
   });
+  const [policyApplying, setPolicyApplying] = useState(false);
 
   const refresh = useCallback(async (silent = false) => {
     if (!silent) {
       setState((prev) => ({ ...prev, loading: true, error: "" }));
     }
     try {
-      const cloudConfig = await loadCloudConfig();
+      const policyPromise = window.electronAPI?.app?.getBrowserExtensionPolicy
+        ? window.electronAPI.app.getBrowserExtensionPolicy().catch(() => null)
+        : Promise.resolve(null);
+      const [cloudConfig, policyStatus] = await Promise.all([
+        loadCloudConfig(),
+        policyPromise,
+      ]);
       const agents = cloudConfig ? await fetchAgentHeartbeats(cloudConfig, { limit: 160 }) : [];
       setState({
         loading: false,
         cloudConfig,
         agents,
         error: "",
+        policyStatus,
       });
     } catch (error: any) {
       setState((prev) => ({
@@ -138,6 +148,28 @@ export default function ExtensionInstallGuide({ variant = "panel" }: ExtensionIn
     }
   };
 
+  const ensureExtensionPolicy = async () => {
+    const api = window.electronAPI?.app?.ensureBrowserExtensionPolicy;
+    if (!api) {
+      message.warning("当前版本不支持自动写入扩展策略");
+      return;
+    }
+    setPolicyApplying(true);
+    try {
+      const policyStatus = await api();
+      setState((prev) => ({ ...prev, policyStatus }));
+      if (policyStatus?.ok) {
+        message.success("已写入 Chrome / Edge 扩展自动安装策略，重启浏览器后生效");
+      } else {
+        message.warning("扩展策略未完全写入，请查看日志或手动安装");
+      }
+    } catch (error: any) {
+      message.error(error?.message || "写入扩展安装策略失败");
+    } finally {
+      setPolicyApplying(false);
+    }
+  };
+
   if (variant === "banner" && hasOnlineAgent) return null;
 
   if (variant === "banner") {
@@ -152,6 +184,9 @@ export default function ExtensionInstallGuide({ variant = "panel" }: ExtensionIn
           {status.label}
         </Tag>
         <Space size={8} wrap style={{ marginLeft: "auto" }}>
+          <Button size="small" icon={<ReloadOutlined />} loading={policyApplying} onClick={ensureExtensionPolicy}>
+            自动安装扩展
+          </Button>
           <Button size="small" icon={<ApiOutlined />} onClick={openTemuSeller}>
             打开 Temu 后台
           </Button>
@@ -218,6 +253,9 @@ export default function ExtensionInstallGuide({ variant = "panel" }: ExtensionIn
           ) : null}
 
           <Space size={10} wrap>
+            <Button icon={<ReloadOutlined />} loading={policyApplying} onClick={ensureExtensionPolicy}>
+              自动安装扩展
+            </Button>
             <Button type="primary" icon={<ApiOutlined />} onClick={openTemuSeller}>
               打开 Temu 后台
             </Button>
@@ -228,6 +266,12 @@ export default function ExtensionInstallGuide({ variant = "panel" }: ExtensionIn
         </Space>
 
         <div style={{ display: "grid", gap: 10 }}>
+          <div className="app-kv">
+            <span className="app-kv__label">安装策略</span>
+            <span className="app-kv__value">
+              {state.policyStatus?.ok ? "已写入" : state.policyStatus?.supported === false ? "不支持" : "待写入"}
+            </span>
+          </div>
           <div className="app-kv">
             <span className="app-kv__label">在线设备</span>
             <span className="app-kv__value">{onlineAgents.length}/{latestAgents.length}</span>

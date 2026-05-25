@@ -23,9 +23,11 @@ const COLLECTOR_STATE_KEY = "temu_monitor_collector_state";
 const COLLECTOR_WINDOW_KEY = "temu_monitor_collector_window";
 const COLLECTOR_QUERY = "__temu_monitor_collector=1";
 const COLLECTOR_BOOT_VERSION_KEY = "temu_monitor_collector_boot_version";
-const COLLECTOR_BOOT_VERSION = "20260525_shipping_chain";
+const COLLECTOR_BOOT_VERSION = "20260525_passive_capture";
 const COLLECTOR_ALARM_MINUTES = 2;
 const COLLECTOR_BATCH_SIZE = 4;
+const COLLECTOR_WINDOW_WIDTH = 360;
+const COLLECTOR_WINDOW_HEIGHT = 300;
 const HK_CLOUD_ENDPOINT = "https://erp.temu.chat/cloud";
 const FEISHU_SUPPLIER_TABLE_URL = "https://mcn24onb5t1o.feishu.cn/base/RLy7bndc4aCXhtsx4yAcr2d8nSg?table=tbl0UhZRpR0niDSt&view=vew5Spjz7c";
 const FEISHU_SUPPLIER_ONCE_KEY = "temu_monitor_feishu_supplier_once";
@@ -71,34 +73,36 @@ chrome.runtime.onStartup.addListener(async () => {
 
 async function ensureRuntimeDefaults() {
   chrome.alarms.create(ALARM_FLUSH, { periodInMinutes: 0.5 });
-  chrome.alarms.create(ALARM_COLLECT, { periodInMinutes: COLLECTOR_ALARM_MINUTES });
-  const cur = await getStorage(["device_id", COLLECTOR_STATE_KEY, COLLECTOR_BOOT_VERSION_KEY]);
+  await clearAlarm(ALARM_COLLECT);
+  const cur = await getStorage(["device_id", COLLECTOR_STATE_KEY, COLLECTOR_WINDOW_KEY, COLLECTOR_BOOT_VERSION_KEY]);
   const patch = {};
   if (!cur.device_id) patch.device_id = crypto.randomUUID();
   if (!cur[COLLECTOR_STATE_KEY]) {
     patch[COLLECTOR_STATE_KEY] = {
-      enabled: true,
+      enabled: false,
       index: 0,
       updated_at: Date.now(),
-      reason: "auto_default",
+      reason: "passive_capture_only",
     };
+    patch[COLLECTOR_WINDOW_KEY] = null;
     patch[COLLECTOR_BOOT_VERSION_KEY] = COLLECTOR_BOOT_VERSION;
   } else if (cur[COLLECTOR_BOOT_VERSION_KEY] !== COLLECTOR_BOOT_VERSION) {
     patch[COLLECTOR_STATE_KEY] = {
       ...cur[COLLECTOR_STATE_KEY],
-      enabled: true,
+      enabled: false,
       updated_at: Date.now(),
-      reason: "auto_enable_shipping_chain",
+      reason: "passive_capture_only",
     };
+    patch[COLLECTOR_WINDOW_KEY] = null;
     patch[COLLECTOR_BOOT_VERSION_KEY] = COLLECTOR_BOOT_VERSION;
   }
   if (Object.keys(patch).length) await setStorage(patch);
   await tryAutoConfigure();
-  const collectorState = patch[COLLECTOR_STATE_KEY] || cur[COLLECTOR_STATE_KEY];
-  if (collectorState?.enabled !== false) {
-    await runCollectorStep().catch((e) => console.warn("[sw] collector bootstrap err", e?.message || e));
+  if (cur[COLLECTOR_WINDOW_KEY]) {
+    try { await chrome.windows.remove(cur[COLLECTOR_WINDOW_KEY]); } catch {}
   }
-  await runFeishuSupplierImportOnce("bootstrap").catch((e) => console.warn("[sw] feishu once err", e?.message || e));
+  await cleanupStrayCollectorTabs(null).catch((e) => console.warn("[sw] collector cleanup err", e?.message || e));
+  await disableFeishuSupplierAutoImport("bootstrap").catch((e) => console.warn("[sw] feishu auto disable err", e?.message || e));
 }
 
 // Keep the extension on the HK cloud endpoint; old local/custom endpoints are replaced on startup.
@@ -125,7 +129,8 @@ async function tryAutoConfigure() {
 // ---------- 周期上报 ----------
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === ALARM_COLLECT) {
-    await runCollectorStep().catch((e) => console.warn("[sw] collector err", e));
+    await clearAlarm(ALARM_COLLECT);
+    await cleanupStrayCollectorTabs(null).catch((e) => console.warn("[sw] collector cleanup err", e?.message || e));
     return;
   }
   if (alarm.name !== ALARM_FLUSH) return;
@@ -240,7 +245,7 @@ async function sendHeartbeat() {
       console.log("[sw] cloud requested reload, version=" + json.reload_version);
       try { chrome.runtime.reload(); } catch (e) { console.warn("[sw] reload failed", e); }
     }
-    await runFeishuSupplierImportOnce("heartbeat").catch((e) => console.warn("[sw] feishu once err", e?.message || e));
+    await disableFeishuSupplierAutoImport("heartbeat").catch((e) => console.warn("[sw] feishu auto disable err", e?.message || e));
   } catch {}
 }
 
@@ -278,13 +283,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       })
       .catch(() => sendResponse({ queueDepth: -1, stats: {}, configured: false }));
     return true; // async
-  }
-
-  if (msg.type === "FETCHSCRIPT") {
-    fetchRemoteHook()
-      .then((r) => sendResponse(r))
-      .catch((e) => sendResponse({ success: false, error: String(e?.message || e).slice(0, 200) }));
-    return true;
   }
 
   if (msg.type === "FLUSH_NOW") {
@@ -420,6 +418,24 @@ async function runFeishuSupplierImportOnce(reason = "auto") {
   }
 }
 
+async function disableFeishuSupplierAutoImport(reason = "auto_disabled") {
+  const cfg = await getStorage([FEISHU_SUPPLIER_ONCE_KEY]);
+  const state = cfg[FEISHU_SUPPLIER_ONCE_KEY] || {};
+  if (state.auto_disabled) {
+    return { ok: true, skipped: "auto_disabled" };
+  }
+  await setStorage({
+    [FEISHU_SUPPLIER_ONCE_KEY]: {
+      ...state,
+      runningAt: 0,
+      auto_disabled: true,
+      reason,
+      updatedAt: Date.now(),
+    },
+  });
+  return { ok: true, disabled: true };
+}
+
 async function openFeishuSupplierTabForCapture() {
   const tabs = await chrome.tabs.query({ url: ["https://*.feishu.cn/base/*"] });
   const matched = tabs.find((tab) => tab?.url && tab.url.includes("/base/RLy7bndc4aCXhtsx4yAcr2d8nSg"));
@@ -498,93 +514,58 @@ async function handleFeishuSuppliersCaptured(payload, sender) {
 
 async function startCollector() {
   const now = Date.now();
-  const state = {
-    enabled: true,
-    index: 0,
-    last_started_at: now,
-    last_step_at: 0,
-    last_target_key: "",
-    last_target_url: "",
-    last_targets: [],
-    updated_at: now,
-  };
-  await setStorage({ [COLLECTOR_STATE_KEY]: state });
-  chrome.alarms.create(ALARM_COLLECT, { periodInMinutes: COLLECTOR_ALARM_MINUTES });
-  await runCollectorStep(true);
-  return { ok: true };
+  await clearAlarm(ALARM_COLLECT);
+  await cleanupStrayCollectorTabs(null).catch(() => {});
+  await setStorage({
+    [COLLECTOR_STATE_KEY]: {
+      enabled: false,
+      index: 0,
+      last_started_at: now,
+      last_step_at: 0,
+      last_target_key: "",
+      last_target_url: "",
+      last_targets: [],
+      updated_at: now,
+      reason: "passive_capture_only",
+    },
+    [COLLECTOR_WINDOW_KEY]: null,
+  });
+  sendHeartbeat().catch((e) => console.warn("[sw] collector passive heartbeat err", e?.message || e));
+  return { ok: false, reason: "后台自动开页采集已关闭，仅在已打开的 Temu 页面被动采集" };
 }
 
 async function stopCollector() {
   const cfg = await getStorage([COLLECTOR_STATE_KEY, COLLECTOR_WINDOW_KEY]);
   const now = Date.now();
+  await clearAlarm(ALARM_COLLECT);
   await setStorage({ [COLLECTOR_STATE_KEY]: { ...(cfg[COLLECTOR_STATE_KEY] || {}), enabled: false, stopped_at: now, updated_at: now } });
   const windowId = cfg[COLLECTOR_WINDOW_KEY];
   if (windowId) {
     try { await chrome.windows.remove(windowId); } catch {}
   }
   await setStorage({ [COLLECTOR_WINDOW_KEY]: null });
+  await cleanupStrayCollectorTabs(null).catch(() => {});
   sendHeartbeat().catch((e) => console.warn("[sw] collector stop heartbeat err", e?.message || e));
   return { ok: true };
 }
 
 async function runCollectorStep(force = false) {
   const cfg = await getStorage([COLLECTOR_STATE_KEY, COLLECTOR_WINDOW_KEY]);
-  const state = cfg[COLLECTOR_STATE_KEY] || {};
-  if (!state.enabled && !force) return { ok: false, reason: "collector_disabled" };
-  const index = Number.isFinite(Number(state.index)) ? Number(state.index) : 0;
-  const batchSize = Math.min(COLLECTOR_BATCH_SIZE, COLLECTOR_TARGETS.length);
-  const targets = Array.from({ length: batchSize }, (_, offset) => COLLECTOR_TARGETS[(index + offset) % COLLECTOR_TARGETS.length]);
-  const targetUrls = targets.map((target) => markCollectorUrl(target.url));
-  let windowId = cfg[COLLECTOR_WINDOW_KEY] || null;
-  let tabs = [];
-  if (windowId) {
-    try {
-      const win = await chrome.windows.get(windowId, { populate: true });
-      tabs = Array.isArray(win?.tabs) ? win.tabs : [];
-    } catch {
-      windowId = null;
-    }
+  if (cfg[COLLECTOR_WINDOW_KEY]) {
+    try { await chrome.windows.remove(cfg[COLLECTOR_WINDOW_KEY]); } catch {}
   }
-  if (!windowId || !tabs.length) {
-    const win = await chrome.windows.create({
-      url: targetUrls[0],
-      type: "popup",
-      focused: false,
-      width: 360,
-      height: 300,
-      left: 0,
-      top: 0,
-    });
-    windowId = win.id;
-    tabs = Array.isArray(win?.tabs) ? win.tabs : [];
-  }
-  for (let i = 0; i < targetUrls.length; i++) {
-    const tab = tabs[i];
-    if (tab?.id) {
-      await chrome.tabs.update(tab.id, { url: targetUrls[i], active: i === 0 });
-    } else if (windowId) {
-      const created = await chrome.tabs.create({ windowId, url: targetUrls[i], active: i === 0 });
-      tabs[i] = created;
-    }
-  }
-  const extraTabs = tabs.slice(targetUrls.length).map((tab) => tab?.id).filter(Boolean);
-  for (const tabId of extraTabs) {
-    try { await chrome.tabs.remove(tabId); } catch {}
-  }
-  const nextState = {
-    ...state,
-    enabled: true,
-    index: (index + batchSize) % COLLECTOR_TARGETS.length,
-    last_step_at: Date.now(),
-    last_target_key: targets.map((target) => target.key).join(","),
-    last_target_url: targetUrls[0],
-    last_targets: targets.map((target, i) => ({ ...target, url: targetUrls[i] })),
-    updated_at: Date.now(),
-    last_error: null,
-  };
-  await setStorage({ [COLLECTOR_STATE_KEY]: nextState, [COLLECTOR_WINDOW_KEY]: windowId });
-  sendHeartbeat().catch((e) => console.warn("[sw] collector heartbeat err", e?.message || e));
-  return { ok: true, targets: nextState.last_targets };
+  await clearAlarm(ALARM_COLLECT);
+  await cleanupStrayCollectorTabs(null).catch(() => {});
+  await setStorage({
+    [COLLECTOR_STATE_KEY]: {
+      ...(cfg[COLLECTOR_STATE_KEY] || {}),
+      enabled: false,
+      updated_at: Date.now(),
+      reason: "passive_capture_only",
+    },
+    [COLLECTOR_WINDOW_KEY]: null,
+  });
+  return { ok: false, reason: "passive_capture_only" };
 }
 
 function markCollectorUrl(url) {
@@ -595,6 +576,36 @@ function markCollectorUrl(url) {
   } catch {
     const sep = String(url || "").includes("?") ? "&" : "?";
     return String(url || "") + sep + COLLECTOR_QUERY;
+  }
+}
+
+function isCollectorTaggedUrl(url) {
+  try {
+    return new URL(String(url || "")).searchParams.get(COLLECTOR_QUERY.split("=")[0]) === COLLECTOR_QUERY.split("=")[1];
+  } catch {
+    return String(url || "").includes(COLLECTOR_QUERY);
+  }
+}
+
+function isManagedCollectorWindow(win) {
+  if (!win || win.type !== "popup") return false;
+  const tabs = Array.isArray(win.tabs) ? win.tabs : [];
+  return tabs.some((tab) => isCollectorTaggedUrl(tab?.url));
+}
+
+async function cleanupStrayCollectorTabs(collectorWindowId) {
+  const allTabs = await chrome.tabs.query({
+    url: [
+      "https://agentseller.temu.com/*",
+      "https://agentseller-us.temu.com/*",
+      "https://agentseller-eu.temu.com/*",
+      "https://seller.kuajingmaihuo.com/*",
+    ],
+  });
+  const strayTabs = (Array.isArray(allTabs) ? allTabs : [])
+    .filter((tab) => tab?.id && tab.windowId !== collectorWindowId && isCollectorTaggedUrl(tab.url));
+  for (const tab of strayTabs) {
+    try { await chrome.tabs.remove(tab.id); } catch {}
   }
 }
 
@@ -617,30 +628,20 @@ async function handleCaptured(payload, sender) {
   await bumpStats({ captured_count_delta: 1 });
 }
 
-async function fetchRemoteHook() {
-  const cfg = await getStorage(["cloud_endpoint", "auth_token", "device_id"]);
-  if (!cfg.cloud_endpoint || !cfg.auth_token) {
-    return { success: false, error: "未配置云端" };
-  }
-  const base = cfg.cloud_endpoint.replace(/\/$/, "");
-  const headers = {
-    Authorization: `Bearer ${cfg.auth_token}`,
-    "X-Device-Id": cfg.device_id || "",
-  };
-  const [configResp, scriptResp] = await Promise.all([
-    fetch(base + "/api/hook/v1/config", { headers }),
-    fetch(base + "/api/hook/v1/inject.js", { headers }),
-  ]);
-  if (!configResp.ok) return { success: false, error: `config HTTP ${configResp.status}` };
-  if (!scriptResp.ok) return { success: false, error: `hook HTTP ${scriptResp.status}` };
-  return {
-    success: true,
-    config: await configResp.json(),
-    scriptContent: await scriptResp.text(),
-  };
+// ---------- 工具：storage / 累计统计 ----------
+function clearAlarm(name) {
+  return new Promise((resolve) => {
+    try {
+      chrome.alarms.clear(name, () => {
+        void chrome.runtime.lastError;
+        resolve(true);
+      });
+    } catch {
+      resolve(false);
+    }
+  });
 }
 
-// ---------- 工具：storage / 累计统计 ----------
 function getStorage(keys) {
   return new Promise((resolve) => chrome.storage.local.get(keys, (v) => resolve(v || {})));
 }

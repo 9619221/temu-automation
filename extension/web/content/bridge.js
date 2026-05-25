@@ -2,9 +2,8 @@
 // Content script bridge —— isolated world，document_start
 // ============================================================
 // 1. 读取构建期生成的 __TEMU_MONITOR_BUILD_CONFIG__（_config.generated.js 注入）
-// 2. 注入 page world hook（hook.js 走 web_accessible_resources）
-// 3. 转发 page world 上行的 CustomEvent → service worker
-// 4. 接 SW 的 GET_PAGE_STATS 探针，回报 page world 健康度
+// 2. 转发 page world 上行的 CustomEvent → service worker
+// 3. 接 SW 的 GET_PAGE_STATS 探针，回报 page world 健康度
 // ============================================================
 
 (function () {
@@ -42,36 +41,7 @@
 
   injectHook();
 
-  // ---------- 2. 异步从 SW 拉远端版本（可选） ----------
-  try {
-    chrome.runtime.sendMessage({ type: "FETCHSCRIPT" }, (resp) => {
-      if (chrome.runtime.lastError) return;
-      if (!resp || !resp.success || !resp.scriptContent) return;
-      try {
-        if (resp.config) {
-          const cfgScript = document.createElement("script");
-          cfgScript.textContent = `window.__temuMonitorConfig = ${JSON.stringify(resp.config)};`;
-          cfgScript.dataset.temuMonitor = "config-remote";
-          (document.head || document.documentElement).appendChild(cfgScript);
-          cfgScript.remove();
-        }
-        const blob = new Blob([resp.scriptContent], { type: "text/javascript" });
-        const url = URL.createObjectURL(blob);
-        const s = document.createElement("script");
-        s.src = url;
-        s.dataset.temuMonitor = "remote";
-        s.onload = () => { URL.revokeObjectURL(url); s.remove(); };
-        s.onerror = () => { URL.revokeObjectURL(url); s.remove(); };
-        (document.head || document.documentElement).appendChild(s);
-      } catch (e) {
-        console.warn("[temu-monitor] remote inject failed:", e);
-      }
-    });
-  } catch (e) {
-    // chrome.runtime 不可用（极端情况），忽略
-  }
-
-  // ---------- 3. 监听 page world 上行 CustomEvent ----------
+  // ---------- 2. 监听 page world 上行 CustomEvent ----------
   window.addEventListener(EVENT_NAME, (ev) => {
     const payload = ev && ev.detail;
     if (!payload) return;
@@ -153,6 +123,20 @@
     if (!/(^|\.)feishu\.cn$/i.test(location.hostname) || !/\/base\//i.test(location.pathname)) {
       return { ok: false, reason: "当前页面不是飞书 Base" };
     }
+    const apiRows = await collectFeishuRowsFromApi().catch((error) => ({
+      ok: false,
+      reason: String(error?.message || error).slice(0, 200),
+      rows: [],
+    }));
+    if (apiRows.ok && apiRows.rows.length) {
+      await sendFeishuSupplierChunks(apiRows.rows, {
+        sourceUrl: location.href,
+        table: apiRows.table || "",
+        view: apiRows.view || "",
+        mode: "api",
+      });
+      return { ok: true, rows: apiRows.rows.length, sourceUrl: location.href, mode: "api" };
+    }
     const maxSteps = Math.max(2, Math.min(80, Number(options.maxSteps) || 30));
     const delayMs = Math.max(150, Math.min(1200, Number(options.delayMs) || 350));
     const scroller = findMainScrollContainer();
@@ -171,21 +155,160 @@
     }
     const rows = dedupeRows(snapshots);
     if (rows.length) {
+      await sendFeishuSupplierChunks(rows, {
+        sourceUrl: location.href,
+        table: new URLSearchParams(location.search).get("table") || "",
+        view: new URLSearchParams(location.search).get("view") || "",
+        mode: "dom",
+      });
+    }
+    return { ok: true, rows: rows.length, sourceUrl: location.href, mode: "dom", reason: apiRows.reason || null };
+  }
+
+  async function collectFeishuRowsFromApi() {
+    const tokenMatch = location.pathname.match(/\/base\/([^/?#]+)/i);
+    const token = tokenMatch?.[1];
+    if (!token) return { ok: false, rows: [], reason: "missing_token" };
+    const base = `${location.origin}/space/api/bitable/${token}`;
+    const tablesResp = await fetch(`${base}/tablesv3/`, { credentials: "include" });
+    if (!tablesResp.ok) return { ok: false, rows: [], reason: `tablesv3_${tablesResp.status}` };
+    const tablesBody = await tablesResp.json();
+    const tableEntries = Object.entries(tablesBody?.data || {});
+    const allRows = [];
+    for (const [tableId, encoded] of tableEntries) {
+      const tableMeta = await decodeFeishuEncodedJson(encoded).catch(() => null);
+      if (!tableMeta?.meta) continue;
+      const viewId = Array.isArray(tableMeta.views) ? tableMeta.views[0] : Object.keys(tableMeta.viewMap || {})[0];
+      const fieldMap = buildFeishuFieldNameMap(tableMeta.fieldMap || {});
+      const total = Math.max(0, Number(tableMeta.meta.recordsNum || 0));
+      const rev = Number(tableMeta.meta.rev || 0);
+      const pageSize = 200;
+      for (let offset = 0; offset < total; offset += pageSize) {
+        const url = new URL(`${base}/records`);
+        url.searchParams.set("tableId", tableId);
+        url.searchParams.set("viewId", viewId || "");
+        url.searchParams.set("tableRev", String(rev));
+        url.searchParams.set("depRev", "{}");
+        url.searchParams.set("viewLazyLoad", "true");
+        url.searchParams.set("offset", String(offset));
+        url.searchParams.set("limit", String(pageSize));
+        url.searchParams.set("tableID", tableId);
+        url.searchParams.set("viewID", viewId || "");
+        url.searchParams.set("removeFmlExtra", "true");
+        const resp = await fetch(url.toString(), { credentials: "include" });
+        if (!resp.ok) continue;
+        const body = await resp.json().catch(() => null);
+        const decoded = await decodeFeishuRecordsBody(body).catch(() => null);
+        const pageRows = normalizeFeishuRecordRows(decoded, fieldMap, tableId, viewId);
+        allRows.push(...pageRows);
+      }
+    }
+    return {
+      ok: allRows.length > 0,
+      rows: dedupeRows(allRows),
+      table: tableEntries.map(([tableId]) => tableId).join(","),
+      view: "",
+    };
+  }
+
+  async function decodeFeishuRecordsBody(body) {
+    const data = body?.data || body;
+    if (!data) return null;
+    if (typeof data.records === "string") return decodeFeishuEncodedJson(data.records);
+    if (Array.isArray(data.records) || data.recordMap || data.recordsMap) return data;
+    return data;
+  }
+
+  async function decodeFeishuEncodedJson(encoded) {
+    if (!encoded || typeof encoded !== "string") return null;
+    const text = await ungzipBase64(encoded);
+    return JSON.parse(text);
+  }
+
+  async function ungzipBase64(value) {
+    const binary = atob(value);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    if (!("DecompressionStream" in window)) throw new Error("browser_missing_gzip_decoder");
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+    return new Response(stream).text();
+  }
+
+  function buildFeishuFieldNameMap(fieldMap) {
+    const out = {};
+    for (const [fieldId, meta] of Object.entries(fieldMap || {})) {
+      out[fieldId] = meta?.name || fieldId;
+    }
+    return out;
+  }
+
+  function normalizeFeishuRecordRows(decoded, fieldMap, tableId, viewId) {
+    const records = extractFeishuRecordArray(decoded);
+    return records.map((record) => {
+      const cells = record?.fields || record?.fieldMap || record?.cells || record?.data || record || {};
+      const row = {
+        __tableId: tableId,
+        __viewId: viewId || "",
+        __recordId: record?.id || record?.recordId || record?.record_id || "",
+      };
+      for (const [key, value] of Object.entries(cells)) {
+        if (!key || key.startsWith("__")) continue;
+        if (!fieldMap[key] && !/^fld/i.test(key)) continue;
+        row[fieldMap[key] || key] = stringifyFeishuCell(value);
+      }
+      return row;
+    }).filter((row) => Object.keys(row).some((key) => !key.startsWith("__") && row[key]));
+  }
+
+  function extractFeishuRecordArray(value) {
+    if (Array.isArray(value)) return value;
+    if (!value || typeof value !== "object") return [];
+    if (Array.isArray(value.records)) return value.records;
+    if (Array.isArray(value.recordList)) return value.recordList;
+    if (Array.isArray(value.data)) return value.data;
+    const map = value.recordMap || value.recordsMap || value.record_map || null;
+    if (map && typeof map === "object") return Object.values(map);
+    return [];
+  }
+
+  function stringifyFeishuCell(value) {
+    if (value == null) return "";
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+    if (Array.isArray(value)) return value.map(stringifyFeishuCell).filter(Boolean).join(" ");
+    if (typeof value === "object") {
+      const direct = value.text || value.name || value.title || value.url || value.link || value.tmp_url || value.file_token || value.token;
+      if (direct) return String(direct);
+      return Object.values(value).map(stringifyFeishuCell).filter(Boolean).join(" ");
+    }
+    return "";
+  }
+
+  function sendFeishuSupplierChunks(rows, meta) {
+    const chunks = [];
+    for (let i = 0; i < rows.length; i += 400) chunks.push(rows.slice(i, i + 400));
+    return Promise.all(chunks.map((chunk, index) => new Promise((resolve) => {
       try {
         chrome.runtime.sendMessage({
           type: "FEISHU_SUPPLIERS_CAPTURED",
           payload: {
             source: "feishu_supplier_table",
-            sourceUrl: location.href,
-            table: new URLSearchParams(location.search).get("table") || "",
-            view: new URLSearchParams(location.search).get("view") || "",
-            rows,
+            sourceUrl: meta.sourceUrl,
+            table: meta.table || "",
+            view: meta.view || "",
+            mode: meta.mode || "",
+            chunkIndex: index,
+            chunkCount: chunks.length,
+            rows: chunk,
             capturedAt: Date.now(),
           },
-        }, () => { void chrome.runtime.lastError; });
-      } catch {}
-    }
-    return { ok: true, rows: rows.length, sourceUrl: location.href };
+        }, () => {
+          void chrome.runtime.lastError;
+          resolve(true);
+        });
+      } catch {
+        resolve(false);
+      }
+    })));
   }
 
   function findMainScrollContainer() {

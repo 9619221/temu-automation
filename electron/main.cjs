@@ -243,6 +243,223 @@ let autoPricingCurrentTaskId = null;
 const WORKER_HTTP_TIMEOUT_MS = 5 * 60 * 1000;
 const WORKER_LONG_TASK_TIMEOUT_MS = 12 * 60 * 60 * 1000;
 const STORE_KEY_PATTERN = /^[A-Za-z0-9._:-]+$/;
+const TEMU_BROWSER_EXTENSION_ID = "ejheeafceahglndenffjkcmojpiomcpg";
+const TEMU_BROWSER_EXTENSION_UPDATE_URL =
+  process.env.TEMU_BROWSER_EXTENSION_UPDATE_URL || "https://erp.temu.chat/ext/update.xml";
+const TEMU_BROWSER_EXTENSION_POLICY_VALUE_NAME =
+  process.env.TEMU_BROWSER_EXTENSION_POLICY_VALUE_NAME || "1";
+const TEMU_BROWSER_EXTENSION_LEGACY_POLICY_VALUE_NAMES = ["9001"];
+const TEMU_BROWSER_EXTENSION_POLICY_VALUE =
+  `${TEMU_BROWSER_EXTENSION_ID};${TEMU_BROWSER_EXTENSION_UPDATE_URL}`;
+const TEMU_BROWSER_EXTENSION_POLICY_TARGETS = [
+  {
+    scope: "HKCU",
+    browser: "chrome",
+    label: "Google Chrome",
+    key: "HKCU\\SOFTWARE\\Policies\\Google\\Chrome\\ExtensionInstallForcelist",
+  },
+  {
+    scope: "HKCU",
+    browser: "edge",
+    label: "Microsoft Edge",
+    key: "HKCU\\SOFTWARE\\Policies\\Microsoft\\Edge\\ExtensionInstallForcelist",
+  },
+  {
+    scope: "HKLM",
+    browser: "chrome",
+    label: "Google Chrome",
+    key: "HKLM\\SOFTWARE\\Policies\\Google\\Chrome\\ExtensionInstallForcelist",
+  },
+  {
+    scope: "HKLM",
+    browser: "edge",
+    label: "Microsoft Edge",
+    key: "HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge\\ExtensionInstallForcelist",
+  },
+];
+
+function runRegExe(args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("reg.exe", args, { windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout?.on("data", (chunk) => { stdout += chunk.toString("utf8"); });
+    child.stderr?.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+      const error = new Error(`reg.exe ${args.join(" ")} failed with code ${code}`);
+      error.code = code;
+      error.stdout = stdout;
+      error.stderr = stderr;
+      reject(error);
+    });
+  });
+}
+
+function parseRegQueryValue(output, valueName) {
+  const lines = String(output || "").split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || !trimmed.toLowerCase().startsWith(String(valueName).toLowerCase())) continue;
+    const parts = trimmed.split(/\s{2,}/).filter(Boolean);
+    if (parts.length >= 3) return parts.slice(2).join(" ").trim();
+  }
+  return "";
+}
+
+async function readBrowserExtensionPolicyTarget(target) {
+  if (process.platform !== "win32") {
+    return {
+      scope: target.scope,
+      browser: target.browser,
+      label: target.label,
+      key: target.key,
+      valueName: TEMU_BROWSER_EXTENSION_POLICY_VALUE_NAME,
+      value: "",
+      installed: false,
+      supported: false,
+    };
+  }
+
+  try {
+    const result = await runRegExe([
+      "query",
+      target.key,
+      "/v",
+      TEMU_BROWSER_EXTENSION_POLICY_VALUE_NAME,
+      "/reg:64",
+    ]);
+    const value = parseRegQueryValue(result.stdout, TEMU_BROWSER_EXTENSION_POLICY_VALUE_NAME);
+    return {
+      scope: target.scope,
+      browser: target.browser,
+      label: target.label,
+      key: target.key,
+      valueName: TEMU_BROWSER_EXTENSION_POLICY_VALUE_NAME,
+      value,
+      installed: value === TEMU_BROWSER_EXTENSION_POLICY_VALUE,
+      supported: true,
+    };
+  } catch {
+    return {
+      scope: target.scope,
+      browser: target.browser,
+      label: target.label,
+      key: target.key,
+      valueName: TEMU_BROWSER_EXTENSION_POLICY_VALUE_NAME,
+      value: "",
+      installed: false,
+      supported: true,
+    };
+  }
+}
+
+async function getBrowserExtensionPolicyStatus() {
+  const targets = [];
+  for (const target of TEMU_BROWSER_EXTENSION_POLICY_TARGETS) {
+    targets.push(await readBrowserExtensionPolicyTarget(target));
+  }
+  return {
+    ok: process.platform === "win32" && targets.some((target) => target.installed),
+    supported: process.platform === "win32",
+    extensionId: TEMU_BROWSER_EXTENSION_ID,
+    updateUrl: TEMU_BROWSER_EXTENSION_UPDATE_URL,
+    expectedValue: TEMU_BROWSER_EXTENSION_POLICY_VALUE,
+    valueName: TEMU_BROWSER_EXTENSION_POLICY_VALUE_NAME,
+    targets,
+  };
+}
+
+async function ensureBrowserExtensionInstallPolicy(options = {}) {
+  const source = typeof options.source === "string" ? options.source : "manual";
+  if (process.platform !== "win32") {
+    return getBrowserExtensionPolicyStatus();
+  }
+
+  const results = [];
+  for (const target of TEMU_BROWSER_EXTENSION_POLICY_TARGETS) {
+    try {
+      const before = await readBrowserExtensionPolicyTarget(target);
+      if (!options.force && before.installed) {
+        results.push({ ...before, changed: false, error: "" });
+        continue;
+      }
+
+      for (const legacyValueName of TEMU_BROWSER_EXTENSION_LEGACY_POLICY_VALUE_NAMES) {
+        try {
+          await runRegExe([
+            "delete",
+            target.key,
+            "/v",
+            legacyValueName,
+            "/f",
+            "/reg:64",
+          ]);
+        } catch {}
+      }
+
+      await runRegExe([
+        "add",
+        target.key,
+        "/v",
+        TEMU_BROWSER_EXTENSION_POLICY_VALUE_NAME,
+        "/t",
+        "REG_SZ",
+        "/d",
+        TEMU_BROWSER_EXTENSION_POLICY_VALUE,
+        "/f",
+        "/reg:64",
+      ]);
+
+      const after = await readBrowserExtensionPolicyTarget(target);
+      results.push({ ...after, changed: !before.installed, error: "" });
+    } catch (error) {
+      const current = await readBrowserExtensionPolicyTarget(target).catch(() => null);
+      if (current?.installed) {
+        results.push({ ...current, changed: false, error: error?.message || String(error) });
+      } else {
+        results.push({
+          scope: target.scope,
+          browser: target.browser,
+          label: target.label,
+          key: target.key,
+          valueName: TEMU_BROWSER_EXTENSION_POLICY_VALUE_NAME,
+          value: current?.value || "",
+          installed: false,
+          supported: true,
+          changed: false,
+          error: error?.message || String(error),
+        });
+      }
+    }
+  }
+
+  const payload = {
+    ok: results.some((target) => target.installed),
+    supported: true,
+    source,
+    extensionId: TEMU_BROWSER_EXTENSION_ID,
+    updateUrl: TEMU_BROWSER_EXTENSION_UPDATE_URL,
+    expectedValue: TEMU_BROWSER_EXTENSION_POLICY_VALUE,
+    valueName: TEMU_BROWSER_EXTENSION_POLICY_VALUE_NAME,
+    targets: results,
+    restartRequired: true,
+  };
+  appendDiagnosticLog({
+    source: "extension-policy",
+    level: payload.ok ? "info" : "warn",
+    message: payload.ok
+      ? "Browser extension force-install policy is ready"
+      : "Browser extension force-install policy could not be fully applied",
+    detail: payload,
+  });
+  return payload;
+}
 
 const AUTO_PRICING_FILTER_KEYWORDS = {
   liquid: [
@@ -4011,6 +4228,17 @@ app.whenReady().then(async () => {
   // 启动时先做 scoped 数据 id 迁移，避免账号重建后旧数据孤立
   migrateScopedStoreFilesForAccountIdChange();
 
+  try {
+    await ensureBrowserExtensionInstallPolicy({ source: "startup" });
+  } catch (error) {
+    appendDiagnosticLog({
+      source: "extension-policy",
+      level: "warn",
+      message: "Browser extension force-install policy setup failed",
+      detail: diagnosticErrorToDetail(error),
+    });
+  }
+
   // 载入持久化的 AI 凭证覆盖 (用户在 Settings 中设置的 Key)
   hydrateImageStudioRuntimeConfigFromDisk();
 
@@ -5537,6 +5765,14 @@ ipcMain.handle("image-studio:download-all", async (_event, payload) => {
 });
 
 ipcMain.handle("app:get-version", () => app.getVersion());
+
+ipcMain.handle("app:get-browser-extension-policy", async () => {
+  return getBrowserExtensionPolicyStatus();
+});
+
+ipcMain.handle("app:ensure-browser-extension-policy", async () => {
+  return ensureBrowserExtensionInstallPolicy({ source: "ipc" });
+});
 
 ipcMain.handle("app:get-update-status", () => updateState);
 

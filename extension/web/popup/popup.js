@@ -73,22 +73,6 @@ document.getElementById("stopCollectorBtn")?.addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "STOP_COLLECTOR" }, () => refresh());
 });
 
-document.getElementById("openFeishuBtn")?.addEventListener("click", () => {
-  chrome.runtime.sendMessage({ type: "OPEN_FEISHU_SUPPLIER_TABLE" }, () => refresh());
-});
-
-document.getElementById("syncFeishuBtn")?.addEventListener("click", () => {
-  const btn = document.getElementById("syncFeishuBtn");
-  btn.disabled = true;
-  btn.textContent = "同步中...";
-  chrome.runtime.sendMessage({ type: "SYNC_FEISHU_SUPPLIERS" }, (resp) => {
-    btn.disabled = false;
-    btn.textContent = resp?.rows ? `已同步 ${resp.rows} 行` : "同步飞书供应商表";
-    setTimeout(() => { btn.textContent = "同步飞书供应商表"; }, 2500);
-    refresh();
-  });
-});
-
 document.getElementById("optBtn").addEventListener("click", () => {
   chrome.runtime.openOptionsPage();
 });

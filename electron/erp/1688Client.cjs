@@ -302,13 +302,60 @@ const PROCUREMENT_APIS = Object.freeze({
 // 1688 订单号 / tradeId 是 19 位 Long，超过 JS Number.MAX_SAFE_INTEGER (16 位)。
 // JSON.parse 会把它当 Number 解析导致末位精度丢失（如 ...43584 → ...43600）。
 // 这里在解析前把所有 16+ 位的"裸整数"用引号包成字符串，规避丢精度。
-// 命中位置：冒号后、逗号后、方括号开头后接的 ≥16 位整数（不在已有引号内）。
+// 命中位置：JSON 字符串外的 ≥16 位裸整数（不改错误文案里的 [3300...] 这类文本）。
+function quoteLongJsonNumbersOutsideStrings(text) {
+  const source = String(text);
+  let output = "";
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+
+    if (inString) {
+      output += char;
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+      output += char;
+      continue;
+    }
+
+    const startsNumber = (char === "-" && /\d/.test(source[index + 1] || "")) || /\d/.test(char);
+    if (!startsNumber) {
+      output += char;
+      continue;
+    }
+
+    const start = index;
+    let cursor = char === "-" ? index + 1 : index;
+    while (/\d/.test(source[cursor] || "")) cursor += 1;
+
+    const digitsStart = char === "-" ? start + 1 : start;
+    const digits = source.slice(digitsStart, cursor);
+    const hasDecimalOrExponent = source[cursor] === "." || source[cursor] === "e" || source[cursor] === "E";
+    if (digits.length >= 16 && !hasDecimalOrExponent) {
+      output += `"${source.slice(start, cursor)}"`;
+    } else {
+      output += source.slice(start, cursor);
+    }
+    index = cursor - 1;
+  }
+
+  return output;
+}
+
 function safeParse1688Json(text) {
-  const safe = String(text).replace(
-    /([:\[,]\s*)(-?\d{16,})(?=\s*[,}\]])/g,
-    '$1"$2"',
-  );
-  return JSON.parse(safe);
+  return JSON.parse(quoteLongJsonNumbersOutsideStrings(text));
 }
 
 function normalizeOpenApiValue(value) {
@@ -434,6 +481,7 @@ function get1688ApiErrorText(payload = {}) {
     payload.error_description,
     payload.message,
     payload.msg,
+    payload.erroMsg,
     payload.errorMsg,
     payload.error_msg,
     payload.error,
@@ -458,6 +506,7 @@ function find1688ApiErrorValue(value, depth = 0) {
     "error_description",
     "message",
     "msg",
+    "erroMsg",
     "errorMsg",
     "error_msg",
     "returnMessage",
