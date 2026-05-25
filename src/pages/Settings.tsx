@@ -212,7 +212,7 @@ export default function Settings() {
                 <Input placeholder="https://chromewebstore.google.com/detail/…" />
               </Form.Item>
               <Form.Item name="cloudEndpoint" label="云端地址" help="用于读取 /api/dashboard/agent 心跳状态">
-                <Input placeholder="https://your-cloud.example.com" />
+                <Input placeholder={DEFAULT_CLOUD_ENDPOINT} readOnly />
               </Form.Item>
             </div>
             <div className="settings-credential-grid">

@@ -1,7 +1,7 @@
 // 单文件控制台 JS
 const $ = (id) => document.getElementById(id);
 
-// 支持 URL 参数 ?cloud=http://43.156.121.172:8788 切到远端 cloud
+// 支持 URL 参数 ?cloud=https://erp.temu.chat/cloud 切到 HK cloud
 const urlParams = new URLSearchParams(location.search);
 const apiOverride = urlParams.get("cloud") || localStorage.getItem("temu_console_api") || "";
 if (apiOverride) localStorage.setItem("temu_console_api", apiOverride);

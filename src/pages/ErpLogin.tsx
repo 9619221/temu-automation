@@ -27,14 +27,11 @@ export default function ErpLogin() {
     submittingRef.current = true;
     setSubmitting(true);
     try {
-      const runtime = await window.electronAPI?.erp?.client?.getStatus?.().catch(() => null);
       const loginPayload: { login: string; accessCode: string; serverUrl?: string } = {
         login: values.login || "",
         accessCode: values.accessCode,
+        serverUrl: ERP_CLOUD_SERVER_URL,
       };
-      loginPayload.serverUrl = runtime?.isClientMode
-        ? runtime.serverUrl || ERP_CLOUD_SERVER_URL
-        : ERP_CLOUD_SERVER_URL;
       const nextStatus = await auth.login(loginPayload);
       const user = nextStatus.currentUser;
       message.success({

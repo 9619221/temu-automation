@@ -6,11 +6,22 @@
  *   - 桌面端启动时由 sw.js auto-config 写入；用户也可改
  */
 
+import { ERP_CLOUD_SERVER_URL } from "../config/erpCloud";
+
 const STORE_KEY = "temu_cloud_console_cfg";
 
 // 云端采集监控默认地址：erp.temu.chat 的 /cloud 路径
 // （Caddy handle_path /cloud/* 反代到本机 temu-cloud 服务 8788，会剥掉 /cloud 前缀）
-export const DEFAULT_CLOUD_ENDPOINT = "https://erp.temu.chat/cloud";
+export const DEFAULT_CLOUD_ENDPOINT = `${ERP_CLOUD_SERVER_URL}/cloud`;
+
+function normalizeCloudEndpoint(endpoint?: string | null): string {
+  const normalized = String(endpoint || "").trim().replace(/\/$/, "");
+  if (!normalized) return DEFAULT_CLOUD_ENDPOINT;
+  if (normalized === DEFAULT_CLOUD_ENDPOINT || normalized === ERP_CLOUD_SERVER_URL) {
+    return normalized === ERP_CLOUD_SERVER_URL ? DEFAULT_CLOUD_ENDPOINT : normalized;
+  }
+  return DEFAULT_CLOUD_ENDPOINT;
+}
 
 export interface CloudConsoleConfig {
   endpoint: string;
@@ -27,11 +38,13 @@ export async function loadCloudConfig(): Promise<CloudConsoleConfig | null> {
     const v = await window.electronAPI?.store?.get(STORE_KEY);
     // 只要有 token 即可工作，endpoint 缺省回退到默认地址
     if (v && typeof v === "object" && v.token) {
-      return { endpoint: v.endpoint || DEFAULT_CLOUD_ENDPOINT, token: v.token };
+      const cfg = { endpoint: normalizeCloudEndpoint(v.endpoint), token: v.token };
+      if (cfg.endpoint !== v.endpoint) await saveCloudConfig(cfg);
+      return cfg;
     }
     const legacy = await window.electronAPI?.store?.get("temu_app_settings") as LegacyCloudConfig | null | undefined;
     if (legacy && typeof legacy === "object" && legacy.cloudToken) {
-      const cfg = { endpoint: legacy.cloudEndpoint || DEFAULT_CLOUD_ENDPOINT, token: legacy.cloudToken };
+      const cfg = { endpoint: normalizeCloudEndpoint(legacy.cloudEndpoint), token: legacy.cloudToken };
       await saveCloudConfig(cfg);
       return cfg;
     }
@@ -43,7 +56,7 @@ export async function loadCloudConfig(): Promise<CloudConsoleConfig | null> {
 
 export async function saveCloudConfig(cfg: CloudConsoleConfig): Promise<void> {
   await window.electronAPI?.store?.set(STORE_KEY, {
-    endpoint: cfg.endpoint.replace(/\/$/, ""),
+    endpoint: normalizeCloudEndpoint(cfg.endpoint),
     token: cfg.token,
   });
 }
@@ -57,7 +70,7 @@ export async function loginCloud(
   username: string,
   password: string,
 ): Promise<CloudConsoleConfig> {
-  const base = (endpoint || DEFAULT_CLOUD_ENDPOINT).replace(/\/$/, "");
+  const base = normalizeCloudEndpoint(endpoint);
   const r = await fetch(base + "/api/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

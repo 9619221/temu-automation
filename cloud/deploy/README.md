@@ -8,10 +8,10 @@
 
 ```bash
 # 1. 把 cloud 目录整体上传到服务器（路径 ~/cloud）
-scp -r cloud ubuntu@43.156.121.172:~/
+scp -r cloud ubuntu@erp.temu.chat:~/
 
 # 2. ssh 上去
-ssh ubuntu@43.156.121.172
+ssh ubuntu@erp.temu.chat
 
 # 3. 在服务器上跑安装脚本
 cd ~/cloud

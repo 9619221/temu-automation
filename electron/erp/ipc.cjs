@@ -19,6 +19,7 @@ const {
   stopLanServer,
 } = require("./lanServer.cjs");
 const {
+  HK_SERVER_URL,
   configureClientRuntime,
   discoverControllers,
   getRuntimeStatus,
@@ -1050,7 +1051,7 @@ function initializeErp(options = {}) {
     if (hasExistingErpDatabase(options)) {
       setHostMode();
     } else {
-      setClientMode({ serverUrl: "https://erp.temu.chat" });
+      setClientMode({ serverUrl: HK_SERVER_URL });
       erpState.initResult = {
         mode: "client",
         dbPath: null,
@@ -3250,16 +3251,16 @@ function getLocalAuthStatus() {
 }
 
 async function getAuthStatus() {
-  if (isClientMode()) {
-    const status = await remoteAuthStatus();
-    erpState.currentUser = status.currentUser || null;
-    return status;
+  if (!isClientMode()) {
+    setClientMode({ serverUrl: HK_SERVER_URL });
   }
-  return getLocalAuthStatus();
+  const status = await remoteAuthStatus();
+  erpState.currentUser = status.currentUser || null;
+  return status;
 }
 
-function createFirstAdmin(payload = {}) {
-  assertHostMode("首个管理员创建");
+function createBootstrapAdmin(payload = {}) {
+  assertHostMode("initial admin bootstrap");
   if (!erpState.db) {
     setHostMode();
     initializeHostErp({ userDataDir: erpState.userDataDir });
@@ -3286,49 +3287,26 @@ function createFirstAdmin(payload = {}) {
   return getLocalAuthStatus();
 }
 
-function ensureHostModeForLogin() {
-  if (isClientMode()) {
-    setHostMode();
-    erpState.currentUser = null;
-  }
-  if (!erpState.db) {
-    setHostMode();
-    initializeHostErp({ userDataDir: erpState.userDataDir });
-  }
+function createFirstAdmin() {
+  throw new Error("Desktop local admin creation was removed. Create users in HK cloud.");
 }
 
 async function loginElectronUser(payload = {}) {
-  if (payload.serverUrl || isClientMode()) {
-    const status = await remoteLogin(payload);
-    erpState.currentUser = status.currentUser || null;
-    // 登录后预热商品资料缓存（fire-and-forget）：用户进商品资料/采购页前缓存就开始建，
-    // 进页时多半已就绪可秒开。失败静默，listSkusRuntime 仍会按需触发兜底。
-    void skuCache.triggerSync({ mode: "incremental" }).catch(() => {});
-    void skuCache.triggerReconcile().catch(() => {});
-    return status;
-  }
-  ensureHostModeForLogin();
-  const user = verifyLanLogin(payload);
-  if (!user) throw new Error("用户名或访问码错误");
-  erpState.currentUser = user;
-  if (user.role === "admin") {
-    try {
-      await startLanService({});
-    } catch (error) {
-      console.warn("[ERP] Admin controller service start failed:", error?.message || error);
-    }
-  }
-  return getLocalAuthStatus();
+  const status = await remoteLogin({ ...payload, serverUrl: HK_SERVER_URL });
+  erpState.currentUser = status.currentUser || null;
+  // Warm SKU cache after cloud login; failures fall back to on-demand sync.
+  void skuCache.triggerSync({ mode: "incremental" }).catch(() => {});
+  void skuCache.triggerReconcile().catch(() => {});
+  return status;
 }
 
 async function logoutElectronUser() {
-  if (isClientMode()) {
-    const status = await remoteLogout();
-    erpState.currentUser = null;
-    return status;
+  if (!isClientMode()) {
+    setClientMode({ serverUrl: HK_SERVER_URL });
   }
+  const status = await remoteLogout();
   erpState.currentUser = null;
-  return getLocalAuthStatus();
+  return status;
 }
 
 function getClientRuntimeStatus() {
@@ -6551,7 +6529,7 @@ function publicUploadBaseUrl(payload = {}) {
       || process.env.ERP_PUBLIC_URL
       || process.env.PUBLIC_BASE_URL,
   );
-  return (configured || "https://erp.temu.chat").replace(/\/+$/, "");
+  return (configured || HK_SERVER_URL).replace(/\/+$/, "");
 }
 
 function parseErpImageDataUrl(payload = {}) {
@@ -16809,7 +16787,7 @@ function bootstrapAdminFromEnv(env = process.env) {
       status: "active",
     });
   }
-  createFirstAdmin({ name, accessCode });
+  createBootstrapAdmin({ name, accessCode });
   return {
     created: true,
     name,
@@ -17138,9 +17116,10 @@ function registerErpIpcHandlers(ipcMain) {
   });
   ipcMain.handle("erp:get-enums", () => enums);
   ipcMain.handle("erp:auth:get-status", () => getAuthStatus());
-  ipcMain.handle("erp:auth:get-current-user", () => (
-    isClientMode() ? (getRuntimeStatus().currentUser || null) : erpState.currentUser
-  ));
+  ipcMain.handle("erp:auth:get-current-user", async () => {
+    const status = await getAuthStatus();
+    return status.currentUser || null;
+  });
   ipcMain.handle("erp:auth:create-first-admin", (_event, payload) => createFirstAdmin(payload || {}));
   ipcMain.handle("erp:auth:login", (_event, payload) => loginElectronUser(payload || {}));
   ipcMain.handle("erp:auth:logout", () => logoutElectronUser());
@@ -17237,7 +17216,7 @@ async function probe1688MtopFromClient(options = {}) {
   const probes = [
     {
       name: "01-erp-health",
-      url: "https://erp.temu.chat/health",
+      url: `${HK_SERVER_URL}/health`,
     },
     {
       name: "02-mmstat-cna",

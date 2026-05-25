@@ -24,8 +24,7 @@ const COLLECTOR_WINDOW_KEY = "temu_monitor_collector_window";
 const COLLECTOR_QUERY = "__temu_monitor_collector=1";
 const COLLECTOR_ALARM_MINUTES = 2;
 const COLLECTOR_BATCH_SIZE = 4;
-const LOCAL_ERP_ENDPOINT = "http://127.0.0.1:8799";
-const LOCAL_ERP_EXTENSION_TOKEN = "temu-jst-extension-v1";
+const HK_CLOUD_ENDPOINT = "https://erp.temu.chat/cloud";
 const FEISHU_SUPPLIER_TABLE_URL = "https://mcn24onb5t1o.feishu.cn/base/RLy7bndc4aCXhtsx4yAcr2d8nSg?table=tbl0UhZRpR0niDSt&view=vew5Spjz7c";
 
 const COLLECTOR_TARGETS = [
@@ -90,9 +89,8 @@ async function ensureRuntimeDefaults() {
 // 仅当 storage 还没配置时尝试；失败静默（如需指向其它环境，用户在 options 页手动填）
 async function tryAutoConfigure() {
   const cur = await getStorage(["cloud_endpoint", "auth_token"]);
-  if (cur.cloud_endpoint && cur.auth_token) return;
-  if (await configureLocalErpIfAvailable()) return;
-  const defaultEndpoint = "https://erp.temu.chat/cloud";
+  if (cur.cloud_endpoint === HK_CLOUD_ENDPOINT && cur.auth_token) return;
+  const defaultEndpoint = HK_CLOUD_ENDPOINT;
   try {
     const resp = await fetch(defaultEndpoint + "/api/auth/login", {
       method: "POST",
@@ -103,28 +101,13 @@ async function tryAutoConfigure() {
     const data = await resp.json();
     if (!data?.token) return;
     await setStorage({ cloud_endpoint: defaultEndpoint, auth_token: data.token });
-    console.log(`[sw] auto-configured to ${defaultEndpoint}`);
+    console.log("[sw] auto-configured to " + defaultEndpoint);
   } catch (e) {
     console.warn("[sw] auto-configure skipped:", e?.message || e);
   }
 }
 
-async function configureLocalErpIfAvailable() {
-  try {
-    const resp = await fetch(LOCAL_ERP_ENDPOINT + "/api/ingest/v1/health", {
-      method: "GET",
-      headers: { Authorization: `Bearer ${LOCAL_ERP_EXTENSION_TOKEN}` },
-    });
-    if (!resp.ok) return false;
-    await setStorage({ cloud_endpoint: LOCAL_ERP_ENDPOINT, auth_token: LOCAL_ERP_EXTENSION_TOKEN });
-    console.log(`[sw] configured local ERP ${LOCAL_ERP_ENDPOINT}`);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// ---------- 周期上报 ----------
+// Periodic reporting
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === ALARM_COLLECT) {
     await runCollectorStep().catch((e) => console.warn("[sw] collector err", e));
@@ -229,11 +212,11 @@ async function sendHeartbeat() {
     // 1. 处理 reconfig：cloud 让我们改 cloud_endpoint / auth_token（不需要 reload，下次心跳走新 cloud）
     if (json.reconfig && json.reconfig_version > (cfg[RECONFIG_VERSION_KEY] || 0)) {
       const newCfg = {};
-      if (json.reconfig.cloud_endpoint) newCfg.cloud_endpoint = json.reconfig.cloud_endpoint;
+      if (json.reconfig.cloud_endpoint) newCfg.cloud_endpoint = HK_CLOUD_ENDPOINT;
       if (json.reconfig.auth_token) newCfg.auth_token = json.reconfig.auth_token;
       newCfg[RECONFIG_VERSION_KEY] = json.reconfig_version;
       await setStorage(newCfg);
-      console.log("[sw] cloud reconfigured to " + json.reconfig.cloud_endpoint + " version=" + json.reconfig_version);
+      console.log("[sw] cloud reconfigured to " + HK_CLOUD_ENDPOINT + " version=" + json.reconfig_version);
     }
 
     // 2. 处理 reload
@@ -344,7 +327,7 @@ async function openFeishuSupplierTable() {
 }
 
 async function syncFeishuSuppliers() {
-  if (!(await configureLocalErpIfAvailable())) await tryAutoConfigure();
+  await tryAutoConfigure();
   let [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.url || !/feishu\.cn\/base\//i.test(tab.url)) {
     const opened = await openFeishuSupplierTable();

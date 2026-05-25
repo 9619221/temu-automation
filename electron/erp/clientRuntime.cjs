@@ -9,14 +9,7 @@ const CONFIG_FILE_NAME = "erp-runtime.json";
 const DEFAULT_PORT = 19380;
 const SESSION_COOKIE_NAME = "temu_erp_lan_session";
 const REMOTE_SESSION_EXPIRED_MESSAGE = "Cloud login expired, please reconnect.";
-
-// 已停服的旧 ERP 主控端地址。老桌面端首次启动会把当时的 ERP_CLOUD_SERVER_URL
-// 写进 erp-runtime.json，writeRuntimeConfig 是 read-then-merge，旧值会一直残留。
-// 5-21 迁香港后老 SG 机停服 → 残留旧值的客户端 refresh() 会卡 ETIMEDOUT。
-// 启动读盘时一次性把残留改回 unset，让客户端走当前 ERP_CLOUD_SERVER_URL。
-const DEPRECATED_SERVER_URL_PATTERNS = [
-  /^https?:\/\/43\.156\.121\.172(:\d+)?(\/.*)?$/i, // 旧 SG 机 (5-28 后清退)
-];
+const HK_SERVER_URL = "https://erp.temu.chat";
 
 let userDataDir = null;
 
@@ -50,10 +43,29 @@ function normalizeServerUrl(value) {
   return url.toString().replace(/\/$/, "");
 }
 
+function isHkServerUrl(value) {
+  try {
+    return new URL(normalizeServerUrl(value)).hostname.toLowerCase() === "erp.temu.chat";
+  } catch {
+    return false;
+  }
+}
+
+function normalizeHkServerUrl(value) {
+  const normalized = normalizeServerUrl(value);
+  if (!normalized) return "";
+  return HK_SERVER_URL;
+}
+
 function normalizeConfig(config = {}) {
+  const mode = normalizeMode(config.mode);
+  let serverUrl = normalizeServerUrl(config.serverUrl);
+  if (mode === "client" && serverUrl && !isHkServerUrl(serverUrl)) {
+    serverUrl = HK_SERVER_URL;
+  }
   return {
-    mode: normalizeMode(config.mode),
-    serverUrl: normalizeServerUrl(config.serverUrl),
+    mode,
+    serverUrl,
     sessionCookie: String(config.sessionCookie || ""),
     currentUser: config.currentUser || null,
     updatedAt: config.updatedAt || null,
@@ -66,10 +78,10 @@ function readRuntimeConfig() {
   if (!fs.existsSync(configPath)) return normalizeConfig();
   try {
     const raw = JSON.parse(fs.readFileSync(configPath, "utf8"));
-    // 残留的旧 serverUrl 一次性清掉，回到 unset 让客户端走 ERP_CLOUD_SERVER_URL 默认。
-    if (raw?.serverUrl && DEPRECATED_SERVER_URL_PATTERNS.some((re) => re.test(String(raw.serverUrl)))) {
-      raw.mode = "unset";
-      raw.serverUrl = "";
+    // HK is the only active controller now; drop stale sessions tied to old SG/custom hosts.
+    if (raw?.serverUrl && !isHkServerUrl(raw.serverUrl)) {
+      raw.mode = "client";
+      raw.serverUrl = HK_SERVER_URL;
       raw.sessionCookie = "";
       raw.currentUser = null;
     }
@@ -124,7 +136,7 @@ function setHostMode() {
 }
 
 function setClientMode(payload = {}) {
-  const serverUrl = normalizeServerUrl(payload.serverUrl);
+  const serverUrl = normalizeHkServerUrl(payload.serverUrl || HK_SERVER_URL);
   if (!serverUrl) throw new Error("serverUrl is required");
   return writeRuntimeConfig({
     mode: "client",
@@ -255,17 +267,29 @@ async function remoteRequest(requestPath, options = {}) {
 }
 
 async function remoteLogin(payload = {}) {
-  const serverUrl = normalizeServerUrl(payload.serverUrl || readRuntimeConfig().serverUrl);
+  const serverUrl = normalizeHkServerUrl(payload.serverUrl || readRuntimeConfig().serverUrl || HK_SERVER_URL);
   if (!serverUrl) throw new Error("请先选择或填写主控端地址");
-  const result = await requestJson(serverUrl, "/api/login", {
-    method: "POST",
-    body: {
-      login: payload.login,
-      accessCode: payload.accessCode,
-    },
-  });
+  let result = null;
+  try {
+    result = await requestJson(serverUrl, "/api/login", {
+      method: "POST",
+      body: {
+        login: payload.login,
+        accessCode: payload.accessCode,
+      },
+    });
+  } catch (error) {
+    const rawMessage = String(error?.message || error || "");
+    const message = error?.statusCode === 401
+      ? "云端账号或访问码错误"
+      : `HK 云端登录失败：${rawMessage || "请检查网络或主控端状态"}`;
+    const nextError = new Error(message);
+    nextError.statusCode = error?.statusCode;
+    nextError.payload = error?.payload;
+    throw nextError;
+  }
   const user = result.payload?.user || null;
-  if (!user) throw new Error("主控端未返回登录用户");
+  if (!user) throw new Error("HK 云端未返回登录用户");
   writeRuntimeConfig({
     mode: "client",
     serverUrl,
@@ -404,6 +428,7 @@ async function discoverControllers(params = {}) {
 }
 
 module.exports = {
+  HK_SERVER_URL,
   configureClientRuntime,
   discoverControllers,
   getRuntimeStatus,

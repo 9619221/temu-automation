@@ -1,4 +1,5 @@
 const $ = (id) => document.getElementById(id);
+const HK_CLOUD_ENDPOINT = "https://erp.temu.chat/cloud";
 
 function showBanner(text, ok) {
   const b = $("banner");
@@ -9,14 +10,15 @@ function showBanner(text, ok) {
 
 function load() {
   chrome.storage.local.get(["cloud_endpoint", "auth_token", "device_id"], (v) => {
-    $("cloud_endpoint").value = v.cloud_endpoint || "";
+    $("cloud_endpoint").value = HK_CLOUD_ENDPOINT;
+    $("cloud_endpoint").readOnly = true;
     $("auth_token").value = v.auth_token || "";
     $("device_id").value = v.device_id || "";
   });
 }
 
 $("save").addEventListener("click", () => {
-  const cloud_endpoint = $("cloud_endpoint").value.trim().replace(/\/$/, "");
+  const cloud_endpoint = HK_CLOUD_ENDPOINT;
   const auth_token = $("auth_token").value.trim();
   if (!cloud_endpoint || !auth_token) {
     showBanner("请填写 URL 和 Token", false);
@@ -34,7 +36,7 @@ $("save").addEventListener("click", () => {
 });
 
 $("test").addEventListener("click", async () => {
-  const url = $("cloud_endpoint").value.trim().replace(/\/$/, "");
+  const url = HK_CLOUD_ENDPOINT;
   const token = $("auth_token").value.trim();
   if (!url || !token) { showBanner("先填 URL 和 Token", false); return; }
   try {

@@ -15,60 +15,35 @@ export default function BrandMark({ size = 36, className = "" }: BrandMarkProps)
         viewBox="0 0 64 64"
         focusable="false"
       >
-        <rect
-          className="brand-mark-system__bar"
-          x="15"
-          y="15"
-          width="34"
-          height="10"
-          rx="5"
-        />
-        <rect
-          className="brand-mark-system__stem"
-          x="28"
-          y="23"
-          width="8"
-          height="29"
-          rx="4"
-        />
-        <rect
-          className="brand-mark-system__join"
-          x="28"
-          y="23"
-          width="8"
-          height="10"
-          rx="2"
+        <circle className="brand-mark-system__aura" cx="32" cy="32" r="27" />
+        <path className="brand-mark-system__glyph brand-mark-system__glyph--beam" d="M17 19H47" />
+        <path className="brand-mark-system__glyph brand-mark-system__glyph--stem" d="M32 19V48" />
+        <path className="brand-mark-system__glyph brand-mark-system__glyph--flow" d="M20 43C27 34 38 34 45 43" />
+        <circle
+          className="brand-mark-system__node brand-mark-system__node--blue"
+          cx="17"
+          cy="19"
+          r="5"
         />
         <circle
-          className="brand-mark-system__accent"
-          cx="45"
-          cy="45"
-          r="6"
+          className="brand-mark-system__node brand-mark-system__node--yellow"
+          cx="47"
+          cy="19"
+          r="5"
         />
         <circle
-          className="brand-mark-system__node"
-          cx="20"
-          cy="20"
-          r="3"
-        />
-        <circle
-          className="brand-mark-system__node"
+          className="brand-mark-system__node brand-mark-system__node--green"
           cx="32"
-          cy="20"
-          r="3"
+          cy="48"
+          r="5"
         />
         <circle
-          className="brand-mark-system__node"
-          cx="32"
-          cy="49"
-          r="3"
-        />
-        <circle
-          className="brand-mark-system__node"
+          className="brand-mark-system__node brand-mark-system__node--red"
           cx="45"
-          cy="45"
-          r="2.2"
+          cy="43"
+          r="5"
         />
+        <circle className="brand-mark-system__core" cx="32" cy="19" r="3.2" />
       </svg>
     </span>
   );
