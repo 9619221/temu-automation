@@ -5583,6 +5583,51 @@ function resolveExtensionDirectory() {
   return candidates.find((dir) => dir && fs.existsSync(dir)) || candidates[0];
 }
 
+function resolveChromiumBrowserExecutable() {
+  const candidates = [];
+  if (process.platform === "win32") {
+    const localAppData = process.env.LOCALAPPDATA || "";
+    const programFiles = process.env.ProgramFiles || "";
+    const programFilesX86 = process.env["ProgramFiles(x86)"] || "";
+    candidates.push(
+      path.join(localAppData, "Google", "Chrome", "Application", "chrome.exe"),
+      path.join(programFiles, "Google", "Chrome", "Application", "chrome.exe"),
+      path.join(programFilesX86, "Google", "Chrome", "Application", "chrome.exe"),
+      path.join(localAppData, "Microsoft", "Edge", "Application", "msedge.exe"),
+      path.join(programFiles, "Microsoft", "Edge", "Application", "msedge.exe"),
+      path.join(programFilesX86, "Microsoft", "Edge", "Application", "msedge.exe"),
+    );
+  } else if (process.platform === "darwin") {
+    candidates.push(
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    );
+  } else {
+    candidates.push(
+      "/usr/bin/google-chrome",
+      "/usr/bin/google-chrome-stable",
+      "/usr/bin/chromium-browser",
+      "/usr/bin/chromium",
+      "/usr/bin/microsoft-edge",
+    );
+  }
+  return candidates.find((candidate) => candidate && fs.existsSync(candidate)) || "";
+}
+
+function openChromiumInternalPage(url) {
+  const browserExe = resolveChromiumBrowserExecutable();
+  if (!browserExe) {
+    throw new Error("Chrome / Edge not found. Open chrome://extensions/ manually.");
+  }
+  const child = spawn(browserExe, [url], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: false,
+  });
+  child.unref();
+  return browserExe;
+}
+
 ipcMain.handle("app:get-extension-directory", async () => {
   return resolveExtensionDirectory();
 });
@@ -5596,8 +5641,8 @@ ipcMain.handle("app:open-extension-directory", async () => {
 
 ipcMain.handle("app:open-chrome-extensions", async () => {
   const url = "chrome://extensions/";
-  await shell.openExternal(url);
-  return url;
+  const browserExe = openChromiumInternalPage(url);
+  return `${browserExe} ${url}`;
 });
 
 ipcMain.handle("app:open-external", async (_event, rawUrl) => {
