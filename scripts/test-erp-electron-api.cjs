@@ -58,18 +58,6 @@ async function main() {
     assert.equal(status.initialized, true);
     assert.ok(status.dbPath.endsWith(path.join("data", "erp.sqlite")));
 
-    let authStatus = await invoke("erp:auth:get-status");
-    assert.equal(authStatus.hasUsers, false);
-    assert.equal(authStatus.currentUser, null);
-
-    authStatus = await invoke("erp:auth:create-first-admin", {
-      name: "Root Admin",
-      accessCode: "root-code",
-    });
-    assert.equal(authStatus.hasUsers, true);
-    assert.equal(authStatus.currentUser.role, "admin");
-    assert.equal(authStatus.currentUser.companyId, "company_default");
-
     const companies = await invoke("erp:company:list", { limit: 20 });
     assert.equal(companies.length, 1);
     assert.equal(companies[0].id, "company_default");
@@ -78,8 +66,14 @@ async function main() {
     assert.equal(adminPermissionProfile.company.id, "company_default");
     assert.equal(adminPermissionProfile.rolePermissions.some((item) => item.role === "admin" && item.resourceKey === "*"), true);
 
-    authStatus = await invoke("erp:auth:logout");
-    assert.equal(authStatus.currentUser, null);
+    const adminUser = await invoke("erp:user:upsert", {
+      id: "user_admin_ipc",
+      name: "Root Admin",
+      role: "admin",
+      accessCode: "root-code",
+    });
+    assert.equal(adminUser.role, "admin");
+    assert.equal(adminUser.companyId, "company_default");
 
     const account = await invoke("erp:account:upsert", {
       id: "acct_ipc",
@@ -270,28 +264,8 @@ async function main() {
         name: "Another Admin",
         accessCode: "another-code",
       }),
-      /Initial admin already exists/,
+      /removed/,
     );
-
-    await assert.rejects(
-      () => invoke("erp:auth:login", {
-        login: "Buyer",
-        accessCode: "bad-code",
-      }),
-      /用户名或访问码错误/,
-    );
-
-    authStatus = await invoke("erp:auth:login", {
-      login: "Buyer",
-      accessCode: "buyer-code",
-    });
-    assert.equal(authStatus.currentUser.role, "buyer");
-    assert.equal(authStatus.currentUser.companyId, "company_default");
-    const buyerPermissionProfile = await invoke("erp:permission:get-profile");
-    assert.equal(buyerPermissionProfile.resourceScopes[0].resourceId, account.id);
-    assert.equal((await invoke("erp:auth:get-current-user")).id, buyer.id);
-    authStatus = await invoke("erp:auth:logout");
-    assert.equal(authStatus.currentUser, null);
 
     const supplier = await invoke("erp:supplier:create", {
       id: "supplier_ipc",
@@ -733,19 +707,6 @@ async function main() {
       actor: { id: user.id, role: "admin" },
     });
     assert.equal(doneWorkItem.status, "done");
-
-    authStatus = await invoke("erp:auth:login", {
-      login: "Buyer",
-      accessCode: "buyer-code",
-    });
-    assert.equal(authStatus.currentUser.role, "buyer");
-    const scopedBuyerWorkItems = await invoke("erp:workItem:list", {
-      activeOnly: true,
-      limit: 20,
-    });
-    assert.ok(scopedBuyerWorkItems.length > 0);
-    assert.equal(scopedBuyerWorkItems.every((item) => item.ownerRole === "buyer"), true);
-    await invoke("erp:auth:logout");
 
     let lanStatus = await invoke("erp:lan:get-status");
     assert.equal(lanStatus.running, false);

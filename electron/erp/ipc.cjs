@@ -16478,6 +16478,16 @@ function assertHostMode(featureName = "该功能") {
   }
 }
 
+function shouldUseClientRuntime() {
+  return isClientMode() || !erpState.db || !erpState.services;
+}
+
+function ensureClientRuntime() {
+  if (!isClientMode()) {
+    setClientMode({ serverUrl: HK_SERVER_URL });
+  }
+}
+
 async function getPurchaseWorkbenchRuntime(params = {}) {
   if (isClientMode()) {
     let payload;
