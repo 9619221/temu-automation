@@ -5614,10 +5614,77 @@ function resolveChromiumBrowserExecutable() {
   return candidates.find((candidate) => candidate && fs.existsSync(candidate)) || "";
 }
 
+function quotePowerShellString(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
 function openChromiumInternalPage(url) {
   const browserExe = resolveChromiumBrowserExecutable();
   if (!browserExe) {
     throw new Error("Chrome / Edge not found. Open chrome://extensions/ manually.");
+  }
+  if (process.platform === "win32") {
+    const script = `
+$browser = ${quotePowerShellString(browserExe)}
+$url = ${quotePowerShellString(url)}
+try {
+  $existing = Get-Process chrome,msedge -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+  if (-not $existing) {
+    Start-Process -FilePath $browser -ArgumentList @('--new-window', 'about:blank') | Out-Null
+    Start-Sleep -Milliseconds 900
+  } else {
+    Start-Process -FilePath $browser | Out-Null
+    Start-Sleep -Milliseconds 350
+  }
+  $target = Get-Process chrome,msedge -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Sort-Object StartTime -Descending | Select-Object -First 1
+  $shell = New-Object -ComObject WScript.Shell
+  if ($target) {
+    if (-not $shell.AppActivate([int]$target.Id)) {
+      [void]$shell.AppActivate($target.MainWindowTitle)
+    }
+  } else {
+    [void]$shell.AppActivate('Google Chrome')
+  }
+  Start-Sleep -Milliseconds 250
+  Add-Type -AssemblyName System.Windows.Forms
+  $oldClipboard = $null
+  $hadClipboard = $false
+  try {
+    $oldClipboard = [System.Windows.Forms.Clipboard]::GetText()
+    $hadClipboard = $true
+  } catch {}
+  [System.Windows.Forms.Clipboard]::SetText($url)
+  $shell.SendKeys('^l')
+  Start-Sleep -Milliseconds 100
+  $shell.SendKeys('^v')
+  Start-Sleep -Milliseconds 80
+  $shell.SendKeys('{ENTER}')
+  Start-Sleep -Milliseconds 400
+  if ($hadClipboard -and -not [string]::IsNullOrEmpty($oldClipboard)) {
+    [System.Windows.Forms.Clipboard]::SetText($oldClipboard)
+  } elseif ($hadClipboard) {
+    [System.Windows.Forms.Clipboard]::Clear()
+  }
+} catch {
+  Start-Process -FilePath $browser -ArgumentList @('--new-window', $url) | Out-Null
+}
+`;
+    const child = spawn("powershell.exe", [
+      "-NoProfile",
+      "-STA",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-WindowStyle",
+      "Hidden",
+      "-Command",
+      script,
+    ], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    child.unref();
+    return `${browserExe} ${url}`;
   }
   const args = ["--new-window", url];
   const child = spawn(browserExe, args, {
