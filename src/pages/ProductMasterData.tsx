@@ -4,10 +4,11 @@ import type { ColumnsType } from "antd/es/table";
 import { DeleteOutlined, EditOutlined, LineChartOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
 import { useErpAuth } from "../contexts/ErpAuthContext";
-import { hasPageCache, readPageCache, writePageCache } from "../utils/pageCache";
+import { hasPageCache, readIndexedPageCache, readPageCache, writeIndexedPageCache, writePageCache } from "../utils/pageCache";
 
 const erp = window.electronAPI?.erp;
 const PRODUCT_MASTER_DATA_CACHE_KEY = "temu.product-master-data.cache.v2";
+const PRODUCT_MASTER_DATA_SKUS_CACHE_KEY = `${PRODUCT_MASTER_DATA_CACHE_KEY}.skus`;
 const ADDRESS_WORKBENCH_PARAMS = {
   limit: 20,
   includeRequestDetails: false,
@@ -223,6 +224,11 @@ interface ProductMasterDataCache {
   suppliers?: ErpSupplierRow[];
   skus?: ErpSkuRow[];
   alibaba1688Addresses?: Alibaba1688AddressRow[];
+}
+
+interface ProductMasterDataSkuCache {
+  generatedAt?: string;
+  skus?: ErpSkuRow[];
 }
 
 function statusColor(status?: string) {
@@ -1236,12 +1242,12 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
     };
   }, []);
 
-  const loadAll = useCallback(async (options?: { forceFull?: boolean }) => {
+  const loadAll = useCallback(async (options?: { forceFull?: boolean; silent?: boolean; deferSkuCommit?: boolean }) => {
     if (!erp) return;
     const loadSeq = loadSeqRef.current + 1;
     loadSeqRef.current = loadSeq;
     const isCurrentLoad = () => mountedRef.current && loadSeqRef.current === loadSeq;
-    setLoading(true);
+    if (!options?.silent) setLoading(true);
     try {
       // 强刷先让页面读现有缓存/服务器分页；全量同步放后台跑，避免服务器 2 万+ SKU 时首屏一直空白。
       if (options?.forceFull) {
@@ -1298,14 +1304,21 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
         }
         if (rows === null || !rows.length) break;
         allSkuRows.push(...rows);
-        setSkus(allSkuRows.slice());
+        if (!options?.deferSkuCommit) setSkus(allSkuRows.slice());
         if (rows.length < SKU_LOAD_CHUNK_SIZE) break;
         await waitForSkuLoadYield();
+      }
+      if (isCurrentLoad() && allSkuRows.length) {
+        if (options?.deferSkuCommit) setSkus(allSkuRows);
+        void writeIndexedPageCache<ProductMasterDataSkuCache>(PRODUCT_MASTER_DATA_SKUS_CACHE_KEY, {
+          generatedAt: new Date().toISOString(),
+          skus: allSkuRows,
+        });
       }
     } catch (error: any) {
       if (isCurrentLoad()) message.error(error?.message || "商品资料读取失败");
     } finally {
-      if (isCurrentLoad()) setLoading(false);
+      if (isCurrentLoad() && !options?.silent) setLoading(false);
     }
   }, [cachedData.alibaba1688Addresses, mode]);
 
@@ -1340,8 +1353,29 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
   }, [accounts, skus, suppliers]);
 
   useEffect(() => {
-    void loadAll();
-  }, [loadAll]);
+    let cancelled = false;
+    const boot = async () => {
+      if (mode !== "skus") {
+        void loadAll({ silent: hasPageCache(cachedData) });
+        return;
+      }
+      const snapshot = await readIndexedPageCache<ProductMasterDataSkuCache>(PRODUCT_MASTER_DATA_SKUS_CACHE_KEY, {});
+      if (cancelled || !mountedRef.current) return;
+      const cachedSkus = snapshot.skus || [];
+      if (cachedSkus.length) {
+        setSkus((current) => (current.length >= cachedSkus.length ? current : cachedSkus));
+        setLoadedOnce(true);
+      }
+      void loadAll({
+        silent: cachedSkus.length > 0,
+        deferSkuCommit: cachedSkus.length > 0,
+      });
+    };
+    void boot();
+    return () => {
+      cancelled = true;
+    };
+  }, [cachedData, loadAll, mode]);
 
   const openCreateAccountModal = () => {
     accountForm.resetFields();
@@ -1878,28 +1912,35 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
     {
       title: "商品",
       key: "product",
-      width: 320,
+      width: 300,
       render: (_value, row) => {
         const title = row.productName || "-";
-        const code = row.internalSkuCode || "-";
         return (
-          <Space direction="vertical" size={2} style={{ width: "100%" }}>
-            <span
-              title={title}
-              style={{
-                color: "#0f172a",
-                display: "block",
-                fontWeight: 600,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {title}
-            </span>
-            <span style={{ color: "#64748b", fontSize: 12 }}>{code}</span>
-          </Space>
+          <span
+            title={title}
+            style={{
+              color: "#0f172a",
+              display: "block",
+              fontWeight: 600,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {title}
+          </span>
         );
+      },
+    },
+    {
+      title: "商品编码",
+      dataIndex: "internalSkuCode",
+      key: "internalSkuCode",
+      width: 128,
+      ellipsis: true,
+      render: (value) => {
+        const code = value || "-";
+        return <span title={code} style={{ color: "#475569", fontSize: 12 }}>{code}</span>;
       },
     },
     { title: "规格", dataIndex: "colorSpec", key: "colorSpec", width: 190, ellipsis: true, render: (value, row) => { const text = value || row.category || "-"; return <span title={text}>{text}</span>; } },
@@ -2334,7 +2375,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
             onRow={(row) => ({
               onDoubleClick: () => setSkuDetailRow(row),
             })}
-            scroll={{ x: 1600, y: "max(220px, calc(100vh - 500px))" }}
+            scroll={{ x: 1728, y: "max(220px, calc(100vh - 500px))" }}
             pagination={{
               defaultPageSize: 20,
               pageSizeOptions: [10, 20, 50, 100, 200],
