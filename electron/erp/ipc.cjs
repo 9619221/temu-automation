@@ -104,6 +104,7 @@ const BROADCAST_PURCHASE_ACTIONS = new Set([
   "bind_1688_candidate_spec",
   "validate_1688_order_push",
   "preview_1688_order",
+  "create_direct_po",
   "generate_po",
   "delete_po",
   "push_1688_order",
@@ -9089,6 +9090,153 @@ function buildOfflineCandidateForPo(db, pr, payload, actor) {
   return row;
 }
 
+function getDirectPurchaseSku(db, actor, skuInput) {
+  const value = requireString(skuInput, "skuId");
+  const companyId = normalizeCompanyId(null, actor);
+  const row = db.prepare(`
+    SELECT *
+    FROM erp_skus
+    WHERE company_id = @company_id
+      AND status != 'deleted'
+      AND (id = @value OR internal_sku_code = @value)
+    LIMIT 1
+  `).get({ company_id: companyId, value });
+  if (!row) throw new Error(`未找到商品编码：${value}`);
+  if (!optionalString(row.account_id)) {
+    throw new Error(`商品编码 ${row.internal_sku_code || row.id} 还没有选择所属店铺`);
+  }
+  return row;
+}
+
+function normalizeDirectPurchaseLines(db, payload, actor) {
+  const rawLines = Array.isArray(payload.lines)
+    ? payload.lines
+    : (Array.isArray(payload.items) ? payload.items : []);
+  if (!rawLines.length) throw new Error("请至少添加一条采购明细");
+
+  let accountId = optionalString(payload.accountId || payload.account_id);
+  const lines = rawLines.map((line, index) => {
+    const skuInput = line?.skuId
+      || line?.sku_id
+      || line?.internalSkuCode
+      || line?.internal_sku_code
+      || line?.skuCode
+      || line?.sku_code;
+    const sku = getDirectPurchaseSku(db, actor, skuInput);
+    if (accountId && sku.account_id !== accountId) {
+      throw new Error("同一张采购单里的商品必须属于同一个店铺");
+    }
+    accountId = sku.account_id;
+
+    const qty = Number(optionalNumber(line?.qty ?? line?.quantity ?? line?.requestedQty ?? line?.requested_qty));
+    if (!Number.isInteger(qty) || qty <= 0) {
+      throw new Error(`第 ${index + 1} 行采购数量必须是正整数`);
+    }
+
+    const unitCostValue = optionalNumber(line?.unitPrice ?? line?.unit_price ?? line?.unitCost ?? line?.unit_cost);
+    if (unitCostValue == null || !Number.isFinite(unitCostValue) || unitCostValue < 0) {
+      throw new Error(`第 ${index + 1} 行采购单价不能小于 0`);
+    }
+    const unitCost = Number(unitCostValue);
+
+    const logisticsFee = Number(optionalNumber(line?.logisticsFee ?? line?.logistics_fee ?? line?.freightAmount ?? line?.freight_amount) ?? 0);
+    if (!Number.isFinite(logisticsFee) || logisticsFee < 0) {
+      throw new Error(`第 ${index + 1} 行运费不能小于 0`);
+    }
+
+    return {
+      sku,
+      qty,
+      unitCost,
+      logisticsFee,
+      remark: optionalString(line?.specText || line?.spec_text || line?.remark) || null,
+    };
+  });
+
+  return { accountId, lines };
+}
+
+function createDirectPurchaseOrderAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "创建采购单");
+  const { accountId, lines } = normalizeDirectPurchaseLines(db, payload, actor);
+  const now = nowIso();
+  const goodsAmount = lines.reduce((sum, line) => sum + (line.qty * line.unitCost), 0);
+  const freightAmount = lines.reduce((sum, line) => sum + line.logisticsFee, 0);
+  const po = {
+    id: optionalString(payload.poId || payload.id) || createId("po"),
+    account_id: accountId,
+    pr_id: null,
+    selected_candidate_id: null,
+    supplier_id: null,
+    po_no: resolvePurchaseOrderNo(db, accountId, payload.poNo || payload.po_no),
+    status: "draft",
+    payment_status: "unpaid",
+    expected_delivery_date: null,
+    actual_delivery_date: null,
+    total_amount: goodsAmount,
+    paid_amount: goodsAmount + freightAmount,
+    freight_amount: freightAmount,
+    created_by: actor.id || null,
+    created_at: now,
+    updated_at: now,
+  };
+
+  const insertOrder = db.prepare(`
+    INSERT INTO erp_purchase_orders (
+      id, account_id, pr_id, selected_candidate_id, supplier_id, po_no,
+      status, payment_status, expected_delivery_date, actual_delivery_date,
+      total_amount, paid_amount, freight_amount, created_by, created_at, updated_at
+    )
+    VALUES (
+      @id, @account_id, @pr_id, @selected_candidate_id, @supplier_id, @po_no,
+      @status, @payment_status, @expected_delivery_date, @actual_delivery_date,
+      @total_amount, @paid_amount, @freight_amount, @created_by, @created_at, @updated_at
+    )
+  `);
+  const insertLine = db.prepare(`
+    INSERT INTO erp_purchase_order_lines (
+      id, account_id, po_id, sku_id, qty, unit_cost, logistics_fee,
+      expected_qty, received_qty, remark
+    )
+    VALUES (
+      @id, @account_id, @po_id, @sku_id, @qty, @unit_cost, @logistics_fee,
+      @expected_qty, @received_qty, @remark
+    )
+  `);
+
+  const write = db.transaction(() => {
+    insertOrder.run(po);
+    for (const line of lines) {
+      insertLine.run({
+        id: createId("po_line"),
+        account_id: accountId,
+        po_id: po.id,
+        sku_id: line.sku.id,
+        qty: line.qty,
+        unit_cost: line.unitCost,
+        logistics_fee: line.logisticsFee,
+        expected_qty: line.qty,
+        received_qty: 0,
+        remark: line.remark,
+      });
+    }
+    services.workflow.writeAudit({
+      accountId: po.account_id,
+      actor,
+      action: "create_purchase_order",
+      entityType: "purchase_order",
+      entityId: po.id,
+      before: null,
+      after: getPurchaseOrder(db, po.id),
+    });
+  });
+  write();
+
+  return {
+    purchaseOrder: toPurchaseOrderResult(db, po.id),
+  };
+}
+
 function generatePurchaseOrderAction({ db, services, payload, actor }) {
   assertActorRole(actor, ["buyer", "manager", "admin"], "生成采购单");
   const prId = requireString(payload.prId || payload.id, "prId");
@@ -13558,6 +13706,9 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
       }
       case "delete_sku_1688_source": {
         return deleteSku1688SourceRow(db, payload, actor);
+      }
+      case "create_direct_po": {
+        return createDirectPurchaseOrderAction({ db, services, payload, actor });
       }
       case "generate_po": {
         return generatePurchaseOrderAction({ db, services, payload, actor });

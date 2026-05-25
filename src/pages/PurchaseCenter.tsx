@@ -633,9 +633,16 @@ interface OfflinePoFormValues {
   qty: number;
 }
 
-interface DirectPoFormValues extends OfflinePoFormValues {
-  skuIds: string[];
+interface DirectPoLineFormValues {
+  skuIds?: string[];
   specText?: string;
+  unitPrice?: number;
+  logisticsFee?: number;
+  qty?: number;
+}
+
+interface DirectPoFormValues {
+  items: DirectPoLineFormValues[];
 }
 
 interface Source1688FormValues {
@@ -2843,18 +2850,19 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   const upsertGeneratedPurchaseOrder = useCallback((prId: string, generatedPo?: PurchaseOrderRow | null) => {
     if (!generatedPo?.id) return;
     setData((prev) => {
+      const resolvedPrId = generatedPo.prId ?? (generatedPo as any).pr_id ?? prId;
       const poWithRequest = {
         ...generatedPo,
-        prId: generatedPo.prId ?? (generatedPo as any).pr_id ?? prId,
+        ...(resolvedPrId ? { prId: resolvedPrId } : {}),
       };
       const previousOrders = prev.purchaseOrders || [];
       const orderIndex = previousOrders.findIndex((item) => item.id === poWithRequest.id);
       const purchaseOrders = orderIndex >= 0
         ? previousOrders.map((item, index) => (index === orderIndex ? { ...item, ...poWithRequest } : item))
         : [poWithRequest, ...previousOrders];
-      const purchaseRequests = Array.isArray(prev.purchaseRequests)
+      const purchaseRequests = resolvedPrId && Array.isArray(prev.purchaseRequests)
         ? prev.purchaseRequests.map((item) => (
-          item.id === prId ? { ...item, status: "converted_to_po" } : item
+          item.id === resolvedPrId ? { ...item, status: "converted_to_po" } : item
         ))
         : prev.purchaseRequests;
       const merged = { ...prev, purchaseOrders, purchaseRequests };
@@ -3571,7 +3579,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
 
   const openDirectPoCreateModal = () => {
     directPoForm.resetFields();
-    directPoForm.setFieldsValue({ qty: 1 });
+    directPoForm.setFieldsValue({ items: [{ qty: 1 }] });
     setDirectPoOpen(true);
   };
 
@@ -3827,71 +3835,84 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
 
   const handleDirectPoSubmit = async (values: DirectPoFormValues) => {
     if (!erp) return;
-    const skuInput = Array.isArray(values.skuIds)
-      ? String(values.skuIds[0] || "").trim()
-      : "";
-    if (!skuInput) {
-      message.error("请选择商品编码");
+    const rawItems = Array.isArray(values.items) ? values.items : [];
+    if (!rawItems.length) {
+      message.error("请至少添加一条采购明细");
       return;
     }
-    const sku = await resolveSkuForPurchaseInput(skuInput);
-    if (!sku) {
-      message.error(`未找到商品编码：${skuInput}`);
-      return;
+
+    const lineItems: Array<{
+      skuId: string;
+      specText?: string;
+      unitPrice: number;
+      logisticsFee?: number;
+      qty: number;
+    }> = [];
+    let accountId = "";
+
+    for (let index = 0; index < rawItems.length; index += 1) {
+      const item = rawItems[index];
+      const skuInput = Array.isArray(item.skuIds)
+        ? String(item.skuIds[0] || "").trim()
+        : "";
+      if (!skuInput) {
+        message.error(`第 ${index + 1} 行请选择商品编码`);
+        return;
+      }
+      const sku = await resolveSkuForPurchaseInput(skuInput);
+      if (!sku) {
+        message.error(`未找到商品编码：${skuInput}`);
+        return;
+      }
+      if (!sku.accountId) {
+        message.error(`商品 ${sku.internalSkuCode || sku.id} 还没有选择所属店铺，请先在商品资料里补齐`);
+        return;
+      }
+      if (accountId && sku.accountId !== accountId) {
+        message.error("同一张采购单里的商品必须属于同一个店铺");
+        return;
+      }
+      accountId = sku.accountId;
+      const qty = Number(item.qty || 0);
+      if (!Number.isInteger(qty) || qty <= 0) {
+        message.error(`第 ${index + 1} 行请输入采购数量`);
+        return;
+      }
+      const unitPrice = Number(item.unitPrice);
+      if (!Number.isFinite(unitPrice) || unitPrice < 0) {
+        message.error(`第 ${index + 1} 行请输入采购单价`);
+        return;
+      }
+      const logisticsFee = Number(item.logisticsFee || 0);
+      if (!Number.isFinite(logisticsFee) || logisticsFee < 0) {
+        message.error(`第 ${index + 1} 行运费不能小于 0`);
+        return;
+      }
+      lineItems.push({
+        skuId: sku.id,
+        specText: item.specText?.trim() || undefined,
+        unitPrice,
+        logisticsFee,
+        qty,
+      });
     }
-    if (!sku.accountId) {
-      message.error("这个商品资料还没有选择所属店铺，请先在商品资料里补齐");
-      return;
-    }
-    const qty = Number(values.qty || 0);
-    if (!Number.isInteger(qty) || qty <= 0) {
-      message.error("请输入采购数量");
-      return;
-    }
-    const supplierName = values.supplierName?.trim() || undefined;
+
     const createResult = await runAction("direct-po", {
       ...FAST_PURCHASE_WORKBENCH_PARAMS,
-      action: "create_pr",
-      accountId: sku.accountId,
-      skuId: sku.id,
-      requestedQty: qty,
-      targetUnitCost: values.unitPrice,
-      specText: values.specText,
-      reason: "直接创建采购单",
-      evidenceText: "采购单页直接创建",
-      includeWorkbench: false,
-      refreshWorkbench: false,
-    });
-    if (!createResult) return;
-    const prId = String(
-      createResult?.result?.purchaseRequest?.id
-      || createResult?.purchaseRequest?.id
-      || createResult?.result?.id
-      || "",
-    );
-    if (!prId) {
-      message.error("采购需求已创建，但没有拿到编号，请刷新后再生成采购单");
-      return;
-    }
-    const poResult = await runAction("direct-po", {
-      action: "generate_po",
-      prId,
-      qty,
+      action: "create_direct_po",
+      accountId,
+      lines: lineItems,
       offlinePurchase: true,
-      supplierId: values.supplierId || undefined,
-      supplierName,
-      unitPrice: values.unitPrice,
-      logisticsFee: values.logisticsFee,
       includeWorkbench: false,
       refreshWorkbench: false,
     }, "采购单已创建");
-    if (!poResult) return;
-    const generatedPo = poResult?.result?.purchaseOrder as PurchaseOrderRow | undefined;
+    if (!createResult) return;
+    const generatedPo = createResult?.result?.purchaseOrder as PurchaseOrderRow | undefined;
     setDirectPoOpen(false);
     directPoForm.resetFields();
     if (generatedPo?.id) {
-      upsertGeneratedPurchaseOrder(prId, generatedPo);
-      focusPurchaseOrder(generatedPo, prId);
+      upsertGeneratedPurchaseOrder(generatedPo.prId || "", generatedPo);
+      focusPurchaseOrder(generatedPo, generatedPo.prId || undefined);
     } else {
       void loadData({ silent: true, withSupplemental: false });
     }
@@ -7134,6 +7155,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         title="创建采购单"
         okText="创建采购单"
         cancelText="取消"
+        width={920}
         confirmLoading={actingKey === "direct-po"}
         onCancel={() => setDirectPoOpen(false)}
         onOk={() => directPoForm.submit()}
@@ -7151,68 +7173,97 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         <Form
           form={directPoForm}
           layout="vertical"
-          initialValues={{ qty: 1 }}
+          initialValues={{ items: [{ qty: 1 }] }}
           onFinish={handleDirectPoSubmit}
         >
-          <Form.Item name="skuIds" label="商品编码" rules={[{ required: true, message: "请选择商品编码" }]}>
-            <Select
-              mode="tags"
-              showSearch
-              filterOption={false}
-              onSearch={handleSkuSearch}
-              onChange={(values) => {
-                directPoForm.setFieldsValue({
-                  skuIds: Array.isArray(values) ? values.slice(-1) : [],
-                });
-              }}
-              loading={skuSearching}
-              maxTagCount={1}
-              optionFilterProp="searchText"
-              options={skuOptions}
-              optionRender={(option) => {
-                const d = option as any;
-                const displayCode = String(d?.label || d?.value || "");
-                return (
-                  <div style={{ lineHeight: 1.3 }}>
-                    <div>{displayCode} · {d?.skuName || "-"}</div>
-                    <div style={{ fontSize: 12, color: "#888" }}>
-                      成本 {d?.skuCost == null ? "-" : `¥${d.skuCost}`} · 供应商 {d?.skuSupplier || "-"} · 库存 {d?.skuStock == null ? "-" : d.skuStock}
-                    </div>
+          <Form.List name="items">
+            {(fields, { add, remove }) => (
+              <div className="direct-po-lines">
+                <div className="direct-po-lines__head" aria-hidden>
+                  <span>商品编码</span>
+                  <span>规格</span>
+                  <span>采购单价</span>
+                  <span>运费</span>
+                  <span>采购数量</span>
+                  <span />
+                </div>
+                {fields.map((field) => (
+                  <div className="direct-po-lines__row" key={field.key}>
+                    <Form.Item
+                      name={[field.name, "skuIds"]}
+                      rules={[{ required: true, message: "请选择商品编码" }]}
+                    >
+                      <Select
+                        mode="tags"
+                        showSearch
+                        filterOption={false}
+                        onSearch={handleSkuSearch}
+                        onChange={(values) => {
+                          directPoForm.setFieldValue(
+                            ["items", field.name, "skuIds"],
+                            Array.isArray(values) ? values.slice(-1) : [],
+                          );
+                        }}
+                        loading={skuSearching}
+                        maxTagCount={1}
+                        optionFilterProp="searchText"
+                        options={skuOptions}
+                        optionRender={(option) => {
+                          const d = option as any;
+                          const displayCode = String(d?.label || d?.value || "");
+                          return (
+                            <div style={{ lineHeight: 1.3 }}>
+                              <div>{displayCode} · {d?.skuName || "-"}</div>
+                              <div style={{ fontSize: 12, color: "#888" }}>
+                                成本 {d?.skuCost == null ? "-" : `¥${d.skuCost}`} · 库存 {d?.skuStock == null ? "-" : d.skuStock}
+                              </div>
+                            </div>
+                          );
+                        }}
+                        suffixIcon={<SearchOutlined />}
+                        tokenSeparators={[",", "，", " ", "\n"]}
+                        notFoundContent={skuSearching ? "搜索中…" : "输入编码或名称搜索"}
+                        placeholder="输入商品编码或名称搜索"
+                      />
+                    </Form.Item>
+                    <Form.Item name={[field.name, "specText"]}>
+                      <Input placeholder="颜色 / 尺寸 / 包装，可选" allowClear />
+                    </Form.Item>
+                    <Form.Item
+                      name={[field.name, "unitPrice"]}
+                      rules={[{ required: true, message: "请输入采购单价" }]}
+                    >
+                      <InputNumber min={0} precision={2} prefix="¥" style={{ width: "100%" }} />
+                    </Form.Item>
+                    <Form.Item name={[field.name, "logisticsFee"]}>
+                      <InputNumber min={0} precision={2} prefix="¥" style={{ width: "100%" }} />
+                    </Form.Item>
+                    <Form.Item
+                      name={[field.name, "qty"]}
+                      rules={[{ required: true, message: "请输入采购数量" }]}
+                    >
+                      <InputNumber min={1} precision={0} style={{ width: "100%" }} />
+                    </Form.Item>
+                    <Button
+                      className="direct-po-lines__remove"
+                      icon={<DeleteOutlined />}
+                      onClick={() => remove(field.name)}
+                      disabled={fields.length <= 1}
+                      aria-label="删除商品行"
+                    />
                   </div>
-                );
-              }}
-              suffixIcon={<SearchOutlined />}
-              tokenSeparators={[",", "，", " ", "\n"]}
-              notFoundContent={skuSearching ? "搜索中…" : "输入编码或名称搜索"}
-              placeholder="输入商品编码或名称搜索"
-            />
-          </Form.Item>
-          <Form.Item name="specText" label="规格">
-            <Input placeholder="颜色 / 尺寸 / 包装，可选" allowClear />
-          </Form.Item>
-          <Form.Item name="supplierId" label="已有供应商">
-            <Select allowClear showSearch optionFilterProp="label" options={supplierOptions} placeholder="可选；没有就在下面手填供应商名称" />
-          </Form.Item>
-          <Form.Item name="supplierName" label="供应商名称">
-            <Input placeholder="手填供应商或平台店铺名称" />
-          </Form.Item>
-          <Row gutter={12}>
-            <Col span={8}>
-              <Form.Item name="unitPrice" label="采购单价" rules={[{ required: true, message: "请输入采购单价" }]}>
-                <InputNumber min={0} precision={2} prefix="¥" style={{ width: "100%" }} />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item name="logisticsFee" label="运费">
-                <InputNumber min={0} precision={2} prefix="¥" style={{ width: "100%" }} />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item name="qty" label="采购数量" rules={[{ required: true, message: "请输入采购数量" }]}>
-                <InputNumber min={1} precision={0} style={{ width: "100%" }} />
-              </Form.Item>
-            </Col>
-          </Row>
+                ))}
+                <Button
+                  className="direct-po-lines__add"
+                  type="dashed"
+                  icon={<PlusOutlined />}
+                  onClick={() => add({ qty: 1 })}
+                >
+                  添加商品行
+                </Button>
+              </div>
+            )}
+          </Form.List>
         </Form>
       </Modal>
 
