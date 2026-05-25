@@ -148,6 +148,14 @@ const OUTBOUND_STATUS_COLORS: Record<string, string> = {
   cancelled: "default",
 };
 
+const CLOUD_SOURCE_LABELS: Record<string, string> = {
+  stock_order: "备货单",
+  shipping_desk: "发货台",
+  shipping_list: "发货单",
+};
+
+const CLOUD_SOURCE_ORDER = ["stock_order", "shipping_desk", "shipping_list"];
+
 function canRole(role: string, allowed: string[]) {
   return allowed.includes(role) || (role === "admin" && allowed.includes("manager"));
 }
@@ -160,25 +168,83 @@ function formatQty(value: unknown) {
 
 function formatDateTime(value?: string | null) {
   if (!value) return "-";
-  const date = new Date(value);
+  const text = String(value).trim();
+  const numericTime = /^\d{10,13}$/.test(text) ? Number(text.length === 10 ? `${text}000` : text) : NaN;
+  const date = new Date(Number.isFinite(numericTime) ? numericTime : value);
   if (Number.isNaN(date.getTime())) return String(value);
   return date.toLocaleString("zh-CN", { hour12: false });
 }
 
+function formatMoneyCents(cents?: number | null, currency?: string | null) {
+  if (cents == null || !Number.isFinite(Number(cents))) return "-";
+  const value = Number(cents) / 100;
+  const suffix = currency ? ` ${currency}` : "";
+  return `${value.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}${suffix}`;
+}
+
+function stockOrderSourceType(row: TemuStockOrderRow) {
+  return row.source_type || (row.delivery_order_sn ? "shipping_list" : row.delivery_batch_sn ? "shipping_desk" : "stock_order");
+}
+
+function stockOrderSourceLabel(row: TemuStockOrderRow) {
+  const type = stockOrderSourceType(row);
+  return CLOUD_SOURCE_LABELS[type] || "履约单";
+}
+
+function stockOrderStatusKey(status?: string | null) {
+  return status ? String(status) : "__empty__";
+}
+
+function stockOrderStatusLabel(sourceType: string, status?: string | null) {
+  const raw = stockOrderStatusKey(status);
+  if (raw === "__empty__") return "未标记";
+  const sourcePrefix = CLOUD_SOURCE_LABELS[sourceType] || "履约单";
+  if (/^\d+$/.test(raw)) return `${sourcePrefix}状态 ${raw}`;
+  return raw;
+}
+
+function stockOrderWorkflowStatusKey(row: TemuStockOrderRow) {
+  return `${stockOrderSourceType(row)}:${stockOrderStatusKey(row.temu_status)}`;
+}
+
+function stockOrderWorkflowStatusLabel(row: TemuStockOrderRow) {
+  return stockOrderStatusLabel(stockOrderSourceType(row), row.temu_status);
+}
+
 function stockOrderIdentity(row: TemuStockOrderRow) {
-  return row.stock_order_no || row.delivery_order_sn || row.delivery_batch_sn || row.row_key || row.id;
+  const type = stockOrderSourceType(row);
+  if (type === "shipping_list") return row.delivery_order_sn || row.stock_order_no || row.delivery_batch_sn || row.online_order_no || row.row_key || row.id;
+  if (type === "shipping_desk") return row.delivery_batch_sn || row.delivery_order_sn || row.stock_order_no || row.online_order_no || row.row_key || row.id;
+  return row.stock_order_no || row.delivery_order_sn || row.delivery_batch_sn || row.online_order_no || row.row_key || row.id;
 }
 
 function stockOrderKeys(row: TemuStockOrderRow) {
-  return [row.stock_order_no, row.delivery_order_sn, row.delivery_batch_sn]
-    .map((value) => String(value || "").trim())
-    .filter(Boolean);
+  const keys: string[] = [];
+  const push = (prefix: string, value?: string | null) => {
+    const text = String(value || "").trim();
+    if (text) keys.push(`${prefix}:${text}`);
+  };
+  push("stock", row.stock_order_no);
+  push("delivery", row.delivery_order_sn);
+  push("batch", row.delivery_batch_sn);
+  push("online", row.online_order_no);
+  push("internal", row.internal_order_no);
+  if (row.online_order_no && row.internal_order_no) {
+    keys.push(`online_internal:${String(row.online_order_no).trim()}|${String(row.internal_order_no).trim()}`);
+  }
+  return keys;
 }
 
 function shipmentKeys(row: OutboundShipmentRow) {
-  return [row.temuStockOrderNo, row.temuDeliveryOrderSn, row.temuDeliveryBatchSn]
-    .map((value) => String(value || "").trim())
-    .filter(Boolean);
+  const keys: string[] = [];
+  const push = (prefix: string, value?: string | null) => {
+    const text = String(value || "").trim();
+    if (text) keys.push(`${prefix}:${text}`);
+  };
+  push("stock", row.temuStockOrderNo);
+  push("delivery", row.temuDeliveryOrderSn);
+  push("batch", row.temuDeliveryBatchSn);
+  return keys;
 }
 
 function stockOrderDemand(row: TemuStockOrderRow) {
@@ -215,6 +281,7 @@ export default function QcOutboundCenter() {
   const [loadedOnce, setLoadedOnce] = useState(() => hasPageCache(cachedData));
   const [loading, setLoading] = useState(false);
   const [actingKey, setActingKey] = useState<string | null>(null);
+  const [stockSourceType, setStockSourceType] = useState("");
   const [stockStatus, setStockStatus] = useState("");
   const [stockQuery, setStockQuery] = useState("");
   const [cloudConfigured, setCloudConfigured] = useState(false);
@@ -268,15 +335,14 @@ export default function QcOutboundCenter() {
         setCloudConfigured(true);
         try {
           const stockResult = await fetchTemuStockOrders(cfg, {
-            status: stockStatus || undefined,
             q: stockQuery || undefined,
-            limit: 500,
+            limit: 5000,
           });
           nextStockOrders = stockResult.rows || [];
           nextStockSummary = stockResult.summary || [];
           setCloudError(null);
         } catch (error: any) {
-          setCloudError(error?.message || "云端备货单读取失败");
+          setCloudError(error?.message || "云端备货/发货读取失败");
         }
       } else {
         setCloudConfigured(false);
@@ -292,7 +358,7 @@ export default function QcOutboundCenter() {
     } finally {
       setLoading(false);
     }
-  }, [applyCache, selectedAccountId, stockQuery, stockStatus]);
+  }, [applyCache, selectedAccountId, stockQuery]);
 
   useEffect(() => {
     void loadData();
@@ -340,7 +406,8 @@ export default function QcOutboundCenter() {
   };
 
   const openStockOrderModal = (row: TemuStockOrderRow) => {
-    const accountId = selectedAccountId || accounts[0]?.id || "";
+    const linkedAccountId = resolveStockOrderLink(row)?.shipments.find((item) => item.accountId)?.accountId;
+    const accountId = linkedAccountId || selectedAccountId || accounts[0]?.id || "";
     setStockOrderTarget(row);
     setStockOrderPreview(null);
     setStockOrderPreviewError(null);
@@ -348,7 +415,7 @@ export default function QcOutboundCenter() {
       accountId,
       qty: stockOrderDemand(row),
       boxes: 1,
-      remark: `Temu 云端备货单 ${stockOrderIdentity(row)}`,
+      remark: `Temu 云端${stockOrderSourceLabel(row)} ${stockOrderIdentity(row)}`,
     });
     if (accountId) {
       void previewStockOrderPlan(row, accountId, stockOrderDemand(row));
@@ -411,7 +478,7 @@ export default function QcOutboundCenter() {
       await loadData();
       const result = response?.result || {};
       if (result.idempotent) {
-        message.info("该备货单已生成本地出库单，未重复创建");
+        message.info("该云端履约记录已生成本地出库单，未重复创建");
       } else {
         message.success(`已生成 ${formatQty(result.createdQty || values.qty)} 件出库单`);
       }
@@ -452,7 +519,6 @@ export default function QcOutboundCenter() {
   const stockOrderLinkIndex = useMemo(() => {
     const index = new Map<string, { qty: number; shipments: OutboundShipmentRow[] }>();
     for (const shipment of outboundData.outboundShipments || []) {
-      if (selectedAccountId && shipment.accountId && shipment.accountId !== selectedAccountId) continue;
       for (const key of shipmentKeys(shipment)) {
         const current = index.get(key) || { qty: 0, shipments: [] };
         current.qty += Number(shipment.qty || 0);
@@ -461,7 +527,7 @@ export default function QcOutboundCenter() {
       }
     }
     return index;
-  }, [outboundData.outboundShipments, selectedAccountId]);
+  }, [outboundData.outboundShipments]);
   const resolveStockOrderLink = useCallback((row: TemuStockOrderRow) => (
     stockOrderKeys(row)
       .map((key) => stockOrderLinkIndex.get(key))
@@ -471,33 +537,120 @@ export default function QcOutboundCenter() {
     () => stockOrders.reduce((sum, row) => sum + Number(row.demand_qty || 0), 0),
     [stockOrders],
   );
-  const stockStatusOptions = useMemo(() => {
-    const options = [{ label: `全部 ${stockOrders.length}`, value: "" }];
-    for (const item of stockOrderSummary) {
-      const status = item.temu_status || "未标记";
-      options.push({ label: `${status} ${item.count}`, value: item.temu_status || "__empty__" });
+  const cloudShippingQty = useMemo(
+    () => stockOrders.reduce((sum, row) => sum + Number(row.shipping_qty ?? row.delivered_qty ?? 0), 0),
+    [stockOrders],
+  );
+  const stockSourceCounts = useMemo(() => {
+    if (stockOrderSummary.length) {
+      return stockOrderSummary.reduce<Record<string, number>>((acc, item) => {
+        const key = item.source_type || "stock_order";
+        acc[key] = (acc[key] || 0) + Number(item.count || 0);
+        return acc;
+      }, {});
     }
+    return stockOrders.reduce<Record<string, number>>((acc, row) => {
+      const key = stockOrderSourceType(row);
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+  }, [stockOrderSummary, stockOrders]);
+  const selectedSourceStockOrders = useMemo(
+    () => stockOrders.filter((row) => !stockSourceType || stockOrderSourceType(row) === stockSourceType),
+    [stockOrders, stockSourceType],
+  );
+  const filteredStockOrders = useMemo(
+    () => selectedSourceStockOrders.filter((row) => !stockStatus || stockOrderWorkflowStatusKey(row) === stockStatus),
+    [selectedSourceStockOrders, stockStatus],
+  );
+  const stockSourceOptions = useMemo(() => {
+    const total = Object.values(stockSourceCounts).reduce((sum, value) => sum + Number(value || 0), 0) || stockOrders.length;
+    return [
+      { label: `全部 ${total}`, value: "" },
+      { label: `备货单 ${stockSourceCounts.stock_order || 0}`, value: "stock_order" },
+      { label: `发货台 ${stockSourceCounts.shipping_desk || 0}`, value: "shipping_desk" },
+      { label: `发货单 ${stockSourceCounts.shipping_list || 0}`, value: "shipping_list" },
+    ];
+  }, [stockOrders.length, stockSourceCounts]);
+  const stockStatusOptions = useMemo(() => {
+    const counts = new Map<string, { count: number; sourceType: string; rawStatus: string }>();
+    for (const item of stockOrderSummary) {
+      const sourceType = item.source_type || "stock_order";
+      if (stockSourceType && sourceType !== stockSourceType) continue;
+      const rawStatus = stockOrderStatusKey(item.temu_status);
+      const key = `${sourceType}:${rawStatus}`;
+      const current = counts.get(key) || { count: 0, sourceType, rawStatus };
+      current.count += Number(item.count || 0);
+      counts.set(key, current);
+    }
+    if (!counts.size) {
+      for (const row of selectedSourceStockOrders) {
+        const sourceType = stockOrderSourceType(row);
+        const rawStatus = stockOrderStatusKey(row.temu_status);
+        const key = `${sourceType}:${rawStatus}`;
+        const current = counts.get(key) || { count: 0, sourceType, rawStatus };
+        current.count += 1;
+        counts.set(key, current);
+      }
+    }
+    const total = Array.from(counts.values()).reduce((sum, item) => sum + item.count, 0) || selectedSourceStockOrders.length;
+    const options = [{ label: `全部 ${total}`, value: "__all__" }];
+    Array.from(counts.entries())
+      .sort((a, b) => {
+        const sourceDelta = CLOUD_SOURCE_ORDER.indexOf(a[1].sourceType) - CLOUD_SOURCE_ORDER.indexOf(b[1].sourceType);
+        if (sourceDelta) return sourceDelta;
+        return b[1].count - a[1].count;
+      })
+      .forEach(([key, item]) => {
+        const label = stockOrderStatusLabel(item.sourceType, item.rawStatus === "__empty__" ? null : item.rawStatus);
+        options.push({ label: `${label} ${item.count}`, value: key });
+      });
     return options;
-  }, [stockOrderSummary, stockOrders.length]);
+  }, [selectedSourceStockOrders, stockOrderSummary, stockSourceType]);
+  const stockStatusTabItems = useMemo(
+    () => stockStatusOptions.map((item) => ({ key: item.value, label: item.label })),
+    [stockStatusOptions],
+  );
 
   const cloudStockColumns = useMemo<ColumnsType<TemuStockOrderRow>>(() => [
     {
-      title: "备货单",
+      title: "内部/线上单号/平台状态",
       key: "order",
-      width: 220,
+      width: 260,
+      fixed: "left",
       render: (_value, row) => (
-        <Space direction="vertical" size={2}>
+        <Space direction="vertical" size={3}>
+          <Space size={4} wrap>
+            <Tag color="blue">{stockOrderSourceLabel(row)}</Tag>
+            <Tag color={stockStatusColor(stockOrderWorkflowStatusLabel(row))}>{stockOrderWorkflowStatusLabel(row)}</Tag>
+          </Space>
           <Text strong>{stockOrderIdentity(row)}</Text>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            店铺 {row.mall_id || "-"} / {formatDateTime(row.order_time)}
+            线上 {row.online_order_no || row.parent_order_no || "-"}
+          </Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            内部 {row.internal_order_no || row.stock_order_no || "-"}
           </Text>
         </Space>
       ),
     },
     {
-      title: "商品",
+      title: "标记/多标签",
+      key: "labels",
+      width: 170,
+      render: (_value, row) => (
+        <Space size={4} wrap>
+          {row.urgency_info ? <Tag color="orange">{row.urgency_info}</Tag> : null}
+          {row.warehouse_group ? <Tag>{row.warehouse_group}</Tag> : null}
+          {row.receive_warehouse_name ? <Tag>{row.receive_warehouse_name}</Tag> : null}
+          {!row.urgency_info && !row.warehouse_group && !row.receive_warehouse_name ? <Text type="secondary">-</Text> : null}
+        </Space>
+      ),
+    },
+    {
+      title: "商品信息",
       key: "product",
-      width: 340,
+      width: 320,
       render: (_value, row) => (
         <Space direction="vertical" size={3}>
           <Text>{row.product_name || "-"}</Text>
@@ -511,39 +664,85 @@ export default function QcOutboundCenter() {
       ),
     },
     {
-      title: "需求",
-      key: "qty",
+      title: "订单金额",
+      key: "amount",
       width: 130,
+      align: "right",
+      render: (_value, row) => formatMoneyCents(row.order_amount_cents, row.currency),
+    },
+    {
+      title: "发货单时间",
+      key: "orderTime",
+      width: 170,
+      render: (_value, row) => formatDateTime(row.order_time),
+    },
+    {
+      title: "订单发货时间",
+      key: "shipTime",
+      width: 170,
+      render: (_value, row) => formatDateTime(row.latest_ship_at),
+    },
+    {
+      title: "数量",
+      key: "qty",
+      width: 160,
       render: (_value, row) => (
         <Space direction="vertical" size={2}>
           <Text strong>{formatQty(row.demand_qty)} 件</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>云端已发 {formatQty(row.delivered_qty)}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            送货 {formatQty(row.shipping_qty ?? row.delivered_qty)} / 入库 {formatQty(row.inbound_qty)}
+          </Text>
+        </Space>
+      ),
+    },
+    {
+      title: "重量/包裹",
+      key: "package",
+      width: 160,
+      render: (_value, row) => (
+        <Space direction="vertical" size={2}>
+          <Text>{row.weight_kg ? `${row.weight_kg} kg` : "-"}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>包裹 {formatQty(row.package_count)}</Text>
+        </Space>
+      ),
+    },
+    {
+      title: "平台发货单",
+      key: "platformDelivery",
+      width: 210,
+      render: (_value, row) => (
+        <Space direction="vertical" size={2}>
+          <Text>{row.delivery_order_sn || "-"}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>批次 {row.delivery_batch_sn || "-"}</Text>
+        </Space>
+      ),
+    },
+    {
+      title: "包裹号/物流信息",
+      key: "logistics",
+      width: 230,
+      render: (_value, row) => (
+        <Space direction="vertical" size={2}>
+          <Text>{row.package_no || "-"}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>{row.logistics_info || "-"}</Text>
         </Space>
       ),
     },
     {
       title: "收货仓",
       key: "warehouse",
-      width: 220,
+      width: 200,
       render: (_value, row) => (
         <Space direction="vertical" size={2}>
           <Text>{row.receive_warehouse_name || row.warehouse_group || "-"}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{row.urgency_info || row.receive_warehouse_id || "-"}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>{row.receive_warehouse_id || "-"}</Text>
         </Space>
-      ),
-    },
-    {
-      title: "状态",
-      key: "status",
-      width: 120,
-      render: (_value, row) => (
-        <Tag color={stockStatusColor(row.temu_status)}>{row.temu_status || "未标记"}</Tag>
       ),
     },
     {
       title: "本地承接",
       key: "localLink",
-      width: 140,
+      width: 150,
       render: (_value, row) => {
         const localLink = resolveStockOrderLink(row);
         const localQty = Number(localLink?.qty || 0);
@@ -795,10 +994,10 @@ export default function QcOutboundCenter() {
         compact
         eyebrow="系统"
         title="出库中心"
-        subtitle="云端备货单上传入库后，桌面端拉取并生成本地出库单"
+        subtitle="浏览器扩展抓取 Temu 备货单、发货台、发货单并上传云端，桌面端按聚水潭式表单承接出库"
         meta={[
           `更新 ${formatDateTime(outboundData.generatedAt)}`,
-          `云端备货 ${stockOrders.length}`,
+          `送仓托管 ${stockOrders.length}`,
           `本地出库 ${summary.outboundShipmentCount || 0}`,
         ]}
         actions={[
@@ -819,13 +1018,13 @@ export default function QcOutboundCenter() {
 
       <Row gutter={[12, 12]} className="material-kpi-row" style={{ marginBottom: 12 }}>
         <Col xs={24} sm={12} lg={6}>
-          <StatCard title="云端备货单" value={stockOrders.length} color="blue" icon={<CloudSyncOutlined />} compact />
+          <StatCard title="送仓托管单" value={stockOrders.length} color="blue" icon={<CloudSyncOutlined />} compact />
         </Col>
         <Col xs={24} sm={12} lg={6}>
           <StatCard title="云端需求" value={formatQty(cloudDemandQty)} suffix="件" color="brand" icon={<ShoppingCartOutlined />} compact />
         </Col>
         <Col xs={24} sm={12} lg={6}>
-          <StatCard title="可出库库存" value={formatQty(summary.availableQty || 0)} suffix="件" color="success" icon={<InboxOutlined />} compact />
+          <StatCard title="云端送货" value={formatQty(cloudShippingQty)} suffix="件" color="success" icon={<ExportOutlined />} compact />
         </Col>
         <Col xs={24} sm={12} lg={6}>
           <StatCard title="待仓库/运营" value={(summary.pendingWarehouseCount || 0) + (summary.pendingOpsConfirmCount || 0)} color="purple" icon={<FileDoneOutlined />} compact />
@@ -837,32 +1036,41 @@ export default function QcOutboundCenter() {
         items={[
           {
             key: "cloud",
-            label: "云端备货单",
+            label: "Temu送仓托管",
             children: (
               <Space direction="vertical" size={12} style={{ width: "100%" }}>
                 <div className="material-filter-bar material-filter-bar--search">
                   <Input.Search
                     allowClear
                     prefix={<SearchOutlined />}
-                    placeholder="搜索备货单 / 商品 / SKC / SKU"
+                    placeholder="搜索备货单号 / 发货单号 / 商品 / SKC / SKU / 包裹号"
                     enterButton="搜索"
                     onSearch={(value) => setStockQuery(value.trim())}
                     style={{ maxWidth: 520 }}
                   />
                   <Segmented
-                    value={stockStatus || ""}
-                    options={stockStatusOptions}
-                    onChange={(value) => setStockStatus(value === "__empty__" ? "" : String(value))}
+                    value={stockSourceType || ""}
+                    options={stockSourceOptions}
+                    onChange={(value) => {
+                      setStockSourceType(String(value));
+                      setStockStatus("");
+                    }}
                   />
                 </div>
+                <Tabs
+                  size="small"
+                  activeKey={stockStatus || "__all__"}
+                  items={stockStatusTabItems}
+                  onChange={(value) => setStockStatus(value === "__all__" ? "" : value)}
+                />
                 <Table
                   className="erp-compact-table"
                   rowKey="id"
                   size="middle"
                   loading={loading && !loadedOnce}
                   columns={cloudStockColumns}
-                  dataSource={stockOrders}
-                  scroll={{ x: 1540 }}
+                  dataSource={filteredStockOrders}
+                  scroll={{ x: 2550 }}
                   pagination={{ pageSize: 20, showSizeChanger: true }}
                 />
               </Space>
@@ -925,7 +1133,7 @@ export default function QcOutboundCenter() {
       </Modal>
 
       <Modal
-        title="从云端备货单生成出库单"
+        title="从云端履约记录生成出库单"
         open={Boolean(stockOrderTarget)}
         onCancel={closeStockOrderModal}
         onOk={stockOrderPreview && Number(stockOrderPreview.remainingQty || 0) <= 0 ? closeStockOrderModal : submitStockOrderPlan}

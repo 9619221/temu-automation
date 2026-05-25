@@ -145,31 +145,127 @@
             setTimeout(step, 1800);
           } catch {}
         };
+        const fulfillmentTabSweepSeenAuto = new Set();
+        const endpointAuto = (url) => {
+          const text = String(url || "");
+          if (/\/mms\/venom\/api\/supplier\/sales\/management\/listOverall/.test(text)) return { key: "sales" };
+          if (/\/purchase\/manager\/querySubOrderList/.test(text)) return { key: "stock_order" };
+          if (/deliverGoods\/platform\/pageQuerySubPurchaseOrder|deliverGoods\/management\/pageQueryDeliveryBatch/.test(text)) return { key: "shipping_desk" };
+          if (/deliverGoods\/management\/pageQueryDeliveryOrders/.test(text)) return { key: "shipping_list" };
+          return null;
+        };
+        const compactTextAuto = (value) => String(value || "").replace(/\s+/g, " ").trim();
+        const tabClickableAuto = (el) => {
+          try {
+            return el.closest('button,[role="tab"],[role="button"],a,[class*="tab"],[class*="Tab"],[class*="radio"],[class*="Radio"]') || el;
+          } catch { return el; }
+        };
+        const findFulfillmentTabsAuto = () => {
+          const labelRe = /^(全部|待处理|待接单|待发货|待送货|待创建|待确认|待揽收|待取货|待入库|待到仓|已接单|已发货|已送货|已创建|已确认|已揽收|已入库|异常|超期|逾期|今日|普通|加急|可发货|不可发货)(\s*\d+)?$/;
+          const excludeRe = /搜索|查询|清空|重置|导出|下载|打印|设置|生成|创建发货单|删除|刷新|同步|问题|地址|权限/;
+          const seen = new Set();
+          const candidates = [];
+          for (const node of Array.from(document.querySelectorAll('[role="tab"], button, a, span, div'))) {
+            const text = compactTextAuto(node.innerText || node.textContent);
+            if (!text || text.length > 24 || !labelRe.test(text) || excludeRe.test(text)) continue;
+            const clickable = tabClickableAuto(node);
+            if (!clickable || seen.has(clickable)) continue;
+            const cls = String(clickable.className || "");
+            if (/disabled|disable|forbid/i.test(cls) || clickable.getAttribute?.("aria-disabled") === "true") continue;
+            const rect = clickable.getBoundingClientRect?.();
+            if (!rect || rect.width <= 0 || rect.height <= 0) continue;
+            seen.add(clickable);
+            candidates.push(clickable);
+          }
+          return candidates.slice(0, 30);
+        };
+        const maybeSweepFulfillmentTabsAuto = (endpointKey) => {
+          try {
+            if (endpointKey === "sales") return;
+            if (!isCollectorAuto()) return;
+            if (!/\/stock\/fully-mgt\/order-manage|\/main\/order-manager\/shipping-desk|\/main\/order-manager\/shipping-list/i.test(location.pathname)) return;
+            if (window.__temuMonitorFulfillmentTabSweeping) return;
+            const seenKey = `${location.pathname}|${endpointKey}`;
+            if (fulfillmentTabSweepSeenAuto.has(seenKey)) return;
+            const tabs = findFulfillmentTabsAuto();
+            if (tabs.length <= 1) return;
+            fulfillmentTabSweepSeenAuto.add(seenKey);
+            window.__temuMonitorFulfillmentTabSweeping = true;
+            let index = 0;
+            const finish = () => { window.__temuMonitorFulfillmentTabSweeping = false; };
+            const step = () => {
+              if (index >= tabs.length) return finish();
+              clickPagerAuto(tabs[index++]);
+              setTimeout(step, 3500);
+            };
+            setTimeout(step, 1800);
+          } catch {}
+        };
+        const firstRowsAuto = (body) => {
+          const root = body?.result ?? body?.data ?? body;
+          const data = body?.data;
+          const result = body?.result;
+          const candidates = [
+            result?.pageItems, result?.dataList, result?.list, result?.items, result?.records, result?.rows,
+            result?.subOrderList, result?.subPurchaseOrderList, result?.purchaseOrderList,
+            result?.deliveryBatchList, result?.deliveryBatchVOList, result?.deliveryOrderList, result?.deliveryOrderVOList,
+            data?.pageItems, data?.dataList, data?.list, data?.items, data?.records, data?.rows,
+            data?.subOrderList, data?.subPurchaseOrderList, data?.purchaseOrderList,
+            data?.deliveryBatchList, data?.deliveryBatchVOList, data?.deliveryOrderList, data?.deliveryOrderVOList,
+            root?.pageItems, root?.dataList, root?.list, root?.items, root?.records, root?.rows,
+            root?.subOrderList, root?.subPurchaseOrderList, root?.purchaseOrderList,
+            root?.deliveryBatchList, root?.deliveryBatchVOList, root?.deliveryOrderList, root?.deliveryOrderVOList,
+          ];
+          return candidates.find((value) => Array.isArray(value) && value.length) || [];
+        };
+        const requestBodyAutoAsync = (input, init) => {
+          const immediate = init && Object.prototype.hasOwnProperty.call(init, "body") ? bodyTextAuto(init.body) : null;
+          if (immediate) return Promise.resolve(immediate);
+          try {
+            if (input && typeof input !== "string" && typeof input.clone === "function") {
+              const reqMethod = String(input.method || "GET").toUpperCase();
+              if (reqMethod !== "GET" && reqMethod !== "HEAD" && input.bodyUsed === false) {
+                return input.clone().text().catch(() => null);
+              }
+            }
+          } catch {}
+          return Promise.resolve(null);
+        };
         const seenAuto = new Set();
         const baseFetchAuto = window.fetch;
         window.fetch = function (input, init) {
           if (init && init[bypassSym]) return baseFetchAuto.apply(this, arguments);
           const url = typeof input === "string" ? input : (input && input.url) || "";
           const method = String((init && init.method) || (input && input.method) || "GET").toUpperCase();
-          const requestBody = init && Object.prototype.hasOwnProperty.call(init, "body") ? bodyTextAuto(init.body) : null;
+          const endpoint = endpointAuto(url);
+          const requestBodyPromise = requestBodyAutoAsync(input, init);
           const promise = baseFetchAuto.apply(this, arguments);
-          if (!/\/mms\/venom\/api\/supplier\/sales\/management\/listOverall/.test(String(url || ""))) return promise;
+          if (!endpoint) return promise;
           return promise.then((resp) => {
             try {
-              resp.clone().text().then((text) => {
+              resp.clone().text().then(async (text) => {
+                const requestBody = await requestBodyPromise;
                 const body = safeJsonAuto(text);
-                const result = body?.result;
-                const rows = Array.isArray(result?.subOrderList) ? result.subOrderList : Array.isArray(result?.list) ? result.list : [];
-                const total = Number(result?.total || result?.totalCount || result?.totalSize || 0);
-                if (rows.length && Number.isFinite(total) && total > rows.length) {
+                const rows = firstRowsAuto(body);
+                const total = Number(findNumAuto(body?.result ?? body?.data ?? body, ["total", "totalCount", "totalSize", "totalNum", "totalRecords", "recordCount", "count"]) || 0);
+                emitAuto({
+                  kind: "fetch", url, method, status: resp.status, ts: Date.now(),
+                  site: siteAuto(), page: location.pathname,
+                  body,
+                  bodyText: text.length > 200000 ? null : text,
+                  requestBodyText: requestBody,
+                  bodySize: text.length,
+                });
+                maybeSweepFulfillmentTabsAuto(endpoint.key);
+                if (endpoint.key === "sales" && rows.length && Number.isFinite(total) && total > rows.length) {
                   maybeClickSalesPagesAuto(total, rows.length || 10);
                 }
                 if (!requestBody || !rows.length || !Number.isFinite(total) || total <= rows.length) return;
                 const req = parseReqAuto(requestBody);
                 const pageSize = Math.max(1, Math.min(100, findNumAuto(req, ["pageSize", "size", "limit", "pageLimit"]) || rows.length || 10));
                 const pageNo = Math.max(1, findNumAuto(req, ["pageNo", "pageNum", "pageNumber", "currentPage", "pageIndex", "page"]) || 1);
-                const pageCount = Math.min(50, Math.ceil(total / pageSize));
-                const seenKey = String(url) + "|" + requestBody.slice(0, 500) + "|" + total;
+                const pageCount = Math.min(endpoint.key === "sales" ? 50 : 120, Math.ceil(total / pageSize));
+                const seenKey = endpoint.key + "|" + String(url) + "|" + requestBody.slice(0, 500) + "|" + total;
                 if (pageNo >= pageCount || seenAuto.has(seenKey)) return;
                 seenAuto.add(seenKey);
                 (async () => {
@@ -177,6 +273,12 @@
                     const nextBody = buildBodyAuto(requestBody, nextPage, pageSize);
                     if (!nextBody) break;
                     const nextInit = { ...(init || {}), method, body: nextBody };
+                    try {
+                      if (!nextInit.headers && input && typeof input !== "string" && input.headers) nextInit.headers = new Headers(input.headers);
+                      for (const key of ["credentials", "mode", "cache", "redirect", "referrer", "referrerPolicy"]) {
+                        if (nextInit[key] == null && input && typeof input !== "string" && input[key] != null) nextInit[key] = input[key];
+                      }
+                    } catch {}
                     nextInit[bypassSym] = true;
                     const nextResp = await baseFetchAuto.call(window, url, nextInit);
                     const nextText = await nextResp.clone().text();
@@ -185,10 +287,12 @@
                       site: siteAuto(), page: location.pathname,
                       body: safeJsonAuto(nextText),
                       bodyText: nextText.length > 200000 ? null : nextText,
+                      requestBodyText: nextBody,
                       bodySize: nextText.length,
                       autoPage: nextPage,
                       autoPageSize: pageSize,
                       autoPageTotal: total,
+                      autoPageSource: endpoint.key,
                     });
                     await new Promise((resolve) => setTimeout(resolve, 250));
                   }
@@ -375,12 +479,20 @@
   }
   function fetchRequestBodyText(input, init) {
     if (init && Object.prototype.hasOwnProperty.call(init, "body")) return bodyToText(init.body);
+    return null;
+  }
+  function fetchRequestBodyTextAsync(input, init) {
+    const immediate = fetchRequestBodyText(input, init);
+    if (immediate) return Promise.resolve(immediate);
     try {
-      if (input && typeof input !== "string" && input.bodyUsed === false && input.method && input.method !== "GET") {
-        return null;
+      if (input && typeof input !== "string" && typeof input.clone === "function") {
+        const method = String(input.method || "GET").toUpperCase();
+        if (method !== "GET" && method !== "HEAD" && input.bodyUsed === false) {
+          return input.clone().text().catch(() => null);
+        }
       }
     } catch {}
-    return null;
+    return Promise.resolve(null);
   }
   function parseRequestBody(text) {
     if (!text || typeof text !== "string") return null;
@@ -520,23 +632,188 @@
       setTimeout(step, 1800);
     } catch {}
   }
+  const AUTO_PAGE_ENDPOINTS = [
+    { key: "sales", re: /\/mms\/venom\/api\/supplier\/sales\/management\/listOverall/ },
+    { key: "stock_order", re: /\/purchase\/manager\/querySubOrderList/ },
+    { key: "shipping_desk", re: /deliverGoods\/platform\/pageQuerySubPurchaseOrder|deliverGoods\/management\/pageQueryDeliveryBatch/ },
+    { key: "shipping_list", re: /deliverGoods\/management\/pageQueryDeliveryOrders/ },
+  ];
   const autoPageSeen = new Set();
+  const fulfillmentTabSweepSeen = new Set();
+  const FULFILLMENT_TAB_PATH_RE = /\/stock\/fully-mgt\/order-manage|\/main\/order-manager\/shipping-desk|\/main\/order-manager\/shipping-list/i;
+  const FULFILLMENT_TAB_LABEL_RE = /^(全部|待处理|待接单|待发货|待送货|待创建|待确认|待揽收|待取货|待入库|待到仓|已接单|已发货|已送货|已创建|已确认|已揽收|已入库|异常|超期|逾期|今日|普通|加急|可发货|不可发货)(\s*\d+)?$/;
+  const FULFILLMENT_TAB_EXCLUDE_RE = /搜索|查询|清空|重置|导出|下载|打印|设置|生成|创建发货单|删除|刷新|同步|问题|地址|权限/;
+
+  function autoPageEndpoint(url) {
+    return AUTO_PAGE_ENDPOINTS.find((item) => item.re.test(String(url || ""))) || null;
+  }
+
+  function compactText(value) {
+    return String(value || "").replace(/\s+/g, " ").trim();
+  }
+
+  function tabClickableFor(el) {
+    try {
+      return el.closest('button,[role="tab"],[role="button"],a,[class*="tab"],[class*="Tab"],[class*="radio"],[class*="Radio"]') || el;
+    } catch {
+      return el;
+    }
+  }
+
+  function findFulfillmentTabCandidates() {
+    const nodes = Array.from(document.querySelectorAll('[role="tab"], button, a, span, div'));
+    const seen = new Set();
+    const candidates = [];
+    for (const node of nodes) {
+      const text = compactText(node.innerText || node.textContent);
+      if (!text || text.length > 24) continue;
+      if (!FULFILLMENT_TAB_LABEL_RE.test(text)) continue;
+      if (FULFILLMENT_TAB_EXCLUDE_RE.test(text)) continue;
+      const clickable = tabClickableFor(node);
+      if (!clickable || seen.has(clickable)) continue;
+      const cls = String(clickable.className || "");
+      if (/disabled|disable|forbid/i.test(cls) || clickable.getAttribute?.("aria-disabled") === "true") continue;
+      const rect = clickable.getBoundingClientRect?.();
+      if (!rect || rect.width <= 0 || rect.height <= 0) continue;
+      seen.add(clickable);
+      candidates.push({ el: clickable, text });
+    }
+    return candidates.slice(0, 30);
+  }
+
+  function maybeSweepFulfillmentTabs(endpointKey) {
+    try {
+      if (endpointKey === "sales") return;
+      if (!isCollectorPage()) return;
+      if (!FULFILLMENT_TAB_PATH_RE.test(location.pathname)) return;
+      if (window.__temuMonitorFulfillmentTabSweeping) return;
+      const seenKey = `${location.pathname}|${endpointKey}`;
+      if (fulfillmentTabSweepSeen.has(seenKey)) return;
+      const candidates = findFulfillmentTabCandidates();
+      if (candidates.length <= 1) return;
+      fulfillmentTabSweepSeen.add(seenKey);
+      window.__temuMonitorFulfillmentTabSweeping = true;
+      let index = 0;
+      const finish = () => { window.__temuMonitorFulfillmentTabSweeping = false; };
+      const step = () => {
+        if (index >= candidates.length) return finish();
+        const candidate = candidates[index++];
+        try { clickPagerElement(candidate.el); } catch {}
+        setTimeout(step, 3500);
+      };
+      setTimeout(step, 1800);
+    } catch {}
+  }
+
+  function firstArrayValue(candidates) {
+    for (const value of candidates) {
+      if (Array.isArray(value) && value.length) return value;
+    }
+    return [];
+  }
+
+  function rowsFromPagedResponse(url, responseBody) {
+    const root = responseBody?.result ?? responseBody?.data ?? responseBody;
+    const data = responseBody?.data;
+    const result = responseBody?.result;
+    const rows = firstArrayValue([
+      result?.pageItems,
+      result?.dataList,
+      result?.list,
+      result?.items,
+      result?.records,
+      result?.rows,
+      result?.subOrderList,
+      result?.subPurchaseOrderList,
+      result?.purchaseOrderList,
+      result?.deliveryBatchList,
+      result?.deliveryBatchVOList,
+      result?.deliveryOrderList,
+      result?.deliveryOrderVOList,
+      result?.page?.records,
+      result?.page?.rows,
+      data?.pageItems,
+      data?.dataList,
+      data?.list,
+      data?.items,
+      data?.records,
+      data?.rows,
+      data?.subOrderList,
+      data?.subPurchaseOrderList,
+      data?.purchaseOrderList,
+      data?.deliveryBatchList,
+      data?.deliveryBatchVOList,
+      data?.deliveryOrderList,
+      data?.deliveryOrderVOList,
+      data?.page?.records,
+      data?.page?.rows,
+      root?.pageItems,
+      root?.dataList,
+      root?.list,
+      root?.items,
+      root?.records,
+      root?.rows,
+      root?.subOrderList,
+      root?.subPurchaseOrderList,
+      root?.purchaseOrderList,
+      root?.deliveryBatchList,
+      root?.deliveryBatchVOList,
+      root?.deliveryOrderList,
+      root?.deliveryOrderVOList,
+      root?.page?.records,
+      root?.page?.rows,
+    ]);
+    if (rows.length) return rows;
+    if (!autoPageEndpoint(url)) return [];
+    const stack = [root];
+    const seen = new Set();
+    let steps = 0;
+    while (stack.length && steps < 800) {
+      steps++;
+      const node = stack.pop();
+      if (!node || typeof node !== "object" || seen.has(node)) continue;
+      seen.add(node);
+      if (Array.isArray(node)) {
+        if (node.some((item) => item && typeof item === "object" && !Array.isArray(item))) return node;
+        continue;
+      }
+      for (const value of Object.values(node)) {
+        if (value && typeof value === "object") stack.push(value);
+      }
+    }
+    return [];
+  }
+
+  function totalFromPagedResponse(responseBody) {
+    const root = responseBody?.result ?? responseBody?.data ?? responseBody;
+    return findNumberDeep(root, [
+      "total",
+      "totalCount",
+      "totalSize",
+      "totalNum",
+      "totalRecords",
+      "recordCount",
+      "count",
+    ]);
+  }
+
   function maybeAutoPaginate(url, method, input, init, requestBodyText, responseBody) {
     try {
-      if (!/\/mms\/venom\/api\/supplier\/sales\/management\/listOverall/.test(String(url || ""))) return;
-      const result = responseBody && responseBody.result;
-      const rows = Array.isArray(result?.subOrderList) ? result.subOrderList : Array.isArray(result?.list) ? result.list : [];
-      const total = Number(result?.total || result?.totalCount || result?.totalSize || 0);
-      if (rows.length && Number.isFinite(total) && total > rows.length) {
+      const endpoint = autoPageEndpoint(url);
+      if (!endpoint) return;
+      maybeSweepFulfillmentTabs(endpoint.key);
+      const rows = rowsFromPagedResponse(url, responseBody);
+      const total = Number(totalFromPagedResponse(responseBody) || 0);
+      if (endpoint.key === "sales" && rows.length && Number.isFinite(total) && total > rows.length) {
         maybeClickSalesPagination(total, rows.length || 10);
       }
       if (!requestBodyText || !rows.length || !Number.isFinite(total) || total <= rows.length) return;
       const pageInfo = getPageInfoFromRequest(requestBodyText, rows.length);
       const pageSize = Math.max(1, Math.min(100, Number(pageInfo.pageSize) || rows.length || 10));
       const pageNo = Math.max(1, Number(pageInfo.pageNo) || 1);
-      const pageCount = Math.min(50, Math.ceil(total / pageSize));
+      const pageCount = Math.min(endpoint.key === "sales" ? 50 : 120, Math.ceil(total / pageSize));
       if (pageNo >= pageCount) return;
-      const seenKey = String(url) + "|" + String(requestBodyText).slice(0, 500) + "|" + total;
+      const seenKey = endpoint.key + "|" + String(url) + "|" + String(requestBodyText).slice(0, 500) + "|" + total;
       if (autoPageSeen.has(seenKey)) return;
       autoPageSeen.add(seenKey);
       const run = async () => {
@@ -544,6 +821,16 @@
           const nextBody = buildNextPageBody(requestBodyText, nextPage, pageSize);
           if (!nextBody) break;
           const nextInit = { ...(init || {}) };
+          try {
+            if (!nextInit.headers && input && typeof input !== "string" && input.headers) {
+              nextInit.headers = new Headers(input.headers);
+            }
+            for (const key of ["credentials", "mode", "cache", "redirect", "referrer", "referrerPolicy"]) {
+              if (nextInit[key] == null && input && typeof input !== "string" && input[key] != null) {
+                nextInit[key] = input[key];
+              }
+            }
+          } catch {}
           nextInit.method = method || nextInit.method || "POST";
           nextInit.body = nextBody;
           nextInit[BYPASS_SYM] = true;
@@ -554,10 +841,12 @@
             site: inferMallSite(), page: location.pathname,
             body: safeJson(text),
             bodyText: text.length > 200000 ? null : text,
+            requestBodyText: nextBody,
             bodySize: text.length,
             autoPage: nextPage,
             autoPageSize: pageSize,
             autoPageTotal: total,
+            autoPageSource: endpoint.key,
           });
           await new Promise((resolve) => setTimeout(resolve, 250));
         }
@@ -660,13 +949,14 @@
     if (captureMode === "capture") stats.fetchCaptureHit++;
     else stats.fetchDiscoveryHit++;
     const ts = Date.now();
-    const requestBodyText = fetchRequestBodyText(input, init);
+    const requestBodyTextPromise = fetchRequestBodyTextAsync(input, init);
     const promise = OrigFetch.apply(this, arguments);
     return promise.then((resp) => {
       try {
         const cloned = resp.clone();
-        cloned.text().then((text) => {
+        cloned.text().then(async (text) => {
           try {
+            const requestBodyText = await requestBodyTextPromise;
             const parsedBody = captureMode === "capture" ? safeJson(text) : null;
             emit(buildCapturedPayload({
               kind: captureMode === "discovery" ? "fetch-discovery" : "fetch",

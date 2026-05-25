@@ -234,6 +234,7 @@ r.post("/v1/batch", authMiddleware, (req, res) => {
     const parserItems = enriched.map((e) => ({
       id: e.id,
       url_path: e.url_path,
+      page: e.it.page || null,
       body_json: e.body_json,
       ts: Number(e.it.ts) || now,
       mall_id: e.it.mall_id || null,

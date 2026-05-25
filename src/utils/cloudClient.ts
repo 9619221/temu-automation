@@ -302,7 +302,11 @@ export interface TemuActivityRow {
   activity_status: string | null;
   product_id: string | null;
   skc_id: string | null;
+  sku_id?: string | null;
+  sku_ext_code?: string | null;
+  sku_attr_text?: string | null;
   goods_id: string | null;
+  daily_price_cents?: number | null;
   signup_price_cents?: number | null;
   suggested_price_cents?: number | null;
   price_currency?: string | null;
@@ -354,6 +358,7 @@ export interface TemuStockOrderRow {
   id: string;
   mall_id: string | null;
   site: string | null;
+  source_type?: "stock_order" | "shipping_desk" | "shipping_list" | string | null;
   row_key: string;
   stock_order_no: string | null;
   parent_order_no: string | null;
@@ -363,10 +368,16 @@ export interface TemuStockOrderRow {
   skc_id: string | null;
   sku_id: string | null;
   sku_ext_code: string | null;
+  online_order_no?: string | null;
+  internal_order_no?: string | null;
+  order_amount_cents?: number | null;
+  currency?: string | null;
   product_name: string | null;
   spec_name: string | null;
   demand_qty: number | null;
   delivered_qty: number | null;
+  shipping_qty?: number | null;
+  inbound_qty?: number | null;
   temu_status: string | null;
   warehouse_group: string | null;
   receive_warehouse_id: string | null;
@@ -374,6 +385,10 @@ export interface TemuStockOrderRow {
   urgency_info: string | null;
   order_time: string | null;
   latest_ship_at: string | null;
+  weight_kg?: number | null;
+  package_count?: number | null;
+  package_no?: string | null;
+  logistics_info?: string | null;
   raw_json?: string | null;
   source_event_id?: string | null;
   sources_json?: string | null;
@@ -382,9 +397,13 @@ export interface TemuStockOrderRow {
 }
 
 export interface TemuStockOrderSummaryRow {
+  source_type?: string | null;
   temu_status: string | null;
   count: number;
   demand_qty: number | null;
+  delivered_qty?: number | null;
+  shipping_qty?: number | null;
+  inbound_qty?: number | null;
 }
 
 export interface TemuAfterSaleRow {
@@ -691,11 +710,12 @@ export const fetchTemuOperationRisks = async (
 
 export const fetchTemuStockOrders = async (
   cfg: CloudConsoleConfig,
-  params: { mall_id?: string; status?: string; q?: string; limit?: number } = {},
+  params: { mall_id?: string; status?: string; source_type?: string; q?: string; limit?: number } = {},
 ) => {
   const qs = new URLSearchParams();
   if (params.mall_id) qs.set("mall_id", params.mall_id);
   if (params.status) qs.set("status", params.status);
+  if (params.source_type) qs.set("source_type", params.source_type);
   if (params.q) qs.set("q", params.q);
   if (params.limit) qs.set("limit", String(params.limit));
   try {

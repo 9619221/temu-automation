@@ -39,19 +39,42 @@ function pickList(body) {
     body?.result?.records,
     body?.result?.rows,
     body?.result?.subOrderList,
+    body?.result?.subPurchaseOrderList,
+    body?.result?.purchaseOrderList,
+    body?.result?.deliveryBatchList,
+    body?.result?.deliveryBatchVOList,
+    body?.result?.deliveryOrderList,
+    body?.result?.deliveryOrderVOList,
     body?.result?.page?.records,
     body?.result?.page?.rows,
     body?.data?.pageItems,
+    body?.data?.dataList,
     body?.data?.list,
     body?.data?.items,
     body?.data?.records,
     body?.data?.rows,
     body?.data?.subOrderList,
+    body?.data?.subPurchaseOrderList,
+    body?.data?.purchaseOrderList,
+    body?.data?.deliveryBatchList,
+    body?.data?.deliveryBatchVOList,
+    body?.data?.deliveryOrderList,
+    body?.data?.deliveryOrderVOList,
+    body?.data?.page?.records,
+    body?.data?.page?.rows,
     body?.pageItems,
+    body?.dataList,
     body?.list,
     body?.items,
     body?.records,
     body?.rows,
+    body?.subOrderList,
+    body?.subPurchaseOrderList,
+    body?.purchaseOrderList,
+    body?.deliveryBatchList,
+    body?.deliveryBatchVOList,
+    body?.deliveryOrderList,
+    body?.deliveryOrderVOList,
   ];
   return candidates.find((value) => Array.isArray(value) && value.length > 0) || null;
 }
@@ -1003,14 +1026,86 @@ function stockOrderItems(body) {
   return operationRiskItems(body);
 }
 
-function stockOrderRowKey(row, evt, index) {
-  const key = firstDeepDefined(row, [
-    "subPurchaseOrderSn", "subPurchaseOrderNo", "purchaseOrderSn", "purchaseOrderNo",
-    "stockOrderNo", "stockOrderSn", "deliveryOrderSn", "deliveryBatchSn", "orderSn", "id",
-  ], 3);
+function stockOrderRowKey(row, evt, index, sourceType = "") {
+  const keyOrder = sourceType === "shipping_list"
+    ? [
+      "deliveryOrderSn", "deliveryOrderNo", "shipOrderSn", "shipOrderNo", "deliverOrderSn",
+      "subPurchaseOrderSn", "subPurchaseOrderNo", "purchaseOrderSn", "purchaseOrderNo",
+      "stockOrderNo", "stockOrderSn", "deliveryBatchSn", "deliveryBatchNo",
+      "onlineOrderSn", "onlineOrderNo", "internalOrderSn", "internalOrderNo",
+      "platformOrderSn", "orderSn", "id",
+    ]
+    : sourceType === "shipping_desk"
+      ? [
+        "deliveryBatchSn", "deliveryBatchNo", "batchSn", "batchNo",
+        "deliveryOrderSn", "deliveryOrderNo", "shipOrderSn", "shipOrderNo", "deliverOrderSn",
+        "subPurchaseOrderSn", "subPurchaseOrderNo", "purchaseOrderSn", "purchaseOrderNo",
+        "stockOrderNo", "stockOrderSn", "onlineOrderSn", "onlineOrderNo",
+        "internalOrderSn", "internalOrderNo", "platformOrderSn", "orderSn", "id",
+      ]
+      : [
+        "subPurchaseOrderSn", "subPurchaseOrderNo", "purchaseOrderSn", "purchaseOrderNo",
+        "stockOrderNo", "stockOrderSn", "deliveryOrderSn", "deliveryOrderNo",
+        "deliveryBatchSn", "deliveryBatchNo", "onlineOrderSn", "onlineOrderNo",
+        "internalOrderSn", "internalOrderNo", "platformOrderSn", "orderSn", "id",
+      ];
+  const key = firstDeepDefined(row, keyOrder, 3);
   const skc = firstDeepDefined(row, ["productSkcId", "productSKCId", "skcId", "skc_id"], 3);
   const sku = firstDeepDefined(row, ["productSkuId", "prodSkuId", "skuId", "sku_id"], 3);
   return [key || evt.id, skc || "", sku || "", index].map((part) => String(part ?? "")).join("|").slice(0, 500);
+}
+
+function stockOrderSourceTypeFromPath(path, page) {
+  const urlText = String(path || "");
+  const pageText = String(page || "");
+  const combined = `${urlText} ${pageText}`;
+  if (/shipping-list|pageQueryDeliveryOrders/i.test(combined)) return "shipping_list";
+  if (/shipping-desk|pageQuerySubPurchaseOrder|pageQueryDeliveryBatch/i.test(combined)) return "shipping_desk";
+  if (/querySubOrderList/i.test(urlText)) return "stock_order";
+  return "stock_order";
+}
+
+function stockOrderStatus(row) {
+  const textStatus = toNullableString(firstDeepDefined(row, [
+    "statusName", "statusText", "statusDesc", "statusLabel",
+    "orderStatusName", "orderStatusText", "orderStatusDesc",
+    "stateName", "stateText", "stateDesc",
+    "deliveryStatusName", "deliveryStatusText", "deliveryStatusDesc",
+    "purchaseStatusName", "purchaseStatusText", "purchaseStatusDesc",
+    "subOrderStatusName", "subOrderStatusText", "subOrderStatusDesc",
+    "fulfillStatusName", "fulfillStatusText", "fulfillStatusDesc",
+    "platformStatusName", "platformStatusText", "platformStatusDesc",
+    "payStatusName", "payStatusText", "inboundStatusName", "inboundStatusText",
+  ], 3), 100);
+  if (textStatus) return textStatus;
+  return toNullableString(firstDeepDefined(row, [
+    "status", "orderStatus", "state", "deliveryStatus", "purchaseStatus",
+    "subOrderStatus", "fulfillStatus", "platformStatus", "payStatus", "inboundStatus",
+  ], 3), 100);
+}
+
+function pickDeepPriceCents(row, keys) {
+  for (const key of keys) {
+    const value = firstDeepDefined(row, [key], 3);
+    if (value == null || value === "") continue;
+    const cents = toCents(value, key);
+    if (cents != null) return cents;
+  }
+  return null;
+}
+
+function pickDeepInteger(row, keys, options = {}) {
+  let fallback = null;
+  for (const key of keys) {
+    const value = firstDeepDefined(row, [key], 3);
+    if (value == null || value === "") continue;
+    const num = toNullableInteger(value);
+    if (num == null) continue;
+    if (options.preferPositive && num > 0) return num;
+    if (fallback == null) fallback = num;
+    if (!options.preferPositive) return num;
+  }
+  return fallback;
 }
 
 function parseTemuStockOrders(db, ctx, evt, body) {
@@ -1018,20 +1113,25 @@ function parseTemuStockOrders(db, ctx, evt, body) {
   if (!items.length) return;
   const upsert = db.prepare(`
     INSERT INTO temu_stock_order_snapshot (
-      id, tenant_id, mall_id, site, row_key, stock_order_no, parent_order_no,
+      id, tenant_id, mall_id, site, source_type, row_key, stock_order_no, parent_order_no,
       delivery_order_sn, delivery_batch_sn, product_id, skc_id, sku_id, sku_ext_code,
+      online_order_no, internal_order_no, order_amount_cents, currency,
       product_name, spec_name, demand_qty, delivered_qty, temu_status, warehouse_group,
       receive_warehouse_id, receive_warehouse_name, urgency_info, order_time, latest_ship_at,
+      shipping_qty, inbound_qty, weight_kg, package_count, package_no, logistics_info,
       raw_json, source_event_id, sources_json
     ) VALUES (
-      @id, @tenant_id, @mall_id, @site, @row_key, @stock_order_no, @parent_order_no,
+      @id, @tenant_id, @mall_id, @site, @source_type, @row_key, @stock_order_no, @parent_order_no,
       @delivery_order_sn, @delivery_batch_sn, @product_id, @skc_id, @sku_id, @sku_ext_code,
+      @online_order_no, @internal_order_no, @order_amount_cents, @currency,
       @product_name, @spec_name, @demand_qty, @delivered_qty, @temu_status, @warehouse_group,
       @receive_warehouse_id, @receive_warehouse_name, @urgency_info, @order_time, @latest_ship_at,
+      @shipping_qty, @inbound_qty, @weight_kg, @package_count, @package_no, @logistics_info,
       @raw_json, @source_event_id, @sources_json
     )
     ON CONFLICT(tenant_id, mall_id, row_key) DO UPDATE SET
       site                   = COALESCE(excluded.site, site),
+      source_type            = COALESCE(excluded.source_type, source_type),
       stock_order_no         = COALESCE(excluded.stock_order_no, stock_order_no),
       parent_order_no        = COALESCE(excluded.parent_order_no, parent_order_no),
       delivery_order_sn      = COALESCE(excluded.delivery_order_sn, delivery_order_sn),
@@ -1040,6 +1140,10 @@ function parseTemuStockOrders(db, ctx, evt, body) {
       skc_id                 = COALESCE(excluded.skc_id, skc_id),
       sku_id                 = COALESCE(excluded.sku_id, sku_id),
       sku_ext_code           = COALESCE(excluded.sku_ext_code, sku_ext_code),
+      online_order_no        = COALESCE(excluded.online_order_no, online_order_no),
+      internal_order_no      = COALESCE(excluded.internal_order_no, internal_order_no),
+      order_amount_cents     = COALESCE(excluded.order_amount_cents, order_amount_cents),
+      currency               = COALESCE(excluded.currency, currency),
       product_name           = COALESCE(excluded.product_name, product_name),
       spec_name              = COALESCE(excluded.spec_name, spec_name),
       demand_qty             = COALESCE(excluded.demand_qty, demand_qty),
@@ -1051,12 +1155,19 @@ function parseTemuStockOrders(db, ctx, evt, body) {
       urgency_info           = COALESCE(excluded.urgency_info, urgency_info),
       order_time             = COALESCE(excluded.order_time, order_time),
       latest_ship_at         = COALESCE(excluded.latest_ship_at, latest_ship_at),
+      shipping_qty           = COALESCE(excluded.shipping_qty, shipping_qty),
+      inbound_qty            = COALESCE(excluded.inbound_qty, inbound_qty),
+      weight_kg              = COALESCE(excluded.weight_kg, weight_kg),
+      package_count          = COALESCE(excluded.package_count, package_count),
+      package_no             = COALESCE(excluded.package_no, package_no),
+      logistics_info         = COALESCE(excluded.logistics_info, logistics_info),
       raw_json               = COALESCE(excluded.raw_json, raw_json),
       source_event_id        = COALESCE(excluded.source_event_id, source_event_id),
       sources_json           = json_patch(COALESCE(sources_json, '{}'), COALESCE(excluded.sources_json, '{}')),
       last_updated_at        = datetime('now')
   `);
   const mall_id = eventMallId(ctx, evt);
+  const source_type = stockOrderSourceTypeFromPath(evt.url_path, evt.page);
   const sources_json = JSON.stringify({ [evt.url_path]: evt.id });
   items.forEach((row, index) => {
     if (!row || typeof row !== "object") return;
@@ -1082,7 +1193,8 @@ function parseTemuStockOrders(db, ctx, evt, body) {
       tenant_id: ctx.tenant_id,
       mall_id,
       site: evt.site || null,
-      row_key: stockOrderRowKey(row, evt, index),
+      source_type,
+      row_key: stockOrderRowKey(row, evt, index, source_type),
       stock_order_no,
       parent_order_no: toNullableString(firstDeepDefined(row, [
         "parentOrderSn", "parentOrderNo", "parentPurchaseOrderSn", "parentPurchaseOrderNo",
@@ -1095,6 +1207,21 @@ function parseTemuStockOrders(db, ctx, evt, body) {
       sku_ext_code: toNullableString(firstDeepDefined(row, [
         "skuExtCode", "extCode", "externalSkuCode", "supplierSkuCode", "skuCode", "specCode",
       ], 3), 200),
+      online_order_no: toNullableString(firstDeepDefined(row, [
+        "onlineOrderSn", "onlineOrderNo", "online_order_no", "platformOrderSn",
+        "platformOrderNo", "parentOrderSn", "parentOrderNo",
+      ], 3), 200),
+      internal_order_no: toNullableString(firstDeepDefined(row, [
+        "internalOrderSn", "internalOrderNo", "internal_order_no", "orderSn", "orderNo",
+        "wbOrderSn", "wbOrderNo",
+      ], 3), 200),
+      order_amount_cents: pickDeepPriceCents(row, [
+        "orderAmountCents", "orderAmountCent", "orderAmount", "totalAmountCents",
+        "totalAmount", "payAmountCents", "payAmount", "amountCents", "amount",
+      ]),
+      currency: toNullableString(firstDeepDefined(row, [
+        "currency", "currencyCode", "currency_code", "priceCurrency", "siteCurrency",
+      ], 3), 20),
       product_name: toNullableString(firstDeepDefined(row, [
         "productName", "goodsName", "productTitle", "title", "name",
       ], 3), 500),
@@ -1111,13 +1238,9 @@ function parseTemuStockOrders(db, ctx, evt, body) {
         "deliveredQty", "deliveredQuantity", "deliverQuantity", "deliveryQuantity",
         "shippedQty", "shippedQuantity", "actualQuantity", "receivedQuantity",
         "arrivedQuantity", "arrivalQuantity", "inboundQuantity", "inStockQuantity",
+        "deliverSkcNum", "receiveSkcNum",
       ], 3)),
-      temu_status: toNullableString(firstDeepDefined(row, [
-        "status", "statusName", "orderStatus", "orderStatusName", "state", "stateName",
-        "deliveryStatus", "deliveryStatusName", "purchaseStatus", "purchaseStatusName",
-        "subOrderStatus", "subOrderStatusName", "fulfillStatus", "fulfillStatusName",
-        "payStatus", "payStatusName", "inboundStatus", "inboundStatusName",
-      ], 3), 100),
+      temu_status: stockOrderStatus(row),
       warehouse_group: toNullableString(firstDeepDefined(row, [
         "warehouseGroup", "warehouseGroupName", "warehouse", "warehouseName", "siteName",
       ], 3), 200),
@@ -1139,6 +1262,31 @@ function parseTemuStockOrders(db, ctx, evt, body) {
         "deliveryDeadline", "shipDeadline", "expectArriveTime", "expectedArriveTime",
         "expectReceiveTime", "expectedReceiveTime",
       ], 3), 100),
+      shipping_qty: toNullableInteger(firstDeepDefined(row, [
+        "shippingQty", "shippingQuantity", "sendQty", "sendQuantity", "deliveryQty",
+        "deliveryQuantity", "deliverQty", "deliverQuantity", "shippedQty", "shippedQuantity",
+        "deliverSkcNum", "skcPurchaseNum",
+      ], 3)),
+      inbound_qty: toNullableInteger(firstDeepDefined(row, [
+        "inboundQty", "inboundQuantity", "arrivalQty", "arrivalQuantity",
+        "receivedQty", "receivedQuantity", "inStockQuantity", "stockInQuantity",
+        "receiveSkcNum",
+      ], 3)),
+      weight_kg: toNullableNumber(firstDeepDefined(row, [
+        "weightKg", "weight_kg", "weight", "packageWeight", "packageWeightKg",
+      ], 3)),
+      package_count: pickDeepInteger(row, [
+        "packageCount", "packageNum", "parcelCount", "parcelNum", "boxCount", "boxes",
+        "expressPackageNum", "otherDeliveryPackageNum", "deliverPackageNum", "receivePackageNum",
+      ], { preferPositive: true }),
+      package_no: toNullableString(firstDeepDefined(row, [
+        "packageNo", "packageSn", "parcelNo", "parcelSn", "waybillNo", "trackingNumber",
+        "trackingNo", "logisticsNo",
+      ], 3), 300),
+      logistics_info: toNullableString(firstDeepDefined(row, [
+        "logisticsInfo", "logisticsName", "logisticsCompany", "expressCompanyName",
+        "expressCompany", "carrierName", "shipCompanyName",
+      ], 3), 500),
       raw_json: toJsonText(row),
       source_event_id: evt.id,
       sources_json,
@@ -1578,6 +1726,31 @@ function pickActivityInteger(item, keys) {
   return toNullableInteger(raw);
 }
 
+function stringifyActivitySkuSpec(value) {
+  if (value == null || value === "") return "";
+  if (Array.isArray(value)) return value.map(stringifyActivitySkuSpec).filter(Boolean).join(" / ");
+  if (typeof value !== "object") return String(value).trim();
+  const direct = firstDefined(value, ["specText", "skuAttr", "skuAttrText", "skuAttribute", "skuName", "className", "attrName"]);
+  if (direct != null && direct !== "") return String(direct).trim();
+  const label = firstDefined(value, ["parentSpecName", "specKey", "key", "name", "label"]);
+  const text = firstDefined(value, ["specName", "unitSpecName", "value", "text", "title"]);
+  return [label, text].filter((part) => part != null && part !== "").map((part) => String(part).trim()).join(": ");
+}
+
+function activitySkuAttrText(item) {
+  const direct = firstDeepDefined(item, [
+    "skuAttrText", "skuAttributeText", "skuPropertyText", "skuPropText",
+    "skuName", "className", "specText", "specName",
+  ], 2);
+  const directText = stringifyActivitySkuSpec(direct);
+  if (directText) return directText;
+  const specList = firstDeepDefined(item, [
+    "productSkuSpecList", "skuSpecList", "skuAttrList", "skuAttrs",
+    "skuProperties", "skuPropertyList",
+  ], 2);
+  return stringifyActivitySkuSpec(specList);
+}
+
 function activityRowKey(item, evt, index) {
   const activityId = firstDefined(item, [
     "activityThematicId", "activityId", "activityThemeId", "themeId", "topicId",
@@ -1586,12 +1759,16 @@ function activityRowKey(item, evt, index) {
   const meta = isRecord(item.__activity_meta) ? item.__activity_meta : {};
   const productId = firstDefined(item, ["productId", "productSpuId", "spuId", "spu_id", "goodsSpuId"]) ?? meta.productId;
   const skcId = firstDefined(item, ["productSkcId", "skcId", "skc_id"]);
+  const skuId = firstDefined(item, ["productSkuId", "prodSkuId", "skuId", "sku_id"]);
+  const skuExtCode = firstDefined(item, ["skuExtCode", "skuCode", "extCode", "externalSkuCode"]);
   const goodsId = firstDefined(item, ["goodsId", "goods_id"]);
   return [
     activityKindFromPath(evt.url_path),
     activityId || meta.activityId || evt.id,
     productId || "",
     skcId || "",
+    skuId || "",
+    skuExtCode || "",
     goodsId || "",
     index,
   ].map((part) => String(part ?? "")).join("|").slice(0, 500);
@@ -1603,14 +1780,14 @@ function parseActivitySnapshot(db, ctx, evt, body) {
   const upsert = db.prepare(`
     INSERT INTO temu_activity_snapshot (
       id, tenant_id, mall_id, site, stat_date, row_key, activity_kind,
-      activity_id, activity_title, activity_type, activity_status, product_id, skc_id, goods_id,
-      signup_price_cents, suggested_price_cents, price_currency, activity_stock,
+      activity_id, activity_title, activity_type, activity_status, product_id, skc_id, sku_id, sku_ext_code, sku_attr_text, goods_id,
+      daily_price_cents, signup_price_cents, suggested_price_cents, price_currency, activity_stock,
       signup_price_diff_cents,
       start_at, end_at, metric_json, raw_json, source_event_id, sources_json
     ) VALUES (
       @id, @tenant_id, @mall_id, @site, @stat_date, @row_key, @activity_kind,
-      @activity_id, @activity_title, @activity_type, @activity_status, @product_id, @skc_id, @goods_id,
-      @signup_price_cents, @suggested_price_cents, @price_currency, @activity_stock,
+      @activity_id, @activity_title, @activity_type, @activity_status, @product_id, @skc_id, @sku_id, @sku_ext_code, @sku_attr_text, @goods_id,
+      @daily_price_cents, @signup_price_cents, @suggested_price_cents, @price_currency, @activity_stock,
       @signup_price_diff_cents,
       @start_at, @end_at, @metric_json, @raw_json, @source_event_id, @sources_json
     )
@@ -1623,7 +1800,11 @@ function parseActivitySnapshot(db, ctx, evt, body) {
       activity_status = COALESCE(excluded.activity_status, activity_status),
       product_id      = COALESCE(excluded.product_id, product_id),
       skc_id          = COALESCE(excluded.skc_id, skc_id),
+      sku_id          = COALESCE(excluded.sku_id, sku_id),
+      sku_ext_code    = COALESCE(excluded.sku_ext_code, sku_ext_code),
+      sku_attr_text   = COALESCE(excluded.sku_attr_text, sku_attr_text),
       goods_id        = COALESCE(excluded.goods_id, goods_id),
+      daily_price_cents = COALESCE(excluded.daily_price_cents, daily_price_cents),
       signup_price_cents = COALESCE(excluded.signup_price_cents, signup_price_cents),
       suggested_price_cents = COALESCE(excluded.suggested_price_cents, suggested_price_cents),
       price_currency  = COALESCE(excluded.price_currency, price_currency),
@@ -1658,6 +1839,17 @@ function parseActivitySnapshot(db, ctx, evt, body) {
       "salePriceCents", "salePriceCent", "salePrice",
       "supplierActivityPrice", "skuActivityPrice", "skcActivityPrice",
       "inputPrice", "declarePrice", "declaredPrice",
+    ]);
+    const daily_price_cents = pickActivityPriceCents(item, [
+      "dailyDeclarePriceCents", "dailyDeclarePriceCent", "dailyDeclarePrice",
+      "normalDeclarePriceCents", "normalDeclarePriceCent", "normalDeclarePrice",
+      "dailyPriceCents", "dailyPriceCent", "dailyPrice",
+      "normalPriceCents", "normalPriceCent", "normalPrice",
+      "basePriceCents", "basePriceCent", "basePrice",
+      "supplierPriceCents", "supplierPriceCent", "supplierPrice",
+      "declaredPriceCents", "declaredPriceCent", "declaredPrice",
+      "declarePriceCents", "declarePriceCent", "declarePrice",
+      "skuSupplierPrice", "skuDeclaredPrice",
     ]);
     const suggested_price_cents = pickActivityPriceCents(item, [
       "suggestedPriceCents", "suggestedPriceCent", "suggestedPrice",
@@ -1706,7 +1898,11 @@ function parseActivitySnapshot(db, ctx, evt, body) {
       ]), 100),
       product_id: toNullableString(firstDefined(item, ["productId", "productSpuId", "spuId", "spu_id", "goodsSpuId"]) ?? meta.productId),
       skc_id: toNullableString(firstDefined(item, ["productSkcId", "skcId", "skc_id"])),
+      sku_id: toNullableString(firstDefined(item, ["productSkuId", "prodSkuId", "skuId", "sku_id"]), 100),
+      sku_ext_code: toNullableString(firstDefined(item, ["skuExtCode", "skuCode", "extCode", "externalSkuCode"]), 200),
+      sku_attr_text: toNullableString(activitySkuAttrText(item), 500),
       goods_id: toNullableString(firstDefined(item, ["goodsId", "goods_id"])),
+      daily_price_cents,
       signup_price_cents,
       suggested_price_cents,
       price_currency,
@@ -1716,6 +1912,10 @@ function parseActivitySnapshot(db, ctx, evt, body) {
       end_at: toNullableString(firstDefined(item, ["endTime", "finishTime", "sessionEndTime", "activityEndTime", "validEndTime"])),
       metric_json: toJsonText({
         activityType: activity_type,
+        skuId: firstDefined(item, ["productSkuId", "prodSkuId", "skuId", "sku_id"]),
+        skuExtCode: firstDefined(item, ["skuExtCode", "skuCode", "extCode", "externalSkuCode"]),
+        skuAttrText: activitySkuAttrText(item),
+        dailyPriceCents: daily_price_cents,
         signupPriceCents: signup_price_cents,
         suggestedPriceCents: suggested_price_cents,
         priceCurrency: price_currency,

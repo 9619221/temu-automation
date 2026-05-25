@@ -22,16 +22,22 @@ const MALLS_KEY = "temu_monitor_malls";
 const COLLECTOR_STATE_KEY = "temu_monitor_collector_state";
 const COLLECTOR_WINDOW_KEY = "temu_monitor_collector_window";
 const COLLECTOR_QUERY = "__temu_monitor_collector=1";
+const COLLECTOR_BOOT_VERSION_KEY = "temu_monitor_collector_boot_version";
+const COLLECTOR_BOOT_VERSION = "20260525_shipping_chain";
 const COLLECTOR_ALARM_MINUTES = 2;
 const COLLECTOR_BATCH_SIZE = 4;
 const HK_CLOUD_ENDPOINT = "https://erp.temu.chat/cloud";
 const FEISHU_SUPPLIER_TABLE_URL = "https://mcn24onb5t1o.feishu.cn/base/RLy7bndc4aCXhtsx4yAcr2d8nSg?table=tbl0UhZRpR0niDSt&view=vew5Spjz7c";
+const FEISHU_SUPPLIER_ONCE_KEY = "temu_monitor_feishu_supplier_once";
 
 const COLLECTOR_TARGETS = [
   { key: "products", url: "https://agentseller.temu.com/goods/list" },
   { key: "sales", url: "https://agentseller.temu.com/stock/fully-mgt/sale-manage/main" },
   { key: "orders", url: "https://agentseller.temu.com/stock/fully-mgt/order-manage" },
   { key: "urgent_orders", url: "https://agentseller.temu.com/stock/fully-mgt/order-manage-urgency" },
+  { key: "stock_orders", url: "https://seller.kuajingmaihuo.com/stock/fully-mgt/order-manage" },
+  { key: "shipping_desk", url: "https://seller.kuajingmaihuo.com/main/order-manager/shipping-desk" },
+  { key: "shipping_list", url: "https://seller.kuajingmaihuo.com/main/order-manager/shipping-list" },
   { key: "traffic_goods", url: "https://agentseller.temu.com/main/flux-analysis-full" },
   { key: "traffic_mall", url: "https://agentseller.temu.com/main/mall-flux-analysis-full" },
   { key: "flow_price", url: "https://agentseller.temu.com/newon/compete-manager" },
@@ -66,7 +72,7 @@ chrome.runtime.onStartup.addListener(async () => {
 async function ensureRuntimeDefaults() {
   chrome.alarms.create(ALARM_FLUSH, { periodInMinutes: 0.5 });
   chrome.alarms.create(ALARM_COLLECT, { periodInMinutes: COLLECTOR_ALARM_MINUTES });
-  const cur = await getStorage(["device_id", COLLECTOR_STATE_KEY]);
+  const cur = await getStorage(["device_id", COLLECTOR_STATE_KEY, COLLECTOR_BOOT_VERSION_KEY]);
   const patch = {};
   if (!cur.device_id) patch.device_id = crypto.randomUUID();
   if (!cur[COLLECTOR_STATE_KEY]) {
@@ -76,6 +82,15 @@ async function ensureRuntimeDefaults() {
       updated_at: Date.now(),
       reason: "auto_default",
     };
+    patch[COLLECTOR_BOOT_VERSION_KEY] = COLLECTOR_BOOT_VERSION;
+  } else if (cur[COLLECTOR_BOOT_VERSION_KEY] !== COLLECTOR_BOOT_VERSION) {
+    patch[COLLECTOR_STATE_KEY] = {
+      ...cur[COLLECTOR_STATE_KEY],
+      enabled: true,
+      updated_at: Date.now(),
+      reason: "auto_enable_shipping_chain",
+    };
+    patch[COLLECTOR_BOOT_VERSION_KEY] = COLLECTOR_BOOT_VERSION;
   }
   if (Object.keys(patch).length) await setStorage(patch);
   await tryAutoConfigure();
@@ -83,10 +98,10 @@ async function ensureRuntimeDefaults() {
   if (collectorState?.enabled !== false) {
     await runCollectorStep().catch((e) => console.warn("[sw] collector bootstrap err", e?.message || e));
   }
+  await runFeishuSupplierImportOnce("bootstrap").catch((e) => console.warn("[sw] feishu once err", e?.message || e));
 }
 
-// 装好扩展自动连生产 cloud（默认 https://erp.temu.chat/cloud）
-// 仅当 storage 还没配置时尝试；失败静默（如需指向其它环境，用户在 options 页手动填）
+// Keep the extension on the HK cloud endpoint; old local/custom endpoints are replaced on startup.
 async function tryAutoConfigure() {
   const cur = await getStorage(["cloud_endpoint", "auth_token"]);
   if (cur.cloud_endpoint === HK_CLOUD_ENDPOINT && cur.auth_token) return;
@@ -101,13 +116,13 @@ async function tryAutoConfigure() {
     const data = await resp.json();
     if (!data?.token) return;
     await setStorage({ cloud_endpoint: defaultEndpoint, auth_token: data.token });
-    console.log("[sw] auto-configured to " + defaultEndpoint);
+    console.log(`[sw] auto-configured to ${defaultEndpoint}`);
   } catch (e) {
     console.warn("[sw] auto-configure skipped:", e?.message || e);
   }
 }
 
-// Periodic reporting
+// ---------- 周期上报 ----------
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === ALARM_COLLECT) {
     await runCollectorStep().catch((e) => console.warn("[sw] collector err", e));
@@ -225,6 +240,7 @@ async function sendHeartbeat() {
       console.log("[sw] cloud requested reload, version=" + json.reload_version);
       try { chrome.runtime.reload(); } catch (e) { console.warn("[sw] reload failed", e); }
     }
+    await runFeishuSupplierImportOnce("heartbeat").catch((e) => console.warn("[sw] feishu once err", e?.message || e));
   } catch {}
 }
 
@@ -346,6 +362,100 @@ async function syncFeishuSuppliers() {
     flushRequested: true,
     reason: response?.reason || null,
   };
+}
+
+async function runFeishuSupplierImportOnce(reason = "auto") {
+  const cfg = await getStorage([FEISHU_SUPPLIER_ONCE_KEY]);
+  const state = cfg[FEISHU_SUPPLIER_ONCE_KEY] || {};
+  const now = Date.now();
+  if (state.done) return { ok: true, skipped: "done", rows: state.rows || 0 };
+  if (state.runningAt && now - Number(state.runningAt) < 180000) {
+    return { ok: true, skipped: "running" };
+  }
+  await setStorage({
+    [FEISHU_SUPPLIER_ONCE_KEY]: {
+      ...state,
+      runningAt: now,
+      reason,
+      attempts: Number(state.attempts || 0) + 1,
+      updatedAt: now,
+    },
+  });
+  try {
+    await tryAutoConfigure();
+    const tab = await openFeishuSupplierTabForCapture();
+    await waitForTabComplete(tab.id, 90000);
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    const response = await sendMessageToTab(tab.id, {
+      type: "COLLECT_FEISHU_SUPPLIERS",
+      mode: "api",
+      maxSteps: 160,
+      delayMs: 250,
+    });
+    await flush();
+    const rows = Number(response?.rows || 0);
+    const ok = Boolean(response?.ok && rows > 0);
+    await setStorage({
+      [FEISHU_SUPPLIER_ONCE_KEY]: {
+        done: ok,
+        runningAt: 0,
+        rows,
+        reason,
+        error: ok ? null : (response?.reason || "no_rows"),
+        updatedAt: Date.now(),
+      },
+    });
+    return { ok, rows, reason: response?.reason || null };
+  } catch (error) {
+    await setStorage({
+      [FEISHU_SUPPLIER_ONCE_KEY]: {
+        ...state,
+        done: false,
+        runningAt: 0,
+        error: String(error?.message || error).slice(0, 200),
+        updatedAt: Date.now(),
+      },
+    });
+    throw error;
+  }
+}
+
+async function openFeishuSupplierTabForCapture() {
+  const tabs = await chrome.tabs.query({ url: ["https://*.feishu.cn/base/*"] });
+  const matched = tabs.find((tab) => tab?.url && tab.url.includes("/base/RLy7bndc4aCXhtsx4yAcr2d8nSg"));
+  if (matched?.id) {
+    await chrome.tabs.update(matched.id, { url: FEISHU_SUPPLIER_TABLE_URL, active: false });
+    return matched;
+  }
+  return chrome.tabs.create({ url: FEISHU_SUPPLIER_TABLE_URL, active: false });
+}
+
+function waitForTabComplete(tabId, timeoutMs = 60000) {
+  return new Promise((resolve) => {
+    if (!tabId) return resolve(false);
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      resolve(false);
+    }, timeoutMs);
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      resolve(true);
+    };
+    const onUpdated = (updatedTabId, changeInfo) => {
+      if (updatedTabId === tabId && changeInfo.status === "complete") finish();
+    };
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.get(tabId, (tab) => {
+      if (chrome.runtime.lastError) return;
+      if (tab?.status === "complete") finish();
+    });
+  });
 }
 
 function sendMessageToTab(tabId, message) {

@@ -1149,6 +1149,7 @@ r.get("/stock-orders", (req, res) => {
   const tid = req.user.tid;
   const requestedMallId = req.query.mall_id ? String(req.query.mall_id) : "";
   const requestedStatus = req.query.status ? String(req.query.status) : "";
+  const requestedSourceType = req.query.source_type ? String(req.query.source_type) : "";
   const q = req.query.q ? String(req.query.q).trim() : "";
   const limit = Math.min(5000, Math.max(1, Number(req.query.limit) || 300));
   const where = ["tenant_id = ?", realMallWhere];
@@ -1161,27 +1162,38 @@ r.get("/stock-orders", (req, res) => {
     where.push("COALESCE(temu_status, '') = ?");
     params.push(requestedStatus);
   }
+  if (requestedSourceType) {
+    where.push("COALESCE(source_type, 'stock_order') = ?");
+    params.push(requestedSourceType);
+  }
   if (q) {
     where.push(`(
       stock_order_no LIKE ?
       OR parent_order_no LIKE ?
       OR delivery_order_sn LIKE ?
       OR delivery_batch_sn LIKE ?
+      OR online_order_no LIKE ?
+      OR internal_order_no LIKE ?
+      OR package_no LIKE ?
+      OR logistics_info LIKE ?
       OR product_name LIKE ?
       OR skc_id LIKE ?
       OR sku_id LIKE ?
       OR sku_ext_code LIKE ?
     )`);
     const like = `%${q}%`;
-    params.push(like, like, like, like, like, like, like, like);
+    params.push(like, like, like, like, like, like, like, like, like, like, like, like);
   }
 
   try {
     const rows = db.prepare(`
-      SELECT id, mall_id, site, row_key, stock_order_no, parent_order_no,
+      SELECT id, mall_id, site, COALESCE(source_type, 'stock_order') AS source_type,
+             row_key, stock_order_no, parent_order_no,
              delivery_order_sn, delivery_batch_sn, product_id, skc_id, sku_id, sku_ext_code,
+             online_order_no, internal_order_no, order_amount_cents, currency,
              product_name, spec_name, demand_qty, delivered_qty, temu_status, warehouse_group,
              receive_warehouse_id, receive_warehouse_name, urgency_info, order_time, latest_ship_at,
+             shipping_qty, inbound_qty, weight_kg, package_count, package_no, logistics_info,
              raw_json, source_event_id, sources_json, first_seen_at, last_updated_at
       FROM temu_stock_order_snapshot
       WHERE ${where.join(" AND ")}
@@ -1196,11 +1208,17 @@ r.get("/stock-orders", (req, res) => {
       LIMIT ?
     `).all(...params, limit);
     const summary = db.prepare(`
-      SELECT COALESCE(temu_status, '') AS temu_status, COUNT(*) AS count, COALESCE(SUM(demand_qty), 0) AS demand_qty
+      SELECT COALESCE(source_type, 'stock_order') AS source_type,
+             COALESCE(temu_status, '') AS temu_status,
+             COUNT(*) AS count,
+             COALESCE(SUM(demand_qty), 0) AS demand_qty,
+             COALESCE(SUM(delivered_qty), 0) AS delivered_qty,
+             COALESCE(SUM(shipping_qty), 0) AS shipping_qty,
+             COALESCE(SUM(inbound_qty), 0) AS inbound_qty
       FROM temu_stock_order_snapshot
       WHERE ${where.join(" AND ")}
-      GROUP BY COALESCE(temu_status, '')
-      ORDER BY count DESC
+      GROUP BY COALESCE(source_type, 'stock_order'), COALESCE(temu_status, '')
+      ORDER BY source_type ASC, count DESC
     `).all(...params);
     res.json({ rows, summary });
   } catch (error) {
@@ -1513,8 +1531,9 @@ r.get("/activity", (req, res) => {
     }
     const rows = db.prepare(`
       SELECT id, mall_id, site, stat_date, row_key, activity_kind, activity_id,
-             activity_title, activity_type, activity_status, product_id, skc_id, goods_id,
-             signup_price_cents, suggested_price_cents, price_currency, activity_stock,
+             activity_title, activity_type, activity_status, product_id, skc_id, sku_id,
+             sku_ext_code, sku_attr_text, goods_id,
+             daily_price_cents, signup_price_cents, suggested_price_cents, price_currency, activity_stock,
              signup_price_diff_cents,
              start_at, end_at, metric_json, raw_json, source_event_id,
              sources_json, last_updated_at
