@@ -1,7 +1,7 @@
 {
   "name": "temu-automation",
   "private": true,
-  "version": "0.3.41",
+  "version": "0.3.42",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -56,6 +56,15 @@
         "filter": [
           "**/*",
           "!data/**"
+        ]
+      },
+      {
+        "from": "extension",
+        "to": "extension",
+        "filter": [
+          "manifest.json",
+          "rules.json",
+          "web/**/*"
         ]
       }
     ],

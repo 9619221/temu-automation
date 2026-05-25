@@ -17888,6 +17888,27 @@ async function listSkuStockDetailsRuntime(params = {}) {
       });
       return payload.result || payload.stockDetails || payload;
     } catch (error) {
+      const message = String(error?.message || "");
+      const remoteErpUnavailable =
+        /ERP database is not (initialized|ready)/i.test(message)
+        || /database is not initialized/i.test(message);
+      if (remoteErpUnavailable) {
+        return {
+          rows: [],
+          total: 0,
+          summary: {
+            receivedQty: 0,
+            availableQty: 0,
+            reservedQty: 0,
+            blockedQty: 0,
+            defectiveQty: 0,
+            reworkQty: 0,
+            costedQty: 0,
+            missingCostQty: 0,
+            stockValue: 0,
+          },
+        };
+      }
       if (error?.statusCode && error.statusCode !== 404) throw error;
     }
   }

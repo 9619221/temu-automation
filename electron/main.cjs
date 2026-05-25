@@ -5810,13 +5810,76 @@ ipcMain.handle("app:open-log-directory", async () => {
   return logDir;
 });
 
+function isPathInsideAsar(filePath) {
+  return String(filePath || "").replace(/\\/g, "/").toLowerCase().includes("/app.asar/");
+}
+
+function getUserDataExtensionDirectory() {
+  try {
+    return path.join(app.getPath("userData"), "extension");
+  } catch {
+    return path.join(process.cwd(), "extension");
+  }
+}
+
+function hasLoadableExtensionDirectory(dir) {
+  try {
+    if (!dir || isPathInsideAsar(dir)) return false;
+    return fs.statSync(dir).isDirectory() && fs.existsSync(path.join(dir, "manifest.json"));
+  } catch {
+    return false;
+  }
+}
+
+function copyDirectoryContentsSync(sourceDir, targetDir) {
+  fs.mkdirSync(targetDir, { recursive: true });
+  for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
+    const sourcePath = path.join(sourceDir, entry.name);
+    const targetPath = path.join(targetDir, entry.name);
+    if (entry.isDirectory()) {
+      copyDirectoryContentsSync(sourcePath, targetPath);
+    } else if (entry.isFile()) {
+      fs.copyFileSync(sourcePath, targetPath);
+    }
+  }
+}
+
+function materializeExtensionDirectoryFromAsar() {
+  const sourceDir = path.join(app.getAppPath(), "extension");
+  if (!isPathInsideAsar(sourceDir)) return "";
+  try {
+    if (!fs.existsSync(path.join(sourceDir, "manifest.json"))) return "";
+    const targetDir = getUserDataExtensionDirectory();
+    copyDirectoryContentsSync(sourceDir, targetDir);
+    return hasLoadableExtensionDirectory(targetDir) ? targetDir : "";
+  } catch (error) {
+    appendDiagnosticLog({
+      source: "extension-directory",
+      message: "Failed to export extension from app.asar",
+      error: diagnosticErrorToDetail(error),
+    });
+    return "";
+  }
+}
+
 function resolveExtensionDirectory() {
-  const candidates = [
-    path.join(app.getAppPath(), "extension"),
-    path.join(process.resourcesPath || "", "extension"),
-    path.join(process.cwd(), "extension"),
+  const resourcesPath = process.resourcesPath || "";
+  const packagedCandidates = [
+    resourcesPath ? path.join(resourcesPath, "extension") : "",
+    resourcesPath ? path.join(resourcesPath, "app.asar.unpacked", "extension") : "",
+    getUserDataExtensionDirectory(),
   ];
-  return candidates.find((dir) => dir && fs.existsSync(dir)) || candidates[0];
+  const devCandidates = [
+    path.join(process.cwd(), "extension"),
+    path.join(app.getAppPath(), "extension"),
+    ...packagedCandidates,
+  ];
+  const candidates = app.isPackaged ? packagedCandidates : devCandidates;
+  const loadableDir = candidates.find(hasLoadableExtensionDirectory);
+  if (loadableDir) return loadableDir;
+  const exportedDir = app.isPackaged ? materializeExtensionDirectoryFromAsar() : "";
+  if (exportedDir) return exportedDir;
+  return candidates.find(Boolean) || path.join(process.cwd(), "extension");
 }
 
 function resolveChromiumBrowserExecutable() {

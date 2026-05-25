@@ -53,6 +53,31 @@ function assertAiCredentialsMatchRuntimeEnv(env) {
   }
 }
 
+function assertExtensionResourceConfigured(buildConfig) {
+  const extraResources = Array.isArray(buildConfig.extraResources) ? buildConfig.extraResources : [];
+  const extensionResource = extraResources.find((resource) => (
+    resource
+    && typeof resource === "object"
+    && resource.from === "extension"
+    && resource.to === "extension"
+  ));
+  if (!extensionResource) {
+    throw new Error("build.extraResources must copy extension to resources/extension");
+  }
+  for (const relativePath of [
+    "manifest.json",
+    "rules.json",
+    path.join("web", "background", "sw.js"),
+    path.join("web", "content", "bridge.js"),
+  ]) {
+    const filePath = path.join(repoRoot, "extension", relativePath);
+    if (!checkPathExists(filePath)) {
+      throw new Error(`Extension package file missing: ${filePath}`);
+    }
+  }
+  console.log("[ok] extension extraResource configured for resources/extension");
+}
+
 function verifyAnalyzeKey(env) {
   const apiKey = env.ANALYZE_API_KEY || "";
   const baseUrl = (env.ANALYZE_BASE_URL || "").replace(/\/+$/, "");
@@ -142,6 +167,8 @@ async function main() {
     }
     process.exit(1);
   }
+
+  assertExtensionResourceConfigured(buildConfig);
 
   const aiEnv = readEnvFile(aiRuntimeEnvPath);
   assertAiCredentialsMatchRuntimeEnv(aiEnv);
