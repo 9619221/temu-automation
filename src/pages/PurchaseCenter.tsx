@@ -300,6 +300,15 @@ function purchaseEventTypeLabel(eventType?: string | null) {
   return PURCHASE_EVENT_TYPE_LABELS[eventType] || eventType;
 }
 
+function purchaseLogTitle(row: TimelineRow) {
+  if (row.kind === "comment") return "协作留言";
+  return purchaseEventTypeLabel(row.eventType) || "操作记录";
+}
+
+function purchaseLogActor(row: TimelineRow) {
+  return row.actorName || row.actorId || row.actorRole || "系统";
+}
+
 interface PurchaseOrderRow {
   id: string;
   prId?: string | null;
@@ -1445,7 +1454,6 @@ interface PurchaseQueueItem {
 }
 
 const ACTIVE_REQUEST_STATUSES = new Set(["submitted", "buyer_processing", "sourced", "waiting_ops_confirm"]);
-const PAYMENT_QUEUE_STATUSES = new Set(["pending_finance_approval", "approved_to_pay"]);
 const COMPLETED_PO_STATUSES = new Set(["inbounded", "closed"]);
 const PURCHASE_ORDER_PAYMENT_FILTER_OPTIONS = [
   { label: "付款：全部", value: "" },
@@ -1690,10 +1698,6 @@ function purchaseRequestTaskStage(row: PurchaseRequestRow) {
 // PR 早期阶段（还没流转到 sourced）：运营刚提交 / 采购处理中。
 function isEarlyStagePurchaseRequest(row: PurchaseRequestRow) {
   return row.status === "submitted" || row.status === "buyer_processing";
-}
-
-function isPendingPaymentOrder(row: PurchaseOrderRow) {
-  return PAYMENT_QUEUE_STATUSES.has(row.status);
 }
 
 function isFullyReceived(row: PurchaseOrderRow) {
@@ -2296,6 +2300,53 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     && selectedInquiryCount === selectableInquiryCandidateIds.length;
   const someInquiryCandidatesSelected = selectedInquiryCount > 0
     && selectedInquiryCount < selectableInquiryCandidateIds.length;
+  const detailEventRows = useMemo(
+    () => [...(detailPr?.timeline || [])]
+      .filter((item) => item.kind === "event")
+      .sort((left, right) => String(right.createdAt || "").localeCompare(String(left.createdAt || "")))
+      .slice(0, 120),
+    [detailPr],
+  );
+  const detailCommentRows = useMemo(
+    () => [...(detailPr?.timeline || [])]
+      .filter((item) => item.kind === "comment")
+      .reverse()
+      .slice(0, 80),
+    [detailPr],
+  );
+  const detailLogColumns = useMemo<ColumnsType<TimelineRow>>(() => [
+    {
+      title: "标题(最长30字符)",
+      dataIndex: "eventType",
+      width: 180,
+      render: (_value, row) => (
+        <Text className="purchase-log-table__title" title={purchaseLogTitle(row)}>
+          {purchaseLogTitle(row)}
+        </Text>
+      ),
+    },
+    {
+      title: "备注",
+      dataIndex: "message",
+      render: (value) => (
+        <Text className="purchase-log-table__remark" title={String(value || "已记录操作")}>
+          {String(value || "已记录操作")}
+        </Text>
+      ),
+    },
+    {
+      title: "操作人",
+      dataIndex: "actorName",
+      width: 120,
+      render: (_value, row) => purchaseLogActor(row),
+    },
+    {
+      title: "操作时间",
+      dataIndex: "createdAt",
+      width: 170,
+      render: (value) => formatDateTime(value),
+    },
+  ], []);
   const detailImageSearchLoading = detailDrawerMode === "imageSearch"
     && Boolean(detailPr && actingKey === `1688-image-${detailPr.id}`);
   const refundPo = useMemo(
@@ -2419,11 +2470,6 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       || row.status === "shipped"
       || row.status === "arrived",
     ),
-    [purchaseOrders],
-  );
-  // pendingPaymentRows 还被 PageHeader 顶部 meta 用着，保留不删
-  const pendingPaymentRows = useMemo(
-    () => purchaseOrders.filter(isPendingPaymentOrder),
     [purchaseOrders],
   );
   const completedOrderRows = useMemo(
@@ -6093,11 +6139,92 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     },
   ], [actingKey]);
 
-  const summary = data.summary || {};
   // 首屏（无快照）加载时显示加载态；已有数据的手动刷新保持原内容，不空屏闪烁。
   const tableLoading = loading && !hasWorkbenchSnapshot(data);
   const tableBusy = tableLoading || purchaseOrderPageLoading;
   const workAreaTitle = activeWorkArea === "sourcing" ? "找品" : "采购单";
+  const workAreaUpdatedText = tableLoading ? "更新 —" : `更新 ${formatDateTime(data.generatedAt)}`;
+  const workAreaActions = [
+    <Button key="workflow" icon={<FileDoneOutlined />} onClick={() => setPurchaseFlowOpen(true)}>
+      流程
+    </Button>,
+    <Button key="stores" icon={<ShopOutlined />} onClick={() => setStoreManagerOpen(true)}>
+      店铺
+    </Button>,
+    canPurchase ? (
+      <Button key="inquiry-template" icon={<CommentOutlined />} onClick={openPurchaseSettings}>
+        询盘设置
+      </Button>
+    ) : null,
+    activeWorkArea === "orders" && canPurchase ? (
+      <Button
+        key="new-po"
+        type="primary"
+        icon={<PlusOutlined />}
+        onClick={openDirectPoCreateModal}
+      >
+        创建采购单
+      </Button>
+    ) : null,
+    activeWorkArea === "sourcing" && canCreateRequest ? (
+      <Button
+        key="new-optimization"
+        icon={<PlusOutlined />}
+        onClick={() => openRequestCreateModal("optimization")}
+      >
+        新建优化
+      </Button>
+    ) : null,
+    activeWorkArea === "sourcing" && canCreateRequest ? (
+      <Button
+        key="new"
+        type="primary"
+        icon={<PlusOutlined />}
+        onClick={() => openRequestCreateModal("sourcing")}
+      >
+        新建找品
+      </Button>
+    ) : null,
+  ].filter(Boolean);
+  const queueActions = [
+    activeWorkArea === "sourcing" && canPurchase ? (
+      <Button
+        key="sync-inquiry-results"
+        icon={<CommentOutlined />}
+        loading={actingKey === "sync-inquiry-results"}
+        onClick={() => void syncInquiryResults()}
+      >
+        同步询盘结果
+      </Button>
+    ) : null,
+    activeWorkArea === "orders" && canPurchase ? (
+      <Button
+        key="batch-push-1688"
+        icon={<ShoppingCartOutlined />}
+        disabled={!selectedPushableOrders.length}
+        onClick={() => void openBatchPush1688Picker()}
+      >
+        批量推送 1688{selectedPushableOrders.length ? ` (${selectedPushableOrders.length})` : ""}
+      </Button>
+    ) : null,
+    activeWorkArea === "orders" && (canPurchase || canFinance) ? (
+      <Button
+        key="batch-pay"
+        icon={<LinkOutlined />}
+        disabled={!selectedPurchaseOrders.some((row) => row.externalOrderId)}
+        loading={actingKey === "1688-batch-pay"}
+        onClick={openBatch1688PaymentUrl}
+      >
+        批量支付
+      </Button>
+    ) : null,
+    <Button key="export" icon={<DownloadOutlined />} onClick={exportActiveQueue}>
+      导出
+    </Button>,
+    <Button key="refresh" icon={<ReloadOutlined />} loading={loading} onClick={() => void loadData()}>
+      刷新
+    </Button>,
+  ].filter(Boolean);
   const activePurchaseOrderColumnConfig = purchaseOrderColumnDraft || purchaseOrderColumnConfig;
 
   if (!erp) {
@@ -6111,73 +6238,6 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
 
   return (
     <div className="dashboard-shell">
-      <PageHeader
-        compact
-        eyebrow="系统"
-        title={workAreaTitle}
-        meta={tableLoading
-          ? (activeWorkArea === "sourcing"
-            ? ["更新 —", "找品 —", "待找品 —", "已找品 —", "待优化 —", "已优化 —"]
-            : ["更新 —", "采购单 —", "付款 —", "已完成 —"])
-          : (activeWorkArea === "sourcing"
-            ? [
-              `更新 ${formatDateTime(data.generatedAt)}`,
-              `找品 ${pendingRequestRows.length}`,
-              `待找品 ${pendingSourcingRequestRows.length}`,
-              `已找品 ${sourcedRequestRows.length}`,
-              `待优化 ${pendingOptimizationRequestRows.length}`,
-              `已优化 ${optimizedRequestRows.length}`,
-            ]
-            : [
-              `更新 ${formatDateTime(data.generatedAt)}`,
-              `采购单 ${orderCountAll}`,
-              `付款 ${summary.paymentQueueCount || pendingPaymentRows.length}`,
-              `已完成 ${orderCountCompleted}`,
-            ])}
-        actions={[
-          <Button key="workflow" icon={<FileDoneOutlined />} onClick={() => setPurchaseFlowOpen(true)}>
-            流程
-          </Button>,
-          <Button key="stores" icon={<ShopOutlined />} onClick={() => setStoreManagerOpen(true)}>
-            店铺
-          </Button>,
-          canPurchase ? (
-            <Button key="inquiry-template" icon={<CommentOutlined />} onClick={openPurchaseSettings}>
-              询盘设置
-            </Button>
-          ) : null,
-          activeWorkArea === "orders" && canPurchase ? (
-            <Button
-              key="new-po"
-              type="primary"
-              icon={<PlusOutlined />}
-              onClick={openDirectPoCreateModal}
-            >
-              创建采购单
-            </Button>
-          ) : null,
-          activeWorkArea === "sourcing" && canCreateRequest ? (
-            <Button
-              key="new-optimization"
-              icon={<PlusOutlined />}
-              onClick={() => openRequestCreateModal("optimization")}
-            >
-              新建优化
-            </Button>
-          ) : null,
-          activeWorkArea === "sourcing" && canCreateRequest ? (
-            <Button
-              key="new"
-              type="primary"
-              icon={<PlusOutlined />}
-              onClick={() => openRequestCreateModal("sourcing")}
-            >
-              新建找品
-            </Button>
-          ) : null,
-        ].filter(Boolean)}
-      />
-
       <Drawer
         title="采购流程"
         open={purchaseFlowOpen}
@@ -6193,48 +6253,36 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         />
       </Drawer>
 
-      <div className="app-panel">
-        <div className="app-panel__title">
-          <div>
-            <div className="app-panel__title-main">{workAreaTitle} · {activeQueue.title}</div>
+      <div className="app-panel purchase-workbench-panel">
+        <div className="purchase-workbench-head">
+          <div className="purchase-workbench-statusline purchase-workbench-statusline--primary">
+            <span className="purchase-workbench-name">{workAreaTitle}</span>
+            <span className="purchase-workbench-meta__pill">{workAreaUpdatedText}</span>
+            <Text strong>{activeWorkArea === "sourcing" ? "找品状态" : "采购单状态"}</Text>
+            <Space size={[8, 8]} wrap>
+              {queueItems.map((item) => (
+                <Button
+                  key={item.key}
+                  size="small"
+                  type={activeQueue.key === item.key ? "primary" : "default"}
+                  onClick={() => {
+                    setSelectedPoIds([]);
+                    setPurchaseOrderPage(1);
+                    setActiveQueueKey(item.key);
+                  }}
+                >
+                  {item.title} {tableLoading ? "—" : item.count}
+                </Button>
+              ))}
+            </Space>
           </div>
-          <Space size={8} wrap>
-            {activeWorkArea === "sourcing" && canPurchase ? (
-              <Button
-                icon={<CommentOutlined />}
-                loading={actingKey === "sync-inquiry-results"}
-                onClick={() => void syncInquiryResults()}
-              >
-                同步询盘结果
-              </Button>
-            ) : null}
-            {activeWorkArea === "orders" && canPurchase ? (
-              <Button
-                icon={<ShoppingCartOutlined />}
-                disabled={!selectedPushableOrders.length}
-                onClick={() => void openBatchPush1688Picker()}
-              >
-                批量推送 1688{selectedPushableOrders.length ? ` (${selectedPushableOrders.length})` : ""}
-              </Button>
-            ) : null}
-            {activeWorkArea === "orders" && (canPurchase || canFinance) ? (
-              <Button
-                icon={<LinkOutlined />}
-                disabled={!selectedPurchaseOrders.some((row) => row.externalOrderId)}
-                loading={actingKey === "1688-batch-pay"}
-                onClick={openBatch1688PaymentUrl}
-              >
-                批量支付
-              </Button>
-            ) : null}
-            <Button icon={<DownloadOutlined />} onClick={exportActiveQueue}>
-              导出
-            </Button>
-            <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void loadData()}>
-              刷新
-            </Button>
+          <Space size={8} wrap className="purchase-workbench-actions">
+            {workAreaActions}
+            {queueActions.length ? <span className="purchase-workbench-action-divider" aria-hidden="true" /> : null}
+            {queueActions}
           </Space>
         </div>
+
         {!workArea ? (
           <Segmented
             value={activeWorkArea}
@@ -6246,25 +6294,6 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
             style={{ marginBottom: 12 }}
           />
         ) : null}
-        <div className="material-queue-filter">
-          <Text strong>{activeWorkArea === "sourcing" ? "找品状态" : "采购单状态"}</Text>
-          <Space size={[8, 8]} wrap>
-            {queueItems.map((item) => (
-              <Button
-                key={item.key}
-                size="small"
-                type={activeQueue.key === item.key ? "primary" : "default"}
-                onClick={() => {
-                  setSelectedPoIds([]);
-                  setPurchaseOrderPage(1);
-                  setActiveQueueKey(item.key);
-                }}
-              >
-                {item.title} {tableLoading ? "—" : item.count}
-              </Button>
-            ))}
-          </Space>
-        </div>
         {activeWorkArea === "orders" ? (
           <div className="material-filter-bar">
             <Input
@@ -7832,124 +7861,63 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
             </div>
 
             {detailDrawerMode === "collaboration" ? (
-            <div
-              onPaste={handleCollaborationPaste}
-              style={{
-                border: "1px solid #e5e7eb",
-                borderRadius: 8,
-                padding: 12,
-                background: "#fff",
-                minHeight: "calc(100vh - 245px)",
-                display: "flex",
-                flexDirection: "column",
-              }}
-            >
-              <div style={{ display: "flex", flexDirection: "column", gap: 12, flex: 1, minHeight: 0 }}>
-                <div>
-                  <Text strong>操作日志</Text>
+            <div className="purchase-log-panel" onPaste={handleCollaborationPaste}>
+              <div className="purchase-log-tabs" aria-label="采购单日志视图">
+                {["采购明细", "跟单信息", "入库&退货", "采购质检", "付款记录", "操作日志"].map((item) => (
+                  <span key={item} className={item === "操作日志" ? "purchase-log-tabs__item is-active" : "purchase-log-tabs__item"}>
+                    {item}
+                  </span>
+                ))}
+              </div>
+              <Table<TimelineRow>
+                rowKey="id"
+                size="small"
+                className="erp-compact-table purchase-log-table"
+                columns={detailLogColumns}
+                dataSource={detailEventRows}
+                pagination={false}
+                locale={{ emptyText: "暂无操作日志" }}
+                scroll={{ y: 300 }}
+              />
+              <div className="purchase-log-chat">
+                <div className="purchase-log-chat__head">
+                  <Text strong>协作记录</Text>
+                  <Text type="secondary">可发送文字、添加图片，也可以直接粘贴截图</Text>
                 </div>
-                <div style={{ display: "grid", alignContent: "start", gap: 10, maxHeight: 260, overflowY: "auto", paddingRight: 4 }}>
-                  {[...(detailPr.timeline || [])]
-                    .filter((item) => item.kind === "event")
-                    .reverse()
-                    .slice(0, 120)
-                    .map((item) => (
-                      <div
-                        key={item.id}
-                        style={{
-                          borderLeft: "3px solid #2563eb",
-                          paddingLeft: 10,
-                          minHeight: 34,
-                        }}
-                      >
-                        <Space size={8} wrap>
-                          <FileDoneOutlined style={{ color: "#2563eb" }} />
-                          <Text strong style={{ fontSize: 13 }}>
-                            {item.actorName || item.actorId || item.actorRole || "系统"}
-                          </Text>
+                <div className="purchase-log-chat__list">
+                  {detailCommentRows.map((item) => {
+                    const imageUrls = extractMessageImageUrls(item.message);
+                    const strippedText = stripMessageImageLines(item.message);
+                    const text = imageUrls.length && strippedText === "图片" ? "" : strippedText;
+                    return (
+                      <div key={item.id} className="purchase-log-chat__item">
+                        <div className="purchase-log-chat__meta">
+                          <Text strong>{purchaseLogActor(item)}</Text>
                           {item.actorRole ? <Tag>{item.actorRole}</Tag> : null}
-                          {item.eventType ? <Tag color="blue">{purchaseEventTypeLabel(item.eventType)}</Tag> : null}
-                          <Text type="secondary" style={{ fontSize: 12 }}>
-                            {formatDateTime(item.createdAt)}
-                          </Text>
-                        </Space>
-                        <Paragraph style={{ margin: "4px 0 0", whiteSpace: "pre-wrap" }}>
-                          {item.message || "已记录操作"}
-                        </Paragraph>
-                      </div>
-                    ))}
-                  {!(detailPr.timeline || []).some((item) => item.kind === "event") ? (
-                    <Text type="secondary">暂无操作日志</Text>
-                  ) : null}
-                </div>
-                <div style={{ borderTop: "1px solid #f1f5f9", paddingTop: 12 }}>
-                  <Text strong>聊天记录</Text>
-                  <div>
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      可发送文字、添加图片，也可以直接粘贴截图
-                    </Text>
-                  </div>
-                </div>
-                <div style={{ display: "grid", alignContent: "start", gap: 10, flex: 1, minHeight: 120, overflowY: "auto", paddingRight: 4 }}>
-                  {[...(detailPr.timeline || [])]
-                    .filter((item) => item.kind === "comment")
-                    .reverse()
-                    .slice(0, 80)
-                    .map((item) => {
-                      const imageUrls = extractMessageImageUrls(item.message);
-                      const strippedText = stripMessageImageLines(item.message);
-                      const text = imageUrls.length && strippedText === "图片" ? "" : strippedText;
-                      return (
-                        <div
-                          key={item.id}
-                          style={{
-                            borderLeft: "3px solid #fbbc04",
-                            paddingLeft: 10,
-                            minHeight: 34,
-                          }}
-                        >
-                          <Space size={8} wrap>
-                            <Text strong style={{ fontSize: 13 }}>
-                              {item.actorName || item.actorId || item.actorRole || "协作者"}
-                            </Text>
-                            {item.actorRole ? <Tag>{item.actorRole}</Tag> : null}
-                            <Text type="secondary" style={{ fontSize: 12 }}>
-                              {formatDateTime(item.createdAt)}
-                            </Text>
-                          </Space>
-                          {text ? (
-                            <Paragraph style={{ margin: "4px 0 0", whiteSpace: "pre-wrap" }}>
-                              {text}
-                            </Paragraph>
-                          ) : null}
-                          {imageUrls.length ? (
-                            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
-                              {imageUrls.map((url) => (
-                                <a key={url} href={url} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}>
-                                  <img
-                                    src={url}
-                                    alt="聊天图片"
-                                    style={{
-                                      width: 96,
-                                      height: 96,
-                                      objectFit: "cover",
-                                      borderRadius: 8,
-                                      border: "1px solid #e5e7eb",
-                                      background: "#f8fbff",
-                                    }}
-                                  />
-                                </a>
-                              ))}
-                            </div>
-                          ) : null}
+                          <Text type="secondary">{formatDateTime(item.createdAt)}</Text>
                         </div>
-                      );
-                    })}
-                  {!(detailPr.timeline || []).some((item) => item.kind === "comment") ? (
+                        {text ? (
+                          <Paragraph className="purchase-log-chat__text">
+                            {text}
+                          </Paragraph>
+                        ) : null}
+                        {imageUrls.length ? (
+                          <div className="purchase-log-chat__images">
+                            {imageUrls.map((url) => (
+                              <a key={url} href={url} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}>
+                                <img src={url} alt="聊天图片" />
+                              </a>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                  {!detailCommentRows.length ? (
                     <Text type="secondary">暂无聊天记录</Text>
                   ) : null}
                 </div>
-                <div style={{ borderTop: "1px solid #f1f5f9", paddingTop: 12 }}>
+                <div className="purchase-log-chat__composer">
                   <Input.TextArea
                     value={collaborationDraft}
                     onChange={(event) => setCollaborationDraft(event.target.value)}
