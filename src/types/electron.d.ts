@@ -508,9 +508,28 @@ interface ErpAPI {
       category?: string;
       imageUrl?: string;
       supplierId?: string;
+      skuType?: string;
+      bundleCostPrice?: number | null;
       status?: string;
     }) => Promise<any>;
     delete: (payload: { id?: string; skuId?: string }) => Promise<any>;
+    saveBundle: (payload: {
+      id?: string;
+      accountId?: string;
+      internalSkuCode?: string;
+      productName: string;
+      colorSpec?: string;
+      status?: string;
+      components: Array<{
+        skuId: string;
+        qty: number;
+        unitCost?: number | null;
+      }>;
+    }) => Promise<any>;
+    bundleComponents: (params: {
+      bundleSkuId?: string;
+      skuId?: string;
+    }) => Promise<any[]>;
     sync: (options?: { mode?: "full" | "incremental"; companyId?: string }) => Promise<any>;
     cacheStatus: (options?: { companyId?: string }) => Promise<{
       companyId: string | null;

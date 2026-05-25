@@ -18,6 +18,7 @@ const ADDRESS_WORKBENCH_PARAMS = {
 const SKU_LOAD_CHUNK_SIZE = 1000;
 const SKU_LOAD_MAX_OFFSET = 200000;
 const SKU_LOAD_YIELD_MS = 60;
+const JUSHUITAN_WAREHOUSE_NAME = "义乌明舵国际贸易有限公司";
 
 interface ErpAccountRow {
   id: string;
@@ -100,6 +101,9 @@ interface ErpSkuRow {
   actualStockQty?: number | null;
   warehouseLocation?: string | null;
   costPrice?: number | null;
+  skuType?: string | null;
+  bundleCostPrice?: number | null;
+  bundleComponentCount?: number | null;
   jstActualStockQty?: number | null;
   jstCostPrice?: number | null;
   jstSupplierName?: string | null;
@@ -118,6 +122,25 @@ interface SkuDialogValues {
   productName: string;
   colorSpec: string;
   accountId?: string;
+}
+
+interface SkuBundleDialogValues {
+  internalSkuCode?: string;
+  productName: string;
+  colorSpec: string;
+  accountId?: string;
+}
+
+interface BundleComponentDraft {
+  key: string;
+  skuId?: string;
+  qty: number;
+}
+
+interface BundleComponentView extends BundleComponentDraft {
+  sku?: ErpSkuRow;
+  unitCost: number | null;
+  lineCost: number | null;
 }
 
 type SkuIssueKey = "missing_image" | "missing_spec" | "missing_cost" | "zero_stock" | "missing_supplier" | "stale_data";
@@ -350,12 +373,28 @@ function toOptionalNumber(value: unknown) {
   return Number.isFinite(amount) ? amount : null;
 }
 
+function isBundleSku(row: ErpSkuRow) {
+  return String(row.skuType || "").toLowerCase() === "bundle";
+}
+
 function getSkuStockQty(row: ErpSkuRow) {
   const actualStockQty = toOptionalNumber(row.actualStockQty);
   const jstActualStockQty = toOptionalNumber(row.jstActualStockQty);
   if (actualStockQty !== null && actualStockQty !== 0) return actualStockQty;
   if (jstActualStockQty !== null) return jstActualStockQty;
   return actualStockQty ?? 0;
+}
+
+function normalizeSkuWarehouseLocation(...values: Array<string | null | undefined>) {
+  const parts = values
+    .flatMap((value) => String(value || "").split(/[,，;；、|]/))
+    .map((value) => value.trim())
+    .filter((value) => value && value !== JUSHUITAN_WAREHOUSE_NAME);
+  return Array.from(new Set(parts)).join("、");
+}
+
+function getSkuWarehouseLocation(row: ErpSkuRow) {
+  return normalizeSkuWarehouseLocation(row.warehouseLocation, row.jstMainBin);
 }
 
 function getSkuStockRecords(row: ErpSkuRow): SkuStockRecord[] {
@@ -365,7 +404,7 @@ function getSkuStockRecords(row: ErpSkuRow): SkuStockRecord[] {
     date: getSkuTouchedAt(row),
     qty: getSkuStockQty(row),
     orderNo: row.internalSkuCode || row.id,
-    warehouse: row.warehouseLocation || row.jstMainBin || "-",
+    warehouse: getSkuWarehouseLocation(row) || "-",
     store: row.accountName || "-",
     operator: row.createdByName || row.jstCreator || "-",
   }];
@@ -439,7 +478,7 @@ function getSkuDataIssues(row: ErpSkuRow): SkuIssueKey[] {
   if (!(row.colorSpec || row.category)) issues.push("missing_spec");
   if (getSkuCostPrice(row) === null) issues.push("missing_cost");
   if (getSkuStockQty(row) <= 0) issues.push("zero_stock");
-  if (!getSkuSupplierText(row)) issues.push("missing_supplier");
+  if (!isBundleSku(row) && !getSkuSupplierText(row)) issues.push("missing_supplier");
   if (isSkuDataStale(row)) issues.push("stale_data");
   return issues;
 }
@@ -678,7 +717,7 @@ function getSkuWorkLogItems(row: ErpSkuRow) {
   const stockQty = getSkuStockQty(row);
   const costPrice = getSkuCostPrice(row);
   const supplierText = getSkuSupplierText(row);
-  const location = row.warehouseLocation || row.jstMainBin;
+  const location = getSkuWarehouseLocation(row);
   const items = issues.map((issue) => ({
     key: `issue:${issue}`,
     color: SKU_ISSUE_META[issue].color,
@@ -928,6 +967,14 @@ function waitForSkuLoadYield() {
   return new Promise((resolve) => window.setTimeout(resolve, SKU_LOAD_YIELD_MS));
 }
 
+function createBundleComponentDraft(skuId?: string): BundleComponentDraft {
+  return {
+    key: `bundle_component_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    skuId,
+    qty: 1,
+  };
+}
+
 export default function ProductMasterData({ mode = "skus", embedded = false }: ProductMasterDataProps) {
   const auth = useErpAuth();
   const role = auth.currentUser?.role;
@@ -945,6 +992,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
   const [storeAddressForm] = Form.useForm<StoreAddressValues>();
   const [supplierForm] = Form.useForm();
   const [skuForm] = Form.useForm();
+  const [bundleForm] = Form.useForm<SkuBundleDialogValues>();
   const [accounts, setAccounts] = useState<ErpAccountRow[]>(() => cachedData.accounts || []);
   const [suppliers, setSuppliers] = useState<ErpSupplierRow[]>(() => cachedData.suppliers || []);
   const [skus, setSkus] = useState<ErpSkuRow[]>(() => cachedData.skus || []);
@@ -955,6 +1003,10 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
   const [submitting, setSubmitting] = useState<string | null>(null);
   const [skuModalOpen, setSkuModalOpen] = useState(false);
   const [editingSku, setEditingSku] = useState<ErpSkuRow | null>(null);
+  const [bundleModalOpen, setBundleModalOpen] = useState(false);
+  const [editingBundleSku, setEditingBundleSku] = useState<ErpSkuRow | null>(null);
+  const [bundleComponents, setBundleComponents] = useState<BundleComponentDraft[]>([]);
+  const [bundleLoadingComponents, setBundleLoadingComponents] = useState(false);
   const [supplierModalOpen, setSupplierModalOpen] = useState(false);
   const [editingSupplier, setEditingSupplier] = useState<ErpSupplierRow | null>(null);
   const [accountModalOpen, setAccountModalOpen] = useState(false);
@@ -991,6 +1043,21 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       value: address.id,
     })),
     [alibaba1688Addresses],
+  );
+  const skuById = useMemo(
+    () => new Map(skus.map((sku) => [sku.id, sku])),
+    [skus],
+  );
+  const normalSkuOptions = useMemo(
+    () => skus
+      .filter((sku) => !isBundleSku(sku) && sku.status !== "deleted")
+      .map((sku) => ({
+        label: [sku.internalSkuCode, sku.productName, sku.colorSpec || sku.category]
+          .filter(Boolean)
+          .join(" / "),
+        value: sku.id,
+      })),
+    [skus],
   );
   const hasSkuFilters = Boolean(
     skuFilters.keyword.trim()
@@ -1060,8 +1127,8 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
         sku.category,
         accountName,
         sku.jstSupplierName,
-        sku.warehouseLocation,
-        sku.jstMainBin,
+        getSkuWarehouseLocation(sku),
+        isBundleSku(sku) ? "组合装" : "",
         issues.length ? "有问题" : "正常",
         ...issues.map((issue) => SKU_ISSUE_META[issue].label),
         sku.status ? statusLabel(sku.status) : "",
@@ -1124,6 +1191,32 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       storeCount: stores.size,
     };
   }, [selectedSkus]);
+  const bundleComponentRows = useMemo<BundleComponentView[]>(() => (
+    bundleComponents.map((component) => {
+      const sku = component.skuId ? skuById.get(component.skuId) : undefined;
+      const unitCost = sku ? getSkuCostPrice(sku) : null;
+      const qty = Number(component.qty || 0);
+      return {
+        ...component,
+        sku,
+        qty,
+        unitCost,
+        lineCost: sku && unitCost !== null ? unitCost * qty : null,
+      };
+    })
+  ), [bundleComponents, skuById]);
+  const bundleSelectedCount = useMemo(
+    () => bundleComponentRows.filter((row) => row.skuId).length,
+    [bundleComponentRows],
+  );
+  const bundleTotalCost = useMemo(
+    () => bundleComponentRows.reduce((sum, row) => sum + (row.lineCost ?? 0), 0),
+    [bundleComponentRows],
+  );
+  const bundleHasMissingCost = useMemo(
+    () => bundleComponentRows.some((row) => row.skuId && row.unitCost === null),
+    [bundleComponentRows],
+  );
   const supplierDetailAttention = useMemo(() => (
     supplierDetailRow ? getSupplierAttentionKeys(supplierDetailRow) : []
   ), [supplierDetailRow]);
@@ -1621,6 +1714,114 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
     }
   };
 
+  const resetBundleModal = () => {
+    setBundleModalOpen(false);
+    setEditingBundleSku(null);
+    setBundleComponents([]);
+    setBundleLoadingComponents(false);
+    bundleForm.resetFields();
+  };
+
+  const openBundleModal = async (row?: ErpSkuRow, initialSkus: ErpSkuRow[] = []) => {
+    const bundleSku = row || null;
+    setEditingBundleSku(bundleSku);
+    bundleForm.resetFields();
+    bundleForm.setFieldsValue({
+      accountId: bundleSku?.accountId || (accounts.length === 1 ? accounts[0].id : undefined),
+      internalSkuCode: bundleSku?.internalSkuCode || "",
+      productName: bundleSku?.productName || "",
+      colorSpec: bundleSku?.colorSpec || bundleSku?.category || "",
+    });
+    const initialComponents = initialSkus
+      .filter((sku) => !isBundleSku(sku))
+      .map((sku) => createBundleComponentDraft(sku.id));
+    setBundleComponents(initialComponents.length ? initialComponents : [
+      createBundleComponentDraft(),
+      createBundleComponentDraft(),
+    ]);
+    setBundleModalOpen(true);
+    if (!bundleSku?.id || !erp?.sku?.bundleComponents) return;
+    setBundleLoadingComponents(true);
+    try {
+      const rows = await erp.sku.bundleComponents({ bundleSkuId: bundleSku.id });
+      const nextComponents = (rows || []).map((component: any) => ({
+        key: component.id || createBundleComponentDraft().key,
+        skuId: component.componentSkuId,
+        qty: Number(component.qty || 1),
+      }));
+      setBundleComponents(nextComponents.length ? nextComponents : [
+        createBundleComponentDraft(),
+        createBundleComponentDraft(),
+      ]);
+    } catch (error: any) {
+      message.error(error?.message || "组合装明细读取失败");
+    } finally {
+      setBundleLoadingComponents(false);
+    }
+  };
+
+  const updateBundleComponent = (key: string, patch: Partial<BundleComponentDraft>) => {
+    setBundleComponents((current) => current.map((item) => (
+      item.key === key ? { ...item, ...patch } : item
+    )));
+  };
+
+  const addBundleComponent = () => {
+    setBundleComponents((current) => [...current, createBundleComponentDraft()]);
+  };
+
+  const removeBundleComponent = (key: string) => {
+    setBundleComponents((current) => {
+      if (current.length <= 2) return current;
+      return current.filter((item) => item.key !== key);
+    });
+  };
+
+  const handleSaveBundle = async () => {
+    if (!erp) return;
+    const values = await bundleForm.validateFields() as SkuBundleDialogValues;
+    const selectedRows = bundleComponentRows.filter((row) => row.skuId);
+    if (selectedRows.length < 2) {
+      message.warning("组合装至少选择 2 个普通商品");
+      return;
+    }
+    const uniqueSkuIds = new Set(selectedRows.map((row) => row.skuId));
+    if (uniqueSkuIds.size !== selectedRows.length) {
+      message.warning("组合装子商品不能重复");
+      return;
+    }
+    const missingCost = selectedRows.find((row) => row.unitCost === null);
+    if (missingCost) {
+      message.warning(`子商品缺成本价：${missingCost.sku?.internalSkuCode || missingCost.skuId}`);
+      return;
+    }
+    setSubmitting("sku-bundle");
+    try {
+      await erp.sku.saveBundle({
+        id: editingBundleSku?.id,
+        accountId: values.accountId,
+        internalSkuCode: values.internalSkuCode,
+        productName: values.productName,
+        colorSpec: values.colorSpec,
+        status: editingBundleSku?.status || "active",
+        components: selectedRows.map((row) => ({
+          skuId: row.skuId!,
+          qty: Number(row.qty || 1),
+          unitCost: row.unitCost,
+        })),
+      });
+      await erp.sku.sync?.({ mode: "incremental" }).catch(() => null);
+      resetBundleModal();
+      setSelectedSkuRowKeys([]);
+      message.success(editingBundleSku ? "组合装已保存" : "组合装已创建");
+      await loadAll({ forceFull: true });
+    } catch (error: any) {
+      message.error(error?.message || "组合装保存失败");
+    } finally {
+      setSubmitting(null);
+    }
+  };
+
   const accountColumns: ColumnsType<ErpAccountRow> = [
     { title: "店铺", dataIndex: "name", key: "name", width: 180, ellipsis: true },
     { title: "状态", dataIndex: "status", key: "status", width: 92, render: (value) => <Tag color={statusColor(value)}>{statusLabel(value)}</Tag> },
@@ -1901,6 +2102,69 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
     </div>
   );
 
+  const bundleColumns: ColumnsType<BundleComponentView> = [
+    {
+      title: "普通商品",
+      key: "sku",
+      render: (_value, row) => (
+        <Select
+          showSearch
+          optionFilterProp="label"
+          options={normalSkuOptions}
+          value={row.skuId}
+          placeholder="选择普通商品"
+          style={{ width: "100%" }}
+          onChange={(value) => updateBundleComponent(row.key, { skuId: value })}
+        />
+      ),
+    },
+    {
+      title: "数量",
+      key: "qty",
+      width: 120,
+      render: (_value, row) => (
+        <InputNumber
+          min={1}
+          precision={0}
+          value={row.qty}
+          style={{ width: "100%" }}
+          onChange={(value) => updateBundleComponent(row.key, { qty: Number(value || 1) })}
+        />
+      ),
+    },
+    {
+      title: "成本价",
+      key: "unitCost",
+      width: 110,
+      render: (_value, row) => {
+        if (!row.skuId) return "-";
+        return row.unitCost === null ? <Tag color="red">缺成本</Tag> : formatMoney(row.unitCost);
+      },
+    },
+    {
+      title: "小计",
+      key: "lineCost",
+      width: 110,
+      render: (_value, row) => (row.lineCost === null ? "-" : <strong>{formatMoney(row.lineCost)}</strong>),
+    },
+    {
+      title: "操作",
+      key: "actions",
+      width: 80,
+      align: "right",
+      render: (_value, row) => (
+        <Button
+          danger
+          size="small"
+          type="text"
+          icon={<DeleteOutlined />}
+          disabled={bundleComponents.length <= 2}
+          onClick={() => removeBundleComponent(row.key)}
+        />
+      ),
+    },
+  ];
+
   const skuColumns: ColumnsType<ErpSkuRow> = [
     {
       title: "图片",
@@ -1916,19 +2180,37 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       render: (_value, row) => {
         const title = row.productName || "-";
         return (
-          <span
-            title={title}
+          <div
             style={{
-              color: "#0f172a",
-              display: "block",
-              fontWeight: 600,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
+              alignItems: "flex-start",
+              display: "flex",
+              gap: 6,
+              maxWidth: "100%",
+              minWidth: 0,
+              width: "100%",
             }}
           >
-            {title}
-          </span>
+            <span
+              title={title}
+              style={{
+                color: "#0f172a",
+                display: "block",
+                flex: "1 1 auto",
+                fontWeight: 600,
+                minWidth: 0,
+                lineHeight: "20px",
+                whiteSpace: "normal",
+                wordBreak: "break-word",
+              }}
+            >
+              {title}
+            </span>
+            {isBundleSku(row) ? (
+              <Tag color="purple" style={{ flex: "0 0 auto", marginInlineEnd: 0 }}>
+                组合装{Number(row.bundleComponentCount || 0) > 0 ? ` ${row.bundleComponentCount}件` : ""}
+              </Tag>
+            ) : null}
+          </div>
         );
       },
     },
@@ -1968,10 +2250,13 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       title: "仓位",
       key: "warehouseLocation",
       width: 120,
-      ellipsis: true,
       render: (_value, row) => {
-        const location = row.warehouseLocation || row.jstMainBin || "-";
-        return <span title={location}>{location}</span>;
+        const location = getSkuWarehouseLocation(row) || "-";
+        return (
+          <span title={location} style={{ whiteSpace: "normal", wordBreak: "break-word" }}>
+            {location}
+          </span>
+        );
       },
     },
     {
@@ -2033,7 +2318,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
             日志
           </Button>
           {canManageSkus ? (
-            <Button size="small" icon={<EditOutlined />} onClick={() => openSkuModal(row)}>
+            <Button size="small" icon={<EditOutlined />} onClick={() => (isBundleSku(row) ? openBundleModal(row) : openSkuModal(row))}>
               编辑
             </Button>
           ) : null}
@@ -2176,6 +2461,15 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
               onClick={() => openSkuModal()}
             >
               新增商品
+            </Button>
+          ) : null,
+          mode === "skus" && canManageSkus ? (
+            <Button
+              key="new-bundle"
+              icon={<PlusOutlined />}
+              onClick={() => openBundleModal()}
+            >
+              新增组合装
             </Button>
           ) : null,
           mode === "suppliers" && canManageSuppliers ? (
@@ -2358,6 +2652,15 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
                 <Button size="small" onClick={() => setSkuDetailRow(selectedSkus[0])}>
                   打开日志
                 </Button>
+                {canManageSkus ? (
+                  <Button
+                    size="small"
+                    disabled={selectedSkus.filter((sku) => !isBundleSku(sku)).length < 2}
+                    onClick={() => openBundleModal(undefined, selectedSkus)}
+                  >
+                    组合装
+                  </Button>
+                ) : null}
                 <Button size="small" onClick={() => setSelectedSkuRowKeys([])}>
                   取消选择
                 </Button>
@@ -3103,6 +3406,78 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
             </Col>
           </Row>
         </Form>
+      </Modal>
+
+      <Modal
+        title={editingBundleSku ? "编辑组合装" : "新增组合装"}
+        open={bundleModalOpen}
+        centered
+        okText="保存"
+        cancelText="取消"
+        width={960}
+        confirmLoading={submitting === "sku-bundle"}
+        okButtonProps={{
+          disabled: bundleLoadingComponents || bundleSelectedCount < 2 || bundleHasMissingCost,
+        }}
+        onOk={handleSaveBundle}
+        onCancel={resetBundleModal}
+        destroyOnClose
+      >
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Form form={bundleForm} layout="vertical">
+            <Row gutter={12}>
+              <Col xs={24} md={8}>
+                <Form.Item name="internalSkuCode" label="组合商品编码">
+                  <Input placeholder="留空自动生成" disabled={Boolean(editingBundleSku)} />
+                </Form.Item>
+              </Col>
+              <Col xs={24} md={16}>
+                <Form.Item name="productName" label="组合商品名称" rules={[{ required: true, message: "请输入组合商品名称" }]}>
+                  <Input placeholder="例如：厨房收纳 3 件套" />
+                </Form.Item>
+              </Col>
+              <Col xs={24} md={12}>
+                <Form.Item name="colorSpec" label="组合规格" rules={[{ required: true, message: "请输入组合规格" }]}>
+                  <Input placeholder="例如：红色+蓝色 / 1+2 / 三件装" />
+                </Form.Item>
+              </Col>
+              <Col xs={24} md={12}>
+                <Form.Item name="accountId" label="店铺" rules={[{ required: true, message: "请选择店铺" }]}>
+                  <Select
+                    showSearch
+                    optionFilterProp="label"
+                    options={accountOptions}
+                    placeholder="请选择商品所属店铺"
+                  />
+                </Form.Item>
+              </Col>
+            </Row>
+          </Form>
+
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+            <Space size={8}>
+              <span style={{ color: "#0f172a", fontWeight: 700 }}>子商品</span>
+              <Tag color="purple" style={{ marginInlineEnd: 0 }}>成本合计 {formatMoney(bundleTotalCost)}</Tag>
+            </Space>
+            <Button size="small" icon={<PlusOutlined />} onClick={addBundleComponent}>
+              添加商品
+            </Button>
+          </div>
+
+          {bundleHasMissingCost ? (
+            <Alert type="warning" showIcon message="有子商品缺成本价，先维护成本价后才能保存组合装。" />
+          ) : null}
+
+          <Table
+            size="small"
+            rowKey="key"
+            loading={bundleLoadingComponents}
+            pagination={false}
+            columns={bundleColumns}
+            dataSource={bundleComponentRows}
+            scroll={{ x: 820 }}
+          />
+        </Space>
       </Modal>
 
       <Modal

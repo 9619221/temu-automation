@@ -156,6 +156,7 @@ const ACCESS_CODE_KEY_LENGTH = 32;
 const ACCESS_CODE_DIGEST = "sha256";
 const VALID_USER_ROLES = new Set(["admin", "manager", "operations", "buyer", "finance", "warehouse", "viewer"]);
 const VALID_USER_STATUSES = new Set(["active", "blocked"]);
+const JUSHUITAN_WAREHOUSE_NAME = "????????????";
 const DEFAULT_COMPANY_ID = "company_default";
 const DEFAULT_COMPANY_CODE = "default";
 const DEFAULT_COMPANY_NAME = "Default Company";
@@ -925,6 +926,34 @@ function ensureRuntimeSchema(db, options = {}) {
     db.exec("ALTER TABLE erp_skus ADD COLUMN created_by TEXT");
   }
   db.exec("CREATE INDEX IF NOT EXISTS idx_erp_skus_created_by ON erp_skus(created_by)");
+  if (!tableHasColumn(db, "erp_skus", "sku_type")) {
+    db.exec("ALTER TABLE erp_skus ADD COLUMN sku_type TEXT NOT NULL DEFAULT 'single'");
+  }
+  if (!tableHasColumn(db, "erp_skus", "bundle_cost_price")) {
+    db.exec("ALTER TABLE erp_skus ADD COLUMN bundle_cost_price REAL");
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS erp_sku_bundle_components (
+      id TEXT PRIMARY KEY,
+      company_id TEXT NOT NULL DEFAULT 'company_default',
+      bundle_sku_id TEXT NOT NULL,
+      component_sku_id TEXT NOT NULL,
+      qty REAL NOT NULL DEFAULT 1,
+      unit_cost REAL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(bundle_sku_id, component_sku_id),
+      FOREIGN KEY(company_id) REFERENCES erp_companies(id),
+      FOREIGN KEY(bundle_sku_id) REFERENCES erp_skus(id),
+      FOREIGN KEY(component_sku_id) REFERENCES erp_skus(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_erp_sku_bundle_components_bundle
+      ON erp_sku_bundle_components(company_id, bundle_sku_id, status);
+    CREATE INDEX IF NOT EXISTS idx_erp_sku_bundle_components_component
+      ON erp_sku_bundle_components(company_id, component_sku_id, status);
+  `);
   if (!tableHasColumn(db, "erp_purchase_requests", "spec_text")) {
     db.exec("ALTER TABLE erp_purchase_requests ADD COLUMN spec_text TEXT");
   }
@@ -3510,7 +3539,8 @@ function listSkus(params = {}) {
       supplier.name AS system_supplier_name,
       COALESCE(inv.actual_stock_qty, 0) AS actual_stock_qty,
       inv.location_codes AS warehouse_location,
-      COALESCE(inv.weighted_unit_landed_cost, source.unit_price) AS cost_price,
+      COALESCE(bundle_meta.bundle_cost_price, sku.bundle_cost_price, inv.weighted_unit_landed_cost, source.unit_price) AS cost_price,
+      COALESCE(bundle_meta.component_count, 0) AS bundle_component_count,
       creator.name AS created_by_name,
       COALESCE(source_count.source_count, 0) AS procurement_source_count,
       source.id AS primary_1688_source_id,
@@ -3551,6 +3581,15 @@ function listSkus(params = {}) {
       FROM erp_inventory_batches
       GROUP BY account_id, sku_id
     ) inv ON inv.account_id = sku.account_id AND inv.sku_id = sku.id
+    LEFT JOIN (
+      SELECT
+        bundle_sku_id,
+        COUNT(*) AS component_count,
+        SUM(COALESCE(unit_cost, 0) * qty) AS bundle_cost_price
+      FROM erp_sku_bundle_components
+      WHERE status = 'active'
+      GROUP BY bundle_sku_id
+    ) bundle_meta ON bundle_meta.bundle_sku_id = sku.id
     LEFT JOIN erp_sku_1688_sources source ON source.id = (
       SELECT id
       FROM erp_sku_1688_sources item
@@ -3658,6 +3697,8 @@ function createSku(payload = {}, actor = erpState.currentUser) {
     category: optionalString(payload.category),
     image_url: optionalString(payload.imageUrl),
     supplier_id: supplierId,
+    sku_type: optionalString(payload.skuType ?? payload.sku_type) || "single",
+    bundle_cost_price: optionalNumber(payload.bundleCostPrice ?? payload.bundle_cost_price),
     status: optionalString(payload.status) || "active",
     created_by: optionalString(payload.createdBy || payload.created_by || actor?.id),
     created_at: now,
@@ -3668,12 +3709,12 @@ function createSku(payload = {}, actor = erpState.currentUser) {
     INSERT INTO erp_skus (
       id, company_id, account_id, internal_sku_code, temu_sku_id, temu_product_id,
       temu_skc_id, product_name, color_spec, category, image_url, supplier_id,
-      status, created_by, created_at, updated_at
+      sku_type, bundle_cost_price, status, created_by, created_at, updated_at
     )
     VALUES (
       @id, @company_id, @account_id, @internal_sku_code, @temu_sku_id, @temu_product_id,
       @temu_skc_id, @product_name, @color_spec, @category, @image_url, @supplier_id,
-      @status, @created_by, @created_at, @updated_at
+      @sku_type, @bundle_cost_price, @status, @created_by, @created_at, @updated_at
     )
     ON CONFLICT(id) DO UPDATE SET
       account_id = excluded.account_id,
@@ -3683,11 +3724,150 @@ function createSku(payload = {}, actor = erpState.currentUser) {
       category = excluded.category,
       image_url = COALESCE(excluded.image_url, erp_skus.image_url),
       supplier_id = excluded.supplier_id,
+      sku_type = excluded.sku_type,
+      bundle_cost_price = excluded.bundle_cost_price,
       status = excluded.status,
       updated_at = excluded.updated_at
   `).run(row);
 
   return toCamelRow(db.prepare("SELECT * FROM erp_skus WHERE id = ?").get(row.id));
+}
+
+function getSkuEffectiveCost(db, skuId) {
+  const hasJstCost = tableHasColumn(db, "erp_skus", "jst_cost_price");
+  const row = db.prepare(`
+    SELECT
+      sku.id,
+      ${hasJstCost ? "sku.jst_cost_price" : "NULL"} AS jst_cost_price,
+      COALESCE(inv.weighted_unit_landed_cost, source.unit_price, sku.bundle_cost_price) AS cost_price
+    FROM erp_skus sku
+    LEFT JOIN (
+      SELECT
+        account_id,
+        sku_id,
+        CASE
+          WHEN SUM(available_qty + reserved_qty + blocked_qty + defective_qty + rework_qty) > 0 THEN
+            SUM(unit_landed_cost * (available_qty + reserved_qty + blocked_qty + defective_qty + rework_qty))
+            / SUM(available_qty + reserved_qty + blocked_qty + defective_qty + rework_qty)
+          ELSE NULL
+        END AS weighted_unit_landed_cost
+      FROM erp_inventory_batches
+      GROUP BY account_id, sku_id
+    ) inv ON inv.account_id = sku.account_id AND inv.sku_id = sku.id
+    LEFT JOIN erp_sku_1688_sources source ON source.id = (
+      SELECT id
+      FROM erp_sku_1688_sources item
+      WHERE item.account_id = sku.account_id
+        AND item.sku_id = sku.id
+        AND item.status = 'active'
+      ORDER BY item.is_default DESC, item.updated_at DESC, item.created_at DESC
+      LIMIT 1
+    )
+    WHERE sku.id = ?
+    LIMIT 1
+  `).get(skuId);
+  if (!row) return null;
+  const cost = optionalNumber(row.cost_price);
+  if (cost !== null) return cost;
+  return optionalNumber(row.jst_cost_price);
+}
+
+function listSkuBundleComponents(params = {}) {
+  const { db } = requireErp();
+  const bundleSkuId = requireString(params.bundleSkuId || params.bundle_sku_id || params.skuId || params.sku_id, "bundleSkuId");
+  const companyId = optionalString(params.companyId || params.company_id);
+  const conditions = ["component.bundle_sku_id = @bundle_sku_id", "component.status = 'active'"];
+  if (companyId) conditions.push("component.company_id = @company_id");
+  const rows = db.prepare(`
+    SELECT
+      component.*,
+      child.internal_sku_code AS component_sku_code,
+      child.product_name AS component_product_name,
+      child.color_spec AS component_color_spec,
+      child.image_url AS component_image_url,
+      child.status AS component_sku_status
+    FROM erp_sku_bundle_components component
+    LEFT JOIN erp_skus child ON child.id = component.component_sku_id
+    WHERE ${conditions.join(" AND ")}
+    ORDER BY component.sort_order ASC, component.created_at ASC
+  `).all({
+    bundle_sku_id: bundleSkuId,
+    company_id: companyId,
+  });
+  return rows.map((row) => ({
+    ...toCamelRow(row),
+    qty: Number(row.qty || 0),
+    unitCost: row.unit_cost === null || row.unit_cost === undefined ? null : Number(row.unit_cost),
+  }));
+}
+
+function saveSkuBundle(payload = {}, actor = erpState.currentUser) {
+  const { db } = requireErp();
+  const rawComponents = Array.isArray(payload.components) ? payload.components : [];
+  if (rawComponents.length < 2) throw new Error("组合装至少选择 2 个普通商品");
+  const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
+  const seen = new Set();
+  const components = rawComponents.map((item, index) => {
+    const componentSkuId = requireString(item.skuId || item.sku_id || item.componentSkuId || item.component_sku_id, `components[${index}].skuId`);
+    if (seen.has(componentSkuId)) throw new Error("组合装子商品不能重复");
+    seen.add(componentSkuId);
+    const qty = optionalNumber(item.qty ?? item.quantity);
+    if (!qty || qty <= 0) throw new Error("组合装子商品数量必须大于 0");
+    const sku = db.prepare("SELECT * FROM erp_skus WHERE id = ?").get(componentSkuId);
+    if (!sku || sku.status === "deleted") throw new Error(`子商品不存在：${componentSkuId}`);
+    if (sku.company_id !== companyId) throw new Error(`子商品不属于当前公司：${sku.internal_sku_code || componentSkuId}`);
+    if ((sku.sku_type || "single") === "bundle") throw new Error("组合装只能由普通商品组成，不能再套组合装");
+    const unitCost = optionalNumber(item.unitCost ?? item.unit_cost) ?? getSkuEffectiveCost(db, componentSkuId);
+    if (unitCost === null) throw new Error(`子商品缺成本价：${sku.internal_sku_code || componentSkuId}`);
+    return {
+      sku,
+      componentSkuId,
+      qty,
+      unitCost,
+      sortOrder: index,
+    };
+  });
+  const bundleCostPrice = Number(components.reduce((sum, item) => sum + item.qty * item.unitCost, 0).toFixed(4));
+  const now = nowIso();
+  let savedSku = null;
+  db.transaction(() => {
+    savedSku = createSku({
+      ...payload,
+      companyId,
+      skuType: "bundle",
+      bundleCostPrice,
+      status: optionalString(payload.status) || "active",
+    }, actor);
+    db.prepare("DELETE FROM erp_sku_bundle_components WHERE bundle_sku_id = ?").run(savedSku.id);
+    const insertComponent = db.prepare(`
+      INSERT INTO erp_sku_bundle_components (
+        id, company_id, bundle_sku_id, component_sku_id, qty, unit_cost, sort_order,
+        status, created_at, updated_at
+      )
+      VALUES (
+        @id, @company_id, @bundle_sku_id, @component_sku_id, @qty, @unit_cost, @sort_order,
+        'active', @created_at, @updated_at
+      )
+    `);
+    for (const component of components) {
+      insertComponent.run({
+        id: createId("sku_bundle"),
+        company_id: companyId,
+        bundle_sku_id: savedSku.id,
+        component_sku_id: component.componentSkuId,
+        qty: component.qty,
+        unit_cost: component.unitCost,
+        sort_order: component.sortOrder,
+        created_at: now,
+        updated_at: now,
+      });
+    }
+  })();
+  return {
+    sku: savedSku,
+    components: listSkuBundleComponents({ bundleSkuId: savedSku.id, companyId }),
+    bundleCostPrice,
+  };
 }
 
 function getSkuReferenceCounts(db, skuId) {
@@ -3706,6 +3886,17 @@ function getSkuReferenceCounts(db, skuId) {
       ...item,
       count: Number(db.prepare(`SELECT COUNT(*) AS count FROM ${item.table} WHERE sku_id = ?`).get(skuId)?.count || 0),
     }))
+    .concat([
+      {
+        table: "erp_sku_bundle_components",
+        label: "组合装组件",
+        count: Number(db.prepare(`
+          SELECT COUNT(*) AS count
+          FROM erp_sku_bundle_components
+          WHERE component_sku_id = ? AND status = 'active'
+        `).get(skuId)?.count || 0),
+      },
+    ])
     .filter((item) => item.count > 0);
 }
 
@@ -3738,6 +3929,12 @@ function deleteSku(payload = {}, actor = erpState.currentUser) {
             updated_at = ?
         WHERE id = ?
       `).run(now, skuId);
+      db.prepare(`
+        UPDATE erp_sku_bundle_components
+        SET status = 'deleted',
+            updated_at = ?
+        WHERE bundle_sku_id = ?
+      `).run(now, skuId);
     })();
     return {
       id: skuId,
@@ -3749,6 +3946,7 @@ function deleteSku(payload = {}, actor = erpState.currentUser) {
 
   db.transaction(() => {
     db.prepare("DELETE FROM erp_sku_1688_sources WHERE sku_id = ?").run(skuId);
+    db.prepare("DELETE FROM erp_sku_bundle_components WHERE bundle_sku_id = ?").run(skuId);
     db.prepare("DELETE FROM erp_skus WHERE id = ?").run(skuId);
   })();
 
@@ -3756,6 +3954,14 @@ function deleteSku(payload = {}, actor = erpState.currentUser) {
     id: skuId,
     deleted: true,
   };
+}
+
+function normalizeWarehouseLocationText(...values) {
+  const parts = values
+    .flatMap((value) => String(value || "").split(/[,，;；、|]/))
+    .map((value) => value.trim())
+    .filter((value) => value && value !== JUSHUITAN_WAREHOUSE_NAME);
+  return Array.from(new Set(parts)).join("、");
 }
 
 function toSku1688Source(row) {
@@ -3774,8 +3980,9 @@ function toSkuOptionRow(row) {
   const next = toCamelRow(row);
   next.procurementSourceCount = Number(row.procurement_source_count || 0);
   next.actualStockQty = Number(row.actual_stock_qty || 0);
-  next.warehouseLocation = row.warehouse_location || row.jst_main_bin || "";
+  next.warehouseLocation = normalizeWarehouseLocationText(row.warehouse_location, row.jst_main_bin);
   next.costPrice = row.cost_price === null || row.cost_price === undefined ? null : Number(row.cost_price);
+  next.bundleComponentCount = Number(row.bundle_component_count || 0);
   if (row.primary_1688_source_id) {
     next.primary1688Source = {
       id: row.primary_1688_source_id,
@@ -16670,6 +16877,36 @@ async function createSkuRuntime(payload = {}, actor = {}) {
   return createSku(payload || {}, actor);
 }
 
+async function saveSkuBundleRuntime(payload = {}, actor = {}) {
+  if (isClientMode()) {
+    const response = await remoteRequest("/api/master-data/action", {
+      method: "POST",
+      body: {
+        ...payload,
+        action: "save_sku_bundle",
+      },
+    });
+    void skuCache.triggerSync({ mode: "incremental" }).catch(() => {});
+    return response.result;
+  }
+  assertRoleIfLoggedIn(["admin", "manager", "operations"]);
+  return saveSkuBundle(payload || {}, actor);
+}
+
+async function listSkuBundleComponentsRuntime(params = {}) {
+  if (isClientMode()) {
+    const response = await remoteRequest("/api/master-data/action", {
+      method: "POST",
+      body: {
+        ...params,
+        action: "list_sku_bundle_components",
+      },
+    });
+    return response.result || [];
+  }
+  return listSkuBundleComponents(params || {});
+}
+
 async function deleteSkuRuntime(payload = {}, actor = {}) {
   if (isClientMode()) {
     const response = await remoteRequest("/api/master-data/action", {
@@ -16739,6 +16976,8 @@ function startLanService(payload = {}) {
     listSku1688Sources,
     createSku,
     deleteSku,
+    saveSkuBundle,
+    listSkuBundleComponents,
     sessionStore: createLanSessionStore(),
     verifyLogin: verifyLanLogin,
     validateSessionUser: validateLanSessionUser,
@@ -16907,6 +17146,8 @@ async function startErpHeadlessServer(options = {}) {
     listSku1688Sources,
     createSku,
     deleteSku,
+    saveSkuBundle,
+    listSkuBundleComponents,
     sessionStore: createLanSessionStore(),
     verifyLogin: verifyLanLogin,
     validateSessionUser: validateLanSessionUser,
@@ -17163,6 +17404,8 @@ function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:sku:list", (_event, params) => listSkusRuntime(params || {}));
   ipcMain.handle("erp:sku:create", (_event, payload) => createSkuRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:sku:delete", (_event, payload) => deleteSkuRuntime(payload || {}, erpState.currentUser || {}));
+  ipcMain.handle("erp:sku:bundle-save", (_event, payload) => saveSkuBundleRuntime(payload || {}, erpState.currentUser || {}));
+  ipcMain.handle("erp:sku:bundle-components", (_event, params) => listSkuBundleComponentsRuntime(params || {}));
   // 供应商管理「未绑定」Tab 服务端分页：返回 { rows, total }。
   ipcMain.handle("erp:sku:unmapped-page", (_event, params) => listUnmappedSkusPageRuntime(params || {}));
   // 商品资料本地缓存（client 模式）：手动强刷 + 状态查询。

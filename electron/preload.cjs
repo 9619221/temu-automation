@@ -265,6 +265,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
       listUnmappedPage: (params) => ipcRenderer.invoke("erp:sku:unmapped-page", params || {}),
       create: (payload) => ipcRenderer.invoke("erp:sku:create", payload || {}),
       delete: (payload) => ipcRenderer.invoke("erp:sku:delete", payload || {}),
+      saveBundle: (payload) => ipcRenderer.invoke("erp:sku:bundle-save", payload || {}),
+      bundleComponents: (params) => ipcRenderer.invoke("erp:sku:bundle-components", params || {}),
       sync: (options) => ipcRenderer.invoke("erp:sku:sync", options || {}),
       cacheStatus: (options) => ipcRenderer.invoke("erp:sku:cache-status", options || {}),
     },

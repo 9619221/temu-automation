@@ -2768,6 +2768,10 @@ function createRequestHandler(options = {}) {
   const deleteSku = options.deleteSku || (() => {
     throw new Error("SKU delete handler is not available");
   });
+  const saveSkuBundle = options.saveSkuBundle || (() => {
+    throw new Error("SKU bundle handler is not available");
+  });
+  const listSkuBundleComponents = options.listSkuBundleComponents || (() => []);
   const get1688AuthStatus = options.get1688AuthStatus || (() => ({
     configured: false,
     authorized: false,
@@ -2828,6 +2832,8 @@ function createRequestHandler(options = {}) {
       listSku1688Sources,
       createSku,
       deleteSku,
+      saveSkuBundle,
+      listSkuBundleComponents,
       get1688AuthStatus,
       upsert1688AuthConfig,
       save1688ManualToken,
@@ -3087,6 +3093,8 @@ async function handleMasterDataActionRequest({
   createSupplier,
   createSku,
   deleteSku,
+  saveSkuBundle,
+  listSkuBundleComponents,
 }) {
   if (req.method !== "POST") {
     writeJson(res, 405, { ok: false, error: "Method not allowed" });
@@ -3116,6 +3124,12 @@ async function handleMasterDataActionRequest({
     } else if (action === "delete_sku") {
       assertSessionRole(session, ["admin", "manager", "operations"], "商品资料删除");
       result = await deleteSku(scopedPayload, session.user);
+    } else if (action === "save_sku_bundle") {
+      assertSessionRole(session, ["admin", "manager", "operations"], "组合装保存");
+      result = await saveSkuBundle(scopedPayload, session.user);
+    } else if (action === "list_sku_bundle_components") {
+      assertSessionRole(session, ["admin", "manager", "operations"], "组合装明细");
+      result = await listSkuBundleComponents(scopedPayload, session.user);
     } else {
       throw new Error(`不支持的商品资料操作：${action || "-"}`);
     }
@@ -3591,6 +3605,8 @@ async function handleRequest({
   listSku1688Sources,
   createSku,
   deleteSku,
+  saveSkuBundle,
+  listSkuBundleComponents,
   get1688AuthStatus,
   upsert1688AuthConfig,
   save1688ManualToken,
@@ -3859,6 +3875,8 @@ async function handleRequest({
         createSupplier,
         createSku,
         deleteSku,
+        saveSkuBundle,
+        listSkuBundleComponents,
       });
       return;
     }
