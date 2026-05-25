@@ -168,7 +168,13 @@ export default function OperationsExtensionGate({ role, routePath, children }: O
   const openExtensionDirectory = async () => {
     try {
       const dir = await window.electronAPI?.app?.openExtensionDirectory?.();
-      if (dir) setExtensionDir(dir);
+      if (dir) {
+        setExtensionDir(dir);
+        try {
+          await navigator.clipboard?.writeText(dir);
+        } catch {}
+        message.success("已打开并复制正确扩展目录。Chrome 里请选择这个 extension 文件夹，不要选择素材目录。", 8);
+      }
     } catch (error: any) {
       message.error(error?.message || "打开扩展目录失败");
     }
@@ -215,17 +221,20 @@ export default function OperationsExtensionGate({ role, routePath, children }: O
           扩展目录：{extensionDir || "未获取到目录，请点击“本机扩展目录”"}
         </div>
         <div className="operations-extension-gate__notice">
+          Chrome 加载时必须选择这个 extension 文件夹本身，文件夹第一层要能看到 manifest.json；不要选择 chrome-webstore-assets、dist、web 或截图素材目录。
+        </div>
+        <div className="operations-extension-gate__notice">
           扩展管理地址：{CHROME_EXTENSIONS_URL}。如果按钮没有自动跳转，就在 Chrome 地址栏粘贴并回车。
         </div>
 
         <div className="operations-extension-gate__steps">
           <div className="operations-extension-gate__step">
             <FolderOpenOutlined />
-            <span>1. 点击“本机扩展目录”，确认打开的是软件自带的 extension 文件夹。</span>
+            <span>1. 点击“打开正确扩展目录”，Chrome 选择文件夹时就选弹出的这个 extension 文件夹。</span>
           </div>
           <div className="operations-extension-gate__step">
             <ChromeOutlined />
-            <span>2. 点击“扩展管理”，打开右上角开发者模式，点“加载已解压的扩展程序”，选择上面的 extension 文件夹。</span>
+            <span>2. 点“复制并打开扩展页”，打开右上角开发者模式，再点“加载已解压的扩展程序”，选择带 manifest.json 的 extension 文件夹。</span>
           </div>
           <div className="operations-extension-gate__step">
             <CloudSyncOutlined />
@@ -251,7 +260,7 @@ export default function OperationsExtensionGate({ role, routePath, children }: O
 
         <Space size={10} wrap className="operations-extension-gate__actions">
           <Button type="primary" icon={<FolderOpenOutlined />} onClick={openExtensionDirectory}>
-            本机扩展目录
+            打开正确扩展目录
           </Button>
           <Button icon={<ChromeOutlined />} onClick={openChromeExtensions}>
             复制并打开扩展页
