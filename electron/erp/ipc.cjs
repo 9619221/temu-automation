@@ -3696,6 +3696,16 @@ function createSku(payload = {}, actor = erpState.currentUser) {
       @temu_skc_id, @product_name, @color_spec, @category, @image_url, @supplier_id,
       @status, @created_by, @created_at, @updated_at
     )
+    ON CONFLICT(id) DO UPDATE SET
+      account_id = excluded.account_id,
+      internal_sku_code = excluded.internal_sku_code,
+      product_name = excluded.product_name,
+      color_spec = excluded.color_spec,
+      category = excluded.category,
+      image_url = COALESCE(excluded.image_url, erp_skus.image_url),
+      supplier_id = excluded.supplier_id,
+      status = excluded.status,
+      updated_at = excluded.updated_at
   `).run(row);
 
   return toCamelRow(db.prepare("SELECT * FROM erp_skus WHERE id = ?").get(row.id));

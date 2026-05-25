@@ -1,15 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Key } from "react";
 import { Alert, Button, Col, Descriptions, Drawer, Form, Image, Input, InputNumber, Modal, Popconfirm, Progress, Row, Select, Space, Table, Tag, Tooltip, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { DeleteOutlined, EditOutlined, LineChartOutlined, LinkOutlined, PlusOutlined, ReloadOutlined, UploadOutlined } from "@ant-design/icons";
-import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip as RechartsTooltip, XAxis, YAxis } from "recharts";
+import { DeleteOutlined, EditOutlined, LineChartOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
 import { useErpAuth } from "../contexts/ErpAuthContext";
 import { hasPageCache, readPageCache, writePageCache } from "../utils/pageCache";
 
 const erp = window.electronAPI?.erp;
 const PRODUCT_MASTER_DATA_CACHE_KEY = "temu.product-master-data.cache.v2";
-const FEISHU_SUPPLIER_SOURCE_URL = "https://mcn24onb5t1o.feishu.cn/base/RLy7bndc4aCXhtsx4yAcr2d8nSg?table=tbl0UhZRpR0niDSt&view=vew5Spjz7c";
 const ADDRESS_WORKBENCH_PARAMS = {
   limit: 20,
   includeRequestDetails: false,
@@ -160,7 +158,31 @@ interface SkuCostRecord {
   label: string;
   amount: number;
   at?: string | null;
+  startAt?: string | null;
+  endAt?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
   note: string;
+}
+
+interface SkuStockRecord {
+  key: string;
+  businessType: string;
+  date?: string | null;
+  qty: number;
+  orderNo: string;
+  warehouse: string;
+  store: string;
+  operator: string;
+}
+
+interface SkuLogRecord {
+  key: string;
+  skuCode: string;
+  content: string;
+  action: string;
+  operator: string;
+  at?: string | null;
 }
 
 interface SupplierFilters {
@@ -330,6 +352,19 @@ function getSkuStockQty(row: ErpSkuRow) {
   return actualStockQty ?? 0;
 }
 
+function getSkuStockRecords(row: ErpSkuRow): SkuStockRecord[] {
+  return [{
+    key: "current",
+    businessType: "库存结存",
+    date: getSkuTouchedAt(row),
+    qty: getSkuStockQty(row),
+    orderNo: row.internalSkuCode || row.id,
+    warehouse: row.warehouseLocation || row.jstMainBin || "-",
+    store: row.accountName || "-",
+    operator: row.createdByName || row.jstCreator || "-",
+  }];
+}
+
 function getSkuCostPrice(row: ErpSkuRow) {
   const cost = row.costPrice ?? row.jstCostPrice;
   return toOptionalNumber(cost);
@@ -345,7 +380,11 @@ function getSkuCostRecords(row: ErpSkuRow): SkuCostRecord[] {
       label: "同步成本",
       amount: jstCostPrice,
       at: row.jstModifiedAt || row.jstCreatedAt || row.updatedAt || row.createdAt,
-      note: "同步成本",
+      startAt: row.jstCreatedAt || row.createdAt,
+      endAt: row.jstModifiedAt || row.updatedAt,
+      createdAt: row.jstCreatedAt || row.createdAt,
+      updatedAt: row.jstModifiedAt || row.updatedAt,
+      note: "-",
     });
   }
   if (erpCostPrice !== null) {
@@ -354,7 +393,11 @@ function getSkuCostRecords(row: ErpSkuRow): SkuCostRecord[] {
       label: "当前资料成本",
       amount: erpCostPrice,
       at: row.updatedAt || row.createdAt || row.jstModifiedAt || row.jstCreatedAt,
-      note: "当前资料成本",
+      startAt: row.createdAt || row.jstCreatedAt,
+      endAt: row.updatedAt || row.jstModifiedAt,
+      createdAt: row.createdAt || row.jstCreatedAt,
+      updatedAt: row.updatedAt || row.jstModifiedAt,
+      note: "-",
     });
   }
   return records;
@@ -624,21 +667,6 @@ const SKU_ISSUE_NOTES: Record<SkuIssueKey, string> = {
   stale_data: `超过 ${SKU_STALE_DAYS} 天未更新，成本、供应商、规格或库存口径可能已经变旧。`,
 };
 
-const SKU_ISSUE_PRIORITY: Record<SkuIssueKey, number> = {
-  missing_cost: 40,
-  missing_supplier: 35,
-  zero_stock: 30,
-  missing_spec: 25,
-  stale_data: 20,
-  missing_image: 15,
-};
-
-function getSkuWorkPriority(row: ErpSkuRow) {
-  const issues = getSkuDataIssues(row);
-  if (!issues.length) return 0;
-  return issues.reduce((score, issue) => score + SKU_ISSUE_PRIORITY[issue], 0) + issues.length;
-}
-
 function getSkuWorkLogItems(row: ErpSkuRow) {
   const issues = getSkuDataIssues(row);
   const stockQty = getSkuStockQty(row);
@@ -698,6 +726,18 @@ function getSkuWorkLogItems(row: ErpSkuRow) {
   }
 
   return items;
+}
+
+function getSkuLogRecords(row: ErpSkuRow): SkuLogRecord[] {
+  const skuCode = row.internalSkuCode || row.id;
+  return getSkuWorkLogItems(row).map((item) => ({
+    key: item.key,
+    skuCode,
+    content: item.description,
+    action: item.title.replace(/^问题：/, ""),
+    operator: row.createdByName || row.jstCreator || "-",
+    at: getSkuTouchedAt(row),
+  }));
 }
 
 function storeAddressSummary(row: ErpAccountRow) {
@@ -908,6 +948,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
   const [addressLoading, setAddressLoading] = useState(false);
   const [submitting, setSubmitting] = useState<string | null>(null);
   const [skuModalOpen, setSkuModalOpen] = useState(false);
+  const [editingSku, setEditingSku] = useState<ErpSkuRow | null>(null);
   const [supplierModalOpen, setSupplierModalOpen] = useState(false);
   const [editingSupplier, setEditingSupplier] = useState<ErpSupplierRow | null>(null);
   const [accountModalOpen, setAccountModalOpen] = useState(false);
@@ -916,6 +957,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
   const [editingStoreAddressAccount, setEditingStoreAddressAccount] = useState<ErpAccountRow | null>(null);
   const [skuDetailRow, setSkuDetailRow] = useState<ErpSkuRow | null>(null);
   const [costDetailRow, setCostDetailRow] = useState<ErpSkuRow | null>(null);
+  const [stockDetailRow, setStockDetailRow] = useState<ErpSkuRow | null>(null);
   const [supplierDetailRow, setSupplierDetailRow] = useState<ErpSupplierRow | null>(null);
   const [skuFilters, setSkuFilters] = useState<SkuFilters>({ keyword: "" });
   const [selectedSkuRowKeys, setSelectedSkuRowKeys] = useState<Key[]>([]);
@@ -1043,33 +1085,15 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
     { label: "缺成本", value: skuQualitySummary.issueCounts.missing_cost, tone: SKU_ISSUE_CARD_TONES.missing_cost, issue: "missing_cost" },
     { label: "零库存", value: skuQualitySummary.issueCounts.zero_stock, tone: SKU_ISSUE_CARD_TONES.zero_stock, issue: "zero_stock" },
   ], [skuQualitySummary]);
-  const skuDetailWorkLogItems = useMemo(() => (
-    skuDetailRow ? getSkuWorkLogItems(skuDetailRow) : []
+  const skuLogRecords = useMemo(() => (
+    skuDetailRow ? getSkuLogRecords(skuDetailRow) : []
   ), [skuDetailRow]);
+  const stockDetailRecords = useMemo(() => (
+    stockDetailRow ? getSkuStockRecords(stockDetailRow) : []
+  ), [stockDetailRow]);
   const costDetailRecords = useMemo(() => (
     costDetailRow ? getSkuCostRecords(costDetailRow) : []
   ), [costDetailRow]);
-  const costTrendData = useMemo(() => (
-    costDetailRecords.map((record, index) => ({
-      ...record,
-      chartLabel: record.label,
-      price: record.amount,
-      sequence: index + 1,
-    }))
-  ), [costDetailRecords]);
-  const costChangeSummary = useMemo(() => {
-    if (costDetailRecords.length < 2) return null;
-    const first = costDetailRecords[0];
-    const latest = costDetailRecords[costDetailRecords.length - 1];
-    const diff = latest.amount - first.amount;
-    const rate = first.amount !== 0 ? (diff / first.amount) * 100 : null;
-    return {
-      diff,
-      rate,
-      label: diff > 0 ? "上涨" : diff < 0 ? "下降" : "持平",
-      color: diff > 0 ? "#dc2626" : diff < 0 ? "#16a34a" : "#64748b",
-    };
-  }, [costDetailRecords]);
   const selectedSkuKeySet = useMemo(
     () => new Set(selectedSkuRowKeys.map((key) => String(key))),
     [selectedSkuRowKeys],
@@ -1494,42 +1518,6 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
     }
   };
 
-  const handleImportFeishuSuppliersOnce = async () => {
-    if (!erp?.supplier?.importFeishuOnce || !window.electronAPI?.selectFile) {
-      message.error("当前版本缺少飞书供应商导入接口");
-      return;
-    }
-    const filePath = await window.electronAPI.selectFile([
-      { name: "飞书导出表格", extensions: ["xlsx", "xls", "csv"] },
-    ]);
-    if (!filePath) return;
-    setSubmitting("supplier-import-feishu");
-    try {
-      const result = await erp.supplier.importFeishuOnce({
-        filePath,
-        sourceUrl: FEISHU_SUPPLIER_SOURCE_URL,
-      });
-      message.success(`飞书表已导入 ${result.imported} 条，新增 ${result.created} 条，更新 ${result.updated} 条`);
-      if (result.skipped) {
-        const reason = result.errors?.slice(0, 3).map((item: { row?: number | string; reason?: string }) => `第 ${item.row} 行：${item.reason}`).join("；");
-        message.warning(`跳过 ${result.skipped} 条${reason ? `，${reason}` : ""}`);
-      }
-      await loadAll();
-    } catch (error: any) {
-      message.error(error?.message || "飞书供应商导入失败");
-    } finally {
-      setSubmitting(null);
-    }
-  };
-
-  const handleOpenFeishuSupplierTable = async () => {
-    try {
-      await window.electronAPI?.app?.openExternal?.(FEISHU_SUPPLIER_SOURCE_URL);
-    } catch (error: any) {
-      message.error(error?.message || "打开飞书表失败");
-    }
-  };
-
   const handleToggleSupplierStatus = async (row: ErpSupplierRow) => {
     if (!erp) return;
     const nextStatus = row.status === "blocked" ? "active" : "blocked";
@@ -1561,23 +1549,39 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
     }
   };
 
-  const handleCreateSku = async () => {
+  const openSkuModal = (row?: ErpSkuRow) => {
+    setEditingSku(row || null);
+    skuForm.setFieldsValue(row ? {
+      accountId: row.accountId || undefined,
+      productName: row.productName || "",
+      colorSpec: row.colorSpec || row.category || "",
+    } : {
+      accountId: accounts.length === 1 ? accounts[0].id : undefined,
+      productName: "",
+      colorSpec: "",
+    });
+    setSkuModalOpen(true);
+  };
+
+  const handleSaveSku = async () => {
     if (!erp) return;
     const values = await skuForm.validateFields() as SkuDialogValues;
     setSubmitting("sku");
     try {
       await erp.sku.create({
+        id: editingSku?.id,
         accountId: values.accountId,
         productName: values.productName,
         colorSpec: values.colorSpec,
-        status: "active",
+        status: editingSku?.status || "active",
       });
       skuForm.resetFields();
+      setEditingSku(null);
       setSkuModalOpen(false);
-      message.success("商品资料已创建");
+      message.success(editingSku ? "商品资料已更新" : "商品资料已创建");
       await loadAll();
     } catch (error: any) {
-      message.error(error?.message || "商品资料创建失败");
+      message.error(error?.message || "商品资料保存失败");
     } finally {
       setSubmitting(null);
     }
@@ -1900,32 +1904,33 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
     },
     { title: "规格", dataIndex: "colorSpec", key: "colorSpec", width: 190, ellipsis: true, render: (value, row) => { const text = value || row.category || "-"; return <span title={text}>{text}</span>; } },
     {
-      title: "库存 / 仓位",
-      key: "stockLocation",
-      width: 150,
+      title: "库存",
+      key: "stockQty",
+      width: 90,
       sorter: (left, right) => getSkuStockQty(left) - getSkuStockQty(right),
       sortDirections: ["descend", "ascend"],
+      render: (_value, row) => (
+        <Button
+          type="link"
+          size="small"
+          onClick={(event) => {
+            event.stopPropagation();
+            setStockDetailRow(row);
+          }}
+          style={{ color: "#2563eb", fontWeight: 700, height: "auto", padding: 0 }}
+        >
+          {getSkuStockQty(row)}
+        </Button>
+      ),
+    },
+    {
+      title: "仓位",
+      key: "warehouseLocation",
+      width: 120,
+      ellipsis: true,
       render: (_value, row) => {
         const location = row.warehouseLocation || row.jstMainBin || "-";
-        return (
-          <Space direction="vertical" size={2}>
-            <span style={{ color: "#0f172a", fontWeight: 700 }}>{getSkuStockQty(row)}</span>
-            <span
-              title={location}
-              style={{
-                color: "#64748b",
-                display: "block",
-                fontSize: 12,
-                maxWidth: 120,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {location}
-            </span>
-          </Space>
-        );
+        return <span title={location}>{location}</span>;
       },
     },
     {
@@ -1950,8 +1955,9 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       key: "costPrice",
       width: 100,
       render: (value, row) => {
-        const costText = formatMoney(value ?? row.jstCostPrice);
         const hasCost = getSkuCostPrice(row) !== null;
+        if (!hasCost) return <span>-</span>;
+        const costText = formatMoney(value ?? row.jstCostPrice);
         return (
           <Button
             type="link"
@@ -1968,30 +1974,8 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
               padding: 0,
             }}
           >
-            {hasCost ? costText : "缺成本"}
+            {costText}
           </Button>
-        );
-      },
-    },
-    {
-      title: "问题",
-      key: "workAction",
-      width: 120,
-      sorter: (left, right) => getSkuWorkPriority(left) - getSkuWorkPriority(right),
-      defaultSortOrder: "descend",
-      sortDirections: ["descend", "ascend"],
-      render: (_value, row) => {
-        const issues = getSkuDataIssues(row);
-        const issue = issues[0];
-        if (!issue) return <Tag color="green">正常</Tag>;
-        const title = issues.map((item) => SKU_ISSUE_META[item].label).join("、");
-        return (
-          <Tooltip title={title}>
-            <Tag color={SKU_ISSUE_META[issue].color} style={{ marginInlineEnd: 0 }}>
-              {SKU_ISSUE_META[issue].label}
-              {issues.length > 1 ? ` +${issues.length - 1}` : ""}
-            </Tag>
-          </Tooltip>
         );
       },
     },
@@ -1999,13 +1983,20 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
     {
       title: "操作",
       key: "actions",
-      width: 88,
+      width: 150,
       fixed: "right",
       align: "right",
       render: (_value, row) => (
-        <Button size="small" onClick={() => setSkuDetailRow(row)}>
-          日志
-        </Button>
+        <Space size={6}>
+          <Button size="small" onClick={() => setSkuDetailRow(row)}>
+            日志
+          </Button>
+          {canManageSkus ? (
+            <Button size="small" icon={<EditOutlined />} onClick={() => openSkuModal(row)}>
+              编辑
+            </Button>
+          ) : null}
+        </Space>
       ),
     },
   ];
@@ -2130,40 +2121,20 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
     <div className={embedded ? "product-master-data-embedded" : "dashboard-shell"}>
       {!embedded ? (
         <PageHeader
-        compact
-        eyebrow="系统"
-        title={pageTitle}
-        meta={pageMeta}
-        actions={[
+          compact
+          className="product-master-page-header"
+          eyebrow="系统"
+          title={pageTitle}
+          meta={pageMeta}
+          actions={[
           mode === "skus" && canManageSkus ? (
             <Button
               key="new-sku"
               type="primary"
               icon={<PlusOutlined />}
-              onClick={() => {
-                skuForm.resetFields();
-                if (accounts.length === 1) {
-                  skuForm.setFieldsValue({ accountId: accounts[0].id });
-                }
-                setSkuModalOpen(true);
-              }}
+              onClick={() => openSkuModal()}
             >
               新增商品
-            </Button>
-          ) : null,
-          mode === "suppliers" && canManageSuppliers ? (
-            <Button key="open-feishu-suppliers" icon={<LinkOutlined />} onClick={handleOpenFeishuSupplierTable}>
-              打开飞书表
-            </Button>
-          ) : null,
-          mode === "suppliers" && canManageSuppliers ? (
-            <Button
-              key="import-feishu-suppliers"
-              icon={<UploadOutlined />}
-              loading={submitting === "supplier-import-feishu"}
-              onClick={handleImportFeishuSuppliersOnce}
-            >
-              导入飞书表
             </Button>
           ) : null,
           mode === "suppliers" && canManageSuppliers ? (
@@ -2174,7 +2145,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
           <Button key="refresh" icon={<ReloadOutlined />} loading={loading} onClick={() => void loadAll({ forceFull: true })}>
             刷新
           </Button>,
-        ].filter(Boolean)}
+          ].filter(Boolean)}
         />
       ) : null}
 
@@ -2363,7 +2334,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
             onRow={(row) => ({
               onDoubleClick: () => setSkuDetailRow(row),
             })}
-            scroll={{ x: 1540, y: "max(220px, calc(100vh - 500px))" }}
+            scroll={{ x: 1600, y: "max(220px, calc(100vh - 500px))" }}
             pagination={{
               defaultPageSize: 20,
               pageSizeOptions: [10, 20, 50, 100, 200],
@@ -2385,16 +2356,6 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
               <Space size={8} wrap>
                 {canManageSuppliers ? (
                   <>
-                    <Button icon={<LinkOutlined />} onClick={handleOpenFeishuSupplierTable}>
-                      打开飞书表
-                    </Button>
-                    <Button
-                      icon={<UploadOutlined />}
-                      loading={submitting === "supplier-import-feishu"}
-                      onClick={handleImportFeishuSuppliersOnce}
-                    >
-                      导入飞书表
-                    </Button>
                     <Button type="primary" icon={<PlusOutlined />} onClick={() => openSupplierModal()}>
                       新增供应商
                     </Button>
@@ -2561,230 +2522,149 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
         ) : null}
       </Space>
 
-      <Drawer
-        title="商品工作日志"
+      <Modal
+        title="查看商品修改日志"
         open={Boolean(skuDetailRow)}
-        width={620}
-        onClose={() => setSkuDetailRow(null)}
+        centered
+        footer={null}
+        width={1120}
+        onCancel={() => setSkuDetailRow(null)}
         destroyOnClose
       >
         {skuDetailRow ? (
-          <Space direction="vertical" size={16} style={{ width: "100%" }}>
-            <Space align="start" size={12}>
-              {renderSkuImage(skuDetailRow, 72)}
-              <div style={{ minWidth: 0 }}>
-                <div style={{ color: "#0f172a", fontSize: 16, fontWeight: 700, lineHeight: "24px" }}>
-                  {skuDetailRow.productName || "-"}
-                </div>
-                <div style={{ color: "#64748b", marginTop: 4 }}>
-                  {skuDetailRow.internalSkuCode || skuDetailRow.id}
-                </div>
-                <Space size={[4, 4]} wrap style={{ marginTop: 8 }}>
-                  <Tag color={statusColor(skuDetailRow.status)}>{statusLabel(skuDetailRow.status)}</Tag>
-                </Space>
-              </div>
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            <Space size={8} wrap>
+              <Button type="primary">按商品</Button>
+              <Input value={skuDetailRow.internalSkuCode || skuDetailRow.id} readOnly style={{ width: 160 }} />
+              {canManageSkus ? (
+                <Button
+                  icon={<EditOutlined />}
+                  onClick={() => {
+                    const row = skuDetailRow;
+                    setSkuDetailRow(null);
+                    openSkuModal(row);
+                  }}
+                >
+                  编辑
+                </Button>
+              ) : null}
             </Space>
-
-            <Descriptions
-              bordered
+            <Table<SkuLogRecord>
+              rowKey="key"
               size="small"
-              column={1}
-              items={[
-                { key: "spec", label: "颜色/规格", children: skuDetailRow.colorSpec || skuDetailRow.category || "-" },
-                { key: "store", label: "店铺", children: skuDetailRow.accountName || accountNameById.get(skuDetailRow.accountId || "") || "-" },
-                { key: "supplier", label: "供应商", children: getSkuSupplierText(skuDetailRow) || "-" },
-                { key: "stock", label: "实际库存", children: getSkuStockQty(skuDetailRow) },
-                { key: "location", label: "仓位", children: skuDetailRow.warehouseLocation || skuDetailRow.jstMainBin || "-" },
-                {
-                  key: "cost",
-                  label: "成本价",
-                  children: (
-                    <Button
-                      type="link"
-                      size="small"
-                      icon={<LineChartOutlined />}
-                      onClick={() => setCostDetailRow(skuDetailRow)}
-                      style={{ height: "auto", padding: 0, fontWeight: 700 }}
-                    >
-                      {formatMoney(skuDetailRow.costPrice ?? skuDetailRow.jstCostPrice)}
-                    </Button>
-                  ),
-                },
-                { key: "updated", label: "修改时间", children: formatDateTime(skuDetailRow.jstModifiedAt || skuDetailRow.updatedAt) },
+              pagination={{ defaultPageSize: 20, showSizeChanger: false, showTotal: (total) => `共 ${total} 条` }}
+              dataSource={skuLogRecords}
+              scroll={{ x: 980, y: 420 }}
+              columns={[
+                { title: "商品编码", dataIndex: "skuCode", key: "skuCode", width: 150, ellipsis: true },
+                { title: "操作内容", dataIndex: "content", key: "content", ellipsis: true },
+                { title: "操作", dataIndex: "action", key: "action", width: 180, ellipsis: true },
+                { title: "操作人", dataIndex: "operator", key: "operator", width: 130, ellipsis: true },
+                { title: "操作时间", dataIndex: "at", key: "at", width: 170, render: formatDateTime },
               ]}
             />
-
-            <div
-              style={{
-                border: "1px solid #e5e7eb",
-                borderRadius: 6,
-                background: "#fff",
-                padding: 12,
-              }}
-            >
-              <div style={{ color: "#0f172a", fontWeight: 700, marginBottom: 10 }}>工作日志</div>
-              <Space direction="vertical" size={8} style={{ width: "100%" }}>
-                {skuDetailWorkLogItems.map((item) => (
-                  <div
-                    key={item.key}
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "auto minmax(0, 1fr)",
-                      gap: 8,
-                      alignItems: "start",
-                    }}
-                  >
-                    <Tag color={item.color} style={{ marginInlineEnd: 0 }}>
-                      {item.title.startsWith("问题") ? "问题" : "记录"}
-                    </Tag>
-                    <div style={{ minWidth: 0 }}>
-                      <div style={{ color: "#0f172a", fontWeight: 600, lineHeight: "20px" }}>{item.title}</div>
-                      <div style={{ color: "#64748b", fontSize: 12, lineHeight: "18px", marginTop: 2 }}>{item.description}</div>
-                    </div>
-                  </div>
-                ))}
-              </Space>
-            </div>
-
           </Space>
         ) : null}
-      </Drawer>
+      </Modal>
 
-      <Drawer
-        title="成本价趋势"
+      <Modal
+        title={(
+          <Space size={8}>
+            <span>查看库存明细-实际库存数</span>
+            <Tag>{stockDetailRow?.internalSkuCode || stockDetailRow?.id || "-"}</Tag>
+          </Space>
+        )}
+        open={Boolean(stockDetailRow)}
+        centered
+        width={1120}
+        footer={null}
+        onCancel={() => setStockDetailRow(null)}
+        destroyOnClose
+      >
+        {stockDetailRow ? (
+          <Table<SkuStockRecord>
+            rowKey="key"
+            size="small"
+            pagination={false}
+            dataSource={stockDetailRecords}
+            scroll={{ x: 980, y: 420 }}
+            columns={[
+              { title: "序号", width: 64, render: (_value, _row, index) => index + 1 },
+              { title: "业务类型", dataIndex: "businessType", key: "businessType", width: 120 },
+              { title: "日期", dataIndex: "date", key: "date", width: 160, render: formatDateTime },
+              {
+                title: "库存数",
+                dataIndex: "qty",
+                key: "qty",
+                width: 110,
+                align: "right",
+                render: (value) => (
+                  <span style={{ color: Number(value) > 0 ? "#16a34a" : "#0f172a", fontWeight: 700 }}>
+                    {value}
+                  </span>
+                ),
+              },
+              { title: "单号", dataIndex: "orderNo", key: "orderNo", width: 150, ellipsis: true },
+              { title: "仓位", dataIndex: "warehouse", key: "warehouse", width: 130, ellipsis: true },
+              { title: "店铺", dataIndex: "store", key: "store", width: 110, ellipsis: true },
+              { title: "操作人", dataIndex: "operator", key: "operator", width: 130, ellipsis: true },
+            ]}
+            summary={() => (
+              <Table.Summary.Row>
+                <Table.Summary.Cell index={0} colSpan={3}>
+                  <strong>小计</strong>
+                </Table.Summary.Cell>
+                <Table.Summary.Cell index={3} align="right">
+                  <strong>{getSkuStockQty(stockDetailRow)}</strong>
+                </Table.Summary.Cell>
+                <Table.Summary.Cell index={4} colSpan={4} />
+              </Table.Summary.Row>
+            )}
+          />
+        ) : null}
+      </Modal>
+
+      <Modal
+        title={(
+          <Space size={8}>
+            <span>查看历史成本价</span>
+            <Tag>{costDetailRow?.internalSkuCode || costDetailRow?.id || "-"}</Tag>
+          </Space>
+        )}
         open={Boolean(costDetailRow)}
-        width={620}
-        onClose={() => setCostDetailRow(null)}
+        centered
+        width={960}
+        footer={null}
+        onCancel={() => setCostDetailRow(null)}
         destroyOnClose
       >
         {costDetailRow ? (
-          <Space direction="vertical" size={16} style={{ width: "100%" }}>
-            <Space align="start" size={12}>
-              {renderSkuImage(costDetailRow, 64)}
-              <div style={{ minWidth: 0 }}>
-                <div style={{ color: "#0f172a", fontSize: 16, fontWeight: 700, lineHeight: "24px" }}>
-                  {costDetailRow.productName || "-"}
-                </div>
-                <div style={{ color: "#64748b", marginTop: 4 }}>
-                  {costDetailRow.internalSkuCode || costDetailRow.id}
-                </div>
-                <div style={{ color: "#64748b", fontSize: 12, marginTop: 6 }}>
-                  {costDetailRow.colorSpec || costDetailRow.category || "-"}
-                </div>
-              </div>
-            </Space>
-
-            <div
-              style={{
-                border: "1px solid #e5e7eb",
-                borderRadius: 6,
-                display: "flex",
-                justifyContent: "space-between",
-                gap: 16,
-                padding: 12,
-              }}
-            >
-              <div>
-                <div style={{ color: "#64748b", fontSize: 12 }}>当前成本</div>
-                <div style={{ color: "#0f172a", fontSize: 20, fontWeight: 700, marginTop: 4 }}>
-                  {formatMoney(getSkuCostPrice(costDetailRow))}
-                </div>
-              </div>
-              <div style={{ textAlign: "right" }}>
-                <div style={{ color: "#64748b", fontSize: 12 }}>变化</div>
-                <div style={{ color: costChangeSummary?.color || "#64748b", fontSize: 16, fontWeight: 700, marginTop: 4 }}>
-                  {costChangeSummary
-                    ? `${costChangeSummary.label} ${formatMoney(Math.abs(costChangeSummary.diff))}`
-                    : "暂无"}
-                </div>
-                {costChangeSummary?.rate !== null && costChangeSummary?.rate !== undefined ? (
-                  <div style={{ color: "#64748b", fontSize: 12, marginTop: 2 }}>
-                    {costChangeSummary.rate.toFixed(1)}%
-                  </div>
-                ) : null}
-              </div>
-            </div>
-
-            <div style={{ border: "1px solid #e5e7eb", borderRadius: 6, padding: 12 }}>
-              <div style={{ color: "#0f172a", fontWeight: 700, marginBottom: 10 }}>趋势</div>
-              <div style={{ height: 220 }}>
-                {costTrendData.length ? (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={costTrendData} margin={{ top: 10, right: 16, left: 0, bottom: 8 }}>
-                      <CartesianGrid stroke="#eef2f7" vertical={false} />
-                      <XAxis dataKey="chartLabel" tick={{ fill: "#64748b", fontSize: 12 }} axisLine={false} tickLine={false} />
-                      <YAxis
-                        width={72}
-                        tick={{ fill: "#64748b", fontSize: 12 }}
-                        axisLine={false}
-                        tickLine={false}
-                        tickFormatter={(value) => formatMoney(value)}
-                      />
-                      <RechartsTooltip formatter={(value) => [formatMoney(value as number | string), "成本价"]} />
-                      <Line
-                        type="monotone"
-                        dataKey="price"
-                        stroke="#2563eb"
-                        strokeWidth={2}
-                        dot={{ r: 4, strokeWidth: 2 }}
-                        activeDot={{ r: 5 }}
-                      />
-                    </LineChart>
-                  </ResponsiveContainer>
-                ) : (
-                  <div
-                    style={{
-                      height: "100%",
-                      border: "1px dashed #d8dee9",
-                      borderRadius: 6,
-                      color: "#94a3b8",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                    }}
-                  >
-                    暂无成本记录
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div style={{ border: "1px solid #e5e7eb", borderRadius: 6, padding: 12 }}>
-              <div style={{ color: "#0f172a", fontWeight: 700, marginBottom: 10 }}>明细</div>
-              {costDetailRecords.length ? (
-                <Space direction="vertical" size={8} style={{ width: "100%" }}>
-                  {costDetailRecords.map((record) => (
-                    <div
-                      key={record.key}
-                      style={{
-                        display: "grid",
-                        gridTemplateColumns: "120px minmax(0, 1fr) 110px",
-                        gap: 10,
-                        alignItems: "center",
-                        borderBottom: "1px solid #f1f5f9",
-                        paddingBottom: 8,
-                      }}
-                    >
-                      <Tag color={record.key === "erp" ? "blue" : "default"} style={{ marginInlineEnd: 0 }}>
-                        {record.note}
-                      </Tag>
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ color: "#0f172a", fontWeight: 600 }}>{record.label}</div>
-                        <div style={{ color: "#64748b", fontSize: 12, marginTop: 2 }}>{formatDateTime(record.at)}</div>
-                      </div>
-                      <div style={{ color: "#0f172a", fontWeight: 700, textAlign: "right" }}>
-                        {formatMoney(record.amount)}
-                      </div>
-                    </div>
-                  ))}
-                </Space>
-              ) : (
-                <div style={{ color: "#94a3b8" }}>还没有可展示的成本明细。</div>
-              )}
-            </div>
-          </Space>
+          <Table<SkuCostRecord>
+            rowKey="key"
+            size="small"
+            pagination={false}
+            dataSource={costDetailRecords}
+            locale={{ emptyText: "暂无成本明细" }}
+            scroll={{ x: 840, y: 420 }}
+            columns={[
+              { title: "序号", width: 64, render: (_value, _row, index) => index + 1 },
+              { title: "开始日期", dataIndex: "startAt", key: "startAt", width: 140, render: formatDateTime },
+              { title: "截止日期", dataIndex: "endAt", key: "endAt", width: 140, render: formatDateTime },
+              {
+                title: "成本价",
+                dataIndex: "amount",
+                key: "amount",
+                width: 120,
+                align: "right",
+                render: (value) => <strong>{formatMoney(value as number | string)}</strong>,
+              },
+              { title: "备注", dataIndex: "note", key: "note", width: 140, render: (value) => value || "-" },
+              { title: "创建时间", dataIndex: "createdAt", key: "createdAt", width: 160, render: formatDateTime },
+              { title: "修改时间", dataIndex: "updatedAt", key: "updatedAt", width: 160, render: formatDateTime },
+            ]}
+          />
         ) : null}
-      </Drawer>
+      </Modal>
 
       <Drawer
         title="供应商工作日志"
@@ -3185,13 +3065,17 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       </Modal>
 
       <Modal
-        title="新增商品"
+        title={editingSku ? "编辑商品资料" : "新增商品"}
         open={skuModalOpen}
-        okText="创建"
+        centered
+        okText="保存"
         cancelText="取消"
         confirmLoading={submitting === "sku"}
-        onOk={handleCreateSku}
-        onCancel={() => setSkuModalOpen(false)}
+        onOk={handleSaveSku}
+        onCancel={() => {
+          setSkuModalOpen(false);
+          setEditingSku(null);
+        }}
         destroyOnClose
       >
         {accounts.length === 0 ? (

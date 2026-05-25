@@ -1,18 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Card, Checkbox, Col, Descriptions, Drawer, Empty, Image, Input, Modal, Radio, Row, Segmented, Space, Spin, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from "antd";
+import { Alert, Button, Card, Checkbox, Descriptions, Drawer, Empty, Image, Input, Modal, Radio, Segmented, Space, Spin, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
   AppstoreOutlined,
-  BarChartOutlined,
-  FireOutlined,
   PictureOutlined,
-  RiseOutlined,
   SearchOutlined,
   SettingOutlined,
-  ShoppingCartOutlined,
-  StopOutlined,
   SyncOutlined,
-  WarningOutlined,
 } from "@ant-design/icons";
 import {
   Area,
@@ -25,7 +19,6 @@ import {
 } from "recharts";
 import { useLocation, useNavigate } from "react-router-dom";
 import EmptyGuide from "../components/EmptyGuide";
-import PageHeader from "../components/PageHeader";
 import {
   parseOrdersData,
   parseFluxData,
@@ -5289,31 +5282,119 @@ export default function ProductList() {
   const saleOutCount = salesSummary?.saleOutSkcNum || 0;
   const shortageCount = salesSummary?.shortageSkcNum || 0;
   const adviceCount = salesSummary?.adviceStockSkcNum || 0;
+  const soonSaleOutCount = salesSummary?.soonSaleOutSkcNum || 0;
+  const adSkcCount = salesSummary?.adSkcNum || 0;
+  const productCommandTone = hasAccount === false
+    ? "warning"
+    : saleOutCount + shortageCount + cloudRiskCount > 0
+      ? "warning"
+      : "success";
+  const productCommandMetrics = [
+    {
+      label: "商品总数",
+      value: totalProducts,
+      detail: `${filteredProducts.length} 个当前可见`,
+    },
+    {
+      label: "云端 SKC",
+      value: cloudSkcMap.size,
+      detail: `${salesAttachedCount} 个有销售快照`,
+    },
+    {
+      label: "售罄",
+      value: saleOutCount,
+      detail: "点击筛选售罄商品",
+      tone: saleOutCount > 0 ? "warning" : "success",
+      filter: "saleOut" as StatusFilter,
+    },
+    {
+      label: "即将售罄",
+      value: soonSaleOutCount,
+      detail: "库存可售天数小于 7",
+      tone: soonSaleOutCount > 0 ? "warning" : "success",
+      filter: "soonSaleOut" as StatusFilter,
+    },
+    {
+      label: "缺货",
+      value: shortageCount,
+      detail: "点击筛选缺货商品",
+      tone: shortageCount > 0 ? "warning" : "success",
+      filter: "shortage" as StatusFilter,
+    },
+    {
+      label: "建议备货",
+      value: adviceCount,
+      detail: "点击筛选需备货商品",
+      tone: adviceCount > 0 ? "warning" : "success",
+      filter: "advice" as StatusFilter,
+    },
+    {
+      label: "广告商品",
+      value: adSkcCount,
+      detail: "当前广告覆盖商品",
+    },
+    {
+      label: "今日销量",
+      value: `${cloudShopSales?.sale_volume ?? 0} 件`,
+      detail: cloudShopSales?.stat_date ? `店铺销量 ${cloudShopSales.stat_date}` : "店铺今日销量",
+      tone: "success",
+    },
+    {
+      label: "7天销量",
+      value: `${cloudShopSales?.seven_days_sale_volume ?? 0} 件`,
+      detail: "店铺近 7 天销量",
+    },
+    {
+      label: "30天销量",
+      value: `${cloudShopSales?.thirty_days_sale_volume ?? 0} 件`,
+      detail: "店铺近 30 天销量",
+    },
+  ];
 
   return (
     <div className="dashboard-shell">
-      <PageHeader
-        compact
-        eyebrow="云端商品数据"
-        title="商品管理"
-        subtitle="直接读取云端扩展上报的店铺商品，按 SKC 展示商品基础资料、销量和库存。"
-        meta={[
-          formatSyncedAt(latestSyncedAt),
-          `云端 SKC ${cloudSkcMap.size}`,
-          `销售快照 ${cloudSalesMap.size}`,
-          `活动快照 ${cloudActivityCount}`,
-          `风险快照 ${cloudRiskCount}`,
-          `备货单 ${cloudStockOrderCount}`,
-          `售后 ${cloudAfterSaleCount}`,
-          cloudShopSales?.stat_date ? `店铺销量 ${cloudShopSales.stat_date}` : null,
-          hasAccount === false ? "未连接云端" : null,
-        ].filter(Boolean)}
-        actions={(
-          <Button type="primary" icon={<SyncOutlined />} loading={loading} onClick={loadProducts}>
+      <section className="product-list-command product-list-command--merged" aria-label="商品管理概览">
+        <div className={`product-list-command__lead is-${productCommandTone}`}>
+          <div className="product-list-command__head">
+            <div>
+              <div className="product-list-command__eyebrow">云端商品数据</div>
+              <div className="product-list-command__title">商品管理</div>
+            </div>
+            <span className={`product-list-command__status is-${productCommandTone}`}>
+              {loading ? "同步中" : hasAccount === false ? "云端未连接" : "资料就绪"}
+            </span>
+          </div>
+          <div className="product-list-command__description">
+            直接读取云端扩展上报的店铺商品，按 SKC 展示商品基础资料、销量和库存。
+          </div>
+          <div className="product-list-command__meta">
+            <span>{formatSyncedAt(latestSyncedAt)}</span>
+            <span>销售快照 {cloudSalesMap.size}</span>
+            <span>活动 {cloudActivityCount}</span>
+            <span>风险 {cloudRiskCount}</span>
+            <span>备货 {cloudStockOrderCount}</span>
+            <span>售后 {cloudAfterSaleCount}</span>
+            {cloudShopSales?.stat_date ? <span>店铺销量 {cloudShopSales.stat_date}</span> : null}
+          </div>
+          <Button type="primary" icon={<SyncOutlined spin={loading} />} loading={loading} onClick={loadProducts}>
             刷新数据
           </Button>
-        )}
-      />
+        </div>
+        {productCommandMetrics.map((metric) => (
+          <button
+            key={metric.label}
+            type="button"
+            className={`product-list-command__metric${metric.tone ? ` is-${metric.tone}` : ""}${metric.filter ? " is-clickable" : ""}`}
+            onClick={() => {
+              if (metric.filter) setStatusFilter(metric.filter);
+            }}
+          >
+            <span className="product-list-command__metric-label">{metric.label}</span>
+            <span className="product-list-command__metric-value">{metric.value}</span>
+            <span className="product-list-command__metric-detail">{metric.detail}</span>
+          </button>
+        ))}
+      </section>
       {hasAccount === false && products.length > 0 ? (
         <Alert
           style={{ marginBottom: 16 }}
@@ -5360,61 +5441,6 @@ export default function ProductList() {
         </div>
       ) : (
         <>
-          {/* 汇总指标卡片 - SalesManagement 风格 */}
-          <Row gutter={[12, 12]} className="material-kpi-row" style={{ marginBottom: 16 }}>
-            <Col span={4}>
-              <Card size="small" className="material-kpi-card">
-                <Statistic title="商品总数" value={totalProducts} prefix={<ShoppingCartOutlined />} valueStyle={{ color: "var(--color-blue)" }} />
-              </Card>
-            </Col>
-            <Col span={4}>
-              <Card size="small" className="material-kpi-card material-kpi-card--danger">
-                <Statistic title="售罄" value={saleOutCount} prefix={<StopOutlined />} valueStyle={{ color: "#ea4335" }} />
-              </Card>
-            </Col>
-            <Col span={4}>
-              <Card size="small" className="material-kpi-card material-kpi-card--warning">
-                <Statistic title="即将售罄" value={salesSummary?.soonSaleOutSkcNum || 0} prefix={<WarningOutlined />} valueStyle={{ color: "#fbbc04" }} />
-              </Card>
-            </Col>
-            <Col span={4}>
-              <Card size="small" className="material-kpi-card material-kpi-card--danger">
-                <Statistic title="缺货" value={shortageCount} valueStyle={{ color: "var(--color-danger)" }} />
-              </Card>
-            </Col>
-            <Col span={4}>
-              <Card size="small" className="material-kpi-card material-kpi-card--danger">
-                <Statistic title="建议备货" value={adviceCount} valueStyle={{ color: "var(--color-danger)" }} />
-              </Card>
-            </Col>
-            <Col span={4}>
-              <Card size="small" className="material-kpi-card">
-                <Statistic title="广告商品" value={salesSummary?.adSkcNum || 0} prefix={<FireOutlined />} valueStyle={{ color: "var(--color-purple)" }} />
-              </Card>
-            </Col>
-          </Row>
-
-          {cloudShopSales ? (
-            <Row gutter={[12, 12]} className="material-kpi-row material-kpi-row--wide" style={{ marginBottom: 16 }}>
-              <Col xs={24} md={8}>
-                <Card size="small" className="material-kpi-card material-kpi-card--success">
-                  <Statistic title="店铺今日销量" value={cloudShopSales.sale_volume ?? 0} prefix={<RiseOutlined />} suffix="件" valueStyle={{ color: "var(--color-success)" }} />
-                </Card>
-              </Col>
-              <Col xs={24} md={8}>
-                <Card size="small" className="material-kpi-card">
-                  <Statistic title="店铺7日销量" value={cloudShopSales.seven_days_sale_volume ?? 0} prefix={<BarChartOutlined />} suffix="件" valueStyle={{ color: "#1a73e8" }} />
-                </Card>
-              </Col>
-              <Col xs={24} md={8}>
-                <Card size="small" className="material-kpi-card">
-                  <Statistic title="店铺30日销量" value={cloudShopSales.thirty_days_sale_volume ?? 0} prefix={<FireOutlined />} suffix="件" valueStyle={{ color: "var(--color-purple)" }} />
-                </Card>
-              </Col>
-            </Row>
-          ) : null}
-
-
           {/* 工具栏 - SalesManagement 风格 */}
           <Card size="small" className="material-toolbar-card" style={{ marginBottom: 16 }}>
             <Space wrap>
