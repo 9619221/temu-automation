@@ -2,9 +2,10 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button, Space, Tag, Typography, message } from "antd";
 import {
   ApiOutlined,
-  CheckCircleOutlined,
   ChromeOutlined,
   CloudSyncOutlined,
+  CopyOutlined,
+  FolderOpenOutlined,
   ReloadOutlined,
   SettingOutlined,
   WarningOutlined,
@@ -71,6 +72,7 @@ function formatRelativeTime(ts?: number | null) {
 export default function OperationsExtensionGate({ role, routePath, children }: OperationsExtensionGateProps) {
   const navigate = useNavigate();
   const shouldGate = role === "operations" && !OPERATIONS_EXTENSION_FREE_ROUTES.has(routePath);
+  const [extensionDir, setExtensionDir] = useState("");
   const [state, setState] = useState<ExtensionGateState>({
     loading: true,
     cloudConfig: null,
@@ -102,6 +104,19 @@ export default function OperationsExtensionGate({ role, routePath, children }: O
         lastCheckedAt: Date.now(),
       }));
     }
+  }, [shouldGate]);
+
+  useEffect(() => {
+    if (!shouldGate) return undefined;
+    let cancelled = false;
+    window.electronAPI?.app?.getExtensionDirectory?.()
+      .then((dir: string | undefined) => {
+        if (!cancelled) setExtensionDir(dir || "");
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [shouldGate]);
 
   useEffect(() => {
@@ -138,9 +153,23 @@ export default function OperationsExtensionGate({ role, routePath, children }: O
 
   const openExtensionDirectory = async () => {
     try {
-      await window.electronAPI?.app?.openExtensionDirectory?.();
+      const dir = await window.electronAPI?.app?.openExtensionDirectory?.();
+      if (dir) setExtensionDir(dir);
     } catch (error: any) {
       message.error(error?.message || "打开扩展目录失败");
+    }
+  };
+
+  const copyExtensionDirectory = async () => {
+    if (!extensionDir) {
+      message.warning("还没有获取到扩展目录");
+      return;
+    }
+    try {
+      await navigator.clipboard?.writeText(extensionDir);
+      message.success("扩展目录已复制");
+    } catch {
+      message.error("复制失败");
     }
   };
 
@@ -155,33 +184,35 @@ export default function OperationsExtensionGate({ role, routePath, children }: O
       <div className="app-panel operations-extension-gate__panel">
         <div className="app-panel__title">
           <div>
-            <div className="app-panel__title-main">运营账号需要先连接 Temu 多店扩展</div>
+            <div className="app-panel__title-main">先安装并连接 Temu 多店扩展</div>
             <div className="app-panel__title-sub">
-              扩展在线后才能进入商品、店铺、采购和运营页面，确保数据来自我们自己的浏览器扩展并已上传云端。
+              运营账号必须先让扩展上线，软件才会放行商品、店铺、采购和运营页面。
             </div>
           </div>
           <Space size={8} wrap>
             <Tag color={status.color} icon={status.icon} style={{ borderRadius: 999, margin: 0 }}>
               {status.text}
             </Tag>
-            {state.loading ? (
-              <Tag style={{ borderRadius: 999, margin: 0 }}>检测中</Tag>
-            ) : null}
+            {state.loading ? <Tag style={{ borderRadius: 999, margin: 0 }}>检测中</Tag> : null}
           </Space>
+        </div>
+
+        <div className="operations-extension-gate__notice">
+          扩展目录：{extensionDir || "未获取到目录，请点击“本机扩展目录”"}
         </div>
 
         <div className="operations-extension-gate__steps">
           <div className="operations-extension-gate__step">
-            <ChromeOutlined />
-            <span>打开 Chrome 扩展管理，确认“Temu 多店监控”已安装并启用。</span>
+            <FolderOpenOutlined />
+            <span>1. 点击“本机扩展目录”，确认打开的是软件自带的 extension 文件夹。</span>
           </div>
           <div className="operations-extension-gate__step">
-            <ApiOutlined />
-            <span>打开 Temu 卖家后台并保持登录，让扩展上报心跳和接口数据。</span>
+            <ChromeOutlined />
+            <span>2. 点击“扩展管理”，打开右上角开发者模式，点“加载已解压的扩展程序”，选择上面的 extension 文件夹。</span>
           </div>
           <div className="operations-extension-gate__step">
             <CloudSyncOutlined />
-            <span>回到这里重新检测，看到扩展在线后自动放行业务功能。</span>
+            <span>3. 打开 Temu 卖家后台并保持登录，等待 10-30 秒后点“重新检测”，扩展在线后自动进入业务页面。</span>
           </div>
         </div>
 
@@ -202,23 +233,23 @@ export default function OperationsExtensionGate({ role, routePath, children }: O
         ) : null}
 
         <Space size={10} wrap className="operations-extension-gate__actions">
-          <Button type="primary" icon={<ReloadOutlined />} loading={state.loading} onClick={() => refresh(false)}>
-            重新检测
-          </Button>
-          <Button icon={<ApiOutlined />} onClick={openTemuSeller}>
-            打开 Temu 后台
+          <Button type="primary" icon={<FolderOpenOutlined />} onClick={openExtensionDirectory}>
+            本机扩展目录
           </Button>
           <Button icon={<ChromeOutlined />} onClick={openChromeExtensions}>
             扩展管理
           </Button>
-          <Button icon={<CheckCircleOutlined />} onClick={openExtensionDirectory}>
-            本机扩展目录
+          <Button icon={<CopyOutlined />} onClick={copyExtensionDirectory}>
+            复制目录
+          </Button>
+          <Button icon={<ApiOutlined />} onClick={openTemuSeller}>
+            打开 Temu 后台
+          </Button>
+          <Button icon={<ReloadOutlined />} loading={state.loading} onClick={() => refresh(false)}>
+            重新检测
           </Button>
           <Button icon={<SettingOutlined />} onClick={() => navigate("/settings")}>
             去设置
-          </Button>
-          <Button onClick={() => navigate("/collect")}>
-            采集指引
           </Button>
         </Space>
       </div>

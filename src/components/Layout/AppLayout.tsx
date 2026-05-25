@@ -196,7 +196,7 @@ export default function AppLayout() {
   }, []);
 
   const noAccount = accounts.length === 0;
-  const showExtensionBanner = canUseCollection && location.pathname !== "/collect";
+  const showExtensionBanner = currentRole !== "operations" && canUseCollection && location.pathname !== "/collect";
 
   const accountMenuItems = [
     ...accounts.map((account) => ({
