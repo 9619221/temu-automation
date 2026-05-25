@@ -3860,7 +3860,15 @@ function createSku(payload = {}, actor = erpState.currentUser) {
       throw new Error("商品资料供应商不属于当前公司");
     }
   }
+  const existingId = optionalString(payload.id);
+  const existingSku = existingId
+    ? db.prepare("SELECT id, company_id, internal_sku_code FROM erp_skus WHERE id = ?").get(existingId)
+    : null;
+  if (existingSku && existingSku.company_id !== companyId) {
+    throw new Error("商品资料不属于当前公司");
+  }
   const internalSkuCode = optionalString(payload.internalSkuCode || payload.internal_sku_code)
+    || optionalString(existingSku?.internal_sku_code)
     || generateInternalSkuCode(db, companyId);
   const duplicate = db.prepare(`
     SELECT id
@@ -3876,7 +3884,7 @@ function createSku(payload = {}, actor = erpState.currentUser) {
   });
   if (duplicate) throw new Error(`商品编码已存在：${internalSkuCode}`);
   const row = {
-    id: optionalString(payload.id) || createId("sku"),
+    id: existingId || createId("sku"),
     company_id: companyId,
     account_id: accountId,
     internal_sku_code: internalSkuCode,

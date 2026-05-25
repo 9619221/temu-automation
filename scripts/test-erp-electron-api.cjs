@@ -300,6 +300,16 @@ async function main() {
     assert.equal(companySku.companyId, "company_default");
     assert.match(companySku.internalSkuCode, /^\d{12}$/);
     assert.equal(companySku.colorSpec, "Blue / 500ml");
+    const editedCompanySku = await invoke("erp:sku:create", {
+      id: companySku.id,
+      productName: "Company Level SKU Edited",
+      colorSpec: "Green / 750ml",
+      supplierId: supplier.id,
+      status: companySku.status || "active",
+    });
+    assert.equal(editedCompanySku.internalSkuCode, companySku.internalSkuCode);
+    assert.equal(editedCompanySku.productName, "Company Level SKU Edited");
+    assert.equal(editedCompanySku.colorSpec, "Green / 750ml");
 
     const sku = await invoke("erp:sku:create", {
       id: "sku_ipc",
