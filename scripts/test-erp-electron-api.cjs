@@ -1135,6 +1135,7 @@ async function main() {
       body: JSON.stringify({
         action: "save_1688_address",
         id: "addr_1688_ipc",
+        accountId: account.id,
         label: "IPC Warehouse",
         fullName: "Receiver",
         mobile: "13800000000",
@@ -1174,6 +1175,107 @@ async function main() {
     const mappedSku = JSON.parse(po1688.body).result.workbench.skuOptions.find((item) => item.id === sku.id);
     assert.equal(mappedSku.procurementSourceCount, 1);
     assert.equal(mappedSku.primary1688Source.externalOfferId, "1688-offer-ipc");
+
+    const missingRemoteAddressValidation = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "validate_1688_order_push",
+        poId: "po_1688_preview_ipc",
+        dryRun: true,
+      }),
+    });
+    assert.equal(missingRemoteAddressValidation.statusCode, 400);
+    assert.match(missingRemoteAddressValidation.body, /ADDRESS_REMOTE_ID_MISSING/);
+
+    await invoke("erp:purchase:action", {
+      action: "set_default_1688_purchase_account",
+      accountId: account.id,
+      default1688AccountId: "1688_auth_ipc_b",
+      actor: { id: user.id, role: "admin" },
+    });
+    const officialAddressSync = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "sync_1688_addresses",
+        mockResponse: {
+          result: {
+            receiveAddressItems: [{
+              id: 560954849,
+              fullName: "Receiver",
+              address: "No. 1 Test Road",
+              post: "310000",
+              mobilePhone: "13800000000",
+              addressCode: "330106",
+              addressCodeText: "Zhejiang Hangzhou Xihu",
+              townCode: "330106001",
+              townName: "Test Town",
+              isDefault: true,
+            }],
+          },
+          success: true,
+        },
+      }),
+    });
+    assert.equal(officialAddressSync.statusCode, 200);
+    const officialAddressSyncResult = JSON.parse(officialAddressSync.body).result.result;
+    assert.equal(officialAddressSyncResult.addressCount, 1);
+    assert.equal(officialAddressSyncResult.addresses[0].addressId, "560954849");
+    assert.equal(officialAddressSyncResult.addresses[0].purchase1688AccountId, "1688_auth_ipc_b");
+
+    const validateAfterOfficialAddressSync = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "validate_1688_order_push",
+        poId: "po_1688_preview_ipc",
+        dryRun: true,
+      }),
+    });
+    assert.equal(validateAfterOfficialAddressSync.statusCode, 200);
+    const validateAfterOfficialAddressSyncResult = JSON.parse(validateAfterOfficialAddressSync.body).result.result;
+    assert.equal(validateAfterOfficialAddressSyncResult.ready, true);
+    assert.equal(validateAfterOfficialAddressSyncResult.params.addressParam.addressId, "560954849");
+
+    const syncedAddress1688 = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "save_1688_address",
+        id: "addr_1688_ipc",
+        accountId: account.id,
+        label: "IPC Warehouse",
+        fullName: "Receiver",
+        mobile: "13800000000",
+        provinceText: "Zhejiang",
+        cityText: "Hangzhou",
+        areaText: "Xihu",
+        address: "No. 1 Test Road",
+        postCode: "310000",
+        alibabaAddressId: "remote-addr-ipc",
+        isDefault: true,
+      }),
+    });
+    assert.equal(syncedAddress1688.statusCode, 200);
+    const syncedAddress1688Result = JSON.parse(syncedAddress1688.body).result.result;
+    assert.equal(syncedAddress1688Result.addressParam.addressId, "remote-addr-ipc");
 
     const createOptimizationRequest = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
       method: "POST",

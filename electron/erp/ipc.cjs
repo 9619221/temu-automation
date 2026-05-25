@@ -1230,7 +1230,11 @@ function listAccounts(params = {}) {
         WHERE latest_addr.company_id = acct.company_id
           AND latest_addr.account_id = acct.id
           AND latest_addr.status = 'active'
-        ORDER BY latest_addr.is_default DESC, latest_addr.updated_at DESC, latest_addr.created_at DESC
+        ORDER BY
+          CASE WHEN latest_addr.address_id IS NOT NULL AND latest_addr.address_id != '' THEN 0 ELSE 1 END,
+          latest_addr.is_default DESC,
+          latest_addr.updated_at DESC,
+          latest_addr.created_at DESC
         LIMIT 1
       )
     ${whereClause}
@@ -5247,6 +5251,8 @@ function getPurchaseWorkbench(params = {}) {
         FROM erp_1688_delivery_addresses addr
         WHERE addr.account_id = po.account_id
           AND addr.status = 'active'
+          AND addr.address_id IS NOT NULL
+          AND addr.address_id != ''
       ) AS delivery_address_count
       ,
       (
@@ -5553,6 +5559,8 @@ function getPurchaseOrderActionRow(db, poId) {
         FROM erp_1688_delivery_addresses addr
         WHERE addr.account_id = po.account_id
           AND addr.status = 'active'
+          AND addr.address_id IS NOT NULL
+          AND addr.address_id != ''
       ) AS delivery_address_count,
       (
         SELECT cost_line.unit_cost
@@ -8427,6 +8435,40 @@ function build1688AddressParamFromRow(row = {}) {
   return addressParam;
 }
 
+function create1688AddressError(code, message) {
+  const error = new Error(`errorCode:${code} ${message}`);
+  error.code = code;
+  return error;
+}
+
+function throw1688RemoteAddressMissing() {
+  throw create1688AddressError(
+    "ADDRESS_REMOTE_ID_MISSING",
+    "该收货地址还没有 1688 远端 ID，请到「询盘设置」点「同步 1688 地址」拉一份完整数据后重新选择再推单。",
+  );
+}
+
+function queryDefault1688DeliveryAddress(db, whereSql, values = {}) {
+  const usable = db.prepare(`
+    SELECT *
+    FROM erp_1688_delivery_addresses
+    WHERE ${whereSql}
+      AND status = 'active'
+      AND address_id IS NOT NULL AND address_id != ''
+    ORDER BY is_default DESC, updated_at DESC, created_at DESC
+    LIMIT 1
+  `).get(values);
+  if (usable) return usable;
+  const activeCount = db.prepare(`
+    SELECT COUNT(1) AS count
+    FROM erp_1688_delivery_addresses
+    WHERE ${whereSql}
+      AND status = 'active'
+  `).get(values)?.count || 0;
+  if (activeCount > 0) throw1688RemoteAddressMissing();
+  return null;
+}
+
 function list1688DeliveryAddresses(params = {}) {
   const { db } = requireErp();
   const status = optionalString(params.status);
@@ -8464,52 +8506,28 @@ function get1688DeliveryAddress(db, addressId = null, companyId = DEFAULT_COMPAN
   }
   // [OAuth 维度 2026-05-21] 默认地址查询：优先按 OAuth；OAuth 没传退回老的 account_id 路径。
   if (normalizedOauth) {
-    const row = db.prepare(`
-      SELECT *
-      FROM erp_1688_delivery_addresses
-      WHERE company_id = @company_id
-        AND purchase_1688_account_id = @oauth_id
-        AND status = 'active'
-      ORDER BY
-        CASE WHEN address_id IS NOT NULL AND address_id != '' THEN 0 ELSE 1 END,
-        is_default DESC,
-        updated_at DESC,
-        created_at DESC
-      LIMIT 1
-    `).get({ company_id: normalizedCompanyId, oauth_id: normalizedOauth });
+    const row = queryDefault1688DeliveryAddress(db, "company_id = @company_id AND purchase_1688_account_id = @oauth_id", {
+      company_id: normalizedCompanyId,
+      oauth_id: normalizedOauth,
+    });
     if (row) return row;
+    throw create1688AddressError(
+      "ADDRESS_INACTIVE",
+      "当前 1688 采购账号下没有可用的收货地址，请到「询盘设置」点「同步 1688 地址」后重新选择。",
+    );
   }
   if (normalizedAccountId) {
-    const row = db.prepare(`
-      SELECT *
-      FROM erp_1688_delivery_addresses
-      WHERE company_id = @company_id
-        AND account_id = @account_id
-        AND status = 'active'
-      ORDER BY
-        CASE WHEN address_id IS NOT NULL AND address_id != '' THEN 0 ELSE 1 END,
-        is_default DESC,
-        updated_at DESC,
-        created_at DESC
-      LIMIT 1
-    `).get({ company_id: normalizedCompanyId, account_id: normalizedAccountId });
+    const row = queryDefault1688DeliveryAddress(db, "company_id = @company_id AND account_id = @account_id", {
+      company_id: normalizedCompanyId,
+      account_id: normalizedAccountId,
+    });
     if (row) return row;
     const account = db.prepare("SELECT name FROM erp_accounts WHERE id = ?").get(normalizedAccountId);
     throw new Error(`店铺${account?.name ? `「${account.name}」` : ""}还没有绑定 1688 地址，请先到店铺维护`);
   }
-  const row = db.prepare(`
-    SELECT *
-    FROM erp_1688_delivery_addresses
-    WHERE company_id = @company_id
-      AND (account_id IS NULL OR account_id = '')
-      AND status = 'active'
-    ORDER BY
-      CASE WHEN address_id IS NOT NULL AND address_id != '' THEN 0 ELSE 1 END,
-      is_default DESC,
-      updated_at DESC,
-      created_at DESC
-    LIMIT 1
-  `).get({ company_id: normalizedCompanyId });
+  const row = queryDefault1688DeliveryAddress(db, "company_id = @company_id AND (account_id IS NULL OR account_id = '')", {
+    company_id: normalizedCompanyId,
+  });
   if (!row) throw new Error("1688 delivery address is not configured");
   return row;
 }
@@ -8845,6 +8863,12 @@ async function sync1688DeliveryAddressesAction({ db, payload, actor }) {
   if (!purchase1688AccountId && accountId) {
     const acct = db.prepare("SELECT default_1688_purchase_account_id FROM erp_accounts WHERE id = ?").get(accountId);
     purchase1688AccountId = optionalString(acct?.default_1688_purchase_account_id);
+  }
+  if (!purchase1688AccountId) {
+    purchase1688AccountId = optionalString(resolve1688AuthRowForPurchase({
+      companyId,
+      accountId,
+    })?.id);
   }
   const params = raw1688Params(payload, {
     webSite: optionalString(payload.webSite) || "1688",
@@ -10113,7 +10137,11 @@ function resolve1688AddressParam(db, payload = {}, actor = {}, po = {}) {
   const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
   const accountId = optionalString(payload.accountId || payload.account_id || po.account_id || po.accountId);
   // [OAuth 维度 2026-05-21] 传 OAuth 给 get1688DeliveryAddress，让默认地址查询优先按 OAuth 走。
-  const purchase1688AccountId = optionalString(payload.purchase1688AccountId || payload.purchase_1688_account_id || po.purchase_1688_account_id);
+  let purchase1688AccountId = optionalString(payload.purchase1688AccountId || payload.purchase_1688_account_id || po.purchase_1688_account_id);
+  if (!purchase1688AccountId && accountId) {
+    const acct = db.prepare("SELECT default_1688_purchase_account_id FROM erp_accounts WHERE id = ?").get(accountId);
+    purchase1688AccountId = optionalString(acct?.default_1688_purchase_account_id);
+  }
   try {
     const row = get1688DeliveryAddress(db, addressId, companyId, accountId, purchase1688AccountId);
     // 推单前预校验：先在本地拦掉肯定不能成功的请求，错误码与 ALIBABA_1688_BUSINESS_ERROR_HINTS 对齐。
@@ -10156,7 +10184,7 @@ function resolve1688AddressParam(db, payload = {}, actor = {}, po = {}) {
     }
     return build1688AddressParamFromRow(row);
   } catch (error) {
-    if (payload.dryRun || payload.mockResponse || payload.mockPreviewResponse) return null;
+    if (payload.mockResponse || payload.mockPreviewResponse) return null;
     throw error;
   }
 }
