@@ -156,7 +156,7 @@ const ACCESS_CODE_KEY_LENGTH = 32;
 const ACCESS_CODE_DIGEST = "sha256";
 const VALID_USER_ROLES = new Set(["admin", "manager", "operations", "buyer", "finance", "warehouse", "viewer"]);
 const VALID_USER_STATUSES = new Set(["active", "blocked"]);
-const JUSHUITAN_WAREHOUSE_NAME = "????????????";
+const JUSHUITAN_WAREHOUSE_NAME = "义乌明舵国际贸易有限公司";
 const DEFAULT_COMPANY_ID = "company_default";
 const DEFAULT_COMPANY_CODE = "default";
 const DEFAULT_COMPANY_NAME = "Default Company";
@@ -3396,7 +3396,11 @@ function scopeWorkItemParams(params = {}) {
 function listSuppliers(params = {}) {
   const { db } = requireErp();
   const companyId = optionalString(params.companyId || params.company_id);
-  const whereCompany = companyId ? "WHERE supplier.company_id = @company_id" : "";
+  const whereParts = ["supplier.id NOT LIKE 'jst:%'"];
+  if (companyId) {
+    whereParts.push("supplier.company_id = @company_id");
+  }
+  const whereSql = `WHERE ${whereParts.join(" AND ")}`;
   const rows = db.prepare(`
     SELECT
       supplier.*,
@@ -3433,7 +3437,7 @@ function listSuppliers(params = {}) {
           AND po.status != 'cancelled'
       ) AS last_purchase_at
     FROM erp_suppliers supplier
-    ${whereCompany}
+    ${whereSql}
     ORDER BY supplier.updated_at DESC, supplier.created_at DESC
     LIMIT @limit OFFSET @offset
   `).all({
@@ -12177,14 +12181,23 @@ function normalize1688LogisticsResponse(rawResponse = {}, externalOrderId = null
     "acceptTime",
     "time",
     "traceTime",
+    "text",
+    "context",
     "remark",
     "eventDetail",
     "desc",
   ])).map((item) => ({
     time: optionalString(item.acceptTime || item.traceTime || item.time || item.timeStr),
-    text: optionalString(item.remark || item.eventDetail || item.desc || item.description || item.context),
+    text: optionalString(item.remark || item.eventDetail || item.desc || item.description || item.context || item.text),
     raw: item,
   })).filter((item) => item.time || item.text);
+  const traceError = optionalString(findFirstDeepValue(expanded, [
+    "traceError",
+    "errorMessage",
+    "errorMsg",
+    "message",
+    "msg",
+  ]));
   const statusText = [
     ...logisticsItems.map((item) => item.status),
     ...traceItems.map((item) => item.text),
@@ -12197,6 +12210,7 @@ function normalize1688LogisticsResponse(rawResponse = {}, externalOrderId = null
     status: signed ? "signed" : (shipped ? "shipped" : optionalString(findFirstDeepValue(expanded, ["status", "logisticsStatus"]))),
     signed,
     shipped,
+    traceError,
     logisticsItems,
     traceItems,
     raw: expanded,
@@ -14000,6 +14014,72 @@ function extractInboundLogisticsSummary(externalLogisticsJson) {
   };
 }
 
+function normalizeInboundLogisticsTraceItems(items = []) {
+  return (Array.isArray(items) ? items : [])
+    .map((item, index) => ({
+      id: optionalString(item.id) || `trace-${index + 1}`,
+      time: optionalString(item.time || item.acceptTime || item.traceTime || item.timeStr),
+      text: optionalString(item.text || item.remark || item.eventDetail || item.desc || item.description || item.context),
+    }))
+    .filter((item) => item.time || item.text)
+    .sort((left, right) => String(right.time || "").localeCompare(String(left.time || "")));
+}
+
+function normalizeInboundLogisticsItems(items = []) {
+  return (Array.isArray(items) ? items : [])
+    .map((item, index) => ({
+      id: optionalString(item.logisticsId || item.id) || `logistics-${index + 1}`,
+      companyName: optionalString(item.logisticsCompanyName || item.companyName || item.logisticsCompany),
+      billNo: optionalString(item.logisticsBillNo || item.mailNo || item.mail_no || item.waybillNo),
+      status: optionalString(item.status || item.logisticsStatus || item.statusDesc),
+      deliveredAt: optionalString(item.deliveredAt || item.signTime || item.endTime),
+    }))
+    .filter((item) => item.companyName || item.billNo || item.status || item.deliveredAt);
+}
+
+function extractInboundLogisticsDetail(row = {}) {
+  const externalLogisticsJson = row.po_external_logistics_json || row.external_logistics_json;
+  const hasExternalLogistics = Boolean(optionalString(externalLogisticsJson));
+  const externalLogistics = hasExternalLogistics ? parseJsonObject(externalLogisticsJson) : null;
+  const jstRemark = parseJsonObject(row.remark, null);
+  const normalized = hasExternalLogistics
+    ? normalize1688LogisticsResponse(externalLogistics, row.external_order_id)
+    : null;
+  const summary = hasExternalLogistics ? extractInboundLogisticsSummary(externalLogisticsJson) : null;
+  const logisticsItems = normalizeInboundLogisticsItems(normalized?.logisticsItems || []);
+  const primaryLogistics = logisticsItems[0] || {};
+  const companyName = optionalString(
+    summary?.companyName
+    || primaryLogistics.companyName
+    || jstRemark?.logisticsCompany
+    || jstRemark?.logistics_company,
+  );
+  const billNo = optionalString(
+    summary?.billNo
+    || primaryLogistics.billNo
+    || jstRemark?.trackingNo
+    || jstRemark?.tracking_no
+    || jstRemark?.logisticsBillNo,
+  );
+  return {
+    receiptId: row.id || null,
+    receiptNo: row.receipt_no || null,
+    poId: row.po_id || null,
+    poNo: row.po_no || null,
+    supplierName: row.supplier_name || null,
+    companyName: companyName || null,
+    billNo: billNo || null,
+    status: normalized?.status || primaryLogistics.status || null,
+    signed: Boolean(normalized?.signed),
+    shipped: Boolean(normalized?.shipped || normalized?.traceItems?.length || logisticsItems.length),
+    source: hasExternalLogistics ? "1688" : (jstRemark?.source === "jushuitan" ? "jushuitan" : "local"),
+    syncedAt: row.po_external_logistics_synced_at || null,
+    traceError: optionalString(normalized?.traceError || (externalLogistics && findFirstDeepValue(externalLogistics, ["traceError", "errorMessage", "errorMsg"]))),
+    logisticsItems,
+    traceItems: normalizeInboundLogisticsTraceItems(normalized?.traceItems || []),
+  };
+}
+
 function toInboundReceipt(row) {
   const camel = toCamelRow(row);
   const jstRemark = parseJsonObject(row?.remark, null);
@@ -14007,6 +14087,25 @@ function toInboundReceipt(row) {
     const totalQty = Number(jstRemark.totalQty || 0);
     if (totalQty > 0 && Number(camel.expectedQty || 0) <= 0) camel.expectedQty = totalQty;
     if (totalQty > 0 && Number(camel.receivedQty || 0) <= 0) camel.receivedQty = totalQty;
+    if (jstRemark.warehouse && !camel.warehouseName) camel.warehouseName = jstRemark.warehouse;
+    camel.sourceStatus = jstRemark.sourceStatus || jstRemark.status || null;
+    camel.sourceFinancialStatus = jstRemark.sourceFinancialStatus || null;
+    camel.sourceRemark = jstRemark.sourceRemark || null;
+    if (!camel.skuSummary) camel.skuSummary = jstRemark.warehouse ? `聚水潭入库 / ${jstRemark.warehouse}` : "聚水潭入库";
+    if (!camel.logistics && (jstRemark.logisticsCompany || jstRemark.trackingNo)) {
+      camel.logistics = {
+        companyName: jstRemark.logisticsCompany || null,
+        billNo: jstRemark.trackingNo || null,
+      };
+    }
+  } else if (jstRemark?.source === "jushuitan_purchasein_export") {
+    const totalQty = Number(jstRemark.totalQty || jstRemark.sourceTotalQty || 0);
+    if (totalQty > 0 && Number(camel.expectedQty || 0) <= 0) camel.expectedQty = totalQty;
+    if (totalQty > 0 && Number(camel.receivedQty || 0) <= 0) camel.receivedQty = totalQty;
+    if (jstRemark.warehouse && !camel.warehouseName) camel.warehouseName = jstRemark.warehouse;
+    camel.sourceStatus = jstRemark.sourceStatus || jstRemark.status || null;
+    camel.sourceFinancialStatus = jstRemark.sourceFinancialStatus || null;
+    camel.sourceRemark = jstRemark.sourceRemark || null;
     if (!camel.skuSummary) camel.skuSummary = jstRemark.warehouse ? `聚水潭入库 / ${jstRemark.warehouse}` : "聚水潭入库";
     if (!camel.logistics && (jstRemark.logisticsCompany || jstRemark.trackingNo)) {
       camel.logistics = {
@@ -14016,9 +14115,23 @@ function toInboundReceipt(row) {
     }
   }
   if (row?.po_external_logistics_json) {
+    const normalizedLogistics = normalize1688LogisticsResponse(
+      parseJsonObject(row.po_external_logistics_json),
+      row.po_external_order_id || row.external_order_id,
+    );
     const summary = extractInboundLogisticsSummary(row.po_external_logistics_json);
     if (summary) camel.logistics = summary;
+    camel.logisticsStatus = normalizedLogistics.status || null;
+    camel.logisticsSource = "1688";
+    camel.logisticsSyncedAt = row.po_external_logistics_synced_at || null;
+    camel.logisticsTraceError = optionalString(
+      normalizedLogistics.traceError
+      || findFirstDeepValue(parseJsonObject(row.po_external_logistics_json), ["traceError", "errorMessage", "errorMsg"]),
+    ) || null;
+    camel.logisticsHasTrace = normalizedLogistics.traceItems.length > 0 ? 1 : 0;
     delete camel.poExternalLogisticsJson;
+    delete camel.poExternalLogisticsSyncedAt;
+    delete camel.poExternalOrderId;
   }
   return camel;
 }
@@ -14138,6 +14251,28 @@ const WAREHOUSE_EXCEPTION_STATUS_SQL = "('quantity_mismatch', 'damaged', 'except
 const WAREHOUSE_ACTIONABLE_STATUS_SQL = "('pending_arrival', 'arrived', 'counted', 'quantity_mismatch', 'damaged', 'exception')";
 const WAREHOUSE_RECEIPT_DATE_EXPR = "datetime(COALESCE(NULLIF(receipt.received_at, ''), receipt.updated_at, receipt.created_at))";
 const WAREHOUSE_RECEIPT_OVERDUE_HOURS = 24;
+const INBOUND_RECEIPT_EDIT_STATUSES = new Set([
+  "jst_pending_inbound",
+  "pending_arrival",
+  "arrived",
+  "counted",
+  "inbounded_pending_qc",
+  "quantity_mismatch",
+  "damaged",
+  "exception",
+  "cancelled",
+]);
+const INBOUND_SOURCE_STATUS_BY_STATUS = {
+  jst_pending_inbound: "待入库",
+  pending_arrival: "待到货",
+  arrived: "已到仓",
+  counted: "已核数",
+  inbounded_pending_qc: "已入库",
+  quantity_mismatch: "数量异常",
+  damaged: "破损异常",
+  exception: "异常",
+  cancelled: "已取消",
+};
 
 function getWarehouseWorkbench(params = {}) {
   const { db } = requireErp();
@@ -14201,7 +14336,7 @@ function getWarehouseWorkbench(params = {}) {
     && rawInboundReceiptLimit !== null
     && rawInboundReceiptLimit !== ""
     && Number(rawInboundReceiptLimit) > 0;
-  const inboundReceiptLimit = hasInboundReceiptLimit ? normalizeLimit(rawInboundReceiptLimit, 20) : null;
+  const inboundReceiptLimit = hasInboundReceiptLimit ? Math.min(normalizeLimit(rawInboundReceiptLimit, 20), 50) : 20;
   const inboundReceiptOffset = normalizeOffset(
     params.inboundReceiptOffset || params.inbound_receipt_offset || params.receiptOffset || params.receipt_offset || params.offset,
   );
@@ -14213,7 +14348,7 @@ function getWarehouseWorkbench(params = {}) {
   const inventoryBatchOffset = normalizeOffset(
     params.inventoryBatchOffset || params.inventory_batch_offset || params.batchOffset || params.batch_offset,
   );
-  const inboundReceiptLimitClause = hasInboundReceiptLimit ? "LIMIT @receipt_limit OFFSET @receipt_offset" : "";
+  const inboundReceiptLimitClause = "LIMIT @receipt_limit OFFSET @receipt_offset";
   const inventoryBatchLimitClause = "LIMIT @batch_limit OFFSET @batch_offset";
   const receiptWhereAccount = accountId ? "WHERE receipt.account_id = @account_id" : "";
   const batchWhereAccount = accountId ? "WHERE batch.account_id = @account_id" : "";
@@ -14349,8 +14484,40 @@ function getWarehouseWorkbench(params = {}) {
       COALESCE(SUM(line.shortage_qty), 0) AS shortage_qty,
       COALESCE(SUM(line.over_qty), 0) AS over_qty,
       SUM(CASE WHEN line.batch_id IS NOT NULL THEN 1 ELSE 0 END) AS batch_line_count,
-      GROUP_CONCAT(DISTINCT sku.internal_sku_code || ' ' || sku.product_name) AS sku_summary,
-      po.external_logistics_json AS po_external_logistics_json,
+      (
+        SELECT sku_first.internal_sku_code
+        FROM erp_inbound_receipt_lines line_first
+        LEFT JOIN erp_skus sku_first ON sku_first.id = line_first.sku_id
+        WHERE line_first.receipt_id = receipt.id
+          AND COALESCE(sku_first.internal_sku_code, '') != ''
+        ORDER BY line_first.id ASC
+        LIMIT 1
+      ) AS sku_code,
+      (
+        SELECT sku_first.product_name
+        FROM erp_inbound_receipt_lines line_first
+        LEFT JOIN erp_skus sku_first ON sku_first.id = line_first.sku_id
+        WHERE line_first.receipt_id = receipt.id
+          AND COALESCE(sku_first.product_name, '') != ''
+        ORDER BY line_first.id ASC
+        LIMIT 1
+      ) AS product_name,
+      (
+        SELECT sku_first.image_url
+        FROM erp_inbound_receipt_lines line_first
+        LEFT JOIN erp_skus sku_first ON sku_first.id = line_first.sku_id
+        WHERE line_first.receipt_id = receipt.id
+          AND COALESCE(sku_first.image_url, '') != ''
+        ORDER BY line_first.id ASC
+        LIMIT 1
+      ) AS product_image_url,
+      GROUP_CONCAT(DISTINCT sku.internal_sku_code) AS sku_summary,
+      CASE
+        WHEN receipt.remark LIKE '%jushuitan_purchasein_export%' THEN NULL
+        ELSE po.external_logistics_json
+      END AS po_external_logistics_json,
+      po.external_logistics_synced_at AS po_external_logistics_synced_at,
+      po.external_order_id AS po_external_order_id,
       ROUND(MAX(0, (julianday('now') - julianday(${WAREHOUSE_RECEIPT_DATE_EXPR})) * 24), 1) AS age_hours,
       CASE WHEN date(${WAREHOUSE_RECEIPT_DATE_EXPR}, 'localtime') = date('now', 'localtime') THEN 1 ELSE 0 END AS is_today,
       CASE WHEN receipt.status IN ${WAREHOUSE_ACTIONABLE_STATUS_SQL}
@@ -14448,8 +14615,8 @@ function getWarehouseWorkbench(params = {}) {
     generatedAt: nowIso(),
     summary,
     inboundReceiptPage: {
-      limit: inboundReceiptLimit || inboundReceipts.length,
-      offset: hasInboundReceiptLimit ? inboundReceiptOffset : 0,
+      limit: inboundReceiptLimit,
+      offset: inboundReceiptOffset,
       total: Number(receiptListSummary.inbound_receipt_count || 0),
     },
     inventoryBatchPage: {
@@ -14483,6 +14650,10 @@ function normalizeJstWarehouseWorkbench(workbench = {}) {
       const skuSummary = jstRemark?.warehouse ? `聚水潭入库 / ${jstRemark.warehouse}` : "聚水潭入库";
       next.skuSummary = skuSummary;
       if (next.sku_summary !== undefined) next.sku_summary = skuSummary;
+    }
+    if (jstRemark?.warehouse && !next.warehouseName && !next.warehouse_name) {
+      next.warehouseName = jstRemark.warehouse;
+      if (next.warehouse_name !== undefined) next.warehouse_name = jstRemark.warehouse;
     }
     if (!next.logistics && (jstRemark?.logisticsCompany || jstRemark?.trackingNo)) {
       next.logistics = {
@@ -14819,6 +14990,141 @@ function resolveInboundExceptionWithoutBatch({ db, services, receipt, actor, res
   };
 }
 
+function normalizeInboundEditQty(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.floor(number)) : Math.max(0, Math.floor(Number(fallback || 0)));
+}
+
+function normalizeInboundReceiptEditStatus(value, fallback) {
+  const status = optionalString(value || fallback);
+  if (!INBOUND_RECEIPT_EDIT_STATUSES.has(status)) {
+    throw new Error(`不支持的入库单状态: ${status || "空"}`);
+  }
+  return status;
+}
+
+function updateInboundReceiptManual({ db, receipt, payload = {}, actor = {} }) {
+  assertActorRole(actor, ["warehouse", "manager", "admin"], "修改入库单");
+  const now = nowIso();
+  const nextStatus = normalizeInboundReceiptEditStatus(payload.status, receipt.status);
+  const hasReceivedAt = payload.receivedAt !== undefined || payload.received_at !== undefined;
+  const receivedAt = hasReceivedAt ? optionalString(payload.receivedAt ?? payload.received_at) : (receipt.received_at || null);
+  const warehouseName = payload.warehouseName !== undefined || payload.warehouse_name !== undefined
+    ? optionalString(payload.warehouseName || payload.warehouse_name)
+    : undefined;
+  const logisticsCompany = payload.logisticsCompany !== undefined || payload.logistics_company !== undefined
+    ? optionalString(payload.logisticsCompany || payload.logistics_company)
+    : undefined;
+  const trackingNo = payload.trackingNo !== undefined || payload.tracking_no !== undefined
+    ? optionalString(payload.trackingNo || payload.tracking_no)
+    : undefined;
+  const sourceStatus = payload.sourceStatus !== undefined || payload.source_status !== undefined
+    ? optionalString(payload.sourceStatus || payload.source_status)
+    : undefined;
+  const sourceRemark = payload.sourceRemark !== undefined || payload.source_remark !== undefined
+    ? optionalString(payload.sourceRemark || payload.source_remark)
+    : undefined;
+  const remark = parseJsonObject(receipt.remark, {});
+  if (remark.sourceStatus && !remark.sourceOriginalStatus) remark.sourceOriginalStatus = remark.sourceStatus;
+  if (sourceStatus !== undefined) {
+    remark.sourceStatus = sourceStatus;
+  } else if (remark.source) {
+    remark.sourceStatus = INBOUND_SOURCE_STATUS_BY_STATUS[nextStatus] || remark.sourceStatus || null;
+  }
+  if (sourceRemark !== undefined) remark.sourceRemark = sourceRemark;
+  if (warehouseName !== undefined) remark.warehouse = warehouseName || JUSHUITAN_WAREHOUSE_NAME;
+  if (logisticsCompany !== undefined) remark.logisticsCompany = logisticsCompany;
+  if (trackingNo !== undefined) remark.trackingNo = trackingNo;
+  remark.editedAt = now;
+  remark.editedBy = actor?.name || actor?.id || actor?.role || "unknown";
+
+  const linesPayload = Array.isArray(payload.lines) ? payload.lines : [];
+  if (linesPayload.length) {
+    const batchCount = db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM erp_inbound_receipt_lines
+      WHERE receipt_id = ? AND batch_id IS NOT NULL
+    `).get(receipt.id)?.count || 0;
+    if (Number(batchCount || 0) > 0) {
+      throw new Error("该入库单已生成库存批次，不能直接修改数量，请先走库存调整");
+    }
+    const existingLines = db.prepare(`
+      SELECT id, expected_qty, received_qty, damaged_qty
+      FROM erp_inbound_receipt_lines
+      WHERE receipt_id = ?
+    `).all(receipt.id);
+    const existingLineIds = new Set(existingLines.map((line) => line.id));
+    const updateLine = db.prepare(`
+      UPDATE erp_inbound_receipt_lines
+      SET expected_qty = @expected_qty,
+          received_qty = @received_qty,
+          damaged_qty = @damaged_qty,
+          shortage_qty = @shortage_qty,
+          over_qty = @over_qty
+      WHERE id = @id AND receipt_id = @receipt_id
+    `);
+    for (const line of linesPayload) {
+      const id = optionalString(line.id);
+      if (!id || !existingLineIds.has(id)) continue;
+      const expectedQty = normalizeInboundEditQty(line.expectedQty ?? line.expected_qty, 0);
+      const receivedQty = normalizeInboundEditQty(line.receivedQty ?? line.received_qty, expectedQty);
+      const damagedQty = normalizeInboundEditQty(line.damagedQty ?? line.damaged_qty, 0);
+      updateLine.run({
+        id,
+        receipt_id: receipt.id,
+        expected_qty: expectedQty,
+        received_qty: receivedQty,
+        damaged_qty: damagedQty,
+        shortage_qty: Math.max(0, expectedQty - receivedQty),
+        over_qty: Math.max(0, receivedQty - expectedQty),
+      });
+    }
+  }
+
+  db.prepare(`
+    UPDATE erp_inbound_receipts
+    SET status = @status,
+        received_at = @received_at,
+        operator_id = @operator_id,
+        remark = @remark,
+        updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id: receipt.id,
+    status: nextStatus,
+    received_at: receivedAt,
+    operator_id: actor?.id || receipt.operator_id || null,
+    remark: JSON.stringify(remark),
+    updated_at: now,
+  });
+  writeInboundReceiptFlowEvent(
+    db,
+    receipt,
+    actor,
+    "manual_update",
+    `手动修改入库单：${receipt.receipt_no || receipt.id}`,
+  );
+  return {
+    receipt: toCamelRow(getInboundReceipt(db, receipt.id)),
+    lines: db.prepare(`
+      SELECT line.id, line.receipt_id, line.po_line_id, line.sku_id,
+             line.expected_qty, line.received_qty, line.damaged_qty,
+             line.shortage_qty, line.over_qty,
+             sku.internal_sku_code, sku.product_name,
+             sku.image_url AS sku_image_url,
+             sku.color_spec,
+             po_line.unit_cost,
+             po_line.logistics_fee
+      FROM erp_inbound_receipt_lines line
+      LEFT JOIN erp_skus sku ON sku.id = line.sku_id
+      LEFT JOIN erp_purchase_order_lines po_line ON po_line.id = line.po_line_id
+      WHERE line.receipt_id = ?
+      ORDER BY line.id ASC
+    `).all(receipt.id).map(toCamelRow),
+    timeline: getInboundReceiptTimeline(db, receipt.id),
+  };
+}
+
 function performWarehouseAction(payload = {}, actorInput = {}) {
   const { db, services } = requireErp();
   const action = requireString(payload.action, "action");
@@ -14924,6 +15230,15 @@ function performWarehouseAction(payload = {}, actorInput = {}) {
           resolutionRemark: payload.resolutionRemark || payload.resolution_remark || payload.remark,
         });
       }
+      case "update_inbound_receipt": {
+        const receiptId = requireString(payload.receiptId || payload.id, "receiptId");
+        return updateInboundReceiptManual({
+          db,
+          receipt: getInboundReceipt(db, receiptId),
+          payload,
+          actor,
+        });
+      }
       case "get_inbound_lines": {
         // 给前端拉某入库单的明细行，用于"按实数入库"Modal 渲染。
         const receiptId = requireString(payload.receiptId || payload.id, "receiptId");
@@ -14932,15 +15247,49 @@ function performWarehouseAction(payload = {}, actorInput = {}) {
                  line.expected_qty, line.received_qty, line.damaged_qty,
                  line.shortage_qty, line.over_qty,
                  sku.internal_sku_code, sku.product_name,
-                 sku.image_url AS sku_image_url
+                 sku.image_url AS sku_image_url,
+                 sku.color_spec,
+                 po_line.unit_cost,
+                 po_line.logistics_fee,
+                 source.external_offer_id
           FROM erp_inbound_receipt_lines line
           LEFT JOIN erp_skus sku ON sku.id = line.sku_id
+          LEFT JOIN erp_purchase_order_lines po_line ON po_line.id = line.po_line_id
+          LEFT JOIN erp_sku_1688_sources source ON source.id = (
+            SELECT source_one.id
+            FROM erp_sku_1688_sources source_one
+            WHERE source_one.account_id = line.account_id
+              AND source_one.sku_id = line.sku_id
+              AND source_one.status = 'active'
+            ORDER BY source_one.is_default DESC, source_one.updated_at DESC, source_one.created_at DESC
+            LIMIT 1
+          )
           WHERE line.receipt_id = ?
           ORDER BY line.id ASC
         `).all(receiptId);
         return {
           lines: lines.map(toCamelRow),
           timeline: getInboundReceiptTimeline(db, receiptId),
+        };
+      }
+      case "get_inbound_logistics": {
+        const receiptId = requireString(payload.receiptId || payload.id, "receiptId");
+        const receipt = db.prepare(`
+          SELECT
+            receipt.id, receipt.receipt_no, receipt.po_id, receipt.remark,
+            po.po_no, po.external_order_id,
+            po.external_logistics_json AS po_external_logistics_json,
+            po.external_logistics_synced_at AS po_external_logistics_synced_at,
+            supplier.name AS supplier_name
+          FROM erp_inbound_receipts receipt
+          LEFT JOIN erp_purchase_orders po ON po.id = receipt.po_id
+          LEFT JOIN erp_suppliers supplier ON supplier.id = po.supplier_id
+          WHERE receipt.id = ?
+          LIMIT 1
+        `).get(receiptId);
+        if (!receipt) throw new Error(`Inbound receipt not found: ${receiptId}`);
+        return {
+          logistics: extractInboundLogisticsDetail(receipt),
         };
       }
       case "create_batches": {
@@ -14960,7 +15309,7 @@ function performWarehouseAction(payload = {}, actorInput = {}) {
   });
 
   const result = run();
-  if (action === "get_inbound_lines") {
+  if (action === "get_inbound_lines" || action === "get_inbound_logistics") {
     return {
       action,
       result,

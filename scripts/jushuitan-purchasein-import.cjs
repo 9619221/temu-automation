@@ -28,12 +28,17 @@ const { runMigrations } = require("../electron/db/migrate.cjs");
 
 const DEFAULT_COMPANY_ID = "company_default";
 const NONE_ACCOUNT = "jst:account:none";
+const JUSHUITAN_WAREHOUSE_NAME = "义乌明舵国际贸易有限公司";
 
 function parseArgs(argv) {
   const args = { _: [] };
   for (const arg of argv) {
     if (arg === "--dry") {
       args.dry = true;
+      continue;
+    }
+    if (arg === "--include-jinan") {
+      args.includeJinan = true;
       continue;
     }
     if (arg.startsWith("--db=")) {
@@ -84,6 +89,10 @@ function first(record, keys) {
 
 function firstText(record, keys) {
   return text(first(record, keys));
+}
+
+function rowContainsText(record, pattern) {
+  return Object.values(record || {}).some((value) => pattern.test(text(value)));
 }
 
 function numberValue(value) {
@@ -141,6 +150,7 @@ function mapInboundStatus(row) {
     firstText(row, ["archived", "财审日期"]),
   ].join(" ");
   if (/取消|作废|cancel/i.test(status)) return "cancelled";
+  if (/待入库/i.test(status)) return "jst_pending_inbound";
   if (/已审核|已入库|归档|完成|archived/i.test(status)) return "inbounded_pending_qc";
   if (/已到货|到货/i.test(status)) return "arrived";
   return "pending_arrival";
@@ -156,6 +166,12 @@ function poNoOf(row) {
 
 function skuCodeOf(row) {
   return firstText(row, ["商品编码", "sku_code", "sku_id", "skuId", "i_id", "iId"]);
+}
+
+function buildBatchCode(receiptNo, lineId, index) {
+  const safeReceiptNo = text(receiptNo || "JST-INBOUND").replace(/[^A-Za-z0-9_-]+/g, "-").slice(0, 40);
+  const safeLine = text(lineId || index + 1).replace(/[^A-Za-z0-9_-]+/g, "-").slice(-8);
+  return `${safeReceiptNo}-B${String(index + 1).padStart(2, "0")}-${safeLine}`;
 }
 
 function buildHeaderMap(headers) {
@@ -180,7 +196,10 @@ function main() {
 
   const head = pickFile(sourceDir, args.headFile, /^jushuitan-purchasein-\d+\.json$/i, "采购入库抬头 JSON");
   const detail = pickFile(sourceDir, args.detailFile, /^jushuitan-purchasein-detail-\d+\.json$/i, "采购入库明细 JSON");
-  const headerByReceipt = buildHeaderMap(head.rows);
+  const excludePattern = /济南/;
+  const headRows = args.includeJinan ? head.rows : head.rows.filter((row) => !rowContainsText(row, excludePattern));
+  const detailRows = args.includeJinan ? detail.rows : detail.rows.filter((row) => !rowContainsText(row, excludePattern));
+  const headerByReceipt = buildHeaderMap(headRows);
 
   const db = openErpDatabase(dbOptions);
   db.pragma("busy_timeout = 60000");
@@ -260,7 +279,7 @@ function main() {
       ON CONFLICT(account_id, receipt_no) DO UPDATE SET
         po_id = COALESCE(excluded.po_id, erp_inbound_receipts.po_id),
         status = excluded.status,
-        received_at = COALESCE(excluded.received_at, erp_inbound_receipts.received_at),
+        received_at = excluded.received_at,
         remark = excluded.remark,
         updated_at = excluded.updated_at
     `);
@@ -280,7 +299,60 @@ function main() {
         sku_id = excluded.sku_id,
         expected_qty = excluded.expected_qty,
         received_qty = excluded.received_qty,
-        damaged_qty = excluded.damaged_qty
+        damaged_qty = excluded.damaged_qty,
+        shortage_qty = 0,
+        over_qty = 0
+    `);
+    const upsertInventoryBatch = db.prepare(`
+      INSERT INTO erp_inventory_batches (
+        id, account_id, batch_code, sku_id, po_id, inbound_receipt_id,
+        received_qty, available_qty, reserved_qty, blocked_qty, defective_qty,
+        rework_qty, unit_landed_cost, qc_status, location_code,
+        received_at, created_at, updated_at
+      )
+      VALUES (
+        @id, @account_id, @batch_code, @sku_id, @po_id, @inbound_receipt_id,
+        @received_qty, @available_qty, 0, 0, 0,
+        0, @unit_landed_cost, 'passed', @location_code,
+        @received_at, @created_at, @updated_at
+      )
+      ON CONFLICT(account_id, batch_code) DO UPDATE SET
+        sku_id = excluded.sku_id,
+        po_id = COALESCE(excluded.po_id, erp_inventory_batches.po_id),
+        inbound_receipt_id = excluded.inbound_receipt_id,
+        received_qty = excluded.received_qty,
+        available_qty = CASE
+          WHEN erp_inventory_batches.reserved_qty = 0
+            AND erp_inventory_batches.blocked_qty = 0
+            AND erp_inventory_batches.defective_qty = 0
+            AND erp_inventory_batches.rework_qty = 0
+          THEN excluded.available_qty
+          ELSE erp_inventory_batches.available_qty
+        END,
+        unit_landed_cost = excluded.unit_landed_cost,
+        qc_status = 'passed',
+        location_code = COALESCE(NULLIF(excluded.location_code, ''), erp_inventory_batches.location_code),
+        received_at = excluded.received_at,
+        updated_at = excluded.updated_at
+    `);
+    const linkLineBatch = db.prepare(`
+      UPDATE erp_inbound_receipt_lines
+      SET batch_id = @batch_id
+      WHERE id = @id
+    `);
+    const upsertInventoryLedger = db.prepare(`
+      INSERT INTO erp_inventory_ledger_entries (
+        id, account_id, sku_id, batch_id, type, qty_delta, from_bucket,
+        to_bucket, unit_cost, source_doc_type, source_doc_id, created_at, created_by
+      )
+      VALUES (
+        @id, @account_id, @sku_id, @batch_id, 'purchase_inbound', @qty_delta, NULL,
+        'available', @unit_cost, 'inbound_receipt', @source_doc_id, @created_at, NULL
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        qty_delta = excluded.qty_delta,
+        unit_cost = excluded.unit_cost,
+        created_at = excluded.created_at
     `);
 
     const seenLines = new Set();
@@ -290,12 +362,16 @@ function main() {
       detailFile: path.basename(detail.filePath),
       headRows: head.rows.length,
       detailRows: detail.rows.length,
+      importedHeadRows: headRows.length,
+      importedDetailRows: detailRows.length,
       importedReceipts: 0,
       importedLines: 0,
       matchedPoLines: 0,
       fallbackLines: 0,
       createdSuppliers: 0,
       createdSkus: 0,
+      inventoryBatches: 0,
+      inventoryLedgers: 0,
       skippedNoReceipt: 0,
       skippedNoSku: 0,
     };
@@ -371,7 +447,7 @@ function main() {
         updated_at: now,
       });
 
-      for (const [index, detailRow] of detail.rows.entries()) {
+      for (const [index, detailRow] of detailRows.entries()) {
         const receiptNo = receiptNoOf(detailRow);
         if (!receiptNo) {
           stats.skippedNoReceipt += 1;
@@ -393,23 +469,32 @@ function main() {
 
         const receiptId = stableId("inbound", `${accountId}:${receiptNo}`);
         const receiptKey = `${accountId}:${receiptNo}`;
-        const receivedAt = normalizeDate(first(header, ["io_date", "入库日期", "created", "创建日期", "archived", "财审日期"])) || now;
+        const receiptStatus = mapInboundStatus(header);
+        const receivedAt = normalizeDate(first(header, ["io_date", "入库日期"]));
+        const receivedQty = receiptStatus === "inbounded_pending_qc" ? qty : 0;
         upsertReceipt.run({
           id: receiptId,
           account_id: accountId,
           po_id: poLine?.po_id || null,
           receipt_no: receiptNo,
-          status: mapInboundStatus(header),
+          status: receiptStatus,
           received_at: receivedAt,
           remark: JSON.stringify({
             source: "jushuitan_purchasein_export",
             poNo,
+            sourceStatus: firstText(header, ["状态", "status"]),
+            sourceFinancialStatus: firstText(header, ["财审状态", "f_status"]),
+            sourceRemark: firstText(header, ["备注", "remark"]),
+            sourceLabels: firstText(header, ["标记多标签", "labels"]),
             supplier: firstText(header, ["供应商", "receiver_name_en"]),
             purchaser: firstText(header, ["采购员", "purchaser_name", "制单人", "creator_name"]),
-            warehouse: firstText(header, ["仓库", "warehouse", "wms_co_name"]),
+            warehouse: JUSHUITAN_WAREHOUSE_NAME,
+            sourceWarehouse: firstText(header, ["仓库", "warehouse", "wms_co_name"]),
+            sourceInboundAt: receivedAt || null,
             logisticsCompany: firstText(header, ["物流公司", "logistics_company"]),
             trackingNo: firstText(header, ["物流单号", "l_id", "lId"]),
             totalQty: integerQty(first(header, ["total_qty", "数量"])),
+            sourceTotalQty: integerQty(first(header, ["total_qty", "数量"])),
             totalAmount: numberValue(first(header, ["total_amount", "金额"])),
             importFile: path.basename(detail.filePath),
           }),
@@ -425,19 +510,53 @@ function main() {
         if (seenLines.has(lineKey)) continue;
         seenLines.add(lineKey);
         const damagedQty = integerQty(first(detailRow, ["质检次品数", "损坏数量", "破损数量"]));
+        const lineId = `jst:irl:${stableHash(lineKey, 24)}`;
         upsertLine.run({
-          id: `jst:irl:${stableHash(lineKey, 24)}`,
+          id: lineId,
           account_id: accountId,
           receipt_id: receiptId,
           po_line_id: poLine?.po_line_id || null,
           sku_id: skuId,
           expected_qty: qty,
-          received_qty: qty,
+          received_qty: receivedQty,
           damaged_qty: damagedQty,
         });
         stats.importedLines += 1;
         if (poLine?.po_line_id) stats.matchedPoLines += 1;
         else stats.fallbackLines += 1;
+
+        if (receiptStatus === "inbounded_pending_qc" && receivedQty > 0) {
+          const batchCode = buildBatchCode(receiptNo, lineId, index);
+          const batchId = `jst:batch:${stableHash(`${accountId}:${batchCode}`, 24)}`;
+          upsertInventoryBatch.run({
+            id: batchId,
+            account_id: accountId,
+            batch_code: batchCode,
+            sku_id: skuId,
+            po_id: poLine?.po_id || null,
+            inbound_receipt_id: receiptId,
+            received_qty: receivedQty,
+            available_qty: receivedQty,
+            unit_landed_cost: 0,
+            location_code: JUSHUITAN_WAREHOUSE_NAME,
+            received_at: receivedAt || now,
+            created_at: receivedAt || now,
+            updated_at: now,
+          });
+          linkLineBatch.run({ id: lineId, batch_id: batchId });
+          upsertInventoryLedger.run({
+            id: `jst:ledger:${stableHash(`purchase_inbound:${batchId}`, 24)}`,
+            account_id: accountId,
+            sku_id: skuId,
+            batch_id: batchId,
+            qty_delta: receivedQty,
+            unit_cost: 0,
+            source_doc_id: receiptId,
+            created_at: receivedAt || now,
+          });
+          stats.inventoryBatches += 1;
+          stats.inventoryLedgers += 1;
+        }
       }
 
       if (dryRun) throw new Error("__DRY_ROLLBACK__");

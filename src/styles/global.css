@@ -4718,6 +4718,13 @@ h6 {
   background: #f8fafc;
 }
 
+.warehouse-product-image--thumb {
+  display: block;
+  width: 44px;
+  height: 44px;
+  object-fit: cover;
+}
+
 .warehouse-product-image--empty {
   display: inline-flex;
   align-items: center;
@@ -4727,6 +4734,23 @@ h6 {
   color: #64748b;
   font-size: 11px;
   font-weight: 700;
+}
+
+.warehouse-product-name-cell,
+.warehouse-product-name-text {
+  display: block;
+  max-width: 100%;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+
+.warehouse-product-name-cell .ant-typography,
+.warehouse-product-name-text.ant-typography {
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .warehouse-sku-code {

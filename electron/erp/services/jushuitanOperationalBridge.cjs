@@ -3,6 +3,7 @@ const { createId, nowIso } = require("./utils.cjs");
 
 const DEFAULT_COMPANY_ID = "company_default";
 const DEFAULT_ACCOUNT_ID = "jst:account:default";
+const JUSHUITAN_WAREHOUSE_NAME = "义乌明舵国际贸易有限公司";
 
 function optionalString(value) {
   const text = String(value ?? "").trim();
@@ -283,6 +284,7 @@ function mapInboundStatus(raw) {
     firstText(raw, ["archived"]),
   ].join(" ");
   if (/取消|作废|cancel/i.test(text)) return "cancelled";
+  if (/待入库/i.test(text)) return "jst_pending_inbound";
   if (/已审核|已入库|归档|archived/i.test(text)) return "inbounded_pending_qc";
   if (/已到货|到货/i.test(text)) return "arrived";
   return "pending_arrival";
@@ -443,7 +445,7 @@ class JushuitanOperationalBridge {
       ON CONFLICT(account_id, receipt_no) DO UPDATE SET
         po_id = COALESCE(excluded.po_id, erp_inbound_receipts.po_id),
         status = excluded.status,
-        received_at = COALESCE(excluded.received_at, erp_inbound_receipts.received_at),
+        received_at = excluded.received_at,
         remark = excluded.remark,
         updated_at = excluded.updated_at
     `);
@@ -758,14 +760,21 @@ class JushuitanOperationalBridge {
       po_id: this.getPurchaseOrderIdByNo(poNo),
       receipt_no: receiptNo,
       status: mapInboundStatus(raw),
-      received_at: normalizeDate(first(raw, ["io_date", "created", "archived"])),
+      received_at: normalizeDate(first(raw, ["io_date", "入库日期"])),
       operator_id: null,
       remark: stringify({
         source: "jushuitan",
         poNo,
+        sourceStatus: firstText(raw, ["status"]),
+        sourceFinancialStatus: firstText(raw, ["f_status"]),
+        sourceRemark: firstText(raw, ["remark"]),
+        sourceLabels: firstText(raw, ["labels"]),
         purchaser: firstText(raw, ["purchaser_name", "creator_name"]),
-        warehouse: firstText(raw, ["warehouse", "wms_co_name"]),
+        warehouse: JUSHUITAN_WAREHOUSE_NAME,
+        sourceWarehouse: firstText(raw, ["warehouse", "wms_co_name"]),
+        sourceInboundAt: normalizeDate(first(raw, ["io_date", "入库日期"])) || null,
         totalQty,
+        sourceTotalQty: totalQty,
         totalAmount,
         logisticsCompany: firstText(raw, ["logistics_company"]),
         trackingNo: firstText(raw, ["l_id", "lId"]),

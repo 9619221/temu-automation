@@ -51,6 +51,7 @@ export const PAYMENT_STATUS_LABELS: Record<string, string> = {
 };
 
 export const INBOUND_STATUS_LABELS: Record<string, string> = {
+  jst_pending_inbound: "待入库",
   pending_arrival: "待到货",
   arrived: "已到仓",
   counted: "已核数",
@@ -177,6 +178,7 @@ const STATUS_COLOR: Record<string, string> = {
   deducted: "success",
 
   // 入库
+  jst_pending_inbound: "gold",
   pending_arrival: "gold",
   counted: "cyan",
   inbounded_pending_qc: "blue",
