@@ -3949,6 +3949,16 @@ h6 {
   box-shadow: inset 3px 0 0 0 #1a73e8;
 }
 
+.erp-compact-table .purchase-order-row--clickable > td {
+  cursor: pointer;
+}
+
+.erp-compact-table .purchase-order-row--clickable .purchase-action-grid,
+.erp-compact-table .purchase-order-row--clickable .ant-table-selection-column,
+.erp-compact-table .purchase-order-row--clickable > td.ant-table-cell-fix-right {
+  cursor: default;
+}
+
 .erp-compact-table .ant-table-expanded-row > td {
   background: #f8fbff !important;
   padding: 10px 14px 14px !important;
@@ -3963,6 +3973,95 @@ h6 {
   display: grid;
   grid-template-columns: repeat(5, minmax(128px, 1fr));
   gap: 8px;
+}
+
+.purchase-order-detail__items {
+  overflow-x: auto;
+  border: 1px solid #e5e9f0;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.purchase-order-detail__items table {
+  width: 100%;
+  min-width: 920px;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.purchase-order-detail__items th,
+.purchase-order-detail__items td {
+  padding: 9px 12px;
+  border-bottom: 1px solid #eef2f7;
+  color: #0f172a;
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: left;
+  vertical-align: top;
+}
+
+.purchase-order-detail__items th:first-child,
+.purchase-order-detail__items td:first-child {
+  width: 380px;
+}
+
+.purchase-order-detail__items th {
+  background: #f8fafc;
+  color: #475569;
+  font-weight: 700;
+}
+
+.purchase-order-detail__items tfoot td {
+  border-bottom: 0;
+  background: #f8fbff;
+  font-weight: 700;
+}
+
+.purchase-order-detail__items .col-numeric {
+  width: 104px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.purchase-order-detail__code-list.ant-typography {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 0;
+}
+
+.purchase-order-detail__code-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  max-width: 100%;
+  padding: 1px 7px;
+  overflow: hidden;
+  border: 1px solid #cfe0ff;
+  border-radius: 6px;
+  background: #f3f7ff;
+  color: var(--color-blue, #1a73e8);
+  font-weight: 700;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.purchase-order-detail__code-chip.is-empty {
+  border-color: #e5e7eb;
+  background: #f8fafc;
+  color: #94a3b8;
+  font-weight: 500;
+}
+
+.purchase-order-detail__items-name {
+  display: -webkit-box;
+  max-height: 62px;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  word-break: break-word;
 }
 
 .purchase-order-detail__stage {

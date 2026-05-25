@@ -348,8 +348,23 @@ interface PurchaseOrderRow {
   latestRefundId?: string | null;
   latestRefundStatus?: string | null;
   latestRefundAmount?: number | null;
+  lineItems?: PurchaseOrderLineDetail[];
   createdAt?: string;
   updatedAt?: string;
+}
+
+interface PurchaseOrderLineDetail {
+  id?: string;
+  skuId?: string | null;
+  skuCode?: string | null;
+  skuCodes?: string[];
+  productName?: string | null;
+  qty?: number | null;
+  receivedQty?: number | null;
+  unitCost?: number | null;
+  logisticsFee?: number | null;
+  amount?: number | null;
+  paidAmount?: number | null;
 }
 
 interface PaymentQueueRow {
@@ -1529,11 +1544,37 @@ function purchaseOrderRiskTags(row: PurchaseOrderRow, hasUsable1688Address: bool
 }
 
 function purchaseOrderRowClassName(row: PurchaseOrderRow) {
-  const classes: string[] = [];
+  const classes: string[] = ["purchase-order-row--clickable"];
   if (row.status === "delayed" || row.status === "exception") classes.push("purchase-order-row--exception");
   if (canUse1688PaymentActions(row) || canConfirmPaidAction(row)) classes.push("purchase-order-row--payment");
   if (isCompletedOrder(row)) classes.push("purchase-order-row--completed");
   return classes.join(" ");
+}
+
+function shouldIgnorePurchaseOrderRowClick(target: EventTarget | null) {
+  if (!(target instanceof Element)) return false;
+  return Boolean(target.closest([
+    "a",
+    "button",
+    "input",
+    "textarea",
+    "select",
+    "[role='button']",
+    "[role='checkbox']",
+    ".ant-checkbox",
+    ".ant-checkbox-wrapper",
+    ".ant-dropdown",
+    ".ant-picker",
+    ".ant-popover",
+    ".ant-select",
+    ".ant-table-cell-fix-right",
+    ".ant-table-column-sorter",
+    ".ant-table-filter-trigger",
+    ".ant-table-selection-column",
+    ".purchase-action-grid",
+    ".purchase-order-column-menu",
+    ".purchase-order-number-link",
+  ].join(",")));
 }
 
 function candidateSpecRows(candidate?: SourcingCandidateRow | null): BindingSpecRow[] {
@@ -1970,6 +2011,49 @@ function getPurchaseOrderProductNames(row: PurchaseOrderRow) {
 
 function joinGroupedText(items: string[]) {
   return items.filter(Boolean).join(" / ");
+}
+
+function purchaseOrderDetailLines(row: PurchaseOrderRow): PurchaseOrderLineDetail[] {
+  const explicitLines = Array.isArray(row.lineItems)
+    ? row.lineItems.filter((line) => line && typeof line === "object")
+    : [];
+  if (explicitLines.length) {
+    return explicitLines.map((line, index) => {
+      const qty = toFiniteNumber(line.qty);
+      const amount = optionalFiniteNumber(line.amount)
+        ?? (qty > 0 ? qty * toFiniteNumber(line.unitCost) : 0);
+      const paidAmount = optionalFiniteNumber(line.paidAmount)
+        ?? amount + toFiniteNumber(line.logisticsFee);
+      return {
+        ...line,
+        id: line.id || `${row.id}-line-${index}`,
+        qty,
+        amount,
+        paidAmount,
+      };
+    });
+  }
+
+  const codes = getPurchaseOrderSkuCodes(row);
+  const names = getPurchaseOrderProductNames(row);
+  return [{
+    id: `${row.id}-summary`,
+    skuCode: joinGroupedText(codes) || row.skuSummary || "-",
+    skuCodes: codes,
+    productName: joinGroupedText(names) || row.skuSummary || "-",
+    qty: row.totalQty ?? 0,
+    logisticsFee: row.freightAmount ?? null,
+    amount: row.totalAmount ?? 0,
+    paidAmount: purchaseOrderPayableAmount(row),
+  }];
+}
+
+function purchaseOrderDetailLineCodes(line: PurchaseOrderLineDetail) {
+  if (Array.isArray(line.skuCodes) && line.skuCodes.length) return line.skuCodes;
+  return String(line.skuCode || "")
+    .split(/\s*(?:\/|,|，|;|；)\s*/)
+    .map((code) => code.trim())
+    .filter(Boolean);
 }
 
 function extractMessageImageUrls(value?: string | null) {
@@ -2828,6 +2912,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       prev.includes(poId) ? prev.filter((id) => id !== poId) : [...prev, poId]
     ));
   }, []);
+
+  const purchaseOrderTableRowProps = useCallback((row: PurchaseOrderRow) => ({
+    onClick: (event: MouseEvent<HTMLElement>) => {
+      if (shouldIgnorePurchaseOrderRowClick(event.target)) return;
+      togglePurchaseOrderExpanded(row.id);
+    },
+  }), [togglePurchaseOrderExpanded]);
 
   const openPurchaseOrderColumnMenu = useCallback((event: MouseEvent<HTMLElement>) => {
     event.preventDefault();
@@ -5525,6 +5616,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     const payableAmount = purchaseOrderPayableAmount(row);
     const receiptPercent = purchaseOrderReceiptPercent(row);
     const grossAmount = toFiniteNumber(row.totalAmount) + toFiniteNumber(row.freightAmount);
+    const detailLines = purchaseOrderDetailLines(row);
     const stages = [
       { key: "created", label: "建单", done: true, meta: formatDateTime(row.createdAt || row.updatedAt) },
       {
@@ -5565,6 +5657,60 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               <span className="purchase-order-detail__stage-meta">{stage.meta || "-"}</span>
             </div>
           ))}
+        </div>
+        <div className="purchase-order-detail__items">
+          <table>
+            <thead>
+              <tr>
+                <th>商品编码</th>
+                <th>商品名称</th>
+                <th className="col-numeric">数量</th>
+                <th className="col-numeric">金额</th>
+                <th className="col-numeric">运费</th>
+                <th className="col-numeric">实付金额</th>
+              </tr>
+            </thead>
+            <tbody>
+              {detailLines.map((line) => {
+                const codes = purchaseOrderDetailLineCodes(line);
+                const codeText = codes.join("\n");
+                const productName = line.productName || "-";
+                return (
+                  <tr key={line.id || `${codeText || line.skuId || "line"}-${line.qty || 0}`}>
+                    <td>
+                      <Text
+                        copyable={codes.length ? { text: codeText } : false}
+                        className="purchase-order-detail__code-list"
+                        title={codeText || undefined}
+                      >
+                        {codes.length ? codes.map((code) => (
+                          <span key={code} className="purchase-order-detail__code-chip">{code}</span>
+                        )) : <span className="purchase-order-detail__code-chip is-empty">-</span>}
+                      </Text>
+                    </td>
+                    <td>
+                      <div className="purchase-order-detail__items-name" title={productName}>
+                        {productName}
+                      </div>
+                    </td>
+                    <td className="col-numeric">{formatQty(line.qty)}</td>
+                    <td className="col-numeric">{formatCurrency(line.amount)}</td>
+                    <td className="col-numeric">{formatOptionalCurrency(line.logisticsFee)}</td>
+                    <td className="col-numeric">{formatCurrency(line.paidAmount)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td colSpan={2}>合计</td>
+                <td className="col-numeric">{formatQty(row.totalQty)}</td>
+                <td className="col-numeric">{formatCurrency(row.totalAmount)}</td>
+                <td className="col-numeric">{formatOptionalCurrency(row.freightAmount)}</td>
+                <td className="col-numeric">{formatCurrency(payableAmount)}</td>
+              </tr>
+            </tfoot>
+          </table>
         </div>
         <div className="purchase-order-detail__grid">
           <div className="purchase-order-detail__section">
@@ -6570,6 +6716,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
                   dataSource={filteredActiveOrderRows}
                   rowSelection={orderRowSelection}
                   rowClassName={purchaseOrderRowClassName}
+                  onRow={purchaseOrderTableRowProps}
                   expandable={purchaseOrderExpandable}
                   scroll={{ x: 2720 }}
                   pagination={orderTablePagination}
@@ -6588,6 +6735,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
                 dataSource={[]}
                 rowSelection={orderRowSelection}
                 rowClassName={purchaseOrderRowClassName}
+                onRow={purchaseOrderTableRowProps}
                 expandable={purchaseOrderExpandable}
                 scroll={{ x: 2720 }}
                 pagination={false}
@@ -6616,6 +6764,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
             dataSource={filteredActiveOrderRows}
             rowSelection={orderRowSelection}
             rowClassName={purchaseOrderRowClassName}
+            onRow={purchaseOrderTableRowProps}
             expandable={purchaseOrderExpandable}
             scroll={{ x: 2720 }}
             pagination={orderTablePagination}

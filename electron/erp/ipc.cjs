@@ -5191,6 +5191,35 @@ function getPurchaseWorkbench(params = {}) {
       GROUP_CONCAT(DISTINCT sku.internal_sku_code || ' ' || sku.product_name) AS sku_summary,
       GROUP_CONCAT(DISTINCT sku.internal_sku_code) AS sku_codes,
       GROUP_CONCAT(DISTINCT sku.product_name) AS product_names,
+      COALESCE((
+        SELECT json_group_array(json_object(
+          'id', detail.id,
+          'skuId', detail.sku_id,
+          'skuCode', detail.internal_sku_code,
+          'productName', detail.product_name,
+          'qty', detail.qty,
+          'receivedQty', detail.received_qty,
+          'unitCost', detail.unit_cost,
+          'logisticsFee', detail.logistics_fee,
+          'amount', ROUND(detail.qty * detail.unit_cost, 2),
+          'paidAmount', ROUND(detail.qty * detail.unit_cost + detail.logistics_fee, 2)
+        ))
+        FROM (
+          SELECT
+            detail_line.id,
+            detail_line.sku_id,
+            detail_sku.internal_sku_code,
+            detail_sku.product_name,
+            COALESCE(detail_line.qty, 0) AS qty,
+            COALESCE(detail_line.received_qty, 0) AS received_qty,
+            COALESCE(detail_line.unit_cost, 0) AS unit_cost,
+            COALESCE(detail_line.logistics_fee, 0) AS logistics_fee
+          FROM erp_purchase_order_lines detail_line
+          LEFT JOIN erp_skus detail_sku ON detail_sku.id = detail_line.sku_id
+          WHERE detail_line.po_id = po.id
+          ORDER BY detail_line.id ASC
+        ) detail
+      ), '[]') AS line_items_json,
       (
         SELECT first_sku.image_url
         FROM erp_purchase_order_lines first_line
@@ -5278,6 +5307,8 @@ function getPurchaseWorkbench(params = {}) {
     LIMIT @limit OFFSET @offset
   `).all(poParams).map((row) => {
     const next = toCamelRow(row);
+    next.lineItems = parseJsonArray(row.line_items_json);
+    delete next.lineItemsJson;
     if (row.account_id === "jst:account:default") {
       const raw = parseJsonObject(row.external_order_payload_json, {});
       const rawQty = Number(raw.qty_count || raw.total_qty || raw.enable_follow_qty || 0);
