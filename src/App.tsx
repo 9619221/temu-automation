@@ -11,6 +11,7 @@ import {
   writeActiveAccountId,
 } from "./utils/multiStore";
 import BrandMark from "./components/BrandMark";
+import OperationsExtensionGate from "./components/OperationsExtensionGate";
 
 const ACCOUNT_STORAGE_KEY = "temu_accounts";
 
@@ -181,7 +182,11 @@ class AppRouteErrorBoundary extends Component<
 function RoleRoute({ path, children }: { path: string; children: JSX.Element }) {
   const { currentUser } = useErpAuth();
   if (!canAccessRoute(currentUser?.role, path)) return <AccessDenied />;
-  return children;
+  return (
+    <OperationsExtensionGate role={currentUser?.role} routePath={path}>
+      {children}
+    </OperationsExtensionGate>
+  );
 }
 
 function App() {
