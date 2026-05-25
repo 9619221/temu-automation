@@ -13302,6 +13302,57 @@ function extract1688PaymentUrl(rawResponse = {}) {
   ]));
 }
 
+function findFirstDeepRawValue(value, keys = [], depth = 0) {
+  if (!value || depth > 8) return null;
+  const keySet = new Set(keys.map((key) => String(key).toLowerCase()));
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findFirstDeepRawValue(item, keys, depth + 1);
+      if (found !== null) return found;
+    }
+    return null;
+  }
+  if (typeof value !== "object") return null;
+  for (const [key, next] of Object.entries(value)) {
+    if (keySet.has(String(key).toLowerCase()) && next !== null && next !== undefined && next !== "") {
+      return next;
+    }
+  }
+  for (const next of Object.values(value)) {
+    const found = findFirstDeepRawValue(next, keys, depth + 1);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
+function normalize1688OrderIdList(value) {
+  if (value === null || value === undefined || value === "") return [];
+  if (Array.isArray(value)) return value.map((item) => optionalString(item)).filter(Boolean);
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return [];
+    if (/^\[.*\]$/.test(trimmed)) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) return parsed.map((item) => optionalString(item)).filter(Boolean);
+      } catch {
+        // Fall through to delimiter parsing.
+      }
+    }
+    return trimmed.split(/[,\s]+/).map((item) => optionalString(item)).filter(Boolean);
+  }
+  return [optionalString(value)].filter(Boolean);
+}
+
+function extract1688PaymentFailureOrderIds(rawResponse = {}) {
+  return normalize1688OrderIdList(findFirstDeepRawValue(asExpandedObject(rawResponse), [
+    "payFailureOrderList",
+    "pay_failure_order_list",
+    "failureOrderList",
+    "failedOrderIds",
+  ]));
+}
+
 function map1688StatusToLocal(status, currentStatus, logistics = {}) {
   const text = String(status || "").toUpperCase();
   const current = optionalString(currentStatus);
@@ -13569,7 +13620,12 @@ async function request1688PaymentUrl({ db, payload, actor, accountId, orderIds }
     error.requestParams = apiParams;
     throw error;
   }
-  return { apiParams, rawResponse, paymentUrl };
+  return {
+    apiParams,
+    rawResponse,
+    paymentUrl,
+    payFailureOrderIds: extract1688PaymentFailureOrderIds(rawResponse),
+  };
 }
 
 async function recover1688PaymentUrlBySingleOrders({ db, payload, actor, accountId, orderIds }) {
@@ -13672,9 +13728,23 @@ async function get1688PaymentUrlAction({ db, services, payload, actor }) {
     paymentResult = await recover1688PaymentUrlBySingleOrders({ db, payload, actor, accountId, orderIds });
   }
   const paymentUrl = paymentResult.paymentUrl;
+  const payFailureOrderIds = Array.isArray(paymentResult.payFailureOrderIds) ? paymentResult.payFailureOrderIds : [];
+  const payFailureOrderIdSet = new Set(payFailureOrderIds);
   const payableOrderIds = Array.isArray(paymentResult.payableOrderIds) && paymentResult.payableOrderIds.length
     ? paymentResult.payableOrderIds
-    : orderIds;
+    : (payFailureOrderIdSet.size ? orderIds.filter((orderId) => !payFailureOrderIdSet.has(orderId)) : orderIds);
+  if (!payableOrderIds.length) throw new Error("1688 没有可付款订单，请检查订单是否待付款");
+  const officialPartialFailures = payFailureOrderIds.map((orderId) => ({
+    orderId,
+    ok: false,
+    error: "1688 返回该订单未生成支付链接",
+  }));
+  const partialPaymentFailures = [
+    ...(paymentResult.partialPaymentFailures || []),
+    ...officialPartialFailures.filter((failure) => !(
+      paymentResult.partialPaymentFailures || []
+    ).some((item) => String(item.orderId) === String(failure.orderId))),
+  ];
   const updated = purchaseOrders
     .filter((po) => payableOrderIds.includes(String(po.external_order_id || "")))
     .map((po) => updatePurchaseOrderFrom1688Snapshot({
@@ -13693,7 +13763,7 @@ async function get1688PaymentUrlAction({ db, services, payload, actor }) {
     paymentUrl,
     paymentUrlSource: paymentResult.paymentUrlSource || "batch",
     paymentUrls: paymentResult.paymentUrls || [],
-    partialPaymentFailures: paymentResult.partialPaymentFailures || [],
+    partialPaymentFailures,
     externalOrderIds: orderIds,
     payableOrderIds,
     purchaseOrders: updated.map(toCamelRow),
