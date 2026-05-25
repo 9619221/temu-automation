@@ -511,6 +511,7 @@ interface SkuOption {
   accountId?: string | null;
   internalSkuCode?: string;
   productName?: string;
+  imageUrl?: string | null;
   colorSpec?: string | null;
   procurementSourceCount?: number;
   primary1688Source?: {
@@ -522,6 +523,11 @@ interface SkuOption {
     unitPrice?: number | null;
     moq?: number | null;
   } | null;
+  costPrice?: number | null;
+  actualStockQty?: number | null;
+  warehouseLocation?: string | null;
+  jstMainBin?: string | null;
+  systemSupplierName?: string | null;
   jstCostPrice?: number | null;
   jstSupplierName?: string | null;
   jstActualStockQty?: number | null;
@@ -635,9 +641,6 @@ interface OfflinePoFormValues {
 
 interface DirectPoLineFormValues {
   skuIds?: string[];
-  specText?: string;
-  unitPrice?: number;
-  logisticsFee?: number;
   qty?: number;
 }
 
@@ -746,6 +749,99 @@ function formatCurrency(value?: number | string | null) {
 function formatOptionalCurrency(value?: number | string | null) {
   if (value === null || value === undefined || value === "") return "-";
   return formatCurrency(value);
+}
+
+function renderSkuSelectOption(option: any, onPreview?: (preview: { src: string; alt: string }) => void) {
+  const d = option?.data || option || {};
+  const displayCode = String(d?.label || d?.value || "");
+  const costText = d?.skuCost === null || d?.skuCost === undefined || d?.skuCost === "" ? "-" : `¥${d.skuCost}`;
+  const stockText = d?.skuStock === null || d?.skuStock === undefined || d?.skuStock === "" ? "-" : d.skuStock;
+  const warehouseText = d?.skuWarehouse || "-";
+
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "72px minmax(0, 1fr)",
+        gap: 12,
+        alignItems: "start",
+        lineHeight: 1.35,
+        padding: "4px 0",
+      }}
+    >
+      <div
+        role={d?.skuImage ? "button" : undefined}
+        tabIndex={d?.skuImage ? 0 : undefined}
+        title={d?.skuImage ? "点击放大图片" : undefined}
+        onMouseDown={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+        }}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          if (d?.skuImage) onPreview?.({ src: d.skuImage, alt: d?.skuName || displayCode || "商品图片" });
+        }}
+        onKeyDown={(event) => {
+          if (!d?.skuImage || (event.key !== "Enter" && event.key !== " ")) return;
+          event.preventDefault();
+          event.stopPropagation();
+          onPreview?.({ src: d.skuImage, alt: d?.skuName || displayCode || "商品图片" });
+        }}
+        style={{
+          width: 60,
+          height: 60,
+          borderRadius: 8,
+          border: "1px solid #e5e7eb",
+          overflow: "hidden",
+          background: "#f8fafc",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "#9ca3af",
+          cursor: d?.skuImage ? "zoom-in" : "default",
+          fontSize: 12,
+        }}
+      >
+        {d?.skuImage ? (
+          <img
+            src={d.skuImage}
+            alt=""
+            style={{ width: 60, height: 60, objectFit: "cover", display: "block" }}
+          />
+        ) : (
+          "无图"
+        )}
+      </div>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontWeight: 650, color: "#111827" }}>{displayCode}</div>
+        <div
+          style={{
+            color: "#374151",
+            whiteSpace: "normal",
+            wordBreak: "break-word",
+            marginTop: 2,
+          }}
+        >
+          {d?.skuName || "-"}
+        </div>
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "2px 10px",
+            marginTop: 4,
+            fontSize: 12,
+            color: "#6b7280",
+          }}
+        >
+          <span>成本 {costText}</span>
+          <span>库存 {stockText}</span>
+          <span>仓位 {warehouseText}</span>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function toFiniteNumber(value?: number | string | null) {
@@ -2360,10 +2456,17 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     () => data.purchaseOrders?.find((item) => item.id === refundPoId) || null,
     [data.purchaseOrders, refundPoId],
   );
+  const renderSkuOption = useCallback(
+    (option: any) => renderSkuSelectOption(option, setRequestImagePreview),
+    [],
+  );
   const skuOptions = useMemo(
     () => skus.map((sku) => {
       const code = sku.internalSkuCode || sku.id;
       const name = sku.productName || "-";
+      const cost = sku.jstCostPrice ?? sku.costPrice ?? null;
+      const stock = sku.jstActualStockQty ?? sku.actualStockQty ?? null;
+      const warehouse = sku.warehouseLocation || sku.jstMainBin || (sku as any).mainBin || (sku as any).bin || (sku as any).locationCode || "";
       return {
         // value 用 internal_sku_code（纯数字），跟用户输入的 keyword 对齐，
         // antd mode="tags" 才不会再插一条「新建标签」虚拟项。
@@ -2372,9 +2475,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         label: code,
         searchText: `${code} ${name} ${sku.primary1688Source?.externalOfferId || ""}`,
         skuName: name,
-        skuCost: sku.jstCostPrice ?? null,
-        skuSupplier: sku.jstSupplierName || "",
-        skuStock: sku.jstActualStockQty ?? null,
+        skuImage: sku.imageUrl || "",
+        skuCost: cost,
+        skuSupplier: sku.jstSupplierName || sku.systemSupplierName || sku.primary1688Source?.supplierName || "",
+        skuStock: stock,
+        skuWarehouse: warehouse,
       };
     }),
     [skus],
@@ -3843,9 +3948,6 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
 
     const lineItems: Array<{
       skuId: string;
-      specText?: string;
-      unitPrice: number;
-      logisticsFee?: number;
       qty: number;
     }> = [];
     let accountId = "";
@@ -3878,21 +3980,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         message.error(`第 ${index + 1} 行请输入采购数量`);
         return;
       }
-      const unitPrice = Number(item.unitPrice);
-      if (!Number.isFinite(unitPrice) || unitPrice < 0) {
-        message.error(`第 ${index + 1} 行请输入采购单价`);
-        return;
-      }
-      const logisticsFee = Number(item.logisticsFee || 0);
-      if (!Number.isFinite(logisticsFee) || logisticsFee < 0) {
-        message.error(`第 ${index + 1} 行运费不能小于 0`);
-        return;
-      }
       lineItems.push({
         skuId: sku.id,
-        specText: item.specText?.trim() || undefined,
-        unitPrice,
-        logisticsFee,
         qty,
       });
     }
@@ -7155,7 +7244,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         title="创建采购单"
         okText="创建采购单"
         cancelText="取消"
-        width={920}
+        centered
+        width={620}
         confirmLoading={actingKey === "direct-po"}
         onCancel={() => setDirectPoOpen(false)}
         onOk={() => directPoForm.submit()}
@@ -7181,9 +7271,6 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               <div className="direct-po-lines">
                 <div className="direct-po-lines__head" aria-hidden>
                   <span>商品编码</span>
-                  <span>规格</span>
-                  <span>采购单价</span>
-                  <span>运费</span>
                   <span>采购数量</span>
                   <span />
                 </div>
@@ -7208,35 +7295,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
                         maxTagCount={1}
                         optionFilterProp="searchText"
                         options={skuOptions}
-                        optionRender={(option) => {
-                          const d = option as any;
-                          const displayCode = String(d?.label || d?.value || "");
-                          return (
-                            <div style={{ lineHeight: 1.3 }}>
-                              <div>{displayCode} · {d?.skuName || "-"}</div>
-                              <div style={{ fontSize: 12, color: "#888" }}>
-                                成本 {d?.skuCost == null ? "-" : `¥${d.skuCost}`} · 库存 {d?.skuStock == null ? "-" : d.skuStock}
-                              </div>
-                            </div>
-                          );
-                        }}
+                        optionRender={renderSkuOption}
                         suffixIcon={<SearchOutlined />}
                         tokenSeparators={[",", "，", " ", "\n"]}
                         notFoundContent={skuSearching ? "搜索中…" : "输入编码或名称搜索"}
                         placeholder="输入商品编码或名称搜索"
                       />
-                    </Form.Item>
-                    <Form.Item name={[field.name, "specText"]}>
-                      <Input placeholder="颜色 / 尺寸 / 包装，可选" allowClear />
-                    </Form.Item>
-                    <Form.Item
-                      name={[field.name, "unitPrice"]}
-                      rules={[{ required: true, message: "请输入采购单价" }]}
-                    >
-                      <InputNumber min={0} precision={2} prefix="¥" style={{ width: "100%" }} />
-                    </Form.Item>
-                    <Form.Item name={[field.name, "logisticsFee"]}>
-                      <InputNumber min={0} precision={2} prefix="¥" style={{ width: "100%" }} />
                     </Form.Item>
                     <Form.Item
                       name={[field.name, "qty"]}
@@ -7301,19 +7365,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               maxTagCount="responsive"
               optionFilterProp="searchText"
               options={skuOptions}
-              optionRender={(option) => {
-                const d = option as any;
-                // 优先用 label（=internal_sku_code，纯数字外观），兜底才回退到 value（可能带 jst:skuprofile: 前缀）
-                const displayCode = String(d?.label || d?.value || "");
-                return (
-                  <div style={{ lineHeight: 1.3 }}>
-                    <div>{displayCode} · {d?.skuName || "-"}</div>
-                    <div style={{ fontSize: 12, color: "#888" }}>
-                      成本 {d?.skuCost == null ? "-" : `¥${d.skuCost}`} · 供应商 {d?.skuSupplier || "-"} · 库存 {d?.skuStock == null ? "-" : d.skuStock}
-                    </div>
-                  </div>
-                );
-              }}
+              optionRender={renderSkuOption}
               suffixIcon={<SearchOutlined />}
               tokenSeparators={[",", "，", " ", "\n"]}
               notFoundContent={skuSearching ? "搜索中…" : "输入编码或名称搜索"}

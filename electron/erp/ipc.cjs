@@ -3774,7 +3774,7 @@ function toSkuOptionRow(row) {
   const next = toCamelRow(row);
   next.procurementSourceCount = Number(row.procurement_source_count || 0);
   next.actualStockQty = Number(row.actual_stock_qty || 0);
-  next.warehouseLocation = row.warehouse_location || "";
+  next.warehouseLocation = row.warehouse_location || row.jst_main_bin || "";
   next.costPrice = row.cost_price === null || row.cost_price === undefined ? null : Number(row.cost_price);
   if (row.primary_1688_source_id) {
     next.primary1688Source = {
@@ -9111,23 +9111,10 @@ function normalizeDirectPurchaseLines(db, payload, actor) {
       throw new Error(`第 ${index + 1} 行采购数量必须是正整数`);
     }
 
-    const unitCostValue = optionalNumber(line?.unitPrice ?? line?.unit_price ?? line?.unitCost ?? line?.unit_cost);
-    if (unitCostValue == null || !Number.isFinite(unitCostValue) || unitCostValue < 0) {
-      throw new Error(`第 ${index + 1} 行采购单价不能小于 0`);
-    }
-    const unitCost = Number(unitCostValue);
-
-    const logisticsFee = Number(optionalNumber(line?.logisticsFee ?? line?.logistics_fee ?? line?.freightAmount ?? line?.freight_amount) ?? 0);
-    if (!Number.isFinite(logisticsFee) || logisticsFee < 0) {
-      throw new Error(`第 ${index + 1} 行运费不能小于 0`);
-    }
-
     return {
       sku,
       qty,
-      unitCost,
-      logisticsFee,
-      remark: optionalString(line?.specText || line?.spec_text || line?.remark) || null,
+      remark: null,
     };
   });
 
@@ -9138,8 +9125,6 @@ function createDirectPurchaseOrderAction({ db, services, payload, actor }) {
   assertActorRole(actor, ["buyer", "manager", "admin"], "创建采购单");
   const { accountId, lines } = normalizeDirectPurchaseLines(db, payload, actor);
   const now = nowIso();
-  const goodsAmount = lines.reduce((sum, line) => sum + (line.qty * line.unitCost), 0);
-  const freightAmount = lines.reduce((sum, line) => sum + line.logisticsFee, 0);
   const po = {
     id: optionalString(payload.poId || payload.id) || createId("po"),
     account_id: accountId,
@@ -9151,9 +9136,9 @@ function createDirectPurchaseOrderAction({ db, services, payload, actor }) {
     payment_status: "unpaid",
     expected_delivery_date: null,
     actual_delivery_date: null,
-    total_amount: goodsAmount,
-    paid_amount: goodsAmount + freightAmount,
-    freight_amount: freightAmount,
+    total_amount: 0,
+    paid_amount: 0,
+    freight_amount: 0,
     created_by: actor.id || null,
     created_at: now,
     updated_at: now,
@@ -9191,8 +9176,8 @@ function createDirectPurchaseOrderAction({ db, services, payload, actor }) {
         po_id: po.id,
         sku_id: line.sku.id,
         qty: line.qty,
-        unit_cost: line.unitCost,
-        logistics_fee: line.logisticsFee,
+        unit_cost: 0,
+        logistics_fee: 0,
         expected_qty: line.qty,
         received_qty: 0,
         remark: line.remark,

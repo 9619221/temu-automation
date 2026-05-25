@@ -7955,7 +7955,7 @@ body {
 .direct-po-lines__head,
 .direct-po-lines__row {
   display: grid;
-  grid-template-columns: minmax(190px, 1.35fr) minmax(130px, 0.9fr) 112px 112px 112px 34px;
+  grid-template-columns: minmax(320px, 1fr) 120px 34px;
   gap: 10px;
   align-items: start;
 }
