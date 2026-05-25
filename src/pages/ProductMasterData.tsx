@@ -99,6 +99,10 @@ interface ErpSkuRow {
   imageUrl?: string | null;
   supplierId?: string | null;
   actualStockQty?: number | null;
+  costedStockQty?: number | null;
+  missingCostStockQty?: number | null;
+  stockValue?: number | null;
+  weightedStockCost?: number | null;
   warehouseLocation?: string | null;
   costPrice?: number | null;
   skuType?: string | null;
@@ -195,9 +199,27 @@ interface SkuStockRecord {
   date?: string | null;
   qty: number;
   orderNo: string;
+  batchCode?: string;
+  receiptNo?: string;
+  poNo?: string;
   warehouse: string;
   store: string;
   operator: string;
+  availableQty?: number;
+  reservedQty?: number;
+  blockedQty?: number;
+  defectiveQty?: number;
+  reworkQty?: number;
+  currentQty?: number;
+  unitCost?: number;
+  unitFreightCost?: number;
+  unitLandedCost?: number;
+  stockValue?: number;
+  costStatus?: string;
+  costedQty?: number;
+  missingCostQty?: number;
+  sourceStatus?: string;
+  sourceRemark?: string;
 }
 
 interface SkuLogRecord {
@@ -410,6 +432,49 @@ function getSkuStockRecords(row: ErpSkuRow): SkuStockRecord[] {
   }];
 }
 
+function normalizeSkuStockDetailRecord(row: any, index: number): SkuStockRecord {
+  const qty = toOptionalNumber(row?.qty ?? row?.receivedQty ?? row?.received_qty) ?? 0;
+  const availableQty = toOptionalNumber(row?.availableQty ?? row?.available_qty) ?? 0;
+  const reservedQty = toOptionalNumber(row?.reservedQty ?? row?.reserved_qty) ?? 0;
+  const blockedQty = toOptionalNumber(row?.blockedQty ?? row?.blocked_qty) ?? 0;
+  const defectiveQty = toOptionalNumber(row?.defectiveQty ?? row?.defective_qty) ?? 0;
+  const reworkQty = toOptionalNumber(row?.reworkQty ?? row?.rework_qty) ?? 0;
+  const currentQty = toOptionalNumber(row?.currentQty ?? row?.current_qty) ?? (availableQty + reservedQty + blockedQty + defectiveQty + reworkQty);
+  const unitCost = toOptionalNumber(row?.unitCost ?? row?.unit_cost) ?? 0;
+  const unitFreightCost = toOptionalNumber(row?.unitFreightCost ?? row?.unit_freight_cost) ?? 0;
+  const unitLandedCost = toOptionalNumber(row?.unitLandedCost ?? row?.unit_landed_cost) ?? 0;
+  const stockValue = toOptionalNumber(row?.stockValue ?? row?.stock_value) ?? (unitLandedCost * currentQty);
+  const costStatus = row?.costStatus || row?.cost_status || (currentQty > 0 && unitLandedCost <= 0 ? "missing" : "confirmed");
+  return {
+    key: String(row?.id || row?.batchId || row?.batchCode || row?.receiptNo || row?.orderNo || `stock-${index}`),
+    businessType: row?.businessType || "采购进仓",
+    date: row?.date || row?.receivedAt || row?.received_at || row?.createdAt || row?.created_at || null,
+    qty,
+    orderNo: row?.orderNo || row?.receiptNo || row?.batchCode || row?.id || "-",
+    batchCode: row?.batchCode || row?.batch_code || "",
+    receiptNo: row?.receiptNo || row?.receipt_no || "",
+    poNo: row?.poNo || row?.po_no || "",
+    warehouse: row?.warehouse || row?.locationCode || row?.location_code || "-",
+    store: row?.store || row?.accountName || row?.account_name || row?.accountId || row?.account_id || "-",
+    operator: row?.operator || row?.operatorName || row?.operator_name || "-",
+    availableQty,
+    reservedQty,
+    blockedQty,
+    defectiveQty,
+    reworkQty,
+    currentQty,
+    unitCost,
+    unitFreightCost,
+    unitLandedCost,
+    stockValue,
+    costStatus,
+    costedQty: toOptionalNumber(row?.costedQty ?? row?.costed_qty) ?? (costStatus === "confirmed" ? currentQty : 0),
+    missingCostQty: toOptionalNumber(row?.missingCostQty ?? row?.missing_cost_qty) ?? (costStatus === "missing" ? currentQty : 0),
+    sourceStatus: row?.sourceStatus || row?.source_status || "",
+    sourceRemark: row?.sourceRemark || row?.source_remark || "",
+  };
+}
+
 function getSkuCostPrice(row: ErpSkuRow) {
   const cost = row.costPrice ?? row.jstCostPrice;
   return toOptionalNumber(cost);
@@ -476,7 +541,7 @@ function getSkuDataIssues(row: ErpSkuRow): SkuIssueKey[] {
   const issues: SkuIssueKey[] = [];
   if (!row.imageUrl) issues.push("missing_image");
   if (!(row.colorSpec || row.category)) issues.push("missing_spec");
-  if (getSkuCostPrice(row) === null) issues.push("missing_cost");
+  if (getSkuCostPrice(row) === null || Number(row.missingCostStockQty || 0) > 0) issues.push("missing_cost");
   if (getSkuStockQty(row) <= 0) issues.push("zero_stock");
   if (!isBundleSku(row) && !getSkuSupplierText(row)) issues.push("missing_supplier");
   if (isSkuDataStale(row)) issues.push("stale_data");
@@ -1016,6 +1081,8 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
   const [skuDetailRow, setSkuDetailRow] = useState<ErpSkuRow | null>(null);
   const [costDetailRow, setCostDetailRow] = useState<ErpSkuRow | null>(null);
   const [stockDetailRow, setStockDetailRow] = useState<ErpSkuRow | null>(null);
+  const [stockDetailRows, setStockDetailRows] = useState<SkuStockRecord[]>([]);
+  const [stockDetailLoading, setStockDetailLoading] = useState(false);
   const [supplierDetailRow, setSupplierDetailRow] = useState<ErpSupplierRow | null>(null);
   const [skuFilters, setSkuFilters] = useState<SkuFilters>({ keyword: "" });
   const [selectedSkuRowKeys, setSelectedSkuRowKeys] = useState<Key[]>([]);
@@ -1161,9 +1228,34 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
   const skuLogRecords = useMemo(() => (
     skuDetailRow ? getSkuLogRecords(skuDetailRow) : []
   ), [skuDetailRow]);
-  const stockDetailRecords = useMemo(() => (
+  const fallbackStockDetailRecords = useMemo(() => (
     stockDetailRow ? getSkuStockRecords(stockDetailRow) : []
   ), [stockDetailRow]);
+  const stockDetailRecords = useMemo(() => (
+    stockDetailRows.length ? stockDetailRows : fallbackStockDetailRecords
+  ), [fallbackStockDetailRecords, stockDetailRows]);
+  const stockDetailTotal = useMemo(() => (
+    stockDetailRows.length
+      ? stockDetailRows.reduce((sum, row) => sum + Number(row.qty || 0), 0)
+      : (stockDetailRow ? getSkuStockQty(stockDetailRow) : 0)
+  ), [stockDetailRow, stockDetailRows]);
+  const stockDetailCurrentTotal = useMemo(() => (
+    stockDetailRows.length
+      ? stockDetailRows.reduce((sum, row) => sum + Number(row.currentQty ?? row.qty ?? 0), 0)
+      : (stockDetailRow ? getSkuStockQty(stockDetailRow) : 0)
+  ), [stockDetailRow, stockDetailRows]);
+  const stockDetailCostedTotal = useMemo(() => (
+    stockDetailRows.reduce((sum, row) => sum + Number(row.costedQty || 0), 0)
+  ), [stockDetailRows]);
+  const stockDetailMissingCostTotal = useMemo(() => (
+    stockDetailRows.reduce((sum, row) => sum + Number(row.missingCostQty || 0), 0)
+  ), [stockDetailRows]);
+  const stockDetailValueTotal = useMemo(() => (
+    stockDetailRows.reduce((sum, row) => sum + Number(row.stockValue || 0), 0)
+  ), [stockDetailRows]);
+  const stockDetailWeightedCost = stockDetailCostedTotal > 0
+    ? stockDetailValueTotal / stockDetailCostedTotal
+    : null;
   const costDetailRecords = useMemo(() => (
     costDetailRow ? getSkuCostRecords(costDetailRow) : []
   ), [costDetailRow]);
@@ -1334,6 +1426,42 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       loadSeqRef.current += 1;
     };
   }, []);
+
+  useEffect(() => {
+    if (!stockDetailRow) {
+      setStockDetailRows([]);
+      setStockDetailLoading(false);
+      return;
+    }
+    const stockDetails = erp?.sku?.stockDetails;
+    if (!stockDetails) {
+      setStockDetailRows([]);
+      return;
+    }
+    let cancelled = false;
+    setStockDetailLoading(true);
+    stockDetails({
+      skuId: stockDetailRow.id,
+      internalSkuCode: stockDetailRow.internalSkuCode || undefined,
+      limit: 1000,
+    })
+      .then((result: any) => {
+        if (cancelled) return;
+        const rows = Array.isArray(result) ? result : (Array.isArray(result?.rows) ? result.rows : []);
+        setStockDetailRows(rows.map(normalizeSkuStockDetailRecord));
+      })
+      .catch((error: any) => {
+        if (cancelled) return;
+        setStockDetailRows([]);
+        message.warning(error?.message || "库存明细读取失败");
+      })
+      .finally(() => {
+        if (!cancelled) setStockDetailLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [stockDetailRow]);
 
   const loadAll = useCallback(async (options?: { forceFull?: boolean; silent?: boolean; deferSkuCommit?: boolean }) => {
     if (!erp) return;
@@ -2282,26 +2410,37 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       width: 100,
       render: (value, row) => {
         const hasCost = getSkuCostPrice(row) !== null;
-        if (!hasCost) return <span>-</span>;
+        const missingCostQty = Number(row.missingCostStockQty || 0);
+        if (!hasCost) {
+          return (
+            <Space size={4} wrap>
+              <span>-</span>
+              {missingCostQty > 0 ? <Tag color="red">缺成本 {missingCostQty}</Tag> : null}
+            </Space>
+          );
+        }
         const costText = formatMoney(value ?? row.jstCostPrice);
         return (
-          <Button
-            type="link"
-            size="small"
-            icon={<LineChartOutlined />}
-            onClick={(event) => {
-              event.stopPropagation();
-              setCostDetailRow(row);
-            }}
-            style={{
-              color: hasCost ? "#2563eb" : "#dc2626",
-              fontWeight: 700,
-              height: "auto",
-              padding: 0,
-            }}
-          >
-            {costText}
-          </Button>
+          <Space size={4} wrap>
+            <Button
+              type="link"
+              size="small"
+              icon={<LineChartOutlined />}
+              onClick={(event) => {
+                event.stopPropagation();
+                setCostDetailRow(row);
+              }}
+              style={{
+                color: hasCost ? "#2563eb" : "#dc2626",
+                fontWeight: 700,
+                height: "auto",
+                padding: 0,
+              }}
+            >
+              {costText}
+            </Button>
+            {missingCostQty > 0 ? <Tag color="red">缺成本 {missingCostQty}</Tag> : null}
+          </Space>
         );
       },
     },
@@ -2871,7 +3010,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
         open={Boolean(skuDetailRow)}
         centered
         footer={null}
-        width={1120}
+        width={1280}
         onCancel={() => setSkuDetailRow(null)}
         destroyOnClose
       >
@@ -2929,9 +3068,10 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
           <Table<SkuStockRecord>
             rowKey="key"
             size="small"
-            pagination={false}
+            loading={stockDetailLoading}
+            pagination={{ defaultPageSize: 20, showSizeChanger: false, showTotal: (total) => `共 ${total} 条` }}
             dataSource={stockDetailRecords}
-            scroll={{ x: 980, y: 420 }}
+            scroll={{ x: 1600, y: 420 }}
             columns={[
               { title: "序号", width: 64, render: (_value, _row, index) => index + 1 },
               { title: "业务类型", dataIndex: "businessType", key: "businessType", width: 120 },
@@ -2948,7 +3088,22 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
                   </span>
                 ),
               },
+              { title: "当前库存", dataIndex: "currentQty", key: "currentQty", width: 100, align: "right" },
+              { title: "货款单价", dataIndex: "unitCost", key: "unitCost", width: 110, align: "right", render: formatMoney },
+              { title: "单件运费", dataIndex: "unitFreightCost", key: "unitFreightCost", width: 110, align: "right", render: formatMoney },
+              { title: "入库成本", dataIndex: "unitLandedCost", key: "unitLandedCost", width: 110, align: "right", render: formatMoney },
+              { title: "库存金额", dataIndex: "stockValue", key: "stockValue", width: 120, align: "right", render: formatMoney },
+              {
+                title: "成本状态",
+                dataIndex: "costStatus",
+                key: "costStatus",
+                width: 110,
+                render: (value, row) => value === "missing"
+                  ? <Tag color="red">缺成本 {row.missingCostQty || row.currentQty || 0}</Tag>
+                  : <Tag color="green">已确认</Tag>,
+              },
               { title: "单号", dataIndex: "orderNo", key: "orderNo", width: 150, ellipsis: true },
+              { title: "内部订单号", dataIndex: "poNo", key: "poNo", width: 140, ellipsis: true },
               { title: "仓位", dataIndex: "warehouse", key: "warehouse", width: 130, ellipsis: true },
               { title: "店铺", dataIndex: "store", key: "store", width: 110, ellipsis: true },
               { title: "操作人", dataIndex: "operator", key: "operator", width: 130, ellipsis: true },
@@ -2959,9 +3114,20 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
                   <strong>小计</strong>
                 </Table.Summary.Cell>
                 <Table.Summary.Cell index={3} align="right">
-                  <strong>{getSkuStockQty(stockDetailRow)}</strong>
+                  <strong>{stockDetailTotal}</strong>
                 </Table.Summary.Cell>
-                <Table.Summary.Cell index={4} colSpan={4} />
+                <Table.Summary.Cell index={4} align="right">
+                  <strong>{stockDetailCurrentTotal}</strong>
+                </Table.Summary.Cell>
+                <Table.Summary.Cell index={5} colSpan={3}>
+                  <strong>加权成本：{formatMoney(stockDetailWeightedCost)}</strong>
+                  {stockDetailMissingCostTotal > 0 ? <Tag color="red" style={{ marginLeft: 8 }}>缺成本 {stockDetailMissingCostTotal}</Tag> : null}
+                  {stockDetailCostedTotal > 0 ? <Tag color="green" style={{ marginLeft: 4 }}>已确认 {stockDetailCostedTotal}</Tag> : null}
+                </Table.Summary.Cell>
+                <Table.Summary.Cell index={8} align="right">
+                  <strong>{formatMoney(stockDetailValueTotal)}</strong>
+                </Table.Summary.Cell>
+                <Table.Summary.Cell index={9} colSpan={6} />
               </Table.Summary.Row>
             )}
           />

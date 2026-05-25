@@ -21,6 +21,7 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/permissions/scope/upsert": ["admin", "manager"],
   "/api/master-data/workbench": ["admin", "manager", "operations", "buyer"],
   "/api/master-data/sku-ids": ["admin", "manager", "operations", "buyer"],
+  "/api/master-data/sku-stock-details": ["admin", "manager", "operations", "buyer", "warehouse"],
   "/api/master-data/mappings": ["admin", "manager", "operations", "buyer"],
   "/api/master-data/mapping-ids": ["admin", "manager", "operations", "buyer"],
   "/api/master-data/action": ["admin", "manager", "operations", "buyer"],
@@ -2761,6 +2762,7 @@ function createRequestHandler(options = {}) {
     throw new Error("Supplier action handler is not available");
   });
   const listSkus = options.listSkus || (() => []);
+  const listSkuStockDetails = options.listSkuStockDetails || (() => ({ rows: [], total: 0 }));
   const listSku1688Sources = options.listSku1688Sources || (() => []);
   const createSku = options.createSku || (() => {
     throw new Error("SKU action handler is not available");
@@ -2829,6 +2831,7 @@ function createRequestHandler(options = {}) {
       listSuppliers,
       createSupplier,
       listSkus,
+      listSkuStockDetails,
       listSku1688Sources,
       createSku,
       deleteSku,
@@ -3602,6 +3605,7 @@ async function handleRequest({
   listSuppliers,
   createSupplier,
   listSkus,
+  listSkuStockDetails,
   listSku1688Sources,
   createSku,
   deleteSku,
@@ -3831,6 +3835,16 @@ async function handleRequest({
           ${companyId ? "AND company_id = @company_id" : ""}
       `).all(companyId ? { company_id: companyId } : {});
       writeJson(res, 200, { ok: true, ids: idRows.map((row) => row.id) });
+      return;
+    }
+
+    if (pathname === "/api/master-data/sku-stock-details") {
+      const payload = await readOptionalPayload(req);
+      const result = await listSkuStockDetails({
+        ...(payload || {}),
+        companyId: session.user?.companyId,
+      }, session.user);
+      writeJson(res, 200, { ok: true, result, ...result });
       return;
     }
 

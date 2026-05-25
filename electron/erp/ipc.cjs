@@ -722,6 +722,29 @@ function splitOrderMoney(totalAmount, freightAmount, fallbackGoodsAmount = null)
   };
 }
 
+function moneyOrZero(value) {
+  return roundMoney(value) ?? 0;
+}
+
+function allocateMoneyByWeight(total, weights = []) {
+  const amount = moneyOrZero(total);
+  if (!weights.length || amount <= 0) return weights.map(() => 0);
+  const normalizedWeights = weights.map((weight) => {
+    const number = optionalNumber(weight);
+    return number !== null && number > 0 ? number : 0;
+  });
+  const weightSum = normalizedWeights.reduce((sum, weight) => sum + weight, 0);
+  const effectiveWeights = weightSum > 0 ? normalizedWeights : weights.map(() => 1);
+  const effectiveSum = weightSum > 0 ? weightSum : effectiveWeights.length;
+  let allocated = 0;
+  return effectiveWeights.map((weight, index) => {
+    if (index === effectiveWeights.length - 1) return moneyOrZero(amount - allocated);
+    const share = moneyOrZero((amount * weight) / effectiveSum);
+    allocated = moneyOrZero(allocated + share);
+    return share;
+  });
+}
+
 function optionalPositiveInteger(value, fallback = null) {
   const number = optionalNumber(value);
   if (number === null) return fallback;
@@ -3546,8 +3569,15 @@ function listSkus(params = {}) {
       acct.name AS account_name,
       supplier.name AS system_supplier_name,
       COALESCE(inv.actual_stock_qty, 0) AS actual_stock_qty,
+      COALESCE(inv.costed_stock_qty, 0) AS costed_stock_qty,
+      COALESCE(inv.missing_cost_stock_qty, 0) AS missing_cost_stock_qty,
+      COALESCE(inv.stock_value, 0) AS stock_value,
       inv.location_codes AS warehouse_location,
-      COALESCE(bundle_meta.bundle_cost_price, sku.bundle_cost_price, inv.weighted_unit_landed_cost, source.unit_price) AS cost_price,
+      inv.weighted_unit_landed_cost AS weighted_stock_cost,
+      COALESCE(bundle_meta.bundle_cost_price, sku.bundle_cost_price, CASE
+        WHEN COALESCE(inv.actual_stock_qty, 0) > 0 THEN inv.weighted_unit_landed_cost
+        ELSE source.unit_price
+      END) AS cost_price,
       COALESCE(bundle_meta.component_count, 0) AS bundle_component_count,
       creator.name AS created_by_name,
       COALESCE(source_count.source_count, 0) AS procurement_source_count,
@@ -3573,22 +3603,46 @@ function listSkus(params = {}) {
     ) source_count ON source_count.account_id = sku.account_id AND source_count.sku_id = sku.id
     LEFT JOIN (
       SELECT
-        account_id,
         sku_id,
         SUM(available_qty + reserved_qty + blocked_qty + defective_qty + rework_qty) AS actual_stock_qty,
+        SUM(CASE
+          WHEN (available_qty + reserved_qty + blocked_qty + defective_qty + rework_qty) > 0
+            AND COALESCE(unit_landed_cost, 0) > 0
+          THEN (available_qty + reserved_qty + blocked_qty + defective_qty + rework_qty)
+          ELSE 0
+        END) AS costed_stock_qty,
+        SUM(CASE
+          WHEN (available_qty + reserved_qty + blocked_qty + defective_qty + rework_qty) > 0
+            AND COALESCE(unit_landed_cost, 0) <= 0
+          THEN (available_qty + reserved_qty + blocked_qty + defective_qty + rework_qty)
+          ELSE 0
+        END) AS missing_cost_stock_qty,
+        SUM(CASE
+          WHEN COALESCE(unit_landed_cost, 0) > 0 THEN unit_landed_cost * (available_qty + reserved_qty + blocked_qty + defective_qty + rework_qty)
+          ELSE 0
+        END) AS stock_value,
         GROUP_CONCAT(DISTINCT CASE
           WHEN (available_qty + reserved_qty + blocked_qty + defective_qty + rework_qty) > 0 THEN NULLIF(location_code, '')
           ELSE NULL
         END) AS location_codes,
         CASE
-          WHEN SUM(available_qty + reserved_qty + blocked_qty + defective_qty + rework_qty) > 0 THEN
-            SUM(unit_landed_cost * (available_qty + reserved_qty + blocked_qty + defective_qty + rework_qty))
-            / SUM(available_qty + reserved_qty + blocked_qty + defective_qty + rework_qty)
+          WHEN SUM(CASE
+            WHEN COALESCE(unit_landed_cost, 0) > 0 THEN (available_qty + reserved_qty + blocked_qty + defective_qty + rework_qty)
+            ELSE 0
+          END) > 0 THEN
+            SUM(CASE
+              WHEN COALESCE(unit_landed_cost, 0) > 0 THEN unit_landed_cost * (available_qty + reserved_qty + blocked_qty + defective_qty + rework_qty)
+              ELSE 0
+            END)
+            / SUM(CASE
+              WHEN COALESCE(unit_landed_cost, 0) > 0 THEN (available_qty + reserved_qty + blocked_qty + defective_qty + rework_qty)
+              ELSE 0
+            END)
           ELSE NULL
         END AS weighted_unit_landed_cost
       FROM erp_inventory_batches
-      GROUP BY account_id, sku_id
-    ) inv ON inv.account_id = sku.account_id AND inv.sku_id = sku.id
+      GROUP BY sku_id
+    ) inv ON inv.sku_id = sku.id
     LEFT JOIN (
       SELECT
         bundle_sku_id,
@@ -3747,21 +3801,33 @@ function getSkuEffectiveCost(db, skuId) {
     SELECT
       sku.id,
       ${hasJstCost ? "sku.jst_cost_price" : "NULL"} AS jst_cost_price,
-      COALESCE(inv.weighted_unit_landed_cost, source.unit_price, sku.bundle_cost_price) AS cost_price
+      COALESCE(CASE
+        WHEN COALESCE(inv.actual_stock_qty, 0) > 0 THEN inv.weighted_unit_landed_cost
+        ELSE source.unit_price
+      END, sku.bundle_cost_price) AS cost_price
     FROM erp_skus sku
     LEFT JOIN (
       SELECT
-        account_id,
         sku_id,
+        SUM(available_qty + reserved_qty + blocked_qty + defective_qty + rework_qty) AS actual_stock_qty,
         CASE
-          WHEN SUM(available_qty + reserved_qty + blocked_qty + defective_qty + rework_qty) > 0 THEN
-            SUM(unit_landed_cost * (available_qty + reserved_qty + blocked_qty + defective_qty + rework_qty))
-            / SUM(available_qty + reserved_qty + blocked_qty + defective_qty + rework_qty)
+          WHEN SUM(CASE
+            WHEN COALESCE(unit_landed_cost, 0) > 0 THEN (available_qty + reserved_qty + blocked_qty + defective_qty + rework_qty)
+            ELSE 0
+          END) > 0 THEN
+            SUM(CASE
+              WHEN COALESCE(unit_landed_cost, 0) > 0 THEN unit_landed_cost * (available_qty + reserved_qty + blocked_qty + defective_qty + rework_qty)
+              ELSE 0
+            END)
+            / SUM(CASE
+              WHEN COALESCE(unit_landed_cost, 0) > 0 THEN (available_qty + reserved_qty + blocked_qty + defective_qty + rework_qty)
+              ELSE 0
+            END)
           ELSE NULL
         END AS weighted_unit_landed_cost
       FROM erp_inventory_batches
-      GROUP BY account_id, sku_id
-    ) inv ON inv.account_id = sku.account_id AND inv.sku_id = sku.id
+      GROUP BY sku_id
+    ) inv ON inv.sku_id = sku.id
     LEFT JOIN erp_sku_1688_sources source ON source.id = (
       SELECT id
       FROM erp_sku_1688_sources item
@@ -3988,6 +4054,10 @@ function toSkuOptionRow(row) {
   const next = toCamelRow(row);
   next.procurementSourceCount = Number(row.procurement_source_count || 0);
   next.actualStockQty = Number(row.actual_stock_qty || 0);
+  next.costedStockQty = Number(row.costed_stock_qty || 0);
+  next.missingCostStockQty = Number(row.missing_cost_stock_qty || 0);
+  next.stockValue = Number(row.stock_value || 0);
+  next.weightedStockCost = row.weighted_stock_cost === null || row.weighted_stock_cost === undefined ? null : Number(row.weighted_stock_cost);
   next.warehouseLocation = normalizeWarehouseLocationText(row.warehouse_location, row.jst_main_bin);
   next.costPrice = row.cost_price === null || row.cost_price === undefined ? null : Number(row.cost_price);
   next.bundleComponentCount = Number(row.bundle_component_count || 0);
@@ -4018,6 +4088,132 @@ function toSkuOptionRow(row) {
     delete next[key];
   }
   return next;
+}
+
+function toSkuStockDetail(row) {
+  const next = toCamelRow(row);
+  const remark = parseJsonObject(row.receipt_remark);
+  next.businessType = "采购进仓";
+  next.date = row.received_at || row.created_at || null;
+  next.qty = Number(row.received_qty || 0);
+  next.orderNo = row.receipt_no || row.batch_code || row.id;
+  next.batchCode = row.batch_code || "";
+  next.receiptNo = row.receipt_no || "";
+  next.poNo = row.po_no || "";
+  next.warehouse = row.location_code || remark.warehouse || remark.sourceWarehouse || "-";
+  next.store = row.account_name || row.account_id || "-";
+  next.operator = remark.purchaser || row.operator_name || "-";
+  next.sourceStatus = remark.sourceStatus || row.receipt_status || "";
+  next.sourceRemark = remark.sourceRemark || "";
+  next.availableQty = Number(row.available_qty || 0);
+  next.reservedQty = Number(row.reserved_qty || 0);
+  next.blockedQty = Number(row.blocked_qty || 0);
+  next.defectiveQty = Number(row.defective_qty || 0);
+  next.reworkQty = Number(row.rework_qty || 0);
+  next.currentQty = next.availableQty + next.reservedQty + next.blockedQty + next.defectiveQty + next.reworkQty;
+  next.unitCost = Number(row.po_unit_cost || 0);
+  next.unitLandedCost = Number(row.unit_landed_cost || 0);
+  next.unitFreightCost = next.unitLandedCost && next.unitCost ? Number((next.unitLandedCost - next.unitCost).toFixed(6)) : 0;
+  next.stockValue = Number((next.unitLandedCost * next.currentQty).toFixed(6));
+  next.costStatus = next.currentQty > 0 && next.unitLandedCost <= 0 ? "missing" : "confirmed";
+  next.costedQty = next.costStatus === "confirmed" ? next.currentQty : 0;
+  next.missingCostQty = next.costStatus === "missing" ? next.currentQty : 0;
+  delete next.receiptRemark;
+  return next;
+}
+
+function listSkuStockDetails(params = {}) {
+  const { db } = requireErp();
+  const skuId = optionalString(params.skuId || params.sku_id || params.id);
+  const internalSkuCode = optionalString(params.internalSkuCode || params.internal_sku_code || params.skuCode || params.sku_code);
+  if (!skuId && !internalSkuCode) throw new Error("skuId or internalSkuCode is required");
+
+  const conditions = [];
+  const queryParams = {
+    sku_id: skuId,
+    internal_sku_code: internalSkuCode,
+    limit: Math.min(normalizeLimit(params.limit, 100), 1000),
+    offset: normalizeOffset(params.offset),
+  };
+  if (skuId && internalSkuCode) {
+    conditions.push("(batch.sku_id = @sku_id OR sku.internal_sku_code = @internal_sku_code)");
+  } else if (skuId) {
+    conditions.push("batch.sku_id = @sku_id");
+  } else if (internalSkuCode) {
+    conditions.push("sku.internal_sku_code = @internal_sku_code");
+  }
+  const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+
+  const summary = db.prepare(`
+    SELECT
+      COUNT(*) AS row_count,
+      COALESCE(SUM(batch.received_qty), 0) AS received_qty,
+      COALESCE(SUM(batch.available_qty), 0) AS available_qty,
+      COALESCE(SUM(batch.reserved_qty), 0) AS reserved_qty,
+      COALESCE(SUM(batch.blocked_qty), 0) AS blocked_qty,
+      COALESCE(SUM(batch.defective_qty), 0) AS defective_qty,
+      COALESCE(SUM(batch.rework_qty), 0) AS rework_qty,
+      COALESCE(SUM(CASE
+        WHEN (batch.available_qty + batch.reserved_qty + batch.blocked_qty + batch.defective_qty + batch.rework_qty) > 0
+          AND COALESCE(batch.unit_landed_cost, 0) > 0
+        THEN (batch.available_qty + batch.reserved_qty + batch.blocked_qty + batch.defective_qty + batch.rework_qty)
+        ELSE 0
+      END), 0) AS costed_qty,
+      COALESCE(SUM(CASE
+        WHEN (batch.available_qty + batch.reserved_qty + batch.blocked_qty + batch.defective_qty + batch.rework_qty) > 0
+          AND COALESCE(batch.unit_landed_cost, 0) <= 0
+        THEN (batch.available_qty + batch.reserved_qty + batch.blocked_qty + batch.defective_qty + batch.rework_qty)
+        ELSE 0
+      END), 0) AS missing_cost_qty,
+      COALESCE(SUM(batch.unit_landed_cost * (
+        batch.available_qty + batch.reserved_qty + batch.blocked_qty + batch.defective_qty + batch.rework_qty
+      )), 0) AS stock_value
+    FROM erp_inventory_batches batch
+    LEFT JOIN erp_skus sku ON sku.id = batch.sku_id
+    ${whereClause}
+  `).get(queryParams) || {};
+
+  const rows = db.prepare(`
+    SELECT
+      batch.*,
+      sku.internal_sku_code,
+      sku.product_name,
+      acct.name AS account_name,
+      receipt.receipt_no,
+      receipt.status AS receipt_status,
+      receipt.remark AS receipt_remark,
+      operator.name AS operator_name,
+      receipt_line.po_line_id,
+      po_line.unit_cost AS po_unit_cost,
+      po.po_no
+    FROM erp_inventory_batches batch
+    LEFT JOIN erp_skus sku ON sku.id = batch.sku_id
+    LEFT JOIN erp_accounts acct ON acct.id = batch.account_id
+    LEFT JOIN erp_inbound_receipts receipt ON receipt.id = batch.inbound_receipt_id
+    LEFT JOIN erp_users operator ON operator.id = receipt.operator_id
+    LEFT JOIN erp_inbound_receipt_lines receipt_line ON receipt_line.batch_id = batch.id
+    LEFT JOIN erp_purchase_order_lines po_line ON po_line.id = receipt_line.po_line_id
+    LEFT JOIN erp_purchase_orders po ON po.id = batch.po_id
+    ${whereClause}
+    ORDER BY datetime(batch.received_at) DESC, batch.updated_at DESC, batch.id DESC
+    LIMIT @limit OFFSET @offset
+  `).all(queryParams).map(toSkuStockDetail);
+
+  return {
+    rows,
+    total: Number(summary.row_count || 0),
+    summary: {
+      receivedQty: Number(summary.received_qty || 0),
+      availableQty: Number(summary.available_qty || 0),
+      reservedQty: Number(summary.reserved_qty || 0),
+      blockedQty: Number(summary.blocked_qty || 0),
+      defectiveQty: Number(summary.defective_qty || 0),
+      reworkQty: Number(summary.rework_qty || 0),
+      costedQty: Number(summary.costed_qty || 0),
+      missingCostQty: Number(summary.missing_cost_qty || 0),
+      stockValue: Number(summary.stock_value || 0),
+    },
+  };
 }
 
 function getDefaultSku1688Source(db, accountId, skuId) {
@@ -13483,8 +13679,18 @@ function createPurchaseOrderFrom1688Order({ db, services, order, payload = {}, a
       @external_order_synced_at, @external_order_detail_json, @external_order_detail_synced_at
     )
   `).run(po);
-  usableLines.forEach((item, index) => {
+  const lineDrafts = usableLines.map((item) => {
     const qty = Math.max(1, Math.floor(Number(item.line.quantity || 1)));
+    const unitCost = optionalNumber(item.source.unit_price) ?? unitFallback;
+    return {
+      item,
+      qty,
+      unitCost,
+      amount: moneyOrZero(qty * unitCost),
+    };
+  });
+  const allocatedFreight = allocateMoneyByWeight(money.freightAmount, lineDrafts.map((line) => line.amount));
+  lineDrafts.forEach((line, index) => {
     db.prepare(`
       INSERT INTO erp_purchase_order_lines (
         id, account_id, po_id, sku_id, qty, unit_cost, logistics_fee,
@@ -13498,13 +13704,13 @@ function createPurchaseOrderFrom1688Order({ db, services, order, payload = {}, a
       id: createId("po_line"),
       account_id: finalAccountId,
       po_id: po.id,
-      sku_id: item.source.sku_id,
-      qty,
-      unit_cost: optionalNumber(item.source.unit_price) ?? unitFallback,
-      logistics_fee: index === 0 ? money.freightAmount : 0,
-      expected_qty: qty,
+      sku_id: line.item.source.sku_id,
+      qty: line.qty,
+      unit_cost: line.unitCost,
+      logistics_fee: allocatedFreight[index] || 0,
+      expected_qty: line.qty,
       received_qty: 0,
-      remark: item.line.title || item.source.product_title || null,
+      remark: line.item.line.title || line.item.source.product_title || null,
     });
   });
   const afterPo = getPurchaseOrder(db, po.id);
@@ -14745,10 +14951,30 @@ function buildBatchCode(receiptNo, line, index) {
   return `${safeReceiptNo}-B${String(index + 1).padStart(2, "0")}-${safeLine}`;
 }
 
+function getPurchaseOrderLineFreightAllocations(db, poId) {
+  if (!poId) return new Map();
+  const po = db.prepare("SELECT freight_amount FROM erp_purchase_orders WHERE id = ?").get(poId);
+  const lines = db.prepare(`
+    SELECT id, qty, unit_cost, logistics_fee
+    FROM erp_purchase_order_lines
+    WHERE po_id = ?
+    ORDER BY id ASC
+  `).all(poId);
+  if (!lines.length) return new Map();
+  const orderFreight = optionalNumber(po?.freight_amount);
+  const lineFreightTotal = moneyOrZero(lines.reduce((sum, line) => sum + Number(line.logistics_fee || 0), 0));
+  const freightToAllocate = orderFreight !== null && orderFreight > 0 ? orderFreight : lineFreightTotal;
+  if (!freightToAllocate) return new Map(lines.map((line) => [line.id, Number(line.logistics_fee || 0)]));
+  const weights = lines.map((line) => moneyOrZero(Number(line.qty || 0) * Number(line.unit_cost || 0)));
+  const allocated = allocateMoneyByWeight(freightToAllocate, weights);
+  return new Map(lines.map((line, index) => [line.id, allocated[index] || 0]));
+}
+
 function getInboundLinesForBatchCreation(db, receiptId) {
-  return db.prepare(`
+  const rows = db.prepare(`
     SELECT
       line.*,
+      po_line.po_id AS po_line_po_id,
       po_line.qty AS po_qty,
       po_line.unit_cost AS po_unit_cost,
       po_line.logistics_fee AS po_logistics_fee
@@ -14757,11 +14983,24 @@ function getInboundLinesForBatchCreation(db, receiptId) {
     WHERE line.receipt_id = ?
     ORDER BY line.id ASC
   `).all(receiptId);
+  const allocationByPo = new Map();
+  return rows.map((line) => {
+    const poId = optionalString(line.po_line_po_id);
+    if (!poId) return line;
+    if (!allocationByPo.has(poId)) {
+      allocationByPo.set(poId, getPurchaseOrderLineFreightAllocations(db, poId));
+    }
+    const allocation = allocationByPo.get(poId);
+    return {
+      ...line,
+      po_allocated_logistics_fee: allocation.get(line.po_line_id) ?? Number(line.po_logistics_fee || 0),
+    };
+  });
 }
 
 function calculateLineLandedCost(line) {
   const unitCost = Number(line.po_unit_cost || 0);
-  const logisticsFee = Number(line.po_logistics_fee || 0);
+  const logisticsFee = Number(line.po_allocated_logistics_fee ?? line.po_logistics_fee ?? 0);
   const qty = Number(line.po_qty || line.expected_qty || line.received_qty || 0);
   if (qty > 0) return unitCost + (logisticsFee / qty);
   return unitCost;
@@ -16890,7 +17129,8 @@ async function performOutboundActionRuntime(payload = {}) {
 }
 
 async function listWorkItemsRuntime(params = {}) {
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     const payload = await remoteRequest("/api/work-items/list", {
       method: "POST",
       body: params,
@@ -16901,7 +17141,8 @@ async function listWorkItemsRuntime(params = {}) {
 }
 
 async function getWorkItemStatsRuntime(params = {}) {
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     const payload = await remoteRequest("/api/work-items/stats", {
       method: "POST",
       body: params,
@@ -16912,7 +17153,8 @@ async function getWorkItemStatsRuntime(params = {}) {
 }
 
 async function generateWorkItemsRuntime(payload = {}) {
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     const response = await remoteRequest("/api/work-items/generate", {
       method: "POST",
       body: payload,
@@ -16923,7 +17165,8 @@ async function generateWorkItemsRuntime(payload = {}) {
 }
 
 async function updateWorkItemStatusRuntime(payload = {}) {
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     const response = await remoteRequest("/api/work-items/update-status", {
       method: "POST",
       body: payload,

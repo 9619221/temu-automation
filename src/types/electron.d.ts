@@ -495,6 +495,26 @@ interface ErpAPI {
   };
   sku: {
     list: (params?: ErpListParams) => Promise<any[]>;
+    stockDetails: (params?: {
+      skuId?: string;
+      internalSkuCode?: string;
+      limit?: number;
+      offset?: number;
+    }) => Promise<{
+      rows: any[];
+      total: number;
+      summary?: {
+        receivedQty?: number;
+        availableQty?: number;
+        reservedQty?: number;
+        blockedQty?: number;
+        defectiveQty?: number;
+        reworkQty?: number;
+        costedQty?: number;
+        missingCostQty?: number;
+        stockValue?: number;
+      };
+    }>;
     listUnmappedPage: (params?: ErpListParams) => Promise<ErpPageResult>;
     create: (payload: {
       id?: string;
