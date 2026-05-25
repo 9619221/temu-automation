@@ -29,7 +29,7 @@ app.use((req, _res, next) => {
 app.use("/console", express.static(path.join(__dirname, "public")));
 app.get("/", (_req, res) => {
   // 根路径重定向到控制台（旧 JSON 元信息搬到 /api/_meta）
-  res.redirect("/console/console.html");
+  res.redirect("./console/console.html");
 });
 app.get("/api/_meta", (_req, res) => {
   res.json({ name: "temu-monitor-cloud", version: "0.1.0", ts: Date.now() });
