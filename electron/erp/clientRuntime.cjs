@@ -138,11 +138,12 @@ function setHostMode() {
 function setClientMode(payload = {}) {
   const serverUrl = normalizeHkServerUrl(payload.serverUrl || HK_SERVER_URL);
   if (!serverUrl) throw new Error("serverUrl is required");
+  const current = readRuntimeConfig();
   return writeRuntimeConfig({
     mode: "client",
     serverUrl,
-    sessionCookie: payload.sessionCookie || "",
-    currentUser: payload.currentUser || null,
+    sessionCookie: payload.sessionCookie ?? current.sessionCookie ?? "",
+    currentUser: payload.currentUser ?? current.currentUser ?? null,
   });
 }
 

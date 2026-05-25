@@ -4068,7 +4068,7 @@ h6 {
 
 .purchase-order-detail__items table {
   width: 100%;
-  min-width: 920px;
+  min-width: 1040px;
   border-collapse: collapse;
   table-layout: fixed;
 }
@@ -4109,10 +4109,19 @@ h6 {
 
 .purchase-order-detail__code-list.ant-typography {
   display: inline-flex;
-  align-items: center;
-  flex-wrap: wrap;
+  align-items: flex-start;
   gap: 6px;
+  max-width: 100%;
   margin-bottom: 0;
+}
+
+.purchase-order-detail__code-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .purchase-order-detail__code-chip {
@@ -4145,6 +4154,16 @@ h6 {
   overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
+  word-break: break-word;
+}
+
+.purchase-order-detail__items-spec {
+  display: -webkit-box;
+  max-height: 42px;
+  overflow: hidden;
+  color: #334155;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   word-break: break-word;
 }
 

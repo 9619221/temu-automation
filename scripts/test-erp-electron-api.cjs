@@ -8,6 +8,12 @@ const { relaunchUnderElectronIfNeeded } = require("./ensure-electron-runtime.cjs
 relaunchUnderElectronIfNeeded(__filename);
 
 const { openErpDatabase } = require("../electron/db/connection.cjs");
+const {
+  HK_SERVER_URL,
+  configureClientRuntime,
+  getRuntimeStatus,
+  setClientMode,
+} = require("../electron/erp/clientRuntime.cjs");
 const { createErpServices } = require("../electron/erp/services/index.cjs");
 const {
   closeErp,
@@ -40,6 +46,16 @@ async function main() {
   };
 
   try {
+    configureClientRuntime({ userDataDir: tempUserData });
+    setClientMode({
+      serverUrl: HK_SERVER_URL,
+      sessionCookie: "temu_erp_lan_session=test-session",
+      currentUser: { id: "client_user_ipc", name: "Client User", role: "operations" },
+    });
+    setClientMode({ serverUrl: HK_SERVER_URL });
+    assert.equal(getRuntimeStatus().currentUser.id, "client_user_ipc");
+    assert.equal(getRuntimeStatus().connected, true);
+
     initializeErp({
       userDataDir: tempUserData,
       backup: false,
@@ -355,13 +371,13 @@ async function main() {
           INSERT INTO erp_purchase_orders (
             id, account_id, pr_id, selected_candidate_id, supplier_id, po_no,
             status, payment_status, expected_delivery_date, total_amount,
-            external_order_id, external_order_status,
+            paid_amount, freight_amount, external_order_id, external_order_status,
             created_by, created_at, updated_at
           )
           VALUES (
             'po_ipc', @account_id, 'pr_ipc', 'candidate_ipc', @supplier_id,
             'PO-IPC-001', 'pending_finance_approval', 'unpaid',
-            '2026-05-10', 1260, '16880001', 'paid', @buyer_id, @now, @now
+            '2026-05-10', 1260, 1272, 12, '16880001', 'paid', @buyer_id, @now, @now
           )
         `).run({
           account_id: account.id,
@@ -375,7 +391,19 @@ async function main() {
             id, account_id, po_id, sku_id, qty, unit_cost, expected_qty, received_qty
           )
           VALUES (
-            'po_line_ipc', @account_id, 'po_ipc', @sku_id, 120, 10.5, 120, 0
+            'po_line_ipc', @account_id, 'po_ipc', @sku_id, 70, 10.5, 70, 0
+          )
+        `).run({
+          account_id: account.id,
+          sku_id: sku.id,
+        });
+
+        seedDb.prepare(`
+          INSERT INTO erp_purchase_order_lines (
+            id, account_id, po_id, sku_id, qty, unit_cost, expected_qty, received_qty
+          )
+          VALUES (
+            'po_line_ipc_extra', @account_id, 'po_ipc', @sku_id, 50, 10.5, 50, 0
           )
         `).run({
           account_id: account.id,
@@ -594,6 +622,12 @@ async function main() {
     assert.equal(purchaseWorkbench.purchaseOrders.length, 5);
     assert.equal(purchaseWorkbench.paymentQueue.length, 1);
     assert.equal(purchaseWorkbench.paymentQueue[0].paymentApprovalId, "pay_ipc");
+    const detailedPurchaseOrder = purchaseWorkbench.purchaseOrders.find((item) => item.id === "po_ipc");
+    assert.equal(detailedPurchaseOrder.lineItems.length, 2);
+    assert.deepEqual(detailedPurchaseOrder.lineItems.map((item) => item.qty), [70, 50]);
+    assert.deepEqual(detailedPurchaseOrder.lineItems.map((item) => item.amount), [735, 525]);
+    assert.deepEqual(detailedPurchaseOrder.lineItems.map((item) => item.logisticsFee), [7, 5]);
+    assert.deepEqual(detailedPurchaseOrder.lineItems.map((item) => item.paidAmount), [742, 530]);
 
     const sortedByAmountWorkbench = await invoke("erp:purchase:workbench", {
       purchaseOrderSortField: "paidAmount",

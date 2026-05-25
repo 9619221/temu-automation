@@ -359,6 +359,7 @@ interface PurchaseOrderLineDetail {
   skuCode?: string | null;
   skuCodes?: string[];
   productName?: string | null;
+  specText?: string | null;
   qty?: number | null;
   receivedQty?: number | null;
   unitCost?: number | null;
@@ -2013,25 +2014,110 @@ function joinGroupedText(items: string[]) {
   return items.filter(Boolean).join(" / ");
 }
 
+function roundCurrency(value?: number | string | null) {
+  const number = optionalFiniteNumber(value);
+  if (number === null) return 0;
+  return Math.round(number * 100) / 100;
+}
+
+function allocateCurrencyByWeight(total: number, weights: number[]) {
+  const amount = roundCurrency(total);
+  if (!weights.length || amount <= 0) return weights.map(() => 0);
+  const normalizedWeights = weights.map((weight) => (Number.isFinite(weight) && weight > 0 ? weight : 0));
+  const weightSum = normalizedWeights.reduce((sum, weight) => sum + weight, 0);
+  const effectiveWeights = weightSum > 0 ? normalizedWeights : weights.map(() => 1);
+  const effectiveSum = weightSum > 0 ? weightSum : effectiveWeights.length;
+  let allocated = 0;
+  return effectiveWeights.map((weight, index) => {
+    if (index === effectiveWeights.length - 1) return roundCurrency(amount - allocated);
+    const share = roundCurrency((amount * weight) / effectiveSum);
+    allocated = roundCurrency(allocated + share);
+    return share;
+  });
+}
+
+function splitPurchaseOrderDetailText(value?: string | null) {
+  return String(value || "")
+    .split(/\s*(?:\/|,|，|、|;|；)\s*/u)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function normalizePurchaseOrderDetailLine(
+  row: PurchaseOrderRow,
+  line: PurchaseOrderLineDetail,
+  index: number,
+): PurchaseOrderLineDetail {
+  const qty = toFiniteNumber(line.qty);
+  const amount = roundCurrency(
+    optionalFiniteNumber(line.amount) ?? (qty > 0 ? qty * toFiniteNumber(line.unitCost) : 0),
+  );
+  const logisticsFee = roundCurrency(line.logisticsFee);
+  const paidAmount = roundCurrency(optionalFiniteNumber(line.paidAmount)
+    ?? amount + logisticsFee);
+  return {
+    ...line,
+    id: line.id || `${row.id}-line-${index}`,
+    qty,
+    logisticsFee,
+    amount,
+    paidAmount,
+  };
+}
+
+function allocatePurchaseOrderDetailLineFreight(
+  row: PurchaseOrderRow,
+  lines: PurchaseOrderLineDetail[],
+) {
+  if (!lines.length) return lines;
+  const lineFreightTotal = roundCurrency(lines.reduce((sum, line) => sum + roundCurrency(line.logisticsFee), 0));
+  if (lineFreightTotal > 0) return lines;
+
+  const explicitFreight = optionalFiniteNumber(row.freightAmount);
+  const lineAmountTotal = roundCurrency(lines.reduce((sum, line) => sum + roundCurrency(line.amount), 0));
+  const paidAmount = optionalFiniteNumber(row.paidAmount);
+  const inferredFreight = paidAmount !== null && paidAmount > lineAmountTotal
+    ? roundCurrency(paidAmount - lineAmountTotal)
+    : 0;
+  const freightToAllocate = explicitFreight !== null && explicitFreight > 0
+    ? explicitFreight
+    : inferredFreight;
+  if (!freightToAllocate) return lines;
+
+  const weights = lines.map((line) => roundCurrency(line.amount) || toFiniteNumber(line.qty));
+  const allocatedFreight = allocateCurrencyByWeight(freightToAllocate, weights);
+  return lines.map((line, index) => {
+    const logisticsFee = allocatedFreight[index] ?? 0;
+    const amount = roundCurrency(line.amount);
+    return {
+      ...line,
+      logisticsFee,
+      paidAmount: roundCurrency(amount + logisticsFee),
+    };
+  });
+}
+
+function purchaseOrderDetailTotals(lines: PurchaseOrderLineDetail[]) {
+  return lines.reduce<{ qty: number; amount: number; logisticsFee: number; paidAmount: number }>(
+    (totals, line) => ({
+      qty: totals.qty + toFiniteNumber(line.qty),
+      amount: roundCurrency(totals.amount + roundCurrency(line.amount)),
+      logisticsFee: roundCurrency(totals.logisticsFee + roundCurrency(line.logisticsFee)),
+      paidAmount: roundCurrency(totals.paidAmount + roundCurrency(line.paidAmount)),
+    }),
+    { qty: 0, amount: 0, logisticsFee: 0, paidAmount: 0 },
+  );
+}
+
 function purchaseOrderDetailLines(row: PurchaseOrderRow): PurchaseOrderLineDetail[] {
   const explicitLines = Array.isArray(row.lineItems)
     ? row.lineItems.filter((line) => line && typeof line === "object")
     : [];
   if (explicitLines.length) {
-    return explicitLines.map((line, index) => {
-      const qty = toFiniteNumber(line.qty);
-      const amount = optionalFiniteNumber(line.amount)
-        ?? (qty > 0 ? qty * toFiniteNumber(line.unitCost) : 0);
-      const paidAmount = optionalFiniteNumber(line.paidAmount)
-        ?? amount + toFiniteNumber(line.logisticsFee);
-      return {
-        ...line,
-        id: line.id || `${row.id}-line-${index}`,
-        qty,
-        amount,
-        paidAmount,
-      };
-    });
+    return allocatePurchaseOrderDetailLineFreight(
+      row,
+      explicitLines.map((line, index) => normalizePurchaseOrderDetailLine(row, line, index)),
+    );
   }
 
   const codes = getPurchaseOrderSkuCodes(row);
@@ -2041,6 +2127,7 @@ function purchaseOrderDetailLines(row: PurchaseOrderRow): PurchaseOrderLineDetai
     skuCode: joinGroupedText(codes) || row.skuSummary || "-",
     skuCodes: codes,
     productName: joinGroupedText(names) || row.skuSummary || "-",
+    specText: "-",
     qty: row.totalQty ?? 0,
     logisticsFee: row.freightAmount ?? null,
     amount: row.totalAmount ?? 0,
@@ -2049,11 +2136,10 @@ function purchaseOrderDetailLines(row: PurchaseOrderRow): PurchaseOrderLineDetai
 }
 
 function purchaseOrderDetailLineCodes(line: PurchaseOrderLineDetail) {
-  if (Array.isArray(line.skuCodes) && line.skuCodes.length) return line.skuCodes;
-  return String(line.skuCode || "")
-    .split(/\s*(?:\/|,|，|;|；)\s*/)
-    .map((code) => code.trim())
-    .filter(Boolean);
+  if (Array.isArray(line.skuCodes) && line.skuCodes.length) {
+    return line.skuCodes.map((code) => String(code || "").trim()).filter(Boolean);
+  }
+  return splitPurchaseOrderDetailText(line.skuCode);
 }
 
 function extractMessageImageUrls(value?: string | null) {
@@ -5617,6 +5703,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     const receiptPercent = purchaseOrderReceiptPercent(row);
     const grossAmount = toFiniteNumber(row.totalAmount) + toFiniteNumber(row.freightAmount);
     const detailLines = purchaseOrderDetailLines(row);
+    const detailTotals = purchaseOrderDetailTotals(detailLines);
     const stages = [
       { key: "created", label: "建单", done: true, meta: formatDateTime(row.createdAt || row.updatedAt) },
       {
@@ -5664,6 +5751,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               <tr>
                 <th>商品编码</th>
                 <th>商品名称</th>
+                <th>规格</th>
                 <th className="col-numeric">数量</th>
                 <th className="col-numeric">金额</th>
                 <th className="col-numeric">运费</th>
@@ -5675,6 +5763,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
                 const codes = purchaseOrderDetailLineCodes(line);
                 const codeText = codes.join("\n");
                 const productName = line.productName || "-";
+                const specText = line.specText || "-";
                 return (
                   <tr key={line.id || `${codeText || line.skuId || "line"}-${line.qty || 0}`}>
                     <td>
@@ -5683,14 +5772,21 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
                         className="purchase-order-detail__code-list"
                         title={codeText || undefined}
                       >
-                        {codes.length ? codes.map((code) => (
-                          <span key={code} className="purchase-order-detail__code-chip">{code}</span>
-                        )) : <span className="purchase-order-detail__code-chip is-empty">-</span>}
+                        <span className="purchase-order-detail__code-stack">
+                          {codes.length ? codes.map((code) => (
+                            <span key={code} className="purchase-order-detail__code-chip">{code}</span>
+                          )) : <span className="purchase-order-detail__code-chip is-empty">-</span>}
+                        </span>
                       </Text>
                     </td>
                     <td>
                       <div className="purchase-order-detail__items-name" title={productName}>
                         {productName}
+                      </div>
+                    </td>
+                    <td>
+                      <div className="purchase-order-detail__items-spec" title={specText}>
+                        {specText}
                       </div>
                     </td>
                     <td className="col-numeric">{formatQty(line.qty)}</td>
@@ -5703,11 +5799,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
             </tbody>
             <tfoot>
               <tr>
-                <td colSpan={2}>合计</td>
-                <td className="col-numeric">{formatQty(row.totalQty)}</td>
-                <td className="col-numeric">{formatCurrency(row.totalAmount)}</td>
-                <td className="col-numeric">{formatOptionalCurrency(row.freightAmount)}</td>
-                <td className="col-numeric">{formatCurrency(payableAmount)}</td>
+                <td colSpan={3}>合计</td>
+                <td className="col-numeric">{formatQty(detailTotals.qty)}</td>
+                <td className="col-numeric">{formatCurrency(detailTotals.amount)}</td>
+                <td className="col-numeric">{formatOptionalCurrency(detailTotals.logisticsFee)}</td>
+                <td className="col-numeric">{formatCurrency(detailTotals.paidAmount)}</td>
               </tr>
             </tfoot>
           </table>

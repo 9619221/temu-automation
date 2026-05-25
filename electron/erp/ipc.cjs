@@ -745,6 +745,148 @@ function allocateMoneyByWeight(total, weights = []) {
   });
 }
 
+function normalizePurchaseOrderLineItems(row = {}, rawItems = []) {
+  const items = Array.isArray(rawItems) ? rawItems.filter((item) => item && typeof item === "object") : [];
+  if (!items.length) return [];
+  const normalized = items.map((item, index) => {
+    const qty = optionalNumber(item.qty ?? item.quantity) ?? 0;
+    const unitCost = optionalNumber(item.unitCost ?? item.unit_cost) ?? 0;
+    const amount = moneyOrZero(optionalNumber(item.amount) ?? qty * unitCost);
+    const logisticsFee = moneyOrZero(item.logisticsFee ?? item.logistics_fee);
+    return {
+      ...item,
+      id: optionalString(item.id) || `${row.id || row.po_no || "po"}:line:${index}`,
+      qty,
+      unitCost,
+      logisticsFee,
+      amount,
+      paidAmount: moneyOrZero(optionalNumber(item.paidAmount ?? item.paid_amount) ?? amount + logisticsFee),
+    };
+  });
+  const lineFreightTotal = moneyOrZero(normalized.reduce((sum, item) => sum + moneyOrZero(item.logisticsFee), 0));
+  if (lineFreightTotal > 0) return normalized;
+
+  const explicitFreight = optionalNumber(row.freightAmount ?? row.freight_amount);
+  const lineAmountTotal = moneyOrZero(normalized.reduce((sum, item) => sum + moneyOrZero(item.amount), 0));
+  const paidAmount = optionalNumber(row.paidAmount ?? row.paid_amount);
+  const inferredFreight = paidAmount !== null && paidAmount > lineAmountTotal
+    ? moneyOrZero(paidAmount - lineAmountTotal)
+    : 0;
+  const freightToAllocate = explicitFreight !== null && explicitFreight > 0
+    ? explicitFreight
+    : inferredFreight;
+  if (!freightToAllocate) return normalized;
+
+  const weights = normalized.map((item) => moneyOrZero(item.amount) || optionalNumber(item.qty) || 0);
+  const allocatedFreight = allocateMoneyByWeight(freightToAllocate, weights);
+  return normalized.map((item, index) => {
+    const logisticsFee = allocatedFreight[index] ?? 0;
+    const amount = moneyOrZero(item.amount);
+    return {
+      ...item,
+      logisticsFee,
+      paidAmount: moneyOrZero(amount + logisticsFee),
+    };
+  });
+}
+
+function enrichPurchaseWorkbenchWithLocalLineItems(workbench = {}) {
+  const purchaseOrders = Array.isArray(workbench.purchaseOrders) ? workbench.purchaseOrders : [];
+  const missingLineOrders = purchaseOrders.filter((po) => !Array.isArray(po.lineItems) || po.lineItems.length === 0);
+  if (!missingLineOrders.length || !hasExistingErpDatabase({ userDataDir: erpState.userDataDir })) return workbench;
+
+  const keys = Array.from(new Set(missingLineOrders.flatMap((po) => [
+    optionalString(po.id),
+    optionalString(po.poNo || po.po_no),
+    optionalString(po.externalOrderId || po.external_order_id),
+  ]).filter(Boolean)));
+  if (!keys.length) return workbench;
+
+  let db = null;
+  try {
+    db = openErpDatabase({ userDataDir: erpState.userDataDir });
+    const placeholders = keys.map(() => "?").join(",");
+    const localOrders = db.prepare(`
+      SELECT id, po_no, external_order_id, total_amount, freight_amount, paid_amount
+      FROM erp_purchase_orders
+      WHERE id IN (${placeholders})
+        OR po_no IN (${placeholders})
+        OR external_order_id IN (${placeholders})
+    `).all(...keys, ...keys, ...keys);
+    if (!localOrders.length) return workbench;
+
+    const localIds = localOrders.map((row) => row.id).filter(Boolean);
+    if (!localIds.length) return workbench;
+    const linePlaceholders = localIds.map(() => "?").join(",");
+    const localLines = db.prepare(`
+      SELECT
+        line.po_id,
+        line.id,
+        line.sku_id,
+        sku.internal_sku_code,
+        sku.product_name,
+        sku.color_spec,
+        COALESCE(line.qty, 0) AS qty,
+        COALESCE(line.received_qty, 0) AS received_qty,
+        COALESCE(line.unit_cost, 0) AS unit_cost,
+        COALESCE(line.logistics_fee, 0) AS logistics_fee
+      FROM erp_purchase_order_lines line
+      LEFT JOIN erp_skus sku ON sku.id = line.sku_id
+      WHERE line.po_id IN (${linePlaceholders})
+      ORDER BY line.id ASC
+    `).all(...localIds);
+
+    const linesByPoId = new Map();
+    for (const line of localLines) {
+      const item = {
+        id: optionalString(line.id),
+        skuId: optionalString(line.sku_id),
+        skuCode: optionalString(line.internal_sku_code),
+        productName: optionalString(line.product_name),
+        specText: optionalString(line.color_spec),
+        qty: optionalNumber(line.qty) ?? 0,
+        receivedQty: optionalNumber(line.received_qty) ?? 0,
+        unitCost: optionalNumber(line.unit_cost) ?? 0,
+        logisticsFee: optionalNumber(line.logistics_fee) ?? 0,
+      };
+      item.amount = moneyOrZero(item.qty * item.unitCost);
+      item.paidAmount = moneyOrZero(item.amount + item.logisticsFee);
+      const list = linesByPoId.get(line.po_id) || [];
+      list.push(item);
+      linesByPoId.set(line.po_id, list);
+    }
+
+    const orderByKey = new Map();
+    for (const row of localOrders) {
+      const local = toCamelRow(row);
+      for (const key of [row.id, row.po_no, row.external_order_id]) {
+        const normalizedKey = optionalString(key);
+        if (normalizedKey) orderByKey.set(normalizedKey, local);
+      }
+    }
+
+    return {
+      ...workbench,
+      purchaseOrders: purchaseOrders.map((po) => {
+        if (Array.isArray(po.lineItems) && po.lineItems.length > 0) return po;
+        const local = orderByKey.get(optionalString(po.id))
+          || orderByKey.get(optionalString(po.poNo || po.po_no))
+          || orderByKey.get(optionalString(po.externalOrderId || po.external_order_id));
+        if (!local) return po;
+        const lineItems = normalizePurchaseOrderLineItems(
+          { ...po, ...local },
+          linesByPoId.get(local.id) || [],
+        );
+        return lineItems.length ? { ...po, lineItems } : po;
+      }),
+    };
+  } catch {
+    return workbench;
+  } finally {
+    try { db?.close?.(); } catch {}
+  }
+}
+
 function optionalPositiveInteger(value, fallback = null) {
   const number = optionalNumber(value);
   if (number === null) return fallback;
@@ -1089,33 +1231,20 @@ function initializeErp(options = {}) {
   }
 
   if (runtime.mode === "unset") {
-    // 0.3.23：新机首次启动默认切到云端 client 模式。
-    // 历史上这里在 mode=unset && 无本地 db 时静默返回 unset，等用户去
-    // "主控/客户端" 选择 UI 做决定，但前端从来没把这个 UI 做出来（src/
-    // 里搜不到调用 erp:client:set-host-mode / set-client-mode 的入口），
-    // 导致新装机器永远卡在 unset：erp.sqlite 不创建、IPC handler
-    // 拿不到 db、商品资料页 loading 不结束。
-    // 改后行为：
-    //   - 无本地 db (全新机)：默认 setClientMode 指向 erp.temu.chat，
-    //     前端 RequireAuth 看到没 sessionCookie 自然跳登录页。
-    //   - 已有本地 db (老 host 用户)：保留 host 模式，不破坏老数据。
-    // 与 src/config/erpCloud.ts 保持同步：ERP_CLOUD_SERVER_URL。
-    if (hasExistingErpDatabase(options)) {
-      setHostMode();
-    } else {
-      setClientMode({ serverUrl: HK_SERVER_URL });
-      erpState.initResult = {
-        mode: "client",
-        dbPath: null,
-        backupPath: null,
-        migrations: [],
-        runtime: getRuntimeStatus(),
-      };
-      erpState.initError = null;
-      erpState.db = null;
-      erpState.services = null;
-      return erpState.initResult;
-    }
+    // Cloud desktop is the default. A leftover local sqlite file must not
+    // silently switch a fresh/unknown runtime into host mode.
+    setClientMode({ serverUrl: HK_SERVER_URL });
+    erpState.initResult = {
+      mode: "client",
+      dbPath: null,
+      backupPath: null,
+      migrations: [],
+      runtime: getRuntimeStatus(),
+    };
+    erpState.initError = null;
+    erpState.db = null;
+    erpState.services = null;
+    return erpState.initResult;
   }
 
   return initializeHostErp(options);
@@ -5397,6 +5526,7 @@ function getPurchaseWorkbench(params = {}) {
           'skuId', detail.sku_id,
           'skuCode', detail.internal_sku_code,
           'productName', detail.product_name,
+          'specText', detail.color_spec,
           'qty', detail.qty,
           'receivedQty', detail.received_qty,
           'unitCost', detail.unit_cost,
@@ -5410,6 +5540,7 @@ function getPurchaseWorkbench(params = {}) {
             detail_line.sku_id,
             detail_sku.internal_sku_code,
             detail_sku.product_name,
+            detail_sku.color_spec,
             COALESCE(detail_line.qty, 0) AS qty,
             COALESCE(detail_line.received_qty, 0) AS received_qty,
             COALESCE(detail_line.unit_cost, 0) AS unit_cost,
@@ -5509,7 +5640,7 @@ function getPurchaseWorkbench(params = {}) {
     LIMIT @limit OFFSET @offset
   `).all(poParams).map((row) => {
     const next = toCamelRow(row);
-    next.lineItems = parseJsonArray(row.line_items_json);
+    next.lineItems = normalizePurchaseOrderLineItems(next, parseJsonArray(row.line_items_json));
     delete next.lineItemsJson;
     if (row.account_id === "jst:account:default") {
       const raw = parseJsonObject(row.external_order_payload_json, {});
@@ -5729,6 +5860,37 @@ function getPurchaseOrderActionRow(db, poId) {
       GROUP_CONCAT(DISTINCT sku.internal_sku_code || ' ' || sku.product_name) AS sku_summary,
       GROUP_CONCAT(DISTINCT sku.internal_sku_code) AS sku_codes,
       GROUP_CONCAT(DISTINCT sku.product_name) AS product_names,
+      COALESCE((
+        SELECT json_group_array(json_object(
+          'id', detail.id,
+          'skuId', detail.sku_id,
+          'skuCode', detail.internal_sku_code,
+          'productName', detail.product_name,
+          'specText', detail.color_spec,
+          'qty', detail.qty,
+          'receivedQty', detail.received_qty,
+          'unitCost', detail.unit_cost,
+          'logisticsFee', detail.logistics_fee,
+          'amount', ROUND(detail.qty * detail.unit_cost, 2),
+          'paidAmount', ROUND(detail.qty * detail.unit_cost + detail.logistics_fee, 2)
+        ))
+        FROM (
+          SELECT
+            detail_line.id,
+            detail_line.sku_id,
+            detail_sku.internal_sku_code,
+            detail_sku.product_name,
+            detail_sku.color_spec,
+            COALESCE(detail_line.qty, 0) AS qty,
+            COALESCE(detail_line.received_qty, 0) AS received_qty,
+            COALESCE(detail_line.unit_cost, 0) AS unit_cost,
+            COALESCE(detail_line.logistics_fee, 0) AS logistics_fee
+          FROM erp_purchase_order_lines detail_line
+          LEFT JOIN erp_skus detail_sku ON detail_sku.id = detail_line.sku_id
+          WHERE detail_line.po_id = po.id
+          ORDER BY detail_line.id ASC
+        ) detail
+      ), '[]') AS line_items_json,
       (
         SELECT first_sku.image_url
         FROM erp_purchase_order_lines first_line
@@ -5788,7 +5950,12 @@ function getPurchaseOrderActionRow(db, poId) {
 function toPurchaseOrderResult(db, poOrId) {
   const poId = typeof poOrId === "object" ? poOrId?.id : poOrId;
   const row = getPurchaseOrderActionRow(db, poId);
-  return toCamelRow(row || (typeof poOrId === "object" ? poOrId : null));
+  const next = toCamelRow(row || (typeof poOrId === "object" ? poOrId : null));
+  if (next && typeof next === "object") {
+    next.lineItems = normalizePurchaseOrderLineItems(next, parseJsonArray(row?.line_items_json));
+    delete next.lineItemsJson;
+  }
+  return next;
 }
 
 function getLatestPaymentApproval(db, payload = {}) {
@@ -16488,8 +16655,30 @@ function ensureClientRuntime() {
   }
 }
 
+async function requestRemotePurchaseWorkbench(params = {}) {
+  ensureClientRuntime();
+  let payload;
+  try {
+    payload = await remoteRequest("/api/purchase/workbench", {
+      method: "POST",
+      body: params,
+      timeoutMs: 120000,
+    });
+  } catch (error) {
+    const statusCode = Number(error?.statusCode || 0);
+    if (!statusCode || ![404, 405, 502].includes(statusCode)) throw error;
+    // 0.3.25锛歠allback 涔熷甫涓婂師濮?params锛岄伩鍏嶈€?body=绌烘椂鏈嶅姟鍣ㄦ寜 default锛坕ncludeOptions=true,
+    // include1688Meta=true锛夎繑鍥?4.6MB 鍏ㄩ噺鍖咃紝璺ㄦ捣鎾戠垎 timeout銆佹寜閽崱 3-10 绉掋€?
+    payload = await remoteRequest("/api/purchase/workbench", { method: "POST", body: params, timeoutMs: 120000 });
+  }
+  return enrichPurchaseWorkbenchWithLocalLineItems(
+    normalizePurchaseWorkbenchPoNumbers(normalizeJstPurchaseWorkbench(payload.workbench || {})),
+  );
+}
+
 async function getPurchaseWorkbenchRuntime(params = {}) {
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     let payload;
     try {
       payload = await remoteRequest("/api/purchase/workbench", {
@@ -16504,7 +16693,9 @@ async function getPurchaseWorkbenchRuntime(params = {}) {
       // include1688Meta=true）返回 4.6MB 全量包，跨海撑爆 timeout、按钮卡 3-10 秒。
       payload = await remoteRequest("/api/purchase/workbench", { method: "POST", body: params, timeoutMs: 120000 });
     }
-    return normalizePurchaseWorkbenchPoNumbers(normalizeJstPurchaseWorkbench(payload.workbench || {}));
+    return enrichPurchaseWorkbenchWithLocalLineItems(
+      normalizePurchaseWorkbenchPoNumbers(normalizeJstPurchaseWorkbench(payload.workbench || {})),
+    );
   }
   return getPurchaseWorkbench(params);
 }
@@ -17013,7 +17204,8 @@ async function performClientBind1688CandidateSpec(payload = {}) {
 }
 
 async function performPurchaseActionRuntime(payload = {}) {
-  if (isClientMode()) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
     if (payload?.action === "preview_1688_url_specs") {
       return performClientPreview1688UrlSpecs(payload);
     }
