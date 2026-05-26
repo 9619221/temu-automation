@@ -10197,16 +10197,38 @@ function getPurchaseOrderLines(db, poId) {
   }));
 }
 
+function aggregate1688CargoParamList(cargoParamList = []) {
+  const grouped = new Map();
+  for (const item of cargoParamList) {
+    const offerId = requireString(item.offerId || item.offer_id, "cargoParamList.offerId");
+    const specId = require1688SpecId(item.specId || item.spec_id || item.cargoSkuId || item.cargo_sku_id, `offer ${offerId}`);
+    const quantity = optionalPositiveInteger(item.quantity, 1);
+    const key = `${offerId}\u0000${specId}`;
+    const existing = grouped.get(key);
+    if (existing) {
+      existing.quantity += quantity;
+      continue;
+    }
+    grouped.set(key, {
+      ...item,
+      offerId,
+      specId,
+      quantity,
+    });
+  }
+  return Array.from(grouped.values());
+}
+
 function build1688OrderCargoParamList(po, lines, payload = {}) {
   if (Array.isArray(payload.cargoParamList) && payload.cargoParamList.length) {
-    return payload.cargoParamList.map((item, index) => ({
+    return aggregate1688CargoParamList(payload.cargoParamList.map((item, index) => ({
       ...item,
       offerId: requireString(item.offerId || item.offer_id, `cargoParamList[${index}].offerId`),
       specId: require1688SpecId(item.specId || item.spec_id || item.cargoSkuId || item.cargo_sku_id, `cargoParamList[${index}]`),
       quantity: optionalPositiveInteger(item.quantity, 1),
-    }));
+    })));
   }
-  return lines.flatMap((line) => {
+  const cargoParamList = lines.flatMap((line) => {
     const mappings = Array.isArray(line.source_mappings) && line.source_mappings.length
       ? line.source_mappings
       : [{
@@ -10242,6 +10264,7 @@ function build1688OrderCargoParamList(po, lines, payload = {}) {
       };
     });
   });
+  return aggregate1688CargoParamList(cargoParamList);
 }
 
 function isLikely1688NumericSkuId(value) {

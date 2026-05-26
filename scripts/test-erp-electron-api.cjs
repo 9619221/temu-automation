@@ -2347,6 +2347,57 @@ async function main() {
     assert.equal(ratioValidation.result.params.cargoParamList[0].quantity, 10);
     assert.equal(ratioValidation.result.params.cargoParamList[1].quantity, 14);
 
+    const duplicateCargoDb = openErpDatabase({ userDataDir: tempUserData });
+    try {
+      const duplicateCargoNow = new Date().toISOString();
+      duplicateCargoDb.prepare(`
+        INSERT INTO erp_purchase_orders (
+          id, account_id, po_no, status, payment_status, total_amount,
+          freight_amount, created_by, created_at, updated_at
+        )
+        VALUES (
+          'po_duplicate_cargo_ipc', @account_id, 'PO-DUP-CARGO-IPC', 'draft',
+          'unpaid', 0, 0, @buyer_id, @now, @now
+        )
+      `).run({
+        account_id: account.id,
+        buyer_id: buyer.id,
+        now: duplicateCargoNow,
+      });
+      for (const [id, qty] of [["po_line_duplicate_cargo_1", 1], ["po_line_duplicate_cargo_2", 3]]) {
+        duplicateCargoDb.prepare(`
+          INSERT INTO erp_purchase_order_lines (
+            id, account_id, po_id, sku_id, qty, unit_cost, expected_qty, received_qty
+          )
+          VALUES (
+            @id, @account_id, 'po_duplicate_cargo_ipc', @sku_id, @qty, 8, @qty, 0
+          )
+        `).run({
+          id,
+          account_id: account.id,
+          sku_id: ratioSku.id,
+          qty,
+        });
+      }
+    } finally {
+      duplicateCargoDb.close();
+    }
+
+    const duplicateCargoValidation = await invoke("erp:purchase:action", {
+      action: "validate_1688_order_push",
+      actor: { id: buyer.id, role: buyer.role },
+      poId: "po_duplicate_cargo_ipc",
+      dryRun: true,
+      includeWorkbench: false,
+    });
+    assert.equal(duplicateCargoValidation.result.ready, true);
+    const duplicateCargoBySpec = new Map(
+      duplicateCargoValidation.result.params.cargoParamList.map((item) => [item.specId, item.quantity]),
+    );
+    assert.equal(duplicateCargoBySpec.size, 2);
+    assert.equal(duplicateCargoBySpec.get("spec-ratio"), 11);
+    assert.equal(duplicateCargoBySpec.get("spec-ratio-red"), 15);
+
     const ratioDb = openErpDatabase({ userDataDir: tempUserData });
     try {
       const row = ratioDb.prepare("SELECT our_qty, platform_qty, mapping_group_id FROM erp_sku_1688_sources WHERE id = ?").get(ratioMapping.result.sku1688Source.id);
