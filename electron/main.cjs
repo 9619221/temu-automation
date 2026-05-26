@@ -6755,3 +6755,137 @@ ipcMain.handle("store:set-many", async (_, entries) => {
   }
   return true;
 });
+
+// ============ Browser Multi (Chrome 多开) ============
+// 给用户在 temu-automation 内部管理多个独立 Chrome profile，
+// 每个 profile 一个 --user-data-dir，cookies / 登录态彻底隔离，
+// 用于多账号手工运营场景。和 automation/worker.mjs 的 Playwright 通道完全独立。
+const browserMultiProfilesRoot = path.join(app.getPath("userData"), "browser-profiles");
+try {
+  if (!fs.existsSync(browserMultiProfilesRoot)) {
+    fs.mkdirSync(browserMultiProfilesRoot, { recursive: true });
+  }
+} catch (e) {
+  console.warn("[browser-multi] create profiles root failed:", e?.message || e);
+}
+
+function findChromeOrEdge() {
+  const candidates = [
+    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+    process.env.LOCALAPPDATA
+      ? path.join(process.env.LOCALAPPDATA, "Google\\Chrome\\Application\\chrome.exe")
+      : null,
+    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+    "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+  ];
+  for (const p of candidates) {
+    if (p && fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+function queryBrowserMultiRunning() {
+  return new Promise((resolve) => {
+    const ps = `Get-WmiObject Win32_Process -Filter "Name='chrome.exe' OR Name='msedge.exe'" | Select-Object -ExpandProperty CommandLine`;
+    const { execFile } = require("child_process");
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-Command", ps],
+      { maxBuffer: 20 * 1024 * 1024 },
+      (err, stdout) => {
+        if (err) { resolve([]); return; }
+        const ids = new Set();
+        const re = /--user-data-dir=(?:"([^"]+)"|([^\s]+))/g;
+        let m;
+        while ((m = re.exec(stdout || "")) !== null) {
+          const dir = (m[1] || m[2] || "").trim().replace(/[\\/]+$/, "");
+          if (dir && dir.toLowerCase().startsWith(browserMultiProfilesRoot.toLowerCase())) {
+            const id = path.basename(dir);
+            if (id) ids.add(id);
+          }
+        }
+        resolve(Array.from(ids));
+      },
+    );
+  });
+}
+
+ipcMain.handle("browser-multi:find-chrome", () => findChromeOrEdge() || "");
+
+ipcMain.handle("browser-multi:launch", (_e, payload) => {
+  const account = payload?.account || {};
+  const config = payload?.config || {};
+  const chromePath = (config.chromePath && config.chromePath.trim()) || findChromeOrEdge();
+  if (!chromePath || !fs.existsSync(chromePath)) {
+    throw new Error("找不到 Chrome / Edge，请在【浏览器多开】设置里手动指定路径");
+  }
+  if (!account.id) throw new Error("账号缺少 id");
+
+  const profileDir = path.join(browserMultiProfilesRoot, String(account.id));
+  if (!fs.existsSync(profileDir)) fs.mkdirSync(profileDir, { recursive: true });
+
+  const args = [`--user-data-dir=${profileDir}`];
+
+  const shared = Array.isArray(config.sharedExtensions) ? config.sharedExtensions : [];
+  const extra = Array.isArray(account.extraExtensions) ? account.extraExtensions : [];
+  const exts = [...shared, ...extra].filter(Boolean);
+  if (exts.length) args.push(`--load-extension=${exts.join(",")}`);
+
+  if (account.proxy) args.push(`--proxy-server=${account.proxy}`);
+  if (account.userAgent) args.push(`--user-agent=${account.userAgent}`);
+  if (account.startUrl) args.push(account.startUrl);
+
+  args.push("--no-first-run", "--no-default-browser-check");
+
+  const proc = spawn(chromePath, args, { detached: true, stdio: "ignore" });
+  proc.unref();
+  return { pid: proc.pid, profileDir };
+});
+
+ipcMain.handle("browser-multi:close", async (_e, accountId) => {
+  if (!accountId) return false;
+  const profileDir = path.join(browserMultiProfilesRoot, String(accountId));
+  return new Promise((resolve) => {
+    const escaped = profileDir.replace(/'/g, "''");
+    const ps = `Get-WmiObject Win32_Process -Filter "Name='chrome.exe' OR Name='msedge.exe'" | Where-Object { $_.CommandLine -like "*--user-data-dir=*${escaped}*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`;
+    const { execFile } = require("child_process");
+    execFile("powershell.exe", ["-NoProfile", "-Command", ps], () => resolve(true));
+  });
+});
+
+ipcMain.handle("browser-multi:list-running", () => queryBrowserMultiRunning());
+
+ipcMain.handle("browser-multi:open-profile-dir", (_e, accountId) => {
+  if (!accountId) return false;
+  const dir = path.join(browserMultiProfilesRoot, String(accountId));
+  if (fs.existsSync(dir)) shell.openPath(dir);
+  return true;
+});
+
+ipcMain.handle("browser-multi:delete-profile", (_e, accountId) => {
+  if (!accountId) return { ok: false, err: "no accountId" };
+  const dir = path.join(browserMultiProfilesRoot, String(accountId));
+  if (!fs.existsSync(dir)) return { ok: true };
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, err: String(e?.message || e), dir };
+  }
+});
+
+ipcMain.handle("browser-multi:pick-file", async (_e, opts) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ["openFile"],
+    ...(opts || {}),
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  return result.filePaths[0];
+});
+
+ipcMain.handle("browser-multi:pick-dir", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, { properties: ["openDirectory"] });
+  if (result.canceled || !result.filePaths.length) return null;
+  return result.filePaths[0];
+});

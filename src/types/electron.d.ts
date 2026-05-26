@@ -859,6 +859,33 @@ interface AutoImageSwapAPI {
   getProgress: (taskId?: string) => Promise<AutoImageSwapProgress>;
 }
 
+export interface BrowserMultiAccount {
+  id: string;
+  name: string;
+  group?: string;
+  startUrl?: string;
+  proxy?: string;
+  userAgent?: string;
+  extraExtensions?: string[];
+  note?: string;
+}
+
+export interface BrowserMultiConfig {
+  chromePath?: string;
+  sharedExtensions?: string[];
+}
+
+interface BrowserMultiAPI {
+  findChrome: () => Promise<string>;
+  launch: (account: BrowserMultiAccount, config: BrowserMultiConfig) => Promise<{ pid: number; profileDir: string }>;
+  close: (accountId: string) => Promise<boolean>;
+  listRunning: () => Promise<string[]>;
+  openProfileDir: (accountId: string) => Promise<boolean>;
+  deleteProfile: (accountId: string) => Promise<{ ok: boolean; err?: string; dir?: string }>;
+  pickFile: (opts?: { filters?: { name: string; extensions: string[] }[] }) => Promise<string | null>;
+  pickDir: () => Promise<string | null>;
+}
+
 interface ElectronAPI {
   getAppPath: () => Promise<string>;
   selectFile: (filters?: any) => Promise<string | null>;
@@ -871,6 +898,7 @@ interface ElectronAPI {
   app: AppAPI;
   store: StoreAPI;
   autoImageSwap: AutoImageSwapAPI;
+  browserMulti: BrowserMultiAPI;
   onAutomationEvent: (callback: (data: any) => void) => (() => void);
   onUpdateStatus?: (callback: (data: any) => void) => (() => void);
   onImageStudioEvent?: (callback: (data: ImageStudioEventPayload) => void) => (() => void);

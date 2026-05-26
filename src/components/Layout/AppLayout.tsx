@@ -66,6 +66,7 @@ const menuItems = [
     children: [
       { key: "/shop", icon: <DashboardOutlined />, label: "店铺概览" },
       { key: "/products", icon: <ShoppingOutlined />, label: "商品管理" },
+      { key: "/browser-multi", icon: <RocketOutlined />, label: "浏览器多开" },
     ],
   },
   {
