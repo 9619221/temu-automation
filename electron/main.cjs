@@ -2326,6 +2326,85 @@ function getImageStudioRuntimeWorkDir() {
   return path.join(app.getPath("userData"), "image-studio-runtime");
 }
 
+let stagedImageStudioRuntimePath = "";
+
+function ensureImageStudioRuntimeNodeModulesAlias(projectPath) {
+  const runtimeNodeModules = path.join(projectPath, "runtime_node_modules");
+  const nodeModules = path.join(projectPath, "node_modules");
+
+  if (fs.existsSync(nodeModules) || !fs.existsSync(runtimeNodeModules)) {
+    return;
+  }
+
+  try {
+    fs.symlinkSync(runtimeNodeModules, nodeModules, "junction");
+  } catch (error) {
+    appendImageStudioLog(`node_modules-junction failed: ${error?.message || error}; copying fallback`);
+    fs.cpSync(runtimeNodeModules, nodeModules, { recursive: true });
+  }
+}
+
+function getPackagedImageStudioRuntimeMarker(sourcePath) {
+  const statFor = (name) => {
+    try {
+      return fs.statSync(path.join(sourcePath, name)).mtimeMs;
+    } catch {
+      return 0;
+    }
+  };
+  return JSON.stringify({
+    version: app.getVersion(),
+    server: statFor("server.js"),
+    bootstrap: statFor("bootstrap.cjs"),
+    packageJson: statFor("package.json"),
+  });
+}
+
+function isUsableStagedImageStudioRuntime(targetPath, marker) {
+  try {
+    const markerPath = path.join(targetPath, ".runtime-marker.json");
+    if (!fs.existsSync(markerPath) || fs.readFileSync(markerPath, "utf8") !== marker) {
+      return false;
+    }
+    return fs.existsSync(path.join(targetPath, "server.js"))
+      && fs.existsSync(path.join(targetPath, "runtime_node_modules", "openai", "index.js"))
+      && fs.existsSync(path.join(targetPath, "node_modules", "openai", "index.js"));
+  } catch {
+    return false;
+  }
+}
+
+function stagePackagedImageStudioRuntime(sourcePath) {
+  if (!app.isPackaged || !sourcePath || !fs.existsSync(path.join(sourcePath, "server.js"))) {
+    return sourcePath;
+  }
+  if (stagedImageStudioRuntimePath) {
+    return stagedImageStudioRuntimePath;
+  }
+
+  const targetPath = path.join(app.getPath("userData"), "image-studio-app-runtime");
+  const marker = getPackagedImageStudioRuntimeMarker(sourcePath);
+
+  try {
+    if (!isUsableStagedImageStudioRuntime(targetPath, marker)) {
+      fs.rmSync(targetPath, { recursive: true, force: true });
+      fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      fs.cpSync(sourcePath, targetPath, {
+        recursive: true,
+        filter: (src) => path.relative(sourcePath, src).split(path.sep)[0] !== "data",
+      });
+      ensureImageStudioRuntimeNodeModulesAlias(targetPath);
+      fs.writeFileSync(path.join(targetPath, ".runtime-marker.json"), marker, "utf8");
+      appendImageStudioLog(`staged runtime: ${targetPath}`);
+    }
+    stagedImageStudioRuntimePath = targetPath;
+    return stagedImageStudioRuntimePath;
+  } catch (error) {
+    appendImageStudioLog(`stage-runtime failed: ${error?.message || error}`);
+    return sourcePath;
+  }
+}
+
 function appendImageStudioLog(message) {
   try {
     fs.appendFileSync(getImageStudioLogPath(), `[${new Date().toISOString()}] ${message}\n`);
@@ -2390,6 +2469,9 @@ function getAutoImageProjectCandidates() {
   const appDir = app.getAppPath();
   const cwd = process.cwd();
   const homeDir = require("os").homedir();
+  const packagedRuntimePath = app.isPackaged
+    ? stagePackagedImageStudioRuntime(path.join(process.resourcesPath, "auto-image-gen-runtime"))
+    : "";
 
   // 检测 git 仓库根目录（worktree 场景下 cwd 可能嵌套很深）
   // 缓存 git 根目录避免重复 execSync 调用
@@ -2403,7 +2485,7 @@ function getAutoImageProjectCandidates() {
 
   return dedupePaths([
     process.env.AUTO_IMAGE_GEN_DIR,
-    app.isPackaged ? path.join(process.resourcesPath, "auto-image-gen-runtime") : path.resolve(appDir, "build", "auto-image-gen-runtime"),
+    app.isPackaged ? packagedRuntimePath : path.resolve(appDir, "build", "auto-image-gen-runtime"),
     path.resolve(appDir, "auto-image-gen-dev"),
     path.resolve(appDir, "..", "auto-image-gen-dev"),
     path.resolve(appDir, "..", "build", "auto-image-gen-runtime"),
@@ -2415,7 +2497,7 @@ function getAutoImageProjectCandidates() {
     // git 仓库根目录（worktree 场景）
     gitRoot ? path.resolve(gitRoot, "build", "auto-image-gen-runtime") : "",
     gitRoot ? path.resolve(gitRoot, "..", "auto-image-gen-dev") : "",
-    app.isPackaged ? path.join(process.resourcesPath, "auto-image-gen-runtime") : "",
+    app.isPackaged ? packagedRuntimePath : "",
   ]);
 }
 
