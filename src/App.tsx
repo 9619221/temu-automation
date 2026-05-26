@@ -48,6 +48,7 @@ const QcOutboundCenter = lazyWithPreload(() => import("./pages/QcOutboundCenter"
 const WorkItems = lazyWithPreload(() => import("./pages/WorkItems"));
 const UserManagement = lazyWithPreload(() => import("./pages/UserManagement"));
 const ErpLogin = lazyWithPreload(() => import("./pages/ErpLogin"));
+const BrowserMulti = lazyWithPreload(() => import("./pages/BrowserMulti"));
 
 const CORE_ROUTE_PRELOADERS = [
   AppLayout.preload,
@@ -303,6 +304,7 @@ function App() {
               <Route path="multi-store-cloud" element={<Navigate to="/collect" replace />} />
               <Route path="jushuitan-import" element={<Navigate to="/product-master-data" replace />} />
               <Route path="accounts" element={<RoleRoute path="/accounts"><AccountManager /></RoleRoute>} />
+              <Route path="browser-multi" element={<RoleRoute path="/browser-multi"><BrowserMulti /></RoleRoute>} />
               <Route path="tasks" element={<Navigate to="/work-items" replace />} />
               <Route path="competitor" element={<RoleRoute path="/competitor"><CompetitorAnalysis /></RoleRoute>} />
               <Route path="price-review" element={<RoleRoute path="/price-review"><PriceReview /></RoleRoute>} />

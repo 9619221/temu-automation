@@ -455,6 +455,17 @@ contextBridge.exposeInMainWorld("electronAPI", {
     getProgress: (taskId) => ipcRenderer.invoke("auto-image-swap:get-progress", taskId || ""),
   },
 
+  browserMulti: {
+    findChrome: () => ipcRenderer.invoke("browser-multi:find-chrome"),
+    launch: (account, config) => ipcRenderer.invoke("browser-multi:launch", { account, config }),
+    close: (accountId) => ipcRenderer.invoke("browser-multi:close", accountId),
+    listRunning: () => ipcRenderer.invoke("browser-multi:list-running"),
+    openProfileDir: (accountId) => ipcRenderer.invoke("browser-multi:open-profile-dir", accountId),
+    deleteProfile: (accountId) => ipcRenderer.invoke("browser-multi:delete-profile", accountId),
+    pickFile: (opts) => ipcRenderer.invoke("browser-multi:pick-file", opts),
+    pickDir: () => ipcRenderer.invoke("browser-multi:pick-dir"),
+  },
+
   store: {
     get: (key) => ipcRenderer.invoke("store:get", key),
     getMany: (keys) => ipcRenderer.invoke("store:get-many", Array.isArray(keys) ? keys : []),
