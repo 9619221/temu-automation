@@ -10823,6 +10823,11 @@ async function formatAiImageError(prefix, response) {
       return `${prefix}: AI 服务当前繁忙或已限流，请稍后重试`;
     }
     if (payload) {
+      if (/^<!doctype html/i.test(payload)) {
+        const titleMatch = payload.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+        const title = titleMatch?.[1]?.replace(/\s+/g, " ").trim();
+        return `${prefix}: ${response.status} AI 服务返回 HTML 错误页${title ? ` (${title})` : ""}`;
+      }
       return `${prefix}: ${response.status} ${payload.slice(0, 240)}`;
     }
   } catch {}
@@ -10842,7 +10847,7 @@ function formatAiImageFetchError(prefix, error, routePath) {
  * 规避 undici FormData 在某些环境下不自动设置 Content-Type boundary 导致
  * Next.js route 报 "Content-Type was not one of multipart/form-data" 的问题。
  */
-function postMultipartViaNodeHttp(urlString, { fileBlobs = [], fields = {}, extraHeaders = {}, timeoutMs = 180000 } = {}) {
+function postMultipartViaNodeHttp(urlString, { fileBlobs = [], fields = {}, extraHeaders = {}, timeoutMs = 180000, totalTimeoutMs = 0 } = {}) {
   return new Promise((resolve, reject) => {
     let url;
     try { url = new URL(urlString); } catch (e) { reject(e); return; }
@@ -10864,6 +10869,13 @@ function postMultipartViaNodeHttp(urlString, { fileBlobs = [], fields = {}, extr
     try { headers["Content-Length"] = form.getLengthSync(); } catch {}
 
     const lib = url.protocol === "https:" ? https : http;
+    let totalTimer = null;
+    const clearTotalTimer = () => {
+      if (totalTimer) {
+        clearTimeout(totalTimer);
+        totalTimer = null;
+      }
+    };
     const req = lib.request({
       protocol: url.protocol,
       hostname: url.hostname,
@@ -10877,6 +10889,7 @@ function postMultipartViaNodeHttp(urlString, { fileBlobs = [], fields = {}, extr
       const chunks = [];
       res.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
       res.on("end", () => {
+        clearTotalTimer();
         const buf = Buffer.concat(chunks);
         const text = buf.toString("utf8");
         let cachedJson = null;
@@ -10893,8 +10906,14 @@ function postMultipartViaNodeHttp(urlString, { fileBlobs = [], fields = {}, extr
         });
       });
     });
+    if (totalTimeoutMs > 0) {
+      totalTimer = setTimeout(() => req.destroy(new Error(`timeout after ${totalTimeoutMs}ms`)), totalTimeoutMs);
+    }
     req.on("timeout", () => req.destroy(new Error(`timeout after ${timeoutMs}ms`)));
-    req.on("error", (err) => reject(err));
+    req.on("error", (err) => {
+      clearTotalTimer();
+      reject(err);
+    });
     form.pipe(req);
   });
 }
@@ -11829,6 +11848,35 @@ async function readWorkflowGenerateSSE(resp, expectedTypes, idleTimeoutMs = 6000
   }
 }
 
+function parseWorkflowGenerateSSEText(text, expectedTypes, taskId = "") {
+  const expected = new Set(expectedTypes);
+  const images = {};
+  const errors = {};
+  const warnings = {};
+  for (const line of String(text || "").split(/\r?\n/)) {
+    if (!line.startsWith("data: ")) continue;
+    try {
+      const data = JSON.parse(line.slice(6));
+      if (data?.imageType && expected.has(data.imageType) && Array.isArray(data.warnings) && data.warnings.length > 0) {
+        warnings[data.imageType] = data.warnings;
+        logWorkflowPack(taskId, `${data.imageType} warnings: ${data.warnings.join("; ")}`);
+      }
+      if (data?.status === "done" && data.imageType && data.imageUrl && expected.has(data.imageType)) {
+        images[data.imageType] = data.imageUrl;
+        logWorkflowPack(taskId, `${data.imageType} done`);
+      } else if (data?.status === "error" && data.imageType && expected.has(data.imageType)) {
+        errors[data.imageType] = data.error || "generation failed";
+        logWorkflowPack(taskId, `${data.imageType} error: ${errors[data.imageType]}`);
+      } else if (data?.status && data.imageType && expected.has(data.imageType)) {
+        logWorkflowPack(taskId, `${data.imageType} status=${data.status}`);
+      }
+    } catch (error) {
+      logSilent("workflow-pack.sse.parse", error);
+    }
+  }
+  return { images, errors, warnings };
+}
+
 async function generateWorkflowSinglePackImageAttempt({
   imageBuffer,
   mimeType,
@@ -11839,23 +11887,23 @@ async function generateWorkflowSinglePackImageAttempt({
   requestTimeoutMs,
   idleTimeoutMs,
 }) {
-  let requestTimer = null;
   try {
     logWorkflowPack(taskId, `${plan.imageType} request start attempt=${attempt}`);
-    const form = new FormData();
-    form.append("images", new Blob([imageBuffer], { type: mimeType }), path.basename(sourceImagePath));
-    form.append("plans", JSON.stringify([plan]));
-    form.append("productMode", "single");
-    form.append("imageLanguage", "en");
-    form.append("imageSize", "1000x1000");
-
-    const controller = new AbortController();
-    requestTimer = setTimeout(() => controller.abort(), requestTimeoutMs);
-    const resp = await fetch(`${AI_IMAGE_GEN_URL}/api/generate`, {
-      method: "POST",
-      body: form,
-      headers: AI_AUTH_HEADERS,
-      signal: controller.signal,
+    const resp = await postMultipartViaNodeHttp(`${AI_IMAGE_GEN_URL}/api/generate`, {
+      fileBlobs: [{
+        buffer: imageBuffer,
+        name: path.basename(sourceImagePath) || "product.jpg",
+        type: mimeType,
+      }],
+      fields: {
+        plans: JSON.stringify([plan]),
+        productMode: "single",
+        imageLanguage: "en",
+        imageSize: "1000x1000",
+      },
+      extraHeaders: AI_AUTH_HEADERS,
+      timeoutMs: idleTimeoutMs,
+      totalTimeoutMs: requestTimeoutMs,
     });
 
     if (!resp.ok) {
@@ -11864,7 +11912,9 @@ async function generateWorkflowSinglePackImageAttempt({
       return { imageType: plan.imageType, imageUrl: "", error, warnings: [] };
     }
 
-    const parsed = await readWorkflowGenerateSSE(resp, [plan.imageType], idleTimeoutMs, taskId);
+    const parsed = resp.body
+      ? await readWorkflowGenerateSSE(resp, [plan.imageType], idleTimeoutMs, taskId)
+      : parseWorkflowGenerateSSEText(await resp.text(), [plan.imageType], taskId);
     const imageUrl = parsed.images?.[plan.imageType] || "";
     const error = parsed.errors?.[plan.imageType] || (imageUrl ? "" : "未返回图片");
     if (!imageUrl) {
@@ -11880,8 +11930,6 @@ async function generateWorkflowSinglePackImageAttempt({
     const message = formatAiImageFetchError(`Workflow pack generate failed (${plan.imageType})`, error, "/api/generate");
     logWorkflowPack(taskId, `${plan.imageType} fetch failed: ${message}`);
     return { imageType: plan.imageType, imageUrl: "", error: message, warnings: [] };
-  } finally {
-    if (requestTimer) clearTimeout(requestTimer);
   }
 }
 
