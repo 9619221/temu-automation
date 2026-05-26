@@ -3,10 +3,12 @@ const path = require("path");
 const { pathToFileURL } = require("url");
 const { spawn } = require("child_process");
 const http = require("http");
+const https = require("https");
 const net = require("net");
 const fs = require("fs");
 const crypto = require("crypto");
 const XLSX = require("xlsx");
+const FormDataLib = require("form-data");
 const { autoUpdater } = require("electron-updater");
 const { getDefaultCredentials } = require("./default-credentials.cjs");
 const {
@@ -2320,6 +2322,10 @@ function getImageStudioLogPath() {
   return path.join(app.getPath("userData"), "image-studio.log");
 }
 
+function getImageStudioRuntimeWorkDir() {
+  return path.join(app.getPath("userData"), "image-studio-runtime");
+}
+
 function appendImageStudioLog(message) {
   try {
     fs.appendFileSync(getImageStudioLogPath(), `[${new Date().toISOString()}] ${message}\n`);
@@ -2614,6 +2620,12 @@ async function ensureImageStudioServiceInternal(options = {}) {
   updateImageStudioStatus({ status: "starting", ready: false, message: "正在启动 AI 出图服务…" });
 
   const nodeExe = findNodeExe();
+  const runtimeWorkDir = getImageStudioRuntimeWorkDir();
+  try {
+    fs.mkdirSync(path.join(runtimeWorkDir, "data"), { recursive: true });
+  } catch (error) {
+    appendImageStudioLog(`workdir-error: ${error?.message || error}`);
+  }
 
   // 读取项目目录下的 .env.local，注入 API Key 等配置（Next.js standalone 模式不自动加载）
   const envLocalPath = path.join(projectInfo.projectPath, ".env.local");
@@ -2671,14 +2683,23 @@ async function ensureImageStudioServiceInternal(options = {}) {
     if (typeof v === "string" && v.trim()) overrideEnv[envKey] = v;
   }
   // 优先级：process.env (系统) < 内置 baked < .env.local (开发) < 用户 override
-  const env = { ...process.env, ...bakedEnv, ...profileEnvLocalVars, ...overrideEnv, PORT: String(nextPort), HOSTNAME: AUTO_IMAGE_HOST, NODE_ENV: "production" };
+  const env = {
+    ...process.env,
+    ...bakedEnv,
+    ...profileEnvLocalVars,
+    ...overrideEnv,
+    TEMU_IMAGE_STUDIO_WORK_DIR: runtimeWorkDir,
+    PORT: String(nextPort),
+    HOSTNAME: AUTO_IMAGE_HOST,
+    NODE_ENV: "production",
+  };
 
   const spawnArgs = projectInfo.mode === "packaged-runtime"
     ? [projectInfo.serverPath]
     : [projectInfo.nextBinPath, "start", "-p", String(nextPort), "--hostname", AUTO_IMAGE_HOST];
 
   console.log(`[Main] Starting image studio: ${nodeExe} ${spawnArgs.join(" ")} (${projectInfo.mode})`);
-  appendImageStudioLog(`start: runtime=${path.basename(nodeExe)} exe=${nodeExe} project=${projectInfo.projectPath} mode=${projectInfo.mode} port=${nextPort}`);
+  appendImageStudioLog(`start: runtime=${path.basename(nodeExe)} exe=${nodeExe} project=${projectInfo.projectPath} workdir=${runtimeWorkDir} mode=${projectInfo.mode} port=${nextPort}`);
 
   imageStudioProcess = spawn(nodeExe, spawnArgs, {
     cwd: projectInfo.projectPath,
@@ -3162,6 +3183,8 @@ const IMAGE_STUDIO_LONG_RUNNING_ROUTES = new Set([
   "/api/regenerate",
   "/api/compose",
 ]);
+const IMAGE_STUDIO_MULTIPART_TIMEOUT_MS = 10 * 60 * 1000;
+const IMAGE_STUDIO_MULTIPART_PAYLOAD = Symbol("imageStudioMultipartPayload");
 let imageStudioLongRunningFetchPair = null;
 function getImageStudioLongRunningFetch() {
   if (imageStudioLongRunningFetchPair) return imageStudioLongRunningFetchPair;
@@ -3202,6 +3225,92 @@ function createUndiciFormDataBody(body, UndiciFormData) {
   return formData;
 }
 
+function getImageStudioMultipartPayload(body) {
+  return body && typeof body === "object" ? body[IMAGE_STUDIO_MULTIPART_PAYLOAD] : null;
+}
+
+function normalizeImageStudioMultipartBuffer(file = {}) {
+  const value = file?.buffer;
+  if (Buffer.isBuffer(value)) return value;
+  if (value instanceof ArrayBuffer) return Buffer.from(new Uint8Array(value));
+  if (ArrayBuffer.isView(value)) return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+  return Buffer.alloc(0);
+}
+
+function createImageStudioNodeMultipartBody(payload = {}) {
+  const form = new FormDataLib();
+  const files = Array.isArray(payload.files) ? payload.files : [];
+  files.forEach((file, index) => {
+    const buffer = normalizeImageStudioMultipartBuffer(file);
+    form.append("images", buffer, {
+      filename: file?.name || `image-${index + 1}.png`,
+      contentType: file?.type || "application/octet-stream",
+      knownLength: buffer.length,
+    });
+  });
+
+  Object.entries(payload.fields || {}).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === "") return;
+    form.append(key, typeof value === "string" ? value : JSON.stringify(value));
+  });
+
+  return form;
+}
+
+function imageStudioMultipartFetch(urlString, init = {}, payload = {}) {
+  return new Promise((resolve, reject) => {
+    let url;
+    try { url = new URL(urlString); } catch (error) { reject(error); return; }
+
+    const form = createImageStudioNodeMultipartBody(payload);
+    const headers = {
+      ...form.getHeaders(),
+      ...(init.headers || {}),
+    };
+    try { headers["Content-Length"] = form.getLengthSync(); } catch {}
+
+    const lib = url.protocol === "https:" ? https : http;
+    const req = lib.request({
+      protocol: url.protocol,
+      hostname: url.hostname,
+      port: url.port || (url.protocol === "https:" ? 443 : 80),
+      path: `${url.pathname}${url.search}`,
+      method: init.method || "POST",
+      headers,
+      family: 4,
+      timeout: IMAGE_STUDIO_MULTIPART_TIMEOUT_MS,
+    }, (res) => {
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+      res.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        let cachedJson = null;
+        const responseHeaders = {
+          get(name) {
+            const value = res.headers[String(name || "").toLowerCase()];
+            return Array.isArray(value) ? value.join(", ") : (value || "");
+          },
+        };
+        resolve({
+          ok: Number(res.statusCode) >= 200 && Number(res.statusCode) < 300,
+          status: Number(res.statusCode) || 0,
+          headers: responseHeaders,
+          text: async () => text,
+          json: async () => {
+            if (cachedJson !== null) return cachedJson;
+            cachedJson = JSON.parse(text || "{}");
+            return cachedJson;
+          },
+        });
+      });
+    });
+
+    req.on("timeout", () => req.destroy(new Error(`timeout after ${IMAGE_STUDIO_MULTIPART_TIMEOUT_MS}ms`)));
+    req.on("error", reject);
+    form.pipe(req);
+  });
+}
+
 async function imageStudioFetch(routePath, init = {}) {
   let status = await ensureImageStudioService();
   if (routeNeedsImageStudioRuntimeConfig(routePath)) {
@@ -3214,7 +3323,11 @@ async function imageStudioFetch(routePath, init = {}) {
   };
   const isLongRunning = IMAGE_STUDIO_LONG_RUNNING_ROUTES.has(routePath);
   const longRunningFetch = isLongRunning ? getImageStudioLongRunningFetch() : null;
+  const multipartPayload = getImageStudioMultipartPayload(init.body);
   const request = () => {
+    if (multipartPayload && !longRunningFetch) {
+      return imageStudioMultipartFetch(`${status.url}${routePath}`, { ...init, headers }, multipartPayload);
+    }
     if (longRunningFetch) {
       return longRunningFetch.fetch(`${status.url}${routePath}`, {
         ...init,
@@ -3277,6 +3390,13 @@ function createImageStudioFormData(payload = {}) {
   Object.entries(payload.fields || {}).forEach(([key, value]) => {
     if (value === undefined || value === null || value === "") return;
     formData.append(key, typeof value === "string" ? value : JSON.stringify(value));
+  });
+
+  Object.defineProperty(formData, IMAGE_STUDIO_MULTIPART_PAYLOAD, {
+    value: {
+      files,
+      fields: payload.fields || {},
+    },
   });
 
   return formData;
