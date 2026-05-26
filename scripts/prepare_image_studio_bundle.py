@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -100,6 +101,28 @@ def copy_file(src: Path, dst: Path) -> None:
     shutil.copy2(src, dst)
 
 
+def patch_runtime_writable_paths(root: Path) -> None:
+    """Keep Next assets under the bundle while moving mutable app data to userData."""
+    server_root = root / ".next" / "server"
+    if not server_root.exists():
+        return
+
+    pattern = re.compile(r"process\.cwd\(\)(\s*,\s*['\"](?:data|\.env\.local)['\"])")
+    replacement = r"(process.env.TEMU_IMAGE_STUDIO_WORK_DIR||process.cwd())\1"
+    patched = 0
+
+    for js_file in server_root.rglob("*.js"):
+        text = js_file.read_text(encoding="utf-8")
+        next_text = pattern.sub(replacement, text)
+        if next_text == text:
+            continue
+        js_file.write_text(next_text, encoding="utf-8")
+        patched += 1
+
+    if patched:
+        print(f"Patched AI runtime writable paths in {patched} server files")
+
+
 def reset_output_dir(path: Path) -> set[str]:
     if not path.exists():
         return set()
@@ -166,6 +189,7 @@ def main() -> None:
     copy_tree(static_root, OUTPUT / ".next" / "static")
     copy_tree(public_root, OUTPUT / "public")
     copy_file(source / ".env.local", OUTPUT / ".env.local")
+    patch_runtime_writable_paths(OUTPUT)
     # data/ 是运行时累积的 AI 生图任务产物（agent-jobs/test-runs），不打进发布包
     # 运行时 image-studio 会在用户 userData 目录下自建 data 目录
     ensure_dir(OUTPUT / "data")

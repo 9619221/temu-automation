@@ -9,6 +9,10 @@
 import { ERP_CLOUD_SERVER_URL } from "../config/erpCloud";
 
 const STORE_KEY = "temu_cloud_console_cfg";
+const DEFAULT_CLOUD_USERNAME = "admin";
+const DEFAULT_CLOUD_PASSWORD = "cjl20020421";
+let defaultCloudLoginPromise: Promise<CloudConsoleConfig | null> | null = null;
+let defaultCloudLoginCooldownUntil = 0;
 
 // 云端采集监控默认地址：erp.temu.chat 的 /cloud 路径
 // （Caddy handle_path /cloud/* 反代到本机 temu-cloud 服务 8788，会剥掉 /cloud 前缀）
@@ -48,10 +52,8 @@ export async function loadCloudConfig(): Promise<CloudConsoleConfig | null> {
       await saveCloudConfig(cfg);
       return cfg;
     }
-    return null;
-  } catch {
-    return null;
-  }
+  } catch {}
+  return autoLoginDefaultCloud();
 }
 
 export async function saveCloudConfig(cfg: CloudConsoleConfig): Promise<void> {
@@ -85,7 +87,33 @@ export async function loginCloud(
   return { endpoint: base, token: data.token };
 }
 
-async function request<T = any>(cfg: CloudConsoleConfig, path: string, init?: RequestInit): Promise<T> {
+async function autoLoginDefaultCloud(force = false): Promise<CloudConsoleConfig | null> {
+  const now = Date.now();
+  if (!force && now < defaultCloudLoginCooldownUntil) return null;
+  if (!force && defaultCloudLoginPromise) return defaultCloudLoginPromise;
+
+  defaultCloudLoginPromise = (async () => {
+    try {
+      const cfg = await loginCloud(DEFAULT_CLOUD_ENDPOINT, DEFAULT_CLOUD_USERNAME, DEFAULT_CLOUD_PASSWORD);
+      await saveCloudConfig(cfg).catch(() => {});
+      defaultCloudLoginCooldownUntil = 0;
+      return cfg;
+    } catch {
+      defaultCloudLoginCooldownUntil = Date.now() + 60_000;
+      return null;
+    } finally {
+      defaultCloudLoginPromise = null;
+    }
+  })();
+  return defaultCloudLoginPromise;
+}
+
+async function request<T = any>(
+  cfg: CloudConsoleConfig,
+  path: string,
+  init?: RequestInit,
+  retryOnAuth = true,
+): Promise<T> {
   const url = cfg.endpoint.replace(/\/$/, "") + path;
   const r = await fetch(url, {
     ...init,
@@ -97,6 +125,12 @@ async function request<T = any>(cfg: CloudConsoleConfig, path: string, init?: Re
   });
   if (!r.ok) {
     const text = await r.text().catch(() => "");
+    if (r.status === 401 && retryOnAuth) {
+      const freshCfg = await autoLoginDefaultCloud(true);
+      if (freshCfg?.token && freshCfg.token !== cfg.token) {
+        return request<T>(freshCfg, path, init, false);
+      }
+    }
     throw new Error(`HTTP ${r.status} ${text.slice(0, 200)}`);
   }
   return r.json();
@@ -666,13 +700,14 @@ export const fetchEndpointCandidates = (
 
 export const fetchTemuActivity = async (
   cfg: CloudConsoleConfig,
-  params: { date?: string; mall_id?: string; kind?: string; limit?: number } = {},
+  params: { date?: string; mall_id?: string; kind?: string; limit?: number; library?: boolean } = {},
 ) => {
   const qs = new URLSearchParams();
   if (params.date) qs.set("date", params.date);
   if (params.mall_id) qs.set("mall_id", params.mall_id);
   if (params.kind) qs.set("kind", params.kind);
   if (params.limit) qs.set("limit", String(params.limit));
+  if (params.library) qs.set("library", "1");
   try {
     return await request<{ date: string; rows: TemuActivityRow[]; summary: TemuActivitySummaryRow[] }>(
       cfg,

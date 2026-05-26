@@ -86,6 +86,12 @@ function toCents(raw, fieldName) {
   if (!Number.isFinite(n)) return null;
   const isCentsField = /cents?$/i.test(fieldName || "");
   if (isCentsField) return Math.round(n);
+  if (
+    Number.isInteger(n)
+    && /(activityPrice|dailyPrice|supplierPrice|targetSupplierPrice|suggestActivityPrice|suggestActivitySupplierPrice|suggestedActivitySupplierPrice)/i.test(fieldName || "")
+  ) {
+    return Math.round(n);
+  }
   if (Number.isInteger(n) && n >= 1000) return n;
   return Math.round(n * 100);
 }
@@ -1579,10 +1585,15 @@ function activityMetaFromRequest(body) {
   const req = body?.__request;
   if (!isRecord(req)) return {};
   const productIds = Array.isArray(req.productIds) ? req.productIds : [];
+  const productSkcIds = Array.isArray(req.productSkcIds) ? req.productSkcIds : [];
+  const goodsIds = Array.isArray(req.goodsIds) ? req.goodsIds : [];
   return {
     activityId: firstDefined(req, ["activityThematicId", "activityId", "themeId", "topicId"]),
+    activityTitle: firstDefined(req, ["activityThematicName", "activityName", "activityTitle", "themeName", "topicName"]),
     activityType: firstDefined(req, ["activityType", "activityTypeName"]),
     productId: productIds[0] ?? firstDefined(req, ["productId", "spuId"]),
+    skcId: productSkcIds[0] ?? firstDefined(req, ["productSkcId", "skcId"]),
+    goodsId: goodsIds[0] ?? firstDefined(req, ["goodsId"]),
   };
 }
 
@@ -1615,6 +1626,30 @@ function pushActivityItem(out, item, meta, evt) {
   if (!isRecord(item)) return;
   const localMeta = mergeActivityMeta(meta, item.__activity_meta);
   const order = isRecord(item.biddingInvitationOrder) ? item.biddingInvitationOrder : null;
+  const skcList = Array.isArray(item.skcList) ? item.skcList : [];
+  if (skcList.length) {
+    for (const skc of skcList) {
+      if (!isRecord(skc)) continue;
+      const skuList = Array.isArray(skc.skuList) && skc.skuList.length ? skc.skuList : [null];
+      for (const sku of skuList) {
+        const skuObj = isRecord(sku) ? sku : {};
+        out.push({
+          ...item,
+          ...skc,
+          ...skuObj,
+          productId: firstDefined(item, ["productId", "productSpuId", "spuId"]) ?? localMeta.productId,
+          productSkcId: firstDefined(skc, ["productSkcId", "skcId"]) ?? firstDefined(item, ["productSkcId", "skcId"]) ?? localMeta.skcId,
+          __activity_parent: item,
+          __activity_meta: mergeActivityMeta(localMeta, {
+            activityId: firstDefined(item, ["activityThematicId", "activityId", "activityThemeId", "themeId", "topicId"]) ?? localMeta.activityId,
+            activityTitle: firstDefined(item, ["activityThematicName", "activityName", "activityTitle", "themeName", "topicName", "name", "title"]) || localMeta.activityTitle,
+            activityType: (firstDefined(item, ["activityTypeName", "activityType"]) ?? localMeta.activityType) || "活动匹配",
+          }),
+        });
+      }
+    }
+    return;
+  }
   const nestedActivityLists = [
     ["thematicList", item.thematicList],
     ["sessionList", item.sessionList],
@@ -1633,29 +1668,6 @@ function pushActivityItem(out, item, meta, evt) {
             activityId: firstDefined(child, ["activityThematicId", "activityId", "themeId", "topicId"]),
             activityTitle: firstDefined(child, ["activityThematicName", "activityName", "themeName", "topicName"]) || firstDefined(item, ["activityName", "activityTitle", "name", "title"]),
             activityType: firstDefined(child, ["activityType", "activityTypeName"]) ?? firstDefined(item, ["activityType", "activityTypeName"]),
-          }),
-        });
-      }
-    }
-    return;
-  }
-  const skcList = Array.isArray(item.skcList) ? item.skcList : [];
-  if (skcList.length) {
-    for (const skc of skcList) {
-      if (!isRecord(skc)) continue;
-      const skuList = Array.isArray(skc.skuList) && skc.skuList.length ? skc.skuList : [null];
-      for (const sku of skuList) {
-        const skuObj = isRecord(sku) ? sku : {};
-        out.push({
-          ...item,
-          ...skc,
-          ...skuObj,
-          productId: firstDefined(item, ["productId", "productSpuId", "spuId"]) ?? localMeta.productId,
-          productSkcId: firstDefined(skc, ["productSkcId", "skcId"]) ?? firstDefined(item, ["productSkcId", "skcId"]),
-          __activity_parent: item,
-          __activity_meta: mergeActivityMeta(localMeta, {
-            activityId: localMeta.activityId,
-            activityType: localMeta.activityType || "活动匹配",
           }),
         });
       }
@@ -1758,10 +1770,10 @@ function activityRowKey(item, evt, index) {
   ]);
   const meta = isRecord(item.__activity_meta) ? item.__activity_meta : {};
   const productId = firstDefined(item, ["productId", "productSpuId", "spuId", "spu_id", "goodsSpuId"]) ?? meta.productId;
-  const skcId = firstDefined(item, ["productSkcId", "skcId", "skc_id"]);
+  const skcId = firstDefined(item, ["productSkcId", "skcId", "skc_id"]) ?? meta.skcId;
   const skuId = firstDefined(item, ["productSkuId", "prodSkuId", "skuId", "sku_id"]);
   const skuExtCode = firstDefined(item, ["skuExtCode", "skuCode", "extCode", "externalSkuCode"]);
-  const goodsId = firstDefined(item, ["goodsId", "goods_id"]);
+  const goodsId = firstDefined(item, ["goodsId", "goods_id"]) ?? meta.goodsId;
   return [
     activityKindFromPath(evt.url_path),
     activityId || meta.activityId || evt.id,
@@ -1873,6 +1885,12 @@ function parseActivitySnapshot(db, ctx, evt, body) {
       "stockNum", "stock", "inventoryNum", "inventory", "availableStock",
       "activityGoodsStock", "goodsStock", "quantity",
     ]);
+    const remaining_activity_stock = pickActivityInteger(item, [
+      "remainingActivityStock", "remainActivityStock", "remainingActivityStockNum",
+      "activityRemainStock", "activityRemainingStock", "leftActivityStock", "surplusActivityStock",
+      "availableActivityStock", "remainingQuantity", "remainQuantity", "leftQuantity", "surplusQuantity",
+      "remainingStock", "remainStock", "leftStock", "surplusStock", "canEnrollStock",
+    ]);
     const price_currency = toNullableString(firstDeepDefined(item, [
       "currency", "currencyCode", "currencyType", "siteCurrency", "priceCurrency",
     ], 3), 16);
@@ -1889,7 +1907,7 @@ function parseActivitySnapshot(db, ctx, evt, body) {
         "invitationTopicId", "couponId", "promotionId", "campaignId", "biddingInvitationOrderSn", "orderSn", "id",
       ]) ?? meta.activityId),
       activity_title: toNullableString(meta.activityTitle ?? firstDefined(item, [
-        "activityName", "activityTitle", "themeName", "topicName", "couponName",
+        "activityThematicName", "activityName", "activityTitle", "themeName", "topicName", "couponName",
         "name", "title", "productName", "goodsName",
       ]), 500),
       activity_type,
@@ -1897,11 +1915,11 @@ function parseActivitySnapshot(db, ctx, evt, body) {
         "status", "activityStatus", "enrollStatus", "auditStatus", "state", "stage", "orderStatus",
       ]), 100),
       product_id: toNullableString(firstDefined(item, ["productId", "productSpuId", "spuId", "spu_id", "goodsSpuId"]) ?? meta.productId),
-      skc_id: toNullableString(firstDefined(item, ["productSkcId", "skcId", "skc_id"])),
+      skc_id: toNullableString(firstDefined(item, ["productSkcId", "skcId", "skc_id"]) ?? meta.skcId),
       sku_id: toNullableString(firstDefined(item, ["productSkuId", "prodSkuId", "skuId", "sku_id"]), 100),
       sku_ext_code: toNullableString(firstDefined(item, ["skuExtCode", "skuCode", "extCode", "externalSkuCode"]), 200),
       sku_attr_text: toNullableString(activitySkuAttrText(item), 500),
-      goods_id: toNullableString(firstDefined(item, ["goodsId", "goods_id"])),
+      goods_id: toNullableString(firstDefined(item, ["goodsId", "goods_id"]) ?? meta.goodsId),
       daily_price_cents,
       signup_price_cents,
       suggested_price_cents,
@@ -1920,6 +1938,7 @@ function parseActivitySnapshot(db, ctx, evt, body) {
         suggestedPriceCents: suggested_price_cents,
         priceCurrency: price_currency,
         activityStock: activity_stock,
+        remainingActivityStock: remaining_activity_stock,
         signupPriceDiffCents: signup_price_diff_cents,
         payAmount: firstDefined(item, ["payAmount", "activityPayAmountTotal", "gmv"]),
         orderCount: firstDefined(item, ["orderCount", "activityGoodsOrderCount"]),

@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { brotliCompressSync, constants as zlibConstants, gzipSync } from "zlib";
 import { getDb } from "../db/connection.js";
 import { authMiddleware } from "../middleware/auth.js";
 
@@ -57,6 +58,32 @@ function optionalGet(db, sql, params = [], fallback = null) {
     if (/no such table|no such column/i.test(String(error?.message || ""))) return fallback;
     throw error;
   }
+}
+
+function sendJson(req, res, payload) {
+  const json = JSON.stringify(payload);
+  const acceptEncoding = String(req.headers["accept-encoding"] || "");
+  if (/\bbr\b/i.test(acceptEncoding) && json.length > 1024) {
+    const body = brotliCompressSync(Buffer.from(json), {
+      params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 4 },
+    });
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.setHeader("Content-Encoding", "br");
+    res.setHeader("Vary", "Accept-Encoding");
+    res.setHeader("Content-Length", String(body.length));
+    res.end(body);
+    return;
+  }
+  if (/\bgzip\b/i.test(acceptEncoding) && json.length > 1024) {
+    const body = gzipSync(Buffer.from(json));
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.setHeader("Content-Encoding", "gzip");
+    res.setHeader("Vary", "Accept-Encoding");
+    res.setHeader("Content-Length", String(body.length));
+    res.end(body);
+    return;
+  }
+  res.type("application/json").send(json);
 }
 
 function latestText(...values) {
@@ -1151,6 +1178,7 @@ r.get("/stock-orders", (req, res) => {
   const requestedStatus = req.query.status ? String(req.query.status) : "";
   const requestedSourceType = req.query.source_type ? String(req.query.source_type) : "";
   const q = req.query.q ? String(req.query.q).trim() : "";
+  const includeRaw = req.query.include_raw === "1" || req.query.includeRaw === "1";
   const limit = Math.min(5000, Math.max(1, Number(req.query.limit) || 300));
   const where = ["tenant_id = ?", realMallWhere];
   const params = [tid];
@@ -1194,7 +1222,8 @@ r.get("/stock-orders", (req, res) => {
              product_name, spec_name, demand_qty, delivered_qty, temu_status, warehouse_group,
              receive_warehouse_id, receive_warehouse_name, urgency_info, order_time, latest_ship_at,
              shipping_qty, inbound_qty, weight_kg, package_count, package_no, logistics_info,
-             raw_json, source_event_id, sources_json, first_seen_at, last_updated_at
+             source_event_id, first_seen_at, last_updated_at
+             ${includeRaw ? ", raw_json, sources_json" : ""}
       FROM temu_stock_order_snapshot
       WHERE ${where.join(" AND ")}
       ORDER BY
@@ -1220,9 +1249,9 @@ r.get("/stock-orders", (req, res) => {
       GROUP BY COALESCE(source_type, 'stock_order'), COALESCE(temu_status, '')
       ORDER BY source_type ASC, count DESC
     `).all(...params);
-    res.json({ rows, summary });
+    sendJson(req, res, { rows, summary });
   } catch (error) {
-    if (/no such table/i.test(String(error?.message || ""))) return res.json({ rows: [], summary: [] });
+    if (/no such table/i.test(String(error?.message || ""))) return sendJson(req, res, { rows: [], summary: [] });
     throw error;
   }
 });
@@ -1499,10 +1528,82 @@ r.get("/activity", (req, res) => {
   const requestedDate = req.query.date;
   const requestedMallId = req.query.mall_id ? String(req.query.mall_id) : "";
   const requestedKind = req.query.kind ? String(req.query.kind) : "";
+  const requestedLibrary = req.query.library === "1" || req.query.mode === "library";
   const limit = Math.min(5000, Math.max(1, Number(req.query.limit) || 1000));
   const explicitDate = typeof requestedDate === "string" && requestedDate;
   let date = explicitDate ? requestedDate : "";
   try {
+    if (requestedLibrary && !explicitDate) {
+      const where = ["tenant_id = ?", realMallWhere];
+      const params = [tid];
+      if (requestedMallId) {
+        where.push("mall_id = ?");
+        params.push(requestedMallId);
+      }
+      if (requestedKind) {
+        where.push("activity_kind = ?");
+        params.push(requestedKind);
+      }
+      const identityPartition = `
+        mall_id,
+        COALESCE(NULLIF(activity_id, ''), NULLIF(row_key, ''), id),
+        COALESCE(product_id, ''),
+        COALESCE(skc_id, ''),
+        COALESCE(sku_id, ''),
+        COALESCE(sku_ext_code, ''),
+        COALESCE(goods_id, ''),
+        COALESCE(activity_title, ''),
+        COALESCE(activity_type, '')
+      `;
+      const selectColumns = `
+        id, mall_id, site, stat_date, row_key, activity_kind, activity_id,
+        activity_title, activity_type, activity_status, product_id, skc_id, sku_id,
+        sku_ext_code, sku_attr_text, goods_id,
+        daily_price_cents, signup_price_cents, suggested_price_cents, price_currency, activity_stock,
+        signup_price_diff_cents,
+        start_at, end_at, metric_json, raw_json, source_event_id,
+        sources_json, last_updated_at
+      `;
+      const latest = optionalGet(db, `
+        SELECT MAX(stat_date) AS date
+        FROM temu_activity_snapshot
+        WHERE ${where.join(" AND ")}
+      `, params, null);
+      date = latest?.date || new Date().toISOString().slice(0, 10);
+      const rows = db.prepare(`
+        SELECT ${selectColumns}
+        FROM (
+          SELECT ${selectColumns},
+                 ROW_NUMBER() OVER (
+                   PARTITION BY ${identityPartition}
+                   ORDER BY stat_date DESC, last_updated_at DESC
+                 ) AS rn
+          FROM temu_activity_snapshot
+          WHERE ${where.join(" AND ")}
+        )
+        WHERE rn = 1
+        ORDER BY last_updated_at DESC
+        LIMIT ?
+      `).all(...params, limit);
+      const summary = db.prepare(`
+        SELECT activity_kind, COUNT(*) AS count
+        FROM (
+          SELECT activity_kind,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY ${identityPartition}
+                   ORDER BY stat_date DESC, last_updated_at DESC
+                 ) AS rn
+          FROM temu_activity_snapshot
+          WHERE ${where.join(" AND ")}
+        )
+        WHERE rn = 1
+        GROUP BY activity_kind
+        ORDER BY count DESC
+      `).all(...params);
+      res.json({ date, rows, summary, library: true });
+      return;
+    }
+
     if (!date) {
       const latestWhere = ["tenant_id = ?", realMallWhere];
       const latestParams = [tid];

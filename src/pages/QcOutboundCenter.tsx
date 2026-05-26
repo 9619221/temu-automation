@@ -267,6 +267,10 @@ function outboundStatusTag(status?: string) {
   return <Tag color={OUTBOUND_STATUS_COLORS[key] || "default"}>{OUTBOUND_STATUS_LABELS[key] || key}</Tag>;
 }
 
+function stockOrderSummaryTotal(summary: TemuStockOrderSummaryRow[]) {
+  return summary.reduce((sum, row) => sum + Number(row.count || 0), 0);
+}
+
 export default function QcOutboundCenter() {
   const auth = useErpAuth();
   const role = auth.currentUser?.role || "";
@@ -281,11 +285,13 @@ export default function QcOutboundCenter() {
   const [loadedOnce, setLoadedOnce] = useState(() => hasPageCache(cachedData));
   const [loading, setLoading] = useState(false);
   const [actingKey, setActingKey] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState("cloud");
   const [stockSourceType, setStockSourceType] = useState("");
   const [stockStatus, setStockStatus] = useState("");
   const [stockQuery, setStockQuery] = useState("");
   const [cloudConfigured, setCloudConfigured] = useState(false);
   const [cloudError, setCloudError] = useState<string | null>(null);
+  const [cloudLoadedAt, setCloudLoadedAt] = useState<string | null>(() => cachedData.generatedAt || null);
   const [selectedAccountId, setSelectedAccountId] = useState("");
   const [planTarget, setPlanTarget] = useState<OutboundBatchRow | null>(null);
   const [stockOrderTarget, setStockOrderTarget] = useState<TemuStockOrderRow | null>(null);
@@ -320,9 +326,15 @@ export default function QcOutboundCenter() {
     });
   }, []);
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (options?: { notify?: boolean; forceAllCloud?: boolean }) => {
     if (!erp) return;
     setLoading(true);
+    if (options?.forceAllCloud) {
+      setActiveTab("cloud");
+      setStockQuery("");
+      setStockSourceType("");
+      setStockStatus("");
+    }
     try {
       const [nextOutbound, nextAccounts, cfg] = await Promise.all([
         erp.outbound.workbench({ limit: 200 }),
@@ -335,14 +347,21 @@ export default function QcOutboundCenter() {
         setCloudConfigured(true);
         try {
           const stockResult = await fetchTemuStockOrders(cfg, {
-            q: stockQuery || undefined,
+            q: options?.forceAllCloud ? undefined : stockQuery || undefined,
             limit: 5000,
           });
           nextStockOrders = stockResult.rows || [];
           nextStockSummary = stockResult.summary || [];
+          const nextCloudLoadedAt = new Date().toISOString();
+          const nextTotal = stockOrderSummaryTotal(nextStockSummary) || nextStockOrders.length;
+          setCloudLoadedAt(nextCloudLoadedAt);
           setCloudError(null);
+          if (options?.notify) {
+            message.success(`云端送仓托管已同步 ${formatQty(nextTotal)} 条`);
+          }
         } catch (error: any) {
           setCloudError(error?.message || "云端备货/发货读取失败");
+          if (options?.notify) message.error(error?.message || "云端送仓托管读取失败");
         }
       } else {
         setCloudConfigured(false);
@@ -540,6 +559,10 @@ export default function QcOutboundCenter() {
   const cloudShippingQty = useMemo(
     () => stockOrders.reduce((sum, row) => sum + Number(row.shipping_qty ?? row.delivered_qty ?? 0), 0),
     [stockOrders],
+  );
+  const cloudTotalCount = useMemo(
+    () => stockOrderSummaryTotal(stockOrderSummary) || stockOrders.length,
+    [stockOrderSummary, stockOrders.length],
   );
   const stockSourceCounts = useMemo(() => {
     if (stockOrderSummary.length) {
@@ -997,12 +1020,12 @@ export default function QcOutboundCenter() {
         subtitle="浏览器扩展抓取 Temu 备货单、发货台、发货单并上传云端，桌面端按聚水潭式表单承接出库"
         meta={[
           `更新 ${formatDateTime(outboundData.generatedAt)}`,
-          `送仓托管 ${stockOrders.length}`,
+          `云端同步 ${formatQty(cloudTotalCount)}`,
           `本地出库 ${summary.outboundShipmentCount || 0}`,
         ]}
         actions={[
-          <Button key="refresh" icon={<ReloadOutlined />} loading={loading} onClick={() => void loadData()}>
-            刷新
+          <Button key="refresh" icon={<ReloadOutlined />} loading={loading} onClick={() => void loadData({ notify: true, forceAllCloud: true })}>
+            刷新云端全量
           </Button>,
         ]}
       />
@@ -1014,11 +1037,19 @@ export default function QcOutboundCenter() {
           showIcon
           message={cloudError || "还没有配置云端连接"}
         />
+      ) : cloudLoadedAt ? (
+        <Alert
+          style={{ marginBottom: 12 }}
+          type="success"
+          showIcon
+          message={`云端送仓托管已同步 ${formatQty(cloudTotalCount)} 条`}
+          description={`最后同步：${formatDateTime(cloudLoadedAt)}。明细在下方第一个页签「Temu送仓托管」中展示。`}
+        />
       ) : null}
 
       <Row gutter={[12, 12]} className="material-kpi-row" style={{ marginBottom: 12 }}>
         <Col xs={24} sm={12} lg={6}>
-          <StatCard title="送仓托管单" value={stockOrders.length} color="blue" icon={<CloudSyncOutlined />} compact />
+          <StatCard title="送仓托管单" value={formatQty(cloudTotalCount)} color="blue" icon={<CloudSyncOutlined />} compact />
         </Col>
         <Col xs={24} sm={12} lg={6}>
           <StatCard title="云端需求" value={formatQty(cloudDemandQty)} suffix="件" color="brand" icon={<ShoppingCartOutlined />} compact />
@@ -1032,11 +1063,12 @@ export default function QcOutboundCenter() {
       </Row>
 
       <Tabs
-        defaultActiveKey="cloud"
+        activeKey={activeTab}
+        onChange={setActiveTab}
         items={[
           {
             key: "cloud",
-            label: "Temu送仓托管",
+            label: `Temu送仓托管 ${formatQty(cloudTotalCount)}`,
             children: (
               <Space direction="vertical" size={12} style={{ width: "100%" }}>
                 <div className="material-filter-bar material-filter-bar--search">

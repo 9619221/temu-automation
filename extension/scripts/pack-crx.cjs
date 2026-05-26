@@ -71,6 +71,10 @@ function isExcludedRuntimeFile(relativePath) {
   const segments = zipPath.split("/");
   const filename = segments[segments.length - 1];
 
+  if (zipPath === "web/manifest.json" || zipPath === "web/rules.json") {
+    return true;
+  }
+
   if (segments.some((segment) => ["scripts", "dist", "node_modules", ".git"].includes(segment))) {
     return true;
   }
@@ -196,8 +200,12 @@ function main() {
       cwd: REPO_ROOT,
       stdio: "inherit",
     });
+    childProcess.execFileSync("node", ["extension/scripts/build-web-root-compat.cjs"], {
+      cwd: REPO_ROOT,
+      stdio: "inherit",
+    });
   } catch (error) {
-    fail(`build-bridge failed with exit code ${error.status ?? "unknown"}`);
+    fail(`extension build failed with exit code ${error.status ?? "unknown"}`);
   }
 
   const manifest = JSON.parse(fs.readFileSync(MANIFEST_PATH, "utf8"));

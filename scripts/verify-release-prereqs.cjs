@@ -69,11 +69,29 @@ function assertExtensionResourceConfigured(buildConfig) {
     "rules.json",
     path.join("web", "background", "sw.js"),
     path.join("web", "content", "bridge.js"),
+    path.join("web", "manifest.json"),
+    path.join("web", "rules.json"),
   ]) {
     const filePath = path.join(repoRoot, "extension", relativePath);
     if (!checkPathExists(filePath)) {
       throw new Error(`Extension package file missing: ${filePath}`);
     }
+  }
+  const manifest = JSON.parse(fs.readFileSync(path.join(repoRoot, "extension", "manifest.json"), "utf8"));
+  const webManifest = JSON.parse(fs.readFileSync(path.join(repoRoot, "extension", "web", "manifest.json"), "utf8"));
+  const rootRules = JSON.parse(fs.readFileSync(path.join(repoRoot, "extension", "rules.json"), "utf8"));
+  const webRules = JSON.parse(fs.readFileSync(path.join(repoRoot, "extension", "web", "rules.json"), "utf8"));
+  const forbiddenPermission = (manifest.permissions || []).find((permission) => (
+    typeof permission === "string" && permission.startsWith("declarativeNetRequest")
+  ));
+  if (forbiddenPermission || manifest.declarative_net_request || webManifest.declarative_net_request) {
+    throw new Error("Extension must not reference declarativeNetRequest static rules; Chrome rejects the legacy rules.json on some installs");
+  }
+  if (!Array.isArray(rootRules) || !Array.isArray(webRules)) {
+    throw new Error("extension rules.json files must parse as JSON arrays");
+  }
+  if (webManifest.background?.service_worker !== "background/sw.js") {
+    throw new Error("extension/web/manifest.json must be loadable from the web directory");
   }
   console.log("[ok] extension extraResource configured for resources/extension");
 }

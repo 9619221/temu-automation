@@ -312,6 +312,25 @@ async function remoteRequest(requestPath, options = {}) {
   }
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientRemoteReadError(error) {
+  return [502, 503, 504].includes(Number(error?.statusCode || 0));
+}
+
+async function remoteReadRequestWithRetry(requestPath, options = {}) {
+  try {
+    return await remoteRequest(requestPath, options);
+  } catch (error) {
+    if (!isTransientRemoteReadError(error)) throw error;
+    console.warn(`[remote-read] transient HTTP ${error.statusCode} for ${requestPath}, retrying once`);
+    await sleep(800);
+    return remoteRequest(requestPath, options);
+  }
+}
+
 function broadcastPurchaseUpdate(action, payload = {}, actor = {}, result = {}) {
   if (!BROADCAST_PURCHASE_ACTIONS.has(action)) return null;
   const event = {
@@ -17517,7 +17536,7 @@ async function performPurchaseActionRuntime(payload = {}) {
 async function getWarehouseWorkbenchRuntime(params = {}) {
   if (shouldUseClientRuntime()) {
     ensureClientRuntime();
-    const payload = await remoteRequest("/api/warehouse/workbench", {
+    const payload = await remoteReadRequestWithRetry("/api/warehouse/workbench", {
       method: "POST",
       body: params,
       timeoutMs: 120000,

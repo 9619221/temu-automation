@@ -29,6 +29,13 @@ const COLLECTOR_BATCH_SIZE = 4;
 const COLLECTOR_WINDOW_WIDTH = 360;
 const COLLECTOR_WINDOW_HEIGHT = 300;
 const HK_CLOUD_ENDPOINT = "https://erp.temu.chat/cloud";
+const ACTIVITY_LIBRARY_ENDPOINT = "/api/kiana/gamblers/marketing/enroll/list";
+const ACTIVITY_LIBRARY_STATE_KEY = "temu_monitor_activity_library_state";
+const ACTIVITY_LIBRARY_BATCH_SIZE = 50;
+const ACTIVITY_LIBRARY_TARGET_LIMIT = 200;
+const ACTIVITY_LIBRARY_MAX_BATCHES_PER_RUN = 8;
+const ACTIVITY_LIBRARY_RUN_INTERVAL_MS = 5 * 60 * 1000;
+const ACTIVITY_LIBRARY_SEEN_TTL_MS = 6 * 60 * 60 * 1000;
 const FEISHU_SUPPLIER_TABLE_URL = "https://mcn24onb5t1o.feishu.cn/base/RLy7bndc4aCXhtsx4yAcr2d8nSg?table=tbl0UhZRpR0niDSt&view=vew5Spjz7c";
 const FEISHU_SUPPLIER_ONCE_KEY = "temu_monitor_feishu_supplier_once";
 
@@ -148,6 +155,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   });
   // 顺便心跳到 cloud 做远程诊断
   sendHeartbeat().catch((e) => console.warn("[sw] heartbeat err", e));
+  collectActivityLibraryFromTargets().catch((e) => console.warn("[sw] activity library collect err", e?.message || e));
 });
 
 // 在任意 Temu tab 上抓 page world stats（供心跳用）
@@ -250,6 +258,136 @@ async function sendHeartbeat() {
 }
 
 // ---------- 处理 content script 上行 ----------
+function activityLibraryOriginForSite(site) {
+  const value = String(site || "").toLowerCase();
+  if (value.includes("agentseller-us")) return "https://agentseller-us.temu.com";
+  if (value.includes("agentseller-eu")) return "https://agentseller-eu.temu.com";
+  if (value.includes("kuajingmaihuo") || value === "seller") return "https://seller.kuajingmaihuo.com";
+  return "https://agentseller.temu.com";
+}
+
+function normalizeActivitySkcIds(values) {
+  const out = [];
+  const seen = new Set();
+  for (const value of Array.isArray(values) ? values : []) {
+    const id = String(value == null ? "" : value).trim();
+    if (!/^\d{5,}$/.test(id) || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+function pruneActivitySeen(seen, now) {
+  const next = {};
+  const source = seen && typeof seen === "object" ? seen : {};
+  for (const [key, value] of Object.entries(source)) {
+    const ts = Number(value || 0);
+    if (ts && now - ts < ACTIVITY_LIBRARY_SEEN_TTL_MS) next[key] = ts;
+  }
+  return next;
+}
+
+async function collectActivityLibraryFromTargets() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", ACTIVITY_LIBRARY_STATE_KEY]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
+  const now = Date.now();
+  const state = cfg[ACTIVITY_LIBRARY_STATE_KEY] || {};
+  if (state.last_run_at && now - Number(state.last_run_at) < ACTIVITY_LIBRARY_RUN_INTERVAL_MS) {
+    return { ok: true, skipped: "interval" };
+  }
+  const seen = pruneActivitySeen(state.seen, now);
+  await setStorage({
+    [ACTIVITY_LIBRARY_STATE_KEY]: {
+      ...state,
+      seen,
+      last_run_at: now,
+    },
+  });
+
+  const targetUrl = `${cfg.cloud_endpoint.replace(/\/$/, "")}/api/ingest/v1/activity-targets?limit=${ACTIVITY_LIBRARY_TARGET_LIMIT}`;
+  const targetResp = await fetch(targetUrl, {
+    headers: { Authorization: `Bearer ${cfg.auth_token}` },
+  });
+  if (!targetResp.ok) return { ok: false, reason: `targets_http_${targetResp.status}` };
+  const targetData = await targetResp.json().catch(() => null);
+  const targets = Array.isArray(targetData?.targets) ? targetData.targets : [];
+  let batchCount = 0;
+  let enqueuedCount = 0;
+  for (const target of targets) {
+    const mallId = String(target?.mall_id || target?.mallId || "").trim();
+    if (!mallId) continue;
+    const ids = normalizeActivitySkcIds(target?.skc_ids || target?.skcIds);
+    if (!ids.length) continue;
+    const origin = activityLibraryOriginForSite(target?.site);
+    const url = `${origin}${ACTIVITY_LIBRARY_ENDPOINT}`;
+    for (let start = 0; start < ids.length; start += ACTIVITY_LIBRARY_BATCH_SIZE) {
+      if (batchCount >= ACTIVITY_LIBRARY_MAX_BATCHES_PER_RUN) break;
+      const batch = ids.slice(start, start + ACTIVITY_LIBRARY_BATCH_SIZE);
+      const seenKey = `${origin}|${mallId}|${batch.join(",")}`;
+      if (seen[seenKey] && now - Number(seen[seenKey]) < ACTIVITY_LIBRARY_SEEN_TTL_MS) continue;
+      const requestBody = JSON.stringify({
+        pageNo: 1,
+        pageSize: 50,
+        productSkcIds: batch,
+        sessionStatusTag: 4,
+      });
+      batchCount++;
+      try {
+        const resp = await fetch(url, {
+          method: "POST",
+          credentials: "include",
+          cache: "no-store",
+          headers: {
+            "Content-Type": "application/json",
+            mallid: mallId,
+          },
+          body: requestBody,
+        });
+        const text = await resp.text();
+        const body = safeParseJson(text);
+        if (resp.ok && body && typeof body === "object") {
+          await enqueue({
+            kind: "fetch-active-activity-library",
+            url,
+            method: "POST",
+            status: resp.status,
+            ts: Date.now(),
+            site: target?.site || "agentseller",
+            page: "background/activity-library",
+            mall_id: mallId,
+            body,
+            bodyText: text.length > 200000 ? null : text,
+            requestBodyText: requestBody,
+            bodySize: text.length,
+            activeSource: "marketing_enroll_list_background",
+            activeSkcCount: batch.length,
+          });
+          await bumpStats({ captured_count_delta: 1 });
+          enqueuedCount++;
+        }
+        seen[seenKey] = Date.now();
+      } catch {
+        delete seen[seenKey];
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    if (batchCount >= ACTIVITY_LIBRARY_MAX_BATCHES_PER_RUN) break;
+  }
+  await setStorage({
+    [ACTIVITY_LIBRARY_STATE_KEY]: {
+      ...state,
+      seen: pruneActivitySeen(seen, Date.now()),
+      last_run_at: now,
+      last_success_at: Date.now(),
+      last_batch_count: batchCount,
+      last_enqueued_count: enqueuedCount,
+    },
+  });
+  if (enqueuedCount > 0) await flush();
+  return { ok: true, batchCount, enqueuedCount };
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg !== "object") return;
 

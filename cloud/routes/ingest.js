@@ -35,6 +35,100 @@ r.get("/v1/health", authMiddleware, (req, res) => {
   res.json({ ok: true, ts: Date.now(), tenant_id: req.user.tid });
 });
 
+// Activity library backfill targets. The extension can ask the cloud which SKCs
+// need a fresh marketing/enroll/list snapshot, then fetch those in the browser
+// context where Temu cookies are available.
+r.get("/v1/activity-targets", authMiddleware, (req, res) => {
+  const db = getDb();
+  const tenantId = req.user.tid;
+  const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
+  const perGroupLimit = Math.min(50, Math.max(1, Number(req.query.per_group_limit) || 50));
+  try {
+    const rows = db.prepare(`
+      WITH latest_sales AS (
+        SELECT mall_supplier_id AS mall_id, MAX(stat_date) AS stat_date
+        FROM temu_sales_snapshot
+        WHERE tenant_id = ?
+          AND mall_supplier_id <> ''
+          AND skc_id NOT IN ('SKC-EXT-E2E', 'SKC-DBG')
+        GROUP BY mall_supplier_id
+      ),
+      candidates AS (
+        SELECT
+          s.mall_supplier_id AS mall_id,
+          'agentseller' AS site,
+          s.skc_id,
+          MAX(s.last_updated_at) AS updated_at
+        FROM temu_sales_snapshot s
+        JOIN latest_sales l
+          ON l.mall_id = s.mall_supplier_id
+         AND l.stat_date = s.stat_date
+        WHERE s.tenant_id = ?
+          AND s.mall_supplier_id <> ''
+          AND s.skc_id <> ''
+          AND s.skc_id NOT IN ('SKC-EXT-E2E', 'SKC-DBG')
+        GROUP BY s.mall_supplier_id, s.skc_id
+        UNION ALL
+        SELECT
+          mall_id,
+          COALESCE(NULLIF(site, ''), 'agentseller') AS site,
+          skc_id,
+          MAX(last_updated_at) AS updated_at
+        FROM skc_snapshots
+        WHERE tenant_id = ?
+          AND mall_id <> ''
+          AND skc_id <> ''
+          AND skc_id NOT IN ('SKC-EXT-E2E', 'SKC-DBG')
+        GROUP BY mall_id, COALESCE(NULLIF(site, ''), 'agentseller'), skc_id
+      ),
+      dedup AS (
+        SELECT mall_id, site, skc_id, MAX(updated_at) AS updated_at
+        FROM candidates
+        GROUP BY mall_id, site, skc_id
+      ),
+      activity AS (
+        SELECT mall_id, skc_id, MAX(last_updated_at) AS last_activity_at
+        FROM temu_activity_snapshot
+        WHERE tenant_id = ?
+          AND mall_id <> ''
+          AND skc_id <> ''
+        GROUP BY mall_id, skc_id
+      )
+      SELECT d.mall_id, d.site, d.skc_id, d.updated_at, a.last_activity_at
+      FROM dedup d
+      LEFT JOIN activity a
+        ON a.mall_id = d.mall_id
+       AND a.skc_id = d.skc_id
+      ORDER BY
+        CASE WHEN a.last_activity_at IS NULL THEN 0 ELSE 1 END,
+        COALESCE(a.last_activity_at, '') ASC,
+        d.updated_at DESC
+      LIMIT ?
+    `).all(tenantId, tenantId, tenantId, tenantId, limit);
+    const groups = new Map();
+    for (const row of rows) {
+      const mallId = String(row.mall_id || "").trim();
+      const site = String(row.site || "agentseller").trim() || "agentseller";
+      const skcId = String(row.skc_id || "").trim();
+      if (!mallId || !/^\d{5,}$/.test(skcId)) continue;
+      const key = `${mallId}|${site}`;
+      if (!groups.has(key)) groups.set(key, { mall_id: mallId, site, skc_ids: [] });
+      const group = groups.get(key);
+      if (group.skc_ids.length < perGroupLimit && !group.skc_ids.includes(skcId)) {
+        group.skc_ids.push(skcId);
+      }
+    }
+    const targets = Array.from(groups.values()).filter((group) => group.skc_ids.length);
+    res.json({ ok: true, targets, count: rows.length, generated_at: Date.now() });
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) {
+      res.json({ ok: true, targets: [], count: 0, generated_at: Date.now() });
+      return;
+    }
+    throw error;
+  }
+});
+
 // 全局 reload flag：通过 /api/_admin/trigger-reload 设为 true，下一次 heartbeat 把它返回给扩展，扩展调 chrome.runtime.reload() 重读 disk 代码
 const RELOAD_FLAG = { ts: 0, version: 0 };
 export function triggerExtensionReload() {

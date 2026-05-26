@@ -28,7 +28,10 @@
     try {
       const cfgB64 = btoa(unescape(encodeURIComponent(JSON.stringify(WHITELIST_PAYLOAD))));
       const s = document.createElement("script");
-      s.src = chrome.runtime.getURL("web/page/hook.js");
+      const manifest = chrome.runtime.getManifest ? chrome.runtime.getManifest() : null;
+      const serviceWorkerPath = manifest && manifest.background && manifest.background.service_worker;
+      const hookPath = serviceWorkerPath === "background/sw.js" ? "page/hook.js" : "web/page/hook.js";
+      s.src = chrome.runtime.getURL(hookPath);
       s.dataset.temuMonitor = "local";
       s.dataset.cfgB64 = cfgB64;
       s.onload = () => s.remove();

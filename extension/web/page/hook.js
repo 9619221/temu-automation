@@ -900,6 +900,9 @@
           if (xhr.readyState !== 4) return;
           try {
             const text = xhr.responseText || "";
+            if (shouldActivityLibraryCollectFromUrl(_url)) {
+              scheduleActivityLibraryCollect(extractSkcIdsFromSource(safeJson(text)));
+            }
             emit(buildCapturedPayload({
               kind: captureMode === "discovery" ? "xhr-discovery" : "xhr",
               url: _url, method: _method, status: xhr.status, ts: _ts,
@@ -958,6 +961,9 @@
           try {
             const requestBodyText = await requestBodyTextPromise;
             const parsedBody = captureMode === "capture" ? safeJson(text) : null;
+            if (captureMode === "capture" && shouldActivityLibraryCollectFromUrl(url)) {
+              scheduleActivityLibraryCollect(extractSkcIdsFromSource(parsedBody));
+            }
             emit(buildCapturedPayload({
               kind: captureMode === "discovery" ? "fetch-discovery" : "fetch",
               url, method, status: resp.status, ts,
@@ -971,6 +977,188 @@
     });
   }
   try { window.fetch = TrackedFetch; } catch {}
+
+  // Active activity library collector. It mirrors the reference plugin:
+  // collect current SKC ids, call marketing/enroll/list, and emit the response
+  // through the same capture pipeline so the cloud parser builds the activity library.
+  const ACTIVE_ACTIVITY_ENDPOINT = "/api/kiana/gamblers/marketing/enroll/list";
+  const ACTIVE_ACTIVITY_BATCH_SIZE = 50;
+  const ACTIVE_ACTIVITY_TTL_MS = 5 * 60 * 1000;
+  const activeActivitySeen = window.__temuMonitorActivityLibrarySeen || (window.__temuMonitorActivityLibrarySeen = new Map());
+  let activeActivityTimer = 0;
+  let activeActivitySeedIds = new Set();
+
+  function getCookieValue(names) {
+    const wanted = Array.isArray(names) ? names : [names];
+    const parts = String(document.cookie || "").split(/;\s*/);
+    for (const name of wanted) {
+      const prefix = String(name || "") + "=";
+      const found = parts.find((part) => part.startsWith(prefix));
+      if (found) {
+        try { return decodeURIComponent(found.slice(prefix.length)); } catch { return found.slice(prefix.length); }
+      }
+    }
+    return "";
+  }
+
+  function activityMallId() {
+    return getCookieValue(["mallid", "mallId", "mall_id", "mallSupplierId", "supplierId"]);
+  }
+
+  function normalizeSkcId(value) {
+    const text = String(value == null ? "" : value).trim();
+    return /^\d{5,}$/.test(text) ? text : "";
+  }
+
+  function addSkcIdsFromText(text, out) {
+    const source = String(text || "");
+    if (!source) return;
+    const labeled = /(?:productSkcId|productSKCId|goodsSkcId|skcId|SKC|skc)\s*(?:ID|id)?\s*[:：=]?\s*["']?(\d{5,})/g;
+    let match;
+    while ((match = labeled.exec(source))) {
+      const id = normalizeSkcId(match[1]);
+      if (id) out.add(id);
+      if (out.size >= 200) return;
+    }
+  }
+
+  function extractSkcIdsFromSource(root) {
+    const out = new Set();
+    const stack = [root];
+    let steps = 0;
+    while (stack.length && steps < 8000 && out.size < 200) {
+      steps++;
+      const node = stack.pop();
+      if (node == null) continue;
+      if (typeof node === "string" || typeof node === "number") {
+        addSkcIdsFromText(node, out);
+        continue;
+      }
+      if (Array.isArray(node)) {
+        for (const item of node) stack.push(item);
+        continue;
+      }
+      if (typeof node !== "object") continue;
+      for (const [key, value] of Object.entries(node)) {
+        if (/skc/i.test(key)) {
+          if (Array.isArray(value)) {
+            for (const item of value) {
+              const id = normalizeSkcId(item);
+              if (id) out.add(id);
+            }
+          } else {
+            const id = normalizeSkcId(value);
+            if (id) out.add(id);
+          }
+        }
+        if (typeof value === "string" || typeof value === "number") addSkcIdsFromText(value, out);
+        else if (value && typeof value === "object") stack.push(value);
+      }
+    }
+    return Array.from(out);
+  }
+
+  function collectVisibleSkcIds() {
+    const out = new Set();
+    try {
+      const nodes = Array.from(document.querySelectorAll("[data-row-key], tr, [role='row'], td, [class*='skc'], [class*='sku']"));
+      for (const node of nodes.slice(0, 1800)) {
+        addSkcIdsFromText(node && node.textContent, out);
+        if (out.size >= 200) break;
+      }
+      if (out.size === 0 && document.body) {
+        addSkcIdsFromText(String(document.body.innerText || "").slice(0, 300000), out);
+      }
+    } catch {}
+    return Array.from(out);
+  }
+
+  function shouldActivityLibraryCollectFromUrl(url) {
+    const text = String(url || "");
+    if (!text || /\/api\/kiana\/gamblers\/marketing\/enroll\/list/i.test(text)) return false;
+    return /sale-manage|sales\/management|fully-mgt|goods\/list|product\/skc\/|pageQuery|skuQuantity/i.test(text);
+  }
+
+  function scheduleActivityLibraryCollect(seedIds) {
+    if (!isTemuSellerHost()) return;
+    const ids = Array.isArray(seedIds) ? seedIds : [];
+    for (const id of ids) {
+      const normalized = normalizeSkcId(id);
+      if (normalized) activeActivitySeedIds.add(normalized);
+    }
+    if (activeActivityTimer) clearTimeout(activeActivityTimer);
+    activeActivityTimer = setTimeout(() => {
+      activeActivityTimer = 0;
+      runActivityLibraryCollect().catch(() => {});
+    }, 900);
+  }
+
+  async function runActivityLibraryCollect() {
+    if (!isTemuSellerHost() || !OrigFetch) return;
+    const mallId = activityMallId();
+    const ids = Array.from(new Set([...activeActivitySeedIds, ...collectVisibleSkcIds()])).filter(normalizeSkcId).sort();
+    activeActivitySeedIds = new Set();
+    if (!ids.length) return;
+    const now = Date.now();
+    for (const [key, seenAt] of Array.from(activeActivitySeen.entries())) {
+      if (!seenAt || now - Number(seenAt) > ACTIVE_ACTIVITY_TTL_MS) activeActivitySeen.delete(key);
+    }
+    const url = `${location.origin}${ACTIVE_ACTIVITY_ENDPOINT}`;
+    for (let start = 0; start < ids.length; start += ACTIVE_ACTIVITY_BATCH_SIZE) {
+      const batch = ids.slice(start, start + ACTIVE_ACTIVITY_BATCH_SIZE);
+      const seenKey = `${mallId || ""}|${batch.join(",")}`;
+      const seenAt = Number(activeActivitySeen.get(seenKey) || 0);
+      if (seenAt && now - seenAt < ACTIVE_ACTIVITY_TTL_MS) continue;
+      activeActivitySeen.set(seenKey, now);
+      const requestBody = JSON.stringify({
+        pageNo: 1,
+        pageSize: 50,
+        productSkcIds: batch,
+        sessionStatusTag: 4,
+      });
+      const headers = { "Content-Type": "application/json" };
+      if (mallId) headers.mallid = mallId;
+      try {
+        const init = {
+          method: "POST",
+          credentials: "include",
+          cache: "no-store",
+          headers,
+          body: requestBody,
+        };
+        init[BYPASS_SYM] = true;
+        const resp = await OrigFetch.call(window, url, init);
+        const text = await resp.clone().text();
+        emit({
+          kind: "fetch-active-activity-library",
+          url,
+          method: "POST",
+          status: resp.status,
+          ts: Date.now(),
+          site: inferMallSite(),
+          page: location.pathname,
+          mall_id: mallId || null,
+          body: safeJson(text),
+          bodyText: text.length > 200000 ? null : text,
+          requestBodyText: requestBody,
+          bodySize: text.length,
+          activeSource: "marketing_enroll_list",
+          activeSkcCount: batch.length,
+        });
+        stats.activeActivityFetchTotal = (stats.activeActivityFetchTotal || 0) + 1;
+      } catch {
+        activeActivitySeen.delete(seenKey);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+
+  setTimeout(() => scheduleActivityLibraryCollect([]), 2500);
+  setTimeout(() => scheduleActivityLibraryCollect([]), 8000);
+  try {
+    const mo = new MutationObserver(() => scheduleActivityLibraryCollect([]));
+    mo.observe(document.documentElement || document.body, { childList: true, subtree: true });
+  } catch {}
 
   // -------------------- PerformanceObserver --------------------
   const performanceSeen = new Set();
@@ -1008,7 +1196,7 @@
   } catch {}
 
   window.__temuMonitor = {
-    version: "0.3.0",
+    version: "0.3.1",
     site: inferMallSite(),
     healthy: () => window.XMLHttpRequest === TrackedXHR && window.fetch === TrackedFetch,
     stats,
