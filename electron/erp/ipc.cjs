@@ -17612,8 +17612,8 @@ function build1688DetailFromWorkerSkus(workerResult, offerId, payload = {}) {
           };
         }).filter((item) => item.name || item.value)
         : [],
-      price: null,
-      stock: null,
+      price: Number.isFinite(sku.price) ? sku.price : null,
+      stock: Number.isFinite(sku.stock) ? sku.stock : null,
       raw: sku,
     };
   });

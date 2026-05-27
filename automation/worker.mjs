@@ -7916,17 +7916,39 @@ async function handleRequest(body) {
               .sort((left, right) => right.normalizedName.length - left.normalizedName.length)[0];
             return partial?.image || "";
           };
+          // 从 1688 SSR HTML 的 skuInfoMap 抠每个 SKU 的真实成交价 + 可订库存。
+          // 结构：`"specId":"<id>","specAttrs":"...","price":"X","saleCount":N,"discountPrice":"Y","canBookCount":M,"skuId":...`
+          // 以 specId 为 anchor 向右切 ~350 字符，单条 skuInfoMap 项约 200 字符，不会窜到下一个 SKU。
+          const extractSkuPriceStock = (specId) => {
+            const anchor = `"specId":"${specId}"`;
+            const pos = text.indexOf(anchor);
+            if (pos < 0) return { price: null, stock: null };
+            const slice = text.slice(pos, pos + 400);
+            const discountMatch = slice.match(/"discountPrice"\s*:\s*"?([\d.]+)"?/);
+            const priceMatch = slice.match(/"price"\s*:\s*"?([\d.]+)"?/);
+            const stockMatch = slice.match(/"canBookCount"\s*:\s*(\d+)/);
+            const rawPrice = discountMatch?.[1] || priceMatch?.[1] || null;
+            const priceNum = rawPrice != null ? Number(rawPrice) : null;
+            const stockNum = stockMatch ? Number(stockMatch[1]) : null;
+            return {
+              price: Number.isFinite(priceNum) ? priceNum : null,
+              stock: Number.isFinite(stockNum) ? stockNum : null,
+            };
+          };
           const rememberSku = (specId, specAttrs, skuId, index) => {
             if (!specId || !skuId) return;
             const key = `${skuId}:${specId}`;
             if (seen.has(key)) return;
             seen.add(key);
             const nearby = Number.isFinite(index) ? text.slice(Math.max(0, index - 900), index + 1400) : "";
+            const { price, stock } = extractSkuPriceStock(specId);
             skus.push({
               specId,
               specAttrs,
               skuId,
               imageUrl: pickSkuPropImage(specAttrs) || pickImageFromText(nearby),
+              price,
+              stock,
             });
           };
           const reTriplet = /"specId"\s*:\s*"?([^",}]+)"?[^{}]*?"specAttrs"\s*:\s*"([^"]*)"[^{}]*?"skuId"\s*:\s*"?(\d+)"?/g;
