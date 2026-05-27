@@ -2,12 +2,10 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Button,
-  Col,
   Form,
   Input,
   InputNumber,
   Modal,
-  Row,
   Segmented,
   Select,
   Space,
@@ -1015,52 +1013,67 @@ export default function QcOutboundCenter() {
     <div className="app-workspace-shell">
       <PageHeader
         compact
+        className="qc-outbound-page-header"
         eyebrow="系统"
         title="出库中心"
         subtitle="浏览器扩展抓取 Temu 备货单、发货台、发货单并上传云端，桌面端按聚水潭式表单承接出库"
         meta={[
-          `更新 ${formatDateTime(outboundData.generatedAt)}`,
           `云端同步 ${formatQty(cloudTotalCount)}`,
           `本地出库 ${summary.outboundShipmentCount || 0}`,
         ]}
         actions={[
-          <Button key="refresh" icon={<ReloadOutlined />} loading={loading} onClick={() => void loadData({ notify: true, forceAllCloud: true })}>
-            刷新云端全量
-          </Button>,
+          <div key="refresh" className="qc-outbound-header-actions">
+            <div className="qc-outbound-refresh-meta">
+              <span>数据更新</span>
+              <strong>{formatDateTime(outboundData.generatedAt)}</strong>
+            </div>
+            <Button
+              type="primary"
+              ghost
+              icon={<ReloadOutlined />}
+              loading={loading}
+              onClick={() => void loadData({ notify: true, forceAllCloud: true })}
+            >
+              刷新云端全量
+            </Button>
+          </div>,
         ]}
       />
 
       {!cloudConfigured || cloudError ? (
         <Alert
-          style={{ marginBottom: 12 }}
+          className="qc-outbound-sync-alert"
           type={cloudConfigured ? "warning" : "info"}
           showIcon
           message={cloudError || "还没有配置云端连接"}
         />
       ) : cloudLoadedAt ? (
         <Alert
-          style={{ marginBottom: 12 }}
+          className="qc-outbound-sync-alert"
           type="success"
           showIcon
-          message={`云端送仓托管已同步 ${formatQty(cloudTotalCount)} 条`}
-          description={`最后同步：${formatDateTime(cloudLoadedAt)}。明细在下方第一个页签「Temu送仓托管」中展示。`}
+          message={(
+            <div className="qc-outbound-sync-message">
+              <Text className="qc-outbound-sync-primary">
+                云端送仓托管已同步 <Text strong>{formatQty(cloudTotalCount)}</Text> 条
+              </Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                最后同步 {formatDateTime(cloudLoadedAt)}
+              </Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                明细在「Temu送仓托管」展示
+              </Text>
+            </div>
+          )}
         />
       ) : null}
 
-      <Row gutter={[12, 12]} className="material-kpi-row" style={{ marginBottom: 12 }}>
-        <Col xs={24} sm={12} lg={6}>
-          <StatCard title="送仓托管单" value={formatQty(cloudTotalCount)} color="blue" icon={<CloudSyncOutlined />} compact />
-        </Col>
-        <Col xs={24} sm={12} lg={6}>
-          <StatCard title="云端需求" value={formatQty(cloudDemandQty)} suffix="件" color="brand" icon={<ShoppingCartOutlined />} compact />
-        </Col>
-        <Col xs={24} sm={12} lg={6}>
-          <StatCard title="云端送货" value={formatQty(cloudShippingQty)} suffix="件" color="success" icon={<ExportOutlined />} compact />
-        </Col>
-        <Col xs={24} sm={12} lg={6}>
-          <StatCard title="待仓库/运营" value={(summary.pendingWarehouseCount || 0) + (summary.pendingOpsConfirmCount || 0)} color="purple" icon={<FileDoneOutlined />} compact />
-        </Col>
-      </Row>
+      <div className="qc-outbound-kpi-grid">
+        <StatCard title="送仓托管单" value={formatQty(cloudTotalCount)} color="blue" icon={<CloudSyncOutlined />} compact />
+        <StatCard title="云端需求" value={formatQty(cloudDemandQty)} suffix="件" color="brand" icon={<ShoppingCartOutlined />} compact />
+        <StatCard title="云端送货" value={formatQty(cloudShippingQty)} suffix="件" color="success" icon={<ExportOutlined />} compact />
+        <StatCard title="待仓库/运营" value={(summary.pendingWarehouseCount || 0) + (summary.pendingOpsConfirmCount || 0)} color="purple" icon={<FileDoneOutlined />} compact />
+      </div>
 
       <Tabs
         activeKey={activeTab}

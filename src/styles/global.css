@@ -6725,6 +6725,93 @@ body {
 }
 
 /* Material workbench depth for high-frequency data pages */
+.qc-outbound-page-header.app-page-header {
+  align-items: stretch;
+  margin-bottom: 12px;
+}
+
+.qc-outbound-page-header .app-page-header__content {
+  flex: 1 1 560px;
+}
+
+.qc-outbound-page-header .app-page-header__actions {
+  display: flex;
+  align-items: stretch;
+}
+
+.qc-outbound-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-height: 100%;
+  flex-wrap: wrap;
+}
+
+.qc-outbound-refresh-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  min-width: 132px;
+  min-height: 34px;
+  padding: 4px 10px;
+  border: 1px solid var(--google-border-soft);
+  border-radius: 8px;
+  background: #f8fbff;
+  line-height: 1.25;
+}
+
+.qc-outbound-refresh-meta span {
+  color: var(--google-muted);
+  font-size: 11px;
+}
+
+.qc-outbound-refresh-meta strong {
+  color: var(--google-ink);
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.qc-outbound-sync-alert.ant-alert {
+  margin-bottom: 12px;
+  padding: 9px 12px;
+  border-radius: 8px;
+}
+
+.qc-outbound-sync-alert .ant-alert-message {
+  margin-bottom: 0;
+}
+
+.qc-outbound-sync-message {
+  display: flex;
+  align-items: center;
+  gap: 10px 14px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.qc-outbound-sync-message .ant-typography {
+  margin-bottom: 0;
+}
+
+.qc-outbound-sync-primary {
+  color: var(--google-ink);
+}
+
+.qc-outbound-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.qc-outbound-kpi-grid .app-stat-card {
+  height: 100%;
+  min-width: 0;
+}
+
 .material-kpi-row .ant-col {
   min-width: 0;
 }
@@ -7001,6 +7088,10 @@ body {
 }
 
 @media (max-width: 1200px) {
+  .qc-outbound-kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .material-kpi-row .ant-col {
     flex: 0 0 50%;
     max-width: 50%;
@@ -7008,6 +7099,20 @@ body {
 }
 
 @media (max-width: 768px) {
+  .qc-outbound-page-header .app-page-header__actions,
+  .qc-outbound-header-actions {
+    width: 100%;
+  }
+
+  .qc-outbound-refresh-meta {
+    align-items: flex-start;
+    flex: 1 1 180px;
+  }
+
+  .qc-outbound-kpi-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .material-kpi-row .ant-col {
     flex: 0 0 100%;
     max-width: 100%;
