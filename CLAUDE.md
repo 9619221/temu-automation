@@ -48,7 +48,7 @@
 
 为防止再次累积分叉，定下面规则。
 
-## 发版前必做
+## 发版必做
 
 1. 主仓 worktree（`C:\Users\Administrator\Desktop\temu-automation`）切到 `master`
 2. `git fetch origin && git reset --hard origin/master`（让本地 master 跟远端完全同步）
@@ -56,6 +56,7 @@
 4. 跑 `npm run dist:win` 打 NSIS 安装包
 5. 跑 `npm run publish:update:erp` 推自建服务器（推 GitHub Releases 用 `publish:update:github`）
 6. 验证 `https://erp.temu.chat/releases/latest.yml` 显示新版本号
+7. **同步服务器代码到 master**（见下「服务器代码同步」节）—— 桌面端用户更新到新版后，前端会调用新 action / 用到新字段，**主控端必须同时跟上**，否则用户会撞 `Unsupported purchase action: xxx` 或 `no such column: xxx` 一类错。这一步**不可省略**。
 
 ## 版本号 bump 在哪做
 
@@ -71,11 +72,38 @@
 
 ## 服务器代码同步
 
-erp.temu.chat 服务器 `/opt/temu-automation/` 是裸文件部署，跟 git 历史分叉。规则：
+erp.temu.chat 服务器 `/opt/temu-automation/` 是裸文件部署，跟 git 历史分叉。每次桌面端发版（步骤 6 完成）后**立即同步**，规则：
+
+### 同步范围
+
+服务器 ERP 服务（`temu-erp.service`，`npm run erp:server` 拉起）只用以下运行时文件，桌面端 UI 文件不用同步：
+
+- `electron/erp/ipc.cjs`（主控端入口，最大头）
+- `electron/erp/workflow/*.cjs`（transitions / validators / enums）
+- `electron/erp/services/*.cjs`（purchase / inventory / outbound / jushuitan 等）
+- `electron/erp/*.cjs` 其他被 ipc.cjs `require` 的（1688Client / lanServer / mappingCache / jushuitanClient 等）
+- `electron/db/migrate.cjs`（迁移引擎本身）
+- `electron/db/migrations/*.sql`（新增的 migration 文件）
+- `scripts/erp-server.cjs`
+
+`src/`、`automation/worker.mjs`、`electron/main.cjs` 等是桌面端 Electron 进程独享的，**不要**同步到服务器。
+
+### 同步步骤（每次发版后跑一次）
+
+1. **检查磁盘空间**：`ssh temu-erp "df -h /opt"` —— 至少留 3.5 GB，否则 migrate.cjs 启动时 backup sqlite 到 `/opt/backups/` 会撞 ENOSPC，服务进 restart loop（坑过一次）。不够就先 `sudo rm /opt/backups/erp-<旧日期>.sqlite` 释放
+2. **本地 LF normalize**：服务器是 Linux，但本地很多 cjs 是 CRLF。先 `node -e "fs.writeFileSync(out, fs.readFileSync(src).toString().replace(/\r\n/g,'\n'))"` 转 LF 再传
+3. **服务器侧备份现役文件**：`cp -av /opt/temu-automation/electron/erp/ipc.cjs ipc.cjs.bak-pre-<feature>-<时间戳>`，多个文件每个都备份
+4. **sqlite 快照**：`cd /opt/temu-automation && node -e "require('better-sqlite3')('/opt/temu-erp-data/erp.sqlite').backup('/opt/temu-erp-data/erp.sqlite.PRE-<feature>-<时间戳>').then(()=>console.log('OK'))"`
+5. **scp 上传 + mv 覆盖 + chown ubuntu:ubuntu**：先扔到 `/tmp/`，`node -c` 语法校验后再 mv 到位
+6. **scp 新增 migration**：先 `ls /opt/temu-automation/electron/db/migrations/` 跟本地对，**只传缺的**；服务器已跑过的同语义 migration 可能是旧编号（如服务器 `027_jushuitan_sync` ↔ master `030_jushuitan_sync`），不要瞎覆盖
+7. **重启服务**：`sudo systemctl restart temu-erp.service`，`sleep 8`，`systemctl is-active` + `journalctl -u temu-erp.service --since '1 minute ago' --no-pager` 看 `[ERP Server] migrations: ...:success` 全跑过 + `[ERP Server] listening:` 出来
+8. **快速验证**：`curl -sk -o /dev/null -w '%{http_code}\n' https://erp.temu.chat/` 应该 302；`grep -c <新action名> /opt/temu-automation/electron/erp/ipc.cjs` 确认 marker 在
+
+### 死规则
 
 - **绝不 `git pull` 服务器代码**（会冲突损坏救火 patch）
-- 同步代码用外科补丁：`scp` 替换具体文件 → `node -c` 语法校验 → `systemctl restart temu-erp.service`
-- 同步前必须 sqlite snapshot 保命：`node -e "require('better-sqlite3')(...).backup('...PRE-XXX-时间戳')"`
+- **所有 `ALTER TABLE ... ADD COLUMN` migration 必须带 `-- @idempotent`**（[db_migration_conventions](#) 已写）。服务器历史有人手加过列但 migration_log 不知道，没 @idempotent 会撞 `duplicate column name` 让 migrate.cjs 整体抛错、服务起不来
+- **migrate.cjs 本身的版本要先于 SQL 文件同步**：服务器旧版 migrate.cjs 不认 `@idempotent` 注释（坑过一次）。新加 idempotent SQL 之前，先确保 `grep -c idempotent /opt/temu-automation/electron/db/migrate.cjs` ≥ 1
 - 服务器侧也要保持跟 master 同步的目标，逐渐让服务器代码 == master HEAD（长期改造，单独立项）
 
 ## 应急回滚
