@@ -9,6 +9,7 @@ import {
   DatePicker,
   Drawer,
   Form,
+  Image as AntdImage,
   Input,
   InputNumber,
   Modal,
@@ -80,6 +81,7 @@ const MAX_REQUEST_IMAGES = 6;
 const UPLOAD_IMAGE_TARGET_BYTES = 260 * 1024;
 
 const SHOW_KEYWORD_1688_SOURCE = false;
+const PURCHASE_ORDER_CREATE_ROLES = ["operations", "buyer", "manager", "admin"];
 const AUTO_1688_ORDER_SYNC_INTERVAL_MS = 10 * 60 * 1000;
 const PAYMENT_URL_CACHE_MAX_AGE_MS = 30 * 60 * 1000;
 const IMAGE_SEARCH_PAGE_SIZE = 10;
@@ -171,6 +173,7 @@ interface ExternalSkuOptionRow {
   externalSkuId?: string | null;
   externalSpecId?: string | null;
   specText?: string | null;
+  imageUrl?: string | null;
   price?: number | null;
   stock?: number | null;
 }
@@ -1622,6 +1625,32 @@ function candidateSpecRows(candidate?: SourcingCandidateRow | null): BindingSpec
     }));
 }
 
+function specRowSearchText(row: ExternalSkuOptionRow) {
+  return [
+    row.specText,
+    row.externalSkuId,
+    row.externalSpecId,
+  ].map((value) => String(value ?? "")).join(" ");
+}
+
+function specRowImageUrl(row?: ExternalSkuOptionRow | null, candidate?: SourcingCandidateRow | null) {
+  const raw = row && (row as any).raw && typeof (row as any).raw === "object" ? (row as any).raw : {};
+  return imageValue([
+    row?.imageUrl,
+    raw.imageUrl,
+    raw.imgUrl,
+    raw.picUrl,
+    raw.pictureUrl,
+    raw.thumbUrl,
+    raw.skuImageUrl,
+    raw.skuImage,
+    raw.image,
+    raw.images,
+    raw.imageUrls,
+    candidate ? candidateImage(candidate) : "",
+  ]);
+}
+
 type PurchaseQueueKey =
   | "all"
   | "request_pending_sourcing"
@@ -2297,6 +2326,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   const role = auth.currentUser?.role || "";
   const canCreateRequest = canRole(role, ["operations", "manager", "admin"]);
   const canPurchase = canRole(role, ["buyer", "manager", "admin"]);
+  const canCreatePurchaseOrder = canRole(role, PURCHASE_ORDER_CREATE_ROLES);
   const canFinance = canRole(role, ["finance", "manager", "admin"]);
   const canWarehouse = canRole(role, ["warehouse", "manager", "admin"]);
   const initialWorkbench = getInitialPurchaseWorkbenchCache();
@@ -2524,6 +2554,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   const [purchaseFlowOpen, setPurchaseFlowOpen] = useState(false);
   const [specBindingDialog, setSpecBindingDialog] = useState<SpecBindingDialogState | null>(null);
   const [selectedBindingSpecId, setSelectedBindingSpecId] = useState<string | null>(null);
+  const [specBindingSearchText, setSpecBindingSearchText] = useState("");
   const [bindingOurQty, setBindingOurQty] = useState(1);
   const [bindingPlatformQty, setBindingPlatformQty] = useState(1);
 
@@ -2718,11 +2749,35 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     () => candidateSpecRows(specBindingCandidate),
     [specBindingCandidate],
   );
+  const filteredSpecBindingRows = useMemo(() => {
+    const needle = normalizePurchaseSearch(specBindingSearchText);
+    if (!needle) return specBindingRows;
+    return specBindingRows.filter((row) => normalizePurchaseSearch(specRowSearchText(row)).includes(needle));
+  }, [specBindingRows, specBindingSearchText]);
   const selectedBindingSpec = useMemo(
     () => specBindingRows.find((row) => row.externalSpecId === selectedBindingSpecId) || null,
     [selectedBindingSpecId, specBindingRows],
   );
   const specBindingColumns = useMemo<ColumnsType<BindingSpecRow>>(() => [
+    {
+      title: "图片",
+      dataIndex: "imageUrl",
+      width: 72,
+      render: (_value: string | null | undefined, row) => {
+        const imageUrl = specRowImageUrl(row, specBindingCandidate);
+        return imageUrl ? (
+          <div onClick={(event) => event.stopPropagation()}>
+            <AntdImage
+              src={imageUrl}
+              width={44}
+              height={44}
+              style={{ objectFit: "cover", borderRadius: 6, display: "block" }}
+              preview={{ mask: false }}
+            />
+          </div>
+        ) : <Text type="secondary">无图</Text>;
+      },
+    },
     {
       title: "规格",
       dataIndex: "specText",
@@ -2751,7 +2806,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       width: 100,
       render: (value: number | null | undefined) => value === null || value === undefined ? "-" : formatQty(value),
     },
-  ], []);
+  ], [specBindingCandidate]);
   const purchaseRequests = data.purchaseRequests || [];
   const purchaseOrders = data.purchaseOrders || [];
   const pendingRequestRows = useMemo(
@@ -5332,6 +5387,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     const rows = candidateSpecRows(candidate);
     setSpecBindingDialog({ candidate, prId: prId || candidate.prId || detailPr?.id || null });
     setSelectedBindingSpecId(candidate.externalSpecId || rows[0]?.externalSpecId || null);
+    setSpecBindingSearchText("");
     setBindingOurQty(1);
     setBindingPlatformQty(1);
   };
@@ -5439,7 +5495,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       }
       if (!hasMapping || generatedPo?.status !== "draft" || has1688OrderTrace(generatedPo)) return;
     }
-    if (!hasMapping) return;
+    if (!hasMapping || !canPurchase) return;
     if (!generatedPo?.id) {
       if (!silent) message.warning("采购单已生成，但没有拿到可推送的采购单号，请刷新后手动推单");
       return;
@@ -5708,7 +5764,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         const canFindSupplier = canQuote;
         const canImageSearch = canQuote;
         // 即使还没绑定货源也允许生成采购单，后端会走线下采购单占位路径。
-        const canGeneratePo = canPurchase
+        const canGeneratePo = canCreatePurchaseOrder
           && !existingPo
           && ["submitted", "buyer_processing", "sourced", "waiting_ops_confirm"].includes(row.status);
         const canDelete = canCreateRequest && ["submitted", "buyer_processing", "sourced"].includes(row.status);
@@ -5791,7 +5847,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         );
       },
     },
-  ], [actingKey, canCreateRequest, canPurchase, detailPrId, focusPurchaseOrder, purchaseOrders, source1688PrId]);
+  ], [actingKey, canCreatePurchaseOrder, canCreateRequest, canPurchase, detailPrId, focusPurchaseOrder, purchaseOrders, source1688PrId]);
 
   const renderPurchaseOrderErpDetail = useCallback((row: PurchaseOrderRow) => {
     const risks = purchaseOrderRiskTags(row, hasUsable1688Address);
@@ -6617,7 +6673,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         询盘设置
       </Button>
     ) : null,
-    activeWorkArea === "orders" && canPurchase ? (
+    activeWorkArea === "orders" && canCreatePurchaseOrder ? (
       <Button
         key="new-po"
         type="primary"
@@ -7996,20 +8052,31 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         title="选择并绑定 1688 规格"
         okText="绑定规格"
         cancelText="取消"
-        width={860}
+        width={980}
         confirmLoading={specBindingCandidate ? actingKey === `1688-bind-spec-${specBindingCandidate.id}` : false}
         okButtonProps={{ disabled: !selectedBindingSpec }}
-        onCancel={() => setSpecBindingDialog(null)}
+        onCancel={() => {
+          setSpecBindingDialog(null);
+          setSpecBindingSearchText("");
+        }}
         onOk={() => void confirmBindCandidate1688Spec()}
         destroyOnClose
       >
         <Space direction="vertical" size={14} style={{ width: "100%" }}>
+          <Input
+            allowClear
+            prefix={<SearchOutlined />}
+            placeholder="搜索规格 / SKU ID / Spec ID"
+            value={specBindingSearchText}
+            onChange={(event) => setSpecBindingSearchText(event.target.value)}
+          />
           <Table<BindingSpecRow>
             size="small"
             rowKey="externalSpecId"
             columns={specBindingColumns}
-            dataSource={specBindingRows}
+            dataSource={filteredSpecBindingRows}
             pagination={{ pageSize: 8, hideOnSinglePage: true }}
+            locale={{ emptyText: specBindingSearchText.trim() ? "没有匹配的 1688 规格" : "暂无可绑定规格" }}
             rowSelection={{
               type: "radio",
               selectedRowKeys: selectedBindingSpecId ? [selectedBindingSpecId] : [],

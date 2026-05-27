@@ -8375,6 +8375,7 @@ function addFallback1688SkuOption(options, item = {}) {
     externalSkuId: externalSkuId || externalSpecId,
     externalSpecId,
     specText: optionalString(item.specText || item.spec_text || item.specAttrs || item.spec_attrs) || externalSpecId,
+    imageUrl: optionalString(item.imageUrl || item.image_url || item.imgUrl || item.img_url || item.picUrl || item.pictureUrl || item.thumbUrl || item.skuImageUrl || item.skuImage),
     price: optionalNumber(item.price),
     stock: optionalNumber(item.stock),
     raw: item.raw || item,
@@ -17231,6 +17232,7 @@ function alphaShopDetailTo1688MockDetail(detail = {}, rawResponse = {}) {
     price: optionalNumber(sku.price),
     stock: optionalNumber(sku.stock),
     amountOnSale: optionalNumber(sku.stock),
+    imageUrl: optionalString(sku.imageUrl || sku.imgUrl || sku.picUrl || sku.pictureUrl || sku.thumbUrl || sku.skuImageUrl || sku.skuImage),
     raw: sku.raw || sku,
   }));
   const priceRanges = Array.isArray(detail.priceRanges) ? detail.priceRanges : [];
@@ -17343,6 +17345,7 @@ function build1688DetailFromWorkerSkus(workerResult, offerId, payload = {}) {
       externalSkuId: optionalString(sku.skuId),
       externalSpecId: optionalString(sku.specId),
       specText: specText || optionalString(sku.specId),
+      imageUrl: optionalString(sku.imageUrl) || optionalString(workerResult.imageUrl) || optionalString(payload.imageUrl),
       attributes: specText
         ? specText.split(/[;；]/).map((part) => {
           const [name, ...rest] = String(part || "").split(":");

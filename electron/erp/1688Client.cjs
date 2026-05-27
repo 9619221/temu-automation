@@ -549,6 +549,35 @@ function firstNumber(...values) {
   return null;
 }
 
+function firstImage(...values) {
+  for (const value of values) {
+    const parsed = parseMaybeJson(value);
+    if (typeof parsed === "string" && parsed.trim()) return parsed.trim();
+    if (Array.isArray(parsed)) {
+      const nested = firstImage(...parsed);
+      if (nested) return nested;
+    }
+    if (parsed && typeof parsed === "object") {
+      const nested = firstImage(
+        parsed.imageUrl,
+        parsed.imgUrl,
+        parsed.picUrl,
+        parsed.pictureUrl,
+        parsed.thumbUrl,
+        parsed.skuImageUrl,
+        parsed.skuImage,
+        parsed.url,
+        parsed.src,
+        parsed.image,
+        parsed.images,
+        parsed.imageUrls,
+      );
+      if (nested) return nested;
+    }
+  }
+  return null;
+}
+
 function firstBoolean(...values) {
   for (const value of values) {
     if (value === null || value === undefined || value === "") continue;
@@ -836,6 +865,21 @@ function normalize1688SkuOptions(product = {}) {
       externalSpecId: specId ? String(specId) : (skuId ? String(skuId) : null),
       specText: attributes.map((item) => `${item.name}:${item.value}`).join("; "),
       attributes,
+      imageUrl: firstImage(
+        sku.imageUrl,
+        sku.originImageUrl,
+        sku.mainImage,
+        sku.imgUrl,
+        sku.picUrl,
+        sku.pictureUrl,
+        sku.thumbUrl,
+        sku.skuImageUrl,
+        sku.skuImage,
+        sku.image,
+        sku.images,
+        sku.imageList,
+        sku.imageUrls,
+      ),
       price,
       stock: firstNumber(sku.amountOnSale, sku.canBookCount, sku.stock, sku.inventory),
       raw: sku,

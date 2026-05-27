@@ -154,6 +154,7 @@ interface MappingSpecRow {
   externalSkuId?: string | null;
   externalSpecId: string;
   specText?: string | null;
+  imageUrl?: string | null;
   price?: number | null;
   stock?: number | null;
 }
@@ -209,6 +210,41 @@ function build1688Link(row: Sku1688SourceRow | MappingFormValues) {
   if (row.productUrl) return row.productUrl;
   if (row.externalOfferId) return `https://detail.1688.com/offer/${row.externalOfferId}.html`;
   return "";
+}
+
+function normalizeImageUrl(value: unknown): string {
+  const text = String(value || "").trim();
+  if (!text || text === "[object Object]") return "";
+  return text.startsWith("//") ? `https:${text}` : text;
+}
+
+function imageValue(value: unknown): string {
+  if (!value) return "";
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const url = imageValue(item);
+      if (url) return url;
+    }
+    return "";
+  }
+  if (typeof value === "object") {
+    const item = value as Record<string, any>;
+    return imageValue(
+      item.imageUrl
+      || item.imgUrl
+      || item.picUrl
+      || item.pictureUrl
+      || item.thumbUrl
+      || item.skuImageUrl
+      || item.skuImage
+      || item.url
+      || item.src
+      || item.image
+      || item.images
+      || item.imageUrls,
+    );
+  }
+  return normalizeImageUrl(value);
 }
 
 function isSkuPlaceholderRow(row: Sku1688SourceRow) {
@@ -283,10 +319,19 @@ function productDetailSpecRows(detail?: UrlSpecDialogState["detail"] | null): Ma
         externalSkuId: item.externalSkuId || externalSpecId,
         externalSpecId,
         specText: item.specText || externalSpecId,
+        imageUrl: imageValue([(item as any).imageUrl, (item as any).raw]),
         price: item.price ?? null,
         stock: item.stock ?? null,
       };
     });
+}
+
+function specRowSearchText(row: MappingSpecRow) {
+  return [
+    row.specText,
+    row.externalSkuId,
+    row.externalSpecId,
+  ].map((value) => String(value ?? "")).join(" ");
 }
 
 function toPositiveInteger(value: unknown, fallback = 1) {
@@ -394,6 +439,7 @@ export default function AlibabaMapping() {
   const [specPreviewLoading, setSpecPreviewLoading] = useState(false);
   const [urlSpecDialog, setUrlSpecDialog] = useState<UrlSpecDialogState | null>(null);
   const [selectedUrlSpecIds, setSelectedUrlSpecIds] = useState<string[]>([]);
+  const [urlSpecSearchText, setUrlSpecSearchText] = useState("");
   const [pendingUrlSpecs, setPendingUrlSpecs] = useState<PendingMappingSpecRow[]>([]);
   const [urlSpecOurQty, setUrlSpecOurQty] = useState(1);
   const [urlSpecQtyBySpecId, setUrlSpecQtyBySpecId] = useState<Record<string, number>>({});
@@ -601,7 +647,33 @@ export default function AlibabaMapping() {
     return urlSpecDialog.rows.filter((row) => selectedIds.has(row.externalSpecId));
   }, [selectedUrlSpecIds, urlSpecDialog]);
 
+  const filteredUrlSpecRows = useMemo(() => {
+    const rows = urlSpecDialog?.rows || [];
+    const needle = urlSpecSearchText.trim().toLowerCase();
+    if (!needle) return rows;
+    return rows.filter((row) => specRowSearchText(row).toLowerCase().includes(needle));
+  }, [urlSpecDialog, urlSpecSearchText]);
+
   const urlSpecColumns = useMemo<ColumnsType<MappingSpecRow>>(() => [
+    {
+      title: "图片",
+      dataIndex: "imageUrl",
+      width: 72,
+      render: (_value: string | null | undefined, row) => {
+        const imageUrl = imageValue([row.imageUrl, (row as any).raw, urlSpecDialog?.detail.imageUrl]);
+        return imageUrl ? (
+          <div onClick={(event) => event.stopPropagation()}>
+            <Image
+              src={imageUrl}
+              width={44}
+              height={44}
+              style={{ objectFit: "cover", borderRadius: 6, display: "block" }}
+              preview={{ mask: false }}
+            />
+          </div>
+        ) : <Text type="secondary">无图</Text>;
+      },
+    },
     {
       title: "规格",
       dataIndex: "specText",
@@ -630,12 +702,13 @@ export default function AlibabaMapping() {
       width: 100,
       render: (value: number | null | undefined) => value === null || value === undefined ? "-" : Number(value).toLocaleString("zh-CN"),
     },
-  ], []);
+  ], [urlSpecDialog?.detail.imageUrl]);
 
   const openCreateForSku = useCallback((row: Sku1688SourceRow) => {
     setEditingRow(null);
     setPendingUrlSpecs([]);
     setSelectedUrlSpecIds([]);
+    setUrlSpecSearchText("");
     setUrlSpecQtyBySpecId({});
     form.resetFields();
     form.setFieldsValue({
@@ -654,6 +727,7 @@ export default function AlibabaMapping() {
     setEditingRow(row);
     setPendingUrlSpecs([]);
     setSelectedUrlSpecIds(row.externalSpecId ? [row.externalSpecId] : []);
+    setUrlSpecSearchText("");
     setUrlSpecQtyBySpecId(row.externalSpecId ? { [row.externalSpecId]: toPositiveInteger(row.platformQty, 1) } : {});
     form.resetFields();
     form.setFieldsValue({
@@ -682,6 +756,7 @@ export default function AlibabaMapping() {
     if (!Object.prototype.hasOwnProperty.call(changedValues, "productUrl")) return;
     setPendingUrlSpecs([]);
     setSelectedUrlSpecIds([]);
+    setUrlSpecSearchText("");
     setUrlSpecQtyBySpecId({});
     const externalOfferId = extract1688OfferId(changedValues.productUrl);
     if (!externalOfferId) return;
@@ -752,6 +827,7 @@ export default function AlibabaMapping() {
         detail,
         rows,
       });
+      setUrlSpecSearchText("");
       const initialSpecIds = values.externalSpecId ? [values.externalSpecId] : (rows[0]?.externalSpecId ? [rows[0].externalSpecId] : []);
       const initialPlatformQty = toPositiveInteger(values.platformQty, 1);
       setSelectedUrlSpecIds(initialSpecIds);
@@ -805,6 +881,7 @@ export default function AlibabaMapping() {
     });
     setPendingUrlSpecs(selectedRowsWithQty);
     setUrlSpecDialog(null);
+    setUrlSpecSearchText("");
     message.success(selectedRows.length > 1 ? `已选择 ${selectedRows.length} 个 1688 规格，保存后会一起绑定` : "1688 规格和映射比例已选择，保存后完成供应商绑定");
   }, [form, selectedUrlSpecIds, urlSpecDialog, urlSpecOurQty, urlSpecQtyBySpecId]);
 
@@ -1480,20 +1557,31 @@ export default function AlibabaMapping() {
         title="选择 1688 规格和映射比例"
         okText="确认选择"
         cancelText="取消"
-        width={860}
+        width={980}
         centered
         okButtonProps={{ disabled: selectedUrlSpecIds.length === 0 }}
-        onCancel={() => setUrlSpecDialog(null)}
+        onCancel={() => {
+          setUrlSpecDialog(null);
+          setUrlSpecSearchText("");
+        }}
         onOk={applySelectedUrlSpec}
         destroyOnClose
       >
         <Space direction="vertical" size={14} style={{ width: "100%" }}>
+          <Input
+            allowClear
+            prefix={<SearchOutlined />}
+            placeholder="搜索规格 / SKU ID / Spec ID"
+            value={urlSpecSearchText}
+            onChange={(event) => setUrlSpecSearchText(event.target.value)}
+          />
           <Table<MappingSpecRow>
             size="small"
             rowKey="externalSpecId"
             columns={urlSpecColumns}
-            dataSource={urlSpecDialog?.rows || []}
+            dataSource={filteredUrlSpecRows}
             pagination={{ pageSize: 8, hideOnSinglePage: true }}
+            locale={{ emptyText: urlSpecSearchText.trim() ? "没有匹配的 1688 规格" : "暂无可绑定规格" }}
             rowSelection={{
               type: "checkbox",
               selectedRowKeys: selectedUrlSpecIds,

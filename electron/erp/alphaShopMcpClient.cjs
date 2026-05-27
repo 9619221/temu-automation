@@ -173,7 +173,17 @@ function firstImage(...values) {
       if (nested) return nested;
     }
     if (parsed && typeof parsed === "object") {
-      const nested = firstImage(parsed.imageUrl, parsed.url, parsed.imgUrl, parsed.picUrl);
+      const nested = firstImage(
+        parsed.imageUrl,
+        parsed.url,
+        parsed.imgUrl,
+        parsed.picUrl,
+        parsed.pictureUrl,
+        parsed.thumbUrl,
+        parsed.image,
+        parsed.images,
+        parsed.imageUrls,
+      );
       if (nested) return nested;
     }
   }
@@ -468,6 +478,21 @@ function normalizeAlphaShopSkuOptions(product = {}) {
       externalSpecId: specId,
       specText,
       attributes,
+      imageUrl: firstImage(
+        sku.imageUrl,
+        sku.originImageUrl,
+        sku.mainImage,
+        sku.imgUrl,
+        sku.picUrl,
+        sku.pictureUrl,
+        sku.thumbUrl,
+        sku.skuImageUrl,
+        sku.skuImage,
+        sku.image,
+        sku.images,
+        sku.imageList,
+        sku.imageUrls,
+      ),
       price: firstNumber(
         sku.price,
         sku.salePrice,
