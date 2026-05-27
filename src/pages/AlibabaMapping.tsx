@@ -420,6 +420,8 @@ export default function AlibabaMapping() {
   const editable = canManage(currentRole);
   const supplierProfilesVisible = canViewSupplierProfiles(currentRole);
   const [form] = Form.useForm<MappingFormValues>();
+  // 订阅 supplierName,解析 1688 地址后(previewSpecsFromUrl 会 setFieldsValue)在弹框里只读展示
+  const supplierNameWatched = Form.useWatch("supplierName", form);
   const [saving, setSaving] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editingRow, setEditingRow] = useState<Sku1688SourceRow | null>(null);
@@ -1542,6 +1544,11 @@ export default function AlibabaMapping() {
               </Form.Item>
             </Col>
           </Row>
+          {supplierNameWatched ? (
+            <Form.Item label="1688 供应商旺旺名">
+              <Text strong>{supplierNameWatched}</Text>
+            </Form.Item>
+          ) : null}
           <Row gutter={12}>
             <Col span={24}>
               <Text type="secondary" style={{ display: "block", marginBottom: 8 }}>
@@ -1592,6 +1599,12 @@ export default function AlibabaMapping() {
         destroyOnClose
       >
         <Space direction="vertical" size={14} style={{ width: "100%" }}>
+          {urlSpecDialog?.detail?.supplierName ? (
+            <div style={{ padding: "8px 12px", background: "#f5f7fa", borderRadius: 4 }}>
+              <Text type="secondary">1688 供应商旺旺名: </Text>
+              <Text strong>{urlSpecDialog.detail.supplierName}</Text>
+            </div>
+          ) : null}
           <Input
             allowClear
             prefix={<SearchOutlined />}
