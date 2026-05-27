@@ -78,6 +78,7 @@ const BROADCAST_PURCHASE_ACTIONS = new Set([
   "mark_sourced",
   "cancel_pr",
   "quote_feedback",
+  "update_purchase_request_feedback",
   "add_sourcing_candidate",
   "source_1688_keyword",
   "source_1688_image",
@@ -156,6 +157,7 @@ const ACCESS_CODE_ITERATIONS = 120000;
 const ACCESS_CODE_KEY_LENGTH = 32;
 const ACCESS_CODE_DIGEST = "sha256";
 const VALID_USER_ROLES = new Set(["admin", "manager", "operations", "buyer", "finance", "warehouse", "viewer"]);
+const SUPPLIER_MAPPING_ROLES = ["admin", "manager", "operations", "buyer"];
 const VALID_USER_STATUSES = new Set(["active", "blocked"]);
 const JUSHUITAN_WAREHOUSE_NAME = "义乌明舵国际贸易有限公司";
 const DEFAULT_COMPANY_ID = "company_default";
@@ -1141,6 +1143,18 @@ function ensureRuntimeSchema(db, options = {}) {
   `);
   if (!tableHasColumn(db, "erp_purchase_requests", "spec_text")) {
     db.exec("ALTER TABLE erp_purchase_requests ADD COLUMN spec_text TEXT");
+  }
+  if (!tableHasColumn(db, "erp_purchase_requests", "buyer_unit_cost")) {
+    db.exec("ALTER TABLE erp_purchase_requests ADD COLUMN buyer_unit_cost REAL");
+  }
+  if (!tableHasColumn(db, "erp_purchase_requests", "buyer_remark")) {
+    db.exec("ALTER TABLE erp_purchase_requests ADD COLUMN buyer_remark TEXT");
+  }
+  if (!tableHasColumn(db, "erp_purchase_requests", "buyer_feedback_by")) {
+    db.exec("ALTER TABLE erp_purchase_requests ADD COLUMN buyer_feedback_by TEXT");
+  }
+  if (!tableHasColumn(db, "erp_purchase_requests", "buyer_feedback_at")) {
+    db.exec("ALTER TABLE erp_purchase_requests ADD COLUMN buyer_feedback_at TEXT");
   }
   if (!tableHasColumn(db, "erp_sourcing_candidates", "inquiry_status")) {
     db.exec("ALTER TABLE erp_sourcing_candidates ADD COLUMN inquiry_status TEXT");
@@ -2839,16 +2853,13 @@ function build1688MessageEffect(topic = "") {
   if (hasTopic("ORDER_PAY") || hasTopic("BATCH_PAY") || hasTopic("ORDER_STEP_PAY")) {
     return {
       externalOrderStatus: "paid",
-      paymentStatus: "paid",
-      poStatus: "paid",
       eventType: "1688_payment_message",
-      message: "1688 付款消息已同步",
+      message: "1688 付款消息已同步，待财务确认",
     };
   }
   if (hasTopic("ANNOUNCE_SENDGOODS") || hasTopic("PART_PART_SENDGOODS")) {
     return {
       externalOrderStatus: hasTopic("PART_PART") ? "partial_shipped" : "shipped",
-      poStatus: "shipped",
       eventType: "1688_ship_message",
       message: "1688 发货消息已同步",
     };
@@ -4645,7 +4656,7 @@ function buildCandidateFromSkuSupplier(db, pr = {}, source = {}, actor = {}) {
 }
 
 function upsertSku1688SourceRow(db, payload = {}, actor = {}) {
-  assertActorRole(actor, ["buyer", "manager", "admin"], "1688采购来源绑定");
+  assertActorRole(actor, SUPPLIER_MAPPING_ROLES, "1688采购来源绑定");
   const skuId = requireString(payload.skuId || payload.sku_id, "skuId");
   const sku = db.prepare("SELECT * FROM erp_skus WHERE id = ?").get(skuId);
   if (!sku) throw new Error(`SKU not found: ${skuId}`);
@@ -4757,7 +4768,7 @@ function upsertSku1688SourceRow(db, payload = {}, actor = {}) {
 }
 
 function deleteSku1688SourceRow(db, payload = {}, actor = {}) {
-  assertActorRole(actor, ["buyer", "manager", "admin"], "1688采购来源删除");
+  assertActorRole(actor, SUPPLIER_MAPPING_ROLES, "1688采购来源删除");
   const sourceId = requireString(payload.sourceId || payload.source_id || payload.id, "sourceId");
   const row = db.prepare("SELECT * FROM erp_sku_1688_sources WHERE id = ?").get(sourceId);
   if (!row) throw new Error(`1688 supplier mapping not found: ${sourceId}`);
@@ -5327,6 +5338,7 @@ function getPurchaseWorkbench(params = {}) {
       sku.supplier_id AS sku_supplier_id,
       sku_supplier.name AS sku_supplier_name,
       requester.name AS requested_by_name,
+      buyer_feedback_user.name AS buyer_feedback_by_name,
       COUNT(candidate.id) AS candidate_count,
       SUM(CASE WHEN candidate.status = 'selected' THEN 1 ELSE 0 END) AS selected_candidate_count,
       (
@@ -5399,6 +5411,7 @@ function getPurchaseWorkbench(params = {}) {
     LEFT JOIN erp_skus sku ON sku.id = pr.sku_id
     LEFT JOIN erp_suppliers sku_supplier ON sku_supplier.id = sku.supplier_id
     LEFT JOIN erp_users requester ON requester.id = pr.requested_by
+    LEFT JOIN erp_users buyer_feedback_user ON buyer_feedback_user.id = pr.buyer_feedback_by
     LEFT JOIN erp_sourcing_candidates candidate ON candidate.pr_id = pr.id
     ${whereAccount}
     GROUP BY pr.id
@@ -6303,6 +6316,7 @@ function ensureInboundReceiptForPo(db, services, po, actor) {
 }
 
 function confirmPaymentPaid({ db, services, payload, actor }) {
+  assertActorRole(actor, ["finance", "manager", "admin"], "确认已付款");
   const poId = optionalString(payload.poId || payload.id);
   let before = null;
   try {
@@ -8610,7 +8624,7 @@ async function refresh1688ProductDetailAction({ db, services, payload, actor }) 
 }
 
 async function preview1688UrlSpecsAction({ db, payload, actor }) {
-  assertActorRole(actor, ["buyer", "manager", "admin"], "1688 URL spec preview");
+  assertActorRole(actor, SUPPLIER_MAPPING_ROLES, "1688 URL spec preview");
   const productUrl = optionalString(payload.productUrl || payload.product_url || payload.url);
   const offerId = requireString(
     payload.offerId
@@ -11420,12 +11434,8 @@ function selectPoIdsForScheduledSync(db, { maxAgeHours, limit }) {
   `).all({ cutoff, limit });
 }
 
-// 第二阶段候选：已绑定 1688 订单号、但工作流尚未走到 paid 的单。
-// 为什么需要它：selectPoIdsForScheduledSync 只负责"未绑定"单的首次绑定，
-// 一旦 PO 绑定了 external_order_id（或离开 pushed_pending_price），它就不再被定时任务触碰。
-// 而用户的 1688 线上支付通常发生在订单已绑定之后，没有任何机制再去拉它的最新状态，
-// PO 会永久卡住、必须人工点「确认付款」。这里把这些"已绑定待付款"单也纳入定时同步，
-// 拉最新 1688 状态，已支付则用现有工作流自动推进到 paid（含建入库单）。
+// 第二阶段候选：已绑定 1688 订单号、但本地财务尚未确认已付款的单。
+// 定时任务只同步外部状态；即使 1688 已显示付款，也必须等财务在 ERP 内确认。
 function selectBoundPoIdsForPaymentSync(db, { maxAgeHours, limit }) {
   const cutoff = new Date(Date.now() - maxAgeHours * 3600 * 1000).toISOString();
   return db.prepare(`
@@ -11497,9 +11507,8 @@ async function runScheduledOrderSync({ maxAgeHours = 168, limit = 50, logger } =
       results.push({ poId: row.id, status: "error", error: errMsg });
     }
   }
-  // 第二阶段：处理"已绑定 1688 订单号、尚未 paid"的单——拉最新 1688 状态，
-  // 若已支付则用现有工作流（submitPaymentApproval → confirmPaymentPaid）自动推进到 paid。
-  // 全程用系统 actor，不裸改 status；退避 state key 用 "pay:" 前缀与绑定阶段隔离。
+  // 第二阶段：处理"已绑定 1688 订单号、尚未 paid"的单——只拉最新 1688 状态。
+  // 若 1688 显示已支付，返回 pending_finance_confirmation，等待财务手工确认。
   const sysActor = { id: null, role: "system", name: "auto-sync" };
   for (const row of boundCandidates) {
     const stateKey = "pay:" + row.id;
@@ -11528,21 +11537,14 @@ async function runScheduledOrderSync({ maxAgeHours = 168, limit = 50, logger } =
         action: "sync_1688_payment",
       });
       const fresh = getPurchaseOrder(db, row.id);
-      const paid =
-        map1688StatusToPaymentStatus(fresh.external_order_status, fresh.payment_status) === "paid" ||
-        fresh.payment_status === "paid";
-      if (paid) {
-        let target = fresh;
-        if (target.status === "pushed_pending_price") {
-          services.purchase.submitPaymentApproval(row.id, sysActor);
-          target = getPurchaseOrder(db, row.id);
-        }
-        if (target.status === "approved_to_pay" || isPaidOrLaterPurchaseOrder(target)) {
-          confirmPaymentPaid({ db, services, payload: { poId: row.id }, actor: sysActor });
-        }
+      if (is1688PaidLikeStatus(fresh.external_order_status)) {
         orderSyncAttemptState.delete(stateKey);
-        log({ event: "paid_advanced", poId: row.id });
-        results.push({ poId: row.id, status: "paid_advanced" });
+        log({ event: "pending_finance_confirmation", poId: row.id, externalStatus: fresh.external_order_status });
+        results.push({
+          poId: row.id,
+          status: "pending_finance_confirmation",
+          externalOrderStatus: fresh.external_order_status || null,
+        });
       } else {
         const nextAttempts = state.attempts + 1;
         orderSyncAttemptState.set(stateKey, {
@@ -11568,9 +11570,70 @@ async function runScheduledOrderSync({ maxAgeHours = 168, limit = 50, logger } =
   return {
     processed: candidates.length + boundCandidates.length,
     bound: results.filter((r) => r.status === "bound").length,
-    paidAdvanced: results.filter((r) => r.status === "paid_advanced").length,
+    paidAdvanced: 0,
+    externalPaidPendingFinance: results.filter((r) => r.status === "pending_finance_confirmation").length,
     results,
   };
+}
+
+function updatePurchaseRequestFeedbackAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["operations", "buyer", "manager", "admin"], "采购员回填");
+  const prId = requireString(payload.prId || payload.pr_id || payload.id, "prId");
+  let pr = getPurchaseRequest(db, prId);
+  const before = { ...pr };
+  const buyerUnitCost = optionalNumber(payload.buyerUnitCost ?? payload.buyer_unit_cost ?? payload.unitCost ?? payload.cost);
+  const buyerRemark = optionalString(payload.buyerRemark ?? payload.buyer_remark ?? payload.remark);
+  if (buyerUnitCost === null && !buyerRemark) {
+    throw new Error("请填写采购成本或备注");
+  }
+  if (buyerUnitCost !== null && buyerUnitCost < 0) {
+    throw new Error("采购成本不能小于 0");
+  }
+
+  if (pr.status === "submitted") {
+    services.purchase.acceptRequest(prId, actor);
+    pr = getPurchaseRequest(db, prId);
+  }
+  if (pr.status === "buyer_processing") {
+    services.purchase.markRequestSourced(prId, actor);
+    pr = getPurchaseRequest(db, prId);
+  }
+
+  const now = nowIso();
+  db.prepare(`
+    UPDATE erp_purchase_requests
+    SET buyer_unit_cost = @buyer_unit_cost,
+        buyer_remark = @buyer_remark,
+        buyer_feedback_by = @buyer_feedback_by,
+        buyer_feedback_at = @buyer_feedback_at,
+        updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id: prId,
+    buyer_unit_cost: buyerUnitCost,
+    buyer_remark: buyerRemark,
+    buyer_feedback_by: actor.id || null,
+    buyer_feedback_at: now,
+    updated_at: now,
+  });
+
+  const after = getPurchaseRequest(db, prId);
+  services.workflow.writeAudit({
+    accountId: after.account_id,
+    actor,
+    action: "update_purchase_request_feedback",
+    entityType: "purchase_request",
+    entityId: prId,
+    before,
+    after,
+  });
+  const messageParts = [];
+  if (buyerUnitCost !== null) messageParts.push(`成本 ¥${Number(buyerUnitCost).toFixed(2)}`);
+  if (buyerRemark) messageParts.push(`备注：${buyerRemark}`);
+  writePurchaseRequestEvent(db, after, actor, "buyer_feedback", `采购员回填${messageParts.length ? `：${messageParts.join("；")}` : ""}`);
+  if (buyerRemark) addPurchaseRequestComment(db, after, actor, buyerRemark);
+  markPurchaseRequestRead(db, prId, actor);
+  return toPurchaseRequest(after);
 }
 
 function resetScheduledOrderSyncState() {
@@ -12521,7 +12584,7 @@ async function ensure1688SupplierProfileOnceAction({ db, payload, actor }) {
 }
 
 async function query1688PayWaysAction({ db, payload, actor }) {
-  assertActorRole(actor, ["finance", "manager", "admin", "buyer"], "1688 pay way query");
+  assertActorRole(actor, ["finance", "manager", "admin"], "1688 pay way query");
   const { purchaseOrders, orderIds } = orderIdsFor1688PaymentAction(db, payload);
   const params = build1688PayWayParams(payload, orderIds);
   if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.PAY_WAY_QUERY.key, params };
@@ -12543,7 +12606,7 @@ async function query1688PayWaysAction({ db, payload, actor }) {
 }
 
 async function query1688ProtocolPayStatusAction({ db, payload, actor }) {
-  assertActorRole(actor, ["finance", "manager", "admin", "buyer"], "1688 protocol pay status");
+  assertActorRole(actor, ["finance", "manager", "admin"], "1688 protocol pay status");
   let purchaseOrders = [];
   let orderIds = [];
   try {
@@ -13588,21 +13651,20 @@ function map1688StatusToLocal(status, currentStatus, logistics = {}) {
   const text = String(status || "").toUpperCase();
   const current = optionalString(currentStatus);
   if (["closed", "cancelled", "inbounded"].includes(current)) return null;
+  const paidOrLater = ["paid", "supplier_processing", "shipped", "arrived"].includes(current);
   if (/CANCEL|TERMINATED|CLOSE/.test(text)) return "cancelled";
-  if (logistics.signed) return "arrived";
-  if (/CONFIRM_?RECEIVE|RECEIVEGOODS|RECEIVED|SIGNED/.test(text)) return "arrived";
-  if (/WAIT_?BUYER_?RECEIVE|SELLER_?SEND|SHIPPED|SENDGOODS/.test(text) || logistics.shipped) return "shipped";
-  if (/WAIT_?SELLER_?SEND|PAID|PAYED|WAIT_?SELLER_?DELIVER|SUCCESS/.test(text)) return "paid";
+  if (paidOrLater && logistics.signed) return "arrived";
+  if (paidOrLater && /CONFIRM_?RECEIVE|RECEIVEGOODS|RECEIVED|SIGNED/.test(text)) return "arrived";
+  if (paidOrLater && (/WAIT_?BUYER_?RECEIVE|SELLER_?SEND|SHIPPED|SENDGOODS/.test(text) || logistics.shipped)) return "shipped";
   if (/WAIT_?BUYER_?PAY|UNPAID|CREATED|PREVIEW/.test(text)) {
     return current === "draft" ? "pushed_pending_price" : null;
   }
   return null;
 }
 
-function map1688StatusToPaymentStatus(status, currentPaymentStatus) {
+function is1688PaidLikeStatus(status) {
   const text = String(status || "").toUpperCase();
-  if (/WAIT_?SELLER_?SEND|WAIT_?BUYER_?RECEIVE|PAID|PAYED|SUCCESS|SELLER_?SEND|SHIPPED/.test(text)) return "paid";
-  return null;
+  return /WAIT_?SELLER_?SEND|WAIT_?BUYER_?RECEIVE|PAID|PAYED|SUCCESS|SELLER_?SEND|SHIPPED/.test(text);
 }
 
 function updatePurchaseOrderFrom1688Snapshot({
@@ -13622,7 +13684,6 @@ function updatePurchaseOrderFrom1688Snapshot({
   const before = getPurchaseOrder(db, po.id);
   const now = nowIso();
   const nextStatus = forceCancel ? "cancelled" : map1688StatusToLocal(order.status, before.status, logistics || {});
-  const nextPaymentStatus = map1688StatusToPaymentStatus(order.status, before.payment_status);
   const rawDetailRoot = rawDetail?.result || rawDetail || {};
   const rawDetailBaseInfo = rawDetailRoot.baseInfo || rawDetailRoot;
   const snapshotFreight = optionalNumber(
@@ -13647,7 +13708,6 @@ function updatePurchaseOrderFrom1688Snapshot({
   db.prepare(`
     UPDATE erp_purchase_orders
     SET status = @status,
-        payment_status = @payment_status,
         total_amount = COALESCE(@total_amount, total_amount),
         paid_amount = COALESCE(@paid_amount, paid_amount),
         freight_amount = COALESCE(@freight_amount, freight_amount),
@@ -13666,7 +13726,6 @@ function updatePurchaseOrderFrom1688Snapshot({
   `).run({
     id: before.id,
     status: nextStatus || before.status,
-    payment_status: nextPaymentStatus || before.payment_status,
     total_amount: money.goodsAmount,
     paid_amount: money.paidAmount,
     freight_amount: money.freightAmount,
@@ -13941,7 +14000,7 @@ async function recover1688PaymentUrlBySingleOrders({ db, payload, actor, account
 }
 
 async function get1688PaymentUrlAction({ db, services, payload, actor }) {
-  assertActorRole(actor, ["finance", "manager", "admin", "buyer"], "1688 支付链接");
+  assertActorRole(actor, ["finance", "manager", "admin"], "1688 支付链接");
   const purchaseOrders = getPurchaseOrdersForPayment(db, payload);
   const orderIds = Array.from(new Set([
     ...purchaseOrders.map((po) => po.external_order_id),
@@ -14258,6 +14317,10 @@ function createPurchaseOrderFrom1688Order({ db, services, order, payload = {}, a
   const money = splitOrderMoney(order.totalAmount, order.freight, sourceGoodsAmount);
   const totalAmount = money.goodsAmount ?? sourceGoodsAmount;
   const paidAmount = money.paidAmount ?? roundMoney(totalAmount + money.freightAmount);
+  const importedStatusFrom1688 = map1688StatusToLocal(order.status, "draft", {});
+  const importedLocalStatus = importedStatusFrom1688 === "cancelled"
+    ? "cancelled"
+    : (is1688PaidLikeStatus(order.status) ? "approved_to_pay" : (importedStatusFrom1688 || "pushed_pending_price"));
   const unitFallback = totalQty > 0 && totalAmount > 0 ? totalAmount / totalQty : 0;
   const now = nowIso();
   const po = {
@@ -14267,8 +14330,8 @@ function createPurchaseOrderFrom1688Order({ db, services, order, payload = {}, a
     selected_candidate_id: null,
     supplier_id: null,
     po_no: optionalString(payload.poNo) || buildPoNoFrom1688Order(db),
-    status: map1688StatusToLocal(order.status, "draft", {}) || "draft",
-    payment_status: map1688StatusToPaymentStatus(order.status, "unpaid") || "unpaid",
+    status: importedLocalStatus,
+    payment_status: "unpaid",
     expected_delivery_date: null,
     actual_delivery_date: null,
     total_amount: totalAmount,
@@ -14776,6 +14839,11 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
       case "quote_feedback":
       case "add_sourcing_candidate": {
         return addSourcingCandidateAction({ db, services, payload, actor });
+      }
+      case "update_purchase_request_feedback": {
+        return {
+          purchaseRequest: updatePurchaseRequestFeedbackAction({ db, services, payload, actor }),
+        };
       }
       case "save_purchase_settings": {
         return savePurchaseSettingsAction({ db, payload, actor });
@@ -17534,7 +17602,7 @@ function build1688DetailFromWorkerSkus(workerResult, offerId, payload = {}) {
       externalSkuId: optionalString(sku.skuId),
       externalSpecId: optionalString(sku.specId),
       specText: specText || optionalString(sku.specId),
-      imageUrl: optionalString(sku.imageUrl) || optionalString(workerResult.imageUrl) || optionalString(payload.imageUrl),
+      imageUrl: optionalString(sku.imageUrl),
       attributes: specText
         ? specText.split(/[;；]/).map((part) => {
           const [name, ...rest] = String(part || "").split(":");

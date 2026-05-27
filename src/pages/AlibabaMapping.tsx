@@ -186,7 +186,7 @@ interface PageResult<T> {
 }
 
 function canManage(role?: string | null) {
-  return Boolean(role && ["admin", "manager", "buyer"].includes(role));
+  return Boolean(role && ["admin", "manager", "operations", "buyer"].includes(role));
 }
 
 function canViewSupplierProfiles(role?: string | null) {
@@ -655,13 +655,18 @@ export default function AlibabaMapping() {
     return rows.filter((row) => specRowSearchText(row).toLowerCase().includes(needle));
   }, [urlSpecDialog, urlSpecSearchText]);
 
+  const hasUrlSpecRowImages = useMemo(() => (
+    (urlSpecDialog?.rows || []).some((row) => Boolean(imageValue([row.imageUrl, (row as any).raw])))
+  ), [urlSpecDialog?.rows]);
+
   const urlSpecColumns = useMemo<ColumnsType<MappingSpecRow>>(() => [
     {
       title: "图片",
       dataIndex: "imageUrl",
       width: 72,
       render: (_value: string | null | undefined, row) => {
-        const imageUrl = imageValue([row.imageUrl, (row as any).raw, urlSpecDialog?.detail.imageUrl]);
+        const rowImageUrl = imageValue([row.imageUrl, (row as any).raw]);
+        const imageUrl = rowImageUrl || (hasUrlSpecRowImages ? "" : imageValue(urlSpecDialog?.detail.imageUrl));
         return imageUrl ? (
           <div onClick={(event) => event.stopPropagation()}>
             <Image
@@ -703,7 +708,7 @@ export default function AlibabaMapping() {
       width: 100,
       render: (value: number | null | undefined) => value === null || value === undefined ? "-" : Number(value).toLocaleString("zh-CN"),
     },
-  ], [urlSpecDialog?.detail.imageUrl]);
+  ], [hasUrlSpecRowImages, urlSpecDialog?.detail.imageUrl]);
 
   const openCreateForSku = useCallback((row: Sku1688SourceRow) => {
     setEditingRow(null);
@@ -717,6 +722,7 @@ export default function AlibabaMapping() {
       accountId: row.accountId || undefined,
       status: "active",
       isDefault: true,
+      imageUrl: imageValue([row.imageUrl, row.skuImageUrl]),
       ourQty: row.ourQty || 1,
       platformQty: row.platformQty || 1,
       moq: row.moq || 1,
@@ -874,7 +880,7 @@ export default function AlibabaMapping() {
       platformSkuName: selected.specText || selected.externalSpecId,
       supplierName: values.supplierName || urlSpecDialog.detail.supplierName || undefined,
       productTitle: values.productTitle || urlSpecDialog.detail.productTitle || undefined,
-      imageUrl: values.imageUrl || urlSpecDialog.detail.imageUrl || undefined,
+      imageUrl: imageValue([selected.imageUrl, values.imageUrl, urlSpecDialog.detail.imageUrl]) || undefined,
       unitPrice: selected.price ?? values.unitPrice ?? urlSpecDialog.detail.unitPrice ?? undefined,
       moq: values.moq ?? urlSpecDialog.detail.moq ?? 1,
       ourQty: urlSpecOurQty,
@@ -912,6 +918,7 @@ export default function AlibabaMapping() {
           externalSkuId: values.externalSkuId,
           externalSpecId: values.externalSpecId,
           specText: values.platformSkuName || values.externalSpecId,
+          imageUrl: values.imageUrl,
           price: values.unitPrice ?? null,
           platformQty: toPositiveInteger(values.platformQty, 1),
         }];
@@ -939,7 +946,7 @@ export default function AlibabaMapping() {
           supplierName: values.supplierName,
           productTitle: values.productTitle,
           productUrl,
-          imageUrl: values.imageUrl,
+          imageUrl: imageValue([spec.imageUrl, values.imageUrl]),
           unitPrice: spec.price ?? values.unitPrice,
           moq: values.moq,
           ourQty: toPositiveInteger(values.ourQty, 1),

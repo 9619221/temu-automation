@@ -244,6 +244,10 @@ interface PurchaseRequestRow {
   reason?: string;
   requestedQty?: number;
   targetUnitCost?: number | null;
+  buyerUnitCost?: number | null;
+  buyerRemark?: string | null;
+  buyerFeedbackByName?: string | null;
+  buyerFeedbackAt?: string | null;
   expectedArrivalDate?: string | null;
   requestedByName?: string;
   evidence?: string[];
@@ -267,6 +271,7 @@ const PURCHASE_EVENT_TYPE_LABELS: Record<string, string> = {
   create_request: "新建需求",
   accept_request: "接收需求",
   mark_sourced: "找到货源",
+  buyer_feedback: "采购回填",
   quote_feedback: "报价反馈",
   source_1688_keyword: "1688 找款",
   source_1688_image: "1688 图搜",
@@ -663,6 +668,11 @@ interface QuoteFormValues {
   productTitle?: string;
   productUrl?: string;
   remark?: string;
+}
+
+interface BuyerFeedbackFormValues {
+  buyerUnitCost?: number;
+  buyerRemark?: string;
 }
 
 interface OfflinePoFormValues {
@@ -1456,8 +1466,20 @@ function canUse1688PaymentActions(row: PurchaseOrderRow) {
   // 审核通过(进入 approved_to_pay 待付款)之后才能点 1688 支付,避免审核中状态就放出付款入口。
   if (localStatus !== "approved_to_pay") return false;
   if (["paid", "confirmed", "success"].includes(paymentStatus)) return false;
+  if (externalOrderIndicatesPaid(row.externalOrderStatus)) return false;
   if (/cancel|close|terminat|success/.test(externalStatus)) return false;
   return true;
+}
+
+function externalOrderIndicatesPaid(status?: string | null) {
+  const text = String(status || "").toUpperCase();
+  return /WAIT_?SELLER_?SEND|WAIT_?BUYER_?RECEIVE|PAID|PAYED|SUCCESS|SELLER_?SEND|SHIPPED/.test(text);
+}
+
+function externalPaymentNeedsFinanceConfirm(row: PurchaseOrderRow) {
+  return Boolean(row.externalOrderId)
+    && externalOrderIndicatesPaid(row.externalOrderStatus)
+    && !purchaseOrderIsPaid(row);
 }
 
 const REFUND_READY_LOCAL_STATUSES = new Set(["paid", "shipped", "arrived", "received", "success", "completed"]);
@@ -1569,6 +1591,9 @@ function purchaseOrderRiskTags(row: PurchaseOrderRow, hasUsable1688Address: bool
   } else if (canUse1688PaymentActions(row) || canConfirmPaidAction(row)) {
     tags.push({ key: "pay", label: "待付款确认", color: "gold" });
   }
+  if (externalPaymentNeedsFinanceConfirm(row)) {
+    tags.push({ key: "external-paid", label: "1688已付待财务", color: "gold" });
+  }
   if (purchaseOrderIsPaid(row) && !isCompletedOrder(row)) {
     tags.push({ key: "inbound", label: "待入库", color: "cyan" });
   }
@@ -1584,7 +1609,7 @@ function purchaseOrderRiskTags(row: PurchaseOrderRow, hasUsable1688Address: bool
 function purchaseOrderRowClassName(row: PurchaseOrderRow) {
   const classes: string[] = ["purchase-order-row--clickable"];
   if (row.status === "delayed" || row.status === "exception") classes.push("purchase-order-row--exception");
-  if (canUse1688PaymentActions(row) || canConfirmPaidAction(row)) classes.push("purchase-order-row--payment");
+  if (canUse1688PaymentActions(row) || canConfirmPaidAction(row) || externalPaymentNeedsFinanceConfirm(row)) classes.push("purchase-order-row--payment");
   if (isCompletedOrder(row)) classes.push("purchase-order-row--completed");
   return classes.join(" ");
 }
@@ -1893,7 +1918,7 @@ function purchaseRequestIsOptimized(row: PurchaseRequestRow) {
   if (Number(row.selectedCandidateCount || 0) > 0) return true;
 
   const targetUnitCost = optionalFiniteNumber(row.targetUnitCost);
-  const foundUnitPrice = optionalFiniteNumber(getPurchaseRequestFoundUnitPrice(row));
+  const foundUnitPrice = optionalFiniteNumber(row.buyerUnitCost ?? getPurchaseRequestFoundUnitPrice(row));
   return targetUnitCost !== null
     && targetUnitCost > 0
     && foundUnitPrice !== null
@@ -2429,6 +2454,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   const [requestCreateMode, setRequestCreateMode] = useState<RequestCreateMode>("sourcing");
   const [directPoOpen, setDirectPoOpen] = useState(false);
   const [quotePrId, setQuotePrId] = useState<string | null>(null);
+  const [buyerFeedbackPrId, setBuyerFeedbackPrId] = useState<string | null>(null);
   const [offlinePoTarget, setOfflinePoTarget] = useState<
     | { mode: "create"; pr: PurchaseRequestRow }
     | { mode: "edit"; po: PurchaseOrderRow }
@@ -2563,6 +2589,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   const [requestForm] = Form.useForm<RequestFormValues>();
   const [directPoForm] = Form.useForm<DirectPoFormValues>();
   const [quoteForm] = Form.useForm<QuoteFormValues>();
+  const [buyerFeedbackForm] = Form.useForm<BuyerFeedbackFormValues>();
   const [offlinePoForm] = Form.useForm<OfflinePoFormValues>();
   const [source1688Form] = Form.useForm<Source1688FormValues>();
   const [refundForm] = Form.useForm<RefundFormValues>();
@@ -2617,6 +2644,10 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   const quotePr = useMemo(
     () => data.purchaseRequests?.find((item) => item.id === quotePrId) || null,
     [data.purchaseRequests, quotePrId],
+  );
+  const buyerFeedbackPr = useMemo(
+    () => data.purchaseRequests?.find((item) => item.id === buyerFeedbackPrId) || null,
+    [buyerFeedbackPrId, data.purchaseRequests],
   );
   const source1688Pr = useMemo(
     () => data.purchaseRequests?.find((item) => item.id === source1688PrId) || null,
@@ -4417,6 +4448,28 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     }
   };
 
+  const openBuyerFeedback = useCallback((row: PurchaseRequestRow) => {
+    setBuyerFeedbackPrId(row.id);
+    buyerFeedbackForm.setFieldsValue({
+      buyerUnitCost: row.buyerUnitCost ?? getPurchaseRequestFoundUnitPrice(row) ?? row.targetUnitCost ?? undefined,
+      buyerRemark: row.buyerRemark || "",
+    });
+  }, [buyerFeedbackForm]);
+
+  const handleBuyerFeedback = async (values: BuyerFeedbackFormValues) => {
+    if (!buyerFeedbackPr) return;
+    const result = await runAction(`buyer-feedback-${buyerFeedbackPr.id}`, {
+      action: "update_purchase_request_feedback",
+      prId: buyerFeedbackPr.id,
+      buyerUnitCost: values.buyerUnitCost,
+      buyerRemark: values.buyerRemark,
+    }, "采购回填已保存");
+    if (result) {
+      setBuyerFeedbackPrId(null);
+      buyerFeedbackForm.resetFields();
+    }
+  };
+
   const handleSource1688 = async (values: Source1688FormValues) => {
     if (!source1688Pr) return;
     const result = await runAction(`1688-source-${source1688Pr.id}`, {
@@ -5530,7 +5583,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   const exportActiveQueue = () => {
     if (activeQueue.kind === "mixed") {
       downloadCsv(`purchase-todos-${activeQueueKey}.csv`, [
-        ["类型", "商品编码/采购单号", "商品名称", "规格", "商品图片", "状态", "数量", "商品金额/目标成本", "找品单价", "运费", "实付总金额", "负责人"],
+        ["类型", "商品编码/采购单号", "商品名称", "规格", "商品图片", "状态", "数量", "商品金额/目标成本", "采购单价", "采购回填成本", "采购回填备注", "运费", "实付总金额", "负责人"],
         ...activeRequestRows.map((row) => [
           "待处理",
           row.internalSkuCode || "",
@@ -5541,6 +5594,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
           row.requestedQty || 0,
           row.targetUnitCost ?? "",
           getPurchaseRequestFoundUnitPrice(row) ?? "",
+          row.buyerUnitCost ?? "",
+          row.buyerRemark || "",
           "",
           "",
           row.requestedByName || "",
@@ -5555,6 +5610,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
           row.totalQty || 0,
           row.totalAmount ?? "",
           "",
+          "",
+          "",
           row.freightAmount ?? "",
           row.paidAmount ?? "",
           row.createdByName || "",
@@ -5564,7 +5621,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     }
     if (activeQueue.kind === "request") {
       downloadCsv(`purchase-requests-${activeQueueKey}.csv`, [
-        ["商品编码", "商品名称", "规格", "状态", "采购数量", "目标成本", "找品单价", "发起人"],
+        ["商品编码", "商品名称", "规格", "状态", "采购数量", "目标成本", "采购单价", "采购回填成本", "采购回填备注", "发起人"],
         ...activeRequestRows.map((row) => [
           row.internalSkuCode || "",
           row.productName || "",
@@ -5573,6 +5630,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
           row.requestedQty || 0,
           row.targetUnitCost ?? "",
           getPurchaseRequestFoundUnitPrice(row) ?? "",
+          row.buyerUnitCost ?? "",
+          row.buyerRemark || "",
           row.requestedByName || "",
         ]),
       ]);
@@ -5602,7 +5661,31 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     ]);
   };
 
-  const requestColumns = useMemo<ColumnsType<PurchaseRequestRow>>(() => [
+  const requestColumns = useMemo<ColumnsType<PurchaseRequestRow>>(() => {
+    const showBuyerFeedbackColumns = filteredActiveRequestRows.some((row) =>
+      optionalFiniteNumber(row.buyerUnitCost) !== null
+      || Boolean(String(row.buyerRemark || "").trim())
+      || Boolean(row.buyerFeedbackByName),
+    );
+    const showRequestActionColumn = filteredActiveRequestRows.some((row) => {
+      const existingPo = purchaseOrders.find((item) => purchaseOrderBelongsToRequest(item, row.id));
+      const canQuote = canPurchase && ["submitted", "buyer_processing", "sourced"].includes(row.status);
+      const canBuyerFeedback = (canPurchase || canCreateRequest) && ["submitted", "buyer_processing", "sourced", "waiting_ops_confirm"].includes(row.status);
+      const canGeneratePo = canCreatePurchaseOrder
+        && !existingPo
+        && ["submitted", "buyer_processing", "sourced", "waiting_ops_confirm"].includes(row.status);
+      const canDelete = canCreateRequest && ["submitted", "buyer_processing", "sourced"].includes(row.status);
+      return Boolean(
+        (SHOW_KEYWORD_1688_SOURCE && canQuote)
+        || canQuote
+        || canBuyerFeedback
+        || canGeneratePo
+        || existingPo
+        || row.status === "converted_to_po"
+        || canDelete,
+      );
+    });
+    const columns: ColumnsType<PurchaseRequestRow> = [
     {
       title: "图片",
       key: "image",
@@ -5709,7 +5792,40 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       render: formatCurrency,
     },
     {
-      title: "找品单价",
+      title: "采购成本",
+      key: "buyerUnitCost",
+      width: 110,
+      align: "right",
+      render: (_value, row) => {
+        const unitCost = optionalFiniteNumber(row.buyerUnitCost);
+        return unitCost === null ? <Text type="secondary">-</Text> : <Text strong>{formatCurrency(unitCost)}</Text>;
+      },
+    },
+    {
+      title: "备注",
+      key: "buyerRemark",
+      width: 180,
+      render: (_value, row) => {
+        const remark = String(row.buyerRemark || "").trim();
+        if (!remark && !row.buyerFeedbackByName) return <Text type="secondary">-</Text>;
+        return (
+          <Space direction="vertical" size={2} style={{ width: "100%" }}>
+            {remark ? (
+              <Text type="secondary" style={{ fontSize: 12 }} ellipsis={{ tooltip: remark }}>
+                {remark}
+              </Text>
+            ) : null}
+            {row.buyerFeedbackByName ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {row.buyerFeedbackByName}
+              </Text>
+            ) : null}
+          </Space>
+        );
+      },
+    },
+    {
+      title: "采购单价",
       key: "candidatePrice",
       width: 120,
       align: "right",
@@ -5771,13 +5887,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     {
       title: "动作",
       key: "actions",
-      width: 360,
+      width: 300,
       fixed: "right",
       align: "right",
       render: (_value, row) => {
         const hasAnySource = purchaseRequestHasSource(row);
         const existingPo = purchaseOrders.find((item) => purchaseOrderBelongsToRequest(item, row.id));
         const canQuote = canPurchase && ["submitted", "buyer_processing", "sourced"].includes(row.status);
+        const canBuyerFeedback = (canPurchase || canCreateRequest) && ["submitted", "buyer_processing", "sourced", "waiting_ops_confirm"].includes(row.status);
         const canFindSupplier = canQuote;
         const canImageSearch = canQuote;
         // 即使还没绑定货源也允许生成采购单，后端会走线下采购单占位路径。
@@ -5805,6 +5922,16 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
                 onClick={() => void openImageSearch(row)}
               >
                 以图搜款
+              </Button>
+            ) : null}
+            {canBuyerFeedback ? (
+              <Button
+                size="small"
+                icon={<EditOutlined />}
+                loading={actingKey === `buyer-feedback-${row.id}`}
+                onClick={() => openBuyerFeedback(row)}
+              >
+                编辑
               </Button>
             ) : null}
             {canGeneratePo ? (
@@ -5859,12 +5986,19 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
                 </Button>
               </Popconfirm>
             ) : null}
-            {!canImageSearch && !canGeneratePo && !existingPo && row.status !== "converted_to_po" && !canDelete && row.status !== "submitted" ? <Text type="secondary">无待办</Text> : null}
+            {!canImageSearch && !canBuyerFeedback && !canGeneratePo && !existingPo && row.status !== "converted_to_po" && !canDelete && row.status !== "submitted" ? <Text type="secondary">无待办</Text> : null}
           </div>
         );
       },
     },
-  ], [actingKey, canCreatePurchaseOrder, canCreateRequest, canPurchase, detailPrId, focusPurchaseOrder, purchaseOrders, source1688PrId]);
+    ];
+    return columns.filter((column) => {
+      const key = (column as any).key;
+      if (!showBuyerFeedbackColumns && (key === "buyerUnitCost" || key === "buyerRemark")) return false;
+      if (!showRequestActionColumn && key === "actions") return false;
+      return true;
+    });
+  }, [actingKey, canCreatePurchaseOrder, canCreateRequest, canPurchase, detailPrId, filteredActiveRequestRows, focusPurchaseOrder, openBuyerFeedback, purchaseOrders, source1688PrId]);
 
   const renderPurchaseOrderErpDetail = useCallback((row: PurchaseOrderRow) => {
     const risks = purchaseOrderRiskTags(row, hasUsable1688Address);
@@ -6361,7 +6495,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
           || actingKey === `1688-preview-${row.id}`;
         const canUse1688Payment = canUse1688PaymentActions(row);
         const canSubmitPaymentApproval = canPurchase && canSubmitPaymentApprovalAction(row);
-        const canConfirmPaid = (canFinance || canPurchase) && canConfirmPaidAction(row);
+        const canConfirmPaid = canFinance && canConfirmPaidAction(row);
         const canDeletePo = canPurchase && canDeletePurchaseOrder(row);
         return (
           <div className="purchase-action-grid">
@@ -6454,7 +6588,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               提交付款
             </Button>
           ) : null}
-          {canUse1688Payment && (canPurchase || canFinance) ? (
+          {canUse1688Payment && canFinance ? (
             <Button
               size="small"
               type="primary"
@@ -6591,14 +6725,17 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       },
     },
     ];
-    const columnsByField = new Map(columns.map((column) => [columnField(column), column]));
+    const visibleColumns = (canPurchase || canFinance || canWarehouse)
+      ? columns
+      : columns.filter((column) => columnField(column) !== "actions");
+    const columnsByField = new Map(visibleColumns.map((column) => [columnField(column), column]));
     const visibleColumnKeys = new Set(purchaseOrderColumnConfig.visible);
     const orderedColumns = [
       ...purchaseOrderColumnConfig.order
         .filter((field) => visibleColumnKeys.has(field))
         .map((field) => columnsByField.get(field))
         .filter(Boolean),
-      ...columns.filter((column) => !PURCHASE_ORDER_CONFIGURABLE_COLUMN_KEY_SET.has(columnField(column))),
+      ...visibleColumns.filter((column) => !PURCHASE_ORDER_CONFIGURABLE_COLUMN_KEY_SET.has(columnField(column))),
     ] as ColumnsType<PurchaseOrderRow>;
 
     return orderedColumns.map((column) => {
@@ -8009,6 +8146,32 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               </Form.Item>
             </Col>
           </Row>
+        </Form>
+      </Modal>
+
+      <Modal
+        open={Boolean(buyerFeedbackPr)}
+        title="采购员回填"
+        okText="保存回填"
+        cancelText="取消"
+        confirmLoading={buyerFeedbackPr ? actingKey === `buyer-feedback-${buyerFeedbackPr.id}` : false}
+        onCancel={() => setBuyerFeedbackPrId(null)}
+        onOk={() => buyerFeedbackForm.submit()}
+        destroyOnClose
+      >
+        <Form form={buyerFeedbackForm} layout="vertical" onFinish={handleBuyerFeedback}>
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message={buyerFeedbackPr ? `${buyerFeedbackPr.productName || buyerFeedbackPr.internalSkuCode || "采购需求"} · ${formatQty(buyerFeedbackPr.requestedQty)} 件` : ""}
+          />
+          <Form.Item name="buyerUnitCost" label="采购成本" rules={[{ required: true, message: "请输入采购成本" }]}>
+            <InputNumber min={0} precision={2} prefix="¥" style={{ width: "100%" }} />
+          </Form.Item>
+          <Form.Item name="buyerRemark" label="备注">
+            <TextArea rows={4} maxLength={500} showCount placeholder="供应商情况、成本口径、替代方案或风险说明" />
+          </Form.Item>
         </Form>
       </Modal>
 

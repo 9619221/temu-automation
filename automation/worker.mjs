@@ -7862,19 +7862,79 @@ async function handleRequest(body) {
           const url = location.href;
           const isCaptcha = /punish|captcha|tmd/i.test(url);
           const html = document.documentElement.outerHTML;
-          const text = (html || "").replace(/\\"/g, "\"");
+          const text = (html || "")
+            .replace(/\\"/g, "\"")
+            .replace(/\\\//g, "/")
+            .replace(/\\u002F/g, "/")
+            .replace(/&quot;/g, "\"")
+            .replace(/&amp;/g, "&");
           const skus = [];
           const seen = new Set();
+          const normalizeImageUrl = (value) => {
+            let next = String(value || "").trim();
+            if (!next || /^data:/i.test(next)) return "";
+            next = next
+              .replace(/\\\//g, "/")
+              .replace(/\\u002F/g, "/")
+              .replace(/&amp;/g, "&")
+              .replace(/^["']|["']$/g, "");
+            if (next.startsWith("//")) next = `https:${next}`;
+            if (!/^https?:\/\//i.test(next)) return "";
+            if (!/\.(?:jpe?g|png|webp)(?:[?#].*)?$/i.test(next) && !/alicdn|1688|cbu01|cbuimg/i.test(next)) return "";
+            if (/sprite|icon|logo|avatar|default|blank|loading/i.test(next)) return "";
+            return next;
+          };
+          const normalizeSpecText = (value) => String(value || "")
+            .normalize("NFKC")
+            .replace(/\s+/g, "")
+            .trim();
+          const skuPropImages = [];
+          for (const match of text.matchAll(/"imageUrl"\s*:\s*"([^"]+)"\s*,\s*"name"\s*:\s*"([^"]+)"/gi)) {
+            const image = normalizeImageUrl(match[1]);
+            const name = String(match[2] || "").trim();
+            const normalizedName = normalizeSpecText(name);
+            if (image && normalizedName) {
+              skuPropImages.push({ name, normalizedName, image });
+            }
+          }
+          const pickImageFromText = (fragment) => {
+            const source = String(fragment || "");
+            const keyed = /"(?:imageUrl|imageURL|image_url|originImageUrl|mainImage|mainImageUrl|imgUrl|img_url|picUrl|pictureUrl|thumbUrl|skuImageUrl|skuImage|url|src)"\s*:\s*"([^"]+)"/i.exec(source);
+            const direct = keyed?.[1]
+              || /(https?:\/\/[^"'<>\s]+?\.(?:jpe?g|png|webp)(?:[^"'<>\s]*)?)/i.exec(source)?.[1]
+              || /(\/\/[^"'<>\s]+?\.(?:jpe?g|png|webp)(?:[^"'<>\s]*)?)/i.exec(source)?.[1]
+              || "";
+            return normalizeImageUrl(direct);
+          };
+          const pickSkuPropImage = (specAttrs) => {
+            const normalizedSpec = normalizeSpecText(specAttrs);
+            if (!normalizedSpec || !skuPropImages.length) return "";
+            const exact = skuPropImages.find((item) => item.normalizedName === normalizedSpec);
+            if (exact) return exact.image;
+            const partial = skuPropImages
+              .filter((item) => normalizedSpec.includes(item.normalizedName) || item.normalizedName.includes(normalizedSpec))
+              .sort((left, right) => right.normalizedName.length - left.normalizedName.length)[0];
+            return partial?.image || "";
+          };
+          const rememberSku = (specId, specAttrs, skuId, index) => {
+            if (!specId || !skuId) return;
+            const key = `${skuId}:${specId}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            const nearby = Number.isFinite(index) ? text.slice(Math.max(0, index - 900), index + 1400) : "";
+            skus.push({
+              specId,
+              specAttrs,
+              skuId,
+              imageUrl: pickSkuPropImage(specAttrs) || pickImageFromText(nearby),
+            });
+          };
           const reTriplet = /"specId"\s*:\s*"?([^",}]+)"?[^{}]*?"specAttrs"\s*:\s*"([^"]*)"[^{}]*?"skuId"\s*:\s*"?(\d+)"?/g;
           for (const match of text.matchAll(reTriplet)) {
             const specId = String(match[1] || "").trim();
             const specAttrs = String(match[2] || "").trim();
             const skuId = String(match[3] || "").trim();
-            if (!specId || !skuId) continue;
-            const key = `${skuId}:${specId}`;
-            if (seen.has(key)) continue;
-            seen.add(key);
-            skus.push({ specId, specAttrs, skuId });
+            rememberSku(specId, specAttrs, skuId, match.index);
           }
           // 反向也尝试一次（skuId 在前 specId 在后）
           const reReverse = /"skuId"\s*:\s*"?(\d+)"?[^{}]*?"specAttrs"\s*:\s*"([^"]*)"[^{}]*?"specId"\s*:\s*"?([^",}]+)"?/g;
@@ -7882,11 +7942,7 @@ async function handleRequest(body) {
             const specId = String(match[3] || "").trim();
             const specAttrs = String(match[2] || "").trim();
             const skuId = String(match[1] || "").trim();
-            if (!specId || !skuId) continue;
-            const key = `${skuId}:${specId}`;
-            if (seen.has(key)) continue;
-            seen.add(key);
-            skus.push({ specId, specAttrs, skuId });
+            rememberSku(specId, specAttrs, skuId, match.index);
           }
           const requiresLogin = /login\.1688\.com|请登录|扫码登录/.test(url + "\n" + (document.body?.innerText || ""))
             && skus.length === 0;
@@ -7898,8 +7954,42 @@ async function handleRequest(body) {
             return cand && cand.textContent ? cand.textContent.trim() : "";
           })();
           const imageUrl = (() => {
-            const img = document.querySelector('[class*="main-image"] img, [class*="mainImg"] img, [class*="detail-gallery"] img');
-            return img && img.src ? img.src : "";
+            const candidates = [];
+            const push = (value, score = 0) => {
+              const normalized = normalizeImageUrl(value);
+              if (!normalized) return;
+              if (candidates.some((item) => item.url === normalized)) return;
+              candidates.push({ url: normalized, score });
+            };
+            document.querySelectorAll('meta[property="og:image"], meta[name="og:image"], meta[name="twitter:image"], link[rel="image_src"]').forEach((el) => {
+              push(el.getAttribute("content") || el.getAttribute("href"), 120);
+            });
+            document.querySelectorAll("img").forEach((img) => {
+              const src = img.currentSrc
+                || img.getAttribute("src")
+                || img.getAttribute("data-src")
+                || img.getAttribute("data-lazy-src")
+                || img.getAttribute("data-original")
+                || img.getAttribute("data-img")
+                || "";
+              const width = Number(img.naturalWidth || img.width || img.getAttribute("width") || 0);
+              const height = Number(img.naturalHeight || img.height || img.getAttribute("height") || 0);
+              let score = Math.min(80, Math.floor(Math.max(width, height) / 5));
+              const context = `${img.className || ""} ${img.alt || ""} ${img.parentElement?.className || ""}`;
+              if (/main|gallery|detail|offer|product|carousel|sku/i.test(context)) score += 60;
+              if (width >= 120 && height >= 120) score += 50;
+              if (width <= 48 || height <= 48) score -= 80;
+              push(src, score);
+            });
+            document.querySelectorAll("[style*='background']").forEach((el) => {
+              const match = String(el.getAttribute("style") || "").match(/url\((['"]?)(.*?)\1\)/i);
+              if (match?.[2]) push(match[2], 30);
+            });
+            for (const match of text.matchAll(/"(?:imageUrl|imageURL|image_url|originImageUrl|mainImage|mainImageUrl|imgUrl|img_url|picUrl|pictureUrl|thumbUrl)"\s*:\s*"([^"]+)"/gi)) {
+              push(match[1], 40);
+            }
+            candidates.sort((left, right) => right.score - left.score);
+            return candidates[0]?.url || "";
           })();
           return {
             ok: skus.length > 0,

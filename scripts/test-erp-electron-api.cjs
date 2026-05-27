@@ -1503,12 +1503,24 @@ async function main() {
       batchPayDb.close();
     }
 
+    const earlyFinanceLogin = await requestUrl(`${lanStatus.localUrl}/api/login`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({ login: "Finance", accessCode: "finance-code" }),
+    });
+    const earlyFinanceCookie = Array.isArray(earlyFinanceLogin.headers["set-cookie"])
+      ? earlyFinanceLogin.headers["set-cookie"][0]
+      : earlyFinanceLogin.headers["set-cookie"];
+
     const batchPaymentUrl = await requestUrl(`${lanStatus.localUrl}/api/purchase/action`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Accept: "application/json",
-        Cookie: cookie,
+        Cookie: earlyFinanceCookie,
       },
       body: JSON.stringify({
         action: "get_1688_payment_url",

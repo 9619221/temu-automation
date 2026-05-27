@@ -299,6 +299,7 @@ function runFlow() {
 
     services.purchase.submitPaymentApproval("po_demo", ACTORS.buyer);
     assertTransitionDenied(() => services.purchase.approvePayment("po_demo", ACTORS.ops));
+    assertTransitionDenied(() => services.purchase.confirmPaid("po_demo", ACTORS.buyer));
     services.purchase.confirmPaid("po_demo", ACTORS.finance);
     services.purchase.markSupplierProcessing("po_demo", ACTORS.buyer);
     services.purchase.markSupplierShipped("po_demo", ACTORS.buyer);
