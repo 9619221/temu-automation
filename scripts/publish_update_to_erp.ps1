@@ -252,8 +252,9 @@ $blockmapPath = "$installerPath.blockmap"
 if (!(Test-Path -LiteralPath $installerPath)) {
   throw "Missing installer: $installerPath"
 }
-if (!(Test-Path -LiteralPath $blockmapPath)) {
-  throw "Missing blockmap: $blockmapPath"
+$blockmapExists = Test-Path -LiteralPath $blockmapPath
+if (-not $blockmapExists) {
+  Write-Host "[publish] blockmap not produced (differentialPackage disabled); skipping blockmap upload"
 }
 
 $installerSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $installerPath).Hash.ToLowerInvariant()
@@ -342,10 +343,17 @@ $concatCommand = $concatCommand `
 $concatCommand = $concatCommand.Trim("; ".ToCharArray())
 Invoke-NativeChecked "ssh" @($Target, $concatCommand)
 
-Copy-RemoteAtomic -LocalPath $blockmapPath -RemotePath "$RemoteDir/$installerName.blockmap" -Target $Target
+if ($blockmapExists) {
+  Copy-RemoteAtomic -LocalPath $blockmapPath -RemotePath "$RemoteDir/$installerName.blockmap" -Target $Target
+}
 Copy-RemoteAtomic -LocalPath $latestPath -RemotePath "$RemoteDir/latest.yml" -Target $Target
 
-$verifyCommand = "set -euo pipefail; actual=`$(sha256sum $(Quote-Sh $remoteInstallerPath) | cut -d' ' -f1); test ""`$actual"" = '$installerSha256'; chmod 644 $(Quote-Sh "$RemoteDir/latest.yml") $(Quote-Sh $remoteInstallerPath) $(Quote-Sh "$RemoteDir/$installerName.blockmap"); ls -lh $(Quote-Sh "$RemoteDir/latest.yml") $(Quote-Sh $remoteInstallerPath) $(Quote-Sh "$RemoteDir/$installerName.blockmap"); head -5 $(Quote-Sh "$RemoteDir/latest.yml")"
+$verifyTargets = @($(Quote-Sh "$RemoteDir/latest.yml"), $(Quote-Sh $remoteInstallerPath))
+if ($blockmapExists) {
+  $verifyTargets += $(Quote-Sh "$RemoteDir/$installerName.blockmap")
+}
+$verifyTargetsJoined = $verifyTargets -join " "
+$verifyCommand = "set -euo pipefail; actual=`$(sha256sum $(Quote-Sh $remoteInstallerPath) | cut -d' ' -f1); test ""`$actual"" = '$installerSha256'; chmod 644 $verifyTargetsJoined; ls -lh $verifyTargetsJoined; head -5 $(Quote-Sh "$RemoteDir/latest.yml")"
 Invoke-NativeChecked "ssh" @($Target, $verifyCommand)
 
 Invoke-NativeChecked "ssh" @($Target, "rm -rf $(Quote-Sh $remoteChunkDir)")

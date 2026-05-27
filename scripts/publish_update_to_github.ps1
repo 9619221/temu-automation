@@ -72,15 +72,18 @@ $blockmapPath = "$installerPath.blockmap"
 if (!(Test-Path -LiteralPath $installerPath)) {
   throw "Missing installer: $installerPath"
 }
-if (!(Test-Path -LiteralPath $blockmapPath)) {
-  throw "Missing blockmap: $blockmapPath"
+$blockmapExists = Test-Path -LiteralPath $blockmapPath
+if (-not $blockmapExists) {
+  Write-Host "[github] blockmap not produced (differentialPackage disabled); skipping blockmap upload"
 }
 
 $assets = @(
-  @{ Name = "latest.yml"; Path = $latestPath; ContentType = "text/yaml" },
-  @{ Name = "$installerName.blockmap"; Path = $blockmapPath; ContentType = "application/octet-stream" },
-  @{ Name = $installerName; Path = $installerPath; ContentType = "application/octet-stream" }
+  @{ Name = "latest.yml"; Path = $latestPath; ContentType = "text/yaml" }
 )
+if ($blockmapExists) {
+  $assets += @{ Name = "$installerName.blockmap"; Path = $blockmapPath; ContentType = "application/octet-stream" }
+}
+$assets += @{ Name = $installerName; Path = $installerPath; ContentType = "application/octet-stream" }
 
 $token = Get-GitHubToken
 $headers = @{
