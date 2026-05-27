@@ -42,12 +42,13 @@ const menuItems = [
   },
   {
     key: "group-business",
-    label: "业务",
+    label: "采购",
     children: [
       { key: "/product-master-data", icon: <TagsOutlined />, label: "商品资料" },
       { key: "/1688-mapping", icon: <ApiOutlined />, label: "供应商管理" },
       { key: "/sourcing-center", icon: <SearchOutlined />, label: "找品" },
       { key: "/purchase-center", icon: <ShoppingOutlined />, label: "采购单" },
+      { key: "/after-sales", icon: <FileTextOutlined />, label: "售后" },
       { key: "/warehouse-center", icon: <InboxOutlined />, label: "仓库中心" },
       { key: "/qc-outbound", icon: <ExportOutlined />, label: "出库中心" },
     ],

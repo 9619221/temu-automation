@@ -27,6 +27,7 @@ function lazyWithPreload<T extends ComponentType<any>>(factory: LazyFactory<T>) 
 const AppLayout = lazyWithPreload(() => import("./components/Layout/AppLayout"));
 const Dashboard = lazyWithPreload(() => import("./pages/Dashboard"));
 const ShopOverview = lazyWithPreload(() => import("./pages/ShopOverview"));
+const AfterSales = lazyWithPreload(() => import("./pages/AfterSales"));
 const AccountManager = lazyWithPreload(() => import("./pages/AccountManager"));
 const ProductList = lazyWithPreload(() => import("./pages/ProductList.tsx"));
 const ProductDetail = lazyWithPreload(() => import("./pages/ProductDetail"));
@@ -53,6 +54,7 @@ const BrowserMulti = lazyWithPreload(() => import("./pages/BrowserMulti"));
 const CORE_ROUTE_PRELOADERS = [
   AppLayout.preload,
   ShopOverview.preload,
+  AfterSales.preload,
   ProductList.preload,
   ProductMasterData.preload,
   AlibabaMapping.preload,
@@ -292,6 +294,7 @@ function App() {
               >
               <Route index element={<RoleHomeRedirect />} />
               <Route path="shop" element={<RoleRoute path="/shop"><ShopOverview /></RoleRoute>} />
+              <Route path="after-sales" element={<RoleRoute path="/after-sales"><AfterSales /></RoleRoute>} />
               <Route path="products" element={<RoleRoute path="/products"><ProductList /></RoleRoute>} />
               <Route path="products/:id" element={<RoleRoute path="/products"><ProductDetail /></RoleRoute>} />
               <Route path="create-product" element={<RoleRoute path="/create-product"><ProductCreate /></RoleRoute>} />
