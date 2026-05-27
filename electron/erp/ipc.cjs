@@ -149,6 +149,7 @@ const BROADCAST_PURCHASE_ACTIONS = new Set([
   "confirm_paid",
   "rollback_po_status",
   "update_offline_po",
+  "convert_po_to_offline",
 ]);
 
 const ACCESS_CODE_ITERATIONS = 120000;
@@ -4448,7 +4449,8 @@ function listSku1688Sources(params = {}) {
       supplier.name AS system_supplier_name,
       sku.internal_sku_code,
       sku.product_name,
-      sku.color_spec
+      sku.color_spec,
+      sku.image_url AS sku_image_url
     FROM erp_sku_1688_sources source
     LEFT JOIN erp_skus sku ON sku.id = source.sku_id
     LEFT JOIN erp_suppliers supplier ON supplier.id = sku.supplier_id
@@ -10150,6 +10152,192 @@ function updateOfflinePurchaseOrderAction({ db, services, payload, actor }) {
   return { purchaseOrder: toPurchaseOrderResult(db, afterPo) };
 }
 
+// 把任何未付款的采购单转为线下采购：
+// - 已推 1688 的单子先调远端 cancel；远端已不存在按"orphan cleared"算成功
+// - 清掉 1688 残留字段（external_*），candidate 的 1688 标识也清掉
+// - 状态强制回 draft，付款状态 unpaid，方便用户在原 PO 上继续走线下流程
+async function convertPoToOfflineAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "转线下采购");
+  const poId = requireString(payload.poId || payload.id, "poId");
+  const po = getPurchaseOrder(db, poId);
+  const ALLOWED_STATUS = new Set([
+    "draft",
+    "pushed_pending_price",
+    "pending_finance_approval",
+    "approved_to_pay",
+  ]);
+  if (!ALLOWED_STATUS.has(po.status)) {
+    throw new Error("只能在未付款状态下转线下采购");
+  }
+  if (po.payment_status === "paid") {
+    throw new Error("已付款的采购单不能转线下");
+  }
+
+  const lines = db.prepare(
+    "SELECT * FROM erp_purchase_order_lines WHERE po_id = ? ORDER BY id ASC",
+  ).all(poId);
+  if (!lines.length) throw new Error("采购单没有明细行");
+  const line = lines[0];
+
+  const unitCost = optionalNumber(payload.unitPrice) ?? Number(line.unit_cost || 0);
+  const logisticsFee = optionalNumber(payload.logisticsFee) ?? Number(line.logistics_fee || 0);
+  const qty = optionalNumber(payload.qty) ?? Number(line.qty || 0);
+  if (!Number.isFinite(unitCost) || unitCost < 0) throw new Error("unitPrice must be greater than or equal to 0");
+  if (!Number.isFinite(logisticsFee) || logisticsFee < 0) throw new Error("logisticsFee must be greater than or equal to 0");
+  if (!Number.isInteger(qty) || qty <= 0) throw new Error("qty must be a positive integer");
+
+  const supplierId = optionalString(payload.supplierId);
+  const supplier = supplierId ? db.prepare("SELECT * FROM erp_suppliers WHERE id = ?").get(supplierId) : null;
+  const supplierName = optionalString(payload.supplierName) || supplier?.name || "线下供应商";
+
+  // 1) 事务外：调远端 1688 cancel（如果有 external_order_id）
+  let cancelResponse = null;
+  const hadExternalOrder = Boolean(optionalString(po.external_order_id));
+  if (hadExternalOrder) {
+    const apiParams = build1688CancelOrderParams(payload, po);
+    try {
+      cancelResponse = await call1688ProcurementApi({
+        db,
+        actor,
+        accountId: po.account_id,
+        action: "convert_po_to_offline",
+        api: PROCUREMENT_APIS.CANCEL_ORDER,
+        params: apiParams,
+      });
+    } catch (error) {
+      if (!is1688OrderGoneError(error)) throw error;
+      cancelResponse = {
+        orphanCleared: true,
+        reason: "remote_order_not_exist",
+        remoteError: {
+          message: error?.message || String(error),
+          errorCode: error?.errorCode || null,
+        },
+        at: nowIso(),
+      };
+    }
+  }
+
+  // 2) 事务内：原子更新 candidate / line / PO
+  const run = db.transaction(() => {
+    const now = nowIso();
+    const before = getPurchaseOrder(db, poId);
+
+    let candidateId = optionalString(before.selected_candidate_id);
+    if (candidateId) {
+      db.prepare(`
+        UPDATE erp_sourcing_candidates
+        SET purchase_source = @purchase_source,
+            supplier_id = @supplier_id,
+            supplier_name = @supplier_name,
+            unit_price = @unit_price,
+            logistics_fee = @logistics_fee,
+            external_offer_id = NULL,
+            external_sku_id = NULL,
+            external_spec_id = NULL,
+            updated_at = @updated_at
+        WHERE id = @id
+      `).run({
+        id: candidateId,
+        purchase_source: supplierId ? "existing_supplier" : "other_manual",
+        supplier_id: supplierId || null,
+        supplier_name: supplierName,
+        unit_price: unitCost,
+        logistics_fee: logisticsFee,
+        updated_at: now,
+      });
+    } else {
+      candidateId = createId("source");
+      db.prepare(`
+        INSERT INTO erp_sourcing_candidates (
+          id, account_id, pr_id, purchase_source, sourcing_method, supplier_id, supplier_name,
+          product_title, product_url, image_url, unit_price, moq, lead_days,
+          logistics_fee, remark, status, created_by, created_at, updated_at
+        )
+        VALUES (
+          @id, @account_id, @pr_id, @purchase_source, @sourcing_method, @supplier_id, @supplier_name,
+          @product_title, @product_url, @image_url, @unit_price, @moq, @lead_days,
+          @logistics_fee, @remark, @status, @created_by, @created_at, @updated_at
+        )
+      `).run({
+        id: candidateId,
+        account_id: before.account_id,
+        pr_id: before.pr_id,
+        purchase_source: supplierId ? "existing_supplier" : "other_manual",
+        sourcing_method: "manual",
+        supplier_id: supplierId || null,
+        supplier_name: supplierName,
+        product_title: null,
+        product_url: null,
+        image_url: null,
+        unit_price: unitCost,
+        moq: 1,
+        lead_days: null,
+        logistics_fee: logisticsFee,
+        remark: null,
+        status: "selected",
+        created_by: actor.id || null,
+        created_at: now,
+        updated_at: now,
+      });
+    }
+
+    const goodsAmount = qty * unitCost;
+    const totalAmount = goodsAmount + logisticsFee;
+    db.prepare(`
+      UPDATE erp_purchase_order_lines
+      SET qty = @qty, expected_qty = @qty, unit_cost = @unit_cost, logistics_fee = @logistics_fee
+      WHERE id = @id
+    `).run({ id: line.id, qty, unit_cost: unitCost, logistics_fee: logisticsFee });
+
+    db.prepare(`
+      UPDATE erp_purchase_orders
+      SET supplier_id = @supplier_id,
+          selected_candidate_id = @candidate_id,
+          total_amount = @total_amount,
+          paid_amount = @paid_amount,
+          freight_amount = @freight_amount,
+          status = 'draft',
+          payment_status = 'unpaid',
+          external_order_id = NULL,
+          external_order_status = NULL,
+          external_payment_url = NULL,
+          external_payment_url_synced_at = NULL,
+          updated_at = @updated_at
+      WHERE id = @id
+    `).run({
+      id: poId,
+      supplier_id: supplierId || null,
+      candidate_id: candidateId,
+      total_amount: goodsAmount,
+      paid_amount: totalAmount,
+      freight_amount: logisticsFee,
+      updated_at: now,
+    });
+
+    const afterPo = getPurchaseOrder(db, poId);
+    services.workflow.writeAudit({
+      accountId: before.account_id,
+      actor,
+      action: "convert_po_to_offline",
+      entityType: "purchase_order",
+      entityId: poId,
+      before,
+      after: afterPo,
+    });
+    const eventMsg = hadExternalOrder
+      ? `采购单转线下采购（已取消 1688 原单）：${afterPo.po_no || afterPo.id}`
+      : `采购单转线下采购：${afterPo.po_no || afterPo.id}`;
+    writePurchaseOrderFlowEvent(db, afterPo, actor, "convert_po_to_offline", eventMsg);
+    return afterPo;
+  });
+  const afterPo = run();
+  return {
+    purchaseOrder: toPurchaseOrderResult(db, afterPo),
+    cancelResponse,
+  };
+}
+
 function getPurchaseOrderWithCandidate(db, poId) {
   const row = db.prepare(`
     SELECT
@@ -14509,6 +14697,7 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
     generate_po_from_1688_order: generatePoFrom1688OrderAction,
     link_1688_order_to_po: link1688OrderToPoAction,
     cancel_1688_order: cancel1688OrderAction,
+    convert_po_to_offline: convertPoToOfflineAction,
     add_1688_order_memo: add1688OrderMemoAction,
     add_1688_order_feedback: add1688OrderFeedbackAction,
     confirm_1688_receive_goods: confirm1688ReceiveGoodsAction,

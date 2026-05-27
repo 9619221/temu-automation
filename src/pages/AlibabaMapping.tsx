@@ -90,6 +90,7 @@ interface Sku1688SourceRow {
   productTitle?: string | null;
   productUrl?: string | null;
   imageUrl?: string | null;
+  skuImageUrl?: string | null;
   unitPrice?: number | null;
   moq?: number | null;
   ourQty?: number | null;
@@ -1109,16 +1110,32 @@ export default function AlibabaMapping() {
       ),
     },
     {
+      title: "商品图片",
+      key: "productImage",
+      width: 100,
+      align: "center",
+      render: (_value, row) => {
+        const src = row.imageUrl || row.skuImageUrl;
+        return src ? (
+          <Image
+            src={src}
+            width={72}
+            height={72}
+            style={{ objectFit: "cover", borderRadius: 6 }}
+          />
+        ) : (
+          <Text type="secondary">-</Text>
+        );
+      },
+    },
+    {
       title: "商品名称",
       key: "productName",
       width: 220,
       render: (_value, row) => (
-        <Space size={10} align="start">
-          {row.imageUrl ? <Image src={row.imageUrl} width={54} height={54} style={{ objectFit: "cover", borderRadius: 6 }} /> : null}
-          <Space direction="vertical" size={2}>
-            <Text strong ellipsis style={{ maxWidth: 150 }}>{row.productTitle || row.productName || "-"}</Text>
-          </Space>
-        </Space>
+        <Text strong ellipsis style={{ maxWidth: 200 }}>
+          {row.productTitle || row.productName || "-"}
+        </Text>
       ),
     },
     {

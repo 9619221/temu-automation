@@ -274,6 +274,7 @@ const PURCHASE_EVENT_TYPE_LABELS: Record<string, string> = {
   bind_1688_candidate_spec: "绑定规格",
   generate_po: "生成采购单",
   update_offline_po: "更新线下单",
+  convert_po_to_offline: "转线下采购",
   delete_po: "删除采购单",
   preview_1688_order: "1688 预览",
   push_1688_order: "1688 推单",
@@ -2431,6 +2432,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   const [offlinePoTarget, setOfflinePoTarget] = useState<
     | { mode: "create"; pr: PurchaseRequestRow }
     | { mode: "edit"; po: PurchaseOrderRow }
+    | { mode: "convert"; po: PurchaseOrderRow }
     | null
   >(null);
   const [source1688PrId, setSource1688PrId] = useState<string | null>(null);
@@ -4334,11 +4336,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   const offlinePoSubmitting = offlinePoTarget
     ? (offlinePoTarget.mode === "create"
       ? actingKey === `po-${offlinePoTarget.pr.id}`
-      : actingKey === `edit-po-${offlinePoTarget.po.id}`)
+      : offlinePoTarget.mode === "edit"
+        ? actingKey === `edit-po-${offlinePoTarget.po.id}`
+        : actingKey === `convert-po-${offlinePoTarget.po.id}`)
     : false;
 
   const openOfflinePoCreate = (pr: PurchaseRequestRow) => setOfflinePoTarget({ mode: "create", pr });
   const openOfflinePoEdit = (po: PurchaseOrderRow) => setOfflinePoTarget({ mode: "edit", po });
+  const openOfflinePoConvert = (po: PurchaseOrderRow) => setOfflinePoTarget({ mode: "convert", po });
 
   const handleOfflinePoSubmit = async (values: OfflinePoFormValues) => {
     if (!offlinePoTarget) return;
@@ -4362,7 +4367,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         upsertGeneratedPurchaseOrder(pr.id, generatedPo);
         focusPurchaseOrder(generatedPo, pr.id);
       }
-    } else {
+    } else if (offlinePoTarget.mode === "edit") {
       const po = offlinePoTarget.po;
       const result = await runAction(`edit-po-${po.id}`, {
         action: "update_offline_po",
@@ -4373,6 +4378,18 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         unitPrice: values.unitPrice,
         logisticsFee: values.logisticsFee,
       }, "采购单已更新");
+      if (!result) return;
+    } else {
+      const po = offlinePoTarget.po;
+      const result = await runAction(`convert-po-${po.id}`, {
+        action: "convert_po_to_offline",
+        poId: po.id,
+        qty: values.qty,
+        supplierId,
+        supplierName,
+        unitPrice: values.unitPrice,
+        logisticsFee: values.logisticsFee,
+      }, po.externalOrderId ? "已取消 1688 原单并转为线下采购" : "已转为线下采购");
       if (!result) return;
     }
     setOfflinePoTarget(null);
@@ -6399,6 +6416,28 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               编辑
             </Button>
           ) : null}
+          {canPurchase && ["draft", "pushed_pending_price", "pending_finance_approval", "approved_to_pay"].includes(row.status) ? (
+            <Button
+              size="small"
+              icon={<ShopOutlined />}
+              loading={actingKey === `convert-po-${row.id}`}
+              onClick={() => {
+                if (row.externalOrderId) {
+                  Modal.confirm({
+                    title: "转为线下采购",
+                    content: `将先调 1688 取消订单 ${row.externalOrderId}，再把此采购单改为线下。是否继续？`,
+                    okText: "继续",
+                    cancelText: "取消",
+                    onOk: () => openOfflinePoConvert(row),
+                  });
+                } else {
+                  openOfflinePoConvert(row);
+                }
+              }}
+            >
+              线下采购
+            </Button>
+          ) : null}
           {row.status === "draft" && canSubmitPaymentApproval && Number(row.mappingCount || 0) === 0 ? (
             <Button
               size="small"
@@ -7908,8 +7947,20 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
 
       <Modal
         open={Boolean(offlinePoTarget)}
-        title={offlinePoTarget?.mode === "edit" ? "编辑采购单" : "线下采购单"}
-        okText={offlinePoTarget?.mode === "edit" ? "保存" : "创建采购单"}
+        title={
+          offlinePoTarget?.mode === "edit"
+            ? "编辑采购单"
+            : offlinePoTarget?.mode === "convert"
+              ? "转为线下采购"
+              : "线下采购单"
+        }
+        okText={
+          offlinePoTarget?.mode === "edit"
+            ? "保存"
+            : offlinePoTarget?.mode === "convert"
+              ? "确认转线下"
+              : "创建采购单"
+        }
         cancelText="取消"
         confirmLoading={offlinePoSubmitting}
         onCancel={() => setOfflinePoTarget(null)}
@@ -7922,6 +7973,19 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
           initialValues={offlinePoInitialValues}
           onFinish={handleOfflinePoSubmit}
         >
+          {offlinePoTarget?.mode === "convert" ? (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message={
+                offlinePoTarget.po.externalOrderId
+                  ? `将取消 1688 原单 ${offlinePoTarget.po.externalOrderId}，并把此采购单改为线下采购`
+                  : "将把此采购单改为线下采购，状态回到草稿"
+              }
+              description="提交后不可自动恢复线上单，1688 后台请自行确认取消状态"
+            />
+          ) : null}
           <Form.Item name="supplierId" label="已有供应商">
             <Select allowClear showSearch optionFilterProp="label" options={supplierOptions} placeholder="可选；没有就在下面手填供应商名称" />
           </Form.Item>
