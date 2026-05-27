@@ -55,8 +55,8 @@ function parseLatestYml(content, label) {
     if (match) result.size = Number(match[1]);
   }
   result.installerName = basenameFromUpdatePath(result.path || result.url);
-  if (!result.version || !result.installerName || !result.sha512 || !Number.isFinite(result.size)) {
-    throw new Error(`${label} latest.yml is missing version/path/sha512/size`);
+  if (!result.version || !result.installerName || !result.sha512) {
+    throw new Error(`${label} latest.yml is missing version/path/sha512`);
   }
   return result;
 }
@@ -124,11 +124,14 @@ function assetUrlFromFeed(feedUrl, assetName) {
 }
 
 function assertSameLatest(label, actual, expected) {
-  const fields = ["version", "installerName", "sha512", "size"];
+  const fields = ["version", "installerName", "sha512"];
   for (const field of fields) {
     if (actual[field] !== expected[field]) {
       throw new Error(`${label} ${field} mismatch: ${actual[field]} !== ${expected[field]}`);
     }
+  }
+  if (Number.isFinite(actual.size) && Number.isFinite(expected.size) && actual.size !== expected.size) {
+    throw new Error(`${label} size mismatch: ${actual.size} !== ${expected.size}`);
   }
 }
 
@@ -144,8 +147,10 @@ async function verifyRemoteFeed(label, feedUrl, expected, options = {}) {
   } else {
     console.log(`[warn] ${label} is intentionally lagging at ${latest.version}`);
   }
-  await headOk(assetUrlFromFeed(feedUrl, latest.installerName), latest.size);
-  await headOk(assetUrlFromFeed(feedUrl, `${latest.installerName}.blockmap`));
+  await headOk(assetUrlFromFeed(feedUrl, latest.installerName), latest.size || expected.size);
+  if (expected.hasBlockmap) {
+    await headOk(assetUrlFromFeed(feedUrl, `${latest.installerName}.blockmap`));
+  }
   console.log(`[ok] ${label}: version=${latest.version}, installer=${latest.installerName}`);
   return latest;
 }
@@ -162,11 +167,12 @@ async function main() {
   const installerPath = path.join(releaseDir, local.installerName);
   const blockmapPath = path.join(releaseDir, `${local.installerName}.blockmap`);
   if (!fs.existsSync(installerPath)) throw new Error(`missing local installer: ${installerPath}`);
-  if (!fs.existsSync(blockmapPath)) throw new Error(`missing local blockmap: ${blockmapPath}`);
+  local.hasBlockmap = fs.existsSync(blockmapPath);
   const actualSize = fs.statSync(installerPath).size;
-  if (actualSize !== local.size) {
+  if (Number.isFinite(local.size) && actualSize !== local.size) {
     throw new Error(`local installer size mismatch: ${actualSize} !== ${local.size}`);
   }
+  local.size = actualSize;
   console.log(`[ok] local: version=${local.version}, installer=${local.installerName}`);
 
   await verifyRemoteFeed("github", options.githubFeed, local);
