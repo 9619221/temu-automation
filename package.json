@@ -1,7 +1,7 @@
 {
   "name": "temu-automation",
   "private": true,
-  "version": "0.3.50",
+  "version": "0.3.51",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -110,7 +110,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "differentialPackage": true,
+      "differentialPackage": false,
       "shortcutName": "Temu 自动化运营工具",
       "include": "build-installer/installer.nsh"
     }
