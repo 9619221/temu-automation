@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Key } from "react";
 import { Alert, Button, Col, Descriptions, Drawer, Form, Image, Input, InputNumber, Modal, Popconfirm, Progress, Row, Select, Space, Table, Tag, Tooltip, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { DeleteOutlined, EditOutlined, LineChartOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
+import { DeleteOutlined, EditOutlined, EyeOutlined, LineChartOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
 import { useErpAuth } from "../contexts/ErpAuthContext";
 import { hasPageCache, readIndexedPageCache, readPageCache, writeIndexedPageCache, writePageCache } from "../utils/pageCache";
@@ -2208,7 +2208,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       alt="商品图片"
       width={size}
       height={size}
-      preview={{ mask: "查看" }}
+      preview={{ mask: <EyeOutlined /> }}
       style={{ borderRadius: 6, objectFit: "cover", background: "#f5f7fb" }}
     />
   ) : (

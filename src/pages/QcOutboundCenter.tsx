@@ -24,6 +24,7 @@ import {
   CheckCircleOutlined,
   CloudSyncOutlined,
   ExportOutlined,
+  EyeOutlined,
   FileDoneOutlined,
   HolderOutlined,
   InboxOutlined,
@@ -888,7 +889,7 @@ export default function QcOutboundCenter() {
                     width={56}
                     height={56}
                     style={{ objectFit: "cover", borderRadius: 4, cursor: "zoom-in" }}
-                    preview={{ mask: "查看大图" }}
+                    preview={{ mask: <EyeOutlined /> }}
                   />
                 ) : "-"}
               </div>
