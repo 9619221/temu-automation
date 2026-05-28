@@ -777,10 +777,75 @@ interface ErpAPI {
     stop: () => Promise<ErpLanStatus>;
   };
   jushuitan: ErpJushuitanAPI;
+  reports?: {
+    multiStore: (options?: { includeTest?: boolean }) => Promise<ErpMultiStoreReportResponse>;
+  };
   events?: {
     onPurchaseUpdate: (handler: (payload: ErpPurchaseUpdateEvent) => void) => () => void;
     onUserUpdate: (handler: (payload: ErpUserUpdateEvent) => void) => () => void;
     onAuthExpired: (handler: (payload: ErpAuthExpiredEvent) => void) => () => void;
+  };
+}
+
+interface ErpMultiStoreReportStore {
+  mall_id: string;
+  mall_name: string | null;
+  site: string | null;
+  mall_last_seen: string | null;
+  store_code: string | null;
+  store_status: 'active' | 'test' | 'unknown' | string;
+  dict_remark: string | null;
+  sales: {
+    today_qty: number;
+    last7d_qty: number;
+    last30d_qty: number;
+    sku_count: number;
+  };
+  stock_orders: {
+    total: number;
+    pending: number;
+    demand_qty: number;
+    delivered_qty: number;
+  };
+  activities: {
+    count: number;
+    unique: number;
+    skc_count: number;
+  };
+  shop_stats: {
+    stat_date: string | null;
+    sale_volume: number;
+    sale_7d: number;
+    sale_30d: number;
+    on_sale_skc: number;
+    wait_skc: number;
+    lack_skc: number;
+    advice_prepare_skc: number;
+    about_to_sell_out_skc: number;
+    already_sold_out_skc: number;
+    high_price_limit_skc: number;
+    after_sale_ratio_90d: string | number | null;
+    last_updated_at: string | null;
+  };
+  after_sales: {
+    count: number;
+  };
+  health: {
+    last_capture_at: number | null;
+    captures_total: number;
+    lag_seconds: number | null;
+  };
+}
+
+interface ErpMultiStoreReportResponse {
+  ok: boolean;
+  error?: string;
+  data?: {
+    generated_at: number;
+    cloud_tenant_id: string | null;
+    store_count: number;
+    stores: ErpMultiStoreReportStore[];
+    unmapped: ErpMultiStoreReportStore[];
   };
 }
 

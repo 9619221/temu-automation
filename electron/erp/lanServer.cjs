@@ -52,6 +52,7 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/purchase/workbench": ["admin", "manager", "operations", "buyer", "finance"],
   "/api/purchase/action": ["admin", "manager", "operations", "buyer", "finance"],
   "/api/temu/sales-sync": ["admin", "manager", "operations"],
+  "/api/erp/reports/multi-store": ["admin", "manager", "operations", "finance"],
   "/warehouse": ["admin", "manager", "warehouse"],
   "/api/warehouse/workbench": ["admin", "manager", "warehouse"],
   "/api/warehouse/action": ["admin", "manager", "warehouse"],
@@ -3878,6 +3879,25 @@ async function handleTemuSalesSyncRequest({ req, res, db }) {
   }
 }
 
+async function handleMultiStoreReportRequest({ req, res, db }) {
+  if (req.method !== "GET") {
+    writeJson(res, 405, { ok: false, error: "Method not allowed" });
+    return;
+  }
+  try {
+    const parsed = new URL(req.url || "/", "http://127.0.0.1");
+    const includeTest = parsed.searchParams.get("include_test") === "1";
+    const { buildMultiStoreReport } = require("./services/multiStoreReport.cjs");
+    const data = await buildMultiStoreReport(db, { includeTest });
+    writeJson(res, 200, { ok: true, data });
+  } catch (error) {
+    writeJson(res, error?.statusCode || 500, {
+      ok: false,
+      error: error?.message || String(error),
+    });
+  }
+}
+
 async function handleWarehouseActionRequest({ req, res, session, performWarehouseAction }) {
   const wantsJson = String(req.headers.accept || "").includes("application/json")
     || String(req.headers["content-type"] || "").includes("application/json");
@@ -4692,6 +4712,11 @@ async function handleRequest({
         res,
         db,
       });
+      return;
+    }
+
+    if (pathname === "/api/erp/reports/multi-store") {
+      await handleMultiStoreReportRequest({ req, res, db });
       return;
     }
 

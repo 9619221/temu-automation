@@ -388,6 +388,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
         Number.isFinite(options?.timeoutMs) ? options.timeoutMs : 90000,
       ),
     },
+    reports: {
+      multiStore: (options) => ipcRenderer.invoke("erp:reports:multi-store", options || {}),
+    },
     events: {
       onPurchaseUpdate: (handler) => {
         const listener = (_event, payload) => handler(payload);
