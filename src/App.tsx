@@ -50,6 +50,7 @@ const WorkItems = lazyWithPreload(() => import("./pages/WorkItems"));
 const UserManagement = lazyWithPreload(() => import("./pages/UserManagement"));
 const ErpLogin = lazyWithPreload(() => import("./pages/ErpLogin"));
 const BrowserMulti = lazyWithPreload(() => import("./pages/BrowserMulti"));
+const MultiStoreReport = lazyWithPreload(() => import("./pages/MultiStoreReport"));
 
 const CORE_ROUTE_PRELOADERS = [
   AppLayout.preload,
@@ -294,6 +295,7 @@ function App() {
               >
               <Route index element={<RoleHomeRedirect />} />
               <Route path="shop" element={<RoleRoute path="/shop"><ShopOverview /></RoleRoute>} />
+              <Route path="multi-store-report" element={<RoleRoute path="/multi-store-report"><MultiStoreReport /></RoleRoute>} />
               <Route path="after-sales" element={<RoleRoute path="/after-sales"><AfterSales /></RoleRoute>} />
               <Route path="products" element={<RoleRoute path="/products"><ProductList /></RoleRoute>} />
               <Route path="products/:id" element={<RoleRoute path="/products"><ProductDetail /></RoleRoute>} />
@@ -317,6 +319,7 @@ function App() {
               <Route path="1688-mapping" element={<RoleRoute path="/1688-mapping"><AlibabaMapping /></RoleRoute>} />
               <Route path="sourcing-center" element={<RoleRoute path="/sourcing-center"><PurchaseCenter workArea="sourcing" /></RoleRoute>} />
               <Route path="purchase-center" element={<RoleRoute path="/purchase-center"><PurchaseCenter workArea="orders" /></RoleRoute>} />
+              <Route path="other-inout" element={<RoleRoute path="/other-inout"><PurchaseCenter workArea="other-inout" /></RoleRoute>} />
               <Route path="warehouse-center" element={<RoleRoute path="/warehouse-center"><WarehouseCenter /></RoleRoute>} />
               <Route path="qc-outbound" element={<RoleRoute path="/qc-outbound"><QcOutboundCenter /></RoleRoute>} />
               <Route path="work-items" element={<RoleRoute path="/work-items"><WorkItems /></RoleRoute>} />
