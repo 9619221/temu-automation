@@ -129,6 +129,109 @@ r.get("/v1/activity-targets", authMiddleware, (req, res) => {
   }
 });
 
+// JIT/VMI 主动调度目标：返回本租户最近活跃的 mall_id 列表，让扩展 SW 主动调
+// TEMU agentseller 的 querySubOrderList(VMI) + querySuggestCloseJitSkc(JIT) 两个接口。
+// 数据写回 capture_events 后，parseTemuStockOrders / parseTemuJitStatus 自动落表。
+r.get("/v1/jit-vmi-targets", authMiddleware, (req, res) => {
+  const db = getDb();
+  const tenantId = req.user.tid;
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+  const recentDays = Math.min(90, Math.max(1, Number(req.query.recent_days) || 30));
+  try {
+    const rows = db.prepare(`
+      SELECT mall_id, site, mall_name, last_seen
+      FROM mall_accounts
+      WHERE tenant_id = ?
+        AND mall_id <> ''
+        AND last_seen IS NOT NULL
+        AND last_seen >= datetime('now', ?)
+      ORDER BY last_seen DESC
+      LIMIT ?
+    `).all(tenantId, `-${recentDays} days`, limit);
+    const targets = [];
+    const seen = new Set();
+    for (const row of rows) {
+      const mallId = String(row.mall_id || "").trim();
+      if (!mallId) continue;
+      const site = String(row.site || "").trim() || "agentseller";
+      const key = `${mallId}|${site}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      targets.push({
+        mall_id: mallId,
+        site,
+        mall_name: row.mall_name || null,
+        last_seen: row.last_seen || null,
+      });
+    }
+    res.json({ ok: true, targets, generated_at: Date.now() });
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) {
+      res.json({ ok: true, targets: [], generated_at: Date.now() });
+      return;
+    }
+    throw error;
+  }
+});
+
+// 桌面端 ERP 增量拉：把云端 temu_jit_status_snapshot + temu_stock_order_snapshot(querySubOrderList 源)
+// 增量同步到本地 erp_temu_jit_status / erp_temu_vmi_suborder。
+// 客户端记 next_cursor，下次以 since 传回。
+r.get("/v1/sync/temu-jit-vmi", authMiddleware, (req, res) => {
+  const db = getDb();
+  const tenantId = req.user.tid;
+  const since = String(req.query.since || "").trim() || "1970-01-01T00:00:00.000Z";
+  const limit = Math.min(5000, Math.max(1, Number(req.query.limit) || 1000));
+
+  let jit = [];
+  try {
+    jit = db.prepare(`
+      SELECT mall_id, site, stat_date, skc_id, sku_id, product_name,
+             jit_status, jit_close_time, suggest_close,
+             raw_json, last_updated_at
+      FROM temu_jit_status_snapshot
+      WHERE tenant_id = ? AND last_updated_at > ?
+      ORDER BY last_updated_at ASC, skc_id ASC
+      LIMIT ?
+    `).all(tenantId, since, limit);
+  } catch (error) {
+    if (!/no such table/i.test(String(error?.message || ""))) throw error;
+  }
+
+  let vmi = [];
+  try {
+    vmi = db.prepare(`
+      SELECT mall_id, site, stock_order_no, parent_order_no, delivery_order_sn, delivery_batch_sn,
+             skc_id, sku_id, sku_ext_code, product_name, spec_name,
+             demand_qty, delivered_qty, temu_status, order_time, latest_ship_at,
+             raw_json, last_updated_at
+      FROM temu_stock_order_snapshot
+      WHERE tenant_id = ? AND last_updated_at > ?
+        AND source_type = 'stock_order'
+      ORDER BY last_updated_at ASC, stock_order_no ASC
+      LIMIT ?
+    `).all(tenantId, since, limit);
+  } catch (error) {
+    if (!/no such table/i.test(String(error?.message || ""))) throw error;
+  }
+
+  const allTimes = [];
+  for (const row of jit) if (row.last_updated_at) allTimes.push(row.last_updated_at);
+  for (const row of vmi) if (row.last_updated_at) allTimes.push(row.last_updated_at);
+  allTimes.sort();
+  const next_cursor = allTimes.length ? allTimes[allTimes.length - 1] : since;
+  const has_more = jit.length >= limit || vmi.length >= limit;
+
+  res.json({
+    ok: true,
+    jit,
+    vmi,
+    next_cursor,
+    has_more,
+    generated_at: Date.now(),
+  });
+});
+
 // 全局 reload flag：通过 /api/_admin/trigger-reload 设为 true，下一次 heartbeat 把它返回给扩展，扩展调 chrome.runtime.reload() 重读 disk 代码
 const RELOAD_FLAG = { ts: 0, version: 0 };
 export function triggerExtensionReload() {

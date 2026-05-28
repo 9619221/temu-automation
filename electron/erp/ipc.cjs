@@ -20514,9 +20514,57 @@ function registerErpIpcHandlers(ipcMain) {
         });
       }
       requireErp();
-      const { TemuSalesBridge } = require("./services/temuSalesBridge.cjs");
-      const bridge = new TemuSalesBridge({ db: erpState.db });
-      const result = bridge.sync(payload || {});
+      const { TemuCloudSalesSync } = require("./services/temuCloudSalesSync.cjs");
+      const { attachTemuCloudDbIfPossible } = require("./lanServer.cjs");
+      const sync = new TemuCloudSalesSync({
+        db: erpState.db,
+        attachCloudDb: attachTemuCloudDbIfPossible,
+      });
+      const result = sync.sync(payload || {});
+      return { ok: true, result };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+  ipcMain.handle("erp:sync-temu-reviews-from-cloud", async (_event, payload) => {
+    try {
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest("/api/temu/reviews-cloud-sync", {
+          method: "POST",
+          body: payload || {},
+        });
+      }
+      requireErp();
+      const { TemuCloudReviewSync } = require("./services/temuCloudReviewSync.cjs");
+      const { attachTemuCloudDbIfPossible } = require("./lanServer.cjs");
+      const sync = new TemuCloudReviewSync({
+        db: erpState.db,
+        attachCloudDb: attachTemuCloudDbIfPossible,
+      });
+      const result = sync.sync(payload || {});
+      return { ok: true, result };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+  ipcMain.handle("erp:sync-temu-additional-from-cloud", async (_event, payload) => {
+    try {
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest("/api/temu/jit-vmi-cloud-sync", {
+          method: "POST",
+          body: payload || {},
+        });
+      }
+      requireErp();
+      const { TemuCloudJitVmiSync } = require("./services/temuCloudJitVmiSync.cjs");
+      const { attachTemuCloudDbIfPossible } = require("./lanServer.cjs");
+      const sync = new TemuCloudJitVmiSync({
+        db: erpState.db,
+        attachCloudDb: attachTemuCloudDbIfPossible,
+      });
+      const result = sync.sync(payload || {});
       return { ok: true, result };
     } catch (error) {
       return { ok: false, error: error?.message || String(error) };

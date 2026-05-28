@@ -36,6 +36,24 @@ const ACTIVITY_LIBRARY_TARGET_LIMIT = 200;
 const ACTIVITY_LIBRARY_MAX_BATCHES_PER_RUN = 8;
 const ACTIVITY_LIBRARY_RUN_INTERVAL_MS = 5 * 60 * 1000;
 const ACTIVITY_LIBRARY_SEEN_TTL_MS = 6 * 60 * 60 * 1000;
+// JIT(全托管建议关闭) + VMI(普通备货单) 主动调度：替代桌面端 worker.mjs urgentOrders Playwright 任务。
+// 云端 /v1/jit-vmi-targets 给本租户近 30 天活跃 mall，SW 对每个 mall 调两个 venom 接口。
+const JIT_VMI_STATE_KEY = "temu_monitor_jit_vmi_state";
+const JIT_VMI_TARGET_LIMIT = 50;
+const JIT_VMI_MAX_CALLS_PER_RUN = 16;
+const JIT_VMI_RUN_INTERVAL_MS = 30 * 60 * 1000;
+const JIT_VMI_PROBES = [
+  {
+    kind: "fetch-active-jit-suggest-close",
+    path: "/mms/venom/api/supplier/sales/management/querySuggestCloseJitSkc",
+    body: { pageNo: 1, pageSize: 100 },
+  },
+  {
+    kind: "fetch-active-vmi-suborder",
+    path: "/mms/venom/api/supplier/purchase/manager/querySubOrderList",
+    body: { pageNo: 1, pageSize: 100 },
+  },
+];
 const FEISHU_SUPPLIER_TABLE_URL = "https://mcn24onb5t1o.feishu.cn/base/RLy7bndc4aCXhtsx4yAcr2d8nSg?table=tbl0UhZRpR0niDSt&view=vew5Spjz7c";
 const FEISHU_SUPPLIER_ONCE_KEY = "temu_monitor_feishu_supplier_once";
 
@@ -156,6 +174,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   // 顺便心跳到 cloud 做远程诊断
   sendHeartbeat().catch((e) => console.warn("[sw] heartbeat err", e));
   collectActivityLibraryFromTargets().catch((e) => console.warn("[sw] activity library collect err", e?.message || e));
+  collectJitVmiFromTargets().catch((e) => console.warn("[sw] jit/vmi collect err", e?.message || e));
 });
 
 // 在任意 Temu tab 上抓 page world stats（供心跳用）
@@ -386,6 +405,105 @@ async function collectActivityLibraryFromTargets() {
   });
   if (enqueuedCount > 0) await flush();
   return { ok: true, batchCount, enqueuedCount };
+}
+
+// ---------- JIT/VMI 主动调度（替代桌面端 urgentOrders Playwright 任务） ----------
+async function collectJitVmiFromTargets() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", JIT_VMI_STATE_KEY]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
+  const now = Date.now();
+  const state = cfg[JIT_VMI_STATE_KEY] || {};
+  if (state.last_run_at && now - Number(state.last_run_at) < JIT_VMI_RUN_INTERVAL_MS) {
+    return { ok: true, skipped: "interval" };
+  }
+  await setStorage({
+    [JIT_VMI_STATE_KEY]: {
+      ...state,
+      last_run_at: now,
+    },
+  });
+
+  const targetUrl = `${cfg.cloud_endpoint.replace(/\/$/, "")}/api/ingest/v1/jit-vmi-targets?limit=${JIT_VMI_TARGET_LIMIT}`;
+  let targets = [];
+  try {
+    const resp = await fetch(targetUrl, {
+      headers: { Authorization: `Bearer ${cfg.auth_token}` },
+    });
+    if (!resp.ok) return { ok: false, reason: `targets_http_${resp.status}` };
+    const data = await resp.json().catch(() => null);
+    targets = Array.isArray(data?.targets) ? data.targets : [];
+  } catch (error) {
+    return { ok: false, reason: `targets_err_${String(error?.message || error).slice(0, 40)}` };
+  }
+
+  let callCount = 0;
+  let enqueuedCount = 0;
+  let errorCount = 0;
+  for (const target of targets) {
+    if (callCount >= JIT_VMI_MAX_CALLS_PER_RUN) break;
+    const mallId = String(target?.mall_id || target?.mallId || "").trim();
+    if (!mallId) continue;
+    const origin = activityLibraryOriginForSite(target?.site);
+    for (const probe of JIT_VMI_PROBES) {
+      if (callCount >= JIT_VMI_MAX_CALLS_PER_RUN) break;
+      callCount++;
+      const url = `${origin}${probe.path}`;
+      const requestBody = JSON.stringify(probe.body);
+      try {
+        const resp = await fetch(url, {
+          method: "POST",
+          credentials: "include",
+          cache: "no-store",
+          headers: {
+            "Content-Type": "application/json",
+            mallid: mallId,
+          },
+          body: requestBody,
+        });
+        const text = await resp.text();
+        const body = safeParseJson(text);
+        if (resp.ok && body && typeof body === "object") {
+          await enqueue({
+            kind: probe.kind,
+            url,
+            method: "POST",
+            status: resp.status,
+            ts: Date.now(),
+            site: target?.site || "agentseller",
+            page: "background/jit-vmi",
+            mall_id: mallId,
+            mall_name: target?.mall_name || null,
+            body,
+            bodyText: text.length > 200000 ? null : text,
+            requestBodyText: requestBody,
+            bodySize: text.length,
+            activeSource: "jit_vmi_background",
+          });
+          await bumpStats({ captured_count_delta: 1 });
+          enqueuedCount++;
+        } else {
+          errorCount++;
+        }
+      } catch {
+        errorCount++;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+  }
+
+  await setStorage({
+    [JIT_VMI_STATE_KEY]: {
+      ...state,
+      last_run_at: now,
+      last_success_at: Date.now(),
+      last_call_count: callCount,
+      last_enqueued_count: enqueuedCount,
+      last_error_count: errorCount,
+      last_target_count: targets.length,
+    },
+  });
+  if (enqueuedCount > 0) await flush();
+  return { ok: true, callCount, enqueuedCount, errorCount, targetCount: targets.length };
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {

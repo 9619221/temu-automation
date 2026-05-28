@@ -1300,6 +1300,215 @@ function parseTemuStockOrders(db, ctx, evt, body) {
   });
 }
 
+// ---------- JIT 建议关闭：querySuggestCloseJitSkc ----------
+
+function jitSuggestItems(body) {
+  const candidates = [
+    body?.result?.suggestCloseJitSkcList,
+    body?.result?.suggestCloseJitList,
+    body?.result?.skcList,
+    body?.data?.suggestCloseJitSkcList,
+    body?.data?.suggestCloseJitList,
+    body?.data?.skcList,
+    body?.suggestCloseJitSkcList,
+    body?.suggestCloseJitList,
+  ];
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate) && candidate.length) return candidate;
+  }
+  const generic = pickList(body);
+  return Array.isArray(generic) ? generic : [];
+}
+
+function parseTemuJitStatus(db, ctx, evt, body) {
+  const items = jitSuggestItems(body);
+  if (!items.length) return;
+  const upsert = db.prepare(`
+    INSERT INTO temu_jit_status_snapshot (
+      id, tenant_id, mall_id, site, stat_date, skc_id, sku_id, product_name,
+      jit_status, jit_close_time, suggest_close, raw_json, source_event_id, sources_json
+    ) VALUES (
+      @id, @tenant_id, @mall_id, @site, @stat_date, @skc_id, @sku_id, @product_name,
+      @jit_status, @jit_close_time, @suggest_close, @raw_json, @source_event_id, @sources_json
+    )
+    ON CONFLICT(tenant_id, mall_id, skc_id, stat_date) DO UPDATE SET
+      site            = COALESCE(excluded.site, site),
+      sku_id          = COALESCE(excluded.sku_id, sku_id),
+      product_name    = COALESCE(excluded.product_name, product_name),
+      jit_status      = COALESCE(excluded.jit_status, jit_status),
+      jit_close_time  = COALESCE(excluded.jit_close_time, jit_close_time),
+      suggest_close   = COALESCE(excluded.suggest_close, suggest_close),
+      raw_json        = COALESCE(excluded.raw_json, raw_json),
+      source_event_id = COALESCE(excluded.source_event_id, source_event_id),
+      sources_json    = json_patch(COALESCE(sources_json, '{}'), COALESCE(excluded.sources_json, '{}')),
+      last_updated_at = datetime('now')
+  `);
+  const mall_id = eventMallId(ctx, evt);
+  const stat_date = eventStatDate(evt);
+  const sources_json = JSON.stringify({ [evt.url_path]: evt.id });
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue;
+    const skc_id = toNullableString(firstDeepDefined(item, [
+      "productSkcId", "productSKCId", "skcId", "skc", "skcCode", "productSkcCode", "goodsSkcId",
+    ], 3));
+    if (!skc_id) continue;
+    const suggestRaw = firstDeepDefined(item, [
+      "suggestClose", "suggest_close", "needClose", "closeSuggest", "canClose", "suggestion",
+    ], 3);
+    const suggest_close = suggestRaw == null
+      ? 1
+      : (toNullableBooleanInteger(suggestRaw) ?? (toNullableInteger(suggestRaw) ? 1 : 0));
+    const itemJson = JSON.stringify(item);
+    upsert.run({
+      id: crypto.randomUUID(),
+      tenant_id: ctx.tenant_id,
+      mall_id,
+      site: evt.site || null,
+      stat_date,
+      skc_id,
+      sku_id: toNullableString(firstDeepDefined(item, [
+        "productSkuId", "skuId", "skuCode", "extCode",
+      ], 3), 200),
+      product_name: toNullableString(firstDeepDefined(item, [
+        "productName", "goodsName", "title", "name",
+      ], 3), 500),
+      jit_status: toNullableString(firstDeepDefined(item, [
+        "jitStatus", "status", "statusDesc", "statusText", "closeStatus",
+      ], 3), 100),
+      jit_close_time: toNullableString(firstDeepDefined(item, [
+        "jitCloseTime", "closeTime", "suggestCloseTime", "closeDeadline", "gmtClose",
+      ], 3), 100),
+      suggest_close,
+      raw_json: itemJson.length > 1_000_000 ? itemJson.slice(0, 1_000_000) : itemJson,
+      source_event_id: evt.id,
+      sources_json,
+    });
+  }
+}
+
+// ---------- 商品评价：/bg-luna-agent-seller/review/pageQuery ----------
+
+function reviewItems(body) {
+  const candidates = [
+    body?.result?.pageItems,
+    body?.result?.list,
+    body?.result?.items,
+    body?.data?.pageItems,
+    body?.data?.list,
+    body?.pageItems,
+  ];
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate) && candidate.length) return candidate;
+  }
+  return [];
+}
+
+function buildSpecSummary(specVOS) {
+  if (!Array.isArray(specVOS) || !specVOS.length) return null;
+  const parts = [];
+  for (const spec of specVOS) {
+    if (!spec || typeof spec !== "object") continue;
+    const parent = String(spec.parentName ?? spec.parent_name ?? "").trim();
+    const value = String(spec.specName ?? spec.spec_name ?? "").trim();
+    if (!value) continue;
+    parts.push(parent ? `${parent}=${value}` : value);
+  }
+  return parts.length ? parts.join("; ").slice(0, 500) : null;
+}
+
+function buildReviewCategoryPath(categoryPath) {
+  if (!categoryPath || typeof categoryPath !== "object") return null;
+  const parts = [];
+  for (let i = 1; i <= 10; i++) {
+    const node = categoryPath[`cat${i}`];
+    if (node && typeof node === "object" && node.catName) {
+      parts.push(String(node.catName));
+    }
+  }
+  return parts.length ? parts.join(">").slice(0, 200) : null;
+}
+
+function parseTemuReview(db, ctx, evt, body) {
+  const items = reviewItems(body);
+  if (!items.length) return;
+  const upsert = db.prepare(`
+    INSERT INTO temu_review_snapshot (
+      id, tenant_id, mall_id, site, review_id,
+      product_id, product_skc_id, product_sku_ids,
+      goods_id, goods_skc_id, goods_sku_id, goods_name,
+      score, comment, spec_summary, category_path,
+      review_pictures, review_videos, status, on_sale, is_benefit_review,
+      created_at_ts, raw_json, source_event_id, sources_json
+    ) VALUES (
+      @id, @tenant_id, @mall_id, @site, @review_id,
+      @product_id, @product_skc_id, @product_sku_ids,
+      @goods_id, @goods_skc_id, @goods_sku_id, @goods_name,
+      @score, @comment, @spec_summary, @category_path,
+      @review_pictures, @review_videos, @status, @on_sale, @is_benefit_review,
+      @created_at_ts, @raw_json, @source_event_id, @sources_json
+    )
+    ON CONFLICT(tenant_id, mall_id, review_id) DO UPDATE SET
+      site             = COALESCE(excluded.site, site),
+      product_id       = COALESCE(excluded.product_id, product_id),
+      product_skc_id   = COALESCE(excluded.product_skc_id, product_skc_id),
+      product_sku_ids  = COALESCE(excluded.product_sku_ids, product_sku_ids),
+      goods_id         = COALESCE(excluded.goods_id, goods_id),
+      goods_skc_id     = COALESCE(excluded.goods_skc_id, goods_skc_id),
+      goods_sku_id     = COALESCE(excluded.goods_sku_id, goods_sku_id),
+      goods_name       = COALESCE(excluded.goods_name, goods_name),
+      score            = COALESCE(excluded.score, score),
+      comment          = COALESCE(excluded.comment, comment),
+      spec_summary     = COALESCE(excluded.spec_summary, spec_summary),
+      category_path    = COALESCE(excluded.category_path, category_path),
+      review_pictures  = COALESCE(excluded.review_pictures, review_pictures),
+      review_videos    = COALESCE(excluded.review_videos, review_videos),
+      status           = COALESCE(excluded.status, status),
+      on_sale          = COALESCE(excluded.on_sale, on_sale),
+      is_benefit_review = COALESCE(excluded.is_benefit_review, is_benefit_review),
+      created_at_ts    = COALESCE(excluded.created_at_ts, created_at_ts),
+      raw_json         = COALESCE(excluded.raw_json, raw_json),
+      source_event_id  = COALESCE(excluded.source_event_id, source_event_id),
+      sources_json     = json_patch(COALESCE(sources_json, '{}'), COALESCE(excluded.sources_json, '{}')),
+      last_updated_at  = datetime('now')
+  `);
+  const mall_id = eventMallId(ctx, evt);
+  const sources_json = JSON.stringify({ [evt.url_path]: evt.id });
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue;
+    const reviewId = toNullableString(firstDefined(item, ["reviewId", "review_id", "id"]));
+    if (!reviewId) continue;
+    const skuIds = item.productSkuIds ?? item.product_sku_ids;
+    const itemJson = JSON.stringify(item);
+    upsert.run({
+      id: crypto.randomUUID(),
+      tenant_id: ctx.tenant_id,
+      mall_id,
+      site: evt.site || null,
+      review_id: reviewId,
+      product_id: toNullableString(firstDefined(item, ["productId", "product_id"])),
+      product_skc_id: toNullableString(firstDefined(item, ["productSkcId", "product_skc_id"])),
+      product_sku_ids: Array.isArray(skuIds) ? JSON.stringify(skuIds) : null,
+      goods_id: toNullableString(firstDefined(item, ["goodsId", "goods_id"])),
+      goods_skc_id: toNullableString(firstDefined(item, ["goodsSkcId", "goods_skc_id"])),
+      goods_sku_id: toNullableString(firstDefined(item, ["goodsSkuId", "goods_sku_id"])),
+      goods_name: toNullableString(firstDefined(item, ["goodsName", "goods_name", "title"]), 500),
+      score: toNullableInteger(firstDefined(item, ["score", "rating"])),
+      comment: toNullableString(firstDefined(item, ["comment", "content", "reviewText"]), 5000),
+      spec_summary: buildSpecSummary(item.specVOS),
+      category_path: buildReviewCategoryPath(item.categoryPath),
+      review_pictures: item.reviewPictures ? JSON.stringify(item.reviewPictures).slice(0, 10000) : null,
+      review_videos: item.reviewVideos ? JSON.stringify(item.reviewVideos).slice(0, 10000) : null,
+      status: toNullableInteger(firstDefined(item, ["status", "state"])),
+      on_sale: toNullableBooleanInteger(item.onSale),
+      is_benefit_review: toNullableBooleanInteger(item.isBenefitReview),
+      created_at_ts: toNullableInteger(firstDefined(item, ["createdAtTs", "createTime", "createdAt"])),
+      raw_json: itemJson.length > 200_000 ? itemJson.slice(0, 200_000) : itemJson,
+      source_event_id: evt.id,
+      sources_json,
+    });
+  }
+}
+
 function afterSaleTypeFromPath(path) {
   const text = String(path || "");
   if (/returnSupplier\/package/i.test(text)) return "return_package";
@@ -1971,6 +2180,8 @@ const PARSERS = [
   { match: /\/magneto\/price-adjust\/page-query/, fn: parsePriceAdjust, name: "priceAdjust" },
   { match: /\/product\/sku\/site\/suggestedPrice\/pageQuery/, fn: parseSuggestedPrice, name: "suggestedPrice" },
   { match: /deliverGoods\/platform\/pageQuerySubPurchaseOrder|deliverGoods\/management\/pageQueryDeliveryOrders|deliverGoods\/management\/pageQueryDeliveryBatch|\/purchase\/manager\/querySubOrderList/, fn: parseTemuStockOrders, name: "temuStockOrders" },
+  { match: /querySuggestCloseJitSkc|suggestCloseJitSkc/i, fn: parseTemuJitStatus, name: "temuJitStatus" },
+  { match: /\/bg-luna-agent-seller\/review\/pageQuery/i, fn: parseTemuReview, name: "temuReview" },
   { match: /\/mms\/api\/appalachian\/afs\/queryPageV3|\/dunland\/api\/gmp\/returnSupplier\//, fn: parseTemuAfterSales, name: "temuAfterSales" },
   { match: /\/tmod_punish\/|pageQueryDeliveryBatch|queryAllFeedbackRecordInfo|searchQcSubBill|queryWeekInboundExceptionDetailInfo|returnSupplier|high\/price\/flow\/reduce|queryCompetitor|querySiteTargetPrice|batchQueryCustomerQueryLimit|bg-brando-mms\/supplier\/data\/center\/skc\/sales\/data|purchase\/manager\/querySubOrderList/, fn: parseOperationRisk, name: "operationRisk" },
 ];

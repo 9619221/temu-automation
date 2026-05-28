@@ -118,6 +118,9 @@ export const URL_WHITELIST = [
   "/dunland/api/gmp/return/Supplier/confirm/countSupplierConfirmOrder",
   "/dunland/api/gmp/returnSupplier/supplierException/querySupplierFeedBack",
 
+  // === 评价 / 口碑 ===
+  "/bg-luna-agent-seller/review/pageQuery",
+
   // === 物流 / 发货考核 ===
   "/mms/api/andes/delivery/assessment/queryDeliveryAssessmentPeriod",
   "/mms/api/andes/delivery/assessment/queryDeliveryAssessmentRecord",
