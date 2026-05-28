@@ -4,39 +4,9 @@ import type { ColumnsType } from "antd/es/table";
 import { CloudSyncOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons";
 import EmptyGuide from "./EmptyGuide";
 import StatCard from "./StatCard";
+import { fetchUnifiedAfterSales, type UnifiedAfterSaleRow } from "../utils/unifiedAfterSales";
 
 const { Paragraph, Text } = Typography;
-
-interface ConsignAfterSaleRow {
-  id: string;
-  asId: number;
-  outerAsId?: string | null;
-  asDate?: string | null;
-  shopType?: string | null;
-  type?: string | null;
-  status?: string | null;
-  shopStatus?: string | null;
-  shopName?: string | null;
-  shopSite?: string | null;
-  warehouse?: string | null;
-  refundQty?: number | null;
-  rQty?: number | null;
-  boxIdCount?: number | null;
-  totalAmount?: number | null;
-  refundTotalAmount?: number | null;
-  logisticsCompany?: string | null;
-  lId?: string | null;
-  oId?: string | null;
-  soId?: string | null;
-  labels?: string | null;
-  remark?: string | null;
-  receiverName?: string | null;
-  receiverMobile?: string | null;
-  creatorName?: string | null;
-  confirmDate?: string | null;
-  createdText?: string | null;
-  modifiedText?: string | null;
-}
 
 interface ConsignAfterSaleItemRow {
   id: string;
@@ -91,8 +61,8 @@ function formatTime(value?: string | null) {
 
 function statusColor(value?: string | null) {
   const text = String(value || "").trim();
-  if (/作废|取消|关闭|驳回/.test(text)) return "red";
-  if (/完成|已确认|已签收|已入库|已收货/.test(text)) return "green";
+  if (/作废|取消|关闭|驳回|失败/.test(text)) return "red";
+  if (/完成|已确认|已签收|已入库|已收货|审核通过/.test(text)) return "green";
   if (/待|等待|处理中|审核|发货/.test(text)) return "orange";
   return "default";
 }
@@ -109,48 +79,44 @@ function parseReasons(des?: string | null) {
 }
 
 export default function ConsignAfterSalesSection() {
-  const [rows, setRows] = useState<ConsignAfterSaleRow[]>([]);
+  const [rows, setRows] = useState<UnifiedAfterSaleRow[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [loadedOnce, setLoadedOnce] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [jstError, setJstError] = useState<string | null>(null);
+  const [platformError, setPlatformError] = useState<string | null>(null);
   const [loadedAt, setLoadedAt] = useState<string | null>(null);
   const [searchDraft, setSearchDraft] = useState("");
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [activeHead, setActiveHead] = useState<ConsignAfterSaleRow | null>(null);
+  const [activeHead, setActiveHead] = useState<UnifiedAfterSaleRow | null>(null);
   const [items, setItems] = useState<ConsignAfterSaleItemRow[]>([]);
   const [itemsLoading, setItemsLoading] = useState(false);
   const requestIdRef = useRef(0);
 
   const loadData = useCallback(async (notify = false) => {
-    if (!erp?.consignAfterSale?.page) {
-      setError("ERP 接口未就绪，请确认桌面端已登录");
-      setLoadedOnce(true);
-      return;
-    }
     const id = requestIdRef.current + 1;
     requestIdRef.current = id;
     setLoading(true);
     try {
-      const offset = (page - 1) * pageSize;
-      const result = await erp.consignAfterSale.page({
+      const result = await fetchUnifiedAfterSales({
         q: query || undefined,
-        limit: pageSize,
-        offset,
+        page,
+        pageSize,
       });
       if (id !== requestIdRef.current) return;
-      setRows(Array.isArray(result?.rows) ? result.rows : []);
-      setTotal(Number(result?.total || 0));
-      setError(null);
+      setRows(result.rows);
+      setTotal(result.total);
+      setJstError(result.jstError || null);
+      setPlatformError(result.platformError || null);
       setLoadedAt(new Date().toISOString());
       setLoadedOnce(true);
-      if (notify) message.success(`已同步 ${formatNumber(result?.rows?.length || 0)} 条送仓售后`);
+      if (notify) message.success(`已同步 ${formatNumber(result.total)} 条售后`);
     } catch (e: any) {
       if (id !== requestIdRef.current) return;
-      setError(e?.message || "送仓售后读取失败");
+      setJstError(e?.message || "送仓售后读取失败");
       setLoadedOnce(true);
       if (notify) message.error(e?.message || "送仓售后读取失败");
     } finally {
@@ -160,10 +126,13 @@ export default function ConsignAfterSalesSection() {
 
   useEffect(() => { void loadData(); }, [loadData]);
 
-  const openDrawer = useCallback(async (row: ConsignAfterSaleRow) => {
+  const openDrawer = useCallback(async (row: UnifiedAfterSaleRow) => {
     setActiveHead(row);
     setDrawerOpen(true);
-    if (!erp?.consignAfterSale?.items) return;
+    if (!erp?.consignAfterSale?.items || !row.asId) {
+      setItems([]);
+      return;
+    }
     setItemsLoading(true);
     try {
       const list = await erp.consignAfterSale.items({ asId: row.asId });
@@ -180,15 +149,15 @@ export default function ConsignAfterSalesSection() {
   const totalRefundQty = useMemo(() => rows.reduce((s, r) => s + Number(r.refundQty || 0), 0), [rows]);
   const pendingCount = useMemo(() => rows.filter((r) => statusColor(r.status) !== "green").length, [rows]);
 
-  const columns: ColumnsType<ConsignAfterSaleRow> = [
+  const columns: ColumnsType<UnifiedAfterSaleRow> = [
     {
       title: "售后单号",
       key: "as_id",
       width: 200,
       render: (_v, row) => (
         <Space direction="vertical" size={0}>
-          <Text style={{ fontWeight: 600, fontSize: 12 }}>{row.asId}</Text>
-          <Text type="secondary" style={{ fontSize: 11 }}>{row.outerAsId || "-"}</Text>
+          <Text style={{ fontWeight: 600, fontSize: 12 }}>{row.outerAsId || "-"}</Text>
+          {row.asId ? <Text type="secondary" style={{ fontSize: 11 }}>{row.asId}</Text> : null}
         </Space>
       ),
     },
@@ -232,7 +201,7 @@ export default function ConsignAfterSalesSection() {
       title: "内部状态",
       dataIndex: "status",
       key: "status",
-      width: 100,
+      width: 110,
       render: (v) => <Tag color={statusColor(v)}>{v || "-"}</Tag>,
     },
     {
@@ -246,7 +215,7 @@ export default function ConsignAfterSalesSection() {
       title: "类型",
       dataIndex: "type",
       key: "type",
-      width: 100,
+      width: 110,
       render: (v) => v || "-",
     },
     {
@@ -269,7 +238,7 @@ export default function ConsignAfterSalesSection() {
       dataIndex: "remark",
       key: "remark",
       ellipsis: true,
-      render: (v) => v || "-",
+      render: (v, row) => v || row.platformReason || "-",
     },
   ];
 
@@ -325,10 +294,15 @@ export default function ConsignAfterSalesSection() {
     },
   ];
 
+  const combinedError = useMemo(() => {
+    if (jstError && platformError) return `${jstError}；${platformError}`;
+    return jstError || platformError;
+  }, [jstError, platformError]);
+
   return (
     <div>
-      {error ? (
-        <Alert style={{ marginBottom: 12 }} type="warning" showIcon message={error} />
+      {combinedError ? (
+        <Alert style={{ marginBottom: 12 }} type="warning" showIcon message={combinedError} />
       ) : null}
 
       <Row gutter={[12, 12]} className="material-kpi-row" style={{ marginBottom: 12 }}>
@@ -351,12 +325,12 @@ export default function ConsignAfterSalesSection() {
           <div>
             <div className="app-panel__title-main">送仓售后明细</div>
             <div className="app-panel__title-sub">
-              半托管送仓历史台账来自聚水潭导入。本页 {formatNumber(rows.length)} / 累计 {formatNumber(total)} 条；涉及店铺 {formatNumber(shopCount)}。
+              本页 {formatNumber(rows.length)} / 累计 {formatNumber(total)} 条；涉及店铺 {formatNumber(shopCount)}。
               {loadedAt ? ` 同步 ${formatTime(loadedAt)}` : ""}
             </div>
           </div>
           <div>
-            <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void loadData(true)}>刷新</Button>
+            <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void loadData(true)}>刷新全部</Button>
           </div>
         </div>
 
@@ -378,7 +352,7 @@ export default function ConsignAfterSalesSection() {
             />
           </div>
 
-          <Table<ConsignAfterSaleRow>
+          <Table<UnifiedAfterSaleRow>
             className="erp-compact-table"
             rowKey="id"
             size="middle"
@@ -399,7 +373,7 @@ export default function ConsignAfterSalesSection() {
               emptyText: (
                 <EmptyGuide
                   title="暂无送仓售后记录"
-                  description="确认聚水潭历史数据已导入服务器 erp.sqlite（运行 scripts/jushuitan-aftersale-consign-import.cjs）。"
+                  description="确认历史数据已导入 + 云端连接正常。"
                 />
               ),
             }}
@@ -408,7 +382,7 @@ export default function ConsignAfterSalesSection() {
       </section>
 
       <Drawer
-        title={activeHead ? `送仓售后 ${activeHead.asId} · ${activeHead.shopName || "-"}` : "送仓售后明细"}
+        title={activeHead ? `送仓售后 ${activeHead.outerAsId || activeHead.asId || "-"} · ${activeHead.shopName || "-"}` : "送仓售后明细"}
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
         width={1100}
@@ -417,6 +391,7 @@ export default function ConsignAfterSalesSection() {
           <Space direction="vertical" size={12} style={{ width: "100%" }}>
             <Row gutter={[12, 12]}>
               <Col xs={12} sm={6}><Text type="secondary">外部单号</Text><div>{activeHead.outerAsId || "-"}</div></Col>
+              {activeHead.asId ? <Col xs={12} sm={6}><Text type="secondary">内部单号</Text><div>{activeHead.asId}</div></Col> : null}
               <Col xs={12} sm={6}><Text type="secondary">退货时间</Text><div>{formatTime(activeHead.asDate)}</div></Col>
               <Col xs={12} sm={6}><Text type="secondary">内部状态</Text><div><Tag color={statusColor(activeHead.status)}>{activeHead.status || "-"}</Tag></div></Col>
               <Col xs={12} sm={6}><Text type="secondary">平台状态</Text><div><Tag color={statusColor(activeHead.shopStatus)}>{activeHead.shopStatus || "-"}</Tag></div></Col>
@@ -428,19 +403,25 @@ export default function ConsignAfterSalesSection() {
               <Col xs={12} sm={6}><Text type="secondary">网店订单</Text><div>{activeHead.soId || "-"}</div></Col>
               <Col xs={12} sm={6}><Text type="secondary">标签</Text><div>{activeHead.labels || "-"}</div></Col>
               <Col xs={12} sm={6}><Text type="secondary">确认时间</Text><div>{formatTime(activeHead.confirmDate)}</div></Col>
+              {activeHead.platformProductName ? <Col xs={24}><Text type="secondary">平台商品</Text><div>{activeHead.platformProductName}</div></Col> : null}
+              {activeHead.platformReason ? <Col xs={24}><Text type="secondary">平台退货原因</Text><div>{activeHead.platformReason}</div></Col> : null}
               <Col xs={24}><Text type="secondary">备注</Text><div>{activeHead.remark || "-"}</div></Col>
             </Row>
 
-            <Table<ConsignAfterSaleItemRow>
-              className="erp-compact-table"
-              rowKey="id"
-              size="middle"
-              loading={itemsLoading}
-              columns={itemColumns}
-              dataSource={items}
-              scroll={{ x: 1300 }}
-              pagination={{ pageSize: 20, showSizeChanger: true }}
-            />
+            {activeHead.asId ? (
+              <Table<ConsignAfterSaleItemRow>
+                className="erp-compact-table"
+                rowKey="id"
+                size="middle"
+                loading={itemsLoading}
+                columns={itemColumns}
+                dataSource={items}
+                scroll={{ x: 1300 }}
+                pagination={{ pageSize: 20, showSizeChanger: true }}
+              />
+            ) : (
+              <Alert type="info" showIcon message="此单仅来自 Temu 平台后台，暂无明细。" />
+            )}
           </Space>
         ) : null}
       </Drawer>

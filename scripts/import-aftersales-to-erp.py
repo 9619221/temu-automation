@@ -1,6 +1,7 @@
 """
 把聚水潭采购退货 + 送仓售后 4 个 json 导入到生产 ERP 的对应表。
 输出 SQL 到 /tmp 文件，scp 上去 sqlite3 执行。
+含济南排除。
 """
 import json
 import os
@@ -44,6 +45,10 @@ def intesc(v):
 def load(name):
     with open(os.path.join(SRC, name), "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def is_jinan(name):
+    return "济南" in str(name or "")
 
 
 print("读 4 个聚水潭 json...")
@@ -155,10 +160,16 @@ with open(OUT, "w", encoding="utf-8") as f:
         f.write(f"INSERT INTO purchase_return_items ({', '.join(keys)}) VALUES ({', '.join(vals)});\n")
 
     # ---- consign_after_sales 单头 ----
-    f.write(f"\n-- 3. consign_after_sales ({len(aftersale)} 单)\n")
+    skip_jinan_head = 0
+    jinan_as_ids = set()
+    f.write(f"\n-- 3. consign_after_sales (含济南排除)\n")
     for r in aftersale:
         as_id = r.get("as_id")
         if as_id is None:
+            continue
+        if is_jinan(r.get("shop_name")):
+            jinan_as_ids.add(as_id)
+            skip_jinan_head += 1
             continue
         cols = {
             "id": f"jst:as-consign:{as_id}",
@@ -216,11 +227,15 @@ with open(OUT, "w", encoding="utf-8") as f:
         f.write(f"INSERT INTO consign_after_sales ({', '.join(keys)}) VALUES ({', '.join(vals)});\n")
 
     # ---- consign_after_sale_items 明细 ----
-    f.write(f"\n-- 4. consign_after_sale_items ({len(aftersale_items)} 行)\n")
+    skip_jinan_items = 0
+    f.write(f"\n-- 4. consign_after_sale_items (含济南排除)\n")
     for r in aftersale_items:
         asi_id = r.get("asi_id") or r.get("__asi_id")
         as_id = r.get("as_id") or r.get("__as_id")
         if asi_id is None or as_id is None:
+            continue
+        if as_id in jinan_as_ids or is_jinan(r.get("__shop_name")) or is_jinan(r.get("shop_name")):
+            skip_jinan_items += 1
             continue
         cols = {
             "id": f"jst:as-consign-item:{asi_id}",
@@ -271,3 +286,4 @@ with open(OUT, "w", encoding="utf-8") as f:
     f.write("\nCOMMIT;\n")
 
 print(f"\n✅ 已生成: {OUT}, 大小 {os.path.getsize(OUT)//1024} KB")
+print(f"   送仓售后跳济南单头 {skip_jinan_head}，明细 {skip_jinan_items}")

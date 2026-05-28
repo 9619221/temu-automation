@@ -94,6 +94,10 @@ function arrayToJson(value) {
   try { return JSON.stringify(value); } catch { return null; }
 }
 
+function isJinanShop(name) {
+  return /济南/.test(String(name || ""));
+}
+
 function buildHeadRow(raw, companyId, nowIso) {
   const asId = intValue(raw.as_id || raw.id);
   if (!asId) return null;
@@ -212,9 +216,16 @@ function main() {
   const headRows = [];
   const headAsIds = new Set();
   const headSkipped = [];
+  const jinanAsIds = new Set();
+  let headJinanSkipped = 0;
   for (const raw of rawHeads) {
     const row = buildHeadRow(raw, companyId, now);
     if (!row) { headSkipped.push(raw); continue; }
+    if (isJinanShop(row.shop_name)) {
+      jinanAsIds.add(row.as_id);
+      headJinanSkipped += 1;
+      continue;
+    }
     headRows.push(row);
     headAsIds.add(row.as_id);
   }
@@ -222,14 +233,19 @@ function main() {
   const itemRows = [];
   const itemsOrphan = [];
   const itemsSkipped = [];
+  let itemJinanSkipped = 0;
   for (const raw of rawDetails) {
     const row = buildItemRow(raw, companyId, now);
     if (!row) { itemsSkipped.push(raw); continue; }
+    if (jinanAsIds.has(row.as_id) || isJinanShop(row.shop_name)) {
+      itemJinanSkipped += 1;
+      continue;
+    }
     if (!headAsIds.has(row.as_id)) { itemsOrphan.push(row); continue; }
     itemRows.push(row);
   }
 
-  console.log(`[consign-as-import] 解析：单头 ${headRows.length}（跳过 ${headSkipped.length}），明细 ${itemRows.length}（孤儿 ${itemsOrphan.length} / 跳过 ${itemsSkipped.length}）`);
+  console.log(`[consign-as-import] 解析：单头 ${headRows.length}（跳过 ${headSkipped.length}，济南 ${headJinanSkipped}），明细 ${itemRows.length}（孤儿 ${itemsOrphan.length} / 跳过 ${itemsSkipped.length}，济南 ${itemJinanSkipped}）`);
 
   if (dryRun) {
     if (headRows[0]) console.log("[dry] 头样例：", JSON.stringify(headRows[0], null, 2));
