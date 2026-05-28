@@ -46,13 +46,11 @@ function Get-VersionFromLatest {
 }
 
 function Get-GitHubToken {
-  $credentialInput = "protocol=https`nhost=github.com`n`n"
-  $credential = $credentialInput | git credential fill 2>$null
-  $tokenLine = $credential | Where-Object { $_ -like "password=*" } | Select-Object -First 1
-  if (!$tokenLine) {
-    throw "No GitHub token found in git credential manager."
+  $token = (& gh auth token 2>$null | Out-String).Trim()
+  if (-not $token) {
+    throw "gh auth token returned empty. Run: gh auth login"
   }
-  return $tokenLine.Substring("password=".Length)
+  return $token
 }
 
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
