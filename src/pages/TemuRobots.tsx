@@ -48,7 +48,6 @@ interface RobotTaskState {
 }
 
 const ROBOT_TASKS = [
-  { key: "sales", label: "销量", method: "scrapeSales", storeKeys: ["temu_sales", "temu_raw_salesChart"] },
   { key: "products", label: "商品信息", method: "scrapeProducts", storeKeys: ["temu_products"] },
   { key: "quality", label: "质量分", method: "scrapeGoodsData", storeKeys: ["temu_raw_goodsData", "temu_raw_yunduQualityMetrics"] },
   { key: "afterSales", label: "售后", method: "scrapeAfterSales", storeKeys: ["temu_raw_salesReturn", "temu_raw_returnOrders"] },
@@ -235,56 +234,34 @@ export default function TemuRobots() {
   const syncTemuSalesToErp = useCallback(async (runId: number) => {
     const syncTemuSales = window.electronAPI?.erp?.syncTemuSales;
     if (typeof syncTemuSales !== "function") {
-      appendLog("ERP 回灌接口不可用", runId);
-      message.warning("ERP 回灌接口不可用");
+      appendLog("ERP 同步接口不可用", runId);
+      message.warning("ERP 同步接口不可用");
       return;
     }
 
-    let salesData: unknown;
+    appendLog("开始从云端增量同步 TEMU 销量到 ERP", runId);
     try {
-      salesData = await window.electronAPI?.store?.get("temu_sales");
-    } catch (error) {
-      if (!isCurrentRun(runId)) return;
-      appendLog(`未取到销量数据，跳过 ERP 回灌：${getErrorMessage(error)}`, runId);
-      message.warning("未取到销量数据，跳过 ERP 回灌");
-      return;
-    }
-    if (!isCurrentRun(runId)) return;
-
-    if (!salesData || typeof salesData !== "object" || !Array.isArray((salesData as { items?: unknown }).items)) {
-      appendLog("未取到销量数据，跳过 ERP 回灌", runId);
-      message.warning("未取到销量数据，跳过 ERP 回灌");
-      return;
-    }
-
-    appendLog("开始 ERP 回灌销量数据", runId);
-    try {
-      const response = await syncTemuSales({
-        salesData,
-        accountId: activeAccountId ?? undefined,
-        shopName: undefined,
-        statDate: undefined,
-      });
+      const response = await syncTemuSales({});
       if (!isCurrentRun(runId)) return;
 
       if (response?.ok) {
         const result = response.result || {};
-        const detail = `店铺 ${result.shopCount ?? 0} 个，SKU ${result.skuCount ?? 0} 个，跳过 ${result.skippedCount ?? 0} 条`;
-        appendLog(`ERP 回灌成功：${detail}`, runId);
-        message.success(`ERP 回灌成功：${detail}`);
+        const detail = `店铺 ${result.shopCount ?? 0} 个，SKU ${result.skuCount ?? 0} 个，跳过 ${result.skuSkipped ?? 0} 条`;
+        appendLog(`云端同步成功：${detail}`, runId);
+        message.success(`云端同步成功：${detail}`);
         return;
       }
 
       const detail = response?.error || "未知错误";
-      appendLog(`ERP 回灌失败：${detail}`, runId);
-      message.warning(`ERP 回灌失败：${detail}`);
+      appendLog(`云端同步失败：${detail}`, runId);
+      message.warning(`云端同步失败：${detail}`);
     } catch (error) {
       if (!isCurrentRun(runId)) return;
       const detail = getErrorMessage(error);
-      appendLog(`ERP 回灌失败：${detail}`, runId);
-      message.warning(`ERP 回灌失败：${detail}`);
+      appendLog(`云端同步失败：${detail}`, runId);
+      message.warning(`云端同步失败：${detail}`);
     }
-  }, [activeAccountId, appendLog, isCurrentRun]);
+  }, [appendLog, isCurrentRun]);
 
   const handleStart = async () => {
     if (collecting || selectedTotal === 0) return;
@@ -562,6 +539,218 @@ export default function TemuRobots() {
           })}
         </div>
       </section>
+
+      <JitVmiCloudSyncSection />
+      <ReviewsCloudSyncSection />
     </div>
+  );
+}
+
+interface JitVmiSyncResult {
+  jitUpserted?: number;
+  jitSkipped?: number;
+  jitCursor?: string;
+  vmiUpserted?: number;
+  vmiSkipped?: number;
+  vmiCursor?: string;
+  startedAt?: string;
+  finishedAt?: string;
+}
+
+function JitVmiCloudSyncSection() {
+  const [syncing, setSyncing] = useState(false);
+  const [lastResult, setLastResult] = useState<JitVmiSyncResult | null>(null);
+  const [lastError, setLastError] = useState<string | null>(null);
+  const [lastRunAt, setLastRunAt] = useState<string | null>(null);
+
+  const handleSync = useCallback(async () => {
+    const syncFn = window.electronAPI?.erp?.syncTemuAdditionalFromCloud;
+    if (typeof syncFn !== "function") {
+      message.warning("当前桌面端版本不支持云端同步，请升级");
+      return;
+    }
+    setSyncing(true);
+    setLastError(null);
+    try {
+      const resp = await syncFn({});
+      if (resp?.ok) {
+        setLastResult(resp.result || null);
+        setLastRunAt(new Date().toISOString());
+        const detail = `JIT ${resp.result?.jitUpserted ?? 0} / VMI ${resp.result?.vmiUpserted ?? 0}`;
+        message.success(`同步完成：${detail}`);
+      } else {
+        setLastError(resp?.error || "未知错误");
+        message.warning(`同步失败：${resp?.error || "未知错误"}`);
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setLastError(detail);
+      message.warning(`同步失败：${detail}`);
+    } finally {
+      setSyncing(false);
+    }
+  }, []);
+
+  return (
+    <section className="app-panel" style={{ marginTop: 16 }}>
+      <div className="app-panel__title">
+        <div>
+          <div className="app-panel__title-main">
+            <Space size={8}>
+              <SyncOutlined />
+              <span>全托管补偿 · JIT + VMI（云端同步）</span>
+            </Space>
+          </div>
+          <div className="app-panel__title-sub">
+            数据由 Chrome 扩展 SW 主动调 TEMU 接口写入云端，本按钮触发增量同步到本地 ERP（erp_temu_jit_status / erp_temu_vmi_suborder）。
+          </div>
+        </div>
+        <Button
+          type="primary"
+          icon={<SyncOutlined />}
+          loading={syncing}
+          disabled={syncing}
+          onClick={handleSync}
+        >
+          从云端同步
+        </Button>
+      </div>
+
+      {lastError ? (
+        <Alert
+          type="error"
+          showIcon
+          style={{ marginTop: 12 }}
+          message="同步失败"
+          description={lastError}
+        />
+      ) : null}
+
+      {lastResult ? (
+        <div className="robot-metric-grid" style={{ marginTop: 12 }}>
+          <div className="robot-metric is-success">
+            <span>JIT 写入</span>
+            <strong>{lastResult.jitUpserted ?? 0}</strong>
+          </div>
+          <div className="robot-metric is-success">
+            <span>VMI 写入</span>
+            <strong>{lastResult.vmiUpserted ?? 0}</strong>
+          </div>
+          <div className="robot-metric">
+            <span>JIT 跳过</span>
+            <strong>{lastResult.jitSkipped ?? 0}</strong>
+          </div>
+          <div className="robot-metric">
+            <span>VMI 跳过</span>
+            <strong>{lastResult.vmiSkipped ?? 0}</strong>
+          </div>
+        </div>
+      ) : null}
+
+      {lastRunAt ? (
+        <Text type="secondary" style={{ display: "block", marginTop: 12, fontSize: 12 }}>
+          最近同步：{new Date(lastRunAt).toLocaleString()}
+        </Text>
+      ) : null}
+    </section>
+  );
+}
+
+interface ReviewSyncResult {
+  reviewUpserted?: number;
+  reviewSkipped?: number;
+  reviewCursor?: string;
+  startedAt?: string;
+  finishedAt?: string;
+}
+
+function ReviewsCloudSyncSection() {
+  const [syncing, setSyncing] = useState(false);
+  const [lastResult, setLastResult] = useState<ReviewSyncResult | null>(null);
+  const [lastError, setLastError] = useState<string | null>(null);
+  const [lastRunAt, setLastRunAt] = useState<string | null>(null);
+
+  const handleSync = useCallback(async () => {
+    const syncFn = window.electronAPI?.erp?.syncTemuReviewsFromCloud;
+    if (typeof syncFn !== "function") {
+      message.warning("当前桌面端版本不支持评价云端同步，请升级");
+      return;
+    }
+    setSyncing(true);
+    setLastError(null);
+    try {
+      const resp = await syncFn({});
+      if (resp?.ok) {
+        setLastResult(resp.result || null);
+        setLastRunAt(new Date().toISOString());
+        const detail = `评价 ${resp.result?.reviewUpserted ?? 0} 条`;
+        message.success(`同步完成：${detail}`);
+      } else {
+        setLastError(resp?.error || "未知错误");
+        message.warning(`同步失败：${resp?.error || "未知错误"}`);
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setLastError(detail);
+      message.warning(`同步失败：${detail}`);
+    } finally {
+      setSyncing(false);
+    }
+  }, []);
+
+  return (
+    <section className="app-panel" style={{ marginTop: 16 }}>
+      <div className="app-panel__title">
+        <div>
+          <div className="app-panel__title-main">
+            <Space size={8}>
+              <SyncOutlined />
+              <span>商品评价 · 云端同步</span>
+            </Space>
+          </div>
+          <div className="app-panel__title-sub">
+            数据由 Chrome 扩展捕获 TEMU 评价分页接口（/bg-luna-agent-seller/review/pageQuery）写入云端，本按钮触发增量同步到本地 ERP（erp_temu_reviews）。运营访问评价页时数据自动累积。
+          </div>
+        </div>
+        <Button
+          type="primary"
+          icon={<SyncOutlined />}
+          loading={syncing}
+          disabled={syncing}
+          onClick={handleSync}
+        >
+          从云端同步
+        </Button>
+      </div>
+
+      {lastError ? (
+        <Alert
+          type="error"
+          showIcon
+          style={{ marginTop: 12 }}
+          message="同步失败"
+          description={lastError}
+        />
+      ) : null}
+
+      {lastResult ? (
+        <div className="robot-metric-grid" style={{ marginTop: 12 }}>
+          <div className="robot-metric is-success">
+            <span>评价写入</span>
+            <strong>{lastResult.reviewUpserted ?? 0}</strong>
+          </div>
+          <div className="robot-metric">
+            <span>跳过</span>
+            <strong>{lastResult.reviewSkipped ?? 0}</strong>
+          </div>
+        </div>
+      ) : null}
+
+      {lastRunAt ? (
+        <Text type="secondary" style={{ display: "block", marginTop: 12, fontSize: 12 }}>
+          最近同步：{new Date(lastRunAt).toLocaleString()}
+        </Text>
+      ) : null}
+    </section>
   );
 }
