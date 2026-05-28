@@ -171,14 +171,36 @@ function Invoke-ScpChunks {
 
     foreach ($item in $processes) {
       $timeoutMs = [int]([Math]::Min([int64]$ScpTimeoutSeconds * 1000, [int]::MaxValue))
-      if (!$item.Process.WaitForExit($timeoutMs)) {
+      # Start-Process 返回的 Process 对象，进程退出后调 .WaitForExit/.ExitCode 偶发抛"拒绝访问"异常
+      # (Windows process handle 已释放)。用 try/catch 包住并 fallback 到 HasExited 判断。
+      $exited = $false
+      try {
+        $exited = $item.Process.WaitForExit($timeoutMs)
+      } catch {
+        # 退化判断：如果进程已经退出，HasExited 不抛异常
+        try { $exited = $item.Process.HasExited } catch { $exited = $true }
+      }
+      if (-not $exited) {
         Write-Warning "scp timed out for $($item.Chunk.Name) after ${ScpTimeoutSeconds}s; killing and retrying later"
         Stop-Process -Id $item.Process.Id -Force -ErrorAction SilentlyContinue
         continue
       }
-      $item.Process.Refresh()
-      if ($null -ne $item.Process.ExitCode -and $item.Process.ExitCode -ne 0) {
-        Write-Warning "scp failed for $($item.Chunk.Name) with exit code $($item.Process.ExitCode)"
+      try { $item.Process.Refresh() } catch { }
+      $exitCode = $null
+      try { $exitCode = $item.Process.ExitCode } catch { }
+      if ($null -eq $exitCode) {
+        # ExitCode 拿不到，依赖 stderr 日志判断是否失败（非空且非空白 → 视为失败）
+        if (Test-Path -LiteralPath $item.ErrLog) {
+          $errText = (Get-Content -LiteralPath $item.ErrLog -Raw -ErrorAction SilentlyContinue)
+          if (-not [string]::IsNullOrWhiteSpace($errText)) {
+            Write-Warning "scp $($item.Chunk.Name) exit code unavailable; stderr non-empty:"
+            $errText.Trim().Split("`n") | Select-Object -Last 8 | ForEach-Object { Write-Warning $_ }
+          }
+        }
+        continue
+      }
+      if ($exitCode -ne 0) {
+        Write-Warning "scp failed for $($item.Chunk.Name) with exit code $exitCode"
         if (Test-Path -LiteralPath $item.ErrLog) {
           Get-Content -LiteralPath $item.ErrLog -Tail 8 | ForEach-Object { Write-Warning $_ }
         }
