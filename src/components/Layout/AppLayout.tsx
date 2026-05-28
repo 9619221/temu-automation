@@ -4,6 +4,7 @@ import { Badge, Button, Dropdown, Layout, List, Menu, Space, Tag } from "antd";
 import {
   ApiOutlined,
   ArrowRightOutlined,
+  BarChartOutlined,
   BellOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
@@ -21,6 +22,7 @@ import {
   SearchOutlined,
   SettingOutlined,
   ShoppingOutlined,
+  SwapOutlined,
   SyncOutlined,
   TagsOutlined,
   UserOutlined,
@@ -48,6 +50,7 @@ const menuItems = [
       { key: "/1688-mapping", icon: <ApiOutlined />, label: "供应商管理" },
       { key: "/sourcing-center", icon: <SearchOutlined />, label: "找品" },
       { key: "/purchase-center", icon: <ShoppingOutlined />, label: "采购单" },
+      { key: "/other-inout", icon: <SwapOutlined />, label: "其他出入库" },
       { key: "/after-sales", icon: <FileTextOutlined />, label: "售后" },
       { key: "/warehouse-center", icon: <InboxOutlined />, label: "仓库中心" },
       { key: "/qc-outbound", icon: <ExportOutlined />, label: "出库中心" },
@@ -66,6 +69,7 @@ const menuItems = [
     label: "运营",
     children: [
       { key: "/shop", icon: <DashboardOutlined />, label: "店铺概览" },
+      { key: "/multi-store-report", icon: <BarChartOutlined />, label: "多店报表" },
       { key: "/products", icon: <ShoppingOutlined />, label: "商品管理" },
       { key: "/browser-multi", icon: <RocketOutlined />, label: "浏览器多开" },
     ],

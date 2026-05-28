@@ -20646,6 +20646,23 @@ function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:jushuitan:list-jobs", (_event, params) => listJushuitanJobsRuntime(params || {}));
   ipcMain.handle("erp:jushuitan:list-raw", (_event, params) => listJushuitanRawRuntime(params || {}));
   ipcMain.handle("erp:diagnostics:probe-1688-mtop", (_event, payload) => probe1688MtopFromClient(payload || {}));
+  ipcMain.handle("erp:reports:multi-store", async (_event, payload) => {
+    try {
+      const includeTest = payload?.includeTest ? "1" : "0";
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest(`/api/erp/reports/multi-store?include_test=${includeTest}`, {
+          method: "GET",
+        });
+      }
+      requireErp();
+      const { buildMultiStoreReport } = require("./services/multiStoreReport.cjs");
+      const data = await buildMultiStoreReport(erpState.db, { includeTest: payload?.includeTest });
+      return { ok: true, data };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
 }
 
 // 在客户端本机依次探 4 个 1688 mtop 端点 + 主控端 health。

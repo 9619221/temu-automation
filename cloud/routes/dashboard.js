@@ -1733,4 +1733,188 @@ r.get("/skc/:id", (req, res) => {
   res.json({ skc: row, sources, events });
 });
 
+// 多店报表聚合端点：返回每个 mall 的销售/订单/活动/SKC/采集健康 汇总
+// 桌面端 IPC 调用，再 join 本地 erp_temu_malls 补 store_code
+r.get("/report/by-store", (req, res) => {
+  const db = getDb();
+  const tid = req.user.tid;
+  const includeTest = req.query.include_test === "1";
+  const excludeMallIds = includeTest ? [] : ["MALL-EXT-E2E", "MALL-DBG"];
+  const excludePlaceholder = excludeMallIds.map(() => "?").join(",");
+
+  const baseMallFilter = excludeMallIds.length
+    ? `AND mall_id NOT IN (${excludePlaceholder})`
+    : "";
+  const salesMallFilter = excludeMallIds.length
+    ? `AND mall_supplier_id NOT IN (${excludePlaceholder})`
+    : "";
+
+  // 1. 所有出现过的 mall
+  const malls = optionalAll(
+    db,
+    `SELECT mall_id, MAX(mall_name) AS mall_name, MAX(site) AS site, MAX(last_seen) AS last_seen_at
+       FROM mall_accounts
+      WHERE tenant_id = ? AND mall_id <> '' ${baseMallFilter}
+      GROUP BY mall_id`,
+    [tid, ...excludeMallIds]
+  );
+
+  // 2. 销售汇总（来自 temu_sales_snapshot，按 mall_supplier_id 聚合）
+  const salesRows = optionalAll(
+    db,
+    `SELECT mall_supplier_id AS mall_id,
+            SUM(COALESCE(today_sales,0))   AS sales_today_qty,
+            SUM(COALESCE(last7d_sales,0))  AS sales_7d_qty,
+            SUM(COALESCE(last30d_sales,0)) AS sales_30d_qty,
+            COUNT(DISTINCT skc_id) AS sku_count
+       FROM temu_sales_snapshot
+      WHERE tenant_id = ? AND mall_supplier_id <> '' ${salesMallFilter}
+        AND skc_id NOT IN ('SKC-EXT-E2E', 'SKC-DBG')
+      GROUP BY mall_supplier_id`,
+    [tid, ...excludeMallIds]
+  );
+  const salesMap = new Map(salesRows.map((row) => [row.mall_id, row]));
+
+  // 3. 备货单（按状态分桶）
+  const stockOrderRows = optionalAll(
+    db,
+    `SELECT mall_id,
+            COUNT(*) AS total_orders,
+            SUM(CASE WHEN temu_status NOT LIKE '%已发货%' AND temu_status NOT LIKE '%已完成%' AND temu_status NOT LIKE '%已签收%' THEN 1 ELSE 0 END) AS pending_orders,
+            SUM(COALESCE(demand_qty,0))     AS demand_qty_total,
+            SUM(COALESCE(delivered_qty,0))  AS delivered_qty_total
+       FROM temu_stock_order_snapshot
+      WHERE tenant_id = ? AND mall_id <> '' ${baseMallFilter}
+      GROUP BY mall_id`,
+    [tid, ...excludeMallIds]
+  );
+  const stockOrderMap = new Map(stockOrderRows.map((row) => [row.mall_id, row]));
+
+  // 4. 活动报名
+  const activityRows = optionalAll(
+    db,
+    `SELECT mall_id,
+            COUNT(*) AS activity_count,
+            COUNT(DISTINCT activity_id) AS unique_activities,
+            COUNT(DISTINCT skc_id)      AS activity_skc_count
+       FROM temu_activity_snapshot
+      WHERE tenant_id = ? AND mall_id <> '' ${baseMallFilter}
+      GROUP BY mall_id`,
+    [tid, ...excludeMallIds]
+  );
+  const activityMap = new Map(activityRows.map((row) => [row.mall_id, row]));
+
+  // 5. 店铺整体快照（temu_shop_stats，每店最近一条）
+  const shopStatsRows = optionalAll(
+    db,
+    `WITH latest AS (
+       SELECT mall_id, MAX(stat_date) AS stat_date
+         FROM temu_shop_stats
+        WHERE tenant_id = ? AND mall_id <> '' ${baseMallFilter}
+        GROUP BY mall_id
+     )
+     SELECT s.mall_id, s.stat_date,
+            s.sale_volume, s.seven_days_sale_volume, s.thirty_days_sale_volume,
+            s.on_sale_product_number, s.wait_product_number,
+            s.lack_skc_number, s.advice_prepare_skc_number,
+            s.about_to_sell_out_number, s.already_sold_out_number,
+            s.high_price_limit_number, s.quality_after_sale_ratio_90d,
+            s.last_updated_at
+       FROM temu_shop_stats s
+       JOIN latest l ON l.mall_id = s.mall_id AND l.stat_date = s.stat_date
+      WHERE s.tenant_id = ?`,
+    [tid, ...excludeMallIds, tid]
+  );
+  const shopStatsMap = new Map(shopStatsRows.map((row) => [row.mall_id, row]));
+
+  // 6. 采集健康度（capture_events 最近一次 + 总条数）
+  const healthRows = optionalAll(
+    db,
+    `SELECT mall_id,
+            MAX(received_at) AS last_capture_at,
+            COUNT(*)          AS captures_total
+       FROM capture_events
+      WHERE tenant_id = ? AND mall_id IS NOT NULL AND mall_id <> '' ${baseMallFilter}
+      GROUP BY mall_id`,
+    [tid, ...excludeMallIds]
+  );
+  const healthMap = new Map(healthRows.map((row) => [row.mall_id, row]));
+
+  // 7. 售后（按 mall_id 计数，如果表存在）
+  const afterSalesRows = optionalAll(
+    db,
+    `SELECT mall_id, COUNT(*) AS after_sales_count
+       FROM temu_after_sale_snapshot
+      WHERE tenant_id = ? AND mall_id <> '' ${baseMallFilter}
+      GROUP BY mall_id`,
+    [tid, ...excludeMallIds]
+  );
+  const afterSalesMap = new Map(afterSalesRows.map((row) => [row.mall_id, row]));
+
+  // 8. 组装
+  const now = Date.now();
+  const stores = malls.map((m) => {
+    const s = salesMap.get(m.mall_id) || {};
+    const o = stockOrderMap.get(m.mall_id) || {};
+    const a = activityMap.get(m.mall_id) || {};
+    const ss = shopStatsMap.get(m.mall_id) || {};
+    const h = healthMap.get(m.mall_id) || {};
+    const af = afterSalesMap.get(m.mall_id) || {};
+    const lastCaptureAt = Number(h.last_capture_at || 0);
+    return {
+      mall_id: m.mall_id,
+      mall_name: m.mall_name || null,
+      site: m.site || null,
+      mall_last_seen: m.last_seen_at || null,
+      sales: {
+        today_qty: toNum(s.sales_today_qty),
+        last7d_qty: toNum(s.sales_7d_qty),
+        last30d_qty: toNum(s.sales_30d_qty),
+        sku_count: toNum(s.sku_count),
+      },
+      stock_orders: {
+        total: toNum(o.total_orders),
+        pending: toNum(o.pending_orders),
+        demand_qty: toNum(o.demand_qty_total),
+        delivered_qty: toNum(o.delivered_qty_total),
+      },
+      activities: {
+        count: toNum(a.activity_count),
+        unique: toNum(a.unique_activities),
+        skc_count: toNum(a.activity_skc_count),
+      },
+      shop_stats: {
+        stat_date: ss.stat_date || null,
+        sale_volume: toNum(ss.sale_volume),
+        sale_7d: toNum(ss.seven_days_sale_volume),
+        sale_30d: toNum(ss.thirty_days_sale_volume),
+        on_sale_skc: toNum(ss.on_sale_product_number),
+        wait_skc: toNum(ss.wait_product_number),
+        lack_skc: toNum(ss.lack_skc_number),
+        advice_prepare_skc: toNum(ss.advice_prepare_skc_number),
+        about_to_sell_out_skc: toNum(ss.about_to_sell_out_number),
+        already_sold_out_skc: toNum(ss.already_sold_out_number),
+        high_price_limit_skc: toNum(ss.high_price_limit_number),
+        after_sale_ratio_90d: ss.quality_after_sale_ratio_90d ?? null,
+        last_updated_at: ss.last_updated_at || null,
+      },
+      after_sales: {
+        count: toNum(af.after_sales_count),
+      },
+      health: {
+        last_capture_at: lastCaptureAt || null,
+        captures_total: toNum(h.captures_total),
+        lag_seconds: lastCaptureAt ? Math.max(0, Math.round((now - lastCaptureAt) / 1000)) : null,
+      },
+    };
+  });
+
+  sendJson(req, res, {
+    generated_at: now,
+    tenant_id: tid,
+    store_count: stores.length,
+    stores,
+  });
+});
+
 export default r;
