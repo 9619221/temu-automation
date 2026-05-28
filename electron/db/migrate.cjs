@@ -131,7 +131,7 @@ function backupDatabaseIfNeeded(dbPath, options = {}) {
   if (options.backup === false) return null;
   if (!fs.existsSync(dbPath)) return null;
 
-  const backupDir = options.backupDir || path.join(path.dirname(dbPath), "..", "backups");
+  const backupDir = options.backupDir || path.join(path.dirname(dbPath), "backups");
   fs.mkdirSync(backupDir, { recursive: true });
 
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
