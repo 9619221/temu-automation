@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { DragEvent, MouseEvent } from "react";
+import { createPortal } from "react-dom";
 import {
   Alert,
   Button,
+  Checkbox,
   Form,
   Input,
   InputNumber,
   Modal,
-  Segmented,
+  Image,
   Select,
   Space,
+  Spin,
   Table,
   Tabs,
   Tag,
@@ -21,25 +25,92 @@ import {
   CloudSyncOutlined,
   ExportOutlined,
   FileDoneOutlined,
+  HolderOutlined,
   InboxOutlined,
   ReloadOutlined,
   SearchOutlined,
-  ShoppingCartOutlined,
 } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
 import StatCard from "../components/StatCard";
 import { useErpAuth } from "../contexts/ErpAuthContext";
 import { hasPageCache, readPageCache, writePageCache } from "../utils/pageCache";
-import {
-  fetchTemuStockOrders,
-  loadCloudConfig,
-  type TemuStockOrderRow,
-  type TemuStockOrderSummaryRow,
-} from "../utils/cloudClient";
+import type { TemuStockOrderRow } from "../utils/cloudClient";
 
 const { Text } = Typography;
 const erp = window.electronAPI?.erp;
-const OUTBOUND_CACHE_KEY = "temu.qc-outbound.workbench.cache.v2";
+const OUTBOUND_CACHE_KEY = "temu.qc-outbound.workbench.cache.v3";
+const UNIFIED_DEFAULT_PAGE_SIZE = 100;
+
+// 与 src/types/electron.d.ts 中 ConsignDeliverUnified* 保持一致 —— 类型在 .d.ts 模块外不可访问，
+// 这里再声明一份纯结构副本供组件内使用。
+interface ConsignDeliverUnifiedRawCloud {
+  stock_order_no?: string | null;
+  row_key?: string | null;
+  mall_id?: string | null;
+  site?: string | null;
+  parent_order_no?: string | null;
+  delivery_batch_sn?: string | null;
+  product_id?: string | null;
+  skc_id?: string | null;
+  sku_id?: string | null;
+  sku_ext_code?: string | null;
+  temu_status?: string | null;
+  demand_qty?: number | null;
+  delivered_qty?: number | null;
+  order_amount_cents?: number | null;
+  currency?: string | null;
+  product_name?: string | null;
+  spec_name?: string | null;
+  delivery_order_sn?: string | null;
+  receive_warehouse_id?: string | null;
+  receive_warehouse_name?: string | null;
+  warehouse_group?: string | null;
+  urgency_info?: string | null;
+  order_time?: string | null;
+  latest_ship_at?: string | null;
+  logistics_info?: string | null;
+  item_count?: number | null;
+}
+interface ConsignDeliverUnifiedRawJst {
+  o_id?: number | null;
+  so_id?: string | null;
+  shop_name?: string | null;
+  status?: string | null;
+  src_status?: string | null;
+  shop_status_text?: string | null;
+  item_amount?: number | null;
+  items_qty?: number | null;
+  order_date?: string | null;
+  send_date?: string | null;
+  outer_deliver_no?: string | null;
+  supplier_name?: string | null;
+  logistics_company?: string | null;
+  l_id?: string | null;
+  sku_info?: string | null;
+  skus?: string | null;
+  currency?: string | null;
+}
+interface ConsignDeliverUnifiedRow {
+  soId: string | null;
+  shopName: string | null;
+  status: string | null;
+  itemAmount: number | null;
+  itemsQty: number | null;
+  orderDate: string | null;
+  outerDeliverNo: string | null;
+  supplierName: string | null;
+  source: "cloud" | "jst" | "both";
+  rawCloud: ConsignDeliverUnifiedRawCloud | null;
+  rawJst: ConsignDeliverUnifiedRawJst | null;
+}
+interface ConsignDeliverUnifiedResult {
+  ok?: boolean;
+  rows: ConsignDeliverUnifiedRow[];
+  total: number;
+  page: number;
+  pageSize: number;
+  sourceBreakdown: { cloud_only: number; jst_only: number; both: number };
+}
 
 interface AccountRow {
   id: string;
@@ -117,9 +188,8 @@ interface OutboundWorkbench {
 interface OutboundCache {
   generatedAt?: string;
   outboundData?: OutboundWorkbench;
-  stockOrders?: TemuStockOrderRow[];
-  stockOrderSummary?: TemuStockOrderSummaryRow[];
   accounts?: AccountRow[];
+  unifiedSnapshot?: ConsignDeliverUnifiedResult;
 }
 
 const OUTBOUND_STATUS_LABELS: Record<string, string> = {
@@ -146,13 +216,152 @@ const OUTBOUND_STATUS_COLORS: Record<string, string> = {
   cancelled: "default",
 };
 
-const CLOUD_SOURCE_LABELS: Record<string, string> = {
-  stock_order: "备货单",
-  shipping_desk: "发货台",
-  shipping_list: "发货单",
+type UnifiedRowSource = "cloud" | "jst" | "both";
+
+const JST_STATUS_OPTIONS = ["已发货", "取消", "已付款待审核", "异常", "发货中", "待付款"];
+
+const UNIFIED_COLUMN_MENU_WIDTH = 280;
+const UNIFIED_COLUMN_MENU_EDGE_GAP = 12;
+const UNIFIED_COLUMN_MENU_OFFSET = 8;
+const UNIFIED_COLUMN_MENU_CHROME_HEIGHT = 96;
+const UNIFIED_COLUMN_MENU_MIN_BODY_HEIGHT = 180;
+const UNIFIED_COLUMN_MENU_MAX_BODY_HEIGHT = 430;
+const UNIFIED_COLUMN_ORDER_STORAGE_KEY = "temu.consign.unified.columnOrder.v2";
+const UNIFIED_CONFIGURABLE_COLUMN_KEYS = [
+  "status",
+  "order",
+  "deliver",
+  "shop",
+  "product",
+  "amount",
+  "orderTime",
+  "shipTime",
+  "qty",
+  "supplier",
+  "logistics",
+  "warehouse",
+  "localLink",
+];
+const UNIFIED_CONFIGURABLE_COLUMN_KEY_SET = new Set(UNIFIED_CONFIGURABLE_COLUMN_KEYS);
+const UNIFIED_COLUMN_LABELS: Record<string, string> = {
+  status: "状态",
+  order: "备货单",
+  deliver: "发货单",
+  shop: "店铺",
+  product: "商品信息",
+  amount: "订单金额",
+  orderTime: "下单时间",
+  shipTime: "发货时间",
+  qty: "数量",
+  supplier: "供应商",
+  logistics: "物流",
+  warehouse: "收货仓",
+  localLink: "本地承接",
 };
 
-const CLOUD_SOURCE_ORDER = ["stock_order", "shipping_desk", "shipping_list"];
+interface UnifiedColumnConfig {
+  order: string[];
+  visible: string[];
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function unifiedColumnMenuPosition(clientX: number, clientY: number) {
+  const maxLeft = Math.max(
+    UNIFIED_COLUMN_MENU_EDGE_GAP,
+    window.innerWidth - UNIFIED_COLUMN_MENU_WIDTH - UNIFIED_COLUMN_MENU_EDGE_GAP,
+  );
+  const maxTop = Math.max(
+    UNIFIED_COLUMN_MENU_EDGE_GAP,
+    window.innerHeight
+      - UNIFIED_COLUMN_MENU_CHROME_HEIGHT
+      - UNIFIED_COLUMN_MENU_MIN_BODY_HEIGHT
+      - UNIFIED_COLUMN_MENU_EDGE_GAP,
+  );
+  const x = clampNumber(
+    clientX + UNIFIED_COLUMN_MENU_OFFSET,
+    UNIFIED_COLUMN_MENU_EDGE_GAP,
+    maxLeft,
+  );
+  const y = clampNumber(
+    clientY + UNIFIED_COLUMN_MENU_OFFSET,
+    UNIFIED_COLUMN_MENU_EDGE_GAP,
+    maxTop,
+  );
+  const availableBodyHeight = window.innerHeight
+    - y
+    - UNIFIED_COLUMN_MENU_CHROME_HEIGHT
+    - UNIFIED_COLUMN_MENU_EDGE_GAP;
+  return {
+    x,
+    y,
+    bodyMaxHeight: clampNumber(
+      availableBodyHeight,
+      UNIFIED_COLUMN_MENU_MIN_BODY_HEIGHT,
+      UNIFIED_COLUMN_MENU_MAX_BODY_HEIGHT,
+    ),
+  };
+}
+
+function normalizeUnifiedColumnOrder(value: unknown) {
+  const source = Array.isArray(value) ? value : [];
+  const seen = new Set<string>();
+  const ordered = source
+    .map((item) => String(item || ""))
+    .filter((key) => {
+      if (!UNIFIED_CONFIGURABLE_COLUMN_KEY_SET.has(key) || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  return [
+    ...ordered,
+    ...UNIFIED_CONFIGURABLE_COLUMN_KEYS.filter((key) => !seen.has(key)),
+  ];
+}
+
+function defaultUnifiedColumnConfig(): UnifiedColumnConfig {
+  return {
+    order: [...UNIFIED_CONFIGURABLE_COLUMN_KEYS],
+    visible: [...UNIFIED_CONFIGURABLE_COLUMN_KEYS],
+  };
+}
+
+function normalizeUnifiedColumnConfig(value: unknown): UnifiedColumnConfig {
+  const raw = value && typeof value === "object" ? value as { order?: unknown; visible?: unknown } : null;
+  const order = normalizeUnifiedColumnOrder(raw?.order || value);
+  const visibleSource = Array.isArray(raw?.visible) ? raw.visible : order;
+  const visible = Array.from(new Set(visibleSource.map((item) => String(item || "")).filter((key) => (
+    UNIFIED_CONFIGURABLE_COLUMN_KEY_SET.has(key)
+  ))));
+  return {
+    order,
+    visible: visible.length ? visible : ["order"],
+  };
+}
+
+function readUnifiedColumnConfig() {
+  if (typeof window === "undefined") return defaultUnifiedColumnConfig();
+  try {
+    return normalizeUnifiedColumnConfig(JSON.parse(window.localStorage.getItem(UNIFIED_COLUMN_ORDER_STORAGE_KEY) || "[]"));
+  } catch {
+    return defaultUnifiedColumnConfig();
+  }
+}
+
+function unifiedRowKeys(row: ConsignDeliverUnifiedRow) {
+  const keys: string[] = [];
+  const push = (prefix: string, value?: string | null) => {
+    const text = String(value || "").trim();
+    if (text) keys.push(`${prefix}:${text}`);
+  };
+  push("stock", row.soId);
+  push("online", row.soId);
+  push("delivery", row.rawCloud?.delivery_order_sn || row.rawJst?.outer_deliver_no);
+  push("batch", row.rawCloud?.delivery_batch_sn);
+  return keys;
+}
 
 function canRole(role: string, allowed: string[]) {
   return allowed.includes(role) || (role === "admin" && allowed.includes("manager"));
@@ -173,66 +382,6 @@ function formatDateTime(value?: string | null) {
   return date.toLocaleString("zh-CN", { hour12: false });
 }
 
-function formatMoneyCents(cents?: number | null, currency?: string | null) {
-  if (cents == null || !Number.isFinite(Number(cents))) return "-";
-  const value = Number(cents) / 100;
-  const suffix = currency ? ` ${currency}` : "";
-  return `${value.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}${suffix}`;
-}
-
-function stockOrderSourceType(row: TemuStockOrderRow) {
-  return row.source_type || (row.delivery_order_sn ? "shipping_list" : row.delivery_batch_sn ? "shipping_desk" : "stock_order");
-}
-
-function stockOrderSourceLabel(row: TemuStockOrderRow) {
-  const type = stockOrderSourceType(row);
-  return CLOUD_SOURCE_LABELS[type] || "履约单";
-}
-
-function stockOrderStatusKey(status?: string | null) {
-  return status ? String(status) : "__empty__";
-}
-
-function stockOrderStatusLabel(sourceType: string, status?: string | null) {
-  const raw = stockOrderStatusKey(status);
-  if (raw === "__empty__") return "未标记";
-  const sourcePrefix = CLOUD_SOURCE_LABELS[sourceType] || "履约单";
-  if (/^\d+$/.test(raw)) return `${sourcePrefix}状态 ${raw}`;
-  return raw;
-}
-
-function stockOrderWorkflowStatusKey(row: TemuStockOrderRow) {
-  return `${stockOrderSourceType(row)}:${stockOrderStatusKey(row.temu_status)}`;
-}
-
-function stockOrderWorkflowStatusLabel(row: TemuStockOrderRow) {
-  return stockOrderStatusLabel(stockOrderSourceType(row), row.temu_status);
-}
-
-function stockOrderIdentity(row: TemuStockOrderRow) {
-  const type = stockOrderSourceType(row);
-  if (type === "shipping_list") return row.delivery_order_sn || row.stock_order_no || row.delivery_batch_sn || row.online_order_no || row.row_key || row.id;
-  if (type === "shipping_desk") return row.delivery_batch_sn || row.delivery_order_sn || row.stock_order_no || row.online_order_no || row.row_key || row.id;
-  return row.stock_order_no || row.delivery_order_sn || row.delivery_batch_sn || row.online_order_no || row.row_key || row.id;
-}
-
-function stockOrderKeys(row: TemuStockOrderRow) {
-  const keys: string[] = [];
-  const push = (prefix: string, value?: string | null) => {
-    const text = String(value || "").trim();
-    if (text) keys.push(`${prefix}:${text}`);
-  };
-  push("stock", row.stock_order_no);
-  push("delivery", row.delivery_order_sn);
-  push("batch", row.delivery_batch_sn);
-  push("online", row.online_order_no);
-  push("internal", row.internal_order_no);
-  if (row.online_order_no && row.internal_order_no) {
-    keys.push(`online_internal:${String(row.online_order_no).trim()}|${String(row.internal_order_no).trim()}`);
-  }
-  return keys;
-}
-
 function shipmentKeys(row: OutboundShipmentRow) {
   const keys: string[] = [];
   const push = (prefix: string, value?: string | null) => {
@@ -251,6 +400,12 @@ function stockOrderDemand(row: TemuStockOrderRow) {
   return Math.max(0, demand - delivered) || demand || 1;
 }
 
+function unifiedRowDemand(row: ConsignDeliverUnifiedRow) {
+  const demand = Number(row.itemsQty || row.rawCloud?.demand_qty || 0);
+  const delivered = Number(row.rawCloud?.delivered_qty || 0);
+  return Math.max(0, demand - delivered) || demand || 1;
+}
+
 function stockStatusColor(status?: string | null) {
   const text = String(status || "");
   if (!text) return "default";
@@ -265,10 +420,6 @@ function outboundStatusTag(status?: string) {
   return <Tag color={OUTBOUND_STATUS_COLORS[key] || "default"}>{OUTBOUND_STATUS_LABELS[key] || key}</Tag>;
 }
 
-function stockOrderSummaryTotal(summary: TemuStockOrderSummaryRow[]) {
-  return summary.reduce((sum, row) => sum + Number(row.count || 0), 0);
-}
-
 export default function QcOutboundCenter() {
   const auth = useErpAuth();
   const role = auth.currentUser?.role || "";
@@ -277,19 +428,28 @@ export default function QcOutboundCenter() {
     [],
   );
   const [outboundData, setOutboundData] = useState<OutboundWorkbench>(() => cachedData.outboundData || {});
-  const [stockOrders, setStockOrders] = useState<TemuStockOrderRow[]>(() => cachedData.stockOrders || []);
-  const [stockOrderSummary, setStockOrderSummary] = useState<TemuStockOrderSummaryRow[]>(() => cachedData.stockOrderSummary || []);
   const [accounts, setAccounts] = useState<AccountRow[]>(() => cachedData.accounts || []);
+  const [unifiedSnapshot, setUnifiedSnapshot] = useState<ConsignDeliverUnifiedResult>(() => cachedData.unifiedSnapshot || {
+    rows: [],
+    total: 0,
+    page: 1,
+    pageSize: UNIFIED_DEFAULT_PAGE_SIZE,
+    sourceBreakdown: { cloud_only: 0, jst_only: 0, both: 0 },
+  });
+  const [unifiedLoading, setUnifiedLoading] = useState(false);
+  const [unifiedError, setUnifiedError] = useState<string | null>(null);
+  const [unifiedLoadedAt, setUnifiedLoadedAt] = useState<string | null>(() => cachedData.generatedAt || null);
+  const [unifiedPage, setUnifiedPage] = useState(1);
+  const [unifiedPageSize, setUnifiedPageSize] = useState(UNIFIED_DEFAULT_PAGE_SIZE);
+  const unifiedSource: "all" | UnifiedRowSource = "all";
   const [loadedOnce, setLoadedOnce] = useState(() => hasPageCache(cachedData));
   const [loading, setLoading] = useState(false);
   const [actingKey, setActingKey] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("cloud");
-  const [stockSourceType, setStockSourceType] = useState("");
   const [stockStatus, setStockStatus] = useState("");
   const [stockQuery, setStockQuery] = useState("");
-  const [cloudConfigured, setCloudConfigured] = useState(false);
-  const [cloudError, setCloudError] = useState<string | null>(null);
-  const [cloudLoadedAt, setCloudLoadedAt] = useState<string | null>(() => cachedData.generatedAt || null);
+  const [unifiedItemsCache, setUnifiedItemsCache] = useState<Record<string, any[]>>({});
+  const [unifiedItemsLoading, setUnifiedItemsLoading] = useState<Record<string, boolean>>({});
   const [selectedAccountId, setSelectedAccountId] = useState("");
   const [planTarget, setPlanTarget] = useState<OutboundBatchRow | null>(null);
   const [stockOrderTarget, setStockOrderTarget] = useState<TemuStockOrderRow | null>(null);
@@ -297,6 +457,10 @@ export default function QcOutboundCenter() {
   const [stockOrderPreviewError, setStockOrderPreviewError] = useState<string | null>(null);
   const [stockOrderPreviewLoading, setStockOrderPreviewLoading] = useState(false);
   const [shipTarget, setShipTarget] = useState<OutboundShipmentRow | null>(null);
+  const [unifiedColumnConfig, setUnifiedColumnConfig] = useState<UnifiedColumnConfig>(readUnifiedColumnConfig);
+  const [unifiedColumnDraft, setUnifiedColumnDraft] = useState<UnifiedColumnConfig | null>(null);
+  const [unifiedColumnMenu, setUnifiedColumnMenu] = useState({ open: false, x: 0, y: 0, bodyMaxHeight: UNIFIED_COLUMN_MENU_MAX_BODY_HEIGHT });
+  const [unifiedDraggedColumn, setUnifiedDraggedColumn] = useState<string | null>(null);
   const [planForm] = Form.useForm();
   const [stockOrderForm] = Form.useForm();
   const [shipForm] = Form.useForm();
@@ -304,82 +468,91 @@ export default function QcOutboundCenter() {
   const canCreateOutbound = canRole(role, ["operations", "manager", "admin"]);
   const canWarehouseAction = canRole(role, ["warehouse", "manager", "admin"]);
 
-  const applyCache = useCallback((
+  const persistCache = useCallback((
     nextOutbound: OutboundWorkbench,
-    nextStockOrders: TemuStockOrderRow[],
-    nextStockSummary: TemuStockOrderSummaryRow[],
     nextAccounts: AccountRow[],
+    nextSnapshot: ConsignDeliverUnifiedResult | null,
   ) => {
-    setOutboundData(nextOutbound || {});
-    setStockOrders(nextStockOrders || []);
-    setStockOrderSummary(nextStockSummary || []);
-    setAccounts(nextAccounts || []);
-    setLoadedOnce(true);
     writePageCache<OutboundCache>(OUTBOUND_CACHE_KEY, {
       generatedAt: new Date().toISOString(),
       outboundData: nextOutbound || {},
-      stockOrders: nextStockOrders || [],
-      stockOrderSummary: nextStockSummary || [],
       accounts: nextAccounts || [],
+      unifiedSnapshot: nextSnapshot || undefined,
     });
   }, []);
 
-  const loadData = useCallback(async (options?: { notify?: boolean; forceAllCloud?: boolean }) => {
+  const loadData = useCallback(async (options?: { notify?: boolean }) => {
     if (!erp) return;
     setLoading(true);
-    if (options?.forceAllCloud) {
-      setActiveTab("cloud");
-      setStockQuery("");
-      setStockSourceType("");
-      setStockStatus("");
-    }
     try {
-      const [nextOutbound, nextAccounts, cfg] = await Promise.all([
+      const [nextOutbound, nextAccounts] = await Promise.all([
         erp.outbound.workbench({ limit: 200 }),
         erp.account.list({ limit: 500 }),
-        loadCloudConfig(),
       ]);
-      let nextStockOrders: TemuStockOrderRow[] = [];
-      let nextStockSummary: TemuStockOrderSummaryRow[] = [];
-      if (cfg) {
-        setCloudConfigured(true);
-        try {
-          const stockResult = await fetchTemuStockOrders(cfg, {
-            q: options?.forceAllCloud ? undefined : stockQuery || undefined,
-            limit: 5000,
-          });
-          nextStockOrders = stockResult.rows || [];
-          nextStockSummary = stockResult.summary || [];
-          const nextCloudLoadedAt = new Date().toISOString();
-          const nextTotal = stockOrderSummaryTotal(nextStockSummary) || nextStockOrders.length;
-          setCloudLoadedAt(nextCloudLoadedAt);
-          setCloudError(null);
-          if (options?.notify) {
-            message.success(`云端送仓托管已同步 ${formatQty(nextTotal)} 条`);
-          }
-        } catch (error: any) {
-          setCloudError(error?.message || "云端备货/发货读取失败");
-          if (options?.notify) message.error(error?.message || "云端送仓托管读取失败");
-        }
-      } else {
-        setCloudConfigured(false);
-        setCloudError("还没有配置云端连接");
-      }
+      setOutboundData(nextOutbound || {});
       const accountRows = Array.isArray(nextAccounts) ? nextAccounts : [];
+      setAccounts(accountRows);
       if (!selectedAccountId && accountRows[0]?.id) {
         setSelectedAccountId(accountRows[0].id);
       }
-      applyCache(nextOutbound, nextStockOrders, nextStockSummary, accountRows);
+      setLoadedOnce(true);
+      persistCache(nextOutbound, accountRows, unifiedSnapshot);
+      if (options?.notify) message.success("出库工作台已刷新");
     } catch (error: any) {
       message.error(error?.message || "出库中心数据读取失败");
     } finally {
       setLoading(false);
     }
-  }, [applyCache, selectedAccountId, stockQuery]);
+  }, [persistCache, selectedAccountId, unifiedSnapshot]);
+
+  const loadUnified = useCallback(async (params: {
+    page: number;
+    pageSize: number;
+    search: string;
+    status: string;
+    source: "all" | UnifiedRowSource;
+    notify?: boolean;
+  }) => {
+    if (!erp?.consignDeliver?.unified) return;
+    setUnifiedLoading(true);
+    try {
+      const result = await erp.consignDeliver.unified({
+        page: params.page,
+        pageSize: params.pageSize,
+        search: params.search || undefined,
+        status: params.status || undefined,
+        source: params.source,
+      });
+      setUnifiedSnapshot(result);
+      setUnifiedError(null);
+      setUnifiedLoadedAt(new Date().toISOString());
+      persistCache(outboundData, accounts, result);
+      if (params.notify) {
+        message.success(`送仓托管已加载 ${result.rows.length}/${result.total} 条`);
+      }
+    } catch (error: any) {
+      setUnifiedError(error?.message || "送仓托管读取失败");
+      if (params.notify) message.error(error?.message || "送仓托管读取失败");
+    } finally {
+      setUnifiedLoading(false);
+    }
+  }, [accounts, outboundData, persistCache]);
 
   useEffect(() => {
     void loadData();
-  }, [loadData]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    void loadUnified({
+      page: unifiedPage,
+      pageSize: unifiedPageSize,
+      search: stockQuery,
+      status: stockStatus,
+      source: unifiedSource,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unifiedPage, unifiedPageSize, stockQuery, stockStatus, unifiedSource]);
 
   const runOutboundAction = async (key: string, payload: Record<string, any>, successText: string) => {
     if (!erp) return;
@@ -420,23 +593,6 @@ export default function QcOutboundCenter() {
     );
     setPlanTarget(null);
     planForm.resetFields();
-  };
-
-  const openStockOrderModal = (row: TemuStockOrderRow) => {
-    const linkedAccountId = resolveStockOrderLink(row)?.shipments.find((item) => item.accountId)?.accountId;
-    const accountId = linkedAccountId || selectedAccountId || accounts[0]?.id || "";
-    setStockOrderTarget(row);
-    setStockOrderPreview(null);
-    setStockOrderPreviewError(null);
-    stockOrderForm.setFieldsValue({
-      accountId,
-      qty: stockOrderDemand(row),
-      boxes: 1,
-      remark: `Temu 云端${stockOrderSourceLabel(row)} ${stockOrderIdentity(row)}`,
-    });
-    if (accountId) {
-      void previewStockOrderPlan(row, accountId, stockOrderDemand(row));
-    }
   };
 
   const previewStockOrderPlan = async (
@@ -493,6 +649,13 @@ export default function QcOutboundCenter() {
         limit: 200,
       });
       await loadData();
+      void loadUnified({
+        page: unifiedPage,
+        pageSize: unifiedPageSize,
+        search: stockQuery,
+        status: stockStatus,
+        source: unifiedSource,
+      });
       const result = response?.result || {};
       if (result.idempotent) {
         message.info("该云端履约记录已生成本地出库单，未重复创建");
@@ -545,142 +708,255 @@ export default function QcOutboundCenter() {
     }
     return index;
   }, [outboundData.outboundShipments]);
-  const resolveStockOrderLink = useCallback((row: TemuStockOrderRow) => (
-    stockOrderKeys(row)
-      .map((key) => stockOrderLinkIndex.get(key))
-      .find(Boolean)
+  const resolveUnifiedRowLink = useCallback((row: ConsignDeliverUnifiedRow) => (
+    unifiedRowKeys(row).map((key) => stockOrderLinkIndex.get(key)).find(Boolean)
   ), [stockOrderLinkIndex]);
-  const cloudDemandQty = useMemo(
-    () => stockOrders.reduce((sum, row) => sum + Number(row.demand_qty || 0), 0),
-    [stockOrders],
-  );
-  const cloudShippingQty = useMemo(
-    () => stockOrders.reduce((sum, row) => sum + Number(row.shipping_qty ?? row.delivered_qty ?? 0), 0),
-    [stockOrders],
-  );
-  const cloudTotalCount = useMemo(
-    () => stockOrderSummaryTotal(stockOrderSummary) || stockOrders.length,
-    [stockOrderSummary, stockOrders.length],
-  );
-  const stockSourceCounts = useMemo(() => {
-    if (stockOrderSummary.length) {
-      return stockOrderSummary.reduce<Record<string, number>>((acc, item) => {
-        const key = item.source_type || "stock_order";
-        acc[key] = (acc[key] || 0) + Number(item.count || 0);
-        return acc;
-      }, {});
-    }
-    return stockOrders.reduce<Record<string, number>>((acc, row) => {
-      const key = stockOrderSourceType(row);
-      acc[key] = (acc[key] || 0) + 1;
-      return acc;
-    }, {});
-  }, [stockOrderSummary, stockOrders]);
-  const selectedSourceStockOrders = useMemo(
-    () => stockOrders.filter((row) => !stockSourceType || stockOrderSourceType(row) === stockSourceType),
-    [stockOrders, stockSourceType],
-  );
-  const filteredStockOrders = useMemo(
-    () => selectedSourceStockOrders.filter((row) => !stockStatus || stockOrderWorkflowStatusKey(row) === stockStatus),
-    [selectedSourceStockOrders, stockStatus],
-  );
-  const stockSourceOptions = useMemo(() => {
-    const total = Object.values(stockSourceCounts).reduce((sum, value) => sum + Number(value || 0), 0) || stockOrders.length;
-    return [
-      { label: `全部 ${total}`, value: "" },
-      { label: `备货单 ${stockSourceCounts.stock_order || 0}`, value: "stock_order" },
-      { label: `发货台 ${stockSourceCounts.shipping_desk || 0}`, value: "shipping_desk" },
-      { label: `发货单 ${stockSourceCounts.shipping_list || 0}`, value: "shipping_list" },
-    ];
-  }, [stockOrders.length, stockSourceCounts]);
-  const stockStatusOptions = useMemo(() => {
-    const counts = new Map<string, { count: number; sourceType: string; rawStatus: string }>();
-    for (const item of stockOrderSummary) {
-      const sourceType = item.source_type || "stock_order";
-      if (stockSourceType && sourceType !== stockSourceType) continue;
-      const rawStatus = stockOrderStatusKey(item.temu_status);
-      const key = `${sourceType}:${rawStatus}`;
-      const current = counts.get(key) || { count: 0, sourceType, rawStatus };
-      current.count += Number(item.count || 0);
-      counts.set(key, current);
-    }
-    if (!counts.size) {
-      for (const row of selectedSourceStockOrders) {
-        const sourceType = stockOrderSourceType(row);
-        const rawStatus = stockOrderStatusKey(row.temu_status);
-        const key = `${sourceType}:${rawStatus}`;
-        const current = counts.get(key) || { count: 0, sourceType, rawStatus };
-        current.count += 1;
-        counts.set(key, current);
-      }
-    }
-    const total = Array.from(counts.values()).reduce((sum, item) => sum + item.count, 0) || selectedSourceStockOrders.length;
-    const options = [{ label: `全部 ${total}`, value: "__all__" }];
-    Array.from(counts.entries())
-      .sort((a, b) => {
-        const sourceDelta = CLOUD_SOURCE_ORDER.indexOf(a[1].sourceType) - CLOUD_SOURCE_ORDER.indexOf(b[1].sourceType);
-        if (sourceDelta) return sourceDelta;
-        return b[1].count - a[1].count;
-      })
-      .forEach(([key, item]) => {
-        const label = stockOrderStatusLabel(item.sourceType, item.rawStatus === "__empty__" ? null : item.rawStatus);
-        options.push({ label: `${label} ${item.count}`, value: key });
-      });
-    return options;
-  }, [selectedSourceStockOrders, stockOrderSummary, stockSourceType]);
-  const stockStatusTabItems = useMemo(
-    () => stockStatusOptions.map((item) => ({ key: item.value, label: item.label })),
-    [stockStatusOptions],
-  );
+  const unifiedRows = unifiedSnapshot.rows;
+  const unifiedTotal = unifiedSnapshot.total;
 
-  const cloudStockColumns = useMemo<ColumnsType<TemuStockOrderRow>>(() => [
+  const openUnifiedColumnMenu = useCallback((event: MouseEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const position = unifiedColumnMenuPosition(event.clientX, event.clientY);
+    setUnifiedColumnDraft({
+      order: [...unifiedColumnConfig.order],
+      visible: [...unifiedColumnConfig.visible],
+    });
+    setUnifiedColumnMenu({
+      open: true,
+      ...position,
+    });
+  }, [unifiedColumnConfig]);
+
+  const reorderUnifiedDraftColumn = useCallback((sourceField: string, targetField: string) => {
+    if (!sourceField || !targetField || sourceField === targetField) return;
+    setUnifiedColumnDraft((prev) => {
+      const current = normalizeUnifiedColumnConfig(prev || unifiedColumnConfig);
+      const sourceIndex = current.order.indexOf(sourceField);
+      const targetIndex = current.order.indexOf(targetField);
+      if (sourceIndex === -1 || targetIndex === -1) return current;
+      const nextOrder = current.order.slice();
+      const [movedField] = nextOrder.splice(sourceIndex, 1);
+      nextOrder.splice(targetIndex, 0, movedField);
+      return {
+        ...current,
+        order: nextOrder,
+        visible: nextOrder.filter((key) => current.visible.includes(key)),
+      };
+    });
+  }, [unifiedColumnConfig]);
+
+  const handleUnifiedColumnDragStart = useCallback((event: DragEvent<HTMLDivElement>, field: string) => {
+    setUnifiedDraggedColumn(field);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", field);
+  }, []);
+
+  const handleUnifiedColumnDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+  }, []);
+
+  const handleUnifiedColumnDrop = useCallback((event: DragEvent<HTMLDivElement>, targetField: string) => {
+    event.preventDefault();
+    const sourceField = unifiedDraggedColumn || event.dataTransfer.getData("text/plain");
+    reorderUnifiedDraftColumn(sourceField, targetField);
+    setUnifiedDraggedColumn(null);
+  }, [unifiedDraggedColumn, reorderUnifiedDraftColumn]);
+
+  const handleUnifiedColumnDragEnd = useCallback(() => {
+    setUnifiedDraggedColumn(null);
+  }, []);
+
+  const toggleUnifiedDraftColumn = useCallback((field: string, checked: boolean) => {
+    setUnifiedColumnDraft((prev) => {
+      const current = normalizeUnifiedColumnConfig(prev || unifiedColumnConfig);
+      const visible = new Set(current.visible);
+      if (checked) {
+        visible.add(field);
+      } else if (visible.size > 1) {
+        visible.delete(field);
+      }
+      return { ...current, visible: current.order.filter((key) => visible.has(key)) };
+    });
+  }, [unifiedColumnConfig]);
+
+  const saveUnifiedColumnConfig = useCallback(() => {
+    const next = normalizeUnifiedColumnConfig(unifiedColumnDraft || unifiedColumnConfig);
+    setUnifiedColumnConfig(next);
+    try {
+      window.localStorage.setItem(UNIFIED_COLUMN_ORDER_STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      // localStorage 仅做便利保存，失败也不影响表格布局
+    }
+    setUnifiedColumnMenu((prev) => ({ ...prev, open: false }));
+  }, [unifiedColumnConfig, unifiedColumnDraft]);
+
+  const restoreUnifiedColumnConfig = useCallback(() => {
+    setUnifiedColumnDraft(defaultUnifiedColumnConfig());
+  }, []);
+
+  useEffect(() => {
+    if (!unifiedColumnMenu.open) return undefined;
+    const close = (event: globalThis.MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest?.(".purchase-order-column-menu")) return;
+      setUnifiedColumnMenu((prev) => ({ ...prev, open: false }));
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setUnifiedColumnMenu((prev) => ({ ...prev, open: false }));
+    };
+    window.addEventListener("mousedown", close);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [unifiedColumnMenu.open]);
+
+  const activeUnifiedColumnConfig = unifiedColumnDraft || unifiedColumnConfig;
+
+  const loadUnifiedItems = useCallback(async (row: ConsignDeliverUnifiedRow) => {
+    const oId = row.rawJst?.o_id ? String(row.rawJst.o_id) : "";
+    if (!oId || !erp?.consignDeliver?.items) return;
+    if (unifiedItemsCache[oId] || unifiedItemsLoading[oId]) return;
+    setUnifiedItemsLoading((prev) => ({ ...prev, [oId]: true }));
+    try {
+      const items = await erp.consignDeliver.items({ o_id: oId });
+      setUnifiedItemsCache((prev) => ({ ...prev, [oId]: Array.isArray(items) ? items : [] }));
+    } catch (error: any) {
+      message.error(error?.message || "商品明细加载失败");
+    } finally {
+      setUnifiedItemsLoading((prev) => ({ ...prev, [oId]: false }));
+    }
+  }, [unifiedItemsCache, unifiedItemsLoading]);
+
+  const renderUnifiedRowItems = useCallback((row: ConsignDeliverUnifiedRow) => {
+    const oId = row.rawJst?.o_id ? String(row.rawJst.o_id) : "";
+    if (!oId) return <Text type="secondary">仅云端数据，无聚水潭明细</Text>;
+    if (unifiedItemsLoading[oId]) return <Spin size="small" />;
+    const items = unifiedItemsCache[oId];
+    if (!items) return <Text type="secondary">展开后加载中...</Text>;
+    if (!items.length) return <Text type="secondary">无明细</Text>;
+    const headerCellStyle = {
+      fontSize: 12,
+      color: "rgba(0,0,0,0.45)",
+      fontWeight: 500 as const,
+    };
+    return (
+      <div style={{ margin: -16 }}>
+        {/* 列标题 */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            padding: "8px 16px",
+            background: "#f0f5ff",
+            borderBottom: "1px solid #d6e4ff",
+            width: "100%",
+            boxSizing: "border-box",
+          }}
+        >
+          <div style={{ width: 72, flexShrink: 0, ...headerCellStyle }}>图片</div>
+          <div style={{ flex: 1, minWidth: 80, paddingLeft: 12, ...headerCellStyle }}>商品名</div>
+          <div style={{ width: 192, flexShrink: 0, paddingLeft: 12, ...headerCellStyle }}>规格</div>
+          <div style={{ width: 152, flexShrink: 0, paddingLeft: 12, ...headerCellStyle }}>SKU</div>
+          <div style={{ width: 82, flexShrink: 0, paddingLeft: 12, textAlign: "right", ...headerCellStyle }}>数量</div>
+          <div style={{ width: 102, flexShrink: 0, paddingLeft: 12, textAlign: "right", ...headerCellStyle }}>单价</div>
+          <div style={{ width: 112, flexShrink: 0, paddingLeft: 12, textAlign: "right", ...headerCellStyle }}>金额</div>
+        </div>
+        {/* 数据行 */}
+        <Image.PreviewGroup>
+          {items.map((it: any) => (
+            <div
+              key={String(it.oiId || it.id || `${it.skuId}-${it.skuCode}`)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                padding: "10px 16px",
+                borderBottom: "1px solid #f0f0f0",
+                background: "#fafafa",
+                width: "100%",
+                boxSizing: "border-box",
+              }}
+            >
+              <div style={{ width: 72, flexShrink: 0 }}>
+                {it.picUrl ? (
+                  <Image
+                    src={it.picUrl}
+                    alt=""
+                    width={56}
+                    height={56}
+                    style={{ objectFit: "cover", borderRadius: 4, cursor: "zoom-in" }}
+                    preview={{ mask: "查看大图" }}
+                  />
+                ) : "-"}
+              </div>
+              <div style={{ flex: 1, minWidth: 80, paddingLeft: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {it.name || "-"}
+              </div>
+              <div style={{ width: 192, flexShrink: 0, paddingLeft: 12, color: "rgba(0,0,0,0.55)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {it.propertiesValue || "-"}
+              </div>
+              <div style={{ width: 152, flexShrink: 0, paddingLeft: 12, color: "rgba(0,0,0,0.55)", fontFamily: "monospace" }}>
+                {it.skuId || "-"}
+              </div>
+              <div style={{ width: 82, flexShrink: 0, paddingLeft: 12, textAlign: "right" }}>
+                {formatQty(it.qty)} 件
+              </div>
+              <div style={{ width: 102, flexShrink: 0, paddingLeft: 12, textAlign: "right", color: "rgba(0,0,0,0.55)" }}>
+                {it.price != null ? `¥${Number(it.price).toFixed(2)}` : "-"}
+              </div>
+              <div style={{ width: 112, flexShrink: 0, paddingLeft: 12, textAlign: "right", fontWeight: 600 }}>
+                {it.amount != null ? `¥${Number(it.amount).toFixed(2)}` : "-"}
+              </div>
+            </div>
+          ))}
+        </Image.PreviewGroup>
+      </div>
+    );
+  }, [unifiedItemsCache, unifiedItemsLoading]);
+
+  const cloudStockColumns = useMemo<ColumnsType<ConsignDeliverUnifiedRow>>(() => {
+    const columns: ColumnsType<ConsignDeliverUnifiedRow> = [
     {
-      title: "内部/线上单号/平台状态",
-      key: "order",
-      width: 260,
-      fixed: "left",
+      title: "状态",
+      key: "status",
+      width: 130,
       render: (_value, row) => (
-        <Space direction="vertical" size={3}>
-          <Space size={4} wrap>
-            <Tag color="blue">{stockOrderSourceLabel(row)}</Tag>
-            <Tag color={stockStatusColor(stockOrderWorkflowStatusLabel(row))}>{stockOrderWorkflowStatusLabel(row)}</Tag>
-          </Space>
-          <Text strong>{stockOrderIdentity(row)}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            线上 {row.online_order_no || row.parent_order_no || "-"}
-          </Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            内部 {row.internal_order_no || row.stock_order_no || "-"}
-          </Text>
-        </Space>
+        row.status ? <Tag color={stockStatusColor(row.status)} style={{ whiteSpace: "nowrap" }}>{row.status}</Tag> : <Text type="secondary">-</Text>
       ),
     },
     {
-      title: "标记/多标签",
-      key: "labels",
+      title: "备货单",
+      key: "order",
+      width: 180,
+      render: (_value, row) => <Text strong>{row.soId || "-"}</Text>,
+    },
+    {
+      title: "发货单",
+      key: "deliver",
       width: 170,
-      render: (_value, row) => (
-        <Space size={4} wrap>
-          {row.urgency_info ? <Tag color="orange">{row.urgency_info}</Tag> : null}
-          {row.warehouse_group ? <Tag>{row.warehouse_group}</Tag> : null}
-          {row.receive_warehouse_name ? <Tag>{row.receive_warehouse_name}</Tag> : null}
-          {!row.urgency_info && !row.warehouse_group && !row.receive_warehouse_name ? <Text type="secondary">-</Text> : null}
-        </Space>
-      ),
+      render: (_value, row) => {
+        const no = row.outerDeliverNo;
+        if (!no) return <Text type="secondary">-</Text>;
+        return <Text>{no.startsWith("FH") ? no.slice(2) : no}</Text>;
+      },
+    },
+    {
+      title: "店铺",
+      key: "shop",
+      width: 160,
+      render: (_value, row) => <Text>{row.shopName || "-"}</Text>,
     },
     {
       title: "商品信息",
       key: "product",
-      width: 320,
+      width: 300,
       render: (_value, row) => (
         <Space direction="vertical" size={3}>
-          <Text>{row.product_name || "-"}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{row.spec_name || "-"}</Text>
-          <Space size={4} wrap>
-            {row.skc_id ? <Tag>SKC {row.skc_id}</Tag> : null}
-            {row.sku_id ? <Tag>SKU {row.sku_id}</Tag> : null}
-            {row.sku_ext_code ? <Tag>{row.sku_ext_code}</Tag> : null}
-          </Space>
+          <Text>{row.rawCloud?.product_name || row.rawJst?.sku_info || "-"}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>{row.rawJst?.skus || "-"}</Text>
         </Space>
       ),
     },
@@ -688,86 +964,70 @@ export default function QcOutboundCenter() {
       title: "订单金额",
       key: "amount",
       width: 130,
-      align: "right",
-      render: (_value, row) => formatMoneyCents(row.order_amount_cents, row.currency),
+      align: "right" as const,
+      render: (_value, row) => {
+        if (row.itemAmount == null) return "-";
+        const currency = row.rawCloud?.currency || row.rawJst?.currency || "";
+        return `${Number(row.itemAmount).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}${currency ? ` ${currency}` : ""}`;
+      },
     },
     {
-      title: "发货单时间",
+      title: "下单时间",
       key: "orderTime",
       width: 170,
-      render: (_value, row) => formatDateTime(row.order_time),
+      render: (_value, row) => formatDateTime(row.orderDate),
     },
     {
-      title: "订单发货时间",
+      title: "发货时间",
       key: "shipTime",
       width: 170,
-      render: (_value, row) => formatDateTime(row.latest_ship_at),
+      render: (_value, row) => formatDateTime(row.rawCloud?.latest_ship_at || row.rawJst?.send_date),
     },
     {
       title: "数量",
       key: "qty",
-      width: 160,
+      width: 150,
       render: (_value, row) => (
         <Space direction="vertical" size={2}>
-          <Text strong>{formatQty(row.demand_qty)} 件</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            送货 {formatQty(row.shipping_qty ?? row.delivered_qty)} / 入库 {formatQty(row.inbound_qty)}
-          </Text>
+          <Text strong>{formatQty(row.itemsQty)} 件</Text>
+          {row.rawCloud?.delivered_qty != null ? (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              送货 {formatQty(row.rawCloud.delivered_qty)}
+            </Text>
+          ) : null}
         </Space>
       ),
     },
     {
-      title: "重量/包裹",
-      key: "package",
-      width: 160,
-      render: (_value, row) => (
-        <Space direction="vertical" size={2}>
-          <Text>{row.weight_kg ? `${row.weight_kg} kg` : "-"}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>包裹 {formatQty(row.package_count)}</Text>
-        </Space>
-      ),
+      title: "供应商",
+      key: "supplier",
+      width: 180,
+      render: (_value, row) => <Text>{row.supplierName || "-"}</Text>,
     },
     {
-      title: "平台发货单",
-      key: "platformDelivery",
-      width: 210,
-      render: (_value, row) => (
-        <Space direction="vertical" size={2}>
-          <Text>{row.delivery_order_sn || "-"}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>批次 {row.delivery_batch_sn || "-"}</Text>
-        </Space>
-      ),
-    },
-    {
-      title: "包裹号/物流信息",
+      title: "物流",
       key: "logistics",
-      width: 230,
+      width: 160,
       render: (_value, row) => (
-        <Space direction="vertical" size={2}>
-          <Text>{row.package_no || "-"}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{row.logistics_info || "-"}</Text>
-        </Space>
+        <Text type="secondary">
+          {row.rawCloud?.logistics_info || row.rawJst?.logistics_company || row.rawJst?.l_id || "-"}
+        </Text>
       ),
     },
     {
       title: "收货仓",
       key: "warehouse",
-      width: 200,
-      render: (_value, row) => (
-        <Space direction="vertical" size={2}>
-          <Text>{row.receive_warehouse_name || row.warehouse_group || "-"}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{row.receive_warehouse_id || "-"}</Text>
-        </Space>
-      ),
+      width: 180,
+      render: (_value, row) => row.rawCloud?.receive_warehouse_name || "-",
     },
     {
       title: "本地承接",
       key: "localLink",
       width: 150,
       render: (_value, row) => {
-        const localLink = resolveStockOrderLink(row);
+        const localLink = resolveUnifiedRowLink(row);
         const localQty = Number(localLink?.qty || 0);
-        const demandQty = Math.max(1, stockOrderDemand(row));
+        const demandQty = Math.max(1, unifiedRowDemand(row));
         const isDone = localQty >= demandQty;
         const isPartial = localQty > 0 && localQty < demandQty;
         return (
@@ -782,35 +1042,31 @@ export default function QcOutboundCenter() {
         );
       },
     },
-    {
-      title: "更新",
-      key: "updated",
-      width: 170,
-      render: (_value, row) => formatDateTime(row.last_updated_at),
-    },
-    {
-      title: "操作",
-      key: "actions",
-      width: 150,
-      fixed: "right",
-      render: (_value, row) => {
-        const localLink = resolveStockOrderLink(row);
-        const isDone = Number(localLink?.qty || 0) >= Math.max(1, stockOrderDemand(row));
-        return (
-          <Button
-            size="small"
-            type="primary"
-            icon={<ExportOutlined />}
-            loading={actingKey === `stock-${row.id}`}
-            disabled={!canCreateOutbound || accounts.length === 0}
-            onClick={() => openStockOrderModal(row)}
-          >
-            {isDone ? "查看承接" : "生成出库单"}
-          </Button>
-        );
-      },
-    },
-  ], [accounts.length, actingKey, canCreateOutbound, resolveStockOrderLink]);
+    ];
+    const columnsByKey = new Map(columns.map((c) => [String(c.key || ""), c]));
+    const visibleColumnKeys = new Set(unifiedColumnConfig.visible);
+    const orderedColumns = [
+      ...unifiedColumnConfig.order
+        .filter((field) => visibleColumnKeys.has(field))
+        .map((field) => columnsByKey.get(field))
+        .filter(Boolean),
+      ...columns.filter((c) => !UNIFIED_CONFIGURABLE_COLUMN_KEY_SET.has(String(c.key || ""))),
+    ] as ColumnsType<ConsignDeliverUnifiedRow>;
+
+    const buildColumnMenuHeaderProps = () => ({
+      title: "右键配置列",
+      onContextMenu: openUnifiedColumnMenu,
+    });
+
+    return orderedColumns.map((column) => {
+      const key = String(column.key || "");
+      if (!UNIFIED_CONFIGURABLE_COLUMN_KEY_SET.has(key)) return column;
+      return {
+        ...column,
+        onHeaderCell: buildColumnMenuHeaderProps,
+      };
+    });
+  }, [accounts.length, actingKey, canCreateOutbound, openUnifiedColumnMenu, resolveUnifiedRowLink, unifiedColumnConfig]);
 
   const availableBatchColumns = useMemo<ColumnsType<OutboundBatchRow>>(() => [
     {
@@ -1016,62 +1272,44 @@ export default function QcOutboundCenter() {
         className="qc-outbound-page-header"
         eyebrow="系统"
         title="出库中心"
-        subtitle="浏览器扩展抓取 Temu 备货单、发货台、发货单并上传云端，桌面端按聚水潭式表单承接出库"
-        meta={[
-          `云端同步 ${formatQty(cloudTotalCount)}`,
-          `本地出库 ${summary.outboundShipmentCount || 0}`,
-        ]}
         actions={[
           <div key="refresh" className="qc-outbound-header-actions">
             <div className="qc-outbound-refresh-meta">
-              <span>数据更新</span>
-              <strong>{formatDateTime(outboundData.generatedAt)}</strong>
+              <span>最后同步</span>
+              <strong>{formatDateTime(unifiedLoadedAt || outboundData.generatedAt)}</strong>
             </div>
             <Button
-              type="primary"
-              ghost
               icon={<ReloadOutlined />}
-              loading={loading}
-              onClick={() => void loadData({ notify: true, forceAllCloud: true })}
+              loading={loading || unifiedLoading}
+              onClick={() => {
+                void loadData({ notify: true });
+                void loadUnified({
+                  page: unifiedPage,
+                  pageSize: unifiedPageSize,
+                  search: stockQuery,
+                  status: stockStatus,
+                  source: unifiedSource,
+                  notify: true,
+                });
+              }}
             >
-              刷新云端全量
+              刷新
             </Button>
           </div>,
         ]}
       />
 
-      {!cloudConfigured || cloudError ? (
+      {unifiedError ? (
         <Alert
           className="qc-outbound-sync-alert"
-          type={cloudConfigured ? "warning" : "info"}
+          type="warning"
           showIcon
-          message={cloudError || "还没有配置云端连接"}
-        />
-      ) : cloudLoadedAt ? (
-        <Alert
-          className="qc-outbound-sync-alert"
-          type="success"
-          showIcon
-          message={(
-            <div className="qc-outbound-sync-message">
-              <Text className="qc-outbound-sync-primary">
-                云端送仓托管已同步 <Text strong>{formatQty(cloudTotalCount)}</Text> 条
-              </Text>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                最后同步 {formatDateTime(cloudLoadedAt)}
-              </Text>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                明细在「Temu送仓托管」展示
-              </Text>
-            </div>
-          )}
+          message={unifiedError}
         />
       ) : null}
 
       <div className="qc-outbound-kpi-grid">
-        <StatCard title="送仓托管单" value={formatQty(cloudTotalCount)} color="blue" icon={<CloudSyncOutlined />} compact />
-        <StatCard title="云端需求" value={formatQty(cloudDemandQty)} suffix="件" color="brand" icon={<ShoppingCartOutlined />} compact />
-        <StatCard title="云端送货" value={formatQty(cloudShippingQty)} suffix="件" color="success" icon={<ExportOutlined />} compact />
+        <StatCard title="送仓托管单" value={formatQty(unifiedTotal)} color="blue" icon={<CloudSyncOutlined />} compact />
         <StatCard title="待仓库/运营" value={(summary.pendingWarehouseCount || 0) + (summary.pendingOpsConfirmCount || 0)} color="purple" icon={<FileDoneOutlined />} compact />
       </div>
 
@@ -1081,42 +1319,65 @@ export default function QcOutboundCenter() {
         items={[
           {
             key: "cloud",
-            label: `Temu送仓托管 ${formatQty(cloudTotalCount)}`,
+            label: `Temu送仓托管 ${formatQty(unifiedTotal)}`,
             children: (
               <Space direction="vertical" size={12} style={{ width: "100%" }}>
                 <div className="material-filter-bar material-filter-bar--search">
                   <Input.Search
                     allowClear
                     prefix={<SearchOutlined />}
-                    placeholder="搜索备货单号 / 发货单号 / 商品 / SKC / SKU / 包裹号"
+                    placeholder="搜索备货单号 / 发货单号 / 商品 / 店铺 / 物流单号 / 供应商"
                     enterButton="搜索"
-                    onSearch={(value) => setStockQuery(value.trim())}
+                    value={stockQuery}
+                    onChange={(event) => {
+                      setStockQuery(event.target.value);
+                      setUnifiedPage(1);
+                    }}
+                    onSearch={(value) => {
+                      setStockQuery(value.trim());
+                      setUnifiedPage(1);
+                    }}
                     style={{ maxWidth: 520 }}
                   />
-                  <Segmented
-                    value={stockSourceType || ""}
-                    options={stockSourceOptions}
+                  <Select
+                    allowClear
+                    placeholder="按状态过滤"
+                    style={{ width: 180 }}
+                    value={stockStatus || undefined}
+                    options={JST_STATUS_OPTIONS.map((value) => ({ label: value, value }))}
+                    getPopupContainer={(trigger) => trigger.parentElement || document.body}
                     onChange={(value) => {
-                      setStockSourceType(String(value));
-                      setStockStatus("");
+                      setStockStatus(value || "");
+                      setUnifiedPage(1);
                     }}
                   />
                 </div>
-                <Tabs
-                  size="small"
-                  activeKey={stockStatus || "__all__"}
-                  items={stockStatusTabItems}
-                  onChange={(value) => setStockStatus(value === "__all__" ? "" : value)}
-                />
                 <Table
                   className="erp-compact-table"
-                  rowKey="id"
+                  rowKey={(row) => row.soId || JSON.stringify(row)}
                   size="middle"
-                  loading={loading && !loadedOnce}
+                  loading={unifiedLoading}
                   columns={cloudStockColumns}
-                  dataSource={filteredStockOrders}
-                  scroll={{ x: 2550 }}
-                  pagination={{ pageSize: 20, showSizeChanger: true }}
+                  dataSource={unifiedRows}
+                  scroll={{ x: 2050 }}
+                  expandable={{
+                    expandedRowRender: (row) => renderUnifiedRowItems(row),
+                    onExpand: (expanded, row) => { if (expanded) void loadUnifiedItems(row); },
+                    expandRowByClick: true,
+                    showExpandColumn: false,
+                  }}
+                  pagination={{
+                    current: unifiedPage,
+                    pageSize: unifiedPageSize,
+                    total: unifiedTotal,
+                    showSizeChanger: true,
+                    pageSizeOptions: [50, 100, 200, 500],
+                    showTotal: (t, range) => `显示 ${range[0]}-${range[1]} / ${t} 条`,
+                    onChange: (page, pageSize) => {
+                      setUnifiedPage(page);
+                      if (pageSize !== unifiedPageSize) setUnifiedPageSize(pageSize);
+                    },
+                  }}
                 />
               </Space>
             ),
@@ -1268,6 +1529,48 @@ export default function QcOutboundCenter() {
           </Form.Item>
         </Form>
       </Modal>
+
+      {unifiedColumnMenu.open && typeof document !== "undefined" ? createPortal(
+        <div
+          className="purchase-order-column-menu"
+          style={{ left: unifiedColumnMenu.x, top: unifiedColumnMenu.y }}
+          onClick={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          <div className="purchase-order-column-menu__head">自定义字段显示信息</div>
+          <div className="purchase-order-column-menu__body" style={{ maxHeight: unifiedColumnMenu.bodyMaxHeight }}>
+            {activeUnifiedColumnConfig.order.map((field) => {
+              const checked = activeUnifiedColumnConfig.visible.includes(field);
+              return (
+                <div
+                  key={field}
+                  className={unifiedDraggedColumn === field ? "purchase-order-column-menu__item is-dragging" : "purchase-order-column-menu__item"}
+                  draggable
+                  onDragStart={(event) => handleUnifiedColumnDragStart(event, field)}
+                  onDragOver={handleUnifiedColumnDragOver}
+                  onDrop={(event) => handleUnifiedColumnDrop(event, field)}
+                  onDragEnd={handleUnifiedColumnDragEnd}
+                >
+                  <span className="purchase-order-column-menu__drag" aria-hidden="true">
+                    <HolderOutlined />
+                  </span>
+                  <span>{UNIFIED_COLUMN_LABELS[field] || field}</span>
+                  <Checkbox
+                    checked={checked}
+                    disabled={checked && activeUnifiedColumnConfig.visible.length <= 1}
+                    onChange={(event) => toggleUnifiedDraftColumn(field, event.target.checked)}
+                  />
+                </div>
+              );
+            })}
+          </div>
+          <div className="purchase-order-column-menu__foot">
+            <Button size="small" type="primary" onClick={saveUnifiedColumnConfig}>保存</Button>
+            <Button size="small" onClick={restoreUnifiedColumnConfig}>还原</Button>
+          </div>
+        </div>,
+        document.body,
+      ) : null}
     </div>
   );
 }

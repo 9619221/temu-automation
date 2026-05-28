@@ -324,6 +324,10 @@ class InventoryService {
         updated_at: nowIso(),
       });
 
+      // COGS 按 SKU 全公司加权成本结转；均价不变，仅扣减 cost_balance_qty
+      const unitCost = this.getSkuWeightedAvgCost(batch.sku_id);
+      this.applySkuCostChange(batch.sku_id, -qty);
+
       this.writeLedger({
         accountId: batch.account_id,
         skuId: batch.sku_id,
@@ -332,6 +336,7 @@ class InventoryService {
         qtyDelta: -qty,
         fromBucket: "reserved",
         toBucket: null,
+        unitCost,
         sourceDocType: "outbound_shipment",
         sourceDocId: input.outboundId,
         actor: input.actor,
@@ -369,6 +374,180 @@ class InventoryService {
       created_at: nowIso(),
       created_by: input.actor?.id || null,
     });
+  }
+
+  // 全公司单 SKU 移动加权成本。只在"实物总量变化"的动作里调用：
+  //   addedQty > 0 + addedUnitCost：采购入库 / 客户退货 → 按加权重算均价
+  //   addedQty < 0：采购退货 / 平台销售 → 均价不变，只扣减 cost_balance_qty
+  // 调拨 / 平台送仓 / 平台退回自家仓：均价和总量都不变，不要调用本方法
+  applySkuCostChange(skuId, addedQty, addedUnitCost) {
+    if (!skuId) return null;
+    const qty = Number(addedQty || 0);
+    if (qty === 0) return null;
+    const sku = this.db
+      .prepare("SELECT weighted_avg_cost, cost_balance_qty FROM erp_skus WHERE id = ?")
+      .get(skuId);
+    if (!sku) return null;
+    const oldQty = Number(sku.cost_balance_qty || 0);
+    const oldAvg = Number(sku.weighted_avg_cost || 0);
+    const newQty = oldQty + qty;
+    let newAvg = oldAvg;
+    if (qty > 0) {
+      const unitCost = Number(addedUnitCost || 0);
+      newAvg = newQty > 0 ? (oldQty * oldAvg + qty * unitCost) / newQty : 0;
+    }
+    this.db.prepare(`
+      UPDATE erp_skus
+      SET weighted_avg_cost = @avg,
+          cost_balance_qty = @qty,
+          updated_at = @updated_at
+      WHERE id = @id
+    `).run({
+      id: skuId,
+      avg: newAvg,
+      qty: Math.max(0, newQty),
+      updated_at: nowIso(),
+    });
+    return { weightedAvgCost: newAvg, costBalanceQty: Math.max(0, newQty) };
+  }
+
+  getSkuWeightedAvgCost(skuId) {
+    if (!skuId) return 0;
+    const row = this.db
+      .prepare("SELECT weighted_avg_cost FROM erp_skus WHERE id = ?")
+      .get(skuId);
+    return Number(row?.weighted_avg_cost || 0);
+  }
+
+  // 直接出库（绕开 outbound_shipment 单据流程）。
+  // 用于：采购退货 / 店铺间调拨出库腿 / 平台仓→自家仓出库腿。
+  // 按 FIFO（received_at ASC）跨批次扣 available_qty，每批次单独写一条 ledger。
+  // affectSkuTotal=true 时同步扣 cost_balance_qty（采购退货是；调拨/位置切换是 false）。
+  // unitCost 由调用方传：采购退按 PO 原单价；位置切换按 SKU 当前均价。
+  applyDirectOutbound(input = {}) {
+    const accountId = input.accountId;
+    const skuId = input.skuId;
+    const qty = ensurePositiveInteger(input.qty, "qty");
+    const ledgerType = input.ledgerType;
+    if (!accountId) throw new Error("applyDirectOutbound requires accountId");
+    if (!skuId) throw new Error("applyDirectOutbound requires skuId");
+    if (!ledgerType) throw new Error("applyDirectOutbound requires ledgerType");
+
+    const batches = this.db.prepare(`
+      SELECT * FROM erp_inventory_batches
+      WHERE account_id = @account_id
+        AND sku_id = @sku_id
+        AND available_qty > 0
+        AND qc_status IN ('passed', 'passed_with_observation', 'partial_passed')
+      ORDER BY received_at ASC, created_at ASC, id ASC
+    `).all({ account_id: accountId, sku_id: skuId });
+
+    let totalAvailable = 0;
+    for (const b of batches) totalAvailable += Number(b.available_qty || 0);
+    if (totalAvailable < qty) {
+      throw new Error(`Insufficient available inventory for ${skuId} @${accountId}: ${totalAvailable} < ${qty}`);
+    }
+
+    const run = this.db.transaction(() => {
+      let remaining = qty;
+      const lines = [];
+      const now = nowIso();
+      for (const batch of batches) {
+        if (remaining <= 0) break;
+        const take = Math.min(Number(batch.available_qty || 0), remaining);
+        if (take <= 0) continue;
+        this.db.prepare(`
+          UPDATE erp_inventory_batches
+          SET available_qty = available_qty - @take,
+              updated_at = @updated_at
+          WHERE id = @id
+        `).run({ id: batch.id, take, updated_at: now });
+        this.writeLedger({
+          accountId: batch.account_id,
+          skuId: batch.sku_id,
+          batchId: batch.id,
+          type: ledgerType,
+          qtyDelta: -take,
+          fromBucket: "available",
+          toBucket: null,
+          unitCost: input.unitCost ?? null,
+          sourceDocType: input.sourceDocType || "manual",
+          sourceDocId: input.sourceDocId || "",
+          actor: input.actor,
+        });
+        lines.push({ batchId: batch.id, qty: take, unitLandedCost: Number(batch.unit_landed_cost || 0) });
+        remaining -= take;
+      }
+      if (input.affectSkuTotal) {
+        this.applySkuCostChange(skuId, -qty);
+      }
+      return lines;
+    });
+
+    return run();
+  }
+
+  // 直接入库（绕开 inbound_receipt 单据流程）。
+  // 用于：客户退货回平台仓 / 店铺间调拨入库腿 / 平台仓→自家仓入库腿。
+  // 建一条新批次（available_qty=qty，unit_landed_cost=unitCost）+ 写一条 ledger。
+  // affectSkuTotal=true 时按"加权均价"重算 SKU 主表（客户退按当前均价灌→均价不变；
+  //   位置切换→ false，因为总量没变）。
+  applyDirectInbound(input = {}) {
+    const accountId = input.accountId;
+    const skuId = input.skuId;
+    const qty = ensurePositiveInteger(input.qty, "qty");
+    const ledgerType = input.ledgerType;
+    const unitLandedCost = Number(input.unitLandedCost || 0);
+    if (!accountId) throw new Error("applyDirectInbound requires accountId");
+    if (!skuId) throw new Error("applyDirectInbound requires skuId");
+    if (!ledgerType) throw new Error("applyDirectInbound requires ledgerType");
+
+    const now = nowIso();
+    const batchId = createId("batch");
+    const batchCode = input.batchCode || `DIRECT-${ledgerType}-${Date.now().toString(36).slice(-6).toUpperCase()}`;
+
+    const run = this.db.transaction(() => {
+      this.db.prepare(`
+        INSERT INTO erp_inventory_batches (
+          id, account_id, batch_code, sku_id, po_id, inbound_receipt_id,
+          received_qty, available_qty, reserved_qty, blocked_qty, defective_qty,
+          rework_qty, unit_landed_cost, qc_status, location_code,
+          received_at, created_at, updated_at
+        ) VALUES (
+          @id, @account_id, @batch_code, @sku_id, NULL, NULL,
+          @qty, @qty, 0, 0, 0,
+          0, @unit_landed_cost, 'passed', NULL,
+          @now, @now, @now
+        )
+      `).run({
+        id: batchId,
+        account_id: accountId,
+        batch_code: batchCode,
+        sku_id: skuId,
+        qty,
+        unit_landed_cost: unitLandedCost,
+        now,
+      });
+      this.writeLedger({
+        accountId,
+        skuId,
+        batchId,
+        type: ledgerType,
+        qtyDelta: qty,
+        fromBucket: null,
+        toBucket: "available",
+        unitCost: unitLandedCost,
+        sourceDocType: input.sourceDocType || "manual",
+        sourceDocId: input.sourceDocId || "",
+        actor: input.actor,
+      });
+      if (input.affectSkuTotal) {
+        this.applySkuCostChange(skuId, qty, unitLandedCost);
+      }
+      return this.getBatch(batchId);
+    });
+
+    return run();
   }
 }
 

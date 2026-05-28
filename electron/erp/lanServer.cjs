@@ -24,6 +24,22 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/master-data/sku-stock-details": ["admin", "manager", "operations", "buyer", "warehouse"],
   "/api/master-data/mappings": ["admin", "manager", "operations", "buyer"],
   "/api/master-data/mapping-ids": ["admin", "manager", "operations", "buyer"],
+  "/api/master-data/purchase-returns": ["admin", "manager", "operations", "buyer", "finance"],
+  "/api/master-data/purchase-return-ids": ["admin", "manager", "operations", "buyer", "finance"],
+  "/api/master-data/purchase-return-items": ["admin", "manager", "operations", "buyer", "finance"],
+  "/api/master-data/purchase-return-item-ids": ["admin", "manager", "operations", "buyer", "finance"],
+  "/api/master-data/purchase-return/action": ["admin", "manager", "operations", "buyer"],
+  "/api/master-data/consign-after-sales": ["admin", "manager", "operations", "buyer", "finance", "warehouse"],
+  "/api/master-data/consign-after-sale-ids": ["admin", "manager", "operations", "buyer", "finance", "warehouse"],
+  "/api/master-data/consign-after-sale-items": ["admin", "manager", "operations", "buyer", "finance", "warehouse"],
+  "/api/master-data/consign-after-sale-item-ids": ["admin", "manager", "operations", "buyer", "finance", "warehouse"],
+  "/api/master-data/consign-deliveries": ["admin", "manager", "operations", "buyer", "finance", "warehouse"],
+  "/api/master-data/consign-deliver-items": ["admin", "manager", "operations", "buyer", "finance", "warehouse"],
+  "/api/master-data/consign-deliveries-status": ["admin", "manager", "operations", "buyer", "finance", "warehouse"],
+  "/api/master-data/consign-deliveries-unified": ["admin", "manager", "operations", "buyer", "finance", "warehouse"],
+  "/api/master-data/other-inout": ["admin", "manager", "operations", "buyer", "finance", "warehouse"],
+  "/api/master-data/other-inout-items": ["admin", "manager", "operations", "buyer", "finance", "warehouse"],
+  "/api/master-data/other-inout-status": ["admin", "manager", "operations", "buyer", "finance", "warehouse"],
   "/api/master-data/action": ["admin", "manager", "operations", "buyer"],
   "/1688": ["admin", "manager"],
   "/api/1688/status": ["admin", "manager"],
@@ -226,6 +242,428 @@ function getLanStatus(extra = {}) {
     wsClientCount: lanState.wsClients.size,
     lastError: lanState.lastError,
     ...extra,
+  };
+}
+
+// ----------------------------------------------------------------------------
+// 送仓托管统一视图（jst_consign_deliveries + cloud.temu_stock_order_snapshot）
+// 通过 ATTACH 跨库 union，按 so_id / stock_order_no 关联。
+// 缺 cloud 库时退化为 JST-only。
+// ----------------------------------------------------------------------------
+
+const DEFAULT_TEMU_CLOUD_DB_PATH = "/opt/temu-cloud/data/temu-cloud.sqlite";
+
+function getTemuCloudDbPath() {
+  return process.env.TEMU_CLOUD_DB_PATH || DEFAULT_TEMU_CLOUD_DB_PATH;
+}
+
+function attachTemuCloudDbIfPossible(db) {
+  if (!db) return false;
+  if (db.__cloudAttachState === "attached") return true;
+  if (db.__cloudAttachState === "failed") return false;
+  const cloudPath = getTemuCloudDbPath();
+  try {
+    if (!fs.existsSync(cloudPath)) {
+      db.__cloudAttachState = "failed";
+      return false;
+    }
+    db.exec(`ATTACH DATABASE '${cloudPath.replace(/'/g, "''")}' AS cloud`);
+    db.__cloudAttachState = "attached";
+    return true;
+  } catch (error) {
+    db.__cloudAttachState = "failed";
+    db.__cloudAttachError = error?.message || String(error);
+    return false;
+  }
+}
+
+const UNIFIED_CONSIGN_CTE = `
+WITH jst_base AS (
+  SELECT
+    o_id, so_id, shop_name, status, src_status, shop_status_text,
+    item_amount, items_qty, order_date, send_date, outer_deliver_no,
+    supplier_name, logistics_company, l_id, sku_info, skus, currency
+  FROM jst_consign_deliveries
+  WHERE company_id = @company_id AND status_internal != 'deleted'
+),
+cloud_agg AS (
+  SELECT
+    stock_order_no AS cloud_so,
+    MIN(row_key) AS cloud_row_key,
+    MIN(mall_id) AS cloud_mall_id,
+    MIN(site) AS cloud_site,
+    MIN(parent_order_no) AS cloud_parent_order_no,
+    MIN(delivery_batch_sn) AS cloud_delivery_batch_sn,
+    MIN(product_id) AS cloud_product_id,
+    MIN(skc_id) AS cloud_skc_id,
+    MIN(sku_id) AS cloud_sku_id,
+    MIN(sku_ext_code) AS cloud_sku_ext_code,
+    MAX(temu_status) AS cloud_temu_status,
+    SUM(COALESCE(demand_qty, 0)) AS cloud_demand_qty,
+    SUM(COALESCE(delivered_qty, 0)) AS cloud_delivered_qty,
+    SUM(COALESCE(order_amount_cents, 0)) AS cloud_order_amount_cents,
+    MIN(currency) AS cloud_currency,
+    MIN(product_name) AS cloud_product_name,
+    MIN(spec_name) AS cloud_spec_name,
+    MIN(delivery_order_sn) AS cloud_delivery_order_sn,
+    MIN(receive_warehouse_id) AS cloud_receive_warehouse_id,
+    MIN(receive_warehouse_name) AS cloud_receive_warehouse_name,
+    MIN(warehouse_group) AS cloud_warehouse_group,
+    MIN(urgency_info) AS cloud_urgency_info,
+    MIN(order_time) AS cloud_order_time,
+    MIN(latest_ship_at) AS cloud_latest_ship_at,
+    MIN(logistics_info) AS cloud_logistics_info,
+    COUNT(*) AS cloud_item_count
+  FROM cloud.temu_stock_order_snapshot
+  WHERE stock_order_no IS NOT NULL AND stock_order_no != ''
+  GROUP BY stock_order_no
+),
+jst_left AS (
+  SELECT
+    j.so_id AS so_id,
+    CASE WHEN c.cloud_so IS NULL THEN 'jst' ELSE 'both' END AS source,
+    j.o_id AS jst_o_id,
+    j.shop_name AS jst_shop_name,
+    j.status AS jst_status,
+    j.src_status AS jst_src_status,
+    j.shop_status_text AS jst_shop_status_text,
+    j.item_amount AS jst_item_amount,
+    j.items_qty AS jst_items_qty,
+    j.order_date AS jst_order_date,
+    j.send_date AS jst_send_date,
+    j.outer_deliver_no AS jst_outer_deliver_no,
+    j.supplier_name AS jst_supplier_name,
+    j.logistics_company AS jst_logistics_company,
+    j.l_id AS jst_l_id,
+    j.sku_info AS jst_sku_info,
+    j.skus AS jst_skus,
+    j.currency AS jst_currency,
+    c.cloud_so,
+    c.cloud_row_key,
+    c.cloud_mall_id,
+    c.cloud_site,
+    c.cloud_parent_order_no,
+    c.cloud_delivery_batch_sn,
+    c.cloud_product_id,
+    c.cloud_skc_id,
+    c.cloud_sku_id,
+    c.cloud_sku_ext_code,
+    c.cloud_temu_status,
+    c.cloud_demand_qty,
+    c.cloud_delivered_qty,
+    c.cloud_order_amount_cents,
+    c.cloud_currency,
+    c.cloud_product_name,
+    c.cloud_spec_name,
+    c.cloud_delivery_order_sn,
+    c.cloud_receive_warehouse_id,
+    c.cloud_receive_warehouse_name,
+    c.cloud_warehouse_group,
+    c.cloud_urgency_info,
+    c.cloud_order_time,
+    c.cloud_latest_ship_at,
+    c.cloud_logistics_info,
+    c.cloud_item_count
+  FROM jst_base j
+  LEFT JOIN cloud_agg c ON c.cloud_so = j.so_id
+),
+cloud_only AS (
+  SELECT
+    c.cloud_so AS so_id,
+    'cloud' AS source,
+    NULL AS jst_o_id,
+    NULL AS jst_shop_name,
+    NULL AS jst_status,
+    NULL AS jst_src_status,
+    NULL AS jst_shop_status_text,
+    NULL AS jst_item_amount,
+    NULL AS jst_items_qty,
+    NULL AS jst_order_date,
+    NULL AS jst_send_date,
+    NULL AS jst_outer_deliver_no,
+    NULL AS jst_supplier_name,
+    NULL AS jst_logistics_company,
+    NULL AS jst_l_id,
+    NULL AS jst_sku_info,
+    NULL AS jst_skus,
+    NULL AS jst_currency,
+    c.cloud_so,
+    c.cloud_row_key,
+    c.cloud_mall_id,
+    c.cloud_site,
+    c.cloud_parent_order_no,
+    c.cloud_delivery_batch_sn,
+    c.cloud_product_id,
+    c.cloud_skc_id,
+    c.cloud_sku_id,
+    c.cloud_sku_ext_code,
+    c.cloud_temu_status,
+    c.cloud_demand_qty,
+    c.cloud_delivered_qty,
+    c.cloud_order_amount_cents,
+    c.cloud_currency,
+    c.cloud_product_name,
+    c.cloud_spec_name,
+    c.cloud_delivery_order_sn,
+    c.cloud_receive_warehouse_id,
+    c.cloud_receive_warehouse_name,
+    c.cloud_warehouse_group,
+    c.cloud_urgency_info,
+    c.cloud_order_time,
+    c.cloud_latest_ship_at,
+    c.cloud_logistics_info,
+    c.cloud_item_count
+  FROM cloud_agg c
+  WHERE NOT EXISTS (SELECT 1 FROM jst_base j WHERE j.so_id = c.cloud_so)
+),
+unified AS (
+  SELECT * FROM jst_left
+  UNION ALL
+  SELECT * FROM cloud_only
+)
+`;
+
+function buildUnifiedSearchClause(values, search) {
+  if (!search) return "";
+  values.search = `%${search}%`;
+  return `(
+    so_id LIKE @search
+    OR jst_shop_name LIKE @search
+    OR jst_outer_deliver_no LIKE @search
+    OR jst_supplier_name LIKE @search
+    OR jst_sku_info LIKE @search
+    OR jst_skus LIKE @search
+    OR jst_logistics_company LIKE @search
+    OR jst_l_id LIKE @search
+    OR cloud_mall_id LIKE @search
+    OR cloud_site LIKE @search
+    OR cloud_parent_order_no LIKE @search
+    OR cloud_delivery_batch_sn LIKE @search
+    OR cloud_product_id LIKE @search
+    OR cloud_skc_id LIKE @search
+    OR cloud_sku_id LIKE @search
+    OR cloud_sku_ext_code LIKE @search
+    OR cloud_product_name LIKE @search
+    OR cloud_spec_name LIKE @search
+    OR cloud_delivery_order_sn LIKE @search
+  )`;
+}
+
+function unifiedRowToPayload(row) {
+  if (!row) return null;
+  const source = row.source;
+  const itemAmount = source === "cloud"
+    ? (row.cloud_order_amount_cents != null ? Number(row.cloud_order_amount_cents) / 100 : null)
+    : (row.jst_item_amount != null ? Number(row.jst_item_amount) : null);
+  const itemsQty = row.jst_items_qty != null
+    ? Number(row.jst_items_qty)
+    : (row.cloud_demand_qty != null ? Number(row.cloud_demand_qty) : null);
+  const rawCloud = (source === "cloud" || source === "both") ? {
+    stock_order_no: row.cloud_so,
+    row_key: row.cloud_row_key,
+    mall_id: row.cloud_mall_id,
+    site: row.cloud_site,
+    parent_order_no: row.cloud_parent_order_no,
+    delivery_batch_sn: row.cloud_delivery_batch_sn,
+    product_id: row.cloud_product_id,
+    skc_id: row.cloud_skc_id,
+    sku_id: row.cloud_sku_id,
+    sku_ext_code: row.cloud_sku_ext_code,
+    temu_status: row.cloud_temu_status,
+    demand_qty: row.cloud_demand_qty,
+    delivered_qty: row.cloud_delivered_qty,
+    order_amount_cents: row.cloud_order_amount_cents,
+    currency: row.cloud_currency,
+    product_name: row.cloud_product_name,
+    spec_name: row.cloud_spec_name,
+    delivery_order_sn: row.cloud_delivery_order_sn,
+    receive_warehouse_id: row.cloud_receive_warehouse_id,
+    receive_warehouse_name: row.cloud_receive_warehouse_name,
+    warehouse_group: row.cloud_warehouse_group,
+    urgency_info: row.cloud_urgency_info,
+    order_time: row.cloud_order_time,
+    latest_ship_at: row.cloud_latest_ship_at,
+    logistics_info: row.cloud_logistics_info,
+    item_count: row.cloud_item_count,
+  } : null;
+  const rawJst = (source === "jst" || source === "both") ? {
+    o_id: row.jst_o_id,
+    so_id: row.so_id,
+    shop_name: row.jst_shop_name,
+    status: row.jst_status,
+    src_status: row.jst_src_status,
+    shop_status_text: row.jst_shop_status_text,
+    item_amount: row.jst_item_amount,
+    items_qty: row.jst_items_qty,
+    order_date: row.jst_order_date,
+    send_date: row.jst_send_date,
+    outer_deliver_no: row.jst_outer_deliver_no,
+    supplier_name: row.jst_supplier_name,
+    logistics_company: row.jst_logistics_company,
+    l_id: row.jst_l_id,
+    sku_info: row.jst_sku_info,
+    skus: row.jst_skus,
+    currency: row.jst_currency,
+  } : null;
+  return {
+    soId: row.so_id,
+    shopName: row.jst_shop_name || row.cloud_mall_id || null,
+    status: row.jst_status || row.cloud_temu_status || null,
+    itemAmount,
+    itemsQty,
+    orderDate: row.jst_order_date || row.cloud_order_time || null,
+    outerDeliverNo: row.jst_outer_deliver_no || row.cloud_delivery_order_sn || null,
+    supplierName: row.jst_supplier_name || null,
+    source,
+    rawCloud,
+    rawJst,
+  };
+}
+
+function runConsignDeliveriesUnified(db, params = {}) {
+  if (!db) {
+    return {
+      ok: true,
+      rows: [],
+      total: 0,
+      page: 1,
+      pageSize: Number(params.pageSize || 100),
+      sourceBreakdown: { cloud_only: 0, jst_only: 0, both: 0 },
+    };
+  }
+  const page = Math.max(1, Number(params.page || 1));
+  const pageSize = Math.max(1, Math.min(500, Number(params.pageSize || 100)));
+  const offset = (page - 1) * pageSize;
+  const search = String(params.search || "").trim();
+  const statusFilter = String(params.status || "").trim();
+  const source = String(params.source || "all").toLowerCase();
+  const companyId = params.companyId || params.company_id || "company_default";
+
+  const cloudAttached = attachTemuCloudDbIfPossible(db);
+
+  if (!cloudAttached) {
+    return runConsignDeliveriesUnifiedJstOnly(db, {
+      page, pageSize, offset, search, statusFilter, source, companyId,
+    });
+  }
+
+  const baseValues = { company_id: companyId };
+  const filterConditions = [];
+  const searchClause = buildUnifiedSearchClause(baseValues, search);
+  if (searchClause) filterConditions.push(searchClause);
+  if (statusFilter) {
+    baseValues.status_filter = statusFilter;
+    filterConditions.push("jst_status = @status_filter");
+  }
+
+  let sourceCondition = "";
+  if (source === "cloud") sourceCondition = "source = 'cloud'";
+  else if (source === "jst") sourceCondition = "source = 'jst'";
+  else if (source === "both") sourceCondition = "source = 'both'";
+
+  const filtered = [...filterConditions];
+  if (sourceCondition) filtered.push(sourceCondition);
+  const whereClause = filtered.length ? `WHERE ${filtered.join(" AND ")}` : "";
+  const breakdownWhere = filterConditions.length ? `WHERE ${filterConditions.join(" AND ")}` : "";
+
+  const rowsSql = `${UNIFIED_CONSIGN_CTE}
+    SELECT * FROM unified
+    ${whereClause}
+    ORDER BY COALESCE(jst_order_date, cloud_order_time) DESC, so_id DESC
+    LIMIT @limit OFFSET @offset`;
+  const rows = db.prepare(rowsSql).all({ ...baseValues, limit: pageSize, offset });
+
+  const totalSql = `${UNIFIED_CONSIGN_CTE} SELECT COUNT(*) AS n FROM unified ${whereClause}`;
+  const totalRow = db.prepare(totalSql).get(baseValues);
+  const total = Number(totalRow?.n || 0);
+
+  const breakdownSql = `${UNIFIED_CONSIGN_CTE}
+    SELECT source, COUNT(*) AS n FROM unified ${breakdownWhere} GROUP BY source`;
+  const breakdownRows = db.prepare(breakdownSql).all(baseValues);
+  const sourceBreakdown = { cloud_only: 0, jst_only: 0, both: 0 };
+  for (const r of breakdownRows) {
+    if (r.source === "cloud") sourceBreakdown.cloud_only = Number(r.n || 0);
+    else if (r.source === "jst") sourceBreakdown.jst_only = Number(r.n || 0);
+    else if (r.source === "both") sourceBreakdown.both = Number(r.n || 0);
+  }
+
+  return {
+    ok: true,
+    rows: rows.map(unifiedRowToPayload),
+    total,
+    page,
+    pageSize,
+    sourceBreakdown,
+  };
+}
+
+function runConsignDeliveriesUnifiedJstOnly(db, opts) {
+  const { page, pageSize, offset, search, statusFilter, source, companyId } = opts;
+  if (source === "cloud" || source === "both") {
+    return {
+      ok: true,
+      rows: [],
+      total: 0,
+      page, pageSize,
+      sourceBreakdown: { cloud_only: 0, jst_only: 0, both: 0 },
+    };
+  }
+  const conditions = ["company_id = @company_id", "status_internal != 'deleted'"];
+  const values = { company_id: companyId };
+  if (search) {
+    values.search = `%${search}%`;
+    conditions.push(`(so_id LIKE @search OR shop_name LIKE @search OR outer_deliver_no LIKE @search OR supplier_name LIKE @search OR sku_info LIKE @search OR skus LIKE @search OR logistics_company LIKE @search OR l_id LIKE @search)`);
+  }
+  if (statusFilter) {
+    values.status_filter = statusFilter;
+    conditions.push("status = @status_filter");
+  }
+  const whereClause = `WHERE ${conditions.join(" AND ")}`;
+  const rows = db.prepare(`
+    SELECT * FROM jst_consign_deliveries
+    ${whereClause}
+    ORDER BY order_date DESC, o_id DESC
+    LIMIT @limit OFFSET @offset
+  `).all({ ...values, limit: pageSize, offset });
+  const totalRow = db.prepare(`SELECT COUNT(*) AS n FROM jst_consign_deliveries ${whereClause}`).get(values);
+  const total = Number(totalRow?.n || 0);
+  return {
+    ok: true,
+    rows: rows.map((row) => ({
+      soId: row.so_id,
+      shopName: row.shop_name || null,
+      status: row.status || null,
+      itemAmount: row.item_amount != null ? Number(row.item_amount) : null,
+      itemsQty: row.items_qty != null ? Number(row.items_qty) : null,
+      orderDate: row.order_date || null,
+      outerDeliverNo: row.outer_deliver_no || null,
+      supplierName: row.supplier_name || null,
+      source: "jst",
+      rawCloud: null,
+      rawJst: {
+        o_id: row.o_id,
+        so_id: row.so_id,
+        shop_name: row.shop_name,
+        status: row.status,
+        src_status: row.src_status,
+        shop_status_text: row.shop_status_text,
+        item_amount: row.item_amount,
+        items_qty: row.items_qty,
+        order_date: row.order_date,
+        send_date: row.send_date,
+        outer_deliver_no: row.outer_deliver_no,
+        supplier_name: row.supplier_name,
+        logistics_company: row.logistics_company,
+        l_id: row.l_id,
+        sku_info: row.sku_info,
+        skus: row.skus,
+        currency: row.currency,
+      },
+    })),
+    total,
+    page,
+    pageSize,
+    sourceBreakdown: { cloud_only: 0, jst_only: total, both: 0 },
   };
 }
 
@@ -2764,6 +3202,25 @@ function createRequestHandler(options = {}) {
   const listSkus = options.listSkus || (() => []);
   const listSkuStockDetails = options.listSkuStockDetails || (() => ({ rows: [], total: 0 }));
   const listSku1688Sources = options.listSku1688Sources || (() => []);
+  const listPurchaseReturns = options.listPurchaseReturns || (() => []);
+  const getPurchaseReturnIds = options.getPurchaseReturnIds || (() => []);
+  const listPurchaseReturnItems = options.listPurchaseReturnItems || (() => []);
+  const getPurchaseReturnItemIds = options.getPurchaseReturnItemIds || (() => []);
+  const performPurchaseReturnAction = options.performPurchaseReturnAction || (() => {
+    throw new Error("Purchase return action handler is not available");
+  });
+  const listConsignAfterSales = options.listConsignAfterSales || (() => []);
+  const getConsignAfterSaleIds = options.getConsignAfterSaleIds || (() => []);
+  const listConsignAfterSaleItems = options.listConsignAfterSaleItems || (() => []);
+  const getConsignAfterSaleItemIds = options.getConsignAfterSaleItemIds || (() => []);
+  const listJstConsignDeliveries = options.listJstConsignDeliveries || (() => []);
+  const countJstConsignDeliveries = options.countJstConsignDeliveries || ((params) => listJstConsignDeliveries({ ...params, limit: 500000, offset: 0 }).length);
+  const listJstConsignDeliverItems = options.listJstConsignDeliverItems || (() => []);
+  const getJstConsignDeliveryCacheStatus = options.getJstConsignDeliveryCacheStatus || (() => ({ count: 0, lastImportedAt: null, lastUpdatedAt: null }));
+  const listJstOtherInout = options.listJstOtherInout || (() => []);
+  const countJstOtherInout = options.countJstOtherInout || ((params) => listJstOtherInout({ ...params, limit: 500000, offset: 0 }).length);
+  const listJstOtherInoutItems = options.listJstOtherInoutItems || (() => []);
+  const getJstOtherInoutCacheStatus = options.getJstOtherInoutCacheStatus || (() => ({ count: 0, lastImportedAt: null, lastUpdatedAt: null }));
   const createSku = options.createSku || (() => {
     throw new Error("SKU action handler is not available");
   });
@@ -2833,6 +3290,22 @@ function createRequestHandler(options = {}) {
       listSkus,
       listSkuStockDetails,
       listSku1688Sources,
+      listPurchaseReturns,
+      getPurchaseReturnIds,
+      listPurchaseReturnItems,
+      getPurchaseReturnItemIds,
+      listConsignAfterSales,
+      getConsignAfterSaleIds,
+      listConsignAfterSaleItems,
+      getConsignAfterSaleItemIds,
+      listJstConsignDeliveries,
+      countJstConsignDeliveries,
+      listJstConsignDeliverItems,
+      getJstConsignDeliveryCacheStatus,
+      listJstOtherInout,
+      countJstOtherInout,
+      listJstOtherInoutItems,
+      getJstOtherInoutCacheStatus,
       createSku,
       deleteSku,
       saveSkuBundle,
@@ -3607,6 +4080,22 @@ async function handleRequest({
   listSkus,
   listSkuStockDetails,
   listSku1688Sources,
+  listPurchaseReturns,
+  getPurchaseReturnIds,
+  listPurchaseReturnItems,
+  getPurchaseReturnItemIds,
+  listConsignAfterSales,
+  getConsignAfterSaleIds,
+  listConsignAfterSaleItems,
+  getConsignAfterSaleItemIds,
+  listJstConsignDeliveries,
+  countJstConsignDeliveries,
+  listJstConsignDeliverItems,
+  getJstConsignDeliveryCacheStatus,
+  listJstOtherInout,
+  countJstOtherInout,
+  listJstOtherInoutItems,
+  getJstOtherInoutCacheStatus,
   createSku,
   deleteSku,
   saveSkuBundle,
@@ -3876,6 +4365,227 @@ async function handleRequest({
           ${companyId ? "AND (sku.company_id = @company_id OR acct.company_id = @company_id)" : ""}
       `).all(companyId ? { company_id: companyId } : {});
       writeJson(res, 200, { ok: true, ids: idRows.map((row) => row.id) });
+      return;
+    }
+
+    if (pathname === "/api/master-data/purchase-returns") {
+      // 采购退货历史增量：since 游标 + includeDeleted + 分页。
+      // 1062 单头数据量小，单次 limit 默认 1000 一次拉完；保留分页是为对齐 cache 框架。
+      const payload = await readOptionalPayload(req);
+      const companyId = session.user?.companyId;
+      const rows = listPurchaseReturns({
+        since: payload?.since,
+        includeDeleted: Boolean(payload?.includeDeleted),
+        limit: Number(payload?.limit) || 1000,
+        offset: Number(payload?.offset) || 0,
+        search: payload?.search || payload?.q,
+        supplier: payload?.supplier,
+        status: payload?.status,
+        dateFrom: payload?.dateFrom,
+        dateTo: payload?.dateTo,
+        ioIds: Array.isArray(payload?.ioIds) ? payload.ioIds : null,
+        companyId,
+      });
+      writeJson(res, 200, { ok: true, rows });
+      return;
+    }
+
+    if (pathname === "/api/master-data/purchase-return-ids") {
+      // 单头对账：客户端 diff 出硬删的清缓存（当前历史导入不会硬删，保留兜底）。
+      const companyId = session.user?.companyId;
+      const ids = getPurchaseReturnIds({ companyId });
+      writeJson(res, 200, { ok: true, ids });
+      return;
+    }
+
+    if (pathname === "/api/master-data/purchase-return-items") {
+      // 明细增量：可按 since 全量增量，也可传 ioId / ioIds 按单头精确拉明细。
+      const payload = await readOptionalPayload(req);
+      const companyId = session.user?.companyId;
+      const rows = listPurchaseReturnItems({
+        since: payload?.since,
+        includeDeleted: Boolean(payload?.includeDeleted),
+        limit: Number(payload?.limit) || 2000,
+        offset: Number(payload?.offset) || 0,
+        ioId: payload?.ioId,
+        ioIds: Array.isArray(payload?.ioIds) ? payload.ioIds : null,
+        companyId,
+      });
+      writeJson(res, 200, { ok: true, rows });
+      return;
+    }
+
+    if (pathname === "/api/master-data/purchase-return-item-ids") {
+      const companyId = session.user?.companyId;
+      const ids = getPurchaseReturnItemIds({ companyId });
+      writeJson(res, 200, { ok: true, ids });
+      return;
+    }
+
+    if (pathname === "/api/master-data/purchase-return/action") {
+      // 手动采购退货单 action：create_draft / update_draft / effective / cancel / delete_draft。
+      const payload = await readOptionalPayload(req);
+      const result = performPurchaseReturnAction(
+        { ...payload, companyId: payload?.companyId || session.user?.companyId },
+        session.user,
+      );
+      writeJson(res, 200, { ok: true, result });
+      return;
+    }
+
+    if (pathname === "/api/master-data/consign-after-sales") {
+      // 送仓售后历史增量：since 游标 + includeDeleted + 分页。5483 单 head 量比采购退货大。
+      const payload = await readOptionalPayload(req);
+      const companyId = session.user?.companyId;
+      const rows = listConsignAfterSales({
+        since: payload?.since,
+        includeDeleted: Boolean(payload?.includeDeleted),
+        limit: Number(payload?.limit) || 1000,
+        offset: Number(payload?.offset) || 0,
+        search: payload?.search || payload?.q,
+        shopName: payload?.shopName,
+        status: payload?.status,
+        dateFrom: payload?.dateFrom,
+        dateTo: payload?.dateTo,
+        asIds: Array.isArray(payload?.asIds) ? payload.asIds : null,
+        companyId,
+      });
+      writeJson(res, 200, { ok: true, rows });
+      return;
+    }
+
+    if (pathname === "/api/master-data/consign-after-sale-ids") {
+      const companyId = session.user?.companyId;
+      const ids = getConsignAfterSaleIds({ companyId });
+      writeJson(res, 200, { ok: true, ids });
+      return;
+    }
+
+    if (pathname === "/api/master-data/consign-after-sale-items") {
+      // 送仓售后明细：可按 since 全量增量、也可按 asId / asIds 精确拉。
+      const payload = await readOptionalPayload(req);
+      const companyId = session.user?.companyId;
+      const rows = listConsignAfterSaleItems({
+        since: payload?.since,
+        includeDeleted: Boolean(payload?.includeDeleted),
+        limit: Number(payload?.limit) || 2000,
+        offset: Number(payload?.offset) || 0,
+        asId: payload?.asId,
+        asIds: Array.isArray(payload?.asIds) ? payload.asIds : null,
+        companyId,
+      });
+      writeJson(res, 200, { ok: true, rows });
+      return;
+    }
+
+    if (pathname === "/api/master-data/consign-after-sale-item-ids") {
+      const companyId = session.user?.companyId;
+      const ids = getConsignAfterSaleItemIds({ companyId });
+      writeJson(res, 200, { ok: true, ids });
+      return;
+    }
+
+    if (pathname === "/api/master-data/consign-deliveries") {
+      const payload = await readOptionalPayload(req);
+      const companyId = session.user?.companyId;
+      const params = {
+        since: payload?.since,
+        includeDeleted: Boolean(payload?.includeDeleted),
+        limit: Number(payload?.limit) || 1000,
+        offset: Number(payload?.offset) || 0,
+        search: payload?.search || payload?.q,
+        status: payload?.status,
+        dateFrom: payload?.dateFrom,
+        dateTo: payload?.dateTo,
+        oIds: Array.isArray(payload?.oIds) ? payload.oIds : null,
+        companyId,
+      };
+      const rows = listJstConsignDeliveries(params);
+      const total = countJstConsignDeliveries(params);
+      writeJson(res, 200, { ok: true, rows, total });
+      return;
+    }
+
+    if (pathname === "/api/master-data/consign-deliver-items") {
+      const payload = await readOptionalPayload(req);
+      const companyId = session.user?.companyId;
+      const rows = listJstConsignDeliverItems({
+        includeDeleted: Boolean(payload?.includeDeleted),
+        limit: Number(payload?.limit) || 2000,
+        offset: Number(payload?.offset) || 0,
+        oId: payload?.oId || payload?.o_id,
+        companyId,
+      });
+      writeJson(res, 200, { ok: true, rows });
+      return;
+    }
+
+    if (pathname === "/api/master-data/consign-deliveries-status") {
+      const companyId = session.user?.companyId;
+      writeJson(res, 200, {
+        ok: true,
+        ...getJstConsignDeliveryCacheStatus({ companyId }),
+      });
+      return;
+    }
+
+    if (pathname === "/api/master-data/consign-deliveries-unified") {
+      const payload = await readOptionalPayload(req);
+      const companyId = session.user?.companyId || payload?.companyId || "company_default";
+      const result = runConsignDeliveriesUnified(db, {
+        page: Number(payload?.page) || 1,
+        pageSize: Number(payload?.pageSize) || 100,
+        search: payload?.search || payload?.q || "",
+        status: payload?.status || "",
+        source: payload?.source || "all",
+        companyId,
+      });
+      writeJson(res, 200, result);
+      return;
+    }
+
+    if (pathname === "/api/master-data/other-inout") {
+      const payload = await readOptionalPayload(req);
+      const companyId = session.user?.companyId;
+      const params = {
+        since: payload?.since,
+        includeDeleted: Boolean(payload?.includeDeleted),
+        limit: Number(payload?.limit) || 1000,
+        offset: Number(payload?.offset) || 0,
+        search: payload?.search || payload?.q,
+        status: payload?.status,
+        type: payload?.type,
+        dateFrom: payload?.dateFrom,
+        dateTo: payload?.dateTo,
+        ioIds: Array.isArray(payload?.ioIds) ? payload.ioIds : null,
+        companyId,
+      };
+      const rows = listJstOtherInout(params);
+      const total = countJstOtherInout(params);
+      writeJson(res, 200, { ok: true, rows, total });
+      return;
+    }
+
+    if (pathname === "/api/master-data/other-inout-items") {
+      const payload = await readOptionalPayload(req);
+      const companyId = session.user?.companyId;
+      const rows = listJstOtherInoutItems({
+        includeDeleted: Boolean(payload?.includeDeleted),
+        limit: Number(payload?.limit) || 2000,
+        offset: Number(payload?.offset) || 0,
+        ioId: payload?.ioId || payload?.io_id,
+        companyId,
+      });
+      writeJson(res, 200, { ok: true, rows });
+      return;
+    }
+
+    if (pathname === "/api/master-data/other-inout-status") {
+      const companyId = session.user?.companyId;
+      writeJson(res, 200, {
+        ok: true,
+        ...getJstOtherInoutCacheStatus({ companyId }),
+      });
       return;
     }
 
@@ -4274,4 +4984,5 @@ module.exports = {
   syncLanUserSessions,
   startLanServer,
   stopLanServer,
+  runConsignDeliveriesUnified,
 };

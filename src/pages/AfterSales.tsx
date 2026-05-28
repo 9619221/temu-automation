@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Button, Col, Input, Row, Select, Space, Table, Tag, Typography, message } from "antd";
+import { Alert, Button, Col, Input, Row, Select, Space, Table, Tabs, Tag, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { CloudSyncOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import EmptyGuide from "../components/EmptyGuide";
 import PageHeader from "../components/PageHeader";
 import StatCard from "../components/StatCard";
+import PurchaseReturnsSection from "../components/PurchaseReturnsSection";
+import ConsignAfterSalesSection from "../components/ConsignAfterSalesSection";
 import {
   fetchTemuAfterSales,
   loadCloudConfig,
@@ -198,26 +200,8 @@ export default function AfterSales() {
     },
   ];
 
-  return (
-    <div>
-      <PageHeader
-        title="售后"
-        subtitle="集中查看云端采集到的售后、退货、退款和待处理记录。"
-        eyebrow="运营"
-        meta={[
-          loadedAt ? `同步 ${formatTime(loadedAt)}` : "等待同步",
-          cloudConfigured ? "云端已连接" : "云端未配置",
-        ]}
-        actions={[
-          <Button key="collect" onClick={() => navigate("/collect")}>
-            查看采集
-          </Button>,
-          <Button key="refresh" type="primary" icon={<ReloadOutlined />} loading={loading} onClick={() => void loadData(true)}>
-            刷新
-          </Button>,
-        ]}
-      />
-
+  const buyerSection = (
+    <>
       {!cloudConfigured || cloudError ? (
         <Alert
           style={{ marginBottom: 12 }}
@@ -315,6 +299,37 @@ export default function AfterSales() {
           />
         </Space>
       </section>
+    </>
+  );
+
+  return (
+    <div>
+      <PageHeader
+        title="售后"
+        subtitle="平台售后 / 送仓售后 / 采购退货 分三个 Tab 看。"
+        eyebrow="运营"
+        meta={[
+          loadedAt ? `平台售后同步 ${formatTime(loadedAt)}` : "等待同步",
+          cloudConfigured ? "云端已连接" : "云端未配置",
+        ]}
+        actions={[
+          <Button key="collect" onClick={() => navigate("/collect")}>
+            查看采集
+          </Button>,
+          <Button key="refresh" type="primary" icon={<ReloadOutlined />} loading={loading} onClick={() => void loadData(true)}>
+            刷新平台售后
+          </Button>,
+        ]}
+      />
+
+      <Tabs
+        defaultActiveKey="platform"
+        items={[
+          { key: "platform", label: "平台售后", children: buyerSection },
+          { key: "consign", label: "送仓售后", children: <ConsignAfterSalesSection /> },
+          { key: "purchase-return", label: "采购退货", children: <PurchaseReturnsSection /> },
+        ]}
+      />
     </div>
   );
 }

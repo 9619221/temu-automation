@@ -255,6 +255,91 @@ interface StoreAPI {
   setMany: (entries: Record<string, any>) => Promise<boolean>;
 }
 
+interface ConsignDeliverUnifiedParams {
+  page?: number;
+  pageSize?: number;
+  search?: string;
+  status?: string;
+  source?: "all" | "cloud" | "jst" | "both";
+  companyId?: string;
+}
+
+interface ConsignDeliverUnifiedRawCloud {
+  stock_order_no?: string | null;
+  row_key?: string | null;
+  mall_id?: string | null;
+  site?: string | null;
+  parent_order_no?: string | null;
+  delivery_batch_sn?: string | null;
+  product_id?: string | null;
+  skc_id?: string | null;
+  sku_id?: string | null;
+  sku_ext_code?: string | null;
+  temu_status?: string | null;
+  demand_qty?: number | null;
+  delivered_qty?: number | null;
+  order_amount_cents?: number | null;
+  currency?: string | null;
+  product_name?: string | null;
+  spec_name?: string | null;
+  delivery_order_sn?: string | null;
+  receive_warehouse_id?: string | null;
+  receive_warehouse_name?: string | null;
+  warehouse_group?: string | null;
+  urgency_info?: string | null;
+  order_time?: string | null;
+  latest_ship_at?: string | null;
+  logistics_info?: string | null;
+  item_count?: number | null;
+}
+
+interface ConsignDeliverUnifiedRawJst {
+  o_id?: number | null;
+  so_id?: string | null;
+  shop_name?: string | null;
+  status?: string | null;
+  src_status?: string | null;
+  shop_status_text?: string | null;
+  item_amount?: number | null;
+  items_qty?: number | null;
+  order_date?: string | null;
+  send_date?: string | null;
+  outer_deliver_no?: string | null;
+  supplier_name?: string | null;
+  logistics_company?: string | null;
+  l_id?: string | null;
+  sku_info?: string | null;
+  skus?: string | null;
+  currency?: string | null;
+}
+
+interface ConsignDeliverUnifiedRow {
+  soId: string | null;
+  shopName: string | null;
+  status: string | null;
+  itemAmount: number | null;
+  itemsQty: number | null;
+  orderDate: string | null;
+  outerDeliverNo: string | null;
+  supplierName: string | null;
+  source: "cloud" | "jst" | "both";
+  rawCloud: ConsignDeliverUnifiedRawCloud | null;
+  rawJst: ConsignDeliverUnifiedRawJst | null;
+}
+
+interface ConsignDeliverUnifiedResult {
+  ok?: boolean;
+  rows: ConsignDeliverUnifiedRow[];
+  total: number;
+  page: number;
+  pageSize: number;
+  sourceBreakdown: {
+    cloud_only: number;
+    jst_only: number;
+    both: number;
+  };
+}
+
 interface ErpStatus {
   initialized: boolean;
   mode?: "unset" | "host" | "client";
@@ -578,6 +663,68 @@ interface ErpAPI {
       lastReconcileAt?: string | null;
       syncing?: boolean;
     }>;
+  };
+  purchaseReturn: {
+    list: (params?: Record<string, any>) => Promise<any[]>;
+    page: (params?: Record<string, any>) => Promise<{ rows: any[]; total: number }>;
+    items: (params?: { ioId?: number; ioIds?: number[]; companyId?: string }) => Promise<any[]>;
+    sync: (options?: { mode?: "full" | "incremental"; companyId?: string }) => Promise<any>;
+    cacheStatus: (options?: { companyId?: string }) => Promise<{
+      companyId: string | null;
+      headCount: number;
+      itemCount: number;
+      populated: boolean;
+      head?: { cursor?: string | null; lastFullAt?: string | null; lastSyncAt?: string | null; lastReconcileAt?: string | null; syncing?: boolean };
+      item?: { cursor?: string | null; lastFullAt?: string | null; lastSyncAt?: string | null; lastReconcileAt?: string | null; syncing?: boolean };
+    }>;
+    action: (payload: {
+      action: "create_draft" | "update_draft" | "effective" | "cancel" | "delete_draft";
+      id?: string;
+      companyId?: string;
+      supplierName?: string;
+      accountId?: string;
+      labels?: string | null;
+      remark?: string | null;
+      items?: Array<{
+        skuId: string;
+        productName?: string | null;
+        propertiesValue?: string | null;
+        picUrl?: string | null;
+        qty: number;
+        costPrice: number;
+        iId?: string | null;
+        supplierIId?: string | null;
+        supplierSkuId?: string | null;
+        remark?: string | null;
+      }>;
+    }) => Promise<any>;
+  };
+  consignAfterSale: {
+    list: (params?: Record<string, any>) => Promise<any[]>;
+    page: (params?: Record<string, any>) => Promise<{ rows: any[]; total: number }>;
+    items: (params?: { asId?: number; asIds?: number[]; companyId?: string }) => Promise<any[]>;
+    sync: (options?: { mode?: "full" | "incremental"; companyId?: string }) => Promise<any>;
+    cacheStatus: (options?: { companyId?: string }) => Promise<{
+      companyId: string | null;
+      headCount: number;
+      itemCount: number;
+      populated: boolean;
+      head?: { cursor?: string | null; lastFullAt?: string | null; lastSyncAt?: string | null; lastReconcileAt?: string | null; syncing?: boolean };
+      item?: { cursor?: string | null; lastFullAt?: string | null; lastSyncAt?: string | null; lastReconcileAt?: string | null; syncing?: boolean };
+    }>;
+  };
+  consignDeliver: {
+    list: (params?: Record<string, any>) => Promise<any[]>;
+    page: (params?: { page?: number; pageSize?: number; limit?: number; offset?: number; search?: string; status?: string; companyId?: string }) => Promise<{ rows: any[]; total: number }>;
+    items: (params?: { o_id?: number | string; oId?: number | string; companyId?: string }) => Promise<any[]>;
+    cacheStatus: (params?: { companyId?: string }) => Promise<{ count: number; lastImportedAt: string | null; lastUpdatedAt: string | null }>;
+    unified: (params?: ConsignDeliverUnifiedParams) => Promise<ConsignDeliverUnifiedResult>;
+  };
+  otherInout: {
+    list: (params?: Record<string, any>) => Promise<any[]>;
+    page: (params?: { page?: number; pageSize?: number; limit?: number; offset?: number; search?: string; status?: string; type?: string; companyId?: string }) => Promise<{ rows: any[]; total: number }>;
+    items: (params?: { ioId?: number | string; io_id?: number | string; companyId?: string }) => Promise<any[]>;
+    cacheStatus: (params?: { companyId?: string }) => Promise<{ count: number; lastImportedAt: string | null; lastUpdatedAt: string | null }>;
   };
   purchase: {
     workbench: (params?: ErpListParams, options?: { timeoutMs?: number }) => Promise<any>;

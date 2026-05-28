@@ -17,6 +17,7 @@ const {
   syncLanUserSessions,
   startLanServer,
   stopLanServer,
+  runConsignDeliveriesUnified,
 } = require("./lanServer.cjs");
 const {
   HK_SERVER_URL,
@@ -33,6 +34,8 @@ const {
 } = require("./clientRuntime.cjs");
 const skuCache = require("./skuCache.cjs");
 const mappingCache = require("./mappingCache.cjs");
+const purchaseReturnCache = require("./purchaseReturnCache.cjs");
+const consignAfterSaleCache = require("./consignAfterSaleCache.cjs");
 const {
   DEFAULT_1688_GATEWAY_BASE,
   PROCUREMENT_APIS,
@@ -1081,10 +1084,10 @@ function toCompany(row) {
   return toCamelRow(row);
 }
 
-function normalizeLimit(value, fallback = 100) {
+function normalizeLimit(value, fallback = 100, maxCap = 10000) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
-  return Math.max(1, Math.min(Math.floor(number), 10000));
+  return Math.max(1, Math.min(Math.floor(number), maxCap));
 }
 
 function normalizeOffset(value) {
@@ -1248,6 +1251,8 @@ function initializeErp(options = {}) {
   configureClientRuntime({ userDataDir: erpState.userDataDir });
   skuCache.configureSkuCache({ userDataDir: erpState.userDataDir });
   mappingCache.configureMappingCache({ userDataDir: erpState.userDataDir });
+  purchaseReturnCache.configurePurchaseReturnCache({ userDataDir: erpState.userDataDir });
+  consignAfterSaleCache.configureConsignAfterSaleCache({ userDataDir: erpState.userDataDir });
 
   const runtime = getRuntimeStatus();
   if (runtime.mode === "client") {
@@ -4533,6 +4538,1091 @@ function countUnmappedSkus(params = {}) {
   return row ? row.c : 0;
 }
 
+// 采购退货历史台账查询（聚水潭 jushuitan-purchaseout-* 导入到 purchase_returns）。
+// 返回 camelCase 行，按 io_date 倒序；支持 since 游标 + includeDeleted（软删占位，目前
+// 这批历史数据不会写 deleted，但接口签名跟 mapping/sku 缓存保持一致以便复用同步框架）。
+function toPurchaseReturnRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    companyId: row.company_id,
+    ioId: row.io_id,
+    ioDate: row.io_date,
+    status: row.status,
+    fStatus: row.f_status,
+    statusInternal: row.status_internal,
+    totalQty: row.total_qty,
+    totalSkuCount: row.total_sku_count,
+    totalAmount: row.total_amount,
+    wmsCoName: row.wms_co_name,
+    warehouse: row.warehouse,
+    supplierName: row.supplier_name,
+    creatorName: row.creator_name,
+    archiverName: row.archiver_name,
+    archivedAt: row.archived_at,
+    labels: row.labels,
+    remark: row.remark,
+    createdText: row.created_text,
+    modifiedText: row.modified_text,
+    importedAt: row.imported_at,
+    updatedAt: row.updated_at,
+    source: row.source || "jushuitan_import",
+    lifecycle: row.lifecycle || "effective",
+    accountId: row.account_id,
+    createdByUserId: row.created_by_user_id,
+    effectiveAt: row.effective_at,
+    cancelledAt: row.cancelled_at,
+  };
+}
+
+function toPurchaseReturnItemRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    companyId: row.company_id,
+    ioId: row.io_id,
+    ioiId: row.ioi_id,
+    skuId: row.sku_id,
+    productName: row.product_name,
+    propertiesValue: row.properties_value,
+    picUrl: row.pic_url,
+    qty: row.qty,
+    costPrice: row.cost_price,
+    costAmount: row.cost_amount,
+    iId: row.i_id,
+    supplierIId: row.supplier_i_id,
+    supplierSkuId: row.supplier_sku_id,
+    labels: row.labels,
+    remark: row.remark,
+    statusInternal: row.status_internal,
+    importedAt: row.imported_at,
+    updatedAt: row.updated_at,
+    inventoryLedgerId: row.inventory_ledger_id,
+  };
+}
+
+function listPurchaseReturns(params = {}) {
+  const { db } = requireErp();
+  const since = optionalString(params.since);
+  const includeDeleted = Boolean(params.includeDeleted || params.include_deleted);
+  const companyId = optionalString(params.companyId || params.company_id);
+  const ioIdsRaw = Array.isArray(params.ioIds || params.io_ids) ? (params.ioIds || params.io_ids) : null;
+  const conditions = [];
+  const values = {
+    company_id: companyId,
+    since,
+    limit: normalizeLimit(params.limit, 1000, 100000),
+    offset: normalizeOffset(params.offset),
+  };
+  if (companyId) conditions.push("company_id = @company_id");
+  if (since) conditions.push("updated_at > @since");
+  if (!includeDeleted) conditions.push("status_internal != 'deleted'");
+  const search = optionalString(params.search || params.q);
+  if (search) {
+    values.search = `%${search}%`;
+    conditions.push("(supplier_name LIKE @search OR warehouse LIKE @search OR creator_name LIKE @search OR labels LIKE @search OR remark LIKE @search OR CAST(io_id AS TEXT) LIKE @search)");
+  }
+  const supplier = optionalString(params.supplier || params.supplier_name);
+  if (supplier) {
+    values.supplier = supplier;
+    conditions.push("supplier_name = @supplier");
+  }
+  const statusFilter = optionalString(params.status);
+  if (statusFilter) {
+    values.status_filter = statusFilter;
+    conditions.push("status = @status_filter");
+  }
+  const dateFrom = optionalString(params.dateFrom || params.date_from);
+  if (dateFrom) {
+    values.date_from = dateFrom;
+    conditions.push("io_date >= @date_from");
+  }
+  const dateTo = optionalString(params.dateTo || params.date_to);
+  if (dateTo) {
+    values.date_to = dateTo;
+    conditions.push("io_date <= @date_to");
+  }
+  if (ioIdsRaw && ioIdsRaw.length) {
+    const placeholders = ioIdsRaw.map((_, idx) => `@io_id_${idx}`);
+    ioIdsRaw.forEach((value, idx) => {
+      values[`io_id_${idx}`] = Number(value) || 0;
+    });
+    conditions.push(`io_id IN (${placeholders.join(", ")})`);
+  }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const rows = db.prepare(`
+    SELECT * FROM purchase_returns
+    ${where}
+    ORDER BY io_date DESC, io_id DESC
+    LIMIT @limit OFFSET @offset
+  `).all(values);
+  return rows.map(toPurchaseReturnRow);
+}
+
+function getPurchaseReturnIds(params = {}) {
+  const { db } = requireErp();
+  const companyId = optionalString(params.companyId || params.company_id);
+  const where = companyId ? "WHERE company_id = @company_id AND status_internal != 'deleted'" : "WHERE status_internal != 'deleted'";
+  const rows = db.prepare(`SELECT id FROM purchase_returns ${where}`).all(companyId ? { company_id: companyId } : {});
+  return rows.map((row) => row.id);
+}
+
+function listPurchaseReturnItems(params = {}) {
+  const { db } = requireErp();
+  const since = optionalString(params.since);
+  const includeDeleted = Boolean(params.includeDeleted || params.include_deleted);
+  const companyId = optionalString(params.companyId || params.company_id);
+  const ioId = optionalString(params.ioId || params.io_id);
+  const ioIdsRaw = Array.isArray(params.ioIds || params.io_ids) ? (params.ioIds || params.io_ids) : null;
+  const conditions = [];
+  const values = {
+    company_id: companyId,
+    since,
+    io_id: ioId,
+    limit: normalizeLimit(params.limit, 2000),
+    offset: normalizeOffset(params.offset),
+  };
+  if (companyId) conditions.push("company_id = @company_id");
+  if (since) conditions.push("updated_at > @since");
+  if (!includeDeleted) conditions.push("status_internal != 'deleted'");
+  if (ioId) conditions.push("io_id = @io_id");
+  if (ioIdsRaw && ioIdsRaw.length) {
+    const placeholders = ioIdsRaw.map((_, idx) => `@io_id_${idx}`);
+    ioIdsRaw.forEach((value, idx) => {
+      values[`io_id_${idx}`] = Number(value) || 0;
+    });
+    conditions.push(`io_id IN (${placeholders.join(", ")})`);
+  }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const rows = db.prepare(`
+    SELECT * FROM purchase_return_items
+    ${where}
+    ORDER BY io_id DESC, ioi_id ASC
+    LIMIT @limit OFFSET @offset
+  `).all(values);
+  return rows.map(toPurchaseReturnItemRow);
+}
+
+function getPurchaseReturnItemIds(params = {}) {
+  const { db } = requireErp();
+  const companyId = optionalString(params.companyId || params.company_id);
+  const where = companyId ? "WHERE company_id = @company_id AND status_internal != 'deleted'" : "WHERE status_internal != 'deleted'";
+  const rows = db.prepare(`SELECT id FROM purchase_return_items ${where}`).all(companyId ? { company_id: companyId } : {});
+  return rows.map((row) => row.id);
+}
+
+// 手动创建/编辑/生效/作废采购退货单。聚水潭历史单不走这里，由 jushuitan-purchaseout-import.cjs 一次性导入。
+// 手动单约定：id=po-ret:<uuid>，io_id=-<unix_ts_ms>（负数规避 NOT NULL + UNIQUE，聚水潭永远是正数）。
+// 状态机：draft(草稿,未动库存) → effective(生效,已扣库存) → cancelled(作废,反向加库存,终态)。
+
+function normalizePurchaseReturnItemsInput(itemsInput) {
+  if (!Array.isArray(itemsInput) || !itemsInput.length) {
+    throw new Error("至少一条明细");
+  }
+  const items = [];
+  itemsInput.forEach((raw, idx) => {
+    if (!raw) return;
+    const skuId = requireString(raw.skuId || raw.sku_id, `items[${idx}].skuId`);
+    const qty = Number(raw.qty);
+    if (!Number.isFinite(qty) || qty <= 0 || !Number.isInteger(qty)) {
+      throw new Error(`items[${idx}].qty 必须为正整数`);
+    }
+    const unitCost = Number(raw.costPrice ?? raw.cost_price ?? raw.unitCost ?? raw.unit_cost);
+    if (!Number.isFinite(unitCost) || unitCost <= 0) {
+      throw new Error(`items[${idx}].costPrice 必须为正数（必填）`);
+    }
+    items.push({
+      skuId,
+      productName: optionalString(raw.productName || raw.product_name),
+      propertiesValue: optionalString(raw.propertiesValue || raw.properties_value),
+      picUrl: optionalString(raw.picUrl || raw.pic_url),
+      qty,
+      costPrice: unitCost,
+      costAmount: Math.round(qty * unitCost * 100) / 100,
+      iId: optionalString(raw.iId || raw.i_id),
+      supplierIId: optionalString(raw.supplierIId || raw.supplier_i_id),
+      supplierSkuId: optionalString(raw.supplierSkuId || raw.supplier_sku_id),
+      labels: optionalString(raw.labels),
+      remark: optionalString(raw.remark),
+    });
+  });
+  if (!items.length) throw new Error("至少一条明细");
+  return items;
+}
+
+function summarizePurchaseReturnItems(items) {
+  let totalQty = 0;
+  let totalAmount = 0;
+  const skuSet = new Set();
+  for (const item of items) {
+    totalQty += Number(item.qty) || 0;
+    totalAmount += Number(item.costAmount) || 0;
+    if (item.skuId) skuSet.add(item.skuId);
+  }
+  return {
+    totalQty,
+    totalAmount: Math.round(totalAmount * 100) / 100,
+    totalSkuCount: skuSet.size,
+  };
+}
+
+function fetchPurchaseReturnRowRaw(db, id) {
+  const row = db.prepare("SELECT * FROM purchase_returns WHERE id = ?").get(id);
+  if (!row) throw new Error(`采购退货单不存在: ${id}`);
+  return row;
+}
+
+function ensureManualDraft(row) {
+  if (row.source !== "manual") throw new Error("聚水潭历史单不可编辑");
+  if (row.lifecycle !== "draft") throw new Error("非草稿状态不可编辑");
+}
+
+function createPurchaseReturnDraft(payload, actor) {
+  const { db } = requireErp();
+  const companyId = optionalString(payload.companyId) || erpState.currentUser?.companyId || "company_default";
+  const supplierName = requireString(payload.supplierName, "supplierName");
+  const accountId = requireString(payload.accountId, "accountId");
+  const items = normalizePurchaseReturnItemsInput(payload.items);
+  const summary = summarizePurchaseReturnItems(items);
+  const now = nowIso();
+  const id = `po-ret:${createId("uuid")}`;
+  const ioId = -Date.now();
+  const account = db.prepare("SELECT id, name FROM erp_accounts WHERE id = ?").get(accountId);
+  if (!account) throw new Error(`仓库账户不存在: ${accountId}`);
+
+  const run = db.transaction(() => {
+    db.prepare(`
+      INSERT INTO purchase_returns (
+        id, company_id, io_id, io_date, status, f_status,
+        total_qty, total_sku_count, total_amount,
+        wms_co_name, warehouse, supplier_name, creator_name,
+        labels, remark, imported_at, updated_at, status_internal,
+        source, lifecycle, account_id, created_by_user_id
+      ) VALUES (
+        @id, @company_id, @io_id, @io_date, 'draft', 'draft',
+        @total_qty, @total_sku_count, @total_amount,
+        NULL, @warehouse, @supplier_name, @creator_name,
+        @labels, @remark, @now, @now, 'active',
+        'manual', 'draft', @account_id, @created_by
+      )
+    `).run({
+      id,
+      company_id: companyId,
+      io_id: ioId,
+      io_date: now,
+      total_qty: summary.totalQty,
+      total_sku_count: summary.totalSkuCount,
+      total_amount: summary.totalAmount,
+      warehouse: account.name || null,
+      supplier_name: supplierName,
+      creator_name: actor?.displayName || actor?.username || null,
+      labels: optionalString(payload.labels),
+      remark: optionalString(payload.remark),
+      now,
+      account_id: accountId,
+      created_by: actor?.userId || null,
+    });
+    insertPurchaseReturnItems(db, { companyId, ioId, parentId: id, items, now });
+  });
+  run();
+  return { id, ioId, lifecycle: "draft", ...summary };
+}
+
+function insertPurchaseReturnItems(db, { companyId, ioId, items, now }) {
+  const stmt = db.prepare(`
+    INSERT INTO purchase_return_items (
+      id, company_id, io_id, ioi_id, sku_id, product_name, properties_value, pic_url,
+      qty, cost_price, cost_amount, i_id, supplier_i_id, supplier_sku_id,
+      labels, remark, imported_at, updated_at, status_internal
+    ) VALUES (
+      @id, @company_id, @io_id, @ioi_id, @sku_id, @product_name, @properties_value, @pic_url,
+      @qty, @cost_price, @cost_amount, @i_id, @supplier_i_id, @supplier_sku_id,
+      @labels, @remark, @now, @now, 'active'
+    )
+  `);
+  const base = -Date.now() * 1000;
+  items.forEach((item, idx) => {
+    const ioiId = base - idx;
+    stmt.run({
+      id: `po-ret-item:${createId("uuid")}`,
+      company_id: companyId,
+      io_id: ioId,
+      ioi_id: ioiId,
+      sku_id: item.skuId,
+      product_name: item.productName,
+      properties_value: item.propertiesValue,
+      pic_url: item.picUrl,
+      qty: item.qty,
+      cost_price: item.costPrice,
+      cost_amount: item.costAmount,
+      i_id: item.iId,
+      supplier_i_id: item.supplierIId,
+      supplier_sku_id: item.supplierSkuId,
+      labels: item.labels,
+      remark: item.remark,
+      now,
+    });
+  });
+}
+
+function updatePurchaseReturnDraft(payload, actor) {
+  const { db } = requireErp();
+  const id = requireString(payload.id, "id");
+  const items = normalizePurchaseReturnItemsInput(payload.items);
+  const summary = summarizePurchaseReturnItems(items);
+  const supplierName = requireString(payload.supplierName, "supplierName");
+  const accountId = requireString(payload.accountId, "accountId");
+  const now = nowIso();
+  const account = db.prepare("SELECT id, name FROM erp_accounts WHERE id = ?").get(accountId);
+  if (!account) throw new Error(`仓库账户不存在: ${accountId}`);
+
+  const run = db.transaction(() => {
+    const row = fetchPurchaseReturnRowRaw(db, id);
+    ensureManualDraft(row);
+    db.prepare(`
+      UPDATE purchase_returns
+      SET supplier_name = @supplier_name,
+          account_id = @account_id,
+          warehouse = @warehouse,
+          labels = @labels,
+          remark = @remark,
+          total_qty = @total_qty,
+          total_sku_count = @total_sku_count,
+          total_amount = @total_amount,
+          updated_at = @now
+      WHERE id = @id
+    `).run({
+      id,
+      supplier_name: supplierName,
+      account_id: accountId,
+      warehouse: account.name || null,
+      labels: optionalString(payload.labels),
+      remark: optionalString(payload.remark),
+      total_qty: summary.totalQty,
+      total_sku_count: summary.totalSkuCount,
+      total_amount: summary.totalAmount,
+      now,
+    });
+    db.prepare("DELETE FROM purchase_return_items WHERE company_id = ? AND io_id = ?")
+      .run(row.company_id, row.io_id);
+    insertPurchaseReturnItems(db, { companyId: row.company_id, ioId: row.io_id, parentId: id, items, now });
+  });
+  run();
+  return { id, lifecycle: "draft", ...summary };
+}
+
+function effectivePurchaseReturn(payload, actor) {
+  const { db, services } = requireErp();
+  const { INVENTORY_LEDGER_TYPE } = require("./workflow/enums.cjs");
+  const id = requireString(payload.id, "id");
+  const now = nowIso();
+
+  const run = db.transaction(() => {
+    const row = fetchPurchaseReturnRowRaw(db, id);
+    if (row.source !== "manual") throw new Error("聚水潭历史单不可生效");
+    if (row.lifecycle !== "draft") throw new Error("仅草稿可生效");
+    if (!row.account_id) throw new Error("缺少 accountId");
+    const items = db.prepare(
+      "SELECT * FROM purchase_return_items WHERE company_id = ? AND io_id = ? AND status_internal != 'deleted'"
+    ).all(row.company_id, row.io_id);
+    if (!items.length) throw new Error("没有明细，无法生效");
+
+    const updateItem = db.prepare(
+      "UPDATE purchase_return_items SET inventory_ledger_id = @ledger, updated_at = @now WHERE id = @id"
+    );
+    for (const item of items) {
+      const lines = services.inventory.applyDirectOutbound({
+        accountId: row.account_id,
+        skuId: item.sku_id,
+        qty: item.qty,
+        unitCost: item.cost_price,
+        ledgerType: INVENTORY_LEDGER_TYPE.PURCHASE_RETURN,
+        sourceDocType: "purchase_return",
+        sourceDocId: id,
+        affectSkuTotal: true,
+        actor,
+      });
+      updateItem.run({ id: item.id, ledger: JSON.stringify(lines || []), now });
+    }
+    db.prepare(`
+      UPDATE purchase_returns
+      SET lifecycle = 'effective', status = '生效', f_status = '生效',
+          effective_at = @now, updated_at = @now
+      WHERE id = @id
+    `).run({ id, now });
+  });
+  run();
+  return { id, lifecycle: "effective", effectiveAt: now };
+}
+
+function cancelPurchaseReturn(payload, actor) {
+  const { db, services } = requireErp();
+  const { INVENTORY_LEDGER_TYPE } = require("./workflow/enums.cjs");
+  const id = requireString(payload.id, "id");
+  const now = nowIso();
+
+  const run = db.transaction(() => {
+    const row = fetchPurchaseReturnRowRaw(db, id);
+    if (row.source !== "manual") throw new Error("聚水潭历史单不可作废");
+    if (row.lifecycle !== "effective") throw new Error("仅生效单可作废");
+    if (!row.account_id) throw new Error("缺少 accountId");
+    const items = db.prepare(
+      "SELECT * FROM purchase_return_items WHERE company_id = ? AND io_id = ? AND status_internal != 'deleted'"
+    ).all(row.company_id, row.io_id);
+    for (const item of items) {
+      services.inventory.applyDirectInbound({
+        accountId: row.account_id,
+        skuId: item.sku_id,
+        qty: item.qty,
+        unitLandedCost: item.cost_price,
+        ledgerType: INVENTORY_LEDGER_TYPE.PURCHASE_RETURN_REVERSAL,
+        sourceDocType: "purchase_return_cancel",
+        sourceDocId: id,
+        affectSkuTotal: true,
+        actor,
+      });
+    }
+    db.prepare(`
+      UPDATE purchase_returns
+      SET lifecycle = 'cancelled', status = '作废', f_status = '作废',
+          cancelled_at = @now, updated_at = @now
+      WHERE id = @id
+    `).run({ id, now });
+  });
+  run();
+  return { id, lifecycle: "cancelled", cancelledAt: now };
+}
+
+function deletePurchaseReturnDraft(payload /* actor */) {
+  const { db } = requireErp();
+  const id = requireString(payload.id, "id");
+  const run = db.transaction(() => {
+    const row = fetchPurchaseReturnRowRaw(db, id);
+    if (row.source !== "manual") throw new Error("聚水潭历史单不可删除");
+    if (row.lifecycle !== "draft") throw new Error("仅草稿可删除");
+    db.prepare("DELETE FROM purchase_return_items WHERE company_id = ? AND io_id = ?")
+      .run(row.company_id, row.io_id);
+    db.prepare("DELETE FROM purchase_returns WHERE id = ?").run(id);
+  });
+  run();
+  return { id, deleted: true };
+}
+
+function performPurchaseReturnAction(payload = {}, actorInput = {}) {
+  const action = requireString(payload.action, "action");
+  const actor = normalizeActor(actorInput);
+  switch (action) {
+    case "create_draft": return createPurchaseReturnDraft(payload, actor);
+    case "update_draft": return updatePurchaseReturnDraft(payload, actor);
+    case "effective": return effectivePurchaseReturn(payload, actor);
+    case "cancel": return cancelPurchaseReturn(payload, actor);
+    case "delete_draft": return deletePurchaseReturnDraft(payload, actor);
+    default: throw new Error(`Unsupported purchase-return action: ${action}`);
+  }
+}
+
+// 送仓售后台账查询（聚水潭 jushuitan-aftersale-consign-* 导入到 consign_after_sales）。
+// 跟采购退货同口径：camelCase 行、按 as_date 倒序、支持 since 游标 + includeDeleted。
+function toConsignAfterSaleRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    companyId: row.company_id,
+    asId: row.as_id,
+    outerAsId: row.outer_as_id,
+    asDate: row.as_date,
+    shopType: row.shop_type,
+    type: row.type,
+    status: row.status,
+    shopStatus: row.shop_status,
+    goodStatus: row.good_status,
+    shopName: row.shop_name,
+    shopId: row.shop_id,
+    shopSite: row.shop_site,
+    warehouse: row.warehouse,
+    whId: row.wh_id,
+    whCode: row.wh_code,
+    receiverName: row.receiver_name,
+    receiverMobile: row.receiver_mobile,
+    receiverPhone: row.receiver_phone,
+    refundQty: row.refund_qty,
+    rQty: row.r_qty,
+    boxIdCount: row.box_id_count,
+    payment: row.payment,
+    totalAmount: row.total_amount,
+    refundTotalAmount: row.refund_total_amount,
+    buyerApplyRefund: row.buyer_apply_refund,
+    refund: row.refund,
+    logisticsCompany: row.logistics_company,
+    lId: row.l_id,
+    oId: row.o_id,
+    soId: row.so_id,
+    labels: row.labels,
+    remark: row.remark,
+    modifierName: row.modifier_name,
+    creatorName: row.creator_name,
+    confirmDate: row.confirm_date,
+    createdText: row.created_text,
+    modifiedText: row.modified_text,
+    statusInternal: row.status_internal,
+    importedAt: row.imported_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toConsignAfterSaleItemRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    companyId: row.company_id,
+    asiId: row.asi_id,
+    asId: row.as_id,
+    outerAsId: row.outer_as_id,
+    shopName: row.shop_name,
+    skuId: row.sku_id,
+    iId: row.i_id,
+    skuCode: row.sku_code,
+    productName: row.product_name,
+    propertiesValue: row.properties_value,
+    picUrl: row.pic_url,
+    qty: row.qty,
+    rQty: row.r_qty,
+    defectiveQty: row.defective_qty,
+    price: row.price,
+    amount: row.amount,
+    refundAmount: row.refund_amount,
+    shopAmount: row.shop_amount,
+    supplierName: row.supplier_name,
+    type: row.type,
+    des: row.des,
+    outerOiId: row.outer_oi_id,
+    oId: row.o_id,
+    oIdEn: row.o_id_en,
+    boxId: row.box_id,
+    itemSign: row.item_sign,
+    temuBillIds: row.temu_bill_ids,
+    temuHasFlaw: row.temu_has_flaw,
+    temuSoId: row.temu_so_id,
+    itemLabels: row.item_labels,
+    shelfLife: row.shelf_life,
+    isEnableBatch: row.is_enable_batch,
+    receiveDate: row.receive_date,
+    statusInternal: row.status_internal,
+    importedAt: row.imported_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function listConsignAfterSales(params = {}) {
+  const { db } = requireErp();
+  const since = optionalString(params.since);
+  const includeDeleted = Boolean(params.includeDeleted || params.include_deleted);
+  const companyId = optionalString(params.companyId || params.company_id);
+  const asIdsRaw = Array.isArray(params.asIds || params.as_ids) ? (params.asIds || params.as_ids) : null;
+  const conditions = [];
+  const values = {
+    company_id: companyId,
+    since,
+    limit: normalizeLimit(params.limit, 1000, 100000),
+    offset: normalizeOffset(params.offset),
+  };
+  if (companyId) conditions.push("company_id = @company_id");
+  if (since) conditions.push("updated_at > @since");
+  if (!includeDeleted) conditions.push("status_internal != 'deleted'");
+  const search = optionalString(params.search || params.q);
+  if (search) {
+    values.search = `%${search}%`;
+    conditions.push("(shop_name LIKE @search OR warehouse LIKE @search OR outer_as_id LIKE @search OR l_id LIKE @search OR remark LIKE @search OR labels LIKE @search OR CAST(as_id AS TEXT) LIKE @search)");
+  }
+  const shopName = optionalString(params.shopName || params.shop_name);
+  if (shopName) {
+    values.shop_name = shopName;
+    conditions.push("shop_name = @shop_name");
+  }
+  const statusFilter = optionalString(params.status);
+  if (statusFilter) {
+    values.status_filter = statusFilter;
+    conditions.push("status = @status_filter");
+  }
+  const dateFrom = optionalString(params.dateFrom || params.date_from);
+  if (dateFrom) {
+    values.date_from = dateFrom;
+    conditions.push("as_date >= @date_from");
+  }
+  const dateTo = optionalString(params.dateTo || params.date_to);
+  if (dateTo) {
+    values.date_to = dateTo;
+    conditions.push("as_date <= @date_to");
+  }
+  if (asIdsRaw && asIdsRaw.length) {
+    const placeholders = asIdsRaw.map((_, idx) => `@as_${idx}`);
+    asIdsRaw.forEach((value, idx) => { values[`as_${idx}`] = Number(value) || 0; });
+    conditions.push(`as_id IN (${placeholders.join(", ")})`);
+  }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const rows = db.prepare(`
+    SELECT * FROM consign_after_sales
+    ${where}
+    ORDER BY as_date DESC, as_id DESC
+    LIMIT @limit OFFSET @offset
+  `).all(values);
+  return rows.map(toConsignAfterSaleRow);
+}
+
+function getConsignAfterSaleIds(params = {}) {
+  const { db } = requireErp();
+  const companyId = optionalString(params.companyId || params.company_id);
+  const where = companyId ? "WHERE company_id = @company_id AND status_internal != 'deleted'" : "WHERE status_internal != 'deleted'";
+  const rows = db.prepare(`SELECT id FROM consign_after_sales ${where}`).all(companyId ? { company_id: companyId } : {});
+  return rows.map((row) => row.id);
+}
+
+function listConsignAfterSaleItems(params = {}) {
+  const { db } = requireErp();
+  const since = optionalString(params.since);
+  const includeDeleted = Boolean(params.includeDeleted || params.include_deleted);
+  const companyId = optionalString(params.companyId || params.company_id);
+  const asId = optionalString(params.asId || params.as_id);
+  const asIdsRaw = Array.isArray(params.asIds || params.as_ids) ? (params.asIds || params.as_ids) : null;
+  const conditions = [];
+  const values = {
+    company_id: companyId,
+    since,
+    as_id: asId,
+    limit: normalizeLimit(params.limit, 2000),
+    offset: normalizeOffset(params.offset),
+  };
+  if (companyId) conditions.push("company_id = @company_id");
+  if (since) conditions.push("updated_at > @since");
+  if (!includeDeleted) conditions.push("status_internal != 'deleted'");
+  if (asId) conditions.push("as_id = @as_id");
+  if (asIdsRaw && asIdsRaw.length) {
+    const placeholders = asIdsRaw.map((_, idx) => `@as_${idx}`);
+    asIdsRaw.forEach((value, idx) => { values[`as_${idx}`] = Number(value) || 0; });
+    conditions.push(`as_id IN (${placeholders.join(", ")})`);
+  }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const rows = db.prepare(`
+    SELECT * FROM consign_after_sale_items
+    ${where}
+    ORDER BY as_id DESC, asi_id ASC
+    LIMIT @limit OFFSET @offset
+  `).all(values);
+  return rows.map(toConsignAfterSaleItemRow);
+}
+
+function getConsignAfterSaleItemIds(params = {}) {
+  const { db } = requireErp();
+  const companyId = optionalString(params.companyId || params.company_id);
+  const where = companyId ? "WHERE company_id = @company_id AND status_internal != 'deleted'" : "WHERE status_internal != 'deleted'";
+  const rows = db.prepare(`SELECT id FROM consign_after_sale_items ${where}`).all(companyId ? { company_id: companyId } : {});
+  return rows.map((row) => row.id);
+}
+
+// 送仓托管出库历史台账（聚水潭 jst_consign_deliveries / jst_consign_deliver_items）。
+function toJstConsignDeliveryRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    companyId: row.company_id,
+    oId: row.o_id,
+    soId: row.so_id,
+    preSoId: row.pre_so_id,
+    drpSoId: row.drp_so_id,
+    oIdEn: row.o_id_en,
+    outerPayId: row.outer_pay_id,
+    outerDeliverNo: row.outer_deliver_no,
+    orderDate: row.order_date,
+    payDate: row.pay_date,
+    planDeliveryDate: row.plan_delivery_date,
+    sendDate: row.send_date,
+    signTime: row.sign_time,
+    shopId: row.shop_id,
+    shopName: row.shop_name,
+    shopSite: row.shop_site,
+    type: row.type,
+    status: row.status,
+    srcStatus: row.src_status,
+    shopStatus: row.shop_status,
+    shopStatusText: row.shop_status_text,
+    shopDeliveryStatus: row.shop_delivery_status,
+    shopDeliveryStatusText: row.shop_delivery_status_text,
+    deliveryStatus: row.delivery_status,
+    questionType: row.question_type,
+    questionDesc: row.question_desc,
+    isRefund: row.is_refund,
+    isPaid: row.is_paid,
+    isCod: row.is_cod,
+    isSplit: row.is_split,
+    isMerge: row.is_merge,
+    wmsCoId: row.wms_co_id,
+    wmsCoName: row.wms_co_name,
+    binName: row.bin_name,
+    logisticsCompany: row.logistics_company,
+    lId: row.l_id,
+    receiverName: row.receiver_name,
+    receiverCountry: row.receiver_country,
+    receiverState: row.receiver_state,
+    receiverCity: row.receiver_city,
+    receiverDistrict: row.receiver_district,
+    receiverTown: row.receiver_town,
+    receiverAddress: row.receiver_address,
+    receiverZip: row.receiver_zip,
+    supplierName: row.supplier_name,
+    buyerId: row.buyer_id,
+    itemAmount: row.item_amount,
+    itemsQty: row.items_qty,
+    shippedQty: row.shipped_qty,
+    instockedQty: row.instocked_qty,
+    returnQty: row.return_qty,
+    weight: row.weight,
+    freight: row.freight,
+    freeAmount: row.free_amount,
+    currency: row.currency,
+    skuInfo: row.sku_info,
+    skus: row.skus,
+    labels: row.labels,
+    remark: row.remark,
+    createdText: row.created_text,
+    modifiedText: row.modified_text,
+    statusInternal: row.status_internal,
+    importedAt: row.imported_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toJstConsignDeliverItemRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    companyId: row.company_id,
+    oiId: row.oi_id,
+    oId: row.o_id,
+    soId: row.so_id,
+    shopName: row.shop_name,
+    shopStatus: row.shop_status,
+    orderDate: row.order_date,
+    skuId: row.sku_id,
+    iId: row.i_id,
+    skuCode: row.sku_code,
+    name: row.name,
+    propertiesValue: row.properties_value,
+    picUrl: row.pic_url,
+    qty: row.qty,
+    basePrice: row.base_price,
+    price: row.price,
+    amount: row.amount,
+    costPrice: row.cost_price,
+    costAmount: row.cost_amount,
+    statusInternal: row.status_internal,
+    importedAt: row.imported_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function listJstConsignDeliveries(params = {}) {
+  const { db } = requireErp();
+  const since = optionalString(params.since);
+  const includeDeleted = Boolean(params.includeDeleted || params.include_deleted);
+  const companyId = optionalString(params.companyId || params.company_id);
+  const oIdsRaw = Array.isArray(params.oIds || params.o_ids) ? (params.oIds || params.o_ids) : null;
+  const conditions = [];
+  const values = {
+    company_id: companyId,
+    since,
+    limit: normalizeLimit(params.limit, 1000, 100000),
+    offset: normalizeOffset(params.offset),
+  };
+  if (companyId) conditions.push("company_id = @company_id");
+  if (since) conditions.push("updated_at > @since");
+  if (!includeDeleted) conditions.push("status_internal != 'deleted'");
+  const search = optionalString(params.search || params.q);
+  if (search) {
+    values.search = `%${search}%`;
+    conditions.push("(so_id LIKE @search OR outer_deliver_no LIKE @search OR shop_name LIKE @search OR wms_co_name LIKE @search OR receiver_name LIKE @search OR l_id LIKE @search OR remark LIKE @search OR labels LIKE @search OR CAST(o_id AS TEXT) LIKE @search)");
+  }
+  const statusFilter = optionalString(params.status);
+  if (statusFilter) {
+    values.status_filter = statusFilter;
+    conditions.push("status = @status_filter");
+  }
+  const dateFrom = optionalString(params.dateFrom || params.date_from);
+  if (dateFrom) {
+    values.date_from = dateFrom;
+    conditions.push("order_date >= @date_from");
+  }
+  const dateTo = optionalString(params.dateTo || params.date_to);
+  if (dateTo) {
+    values.date_to = dateTo;
+    conditions.push("order_date <= @date_to");
+  }
+  if (oIdsRaw && oIdsRaw.length) {
+    const placeholders = oIdsRaw.map((_, idx) => `@o_id_${idx}`);
+    oIdsRaw.forEach((value, idx) => { values[`o_id_${idx}`] = Number(value) || 0; });
+    conditions.push(`o_id IN (${placeholders.join(", ")})`);
+  }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const rows = db.prepare(`
+    SELECT * FROM jst_consign_deliveries
+    ${where}
+    ORDER BY order_date DESC, o_id DESC
+    LIMIT @limit OFFSET @offset
+  `).all(values);
+  return rows.map(toJstConsignDeliveryRow);
+}
+
+function countJstConsignDeliveries(params = {}) {
+  const { db } = requireErp();
+  const includeDeleted = Boolean(params.includeDeleted || params.include_deleted);
+  const companyId = optionalString(params.companyId || params.company_id);
+  const conditions = [];
+  const values = {};
+  if (companyId) { conditions.push("company_id = @company_id"); values.company_id = companyId; }
+  if (!includeDeleted) conditions.push("status_internal != 'deleted'");
+  const search = optionalString(params.search || params.q);
+  if (search) {
+    values.search = `%${search}%`;
+    conditions.push("(so_id LIKE @search OR outer_deliver_no LIKE @search OR shop_name LIKE @search OR wms_co_name LIKE @search OR receiver_name LIKE @search OR l_id LIKE @search OR remark LIKE @search OR labels LIKE @search OR CAST(o_id AS TEXT) LIKE @search)");
+  }
+  const statusFilter = optionalString(params.status);
+  if (statusFilter) { values.status_filter = statusFilter; conditions.push("status = @status_filter"); }
+  const dateFrom = optionalString(params.dateFrom || params.date_from);
+  if (dateFrom) { values.date_from = dateFrom; conditions.push("order_date >= @date_from"); }
+  const dateTo = optionalString(params.dateTo || params.date_to);
+  if (dateTo) { values.date_to = dateTo; conditions.push("order_date <= @date_to"); }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const row = db.prepare(`SELECT COUNT(*) AS n FROM jst_consign_deliveries ${where}`).get(values);
+  return Number(row?.n || 0);
+}
+
+function listJstConsignDeliverItems(params = {}) {
+  const { db } = requireErp();
+  const includeDeleted = Boolean(params.includeDeleted || params.include_deleted);
+  const companyId = optionalString(params.companyId || params.company_id);
+  const oId = optionalString(params.oId || params.o_id);
+  const conditions = [];
+  const values = {
+    company_id: companyId,
+    o_id: oId,
+    limit: normalizeLimit(params.limit, 2000),
+    offset: normalizeOffset(params.offset),
+  };
+  if (companyId) conditions.push("company_id = @company_id");
+  if (!includeDeleted) conditions.push("status_internal != 'deleted'");
+  if (oId) conditions.push("o_id = @o_id");
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const rows = db.prepare(`
+    SELECT * FROM jst_consign_deliver_items
+    ${where}
+    ORDER BY o_id DESC, oi_id ASC
+    LIMIT @limit OFFSET @offset
+  `).all(values);
+  return rows.map(toJstConsignDeliverItemRow);
+}
+
+function getJstConsignDeliveryCacheStatus(params = {}) {
+  const { db } = requireErp();
+  const companyId = optionalString(params.companyId || params.company_id);
+  const where = companyId ? "WHERE company_id = @company_id AND status_internal != 'deleted'" : "WHERE status_internal != 'deleted'";
+  const row = db.prepare(`
+    SELECT COUNT(*) AS n, MAX(imported_at) AS imported_at, MAX(updated_at) AS updated_at
+    FROM jst_consign_deliveries ${where}
+  `).get(companyId ? { company_id: companyId } : {});
+  return {
+    count: Number(row?.n || 0),
+    lastImportedAt: row?.imported_at || null,
+    lastUpdatedAt: row?.updated_at || null,
+  };
+}
+
+// 其他出入库历史台账（聚水潭 jst_other_inout / jst_other_inout_items）。
+function toJstOtherInoutRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    companyId: row.company_id,
+    ioId: row.io_id,
+    ioDate: row.io_date,
+    type: row.type,
+    status: row.status,
+    fStatus: row.f_status,
+    whId: row.wh_id,
+    lwhId: row.lwh_id,
+    lwhName: row.lwh_name,
+    warehouse: row.warehouse,
+    wmsCoId: row.wms_co_id,
+    wmsCoName: row.wms_co_name,
+    totalQty: row.total_qty,
+    totalAmount: row.total_amount,
+    totalCost: row.total_cost,
+    reason: row.reason,
+    drpCoId: row.drp_co_id,
+    node: row.node,
+    labels: row.labels,
+    remark: row.remark,
+    creatorName: row.creator_name,
+    archiverName: row.archiver_name,
+    archivedAt: row.archived_at,
+    modifierName: row.modifier_name,
+    createdText: row.created_text,
+    modifiedText: row.modified_text,
+    statusInternal: row.status_internal,
+    importedAt: row.imported_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toJstOtherInoutItemRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    companyId: row.company_id,
+    ioId: row.io_id,
+    seq: row.seq,
+    skuId: row.sku_id,
+    iId: row.i_id,
+    name: row.name,
+    propertiesValue: row.properties_value,
+    picUrl: row.pic_url,
+    qty: row.qty,
+    unit: row.unit,
+    shelfLife: row.shelf_life,
+    costPrice: row.cost_price,
+    costAmount: row.cost_amount,
+    supplierId: row.supplier_id,
+    supplierIId: row.supplier_i_id,
+    supplierSkuId: row.supplier_sku_id,
+    supplierName: row.supplier_name,
+    labels: row.labels,
+    remark: row.remark,
+    statusInternal: row.status_internal,
+    importedAt: row.imported_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function listJstOtherInout(params = {}) {
+  const { db } = requireErp();
+  const since = optionalString(params.since);
+  const includeDeleted = Boolean(params.includeDeleted || params.include_deleted);
+  const companyId = optionalString(params.companyId || params.company_id);
+  const ioIdsRaw = Array.isArray(params.ioIds || params.io_ids) ? (params.ioIds || params.io_ids) : null;
+  const conditions = [];
+  const values = {
+    company_id: companyId,
+    since,
+    limit: normalizeLimit(params.limit, 1000, 100000),
+    offset: normalizeOffset(params.offset),
+  };
+  if (companyId) conditions.push("company_id = @company_id");
+  if (since) conditions.push("updated_at > @since");
+  if (!includeDeleted) conditions.push("status_internal != 'deleted'");
+  const search = optionalString(params.search || params.q);
+  if (search) {
+    values.search = `%${search}%`;
+    conditions.push("(warehouse LIKE @search OR wms_co_name LIKE @search OR reason LIKE @search OR creator_name LIKE @search OR archiver_name LIKE @search OR labels LIKE @search OR remark LIKE @search OR type LIKE @search OR CAST(io_id AS TEXT) LIKE @search)");
+  }
+  const statusFilter = optionalString(params.status);
+  if (statusFilter) {
+    values.status_filter = statusFilter;
+    conditions.push("status = @status_filter");
+  }
+  const typeFilter = optionalString(params.type);
+  if (typeFilter) {
+    values.type_filter = typeFilter;
+    conditions.push("type = @type_filter");
+  }
+  const dateFrom = optionalString(params.dateFrom || params.date_from);
+  if (dateFrom) {
+    values.date_from = dateFrom;
+    conditions.push("io_date >= @date_from");
+  }
+  const dateTo = optionalString(params.dateTo || params.date_to);
+  if (dateTo) {
+    values.date_to = dateTo;
+    conditions.push("io_date <= @date_to");
+  }
+  if (ioIdsRaw && ioIdsRaw.length) {
+    const placeholders = ioIdsRaw.map((_, idx) => `@io_id_${idx}`);
+    ioIdsRaw.forEach((value, idx) => { values[`io_id_${idx}`] = Number(value) || 0; });
+    conditions.push(`io_id IN (${placeholders.join(", ")})`);
+  }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const rows = db.prepare(`
+    SELECT * FROM jst_other_inout
+    ${where}
+    ORDER BY io_date DESC, io_id DESC
+    LIMIT @limit OFFSET @offset
+  `).all(values);
+  return rows.map(toJstOtherInoutRow);
+}
+
+function countJstOtherInout(params = {}) {
+  const { db } = requireErp();
+  const includeDeleted = Boolean(params.includeDeleted || params.include_deleted);
+  const companyId = optionalString(params.companyId || params.company_id);
+  const conditions = [];
+  const values = {};
+  if (companyId) { conditions.push("company_id = @company_id"); values.company_id = companyId; }
+  if (!includeDeleted) conditions.push("status_internal != 'deleted'");
+  const search = optionalString(params.search || params.q);
+  if (search) {
+    values.search = `%${search}%`;
+    conditions.push("(warehouse LIKE @search OR wms_co_name LIKE @search OR reason LIKE @search OR creator_name LIKE @search OR archiver_name LIKE @search OR labels LIKE @search OR remark LIKE @search OR type LIKE @search OR CAST(io_id AS TEXT) LIKE @search)");
+  }
+  const statusFilter = optionalString(params.status);
+  if (statusFilter) { values.status_filter = statusFilter; conditions.push("status = @status_filter"); }
+  const typeFilter = optionalString(params.type);
+  if (typeFilter) { values.type_filter = typeFilter; conditions.push("type = @type_filter"); }
+  const dateFrom = optionalString(params.dateFrom || params.date_from);
+  if (dateFrom) { values.date_from = dateFrom; conditions.push("io_date >= @date_from"); }
+  const dateTo = optionalString(params.dateTo || params.date_to);
+  if (dateTo) { values.date_to = dateTo; conditions.push("io_date <= @date_to"); }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const row = db.prepare(`SELECT COUNT(*) AS n FROM jst_other_inout ${where}`).get(values);
+  return Number(row?.n || 0);
+}
+
+function listJstOtherInoutItems(params = {}) {
+  const { db } = requireErp();
+  const includeDeleted = Boolean(params.includeDeleted || params.include_deleted);
+  const companyId = optionalString(params.companyId || params.company_id);
+  const ioId = optionalString(params.ioId || params.io_id);
+  const conditions = [];
+  const values = {
+    company_id: companyId,
+    io_id: ioId,
+    limit: normalizeLimit(params.limit, 2000),
+    offset: normalizeOffset(params.offset),
+  };
+  if (companyId) conditions.push("company_id = @company_id");
+  if (!includeDeleted) conditions.push("status_internal != 'deleted'");
+  if (ioId) conditions.push("io_id = @io_id");
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const rows = db.prepare(`
+    SELECT * FROM jst_other_inout_items
+    ${where}
+    ORDER BY io_id DESC, seq ASC
+    LIMIT @limit OFFSET @offset
+  `).all(values);
+  return rows.map(toJstOtherInoutItemRow);
+}
+
+function getJstOtherInoutCacheStatus(params = {}) {
+  const { db } = requireErp();
+  const companyId = optionalString(params.companyId || params.company_id);
+  const where = companyId ? "WHERE company_id = @company_id AND status_internal != 'deleted'" : "WHERE status_internal != 'deleted'";
+  const row = db.prepare(`
+    SELECT COUNT(*) AS n, MAX(imported_at) AS imported_at, MAX(updated_at) AS updated_at
+    FROM jst_other_inout ${where}
+  `).get(companyId ? { company_id: companyId } : {});
+  return {
+    count: Number(row?.n || 0),
+    lastImportedAt: row?.imported_at || null,
+    lastUpdatedAt: row?.updated_at || null,
+  };
+}
+
 function getActiveSku1688SourceRows(db, accountId, skuId) {
   const rows = db.prepare(`
     SELECT *
@@ -5571,152 +6661,218 @@ function getPurchaseWorkbench(params = {}) {
   };
   const purchaseOrderTotal = Number(purchaseOrderTotalRow?.total || 0);
 
-  const purchaseOrders = includePurchaseOrders ? db.prepare(`
-    SELECT
-      po.*,
-      acct.name AS account_name,
-      COALESCE(supplier.name, cand.supplier_name) AS supplier_name,
-      COALESCE(creator.name, po.jst_purchaser_name) AS created_by_name,
-      pr.status AS pr_status,
-      GROUP_CONCAT(DISTINCT sku.internal_sku_code || ' ' || sku.product_name) AS sku_summary,
-      GROUP_CONCAT(DISTINCT sku.internal_sku_code) AS sku_codes,
-      GROUP_CONCAT(DISTINCT sku.product_name) AS product_names,
-      COALESCE((
-        SELECT json_group_array(json_object(
-          'id', detail.id,
-          'skuId', detail.sku_id,
-          'skuCode', detail.internal_sku_code,
-          'productName', detail.product_name,
-          'specText', detail.color_spec,
-          'qty', detail.qty,
-          'receivedQty', detail.received_qty,
-          'unitCost', detail.unit_cost,
-          'logisticsFee', detail.logistics_fee,
-          'amount', ROUND(detail.qty * detail.unit_cost, 2),
-          'paidAmount', ROUND(detail.qty * detail.unit_cost + detail.logistics_fee, 2)
-        ))
-        FROM (
-          SELECT
-            detail_line.id,
-            detail_line.sku_id,
-            detail_sku.internal_sku_code,
-            detail_sku.product_name,
-            detail_sku.color_spec,
-            COALESCE(detail_line.qty, 0) AS qty,
-            COALESCE(detail_line.received_qty, 0) AS received_qty,
-            COALESCE(detail_line.unit_cost, 0) AS unit_cost,
-            COALESCE(detail_line.logistics_fee, 0) AS logistics_fee
-          FROM erp_purchase_order_lines detail_line
-          LEFT JOIN erp_skus detail_sku ON detail_sku.id = detail_line.sku_id
-          WHERE detail_line.po_id = po.id
-          ORDER BY detail_line.id ASC
-        ) detail
-      ), '[]') AS line_items_json,
-      (
-        SELECT first_sku.image_url
-        FROM erp_purchase_order_lines first_line
-        LEFT JOIN erp_skus first_sku ON first_sku.id = first_line.sku_id
-        WHERE first_line.po_id = po.id
-          AND COALESCE(first_sku.image_url, '') <> ''
-        ORDER BY first_line.id ASC
-        LIMIT 1
-      ) AS sku_image_url,
-      COUNT(DISTINCT line.id) AS line_count,
-      COALESCE(SUM(line.qty), 0) AS total_qty,
-      COALESCE(SUM(line.received_qty), 0) AS received_qty,
-      (
-        SELECT COUNT(*)
-        FROM erp_purchase_order_lines map_line
-        JOIN erp_sku_1688_sources map_source
-          ON map_source.account_id = map_line.account_id
-         AND map_source.sku_id = map_line.sku_id
-         AND map_source.status = 'active'
-        WHERE map_line.po_id = po.id
-      ) AS mapping_count
-      ,
-      (
-        SELECT COUNT(*)
-        FROM erp_1688_delivery_addresses addr
-        WHERE addr.account_id = po.account_id
-          AND addr.status = 'active'
-          AND addr.address_id IS NOT NULL
-          AND addr.address_id != ''
-      ) AS delivery_address_count
-      ,
-      (
-        SELECT COUNT(*)
-        FROM erp_1688_refunds refund
-        WHERE refund.po_id = po.id
-          OR (po.external_order_id IS NOT NULL AND refund.external_order_id = po.external_order_id)
-      ) AS refund_count,
-      (
-        SELECT latest_refund.refund_id
-        FROM erp_1688_refunds latest_refund
-        WHERE latest_refund.po_id = po.id
-          OR (po.external_order_id IS NOT NULL AND latest_refund.external_order_id = po.external_order_id)
-        ORDER BY latest_refund.updated_at DESC
-        LIMIT 1
-      ) AS latest_refund_id,
-      (
-        SELECT latest_refund.refund_status
-        FROM erp_1688_refunds latest_refund
-        WHERE latest_refund.po_id = po.id
-          OR (po.external_order_id IS NOT NULL AND latest_refund.external_order_id = po.external_order_id)
-        ORDER BY latest_refund.updated_at DESC
-        LIMIT 1
-      ) AS latest_refund_status,
-      (
-        SELECT latest_refund.refund_amount
-        FROM erp_1688_refunds latest_refund
-        WHERE latest_refund.po_id = po.id
-          OR (po.external_order_id IS NOT NULL AND latest_refund.external_order_id = po.external_order_id)
-        ORDER BY latest_refund.updated_at DESC
-        LIMIT 1
-      ) AS latest_refund_amount,
-      (
-        SELECT cost_line.unit_cost
-        FROM erp_purchase_order_lines cost_line
-        WHERE cost_line.po_id = po.id
-        ORDER BY cost_line.id ASC
-        LIMIT 1
-      ) AS unit_cost,
-      (
-        SELECT fee_line.logistics_fee
-        FROM erp_purchase_order_lines fee_line
-        WHERE fee_line.po_id = po.id
-        ORDER BY fee_line.id ASC
-        LIMIT 1
-      ) AS logistics_fee
-    FROM erp_purchase_orders po
-    LEFT JOIN erp_accounts acct ON acct.id = po.account_id
-    LEFT JOIN erp_suppliers supplier ON supplier.id = po.supplier_id
-    LEFT JOIN erp_sourcing_candidates cand ON cand.id = po.selected_candidate_id
-    LEFT JOIN erp_users creator ON creator.id = po.created_by
-    LEFT JOIN erp_purchase_requests pr ON pr.id = po.pr_id
-    LEFT JOIN erp_purchase_order_lines line ON line.po_id = po.id
-    LEFT JOIN erp_skus sku ON sku.id = line.sku_id
-    ${poWhereSql}
-    GROUP BY po.id
-    ORDER BY ${poOrderSql}
-    LIMIT @limit OFFSET @offset
-  `).all(poParams).map((row) => {
-    const next = toCamelRow(row);
-    next.lineItems = normalizePurchaseOrderLineItems(next, parseJsonArray(row.line_items_json));
-    delete next.lineItemsJson;
-    if (row.account_id === "jst:account:default") {
-      const raw = parseJsonObject(row.external_order_payload_json, {});
-      const rawQty = Number(raw.qty_count || raw.total_qty || raw.enable_follow_qty || 0);
-      if (rawQty > 0 && Number(next.totalQty || 0) <= 0) next.totalQty = rawQty;
-      const rawReceived = Number(raw.total_in_qty || raw.plan_arrive_qty || 0);
-      if (rawReceived > 0 && Number(next.receivedQty || 0) <= 0) next.receivedQty = rawReceived;
-      if (!next.skuSummary) {
-        next.skuSummary = [raw.item_type, raw.labels].filter(Boolean).join(" / ") || "聚水潭采购单";
+  // ===== 双步策略：先取当前页 50 个 po_id（精简 SQL），再按 IN(...) 拉详情 =====
+  // 旧版把 10 个相关子查询塞进单条 SQL，导致 SQLite 先对全表 PO 跑完所有子查询、
+  // 聚合、排序后才 LIMIT，触发 30+ 秒慢查询锁住 Node event loop。
+  let purchaseOrders;
+  if (!includePurchaseOrders) {
+    purchaseOrders = undefined;
+  } else {
+    // Step 1: 拿当前页 po_id（带 WHERE/ORDER BY/LIMIT，无任何子查询）
+    const idRows = db.prepare(`
+      SELECT po.id
+      FROM erp_purchase_orders po
+      LEFT JOIN erp_accounts acct ON acct.id = po.account_id
+      LEFT JOIN erp_suppliers supplier ON supplier.id = po.supplier_id
+      LEFT JOIN erp_sourcing_candidates cand ON cand.id = po.selected_candidate_id
+      LEFT JOIN erp_users creator ON creator.id = po.created_by
+      LEFT JOIN erp_purchase_order_lines line ON line.po_id = po.id
+      LEFT JOIN erp_skus sku ON sku.id = line.sku_id
+      ${poWhereSql}
+      GROUP BY po.id
+      ORDER BY ${poOrderSql}
+      LIMIT @limit OFFSET @offset
+    `).all(poParams);
+    const orderedPoIds = idRows.map((r) => r.id);
+
+    if (orderedPoIds.length === 0) {
+      purchaseOrders = [];
+    } else {
+      const placeholders = orderedPoIds.map(() => "?").join(",");
+
+      // Step 2a: 主数据（po.* + JOIN + GROUP_CONCAT 聚合，无子查询）
+      const mainRows = db.prepare(`
+        SELECT
+          po.*,
+          acct.name AS account_name,
+          COALESCE(supplier.name, cand.supplier_name) AS supplier_name,
+          COALESCE(creator.name, po.jst_purchaser_name) AS created_by_name,
+          pr.status AS pr_status,
+          GROUP_CONCAT(DISTINCT sku.internal_sku_code || ' ' || sku.product_name) AS sku_summary,
+          GROUP_CONCAT(DISTINCT sku.internal_sku_code) AS sku_codes,
+          GROUP_CONCAT(DISTINCT sku.product_name) AS product_names,
+          COUNT(DISTINCT line.id) AS line_count,
+          COALESCE(SUM(line.qty), 0) AS total_qty,
+          COALESCE(SUM(line.received_qty), 0) AS received_qty
+        FROM erp_purchase_orders po
+        LEFT JOIN erp_accounts acct ON acct.id = po.account_id
+        LEFT JOIN erp_suppliers supplier ON supplier.id = po.supplier_id
+        LEFT JOIN erp_sourcing_candidates cand ON cand.id = po.selected_candidate_id
+        LEFT JOIN erp_users creator ON creator.id = po.created_by
+        LEFT JOIN erp_purchase_requests pr ON pr.id = po.pr_id
+        LEFT JOIN erp_purchase_order_lines line ON line.po_id = po.id
+        LEFT JOIN erp_skus sku ON sku.id = line.sku_id
+        WHERE po.id IN (${placeholders})
+        GROUP BY po.id
+      `).all(...orderedPoIds);
+      const mainByPoId = new Map(mainRows.map((r) => [r.id, r]));
+
+      // Step 2b: 明细行（一次拉所有，前端组装 lineItems + 计算 sku_image_url/unit_cost/logistics_fee）
+      const lineRows = db.prepare(`
+        SELECT
+          detail_line.po_id,
+          detail_line.id,
+          detail_line.sku_id,
+          detail_sku.internal_sku_code,
+          detail_sku.product_name,
+          detail_sku.color_spec,
+          COALESCE(detail_line.qty, 0) AS qty,
+          COALESCE(detail_line.received_qty, 0) AS received_qty,
+          COALESCE(detail_line.unit_cost, 0) AS unit_cost,
+          COALESCE(detail_line.logistics_fee, 0) AS logistics_fee,
+          detail_sku.image_url AS sku_image_url
+        FROM erp_purchase_order_lines detail_line
+        LEFT JOIN erp_skus detail_sku ON detail_sku.id = detail_line.sku_id
+        WHERE detail_line.po_id IN (${placeholders})
+        ORDER BY detail_line.po_id, detail_line.id ASC
+      `).all(...orderedPoIds);
+      const linesByPoId = new Map();
+      for (const ln of lineRows) {
+        if (!linesByPoId.has(ln.po_id)) linesByPoId.set(ln.po_id, []);
+        linesByPoId.get(ln.po_id).push(ln);
       }
-      if (!next.skuCodes) next.skuCodes = raw.merge_sku_id || raw.merge_i_id || "";
-      if (!next.productNames) next.productNames = next.skuSummary;
+
+      // Step 2c: mapping_count（按 po_id 聚合）
+      const mappingByPoId = new Map();
+      const mappingRows = db.prepare(`
+        SELECT line.po_id, COUNT(*) AS n
+        FROM erp_purchase_order_lines line
+        JOIN erp_sku_1688_sources source
+          ON source.account_id = line.account_id
+         AND source.sku_id = line.sku_id
+         AND source.status = 'active'
+        WHERE line.po_id IN (${placeholders})
+        GROUP BY line.po_id
+      `).all(...orderedPoIds);
+      for (const r of mappingRows) mappingByPoId.set(r.po_id, Number(r.n || 0));
+
+      // Step 2d: delivery_address_count（按 account_id 聚合，去重）
+      const accountIds = [...new Set(orderedPoIds.map((id) => mainByPoId.get(id)?.account_id).filter(Boolean))];
+      const addrByAccount = new Map();
+      if (accountIds.length) {
+        const acctPlaceholders = accountIds.map(() => "?").join(",");
+        const addrRows = db.prepare(`
+          SELECT account_id, COUNT(*) AS n
+          FROM erp_1688_delivery_addresses
+          WHERE account_id IN (${acctPlaceholders})
+            AND status = 'active'
+            AND address_id IS NOT NULL AND address_id != ''
+          GROUP BY account_id
+        `).all(...accountIds);
+        for (const r of addrRows) addrByAccount.set(r.account_id, Number(r.n || 0));
+      }
+
+      // Step 2e: refunds（合并 4 个子查询为 1 个；按 po_id / external_order_id 关联，updated_at DESC 取最新）
+      const externalIds = [...new Set(
+        orderedPoIds
+          .map((id) => mainByPoId.get(id)?.external_order_id)
+          .filter((s) => s != null && s !== ""),
+      )];
+      const refundByPoId = new Map();
+      const refundCountByPoId = new Map();
+      if (orderedPoIds.length || externalIds.length) {
+        const args = [...orderedPoIds];
+        let extClause = "";
+        if (externalIds.length) {
+          const extPlaceholders = externalIds.map(() => "?").join(",");
+          extClause = ` OR external_order_id IN (${extPlaceholders})`;
+          args.push(...externalIds);
+        }
+        const refundRows = db.prepare(`
+          SELECT po_id, external_order_id, refund_id, refund_status, refund_amount, updated_at
+          FROM erp_1688_refunds
+          WHERE po_id IN (${placeholders})${extClause}
+          ORDER BY updated_at DESC
+        `).all(...args);
+        // 把每条 refund 归到对应 po_id；优先用 refund.po_id 直配，否则按 external_order_id 找
+        const externalIdToPoIds = new Map();
+        for (const id of orderedPoIds) {
+          const ext = mainByPoId.get(id)?.external_order_id;
+          if (ext) {
+            if (!externalIdToPoIds.has(ext)) externalIdToPoIds.set(ext, []);
+            externalIdToPoIds.get(ext).push(id);
+          }
+        }
+        for (const r of refundRows) {
+          const matchedPoIds = new Set();
+          if (r.po_id && mainByPoId.has(r.po_id)) matchedPoIds.add(r.po_id);
+          if (r.external_order_id && externalIdToPoIds.has(r.external_order_id)) {
+            for (const id of externalIdToPoIds.get(r.external_order_id)) matchedPoIds.add(id);
+          }
+          for (const id of matchedPoIds) {
+            if (!refundByPoId.has(id)) refundByPoId.set(id, r); // 第一条就是最新（已按 updated_at DESC）
+            refundCountByPoId.set(id, (refundCountByPoId.get(id) || 0) + 1);
+          }
+        }
+      }
+
+      // Step 3: 按 orderedPoIds 顺序组装最终 rows，保持跟旧 SQL 输出字段完全一致
+      const purchaseOrdersRaw = orderedPoIds.map((id) => {
+        const main = mainByPoId.get(id);
+        if (!main) return null;
+        const lines = linesByPoId.get(id) || [];
+        const firstLine = lines[0];
+        const firstWithImage = lines.find((ln) => ln.sku_image_url && ln.sku_image_url !== "");
+        const refund = refundByPoId.get(id);
+        // 组装 line_items_json，字段与旧 SQL json_group_array 完全一致
+        const lineItemsJson = JSON.stringify(lines.map((ln) => ({
+          id: ln.id,
+          skuId: ln.sku_id,
+          skuCode: ln.internal_sku_code,
+          productName: ln.product_name,
+          specText: ln.color_spec,
+          qty: ln.qty,
+          receivedQty: ln.received_qty,
+          unitCost: ln.unit_cost,
+          logisticsFee: ln.logistics_fee,
+          amount: Math.round(ln.qty * ln.unit_cost * 100) / 100,
+          paidAmount: Math.round((ln.qty * ln.unit_cost + ln.logistics_fee) * 100) / 100,
+        })));
+        return {
+          ...main,
+          line_items_json: lineItemsJson,
+          sku_image_url: firstWithImage?.sku_image_url || null,
+          mapping_count: mappingByPoId.get(id) || 0,
+          delivery_address_count: addrByAccount.get(main.account_id) || 0,
+          refund_count: refundCountByPoId.get(id) || 0,
+          latest_refund_id: refund?.refund_id || null,
+          latest_refund_status: refund?.refund_status || null,
+          latest_refund_amount: refund?.refund_amount ?? null,
+          unit_cost: firstLine?.unit_cost ?? null,
+          logistics_fee: firstLine?.logistics_fee ?? null,
+        };
+      }).filter(Boolean);
+
+      purchaseOrders = purchaseOrdersRaw.map((row) => {
+        const next = toCamelRow(row);
+        next.lineItems = normalizePurchaseOrderLineItems(next, parseJsonArray(row.line_items_json));
+        delete next.lineItemsJson;
+        if (row.account_id === "jst:account:default") {
+          const raw = parseJsonObject(row.external_order_payload_json, {});
+          const rawQty = Number(raw.qty_count || raw.total_qty || raw.enable_follow_qty || 0);
+          if (rawQty > 0 && Number(next.totalQty || 0) <= 0) next.totalQty = rawQty;
+          const rawReceived = Number(raw.total_in_qty || raw.plan_arrive_qty || 0);
+          if (rawReceived > 0 && Number(next.receivedQty || 0) <= 0) next.receivedQty = rawReceived;
+          if (!next.skuSummary) {
+            next.skuSummary = [raw.item_type, raw.labels].filter(Boolean).join(" / ") || "聚水潭采购单";
+          }
+          if (!next.skuCodes) next.skuCodes = raw.merge_sku_id || raw.merge_i_id || "";
+          if (!next.productNames) next.productNames = next.skuSummary;
+        }
+        return next;
+      });
     }
-    return next;
-  }) : undefined;
+  }
 
   const paymentApprovals = db.prepare(`
     SELECT
@@ -15706,6 +16862,7 @@ function createBatchesForReceipt({ db, services, receipt, actor }) {
   services.inventory.markBatchesCreated(receipt.id, actor);
   const batches = [];
   pendingLines.forEach((line, index) => {
+    const landedCost = calculateLineLandedCost(line);
     const batch = services.inventory.createBatchFromInbound({
       accountId: receipt.account_id,
       batchCode: buildBatchCode(receipt.receipt_no, line, index),
@@ -15713,7 +16870,7 @@ function createBatchesForReceipt({ db, services, receipt, actor }) {
       poId: receipt.po_id,
       inboundReceiptId: receipt.id,
       receivedQty: line.received_qty,
-      unitLandedCost: calculateLineLandedCost(line),
+      unitLandedCost: landedCost,
       locationCode: optionalString(line.locationCode),
       actor,
     });
@@ -15726,6 +16883,9 @@ function createBatchesForReceipt({ db, services, receipt, actor }) {
       id: line.id,
       batch_id: batch.id,
     });
+
+    // 同步刷新 SKU 维度的移动加权均价 + 总库存
+    services.inventory.applySkuCostChange(line.sku_id, Number(line.received_qty || 0), landedCost);
 
     batches.push(toCamelRow(batch));
   });
@@ -17886,6 +19046,118 @@ async function performOutboundActionRuntime(payload = {}) {
   return performOutboundAction(payload || {}, actor);
 }
 
+// 直接库存动作（不走 outbound_shipment 单据流转）：
+// purchase_return / customer_return / platform_return_to_warehouse / transfer_between_accounts
+function performInventoryAction(payload = {}, actorInput = {}) {
+  const { db, services } = requireErp();
+  const action = requireString(payload.action, "action");
+  const actor = normalizeActor(actorInput);
+  const { INVENTORY_LEDGER_TYPE } = require("./workflow/enums.cjs");
+
+  switch (action) {
+    case "purchase_return": {
+      // 自家仓退给 1688 供应商。库存按 FIFO 扣，均价不变，但 cost_balance_qty 同步扣（实物总量真的少了）。
+      // unit_cost 按调用方传的 PO 原单价（这是冲应付的口径，跟 SKU 均价无关）。
+      const accountId = requireString(payload.accountId, "accountId");
+      const skuId = requireString(payload.skuId, "skuId");
+      const qty = positiveInteger(payload.qty, 0);
+      if (qty <= 0) throw new Error("qty must be positive");
+      return {
+        action,
+        lines: services.inventory.applyDirectOutbound({
+          accountId,
+          skuId,
+          qty,
+          unitCost: optionalNumber(payload.unitCost),  // PO 原单价（业务侧传）
+          ledgerType: INVENTORY_LEDGER_TYPE.PURCHASE_RETURN,
+          sourceDocType: payload.sourceDocType || "purchase_return",
+          sourceDocId: optionalString(payload.sourceDocId) || "",
+          affectSkuTotal: true,
+          actor,
+        }),
+      };
+    }
+    case "customer_return": {
+      // 消费者退到平台仓。库存 +N，均价不变（按当前 SKU 加权成本回灌，数学上不变）。
+      const accountId = requireString(payload.accountId, "accountId");
+      const skuId = requireString(payload.skuId, "skuId");
+      const qty = positiveInteger(payload.qty, 0);
+      if (qty <= 0) throw new Error("qty must be positive");
+      const unitCost = services.inventory.getSkuWeightedAvgCost(skuId);
+      return {
+        action,
+        batch: services.inventory.applyDirectInbound({
+          accountId,
+          skuId,
+          qty,
+          unitLandedCost: unitCost,
+          ledgerType: INVENTORY_LEDGER_TYPE.CUSTOMER_RETURN,
+          sourceDocType: payload.sourceDocType || "customer_return",
+          sourceDocId: optionalString(payload.sourceDocId) || "",
+          affectSkuTotal: true,  // 实物总量真的多了
+          actor,
+        }),
+      };
+    }
+    case "platform_return_to_warehouse":
+    case "transfer_between_accounts": {
+      // 双腿动作：fromAccountId -N → toAccountId +N。
+      // SKU 总量和均价都不变（只是搬位置），用 SKU 当前加权成本搬运。
+      const fromAccountId = requireString(payload.fromAccountId, "fromAccountId");
+      const toAccountId = requireString(payload.toAccountId, "toAccountId");
+      const skuId = requireString(payload.skuId, "skuId");
+      const qty = positiveInteger(payload.qty, 0);
+      if (qty <= 0) throw new Error("qty must be positive");
+      if (fromAccountId === toAccountId) throw new Error("fromAccountId equals toAccountId");
+      const unitCost = services.inventory.getSkuWeightedAvgCost(skuId);
+      const outType = action === "transfer_between_accounts"
+        ? INVENTORY_LEDGER_TYPE.TRANSFER_OUT
+        : INVENTORY_LEDGER_TYPE.PLATFORM_RETURN_OUT;
+      const inType = action === "transfer_between_accounts"
+        ? INVENTORY_LEDGER_TYPE.TRANSFER_IN
+        : INVENTORY_LEDGER_TYPE.PLATFORM_RETURN_IN;
+      const sourceDocType = payload.sourceDocType || action;
+      const sourceDocId = optionalString(payload.sourceDocId) || `${action}-${Date.now().toString(36)}`;
+      const run = db.transaction(() => {
+        const outLines = services.inventory.applyDirectOutbound({
+          accountId: fromAccountId,
+          skuId,
+          qty,
+          unitCost,
+          ledgerType: outType,
+          sourceDocType,
+          sourceDocId,
+          affectSkuTotal: false,  // 总量不变（搬位置）
+          actor,
+        });
+        const inBatch = services.inventory.applyDirectInbound({
+          accountId: toAccountId,
+          skuId,
+          qty,
+          unitLandedCost: unitCost,
+          ledgerType: inType,
+          sourceDocType,
+          sourceDocId,
+          affectSkuTotal: false,
+          actor,
+        });
+        return { outLines, inBatch };
+      });
+      return { action, ...run() };
+    }
+    default:
+      throw new Error(`Unsupported inventory action: ${action}`);
+  }
+}
+
+async function performInventoryActionRuntime(payload = {}) {
+  if (shouldUseClientRuntime()) {
+    throw new Error("库存直扣动作暂不支持远端调用，请在桌面端本地模式下操作");
+  }
+  const actor = getCurrentSessionActor(payload?.actor || {});
+  return performInventoryAction(payload || {}, actor);
+}
+
 async function listWorkItemsRuntime(params = {}) {
   if (shouldUseClientRuntime()) {
     ensureClientRuntime();
@@ -18291,6 +19563,407 @@ async function listMappingsPageRuntime(params = {}) {
   };
 }
 
+// 采购退货单头：client 模式优先 cache.db 秒返，后台增量；host 直查 erp.sqlite。
+async function listPurchaseReturnsRuntime(params = {}) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    try {
+      const cached = purchaseReturnCache.getCachedPurchaseReturns(params);
+      if (cached) {
+        void purchaseReturnCache.triggerSync({ mode: "incremental" }).catch(() => {});
+        return cached;
+      }
+      await purchaseReturnCache.triggerSync({ mode: "full" });
+      void purchaseReturnCache.triggerReconcile().catch(() => {});
+      const afterFull = purchaseReturnCache.getCachedPurchaseReturns(params);
+      if (afterFull) return afterFull;
+    } catch {
+      // 缓存损坏 / 同步异常 → 降级跨海全量拉。
+    }
+    try {
+      const payload = await remoteRequest("/api/master-data/purchase-returns", {
+        method: "POST",
+        body: { ...params, limit: params.limit || 5000 },
+      });
+      return (payload && payload.rows) || [];
+    } catch (error) {
+      if (error?.statusCode === 404 || /not found/i.test(error?.message || "")) return [];
+      throw error;
+    }
+  }
+  return listPurchaseReturns({
+    ...params,
+    companyId: params.companyId || erpState.currentUser?.companyId,
+    limit: params.limit || 5000,
+  });
+}
+
+async function listPurchaseReturnsPageRuntime(params = {}) {
+  // 分页器：返回 { rows, total }，client 走本地 cache.db，host 走本地 SQL。
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    try {
+      const rows = purchaseReturnCache.getCachedPurchaseReturns(params);
+      if (rows) {
+        const total = purchaseReturnCache.getCachedPurchaseReturnsCount(params) ?? rows.length;
+        if (!Number(params.offset)) void purchaseReturnCache.triggerSync({ mode: "incremental" }).catch(() => {});
+        return { rows, total };
+      }
+      await purchaseReturnCache.triggerSync({ mode: "full" });
+      void purchaseReturnCache.triggerReconcile().catch(() => {});
+      const afterRows = purchaseReturnCache.getCachedPurchaseReturns(params) || [];
+      const afterTotal = purchaseReturnCache.getCachedPurchaseReturnsCount(params) ?? afterRows.length;
+      return { rows: afterRows, total: afterTotal };
+    } catch {
+      // 降级
+    }
+    const payload = await remoteRequest("/api/master-data/purchase-returns", {
+      method: "POST",
+      body: { ...params, limit: params.limit || 5000 },
+    });
+    const rows = (payload && payload.rows) || [];
+    return { rows, total: rows.length };
+  }
+  const companyId = params.companyId || erpState.currentUser?.companyId;
+  const rows = listPurchaseReturns({ ...params, companyId, limit: params.limit || 5000 });
+  // host 计数：单头数据量小（千级），允许在内存里再 count 一次（不同口径要复查时改 SQL）。
+  const all = listPurchaseReturns({ ...params, companyId, limit: 500000, offset: 0 });
+  return { rows, total: all.length };
+}
+
+// 采购退货明细：按 ioId 拉。client 模式直读 cache.db；host 走本地 SQL。
+async function listPurchaseReturnItemsRuntime(params = {}) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    try {
+      const cached = purchaseReturnCache.getCachedPurchaseReturnItems(params);
+      if (cached) return cached;
+    } catch {
+      // 降级
+    }
+    const payload = await remoteRequest("/api/master-data/purchase-return-items", {
+      method: "POST",
+      body: { ...params, limit: params.limit || 5000 },
+    });
+    return (payload && payload.rows) || [];
+  }
+  return listPurchaseReturnItems({
+    ...params,
+    companyId: params.companyId || erpState.currentUser?.companyId,
+    limit: params.limit || 5000,
+  });
+}
+
+// 采购退货手动 action（create_draft/update_draft/effective/cancel/delete_draft）。
+// client 模式转发到服务器；host 模式本地执行。成功后触发一次同步让 cache 立即看到新数据。
+async function performPurchaseReturnActionRuntime(payload = {}) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    const response = await remoteRequest("/api/master-data/purchase-return/action", {
+      method: "POST",
+      body: payload,
+    });
+    void purchaseReturnCache.triggerSync({ mode: "incremental" }).catch(() => {});
+    return response.result;
+  }
+  const actor = getCurrentSessionActor(payload?.actor || {});
+  return performPurchaseReturnAction(payload || {}, actor);
+}
+
+// 送仓售后单头：client cache 优先，host 直查。
+async function listConsignAfterSalesRuntime(params = {}) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    try {
+      const cached = consignAfterSaleCache.getCachedConsignAfterSales(params);
+      if (cached) {
+        void consignAfterSaleCache.triggerSync({ mode: "incremental" }).catch(() => {});
+        return cached;
+      }
+      await consignAfterSaleCache.triggerSync({ mode: "full" });
+      void consignAfterSaleCache.triggerReconcile().catch(() => {});
+      const afterFull = consignAfterSaleCache.getCachedConsignAfterSales(params);
+      if (afterFull) return afterFull;
+    } catch { /* 降级 */ }
+    try {
+      const payload = await remoteRequest("/api/master-data/consign-after-sales", {
+        method: "POST",
+        body: { ...params, limit: params.limit || 5000 },
+      });
+      return (payload && payload.rows) || [];
+    } catch (error) {
+      if (error?.statusCode === 404 || /not found/i.test(error?.message || "")) return [];
+      throw error;
+    }
+  }
+  return listConsignAfterSales({
+    ...params,
+    companyId: params.companyId || erpState.currentUser?.companyId,
+    limit: params.limit || 5000,
+  });
+}
+
+async function listConsignAfterSalesPageRuntime(params = {}) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    try {
+      const rows = consignAfterSaleCache.getCachedConsignAfterSales(params);
+      if (rows) {
+        const total = consignAfterSaleCache.getCachedConsignAfterSalesCount(params) ?? rows.length;
+        if (!Number(params.offset)) void consignAfterSaleCache.triggerSync({ mode: "incremental" }).catch(() => {});
+        return { rows, total };
+      }
+      await consignAfterSaleCache.triggerSync({ mode: "full" });
+      void consignAfterSaleCache.triggerReconcile().catch(() => {});
+      const afterRows = consignAfterSaleCache.getCachedConsignAfterSales(params) || [];
+      const afterTotal = consignAfterSaleCache.getCachedConsignAfterSalesCount(params) ?? afterRows.length;
+      return { rows: afterRows, total: afterTotal };
+    } catch { /* 降级 */ }
+    const payload = await remoteRequest("/api/master-data/consign-after-sales", {
+      method: "POST",
+      body: { ...params, limit: params.limit || 5000 },
+    });
+    const rows = (payload && payload.rows) || [];
+    return { rows, total: rows.length };
+  }
+  const companyId = params.companyId || erpState.currentUser?.companyId;
+  const rows = listConsignAfterSales({ ...params, companyId, limit: params.limit || 5000 });
+  const all = listConsignAfterSales({ ...params, companyId, limit: 500000, offset: 0 });
+  return { rows, total: all.length };
+}
+
+async function listConsignAfterSaleItemsRuntime(params = {}) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    try {
+      const cached = consignAfterSaleCache.getCachedConsignAfterSaleItems(params);
+      if (cached) return cached;
+    } catch { /* 降级 */ }
+    const payload = await remoteRequest("/api/master-data/consign-after-sale-items", {
+      method: "POST",
+      body: { ...params, limit: params.limit || 5000 },
+    });
+    return (payload && payload.rows) || [];
+  }
+  return listConsignAfterSaleItems({
+    ...params,
+    companyId: params.companyId || erpState.currentUser?.companyId,
+    limit: params.limit || 5000,
+  });
+}
+
+// 送仓托管出库历史：无 cache.db，client 降级远端，host 直查本地。
+async function listJstConsignDeliveriesRuntime(params = {}) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    try {
+      const payload = await remoteRequest("/api/master-data/consign-deliveries", {
+        method: "POST",
+        body: { ...params, limit: params.limit || 5000 },
+      });
+      return (payload && payload.rows) || [];
+    } catch (error) {
+      if (error?.statusCode === 404 || /not found/i.test(error?.message || "")) return [];
+      throw error;
+    }
+  }
+  return listJstConsignDeliveries({
+    ...params,
+    companyId: params.companyId || erpState.currentUser?.companyId,
+    limit: params.limit || 5000,
+  });
+}
+
+async function listJstConsignDeliveriesPageRuntime(params = {}) {
+  const pageSize = Math.max(1, Number(params.pageSize || params.limit || 50));
+  const page = Math.max(1, Number(params.page || 1));
+  const offset = params.offset != null ? Number(params.offset) || 0 : (page - 1) * pageSize;
+  const queryParams = { ...params, limit: pageSize, offset };
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    try {
+      const payload = await remoteRequest("/api/master-data/consign-deliveries", {
+        method: "POST",
+        body: queryParams,
+      });
+      const rows = (payload && payload.rows) || [];
+      const total = Number(payload?.total ?? rows.length);
+      return { rows, total };
+    } catch (error) {
+      if (error?.statusCode === 404 || /not found/i.test(error?.message || "")) return { rows: [], total: 0 };
+      throw error;
+    }
+  }
+  const companyId = params.companyId || erpState.currentUser?.companyId;
+  const rows = listJstConsignDeliveries({ ...queryParams, companyId });
+  const total = countJstConsignDeliveries({ ...params, companyId });
+  return { rows, total };
+}
+
+async function listJstConsignDeliverItemsRuntime(params = {}) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    try {
+      const payload = await remoteRequest("/api/master-data/consign-deliver-items", {
+        method: "POST",
+        body: { ...params, limit: params.limit || 5000 },
+      });
+      return (payload && payload.rows) || [];
+    } catch (error) {
+      if (error?.statusCode === 404 || /not found/i.test(error?.message || "")) return [];
+      throw error;
+    }
+  }
+  return listJstConsignDeliverItems({
+    ...params,
+    companyId: params.companyId || erpState.currentUser?.companyId,
+    limit: params.limit || 5000,
+  });
+}
+
+async function listJstConsignDeliveriesUnifiedRuntime(params = {}) {
+  const emptyResult = {
+    ok: true,
+    rows: [],
+    total: 0,
+    page: Math.max(1, Number(params?.page || 1)),
+    pageSize: Math.max(1, Number(params?.pageSize || 100)),
+    sourceBreakdown: { cloud_only: 0, jst_only: 0, both: 0 },
+  };
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    try {
+      const payload = await remoteRequest("/api/master-data/consign-deliveries-unified", {
+        method: "POST",
+        body: params || {},
+      });
+      if (payload && payload.ok !== false) return payload;
+      return emptyResult;
+    } catch (error) {
+      if (error?.statusCode === 404 || /not found/i.test(error?.message || "")) return emptyResult;
+      throw error;
+    }
+  }
+  const { db } = requireErp();
+  return runConsignDeliveriesUnified(db, {
+    ...params,
+    companyId: params.companyId || erpState.currentUser?.companyId,
+  });
+}
+
+async function getJstConsignDeliveryCacheStatusRuntime(params = {}) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    try {
+      const payload = await remoteRequest("/api/master-data/consign-deliveries-status", {
+        method: "POST",
+        body: params || {},
+      });
+      return payload || { count: 0, lastImportedAt: null, lastUpdatedAt: null };
+    } catch (error) {
+      if (error?.statusCode === 404 || /not found/i.test(error?.message || "")) {
+        return { count: 0, lastImportedAt: null, lastUpdatedAt: null };
+      }
+      throw error;
+    }
+  }
+  return getJstConsignDeliveryCacheStatus({
+    ...params,
+    companyId: params.companyId || erpState.currentUser?.companyId,
+  });
+}
+
+// 其他出入库：与送仓托管出库相同的 client / host 二选一模式。
+async function listJstOtherInoutRuntime(params = {}) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    try {
+      const payload = await remoteRequest("/api/master-data/other-inout", {
+        method: "POST",
+        body: { ...params, limit: params.limit || 5000 },
+      });
+      return (payload && payload.rows) || [];
+    } catch (error) {
+      if (error?.statusCode === 404 || /not found/i.test(error?.message || "")) return [];
+      throw error;
+    }
+  }
+  return listJstOtherInout({
+    ...params,
+    companyId: params.companyId || erpState.currentUser?.companyId,
+    limit: params.limit || 5000,
+  });
+}
+
+async function listJstOtherInoutPageRuntime(params = {}) {
+  const pageSize = Math.max(1, Number(params.pageSize || params.limit || 50));
+  const page = Math.max(1, Number(params.page || 1));
+  const offset = params.offset != null ? Number(params.offset) || 0 : (page - 1) * pageSize;
+  const queryParams = { ...params, limit: pageSize, offset };
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    try {
+      const payload = await remoteRequest("/api/master-data/other-inout", {
+        method: "POST",
+        body: queryParams,
+      });
+      const rows = (payload && payload.rows) || [];
+      const total = Number(payload?.total ?? rows.length);
+      return { rows, total };
+    } catch (error) {
+      if (error?.statusCode === 404 || /not found/i.test(error?.message || "")) return { rows: [], total: 0 };
+      throw error;
+    }
+  }
+  const companyId = params.companyId || erpState.currentUser?.companyId;
+  const rows = listJstOtherInout({ ...queryParams, companyId });
+  const total = countJstOtherInout({ ...params, companyId });
+  return { rows, total };
+}
+
+async function listJstOtherInoutItemsRuntime(params = {}) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    try {
+      const payload = await remoteRequest("/api/master-data/other-inout-items", {
+        method: "POST",
+        body: { ...params, limit: params.limit || 5000 },
+      });
+      return (payload && payload.rows) || [];
+    } catch (error) {
+      if (error?.statusCode === 404 || /not found/i.test(error?.message || "")) return [];
+      throw error;
+    }
+  }
+  return listJstOtherInoutItems({
+    ...params,
+    companyId: params.companyId || erpState.currentUser?.companyId,
+    limit: params.limit || 5000,
+  });
+}
+
+async function getJstOtherInoutCacheStatusRuntime(params = {}) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    try {
+      const payload = await remoteRequest("/api/master-data/other-inout-status", {
+        method: "POST",
+        body: params || {},
+      });
+      return payload || { count: 0, lastImportedAt: null, lastUpdatedAt: null };
+    } catch (error) {
+      if (error?.statusCode === 404 || /not found/i.test(error?.message || "")) {
+        return { count: 0, lastImportedAt: null, lastUpdatedAt: null };
+      }
+      throw error;
+    }
+  }
+  return getJstOtherInoutCacheStatus({
+    ...params,
+    companyId: params.companyId || erpState.currentUser?.companyId,
+  });
+}
+
 // 供应商管理「未绑定」Tab 服务端分页：返回 { rows, total }。未绑定 = sku 减去 mapping，
 // 依赖 sku_cache 与 mapping_cache 两份本地缓存，首页同时等两者就绪后再求差。
 async function listUnmappedSkusPageRuntime(params = {}) {
@@ -18437,6 +20110,23 @@ function startLanService(payload = {}) {
     listSkus,
     listSkuStockDetails,
     listSku1688Sources,
+    listPurchaseReturns,
+    getPurchaseReturnIds,
+    listPurchaseReturnItems,
+    getPurchaseReturnItemIds,
+    performPurchaseReturnAction,
+    listConsignAfterSales,
+    getConsignAfterSaleIds,
+    listConsignAfterSaleItems,
+    getConsignAfterSaleItemIds,
+    listJstConsignDeliveries,
+    countJstConsignDeliveries,
+    listJstConsignDeliverItems,
+    getJstConsignDeliveryCacheStatus,
+    listJstOtherInout,
+    countJstOtherInout,
+    listJstOtherInoutItems,
+    getJstOtherInoutCacheStatus,
     createSku,
     deleteSku,
     saveSkuBundle,
@@ -18608,6 +20298,23 @@ async function startErpHeadlessServer(options = {}) {
     listSkus,
     listSkuStockDetails,
     listSku1688Sources,
+    listPurchaseReturns,
+    getPurchaseReturnIds,
+    listPurchaseReturnItems,
+    getPurchaseReturnItemIds,
+    performPurchaseReturnAction,
+    listConsignAfterSales,
+    getConsignAfterSaleIds,
+    listConsignAfterSaleItems,
+    getConsignAfterSaleItemIds,
+    listJstConsignDeliveries,
+    countJstConsignDeliveries,
+    listJstConsignDeliverItems,
+    getJstConsignDeliveryCacheStatus,
+    listJstOtherInout,
+    countJstOtherInout,
+    listJstOtherInoutItems,
+    getJstOtherInoutCacheStatus,
     createSku,
     deleteSku,
     saveSkuBundle,
@@ -18885,6 +20592,30 @@ function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:mapping:page", (_event, params) => listMappingsPageRuntime(params || {}));
   ipcMain.handle("erp:mapping:sync", (_event, options) => mappingCache.triggerSync(options || {}));
   ipcMain.handle("erp:mapping:cache-status", (_event, options) => mappingCache.getCacheStatus(options || {}));
+  // 采购退货：列表/分页/明细 + cache.db 同步与状态。
+  ipcMain.handle("erp:purchase-return:list", (_event, params) => listPurchaseReturnsRuntime(params || {}));
+  ipcMain.handle("erp:purchase-return:page", (_event, params) => listPurchaseReturnsPageRuntime(params || {}));
+  ipcMain.handle("erp:purchase-return:items", (_event, params) => listPurchaseReturnItemsRuntime(params || {}));
+  ipcMain.handle("erp:purchase-return:sync", (_event, options) => purchaseReturnCache.triggerSync(options || {}));
+  ipcMain.handle("erp:purchase-return:cache-status", (_event, options) => purchaseReturnCache.getCacheStatus(options || {}));
+  ipcMain.handle("erp:purchase-return:action", (_event, payload) => performPurchaseReturnActionRuntime(payload || {}));
+  // 送仓售后：列表/分页/明细 + cache.db 同步与状态。
+  ipcMain.handle("erp:consign-after-sale:list", (_event, params) => listConsignAfterSalesRuntime(params || {}));
+  ipcMain.handle("erp:consign-after-sale:page", (_event, params) => listConsignAfterSalesPageRuntime(params || {}));
+  ipcMain.handle("erp:consign-after-sale:items", (_event, params) => listConsignAfterSaleItemsRuntime(params || {}));
+  ipcMain.handle("erp:consign-after-sale:sync", (_event, options) => consignAfterSaleCache.triggerSync(options || {}));
+  ipcMain.handle("erp:consign-after-sale:cache-status", (_event, options) => consignAfterSaleCache.getCacheStatus(options || {}));
+  // 送仓托管出库历史（聚水潭 jst_consign_deliveries）：直查本地 sqlite，无 cache.db。
+  ipcMain.handle("erp:consign-deliver:list", (_event, params) => listJstConsignDeliveriesRuntime(params || {}));
+  ipcMain.handle("erp:consign-deliver:page", (_event, params) => listJstConsignDeliveriesPageRuntime(params || {}));
+  ipcMain.handle("erp:consign-deliver:items", (_event, params) => listJstConsignDeliverItemsRuntime(params || {}));
+  ipcMain.handle("erp:consign-deliver:cache-status", (_event, params) => getJstConsignDeliveryCacheStatusRuntime(params || {}));
+  ipcMain.handle("erp:consign-deliver:unified", (_event, params) => listJstConsignDeliveriesUnifiedRuntime(params || {}));
+  // 其他出入库历史（聚水潭 jst_other_inout）：直查本地 sqlite，无 cache.db。
+  ipcMain.handle("erp:other-inout:list", (_event, params) => listJstOtherInoutRuntime(params || {}));
+  ipcMain.handle("erp:other-inout:page", (_event, params) => listJstOtherInoutPageRuntime(params || {}));
+  ipcMain.handle("erp:other-inout:items", (_event, params) => listJstOtherInoutItemsRuntime(params || {}));
+  ipcMain.handle("erp:other-inout:cache-status", (_event, params) => getJstOtherInoutCacheStatusRuntime(params || {}));
   ipcMain.handle("erp:purchase:workbench", wrapErpHandler("erp:purchase:workbench", (_event, params) => getPurchaseWorkbenchRuntime(params || {})));
   ipcMain.handle("erp:purchase:action", (_event, payload) => performPurchaseActionRuntime(payload || {}));
   ipcMain.handle("erp:warehouse:workbench", (_event, params) => getWarehouseWorkbenchRuntime(params || {}));
@@ -18893,6 +20624,8 @@ function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:qc:action", (_event, payload) => performQcActionRuntime(payload || {}));
   ipcMain.handle("erp:outbound:workbench", (_event, params) => getOutboundWorkbenchRuntime(params || {}));
   ipcMain.handle("erp:outbound:action", (_event, payload) => performOutboundActionRuntime(payload || {}));
+  // 直接库存动作：采购退货 / 客户退货 / 平台退回自家仓 / 店铺间调拨
+  ipcMain.handle("erp:inventory:action", (_event, payload) => performInventoryActionRuntime(payload || {}));
   ipcMain.handle("erp:workItem:list", (_event, params) => listWorkItemsRuntime(params || {}));
   ipcMain.handle("erp:workItem:stats", (_event, params) => getWorkItemStatsRuntime(params || {}));
   ipcMain.handle("erp:workItem:generate", (_event, payload) => generateWorkItemsRuntime(payload || {}));

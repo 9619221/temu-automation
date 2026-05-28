@@ -278,6 +278,34 @@ contextBridge.exposeInMainWorld("electronAPI", {
       sync: (options) => ipcRenderer.invoke("erp:mapping:sync", options || {}),
       cacheStatus: (options) => ipcRenderer.invoke("erp:mapping:cache-status", options || {}),
     },
+    purchaseReturn: {
+      list: (params) => ipcRenderer.invoke("erp:purchase-return:list", params || {}),
+      page: (params) => ipcRenderer.invoke("erp:purchase-return:page", params || {}),
+      items: (params) => ipcRenderer.invoke("erp:purchase-return:items", params || {}),
+      sync: (options) => ipcRenderer.invoke("erp:purchase-return:sync", options || {}),
+      cacheStatus: (options) => ipcRenderer.invoke("erp:purchase-return:cache-status", options || {}),
+      action: (payload) => ipcRenderer.invoke("erp:purchase-return:action", payload || {}),
+    },
+    consignAfterSale: {
+      list: (params) => ipcRenderer.invoke("erp:consign-after-sale:list", params || {}),
+      page: (params) => ipcRenderer.invoke("erp:consign-after-sale:page", params || {}),
+      items: (params) => ipcRenderer.invoke("erp:consign-after-sale:items", params || {}),
+      sync: (options) => ipcRenderer.invoke("erp:consign-after-sale:sync", options || {}),
+      cacheStatus: (options) => ipcRenderer.invoke("erp:consign-after-sale:cache-status", options || {}),
+    },
+    consignDeliver: {
+      list: (params) => ipcRenderer.invoke("erp:consign-deliver:list", params || {}),
+      page: (params) => ipcRenderer.invoke("erp:consign-deliver:page", params || {}),
+      items: (params) => ipcRenderer.invoke("erp:consign-deliver:items", params || {}),
+      cacheStatus: (params) => ipcRenderer.invoke("erp:consign-deliver:cache-status", params || {}),
+      unified: (params) => ipcRenderer.invoke("erp:consign-deliver:unified", params || {}),
+    },
+    otherInout: {
+      list: (params) => ipcRenderer.invoke("erp:other-inout:list", params || {}),
+      page: (params) => ipcRenderer.invoke("erp:other-inout:page", params || {}),
+      items: (params) => ipcRenderer.invoke("erp:other-inout:items", params || {}),
+      cacheStatus: (params) => ipcRenderer.invoke("erp:other-inout:cache-status", params || {}),
+    },
     purchase: {
       workbench: (params, options) => invokeWithTimeout(
         "erp:purchase:workbench",
