@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Col, Drawer, Input, Row, Space, Table, Tag, Typography, message } from "antd";
+import { Alert, Button, Col, Image, Input, Row, Space, Table, Tag, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { CloudSyncOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons";
+import { CloudSyncOutlined, EyeOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons";
 import EmptyGuide from "./EmptyGuide";
 import StatCard from "./StatCard";
-import { fetchUnifiedAfterSales, type UnifiedAfterSaleRow } from "../utils/unifiedAfterSales";
+import { fetchUnifiedAfterSales, type PlatformAfterSaleItem, type UnifiedAfterSaleRow } from "../utils/unifiedAfterSales";
 
 const { Paragraph, Text } = Typography;
 
@@ -90,8 +90,8 @@ export default function ConsignAfterSalesSection() {
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [activeHead, setActiveHead] = useState<UnifiedAfterSaleRow | null>(null);
+  // 单行展开（accordion）：一次只看一单，跟原 Drawer 行为一致
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   const [items, setItems] = useState<ConsignAfterSaleItemRow[]>([]);
   const [itemsLoading, setItemsLoading] = useState(false);
   const requestIdRef = useRef(0);
@@ -126,13 +126,14 @@ export default function ConsignAfterSalesSection() {
 
   useEffect(() => { void loadData(); }, [loadData]);
 
-  const openDrawer = useCallback(async (row: UnifiedAfterSaleRow) => {
-    setActiveHead(row);
-    setDrawerOpen(true);
-    if (!erp?.consignAfterSale?.items || !row.asId) {
-      setItems([]);
+  const toggleExpand = useCallback(async (row: UnifiedAfterSaleRow) => {
+    if (expandedId === row.id) {
+      setExpandedId(null);
       return;
     }
+    setExpandedId(row.id);
+    setItems([]);
+    if (!erp?.consignAfterSale?.items || !row.asId) return;
     setItemsLoading(true);
     try {
       const list = await erp.consignAfterSale.items({ asId: row.asId });
@@ -143,7 +144,7 @@ export default function ConsignAfterSalesSection() {
     } finally {
       setItemsLoading(false);
     }
-  }, []);
+  }, [expandedId]);
 
   const shopCount = useMemo(() => new Set(rows.map((r) => r.shopName).filter(Boolean)).size, [rows]);
   const totalRefundQty = useMemo(() => rows.reduce((s, r) => s + Number(r.refundQty || 0), 0), [rows]);
@@ -294,6 +295,41 @@ export default function ConsignAfterSalesSection() {
     },
   ];
 
+  // 平台独占单明细：来自平台 raw_json（无中文商品名，用 SKU/SKC 标识）；格式对齐聚水潭明细表
+  const platformItemColumns: ColumnsType<PlatformAfterSaleItem> = [
+    {
+      title: "商品",
+      key: "product",
+      width: 320,
+      render: (_v, row) => (
+        <Space size={8} align="start">
+          {row.picUrl ? (
+            <Image
+              src={row.picUrl}
+              alt=""
+              width={40}
+              height={40}
+              style={{ objectFit: "cover", borderRadius: 4, cursor: "zoom-in" }}
+              preview={{ mask: <EyeOutlined /> }}
+              onClick={(e) => e.stopPropagation()}
+            />
+          ) : null}
+          <Space direction="vertical" size={0} style={{ minWidth: 0 }}>
+            <Paragraph ellipsis={{ rows: 2, tooltip: `SKU ${row.skuId || "-"}` }} style={{ marginBottom: 0, fontWeight: 600, lineHeight: 1.3 }}>
+              SKU {row.skuId || "-"}
+            </Paragraph>
+            <Text type="secondary" style={{ fontSize: 12 }}>SKC {row.skcId || "-"}</Text>
+          </Space>
+        </Space>
+      ),
+    },
+    { title: "规格", dataIndex: "spec", key: "spec", width: 160, render: (v) => v || "-" },
+    { title: "数量", dataIndex: "qty", key: "qty", width: 100, align: "right", render: (v) => formatNumber(v) },
+    { title: "采购子单", dataIndex: "purchaseSn", key: "purchaseSn", width: 200, render: (v) => v || "-" },
+    { title: "类型", dataIndex: "type", key: "type", width: 140, render: (v) => v || "-" },
+    { title: "原因", dataIndex: "reason", key: "reason", ellipsis: true, render: (v) => v || "-" },
+  ];
+
   const combinedError = useMemo(() => {
     if (jstError && platformError) return `${jstError}；${platformError}`;
     return jstError || platformError;
@@ -360,7 +396,59 @@ export default function ConsignAfterSalesSection() {
             columns={columns}
             dataSource={rows}
             scroll={{ x: 1700 }}
-            onRow={(row) => ({ onClick: () => openDrawer(row), style: { cursor: "pointer" } })}
+            onRow={(row) => ({ onClick: () => void toggleExpand(row), style: { cursor: "pointer" } })}
+            expandable={{
+              expandedRowKeys: expandedId ? [expandedId] : [],
+              showExpandColumn: false,
+              rowExpandable: () => true,
+              expandedRowRender: (row) => (
+                <div style={{ padding: "8px 4px" }}>
+                  <Row gutter={[12, 8]} style={{ marginBottom: 12 }}>
+                    <Col xs={12} sm={6}><Text type="secondary">外部单号</Text><div>{row.outerAsId || "-"}</div></Col>
+                    {row.asId ? <Col xs={12} sm={6}><Text type="secondary">内部单号</Text><div>{row.asId}</div></Col> : null}
+                    <Col xs={12} sm={6}><Text type="secondary">退货时间</Text><div>{formatTime(row.asDate)}</div></Col>
+                    <Col xs={12} sm={6}><Text type="secondary">内部状态</Text><div><Tag color={statusColor(row.status)}>{row.status || "-"}</Tag></div></Col>
+                    <Col xs={12} sm={6}><Text type="secondary">平台状态</Text><div><Tag color={statusColor(row.shopStatus)}>{row.shopStatus || "-"}</Tag></div></Col>
+                    <Col xs={12} sm={6}><Text type="secondary">类型</Text><div>{row.type || "-"}</div></Col>
+                    <Col xs={12} sm={6}><Text type="secondary">仓库</Text><div>{row.warehouse || "-"}</div></Col>
+                    <Col xs={12} sm={6}><Text type="secondary">送仓收货人</Text><div>{row.receiverName || "-"}</div></Col>
+                    <Col xs={12} sm={6}><Text type="secondary">收货电话</Text><div>{row.receiverMobile || "-"}</div></Col>
+                    <Col xs={12} sm={6}><Text type="secondary">物流单号</Text><div>{row.lId || "-"}</div></Col>
+                    <Col xs={12} sm={6}><Text type="secondary">网店订单</Text><div>{row.soId || "-"}</div></Col>
+                    <Col xs={12} sm={6}><Text type="secondary">标签</Text><div>{row.labels || "-"}</div></Col>
+                    <Col xs={12} sm={6}><Text type="secondary">确认时间</Text><div>{formatTime(row.confirmDate)}</div></Col>
+                    {row.platformProductName ? <Col xs={24}><Text type="secondary">平台商品</Text><div>{row.platformProductName}</div></Col> : null}
+                    {row.platformReason ? <Col xs={24}><Text type="secondary">平台退货原因</Text><div>{row.platformReason}</div></Col> : null}
+                    <Col xs={24}><Text type="secondary">备注</Text><div>{row.remark || "-"}</div></Col>
+                  </Row>
+
+                  {row.asId ? (
+                    <Table<ConsignAfterSaleItemRow>
+                      className="erp-compact-table"
+                      rowKey="id"
+                      size="small"
+                      loading={itemsLoading}
+                      columns={itemColumns}
+                      dataSource={items}
+                      scroll={{ x: 1300 }}
+                      pagination={false}
+                    />
+                  ) : row.platformItems?.length ? (
+                    <Table<PlatformAfterSaleItem>
+                      className="erp-compact-table"
+                      rowKey="id"
+                      size="small"
+                      columns={platformItemColumns}
+                      dataSource={row.platformItems}
+                      scroll={{ x: 1200 }}
+                      pagination={false}
+                    />
+                  ) : (
+                    <Alert type="info" showIcon message="此单仅来自 Temu 平台后台，暂无明细。" />
+                  )}
+                </div>
+              ),
+            }}
             pagination={{
               current: page,
               pageSize,
@@ -380,51 +468,6 @@ export default function ConsignAfterSalesSection() {
           />
         </Space>
       </section>
-
-      <Drawer
-        title={activeHead ? `送仓售后 ${activeHead.outerAsId || activeHead.asId || "-"} · ${activeHead.shopName || "-"}` : "送仓售后明细"}
-        open={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
-        width={1100}
-      >
-        {activeHead ? (
-          <Space direction="vertical" size={12} style={{ width: "100%" }}>
-            <Row gutter={[12, 12]}>
-              <Col xs={12} sm={6}><Text type="secondary">外部单号</Text><div>{activeHead.outerAsId || "-"}</div></Col>
-              {activeHead.asId ? <Col xs={12} sm={6}><Text type="secondary">内部单号</Text><div>{activeHead.asId}</div></Col> : null}
-              <Col xs={12} sm={6}><Text type="secondary">退货时间</Text><div>{formatTime(activeHead.asDate)}</div></Col>
-              <Col xs={12} sm={6}><Text type="secondary">内部状态</Text><div><Tag color={statusColor(activeHead.status)}>{activeHead.status || "-"}</Tag></div></Col>
-              <Col xs={12} sm={6}><Text type="secondary">平台状态</Text><div><Tag color={statusColor(activeHead.shopStatus)}>{activeHead.shopStatus || "-"}</Tag></div></Col>
-              <Col xs={12} sm={6}><Text type="secondary">类型</Text><div>{activeHead.type || "-"}</div></Col>
-              <Col xs={12} sm={6}><Text type="secondary">仓库</Text><div>{activeHead.warehouse || "-"}</div></Col>
-              <Col xs={12} sm={6}><Text type="secondary">送仓收货人</Text><div>{activeHead.receiverName || "-"}</div></Col>
-              <Col xs={12} sm={6}><Text type="secondary">收货电话</Text><div>{activeHead.receiverMobile || "-"}</div></Col>
-              <Col xs={12} sm={6}><Text type="secondary">物流单号</Text><div>{activeHead.lId || "-"}</div></Col>
-              <Col xs={12} sm={6}><Text type="secondary">网店订单</Text><div>{activeHead.soId || "-"}</div></Col>
-              <Col xs={12} sm={6}><Text type="secondary">标签</Text><div>{activeHead.labels || "-"}</div></Col>
-              <Col xs={12} sm={6}><Text type="secondary">确认时间</Text><div>{formatTime(activeHead.confirmDate)}</div></Col>
-              {activeHead.platformProductName ? <Col xs={24}><Text type="secondary">平台商品</Text><div>{activeHead.platformProductName}</div></Col> : null}
-              {activeHead.platformReason ? <Col xs={24}><Text type="secondary">平台退货原因</Text><div>{activeHead.platformReason}</div></Col> : null}
-              <Col xs={24}><Text type="secondary">备注</Text><div>{activeHead.remark || "-"}</div></Col>
-            </Row>
-
-            {activeHead.asId ? (
-              <Table<ConsignAfterSaleItemRow>
-                className="erp-compact-table"
-                rowKey="id"
-                size="middle"
-                loading={itemsLoading}
-                columns={itemColumns}
-                dataSource={items}
-                scroll={{ x: 1300 }}
-                pagination={{ pageSize: 20, showSizeChanger: true }}
-              />
-            ) : (
-              <Alert type="info" showIcon message="此单仅来自 Temu 平台后台，暂无明细。" />
-            )}
-          </Space>
-        ) : null}
-      </Drawer>
     </div>
   );
 }

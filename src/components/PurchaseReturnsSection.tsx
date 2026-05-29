@@ -12,6 +12,7 @@ import {
 } from "@ant-design/icons";
 import EmptyGuide from "./EmptyGuide";
 import StatCard from "./StatCard";
+import { renderSkuSelectOption } from "../utils/erpUi";
 
 const { Paragraph, Text } = Typography;
 
@@ -922,6 +923,8 @@ export default function PurchaseReturnsSection() {
             placeholder="搜索 SKU（编码 / 名称 / 规格）"
             style={{ width: "100%", marginBottom: 12 }}
             filterOption={false}
+            optionFilterProp="searchText"
+            optionRender={(option) => renderSkuSelectOption(option)}
             loading={skuLoading}
             onSearch={setSkuSearch}
             onChange={(value) => {
@@ -931,10 +934,20 @@ export default function PurchaseReturnsSection() {
               setSkuSearch("");
             }}
             value={undefined}
-            options={skuOptions.map((s) => ({
-              value: s.id,
-              label: `${s.internalSkuCode || s.id} · ${s.name || ""}${s.spec ? ` / ${s.spec}` : ""}`,
-            }))}
+            options={skuOptions.map((s) => {
+              const code = s.internalSkuCode || s.id;
+              const name = [s.name, s.spec].filter(Boolean).join(" / ");
+              return {
+                value: s.id,
+                label: code,
+                searchText: `${code} ${s.name || ""} ${s.spec || ""}`.trim(),
+                skuName: name,
+                skuImage: s.picUrl || "",
+                skuCost: s.weightedAvgCost ?? null,
+                skuStock: (s as any).jstActualStockQty ?? (s as any).actualStockQty ?? null,
+                skuWarehouse: (s as any).warehouseLocation || (s as any).jstMainBin || "",
+              };
+            })}
             notFoundContent={skuLoading ? "搜索中..." : (skuSearch ? "无匹配" : "请输入关键词")}
           />
 

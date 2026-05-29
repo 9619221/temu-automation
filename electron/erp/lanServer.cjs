@@ -55,6 +55,7 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/temu/jit-vmi-cloud-sync": ["admin", "manager", "operations"],
   "/api/temu/reviews-cloud-sync": ["admin", "manager", "operations"],
   "/api/erp/reports/multi-store": ["admin", "manager", "operations", "finance"],
+  "/api/erp/reports/mall-dict": ["admin", "manager", "operations", "finance", "buyer", "warehouse"],
   "/warehouse": ["admin", "manager", "warehouse"],
   "/api/warehouse/workbench": ["admin", "manager", "warehouse"],
   "/api/warehouse/action": ["admin", "manager", "warehouse"],
@@ -64,6 +65,7 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/outbound": ["admin", "manager", "operations", "warehouse"],
   "/api/outbound/workbench": ["admin", "manager", "operations", "warehouse"],
   "/api/outbound/action": ["admin", "manager", "operations", "warehouse"],
+  "/api/inventory/action": ["admin", "manager", "operations", "warehouse"],
   "/api/work-items/list": ["admin", "manager", "operations", "buyer", "finance", "warehouse", "viewer"],
   "/api/work-items/stats": ["admin", "manager", "operations", "buyer", "finance", "warehouse", "viewer"],
   "/api/work-items/generate": ["admin", "manager", "operations", "buyer", "finance", "warehouse"],
@@ -3162,6 +3164,9 @@ function createRequestHandler(options = {}) {
   const performOutboundAction = options.performOutboundAction || (() => {
     throw new Error("Outbound action handler is not available");
   });
+  const performInventoryAction = options.performInventoryAction || (() => {
+    throw new Error("Inventory action handler is not available");
+  });
   const listWorkItems = options.listWorkItems || (() => []);
   const getWorkItemStats = options.getWorkItemStats || (() => ({
     total: 0,
@@ -3275,6 +3280,7 @@ function createRequestHandler(options = {}) {
       performQcAction,
       getOutboundWorkbench,
       performOutboundAction,
+      performInventoryAction,
       listWorkItems,
       getWorkItemStats,
       generateWorkItems,
@@ -3949,6 +3955,25 @@ async function handleMultiStoreReportRequest({ req, res, db }) {
   }
 }
 
+// 纯查 erp_temu_malls 字典表（mall_id → store_code），不碰云端报表。
+// client 模式售后页等用它把 mall_id 翻成「temu-0XX店铺」，云端崩了也能映射。
+async function handleMallDictRequest({ req, res, db }) {
+  if (req.method !== "GET") {
+    writeJson(res, 405, { ok: false, error: "Method not allowed" });
+    return;
+  }
+  try {
+    const { _internal } = require("./services/multiStoreReport.cjs");
+    const malls = _internal.readMallDictionary(db);
+    writeJson(res, 200, { ok: true, data: { malls } });
+  } catch (error) {
+    writeJson(res, error?.statusCode || 500, {
+      ok: false,
+      error: error?.message || String(error),
+    });
+  }
+}
+
 async function handleWarehouseActionRequest({ req, res, session, performWarehouseAction }) {
   const wantsJson = String(req.headers.accept || "").includes("application/json")
     || String(req.headers["content-type"] || "").includes("application/json");
@@ -4081,6 +4106,24 @@ async function handleOutboundActionRequest({ req, res, session, performOutboundA
   }
 }
 
+async function handleInventoryActionRequest({ req, res, session, performInventoryAction }) {
+  if (req.method !== "POST") {
+    writeJson(res, 405, { ok: false, error: "Method not allowed" });
+    return;
+  }
+  try {
+    const payload = await readLoginPayload(req);
+    const result = await performInventoryAction(payload, session.user);
+    writeJson(res, 200, { ok: true, result });
+  } catch (error) {
+    writeJson(res, 400, {
+      ok: false,
+      error: error?.message || String(error),
+      code: error?.code || null,
+    });
+  }
+}
+
 async function handleExtensionIngestRequest({ req, res, pathname, ingestJushuitanExtensionBatch }) {
   if (!isExtensionIngestAuthorized(req)) {
     writeJson(res, 401, { ok: false, error: "Unauthorized" });
@@ -4133,6 +4176,7 @@ async function handleRequest({
   performQcAction,
   getOutboundWorkbench,
   performOutboundAction,
+  performInventoryAction,
   listWorkItems,
   getWorkItemStats,
   generateWorkItems,
@@ -4789,6 +4833,11 @@ async function handleRequest({
       return;
     }
 
+    if (pathname === "/api/erp/reports/mall-dict") {
+      await handleMallDictRequest({ req, res, db });
+      return;
+    }
+
     if (pathname === "/api/warehouse/workbench") {
       const payload = await readOptionalPayload(req);
       writeJson(res, 200, {
@@ -4840,6 +4889,16 @@ async function handleRequest({
         res,
         session,
         performOutboundAction,
+      });
+      return;
+    }
+
+    if (pathname === "/api/inventory/action") {
+      await handleInventoryActionRequest({
+        req,
+        res,
+        session,
+        performInventoryAction,
       });
       return;
     }

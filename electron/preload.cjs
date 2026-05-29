@@ -308,6 +308,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
       items: (params) => ipcRenderer.invoke("erp:other-inout:items", params || {}),
       cacheStatus: (params) => ipcRenderer.invoke("erp:other-inout:cache-status", params || {}),
     },
+    inventory: {
+      action: (payload) => ipcRenderer.invoke("erp:inventory:action", payload || {}),
+    },
     purchase: {
       workbench: (params, options) => invokeWithTimeout(
         "erp:purchase:workbench",
@@ -392,6 +395,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     },
     reports: {
       multiStore: (options) => ipcRenderer.invoke("erp:reports:multi-store", options || {}),
+      mallDict: () => ipcRenderer.invoke("erp:reports:mall-dict"),
     },
     events: {
       onPurchaseUpdate: (handler) => {

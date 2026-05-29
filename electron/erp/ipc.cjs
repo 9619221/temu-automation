@@ -19320,7 +19320,7 @@ async function performOutboundActionRuntime(payload = {}) {
 }
 
 // 直接库存动作（不走 outbound_shipment 单据流转）：
-// purchase_return / customer_return / platform_return_to_warehouse / transfer_between_accounts
+// purchase_return / customer_return / platform_return_to_warehouse / transfer_between_accounts / swap_sku
 function performInventoryAction(payload = {}, actorInput = {}) {
   const { db, services } = requireErp();
   const action = requireString(payload.action, "action");
@@ -19414,6 +19414,62 @@ function performInventoryAction(payload = {}, actorInput = {}) {
           affectSkuTotal: false,
           actor,
         });
+        return { outLines, inBatch };
+      });
+      return { action, ...run() };
+    }
+    case "swap_sku": {
+      // 商品编码换货：编码 A 减 fromQty、编码 B 加 toQty（数量可不等）。
+      // 店铺跟着 SKU 走（erp_skus.account_id 是权威源），不单独传店铺。
+      // 货值守恒：调用方手填「换出总额」fromAmount = A 这批货的总货值。
+      //   A 主表货值 -fromAmount、B 主表货值 +fromAmount，两边均价各自按新货值重算。
+      //   A 出库 ledger 单价 = fromAmount/fromQty；B 入库批次单价 = fromAmount/toQty。
+      const fromSkuId = requireString(payload.fromSkuId, "fromSkuId");
+      const toSkuId = requireString(payload.toSkuId, "toSkuId");
+      const fromQty = positiveInteger(payload.fromQty, 0);
+      const toQty = positiveInteger(payload.toQty, 0);
+      if (fromQty <= 0) throw new Error("fromQty must be positive");
+      if (toQty <= 0) throw new Error("toQty must be positive");
+      if (fromSkuId === toSkuId) throw new Error("fromSkuId equals toSkuId");
+      const fromAmount = optionalNumber(payload.fromAmount);
+      if (fromAmount == null || !(fromAmount >= 0)) throw new Error("fromAmount (换出总额) is required");
+      const fromRow = db.prepare("SELECT account_id FROM erp_skus WHERE id = ?").get(fromSkuId);
+      const toRow = db.prepare("SELECT account_id FROM erp_skus WHERE id = ?").get(toSkuId);
+      if (!fromRow) throw new Error(`fromSku not found: ${fromSkuId}`);
+      if (!toRow) throw new Error(`toSku not found: ${toSkuId}`);
+      const fromAccountId = optionalString(fromRow.account_id);
+      const toAccountId = optionalString(toRow.account_id);
+      if (!fromAccountId) throw new Error(`fromSku 未绑定店铺，无法换货: ${fromSkuId}`);
+      if (!toAccountId) throw new Error(`toSku 未绑定店铺，无法换货: ${toSkuId}`);
+      const fromUnitCost = fromAmount / fromQty;  // A 每件出库货值（仅写 ledger 用）
+      const toUnitCost = fromAmount / toQty;      // B 每件入库货值（整笔货值搬给 B）
+      const sourceDocType = payload.sourceDocType || action;
+      const sourceDocId = optionalString(payload.sourceDocId) || `${action}-${Date.now().toString(36)}`;
+      const run = db.transaction(() => {
+        const outLines = services.inventory.applyDirectOutbound({
+          accountId: fromAccountId,
+          skuId: fromSkuId,
+          qty: fromQty,
+          unitCost: fromUnitCost,
+          ledgerType: INVENTORY_LEDGER_TYPE.SKU_SWAP_OUT,
+          sourceDocType,
+          sourceDocId,
+          affectSkuTotal: false,  // 主表货值单独按 fromAmount 调，不走默认「按旧均价扣」
+          actor,
+        });
+        services.inventory.adjustSkuInventoryValue(fromSkuId, -fromQty, -fromAmount);
+        const inBatch = services.inventory.applyDirectInbound({
+          accountId: toAccountId,
+          skuId: toSkuId,
+          qty: toQty,
+          unitLandedCost: toUnitCost,
+          ledgerType: INVENTORY_LEDGER_TYPE.SKU_SWAP_IN,
+          sourceDocType,
+          sourceDocId,
+          affectSkuTotal: false,  // 同上，主表货值单独按 +fromAmount 调
+          actor,
+        });
+        services.inventory.adjustSkuInventoryValue(toSkuId, toQty, fromAmount);
         return { outLines, inBatch };
       });
       return { action, ...run() };

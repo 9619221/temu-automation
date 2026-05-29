@@ -116,6 +116,8 @@ const INVENTORY_LEDGER_TYPE = Object.freeze({
   PLATFORM_RETURN_IN: "platform_return_in",    // 平台仓 → 自家仓 入库腿
   TRANSFER_OUT: "transfer_out",                // 店铺 A → 店铺 B 出库腿
   TRANSFER_IN: "transfer_in",                  // 店铺 A → 店铺 B 入库腿
+  SKU_SWAP_OUT: "sku_swap_out",                // 商品编码 A → 编码 B 换货：A 出库腿
+  SKU_SWAP_IN: "sku_swap_in",                  // 商品编码 A → 编码 B 换货：B 入库腿
 });
 
 const WORK_ITEM_STATUS = Object.freeze({

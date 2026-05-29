@@ -782,6 +782,7 @@ interface ErpAPI {
   jushuitan: ErpJushuitanAPI;
   reports?: {
     multiStore: (options?: { includeTest?: boolean }) => Promise<ErpMultiStoreReportResponse>;
+    mallDict: () => Promise<ErpMallDictResponse>;
   };
   events?: {
     onPurchaseUpdate: (handler: (payload: ErpPurchaseUpdateEvent) => void) => () => void;
@@ -849,6 +850,23 @@ interface ErpMultiStoreReportResponse {
     store_count: number;
     stores: ErpMultiStoreReportStore[];
     unmapped: ErpMultiStoreReportStore[];
+  };
+}
+
+interface ErpMallDictEntry {
+  mall_id: string;
+  mall_name: string | null;
+  store_code: string | null;
+  site: string | null;
+  status: string | null;
+  remark: string | null;
+}
+
+interface ErpMallDictResponse {
+  ok: boolean;
+  error?: string;
+  data?: {
+    malls: ErpMallDictEntry[];
   };
 }
 

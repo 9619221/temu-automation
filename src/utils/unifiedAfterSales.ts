@@ -43,6 +43,23 @@ export interface UnifiedAfterSaleRow {
   platformReason?: string | null;
   platformQuantity?: number | null;
   platformProductName?: string | null;
+
+  // 平台独占单的明细：从平台 raw_json 解析，按 packageSn 聚合（聚水潭单不用，走 asId 异步加载）
+  platformItems?: PlatformAfterSaleItem[];
+}
+
+// 平台 raw_json 解析出的单个 SKU 明细
+export interface PlatformAfterSaleItem {
+  id: string;
+  picUrl?: string | null;
+  skuId?: string | null;
+  skcId?: string | null;
+  spuId?: string | null;
+  spec?: string | null;
+  qty?: number | null;
+  purchaseSn?: string | null;
+  type?: string | null;
+  reason?: string | null;
 }
 
 interface ConsignAfterSaleRow {
@@ -88,7 +105,7 @@ function extractJoinKey(row: TemuAfterSaleRow): string | null {
   return null;
 }
 
-function platformAsBaseRow(p: TemuAfterSaleRow, joinKey: string): UnifiedAfterSaleRow {
+function platformAsBaseRow(p: TemuAfterSaleRow, joinKey: string, mallMap?: Map<string, string>): UnifiedAfterSaleRow {
   // 解析 raw_json 拿更多字段
   let raw: Record<string, any> = {};
   if (p.raw_json) {
@@ -114,8 +131,8 @@ function platformAsBaseRow(p: TemuAfterSaleRow, joinKey: string): UnifiedAfterSa
     asDate = p.created_at_text;
   }
 
-  // 平台没"店铺名"明文字段，用 mall_id
-  const shopName = p.mall_id ? `Temu ${p.mall_id}` : null;
+  // 平台没"店铺名"明文字段，用 erp_temu_malls 店铺绑定表把 mall_id 映射成"店号 店名"，映射不到才退回 mall_id
+  const shopName = (p.mall_id && mallMap?.get(p.mall_id)) || (p.mall_id ? `Temu ${p.mall_id}` : null);
   const reason = Array.isArray(raw.reasonDesc) ? raw.reasonDesc.join("；") : (p.reason || null);
 
   return {
@@ -143,6 +160,39 @@ function platformAsBaseRow(p: TemuAfterSaleRow, joinKey: string): UnifiedAfterSa
     platformReason: reason,
     platformQuantity: Number(p.quantity || 0) || null,
     platformProductName: p.product_name || null,
+  };
+}
+
+// Temu 图片常是协议相对 URL（//img.kwcdn.com/...），需补 https: 才能加载
+function normalizeImageUrl(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const raw = String(value).trim();
+  if (!raw || raw === "null" || raw === "undefined" || raw === "[object Object]") return null;
+  if (raw.startsWith("//")) return `https:${raw}`;
+  if (raw.startsWith("data:image/")) return raw;
+  const remoteMatch = raw.match(/https?:\/\/[^\s"'\\]+/i);
+  return remoteMatch?.[0] || raw;
+}
+
+function toPlatformItem(p: TemuAfterSaleRow): PlatformAfterSaleItem {
+  let raw: Record<string, any> = {};
+  if (p.raw_json) { try { raw = JSON.parse(p.raw_json); } catch { /* swallow */ } }
+  const spec = raw.secondarySaleSpec || raw.mainSaleSpec || null;
+  const reason = Array.isArray(raw.reasonDesc) ? raw.reasonDesc.join("；") : (raw.remark || p.reason || null);
+  const picUrl = normalizeImageUrl(
+    raw.thumbUrl || raw.productSkcPicture || raw.goodsImageUrl || raw.imageUrl || raw.productPicture,
+  );
+  return {
+    id: `pi:${p.id || p.row_key}`,
+    picUrl,
+    skuId: raw.productSkuId != null ? String(raw.productSkuId) : (p.sku_id || null),
+    skcId: raw.productSkcId != null ? String(raw.productSkcId) : (p.skc_id || null),
+    spuId: raw.productSpuId != null ? String(raw.productSpuId) : null,
+    spec,
+    qty: Number(raw.quantity ?? p.quantity ?? 0) || null,
+    purchaseSn: raw.purchaseSubOrderSn || null,
+    type: raw.orderTypeDesc || p.after_sale_type || null,
+    reason,
   };
 }
 
@@ -203,6 +253,35 @@ export interface FetchUnifiedResult {
   platformError?: string | null;
 }
 
+// 从多店报表端点（已部署）取 erp_temu_malls 店铺绑定表，建 mall_id → "temu-店号店铺" 映射。
+// 该端点要连云端、可能较慢，所以：①模块级缓存（绑定很少变）②超时兜底——绝不拖住主列表加载。
+let mallMapCache: { map: Map<string, string>; at: number } | null = null;
+const MALL_MAP_TTL_MS = 10 * 60 * 1000;
+const MALL_MAP_TIMEOUT_MS = 4000;
+
+async function loadMallNameMap(erp: any): Promise<Map<string, string>> {
+  if (mallMapCache && Date.now() - mallMapCache.at < MALL_MAP_TTL_MS) return mallMapCache.map;
+  const empty = new Map<string, string>();
+  if (!erp?.reports?.mallDict) return empty;
+  try {
+    const resp = await Promise.race([
+      erp.reports.mallDict(),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), MALL_MAP_TIMEOUT_MS)),
+    ]);
+    if (!resp?.ok || !resp.data) return mallMapCache?.map || empty;
+    const map = new Map<string, string>();
+    for (const s of resp.data.malls || []) {
+      if (!s?.mall_id) continue;
+      const name = s.store_code ? `temu-${s.store_code}店铺` : (s.mall_name || "");
+      if (name) map.set(s.mall_id, name);
+    }
+    if (map.size) mallMapCache = { map, at: Date.now() };
+    return map;
+  } catch {
+    return mallMapCache?.map || empty; // 映射不到退回 mall_id 显示
+  }
+}
+
 export async function fetchUnifiedAfterSales(params: FetchUnifiedParams = {}): Promise<FetchUnifiedResult> {
   const { q, page = 1, pageSize = 20 } = params;
   const erp = (window as any).electronAPI?.erp;
@@ -231,7 +310,9 @@ export async function fetchUnifiedAfterSales(params: FetchUnifiedParams = {}): P
     }
   })();
 
-  const [jstFetch, platformFetch] = await Promise.all([jstPromise, platformPromise]);
+  const mallPromise = loadMallNameMap(erp);
+
+  const [jstFetch, platformFetch, mallMap] = await Promise.all([jstPromise, platformPromise, mallPromise]);
 
   // 构造 jushuitan 索引
   const jstByKey = new Map<string, ConsignAfterSaleRow>();
@@ -239,24 +320,45 @@ export async function fetchUnifiedAfterSales(params: FetchUnifiedParams = {}): P
     if (row.outerAsId) jstByKey.set(row.outerAsId, row);
   }
 
+  // 平台行按 join key 分组：同一 packageSn 的多个 SKU 聚合成一张售后单
+  const platformGroups = new Map<string, TemuAfterSaleRow[]>();
+  const platformNoKey: TemuAfterSaleRow[] = [];
+  for (const p of platformFetch.rows) {
+    const key = extractJoinKey(p);
+    if (key) {
+      const arr = platformGroups.get(key);
+      if (arr) arr.push(p);
+      else platformGroups.set(key, [p]);
+    } else {
+      platformNoKey.push(p);
+    }
+  }
+
   const unifiedRows: UnifiedAfterSaleRow[] = [];
   const usedJstIds = new Set<string>();
 
-  // 先走平台行
-  for (const p of platformFetch.rows) {
-    const key = extractJoinKey(p);
-    if (!key) {
-      // 没法 join 的平台行，仍作为独占行展示
-      unifiedRows.push(platformAsBaseRow(p, p.row_key || p.id));
-      continue;
-    }
+  // 聚合后的平台单
+  for (const [key, group] of platformGroups) {
     const j = jstByKey.get(key);
     if (j) {
+      // both：用聚水潭 head（明细走 asId 异步加载），平台字段用组首条补充
       usedJstIds.add(j.id);
-      unifiedRows.push(mergeJstAndPlatform(j, p));
+      unifiedRows.push(mergeJstAndPlatform(j, group[0]));
     } else {
-      unifiedRows.push(platformAsBaseRow(p, key));
+      // 平台独占：一张单 + 多 SKU 明细（来自 raw_json）
+      const head = platformAsBaseRow(group[0], key, mallMap);
+      head.id = `platform:${key}`;
+      head.platformItems = group.map(toPlatformItem);
+      head.refundQty = head.platformItems.reduce((s, it) => s + Number(it.qty || 0), 0) || null;
+      unifiedRows.push(head);
     }
+  }
+
+  // 没法 join 的平台行：各自独立，明细取自身
+  for (const p of platformNoKey) {
+    const head = platformAsBaseRow(p, p.row_key || p.id, mallMap);
+    head.platformItems = [toPlatformItem(p)];
+    unifiedRows.push(head);
   }
 
   // 再补聚水潭独占
