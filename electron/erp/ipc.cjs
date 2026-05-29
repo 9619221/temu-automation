@@ -4932,17 +4932,31 @@ function effectivePurchaseReturn(payload, actor) {
       "UPDATE purchase_return_items SET inventory_ledger_id = @ledger, updated_at = @now WHERE id = @id"
     );
     for (const item of items) {
-      const lines = services.inventory.applyDirectOutbound({
-        accountId: row.account_id,
-        skuId: item.sku_id,
-        qty: item.qty,
-        unitCost: item.cost_price,
-        ledgerType: INVENTORY_LEDGER_TYPE.PURCHASE_RETURN,
-        sourceDocType: "purchase_return",
-        sourceDocId: id,
-        affectSkuTotal: true,
-        actor,
-      });
+      let lines;
+      try {
+        lines = services.inventory.applyDirectOutbound({
+          accountId: row.account_id,
+          skuId: item.sku_id,
+          qty: item.qty,
+          unitCost: item.cost_price,
+          ledgerType: INVENTORY_LEDGER_TYPE.PURCHASE_RETURN,
+          sourceDocType: "purchase_return",
+          sourceDocId: id,
+          affectSkuTotal: true,
+          actor,
+        });
+      } catch (err) {
+        // 库存不足时 applyDirectOutbound 抛英文，转成可读中文（带商品编码/名称/仓库）。
+        if (/Insufficient available inventory/i.test(err?.message || "")) {
+          const skuRow = db.prepare("SELECT internal_sku_code, product_name FROM erp_skus WHERE id = ?").get(item.sku_id);
+          const code = skuRow?.internal_sku_code || item.sku_id;
+          const name = item.product_name || skuRow?.product_name || "";
+          const m = String(err.message).match(/:\s*([\d.]+)\s*<\s*([\d.]+)/);
+          const detail = m ? `（需 ${m[2]}，现有 ${m[1]}）` : "";
+          throw new Error(`SKU ${code}${name ? `（${name}）` : ""} 在「${row.warehouse || row.account_id}」无可退库存${detail}`);
+        }
+        throw err;
+      }
       updateItem.run({ id: item.id, ledger: JSON.stringify(lines || []), now });
     }
     db.prepare(`

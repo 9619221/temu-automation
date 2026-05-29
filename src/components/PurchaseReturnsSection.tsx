@@ -148,6 +148,7 @@ interface PurchaseReturnItemRow {
 interface DraftItem {
   key: string;
   skuId: string;
+  internalSkuCode?: string | null;
   productName?: string | null;
   propertiesValue?: string | null;
   picUrl?: string | null;
@@ -163,10 +164,13 @@ interface AccountRow {
 
 interface SkuOption {
   id: string;
+  internalSkuCode?: string | null;
   name?: string | null;
   spec?: string | null;
   picUrl?: string | null;
   weightedAvgCost?: number | null;
+  accountId?: string | null;
+  accountName?: string | null;
 }
 
 const erp = (window as any).electronAPI?.erp;
@@ -449,14 +453,16 @@ export default function PurchaseReturnsSection() {
   };
 
   const addSkuToDraft = (sku: SkuOption) => {
+    const skuLabel = sku.internalSkuCode || sku.id;
     setDraftItems((prev) => {
       if (prev.some((it) => it.skuId === sku.id)) {
-        message.info(`${sku.id} 已在明细中`);
+        message.info(`${skuLabel} 已在明细中`);
         return prev;
       }
       return [...prev, {
         key: makeKey(),
         skuId: sku.id,
+        internalSkuCode: sku.internalSkuCode || null,
         productName: sku.name || null,
         propertiesValue: sku.spec || null,
         picUrl: sku.picUrl || null,
@@ -464,6 +470,11 @@ export default function PurchaseReturnsSection() {
         costPrice: null,
       }];
     });
+    // 退货仓库还没选时，自动带出该 SKU 绑定的店（每个 SKU 的库存唯一锁定一个店）。
+    if (!accountId && sku.accountId) {
+      setAccountId(sku.accountId);
+      message.info(`已自动选择退货仓库：${sku.accountName || sku.accountId}`);
+    }
   };
 
   const updateDraftItem = (key: string, patch: Partial<DraftItem>) => {
@@ -922,7 +933,7 @@ export default function PurchaseReturnsSection() {
             value={undefined}
             options={skuOptions.map((s) => ({
               value: s.id,
-              label: `${s.id} · ${s.name || ""}${s.spec ? ` / ${s.spec}` : ""}`,
+              label: `${s.internalSkuCode || s.id} · ${s.name || ""}${s.spec ? ` / ${s.spec}` : ""}`,
             }))}
             notFoundContent={skuLoading ? "搜索中..." : (skuSearch ? "无匹配" : "请输入关键词")}
           />
@@ -939,7 +950,7 @@ export default function PurchaseReturnsSection() {
                 key: "sku",
                 render: (_v, it) => (
                   <Space direction="vertical" size={0}>
-                    <Text style={{ fontWeight: 600, fontSize: 12 }}>{it.skuId}</Text>
+                    <Text style={{ fontWeight: 600, fontSize: 12 }}>{it.internalSkuCode || it.skuId}</Text>
                     <Text type="secondary" style={{ fontSize: 12 }}>{it.productName || "-"} {it.propertiesValue ? `/ ${it.propertiesValue}` : ""}</Text>
                   </Space>
                 ),
