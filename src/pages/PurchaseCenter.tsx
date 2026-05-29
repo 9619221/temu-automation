@@ -3928,15 +3928,20 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   runActionRef.current = runAction;
   const handlePurchaseLineEdit = useCallback(
     async (poId: string, lineId: string, patch: { qty?: number; amount?: number; freight?: number; unitPrice?: number }) => {
+      // 行内编辑只改这一张单的金额/数量，不影响 tab 计数或其它单：
+      // 跳过整表 workbench 重拉（200 条跨海 3.4MB），直接用 action 返回的单条
+      // purchaseOrder（已带改后的 lineItems + 重算金额）就地回填，秒级生效。
       const result = await runActionRef.current(`edit-line-${lineId}`, {
         action: "update_po_line",
         poId,
         lineId,
+        refreshWorkbench: false,
         ...patch,
       }, "明细已更新");
+      if (result) patchPurchaseOrderFromResult(result);
       return Boolean(result);
     },
-    [],
+    [patchPurchaseOrderFromResult],
   );
 
   const canRollbackPurchaseOrder = (row: PurchaseOrderRow) => {
