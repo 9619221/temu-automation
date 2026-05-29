@@ -411,6 +411,36 @@ class InventoryService {
     return { weightedAvgCost: newAvg, costBalanceQty: Math.max(0, newQty) };
   }
 
+  // 换货专用：按「货值变动」调整 SKU 主表并重算加权均价。
+  // deltaQty 件 + deltaValue 货值一起记账（出库腿传负、入库腿传正）。
+  // 新均价 = (旧货值 + deltaValue) / (旧库存 + deltaQty)；库存到 0 则均价归 0。
+  // 跟 applySkuCostChange 的区别：出库时也按指定货值扣并重算均价，而非「按旧均价扣、均价不变」。
+  adjustSkuInventoryValue(skuId, deltaQty, deltaValue) {
+    if (!skuId) return null;
+    const sku = this.db
+      .prepare("SELECT weighted_avg_cost, cost_balance_qty FROM erp_skus WHERE id = ?")
+      .get(skuId);
+    if (!sku) return null;
+    const oldQty = Number(sku.cost_balance_qty || 0);
+    const oldAvg = Number(sku.weighted_avg_cost || 0);
+    const newQty = oldQty + Number(deltaQty || 0);
+    const newValue = oldQty * oldAvg + Number(deltaValue || 0);
+    const newAvg = newQty > 0 ? newValue / newQty : 0;
+    this.db.prepare(`
+      UPDATE erp_skus
+      SET weighted_avg_cost = @avg,
+          cost_balance_qty = @qty,
+          updated_at = @updated_at
+      WHERE id = @id
+    `).run({
+      id: skuId,
+      avg: newAvg,
+      qty: Math.max(0, newQty),
+      updated_at: nowIso(),
+    });
+    return { weightedAvgCost: newAvg, costBalanceQty: Math.max(0, newQty) };
+  }
+
   getSkuWeightedAvgCost(skuId) {
     if (!skuId) return 0;
     const row = this.db

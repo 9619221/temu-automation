@@ -389,8 +389,10 @@ export default function OtherInoutSection() {
     if (fromSkuId === toSkuId) { message.error("换出和换入不能是同一个编码"); return; }
     const fq = Number(fromQty);
     const tq = Number(toQty);
+    const fa = Number(fromAmount);
     if (!Number.isFinite(fq) || fq <= 0) { message.error("换出数量必须大于 0"); return; }
     if (!Number.isFinite(tq) || tq <= 0) { message.error("换入数量必须大于 0"); return; }
+    if (!Number.isFinite(fa) || fa < 0) { message.error("请填写换出单价或总额"); return; }
     setXferSubmitting(true);
     try {
       await erp.inventory.action({
@@ -399,9 +401,9 @@ export default function OtherInoutSection() {
         fromQty: fq,
         toSkuId,
         toQty: tq,
-        fromUnitCost: fromUnitCost != null && fromUnitCost >= 0 ? fromUnitCost : undefined,
+        fromAmount: fa,
       });
-      message.success(`换货成功：编码 A 减 ${fq} 件、编码 B 加 ${tq} 件`);
+      message.success(`换货成功：编码 A 减 ${fq} 件（货值 ${fa}），编码 B 加 ${tq} 件`);
       setXferOpen(false);
     } catch (e: any) {
       message.error(e?.message || "换货失败");
@@ -542,7 +544,7 @@ export default function OtherInoutSection() {
           type="info"
           showIcon
           message="只动库存、不留单据"
-          description="换出编码（A）按 FIFO 扣减库存，换入编码（B）按它自己的均价增加库存。店铺跟着商品编码走，数量可不等。不生成出入库单。"
+          description="换出编码（A）按 FIFO 扣减库存，按你填的总额计货值；A 减这笔货值、B 加这笔货值，两边均价各自重算。店铺跟着商品编码走，数量可不等。不生成出入库单。"
         />
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
           <div>
@@ -573,23 +575,23 @@ export default function OtherInoutSection() {
           </div>
           <Row gutter={12}>
             <Col span={12}>
-              <Text type="secondary">换出单价（选填）</Text>
+              <Text type="secondary">换出单价</Text>
               <InputNumber
                 style={{ width: "100%", marginTop: 4 }}
                 min={0}
                 precision={2}
-                placeholder="不填用 A 的均价"
+                placeholder="单价、总额填一个"
                 value={fromUnitCost}
                 onChange={(v) => onFromUnitCostChange(v as number | null)}
               />
             </Col>
             <Col span={12}>
-              <Text type="secondary">换出总额（选填）</Text>
+              <Text type="secondary">换出总额</Text>
               <InputNumber
                 style={{ width: "100%", marginTop: 4 }}
                 min={0}
                 precision={2}
-                placeholder="单价 × 数量"
+                placeholder="另一个自动算"
                 value={fromAmount}
                 onChange={(v) => onFromAmountChange(v as number | null)}
               />
