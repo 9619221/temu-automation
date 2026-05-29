@@ -16,6 +16,7 @@ import {
 } from "antd";
 import { ReloadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
+import { readPageCache, writePageCache } from "../utils/pageCache";
 
 interface ReportStore {
   mall_id: string;
@@ -62,6 +63,8 @@ interface MultiStoreResponse {
 }
 
 const REFRESH_MS = 5 * 60 * 1000; // 5 分钟自动刷新一次
+// 轻量 SWR：缓存上次报表，进页面先显示、后台刷新，避免冷启动空等（报表仍每 5 分钟自动刷新保时效）。
+const MULTI_STORE_REPORT_CACHE_KEY = "temu.multi-store-report.cache.v1";
 const STALE_THRESHOLD_SECONDS = 2 * 60 * 60; // 2 小时无数据视为掉线
 
 function fmtNum(n: number | null | undefined) {
@@ -95,7 +98,9 @@ function StoreCell({ store }: { store: ReportStore }) {
 
 export default function MultiStoreReport() {
   const [loading, setLoading] = useState(false);
-  const [data, setData] = useState<ReportData | null>(null);
+  const [data, setData] = useState<ReportData | null>(
+    () => readPageCache<ReportData | null>(MULTI_STORE_REPORT_CACHE_KEY, null),
+  );
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("daily");
 
@@ -113,6 +118,7 @@ export default function MultiStoreReport() {
       } else {
         setData(resp.data);
         setError(null);
+        writePageCache(MULTI_STORE_REPORT_CACHE_KEY, resp.data);
       }
     } catch (e: any) {
       setError(e?.message || String(e));

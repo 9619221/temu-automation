@@ -34,6 +34,7 @@ const {
 } = require("./clientRuntime.cjs");
 const skuCache = require("./skuCache.cjs");
 const mappingCache = require("./mappingCache.cjs");
+const purchaseRequestCache = require("./purchaseRequestCache.cjs");
 const purchaseReturnCache = require("./purchaseReturnCache.cjs");
 const consignAfterSaleCache = require("./consignAfterSaleCache.cjs");
 const {
@@ -1253,6 +1254,7 @@ function initializeErp(options = {}) {
   configureClientRuntime({ userDataDir: erpState.userDataDir });
   skuCache.configureSkuCache({ userDataDir: erpState.userDataDir });
   mappingCache.configureMappingCache({ userDataDir: erpState.userDataDir });
+  purchaseRequestCache.configurePurchaseRequestCache({ userDataDir: erpState.userDataDir });
   purchaseReturnCache.configurePurchaseReturnCache({ userDataDir: erpState.userDataDir });
   consignAfterSaleCache.configureConsignAfterSaleCache({ userDataDir: erpState.userDataDir });
 
@@ -4669,6 +4671,135 @@ function getPurchaseReturnIds(params = {}) {
   return rows.map((row) => row.id);
 }
 
+// 找品单（采购请求）富行 SELECT 主体：pr.* + 商品/店铺/发起人 join + 候选/映射子查询。
+// ⚠️ 必须与 getPurchaseWorkbench 内联的找品查询（约 6440 行）保持字段一致——前端
+// 找品列表依赖这些 camelCase 字段渲染。改动一处务必同步另一处（Phase0 工厂化后统一）。
+const PURCHASE_REQUEST_RICH_SELECT_SQL = `
+    SELECT
+      pr.*,
+      acct.name AS account_name,
+      sku.internal_sku_code,
+      sku.product_name,
+      sku.color_spec,
+      sku.image_url AS sku_image_url,
+      sku.supplier_id AS sku_supplier_id,
+      sku_supplier.name AS sku_supplier_name,
+      requester.name AS requested_by_name,
+      buyer_feedback_user.name AS buyer_feedback_by_name,
+      COUNT(candidate.id) AS candidate_count,
+      SUM(CASE WHEN candidate.status = 'selected' THEN 1 ELSE 0 END) AS selected_candidate_count,
+      (
+        SELECT COUNT(*)
+        FROM erp_sku_1688_sources source
+        WHERE source.account_id = pr.account_id
+          AND source.sku_id = pr.sku_id
+          AND source.status = 'active'
+      ) AS mapping_count,
+      (
+        SELECT source.supplier_name
+        FROM erp_sku_1688_sources source
+        WHERE source.account_id = pr.account_id
+          AND source.sku_id = pr.sku_id
+          AND source.status = 'active'
+        ORDER BY source.is_default DESC, source.updated_at DESC, source.created_at DESC
+        LIMIT 1
+      ) AS primary_mapping_supplier_name,
+      (
+        SELECT source.external_offer_id
+        FROM erp_sku_1688_sources source
+        WHERE source.account_id = pr.account_id
+          AND source.sku_id = pr.sku_id
+          AND source.status = 'active'
+        ORDER BY source.is_default DESC, source.updated_at DESC, source.created_at DESC
+        LIMIT 1
+      ) AS primary_mapping_offer_id,
+      (
+        SELECT source.unit_price
+        FROM erp_sku_1688_sources source
+        WHERE source.account_id = pr.account_id
+          AND source.sku_id = pr.sku_id
+          AND source.status = 'active'
+        ORDER BY source.is_default DESC, source.updated_at DESC, source.created_at DESC
+        LIMIT 1
+      ) AS primary_mapping_unit_price,
+      (
+        SELECT candidate_price.unit_price
+        FROM erp_sourcing_candidates candidate_price
+        WHERE candidate_price.pr_id = pr.id
+        ORDER BY
+          CASE candidate_price.status
+            WHEN 'selected' THEN 0
+            WHEN 'shortlisted' THEN 1
+            WHEN 'candidate' THEN 2
+            ELSE 9
+          END,
+          candidate_price.updated_at DESC,
+          candidate_price.created_at DESC
+        LIMIT 1
+      ) AS primary_candidate_unit_price,
+      (
+        SELECT COALESCE(candidate_supplier.name, candidate_supplier_row.supplier_name)
+        FROM erp_sourcing_candidates candidate_supplier_row
+        LEFT JOIN erp_suppliers candidate_supplier ON candidate_supplier.id = candidate_supplier_row.supplier_id
+        WHERE candidate_supplier_row.pr_id = pr.id
+        ORDER BY
+          CASE candidate_supplier_row.status
+            WHEN 'selected' THEN 0
+            WHEN 'shortlisted' THEN 1
+            WHEN 'candidate' THEN 2
+            ELSE 9
+          END,
+          candidate_supplier_row.updated_at DESC,
+          candidate_supplier_row.created_at DESC
+        LIMIT 1
+      ) AS primary_candidate_supplier_name
+    FROM erp_purchase_requests pr
+    LEFT JOIN erp_accounts acct ON acct.id = pr.account_id
+    LEFT JOIN erp_skus sku ON sku.id = pr.sku_id
+    LEFT JOIN erp_suppliers sku_supplier ON sku_supplier.id = sku.supplier_id
+    LEFT JOIN erp_users requester ON requester.id = pr.requested_by
+    LEFT JOIN erp_users buyer_feedback_user ON buyer_feedback_user.id = pr.buyer_feedback_by
+    LEFT JOIN erp_sourcing_candidates candidate ON candidate.pr_id = pr.id
+`;
+
+// 找品单增量同步查询（client 模式 purchaseRequestCache 的数据源）。
+// company 经 acct.company_id 过滤（erp_purchase_requests 无 company_id 列）；
+// since 走 pr.updated_at 游标。erp_purchase_requests 是硬删表，删除靠 getPurchaseRequestIds 对账。
+function listPurchaseRequestsForSync(params = {}) {
+  const { db } = requireErp();
+  const since = optionalString(params.since);
+  const companyId = optionalString(params.companyId || params.company_id);
+  const conditions = [];
+  const values = {
+    company_id: companyId,
+    since,
+    limit: normalizeLimit(params.limit, 1000, 100000),
+    offset: normalizeOffset(params.offset),
+  };
+  if (companyId) conditions.push("acct.company_id = @company_id");
+  if (since) conditions.push("pr.updated_at > @since");
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const rows = db.prepare(`
+    ${PURCHASE_REQUEST_RICH_SELECT_SQL}
+    ${where}
+    GROUP BY pr.id
+    ORDER BY pr.updated_at ASC
+    LIMIT @limit OFFSET @offset
+  `).all(values);
+  return rows.map(toPurchaseRequest);
+}
+
+// 找品单 id 全集（硬删对账端点用）。company 经 acct.company_id 过滤。
+function getPurchaseRequestIds(params = {}) {
+  const { db } = requireErp();
+  const companyId = optionalString(params.companyId || params.company_id);
+  const where = companyId
+    ? "LEFT JOIN erp_accounts acct ON acct.id = pr.account_id WHERE acct.company_id = @company_id"
+    : "";
+  const rows = db.prepare(`SELECT pr.id AS id FROM erp_purchase_requests pr ${where}`).all(companyId ? { company_id: companyId } : {});
+  return rows.map((row) => row.id);
+}
+
 function listPurchaseReturnItems(params = {}) {
   const { db } = requireErp();
   const since = optionalString(params.since);
@@ -6176,6 +6307,8 @@ function getPurchaseWorkbench(params = {}) {
   const purchaseOrderSortField = optionalString(params.purchaseOrderSortField || params.purchase_order_sort_field || params.poSortField || params.po_sort_field || params.sortField || params.sort_field);
   const purchaseOrderSortDirection = optionalString(params.purchaseOrderSortDirection || params.purchase_order_sort_direction || params.poSortDirection || params.po_sort_direction || params.sortDirection || params.sort_direction);
   const includePurchaseOrders = params.includePurchaseOrders !== false && params.include_purchase_orders !== false;
+  // client 模式找品单走本地镜像（purchaseRequestCache）后，可让 workbench 跳过找品查询省跨海 payload。
+  const includePurchaseRequests = params.includePurchaseRequests !== false && params.include_purchase_requests !== false;
   const includeRequestDetails = params.includeRequestDetails !== false && params.include_request_details !== false;
   const includeOptions = params.includeOptions !== false && params.include_options !== false;
   const include1688Meta = params.include1688Meta !== false && params.include_1688_meta !== false;
@@ -6433,7 +6566,7 @@ function getPurchaseWorkbench(params = {}) {
       po.updated_at DESC,
       po.id DESC`;
 
-  const purchaseRequests = db.prepare(`
+  const purchaseRequests = !includePurchaseRequests ? [] : db.prepare(`
     SELECT
       pr.*,
       acct.name AS account_name,
@@ -18660,11 +18793,29 @@ async function requestRemotePurchaseWorkbench(params = {}) {
 async function getPurchaseWorkbenchRuntime(params = {}) {
   if (shouldUseClientRuntime()) {
     ensureClientRuntime();
+    // 找品单走本地镜像（purchaseRequestCache）：有缓存就秒返本地行 + 后台增量同步/对账，
+    // 并让远端 workbench 跳过找品查询省跨海 payload；无缓存则后台建缓存、本次用远端 requests 兜底。
+    // 老主控端未部署 /api/purchase/requests 时 getCachedPurchaseRequests 返回 null、sync 静默失败，
+    // 自动降级回「远端 workbench 带 requests」的现状，不退化。
+    let cachedRequests = null;
+    try {
+      cachedRequests = purchaseRequestCache.getCachedPurchaseRequests({});
+    } catch {
+      cachedRequests = null;
+    }
+    const useCache = Array.isArray(cachedRequests);
+    if (useCache) {
+      void purchaseRequestCache.triggerSync({ mode: "incremental" }).catch(() => {});
+      void purchaseRequestCache.triggerReconcile().catch(() => {});
+    } else {
+      void purchaseRequestCache.triggerSync({ mode: "full" }).catch(() => {});
+    }
+    const remoteParams = useCache ? { ...params, includePurchaseRequests: false } : params;
     let payload;
     try {
       payload = await remoteRequest("/api/purchase/workbench", {
         method: "POST",
-        body: params,
+        body: remoteParams,
         timeoutMs: 120000,
       });
     } catch (error) {
@@ -18672,11 +18823,14 @@ async function getPurchaseWorkbenchRuntime(params = {}) {
       if (!statusCode || ![404, 405, 502].includes(statusCode)) throw error;
       // 0.3.25：fallback 也带上原始 params，避免老 body=空时服务器按 default（includeOptions=true,
       // include1688Meta=true）返回 4.6MB 全量包，跨海撑爆 timeout、按钮卡 3-10 秒。
-      payload = await remoteRequest("/api/purchase/workbench", { method: "POST", body: params, timeoutMs: 120000 });
+      payload = await remoteRequest("/api/purchase/workbench", { method: "POST", body: remoteParams, timeoutMs: 120000 });
     }
-    return enrichPurchaseWorkbenchWithLocalLineItems(
-      normalizePurchaseWorkbenchPoNumbers(normalizeJstPurchaseWorkbench(payload.workbench || {})),
-    );
+    const workbench = normalizePurchaseWorkbenchPoNumbers(normalizeJstPurchaseWorkbench(payload.workbench || {}));
+    if (useCache) {
+      // 本地镜像是找品单的事实源（全量活跃行），覆盖远端返回（此时远端已被告知不拉 requests）。
+      workbench.purchaseRequests = cachedRequests;
+    }
+    return enrichPurchaseWorkbenchWithLocalLineItems(workbench);
   }
   return getPurchaseWorkbench(params);
 }
@@ -20170,6 +20324,9 @@ async function listJstConsignDeliveriesUnifiedRuntime(params = {}) {
       const payload = await remoteRequest("/api/master-data/consign-deliveries-unified", {
         method: "POST",
         body: params || {},
+        // 送仓托管统一查询要在主控端聚合数万条云端 + 聚水潭数据，跨海响应常超 30s 默认超时，
+        // 与采购/商品资料 workbench 等重查询对齐，放宽到 120s，避免「连接主控端超时」。
+        timeoutMs: 120000,
       });
       if (payload && payload.ok !== false) return payload;
       return emptyResult;
@@ -20447,6 +20604,8 @@ function startLanService(payload = {}) {
     listSku1688Sources,
     listPurchaseReturns,
     getPurchaseReturnIds,
+    listPurchaseRequestsForSync,
+    getPurchaseRequestIds,
     listPurchaseReturnItems,
     getPurchaseReturnItemIds,
     performPurchaseReturnAction,
@@ -20636,6 +20795,8 @@ async function startErpHeadlessServer(options = {}) {
     listSku1688Sources,
     listPurchaseReturns,
     getPurchaseReturnIds,
+    listPurchaseRequestsForSync,
+    getPurchaseRequestIds,
     listPurchaseReturnItems,
     getPurchaseReturnItemIds,
     performPurchaseReturnAction,

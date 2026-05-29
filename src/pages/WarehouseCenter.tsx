@@ -2139,7 +2139,13 @@ export default function WarehouseCenter() {
     receiptScopeKey,
     receiptSupplierFilter,
   ]);
-  const tableLoading = loading && !loadedOnce;
+  // 轻量 SWR：首屏若有上次缓存的数据（generatedAt / 收货单 / 批次任一非空），直接显示缓存、
+  // 后台静默刷新，不再空骨架；仅冷启动（无任何缓存）才显示骨架。手动刷新（loadedOnce 后）也不空屏。
+  const hasWarehouseSnapshot = Boolean(
+    data?.generatedAt
+    || (Array.isArray(data?.inboundReceipts) && data.inboundReceipts.length),
+  );
+  const tableLoading = loading && !loadedOnce && !hasWarehouseSnapshot;
   const logisticsDetail = logisticsDialog?.detail || null;
   const logisticsTraceItems = logisticsDetail?.traceItems || [];
   const logisticsStatusLabel = logisticsDetail?.signed

@@ -50,6 +50,8 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/1688/accounts/delete": ["admin", "manager"],
   "/purchase": ["admin", "manager", "operations", "buyer", "finance"],
   "/api/purchase/workbench": ["admin", "manager", "operations", "buyer", "finance"],
+  "/api/purchase/requests": ["admin", "manager", "operations", "buyer", "finance"],
+  "/api/purchase/request-ids": ["admin", "manager", "operations", "buyer", "finance"],
   "/api/purchase/action": ["admin", "manager", "operations", "buyer", "finance"],
   "/api/temu/sales-sync": ["admin", "manager", "operations"],
   "/api/temu/jit-vmi-cloud-sync": ["admin", "manager", "operations"],
@@ -3213,6 +3215,8 @@ function createRequestHandler(options = {}) {
   const listSku1688Sources = options.listSku1688Sources || (() => []);
   const listPurchaseReturns = options.listPurchaseReturns || (() => []);
   const getPurchaseReturnIds = options.getPurchaseReturnIds || (() => []);
+  const listPurchaseRequestsForSync = options.listPurchaseRequestsForSync || (() => []);
+  const getPurchaseRequestIds = options.getPurchaseRequestIds || (() => []);
   const listPurchaseReturnItems = options.listPurchaseReturnItems || (() => []);
   const getPurchaseReturnItemIds = options.getPurchaseReturnItemIds || (() => []);
   const performPurchaseReturnAction = options.performPurchaseReturnAction || (() => {
@@ -4799,6 +4803,28 @@ async function handleRequest({
         session,
         performPurchaseAction,
       });
+      return;
+    }
+
+    if (pathname === "/api/purchase/requests") {
+      // 找品单增量同步：since 游标 + 分页（client 模式 purchaseRequestCache 的数据源）。
+      // 富行与 /api/purchase/workbench 的 purchaseRequests 同口径，按 company 过滤。
+      const payload = await readOptionalPayload(req);
+      const requests = listPurchaseRequestsForSync({
+        since: payload?.since,
+        includeDeleted: Boolean(payload?.includeDeleted),
+        limit: Number(payload?.limit) || 1000,
+        offset: Number(payload?.offset) || 0,
+        companyId: session.user?.companyId,
+      });
+      writeJson(res, 200, { ok: true, requests });
+      return;
+    }
+
+    if (pathname === "/api/purchase/request-ids") {
+      // 找品单删除对账端点：返回当前存在的找品单 id 全集，客户端 diff 出硬删的清缓存。
+      const ids = getPurchaseRequestIds({ companyId: session.user?.companyId });
+      writeJson(res, 200, { ok: true, ids });
       return;
     }
 
