@@ -9,6 +9,20 @@ r.use(authMiddleware);
 const realMallWhere = "mall_id <> ''";
 const realSalesWhere = "mall_supplier_id <> '' AND mall_supplier_id NOT IN ('MALL-EXT-E2E') AND skc_id NOT IN ('SKC-EXT-E2E', 'SKC-DBG')";
 
+// ===== 看板聚合结果缓存：把高频全表聚合从“每次刷新一次”降到“每 TTL 一次” =====
+const _aggCache = new Map(); // key -> { exp, data }
+function aggCacheGet(key) {
+  const e = _aggCache.get(key);
+  if (e && e.exp > Date.now()) return e.data;
+  if (e) _aggCache.delete(key);
+  return null;
+}
+function aggCacheSet(key, data, ttlMs) {
+  _aggCache.set(key, { exp: Date.now() + ttlMs, data });
+  return data;
+}
+const AGG_TTL_MS = 45000;
+
 function safeJsonParse(text, fallback = null) {
   if (!text) return fallback;
   try {
@@ -533,6 +547,9 @@ function buildProductFlowSalesRow(flow) {
 r.get("/stats", (req, res) => {
   const db = getDb();
   const tid = req.user.tid;
+  const _cacheKey = `stats|${tid}`;
+  const _cached = aggCacheGet(_cacheKey);
+  if (_cached) return res.json(_cached);
   const total = db.prepare("SELECT COUNT(*) AS n FROM capture_events WHERE tenant_id = ?").get(tid).n;
   const last24h = db
     .prepare("SELECT COUNT(*) AS n FROM capture_events WHERE tenant_id = ? AND received_at >= ?")
@@ -549,7 +566,7 @@ r.get("/stats", (req, res) => {
     .prepare(`SELECT device_uuid, last_seen, user_agent FROM devices
               WHERE tenant_id = ? ORDER BY last_seen DESC LIMIT 30`)
     .all(tid);
-  res.json({ total, last24h, malls, topEndpoints, devices });
+  res.json(aggCacheSet(`stats|${tid}`, { total, last24h, malls, topEndpoints, devices }, AGG_TTL_MS));
 });
 
 r.get("/events", (req, res) => {
@@ -633,6 +650,9 @@ r.get("/agent", (req, res) => {
 r.get("/shop-monitor", (req, res) => {
   const db = getDb();
   const tid = req.user.tid;
+  const _cacheKey = `shop-monitor|${tid}`;
+  const _cached = aggCacheGet(_cacheKey);
+  if (_cached) return res.json(_cached);
   const now = Date.now();
   const last24 = now - 86400000;
   const rowsByMall = new Map();
@@ -1164,11 +1184,13 @@ r.get("/shop-monitor", (req, res) => {
     : null;
   totals.device_count = toNum(deviceRow?.device_count);
 
-  res.json({
+  const _result = {
     generated_at: new Date().toISOString(),
     rows,
     totals,
-  });
+  };
+  aggCacheSet(`shop-monitor|${tid}`, _result, AGG_TTL_MS);
+  res.json(_result);
 });
 
 r.get("/stock-orders", (req, res) => {
@@ -1739,6 +1761,9 @@ r.get("/report/by-store", (req, res) => {
   const db = getDb();
   const tid = req.user.tid;
   const includeTest = req.query.include_test === "1";
+  const _cacheKey = `report-by-store|${tid}|${includeTest ? 1 : 0}`;
+  const _cached = aggCacheGet(_cacheKey);
+  if (_cached) return sendJson(req, res, _cached);
   const excludeMallIds = includeTest ? [] : ["MALL-EXT-E2E", "MALL-DBG"];
   const excludePlaceholder = excludeMallIds.map(() => "?").join(",");
 
@@ -1909,12 +1934,14 @@ r.get("/report/by-store", (req, res) => {
     };
   });
 
-  sendJson(req, res, {
+  const _result = {
     generated_at: now,
     tenant_id: tid,
     store_count: stores.length,
     stores,
-  });
+  };
+  aggCacheSet(`report-by-store|${tid}|${includeTest ? 1 : 0}`, _result, AGG_TTL_MS);
+  sendJson(req, res, _result);
 });
 
 export default r;

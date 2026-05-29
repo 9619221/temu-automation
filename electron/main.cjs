@@ -2207,7 +2207,7 @@ const AUTO_IMAGE_DEFAULT_PORT = normalizeImageStudioPort(
 );
 const AUTO_IMAGE_HEALTH_PATH = "/api/history";
 const IMAGE_STUDIO_SAFE_ANALYZE_MODEL = "gpt-5.5";
-const IMAGE_STUDIO_SAFE_ANALYZE_BASE_URL = "https://api.vectorengine.cn/v1";
+const IMAGE_STUDIO_SAFE_ANALYZE_BASE_URL = "https://erp.temu.chat/api/ai/analyze";
 const IMAGE_STUDIO_LEGACY_DENIED_ANALYZE_MODELS = new Set([
   "gemini-3.1-flash-lite-preview",
 ]);
@@ -2215,9 +2215,9 @@ const IMAGE_STUDIO_DEFAULT_RUNTIME_CONFIG = Object.freeze({
   analyzeModel: IMAGE_STUDIO_SAFE_ANALYZE_MODEL,
   analyzeBaseUrl: IMAGE_STUDIO_SAFE_ANALYZE_BASE_URL,
   generateModel: "gpt-image-2",
-  generateBaseUrl: "https://grsaiapi.com",
+  generateBaseUrl: "https://erp.temu.chat/api/ai/generate",
   gptGenerateModel: "gpt-image-2",
-  gptGenerateBaseUrl: "https://grsaiapi.com",
+  gptGenerateBaseUrl: "https://erp.temu.chat/api/ai/generate",
   gptGenerateModelOverrides: JSON.stringify({
     features: "gpt-image-2",
     closeup: "gpt-image-2",
@@ -5166,30 +5166,27 @@ ipcMain.handle("competitor:vision-compare", async (_event, payload) => {
     return { mimeType: match[1], data: match[2] };
   };
 
-  const userParts = [
-    userTextPart,
-    ...usable.map((item) => {
-      const { mimeType, data } = parseDataUrl(item.dataUrl);
-      return { inline_data: { mime_type: mimeType, data } };
-    }),
+  // 走云端代理：OpenAI vision 格式（messages + image_url），代理转发到 vectorengine
+  const userContent = [
+    { type: "text", text: userTextPart.text },
+    ...usable.map((item) => ({ type: "image_url", image_url: { url: item.dataUrl } })),
   ];
 
-  const endpoint = `${baseOrigin}/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+  const endpoint = `${String(rawBaseUrl).replace(/\/+$/, "")}/chat/completions`;
   const aiResponse = await fetch(endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      // 代理兼容 sk- 风格 key，同时附带 Google 官方的 x-goog-api-key 以防纯 Gemini 直连
       "Authorization": `Bearer ${apiKey}`,
-      "x-goog-api-key": apiKey,
     },
     body: JSON.stringify({
-      systemInstruction: { parts: [{ text: systemPrompt }] },
-      contents: [{ role: "user", parts: userParts }],
-      generationConfig: {
-        temperature: 0.4,
-        responseMimeType: "application/json",
-      },
+      model,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userContent },
+      ],
+      temperature: 0.4,
+      response_format: { type: "json_object" },
     }),
   });
 
@@ -5221,11 +5218,8 @@ ipcMain.handle("competitor:vision-compare", async (_event, payload) => {
       `body 前 300 字：${rawBody.slice(0, 300)}`
     );
   }
-  // Gemini v1beta 响应：candidates[0].content.parts[*].text
-  const candidate = aiJson?.candidates?.[0];
-  const rawText = Array.isArray(candidate?.content?.parts)
-    ? candidate.content.parts.map((p) => p?.text || "").join("")
-    : "";
+  // OpenAI 兼容响应：choices[0].message.content
+  const rawText = aiJson?.choices?.[0]?.message?.content || "";
   let parsed = null;
   try {
     parsed = JSON.parse(rawText);

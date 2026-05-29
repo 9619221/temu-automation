@@ -9,6 +9,7 @@ import ingestRoute from "./routes/ingest.js";
 import hookRoute from "./routes/hook.js";
 import dashboardRoute from "./routes/dashboard.js";
 import notifyRoute from "./routes/notify.js";
+import aiRoute from "./routes/ai.js";
 
 dotenv.config();
 
@@ -40,6 +41,7 @@ app.use("/api/ingest", ingestRoute);
 app.use("/api/hook", hookRoute);
 app.use("/api/dashboard", dashboardRoute);
 app.use("/api/notify", notifyRoute);
+app.use("/api/ai", aiRoute);
 
 app.use((err, _req, res, _next) => {
   console.error("[err]", err);
@@ -47,6 +49,9 @@ app.use((err, _req, res, _next) => {
 });
 
 const PORT = Number(process.env.PORT || 8788);
-app.listen(PORT, () => {
-  console.log(`[cloud] listening on http://localhost:${PORT}`);
+// 默认只绑本机回环：公网只能经 Caddy TLS 反代进来，杜绝直连明文端口。
+// 局域网自托管模式可用 BIND_ADDRESS=0.0.0.0 覆盖。
+const HOST = process.env.BIND_ADDRESS || "127.0.0.1";
+app.listen(PORT, HOST, () => {
+  console.log(`[cloud] listening on http://${HOST}:${PORT}`);
 });

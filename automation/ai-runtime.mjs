@@ -51,14 +51,18 @@ function createOpenAICompatibleClient({ apiKey, baseURL, fallbackBaseURL, timeou
 }
 
 export function createAiRuntime(env = process.env) {
-  const DEFAULT_AI_BASE_URL = "https://api.vectorengine.ai/v1";
-  const AI_API_KEY = env.VECTORENGINE_API_KEY || "";
+  // 方案 B：AI 默认走云端代理（真实 Key 只在服务器），统一 OpenAI 兼容协议。
+  // 用户仍可用 VECTORENGINE_* env 覆盖为直连自有上游。
+  const DEFAULT_AI_BASE_URL = "https://erp.temu.chat/api/ai/analyze";
+  const DESKTOP_TOKEN = "0b8f5be546c34cd841ae485bb6a2305dacb9ff06422cbaa7";
+  const AI_API_KEY = env.VECTORENGINE_API_KEY || DESKTOP_TOKEN;
   const AI_PRO_API_KEY = env.VECTORENGINE_PRO_API_KEY || "";
   const AI_BASE_URL = normalizeChatBaseUrl(env.VECTORENGINE_BASE_URL, DEFAULT_AI_BASE_URL);
-  const AI_MODEL = env.VECTORENGINE_MODEL || "gemini-3.1-flash-lite-preview";
+  // 代理走 OpenAI 兼容端点，统一用 OpenAI 兼容模型（vectorengine 支持 gpt-5.5）
+  const AI_MODEL = env.VECTORENGINE_MODEL || "gpt-5.5";
   const COMPARE_MODEL_CHAIN = (env.VECTORENGINE_COMPARE_MODELS
     || env.VECTORENGINE_COMPARE_MODEL
-    || "gemini-3.1-pro-preview,gemini-3.1-flash-preview,gemini-3.1-flash-lite-preview")
+    || "gpt-5.5")
     .split(",").map((s) => s.trim()).filter(Boolean);
   const ATTRIBUTE_AI_API_KEY = env.VECTORENGINE_ATTRIBUTE_API_KEY || AI_API_KEY;
   const ATTRIBUTE_AI_BASE_URL = normalizeChatBaseUrl(env.VECTORENGINE_ATTRIBUTE_BASE_URL, AI_BASE_URL);
@@ -86,11 +90,8 @@ export function createAiRuntime(env = process.env) {
     return aiOpenAICompatibleClient;
   }
 
-  function getAiClientForModel(modelName) {
-    if (/^gemini/i.test(modelName || "") && /pro-preview/i.test(modelName || "")) {
-      return getAiGeminiProClient() || getAiGeminiClient();
-    }
-    if (/^gemini/i.test(modelName || "")) return getAiGeminiClient();
+  // 方案 B：统一走 OpenAI 兼容客户端（经云端代理），不再按模型名分流到 Gemini 原生协议
+  function getAiClientForModel(_modelName) {
     return getAiOpenAICompatibleClient();
   }
 
@@ -112,10 +113,8 @@ export function createAiRuntime(env = process.env) {
     return attributeOpenAICompatibleClient;
   }
 
+  // 方案 B：统一走 OpenAI 兼容客户端
   function getAttributeClientForModel(modelName) {
-    if (/^gemini/i.test(modelName || "")) {
-      return getAttributeGeminiClient();
-    }
     return getAttributeOpenAICompatibleClient() || getAiClientForModel(modelName);
   }
 

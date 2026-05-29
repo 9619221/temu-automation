@@ -1195,6 +1195,32 @@ function isRoleAllowed(pathname, role) {
   return allowedRoles.includes(role);
 }
 
+// 登录失败限流：同一 IP 连续失败 LOGIN_MAX_FAILS 次后锁定 LOGIN_LOCK_MS，防访问码爆破
+const LOGIN_FAILS = new Map();
+const LOGIN_MAX_FAILS = 8;
+const LOGIN_LOCK_MS = 10 * 60 * 1000;
+function loginClientIp(req) {
+  const xff = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  return xff || req.socket?.remoteAddress || "unknown";
+}
+function loginLockRemainingMs(req) {
+  const e = LOGIN_FAILS.get(loginClientIp(req));
+  if (!e || !e.lockedUntil) return 0;
+  const remain = e.lockedUntil - Date.now();
+  if (remain <= 0) { LOGIN_FAILS.delete(loginClientIp(req)); return 0; }
+  return remain;
+}
+function recordLoginFail(req) {
+  const ip = loginClientIp(req);
+  const e = LOGIN_FAILS.get(ip) || { fails: 0, lockedUntil: 0 };
+  e.fails += 1;
+  if (e.fails >= LOGIN_MAX_FAILS) e.lockedUntil = Date.now() + LOGIN_LOCK_MS;
+  LOGIN_FAILS.set(ip, e);
+}
+function clearLoginFail(req) {
+  LOGIN_FAILS.delete(loginClientIp(req));
+}
+
 function normalizeLocalNext(value) {
   const text = String(value || "/").trim();
   if (!text.startsWith("/") || text.startsWith("//")) return "/";
@@ -3447,6 +3473,13 @@ async function handle1688MessageRequest({ req, res, receive1688Message }) {
 async function handleLoginRequest({ req, res, verifyLogin }) {
   const wantsJson = String(req.headers.accept || "").includes("application/json")
     || String(req.headers["content-type"] || "").includes("application/json");
+  const lockMs = loginLockRemainingMs(req);
+  if (lockMs > 0) {
+    const secs = Math.ceil(lockMs / 1000);
+    if (wantsJson) { writeJson(res, 429, { ok: false, error: `登录尝试过于频繁，请 ${secs} 秒后再试` }); return; }
+    writeHtml(res, renderLoginPage({ error: `登录尝试过于频繁，请 ${secs} 秒后再试`, next: "/" }), 429);
+    return;
+  }
   let payload = {};
   try {
     payload = await readLoginPayload(req, 8 * 1024 * 1024);
@@ -3466,6 +3499,7 @@ async function handleLoginRequest({ req, res, verifyLogin }) {
   });
 
   if (!user) {
+    recordLoginFail(req);
     if (wantsJson) {
       writeJson(res, 401, { ok: false, error: "用户名或访问码错误" });
       return;
@@ -3474,6 +3508,7 @@ async function handleLoginRequest({ req, res, verifyLogin }) {
     return;
   }
 
+  clearLoginFail(req);
   const token = createSession(user);
   if (wantsJson) {
     writeJson(res, 200, { ok: true, user }, { "Set-Cookie": buildSessionCookie(token) });

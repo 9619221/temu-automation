@@ -1,0 +1,121 @@
+import { Router } from "express";
+import { authMiddleware } from "../middleware/auth.js";
+
+// ============================================================
+// AI 代理：客户端只带自己的登录态(JWT)，真正的 AI Key 只存在
+// 服务器环境变量里，永不下发到桌面端/扩展。
+//
+// 透传式设计：对任意上游路径与 body 原样转发，仅替换 Authorization
+// 头为服务端持有的真 Key。这样桌面端只需把 baseUrl 指到本代理、
+// 把 apiKey 换成用户 JWT，无需了解上游协议细节。
+//   /api/ai/analyze/*   -> AI_ANALYZE_BASE_URL   (vectorengine, 图像分析/文本)
+//   /api/ai/generate/*  -> AI_GENERATE_BASE_URL  (grsai, 生图)
+// ============================================================
+
+const r = Router();
+
+// 注意：在“请求时”读取 env，而不是模块顶层常量。
+// 因为 ESM import 会先于 server.js 的 dotenv.config() 执行，
+// 顶层读 process.env 会拿不到 .env 里的值。
+function getUpstream(kind) {
+  if (kind === "generate") {
+    return {
+      base: process.env.AI_GENERATE_BASE_URL || "https://grsaiapi.com",
+      key: process.env.AI_GENERATE_KEY || "",
+    };
+  }
+  return {
+    base: process.env.AI_ANALYZE_BASE_URL || "https://api.vectorengine.cn/v1",
+    key: process.env.AI_ANALYZE_KEY || "",
+  };
+}
+
+// 健康检查无需鉴权：只暴露“是否已配置 key”，不泄露 key 本身
+r.get("/health", (_req, res) => {
+  res.json({
+    ok: true,
+    analyze: Boolean(getUpstream("analyze").key),
+    generate: Boolean(getUpstream("generate").key),
+  });
+});
+
+// 鉴权：接受 cloud 用户 JWT；或桌面端共享 token(AI_DESKTOP_TOKEN)。
+// 桌面端 image-studio 子进程用后者，避免下发真实 AI Key。
+// 该 token 泄露可在服务端 .env 随时更换，且代理层可限流/记账。
+function authOrDesktopToken(req, res, next) {
+  const m = /^Bearer\s+(.+)$/.exec(req.headers.authorization || "");
+  const tok = m && m[1];
+  const desk = process.env.AI_DESKTOP_TOKEN || "";
+  if (tok && desk && tok === desk) {
+    req.user = { uid: "desktop", tid: "desktop", role: "desktop" };
+    return next();
+  }
+  return authMiddleware(req, res, next);
+}
+r.use(authOrDesktopToken);
+
+// 简易每用户限流：默认每分钟 60 次，防被盗用账号刷爆
+const RL = new Map();
+const RL_MAX = Number(process.env.AI_RATE_PER_MIN || 60);
+function rateLimited(uid) {
+  const now = Date.now();
+  const e = RL.get(uid);
+  if (!e || e.exp < now) {
+    RL.set(uid, { n: 1, exp: now + 60000 });
+    return false;
+  }
+  e.n += 1;
+  return e.n > RL_MAX;
+}
+
+async function proxy(kind, req, res) {
+  const up = getUpstream(kind);
+  if (!up.key) {
+    res.status(503).json({ error: `ai_${kind}_key_not_configured` });
+    return;
+  }
+  if (rateLimited(req.user.uid)) {
+    res.status(429).json({ error: "rate_limited" });
+    return;
+  }
+
+  const subPath = req.params[0] ? `/${req.params[0]}` : "";
+  const qsIndex = req.originalUrl.indexOf("?");
+  const qs = qsIndex >= 0 ? req.originalUrl.slice(qsIndex) : "";
+  const url = up.base.replace(/\/+$/, "") + subPath + qs;
+
+  const headers = {
+    "Content-Type": req.headers["content-type"] || "application/json",
+    Accept: req.headers["accept"] || "application/json",
+    Authorization: `Bearer ${up.key}`,
+  };
+
+  const hasBody = !["GET", "HEAD"].includes(req.method);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.AI_TIMEOUT_MS || 180000));
+  try {
+    const upstream = await fetch(url, {
+      method: req.method,
+      headers,
+      body: hasBody ? JSON.stringify(req.body ?? {}) : undefined,
+      signal: controller.signal,
+    });
+    const ct = upstream.headers.get("content-type") || "application/json";
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    console.log(`[ai] uid=${req.user.uid} tid=${req.user.tid} ${kind}${subPath} -> ${upstream.status} ${buf.length}B`);
+    res.status(upstream.status);
+    res.setHeader("Content-Type", ct);
+    res.send(buf);
+  } catch (e) {
+    const msg = String(e?.message || e);
+    console.warn(`[ai] uid=${req.user.uid} ${kind}${subPath} ERROR ${msg}`);
+    res.status(502).json({ error: "ai_upstream_error", detail: msg.slice(0, 300) });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+r.all("/analyze/*", (req, res) => proxy("analyze", req, res));
+r.all("/generate/*", (req, res) => proxy("generate", req, res));
+
+export default r;

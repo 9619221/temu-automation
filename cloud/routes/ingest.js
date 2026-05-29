@@ -6,6 +6,12 @@ import { dispatchParsers } from "../parsers.js";
 
 const r = Router();
 
+// ===== 防膨胀兜底配置 =====
+// 单条响应体落库上限（字节）：超过只存元数据，body 仍传给 parser 在内存中使用
+const MAX_STORE_BODY = 200_000;
+// 非业务路径（飞书多维表格等）整条不落库，也不进 parser
+const NON_BUSINESS_PATH_RE = /\/bitable\/|\/space\/api\//;
+
 function parseRequestBodyText(text) {
   if (!text || typeof text !== "string") return null;
   const trimmed = text.trim();
@@ -389,16 +395,21 @@ r.post("/v1/batch", authMiddleware, (req, res) => {
     const url_path = url.replace(/^https?:\/\/[^/]+/, "").split("?")[0] || url;
     const method = (it.method || "GET").toUpperCase();
     const storedBody = attachRequestBody(it.body || null, it.requestBodyText);
-    const body_json = storedBody ? JSON.stringify(storedBody).slice(0, 1_000_000) : null;
+    // 完整 body 仅供 parser 在内存中使用（生成 snapshot），不一定落库
+    const parser_json = storedBody ? JSON.stringify(storedBody).slice(0, 1_000_000) : null;
+    // 飞书等非业务路径整条不落库；Temu 大响应(>200KB)只存元数据、body_json 置空
+    const skipRow = NON_BUSINESS_PATH_RE.test(url_path);
+    const body_json = (!parser_json || parser_json.length > MAX_STORE_BODY) ? null : parser_json;
     return {
       id: crypto.randomUUID(),
-      url, url_path, method, body_json,
+      url, url_path, method, body_json, parser_json, skipRow,
       it,
     };
   });
 
   const tx = db.transaction(() => {
     for (const e of enriched) {
+      if (e.skipRow) continue;
       insertEvt.run(
         e.id,
         tenant_id,
@@ -428,11 +439,11 @@ r.post("/v1/batch", authMiddleware, (req, res) => {
 
   // parser 在主事务外跑，失败不影响 ingest 主流程
   try {
-    const parserItems = enriched.map((e) => ({
+    const parserItems = enriched.filter((e) => !e.skipRow).map((e) => ({
       id: e.id,
       url_path: e.url_path,
       page: e.it.page || null,
-      body_json: e.body_json,
+      body_json: e.parser_json,
       ts: Number(e.it.ts) || now,
       mall_id: e.it.mall_id || null,
       site: e.it.site || null,
