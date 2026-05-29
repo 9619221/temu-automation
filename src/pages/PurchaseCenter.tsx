@@ -328,6 +328,7 @@ interface PurchaseOrderRow {
   purchase1688AccountLabel?: string | null;
   supplierId?: string | null;
   supplierName?: string;
+  purchaseSource?: string | null;
   createdByName?: string;
   status: string;
   paymentStatus?: string;
@@ -1646,6 +1647,15 @@ async function openLogisticsWindow(billNo: string) {
     }
   }
   await openExternalUrl(`https://www.kuaidi100.com/chaxun?nu=${encodeURIComponent(billNo)}`);
+}
+
+// 判线下采购单：用 candidate 的 purchaseSource，而非 SKU 级 mappingCount。
+// 转线下后的单子可能 mappingCount>0（SKU 有 1688 映射），但本身已是线下单，
+// 不能再走 1688 推单，应走「提交付款 / 编辑」线下流程。
+function isOfflinePo(row: PurchaseOrderRow) {
+  if (row.externalOrderId) return false;
+  const source = String(row.purchaseSource || "").toLowerCase();
+  return source === "other_manual" || source === "existing_supplier";
 }
 
 function canSubmitPaymentApprovalAction(row: PurchaseOrderRow) {
@@ -3917,7 +3927,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   const runActionRef = useRef(runAction);
   runActionRef.current = runAction;
   const handlePurchaseLineEdit = useCallback(
-    async (poId: string, lineId: string, patch: { qty?: number; amount?: number; freight?: number }) => {
+    async (poId: string, lineId: string, patch: { qty?: number; amount?: number; freight?: number; unitPrice?: number }) => {
       const result = await runActionRef.current(`edit-line-${lineId}`, {
         action: "update_po_line",
         poId,
@@ -6199,7 +6209,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
                 <th>商品名称</th>
                 <th>规格</th>
                 <th className="col-numeric">数量</th>
-                <th className="col-numeric">金额</th>
+                <th className="col-numeric">单价</th>
                 <th className="col-numeric">运费</th>
                 <th className="col-numeric">实付金额</th>
               </tr>
@@ -6216,6 +6226,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
                 const cellEditable = linesEditable && Boolean(lineId) && !lineId.startsWith(`${row.id}-`);
                 const lineQty = toFiniteNumber(line.qty);
                 const lineAmount = roundCurrency(line.amount);
+                const lineUnitPrice = lineQty > 0 ? roundCurrency(lineAmount / lineQty) : 0;
                 const lineFreight = roundCurrency(line.logisticsFee);
                 return (
                   <tr key={line.id || `${codeText || line.skuId || "line"}-${line.qty || 0}`}>
@@ -6276,12 +6287,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
                     </td>
                     <td className="col-numeric">
                       <EditablePoDetailCell
-                        value={lineAmount}
-                        display={formatCurrency(line.amount)}
+                        value={lineUnitPrice}
+                        display={formatCurrency(lineUnitPrice)}
                         editable={cellEditable}
                         precision={2}
                         min={0}
-                        onSave={(next) => handlePurchaseLineEdit(row.id, lineId, { amount: next })}
+                        onSave={(next) => handlePurchaseLineEdit(row.id, lineId, { unitPrice: next })}
                       />
                     </td>
                     <td className="col-numeric">
@@ -6704,6 +6715,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         const mappingCount = Number(row.mappingCount || 0);
         const deliveryAddressCount = Number(row.deliveryAddressCount || 0);
         const canPushTo1688 = !row.externalOrderId
+          && !isOfflinePo(row)
           && canPurchase
           && mappingCount > 0
           && (deliveryAddressCount > 0 || hasUsable1688Address);
@@ -6757,7 +6769,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               </Button>
             </Popconfirm>
           ) : null}
-          {row.status === "draft" && Number(row.mappingCount || 0) === 0 && canPurchase ? (
+          {row.status === "draft" && isOfflinePo(row) && canPurchase ? (
             <Button
               size="small"
               icon={<EditOutlined />}
@@ -6789,7 +6801,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               线下采购
             </Button>
           ) : null}
-          {row.status === "draft" && canSubmitPaymentApproval && Number(row.mappingCount || 0) === 0 ? (
+          {row.status === "draft" && canSubmitPaymentApproval && isOfflinePo(row) ? (
             <Button
               size="small"
               type="primary"

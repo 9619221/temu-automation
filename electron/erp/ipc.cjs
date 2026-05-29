@@ -6698,6 +6698,7 @@ function getPurchaseWorkbench(params = {}) {
           acct.name AS account_name,
           COALESCE(auth1688.resource_owner, auth1688.label) AS purchase_1688_account_label,
           COALESCE(supplier.name, cand.supplier_name) AS supplier_name,
+          cand.purchase_source AS purchase_source,
           COALESCE(creator.name, po.jst_purchaser_name) AS created_by_name,
           pr.status AS pr_status,
           GROUP_CONCAT(DISTINCT sku.internal_sku_code || ' ' || sku.product_name) AS sku_summary,
@@ -11343,9 +11344,11 @@ function updateOfflinePurchaseOrderAction({ db, services, payload, actor }) {
   return { purchaseOrder: toPurchaseOrderResult(db, afterPo) };
 }
 
-// 明细行内编辑：未提交付款前(draft / pushed_pending_price)逐行逐格改数量/金额/运费，仅动本地账。
-// - 金额按"每行独立金额"语义：amount → unit_cost = amount/qty；单头 total_amount = Σ(qty×unit_cost)
-// - 1688 单的钱常只记在单头(明细 unit_cost=0)。只改数量时若明细金额合计为 0 而单头有钱，
+// 明细行内编辑：未提交付款前(draft / pushed_pending_price)逐行逐格改数量/单价/运费，仅动本地账。
+// - 单价按"每行单价"语义：unitPrice → unit_cost；单头 total_amount = Σ(qty×unit_cost)
+// - 改数量时保持单价(unit_cost)不变，本行金额 = 新数量 × 单价 自动联动
+// - amount 字段仍兼容(按总额回推 unit_cost = amount/qty)，前端已改用 unitPrice
+// - 1688 单的钱常只记在单头(明细 unit_cost=0)。改数量后若明细金额合计为 0 而单头有钱，
 //   不覆盖单头 total_amount，避免把单头金额清零（同理 freight_amount）。
 function updatePurchaseOrderLineAction({ db, services, payload, actor }) {
   assertActorRole(actor, ["buyer", "manager", "admin"], "编辑采购明细");
@@ -11368,20 +11371,22 @@ function updatePurchaseOrderLineAction({ db, services, payload, actor }) {
 
   const qtyEdited = payload.qty !== undefined && payload.qty !== null;
   const amountEdited = payload.amount !== undefined && payload.amount !== null;
+  const unitPriceEdited = payload.unitPrice !== undefined && payload.unitPrice !== null;
   const freightEdited = payload.freight !== undefined && payload.freight !== null;
-  if (!qtyEdited && !amountEdited && !freightEdited) {
+  if (!qtyEdited && !amountEdited && !unitPriceEdited && !freightEdited) {
     throw new Error("没有要修改的字段");
   }
 
   if (qtyEdited) {
     const v = optionalNumber(payload.qty);
     if (!Number.isInteger(v) || v <= 0) throw new Error("数量必须是正整数");
-    // 只改数量时保持本行金额不变（反推单价），避免 1688 单 unit_cost=0 被放大/清零
-    const currentAmount = Math.round(qty * unitCost * 100) / 100;
+    // 改数量时保持单价(unit_cost)不变，本行金额 = 新数量 × 单价 自动联动
     qty = v;
-    if (!amountEdited && currentAmount > 0) {
-      unitCost = currentAmount / qty;
-    }
+  }
+  if (unitPriceEdited) {
+    const v = optionalNumber(payload.unitPrice);
+    if (!Number.isFinite(v) || v < 0) throw new Error("单价必须大于等于 0");
+    unitCost = v;
   }
   if (amountEdited) {
     const v = optionalNumber(payload.amount);
@@ -11411,8 +11416,8 @@ function updatePurchaseOrderLineAction({ db, services, payload, actor }) {
     updatedLines.reduce((s, l) => s + Number(l.logistics_fee || 0), 0) * 100,
   ) / 100;
 
-  // 单头兜底：明细合计为 0 而原单头有钱、且本次没显式改对应金额，则保留单头，避免清零
-  const totalToSet = (goodsAmount > 0 || amountEdited)
+  // 单头兜底：明细合计为 0 而原单头有钱、且本次没显式改对应金额/单价，则保留单头，避免清零
+  const totalToSet = (goodsAmount > 0 || amountEdited || unitPriceEdited)
     ? goodsAmount
     : Number(po.total_amount || 0);
   const freightToSet = (freightTotal > 0 || freightEdited)
