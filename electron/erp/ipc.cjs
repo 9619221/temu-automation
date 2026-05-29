@@ -20906,6 +20906,36 @@ function registerErpIpcHandlers(ipcMain) {
       return { ok: false, error: error?.message || String(error) };
     }
   });
+  ipcMain.handle("erp:sync-temu-images-from-cloud", async (_event, payload) => {
+    try {
+      let result;
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        const response = await remoteRequest("/api/temu/images-cloud-sync", {
+          method: "POST",
+          body: payload || {},
+        });
+        result = response.result;
+      } else {
+        requireErp();
+        const { TemuCloudImageSync } = require("./services/temuCloudImageSync.cjs");
+        const { attachTemuCloudDbIfPossible } = require("./lanServer.cjs");
+        const sync = new TemuCloudImageSync({
+          db: erpState.db,
+          attachCloudDb: attachTemuCloudDbIfPossible,
+        });
+        result = sync.sync(payload || {});
+      }
+      // 回填改了服务端 erp_skus.image_url + updated_at，增量同步把变更行拉回本地 sku_cache，
+      // 商品资料页随之有图。仅在确有回填时触发，避免无谓同步。
+      if (result && Number(result.updated) > 0) {
+        void skuCache.triggerSync({ mode: "incremental" }).catch(() => {});
+      }
+      return { ok: true, result };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
   ipcMain.handle("erp:get-enums", () => enums);
   ipcMain.handle("erp:auth:get-status", () => getAuthStatus());
   ipcMain.handle("erp:auth:get-current-user", async () => {

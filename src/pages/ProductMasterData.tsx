@@ -1089,6 +1089,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
   const [supplierFilters, setSupplierFilters] = useState<SupplierFilters>({ keyword: "" });
   const mountedRef = useRef(true);
   const loadSeqRef = useRef(0);
+  const imageBackfillTriggeredRef = useRef(false);
   const accountOptions = useMemo(
     () => accounts
       .map((account) => ({ label: account.name || account.id, value: account.id }))
@@ -1597,6 +1598,48 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       cancelled = true;
     };
   }, [cachedData, loadAll, mode]);
+
+  // 自动回填 Temu SKU 图：进商品页时按「货号(sku_ext_code)==商品编码(internal_sku_code)」
+  // 让服务端把 cloud 缩略图写进 erp_skus.image_url（仅补空缺，不覆盖已有图）。
+  // 每次挂载只触发一次 + 6 小时本地节流，避免反复全表扫描；确有回填才静默刷新列表。
+  useEffect(() => {
+    if (mode !== "skus") return;
+    if (imageBackfillTriggeredRef.current) return;
+    const backfill = erp?.syncTemuImagesFromCloud;
+    if (typeof backfill !== "function") return;
+    imageBackfillTriggeredRef.current = true;
+
+    const THROTTLE_MS = 6 * 60 * 60 * 1000;
+    const STORAGE_KEY = "temu.sku-image-backfill.last";
+    try {
+      const last = Number(window.localStorage.getItem(STORAGE_KEY) || 0);
+      if (Number.isFinite(last) && Date.now() - last < THROTTLE_MS) return;
+    } catch {
+      /* localStorage 不可用时照常尝试 */
+    }
+
+    void (async () => {
+      try {
+        const response = await backfill({});
+        // 仅在服务端成功响应后才记节流时间戳：失败（如路由未部署）下次进页正常重试。
+        if (response?.ok) {
+          try {
+            window.localStorage.setItem(STORAGE_KEY, String(Date.now()));
+          } catch {
+            /* ignore */
+          }
+        }
+        if (!mountedRef.current) return;
+        const updated = Number(response?.result?.updated || 0);
+        if (response?.ok && updated > 0) {
+          message.success(`已补全 ${updated} 个 SKU 的商品图`);
+          void loadAll({ silent: true });
+        }
+      } catch (error: any) {
+        console.warn("[ProductMasterData] SKU 图回填失败:", error?.message || error);
+      }
+    })();
+  }, [mode, loadAll]);
 
   const openCreateAccountModal = () => {
     accountForm.resetFields();

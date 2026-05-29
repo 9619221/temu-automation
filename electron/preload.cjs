@@ -224,6 +224,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     syncTemuSales: (payload) => ipcRenderer.invoke("erp:sync-temu-sales", payload || {}),
     syncTemuAdditionalFromCloud: (payload) => ipcRenderer.invoke("erp:sync-temu-additional-from-cloud", payload || {}),
     syncTemuReviewsFromCloud: (payload) => ipcRenderer.invoke("erp:sync-temu-reviews-from-cloud", payload || {}),
+    syncTemuImagesFromCloud: (payload) => ipcRenderer.invoke("erp:sync-temu-images-from-cloud", payload || {}),
     getEnums: () => ipcRenderer.invoke("erp:get-enums"),
     client: {
       getStatus: () => ipcRenderer.invoke("erp:client:get-status"),

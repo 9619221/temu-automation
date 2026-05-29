@@ -54,6 +54,7 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/temu/sales-sync": ["admin", "manager", "operations"],
   "/api/temu/jit-vmi-cloud-sync": ["admin", "manager", "operations"],
   "/api/temu/reviews-cloud-sync": ["admin", "manager", "operations"],
+  "/api/temu/images-cloud-sync": ["admin", "manager", "operations"],
   "/api/erp/reports/multi-store": ["admin", "manager", "operations", "finance"],
   "/api/erp/reports/mall-dict": ["admin", "manager", "operations", "finance", "buyer", "warehouse"],
   "/warehouse": ["admin", "manager", "warehouse"],
@@ -3936,6 +3937,29 @@ async function handleTemuJitVmiCloudSyncRequest({ req, res, db }) {
   }
 }
 
+async function handleTemuImagesCloudSyncRequest({ req, res, db }) {
+  if (req.method !== "POST") {
+    writeJson(res, 405, { ok: false, error: "Method not allowed" });
+    return;
+  }
+  try {
+    const payload = await readLoginPayload(req, 64 * 1024);
+    const { TemuCloudImageSync } = require("./services/temuCloudImageSync.cjs");
+    const sync = new TemuCloudImageSync({
+      db,
+      attachCloudDb: attachTemuCloudDbIfPossible,
+    });
+    const result = sync.sync(payload || {});
+    writeJson(res, 200, { ok: true, result });
+  } catch (error) {
+    writeJson(res, error?.statusCode || 400, {
+      ok: false,
+      error: error?.message || String(error),
+      code: error?.code || null,
+    });
+  }
+}
+
 async function handleMultiStoreReportRequest({ req, res, db }) {
   if (req.method !== "GET") {
     writeJson(res, 405, { ok: false, error: "Method not allowed" });
@@ -4821,6 +4845,15 @@ async function handleRequest({
 
     if (pathname === "/api/temu/reviews-cloud-sync") {
       await handleTemuReviewsCloudSyncRequest({
+        req,
+        res,
+        db,
+      });
+      return;
+    }
+
+    if (pathname === "/api/temu/images-cloud-sync") {
+      await handleTemuImagesCloudSyncRequest({
         req,
         res,
         db,
