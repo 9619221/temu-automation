@@ -325,6 +325,7 @@ interface PurchaseOrderRow {
   poNo?: string;
   accountId?: string | null;
   accountName?: string;
+  purchase1688AccountLabel?: string | null;
   supplierId?: string | null;
   supplierName?: string;
   createdByName?: string;
@@ -370,6 +371,7 @@ interface PurchaseOrderLineDetail {
   skuCodes?: string[];
   productName?: string | null;
   specText?: string | null;
+  imageUrl?: string | null;
   qty?: number | null;
   receivedQty?: number | null;
   unitCost?: number | null;
@@ -794,6 +796,75 @@ function formatCurrency(value?: number | string | null) {
 function formatOptionalCurrency(value?: number | string | null) {
   if (value === null || value === undefined || value === "") return "-";
   return formatCurrency(value);
+}
+
+// 明细可编辑单元格：点击数字 → 变成 InputNumber，失焦/回车立即保存。
+function EditablePoDetailCell({
+  value,
+  display,
+  editable,
+  precision,
+  min,
+  onSave,
+}: {
+  value: number;
+  display: string;
+  editable: boolean;
+  precision: number;
+  min: number;
+  onSave: (next: number) => Promise<boolean>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<number | null>(value);
+  const [saving, setSaving] = useState(false);
+  const committingRef = useRef(false);
+
+  if (!editable) {
+    return <>{display}</>;
+  }
+
+  if (!editing) {
+    return (
+      <span
+        title="点击编辑"
+        onClick={() => {
+          committingRef.current = false;
+          setDraft(value);
+          setEditing(true);
+        }}
+        style={{ cursor: "pointer", borderBottom: "1px dashed #91caff" }}
+      >
+        {display}
+      </span>
+    );
+  }
+
+  const commit = async () => {
+    if (committingRef.current) return;
+    committingRef.current = true;
+    setEditing(false);
+    const next = draft;
+    if (next === null || !Number.isFinite(next) || next < min) return;
+    if (Math.abs(next - value) < 1e-9) return;
+    setSaving(true);
+    await onSave(next);
+    setSaving(false);
+  };
+
+  return (
+    <InputNumber
+      size="small"
+      autoFocus
+      min={min}
+      precision={precision}
+      value={draft}
+      disabled={saving}
+      onChange={(v) => setDraft(typeof v === "number" ? v : null)}
+      onBlur={() => void commit()}
+      onPressEnter={() => void commit()}
+      style={{ width: precision === 0 ? 72 : 104 }}
+    />
+  );
 }
 
 function renderSkuSelectOption(option: any, onPreview?: (preview: { src: string; alt: string }) => void) {
@@ -1564,6 +1635,19 @@ async function openExternalUrl(url: string) {
   window.open(url, "_blank", "noopener,noreferrer");
 }
 
+async function openLogisticsWindow(billNo: string) {
+  const opener = (window as any)?.electronAPI?.app?.openLogisticsWindow;
+  if (typeof opener === "function") {
+    try {
+      await opener(billNo);
+      return;
+    } catch {
+      // 应用内小窗口失败时兜底走系统浏览器
+    }
+  }
+  await openExternalUrl(`https://www.kuaidi100.com/chaxun?nu=${encodeURIComponent(billNo)}`);
+}
+
 function canSubmitPaymentApprovalAction(row: PurchaseOrderRow) {
   const localStatus = String(row.status || "").toLowerCase();
   const paymentStatus = String(row.paymentStatus || "").toLowerCase();
@@ -1748,6 +1832,7 @@ const PURCHASE_ORDER_CONFIGURABLE_COLUMN_KEYS = [
   "paidAt",
   "createdByName",
   "accountName",
+  "purchase1688AccountLabel",
   "supplierName",
   "skuImage",
   "skuCodes",
@@ -1767,12 +1852,13 @@ const PURCHASE_ORDER_CONFIGURABLE_COLUMN_KEY_SET = new Set(PURCHASE_ORDER_CONFIG
 const PURCHASE_ORDER_COLUMN_LABELS: Record<string, string> = {
   createdAt: "采购日期",
   po: "采购单号",
-  status: "状态",
-  paymentStatus: "付款",
-  riskTags: "ERP校验",
+  status: "采购状态",
+  paymentStatus: "付款状态",
+  riskTags: "待处理",
   paidAt: "付款时间",
   createdByName: "采购员",
   accountName: "店铺",
+  purchase1688AccountLabel: "1688账号",
   supplierName: "供应商",
   skuImage: "商品图片",
   skuCodes: "商品编码",
@@ -1860,11 +1946,22 @@ function defaultPurchaseOrderColumnConfig(): PurchaseOrderColumnConfig {
 
 function normalizePurchaseOrderColumnConfig(value: unknown): PurchaseOrderColumnConfig {
   const raw = value && typeof value === "object" ? value as { order?: unknown; visible?: unknown } : null;
-  const order = normalizePurchaseOrderColumnOrder(raw?.order || value);
+  const savedOrderRaw = raw?.order ?? value;
+  const order = normalizePurchaseOrderColumnOrder(savedOrderRaw);
+  // 旧保存配置里出现过的列（用户已对其可见性做过选择）
+  const knownKeys = new Set(
+    (Array.isArray(savedOrderRaw) ? savedOrderRaw : [])
+      .map((item) => String(item || ""))
+      .filter((key) => PURCHASE_ORDER_CONFIGURABLE_COLUMN_KEY_SET.has(key)),
+  );
   const visibleSource = Array.isArray(raw?.visible) ? raw.visible : order;
-  const visible = Array.from(new Set(visibleSource.map((item) => String(item || "")).filter((key) => (
-    PURCHASE_ORDER_CONFIGURABLE_COLUMN_KEY_SET.has(key)
-  ))));
+  const visible = Array.from(new Set([
+    ...visibleSource.map((item) => String(item || "")).filter((key) => (
+      PURCHASE_ORDER_CONFIGURABLE_COLUMN_KEY_SET.has(key)
+    )),
+    // 新增列（旧配置从未见过）默认可见，不被旧的可见清单埋没
+    ...PURCHASE_ORDER_CONFIGURABLE_COLUMN_KEYS.filter((key) => !knownKeys.has(key)),
+  ]));
   return {
     order,
     visible: visible.length ? visible : ["po"],
@@ -2186,6 +2283,30 @@ function allocatePurchaseOrderDetailLineFreight(
   });
 }
 
+// 已推 1688 的单，钱常只记在单头(明细 unit_cost=0)，导致明细「金额」列全是 ¥0.00。
+// 当各行金额合计为 0 而单头有商品金额时，按数量把单头金额摊到各行展示（跟运费摊销对称）。
+function allocatePurchaseOrderDetailLineAmount(
+  row: PurchaseOrderRow,
+  lines: PurchaseOrderLineDetail[],
+) {
+  if (!lines.length) return lines;
+  const lineAmountTotal = roundCurrency(lines.reduce((sum, line) => sum + roundCurrency(line.amount), 0));
+  if (lineAmountTotal > 0) return lines;
+  const headAmount = optionalFiniteNumber(row.totalAmount);
+  if (headAmount === null || headAmount <= 0) return lines;
+
+  const weights = lines.map((line) => toFiniteNumber(line.qty) || 1);
+  const allocatedAmount = allocateCurrencyByWeight(headAmount, weights);
+  return lines.map((line, index) => {
+    const amount = allocatedAmount[index] ?? 0;
+    return {
+      ...line,
+      amount,
+      paidAmount: roundCurrency(amount + roundCurrency(line.logisticsFee)),
+    };
+  });
+}
+
 function purchaseOrderDetailTotals(lines: PurchaseOrderLineDetail[]) {
   return lines.reduce<{ qty: number; amount: number; logisticsFee: number; paidAmount: number }>(
     (totals, line) => ({
@@ -2203,9 +2324,11 @@ function purchaseOrderDetailLines(row: PurchaseOrderRow): PurchaseOrderLineDetai
     ? row.lineItems.filter((line) => line && typeof line === "object")
     : [];
   if (explicitLines.length) {
+    const normalized = explicitLines.map((line, index) => normalizePurchaseOrderDetailLine(row, line, index));
+    // 先把单头商品金额摊到各行（明细金额为 0 的 1688 单），再摊运费，保证「金额/运费」列都对得上
     return allocatePurchaseOrderDetailLineFreight(
       row,
-      explicitLines.map((line, index) => normalizePurchaseOrderDetailLine(row, line, index)),
+      allocatePurchaseOrderDetailLineAmount(row, normalized),
     );
   }
 
@@ -3789,6 +3912,22 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     }
     return result;
   };
+
+  // runAction 每次渲染重建，用 ref 持有最新引用，让行内编辑保存 handler 保持稳定身份。
+  const runActionRef = useRef(runAction);
+  runActionRef.current = runAction;
+  const handlePurchaseLineEdit = useCallback(
+    async (poId: string, lineId: string, patch: { qty?: number; amount?: number; freight?: number }) => {
+      const result = await runActionRef.current(`edit-line-${lineId}`, {
+        action: "update_po_line",
+        poId,
+        lineId,
+        ...patch,
+      }, "明细已更新");
+      return Boolean(result);
+    },
+    [],
+  );
 
   const canRollbackPurchaseOrder = (row: PurchaseOrderRow) => {
     const target = getPurchaseOrderRollbackTarget(row);
@@ -6008,6 +6147,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     const grossAmount = toFiniteNumber(row.totalAmount) + toFiniteNumber(row.freightAmount);
     const detailLines = purchaseOrderDetailLines(row);
     const detailTotals = purchaseOrderDetailTotals(detailLines);
+    // 提交付款前(草稿 / 已推 1688 待付款)允许行内改数量/金额/运费，仅动本地账
+    const linesEditable = canPurchase && (row.status === "draft" || row.status === "pushed_pending_price");
     const stages = [
       { key: "created", label: "建单", done: true, meta: formatDateTime(row.createdAt || row.updatedAt) },
       {
@@ -6054,6 +6195,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
             <thead>
               <tr>
                 <th>商品编码</th>
+                <th>图片</th>
                 <th>商品名称</th>
                 <th>规格</th>
                 <th className="col-numeric">数量</th>
@@ -6068,6 +6210,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
                 const codeText = codes.join("\n");
                 const productName = line.productName || "-";
                 const specText = line.specText || "-";
+                const imageUrl = line.imageUrl || "";
+                // 合计行 / 兜底行用的是合成 id（以 poId 前缀），不是真实明细行，不可编辑
+                const lineId = typeof line.id === "string" ? line.id : "";
+                const cellEditable = linesEditable && Boolean(lineId) && !lineId.startsWith(`${row.id}-`);
+                const lineQty = toFiniteNumber(line.qty);
+                const lineAmount = roundCurrency(line.amount);
+                const lineFreight = roundCurrency(line.logisticsFee);
                 return (
                   <tr key={line.id || `${codeText || line.skuId || "line"}-${line.qty || 0}`}>
                     <td>
@@ -6084,6 +6233,28 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
                       </Text>
                     </td>
                     <td>
+                      {imageUrl ? (
+                        <div
+                          style={{
+                            width: 40,
+                            height: 40,
+                            borderRadius: 6,
+                            overflow: "hidden",
+                            background: "#f8fbff",
+                            border: "1px solid #e5e7eb",
+                          }}
+                        >
+                          <img
+                            src={imageUrl}
+                            alt=""
+                            style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                          />
+                        </div>
+                      ) : (
+                        <Text type="secondary">-</Text>
+                      )}
+                    </td>
+                    <td>
                       <div className="purchase-order-detail__items-name" title={productName}>
                         {productName}
                       </div>
@@ -6093,9 +6264,36 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
                         {specText}
                       </div>
                     </td>
-                    <td className="col-numeric">{formatQty(line.qty)}</td>
-                    <td className="col-numeric">{formatCurrency(line.amount)}</td>
-                    <td className="col-numeric">{formatOptionalCurrency(line.logisticsFee)}</td>
+                    <td className="col-numeric">
+                      <EditablePoDetailCell
+                        value={lineQty}
+                        display={formatQty(line.qty)}
+                        editable={cellEditable}
+                        precision={0}
+                        min={1}
+                        onSave={(next) => handlePurchaseLineEdit(row.id, lineId, { qty: next })}
+                      />
+                    </td>
+                    <td className="col-numeric">
+                      <EditablePoDetailCell
+                        value={lineAmount}
+                        display={formatCurrency(line.amount)}
+                        editable={cellEditable}
+                        precision={2}
+                        min={0}
+                        onSave={(next) => handlePurchaseLineEdit(row.id, lineId, { amount: next })}
+                      />
+                    </td>
+                    <td className="col-numeric">
+                      <EditablePoDetailCell
+                        value={lineFreight}
+                        display={formatOptionalCurrency(line.logisticsFee)}
+                        editable={cellEditable}
+                        precision={2}
+                        min={0}
+                        onSave={(next) => handlePurchaseLineEdit(row.id, lineId, { freight: next })}
+                      />
+                    </td>
                     <td className="col-numeric">{formatCurrency(line.paidAmount)}</td>
                   </tr>
                 );
@@ -6103,7 +6301,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
             </tbody>
             <tfoot>
               <tr>
-                <td colSpan={3}>合计</td>
+                <td colSpan={4}>合计</td>
                 <td className="col-numeric">{formatQty(detailTotals.qty)}</td>
                 <td className="col-numeric">{formatCurrency(detailTotals.amount)}</td>
                 <td className="col-numeric">{formatOptionalCurrency(detailTotals.logisticsFee)}</td>
@@ -6148,7 +6346,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         </div>
       </div>
     );
-  }, [hasUsable1688Address]);
+  }, [hasUsable1688Address, canPurchase, handlePurchaseLineEdit]);
 
   const purchaseOrderExpandable = useMemo(() => ({
     expandedRowKeys: expandedPoIds,
@@ -6207,19 +6405,19 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       ),
     },
     {
-      title: "状态",
+      title: "采购状态",
       dataIndex: "status",
       width: 110,
       render: (value) => statusTag(value, PO_STATUS_LABELS),
     },
     {
-      title: "付款",
+      title: "付款状态",
       dataIndex: "paymentStatus",
       width: 120,
       render: (value) => statusTag(value, PAYMENT_STATUS_LABELS),
     },
     {
-      title: "ERP校验",
+      title: "待处理",
       key: "riskTags",
       width: 150,
       render: (_value, row) => {
@@ -6251,6 +6449,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       title: "店铺",
       dataIndex: "accountName",
       width: 130,
+      ellipsis: true,
+      render: (value) => value || "-",
+    },
+    {
+      title: "1688账号",
+      dataIndex: "purchase1688AccountLabel",
+      width: 110,
       ellipsis: true,
       render: (value) => value || "-",
     },
@@ -6432,13 +6637,24 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
           }
           return "";
         };
-        const company = findDeep(obj, ["logisticsCompanyName", "companyName", "logisticsName"]);
-        const billNo = findDeep(obj, ["logisticsBillNo", "mailNo", "trackingNo", "billNo"]);
+        const company = findDeep(obj, ["logisticsCompanyName", "companyName", "logisticsName", "logistics_company"]);
+        const billNo = findDeep(obj, ["logisticsBillNo", "mailNo", "trackingNo", "billNo", "l_id", "lId"]);
         if (!company && !billNo) return <Text type="secondary">无物流</Text>;
         return (
           <Space direction="vertical" size={2}>
             <Text style={{ fontSize: 12 }}>{company || "未知物流公司"}</Text>
-            {billNo ? <Text copyable code style={{ fontSize: 12 }}>{billNo}</Text> : <Text type="secondary" style={{ fontSize: 12 }}>无运单号</Text>}
+            {billNo ? (
+              <Typography.Link
+                copyable={{ text: billNo }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void openLogisticsWindow(billNo);
+                }}
+                style={{ fontSize: 14, fontWeight: 500 }}
+              >
+                {billNo}
+              </Typography.Link>
+            ) : <Text type="secondary" style={{ fontSize: 12 }}>无运单号</Text>}
           </Space>
         );
       },

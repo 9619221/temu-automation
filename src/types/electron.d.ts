@@ -234,6 +234,7 @@ interface AppAPI {
   openExtensionDirectory?: () => Promise<string>;
   openChromeExtensions?: () => Promise<string>;
   openExternal: (url: string) => Promise<string>;
+  openLogisticsWindow?: (billNo: string) => Promise<string>;
   readWorkflowPackLogs?: (params?: { limit?: number }) => Promise<{
     logFile?: string;
     diagnosticLogFile?: string;

@@ -435,6 +435,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     openExtensionDirectory: () => ipcRenderer.invoke("app:open-extension-directory"),
     openChromeExtensions: () => ipcRenderer.invoke("app:open-chrome-extensions"),
     openExternal: (url) => ipcRenderer.invoke("app:open-external", url),
+    openLogisticsWindow: (billNo) => ipcRenderer.invoke("app:open-logistics-window", billNo),
     readWorkflowPackLogs: (params) => ipcRenderer.invoke("app:read-workflow-pack-logs", params || {}),
     clearWorkflowPackLogs: () => ipcRenderer.invoke("app:clear-workflow-pack-logs"),
   },

@@ -6223,6 +6223,30 @@ ipcMain.handle("app:open-external", async (_event, rawUrl) => {
   return url.toString();
 });
 
+let logisticsWindow = null;
+ipcMain.handle("app:open-logistics-window", async (_event, billNo) => {
+  const no = String(billNo || "").trim();
+  if (!no) throw new Error("运单号为空");
+  const url = `https://www.kuaidi100.com/chaxun?nu=${encodeURIComponent(no)}`;
+  if (logisticsWindow && !logisticsWindow.isDestroyed()) {
+    logisticsWindow.setTitle(`物流查询 ${no}`);
+    await logisticsWindow.loadURL(url);
+    logisticsWindow.focus();
+    return url;
+  }
+  logisticsWindow = new BrowserWindow({
+    width: 1180, height: 720,
+    title: `物流查询 ${no}`,
+    autoHideMenuBar: true,
+    parent: mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined,
+    webPreferences: { contextIsolation: true, nodeIntegration: false },
+  });
+  logisticsWindow.setMenuBarVisibility(false);
+  logisticsWindow.on("closed", () => { logisticsWindow = null; });
+  await logisticsWindow.loadURL(url);
+  return url;
+});
+
 // ============ 文件存储 IPC ============
 
 function parseWorkflowPackLogLine(line, index) {

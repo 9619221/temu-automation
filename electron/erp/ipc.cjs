@@ -153,6 +153,7 @@ const BROADCAST_PURCHASE_ACTIONS = new Set([
   "confirm_paid",
   "rollback_po_status",
   "update_offline_po",
+  "update_po_line",
   "convert_po_to_offline",
 ]);
 
@@ -6695,6 +6696,7 @@ function getPurchaseWorkbench(params = {}) {
         SELECT
           po.*,
           acct.name AS account_name,
+          COALESCE(auth1688.resource_owner, auth1688.label) AS purchase_1688_account_label,
           COALESCE(supplier.name, cand.supplier_name) AS supplier_name,
           COALESCE(creator.name, po.jst_purchaser_name) AS created_by_name,
           pr.status AS pr_status,
@@ -6706,6 +6708,7 @@ function getPurchaseWorkbench(params = {}) {
           COALESCE(SUM(line.received_qty), 0) AS received_qty
         FROM erp_purchase_orders po
         LEFT JOIN erp_accounts acct ON acct.id = po.account_id
+        LEFT JOIN erp_1688_auth_settings auth1688 ON auth1688.id = acct.default_1688_purchase_account_id
         LEFT JOIN erp_suppliers supplier ON supplier.id = po.supplier_id
         LEFT JOIN erp_sourcing_candidates cand ON cand.id = po.selected_candidate_id
         LEFT JOIN erp_users creator ON creator.id = po.created_by
@@ -6730,7 +6733,8 @@ function getPurchaseWorkbench(params = {}) {
           COALESCE(detail_line.received_qty, 0) AS received_qty,
           COALESCE(detail_line.unit_cost, 0) AS unit_cost,
           COALESCE(detail_line.logistics_fee, 0) AS logistics_fee,
-          detail_sku.image_url AS sku_image_url
+          detail_sku.image_url AS sku_image_url,
+          detail_line.jst_payload_json
         FROM erp_purchase_order_lines detail_line
         LEFT JOIN erp_skus detail_sku ON detail_sku.id = detail_line.sku_id
         WHERE detail_line.po_id IN (${placeholders})
@@ -6817,12 +6821,24 @@ function getPurchaseWorkbench(params = {}) {
       }
 
       // Step 3: 按 orderedPoIds 顺序组装最终 rows，保持跟旧 SQL 输出字段完全一致
+      // 店铺绑定账号兜底用 resource_owner（登录名），个别登录名非全名的人工映射到跟聚水潭统一的全名
+      // mdmy2006=明舵；优雅哥登录名本身就是聚水潭那个值（top丶幽雅哥），无需映射
+      const STORE_1688_ACCOUNT_FULLNAME = {
+        "mdmy2006": "义乌明舵国际贸易有限公司",
+      };
       const purchaseOrdersRaw = orderedPoIds.map((id) => {
         const main = mainByPoId.get(id);
         if (!main) return null;
         const lines = linesByPoId.get(id) || [];
         const firstLine = lines[0];
         const firstWithImage = lines.find((ln) => ln.sku_image_url && ln.sku_image_url !== "");
+        let jstPurchase1688Account = null;
+        for (const ln of lines) {
+          try {
+            const v = JSON.parse(ln.jst_payload_json || "{}")["1688采购账号"];
+            if (v && String(v).trim()) { jstPurchase1688Account = String(v).trim(); break; }
+          } catch {}
+        }
         const refund = refundByPoId.get(id);
         // 组装 line_items_json，字段与旧 SQL json_group_array 完全一致
         const lineItemsJson = JSON.stringify(lines.map((ln) => ({
@@ -6835,11 +6851,16 @@ function getPurchaseWorkbench(params = {}) {
           receivedQty: ln.received_qty,
           unitCost: ln.unit_cost,
           logisticsFee: ln.logistics_fee,
+          imageUrl: ln.sku_image_url || null,
           amount: Math.round(ln.qty * ln.unit_cost * 100) / 100,
           paidAmount: Math.round((ln.qty * ln.unit_cost + ln.logistics_fee) * 100) / 100,
         })));
         return {
           ...main,
+          purchase_1688_account_label: jstPurchase1688Account
+            || (main.purchase_1688_account_label
+              ? (STORE_1688_ACCOUNT_FULLNAME[main.purchase_1688_account_label] || main.purchase_1688_account_label)
+              : null),
           line_items_json: lineItemsJson,
           sku_image_url: firstWithImage?.sku_image_url || null,
           mapping_count: mappingByPoId.get(id) || 0,
@@ -11319,6 +11340,111 @@ function updateOfflinePurchaseOrderAction({ db, services, payload, actor }) {
     after: afterPo,
   });
   writePurchaseOrderFlowEvent(db, afterPo, actor, "update_offline_po", `线下采购单已更新：${afterPo.po_no || afterPo.id}`);
+  return { purchaseOrder: toPurchaseOrderResult(db, afterPo) };
+}
+
+// 明细行内编辑：未提交付款前(draft / pushed_pending_price)逐行逐格改数量/金额/运费，仅动本地账。
+// - 金额按"每行独立金额"语义：amount → unit_cost = amount/qty；单头 total_amount = Σ(qty×unit_cost)
+// - 1688 单的钱常只记在单头(明细 unit_cost=0)。只改数量时若明细金额合计为 0 而单头有钱，
+//   不覆盖单头 total_amount，避免把单头金额清零（同理 freight_amount）。
+function updatePurchaseOrderLineAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "编辑采购明细");
+  const poId = requireString(payload.poId || payload.id, "poId");
+  const lineId = requireString(payload.lineId, "lineId");
+  const po = getPurchaseOrder(db, poId);
+  if (po.status !== "draft" && po.status !== "pushed_pending_price") {
+    throw new Error("只能在提交付款前修改明细");
+  }
+  const before = getPurchaseOrder(db, poId);
+  const lines = db.prepare(
+    "SELECT * FROM erp_purchase_order_lines WHERE po_id = ? ORDER BY id ASC",
+  ).all(poId);
+  const line = lines.find((l) => String(l.id) === String(lineId));
+  if (!line) throw new Error("明细行不存在");
+
+  let qty = Number(line.qty || 0);
+  let unitCost = Number(line.unit_cost || 0);
+  let logisticsFee = Number(line.logistics_fee || 0);
+
+  const qtyEdited = payload.qty !== undefined && payload.qty !== null;
+  const amountEdited = payload.amount !== undefined && payload.amount !== null;
+  const freightEdited = payload.freight !== undefined && payload.freight !== null;
+  if (!qtyEdited && !amountEdited && !freightEdited) {
+    throw new Error("没有要修改的字段");
+  }
+
+  if (qtyEdited) {
+    const v = optionalNumber(payload.qty);
+    if (!Number.isInteger(v) || v <= 0) throw new Error("数量必须是正整数");
+    // 只改数量时保持本行金额不变（反推单价），避免 1688 单 unit_cost=0 被放大/清零
+    const currentAmount = Math.round(qty * unitCost * 100) / 100;
+    qty = v;
+    if (!amountEdited && currentAmount > 0) {
+      unitCost = currentAmount / qty;
+    }
+  }
+  if (amountEdited) {
+    const v = optionalNumber(payload.amount);
+    if (!Number.isFinite(v) || v < 0) throw new Error("金额必须大于等于 0");
+    unitCost = qty > 0 ? v / qty : 0;
+  }
+  if (freightEdited) {
+    const v = optionalNumber(payload.freight);
+    if (!Number.isFinite(v) || v < 0) throw new Error("运费必须大于等于 0");
+    logisticsFee = v;
+  }
+
+  const now = nowIso();
+  db.prepare(`
+    UPDATE erp_purchase_order_lines
+    SET qty = @qty, expected_qty = @qty, unit_cost = @unit_cost, logistics_fee = @logistics_fee
+    WHERE id = @id
+  `).run({ id: line.id, qty, unit_cost: unitCost, logistics_fee: logisticsFee });
+
+  const updatedLines = db.prepare(
+    "SELECT qty, unit_cost, logistics_fee FROM erp_purchase_order_lines WHERE po_id = ?",
+  ).all(poId);
+  const goodsAmount = Math.round(
+    updatedLines.reduce((s, l) => s + Number(l.qty || 0) * Number(l.unit_cost || 0), 0) * 100,
+  ) / 100;
+  const freightTotal = Math.round(
+    updatedLines.reduce((s, l) => s + Number(l.logistics_fee || 0), 0) * 100,
+  ) / 100;
+
+  // 单头兜底：明细合计为 0 而原单头有钱、且本次没显式改对应金额，则保留单头，避免清零
+  const totalToSet = (goodsAmount > 0 || amountEdited)
+    ? goodsAmount
+    : Number(po.total_amount || 0);
+  const freightToSet = (freightTotal > 0 || freightEdited)
+    ? freightTotal
+    : Number(po.freight_amount || 0);
+
+  db.prepare(`
+    UPDATE erp_purchase_orders
+    SET total_amount = @total_amount,
+        freight_amount = @freight_amount,
+        paid_amount = @paid_amount,
+        updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id: poId,
+    total_amount: totalToSet,
+    freight_amount: freightToSet,
+    paid_amount: Math.round((totalToSet + freightToSet) * 100) / 100,
+    updated_at: now,
+  });
+
+  const afterPo = getPurchaseOrder(db, poId);
+  services.workflow.writeAudit({
+    accountId: po.account_id,
+    actor,
+    action: "update_po_line",
+    entityType: "purchase_order",
+    entityId: poId,
+    before,
+    after: afterPo,
+  });
+  writePurchaseOrderFlowEvent(db, afterPo, actor, "update_po_line", `采购单明细已修改：${afterPo.po_no || afterPo.id}`);
   return { purchaseOrder: toPurchaseOrderResult(db, afterPo) };
 }
 
@@ -16023,6 +16149,9 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
       }
       case "update_offline_po": {
         return updateOfflinePurchaseOrderAction({ db, services, payload, actor });
+      }
+      case "update_po_line": {
+        return updatePurchaseOrderLineAction({ db, services, payload, actor });
       }
       case "request_1688_price_change": {
         return request1688PriceChangeAction({ db, services, payload, actor });
