@@ -21,20 +21,18 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
-  CheckCircleOutlined,
   CloudSyncOutlined,
-  ExportOutlined,
   EyeOutlined,
   FileDoneOutlined,
   HolderOutlined,
-  InboxOutlined,
   ReloadOutlined,
   SearchOutlined,
 } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
 import StatCard from "../components/StatCard";
+import OtherInoutSection from "../components/OtherInoutSection";
 import { useErpAuth } from "../contexts/ErpAuthContext";
-import { hasPageCache, readPageCache, writePageCache } from "../utils/pageCache";
+import { readPageCache, writePageCache } from "../utils/pageCache";
 import type { TemuStockOrderRow } from "../utils/cloudClient";
 
 const { Text } = Typography;
@@ -192,30 +190,6 @@ interface OutboundCache {
   accounts?: AccountRow[];
   unifiedSnapshot?: ConsignDeliverUnifiedResult;
 }
-
-const OUTBOUND_STATUS_LABELS: Record<string, string> = {
-  draft: "草稿",
-  pending_warehouse: "待仓库处理",
-  picking: "拣货中",
-  packed: "已打包",
-  shipped_out: "已发出",
-  pending_ops_confirm: "待运营确认",
-  confirmed: "已确认",
-  exception: "异常",
-  cancelled: "已取消",
-};
-
-const OUTBOUND_STATUS_COLORS: Record<string, string> = {
-  draft: "default",
-  pending_warehouse: "gold",
-  picking: "processing",
-  packed: "cyan",
-  shipped_out: "blue",
-  pending_ops_confirm: "gold",
-  confirmed: "success",
-  exception: "error",
-  cancelled: "default",
-};
 
 type UnifiedRowSource = "cloud" | "jst" | "both";
 
@@ -416,11 +390,6 @@ function stockStatusColor(status?: string | null) {
   return "processing";
 }
 
-function outboundStatusTag(status?: string) {
-  const key = String(status || "draft");
-  return <Tag color={OUTBOUND_STATUS_COLORS[key] || "default"}>{OUTBOUND_STATUS_LABELS[key] || key}</Tag>;
-}
-
 export default function QcOutboundCenter() {
   const auth = useErpAuth();
   const role = auth.currentUser?.role || "";
@@ -443,7 +412,6 @@ export default function QcOutboundCenter() {
   const [unifiedPage, setUnifiedPage] = useState(1);
   const [unifiedPageSize, setUnifiedPageSize] = useState(UNIFIED_DEFAULT_PAGE_SIZE);
   const unifiedSource: "all" | UnifiedRowSource = "all";
-  const [loadedOnce, setLoadedOnce] = useState(() => hasPageCache(cachedData));
   const [loading, setLoading] = useState(false);
   const [actingKey, setActingKey] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("cloud");
@@ -452,22 +420,17 @@ export default function QcOutboundCenter() {
   const [unifiedItemsCache, setUnifiedItemsCache] = useState<Record<string, any[]>>({});
   const [unifiedItemsLoading, setUnifiedItemsLoading] = useState<Record<string, boolean>>({});
   const [selectedAccountId, setSelectedAccountId] = useState("");
-  const [planTarget, setPlanTarget] = useState<OutboundBatchRow | null>(null);
   const [stockOrderTarget, setStockOrderTarget] = useState<TemuStockOrderRow | null>(null);
   const [stockOrderPreview, setStockOrderPreview] = useState<TemuStockOrderPreview | null>(null);
   const [stockOrderPreviewError, setStockOrderPreviewError] = useState<string | null>(null);
   const [stockOrderPreviewLoading, setStockOrderPreviewLoading] = useState(false);
-  const [shipTarget, setShipTarget] = useState<OutboundShipmentRow | null>(null);
   const [unifiedColumnConfig, setUnifiedColumnConfig] = useState<UnifiedColumnConfig>(readUnifiedColumnConfig);
   const [unifiedColumnDraft, setUnifiedColumnDraft] = useState<UnifiedColumnConfig | null>(null);
   const [unifiedColumnMenu, setUnifiedColumnMenu] = useState({ open: false, x: 0, y: 0, bodyMaxHeight: UNIFIED_COLUMN_MENU_MAX_BODY_HEIGHT });
   const [unifiedDraggedColumn, setUnifiedDraggedColumn] = useState<string | null>(null);
-  const [planForm] = Form.useForm();
   const [stockOrderForm] = Form.useForm();
-  const [shipForm] = Form.useForm();
 
   const canCreateOutbound = canRole(role, ["operations", "manager", "admin"]);
-  const canWarehouseAction = canRole(role, ["warehouse", "manager", "admin"]);
 
   const persistCache = useCallback((
     nextOutbound: OutboundWorkbench,
@@ -496,7 +459,6 @@ export default function QcOutboundCenter() {
       if (!selectedAccountId && accountRows[0]?.id) {
         setSelectedAccountId(accountRows[0].id);
       }
-      setLoadedOnce(true);
       persistCache(nextOutbound, accountRows, unifiedSnapshot);
       if (options?.notify) message.success("出库工作台已刷新");
     } catch (error: any) {
@@ -554,47 +516,6 @@ export default function QcOutboundCenter() {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unifiedPage, unifiedPageSize, stockQuery, stockStatus, unifiedSource]);
-
-  const runOutboundAction = async (key: string, payload: Record<string, any>, successText: string) => {
-    if (!erp) return;
-    setActingKey(key);
-    try {
-      await erp.outbound.action({ ...payload, limit: 200 });
-      await loadData();
-      message.success(successText);
-    } catch (error: any) {
-      message.error(error?.message || "操作失败");
-    } finally {
-      setActingKey(null);
-    }
-  };
-
-  const openPlanModal = (row: OutboundBatchRow) => {
-    setPlanTarget(row);
-    planForm.setFieldsValue({
-      qty: Math.max(1, Number(row.availableQty || 1)),
-      boxes: 1,
-      remark: "",
-    });
-  };
-
-  const submitPlan = async () => {
-    if (!planTarget) return;
-    const values = await planForm.validateFields();
-    await runOutboundAction(
-      `plan-${planTarget.id}`,
-      {
-        action: "create_outbound_plan",
-        batchId: planTarget.id,
-        qty: Number(values.qty),
-        boxes: Number(values.boxes || 1),
-        remark: values.remark,
-      },
-      "出库单已创建",
-    );
-    setPlanTarget(null);
-    planForm.resetFields();
-  };
 
   const previewStockOrderPlan = async (
     row = stockOrderTarget,
@@ -669,31 +590,6 @@ export default function QcOutboundCenter() {
     } finally {
       setActingKey(null);
     }
-  };
-
-  const openShipModal = (row: OutboundShipmentRow) => {
-    setShipTarget(row);
-    shipForm.setFieldsValue({
-      logisticsProvider: row.logisticsProvider || "",
-      trackingNo: row.trackingNo || "",
-    });
-  };
-
-  const submitShip = async () => {
-    if (!shipTarget) return;
-    const values = await shipForm.validateFields();
-    await runOutboundAction(
-      `ship-${shipTarget.id}`,
-      {
-        action: "confirm_shipped_out",
-        outboundId: shipTarget.id,
-        logisticsProvider: values.logisticsProvider,
-        trackingNo: values.trackingNo,
-      },
-      "已确认发出，等待运营确认",
-    );
-    setShipTarget(null);
-    shipForm.resetFields();
   };
 
   const summary = outboundData.summary || {};
@@ -1069,197 +965,6 @@ export default function QcOutboundCenter() {
     });
   }, [accounts.length, actingKey, canCreateOutbound, openUnifiedColumnMenu, resolveUnifiedRowLink, unifiedColumnConfig]);
 
-  const availableBatchColumns = useMemo<ColumnsType<OutboundBatchRow>>(() => [
-    {
-      title: "批次",
-      key: "batch",
-      width: 210,
-      render: (_value, row) => (
-        <Space direction="vertical" size={2}>
-          <Text strong>{row.batchCode || row.id}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{row.receiptNo || row.poNo || "-"}</Text>
-        </Space>
-      ),
-    },
-    {
-      title: "商品",
-      key: "sku",
-      width: 300,
-      render: (_value, row) => (
-        <Space direction="vertical" size={2}>
-          <Text>{row.productName || "-"}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{row.internalSkuCode || "-"}</Text>
-        </Space>
-      ),
-    },
-    {
-      title: "库存",
-      key: "inventory",
-      width: 180,
-      render: (_value, row) => (
-        <Space direction="vertical" size={2}>
-          <Text>可用 {formatQty(row.availableQty)}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            预留 {formatQty(row.reservedQty)} / 锁定 {formatQty(row.blockedQty)}
-          </Text>
-        </Space>
-      ),
-    },
-    {
-      title: "供应商",
-      dataIndex: "supplierName",
-      width: 180,
-      render: (value) => value || "-",
-    },
-    {
-      title: "入库时间",
-      dataIndex: "receivedAt",
-      width: 170,
-      render: formatDateTime,
-    },
-    {
-      title: "操作",
-      key: "actions",
-      width: 140,
-      fixed: "right",
-      render: (_value, row) => (
-        <Button
-          size="small"
-          type="primary"
-          icon={<ExportOutlined />}
-          loading={actingKey === `plan-${row.id}`}
-          disabled={!canCreateOutbound}
-          onClick={() => openPlanModal(row)}
-        >
-          创建出库单
-        </Button>
-      ),
-    },
-  ], [actingKey, canCreateOutbound]);
-
-  const shipmentColumns = useMemo<ColumnsType<OutboundShipmentRow>>(() => [
-    {
-      title: "出库单",
-      key: "shipment",
-      width: 230,
-      render: (_value, row) => (
-        <Space direction="vertical" size={2}>
-          <Text strong>{row.shipmentNo || row.id}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{row.batchCode || row.batchId || "-"}</Text>
-          {row.temuStockOrderNo ? <Tag color="blue">Temu {row.temuStockOrderNo}</Tag> : null}
-        </Space>
-      ),
-    },
-    {
-      title: "商品",
-      key: "sku",
-      width: 280,
-      render: (_value, row) => (
-        <Space direction="vertical" size={2}>
-          <Text>{row.productName || "-"}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{row.internalSkuCode || "-"}</Text>
-        </Space>
-      ),
-    },
-    {
-      title: "数量",
-      key: "qty",
-      width: 130,
-      render: (_value, row) => (
-        <Space direction="vertical" size={2}>
-          <Text>{formatQty(row.qty)} 件</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{formatQty(row.boxes)} 箱</Text>
-        </Space>
-      ),
-    },
-    {
-      title: "状态",
-      dataIndex: "status",
-      width: 140,
-      render: outboundStatusTag,
-    },
-    {
-      title: "物流",
-      key: "logistics",
-      width: 210,
-      render: (_value, row) => (
-        <Space direction="vertical" size={2}>
-          <Text>{row.logisticsProvider || "-"}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{row.trackingNo || "-"}</Text>
-        </Space>
-      ),
-    },
-    {
-      title: "更新",
-      dataIndex: "updatedAt",
-      width: 170,
-      render: formatDateTime,
-    },
-    {
-      title: "操作",
-      key: "actions",
-      width: 240,
-      fixed: "right",
-      render: (_value, row) => {
-        const status = row.status || "";
-        if (status === "pending_warehouse") {
-          return (
-            <Button
-              size="small"
-              icon={<InboxOutlined />}
-              loading={actingKey === `pick-${row.id}`}
-              disabled={!canWarehouseAction}
-              onClick={() => runOutboundAction(`pick-${row.id}`, { action: "start_picking", outboundId: row.id }, "已开始拣货")}
-            >
-              开始拣货
-            </Button>
-          );
-        }
-        if (status === "picking") {
-          return (
-            <Button
-              size="small"
-              icon={<CheckCircleOutlined />}
-              loading={actingKey === `pack-${row.id}`}
-              disabled={!canWarehouseAction}
-              onClick={() => runOutboundAction(`pack-${row.id}`, { action: "mark_packed", outboundId: row.id, boxes: row.boxes || 1 }, "已打包")}
-            >
-              标记打包
-            </Button>
-          );
-        }
-        if (status === "packed") {
-          return (
-            <Button
-              size="small"
-              type="primary"
-              icon={<ExportOutlined />}
-              disabled={!canWarehouseAction}
-              onClick={() => openShipModal(row)}
-            >
-              确认发出
-            </Button>
-          );
-        }
-        if (status === "pending_ops_confirm") {
-          return (
-            <Button
-              size="small"
-              type="primary"
-              icon={<CheckCircleOutlined />}
-              loading={actingKey === `done-${row.id}`}
-              disabled={!canCreateOutbound}
-              onClick={() => runOutboundAction(`done-${row.id}`, { action: "confirm_outbound_done", outboundId: row.id }, "出库已确认完成")}
-            >
-              运营确认
-            </Button>
-          );
-        }
-        return <Text type="secondary">-</Text>;
-      },
-    },
-  ], [actingKey, canCreateOutbound, canWarehouseAction]);
-
   if (!erp) {
     return (
       <PageHeader compact eyebrow="系统" title="出库中心" subtitle="服务未就绪，请重启软件" />
@@ -1384,60 +1089,12 @@ export default function QcOutboundCenter() {
             ),
           },
           {
-            key: "inventory",
-            label: "可出库库存",
-            children: (
-              <Table
-                className="erp-compact-table"
-                rowKey="id"
-                size="middle"
-                loading={loading && !loadedOnce}
-                columns={availableBatchColumns}
-                dataSource={outboundData.availableBatches || []}
-                scroll={{ x: 1100 }}
-                pagination={{ pageSize: 20, showSizeChanger: true }}
-              />
-            ),
-          },
-          {
-            key: "shipments",
-            label: "本地出库单",
-            children: (
-              <Table
-                className="erp-compact-table"
-                rowKey="id"
-                size="middle"
-                loading={loading && !loadedOnce}
-                columns={shipmentColumns}
-                dataSource={outboundData.outboundShipments || []}
-                scroll={{ x: 1400 }}
-                pagination={{ pageSize: 20, showSizeChanger: true }}
-              />
-            ),
+            key: "other-inout",
+            label: "其他出入库",
+            children: <OtherInoutSection />,
           },
         ]}
       />
-
-      <Modal
-        title="创建出库单"
-        open={Boolean(planTarget)}
-        onCancel={() => setPlanTarget(null)}
-        onOk={submitPlan}
-        confirmLoading={actingKey === `plan-${planTarget?.id}`}
-        destroyOnClose
-      >
-        <Form form={planForm} layout="vertical">
-          <Form.Item label="出库数量" name="qty" rules={[{ required: true, message: "请输入出库数量" }]}>
-            <InputNumber min={1} max={Math.max(1, Number(planTarget?.availableQty || 1))} precision={0} style={{ width: "100%" }} />
-          </Form.Item>
-          <Form.Item label="箱数" name="boxes">
-            <InputNumber min={1} precision={0} style={{ width: "100%" }} />
-          </Form.Item>
-          <Form.Item label="备注" name="remark">
-            <Input.TextArea rows={3} />
-          </Form.Item>
-        </Form>
-      </Modal>
 
       <Modal
         title="从云端履约记录生成出库单"
@@ -1510,24 +1167,6 @@ export default function QcOutboundCenter() {
               <Alert type="info" showIcon message="选择店铺和数量后，可先预检库存覆盖情况。" />
             )}
           </Space>
-        </Form>
-      </Modal>
-
-      <Modal
-        title="确认发出"
-        open={Boolean(shipTarget)}
-        onCancel={() => setShipTarget(null)}
-        onOk={submitShip}
-        confirmLoading={actingKey === `ship-${shipTarget?.id}`}
-        destroyOnClose
-      >
-        <Form form={shipForm} layout="vertical">
-          <Form.Item label="物流商" name="logisticsProvider">
-            <Input />
-          </Form.Item>
-          <Form.Item label="运单号" name="trackingNo">
-            <Input />
-          </Form.Item>
         </Form>
       </Modal>
 
