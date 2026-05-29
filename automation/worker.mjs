@@ -10147,11 +10147,15 @@ async function verifyWorkflowSkuRequiredFieldsInDom(page, options = {}) {
       ? options.expectedQuantityCounts.length
       : 4));
     const invalidPackIncludeInputs = state.packIncludeInputs.filter((item) => !(Number(item.value) > 0));
+    // 只以"页面出现明确错误提示"或"已抓到的共计内含框里值非正数"判失败。
+    // 不再把"共计内含输入框数量 < N"或"压根没抓到 input"当失败依据：编辑页 SKU 区块
+    // 折叠/懒加载时 page.evaluate 常一个相关 input 都抓不到（packIncludeInputs/skuRelatedInputs
+    // 为空），会把已存好的草稿误判为缺字段。数据权威性在 API-JSON 层
+    // verifyDraftWorkflowSkuRequiredFields，那层通过即认为字段已保存。
     return {
       ok: !state.hasSuggestPriceError
         && !state.hasPackIncludeError
         && !state.hasNaCurrencyInVisibleInputs
-        && state.packIncludeInputs.length >= expectedMinimumPackInputs
         && invalidPackIncludeInputs.length === 0,
       skipped: false,
       hasSuggestPriceError: state.hasSuggestPriceError,

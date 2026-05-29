@@ -6903,7 +6903,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               提交付款
             </Button>
           ) : null}
-          {canConfirmPaid && (row.externalOrderId || Number(row.mappingCount || 0) === 0) ? (
+          {/* 只要是「待付款」单、角色够（canConfirmPaid 已含这两条），就允许线下确认付款。
+              以前还要求 externalOrderId 存在或 mappingCount===0，结果"有1688映射但没推1688"的单
+              既看不到「1688支付」(canUse1688PaymentActions 要 externalOrderId) 又看不到「确认付款」，
+              卡死在待付款。后端 confirm_paid 本就不看 external_order_id，这里放开即可。 */}
+          {canConfirmPaid ? (
             <Button
               size="small"
               type="primary"
