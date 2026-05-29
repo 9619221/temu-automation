@@ -512,6 +512,8 @@ interface ErpAPI {
   getStatus: () => Promise<ErpStatus>;
   runMigrations: () => Promise<ErpStatus>;
   syncTemuSales?: (payload: any) => Promise<{ ok: boolean; result?: any; error?: string }>;
+  syncTemuAdditionalFromCloud?: (payload: any) => Promise<{ ok: boolean; result?: any; error?: string }>;
+  syncTemuReviewsFromCloud?: (payload: any) => Promise<{ ok: boolean; result?: any; error?: string }>;
   getEnums: () => Promise<Record<string, Record<string, string>>>;
   client: {
     getStatus: () => Promise<ErpClientStatus>;

@@ -56,9 +56,15 @@ for (const [key, g] of groups) {
   console.log(`[backfill] ${key}: ${g.items.length} events`);
 }
 
-const skcCount = db.prepare("SELECT COUNT(*) AS n FROM skc_snapshots").get().n;
-const mallCount = db.prepare("SELECT COUNT(*) AS n FROM mall_accounts").get().n;
+function countTable(name) {
+  try { return db.prepare(`SELECT COUNT(*) AS n FROM ${name}`).get().n; }
+  catch { return "(no table)"; }
+}
 
 console.log(`\n[backfill] done. processed=${processed} events`);
-console.log(`  skc_snapshots:     ${skcCount} rows`);
-console.log(`  mall_accounts:     ${mallCount} rows`);
+console.log(`  skc_snapshots:          ${countTable("skc_snapshots")} rows`);
+console.log(`  mall_accounts:          ${countTable("mall_accounts")} rows`);
+console.log(`  temu_sales_snapshot:    ${countTable("temu_sales_snapshot")} rows`);
+console.log(`  temu_stock_order_snapshot: ${countTable("temu_stock_order_snapshot")} rows`);
+console.log(`  temu_jit_status_snapshot:  ${countTable("temu_jit_status_snapshot")} rows`);
+console.log(`  temu_review_snapshot:   ${countTable("temu_review_snapshot")} rows`);

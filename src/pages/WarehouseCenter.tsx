@@ -6,6 +6,7 @@ import { Alert, Button, Checkbox, Col, DatePicker, Drawer, Image, Input, InputNu
 import type { ColumnsType } from "antd/es/table";
 import type { TableRowSelection } from "antd/es/table/interface";
 import {
+  EyeOutlined,
   FilterOutlined,
   HolderOutlined,
   InboxOutlined,
@@ -1879,7 +1880,7 @@ export default function WarehouseCenter() {
               src={imageUrl}
               width={44}
               height={44}
-              preview={{ mask: "查看" }}
+              preview={{ mask: <EyeOutlined /> }}
               className="warehouse-product-image"
               style={{ objectFit: "cover" }}
               fallback="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='44' height='44'%3E%3Crect width='44' height='44' rx='6' fill='%23f1f5f9'/%3E%3Ctext x='22' y='25' text-anchor='middle' font-size='10' fill='%2364748b'%3E无图%3C/text%3E%3C/svg%3E"

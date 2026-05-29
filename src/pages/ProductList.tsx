@@ -3,6 +3,7 @@ import { Alert, Button, Card, Checkbox, Drawer, Empty, Image, Input, Modal, Radi
 import type { ColumnsType } from "antd/es/table";
 import {
   AppstoreOutlined,
+  EyeOutlined,
   PictureOutlined,
   SearchOutlined,
   SettingOutlined,
@@ -6233,7 +6234,7 @@ export default function ProductList() {
         title={(
           <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
             {record.imageUrl ? (
-              <Image src={record.imageUrl} width={60} height={60} preview={{ mask: "查看大图" }} fallback={EMPTY_IMAGE_FALLBACK} />
+              <Image src={record.imageUrl} width={60} height={60} preview={{ mask: <EyeOutlined /> }} fallback={EMPTY_IMAGE_FALLBACK} />
             ) : null}
             <div style={{ display: "grid", gap: 2, minWidth: 0 }}>
               <div style={{ fontSize: 14, fontWeight: 700 }}>{record.title || "未命名商品"}</div>
