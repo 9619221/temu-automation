@@ -154,6 +154,7 @@ const BROADCAST_PURCHASE_ACTIONS = new Set([
   "rollback_po_status",
   "update_offline_po",
   "update_po_line",
+  "update_po_totals",
   "convert_po_to_offline",
 ]);
 
@@ -11467,6 +11468,127 @@ function updatePurchaseOrderLineAction({ db, services, payload, actor }) {
   return { purchaseOrder: toPurchaseOrderResult(db, afterPo) };
 }
 
+function allocateIntByWeight(total, weights, minEach = 1) {
+  const n = weights.length;
+  if (n === 0) return [];
+  const base = Array(n).fill(minEach);
+  let remaining = total - minEach * n; // 调用方已保证 total >= n*minEach
+  if (remaining <= 0) return base;
+  const norm = weights.map((w) => (Number.isFinite(w) && w > 0 ? w : 0));
+  const sum = norm.reduce((s, w) => s + w, 0);
+  const eff = sum > 0 ? norm : weights.map(() => 1);
+  const effSum = sum > 0 ? sum : n;
+  const raw = eff.map((w) => (remaining * w) / effSum);
+  const floors = raw.map((x) => Math.floor(x));
+  let used = floors.reduce((s, x) => s + x, 0);
+  const order = raw
+    .map((x, i) => ({ i, frac: x - Math.floor(x) }))
+    .sort((a, b) => b.frac - a.frac);
+  let k = 0;
+  while (used < remaining) { floors[order[k % n].i] += 1; used += 1; k += 1; }
+  return base.map((b, i) => b + floors[i]);
+}
+
+function updatePurchaseOrderTotalsAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["buyer", "manager", "admin"], "编辑采购合计");
+  const poId = requireString(payload.poId || payload.id, "poId");
+  const field = requireString(payload.field, "field");
+  if (field !== "qty" && field !== "amount" && field !== "freight" && field !== "paid") {
+    throw new Error("不支持的合计字段");
+  }
+  const value = optionalNumber(payload.value);
+  if (!Number.isFinite(value) || value < 0) throw new Error("合计值必须大于等于 0");
+
+  const po = getPurchaseOrder(db, poId);
+  if (po.status !== "draft" && po.status !== "pushed_pending_price") {
+    throw new Error("只能在提交付款前修改明细");
+  }
+  const before = getPurchaseOrder(db, poId);
+  const lines = db.prepare(
+    "SELECT * FROM erp_purchase_order_lines WHERE po_id = ? ORDER BY id ASC",
+  ).all(poId);
+  if (lines.length === 0) throw new Error("没有可分摊的明细行");
+
+  const weights = lines.map((l) => Number(l.qty || 0) * Number(l.unit_cost || 0));
+  const newQty = lines.map((l) => Number(l.qty || 0));
+  const newUnitCost = lines.map((l) => Number(l.unit_cost || 0));
+  const newLogisticsFee = lines.map((l) => Number(l.logistics_fee || 0));
+
+  if (field === "amount") {
+    const alloc = allocateMoneyByWeight(value, weights);
+    lines.forEach((l, i) => {
+      newUnitCost[i] = newQty[i] > 0 ? alloc[i] / newQty[i] : 0;
+    });
+  } else if (field === "freight") {
+    const alloc = allocateMoneyByWeight(value, weights);
+    lines.forEach((l, i) => {
+      newLogisticsFee[i] = alloc[i];
+    });
+  } else if (field === "paid") {
+    const currentFreight = lines.reduce((s, l) => s + Number(l.logistics_fee || 0), 0);
+    const newGoods = value - currentFreight;
+    if (newGoods < 0) throw new Error("实付金额不能小于运费合计");
+    const alloc = allocateMoneyByWeight(newGoods, weights);
+    lines.forEach((l, i) => {
+      newUnitCost[i] = newQty[i] > 0 ? alloc[i] / newQty[i] : 0;
+    });
+  } else {
+    if (!Number.isInteger(value)) throw new Error("数量合计必须是整数");
+    if (value < lines.length) throw new Error("数量合计不能小于明细行数");
+    const alloc = allocateIntByWeight(value, weights);
+    lines.forEach((l, i) => {
+      newQty[i] = alloc[i];
+    });
+  }
+
+  const now = nowIso();
+  const upd = db.prepare(`
+    UPDATE erp_purchase_order_lines
+    SET qty = @qty, expected_qty = @qty, unit_cost = @unit_cost, logistics_fee = @logistics_fee
+    WHERE id = @id
+  `);
+  lines.forEach((l, i) => {
+    upd.run({ id: l.id, qty: newQty[i], unit_cost: newUnitCost[i], logistics_fee: newLogisticsFee[i] });
+  });
+
+  const updatedLines = db.prepare(
+    "SELECT qty, unit_cost, logistics_fee FROM erp_purchase_order_lines WHERE po_id = ?",
+  ).all(poId);
+  const goodsAmount = Math.round(
+    updatedLines.reduce((s, l) => s + Number(l.qty || 0) * Number(l.unit_cost || 0), 0) * 100,
+  ) / 100;
+  const freightTotal = Math.round(
+    updatedLines.reduce((s, l) => s + Number(l.logistics_fee || 0), 0) * 100,
+  ) / 100;
+  db.prepare(`
+    UPDATE erp_purchase_orders
+    SET total_amount = @total_amount,
+        freight_amount = @freight_amount,
+        paid_amount = @paid_amount,
+        updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id: poId,
+    total_amount: goodsAmount,
+    freight_amount: freightTotal,
+    paid_amount: Math.round((goodsAmount + freightTotal) * 100) / 100,
+    updated_at: now,
+  });
+
+  const afterPo = getPurchaseOrder(db, poId);
+  services.workflow.writeAudit({
+    accountId: po.account_id,
+    actor,
+    action: "update_po_totals",
+    entityType: "purchase_order",
+    entityId: poId,
+    before,
+    after: afterPo,
+  });
+  writePurchaseOrderFlowEvent(db, afterPo, actor, "update_po_totals", `采购单合计已修改：${afterPo.po_no || afterPo.id}`);
+  return { purchaseOrder: toPurchaseOrderResult(db, afterPo) };
+}
+
 // 把任何未付款的采购单转为线下采购：
 // - 已推 1688 的单子先调远端 cancel；远端已不存在按"orphan cleared"算成功
 // - 清掉 1688 残留字段（external_*），candidate 的 1688 标识也清掉
@@ -16172,6 +16294,9 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
       case "update_po_line": {
         return updatePurchaseOrderLineAction({ db, services, payload, actor });
       }
+      case "update_po_totals": {
+        return updatePurchaseOrderTotalsAction({ db, services, payload, actor });
+      }
       case "request_1688_price_change": {
         return request1688PriceChangeAction({ db, services, payload, actor });
       }
@@ -19300,7 +19425,12 @@ function performInventoryAction(payload = {}, actorInput = {}) {
 
 async function performInventoryActionRuntime(payload = {}) {
   if (shouldUseClientRuntime()) {
-    throw new Error("库存直扣动作暂不支持远端调用，请在桌面端本地模式下操作");
+    ensureClientRuntime();
+    const response = await remoteRequest("/api/inventory/action", {
+      method: "POST",
+      body: payload,
+    });
+    return response.result;
   }
   const actor = getCurrentSessionActor(payload?.actor || {});
   return performInventoryAction(payload || {}, actor);
@@ -20242,6 +20372,7 @@ function startLanService(payload = {}) {
     performWarehouseAction,
     performQcAction,
     performOutboundAction,
+    performInventoryAction,
     listWorkItems: listWorkItemsForUser,
     getWorkItemStats: getWorkItemStatsForUser,
     generateWorkItems: generateWorkItemsForUser,
@@ -20430,6 +20561,7 @@ async function startErpHeadlessServer(options = {}) {
     performWarehouseAction,
     performQcAction,
     performOutboundAction,
+    performInventoryAction,
     listWorkItems: listWorkItemsForUser,
     getWorkItemStats: getWorkItemStatsForUser,
     generateWorkItems: generateWorkItemsForUser,
@@ -20855,6 +20987,22 @@ function registerErpIpcHandlers(ipcMain) {
       const { buildMultiStoreReport } = require("./services/multiStoreReport.cjs");
       const data = await buildMultiStoreReport(erpState.db, { includeTest: payload?.includeTest });
       return { ok: true, data };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+  // 纯查本地 erp_temu_malls 字典表（mall_id → store_code），不依赖云端报表。
+  // 售后页等只需把 mall_id 翻成「temu-0XX店铺」，用这个轻量端点，云端崩了也能映射。
+  ipcMain.handle("erp:reports:mall-dict", async () => {
+    try {
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest(`/api/erp/reports/mall-dict`, { method: "GET" });
+      }
+      requireErp();
+      const { _internal } = require("./services/multiStoreReport.cjs");
+      const malls = _internal.readMallDictionary(erpState.db);
+      return { ok: true, data: { malls } };
     } catch (error) {
       return { ok: false, error: error?.message || String(error) };
     }

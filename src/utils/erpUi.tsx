@@ -269,3 +269,98 @@ export function priorityTag(value?: string | null) {
 export function canRole(role: string | undefined | null, allowed: string[]) {
   return !!role && allowed.includes(role);
 }
+
+// SKU 选择器下拉项的图文卡片渲染：左侧图片缩略图 + 右侧编码 / 名称 / 成本·库存·仓位。
+// 采购单、采购退货单等多处 Select 共用，传给 antd 的 optionRender。
+export function renderSkuSelectOption(option: any, onPreview?: (preview: { src: string; alt: string }) => void) {
+  const d = option?.data || option || {};
+  const displayCode = String(d?.label || d?.value || "");
+  const costText = d?.skuCost === null || d?.skuCost === undefined || d?.skuCost === "" ? "-" : `¥${d.skuCost}`;
+  const stockText = d?.skuStock === null || d?.skuStock === undefined || d?.skuStock === "" ? "-" : d.skuStock;
+  const warehouseText = d?.skuWarehouse || "-";
+
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "72px minmax(0, 1fr)",
+        gap: 12,
+        alignItems: "start",
+        lineHeight: 1.35,
+        padding: "4px 0",
+      }}
+    >
+      <div
+        role={d?.skuImage ? "button" : undefined}
+        tabIndex={d?.skuImage ? 0 : undefined}
+        title={d?.skuImage ? "点击放大图片" : undefined}
+        onMouseDown={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+        }}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          if (d?.skuImage) onPreview?.({ src: d.skuImage, alt: d?.skuName || displayCode || "商品图片" });
+        }}
+        onKeyDown={(event) => {
+          if (!d?.skuImage || (event.key !== "Enter" && event.key !== " ")) return;
+          event.preventDefault();
+          event.stopPropagation();
+          onPreview?.({ src: d.skuImage, alt: d?.skuName || displayCode || "商品图片" });
+        }}
+        style={{
+          width: 60,
+          height: 60,
+          borderRadius: 8,
+          border: "1px solid #e5e7eb",
+          overflow: "hidden",
+          background: "#f8fafc",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "#9ca3af",
+          cursor: d?.skuImage ? "zoom-in" : "default",
+          fontSize: 12,
+        }}
+      >
+        {d?.skuImage ? (
+          <img
+            src={d.skuImage}
+            alt=""
+            style={{ width: 60, height: 60, objectFit: "cover", display: "block" }}
+          />
+        ) : (
+          "无图"
+        )}
+      </div>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontWeight: 650, color: "#111827" }}>{displayCode}</div>
+        <div
+          style={{
+            color: "#374151",
+            whiteSpace: "normal",
+            wordBreak: "break-word",
+            marginTop: 2,
+          }}
+        >
+          {d?.skuName || "-"}
+        </div>
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "2px 10px",
+            marginTop: 4,
+            fontSize: 12,
+            color: "#6b7280",
+          }}
+        >
+          <span>成本 {costText}</span>
+          <span>库存 {stockText}</span>
+          <span>仓位 {warehouseText}</span>
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -70,6 +70,7 @@ import {
   formatDate,
   formatDateTime,
   formatQty,
+  renderSkuSelectOption,
   statusTag,
 } from "../utils/erpUi";
 
@@ -865,99 +866,6 @@ function EditablePoDetailCell({
       onPressEnter={() => void commit()}
       style={{ width: precision === 0 ? 72 : 104 }}
     />
-  );
-}
-
-function renderSkuSelectOption(option: any, onPreview?: (preview: { src: string; alt: string }) => void) {
-  const d = option?.data || option || {};
-  const displayCode = String(d?.label || d?.value || "");
-  const costText = d?.skuCost === null || d?.skuCost === undefined || d?.skuCost === "" ? "-" : `¥${d.skuCost}`;
-  const stockText = d?.skuStock === null || d?.skuStock === undefined || d?.skuStock === "" ? "-" : d.skuStock;
-  const warehouseText = d?.skuWarehouse || "-";
-
-  return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "72px minmax(0, 1fr)",
-        gap: 12,
-        alignItems: "start",
-        lineHeight: 1.35,
-        padding: "4px 0",
-      }}
-    >
-      <div
-        role={d?.skuImage ? "button" : undefined}
-        tabIndex={d?.skuImage ? 0 : undefined}
-        title={d?.skuImage ? "点击放大图片" : undefined}
-        onMouseDown={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-        }}
-        onClick={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          if (d?.skuImage) onPreview?.({ src: d.skuImage, alt: d?.skuName || displayCode || "商品图片" });
-        }}
-        onKeyDown={(event) => {
-          if (!d?.skuImage || (event.key !== "Enter" && event.key !== " ")) return;
-          event.preventDefault();
-          event.stopPropagation();
-          onPreview?.({ src: d.skuImage, alt: d?.skuName || displayCode || "商品图片" });
-        }}
-        style={{
-          width: 60,
-          height: 60,
-          borderRadius: 8,
-          border: "1px solid #e5e7eb",
-          overflow: "hidden",
-          background: "#f8fafc",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          color: "#9ca3af",
-          cursor: d?.skuImage ? "zoom-in" : "default",
-          fontSize: 12,
-        }}
-      >
-        {d?.skuImage ? (
-          <img
-            src={d.skuImage}
-            alt=""
-            style={{ width: 60, height: 60, objectFit: "cover", display: "block" }}
-          />
-        ) : (
-          "无图"
-        )}
-      </div>
-      <div style={{ minWidth: 0 }}>
-        <div style={{ fontWeight: 650, color: "#111827" }}>{displayCode}</div>
-        <div
-          style={{
-            color: "#374151",
-            whiteSpace: "normal",
-            wordBreak: "break-word",
-            marginTop: 2,
-          }}
-        >
-          {d?.skuName || "-"}
-        </div>
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            gap: "2px 10px",
-            marginTop: 4,
-            fontSize: 12,
-            color: "#6b7280",
-          }}
-        >
-          <span>成本 {costText}</span>
-          <span>库存 {stockText}</span>
-          <span>仓位 {warehouseText}</span>
-        </div>
-      </div>
-    </div>
   );
 }
 
@@ -3944,6 +3852,21 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     [patchPurchaseOrderFromResult],
   );
 
+  const handlePurchaseTotalsEdit = useCallback(
+    async (poId: string, field: "qty" | "amount" | "freight" | "paid", value: number) => {
+      const result = await runActionRef.current(`edit-totals-${poId}-${field}`, {
+        action: "update_po_totals",
+        poId,
+        field,
+        value,
+        refreshWorkbench: false,
+      }, "合计已更新");
+      if (result) patchPurchaseOrderFromResult(result);
+      return Boolean(result);
+    },
+    [patchPurchaseOrderFromResult],
+  );
+
   const canRollbackPurchaseOrder = (row: PurchaseOrderRow) => {
     const target = getPurchaseOrderRollbackTarget(row);
     if (!target) return false;
@@ -6164,6 +6087,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     const detailTotals = purchaseOrderDetailTotals(detailLines);
     // 提交付款前(草稿 / 已推 1688 待付款)允许行内改数量/金额/运费，仅动本地账
     const linesEditable = canPurchase && (row.status === "draft" || row.status === "pushed_pending_price");
+    const hasRealLines = detailLines.some(
+      (l) => typeof l.id === "string" && l.id && !l.id.startsWith(`${row.id}-`),
+    );
+    const totalsEditable = linesEditable && hasRealLines;
+    const realLineCount = detailLines.filter(
+      (l) => typeof l.id === "string" && l.id && !l.id.startsWith(`${row.id}-`),
+    ).length;
     const stages = [
       { key: "created", label: "建单", done: true, meta: formatDateTime(row.createdAt || row.updatedAt) },
       {
@@ -6318,10 +6248,46 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
             <tfoot>
               <tr>
                 <td colSpan={4}>合计</td>
-                <td className="col-numeric">{formatQty(detailTotals.qty)}</td>
-                <td className="col-numeric">{formatCurrency(detailTotals.amount)}</td>
-                <td className="col-numeric">{formatOptionalCurrency(detailTotals.logisticsFee)}</td>
-                <td className="col-numeric">{formatCurrency(detailTotals.paidAmount)}</td>
+                <td className="col-numeric">
+                  <EditablePoDetailCell
+                    value={detailTotals.qty}
+                    display={formatQty(detailTotals.qty)}
+                    editable={totalsEditable}
+                    precision={0}
+                    min={Math.max(1, realLineCount)}
+                    onSave={(next) => handlePurchaseTotalsEdit(row.id, "qty", next)}
+                  />
+                </td>
+                <td className="col-numeric">
+                  <EditablePoDetailCell
+                    value={detailTotals.amount}
+                    display={formatCurrency(detailTotals.amount)}
+                    editable={totalsEditable}
+                    precision={2}
+                    min={0}
+                    onSave={(next) => handlePurchaseTotalsEdit(row.id, "amount", next)}
+                  />
+                </td>
+                <td className="col-numeric">
+                  <EditablePoDetailCell
+                    value={detailTotals.logisticsFee}
+                    display={formatOptionalCurrency(detailTotals.logisticsFee)}
+                    editable={totalsEditable}
+                    precision={2}
+                    min={0}
+                    onSave={(next) => handlePurchaseTotalsEdit(row.id, "freight", next)}
+                  />
+                </td>
+                <td className="col-numeric">
+                  <EditablePoDetailCell
+                    value={detailTotals.paidAmount}
+                    display={formatCurrency(detailTotals.paidAmount)}
+                    editable={totalsEditable}
+                    precision={2}
+                    min={0}
+                    onSave={(next) => handlePurchaseTotalsEdit(row.id, "paid", next)}
+                  />
+                </td>
               </tr>
             </tfoot>
           </table>
@@ -6362,7 +6328,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         </div>
       </div>
     );
-  }, [hasUsable1688Address, canPurchase, handlePurchaseLineEdit]);
+  }, [hasUsable1688Address, canPurchase, handlePurchaseLineEdit, handlePurchaseTotalsEdit]);
 
   const purchaseOrderExpandable = useMemo(() => ({
     expandedRowKeys: expandedPoIds,
