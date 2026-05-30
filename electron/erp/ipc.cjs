@@ -19454,7 +19454,11 @@ async function performQcActionRuntime(payload = {}) {
 async function getOutboundWorkbenchRuntime(params = {}) {
   if (shouldUseClientRuntime()) {
     ensureClientRuntime();
-    const payload = await remoteRequest("/api/outbound/workbench");
+    const payload = await remoteRequest("/api/outbound/workbench", {
+      // 出库中心 workbench 要在主控端聚合数万条送仓托管数据，跨海响应常超 30s 默认超时，
+      // 与送仓托管统一查询/采购 workbench 对齐放宽到 120s，避免「连接主控端超时」。
+      timeoutMs: 120000,
+    });
     return payload.workbench || {};
   }
   return getOutboundWorkbench(params);
@@ -21221,39 +21225,9 @@ function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:jushuitan:list-jobs", (_event, params) => listJushuitanJobsRuntime(params || {}));
   ipcMain.handle("erp:jushuitan:list-raw", (_event, params) => listJushuitanRawRuntime(params || {}));
   ipcMain.handle("erp:diagnostics:probe-1688-mtop", (_event, payload) => probe1688MtopFromClient(payload || {}));
-  ipcMain.handle("erp:reports:multi-store", async (_event, payload) => {
-    try {
-      const includeTest = payload?.includeTest ? "1" : "0";
-      if (shouldUseClientRuntime()) {
-        ensureClientRuntime();
-        return await remoteRequest(`/api/erp/reports/multi-store?include_test=${includeTest}`, {
-          method: "GET",
-        });
-      }
-      requireErp();
-      const { buildMultiStoreReport } = require("./services/multiStoreReport.cjs");
-      const data = await buildMultiStoreReport(erpState.db, { includeTest: payload?.includeTest });
-      return { ok: true, data };
-    } catch (error) {
-      return { ok: false, error: error?.message || String(error) };
-    }
-  });
-  // 纯查本地 erp_temu_malls 字典表（mall_id → store_code），不依赖云端报表。
-  // 售后页等只需把 mall_id 翻成「temu-0XX店铺」，用这个轻量端点，云端崩了也能映射。
-  ipcMain.handle("erp:reports:mall-dict", async () => {
-    try {
-      if (shouldUseClientRuntime()) {
-        ensureClientRuntime();
-        return await remoteRequest(`/api/erp/reports/mall-dict`, { method: "GET" });
-      }
-      requireErp();
-      const { _internal } = require("./services/multiStoreReport.cjs");
-      const malls = _internal.readMallDictionary(erpState.db);
-      return { ok: true, data: { malls } };
-    } catch (error) {
-      return { ok: false, error: error?.message || String(error) };
-    }
-  });
+  // ipc.cjs 拆分（逐域抽离）第一步：reports 域已移到 ./ipcHandlers/reports.cjs（依赖注入）
+  const { registerReportsHandlers } = require("./ipcHandlers/reports.cjs");
+  registerReportsHandlers(ipcMain, { erpState, remoteRequest, shouldUseClientRuntime, ensureClientRuntime, requireErp });
 }
 
 // 在客户端本机依次探 4 个 1688 mtop 端点 + 主控端 health。
