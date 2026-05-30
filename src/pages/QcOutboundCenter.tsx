@@ -23,7 +23,6 @@ import type { ColumnsType } from "antd/es/table";
 import {
   CloudSyncOutlined,
   EyeOutlined,
-  FileDoneOutlined,
   HolderOutlined,
   ReloadOutlined,
   SearchOutlined,
@@ -592,7 +591,6 @@ export default function QcOutboundCenter() {
     }
   };
 
-  const summary = outboundData.summary || {};
   const stockOrderLinkIndex = useMemo(() => {
     const index = new Map<string, { qty: number; shipments: OutboundShipmentRow[] }>();
     for (const shipment of outboundData.outboundShipments || []) {
@@ -1008,7 +1006,6 @@ export default function QcOutboundCenter() {
 
       <div className="qc-outbound-kpi-grid">
         <StatCard title="送仓托管单" value={formatQty(unifiedTotal)} color="blue" icon={<CloudSyncOutlined />} compact />
-        <StatCard title="待仓库/运营" value={(summary.pendingWarehouseCount || 0) + (summary.pendingOpsConfirmCount || 0)} color="purple" icon={<FileDoneOutlined />} compact />
       </div>
 
       <Tabs
