@@ -40,9 +40,9 @@
 
 ## 日常开发分支策略
 
-- **功能 / fix 一律在 `claude/*`（或 `codex/*`）短分支上开发**，改完及时 commit，再 push 开 PR 合 master。**不要把改动长期停在 master 工作区「未提交」状态**——未提交改动随时可能被 IDE「撤销更改」或 `git checkout` 刷回 HEAD（踩过：移走的入口反复自己冒回来，根因就是改动一直没提交）。
+- **默认直接在 `master` 上开发并提交**：改完一段就 `git commit`（需要时 `git push origin master`）。**改完就提交是死规矩**——不要把改动长期停在工作区「未提交」状态，未提交改动随时会被 IDE「撤销更改」、切分支或 `git checkout` 刷回 HEAD（踩过：移走的入口反复自己冒回来，根因就是改动一直没提交）。
+- 需要 review / 协作 / 大改动想留缓冲时，再开 `claude/*`（或 `codex/*`）**短**分支走 PR 合 master。PR 是可选项，不是强制。短分支用完即合即删，**不要长期攒 commit**（goofy-wing 教训：旁支跟 master 平行演化会分叉、发版混乱）。
 - **dev 跑在哪个分支无所谓**：`npm run dev` 只服务当前工作区代码，切到哪个分支就跑哪个分支。分支模型管的是「提交往哪落」，不是「dev 在哪跑」。
-- master 只接两类写入：① PR 合并；② 版本号 bump（见下）。其它一切功能改动都先进 `claude/*` 分支。
 
 ## 背景
 
@@ -58,7 +58,7 @@
 
 发版永远从 master 发，不从旁支。口诀：**对齐 master → tsc → bump+push → dist:win → 推 erp + 推 github → 验 latest.yml → 同步服务器主控端**。
 
-1. 功能改动已通过 PR 合进 master（前提：见「日常开发分支策略」）
+1. 功能改动已全部提交到 master（直接 commit 或 PR 合并均可，前提：见「日常开发分支策略」）
 2. 主仓 worktree（`C:\Users\Administrator\Desktop\temu-automation`）切到 `master`
 3. `git fetch origin && git reset --hard origin/master`（让本地 master 跟远端完全同步）
 4. 跑 `npx tsc --noEmit` 验证 0 错
@@ -76,9 +76,9 @@
 
 ## 功能改动怎么进 master
 
-- 所有 feature / fix 走 PR：claude/* 或 codex/* 分支 → PR → review → 合 master
-- master 是唯一 base，**禁止 PR base 在 goofy-wing 或其他长期分支**
-- 紧急 hotfix 也是同流程（cherry-pick PR 直接 fast-track 合 master 后立即发版）
+- **默认：直接在 master 上 commit**（改完即提交，避免被 discard）
+- 需要 review / 协作时再走 PR：claude/* 或 codex/* 分支 → PR → 合 master；master 是唯一 base，**禁止 PR base 在 goofy-wing 或其他长期分支**
+- 紧急 hotfix：直接在 master 改完提交即可，或 fast-track PR
 
 ## 服务器代码同步
 
