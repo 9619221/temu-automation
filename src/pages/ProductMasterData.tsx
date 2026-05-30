@@ -452,8 +452,9 @@ function normalizeSkuStockDetailRecord(row: any, index: number): SkuStockRecord 
     qty,
     // 内部技术性单号对用户无意义,统一显示为 "-",仅保留真实业务单号:
     //   - jst:batch:xxx / jst:batch:replay:xxx / jst:ledger:xxx —— 聚水潭同步/回放批次 ID
+    //   - JST-STOCK-xxx —— 聚水潭库存初始化批次号
     //   - DIRECT-xxx —— 直接入库(送仓售后退货等)自动生成的批次号
-    orderNo: ((value: string) => (value && !/^(jst:|direct-)/i.test(value) ? value : "-"))(
+    orderNo: ((value: string) => (value && !/^(jst[:-]|direct-)/i.test(value) ? value : "-"))(
       row?.orderNo || row?.receiptNo || row?.batchCode || row?.id || "",
     ),
     batchCode: row?.batchCode || row?.batch_code || "",
