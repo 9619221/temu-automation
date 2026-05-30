@@ -55,6 +55,9 @@ interface SkuOpt {
   internalSkuCode?: string | null;
   name?: string | null;
   accountName?: string | null;
+  // 物理库存 = SUM(available+reserved+blocked+defective+rework)，跨所有 qc_status。
+  // 恒 ≥ 换货「换出」守卫真正扣的「passed 可用」，所以拿它当换出上限永远不会误拦合法换货。
+  actualStockQty?: number | null;
 }
 
 const erp = (window as any).electronAPI?.erp;
@@ -116,6 +119,8 @@ export default function OtherInoutSection() {
   const [xferOpen, setXferOpen] = useState(false);
   const [xferSubmitting, setXferSubmitting] = useState(false);
   const [fromSkuId, setFromSkuId] = useState<string | undefined>(undefined);
+  // 记住选中的换出编码整行，用它的 actualStockQty 做「可用库存」提示与换出上限。
+  const [fromSkuObj, setFromSkuObj] = useState<SkuOpt | null>(null);
   const [fromQty, setFromQty] = useState<number | null>(null);
   const [fromUnitCost, setFromUnitCost] = useState<number | null>(null);
   const [fromAmount, setFromAmount] = useState<number | null>(null);
@@ -350,6 +355,7 @@ export default function OtherInoutSection() {
 
   const openXfer = () => {
     setFromSkuId(undefined);
+    setFromSkuObj(null);
     setFromQty(null);
     setFromUnitCost(null);
     setFromAmount(null);
@@ -363,6 +369,11 @@ export default function OtherInoutSection() {
   };
 
   const round2 = (n: number) => Math.round(n * 100) / 100;
+
+  // 选中换出编码后的可用库存上限（物理库存）。未选则 null，不做本地拦截。
+  const fromAvailable = fromSkuObj && Number.isFinite(Number(fromSkuObj.actualStockQty))
+    ? Number(fromSkuObj.actualStockQty)
+    : null;
 
   // 换出 A 的 数量 / 单价 / 总额 三者联动：总额 = 单价 × 数量
   const onFromQtyChange = (v: number | null) => {
@@ -390,6 +401,11 @@ export default function OtherInoutSection() {
     const tq = Number(toQty);
     const fa = Number(fromAmount);
     if (!Number.isFinite(fq) || fq <= 0) { message.error("换出数量必须大于 0"); return; }
+    // 提交前拦超额：换出量超过可用库存就别发请求，避免撞服务器那条被 toast 吃掉 < 的乱码报错。
+    if (fromAvailable != null && fq > fromAvailable) {
+      message.error(`换出数量 ${fq} 超过可用库存 ${fromAvailable}，请改成 ≤ ${fromAvailable} 或先给该编码补货`);
+      return;
+    }
     if (!Number.isFinite(tq) || tq <= 0) { message.error("换入数量必须大于 0"); return; }
     if (!Number.isFinite(fa) || fa < 0) { message.error("请填写换出单价或总额"); return; }
     setXferSubmitting(true);
@@ -554,7 +570,10 @@ export default function OtherInoutSection() {
                     style={{ width: "100%", marginTop: 4 }}
                     placeholder="输入编码 / 名称搜索"
                     value={fromSkuId}
-                    onChange={setFromSkuId}
+                    onChange={(v) => {
+                      setFromSkuId(v);
+                      setFromSkuObj(fromSkuOptions.find((o) => o.id === v) || null);
+                    }}
                     showSearch
                     filterOption={false}
                     onSearch={setFromSkuSearch}
@@ -564,10 +583,18 @@ export default function OtherInoutSection() {
                   />
                 </div>
                 <div>
-                  <Text type="secondary">换出数量</Text>
+                  <Space size={6}>
+                    <Text type="secondary">换出数量</Text>
+                    {fromAvailable != null && (
+                      <Text type={fromQty != null && fromQty > fromAvailable ? "danger" : "secondary"} style={{ fontSize: 12 }}>
+                        可用库存 {fromAvailable}
+                      </Text>
+                    )}
+                  </Space>
                   <InputNumber
                     style={{ width: "100%", marginTop: 4 }}
                     min={1}
+                    max={fromAvailable ?? undefined}
                     precision={0}
                     placeholder="A 减少的数量"
                     value={fromQty}
