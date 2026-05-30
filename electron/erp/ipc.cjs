@@ -779,6 +779,34 @@ function allocateMoneyByWeight(total, weights = []) {
   });
 }
 
+// 把 PO 抬头货款(total_amount，不含运费)回填到明细行 unit_cost。
+// 背景：1688 订单同步只把整单货款写进了 PO 抬头，从未摊到明细行，
+// 导致入库 calculateLineLandedCost 取 unit_cost=0、落地成本只剩运费摊销、货款全漏。
+// 口径：按各明细行 qty 权重分摊整单货款(即“按 ERP 入库数量摊”)，unit_cost = 行货款 / 行 qty。
+// 安全策略：仅当该 PO 所有明细行 unit_cost 都为 0(从未回填，典型为纯 1688 同步单)时才执行，
+// 一旦有任何行已带正单价(人工或其它来源已填)就整单跳过，避免覆盖既有数据。幂等。
+function backfillPoLineUnitCostFromGoods(db, po) {
+  if (!po) return;
+  const goods = roundMoney(po.total_amount);
+  if (goods === null || goods <= 0) return;
+  const lines = db.prepare(`
+    SELECT id, qty, unit_cost FROM erp_purchase_order_lines WHERE po_id = ? ORDER BY id ASC
+  `).all(po.id);
+  if (!lines.length) return;
+  const allZero = lines.every((line) => !(Number(line.unit_cost || 0) > 0));
+  if (!allZero) return;
+  const goodsByLine = allocateMoneyByWeight(goods, lines.map((line) => Number(line.qty || 0)));
+  const update = db.prepare(`
+    UPDATE erp_purchase_order_lines SET unit_cost = @unit_cost WHERE id = @id
+  `);
+  lines.forEach((line, index) => {
+    const qty = Number(line.qty || 0);
+    if (qty <= 0) return;
+    const unitCost = roundMoney(goodsByLine[index] / qty);
+    update.run({ id: line.id, unit_cost: unitCost ?? 0 });
+  });
+}
+
 function normalizePurchaseOrderLineItems(row = {}, rawItems = []) {
   const items = Array.isArray(rawItems) ? rawItems.filter((item) => item && typeof item === "object") : [];
   if (!items.length) return [];
@@ -15534,6 +15562,8 @@ function updatePurchaseOrderFrom1688Snapshot({
     external_logistics_synced_at: rawLogistics ? now : null,
     updated_at: now,
   });
+  // 回填明细行 unit_cost：1688 同步只写了抬头货款，不补这步入库落地成本会漏掉全部货款。
+  backfillPoLineUnitCostFromGoods(db, getPurchaseOrder(db, before.id));
   const after = getPurchaseOrder(db, before.id);
   services.workflow.writeAudit({
     accountId: before.account_id,
