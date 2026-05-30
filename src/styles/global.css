@@ -7072,9 +7072,9 @@ body {
   background: #ffffff;
 }
 
-/* 送仓托管展开明细：横向铺满（左右内边距 0），上 12px、下 32px 空隙；明细表去外框。 */
+/* 送仓托管展开明细：横向铺满（左右内边距 0），上下各留 8px 空隙；明细表去外框。 */
 .erp-compact-table.consign-unified-table .ant-table-expanded-row > td {
-  padding: 12px 0 32px !important;
+  padding: 8px 0 !important;
 }
 .consign-item-detail .erp-compact-table.ant-table-wrapper {
   border: none;
@@ -7099,11 +7099,11 @@ body {
 /* 明细单元格四周留白，避免图片/文字贴住边框或列线。 */
 .consign-item-detail .erp-compact-table .ant-table-thead > tr > th,
 .consign-item-detail .erp-compact-table .ant-table-tbody > tr > td {
-  padding: 10px 14px !important;
+  padding: 14px 18px !important;
 }
 .consign-item-detail .erp-compact-table .ant-table-thead > tr > th:first-child,
 .consign-item-detail .erp-compact-table .ant-table-tbody > tr > td:first-child {
-  padding-left: 16px !important;
+  padding-left: 24px !important;
 }
 
 .erp-compact-table .ant-table-thead > tr > th {
