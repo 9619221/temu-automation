@@ -290,7 +290,8 @@ WITH jst_base AS (
   SELECT
     o_id, so_id, shop_name, status, src_status, shop_status_text,
     item_amount, items_qty, order_date, send_date, outer_deliver_no,
-    supplier_name, logistics_company, l_id, sku_info, skus, currency
+    supplier_name, logistics_company, l_id, sku_info, skus, currency,
+    local_status_override, inventory_deducted
   FROM jst_consign_deliveries
   WHERE company_id = @company_id AND status_internal != 'deleted'
 ),
@@ -346,6 +347,8 @@ jst_left AS (
     j.sku_info AS jst_sku_info,
     j.skus AS jst_skus,
     j.currency AS jst_currency,
+    j.local_status_override AS local_status_override,
+    j.inventory_deducted AS inventory_deducted,
     c.cloud_so,
     c.cloud_row_key,
     c.cloud_mall_id,
@@ -395,6 +398,8 @@ cloud_only AS (
     NULL AS jst_sku_info,
     NULL AS jst_skus,
     NULL AS jst_currency,
+    NULL AS local_status_override,
+    0 AS inventory_deducted,
     c.cloud_so,
     c.cloud_row_key,
     c.cloud_mall_id,
@@ -516,15 +521,102 @@ function unifiedRowToPayload(row) {
   return {
     soId: row.so_id,
     shopName: row.jst_shop_name || row.cloud_mall_id || null,
-    status: row.jst_status || row.cloud_temu_status || null,
+    // 本地确认发货后 local_status_override 优先展示（已发货）。
+    status: row.local_status_override || row.jst_status || row.cloud_temu_status || null,
     itemAmount,
     itemsQty,
     orderDate: row.jst_order_date || row.cloud_order_time || null,
     outerDeliverNo: row.jst_outer_deliver_no || row.cloud_delivery_order_sn || null,
     supplierName: row.jst_supplier_name || null,
     source,
+    localStatusOverride: row.local_status_override || null,
+    inventoryDeducted: Number(row.inventory_deducted) === 1,
     rawCloud,
     rawJst,
+  };
+}
+
+// 物化快照读取：runConsignDeliveriesUnified 优先走这条（毫秒级），由
+// scripts/rebuild-consign-snapshot.cjs 后台进程预先把昂贵的 UNIFIED_CONSIGN_CTE 结果落到
+// temu_consign_unified_snapshot。读不到 / 太旧 / 任何异常 → 返回 null，调用方回退到在线 CTE
+// （正确但慢），因此没有快照 = 退化为现状，零回归。
+const CONSIGN_SNAPSHOT_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 超过 6h 未刷新视为陈旧，回退在线查询
+
+function readConsignDeliveriesUnifiedFromSnapshot(db, opts) {
+  const { companyId, page, pageSize, offset, search, statusFilter, source } = opts;
+  const tableExists = db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='temu_consign_unified_snapshot'")
+    .get();
+  if (!tableExists) return null;
+  const meta = db
+    .prepare("SELECT MAX(rebuilt_at) AS m, COUNT(*) AS c FROM temu_consign_unified_snapshot WHERE company_id = ?")
+    .get(companyId);
+  if (!meta || !meta.c) return null;
+  if (meta.m && Date.now() - Number(meta.m) > CONSIGN_SNAPSHOT_MAX_AGE_MS) return null;
+
+  // 新快照有 display_status 列(= COALESCE(jst_status, cloud_temu_status))；
+  // 部署后旧快照重建前可能还没有该列，回退到 jst_status，避免「no such column」。
+  const hasDisplayStatus = db
+    .prepare("SELECT 1 FROM pragma_table_info('temu_consign_unified_snapshot') WHERE name = 'display_status'")
+    .get();
+  const statusCol = hasDisplayStatus ? "display_status" : "jst_status";
+
+  const buildWhere = (includeSource) => {
+    const values = { company_id: companyId };
+    const cond = ["company_id = @company_id"];
+    if (search) { values.search = `%${search}%`; cond.push("search_blob LIKE @search"); }
+    if (statusFilter) { values.status_filter = statusFilter; cond.push(`${statusCol} = @status_filter`); }
+    if (includeSource && (source === "cloud" || source === "jst" || source === "both")) {
+      values.source_filter = source;
+      cond.push("source = @source_filter");
+    }
+    return { where: `WHERE ${cond.join(" AND ")}`, values };
+  };
+
+  const rowsQ = buildWhere(true);
+  const rows = db.prepare(`
+    SELECT payload_json FROM temu_consign_unified_snapshot
+    ${rowsQ.where}
+    ORDER BY order_key DESC, so_id DESC
+    LIMIT @limit OFFSET @offset
+  `).all({ ...rowsQ.values, limit: pageSize, offset });
+
+  const totalRow = db.prepare(`SELECT COUNT(*) AS n FROM temu_consign_unified_snapshot ${rowsQ.where}`).get(rowsQ.values);
+
+  // breakdown 与在线一致：不含 source 过滤
+  const bdQ = buildWhere(false);
+  const bdRows = db.prepare(`
+    SELECT source, COUNT(*) AS n FROM temu_consign_unified_snapshot ${bdQ.where} GROUP BY source
+  `).all(bdQ.values);
+  const sourceBreakdown = { cloud_only: 0, jst_only: 0, both: 0 };
+  for (const r of bdRows) {
+    if (r.source === "cloud") sourceBreakdown.cloud_only = Number(r.n || 0);
+    else if (r.source === "jst") sourceBreakdown.jst_only = Number(r.n || 0);
+    else if (r.source === "both") sourceBreakdown.both = Number(r.n || 0);
+  }
+
+  // 状态分布：只受搜索约束，按显示状态(display_status，回退 jst_status)分组，与筛选口径一致。
+  const sbValues = { company_id: companyId };
+  const sbCond = ["company_id = @company_id"];
+  if (search) { sbValues.search = `%${search}%`; sbCond.push("search_blob LIKE @search"); }
+  const statusBreakdown = {};
+  for (const r of db.prepare(`
+    SELECT ${statusCol} AS status, COUNT(*) AS n FROM temu_consign_unified_snapshot
+    WHERE ${sbCond.join(" AND ")} GROUP BY ${statusCol}
+  `).all(sbValues)) {
+    const key = r.status == null || r.status === "" ? "(空)" : String(r.status);
+    statusBreakdown[key] = Number(r.n || 0);
+  }
+
+  return {
+    ok: true,
+    rows: rows.map((r) => JSON.parse(r.payload_json)),
+    total: Number(totalRow?.n || 0),
+    page,
+    pageSize,
+    sourceBreakdown,
+    statusBreakdown,
+    fromSnapshot: true,
   };
 }
 
@@ -537,6 +629,7 @@ function runConsignDeliveriesUnified(db, params = {}) {
       page: 1,
       pageSize: Number(params.pageSize || 100),
       sourceBreakdown: { cloud_only: 0, jst_only: 0, both: 0 },
+      statusBreakdown: {},
     };
   }
   const page = Math.max(1, Number(params.page || 1));
@@ -546,6 +639,17 @@ function runConsignDeliveriesUnified(db, params = {}) {
   const statusFilter = String(params.status || "").trim();
   const source = String(params.source || "all").toLowerCase();
   const companyId = params.companyId || params.company_id || "company_default";
+
+  // 优先读物化快照（毫秒级）；读不到/太旧/异常则回退到下方在线 CTE（正确但慢）。
+  try {
+    const snapshot = readConsignDeliveriesUnifiedFromSnapshot(db, {
+      companyId, page, pageSize, offset, search, statusFilter, source,
+    });
+    if (snapshot) return snapshot;
+  } catch (snapErr) {
+    // 快照读异常不致命，继续走在线 CTE
+    void snapErr;
+  }
 
   const cloudAttached = attachTemuCloudDbIfPossible(db);
 
@@ -561,7 +665,9 @@ function runConsignDeliveriesUnified(db, params = {}) {
   if (searchClause) filterConditions.push(searchClause);
   if (statusFilter) {
     baseValues.status_filter = statusFilter;
-    filterConditions.push("jst_status = @status_filter");
+    // 状态用「显示状态」= COALESCE(local_status_override, jst_status, cloud_temu_status)：
+    // 本地确认发货后优先按覆盖状态（已发货）筛；否则聚水潭(jst)内部状态；cloud-only 兜底用 Temu 状态。
+    filterConditions.push("COALESCE(local_status_override, jst_status, cloud_temu_status) = @status_filter");
   }
 
   let sourceCondition = "";
@@ -595,6 +701,19 @@ function runConsignDeliveriesUnified(db, params = {}) {
     else if (r.source === "both") sourceBreakdown.both = Number(r.n || 0);
   }
 
+  // 状态分布：基于显示状态(COALESCE(local_status_override, jst_status, cloud_temu_status))，
+  // 只受搜索约束，与筛选口径一致，保证下拉始终能列出全部真实可筛状态值。
+  const statusBreakdownWhere = searchClause ? `WHERE ${searchClause}` : "";
+  const statusBreakdownSql = `${UNIFIED_CONSIGN_CTE}
+    SELECT COALESCE(local_status_override, jst_status, cloud_temu_status) AS status, COUNT(*) AS n
+    FROM unified ${statusBreakdownWhere}
+    GROUP BY COALESCE(local_status_override, jst_status, cloud_temu_status)`;
+  const statusBreakdown = {};
+  for (const r of db.prepare(statusBreakdownSql).all(baseValues)) {
+    const key = r.status == null || r.status === "" ? "(空)" : String(r.status);
+    statusBreakdown[key] = Number(r.n || 0);
+  }
+
   return {
     ok: true,
     rows: rows.map(unifiedRowToPayload),
@@ -602,6 +721,7 @@ function runConsignDeliveriesUnified(db, params = {}) {
     page,
     pageSize,
     sourceBreakdown,
+    statusBreakdown,
   };
 }
 
@@ -614,6 +734,7 @@ function runConsignDeliveriesUnifiedJstOnly(db, opts) {
       total: 0,
       page, pageSize,
       sourceBreakdown: { cloud_only: 0, jst_only: 0, both: 0 },
+      statusBreakdown: {},
     };
   }
   const conditions = ["company_id = @company_id", "status_internal != 'deleted'"];
@@ -624,7 +745,7 @@ function runConsignDeliveriesUnifiedJstOnly(db, opts) {
   }
   if (statusFilter) {
     values.status_filter = statusFilter;
-    conditions.push("status = @status_filter");
+    conditions.push("COALESCE(local_status_override, status) = @status_filter");
   }
   const whereClause = `WHERE ${conditions.join(" AND ")}`;
   const rows = db.prepare(`
@@ -635,12 +756,30 @@ function runConsignDeliveriesUnifiedJstOnly(db, opts) {
   `).all({ ...values, limit: pageSize, offset });
   const totalRow = db.prepare(`SELECT COUNT(*) AS n FROM jst_consign_deliveries ${whereClause}`).get(values);
   const total = Number(totalRow?.n || 0);
+
+  // 状态分布：只受搜索约束，不受状态过滤约束，保证下拉列出全部真实状态值。
+  const statusBdConditions = ["company_id = @company_id", "status_internal != 'deleted'"];
+  if (search) {
+    statusBdConditions.push(`(so_id LIKE @search OR shop_name LIKE @search OR outer_deliver_no LIKE @search OR supplier_name LIKE @search OR sku_info LIKE @search OR skus LIKE @search OR logistics_company LIKE @search OR l_id LIKE @search)`);
+  }
+  const statusBreakdown = {};
+  for (const r of db.prepare(`
+    SELECT COALESCE(local_status_override, status) AS status, COUNT(*) AS n FROM jst_consign_deliveries
+    WHERE ${statusBdConditions.join(" AND ")}
+    GROUP BY COALESCE(local_status_override, status)
+  `).all(values)) {
+    const key = r.status == null || r.status === "" ? "(空)" : String(r.status);
+    statusBreakdown[key] = Number(r.n || 0);
+  }
+
   return {
     ok: true,
     rows: rows.map((row) => ({
       soId: row.so_id,
       shopName: row.shop_name || null,
-      status: row.status || null,
+      status: row.local_status_override || row.status || null,
+      localStatusOverride: row.local_status_override || null,
+      inventoryDeducted: Number(row.inventory_deducted) === 1,
       itemAmount: row.item_amount != null ? Number(row.item_amount) : null,
       itemsQty: row.items_qty != null ? Number(row.items_qty) : null,
       orderDate: row.order_date || null,
@@ -672,6 +811,7 @@ function runConsignDeliveriesUnifiedJstOnly(db, opts) {
     page,
     pageSize,
     sourceBreakdown: { cloud_only: 0, jst_only: total, both: 0 },
+    statusBreakdown,
   };
 }
 
@@ -5233,4 +5373,7 @@ module.exports = {
   stopLanServer,
   runConsignDeliveriesUnified,
   attachTemuCloudDbIfPossible,
+  // 导出给 scripts/rebuild-consign-snapshot.cjs 复用，保证物化快照与在线查询同一份 SQL（不漂移）。
+  UNIFIED_CONSIGN_CTE,
+  unifiedRowToPayload,
 };
