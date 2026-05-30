@@ -101,7 +101,7 @@ export default function OtherInoutSection() {
   const [loading, setLoading] = useState(false);
   const [loadedOnce, setLoadedOnce] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [loadedAt, setLoadedAt] = useState<string | null>(null);
+  const [, setLoadedAt] = useState<string | null>(null);
   const [searchDraft, setSearchDraft] = useState("");
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
@@ -185,7 +185,6 @@ export default function OtherInoutSection() {
     }
   }, [expandedId]);
 
-  const typeCount = useMemo(() => new Set(rows.map((r) => r.type).filter(Boolean)).size, [rows]);
   const totalQty = useMemo(() => rows.reduce((s, r) => s + Number(r.totalQty || 0), 0), [rows]);
   const totalAmount = useMemo(() => rows.reduce((s, r) => s + Number(r.totalAmount || 0), 0), [rows]);
 
@@ -434,14 +433,7 @@ export default function OtherInoutSection() {
       </Row>
 
       <section className="app-panel">
-        <div className="app-panel__title">
-          <div>
-            <div className="app-panel__title-main">其他出入库明细</div>
-            <div className="app-panel__title-sub">
-              历史台账来自导入。本页 {formatNumber(rows.length)} / 累计 {formatNumber(total)} 条；涉及类型 {formatNumber(typeCount)}。
-              {loadedAt ? ` 同步 ${formatTime(loadedAt)}` : ""}
-            </div>
-          </div>
+        <div className="app-panel__title" style={{ justifyContent: "flex-end" }}>
           <div>
             <Space>
               <Button type="primary" icon={<SwapOutlined />} onClick={openXfer}>新建换货</Button>
@@ -537,93 +529,127 @@ export default function OtherInoutSection() {
         onOk={() => void submitXfer()}
         okText="确认换货"
         confirmLoading={xferSubmitting}
+        width={760}
         destroyOnClose
       >
-        <Alert
-          style={{ marginBottom: 16 }}
-          type="info"
-          showIcon
-          message="只动库存、不留单据"
-          description="换出编码（A）按 FIFO 扣减库存，按你填的总额计货值；A 减这笔货值、B 加这笔货值，两边均价各自重算。店铺跟着商品编码走，数量可不等。不生成出入库单。"
-        />
-        <Space direction="vertical" size={12} style={{ width: "100%" }}>
-          <div>
-            <Text type="secondary">换出商品编码（A，减库存）</Text>
-            <Select
-              style={{ width: "100%", marginTop: 4 }}
-              placeholder="输入编码 / 名称搜索"
-              value={fromSkuId}
-              onChange={setFromSkuId}
-              showSearch
-              filterOption={false}
-              onSearch={setFromSkuSearch}
-              loading={fromSkuLoading}
-              notFoundContent={fromSkuLoading ? "搜索中…" : "无匹配商品"}
-              options={fromSkuOptions.map((s) => ({ value: s.id, label: skuOptionLabel(s) }))}
-            />
-          </div>
-          <div>
-            <Text type="secondary">换出数量</Text>
-            <InputNumber
-              style={{ width: "100%", marginTop: 4 }}
-              min={1}
-              precision={0}
-              placeholder="A 减少的数量"
-              value={fromQty}
-              onChange={(v) => onFromQtyChange(v as number | null)}
-            />
-          </div>
-          <Row gutter={12}>
-            <Col span={12}>
-              <Text type="secondary">换出单价</Text>
-              <InputNumber
-                style={{ width: "100%", marginTop: 4 }}
-                min={0}
-                precision={2}
-                placeholder="单价、总额填一个"
-                value={fromUnitCost}
-                onChange={(v) => onFromUnitCostChange(v as number | null)}
-              />
-            </Col>
-            <Col span={12}>
-              <Text type="secondary">换出总额</Text>
-              <InputNumber
-                style={{ width: "100%", marginTop: 4 }}
-                min={0}
-                precision={2}
-                placeholder="另一个自动算"
-                value={fromAmount}
-                onChange={(v) => onFromAmountChange(v as number | null)}
-              />
-            </Col>
-          </Row>
-          <div>
-            <Text type="secondary">换入商品编码（B，加库存）</Text>
-            <Select
-              style={{ width: "100%", marginTop: 4 }}
-              placeholder="输入编码 / 名称搜索"
-              value={toSkuId}
-              onChange={setToSkuId}
-              showSearch
-              filterOption={false}
-              onSearch={setToSkuSearch}
-              loading={toSkuLoading}
-              notFoundContent={toSkuLoading ? "搜索中…" : "无匹配商品"}
-              options={toSkuOptions.map((s) => ({ value: s.id, label: skuOptionLabel(s) }))}
-            />
-          </div>
-          <div>
-            <Text type="secondary">换入数量</Text>
-            <InputNumber
-              style={{ width: "100%", marginTop: 4 }}
-              min={1}
-              precision={0}
-              placeholder="B 增加的数量"
-              value={toQty}
-              onChange={(v) => setToQty(v as number | null)}
-            />
-          </div>
-        </Space>
+        <Row gutter={16} align="stretch" wrap={false}>
+          {/* 左栏：换出 A（减库存），淡红 */}
+          <Col flex="1 1 0">
+            <div
+              style={{
+                background: "#fff1f0",
+                border: "1px solid #ffccc7",
+                borderRadius: 8,
+                padding: 16,
+                height: "100%",
+              }}
+            >
+              <Tag color="error" style={{ marginBottom: 12, fontWeight: 600 }}>
+                换出 A · 减库存
+              </Tag>
+              <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                <div>
+                  <Text type="secondary">换出商品编码</Text>
+                  <Select
+                    style={{ width: "100%", marginTop: 4 }}
+                    placeholder="输入编码 / 名称搜索"
+                    value={fromSkuId}
+                    onChange={setFromSkuId}
+                    showSearch
+                    filterOption={false}
+                    onSearch={setFromSkuSearch}
+                    loading={fromSkuLoading}
+                    notFoundContent={fromSkuLoading ? "搜索中…" : "无匹配商品"}
+                    options={fromSkuOptions.map((s) => ({ value: s.id, label: skuOptionLabel(s) }))}
+                  />
+                </div>
+                <div>
+                  <Text type="secondary">换出数量</Text>
+                  <InputNumber
+                    style={{ width: "100%", marginTop: 4 }}
+                    min={1}
+                    precision={0}
+                    placeholder="A 减少的数量"
+                    value={fromQty}
+                    onChange={(v) => onFromQtyChange(v as number | null)}
+                  />
+                </div>
+                <Row gutter={12}>
+                  <Col span={12}>
+                    <Text type="secondary">换出单价</Text>
+                    <InputNumber
+                      style={{ width: "100%", marginTop: 4 }}
+                      min={0}
+                      precision={2}
+                      placeholder="单价、总额填一个"
+                      value={fromUnitCost}
+                      onChange={(v) => onFromUnitCostChange(v as number | null)}
+                    />
+                  </Col>
+                  <Col span={12}>
+                    <Text type="secondary">换出总额</Text>
+                    <InputNumber
+                      style={{ width: "100%", marginTop: 4 }}
+                      min={0}
+                      precision={2}
+                      placeholder="另一个自动算"
+                      value={fromAmount}
+                      onChange={(v) => onFromAmountChange(v as number | null)}
+                    />
+                  </Col>
+                </Row>
+              </Space>
+            </div>
+          </Col>
+          {/* 中间箭头 */}
+          <Col flex="0 0 auto" style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <SwapOutlined style={{ fontSize: 22, color: "#bfbfbf" }} />
+          </Col>
+          {/* 右栏：换入 B（加库存），淡绿 */}
+          <Col flex="1 1 0">
+            <div
+              style={{
+                background: "#f6ffed",
+                border: "1px solid #b7eb8f",
+                borderRadius: 8,
+                padding: 16,
+                height: "100%",
+              }}
+            >
+              <Tag color="success" style={{ marginBottom: 12, fontWeight: 600 }}>
+                换入 B · 加库存
+              </Tag>
+              <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                <div>
+                  <Text type="secondary">换入商品编码</Text>
+                  <Select
+                    style={{ width: "100%", marginTop: 4 }}
+                    placeholder="输入编码 / 名称搜索"
+                    value={toSkuId}
+                    onChange={setToSkuId}
+                    showSearch
+                    filterOption={false}
+                    onSearch={setToSkuSearch}
+                    loading={toSkuLoading}
+                    notFoundContent={toSkuLoading ? "搜索中…" : "无匹配商品"}
+                    options={toSkuOptions.map((s) => ({ value: s.id, label: skuOptionLabel(s) }))}
+                  />
+                </div>
+                <div>
+                  <Text type="secondary">换入数量</Text>
+                  <InputNumber
+                    style={{ width: "100%", marginTop: 4 }}
+                    min={1}
+                    precision={0}
+                    placeholder="B 增加的数量"
+                    value={toQty}
+                    onChange={(v) => setToQty(v as number | null)}
+                  />
+                </div>
+              </Space>
+            </div>
+          </Col>
+        </Row>
       </Modal>
     </div>
   );
