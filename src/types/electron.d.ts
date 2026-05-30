@@ -819,6 +819,7 @@ interface ErpAPI {
   reports?: {
     multiStore: (options?: { includeTest?: boolean }) => Promise<ErpMultiStoreReportResponse>;
     mallDict: () => Promise<ErpMallDictResponse>;
+    setMallOwner: (payload: { mallId: string; owner: string | null }) => Promise<ErpSetMallOwnerResponse>;
   };
   events?: {
     onPurchaseUpdate: (handler: (payload: ErpPurchaseUpdateEvent) => void) => () => void;
@@ -835,6 +836,8 @@ interface ErpMultiStoreReportStore {
   store_code: string | null;
   store_status: 'active' | 'test' | 'unknown' | string;
   dict_remark: string | null;
+  owner: string | null;
+  financials: ErpStoreFinancials | null;
   sales: {
     today_qty: number;
     last7d_qty: number;
@@ -877,6 +880,22 @@ interface ErpMultiStoreReportStore {
   };
 }
 
+interface ErpStoreFinancialsWindow {
+  revenue: number;
+  cost: number;
+  gross_profit: number;
+  qty: number;
+}
+
+interface ErpStoreFinancials {
+  latest_date: string | null;
+  today: ErpStoreFinancialsWindow;
+  last7d: ErpStoreFinancialsWindow & { revenue_prev: number; rev_wow: number | null };
+  last30d: ErpStoreFinancialsWindow & { revenue_prev: number; rev_mom: number | null };
+  cost_coverage: number | null;
+  trend_daily: Array<{ date: string; revenue: number; gross_profit: number }>;
+}
+
 interface ErpMultiStoreReportResponse {
   ok: boolean;
   error?: string;
@@ -884,9 +903,16 @@ interface ErpMultiStoreReportResponse {
     generated_at: number;
     cloud_tenant_id: string | null;
     store_count: number;
+    financials_available: boolean;
     stores: ErpMultiStoreReportStore[];
     unmapped: ErpMultiStoreReportStore[];
   };
+}
+
+interface ErpSetMallOwnerResponse {
+  ok: boolean;
+  error?: string;
+  data?: { changes: number };
 }
 
 interface ErpMallDictEntry {
@@ -896,6 +922,7 @@ interface ErpMallDictEntry {
   site: string | null;
   status: string | null;
   remark: string | null;
+  owner?: string | null;
 }
 
 interface ErpMallDictResponse {

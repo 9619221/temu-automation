@@ -17,7 +17,11 @@ function registerReportsHandlers(ipcMain, deps) {
       }
       requireErp();
       const { buildMultiStoreReport } = require("../services/multiStoreReport.cjs");
-      const data = await buildMultiStoreReport(erpState.db, { includeTest: payload?.includeTest });
+      const { attachTemuCloudDbIfPossible } = require("../lanServer.cjs");
+      const data = await buildMultiStoreReport(erpState.db, {
+        includeTest: payload?.includeTest,
+        attachCloudDb: attachTemuCloudDbIfPossible,
+      });
       return { ok: true, data };
     } catch (error) {
       return { ok: false, error: error?.message || String(error) };
@@ -36,6 +40,25 @@ function registerReportsHandlers(ipcMain, deps) {
       const { _internal } = require("../services/multiStoreReport.cjs");
       const malls = _internal.readMallDictionary(erpState.db);
       return { ok: true, data: { malls } };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+
+  // 设置店铺运营负责人（多店报表 - 店铺归属）。写 erp_temu_malls.owner。
+  ipcMain.handle("erp:reports:set-mall-owner", async (_event, payload) => {
+    try {
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest(`/api/erp/reports/set-mall-owner`, {
+          method: "POST",
+          body: { mall_id: payload?.mallId, owner: payload?.owner ?? null },
+        });
+      }
+      requireErp();
+      const { setMallOwner } = require("../services/multiStoreReport.cjs");
+      const changes = setMallOwner(erpState.db, payload?.mallId, payload?.owner);
+      return { ok: true, data: { changes } };
     } catch (error) {
       return { ok: false, error: error?.message || String(error) };
     }

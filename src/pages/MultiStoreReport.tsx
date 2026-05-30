@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
+  AutoComplete,
   Badge,
   Button,
   Card,
   Empty,
+  Select,
   Space,
   Statistic,
   Table,
@@ -14,9 +16,33 @@ import {
   Typography,
   message,
 } from "antd";
-import { ReloadOutlined } from "@ant-design/icons";
+import { ArrowDownOutlined, ArrowUpOutlined, ReloadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip as RTooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import { readPageCache, writePageCache } from "../utils/pageCache";
+
+interface FinWindow {
+  revenue: number;
+  cost: number;
+  gross_profit: number;
+  qty: number;
+}
+interface StoreFinancials {
+  latest_date: string | null;
+  today: FinWindow;
+  last7d: FinWindow & { revenue_prev: number; rev_wow: number | null };
+  last30d: FinWindow & { revenue_prev: number; rev_mom: number | null };
+  cost_coverage: number | null;
+  trend_daily: Array<{ date: string; revenue: number; gross_profit: number }>;
+}
 
 interface ReportStore {
   mall_id: string;
@@ -26,6 +52,8 @@ interface ReportStore {
   store_code: string | null;
   store_status: string;
   dict_remark: string | null;
+  owner: string | null;
+  financials: StoreFinancials | null;
   sales: { today_qty: number; last7d_qty: number; last30d_qty: number; sku_count: number };
   stock_orders: { total: number; pending: number; demand_qty: number; delivered_qty: number };
   activities: { count: number; unique: number; skc_count: number };
@@ -52,6 +80,7 @@ interface ReportData {
   generated_at: number;
   cloud_tenant_id: string | null;
   store_count: number;
+  financials_available: boolean;
   stores: ReportStore[];
   unmapped: ReportStore[];
 }
@@ -63,13 +92,38 @@ interface MultiStoreResponse {
 }
 
 const REFRESH_MS = 5 * 60 * 1000; // 5 分钟自动刷新一次
-// 轻量 SWR：缓存上次报表，进页面先显示、后台刷新，避免冷启动空等（报表仍每 5 分钟自动刷新保时效）。
 const MULTI_STORE_REPORT_CACHE_KEY = "temu.multi-store-report.cache.v1";
 const STALE_THRESHOLD_SECONDS = 2 * 60 * 60; // 2 小时无数据视为掉线
+const UNASSIGNED = "__unassigned__";
+
+// 预警阈值
+const ALERT_MARGIN_LOW = 0.1; // 毛利率低于 10% 预警
+const ALERT_AFTER_SALE_RATIO = 3; // 90 天售后率高于 3% 预警
 
 function fmtNum(n: number | null | undefined) {
   if (n == null) return "-";
   return n.toLocaleString("zh-CN");
+}
+
+function fmtMoney(n: number | null | undefined) {
+  if (n == null) return "—";
+  return "¥" + Math.round(n).toLocaleString("zh-CN");
+}
+
+function fmtPct(n: number | null | undefined, digits = 1) {
+  if (n == null || !Number.isFinite(n)) return "—";
+  return (n * 100).toFixed(digits) + "%";
+}
+
+function marginOf(w: FinWindow | null | undefined): number | null {
+  if (!w || w.revenue <= 0) return null;
+  return w.gross_profit / w.revenue;
+}
+
+function parseAfterSaleRatio(v: string | number | null): number | null {
+  if (v == null || v === "") return null;
+  const num = typeof v === "number" ? v : Number(String(v).replace("%", ""));
+  return Number.isFinite(num) ? num : null;
 }
 
 function fmtLag(seconds: number | null) {
@@ -82,15 +136,29 @@ function fmtLag(seconds: number | null) {
 
 function lagColor(seconds: number | null): string {
   if (seconds == null) return "default";
-  if (seconds < 600) return "success"; // 10min 内
-  if (seconds < STALE_THRESHOLD_SECONDS) return "processing"; // 2h 内
-  return "error"; // 超 2h
+  if (seconds < 600) return "success";
+  if (seconds < STALE_THRESHOLD_SECONDS) return "processing";
+  return "error";
+}
+
+function DeltaTag({ value }: { value: number | null }) {
+  if (value == null) return <span style={{ color: "#bbb" }}>—</span>;
+  if (Math.abs(value) < 0.0005) return <span style={{ color: "#999" }}>0%</span>;
+  const up = value > 0;
+  return (
+    <span style={{ color: up ? "#3f8600" : "#cf1322", fontSize: 12 }}>
+      {up ? <ArrowUpOutlined /> : <ArrowDownOutlined />} {(Math.abs(value) * 100).toFixed(1)}%
+    </span>
+  );
 }
 
 function StoreCell({ store }: { store: ReportStore }) {
   return (
     <div>
       <Typography.Text strong>{store.store_code || "—"}</Typography.Text>
+      {store.owner && (
+        <Tag color="blue" style={{ marginLeft: 6 }}>{store.owner}</Tag>
+      )}
       <div style={{ color: "#888", fontSize: 12, lineHeight: 1.4 }}>{store.mall_name || "(未命名)"}</div>
     </div>
   );
@@ -103,6 +171,8 @@ export default function MultiStoreReport() {
   );
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("daily");
+  const [ownerFilter, setOwnerFilter] = useState<string>("all");
+  const [savingMall, setSavingMall] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!window.electronAPI?.erp?.reports?.multiStore) {
@@ -134,163 +204,204 @@ export default function MultiStoreReport() {
     return () => window.clearInterval(timer);
   }, [load]);
 
-  const stores = data?.stores || [];
+  const allStores = data?.stores || [];
+  const finAvailable = data?.financials_available ?? false;
+
+  const ownerOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const s of allStores) if (s.owner) set.add(s.owner);
+    return Array.from(set).sort();
+  }, [allStores]);
+
+  const stores = useMemo(() => {
+    if (ownerFilter === "all") return allStores;
+    if (ownerFilter === UNASSIGNED) return allStores.filter((s) => !s.owner);
+    return allStores.filter((s) => s.owner === ownerFilter);
+  }, [allStores, ownerFilter]);
+
+  const saveOwner = useCallback(async (mallId: string, owner: string | null) => {
+    if (!window.electronAPI?.erp?.reports?.setMallOwner) {
+      message.error("当前版本不支持设置负责人，请升级桌面端");
+      return;
+    }
+    setSavingMall(mallId);
+    try {
+      const resp = await window.electronAPI.erp.reports.setMallOwner({ mallId, owner: owner || null });
+      if (resp.ok) {
+        message.success("已保存");
+        load();
+      } else {
+        message.error(resp.error || "保存失败");
+      }
+    } catch (e: any) {
+      message.error(e?.message || String(e));
+    } finally {
+      setSavingMall(null);
+    }
+  }, [load]);
 
   const summary = useMemo(() => {
     if (!stores.length) return null;
-    const onlineCount = stores.filter((s: ReportStore) => s.health.lag_seconds != null && s.health.lag_seconds < STALE_THRESHOLD_SECONDS).length;
-    const totalSales7d = stores.reduce((acc: number, s: ReportStore) => acc + (s.sales.last7d_qty || 0), 0);
-    const totalPending = stores.reduce((acc: number, s: ReportStore) => acc + (s.stock_orders.pending || 0), 0);
-    const totalActivities = stores.reduce((acc: number, s: ReportStore) => acc + (s.activities.count || 0), 0);
-    return { onlineCount, totalSales7d, totalPending, totalActivities };
+    const onlineCount = stores.filter((s) => s.health.lag_seconds != null && s.health.lag_seconds < STALE_THRESHOLD_SECONDS).length;
+    const totalPending = stores.reduce((acc, s) => acc + (s.stock_orders.pending || 0), 0);
+    const rev30 = stores.reduce((acc, s) => acc + (s.financials?.last30d.revenue || 0), 0);
+    const gp30 = stores.reduce((acc, s) => acc + (s.financials?.last30d.gross_profit || 0), 0);
+    const revToday = stores.reduce((acc, s) => acc + (s.financials?.today.revenue || 0), 0);
+    return { onlineCount, totalPending, rev30, gp30, revToday, margin30: rev30 > 0 ? gp30 / rev30 : null };
+  }, [stores]);
+
+  // 全局趋势（合并各店 trend_daily）
+  const combinedTrend = useMemo(() => {
+    const m = new Map<string, { date: string; revenue: number; gross_profit: number }>();
+    for (const s of stores) {
+      for (const t of s.financials?.trend_daily ?? []) {
+        const e = m.get(t.date) || { date: t.date, revenue: 0, gross_profit: 0 };
+        e.revenue += t.revenue;
+        e.gross_profit += t.gross_profit;
+        m.set(t.date, e);
+      }
+    }
+    return Array.from(m.values()).sort((a, b) => a.date.localeCompare(b.date));
+  }, [stores]);
+
+  // 按负责人卷积
+  const ownerRollup = useMemo(() => {
+    const m = new Map<string, {
+      owner: string;
+      store_count: number;
+      rev30: number;
+      gp30: number;
+      pending: number;
+      after_sales: number;
+      risk: number;
+    }>();
+    for (const s of stores) {
+      const key = s.owner || "(未分配)";
+      const r = m.get(key) || { owner: key, store_count: 0, rev30: 0, gp30: 0, pending: 0, after_sales: 0, risk: 0 };
+      r.store_count += 1;
+      r.rev30 += s.financials?.last30d.revenue || 0;
+      r.gp30 += s.financials?.last30d.gross_profit || 0;
+      r.pending += s.stock_orders.pending || 0;
+      r.after_sales += s.after_sales.count || 0;
+      r.risk += 0; // 风险数当前 by-store 未透出，预留
+      m.set(key, r);
+    }
+    return Array.from(m.values()).sort((a, b) => b.rev30 - a.rev30);
+  }, [stores]);
+
+  // 异常预警
+  const alerts = useMemo(() => {
+    const out: Array<{ key: string; level: "error" | "warning"; text: string }> = [];
+    for (const s of stores) {
+      const code = s.store_code || s.mall_id;
+      const who = s.owner ? `（${s.owner}）` : "";
+      if (s.health.lag_seconds == null || s.health.lag_seconds >= STALE_THRESHOLD_SECONDS) {
+        out.push({ key: `${s.mall_id}-lag`, level: "error", text: `${code}${who} 采集滞后/掉线（${fmtLag(s.health.lag_seconds)}前）` });
+      }
+      const m30 = marginOf(s.financials?.last30d);
+      if (m30 != null && m30 < ALERT_MARGIN_LOW) {
+        out.push({ key: `${s.mall_id}-margin`, level: "warning", text: `${code}${who} 近 30 天毛利率偏低（${fmtPct(m30)}）` });
+      }
+      const asr = parseAfterSaleRatio(s.shop_stats.after_sale_ratio_90d);
+      if (asr != null && asr > ALERT_AFTER_SALE_RATIO) {
+        out.push({ key: `${s.mall_id}-asr`, level: "warning", text: `${code}${who} 90 天售后率偏高（${asr}%）` });
+      }
+      if ((s.shop_stats.already_sold_out_skc || 0) > 0) {
+        out.push({ key: `${s.mall_id}-soldout`, level: "warning", text: `${code}${who} 已售罄 ${s.shop_stats.already_sold_out_skc} 个 SKC` });
+      }
+    }
+    return out;
   }, [stores]);
 
   // === Tab 1: 运营日报 ===
   const dailyColumns: ColumnsType<ReportStore> = [
+    { title: "店号 / 店铺", key: "store", width: 200, fixed: "left", render: (_, s) => <StoreCell store={s} />, sorter: (a, b) => (a.store_code || "").localeCompare(b.store_code || ""), defaultSortOrder: "ascend" },
+    { title: "今日销量", dataIndex: ["sales", "today_qty"], width: 90, align: "right", render: (v) => fmtNum(v), sorter: (a, b) => (a.sales.today_qty || 0) - (b.sales.today_qty || 0) },
+    { title: "近 7 天", dataIndex: ["sales", "last7d_qty"], width: 90, align: "right", render: (v) => fmtNum(v), sorter: (a, b) => (a.sales.last7d_qty || 0) - (b.sales.last7d_qty || 0) },
+    { title: "待发备货", dataIndex: ["stock_orders", "pending"], width: 90, align: "right", render: (v: number) => (v > 0 ? <Tag color="orange">{fmtNum(v)}</Tag> : <span>—</span>), sorter: (a, b) => (a.stock_orders.pending || 0) - (b.stock_orders.pending || 0) },
+    { title: "缺货", dataIndex: ["shop_stats", "lack_skc"], width: 80, align: "right", render: (v: number) => (v > 0 ? <Tag color="gold">{fmtNum(v)}</Tag> : <span>—</span>), sorter: (a, b) => (a.shop_stats.lack_skc || 0) - (b.shop_stats.lack_skc || 0) },
+    { title: "已售罄", dataIndex: ["shop_stats", "already_sold_out_skc"], width: 80, align: "right", render: (v: number) => (v > 0 ? <Tag color="red">{fmtNum(v)}</Tag> : <span>—</span>), sorter: (a, b) => (a.shop_stats.already_sold_out_skc || 0) - (b.shop_stats.already_sold_out_skc || 0) },
+    { title: "待处理售后", dataIndex: ["after_sales", "count"], width: 100, align: "right", render: (v: number) => (v > 0 ? <Tag color="volcano">{fmtNum(v)}</Tag> : <span>—</span>), sorter: (a, b) => (a.after_sales.count || 0) - (b.after_sales.count || 0) },
+    { title: "数据上报", key: "lag", width: 110, render: (_, s) => <Tag color={lagColor(s.health.lag_seconds)}>{fmtLag(s.health.lag_seconds)}前</Tag>, sorter: (a, b) => (a.health.lag_seconds ?? Infinity) - (b.health.lag_seconds ?? Infinity) },
+  ];
+
+  // === Tab 2: 老板周/月（金额）===
+  const bossColumns: ColumnsType<ReportStore> = [
+    { title: "店号 / 店铺", key: "store", width: 200, fixed: "left", render: (_, s) => <StoreCell store={s} />, sorter: (a, b) => (a.store_code || "").localeCompare(b.store_code || "") },
+    { title: "近 7 天营收", key: "rev7", width: 120, align: "right", render: (_, s) => fmtMoney(s.financials?.last7d.revenue), sorter: (a, b) => (a.financials?.last7d.revenue || 0) - (b.financials?.last7d.revenue || 0), defaultSortOrder: "descend" },
+    { title: "7 天环比", key: "wow", width: 90, align: "right", render: (_, s) => <DeltaTag value={s.financials?.last7d.rev_wow ?? null} /> },
+    { title: "近 30 天营收", key: "rev30", width: 120, align: "right", render: (_, s) => fmtMoney(s.financials?.last30d.revenue), sorter: (a, b) => (a.financials?.last30d.revenue || 0) - (b.financials?.last30d.revenue || 0) },
+    { title: "30 天环比", key: "mom", width: 90, align: "right", render: (_, s) => <DeltaTag value={s.financials?.last30d.rev_mom ?? null} /> },
+    { title: "近 30 天毛利", key: "gp30", width: 120, align: "right", render: (_, s) => fmtMoney(s.financials?.last30d.gross_profit), sorter: (a, b) => (a.financials?.last30d.gross_profit || 0) - (b.financials?.last30d.gross_profit || 0) },
     {
-      title: "店号 / 店铺",
-      key: "store",
-      width: 180,
-      fixed: "left",
-      render: (_, store) => <StoreCell store={store} />,
-      sorter: (a, b) => (a.store_code || "").localeCompare(b.store_code || ""),
-      defaultSortOrder: "ascend",
+      title: "毛利率", key: "margin", width: 110, align: "right",
+      render: (_, s) => {
+        const m = marginOf(s.financials?.last30d);
+        const cov = s.financials?.cost_coverage;
+        const node = <span style={{ color: m != null && m < ALERT_MARGIN_LOW ? "#cf1322" : undefined }}>{fmtPct(m)}</span>;
+        if (cov != null && cov < 0.9) {
+          return <Tooltip title={`成本覆盖 ${fmtPct(cov, 0)}，未覆盖 SKU 按 0 成本，毛利率偏高`}>{node} <Typography.Text type="secondary" style={{ fontSize: 11 }}>*</Typography.Text></Tooltip>;
+        }
+        return node;
+      },
+      sorter: (a, b) => (marginOf(a.financials?.last30d) ?? -1) - (marginOf(b.financials?.last30d) ?? -1),
     },
     {
-      title: "今日销量",
-      dataIndex: ["sales", "today_qty"],
-      width: 100,
-      align: "right",
-      render: (v) => fmtNum(v),
-      sorter: (a, b) => (a.sales.today_qty || 0) - (b.sales.today_qty || 0),
+      title: "30 天趋势", key: "trend", width: 140,
+      render: (_, s) => {
+        const t = s.financials?.trend_daily ?? [];
+        if (t.length < 2) return <span style={{ color: "#bbb" }}>—</span>;
+        return (
+          <ResponsiveContainer width="100%" height={36}>
+            <LineChart data={t}>
+              <Line type="monotone" dataKey="revenue" stroke="#1677ff" dot={false} strokeWidth={1.5} isAnimationActive={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        );
+      },
     },
+  ];
+
+  // === Tab 3: 团队管理 ===
+  const managerColumns: ColumnsType<(typeof ownerRollup)[number]> = [
+    { title: "负责人", dataIndex: "owner", key: "owner", width: 140, fixed: "left", render: (v: string) => <Typography.Text strong>{v}</Typography.Text> },
+    { title: "管理店数", dataIndex: "store_count", key: "store_count", width: 100, align: "right", render: (v) => fmtNum(v), sorter: (a, b) => a.store_count - b.store_count },
+    { title: "近 30 天营收", dataIndex: "rev30", key: "rev30", width: 130, align: "right", render: (v) => fmtMoney(v), sorter: (a, b) => a.rev30 - b.rev30, defaultSortOrder: "descend" },
+    { title: "近 30 天毛利", dataIndex: "gp30", key: "gp30", width: 130, align: "right", render: (v) => fmtMoney(v), sorter: (a, b) => a.gp30 - b.gp30 },
+    { title: "毛利率", key: "margin", width: 100, align: "right", render: (_, r) => fmtPct(r.rev30 > 0 ? r.gp30 / r.rev30 : null) },
+    { title: "待发备货", dataIndex: "pending", key: "pending", width: 100, align: "right", render: (v: number) => (v > 0 ? <Tag color="orange">{fmtNum(v)}</Tag> : "—"), sorter: (a, b) => a.pending - b.pending },
+    { title: "待处理售后", dataIndex: "after_sales", key: "after_sales", width: 110, align: "right", render: (v: number) => (v > 0 ? <Tag color="volcano">{fmtNum(v)}</Tag> : "—"), sorter: (a, b) => a.after_sales - b.after_sales },
+  ];
+
+  // === Tab 4: 店铺归属 ===
+  const ownerEditColumns: ColumnsType<ReportStore> = [
+    { title: "店号", dataIndex: "store_code", width: 90, fixed: "left", render: (v) => <Typography.Text strong>{v || "—"}</Typography.Text>, sorter: (a, b) => (a.store_code || "").localeCompare(b.store_code || ""), defaultSortOrder: "ascend" },
+    { title: "店铺名", dataIndex: "mall_name", width: 200, render: (v) => v || "(未命名)" },
+    { title: "站点", dataIndex: "site", width: 120, render: (v) => v || "—" },
     {
-      title: "近 7 天",
-      dataIndex: ["sales", "last7d_qty"],
-      width: 100,
-      align: "right",
-      render: (v) => fmtNum(v),
-      sorter: (a, b) => (a.sales.last7d_qty || 0) - (b.sales.last7d_qty || 0),
-    },
-    {
-      title: "待发备货",
-      dataIndex: ["stock_orders", "pending"],
-      width: 100,
-      align: "right",
-      render: (v: number) => v > 0 ? <Tag color="orange">{fmtNum(v)}</Tag> : <span>—</span>,
-      sorter: (a, b) => (a.stock_orders.pending || 0) - (b.stock_orders.pending || 0),
-    },
-    {
-      title: "活动报名",
-      dataIndex: ["activities", "count"],
-      width: 100,
-      align: "right",
-      render: (v) => fmtNum(v),
-      sorter: (a, b) => (a.activities.count || 0) - (b.activities.count || 0),
-    },
-    {
-      title: "SKU 数",
-      dataIndex: ["sales", "sku_count"],
-      width: 100,
-      align: "right",
-      render: (v) => fmtNum(v),
-      sorter: (a, b) => (a.sales.sku_count || 0) - (b.sales.sku_count || 0),
-    },
-    {
-      title: "数据上报",
-      key: "lag",
-      width: 120,
+      title: "运营负责人", key: "owner", width: 220,
       render: (_, s) => (
-        <Tag color={lagColor(s.health.lag_seconds)}>
-          {fmtLag(s.health.lag_seconds)}前
-        </Tag>
+        <AutoComplete
+          style={{ width: 180 }}
+          defaultValue={s.owner || ""}
+          options={ownerOptions.map((o) => ({ value: o }))}
+          placeholder="输入负责人姓名"
+          disabled={savingMall === s.mall_id}
+          filterOption={(input, opt) => (opt?.value || "").toLowerCase().includes(input.toLowerCase())}
+          onBlur={(e) => {
+            const next = (e.target as HTMLInputElement).value.trim();
+            if (next !== (s.owner || "")) saveOwner(s.mall_id, next);
+          }}
+        />
       ),
-      sorter: (a, b) => (a.health.lag_seconds ?? Infinity) - (b.health.lag_seconds ?? Infinity),
     },
   ];
 
-  // === Tab 2: 老板周/月报（横向对比）===
-  const monthlyColumns: ColumnsType<ReportStore> = [
-    {
-      title: "店号 / 店铺",
-      key: "store",
-      width: 180,
-      fixed: "left",
-      render: (_, store) => <StoreCell store={store} />,
-      sorter: (a, b) => (a.store_code || "").localeCompare(b.store_code || ""),
-    },
-    {
-      title: "近 7 天销量",
-      dataIndex: ["sales", "last7d_qty"],
-      width: 110,
-      align: "right",
-      render: (v) => fmtNum(v),
-      sorter: (a, b) => (a.sales.last7d_qty || 0) - (b.sales.last7d_qty || 0),
-      defaultSortOrder: "descend",
-    },
-    {
-      title: "近 30 天销量",
-      dataIndex: ["sales", "last30d_qty"],
-      width: 110,
-      align: "right",
-      render: (v) => fmtNum(v),
-      sorter: (a, b) => (a.sales.last30d_qty || 0) - (b.sales.last30d_qty || 0),
-    },
-    {
-      title: "在售 SKC",
-      dataIndex: ["shop_stats", "on_sale_skc"],
-      width: 100,
-      align: "right",
-      render: (v) => fmtNum(v),
-      sorter: (a, b) => (a.shop_stats.on_sale_skc || 0) - (b.shop_stats.on_sale_skc || 0),
-    },
-    {
-      title: "已售罄",
-      dataIndex: ["shop_stats", "already_sold_out_skc"],
-      width: 100,
-      align: "right",
-      render: (v: number) => v > 0 ? <Tag color="red">{fmtNum(v)}</Tag> : <span>—</span>,
-      sorter: (a, b) => (a.shop_stats.already_sold_out_skc || 0) - (b.shop_stats.already_sold_out_skc || 0),
-    },
-    {
-      title: "缺货中",
-      dataIndex: ["shop_stats", "lack_skc"],
-      width: 100,
-      align: "right",
-      render: (v: number) => v > 0 ? <Tag color="orange">{fmtNum(v)}</Tag> : <span>—</span>,
-      sorter: (a, b) => (a.shop_stats.lack_skc || 0) - (b.shop_stats.lack_skc || 0),
-    },
-    {
-      title: "活动 SKC",
-      dataIndex: ["activities", "skc_count"],
-      width: 100,
-      align: "right",
-      render: (v) => fmtNum(v),
-      sorter: (a, b) => (a.activities.skc_count || 0) - (b.activities.skc_count || 0),
-    },
-    {
-      title: "售后率 90d",
-      dataIndex: ["shop_stats", "after_sale_ratio_90d"],
-      width: 110,
-      align: "right",
-      render: (v) => (v == null || v === "" ? "—" : String(v)),
-    },
-  ];
-
-  // === Tab 3: 运维监控 ===
+  // === Tab 5: 运维监控 ===
   const opsColumns: ColumnsType<ReportStore> = [
+    { title: "店号 / 店铺", key: "store", width: 200, fixed: "left", render: (_, s) => <StoreCell store={s} />, sorter: (a, b) => (a.store_code || "").localeCompare(b.store_code || "") },
     {
-      title: "店号 / 店铺",
-      key: "store",
-      width: 200,
-      fixed: "left",
-      render: (_, store) => <StoreCell store={store} />,
-      sorter: (a, b) => (a.store_code || "").localeCompare(b.store_code || ""),
-    },
-    {
-      title: "状态",
-      key: "status",
-      width: 100,
+      title: "状态", key: "status", width: 100,
       render: (_, s) => {
         const sec = s.health.lag_seconds;
         if (sec == null) return <Badge status="default" text="从未上报" />;
@@ -298,81 +409,79 @@ export default function MultiStoreReport() {
         if (sec < STALE_THRESHOLD_SECONDS) return <Badge status="processing" text="活跃" />;
         return <Badge status="error" text="滞后" />;
       },
-      sorter: (a, b) => (a.health.lag_seconds ?? Infinity) - (b.health.lag_seconds ?? Infinity),
-      defaultSortOrder: "descend",
+      sorter: (a, b) => (a.health.lag_seconds ?? Infinity) - (b.health.lag_seconds ?? Infinity), defaultSortOrder: "descend",
     },
-    {
-      title: "最近上报",
-      key: "last_capture",
-      width: 180,
-      render: (_, s) => {
-        if (!s.health.last_capture_at) return <span style={{ color: "#999" }}>无</span>;
-        const date = new Date(s.health.last_capture_at);
-        return (
-          <Tooltip title={date.toLocaleString("zh-CN")}>
-            <span>{fmtLag(s.health.lag_seconds)}前</span>
-          </Tooltip>
-        );
-      },
-      sorter: (a, b) => (a.health.last_capture_at || 0) - (b.health.last_capture_at || 0),
-    },
-    {
-      title: "累计抓取",
-      dataIndex: ["health", "captures_total"],
-      width: 100,
-      align: "right",
-      render: (v) => fmtNum(v),
-      sorter: (a, b) => (a.health.captures_total || 0) - (b.health.captures_total || 0),
-    },
-    {
-      title: "店铺数据日期",
-      dataIndex: ["shop_stats", "stat_date"],
-      width: 120,
-      render: (v) => v || <span style={{ color: "#999" }}>—</span>,
-    },
-    {
-      title: "mall_id",
-      dataIndex: "mall_id",
-      width: 180,
-      render: (v) => <Typography.Text type="secondary" copyable={{ text: v }}>{v}</Typography.Text>,
-    },
-    {
-      title: "站点",
-      dataIndex: "site",
-      width: 140,
-      render: (v) => v || "—",
-    },
+    { title: "最近上报", key: "last_capture", width: 140, render: (_, s) => (s.health.last_capture_at ? <Tooltip title={new Date(s.health.last_capture_at).toLocaleString("zh-CN")}><span>{fmtLag(s.health.lag_seconds)}前</span></Tooltip> : <span style={{ color: "#999" }}>无</span>), sorter: (a, b) => (a.health.last_capture_at || 0) - (b.health.last_capture_at || 0) },
+    { title: "累计抓取", dataIndex: ["health", "captures_total"], width: 100, align: "right", render: (v) => fmtNum(v), sorter: (a, b) => (a.health.captures_total || 0) - (b.health.captures_total || 0) },
+    { title: "店铺数据日期", dataIndex: ["shop_stats", "stat_date"], width: 120, render: (v) => v || <span style={{ color: "#999" }}>—</span> },
+    { title: "mall_id", dataIndex: "mall_id", width: 170, render: (v) => <Typography.Text type="secondary" copyable={{ text: v }}>{v}</Typography.Text> },
   ];
 
   const tabItems = [
     {
       key: "daily",
       label: "运营日报",
+      children: <Table<ReportStore> dataSource={stores} columns={dailyColumns} rowKey="mall_id" size="small" pagination={false} scroll={{ x: 940 }} loading={loading} />,
+    },
+    {
+      key: "boss",
+      label: "老板周/月",
       children: (
-        <Table<ReportStore>
-          dataSource={stores}
-          columns={dailyColumns}
-          rowKey="mall_id"
-          size="small"
-          pagination={false}
-          scroll={{ x: 900 }}
-          loading={loading}
-        />
+        <>
+          {!finAvailable && (
+            <Alert type="warning" showIcon style={{ margin: 16 }} message="金额维度暂不可用" description="未能连接 cloud 销量库（attach 失败或主控端未配置），营收/毛利显示为空。" />
+          )}
+          {finAvailable && combinedTrend.length >= 2 && (
+            <div style={{ padding: "12px 16px 0" }}>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>近 30 天营收 / 毛利趋势（所选范围合计）</Typography.Text>
+              <ResponsiveContainer width="100%" height={180}>
+                <LineChart data={combinedTrend} margin={{ top: 8, right: 16, bottom: 0, left: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                  <XAxis dataKey="date" tick={{ fontSize: 11 }} tickFormatter={(d) => String(d).slice(5)} />
+                  <YAxis tick={{ fontSize: 11 }} width={56} tickFormatter={(v) => "¥" + (v >= 1000 ? (v / 1000).toFixed(0) + "k" : v)} />
+                  <RTooltip formatter={(v: any) => fmtMoney(Number(v))} labelFormatter={(d) => `日期 ${d}`} />
+                  <Line type="monotone" dataKey="revenue" name="营收" stroke="#1677ff" dot={false} strokeWidth={2} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="gross_profit" name="毛利" stroke="#52c41a" dot={false} strokeWidth={2} isAnimationActive={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+          <Table<ReportStore> dataSource={stores} columns={bossColumns} rowKey="mall_id" size="small" pagination={false} scroll={{ x: 1000 }} loading={loading} />
+        </>
       ),
     },
     {
-      key: "monthly",
-      label: "老板周/月",
+      key: "manager",
+      label: "团队管理",
       children: (
-        <Table<ReportStore>
-          dataSource={stores}
-          columns={monthlyColumns}
-          rowKey="mall_id"
-          size="small"
-          pagination={false}
-          scroll={{ x: 1000 }}
-          loading={loading}
-        />
+        <div style={{ padding: 16 }}>
+          {alerts.length > 0 && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message={`异常预警 ${alerts.length} 项`}
+              description={
+                <div style={{ fontSize: 12, maxHeight: 180, overflowY: "auto" }}>
+                  {alerts.map((a) => (
+                    <div key={a.key} style={{ color: a.level === "error" ? "#cf1322" : "#d46b08" }}>• {a.text}</div>
+                  ))}
+                </div>
+              }
+            />
+          )}
+          <Table dataSource={ownerRollup} columns={managerColumns} rowKey="owner" size="small" pagination={false} scroll={{ x: 820 }} loading={loading} />
+        </div>
+      ),
+    },
+    {
+      key: "owners",
+      label: "店铺归属",
+      children: (
+        <div style={{ padding: 16 }}>
+          <Alert type="info" showIcon style={{ marginBottom: 12 }} message="为每家店指定运营负责人，团队管理与运营视图按此聚合 / 过滤。失焦自动保存。" />
+          <Table<ReportStore> dataSource={allStores} columns={ownerEditColumns} rowKey="mall_id" size="small" pagination={false} scroll={{ x: 640 }} loading={loading} />
+        </div>
       ),
     },
     {
@@ -384,31 +493,19 @@ export default function MultiStoreReport() {
             <Alert
               type="warning"
               showIcon
-              style={{ marginBottom: 16 }}
+              style={{ margin: 16 }}
               message={`检测到 ${data.unmapped.length} 个店铺在云端有数据，但本地字典未登记`}
               description={
                 <div style={{ fontSize: 12 }}>
-                  {data.unmapped.map((u: ReportStore) => (
-                    <div key={u.mall_id}>
-                      {u.mall_id} · {u.mall_name || "(未命名)"}
-                    </div>
+                  {data.unmapped.map((u) => (
+                    <div key={u.mall_id}>{u.mall_id} · {u.mall_name || "(未命名)"}</div>
                   ))}
-                  <div style={{ marginTop: 6, color: "#888" }}>
-                    跑 <code>scripts/seed-temu-malls.cjs</code> 时把它们加上 store_code。
-                  </div>
+                  <div style={{ marginTop: 6, color: "#888" }}>跑 <code>scripts/seed-temu-malls.cjs</code> 时把它们加上 store_code。</div>
                 </div>
               }
             />
           )}
-          <Table<ReportStore>
-            dataSource={stores}
-            columns={opsColumns}
-            rowKey="mall_id"
-            size="small"
-            pagination={false}
-            scroll={{ x: 1100 }}
-            loading={loading}
-          />
+          <Table<ReportStore> dataSource={stores} columns={opsColumns} rowKey="mall_id" size="small" pagination={false} scroll={{ x: 950 }} loading={loading} />
         </>
       ),
     },
@@ -420,6 +517,17 @@ export default function MultiStoreReport() {
         title="多店数据报表"
         extra={
           <Space>
+            <Select
+              size="small"
+              style={{ width: 160 }}
+              value={ownerFilter}
+              onChange={setOwnerFilter}
+              options={[
+                { value: "all", label: "全部负责人" },
+                ...ownerOptions.map((o) => ({ value: o, label: o })),
+                { value: UNASSIGNED, label: "未分配" },
+              ]}
+            />
             {data?.generated_at && (
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                 生成于 {new Date(data.generated_at).toLocaleString("zh-CN")}
@@ -433,33 +541,27 @@ export default function MultiStoreReport() {
         style={{ marginBottom: 16 }}
       >
         {summary && (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16 }}>
-            <Statistic title="店铺总数" value={data?.store_count || 0} suffix={`/ ${summary.onlineCount} 实时`} />
-            <Statistic title="近 7 天销量合计" value={summary.totalSales7d} />
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 16 }}>
+            <Statistic title="店铺数" value={stores.length} suffix={`/ ${summary.onlineCount} 实时`} />
+            <Statistic title="今日营收" value={finAvailable ? fmtMoney(summary.revToday) : "—"} />
+            <Statistic title="近 30 天营收" value={finAvailable ? fmtMoney(summary.rev30) : "—"} />
+            <Statistic title="近 30 天毛利率" value={finAvailable ? fmtPct(summary.margin30) : "—"} valueStyle={summary.margin30 != null && summary.margin30 < ALERT_MARGIN_LOW ? { color: "#cf1322" } : undefined} />
             <Statistic title="待发备货合计" value={summary.totalPending} valueStyle={summary.totalPending > 0 ? { color: "#fa8c16" } : undefined} />
-            <Statistic title="活动报名合计" value={summary.totalActivities} />
           </div>
         )}
       </Card>
 
       {error && (
-        <Alert
-          type="error"
-          showIcon
-          message="加载失败"
-          description={error}
-          style={{ marginBottom: 16 }}
-          action={<Button onClick={load} size="small">重试</Button>}
-        />
+        <Alert type="error" showIcon message="加载失败" description={error} style={{ marginBottom: 16 }} action={<Button onClick={load} size="small">重试</Button>} />
       )}
 
-      {!error && stores.length === 0 && !loading && (
+      {!error && allStores.length === 0 && !loading && (
         <Card>
           <Empty description="暂无店铺数据 —— 请先在主控端跑 scripts/seed-temu-malls.cjs" />
         </Card>
       )}
 
-      {!error && stores.length > 0 && (
+      {!error && allStores.length > 0 && (
         <Card bodyStyle={{ padding: 0 }}>
           <Tabs activeKey={activeTab} onChange={setActiveTab} items={tabItems} tabBarStyle={{ paddingLeft: 16, marginBottom: 0 }} />
         </Card>

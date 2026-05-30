@@ -404,6 +404,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     reports: {
       multiStore: (options) => ipcRenderer.invoke("erp:reports:multi-store", options || {}),
       mallDict: () => ipcRenderer.invoke("erp:reports:mall-dict"),
+      setMallOwner: (payload) => ipcRenderer.invoke("erp:reports:set-mall-owner", payload || {}),
     },
     events: {
       onPurchaseUpdate: (handler) => {
