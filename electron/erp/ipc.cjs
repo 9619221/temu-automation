@@ -5438,11 +5438,15 @@ function confirmConsignAfterSaleReceipt(payload = {}, actor = {}) {
         productName: optionalString(raw.productName || raw.product_name),
       };
       const sku = resolveConsignAfterSaleSku(db, item);
+      // 退货回仓按 SKU 当前加权均价灌入，使并入后均价不变（见 inventoryService.applyDirectInbound 注释）。
+      // 漏传时会按 0 成本入库并稀释加权均价、低估库存货值。
+      const unitLandedCost = services.inventory.getSkuWeightedAvgCost(sku.id);
       const batch = services.inventory.applyDirectInbound({
         accountId: sku.account_id,
         skuId: sku.id,
         qty: receivedQty,
         ledgerType: INVENTORY_LEDGER_TYPE.CONSIGN_AFTER_SALE_RETURN,
+        unitLandedCost,
         sourceDocType: "consign_after_sale",
         sourceDocId: outerAsId,
         affectSkuTotal: true,
