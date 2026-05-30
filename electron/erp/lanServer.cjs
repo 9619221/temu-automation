@@ -307,7 +307,29 @@ cloud_agg AS (
     MIN(skc_id) AS cloud_skc_id,
     MIN(sku_id) AS cloud_sku_id,
     MIN(sku_ext_code) AS cloud_sku_ext_code,
-    MAX(temu_status) AS cloud_temu_status,
+    -- temu_status 是 Temu 数字状态码，且按 source_type 混了三套枚举（备货单/发货单/发货台），
+    -- 同一数字含义不同。这里按「来源+码」映射成中文（口径=聚水潭同款词），并用 2 位生命周期
+    -- rank 前缀让 MAX 选出最新状态，再 SUBSTR 去掉前缀。读取期归一，历史数据零回填。
+    -- 映射依据：云端数字 ↔ 聚水潭中文 3.3 万条交叉统计 + raw_json 字段（isCanJoinDeliverPlatform /
+    -- applyDeleteStatus / deliverTime+receiveTime）佐证。未知码兜底为「其他」。
+    TRIM(SUBSTR(MAX(
+      CASE
+        WHEN temu_status IS NULL OR temu_status = '' THEN '00'
+        WHEN temu_status NOT GLOB '[0-9]*' THEN '06' || temu_status
+        WHEN source_type = 'stock_order'  AND temu_status = '8'        THEN '07取消'
+        WHEN source_type = 'stock_order'  AND temu_status = '7'        THEN '06已收货'
+        WHEN source_type = 'stock_order'  AND temu_status IN ('2','3') THEN '05已发货'
+        WHEN source_type = 'stock_order'  AND temu_status = '1'        THEN '03待发货'
+        WHEN source_type = 'stock_order'  AND temu_status = '0'        THEN '02已付款待审核'
+        WHEN source_type = 'shipping_list' AND temu_status = '6'       THEN '08异常'
+        WHEN source_type = 'shipping_list' AND temu_status = '5'       THEN '07取消'
+        WHEN source_type = 'shipping_list' AND temu_status = '2'       THEN '06已收货'
+        WHEN source_type = 'shipping_list' AND temu_status = '1'       THEN '05已发货'
+        WHEN source_type = 'shipping_list' AND temu_status = '0'       THEN '03待发货'
+        WHEN source_type = 'shipping_desk' AND temu_status IN ('0','1') THEN '03待发货'
+        ELSE '01其他'
+      END
+    ), 3)) AS cloud_temu_status,
     SUM(COALESCE(demand_qty, 0)) AS cloud_demand_qty,
     SUM(COALESCE(delivered_qty, 0)) AS cloud_delivered_qty,
     SUM(COALESCE(order_amount_cents, 0)) AS cloud_order_amount_cents,
