@@ -6487,7 +6487,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     {
       title: "1688账号",
       dataIndex: "purchase1688AccountLabel",
-      width: 110,
+      width: 200,
       ellipsis: true,
       render: (value) => value || "-",
     },

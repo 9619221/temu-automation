@@ -3,10 +3,16 @@ import ReactDOM from "react-dom/client";
 import { HashRouter } from "react-router-dom";
 import { ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
+import dayjs from "dayjs";
+import "dayjs/locale/zh-cn";
 import App from "./App";
 import { initFrontendLogger } from "./utils/frontendLogger";
 import "./styles/tokens.css";
 import "./styles/global.css";
+
+// AntD v5 的 DatePicker 等组件用 dayjs 取星期/月份名，必须把 dayjs 全局 locale 设成 zh-cn，
+// 否则日历头仍显示英文（Su Mo Tu… / May Jun），ConfigProvider 的 zhCN 只管面板按钮文案。
+dayjs.locale("zh-cn");
 
 initFrontendLogger().catch(() => {});
 

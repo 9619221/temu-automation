@@ -6924,7 +6924,20 @@ function getPurchaseWorkbench(params = {}) {
           COALESCE(detail_line.received_qty, 0) AS received_qty,
           COALESCE(detail_line.unit_cost, 0) AS unit_cost,
           COALESCE(detail_line.logistics_fee, 0) AS logistics_fee,
-          detail_sku.image_url AS sku_image_url,
+          -- SKU 自带图为空时回退到已绑定的 1688 货源图（account_id + sku_id 关联，取 active 的默认/最新一条）
+          COALESCE(
+            NULLIF(detail_sku.image_url, ''),
+            (
+              SELECT src_img.image_url
+              FROM erp_sku_1688_sources src_img
+              WHERE src_img.sku_id = detail_line.sku_id
+                AND src_img.account_id = detail_line.account_id
+                AND src_img.status = 'active'
+                AND COALESCE(src_img.image_url, '') <> ''
+              ORDER BY src_img.is_default DESC, src_img.updated_at DESC
+              LIMIT 1
+            )
+          ) AS sku_image_url,
           detail_line.jst_payload_json
         FROM erp_purchase_order_lines detail_line
         LEFT JOIN erp_skus detail_sku ON detail_sku.id = detail_line.sku_id
@@ -7300,6 +7313,7 @@ function getPurchaseOrderActionRow(db, poId) {
           'receivedQty', detail.received_qty,
           'unitCost', detail.unit_cost,
           'logisticsFee', detail.logistics_fee,
+          'imageUrl', detail.sku_image_url,
           'amount', ROUND(detail.qty * detail.unit_cost, 2),
           'paidAmount', ROUND(detail.qty * detail.unit_cost + detail.logistics_fee, 2)
         ))
@@ -7313,7 +7327,21 @@ function getPurchaseOrderActionRow(db, poId) {
             COALESCE(detail_line.qty, 0) AS qty,
             COALESCE(detail_line.received_qty, 0) AS received_qty,
             COALESCE(detail_line.unit_cost, 0) AS unit_cost,
-            COALESCE(detail_line.logistics_fee, 0) AS logistics_fee
+            COALESCE(detail_line.logistics_fee, 0) AS logistics_fee,
+            -- SKU 自带图为空时回退到已绑定的 1688 货源图
+            COALESCE(
+              NULLIF(detail_sku.image_url, ''),
+              (
+                SELECT src_img.image_url
+                FROM erp_sku_1688_sources src_img
+                WHERE src_img.sku_id = detail_line.sku_id
+                  AND src_img.account_id = detail_line.account_id
+                  AND src_img.status = 'active'
+                  AND COALESCE(src_img.image_url, '') <> ''
+                ORDER BY src_img.is_default DESC, src_img.updated_at DESC
+                LIMIT 1
+              )
+            ) AS sku_image_url
           FROM erp_purchase_order_lines detail_line
           LEFT JOIN erp_skus detail_sku ON detail_sku.id = detail_line.sku_id
           WHERE detail_line.po_id = po.id
@@ -7321,11 +7349,33 @@ function getPurchaseOrderActionRow(db, poId) {
         ) detail
       ), '[]') AS line_items_json,
       (
-        SELECT first_sku.image_url
+        SELECT COALESCE(
+          NULLIF(first_sku.image_url, ''),
+          (
+            SELECT src_img.image_url
+            FROM erp_sku_1688_sources src_img
+            WHERE src_img.sku_id = first_line.sku_id
+              AND src_img.account_id = first_line.account_id
+              AND src_img.status = 'active'
+              AND COALESCE(src_img.image_url, '') <> ''
+            ORDER BY src_img.is_default DESC, src_img.updated_at DESC
+            LIMIT 1
+          )
+        )
         FROM erp_purchase_order_lines first_line
         LEFT JOIN erp_skus first_sku ON first_sku.id = first_line.sku_id
         WHERE first_line.po_id = po.id
-          AND COALESCE(first_sku.image_url, '') <> ''
+          AND COALESCE(
+            NULLIF(first_sku.image_url, ''),
+            (
+              SELECT src_img.image_url
+              FROM erp_sku_1688_sources src_img
+              WHERE src_img.sku_id = first_line.sku_id
+                AND src_img.account_id = first_line.account_id
+                AND src_img.status = 'active'
+                AND COALESCE(src_img.image_url, '') <> ''
+              LIMIT 1
+            ), '') <> ''
         ORDER BY first_line.id ASC
         LIMIT 1
       ) AS sku_image_url,
