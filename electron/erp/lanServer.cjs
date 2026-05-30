@@ -69,6 +69,7 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/outbound/workbench": ["admin", "manager", "operations", "warehouse"],
   "/api/outbound/action": ["admin", "manager", "operations", "warehouse"],
   "/api/inventory/action": ["admin", "manager", "operations", "warehouse"],
+  "/api/consign-after-sale/action": ["admin", "manager", "operations", "warehouse"],
   "/api/work-items/list": ["admin", "manager", "operations", "buyer", "finance", "warehouse", "viewer"],
   "/api/work-items/stats": ["admin", "manager", "operations", "buyer", "finance", "warehouse", "viewer"],
   "/api/work-items/generate": ["admin", "manager", "operations", "buyer", "finance", "warehouse"],
@@ -295,6 +296,16 @@ WITH jst_base AS (
   FROM jst_consign_deliveries
   WHERE company_id = @company_id AND status_internal != 'deleted'
 ),
+jst_ship_agg AS (
+  -- 按 o_id 聚合明细的「本地实发数量」之和：local_ship_qty 为 NULL 时回退到备货数量 qty（默认全发）。
+  -- 主表「送货数」列即取此值；它驱动确认发货时的本地库存扣减口径。
+  SELECT
+    o_id,
+    SUM(COALESCE(local_ship_qty, qty, 0)) AS local_ship_total
+  FROM jst_consign_deliver_items
+  WHERE company_id = @company_id AND status_internal != 'deleted'
+  GROUP BY o_id
+),
 cloud_agg AS (
   SELECT
     stock_order_no AS cloud_so,
@@ -332,6 +343,7 @@ cloud_agg AS (
     ), 3)) AS cloud_temu_status,
     SUM(COALESCE(demand_qty, 0)) AS cloud_demand_qty,
     SUM(COALESCE(delivered_qty, 0)) AS cloud_delivered_qty,
+    SUM(COALESCE(inbound_qty, 0)) AS cloud_inbound_qty,
     SUM(COALESCE(order_amount_cents, 0)) AS cloud_order_amount_cents,
     MIN(currency) AS cloud_currency,
     MIN(product_name) AS cloud_product_name,
@@ -371,6 +383,7 @@ jst_left AS (
     j.currency AS jst_currency,
     j.local_status_override AS local_status_override,
     j.inventory_deducted AS inventory_deducted,
+    sa.local_ship_total AS jst_local_ship_total,
     c.cloud_so,
     c.cloud_row_key,
     c.cloud_mall_id,
@@ -384,6 +397,7 @@ jst_left AS (
     c.cloud_temu_status,
     c.cloud_demand_qty,
     c.cloud_delivered_qty,
+    c.cloud_inbound_qty,
     c.cloud_order_amount_cents,
     c.cloud_currency,
     c.cloud_product_name,
@@ -399,6 +413,7 @@ jst_left AS (
     c.cloud_item_count
   FROM jst_base j
   LEFT JOIN cloud_agg c ON c.cloud_so = j.so_id
+  LEFT JOIN jst_ship_agg sa ON sa.o_id = j.o_id
 ),
 cloud_only AS (
   SELECT
@@ -422,6 +437,7 @@ cloud_only AS (
     NULL AS jst_currency,
     NULL AS local_status_override,
     0 AS inventory_deducted,
+    NULL AS jst_local_ship_total,
     c.cloud_so,
     c.cloud_row_key,
     c.cloud_mall_id,
@@ -435,6 +451,7 @@ cloud_only AS (
     c.cloud_temu_status,
     c.cloud_demand_qty,
     c.cloud_delivered_qty,
+    c.cloud_inbound_qty,
     c.cloud_order_amount_cents,
     c.cloud_currency,
     c.cloud_product_name,
@@ -507,6 +524,7 @@ function unifiedRowToPayload(row) {
     temu_status: row.cloud_temu_status,
     demand_qty: row.cloud_demand_qty,
     delivered_qty: row.cloud_delivered_qty,
+    inbound_qty: row.cloud_inbound_qty,
     order_amount_cents: row.cloud_order_amount_cents,
     currency: row.cloud_currency,
     product_name: row.cloud_product_name,
@@ -547,6 +565,8 @@ function unifiedRowToPayload(row) {
     status: row.local_status_override || row.jst_status || row.cloud_temu_status || null,
     itemAmount,
     itemsQty,
+    // 送货数 = 明细本地实发数量之和（默认全发=备货数，逐条改后为实发）。仅有聚水潭明细的行有值。
+    localShipQty: row.jst_local_ship_total != null ? Number(row.jst_local_ship_total) : null,
     orderDate: row.jst_order_date || row.cloud_order_time || null,
     outerDeliverNo: row.jst_outer_deliver_no || row.cloud_delivery_order_sn || null,
     supplierName: row.jst_supplier_name || null,
@@ -565,7 +585,7 @@ function unifiedRowToPayload(row) {
 const CONSIGN_SNAPSHOT_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 超过 6h 未刷新视为陈旧，回退在线查询
 
 function readConsignDeliveriesUnifiedFromSnapshot(db, opts) {
-  const { companyId, page, pageSize, offset, search, statusFilter, source } = opts;
+  const { companyId, page, pageSize, offset, search, statusFilter, shopFilter, skuCodeFilter, dateFrom, dateTo, source } = opts;
   const tableExists = db
     .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='temu_consign_unified_snapshot'")
     .get();
@@ -588,6 +608,12 @@ function readConsignDeliveriesUnifiedFromSnapshot(db, opts) {
     const cond = ["company_id = @company_id"];
     if (search) { values.search = `%${search}%`; cond.push("search_blob LIKE @search"); }
     if (statusFilter) { values.status_filter = statusFilter; cond.push(`${statusCol} = @status_filter`); }
+    // 店铺 / 商品编码：快照无独立列，统一用 search_blob LIKE（其中已含 shop_name + sku 字段）。
+    if (shopFilter) { values.shop_like = `%${shopFilter}%`; cond.push("search_blob LIKE @shop_like"); }
+    if (skuCodeFilter) { values.sku_like = `%${skuCodeFilter}%`; cond.push("search_blob LIKE @sku_like"); }
+    // 下单时间：快照 order_key = COALESCE(jst_order_date, cloud_order_time)，正好用于区间筛。
+    if (dateFrom) { values.date_from = dateFrom; cond.push("order_key >= @date_from"); }
+    if (dateTo) { values.date_to = dateTo; cond.push("order_key <= @date_to"); }
     if (includeSource && (source === "cloud" || source === "jst" || source === "both")) {
       values.source_filter = source;
       cond.push("source = @source_filter");
@@ -659,13 +685,17 @@ function runConsignDeliveriesUnified(db, params = {}) {
   const offset = (page - 1) * pageSize;
   const search = String(params.search || "").trim();
   const statusFilter = String(params.status || "").trim();
+  const shopFilter = String(params.shop || "").trim();
+  const skuCodeFilter = String(params.skuCode || params.sku_code || "").trim();
+  const dateFrom = String(params.dateFrom || params.date_from || "").trim();
+  const dateTo = String(params.dateTo || params.date_to || "").trim();
   const source = String(params.source || "all").toLowerCase();
   const companyId = params.companyId || params.company_id || "company_default";
 
   // 优先读物化快照（毫秒级）；读不到/太旧/异常则回退到下方在线 CTE（正确但慢）。
   try {
     const snapshot = readConsignDeliveriesUnifiedFromSnapshot(db, {
-      companyId, page, pageSize, offset, search, statusFilter, source,
+      companyId, page, pageSize, offset, search, statusFilter, shopFilter, skuCodeFilter, dateFrom, dateTo, source,
     });
     if (snapshot) return snapshot;
   } catch (snapErr) {
@@ -677,7 +707,7 @@ function runConsignDeliveriesUnified(db, params = {}) {
 
   if (!cloudAttached) {
     return runConsignDeliveriesUnifiedJstOnly(db, {
-      page, pageSize, offset, search, statusFilter, source, companyId,
+      page, pageSize, offset, search, statusFilter, shopFilter, skuCodeFilter, dateFrom, dateTo, source, companyId,
     });
   }
 
@@ -690,6 +720,22 @@ function runConsignDeliveriesUnified(db, params = {}) {
     // 状态用「显示状态」= COALESCE(local_status_override, jst_status, cloud_temu_status)：
     // 本地确认发货后优先按覆盖状态（已发货）筛；否则聚水潭(jst)内部状态；cloud-only 兜底用 Temu 状态。
     filterConditions.push("COALESCE(local_status_override, jst_status, cloud_temu_status) = @status_filter");
+  }
+  if (shopFilter) {
+    baseValues.shop_like = `%${shopFilter}%`;
+    filterConditions.push("COALESCE(jst_shop_name, cloud_mall_id) LIKE @shop_like");
+  }
+  if (skuCodeFilter) {
+    baseValues.sku_like = `%${skuCodeFilter}%`;
+    filterConditions.push("(jst_skus LIKE @sku_like OR jst_sku_info LIKE @sku_like OR cloud_sku_ext_code LIKE @sku_like OR cloud_sku_id LIKE @sku_like)");
+  }
+  if (dateFrom) {
+    baseValues.date_from = dateFrom;
+    filterConditions.push("COALESCE(jst_order_date, cloud_order_time) >= @date_from");
+  }
+  if (dateTo) {
+    baseValues.date_to = dateTo;
+    filterConditions.push("COALESCE(jst_order_date, cloud_order_time) <= @date_to");
   }
 
   let sourceCondition = "";
@@ -748,7 +794,7 @@ function runConsignDeliveriesUnified(db, params = {}) {
 }
 
 function runConsignDeliveriesUnifiedJstOnly(db, opts) {
-  const { page, pageSize, offset, search, statusFilter, source, companyId } = opts;
+  const { page, pageSize, offset, search, statusFilter, shopFilter, skuCodeFilter, dateFrom, dateTo, source, companyId } = opts;
   if (source === "cloud" || source === "both") {
     return {
       ok: true,
@@ -768,6 +814,22 @@ function runConsignDeliveriesUnifiedJstOnly(db, opts) {
   if (statusFilter) {
     values.status_filter = statusFilter;
     conditions.push("COALESCE(local_status_override, status) = @status_filter");
+  }
+  if (shopFilter) {
+    values.shop_like = `%${shopFilter}%`;
+    conditions.push("shop_name LIKE @shop_like");
+  }
+  if (skuCodeFilter) {
+    values.sku_like = `%${skuCodeFilter}%`;
+    conditions.push("(skus LIKE @sku_like OR sku_info LIKE @sku_like)");
+  }
+  if (dateFrom) {
+    values.date_from = dateFrom;
+    conditions.push("order_date >= @date_from");
+  }
+  if (dateTo) {
+    values.date_to = dateTo;
+    conditions.push("order_date <= @date_to");
   }
   const whereClause = `WHERE ${conditions.join(" AND ")}`;
   const rows = db.prepare(`
@@ -3414,6 +3476,10 @@ function createRequestHandler(options = {}) {
   const getConsignAfterSaleIds = options.getConsignAfterSaleIds || (() => []);
   const listConsignAfterSaleItems = options.listConsignAfterSaleItems || (() => []);
   const getConsignAfterSaleItemIds = options.getConsignAfterSaleItemIds || (() => []);
+  const confirmConsignAfterSaleReceipt = options.confirmConsignAfterSaleReceipt || (() => {
+    throw new Error("Consign after-sale receipt handler is not available");
+  });
+  const listConsignAfterSaleReceipts = options.listConsignAfterSaleReceipts || (() => []);
   const listJstConsignDeliveries = options.listJstConsignDeliveries || (() => []);
   const countJstConsignDeliveries = options.countJstConsignDeliveries || ((params) => listJstConsignDeliveries({ ...params, limit: 500000, offset: 0 }).length);
   const listJstConsignDeliverItems = options.listJstConsignDeliverItems || (() => []);
@@ -3500,6 +3566,8 @@ function createRequestHandler(options = {}) {
       getConsignAfterSaleIds,
       listConsignAfterSaleItems,
       getConsignAfterSaleItemIds,
+      confirmConsignAfterSaleReceipt,
+      listConsignAfterSaleReceipts,
       listJstConsignDeliveries,
       countJstConsignDeliveries,
       listJstConsignDeliverItems,
@@ -4349,6 +4417,32 @@ async function handleInventoryActionRequest({ req, res, session, performInventor
   }
 }
 
+async function handleConsignAfterSaleActionRequest({ req, res, session, confirmConsignAfterSaleReceipt, listConsignAfterSaleReceipts }) {
+  if (req.method !== "POST") {
+    writeJson(res, 405, { ok: false, error: "Method not allowed" });
+    return;
+  }
+  try {
+    const payload = await readLoginPayload(req);
+    const action = String(payload.action || "");
+    let result;
+    if (action === "confirm_receipt") {
+      result = await confirmConsignAfterSaleReceipt(payload, session.user);
+    } else if (action === "list_receipts") {
+      result = await listConsignAfterSaleReceipts(payload);
+    } else {
+      throw new Error(`Unsupported consign-after-sale action: ${action}`);
+    }
+    writeJson(res, 200, { ok: true, result });
+  } catch (error) {
+    writeJson(res, 400, {
+      ok: false,
+      error: error?.message || String(error),
+      code: error?.code || null,
+    });
+  }
+}
+
 async function handleExtensionIngestRequest({ req, res, pathname, ingestJushuitanExtensionBatch }) {
   if (!isExtensionIngestAuthorized(req)) {
     writeJson(res, 401, { ok: false, error: "Unauthorized" });
@@ -4428,6 +4522,8 @@ async function handleRequest({
   getConsignAfterSaleIds,
   listConsignAfterSaleItems,
   getConsignAfterSaleItemIds,
+  confirmConsignAfterSaleReceipt,
+  listConsignAfterSaleReceipts,
   listJstConsignDeliveries,
   countJstConsignDeliveries,
   listJstConsignDeliverItems,
@@ -4877,6 +4973,10 @@ async function handleRequest({
         pageSize: Number(payload?.pageSize) || 100,
         search: payload?.search || payload?.q || "",
         status: payload?.status || "",
+        shop: payload?.shop || "",
+        skuCode: payload?.skuCode || payload?.sku_code || "",
+        dateFrom: payload?.dateFrom || payload?.date_from || "",
+        dateTo: payload?.dateTo || payload?.date_to || "",
         source: payload?.source || "all",
         companyId,
       });
@@ -5155,6 +5255,17 @@ async function handleRequest({
         res,
         session,
         performInventoryAction,
+      });
+      return;
+    }
+
+    if (pathname === "/api/consign-after-sale/action") {
+      await handleConsignAfterSaleActionRequest({
+        req,
+        res,
+        session,
+        confirmConsignAfterSaleReceipt,
+        listConsignAfterSaleReceipts,
       });
       return;
     }

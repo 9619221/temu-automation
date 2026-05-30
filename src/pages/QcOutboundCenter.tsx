@@ -5,6 +5,7 @@ import {
   Alert,
   Button,
   Checkbox,
+  DatePicker,
   Form,
   Input,
   InputNumber,
@@ -34,8 +35,15 @@ import { useErpAuth } from "../contexts/ErpAuthContext";
 import { readPageCache, writePageCache } from "../utils/pageCache";
 import type { TemuStockOrderRow } from "../utils/cloudClient";
 
-const { Text } = Typography;
+const { Text, Paragraph } = Typography;
+const { RangePicker } = DatePicker;
 const erp = window.electronAPI?.erp;
+
+// 下单时间区间边界 → 聚水潭文本格式「YYYY-MM-DD HH:mm:ss」，与 order_date 存储格式一致以便字符串比较。
+function consignDateBound(value: any, end: boolean): string {
+  if (!value?.format) return "";
+  return `${value.format("YYYY-MM-DD")} ${end ? "23:59:59" : "00:00:00"}`;
+}
 const OUTBOUND_CACHE_KEY = "temu.qc-outbound.workbench.cache.v3";
 const UNIFIED_DEFAULT_PAGE_SIZE = 100;
 
@@ -55,6 +63,7 @@ interface ConsignDeliverUnifiedRawCloud {
   temu_status?: string | null;
   demand_qty?: number | null;
   delivered_qty?: number | null;
+  inbound_qty?: number | null;
   order_amount_cents?: number | null;
   currency?: string | null;
   product_name?: string | null;
@@ -94,10 +103,13 @@ interface ConsignDeliverUnifiedRow {
   status: string | null;
   itemAmount: number | null;
   itemsQty: number | null;
+  localShipQty?: number | null;
   orderDate: string | null;
   outerDeliverNo: string | null;
   supplierName: string | null;
   source: "cloud" | "jst" | "both";
+  localStatusOverride?: string | null;
+  inventoryDeducted?: boolean;
   rawCloud: ConsignDeliverUnifiedRawCloud | null;
   rawJst: ConsignDeliverUnifiedRawJst | null;
 }
@@ -108,6 +120,8 @@ interface ConsignDeliverUnifiedResult {
   page: number;
   pageSize: number;
   sourceBreakdown: { cloud_only: number; jst_only: number; both: number };
+  // 各「显示状态」条数，仅受搜索约束；旧服务器不返回，做缺省兜底。
+  statusBreakdown?: Record<string, number>;
 }
 
 interface AccountRow {
@@ -200,7 +214,9 @@ const UNIFIED_COLUMN_MENU_OFFSET = 8;
 const UNIFIED_COLUMN_MENU_CHROME_HEIGHT = 96;
 const UNIFIED_COLUMN_MENU_MIN_BODY_HEIGHT = 180;
 const UNIFIED_COLUMN_MENU_MAX_BODY_HEIGHT = 430;
-const UNIFIED_COLUMN_ORDER_STORAGE_KEY = "temu.consign.unified.columnOrder.v2";
+// v3：新增「送货数」「入库数」独立列。升版本让旧客户端的列配置重置为含新列的全可见默认，
+// 否则旧 localStorage 的 visible 不含新 key，新列默认隐藏、用户仍看不到。
+const UNIFIED_COLUMN_ORDER_STORAGE_KEY = "temu.consign.unified.columnOrder.v3";
 const UNIFIED_CONFIGURABLE_COLUMN_KEYS = [
   "status",
   "order",
@@ -211,6 +227,8 @@ const UNIFIED_CONFIGURABLE_COLUMN_KEYS = [
   "orderTime",
   "shipTime",
   "qty",
+  "deliveredQty",
+  "inboundQty",
   "supplier",
   "logistics",
   "warehouse",
@@ -227,6 +245,8 @@ const UNIFIED_COLUMN_LABELS: Record<string, string> = {
   orderTime: "下单时间",
   shipTime: "发货时间",
   qty: "数量",
+  deliveredQty: "送货数",
+  inboundQty: "入库数",
   supplier: "供应商",
   logistics: "物流",
   warehouse: "收货仓",
@@ -415,9 +435,15 @@ export default function QcOutboundCenter() {
   const [actingKey, setActingKey] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("cloud");
   const [stockStatus, setStockStatus] = useState("");
+  const [stockShop, setStockShop] = useState("");
+  const [stockSkuCode, setStockSkuCode] = useState("");
+  const [stockDateRange, setStockDateRange] = useState<any>(null);
   const [stockQuery, setStockQuery] = useState("");
   const [unifiedItemsCache, setUnifiedItemsCache] = useState<Record<string, any[]>>({});
   const [unifiedItemsLoading, setUnifiedItemsLoading] = useState<Record<string, boolean>>({});
+  // 送仓明细「本地实发数量」编辑：草稿值（按 oiId）与保存中标记。
+  const [itemShipDraft, setItemShipDraft] = useState<Record<string, number | null>>({});
+  const [itemShipSaving, setItemShipSaving] = useState<Record<string, boolean>>({});
   const [selectedAccountId, setSelectedAccountId] = useState("");
   const [stockOrderTarget, setStockOrderTarget] = useState<TemuStockOrderRow | null>(null);
   const [stockOrderPreview, setStockOrderPreview] = useState<TemuStockOrderPreview | null>(null);
@@ -472,6 +498,10 @@ export default function QcOutboundCenter() {
     pageSize: number;
     search: string;
     status: string;
+    shop?: string;
+    skuCode?: string;
+    dateFrom?: string;
+    dateTo?: string;
     source: "all" | UnifiedRowSource;
     notify?: boolean;
   }) => {
@@ -483,6 +513,10 @@ export default function QcOutboundCenter() {
         pageSize: params.pageSize,
         search: params.search || undefined,
         status: params.status || undefined,
+        shop: params.shop || undefined,
+        skuCode: params.skuCode || undefined,
+        dateFrom: params.dateFrom || undefined,
+        dateTo: params.dateTo || undefined,
         source: params.source,
       });
       setUnifiedSnapshot(result);
@@ -511,10 +545,14 @@ export default function QcOutboundCenter() {
       pageSize: unifiedPageSize,
       search: stockQuery,
       status: stockStatus,
+      shop: stockShop,
+      skuCode: stockSkuCode,
+      dateFrom: consignDateBound(stockDateRange?.[0], false),
+      dateTo: consignDateBound(stockDateRange?.[1], true),
       source: unifiedSource,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [unifiedPage, unifiedPageSize, stockQuery, stockStatus, unifiedSource]);
+  }, [unifiedPage, unifiedPageSize, stockQuery, stockStatus, stockShop, stockSkuCode, stockDateRange, unifiedSource]);
 
   const previewStockOrderPlan = async (
     row = stockOrderTarget,
@@ -575,6 +613,10 @@ export default function QcOutboundCenter() {
         pageSize: unifiedPageSize,
         search: stockQuery,
         status: stockStatus,
+        shop: stockShop,
+        skuCode: stockSkuCode,
+        dateFrom: consignDateBound(stockDateRange?.[0], false),
+        dateTo: consignDateBound(stockDateRange?.[1], true),
         source: unifiedSource,
       });
       const result = response?.result || {};
@@ -608,6 +650,19 @@ export default function QcOutboundCenter() {
   ), [stockOrderLinkIndex]);
   const unifiedRows = unifiedSnapshot.rows;
   const unifiedTotal = unifiedSnapshot.total;
+
+  // 状态筛选下拉选项：优先用服务器返回的真实状态分布（含条数）；
+  // 旧服务器无 statusBreakdown 时回退到静态列表，保证不报错。
+  const statusFilterOptions = useMemo(() => {
+    const breakdown = unifiedSnapshot.statusBreakdown;
+    const entries = breakdown ? Object.entries(breakdown).filter(([key]) => key && key !== "(空)") : [];
+    if (entries.length) {
+      return entries
+        .sort((a, b) => b[1] - a[1])
+        .map(([status, count]) => ({ label: `${status}（${formatQty(count)}）`, value: status }));
+    }
+    return JST_STATUS_OPTIONS.map((value) => ({ label: value, value }));
+  }, [unifiedSnapshot.statusBreakdown]);
 
   const openUnifiedColumnMenu = useCallback((event: MouseEvent<HTMLElement>) => {
     event.preventDefault();
@@ -726,6 +781,39 @@ export default function QcOutboundCenter() {
     }
   }, [unifiedItemsCache, unifiedItemsLoading]);
 
+  // 保存某条明细的本地实发数量：写后端 + 乐观更新明细缓存与主表「送货数」之和。
+  const handleSetItemShipQty = useCallback(async (row: ConsignDeliverUnifiedRow, item: any, nextQty: number) => {
+    const oId = row.rawJst?.o_id != null ? String(row.rawJst.o_id) : "";
+    const oiId = item?.oiId != null ? String(item.oiId) : "";
+    if (!oId || !oiId || !erp?.inventory?.action) return;
+    const planQty = Number(item.qty || 0);
+    const clamped = Math.max(0, Math.min(Math.floor(Number(nextQty) || 0), planQty));
+    setItemShipSaving((prev) => ({ ...prev, [oiId]: true }));
+    try {
+      await erp.inventory.action({ action: "consign_deliver_set_item_ship_qty", oId, oiId, shipQty: clamped });
+      const prevList = unifiedItemsCache[oId] || [];
+      const nextList = prevList.map((it) => (String(it.oiId) === oiId ? { ...it, localShipQty: clamped } : it));
+      const sum = nextList.reduce(
+        (acc, it) => acc + Number(it.localShipQty != null ? it.localShipQty : (it.qty || 0)),
+        0,
+      );
+      setUnifiedItemsCache((prev) => ({ ...prev, [oId]: nextList }));
+      setItemShipDraft((prev) => { const next = { ...prev }; delete next[oiId]; return next; });
+      // 乐观更新主表该行送货数（明细本地实发之和），不必等物化快照重建。
+      setUnifiedSnapshot((snap) => ({
+        ...snap,
+        rows: snap.rows.map((r) => (
+          r.rawJst?.o_id != null && String(r.rawJst.o_id) === oId ? { ...r, localShipQty: sum } : r
+        )),
+      }));
+      message.success("已更新实发数量");
+    } catch (error: any) {
+      message.error(error?.message || "更新实发数量失败");
+    } finally {
+      setItemShipSaving((prev) => ({ ...prev, [oiId]: false }));
+    }
+  }, [unifiedItemsCache]);
+
   const renderUnifiedRowItems = useCallback((row: ConsignDeliverUnifiedRow) => {
     const oId = row.rawJst?.o_id ? String(row.rawJst.o_id) : "";
     if (!oId) return <Text type="secondary">仅云端数据，无聚水潭明细</Text>;
@@ -733,62 +821,86 @@ export default function QcOutboundCenter() {
     const items = unifiedItemsCache[oId];
     if (!items) return <Text type="secondary">展开后加载中...</Text>;
     if (!items.length) return <Text type="secondary">无明细</Text>;
-    // 明细列：对齐售后页（ConsignAfterSalesSection）的紧凑 Table 风格
+    // 明细列：对齐「其他出入库」明细（OtherInoutSection）的列布局与风格。
+    const fmtMoney = (v: any) => (v != null && v !== "" ? `¥${Number(v).toFixed(2)}` : "-");
     const itemColumns: ColumnsType<any> = [
       {
         title: "商品",
         key: "product",
-        width: 320,
+        width: 280,
         render: (_v, it: any) => (
           <Space size={8} align="start">
             {it.picUrl ? (
               <Image
                 src={it.picUrl}
                 alt=""
-                width={48}
-                height={48}
+                width={40}
+                height={40}
                 style={{ objectFit: "cover", borderRadius: 4, cursor: "zoom-in" }}
                 preview={{ mask: <EyeOutlined /> }}
+                onClick={(e) => e.stopPropagation()}
               />
             ) : null}
-            <Space direction="vertical" size={0} style={{ minWidth: 0 }}>
-              <Text style={{ fontWeight: 600, lineHeight: 1.3 }}>{it.name || "-"}</Text>
-              <Text type="secondary" style={{ fontSize: 12 }}>货号 {it.skuCode || "-"} / SKU {it.skuId || "-"}</Text>
-            </Space>
+            <Paragraph ellipsis={{ rows: 2, tooltip: it.name || "-" }} style={{ marginBottom: 0, fontWeight: 600, lineHeight: 1.3, minWidth: 0 }}>
+              {it.name || "-"}
+            </Paragraph>
           </Space>
         ),
       },
       {
-        title: "规格",
-        dataIndex: "propertiesValue",
-        key: "spec",
-        width: 180,
-        render: (v) => v || "-",
+        title: "货号 / SKU",
+        key: "iidSku",
+        width: 160,
+        render: (_v, it: any) => (
+          <Space direction="vertical" size={0}>
+            <Text style={{ fontSize: 12 }}>货号 {it.iId || "-"}</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>SKU {it.skuId || "-"}</Text>
+          </Space>
+        ),
       },
+      { title: "规格", dataIndex: "propertiesValue", key: "spec", width: 180, render: (v) => v || "-" },
+      { title: "备货数", dataIndex: "qty", key: "qty", width: 90, align: "right" as const, render: (v) => formatQty(v) },
       {
-        title: "数量",
-        key: "qty",
-        width: 100,
+        // 本地实发数量：默认 = 备货数（全发），可改小。改后驱动确认发货按实发扣本地库存。
+        // 已确认发货（row.inventoryDeducted）时锁定，需先撤销发货才能改。
+        title: "发货数量",
+        key: "shipQty",
+        width: 130,
         align: "right" as const,
-        render: (_v, it: any) => `${formatQty(it.qty)} 件`,
+        render: (_v, it: any) => {
+          const oiId = it.oiId != null ? String(it.oiId) : "";
+          const planQty = Number(it.qty || 0);
+          const stored = it.localShipQty != null ? Number(it.localShipQty) : planQty;
+          const current = itemShipDraft[oiId] != null ? Number(itemShipDraft[oiId]) : stored;
+          const locked = Boolean(row.inventoryDeducted);
+          const commit = (next: number | null) => {
+            if (next == null) return;
+            if (next !== stored) void handleSetItemShipQty(row, it, next);
+          };
+          return (
+            <InputNumber
+              size="small"
+              min={0}
+              max={planQty}
+              precision={0}
+              value={current}
+              disabled={locked || !canCreateOutbound || Boolean(itemShipSaving[oiId])}
+              status={current < planQty ? "warning" : undefined}
+              style={{ width: 110 }}
+              onChange={(val) => setItemShipDraft((prev) => ({ ...prev, [oiId]: (val as number) ?? 0 }))}
+              onBlur={() => commit(itemShipDraft[oiId] ?? null)}
+              onPressEnter={() => commit(itemShipDraft[oiId] ?? null)}
+            />
+          );
+        },
       },
-      {
-        title: "单价",
-        key: "price",
-        width: 110,
-        align: "right" as const,
-        render: (_v, it: any) => (it.price != null ? `¥${Number(it.price).toFixed(2)}` : "-"),
-      },
-      {
-        title: "金额",
-        key: "amount",
-        width: 120,
-        align: "right" as const,
-        render: (_v, it: any) => (it.amount != null ? `¥${Number(it.amount).toFixed(2)}` : "-"),
-      },
+      { title: "成本单价", dataIndex: "costPrice", key: "costPrice", width: 110, align: "right" as const, render: (v) => fmtMoney(v) },
+      { title: "成本金额", dataIndex: "costAmount", key: "costAmount", width: 130, align: "right" as const, render: (v) => fmtMoney(v) },
+      // 供应商不设宽度，撑满剩余宽度让明细铺满整行。
+      { title: "供应商", key: "supplier", render: () => row.supplierName || "-" },
     ];
     return (
-      <div style={{ padding: "8px 4px" }}>
+      <div className="consign-item-detail">
         <Image.PreviewGroup>
           <Table
             className="erp-compact-table"
@@ -797,12 +909,45 @@ export default function QcOutboundCenter() {
             columns={itemColumns}
             dataSource={items}
             pagination={false}
-            scroll={{ x: 830 }}
           />
         </Image.PreviewGroup>
       </div>
     );
-  }, [unifiedItemsCache, unifiedItemsLoading]);
+  }, [unifiedItemsCache, unifiedItemsLoading, itemShipDraft, itemShipSaving, handleSetItemShipQty, canCreateOutbound]);
+
+  // 本地确认发货 / 撤销：对应后端 inventory.action consign_deliver_ship / consign_deliver_unship。
+  const handleConsignShip = useCallback(async (row: ConsignDeliverUnifiedRow, ship: boolean) => {
+    if (!erp?.inventory?.action) { message.error("ERP 接口未就绪"); return; }
+    const oId = row.rawJst?.o_id;
+    if (!oId) { message.error("该行无聚水潭送仓单，无法确认发货"); return; }
+    setActingKey(`consign-${oId}`);
+    try {
+      const result = await erp.inventory.action({
+        action: ship ? "consign_deliver_ship" : "consign_deliver_unship",
+        oId,
+      });
+      if (result?.idempotent) {
+        message.info(result?.message || (ship ? "已扣过本地库存，未重复扣减" : "未扣减，无需撤销"));
+      } else {
+        message.success(result?.message || (ship ? "已发货，本地库存已扣减" : "已撤销发货，本地库存已回补"));
+      }
+      void loadUnified({
+        page: unifiedPage,
+        pageSize: unifiedPageSize,
+        search: stockQuery,
+        status: stockStatus,
+        shop: stockShop,
+        skuCode: stockSkuCode,
+        dateFrom: consignDateBound(stockDateRange?.[0], false),
+        dateTo: consignDateBound(stockDateRange?.[1], true),
+        source: unifiedSource,
+      });
+    } catch (error: any) {
+      message.error(error?.message || (ship ? "确认发货失败" : "撤销失败"));
+    } finally {
+      setActingKey(null);
+    }
+  }, [erp, loadUnified, unifiedPage, unifiedPageSize, stockQuery, stockStatus, stockShop, stockSkuCode, stockDateRange, unifiedSource]);
 
   const cloudStockColumns = useMemo<ColumnsType<ConsignDeliverUnifiedRow>>(() => {
     const columns: ColumnsType<ConsignDeliverUnifiedRow> = [
@@ -871,18 +1016,40 @@ export default function QcOutboundCenter() {
       render: (_value, row) => formatDateTime(row.rawCloud?.latest_ship_at || row.rawJst?.send_date),
     },
     {
+      // 数量 = Temu 备货单商品总数（demand_qty）；无云端数据的纯聚水潭行回退聚水潭件数。
       title: "数量",
       key: "qty",
-      width: 150,
+      width: 110,
+      align: "right" as const,
+      render: (_value, row) => {
+        const demand = row.rawCloud?.demand_qty != null ? row.rawCloud.demand_qty : row.itemsQty;
+        return <Text strong>{formatQty(demand)} 件</Text>;
+      },
+    },
+    {
+      // 送货数 = 本地实发之和（明细 local_ship_qty 之和，默认全发=备货数，可在展开明细逐条改）。
+      // 纯云端行无聚水潭明细，回退展示 Temu 平台「已送货」delivered_qty 作参考（带「平台」字样）。
+      title: "送货数",
+      key: "deliveredQty",
+      width: 110,
+      align: "right" as const,
+      render: (_value, row) => {
+        if (row.localShipQty != null) return <Text>{formatQty(row.localShipQty)}</Text>;
+        if (row.rawCloud?.delivered_qty != null) {
+          return <Text type="secondary">{formatQty(row.rawCloud.delivered_qty)}（平台）</Text>;
+        }
+        return <Text type="secondary">-</Text>;
+      },
+    },
+    {
+      title: "入库数",
+      key: "inboundQty",
+      width: 100,
+      align: "right" as const,
       render: (_value, row) => (
-        <Space direction="vertical" size={2}>
-          <Text strong>{formatQty(row.itemsQty)} 件</Text>
-          {row.rawCloud?.delivered_qty != null ? (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              送货 {formatQty(row.rawCloud.delivered_qty)}
-            </Text>
-          ) : null}
-        </Space>
+        row.rawCloud?.inbound_qty != null
+          ? <Text>{formatQty(row.rawCloud.inbound_qty)}</Text>
+          : <Text type="secondary">-</Text>
       ),
     },
     {
@@ -930,6 +1097,41 @@ export default function QcOutboundCenter() {
         );
       },
     },
+    {
+      title: "本地发货",
+      key: "shipAction",
+      width: 140,
+      fixed: "right" as const,
+      render: (_value, row) => {
+        // 只有带聚水潭送仓单(jst/both)的行能扣本地库存；cloud-only 备货单行不可。
+        if (!row.rawJst?.o_id) return <Text type="secondary">-</Text>;
+        const busy = actingKey === `consign-${row.rawJst.o_id}`;
+        if (row.inventoryDeducted) {
+          return (
+            <Button
+              size="small"
+              danger
+              loading={busy}
+              disabled={!canCreateOutbound}
+              onClick={() => handleConsignShip(row, false)}
+            >
+              撤销发货
+            </Button>
+          );
+        }
+        return (
+          <Button
+            size="small"
+            type="primary"
+            loading={busy}
+            disabled={!canCreateOutbound}
+            onClick={() => handleConsignShip(row, true)}
+          >
+            确认发货
+          </Button>
+        );
+      },
+    },
     ];
     const columnsByKey = new Map(columns.map((c) => [String(c.key || ""), c]));
     const visibleColumnKeys = new Set(unifiedColumnConfig.visible);
@@ -954,7 +1156,7 @@ export default function QcOutboundCenter() {
         onHeaderCell: buildColumnMenuHeaderProps,
       };
     });
-  }, [accounts.length, actingKey, canCreateOutbound, openUnifiedColumnMenu, resolveUnifiedRowLink, unifiedColumnConfig]);
+  }, [accounts.length, actingKey, canCreateOutbound, handleConsignShip, openUnifiedColumnMenu, resolveUnifiedRowLink, unifiedColumnConfig]);
 
   if (!erp) {
     return (
@@ -985,6 +1187,10 @@ export default function QcOutboundCenter() {
                   pageSize: unifiedPageSize,
                   search: stockQuery,
                   status: stockStatus,
+                  shop: stockShop,
+                  skuCode: stockSkuCode,
+                  dateFrom: consignDateBound(stockDateRange?.[0], false),
+                  dateTo: consignDateBound(stockDateRange?.[1], true),
                   source: unifiedSource,
                   notify: true,
                 });
@@ -1035,12 +1241,41 @@ export default function QcOutboundCenter() {
                     }}
                     style={{ maxWidth: 520 }}
                   />
+                  <Input
+                    allowClear
+                    placeholder="店铺"
+                    style={{ width: 160 }}
+                    value={stockShop}
+                    onChange={(event) => {
+                      setStockShop(event.target.value);
+                      setUnifiedPage(1);
+                    }}
+                  />
+                  <Input
+                    allowClear
+                    placeholder="商品编码"
+                    style={{ width: 160 }}
+                    value={stockSkuCode}
+                    onChange={(event) => {
+                      setStockSkuCode(event.target.value);
+                      setUnifiedPage(1);
+                    }}
+                  />
+                  <RangePicker
+                    placeholder={["下单开始", "下单结束"]}
+                    style={{ width: 250 }}
+                    value={stockDateRange}
+                    onChange={(value) => {
+                      setStockDateRange(value);
+                      setUnifiedPage(1);
+                    }}
+                  />
                   <Select
                     allowClear
                     placeholder="按状态过滤"
                     style={{ width: 180 }}
                     value={stockStatus || undefined}
-                    options={JST_STATUS_OPTIONS.map((value) => ({ label: value, value }))}
+                    options={statusFilterOptions}
                     getPopupContainer={(trigger) => trigger.parentElement || document.body}
                     onChange={(value) => {
                       setStockStatus(value || "");
@@ -1049,13 +1284,15 @@ export default function QcOutboundCenter() {
                   />
                 </div>
                 <Table
-                  className="erp-compact-table"
+                  className="erp-compact-table consign-unified-table"
                   rowKey={(row) => row.soId || JSON.stringify(row)}
                   size="middle"
                   loading={unifiedLoading}
                   columns={cloudStockColumns}
                   dataSource={unifiedRows}
-                  scroll={{ x: 2050 }}
+                  scroll={{ x: 2560 }}
+                  // 悬停即后台预取明细，点开时多半已缓存，避免每次展开都等一次跨区请求。
+                  onRow={(row) => ({ onMouseEnter: () => { void loadUnifiedItems(row); } })}
                   expandable={{
                     expandedRowRender: (row) => renderUnifiedRowItems(row),
                     onExpand: (expanded, row) => { if (expanded) void loadUnifiedItems(row); },

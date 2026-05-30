@@ -7072,6 +7072,35 @@ body {
   background: #ffffff;
 }
 
+/* 送仓托管展开明细：横向铺满（左右内边距 0），上 12px、下 32px 空隙；明细表去外框。 */
+.erp-compact-table.consign-unified-table .ant-table-expanded-row > td {
+  padding: 12px 0 32px !important;
+}
+.consign-item-detail .erp-compact-table.ant-table-wrapper {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+/* 展开明细顶到最左：清掉 antd 在「含固定列 + 横向滚动」时给展开内容包裹层的左侧偏移/边距，
+   以及明细表首列的左内边距，让「商品」列从最左边开始。 */
+.consign-unified-table .ant-table-expanded-row-fixed {
+  inset-inline-start: 0 !important;
+  margin-inline-start: 0 !important;
+  padding-inline-start: 0 !important;
+  /* 占满整行宽度，让明细横向铺满到最右。 */
+  width: 100% !important;
+}
+/* 明细表强制占满容器 + table-layout fixed：无宽度的「供应商」列吃掉剩余宽度，铺满到最右。 */
+.consign-item-detail .ant-table-content > table,
+.consign-item-detail .ant-table table {
+  width: 100% !important;
+  table-layout: fixed !important;
+}
+.consign-item-detail .erp-compact-table .ant-table-thead > tr > th:first-child,
+.consign-item-detail .erp-compact-table .ant-table-tbody > tr > td:first-child {
+  padding-left: 4px !important;
+}
+
 .erp-compact-table .ant-table-thead > tr > th {
   background: #f8fbff !important;
   color: var(--google-muted) !important;
