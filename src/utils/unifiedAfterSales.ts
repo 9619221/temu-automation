@@ -25,6 +25,8 @@ export interface UnifiedAfterSaleRow {
   shopName?: string | null;
   shopStatus?: string | null;
   status?: string | null;
+  // 货物状态（聚水潭 good_status）：卖家已收到退货 / 买家已退货 — 真实收货状态，与审核状态 status 区分
+  goodStatus?: string | null;
   type?: string | null;
   refundQty?: number | null;
   rQty?: number | null;
@@ -47,7 +49,7 @@ export interface UnifiedAfterSaleRow {
   // 平台独占单的明细：从平台 raw_json 解析，按 packageSn 聚合（聚水潭单不用，走 asId 异步加载）
   platformItems?: PlatformAfterSaleItem[];
 
-  // 确认收货状态（本地确认台账，confirmed = 已确认收货 + 已入库）
+  // 确认收货状态（本地确认台账，confirmed = 已确认收货 + 已入库）；用于操作列显示「已确认」
   receiptStatus?: string | null;
 }
 
@@ -73,6 +75,7 @@ interface ConsignAfterSaleRow {
   shopName?: string | null;
   shopStatus?: string | null;
   status?: string | null;
+  goodStatus?: string | null;
   type?: string | null;
   refundQty?: number | null;
   rQty?: number | null;
@@ -214,6 +217,7 @@ function jstAsBaseRow(j: ConsignAfterSaleRow): UnifiedAfterSaleRow {
     shopName: j.shopName || null,
     shopStatus: j.shopStatus || null,
     status: j.status || null,
+    goodStatus: j.goodStatus || null,
     type: j.type || null,
     refundQty: j.refundQty ?? null,
     rQty: j.rQty ?? null,
@@ -320,7 +324,7 @@ export async function fetchUnifiedAfterSales(params: FetchUnifiedParams = {}): P
 
   const mallPromise = loadMallNameMap(erp);
 
-  // 确认收货状态（本地确认台账，按 outerAsId），聚水潭单和平台单统一附加
+  // 确认收货台账（本地，按 outerAsId）：已确认的单，货物状态标记为「已收到货物」
   const receiptsPromise: Promise<Map<string, string>> = (async () => {
     if (!erp?.consignAfterSale?.receipts) return new Map<string, string>();
     try {
@@ -398,13 +402,13 @@ export async function fetchUnifiedAfterSales(params: FetchUnifiedParams = {}): P
     unifiedRows.push(jstAsBaseRow(j));
   }
 
-  // 附加确认收货状态：已确认的内部状态显示「已确认」
+  // 附加确认收货状态：已确认收货的单，货物状态标记为「卖家已收到退货」（已收到货物）
   if (receiptMap.size) {
     for (const row of unifiedRows) {
       const st = row.outerAsId ? receiptMap.get(String(row.outerAsId)) : undefined;
       if (st) {
         row.receiptStatus = st;
-        if (st === "confirmed") row.status = "已确认";
+        if (st === "confirmed") row.goodStatus = "卖家已收到退货";
       }
     }
   }

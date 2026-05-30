@@ -77,6 +77,14 @@ function statusColor(value?: string | null) {
   return "default";
 }
 
+// 货物状态（聚水潭 good_status）配色：已收到退货=绿（货已到仓），买家已退货=橙（在途/待收）
+function goodStatusColor(value?: string | null) {
+  const text = String(value || "").trim();
+  if (/卖家已收到|已收到退货|已签收|已入库/.test(text)) return "green";
+  if (/买家已退货|退货中|在途|待/.test(text)) return "orange";
+  return "default";
+}
+
 function parseReasons(des?: string | null) {
   if (!des) return "";
   const text = String(des).trim();
@@ -216,7 +224,7 @@ export default function ConsignAfterSalesSection() {
         source: confirmRow.source,
         items,
       });
-      message.success("已确认收货并入库");
+      message.success("已确认收货并入库，货物状态已更新");
       setConfirmRow(null);
       setConfirmItems([]);
       void loadData();
@@ -280,11 +288,11 @@ export default function ConsignAfterSalesSection() {
       render: (v) => formatNumber(v),
     },
     {
-      title: "内部状态",
-      dataIndex: "status",
-      key: "status",
-      width: 110,
-      render: (v) => <Tag color={statusColor(v)}>{v || "-"}</Tag>,
+      title: "货物状态",
+      dataIndex: "goodStatus",
+      key: "goodStatus",
+      width: 120,
+      render: (v) => v ? <Tag color={goodStatusColor(v)}>{v}</Tag> : <Tag color="red">卖家未收到退货</Tag>,
     },
     {
       title: "平台状态",
@@ -326,10 +334,11 @@ export default function ConsignAfterSalesSection() {
       title: "操作",
       key: "action",
       width: 110,
+      fixed: "right",
       render: (_v, row) => (
         row.receiptStatus === "confirmed"
           ? <Tag color="green">已确认</Tag>
-          : <Button size="small" type="primary" onClick={() => void openConfirm(row)}>确认收货</Button>
+          : <Button size="small" type="primary" onClick={(e) => { e.stopPropagation(); void openConfirm(row); }}>确认收货</Button>
       ),
     },
   ];
@@ -486,7 +495,7 @@ export default function ConsignAfterSalesSection() {
             loading={loading && !loadedOnce}
             columns={columns}
             dataSource={rows}
-            scroll={{ x: 1700 }}
+            scroll={{ x: 1710 }}
             onRow={(row) => ({ onClick: () => void toggleExpand(row), style: { cursor: "pointer" } })}
             expandable={{
               expandedRowKeys: expandedId ? [expandedId] : [],
@@ -499,6 +508,7 @@ export default function ConsignAfterSalesSection() {
                     {row.asId ? <Col xs={12} sm={6}><Text type="secondary">内部单号</Text><div>{row.asId}</div></Col> : null}
                     <Col xs={12} sm={6}><Text type="secondary">退货时间</Text><div>{formatTime(row.asDate)}</div></Col>
                     <Col xs={12} sm={6}><Text type="secondary">内部状态</Text><div><Tag color={statusColor(row.status)}>{row.status || "-"}</Tag></div></Col>
+                    <Col xs={12} sm={6}><Text type="secondary">货物状态</Text><div>{row.goodStatus ? <Tag color={goodStatusColor(row.goodStatus)}>{row.goodStatus}</Tag> : <Tag color="red">卖家未收到退货</Tag>}</div></Col>
                     <Col xs={12} sm={6}><Text type="secondary">平台状态</Text><div><Tag color={statusColor(row.shopStatus)}>{row.shopStatus || "-"}</Tag></div></Col>
                     <Col xs={12} sm={6}><Text type="secondary">类型</Text><div>{row.type || "-"}</div></Col>
                     <Col xs={12} sm={6}><Text type="secondary">仓库</Text><div>{row.warehouse || "-"}</div></Col>
@@ -574,7 +584,7 @@ export default function ConsignAfterSalesSection() {
           type="info"
           showIcon
           style={{ marginBottom: 12 }}
-          message="按实收数量增加库存。SKU 未绑定内部编码的明细会被拒绝，请先在商品资料补齐。"
+          message="按实收数量增加库存，并把该单货物状态标记为「卖家已收到退货」。SKU 未绑定内部编码的明细会被拒绝，请先在商品资料补齐。"
         />
         <Table<ConfirmItemRow>
           className="erp-compact-table"
