@@ -7096,9 +7096,14 @@ body {
   width: 100% !important;
   table-layout: fixed !important;
 }
+/* 明细单元格四周留白，避免图片/文字贴住边框或列线。 */
+.consign-item-detail .erp-compact-table .ant-table-thead > tr > th,
+.consign-item-detail .erp-compact-table .ant-table-tbody > tr > td {
+  padding: 10px 14px !important;
+}
 .consign-item-detail .erp-compact-table .ant-table-thead > tr > th:first-child,
 .consign-item-detail .erp-compact-table .ant-table-tbody > tr > td:first-child {
-  padding-left: 4px !important;
+  padding-left: 16px !important;
 }
 
 .erp-compact-table .ant-table-thead > tr > th {
