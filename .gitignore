@@ -61,3 +61,8 @@ _diag.txt
 _codex-*.md
 *.tsv
 import-*.sql
+
+# codex 探测脚本临时产物
+_probe_*
+_pu*
+_dbpath.txt

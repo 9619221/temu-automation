@@ -123,7 +123,7 @@ function verifyAnalyzeKey(env) {
         "Content-Length": Buffer.byteLength(body),
         Authorization: `Bearer ${apiKey}`,
       },
-      timeout: 30_000,
+      timeout: 60_000,
     }, (res) => {
       const chunks = [];
       res.on("data", (chunk) => chunks.push(chunk));

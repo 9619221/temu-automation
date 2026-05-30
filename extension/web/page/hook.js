@@ -854,6 +854,25 @@
       run().catch(() => {});
     } catch {}
   }
+  // 仅采集逆向必需的请求头，绝不采 cookie / authorization / token，避免凭据外泄
+  const REQ_HEADER_ALLOW = ["anti-content", "content-type", "mallid", "x-requested-with"];
+  function pickReqHeaders(getter) {
+    const out = {};
+    try {
+      for (const name of REQ_HEADER_ALLOW) {
+        const v = getter(name);
+        if (v) out[name] = String(v).slice(0, 4000);
+      }
+    } catch {}
+    return out;
+  }
+  function reqBodyStr(body) {
+    try {
+      if (body == null) return null;
+      if (typeof body === "string") return body.length > 60000 ? body.slice(0, 60000) + "...[TRUNC]" : body;
+      return "[non-string body]";
+    } catch { return null; }
+  }
   function emit(payload) {
     try {
       window.dispatchEvent(new CustomEvent(EVENT_NAME, { detail: payload }));
@@ -877,6 +896,8 @@
     const xhr = new OrigXHR();
     let _url = "", _method = "GET", _bypass = false;
     let _requestBodyText = null;
+    const _reqHeaders = {};
+    let _reqBody = null;
     const _ts = Date.now();
     const origOpen = xhr.open;
     xhr.open = function (method, url) {
@@ -884,13 +905,19 @@
       return origOpen.apply(this, arguments);
     };
     const origSetHdr = xhr.setRequestHeader;
-    xhr.setRequestHeader = function (name) {
+    xhr.setRequestHeader = function (name, value) {
       if (name === BYPASS_SYMBOL_KEY) { _bypass = true; stats.bypassHit++; return; }
+      try {
+        if (name && REQ_HEADER_ALLOW.indexOf(String(name).toLowerCase()) >= 0) {
+          _reqHeaders[String(name).toLowerCase()] = String(value).slice(0, 4000);
+        }
+      } catch {}
       return origSetHdr.apply(this, arguments);
     };
     const origSend = xhr.send;
     xhr.send = function (body) {
       _requestBodyText = bodyToText(body);
+      try { _reqBody = reqBodyStr(body); } catch {}
       stats.xhrSendTotal++;
       const captureMode = !_bypass && shouldCapture(_url) ? "capture" : (!_bypass && shouldDiscover(_url) ? "discovery" : "");
       if (captureMode) {
@@ -907,6 +934,8 @@
               kind: captureMode === "discovery" ? "xhr-discovery" : "xhr",
               url: _url, method: _method, status: xhr.status, ts: _ts,
               site: inferMallSite(), page: location.pathname,
+              reqBody: _reqBody,
+              reqHeaders: _reqHeaders,
             }, text, _requestBodyText, captureMode === "discovery"));
           } catch {}
         });
@@ -953,6 +982,16 @@
     else stats.fetchDiscoveryHit++;
     const ts = Date.now();
     const requestBodyTextPromise = fetchRequestBodyTextAsync(input, init);
+    const reqBody = reqBodyStr(init && init.body);
+    const hdrSrc = (init && init.headers) || (input && input.headers) || null;
+    const reqHeaders = pickReqHeaders((n) => {
+      try {
+        if (!hdrSrc) return null;
+        if (typeof hdrSrc.get === "function") return hdrSrc.get(n);
+        const lk = Object.keys(hdrSrc).find((k) => k.toLowerCase() === n.toLowerCase());
+        return lk ? hdrSrc[lk] : null;
+      } catch { return null; }
+    });
     const promise = OrigFetch.apply(this, arguments);
     return promise.then((resp) => {
       try {
@@ -968,6 +1007,8 @@
               kind: captureMode === "discovery" ? "fetch-discovery" : "fetch",
               url, method, status: resp.status, ts,
               site: inferMallSite(), page: location.pathname,
+              reqBody,
+              reqHeaders,
             }, text, requestBodyText, captureMode === "discovery"));
             if (captureMode === "capture") maybeAutoPaginate(url, method, input, init, requestBodyText, parsedBody);
           } catch {}
@@ -1196,11 +1237,11 @@
   } catch {}
 
   window.__temuMonitor = {
-    version: "0.3.1",
+    version: "0.3.3",
     site: inferMallSite(),
     healthy: () => window.XMLHttpRequest === TrackedXHR && window.fetch === TrackedFetch,
     stats,
-    note: "XHR + fetch wrapped; fetch 用 resp.clone() 不消耗原 stream; perf observer 兜底",
+    note: "XHR + fetch wrapped; v0.3.3 增白名单内请求体+anti-content/content-type 头采集(不采凭据); fetch 用 resp.clone() 不消耗原 stream; perf observer 兜底",
   };
 })(
   (function () {

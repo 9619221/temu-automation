@@ -21220,8 +21220,9 @@ function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:other-inout:page", (_event, params) => listJstOtherInoutPageRuntime(params || {}));
   ipcMain.handle("erp:other-inout:items", (_event, params) => listJstOtherInoutItemsRuntime(params || {}));
   ipcMain.handle("erp:other-inout:cache-status", (_event, params) => getJstOtherInoutCacheStatusRuntime(params || {}));
-  ipcMain.handle("erp:purchase:workbench", wrapErpHandler("erp:purchase:workbench", (_event, params) => getPurchaseWorkbenchRuntime(params || {})));
-  ipcMain.handle("erp:purchase:action", (_event, payload) => performPurchaseActionRuntime(payload || {}));
+  // ipc.cjs 拆分：purchase 域已移到 ./ipcHandlers/purchase.cjs（依赖注入）
+  const { registerPurchaseHandlers } = require("./ipcHandlers/purchase.cjs");
+  registerPurchaseHandlers(ipcMain, { getPurchaseWorkbenchRuntime, performPurchaseActionRuntime, wrapErpHandler });
   ipcMain.handle("erp:warehouse:workbench", (_event, params) => getWarehouseWorkbenchRuntime(params || {}));
   ipcMain.handle("erp:warehouse:action", (_event, payload) => performWarehouseActionRuntime(payload || {}));
   ipcMain.handle("erp:qc:workbench", (_event, params) => getQcWorkbenchRuntime(params || {}));
