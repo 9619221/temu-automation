@@ -59,7 +59,6 @@ import {
 } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
 import StoreManager from "../components/StoreManager";
-import OtherInoutSection from "../components/OtherInoutSection";
 import { useErpAuth } from "../contexts/ErpAuthContext";
 import {
   PAYMENT_STATUS_LABELS,
@@ -1693,7 +1692,7 @@ type PurchaseQueueKey =
   | "po_cancelled"
   | "po_exception";
 
-type PurchaseWorkArea = "sourcing" | "orders" | "other-inout";
+type PurchaseWorkArea = "sourcing" | "orders";
 type RequestCreateMode = "sourcing" | "optimization";
 
 interface PurchaseQueueItem {
@@ -7039,7 +7038,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   // 首屏（无快照）加载时显示加载态；已有数据的手动刷新保持原内容，不空屏闪烁。
   const tableLoading = loading && !hasWorkbenchSnapshot(data);
   const tableBusy = tableLoading || purchaseOrderPageLoading;
-  const workAreaTitle = activeWorkArea === "sourcing" ? "找品" : activeWorkArea === "other-inout" ? "其他出入库" : "采购单";
+  const workAreaTitle = activeWorkArea === "sourcing" ? "找品" : "采购单";
   const workAreaUpdatedText = tableLoading ? "更新 —" : `更新 ${formatDateTime(data.generatedAt)}`;
   const workAreaActions = [
     <Button key="workflow" icon={<FileDoneOutlined />} onClick={() => setPurchaseFlowOpen(true)}>
@@ -7155,8 +7154,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
           <div className="purchase-workbench-statusline purchase-workbench-statusline--primary">
             <span className="purchase-workbench-name">{workAreaTitle}</span>
             <span className="purchase-workbench-meta__pill">{workAreaUpdatedText}</span>
-            <Text strong>{activeWorkArea === "sourcing" ? "找品状态" : activeWorkArea === "other-inout" ? "历史台账" : "采购单状态"}</Text>
-            <Space size={[8, 8]} wrap style={{ display: activeWorkArea === "other-inout" ? "none" : undefined }}>
+            <Text strong>{activeWorkArea === "sourcing" ? "找品状态" : "采购单状态"}</Text>
+            <Space size={[8, 8]} wrap>
               {queueItems.map((item) => (
                 <Button
                   key={item.key}
@@ -7187,12 +7186,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
             options={[
               { label: `找品 ${pendingRequestRows.length}`, value: "sourcing" },
               { label: `采购单 ${orderCountAll}`, value: "orders" },
-              { label: "其他出入库", value: "other-inout" },
             ]}
             style={{ marginBottom: 12 }}
           />
         ) : null}
-        {activeWorkArea === "other-inout" ? null : activeWorkArea === "orders" ? (
+        {activeWorkArea === "orders" ? (
           <div className="material-filter-bar">
             <Input
               allowClear
@@ -7312,9 +7310,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
             ) : null}
           </div>
         )}
-        {activeWorkArea === "other-inout" ? (
-          <OtherInoutSection />
-        ) : tableLoading ? (
+        {tableLoading ? (
           <Skeleton active paragraph={{ rows: 8 }} title={false} style={{ padding: "12px 0" }} />
         ) : activeQueue.kind === "mixed" ? (
           // "全部" tab：上下两段表同屏排列，空段不显示

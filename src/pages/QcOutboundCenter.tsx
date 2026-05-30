@@ -735,80 +735,72 @@ export default function QcOutboundCenter() {
     const items = unifiedItemsCache[oId];
     if (!items) return <Text type="secondary">展开后加载中...</Text>;
     if (!items.length) return <Text type="secondary">无明细</Text>;
-    const headerCellStyle = {
-      fontSize: 12,
-      color: "rgba(0,0,0,0.45)",
-      fontWeight: 500 as const,
-    };
+    // 明细列：对齐售后页（ConsignAfterSalesSection）的紧凑 Table 风格
+    const itemColumns: ColumnsType<any> = [
+      {
+        title: "商品",
+        key: "product",
+        width: 320,
+        render: (_v, it: any) => (
+          <Space size={8} align="start">
+            {it.picUrl ? (
+              <Image
+                src={it.picUrl}
+                alt=""
+                width={48}
+                height={48}
+                style={{ objectFit: "cover", borderRadius: 4, cursor: "zoom-in" }}
+                preview={{ mask: <EyeOutlined /> }}
+              />
+            ) : null}
+            <Space direction="vertical" size={0} style={{ minWidth: 0 }}>
+              <Text style={{ fontWeight: 600, lineHeight: 1.3 }}>{it.name || "-"}</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>货号 {it.skuCode || "-"} / SKU {it.skuId || "-"}</Text>
+            </Space>
+          </Space>
+        ),
+      },
+      {
+        title: "规格",
+        dataIndex: "propertiesValue",
+        key: "spec",
+        width: 180,
+        render: (v) => v || "-",
+      },
+      {
+        title: "数量",
+        key: "qty",
+        width: 100,
+        align: "right" as const,
+        render: (_v, it: any) => `${formatQty(it.qty)} 件`,
+      },
+      {
+        title: "单价",
+        key: "price",
+        width: 110,
+        align: "right" as const,
+        render: (_v, it: any) => (it.price != null ? `¥${Number(it.price).toFixed(2)}` : "-"),
+      },
+      {
+        title: "金额",
+        key: "amount",
+        width: 120,
+        align: "right" as const,
+        render: (_v, it: any) => (it.amount != null ? `¥${Number(it.amount).toFixed(2)}` : "-"),
+      },
+    ];
     return (
-      <div style={{ margin: -16 }}>
-        {/* 列标题 */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            padding: "8px 16px",
-            background: "#f0f5ff",
-            borderBottom: "1px solid #d6e4ff",
-            width: "100%",
-            boxSizing: "border-box",
-          }}
-        >
-          <div style={{ width: 72, flexShrink: 0, ...headerCellStyle }}>图片</div>
-          <div style={{ flex: 1, minWidth: 80, paddingLeft: 12, ...headerCellStyle }}>商品名</div>
-          <div style={{ width: 192, flexShrink: 0, paddingLeft: 12, ...headerCellStyle }}>规格</div>
-          <div style={{ width: 152, flexShrink: 0, paddingLeft: 12, ...headerCellStyle }}>SKU</div>
-          <div style={{ width: 82, flexShrink: 0, paddingLeft: 12, textAlign: "right", ...headerCellStyle }}>数量</div>
-          <div style={{ width: 102, flexShrink: 0, paddingLeft: 12, textAlign: "right", ...headerCellStyle }}>单价</div>
-          <div style={{ width: 112, flexShrink: 0, paddingLeft: 12, textAlign: "right", ...headerCellStyle }}>金额</div>
-        </div>
-        {/* 数据行 */}
+      <div style={{ padding: "8px 4px" }}>
         <Image.PreviewGroup>
-          {items.map((it: any) => (
-            <div
-              key={String(it.oiId || it.id || `${it.skuId}-${it.skuCode}`)}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                padding: "10px 16px",
-                borderBottom: "1px solid #f0f0f0",
-                background: "#fafafa",
-                width: "100%",
-                boxSizing: "border-box",
-              }}
-            >
-              <div style={{ width: 72, flexShrink: 0 }}>
-                {it.picUrl ? (
-                  <Image
-                    src={it.picUrl}
-                    alt=""
-                    width={56}
-                    height={56}
-                    style={{ objectFit: "cover", borderRadius: 4, cursor: "zoom-in" }}
-                    preview={{ mask: <EyeOutlined /> }}
-                  />
-                ) : "-"}
-              </div>
-              <div style={{ flex: 1, minWidth: 80, paddingLeft: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {it.name || "-"}
-              </div>
-              <div style={{ width: 192, flexShrink: 0, paddingLeft: 12, color: "rgba(0,0,0,0.55)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {it.propertiesValue || "-"}
-              </div>
-              <div style={{ width: 152, flexShrink: 0, paddingLeft: 12, color: "rgba(0,0,0,0.55)", fontFamily: "monospace" }}>
-                {it.skuId || "-"}
-              </div>
-              <div style={{ width: 82, flexShrink: 0, paddingLeft: 12, textAlign: "right" }}>
-                {formatQty(it.qty)} 件
-              </div>
-              <div style={{ width: 102, flexShrink: 0, paddingLeft: 12, textAlign: "right", color: "rgba(0,0,0,0.55)" }}>
-                {it.price != null ? `¥${Number(it.price).toFixed(2)}` : "-"}
-              </div>
-              <div style={{ width: 112, flexShrink: 0, paddingLeft: 12, textAlign: "right", fontWeight: 600 }}>
-                {it.amount != null ? `¥${Number(it.amount).toFixed(2)}` : "-"}
-              </div>
-            </div>
-          ))}
+          <Table
+            className="erp-compact-table"
+            rowKey={(it: any) => String(it.oiId || it.id || `${it.skuId}-${it.skuCode}`)}
+            size="small"
+            columns={itemColumns}
+            dataSource={items}
+            pagination={false}
+            scroll={{ x: 830 }}
+          />
         </Image.PreviewGroup>
       </div>
     );

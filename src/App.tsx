@@ -319,7 +319,6 @@ function App() {
               <Route path="1688-mapping" element={<RoleRoute path="/1688-mapping"><AlibabaMapping /></RoleRoute>} />
               <Route path="sourcing-center" element={<RoleRoute path="/sourcing-center"><PurchaseCenter workArea="sourcing" /></RoleRoute>} />
               <Route path="purchase-center" element={<RoleRoute path="/purchase-center"><PurchaseCenter workArea="orders" /></RoleRoute>} />
-              <Route path="other-inout" element={<RoleRoute path="/other-inout"><PurchaseCenter workArea="other-inout" /></RoleRoute>} />
               <Route path="warehouse-center" element={<RoleRoute path="/warehouse-center"><WarehouseCenter /></RoleRoute>} />
               <Route path="qc-outbound" element={<RoleRoute path="/qc-outbound"><QcOutboundCenter /></RoleRoute>} />
               <Route path="work-items" element={<RoleRoute path="/work-items"><WorkItems /></RoleRoute>} />
