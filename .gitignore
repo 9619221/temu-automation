@@ -51,3 +51,13 @@ extension/dist/
 /logs/
 .temu_partner_*.txt
 .codex-tmp-*
+
+# 2026-05-29 补充：散落副本 / 临时调试产物 / codex 子项目（防误提交 + 减噪）
+_norm/
+_srvsync/
+artifacts/
+temu-web-erp/
+_diag.txt
+_codex-*.md
+*.tsv
+import-*.sql
