@@ -51,6 +51,7 @@ const menuItems = [
       { key: "/purchase-center", icon: <ShoppingOutlined />, label: "采购单" },
       { key: "/after-sales", icon: <FileTextOutlined />, label: "售后" },
       { key: "/warehouse-center", icon: <InboxOutlined />, label: "仓库中心" },
+      { key: "/temu-stock-orders", icon: <InboxOutlined />, label: "备货单" },
       { key: "/qc-outbound", icon: <ExportOutlined />, label: "出库中心" },
     ],
   },
