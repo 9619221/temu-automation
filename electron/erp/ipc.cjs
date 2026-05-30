@@ -33,6 +33,7 @@ const {
   setHostMode,
 } = require("./clientRuntime.cjs");
 const skuCache = require("./skuCache.cjs");
+const accountCache = require("./accountCache.cjs");
 const mappingCache = require("./mappingCache.cjs");
 const purchaseRequestCache = require("./purchaseRequestCache.cjs");
 const purchaseReturnCache = require("./purchaseReturnCache.cjs");
@@ -1253,6 +1254,7 @@ function initializeErp(options = {}) {
   }
   configureClientRuntime({ userDataDir: erpState.userDataDir });
   skuCache.configureSkuCache({ userDataDir: erpState.userDataDir });
+  accountCache.configureAccountCache({ userDataDir: erpState.userDataDir });
   mappingCache.configureMappingCache({ userDataDir: erpState.userDataDir });
   purchaseRequestCache.configurePurchaseRequestCache({ userDataDir: erpState.userDataDir });
   purchaseReturnCache.configurePurchaseReturnCache({ userDataDir: erpState.userDataDir });
@@ -19761,6 +19763,29 @@ async function listAccountsRuntime(params = {}) {
   // accounts+suppliers+skus 三套响应把 main process IPC 卡死。
   // host mode 下 getMasterDataWorkbenchRuntime 走本地 SQL，全量查询很快，
   // 多查的两项忽略即可，不影响性能。
+  //
+  // client 缓存兜底（accountCache）：accounts 原本无本地缓存，每次都实时跨海，主控端
+  // 一抖/慢就撞「连接主控端超时」糊脸。改为 stale-while-revalidate：有缓存秒返回 +
+  // 后台静默刷新；首次无缓存才实时拉一次并写缓存，超时/失败时尽量回退到旧缓存。
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    let cached = null;
+    try { cached = accountCache.getCachedAccounts(); } catch { cached = null; }
+    if (cached) {
+      void accountCache.triggerSync(params).catch(() => {}); // 后台刷新，失败静默
+      return cached;
+    }
+    // 无缓存：实时拉一次（triggerSync 内部会写缓存）；超时/失败时回退到任何旧缓存，
+    // 实在没有才抛错（跟改造前行为一致，不会更差）。
+    try {
+      return await accountCache.triggerSync(params);
+    } catch (error) {
+      let stale = null;
+      try { stale = accountCache.getCachedAccounts(); } catch { stale = null; }
+      if (stale) return stale;
+      throw error;
+    }
+  }
   const workbench = await getMasterDataWorkbenchRuntime({ ...params, part: "accounts" });
   return workbench.accounts || [];
 }
