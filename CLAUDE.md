@@ -38,6 +38,12 @@
 
 **事实主干 = `master`。所有功能 commit 必须先合 master，再发版。禁止旁支独立 commit 功能后直接发版。**
 
+## 日常开发分支策略
+
+- **功能 / fix 一律在 `claude/*`（或 `codex/*`）短分支上开发**，改完及时 commit，再 push 开 PR 合 master。**不要把改动长期停在 master 工作区「未提交」状态**——未提交改动随时可能被 IDE「撤销更改」或 `git checkout` 刷回 HEAD（踩过：移走的入口反复自己冒回来，根因就是改动一直没提交）。
+- **dev 跑在哪个分支无所谓**：`npm run dev` 只服务当前工作区代码，切到哪个分支就跑哪个分支。分支模型管的是「提交往哪落」，不是「dev 在哪跑」。
+- master 只接两类写入：① PR 合并；② 版本号 bump（见下）。其它一切功能改动都先进 `claude/*` 分支。
+
 ## 背景
 
 历史上 `goofy-wing-cec9e0` 长期作发版分支，跟 master 平行演化、积累过 26 个独有 commit，导致：
@@ -50,13 +56,17 @@
 
 ## 发版必做
 
-1. 主仓 worktree（`C:\Users\Administrator\Desktop\temu-automation`）切到 `master`
-2. `git fetch origin && git reset --hard origin/master`（让本地 master 跟远端完全同步）
-3. 跑 `npx tsc --noEmit` 验证 0 错
-4. 跑 `npm run dist:win` 打 NSIS 安装包
-5. 跑 `npm run publish:update:erp` 推自建服务器（推 GitHub Releases 用 `publish:update:github`）
-6. 验证 `https://erp.temu.chat/releases/latest.yml` 显示新版本号
-7. **同步服务器代码到 master**（见下「服务器代码同步」节）—— 桌面端用户更新到新版后，前端会调用新 action / 用到新字段，**主控端必须同时跟上**，否则用户会撞 `Unsupported purchase action: xxx` 或 `no such column: xxx` 一类错。这一步**不可省略**。
+发版永远从 master 发，不从旁支。口诀：**对齐 master → tsc → bump+push → dist:win → 推 erp + 推 github → 验 latest.yml → 同步服务器主控端**。
+
+1. 功能改动已通过 PR 合进 master（前提：见「日常开发分支策略」）
+2. 主仓 worktree（`C:\Users\Administrator\Desktop\temu-automation`）切到 `master`
+3. `git fetch origin && git reset --hard origin/master`（让本地 master 跟远端完全同步）
+4. 跑 `npx tsc --noEmit` 验证 0 错
+5. **bump 版本号**：改 `package.json` 的 `version`，commit `chore(release): bump 0.3.X` + 一行 release note，`git push origin master`。version 决定安装包版本号，**必须在打包前 bump**（详见下「版本号 bump 在哪做」）
+6. 跑 `npm run dist:win` 打 NSIS 安装包
+7. **发布更新源——两个都要推**：`npm run publish:update:erp`（自建服务器 `latest.yml`）+ `npm run publish:update:github`（GitHub Releases）。⚠️ exe 下载是 302 跳 GitHub，**`publish:update:github` 不可省略**，只推 erp 用户下不到包；两边发布有竞态，别并发乱推
+8. 验证 `https://erp.temu.chat/releases/latest.yml` 显示新版本号
+9. **同步服务器代码到 master**（见下「服务器代码同步」节）—— 桌面端用户更新到新版后，前端会调用新 action / 用到新字段，**主控端必须同时跟上**，否则用户会撞 `Unsupported purchase action: xxx` 或 `no such column: xxx` 一类错。这一步**不可省略**。
 
 ## 版本号 bump 在哪做
 
@@ -72,7 +82,7 @@
 
 ## 服务器代码同步
 
-erp.temu.chat 服务器 `/opt/temu-automation/` 是裸文件部署，跟 git 历史分叉。每次桌面端发版（步骤 6 完成）后**立即同步**，规则：
+erp.temu.chat 服务器 `/opt/temu-automation/` 是裸文件部署，跟 git 历史分叉。每次桌面端发版（步骤 8 验证通过）后**立即同步**，规则：
 
 ### 同步范围
 
