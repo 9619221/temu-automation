@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Col, Image, Input, Row, Space, Table, Tag, Typography, message } from "antd";
+import { Alert, Button, Col, Image, Input, InputNumber, Modal, Row, Space, Table, Tag, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { CloudSyncOutlined, EyeOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons";
 import EmptyGuide from "./EmptyGuide";
@@ -34,6 +34,16 @@ interface ConsignAfterSaleItemRow {
   temuSoId?: string | null;
   boxId?: string | null;
   itemLabels?: string | null;
+}
+
+interface ConfirmItemRow {
+  key: string;
+  productName: string;
+  temuSkuId: string | null;
+  temuSkcId: string | null;
+  internalSkuCode: string | null;
+  dueQty: number;
+  receivedQty: number;
 }
 
 const erp = (window as any).electronAPI?.erp;
@@ -146,6 +156,77 @@ export default function ConsignAfterSalesSection() {
     }
   }, [expandedId]);
 
+  const [confirmRow, setConfirmRow] = useState<UnifiedAfterSaleRow | null>(null);
+  const [confirmItems, setConfirmItems] = useState<ConfirmItemRow[]>([]);
+  const [confirmLoading, setConfirmLoading] = useState(false);
+
+  // 打开确认收货弹框：平台单明细来自 platformItems，聚水潭单走 asId 拉明细。
+  const openConfirm = useCallback(async (row: UnifiedAfterSaleRow) => {
+    let list: ConfirmItemRow[] = [];
+    if (row.source === "platform" && Array.isArray(row.platformItems)) {
+      list = row.platformItems.map((it: PlatformAfterSaleItem, idx: number) => ({
+        key: it.id || `pi-${idx}`,
+        productName: it.spec || it.skuId || it.skcId || "-",
+        temuSkuId: it.skuId || null,
+        temuSkcId: it.skcId || null,
+        internalSkuCode: null,
+        dueQty: Number(it.qty || 0),
+        receivedQty: Number(it.qty || 0),
+      }));
+    } else if (row.asId && erp?.consignAfterSale?.items) {
+      try {
+        const items = await erp.consignAfterSale.items({ asId: row.asId });
+        list = (Array.isArray(items) ? items : []).map((it: any, idx: number) => ({
+          key: it.id || `ji-${idx}`,
+          productName: it.productName || it.skuId || "-",
+          temuSkuId: null,
+          temuSkcId: null,
+          internalSkuCode: it.skuId || null, // 聚水潭 sku_id == internal_sku_code
+          dueQty: Number(it.rQty || it.qty || 0),
+          receivedQty: Number(it.rQty || it.qty || 0),
+        }));
+      } catch (e: any) {
+        message.error(e?.message || "明细读取失败");
+        return;
+      }
+    }
+    if (!list.length) { message.warning("该售后单没有可入库的明细"); return; }
+    setConfirmRow(row);
+    setConfirmItems(list);
+  }, []);
+
+  const submitConfirm = useCallback(async () => {
+    if (!confirmRow || !erp?.consignAfterSale?.confirmReceipt) return;
+    if (!confirmRow.outerAsId) { message.error("缺少外部单号，无法确认"); return; }
+    const items = confirmItems
+      .filter((it) => Number(it.receivedQty) > 0)
+      .map((it) => ({
+        temuSkuId: it.temuSkuId,
+        temuSkcId: it.temuSkcId,
+        internalSkuCode: it.internalSkuCode,
+        productName: it.productName,
+        receivedQty: Math.trunc(Number(it.receivedQty)),
+      }));
+    if (!items.length) { message.warning("请填写实收数量"); return; }
+    setConfirmLoading(true);
+    try {
+      await erp.consignAfterSale.confirmReceipt({
+        outerAsId: confirmRow.outerAsId,
+        asId: confirmRow.asId ?? null,
+        source: confirmRow.source,
+        items,
+      });
+      message.success("已确认收货并入库");
+      setConfirmRow(null);
+      setConfirmItems([]);
+      void loadData();
+    } catch (e: any) {
+      message.error(e?.message || "确认收货失败");
+    } finally {
+      setConfirmLoading(false);
+    }
+  }, [confirmRow, confirmItems, loadData]);
+
   const shopCount = useMemo(() => new Set(rows.map((r) => r.shopName).filter(Boolean)).size, [rows]);
   const totalRefundQty = useMemo(() => rows.reduce((s, r) => s + Number(r.refundQty || 0), 0), [rows]);
   const pendingCount = useMemo(() => rows.filter((r) => statusColor(r.status) !== "green").length, [rows]);
@@ -240,6 +321,16 @@ export default function ConsignAfterSalesSection() {
       key: "remark",
       ellipsis: true,
       render: (v, row) => v || row.platformReason || "-",
+    },
+    {
+      title: "操作",
+      key: "action",
+      width: 110,
+      render: (_v, row) => (
+        row.receiptStatus === "confirmed"
+          ? <Tag color="green">已确认</Tag>
+          : <Button size="small" type="primary" onClick={() => void openConfirm(row)}>确认收货</Button>
+      ),
     },
   ];
 
@@ -468,6 +559,50 @@ export default function ConsignAfterSalesSection() {
           />
         </Space>
       </section>
+
+      <Modal
+        title={`确认收货 — ${confirmRow?.outerAsId || ""}`}
+        open={!!confirmRow}
+        onCancel={() => { setConfirmRow(null); setConfirmItems([]); }}
+        onOk={() => void submitConfirm()}
+        okText="确认收货并入库"
+        okButtonProps={{ loading: confirmLoading }}
+        width={720}
+        destroyOnClose
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="按实收数量增加库存。SKU 未绑定内部编码的明细会被拒绝，请先在商品资料补齐。"
+        />
+        <Table<ConfirmItemRow>
+          className="erp-compact-table"
+          rowKey="key"
+          size="small"
+          pagination={false}
+          dataSource={confirmItems}
+          columns={[
+            { title: "商品", dataIndex: "productName", key: "productName", ellipsis: true },
+            { title: "应退", dataIndex: "dueQty", key: "dueQty", width: 80, align: "right", render: (v: number) => formatNumber(v) },
+            {
+              title: "实收",
+              key: "receivedQty",
+              width: 120,
+              render: (_v: unknown, it: ConfirmItemRow) => (
+                <InputNumber
+                  min={0}
+                  precision={0}
+                  value={it.receivedQty}
+                  onChange={(val) => {
+                    setConfirmItems((prev) => prev.map((x) => x.key === it.key ? { ...x, receivedQty: Number(val) || 0 } : x));
+                  }}
+                />
+              ),
+            },
+          ] as ColumnsType<ConfirmItemRow>}
+        />
+      </Modal>
     </div>
   );
 }

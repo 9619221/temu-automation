@@ -1519,13 +1519,16 @@ function afterSaleTypeFromPath(path) {
 
 function afterSaleRowKey(type, row, evt, index) {
   const key = firstDeepDefined(row, [
-    "returnPackageSn", "returnPackageNo", "packageSn", "packageNo",
+    "returnPackageSn", "returnPackageNo", "returnSupplierPackageNo", "packageSn", "packageNo",
     "afterSaleOrderSn", "afterSaleNo", "afsOrderSn", "afsNo",
     "orderSn", "parentOrderSn", "subOrderSn", "waybillNo", "trackingNumber", "id",
   ], 3);
   const skc = firstDeepDefined(row, ["productSkcId", "productSKCId", "skcId", "skc_id"], 3);
   const sku = firstDeepDefined(row, ["productSkuId", "prodSkuId", "skuId", "sku_id"], 3);
-  return [type, key || evt.id, skc || "", sku || "", index].map((part) => String(part ?? "")).join("|").slice(0, 500);
+  // 包裹级汇总行（无 skc/sku，如退货包裹管理接口）用稳定后缀，避免分页 index 漂移产生重复行；
+  // SKU 明细行（有 skc/sku）仍按 index 区分同一包裹下的多个 SKU。
+  const tail = (skc || sku) ? index : "pkg";
+  return [type, key || evt.id, skc || "", sku || "", tail].map((part) => String(part ?? "")).join("|").slice(0, 500);
 }
 
 function parseTemuAfterSales(db, ctx, evt, body) {
@@ -1573,7 +1576,7 @@ function parseTemuAfterSales(db, ctx, evt, body) {
   items.forEach((row, index) => {
     if (!row || typeof row !== "object") return;
     const package_no = toNullableString(firstDeepDefined(row, [
-      "returnPackageSn", "returnPackageNo", "packageSn", "packageNo",
+      "returnPackageSn", "returnPackageNo", "returnSupplierPackageNo", "packageSn", "packageNo",
       "afterSaleOrderSn", "afterSaleNo", "afsOrderSn", "afsNo",
     ], 3));
     const order_id = toNullableString(firstDeepDefined(row, [
@@ -1604,21 +1607,22 @@ function parseTemuAfterSales(db, ctx, evt, body) {
       ], 3), 500),
       quantity: toNullableInteger(firstDeepDefined(row, [
         "quantity", "qty", "returnQuantity", "returnQty", "refundQuantity", "refundQty",
-        "goodsQuantity", "skuQuantity", "applyQuantity",
+        "returnSupplierQuantity", "goodsQuantity", "skuQuantity", "applyQuantity",
       ], 3)),
       status: toNullableString(firstDeepDefined(row, [
-        "status", "statusName", "state", "stateName", "afterSaleStatus",
+        // 退货包裹管理接口的 packageStatusDesc 是中文描述（如「已出库」），优先于数字状态码
+        "packageStatusDesc", "status", "statusName", "state", "stateName", "afterSaleStatus",
         "returnStatus", "packageStatus", "auditStatus",
       ], 3), 100),
       reason: toNullableString(firstDeepDefined(row, [
-        "reason", "returnReason", "refundReason", "afterSaleReason", "feedbackReason",
-        "exceptionReason", "remark",
+        "returnSupplierReasonDesc", "reason", "returnReason", "refundReason", "afterSaleReason",
+        "feedbackReason", "exceptionReason", "remark",
       ], 3), 500),
       logistics_no: toNullableString(firstDeepDefined(row, [
-        "waybillNo", "trackingNumber", "trackingNo", "logisticsNo", "expressNo", "mailNo",
+        "expressDeLiverySn", "waybillNo", "trackingNumber", "trackingNo", "logisticsNo", "expressNo", "mailNo",
       ], 3), 200),
       warehouse_name: toNullableString(firstDeepDefined(row, [
-        "warehouseName", "receiveWarehouseName", "returnWarehouseName", "siteName",
+        "returnSubWarehouseName", "warehouseName", "receiveWarehouseName", "returnWarehouseName", "siteName",
       ], 3), 200),
       amount_cents: pickPriceCents(row, [
         "amountCents", "refundAmountCents", "returnAmountCents", "refundFeeCents",

@@ -261,6 +261,10 @@ interface ConsignDeliverUnifiedParams {
   pageSize?: number;
   search?: string;
   status?: string;
+  shop?: string;
+  skuCode?: string;
+  dateFrom?: string;
+  dateTo?: string;
   source?: "all" | "cloud" | "jst" | "both";
   companyId?: string;
 }
@@ -279,6 +283,7 @@ interface ConsignDeliverUnifiedRawCloud {
   temu_status?: string | null;
   demand_qty?: number | null;
   delivered_qty?: number | null;
+  inbound_qty?: number | null;
   order_amount_cents?: number | null;
   currency?: string | null;
   product_name?: string | null;
@@ -320,10 +325,13 @@ interface ConsignDeliverUnifiedRow {
   status: string | null;
   itemAmount: number | null;
   itemsQty: number | null;
+  localShipQty?: number | null;
   orderDate: string | null;
   outerDeliverNo: string | null;
   supplierName: string | null;
   source: "cloud" | "jst" | "both";
+  localStatusOverride?: string | null;
+  inventoryDeducted?: boolean;
   rawCloud: ConsignDeliverUnifiedRawCloud | null;
   rawJst: ConsignDeliverUnifiedRawJst | null;
 }
@@ -339,6 +347,9 @@ interface ConsignDeliverUnifiedResult {
     jst_only: number;
     both: number;
   };
+  // 各「显示状态」(jst_status || cloud_temu_status) 的条数，仅受搜索约束。
+  // 旧服务器不返回此字段，前端需做缺省兜底。
+  statusBreakdown?: Record<string, number>;
 }
 
 interface ErpStatus {
@@ -716,6 +727,27 @@ interface ErpAPI {
       head?: { cursor?: string | null; lastFullAt?: string | null; lastSyncAt?: string | null; lastReconcileAt?: string | null; syncing?: boolean };
       item?: { cursor?: string | null; lastFullAt?: string | null; lastSyncAt?: string | null; lastReconcileAt?: string | null; syncing?: boolean };
     }>;
+    confirmReceipt: (payload: {
+      outerAsId: string;
+      asId?: number | null;
+      source?: string;
+      remark?: string;
+      items: Array<{
+        temuSkuId?: string | null;
+        temuSkcId?: string | null;
+        internalSkuCode?: string | null;
+        productName?: string | null;
+        receivedQty: number;
+      }>;
+    }) => Promise<{ outerAsId: string; receiptStatus: string; confirmedAt: string; items: any[] }>;
+    receipts: (params?: { companyId?: string }) => Promise<Array<{
+      outerAsId: string;
+      asId?: number | null;
+      source?: string;
+      receiptStatus: string;
+      confirmedBy?: string | null;
+      confirmedAt?: string | null;
+    }>>;
   };
   consignDeliver: {
     list: (params?: Record<string, any>) => Promise<any[]>;
@@ -756,6 +788,9 @@ interface ErpAPI {
   };
   outbound: {
     workbench: (params?: ErpListParams) => Promise<any>;
+    action: (payload: Record<string, any>) => Promise<any>;
+  };
+  inventory: {
     action: (payload: Record<string, any>) => Promise<any>;
   };
   workItem: {

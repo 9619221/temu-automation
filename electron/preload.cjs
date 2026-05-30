@@ -295,6 +295,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
       items: (params) => ipcRenderer.invoke("erp:consign-after-sale:items", params || {}),
       sync: (options) => ipcRenderer.invoke("erp:consign-after-sale:sync", options || {}),
       cacheStatus: (options) => ipcRenderer.invoke("erp:consign-after-sale:cache-status", options || {}),
+      confirmReceipt: (payload) => ipcRenderer.invoke("erp:consign-after-sale:confirm-receipt", payload || {}),
+      receipts: (params) => ipcRenderer.invoke("erp:consign-after-sale:receipts", params || {}),
     },
     consignDeliver: {
       list: (params) => ipcRenderer.invoke("erp:consign-deliver:list", params || {}),

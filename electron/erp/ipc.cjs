@@ -20,6 +20,11 @@ const {
   runConsignDeliveriesUnified,
 } = require("./lanServer.cjs");
 const {
+  shipConsignDelivery,
+  unshipConsignDelivery,
+  setConsignDeliverItemShipQty,
+} = require("./services/consignDeliverShip.cjs");
+const {
   HK_SERVER_URL,
   configureClientRuntime,
   discoverControllers,
@@ -5346,6 +5351,136 @@ function listConsignAfterSales(params = {}) {
   return rows.map(toConsignAfterSaleRow);
 }
 
+// 解析售后明细到 erp_skus（取 SKU 自身绑定的有效店铺），仿 resolvePurchaseReturnInventoryTarget。
+// 平台单用 temuSkcId/temuSkuId；聚水潭单用 internalSkuCode（= 聚水潭 sku_id，对得上 internal_sku_code）。
+// 映射不到 / 无有效店铺 → throw（对应「阻止并提示」，迫使先在商品资料绑定）。
+function resolveConsignAfterSaleSku(db, item) {
+  const conds = [];
+  const p = {};
+  if (item.temuSkcId) { conds.push("temu_skc_id = @skc"); p.skc = String(item.temuSkcId); }
+  if (item.temuSkuId) { conds.push("temu_sku_id = @sku"); p.sku = String(item.temuSkuId); }
+  if (item.internalSkuCode) { conds.push("internal_sku_code = @code"); p.code = String(item.internalSkuCode); }
+  if (!conds.length) throw new Error("退货明细缺少 SKC/SKU/商品编码，无法入库");
+  const sku = db.prepare(`
+    SELECT id, account_id, internal_sku_code, product_name FROM erp_skus
+    WHERE status != 'deleted'
+      AND account_id IS NOT NULL
+      AND account_id NOT IN ('jst:account:default', 'jst:account:none')
+      AND (${conds.join(" OR ")})
+    ORDER BY (id LIKE 'sku_%') DESC, updated_at DESC
+    LIMIT 1
+  `).get(p);
+  if (!sku) {
+    const key = item.internalSkuCode || item.temuSkuId || item.temuSkcId || "?";
+    const label = item.productName ? `${key}（${item.productName}）` : key;
+    throw new Error(`商品 ${label} 未绑定有效店铺/内部编码，无法确认收货入库，请先在商品资料补齐`);
+  }
+  return sku;
+}
+
+// 确认收货：逐明细按实收数量增加库存（applyDirectInbound），并写本地确认台账。
+function confirmConsignAfterSaleReceipt(payload = {}, actor = {}) {
+  const { db, services } = requireErp();
+  const { INVENTORY_LEDGER_TYPE } = require("./workflow/enums.cjs");
+  const outerAsId = requireString(payload.outerAsId || payload.outer_as_id, "outerAsId");
+  const source = optionalString(payload.source) || "platform";
+  const asIdRaw = payload.asId ?? payload.as_id;
+  const asId = asIdRaw == null || asIdRaw === "" ? null : Number(asIdRaw);
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  if (!items.length) throw new Error("没有可入库的明细");
+  const companyId = DEFAULT_COMPANY_ID;
+  const now = nowIso();
+  const actorName = optionalString(actor?.name || actor?.userName || actor?.username)
+    || optionalString(actor?.id) || "system";
+
+  const run = db.transaction(() => {
+    const existing = db.prepare(
+      "SELECT id FROM consign_after_sale_receipts WHERE company_id = ? AND outer_as_id = ? AND status_internal != 'deleted'"
+    ).get(companyId, outerAsId);
+    if (existing) throw new Error(`售后单 ${outerAsId} 已确认收货过，请勿重复确认`);
+
+    const savedItems = [];
+    for (const raw of items) {
+      const receivedQty = Math.trunc(Number(raw.receivedQty ?? raw.received_qty ?? 0));
+      if (!(receivedQty > 0)) continue; // 实收 0 跳过，不入库
+      const item = {
+        temuSkcId: optionalString(raw.temuSkcId || raw.skcId),
+        temuSkuId: optionalString(raw.temuSkuId || raw.skuId),
+        internalSkuCode: optionalString(raw.internalSkuCode || raw.internal_sku_code),
+        productName: optionalString(raw.productName || raw.product_name),
+      };
+      const sku = resolveConsignAfterSaleSku(db, item);
+      const batch = services.inventory.applyDirectInbound({
+        accountId: sku.account_id,
+        skuId: sku.id,
+        qty: receivedQty,
+        ledgerType: INVENTORY_LEDGER_TYPE.CONSIGN_AFTER_SALE_RETURN,
+        sourceDocType: "consign_after_sale",
+        sourceDocId: outerAsId,
+        affectSkuTotal: true,
+        actor,
+      });
+      db.prepare(`
+        INSERT INTO consign_after_sale_receipt_items
+          (id, company_id, outer_as_id, erp_sku_id, internal_sku_code, temu_sku_id, temu_skc_id, product_name, received_qty, ledger_batch_id, created_at)
+        VALUES (@id, @company_id, @outer_as_id, @erp_sku_id, @internal_sku_code, @temu_sku_id, @temu_skc_id, @product_name, @received_qty, @ledger_batch_id, @created_at)
+      `).run({
+        id: `as-receipt-item:${crypto.randomUUID()}`,
+        company_id: companyId,
+        outer_as_id: outerAsId,
+        erp_sku_id: sku.id,
+        internal_sku_code: sku.internal_sku_code,
+        temu_sku_id: item.temuSkuId || null,
+        temu_skc_id: item.temuSkcId || null,
+        product_name: item.productName || sku.product_name || null,
+        received_qty: receivedQty,
+        ledger_batch_id: batch?.id || null,
+        created_at: now,
+      });
+      savedItems.push({ skuId: sku.id, internalSkuCode: sku.internal_sku_code, receivedQty, batchId: batch?.id || null });
+    }
+    if (!savedItems.length) throw new Error("没有实收数量大于 0 的明细，未入库");
+
+    db.prepare(`
+      INSERT INTO consign_after_sale_receipts
+        (id, company_id, outer_as_id, as_id, source, receipt_status, confirmed_by, confirmed_at, remark, created_at, updated_at)
+      VALUES (@id, @company_id, @outer_as_id, @as_id, @source, 'confirmed', @confirmed_by, @confirmed_at, @remark, @created_at, @updated_at)
+    `).run({
+      id: `as-receipt:${crypto.randomUUID()}`,
+      company_id: companyId,
+      outer_as_id: outerAsId,
+      as_id: Number.isFinite(asId) ? asId : null,
+      source,
+      confirmed_by: actorName,
+      confirmed_at: now,
+      remark: optionalString(payload.remark) || null,
+      created_at: now,
+      updated_at: now,
+    });
+    return { outerAsId, receiptStatus: "confirmed", confirmedAt: now, items: savedItems };
+  });
+  return run();
+}
+
+// 查所有已确认收货记录（前端给聚水潭单+平台单统一附加 receiptStatus 用）。
+function listConsignAfterSaleReceipts(params = {}) {
+  const { db } = requireErp();
+  const companyId = optionalString(params.companyId || params.company_id) || DEFAULT_COMPANY_ID;
+  const rows = db.prepare(`
+    SELECT outer_as_id, as_id, source, receipt_status, confirmed_by, confirmed_at
+    FROM consign_after_sale_receipts
+    WHERE company_id = ? AND status_internal != 'deleted'
+  `).all(companyId);
+  return rows.map((r) => ({
+    outerAsId: r.outer_as_id,
+    asId: r.as_id,
+    source: r.source,
+    receiptStatus: r.receipt_status,
+    confirmedBy: r.confirmed_by,
+    confirmedAt: r.confirmed_at,
+  }));
+}
+
 function getConsignAfterSaleIds(params = {}) {
   const { db } = requireErp();
   const companyId = optionalString(params.companyId || params.company_id);
@@ -5491,6 +5626,8 @@ function toJstConsignDeliverItemRow(row) {
     amount: row.amount,
     costPrice: row.cost_price,
     costAmount: row.cost_amount,
+    // 本地实发数量：NULL 表示未单独设置，前端按 qty（备货数）默认全发展示。
+    localShipQty: row.local_ship_qty != null ? Number(row.local_ship_qty) : null,
     statusInternal: row.status_internal,
     importedAt: row.imported_at,
     updatedAt: row.updated_at,
@@ -19778,6 +19915,29 @@ function performInventoryAction(payload = {}, actorInput = {}) {
       });
       return { action, ...run() };
     }
+    case "consign_deliver_ship": {
+      // 送仓托管行本地确认发货：按明细把货从本地仓扣掉（发到 Temu 仓）。
+      const oId = requireString(payload.oId || payload.o_id, "oId");
+      const companyId = optionalString(payload.companyId || payload.company_id)
+        || actorInput.companyId || erpState.currentUser?.companyId || "company_default";
+      return { action, ...shipConsignDelivery({ db, services, oId, companyId, actor }) };
+    }
+    case "consign_deliver_unship": {
+      // 撤销本地发货：按之前扣减明细反向入库回补。
+      const oId = requireString(payload.oId || payload.o_id, "oId");
+      const companyId = optionalString(payload.companyId || payload.company_id)
+        || actorInput.companyId || erpState.currentUser?.companyId || "company_default";
+      return { action, ...unshipConsignDelivery({ db, services, oId, companyId, actor }) };
+    }
+    case "consign_deliver_set_item_ship_qty": {
+      // 保存某条送仓明细的「本地实发数量」，驱动后续确认发货按实发扣本地库存。
+      const oId = requireString(payload.oId || payload.o_id, "oId");
+      const oiId = requireString(payload.oiId || payload.oi_id, "oiId");
+      const shipQty = payload.shipQty ?? payload.ship_qty;
+      const companyId = optionalString(payload.companyId || payload.company_id)
+        || actorInput.companyId || erpState.currentUser?.companyId || "company_default";
+      return { action, ...setConsignDeliverItemShipQty({ db, oId, oiId, shipQty, companyId }) };
+    }
     default:
       throw new Error(`Unsupported inventory action: ${action}`);
   }
@@ -20332,6 +20492,31 @@ async function performPurchaseReturnActionRuntime(payload = {}) {
 }
 
 // 送仓售后单头：client cache 优先，host 直查。
+async function confirmConsignAfterSaleReceiptRuntime(payload = {}) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    const response = await remoteRequest("/api/consign-after-sale/action", {
+      method: "POST",
+      body: { ...payload, action: "confirm_receipt" },
+    });
+    return response.result;
+  }
+  const actor = getCurrentSessionActor(payload?.actor || {});
+  return confirmConsignAfterSaleReceipt(payload || {}, actor);
+}
+
+async function listConsignAfterSaleReceiptsRuntime(params = {}) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    const response = await remoteRequest("/api/consign-after-sale/action", {
+      method: "POST",
+      body: { ...params, action: "list_receipts" },
+    });
+    return response.result || [];
+  }
+  return listConsignAfterSaleReceipts(params || {});
+}
+
 async function listConsignAfterSalesRuntime(params = {}) {
   if (shouldUseClientRuntime()) {
     ensureClientRuntime();
@@ -20490,6 +20675,7 @@ async function listJstConsignDeliveriesUnifiedRuntime(params = {}) {
     page: Math.max(1, Number(params?.page || 1)),
     pageSize: Math.max(1, Number(params?.pageSize || 100)),
     sourceBreakdown: { cloud_only: 0, jst_only: 0, both: 0 },
+    statusBreakdown: {},
   };
   if (shouldUseClientRuntime()) {
     ensureClientRuntime();
@@ -20786,6 +20972,8 @@ function startLanService(payload = {}) {
     getConsignAfterSaleIds,
     listConsignAfterSaleItems,
     getConsignAfterSaleItemIds,
+    confirmConsignAfterSaleReceipt,
+    listConsignAfterSaleReceipts,
     listJstConsignDeliveries,
     countJstConsignDeliveries,
     listJstConsignDeliverItems,
@@ -20977,6 +21165,8 @@ async function startErpHeadlessServer(options = {}) {
     getConsignAfterSaleIds,
     listConsignAfterSaleItems,
     getConsignAfterSaleItemIds,
+    confirmConsignAfterSaleReceipt,
+    listConsignAfterSaleReceipts,
     listJstConsignDeliveries,
     countJstConsignDeliveries,
     listJstConsignDeliverItems,
@@ -21350,6 +21540,8 @@ function registerErpIpcHandlers(ipcMain) {
   // 送仓售后：列表/分页/明细 + cache.db 同步与状态。
   ipcMain.handle("erp:consign-after-sale:list", (_event, params) => listConsignAfterSalesRuntime(params || {}));
   ipcMain.handle("erp:consign-after-sale:page", (_event, params) => listConsignAfterSalesPageRuntime(params || {}));
+  ipcMain.handle("erp:consign-after-sale:confirm-receipt", (_event, payload) => confirmConsignAfterSaleReceiptRuntime(payload || {}));
+  ipcMain.handle("erp:consign-after-sale:receipts", (_event, params) => listConsignAfterSaleReceiptsRuntime(params || {}));
   ipcMain.handle("erp:consign-after-sale:items", (_event, params) => listConsignAfterSaleItemsRuntime(params || {}));
   ipcMain.handle("erp:consign-after-sale:sync", (_event, options) => consignAfterSaleCache.triggerSync(options || {}));
   ipcMain.handle("erp:consign-after-sale:cache-status", (_event, options) => consignAfterSaleCache.getCacheStatus(options || {}));

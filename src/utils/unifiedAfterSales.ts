@@ -46,6 +46,9 @@ export interface UnifiedAfterSaleRow {
 
   // 平台独占单的明细：从平台 raw_json 解析，按 packageSn 聚合（聚水潭单不用，走 asId 异步加载）
   platformItems?: PlatformAfterSaleItem[];
+
+  // 确认收货状态（本地确认台账，confirmed = 已确认收货 + 已入库）
+  receiptStatus?: string | null;
 }
 
 // 平台 raw_json 解析出的单个 SKU 明细
@@ -142,17 +145,22 @@ function platformAsBaseRow(p: TemuAfterSaleRow, joinKey: string, mallMap?: Map<s
     outerAsId: joinKey,
     asDate,
     shopName,
-    shopStatus: p.status || null,
-    status: raw.statusDescription || p.status || null,
+    // 平台状态：Temu 平台侧状态（已出库 / 平台审核中 等）
+    shopStatus: raw.packageStatusDesc || raw.statusDescription || p.status || null,
+    // 内部状态：按聚水潭口径，是「我方在 ERP 是否确认建台账」（待确认/已确认），与 Temu 物流无关。
+    // 平台独占单尚未进聚水潭台账确认，统一显示「待确认」。
+    status: "待确认",
     type: typeText,
     refundQty: Number(p.quantity || raw.quantity || 0) || null,
     rQty: null,
     boxIdCount: null,
     warehouse: p.warehouse_name || null,
     lId: p.logistics_no || null,
-    receiverName: null,
-    receiverMobile: null,
-    remark: raw.remark || p.reason || null,
+    // 退货包裹管理接口提供退货子仓名（returnSubWarehouseName，与聚水潭 receiver_name 同口径）
+    // 和联系人 contactName；「送仓」列优先展示子仓名，与聚水潭行保持一致。
+    receiverName: raw.returnSubWarehouseName || p.warehouse_name || raw.contactName || null,
+    receiverMobile: raw.contactPhone || null,
+    remark: (raw.remark || p.reason || "").trim() || null,
     soId: p.order_id || null,
     oId: null,
     labels: null,
@@ -312,7 +320,22 @@ export async function fetchUnifiedAfterSales(params: FetchUnifiedParams = {}): P
 
   const mallPromise = loadMallNameMap(erp);
 
-  const [jstFetch, platformFetch, mallMap] = await Promise.all([jstPromise, platformPromise, mallPromise]);
+  // 确认收货状态（本地确认台账，按 outerAsId），聚水潭单和平台单统一附加
+  const receiptsPromise: Promise<Map<string, string>> = (async () => {
+    if (!erp?.consignAfterSale?.receipts) return new Map<string, string>();
+    try {
+      const list = await erp.consignAfterSale.receipts({});
+      const map = new Map<string, string>();
+      for (const r of Array.isArray(list) ? list : []) {
+        if (r?.outerAsId) map.set(String(r.outerAsId), String(r.receiptStatus || "confirmed"));
+      }
+      return map;
+    } catch {
+      return new Map<string, string>();
+    }
+  })();
+
+  const [jstFetch, platformFetch, mallMap, receiptMap] = await Promise.all([jstPromise, platformPromise, mallPromise, receiptsPromise]);
 
   // 构造 jushuitan 索引
   const jstByKey = new Map<string, ConsignAfterSaleRow>();
@@ -340,16 +363,24 @@ export async function fetchUnifiedAfterSales(params: FetchUnifiedParams = {}): P
   // 聚合后的平台单
   for (const [key, group] of platformGroups) {
     const j = jstByKey.get(key);
+    // 同一 packageSn 下可能既有「退货包裹管理」接口的包裹级行（带物流/子仓/状态），
+    // 又有「退货明细」接口的 SKU 级行（只有商品维度）。选包裹级行做表头，SKU 级行做商品明细。
+    const pkgRow = group.find((p) => p.logistics_no || p.warehouse_name) || group[0];
+    const detailRows = group.filter((p) => p.skc_id || p.sku_id);
     if (j) {
-      // both：用聚水潭 head（明细走 asId 异步加载），平台字段用组首条补充
+      // both：用聚水潭 head（明细走 asId 异步加载），平台字段用包裹级行补充
       usedJstIds.add(j.id);
-      unifiedRows.push(mergeJstAndPlatform(j, group[0]));
+      unifiedRows.push(mergeJstAndPlatform(j, pkgRow));
     } else {
       // 平台独占：一张单 + 多 SKU 明细（来自 raw_json）
-      const head = platformAsBaseRow(group[0], key, mallMap);
+      const head = platformAsBaseRow(pkgRow, key, mallMap);
       head.id = `platform:${key}`;
-      head.platformItems = group.map(toPlatformItem);
+      head.platformItems = (detailRows.length ? detailRows : group).map(toPlatformItem);
       head.refundQty = head.platformItems.reduce((s, it) => s + Number(it.qty || 0), 0) || null;
+      // 退货原因通常在 SKU 明细行里（包裹级行的 reason 可能为空），表头取明细兜底
+      if (!head.platformReason || !String(head.platformReason).trim()) {
+        head.platformReason = head.platformItems.find((it) => it.reason)?.reason || null;
+      }
       unifiedRows.push(head);
     }
   }
@@ -365,6 +396,17 @@ export async function fetchUnifiedAfterSales(params: FetchUnifiedParams = {}): P
   for (const j of jstFetch.rows) {
     if (usedJstIds.has(j.id)) continue;
     unifiedRows.push(jstAsBaseRow(j));
+  }
+
+  // 附加确认收货状态：已确认的内部状态显示「已确认」
+  if (receiptMap.size) {
+    for (const row of unifiedRows) {
+      const st = row.outerAsId ? receiptMap.get(String(row.outerAsId)) : undefined;
+      if (st) {
+        row.receiptStatus = st;
+        if (st === "confirmed") row.status = "已确认";
+      }
+    }
   }
 
   // 按 asDate 倒序，null 排最后

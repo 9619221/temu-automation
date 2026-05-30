@@ -107,11 +107,13 @@ const INVENTORY_LEDGER_TYPE = Object.freeze({
   OUTBOUND_RESERVE: "outbound_reserve",
   OUTBOUND_RELEASE_RESERVATION: "outbound_release_reservation",
   OUTBOUND_TO_TEMU: "outbound_to_temu",
+  OUTBOUND_TO_TEMU_REVERSAL: "outbound_to_temu_reversal",  // 送仓托管本地撤销发货→反向入库回补
   STOCK_ADJUSTMENT: "stock_adjustment",
   SCRAP: "scrap",
   PURCHASE_RETURN: "purchase_return",          // 自家仓退给供应商
   PURCHASE_RETURN_REVERSAL: "purchase_return_reversal",  // 采购退货单作废→反向入库（补偿）
   CUSTOMER_RETURN: "customer_return",          // 消费者退回平台仓
+  CONSIGN_AFTER_SALE_RETURN: "consign_after_sale_return",  // 送仓售后确认收货→退回货入库
   PLATFORM_RETURN_OUT: "platform_return_out",  // 平台仓 → 自家仓 出库腿
   PLATFORM_RETURN_IN: "platform_return_in",    // 平台仓 → 自家仓 入库腿
   TRANSFER_OUT: "transfer_out",                // 店铺 A → 店铺 B 出库腿
