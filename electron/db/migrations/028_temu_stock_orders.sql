@@ -1,3 +1,6 @@
+-- @idempotent
+-- 末尾 3 条 ALTER erp_outbound_shipments ADD COLUMN 必须幂等：部分环境（如服务器主控端）
+-- 这些列已由其他迁移线（039_temu_cloud_outbound_fields 等）先行加过，逐语句执行可跳过已存在列。
 CREATE TABLE IF NOT EXISTS erp_temu_stock_orders (
   id TEXT PRIMARY KEY,
   account_id TEXT NOT NULL,
