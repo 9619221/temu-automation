@@ -5104,6 +5104,34 @@ function effectivePurchaseReturn(payload, actor) {
   return { id, lifecycle: "effective", effectiveAt: now };
 }
 
+// 把退货明细解析成库存操作目标 {accountId, skuId(真实 erp_skus.id)}。
+// 手建单：单头有 account_id，item.sku_id 已是 erp_skus.id，直接用。
+// 历史台账（source!==manual）：单头 account_id 为空、item.sku_id 实为 internal_sku_code，
+// 映射到真实 SKU 并落到该 SKU 绑定的店；落不到有效店铺（none/未绑定/default）的明细报错，
+// 不硬塞——历史台账原未扣库存，作废加回会增加对应店库存（业务上属手工修正）。
+function resolvePurchaseReturnInventoryTarget(db, row, item) {
+  if (row.account_id) {
+    return { accountId: row.account_id, skuId: item.sku_id };
+  }
+  let sku = db.prepare("SELECT id, account_id FROM erp_skus WHERE id = ? AND status != 'deleted'").get(item.sku_id);
+  if (!sku) {
+    sku = db.prepare(`
+      SELECT id, account_id FROM erp_skus
+      WHERE internal_sku_code = @code AND status != 'deleted'
+        AND account_id IS NOT NULL
+        AND account_id NOT IN ('jst:account:default', 'jst:account:none')
+      ORDER BY (id LIKE 'sku_%') DESC, updated_at DESC
+      LIMIT 1
+    `).get({ code: item.sku_id });
+  }
+  const acct = sku && sku.account_id;
+  if (!sku || !acct || acct === "jst:account:default" || acct === "jst:account:none") {
+    const label = item.product_name ? `${item.sku_id}（${item.product_name}）` : item.sku_id;
+    throw new Error(`明细 SKU ${label} 未绑定有效店铺，历史退货单无法做库存流转`);
+  }
+  return { accountId: acct, skuId: sku.id };
+}
+
 function cancelPurchaseReturn(payload, actor) {
   const { db, services } = requireErp();
   const { INVENTORY_LEDGER_TYPE } = require("./workflow/enums.cjs");
@@ -5112,16 +5140,16 @@ function cancelPurchaseReturn(payload, actor) {
 
   const run = db.transaction(() => {
     const row = fetchPurchaseReturnRowRaw(db, id);
-    if (row.source !== "manual") throw new Error("聚水潭历史单不可作废");
     if (row.lifecycle !== "effective") throw new Error("仅生效单可作废");
-    if (!row.account_id) throw new Error("缺少 accountId");
     const items = db.prepare(
       "SELECT * FROM purchase_return_items WHERE company_id = ? AND io_id = ? AND status_internal != 'deleted'"
     ).all(row.company_id, row.io_id);
+    if (!items.length) throw new Error("没有明细，无法作废");
     for (const item of items) {
+      const target = resolvePurchaseReturnInventoryTarget(db, row, item);
       services.inventory.applyDirectInbound({
-        accountId: row.account_id,
-        skuId: item.sku_id,
+        accountId: target.accountId,
+        skuId: target.skuId,
         qty: item.qty,
         unitLandedCost: item.cost_price,
         ledgerType: INVENTORY_LEDGER_TYPE.PURCHASE_RETURN_REVERSAL,

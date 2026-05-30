@@ -166,12 +166,24 @@ interface AccountRow {
 interface SkuOption {
   id: string;
   internalSkuCode?: string | null;
-  name?: string | null;
-  spec?: string | null;
-  picUrl?: string | null;
-  weightedAvgCost?: number | null;
+  // erp.sku.list 经 toCamelRow 返回的字段：productName / colorSpec / imageUrl / costPrice，
+  // 不是 name / spec / picUrl / weightedAvgCost（早期写错导致下拉全显示空，已对齐 ProductMasterData）。
+  productName?: string | null;
+  colorSpec?: string | null;
+  category?: string | null;
+  imageUrl?: string | null;
+  costPrice?: number | null;
+  weightedStockCost?: number | null;
+  jstCostPrice?: number | null;
+  actualStockQty?: number | null;
+  jstActualStockQty?: number | null;
+  warehouseLocation?: string | null;
+  jstMainBin?: string | null;
   accountId?: string | null;
   accountName?: string | null;
+  // 供应商自动带出来源：优先 1688 采购供应商，其次系统绑定供应商。
+  systemSupplierName?: string | null;
+  primary1688Source?: { supplierName?: string | null } | null;
 }
 
 const erp = (window as any).electronAPI?.erp;
@@ -206,7 +218,7 @@ function statusColor(value?: string | null) {
 }
 
 // 旧服务器返回不带 lifecycle 字段时按业务语义兜底：手建无值不可能(走新写路径)，
-// 聚水潭历史导入全是 effective，所以兜 effective 安全。
+// 历史导入数据全是 effective，所以兜 effective 安全。
 function effectiveLifecycle(row: { lifecycle?: string | null; source?: string | null }) {
   return row.lifecycle || "effective";
 }
@@ -464,9 +476,9 @@ export default function PurchaseReturnsSection() {
         key: makeKey(),
         skuId: sku.id,
         internalSkuCode: sku.internalSkuCode || null,
-        productName: sku.name || null,
-        propertiesValue: sku.spec || null,
-        picUrl: sku.picUrl || null,
+        productName: sku.productName || null,
+        propertiesValue: sku.colorSpec || sku.category || null,
+        picUrl: sku.imageUrl || null,
         qty: null,
         costPrice: null,
       }];
@@ -474,7 +486,15 @@ export default function PurchaseReturnsSection() {
     // 退货仓库还没选时，自动带出该 SKU 绑定的店（每个 SKU 的库存唯一锁定一个店）。
     if (!accountId && sku.accountId) {
       setAccountId(sku.accountId);
-      message.info(`已自动选择退货仓库：${sku.accountName || sku.accountId}`);
+      message.info(`已自动带出退货仓库：${sku.accountName || sku.accountId}`);
+    }
+    // 供应商还没填时，自动带出该 SKU 的采购供应商（优先 1688 源，其次系统绑定）。
+    if (!supplierName.trim()) {
+      const derivedSupplier = (sku.primary1688Source?.supplierName || sku.systemSupplierName || "").trim();
+      if (derivedSupplier) {
+        setSupplierName(derivedSupplier);
+        message.info(`已自动带出供应商：${derivedSupplier}`);
+      }
     }
   };
 
@@ -553,7 +573,7 @@ export default function PurchaseReturnsSection() {
     }
   };
 
-  const doEffective = async (row: PurchaseReturnRow) => {
+  const doEffective = useCallback(async (row: PurchaseReturnRow) => {
     try {
       await erp.purchaseReturn.action({ action: "effective", id: row.id });
       message.success("已生效，库存已扣减");
@@ -562,9 +582,9 @@ export default function PurchaseReturnsSection() {
     } catch (e: any) {
       message.error(e?.message || "生效失败");
     }
-  };
+  }, [loadData]);
 
-  const doCancel = async (row: PurchaseReturnRow) => {
+  const doCancel = useCallback(async (row: PurchaseReturnRow) => {
     try {
       await erp.purchaseReturn.action({ action: "cancel", id: row.id });
       message.success("已作废，库存已加回");
@@ -573,7 +593,35 @@ export default function PurchaseReturnsSection() {
     } catch (e: any) {
       message.error(e?.message || "作废失败");
     }
-  };
+  }, [loadData]);
+
+  // 状态列内联切换：状态流转有库存副作用，切换前用 Modal.confirm 二次确认。
+  // 手建单：draft→生效（扣库存）、effective→作废（加回）。
+  // 历史台账（source!==manual）：仅 effective→作废，库存按每条明细落到该 SKU 绑定的店。
+  const onLifecycleSelect = useCallback((row: PurchaseReturnRow, next: string) => {
+    if (next === effectiveLifecycle(row)) return;
+    const isHistory = row.source !== "manual";
+    if (next === "effective") {
+      Modal.confirm({
+        title: "确认生效？",
+        content: "生效后会按 FIFO 扣减库存，操作不可撤销（只能作废反向）。",
+        okText: "生效",
+        cancelText: "取消",
+        onOk: () => doEffective(row),
+      });
+    } else if (next === "cancelled") {
+      Modal.confirm({
+        title: "作废这张退货单？",
+        content: isHistory
+          ? "历史台账单：将按明细数量/单价把库存加回各 SKU 绑定的店（新建批次）。注意历史台账原未扣减库存，作废会使对应店库存增加。未绑定有效店铺的明细会报错。作废为终态。"
+          : "将按当前明细数量/单价反向加回库存（新建批次），作废为终态。",
+        okText: "作废",
+        okButtonProps: { danger: true },
+        cancelText: "取消",
+        onOk: () => doCancel(row),
+      });
+    }
+  }, [doEffective, doCancel]);
 
   const doDelete = async (row: PurchaseReturnRow) => {
     try {
@@ -595,10 +643,30 @@ export default function PurchaseReturnsSection() {
     {
       title: "状态",
       key: "lifecycle",
-      width: 84,
+      width: 110,
       render: (_v, row) => {
-        const lc = lifecycleLabel(effectiveLifecycle(row));
-        return <Tag color={lc.color} style={{ marginRight: 0 }}>{lc.label}</Tag>;
+        const current = effectiveLifecycle(row);
+        const lc = lifecycleLabel(current);
+        // 可改：手建草稿(draft→生效)、生效单(effective→作废)；历史台账生效行也可作废。
+        // 已作废(cancelled)等终态只读。
+        const editable = current === "draft" || current === "effective";
+        if (!editable) {
+          return <Tag color={lc.color} style={{ marginRight: 0 }}>{lc.label}</Tag>;
+        }
+        const options = current === "draft"
+          ? [{ value: "draft", label: "草稿" }, { value: "effective", label: "生效" }]
+          : [{ value: "effective", label: "生效" }, { value: "cancelled", label: "作废" }];
+        return (
+          <Select
+            size="small"
+            variant="borderless"
+            value={current}
+            options={options}
+            style={{ width: "100%" }}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(next) => onLifecycleSelect(row, next)}
+          />
+        );
       },
     },
     {
@@ -663,7 +731,7 @@ export default function PurchaseReturnsSection() {
       onContextMenu: openColumnMenu,
     });
     return ordered.map((c) => ({ ...c, onHeaderCell: headerProps }));
-  }, [columnConfig, openColumnMenu]);
+  }, [columnConfig, openColumnMenu, onLifecycleSelect]);
 
   const itemColumns: ColumnsType<PurchaseReturnItemRow> = [
     {
@@ -735,7 +803,7 @@ export default function PurchaseReturnsSection() {
           <div>
             <div className="app-panel__title-main">采购退货明细</div>
             <div className="app-panel__title-sub">
-              聚水潭历史台账 + 手建退货单（生效后扣库存，作废加回）。
+              历史台账 + 手建退货单（生效后扣库存，作废加回）。
               本页 {formatNumber(rows.length)} / 累计 {formatNumber(total)} 条；涉及供应商 {formatNumber(supplierCount)}。
               {loadedAt ? ` 同步 ${formatTime(loadedAt)}` : ""}
             </div>
@@ -851,7 +919,7 @@ export default function PurchaseReturnsSection() {
               emptyText: (
                 <EmptyGuide
                   title="暂无采购退货记录"
-                  description="历史数据来自聚水潭一次性导入；新建按钮可建手工退货单。"
+                  description="历史数据来自一次性导入；新建按钮可建手工退货单。"
                 />
               ),
             }}
@@ -876,45 +944,38 @@ export default function PurchaseReturnsSection() {
         ]}
       >
         <Form layout="vertical">
-          <Row gutter={12}>
-            <Col span={12}>
-              <Form.Item label="供应商" required>
-                <Input
-                  placeholder="自由文本，如 32棉签盒 / 禧昕塑料制品有限公司"
-                  value={supplierName}
-                  onChange={(e) => setSupplierName(e.target.value)}
-                />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item label="退货仓库（从该仓的库存扣）" required>
-                <Select
-                  showSearch
-                  placeholder="选择仓库账户"
-                  optionFilterProp="label"
-                  value={accountId}
-                  onChange={setAccountId}
-                  options={accounts.map((a) => ({ value: a.id, label: a.name || a.shopName || a.id }))}
-                />
-              </Form.Item>
-            </Col>
-            <Col span={24}>
-              <Form.Item label="备注">
-                <Input.TextArea
-                  rows={2}
-                  value={remark}
-                  onChange={(e) => setRemark(e.target.value)}
-                  placeholder="可选"
-                />
-              </Form.Item>
-            </Col>
-          </Row>
-
+          {/* 供应商 / 退货仓库已改为选 SKU 后自动带出，不再手填。下方只读展示当前带出值。 */}
           <div style={{ marginBottom: 8 }}>
             <Text strong>退货明细</Text>
             <Text type="secondary" style={{ marginLeft: 12, fontSize: 12 }}>
               单价必填（无默认值），合计 {formatMoney(totalAmountInDraft)}
             </Text>
+          </div>
+
+          <div
+            style={{
+              marginBottom: 12,
+              padding: "8px 12px",
+              background: "#f8fafc",
+              border: "1px solid #eef2f7",
+              borderRadius: 8,
+              display: "flex",
+              gap: 32,
+              fontSize: 13,
+            }}
+          >
+            <span>
+              <Text type="secondary">供应商　</Text>
+              {supplierName
+                ? <Text strong>{supplierName}</Text>
+                : <Text type="secondary">选 SKU 后自动带出</Text>}
+            </span>
+            <span>
+              <Text type="secondary">退货仓库　</Text>
+              {accountId
+                ? <Text strong>{accounts.find((a) => a.id === accountId)?.name || accounts.find((a) => a.id === accountId)?.shopName || accountId}</Text>
+                : <Text type="secondary">选 SKU 后自动带出</Text>}
+            </span>
           </div>
 
           <Select
@@ -936,16 +997,17 @@ export default function PurchaseReturnsSection() {
             value={undefined}
             options={skuOptions.map((s) => {
               const code = s.internalSkuCode || s.id;
-              const name = [s.name, s.spec].filter(Boolean).join(" / ");
+              const spec = s.colorSpec || s.category || "";
+              const name = [s.productName, spec].filter(Boolean).join(" / ");
               return {
                 value: s.id,
                 label: code,
-                searchText: `${code} ${s.name || ""} ${s.spec || ""}`.trim(),
+                searchText: `${code} ${s.productName || ""} ${spec}`.trim(),
                 skuName: name,
-                skuImage: s.picUrl || "",
-                skuCost: s.weightedAvgCost ?? null,
-                skuStock: (s as any).jstActualStockQty ?? (s as any).actualStockQty ?? null,
-                skuWarehouse: (s as any).warehouseLocation || (s as any).jstMainBin || "",
+                skuImage: s.imageUrl || "",
+                skuCost: s.costPrice ?? s.weightedStockCost ?? s.jstCostPrice ?? null,
+                skuStock: s.jstActualStockQty ?? s.actualStockQty ?? null,
+                skuWarehouse: s.warehouseLocation || s.jstMainBin || "",
               };
             })}
             notFoundContent={skuLoading ? "搜索中..." : (skuSearch ? "无匹配" : "请输入关键词")}
@@ -1016,6 +1078,15 @@ export default function PurchaseReturnsSection() {
               },
             ]}
           />
+
+          <Form.Item label="备注" style={{ marginTop: 16, marginBottom: 0 }}>
+            <Input.TextArea
+              rows={2}
+              value={remark}
+              onChange={(e) => setRemark(e.target.value)}
+              placeholder="可选"
+            />
+          </Form.Item>
         </Form>
       </Modal>
 
