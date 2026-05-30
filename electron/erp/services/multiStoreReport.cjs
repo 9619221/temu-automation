@@ -92,6 +92,23 @@ const REAL_SALES_WHERE =
   "s.mall_supplier_id <> '' AND s.mall_supplier_id NOT IN ('MALL-EXT-E2E') " +
   "AND s.skc_id NOT IN ('SKC-EXT-E2E','SKC-DBG')";
 
+// cloud 库当前单租户。by-store 本地聚合按此过滤（dashboard.js 用登录 user tid，ERP 进程无此上下文）。
+const DEFAULT_CLOUD_TENANT = "default-tenant";
+
+function toNum(value) {
+  const num = Number(value || 0);
+  return Number.isFinite(num) ? num : 0;
+}
+
+function optionalAllLocal(db, sql, params = []) {
+  try {
+    return db.prepare(sql).all(...params);
+  } catch (error) {
+    if (/no such table|no such column/i.test(String(error?.message || ""))) return [];
+    throw error;
+  }
+}
+
 // 把 'YYYY-MM-DD' 偏移 n 天（n 可为负），返回 'YYYY-MM-DD'
 function shiftDate(dateStr, days) {
   const ms = Date.parse(`${dateStr}T00:00:00Z`);
@@ -211,22 +228,165 @@ function buildFinancialsByMall(db, attachCloudDb) {
   return byMall;
 }
 
+// 本地 ATTACH cloud 直接聚合 by-store（复刻 cloud dashboard.js /report/by-store）。
+// 前提：db 已 ATTACH cloud。绕开 cloud HTTP 单进程瓶颈（by-store 重聚合会卡死 cloud event loop）。
+function buildByStoreLocal(db, options = {}) {
+  const tid = options.tenantId || DEFAULT_CLOUD_TENANT;
+  const includeTest = !!options.includeTest;
+  const excludeMallIds = includeTest ? [] : ["MALL-EXT-E2E", "MALL-DBG"];
+  const ph = excludeMallIds.map(() => "?").join(",");
+  const baseMallFilter = excludeMallIds.length ? `AND mall_id NOT IN (${ph})` : "";
+  const salesMallFilter = excludeMallIds.length ? `AND mall_supplier_id NOT IN (${ph})` : "";
+
+  const malls = optionalAllLocal(db,
+    `SELECT mall_id, MAX(mall_name) AS mall_name, MAX(site) AS site, MAX(last_seen) AS last_seen_at
+       FROM cloud.mall_accounts
+      WHERE tenant_id = ? AND mall_id <> '' ${baseMallFilter}
+      GROUP BY mall_id`, [tid, ...excludeMallIds]);
+
+  const salesRows = optionalAllLocal(db,
+    `SELECT mall_supplier_id AS mall_id,
+            SUM(COALESCE(today_sales,0))   AS sales_today_qty,
+            SUM(COALESCE(last7d_sales,0))  AS sales_7d_qty,
+            SUM(COALESCE(last30d_sales,0)) AS sales_30d_qty,
+            COUNT(DISTINCT skc_id) AS sku_count
+       FROM cloud.temu_sales_snapshot
+      WHERE tenant_id = ? AND mall_supplier_id <> '' ${salesMallFilter}
+        AND skc_id NOT IN ('SKC-EXT-E2E','SKC-DBG')
+      GROUP BY mall_supplier_id`, [tid, ...excludeMallIds]);
+  const salesMap = new Map(salesRows.map((r) => [r.mall_id, r]));
+
+  const stockRows = optionalAllLocal(db,
+    `SELECT mall_id, COUNT(*) AS total_orders,
+            SUM(CASE WHEN temu_status NOT LIKE '%已发货%' AND temu_status NOT LIKE '%已完成%' AND temu_status NOT LIKE '%已签收%' THEN 1 ELSE 0 END) AS pending_orders,
+            SUM(COALESCE(demand_qty,0))    AS demand_qty_total,
+            SUM(COALESCE(delivered_qty,0)) AS delivered_qty_total
+       FROM cloud.temu_stock_order_snapshot
+      WHERE tenant_id = ? AND mall_id <> '' ${baseMallFilter}
+      GROUP BY mall_id`, [tid, ...excludeMallIds]);
+  const stockMap = new Map(stockRows.map((r) => [r.mall_id, r]));
+
+  const activityRows = optionalAllLocal(db,
+    `SELECT mall_id, COUNT(*) AS activity_count,
+            COUNT(DISTINCT activity_id) AS unique_activities,
+            COUNT(DISTINCT skc_id)      AS activity_skc_count
+       FROM cloud.temu_activity_snapshot
+      WHERE tenant_id = ? AND mall_id <> '' ${baseMallFilter}
+      GROUP BY mall_id`, [tid, ...excludeMallIds]);
+  const activityMap = new Map(activityRows.map((r) => [r.mall_id, r]));
+
+  const shopStatsRows = optionalAllLocal(db,
+    `WITH latest AS (
+       SELECT mall_id, MAX(stat_date) AS stat_date
+         FROM cloud.temu_shop_stats
+        WHERE tenant_id = ? AND mall_id <> '' ${baseMallFilter}
+        GROUP BY mall_id
+     )
+     SELECT s.mall_id, s.stat_date, s.sale_volume, s.seven_days_sale_volume, s.thirty_days_sale_volume,
+            s.on_sale_product_number, s.wait_product_number, s.lack_skc_number, s.advice_prepare_skc_number,
+            s.about_to_sell_out_number, s.already_sold_out_number, s.high_price_limit_number,
+            s.quality_after_sale_ratio_90d, s.last_updated_at
+       FROM cloud.temu_shop_stats s
+       JOIN latest l ON l.mall_id = s.mall_id AND l.stat_date = s.stat_date
+      WHERE s.tenant_id = ?`, [tid, ...excludeMallIds, tid]);
+  const shopStatsMap = new Map(shopStatsRows.map((r) => [r.mall_id, r]));
+
+  const healthRows = optionalAllLocal(db,
+    `SELECT mall_id, MAX(received_at) AS last_capture_at, COUNT(*) AS captures_total
+       FROM cloud.capture_events
+      WHERE tenant_id = ? AND mall_id IS NOT NULL AND mall_id <> '' ${baseMallFilter}
+      GROUP BY mall_id`, [tid, ...excludeMallIds]);
+  const healthMap = new Map(healthRows.map((r) => [r.mall_id, r]));
+
+  const afterSalesRows = optionalAllLocal(db,
+    `SELECT mall_id, COUNT(*) AS after_sales_count
+       FROM cloud.temu_after_sale_snapshot
+      WHERE tenant_id = ? AND mall_id <> '' ${baseMallFilter}
+      GROUP BY mall_id`, [tid, ...excludeMallIds]);
+  const afterSalesMap = new Map(afterSalesRows.map((r) => [r.mall_id, r]));
+
+  const now = Date.now();
+  const stores = malls.map((m) => {
+    const s = salesMap.get(m.mall_id) || {};
+    const o = stockMap.get(m.mall_id) || {};
+    const a = activityMap.get(m.mall_id) || {};
+    const ss = shopStatsMap.get(m.mall_id) || {};
+    const h = healthMap.get(m.mall_id) || {};
+    const af = afterSalesMap.get(m.mall_id) || {};
+    const lastCaptureAt = Number(h.last_capture_at || 0);
+    return {
+      mall_id: m.mall_id,
+      mall_name: m.mall_name || null,
+      site: m.site || null,
+      mall_last_seen: m.last_seen_at || null,
+      sales: {
+        today_qty: toNum(s.sales_today_qty),
+        last7d_qty: toNum(s.sales_7d_qty),
+        last30d_qty: toNum(s.sales_30d_qty),
+        sku_count: toNum(s.sku_count),
+      },
+      stock_orders: {
+        total: toNum(o.total_orders),
+        pending: toNum(o.pending_orders),
+        demand_qty: toNum(o.demand_qty_total),
+        delivered_qty: toNum(o.delivered_qty_total),
+      },
+      activities: {
+        count: toNum(a.activity_count),
+        unique: toNum(a.unique_activities),
+        skc_count: toNum(a.activity_skc_count),
+      },
+      shop_stats: {
+        stat_date: ss.stat_date || null,
+        sale_volume: toNum(ss.sale_volume),
+        sale_7d: toNum(ss.seven_days_sale_volume),
+        sale_30d: toNum(ss.thirty_days_sale_volume),
+        on_sale_skc: toNum(ss.on_sale_product_number),
+        wait_skc: toNum(ss.wait_product_number),
+        lack_skc: toNum(ss.lack_skc_number),
+        advice_prepare_skc: toNum(ss.advice_prepare_skc_number),
+        about_to_sell_out_skc: toNum(ss.about_to_sell_out_number),
+        already_sold_out_skc: toNum(ss.already_sold_out_number),
+        high_price_limit_skc: toNum(ss.high_price_limit_number),
+        after_sale_ratio_90d: ss.quality_after_sale_ratio_90d ?? null,
+        last_updated_at: ss.last_updated_at || null,
+      },
+      after_sales: { count: toNum(af.after_sales_count) },
+      health: {
+        last_capture_at: lastCaptureAt || null,
+        captures_total: toNum(h.captures_total),
+        lag_seconds: lastCaptureAt ? Math.max(0, Math.round((now - lastCaptureAt) / 1000)) : null,
+      },
+    };
+  });
+
+  return { generated_at: now, tenant_id: tid, store_count: stores.length, stores };
+}
+
 // 主入口：返回 { generated_at, store_count, stores: [...], unmapped: [...], financials_available }
 async function buildMultiStoreReport(db, options = {}) {
   if (!db) throw new Error("multiStoreReport: db is required (host mode only)");
-  const cloud = await fetchCloudReport({ includeTest: options.includeTest });
+  const attachCloudDb = options.attachCloudDb;
+  const attached = typeof attachCloudDb === "function" && attachCloudDb(db) === true;
+
+  // 优先本地 ATTACH cloud 直接聚合（快、不触碰 cloud HTTP 单进程）；attach 不可用时退回 HTTP API
+  let cloud;
+  let financialsByMall = null;
+  if (attached) {
+    cloud = buildByStoreLocal(db, { includeTest: options.includeTest });
+    try {
+      financialsByMall = buildFinancialsByMall(db, attachCloudDb);
+    } catch (error) {
+      financialsByMall = null;
+      if (options.onError) options.onError(error);
+    }
+  } else {
+    // 降级：本地开发机无 cloud sqlite 等场景，退回 cloud HTTP API（金额维度不可用）
+    cloud = await fetchCloudReport({ includeTest: options.includeTest });
+  }
+
   const dict = readMallDictionary(db);
   const dictByMall = new Map(dict.map((row) => [row.mall_id, row]));
-
-  // 跨库金额聚合（attach 失败/无 cloud 库时为 null，前端降级隐藏金额列）
-  let financialsByMall = null;
-  try {
-    financialsByMall = buildFinancialsByMall(db, options.attachCloudDb);
-  } catch (error) {
-    // 金额聚合失败不应拖垮整张报表，记录后降级
-    financialsByMall = null;
-    if (options.onError) options.onError(error);
-  }
 
   const stores = [];
   const unmapped = [];
@@ -283,5 +443,5 @@ module.exports = {
   buildMultiStoreReport,
   setMallOwner,
   // 暴露给测试用
-  _internal: { fetchCloudReport, readMallDictionary, loginCloud, buildFinancialsByMall, shiftDate },
+  _internal: { fetchCloudReport, readMallDictionary, loginCloud, buildFinancialsByMall, buildByStoreLocal, shiftDate },
 };
