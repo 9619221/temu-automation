@@ -643,30 +643,10 @@ export default function PurchaseReturnsSection() {
     {
       title: "状态",
       key: "lifecycle",
-      width: 110,
+      width: 84,
       render: (_v, row) => {
-        const current = effectiveLifecycle(row);
-        const lc = lifecycleLabel(current);
-        // 可改：手建草稿(draft→生效)、生效单(effective→作废)；历史台账生效行也可作废。
-        // 已作废(cancelled)等终态只读。
-        const editable = current === "draft" || current === "effective";
-        if (!editable) {
-          return <Tag color={lc.color} style={{ marginRight: 0 }}>{lc.label}</Tag>;
-        }
-        const options = current === "draft"
-          ? [{ value: "draft", label: "草稿" }, { value: "effective", label: "生效" }]
-          : [{ value: "effective", label: "生效" }, { value: "cancelled", label: "作废" }];
-        return (
-          <Select
-            size="small"
-            variant="borderless"
-            value={current}
-            options={options}
-            style={{ width: "100%" }}
-            onClick={(e) => e.stopPropagation()}
-            onChange={(next) => onLifecycleSelect(row, next)}
-          />
-        );
+        const lc = lifecycleLabel(effectiveLifecycle(row));
+        return <Tag color={lc.color} style={{ marginRight: 0 }}>{lc.label}</Tag>;
       },
     },
     {
@@ -730,7 +710,33 @@ export default function PurchaseReturnsSection() {
       className: "purchase-order-column-configurable",
       onContextMenu: openColumnMenu,
     });
-    return ordered.map((c) => ({ ...c, onHeaderCell: headerProps }));
+    const configured = ordered.map((c) => ({ ...c, onHeaderCell: headerProps }));
+    // 固定「操作」列：状态流转入口。草稿→生效、生效→作废，其余只读。不进右键配置。
+    const opsColumn: ColumnType<PurchaseReturnRow> = {
+      title: "操作",
+      key: "ops",
+      width: 88,
+      fixed: "right",
+      render: (_v, row) => {
+        const current = effectiveLifecycle(row);
+        if (current === "draft") {
+          return (
+            <Button size="small" type="link" onClick={(e) => { e.stopPropagation(); onLifecycleSelect(row, "effective"); }}>
+              生效
+            </Button>
+          );
+        }
+        if (current === "effective") {
+          return (
+            <Button size="small" type="link" danger onClick={(e) => { e.stopPropagation(); onLifecycleSelect(row, "cancelled"); }}>
+              作废
+            </Button>
+          );
+        }
+        return <Text type="secondary">-</Text>;
+      },
+    };
+    return [...configured, opsColumn];
   }, [columnConfig, openColumnMenu, onLifecycleSelect]);
 
   const itemColumns: ColumnsType<PurchaseReturnItemRow> = [
