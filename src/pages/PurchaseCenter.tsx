@@ -2576,6 +2576,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   ));
   const [purchaseOrderCounts, setPurchaseOrderCounts] = useState<PurchaseOrderCounts>(() => initialWorkbench.purchaseOrderCounts || {});
   const [purchaseOrderPageLoading, setPurchaseOrderPageLoading] = useState(false);
+  // 预取下一页缓存:key=请求参数签名,value=原始 workbench。真翻页命中即时渲染,详见标杆收口。
+  const purchaseOrderPrefetchRef = useRef<Map<string, PurchaseWorkbench>>(new Map());
   const initialFocusPo = readFocusPoFromHash();
   const [purchaseOrderFilterDraft, setPurchaseOrderFilterDraft] = useState<PurchaseOrderFilterDraft>(() => ({
     keyword: "",
@@ -3472,10 +3474,17 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     if (!erp) return;
     const silent = Boolean(options?.silent);
     const sideLoads = options?.sideLoads !== false;
+    const params = buildPurchaseWorkbenchParams();
+    // 预取命中:静默刷新时若下一页已预取,先即时渲染、跳过页加载态;后台仍拉新校正。
+    const prefetched = silent ? purchaseOrderPrefetchRef.current.get(JSON.stringify(params)) : undefined;
+    if (prefetched) {
+      applyWorkbench(prefetched);
+      syncWorkbenchOptions(prefetched);
+    }
     if (!silent) setLoading(true);
-    else setPurchaseOrderPageLoading(true);
+    else if (!prefetched) setPurchaseOrderPageLoading(true);
     try {
-      const workbench = await erp.purchase.workbench(buildPurchaseWorkbenchParams());
+      const workbench = await erp.purchase.workbench(params);
       applyWorkbench(workbench);
       syncWorkbenchOptions(workbench);
       if (sideLoads) {
@@ -3559,6 +3568,46 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     }
     void loadData({ silent: true, withSupplemental: false, sideLoads: false });
   }, [loadData]);
+
+  // 预取下一页:当前页稳定后,空闲时静默拉下一页写入内存缓存,真翻页时瞬开(≤100ms)。
+  useEffect(() => {
+    if (activeWorkArea !== "orders" || !erp) return;
+    const pageSize = Math.max(1, purchaseOrderPageSize);
+    const totalPages = Math.max(1, Math.ceil(Math.max(0, purchaseOrderTotal) / pageSize));
+    const nextPage = purchaseOrderPage + 1;
+    if (nextPage > totalPages) return;
+    const params = {
+      ...buildPurchaseWorkbenchParams(),
+      purchaseOrderOffset: Math.max(0, nextPage - 1) * pageSize,
+    };
+    const sig = JSON.stringify(params);
+    if (purchaseOrderPrefetchRef.current.has(sig)) return;
+    let cancelled = false;
+    const run = () => {
+      if (cancelled) return;
+      erp.purchase.workbench(params)
+        .then((workbench: PurchaseWorkbench) => {
+          if (cancelled) return;
+          const cache = purchaseOrderPrefetchRef.current;
+          cache.set(sig, workbench);
+          // 内存上限:最多保留 8 个预取页,超出按插入序淘汰最旧。
+          while (cache.size > 8) {
+            const oldestKey = cache.keys().next().value;
+            if (oldestKey === undefined) break;
+            cache.delete(oldestKey);
+          }
+        })
+        .catch(() => {});
+    };
+    const idleApi = typeof window !== "undefined" ? (window as any).requestIdleCallback : undefined;
+    const handle = typeof idleApi === "function" ? idleApi(run, { timeout: 1500 }) : window.setTimeout(run, 400);
+    return () => {
+      cancelled = true;
+      const cancelIdle = typeof window !== "undefined" ? (window as any).cancelIdleCallback : undefined;
+      if (typeof idleApi === "function" && typeof cancelIdle === "function") cancelIdle(handle);
+      else window.clearTimeout(handle as number);
+    };
+  }, [activeWorkArea, erp, purchaseOrderPage, purchaseOrderPageSize, purchaseOrderTotal, buildPurchaseWorkbenchParams]);
 
   useEffect(() => {
     // 采购页挂载即预热商品资料缓存（client 模式 fire-and-forget；host 模式 no-op）。
@@ -3696,6 +3745,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   ) => {
     if (!erp) return null;
     setActingKey(key);
+    // 写操作会改动数据,预取的下一页随即过期:清空缓存,避免刷新时闪回陈旧行。
+    purchaseOrderPrefetchRef.current.clear();
     try {
       const workbenchParams = {
         limit: 200,

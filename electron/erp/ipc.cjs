@@ -6776,15 +6776,32 @@ function getPurchaseWorkbench(params = {}) {
     }
   }
 
+  // 按需 JOIN：Step 1（取当页 po_id）与 COUNT 总数只在筛选/排序真正引用到某张表时才 JOIN。
+  // line/sku 是 1:N 关联，JOIN 后会把每个采购单膨胀成「明细行数」行，强制 GROUP BY + 全量物化排序——
+  // 这是翻页慢的根因。日常翻页（队列筛选 + 默认排序）不引用任何 JOIN，退化成 erp_purchase_orders 单表
+  // 走 (account_id, status) 索引扫描即可。货号过滤/退款/1688 映射/送货地址都是 EXISTS 子查询，不依赖这些 JOIN。
+  const poNeedsAcct = !!purchaseOrderSearch || purchaseOrderSortField === "accountName";
+  const poNeedsSupplier = !!purchaseOrderSearch || !!purchaseOrderSupplier || purchaseOrderSortField === "supplierName";
+  const poNeedsCreator = !!purchaseOrderPurchaser || purchaseOrderSortField === "createdByName";
+  const poNeedsLineSku = !!purchaseOrderSearch
+    || purchaseOrderSortField === "totalQty"
+    || purchaseOrderSortField === "receivedQty"
+    || purchaseOrderSortField === "skuCodes"
+    || purchaseOrderSortField === "productNames";
+  const poFilterJoinSql = [
+    poNeedsAcct ? "LEFT JOIN erp_accounts acct ON acct.id = po.account_id" : "",
+    poNeedsSupplier ? "LEFT JOIN erp_suppliers supplier ON supplier.id = po.supplier_id" : "",
+    poNeedsSupplier ? "LEFT JOIN erp_sourcing_candidates cand ON cand.id = po.selected_candidate_id" : "",
+    poNeedsCreator ? "LEFT JOIN erp_users creator ON creator.id = po.created_by" : "",
+    poNeedsLineSku ? "LEFT JOIN erp_purchase_order_lines line ON line.po_id = po.id" : "",
+    poNeedsLineSku ? "LEFT JOIN erp_skus sku ON sku.id = line.sku_id" : "",
+  ].filter(Boolean).join("\n    ");
+  // 只有 line/sku 这类 1:N JOIN 才会膨胀行数、需要 GROUP BY 去重；其余 N:1 JOIN 不膨胀。
+  const poNeedsGroupBy = poNeedsLineSku;
   const purchaseOrderTotalRow = db.prepare(`
-    SELECT COUNT(DISTINCT po.id) AS total
+    SELECT COUNT(${poNeedsGroupBy ? "DISTINCT po.id" : "*"}) AS total
     FROM erp_purchase_orders po
-    LEFT JOIN erp_accounts acct ON acct.id = po.account_id
-    LEFT JOIN erp_suppliers supplier ON supplier.id = po.supplier_id
-    LEFT JOIN erp_sourcing_candidates cand ON cand.id = po.selected_candidate_id
-    LEFT JOIN erp_users creator ON creator.id = po.created_by
-    LEFT JOIN erp_purchase_order_lines line ON line.po_id = po.id
-    LEFT JOIN erp_skus sku ON sku.id = line.sku_id
+    ${poFilterJoinSql}
     ${poWhereSql}
   `).get(poParams);
   const purchaseOrderStatusCounts = db.prepare(`
@@ -6823,14 +6840,9 @@ function getPurchaseWorkbench(params = {}) {
     const idRows = db.prepare(`
       SELECT po.id
       FROM erp_purchase_orders po
-      LEFT JOIN erp_accounts acct ON acct.id = po.account_id
-      LEFT JOIN erp_suppliers supplier ON supplier.id = po.supplier_id
-      LEFT JOIN erp_sourcing_candidates cand ON cand.id = po.selected_candidate_id
-      LEFT JOIN erp_users creator ON creator.id = po.created_by
-      LEFT JOIN erp_purchase_order_lines line ON line.po_id = po.id
-      LEFT JOIN erp_skus sku ON sku.id = line.sku_id
+      ${poFilterJoinSql}
       ${poWhereSql}
-      GROUP BY po.id
+      ${poNeedsGroupBy ? "GROUP BY po.id" : ""}
       ORDER BY ${poOrderSql}
       LIMIT @limit OFFSET @offset
     `).all(poParams);

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Alert,
   Button,
@@ -18,6 +18,7 @@ import { CloudSyncOutlined, ReloadOutlined, RiseOutlined, ShopOutlined, WarningO
 import { parseDashboardData, parseFluxData, parseSalesData } from "../utils/parseRawApis";
 import { APP_SETTINGS_KEY, normalizeAppSettings } from "../utils/appSettings";
 import {
+  ACTIVE_ACCOUNT_CHANGED_EVENT,
   setStoreValueForActiveAccount,
 } from "../utils/multiStore";
 import {
@@ -29,6 +30,7 @@ import {
 import { useStoreRefresh } from "../hooks/useStoreRefresh";
 import { getStoreValues, STORE_KEY_ALIASES } from "../utils/storeCompat";
 import PageHeader from "../components/PageHeader";
+import { TopProgressBar } from "../components/TopProgressBar";
 import StatCard from "../components/StatCard";
 import EmptyGuide from "../components/EmptyGuide";
 import FluxOperatorPanel from "../components/FluxOperatorPanel";
@@ -220,6 +222,8 @@ function isDiagnosticCloudText(value?: string | null) {
 
 const ShopOverview: React.FC = () => {
   const [loading, setLoading] = useState(true);
+  // 首屏是否已成功加载过:warm 刷新不再整页骨架,只在冷启动(从未加载)时显骨架。
+  const [hasLoaded, setHasLoaded] = useState(false);
   const [dashboard, setDashboard] = useState<any>(null);
   const [flux, setFlux] = useState<any>(null);
   const [performance, setPerformance] = useState<any>(null);
@@ -260,8 +264,9 @@ const ShopOverview: React.FC = () => {
   const [stockNotice, setStockNotice] = useState<{ type: "info" | "warning" | "error"; message: string } | null>(null);
   const [savingStockThreshold, setSavingStockThreshold] = useState(false);
 
-  const loadAllData = async () => {
-    setLoading(true);
+  // 清空全部店铺数据。仅在账号切换时调用——切店是换了实体,必须清掉旧店数字避免误读。
+  // warm 刷新(同店 store 更新)不再清屏,保留旧数据 + 顶部进度条,符合 stale-while-revalidate。
+  const clearAllShopData = () => {
     setDashboard(null);
     setFlux(null);
     setPerformance(null);
@@ -288,6 +293,10 @@ const ShopOverview: React.FC = () => {
     setCloudStockOrderSummary([]);
     setCloudAfterSales([]);
     setCloudAfterSaleSummary([]);
+  };
+
+  const loadAllData = async () => {
+    setLoading(true);
     try {
       const storeValues = await getStoreValues(store, [
         "temu_dashboard",
@@ -387,8 +396,19 @@ const ShopOverview: React.FC = () => {
       setDiagnostics(null);
     } finally {
       setLoading(false);
+      setHasLoaded(true);
     }
   };
+
+  // 账号切换:清空旧店数据并复位首屏标记,让新店重新走骨架,不闪旧店数字。
+  useEffect(() => {
+    const handleAccountChanged = () => {
+      clearAllShopData();
+      setHasLoaded(false);
+    };
+    window.addEventListener(ACTIVE_ACCOUNT_CHANGED_EVENT, handleAccountChanged);
+    return () => window.removeEventListener(ACTIVE_ACCOUNT_CHANGED_EVENT, handleAccountChanged);
+  }, []);
 
   // ========== 数据提取 ==========
 
@@ -1806,7 +1826,8 @@ const ShopOverview: React.FC = () => {
   );
 
   // ========== 主渲染 ==========
-  if (loading) {
+  // 仅冷启动(从未成功加载过)才整页骨架;warm 刷新保留旧数据,改用顶部细进度条。
+  if (loading && !hasLoaded) {
     return (
       <div style={{ padding: 24 }}>
         <Skeleton active paragraph={{ rows: 6 }} />
@@ -1864,6 +1885,7 @@ const ShopOverview: React.FC = () => {
 
   return (
     <div className="dashboard-shell shop-overview-shell">
+      <TopProgressBar visible={loading} />
       <PageHeader
         compact
         eyebrow="运营"

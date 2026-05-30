@@ -27,6 +27,7 @@ import { parseProductsData, parseOrdersData, parseSalesData, parseFluxData, pars
 import { getStoreValues, STORE_KEY_ALIASES } from "../utils/storeCompat";
 import EmptyGuide from "../components/EmptyGuide";
 import PageHeader from "../components/PageHeader";
+import { TopProgressBar } from "../components/TopProgressBar";
 import StatCard from "../components/StatCard";
 
 const { Paragraph } = Typography;
@@ -306,6 +307,9 @@ export default function ProductDetail() {
   const [goodsSalesData, setGoodsSalesData] = useState<any>(null);
   const [dailyFluxData, setDailyFluxData] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  // 当前已加载数据对应的商品 id。换商品(实体变了)才清屏+全屏 spin;同商品 warm 刷新保留旧详情。
+  const [loadedId, setLoadedId] = useState<string | null>(null);
+  const loadedIdRef = useRef<string | null>(null);
   const [diagnostics, setDiagnostics] = useState<CollectionDiagnostics | null>(null);
   const [dataSources, setDataSources] = useState<DetailDataSources>(EMPTY_DATA_SOURCES);
   const loadRequestIdRef = useRef(0);
@@ -342,20 +346,24 @@ export default function ProductDetail() {
       }
     };
     setLoading(true);
-    setProduct(null);
-    setSalesInfo(null);
-    setSalesRows([]);
-    setOrders([]);
-    setAfterSalesRecords([]);
-    setFlowPriceInfo(null);
-    setRetailPriceInfo([]);
-    setFluxItems([]);
-    setFluxHistory([]);
-    setQualityInfo(null);
-    setCheckupInfo(null);
-    setGoodsSalesData(null);
-    setDailyFluxData([]);
-    setDataSources(EMPTY_DATA_SOURCES);
+    // 仅在切换到不同商品时清空旧数据;同商品 warm 刷新保留旧详情,避免整页闪空再填回。
+    const isNewProduct = (id || null) !== loadedIdRef.current;
+    if (isNewProduct) {
+      setProduct(null);
+      setSalesInfo(null);
+      setSalesRows([]);
+      setOrders([]);
+      setAfterSalesRecords([]);
+      setFlowPriceInfo(null);
+      setRetailPriceInfo([]);
+      setFluxItems([]);
+      setFluxHistory([]);
+      setQualityInfo(null);
+      setCheckupInfo(null);
+      setGoodsSalesData(null);
+      setDailyFluxData([]);
+      setDataSources(EMPTY_DATA_SOURCES);
+    }
     try {
       const globalFluxSources = FLUX_SOURCE_GROUPS.find((item) => item.siteKey === "global")?.storeKeys || ["temu_flux", "temu_raw_mallFlux"];
       const storeValues = await getStoreValues(store, [
@@ -666,6 +674,8 @@ export default function ProductDetail() {
     } finally {
       if (requestId === loadRequestIdRef.current) {
         setLoading(false);
+        loadedIdRef.current = id || null;
+        setLoadedId(id || null);
       }
     }
   };
@@ -698,7 +708,8 @@ export default function ProductDetail() {
     </div>
   );
 
-  if (loading) {
+  // 仅冷启动或切换到不同商品时整页 spin;同商品 warm 刷新保留旧详情、改用顶部进度条。
+  if (loading && loadedId !== (id || null)) {
     return (
       <div className="dashboard-shell">
         <PageHeader
@@ -1148,6 +1159,7 @@ export default function ProductDetail() {
 
   return (
     <div className="dashboard-shell">
+      <TopProgressBar visible={loading} />
       <PageHeader
         compact
         eyebrow="商品数据"
