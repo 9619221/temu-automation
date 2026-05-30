@@ -105,23 +105,6 @@ const RECEIPT_ISSUE_OPTIONS: Array<{ label: string; value: ReceiptIssueKey }> = 
   { label: "破损", value: "damaged" },
 ];
 
-const INBOUND_EDIT_STATUS_VALUES = [
-  "jst_pending_inbound",
-  "pending_arrival",
-  "arrived",
-  "counted",
-  "inbounded_pending_qc",
-  "quantity_mismatch",
-  "damaged",
-  "exception",
-  "cancelled",
-] as const;
-
-const INBOUND_EDIT_STATUS_OPTIONS = INBOUND_EDIT_STATUS_VALUES.map((value) => ({
-  label: INBOUND_STATUS_LABELS[value] || value,
-  value,
-}));
-
 type WarehouseWorkbenchParams = {
   inboundReceiptLimit: number;
   inboundReceiptOffset: number;
@@ -2493,80 +2476,6 @@ export default function WarehouseCenter() {
       >
         {editReceiptModal ? (
           <Space direction="vertical" size={12} style={{ width: "100%" }}>
-            <Row gutter={[12, 12]}>
-              <Col span={8}>
-                <Text type="secondary">状态</Text>
-                <Select
-                  value={editReceiptModal.status}
-                  options={INBOUND_EDIT_STATUS_OPTIONS}
-                  style={{ width: "100%", marginTop: 6 }}
-                  onChange={(status) => setEditReceiptModal((current) => (
-                    current ? { ...current, status, sourceStatus: INBOUND_STATUS_LABELS[status] || current.sourceStatus } : current
-                  ))}
-                />
-              </Col>
-              <Col span={8}>
-                <Text type="secondary">来源状态</Text>
-                <Input
-                  value={editReceiptModal.sourceStatus}
-                  style={{ marginTop: 6 }}
-                  onChange={(event) => setEditReceiptModal((current) => (
-                    current ? { ...current, sourceStatus: event.target.value } : current
-                  ))}
-                />
-              </Col>
-              <Col span={8}>
-                <Text type="secondary">入库时间</Text>
-                <Input
-                  value={editReceiptModal.receivedAt}
-                  style={{ marginTop: 6 }}
-                  onChange={(event) => setEditReceiptModal((current) => (
-                    current ? { ...current, receivedAt: event.target.value } : current
-                  ))}
-                />
-              </Col>
-              <Col span={8}>
-                <Text type="secondary">仓库</Text>
-                <Input
-                  value={editReceiptModal.warehouseName}
-                  style={{ marginTop: 6 }}
-                  onChange={(event) => setEditReceiptModal((current) => (
-                    current ? { ...current, warehouseName: event.target.value } : current
-                  ))}
-                />
-              </Col>
-              <Col span={8}>
-                <Text type="secondary">物流公司</Text>
-                <Input
-                  value={editReceiptModal.logisticsCompany}
-                  style={{ marginTop: 6 }}
-                  onChange={(event) => setEditReceiptModal((current) => (
-                    current ? { ...current, logisticsCompany: event.target.value } : current
-                  ))}
-                />
-              </Col>
-              <Col span={8}>
-                <Text type="secondary">物流单号</Text>
-                <Input
-                  value={editReceiptModal.trackingNo}
-                  style={{ marginTop: 6 }}
-                  onChange={(event) => setEditReceiptModal((current) => (
-                    current ? { ...current, trackingNo: event.target.value } : current
-                  ))}
-                />
-              </Col>
-              <Col span={24}>
-                <Text type="secondary">备注</Text>
-                <TextArea
-                  value={editReceiptModal.sourceRemark}
-                  rows={2}
-                  style={{ marginTop: 6 }}
-                  onChange={(event) => setEditReceiptModal((current) => (
-                    current ? { ...current, sourceRemark: event.target.value } : current
-                  ))}
-                />
-              </Col>
-            </Row>
             <Table
               rowKey="id"
               size="small"
