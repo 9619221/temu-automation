@@ -81,6 +81,7 @@ interface ReportData {
   cloud_tenant_id: string | null;
   store_count: number;
   financials_available: boolean;
+  sales_window: { start: string | null; end: string | null; days: number } | null;
   stores: ReportStore[];
   unmapped: ReportStore[];
 }
@@ -206,6 +207,9 @@ export default function MultiStoreReport() {
 
   const allStores = data?.stores || [];
   const finAvailable = data?.financials_available ?? false;
+  const salesWindow = data?.sales_window ?? null;
+  const windowDays = salesWindow?.days && salesWindow.days > 0 ? salesWindow.days : 0;
+  const label30 = windowDays > 0 && windowDays < 30 ? `近 ${windowDays} 天` : "近 30 天";
 
   const ownerOptions = useMemo(() => {
     const set = new Set<string>();
@@ -431,9 +435,18 @@ export default function MultiStoreReport() {
           {!finAvailable && (
             <Alert type="warning" showIcon style={{ margin: 16 }} message="金额维度暂不可用" description="未能连接 cloud 销量库（attach 失败或主控端未配置），营收/毛利显示为空。" />
           )}
+          {finAvailable && salesWindow && windowDays > 0 && windowDays < 30 && (
+            <Alert
+              type="info"
+              showIcon
+              style={{ margin: 16 }}
+              message={`营收数据目前覆盖 ${salesWindow.start} ~ ${salesWindow.end}，共 ${windowDays} 天（不足 30 天）`}
+              description="“近30天”相关金额为该区间累计、非完整自然月；7天/30天环比待数据攒满对比周期后才显示。"
+            />
+          )}
           {finAvailable && combinedTrend.length >= 2 && (
             <div style={{ padding: "12px 16px 0" }}>
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>近 30 天营收 / 毛利趋势（所选范围合计）</Typography.Text>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>{label30}营收 / 毛利趋势（所选范围合计）</Typography.Text>
               <ResponsiveContainer width="100%" height={180}>
                 <LineChart data={combinedTrend} margin={{ top: 8, right: 16, bottom: 0, left: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} />
@@ -544,8 +557,8 @@ export default function MultiStoreReport() {
           <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 16 }}>
             <Statistic title="店铺数" value={stores.length} suffix={`/ ${summary.onlineCount} 实时`} />
             <Statistic title="今日营收" value={finAvailable ? fmtMoney(summary.revToday) : "—"} />
-            <Statistic title="近 30 天营收" value={finAvailable ? fmtMoney(summary.rev30) : "—"} />
-            <Statistic title="近 30 天毛利率" value={finAvailable ? fmtPct(summary.margin30) : "—"} valueStyle={summary.margin30 != null && summary.margin30 < ALERT_MARGIN_LOW ? { color: "#cf1322" } : undefined} />
+            <Statistic title={`${label30}营收`} value={finAvailable ? fmtMoney(summary.rev30) : "—"} />
+            <Statistic title={`${label30}毛利率`} value={finAvailable ? fmtPct(summary.margin30) : "—"} valueStyle={summary.margin30 != null && summary.margin30 < ALERT_MARGIN_LOW ? { color: "#cf1322" } : undefined} />
             <Statistic title="待发备货合计" value={summary.totalPending} valueStyle={summary.totalPending > 0 ? { color: "#fa8c16" } : undefined} />
           </div>
         )}

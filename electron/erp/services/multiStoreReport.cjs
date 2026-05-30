@@ -256,9 +256,17 @@ function buildByStoreLocal(db, options = {}) {
       GROUP BY mall_supplier_id`, [tid, ...excludeMallIds]);
   const salesMap = new Map(salesRows.map((r) => [r.mall_id, r]));
 
+  // 待发口径：未发完(delivered<demand) 且排除终态。temu_status 是裸数字码、按 source_type 混 3 套枚举，
+  // 中文 LIKE 对数字码失效(老坑)。证据：stock_order 码 7=已完成(已发完,数量口径自动排除)、
+  // 8=已取消(delivered=0 全为 0 + applyDeleteStatus=2 + 量级远超销量)，故按数量排除 7、按状态排除 8；
+  // 兼容历史中文状态。7/8 只出现在 stock_order 套，排除不误伤 shipping_list/shipping_desk。
   const stockRows = optionalAllLocal(db,
     `SELECT mall_id, COUNT(*) AS total_orders,
-            SUM(CASE WHEN temu_status NOT LIKE '%已发货%' AND temu_status NOT LIKE '%已完成%' AND temu_status NOT LIKE '%已签收%' THEN 1 ELSE 0 END) AS pending_orders,
+            SUM(CASE WHEN COALESCE(delivered_qty,0) < COALESCE(demand_qty,0)
+                      AND COALESCE(temu_status,'') NOT IN ('7','8')
+                      AND temu_status NOT LIKE '%已完成%' AND temu_status NOT LIKE '%已发货%'
+                      AND temu_status NOT LIKE '%已签收%' AND temu_status NOT LIKE '%取消%'
+                     THEN 1 ELSE 0 END) AS pending_orders,
             SUM(COALESCE(demand_qty,0))    AS demand_qty_total,
             SUM(COALESCE(delivered_qty,0)) AS delivered_qty_total
        FROM cloud.temu_stock_order_snapshot
@@ -360,7 +368,18 @@ function buildByStoreLocal(db, options = {}) {
     };
   });
 
-  return { generated_at: now, tenant_id: tid, store_count: stores.length, stores };
+  // 销量数据实际覆盖窗口（cloud 回溯天数可能不足 30 天，前端据此标注真实天数，避免"近30天"误导）
+  const win = optionalAllLocal(db,
+    `SELECT MIN(stat_date) mn, MAX(stat_date) mx, COUNT(DISTINCT stat_date) days
+       FROM cloud.temu_sales_snapshot WHERE tenant_id = ? AND mall_supplier_id <> ''`, [tid])[0] || {};
+
+  return {
+    generated_at: now,
+    tenant_id: tid,
+    store_count: stores.length,
+    stores,
+    sales_window: { start: win.mn || null, end: win.mx || null, days: toNum(win.days) },
+  };
 }
 
 // 主入口：返回 { generated_at, store_count, stores: [...], unmapped: [...], financials_available }
@@ -421,6 +440,7 @@ async function buildMultiStoreReport(db, options = {}) {
     cloud_tenant_id: cloud.tenant_id || null,
     store_count: stores.length,
     financials_available: financialsByMall !== null,
+    sales_window: cloud.sales_window || null, // 销量数据实际覆盖窗口（不足30天时前端据此标注真实天数）
     stores,
     unmapped, // 云端有数据但本地字典没登记的（应该提醒用户去 seed）
   };
