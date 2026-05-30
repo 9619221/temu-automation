@@ -905,7 +905,8 @@ export default function QcOutboundCenter() {
       title: "收货仓",
       key: "warehouse",
       width: 180,
-      render: (_value, row) => row.rawCloud?.receive_warehouse_name || "-",
+      render: (_value, row) =>
+        row.rawCloud?.receive_warehouse_name || row.rawCloud?.warehouse_group || "-",
     },
     {
       title: "本地承接",
