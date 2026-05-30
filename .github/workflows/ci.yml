@@ -1,0 +1,28 @@
+name: CI
+
+# 最小 CI：在 push / PR 到 master 时跑 TypeScript 类型检查 + 数据契约校验，
+# 拦住编译期就能发现的崩溃（例如曾经发出去的 outboundStatusTag is not defined）。
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      # --ignore-scripts 跳过 electron/better-sqlite3 的原生编译与下载，
+      # 类型检查只需要包内的 .d.ts，不需要原生模块真正可运行。
+      - name: Install deps
+        run: npm ci --ignore-scripts
+      - name: TypeScript 类型检查
+        run: npx tsc --noEmit
+      - name: 数据契约校验
+        run: npm run verify:data-contracts
+        continue-on-error: true
