@@ -20361,8 +20361,10 @@ async function listMappingsPageRuntime(params = {}) {
   if (shouldUseClientRuntime()) {
     ensureClientRuntime();
     try {
-      // 首页等一次增量同步保证数据新鲜（无游标自动转全量建基线）；翻页后台静默追增量。
-      if (!Number(params.offset)) await mappingCache.triggerSync({ mode: "incremental" });
+      // 仅「无搜索词的首页」等一次增量同步保证基线新鲜（无游标自动转全量）；翻页 / 搜索态
+      // 都后台静默追增量——搜索走本地缓存 payload LIKE（几十毫秒即返），不被跨海同步阻塞，
+      // 否则每敲一次搜索都卡在一次增量同步上（用户反馈「搜索很慢」根因）。
+      if (!Number(params.offset) && !optionalString(params.search)) await mappingCache.triggerSync({ mode: "incremental" });
       else void mappingCache.triggerSync({ mode: "incremental" }).catch(() => {});
       void mappingCache.triggerReconcile().catch(() => {});
       const rows = mappingCache.getCachedMappings(params);
@@ -20820,7 +20822,9 @@ async function listUnmappedSkusPageRuntime(params = {}) {
   if (shouldUseClientRuntime()) {
     ensureClientRuntime();
     try {
-      if (!Number(params.offset)) {
+      // 同「已绑定」：仅无搜索词首页 await 双表同步保证基线，翻页 / 搜索态后台静默，
+      // 搜索走本地缓存双表求差即返，不被跨海同步阻塞。
+      if (!Number(params.offset) && !optionalString(params.search)) {
         await skuCache.triggerSync({ mode: "incremental" });
         await mappingCache.triggerSync({ mode: "incremental" });
       } else {
