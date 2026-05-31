@@ -19,7 +19,11 @@ import {
 import { ArrowDownOutlined, ArrowUpOutlined, ReloadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import {
+  Bar,
+  BarChart,
   CartesianGrid,
+  Cell,
+  LabelList,
   Line,
   LineChart,
   ResponsiveContainer,
@@ -295,6 +299,23 @@ export default function MultiStoreReport() {
     return Array.from(m.values()).sort((a, b) => a.date.localeCompare(b.date));
   }, [stores]);
 
+  // 店铺营收排名（Top 15，营收毛利 Tab 横向条形）
+  const revRank = useMemo(() => stores
+    .filter((s) => s.financials)
+    .map((s) => ({ name: s.store_code || s.mall_id.slice(-4), rev: Math.round(s.financials!.last30d.revenue), margin: marginOf(s.financials!.last30d) }))
+    .sort((a, b) => b.rev - a.rev)
+    .slice(0, 15), [stores]);
+
+  // 营收二八分布：前 N 家贡献 80% 营收
+  const pareto = useMemo(() => {
+    const arr = stores.map((s) => s.financials?.last30d.revenue || 0).filter((v) => v > 0).sort((a, b) => b - a);
+    const total = arr.reduce((a, b) => a + b, 0);
+    if (total <= 0) return null;
+    let cum = 0, n = 0;
+    for (const v of arr) { cum += v; n++; if (cum >= total * 0.8) break; }
+    return { topN: n, total: arr.length };
+  }, [stores]);
+
   // 按负责人卷积
   const ownerRollup = useMemo(() => {
     const m = new Map<string, {
@@ -489,7 +510,13 @@ export default function MultiStoreReport() {
       label: "运营日报",
       children: (
         <>
-          <div style={{ padding: "10px 16px 0", color: "#888", fontSize: 12 }}>已按紧急度排序：掉线 / 售罄 / 缺货 / 待处理售后 / 待发 多的店自动置顶。</div>
+          <div style={{ padding: "12px 16px 0", display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+            <Statistic title="待发备货" value={summary?.totalPending || 0} valueStyle={{ fontSize: 20, color: (summary?.totalPending || 0) > 0 ? "#fa8c16" : undefined }} />
+            <Statistic title="缺货 SKC" value={highlights.lack} valueStyle={{ fontSize: 20, color: highlights.lack > 0 ? "#d4b106" : undefined }} />
+            <Statistic title="已售罄 SKC" value={highlights.soldout} valueStyle={{ fontSize: 20, color: highlights.soldout > 0 ? "#cf1322" : undefined }} />
+            <Statistic title="待处理售后" value={highlights.aftersale} valueStyle={{ fontSize: 20, color: highlights.aftersale > 0 ? "#cf1322" : undefined }} />
+          </div>
+          <div style={{ padding: "8px 16px 0", color: "#888", fontSize: 12 }}>已按紧急度排序：掉线 / 售罄 / 缺货 / 待处理售后 / 待发 多的店自动置顶。</div>
           <Table<ReportStore> dataSource={dailyStores} columns={dailyColumns} rowKey="mall_id" size="small" pagination={false} scroll={{ x: 945 }} loading={loading} />
         </>
       ),
@@ -526,6 +553,25 @@ export default function MultiStoreReport() {
               </ResponsiveContainer>
             </div>
           )}
+          {finAvailable && revRank.length > 0 && (
+            <div style={{ padding: "8px 16px 0" }}>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                {label30}营收排名 Top {revRank.length}（条形按毛利率着色：绿好·橙中·红差）
+                {pareto && <span style={{ marginLeft: 8 }}>· 前 {pareto.topN} 家贡献 80% 营收（共 {pareto.total} 家）</span>}
+              </Typography.Text>
+              <ResponsiveContainer width="100%" height={Math.max(160, revRank.length * 26)}>
+                <BarChart data={revRank} layout="vertical" margin={{ top: 4, right: 70, bottom: 4, left: 8 }}>
+                  <XAxis type="number" tick={{ fontSize: 11 }} tickFormatter={(v) => "¥" + (v >= 1000 ? (v / 1000).toFixed(0) + "k" : v)} />
+                  <YAxis type="category" dataKey="name" width={44} tick={{ fontSize: 11 }} />
+                  <RTooltip formatter={(v: any) => fmtMoney(Number(v))} />
+                  <Bar dataKey="rev" radius={[0, 4, 4, 0]} isAnimationActive={false}>
+                    {revRank.map((r, i) => <Cell key={i} fill={marginColor(r.margin) || "#1677ff"} />)}
+                    <LabelList dataKey="rev" position="right" formatter={(v: any) => fmtMoney(Number(v))} style={{ fontSize: 11, fill: "#666" }} />
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
           <Table<ReportStore> dataSource={stores} columns={bossColumns} rowKey="mall_id" size="small" pagination={false} scroll={{ x: 1000 }} loading={loading} />
         </>
       ),
@@ -549,6 +595,28 @@ export default function MultiStoreReport() {
                 </div>
               }
             />
+          )}
+          {ownerRollup.length > 0 && (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 12, marginBottom: 16 }}>
+              {ownerRollup.map((o) => {
+                const m = o.rev30 > 0 ? o.gp30 / o.rev30 : null;
+                return (
+                  <Card size="small" key={o.owner} bodyStyle={{ padding: 12 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <Typography.Text strong>{o.owner}</Typography.Text>
+                      <Tag>{o.store_count} 店</Tag>
+                    </div>
+                    <div style={{ marginTop: 6, fontSize: 20, fontWeight: 600 }}>{finAvailable ? fmtMoney(o.rev30) : "—"}</div>
+                    <div style={{ fontSize: 12, color: "#888" }}>{label30}营收 · 毛利率 <span style={{ color: marginColor(m), fontWeight: 600 }}>{finAvailable ? fmtPct(m) : "—"}</span></div>
+                    <div style={{ marginTop: 8, display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      {o.pending > 0 && <Tag color="orange">待发 {fmtNum(o.pending)}</Tag>}
+                      {o.after_sales > 0 && <Tag color="volcano">售后 {fmtNum(o.after_sales)}</Tag>}
+                      {o.pending === 0 && o.after_sales === 0 && <Tag color="success">无积压</Tag>}
+                    </div>
+                  </Card>
+                );
+              })}
+            </div>
           )}
           <Table dataSource={ownerRollup} columns={managerColumns} rowKey="owner" size="small" pagination={false} scroll={{ x: 820 }} loading={loading} />
         </div>
