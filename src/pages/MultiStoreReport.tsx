@@ -564,7 +564,7 @@ export default function MultiStoreReport() {
                   <XAxis type="number" tick={{ fontSize: 11 }} tickFormatter={(v) => "¥" + (v >= 1000 ? (v / 1000).toFixed(0) + "k" : v)} />
                   <YAxis type="category" dataKey="name" width={44} tick={{ fontSize: 11 }} />
                   <RTooltip formatter={(v: any) => fmtMoney(Number(v))} />
-                  <Bar dataKey="rev" radius={[0, 4, 4, 0]} isAnimationActive={false}>
+                  <Bar dataKey="rev" name="营收" radius={[0, 4, 4, 0]} isAnimationActive={false}>
                     {revRank.map((r, i) => <Cell key={i} fill={marginColor(r.margin) || "#1677ff"} />)}
                     <LabelList dataKey="rev" position="right" formatter={(v: any) => fmtMoney(Number(v))} style={{ fontSize: 11, fill: "#666" }} />
                   </Bar>
