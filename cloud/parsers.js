@@ -363,6 +363,28 @@ function parseSkcList(db, ctx, evt, body) {
   }
 }
 
+// ---------- 合规巡查：retrieval/board/pageQuery 命中违规的 SKC，回填 compliance_status ----------
+
+function parseComplianceBoard(db, ctx, evt, body) {
+  const items = body && body.result && Array.isArray(body.result.pageItems) ? body.result.pageItems : pickList(body);
+  if (!Array.isArray(items) || !items.length) return;
+  const upd = db.prepare(`
+    UPDATE skc_snapshots
+       SET compliance_status = @compliance_status, last_updated_at = datetime('now')
+     WHERE tenant_id = @tenant_id AND skc_id = @skc_id
+  `);
+  for (const row of items) {
+    const skc_id = String(firstDefined(row, ["productSkcId", "skcId", "skc_id"]) || "");
+    if (!skc_id) continue;
+    const reasons = [];
+    if (Array.isArray(row.reasonList)) for (const r of row.reasonList) if (r && r.reason) reasons.push(String(r.reason));
+    if (Array.isArray(row.secondReasonList)) for (const r of row.secondReasonList) if (r && r.reason) reasons.push(String(r.reason));
+    const uniq = [...new Set(reasons)];
+    const compliance_status = (uniq.length ? uniq.join("; ") : "违规命中").slice(0, 500);
+    upd.run({ tenant_id: ctx.tenant_id, skc_id, compliance_status });
+  }
+}
+
 // ---------- TEMU sales/management ----------
 
 function parseSkuSalesTrend(db, ctx, evt, body) {
@@ -2176,6 +2198,7 @@ function parseActivitySnapshot(db, ctx, evt, body) {
 const PARSERS = [
   { match: /\/auth\/userInfo|\/mms\/userInfo|\/mms\/account\/menu/, fn: parseUserInfo, name: "userInfo" },
   { match: /\/product\/skc\/pageQuery|\/product\/draft\/pageQuery|\/product\/notAllEu\/pageQuery/, fn: parseSkcList, name: "skcList" },
+  { match: /\/retrieval\/board\/pageQuery/, fn: parseComplianceBoard, name: "complianceBoard" },
   { match: /\/mms\/venom\/api\/supplier\/sales\/management\/(listOverall|listWarehouse|querySkuSalesNumber|queryFulfilmentFormStatistic)/, fn: parseSalesManagement, name: "salesManagement" },
   { match: /\/api\/seller\/full\/flow\/analysis\/goods\/list/, fn: parseProductFlowGoods, name: "productFlowGoods" },
   { match: /\/api\/seller\/full\/flow\/analysis\/goods\/(detail|trend)/, fn: parseProductFlowTrend, name: "productFlowTrend" },
