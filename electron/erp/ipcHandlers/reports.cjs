@@ -81,6 +81,40 @@ function registerReportsHandlers(ipcMain, deps) {
       return { ok: false, error: error?.message || String(error) };
     }
   });
+
+  // 运营工作台：风险待办明细
+  ipcMain.handle("erp:reports:risk-list", async (_event, payload) => {
+    try {
+      const includeTest = payload?.includeTest ? "1" : "0";
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest(`/api/erp/reports/risk-list?include_test=${includeTest}`, { method: "GET" });
+      }
+      requireErp();
+      const { buildRiskList } = require("../services/multiStoreReport.cjs");
+      const { attachTemuCloudDbIfPossible } = require("../lanServer.cjs");
+      return { ok: true, data: buildRiskList(erpState.db, { includeTest: payload?.includeTest, attachCloudDb: attachTemuCloudDbIfPossible }) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+
+  // 运营工作台：活动机会明细
+  ipcMain.handle("erp:reports:activity-list", async (_event, payload) => {
+    try {
+      const includeTest = payload?.includeTest ? "1" : "0";
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest(`/api/erp/reports/activity-list?include_test=${includeTest}`, { method: "GET" });
+      }
+      requireErp();
+      const { buildActivityList } = require("../services/multiStoreReport.cjs");
+      const { attachTemuCloudDbIfPossible } = require("../lanServer.cjs");
+      return { ok: true, data: buildActivityList(erpState.db, { includeTest: payload?.includeTest, attachCloudDb: attachTemuCloudDbIfPossible }) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
 }
 
 module.exports = { registerReportsHandlers };

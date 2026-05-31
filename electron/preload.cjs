@@ -442,6 +442,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
       mallDict: () => ipcRenderer.invoke("erp:reports:mall-dict"),
       setMallOwner: (payload) => ipcRenderer.invoke("erp:reports:set-mall-owner", payload || {}),
       skuSales: (options) => ipcRenderer.invoke("erp:reports:sku-sales", options || {}),
+      riskList: (options) => ipcRenderer.invoke("erp:reports:risk-list", options || {}),
+      activityList: (options) => ipcRenderer.invoke("erp:reports:activity-list", options || {}),
     },
     events: {
       onPurchaseUpdate: (handler) => {

@@ -554,6 +554,91 @@ function buildSkuSales(db, options = {}) {
   return data;
 }
 
+// ===== 风险待办：运营风险明细（每店最新天，按严重度排）=====
+const _riskCache = new Map();
+function buildRiskList(db, options = {}) {
+  if (!db) throw new Error("buildRiskList: db is required (host mode only)");
+  const attachCloudDb = options.attachCloudDb;
+  if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
+    return { generated_at: Date.now(), row_count: 0, rows: [], attached: false };
+  }
+  const key = options.includeTest ? "1" : "0";
+  if (!options.force) {
+    const c = _riskCache.get(key);
+    if (c && Date.now() - c.ts < REPORT_CACHE_TTL_MS) return c.data;
+  }
+  const tid = options.tenantId || DEFAULT_CLOUD_TENANT;
+  const rows = optionalAllLocal(db, `
+    WITH latest AS (
+      SELECT mall_id, MAX(stat_date) AS sd FROM cloud.temu_operation_risk_snapshot
+       WHERE tenant_id = ? AND mall_id <> '' GROUP BY mall_id
+    )
+    SELECT r.mall_id, m.store_code, m.mall_name, r.risk_type, r.severity, r.risk_title,
+           r.risk_status, r.product_id, r.skc_id, r.quantity, r.stat_date
+      FROM cloud.temu_operation_risk_snapshot r
+      JOIN latest l ON l.mall_id = r.mall_id AND l.sd = r.stat_date
+      LEFT JOIN erp_temu_malls m ON m.mall_id = r.mall_id
+     WHERE r.tenant_id = ?
+       ${options.includeTest ? "" : "AND COALESCE(m.status,'active') <> 'test'"}
+     ORDER BY CASE r.severity WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END DESC, r.mall_id
+     LIMIT 4000
+  `, [tid, tid]);
+  const out = rows.map((r) => ({
+    mall_id: r.mall_id, store_code: r.store_code || null, mall_name: r.mall_name || null,
+    risk_type: r.risk_type || null, severity: r.severity || null, title: r.risk_title || null,
+    status: r.risk_status || null, product_id: r.product_id || null, skc_id: r.skc_id || null,
+    quantity: toNum(r.quantity), stat_date: r.stat_date || null,
+  }));
+  const data = { generated_at: Date.now(), row_count: out.length, rows: out };
+  _riskCache.set(key, { data, ts: Date.now() });
+  return data;
+}
+
+// ===== 活动机会：可报活动 / 竞价 / 优惠券明细（每店最新天，仅含有实质内容的行）=====
+const _activityCache = new Map();
+function buildActivityList(db, options = {}) {
+  if (!db) throw new Error("buildActivityList: db is required (host mode only)");
+  const attachCloudDb = options.attachCloudDb;
+  if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
+    return { generated_at: Date.now(), row_count: 0, rows: [], attached: false };
+  }
+  const key = options.includeTest ? "1" : "0";
+  if (!options.force) {
+    const c = _activityCache.get(key);
+    if (c && Date.now() - c.ts < REPORT_CACHE_TTL_MS) return c.data;
+  }
+  const tid = options.tenantId || DEFAULT_CLOUD_TENANT;
+  const rows = optionalAllLocal(db, `
+    WITH latest AS (
+      SELECT mall_id, MAX(stat_date) AS sd FROM cloud.temu_activity_snapshot
+       WHERE tenant_id = ? AND mall_id <> '' GROUP BY mall_id
+    )
+    SELECT a.mall_id, m.store_code, m.mall_name, a.activity_kind, a.activity_title, a.activity_status,
+           a.sku_ext_code, a.skc_id, a.signup_price_cents, a.suggested_price_cents,
+           a.signup_price_diff_cents, a.activity_stock, a.end_at, a.stat_date
+      FROM cloud.temu_activity_snapshot a
+      JOIN latest l ON l.mall_id = a.mall_id AND l.sd = a.stat_date
+      LEFT JOIN erp_temu_malls m ON m.mall_id = a.mall_id
+     WHERE a.tenant_id = ?
+       AND (a.sku_ext_code IS NOT NULL OR a.activity_title IS NOT NULL OR a.signup_price_cents IS NOT NULL)
+       ${options.includeTest ? "" : "AND COALESCE(m.status,'active') <> 'test'"}
+     ORDER BY a.mall_id, a.activity_kind
+     LIMIT 4000
+  `, [tid, tid]);
+  const centsToYuan = (v) => (v == null ? null : Number(v) / 100);
+  const out = rows.map((a) => ({
+    mall_id: a.mall_id, store_code: a.store_code || null, mall_name: a.mall_name || null,
+    kind: a.activity_kind || null, title: a.activity_title || null, status: a.activity_status || null,
+    sku_ext_code: a.sku_ext_code || null, skc_id: a.skc_id || null,
+    signup_price: centsToYuan(a.signup_price_cents), suggested_price: centsToYuan(a.suggested_price_cents),
+    price_diff: centsToYuan(a.signup_price_diff_cents), activity_stock: toNum(a.activity_stock),
+    end_at: a.end_at || null, stat_date: a.stat_date || null,
+  }));
+  const data = { generated_at: Date.now(), row_count: out.length, rows: out };
+  _activityCache.set(key, { data, ts: Date.now() });
+  return data;
+}
+
 // 写入店铺负责人（host 模式）。返回受影响行数。
 function setMallOwner(db, mallId, owner) {
   if (!db) throw new Error("setMallOwner: db is required (host mode only)");
@@ -571,6 +656,8 @@ module.exports = {
   buildMultiStoreReport,
   prewarmMultiStoreReport,
   buildSkuSales,
+  buildRiskList,
+  buildActivityList,
   setMallOwner,
   // 暴露给测试用
   _internal: { fetchCloudReport, readMallDictionary, loginCloud, buildFinancialsByMall, buildByStoreLocal, shiftDate },

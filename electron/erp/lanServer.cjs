@@ -61,6 +61,8 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/erp/reports/mall-dict": ["admin", "manager", "operations", "finance", "buyer", "warehouse"],
   "/api/erp/reports/set-mall-owner": ["admin", "manager"],
   "/api/erp/reports/sku-sales": ["admin", "manager", "operations", "finance"],
+  "/api/erp/reports/risk-list": ["admin", "manager", "operations", "viewer"],
+  "/api/erp/reports/activity-list": ["admin", "manager", "operations", "viewer"],
   "/warehouse": ["admin", "manager", "warehouse"],
   "/api/warehouse/workbench": ["admin", "manager", "warehouse"],
   "/api/warehouse/action": ["admin", "manager", "warehouse"],
@@ -5206,6 +5208,24 @@ async function handleRequest({
         const includeTest = parsed.searchParams.get("include_test") === "1";
         const { buildSkuSales } = require("./services/multiStoreReport.cjs");
         const data = buildSkuSales(db, { includeTest, attachCloudDb: attachTemuCloudDbIfPossible });
+        writeJson(res, 200, { ok: true, data });
+      } catch (error) {
+        writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });
+      }
+      return;
+    }
+
+    if (pathname === "/api/erp/reports/risk-list" || pathname === "/api/erp/reports/activity-list") {
+      if (req.method !== "GET") {
+        writeJson(res, 405, { ok: false, error: "Method not allowed" });
+        return;
+      }
+      try {
+        const parsed = new URL(req.url || "/", "http://127.0.0.1");
+        const includeTest = parsed.searchParams.get("include_test") === "1";
+        const svc = require("./services/multiStoreReport.cjs");
+        const fn = pathname.endsWith("risk-list") ? svc.buildRiskList : svc.buildActivityList;
+        const data = fn(db, { includeTest, attachCloudDb: attachTemuCloudDbIfPossible });
         writeJson(res, 200, { ok: true, data });
       } catch (error) {
         writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });

@@ -821,6 +821,8 @@ interface ErpAPI {
     mallDict: () => Promise<ErpMallDictResponse>;
     setMallOwner: (payload: { mallId: string; owner: string | null }) => Promise<ErpSetMallOwnerResponse>;
     skuSales: (options?: { includeTest?: boolean }) => Promise<ErpSkuSalesResponse>;
+    riskList: (options?: { includeTest?: boolean }) => Promise<ErpRiskListResponse>;
+    activityList: (options?: { includeTest?: boolean }) => Promise<ErpActivityListResponse>;
   };
   events?: {
     onPurchaseUpdate: (handler: (payload: ErpPurchaseUpdateEvent) => void) => () => void;
@@ -945,6 +947,49 @@ interface ErpSkuSalesResponse {
     rows: ErpSkuSalesRow[];
     attached?: boolean;
   };
+}
+
+interface ErpRiskRow {
+  mall_id: string;
+  store_code: string | null;
+  mall_name: string | null;
+  risk_type: string | null;
+  severity: string | null;
+  title: string | null;
+  status: string | null;
+  product_id: string | null;
+  skc_id: string | null;
+  quantity: number;
+  stat_date: string | null;
+}
+
+interface ErpRiskListResponse {
+  ok: boolean;
+  error?: string;
+  data?: { generated_at: number; row_count: number; rows: ErpRiskRow[]; attached?: boolean };
+}
+
+interface ErpActivityRow {
+  mall_id: string;
+  store_code: string | null;
+  mall_name: string | null;
+  kind: string | null;
+  title: string | null;
+  status: string | null;
+  sku_ext_code: string | null;
+  skc_id: string | null;
+  signup_price: number | null;
+  suggested_price: number | null;
+  price_diff: number | null;
+  activity_stock: number;
+  end_at: string | null;
+  stat_date: string | null;
+}
+
+interface ErpActivityListResponse {
+  ok: boolean;
+  error?: string;
+  data?: { generated_at: number; row_count: number; rows: ErpActivityRow[]; attached?: boolean };
 }
 
 interface ErpMallDictEntry {
