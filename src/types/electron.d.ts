@@ -1066,6 +1066,7 @@ interface ErpProductPanelRow {
   store_code: string | null;
   mall_name: string | null;
   title: string | null;
+  thumb: string | null;
   expose: number | null;
   click: number | null;
   pay: number | null;

@@ -785,7 +785,7 @@ function buildProductPanel(db, options = {}) {
   // 1) 流量（每店最新天，按 product_id）
   const flowRows = optionalAllLocal(db, `
     WITH lf AS (SELECT mall_id, MAX(stat_date) sd FROM cloud.temu_product_flow_snapshot WHERE tenant_id = ? GROUP BY mall_id)
-    SELECT f.mall_id, f.product_id, f.title, f.expose_num, f.click_num, f.pay_goods_num,
+    SELECT f.mall_id, f.product_id, f.title, f.thumb_url, f.expose_num, f.click_num, f.pay_goods_num,
            f.expose_pay_conversion_rate, f.flow_grow_status
       FROM cloud.temu_product_flow_snapshot f JOIN lf ON lf.mall_id = f.mall_id AND lf.sd = f.stat_date
      WHERE f.product_id IS NOT NULL AND f.product_id <> ''`, [tid]);
@@ -808,23 +808,23 @@ function buildProductPanel(db, options = {}) {
      GROUP BY mall_id, product_id`, [tid]);
   // 商品名字典（by product_id，skc + sales 两表合并，覆盖更全）
   const titleRows = optionalAllLocal(db, `
-    SELECT product_id, MAX(title) title FROM (
-      SELECT product_id, title FROM cloud.skc_snapshots WHERE tenant_id = ? AND product_id <> '' AND title IS NOT NULL AND title <> ''
+    SELECT product_id, MAX(title) title, MAX(thumb_url) thumb FROM (
+      SELECT product_id, title, thumb_url FROM cloud.skc_snapshots WHERE tenant_id = ? AND product_id <> '' AND title IS NOT NULL AND title <> ''
       UNION ALL
-      SELECT product_id, title FROM cloud.temu_sales_snapshot WHERE tenant_id = ? AND product_id <> '' AND title IS NOT NULL AND title <> ''
+      SELECT product_id, title, thumb_url FROM cloud.temu_sales_snapshot WHERE tenant_id = ? AND product_id <> '' AND title IS NOT NULL AND title <> ''
     ) GROUP BY product_id`, [tid, tid]);
-  const titleMap = new Map(titleRows.map((t) => [String(t.product_id), t.title]));
+  const titleMap = new Map(titleRows.map((t) => [String(t.product_id), { title: t.title, thumb: t.thumb }]));
   const malls = optionalAllLocal(db, `SELECT mall_id, store_code, mall_name, status FROM erp_temu_malls`, []);
   const mallMap = new Map(malls.map((m) => [m.mall_id, m]));
   const map = new Map();
   const get = (mall_id, product_id, title) => {
     const k = mall_id + "|" + product_id;
     let e = map.get(k);
-    if (!e) { e = { mall_id, product_id, title: title || null, expose: null, click: null, pay: null, conv: null, grow: null, limited: false, act_cnt: 0, min_price: null, compliance: null }; map.set(k, e); }
+    if (!e) { e = { mall_id, product_id, title: title || null, thumb: null, expose: null, click: null, pay: null, conv: null, grow: null, limited: false, act_cnt: 0, min_price: null, compliance: null }; map.set(k, e); }
     if (title && !e.title) e.title = title;
     return e;
   };
-  for (const f of flowRows) { const e = get(f.mall_id, f.product_id, f.title); e.expose = toNum(f.expose_num); e.click = toNum(f.click_num); e.pay = toNum(f.pay_goods_num); e.conv = f.expose_pay_conversion_rate == null ? null : Number(f.expose_pay_conversion_rate); e.grow = f.flow_grow_status || null; }
+  for (const f of flowRows) { const e = get(f.mall_id, f.product_id, f.title); e.expose = toNum(f.expose_num); e.click = toNum(f.click_num); e.pay = toNum(f.pay_goods_num); e.conv = f.expose_pay_conversion_rate == null ? null : Number(f.expose_pay_conversion_rate); e.grow = f.flow_grow_status || null; if (f.thumb_url) e.thumb = f.thumb_url; }
   for (const r of limRows) { get(r.mall_id, r.product_id, null).limited = true; }
   for (const a of actRows) { const e = get(a.mall_id, a.product_id, null); e.act_cnt = toNum(a.cnt); e.min_price = a.minp == null ? null : Number(a.minp) / 100; }
   for (const c of compRows) { const e = get(c.mall_id, c.product_id, c.title); e.compliance = c.cs || null; }
@@ -832,7 +832,8 @@ function buildProductPanel(db, options = {}) {
   for (const e of map.values()) {
     const m = mallMap.get(e.mall_id);
     if (!options.includeTest && m && m.status === "test") continue;
-    if (!e.title) e.title = titleMap.get(String(e.product_id)) || null;
+    const tm = titleMap.get(String(e.product_id));
+    if (tm) { if (!e.title) e.title = tm.title || null; if (!e.thumb) e.thumb = tm.thumb || null; }
     e.store_code = m ? m.store_code || null : null;
     e.mall_name = m ? m.mall_name || null : null;
     out.push(e);

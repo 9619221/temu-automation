@@ -50,7 +50,7 @@ interface StoreMatrixRow {
   high_risk: number; restock: number; stock_gap: number; activity: number;
 }
 interface ProductPanelRow {
-  mall_id: string; product_id: string; store_code: string | null; mall_name: string | null; title: string | null;
+  mall_id: string; product_id: string; store_code: string | null; mall_name: string | null; title: string | null; thumb: string | null;
   expose: number | null; click: number | null; pay: number | null; conv: number | null; grow: string | null;
   limited: boolean; act_cnt: number; min_price: number | null; compliance: string | null; __rk?: number;
 }
@@ -417,7 +417,15 @@ export default function OperationsWorkbench() {
 
   const panelColumns: ColumnsType<ProductPanelRow> = [
     { title: "店号", dataIndex: "store_code", width: 70, fixed: "left", render: (v, r) => v || r.mall_id },
-    { title: "商品 (SPU)", key: "prod", width: 270, render: (_, r) => <div><Typography.Text copyable={{ text: r.product_id }} style={{ fontSize: 12, fontWeight: 600 }}>{r.product_id}</Typography.Text><Tooltip title={r.title || ""}><div style={{ color: "#888", fontSize: 12, maxWidth: 250, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title || "—"}</div></Tooltip></div> },
+    { title: "商品 (SPU)", key: "prod", width: 310, render: (_, r) => (
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        {r.thumb ? <img src={r.thumb} alt="" loading="lazy" style={{ width: 40, height: 40, objectFit: "cover", borderRadius: 4, flexShrink: 0, background: "#f5f5f5" }} /> : <div style={{ width: 40, height: 40, borderRadius: 4, background: "#f0f0f0", flexShrink: 0 }} />}
+        <div style={{ minWidth: 0 }}>
+          <Typography.Text copyable={{ text: r.product_id }} style={{ fontSize: 12, fontWeight: 600 }}>{r.product_id}</Typography.Text>
+          <Tooltip title={r.title || ""}><div style={{ color: "#888", fontSize: 12, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title || "—"}</div></Tooltip>
+        </div>
+      </div>
+    ) },
     { title: "可报活动", key: "act", width: 130, align: "right", sorter: (a, b) => a.act_cnt - b.act_cnt, render: (_, r) => (r.act_cnt > 0 ? <span style={{ color: "#3f8600" }}>{r.act_cnt}个{r.min_price != null ? ` / 低¥${r.min_price.toFixed(2)}` : ""}</span> : <span style={{ color: "#bbb" }}>—</span>) },
     { title: "合规", dataIndex: "compliance", width: 170, render: (v: string | null) => (v ? <Tag color="red" style={{ whiteSpace: "normal" }}>{v}</Tag> : <span style={{ color: "#3f8600" }}>正常</span>) },
     { title: "限流", dataIndex: "limited", width: 90, align: "center", sorter: (a, b) => (a.limited ? 1 : 0) - (b.limited ? 1 : 0), render: (v: boolean) => (v ? <Tag color="volcano">高价限流</Tag> : <span style={{ color: "#bbb" }}>—</span>) },
