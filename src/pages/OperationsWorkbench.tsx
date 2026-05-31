@@ -416,7 +416,7 @@ export default function OperationsWorkbench() {
             <Card size="small" hoverable onClick={() => setActiveTab("stock")}><Statistic title="备货缺口单" value={stockView.length} /></Card>
             <Card size="small" hoverable onClick={() => setActiveTab("activity")}><Statistic title="可报活动" value={actView.length} valueStyle={{ color: "#3f8600" }} /></Card>
           </div>
-          <Card size="small" title="各店概览 · 问题多的店排前,点行钻取该店" style={{ marginBottom: 16 }} loading={shopLoading || riskLoading || skuLoading}>
+          <Card size="small" title="各店概览 · 点店查看商品明细,问题多的店排在前" style={{ marginBottom: 16 }} loading={shopLoading || riskLoading || skuLoading}>
             <Table<StoreMatrixRow> dataSource={storeMatrix} columns={storeMatrixColumns} rowKey="store_code" size="small"
               pagination={{ defaultPageSize: 20, showSizeChanger: true, pageSizeOptions: [10, 20, 50], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 店` }}
               scroll={{ x: 980 }}
