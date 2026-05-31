@@ -51,6 +51,7 @@ const MALLS = [
   { store_code: '053', mall_id: '634418226025563', mall_name: 'Wild Bloom Mart' },
   { store_code: '054', mall_id: '634418226041962', mall_name: 'Global Dash Mart' },
   { store_code: '062', mall_id: '634418226219194', mall_name: 'Borderless Mart Box' },
+  { store_code: '063', mall_id: '634418226785687', mall_name: 'Rare Finds Global' },
   { store_code: '065', mall_id: '634418225172002', mall_name: 'Breeze Cargo' },
   { store_code: '067', mall_id: '634418225262761', mall_name: 'FixMaster Collection' },
   { store_code: '071', mall_id: '634418227770823', mall_name: 'Crafted to Perfection' },
