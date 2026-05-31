@@ -619,7 +619,9 @@ function buildActivityList(db, options = {}) {
       FROM cloud.temu_activity_snapshot a
       JOIN latest l ON l.mall_id = a.mall_id AND l.sd = a.stat_date
       LEFT JOIN erp_temu_malls m ON m.mall_id = a.mall_id
-      LEFT JOIN (SELECT internal_sku_code, MAX(weighted_avg_cost) AS wac FROM erp_skus GROUP BY internal_sku_code) k
+      LEFT JOIN (SELECT internal_sku_code,
+                        MAX(COALESCE(NULLIF(weighted_avg_cost,0), NULLIF(jst_cost_price,0))) AS wac
+                   FROM erp_skus GROUP BY internal_sku_code) k
         ON k.internal_sku_code = a.sku_ext_code
      WHERE a.tenant_id = ?
        AND (a.sku_ext_code IS NOT NULL OR a.activity_title IS NOT NULL OR a.signup_price_cents IS NOT NULL)
