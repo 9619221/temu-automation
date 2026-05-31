@@ -335,7 +335,7 @@ export default function MultiStoreReport() {
     { title: "数据上报", key: "lag", width: 110, render: (_, s) => <Tag color={lagColor(s.health.lag_seconds)}>{fmtLag(s.health.lag_seconds)}前</Tag>, sorter: (a, b) => (a.health.lag_seconds ?? Infinity) - (b.health.lag_seconds ?? Infinity) },
   ];
 
-  // === Tab 2: 老板周/月（金额）===
+  // === Tab 2: 营收毛利（金额）===
   const bossColumns: ColumnsType<ReportStore> = [
     { title: "店号", key: "code", width: 110, fixed: "left", render: (_, s) => <StoreCell store={s} />, sorter: (a, b) => (a.store_code || "").localeCompare(b.store_code || "") },
     { title: "店铺", key: "name", width: 170, render: (_, s) => storeNameCell(s), sorter: storeNameSorter },
@@ -437,7 +437,7 @@ export default function MultiStoreReport() {
     },
     {
       key: "boss",
-      label: "老板周/月",
+      label: "营收毛利",
       children: (
         <>
           {!finAvailable && (
