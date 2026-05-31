@@ -244,16 +244,26 @@ function buildByStoreLocal(db, options = {}) {
       WHERE tenant_id = ? AND mall_id <> '' ${baseMallFilter}
       GROUP BY mall_id`, [tid, ...excludeMallIds]);
 
+  // today_sales/last7d_sales/last30d_sales 是 Temu 在每个 stat_date 当天算好的快照值，
+  // 表里每天每 SKU 一行（保留历史），所以只能取每店最新 stat_date 当天，绝不可跨天 SUM（否则虚高 N 倍）。
   const salesRows = optionalAllLocal(db,
-    `SELECT mall_supplier_id AS mall_id,
-            SUM(COALESCE(today_sales,0))   AS sales_today_qty,
-            SUM(COALESCE(last7d_sales,0))  AS sales_7d_qty,
-            SUM(COALESCE(last30d_sales,0)) AS sales_30d_qty,
-            COUNT(DISTINCT skc_id) AS sku_count
-       FROM cloud.temu_sales_snapshot
-      WHERE tenant_id = ? AND mall_supplier_id <> '' ${salesMallFilter}
-        AND skc_id NOT IN ('SKC-EXT-E2E','SKC-DBG')
-      GROUP BY mall_supplier_id`, [tid, ...excludeMallIds]);
+    `WITH latest AS (
+       SELECT mall_supplier_id, MAX(stat_date) AS sd
+         FROM cloud.temu_sales_snapshot
+        WHERE tenant_id = ? AND mall_supplier_id <> '' ${salesMallFilter}
+          AND skc_id NOT IN ('SKC-EXT-E2E','SKC-DBG')
+        GROUP BY mall_supplier_id
+     )
+     SELECT s.mall_supplier_id AS mall_id,
+            SUM(COALESCE(s.today_sales,0))   AS sales_today_qty,
+            SUM(COALESCE(s.last7d_sales,0))  AS sales_7d_qty,
+            SUM(COALESCE(s.last30d_sales,0)) AS sales_30d_qty,
+            COUNT(DISTINCT s.skc_id) AS sku_count
+       FROM cloud.temu_sales_snapshot s
+       JOIN latest l ON l.mall_supplier_id = s.mall_supplier_id AND l.sd = s.stat_date
+      WHERE s.tenant_id = ? AND s.skc_id NOT IN ('SKC-EXT-E2E','SKC-DBG')
+      GROUP BY s.mall_supplier_id`,
+    [tid, ...excludeMallIds, tid]);
   const salesMap = new Map(salesRows.map((r) => [r.mall_id, r]));
 
   // 待发口径：未发完(delivered<demand) 且排除终态。temu_status 是裸数字码、按 source_type 混 3 套枚举，
