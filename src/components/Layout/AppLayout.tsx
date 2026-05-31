@@ -12,6 +12,7 @@ import {
   DatabaseOutlined,
   DollarOutlined,
   ExportOutlined,
+  FundProjectionScreenOutlined,
   FileTextOutlined,
   InboxOutlined,
   LoadingOutlined,
@@ -68,6 +69,7 @@ const menuItems = [
     children: [
       { key: "/shop", icon: <DashboardOutlined />, label: "店铺概览" },
       { key: "/multi-store-report", icon: <BarChartOutlined />, label: "多店报表" },
+      { key: "/ops-workbench", icon: <FundProjectionScreenOutlined />, label: "运营工作台" },
       { key: "/products", icon: <ShoppingOutlined />, label: "商品管理" },
       { key: "/browser-multi", icon: <RocketOutlined />, label: "浏览器多开" },
     ],
