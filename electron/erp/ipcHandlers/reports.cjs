@@ -166,6 +166,23 @@ function registerReportsHandlers(ipcMain, deps) {
       return { ok: false, error: error?.message || String(error) };
     }
   });
+
+  // 运营工作台：商品运营面板（活动/合规/流量/限流四维集成,SPU级）
+  ipcMain.handle("erp:reports:product-panel", async (_event, payload) => {
+    try {
+      const includeTest = payload?.includeTest ? "1" : "0";
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest(`/api/erp/reports/product-panel?include_test=${includeTest}`, { method: "GET" });
+      }
+      requireErp();
+      const { buildProductPanel } = require("../services/multiStoreReport.cjs");
+      const { attachTemuCloudDbIfPossible } = require("../lanServer.cjs");
+      return { ok: true, data: buildProductPanel(erpState.db, { includeTest: payload?.includeTest, attachCloudDb: attachTemuCloudDbIfPossible }) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
 }
 
 module.exports = { registerReportsHandlers };

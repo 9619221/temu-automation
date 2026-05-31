@@ -447,6 +447,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
       shopHealth: (options) => ipcRenderer.invoke("erp:reports:shop-health", options || {}),
       stockOrders: (options) => ipcRenderer.invoke("erp:reports:stock-orders", options || {}),
       salesTrend: (options) => ipcRenderer.invoke("erp:reports:sales-trend", options || {}),
+      productPanel: (options) => ipcRenderer.invoke("erp:reports:product-panel", options || {}),
     },
     events: {
       onPurchaseUpdate: (handler) => {

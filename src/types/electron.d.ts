@@ -826,6 +826,7 @@ interface ErpAPI {
     shopHealth: (options?: { includeTest?: boolean }) => Promise<ErpShopHealthResponse>;
     stockOrders: (options?: { includeTest?: boolean }) => Promise<ErpStockOrderResponse>;
     salesTrend: (options?: { includeTest?: boolean; days?: number }) => Promise<ErpSalesTrendResponse>;
+    productPanel: (options?: { includeTest?: boolean }) => Promise<ErpProductPanelResponse>;
   };
   events?: {
     onPurchaseUpdate: (handler: (payload: ErpPurchaseUpdateEvent) => void) => () => void;
@@ -1057,6 +1058,29 @@ interface ErpSalesTrendResponse {
   ok: boolean;
   error?: string;
   data?: { generated_at: number; row_count: number; rows: ErpSalesTrendRow[]; attached?: boolean };
+}
+
+interface ErpProductPanelRow {
+  mall_id: string;
+  product_id: string;
+  store_code: string | null;
+  mall_name: string | null;
+  title: string | null;
+  expose: number | null;
+  click: number | null;
+  pay: number | null;
+  conv: number | null;
+  grow: string | null;
+  limited: boolean;
+  act_cnt: number;
+  min_price: number | null;
+  compliance: string | null;
+}
+
+interface ErpProductPanelResponse {
+  ok: boolean;
+  error?: string;
+  data?: { generated_at: number; row_count: number; rows: ErpProductPanelRow[]; attached?: boolean };
 }
 
 interface ErpMallDictEntry {

@@ -768,6 +768,72 @@ function buildSalesTrend(db, options = {}) {
   return data;
 }
 
+// ===== 商品运营面板：以商品(SPU/product_id)为行，横向集成 活动/合规/流量/限流 四维 =====
+const _productPanelCache = new Map();
+function buildProductPanel(db, options = {}) {
+  if (!db) throw new Error("buildProductPanel: db is required (host mode only)");
+  const attachCloudDb = options.attachCloudDb;
+  if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
+    return { generated_at: Date.now(), row_count: 0, rows: [], attached: false };
+  }
+  const key = options.includeTest ? "1" : "0";
+  if (!options.force) {
+    const c = _productPanelCache.get(key);
+    if (c && Date.now() - c.ts < REPORT_CACHE_TTL_MS) return c.data;
+  }
+  const tid = options.tenantId || DEFAULT_CLOUD_TENANT;
+  // 1) 流量（每店最新天，按 product_id）
+  const flowRows = optionalAllLocal(db, `
+    WITH lf AS (SELECT mall_id, MAX(stat_date) sd FROM cloud.temu_product_flow_snapshot WHERE tenant_id = ? GROUP BY mall_id)
+    SELECT f.mall_id, f.product_id, f.title, f.expose_num, f.click_num, f.pay_goods_num,
+           f.expose_pay_conversion_rate, f.flow_grow_status
+      FROM cloud.temu_product_flow_snapshot f JOIN lf ON lf.mall_id = f.mall_id AND lf.sd = f.stat_date
+     WHERE f.product_id IS NOT NULL AND f.product_id <> ''`, [tid]);
+  // 2) 限流：高价流量受限（high_price_flow，每店最新天）
+  const limRows = optionalAllLocal(db, `
+    WITH lr AS (SELECT mall_id, MAX(stat_date) sd FROM cloud.temu_operation_risk_snapshot WHERE tenant_id = ? AND risk_type = 'high_price_flow' GROUP BY mall_id)
+    SELECT DISTINCT r.mall_id, r.product_id FROM cloud.temu_operation_risk_snapshot r JOIN lr ON lr.mall_id = r.mall_id AND lr.sd = r.stat_date
+     WHERE r.risk_type = 'high_price_flow' AND r.product_id IS NOT NULL AND r.product_id <> ''`, [tid]);
+  // 3) 活动（每店最新天，按 product_id 聚合：可报活动数 + 最低报名价）
+  const actRows = optionalAllLocal(db, `
+    WITH la AS (SELECT mall_id, MAX(stat_date) sd FROM cloud.temu_activity_snapshot WHERE tenant_id = ? GROUP BY mall_id)
+    SELECT a.mall_id, a.product_id, COUNT(*) cnt, MIN(a.signup_price_cents) minp
+      FROM cloud.temu_activity_snapshot a JOIN la ON la.mall_id = a.mall_id AND la.sd = a.stat_date
+     WHERE a.product_id IS NOT NULL AND a.product_id <> '' AND a.signup_price_cents IS NOT NULL
+     GROUP BY a.mall_id, a.product_id`, [tid]);
+  // 4) 合规（按 product_id，任一 SKC 违规即标记）
+  const compRows = optionalAllLocal(db, `
+    SELECT mall_id, product_id, MAX(compliance_status) cs, MAX(title) title
+      FROM cloud.skc_snapshots WHERE tenant_id = ? AND compliance_status IS NOT NULL AND product_id IS NOT NULL AND product_id <> ''
+     GROUP BY mall_id, product_id`, [tid]);
+  const malls = optionalAllLocal(db, `SELECT mall_id, store_code, mall_name, status FROM erp_temu_malls`, []);
+  const mallMap = new Map(malls.map((m) => [m.mall_id, m]));
+  const map = new Map();
+  const get = (mall_id, product_id, title) => {
+    const k = mall_id + "|" + product_id;
+    let e = map.get(k);
+    if (!e) { e = { mall_id, product_id, title: title || null, expose: null, click: null, pay: null, conv: null, grow: null, limited: false, act_cnt: 0, min_price: null, compliance: null }; map.set(k, e); }
+    if (title && !e.title) e.title = title;
+    return e;
+  };
+  for (const f of flowRows) { const e = get(f.mall_id, f.product_id, f.title); e.expose = toNum(f.expose_num); e.click = toNum(f.click_num); e.pay = toNum(f.pay_goods_num); e.conv = f.expose_pay_conversion_rate == null ? null : Number(f.expose_pay_conversion_rate); e.grow = f.flow_grow_status || null; }
+  for (const r of limRows) { get(r.mall_id, r.product_id, null).limited = true; }
+  for (const a of actRows) { const e = get(a.mall_id, a.product_id, null); e.act_cnt = toNum(a.cnt); e.min_price = a.minp == null ? null : Number(a.minp) / 100; }
+  for (const c of compRows) { const e = get(c.mall_id, c.product_id, c.title); e.compliance = c.cs || null; }
+  const out = [];
+  for (const e of map.values()) {
+    const m = mallMap.get(e.mall_id);
+    if (!options.includeTest && m && m.status === "test") continue;
+    e.store_code = m ? m.store_code || null : null;
+    e.mall_name = m ? m.mall_name || null : null;
+    out.push(e);
+  }
+  out.sort((a, b) => (b.limited ? 1 : 0) - (a.limited ? 1 : 0) || (b.compliance ? 1 : 0) - (a.compliance ? 1 : 0) || (b.act_cnt - a.act_cnt) || ((b.expose || 0) - (a.expose || 0)));
+  const data = { generated_at: Date.now(), row_count: out.length, rows: out.slice(0, 4000) };
+  _productPanelCache.set(key, { data, ts: Date.now() });
+  return data;
+}
+
 // 写入店铺负责人（host 模式）。返回受影响行数。
 function setMallOwner(db, mallId, owner) {
   if (!db) throw new Error("setMallOwner: db is required (host mode only)");
@@ -790,6 +856,7 @@ module.exports = {
   buildShopHealth,
   buildStockOrders,
   buildSalesTrend,
+  buildProductPanel,
   setMallOwner,
   // 暴露给测试用
   _internal: { fetchCloudReport, readMallDictionary, loginCloud, buildFinancialsByMall, buildByStoreLocal, shiftDate },

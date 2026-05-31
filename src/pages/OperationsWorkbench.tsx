@@ -49,6 +49,11 @@ interface StoreMatrixRow {
   sales: number; sale_7d: number; lack: number; soldout: number;
   high_risk: number; restock: number; stock_gap: number; activity: number;
 }
+interface ProductPanelRow {
+  mall_id: string; product_id: string; store_code: string | null; mall_name: string | null; title: string | null;
+  expose: number | null; click: number | null; pay: number | null; conv: number | null; grow: string | null;
+  limited: boolean; act_cnt: number; min_price: number | null; compliance: string | null; __rk?: number;
+}
 
 interface Diag { label: string; action: string; level: number }
 interface DiagnosedRow extends SkuRow { _level: number; _issues: Diag[] }
@@ -107,6 +112,9 @@ export default function OperationsWorkbench() {
   const [trendRows, setTrendRows] = useState<TrendRow[]>([]);
   const [trendLoading, setTrendLoading] = useState(false);
   const [trendLoaded, setTrendLoaded] = useState(false);
+  const [panelRows, setPanelRows] = useState<ProductPanelRow[]>([]);
+  const [panelLoading, setPanelLoading] = useState(false);
+  const [panelLoaded, setPanelLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [storeFilter, setStoreFilter] = useState("all");
@@ -150,6 +158,12 @@ export default function OperationsWorkbench() {
     try { const resp = await window.electronAPI.erp.reports.salesTrend({ includeTest: false }); if (resp.ok && resp.data) { setTrendRows((resp.data.rows || []) as TrendRow[]); setTrendLoaded(true); } } catch { /* */ } finally { setTrendLoading(false); }
   }, []);
 
+  const loadPanel = useCallback(async () => {
+    if (!window.electronAPI?.erp?.reports?.productPanel) return;
+    setPanelLoading(true);
+    try { const resp = await window.electronAPI.erp.reports.productPanel({ includeTest: false }); if (resp.ok && resp.data) { setPanelRows((resp.data.rows || []) as ProductPanelRow[]); setPanelLoaded(true); } } catch { /* */ } finally { setPanelLoading(false); }
+  }, []);
+
   useEffect(() => { loadSku(); }, [loadSku]);
   useEffect(() => {
     const ov = activeTab === "overview";
@@ -158,7 +172,8 @@ export default function OperationsWorkbench() {
     if ((activeTab === "stock" || ov) && !stockLoaded && !stockLoading) loadStockOrders();
     if ((activeTab === "risk" || ov) && !riskLoaded && !riskLoading) loadRisk();
     if ((activeTab === "activity" || ov) && !actLoaded && !actLoading) loadAct();
-  }, [activeTab, shopLoaded, shopLoading, trendLoaded, trendLoading, stockLoaded, stockLoading, riskLoaded, riskLoading, actLoaded, actLoading, loadShop, loadTrend, loadStockOrders, loadRisk, loadAct]);
+    if (activeTab === "panel" && !panelLoaded && !panelLoading) loadPanel();
+  }, [activeTab, shopLoaded, shopLoading, trendLoaded, trendLoading, stockLoaded, stockLoading, riskLoaded, riskLoading, actLoaded, actLoading, panelLoaded, panelLoading, loadShop, loadTrend, loadStockOrders, loadRisk, loadAct, loadPanel]);
 
   const diagnosed: DiagnosedRow[] = useMemo(() => skuRows.map((r) => {
     const issues = diagnose(r);
@@ -261,6 +276,13 @@ export default function OperationsWorkbench() {
     for (const r of actRows) get(r.store_code || r.mall_id, r.mall_id, r.mall_name, null).activity++;
     return [...m.values()].sort((a, b) => (b.lack + b.soldout + b.high_risk * 5) - (a.lack + a.soldout + a.high_risk * 5));
   }, [shopRows, riskRows, skuRows, stockRows, actRows]);
+  const panelView = useMemo(() => {
+    let v = panelRows;
+    if (storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
+    const q = search.trim().toLowerCase();
+    if (q) v = v.filter((r) => (r.title || "").toLowerCase().includes(q) || (r.product_id || "").includes(q));
+    return v.map((r, i) => ({ ...r, __rk: i }));
+  }, [panelRows, storeFilter, search]);
   const shopView = useMemo(() => {
     let v = shopRows;
     if (storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
@@ -391,6 +413,18 @@ export default function OperationsWorkbench() {
     { title: "待补货", dataIndex: "restock", width: 75, align: "right", sorter: (a, b) => a.restock - b.restock, render: redNum("#d46b08") },
     { title: "备货缺口", dataIndex: "stock_gap", width: 85, align: "right", sorter: (a, b) => a.stock_gap - b.stock_gap, render: fmtNum },
     { title: "可报活动", dataIndex: "activity", width: 85, align: "right", sorter: (a, b) => a.activity - b.activity, render: (v: number) => (v > 0 ? <span style={{ color: "#3f8600" }}>{fmtNum(v)}</span> : <span style={{ color: "#bbb" }}>0</span>) },
+  ];
+
+  const panelColumns: ColumnsType<ProductPanelRow> = [
+    { title: "店号", dataIndex: "store_code", width: 70, fixed: "left", render: (v, r) => v || r.mall_id },
+    { title: "商品 (SPU)", key: "prod", width: 270, render: (_, r) => <div><Typography.Text copyable={{ text: r.product_id }} style={{ fontSize: 12, fontWeight: 600 }}>{r.product_id}</Typography.Text><Tooltip title={r.title || ""}><div style={{ color: "#888", fontSize: 12, maxWidth: 250, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title || "—"}</div></Tooltip></div> },
+    { title: "可报活动", key: "act", width: 130, align: "right", sorter: (a, b) => a.act_cnt - b.act_cnt, render: (_, r) => (r.act_cnt > 0 ? <span style={{ color: "#3f8600" }}>{r.act_cnt}个{r.min_price != null ? ` / 低¥${r.min_price.toFixed(2)}` : ""}</span> : <span style={{ color: "#bbb" }}>—</span>) },
+    { title: "合规", dataIndex: "compliance", width: 170, render: (v: string | null) => (v ? <Tag color="red" style={{ whiteSpace: "normal" }}>{v}</Tag> : <span style={{ color: "#3f8600" }}>正常</span>) },
+    { title: "限流", dataIndex: "limited", width: 90, align: "center", sorter: (a, b) => (a.limited ? 1 : 0) - (b.limited ? 1 : 0), render: (v: boolean) => (v ? <Tag color="volcano">高价限流</Tag> : <span style={{ color: "#bbb" }}>—</span>) },
+    { title: "曝光", dataIndex: "expose", width: 80, align: "right", sorter: (a, b) => (a.expose || 0) - (b.expose || 0), render: (v: number | null) => (v == null ? <span style={{ color: "#ccc" }}>无</span> : fmtNum(v)) },
+    { title: "点击", dataIndex: "click", width: 70, align: "right", render: (v: number | null) => (v == null ? "—" : fmtNum(v)) },
+    { title: "支付件", dataIndex: "pay", width: 75, align: "right", render: (v: number | null) => (v == null ? "—" : fmtNum(v)) },
+    { title: "曝光转化", dataIndex: "conv", width: 90, align: "right", render: (v: number | null) => (v == null ? "—" : (v * 100).toFixed(2) + "%") },
   ];
 
   const commonFilters = (extra?: React.ReactNode) => (
@@ -577,6 +611,16 @@ export default function OperationsWorkbench() {
             <Select size="small" style={{ width: 120 }} value={kindFilter} onChange={setKindFilter} options={[{ value: "all", label: "全部类型" }, { value: "activity", label: "活动" }, { value: "bidding", label: "竞价" }, { value: "coupon", label: "优惠券" }]} />,
           )}
           <Table<ActivityRow> dataSource={actView} columns={actColumns} rowKey={(r) => String(r.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 条` }} scroll={{ x: 1000 }} loading={actLoading} />
+        </div>
+      ),
+    },
+    {
+      key: "panel", label: "商品运营",
+      children: (
+        <div>
+          <div style={{ padding: "12px 16px 0", color: "#888", fontSize: 12 }}>每个商品(SPU)横向集成:可报活动 / 合规状态 / 流量(曝光·点击·转化) / 高价限流。按 限流 &gt; 违规 &gt; 活动 排序;流量「无」表示该商品暂未采到(采集覆盖待提升)。</div>
+          {commonFilters()}
+          <Table<ProductPanelRow> dataSource={panelView} columns={panelColumns} rowKey={(r) => String(r.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个商品` }} scroll={{ x: 1100 }} loading={panelLoading} />
         </div>
       ),
     },
