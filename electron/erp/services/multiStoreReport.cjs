@@ -806,6 +806,14 @@ function buildProductPanel(db, options = {}) {
     SELECT mall_id, product_id, MAX(compliance_status) cs, MAX(title) title
       FROM cloud.skc_snapshots WHERE tenant_id = ? AND compliance_status IS NOT NULL AND product_id IS NOT NULL AND product_id <> ''
      GROUP BY mall_id, product_id`, [tid]);
+  // 商品名字典（by product_id，skc + sales 两表合并，覆盖更全）
+  const titleRows = optionalAllLocal(db, `
+    SELECT product_id, MAX(title) title FROM (
+      SELECT product_id, title FROM cloud.skc_snapshots WHERE tenant_id = ? AND product_id <> '' AND title IS NOT NULL AND title <> ''
+      UNION ALL
+      SELECT product_id, title FROM cloud.temu_sales_snapshot WHERE tenant_id = ? AND product_id <> '' AND title IS NOT NULL AND title <> ''
+    ) GROUP BY product_id`, [tid, tid]);
+  const titleMap = new Map(titleRows.map((t) => [String(t.product_id), t.title]));
   const malls = optionalAllLocal(db, `SELECT mall_id, store_code, mall_name, status FROM erp_temu_malls`, []);
   const mallMap = new Map(malls.map((m) => [m.mall_id, m]));
   const map = new Map();
@@ -824,6 +832,7 @@ function buildProductPanel(db, options = {}) {
   for (const e of map.values()) {
     const m = mallMap.get(e.mall_id);
     if (!options.includeTest && m && m.status === "test") continue;
+    if (!e.title) e.title = titleMap.get(String(e.product_id)) || null;
     e.store_code = m ? m.store_code || null : null;
     e.mall_name = m ? m.mall_name || null : null;
     out.push(e);
