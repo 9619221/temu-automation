@@ -970,7 +970,7 @@ export function _KeywordSearchTab() {
                   selectedRowKeys: selectedGoodsIds,
                   onChange: (keys) => setSelectedGoodsIds(keys.map((key) => String(key))),
                 }}
-                pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
+                pagination={{ defaultPageSize: 20, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
                 onRow={(record) => ({ onClick: () => setDetailItem(record), style: { cursor: "pointer" } })}
               />
             ) : (
@@ -1604,7 +1604,7 @@ function CompetitorReportTab() {
               rowKey="key"
               size="small"
               scroll={{ x: 2100 }}
-              pagination={{ pageSize: 6, showSizeChanger: true }}
+              pagination={{ defaultPageSize: 6, showSizeChanger: true }}
             />
           </Card>
 

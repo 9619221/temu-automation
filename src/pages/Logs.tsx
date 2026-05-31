@@ -399,7 +399,7 @@ export default function Logs() {
             loading={tableLoading}
             dataSource={filteredLogs}
             columns={columns}
-            pagination={{ pageSize: 24, showSizeChanger: true }}
+            pagination={{ defaultPageSize: 24, showSizeChanger: true }}
             scroll={{ x: 920 }}
             expandable={{
               expandRowByClick: true,

@@ -647,7 +647,7 @@ export default function MultiStoreReport() {
             columns={salesColumns}
             rowKey={(r) => `${r.mall_id}|${r.skc_id || ""}|${r.sku_ext_code || ""}`}
             size="small"
-            pagination={{ pageSize: 50, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
+            pagination={{ defaultPageSize: 50, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
             scroll={{ x: 1080 }}
             loading={skuLoading}
           />

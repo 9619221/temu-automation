@@ -644,6 +644,130 @@ function buildActivityList(db, options = {}) {
   return data;
 }
 
+// ===== 店铺健康：店铺级体检（每店最新天）=====
+const _shopHealthCache = new Map();
+function buildShopHealth(db, options = {}) {
+  if (!db) throw new Error("buildShopHealth: db is required (host mode only)");
+  const attachCloudDb = options.attachCloudDb;
+  if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
+    return { generated_at: Date.now(), row_count: 0, rows: [], attached: false };
+  }
+  const key = options.includeTest ? "1" : "0";
+  if (!options.force) {
+    const c = _shopHealthCache.get(key);
+    if (c && Date.now() - c.ts < REPORT_CACHE_TTL_MS) return c.data;
+  }
+  const tid = options.tenantId || DEFAULT_CLOUD_TENANT;
+  const rows = optionalAllLocal(db, `
+    WITH latest AS (
+      SELECT mall_id, MAX(stat_date) AS sd FROM cloud.temu_shop_stats
+       WHERE tenant_id = ? AND mall_id <> '' GROUP BY mall_id
+    )
+    SELECT s.mall_id, m.store_code, m.mall_name, m.owner,
+           s.sale_volume, s.seven_days_sale_volume, s.thirty_days_sale_volume,
+           s.on_sale_product_number, s.wait_product_number, s.lack_skc_number,
+           s.advice_prepare_skc_number, s.about_to_sell_out_number, s.already_sold_out_number,
+           s.high_price_limit_number, s.quality_after_sale_ratio_90d, s.stat_date
+      FROM cloud.temu_shop_stats s
+      JOIN latest l ON l.mall_id = s.mall_id AND l.sd = s.stat_date
+      LEFT JOIN erp_temu_malls m ON m.mall_id = s.mall_id
+     WHERE s.tenant_id = ?
+       ${options.includeTest ? "" : "AND COALESCE(m.status,'active') <> 'test'"}
+     ORDER BY s.already_sold_out_number DESC, s.lack_skc_number DESC, s.mall_id
+     LIMIT 4000
+  `, [tid, tid]);
+  const out = rows.map((s) => ({
+    mall_id: s.mall_id, store_code: s.store_code || null, mall_name: s.mall_name || null, owner: s.owner || null,
+    sale_volume: toNum(s.sale_volume), sale_7d: toNum(s.seven_days_sale_volume), sale_30d: toNum(s.thirty_days_sale_volume),
+    on_sale: toNum(s.on_sale_product_number), wait_online: toNum(s.wait_product_number),
+    lack_skc: toNum(s.lack_skc_number), advice_prepare_skc: toNum(s.advice_prepare_skc_number),
+    about_to_sell_out: toNum(s.about_to_sell_out_number), already_sold_out: toNum(s.already_sold_out_number),
+    high_price_limit: toNum(s.high_price_limit_number),
+    after_sale_ratio_90d: s.quality_after_sale_ratio_90d == null ? null : Number(s.quality_after_sale_ratio_90d),
+    stat_date: s.stat_date || null,
+  }));
+  const data = { generated_at: Date.now(), row_count: out.length, rows: out };
+  _shopHealthCache.set(key, { data, ts: Date.now() });
+  return data;
+}
+
+// ===== 备货在途：未完成的备货/发货单（需求量 > 已发量）=====
+const _stockOrderCache = new Map();
+function buildStockOrders(db, options = {}) {
+  if (!db) throw new Error("buildStockOrders: db is required (host mode only)");
+  const attachCloudDb = options.attachCloudDb;
+  if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
+    return { generated_at: Date.now(), row_count: 0, rows: [], attached: false };
+  }
+  const key = options.includeTest ? "1" : "0";
+  if (!options.force) {
+    const c = _stockOrderCache.get(key);
+    if (c && Date.now() - c.ts < REPORT_CACHE_TTL_MS) return c.data;
+  }
+  const tid = options.tenantId || DEFAULT_CLOUD_TENANT;
+  const rows = optionalAllLocal(db, `
+    SELECT DISTINCT s.mall_id, m.store_code, m.mall_name, s.sku_ext_code, s.product_name, s.spec_name,
+           s.source_type, s.demand_qty, s.delivered_qty, s.shipping_qty, s.inbound_qty,
+           s.latest_ship_at, s.receive_warehouse_name, s.stock_order_no
+      FROM cloud.temu_stock_order_snapshot s
+      LEFT JOIN erp_temu_malls m ON m.mall_id = s.mall_id
+     WHERE s.tenant_id = ?
+       AND s.mall_id <> ''
+       AND COALESCE(s.demand_qty,0) > COALESCE(s.delivered_qty,0)
+       ${options.includeTest ? "" : "AND COALESCE(m.status,'active') <> 'test'"}
+     ORDER BY (s.latest_ship_at IS NULL OR s.latest_ship_at = ''), s.latest_ship_at ASC, (s.demand_qty - COALESCE(s.delivered_qty,0)) DESC
+     LIMIT 4000
+  `, [tid]);
+  const out = rows.map((s) => {
+    const demand = toNum(s.demand_qty), delivered = toNum(s.delivered_qty);
+    return {
+      mall_id: s.mall_id, store_code: s.store_code || null, mall_name: s.mall_name || null,
+      sku_ext_code: s.sku_ext_code || null, product_name: s.product_name || null, spec_name: s.spec_name || null,
+      source_type: s.source_type || null, demand_qty: demand, delivered_qty: delivered,
+      gap: Math.max(0, demand - delivered), shipping_qty: toNum(s.shipping_qty), inbound_qty: toNum(s.inbound_qty),
+      latest_ship_at: s.latest_ship_at || null, warehouse: s.receive_warehouse_name || null, order_no: s.stock_order_no || null,
+    };
+  });
+  const data = { generated_at: Date.now(), row_count: out.length, rows: out };
+  _stockOrderCache.set(key, { data, ts: Date.now() });
+  return data;
+}
+
+// ===== 销量趋势：店铺级每日销量序列（最近 N 天，排除预测值）=====
+const _salesTrendCache = new Map();
+function buildSalesTrend(db, options = {}) {
+  if (!db) throw new Error("buildSalesTrend: db is required (host mode only)");
+  const attachCloudDb = options.attachCloudDb;
+  if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
+    return { generated_at: Date.now(), row_count: 0, rows: [], attached: false };
+  }
+  const days = options.days && options.days > 0 ? Math.min(90, Math.floor(options.days)) : 30;
+  const key = (options.includeTest ? "1" : "0") + ":" + days;
+  if (!options.force) {
+    const c = _salesTrendCache.get(key);
+    if (c && Date.now() - c.ts < REPORT_CACHE_TTL_MS) return c.data;
+  }
+  const tid = options.tenantId || DEFAULT_CLOUD_TENANT;
+  const rows = optionalAllLocal(db, `
+    SELECT t.mall_id, m.store_code, m.mall_name, t.stat_date, SUM(t.sales_number) AS sales
+      FROM cloud.temu_sku_sales_trend t
+      LEFT JOIN erp_temu_malls m ON m.mall_id = t.mall_id
+     WHERE t.tenant_id = ? AND t.mall_id <> ''
+       AND COALESCE(t.is_predict,0) = 0
+       AND t.stat_date >= date('now','-' || ? || ' days')
+       ${options.includeTest ? "" : "AND COALESCE(m.status,'active') <> 'test'"}
+     GROUP BY t.mall_id, t.stat_date
+     ORDER BY t.stat_date, t.mall_id
+  `, [tid, days]);
+  const out = rows.map((r) => ({
+    mall_id: r.mall_id, store_code: r.store_code || null, mall_name: r.mall_name || null,
+    stat_date: r.stat_date, sales: toNum(r.sales),
+  }));
+  const data = { generated_at: Date.now(), row_count: out.length, rows: out };
+  _salesTrendCache.set(key, { data, ts: Date.now() });
+  return data;
+}
+
 // 写入店铺负责人（host 模式）。返回受影响行数。
 function setMallOwner(db, mallId, owner) {
   if (!db) throw new Error("setMallOwner: db is required (host mode only)");
@@ -663,6 +787,9 @@ module.exports = {
   buildSkuSales,
   buildRiskList,
   buildActivityList,
+  buildShopHealth,
+  buildStockOrders,
+  buildSalesTrend,
   setMallOwner,
   // 暴露给测试用
   _internal: { fetchCloudReport, readMallDictionary, loginCloud, buildFinancialsByMall, buildByStoreLocal, shiftDate },

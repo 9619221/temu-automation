@@ -8597,3 +8597,14 @@ body {
     width: 100%;
   }
 }
+
+/* ===== 全局分页器优化 ===== */
+/* antd 5.25+ 起,分页「每页条数」选择器默认带搜索输入框,聚焦时会冒出可编辑光标。
+   全项目所有表格/分页器统一关掉:禁用搜索框的鼠标交互与光标,点击仅展开下拉选择,
+   不再出现"编辑字符"。覆盖 Table 自带分页与独立 <Pagination>。 */
+.ant-pagination-options .ant-select-selection-search {
+  pointer-events: none;
+}
+.ant-pagination-options .ant-select-selection-search-input {
+  caret-color: transparent !important;
+}

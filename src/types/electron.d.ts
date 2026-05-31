@@ -823,6 +823,9 @@ interface ErpAPI {
     skuSales: (options?: { includeTest?: boolean }) => Promise<ErpSkuSalesResponse>;
     riskList: (options?: { includeTest?: boolean }) => Promise<ErpRiskListResponse>;
     activityList: (options?: { includeTest?: boolean }) => Promise<ErpActivityListResponse>;
+    shopHealth: (options?: { includeTest?: boolean }) => Promise<ErpShopHealthResponse>;
+    stockOrders: (options?: { includeTest?: boolean }) => Promise<ErpStockOrderResponse>;
+    salesTrend: (options?: { includeTest?: boolean; days?: number }) => Promise<ErpSalesTrendResponse>;
   };
   events?: {
     onPurchaseUpdate: (handler: (payload: ErpPurchaseUpdateEvent) => void) => () => void;
@@ -991,6 +994,69 @@ interface ErpActivityListResponse {
   ok: boolean;
   error?: string;
   data?: { generated_at: number; row_count: number; rows: ErpActivityRow[]; attached?: boolean };
+}
+
+interface ErpShopHealthRow {
+  mall_id: string;
+  store_code: string | null;
+  mall_name: string | null;
+  owner: string | null;
+  sale_volume: number;
+  sale_7d: number;
+  sale_30d: number;
+  on_sale: number;
+  wait_online: number;
+  lack_skc: number;
+  advice_prepare_skc: number;
+  about_to_sell_out: number;
+  already_sold_out: number;
+  high_price_limit: number;
+  after_sale_ratio_90d: number | null;
+  stat_date: string | null;
+}
+
+interface ErpShopHealthResponse {
+  ok: boolean;
+  error?: string;
+  data?: { generated_at: number; row_count: number; rows: ErpShopHealthRow[]; attached?: boolean };
+}
+
+interface ErpStockOrderRow {
+  mall_id: string;
+  store_code: string | null;
+  mall_name: string | null;
+  sku_ext_code: string | null;
+  product_name: string | null;
+  spec_name: string | null;
+  source_type: string | null;
+  demand_qty: number;
+  delivered_qty: number;
+  gap: number;
+  shipping_qty: number;
+  inbound_qty: number;
+  latest_ship_at: string | null;
+  warehouse: string | null;
+  order_no: string | null;
+}
+
+interface ErpStockOrderResponse {
+  ok: boolean;
+  error?: string;
+  data?: { generated_at: number; row_count: number; rows: ErpStockOrderRow[]; attached?: boolean };
+}
+
+interface ErpSalesTrendRow {
+  mall_id: string;
+  store_code: string | null;
+  mall_name: string | null;
+  stat_date: string;
+  sales: number;
+}
+
+interface ErpSalesTrendResponse {
+  ok: boolean;
+  error?: string;
+  data?: { generated_at: number; row_count: number; rows: ErpSalesTrendRow[]; attached?: boolean };
 }
 
 interface ErpMallDictEntry {

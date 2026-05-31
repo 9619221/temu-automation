@@ -6549,7 +6549,7 @@ export default function ProductList() {
                 loading={loading}
                 rowClassName={() => "product-row"}
                 pagination={{
-                  pageSize: 50,
+                  defaultPageSize: 50,
                   showSizeChanger: true,
                   pageSizeOptions: [30, 50, 100, 200],
                   showTotal: (total) => `共 ${total} 个商品`,

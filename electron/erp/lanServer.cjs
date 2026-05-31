@@ -63,6 +63,9 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/erp/reports/sku-sales": ["admin", "manager", "operations", "finance"],
   "/api/erp/reports/risk-list": ["admin", "manager", "operations", "viewer"],
   "/api/erp/reports/activity-list": ["admin", "manager", "operations", "viewer"],
+  "/api/erp/reports/shop-health": ["admin", "manager", "operations", "finance", "viewer"],
+  "/api/erp/reports/stock-orders": ["admin", "manager", "operations", "warehouse", "viewer"],
+  "/api/erp/reports/sales-trend": ["admin", "manager", "operations", "finance", "viewer"],
   "/warehouse": ["admin", "manager", "warehouse"],
   "/api/warehouse/workbench": ["admin", "manager", "warehouse"],
   "/api/warehouse/action": ["admin", "manager", "warehouse"],
@@ -5215,7 +5218,7 @@ async function handleRequest({
       return;
     }
 
-    if (pathname === "/api/erp/reports/risk-list" || pathname === "/api/erp/reports/activity-list") {
+    if (pathname === "/api/erp/reports/risk-list" || pathname === "/api/erp/reports/activity-list" || pathname === "/api/erp/reports/shop-health" || pathname === "/api/erp/reports/stock-orders" || pathname === "/api/erp/reports/sales-trend") {
       if (req.method !== "GET") {
         writeJson(res, 405, { ok: false, error: "Method not allowed" });
         return;
@@ -5224,7 +5227,7 @@ async function handleRequest({
         const parsed = new URL(req.url || "/", "http://127.0.0.1");
         const includeTest = parsed.searchParams.get("include_test") === "1";
         const svc = require("./services/multiStoreReport.cjs");
-        const fn = pathname.endsWith("risk-list") ? svc.buildRiskList : svc.buildActivityList;
+        const fn = pathname.endsWith("risk-list") ? svc.buildRiskList : pathname.endsWith("shop-health") ? svc.buildShopHealth : pathname.endsWith("stock-orders") ? svc.buildStockOrders : pathname.endsWith("sales-trend") ? svc.buildSalesTrend : svc.buildActivityList;
         const data = fn(db, { includeTest, attachCloudDb: attachTemuCloudDbIfPossible });
         writeJson(res, 200, { ok: true, data });
       } catch (error) {

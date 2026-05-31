@@ -398,7 +398,7 @@ export default function BrowserMulti() {
           onChange: (keys) => setSelectedIds(keys as string[]),
         }}
         locale={{ emptyText: hydrated ? "暂无账号，点【新增账号】开始" : "加载中..." }}
-        pagination={{ pageSize: 20, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100] }}
+        pagination={{ defaultPageSize: 20, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100] }}
       />
 
       <Modal

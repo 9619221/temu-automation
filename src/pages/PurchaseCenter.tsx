@@ -7377,7 +7377,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
                   columns={requestColumns}
                   dataSource={filteredActiveRequestRows}
                   scroll={{ x: 1800 }}
-                  pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
+                  pagination={{ defaultPageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
                   style={{ marginTop: 8 }}
                 />
               </div>
@@ -7430,7 +7430,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
             columns={requestColumns}
             dataSource={filteredActiveRequestRows}
             scroll={{ x: 1800 }}
-            pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
+            pagination={{ defaultPageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
           />
         ) : (
           <Table

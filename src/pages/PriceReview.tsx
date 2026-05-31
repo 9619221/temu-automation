@@ -353,7 +353,7 @@ export default function PriceReview() {
         columns={columns as any}
         dataSource={rows}
         loading={loading}
-        pagination={{ pageSize: 50, showSizeChanger: true, pageSizeOptions: [20, 50, 100, 200] }}
+        pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [20, 50, 100, 200] }}
         scroll={{ x: 1200 }}
         size="small"
       />

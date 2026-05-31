@@ -115,6 +115,57 @@ function registerReportsHandlers(ipcMain, deps) {
       return { ok: false, error: error?.message || String(error) };
     }
   });
+
+  // 运营工作台：店铺健康（店铺级体检）
+  ipcMain.handle("erp:reports:shop-health", async (_event, payload) => {
+    try {
+      const includeTest = payload?.includeTest ? "1" : "0";
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest(`/api/erp/reports/shop-health?include_test=${includeTest}`, { method: "GET" });
+      }
+      requireErp();
+      const { buildShopHealth } = require("../services/multiStoreReport.cjs");
+      const { attachTemuCloudDbIfPossible } = require("../lanServer.cjs");
+      return { ok: true, data: buildShopHealth(erpState.db, { includeTest: payload?.includeTest, attachCloudDb: attachTemuCloudDbIfPossible }) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+
+  // 运营工作台：备货在途（未完成备货/发货单）
+  ipcMain.handle("erp:reports:stock-orders", async (_event, payload) => {
+    try {
+      const includeTest = payload?.includeTest ? "1" : "0";
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest(`/api/erp/reports/stock-orders?include_test=${includeTest}`, { method: "GET" });
+      }
+      requireErp();
+      const { buildStockOrders } = require("../services/multiStoreReport.cjs");
+      const { attachTemuCloudDbIfPossible } = require("../lanServer.cjs");
+      return { ok: true, data: buildStockOrders(erpState.db, { includeTest: payload?.includeTest, attachCloudDb: attachTemuCloudDbIfPossible }) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+
+  // 运营工作台：销量趋势（店铺级每日序列）
+  ipcMain.handle("erp:reports:sales-trend", async (_event, payload) => {
+    try {
+      const includeTest = payload?.includeTest ? "1" : "0";
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest(`/api/erp/reports/sales-trend?include_test=${includeTest}`, { method: "GET" });
+      }
+      requireErp();
+      const { buildSalesTrend } = require("../services/multiStoreReport.cjs");
+      const { attachTemuCloudDbIfPossible } = require("../lanServer.cjs");
+      return { ok: true, data: buildSalesTrend(erpState.db, { includeTest: payload?.includeTest, attachCloudDb: attachTemuCloudDbIfPossible }) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
 }
 
 module.exports = { registerReportsHandlers };

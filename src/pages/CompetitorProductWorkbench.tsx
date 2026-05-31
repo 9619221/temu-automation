@@ -4637,7 +4637,7 @@ export default function CompetitorProductWorkbench({
         scroll={{ x: 1380 }}
         onChange={handleSearchTableChange}
         rowSelection={{ selectedRowKeys: selectedResultKeys, onChange: (keys) => setSelectedResultKeys(keys.map((key) => String(key))) }}
-        pagination={{ pageSize: 12, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
+        pagination={{ defaultPageSize: 12, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
       />
     </Card>
   );
