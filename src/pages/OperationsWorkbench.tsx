@@ -84,7 +84,7 @@ const fmtMoney = (n: number | null | undefined) => (n == null ? "—" : "¥" + n
 const TREND_COLORS = ["#1a73e8", "#34a853", "#fbbc04", "#ea4335", "#a142f4", "#24c1e0", "#ff6d01", "#7c8597"];
 
 export default function OperationsWorkbench() {
-  const [activeTab, setActiveTab] = useState("shop");
+  const [activeTab, setActiveTab] = useState("overview");
   const [skuRows, setSkuRows] = useState<SkuRow[]>([]);
   const [skuLoading, setSkuLoading] = useState(false);
   const [riskRows, setRiskRows] = useState<RiskRow[]>([]);
@@ -147,11 +147,12 @@ export default function OperationsWorkbench() {
 
   useEffect(() => { loadSku(); }, [loadSku]);
   useEffect(() => {
-    if (activeTab === "shop" && !shopLoaded && !shopLoading) loadShop();
-    if (activeTab === "trend" && !trendLoaded && !trendLoading) loadTrend();
-    if (activeTab === "stock" && !stockLoaded && !stockLoading) loadStockOrders();
-    if (activeTab === "risk" && !riskLoaded && !riskLoading) loadRisk();
-    if (activeTab === "activity" && !actLoaded && !actLoading) loadAct();
+    const ov = activeTab === "overview";
+    if ((activeTab === "shop" || ov) && !shopLoaded && !shopLoading) loadShop();
+    if ((activeTab === "trend" || ov) && !trendLoaded && !trendLoading) loadTrend();
+    if ((activeTab === "stock" || ov) && !stockLoaded && !stockLoading) loadStockOrders();
+    if ((activeTab === "risk" || ov) && !riskLoaded && !riskLoading) loadRisk();
+    if ((activeTab === "activity" || ov) && !actLoaded && !actLoading) loadAct();
   }, [activeTab, shopLoaded, shopLoading, trendLoaded, trendLoading, stockLoaded, stockLoading, riskLoaded, riskLoading, actLoaded, actLoading, loadShop, loadTrend, loadStockOrders, loadRisk, loadAct]);
 
   const diagnosed: DiagnosedRow[] = useMemo(() => skuRows.map((r) => {
@@ -233,6 +234,11 @@ export default function OperationsWorkbench() {
     for (const r of shopRows) { lack += r.lack_skc || 0; soldout += r.already_sold_out || 0; sales += r.sale_volume || 0; }
     return { lack, soldout, sales };
   }, [shopRows]);
+  const overviewTrend = useMemo(() => {
+    const byDate = new Map<string, number>();
+    for (const r of trendRows) byDate.set(r.stat_date, (byDate.get(r.stat_date) || 0) + r.sales);
+    return [...byDate.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([date, sales]) => ({ date, sales }));
+  }, [trendRows]);
   const shopView = useMemo(() => {
     let v = shopRows;
     if (storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
@@ -355,6 +361,66 @@ export default function OperationsWorkbench() {
   );
 
   const tabItems = [
+    {
+      key: "overview", label: "总览",
+      children: (
+        <div style={{ padding: 16 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 16 }}>
+            <Card size="small" hoverable onClick={() => setActiveTab("shop")}><Statistic title="今日销量(全店)" value={shopAgg.sales} /></Card>
+            <Card size="small" hoverable onClick={() => setActiveTab("shop")}><Statistic title="缺货 SKC" value={shopAgg.lack} valueStyle={{ color: shopAgg.lack > 0 ? "#d46b08" : undefined }} /></Card>
+            <Card size="small" hoverable onClick={() => setActiveTab("shop")}><Statistic title="已售罄" value={shopAgg.soldout} valueStyle={{ color: shopAgg.soldout > 0 ? "#cf1322" : undefined }} /></Card>
+            <Card size="small" hoverable onClick={() => setActiveTab("risk")}><Statistic title="高风险待办" value={riskOverview.high} valueStyle={{ color: riskOverview.high > 0 ? "#cf1322" : undefined }} /></Card>
+            <Card size="small" hoverable onClick={() => setActiveTab("diag")}><Statistic title="诊断 · 急" value={overview.urgent} valueStyle={{ color: overview.urgent > 0 ? "#cf1322" : undefined }} /></Card>
+            <Card size="small" hoverable onClick={() => setActiveTab("restock")}><Statistic title="急需补货 SKU" value={restockView.length} valueStyle={{ color: restockView.length > 0 ? "#d46b08" : undefined }} /></Card>
+            <Card size="small" hoverable onClick={() => setActiveTab("stock")}><Statistic title="备货缺口单" value={stockView.length} /></Card>
+            <Card size="small" hoverable onClick={() => setActiveTab("activity")}><Statistic title="可报活动" value={actView.length} valueStyle={{ color: "#3f8600" }} /></Card>
+          </div>
+          <Card size="small" title="全店销量趋势 · 近 30 天" style={{ marginBottom: 16 }} loading={trendLoading}>
+            <div style={{ height: 200 }}>
+              {overviewTrend.length === 0 ? <Empty description="暂无趋势数据" image={Empty.PRESENTED_IMAGE_SIMPLE} /> : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={overviewTrend} margin={{ top: 8, right: 16, bottom: 0, left: -16 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
+                    <XAxis dataKey="date" tick={{ fontSize: 11 }} minTickGap={24} />
+                    <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
+                    <RTooltip />
+                    <Line type="monotone" dataKey="sales" name="全店销量" stroke="#1a73e8" strokeWidth={2} dot={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+          </Card>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+            <Card size="small" title="高风险待办" extra={<a onClick={() => setActiveTab("risk")}>全部</a>} loading={riskLoading}>
+              {riskView.filter((r) => r.severity === "high").slice(0, 6).map((r) => (
+                <div key={r.__rk} style={{ padding: "4px 0", borderBottom: "1px solid #f5f5f5", fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  <Tag color="red">{r.store_code || r.mall_id}</Tag>{r.title || r.risk_type || "—"}
+                </div>
+              ))}
+              {riskView.filter((r) => r.severity === "high").length === 0 && <div style={{ color: "#999", fontSize: 12, padding: "8px 0" }}>无高风险</div>}
+            </Card>
+            <Card size="small" title="急需补货" extra={<a onClick={() => setActiveTab("restock")}>全部</a>} loading={skuLoading}>
+              {restockView.slice(0, 6).map((r, i) => (
+                <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "4px 0", borderBottom: "1px solid #f5f5f5", fontSize: 12 }}>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}><Tag color="orange">{r.store_code || r.mall_id}</Tag>{r.title || r.sku_ext_code || "—"}</span>
+                  <span style={{ color: "#d46b08", whiteSpace: "nowrap" }}>{(r.stock || 0) <= 0 ? "已断货" : `可售${r.sale_days ?? "?"}天`}</span>
+                </div>
+              ))}
+              {restockView.length === 0 && <div style={{ color: "#999", fontSize: 12, padding: "8px 0" }}>无需补货</div>}
+            </Card>
+            <Card size="small" title="紧急备货在途" extra={<a onClick={() => setActiveTab("stock")}>全部</a>} loading={stockLoading}>
+              {stockView.slice(0, 6).map((r) => (
+                <div key={r.__rk} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "4px 0", borderBottom: "1px solid #f5f5f5", fontSize: 12 }}>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}><Tag>{r.store_code || r.mall_id}</Tag>{r.product_name || r.sku_ext_code || "—"}</span>
+                  <span style={{ color: "#cf1322", whiteSpace: "nowrap" }}>缺{r.gap}</span>
+                </div>
+              ))}
+              {stockView.length === 0 && <div style={{ color: "#999", fontSize: 12, padding: "8px 0" }}>无备货缺口</div>}
+            </Card>
+          </div>
+        </div>
+      ),
+    },
     {
       key: "shop", label: "店铺健康",
       children: (
