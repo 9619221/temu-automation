@@ -170,6 +170,28 @@ function storeNameCell(store: ReportStore) {
 }
 const storeNameSorter = (a: ReportStore, b: ReportStore) => (a.mall_name || "").localeCompare(b.mall_name || "");
 
+// 全局色彩语言：绿=健康、黄/橙=注意、红=异常
+const COLOR = { good: "#3f8600", warn: "#d46b08", bad: "#cf1322", muted: "#bbb" };
+
+function marginColor(m: number | null): string | undefined {
+  if (m == null) return undefined;
+  if (m < ALERT_MARGIN_LOW) return COLOR.bad;
+  if (m < 0.3) return COLOR.warn;
+  return COLOR.good;
+}
+
+// 数字 + 热力背景（值越大背景越深），0 显示灰 —
+function HeatNum({ value, max, hue }: { value: number; max: number; hue: "red" | "orange" | "gold" }) {
+  if (!value || value <= 0) return <span style={{ color: COLOR.muted }}>—</span>;
+  const ratio = max > 0 ? Math.min(1, value / max) : 0;
+  const rgb = hue === "red" ? "255,77,79" : hue === "orange" ? "250,140,22" : "250,219,20";
+  return (
+    <span style={{ backgroundColor: `rgba(${rgb},${0.1 + ratio * 0.38})`, borderRadius: 4, padding: "1px 8px", fontVariantNumeric: "tabular-nums" }}>
+      {value.toLocaleString("zh-CN")}
+    </span>
+  );
+}
+
 export default function MultiStoreReport() {
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<ReportData | null>(
@@ -322,16 +344,48 @@ export default function MultiStoreReport() {
     return out;
   }, [stores]);
 
+  // 各待办列的最大值（用于热力色阶归一化）
+  const maxes = useMemo(() => ({
+    pending: Math.max(1, ...stores.map((s) => s.stock_orders.pending || 0)),
+    lack: Math.max(1, ...stores.map((s) => s.shop_stats.lack_skc || 0)),
+    soldout: Math.max(1, ...stores.map((s) => s.shop_stats.already_sold_out_skc || 0)),
+    aftersale: Math.max(1, ...stores.map((s) => s.after_sales.count || 0)),
+  }), [stores]);
+
+  // 顶部「今日要点」汇总
+  const highlights = useMemo(() => {
+    const offline = stores.filter((s) => s.health.lag_seconds == null || s.health.lag_seconds >= STALE_THRESHOLD_SECONDS).length;
+    const soldout = stores.reduce((a, s) => a + (s.shop_stats.already_sold_out_skc || 0), 0);
+    const lack = stores.reduce((a, s) => a + (s.shop_stats.lack_skc || 0), 0);
+    const aftersale = stores.reduce((a, s) => a + (s.after_sales.count || 0), 0);
+    const lowMargin = stores.filter((s) => { const m = marginOf(s.financials?.last30d); return m != null && m < ALERT_MARGIN_LOW; }).length;
+    return { offline, soldout, lack, aftersale, lowMargin };
+  }, [stores]);
+
+  // 运营日报按紧急度排序：掉线/售罄/缺货/售后/待发 的店置顶
+  const dailyStores = useMemo(() => {
+    const urgency = (s: ReportStore) => {
+      let u = 0;
+      if (s.health.lag_seconds == null || s.health.lag_seconds >= STALE_THRESHOLD_SECONDS) u += 100000;
+      u += (s.shop_stats.already_sold_out_skc || 0) * 100;
+      u += (s.shop_stats.lack_skc || 0) * 50;
+      u += (s.after_sales.count || 0) * 30;
+      u += (s.stock_orders.pending || 0);
+      return u;
+    };
+    return [...stores].sort((a, b) => urgency(b) - urgency(a));
+  }, [stores]);
+
   // === Tab 1: 运营日报 ===
   const dailyColumns: ColumnsType<ReportStore> = [
-    { title: "店号", key: "code", width: 110, fixed: "left", render: (_, s) => <StoreCell store={s} />, sorter: (a, b) => (a.store_code || "").localeCompare(b.store_code || ""), defaultSortOrder: "ascend" },
+    { title: "店号", key: "code", width: 110, fixed: "left", render: (_, s) => <StoreCell store={s} />, sorter: (a, b) => (a.store_code || "").localeCompare(b.store_code || "") },
     { title: "店铺", key: "name", width: 170, render: (_, s) => storeNameCell(s), sorter: storeNameSorter },
     { title: "今日销量", dataIndex: ["sales", "today_qty"], width: 90, align: "right", render: (v) => fmtNum(v), sorter: (a, b) => (a.sales.today_qty || 0) - (b.sales.today_qty || 0) },
     { title: "近 7 天", dataIndex: ["sales", "last7d_qty"], width: 90, align: "right", render: (v) => fmtNum(v), sorter: (a, b) => (a.sales.last7d_qty || 0) - (b.sales.last7d_qty || 0) },
-    { title: "待发备货", dataIndex: ["stock_orders", "pending"], width: 90, align: "right", render: (v: number) => (v > 0 ? <Tag color="orange">{fmtNum(v)}</Tag> : <span>—</span>), sorter: (a, b) => (a.stock_orders.pending || 0) - (b.stock_orders.pending || 0) },
-    { title: "缺货", dataIndex: ["shop_stats", "lack_skc"], width: 80, align: "right", render: (v: number) => (v > 0 ? <Tag color="gold">{fmtNum(v)}</Tag> : <span>—</span>), sorter: (a, b) => (a.shop_stats.lack_skc || 0) - (b.shop_stats.lack_skc || 0) },
-    { title: "已售罄", dataIndex: ["shop_stats", "already_sold_out_skc"], width: 80, align: "right", render: (v: number) => (v > 0 ? <Tag color="red">{fmtNum(v)}</Tag> : <span>—</span>), sorter: (a, b) => (a.shop_stats.already_sold_out_skc || 0) - (b.shop_stats.already_sold_out_skc || 0) },
-    { title: "待处理售后", dataIndex: ["after_sales", "count"], width: 100, align: "right", render: (v: number) => (v > 0 ? <Tag color="volcano">{fmtNum(v)}</Tag> : <span>—</span>), sorter: (a, b) => (a.after_sales.count || 0) - (b.after_sales.count || 0) },
+    { title: "待发备货", dataIndex: ["stock_orders", "pending"], width: 95, align: "right", render: (v: number) => <HeatNum value={v} max={maxes.pending} hue="orange" />, sorter: (a, b) => (a.stock_orders.pending || 0) - (b.stock_orders.pending || 0) },
+    { title: "缺货", dataIndex: ["shop_stats", "lack_skc"], width: 80, align: "right", render: (v: number) => <HeatNum value={v} max={maxes.lack} hue="gold" />, sorter: (a, b) => (a.shop_stats.lack_skc || 0) - (b.shop_stats.lack_skc || 0) },
+    { title: "已售罄", dataIndex: ["shop_stats", "already_sold_out_skc"], width: 80, align: "right", render: (v: number) => <HeatNum value={v} max={maxes.soldout} hue="red" />, sorter: (a, b) => (a.shop_stats.already_sold_out_skc || 0) - (b.shop_stats.already_sold_out_skc || 0) },
+    { title: "待处理售后", dataIndex: ["after_sales", "count"], width: 100, align: "right", render: (v: number) => <HeatNum value={v} max={maxes.aftersale} hue="red" />, sorter: (a, b) => (a.after_sales.count || 0) - (b.after_sales.count || 0) },
     { title: "数据上报", key: "lag", width: 110, render: (_, s) => <Tag color={lagColor(s.health.lag_seconds)}>{fmtLag(s.health.lag_seconds)}前</Tag>, sorter: (a, b) => (a.health.lag_seconds ?? Infinity) - (b.health.lag_seconds ?? Infinity) },
   ];
 
@@ -349,7 +403,7 @@ export default function MultiStoreReport() {
       render: (_, s) => {
         const m = marginOf(s.financials?.last30d);
         const cov = s.financials?.cost_coverage;
-        const node = <span style={{ color: m != null && m < ALERT_MARGIN_LOW ? "#cf1322" : undefined }}>{fmtPct(m)}</span>;
+        const node = <span style={{ color: marginColor(m), fontWeight: 600 }}>{fmtPct(m)}</span>;
         if (cov != null && cov < 0.9) {
           return <Tooltip title={`成本覆盖 ${fmtPct(cov, 0)}，未覆盖 SKU 按 0 成本，毛利率偏高`}>{node} <Typography.Text type="secondary" style={{ fontSize: 11 }}>*</Typography.Text></Tooltip>;
         }
@@ -379,7 +433,7 @@ export default function MultiStoreReport() {
     { title: "管理店数", dataIndex: "store_count", key: "store_count", width: 100, align: "right", render: (v) => fmtNum(v), sorter: (a, b) => a.store_count - b.store_count },
     { title: "近 30 天营收", dataIndex: "rev30", key: "rev30", width: 130, align: "right", render: (v) => fmtMoney(v), sorter: (a, b) => a.rev30 - b.rev30, defaultSortOrder: "descend" },
     { title: "近 30 天毛利", dataIndex: "gp30", key: "gp30", width: 130, align: "right", render: (v) => fmtMoney(v), sorter: (a, b) => a.gp30 - b.gp30 },
-    { title: "毛利率", key: "margin", width: 100, align: "right", render: (_, r) => fmtPct(r.rev30 > 0 ? r.gp30 / r.rev30 : null) },
+    { title: "毛利率", key: "margin", width: 100, align: "right", render: (_, r) => { const m = r.rev30 > 0 ? r.gp30 / r.rev30 : null; return <span style={{ color: marginColor(m), fontWeight: 600 }}>{fmtPct(m)}</span>; } },
     { title: "待发备货", dataIndex: "pending", key: "pending", width: 100, align: "right", render: (v: number) => (v > 0 ? <Tag color="orange">{fmtNum(v)}</Tag> : "—"), sorter: (a, b) => a.pending - b.pending },
     { title: "待处理售后", dataIndex: "after_sales", key: "after_sales", width: 110, align: "right", render: (v: number) => (v > 0 ? <Tag color="volcano">{fmtNum(v)}</Tag> : "—"), sorter: (a, b) => a.after_sales - b.after_sales },
   ];
@@ -433,7 +487,12 @@ export default function MultiStoreReport() {
     {
       key: "daily",
       label: "运营日报",
-      children: <Table<ReportStore> dataSource={stores} columns={dailyColumns} rowKey="mall_id" size="small" pagination={false} scroll={{ x: 940 }} loading={loading} />,
+      children: (
+        <>
+          <div style={{ padding: "10px 16px 0", color: "#888", fontSize: 12 }}>已按紧急度排序：掉线 / 售罄 / 缺货 / 待处理售后 / 待发 多的店自动置顶。</div>
+          <Table<ReportStore> dataSource={dailyStores} columns={dailyColumns} rowKey="mall_id" size="small" pagination={false} scroll={{ x: 945 }} loading={loading} />
+        </>
+      ),
     },
     {
       key: "boss",
@@ -562,13 +621,24 @@ export default function MultiStoreReport() {
         style={{ marginBottom: 16 }}
       >
         {summary && (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 16 }}>
-            <Statistic title="店铺数" value={stores.length} suffix={`/ ${summary.onlineCount} 实时`} />
-            <Statistic title="今日营收" value={finAvailable ? fmtMoney(summary.revToday) : "—"} />
-            <Statistic title={`${label30}营收`} value={finAvailable ? fmtMoney(summary.rev30) : "—"} />
-            <Statistic title={`${label30}毛利率`} value={finAvailable ? fmtPct(summary.margin30) : "—"} valueStyle={summary.margin30 != null && summary.margin30 < ALERT_MARGIN_LOW ? { color: "#cf1322" } : undefined} />
-            <Statistic title="待发备货合计" value={summary.totalPending} valueStyle={summary.totalPending > 0 ? { color: "#fa8c16" } : undefined} />
-          </div>
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 16 }}>
+              <Statistic title="店铺数" value={stores.length} suffix={`/ ${summary.onlineCount} 实时`} />
+              <Statistic title="今日营收" value={finAvailable ? fmtMoney(summary.revToday) : "—"} />
+              <Statistic title={`${label30}营收`} value={finAvailable ? fmtMoney(summary.rev30) : "—"} />
+              <Statistic title={`${label30}毛利率`} value={finAvailable ? fmtPct(summary.margin30) : "—"} valueStyle={summary.margin30 != null ? { color: marginColor(summary.margin30) } : undefined} />
+              <Statistic title="待发备货合计" value={summary.totalPending} valueStyle={summary.totalPending > 0 ? { color: "#fa8c16" } : undefined} />
+            </div>
+            <div style={{ marginTop: 14, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+              <Typography.Text type="secondary" style={{ fontSize: 12, marginRight: 4 }}>今日要点</Typography.Text>
+              {highlights.offline > 0 && <Tag color="error" style={{ cursor: "pointer" }} onClick={() => setActiveTab("ops")}>{highlights.offline} 家掉线</Tag>}
+              {highlights.soldout > 0 && <Tag color="red" style={{ cursor: "pointer" }} onClick={() => setActiveTab("daily")}>{highlights.soldout} 个已售罄</Tag>}
+              {highlights.lack > 0 && <Tag color="gold" style={{ cursor: "pointer" }} onClick={() => setActiveTab("daily")}>{highlights.lack} 个缺货</Tag>}
+              {highlights.aftersale > 0 && <Tag color="volcano" style={{ cursor: "pointer" }} onClick={() => setActiveTab("daily")}>{highlights.aftersale} 待处理售后</Tag>}
+              {finAvailable && highlights.lowMargin > 0 && <Tag color="orange" style={{ cursor: "pointer" }} onClick={() => setActiveTab("boss")}>{highlights.lowMargin} 家毛利率偏低</Tag>}
+              {highlights.offline === 0 && highlights.soldout === 0 && highlights.lack === 0 && highlights.aftersale === 0 && <Tag color="success">暂无紧急事项</Tag>}
+            </div>
+          </>
         )}
       </Card>
 
