@@ -17974,26 +17974,32 @@ function performWarehouseAction(payload = {}, actorInput = {}) {
                 over_qty = @over_qty
             WHERE id = @id AND receipt_id = @receipt_id
           `);
-          for (const ln of linesPayload) {
-            const lineId = optionalString(ln.id);
-            if (!lineId) continue;
-            const expectedRow = db.prepare(
-              "SELECT expected_qty FROM erp_inbound_receipt_lines WHERE id = ? AND receipt_id = ?"
-            ).get(lineId, receiptId);
-            const expected = Math.max(0, Math.floor(Number(expectedRow?.expected_qty || 0)));
-            const received = Math.max(0, Math.floor(Number(ln.received_qty ?? 0)));
-            const damaged = Math.max(0, Math.floor(Number(ln.damaged_qty ?? 0)));
-            const shortage = Math.max(0, expected - received);
-            const over = Math.max(0, received - expected);
-            updateLine.run({
-              id: lineId,
-              receipt_id: receiptId,
-              received_qty: received,
-              damaged_qty: damaged,
-              shortage_qty: shortage,
-              over_qty: over,
-            });
-          }
+          // 性能优化：SELECT 预编译提到循环外（原为每行 db.prepare，百行明细重复编译），
+          // 并把逐行 UPDATE 包进单事务，消除每行各自隐式提交的 fsync 开销。
+          const expectedStmt = db.prepare(
+            "SELECT expected_qty FROM erp_inbound_receipt_lines WHERE id = ? AND receipt_id = ?"
+          );
+          const applyReceivedLines = db.transaction((rows) => {
+            for (const ln of rows) {
+              const lineId = optionalString(ln.id);
+              if (!lineId) continue;
+              const expectedRow = expectedStmt.get(lineId, receiptId);
+              const expected = Math.max(0, Math.floor(Number(expectedRow?.expected_qty || 0)));
+              const received = Math.max(0, Math.floor(Number(ln.received_qty ?? 0)));
+              const damaged = Math.max(0, Math.floor(Number(ln.damaged_qty ?? 0)));
+              const shortage = Math.max(0, expected - received);
+              const over = Math.max(0, received - expected);
+              updateLine.run({
+                id: lineId,
+                receipt_id: receiptId,
+                received_qty: received,
+                damaged_qty: damaged,
+                shortage_qty: shortage,
+                over_qty: over,
+              });
+            }
+          });
+          applyReceivedLines(linesPayload);
         } else {
           fillInboundLineReceivedQty(db, receiptId);
         }

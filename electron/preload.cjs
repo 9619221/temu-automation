@@ -1,5 +1,35 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
+// ===== 性能埋点（常驻、零业务侵入）=====
+// 在 ipcRenderer.invoke 这个唯一咽喉点做一次性计时包装：所有 IPC 往返（≈每个按钮动作）
+// 自动记录 channel 名与耗时到环形缓冲，通过 window.electronAPI.perf 暴露给「日志中心」查看/导出。
+// 只记录时间戳与耗时，不读写任何业务数据。
+const __PERF_MAX = 600;
+const __perfRing = [];
+function __perfPush(channel, ms, isError) {
+  __perfRing.push({ channel, ms: Math.round(ms * 10) / 10, error: !!isError, at: Date.now() });
+  if (__perfRing.length > __PERF_MAX) __perfRing.shift();
+}
+const __rawInvoke = ipcRenderer.invoke.bind(ipcRenderer);
+ipcRenderer.invoke = function (channel, ...args) {
+  const t0 = performance.now();
+  let result;
+  try {
+    result = __rawInvoke(channel, ...args);
+  } catch (e) {
+    __perfPush(channel, performance.now() - t0, true);
+    throw e;
+  }
+  if (result && typeof result.then === "function") {
+    return result.then(
+      (v) => { __perfPush(channel, performance.now() - t0, false); return v; },
+      (e) => { __perfPush(channel, performance.now() - t0, true); throw e; },
+    );
+  }
+  __perfPush(channel, performance.now() - t0, false);
+  return result;
+};
+
 // 给 invoke 调用加软超时：超时后 Promise reject 让 UI 立刻可恢复，
 // 主进程那侧的 IPC 不能真正中断，但渲染端不再卡死，错误能上抛到 catch 给用户提示。
 function invokeWithTimeout(channel, payload, timeoutMs) {
@@ -101,6 +131,12 @@ function createImageStudioApi(profile) {
 contextBridge.exposeInMainWorld("electronAPI", {
   getAppPath: () => ipcRenderer.invoke("get-app-path"),
   selectFile: (filters) => ipcRenderer.invoke("select-file", filters),
+
+  // 性能埋点读取口：返回最近 N 条 IPC 耗时记录（环形缓冲），供前端聚合展示/导出。
+  perf: {
+    getEntries: () => __perfRing.slice(),
+    clear: () => { __perfRing.length = 0; },
+  },
 
   automation: {
     login: (accountId, phone, password) =>

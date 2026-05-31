@@ -6542,7 +6542,7 @@ export default function ProductList() {
               `}</style>
               <Table
                 className="product-list-table"
-                rowKey={(record: any, index) => `row-${index}-${record._flatKey || ""}`}
+                rowKey={(record: any, index) => record._flatKey || `row-${index}`}
                 dataSource={tableRows}
                 columns={configuredColumns as any}
                 size="small"
@@ -6554,7 +6554,10 @@ export default function ProductList() {
                   pageSizeOptions: [30, 50, 100, 200],
                   showTotal: (total) => `共 ${total} 个商品`,
                 }}
-                scroll={{ x: "max-content" }}
+                // 虚拟滚动：仅渲染可视区行，大数据量下避免一次性渲染数百行导致的长时间卡顿。
+                // 需配合固定 scroll.y；rowKey 用稳定业务键 _flatKey（不可用 index，否则虚拟滚动错位）。
+                virtual
+                scroll={{ x: "max-content", y: 560 }}
                 locale={{ emptyText: "暂无商品数据" }}
               />
               </>

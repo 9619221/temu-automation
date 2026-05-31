@@ -12,6 +12,7 @@ import {
 } from "./utils/multiStore";
 import BrandMark from "./components/BrandMark";
 import OperationsExtensionGate from "./components/OperationsExtensionGate";
+import { recordRouteOpen, exportPerfReport, buildPerfReport } from "./utils/perfLog";
 
 const ACCOUNT_STORAGE_KEY = "temu_accounts";
 
@@ -198,6 +199,28 @@ function App() {
   const [accountViewVersion, setAccountViewVersion] = useState(0);
   const lastEmittedAccountIdRef = useRef<string | null | undefined>(undefined);
 
+  // 路由打开耗时埋点：记录路由变化到下一帧（首帧渲染完成）的耗时，
+  // 作为「页面打开时间」的前端口径，供日志中心聚合查看。非阻塞、无副作用。
+  useEffect(() => {
+    const t0 = performance.now();
+    const raf = requestAnimationFrame(() => {
+      recordRouteOpen(location.pathname, performance.now() - t0);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [location.pathname]);
+
+  // 暴露性能报告全局入口：开发者工具 Console 里执行
+  //   window.__exportPerfReport()  → 下载 JSON 并返回报告对象
+  //   window.__perfReport()        → 仅返回报告对象（不下载）
+  useEffect(() => {
+    (window as any).__exportPerfReport = exportPerfReport;
+    (window as any).__perfReport = buildPerfReport;
+    return () => {
+      delete (window as any).__exportPerfReport;
+      delete (window as any).__perfReport;
+    };
+  }, []);
+
   useEffect(() => {
     let index = 0;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -214,6 +237,25 @@ function App() {
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
+    };
+  }, []);
+
+  // AI 出图首开预热：应用空闲后在后台触发 profile 切换 + 状态查询，
+  // 把首次进入「AI 出图 / AI 出图 GPT」时的冷启动 IPC 往返提前到启动阶段完成，
+  // 用户点进去时服务已就绪。全程非阻塞、错误吞掉，不影响其它流程。
+  useEffect(() => {
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      if (cancelled) return;
+      const studios = [window.electronAPI?.imageStudio, window.electronAPI?.imageStudioGpt];
+      for (const studio of studios) {
+        if (!studio?.getStatus) continue;
+        void studio.getStatus().catch(() => {});
+      }
+    }, 6000);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
     };
   }, []);
 

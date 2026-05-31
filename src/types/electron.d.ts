@@ -1185,6 +1185,10 @@ interface BrowserMultiAPI {
 interface ElectronAPI {
   getAppPath: () => Promise<string>;
   selectFile: (filters?: any) => Promise<string | null>;
+  perf?: {
+    getEntries: () => Array<{ channel: string; ms: number; error: boolean; at: number }>;
+    clear: () => void;
+  };
   automation: AutomationAPI;
   competitor: CompetitorAPI;
   yunqiDb: YunqiDbAPI;
