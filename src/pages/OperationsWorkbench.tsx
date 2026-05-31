@@ -294,11 +294,15 @@ export default function OperationsWorkbench() {
   }, [trendRows, storeFilter]);
 
   const skuTitleCol = {
-    title: "SKU / 商品", key: "sku", width: 280,
+    title: "商品 · SKU / SKC / SPU", key: "sku", width: 300,
     render: (_: any, r: SkuRow) => (
       <div>
-        <Typography.Text copyable={{ text: r.sku_ext_code || "" }} style={{ fontSize: 12 }}>{r.sku_ext_code || "(无货号)"}</Typography.Text>
-        <Tooltip title={r.title || ""}><div style={{ color: "#888", fontSize: 12, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title || "—"}</div></Tooltip>
+        <Typography.Text copyable={{ text: r.sku_ext_code || "" }} style={{ fontSize: 12, fontWeight: 600 }}>{r.sku_ext_code || "(无货号)"}</Typography.Text>
+        <Tooltip title={r.title || ""}><div style={{ color: "#888", fontSize: 12, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title || "—"}</div></Tooltip>
+        <div style={{ fontSize: 11, color: "#aaa" }}>
+          {r.skc_id ? <span>SKC&nbsp;{r.skc_id}</span> : null}
+          {r.product_id ? <span style={{ marginLeft: 8 }}>SPU&nbsp;{r.product_id}</span> : null}
+        </div>
       </div>
     ),
   };
@@ -416,7 +420,7 @@ export default function OperationsWorkbench() {
             <Table<StoreMatrixRow> dataSource={storeMatrix} columns={storeMatrixColumns} rowKey="store_code" size="small"
               pagination={{ defaultPageSize: 20, showSizeChanger: true, pageSizeOptions: [10, 20, 50], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 店` }}
               scroll={{ x: 980 }}
-              onRow={(r) => ({ onClick: () => { setStoreFilter(r.store_code); setActiveTab("shop"); }, style: { cursor: "pointer" } })} />
+              onRow={(r) => ({ onClick: () => { setStoreFilter(r.store_code); setActiveTab("diag"); }, style: { cursor: "pointer" } })} />
           </Card>
           <Card size="small" title="全店销量趋势 · 近 30 天" style={{ marginBottom: 16 }} loading={trendLoading}>
             <div style={{ height: 200 }}>
