@@ -153,17 +153,22 @@ function DeltaTag({ value }: { value: number | null }) {
   );
 }
 
+// 仅渲染店号（+负责人标签）；店铺名拆为独立列
 function StoreCell({ store }: { store: ReportStore }) {
   return (
-    <div>
+    <span>
       <Typography.Text strong>{store.store_code || "—"}</Typography.Text>
       {store.owner && (
         <Tag color="blue" style={{ marginLeft: 6 }}>{store.owner}</Tag>
       )}
-      <div style={{ color: "#888", fontSize: 12, lineHeight: 1.4 }}>{store.mall_name || "(未命名)"}</div>
-    </div>
+    </span>
   );
 }
+
+function storeNameCell(store: ReportStore) {
+  return <span style={{ color: "#555" }}>{store.mall_name || "(未命名)"}</span>;
+}
+const storeNameSorter = (a: ReportStore, b: ReportStore) => (a.mall_name || "").localeCompare(b.mall_name || "");
 
 export default function MultiStoreReport() {
   const [loading, setLoading] = useState(false);
@@ -319,7 +324,8 @@ export default function MultiStoreReport() {
 
   // === Tab 1: 运营日报 ===
   const dailyColumns: ColumnsType<ReportStore> = [
-    { title: "店号 / 店铺", key: "store", width: 200, fixed: "left", render: (_, s) => <StoreCell store={s} />, sorter: (a, b) => (a.store_code || "").localeCompare(b.store_code || ""), defaultSortOrder: "ascend" },
+    { title: "店号", key: "code", width: 110, fixed: "left", render: (_, s) => <StoreCell store={s} />, sorter: (a, b) => (a.store_code || "").localeCompare(b.store_code || ""), defaultSortOrder: "ascend" },
+    { title: "店铺", key: "name", width: 170, render: (_, s) => storeNameCell(s), sorter: storeNameSorter },
     { title: "今日销量", dataIndex: ["sales", "today_qty"], width: 90, align: "right", render: (v) => fmtNum(v), sorter: (a, b) => (a.sales.today_qty || 0) - (b.sales.today_qty || 0) },
     { title: "近 7 天", dataIndex: ["sales", "last7d_qty"], width: 90, align: "right", render: (v) => fmtNum(v), sorter: (a, b) => (a.sales.last7d_qty || 0) - (b.sales.last7d_qty || 0) },
     { title: "待发备货", dataIndex: ["stock_orders", "pending"], width: 90, align: "right", render: (v: number) => (v > 0 ? <Tag color="orange">{fmtNum(v)}</Tag> : <span>—</span>), sorter: (a, b) => (a.stock_orders.pending || 0) - (b.stock_orders.pending || 0) },
@@ -331,7 +337,8 @@ export default function MultiStoreReport() {
 
   // === Tab 2: 老板周/月（金额）===
   const bossColumns: ColumnsType<ReportStore> = [
-    { title: "店号 / 店铺", key: "store", width: 200, fixed: "left", render: (_, s) => <StoreCell store={s} />, sorter: (a, b) => (a.store_code || "").localeCompare(b.store_code || "") },
+    { title: "店号", key: "code", width: 110, fixed: "left", render: (_, s) => <StoreCell store={s} />, sorter: (a, b) => (a.store_code || "").localeCompare(b.store_code || "") },
+    { title: "店铺", key: "name", width: 170, render: (_, s) => storeNameCell(s), sorter: storeNameSorter },
     { title: "近 7 天营收", key: "rev7", width: 120, align: "right", render: (_, s) => fmtMoney(s.financials?.last7d.revenue), sorter: (a, b) => (a.financials?.last7d.revenue || 0) - (b.financials?.last7d.revenue || 0), defaultSortOrder: "descend" },
     { title: "7 天环比", key: "wow", width: 90, align: "right", render: (_, s) => <DeltaTag value={s.financials?.last7d.rev_wow ?? null} /> },
     { title: "近 30 天营收", key: "rev30", width: 120, align: "right", render: (_, s) => fmtMoney(s.financials?.last30d.revenue), sorter: (a, b) => (a.financials?.last30d.revenue || 0) - (b.financials?.last30d.revenue || 0) },
@@ -403,7 +410,8 @@ export default function MultiStoreReport() {
 
   // === Tab 5: 运维监控 ===
   const opsColumns: ColumnsType<ReportStore> = [
-    { title: "店号 / 店铺", key: "store", width: 200, fixed: "left", render: (_, s) => <StoreCell store={s} />, sorter: (a, b) => (a.store_code || "").localeCompare(b.store_code || "") },
+    { title: "店号", key: "code", width: 110, fixed: "left", render: (_, s) => <StoreCell store={s} />, sorter: (a, b) => (a.store_code || "").localeCompare(b.store_code || "") },
+    { title: "店铺", key: "name", width: 170, render: (_, s) => storeNameCell(s), sorter: storeNameSorter },
     {
       title: "状态", key: "status", width: 100,
       render: (_, s) => {
