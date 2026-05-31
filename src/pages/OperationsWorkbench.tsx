@@ -44,6 +44,11 @@ interface StockOrderRow {
   __rk?: number;
 }
 interface TrendRow { mall_id: string; store_code: string | null; mall_name: string | null; stat_date: string; sales: number; }
+interface StoreMatrixRow {
+  store_code: string; mall_id: string; mall_name: string | null; owner: string | null;
+  sales: number; sale_7d: number; lack: number; soldout: number;
+  high_risk: number; restock: number; stock_gap: number; activity: number;
+}
 
 interface Diag { label: string; action: string; level: number }
 interface DiagnosedRow extends SkuRow { _level: number; _issues: Diag[] }
@@ -239,6 +244,23 @@ export default function OperationsWorkbench() {
     for (const r of trendRows) byDate.set(r.stat_date, (byDate.get(r.stat_date) || 0) + r.sales);
     return [...byDate.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([date, sales]) => ({ date, sales }));
   }, [trendRows]);
+  const storeMatrix = useMemo(() => {
+    const m = new Map<string, StoreMatrixRow>();
+    const get = (code: string, mall_id: string, mall_name: string | null, owner: string | null) => {
+      let e = m.get(code);
+      if (!e) { e = { store_code: code, mall_id, mall_name, owner, sales: 0, sale_7d: 0, lack: 0, soldout: 0, high_risk: 0, restock: 0, stock_gap: 0, activity: 0 }; m.set(code, e); }
+      if (mall_name && !e.mall_name) e.mall_name = mall_name;
+      if (owner && !e.owner) e.owner = owner;
+      return e;
+    };
+    for (const r of shopRows) { const e = get(r.store_code || r.mall_id, r.mall_id, r.mall_name, r.owner); e.sales = r.sale_volume; e.sale_7d = r.sale_7d; e.lack = r.lack_skc; e.soldout = r.already_sold_out; }
+    for (const r of riskRows) if (r.severity === "high") get(r.store_code || r.mall_id, r.mall_id, r.mall_name, null).high_risk++;
+    const need = (r: SkuRow) => (r.stock || 0) <= 0 || (r.sale_days != null && r.sale_days < 14) || (r.advice_qty || 0) > 0;
+    for (const r of skuRows) if (need(r)) get(r.store_code || r.mall_id, r.mall_id, r.mall_name, null).restock++;
+    for (const r of stockRows) get(r.store_code || r.mall_id, r.mall_id, r.mall_name, null).stock_gap++;
+    for (const r of actRows) get(r.store_code || r.mall_id, r.mall_id, r.mall_name, null).activity++;
+    return [...m.values()].sort((a, b) => (b.lack + b.soldout + b.high_risk * 5) - (a.lack + a.soldout + a.high_risk * 5));
+  }, [shopRows, riskRows, skuRows, stockRows, actRows]);
   const shopView = useMemo(() => {
     let v = shopRows;
     if (storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
@@ -352,6 +374,21 @@ export default function OperationsWorkbench() {
     { title: "收货仓", dataIndex: "warehouse", width: 140, ellipsis: true, render: (v) => v || "—" },
   ];
 
+  const redNum = (color: string) => (v: number) => (v > 0 ? <span style={{ color, fontWeight: 600 }}>{fmtNum(v)}</span> : <span style={{ color: "#bbb" }}>0</span>);
+  const storeMatrixColumns: ColumnsType<StoreMatrixRow> = [
+    { title: "店号", dataIndex: "store_code", width: 70, fixed: "left" },
+    { title: "店铺", dataIndex: "mall_name", width: 130, ellipsis: true, render: (v) => v || "—" },
+    { title: "负责人", dataIndex: "owner", width: 70, render: (v) => v || "—" },
+    { title: "今日销量", dataIndex: "sales", width: 85, align: "right", sorter: (a, b) => a.sales - b.sales, render: fmtNum },
+    { title: "7天销量", dataIndex: "sale_7d", width: 85, align: "right", sorter: (a, b) => a.sale_7d - b.sale_7d, render: fmtNum },
+    { title: "缺货", dataIndex: "lack", width: 70, align: "right", sorter: (a, b) => a.lack - b.lack, render: redNum("#d46b08") },
+    { title: "售罄", dataIndex: "soldout", width: 70, align: "right", sorter: (a, b) => a.soldout - b.soldout, render: redNum("#cf1322") },
+    { title: "高风险", dataIndex: "high_risk", width: 75, align: "right", sorter: (a, b) => a.high_risk - b.high_risk, render: redNum("#cf1322") },
+    { title: "待补货", dataIndex: "restock", width: 75, align: "right", sorter: (a, b) => a.restock - b.restock, render: redNum("#d46b08") },
+    { title: "备货缺口", dataIndex: "stock_gap", width: 85, align: "right", sorter: (a, b) => a.stock_gap - b.stock_gap, render: fmtNum },
+    { title: "可报活动", dataIndex: "activity", width: 85, align: "right", sorter: (a, b) => a.activity - b.activity, render: (v: number) => (v > 0 ? <span style={{ color: "#3f8600" }}>{fmtNum(v)}</span> : <span style={{ color: "#bbb" }}>0</span>) },
+  ];
+
   const commonFilters = (extra?: React.ReactNode) => (
     <div style={{ padding: "12px 16px", display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
       <Select size="small" style={{ width: 130 }} value={storeFilter} onChange={setStoreFilter} options={[{ value: "all", label: "全部店铺" }, ...storeOptions.map((c) => ({ value: c, label: c }))]} />
@@ -375,6 +412,12 @@ export default function OperationsWorkbench() {
             <Card size="small" hoverable onClick={() => setActiveTab("stock")}><Statistic title="备货缺口单" value={stockView.length} /></Card>
             <Card size="small" hoverable onClick={() => setActiveTab("activity")}><Statistic title="可报活动" value={actView.length} valueStyle={{ color: "#3f8600" }} /></Card>
           </div>
+          <Card size="small" title="各店概览 · 问题多的店排前,点行钻取该店" style={{ marginBottom: 16 }} loading={shopLoading || riskLoading || skuLoading}>
+            <Table<StoreMatrixRow> dataSource={storeMatrix} columns={storeMatrixColumns} rowKey="store_code" size="small"
+              pagination={{ defaultPageSize: 20, showSizeChanger: true, pageSizeOptions: [10, 20, 50], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 店` }}
+              scroll={{ x: 980 }}
+              onRow={(r) => ({ onClick: () => { setStoreFilter(r.store_code); setActiveTab("shop"); }, style: { cursor: "pointer" } })} />
+          </Card>
           <Card size="small" title="全店销量趋势 · 近 30 天" style={{ marginBottom: 16 }} loading={trendLoading}>
             <div style={{ height: 200 }}>
               {overviewTrend.length === 0 ? <Empty description="暂无趋势数据" image={Empty.PRESENTED_IMAGE_SIMPLE} /> : (
