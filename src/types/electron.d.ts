@@ -982,6 +982,7 @@ interface ErpActivityRow {
   suggested_price: number | null;
   price_diff: number | null;
   activity_stock: number;
+  cost: number | null;
   end_at: string | null;
   stat_date: string | null;
 }

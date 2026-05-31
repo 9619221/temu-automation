@@ -615,10 +615,12 @@ function buildActivityList(db, options = {}) {
     )
     SELECT a.mall_id, m.store_code, m.mall_name, a.activity_kind, a.activity_title, a.activity_status,
            a.sku_ext_code, a.skc_id, a.signup_price_cents, a.suggested_price_cents,
-           a.signup_price_diff_cents, a.activity_stock, a.end_at, a.stat_date
+           a.signup_price_diff_cents, a.activity_stock, a.end_at, a.stat_date, k.wac AS cost
       FROM cloud.temu_activity_snapshot a
       JOIN latest l ON l.mall_id = a.mall_id AND l.sd = a.stat_date
       LEFT JOIN erp_temu_malls m ON m.mall_id = a.mall_id
+      LEFT JOIN (SELECT internal_sku_code, MAX(weighted_avg_cost) AS wac FROM erp_skus GROUP BY internal_sku_code) k
+        ON k.internal_sku_code = a.sku_ext_code
      WHERE a.tenant_id = ?
        AND (a.sku_ext_code IS NOT NULL OR a.activity_title IS NOT NULL OR a.signup_price_cents IS NOT NULL)
        ${options.includeTest ? "" : "AND COALESCE(m.status,'active') <> 'test'"}
@@ -632,6 +634,7 @@ function buildActivityList(db, options = {}) {
     sku_ext_code: a.sku_ext_code || null, skc_id: a.skc_id || null,
     signup_price: centsToYuan(a.signup_price_cents), suggested_price: centsToYuan(a.suggested_price_cents),
     price_diff: centsToYuan(a.signup_price_diff_cents), activity_stock: toNum(a.activity_stock),
+    cost: a.cost != null && Number(a.cost) > 0 ? Number(a.cost) : null,
     end_at: a.end_at || null, stat_date: a.stat_date || null,
   }));
   const data = { generated_at: Date.now(), row_count: out.length, rows: out };

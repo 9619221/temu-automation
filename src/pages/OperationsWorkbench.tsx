@@ -21,7 +21,7 @@ interface ActivityRow {
   kind: string | null; title: string | null; status: string | null;
   sku_ext_code: string | null; skc_id: string | null;
   signup_price: number | null; suggested_price: number | null; price_diff: number | null;
-  activity_stock: number; end_at: string | null; stat_date: string | null;
+  activity_stock: number; cost: number | null; end_at: string | null; stat_date: string | null;
 }
 
 interface Diag { label: string; action: string; level: number }
@@ -224,8 +224,8 @@ export default function OperationsWorkbench() {
     { title: "类型", dataIndex: "kind", width: 80, render: (v: string | null) => <Tag color={v === "bidding" ? "purple" : v === "coupon" ? "cyan" : "blue"}>{KIND_LABEL[v || ""] || v || "—"}</Tag> },
     { title: "活动 / SKU", key: "at", width: 300, render: (_, r) => <div><div style={{ fontSize: 12 }}>{r.title || "(未命名活动)"}</div>{r.sku_ext_code ? <div style={{ color: "#888", fontSize: 12 }}>{r.sku_ext_code}</div> : null}</div> },
     { title: "报名价", dataIndex: "signup_price", width: 90, align: "right", render: (v) => fmtMoney(v) },
-    { title: "建议价", dataIndex: "suggested_price", width: 90, align: "right", render: (v) => fmtMoney(v) },
-    { title: "让利", dataIndex: "price_diff", width: 90, align: "right", render: (v: number | null) => (v == null ? "—" : <span style={{ color: v > 0 ? "#cf1322" : "#3f8600" }}>{fmtMoney(v)}</span>) },
+    { title: "成本价", dataIndex: "cost", width: 90, align: "right", render: (v: number | null) => (v == null ? <Tooltip title="无成本台账（未采购入库/未绑定）"><span style={{ color: "#bbb" }}>—</span></Tooltip> : fmtMoney(v)) },
+    { title: "活动毛利", key: "amargin", width: 110, align: "right", render: (_, r) => { if (r.signup_price == null || r.cost == null) return <span style={{ color: "#bbb" }}>—</span>; const gp = r.signup_price - r.cost; return <span style={{ color: gp < 0 ? "#cf1322" : "#3f8600", fontWeight: 600 }}>{gp < 0 ? "亏 " : ""}{fmtMoney(gp)}</span>; }, sorter: (a, b) => ((a.signup_price ?? 0) - (a.cost ?? 0)) - ((b.signup_price ?? 0) - (b.cost ?? 0)) },
     { title: "活动库存", dataIndex: "activity_stock", width: 90, align: "right", render: (v) => fmtNum(v), sorter: (a, b) => a.activity_stock - b.activity_stock },
     { title: "截止", dataIndex: "end_at", width: 130, render: (v: string | null) => { if (!v) return "—"; const n = Number(v); return Number.isFinite(n) && n > 1e11 ? new Date(n).toLocaleDateString("zh-CN") : String(v); } },
   ];
