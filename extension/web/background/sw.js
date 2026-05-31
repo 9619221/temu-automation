@@ -54,6 +54,13 @@ const JIT_VMI_PROBES = [
     body: { pageNo: 1, pageSize: 100 },
   },
 ];
+// 流量分析主动直采：SW 对"当前登录店"直接 fetch flow/analysis/goods/list（实测不需 anti-content，
+// 但 mallid 必须=当前登录店，跨店 403）。多店覆盖靠多开（每实例一店）。parser parseProductFlowGoods 自动落 temu_product_flow_snapshot。
+const FLOW_STATE_KEY = "temu_monitor_flow_state";
+const FLOW_RUN_INTERVAL_MS = 30 * 60 * 1000; // 每店每 30 分钟一轮（避 429）
+const FLOW_PAGE_SIZE = 100;
+const FLOW_MAX_PAGES = 12;
+const FLOW_PAGE_DELAY_MS = 500;
 const FEISHU_SUPPLIER_TABLE_URL = "https://mcn24onb5t1o.feishu.cn/base/RLy7bndc4aCXhtsx4yAcr2d8nSg?table=tbl0UhZRpR0niDSt&view=vew5Spjz7c";
 const FEISHU_SUPPLIER_ONCE_KEY = "temu_monitor_feishu_supplier_once";
 
@@ -175,6 +182,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   sendHeartbeat().catch((e) => console.warn("[sw] heartbeat err", e));
   collectActivityLibraryFromTargets().catch((e) => console.warn("[sw] activity library collect err", e?.message || e));
   collectJitVmiFromTargets().catch((e) => console.warn("[sw] jit/vmi collect err", e?.message || e));
+  collectFlowForCurrentMall().catch((e) => console.warn("[sw] flow collect err", e?.message || e));
 });
 
 // 在任意 Temu tab 上抓 page world stats（供心跳用）
@@ -405,6 +413,87 @@ async function collectActivityLibraryFromTargets() {
   });
   if (enqueuedCount > 0) await flush();
   return { ok: true, batchCount, enqueuedCount };
+}
+
+// ---------- 流量分析主动直采（采当前登录店，铺开 temu_product_flow_snapshot） ----------
+// 用 scripting 在 agentseller 标签页取当前 mallid（manifest 无 cookies 权限，借 scripting）
+async function getCurrentAgentSellerMall() {
+  try {
+    const tabs = await chrome.tabs.query({
+      url: ["https://agentseller.temu.com/*", "https://agentseller-us.temu.com/*", "https://agentseller-eu.temu.com/*"],
+    });
+    if (!tabs.length) return null;
+    const tab = tabs.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
+    const [res] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => (document.cookie.match(/mallid=([^;]+)/i)?.[1] || ""),
+    });
+    const mallId = String(res?.result || "").trim();
+    if (!mallId) return null;
+    let origin = "https://agentseller.temu.com";
+    try { origin = new URL(tab.url).origin; } catch {}
+    return { mallId, origin };
+  } catch {
+    return null;
+  }
+}
+
+async function collectFlowForCurrentMall() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", FLOW_STATE_KEY]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
+  const now = Date.now();
+  const state = cfg[FLOW_STATE_KEY] || {};
+  if (state.last_run_at && now - Number(state.last_run_at) < FLOW_RUN_INTERVAL_MS) {
+    return { ok: true, skipped: "interval" };
+  }
+  const cur = await getCurrentAgentSellerMall();
+  if (!cur) return { ok: false, reason: "no_agentseller_tab_or_mallid" };
+  await setStorage({ [FLOW_STATE_KEY]: { ...state, last_run_at: now } });
+
+  const url = `${cur.origin}/api/seller/full/flow/analysis/goods/list`;
+  let enqueuedCount = 0;
+  for (let page = 1; page <= FLOW_MAX_PAGES; page++) {
+    const requestBody = JSON.stringify({ pageNum: page, pageSize: FLOW_PAGE_SIZE, dayDimension: 1 });
+    try {
+      const resp = await fetch(url, {
+        method: "POST",
+        credentials: "include",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json", mallid: cur.mallId },
+        body: requestBody,
+      });
+      const text = await resp.text();
+      const body = safeParseJson(text);
+      if (!resp.ok || !body || typeof body !== "object") break;
+      await enqueue({
+        kind: "fetch-active-flow",
+        url,
+        method: "POST",
+        status: resp.status,
+        ts: Date.now(),
+        site: "agentseller",
+        page: "background/flow-analysis",
+        mall_id: cur.mallId,
+        body,
+        bodyText: text.length > 200000 ? null : text,
+        requestBodyText: requestBody,
+        bodySize: text.length,
+        activeSource: "flow_analysis_background",
+      });
+      await bumpStats({ captured_count_delta: 1 });
+      enqueuedCount++;
+      const list = body?.result?.list || body?.result?.pageItems || [];
+      if (!Array.isArray(list) || list.length < FLOW_PAGE_SIZE) break; // 末页
+    } catch {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, FLOW_PAGE_DELAY_MS));
+  }
+  await setStorage({
+    [FLOW_STATE_KEY]: { ...state, last_run_at: now, last_success_at: Date.now(), last_enqueued: enqueuedCount, last_mall: cur.mallId },
+  });
+  if (enqueuedCount > 0) await flush();
+  return { ok: true, enqueuedCount, mall: cur.mallId };
 }
 
 // ---------- JIT/VMI 主动调度（替代桌面端 urgentOrders Playwright 任务） ----------
