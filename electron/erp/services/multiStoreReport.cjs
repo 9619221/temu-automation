@@ -418,6 +418,7 @@ async function buildMultiStoreReport(db, options = {}) {
 
 // 预热：强制重算并填缓存，供服务端定时调用，使 page cache 常暖、用户不撞冷查询。
 function prewarmMultiStoreReport(db, attachCloudDb) {
+  try { buildSkuSales(db, { includeTest: false, attachCloudDb, force: true }); } catch {}
   return buildMultiStoreReport(db, { includeTest: false, attachCloudDb, force: true }).catch(() => null);
 }
 
@@ -485,6 +486,74 @@ async function _buildMultiStoreReportFresh(db, options = {}) {
   };
 }
 
+// ===== 销售管理：SKU 级明细（每店最新天，含动销/库存/申报价/售罄）=====
+const _skuSalesCache = new Map(); // includeTest -> { data, ts }
+
+function _buildSkuSalesFresh(db, options = {}) {
+  const tid = options.tenantId || DEFAULT_CLOUD_TENANT;
+  const includeTest = !!options.includeTest;
+  const limit = Math.min(8000, Math.max(50, Number(options.limit) || 4000));
+  const rows = optionalAllLocal(db, `
+    WITH latest AS (
+      SELECT mall_supplier_id, MAX(stat_date) AS sd
+        FROM cloud.temu_sales_snapshot
+       WHERE tenant_id = ? AND mall_supplier_id <> ''
+       GROUP BY mall_supplier_id
+    )
+    SELECT s.mall_supplier_id AS mall_id, m.store_code, m.mall_name, m.status AS dict_status,
+           s.skc_id, s.sku_ext_code, s.product_id, s.title, s.category_name,
+           s.today_sales, s.last7d_sales, s.last30d_sales,
+           s.warehouse_stock, s.occupy_stock, s.advice_qty, s.available_sale_days,
+           s.declared_price_cents, s.stat_date
+      FROM cloud.temu_sales_snapshot s
+      JOIN latest l ON l.mall_supplier_id = s.mall_supplier_id AND l.sd = s.stat_date
+      LEFT JOIN erp_temu_malls m ON m.mall_id = s.mall_supplier_id
+     WHERE s.tenant_id = ? AND s.skc_id NOT IN ('SKC-EXT-E2E','SKC-DBG')
+       ${includeTest ? "" : "AND COALESCE(m.status,'active') <> 'test'"}
+       AND (COALESCE(s.last30d_sales,0) > 0 OR COALESCE(s.today_sales,0) > 0 OR COALESCE(s.warehouse_stock,0) <= 0)
+     ORDER BY COALESCE(s.last7d_sales,0) DESC
+     LIMIT ?
+  `, [tid, tid, limit]);
+
+  const out = rows.map((r) => ({
+    mall_id: r.mall_id,
+    store_code: r.store_code || null,
+    mall_name: r.mall_name || null,
+    skc_id: r.skc_id || null,
+    sku_ext_code: r.sku_ext_code || null,
+    product_id: r.product_id || null,
+    title: r.title || null,
+    category: r.category_name || null,
+    today: toNum(r.today_sales),
+    last7d: toNum(r.last7d_sales),
+    last30d: toNum(r.last30d_sales),
+    stock: toNum(r.warehouse_stock),
+    occupy: toNum(r.occupy_stock),
+    advice_qty: toNum(r.advice_qty),
+    sale_days: r.available_sale_days == null ? null : Number(r.available_sale_days),
+    declared_price: r.declared_price_cents == null ? null : Number(r.declared_price_cents) / 100,
+    stat_date: r.stat_date || null,
+  }));
+  return { generated_at: Date.now(), row_count: out.length, rows: out };
+}
+
+// SKU 销售明细（带缓存）。需 attachCloudDb 接通 cloud 库。
+function buildSkuSales(db, options = {}) {
+  if (!db) throw new Error("buildSkuSales: db is required (host mode only)");
+  const attachCloudDb = options.attachCloudDb;
+  if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
+    return { generated_at: Date.now(), row_count: 0, rows: [], attached: false };
+  }
+  const key = options.includeTest ? "1" : "0";
+  if (!options.force) {
+    const cached = _skuSalesCache.get(key);
+    if (cached && Date.now() - cached.ts < REPORT_CACHE_TTL_MS) return cached.data;
+  }
+  const data = _buildSkuSalesFresh(db, options);
+  _skuSalesCache.set(key, { data, ts: Date.now() });
+  return data;
+}
+
 // 写入店铺负责人（host 模式）。返回受影响行数。
 function setMallOwner(db, mallId, owner) {
   if (!db) throw new Error("setMallOwner: db is required (host mode only)");
@@ -501,6 +570,7 @@ function setMallOwner(db, mallId, owner) {
 module.exports = {
   buildMultiStoreReport,
   prewarmMultiStoreReport,
+  buildSkuSales,
   setMallOwner,
   // 暴露给测试用
   _internal: { fetchCloudReport, readMallDictionary, loginCloud, buildFinancialsByMall, buildByStoreLocal, shiftDate },

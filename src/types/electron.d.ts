@@ -820,6 +820,7 @@ interface ErpAPI {
     multiStore: (options?: { includeTest?: boolean }) => Promise<ErpMultiStoreReportResponse>;
     mallDict: () => Promise<ErpMallDictResponse>;
     setMallOwner: (payload: { mallId: string; owner: string | null }) => Promise<ErpSetMallOwnerResponse>;
+    skuSales: (options?: { includeTest?: boolean }) => Promise<ErpSkuSalesResponse>;
   };
   events?: {
     onPurchaseUpdate: (handler: (payload: ErpPurchaseUpdateEvent) => void) => () => void;
@@ -913,6 +914,37 @@ interface ErpSetMallOwnerResponse {
   ok: boolean;
   error?: string;
   data?: { changes: number };
+}
+
+interface ErpSkuSalesRow {
+  mall_id: string;
+  store_code: string | null;
+  mall_name: string | null;
+  skc_id: string | null;
+  sku_ext_code: string | null;
+  product_id: string | null;
+  title: string | null;
+  category: string | null;
+  today: number;
+  last7d: number;
+  last30d: number;
+  stock: number;
+  occupy: number;
+  advice_qty: number;
+  sale_days: number | null;
+  declared_price: number | null;
+  stat_date: string | null;
+}
+
+interface ErpSkuSalesResponse {
+  ok: boolean;
+  error?: string;
+  data?: {
+    generated_at: number;
+    row_count: number;
+    rows: ErpSkuSalesRow[];
+    attached?: boolean;
+  };
 }
 
 interface ErpMallDictEntry {

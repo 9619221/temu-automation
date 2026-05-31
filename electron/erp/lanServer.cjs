@@ -60,6 +60,7 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/erp/reports/multi-store": ["admin", "manager", "operations", "finance"],
   "/api/erp/reports/mall-dict": ["admin", "manager", "operations", "finance", "buyer", "warehouse"],
   "/api/erp/reports/set-mall-owner": ["admin", "manager"],
+  "/api/erp/reports/sku-sales": ["admin", "manager", "operations", "finance"],
   "/warehouse": ["admin", "manager", "warehouse"],
   "/api/warehouse/workbench": ["admin", "manager", "warehouse"],
   "/api/warehouse/action": ["admin", "manager", "warehouse"],
@@ -5192,6 +5193,23 @@ async function handleRequest({
 
     if (pathname === "/api/erp/reports/mall-dict") {
       await handleMallDictRequest({ req, res, db });
+      return;
+    }
+
+    if (pathname === "/api/erp/reports/sku-sales") {
+      if (req.method !== "GET") {
+        writeJson(res, 405, { ok: false, error: "Method not allowed" });
+        return;
+      }
+      try {
+        const parsed = new URL(req.url || "/", "http://127.0.0.1");
+        const includeTest = parsed.searchParams.get("include_test") === "1";
+        const { buildSkuSales } = require("./services/multiStoreReport.cjs");
+        const data = buildSkuSales(db, { includeTest, attachCloudDb: attachTemuCloudDbIfPossible });
+        writeJson(res, 200, { ok: true, data });
+      } catch (error) {
+        writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });
+      }
       return;
     }
 

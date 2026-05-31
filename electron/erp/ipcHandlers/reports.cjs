@@ -63,6 +63,24 @@ function registerReportsHandlers(ipcMain, deps) {
       return { ok: false, error: error?.message || String(error) };
     }
   });
+
+  // 销售管理：SKU 级销售明细（跨店）
+  ipcMain.handle("erp:reports:sku-sales", async (_event, payload) => {
+    try {
+      const includeTest = payload?.includeTest ? "1" : "0";
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest(`/api/erp/reports/sku-sales?include_test=${includeTest}`, { method: "GET" });
+      }
+      requireErp();
+      const { buildSkuSales } = require("../services/multiStoreReport.cjs");
+      const { attachTemuCloudDbIfPossible } = require("../lanServer.cjs");
+      const data = buildSkuSales(erpState.db, { includeTest: payload?.includeTest, attachCloudDb: attachTemuCloudDbIfPossible });
+      return { ok: true, data };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
 }
 
 module.exports = { registerReportsHandlers };

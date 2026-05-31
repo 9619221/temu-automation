@@ -6,6 +6,7 @@ import {
   Button,
   Card,
   Empty,
+  Input,
   Select,
   Space,
   Statistic,
@@ -96,6 +97,26 @@ interface MultiStoreResponse {
   data?: ReportData;
 }
 
+interface SkuRow {
+  mall_id: string;
+  store_code: string | null;
+  mall_name: string | null;
+  skc_id: string | null;
+  sku_ext_code: string | null;
+  product_id: string | null;
+  title: string | null;
+  category: string | null;
+  today: number;
+  last7d: number;
+  last30d: number;
+  stock: number;
+  occupy: number;
+  advice_qty: number;
+  sale_days: number | null;
+  declared_price: number | null;
+  stat_date: string | null;
+}
+
 const REFRESH_MS = 5 * 60 * 1000; // 5 分钟自动刷新一次
 const MULTI_STORE_REPORT_CACHE_KEY = "temu.multi-store-report.cache.v1";
 const STALE_THRESHOLD_SECONDS = 2 * 60 * 60; // 2 小时无数据视为掉线
@@ -174,6 +195,13 @@ function storeNameCell(store: ReportStore) {
 }
 const storeNameSorter = (a: ReportStore, b: ReportStore) => (a.mall_name || "").localeCompare(b.mall_name || "");
 
+// SKU 售卖状态：售罄 / 建议补货 / 在售
+function skuStatus(r: SkuRow): { text: string; color: string } {
+  if (r.stock <= 0) return { text: "已售罄", color: "red" };
+  if (r.advice_qty > 0) return { text: "建议补货", color: "orange" };
+  return { text: "在售", color: "green" };
+}
+
 // 全局色彩语言：绿=健康、黄/橙=注意、红=异常
 const COLOR = { good: "#3f8600", warn: "#d46b08", bad: "#cf1322", muted: "#bbb" };
 
@@ -205,6 +233,13 @@ export default function MultiStoreReport() {
   const [activeTab, setActiveTab] = useState("daily");
   const [ownerFilter, setOwnerFilter] = useState<string>("all");
   const [savingMall, setSavingMall] = useState<string | null>(null);
+  // 销售管理 Tab（SKU 明细，懒加载）
+  const [skuRows, setSkuRows] = useState<SkuRow[]>([]);
+  const [skuLoading, setSkuLoading] = useState(false);
+  const [skuLoaded, setSkuLoaded] = useState(false);
+  const [skuStoreFilter, setSkuStoreFilter] = useState("all");
+  const [skuStatusFilter, setSkuStatusFilter] = useState("all");
+  const [skuSearch, setSkuSearch] = useState("");
 
   const load = useCallback(async () => {
     if (!window.electronAPI?.erp?.reports?.multiStore) {
@@ -274,6 +309,42 @@ export default function MultiStoreReport() {
       setSavingMall(null);
     }
   }, [load]);
+
+  // 销售管理：进 Tab 懒加载 SKU 明细（数据量大，不随主报表一起拉）
+  const loadSkuSales = useCallback(async () => {
+    if (!window.electronAPI?.erp?.reports?.skuSales) return;
+    setSkuLoading(true);
+    try {
+      const resp = await window.electronAPI.erp.reports.skuSales({ includeTest: false });
+      if (resp.ok && resp.data) {
+        setSkuRows((resp.data.rows || []) as SkuRow[]);
+        setSkuLoaded(true);
+      }
+    } catch { /* ignore */ } finally {
+      setSkuLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === "sales" && !skuLoaded && !skuLoading) loadSkuSales();
+  }, [activeTab, skuLoaded, skuLoading, loadSkuSales]);
+
+  const skuStoreOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of skuRows) if (r.store_code) set.add(r.store_code);
+    return Array.from(set).sort();
+  }, [skuRows]);
+
+  const skuView = useMemo(() => {
+    let rows = skuRows;
+    if (skuStoreFilter !== "all") rows = rows.filter((r) => r.store_code === skuStoreFilter);
+    if (skuStatusFilter === "soldout") rows = rows.filter((r) => r.stock <= 0);
+    else if (skuStatusFilter === "low") rows = rows.filter((r) => r.stock > 0 && r.advice_qty > 0);
+    else if (skuStatusFilter === "selling") rows = rows.filter((r) => r.stock > 0);
+    const q = skuSearch.trim().toLowerCase();
+    if (q) rows = rows.filter((r) => (r.sku_ext_code || "").toLowerCase().includes(q) || (r.title || "").toLowerCase().includes(q) || (r.skc_id || "").includes(q));
+    return rows;
+  }, [skuRows, skuStoreFilter, skuStatusFilter, skuSearch]);
 
   const summary = useMemo(() => {
     if (!stores.length) return null;
@@ -396,6 +467,30 @@ export default function MultiStoreReport() {
     };
     return [...stores].sort((a, b) => urgency(b) - urgency(a));
   }, [stores]);
+
+  // === 销售管理：SKU 明细列 ===
+  const salesColumns: ColumnsType<SkuRow> = [
+    { title: "店号", dataIndex: "store_code", width: 78, fixed: "left", render: (v) => <Typography.Text strong>{v || "—"}</Typography.Text>, sorter: (a, b) => (a.store_code || "").localeCompare(b.store_code || "") },
+    { title: "店铺", dataIndex: "mall_name", width: 130, render: (v) => <span style={{ color: "#555" }}>{v || "—"}</span> },
+    {
+      title: "SKU / 商品", key: "sku", width: 300,
+      render: (_, r) => (
+        <div>
+          <Typography.Text copyable={{ text: r.sku_ext_code || "" }} style={{ fontSize: 12 }}>{r.sku_ext_code || "(无货号)"}</Typography.Text>
+          <Tooltip title={r.title || ""}>
+            <div style={{ color: "#888", fontSize: 12, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title || "—"}</div>
+          </Tooltip>
+        </div>
+      ),
+    },
+    { title: "今日销量", dataIndex: "today", width: 90, align: "right", render: (v) => fmtNum(v), sorter: (a, b) => a.today - b.today },
+    { title: "近 7 天", dataIndex: "last7d", width: 88, align: "right", render: (v) => fmtNum(v), sorter: (a, b) => a.last7d - b.last7d, defaultSortOrder: "descend" },
+    { title: "近 30 天", dataIndex: "last30d", width: 92, align: "right", render: (v) => fmtNum(v), sorter: (a, b) => a.last30d - b.last30d },
+    { title: "库存", dataIndex: "stock", width: 100, align: "right", render: (v: number, r) => <span style={{ color: v <= 0 ? COLOR.bad : undefined }}>{fmtNum(v)}{r.occupy > 0 ? <span style={{ color: "#aaa", fontSize: 11 }}> /占{fmtNum(r.occupy)}</span> : null}</span>, sorter: (a, b) => a.stock - b.stock },
+    { title: "可售天数", dataIndex: "sale_days", width: 88, align: "right", render: (v: number | null) => (v == null ? "—" : <span style={{ color: v < 7 ? COLOR.warn : undefined }}>{v}天</span>), sorter: (a, b) => (a.sale_days ?? Infinity) - (b.sale_days ?? Infinity) },
+    { title: "申报价", dataIndex: "declared_price", width: 88, align: "right", render: (v: number | null) => (v == null ? "—" : "¥" + v.toFixed(2)), sorter: (a, b) => (a.declared_price ?? 0) - (b.declared_price ?? 0) },
+    { title: "状态", key: "status", width: 96, render: (_, r) => { const s = skuStatus(r); return <Tag color={s.color}>{s.text}</Tag>; } },
+  ];
 
   // === Tab 1: 运营日报 ===
   const dailyColumns: ColumnsType<ReportStore> = [
@@ -532,6 +627,31 @@ export default function MultiStoreReport() {
           <div style={{ padding: "8px 16px 0", color: "#888", fontSize: 12 }}>已按紧急度排序：掉线 / 售罄 / 缺货 / 待处理售后 / 待发 多的店自动置顶。</div>
           <Table<ReportStore> dataSource={dailyStores} columns={dailyColumns} rowKey="mall_id" size="small" pagination={false} scroll={{ x: 945 }} loading={loading} />
         </>
+      ),
+    },
+    {
+      key: "sales",
+      label: "销售管理",
+      children: (
+        <div>
+          <div style={{ padding: "12px 16px", display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+            <Select size="small" style={{ width: 130 }} value={skuStoreFilter} onChange={setSkuStoreFilter}
+              options={[{ value: "all", label: "全部店铺" }, ...skuStoreOptions.map((c) => ({ value: c, label: c }))]} />
+            <Select size="small" style={{ width: 130 }} value={skuStatusFilter} onChange={setSkuStatusFilter}
+              options={[{ value: "all", label: "全部状态" }, { value: "soldout", label: "已售罄" }, { value: "low", label: "建议补货" }, { value: "selling", label: "在售" }]} />
+            <Input.Search size="small" allowClear placeholder="搜货号 / 标题 / SKC" style={{ width: 240 }} value={skuSearch} onChange={(e) => setSkuSearch(e.target.value)} />
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>共 {skuView.length} 条（仅含动销或售罄 SKU，取各店最新一天）</Typography.Text>
+          </div>
+          <Table<SkuRow>
+            dataSource={skuView}
+            columns={salesColumns}
+            rowKey={(r) => `${r.mall_id}|${r.skc_id || ""}|${r.sku_ext_code || ""}`}
+            size="small"
+            pagination={{ pageSize: 50, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
+            scroll={{ x: 1080 }}
+            loading={skuLoading}
+          />
+        </div>
       ),
     },
     {
