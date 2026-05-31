@@ -5443,6 +5443,19 @@ async function handleRequest({
     });
 }
 
+// 多店报表预热：服务端定时强制刷新报表缓存，让 page cache 常暖、用户请求秒回（冷查询只发生在后台）。
+let _msrPrewarmTimer = null;
+function startMultiStoreReportPrewarm(db) {
+  if (!db || _msrPrewarmTimer) return;
+  let svc;
+  try { svc = require("./services/multiStoreReport.cjs"); } catch { return; }
+  if (typeof svc.prewarmMultiStoreReport !== "function") return;
+  const run = () => { try { svc.prewarmMultiStoreReport(db, attachTemuCloudDbIfPossible); } catch {} };
+  setTimeout(run, 8000); // 启动 8s 后预热一次（错开启动期 IO）
+  _msrPrewarmTimer = setInterval(run, 4 * 60 * 1000); // 每 4 分钟保持暖（< 5min 缓存 TTL）
+  if (_msrPrewarmTimer && typeof _msrPrewarmTimer.unref === "function") _msrPrewarmTimer.unref();
+}
+
 function startLanServer(options = {}) {
   if (lanState.server) {
     return Promise.resolve(getLanStatus());
@@ -5478,6 +5491,7 @@ function startLanServer(options = {}) {
       lanState.startedAt = new Date().toISOString();
       lanState.lastError = null;
       resolve(getLanStatus());
+      try { startMultiStoreReportPrewarm(options.db); } catch {}
     });
 
     server.listen(port, bindAddress);

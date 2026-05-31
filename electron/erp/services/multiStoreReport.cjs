@@ -382,8 +382,37 @@ function buildByStoreLocal(db, options = {}) {
   };
 }
 
-// 主入口：返回 { generated_at, store_count, stores: [...], unmapped: [...], financials_available }
+// 进程级结果缓存：跨库聚合冷态可达 ~17s（OS page cache 被挤出后首查），
+// 缓存 + 服务端定时预热让用户请求永远命中暖缓存、秒回。
+const REPORT_CACHE_TTL_MS = 5 * 60 * 1000;
+const _reportCache = new Map();    // includeTest -> { data, ts }
+const _reportInflight = new Map(); // includeTest -> Promise（并发去重，避免多请求同时冷算）
+
+// 主入口（带缓存）：force=true 跳过读缓存（预热用），仍写缓存。
 async function buildMultiStoreReport(db, options = {}) {
+  if (!db) throw new Error("multiStoreReport: db is required (host mode only)");
+  const key = options.includeTest ? "1" : "0";
+  if (!options.force) {
+    const cached = _reportCache.get(key);
+    if (cached && Date.now() - cached.ts < REPORT_CACHE_TTL_MS) return cached.data;
+  }
+  const inflight = _reportInflight.get(key);
+  if (inflight) return inflight; // 复用进行中的计算（含预热），避免并发重复冷算
+  const p = Promise.resolve()
+    .then(() => _buildMultiStoreReportFresh(db, options))
+    .then((data) => { _reportCache.set(key, { data, ts: Date.now() }); return data; })
+    .finally(() => { _reportInflight.delete(key); });
+  _reportInflight.set(key, p);
+  return p;
+}
+
+// 预热：强制重算并填缓存，供服务端定时调用，使 page cache 常暖、用户不撞冷查询。
+function prewarmMultiStoreReport(db, attachCloudDb) {
+  return buildMultiStoreReport(db, { includeTest: false, attachCloudDb, force: true }).catch(() => null);
+}
+
+// 真正的聚合实现（无缓存）
+async function _buildMultiStoreReportFresh(db, options = {}) {
   if (!db) throw new Error("multiStoreReport: db is required (host mode only)");
   const attachCloudDb = options.attachCloudDb;
   const attached = typeof attachCloudDb === "function" && attachCloudDb(db) === true;
@@ -461,6 +490,7 @@ function setMallOwner(db, mallId, owner) {
 
 module.exports = {
   buildMultiStoreReport,
+  prewarmMultiStoreReport,
   setMallOwner,
   // 暴露给测试用
   _internal: { fetchCloudReport, readMallDictionary, loginCloud, buildFinancialsByMall, buildByStoreLocal, shiftDate },
