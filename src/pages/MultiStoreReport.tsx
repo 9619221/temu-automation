@@ -407,7 +407,20 @@ export default function MultiStoreReport() {
     { title: "缺货", dataIndex: ["shop_stats", "lack_skc"], width: 80, align: "right", render: (v: number) => <HeatNum value={v} max={maxes.lack} hue="gold" />, sorter: (a, b) => (a.shop_stats.lack_skc || 0) - (b.shop_stats.lack_skc || 0) },
     { title: "已售罄", dataIndex: ["shop_stats", "already_sold_out_skc"], width: 80, align: "right", render: (v: number) => <HeatNum value={v} max={maxes.soldout} hue="red" />, sorter: (a, b) => (a.shop_stats.already_sold_out_skc || 0) - (b.shop_stats.already_sold_out_skc || 0) },
     { title: "待处理售后", dataIndex: ["after_sales", "count"], width: 100, align: "right", render: (v: number) => <HeatNum value={v} max={maxes.aftersale} hue="red" />, sorter: (a, b) => (a.after_sales.count || 0) - (b.after_sales.count || 0) },
-    { title: "数据上报", key: "lag", width: 110, render: (_, s) => <Tag color={lagColor(s.health.lag_seconds)}>{fmtLag(s.health.lag_seconds)}前</Tag>, sorter: (a, b) => (a.health.lag_seconds ?? Infinity) - (b.health.lag_seconds ?? Infinity) },
+    {
+      title: "数据上报", key: "lag", width: 110,
+      render: (_, s) => {
+        const sec = s.health.lag_seconds;
+        const stale = sec != null && sec >= STALE_THRESHOLD_SECONDS;
+        return (
+          <Badge
+            status={lagColor(sec) as "success" | "processing" | "error" | "default"}
+            text={<span style={{ fontSize: 12, color: stale ? COLOR.bad : "#888" }}>{sec == null ? "未上报" : `${fmtLag(sec)}前`}</span>}
+          />
+        );
+      },
+      sorter: (a, b) => (a.health.lag_seconds ?? Infinity) - (b.health.lag_seconds ?? Infinity),
+    },
   ];
 
   // === Tab 2: 营收毛利（金额）===
