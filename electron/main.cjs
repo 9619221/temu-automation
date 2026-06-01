@@ -3418,58 +3418,36 @@ async function imageStudioCloudFetch(routePath, init = {}) {
 }
 
 async function imageStudioFetch(routePath, init = {}) {
-  if (isCloudAgentRoute(routePath)) {
-    return imageStudioCloudFetch(routePath, init);
-  }
-  let status = await ensureImageStudioService();
-  if (routeNeedsImageStudioRuntimeConfig(routePath)) {
-    await syncImageStudioRuntimeConfig(routePath);
-  }
+  // 全量切云：所有 image-studio 路由（老 AI 出图/GPT 版 + 多 agent 版）都走云端
+  // agent-gen（erp.temu.chat/agent），不再依赖本地子进程。鉴权带 API_SECRET + erp
+  // sessionCookie（多用户隔离）。multipart(analyze)/long-running SSE(generate) 逻辑复用，仅 base 换云端。
+  const baseUrl = IMAGE_STUDIO_CLOUD_AGENT_BASE;
   const projectInfo = getImageStudioProjectInfo();
+  let erpCookie = "";
+  try {
+    const { readRuntimeConfig } = require("./erp/clientRuntime.cjs");
+    erpCookie = readRuntimeConfig()?.sessionCookie || "";
+  } catch {}
   const headers = {
     ...getImageStudioAuthHeaders(projectInfo),
+    ...(erpCookie ? { Cookie: erpCookie } : {}),
     ...(init.headers || {}),
   };
   const isLongRunning = IMAGE_STUDIO_LONG_RUNNING_ROUTES.has(routePath);
   const longRunningFetch = isLongRunning ? getImageStudioLongRunningFetch() : null;
   const multipartPayload = getImageStudioMultipartPayload(init.body);
-  const request = () => {
-    if (multipartPayload && !longRunningFetch) {
-      return imageStudioMultipartFetch(`${status.url}${routePath}`, { ...init, headers }, multipartPayload);
-    }
-    if (longRunningFetch) {
-      return longRunningFetch.fetch(`${status.url}${routePath}`, {
-        ...init,
-        headers,
-        body: createUndiciFormDataBody(init.body, longRunningFetch.FormData),
-        dispatcher: longRunningFetch.agent,
-      });
-    }
-    return fetch(`${status.url}${routePath}`, {
+  if (multipartPayload && !longRunningFetch) {
+    return imageStudioMultipartFetch(`${baseUrl}${routePath}`, { ...init, headers }, multipartPayload);
+  }
+  if (longRunningFetch) {
+    return longRunningFetch.fetch(`${baseUrl}${routePath}`, {
       ...init,
       headers,
+      body: createUndiciFormDataBody(init.body, longRunningFetch.FormData),
+      dispatcher: longRunningFetch.agent,
     });
-  };
-
-  try {
-    return await request();
-  } catch (error) {
-    if (!isImageStudioLocalServiceConnectionError(error)) {
-      throw error;
-    }
-    // 长任务路由：fetch 失败有可能只是慢/超时，不要立刻重启服务（会让任务白跑）
-    // 长任务的重启-重试改成只对 connect/socket 立即失败这类硬错误生效
-    if (isLongRunning) {
-      appendImageStudioLog(`[http] ${routePath} fetch failed (long route，不重启服务): ${getImageStudioErrorText(error)}`);
-      throw error;
-    }
-    appendImageStudioLog(`[http] ${routePath} local service unavailable，正在重启后重试: ${getImageStudioErrorText(error)}`);
-    status = await restartImageStudioService();
-    if (routeNeedsImageStudioRuntimeConfig(routePath)) {
-      await syncImageStudioRuntimeConfig(routePath, { force: true });
-    }
-    return request();
   }
+  return fetch(`${baseUrl}${routePath}`, { ...init, headers });
 }
 
 async function imageStudioJson(routePath, init = {}) {
