@@ -664,7 +664,7 @@ export default function OperationsWorkbench() {
     <div style={{ padding: 16 }}>
       <Card
         title="运营工作台"
-        extra={<Button icon={<ReloadOutlined />} loading={skuLoading || riskLoading || actLoading} onClick={() => { loadSku(); setRiskLoaded(false); setActLoaded(false); if (activeTab === "risk") loadRisk(); if (activeTab === "activity") loadAct(); message.success("已刷新"); }}>刷新</Button>}
+        extra={<Button icon={<ReloadOutlined />} loading={skuLoading || riskLoading || actLoading || shopLoading || trendLoading || stockLoading || panelLoading} onClick={() => { loadSku(); setShopLoaded(false); setTrendLoaded(false); setStockLoaded(false); setRiskLoaded(false); setActLoaded(false); setPanelLoaded(false); if (activeTab === "shop") loadShop(); else if (activeTab === "trend") loadTrend(); else if (activeTab === "stock") loadStockOrders(); else if (activeTab === "risk") loadRisk(); else if (activeTab === "activity") loadAct(); else if (activeTab === "panel") loadPanel(); else if (activeTab === "overview") { loadShop(); loadTrend(); loadStockOrders(); loadRisk(); loadAct(); } message.success("已刷新"); }}>刷新</Button>}
         bodyStyle={{ padding: 0 }}
       >
         {error && <Alert type="error" showIcon message="加载失败" description={error} style={{ margin: 16 }} action={<Button size="small" onClick={loadSku}>重试</Button>} />}
