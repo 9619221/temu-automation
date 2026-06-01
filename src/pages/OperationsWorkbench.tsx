@@ -89,6 +89,7 @@ function diagnose(r: SkuRow): Diag[] {
       if (d30 > 0 && d7 < d30 * 0.5) issues.push({ label: "销量下滑", action: "近 7 天日均不足 30 天一半 → 关注/报活动/比价", level: 1 });
     }
   }
+  if (!r.sku_ext_code) issues.push({ label: "缺货号", action: "Temu 后台未回填 SKU 货号,无法与 ERP 绑定 → 去卖家后台补货号", level: 1 });
   return issues;
 }
 
@@ -590,7 +591,7 @@ export default function OperationsWorkbench() {
             <Statistic title="健康" value={overview.healthy} valueStyle={{ color: "#3f8600" }} />
           </div>
           {commonFilters(
-            <Select size="small" style={{ width: 130 }} value={diagFilter} onChange={setDiagFilter} options={[{ value: "all", label: "全部" }, { value: "issues", label: "仅有问题" }, { value: "urgent", label: "急" }, { value: "warn", label: "警" }, { value: "note", label: "注意" }]} />,
+            <Select size="small" style={{ width: 140 }} value={diagFilter} onChange={setDiagFilter} options={[{ value: "all", label: "全部" }, { value: "issues", label: "仅有问题" }, { value: "urgent", label: "急" }, { value: "warn", label: "警" }, { value: "note", label: "注意" }, { value: "缺货号", label: "缺货号" }]} />,
           )}
           <Table<DiagnosedRow> dataSource={diagView} columns={diagColumns} rowKey={(r) => `${r.mall_id}|${r.skc_id}|${r.sku_ext_code}`} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 条` }} scroll={{ x: 1120 }} loading={skuLoading} />
         </div>
