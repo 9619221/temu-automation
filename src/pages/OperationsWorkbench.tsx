@@ -51,6 +51,7 @@ interface StoreMatrixRow {
 }
 interface ProductPanelRow {
   mall_id: string; product_id: string; store_code: string | null; mall_name: string | null; title: string | null; thumb: string | null;
+  skc_codes: string | null; sku_codes: string | null;
   expose: number | null; click: number | null; pay: number | null; conv: number | null; grow: string | null;
   limited: boolean; act_cnt: number; min_price: number | null; compliance: string | null; __rk?: number;
 }
@@ -418,6 +419,8 @@ export default function OperationsWorkbench() {
   const panelColumns: ColumnsType<ProductPanelRow> = [
     { title: "店号", dataIndex: "store_code", width: 70, fixed: "left", render: (v, r) => v || r.mall_id },
     { title: "SPU", dataIndex: "product_id", width: 120, render: (v: string) => <Typography.Text copyable={{ text: v }} style={{ fontSize: 12, fontWeight: 600 }}>{v}</Typography.Text> },
+    { title: "SKC", dataIndex: "skc_codes", width: 130, render: (v: string | null) => (v ? <Tooltip title={v}><div style={{ fontSize: 12, maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</div></Tooltip> : <span style={{ color: "#bbb" }}>—</span>) },
+    { title: "SKU货号", dataIndex: "sku_codes", width: 140, render: (v: string | null) => (v ? <Tooltip title={v}><div style={{ fontSize: 12, maxWidth: 130, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</div></Tooltip> : <span style={{ color: "#bbb" }}>—</span>) },
     { title: "商品", key: "prod", width: 340, render: (_, r) => (
       <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
         {r.thumb ? <div style={{ flexShrink: 0, width: 40, height: 40 }}><Image src={r.thumb} width={40} height={40} style={{ objectFit: "cover", borderRadius: 4 }} preview={{ mask: <EyeOutlined />, maskClassName: "prod-thumb-mask" }} /></div> : <div style={{ width: 40, height: 40, borderRadius: 4, background: "#f0f0f0", flexShrink: 0 }} />}

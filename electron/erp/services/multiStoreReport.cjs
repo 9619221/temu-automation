@@ -814,6 +814,11 @@ function buildProductPanel(db, options = {}) {
       SELECT product_id, title, thumb_url FROM cloud.temu_sales_snapshot WHERE tenant_id = ? AND product_id <> '' AND title IS NOT NULL AND title <> ''
     ) GROUP BY product_id`, [tid, tid]);
   const titleMap = new Map(titleRows.map((t) => [String(t.product_id), { title: t.title, thumb: t.thumb }]));
+  // SKC / SKU 编码（by product_id，从 sales 聚合去重）
+  const codeRows = optionalAllLocal(db, `
+    SELECT product_id, GROUP_CONCAT(DISTINCT NULLIF(skc_id,'')) skcs, GROUP_CONCAT(DISTINCT NULLIF(sku_ext_code,'')) skus
+      FROM cloud.temu_sales_snapshot WHERE tenant_id = ? AND product_id <> '' GROUP BY product_id`, [tid]);
+  const codeMap = new Map(codeRows.map((c) => [String(c.product_id), { skcs: c.skcs || null, skus: c.skus || null }]));
   const malls = optionalAllLocal(db, `SELECT mall_id, store_code, mall_name, status FROM erp_temu_malls`, []);
   const mallMap = new Map(malls.map((m) => [m.mall_id, m]));
   const map = new Map();
@@ -834,6 +839,9 @@ function buildProductPanel(db, options = {}) {
     if (!options.includeTest && m && m.status === "test") continue;
     const tm = titleMap.get(String(e.product_id));
     if (tm) { if (!e.title) e.title = tm.title || null; if (!e.thumb) e.thumb = tm.thumb || null; }
+    const cm = codeMap.get(String(e.product_id));
+    e.skc_codes = cm ? cm.skcs : null;
+    e.sku_codes = cm ? cm.skus : null;
     e.store_code = m ? m.store_code || null : null;
     e.mall_name = m ? m.mall_name || null : null;
     out.push(e);
