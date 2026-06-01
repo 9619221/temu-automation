@@ -2208,6 +2208,8 @@ const AUTO_IMAGE_DEFAULT_PORT = normalizeImageStudioPort(
 const AUTO_IMAGE_HEALTH_PATH = "/api/history";
 const IMAGE_STUDIO_SAFE_ANALYZE_MODEL = "gpt-5.5";
 const IMAGE_STUDIO_SAFE_ANALYZE_BASE_URL = "https://erp.temu.chat/api/ai/analyze";
+// M3: 多 agent / Supervisor 生图独立服务（Caddy handle_path /agent/* 剥前缀 → 服务器 127.0.0.1:8789）
+const IMAGE_STUDIO_CLOUD_AGENT_BASE = "https://erp.temu.chat/agent";
 const IMAGE_STUDIO_LEGACY_DENIED_ANALYZE_MODELS = new Set([
   "gemini-3.1-flash-lite-preview",
 ]);
@@ -3393,7 +3395,25 @@ function imageStudioMultipartFetch(urlString, init = {}, payload = {}) {
   });
 }
 
+// M3: /api/agent/*（9-agent Supervisor）走云端独立服务，不依赖本地子进程。
+// 鉴权复用 getImageStudioAuthHeaders（读 .env.local 的 API_SECRET 作 Bearer）。
+function isCloudAgentRoute(routePath) {
+  return typeof routePath === "string" && routePath.startsWith("/api/agent/");
+}
+
+async function imageStudioCloudFetch(routePath, init = {}) {
+  const projectInfo = getImageStudioProjectInfo();
+  const headers = {
+    ...getImageStudioAuthHeaders(projectInfo),
+    ...(init.headers || {}),
+  };
+  return fetch(`${IMAGE_STUDIO_CLOUD_AGENT_BASE}${routePath}`, { ...init, headers });
+}
+
 async function imageStudioFetch(routePath, init = {}) {
+  if (isCloudAgentRoute(routePath)) {
+    return imageStudioCloudFetch(routePath, init);
+  }
   let status = await ensureImageStudioService();
   if (routeNeedsImageStudioRuntimeConfig(routePath)) {
     await syncImageStudioRuntimeConfig(routePath);
