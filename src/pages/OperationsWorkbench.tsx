@@ -168,9 +168,6 @@ export default function OperationsWorkbench() {
   const [selActRows, setSelActRows] = useState<ActivityRow[]>([]); // 活动报名:勾选待提交行
   const [enrollBusy, setEnrollBusy] = useState(false);
   const [actSkuOnly, setActSkuOnly] = useState(true); // 活动报名:仅看有货号的行(店铺-商品-活动维度)
-  const [liveMode, setLiveMode] = useState(false); // 活动报名:live 数据源(worker 当前登录店,干净可提交)
-  const [liveRows, setLiveRows] = useState<ActivityRow[]>([]);
-  const [liveLoading, setLiveLoading] = useState(false);
   // 待办闭环(第一版落 localStorage,零后端撞车;task key 稳定,后续可平滑迁 op_task_state 表)
   const [todoState, setTodoState] = useState<Record<string, "done" | "ignored">>(() => {
     try { return JSON.parse(localStorage.getItem("ow_todo_state") || "{}"); } catch { return {}; }
@@ -237,60 +234,6 @@ export default function OperationsWorkbench() {
     if (r.sku_ext_code && skuMinStock.has(r.sku_ext_code)) return skuMinStock.get(r.sku_ext_code)!; // 默认取活动最小值
     return r.activity_stock || 0;
   }, [enrollDraft, enrollKey, skuMinStock]);
-
-  // 货号 → 真实成本(从快照 cost 复用,live 行按货号 join)
-  const costByCode = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const r of actRows) if (r.sku_ext_code && r.cost != null && r.cost > 0) m.set(r.sku_ext_code, r.cost);
-    return m;
-  }, [actRows]);
-
-  // 切 live 数据源:worker 当前登录店,拉 activityList(带 thematicId)+ match(带商品/参考价),干净可提交
-  const fetchLive = useCallback(async () => {
-    const listApi = window.electronAPI?.automation?.yunduActivityList;
-    const matchApi = window.electronAPI?.automation?.yunduActivityMatch;
-    if (!listApi || !matchApi) { message.error("当前桌面端不支持(需重启/更新)"); return; }
-    setLiveLoading(true);
-    try {
-      const lr: any = await listApi({ pageNum: 1, pageSize: 50 });
-      const types: any[] = lr?.list || [];
-      const thematics: Array<{ type: number; tid: string; name: string; end: any }> = [];
-      for (const t of types) {
-        const list = (t?.raw && t.raw.thematicList) || t?.thematicList || [];
-        for (const th of list) if (th?.activityThematicId) thematics.push({ type: t.activityType, tid: String(th.activityThematicId), name: th.activityThematicName || t.activityName || "", end: th.endTime || th.enrollDeadLine || null });
-      }
-      const cap = thematics.slice(0, 15); // v1 限前 15 个活动,避免全量 match 太慢
-      const rows: ActivityRow[] = [];
-      for (const th of cap) {
-        let ctx: any = null, rounds = 0;
-        while (rounds < 20) {
-          const params: any = { activityThematicId: Number(th.tid), activityType: th.type, rowCount: 10 };
-          if (ctx) params.searchScrollContext = ctx;
-          const mr: any = await matchApi(params);
-          const ml: any[] = mr?.matchList || [];
-          for (const p of ml) for (const skc of (p.skcList || [])) for (const sku of (skc.skuList || [])) {
-            const ext = sku.extCode ? String(sku.extCode) : null;
-            rows.push({
-              mall_id: "live", store_code: "live", mall_name: null, kind: "activity", title: th.name, status: null,
-              activity_id: th.tid, product_id: p.productId != null ? String(p.productId) : null, activity_type: th.type,
-              sku_id: sku.skuId != null ? String(sku.skuId) : null, sku_ext_code: ext, skc_id: skc.skcId != null ? String(skc.skcId) : null,
-              signup_price: sku.dailyPrice != null ? sku.dailyPrice / 100 : null,
-              suggested_price: sku.suggestActivityPrice != null ? sku.suggestActivityPrice / 100 : null,
-              price_diff: null, activity_stock: p.targetActivityStock || 0,
-              cost: ext && costByCode.has(ext) ? costByCode.get(ext)! : null,
-              end_at: th.end ? String(th.end) : null, stat_date: null,
-            });
-          }
-          ctx = mr?.searchScrollContext || null; rounds++;
-          if (!mr?.hasMore || !ml.length) break;
-        }
-      }
-      setLiveRows(rows); setLiveMode(true);
-      message.success(`live 拉取 ${rows.length} 行 / ${cap.length} 活动(当前登录店)`);
-    } catch (e: any) {
-      message.error("live 拉取失败:" + (e?.message || String(e)) + "(确认自动化浏览器已登录 Temu)");
-    } finally { setLiveLoading(false); }
-  }, [costByCode]);
 
   // 提交报名:勾选行→按活动分组→worker live match 解析权威 ID(dryRun 预演)→二次确认→真提交
   const submitEnroll = useCallback(async () => {
@@ -638,8 +581,8 @@ export default function OperationsWorkbench() {
   }, [riskStoreReady, storeFilter, sevFilter, search, inScope]);
 
   const actView = useMemo(() => {
-    let v = liveMode ? liveRows : actRows.filter((r) => inScope(r.store_code || r.mall_id));
-    if (!liveMode && storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
+    let v = actRows.filter((r) => inScope(r.store_code || r.mall_id));
+    if (storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
     if (kindFilter !== "all") v = v.filter((r) => r.kind === kindFilter);
     if (actSkuOnly) v = v.filter((r) => r.sku_ext_code); // 仅看有货号的行(滤掉活动表头噪声)
     const q = search.trim().toLowerCase();
@@ -652,7 +595,7 @@ export default function OperationsWorkbench() {
       const sk = (a.sku_ext_code || "").localeCompare(b.sku_ext_code || ""); if (sk) return sk;
       return (a.title || "").localeCompare(b.title || "");
     }).map((r, i) => ({ ...r, __rk: i }));
-  }, [actRows, storeFilter, kindFilter, search, inScope, actSkuOnly, liveMode, liveRows]);
+  }, [actRows, storeFilter, kindFilter, search, inScope, actSkuOnly]);
 
   const shopAgg = useMemo(() => {
     let lack = 0, soldout = 0, sales = 0;
@@ -1118,9 +1061,6 @@ export default function OperationsWorkbench() {
             </>,
           )}
           <div style={{ padding: "0 16px 8px", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            <Button type={liveMode ? "default" : "primary"} size="small" loading={liveLoading} onClick={fetchLive}>{liveMode ? "🔄 重拉 live" : "拉取 live(当前登录店)"}</Button>
-            {liveMode && <><Tag color="green">live·干净可提交</Tag><Button size="small" onClick={() => { setLiveMode(false); setSelActRows([]); }}>回快照</Button></>}
-            <span style={{ width: 1, height: 16, background: "#eee" }} />
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>批量填写(当前 {actView.length} 行):</Typography.Text>
             <InputNumber size="small" min={0} step={0.1} precision={2} prefix="¥" placeholder="申报价" value={batchPrice ?? undefined} style={{ width: 110 }} onChange={(v) => setBatchPrice(v == null ? null : Number(v))} />
             <Button size="small" disabled={batchPrice == null} onClick={() => { const next = { ...enrollDraft }; for (const r of actView) { const k = enrollKey(r); next[k] = { ...(next[k] || {}), price: batchPrice! }; } persistDraft(next); }}>按此价填</Button>
