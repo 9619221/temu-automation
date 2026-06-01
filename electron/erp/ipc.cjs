@@ -4122,8 +4122,7 @@ function saveSkuBundle(payload = {}, actor = erpState.currentUser) {
     if (!sku || sku.status === "deleted") throw new Error(`子商品不存在：${componentSkuId}`);
     if (sku.company_id !== companyId) throw new Error(`子商品不属于当前公司：${sku.internal_sku_code || componentSkuId}`);
     if ((sku.sku_type || "single") === "bundle") throw new Error("组合装只能由普通商品组成，不能再套组合装");
-    const unitCost = optionalNumber(item.unitCost ?? item.unit_cost) ?? getSkuEffectiveCost(db, componentSkuId);
-    if (unitCost === null) throw new Error(`子商品缺成本价：${sku.internal_sku_code || componentSkuId}`);
+    const unitCost = optionalNumber(item.unitCost ?? item.unit_cost) ?? getSkuEffectiveCost(db, componentSkuId) ?? 0;
     return {
       sku,
       componentSkuId,

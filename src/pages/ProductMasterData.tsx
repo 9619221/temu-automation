@@ -1979,11 +1979,6 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       message.warning("组合装子商品不能重复");
       return;
     }
-    const missingCost = selectedRows.find((row) => row.unitCost === null);
-    if (missingCost) {
-      message.warning(`子商品缺成本价：${missingCost.sku?.internalSkuCode || missingCost.skuId}`);
-      return;
-    }
     setSubmitting("sku-bundle");
     try {
       await erp.sku.saveBundle({
@@ -3659,7 +3654,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
         width={960}
         confirmLoading={submitting === "sku-bundle"}
         okButtonProps={{
-          disabled: bundleLoadingComponents || bundleSelectedCount < 2 || bundleHasMissingCost,
+          disabled: bundleLoadingComponents || bundleSelectedCount < 2,
         }}
         onOk={handleSaveBundle}
         onCancel={resetBundleModal}
@@ -3707,7 +3702,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
           </div>
 
           {bundleHasMissingCost ? (
-            <Alert type="warning" showIcon message="有子商品缺成本价，先维护成本价后才能保存组合装。" />
+            <Alert type="warning" showIcon message="有子商品缺成本价，将按 0 计入组合成本，可先保存后再补维护成本价。" />
           ) : null}
 
           <Table
