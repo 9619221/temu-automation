@@ -3403,8 +3403,15 @@ function isCloudAgentRoute(routePath) {
 
 async function imageStudioCloudFetch(routePath, init = {}) {
   const projectInfo = getImageStudioProjectInfo();
+  // 多用户隔离：带上 erp 登录 sessionCookie，agent 服务据此反查 uid 隔离 job/history
+  let erpCookie = "";
+  try {
+    const { readRuntimeConfig } = require("./erp/clientRuntime.cjs");
+    erpCookie = readRuntimeConfig()?.sessionCookie || "";
+  } catch {}
   const headers = {
     ...getImageStudioAuthHeaders(projectInfo),
+    ...(erpCookie ? { Cookie: erpCookie } : {}),
     ...(init.headers || {}),
   };
   return fetch(`${IMAGE_STUDIO_CLOUD_AGENT_BASE}${routePath}`, { ...init, headers });

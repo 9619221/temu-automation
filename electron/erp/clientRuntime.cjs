@@ -431,6 +431,7 @@ async function discoverControllers(params = {}) {
 module.exports = {
   HK_SERVER_URL,
   configureClientRuntime,
+  readRuntimeConfig,
   discoverControllers,
   getRuntimeStatus,
   isClientMode,
