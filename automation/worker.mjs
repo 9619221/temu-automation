@@ -3905,15 +3905,18 @@ async function yunduEnrollPriced({ activityType, activityThematicId, items = [],
   for (const it of items) if (it && it.extCode != null) wantByExt.set(String(it.extCode), it);
   const page = await _yunduOpenPage();
   // 滚动匹配全部可报商品
-  let matched = [], hasMore = true, rounds = 0;
-  while (hasMore && rounds < 30) {
-    const r = await _yunduFetch(page, "/api/kiana/gamblers/marketing/enroll/scroll/match",
-      { activityThematicId, activityType, productIds: [], productSkcExtCodes: [], rowCount: 100, hasMore: rounds > 0 });
+  // rowCount 必须小(实测 100 被拒返空,5/10 正常);用 searchScrollContext 翻页扫全
+  let matched = [], scrollContext = null, rounds = 0;
+  while (rounds < 60) {
+    const reqBody = { activityThematicId, activityType, productIds: [], productSkcExtCodes: [], rowCount: 10 };
+    if (scrollContext) reqBody.searchScrollContext = scrollContext;
+    const r = await _yunduFetch(page, "/api/kiana/gamblers/marketing/enroll/scroll/match", reqBody);
     const res = r?.body?.result || {};
     const list = res.matchList || res.list || [];
     matched.push(...list);
-    hasMore = !!res.hasMore; rounds += 1;
-    if (!list.length) break;
+    scrollContext = res.searchScrollContext || null;
+    rounds += 1;
+    if (!res.hasMore || !list.length) break;
   }
   // 按货号解析三级 ID,价 ×100 转分
   const prodMap = new Map();
@@ -3958,16 +3961,17 @@ async function yunduAutoEnroll({ activityThematicId, activityType, dryRun = true
   try {
     // 1. 滚动匹配所有可报商品
     let allMatched = [];
-    let hasMore = true, rounds = 0;
-    while (hasMore && rounds < 20) {
-      const r = await _yunduFetch(page, "/api/kiana/gamblers/marketing/enroll/scroll/match",
-        { activityThematicId, activityType, productIds: [], productSkcExtCodes: [], rowCount: 100, hasMore: rounds > 0 });
+    let scrollContext = null, rounds = 0;
+    while (rounds < 60) {
+      const reqBody = { activityThematicId, activityType, productIds: [], productSkcExtCodes: [], rowCount: 10 };
+      if (scrollContext) reqBody.searchScrollContext = scrollContext;
+      const r = await _yunduFetch(page, "/api/kiana/gamblers/marketing/enroll/scroll/match", reqBody);
       const result = r?.body?.result || {};
       const matchList = result.matchList || result.list || [];
       allMatched.push(...matchList);
-      hasMore = !!result.hasMore;
+      scrollContext = result.searchScrollContext || null;
       rounds += 1;
-      if (matchList.length === 0) break;
+      if (!result.hasMore || matchList.length === 0) break;
     }
     if (dryRun) {
       return { dryRun: true, matchedCount: allMatched.length, matched: allMatched.slice(0, 50) };
