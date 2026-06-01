@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Card, Row, Col, Table, Tag, Select, Input, Space, Typography, Alert, Button, Progress, Tooltip } from "antd";
+import { Card, Row, Col, Table, Tag, Select, Input, Space, Typography, Alert, Button, Progress, Tooltip, Checkbox } from "antd";
 import { ReloadOutlined, AccountBookOutlined, CheckCircleOutlined, ClockCircleOutlined, InboxOutlined, CalendarOutlined, WalletOutlined, InfoCircleOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 
@@ -26,6 +26,10 @@ const STATUS_HEX: Record<string, string> = {
 // 账龄分桶配色/标签
 const AGE_HEX: Record<string, string> = { "0-30": "#52c41a", "31-60": "#faad14", "61-90": "#fa8c16", "90+": "#cf1322" };
 const AGE_LABEL: Record<string, string> = { "0-30": "0-30 天", "31-60": "31-60 天", "61-90": "61-90 天", "90+": "90 天以上" };
+// 已付未发货账龄分桶配色/标签(付款后拖延天数)
+const PS_HEX: Record<string, string> = { "0-7": "#52c41a", "8-15": "#faad14", "16-30": "#fa8c16", "30+": "#cf1322" };
+const PS_LABEL: Record<string, string> = { "0-7": "0-7 天", "8-15": "8-15 天", "16-30": "16-30 天", "30+": "30 天以上" };
+const SHIPPED_STATUSES = ["shipped", "arrived", "inbounded", "closed"];
 
 interface OrderRow {
   id: string; po_no: string; status: string; status_label: string; payment_status: string | null;
@@ -48,6 +52,7 @@ interface Report {
   capital: { paid_done: Quad; paid_undone: Quad; unpaid_done: Quad; unpaid_undone: Quad };
   aging: Aging[];
   cash_outflow: { coverage: number; monthly: Monthly[] };
+  paid_unshipped: { count: number; amount: number; aging: Aging[] };
   by_status: ByStatus[]; by_supplier: BySupplier[]; monthly: Monthly[]; orders: OrderRow[];
 }
 
@@ -58,6 +63,7 @@ export default function PurchaseReportPanel() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [supplierFilter, setSupplierFilter] = useState("all");
   const [keyword, setKeyword] = useState("");
+  const [psOnly, setPsOnly] = useState(false);
 
   const load = useCallback(async () => {
     if (!window.electronAPI?.erp?.reports?.purchase) {
@@ -87,13 +93,14 @@ export default function PurchaseReportPanel() {
     return orders.filter((o) => {
       if (statusFilter !== "all" && o.status !== statusFilter) return false;
       if (supplierFilter !== "all" && (o.buyer_name || "(未知采购员)") !== supplierFilter) return false;
+      if (psOnly && !(o.payment_status === "paid" && !SHIPPED_STATUSES.includes(o.status))) return false;
       if (kw) {
         const hay = [o.po_no, o.supplier_name, o.buyer_name, o.account_name].filter(Boolean).join(" ").toLowerCase();
         if (!hay.includes(kw)) return false;
       }
       return true;
     });
-  }, [orders, statusFilter, supplierFilter, keyword]);
+  }, [orders, statusFilter, supplierFilter, keyword, psOnly]);
 
   const s = data?.summary;
   const cap = data?.capital;
@@ -109,6 +116,8 @@ export default function PurchaseReportPanel() {
   const maxSupplier = Math.max(1, ...bySupplier.map((x) => x.amount));
   const totalStatusCount = byStatus.reduce((a, x) => a + x.count, 0) || 1;
   const agingMaxAmt = Math.max(1, ...aging.map((x) => x.amount));
+  const ps = data?.paid_unshipped;
+  const psMaxAmt = Math.max(1, ...(ps?.aging || []).map((x) => x.amount));
 
   // 财务 KPI
   const KPIS = s && cap ? [
@@ -184,6 +193,37 @@ export default function PurchaseReportPanel() {
       <div style={{ marginTop: 8, fontSize: 12, color: "#999" }}>
         采购总额 = 货款 + 运费（已排除「已取消」单）；已付/应付按付款状态判定（系统 paid_amount 字段不可信，故按状态口径）。
       </div>
+
+      {/* 已付未发货 · 预付风险敞口 */}
+      {ps && ps.count > 0 ? (
+        <Card
+          size="small"
+          style={{ marginTop: 16, borderColor: "#ffccc7", background: "#fffbfa" }}
+          styles={{ header: { borderBottom: "1px solid #ffe4e0" } }}
+          title={<span style={{ color: "#cf1322", fontWeight: 600 }}>已付未发货 · 预付风险敞口</span>}
+          extra={<Tooltip title="钱已付给供应商但订单状态尚未到「已发货」。这是资金占用 + 供应商履约/跑路风险敞口；付款后拖延越久越需重点跟进(催发或退款)。"><InfoCircleOutlined style={{ color: "#999" }} /></Tooltip>}
+        >
+          <Row gutter={16} align="middle">
+            <Col xs={24} md={7}>
+              <div style={{ fontSize: 12, color: "#cf1322" }}>预付未发货金额</div>
+              <div style={{ fontSize: 26, fontWeight: 700, color: "#cf1322", lineHeight: 1.2 }}>{fmtMoney(ps.amount)}</div>
+              <div style={{ fontSize: 12, color: "#888", marginTop: 4 }}>{fmtNum(ps.count)} 单 · 钱付了货没发</div>
+              <Button type="link" size="small" danger style={{ paddingLeft: 0, marginTop: 4 }} onClick={() => setPsOnly(true)}>在下方明细中查看这些单 →</Button>
+            </Col>
+            <Col xs={24} md={17}>
+              <div style={{ fontSize: 12, color: "#888", marginBottom: 6 }}>按付款后拖延时长(下单距今)</div>
+              {ps.aging.map((a) => (
+                <div key={a.bucket} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                  <span style={{ width: 72, fontSize: 12, color: a.bucket === "30+" ? "#cf1322" : "#666", fontWeight: a.bucket === "30+" ? 600 : 400 }}>{PS_LABEL[a.bucket]}</span>
+                  <div style={{ flex: 1, minWidth: 40 }}><Progress percent={Math.round((a.amount / psMaxAmt) * 100)} showInfo={false} size="small" strokeColor={PS_HEX[a.bucket]} /></div>
+                  <span style={{ width: 52, textAlign: "right", fontSize: 12, color: "#666" }}>{fmtNum(a.count)}单</span>
+                  <span style={{ width: 100, textAlign: "right", fontSize: 12, fontWeight: a.bucket === "30+" ? 600 : 400, color: a.bucket === "30+" ? "#cf1322" : undefined }}>{fmtMoney(a.amount)}</span>
+                </div>
+              ))}
+            </Col>
+          </Row>
+        </Card>
+      ) : null}
 
       {/* 资金占用四象限 + 应付账款账龄 */}
       <Row gutter={16} style={{ marginTop: 16 }}>
@@ -344,6 +384,7 @@ export default function PurchaseReportPanel() {
             options={[{ value: "all", label: "全部采购员" }, ...bySupplier.map((sp) => ({ value: sp.supplier_name, label: sp.supplier_name }))]}
           />
           <Input.Search placeholder="搜索采购单号 / 供应商 / 采购员 / 店铺" allowClear style={{ width: 280 }} onChange={(e) => setKeyword(e.target.value)} />
+          <Checkbox checked={psOnly} onChange={(e) => setPsOnly(e.target.checked)} style={{ color: "#cf1322" }}>仅看已付未发货</Checkbox>
           <span style={{ color: "#999", fontSize: 12 }}>
             筛选后 {filtered.length} 单
             {data?.orders_truncated ? `（明细仅展示最近 ${data.orders_shown} 单 / 全量 ${data.row_count} 单；上方汇总·分布·账龄为全量统计）` : ""}

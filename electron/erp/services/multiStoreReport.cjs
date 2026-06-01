@@ -1056,6 +1056,20 @@ function buildPurchaseReport(db, options = {}) {
     .map((r) => ({ month: r.month, count: toNum(r.count), amount: toNum(r.amount) })).reverse();
   const covR = db.prepare(`SELECT SUM(CASE WHEN paid_at IS NOT NULL AND paid_at<>'' THEN 1 ELSE 0 END) f, COUNT(*) c FROM erp_purchase_orders WHERE ${ACT} AND payment_status='paid'`).get();
   const cash_outflow = { coverage: toNum(covR.c) > 0 ? Math.round((toNum(covR.f) / toNum(covR.c)) * 100) : 0, monthly: cashMonthly };
+  // 9) 已付未发货(预付风险敞口)：钱付了但 status 未到 shipped+，资金占用 + 供应商履约/跑路风险；按下单后拖延天数分桶
+  const UNSHIP = "status<>'cancelled' AND payment_status='paid' AND status NOT IN ('shipped','arrived','inbounded','closed')";
+  const psT = db.prepare(`SELECT COUNT(*) c, COALESCE(SUM(${AMT}),0) a FROM erp_purchase_orders WHERE ${UNSHIP}`).get();
+  const psAgingRaw = optionalAllLocal(db, `
+    SELECT CASE WHEN julianday('now')-julianday(created_at)<=7 THEN '0-7'
+                WHEN julianday('now')-julianday(created_at)<=15 THEN '8-15'
+                WHEN julianday('now')-julianday(created_at)<=30 THEN '16-30'
+                ELSE '30+' END bucket,
+           COUNT(*) count, COALESCE(SUM(${AMT}),0) amount
+      FROM erp_purchase_orders WHERE ${UNSHIP} GROUP BY bucket`, []);
+  const paid_unshipped = {
+    count: toNum(psT.c), amount: toNum(psT.a),
+    aging: ['0-7', '8-15', '16-30', '30+'].map((b) => { const r = psAgingRaw.find((x) => x.bucket === b); return { bucket: b, count: r ? toNum(r.count) : 0, amount: r ? toNum(r.amount) : 0 }; }),
+  };
   // 5) 明细(最近 ORDERS_LIMIT 单)：先取单，再只聚合这些单的明细行(避免全表 GROUP BY 43404 行)
   const rows = optionalAllLocal(db, `
     SELECT po.id, po.po_no, po.status, po.payment_status, po.total_amount, po.freight_amount,
@@ -1093,7 +1107,7 @@ function buildPurchaseReport(db, options = {}) {
   const result = {
     generated_at: Date.now(), row_count: toNum(sr.po_count),
     orders_shown: orders.length, orders_truncated: toNum(sr.po_count) > ORDERS_LIMIT,
-    summary, capital, aging, cash_outflow, by_status, by_supplier, monthly, orders,
+    summary, capital, aging, cash_outflow, paid_unshipped, by_status, by_supplier, monthly, orders,
   };
   _purchaseReportCache = { ts: Date.now(), data: result };
   return result;

@@ -1153,6 +1153,7 @@ interface ErpPurchaseReportResponse {
     };
     aging: { bucket: string; count: number; amount: number }[];
     cash_outflow: { coverage: number; monthly: { month: string; count: number; amount: number }[] };
+    paid_unshipped: { count: number; amount: number; aging: { bucket: string; count: number; amount: number }[] };
     by_status: { status: string; label: string; count: number; amount: number }[];
     by_supplier: { supplier_id: string | null; supplier_name: string; count: number; amount: number; paid: number }[];
     monthly: { month: string; count: number; amount: number }[];
