@@ -1111,6 +1111,7 @@ interface ErpPurchaseOrderRow {
   payment_status: string | null;
   supplier_id: string | null;
   supplier_name: string | null;
+  buyer_name: string | null;
   account_id: string | null;
   account_name: string | null;
   goods_amount: number;

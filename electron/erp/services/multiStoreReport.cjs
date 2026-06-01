@@ -978,6 +978,9 @@ function buildPurchaseReport(db, options = {}) {
   const ORDERS_LIMIT = 500;
   const curMonth = new Date().toISOString().slice(0, 7);
   const AMT = "(COALESCE(total_amount,0)+COALESCE(freight_amount,0))"; // 采购总额表达式
+  // 供应商主体名：仅取 1688 订单详情的卖家公司名/店铺名(兼容 $.baseInfo 与 $.result.baseInfo 两种结构)。
+  // 仅约 1.3% 单有(其余聚水潭单无 1688 详情)，无则 null；不再 fallback 采购员(那是 jst_purchaser_name)。
+  const SUP = "COALESCE(NULLIF(json_extract(po.external_order_detail_json,'$.baseInfo.sellerContact.companyName'),''),NULLIF(json_extract(po.external_order_detail_json,'$.result.baseInfo.sellerContact.companyName'),''),NULLIF(json_extract(po.external_order_detail_json,'$.baseInfo.sellerLoginId'),''),NULLIF(json_extract(po.external_order_detail_json,'$.result.baseInfo.sellerLoginId'),''))";
   // 1) 汇总(全量 SQL，不受明细 LIMIT 影响)
   const sr = db.prepare(`
     SELECT COUNT(*) po_count,
@@ -1003,9 +1006,10 @@ function buildPurchaseReport(db, options = {}) {
   const by_status = optionalAllLocal(db, `SELECT status, COUNT(*) count, SUM(${AMT}) amount FROM erp_purchase_orders GROUP BY status`, [])
     .map((r) => ({ status: r.status, label: STATUS_LABELS[r.status] || r.status, count: toNum(r.count), amount: toNum(r.amount) }))
     .sort((a, b) => b.count - a.count);
-  // 3) 供应商 TOP(全量，排除取消)：供应商名取 jst_purchaser_name(erp_suppliers 为空表，supplier_id 是 jst:supplier:xxx)，按供应商名聚合
+  // 3) 采购员 TOP(全量，排除取消)：按采购员(jst_purchaser_name,98.6%覆盖)聚合。
+  // 真供应商主体名仅1.3%覆盖(见 SUP)，不足以做排行；故此排行实为采购员维度。字段名沿用 by_supplier。
   const by_supplier = optionalAllLocal(db, `
-    SELECT COALESCE(NULLIF(po.jst_purchaser_name,''),'(未指定供应商)') supplier_name,
+    SELECT COALESCE(NULLIF(po.jst_purchaser_name,''),'(未知采购员)') supplier_name,
            COUNT(*) count,
            SUM(COALESCE(po.total_amount,0)+COALESCE(po.freight_amount,0)) amount,
            SUM(CASE WHEN po.payment_status='paid' THEN (COALESCE(po.total_amount,0)+COALESCE(po.freight_amount,0)) ELSE 0 END) paid
@@ -1055,7 +1059,7 @@ function buildPurchaseReport(db, options = {}) {
   const rows = optionalAllLocal(db, `
     SELECT po.id, po.po_no, po.status, po.payment_status, po.total_amount, po.freight_amount,
            po.created_at, po.expected_delivery_date, po.actual_delivery_date, po.paid_at,
-           po.supplier_id, po.jst_purchaser_name supplier_name, po.account_id, a.name account_name
+           po.supplier_id, ${SUP} supplier_name, po.jst_purchaser_name buyer_name, po.account_id, a.name account_name
       FROM erp_purchase_orders po
       LEFT JOIN erp_accounts a ON a.id = po.account_id
      ORDER BY po.created_at DESC LIMIT ?`, [ORDERS_LIMIT]);
@@ -1075,7 +1079,7 @@ function buildPurchaseReport(db, options = {}) {
     return {
       id: r.id, po_no: r.po_no, status: r.status, status_label: STATUS_LABELS[r.status] || r.status,
       payment_status: r.payment_status || null,
-      supplier_id: r.supplier_id || null, supplier_name: r.supplier_name || null,
+      supplier_id: r.supplier_id || null, supplier_name: r.supplier_name || null, buyer_name: r.buyer_name || null,
       account_id: r.account_id || null, account_name: r.account_name || null,
       goods_amount: goods, freight_amount: freight, total_amount: total,
       paid_amount: isPaid ? total : 0, unpaid_amount: isPaid ? 0 : total,

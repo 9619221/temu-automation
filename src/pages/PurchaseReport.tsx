@@ -29,7 +29,7 @@ const AGE_LABEL: Record<string, string> = { "0-30": "0-30 天", "31-60": "31-60 
 
 interface OrderRow {
   id: string; po_no: string; status: string; status_label: string; payment_status: string | null;
-  supplier_id: string | null; supplier_name: string | null; account_id: string | null; account_name: string | null;
+  supplier_id: string | null; supplier_name: string | null; buyer_name: string | null; account_id: string | null; account_name: string | null;
   goods_amount: number; freight_amount: number; total_amount: number; paid_amount: number; unpaid_amount: number;
   line_count: number; total_qty: number; received_qty: number; inbound_pct: number;
   created_at: string | null; expected_delivery_date: string | null; actual_delivery_date: string | null; paid_at: string | null;
@@ -86,9 +86,9 @@ export default function PurchaseReportPanel() {
     const kw = keyword.trim().toLowerCase();
     return orders.filter((o) => {
       if (statusFilter !== "all" && o.status !== statusFilter) return false;
-      if (supplierFilter !== "all" && (o.supplier_name || "(未指定供应商)") !== supplierFilter) return false;
+      if (supplierFilter !== "all" && (o.buyer_name || "(未知采购员)") !== supplierFilter) return false;
       if (kw) {
-        const hay = [o.po_no, o.supplier_name, o.account_name].filter(Boolean).join(" ").toLowerCase();
+        const hay = [o.po_no, o.supplier_name, o.buyer_name, o.account_name].filter(Boolean).join(" ").toLowerCase();
         if (!hay.includes(kw)) return false;
       }
       return true;
@@ -132,7 +132,8 @@ export default function PurchaseReportPanel() {
   const columns: ColumnsType<OrderRow> = [
     { title: "采购单号", dataIndex: "po_no", width: 140, fixed: "left", render: (v: string) => <Typography.Text copyable={{ text: v }} style={{ fontSize: 12 }}>{v}</Typography.Text> },
     { title: "店铺/账号", dataIndex: "account_name", width: 100, render: (v: string | null, r) => v || r.account_id || "—" },
-    { title: "供应商", dataIndex: "supplier_name", width: 130, render: (v: string | null) => v || <span style={{ color: "#bbb" }}>未指定</span> },
+    { title: "供应商", dataIndex: "supplier_name", width: 160, render: (v: string | null) => v || <Tooltip title="该单无 1688 订单详情，未采到供应商主体名"><span style={{ color: "#ccc" }}>—</span></Tooltip> },
+    { title: "采购员", dataIndex: "buyer_name", width: 100, render: (v: string | null) => v || <span style={{ color: "#bbb" }}>—</span> },
     { title: "状态", dataIndex: "status_label", width: 100, render: (_, r) => <Tag color={STATUS_COLOR[r.status] || "default"}>{r.status_label}</Tag>, filters: byStatus.map((st) => ({ text: st.label, value: st.status })), onFilter: (val, r) => r.status === val },
     { title: "货款", dataIndex: "goods_amount", width: 100, align: "right", sorter: (a, b) => a.goods_amount - b.goods_amount, render: fmtMoney },
     { title: "运费", dataIndex: "freight_amount", width: 85, align: "right", sorter: (a, b) => a.freight_amount - b.freight_amount, render: (v: number) => (v > 0 ? fmtMoney(v) : <span style={{ color: "#bbb" }}>—</span>) },
@@ -303,7 +304,7 @@ export default function PurchaseReportPanel() {
       </Row>
 
       {/* 供应商应付排行 */}
-      <Card size="small" title="供应商采购 / 应付 TOP20" style={{ marginTop: 16 }}>
+      <Card size="small" title="采购员采购 / 应付 TOP20" extra={<Tooltip title="按采购员(jst_purchaser_name)聚合。系统供应商主数据为空、99% 采购单无 1688 供应商信息，故采购维度落在采购员；真供应商名见明细「供应商」列(仅约1.3%单有)。"><span style={{ fontSize: 12, color: "#999" }}>为何不是供应商? <InfoCircleOutlined /></span></Tooltip>} style={{ marginTop: 16 }}>
         <Table
           dataSource={bySupplier}
           rowKey={(r) => r.supplier_id || "__none__"}
@@ -311,7 +312,7 @@ export default function PurchaseReportPanel() {
           pagination={false}
           scroll={{ y: 260 }}
           columns={[
-            { title: "供应商", dataIndex: "supplier_name", render: (v: string) => v || <span style={{ color: "#bbb" }}>(未指定供应商)</span> },
+            { title: "采购员", dataIndex: "supplier_name", render: (v: string) => v || <span style={{ color: "#bbb" }}>(未知采购员)</span> },
             { title: "采购单数", dataIndex: "count", width: 90, align: "right", render: fmtNum },
             { title: "采购额", dataIndex: "amount", width: 220, render: (v: number) => (
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -340,9 +341,9 @@ export default function PurchaseReportPanel() {
             style={{ width: 200 }}
             showSearch
             optionFilterProp="label"
-            options={[{ value: "all", label: "全部供应商" }, ...bySupplier.map((sp) => ({ value: sp.supplier_id || "__none__", label: sp.supplier_name }))]}
+            options={[{ value: "all", label: "全部采购员" }, ...bySupplier.map((sp) => ({ value: sp.supplier_name, label: sp.supplier_name }))]}
           />
-          <Input.Search placeholder="搜索采购单号 / 供应商 / 店铺" allowClear style={{ width: 260 }} onChange={(e) => setKeyword(e.target.value)} />
+          <Input.Search placeholder="搜索采购单号 / 供应商 / 采购员 / 店铺" allowClear style={{ width: 280 }} onChange={(e) => setKeyword(e.target.value)} />
           <span style={{ color: "#999", fontSize: 12 }}>
             筛选后 {filtered.length} 单
             {data?.orders_truncated ? `（明细仅展示最近 ${data.orders_shown} 单 / 全量 ${data.row_count} 单；上方汇总·分布·账龄为全量统计）` : ""}
@@ -354,7 +355,7 @@ export default function PurchaseReportPanel() {
           rowKey="id"
           size="small"
           loading={loading}
-          scroll={{ x: 1400 }}
+          scroll={{ x: 1520 }}
           pagination={{ defaultPageSize: 20, showSizeChanger: true, pageSizeOptions: [20, 50, 100], showTotal: (t) => `共 ${t} 单` }}
         />
       </Card>
