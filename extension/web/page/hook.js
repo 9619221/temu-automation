@@ -856,6 +856,7 @@
   }
   // 仅采集逆向必需的请求头，绝不采 cookie / authorization / token，避免凭据外泄
   const REQ_HEADER_ALLOW = ["anti-content", "content-type", "mallid", "x-requested-with"];
+  let _lastAntiContent = ""; // 缓存最近捕获的 anti-content,供主动报名复用(Phase 0 验证可跨接口复用)
   function pickReqHeaders(getter) {
     const out = {};
     try {
@@ -863,6 +864,7 @@
         const v = getter(name);
         if (v) out[name] = String(v).slice(0, 4000);
       }
+      if (out["anti-content"]) _lastAntiContent = out["anti-content"];
     } catch {}
     return out;
   }
@@ -1235,6 +1237,25 @@
     });
     po.observe({ type: "resource", buffered: true });
   } catch {}
+
+  // 主动报名:接 content script 下发的 enroll-request,在登录态页用缓存 anti-content 发 /enroll/submit,结果回传
+  window.addEventListener("temu-monitor.enroll-request", async (ev) => {
+    const d = ev && ev.detail;
+    if (!d || !d.reqId) return;
+    const ack = (payload) => { try { window.dispatchEvent(new CustomEvent("temu-monitor.enroll-result", { detail: { reqId: d.reqId, ...payload } })); } catch {} };
+    try {
+      if (!_lastAntiContent) { ack({ ok: false, error: "no_anti_content(页面需先发过请求)" }); return; }
+      const mallid = getCookieValue(["mallid", "mallId", "mall_id"]) || "";
+      const resp = await window.fetch("/api/kiana/gamblers/marketing/enroll/submit", {
+        method: "POST", credentials: "include",
+        headers: { "content-type": "application/json", "mallid": mallid, "anti-content": _lastAntiContent },
+        body: JSON.stringify(d.body || {}),
+      });
+      let body = null; const text = await resp.text();
+      try { body = JSON.parse(text); } catch { body = { text: text.slice(0, 500) }; }
+      ack({ ok: resp.ok && (body?.success !== false), status: resp.status, result: (body && body.result) || body });
+    } catch (e) { ack({ ok: false, error: String((e && e.message) || e).slice(0, 200) }); }
+  });
 
   window.__temuMonitor = {
     version: "0.3.3",

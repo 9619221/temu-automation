@@ -68,6 +68,33 @@
         .catch((error) => sendResponse({ ok: false, reason: String(error?.message || error).slice(0, 200) }));
       return true;
     }
+    if (msg.type === "ENROLL_SUBMIT" && msg.task) {
+      // SW 下发报名任务 → 转 page world hook 用登录态+anti-content 发 submit → 结果回传 SW
+      let settled = false;
+      const reqId = "e" + Date.now() + Math.random().toString(36).slice(2, 8);
+      const resultEvent = "temu-monitor.enroll-result";
+      const onResult = (ev) => {
+        if (!ev || !ev.detail || ev.detail.reqId !== reqId) return;
+        window.removeEventListener(resultEvent, onResult);
+        if (settled) return;
+        settled = true;
+        sendResponse(ev.detail);
+      };
+      window.addEventListener(resultEvent, onResult);
+      try {
+        window.dispatchEvent(new CustomEvent("temu-monitor.enroll-request", { detail: { reqId, body: msg.task.body } }));
+      } catch (e) {
+        if (!settled) { settled = true; sendResponse({ ok: false, error: String(e).slice(0, 200) }); }
+        return true;
+      }
+      setTimeout(() => {
+        window.removeEventListener(resultEvent, onResult);
+        if (settled) return;
+        settled = true;
+        try { sendResponse({ ok: false, error: "enroll_page_timeout" }); } catch {}
+      }, 30000);
+      return true; // async
+    }
     if (msg.type !== "GET_PAGE_STATS") return;
     let settled = false;
     try {

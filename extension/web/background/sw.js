@@ -17,13 +17,14 @@ import { enqueue, queueDepth, flush } from "./ingest-queue.js";
 
 const ALARM_FLUSH = "temu-monitor.flush";
 const ALARM_COLLECT = "temu-monitor.collect";
+const ALARM_ENROLL = "temu-monitor.enroll"; // 轮询云端待报名任务
 const STATS_KEY = "temu_monitor_stats";
 const MALLS_KEY = "temu_monitor_malls";
 const COLLECTOR_STATE_KEY = "temu_monitor_collector_state";
 const COLLECTOR_WINDOW_KEY = "temu_monitor_collector_window";
 const COLLECTOR_QUERY = "__temu_monitor_collector=1";
 const COLLECTOR_BOOT_VERSION_KEY = "temu_monitor_collector_boot_version";
-const COLLECTOR_BOOT_VERSION = "20260525_passive_capture";
+const COLLECTOR_BOOT_VERSION = "20260601_return_pages";
 const COLLECTOR_ALARM_MINUTES = 2;
 const COLLECTOR_BATCH_SIZE = 4;
 const COLLECTOR_WINDOW_WIDTH = 360;
@@ -105,6 +106,7 @@ chrome.runtime.onStartup.addListener(async () => {
 
 async function ensureRuntimeDefaults() {
   chrome.alarms.create(ALARM_FLUSH, { periodInMinutes: 0.5 });
+  chrome.alarms.create(ALARM_ENROLL, { periodInMinutes: 1 });
   await clearAlarm(ALARM_COLLECT);
   const cur = await getStorage(["device_id", COLLECTOR_STATE_KEY, COLLECTOR_WINDOW_KEY, COLLECTOR_BOOT_VERSION_KEY]);
   const patch = {};
@@ -163,6 +165,10 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === ALARM_COLLECT) {
     await clearAlarm(ALARM_COLLECT);
     await cleanupStrayCollectorTabs(null).catch((e) => console.warn("[sw] collector cleanup err", e?.message || e));
+    return;
+  }
+  if (alarm.name === ALARM_ENROLL) {
+    await pollEnrollTasks().catch((e) => console.warn("[sw] enroll poll err", e?.message || e));
     return;
   }
   if (alarm.name !== ALARM_FLUSH) return;
@@ -435,6 +441,55 @@ async function getCurrentAgentSellerMall() {
     return { mallId, origin };
   } catch {
     return null;
+  }
+}
+
+// 轮询云端待报名任务,按当前店分发到登录态 agentseller tab(page world 发 submit),结果回传云端
+async function pollEnrollTasks() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token"]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return;
+  const cur = await getCurrentAgentSellerMall();
+  if (!cur) return; // 没有登录态 agentseller tab,跳过
+  const base = cfg.cloud_endpoint.replace(/\/$/, "");
+  let tasks = [];
+  try {
+    const resp = await fetch(`${base}/api/ingest/v1/enroll-tasks?mall_id=${encodeURIComponent(cur.mallId)}`, {
+      headers: { Authorization: `Bearer ${cfg.auth_token}` },
+    });
+    if (!resp.ok) return;
+    const data = await resp.json();
+    tasks = Array.isArray(data?.tasks) ? data.tasks : [];
+  } catch { return; }
+  if (!tasks.length) return;
+  const tabs = await chrome.tabs.query({
+    url: ["https://agentseller.temu.com/*", "https://agentseller-us.temu.com/*", "https://agentseller-eu.temu.com/*"],
+  });
+  const tab = tabs.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
+  if (!tab) return;
+  for (const task of tasks) {
+    const body = {
+      activityType: task.activity_type,
+      activityThematicId: Number(task.activity_thematic_id),
+      productList: task.product_list,
+    };
+    const result = await new Promise((resolve) => {
+      let done = false;
+      try {
+        chrome.tabs.sendMessage(tab.id, { type: "ENROLL_SUBMIT", task: { body } }, (resp) => {
+          if (done) return; done = true;
+          if (chrome.runtime.lastError) { resolve({ ok: false, error: String(chrome.runtime.lastError.message || "") }); return; }
+          resolve(resp || { ok: false, error: "no_resp" });
+        });
+      } catch (e) { resolve({ ok: false, error: String(e?.message || e) }); }
+      setTimeout(() => { if (!done) { done = true; resolve({ ok: false, error: "sw_dispatch_timeout" }); } }, 35000);
+    });
+    try {
+      await fetch(`${base}/api/ingest/v1/enroll-tasks/result`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.auth_token}` },
+        body: JSON.stringify({ task_id: task.task_id, status: result.ok ? "done" : "failed", result }),
+      });
+    } catch { /* 下轮重试由云端 status 控制 */ }
   }
 }
 
