@@ -295,7 +295,8 @@ async function loadMallNameMap(erp: any): Promise<Map<string, string>> {
 }
 
 export async function fetchUnifiedAfterSales(params: FetchUnifiedParams = {}): Promise<FetchUnifiedResult> {
-  const { q, page = 1, pageSize = 20 } = params;
+  // 一次拉全量并合并排序，分页交给前端纯切片（避免每翻一页都重拉云端，导致「换页没反应」）。
+  const { q } = params;
   const erp = (window as any).electronAPI?.erp;
 
   // 并发拉两边
@@ -420,13 +421,9 @@ export async function fetchUnifiedAfterSales(params: FetchUnifiedParams = {}): P
     return (tB || 0) - (tA || 0);
   });
 
-  const total = unifiedRows.length;
-  const offset = Math.max(0, (page - 1) * pageSize);
-  const rows = unifiedRows.slice(offset, offset + pageSize);
-
   return {
-    rows,
-    total,
+    rows: unifiedRows,
+    total: unifiedRows.length,
     jstOk: !jstFetch.error,
     platformOk: !platformFetch.error,
     jstError: jstFetch.error || null,

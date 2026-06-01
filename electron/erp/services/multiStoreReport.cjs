@@ -816,9 +816,10 @@ function buildProductPanel(db, options = {}) {
   const titleMap = new Map(titleRows.map((t) => [String(t.product_id), { title: t.title, thumb: t.thumb }]));
   // SKC / SKU 编码（by product_id，从 sales 聚合去重）
   const codeRows = optionalAllLocal(db, `
-    SELECT product_id, GROUP_CONCAT(DISTINCT NULLIF(skc_id,'')) skcs, GROUP_CONCAT(DISTINCT NULLIF(sku_ext_code,'')) skus
+    SELECT product_id, GROUP_CONCAT(DISTINCT NULLIF(skc_id,'')) skcs, GROUP_CONCAT(DISTINCT NULLIF(sku_ext_code,'')) skus,
+           MIN(NULLIF(declared_price_cents,0)) declared
       FROM cloud.temu_sales_snapshot WHERE tenant_id = ? AND product_id <> '' GROUP BY product_id`, [tid]);
-  const codeMap = new Map(codeRows.map((c) => [String(c.product_id), { skcs: c.skcs || null, skus: c.skus || null }]));
+  const codeMap = new Map(codeRows.map((c) => [String(c.product_id), { skcs: c.skcs || null, skus: c.skus || null, declared: c.declared || null }]));
   const malls = optionalAllLocal(db, `SELECT mall_id, store_code, mall_name, status FROM erp_temu_malls`, []);
   const mallMap = new Map(malls.map((m) => [m.mall_id, m]));
   const map = new Map();
@@ -842,6 +843,7 @@ function buildProductPanel(db, options = {}) {
     const cm = codeMap.get(String(e.product_id));
     e.skc_codes = cm ? cm.skcs : null;
     e.sku_codes = cm ? cm.skus : null;
+    e.declared_price = cm && cm.declared ? Number(cm.declared) / 100 : null;
     e.store_code = m ? m.store_code || null : null;
     e.mall_name = m ? m.mall_name || null : null;
     out.push(e);

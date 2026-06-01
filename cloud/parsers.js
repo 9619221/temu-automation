@@ -1533,14 +1533,21 @@ function parseTemuReview(db, ctx, evt, body) {
 
 function afterSaleTypeFromPath(path) {
   const text = String(path || "");
-  if (/returnSupplier\/package/i.test(text)) return "return_package";
+  // 只放行「列表」接口（行都带 packageSn / returnSupplierApplicationId，能正确归并）。
+  // 退货包裹列表 + 包裹内 SKU 明细列表（都带 packageSn）→ 包裹维度
+  if (/returnSupplier\/package\/pageQueryReturnSupplierPackage|returnSupplier\/package\/pageReturnPackageSkuDetailList/i.test(text)) return "return_package";
   if (/returnSupplier\/supplierException/i.test(text)) return "return_exception";
-  if (/afs\/queryPage/i.test(text)) return "after_sale";
-  return "after_sale";
+  // 退货申请单列表（含「按SKC退」，带 returnSupplierApplicationId / 状态 / 时间）→ 售后维度
+  if (/afs\/queryPage|sellerReturnSupplierApplication\/pageQueryReturnSupplierApplicationForGmp/i.test(text)) return "after_sale";
+  // 其余 returnSupplier/* 多为明细弹窗 / 动作 / 枚举接口
+  //（queryReturnOrderDetail / createReturnSupplierApplication / queryReturnPackageSkcReason / *Enum / *PopUp / count* 等），
+  // 不是列表数据，入库只会产生无父单号的孤儿 SKU 行 → 返回 null，调用方据此跳过。
+  return null;
 }
 
 function afterSaleRowKey(type, row, evt, index) {
   const key = firstDeepDefined(row, [
+    "returnSupplierApplicationId",
     "returnPackageSn", "returnPackageNo", "returnSupplierPackageNo", "packageSn", "packageNo",
     "afterSaleOrderSn", "afterSaleNo", "afsOrderSn", "afsNo",
     "orderSn", "parentOrderSn", "subOrderSn", "waybillNo", "trackingNumber", "id",
@@ -1594,10 +1601,12 @@ function parseTemuAfterSales(db, ctx, evt, body) {
   const mall_id = eventMallId(ctx, evt);
   const site = evt.site || null;
   const after_sale_type = afterSaleTypeFromPath(evt.url_path);
+  if (!after_sale_type) return; // 明细弹窗 / 动作 / 枚举接口不入快照（避免孤儿 SKU 行）
   const sources_json = JSON.stringify({ [evt.url_path]: evt.id });
   items.forEach((row, index) => {
     if (!row || typeof row !== "object") return;
     const package_no = toNullableString(firstDeepDefined(row, [
+      "returnSupplierApplicationId",
       "returnPackageSn", "returnPackageNo", "returnSupplierPackageNo", "packageSn", "packageNo",
       "afterSaleOrderSn", "afterSaleNo", "afsOrderSn", "afsNo",
     ], 3));
@@ -1632,8 +1641,8 @@ function parseTemuAfterSales(db, ctx, evt, body) {
         "returnSupplierQuantity", "goodsQuantity", "skuQuantity", "applyQuantity",
       ], 3)),
       status: toNullableString(firstDeepDefined(row, [
-        // 退货包裹管理接口的 packageStatusDesc 是中文描述（如「已出库」），优先于数字状态码
-        "packageStatusDesc", "status", "statusName", "state", "stateName", "afterSaleStatus",
+        // 中文状态描述优先于数字状态码：packageStatusDesc(包裹「已出库」) / statusDescription(申请单「审核通过」)
+        "packageStatusDesc", "statusDescription", "status", "statusName", "state", "stateName", "afterSaleStatus",
         "returnStatus", "packageStatus", "auditStatus",
       ], 3), 100),
       reason: toNullableString(firstDeepDefined(row, [
@@ -1654,7 +1663,7 @@ function parseTemuAfterSales(db, ctx, evt, body) {
         "currency", "currencyCode", "currencyType", "priceCurrency",
       ], 3), 20),
       created_at_text: toNullableString(firstDeepDefined(row, [
-        "createdAt", "createTime", "gmtCreate", "applyTime", "returnCreateTime",
+        "createdAt", "createTime", "gmtCreate", "applyTime", "returnCreateTime", "createdAtTimestamp",
       ], 3), 100),
       updated_at_text: toNullableString(firstDeepDefined(row, [
         "updatedAt", "updateTime", "gmtModified", "operateTime", "finishTime",

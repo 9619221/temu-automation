@@ -97,7 +97,7 @@ function parseReasons(des?: string | null) {
 }
 
 export default function ConsignAfterSalesSection() {
-  const [rows, setRows] = useState<UnifiedAfterSaleRow[]>([]);
+  const [allRows, setAllRows] = useState<UnifiedAfterSaleRow[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [loadedOnce, setLoadedOnce] = useState(false);
@@ -121,11 +121,9 @@ export default function ConsignAfterSalesSection() {
     try {
       const result = await fetchUnifiedAfterSales({
         q: query || undefined,
-        page,
-        pageSize,
       });
       if (id !== requestIdRef.current) return;
-      setRows(result.rows);
+      setAllRows(result.rows);
       setTotal(result.total);
       setJstError(result.jstError || null);
       setPlatformError(result.platformError || null);
@@ -140,9 +138,15 @@ export default function ConsignAfterSalesSection() {
     } finally {
       if (id === requestIdRef.current) setLoading(false);
     }
-  }, [query, page, pageSize]);
+  }, [query]);
 
   useEffect(() => { void loadData(); }, [loadData]);
+
+  // 翻页纯前端切片：不再触发重新取数，瞬间响应
+  const rows = useMemo(() => {
+    const offset = Math.max(0, (page - 1) * pageSize);
+    return allRows.slice(offset, offset + pageSize);
+  }, [allRows, page, pageSize]);
 
   const toggleExpand = useCallback(async (row: UnifiedAfterSaleRow) => {
     if (expandedId === row.id) {
