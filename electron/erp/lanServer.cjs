@@ -4631,6 +4631,22 @@ async function handleRequest({
       return;
     }
 
+    // /api/me：用 sessionCookie 反查当前登录用户（供多 agent 生图服务做 uid 隔离）。
+    // 无有效 session 返 401。身份由服务端 session 确认，客户端无法伪造。
+    if (pathname === "/api/me") {
+      const session = getSessionFromRequest(req);
+      if (!session || !session.user) {
+        writeJson(res, 401, { ok: false, error: "unauthorized" });
+        return;
+      }
+      const u = session.user;
+      writeJson(res, 200, {
+        ok: true,
+        user: { id: u.id, name: u.name, role: u.role, companyId: u.companyId || null },
+      });
+      return;
+    }
+
     if (pathname.startsWith("/api/ingest/v1/")) {
       await handleExtensionIngestRequest({
         req,
