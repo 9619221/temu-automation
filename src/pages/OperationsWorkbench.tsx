@@ -587,6 +587,12 @@ export default function OperationsWorkbench() {
     if (actSkuOnly) v = v.filter((r) => r.sku_ext_code); // 仅看有货号的行(滤掉活动表头噪声)
     const q = search.trim().toLowerCase();
     if (q) v = v.filter((r) => (r.title || "").toLowerCase().includes(q) || (r.sku_ext_code || "").toLowerCase().includes(q));
+    // 去重:同 货号+活动+申报价+参考价 的完全重复行只留一条
+    const seen = new Set<string>();
+    v = v.filter((r) => {
+      const k = `${r.store_code || r.mall_id}|${r.sku_ext_code || ""}|${r.activity_id || r.title || ""}|${r.signup_price ?? ""}|${r.suggested_price ?? ""}`;
+      if (seen.has(k)) return false; seen.add(k); return true;
+    });
     // 店铺 → 商品(货号) → 活动 维度排序;无货号的表头行沉底
     const sc = (r: ActivityRow) => r.store_code || r.mall_id || "";
     return [...v].sort((a, b) => {
@@ -596,6 +602,20 @@ export default function OperationsWorkbench() {
       return (a.title || "").localeCompare(b.title || "");
     }).map((r, i) => ({ ...r, __rk: i }));
   }, [actRows, storeFilter, kindFilter, search, inScope, actSkuOnly]);
+
+  // 每货号可报活动数(去重后,按 activity_id||活动名 区分)
+  const skuActCount = useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    for (const r of actView) {
+      if (!r.sku_ext_code) continue;
+      const a = r.activity_id || r.title || "";
+      if (!m.has(r.sku_ext_code)) m.set(r.sku_ext_code, new Set());
+      m.get(r.sku_ext_code)!.add(a);
+    }
+    const c = new Map<string, number>();
+    for (const [k, s] of m) c.set(k, s.size);
+    return c;
+  }, [actView]);
 
   const shopAgg = useMemo(() => {
     let lack = 0, soldout = 0, sales = 0;
@@ -737,6 +757,7 @@ export default function OperationsWorkbench() {
     storeCol,
     { title: "类型", dataIndex: "kind", width: 70, render: (v: string | null) => <Tag color={v === "bidding" ? "purple" : v === "coupon" ? "cyan" : "blue"}>{KIND_LABEL[v || ""] || v || "—"}</Tag> },
     { title: "货号 / 活动", key: "at", width: 280, render: (_, r) => <div>{r.sku_ext_code ? <Typography.Text copyable={{ text: r.sku_ext_code }} style={{ fontSize: 12, fontWeight: 600 }}>{r.sku_ext_code}</Typography.Text> : <span style={{ color: "#bbb", fontSize: 12 }}>(无货号·活动表头)</span>}<div style={{ color: "#888", fontSize: 12, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title || "(未命名活动)"}</div></div> },
+    { title: "可报活动", key: "actcnt", width: 80, align: "center", render: (_, r) => { const n = r.sku_ext_code ? (skuActCount.get(r.sku_ext_code) || 0) : 0; return n > 0 ? <Tag color={n >= 3 ? "green" : "blue"}>{n} 个</Tag> : <span style={{ color: "#bbb" }}>—</span>; }, sorter: (a, b) => (skuActCount.get(a.sku_ext_code || "") || 0) - (skuActCount.get(b.sku_ext_code || "") || 0) },
     { title: "原申报价", dataIndex: "signup_price", width: 80, align: "right", render: (v) => fmtMoney(v) },
     { title: "活动参考价", dataIndex: "suggested_price", width: 90, align: "right", render: (v: number | null) => (v == null ? <span style={{ color: "#bbb" }}>—</span> : fmtMoney(v)) },
     { title: "真实成本", dataIndex: "cost", width: 85, align: "right", render: (v: number | null) => (v == null ? <Tooltip title="无成本台账（未采购入库/未绑定）"><span style={{ color: "#bbb" }}>—</span></Tooltip> : fmtMoney(v)) },
@@ -1075,7 +1096,7 @@ export default function OperationsWorkbench() {
           </div>
           <Table<ActivityRow> dataSource={actView} columns={actColumns} rowKey={(r) => String(r.__rk)} size="small"
             rowSelection={{ selectedRowKeys: selActRows.map((r) => String(r.__rk)), onChange: (_, rows) => setSelActRows(rows as ActivityRow[]), getCheckboxProps: (r) => ({ disabled: !r.activity_id || !r.sku_ext_code }) }}
-            pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 条` }} scroll={{ x: 1160 }} loading={actLoading} />
+            pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 条` }} scroll={{ x: 1240 }} loading={actLoading} />
         </div>
       ),
     },
