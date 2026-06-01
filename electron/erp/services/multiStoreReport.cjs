@@ -963,15 +963,17 @@ function setOpTaskState(db, taskKey, status, owner) {
 // 采购单报表(纯本地 erp.sqlite，不涉及 cloud)：汇总/分布/供应商/月趋势均为「全量 SQL 聚合」，
 // 明细只取最近 ORDERS_LIMIT 单(附截断标记)。采购总额 = total_amount(货款) + freight_amount(运费)。
 // 已付口径用 payment_status='paid'(paid_amount 列在历史数据里普遍被填成=总额，不可信)。
-function buildPurchaseReport(db) {
+let _purchaseReportCache = { ts: 0, data: null };
+function buildPurchaseReport(db, options = {}) {
   if (!db) throw new Error("buildPurchaseReport: db is required (host mode only)");
+  if (!options.force && _purchaseReportCache.data && Date.now() - _purchaseReportCache.ts < REPORT_CACHE_TTL_MS) return _purchaseReportCache.data;
   const STATUS_LABELS = {
     draft: "草稿", pushed_pending_price: "待报价", pending_finance_approval: "待财务审批",
     approved_to_pay: "待付款", paid: "已付款", supplier_processing: "供应商处理中",
     shipped: "已发货", arrived: "已到货", inbounded: "已入库", closed: "已关闭",
     delayed: "已延期", exception: "异常", cancelled: "已取消",
   };
-  const ORDERS_LIMIT = 2000;
+  const ORDERS_LIMIT = 500;
   const curMonth = new Date().toISOString().slice(0, 7);
   const AMT = "(COALESCE(total_amount,0)+COALESCE(freight_amount,0))"; // 采购总额表达式
   // 1) 汇总(全量 SQL，不受明细 LIMIT 影响)
@@ -1011,9 +1013,7 @@ function buildPurchaseReport(db) {
       FROM erp_purchase_orders WHERE status<>'cancelled' AND created_at IS NOT NULL AND created_at<>''
      GROUP BY month ORDER BY month DESC LIMIT 12`, [])
     .map((r) => ({ month: r.month, count: toNum(r.count), amount: toNum(r.amount) })).reverse();
-  // 5) 明细(最近 ORDERS_LIMIT 单)
-  const lineAgg = optionalAllLocal(db, `SELECT po_id, COUNT(*) line_count, COALESCE(SUM(qty),0) total_qty, COALESCE(SUM(received_qty),0) received_qty FROM erp_purchase_order_lines GROUP BY po_id`, []);
-  const lineMap = new Map(lineAgg.map((l) => [l.po_id, l]));
+  // 5) 明细(最近 ORDERS_LIMIT 单)：先取单，再只聚合这些单的明细行(避免全表 GROUP BY 43404 行)
   const rows = optionalAllLocal(db, `
     SELECT po.id, po.po_no, po.status, po.payment_status, po.total_amount, po.freight_amount,
            po.created_at, po.expected_delivery_date, po.actual_delivery_date, po.paid_at,
@@ -1022,6 +1022,13 @@ function buildPurchaseReport(db) {
       LEFT JOIN erp_suppliers s ON s.id = po.supplier_id
       LEFT JOIN erp_accounts a ON a.id = po.account_id
      ORDER BY po.created_at DESC LIMIT ?`, [ORDERS_LIMIT]);
+  let lineMap = new Map();
+  const ids = rows.map((r) => r.id).filter(Boolean);
+  if (ids.length) {
+    const ph = ids.map(() => "?").join(",");
+    const lineAgg = optionalAllLocal(db, `SELECT po_id, COUNT(*) line_count, COALESCE(SUM(qty),0) total_qty, COALESCE(SUM(received_qty),0) received_qty FROM erp_purchase_order_lines WHERE po_id IN (${ph}) GROUP BY po_id`, ids);
+    lineMap = new Map(lineAgg.map((l) => [l.po_id, l]));
+  }
   const orders = rows.map((r) => {
     const lm = lineMap.get(r.id) || {};
     const goods = toNum(r.total_amount), freight = toNum(r.freight_amount);
@@ -1041,11 +1048,13 @@ function buildPurchaseReport(db) {
       actual_delivery_date: r.actual_delivery_date || null, paid_at: r.paid_at || null,
     };
   });
-  return {
+  const result = {
     generated_at: Date.now(), row_count: toNum(sr.po_count),
     orders_shown: orders.length, orders_truncated: toNum(sr.po_count) > ORDERS_LIMIT,
     summary, by_status, by_supplier, monthly, orders,
   };
+  _purchaseReportCache = { ts: Date.now(), data: result };
+  return result;
 }
 
 module.exports = {
