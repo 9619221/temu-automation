@@ -419,6 +419,7 @@ async function buildMultiStoreReport(db, options = {}) {
 // 预热：强制重算并填缓存，供服务端定时调用，使 page cache 常暖、用户不撞冷查询。
 function prewarmMultiStoreReport(db, attachCloudDb) {
   try { buildSkuSales(db, { includeTest: false, attachCloudDb, force: true }); } catch {}
+  try { buildProductPanel(db, { includeTest: false, attachCloudDb, force: true }); } catch {}
   return buildMultiStoreReport(db, { includeTest: false, attachCloudDb, force: true }).catch(() => null);
 }
 
