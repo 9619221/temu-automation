@@ -1079,6 +1079,7 @@ interface ErpProductPanelRow {
   act_cnt: number;
   min_price: number | null;
   compliance: string | null;
+  skus_detail?: { skc_id: string | null; sku_ext_code: string | null; declared_price: number | null; today: number; last7d: number; stock: number }[];
 }
 
 interface ErpProductPanelResponse {

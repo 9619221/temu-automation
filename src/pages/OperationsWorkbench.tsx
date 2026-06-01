@@ -49,11 +49,12 @@ interface StoreMatrixRow {
   sales: number; sale_7d: number; lack: number; soldout: number;
   high_risk: number; restock: number; stock_gap: number; activity: number;
 }
+interface SkuChild { skc_id: string | null; sku_ext_code: string | null; declared_price: number | null; today: number; last7d: number; stock: number; }
 interface ProductPanelRow {
   mall_id: string; product_id: string; store_code: string | null; mall_name: string | null; title: string | null; thumb: string | null;
   skc_codes: string | null; sku_codes: string | null; declared_price: number | null;
   expose: number | null; click: number | null; pay: number | null; conv: number | null; grow: string | null;
-  limited: boolean; act_cnt: number; min_price: number | null; compliance: string | null; __rk?: number;
+  limited: boolean; act_cnt: number; min_price: number | null; compliance: string | null; skus_detail?: SkuChild[]; __rk?: number;
 }
 
 interface Diag { label: string; action: string; level: number }
@@ -284,6 +285,12 @@ export default function OperationsWorkbench() {
     if (q) v = v.filter((r) => (r.title || "").toLowerCase().includes(q) || (r.product_id || "").includes(q));
     return v.map((r, i) => ({ ...r, __rk: i }));
   }, [panelRows, storeFilter, search]);
+  // 商品运营展开子行：用已加载的 skuRows 按 mall_id|product_id 归组(零额外查询)
+  const skuByProduct = useMemo(() => {
+    const m = new Map<string, SkuRow[]>();
+    for (const s of skuRows) { const k = s.mall_id + "|" + s.product_id; let a = m.get(k); if (!a) { a = []; m.set(k, a); } a.push(s); }
+    return m;
+  }, [skuRows]);
   const shopView = useMemo(() => {
     let v = shopRows;
     if (storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
@@ -435,6 +442,16 @@ export default function OperationsWorkbench() {
     { title: "点击", dataIndex: "click", width: 70, align: "right", render: (v: number | null) => (v == null ? "—" : fmtNum(v)) },
     { title: "支付件", dataIndex: "pay", width: 75, align: "right", render: (v: number | null) => (v == null ? "—" : fmtNum(v)) },
     { title: "曝光转化", dataIndex: "conv", width: 90, align: "right", render: (v: number | null) => (v == null ? "—" : (v * 100).toFixed(2) + "%") },
+  ];
+
+  const skuChildColumns: ColumnsType<SkuRow> = [
+    { title: "SKC", dataIndex: "skc_id", width: 140, render: (v) => v || "—" },
+    { title: "SKU货号", dataIndex: "sku_ext_code", width: 130, render: (v) => v || "—" },
+    { title: "申报价", dataIndex: "declared_price", width: 90, align: "right", render: (v: number | null) => (v == null ? "—" : "¥" + v.toFixed(2)) },
+    { title: "今日销量", dataIndex: "today", width: 90, align: "right", render: (v) => fmtNum(v) },
+    { title: "近7天", dataIndex: "last7d", width: 80, align: "right", render: (v) => fmtNum(v) },
+    { title: "可售天数", dataIndex: "sale_days", width: 90, align: "right", render: (v: number | null) => (v == null ? "—" : v + "天") },
+    { title: "库存", dataIndex: "stock", width: 80, align: "right", render: (v: number) => <span style={{ color: v <= 0 ? "#cf1322" : undefined }}>{fmtNum(v)}</span> },
   ];
 
   const commonFilters = (extra?: React.ReactNode) => (
@@ -630,7 +647,7 @@ export default function OperationsWorkbench() {
         <div>
           <div style={{ padding: "12px 16px 0", color: "#888", fontSize: 12 }}>每个商品(SPU)横向集成:可报活动 / 合规状态 / 流量(曝光·点击·转化) / 高价限流。按 限流 &gt; 违规 &gt; 活动 排序;流量「无」表示该商品暂未采到(采集覆盖待提升)。</div>
           {commonFilters()}
-          <Table<ProductPanelRow> dataSource={panelView} columns={panelColumns} rowKey={(r) => String(r.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个商品` }} scroll={{ x: 1100 }} loading={panelLoading} />
+          <Table<ProductPanelRow> dataSource={panelView} columns={panelColumns} rowKey={(r) => String(r.__rk)} size="small" expandable={{ rowExpandable: (r) => (skuByProduct.get(r.mall_id + "|" + r.product_id)?.length || 0) > 0, expandedRowRender: (r) => <Table<SkuRow> size="small" rowKey={(c, i) => `${r.__rk}-${i}`} dataSource={skuByProduct.get(r.mall_id + "|" + r.product_id) || []} columns={skuChildColumns} pagination={false} /> }} pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个商品` }} scroll={{ x: 1100 }} loading={panelLoading} />
         </div>
       ),
     },
