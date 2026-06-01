@@ -434,7 +434,7 @@ export default function OperationsWorkbench() {
         <div style={{ minWidth: 0, fontSize: 12, lineHeight: 1.45, whiteSpace: "normal", wordBreak: "break-word" }}>{r.title || "—"}</div>
       </div>
     ) },
-    { title: "评分", key: "score", width: 105, align: "right", sorter: (a, b) => (a.score ?? 0) - (b.score ?? 0), render: (_, r) => (r.score == null ? <span style={{ color: "#bbb" }}>—</span> : <span><span style={{ color: "#fadb14" }}>★</span>{r.score.toFixed(1)}{r.comments ? <span style={{ color: "#999", fontSize: 11 }}> ({fmtNum(r.comments)})</span> : ""}</span>) },
+    { title: "评价", key: "score", width: 110, align: "right", sorter: (a, b) => (a.comments ?? 0) - (b.comments ?? 0), render: (_, r) => { if (r.comments == null && r.score == null) return <span style={{ color: "#bbb" }}>—</span>; return <span>{r.score != null ? <span style={{ color: "#fadb14" }}>★{r.score.toFixed(1)} </span> : null}{r.comments != null ? <span>{fmtNum(r.comments)} 评论</span> : ""}</span>; } },
     { title: "申报价", dataIndex: "declared_price", width: 90, align: "right", sorter: (a, b) => (a.declared_price ?? 0) - (b.declared_price ?? 0), render: (v: number | null) => (v == null ? <span style={{ color: "#bbb" }}>—</span> : "¥" + v.toFixed(2)) },
     { title: "可报活动", key: "act", width: 130, align: "right", sorter: (a, b) => a.act_cnt - b.act_cnt, render: (_, r) => (r.act_cnt > 0 ? <span style={{ color: "#3f8600" }}>{r.act_cnt}个{r.min_price != null ? ` / 低¥${r.min_price.toFixed(2)}` : ""}</span> : <span style={{ color: "#bbb" }}>—</span>) },
     { title: "合规", dataIndex: "compliance", width: 170, render: (v: string | null) => (v ? <Tag color="red" style={{ whiteSpace: "normal" }}>{v}</Tag> : <span style={{ color: "#3f8600" }}>正常</span>) },
