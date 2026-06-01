@@ -1003,13 +1003,16 @@ function buildPurchaseReport(db, options = {}) {
   const by_status = optionalAllLocal(db, `SELECT status, COUNT(*) count, SUM(${AMT}) amount FROM erp_purchase_orders GROUP BY status`, [])
     .map((r) => ({ status: r.status, label: STATUS_LABELS[r.status] || r.status, count: toNum(r.count), amount: toNum(r.amount) }))
     .sort((a, b) => b.count - a.count);
-  // 3) 供应商 TOP(全量，排除取消)
+  // 3) 供应商 TOP(全量，排除取消)：供应商名取 jst_purchaser_name(erp_suppliers 为空表，supplier_id 是 jst:supplier:xxx)，按供应商名聚合
   const by_supplier = optionalAllLocal(db, `
-    SELECT po.supplier_id, s.name supplier_name, COUNT(*) count, SUM(${AMT.replace(/total_amount/g, "po.total_amount").replace(/freight_amount/g, "po.freight_amount")}) amount,
+    SELECT COALESCE(NULLIF(po.jst_purchaser_name,''),'(未指定供应商)') supplier_name,
+           COUNT(*) count,
+           SUM(COALESCE(po.total_amount,0)+COALESCE(po.freight_amount,0)) amount,
            SUM(CASE WHEN po.payment_status='paid' THEN (COALESCE(po.total_amount,0)+COALESCE(po.freight_amount,0)) ELSE 0 END) paid
-      FROM erp_purchase_orders po LEFT JOIN erp_suppliers s ON s.id = po.supplier_id
-     WHERE po.status<>'cancelled' GROUP BY po.supplier_id ORDER BY amount DESC LIMIT 20`, [])
-    .map((r) => ({ supplier_id: r.supplier_id || null, supplier_name: r.supplier_name || "(未指定供应商)", count: toNum(r.count), amount: toNum(r.amount), paid: toNum(r.paid) }));
+      FROM erp_purchase_orders po
+     WHERE po.status<>'cancelled'
+     GROUP BY supplier_name ORDER BY amount DESC LIMIT 20`, [])
+    .map((r) => ({ supplier_id: r.supplier_name, supplier_name: r.supplier_name, count: toNum(r.count), amount: toNum(r.amount), paid: toNum(r.paid) }));
   // 4) 月趋势(全量，排除取消，近12月)
   const monthly = optionalAllLocal(db, `
     SELECT substr(created_at,1,7) month, COUNT(*) count, SUM(${AMT}) amount
@@ -1052,9 +1055,8 @@ function buildPurchaseReport(db, options = {}) {
   const rows = optionalAllLocal(db, `
     SELECT po.id, po.po_no, po.status, po.payment_status, po.total_amount, po.freight_amount,
            po.created_at, po.expected_delivery_date, po.actual_delivery_date, po.paid_at,
-           po.supplier_id, s.name supplier_name, po.account_id, a.name account_name
+           po.supplier_id, po.jst_purchaser_name supplier_name, po.account_id, a.name account_name
       FROM erp_purchase_orders po
-      LEFT JOIN erp_suppliers s ON s.id = po.supplier_id
       LEFT JOIN erp_accounts a ON a.id = po.account_id
      ORDER BY po.created_at DESC LIMIT ?`, [ORDERS_LIMIT]);
   let lineMap = new Map();

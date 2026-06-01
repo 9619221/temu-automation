@@ -86,7 +86,7 @@ export default function PurchaseReportPanel() {
     const kw = keyword.trim().toLowerCase();
     return orders.filter((o) => {
       if (statusFilter !== "all" && o.status !== statusFilter) return false;
-      if (supplierFilter !== "all" && (o.supplier_id || "__none__") !== supplierFilter) return false;
+      if (supplierFilter !== "all" && (o.supplier_name || "(未指定供应商)") !== supplierFilter) return false;
       if (kw) {
         const hay = [o.po_no, o.supplier_name, o.account_name].filter(Boolean).join(" ").toLowerCase();
         if (!hay.includes(kw)) return false;
