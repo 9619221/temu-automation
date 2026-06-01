@@ -167,6 +167,7 @@ export default function OperationsWorkbench() {
   const [batchStock, setBatchStock] = useState<number | null>(null); // 活动报名:批量填库存
   const [selActRows, setSelActRows] = useState<ActivityRow[]>([]); // 活动报名:勾选待提交行
   const [enrollBusy, setEnrollBusy] = useState(false);
+  const [actSkuOnly, setActSkuOnly] = useState(true); // 活动报名:仅看有货号的行(店铺-商品-活动维度)
   // 待办闭环(第一版落 localStorage,零后端撞车;task key 稳定,后续可平滑迁 op_task_state 表)
   const [todoState, setTodoState] = useState<Record<string, "done" | "ignored">>(() => {
     try { return JSON.parse(localStorage.getItem("ow_todo_state") || "{}"); } catch { return {}; }
@@ -570,10 +571,18 @@ export default function OperationsWorkbench() {
     let v = actRows.filter((r) => inScope(r.store_code || r.mall_id));
     if (storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
     if (kindFilter !== "all") v = v.filter((r) => r.kind === kindFilter);
+    if (actSkuOnly) v = v.filter((r) => r.sku_ext_code); // 仅看有货号的行(滤掉活动表头噪声)
     const q = search.trim().toLowerCase();
     if (q) v = v.filter((r) => (r.title || "").toLowerCase().includes(q) || (r.sku_ext_code || "").toLowerCase().includes(q));
-    return v.map((r, i) => ({ ...r, __rk: i }));
-  }, [actRows, storeFilter, kindFilter, search, inScope]);
+    // 店铺 → 商品(货号) → 活动 维度排序;无货号的表头行沉底
+    const sc = (r: ActivityRow) => r.store_code || r.mall_id || "";
+    return [...v].sort((a, b) => {
+      const s = sc(a).localeCompare(sc(b)); if (s) return s;
+      const ah = a.sku_ext_code ? 0 : 1, bh = b.sku_ext_code ? 0 : 1; if (ah !== bh) return ah - bh;
+      const sk = (a.sku_ext_code || "").localeCompare(b.sku_ext_code || ""); if (sk) return sk;
+      return (a.title || "").localeCompare(b.title || "");
+    }).map((r, i) => ({ ...r, __rk: i }));
+  }, [actRows, storeFilter, kindFilter, search, inScope, actSkuOnly]);
 
   const shopAgg = useMemo(() => {
     let lack = 0, soldout = 0, sales = 0;
@@ -714,7 +723,7 @@ export default function OperationsWorkbench() {
   const actColumns: ColumnsType<ActivityRow> = [
     storeCol,
     { title: "类型", dataIndex: "kind", width: 70, render: (v: string | null) => <Tag color={v === "bidding" ? "purple" : v === "coupon" ? "cyan" : "blue"}>{KIND_LABEL[v || ""] || v || "—"}</Tag> },
-    { title: "活动 / SKU", key: "at", width: 280, render: (_, r) => <div><div style={{ fontSize: 12 }}>{r.title || "(未命名活动)"}</div>{r.sku_ext_code ? <div style={{ color: "#888", fontSize: 12 }}>{r.sku_ext_code}</div> : null}</div> },
+    { title: "货号 / 活动", key: "at", width: 280, render: (_, r) => <div>{r.sku_ext_code ? <Typography.Text copyable={{ text: r.sku_ext_code }} style={{ fontSize: 12, fontWeight: 600 }}>{r.sku_ext_code}</Typography.Text> : <span style={{ color: "#bbb", fontSize: 12 }}>(无货号·活动表头)</span>}<div style={{ color: "#888", fontSize: 12, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title || "(未命名活动)"}</div></div> },
     { title: "原申报价", dataIndex: "signup_price", width: 80, align: "right", render: (v) => fmtMoney(v) },
     { title: "活动参考价", dataIndex: "suggested_price", width: 90, align: "right", render: (v: number | null) => (v == null ? <span style={{ color: "#bbb" }}>—</span> : fmtMoney(v)) },
     { title: "真实成本", dataIndex: "cost", width: 85, align: "right", render: (v: number | null) => (v == null ? <Tooltip title="无成本台账（未采购入库/未绑定）"><span style={{ color: "#bbb" }}>—</span></Tooltip> : fmtMoney(v)) },
@@ -1031,9 +1040,12 @@ export default function OperationsWorkbench() {
       key: "activity", label: "活动报名",
       children: (
         <div>
-          <div style={{ padding: "12px 16px 0", color: "#888", fontSize: 12 }}>商品×活动报名决策表:用<b>真实成本</b>(加权均价)算每个申报价下的真实利润率。「建议申报价」默认=活动参考价,可改;申报价低于成本会标红「亏本」。编辑暂存本机(不提交)。一键提交 Temu 待下一阶段(需先抓报名报文)。</div>
+          <div style={{ padding: "12px 16px 0", color: "#888", fontSize: 12 }}>按<b>店铺 → 商品(货号) → 活动</b>维度:同一商品的各可报活动相邻。用<b>真实成本</b>(加权均价)算每个申报价下的真实利润率;「建议申报价」默认=活动参考价,可改;申报价&lt;成本标红「亏本」。「仅有货号」滤掉活动表头噪声(显示「—」的)。提交报名(单店worker)/下发多店任务(扩展)。</div>
           {commonFilters(
-            <Select size="small" style={{ width: 120 }} value={kindFilter} onChange={setKindFilter} options={[{ value: "all", label: "全部类型" }, { value: "activity", label: "活动" }, { value: "bidding", label: "竞价" }, { value: "coupon", label: "优惠券" }]} />,
+            <>
+              <Select size="small" style={{ width: 120 }} value={kindFilter} onChange={setKindFilter} options={[{ value: "all", label: "全部类型" }, { value: "activity", label: "活动" }, { value: "bidding", label: "竞价" }, { value: "coupon", label: "优惠券" }]} />
+              <Select size="small" style={{ width: 130 }} value={actSkuOnly ? "sku" : "all"} onChange={(v) => setActSkuOnly(v === "sku")} options={[{ value: "sku", label: "仅有货号" }, { value: "all", label: "含活动表头" }]} />
+            </>,
           )}
           <div style={{ padding: "0 16px 8px", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>批量填写(当前 {actView.length} 行):</Typography.Text>
