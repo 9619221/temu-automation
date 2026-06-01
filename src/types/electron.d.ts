@@ -53,6 +53,8 @@ interface AutomationAPI {
   yunduActivityMatch: (params: { activityThematicId: number; activityType?: number; productIds?: number[]; productSkcExtCodes?: string[]; rowCount?: number; hasMore?: boolean }) => Promise<any>;
   yunduActivitySubmit: (params: { activityThematicId: number; productIds: number[]; extra?: any }) => Promise<any>;
   yunduAutoEnroll: (params: { activityThematicId: number; activityType?: number; dryRun?: boolean }) => Promise<any>;
+  yunduCaptureEnrollSubmit: (params?: { wait?: boolean; timeoutMs?: number }) => Promise<any>;
+  yunduEnrollPriced: (params: { activityType?: number; activityThematicId: number; items: Array<{ extCode: string; activityPriceYuan: number; activityStock: number }>; dryRun?: boolean }) => Promise<any>;
   autoPricing: (params: any) => Promise<any>;
   startAutoPricing: (params: any) => Promise<any>;
   generatePackImages: (params: any) => Promise<any>;

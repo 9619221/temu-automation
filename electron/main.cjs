@@ -4933,6 +4933,7 @@ ipcMain.handle("automation:yundu-activity-match", async (_e, params) => sendCmd(
 ipcMain.handle("automation:yundu-activity-submit", async (_e, params) => sendCmd("yundu_activity_submit", params || {}));
 ipcMain.handle("automation:yundu-auto-enroll", async (_e, params) => sendCmd("yundu_auto_enroll", params || {}));
 ipcMain.handle("automation:yundu-capture-enroll-submit", async (_e, params) => sendCmd("yundu_capture_enroll_submit", params || {}));
+ipcMain.handle("automation:yundu-enroll-priced", async (_e, params) => sendCmd("yundu_enroll_priced", params || {}));
 
 ipcMain.handle("automation:close", async () => {
   return sendCmd("close");

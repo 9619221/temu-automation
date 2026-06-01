@@ -3895,6 +3895,62 @@ async function yunduActivitySubmit({ activityType, activityThematicId, productLi
   } finally { /* keep _yunduPage cached */ }
 }
 
+// 按货号+申报价(元)报名:走 live match 解析权威 productId/skcId/skuId,拼真实提交体(价×100转分)。
+// items:[{extCode, activityPriceYuan, activityStock}];dryRun=true 只返回将提交的 body+解析结果,不真提交。
+// IDs 全部来自 live match,故快照 activityThematicId/activityType 若不对,match 返回空→安全失败(不会瞎报)。
+async function yunduEnrollPriced({ activityType, activityThematicId, items = [], dryRun = true } = {}) {
+  if (!activityThematicId) throw new Error("activityThematicId required");
+  if (!Array.isArray(items) || !items.length) throw new Error("items required");
+  const wantByExt = new Map();
+  for (const it of items) if (it && it.extCode != null) wantByExt.set(String(it.extCode), it);
+  const page = await _yunduOpenPage();
+  // 滚动匹配全部可报商品
+  let matched = [], hasMore = true, rounds = 0;
+  while (hasMore && rounds < 30) {
+    const r = await _yunduFetch(page, "/api/kiana/gamblers/marketing/enroll/scroll/match",
+      { activityThematicId, activityType, productIds: [], productSkcExtCodes: [], rowCount: 100, hasMore: rounds > 0 });
+    const res = r?.body?.result || {};
+    const list = res.matchList || res.list || [];
+    matched.push(...list);
+    hasMore = !!res.hasMore; rounds += 1;
+    if (!list.length) break;
+  }
+  // 按货号解析三级 ID,价 ×100 转分
+  const prodMap = new Map();
+  const resolved = [];
+  for (const p of matched) {
+    for (const skc of (p.skcList || [])) {
+      for (const sku of (skc.skuList || [])) {
+        const it = wantByExt.get(String(sku.extCode));
+        if (!it) continue;
+        const cents = Math.round(Number(it.activityPriceYuan) * 100);
+        if (!Number.isFinite(cents) || cents <= 0) continue;
+        if (!prodMap.has(p.productId)) prodMap.set(p.productId, { productId: p.productId, activityStock: Number(it.activityStock) || p.targetActivityStock || 0, skc: new Map() });
+        const pe = prodMap.get(p.productId);
+        if (it.activityStock != null) pe.activityStock = Number(it.activityStock);
+        if (!pe.skc.has(skc.skcId)) pe.skc.set(skc.skcId, new Map());
+        pe.skc.get(skc.skcId).set(sku.skuId, cents);
+        resolved.push({ extCode: sku.extCode, productId: p.productId, skcId: skc.skcId, skuId: sku.skuId, activityPriceCents: cents });
+      }
+    }
+  }
+  const missing = [...wantByExt.keys()].filter((ext) => !resolved.some((r) => String(r.extCode) === ext));
+  const productList = [...prodMap.values()].map((pe) => ({
+    productId: pe.productId,
+    activityStock: pe.activityStock,
+    skcList: [...pe.skc.entries()].map(([skcId, skuMap]) => ({
+      skcId,
+      skuList: [...skuMap.entries()].map(([skuId, activityPrice]) => ({ skuId, activityPrice })),
+    })),
+  }));
+  if (!productList.length) return { ok: false, error: "no matched products for given extCodes", matchedCount: matched.length, missing };
+  const body = { activityType, activityThematicId, productList };
+  if (dryRun) return { ok: true, dryRun: true, willSubmit: body, resolved, missing, matchedCount: matched.length };
+  const sr = await _yunduFetch(page, "/api/kiana/gamblers/marketing/enroll/submit", body);
+  const result = sr?.body?.result || sr?.body || {};
+  return { ok: true, dryRun: false, submittedProducts: productList.length, result, resolved, missing };
+}
+
 // 组合：自动报活动（拉可报 → 匹配 → 提交）
 async function yunduAutoEnroll({ activityThematicId, activityType, dryRun = true } = {}) {
   if (!activityThematicId) throw new Error("activityThematicId required");
@@ -8220,6 +8276,7 @@ async function handleRequest(body) {
     case "yundu_activity_submit": return await yunduActivitySubmit(params || {});
     case "yundu_auto_enroll": return await yunduAutoEnroll(params || {});
     case "yundu_capture_enroll_submit": return await yunduCaptureEnrollSubmit(params || {});
+    case "yundu_enroll_priced": return await yunduEnrollPriced(params || {});
     case "sidebar_nav": {
       await ensureBrowser();
       return await scrapeViaSidebarClick();

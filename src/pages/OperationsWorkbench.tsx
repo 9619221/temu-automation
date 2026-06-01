@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Button, Card, Empty, Image, Input, InputNumber, Segmented, Select, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from "antd";
+import { Alert, Button, Card, Empty, Image, Input, InputNumber, Modal, Segmented, Select, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from "antd";
 import { EyeOutlined, ReloadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, Legend, ResponsiveContainer } from "recharts";
@@ -25,7 +25,7 @@ interface RiskRow {
 interface ActivityRow {
   mall_id: string; store_code: string | null; mall_name: string | null;
   kind: string | null; title: string | null; status: string | null;
-  activity_id: string | null; product_id: string | null;
+  activity_id: string | null; product_id: string | null; activity_type: number | null; sku_id: string | null;
   sku_ext_code: string | null; skc_id: string | null;
   signup_price: number | null; suggested_price: number | null; price_diff: number | null;
   activity_stock: number; cost: number | null; end_at: string | null; stat_date: string | null;
@@ -165,6 +165,8 @@ export default function OperationsWorkbench() {
   const [todoStatus, setTodoStatus] = useState("open"); // 默认只看待处理
   const [batchPrice, setBatchPrice] = useState<number | null>(null); // 活动报名:批量填申报价
   const [batchStock, setBatchStock] = useState<number | null>(null); // 活动报名:批量填库存
+  const [selActRows, setSelActRows] = useState<ActivityRow[]>([]); // 活动报名:勾选待提交行
+  const [enrollBusy, setEnrollBusy] = useState(false);
   // 待办闭环(第一版落 localStorage,零后端撞车;task key 稳定,后续可平滑迁 op_task_state 表)
   const [todoState, setTodoState] = useState<Record<string, "done" | "ignored">>(() => {
     try { return JSON.parse(localStorage.getItem("ow_todo_state") || "{}"); } catch { return {}; }
@@ -218,6 +220,68 @@ export default function OperationsWorkbench() {
     const d = enrollDraft[enrollKey(r)]?.stock;
     return d != null ? d : (r.activity_stock || 0);
   }, [enrollDraft, enrollKey]);
+
+  // 提交报名:勾选行→按活动分组→worker live match 解析权威 ID(dryRun 预演)→二次确认→真提交
+  const submitEnroll = useCallback(async () => {
+    const rows = selActRows;
+    if (!rows.length) { message.warning("请先勾选要报名的商品行"); return; }
+    const api = window.electronAPI?.automation?.yunduEnrollPriced;
+    if (!api) { message.error("当前桌面端不支持(请重启/更新应用)"); return; }
+    const noId = rows.filter((r) => !r.activity_id);
+    if (noId.length) { message.error(`有 ${noId.length} 行缺活动ID(快照未透出),无法提交;请刷新数据或换有ID的活动`); return; }
+    // 按活动(thematicId+type)分组
+    const groups = new Map<string, { thId: string; type: number | null; rows: ActivityRow[] }>();
+    for (const r of rows) {
+      const k = `${r.activity_id}|${r.activity_type ?? ""}`;
+      if (!groups.has(k)) groups.set(k, { thId: r.activity_id!, type: r.activity_type, rows: [] });
+      groups.get(k)!.rows.push(r);
+    }
+    const lossRows = rows.filter((r) => { const p = effPrice(r); return p != null && r.cost != null && p < r.cost; });
+    const noPrice = rows.filter((r) => effPrice(r) == null);
+    if (noPrice.length) { message.error(`有 ${noPrice.length} 行没有申报价,先填价再提交`); return; }
+    setEnrollBusy(true);
+    try {
+      // 1) 逐组 dryRun 预演,拿权威解析 + 未匹配
+      const previews: Array<{ thId: string; type: number | null; n: number; resp: any }> = [];
+      for (const g of groups.values()) {
+        const items = g.rows.map((r) => ({ extCode: r.sku_ext_code || "", activityPriceYuan: effPrice(r)!, activityStock: effStock(r) }));
+        const resp = await api({ activityType: g.type ?? undefined, activityThematicId: Number(g.thId), items, dryRun: true });
+        previews.push({ thId: g.thId, type: g.type, n: g.rows.length, resp });
+      }
+      const totalResolved = previews.reduce((a, p) => a + (p.resp?.resolved?.length || 0), 0);
+      const allMissing = previews.flatMap((p) => p.resp?.missing || []);
+      // 2) 二次确认
+      Modal.confirm({
+        title: "确认提交活动报名",
+        width: 560,
+        content: (
+          <div style={{ fontSize: 13 }}>
+            <p>共 <b>{rows.length}</b> 行 / {groups.size} 个活动;live 解析成功 <b style={{ color: "#3f8600" }}>{totalResolved}</b> 个 SKU。</p>
+            {allMissing.length > 0 && <p style={{ color: "#d46b08" }}>⚠️ {allMissing.length} 个货号在活动里没匹配到(将跳过):{allMissing.slice(0, 8).join(", ")}{allMissing.length > 8 ? "…" : ""}</p>}
+            {lossRows.length > 0 && <p style={{ color: "#cf1322", fontWeight: 600 }}>🔴 {lossRows.length} 行申报价低于成本(亏本):{lossRows.slice(0, 5).map((r) => r.sku_ext_code).join(", ")}{lossRows.length > 5 ? "…" : ""}</p>}
+            <p style={{ color: "#888" }}>申报价将按你填的值(元×100=分)真实提交到 Temu,确认后不可撤销。</p>
+          </div>
+        ),
+        okText: lossRows.length > 0 ? "仍然提交(含亏本)" : "确认提交",
+        okButtonProps: { danger: lossRows.length > 0 },
+        cancelText: "取消",
+        onOk: async () => {
+          let ok = 0, fail = 0;
+          for (const g of groups.values()) {
+            const items = g.rows.map((r) => ({ extCode: r.sku_ext_code || "", activityPriceYuan: effPrice(r)!, activityStock: effStock(r) }));
+            try {
+              const resp = await api({ activityType: g.type ?? undefined, activityThematicId: Number(g.thId), items, dryRun: false });
+              if (resp?.ok) ok += resp.submittedProducts || 0; else fail += 1;
+            } catch { fail += 1; }
+          }
+          if (fail === 0) { message.success(`已提交 ${ok} 个商品报名`); setSelActRows([]); }
+          else message.warning(`提交完成:成功组若干、失败 ${fail} 组,详见各活动报名记录`);
+        },
+      });
+    } catch (e: any) {
+      message.error("预演失败:" + (e?.message || String(e)));
+    } finally { setEnrollBusy(false); }
+  }, [selActRows, effPrice, effStock]);
 
   const loadSku = useCallback(async () => {
     if (!window.electronAPI?.erp?.reports?.skuSales) { setError("当前版本不支持运营工作台，请升级桌面端"); return; }
@@ -922,8 +986,11 @@ export default function OperationsWorkbench() {
             <InputNumber size="small" min={0} precision={0} placeholder="库存" value={batchStock ?? undefined} style={{ width: 90 }} onChange={(v) => setBatchStock(v == null ? null : Number(v))} />
             <Button size="small" disabled={batchStock == null} onClick={() => { const next = { ...enrollDraft }; for (const r of actView) { const k = enrollKey(r); next[k] = { ...(next[k] || {}), stock: batchStock! }; } persistDraft(next); }}>填库存</Button>
             <Button size="small" danger onClick={() => { const next = { ...enrollDraft }; for (const r of actView) delete next[enrollKey(r)]; persistDraft(next); }}>清空草稿</Button>
+            <Button type="primary" size="small" loading={enrollBusy} disabled={!selActRows.length} onClick={submitEnroll}>提交报名 ({selActRows.length})</Button>
           </div>
-          <Table<ActivityRow> dataSource={actView} columns={actColumns} rowKey={(r) => String(r.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 条` }} scroll={{ x: 1160 }} loading={actLoading} />
+          <Table<ActivityRow> dataSource={actView} columns={actColumns} rowKey={(r) => String(r.__rk)} size="small"
+            rowSelection={{ selectedRowKeys: selActRows.map((r) => String(r.__rk)), onChange: (_, rows) => setSelActRows(rows as ActivityRow[]), getCheckboxProps: (r) => ({ disabled: !r.activity_id || !r.sku_ext_code }) }}
+            pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 条` }} scroll={{ x: 1160 }} loading={actLoading} />
         </div>
       ),
     },
