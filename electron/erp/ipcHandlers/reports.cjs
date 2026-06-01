@@ -167,6 +167,21 @@ function registerReportsHandlers(ipcMain, deps) {
     }
   });
 
+  // 采购单报表：采购单明细 + 汇总 + 状态分布 + 供应商TOP + 月趋势（纯本地 erp.sqlite）
+  ipcMain.handle("erp:reports:purchase", async (_event, payload) => {
+    try {
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest(`/api/erp/reports/purchase`, { method: "GET" });
+      }
+      requireErp();
+      const { buildPurchaseReport } = require("../services/multiStoreReport.cjs");
+      return { ok: true, data: buildPurchaseReport(erpState.db, { includeTest: payload?.includeTest }) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+
   // 运营工作台：商品运营面板（活动/合规/流量/限流四维集成,SPU级）
   ipcMain.handle("erp:reports:product-panel", async (_event, payload) => {
     try {

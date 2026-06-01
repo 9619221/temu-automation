@@ -448,6 +448,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
       stockOrders: (options) => ipcRenderer.invoke("erp:reports:stock-orders", options || {}),
       salesTrend: (options) => ipcRenderer.invoke("erp:reports:sales-trend", options || {}),
       productPanel: (options) => ipcRenderer.invoke("erp:reports:product-panel", options || {}),
+      purchase: (options) => ipcRenderer.invoke("erp:reports:purchase", options || {}),
     },
     events: {
       onPurchaseUpdate: (handler) => {

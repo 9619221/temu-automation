@@ -932,8 +932,97 @@ function setMallOwner(db, mallId, owner) {
   return info.changes;
 }
 
+// 采购单报表(纯本地 erp.sqlite，不涉及 cloud)：汇总/分布/供应商/月趋势均为「全量 SQL 聚合」，
+// 明细只取最近 ORDERS_LIMIT 单(附截断标记)。采购总额 = total_amount(货款) + freight_amount(运费)。
+// 已付口径用 payment_status='paid'(paid_amount 列在历史数据里普遍被填成=总额，不可信)。
+function buildPurchaseReport(db) {
+  if (!db) throw new Error("buildPurchaseReport: db is required (host mode only)");
+  const STATUS_LABELS = {
+    draft: "草稿", pushed_pending_price: "待报价", pending_finance_approval: "待财务审批",
+    approved_to_pay: "待付款", paid: "已付款", supplier_processing: "供应商处理中",
+    shipped: "已发货", arrived: "已到货", inbounded: "已入库", closed: "已关闭",
+    delayed: "已延期", exception: "异常", cancelled: "已取消",
+  };
+  const ORDERS_LIMIT = 2000;
+  const curMonth = new Date().toISOString().slice(0, 7);
+  const AMT = "(COALESCE(total_amount,0)+COALESCE(freight_amount,0))"; // 采购总额表达式
+  // 1) 汇总(全量 SQL，不受明细 LIMIT 影响)
+  const sr = db.prepare(`
+    SELECT COUNT(*) po_count,
+      SUM(CASE WHEN status='cancelled' THEN 1 ELSE 0 END) cancelled_count,
+      SUM(CASE WHEN status<>'cancelled' THEN COALESCE(total_amount,0) ELSE 0 END) goods_amount,
+      SUM(CASE WHEN status<>'cancelled' THEN COALESCE(freight_amount,0) ELSE 0 END) freight_amount,
+      SUM(CASE WHEN status<>'cancelled' AND payment_status='paid' THEN ${AMT} ELSE 0 END) paid_amount,
+      SUM(CASE WHEN status<>'cancelled' AND COALESCE(payment_status,'unpaid')<>'paid' THEN ${AMT} ELSE 0 END) unpaid_amount,
+      SUM(CASE WHEN status NOT IN ('cancelled','inbounded','closed') THEN ${AMT} ELSE 0 END) pending_inbound_amount,
+      SUM(CASE WHEN status<>'cancelled' AND substr(created_at,1,7)=? THEN ${AMT} ELSE 0 END) this_month_amount,
+      SUM(CASE WHEN status<>'cancelled' AND substr(created_at,1,7)=? THEN 1 ELSE 0 END) this_month_count
+      FROM erp_purchase_orders`).get(curMonth, curMonth);
+  const summary = {
+    po_count: toNum(sr.po_count), cancelled_count: toNum(sr.cancelled_count),
+    goods_amount: toNum(sr.goods_amount), freight_amount: toNum(sr.freight_amount),
+    total_amount: toNum(sr.goods_amount) + toNum(sr.freight_amount),
+    paid_amount: toNum(sr.paid_amount), unpaid_amount: toNum(sr.unpaid_amount),
+    pending_inbound_amount: toNum(sr.pending_inbound_amount),
+    this_month_amount: toNum(sr.this_month_amount), this_month_count: toNum(sr.this_month_count),
+  };
+  // 2) 状态分布(全量)
+  const by_status = optionalAllLocal(db, `SELECT status, COUNT(*) count, SUM(${AMT}) amount FROM erp_purchase_orders GROUP BY status`, [])
+    .map((r) => ({ status: r.status, label: STATUS_LABELS[r.status] || r.status, count: toNum(r.count), amount: toNum(r.amount) }))
+    .sort((a, b) => b.count - a.count);
+  // 3) 供应商 TOP(全量，排除取消)
+  const by_supplier = optionalAllLocal(db, `
+    SELECT po.supplier_id, s.name supplier_name, COUNT(*) count, SUM(${AMT.replace(/total_amount/g, "po.total_amount").replace(/freight_amount/g, "po.freight_amount")}) amount,
+           SUM(CASE WHEN po.payment_status='paid' THEN (COALESCE(po.total_amount,0)+COALESCE(po.freight_amount,0)) ELSE 0 END) paid
+      FROM erp_purchase_orders po LEFT JOIN erp_suppliers s ON s.id = po.supplier_id
+     WHERE po.status<>'cancelled' GROUP BY po.supplier_id ORDER BY amount DESC LIMIT 20`, [])
+    .map((r) => ({ supplier_id: r.supplier_id || null, supplier_name: r.supplier_name || "(未指定供应商)", count: toNum(r.count), amount: toNum(r.amount), paid: toNum(r.paid) }));
+  // 4) 月趋势(全量，排除取消，近12月)
+  const monthly = optionalAllLocal(db, `
+    SELECT substr(created_at,1,7) month, COUNT(*) count, SUM(${AMT}) amount
+      FROM erp_purchase_orders WHERE status<>'cancelled' AND created_at IS NOT NULL AND created_at<>''
+     GROUP BY month ORDER BY month DESC LIMIT 12`, [])
+    .map((r) => ({ month: r.month, count: toNum(r.count), amount: toNum(r.amount) })).reverse();
+  // 5) 明细(最近 ORDERS_LIMIT 单)
+  const lineAgg = optionalAllLocal(db, `SELECT po_id, COUNT(*) line_count, COALESCE(SUM(qty),0) total_qty, COALESCE(SUM(received_qty),0) received_qty FROM erp_purchase_order_lines GROUP BY po_id`, []);
+  const lineMap = new Map(lineAgg.map((l) => [l.po_id, l]));
+  const rows = optionalAllLocal(db, `
+    SELECT po.id, po.po_no, po.status, po.payment_status, po.total_amount, po.freight_amount,
+           po.created_at, po.expected_delivery_date, po.actual_delivery_date, po.paid_at,
+           po.supplier_id, s.name supplier_name, po.account_id, a.name account_name
+      FROM erp_purchase_orders po
+      LEFT JOIN erp_suppliers s ON s.id = po.supplier_id
+      LEFT JOIN erp_accounts a ON a.id = po.account_id
+     ORDER BY po.created_at DESC LIMIT ?`, [ORDERS_LIMIT]);
+  const orders = rows.map((r) => {
+    const lm = lineMap.get(r.id) || {};
+    const goods = toNum(r.total_amount), freight = toNum(r.freight_amount);
+    const total = goods + freight;
+    const isPaid = r.payment_status === "paid";
+    const totalQty = toNum(lm.total_qty), recvQty = toNum(lm.received_qty);
+    return {
+      id: r.id, po_no: r.po_no, status: r.status, status_label: STATUS_LABELS[r.status] || r.status,
+      payment_status: r.payment_status || null,
+      supplier_id: r.supplier_id || null, supplier_name: r.supplier_name || null,
+      account_id: r.account_id || null, account_name: r.account_name || null,
+      goods_amount: goods, freight_amount: freight, total_amount: total,
+      paid_amount: isPaid ? total : 0, unpaid_amount: isPaid ? 0 : total,
+      line_count: toNum(lm.line_count), total_qty: totalQty, received_qty: recvQty,
+      inbound_pct: totalQty > 0 ? Math.round((recvQty / totalQty) * 100) : 0,
+      created_at: r.created_at || null, expected_delivery_date: r.expected_delivery_date || null,
+      actual_delivery_date: r.actual_delivery_date || null, paid_at: r.paid_at || null,
+    };
+  });
+  return {
+    generated_at: Date.now(), row_count: toNum(sr.po_count),
+    orders_shown: orders.length, orders_truncated: toNum(sr.po_count) > ORDERS_LIMIT,
+    summary, by_status, by_supplier, monthly, orders,
+  };
+}
+
 module.exports = {
   buildMultiStoreReport,
+  buildPurchaseReport,
   prewarmMultiStoreReport,
   buildSkuSales,
   buildRiskList,

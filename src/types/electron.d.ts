@@ -827,6 +827,7 @@ interface ErpAPI {
     stockOrders: (options?: { includeTest?: boolean }) => Promise<ErpStockOrderResponse>;
     salesTrend: (options?: { includeTest?: boolean; days?: number }) => Promise<ErpSalesTrendResponse>;
     productPanel: (options?: { includeTest?: boolean }) => Promise<ErpProductPanelResponse>;
+    purchase: (options?: { includeTest?: boolean }) => Promise<ErpPurchaseReportResponse>;
   };
   events?: {
     onPurchaseUpdate: (handler: (payload: ErpPurchaseUpdateEvent) => void) => () => void;
@@ -1096,6 +1097,52 @@ interface ErpProductPanelResponse {
   ok: boolean;
   error?: string;
   data?: { generated_at: number; row_count: number; rows: ErpProductPanelRow[]; attached?: boolean };
+}
+
+interface ErpPurchaseOrderRow {
+  id: string;
+  po_no: string;
+  status: string;
+  status_label: string;
+  payment_status: string | null;
+  supplier_id: string | null;
+  supplier_name: string | null;
+  account_id: string | null;
+  account_name: string | null;
+  goods_amount: number;
+  freight_amount: number;
+  total_amount: number;
+  paid_amount: number;
+  unpaid_amount: number;
+  line_count: number;
+  total_qty: number;
+  received_qty: number;
+  inbound_pct: number;
+  created_at: string | null;
+  expected_delivery_date: string | null;
+  actual_delivery_date: string | null;
+  paid_at: string | null;
+}
+
+interface ErpPurchaseReportResponse {
+  ok: boolean;
+  error?: string;
+  data?: {
+    generated_at: number;
+    row_count: number;
+    orders_shown: number;
+    orders_truncated: boolean;
+    summary: {
+      po_count: number; cancelled_count: number;
+      goods_amount: number; freight_amount: number; total_amount: number;
+      paid_amount: number; unpaid_amount: number; pending_inbound_amount: number;
+      this_month_amount: number; this_month_count: number;
+    };
+    by_status: { status: string; label: string; count: number; amount: number }[];
+    by_supplier: { supplier_id: string | null; supplier_name: string; count: number; amount: number; paid: number }[];
+    monthly: { month: string; count: number; amount: number }[];
+    orders: ErpPurchaseOrderRow[];
+  };
 }
 
 interface ErpMallDictEntry {

@@ -53,6 +53,7 @@ const ErpLogin = lazyWithPreload(() => import("./pages/ErpLogin"));
 const BrowserMulti = lazyWithPreload(() => import("./pages/BrowserMulti"));
 const MultiStoreReport = lazyWithPreload(() => import("./pages/MultiStoreReport"));
 const OperationsWorkbench = lazyWithPreload(() => import("./pages/OperationsWorkbench"));
+const PurchaseReport = lazyWithPreload(() => import("./pages/PurchaseReport"));
 
 const CORE_ROUTE_PRELOADERS = [
   AppLayout.preload,
@@ -340,6 +341,7 @@ function App() {
               <Route path="shop" element={<RoleRoute path="/shop"><ShopOverview /></RoleRoute>} />
               <Route path="multi-store-report" element={<RoleRoute path="/multi-store-report"><MultiStoreReport /></RoleRoute>} />
               <Route path="ops-workbench" element={<RoleRoute path="/ops-workbench"><OperationsWorkbench /></RoleRoute>} />
+              <Route path="purchase-report" element={<RoleRoute path="/purchase-report"><PurchaseReport /></RoleRoute>} />
               <Route path="after-sales" element={<RoleRoute path="/after-sales"><AfterSales /></RoleRoute>} />
               <Route path="products" element={<RoleRoute path="/products"><ProductList /></RoleRoute>} />
               <Route path="products/:id" element={<RoleRoute path="/products"><ProductDetail /></RoleRoute>} />
