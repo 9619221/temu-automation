@@ -37,6 +37,15 @@ const ACTIVITY_LIBRARY_TARGET_LIMIT = 200;
 const ACTIVITY_LIBRARY_MAX_BATCHES_PER_RUN = 8;
 const ACTIVITY_LIBRARY_RUN_INTERVAL_MS = 5 * 60 * 1000;
 const ACTIVITY_LIBRARY_SEEN_TTL_MS = 6 * 60 * 60 * 1000;
+// 活动报名决策数据:主动采 enroll/activity/list(拿 thematicId) + scroll/match(拿参考价/三级ID/目标库存),
+// 喂 cloud parser 落 temu_activity_snapshot(补全 activity_id/suggested_price)。实测 match 免 anti-content。
+const ACTIVITY_MATCH_LIST_ENDPOINT = "/api/kiana/gamblers/marketing/enroll/activity/list";
+const ACTIVITY_MATCH_ENDPOINT = "/api/kiana/gamblers/marketing/enroll/scroll/match";
+const ACTIVITY_MATCH_STATE_KEY = "temu_monitor_activity_match_state";
+const ACTIVITY_MATCH_RUN_INTERVAL_MS = 30 * 60 * 1000; // 整轮间隔
+const ACTIVITY_MATCH_MAX_THEMATICS = 30; // 每轮最多 match 的活动数(限速)
+const ACTIVITY_MATCH_ROWCOUNT = 10; // 实测 >10 被拒
+const ACTIVITY_MATCH_MAX_SCROLL = 10; // 每活动最多翻页
 // JIT(全托管建议关闭) + VMI(普通备货单) 主动调度：替代桌面端 worker.mjs urgentOrders Playwright 任务。
 // 云端 /v1/jit-vmi-targets 给本租户近 30 天活跃 mall，SW 对每个 mall 调两个 venom 接口。
 const JIT_VMI_STATE_KEY = "temu_monitor_jit_vmi_state";
@@ -187,6 +196,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   // 顺便心跳到 cloud 做远程诊断
   sendHeartbeat().catch((e) => console.warn("[sw] heartbeat err", e));
   collectActivityLibraryFromTargets().catch((e) => console.warn("[sw] activity library collect err", e?.message || e));
+  collectActivityMatchForCurrentMall().catch((e) => console.warn("[sw] activity match collect err", e?.message || e));
   collectJitVmiFromTargets().catch((e) => console.warn("[sw] jit/vmi collect err", e?.message || e));
   collectFlowForCurrentMall().catch((e) => console.warn("[sw] flow collect err", e?.message || e));
 });
@@ -491,6 +501,72 @@ async function pollEnrollTasks() {
       });
     } catch { /* 下轮重试由云端 status 控制 */ }
   }
+}
+
+// 采当前店的活动报名决策数据:activity/list 展平 thematic → 逐个 scroll/match → enqueue 上云
+async function collectActivityMatchForCurrentMall() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", ACTIVITY_MATCH_STATE_KEY]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
+  const now = Date.now();
+  const state = cfg[ACTIVITY_MATCH_STATE_KEY] || {};
+  if (state.last_run_at && now - Number(state.last_run_at) < ACTIVITY_MATCH_RUN_INTERVAL_MS) return { ok: true, skipped: "interval" };
+  const cur = await getCurrentAgentSellerMall();
+  if (!cur) return { ok: false, reason: "no_agentseller_tab_or_mallid" };
+  await setStorage({ [ACTIVITY_MATCH_STATE_KEY]: { ...state, last_run_at: now } });
+  const site = cur.origin.includes("-us") ? "agentseller-us" : cur.origin.includes("-eu") ? "agentseller-eu" : "agentseller";
+
+  // 1. 活动列表 → 展平 thematicList
+  let types = [];
+  try {
+    const lr = await fetch(`${cur.origin}${ACTIVITY_MATCH_LIST_ENDPOINT}`, {
+      method: "POST", credentials: "include", cache: "no-store",
+      headers: { "Content-Type": "application/json", mallid: cur.mallId },
+      body: JSON.stringify({ pageNum: 1, pageSize: 50 }),
+    });
+    const j = safeParseJson(await lr.text());
+    types = j?.result?.activityList || j?.result?.list || [];
+  } catch { return { ok: false, reason: "list_failed" }; }
+  const thematics = [];
+  for (const t of types) {
+    for (const th of (t.thematicList || [])) if (th?.activityThematicId) thematics.push({ type: t.activityType, tid: th.activityThematicId });
+  }
+  const cap = thematics.slice(0, ACTIVITY_MATCH_MAX_THEMATICS);
+
+  // 2. 逐 thematic scroll/match(翻页),enqueue 上云(带 requestBodyText 让 parser 从 __request 拿 activityThematicId/type)
+  let enqueued = 0;
+  for (const th of cap) {
+    let ctx = null, rounds = 0;
+    while (rounds < ACTIVITY_MATCH_MAX_SCROLL) {
+      const reqBody = JSON.stringify({ activityThematicId: th.tid, activityType: th.type, productIds: [], productSkcExtCodes: [], rowCount: ACTIVITY_MATCH_ROWCOUNT, ...(ctx ? { searchScrollContext: ctx } : {}) });
+      let body = null, text = "";
+      try {
+        const resp = await fetch(`${cur.origin}${ACTIVITY_MATCH_ENDPOINT}`, {
+          method: "POST", credentials: "include", cache: "no-store",
+          headers: { "Content-Type": "application/json", mallid: cur.mallId },
+          body: reqBody,
+        });
+        text = await resp.text();
+        body = safeParseJson(text);
+        if (!resp.ok || !body || typeof body !== "object") break;
+      } catch { break; }
+      await enqueue({
+        kind: "fetch-activity-match", url: `${cur.origin}${ACTIVITY_MATCH_ENDPOINT}`,
+        method: "POST", status: 200, ts: Date.now(), site,
+        page: "background/activity-match", mall_id: cur.mallId,
+        body, bodyText: text.length > 200000 ? null : text, requestBodyText: reqBody, bodySize: text.length,
+        activeSource: "scroll_match_background",
+      });
+      enqueued++;
+      await bumpStats({ captured_count_delta: 1 });
+      const res = body.result || {};
+      ctx = res.searchScrollContext || null; rounds++;
+      if (!res.hasMore || !(res.matchList || []).length) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  await setStorage({ [ACTIVITY_MATCH_STATE_KEY]: { ...state, last_run_at: now, last_success_at: Date.now(), last_thematics: cap.length, last_enqueued: enqueued } });
+  return { ok: true, thematics: cap.length, enqueued };
 }
 
 async function collectFlowForCurrentMall() {
