@@ -217,10 +217,23 @@ export default function OperationsWorkbench() {
     const d = enrollDraft[enrollKey(r)]?.price;
     return d != null ? d : (r.suggested_price != null ? r.suggested_price : r.signup_price);
   }, [enrollDraft, enrollKey]);
+  // 每货号「活动最小库存」:该商品所有可报活动里最小的正 activity_stock(避免过量承诺)
+  const skuMinStock = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of actRows) {
+      const s = Number(r.activity_stock);
+      if (!r.sku_ext_code || !Number.isFinite(s) || s <= 0) continue;
+      const cur = m.get(r.sku_ext_code);
+      if (cur == null || s < cur) m.set(r.sku_ext_code, s);
+    }
+    return m;
+  }, [actRows]);
   const effStock = useCallback((r: ActivityRow): number => {
     const d = enrollDraft[enrollKey(r)]?.stock;
-    return d != null ? d : (r.activity_stock || 0);
-  }, [enrollDraft, enrollKey]);
+    if (d != null) return d;
+    if (r.sku_ext_code && skuMinStock.has(r.sku_ext_code)) return skuMinStock.get(r.sku_ext_code)!; // 默认取活动最小值
+    return r.activity_stock || 0;
+  }, [enrollDraft, enrollKey, skuMinStock]);
 
   // 提交报名:勾选行→按活动分组→worker live match 解析权威 ID(dryRun 预演)→二次确认→真提交
   const submitEnroll = useCallback(async () => {
