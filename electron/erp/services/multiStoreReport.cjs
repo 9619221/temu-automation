@@ -997,6 +997,7 @@ function buildPurchaseReport(db, options = {}) {
     paid_amount: toNum(sr.paid_amount), unpaid_amount: toNum(sr.unpaid_amount),
     pending_inbound_amount: toNum(sr.pending_inbound_amount),
     this_month_amount: toNum(sr.this_month_amount), this_month_count: toNum(sr.this_month_count),
+    payment_rate: (toNum(sr.goods_amount) + toNum(sr.freight_amount)) > 0 ? toNum(sr.paid_amount) / (toNum(sr.goods_amount) + toNum(sr.freight_amount)) : 0,
   };
   // 2) 状态分布(全量)
   const by_status = optionalAllLocal(db, `SELECT status, COUNT(*) count, SUM(${AMT}) amount FROM erp_purchase_orders GROUP BY status`, [])
@@ -1015,6 +1016,38 @@ function buildPurchaseReport(db, options = {}) {
       FROM erp_purchase_orders WHERE status<>'cancelled' AND created_at IS NOT NULL AND created_at<>''
      GROUP BY month ORDER BY month DESC LIMIT 12`, [])
     .map((r) => ({ month: r.month, count: toNum(r.count), amount: toNum(r.amount) })).reverse();
+  // 6) 资金占用四象限(已付×已入库 矩阵，排除取消)：财务看采购资金/负债结构
+  const ACT = "status<>'cancelled'";
+  const DONE = "status IN ('inbounded','closed')";
+  const cap = (w) => { const r = db.prepare(`SELECT COUNT(*) c, COALESCE(SUM(${AMT}),0) a FROM erp_purchase_orders WHERE ${w}`).get(); return { count: toNum(r.c), amount: toNum(r.a) }; };
+  const capital = {
+    paid_done: cap(`${ACT} AND payment_status='paid' AND ${DONE}`),
+    paid_undone: cap(`${ACT} AND payment_status='paid' AND NOT (${DONE})`),
+    unpaid_done: cap(`${ACT} AND COALESCE(payment_status,'unpaid')<>'paid' AND ${DONE}`),
+    unpaid_undone: cap(`${ACT} AND COALESCE(payment_status,'unpaid')<>'paid' AND NOT (${DONE})`),
+  };
+  // 7) 应付账款账龄(未付单，按下单距今分桶；系统无账期/交期字段，只能按下单日近似)
+  const agingRaw = optionalAllLocal(db, `
+    SELECT CASE WHEN julianday('now')-julianday(created_at)<=30 THEN '0-30'
+                WHEN julianday('now')-julianday(created_at)<=60 THEN '31-60'
+                WHEN julianday('now')-julianday(created_at)<=90 THEN '61-90'
+                ELSE '90+' END bucket,
+           COUNT(*) count, COALESCE(SUM(${AMT}),0) amount
+      FROM erp_purchase_orders
+     WHERE ${ACT} AND COALESCE(payment_status,'unpaid')<>'paid' AND created_at IS NOT NULL AND created_at<>''
+     GROUP BY bucket`, []);
+  const aging = ['0-30', '31-60', '61-90', '90+'].map((b) => {
+    const r = agingRaw.find((x) => x.bucket === b);
+    return { bucket: b, count: r ? toNum(r.count) : 0, amount: r ? toNum(r.amount) : 0 };
+  });
+  // 8) 现金流出(按 paid_at 实际付款月度；paid_at 仅部分有值，附覆盖率)
+  const cashMonthly = optionalAllLocal(db, `
+    SELECT substr(paid_at,1,7) month, COUNT(*) count, COALESCE(SUM(${AMT}),0) amount
+      FROM erp_purchase_orders WHERE ${ACT} AND paid_at IS NOT NULL AND paid_at<>''
+     GROUP BY month ORDER BY month DESC LIMIT 12`, [])
+    .map((r) => ({ month: r.month, count: toNum(r.count), amount: toNum(r.amount) })).reverse();
+  const covR = db.prepare(`SELECT SUM(CASE WHEN paid_at IS NOT NULL AND paid_at<>'' THEN 1 ELSE 0 END) f, COUNT(*) c FROM erp_purchase_orders WHERE ${ACT} AND payment_status='paid'`).get();
+  const cash_outflow = { coverage: toNum(covR.c) > 0 ? Math.round((toNum(covR.f) / toNum(covR.c)) * 100) : 0, monthly: cashMonthly };
   // 5) 明细(最近 ORDERS_LIMIT 单)：先取单，再只聚合这些单的明细行(避免全表 GROUP BY 43404 行)
   const rows = optionalAllLocal(db, `
     SELECT po.id, po.po_no, po.status, po.payment_status, po.total_amount, po.freight_amount,
@@ -1053,7 +1086,7 @@ function buildPurchaseReport(db, options = {}) {
   const result = {
     generated_at: Date.now(), row_count: toNum(sr.po_count),
     orders_shown: orders.length, orders_truncated: toNum(sr.po_count) > ORDERS_LIMIT,
-    summary, by_status, by_supplier, monthly, orders,
+    summary, capital, aging, cash_outflow, by_status, by_supplier, monthly, orders,
   };
   _purchaseReportCache = { ts: Date.now(), data: result };
   return result;

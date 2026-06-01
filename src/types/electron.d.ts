@@ -1140,8 +1140,16 @@ interface ErpPurchaseReportResponse {
       po_count: number; cancelled_count: number;
       goods_amount: number; freight_amount: number; total_amount: number;
       paid_amount: number; unpaid_amount: number; pending_inbound_amount: number;
-      this_month_amount: number; this_month_count: number;
+      this_month_amount: number; this_month_count: number; payment_rate: number;
     };
+    capital: {
+      paid_done: { count: number; amount: number };
+      paid_undone: { count: number; amount: number };
+      unpaid_done: { count: number; amount: number };
+      unpaid_undone: { count: number; amount: number };
+    };
+    aging: { bucket: string; count: number; amount: number }[];
+    cash_outflow: { coverage: number; monthly: { month: string; count: number; amount: number }[] };
     by_status: { status: string; label: string; count: number; amount: number }[];
     by_supplier: { supplier_id: string | null; supplier_name: string; count: number; amount: number; paid: number }[];
     monthly: { month: string; count: number; amount: number }[];
