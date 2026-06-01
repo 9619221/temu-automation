@@ -3,6 +3,7 @@ import { Alert, Button, Card, Empty, Image, Input, Segmented, Select, Statistic,
 import { EyeOutlined, ReloadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, Legend, ResponsiveContainer } from "recharts";
+import { useNavigate } from "react-router-dom";
 
 // 分页「每页条数」选择器:antd 5.25+ 默认带搜索框(聚焦冒出可编辑光标),这里强制关掉
 const NoSearchSelect = (props: Record<string, unknown>) => <Select {...props} showSearch={false} />;
@@ -72,6 +73,19 @@ const TODO_TYPE_TAG: Record<string, { c: string; t: string }> = {
   product: { c: "orange", t: "运营" }, code: { c: "gold", t: "缺货号" }, risk: { c: "red", t: "风险" }, activity: { c: "green", t: "活动" },
 };
 const TODO_LEVEL_TEXT: Record<number, string> = { 3: "急", 2: "警", 1: "注意" };
+
+// 待办「去处理」跳转目标:备货走应用内路由(/purchase-center 采购单),其余跳 Temu 卖家后台
+// 后台深链路径取自 automation worker 实际用过的页;如需精确到违规/报名子页,改这里即可
+const SELLER_BASE = "https://agentseller.temu.com";
+const RESTOCK_LABELS = new Set(["已售罄", "即将断货", "建议补货", "售罄无销"]);
+function processTarget(t: TodoTask): { route?: string; ext?: string; label: string } {
+  if (t.type === "code") return { ext: `${SELLER_BASE}/goods/list`, label: "去后台补货号" };
+  if (t.type === "risk") return { ext: `${SELLER_BASE}/main/data-center`, label: "去后台处理" };
+  if (t.type === "activity") return { ext: `${SELLER_BASE}/main/activity-analysis`, label: "去活动中心" };
+  // product:补货类去开采购单,动销类(零动销/停销/下滑)去后台救量
+  if (RESTOCK_LABELS.has(t.typeLabel)) return { route: "/purchase-center", label: "去开采购单" };
+  return { ext: `${SELLER_BASE}/main/activity-analysis`, label: "去活动救量" };
+}
 
 const LEVEL_COLOR: Record<number, string> = { 3: "#cf1322", 2: "#d46b08", 1: "#d4b106", 0: "#3f8600" };
 const TAG_COLOR: Record<number, string> = { 3: "red", 2: "orange", 1: "gold", 0: "green" };
@@ -160,6 +174,16 @@ export default function OperationsWorkbench() {
       return next;
     });
   }, []);
+  const navigate = useNavigate();
+  // 待办「去处理」:备货跳应用内采购单页,其余跳 Temu 卖家后台对应页(openExternal 已存在)
+  const goProcess = useCallback((t: TodoTask) => {
+    const tgt = processTarget(t);
+    if (tgt.route) { navigate(tgt.route); return; }
+    if (tgt.ext) {
+      const open = window.electronAPI?.app?.openExternal;
+      if (open) open(tgt.ext); else window.open(tgt.ext, "_blank");
+    }
+  }, [navigate]);
 
   const loadSku = useCallback(async () => {
     if (!window.electronAPI?.erp?.reports?.skuSales) { setError("当前版本不支持运营工作台，请升级桌面端"); return; }
@@ -481,11 +505,15 @@ export default function OperationsWorkbench() {
     ) },
     { title: "关键指标", dataIndex: "metric", width: 120, render: (v: string) => <span style={{ fontSize: 12 }}>{v}</span> },
     { title: "建议动作", dataIndex: "action", width: 280, render: (v: string, t) => <span style={{ fontSize: 12, color: LEVEL_COLOR[t.level] }}>{v}</span> },
-    { title: "处理", key: "ops", width: 120, fixed: "right" as const, render: (_, t) => (
+    { title: "处理", key: "ops", width: 200, fixed: "right" as const, render: (_, t) => (
       t.status ? (
         <span style={{ fontSize: 12 }}><Tag color={t.status === "done" ? "green" : "default"}>{t.status === "done" ? "已处理" : "已忽略"}</Tag><a onClick={() => markTask(t.key, null)}>恢复</a></span>
       ) : (
-        <span style={{ fontSize: 12 }}><a style={{ color: "#3f8600" }} onClick={() => markTask(t.key, "done")}>完成</a><a style={{ marginLeft: 10, color: "#999" }} onClick={() => markTask(t.key, "ignored")}>忽略</a></span>
+        <span style={{ fontSize: 12 }}>
+          <a style={{ color: "#1677ff" }} onClick={() => goProcess(t)}>{processTarget(t).label}</a>
+          <a style={{ marginLeft: 10, color: "#3f8600" }} onClick={() => markTask(t.key, "done")}>完成</a>
+          <a style={{ marginLeft: 10, color: "#999" }} onClick={() => markTask(t.key, "ignored")}>忽略</a>
+        </span>
       )
     ) },
   ];
@@ -700,7 +728,7 @@ export default function OperationsWorkbench() {
               <Select size="small" style={{ width: 130 }} value={todoType} onChange={setTodoType} options={[{ value: "all", label: "全部类型" }, { value: "product", label: "运营/补货" }, { value: "code", label: "缺货号" }, { value: "risk", label: "风险" }, { value: "activity", label: "活动" }]} />
             </>,
           )}
-          <Table<TodoTask> dataSource={todoView} columns={todoColumns} rowKey={(t) => t.key} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 项` }} scroll={{ x: 1176 }} loading={skuLoading || riskLoading || actLoading} />
+          <Table<TodoTask> dataSource={todoView} columns={todoColumns} rowKey={(t) => t.key} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 项` }} scroll={{ x: 1256 }} loading={skuLoading || riskLoading || actLoading} />
         </div>
       ),
     },
