@@ -3877,12 +3877,20 @@ async function yunduActivityMatch({ activityThematicId, activityType, productIds
   } finally { /* keep _yunduPage cached */ }
 }
 
-async function yunduActivitySubmit({ activityThematicId, productIds = [], extra = {} } = {}) {
+// 提交报名。真实体(抓包确认 2026-06-01,与原生「营销活动」同接口):
+//   {activityType, activityThematicId, productList:[{productId, activityStock,
+//     skcList:[{skcId, skuList:[{skuId, activityPrice}]}]}]}
+// 关键:activityPrice 单位=分(元×100)。dryRun=true 时只返回将提交的 body、不真提交。
+// 兼容旧 {productIds} 形态(按系统默认价)。
+async function yunduActivitySubmit({ activityType, activityThematicId, productList, productIds, extra = {}, dryRun = false } = {}) {
   if (!activityThematicId) throw new Error("activityThematicId required");
+  const body = Array.isArray(productList)
+    ? { activityType, activityThematicId, productList, ...extra }
+    : { activityThematicId, productIds: productIds || [], ...extra };
+  if (dryRun) return { dryRun: true, willSubmit: body };
   const page = await _yunduOpenPage();
   try {
-    const r = await _yunduFetch(page, "/api/kiana/gamblers/marketing/enroll/submit",
-      { activityThematicId, productIds, ...extra });
+    const r = await _yunduFetch(page, "/api/kiana/gamblers/marketing/enroll/submit", body);
     return r?.body?.result || r?.body || {};
   } finally { /* keep _yunduPage cached */ }
 }
