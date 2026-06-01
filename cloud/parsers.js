@@ -441,14 +441,14 @@ function parseSalesManagement(db, ctx, evt, body) {
       id, tenant_id, skc_id, product_id, goods_id, mall_supplier_id,
       title, category_name, thumb_url, sku_ext_code,
       today_sales, last7d_sales, last30d_sales, total_sales,
-      warehouse_stock, occupy_stock, unavailable_stock, advice_qty, available_sale_days,
+      warehouse_stock, occupy_stock, unavailable_stock, advice_qty, lack_quantity, available_sale_days,
       declared_price_cents, price_currency, asf_score, comment_num, quality_after_sales_rate,
       supply_status, stock_status, close_jit_status, stat_date, sources_json
     ) VALUES (
       @id, @tenant_id, @skc_id, @product_id, @goods_id, @mall_supplier_id,
       @title, @category_name, @thumb_url, @sku_ext_code,
       @today_sales, @last7d_sales, @last30d_sales, @total_sales,
-      @warehouse_stock, @occupy_stock, @unavailable_stock, @advice_qty, @available_sale_days,
+      @warehouse_stock, @occupy_stock, @unavailable_stock, @advice_qty, @lack_quantity, @available_sale_days,
       @declared_price_cents, @price_currency, @asf_score, @comment_num, @quality_after_sales_rate,
       @supply_status, @stock_status, @close_jit_status, @stat_date, @sources_json
     )
@@ -468,6 +468,7 @@ function parseSalesManagement(db, ctx, evt, body) {
       occupy_stock             = COALESCE(excluded.occupy_stock, occupy_stock),
       unavailable_stock        = COALESCE(excluded.unavailable_stock, unavailable_stock),
       advice_qty               = COALESCE(excluded.advice_qty, advice_qty),
+      lack_quantity            = COALESCE(excluded.lack_quantity, lack_quantity),
       available_sale_days      = COALESCE(excluded.available_sale_days, available_sale_days),
       declared_price_cents     = COALESCE(excluded.declared_price_cents, declared_price_cents),
       price_currency           = COALESCE(excluded.price_currency, price_currency),
@@ -542,6 +543,7 @@ function parseSalesManagement(db, ctx, evt, body) {
       ),
       unavailable_stock: toNullableInteger(firstDefined(row, ["unavailableStock", "unavailableWarehouseInventoryNum"]) ?? inventoryInfo.unavailableWarehouseInventoryNum),
       advice_qty: toNullableInteger(firstDefined(row, ["adviceQuantity", "adviceQty", "suggestPrepareQuantity"]) ?? totalInfo.adviceQuantity),
+      lack_quantity: toNullableInteger(firstDefined(row, ["lackQuantity"]) ?? totalInfo.lackQuantity ?? inventoryInfo.lackQuantity),
       available_sale_days: toNullableNumber(firstDefined(row, ["availableSaleDays", "warehouseAvailableSaleDays"]) ?? totalInfo.availableSaleDays),
       declared_price_cents,
       price_currency,

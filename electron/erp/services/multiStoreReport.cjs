@@ -838,7 +838,7 @@ function buildProductPanel(db, options = {}) {
     const detailRows = optionalAllLocal(db, `
       WITH ls AS (SELECT product_id, MAX(stat_date) sd FROM cloud.temu_sales_snapshot WHERE tenant_id = ? AND product_id IN (${ph}) GROUP BY product_id)
       SELECT s.product_id, s.skc_id, s.sku_ext_code, s.declared_price_cents, s.today_sales, s.last7d_sales, s.available_sale_days,
-             s.warehouse_stock, s.occupy_stock, s.unavailable_stock, s.advice_qty, s.asf_score, s.comment_num
+             s.warehouse_stock, s.occupy_stock, s.unavailable_stock, s.advice_qty, s.lack_quantity, s.asf_score, s.comment_num
         FROM cloud.temu_sales_snapshot s JOIN ls ON ls.product_id = s.product_id AND ls.sd = s.stat_date
        WHERE s.product_id IN (${ph})`, [tid, ...pids, ...pids]);
     const agg = new Map();
@@ -846,9 +846,9 @@ function buildProductPanel(db, options = {}) {
       const k = String(d.product_id);
       let arr = detailMap.get(k);
       if (!arr) { arr = []; detailMap.set(k, arr); }
-      arr.push({ skc_id: d.skc_id || null, sku_ext_code: d.sku_ext_code || null, declared_price: d.declared_price_cents ? Number(d.declared_price_cents) / 100 : null, today: toNum(d.today_sales), last7d: toNum(d.last7d_sales), sale_days: d.available_sale_days == null ? null : Number(d.available_sale_days), stock: toNum(d.warehouse_stock), occupy: toNum(d.occupy_stock), advice_qty: toNum(d.advice_qty) });
+      arr.push({ skc_id: d.skc_id || null, sku_ext_code: d.sku_ext_code || null, declared_price: d.declared_price_cents ? Number(d.declared_price_cents) / 100 : null, today: toNum(d.today_sales), last7d: toNum(d.last7d_sales), sale_days: d.available_sale_days == null ? null : Number(d.available_sale_days), stock: toNum(d.warehouse_stock), occupy: toNum(d.occupy_stock), advice_qty: toNum(d.advice_qty), lack_qty: toNum(d.lack_quantity) });
       let a = agg.get(k);
-      if (!a) { a = { skcs: new Set(), skus: new Set(), declared: null, score: null, comments: null, stock: 0, occupy: 0, unavail: 0, advice: 0, lack: 0 }; agg.set(k, a); }
+      if (!a) { a = { skcs: new Set(), skus: new Set(), declared: null, score: null, comments: null, stock: 0, occupy: 0, unavail: 0, advice: 0, lack: 0, lackQty: 0 }; agg.set(k, a); }
       if (d.skc_id) a.skcs.add(d.skc_id);
       if (d.sku_ext_code) a.skus.add(d.sku_ext_code);
       const dp = d.declared_price_cents ? Number(d.declared_price_cents) : null;
@@ -857,10 +857,21 @@ function buildProductPanel(db, options = {}) {
       if (sc && (a.score == null || sc > a.score)) a.score = sc;
       const cn = d.comment_num != null ? toNum(d.comment_num) : null;
       if (cn != null && (a.comments == null || cn > a.comments)) a.comments = cn;
-      a.stock += toNum(d.warehouse_stock); a.occupy += toNum(d.occupy_stock); a.unavail += toNum(d.unavailable_stock); a.advice += toNum(d.advice_qty);
+      a.stock += toNum(d.warehouse_stock); a.occupy += toNum(d.occupy_stock); a.unavail += toNum(d.unavailable_stock); a.advice += toNum(d.advice_qty); a.lackQty += toNum(d.lack_quantity);
       if (toNum(d.warehouse_stock) <= 0) a.lack++;
     }
-    codeMap = new Map([...agg].map(([k, a]) => [k, { skcs: [...a.skcs].join(",") || null, skus: [...a.skus].join(",") || null, declared: a.declared, score: a.score, comments: a.comments, stock: a.stock, occupy: a.occupy, unavail: a.unavail, advice: a.advice, lack: a.lack }]));
+    codeMap = new Map([...agg].map(([k, a]) => [k, { skcs: [...a.skcs].join(",") || null, skus: [...a.skus].join(",") || null, declared: a.declared, score: a.score, comments: a.comments, stock: a.stock, occupy: a.occupy, unavail: a.unavail, advice: a.advice, lack: a.lack, lackQty: a.lackQty }]));
+  }
+  // 发货在途：备货单运输中数量(shipping_qty)，按 mall_id+product_id 聚合(stock_order 是当前态 upsert，无跨天虚高)
+  let shipMap = new Map();
+  if (pids.length) {
+    const ph2 = pids.map(() => "?").join(",");
+    const shipRows = optionalAllLocal(db, `
+      SELECT mall_id, product_id, SUM(COALESCE(shipping_qty,0)) ship
+        FROM cloud.temu_stock_order_snapshot
+       WHERE tenant_id = ? AND product_id IN (${ph2}) AND product_id IS NOT NULL AND product_id <> ''
+       GROUP BY mall_id, product_id`, [tid, ...pids]);
+    shipMap = new Map(shipRows.map((s) => [s.mall_id + "|" + s.product_id, toNum(s.ship)]));
   }
   const out = [];
   for (const e of map.values()) {
@@ -879,6 +890,10 @@ function buildProductPanel(db, options = {}) {
     e.unavail = cm ? toNum(cm.unavail) : null;
     e.advice = cm ? toNum(cm.advice) : null;
     e.lack = cm ? toNum(cm.lack) : null;
+    e.lack_qty = cm ? toNum(cm.lackQty) : null;
+    e.shipping = shipMap.get(e.mall_id + "|" + e.product_id) || 0;
+    // 总库存 = 可用 + 暂不可用 - 缺货件数 + 发货在途
+    e.total_stock = cm ? (toNum(cm.stock) + toNum(cm.unavail) - toNum(cm.lackQty) + e.shipping) : null;
     e.skus_detail = detailMap.get(String(e.product_id)) || [];
     e.store_code = m ? m.store_code || null : null;
     e.mall_name = m ? m.mall_name || null : null;

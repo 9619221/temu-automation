@@ -1077,6 +1077,9 @@ interface ErpProductPanelRow {
   unavail: number | null;
   advice: number | null;
   lack: number | null;
+  lack_qty: number | null;
+  shipping: number | null;
+  total_stock: number | null;
   expose: number | null;
   click: number | null;
   pay: number | null;
@@ -1086,7 +1089,7 @@ interface ErpProductPanelRow {
   act_cnt: number;
   min_price: number | null;
   compliance: string | null;
-  skus_detail?: { skc_id: string | null; sku_ext_code: string | null; declared_price: number | null; today: number; last7d: number; sale_days: number | null; stock: number; occupy: number; advice_qty: number }[];
+  skus_detail?: { skc_id: string | null; sku_ext_code: string | null; declared_price: number | null; today: number; last7d: number; sale_days: number | null; stock: number; occupy: number; advice_qty: number; lack_qty?: number }[];
 }
 
 interface ErpProductPanelResponse {

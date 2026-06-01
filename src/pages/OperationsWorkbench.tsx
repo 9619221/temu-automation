@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Button, Card, Empty, Image, Input, Select, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from "antd";
+import { Alert, Button, Card, Empty, Image, Input, Segmented, Select, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from "antd";
 import { EyeOutlined, ReloadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, Legend, ResponsiveContainer } from "recharts";
@@ -49,11 +49,11 @@ interface StoreMatrixRow {
   sales: number; sale_7d: number; lack: number; soldout: number;
   high_risk: number; restock: number; stock_gap: number; activity: number;
 }
-interface SkuChild { skc_id: string | null; sku_ext_code: string | null; declared_price: number | null; today: number; last7d: number; sale_days: number | null; stock: number; occupy: number; advice_qty: number; }
+interface SkuChild { skc_id: string | null; sku_ext_code: string | null; declared_price: number | null; today: number; last7d: number; sale_days: number | null; stock: number; occupy: number; advice_qty: number; lack_qty?: number; }
 interface ProductPanelRow {
   mall_id: string; product_id: string; store_code: string | null; mall_name: string | null; title: string | null; thumb: string | null;
   skc_codes: string | null; sku_codes: string | null; declared_price: number | null; score: number | null; comments: number | null;
-  stock: number | null; occupy: number | null; unavail: number | null; advice: number | null; lack: number | null;
+  stock: number | null; occupy: number | null; unavail: number | null; advice: number | null; lack: number | null; lack_qty: number | null; shipping: number | null; total_stock: number | null;
   expose: number | null; click: number | null; pay: number | null; conv: number | null; grow: string | null;
   limited: boolean; act_cnt: number; min_price: number | null; compliance: string | null; skus_detail?: SkuChild[]; __rk?: number;
 }
@@ -99,6 +99,14 @@ const TREND_COLORS = ["#1a73e8", "#34a853", "#fbbc04", "#ea4335", "#a142f4", "#2
 
 export default function OperationsWorkbench() {
   const [activeTab, setActiveTab] = useState("overview");
+  // 「我的店」视角:按负责人(owner)过滤全局,记住上次选择
+  const [ownerFilter, setOwnerFilter] = useState<string>(() => { try { return localStorage.getItem("ow_owner") || "all"; } catch { return "all"; } });
+  const setOwner = useCallback((v: string) => { setOwnerFilter(v); try { localStorage.setItem("ow_owner", v); } catch { /* */ } }, []);
+  // 合并 Tab 内的子段切换
+  const [storeSeg, setStoreSeg] = useState<string>("health");
+  const [prodSeg, setProdSeg] = useState<string>("panel");
+  const goProduct = useCallback((seg: string) => { setProdSeg(seg); setActiveTab("product"); }, []);
+  const goStore = useCallback((seg: string) => { setStoreSeg(seg); setActiveTab("store"); }, []);
   const [skuRows, setSkuRows] = useState<SkuRow[]>([]);
   const [skuLoading, setSkuLoading] = useState(false);
   const [riskRows, setRiskRows] = useState<RiskRow[]>([]);
@@ -171,12 +179,14 @@ export default function OperationsWorkbench() {
   useEffect(() => { loadSku(); }, [loadSku]);
   useEffect(() => {
     const ov = activeTab === "overview";
-    if ((activeTab === "shop" || ov) && !shopLoaded && !shopLoading) loadShop();
-    if ((activeTab === "trend" || ov) && !trendLoaded && !trendLoading) loadTrend();
+    const store = activeTab === "store";
+    // shop 始终加载:owner 映射是「我的店」全局过滤的基础
+    if (!shopLoaded && !shopLoading) loadShop();
+    if ((store || ov) && !trendLoaded && !trendLoading) loadTrend();
     if ((activeTab === "stock" || ov) && !stockLoaded && !stockLoading) loadStockOrders();
     if ((activeTab === "risk" || ov) && !riskLoaded && !riskLoading) loadRisk();
     if ((activeTab === "activity" || ov) && !actLoaded && !actLoading) loadAct();
-    if (activeTab === "panel" && !panelLoaded && !panelLoading) loadPanel();
+    if (activeTab === "product" && !panelLoaded && !panelLoading) loadPanel();
   }, [activeTab, shopLoaded, shopLoading, trendLoaded, trendLoading, stockLoaded, stockLoading, riskLoaded, riskLoading, actLoaded, actLoading, panelLoaded, panelLoading, loadShop, loadTrend, loadStockOrders, loadRisk, loadAct, loadPanel]);
 
   const diagnosed: DiagnosedRow[] = useMemo(() => skuRows.map((r) => {
@@ -186,22 +196,45 @@ export default function OperationsWorkbench() {
 
   const storeOptions = useMemo(() => {
     const s = new Set<string>();
-    for (const r of skuRows) if (r.store_code) s.add(r.store_code);
+    for (const r of skuRows) if (r.store_code && inScope(r.store_code || r.mall_id)) s.add(r.store_code);
     return Array.from(s).sort();
-  }, [skuRows]);
+  }, [skuRows, inScope]);
+
+  // store_code / mall_id → owner 映射(来自店铺健康),用于「我的店」过滤
+  const storeOwnerMap = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const r of shopRows) {
+      if (!r.owner) continue;
+      if (r.store_code) m.set(r.store_code, r.owner);
+      if (r.mall_id) m.set(r.mall_id, r.owner);
+    }
+    return m;
+  }, [shopRows]);
+  const ownerOptions = useMemo(() => {
+    const s = new Set<string>();
+    for (const r of shopRows) if (r.owner) s.add(r.owner);
+    return Array.from(s).sort();
+  }, [shopRows]);
+  // 当前 owner 视角下该店是否可见;选了具体 owner 但映射还没到(shop未加载)时不误杀,放行
+  const inScope = useCallback((code: string | null | undefined) => {
+    if (ownerFilter === "all") return true;
+    if (storeOwnerMap.size === 0) return true;
+    return storeOwnerMap.get(code || "") === ownerFilter;
+  }, [ownerFilter, storeOwnerMap]);
 
   const overview = useMemo(() => {
     let urgent = 0, warn = 0, note = 0, healthy = 0;
     const byLabel: Record<string, number> = {};
     for (const r of diagnosed) {
+      if (!inScope(r.store_code || r.mall_id)) continue;
       if (r._level === 3) urgent++; else if (r._level === 2) warn++; else if (r._level === 1) note++; else healthy++;
       for (const i of r._issues) byLabel[i.label] = (byLabel[i.label] || 0) + 1;
     }
     return { urgent, warn, note, healthy, byLabel };
-  }, [diagnosed]);
+  }, [diagnosed, inScope]);
 
   const diagView = useMemo(() => {
-    let v = diagnosed;
+    let v = diagnosed.filter((r) => inScope(r.store_code || r.mall_id));
     if (storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
     if (diagFilter === "urgent") v = v.filter((r) => r._level === 3);
     else if (diagFilter === "warn") v = v.filter((r) => r._level === 2);
@@ -211,7 +244,7 @@ export default function OperationsWorkbench() {
     const q = search.trim().toLowerCase();
     if (q) v = v.filter((r) => (r.sku_ext_code || "").toLowerCase().includes(q) || (r.title || "").toLowerCase().includes(q));
     return [...v].sort((a, b) => b._level - a._level || b.last7d - a.last7d);
-  }, [diagnosed, storeFilter, diagFilter, search]);
+  }, [diagnosed, storeFilter, diagFilter, search, inScope]);
 
   // 库存补货：需补货 SKU（售罄/即将断货/有建议备货），紧急度排序
   const restockView = useMemo(() => {
@@ -222,47 +255,47 @@ export default function OperationsWorkbench() {
       if ((r.advice_qty || 0) > 0 || (r.sale_days != null && r.sale_days < 14)) return 1;
       return 0;
     };
-    let v = skuRows.filter(need);
+    let v = skuRows.filter((r) => need(r) && inScope(r.store_code || r.mall_id));
     if (storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
     const q = search.trim().toLowerCase();
     if (q) v = v.filter((r) => (r.sku_ext_code || "").toLowerCase().includes(q) || (r.title || "").toLowerCase().includes(q));
     return [...v].sort((a, b) => urg(b) - urg(a) || (a.sale_days ?? Infinity) - (b.sale_days ?? Infinity) || b.advice_qty - a.advice_qty);
-  }, [skuRows, storeFilter, search]);
+  }, [skuRows, storeFilter, search, inScope]);
 
   const riskStoreReady = riskRows;
   const riskOverview = useMemo(() => {
     let high = 0, medium = 0, low = 0;
-    for (const r of riskRows) { if (r.severity === "high") high++; else if (r.severity === "medium") medium++; else low++; }
+    for (const r of riskRows) { if (!inScope(r.store_code || r.mall_id)) continue; if (r.severity === "high") high++; else if (r.severity === "medium") medium++; else low++; }
     return { high, medium, low };
-  }, [riskRows]);
+  }, [riskRows, inScope]);
   const riskView = useMemo(() => {
-    let v = riskStoreReady;
+    let v = riskStoreReady.filter((r) => inScope(r.store_code || r.mall_id));
     if (storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
     if (sevFilter !== "all") v = v.filter((r) => r.severity === sevFilter);
     const q = search.trim().toLowerCase();
     if (q) v = v.filter((r) => (r.title || "").toLowerCase().includes(q) || (r.risk_type || "").toLowerCase().includes(q) || (r.skc_id || "").includes(q));
     return [...v].sort((a, b) => (SEV_RANK[b.severity || ""] || 0) - (SEV_RANK[a.severity || ""] || 0)).map((r, i) => ({ ...r, __rk: i }));
-  }, [riskStoreReady, storeFilter, sevFilter, search]);
+  }, [riskStoreReady, storeFilter, sevFilter, search, inScope]);
 
   const actView = useMemo(() => {
-    let v = actRows;
+    let v = actRows.filter((r) => inScope(r.store_code || r.mall_id));
     if (storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
     if (kindFilter !== "all") v = v.filter((r) => r.kind === kindFilter);
     const q = search.trim().toLowerCase();
     if (q) v = v.filter((r) => (r.title || "").toLowerCase().includes(q) || (r.sku_ext_code || "").toLowerCase().includes(q));
     return v.map((r, i) => ({ ...r, __rk: i }));
-  }, [actRows, storeFilter, kindFilter, search]);
+  }, [actRows, storeFilter, kindFilter, search, inScope]);
 
   const shopAgg = useMemo(() => {
     let lack = 0, soldout = 0, sales = 0;
-    for (const r of shopRows) { lack += r.lack_skc || 0; soldout += r.already_sold_out || 0; sales += r.sale_volume || 0; }
+    for (const r of shopRows) { if (!inScope(r.store_code || r.mall_id)) continue; lack += r.lack_skc || 0; soldout += r.already_sold_out || 0; sales += r.sale_volume || 0; }
     return { lack, soldout, sales };
-  }, [shopRows]);
+  }, [shopRows, inScope]);
   const overviewTrend = useMemo(() => {
     const byDate = new Map<string, number>();
-    for (const r of trendRows) byDate.set(r.stat_date, (byDate.get(r.stat_date) || 0) + r.sales);
+    for (const r of trendRows) { if (!inScope(r.store_code || r.mall_id)) continue; byDate.set(r.stat_date, (byDate.get(r.stat_date) || 0) + r.sales); }
     return [...byDate.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([date, sales]) => ({ date, sales }));
-  }, [trendRows]);
+  }, [trendRows, inScope]);
   const storeMatrix = useMemo(() => {
     const m = new Map<string, StoreMatrixRow>();
     const get = (code: string, mall_id: string, mall_name: string | null, owner: string | null) => {
@@ -272,52 +305,53 @@ export default function OperationsWorkbench() {
       if (owner && !e.owner) e.owner = owner;
       return e;
     };
-    for (const r of shopRows) { const e = get(r.store_code || r.mall_id, r.mall_id, r.mall_name, r.owner); e.sales = r.sale_volume; e.sale_7d = r.sale_7d; e.lack = r.lack_skc; e.soldout = r.already_sold_out; }
-    for (const r of riskRows) if (r.severity === "high") get(r.store_code || r.mall_id, r.mall_id, r.mall_name, null).high_risk++;
+    for (const r of shopRows) { if (!inScope(r.store_code || r.mall_id)) continue; const e = get(r.store_code || r.mall_id, r.mall_id, r.mall_name, r.owner); e.sales = r.sale_volume; e.sale_7d = r.sale_7d; e.lack = r.lack_skc; e.soldout = r.already_sold_out; }
+    for (const r of riskRows) if (r.severity === "high" && inScope(r.store_code || r.mall_id)) get(r.store_code || r.mall_id, r.mall_id, r.mall_name, null).high_risk++;
     const need = (r: SkuRow) => (r.stock || 0) <= 0 || (r.sale_days != null && r.sale_days < 14) || (r.advice_qty || 0) > 0;
-    for (const r of skuRows) if (need(r)) get(r.store_code || r.mall_id, r.mall_id, r.mall_name, null).restock++;
-    for (const r of stockRows) get(r.store_code || r.mall_id, r.mall_id, r.mall_name, null).stock_gap++;
-    for (const r of actRows) get(r.store_code || r.mall_id, r.mall_id, r.mall_name, null).activity++;
+    for (const r of skuRows) if (need(r) && inScope(r.store_code || r.mall_id)) get(r.store_code || r.mall_id, r.mall_id, r.mall_name, null).restock++;
+    for (const r of stockRows) { if (!inScope(r.store_code || r.mall_id)) continue; get(r.store_code || r.mall_id, r.mall_id, r.mall_name, null).stock_gap++; }
+    for (const r of actRows) { if (!inScope(r.store_code || r.mall_id)) continue; get(r.store_code || r.mall_id, r.mall_id, r.mall_name, null).activity++; }
     return [...m.values()].sort((a, b) => (b.lack + b.soldout + b.high_risk * 5) - (a.lack + a.soldout + a.high_risk * 5));
-  }, [shopRows, riskRows, skuRows, stockRows, actRows]);
+  }, [shopRows, riskRows, skuRows, stockRows, actRows, inScope]);
   const panelView = useMemo(() => {
-    let v = panelRows;
+    let v = panelRows.filter((r) => inScope(r.store_code || r.mall_id));
     if (storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
     const q = search.trim().toLowerCase();
     if (q) v = v.filter((r) => (r.title || "").toLowerCase().includes(q) || (r.product_id || "").includes(q));
     return v.map((r, i) => ({ ...r, __rk: i }));
-  }, [panelRows, storeFilter, search]);
+  }, [panelRows, storeFilter, search, inScope]);
   const shopView = useMemo(() => {
-    let v = shopRows;
+    let v = shopRows.filter((r) => inScope(r.store_code || r.mall_id));
     if (storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
     const q = search.trim().toLowerCase();
     if (q) v = v.filter((r) => (r.store_code || "").toLowerCase().includes(q) || (r.mall_name || "").toLowerCase().includes(q) || (r.owner || "").toLowerCase().includes(q));
     return v.map((r, i) => ({ ...r, __rk: i }));
-  }, [shopRows, storeFilter, search]);
+  }, [shopRows, storeFilter, search, inScope]);
   const stockView = useMemo(() => {
-    let v = stockRows;
+    let v = stockRows.filter((r) => inScope(r.store_code || r.mall_id));
     if (storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
     const q = search.trim().toLowerCase();
     if (q) v = v.filter((r) => (r.sku_ext_code || "").toLowerCase().includes(q) || (r.product_name || "").toLowerCase().includes(q) || (r.order_no || "").toLowerCase().includes(q));
     return v.map((r, i) => ({ ...r, __rk: i }));
-  }, [stockRows, storeFilter, search]);
+  }, [stockRows, storeFilter, search, inScope]);
   const trendChart = useMemo(() => {
-    const dates = [...new Set(trendRows.map((r) => r.stat_date))].sort();
+    const scoped = trendRows.filter((r) => inScope(r.store_code || r.mall_id));
+    const dates = [...new Set(scoped.map((r) => r.stat_date))].sort();
     const totals = new Map<string, number>();
-    for (const r of trendRows) { const k = r.store_code || r.mall_id; totals.set(k, (totals.get(k) || 0) + r.sales); }
+    for (const r of scoped) { const k = r.store_code || r.mall_id; totals.set(k, (totals.get(k) || 0) + r.sales); }
     let stores: string[];
     if (storeFilter !== "all") stores = [storeFilter];
     else stores = [...totals.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map((e) => e[0]);
     const byDate = new Map<string, Record<string, number | string>>();
     for (const d of dates) byDate.set(d, { date: d });
-    for (const r of trendRows) {
+    for (const r of scoped) {
       const k = r.store_code || r.mall_id;
       if (!stores.includes(k)) continue;
       const row = byDate.get(r.stat_date);
       if (row) row[k] = r.sales;
     }
     return { data: dates.map((d) => byDate.get(d)!), stores };
-  }, [trendRows, storeFilter]);
+  }, [trendRows, storeFilter, inScope]);
 
   const skuTitleCol = {
     title: "商品 · SKU / SKC / SPU", key: "sku", width: 300,
@@ -448,7 +482,9 @@ export default function OperationsWorkbench() {
     { title: "可用库存", key: "stock", width: 90, align: "right", render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.stock || 0), 0); return stackCell(skus, (s) => <span style={{ color: (s.stock || 0) <= 0 ? "#cf1322" : undefined }}>{fmtNum(s.stock)}</span>, fmtNum(sum)); } },
     { title: "预占用库存", key: "occupy", width: 100, align: "right", render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.occupy || 0), 0); return stackCell(skus, (s) => fmtNum(s.occupy), fmtNum(sum)); } },
     { title: "暂不可用库存", dataIndex: "unavail", width: 110, align: "right", render: (v: number | null) => (v == null ? "—" : v > 0 ? <span style={{ color: "#d46b08" }}>{fmtNum(v)}</span> : fmtNum(v)) },
-    { title: "缺货数量", dataIndex: "lack", width: 95, align: "right", sorter: (a, b) => (a.lack ?? 0) - (b.lack ?? 0), render: (v: number | null) => (v == null ? "—" : v > 0 ? <span style={{ color: "#cf1322", fontWeight: 600 }}>{fmtNum(v)}</span> : <span style={{ color: "#bbb" }}>0</span>) },
+    { title: "缺货件数", key: "lack_qty", width: 95, align: "right", sorter: (a, b) => (a.lack_qty ?? 0) - (b.lack_qty ?? 0), render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.lack_qty || 0), 0); return stackCell(skus, (s) => ((s.lack_qty || 0) > 0 ? <span style={{ color: "#cf1322", fontWeight: 600 }}>{fmtNum(s.lack_qty || 0)}</span> : <span style={{ color: "#bbb" }}>0</span>), sum > 0 ? <span style={{ color: "#cf1322" }}>{fmtNum(sum)}</span> : fmtNum(sum)); } },
+    { title: "发货在途", dataIndex: "shipping", width: 90, align: "right", sorter: (a, b) => (a.shipping ?? 0) - (b.shipping ?? 0), render: (v: number | null) => (v == null ? "—" : v > 0 ? <span style={{ color: "#1677ff" }}>{fmtNum(v)}</span> : <span style={{ color: "#bbb" }}>0</span>) },
+    { title: "总库存", dataIndex: "total_stock", width: 95, align: "right", sorter: (a, b) => (a.total_stock ?? 0) - (b.total_stock ?? 0), render: (v: number | null) => (v == null ? "—" : <span style={{ fontWeight: 700, color: v <= 0 ? "#cf1322" : "#1a73e8" }}>{fmtNum(v)}</span>) },
     { title: "建议备货", key: "advice", width: 90, align: "right", render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.advice_qty || 0), 0); return stackCell(skus, (s) => ((s.advice_qty || 0) > 0 ? <Tag color="blue">{fmtNum(s.advice_qty)}</Tag> : <span style={{ color: "#bbb" }}>—</span>), fmtNum(sum)); } },
     { title: "可报活动", key: "act", width: 130, align: "right", sorter: (a, b) => a.act_cnt - b.act_cnt, render: (_, r) => (r.act_cnt > 0 ? <span style={{ color: "#3f8600" }}>{r.act_cnt}个{r.min_price != null ? ` / 低¥${r.min_price.toFixed(2)}` : ""}</span> : <span style={{ color: "#bbb" }}>—</span>) },
     { title: "合规", dataIndex: "compliance", width: 170, render: (v: string | null) => (v ? <Tag color="red" style={{ whiteSpace: "normal" }}>{v}</Tag> : <span style={{ color: "#3f8600" }}>正常</span>) },
@@ -473,12 +509,12 @@ export default function OperationsWorkbench() {
       children: (
         <div style={{ padding: 16 }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 16 }}>
-            <Card size="small" hoverable onClick={() => setActiveTab("shop")}><Statistic title="今日销量(全店)" value={shopAgg.sales} /></Card>
-            <Card size="small" hoverable onClick={() => setActiveTab("shop")}><Statistic title="缺货 SKC" value={shopAgg.lack} valueStyle={{ color: shopAgg.lack > 0 ? "#d46b08" : undefined }} /></Card>
-            <Card size="small" hoverable onClick={() => setActiveTab("shop")}><Statistic title="已售罄" value={shopAgg.soldout} valueStyle={{ color: shopAgg.soldout > 0 ? "#cf1322" : undefined }} /></Card>
+            <Card size="small" hoverable onClick={() => goStore("health")}><Statistic title="今日销量(全店)" value={shopAgg.sales} /></Card>
+            <Card size="small" hoverable onClick={() => goStore("health")}><Statistic title="缺货 SKC" value={shopAgg.lack} valueStyle={{ color: shopAgg.lack > 0 ? "#d46b08" : undefined }} /></Card>
+            <Card size="small" hoverable onClick={() => goStore("health")}><Statistic title="已售罄" value={shopAgg.soldout} valueStyle={{ color: shopAgg.soldout > 0 ? "#cf1322" : undefined }} /></Card>
             <Card size="small" hoverable onClick={() => setActiveTab("risk")}><Statistic title="高风险待办" value={riskOverview.high} valueStyle={{ color: riskOverview.high > 0 ? "#cf1322" : undefined }} /></Card>
-            <Card size="small" hoverable onClick={() => setActiveTab("diag")}><Statistic title="诊断 · 急" value={overview.urgent} valueStyle={{ color: overview.urgent > 0 ? "#cf1322" : undefined }} /></Card>
-            <Card size="small" hoverable onClick={() => setActiveTab("restock")}><Statistic title="急需补货 SKU" value={restockView.length} valueStyle={{ color: restockView.length > 0 ? "#d46b08" : undefined }} /></Card>
+            <Card size="small" hoverable onClick={() => goProduct("diag")}><Statistic title="诊断 · 急" value={overview.urgent} valueStyle={{ color: overview.urgent > 0 ? "#cf1322" : undefined }} /></Card>
+            <Card size="small" hoverable onClick={() => goProduct("restock")}><Statistic title="急需补货 SKU" value={restockView.length} valueStyle={{ color: restockView.length > 0 ? "#d46b08" : undefined }} /></Card>
             <Card size="small" hoverable onClick={() => setActiveTab("stock")}><Statistic title="备货缺口单" value={stockView.length} /></Card>
             <Card size="small" hoverable onClick={() => setActiveTab("activity")}><Statistic title="可报活动" value={actView.length} valueStyle={{ color: "#3f8600" }} /></Card>
           </div>
@@ -486,7 +522,7 @@ export default function OperationsWorkbench() {
             <Table<StoreMatrixRow> dataSource={storeMatrix} columns={storeMatrixColumns} rowKey="store_code" size="small"
               pagination={{ defaultPageSize: 20, showSizeChanger: true, pageSizeOptions: [10, 20, 50], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 店` }}
               scroll={{ x: 980 }}
-              onRow={(r) => ({ onClick: () => { setStoreFilter(r.store_code); setActiveTab("diag"); }, style: { cursor: "pointer" } })} />
+              onRow={(r) => ({ onClick: () => { setStoreFilter(r.store_code); goProduct("diag"); }, style: { cursor: "pointer" } })} />
           </Card>
           <Card size="small" title="全店销量趋势 · 近 30 天" style={{ marginBottom: 16 }} loading={trendLoading}>
             <div style={{ height: 200 }}>
@@ -512,7 +548,7 @@ export default function OperationsWorkbench() {
               ))}
               {riskView.filter((r) => r.severity === "high").length === 0 && <div style={{ color: "#999", fontSize: 12, padding: "8px 0" }}>无高风险</div>}
             </Card>
-            <Card size="small" title="急需补货" extra={<a onClick={() => setActiveTab("restock")}>全部</a>} loading={skuLoading}>
+            <Card size="small" title="急需补货" extra={<a onClick={() => goProduct("restock")}>全部</a>} loading={skuLoading}>
               {restockView.slice(0, 6).map((r, i) => (
                 <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "4px 0", borderBottom: "1px solid #f5f5f5", fontSize: 12 }}>
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}><Tag color="orange">{r.store_code || r.mall_id}</Tag>{r.title || r.sku_ext_code || "—"}</span>
@@ -535,75 +571,87 @@ export default function OperationsWorkbench() {
       ),
     },
     {
-      key: "shop", label: "店铺健康",
+      key: "store", label: "店铺",
       children: (
         <div>
-          <div style={{ padding: "12px 16px 0", display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16 }}>
-            <Statistic title="店铺数" value={shopRows.length} />
-            <Statistic title="缺货SKC合计" value={shopAgg.lack} valueStyle={{ color: shopAgg.lack > 0 ? "#d46b08" : undefined }} />
-            <Statistic title="已售罄合计" value={shopAgg.soldout} valueStyle={{ color: shopAgg.soldout > 0 ? "#cf1322" : undefined }} />
-            <Statistic title="今日销量合计" value={shopAgg.sales} />
+          <div style={{ padding: "12px 16px 0" }}>
+            <Segmented value={storeSeg} onChange={(v) => setStoreSeg(v as string)} options={[{ label: "健康体检", value: "health" }, { label: "销量趋势", value: "trend" }]} />
           </div>
-          <div style={{ padding: "8px 16px 0", color: "#888", fontSize: 12 }}>各店体检:销量 / 在售 / 缺货 / 售罄 / 90天售后率,按已售罄、缺货降序。</div>
-          {commonFilters()}
-          <Table<ShopHealthRow> dataSource={shopView} columns={shopColumns} rowKey={(r) => String(r.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 条` }} scroll={{ x: 1200 }} loading={shopLoading} />
-        </div>
-      ),
-    },
-    {
-      key: "trend", label: "销量趋势",
-      children: (
-        <div>
-          <div style={{ padding: "12px 16px 0", color: "#888", fontSize: 12 }}>各店近 30 天每日销量走势(已排除预测值)。全部店时显示销量 Top 8;选具体店看单店曲线。</div>
-          {commonFilters()}
-          <div style={{ padding: "8px 16px 16px", height: 440 }}>
-            {trendLoading ? (
-              <div style={{ textAlign: "center", color: "#999", paddingTop: 170 }}>加载中…</div>
-            ) : trendChart.data.length === 0 ? (
-              <Empty description="暂无趋势数据" style={{ paddingTop: 140 }} />
-            ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={trendChart.data} margin={{ top: 10, right: 24, bottom: 4, left: -12 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
-                  <XAxis dataKey="date" tick={{ fontSize: 11 }} minTickGap={20} />
-                  <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
-                  <RTooltip />
-                  <Legend wrapperStyle={{ fontSize: 12 }} />
-                  {trendChart.stores.map((s, i) => (
-                    <Line key={s} type="monotone" dataKey={s} name={s} stroke={TREND_COLORS[i % TREND_COLORS.length]} dot={false} strokeWidth={2} connectNulls />
-                  ))}
-                </LineChart>
-              </ResponsiveContainer>
-            )}
-          </div>
-        </div>
-      ),
-    },
-    {
-      key: "diag", label: "商品诊断",
-      children: (
-        <div>
-          <div style={{ padding: "12px 16px 0", display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 16 }}>
-            <Statistic title="待诊断 SKU" value={diagnosed.length} />
-            <Statistic title="急" value={overview.urgent} valueStyle={{ color: overview.urgent > 0 ? "#cf1322" : undefined }} />
-            <Statistic title="警" value={overview.warn} valueStyle={{ color: overview.warn > 0 ? "#d46b08" : undefined }} />
-            <Statistic title="注意" value={overview.note} valueStyle={{ color: overview.note > 0 ? "#d4b106" : undefined }} />
-            <Statistic title="健康" value={overview.healthy} valueStyle={{ color: "#3f8600" }} />
-          </div>
-          {commonFilters(
-            <Select size="small" style={{ width: 140 }} value={diagFilter} onChange={setDiagFilter} options={[{ value: "all", label: "全部" }, { value: "issues", label: "仅有问题" }, { value: "urgent", label: "急" }, { value: "warn", label: "警" }, { value: "note", label: "注意" }, { value: "缺货号", label: "缺货号" }]} />,
+          {storeSeg === "health" ? (
+            <div>
+              <div style={{ padding: "12px 16px 0", display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16 }}>
+                <Statistic title="店铺数" value={shopView.length} />
+                <Statistic title="缺货SKC合计" value={shopAgg.lack} valueStyle={{ color: shopAgg.lack > 0 ? "#d46b08" : undefined }} />
+                <Statistic title="已售罄合计" value={shopAgg.soldout} valueStyle={{ color: shopAgg.soldout > 0 ? "#cf1322" : undefined }} />
+                <Statistic title="今日销量合计" value={shopAgg.sales} />
+              </div>
+              <div style={{ padding: "8px 16px 0", color: "#888", fontSize: 12 }}>各店体检:销量 / 在售 / 缺货 / 售罄 / 90天售后率,按已售罄、缺货降序。</div>
+              {commonFilters()}
+              <Table<ShopHealthRow> dataSource={shopView} columns={shopColumns} rowKey={(r) => String(r.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 条` }} scroll={{ x: 1200 }} loading={shopLoading} />
+            </div>
+          ) : (
+            <div>
+              <div style={{ padding: "12px 16px 0", color: "#888", fontSize: 12 }}>各店近 30 天每日销量走势(已排除预测值)。全部店时显示销量 Top 8;选具体店看单店曲线。</div>
+              {commonFilters()}
+              <div style={{ padding: "8px 16px 16px", height: 440 }}>
+                {trendLoading ? (
+                  <div style={{ textAlign: "center", color: "#999", paddingTop: 170 }}>加载中…</div>
+                ) : trendChart.data.length === 0 ? (
+                  <Empty description="暂无趋势数据" style={{ paddingTop: 140 }} />
+                ) : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={trendChart.data} margin={{ top: 10, right: 24, bottom: 4, left: -12 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
+                      <XAxis dataKey="date" tick={{ fontSize: 11 }} minTickGap={20} />
+                      <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
+                      <RTooltip />
+                      <Legend wrapperStyle={{ fontSize: 12 }} />
+                      {trendChart.stores.map((s, i) => (
+                        <Line key={s} type="monotone" dataKey={s} name={s} stroke={TREND_COLORS[i % TREND_COLORS.length]} dot={false} strokeWidth={2} connectNulls />
+                      ))}
+                    </LineChart>
+                  </ResponsiveContainer>
+                )}
+              </div>
+            </div>
           )}
-          <Table<DiagnosedRow> dataSource={diagView} columns={diagColumns} rowKey={(r) => `${r.mall_id}|${r.skc_id}|${r.sku_ext_code}`} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 条` }} scroll={{ x: 1120 }} loading={skuLoading} />
         </div>
       ),
     },
     {
-      key: "restock", label: "库存补货",
+      key: "product", label: "商品",
       children: (
         <div>
-          <div style={{ padding: "12px 16px 0", color: "#888", fontSize: 12 }}>需补货 SKU（已售罄 / 可售&lt;14天 / 有建议备货量），按紧急度排序。</div>
-          {commonFilters()}
-          <Table<SkuRow> dataSource={restockView} columns={restockColumns} rowKey={(r) => `${r.mall_id}|${r.skc_id}|${r.sku_ext_code}`} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 条` }} scroll={{ x: 1080 }} loading={skuLoading} />
+          <div style={{ padding: "12px 16px 0" }}>
+            <Segmented value={prodSeg} onChange={(v) => setProdSeg(v as string)} options={[{ label: "运营全景", value: "panel" }, { label: "诊断待办", value: "diag" }, { label: "补货清单", value: "restock" }]} />
+          </div>
+          {prodSeg === "panel" ? (
+            <div>
+              <div style={{ padding: "12px 16px 0", color: "#888", fontSize: 12 }}>每个商品(SPU)横向集成:可报活动 / 合规状态 / 流量(曝光·点击·转化) / 高价限流。按 限流 &gt; 违规 &gt; 活动 排序;流量「无」表示该商品暂未采到(采集覆盖待提升)。总库存 = 可用 + 暂不可用 − 缺货件数 + 发货在途。</div>
+              {commonFilters()}
+              <Table<ProductPanelRow> className="op-panel-table" dataSource={panelView} columns={panelColumns} rowKey={(r) => String(r.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个商品` }} scroll={{ x: 1300 }} loading={panelLoading} />
+            </div>
+          ) : prodSeg === "diag" ? (
+            <div>
+              <div style={{ padding: "12px 16px 0", display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 16 }}>
+                <Statistic title="待诊断 SKU" value={overview.urgent + overview.warn + overview.note + overview.healthy} />
+                <Statistic title="急" value={overview.urgent} valueStyle={{ color: overview.urgent > 0 ? "#cf1322" : undefined }} />
+                <Statistic title="警" value={overview.warn} valueStyle={{ color: overview.warn > 0 ? "#d46b08" : undefined }} />
+                <Statistic title="注意" value={overview.note} valueStyle={{ color: overview.note > 0 ? "#d4b106" : undefined }} />
+                <Statistic title="健康" value={overview.healthy} valueStyle={{ color: "#3f8600" }} />
+              </div>
+              {commonFilters(
+                <Select size="small" style={{ width: 140 }} value={diagFilter} onChange={setDiagFilter} options={[{ value: "all", label: "全部" }, { value: "issues", label: "仅有问题" }, { value: "urgent", label: "急" }, { value: "warn", label: "警" }, { value: "note", label: "注意" }, { value: "缺货号", label: "缺货号" }]} />,
+              )}
+              <Table<DiagnosedRow> dataSource={diagView} columns={diagColumns} rowKey={(r) => `${r.mall_id}|${r.skc_id}|${r.sku_ext_code}`} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 条` }} scroll={{ x: 1120 }} loading={skuLoading} />
+            </div>
+          ) : (
+            <div>
+              <div style={{ padding: "12px 16px 0", color: "#888", fontSize: 12 }}>需补货 SKU（已售罄 / 可售&lt;14天 / 有建议备货量），按紧急度排序。</div>
+              {commonFilters()}
+              <Table<SkuRow> dataSource={restockView} columns={restockColumns} rowKey={(r) => `${r.mall_id}|${r.skc_id}|${r.sku_ext_code}`} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 条` }} scroll={{ x: 1080 }} loading={skuLoading} />
+            </div>
+          )}
         </div>
       ),
     },
@@ -646,23 +694,17 @@ export default function OperationsWorkbench() {
         </div>
       ),
     },
-    {
-      key: "panel", label: "商品运营",
-      children: (
-        <div>
-          <div style={{ padding: "12px 16px 0", color: "#888", fontSize: 12 }}>每个商品(SPU)横向集成:可报活动 / 合规状态 / 流量(曝光·点击·转化) / 高价限流。按 限流 &gt; 违规 &gt; 活动 排序;流量「无」表示该商品暂未采到(采集覆盖待提升)。</div>
-          {commonFilters()}
-          <Table<ProductPanelRow> className="op-panel-table" dataSource={panelView} columns={panelColumns} rowKey={(r) => String(r.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个商品` }} scroll={{ x: 1100 }} loading={panelLoading} />
-        </div>
-      ),
-    },
   ];
 
   return (
     <div style={{ padding: 16 }}>
       <Card
         title="运营工作台"
-        extra={<Button icon={<ReloadOutlined />} loading={skuLoading || riskLoading || actLoading || shopLoading || trendLoading || stockLoading || panelLoading} onClick={() => { loadSku(); setShopLoaded(false); setTrendLoaded(false); setStockLoaded(false); setRiskLoaded(false); setActLoaded(false); setPanelLoaded(false); if (activeTab === "shop") loadShop(); else if (activeTab === "trend") loadTrend(); else if (activeTab === "stock") loadStockOrders(); else if (activeTab === "risk") loadRisk(); else if (activeTab === "activity") loadAct(); else if (activeTab === "panel") loadPanel(); else if (activeTab === "overview") { loadShop(); loadTrend(); loadStockOrders(); loadRisk(); loadAct(); } message.success("已刷新"); }}>刷新</Button>}
+        extra={<div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>我的店</Typography.Text>
+          <Select size="small" style={{ width: 140 }} value={ownerFilter} onChange={setOwner} options={[{ value: "all", label: "全部负责人" }, ...ownerOptions.map((o) => ({ value: o, label: o }))]} disabled={ownerOptions.length === 0} placeholder="负责人" />
+          <Button icon={<ReloadOutlined />} loading={skuLoading || riskLoading || actLoading || shopLoading || trendLoading || stockLoading || panelLoading} onClick={() => { loadSku(); setShopLoaded(false); setTrendLoaded(false); setStockLoaded(false); setRiskLoaded(false); setActLoaded(false); setPanelLoaded(false); loadShop(); if (activeTab === "store") loadTrend(); else if (activeTab === "stock") loadStockOrders(); else if (activeTab === "risk") loadRisk(); else if (activeTab === "activity") loadAct(); else if (activeTab === "product") loadPanel(); else if (activeTab === "overview") { loadTrend(); loadStockOrders(); loadRisk(); loadAct(); } message.success("已刷新"); }}>刷新</Button>
+        </div>}
         bodyStyle={{ padding: 0 }}
       >
         {error && <Alert type="error" showIcon message="加载失败" description={error} style={{ margin: 16 }} action={<Button size="small" onClick={loadSku}>重试</Button>} />}
