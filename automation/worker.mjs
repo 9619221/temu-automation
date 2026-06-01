@@ -3923,6 +3923,55 @@ async function yunduAutoEnroll({ activityThematicId, activityType, dryRun = true
   } finally { /* keep _yunduPage cached */ }
 }
 
+// 抓包:活动报名提交报文。_yunduRealBodies 只嗅探 _yunduPage,抓不到用户自己 tab 的手工报名,
+// 故这里给整个 context 的所有页(含新开页)挂请求监听,持久累积到 _enrollCaptures。
+// 两段式用法:先调一次「布防」(返回 armed),用户手工报一次名,再调一次读取 captures。
+const _enrollCaptures = [];
+let _enrollCaptureArmed = false;
+function _armEnrollCapture() {
+  if (_enrollCaptureArmed || !context) return;
+  _enrollCaptureArmed = true;
+  const attach = (pg) => {
+    try {
+      pg.on("request", (req) => {
+        try {
+          const u = req.url();
+          if (req.method() === "POST" && /\/marketing\/enroll\/(submit|batchSubmit|batchEnroll)/.test(u)) {
+            const post = req.postData();
+            if (post) {
+              _enrollCaptures.push({ url: u, body: post.slice(0, 12000), at: Date.now() });
+              console.error(`[enroll-capture] ${u} body=${post.slice(0, 300)}`);
+            }
+          }
+        } catch {}
+      });
+    } catch {}
+  };
+  try { for (const pg of context.pages()) attach(pg); context.on("page", attach); } catch {}
+}
+async function yunduCaptureEnrollSubmit({ wait = false, timeoutMs = 60000 } = {}) {
+  await _yunduOpenPage(); // 确保有登录态的 Temu 页(其自带嗅探也会记 _yunduRealBodies)
+  _armEnrollCapture();
+  if (wait) {
+    const t0 = Date.now();
+    while (_enrollCaptures.length === 0 && Date.now() - t0 < Math.min(timeoutMs, 90000)) {
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+  return {
+    armed: true,
+    captureCount: _enrollCaptures.length,
+    captures: _enrollCaptures.slice(-5),
+    sniffed: {
+      submit: _yunduRealBodies["/api/kiana/gamblers/marketing/enroll/submit"] || null,
+      match: _yunduRealBodies["/api/kiana/gamblers/marketing/enroll/scroll/match"] || null,
+    },
+    hint: _enrollCaptures.length
+      ? "已抓到提交报文,见 captures[].body"
+      : "已布防:请在打开的浏览器里手工报一次名,然后再调一次本接口读取 captures",
+  };
+}
+
 // ---- 抓取销售管理数据 (翻页采集所有商品库存) ----
 
 async function scrapeSales() {
@@ -8162,6 +8211,7 @@ async function handleRequest(body) {
     case "yundu_activity_match": return await yunduActivityMatch(params || {});
     case "yundu_activity_submit": return await yunduActivitySubmit(params || {});
     case "yundu_auto_enroll": return await yunduAutoEnroll(params || {});
+    case "yundu_capture_enroll_submit": return await yunduCaptureEnrollSubmit(params || {});
     case "sidebar_nav": {
       await ensureBrowser();
       return await scrapeViaSidebarClick();

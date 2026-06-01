@@ -4912,6 +4912,7 @@ ipcMain.handle("automation:yundu-activity-enrolled", async (_e, params) => sendC
 ipcMain.handle("automation:yundu-activity-match", async (_e, params) => sendCmd("yundu_activity_match", params || {}));
 ipcMain.handle("automation:yundu-activity-submit", async (_e, params) => sendCmd("yundu_activity_submit", params || {}));
 ipcMain.handle("automation:yundu-auto-enroll", async (_e, params) => sendCmd("yundu_auto_enroll", params || {}));
+ipcMain.handle("automation:yundu-capture-enroll-submit", async (_e, params) => sendCmd("yundu_capture_enroll_submit", params || {}));
 
 ipcMain.handle("automation:close", async () => {
   return sendCmd("close");

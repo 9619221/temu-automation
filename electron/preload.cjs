@@ -216,6 +216,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     yunduActivityMatch: (params) => ipcRenderer.invoke("automation:yundu-activity-match", params || {}),
     yunduActivitySubmit: (params) => ipcRenderer.invoke("automation:yundu-activity-submit", params || {}),
     yunduAutoEnroll: (params) => ipcRenderer.invoke("automation:yundu-auto-enroll", params || {}),
+    yunduCaptureEnrollSubmit: (params) => ipcRenderer.invoke("automation:yundu-capture-enroll-submit", params || {}),
     pausePricing: (taskId) =>
       ipcRenderer.invoke("automation:pause-pricing", taskId),
     resumePricing: (taskId) =>
