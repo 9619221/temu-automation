@@ -194,12 +194,6 @@ export default function OperationsWorkbench() {
     return { ...r, _issues: issues, _level: issues.length ? Math.max(...issues.map((i) => i.level)) : 0 };
   }), [skuRows]);
 
-  const storeOptions = useMemo(() => {
-    const s = new Set<string>();
-    for (const r of skuRows) if (r.store_code && inScope(r.store_code || r.mall_id)) s.add(r.store_code);
-    return Array.from(s).sort();
-  }, [skuRows, inScope]);
-
   // store_code / mall_id → owner 映射(来自店铺健康),用于「我的店」过滤
   const storeOwnerMap = useMemo(() => {
     const m = new Map<string, string>();
@@ -221,6 +215,12 @@ export default function OperationsWorkbench() {
     if (storeOwnerMap.size === 0) return true;
     return storeOwnerMap.get(code || "") === ownerFilter;
   }, [ownerFilter, storeOwnerMap]);
+
+  const storeOptions = useMemo(() => {
+    const s = new Set<string>();
+    for (const r of skuRows) if (r.store_code && inScope(r.store_code || r.mall_id)) s.add(r.store_code);
+    return Array.from(s).sort();
+  }, [skuRows, inScope]);
 
   const overview = useMemo(() => {
     let urgent = 0, warn = 0, note = 0, healthy = 0;
