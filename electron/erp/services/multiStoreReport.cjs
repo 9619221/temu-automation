@@ -835,9 +835,11 @@ function buildProductPanel(db, options = {}) {
     titleMap = new Map(titleRows.map((t) => [String(t.product_id), { title: t.title, thumb: t.thumb }]));
     const codeRows = optionalAllLocal(db, `
       SELECT product_id, GROUP_CONCAT(DISTINCT NULLIF(skc_id,'')) skcs, GROUP_CONCAT(DISTINCT NULLIF(sku_ext_code,'')) skus,
-             MIN(NULLIF(declared_price_cents,0)) declared, MAX(NULLIF(asf_score,0)) score, MAX(comment_num) comments
+             MIN(NULLIF(declared_price_cents,0)) declared, MAX(NULLIF(asf_score,0)) score, MAX(comment_num) comments,
+             SUM(COALESCE(warehouse_stock,0)) stock, SUM(COALESCE(occupy_stock,0)) occupy, SUM(COALESCE(unavailable_stock,0)) unavail,
+             SUM(COALESCE(advice_qty,0)) advice, SUM(CASE WHEN COALESCE(warehouse_stock,0)<=0 THEN 1 ELSE 0 END) lack
         FROM cloud.temu_sales_snapshot WHERE tenant_id = ? AND product_id IN (${ph}) GROUP BY product_id`, [tid, ...pids]);
-    codeMap = new Map(codeRows.map((c) => [String(c.product_id), { skcs: c.skcs || null, skus: c.skus || null, declared: c.declared || null, score: c.score, comments: c.comments }]));
+    codeMap = new Map(codeRows.map((c) => [String(c.product_id), { skcs: c.skcs || null, skus: c.skus || null, declared: c.declared || null, score: c.score, comments: c.comments, stock: c.stock, occupy: c.occupy, unavail: c.unavail, advice: c.advice, lack: c.lack }]));
   }
   const out = [];
   for (const e of map.values()) {
@@ -851,6 +853,11 @@ function buildProductPanel(db, options = {}) {
     e.declared_price = cm && cm.declared ? Number(cm.declared) / 100 : null;
     e.score = cm && cm.score != null ? Number(cm.score) : null;
     e.comments = cm && cm.comments != null ? toNum(cm.comments) : null;
+    e.stock = cm ? toNum(cm.stock) : null;
+    e.occupy = cm ? toNum(cm.occupy) : null;
+    e.unavail = cm ? toNum(cm.unavail) : null;
+    e.advice = cm ? toNum(cm.advice) : null;
+    e.lack = cm ? toNum(cm.lack) : null;
     e.store_code = m ? m.store_code || null : null;
     e.mall_name = m ? m.mall_name || null : null;
     out.push(e);

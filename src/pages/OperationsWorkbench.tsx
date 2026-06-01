@@ -53,6 +53,7 @@ interface SkuChild { skc_id: string | null; sku_ext_code: string | null; declare
 interface ProductPanelRow {
   mall_id: string; product_id: string; store_code: string | null; mall_name: string | null; title: string | null; thumb: string | null;
   skc_codes: string | null; sku_codes: string | null; declared_price: number | null; score: number | null; comments: number | null;
+  stock: number | null; occupy: number | null; unavail: number | null; advice: number | null; lack: number | null;
   expose: number | null; click: number | null; pay: number | null; conv: number | null; grow: string | null;
   limited: boolean; act_cnt: number; min_price: number | null; compliance: string | null; skus_detail?: SkuChild[]; __rk?: number;
 }
@@ -436,6 +437,11 @@ export default function OperationsWorkbench() {
     ) },
     { title: "评价", key: "score", width: 110, align: "right", sorter: (a, b) => (a.comments ?? 0) - (b.comments ?? 0), render: (_, r) => { if (r.comments == null && r.score == null) return <span style={{ color: "#bbb" }}>—</span>; return <span>{r.score != null ? <span style={{ color: "#fadb14" }}>★{r.score.toFixed(1)} </span> : null}{r.comments != null ? <span>{fmtNum(r.comments)} 评论</span> : ""}</span>; } },
     { title: "申报价", dataIndex: "declared_price", width: 90, align: "right", sorter: (a, b) => (a.declared_price ?? 0) - (b.declared_price ?? 0), render: (v: number | null) => (v == null ? <span style={{ color: "#bbb" }}>—</span> : "¥" + v.toFixed(2)) },
+    { title: "可用库存", dataIndex: "stock", width: 90, align: "right", sorter: (a, b) => (a.stock ?? 0) - (b.stock ?? 0), render: (v: number | null) => (v == null ? "—" : v <= 0 ? <span style={{ color: "#cf1322", fontWeight: 600 }}>{fmtNum(v)}</span> : fmtNum(v)) },
+    { title: "预占", dataIndex: "occupy", width: 75, align: "right", render: (v: number | null) => (v == null ? "—" : fmtNum(v)) },
+    { title: "暂不可用", dataIndex: "unavail", width: 90, align: "right", render: (v: number | null) => (v == null ? "—" : v > 0 ? <span style={{ color: "#d46b08" }}>{fmtNum(v)}</span> : fmtNum(v)) },
+    { title: "缺货SKU", dataIndex: "lack", width: 85, align: "right", sorter: (a, b) => (a.lack ?? 0) - (b.lack ?? 0), render: (v: number | null) => (v == null ? "—" : v > 0 ? <span style={{ color: "#cf1322", fontWeight: 600 }}>{fmtNum(v)}</span> : <span style={{ color: "#bbb" }}>0</span>) },
+    { title: "建议备货", dataIndex: "advice", width: 90, align: "right", sorter: (a, b) => (a.advice ?? 0) - (b.advice ?? 0), render: (v: number | null) => (v == null ? "—" : v > 0 ? <Tag color="blue">{fmtNum(v)}</Tag> : <span style={{ color: "#bbb" }}>—</span>) },
     { title: "可报活动", key: "act", width: 130, align: "right", sorter: (a, b) => a.act_cnt - b.act_cnt, render: (_, r) => (r.act_cnt > 0 ? <span style={{ color: "#3f8600" }}>{r.act_cnt}个{r.min_price != null ? ` / 低¥${r.min_price.toFixed(2)}` : ""}</span> : <span style={{ color: "#bbb" }}>—</span>) },
     { title: "合规", dataIndex: "compliance", width: 170, render: (v: string | null) => (v ? <Tag color="red" style={{ whiteSpace: "normal" }}>{v}</Tag> : <span style={{ color: "#3f8600" }}>正常</span>) },
     { title: "限流", dataIndex: "limited", width: 90, align: "center", sorter: (a, b) => (a.limited ? 1 : 0) - (b.limited ? 1 : 0), render: (v: boolean) => (v ? <Tag color="volcano">高价限流</Tag> : <span style={{ color: "#bbb" }}>—</span>) },

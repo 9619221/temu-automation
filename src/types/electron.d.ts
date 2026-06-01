@@ -1072,6 +1072,11 @@ interface ErpProductPanelRow {
   declared_price: number | null;
   score: number | null;
   comments: number | null;
+  stock: number | null;
+  occupy: number | null;
+  unavail: number | null;
+  advice: number | null;
+  lack: number | null;
   expose: number | null;
   click: number | null;
   pay: number | null;
