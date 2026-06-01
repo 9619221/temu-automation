@@ -8608,3 +8608,8 @@ body {
 .ant-pagination-options .ant-select-selection-search-input {
   caret-color: transparent !important;
 }
+
+/* 商品运营面板:SKU 多行堆叠时,让 SPU 级单值列垂直居中对齐 */
+.op-panel-table .ant-table-tbody > tr > td {
+  vertical-align: middle;
+}

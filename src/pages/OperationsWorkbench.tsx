@@ -425,12 +425,16 @@ export default function OperationsWorkbench() {
   ];
 
   // SKU 堆叠单元格:把同一 SPU 下多个 SKU 竖直堆叠,各列行数一致天然对齐;total 不为空时追加合计行
-  const stackCell = (skus: SkuRow[], get: (s: SkuRow) => React.ReactNode, total?: React.ReactNode) => (
-    <div>
-      {skus.map((s, i) => <div key={i} style={{ padding: "3px 0", borderBottom: i < skus.length - 1 ? "1px solid #f5f5f5" : undefined, minHeight: 20, fontSize: 12 }}>{get(s)}</div>)}
-      {total != null && <div style={{ padding: "3px 0", borderTop: "1px solid #e8e8e8", fontWeight: 600, fontSize: 12, background: "#f8fbff", minHeight: 20 }}>{total}</div>}
-    </div>
-  );
+  const stackCell = (skus: SkuRow[], get: (s: SkuRow) => React.ReactNode, total?: React.ReactNode) => {
+    if (!skus.length) return <span style={{ color: "#bbb" }}>—</span>;
+    if (skus.length === 1) return <span style={{ fontSize: 12 }}>{get(skus[0])}</span>;
+    return (
+      <div>
+        {skus.map((s, i) => <div key={i} style={{ padding: "2px 0", borderBottom: "1px solid #f5f5f5", minHeight: 18, fontSize: 12 }}>{get(s)}</div>)}
+        {total != null && <div style={{ padding: "2px 0", fontWeight: 600, fontSize: 12, color: "#1a73e8", minHeight: 18 }}>合计 {total}</div>}
+      </div>
+    );
+  };
   const skusOf = (r: ProductPanelRow) => skuByProduct.get(r.mall_id + "|" + r.product_id) || [];
 
   const panelColumns: ColumnsType<ProductPanelRow> = [
@@ -653,7 +657,7 @@ export default function OperationsWorkbench() {
         <div>
           <div style={{ padding: "12px 16px 0", color: "#888", fontSize: 12 }}>每个商品(SPU)横向集成:可报活动 / 合规状态 / 流量(曝光·点击·转化) / 高价限流。按 限流 &gt; 违规 &gt; 活动 排序;流量「无」表示该商品暂未采到(采集覆盖待提升)。</div>
           {commonFilters()}
-          <Table<ProductPanelRow> dataSource={panelView} columns={panelColumns} rowKey={(r) => String(r.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个商品` }} scroll={{ x: 1100 }} loading={panelLoading} />
+          <Table<ProductPanelRow> className="op-panel-table" dataSource={panelView} columns={panelColumns} rowKey={(r) => String(r.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个商品` }} scroll={{ x: 1100 }} loading={panelLoading} />
         </div>
       ),
     },
