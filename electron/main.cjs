@@ -6847,7 +6847,25 @@ ipcMain.handle("browser-multi:launch", (_e, payload) => {
 
   const shared = Array.isArray(config.sharedExtensions) ? config.sharedExtensions : [];
   const extra = Array.isArray(account.extraExtensions) ? account.extraExtensions : [];
-  const exts = [...shared, ...extra].filter(Boolean);
+  const wantExts = [...shared, ...extra].filter(Boolean);
+  // 只加载真实存在的扩展目录：dev 机器上配的绝对路径在用户机器上往往不存在，
+  // 直接把无效路径塞给 --load-extension 会让 Chrome/Edge（尤其 Edge）拒绝启动、窗口根本不弹。
+  const exts = wantExts.filter((p) => {
+    try {
+      return fs.existsSync(p);
+    } catch {
+      return false;
+    }
+  });
+  const missingExts = wantExts.filter((p) => !exts.includes(p));
+  if (missingExts.length) {
+    appendDiagnosticLog({
+      level: "warn",
+      source: "browser-multi",
+      message: `账号「${account.name || account.id}」忽略了 ${missingExts.length} 个不存在的扩展路径`,
+      detail: missingExts,
+    });
+  }
   if (exts.length) args.push(`--load-extension=${exts.join(",")}`);
 
   if (account.proxy) args.push(`--proxy-server=${account.proxy}`);
@@ -6856,9 +6874,64 @@ ipcMain.handle("browser-multi:launch", (_e, payload) => {
 
   args.push("--no-first-run", "--no-default-browser-check");
 
-  const proc = spawn(chromePath, args, { detached: true, stdio: "ignore" });
-  proc.unref();
-  return { pid: proc.pid, profileDir };
+  appendDiagnosticLog({
+    level: "info",
+    source: "browser-multi",
+    message: `启动账号「${account.name || account.id}」`,
+    detail: { chromePath, args },
+  });
+
+  // spawn 的失败是异步通过 'error' 事件抛的，旧代码直接 return 会把假成功传回前端
+  // （弹绿色「已启动」但浏览器其实没起来）。这里给一个结算窗口捕获 ENOENT/EACCES 等，
+  // 真失败时 reject 真实原因，前端会显示红色错误而不是误导性的成功。
+  return new Promise((resolve, reject) => {
+    let proc;
+    try {
+      proc = spawn(chromePath, args, { detached: true, stdio: "ignore" });
+    } catch (e) {
+      appendDiagnosticLog({
+        level: "error",
+        source: "browser-multi",
+        message: `spawn 同步抛错 account=${account.name || account.id}`,
+        detail: diagnosticErrorToDetail(e),
+      });
+      reject(new Error(`启动失败：${e?.message || e}`));
+      return;
+    }
+
+    let settled = false;
+    const onEarlyError = (err) => {
+      if (settled) return;
+      settled = true;
+      appendDiagnosticLog({
+        level: "error",
+        source: "browser-multi",
+        message: `Chrome/Edge 启动失败 account=${account.name || account.id}`,
+        detail: { ...diagnosticErrorToDetail(err), chromePath },
+      });
+      reject(new Error(`浏览器启动失败：${err?.message || err}（路径：${chromePath}）`));
+    };
+    proc.once("error", onEarlyError);
+
+    setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      proc.removeListener("error", onEarlyError);
+      // 结算后再有 error 只记日志，避免变成未捕获异常拖垮主进程
+      proc.on("error", (err) =>
+        appendDiagnosticLog({
+          level: "error",
+          source: "browser-multi",
+          message: `Chrome/Edge 运行期错误 account=${account.name || account.id}`,
+          detail: diagnosticErrorToDetail(err),
+        }),
+      );
+      try {
+        proc.unref();
+      } catch {}
+      resolve({ pid: proc.pid, profileDir });
+    }, 700);
+  });
 });
 
 ipcMain.handle("browser-multi:close", async (_e, accountId) => {
