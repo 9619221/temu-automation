@@ -49,7 +49,7 @@ interface StoreMatrixRow {
   sales: number; sale_7d: number; lack: number; soldout: number;
   high_risk: number; restock: number; stock_gap: number; activity: number;
 }
-interface SkuChild { skc_id: string | null; sku_ext_code: string | null; declared_price: number | null; today: number; last7d: number; stock: number; }
+interface SkuChild { skc_id: string | null; sku_ext_code: string | null; declared_price: number | null; today: number; last7d: number; sale_days: number | null; stock: number; occupy: number; advice_qty: number; }
 interface ProductPanelRow {
   mall_id: string; product_id: string; store_code: string | null; mall_name: string | null; title: string | null; thumb: string | null;
   skc_codes: string | null; sku_codes: string | null; declared_price: number | null; score: number | null; comments: number | null;
@@ -286,12 +286,6 @@ export default function OperationsWorkbench() {
     if (q) v = v.filter((r) => (r.title || "").toLowerCase().includes(q) || (r.product_id || "").includes(q));
     return v.map((r, i) => ({ ...r, __rk: i }));
   }, [panelRows, storeFilter, search]);
-  // 商品运营展开子行：用已加载的 skuRows 按 mall_id|product_id 归组(零额外查询)
-  const skuByProduct = useMemo(() => {
-    const m = new Map<string, SkuRow[]>();
-    for (const s of skuRows) { const k = s.mall_id + "|" + s.product_id; let a = m.get(k); if (!a) { a = []; m.set(k, a); } a.push(s); }
-    return m;
-  }, [skuRows]);
   const shopView = useMemo(() => {
     let v = shopRows;
     if (storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
@@ -425,7 +419,7 @@ export default function OperationsWorkbench() {
   ];
 
   // SKU 堆叠单元格:把同一 SPU 下多个 SKU 竖直堆叠,各列行数一致天然对齐;total 不为空时追加合计行
-  const stackCell = (skus: SkuRow[], get: (s: SkuRow) => React.ReactNode, total?: React.ReactNode) => {
+  const stackCell = (skus: SkuChild[], get: (s: SkuChild) => React.ReactNode, total?: React.ReactNode) => {
     if (!skus.length) return <span style={{ color: "#bbb" }}>—</span>;
     if (skus.length === 1) return <span style={{ fontSize: 12 }}>{get(skus[0])}</span>;
     return (
@@ -435,7 +429,7 @@ export default function OperationsWorkbench() {
       </div>
     );
   };
-  const skusOf = (r: ProductPanelRow) => skuByProduct.get(r.mall_id + "|" + r.product_id) || [];
+  const skusOf = (r: ProductPanelRow): SkuChild[] => r.skus_detail || [];
 
   const panelColumns: ColumnsType<ProductPanelRow> = [
     { title: "店号", dataIndex: "store_code", width: 70, fixed: "left", render: (v, r) => v || r.mall_id },
