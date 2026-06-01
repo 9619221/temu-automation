@@ -829,6 +829,10 @@ interface ErpAPI {
     productPanel: (options?: { includeTest?: boolean }) => Promise<ErpProductPanelResponse>;
     purchase: (options?: { includeTest?: boolean }) => Promise<ErpPurchaseReportResponse>;
   };
+  opTask?: {
+    list: () => Promise<{ ok: boolean; data?: { rows: Array<{ task_key: string; status: "done" | "ignored"; owner: string | null; note: string | null; updated_at: number }> }; error?: string }>;
+    set: (payload: { taskKey: string; status: "done" | "ignored" | null; owner?: string | null }) => Promise<{ ok: boolean; data?: { changes: number }; error?: string }>;
+  };
   events?: {
     onPurchaseUpdate: (handler: (payload: ErpPurchaseUpdateEvent) => void) => () => void;
     onUserUpdate: (handler: (payload: ErpUserUpdateEvent) => void) => () => void;

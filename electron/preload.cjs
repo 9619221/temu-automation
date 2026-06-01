@@ -125,6 +125,12 @@ function createImageStudioApi(profile) {
       ipcRenderer.on(channel, listener);
       return () => ipcRenderer.removeListener(channel, listener);
     },
+
+    // 9-agent Supervisor 生图（异步 job + 轮询模型）
+    supervisorStart: withProfile((payload) => ipcRenderer.invoke("image-studio:supervisor-start", payload)),
+    supervisorPoll: withProfile((jobId) => ipcRenderer.invoke("image-studio:supervisor-poll", jobId)),
+    supervisorCancel: withProfile((jobId) => ipcRenderer.invoke("image-studio:supervisor-cancel", jobId)),
+    supervisorFetchImage: withProfile((payload) => ipcRenderer.invoke("image-studio:supervisor-fetch-image", payload)),
   };
 }
 
@@ -449,6 +455,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
       salesTrend: (options) => ipcRenderer.invoke("erp:reports:sales-trend", options || {}),
       productPanel: (options) => ipcRenderer.invoke("erp:reports:product-panel", options || {}),
       purchase: (options) => ipcRenderer.invoke("erp:reports:purchase", options || {}),
+    },
+    opTask: {
+      list: () => ipcRenderer.invoke("erp:op-task:list"),
+      set: (payload) => ipcRenderer.invoke("erp:op-task:set", payload || {}),
     },
     events: {
       onPurchaseUpdate: (handler) => {

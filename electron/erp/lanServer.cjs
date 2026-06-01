@@ -60,6 +60,8 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/erp/reports/multi-store": ["admin", "manager", "operations", "finance"],
   "/api/erp/reports/mall-dict": ["admin", "manager", "operations", "finance", "buyer", "warehouse"],
   "/api/erp/reports/set-mall-owner": ["admin", "manager"],
+  "/api/erp/op-task/list": ["admin", "manager", "operations", "viewer"],
+  "/api/erp/op-task/set": ["admin", "manager", "operations"],
   "/api/erp/reports/sku-sales": ["admin", "manager", "operations", "finance"],
   "/api/erp/reports/risk-list": ["admin", "manager", "operations", "viewer"],
   "/api/erp/reports/activity-list": ["admin", "manager", "operations", "viewer"],
@@ -5247,6 +5249,36 @@ async function handleRequest({
         const payload = await readOptionalPayload(req);
         const { setMallOwner } = require("./services/multiStoreReport.cjs");
         const changes = setMallOwner(db, payload?.mall_id, payload?.owner);
+        writeJson(res, 200, { ok: true, data: { changes } });
+      } catch (error) {
+        writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });
+      }
+      return;
+    }
+
+    // 运营工作台「今日待办」闭环状态(跨用户共享)
+    if (pathname === "/api/erp/op-task/list") {
+      if (req.method !== "GET") {
+        writeJson(res, 405, { ok: false, error: "Method not allowed" });
+        return;
+      }
+      try {
+        const { listOpTaskState } = require("./services/multiStoreReport.cjs");
+        writeJson(res, 200, { ok: true, data: listOpTaskState(db) });
+      } catch (error) {
+        writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });
+      }
+      return;
+    }
+    if (pathname === "/api/erp/op-task/set") {
+      if (req.method !== "POST") {
+        writeJson(res, 405, { ok: false, error: "Method not allowed" });
+        return;
+      }
+      try {
+        const payload = await readOptionalPayload(req);
+        const { setOpTaskState } = require("./services/multiStoreReport.cjs");
+        const changes = setOpTaskState(db, payload?.task_key, payload?.status ?? null, payload?.owner ?? null);
         writeJson(res, 200, { ok: true, data: { changes } });
       } catch (error) {
         writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });

@@ -64,6 +64,40 @@ function registerReportsHandlers(ipcMain, deps) {
     }
   });
 
+  // 运营工作台「今日待办」闭环:列出所有已标记状态(已处理/已忽略)
+  ipcMain.handle("erp:op-task:list", async () => {
+    try {
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest(`/api/erp/op-task/list`, { method: "GET" });
+      }
+      requireErp();
+      const { listOpTaskState } = require("../services/multiStoreReport.cjs");
+      return { ok: true, data: listOpTaskState(erpState.db) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+
+  // 运营工作台「今日待办」闭环:标记一条待办(status=done/ignored;status=null 撤销)
+  ipcMain.handle("erp:op-task:set", async (_event, payload) => {
+    try {
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest(`/api/erp/op-task/set`, {
+          method: "POST",
+          body: { task_key: payload?.taskKey, status: payload?.status ?? null, owner: payload?.owner ?? null },
+        });
+      }
+      requireErp();
+      const { setOpTaskState } = require("../services/multiStoreReport.cjs");
+      const changes = setOpTaskState(erpState.db, payload?.taskKey, payload?.status ?? null, payload?.owner ?? null);
+      return { ok: true, data: { changes } };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+
   // 销售管理：SKU 级销售明细（跨店）
   ipcMain.handle("erp:reports:sku-sales", async (_event, payload) => {
     try {

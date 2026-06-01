@@ -932,6 +932,34 @@ function setMallOwner(db, mallId, owner) {
   return info.changes;
 }
 
+// 运营工作台「今日待办」闭环状态:KV 表 op_task_state(task_key → 已处理/已忽略)
+// 表可能在未跑 migration 的旧服务器上不存在,list 容错返回空;set 走 upsert/delete
+function listOpTaskState(db) {
+  if (!db) throw new Error("listOpTaskState: db is required (host mode only)");
+  try {
+    const rows = db.prepare("SELECT task_key, status, owner, note, updated_at FROM op_task_state").all();
+    return { rows };
+  } catch (e) {
+    if (/no such table/i.test(e?.message || "")) return { rows: [] };
+    throw e;
+  }
+}
+function setOpTaskState(db, taskKey, status, owner) {
+  if (!db) throw new Error("setOpTaskState: db is required (host mode only)");
+  if (!taskKey) throw new Error("setOpTaskState: taskKey is required");
+  const key = String(taskKey);
+  if (status == null) {
+    return db.prepare("DELETE FROM op_task_state WHERE task_key = ?").run(key).changes;
+  }
+  if (status !== "done" && status !== "ignored") throw new Error("setOpTaskState: invalid status");
+  const normOwner = owner == null || String(owner).trim() === "" ? null : String(owner).trim();
+  return db.prepare(
+    `INSERT INTO op_task_state (task_key, status, owner, note, updated_at)
+     VALUES (?, ?, ?, NULL, ?)
+     ON CONFLICT(task_key) DO UPDATE SET status = excluded.status, owner = excluded.owner, updated_at = excluded.updated_at`
+  ).run(key, status, normOwner, Date.now()).changes;
+}
+
 // 采购单报表(纯本地 erp.sqlite，不涉及 cloud)：汇总/分布/供应商/月趋势均为「全量 SQL 聚合」，
 // 明细只取最近 ORDERS_LIMIT 单(附截断标记)。采购总额 = total_amount(货款) + freight_amount(运费)。
 // 已付口径用 payment_status='paid'(paid_amount 列在历史数据里普遍被填成=总额，不可信)。
@@ -1033,6 +1061,8 @@ module.exports = {
   buildProductPanel,
   getProductPanelFast,
   setMallOwner,
+  listOpTaskState,
+  setOpTaskState,
   // 暴露给测试用
   _internal: { fetchCloudReport, readMallDictionary, loginCloud, buildFinancialsByMall, buildByStoreLocal, shiftDate },
 };

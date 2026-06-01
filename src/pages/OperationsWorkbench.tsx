@@ -173,6 +173,8 @@ export default function OperationsWorkbench() {
       try { localStorage.setItem("ow_todo_state", JSON.stringify(next)); } catch { /* */ }
       return next;
     });
+    // 写后端(跨设备/跨用户共享);后端不可用时静默,localStorage 已兜底
+    try { window.electronAPI?.erp?.opTask?.set?.({ taskKey: key, status }); } catch { /* */ }
   }, []);
   const navigate = useNavigate();
   // 待办「去处理」:备货跳应用内采购单页,其余跳 Temu 卖家后台对应页(openExternal 已存在)
@@ -227,6 +229,25 @@ export default function OperationsWorkbench() {
   }, []);
 
   useEffect(() => { loadSku(); }, [loadSku]);
+  // 挂载时从后端加载待办状态;本地有、后端没有的首次推上去(localStorage → 后端迁移);后端不可用则保持本地
+  useEffect(() => {
+    const api = window.electronAPI?.erp?.opTask;
+    if (!api?.list) return;
+    (async () => {
+      try {
+        const resp = await api.list();
+        if (!resp?.ok || !resp.data?.rows) return;
+        const backend: Record<string, "done" | "ignored"> = {};
+        for (const r of resp.data.rows) backend[r.task_key] = r.status;
+        let local: Record<string, "done" | "ignored"> = {};
+        try { local = JSON.parse(localStorage.getItem("ow_todo_state") || "{}"); } catch { /* */ }
+        for (const k of Object.keys(local)) if (!(k in backend)) api.set?.({ taskKey: k, status: local[k] });
+        const merged = { ...local, ...backend };
+        setTodoState(merged);
+        try { localStorage.setItem("ow_todo_state", JSON.stringify(merged)); } catch { /* */ }
+      } catch { /* 后端不可用,保持 localStorage */ }
+    })();
+  }, []);
   useEffect(() => {
     const ov = activeTab === "overview";
     const store = activeTab === "store";
