@@ -254,6 +254,15 @@ export interface FetchUnifiedParams {
   q?: string;
   page?: number;
   pageSize?: number;
+  // 本地聚水潭秒回后先回调一次（jst-only），让表格先渲染，云端/字典慢慢补
+  onPartial?: (rows: UnifiedAfterSaleRow[], total: number) => void;
+}
+
+// 按退货时间倒序，null 排最后
+function byAsDateDesc(a: UnifiedAfterSaleRow, b: UnifiedAfterSaleRow) {
+  const tA = a.asDate ? Date.parse(a.asDate) : 0;
+  const tB = b.asDate ? Date.parse(b.asDate) : 0;
+  return (tB || 0) - (tA || 0);
 }
 
 export interface FetchUnifiedResult {
@@ -296,7 +305,7 @@ async function loadMallNameMap(erp: any): Promise<Map<string, string>> {
 
 export async function fetchUnifiedAfterSales(params: FetchUnifiedParams = {}): Promise<FetchUnifiedResult> {
   // 一次拉全量并合并排序，分页交给前端纯切片（避免每翻一页都重拉云端，导致「换页没反应」）。
-  const { q } = params;
+  const { q, onPartial } = params;
   const erp = (window as any).electronAPI?.erp;
 
   // 并发拉两边
@@ -340,7 +349,14 @@ export async function fetchUnifiedAfterSales(params: FetchUnifiedParams = {}): P
     }
   })();
 
-  const [jstFetch, platformFetch, mallMap, receiptMap] = await Promise.all([jstPromise, platformPromise, mallPromise, receiptsPromise]);
+  // 本地聚水潭秒回 → 先把 jst-only 行渲染出来；云端平台单 / 店铺字典 / 确认台账慢慢补，
+  // 不让本地数据被慢的网络调用扣住（初次加载「好慢」的根因）。
+  const jstFetch = await jstPromise;
+  if (onPartial) {
+    const jstRows = jstFetch.rows.map(jstAsBaseRow).sort(byAsDateDesc);
+    onPartial(jstRows, jstRows.length);
+  }
+  const [platformFetch, mallMap, receiptMap] = await Promise.all([platformPromise, mallPromise, receiptsPromise]);
 
   // 构造 jushuitan 索引
   const jstByKey = new Map<string, ConsignAfterSaleRow>();
@@ -414,12 +430,7 @@ export async function fetchUnifiedAfterSales(params: FetchUnifiedParams = {}): P
     }
   }
 
-  // 按 asDate 倒序，null 排最后
-  unifiedRows.sort((a, b) => {
-    const tA = a.asDate ? Date.parse(a.asDate) : 0;
-    const tB = b.asDate ? Date.parse(b.asDate) : 0;
-    return (tB || 0) - (tA || 0);
-  });
+  unifiedRows.sort(byAsDateDesc);
 
   return {
     rows: unifiedRows,
