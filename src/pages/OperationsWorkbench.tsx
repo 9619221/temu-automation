@@ -61,6 +61,17 @@ interface ProductPanelRow {
 interface Diag { label: string; action: string; level: number }
 interface DiagnosedRow extends SkuRow { _level: number; _issues: Diag[] }
 
+// 今日待办:跨「商品/风险/活动」维度汇成的统一任务项;key 为稳定标识,供后续闭环(标记已处理)复用
+interface TodoTask {
+  key: string; type: "product" | "code" | "risk" | "activity"; typeLabel: string;
+  level: number; store: string; mall_id: string;
+  object: string; sub: string | null; metric: string; action: string; __rk?: number;
+}
+const TODO_TYPE_TAG: Record<string, { c: string; t: string }> = {
+  product: { c: "orange", t: "运营" }, code: { c: "gold", t: "缺货号" }, risk: { c: "red", t: "风险" }, activity: { c: "green", t: "活动" },
+};
+const TODO_LEVEL_TEXT: Record<number, string> = { 3: "急", 2: "警", 1: "注意" };
+
 const LEVEL_COLOR: Record<number, string> = { 3: "#cf1322", 2: "#d46b08", 1: "#d4b106", 0: "#3f8600" };
 const TAG_COLOR: Record<number, string> = { 3: "red", 2: "orange", 1: "gold", 0: "green" };
 
@@ -134,6 +145,7 @@ export default function OperationsWorkbench() {
   const [search, setSearch] = useState("");
   const [sevFilter, setSevFilter] = useState("all");
   const [kindFilter, setKindFilter] = useState("all");
+  const [todoType, setTodoType] = useState("all");
 
   const loadSku = useCallback(async () => {
     if (!window.electronAPI?.erp?.reports?.skuSales) { setError("当前版本不支持运营工作台，请升级桌面端"); return; }
@@ -180,12 +192,13 @@ export default function OperationsWorkbench() {
   useEffect(() => {
     const ov = activeTab === "overview";
     const store = activeTab === "store";
+    const todo = activeTab === "todo"; // 今日待办依赖风险+活动+诊断(诊断走 skuRows,已在挂载时加载)
     // shop 始终加载:owner 映射是「我的店」全局过滤的基础
     if (!shopLoaded && !shopLoading) loadShop();
     if ((store || ov) && !trendLoaded && !trendLoading) loadTrend();
     if ((activeTab === "stock" || ov) && !stockLoaded && !stockLoading) loadStockOrders();
-    if ((activeTab === "risk" || ov) && !riskLoaded && !riskLoading) loadRisk();
-    if ((activeTab === "activity" || ov) && !actLoaded && !actLoading) loadAct();
+    if ((activeTab === "risk" || ov || todo) && !riskLoaded && !riskLoading) loadRisk();
+    if ((activeTab === "activity" || ov || todo) && !actLoaded && !actLoading) loadAct();
     if (activeTab === "product" && !panelLoaded && !panelLoading) loadPanel();
   }, [activeTab, shopLoaded, shopLoading, trendLoaded, trendLoading, stockLoaded, stockLoading, riskLoaded, riskLoading, actLoaded, actLoading, panelLoaded, panelLoading, loadShop, loadTrend, loadStockOrders, loadRisk, loadAct, loadPanel]);
 
@@ -245,6 +258,63 @@ export default function OperationsWorkbench() {
     if (q) v = v.filter((r) => (r.sku_ext_code || "").toLowerCase().includes(q) || (r.title || "").toLowerCase().includes(q));
     return [...v].sort((a, b) => b._level - a._level || b.last7d - a.last7d);
   }, [diagnosed, storeFilter, diagFilter, search, inScope]);
+
+  // 今日待办:把商品诊断 issues + 中高风险 + 可报活动汇成统一任务流(仅「我的店」范围)
+  const todoTasks = useMemo<TodoTask[]>(() => {
+    const out: TodoTask[] = [];
+    for (const r of diagnosed) {
+      if (!inScope(r.store_code || r.mall_id)) continue;
+      const store = r.store_code || r.mall_id;
+      for (const it of r._issues) {
+        const isCode = it.label === "缺货号";
+        out.push({
+          key: `${r.mall_id}|${r.skc_id}|${r.sku_ext_code}|${it.label}`,
+          type: isCode ? "code" : "product", typeLabel: it.label, level: it.level,
+          store, mall_id: r.mall_id,
+          object: r.title || r.sku_ext_code || "—", sub: r.sku_ext_code || r.skc_id || null,
+          metric: (r.stock || 0) <= 0 ? "已断货" : (r.sale_days != null ? `可售${r.sale_days}天` : `库存${fmtNum(r.stock)}`),
+          action: it.action,
+        });
+      }
+    }
+    for (const r of riskRows) {
+      if (!inScope(r.store_code || r.mall_id) || r.severity === "low") continue; // 待办只收中高风险
+      out.push({
+        key: `risk|${r.mall_id}|${r.skc_id}|${r.risk_type}|${r.title}`,
+        type: "risk", typeLabel: RISK_TYPE_LABEL[r.risk_type || ""] || r.risk_type || "风险",
+        level: SEV_RANK[r.severity || ""] || 1, store: r.store_code || r.mall_id, mall_id: r.mall_id,
+        object: r.title || r.risk_type || "—", sub: r.skc_id || null,
+        metric: (SEV_TEXT[r.severity || ""] || "") + "风险" + (r.quantity ? ` ·${fmtNum(r.quantity)}` : ""),
+        action: "去卖家后台处理违规 / 申诉",
+      });
+    }
+    for (const r of actRows) {
+      if (!inScope(r.store_code || r.mall_id)) continue;
+      const gp = (r.signup_price != null && r.cost != null) ? r.signup_price - r.cost : null;
+      out.push({
+        key: `act|${r.mall_id}|${r.skc_id}|${r.sku_ext_code}|${r.title}`,
+        type: "activity", typeLabel: KIND_LABEL[r.kind || ""] || "活动", level: 1,
+        store: r.store_code || r.mall_id, mall_id: r.mall_id,
+        object: r.title || r.sku_ext_code || "(未命名活动)", sub: r.sku_ext_code || null,
+        metric: gp != null ? (gp < 0 ? `亏${fmtMoney(gp)}` : `毛利${fmtMoney(gp)}`) : (r.signup_price != null ? `报名${fmtMoney(r.signup_price)}` : "—"),
+        action: gp != null && gp < 0 ? "亏本慎报 / 调价后再报" : "可报名冲量",
+      });
+    }
+    return out;
+  }, [diagnosed, riskRows, actRows, inScope]);
+  const todoCount = useMemo(() => {
+    const c = { product: 0, code: 0, risk: 0, activity: 0, urgent: 0 };
+    for (const t of todoTasks) { c[t.type]++; if (t.level >= 3) c.urgent++; }
+    return c;
+  }, [todoTasks]);
+  const todoView = useMemo(() => {
+    let v = todoTasks;
+    if (storeFilter !== "all") v = v.filter((t) => t.store === storeFilter);
+    if (todoType !== "all") v = v.filter((t) => t.type === todoType);
+    const q = search.trim().toLowerCase();
+    if (q) v = v.filter((t) => t.object.toLowerCase().includes(q) || (t.sub || "").toLowerCase().includes(q));
+    return [...v].sort((a, b) => b.level - a.level).map((t, i) => ({ ...t, __rk: i }));
+  }, [todoTasks, storeFilter, todoType, search]);
 
   // 库存补货：需补货 SKU（售罄/即将断货/有建议备货），紧急度排序
   const restockView = useMemo(() => {
@@ -376,6 +446,20 @@ export default function OperationsWorkbench() {
     { title: "近30天", dataIndex: "last30d", width: 80, align: "right", render: (v) => fmtNum(v), sorter: (a, b) => a.last30d - b.last30d },
     { title: "库存", dataIndex: "stock", width: 80, align: "right", render: (v: number) => <span style={{ color: v <= 0 ? "#cf1322" : undefined }}>{fmtNum(v)}</span>, sorter: (a, b) => a.stock - b.stock },
     { title: "可售天数", dataIndex: "sale_days", width: 85, align: "right", render: (v: number | null) => (v == null ? "—" : <span style={{ color: v < 7 ? "#d46b08" : undefined }}>{v}天</span>) },
+  ];
+
+  const todoColumns: ColumnsType<TodoTask> = [
+    { title: "紧急度", dataIndex: "level", width: 76, fixed: "left" as const, render: (v: number) => <Tag color={TAG_COLOR[v]}>{TODO_LEVEL_TEXT[v] || "—"}</Tag>, sorter: (a, b) => a.level - b.level, defaultSortOrder: "descend" },
+    { title: "类型", key: "type", width: 90, render: (_, t) => { const tg = TODO_TYPE_TAG[t.type]; return <Tag color={tg?.c}>{tg?.t}·{t.typeLabel}</Tag>; }, filters: [{ text: "运营", value: "product" }, { text: "缺货号", value: "code" }, { text: "风险", value: "risk" }, { text: "活动", value: "activity" }], onFilter: (val, t) => t.type === val },
+    { title: "店号", dataIndex: "store", width: 70, render: (v: string) => <Typography.Text strong>{v}</Typography.Text>, sorter: (a, b) => a.store.localeCompare(b.store) },
+    { title: "对象 · 商品 / SKU", key: "obj", width: 320, render: (_, t) => (
+      <div>
+        <Tooltip title={t.object}><div style={{ fontSize: 12, maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.object}</div></Tooltip>
+        {t.sub ? <div style={{ color: "#999", fontSize: 11 }}>{t.sub}</div> : null}
+      </div>
+    ) },
+    { title: "关键指标", dataIndex: "metric", width: 120, render: (v: string) => <span style={{ fontSize: 12 }}>{v}</span> },
+    { title: "建议动作", dataIndex: "action", width: 280, render: (v: string, t) => <span style={{ fontSize: 12, color: LEVEL_COLOR[t.level] }}>{v}</span> },
   ];
 
   const restockColumns: ColumnsType<SkuRow> = [
@@ -571,6 +655,25 @@ export default function OperationsWorkbench() {
       ),
     },
     {
+      key: "todo", label: "今日待办",
+      children: (
+        <div>
+          <div style={{ padding: "12px 16px 0", display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 16 }}>
+            <Statistic title="待办总数" value={todoTasks.length} />
+            <Statistic title="急" value={todoCount.urgent} valueStyle={{ color: todoCount.urgent > 0 ? "#cf1322" : undefined }} />
+            <Statistic title="运营/补货" value={todoCount.product} valueStyle={{ color: todoCount.product > 0 ? "#d46b08" : undefined }} />
+            <Statistic title="风险" value={todoCount.risk} valueStyle={{ color: todoCount.risk > 0 ? "#cf1322" : undefined }} />
+            <Statistic title="活动机会" value={todoCount.activity} valueStyle={{ color: "#3f8600" }} />
+          </div>
+          <div style={{ padding: "8px 16px 0", color: "#888", fontSize: 12 }}>把「商品诊断 / 中高风险 / 可报活动」里要动手的事汇成一条清单,按紧急度降序;顶部切「我的店」只看自己负责的店。</div>
+          {commonFilters(
+            <Select size="small" style={{ width: 130 }} value={todoType} onChange={setTodoType} options={[{ value: "all", label: "全部类型" }, { value: "product", label: "运营/补货" }, { value: "code", label: "缺货号" }, { value: "risk", label: "风险" }, { value: "activity", label: "活动" }]} />,
+          )}
+          <Table<TodoTask> dataSource={todoView} columns={todoColumns} rowKey={(t) => String(t.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 项待办` }} scroll={{ x: 1056 }} loading={skuLoading || riskLoading || actLoading} />
+        </div>
+      ),
+    },
+    {
       key: "store", label: "店铺",
       children: (
         <div>
@@ -703,7 +806,7 @@ export default function OperationsWorkbench() {
         extra={<div style={{ display: "flex", gap: 10, alignItems: "center" }}>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>我的店</Typography.Text>
           <Select size="small" style={{ width: 140 }} value={ownerFilter} onChange={setOwner} options={[{ value: "all", label: "全部负责人" }, ...ownerOptions.map((o) => ({ value: o, label: o }))]} disabled={ownerOptions.length === 0} placeholder="负责人" />
-          <Button icon={<ReloadOutlined />} loading={skuLoading || riskLoading || actLoading || shopLoading || trendLoading || stockLoading || panelLoading} onClick={() => { loadSku(); setShopLoaded(false); setTrendLoaded(false); setStockLoaded(false); setRiskLoaded(false); setActLoaded(false); setPanelLoaded(false); loadShop(); if (activeTab === "store") loadTrend(); else if (activeTab === "stock") loadStockOrders(); else if (activeTab === "risk") loadRisk(); else if (activeTab === "activity") loadAct(); else if (activeTab === "product") loadPanel(); else if (activeTab === "overview") { loadTrend(); loadStockOrders(); loadRisk(); loadAct(); } message.success("已刷新"); }}>刷新</Button>
+          <Button icon={<ReloadOutlined />} loading={skuLoading || riskLoading || actLoading || shopLoading || trendLoading || stockLoading || panelLoading} onClick={() => { loadSku(); setShopLoaded(false); setTrendLoaded(false); setStockLoaded(false); setRiskLoaded(false); setActLoaded(false); setPanelLoaded(false); loadShop(); if (activeTab === "store") loadTrend(); else if (activeTab === "stock") loadStockOrders(); else if (activeTab === "risk") loadRisk(); else if (activeTab === "activity") loadAct(); else if (activeTab === "product") loadPanel(); else if (activeTab === "todo") { loadRisk(); loadAct(); } else if (activeTab === "overview") { loadTrend(); loadStockOrders(); loadRisk(); loadAct(); } message.success("已刷新"); }}>刷新</Button>
         </div>}
         bodyStyle={{ padding: 0 }}
       >
