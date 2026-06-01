@@ -834,9 +834,10 @@ function buildProductPanel(db, options = {}) {
       ) GROUP BY product_id`, [tid, ...pids, tid, ...pids]);
     titleMap = new Map(titleRows.map((t) => [String(t.product_id), { title: t.title, thumb: t.thumb }]));
     const codeRows = optionalAllLocal(db, `
-      SELECT product_id, GROUP_CONCAT(DISTINCT NULLIF(skc_id,'')) skcs, GROUP_CONCAT(DISTINCT NULLIF(sku_ext_code,'')) skus, MIN(NULLIF(declared_price_cents,0)) declared
+      SELECT product_id, GROUP_CONCAT(DISTINCT NULLIF(skc_id,'')) skcs, GROUP_CONCAT(DISTINCT NULLIF(sku_ext_code,'')) skus,
+             MIN(NULLIF(declared_price_cents,0)) declared, MAX(NULLIF(asf_score,0)) score, MAX(comment_num) comments
         FROM cloud.temu_sales_snapshot WHERE tenant_id = ? AND product_id IN (${ph}) GROUP BY product_id`, [tid, ...pids]);
-    codeMap = new Map(codeRows.map((c) => [String(c.product_id), { skcs: c.skcs || null, skus: c.skus || null, declared: c.declared || null }]));
+    codeMap = new Map(codeRows.map((c) => [String(c.product_id), { skcs: c.skcs || null, skus: c.skus || null, declared: c.declared || null, score: c.score, comments: c.comments }]));
   }
   const out = [];
   for (const e of map.values()) {
@@ -848,6 +849,8 @@ function buildProductPanel(db, options = {}) {
     e.skc_codes = cm ? cm.skcs : null;
     e.sku_codes = cm ? cm.skus : null;
     e.declared_price = cm && cm.declared ? Number(cm.declared) / 100 : null;
+    e.score = cm && cm.score != null ? Number(cm.score) : null;
+    e.comments = cm && cm.comments != null ? toNum(cm.comments) : null;
     e.store_code = m ? m.store_code || null : null;
     e.mall_name = m ? m.mall_name || null : null;
     out.push(e);

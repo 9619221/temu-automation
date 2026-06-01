@@ -52,7 +52,7 @@ interface StoreMatrixRow {
 interface SkuChild { skc_id: string | null; sku_ext_code: string | null; declared_price: number | null; today: number; last7d: number; stock: number; }
 interface ProductPanelRow {
   mall_id: string; product_id: string; store_code: string | null; mall_name: string | null; title: string | null; thumb: string | null;
-  skc_codes: string | null; sku_codes: string | null; declared_price: number | null;
+  skc_codes: string | null; sku_codes: string | null; declared_price: number | null; score: number | null; comments: number | null;
   expose: number | null; click: number | null; pay: number | null; conv: number | null; grow: string | null;
   limited: boolean; act_cnt: number; min_price: number | null; compliance: string | null; skus_detail?: SkuChild[]; __rk?: number;
 }
@@ -434,6 +434,7 @@ export default function OperationsWorkbench() {
         <div style={{ minWidth: 0, fontSize: 12, lineHeight: 1.45, whiteSpace: "normal", wordBreak: "break-word" }}>{r.title || "—"}</div>
       </div>
     ) },
+    { title: "评分", key: "score", width: 105, align: "right", sorter: (a, b) => (a.score ?? 0) - (b.score ?? 0), render: (_, r) => (r.score == null ? <span style={{ color: "#bbb" }}>—</span> : <span><span style={{ color: "#fadb14" }}>★</span>{r.score.toFixed(1)}{r.comments ? <span style={{ color: "#999", fontSize: 11 }}> ({fmtNum(r.comments)})</span> : ""}</span>) },
     { title: "申报价", dataIndex: "declared_price", width: 90, align: "right", sorter: (a, b) => (a.declared_price ?? 0) - (b.declared_price ?? 0), render: (v: number | null) => (v == null ? <span style={{ color: "#bbb" }}>—</span> : "¥" + v.toFixed(2)) },
     { title: "可报活动", key: "act", width: 130, align: "right", sorter: (a, b) => a.act_cnt - b.act_cnt, render: (_, r) => (r.act_cnt > 0 ? <span style={{ color: "#3f8600" }}>{r.act_cnt}个{r.min_price != null ? ` / 低¥${r.min_price.toFixed(2)}` : ""}</span> : <span style={{ color: "#bbb" }}>—</span>) },
     { title: "合规", dataIndex: "compliance", width: 170, render: (v: string | null) => (v ? <Tag color="red" style={{ whiteSpace: "normal" }}>{v}</Tag> : <span style={{ color: "#3f8600" }}>正常</span>) },

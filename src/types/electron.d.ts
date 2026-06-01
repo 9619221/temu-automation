@@ -1070,6 +1070,8 @@ interface ErpProductPanelRow {
   skc_codes: string | null;
   sku_codes: string | null;
   declared_price: number | null;
+  score: number | null;
+  comments: number | null;
   expose: number | null;
   click: number | null;
   pay: number | null;
