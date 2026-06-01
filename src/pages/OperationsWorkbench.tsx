@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Button, Card, Empty, Image, Input, Segmented, Select, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from "antd";
+import { Alert, Button, Card, Empty, Image, Input, InputNumber, Segmented, Select, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from "antd";
 import { EyeOutlined, ReloadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, Legend, ResponsiveContainer } from "recharts";
@@ -25,6 +25,7 @@ interface RiskRow {
 interface ActivityRow {
   mall_id: string; store_code: string | null; mall_name: string | null;
   kind: string | null; title: string | null; status: string | null;
+  activity_id: string | null; product_id: string | null;
   sku_ext_code: string | null; skc_id: string | null;
   signup_price: number | null; suggested_price: number | null; price_diff: number | null;
   activity_stock: number; cost: number | null; end_at: string | null; stat_date: string | null;
@@ -162,6 +163,8 @@ export default function OperationsWorkbench() {
   const [kindFilter, setKindFilter] = useState("all");
   const [todoType, setTodoType] = useState("all");
   const [todoStatus, setTodoStatus] = useState("open"); // 默认只看待处理
+  const [batchPrice, setBatchPrice] = useState<number | null>(null); // 活动报名:批量填申报价
+  const [batchStock, setBatchStock] = useState<number | null>(null); // 活动报名:批量填库存
   // 待办闭环(第一版落 localStorage,零后端撞车;task key 稳定,后续可平滑迁 op_task_state 表)
   const [todoState, setTodoState] = useState<Record<string, "done" | "ignored">>(() => {
     try { return JSON.parse(localStorage.getItem("ow_todo_state") || "{}"); } catch { return {}; }
@@ -186,6 +189,35 @@ export default function OperationsWorkbench() {
       if (open) open(tgt.ext); else window.open(tgt.ext, "_blank");
     }
   }, [navigate]);
+
+  // 活动报名决策表:每行(店×活动×SKU)的「建议申报价/活动库存」草稿,默认申报价=活动参考价,落 localStorage(不提交)
+  const [enrollDraft, setEnrollDraft] = useState<Record<string, { price?: number; stock?: number }>>(() => {
+    try { return JSON.parse(localStorage.getItem("ow_enroll_draft") || "{}"); } catch { return {}; }
+  });
+  const enrollKey = useCallback((r: ActivityRow) => `${r.mall_id}|${r.activity_id || r.kind || ""}|${r.sku_ext_code || r.skc_id || ""}`, []);
+  const persistDraft = useCallback((next: Record<string, { price?: number; stock?: number }>) => {
+    setEnrollDraft(next);
+    try { localStorage.setItem("ow_enroll_draft", JSON.stringify(next)); } catch { /* */ }
+  }, []);
+  const setDraft = useCallback((key: string, patch: { price?: number | null; stock?: number | null }) => {
+    setEnrollDraft((prev) => {
+      const cur = { ...(prev[key] || {}) };
+      if ("price" in patch) { if (patch.price == null) delete cur.price; else cur.price = patch.price; }
+      if ("stock" in patch) { if (patch.stock == null) delete cur.stock; else cur.stock = patch.stock; }
+      const next = { ...prev, [key]: cur };
+      try { localStorage.setItem("ow_enroll_draft", JSON.stringify(next)); } catch { /* */ }
+      return next;
+    });
+  }, []);
+  // 生效申报价/库存:草稿优先,否则默认参考价(无则原申报价)/快照库存
+  const effPrice = useCallback((r: ActivityRow): number | null => {
+    const d = enrollDraft[enrollKey(r)]?.price;
+    return d != null ? d : (r.suggested_price != null ? r.suggested_price : r.signup_price);
+  }, [enrollDraft, enrollKey]);
+  const effStock = useCallback((r: ActivityRow): number => {
+    const d = enrollDraft[enrollKey(r)]?.stock;
+    return d != null ? d : (r.activity_stock || 0);
+  }, [enrollDraft, enrollKey]);
 
   const loadSku = useCallback(async () => {
     if (!window.electronAPI?.erp?.reports?.skuSales) { setError("当前版本不支持运营工作台，请升级桌面端"); return; }
@@ -560,13 +592,22 @@ export default function OperationsWorkbench() {
 
   const actColumns: ColumnsType<ActivityRow> = [
     storeCol,
-    { title: "类型", dataIndex: "kind", width: 80, render: (v: string | null) => <Tag color={v === "bidding" ? "purple" : v === "coupon" ? "cyan" : "blue"}>{KIND_LABEL[v || ""] || v || "—"}</Tag> },
-    { title: "活动 / SKU", key: "at", width: 300, render: (_, r) => <div><div style={{ fontSize: 12 }}>{r.title || "(未命名活动)"}</div>{r.sku_ext_code ? <div style={{ color: "#888", fontSize: 12 }}>{r.sku_ext_code}</div> : null}</div> },
-    { title: "报名价", dataIndex: "signup_price", width: 90, align: "right", render: (v) => fmtMoney(v) },
-    { title: "成本价", dataIndex: "cost", width: 90, align: "right", render: (v: number | null) => (v == null ? <Tooltip title="无成本台账（未采购入库/未绑定）"><span style={{ color: "#bbb" }}>—</span></Tooltip> : fmtMoney(v)) },
-    { title: "活动毛利", key: "amargin", width: 110, align: "right", render: (_, r) => { if (r.signup_price == null || r.cost == null) return <span style={{ color: "#bbb" }}>—</span>; const gp = r.signup_price - r.cost; return <span style={{ color: gp < 0 ? "#cf1322" : "#3f8600", fontWeight: 600 }}>{gp < 0 ? "亏 " : ""}{fmtMoney(gp)}</span>; }, sorter: (a, b) => ((a.signup_price ?? 0) - (a.cost ?? 0)) - ((b.signup_price ?? 0) - (b.cost ?? 0)) },
-    { title: "活动库存", dataIndex: "activity_stock", width: 90, align: "right", render: (v) => fmtNum(v), sorter: (a, b) => a.activity_stock - b.activity_stock },
-    { title: "截止", dataIndex: "end_at", width: 130, render: (v: string | null) => { if (!v) return "—"; const n = Number(v); return Number.isFinite(n) && n > 1e11 ? new Date(n).toLocaleDateString("zh-CN") : String(v); } },
+    { title: "类型", dataIndex: "kind", width: 70, render: (v: string | null) => <Tag color={v === "bidding" ? "purple" : v === "coupon" ? "cyan" : "blue"}>{KIND_LABEL[v || ""] || v || "—"}</Tag> },
+    { title: "活动 / SKU", key: "at", width: 280, render: (_, r) => <div><div style={{ fontSize: 12 }}>{r.title || "(未命名活动)"}</div>{r.sku_ext_code ? <div style={{ color: "#888", fontSize: 12 }}>{r.sku_ext_code}</div> : null}</div> },
+    { title: "原申报价", dataIndex: "signup_price", width: 80, align: "right", render: (v) => fmtMoney(v) },
+    { title: "活动参考价", dataIndex: "suggested_price", width: 90, align: "right", render: (v: number | null) => (v == null ? <span style={{ color: "#bbb" }}>—</span> : fmtMoney(v)) },
+    { title: "真实成本", dataIndex: "cost", width: 85, align: "right", render: (v: number | null) => (v == null ? <Tooltip title="无成本台账（未采购入库/未绑定）"><span style={{ color: "#bbb" }}>—</span></Tooltip> : fmtMoney(v)) },
+    { title: "建议申报价", key: "bid", width: 116, align: "right", render: (_, r) => {
+      const v = effPrice(r); const loss = v != null && r.cost != null && v < r.cost;
+      return <InputNumber size="small" min={0} step={0.1} precision={2} value={v ?? undefined} status={loss ? "error" : undefined} style={{ width: 100 }} prefix="¥" onChange={(val) => setDraft(enrollKey(r), { price: val == null ? null : Number(val) })} />;
+    } },
+    { title: "真实利润 / 率", key: "realmargin", width: 120, align: "right", render: (_, r) => {
+      const p = effPrice(r); if (p == null || r.cost == null) return <span style={{ color: "#bbb" }}>—</span>;
+      const gp = p - r.cost; const rate = p > 0 ? gp / p : 0; const color = gp < 0 ? "#cf1322" : "#3f8600";
+      return <span style={{ color, fontWeight: 600 }}>{gp < 0 ? "亏 " : ""}{fmtMoney(gp)}<span style={{ fontSize: 11, marginLeft: 4 }}>{(rate * 100).toFixed(1)}%</span></span>;
+    }, sorter: (a, b) => ((effPrice(a) ?? 0) - (a.cost ?? 0)) - ((effPrice(b) ?? 0) - (b.cost ?? 0)) },
+    { title: "活动库存", key: "astock", width: 96, align: "right", render: (_, r) => <InputNumber size="small" min={0} precision={0} value={effStock(r)} style={{ width: 80 }} onChange={(val) => setDraft(enrollKey(r), { stock: val == null ? null : Number(val) })} /> },
+    { title: "截止", dataIndex: "end_at", width: 110, render: (v: string | null) => { if (!v) return "—"; const n = Number(v); return Number.isFinite(n) && n > 1e11 ? new Date(n).toLocaleDateString("zh-CN") : String(v); } },
   ];
 
   const shopColumns: ColumnsType<ShopHealthRow> = [
@@ -866,14 +907,23 @@ export default function OperationsWorkbench() {
       ),
     },
     {
-      key: "activity", label: "活动机会",
+      key: "activity", label: "活动报名",
       children: (
         <div>
-          <div style={{ padding: "12px 16px 0", color: "#888", fontSize: 12 }}>各店可报活动 / 竞价 / 优惠券（仅含有报名价或 SKU 的行；部分活动平台未透出名称）。</div>
+          <div style={{ padding: "12px 16px 0", color: "#888", fontSize: 12 }}>商品×活动报名决策表:用<b>真实成本</b>(加权均价)算每个申报价下的真实利润率。「建议申报价」默认=活动参考价,可改;申报价低于成本会标红「亏本」。编辑暂存本机(不提交)。一键提交 Temu 待下一阶段(需先抓报名报文)。</div>
           {commonFilters(
             <Select size="small" style={{ width: 120 }} value={kindFilter} onChange={setKindFilter} options={[{ value: "all", label: "全部类型" }, { value: "activity", label: "活动" }, { value: "bidding", label: "竞价" }, { value: "coupon", label: "优惠券" }]} />,
           )}
-          <Table<ActivityRow> dataSource={actView} columns={actColumns} rowKey={(r) => String(r.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 条` }} scroll={{ x: 1000 }} loading={actLoading} />
+          <div style={{ padding: "0 16px 8px", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>批量填写(当前 {actView.length} 行):</Typography.Text>
+            <InputNumber size="small" min={0} step={0.1} precision={2} prefix="¥" placeholder="申报价" value={batchPrice ?? undefined} style={{ width: 110 }} onChange={(v) => setBatchPrice(v == null ? null : Number(v))} />
+            <Button size="small" disabled={batchPrice == null} onClick={() => { const next = { ...enrollDraft }; for (const r of actView) { const k = enrollKey(r); next[k] = { ...(next[k] || {}), price: batchPrice! }; } persistDraft(next); }}>按此价填</Button>
+            <Button size="small" onClick={() => { const next = { ...enrollDraft }; for (const r of actView) { const p = r.suggested_price ?? r.signup_price; if (p == null) continue; const k = enrollKey(r); next[k] = { ...(next[k] || {}), price: p }; } persistDraft(next); }}>按参考价填</Button>
+            <InputNumber size="small" min={0} precision={0} placeholder="库存" value={batchStock ?? undefined} style={{ width: 90 }} onChange={(v) => setBatchStock(v == null ? null : Number(v))} />
+            <Button size="small" disabled={batchStock == null} onClick={() => { const next = { ...enrollDraft }; for (const r of actView) { const k = enrollKey(r); next[k] = { ...(next[k] || {}), stock: batchStock! }; } persistDraft(next); }}>填库存</Button>
+            <Button size="small" danger onClick={() => { const next = { ...enrollDraft }; for (const r of actView) delete next[enrollKey(r)]; persistDraft(next); }}>清空草稿</Button>
+          </div>
+          <Table<ActivityRow> dataSource={actView} columns={actColumns} rowKey={(r) => String(r.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 条` }} scroll={{ x: 1160 }} loading={actLoading} />
         </div>
       ),
     },
