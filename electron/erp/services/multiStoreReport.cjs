@@ -419,6 +419,7 @@ async function buildMultiStoreReport(db, options = {}) {
 // 预热：强制重算并填缓存，供服务端定时调用，使 page cache 常暖、用户不撞冷查询。
 function prewarmMultiStoreReport(db, attachCloudDb) {
   try { buildSkuSales(db, { includeTest: false, attachCloudDb, force: true }); } catch {}
+  try { buildProductPanel(db, { includeTest: false, attachCloudDb, force: true }); } catch {}
   return buildMultiStoreReport(db, { includeTest: false, attachCloudDb, force: true }).catch(() => null);
 }
 
@@ -806,20 +807,6 @@ function buildProductPanel(db, options = {}) {
     SELECT mall_id, product_id, MAX(compliance_status) cs, MAX(title) title
       FROM cloud.skc_snapshots WHERE tenant_id = ? AND compliance_status IS NOT NULL AND product_id IS NOT NULL AND product_id <> ''
      GROUP BY mall_id, product_id`, [tid]);
-  // 商品名字典（by product_id，skc + sales 两表合并，覆盖更全）
-  const titleRows = optionalAllLocal(db, `
-    SELECT product_id, MAX(title) title, MAX(thumb_url) thumb FROM (
-      SELECT product_id, title, thumb_url FROM cloud.skc_snapshots WHERE tenant_id = ? AND product_id <> '' AND title IS NOT NULL AND title <> ''
-      UNION ALL
-      SELECT product_id, title, thumb_url FROM cloud.temu_sales_snapshot WHERE tenant_id = ? AND product_id <> '' AND title IS NOT NULL AND title <> ''
-    ) GROUP BY product_id`, [tid, tid]);
-  const titleMap = new Map(titleRows.map((t) => [String(t.product_id), { title: t.title, thumb: t.thumb }]));
-  // SKC / SKU 编码（by product_id，从 sales 聚合去重）
-  const codeRows = optionalAllLocal(db, `
-    SELECT product_id, GROUP_CONCAT(DISTINCT NULLIF(skc_id,'')) skcs, GROUP_CONCAT(DISTINCT NULLIF(sku_ext_code,'')) skus,
-           MIN(NULLIF(declared_price_cents,0)) declared
-      FROM cloud.temu_sales_snapshot WHERE tenant_id = ? AND product_id <> '' GROUP BY product_id`, [tid]);
-  const codeMap = new Map(codeRows.map((c) => [String(c.product_id), { skcs: c.skcs || null, skus: c.skus || null, declared: c.declared || null }]));
   const malls = optionalAllLocal(db, `SELECT mall_id, store_code, mall_name, status FROM erp_temu_malls`, []);
   const mallMap = new Map(malls.map((m) => [m.mall_id, m]));
   const map = new Map();
@@ -834,6 +821,24 @@ function buildProductPanel(db, options = {}) {
   for (const r of limRows) { get(r.mall_id, r.product_id, null).limited = true; }
   for (const a of actRows) { const e = get(a.mall_id, a.product_id, null); e.act_cnt = toNum(a.cnt); e.min_price = a.minp == null ? null : Number(a.minp) / 100; }
   for (const c of compRows) { const e = get(c.mall_id, c.product_id, c.title); e.compliance = c.cs || null; }
+  // 只查命中商品的 标题/缩略图/编码/申报价（IN 走 product_id 索引，避免扫全表 GROUP BY）
+  const pids = [...new Set([...map.values()].map((e) => e.product_id))].filter((p) => p);
+  let titleMap = new Map();
+  let codeMap = new Map();
+  if (pids.length) {
+    const ph = pids.map(() => "?").join(",");
+    const titleRows = optionalAllLocal(db, `
+      SELECT product_id, MAX(title) title, MAX(thumb_url) thumb FROM (
+        SELECT product_id, title, thumb_url FROM cloud.skc_snapshots WHERE tenant_id = ? AND product_id IN (${ph}) AND title IS NOT NULL AND title <> ''
+        UNION ALL
+        SELECT product_id, title, thumb_url FROM cloud.temu_sales_snapshot WHERE tenant_id = ? AND product_id IN (${ph}) AND title IS NOT NULL AND title <> ''
+      ) GROUP BY product_id`, [tid, ...pids, tid, ...pids]);
+    titleMap = new Map(titleRows.map((t) => [String(t.product_id), { title: t.title, thumb: t.thumb }]));
+    const codeRows = optionalAllLocal(db, `
+      SELECT product_id, GROUP_CONCAT(DISTINCT NULLIF(skc_id,'')) skcs, GROUP_CONCAT(DISTINCT NULLIF(sku_ext_code,'')) skus, MIN(NULLIF(declared_price_cents,0)) declared
+        FROM cloud.temu_sales_snapshot WHERE tenant_id = ? AND product_id IN (${ph}) GROUP BY product_id`, [tid, ...pids]);
+    codeMap = new Map(codeRows.map((c) => [String(c.product_id), { skcs: c.skcs || null, skus: c.skus || null, declared: c.declared || null }]));
+  }
   const out = [];
   for (const e of map.values()) {
     const m = mallMap.get(e.mall_id);
