@@ -34,7 +34,7 @@ interface Report {
   by_status: ByStatus[]; by_supplier: BySupplier[]; monthly: Monthly[]; orders: OrderRow[];
 }
 
-export default function PurchaseReport() {
+export default function PurchaseReportPanel() {
   const [data, setData] = useState<Report | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -107,12 +107,10 @@ export default function PurchaseReport() {
 
   return (
     <div style={{ padding: 16 }}>
-      <Card
-        title="采购单报表"
-        extra={<Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>}
-        styles={{ body: { paddingTop: 16 } }}
-      >
-        {error && <Alert type="error" showIcon message={error} style={{ marginBottom: 16 }} />}
+      {error && <Alert type="error" showIcon message={error} style={{ marginBottom: 16 }} />}
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+        <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>
+      </div>
 
         {/* 采购总览 */}
         <Row gutter={[16, 16]}>
@@ -211,7 +209,6 @@ export default function PurchaseReport() {
             pagination={{ defaultPageSize: 20, showSizeChanger: true, pageSizeOptions: [20, 50, 100], showTotal: (t) => `共 ${t} 单` }}
           />
         </Card>
-      </Card>
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import PurchaseReportPanel from "./PurchaseReport";
 import {
   Alert,
   AutoComplete,
@@ -789,6 +790,11 @@ export default function MultiStoreReport() {
           <Table<ReportStore> dataSource={stores} columns={opsColumns} rowKey="mall_id" size="small" pagination={false} scroll={{ x: 950 }} loading={loading} />
         </>
       ),
+    },
+    {
+      key: "purchase",
+      label: "采购报表",
+      children: <PurchaseReportPanel />,
     },
   ];
 
