@@ -207,6 +207,15 @@ function toPlatformItem(p: TemuAfterSaleRow): PlatformAfterSaleItem {
   };
 }
 
+// 聚水潭店铺名口径不统一（有的漏「铺」字，如 temu-073店），归一到平台口径 temu-NNN店铺，
+// 避免同一店在下拉框/筛选/计数里被当成两个店。
+function normalizeShopName(name?: string | null): string | null {
+  const t = (name || "").trim();
+  if (!t) return null;
+  const m = t.match(/^temu-?(\d+)\s*店铺?$/i);
+  return m ? `temu-${m[1]}店铺` : t;
+}
+
 function jstAsBaseRow(j: ConsignAfterSaleRow): UnifiedAfterSaleRow {
   return {
     id: `jst:${j.id}`,
@@ -214,7 +223,7 @@ function jstAsBaseRow(j: ConsignAfterSaleRow): UnifiedAfterSaleRow {
     asId: j.asId,
     outerAsId: j.outerAsId || null,
     asDate: j.asDate || null,
-    shopName: j.shopName || null,
+    shopName: normalizeShopName(j.shopName),
     shopStatus: j.shopStatus || null,
     status: j.status || null,
     goodStatus: j.goodStatus || null,
@@ -279,6 +288,8 @@ export interface FetchUnifiedResult {
 let mallMapCache: { map: Map<string, string>; at: number } | null = null;
 const MALL_MAP_TTL_MS = 10 * 60 * 1000;
 const MALL_MAP_TIMEOUT_MS = 4000;
+// 云端平台售后单超时阈值：云端慢/挂时超过即降级到仅本地，避免拖垮整表加载
+const PLATFORM_FETCH_TIMEOUT_MS = 8000;
 
 async function loadMallNameMap(erp: any): Promise<Map<string, string>> {
   if (mallMapCache && Date.now() - mallMapCache.at < MALL_MAP_TTL_MS) return mallMapCache.map;
@@ -325,10 +336,16 @@ export async function fetchUnifiedAfterSales(params: FetchUnifiedParams = {}): P
     const cfg = await loadCloudConfig().catch(() => null);
     if (!cfg) return { rows: [], error: "云端未配置" };
     try {
-      const result = await fetchTemuAfterSales(cfg, { q: q || undefined, limit: 1000 });
+      // 云端平台单接口在重负载下偶发很慢/连接重置（Failed to fetch）。加超时降级：
+      // 超时即放弃，只用本地聚水潭，不让最终合并那步死等、拖垮整张表的加载。
+      const result = await Promise.race([
+        fetchTemuAfterSales(cfg, { q: q || undefined, limit: 1000 }),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("__platform_timeout__")), PLATFORM_FETCH_TIMEOUT_MS)),
+      ]);
       return { rows: result.rows || [], error: null };
-    } catch (e: any) {
-      return { rows: [], error: e?.message || "云端售后读取失败" };
+    } catch {
+      // 不把 "Failed to fetch" / 超时原文抛给用户，温和提示仅显示本地数据
+      return { rows: [], error: "云端平台数据暂不可用，仅显示本地聚水潭数据" };
     }
   })();
 

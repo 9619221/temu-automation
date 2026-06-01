@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Col, Image, Input, InputNumber, Modal, Row, Space, Table, Tag, Typography, message } from "antd";
+import { Alert, Button, Col, Image, Input, InputNumber, Modal, Row, Select, Space, Table, Tag, Typography, message } from "antd";
+import type { SorterResult } from "antd/es/table/interface";
 import type { ColumnsType } from "antd/es/table";
 import { CloudSyncOutlined, EyeOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons";
 import EmptyGuide from "./EmptyGuide";
@@ -85,6 +86,30 @@ function goodStatusColor(value?: string | null) {
   return "default";
 }
 
+// 货物状态归一：聚水潭 good_status 为空表示「卖家未收到退货」，与表格 / 筛选口径保持一致
+function goodStatusLabel(value?: string | null) {
+  const text = String(value || "").trim();
+  return text || "卖家未收到退货";
+}
+
+// 平台状态归一：空值统一成「-」，便于下拉筛选
+function shopStatusLabel(value?: string | null) {
+  const text = String(value || "").trim();
+  return text || "-";
+}
+
+// 按退货时间排序的比较器（升序）；降序取反。null 时间始终排最后
+function compareAsDateAsc(a: UnifiedAfterSaleRow, b: UnifiedAfterSaleRow) {
+  const tA = a.asDate ? Date.parse(a.asDate) : NaN;
+  const tB = b.asDate ? Date.parse(b.asDate) : NaN;
+  const okA = Number.isFinite(tA);
+  const okB = Number.isFinite(tB);
+  if (!okA && !okB) return 0;
+  if (!okA) return 1;
+  if (!okB) return -1;
+  return tA - tB;
+}
+
 function parseReasons(des?: string | null) {
   if (!des) return "";
   const text = String(des).trim();
@@ -108,6 +133,11 @@ export default function ConsignAfterSalesSection() {
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  // 筛选：货物状态 / 平台状态 / 店铺；排序：退货时间（默认倒序，与原行为一致）
+  const [goodStatusFilter, setGoodStatusFilter] = useState<string | null>(null);
+  const [shopStatusFilter, setShopStatusFilter] = useState<string | null>(null);
+  const [shopFilter, setShopFilter] = useState<string | null>(null);
+  const [sortOrder, setSortOrder] = useState<"ascend" | "descend">("descend");
   // 单行展开（accordion）：一次只看一单，跟原 Drawer 行为一致
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [items, setItems] = useState<ConsignAfterSaleItemRow[]>([]);
@@ -121,6 +151,13 @@ export default function ConsignAfterSalesSection() {
     try {
       const result = await fetchUnifiedAfterSales({
         q: query || undefined,
+        // 本地聚水潭秒回先渲染（去掉转圈），云端平台单 / 店铺名 / 确认状态随后补全
+        onPartial: (partialRows, partialTotal) => {
+          if (id !== requestIdRef.current) return;
+          setAllRows(partialRows);
+          setTotal(partialTotal);
+          setLoadedOnce(true);
+        },
       });
       if (id !== requestIdRef.current) return;
       setAllRows(result.rows);
@@ -142,11 +179,41 @@ export default function ConsignAfterSalesSection() {
 
   useEffect(() => { void loadData(); }, [loadData]);
 
-  // 翻页纯前端切片：不再触发重新取数，瞬间响应
+  // 下拉选项：从全量行去重提取（货物状态 / 平台状态 / 店铺），归一后排序
+  const goodStatusOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of allRows) set.add(goodStatusLabel(r.goodStatus));
+    return Array.from(set).sort((a, b) => a.localeCompare(b, "zh-CN"));
+  }, [allRows]);
+  const shopStatusOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of allRows) set.add(shopStatusLabel(r.shopStatus));
+    return Array.from(set).sort((a, b) => a.localeCompare(b, "zh-CN"));
+  }, [allRows]);
+  const shopOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of allRows) { const v = (r.shopName || "").trim(); if (v) set.add(v); }
+    return Array.from(set).sort((a, b) => a.localeCompare(b, "zh-CN"));
+  }, [allRows]);
+
+  // 先按筛选 + 排序作用于全量行，再纯前端切片翻页（翻页瞬时响应）
+  const filteredRows = useMemo(() => {
+    let arr = allRows;
+    if (goodStatusFilter) arr = arr.filter((r) => goodStatusLabel(r.goodStatus) === goodStatusFilter);
+    if (shopStatusFilter) arr = arr.filter((r) => shopStatusLabel(r.shopStatus) === shopStatusFilter);
+    if (shopFilter) arr = arr.filter((r) => (r.shopName || "").trim() === shopFilter);
+    const sorted = [...arr].sort(compareAsDateAsc);
+    if (sortOrder === "descend") sorted.reverse();
+    return sorted;
+  }, [allRows, goodStatusFilter, shopStatusFilter, shopFilter, sortOrder]);
+
+  const filteredTotal = filteredRows.length;
+  const hasFilter = !!(goodStatusFilter || shopStatusFilter || shopFilter);
+
   const rows = useMemo(() => {
     const offset = Math.max(0, (page - 1) * pageSize);
-    return allRows.slice(offset, offset + pageSize);
-  }, [allRows, page, pageSize]);
+    return filteredRows.slice(offset, offset + pageSize);
+  }, [filteredRows, page, pageSize]);
 
   const toggleExpand = useCallback(async (row: UnifiedAfterSaleRow) => {
     if (expandedId === row.id) {
@@ -239,7 +306,8 @@ export default function ConsignAfterSalesSection() {
     }
   }, [confirmRow, confirmItems, loadData]);
 
-  const shopCount = useMemo(() => new Set(rows.map((r) => r.shopName).filter(Boolean)).size, [rows]);
+  // 涉及店铺：跟「累计」口径对齐，统计当前结果集（未筛选=全量）的不同店铺数，而非仅本页切片
+  const shopCount = useMemo(() => new Set(filteredRows.map((r) => r.shopName).filter(Boolean)).size, [filteredRows]);
   const totalRefundQty = useMemo(() => rows.reduce((s, r) => s + Number(r.refundQty || 0), 0), [rows]);
   const pendingCount = useMemo(() => rows.filter((r) => statusColor(r.status) !== "green").length, [rows]);
 
@@ -267,6 +335,9 @@ export default function ConsignAfterSalesSection() {
       dataIndex: "asDate",
       key: "asDate",
       width: 160,
+      sorter: compareAsDateAsc,
+      sortOrder,
+      sortDirections: ["descend", "ascend"],
       render: (v) => formatTime(v),
     },
     {
@@ -475,7 +546,7 @@ export default function ConsignAfterSalesSection() {
         </div>
 
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
-          <div className="material-filter-bar material-filter-bar--search">
+          <div className="material-filter-bar material-filter-bar--search" style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
             <Input.Search
               allowClear
               prefix={<SearchOutlined />}
@@ -488,8 +559,43 @@ export default function ConsignAfterSalesSection() {
                 if (!next.trim()) { setQuery(""); setPage(1); }
               }}
               onSearch={(value) => { setQuery(value.trim()); setPage(1); }}
-              style={{ maxWidth: 520 }}
+              style={{ maxWidth: 520, flex: "1 1 320px" }}
             />
+            <Select
+              allowClear
+              placeholder="货物状态"
+              value={goodStatusFilter}
+              onChange={(v) => { setGoodStatusFilter(v ?? null); setPage(1); }}
+              options={goodStatusOptions.map((v) => ({ value: v, label: v }))}
+              style={{ width: 160 }}
+            />
+            <Select
+              allowClear
+              placeholder="平台状态"
+              value={shopStatusFilter}
+              onChange={(v) => { setShopStatusFilter(v ?? null); setPage(1); }}
+              options={shopStatusOptions.map((v) => ({ value: v, label: v }))}
+              style={{ width: 160 }}
+            />
+            <Select
+              allowClear
+              showSearch
+              placeholder="店铺"
+              value={shopFilter}
+              onChange={(v) => { setShopFilter(v ?? null); setPage(1); }}
+              options={shopOptions.map((v) => ({ value: v, label: v }))}
+              optionFilterProp="label"
+              style={{ width: 180 }}
+            />
+            {hasFilter ? (
+              <Button
+                type="link"
+                size="small"
+                onClick={() => { setGoodStatusFilter(null); setShopStatusFilter(null); setShopFilter(null); setPage(1); }}
+              >
+                清除筛选
+              </Button>
+            ) : null}
           </div>
 
           <Table<UnifiedAfterSaleRow>
@@ -500,6 +606,13 @@ export default function ConsignAfterSalesSection() {
             columns={columns}
             dataSource={rows}
             scroll={{ x: 1710 }}
+            onChange={(_pagination, _filters, sorter) => {
+              const s = (Array.isArray(sorter) ? sorter[0] : sorter) as SorterResult<UnifiedAfterSaleRow>;
+              if (s && s.columnKey === "asDate") {
+                setSortOrder(s.order === "ascend" ? "ascend" : "descend");
+                setPage(1);
+              }
+            }}
             onRow={(row) => ({ onClick: () => void toggleExpand(row), style: { cursor: "pointer" } })}
             expandable={{
               expandedRowKeys: expandedId ? [expandedId] : [],
@@ -557,9 +670,9 @@ export default function ConsignAfterSalesSection() {
             pagination={{
               current: page,
               pageSize,
-              total,
+              total: filteredTotal,
               showSizeChanger: true,
-              showTotal: (t) => `共 ${formatNumber(t)} 条`,
+              showTotal: (t) => (hasFilter ? `筛选出 ${formatNumber(t)} 条 / 共 ${formatNumber(total)} 条` : `共 ${formatNumber(t)} 条`),
               onChange: (p, s) => { setPage(p); setPageSize(s); },
             }}
             locale={{
