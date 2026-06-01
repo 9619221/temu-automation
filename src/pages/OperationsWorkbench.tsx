@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Button, Card, Empty, Input, Select, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from "antd";
-import { ReloadOutlined } from "@ant-design/icons";
+import { Alert, Button, Card, Empty, Image, Input, Select, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from "antd";
+import { EyeOutlined, ReloadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, Legend, ResponsiveContainer } from "recharts";
 
@@ -419,7 +419,7 @@ export default function OperationsWorkbench() {
     { title: "店号", dataIndex: "store_code", width: 70, fixed: "left", render: (v, r) => v || r.mall_id },
     { title: "商品 (SPU)", key: "prod", width: 310, render: (_, r) => (
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-        {r.thumb ? <img src={r.thumb} alt="" loading="lazy" style={{ width: 40, height: 40, objectFit: "cover", borderRadius: 4, flexShrink: 0, background: "#f5f5f5" }} /> : <div style={{ width: 40, height: 40, borderRadius: 4, background: "#f0f0f0", flexShrink: 0 }} />}
+        {r.thumb ? <div style={{ flexShrink: 0, width: 40, height: 40 }}><Image src={r.thumb} width={40} height={40} style={{ objectFit: "cover", borderRadius: 4 }} preview={{ mask: <EyeOutlined />, maskClassName: "prod-thumb-mask" }} /></div> : <div style={{ width: 40, height: 40, borderRadius: 4, background: "#f0f0f0", flexShrink: 0 }} />}
         <div style={{ minWidth: 0 }}>
           <Typography.Text copyable={{ text: r.product_id }} style={{ fontSize: 12, fontWeight: 600 }}>{r.product_id}</Typography.Text>
           <Tooltip title={r.title || ""}><div style={{ color: "#888", fontSize: 12, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title || "—"}</div></Tooltip>
