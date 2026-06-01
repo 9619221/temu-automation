@@ -827,8 +827,6 @@ function buildProductPanel(db, options = {}) {
   let detailMap = new Map();
   if (pids.length) {
     const ph = pids.map(() => "?").join(",");
-    const md = optionalAllLocal(db, `SELECT MAX(stat_date) m FROM cloud.temu_sales_snapshot WHERE tenant_id = ?`, [tid]);
-    const maxDate = md.length && md[0].m ? md[0].m : "";
     const titleRows = optionalAllLocal(db, `
       SELECT product_id, MAX(title) title, MAX(thumb_url) thumb FROM (
         SELECT product_id, title, thumb_url FROM cloud.skc_snapshots WHERE tenant_id = ? AND product_id IN (${ph}) AND title IS NOT NULL AND title <> ''
@@ -836,23 +834,33 @@ function buildProductPanel(db, options = {}) {
         SELECT product_id, title, thumb_url FROM cloud.temu_sales_snapshot WHERE tenant_id = ? AND product_id IN (${ph}) AND title IS NOT NULL AND title <> ''
       ) GROUP BY product_id`, [tid, ...pids, tid, ...pids]);
     titleMap = new Map(titleRows.map((t) => [String(t.product_id), { title: t.title, thumb: t.thumb }]));
-    const codeRows = optionalAllLocal(db, `
-      SELECT product_id, GROUP_CONCAT(DISTINCT NULLIF(skc_id,'')) skcs, GROUP_CONCAT(DISTINCT NULLIF(sku_ext_code,'')) skus,
-             MIN(NULLIF(declared_price_cents,0)) declared, MAX(NULLIF(asf_score,0)) score, MAX(comment_num) comments,
-             SUM(COALESCE(warehouse_stock,0)) stock, SUM(COALESCE(occupy_stock,0)) occupy, SUM(COALESCE(unavailable_stock,0)) unavail,
-             SUM(COALESCE(advice_qty,0)) advice, SUM(CASE WHEN COALESCE(warehouse_stock,0)<=0 THEN 1 ELSE 0 END) lack
-        FROM cloud.temu_sales_snapshot WHERE tenant_id = ? AND stat_date = ? AND product_id IN (${ph}) GROUP BY product_id`, [tid, maxDate, ...pids]);
-    codeMap = new Map(codeRows.map((c) => [String(c.product_id), { skcs: c.skcs || null, skus: c.skus || null, declared: c.declared || null, score: c.score, comments: c.comments, stock: c.stock, occupy: c.occupy, unavail: c.unavail, advice: c.advice, lack: c.lack }]));
-    // SKU 明细（堆叠子行用）：命中商品在最新天的每个 SKU 一行(单天,不跨天)
+    // SKU 明细(每商品各自最新天,覆盖全)+ JS 聚合出 SPU 级值(单天,不跨天虚高)
     const detailRows = optionalAllLocal(db, `
-      SELECT product_id, skc_id, sku_ext_code, declared_price_cents, today_sales, last7d_sales, available_sale_days, warehouse_stock, occupy_stock, advice_qty
-        FROM cloud.temu_sales_snapshot WHERE tenant_id = ? AND stat_date = ? AND product_id IN (${ph})`, [tid, maxDate, ...pids]);
+      WITH ls AS (SELECT product_id, MAX(stat_date) sd FROM cloud.temu_sales_snapshot WHERE tenant_id = ? AND product_id IN (${ph}) GROUP BY product_id)
+      SELECT s.product_id, s.skc_id, s.sku_ext_code, s.declared_price_cents, s.today_sales, s.last7d_sales, s.available_sale_days,
+             s.warehouse_stock, s.occupy_stock, s.unavailable_stock, s.advice_qty, s.asf_score, s.comment_num
+        FROM cloud.temu_sales_snapshot s JOIN ls ON ls.product_id = s.product_id AND ls.sd = s.stat_date
+       WHERE s.product_id IN (${ph})`, [tid, ...pids, ...pids]);
+    const agg = new Map();
     for (const d of detailRows) {
       const k = String(d.product_id);
       let arr = detailMap.get(k);
       if (!arr) { arr = []; detailMap.set(k, arr); }
       arr.push({ skc_id: d.skc_id || null, sku_ext_code: d.sku_ext_code || null, declared_price: d.declared_price_cents ? Number(d.declared_price_cents) / 100 : null, today: toNum(d.today_sales), last7d: toNum(d.last7d_sales), sale_days: d.available_sale_days == null ? null : Number(d.available_sale_days), stock: toNum(d.warehouse_stock), occupy: toNum(d.occupy_stock), advice_qty: toNum(d.advice_qty) });
+      let a = agg.get(k);
+      if (!a) { a = { skcs: new Set(), skus: new Set(), declared: null, score: null, comments: null, stock: 0, occupy: 0, unavail: 0, advice: 0, lack: 0 }; agg.set(k, a); }
+      if (d.skc_id) a.skcs.add(d.skc_id);
+      if (d.sku_ext_code) a.skus.add(d.sku_ext_code);
+      const dp = d.declared_price_cents ? Number(d.declared_price_cents) : null;
+      if (dp && (a.declared == null || dp < a.declared)) a.declared = dp;
+      const sc = d.asf_score ? Number(d.asf_score) : null;
+      if (sc && (a.score == null || sc > a.score)) a.score = sc;
+      const cn = d.comment_num != null ? toNum(d.comment_num) : null;
+      if (cn != null && (a.comments == null || cn > a.comments)) a.comments = cn;
+      a.stock += toNum(d.warehouse_stock); a.occupy += toNum(d.occupy_stock); a.unavail += toNum(d.unavailable_stock); a.advice += toNum(d.advice_qty);
+      if (toNum(d.warehouse_stock) <= 0) a.lack++;
     }
+    codeMap = new Map([...agg].map(([k, a]) => [k, { skcs: [...a.skcs].join(",") || null, skus: [...a.skus].join(",") || null, declared: a.declared, score: a.score, comments: a.comments, stock: a.stock, occupy: a.occupy, unavail: a.unavail, advice: a.advice, lack: a.lack }]));
   }
   const out = [];
   for (const e of map.values()) {
