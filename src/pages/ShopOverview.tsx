@@ -243,6 +243,7 @@ const ShopOverview: React.FC = () => {
   const [diagnostics, setDiagnostics] = useState<CollectionDiagnostics | null>(null);
   const [productHistoryCache, setProductHistoryCache] = useState<Record<string, any> | null>(null);
   const [cloudConfigured, setCloudConfigured] = useState(false);
+  const [cloudLoading, setCloudLoading] = useState(false);
   const [cloudError, setCloudError] = useState("");
   const [cloudMonitorRows, setCloudMonitorRows] = useState<CloudShopMonitorRow[]>([]);
   const [cloudMonitorTotals, setCloudMonitorTotals] = useState<CloudShopMonitorPayload["totals"] | null>(null);
@@ -363,7 +364,13 @@ const ShopOverview: React.FC = () => {
       setStockThreshold(appSettings.lowStockThreshold);
       setSavedStockThreshold(appSettings.lowStockThreshold);
 
+      // 本地 store 数据已就绪:立即撤掉整页骨架渲染页面,云端聚合请求(较慢)在后台继续,
+      // 用顶部进度条 + 云端面板局部骨架表示,避免本地数据被慢请求拖着一起等。
+      setHasLoaded(true);
+      setLoading(false);
+
       try {
+        setCloudLoading(true);
         const cfg = await loadCloudConfig();
         if (!cfg) {
           setCloudConfigured(false);
@@ -390,6 +397,8 @@ const ShopOverview: React.FC = () => {
       } catch (error: any) {
         setCloudConfigured(true);
         setCloudError(error?.message || "云端店铺数据读取失败");
+      } finally {
+        setCloudLoading(false);
       }
     } catch (e) {
       console.error("加载店铺概览数据失败", e);
@@ -638,7 +647,9 @@ const ShopOverview: React.FC = () => {
         <div className="app-panel__title-main">云端店铺监控</div>
         <div className="app-panel__title-sub">{cloudLatestAt ? `最近更新：${formatCloudTime(cloudLatestAt)}` : ""}</div>
       </div>
-      {!cloudConfigured ? (
+      {cloudLoading && cloudMonitorRows.length === 0 && !cloudError ? (
+        <Skeleton active paragraph={{ rows: 4 }} />
+      ) : !cloudConfigured ? (
         <Alert type="warning" showIcon message="云端未配置" />
       ) : cloudError ? (
         <Alert type="warning" showIcon message="云端读取失败" description={cloudError} />
