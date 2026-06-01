@@ -341,6 +341,92 @@ r.post("/_admin/trigger-reconfig", (req, res) => {
   res.json({ ok: true, ...flag });
 });
 
+// ===== 活动报名任务通道(指令下行) =====
+// 桌面端建任务
+r.post("/v1/enroll-tasks/create", authMiddleware, (req, res) => {
+  const db = getDb();
+  const tenant_id = req.user.tid;
+  const { mall_id, site, activity_type, activity_thematic_id, product_list } = req.body || {};
+  if (!mall_id || !activity_thematic_id || !Array.isArray(product_list) || !product_list.length) {
+    return res.status(400).json({ error: "mall_id / activity_thematic_id / product_list 必填" });
+  }
+  const id = crypto.randomUUID();
+  try {
+    db.prepare(`
+      INSERT INTO enroll_task (id, tenant_id, mall_id, site, activity_type, activity_thematic_id, product_list_json, status, created_by, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, datetime('now'))
+    `).run(id, tenant_id, String(mall_id), site || "agentseller", activity_type ?? null, String(activity_thematic_id), JSON.stringify(product_list).slice(0, 200000), req.user.uid || null);
+    res.json({ ok: true, task_id: id });
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) return res.status(503).json({ error: "enroll_task 表未迁移(需 migrate)" });
+    throw error;
+  }
+});
+
+// 扩展按 mall_id 拉待报名任务,拉到即标记 dispatched(避免重复发)
+r.get("/v1/enroll-tasks", authMiddleware, (req, res) => {
+  const db = getDb();
+  const tenant_id = req.user.tid;
+  const mall_id = String(req.query.mall_id || "").trim();
+  if (!mall_id) return res.json({ ok: true, tasks: [] });
+  const limit = Math.min(20, Math.max(1, Number(req.query.limit) || 10));
+  try {
+    const rows = db.prepare(`
+      SELECT id, mall_id, site, activity_type, activity_thematic_id, product_list_json
+      FROM enroll_task WHERE tenant_id = ? AND mall_id = ? AND status = 'pending'
+      ORDER BY created_at ASC LIMIT ?
+    `).all(tenant_id, mall_id, limit);
+    if (rows.length) {
+      const mark = db.prepare("UPDATE enroll_task SET status='dispatched', dispatched_at=datetime('now') WHERE id=? AND status='pending'");
+      db.transaction(() => { for (const row of rows) mark.run(row.id); })();
+    }
+    const tasks = rows.map((row) => ({
+      task_id: row.id, mall_id: row.mall_id, site: row.site,
+      activity_type: row.activity_type, activity_thematic_id: row.activity_thematic_id,
+      product_list: JSON.parse(row.product_list_json),
+    }));
+    res.json({ ok: true, tasks });
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) return res.json({ ok: true, tasks: [] });
+    throw error;
+  }
+});
+
+// 扩展回传报名结果
+r.post("/v1/enroll-tasks/result", authMiddleware, (req, res) => {
+  const db = getDb();
+  const tenant_id = req.user.tid;
+  const { task_id, status, result } = req.body || {};
+  if (!task_id) return res.status(400).json({ error: "task_id 必填" });
+  const st = status === "failed" ? "failed" : "done";
+  try {
+    const info = db.prepare(`
+      UPDATE enroll_task SET status=?, result_json=?, done_at=datetime('now')
+      WHERE id=? AND tenant_id=?
+    `).run(st, result != null ? JSON.stringify(result).slice(0, 20000) : null, String(task_id), tenant_id);
+    res.json({ ok: true, updated: info.changes });
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) return res.json({ ok: true, updated: 0 });
+    throw error;
+  }
+});
+
+// 桌面端轮询任务结果(逗号分隔 task_id)
+r.get("/v1/enroll-tasks/status", authMiddleware, (req, res) => {
+  const db = getDb();
+  const tenant_id = req.user.tid;
+  const ids = String(req.query.ids || req.query.task_id || "").split(",").map((s) => s.trim()).filter(Boolean).slice(0, 100);
+  if (!ids.length) return res.json({ ok: true, tasks: [] });
+  try {
+    const ph = ids.map(() => "?").join(",");
+    const rows = db.prepare(`SELECT id, status, result_json, created_at, done_at FROM enroll_task WHERE tenant_id=? AND id IN (${ph})`).all(tenant_id, ...ids);
+    res.json({ ok: true, tasks: rows.map((row) => ({ task_id: row.id, status: row.status, created_at: row.created_at, done_at: row.done_at, result: row.result_json ? JSON.parse(row.result_json) : null })) });
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) return res.json({ ok: true, tasks: [] });
+    throw error;
+  }
+});
+
 r.post("/v1/batch", authMiddleware, (req, res) => {
   const { items } = req.body || {};
   if (!Array.isArray(items)) return res.status(400).json({ error: "items 必须是数组" });
