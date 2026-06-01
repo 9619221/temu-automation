@@ -890,6 +890,20 @@ function buildProductPanel(db, options = {}) {
   return data;
 }
 
+// 商品运营面板:优先读物化缓存表(cron 预聚合,毫秒),无/未跑则实时兜底(慢)
+function getProductPanelFast(db, options = {}) {
+  try {
+    const key = "product_panel:" + (options.includeTest ? "1" : "0");
+    const row = db.prepare("SELECT payload_json, updated_at FROM erp_report_cache WHERE cache_key = ?").get(key);
+    if (row && row.payload_json) {
+      const d = JSON.parse(row.payload_json);
+      d.cached_at = row.updated_at || null;
+      return d;
+    }
+  } catch (e) { /* 表不存在/解析失败 → 走实时兜底 */ }
+  return buildProductPanel(db, options);
+}
+
 // 写入店铺负责人（host 模式）。返回受影响行数。
 function setMallOwner(db, mallId, owner) {
   if (!db) throw new Error("setMallOwner: db is required (host mode only)");
@@ -913,6 +927,7 @@ module.exports = {
   buildStockOrders,
   buildSalesTrend,
   buildProductPanel,
+  getProductPanelFast,
   setMallOwner,
   // 暴露给测试用
   _internal: { fetchCloudReport, readMallDictionary, loginCloud, buildFinancialsByMall, buildByStoreLocal, shiftDate },

@@ -176,9 +176,9 @@ function registerReportsHandlers(ipcMain, deps) {
         return await remoteRequest(`/api/erp/reports/product-panel?include_test=${includeTest}`, { method: "GET" });
       }
       requireErp();
-      const { buildProductPanel } = require("../services/multiStoreReport.cjs");
+      const { getProductPanelFast } = require("../services/multiStoreReport.cjs");
       const { attachTemuCloudDbIfPossible } = require("../lanServer.cjs");
-      return { ok: true, data: buildProductPanel(erpState.db, { includeTest: payload?.includeTest, attachCloudDb: attachTemuCloudDbIfPossible }) };
+      return { ok: true, data: getProductPanelFast(erpState.db, { includeTest: payload?.includeTest, attachCloudDb: attachTemuCloudDbIfPossible }) };
     } catch (error) {
       return { ok: false, error: error?.message || String(error) };
     }
