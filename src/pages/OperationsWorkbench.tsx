@@ -65,7 +65,8 @@ interface DiagnosedRow extends SkuRow { _level: number; _issues: Diag[] }
 interface TodoTask {
   key: string; type: "product" | "code" | "risk" | "activity"; typeLabel: string;
   level: number; store: string; mall_id: string;
-  object: string; sub: string | null; metric: string; action: string; __rk?: number;
+  object: string; sub: string | null; metric: string; action: string;
+  status?: "done" | "ignored" | null; __rk?: number;
 }
 const TODO_TYPE_TAG: Record<string, { c: string; t: string }> = {
   product: { c: "orange", t: "运营" }, code: { c: "gold", t: "缺货号" }, risk: { c: "red", t: "风险" }, activity: { c: "green", t: "活动" },
@@ -146,6 +147,19 @@ export default function OperationsWorkbench() {
   const [sevFilter, setSevFilter] = useState("all");
   const [kindFilter, setKindFilter] = useState("all");
   const [todoType, setTodoType] = useState("all");
+  const [todoStatus, setTodoStatus] = useState("open"); // 默认只看待处理
+  // 待办闭环(第一版落 localStorage,零后端撞车;task key 稳定,后续可平滑迁 op_task_state 表)
+  const [todoState, setTodoState] = useState<Record<string, "done" | "ignored">>(() => {
+    try { return JSON.parse(localStorage.getItem("ow_todo_state") || "{}"); } catch { return {}; }
+  });
+  const markTask = useCallback((key: string, status: "done" | "ignored" | null) => {
+    setTodoState((prev) => {
+      const next = { ...prev };
+      if (status === null) delete next[key]; else next[key] = status;
+      try { localStorage.setItem("ow_todo_state", JSON.stringify(next)); } catch { /* */ }
+      return next;
+    });
+  }, []);
 
   const loadSku = useCallback(async () => {
     if (!window.electronAPI?.erp?.reports?.skuSales) { setError("当前版本不支持运营工作台，请升级桌面端"); return; }
@@ -303,18 +317,25 @@ export default function OperationsWorkbench() {
     return out;
   }, [diagnosed, riskRows, actRows, inScope]);
   const todoCount = useMemo(() => {
-    const c = { product: 0, code: 0, risk: 0, activity: 0, urgent: 0 };
-    for (const t of todoTasks) { c[t.type]++; if (t.level >= 3) c.urgent++; }
+    const c = { product: 0, code: 0, risk: 0, activity: 0, urgent: 0, done: 0 };
+    for (const t of todoTasks) {
+      const st = todoState[t.key];
+      if (st === "done") { c.done++; continue; }
+      if (st === "ignored") continue;
+      c[t.type]++; if (t.level >= 3) c.urgent++;
+    }
     return c;
-  }, [todoTasks]);
+  }, [todoTasks, todoState]);
   const todoView = useMemo(() => {
-    let v = todoTasks;
+    let v = todoTasks.map((t) => ({ ...t, status: todoState[t.key] || null }));
     if (storeFilter !== "all") v = v.filter((t) => t.store === storeFilter);
     if (todoType !== "all") v = v.filter((t) => t.type === todoType);
+    if (todoStatus === "open") v = v.filter((t) => !t.status);
+    else if (todoStatus !== "all") v = v.filter((t) => t.status === todoStatus);
     const q = search.trim().toLowerCase();
     if (q) v = v.filter((t) => t.object.toLowerCase().includes(q) || (t.sub || "").toLowerCase().includes(q));
     return [...v].sort((a, b) => b.level - a.level).map((t, i) => ({ ...t, __rk: i }));
-  }, [todoTasks, storeFilter, todoType, search]);
+  }, [todoTasks, storeFilter, todoType, todoStatus, search, todoState]);
 
   // 库存补货：需补货 SKU（售罄/即将断货/有建议备货），紧急度排序
   const restockView = useMemo(() => {
@@ -460,6 +481,13 @@ export default function OperationsWorkbench() {
     ) },
     { title: "关键指标", dataIndex: "metric", width: 120, render: (v: string) => <span style={{ fontSize: 12 }}>{v}</span> },
     { title: "建议动作", dataIndex: "action", width: 280, render: (v: string, t) => <span style={{ fontSize: 12, color: LEVEL_COLOR[t.level] }}>{v}</span> },
+    { title: "处理", key: "ops", width: 120, fixed: "right" as const, render: (_, t) => (
+      t.status ? (
+        <span style={{ fontSize: 12 }}><Tag color={t.status === "done" ? "green" : "default"}>{t.status === "done" ? "已处理" : "已忽略"}</Tag><a onClick={() => markTask(t.key, null)}>恢复</a></span>
+      ) : (
+        <span style={{ fontSize: 12 }}><a style={{ color: "#3f8600" }} onClick={() => markTask(t.key, "done")}>完成</a><a style={{ marginLeft: 10, color: "#999" }} onClick={() => markTask(t.key, "ignored")}>忽略</a></span>
+      )
+    ) },
   ];
 
   const restockColumns: ColumnsType<SkuRow> = [
@@ -659,17 +687,20 @@ export default function OperationsWorkbench() {
       children: (
         <div>
           <div style={{ padding: "12px 16px 0", display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 16 }}>
-            <Statistic title="待办总数" value={todoTasks.length} />
+            <Statistic title="待处理" value={todoCount.product + todoCount.code + todoCount.risk + todoCount.activity} valueStyle={{ color: "#d46b08" }} />
             <Statistic title="急" value={todoCount.urgent} valueStyle={{ color: todoCount.urgent > 0 ? "#cf1322" : undefined }} />
             <Statistic title="运营/补货" value={todoCount.product} valueStyle={{ color: todoCount.product > 0 ? "#d46b08" : undefined }} />
             <Statistic title="风险" value={todoCount.risk} valueStyle={{ color: todoCount.risk > 0 ? "#cf1322" : undefined }} />
-            <Statistic title="活动机会" value={todoCount.activity} valueStyle={{ color: "#3f8600" }} />
+            <Statistic title="已处理" value={todoCount.done} valueStyle={{ color: "#3f8600" }} />
           </div>
-          <div style={{ padding: "8px 16px 0", color: "#888", fontSize: 12 }}>把「商品诊断 / 中高风险 / 可报活动」里要动手的事汇成一条清单,按紧急度降序;顶部切「我的店」只看自己负责的店。</div>
+          <div style={{ padding: "8px 16px 0", color: "#888", fontSize: 12 }}>把「商品诊断 / 中高风险 / 可报活动」里要动手的事汇成一条清单,按紧急度降序;「完成 / 忽略」后从待处理列表消失(记在本机,可切「已处理 / 已忽略」回看或恢复)。顶部切「我的店」只看自己负责的店。</div>
           {commonFilters(
-            <Select size="small" style={{ width: 130 }} value={todoType} onChange={setTodoType} options={[{ value: "all", label: "全部类型" }, { value: "product", label: "运营/补货" }, { value: "code", label: "缺货号" }, { value: "risk", label: "风险" }, { value: "activity", label: "活动" }]} />,
+            <>
+              <Select size="small" style={{ width: 120 }} value={todoStatus} onChange={setTodoStatus} options={[{ value: "open", label: "待处理" }, { value: "done", label: "已处理" }, { value: "ignored", label: "已忽略" }, { value: "all", label: "全部" }]} />
+              <Select size="small" style={{ width: 130 }} value={todoType} onChange={setTodoType} options={[{ value: "all", label: "全部类型" }, { value: "product", label: "运营/补货" }, { value: "code", label: "缺货号" }, { value: "risk", label: "风险" }, { value: "activity", label: "活动" }]} />
+            </>,
           )}
-          <Table<TodoTask> dataSource={todoView} columns={todoColumns} rowKey={(t) => String(t.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 项待办` }} scroll={{ x: 1056 }} loading={skuLoading || riskLoading || actLoading} />
+          <Table<TodoTask> dataSource={todoView} columns={todoColumns} rowKey={(t) => t.key} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 项` }} scroll={{ x: 1176 }} loading={skuLoading || riskLoading || actLoading} />
         </div>
       ),
     },
