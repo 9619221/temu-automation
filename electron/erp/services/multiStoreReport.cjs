@@ -40,6 +40,36 @@ async function getToken(fetchImpl) {
   return loginCloud(fetchImpl);
 }
 
+// 活动报名:桌面端把任务下发到云端 enroll_task(扩展再按店拉取执行)
+async function createEnrollTasks(tasks = []) {
+  const fetchImpl = typeof fetch === "function" ? fetch : (await import("undici")).fetch;
+  let token = await getToken(fetchImpl);
+  const out = [];
+  for (const t of tasks) {
+    const post = (tk) => fetchImpl(`${CLOUD_BASE}/api/ingest/v1/enroll-tasks/create`, {
+      method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${tk}` },
+      body: JSON.stringify(t),
+    });
+    let resp = await post(token);
+    if (resp.status === 401) { cachedToken = null; token = await loginCloud(fetchImpl); resp = await post(token); }
+    const data = await resp.json().catch(() => ({}));
+    out.push({ ok: !!(resp.ok && data?.ok), task_id: data?.task_id || null, mall_id: t?.mall_id || null, error: data?.error || (resp.ok ? null : `HTTP ${resp.status}`) });
+  }
+  return { rows: out };
+}
+
+// 桌面端轮询报名任务结果(扩展执行后回传云端)
+async function pollEnrollResults(taskIds = []) {
+  if (!Array.isArray(taskIds) || !taskIds.length) return { tasks: [] };
+  const fetchImpl = typeof fetch === "function" ? fetch : (await import("undici")).fetch;
+  let token = await getToken(fetchImpl);
+  const url = `${CLOUD_BASE}/api/ingest/v1/enroll-tasks/status?ids=${encodeURIComponent(taskIds.join(","))}`;
+  let resp = await fetchImpl(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (resp.status === 401) { cachedToken = null; token = await loginCloud(fetchImpl); resp = await fetchImpl(url, { headers: { Authorization: `Bearer ${token}` } }); }
+  const data = await resp.json().catch(() => ({}));
+  return { tasks: data?.tasks || [] };
+}
+
 async function fetchCloudReport(options = {}) {
   const fetchImpl = typeof fetch === "function" ? fetch : (await import("undici")).fetch;
   const includeTest = options.includeTest ? "1" : "0";
@@ -1128,6 +1158,8 @@ module.exports = {
   setMallOwner,
   listOpTaskState,
   setOpTaskState,
+  createEnrollTasks,
+  pollEnrollResults,
   // 暴露给测试用
   _internal: { fetchCloudReport, readMallDictionary, loginCloud, buildFinancialsByMall, buildByStoreLocal, shiftDate },
 };

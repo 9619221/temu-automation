@@ -462,6 +462,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
       list: () => ipcRenderer.invoke("erp:op-task:list"),
       set: (payload) => ipcRenderer.invoke("erp:op-task:set", payload || {}),
     },
+    enroll: {
+      create: (payload) => ipcRenderer.invoke("erp:enroll:create", payload || {}),
+      status: (payload) => ipcRenderer.invoke("erp:enroll:status", payload || {}),
+    },
     events: {
       onPurchaseUpdate: (handler) => {
         const listener = (_event, payload) => handler(payload);

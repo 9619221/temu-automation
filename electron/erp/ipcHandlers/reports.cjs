@@ -98,6 +98,25 @@ function registerReportsHandlers(ipcMain, deps) {
     }
   });
 
+  // 活动报名:桌面端把任务下发到云端 enroll_task(扩展按店拉取执行)。直连云端,host/client 同。
+  ipcMain.handle("erp:enroll:create", async (_event, payload) => {
+    try {
+      const { createEnrollTasks } = require("../services/multiStoreReport.cjs");
+      return { ok: true, data: await createEnrollTasks(payload?.tasks || []) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+  // 轮询报名任务结果
+  ipcMain.handle("erp:enroll:status", async (_event, payload) => {
+    try {
+      const { pollEnrollResults } = require("../services/multiStoreReport.cjs");
+      return { ok: true, data: await pollEnrollResults(payload?.taskIds || []) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+
   // 销售管理：SKU 级销售明细（跨店）
   ipcMain.handle("erp:reports:sku-sales", async (_event, payload) => {
     try {

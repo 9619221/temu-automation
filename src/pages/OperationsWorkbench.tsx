@@ -283,6 +283,63 @@ export default function OperationsWorkbench() {
     } finally { setEnrollBusy(false); }
   }, [selActRows, effPrice, effStock]);
 
+  // 多店·扩展路:把勾选行按(店×活动)拼成任务下发云端,各店登录态的浏览器扩展自动报名(免逐店切登)
+  const submitViaExtension = useCallback(async () => {
+    const rows = selActRows;
+    if (!rows.length) { message.warning("请先勾选要报名的商品行"); return; }
+    const api = window.electronAPI?.erp?.enroll?.create;
+    if (!api) { message.error("当前桌面端不支持(请重启/更新应用)"); return; }
+    const bad = rows.filter((r) => !r.product_id || !r.skc_id || !r.sku_id || !r.activity_id);
+    if (bad.length) { message.error(`有 ${bad.length} 行缺 ID(快照未透出 product/skc/sku/activity),走扩展路需完整 ID`); return; }
+    const noPrice = rows.filter((r) => effPrice(r) == null);
+    if (noPrice.length) { message.error(`有 ${noPrice.length} 行没填申报价`); return; }
+    // 分组:mall → (activity_id,type) → product → skc → sku
+    const groups = new Map<string, { mall_id: string; activity_type: number | null; activity_thematic_id: string; prod: Map<string, { productId: number; activityStock: number; skc: Map<string, Map<string, number>> }> }>();
+    for (const r of rows) {
+      const k = `${r.mall_id}|${r.activity_id}|${r.activity_type ?? ""}`;
+      if (!groups.has(k)) groups.set(k, { mall_id: r.mall_id, activity_type: r.activity_type, activity_thematic_id: r.activity_id!, prod: new Map() });
+      const g = groups.get(k)!;
+      if (!g.prod.has(r.product_id!)) g.prod.set(r.product_id!, { productId: Number(r.product_id), activityStock: effStock(r), skc: new Map() });
+      const pe = g.prod.get(r.product_id!)!;
+      pe.activityStock = effStock(r);
+      if (!pe.skc.has(r.skc_id!)) pe.skc.set(r.skc_id!, new Map());
+      pe.skc.get(r.skc_id!)!.set(r.sku_id!, Math.round(effPrice(r)! * 100));
+    }
+    const tasks = [...groups.values()].map((g) => ({
+      mall_id: g.mall_id, site: "agentseller", activity_type: g.activity_type, activity_thematic_id: g.activity_thematic_id,
+      product_list: [...g.prod.values()].map((pe) => ({
+        productId: pe.productId, activityStock: pe.activityStock,
+        skcList: [...pe.skc.entries()].map(([skcId, skuMap]) => ({ skcId: Number(skcId), skuList: [...skuMap.entries()].map(([skuId, activityPrice]) => ({ skuId: Number(skuId), activityPrice })) })),
+      })),
+    }));
+    const lossRows = rows.filter((r) => { const p = effPrice(r); return p != null && r.cost != null && p < r.cost; });
+    Modal.confirm({
+      title: "下发报名任务(多店·扩展执行)",
+      width: 560,
+      content: (
+        <div style={{ fontSize: 13 }}>
+          <p>共 <b>{rows.length}</b> 行 → <b>{tasks.length}</b> 个(店×活动)任务,下发到云端,由各店<b>登录态的浏览器扩展</b>自动报名(免逐店切登)。</p>
+          {lossRows.length > 0 && <p style={{ color: "#cf1322", fontWeight: 600 }}>🔴 {lossRows.length} 行申报价低于成本(亏本)</p>}
+          <p style={{ color: "#888" }}>需对应店铺的 Chrome 开着(装了扩展)才会执行;结果稍后在「报名记录」或刷新可见。</p>
+        </div>
+      ),
+      okText: lossRows.length > 0 ? "仍然下发(含亏本)" : "下发任务",
+      okButtonProps: { danger: lossRows.length > 0 },
+      cancelText: "取消",
+      onOk: async () => {
+        setEnrollBusy(true);
+        try {
+          const resp = await api({ tasks });
+          const out = resp?.data?.rows || [];
+          const ok = out.filter((x: { ok: boolean }) => x.ok).length;
+          if (ok) { message.success(`已下发 ${ok}/${out.length} 个报名任务,等扩展执行`); setSelActRows([]); }
+          else message.error("下发失败:" + (out[0]?.error || resp?.error || "未知"));
+        } catch (e: any) { message.error("下发失败:" + (e?.message || String(e))); }
+        finally { setEnrollBusy(false); }
+      },
+    });
+  }, [selActRows, effPrice, effStock]);
+
   const loadSku = useCallback(async () => {
     if (!window.electronAPI?.erp?.reports?.skuSales) { setError("当前版本不支持运营工作台，请升级桌面端"); return; }
     setSkuLoading(true);
@@ -987,6 +1044,9 @@ export default function OperationsWorkbench() {
             <Button size="small" disabled={batchStock == null} onClick={() => { const next = { ...enrollDraft }; for (const r of actView) { const k = enrollKey(r); next[k] = { ...(next[k] || {}), stock: batchStock! }; } persistDraft(next); }}>填库存</Button>
             <Button size="small" danger onClick={() => { const next = { ...enrollDraft }; for (const r of actView) delete next[enrollKey(r)]; persistDraft(next); }}>清空草稿</Button>
             <Button type="primary" size="small" loading={enrollBusy} disabled={!selActRows.length} onClick={submitEnroll}>提交报名 ({selActRows.length})</Button>
+            <Tooltip title="把勾选行按(店×活动)下发到云端,由各店登录态浏览器扩展自动报名,免逐店切登(需云端+扩展已部署)">
+              <Button size="small" loading={enrollBusy} disabled={!selActRows.length} onClick={submitViaExtension}>下发多店任务 ({selActRows.length})</Button>
+            </Tooltip>
           </div>
           <Table<ActivityRow> dataSource={actView} columns={actColumns} rowKey={(r) => String(r.__rk)} size="small"
             rowSelection={{ selectedRowKeys: selActRows.map((r) => String(r.__rk)), onChange: (_, rows) => setSelActRows(rows as ActivityRow[]), getCheckboxProps: (r) => ({ disabled: !r.activity_id || !r.sku_ext_code }) }}

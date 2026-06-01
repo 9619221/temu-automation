@@ -835,6 +835,10 @@ interface ErpAPI {
     list: () => Promise<{ ok: boolean; data?: { rows: Array<{ task_key: string; status: "done" | "ignored"; owner: string | null; note: string | null; updated_at: number }> }; error?: string }>;
     set: (payload: { taskKey: string; status: "done" | "ignored" | null; owner?: string | null }) => Promise<{ ok: boolean; data?: { changes: number }; error?: string }>;
   };
+  enroll?: {
+    create: (payload: { tasks: Array<{ mall_id: string; site?: string; activity_type?: number | null; activity_thematic_id: string; product_list: unknown[] }> }) => Promise<{ ok: boolean; data?: { rows: Array<{ ok: boolean; task_id: string | null; mall_id: string | null; error: string | null }> }; error?: string }>;
+    status: (payload: { taskIds: string[] }) => Promise<{ ok: boolean; data?: { tasks: Array<{ task_id: string; status: string; result: unknown; created_at: string; done_at: string | null }> }; error?: string }>;
+  };
   events?: {
     onPurchaseUpdate: (handler: (payload: ErpPurchaseUpdateEvent) => void) => () => void;
     onUserUpdate: (handler: (payload: ErpUserUpdateEvent) => void) => () => void;
