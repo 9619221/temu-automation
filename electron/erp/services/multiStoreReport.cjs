@@ -827,6 +827,8 @@ function buildProductPanel(db, options = {}) {
   let detailMap = new Map();
   if (pids.length) {
     const ph = pids.map(() => "?").join(",");
+    const md = optionalAllLocal(db, `SELECT MAX(stat_date) m FROM cloud.temu_sales_snapshot WHERE tenant_id = ?`, [tid]);
+    const maxDate = md.length && md[0].m ? md[0].m : "";
     const titleRows = optionalAllLocal(db, `
       SELECT product_id, MAX(title) title, MAX(thumb_url) thumb FROM (
         SELECT product_id, title, thumb_url FROM cloud.skc_snapshots WHERE tenant_id = ? AND product_id IN (${ph}) AND title IS NOT NULL AND title <> ''
@@ -839,14 +841,12 @@ function buildProductPanel(db, options = {}) {
              MIN(NULLIF(declared_price_cents,0)) declared, MAX(NULLIF(asf_score,0)) score, MAX(comment_num) comments,
              SUM(COALESCE(warehouse_stock,0)) stock, SUM(COALESCE(occupy_stock,0)) occupy, SUM(COALESCE(unavailable_stock,0)) unavail,
              SUM(COALESCE(advice_qty,0)) advice, SUM(CASE WHEN COALESCE(warehouse_stock,0)<=0 THEN 1 ELSE 0 END) lack
-        FROM cloud.temu_sales_snapshot WHERE tenant_id = ? AND product_id IN (${ph}) GROUP BY product_id`, [tid, ...pids]);
+        FROM cloud.temu_sales_snapshot WHERE tenant_id = ? AND stat_date = ? AND product_id IN (${ph}) GROUP BY product_id`, [tid, maxDate, ...pids]);
     codeMap = new Map(codeRows.map((c) => [String(c.product_id), { skcs: c.skcs || null, skus: c.skus || null, declared: c.declared || null, score: c.score, comments: c.comments, stock: c.stock, occupy: c.occupy, unavail: c.unavail, advice: c.advice, lack: c.lack }]));
-    // SKU 明细（堆叠子行用）：命中商品的每个 SKU 最新天一行，覆盖全(含下架/无销量)
+    // SKU 明细（堆叠子行用）：命中商品在最新天的每个 SKU 一行(单天,不跨天)
     const detailRows = optionalAllLocal(db, `
-      WITH ls AS (SELECT product_id, MAX(stat_date) sd FROM cloud.temu_sales_snapshot WHERE tenant_id = ? AND product_id IN (${ph}) GROUP BY product_id)
-      SELECT s.product_id, s.skc_id, s.sku_ext_code, s.declared_price_cents, s.today_sales, s.last7d_sales, s.available_sale_days, s.warehouse_stock, s.occupy_stock, s.advice_qty
-        FROM cloud.temu_sales_snapshot s JOIN ls ON ls.product_id = s.product_id AND ls.sd = s.stat_date
-       WHERE s.product_id IN (${ph})`, [tid, ...pids, ...pids]);
+      SELECT product_id, skc_id, sku_ext_code, declared_price_cents, today_sales, last7d_sales, available_sale_days, warehouse_stock, occupy_stock, advice_qty
+        FROM cloud.temu_sales_snapshot WHERE tenant_id = ? AND stat_date = ? AND product_id IN (${ph})`, [tid, maxDate, ...pids]);
     for (const d of detailRows) {
       const k = String(d.product_id);
       let arr = detailMap.get(k);
