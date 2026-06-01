@@ -424,11 +424,20 @@ export default function OperationsWorkbench() {
     { title: "可报活动", dataIndex: "activity", width: 85, align: "right", sorter: (a, b) => a.activity - b.activity, render: (v: number) => (v > 0 ? <span style={{ color: "#3f8600" }}>{fmtNum(v)}</span> : <span style={{ color: "#bbb" }}>0</span>) },
   ];
 
+  // SKU 堆叠单元格:把同一 SPU 下多个 SKU 竖直堆叠,各列行数一致天然对齐;total 不为空时追加合计行
+  const stackCell = (skus: SkuRow[], get: (s: SkuRow) => React.ReactNode, total?: React.ReactNode) => (
+    <div>
+      {skus.map((s, i) => <div key={i} style={{ padding: "3px 0", borderBottom: i < skus.length - 1 ? "1px solid #f5f5f5" : undefined, minHeight: 20, fontSize: 12 }}>{get(s)}</div>)}
+      {total != null && <div style={{ padding: "3px 0", borderTop: "1px solid #e8e8e8", fontWeight: 600, fontSize: 12, background: "#f8fbff", minHeight: 20 }}>{total}</div>}
+    </div>
+  );
+  const skusOf = (r: ProductPanelRow) => skuByProduct.get(r.mall_id + "|" + r.product_id) || [];
+
   const panelColumns: ColumnsType<ProductPanelRow> = [
     { title: "店号", dataIndex: "store_code", width: 70, fixed: "left", render: (v, r) => v || r.mall_id },
     { title: "SPU", dataIndex: "product_id", width: 120, render: (v: string) => <Typography.Text copyable={{ text: v }} style={{ fontSize: 12, fontWeight: 600 }}>{v}</Typography.Text> },
-    { title: "SKC", dataIndex: "skc_codes", width: 130, render: (v: string | null) => (v ? <Tooltip title={v}><div style={{ fontSize: 12, maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</div></Tooltip> : <span style={{ color: "#bbb" }}>—</span>) },
-    { title: "SKU货号", dataIndex: "sku_codes", width: 140, render: (v: string | null) => (v ? <Tooltip title={v}><div style={{ fontSize: 12, maxWidth: 130, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</div></Tooltip> : <span style={{ color: "#bbb" }}>—</span>) },
+    { title: "SKC", key: "skc", width: 130, render: (_, r) => stackCell(skusOf(r), (s) => s.skc_id || <span style={{ color: "#bbb" }}>—</span>) },
+    { title: "SKU货号", key: "sku_ext", width: 140, render: (_, r) => stackCell(skusOf(r), (s) => s.sku_ext_code || <span style={{ color: "#bbb" }}>—</span>) },
     { title: "商品", key: "prod", width: 340, render: (_, r) => (
       <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
         {r.thumb ? <div style={{ flexShrink: 0, width: 40, height: 40 }}><Image src={r.thumb} width={40} height={40} style={{ objectFit: "cover", borderRadius: 4 }} preview={{ mask: <EyeOutlined />, maskClassName: "prod-thumb-mask" }} /></div> : <div style={{ width: 40, height: 40, borderRadius: 4, background: "#f0f0f0", flexShrink: 0 }} />}
@@ -436,12 +445,12 @@ export default function OperationsWorkbench() {
       </div>
     ) },
     { title: "评价", key: "score", width: 110, align: "right", sorter: (a, b) => (a.comments ?? 0) - (b.comments ?? 0), render: (_, r) => { if (r.comments == null && r.score == null) return <span style={{ color: "#bbb" }}>—</span>; return <span>{r.score != null ? <span style={{ color: "#fadb14" }}>★{r.score.toFixed(1)} </span> : null}{r.comments != null ? <span>{fmtNum(r.comments)} 评论</span> : ""}</span>; } },
-    { title: "申报价", dataIndex: "declared_price", width: 90, align: "right", sorter: (a, b) => (a.declared_price ?? 0) - (b.declared_price ?? 0), render: (v: number | null) => (v == null ? <span style={{ color: "#bbb" }}>—</span> : "¥" + v.toFixed(2)) },
-    { title: "可用库存", dataIndex: "stock", width: 90, align: "right", sorter: (a, b) => (a.stock ?? 0) - (b.stock ?? 0), render: (v: number | null) => (v == null ? "—" : v <= 0 ? <span style={{ color: "#cf1322", fontWeight: 600 }}>{fmtNum(v)}</span> : fmtNum(v)) },
-    { title: "预占用库存", dataIndex: "occupy", width: 100, align: "right", render: (v: number | null) => (v == null ? "—" : fmtNum(v)) },
+    { title: "申报价", key: "declared_price", width: 90, align: "right", render: (_, r) => { const skus = skusOf(r); const prices = skus.map((s) => s.declared_price).filter((p): p is number => p != null); const min = prices.length ? Math.min(...prices) : null; return stackCell(skus, (s) => (s.declared_price == null ? "—" : "¥" + s.declared_price.toFixed(2)), min == null ? "—" : "¥" + min.toFixed(2)); } },
+    { title: "可用库存", key: "stock", width: 90, align: "right", render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.stock || 0), 0); return stackCell(skus, (s) => <span style={{ color: (s.stock || 0) <= 0 ? "#cf1322" : undefined }}>{fmtNum(s.stock)}</span>, fmtNum(sum)); } },
+    { title: "预占用库存", key: "occupy", width: 100, align: "right", render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.occupy || 0), 0); return stackCell(skus, (s) => fmtNum(s.occupy), fmtNum(sum)); } },
     { title: "暂不可用库存", dataIndex: "unavail", width: 110, align: "right", render: (v: number | null) => (v == null ? "—" : v > 0 ? <span style={{ color: "#d46b08" }}>{fmtNum(v)}</span> : fmtNum(v)) },
     { title: "缺货数量", dataIndex: "lack", width: 95, align: "right", sorter: (a, b) => (a.lack ?? 0) - (b.lack ?? 0), render: (v: number | null) => (v == null ? "—" : v > 0 ? <span style={{ color: "#cf1322", fontWeight: 600 }}>{fmtNum(v)}</span> : <span style={{ color: "#bbb" }}>0</span>) },
-    { title: "建议备货", dataIndex: "advice", width: 90, align: "right", sorter: (a, b) => (a.advice ?? 0) - (b.advice ?? 0), render: (v: number | null) => (v == null ? "—" : v > 0 ? <Tag color="blue">{fmtNum(v)}</Tag> : <span style={{ color: "#bbb" }}>—</span>) },
+    { title: "建议备货", key: "advice", width: 90, align: "right", render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.advice_qty || 0), 0); return stackCell(skus, (s) => ((s.advice_qty || 0) > 0 ? <Tag color="blue">{fmtNum(s.advice_qty)}</Tag> : <span style={{ color: "#bbb" }}>—</span>), fmtNum(sum)); } },
     { title: "可报活动", key: "act", width: 130, align: "right", sorter: (a, b) => a.act_cnt - b.act_cnt, render: (_, r) => (r.act_cnt > 0 ? <span style={{ color: "#3f8600" }}>{r.act_cnt}个{r.min_price != null ? ` / 低¥${r.min_price.toFixed(2)}` : ""}</span> : <span style={{ color: "#bbb" }}>—</span>) },
     { title: "合规", dataIndex: "compliance", width: 170, render: (v: string | null) => (v ? <Tag color="red" style={{ whiteSpace: "normal" }}>{v}</Tag> : <span style={{ color: "#3f8600" }}>正常</span>) },
     { title: "限流", dataIndex: "limited", width: 90, align: "center", sorter: (a, b) => (a.limited ? 1 : 0) - (b.limited ? 1 : 0), render: (v: boolean) => (v ? <Tag color="volcano">高价限流</Tag> : <span style={{ color: "#bbb" }}>—</span>) },
@@ -449,16 +458,6 @@ export default function OperationsWorkbench() {
     { title: "点击", dataIndex: "click", width: 70, align: "right", render: (v: number | null) => (v == null ? "—" : fmtNum(v)) },
     { title: "支付件", dataIndex: "pay", width: 75, align: "right", render: (v: number | null) => (v == null ? "—" : fmtNum(v)) },
     { title: "曝光转化", dataIndex: "conv", width: 90, align: "right", render: (v: number | null) => (v == null ? "—" : (v * 100).toFixed(2) + "%") },
-  ];
-
-  const skuChildColumns: ColumnsType<SkuRow> = [
-    { title: "SKC", dataIndex: "skc_id", width: 140, render: (v) => v || "—" },
-    { title: "SKU货号", dataIndex: "sku_ext_code", width: 130, render: (v) => v || "—" },
-    { title: "申报价", dataIndex: "declared_price", width: 90, align: "right", render: (v: number | null) => (v == null ? "—" : "¥" + v.toFixed(2)) },
-    { title: "今日销量", dataIndex: "today", width: 90, align: "right", render: (v) => fmtNum(v) },
-    { title: "近7天", dataIndex: "last7d", width: 80, align: "right", render: (v) => fmtNum(v) },
-    { title: "可售天数", dataIndex: "sale_days", width: 90, align: "right", render: (v: number | null) => (v == null ? "—" : v + "天") },
-    { title: "库存", dataIndex: "stock", width: 80, align: "right", render: (v: number) => <span style={{ color: v <= 0 ? "#cf1322" : undefined }}>{fmtNum(v)}</span> },
   ];
 
   const commonFilters = (extra?: React.ReactNode) => (
@@ -654,7 +653,7 @@ export default function OperationsWorkbench() {
         <div>
           <div style={{ padding: "12px 16px 0", color: "#888", fontSize: 12 }}>每个商品(SPU)横向集成:可报活动 / 合规状态 / 流量(曝光·点击·转化) / 高价限流。按 限流 &gt; 违规 &gt; 活动 排序;流量「无」表示该商品暂未采到(采集覆盖待提升)。</div>
           {commonFilters()}
-          <Table<ProductPanelRow> dataSource={panelView} columns={panelColumns} rowKey={(r) => String(r.__rk)} size="small" expandable={{ rowExpandable: (r) => (skuByProduct.get(r.mall_id + "|" + r.product_id)?.length || 0) > 0, expandedRowRender: (r) => <Table<SkuRow> size="small" rowKey={(c, i) => `${r.__rk}-${i}`} dataSource={skuByProduct.get(r.mall_id + "|" + r.product_id) || []} columns={skuChildColumns} pagination={false} /> }} pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个商品` }} scroll={{ x: 1100 }} loading={panelLoading} />
+          <Table<ProductPanelRow> dataSource={panelView} columns={panelColumns} rowKey={(r) => String(r.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个商品` }} scroll={{ x: 1100 }} loading={panelLoading} />
         </div>
       ),
     },
