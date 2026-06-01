@@ -44,6 +44,7 @@ const ROUTE_ROLES: Record<string, string[]> = {
   "/create-product": ["admin", "manager", "operations"],
   "/image-studio": ["admin", "manager", "operations"],
   "/image-studio-gpt": ["admin", "manager", "operations"],
+  "/image-studio-agent": ["admin", "manager", "operations"],
   "/auto-image-swap": ["admin", "manager", "operations"],
   "/collect": ["admin", "manager", "operations"],
   "/accounts": ["admin", "manager", "operations"],

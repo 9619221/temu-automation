@@ -5812,6 +5812,74 @@ ipcMain.handle("image-studio:regenerate-slot", async (_event, payload) => {
   return result;
 });
 
+// ============================================================
+// 9-agent Supervisor 生图（M1：走本地子进程 /api/agent/*；M3 切云端）
+//   - start  : POST /api/agent/supervisor（fire-and-forget，立即返回 jobId）
+//   - poll   : GET  /api/agent/job/{jobId}（state + logs + generatedSlotOrders）
+//   - cancel : DELETE /api/agent/job/{jobId}
+//   - fetchImage: GET /api/agent/job/{jobId}/file/slots/slot_N.{ext}（探测扩展名，返回 dataUrl）
+//   后端是异步 job + 落盘 + 轮询模型，不走 SSE。
+// ============================================================
+const SUPERVISOR_JOB_ID_RE = /^[a-f0-9-]{32,}$/i;
+const SUPERVISOR_SLOT_EXTS = ["png", "jpg", "jpeg", "webp"];
+
+ipcMain.handle("image-studio:supervisor-start", async (_event, payload) => {
+  const analysis = payload?.analysis;
+  const productReferences = Array.isArray(payload?.productReferences) ? payload.productReferences : [];
+  if (!analysis || productReferences.length === 0) {
+    throw new Error("缺少 analysis 或 productReferences");
+  }
+  const body = {
+    analysis,
+    productReferences,
+    competitorImages: Array.isArray(payload?.competitorImages) && payload.competitorImages.length
+      ? payload.competitorImages
+      : undefined,
+    brandLogoUrl: typeof payload?.brandLogoUrl === "string" && payload.brandLogoUrl ? payload.brandLogoUrl : undefined,
+    stopAtPhase: payload?.stopAtPhase === "review_passed" ? "review_passed" : "completed",
+    skipAssetLibrary: payload?.skipAssetLibrary === true ? true : undefined,
+  };
+  return imageStudioJson("/api/agent/supervisor", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+});
+
+ipcMain.handle("image-studio:supervisor-poll", async (_event, jobId) => {
+  if (typeof jobId !== "string" || !SUPERVISOR_JOB_ID_RE.test(jobId)) {
+    throw new Error("非法 jobId");
+  }
+  return imageStudioJson(`/api/agent/job/${jobId}`, { method: "GET" });
+});
+
+ipcMain.handle("image-studio:supervisor-cancel", async (_event, jobId) => {
+  if (typeof jobId !== "string" || !SUPERVISOR_JOB_ID_RE.test(jobId)) {
+    throw new Error("非法 jobId");
+  }
+  return imageStudioJson(`/api/agent/job/${jobId}`, { method: "DELETE" });
+});
+
+ipcMain.handle("image-studio:supervisor-fetch-image", async (_event, payload) => {
+  const jobId = typeof payload?.jobId === "string" ? payload.jobId : "";
+  const slot = Number(payload?.slot);
+  if (!SUPERVISOR_JOB_ID_RE.test(jobId) || !Number.isInteger(slot)) {
+    throw new Error("非法 jobId/slot");
+  }
+  // slot 文件扩展名不固定（main 图存 png，其余存 jpeg），逐个探测
+  for (const ext of SUPERVISOR_SLOT_EXTS) {
+    const resp = await imageStudioFetch(`/api/agent/job/${jobId}/file/slots/slot_${slot}.${ext}`, { method: "GET" });
+    if (resp.ok) {
+      const buf = Buffer.from(await resp.arrayBuffer());
+      const mime = resp.headers.get("content-type") || `image/${ext === "jpg" ? "jpeg" : ext}`;
+      return { slot, dataUrl: `data:${mime};base64,${buf.toString("base64")}` };
+    }
+    // 消费掉响应体，避免连接挂起
+    try { await resp.arrayBuffer(); } catch {}
+  }
+  return { slot, dataUrl: null };
+});
+
 ipcMain.handle("image-studio:start-generate", async (event, payload) => {
   const jobId = typeof payload?.jobId === "string" && payload.jobId
     ? payload.jobId
