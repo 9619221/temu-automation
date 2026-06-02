@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Table, Tag, Typography, message } from "antd";
+import { Alert, Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Table, Tag, Tooltip, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { PlusOutlined, ReloadOutlined } from "@ant-design/icons";
+import { CloudDownloadOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import { useErpAuth } from "../contexts/ErpAuthContext";
 import { canRole } from "../utils/erpUi";
 
@@ -19,6 +19,10 @@ interface TemuOpenApiBinding {
   status: string;
   authorizedAt?: string;
   updatedAt?: string;
+  productSyncCount?: number;
+  lastProductSyncAt?: string;
+  lastProductSyncStatus?: string;
+  lastProductSyncError?: string;
 }
 
 const REGION_OPTIONS = [
@@ -104,6 +108,31 @@ export default function TemuAuthManager() {
     }
   };
 
+  const handleSyncProducts = async (row?: TemuOpenApiBinding) => {
+    if (!erp?.temuOpenApi) {
+      message.error("当前运行的应用未加载该功能，请完全重启应用");
+      return;
+    }
+    const key = row ? `sync:${row.mallId}` : "sync:all";
+    setSubmitting(key);
+    try {
+      const res = await erp.temuOpenApi.syncProducts(row ? { mallId: row.mallId } : {});
+      const ok = (res?.results || []).filter((r: any) => r?.ok);
+      const failed = (res?.results || []).filter((r: any) => r && r.ok === false);
+      const total = ok.reduce((sum: number, r: any) => sum + (r.productCount || 0), 0);
+      if (failed.length) {
+        message.warning(`采集完成：成功 ${ok.length} 店（${total} 商品），失败 ${failed.length} 店`);
+      } else {
+        message.success(`采集完成：${ok.length} 店，共 ${total} 个商品`);
+      }
+      await load();
+    } catch (error: any) {
+      message.error(error?.message || "采集失败");
+    } finally {
+      setSubmitting(null);
+    }
+  };
+
   const columns: ColumnsType<TemuOpenApiBinding> = [
     {
       title: "店铺",
@@ -151,12 +180,45 @@ export default function TemuAuthManager() {
       width: 180,
       render: (value) => (value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "-"),
     },
+    {
+      title: "商品采集",
+      key: "productSync",
+      width: 200,
+      render: (_value, row) => {
+        if (!row.lastProductSyncAt) {
+          return <span style={{ color: "#98a2b3" }}>未采集</span>;
+        }
+        const time = new Date(row.lastProductSyncAt).toLocaleString("zh-CN", { hour12: false });
+        return (
+          <Space direction="vertical" size={0}>
+            <Space size={4}>
+              <span>{row.productSyncCount || 0} 商品</span>
+              {row.lastProductSyncStatus === "error" ? (
+                <Tooltip title={row.lastProductSyncError || "采集失败"}>
+                  <Tag color="error">失败</Tag>
+                </Tooltip>
+              ) : null}
+            </Space>
+            <span style={{ color: "#667085", fontSize: 12 }}>{time}</span>
+          </Space>
+        );
+      },
+    },
     ...(canManage ? [{
       title: "操作",
       key: "actions",
-      width: 190,
+      width: 270,
       render: (_value: unknown, row: TemuOpenApiBinding) => (
         <Space size={6}>
+          <Button
+            size="small"
+            type="primary"
+            ghost
+            loading={submitting === `sync:${row.mallId}`}
+            onClick={() => handleSyncProducts(row)}
+          >
+            立即采集
+          </Button>
           <Button
             size="small"
             onClick={() => {
@@ -204,6 +266,15 @@ export default function TemuAuthManager() {
             <Button icon={<ReloadOutlined />} onClick={() => void load()} loading={loading}>
               刷新
             </Button>
+            {canManage && bindings.length > 0 ? (
+              <Button
+                icon={<CloudDownloadOutlined />}
+                loading={submitting === "sync:all"}
+                onClick={() => handleSyncProducts()}
+              >
+                全部采集商品
+              </Button>
+            ) : null}
             {canManage ? (
               <Button type="primary" icon={<PlusOutlined />} onClick={openBindModal}>
                 绑定授权

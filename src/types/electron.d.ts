@@ -534,6 +534,10 @@ interface TemuOpenApiBinding {
   status: string;
   authorizedAt: string;
   updatedAt: string;
+  productSyncCount?: number;
+  lastProductSyncAt?: string;
+  lastProductSyncStatus?: string;
+  lastProductSyncError?: string;
 }
 
 interface ErpAPI {
@@ -579,6 +583,12 @@ interface ErpAPI {
       appSecret?: string;
     }) => Promise<TemuOpenApiBinding>;
     unbind: (payload: { mallId: string }) => Promise<{ ok: boolean; mallId: string }>;
+    syncProducts: (payload?: { mallId?: string }) => Promise<{ malls: number; results: any[] }>;
+    listProducts: (payload?: { mallId?: string; limit?: number; offset?: number }) => Promise<{
+      counts?: { mallId: string; productCount: number }[];
+      products?: any[];
+      total?: number;
+    }>;
   };
   user: {
     list: (params?: ErpListParams) => Promise<any[]>;

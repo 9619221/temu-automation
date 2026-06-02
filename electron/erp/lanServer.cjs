@@ -51,6 +51,8 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/temu/openapi/status": ["admin", "manager", "buyer"],
   "/api/temu/openapi/bind": ["admin", "manager"],
   "/api/temu/openapi/unbind": ["admin", "manager"],
+  "/api/temu/openapi/products/sync": ["admin", "manager"],
+  "/api/temu/openapi/products": ["admin", "manager", "buyer"],
   "/purchase": ["admin", "manager", "operations", "buyer", "finance"],
   "/api/purchase/workbench": ["admin", "manager", "operations", "buyer", "finance"],
   "/api/purchase/requests": ["admin", "manager", "operations", "buyer", "finance"],
@@ -3542,6 +3544,10 @@ function createRequestHandler(options = {}) {
   const unbindTemuOpenApiMall = options.unbindTemuOpenApiMall || (() => {
     throw new Error("Temu OpenAPI unbind handler is not available");
   });
+  const syncTemuOpenApiProducts = options.syncTemuOpenApiProducts || (() => {
+    throw new Error("Temu OpenAPI product sync handler is not available");
+  });
+  const listTemuOpenApiProducts = options.listTemuOpenApiProducts || (() => ({ counts: [] }));
   const ingestJushuitanExtensionBatch = options.ingestJushuitanExtensionBatch || null;
   const validateSessionUser = options.validateSessionUser || null;
   const verifyLogin = options.verifyLogin || (() => null);
@@ -3612,6 +3618,8 @@ function createRequestHandler(options = {}) {
       bindTemuOpenApiMall,
       listTemuOpenApiMalls,
       unbindTemuOpenApiMall,
+      syncTemuOpenApiProducts,
+      listTemuOpenApiProducts,
       validateSessionUser,
       verifyLogin,
     }).catch((error) => {
@@ -4585,6 +4593,8 @@ async function handleRequest({
   bindTemuOpenApiMall,
   listTemuOpenApiMalls,
   unbindTemuOpenApiMall,
+  syncTemuOpenApiProducts,
+  listTemuOpenApiProducts,
   validateSessionUser,
   verifyLogin,
 }) {
@@ -5156,6 +5166,32 @@ async function handleRequest({
       try {
         const payload = await readLoginPayload(req);
         const result = await unbindTemuOpenApiMall(payload, session.user);
+        writeJson(res, 200, { ok: true, ...result });
+      } catch (error) {
+        writeJson(res, 400, { ok: false, error: error?.message || String(error) });
+      }
+      return;
+    }
+
+    if (pathname === "/api/temu/openapi/products/sync") {
+      if (req.method !== "POST") {
+        writeJson(res, 405, { ok: false, error: "Method not allowed" });
+        return;
+      }
+      try {
+        const payload = await readLoginPayload(req);
+        const result = await syncTemuOpenApiProducts(payload, session.user);
+        writeJson(res, 200, { ok: true, ...result });
+      } catch (error) {
+        writeJson(res, 400, { ok: false, error: error?.message || String(error) });
+      }
+      return;
+    }
+
+    if (pathname === "/api/temu/openapi/products") {
+      try {
+        const mallId = new URL(req.url, "http://localhost").searchParams.get("mallId") || "";
+        const result = listTemuOpenApiProducts({ mallId }, session.user);
         writeJson(res, 200, { ok: true, ...result });
       } catch (error) {
         writeJson(res, 400, { ok: false, error: error?.message || String(error) });

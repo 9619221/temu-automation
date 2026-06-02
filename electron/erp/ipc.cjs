@@ -54,6 +54,7 @@ const {
   normalize1688SearchResponse,
 } = require("./1688Client.cjs");
 const { validateTemuOpenApiToken, resolveTemuAppCredentials } = require("./temuOpenApiClient.cjs");
+const temuOpenApiProductSync = require("./services/temuOpenApiProductSync.cjs");
 const {
   imageSearchProduct: imageSearchAlphaShopProduct,
   productDetailQuery: alphaShopProductDetailQuery,
@@ -2465,6 +2466,10 @@ function toTemuOpenApiStatus(row) {
     status: row.status,
     authorizedAt: row.authorized_at || "",
     updatedAt: row.updated_at || "",
+    productSyncCount: Number(row.product_sync_count || 0),
+    lastProductSyncAt: row.last_product_sync_at || "",
+    lastProductSyncStatus: row.last_product_sync_status || "",
+    lastProductSyncError: row.last_product_sync_error || "",
   };
 }
 
@@ -2617,6 +2622,71 @@ async function unbindTemuOpenApiMallRuntime(payload = {}, actor = {}) {
     return { ok: response.ok, mallId: response.mallId };
   }
   return unbindTemuOpenApiMall(payload || {}, actor);
+}
+
+// ===== TEMU 官方商品主数据采集（bg.glo.goods.list.get）=====
+
+/** 手动触发采集：带 mallId 只采一店，否则全量。 */
+async function syncTemuOpenApiProducts(payload = {}, actor = {}) {
+  assertActorRole(actor, ["admin", "manager"], "采集 Temu 官方商品");
+  const { db } = requireErp();
+  const mallId = optionalString(payload.mallId || payload.mall_id);
+  if (mallId) {
+    const row = db.prepare("SELECT * FROM erp_temu_openapi_auth WHERE mall_id = ? AND status = 'active'").get(mallId);
+    if (!row) throw new Error(`未找到已绑定的店铺：${mallId}`);
+    try {
+      return { malls: 1, results: [{ ok: true, ...(await temuOpenApiProductSync.syncOneMall(db, row)) }] };
+    } catch (e) {
+      const msg = String((e && e.message) || e).slice(0, 1000);
+      db.prepare(`
+        UPDATE erp_temu_openapi_auth
+        SET last_product_sync_status='error', last_product_sync_error=?, updated_at=?
+        WHERE mall_id=?
+      `).run(msg, nowIso(), mallId);
+      throw new Error(`采集失败：${msg}`);
+    }
+  }
+  return temuOpenApiProductSync.syncAllMalls(db);
+}
+
+/** 读取已采集商品：不带 mallId 返回按店计数；带 mallId 返回分页明细。 */
+function listTemuOpenApiProducts(payload = {}, actor = {}) {
+  assertActorRole(actor, ["admin", "manager", "buyer"], "查看 Temu 官方商品");
+  const { db } = requireErp();
+  const mallId = optionalString(payload.mallId || payload.mall_id);
+  if (!mallId) {
+    const counts = db.prepare(`
+      SELECT mall_id AS mallId, COUNT(*) AS productCount
+      FROM erp_temu_openapi_products GROUP BY mall_id
+    `).all();
+    return { counts };
+  }
+  const limit = Math.min(Math.max(Number(payload.limit) || 50, 1), 500);
+  const offset = Math.max(Number(payload.offset) || 0, 0);
+  const products = db.prepare(`
+    SELECT * FROM erp_temu_openapi_products WHERE mall_id = ?
+    ORDER BY updated_at DESC LIMIT ? OFFSET ?
+  `).all(mallId, limit, offset);
+  const total = db.prepare("SELECT COUNT(*) AS n FROM erp_temu_openapi_products WHERE mall_id = ?").get(mallId).n;
+  return { products, total, limit, offset };
+}
+
+async function syncTemuOpenApiProductsRuntime(payload = {}, actor = {}) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    return await remoteRequest("/api/temu/openapi/products/sync", { method: "POST", body: payload || {} });
+  }
+  return syncTemuOpenApiProducts(payload || {}, actor);
+}
+
+async function listTemuOpenApiProductsRuntime(payload = {}, actor = {}) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    const mallId = optionalString(payload?.mallId || payload?.mall_id);
+    const qs = mallId ? `?mallId=${encodeURIComponent(mallId)}` : "";
+    return await remoteRequest("/api/temu/openapi/products" + qs, { method: "GET" });
+  }
+  return listTemuOpenApiProducts(payload || {}, actor);
 }
 
 function create1688AuthorizeUrl(payload = {}, actor = {}) {
@@ -21234,6 +21304,8 @@ function startLanService(payload = {}) {
     bindTemuOpenApiMall,
     listTemuOpenApiMalls,
     unbindTemuOpenApiMall,
+    syncTemuOpenApiProducts,
+    listTemuOpenApiProducts,
     ingestJushuitanExtensionBatch,
   });
 }
@@ -21430,6 +21502,8 @@ async function startErpHeadlessServer(options = {}) {
     bindTemuOpenApiMall,
     listTemuOpenApiMalls,
     unbindTemuOpenApiMall,
+    syncTemuOpenApiProducts,
+    listTemuOpenApiProducts,
     ingestJushuitanExtensionBatch,
   });
   const auto1688OrderSync = startAuto1688OrderSync(env);
@@ -21726,6 +21800,8 @@ function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:temu-openapi:bind", (_event, payload) => bindTemuOpenApiMallRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:temu-openapi:list", () => listTemuOpenApiMallsRuntime(erpState.currentUser || {}));
   ipcMain.handle("erp:temu-openapi:unbind", (_event, payload) => unbindTemuOpenApiMallRuntime(payload || {}, erpState.currentUser || {}));
+  ipcMain.handle("erp:temu-openapi:products-sync", (_event, payload) => syncTemuOpenApiProductsRuntime(payload || {}, erpState.currentUser || {}));
+  ipcMain.handle("erp:temu-openapi:products-list", (_event, payload) => listTemuOpenApiProductsRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:user:list", (_event, params) => {
     if (!shouldUseClientRuntime()) assertHostMode("用户管理");
     return listUsersRuntime(params || {});
