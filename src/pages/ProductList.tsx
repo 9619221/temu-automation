@@ -995,7 +995,63 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, messageText: str
   });
 }
 
+// 独立拉取官方 API 全店商品 → SkcRow 形状（不受抓包云端成败影响）。
+async function fetchOfficialSkcRows(): Promise<SkcRow[]> {
+  try {
+    const officialApi = (window.electronAPI as any)?.erp?.temuOpenApi;
+    if (!officialApi?.listProductsAsSkc) return [];
+    const res = await officialApi.listProductsAsSkc();
+    return (Array.isArray(res?.rows) ? res.rows : [])
+      .filter((r: any) => r && r.skc_id && r.mall_id)
+      .map((r: any) => ({
+        skc_id: String(r.skc_id),
+        product_id: r.product_id != null ? String(r.product_id) : null,
+        mall_id: String(r.mall_id),
+        site: null,
+        title: r.title || null,
+        category_name: null,
+        status: null,
+        thumb_url: r.thumb_url || null,
+        declared_price_cents: null,
+        suggested_price_cents: null,
+        price_currency: null,
+        sales_total: null,
+        stock_available: null,
+        last_updated_at: r.updated_at ? (Date.parse(r.updated_at) || 0) : 0,
+        ext_code: r.ext_code || null, // 官方货号(运行时附加)，供 applyCloudProduct 回填 product.extCode
+      } as unknown as SkcRow));
+  } catch {
+    return [];
+  }
+}
+
+// 把官方商品并入 bundle 作底（官方为主，抓包 skcRows 仅保留官方未覆盖的；销量/流量仍按 mall|skc enrich）。
+function mergeOfficialIntoBundle(bundle: CloudProductBundle, officialSkcRows: SkcRow[]): CloudProductBundle {
+  if (!officialSkcRows.length) return bundle;
+  const officialKeys = new Set(officialSkcRows.map((r) => cloudKeyFromSkc(r)));
+  const captureOnly = bundle.skcRows.filter((row) => !officialKeys.has(cloudKeyFromSkc(row)));
+  return hydrateCloudProductBundle({
+    skcRows: [...officialSkcRows, ...captureOnly],
+    salesRows: bundle.salesRows,
+    activityRows: bundle.activityRows,
+    riskRows: bundle.riskRows,
+    stockOrderRows: bundle.stockOrderRows,
+    afterSaleRows: bundle.afterSaleRows,
+    shopSales: bundle.shopSales,
+    latestAt: bundle.latestAt,
+  }, { configured: true, error: bundle.error });
+}
+
+// 官方商品作底 + 抓包 enrich。官方独立拉取，云端成败都把官方并进去。
 async function loadCloudProductBundle(): Promise<CloudProductBundle> {
+  const [bundle, officialSkcRows] = await Promise.all([
+    loadCloudProductBundleRaw(),
+    fetchOfficialSkcRows(),
+  ]);
+  return mergeOfficialIntoBundle(bundle, officialSkcRows);
+}
+
+async function loadCloudProductBundleRaw(): Promise<CloudProductBundle> {
   const empty = hydrateCloudProductBundle({}, { configured: false });
 
   try {
@@ -1022,39 +1078,7 @@ async function loadCloudProductBundle(): Promise<CloudProductBundle> {
         .filter((row) => isDiagnosticCloudProduct(row, null))
         .map((row) => cloudKeyFromSkc(row)),
     );
-    const captureSkcRows = rawSkcRows.filter((row) => !isDiagnosticCloudProduct(row, null));
-    // === 融入官方 API 商品作底列表（官方为主，抓包销量/流量按 mall|skc 叠加）===
-    // 官方商品转 SkcRow 形状；抓包 skcRows 仅保留官方未覆盖的（按 mall|skc 去重）。
-    // 抓包的销量/价格/库存/活动/流量仍由 salesRows 等按同 key enrich，不丢失。
-    let officialSkcRows: SkcRow[] = [];
-    try {
-      const officialApi = (window.electronAPI as any)?.erp?.temuOpenApi;
-      if (officialApi?.listProductsAsSkc) {
-        const officialRes = await officialApi.listProductsAsSkc();
-        officialSkcRows = (Array.isArray(officialRes?.rows) ? officialRes.rows : [])
-          .filter((r: any) => r && r.skc_id && r.mall_id)
-          .map((r: any) => ({
-            skc_id: String(r.skc_id),
-            product_id: r.product_id != null ? String(r.product_id) : null,
-            mall_id: String(r.mall_id),
-            site: null,
-            title: r.title || null,
-            category_name: null,
-            status: null,
-            thumb_url: r.thumb_url || null,
-            declared_price_cents: null,
-            suggested_price_cents: null,
-            price_currency: null,
-            sales_total: null,
-            stock_available: null,
-            last_updated_at: r.updated_at ? (Date.parse(r.updated_at) || 0) : 0,
-          } as SkcRow));
-      }
-    } catch { /* 官方读取失败不影响抓包数据 */ }
-    const officialKeys = new Set(officialSkcRows.map((r) => cloudKeyFromSkc(r)));
-    const skcRows = officialSkcRows.length
-      ? [...officialSkcRows, ...captureSkcRows.filter((row) => !officialKeys.has(cloudKeyFromSkc(row)))]
-      : captureSkcRows;
+    const skcRows = rawSkcRows.filter((row) => !isDiagnosticCloudProduct(row, null));
     const salesRows = (Array.isArray(sales?.rows) ? sales.rows : []).filter((row) => (
       !isDiagnosticCloudProduct(null, row) && !diagnosticSkcIds.has(cloudKeyFromSales(row))
     ));
@@ -1337,7 +1361,7 @@ function applyCloudProduct(
   product.spuId = firstCloudValue<string>(sales?.product_id, skc?.product_id, raw.productId, raw.productSpuId, raw.spuId) || product.spuId;
   product.goodsId = firstCloudValue<string>(sales?.goods_id, raw.goodsId) || product.goodsId;
   product.sku = firstCloudValue<string>(rawSku.skuExtCode, rawSku.productSkuId, raw.skuCode) || product.sku;
-  product.extCode = firstCloudValue<string>(sales?.sku_ext_code, raw.skcExtCode, rawSku.skuExtCode) || product.extCode;
+  product.extCode = firstCloudValue<string>(sales?.sku_ext_code, raw.skcExtCode, rawSku.skuExtCode, (skc as any)?.ext_code) || product.extCode;
   product.skuId = firstCloudValue<string>(rawSku.productSkuId, raw.productSkuId) || product.skuId;
   product.skuName = firstCloudValue<string>(rawSku.className, rawSku.specName, raw.skuName) || product.skuName;
   product.imageUrl = imageUrl || product.imageUrl;
@@ -4568,19 +4592,27 @@ export default function ProductList() {
       title: "货号",
       key: "skuExtCode",
       width: 140,
-      render: (_: any, record: any) => (
-        <div className="sku-stack">
-          {(record._skuRows || []).map((s: any) => (
-            <div className={`sku-cell${s._isTotal ? " sku-cell-total" : ""}`} key={s._skuKey}>
-              {s._isTotal
-                ? <span style={{ color: "#bfbfbf" }}>—</span>
-                : s.skuExtCode
-                  ? <span style={{ fontSize: 13, color: "#262626", fontFamily: "monospace" }}>{s.skuExtCode}</span>
-                  : <span style={{ color: "#bfbfbf" }}>-</span>}
-            </div>
-          ))}
-        </div>
-      ),
+      render: (_: any, record: any) => {
+        const skuRows = record._skuRows || [];
+        const hasSkuExt = skuRows.some((s: any) => !s._isTotal && s.skuExtCode);
+        // 官方商品无 SKU 级货号子行时，用商品级代表货号 record.extCode 兜底显示
+        if (!hasSkuExt && record.extCode) {
+          return <span style={{ fontSize: 13, color: "#262626", fontFamily: "monospace" }}>{record.extCode}</span>;
+        }
+        return (
+          <div className="sku-stack">
+            {skuRows.map((s: any) => (
+              <div className={`sku-cell${s._isTotal ? " sku-cell-total" : ""}`} key={s._skuKey}>
+                {s._isTotal
+                  ? <span style={{ color: "#bfbfbf" }}>—</span>
+                  : s.skuExtCode
+                    ? <span style={{ fontSize: 13, color: "#262626", fontFamily: "monospace" }}>{s.skuExtCode}</span>
+                    : <span style={{ color: "#bfbfbf" }}>-</span>}
+              </div>
+            ))}
+          </div>
+        );
+      },
     },
     {
       title: "申报价格",

@@ -2734,7 +2734,12 @@ function listAllTemuOpenApiProductsAsSkc(payload = {}, actor = {}) {
            json_extract(p.raw_json, '$.productSkcId') AS skc_id,
            p.product_name AS title,
            json_extract(p.raw_json, '$.mainImageUrl') AS thumb_url,
-           json_extract(p.raw_json, '$.extCode') AS ext_code,
+           COALESCE(
+             NULLIF(json_extract(p.raw_json, '$.extCode'), ''),
+             (SELECT s.ext_code FROM erp_temu_openapi_skus s
+              WHERE s.mall_id = p.mall_id AND s.product_id = p.product_id
+                AND s.ext_code IS NOT NULL AND s.ext_code <> '' LIMIT 1)
+           ) AS ext_code,
            p.sku_count AS sku_count,
            p.updated_at AS updated_at
     FROM erp_temu_openapi_products p
