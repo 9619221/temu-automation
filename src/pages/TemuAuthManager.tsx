@@ -116,18 +116,16 @@ export default function TemuAuthManager() {
     const key = row ? `sync:${row.mallId}` : "sync:all";
     setSubmitting(key);
     try {
-      const res = await erp.temuOpenApi.syncProducts(row ? { mallId: row.mallId } : {});
-      const ok = (res?.results || []).filter((r: any) => r?.ok);
-      const failed = (res?.results || []).filter((r: any) => r && r.ok === false);
-      const total = ok.reduce((sum: number, r: any) => sum + (r.productCount || 0), 0);
-      if (failed.length) {
-        message.warning(`采集完成：成功 ${ok.length} 店（${total} 商品），失败 ${failed.length} 店`);
+      const res: any = await erp.temuOpenApi.syncProducts(row ? { mallId: row.mallId } : {});
+      if (res?.started === false && res?.running) {
+        message.info(res.message || "该采集任务正在进行中，请稍候");
       } else {
-        message.success(`采集完成：${ok.length} 店，共 ${total} 个商品`);
+        message.success("采集已在后台开始（约 1 分钟），完成后自动刷新查看");
+        // 采集在服务器后台跑，延迟几次刷新拉取最新采集状态
+        [15000, 35000, 65000].forEach((ms) => setTimeout(() => { void load(); }, ms));
       }
-      await load();
     } catch (error: any) {
-      message.error(error?.message || "采集失败");
+      message.error(error?.message || "采集触发失败");
     } finally {
       setSubmitting(null);
     }
@@ -213,7 +211,6 @@ export default function TemuAuthManager() {
           <Button
             size="small"
             type="primary"
-            ghost
             loading={submitting === `sync:${row.mallId}`}
             onClick={() => handleSyncProducts(row)}
           >

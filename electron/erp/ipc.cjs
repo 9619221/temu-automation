@@ -2626,27 +2626,52 @@ async function unbindTemuOpenApiMallRuntime(payload = {}, actor = {}) {
 
 // ===== TEMU 官方商品主数据采集（bg.glo.goods.list.get）=====
 
-/** 手动触发采集：带 mallId 只采一店，否则全量。 */
-async function syncTemuOpenApiProducts(payload = {}, actor = {}) {
+// 采集是耗时操作（数十秒~分钟），同步等待会超 client 超时。改为后台触发：
+// 立即返回 started，采集在服务器后台跑并回写 erp_temu_openapi_auth 采集状态，前端轮询/刷新查看。
+const temuProductSyncInFlight = new Set();
+
+/** 手动触发采集：带 mallId 只采一店，否则全量。后台运行，立即返回。 */
+function syncTemuOpenApiProducts(payload = {}, actor = {}) {
   assertActorRole(actor, ["admin", "manager"], "采集 Temu 官方商品");
   const { db } = requireErp();
   const mallId = optionalString(payload.mallId || payload.mall_id);
-  if (mallId) {
-    const row = db.prepare("SELECT * FROM erp_temu_openapi_auth WHERE mall_id = ? AND status = 'active'").get(mallId);
-    if (!row) throw new Error(`未找到已绑定的店铺：${mallId}`);
-    try {
-      return { malls: 1, results: [{ ok: true, ...(await temuOpenApiProductSync.syncOneMall(db, row)) }] };
-    } catch (e) {
-      const msg = String((e && e.message) || e).slice(0, 1000);
-      db.prepare(`
-        UPDATE erp_temu_openapi_auth
-        SET last_product_sync_status='error', last_product_sync_error=?, updated_at=?
-        WHERE mall_id=?
-      `).run(msg, nowIso(), mallId);
-      throw new Error(`采集失败：${msg}`);
-    }
+  const key = mallId || "__all__";
+
+  if (temuProductSyncInFlight.has(key)) {
+    return { started: false, running: true, mallId: mallId || null, message: "该采集任务正在进行中" };
   }
-  return temuOpenApiProductSync.syncAllMalls(db);
+
+  let target = null;
+  if (mallId) {
+    target = db.prepare("SELECT * FROM erp_temu_openapi_auth WHERE mall_id = ? AND status = 'active'").get(mallId);
+    if (!target) throw new Error(`未找到已绑定的店铺：${mallId}`);
+  }
+
+  temuProductSyncInFlight.add(key);
+  // 后台跑，不阻塞 HTTP 响应；状态/错误由 service 回写到 erp_temu_openapi_auth
+  Promise.resolve()
+    .then(async () => {
+      if (mallId) {
+        try {
+          await temuOpenApiProductSync.syncOneMall(db, target);
+        } catch (e) {
+          const msg = String((e && e.message) || e).slice(0, 1000);
+          try {
+            db.prepare(`
+              UPDATE erp_temu_openapi_auth
+              SET last_product_sync_status='error', last_product_sync_error=?, updated_at=?
+              WHERE mall_id=?
+            `).run(msg, nowIso(), mallId);
+          } catch { /* ignore */ }
+        }
+      } else {
+        await temuOpenApiProductSync.syncAllMalls(db);
+      }
+    })
+    .catch(() => { /* 已在内部回写错误状态 */ })
+    .finally(() => { temuProductSyncInFlight.delete(key); });
+
+  return { started: true, mallId: mallId || null };
 }
 
 /** 读取已采集商品：不带 mallId 返回按店计数；带 mallId 返回分页明细。 */
