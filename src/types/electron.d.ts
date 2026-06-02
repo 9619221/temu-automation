@@ -594,6 +594,7 @@ interface ErpAPI {
       total?: number;
     }>;
     listProductsAsSkc: () => Promise<{ rows: any[] }>;
+    listSales: () => Promise<{ rows: any[] }>;
   };
   user: {
     list: (params?: ErpListParams) => Promise<any[]>;

@@ -54,6 +54,7 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/temu/openapi/products/sync": ["admin", "manager"],
   "/api/temu/openapi/products": ["admin", "manager", "buyer"],
   "/api/temu/openapi/products/skc": ["admin", "manager", "operations", "buyer", "viewer", "finance"],
+  "/api/temu/openapi/sales": ["admin", "manager", "operations", "buyer", "viewer", "finance"],
   "/purchase": ["admin", "manager", "operations", "buyer", "finance"],
   "/api/purchase/workbench": ["admin", "manager", "operations", "buyer", "finance"],
   "/api/purchase/requests": ["admin", "manager", "operations", "buyer", "finance"],
@@ -3550,6 +3551,7 @@ function createRequestHandler(options = {}) {
   });
   const listTemuOpenApiProducts = options.listTemuOpenApiProducts || (() => ({ counts: [] }));
   const listAllTemuOpenApiProductsAsSkc = options.listAllTemuOpenApiProductsAsSkc || (() => ({ rows: [] }));
+  const listAllTemuOpenApiSales = options.listAllTemuOpenApiSales || (() => ({ rows: [] }));
   const ingestJushuitanExtensionBatch = options.ingestJushuitanExtensionBatch || null;
   const validateSessionUser = options.validateSessionUser || null;
   const verifyLogin = options.verifyLogin || (() => null);
@@ -3623,6 +3625,7 @@ function createRequestHandler(options = {}) {
       syncTemuOpenApiProducts,
       listTemuOpenApiProducts,
       listAllTemuOpenApiProductsAsSkc,
+      listAllTemuOpenApiSales,
       validateSessionUser,
       verifyLogin,
     }).catch((error) => {
@@ -4599,6 +4602,7 @@ async function handleRequest({
   syncTemuOpenApiProducts,
   listTemuOpenApiProducts,
   listAllTemuOpenApiProductsAsSkc,
+  listAllTemuOpenApiSales,
   validateSessionUser,
   verifyLogin,
 }) {
@@ -5195,6 +5199,16 @@ async function handleRequest({
     if (pathname === "/api/temu/openapi/products/skc") {
       try {
         const result = listAllTemuOpenApiProductsAsSkc({}, session.user);
+        writeJson(res, 200, { ok: true, ...result });
+      } catch (error) {
+        writeJson(res, 400, { ok: false, error: error?.message || String(error) });
+      }
+      return;
+    }
+
+    if (pathname === "/api/temu/openapi/sales") {
+      try {
+        const result = listAllTemuOpenApiSales({}, session.user);
         writeJson(res, 200, { ok: true, ...result });
       } catch (error) {
         writeJson(res, 400, { ok: false, error: error?.message || String(error) });

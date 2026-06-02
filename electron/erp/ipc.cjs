@@ -2765,6 +2765,55 @@ async function listAllTemuOpenApiProductsAsSkcRuntime(payload = {}, actor = {}) 
   return listAllTemuOpenApiProductsAsSkc(payload || {}, actor);
 }
 
+/** 全店官方销量(salesv2) → TemuSalesRow 形状（按 mall|skc enrich 销量/库存/缺货/规格/货号）。 */
+function listAllTemuOpenApiSales(payload = {}, actor = {}) {
+  assertActorRole(actor, ["admin", "manager", "operations", "buyer", "viewer", "finance"], "查看 Temu 官方销量");
+  const { db } = requireErp();
+  const records = db.prepare(`
+    SELECT r.mall_id, r.product_skc_id, r.raw_json
+    FROM erp_temu_openapi_records r
+    JOIN erp_temu_openapi_auth a ON a.mall_id = r.mall_id AND a.status = 'active'
+    WHERE r.source = 'sales'
+  `).all();
+  const SKU_FIELDS = ["productSkuId", "skuExtCode", "className", "supplierPrice",
+    "todaySaleVolume", "lastSevenDaysSaleVolume", "lastThirtyDaysSaleVolume", "totalSaleVolume",
+    "lackQuantity", "adviceQuantity", "inventoryNumInfo", "availableSaleDays", "priceReviewStatus"];
+  const rows = [];
+  for (const rec of records) {
+    let raw;
+    try { raw = JSON.parse(rec.raw_json); } catch { continue; }
+    const skus = Array.isArray(raw.skuQuantityDetailList) ? raw.skuQuantityDetailList : [];
+    let today = 0, d7 = 0, d30 = 0, total = 0;
+    const slim = skus.map((s) => {
+      today += Number(s.todaySaleVolume) || 0;
+      d7 += Number(s.lastSevenDaysSaleVolume) || 0;
+      d30 += Number(s.lastThirtyDaysSaleVolume) || 0;
+      total += Number(s.totalSaleVolume) || 0;
+      const o = {};
+      for (const f of SKU_FIELDS) if (s[f] !== undefined && s[f] !== null) o[f] = s[f];
+      return o;
+    });
+    rows.push({
+      skc_id: rec.product_skc_id,
+      mall_supplier_id: rec.mall_id,
+      today_sales: today,
+      last7d_sales: d7,
+      last30d_sales: d30,
+      total_sales: total,
+      raw_item: { skuQuantityDetailList: slim, productName: raw.productName, supplyStatus: raw.supplyStatus },
+    });
+  }
+  return { rows };
+}
+
+async function listAllTemuOpenApiSalesRuntime(payload = {}, actor = {}) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    return await remoteRequest("/api/temu/openapi/sales", { method: "GET" });
+  }
+  return listAllTemuOpenApiSales(payload || {}, actor);
+}
+
 function create1688AuthorizeUrl(payload = {}, actor = {}) {
   let savedStatus = null;
   if (payload.appKey || payload.app_key || payload.appSecret || payload.app_secret || payload.redirectUri || payload.redirect_uri) {
@@ -21383,6 +21432,7 @@ function startLanService(payload = {}) {
     syncTemuOpenApiProducts,
     listTemuOpenApiProducts,
     listAllTemuOpenApiProductsAsSkc,
+    listAllTemuOpenApiSales,
     ingestJushuitanExtensionBatch,
   });
 }
@@ -21582,6 +21632,7 @@ async function startErpHeadlessServer(options = {}) {
     syncTemuOpenApiProducts,
     listTemuOpenApiProducts,
     listAllTemuOpenApiProductsAsSkc,
+    listAllTemuOpenApiSales,
     ingestJushuitanExtensionBatch,
   });
   const auto1688OrderSync = startAuto1688OrderSync(env);
@@ -21881,6 +21932,7 @@ function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:temu-openapi:products-sync", (_event, payload) => syncTemuOpenApiProductsRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:temu-openapi:products-list", (_event, payload) => listTemuOpenApiProductsRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:temu-openapi:products-skc", (_event, payload) => listAllTemuOpenApiProductsAsSkcRuntime(payload || {}, erpState.currentUser || {}));
+  ipcMain.handle("erp:temu-openapi:sales", (_event, payload) => listAllTemuOpenApiSalesRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:user:list", (_event, params) => {
     if (!shouldUseClientRuntime()) assertHostMode("用户管理");
     return listUsersRuntime(params || {});

@@ -1028,14 +1028,42 @@ async function fetchOfficialSkcRows(): Promise<SkcRow[]> {
   }
 }
 
-// 把官方商品并入 bundle 作底（官方为主，抓包 skcRows 仅保留官方未覆盖的；销量/流量仍按 mall|skc enrich）。
-function mergeOfficialIntoBundle(bundle: CloudProductBundle, officialSkcRows: SkcRow[]): CloudProductBundle {
-  if (!officialSkcRows.length) return bundle;
-  const officialKeys = new Set(officialSkcRows.map((r) => cloudKeyFromSkc(r)));
-  const captureOnly = bundle.skcRows.filter((row) => !officialKeys.has(cloudKeyFromSkc(row)));
+// 独立拉取官方 salesv2 销量 → TemuSalesRow 形状（含 raw_item.skuQuantityDetailList 销量/货号/规格/库存）。
+async function fetchOfficialSales(): Promise<TemuSalesRow[]> {
+  try {
+    const officialApi = (window.electronAPI as any)?.erp?.temuOpenApi;
+    if (!officialApi?.listSales) return [];
+    const res = await officialApi.listSales();
+    return (Array.isArray(res?.rows) ? res.rows : [])
+      .filter((r: any) => r && r.skc_id && r.mall_supplier_id)
+      .map((r: any) => ({
+        skc_id: String(r.skc_id),
+        mall_supplier_id: String(r.mall_supplier_id),
+        today_sales: r.today_sales ?? null,
+        last7d_sales: r.last7d_sales ?? null,
+        last30d_sales: r.last30d_sales ?? null,
+        total_sales: r.total_sales ?? null,
+        raw_item: r.raw_item || null,
+      } as unknown as TemuSalesRow));
+  } catch {
+    return [];
+  }
+}
+
+// 把官方商品/销量并入 bundle 作底（官方为主，抓包仅保留官方未覆盖的；官方 salesv2 提供销量/库存/货号/规格）。
+function mergeOfficialIntoBundle(
+  bundle: CloudProductBundle,
+  officialSkcRows: SkcRow[],
+  officialSalesRows: TemuSalesRow[],
+): CloudProductBundle {
+  if (!officialSkcRows.length && !officialSalesRows.length) return bundle;
+  const officialSkcKeys = new Set(officialSkcRows.map((r) => cloudKeyFromSkc(r)));
+  const captureSkcOnly = bundle.skcRows.filter((row) => !officialSkcKeys.has(cloudKeyFromSkc(row)));
+  const officialSalesKeys = new Set(officialSalesRows.map((r) => cloudKeyFromSales(r)));
+  const captureSalesOnly = bundle.salesRows.filter((row) => !officialSalesKeys.has(cloudKeyFromSales(row)));
   return hydrateCloudProductBundle({
-    skcRows: [...officialSkcRows, ...captureOnly],
-    salesRows: bundle.salesRows,
+    skcRows: officialSkcRows.length ? [...officialSkcRows, ...captureSkcOnly] : bundle.skcRows,
+    salesRows: officialSalesRows.length ? [...officialSalesRows, ...captureSalesOnly] : bundle.salesRows,
     activityRows: bundle.activityRows,
     riskRows: bundle.riskRows,
     stockOrderRows: bundle.stockOrderRows,
@@ -1045,13 +1073,14 @@ function mergeOfficialIntoBundle(bundle: CloudProductBundle, officialSkcRows: Sk
   }, { configured: true, error: bundle.error });
 }
 
-// 官方商品作底 + 抓包 enrich。官方独立拉取，云端成败都把官方并进去。
+// 官方商品作底 + 官方销量 enrich。官方独立拉取，云端成败都把官方并进去。
 async function loadCloudProductBundle(): Promise<CloudProductBundle> {
-  const [bundle, officialSkcRows] = await Promise.all([
+  const [bundle, officialSkcRows, officialSalesRows] = await Promise.all([
     loadCloudProductBundleRaw(),
     fetchOfficialSkcRows(),
+    fetchOfficialSales(),
   ]);
-  return mergeOfficialIntoBundle(bundle, officialSkcRows);
+  return mergeOfficialIntoBundle(bundle, officialSkcRows, officialSalesRows);
 }
 
 async function loadCloudProductBundleRaw(): Promise<CloudProductBundle> {
