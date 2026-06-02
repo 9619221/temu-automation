@@ -521,6 +521,21 @@ interface ErpAuthExpiredEvent {
   at?: string;
 }
 
+interface TemuOpenApiBinding {
+  mallId: string;
+  mallName: string;
+  region: string;
+  appKey: string;
+  authorized: boolean;
+  semiManaged: boolean;
+  scopeCount: number;
+  apiScopeList?: string[];
+  accessTokenExpiresAt: string;
+  status: string;
+  authorizedAt: string;
+  updatedAt: string;
+}
+
 interface ErpAPI {
   getStatus: () => Promise<ErpStatus>;
   runMigrations: () => Promise<ErpStatus>;
@@ -552,6 +567,18 @@ interface ErpAPI {
       source?: string;
     }) => Promise<any>;
     delete: (payload: { id?: string; accountId?: string }) => Promise<any>;
+  };
+  temuOpenApi: {
+    list: () => Promise<{ malls: TemuOpenApiBinding[] }>;
+    bind: (payload: {
+      accessToken: string;
+      region?: string;
+      mallName?: string;
+      mallId?: string;
+      appKey?: string;
+      appSecret?: string;
+    }) => Promise<TemuOpenApiBinding>;
+    unbind: (payload: { mallId: string }) => Promise<{ ok: boolean; mallId: string }>;
   };
   user: {
     list: (params?: ErpListParams) => Promise<any[]>;

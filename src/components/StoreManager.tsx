@@ -78,6 +78,20 @@ interface StoreAddressValues {
   address: string;
 }
 
+interface TemuOpenApiBinding {
+  mallId: string;
+  mallName: string;
+  region: string;
+  appKey?: string;
+  authorized: boolean;
+  semiManaged?: boolean;
+  scopeCount: number;
+  accessTokenExpiresAt: string;
+  status: string;
+  authorizedAt?: string;
+  updatedAt?: string;
+}
+
 interface StoreManagerProps {
   onChanged?: () => void | Promise<void>;
 }
@@ -301,6 +315,7 @@ export default function StoreManager({ onChanged }: StoreManagerProps) {
 
   const [accountForm] = Form.useForm();
   const [storeAddressForm] = Form.useForm<StoreAddressValues>();
+  const [temuBindForm] = Form.useForm<{ accessToken: string; region: string; mallName?: string }>();
   const [accounts, setAccounts] = useState<StoreAccountRow[]>(() => cachedData.accounts || []);
   const [alibaba1688Addresses, setAlibaba1688Addresses] = useState<Alibaba1688AddressRow[]>(() => cachedData.alibaba1688Addresses || []);
   const [purchase1688Accounts, setPurchase1688Accounts] = useState<Purchase1688AccountRow[]>(() => cachedData.purchase1688Accounts || []);
@@ -312,6 +327,8 @@ export default function StoreManager({ onChanged }: StoreManagerProps) {
   const [accountCreateModalOpen, setAccountCreateModalOpen] = useState(false);
   const [storeAddressModalOpen, setStoreAddressModalOpen] = useState(false);
   const [editingStoreAddressAccount, setEditingStoreAddressAccount] = useState<StoreAccountRow | null>(null);
+  const [temuBindings, setTemuBindings] = useState<TemuOpenApiBinding[]>([]);
+  const [temuBindModalOpen, setTemuBindModalOpen] = useState(false);
 
   const sortedAccounts = useMemo(
     () => [...accounts].sort((a, b) =>
@@ -407,9 +424,55 @@ export default function StoreManager({ onChanged }: StoreManagerProps) {
     }
   }, [accounts]);
 
+  const loadTemuBindings = useCallback(async () => {
+    if (!erp?.temuOpenApi) return;
+    try {
+      const res = await erp.temuOpenApi.list();
+      setTemuBindings(Array.isArray(res?.malls) ? res.malls : []);
+    } catch {
+      // 静默：未配置 / 无权限时不打扰
+    }
+  }, []);
+
   useEffect(() => {
     void loadAll();
-  }, [loadAll]);
+    void loadTemuBindings();
+  }, [loadAll, loadTemuBindings]);
+
+  const handleBindTemuOpenApi = async () => {
+    if (!erp?.temuOpenApi) return;
+    const values = await temuBindForm.validateFields();
+    setSubmitting("temu-openapi-bind");
+    try {
+      const binding = await erp.temuOpenApi.bind({
+        accessToken: values.accessToken.trim(),
+        region: values.region || "CN",
+        mallName: values.mallName?.trim() || undefined,
+      });
+      message.success(`已绑定店铺 ${binding.mallName || binding.mallId}（${binding.scopeCount} 个接口权限）`);
+      setTemuBindModalOpen(false);
+      temuBindForm.resetFields();
+      await loadTemuBindings();
+    } catch (error: any) {
+      message.error(error?.message || "绑定失败");
+    } finally {
+      setSubmitting(null);
+    }
+  };
+
+  const handleUnbindTemuOpenApi = async (row: TemuOpenApiBinding) => {
+    if (!erp?.temuOpenApi) return;
+    setSubmitting(`temu-openapi-unbind:${row.mallId}`);
+    try {
+      await erp.temuOpenApi.unbind({ mallId: row.mallId });
+      message.success("已解绑");
+      await loadTemuBindings();
+    } catch (error: any) {
+      message.error(error?.message || "解绑失败");
+    } finally {
+      setSubmitting(null);
+    }
+  };
 
   const openCreateAccountModal = () => {
     accountForm.resetFields();
@@ -634,6 +697,69 @@ export default function StoreManager({ onChanged }: StoreManagerProps) {
     }] : []),
   ];
 
+  const temuBindingColumns: ColumnsType<TemuOpenApiBinding> = [
+    {
+      title: "店铺",
+      key: "mall",
+      render: (_value, row) => (
+        <Space direction="vertical" size={0}>
+          <span>{row.mallName || row.mallId}</span>
+          <span style={{ color: "#667085", fontSize: 12 }}>mallId: {row.mallId}</span>
+        </Space>
+      ),
+    },
+    { title: "分区", dataIndex: "region", key: "region", width: 80 },
+    {
+      title: "授权状态",
+      key: "authorized",
+      width: 110,
+      render: (_value, row) => (
+        row.authorized
+          ? <Tag color="success">已授权</Tag>
+          : <Tag color="error">{row.status === "revoked" ? "已解绑" : "失效"}</Tag>
+      ),
+    },
+    { title: "接口权限", dataIndex: "scopeCount", key: "scopeCount", width: 90, render: (value) => `${value || 0} 个` },
+    {
+      title: "Token 到期",
+      dataIndex: "accessTokenExpiresAt",
+      key: "expiry",
+      width: 170,
+      render: (value) => (value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "-"),
+    },
+    ...(canManageAccounts ? [{
+      title: "操作",
+      key: "actions",
+      width: 180,
+      render: (_value: unknown, row: TemuOpenApiBinding) => (
+        <Space size={6}>
+          <Button
+            size="small"
+            onClick={() => {
+              temuBindForm.resetFields();
+              temuBindForm.setFieldsValue({ region: row.region, mallName: row.mallName });
+              setTemuBindModalOpen(true);
+            }}
+          >
+            重新绑定
+          </Button>
+          <Popconfirm
+            title="解绑授权"
+            description="解绑后将清除该店铺的 access_token，官方接口调用会停用。"
+            okText="解绑"
+            cancelText="取消"
+            okButtonProps={{ danger: true }}
+            onConfirm={() => handleUnbindTemuOpenApi(row)}
+          >
+            <Button danger size="small" type="text" loading={submitting === `temu-openapi-unbind:${row.mallId}`}>
+              解绑
+            </Button>
+          </Popconfirm>
+        </Space>
+      ),
+    }] : []),
+  ];
+
   if (!erp) {
     return <Alert type="error" showIcon message="当前环境缺少本地服务接口" />;
   }
@@ -659,6 +785,76 @@ export default function StoreManager({ onChanged }: StoreManagerProps) {
         dataSource={sortedAccounts}
         pagination={{ pageSize: 5, showSizeChanger: false }}
       />
+
+      <div style={{ borderTop: "1px solid #f0f0f0", paddingTop: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+          <Space size={8} wrap>
+            <strong>Temu 官方接口授权</strong>
+            <span style={{ color: "#667085", fontSize: 12 }}>
+              商家在卖家中心「授权管理」勾选「云舵AI」后复制 access_token 填入即可
+            </span>
+          </Space>
+          {canManageAccounts ? (
+            <Button
+              type="primary"
+              icon={<PlusOutlined />}
+              onClick={() => {
+                temuBindForm.resetFields();
+                temuBindForm.setFieldsValue({ region: "CN" });
+                setTemuBindModalOpen(true);
+              }}
+            >
+              绑定授权
+            </Button>
+          ) : null}
+        </div>
+        <Table
+          size="small"
+          rowKey="mallId"
+          columns={temuBindingColumns}
+          dataSource={temuBindings}
+          pagination={false}
+          locale={{ emptyText: "尚未绑定任何店铺的官方授权" }}
+        />
+      </div>
+
+      <Modal
+        title="绑定 Temu 官方接口授权"
+        open={temuBindModalOpen}
+        okText="校验并绑定"
+        cancelText="取消"
+        confirmLoading={submitting === "temu-openapi-bind"}
+        onOk={handleBindTemuOpenApi}
+        onCancel={() => setTemuBindModalOpen(false)}
+        destroyOnClose
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="如何获取 access_token"
+          description="卖家中心 → 授权管理 → 选择应用「云舵AI」→ 勾选接口（建议全选）→ 确认 → 复制 token。App Key / App Secret 由系统默认配置，无需填写。"
+        />
+        <Form form={temuBindForm} layout="vertical">
+          <Form.Item name="accessToken" label="access_token" rules={[{ required: true, message: "请粘贴 access_token" }]}>
+            <Input.TextArea rows={3} placeholder="粘贴商家授权后复制的 access_token" />
+          </Form.Item>
+          <Form.Item name="region" label="分区" initialValue="CN" rules={[{ required: true, message: "请选择分区" }]} tooltip="必须与获取 token 的卖家中心同区，默认 CN">
+            <Select
+              options={[
+                { value: "CN", label: "CN（全托/半托发品·库存·全托备货履约）" },
+                { value: "PA", label: "PA（半托库存·调价核价）" },
+                { value: "US", label: "US（美国半托履约）" },
+                { value: "EU", label: "EU（欧区半托履约）" },
+                { value: "GLOBAL", label: "GLOBAL（合规资质·全球半托履约）" },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item name="mallName" label="店铺名称（可选）">
+            <Input placeholder="便于识别，可留空（系统会尽量自动带出）" />
+          </Form.Item>
+        </Form>
+      </Modal>
 
       <Modal
         title="绑定店铺"

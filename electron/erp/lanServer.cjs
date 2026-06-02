@@ -3980,6 +3980,20 @@ async function handle1688TokenRequest({ req, res, session, save1688ManualToken }
   }
 }
 
+async function handleTemuOpenApiBindRequest({ req, res, session, bindTemuOpenApiMall }) {
+  if (req.method !== "POST") {
+    writeJson(res, 405, { ok: false, error: "Method not allowed" });
+    return;
+  }
+  try {
+    const payload = await readLoginPayload(req);
+    const status = await bindTemuOpenApiMall(payload, session.user);
+    writeJson(res, 200, { ok: true, status });
+  } catch (error) {
+    writeJson(res, 400, { ok: false, error: error?.message || String(error) });
+  }
+}
+
 async function handle1688StartRequest({ req, res, session, create1688AuthorizeUrl }) {
   const wantsJson = String(req.headers.accept || "").includes("application/json")
     || String(req.headers["content-type"] || "").includes("application/json");
@@ -4555,6 +4569,9 @@ async function handleRequest({
   refresh1688AccessToken,
   receive1688Message,
   list1688PurchaseAccounts,
+  bindTemuOpenApiMall,
+  listTemuOpenApiMalls,
+  unbindTemuOpenApiMall,
   validateSessionUser,
   verifyLogin,
 }) {
@@ -5097,6 +5114,39 @@ async function handleRequest({
         session,
         save1688ManualToken,
       });
+      return;
+    }
+
+    if (pathname === "/api/temu/openapi/status") {
+      writeJson(res, 200, {
+        ok: true,
+        ...(await listTemuOpenApiMalls(session.user)),
+      });
+      return;
+    }
+
+    if (pathname === "/api/temu/openapi/bind") {
+      await handleTemuOpenApiBindRequest({
+        req,
+        res,
+        session,
+        bindTemuOpenApiMall,
+      });
+      return;
+    }
+
+    if (pathname === "/api/temu/openapi/unbind") {
+      if (req.method !== "POST") {
+        writeJson(res, 405, { ok: false, error: "Method not allowed" });
+        return;
+      }
+      try {
+        const payload = await readLoginPayload(req);
+        const result = await unbindTemuOpenApiMall(payload, session.user);
+        writeJson(res, 200, { ok: true, ...result });
+      } catch (error) {
+        writeJson(res, 400, { ok: false, error: error?.message || String(error) });
+      }
       return;
     }
 

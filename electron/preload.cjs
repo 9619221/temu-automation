@@ -292,6 +292,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
       upsert: (payload) => ipcRenderer.invoke("erp:account:upsert", payload || {}),
       delete: (payload) => ipcRenderer.invoke("erp:account:delete", payload || {}),
     },
+    temuOpenApi: {
+      list: () => ipcRenderer.invoke("erp:temu-openapi:list"),
+      bind: (payload) => ipcRenderer.invoke("erp:temu-openapi:bind", payload || {}),
+      unbind: (payload) => ipcRenderer.invoke("erp:temu-openapi:unbind", payload || {}),
+    },
     user: {
       list: (params) => ipcRenderer.invoke("erp:user:list", params || {}),
       upsert: (payload) => ipcRenderer.invoke("erp:user:upsert", payload || {}),

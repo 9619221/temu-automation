@@ -53,6 +53,7 @@ const {
   normalize1688RefundListResponse,
   normalize1688SearchResponse,
 } = require("./1688Client.cjs");
+const { validateTemuOpenApiToken, resolveTemuAppCredentials } = require("./temuOpenApiClient.cjs");
 const {
   imageSearchProduct: imageSearchAlphaShopProduct,
   productDetailQuery: alphaShopProductDetailQuery,
@@ -2428,6 +2429,194 @@ function save1688ManualToken(payload = {}, actor = {}) {
     updated_at: now,
   });
   return to1688AuthStatus(get1688AuthRowById(setting.id, companyId) || get1688AuthRow(companyId));
+}
+
+// ===== TEMU 官方开放平台：绑定店铺授权（手动 token，store 维度）=====
+
+const TEMU_OPENAPI_REGIONS = new Set(["CN", "PA", "US", "EU", "GLOBAL"]);
+
+function temuOpenApiExpiryIso(expiredTimeSeconds) {
+  const n = Number(expiredTimeSeconds);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return new Date(n * 1000).toISOString();
+}
+
+function getKnownTemuMallName(db, mallId) {
+  const fromDict = db.prepare("SELECT mall_name FROM erp_temu_malls WHERE mall_id = ?").get(mallId);
+  if (fromDict?.mall_name) return fromDict.mall_name;
+  const fromAuth = db.prepare("SELECT mall_name FROM erp_temu_openapi_auth WHERE mall_id = ?").get(mallId);
+  return fromAuth?.mall_name || null;
+}
+
+function toTemuOpenApiStatus(row) {
+  if (!row) return null;
+  let scopes = [];
+  try { scopes = JSON.parse(row.api_scopes_json || "[]"); } catch { scopes = []; }
+  return {
+    mallId: row.mall_id,
+    mallName: row.mall_name || "",
+    region: row.region,
+    appKey: row.app_key,
+    authorized: Boolean(row.access_token) && row.status === "active",
+    semiManaged: Boolean(row.semi_managed),
+    scopeCount: Array.isArray(scopes) ? scopes.length : 0,
+    apiScopeList: Array.isArray(scopes) ? scopes : [],
+    accessTokenExpiresAt: row.access_token_expires_at || "",
+    status: row.status,
+    authorizedAt: row.authorized_at || "",
+    updatedAt: row.updated_at || "",
+  };
+}
+
+/**
+ * 绑定店铺：保存一组 Temu 官方开放平台凭证并绑定到店铺。
+ * 落库前实调 bg.open.accesstoken.info.get(.global) + bg.mall.info.get 校验，
+ * mall_id 以官方返回为准（传入的 mallId 仅做一致性校验）。
+ */
+async function bindTemuOpenApiMall(payload = {}, actor = {}) {
+  assertActorRole(actor, ["admin", "manager"], "绑定 Temu 店铺授权");
+  const { db } = requireErp();
+
+  // App Key/Secret 默认用本 ERP 三方应用「云舵AI」的凭证（环境变量可覆盖），
+  // 商家只需提供自己授权后复制的 access_token；仅自研应用场景才显式传 appKey/appSecret。
+  const { appKey, appSecret } = resolveTemuAppCredentials({
+    appKey: optionalString(payload.appKey || payload.app_key),
+    appSecret: optionalString(payload.appSecret || payload.app_secret),
+  });
+  if (!appKey) throw new Error("未配置 Temu 应用 App Key");
+  if (!appSecret) throw new Error("未配置 Temu 应用 App Secret，请在服务器设置环境变量 TEMU_OPENAPI_APP_SECRET（参与签名的敏感凭证，源码不内置）");
+  const accessToken = requireString(payload.accessToken || payload.access_token || payload.token, "accessToken");
+  const region = (optionalString(payload.region) || "CN").toUpperCase();
+  if (!TEMU_OPENAPI_REGIONS.has(region)) {
+    throw new Error(`不支持的分区：${region}（可选 CN / PA / US / EU / GLOBAL）`);
+  }
+
+  const validation = await validateTemuOpenApiToken({ appKey, appSecret, accessToken, region });
+  if (!validation.ok) {
+    throw new Error(`Temu 授权校验失败：${validation.error || "access_token 无效"}`);
+  }
+  const resolvedMallId = String(validation.mallId || "").trim();
+  if (!resolvedMallId) throw new Error("Temu 授权校验未返回 mallId，无法绑定");
+
+  const expectMallId = optionalString(payload.mallId || payload.mall_id);
+  if (expectMallId && expectMallId !== resolvedMallId) {
+    throw new Error(`该 access_token 属于店铺 ${resolvedMallId}，与指定店铺 ${expectMallId} 不一致`);
+  }
+
+  const mallName = optionalString(payload.mallName || payload.mall_name)
+    || getKnownTemuMallName(db, resolvedMallId)
+    || "";
+  const now = nowIso();
+  const existing = db.prepare("SELECT created_at FROM erp_temu_openapi_auth WHERE mall_id = ?").get(resolvedMallId);
+  const row = {
+    mall_id: resolvedMallId,
+    mall_name: mallName,
+    region,
+    app_key: appKey,
+    app_secret: appSecret,
+    access_token: accessToken,
+    semi_managed: validation.semiManaged ? 1 : 0,
+    api_scopes_json: JSON.stringify(validation.apiScopeList || []),
+    token_info_json: JSON.stringify({
+      expiredTime: validation.expiredTime || null,
+      isThriftStore: validation.isThriftStore,
+      savedBy: actor?.id || actor?.name || null,
+      savedAt: now,
+    }),
+    access_token_expires_at: temuOpenApiExpiryIso(validation.expiredTime),
+    status: "active",
+    authorized_at: now,
+    created_at: existing?.created_at || now,
+    updated_at: now,
+  };
+
+  db.prepare(`
+    INSERT INTO erp_temu_openapi_auth (
+      mall_id, mall_name, region, app_key, app_secret, access_token,
+      semi_managed, api_scopes_json, token_info_json, access_token_expires_at,
+      status, authorized_at, created_at, updated_at
+    )
+    VALUES (
+      @mall_id, @mall_name, @region, @app_key, @app_secret, @access_token,
+      @semi_managed, @api_scopes_json, @token_info_json, @access_token_expires_at,
+      @status, @authorized_at, @created_at, @updated_at
+    )
+    ON CONFLICT(mall_id) DO UPDATE SET
+      mall_name = excluded.mall_name,
+      region = excluded.region,
+      app_key = excluded.app_key,
+      app_secret = excluded.app_secret,
+      access_token = excluded.access_token,
+      semi_managed = excluded.semi_managed,
+      api_scopes_json = excluded.api_scopes_json,
+      token_info_json = excluded.token_info_json,
+      access_token_expires_at = excluded.access_token_expires_at,
+      status = excluded.status,
+      authorized_at = excluded.authorized_at,
+      updated_at = excluded.updated_at
+  `).run(row);
+
+  // 绑定一家字典里还没有的店时，顺带登记进店铺字典（不覆盖已有 owner / store_code）
+  if (mallName) {
+    db.prepare(`
+      INSERT INTO erp_temu_malls (mall_id, mall_name, status, created_at, updated_at)
+      VALUES (?, ?, 'active', ?, ?)
+      ON CONFLICT(mall_id) DO NOTHING
+    `).run(resolvedMallId, mallName, now, now);
+  }
+
+  return toTemuOpenApiStatus(db.prepare("SELECT * FROM erp_temu_openapi_auth WHERE mall_id = ?").get(resolvedMallId));
+}
+
+/** 列出已绑定官方授权的店铺及 token 状态（不返回 app_secret / access_token 明文）。 */
+function listTemuOpenApiMalls(actor = {}) {
+  assertActorRole(actor, ["admin", "manager", "buyer"], "查看 Temu 店铺授权");
+  const { db } = requireErp();
+  const rows = db.prepare("SELECT * FROM erp_temu_openapi_auth ORDER BY updated_at DESC").all();
+  return { malls: rows.map(toTemuOpenApiStatus) };
+}
+
+/** 解绑：清空 access_token 并置为 revoked（保留记录便于审计）。 */
+function unbindTemuOpenApiMall(payload = {}, actor = {}) {
+  assertActorRole(actor, ["admin", "manager"], "解绑 Temu 店铺授权");
+  const { db } = requireErp();
+  const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+  const info = db.prepare("SELECT mall_id FROM erp_temu_openapi_auth WHERE mall_id = ?").get(mallId);
+  if (!info) throw new Error(`未找到已绑定的店铺：${mallId}`);
+  db.prepare(`
+    UPDATE erp_temu_openapi_auth
+    SET access_token = '', status = 'revoked', updated_at = ?
+    WHERE mall_id = ?
+  `).run(nowIso(), mallId);
+  return { ok: true, mallId };
+}
+
+// Runtime 包装：client 模式代理到主控端 HTTP 路由，host 模式直调本地 handler。
+async function bindTemuOpenApiMallRuntime(payload = {}, actor = {}) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    const response = await remoteRequest("/api/temu/openapi/bind", { method: "POST", body: payload || {} });
+    return response.status;
+  }
+  return bindTemuOpenApiMall(payload || {}, actor);
+}
+
+async function listTemuOpenApiMallsRuntime(actor = {}) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    const response = await remoteRequest("/api/temu/openapi/status", { method: "GET" });
+    return { malls: response.malls || [] };
+  }
+  return listTemuOpenApiMalls(actor);
+}
+
+async function unbindTemuOpenApiMallRuntime(payload = {}, actor = {}) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    const response = await remoteRequest("/api/temu/openapi/unbind", { method: "POST", body: payload || {} });
+    return { ok: response.ok, mallId: response.mallId };
+  }
+  return unbindTemuOpenApiMall(payload || {}, actor);
 }
 
 function create1688AuthorizeUrl(payload = {}, actor = {}) {
@@ -21042,6 +21231,9 @@ function startLanService(payload = {}) {
     refresh1688AccessToken,
     receive1688Message,
     list1688PurchaseAccounts,
+    bindTemuOpenApiMall,
+    listTemuOpenApiMalls,
+    unbindTemuOpenApiMall,
     ingestJushuitanExtensionBatch,
   });
 }
@@ -21235,6 +21427,9 @@ async function startErpHeadlessServer(options = {}) {
     refresh1688AccessToken,
     receive1688Message,
     list1688PurchaseAccounts,
+    bindTemuOpenApiMall,
+    listTemuOpenApiMalls,
+    unbindTemuOpenApiMall,
     ingestJushuitanExtensionBatch,
   });
   const auto1688OrderSync = startAuto1688OrderSync(env);
@@ -21528,6 +21723,9 @@ function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:account:list", wrapErpHandler("erp:account:list", (_event, params) => listAccountsRuntime(params || {})));
   ipcMain.handle("erp:account:upsert", (_event, payload) => upsertAccountRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:account:delete", (_event, payload) => deleteAccountRuntime(payload || {}, erpState.currentUser || {}));
+  ipcMain.handle("erp:temu-openapi:bind", (_event, payload) => bindTemuOpenApiMallRuntime(payload || {}, erpState.currentUser || {}));
+  ipcMain.handle("erp:temu-openapi:list", () => listTemuOpenApiMallsRuntime(erpState.currentUser || {}));
+  ipcMain.handle("erp:temu-openapi:unbind", (_event, payload) => unbindTemuOpenApiMallRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:user:list", (_event, params) => {
     if (!shouldUseClientRuntime()) assertHostMode("用户管理");
     return listUsersRuntime(params || {});
