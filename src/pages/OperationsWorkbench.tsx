@@ -757,12 +757,16 @@ export default function OperationsWorkbench() {
   const actColumns: ColumnsType<ActivityRow> = [
     storeCol,
     { title: "类型", dataIndex: "kind", width: 70, render: (v: string | null) => <Tag color={v === "bidding" ? "purple" : v === "coupon" ? "cyan" : "blue"}>{KIND_LABEL[v || ""] || v || "—"}</Tag> },
-    { title: "商品 / 货号", key: "at", width: 320, render: (_, r) => (
+    { title: "商品 / SKC / 货号", key: "at", width: 360, render: (_, r) => (
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         {r.thumb ? <div style={{ flexShrink: 0, width: 40, height: 40 }}><Image src={r.thumb} width={40} height={40} style={{ objectFit: "cover", borderRadius: 4 }} preview={{ mask: <EyeOutlined /> }} /></div> : <div style={{ width: 40, height: 40, borderRadius: 4, background: "#f0f0f0", flexShrink: 0 }} />}
         <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 12, maxWidth: 250, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.product_name || undefined}>{r.product_name || <span style={{ color: "#bbb" }}>(无商品名)</span>}</div>
+          <div style={{ fontSize: 12, maxWidth: 290, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.product_name || undefined}>{r.product_name || <span style={{ color: "#bbb" }}>(无商品名)</span>}</div>
           {r.sku_ext_code ? <Typography.Text copyable={{ text: r.sku_ext_code }} style={{ fontSize: 12, fontWeight: 600 }}>{r.sku_ext_code}</Typography.Text> : <span style={{ color: "#bbb", fontSize: 12 }}>(无货号·活动表头)</span>}
+          <div style={{ fontSize: 11, color: "#aaa", marginTop: 1, display: "flex", gap: 8 }}>
+            {r.product_id ? <Typography.Text copyable={{ text: r.product_id }} style={{ fontSize: 11, color: "#aaa" }}>SPU {r.product_id}</Typography.Text> : null}
+            {r.skc_id ? <Typography.Text copyable={{ text: r.skc_id }} style={{ fontSize: 11, color: "#aaa" }}>SKC {r.skc_id}</Typography.Text> : null}
+          </div>
         </div>
       </div>
     ) },
