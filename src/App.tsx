@@ -54,6 +54,7 @@ const ErpLogin = lazyWithPreload(() => import("./pages/ErpLogin"));
 const BrowserMulti = lazyWithPreload(() => import("./pages/BrowserMulti"));
 const MultiStoreReport = lazyWithPreload(() => import("./pages/MultiStoreReport"));
 const OperationsWorkbench = lazyWithPreload(() => import("./pages/OperationsWorkbench"));
+const TemuAuthManager = lazyWithPreload(() => import("./pages/TemuAuthManager"));
 
 const CORE_ROUTE_PRELOADERS = [
   AppLayout.preload,
@@ -355,6 +356,7 @@ function App() {
               <Route path="multi-store-cloud" element={<Navigate to="/collect" replace />} />
               <Route path="jushuitan-import" element={<Navigate to="/product-master-data" replace />} />
               <Route path="accounts" element={<RoleRoute path="/accounts"><AccountManager /></RoleRoute>} />
+              <Route path="temu-auth" element={<RoleRoute path="/temu-auth"><TemuAuthManager /></RoleRoute>} />
               <Route path="browser-multi" element={<RoleRoute path="/browser-multi"><BrowserMulti /></RoleRoute>} />
               <Route path="tasks" element={<Navigate to="/work-items" replace />} />
               <Route path="competitor" element={<RoleRoute path="/competitor"><CompetitorAnalysis /></RoleRoute>} />

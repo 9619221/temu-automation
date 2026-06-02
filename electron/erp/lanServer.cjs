@@ -48,6 +48,9 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/1688/start": ["admin", "manager"],
   "/api/1688/refresh": ["admin", "manager"],
   "/api/1688/accounts/delete": ["admin", "manager"],
+  "/api/temu/openapi/status": ["admin", "manager", "buyer"],
+  "/api/temu/openapi/bind": ["admin", "manager"],
+  "/api/temu/openapi/unbind": ["admin", "manager"],
   "/purchase": ["admin", "manager", "operations", "buyer", "finance"],
   "/api/purchase/workbench": ["admin", "manager", "operations", "buyer", "finance"],
   "/api/purchase/requests": ["admin", "manager", "operations", "buyer", "finance"],
@@ -3532,6 +3535,13 @@ function createRequestHandler(options = {}) {
     throw new Error("1688 message handler is not available");
   });
   const list1688PurchaseAccounts = options.list1688PurchaseAccounts || (() => ({ accounts: [] }));
+  const bindTemuOpenApiMall = options.bindTemuOpenApiMall || (() => {
+    throw new Error("Temu OpenAPI bind handler is not available");
+  });
+  const listTemuOpenApiMalls = options.listTemuOpenApiMalls || (() => ({ malls: [] }));
+  const unbindTemuOpenApiMall = options.unbindTemuOpenApiMall || (() => {
+    throw new Error("Temu OpenAPI unbind handler is not available");
+  });
   const ingestJushuitanExtensionBatch = options.ingestJushuitanExtensionBatch || null;
   const validateSessionUser = options.validateSessionUser || null;
   const verifyLogin = options.verifyLogin || (() => null);
@@ -3599,6 +3609,9 @@ function createRequestHandler(options = {}) {
       refresh1688AccessToken,
       receive1688Message,
       list1688PurchaseAccounts,
+      bindTemuOpenApiMall,
+      listTemuOpenApiMalls,
+      unbindTemuOpenApiMall,
       validateSessionUser,
       verifyLogin,
     }).catch((error) => {

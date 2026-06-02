@@ -40,7 +40,10 @@ const menuItems = [
   {
     key: "group-account",
     label: "账号",
-    children: [{ key: "/accounts", icon: <UserOutlined />, label: "账号管理" }],
+    children: [
+      { key: "/accounts", icon: <UserOutlined />, label: "账号管理" },
+      { key: "/temu-auth", icon: <ApiOutlined />, label: "Temu 授权" },
+    ],
   },
   {
     key: "group-business",
