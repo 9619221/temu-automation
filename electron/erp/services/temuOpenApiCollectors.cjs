@@ -18,7 +18,8 @@ const { callOpenApi, resolveTemuAppCredentials } = require("../temuOpenApiClient
 const PAGE_SIZE = 20;                     // 实测各接口 pageSize 上限不同(发货≤20,>20报SYSTEM_EXCEPTION)，取 20 通用安全
 const MAX_PAGES = 1500;
 const RETURN_WINDOW_DAYS = 30;            // 售后出库时间窗口（接口限 ≤31 天）
-const MAX_INVENTORY_SKCS = 8000;          // 库存逐 SKC 调用上限（防 runaway）
+const MAX_INVENTORY_SKCS = 20000;         // 库存逐 SKC 调用上限（防 runaway）
+const INVENTORY_CONCURRENCY = 8;          // 库存接口(PA)限流宽松，实测并发10无失败，取8并发提速~10倍
 const MIN_INTERVAL_MS = 600;              // 全局节流（SYSTEM_EXCEPTION 间歇触发，放慢更稳）
 const MAX_RETRIES = 5;
 const INTER_COLLECTOR_PAUSE_MS = 4000;    // 源间停顿，让限流桶回血（避免上一源耗光桶导致下一源持续限流）
@@ -174,22 +175,34 @@ async function syncInventoryCollector(db, mallId, creds) {
     ) WHERE product_skc_id IS NOT NULL LIMIT ?
   `).all(mallId, MAX_INVENTORY_SKCS);
   const rows = [];
-  for (const { product_skc_id } of skcRows) {
-    try {
-      const response = await callRetry({
-        type: "bg.qtg.stock.virtualinventoryjit.get", ...creds, region: "PA",
-        bizParams: { productSkcId: product_skc_id },
-      });
-      const stockList = (response.result && response.result.productSkuStockList) || [];
-      for (const st of stockList) {
+  // 库存接口(PA)限流宽松，用并发池提速（不走全局 600ms 节流），单 SKC 失败重试1次后跳过
+  let idx = 0;
+  async function worker() {
+    while (idx < skcRows.length) {
+      const skc = skcRows[idx++].product_skc_id;
+      let stockList = null;
+      for (let attempt = 0; attempt < 2 && stockList === null; attempt += 1) {
+        try {
+          const { ok, response } = await callOpenApi({
+            type: "bg.qtg.stock.virtualinventoryjit.get", ...creds, region: "PA",
+            bizParams: { productSkcId: skc },
+          });
+          if (ok && response && response.success === true) {
+            stockList = (response.result && response.result.productSkuStockList) || [];
+          }
+        } catch { /* retry */ }
+        if (stockList === null) await sleep(300);
+      }
+      for (const st of (stockList || [])) {
         rows.push({
           record_key: s(st.productSkuId), product_id: null,
-          product_skc_id: s(product_skc_id), ext_code: s(st.extCode),
+          product_skc_id: s(skc), ext_code: s(st.extCode),
           status: null, biz_time: null, raw: JSON.stringify(st),
         });
       }
-    } catch { /* 单 SKC 失败跳过 */ }
+    }
   }
+  await Promise.all(Array.from({ length: INVENTORY_CONCURRENCY }, () => worker()));
   replaceSourceRecords(db, mallId, "inventory", rows, nowIso());
   return rows.length;
 }
@@ -247,8 +260,29 @@ async function syncAllCollectorsAllMalls(db, opts = {}) {
   return { malls: results.length, results };
 }
 
+/** 仅采库存（全店）——独立 job 用，与快源解耦。 */
+async function syncInventoryAllMalls(db) {
+  const malls = db.prepare(`
+    SELECT * FROM erp_temu_openapi_auth
+    WHERE status='active' AND access_token IS NOT NULL AND access_token <> ''
+    ORDER BY updated_at DESC
+  `).all();
+  const results = [];
+  for (const m of malls) {
+    try {
+      const { appKey, appSecret } = resolveTemuAppCredentials({ appKey: m.app_key, appSecret: m.app_secret });
+      const count = await syncInventoryCollector(db, m.mall_id, { appKey, appSecret, accessToken: m.access_token });
+      results.push({ ok: true, mallId: m.mall_id, inventory: count });
+    } catch (e) {
+      results.push({ ok: false, mallId: m.mall_id, error: String(e?.message || e) });
+    }
+  }
+  return { malls: results.length, results };
+}
+
 module.exports = {
   LIST_COLLECTORS,
   syncAllCollectorsForMall,
   syncAllCollectorsAllMalls,
+  syncInventoryAllMalls,
 };
