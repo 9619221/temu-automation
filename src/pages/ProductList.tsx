@@ -1019,6 +1019,9 @@ async function fetchOfficialSkcRows(): Promise<SkcRow[]> {
         stock_available: null,
         last_updated_at: r.updated_at ? (Date.parse(r.updated_at) || 0) : 0,
         ext_code: r.ext_code || null, // 官方货号(运行时附加)，供 applyCloudProduct 回填 product.extCode
+        _officialSkus: (() => {
+          try { return r.skus_json ? JSON.parse(r.skus_json) : []; } catch { return []; }
+        })(), // 官方 SKU 列表[{productSkuId,skuExtCode}]，供 tableRows 建 SKU 子行
       } as unknown as SkcRow));
   } catch {
     return [];
@@ -4249,9 +4252,9 @@ export default function ProductList() {
   // 第一条永远是 "合计" 汇总行。
   const tableRows = useMemo(() => {
     return filteredProducts.map((product, productIdx) => {
-      const skuList: any[] = Array.isArray(product.salesRaw?.skuQuantityDetailList)
+      const skuList: any[] = Array.isArray(product.salesRaw?.skuQuantityDetailList) && product.salesRaw.skuQuantityDetailList.length
         ? product.salesRaw.skuQuantityDetailList
-        : [];
+        : (Array.isArray((product.cloudSkc as any)?._officialSkus) ? (product.cloudSkc as any)._officialSkus : []);
       const groupKey = [product.mallId, product.skcId || product.goodsId || product.spuId || product.title || `p${productIdx}`].filter(Boolean).join("|");
 
       const totalInfo = product.salesRaw?.skuQuantityTotalInfo || {};
