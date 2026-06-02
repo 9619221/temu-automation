@@ -15,14 +15,41 @@
 
 const { callOpenApi, resolveTemuAppCredentials } = require("../temuOpenApiClient.cjs");
 
-const PAGE_SIZE = 100;
-const MAX_PAGES = 300;
+const PAGE_SIZE = 20;                     // 实测各接口 pageSize 上限不同(发货≤20,>20报SYSTEM_EXCEPTION)，取 20 通用安全
+const MAX_PAGES = 1500;
 const RETURN_WINDOW_DAYS = 30;            // 售后出库时间窗口（接口限 ≤31 天）
 const MAX_INVENTORY_SKCS = 8000;          // 库存逐 SKC 调用上限（防 runaway）
-const INVENTORY_DELAY_MS = 30;            // 库存调用间隔（轻节流，避免限流）
+const MIN_INTERVAL_MS = 600;              // 全局节流（SYSTEM_EXCEPTION 间歇触发，放慢更稳）
+const MAX_RETRIES = 5;
+const INTER_COLLECTOR_PAUSE_MS = 4000;    // 源间停顿，让限流桶回血（避免上一源耗光桶导致下一源持续限流）
 
 function nowIso() { return new Date().toISOString(); }
 function s(v) { return v == null ? null : String(v); }
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+let lastCallAt = 0;
+async function throttle() {
+  const wait = MIN_INTERVAL_MS - (Date.now() - lastCallAt);
+  if (wait > 0) await sleep(wait);
+  lastCallAt = Date.now();
+}
+
+// 带节流 + 限流重试退避的调用。成功返回 response，彻底失败抛错。
+async function callRetry(params) {
+  let lastMsg = "";
+  for (let i = 0; i <= MAX_RETRIES; i += 1) {
+    await throttle();
+    let response = null;
+    try { ({ response } = await callOpenApi(params)); } catch (e) { response = { errorMsg: String(e?.message || e) }; }
+    if (response && response.success === true) return response;
+    const code = response && response.errorCode;
+    lastMsg = (response && response.errorMsg) || `errorCode=${code}`;
+    const retriable = code === 4000000 || /SYSTEM_EXCEPTION|limit|frequent|频繁|rate|timeout|超时/i.test(lastMsg);
+    if (i < MAX_RETRIES && retriable) { await sleep(1000 * (i + 1)); continue; }
+    throw new Error(`${params.type} 失败: ${lastMsg}`);
+  }
+  throw new Error(`${params.type} 重试失败: ${lastMsg}`);
+}
 
 // ===== 列表型采集源注册表 =====
 const LIST_COLLECTORS = [
@@ -76,7 +103,7 @@ const LIST_COLLECTORS = [
       const now = Date.now();
       return { outboundTimeStart: now - RETURN_WINDOW_DAYS * 86400000, outboundTimeEnd: now };
     },
-    listOf: (r) => r.list || r.data || r.returnSupplierPackageList || r.returnPackageList,
+    listOf: (r) => r.packageDetailDTOList || r.list || r.data || r.returnSupplierPackageList || r.returnPackageList,
     map: (it) => ({
       record_key: s(it.returnSupplierPackageSn || it.packageSn || it.returnPackageSn),
       product_id: s(it.productId),
@@ -118,12 +145,16 @@ async function syncListCollector(db, mallId, creds, collector) {
   const extra = collector.extraParams ? collector.extraParams() : {};
   const rows = [];
   for (let pageNo = 1; pageNo <= MAX_PAGES; pageNo += 1) {
-    const { ok, response } = await callOpenApi({
-      type: collector.type, ...creds, region: collector.region,
-      bizParams: { ...extra, pageNo, pageSize: PAGE_SIZE },
-    });
-    if (!ok || !response || response.success === false) {
-      throw new Error(`${collector.type} 失败: ${response?.errorMsg || `errorCode=${response?.errorCode}`}`);
+    if (pageNo > 1 && pageNo % 10 === 1) await sleep(INTER_COLLECTOR_PAUSE_MS); // 每 10 页停一下回血
+    let response;
+    try {
+      response = await callRetry({
+        type: collector.type, ...creds, region: collector.region,
+        bizParams: { ...extra, pageNo, pageSize: PAGE_SIZE },
+      });
+    } catch (e) {
+      if (pageNo === 1) throw e;       // 首页就失败 = 彻底失败
+      break;                            // 翻页中途失败：保留已采页，停止翻页
     }
     const items = collector.listOf(response.result || {}) || [];
     if (!items.length) break;
@@ -145,22 +176,19 @@ async function syncInventoryCollector(db, mallId, creds) {
   const rows = [];
   for (const { product_skc_id } of skcRows) {
     try {
-      const { ok, response } = await callOpenApi({
+      const response = await callRetry({
         type: "bg.qtg.stock.virtualinventoryjit.get", ...creds, region: "PA",
         bizParams: { productSkcId: product_skc_id },
       });
-      if (ok && response && response.success !== false) {
-        const stockList = (response.result && response.result.productSkuStockList) || [];
-        for (const st of stockList) {
-          rows.push({
-            record_key: s(st.productSkuId), product_id: null,
-            product_skc_id: s(product_skc_id), ext_code: s(st.extCode),
-            status: null, biz_time: null, raw: JSON.stringify(st),
-          });
-        }
+      const stockList = (response.result && response.result.productSkuStockList) || [];
+      for (const st of stockList) {
+        rows.push({
+          record_key: s(st.productSkuId), product_id: null,
+          product_skc_id: s(product_skc_id), ext_code: s(st.extCode),
+          status: null, biz_time: null, raw: JSON.stringify(st),
+        });
       }
     } catch { /* 单 SKC 失败跳过 */ }
-    if (INVENTORY_DELAY_MS) await new Promise((r) => setTimeout(r, INVENTORY_DELAY_MS));
   }
   replaceSourceRecords(db, mallId, "inventory", rows, nowIso());
   return rows.length;
@@ -178,10 +206,13 @@ async function syncAllCollectorsForMall(db, mallRow, opts = {}) {
 
   const summary = {};
   let firstError = null;
-  for (const collector of LIST_COLLECTORS) {
+  for (let i = 0; i < LIST_COLLECTORS.length; i += 1) {
+    const collector = LIST_COLLECTORS[i];
+    if (i > 0) await sleep(INTER_COLLECTOR_PAUSE_MS);   // 源间停顿，让限流桶回血
     try { summary[collector.source] = await syncListCollector(db, mallId, creds, collector); }
     catch (e) { summary[collector.source] = -1; firstError = firstError || `${collector.source}: ${e?.message || e}`; }
   }
+  if (!opts.skipInventory) await sleep(INTER_COLLECTOR_PAUSE_MS);
   if (!opts.skipInventory) {
     try { summary.inventory = await syncInventoryCollector(db, mallId, creds); }
     catch (e) { summary.inventory = -1; firstError = firstError || `inventory: ${e?.message || e}`; }
