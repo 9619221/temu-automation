@@ -2724,6 +2724,34 @@ async function listTemuOpenApiProductsRuntime(payload = {}, actor = {}) {
   return listTemuOpenApiProducts(payload || {}, actor);
 }
 
+/** 全店官方商品 → SkcRow 形状（供「商品管理」页作底列表，抓包销量/流量按 mall|skc 叠加）。 */
+function listAllTemuOpenApiProductsAsSkc(payload = {}, actor = {}) {
+  assertActorRole(actor, ["admin", "manager", "operations", "buyer", "viewer", "finance"], "查看 Temu 官方商品");
+  const { db } = requireErp();
+  const rows = db.prepare(`
+    SELECT p.mall_id AS mall_id,
+           p.product_id AS product_id,
+           json_extract(p.raw_json, '$.productSkcId') AS skc_id,
+           p.product_name AS title,
+           json_extract(p.raw_json, '$.mainImageUrl') AS thumb_url,
+           json_extract(p.raw_json, '$.extCode') AS ext_code,
+           p.sku_count AS sku_count,
+           p.updated_at AS updated_at
+    FROM erp_temu_openapi_products p
+    JOIN erp_temu_openapi_auth a ON a.mall_id = p.mall_id AND a.status = 'active'
+    WHERE json_extract(p.raw_json, '$.productSkcId') IS NOT NULL
+  `).all();
+  return { rows };
+}
+
+async function listAllTemuOpenApiProductsAsSkcRuntime(payload = {}, actor = {}) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    return await remoteRequest("/api/temu/openapi/products/skc", { method: "GET" });
+  }
+  return listAllTemuOpenApiProductsAsSkc(payload || {}, actor);
+}
+
 function create1688AuthorizeUrl(payload = {}, actor = {}) {
   let savedStatus = null;
   if (payload.appKey || payload.app_key || payload.appSecret || payload.app_secret || payload.redirectUri || payload.redirect_uri) {
@@ -21341,6 +21369,7 @@ function startLanService(payload = {}) {
     unbindTemuOpenApiMall,
     syncTemuOpenApiProducts,
     listTemuOpenApiProducts,
+    listAllTemuOpenApiProductsAsSkc,
     ingestJushuitanExtensionBatch,
   });
 }
@@ -21539,6 +21568,7 @@ async function startErpHeadlessServer(options = {}) {
     unbindTemuOpenApiMall,
     syncTemuOpenApiProducts,
     listTemuOpenApiProducts,
+    listAllTemuOpenApiProductsAsSkc,
     ingestJushuitanExtensionBatch,
   });
   const auto1688OrderSync = startAuto1688OrderSync(env);
@@ -21837,6 +21867,7 @@ function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:temu-openapi:unbind", (_event, payload) => unbindTemuOpenApiMallRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:temu-openapi:products-sync", (_event, payload) => syncTemuOpenApiProductsRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:temu-openapi:products-list", (_event, payload) => listTemuOpenApiProductsRuntime(payload || {}, erpState.currentUser || {}));
+  ipcMain.handle("erp:temu-openapi:products-skc", (_event, payload) => listAllTemuOpenApiProductsAsSkcRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:user:list", (_event, params) => {
     if (!shouldUseClientRuntime()) assertHostMode("用户管理");
     return listUsersRuntime(params || {});

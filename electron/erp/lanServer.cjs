@@ -53,6 +53,7 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/temu/openapi/unbind": ["admin", "manager"],
   "/api/temu/openapi/products/sync": ["admin", "manager"],
   "/api/temu/openapi/products": ["admin", "manager", "buyer"],
+  "/api/temu/openapi/products/skc": ["admin", "manager", "operations", "buyer", "viewer", "finance"],
   "/purchase": ["admin", "manager", "operations", "buyer", "finance"],
   "/api/purchase/workbench": ["admin", "manager", "operations", "buyer", "finance"],
   "/api/purchase/requests": ["admin", "manager", "operations", "buyer", "finance"],
@@ -3548,6 +3549,7 @@ function createRequestHandler(options = {}) {
     throw new Error("Temu OpenAPI product sync handler is not available");
   });
   const listTemuOpenApiProducts = options.listTemuOpenApiProducts || (() => ({ counts: [] }));
+  const listAllTemuOpenApiProductsAsSkc = options.listAllTemuOpenApiProductsAsSkc || (() => ({ rows: [] }));
   const ingestJushuitanExtensionBatch = options.ingestJushuitanExtensionBatch || null;
   const validateSessionUser = options.validateSessionUser || null;
   const verifyLogin = options.verifyLogin || (() => null);
@@ -3620,6 +3622,7 @@ function createRequestHandler(options = {}) {
       unbindTemuOpenApiMall,
       syncTemuOpenApiProducts,
       listTemuOpenApiProducts,
+      listAllTemuOpenApiProductsAsSkc,
       validateSessionUser,
       verifyLogin,
     }).catch((error) => {
@@ -4595,6 +4598,7 @@ async function handleRequest({
   unbindTemuOpenApiMall,
   syncTemuOpenApiProducts,
   listTemuOpenApiProducts,
+  listAllTemuOpenApiProductsAsSkc,
   validateSessionUser,
   verifyLogin,
 }) {
@@ -5181,6 +5185,16 @@ async function handleRequest({
       try {
         const payload = await readLoginPayload(req);
         const result = await syncTemuOpenApiProducts(payload, session.user);
+        writeJson(res, 200, { ok: true, ...result });
+      } catch (error) {
+        writeJson(res, 400, { ok: false, error: error?.message || String(error) });
+      }
+      return;
+    }
+
+    if (pathname === "/api/temu/openapi/products/skc") {
+      try {
+        const result = listAllTemuOpenApiProductsAsSkc({}, session.user);
         writeJson(res, 200, { ok: true, ...result });
       } catch (error) {
         writeJson(res, 400, { ok: false, error: error?.message || String(error) });

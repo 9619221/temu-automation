@@ -1022,7 +1022,39 @@ async function loadCloudProductBundle(): Promise<CloudProductBundle> {
         .filter((row) => isDiagnosticCloudProduct(row, null))
         .map((row) => cloudKeyFromSkc(row)),
     );
-    const skcRows = rawSkcRows.filter((row) => !isDiagnosticCloudProduct(row, null));
+    const captureSkcRows = rawSkcRows.filter((row) => !isDiagnosticCloudProduct(row, null));
+    // === 融入官方 API 商品作底列表（官方为主，抓包销量/流量按 mall|skc 叠加）===
+    // 官方商品转 SkcRow 形状；抓包 skcRows 仅保留官方未覆盖的（按 mall|skc 去重）。
+    // 抓包的销量/价格/库存/活动/流量仍由 salesRows 等按同 key enrich，不丢失。
+    let officialSkcRows: SkcRow[] = [];
+    try {
+      const officialApi = (window.electronAPI as any)?.erp?.temuOpenApi;
+      if (officialApi?.listProductsAsSkc) {
+        const officialRes = await officialApi.listProductsAsSkc();
+        officialSkcRows = (Array.isArray(officialRes?.rows) ? officialRes.rows : [])
+          .filter((r: any) => r && r.skc_id && r.mall_id)
+          .map((r: any) => ({
+            skc_id: String(r.skc_id),
+            product_id: r.product_id != null ? String(r.product_id) : null,
+            mall_id: String(r.mall_id),
+            site: null,
+            title: r.title || null,
+            category_name: null,
+            status: null,
+            thumb_url: r.thumb_url || null,
+            declared_price_cents: null,
+            suggested_price_cents: null,
+            price_currency: null,
+            sales_total: null,
+            stock_available: null,
+            last_updated_at: r.updated_at ? (Date.parse(r.updated_at) || 0) : 0,
+          } as SkcRow));
+      }
+    } catch { /* 官方读取失败不影响抓包数据 */ }
+    const officialKeys = new Set(officialSkcRows.map((r) => cloudKeyFromSkc(r)));
+    const skcRows = officialSkcRows.length
+      ? [...officialSkcRows, ...captureSkcRows.filter((row) => !officialKeys.has(cloudKeyFromSkc(row)))]
+      : captureSkcRows;
     const salesRows = (Array.isArray(sales?.rows) ? sales.rows : []).filter((row) => (
       !isDiagnosticCloudProduct(null, row) && !diagnosticSkcIds.has(cloudKeyFromSales(row))
     ));

@@ -298,6 +298,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
       unbind: (payload) => ipcRenderer.invoke("erp:temu-openapi:unbind", payload || {}),
       syncProducts: (payload) => ipcRenderer.invoke("erp:temu-openapi:products-sync", payload || {}),
       listProducts: (payload) => ipcRenderer.invoke("erp:temu-openapi:products-list", payload || {}),
+      listProductsAsSkc: () => ipcRenderer.invoke("erp:temu-openapi:products-skc"),
     },
     user: {
       list: (params) => ipcRenderer.invoke("erp:user:list", params || {}),
