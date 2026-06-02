@@ -47,8 +47,8 @@ r.get("/v1/health", authMiddleware, (req, res) => {
 r.get("/v1/activity-targets", authMiddleware, (req, res) => {
   const db = getDb();
   const tenantId = req.user.tid;
-  const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
-  const perGroupLimit = Math.min(50, Math.max(1, Number(req.query.per_group_limit) || 50));
+  const limit = Math.min(1200, Math.max(1, Number(req.query.limit) || 800));
+  const perGroupLimit = Math.min(200, Math.max(1, Number(req.query.per_group_limit) || 120));
   try {
     const rows = db.prepare(`
       WITH latest_sales AS (
@@ -98,19 +98,45 @@ r.get("/v1/activity-targets", authMiddleware, (req, res) => {
         WHERE tenant_id = ?
           AND mall_id <> ''
           AND skc_id <> ''
+          AND (
+            signup_price_cents IS NOT NULL
+            OR daily_price_cents IS NOT NULL
+            OR activity_stock IS NOT NULL
+            OR NULLIF(sku_id, '') IS NOT NULL
+            OR NULLIF(sku_ext_code, '') IS NOT NULL
+          )
         GROUP BY mall_id, skc_id
+      ),
+      ranked AS (
+        SELECT
+          d.mall_id,
+          d.site,
+          d.skc_id,
+          d.updated_at,
+          a.last_activity_at,
+          ROW_NUMBER() OVER (
+            PARTITION BY d.mall_id, d.site
+            ORDER BY
+              CASE WHEN a.last_activity_at IS NULL THEN 0 ELSE 1 END,
+              COALESCE(a.last_activity_at, '') ASC,
+              d.updated_at DESC,
+              d.skc_id ASC
+          ) AS rn
+        FROM dedup d
+        LEFT JOIN activity a
+          ON a.mall_id = d.mall_id
+         AND a.skc_id = d.skc_id
       )
-      SELECT d.mall_id, d.site, d.skc_id, d.updated_at, a.last_activity_at
-      FROM dedup d
-      LEFT JOIN activity a
-        ON a.mall_id = d.mall_id
-       AND a.skc_id = d.skc_id
+      SELECT mall_id, site, skc_id, updated_at, last_activity_at
+      FROM ranked
+      WHERE rn <= ?
       ORDER BY
-        CASE WHEN a.last_activity_at IS NULL THEN 0 ELSE 1 END,
-        COALESCE(a.last_activity_at, '') ASC,
-        d.updated_at DESC
+        CASE WHEN last_activity_at IS NULL THEN 0 ELSE 1 END,
+        COALESCE(last_activity_at, '') ASC,
+        updated_at DESC,
+        skc_id ASC
       LIMIT ?
-    `).all(tenantId, tenantId, tenantId, tenantId, limit);
+    `).all(tenantId, tenantId, tenantId, tenantId, perGroupLimit, limit);
     const groups = new Map();
     for (const row of rows) {
       const mallId = String(row.mall_id || "").trim();
@@ -427,7 +453,7 @@ r.get("/v1/enroll-tasks/status", authMiddleware, (req, res) => {
   }
 });
 
-r.post("/v1/batch", authMiddleware, (req, res) => {
+r.post("/v1/batch", authMiddleware, async (req, res) => {
   const { items } = req.body || {};
   if (!Array.isArray(items)) return res.status(400).json({ error: "items 必须是数组" });
 
@@ -475,8 +501,8 @@ r.post("/v1/batch", authMiddleware, (req, res) => {
   const now = Date.now();
   let inserted = 0;
 
-  // 事务前预先生成 event id + url_path，事务后传给 parser dispatcher
-  const enriched = items.map((it) => {
+  // 单条 enrich：生成 event id + url_path + body 落库/parser 用的 json
+  const enrichOne = (it) => {
     const url = it.url || "";
     const url_path = url.replace(/^https?:\/\/[^/]+/, "").split("?")[0] || url;
     const method = (it.method || "GET").toUpperCase();
@@ -486,15 +512,12 @@ r.post("/v1/batch", authMiddleware, (req, res) => {
     // 飞书等非业务路径整条不落库；Temu 大响应(>200KB)只存元数据、body_json 置空
     const skipRow = NON_BUSINESS_PATH_RE.test(url_path);
     const body_json = (!parser_json || parser_json.length > MAX_STORE_BODY) ? null : parser_json;
-    return {
-      id: crypto.randomUUID(),
-      url, url_path, method, body_json, parser_json, skipRow,
-      it,
-    };
-  });
+    return { id: crypto.randomUUID(), url, url_path, method, body_json, parser_json, skipRow, it };
+  };
 
-  const tx = db.transaction(() => {
-    for (const e of enriched) {
+  // 单块入库事务（小事务，逐块提交）
+  const txChunk = db.transaction((chunk) => {
+    for (const e of chunk) {
       if (e.skipRow) continue;
       insertEvt.run(
         e.id,
@@ -521,22 +544,31 @@ r.post("/v1/batch", authMiddleware, (req, res) => {
       inserted++;
     }
   });
-  tx();
 
-  // parser 在主事务外跑，失败不影响 ingest 主流程
-  try {
-    const parserItems = enriched.filter((e) => !e.skipRow).map((e) => ({
-      id: e.id,
-      url_path: e.url_path,
-      page: e.it.page || null,
-      body_json: e.parser_json,
-      ts: Number(e.it.ts) || now,
-      mall_id: e.it.mall_id || null,
-      site: e.it.site || null,
-    }));
-    dispatchParsers(db, { tenant_id, device_id }, parserItems);
-  } catch (e) {
-    console.warn("[ingest] dispatchParsers failed:", e?.message);
+  // ★ 分块处理 + 块间 setImmediate 让出事件循环：避免单个大批量请求独占单线程
+  // 数秒、把 login/dashboard 饿死导致 Caddy 502。把一个大事务 + 全量 parser 拆成
+  // 每 CHUNK 条一个小事务 + 该块 parser，块之间让事件循环喘口气。
+  const CHUNK = 150;
+  const yieldLoop = () => new Promise((resolve) => setImmediate(resolve));
+  for (let i = 0; i < items.length; i += CHUNK) {
+    const enriched = items.slice(i, i + CHUNK).map(enrichOne);
+    txChunk(enriched);
+    // parser 在主事务外跑，失败不影响 ingest 主流程
+    try {
+      const parserItems = enriched.filter((e) => !e.skipRow).map((e) => ({
+        id: e.id,
+        url_path: e.url_path,
+        page: e.it.page || null,
+        body_json: e.parser_json,
+        ts: Number(e.it.ts) || now,
+        mall_id: e.it.mall_id || null,
+        site: e.it.site || null,
+      }));
+      dispatchParsers(db, { tenant_id, device_id }, parserItems);
+    } catch (e) {
+      console.warn("[ingest] dispatchParsers failed:", e?.message);
+    }
+    if (i + CHUNK < items.length) await yieldLoop();
   }
 
   res.json({ ok: true, inserted });

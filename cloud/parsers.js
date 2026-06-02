@@ -1843,6 +1843,62 @@ function activityMetaFromRequest(body) {
   };
 }
 
+const NO_ACTIVITY_STATUS = "\u672a\u53c2\u52a0\u6d3b\u52a8";
+
+function isActiveActivityLibraryEvent(evt) {
+  return /\/marketing\/enroll\/list/i.test(String(evt?.url_path || evt?.url || ""));
+}
+
+function requestedActivitySkcIds(body) {
+  const req = body?.__request;
+  if (!isRecord(req) || !Array.isArray(req.productSkcIds)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const value of req.productSkcIds) {
+    const id = String(value == null ? "" : value).trim();
+    if (!/^\d{5,}$/.test(id) || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+function itemActivitySkcIds(item, out) {
+  if (!isRecord(item)) return;
+  const direct = firstDefined(item, ["productSkcId", "skcId", "skc_id"]);
+  if (direct != null && /^\d{5,}$/.test(String(direct))) out.add(String(direct));
+  const skcList = Array.isArray(item.skcList) ? item.skcList : [];
+  for (const skc of skcList) {
+    if (!isRecord(skc)) continue;
+    const skcId = firstDefined(skc, ["productSkcId", "skcId", "skc_id"]);
+    if (skcId != null && /^\d{5,}$/.test(String(skcId))) out.add(String(skcId));
+  }
+}
+
+function appendMissingActivitySkcItems(items, body, evt, meta) {
+  if (!isActiveActivityLibraryEvent(evt)) return items;
+  const requested = requestedActivitySkcIds(body);
+  if (!requested.length) return items;
+  const present = new Set();
+  for (const item of items) itemActivitySkcIds(item, present);
+  const next = [...items];
+  for (const skcId of requested) {
+    if (present.has(skcId)) continue;
+    next.push({
+      productSkcId: skcId,
+      activityStatus: NO_ACTIVITY_STATUS,
+      __checkedNoActivity: true,
+      __activity_meta: mergeActivityMeta(meta, {
+        activityId: `no-activity:${skcId}`,
+        activityTitle: NO_ACTIVITY_STATUS,
+        activityType: NO_ACTIVITY_STATUS,
+        skcId,
+      }),
+    });
+  }
+  return next;
+}
+
 function activityListFromRoot(root) {
   const out = [];
   if (Array.isArray(root)) out.push(["result", root]);
@@ -1951,18 +2007,22 @@ function pickActivityItems(body, evt) {
     const out = [];
     const meta = mergeActivityMeta(activityMetaForPath(evt.url_path, "list"), requestMeta);
     for (const item of list) pushActivityItem(out, item, meta, evt);
-    if (out.length) return out;
+    const withMissing = appendMissingActivitySkcItems(out, body, evt, meta);
+    if (withMissing.length) return withMissing;
     return list;
   }
   const result = body?.result ?? body?.data ?? body;
   const out = [];
+  const baseMeta = mergeActivityMeta(activityMetaForPath(evt.url_path), requestMeta);
   for (const [arrayKey, array] of activityListFromRoot(result)) {
     const meta = mergeActivityMeta(activityMetaForPath(evt.url_path, arrayKey), requestMeta);
     for (const item of array) pushActivityItem(out, item, meta, evt);
   }
-  if (out.length) return out;
+  const withMissing = appendMissingActivitySkcItems(out, body, evt, baseMeta);
+  if (withMissing.length) return withMissing;
+  if (isActiveActivityLibraryEvent(evt)) return [];
   return result && typeof result === "object"
-    ? [{ ...result, __activity_meta: mergeActivityMeta(activityMetaForPath(evt.url_path), requestMeta) }]
+    ? [{ ...result, __activity_meta: baseMeta }]
     : [];
 }
 
@@ -2176,6 +2236,7 @@ function parseActivitySnapshot(db, ctx, evt, body) {
       end_at: toNullableString(firstDefined(item, ["endTime", "finishTime", "sessionEndTime", "activityEndTime", "validEndTime"])),
       metric_json: toJsonText({
         activityType: activity_type,
+        checkedNoActivity: item.__checkedNoActivity === true ? 1 : 0,
         skuId: firstDefined(item, ["productSkuId", "prodSkuId", "skuId", "sku_id"]),
         skuExtCode: firstDefined(item, ["skuExtCode", "skuCode", "extCode", "externalSkuCode"]),
         skuAttrText: activitySkuAttrText(item),
@@ -2199,7 +2260,9 @@ function parseActivitySnapshot(db, ctx, evt, body) {
         visitorsClickConversionRate: firstDefined(item, ["visitorsClickConversionRate", "clickConversionRate"]),
         visitorsPayConversionRate: firstDefined(item, ["visitorsPayConversionRate", "payConversionRate"]),
       }, 20000),
-      raw_json: toJsonText(item),
+      // raw_json 不再落库：结构化字段已拆成正式列 + metric_json，控制台不消费 raw_json，
+      // 而它每行 ~33KB、每天累积 ~1GB（曾撑到 5.7G 拖慢全表冷扫）。置 null 止血。
+      raw_json: null,
       source_event_id: evt.id,
       sources_json,
     });
