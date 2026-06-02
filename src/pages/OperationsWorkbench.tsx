@@ -27,6 +27,7 @@ interface ActivityRow {
   kind: string | null; title: string | null; status: string | null;
   activity_id: string | null; product_id: string | null; activity_type: number | null; sku_id: string | null;
   sku_ext_code: string | null; skc_id: string | null;
+  product_name: string | null; thumb: string | null;
   signup_price: number | null; suggested_price: number | null; price_diff: number | null;
   activity_stock: number; cost: number | null; end_at: string | null; stat_date: string | null;
   __rk?: number;
@@ -586,7 +587,7 @@ export default function OperationsWorkbench() {
     if (kindFilter !== "all") v = v.filter((r) => r.kind === kindFilter);
     if (actSkuOnly) v = v.filter((r) => r.sku_ext_code); // 仅看有货号的行(滤掉活动表头噪声)
     const q = search.trim().toLowerCase();
-    if (q) v = v.filter((r) => (r.title || "").toLowerCase().includes(q) || (r.sku_ext_code || "").toLowerCase().includes(q));
+    if (q) v = v.filter((r) => (r.product_name || r.title || "").toLowerCase().includes(q) || (r.sku_ext_code || "").toLowerCase().includes(q));
     // 去重:同 货号+活动+申报价+参考价 的完全重复行只留一条
     const seen = new Set<string>();
     v = v.filter((r) => {
@@ -756,7 +757,15 @@ export default function OperationsWorkbench() {
   const actColumns: ColumnsType<ActivityRow> = [
     storeCol,
     { title: "类型", dataIndex: "kind", width: 70, render: (v: string | null) => <Tag color={v === "bidding" ? "purple" : v === "coupon" ? "cyan" : "blue"}>{KIND_LABEL[v || ""] || v || "—"}</Tag> },
-    { title: "货号 / 活动", key: "at", width: 280, render: (_, r) => <div>{r.sku_ext_code ? <Typography.Text copyable={{ text: r.sku_ext_code }} style={{ fontSize: 12, fontWeight: 600 }}>{r.sku_ext_code}</Typography.Text> : <span style={{ color: "#bbb", fontSize: 12 }}>(无货号·活动表头)</span>}<div style={{ color: "#888", fontSize: 12, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title || "(未命名活动)"}</div></div> },
+    { title: "商品 / 货号", key: "at", width: 320, render: (_, r) => (
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        {r.thumb ? <div style={{ flexShrink: 0, width: 40, height: 40 }}><Image src={r.thumb} width={40} height={40} style={{ objectFit: "cover", borderRadius: 4 }} preview={{ mask: <EyeOutlined /> }} /></div> : <div style={{ width: 40, height: 40, borderRadius: 4, background: "#f0f0f0", flexShrink: 0 }} />}
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ fontSize: 12, maxWidth: 250, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.product_name || undefined}>{r.product_name || <span style={{ color: "#bbb" }}>(无商品名)</span>}</div>
+          {r.sku_ext_code ? <Typography.Text copyable={{ text: r.sku_ext_code }} style={{ fontSize: 12, fontWeight: 600 }}>{r.sku_ext_code}</Typography.Text> : <span style={{ color: "#bbb", fontSize: 12 }}>(无货号·活动表头)</span>}
+        </div>
+      </div>
+    ) },
     { title: "可报活动", key: "actcnt", width: 80, align: "center", render: (_, r) => { const n = r.sku_ext_code ? (skuActCount.get(r.sku_ext_code) || 0) : 0; return n > 0 ? <Tag color={n >= 3 ? "green" : "blue"}>{n} 个</Tag> : <span style={{ color: "#bbb" }}>—</span>; }, sorter: (a, b) => (skuActCount.get(a.sku_ext_code || "") || 0) - (skuActCount.get(b.sku_ext_code || "") || 0) },
     { title: "原申报价", dataIndex: "signup_price", width: 80, align: "right", render: (v) => fmtMoney(v) },
     { title: "活动参考价", dataIndex: "suggested_price", width: 90, align: "right", render: (v: number | null) => (v == null ? <span style={{ color: "#bbb" }}>—</span> : fmtMoney(v)) },

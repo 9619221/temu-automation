@@ -646,10 +646,12 @@ function buildActivityList(db, options = {}) {
     SELECT a.mall_id, m.store_code, m.mall_name, a.activity_kind, a.activity_title, a.activity_status,
            a.sku_ext_code, a.skc_id, a.signup_price_cents, a.suggested_price_cents,
            a.signup_price_diff_cents, a.activity_stock, a.end_at, a.stat_date, k.wac AS cost,
-           a.activity_id, a.product_id, a.activity_type, a.sku_id
+           a.activity_id, a.product_id, a.activity_type, a.sku_id,
+           sc.title AS prod_title, sc.thumb_url AS thumb
       FROM cloud.temu_activity_snapshot a
       JOIN latest l ON l.mall_id = a.mall_id AND l.sd = a.stat_date
       LEFT JOIN erp_temu_malls m ON m.mall_id = a.mall_id
+      LEFT JOIN cloud.skc_snapshots sc ON sc.tenant_id = a.tenant_id AND sc.skc_id = a.skc_id
       LEFT JOIN (SELECT internal_sku_code,
                         MAX(COALESCE(NULLIF(weighted_avg_cost,0), NULLIF(jst_cost_price,0))) AS wac
                    FROM erp_skus GROUP BY internal_sku_code) k
@@ -667,6 +669,7 @@ function buildActivityList(db, options = {}) {
     activity_id: a.activity_id || null, product_id: a.product_id || null,
     activity_type: a.activity_type != null ? Number(a.activity_type) : null, sku_id: a.sku_id || null,
     sku_ext_code: a.sku_ext_code || null, skc_id: a.skc_id || null,
+    product_name: a.prod_title || a.activity_title || null, thumb: a.thumb || null,
     signup_price: centsToYuan(a.signup_price_cents), suggested_price: centsToYuan(a.suggested_price_cents),
     price_diff: centsToYuan(a.signup_price_diff_cents), activity_stock: toNum(a.activity_stock),
     cost: a.cost != null && Number(a.cost) > 0 ? Number(a.cost) : null,
