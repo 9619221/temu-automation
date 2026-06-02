@@ -34,8 +34,9 @@ async function main() {
     const prOk = pr.results.filter((r) => r.ok);
     const products = prOk.reduce((sum, r) => sum + (r.productCount || 0), 0);
     log(`products: malls=${pr.malls} ok=${prOk.length} products=${products}`);
-    // 2) 多源（采购/发货/销售/售后/库存）—— 库存逐 SKC，较慢
-    const cr = await collectors.syncAllCollectorsAllMalls(db);
+    // 2) 多源（采购/发货/销售/售后）—— 库存逐 SKC 太慢(8店×上千SKC=数小时)，
+    //    从自动采集摘出，改按需手动触发（skipInventory）
+    const cr = await collectors.syncAllCollectorsAllMalls(db, { skipInventory: true });
     const crOk = cr.results.filter((r) => r.ok);
     log(`records: malls=${cr.malls} ok=${crOk.length} summary=${JSON.stringify(crOk.map((r) => r.summary))}`);
     log(`all done in ${Date.now() - t0}ms`);

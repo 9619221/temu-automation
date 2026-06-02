@@ -2671,11 +2671,11 @@ function syncTemuOpenApiProducts(payload = {}, actor = {}) {
             `).run(msg, nowIso(), mallId);
           } catch { /* ignore */ }
         }
-        // 商品采集后再采多源（库存依赖商品的 productSkcId）
-        try { await temuOpenApiCollectors.syncAllCollectorsForMall(db, target); } catch { /* 已回写状态 */ }
+        // 商品采集后再采多源（库存太慢，从默认路径摘出，按需单独触发）
+        try { await temuOpenApiCollectors.syncAllCollectorsForMall(db, target, { skipInventory: true }); } catch { /* 已回写状态 */ }
       } else {
         await temuOpenApiProductSync.syncAllMalls(db);
-        await temuOpenApiCollectors.syncAllCollectorsAllMalls(db);
+        await temuOpenApiCollectors.syncAllCollectorsAllMalls(db, { skipInventory: true });
       }
     })
     .catch(() => { /* 已在内部回写错误状态 */ })

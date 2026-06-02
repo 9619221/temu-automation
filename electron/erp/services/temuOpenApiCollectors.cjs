@@ -233,7 +233,7 @@ async function syncAllCollectorsForMall(db, mallRow, opts = {}) {
   return { mallId, summary };
 }
 
-async function syncAllCollectorsAllMalls(db) {
+async function syncAllCollectorsAllMalls(db, opts = {}) {
   const malls = db.prepare(`
     SELECT * FROM erp_temu_openapi_auth
     WHERE status='active' AND access_token IS NOT NULL AND access_token <> ''
@@ -241,7 +241,7 @@ async function syncAllCollectorsAllMalls(db) {
   `).all();
   const results = [];
   for (const m of malls) {
-    try { results.push({ ok: true, ...(await syncAllCollectorsForMall(db, m)) }); }
+    try { results.push({ ok: true, ...(await syncAllCollectorsForMall(db, m, opts)) }); }
     catch (e) { results.push({ ok: false, mallId: m.mall_id, error: String(e?.message || e) }); }
   }
   return { malls: results.length, results };
