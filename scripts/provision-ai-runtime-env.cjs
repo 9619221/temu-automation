@@ -34,6 +34,9 @@ const MAP = {
   GPT_GENERATE_MODEL: "gptGenerateModel",
   GENERATE_MODEL_OVERRIDES: "gptGenerateModelOverrides",
   GENERATE_QUALITY_TIER: "gptGenerateQualityTier",
+  // 生图子进程鉴权 secret（Bearer）。漏了会让 /api/history 等本地接口报「未授权访问」。
+  // 必须纳入白名单，否则本脚本的全覆盖写会把 build:image-studio 拷进来的 API_SECRET 抹掉。
+  API_SECRET: "apiSecret",
 };
 
 const lines = [];

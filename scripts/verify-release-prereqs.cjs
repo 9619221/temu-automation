@@ -51,6 +51,11 @@ function assertAiCredentialsMatchRuntimeEnv(env) {
   if (!baked.analyzeModel || baked.analyzeModel !== env.ANALYZE_MODEL) {
     throw new Error("electron/default-credentials.cjs 的 analyzeModel 与 build/auto-image-gen-runtime/.env.local 不一致");
   }
+  // 生图子进程鉴权 secret：缺失或不匹配会让 /api/history 等接口报「未授权访问」。
+  // 这是发版卡口——历史上 provision 全覆盖写漏掉 API_SECRET 已导致线上复发，必须在打包前拦住。
+  if (!baked.apiSecret || baked.apiSecret !== env.API_SECRET) {
+    throw new Error("electron/default-credentials.cjs 的 apiSecret 与 build/auto-image-gen-runtime/.env.local 的 API_SECRET 缺失或不一致（会导致生图「未授权访问」）");
+  }
 }
 
 function assertExtensionResourceConfigured(buildConfig) {
