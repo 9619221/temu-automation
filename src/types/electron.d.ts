@@ -538,6 +538,10 @@ interface TemuOpenApiBinding {
   lastProductSyncAt?: string;
   lastProductSyncStatus?: string;
   lastProductSyncError?: string;
+  lastRecordsSyncAt?: string;
+  lastRecordsSyncStatus?: string;
+  lastRecordsSyncError?: string;
+  recordsSyncSummary?: Record<string, number>;
 }
 
 interface ErpAPI {

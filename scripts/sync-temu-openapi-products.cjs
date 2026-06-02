@@ -18,9 +18,10 @@ const ERP_DB = process.env.ERP_DB
   || path.join(process.env.ERP_DATA_DIR || "/opt/temu-erp-data", "erp.sqlite");
 
 const svc = require("../electron/erp/services/temuOpenApiProductSync.cjs");
+const collectors = require("../electron/erp/services/temuOpenApiCollectors.cjs");
 
 function log(...args) {
-  console.log(new Date().toISOString(), "[temu-openapi-products]", ...args);
+  console.log(new Date().toISOString(), "[temu-openapi-sync]", ...args);
 }
 
 async function main() {
@@ -28,12 +29,16 @@ async function main() {
   const db = new Database(ERP_DB);
   db.pragma("busy_timeout=60000");
   try {
-    const result = await svc.syncAllMalls(db);
-    const ok = result.results.filter((r) => r.ok);
-    const failed = result.results.filter((r) => r && r.ok === false);
-    const products = ok.reduce((sum, r) => sum + (r.productCount || 0), 0);
-    log(`done: malls=${result.malls} ok=${ok.length} failed=${failed.length} products=${products} in ${Date.now() - t0}ms`);
-    for (const f of failed) log(`  FAIL mall=${f.mallId}: ${f.error}`);
+    // 1) 商品主数据
+    const pr = await svc.syncAllMalls(db);
+    const prOk = pr.results.filter((r) => r.ok);
+    const products = prOk.reduce((sum, r) => sum + (r.productCount || 0), 0);
+    log(`products: malls=${pr.malls} ok=${prOk.length} products=${products}`);
+    // 2) 多源（采购/发货/销售/售后/库存）—— 库存逐 SKC，较慢
+    const cr = await collectors.syncAllCollectorsAllMalls(db);
+    const crOk = cr.results.filter((r) => r.ok);
+    log(`records: malls=${cr.malls} ok=${crOk.length} summary=${JSON.stringify(crOk.map((r) => r.summary))}`);
+    log(`all done in ${Date.now() - t0}ms`);
   } finally {
     db.close();
   }

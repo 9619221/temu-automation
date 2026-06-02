@@ -55,6 +55,7 @@ const {
 } = require("./1688Client.cjs");
 const { validateTemuOpenApiToken, resolveTemuAppCredentials } = require("./temuOpenApiClient.cjs");
 const temuOpenApiProductSync = require("./services/temuOpenApiProductSync.cjs");
+const temuOpenApiCollectors = require("./services/temuOpenApiCollectors.cjs");
 const {
   imageSearchProduct: imageSearchAlphaShopProduct,
   productDetailQuery: alphaShopProductDetailQuery,
@@ -2470,6 +2471,12 @@ function toTemuOpenApiStatus(row) {
     lastProductSyncAt: row.last_product_sync_at || "",
     lastProductSyncStatus: row.last_product_sync_status || "",
     lastProductSyncError: row.last_product_sync_error || "",
+    lastRecordsSyncAt: row.last_records_sync_at || "",
+    lastRecordsSyncStatus: row.last_records_sync_status || "",
+    lastRecordsSyncError: row.last_records_sync_error || "",
+    recordsSyncSummary: (() => {
+      try { return JSON.parse(row.records_sync_summary_json || "{}"); } catch { return {}; }
+    })(),
   };
 }
 
@@ -2648,7 +2655,7 @@ function syncTemuOpenApiProducts(payload = {}, actor = {}) {
   }
 
   temuProductSyncInFlight.add(key);
-  // 后台跑，不阻塞 HTTP 响应；状态/错误由 service 回写到 erp_temu_openapi_auth
+  // 后台跑：商品主数据 + 多源(采购/发货/销售/售后/库存)。状态/错误由 service 回写到 erp_temu_openapi_auth
   Promise.resolve()
     .then(async () => {
       if (mallId) {
@@ -2664,8 +2671,11 @@ function syncTemuOpenApiProducts(payload = {}, actor = {}) {
             `).run(msg, nowIso(), mallId);
           } catch { /* ignore */ }
         }
+        // 商品采集后再采多源（库存依赖商品的 productSkcId）
+        try { await temuOpenApiCollectors.syncAllCollectorsForMall(db, target); } catch { /* 已回写状态 */ }
       } else {
         await temuOpenApiProductSync.syncAllMalls(db);
+        await temuOpenApiCollectors.syncAllCollectorsAllMalls(db);
       }
     })
     .catch(() => { /* 已在内部回写错误状态 */ })

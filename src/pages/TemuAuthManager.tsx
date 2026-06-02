@@ -23,6 +23,10 @@ interface TemuOpenApiBinding {
   lastProductSyncAt?: string;
   lastProductSyncStatus?: string;
   lastProductSyncError?: string;
+  lastRecordsSyncAt?: string;
+  lastRecordsSyncStatus?: string;
+  lastRecordsSyncError?: string;
+  recordsSyncSummary?: Record<string, number>;
 }
 
 const REGION_OPTIONS = [
@@ -198,6 +202,36 @@ export default function TemuAuthManager() {
               ) : null}
             </Space>
             <span style={{ color: "#667085", fontSize: 12 }}>{time}</span>
+          </Space>
+        );
+      },
+    },
+    {
+      title: "多源采集",
+      key: "recordsSync",
+      width: 230,
+      render: (_value, row) => {
+        const sum = row.recordsSyncSummary || {};
+        if (!row.lastRecordsSyncAt) return <span style={{ color: "#98a2b3" }}>未采集</span>;
+        const labels: Record<string, string> = {
+          purchase_order: "采购", ship_order: "发货", sales: "销售", return: "售后", inventory: "库存",
+        };
+        const parts = Object.keys(labels)
+          .filter((k) => sum[k] !== undefined)
+          .map((k) => `${labels[k]}${sum[k] < 0 ? "✕" : sum[k]}`);
+        return (
+          <Space direction="vertical" size={0}>
+            <Space size={4} wrap>
+              <span style={{ fontSize: 12 }}>{parts.join(" · ")}</span>
+              {row.lastRecordsSyncStatus === "partial" ? (
+                <Tooltip title={row.lastRecordsSyncError || "部分源采集失败"}>
+                  <Tag color="warning">部分失败</Tag>
+                </Tooltip>
+              ) : null}
+            </Space>
+            <span style={{ color: "#667085", fontSize: 12 }}>
+              {new Date(row.lastRecordsSyncAt).toLocaleString("zh-CN", { hour12: false })}
+            </span>
           </Space>
         );
       },
