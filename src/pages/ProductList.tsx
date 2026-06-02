@@ -999,8 +999,10 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, messageText: str
 async function fetchOfficialSkcRows(): Promise<SkcRow[]> {
   try {
     const officialApi = (window.electronAPI as any)?.erp?.temuOpenApi;
-    if (!officialApi?.listProductsAsSkc) return [];
+    if (!officialApi?.listProductsAsSkc) { console.warn("[OFFICIAL-DIAG] listProductsAsSkc 不存在(preload未更新)"); return []; }
     const res = await officialApi.listProductsAsSkc();
+    const _rows0 = Array.isArray(res?.rows) ? res.rows : [];
+    console.warn(`[OFFICIAL-DIAG] skc rows=${_rows0.length} firstSkusJson=${_rows0[0]?.skus_json ? String(_rows0[0].skus_json).slice(0,80) : "NULL"} firstExt=${_rows0[0]?.ext_code ?? "NULL"}`);
     return (Array.isArray(res?.rows) ? res.rows : [])
       .filter((r: any) => r && r.skc_id && r.mall_id)
       .map((r: any) => ({
@@ -1032,8 +1034,11 @@ async function fetchOfficialSkcRows(): Promise<SkcRow[]> {
 async function fetchOfficialSales(): Promise<TemuSalesRow[]> {
   try {
     const officialApi = (window.electronAPI as any)?.erp?.temuOpenApi;
-    if (!officialApi?.listSales) return [];
+    if (!officialApi?.listSales) { console.warn("[OFFICIAL-DIAG] listSales 不存在(preload未更新,需重启dev)"); return []; }
     const res = await officialApi.listSales();
+    const _rows0 = Array.isArray(res?.rows) ? res.rows : [];
+    const _withSales = _rows0.filter((r: any) => (r?.total_sales ?? 0) > 0).length;
+    console.warn(`[OFFICIAL-DIAG] sales rows=${_rows0.length} withSales>0=${_withSales} first=${_rows0[0] ? JSON.stringify({skc:_rows0[0].skc_id, mall:_rows0[0].mall_supplier_id, t:_rows0[0].today_sales}) : "NONE"}`);
     return (Array.isArray(res?.rows) ? res.rows : [])
       .filter((r: any) => r && r.skc_id && r.mall_supplier_id)
       .map((r: any) => ({
@@ -1056,6 +1061,7 @@ function mergeOfficialIntoBundle(
   officialSkcRows: SkcRow[],
   officialSalesRows: TemuSalesRow[],
 ): CloudProductBundle {
+  console.warn(`[OFFICIAL-DIAG] merge: officialSkc=${officialSkcRows.length} officialSales=${officialSalesRows.length} captureSkc=${bundle.skcRows.length} captureSales=${bundle.salesRows.length} bundleErr=${bundle.error || "none"}`);
   if (!officialSkcRows.length && !officialSalesRows.length) return bundle;
   const officialSkcKeys = new Set(officialSkcRows.map((r) => cloudKeyFromSkc(r)));
   const captureSkcOnly = bundle.skcRows.filter((row) => !officialSkcKeys.has(cloudKeyFromSkc(row)));
