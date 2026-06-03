@@ -1053,7 +1053,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
     () => readPageCache<ProductMasterDataCache>(PRODUCT_MASTER_DATA_CACHE_KEY, {}),
     [],
   );
-  const canManageAccounts = canRole(role, ["admin", "manager"]);
+  const canManageAccounts = canRole(role, ["admin", "manager", "operations"]);
   const canManageStoreAddress = canRole(role, ["admin", "manager", "buyer"]);
   const canViewSuppliers = canRole(role, ["admin", "buyer"]);
   const canManageSuppliers = canViewSuppliers;
@@ -2685,6 +2685,11 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
           mode === "suppliers" && canManageSuppliers ? (
             <Button key="new-supplier" type="primary" icon={<PlusOutlined />} onClick={() => openSupplierModal()}>
               新增供应商
+            </Button>
+          ) : null,
+          mode === "skus" && canManageAccounts ? (
+            <Button key="new-store" icon={<PlusOutlined />} onClick={openCreateAccountModal}>
+              新增店铺
             </Button>
           ) : null,
           <Button key="refresh" icon={<ReloadOutlined />} loading={loading} onClick={() => void loadAll({ forceFull: true })}>

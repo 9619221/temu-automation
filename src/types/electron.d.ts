@@ -595,6 +595,7 @@ interface ErpAPI {
     }>;
     listProductsAsSkc: () => Promise<{ rows: any[] }>;
     listSales: () => Promise<{ rows: any[] }>;
+    listRecords: (source: string) => Promise<{ rows: any[] }>;
   };
   user: {
     list: (params?: ErpListParams) => Promise<any[]>;

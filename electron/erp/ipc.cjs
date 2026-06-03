@@ -2814,6 +2814,51 @@ async function listAllTemuOpenApiSalesRuntime(payload = {}, actor = {}) {
   return listAllTemuOpenApiSales(payload || {}, actor);
 }
 
+// 通用：按 source 读官方扩展采集数据（广告/流量、生命周期、爆款邀约、商品维度等），
+// 一个接口覆盖多源，避免重复接线。返回精简后的通用行 + 解析后的 raw。
+const TEMU_OPENAPI_RECORD_SOURCES = new Set([
+  "ad_report_mall", "ad_report_goods", "product_lifecycle", "best_seller_invitation",
+  "sales", "inventory", "purchase_order", "ship_order", "return",
+]);
+function listTemuOpenApiRecordsBySource(payload = {}, actor = {}) {
+  assertActorRole(actor, ["admin", "manager", "operations", "buyer", "viewer", "finance"], "查看 Temu 官方扩展数据");
+  const source = String((payload && payload.source) || "");
+  if (!TEMU_OPENAPI_RECORD_SOURCES.has(source)) return { rows: [] };
+  const { db } = requireErp();
+  // 广告报表(ad_report_*)需要 raw_json 里的指标体；生命周期/邀约等只用通用列，
+  // 解析+回传 raw 会让 1.8w+ 行的 payload 巨大且慢，故仅广告源带 raw。
+  const needRaw = source.startsWith("ad_report");
+  const records = db.prepare(`
+    SELECT r.mall_id, r.product_id, r.product_skc_id, r.ext_code, r.status, r.biz_time${needRaw ? ", r.raw_json" : ""}
+    FROM erp_temu_openapi_records r
+    JOIN erp_temu_openapi_auth a ON a.mall_id = r.mall_id AND a.status = 'active'
+    WHERE r.source = ?
+  `).all(source);
+  const rows = records.map((rec) => {
+    let raw = null;
+    if (needRaw) { try { raw = rec.raw_json ? JSON.parse(rec.raw_json) : null; } catch { raw = null; } }
+    return {
+      mall_id: rec.mall_id,
+      product_id: rec.product_id,
+      product_skc_id: rec.product_skc_id,
+      ext_code: rec.ext_code,
+      status: rec.status,
+      biz_time: rec.biz_time,
+      raw,
+    };
+  });
+  return { rows };
+}
+
+async function listTemuOpenApiRecordsBySourceRuntime(payload = {}, actor = {}) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    const source = encodeURIComponent(String((payload && payload.source) || ""));
+    return await remoteRequest(`/api/temu/openapi/records?source=${source}`, { method: "GET" });
+  }
+  return listTemuOpenApiRecordsBySource(payload || {}, actor);
+}
+
 function create1688AuthorizeUrl(payload = {}, actor = {}) {
   let savedStatus = null;
   if (payload.appKey || payload.app_key || payload.appSecret || payload.app_secret || payload.redirectUri || payload.redirect_uri) {
@@ -21433,6 +21478,7 @@ function startLanService(payload = {}) {
     listTemuOpenApiProducts,
     listAllTemuOpenApiProductsAsSkc,
     listAllTemuOpenApiSales,
+    listTemuOpenApiRecordsBySource,
     ingestJushuitanExtensionBatch,
   });
 }
@@ -21633,6 +21679,7 @@ async function startErpHeadlessServer(options = {}) {
     listTemuOpenApiProducts,
     listAllTemuOpenApiProductsAsSkc,
     listAllTemuOpenApiSales,
+    listTemuOpenApiRecordsBySource,
     ingestJushuitanExtensionBatch,
   });
   const auto1688OrderSync = startAuto1688OrderSync(env);
@@ -21933,6 +21980,7 @@ function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:temu-openapi:products-list", (_event, payload) => listTemuOpenApiProductsRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:temu-openapi:products-skc", (_event, payload) => listAllTemuOpenApiProductsAsSkcRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:temu-openapi:sales", (_event, payload) => listAllTemuOpenApiSalesRuntime(payload || {}, erpState.currentUser || {}));
+  ipcMain.handle("erp:temu-openapi:records", (_event, payload) => listTemuOpenApiRecordsBySourceRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:user:list", (_event, params) => {
     if (!shouldUseClientRuntime()) assertHostMode("用户管理");
     return listUsersRuntime(params || {});

@@ -278,6 +278,22 @@ const EMPTY_COUNT_SUMMARY: ProductCountSummary = {
 };
 
 const CLOUD_PRODUCTS_ONLY: boolean = true;
+// 官方 selectStatus(选品/生命周期状态)码 -> 中文。
+// 已由卖家后台「上新生命周期管理」两店的状态聚合(productSkcStatusAggregation)逐码对 Tab 计数确认。
+// 注：部分 Tab 由多码合并 —— 未发布={1,14,15}，价格申报中={7,9}。
+const SELECT_STATUS_LABELS: Record<string, string> = {
+  "1": "未发布", "14": "未发布", "15": "未发布",
+  "3": "待寄样",
+  "7": "价格申报中", "9": "价格申报中",
+  "10": "待创建首单",
+  "11": "已创建首单",
+  "12": "已发布到站点", // 在售
+  "13": "已下架/终止",
+};
+function selectStatusLabel(code: string | null | undefined): string {
+  if (code == null || code === "") return "—";
+  return SELECT_STATUS_LABELS[String(code)] || `选品状态-${code}`;
+}
 const CLOUD_PRODUCT_BUNDLE_CACHE_KEY = "temu.product-list.cloud-bundle.cache.v1";
 const CLOUD_PRODUCT_FETCH_TIMEOUT_MS = 10000;
 
@@ -999,10 +1015,8 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, messageText: str
 async function fetchOfficialSkcRows(): Promise<SkcRow[]> {
   try {
     const officialApi = (window.electronAPI as any)?.erp?.temuOpenApi;
-    if (!officialApi?.listProductsAsSkc) { console.warn("[OFFICIAL-DIAG] listProductsAsSkc 不存在(preload未更新)"); return []; }
+    if (!officialApi?.listProductsAsSkc) return [];
     const res = await officialApi.listProductsAsSkc();
-    const _rows0 = Array.isArray(res?.rows) ? res.rows : [];
-    console.warn(`[OFFICIAL-DIAG] skc rows=${_rows0.length} firstSkusJson=${_rows0[0]?.skus_json ? String(_rows0[0].skus_json).slice(0,80) : "NULL"} firstExt=${_rows0[0]?.ext_code ?? "NULL"}`);
     return (Array.isArray(res?.rows) ? res.rows : [])
       .filter((r: any) => r && r.skc_id && r.mall_id)
       .map((r: any) => ({
@@ -1034,11 +1048,8 @@ async function fetchOfficialSkcRows(): Promise<SkcRow[]> {
 async function fetchOfficialSales(): Promise<TemuSalesRow[]> {
   try {
     const officialApi = (window.electronAPI as any)?.erp?.temuOpenApi;
-    if (!officialApi?.listSales) { console.warn("[OFFICIAL-DIAG] listSales 不存在(preload未更新,需重启dev)"); return []; }
+    if (!officialApi?.listSales) return [];
     const res = await officialApi.listSales();
-    const _rows0 = Array.isArray(res?.rows) ? res.rows : [];
-    const _withSales = _rows0.filter((r: any) => (r?.total_sales ?? 0) > 0).length;
-    console.warn(`[OFFICIAL-DIAG] sales rows=${_rows0.length} withSales>0=${_withSales} first=${_rows0[0] ? JSON.stringify({skc:_rows0[0].skc_id, mall:_rows0[0].mall_supplier_id, t:_rows0[0].today_sales}) : "NONE"}`);
     return (Array.isArray(res?.rows) ? res.rows : [])
       .filter((r: any) => r && r.skc_id && r.mall_supplier_id)
       .map((r: any) => ({
@@ -1061,7 +1072,6 @@ function mergeOfficialIntoBundle(
   officialSkcRows: SkcRow[],
   officialSalesRows: TemuSalesRow[],
 ): CloudProductBundle {
-  console.warn(`[OFFICIAL-DIAG] merge: officialSkc=${officialSkcRows.length} officialSales=${officialSalesRows.length} captureSkc=${bundle.skcRows.length} captureSales=${bundle.salesRows.length} bundleErr=${bundle.error || "none"}`);
   if (!officialSkcRows.length && !officialSalesRows.length) return bundle;
   const officialSkcKeys = new Set(officialSkcRows.map((r) => cloudKeyFromSkc(r)));
   const captureSkcOnly = bundle.skcRows.filter((row) => !officialSkcKeys.has(cloudKeyFromSkc(row)));
@@ -3290,6 +3300,8 @@ function mergeFluxSiteData(primary: ProductFluxSiteData | null, fallback: Produc
 
 export default function ProductList() {
   const [products, setProducts] = useState<ProductItem[]>([]);
+  // 官方生命周期/选品状态(product_lifecycle)：skc_id -> selectStatus 码
+  const [lifecycleMap, setLifecycleMap] = useState<Map<string, string>>(new Map());
   const [salesSummary, setSalesSummary] = useState<any>(null);
   const [countSummary, setCountSummary] = useState<ProductCountSummary>(EMPTY_COUNT_SUMMARY);
   // 云端采集到的 SKC / 销售数据，按 skc_id 覆盖商品管理主字段。
@@ -3398,6 +3410,24 @@ export default function ProductList() {
   };
   const location = useLocation();
   const navigate = useNavigate();
+
+  // 官方生命周期状态：挂载时拉一次，按 skc_id 建 selectStatus 映射
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const api = (window.electronAPI as any)?.erp?.temuOpenApi;
+        if (!api?.listRecords) return;
+        const resp = await api.listRecords("product_lifecycle");
+        const m = new Map<string, string>();
+        for (const r of (resp?.rows || []) as any[]) {
+          if (r?.product_skc_id != null && r?.status != null) m.set(String(r.product_skc_id), String(r.status));
+        }
+        if (!cancelled) setLifecycleMap(m);
+      } catch { /* 忽略 */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     void loadProducts();
@@ -4650,6 +4680,35 @@ export default function ProductList() {
             ))}
           </div>
         );
+      },
+    },
+    {
+      title: "生命周期",
+      key: "lifecycle",
+      width: 100,
+      align: "center",
+      filters: [
+        { text: "未发布", value: "未发布" },
+        { text: "待寄样", value: "3" },
+        { text: "价格申报中", value: "价格申报中" },
+        { text: "待创建首单", value: "10" },
+        { text: "已创建首单", value: "11" },
+        { text: "已发布到站点(在售)", value: "12" },
+        { text: "已下架/终止", value: "13" },
+      ],
+      onFilter: (val: any, record: any) => {
+        const code = String(lifecycleMap.get(String((record as any).skcId)) || lifecycleMap.get(String((record as any).cloudSkc?.skc_id)) || "");
+        if (!code) return false;
+        if (val === "未发布") return ["1", "14", "15"].includes(code);
+        if (val === "价格申报中") return ["7", "9"].includes(code);
+        return code === String(val);
+      },
+      render: (_: any, record: any) => {
+        const code = lifecycleMap.get(String((record as any).skcId)) || lifecycleMap.get(String((record as any).cloudSkc?.skc_id));
+        if (code == null) return <span style={{ color: "#bfbfbf" }}>—</span>;
+        const label = selectStatusLabel(code);
+        const known = !label.startsWith("选品状态-");
+        return <span style={{ fontSize: 12, color: known ? "#389e0d" : "#8c8c8c" }}>{label}</span>;
       },
     },
     {

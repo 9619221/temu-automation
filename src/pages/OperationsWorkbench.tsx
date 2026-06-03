@@ -47,6 +47,13 @@ interface StockOrderRow {
   __rk?: number;
 }
 interface TrendRow { mall_id: string; store_code: string | null; mall_name: string | null; stat_date: string; sales: number; }
+// 官方店铺维度广告/流量(ad_report_mall)：原始指标值 rate×100(%)、金额=分、roas=×1000
+interface AdMallRow {
+  mall_id: string; store: string;
+  imprCnt: number | null; clkCnt: number | null; ctr: number | null; cartCnt: number | null;
+  cvr: number | null; orderPayCnt: number | null; orderPayAmt: number | null;
+  spend: number | null; roas: number | null; acos: number | null;
+}
 interface StoreMatrixRow {
   store_code: string; mall_id: string; mall_name: string | null; owner: string | null;
   sales: number; sale_7d: number; lack: number; soldout: number;
@@ -146,6 +153,9 @@ export default function OperationsWorkbench() {
   const [shopRows, setShopRows] = useState<ShopHealthRow[]>([]);
   const [shopLoading, setShopLoading] = useState(false);
   const [shopLoaded, setShopLoaded] = useState(false);
+  const [adRows, setAdRows] = useState<AdMallRow[]>([]);
+  const [adLoading, setAdLoading] = useState(false);
+  const [adLoaded, setAdLoaded] = useState(false);
   const [stockRows, setStockRows] = useState<StockOrderRow[]>([]);
   const [stockLoading, setStockLoading] = useState(false);
   const [stockLoaded, setStockLoaded] = useState(false);
@@ -379,6 +389,27 @@ export default function OperationsWorkbench() {
     setShopLoading(true);
     try { const resp = await window.electronAPI.erp.reports.shopHealth({ includeTest: false }); if (resp.ok && resp.data) { setShopRows((resp.data.rows || []) as ShopHealthRow[]); setShopLoaded(true); } } catch { /* */ } finally { setShopLoading(false); }
   }, []);
+
+  // 官方店铺维度广告/流量(近7天)：来自 ad_report_mall 快照
+  const loadAd = useCallback(async () => {
+    const api = (window.electronAPI as any)?.erp?.temuOpenApi;
+    if (!api?.listRecords) return;
+    setAdLoading(true);
+    try {
+      const resp = await api.listRecords("ad_report_mall");
+      const rows: AdMallRow[] = ((resp?.rows || []) as any[]).map((r) => {
+        const sum = (r.raw && r.raw.summary) || {};
+        const g = (k: string) => (sum[k] && sum[k].total && sum[k].total.val != null) ? Number(sum[k].total.val) : null;
+        return {
+          mall_id: String(r.mall_id), store: String(r.mall_id),
+          imprCnt: g("imprCnt"), clkCnt: g("clkCnt"), ctr: g("ctr"), cartCnt: g("cartCnt"),
+          cvr: g("cvr"), orderPayCnt: g("orderPayCnt"), orderPayAmt: g("orderPayAmt"),
+          spend: g("spend"), roas: g("roas"), acos: g("acos"),
+        };
+      });
+      setAdRows(rows); setAdLoaded(true);
+    } catch { /* */ } finally { setAdLoading(false); }
+  }, []);
   const loadStockOrders = useCallback(async () => {
     if (!window.electronAPI?.erp?.reports?.stockOrders) return;
     setStockLoading(true);
@@ -423,11 +454,12 @@ export default function OperationsWorkbench() {
     // shop 始终加载:owner 映射是「我的店」全局过滤的基础
     if (!shopLoaded && !shopLoading) loadShop();
     if ((store || ov) && !trendLoaded && !trendLoading) loadTrend();
+    if (store && !adLoaded && !adLoading) loadAd();
     if ((activeTab === "stock" || ov) && !stockLoaded && !stockLoading) loadStockOrders();
     if ((activeTab === "risk" || ov || todo) && !riskLoaded && !riskLoading) loadRisk();
     if ((activeTab === "activity" || ov || todo) && !actLoaded && !actLoading) loadAct();
     if (activeTab === "product" && !panelLoaded && !panelLoading) loadPanel();
-  }, [activeTab, shopLoaded, shopLoading, trendLoaded, trendLoading, stockLoaded, stockLoading, riskLoaded, riskLoading, actLoaded, actLoading, panelLoaded, panelLoading, loadShop, loadTrend, loadStockOrders, loadRisk, loadAct, loadPanel]);
+  }, [activeTab, shopLoaded, shopLoading, trendLoaded, trendLoading, adLoaded, adLoading, stockLoaded, stockLoading, riskLoaded, riskLoading, actLoaded, actLoading, panelLoaded, panelLoading, loadShop, loadTrend, loadAd, loadStockOrders, loadRisk, loadAct, loadPanel]);
 
   const diagnosed: DiagnosedRow[] = useMemo(() => skuRows.map((r) => {
     const issues = diagnose(r);
@@ -659,6 +691,22 @@ export default function OperationsWorkbench() {
     if (q) v = v.filter((r) => (r.store_code || "").toLowerCase().includes(q) || (r.mall_name || "").toLowerCase().includes(q) || (r.owner || "").toLowerCase().includes(q));
     return v.map((r, i) => ({ ...r, __rk: i }));
   }, [shopRows, storeFilter, search, inScope]);
+  // 官方流量(店铺维度)：用 shopRows 把 mall_id 映射成店名/store_code，沿用 owner/store 过滤
+  const mallInfoMap = useMemo(() => {
+    const m = new Map<string, { name: string; code: string | null }>();
+    for (const s of shopRows) m.set(s.mall_id, { name: s.mall_name || s.store_code || s.mall_id, code: s.store_code });
+    return m;
+  }, [shopRows]);
+  const adView = useMemo(() => {
+    let v = adRows.map((r) => { const info = mallInfoMap.get(r.mall_id); return { ...r, store: info?.name || r.mall_id, store_code: info?.code || null }; });
+    v = v.filter((r) => inScope(r.store_code || r.mall_id));
+    if (storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
+    return v.sort((a, b) => (b.spend || 0) - (a.spend || 0)).map((r, i) => ({ ...r, __rk: i }));
+  }, [adRows, mallInfoMap, storeFilter, inScope]);
+  const adAgg = useMemo(() => {
+    const sum = (k: keyof AdMallRow) => adView.reduce((s, r) => s + (Number(r[k]) || 0), 0);
+    return { impr: sum("imprCnt"), clk: sum("clkCnt"), spend: sum("spend"), amt: sum("orderPayAmt"), ord: sum("orderPayCnt") };
+  }, [adView]);
   const stockView = useMemo(() => {
     let v = stockRows.filter((r) => inScope(r.store_code || r.mall_id));
     if (storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
@@ -976,9 +1024,42 @@ export default function OperationsWorkbench() {
       children: (
         <div>
           <div style={{ padding: "12px 16px 0" }}>
-            <Segmented value={storeSeg} onChange={(v) => setStoreSeg(v as string)} options={[{ label: "健康体检", value: "health" }, { label: "销量趋势", value: "trend" }]} />
+            <Segmented value={storeSeg} onChange={(v) => setStoreSeg(v as string)} options={[{ label: "健康体检", value: "health" }, { label: "销量趋势", value: "trend" }, { label: "流量投放", value: "ad" }]} />
           </div>
-          {storeSeg === "health" ? (
+          {storeSeg === "ad" ? (
+            <div>
+              <div style={{ padding: "12px 16px 0", display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 16 }}>
+                <Statistic title="曝光合计" value={adAgg.impr} />
+                <Statistic title="点击合计" value={adAgg.clk} />
+                <Statistic title="花费合计(¥)" value={(adAgg.spend / 100).toFixed(2)} />
+                <Statistic title="申报价销售额(¥)" value={(adAgg.amt / 100).toFixed(2)} />
+                <Statistic title="子订单合计" value={adAgg.ord} />
+              </div>
+              <div style={{ padding: "8px 16px 0", color: "#888", fontSize: 12 }}>官方店铺维度广告/流量(近7天，bg.glo.searchrec.ad.reports.mall)。率为全店口径，金额单位元，ROAS=销售额/花费。空白店表示该店无投放或未签广告协议。</div>
+              {commonFilters()}
+              <Table<AdMallRow & { __rk: number }>
+                dataSource={adView}
+                rowKey={(r) => String(r.__rk)}
+                size="small"
+                loading={adLoading}
+                scroll={{ x: 1100 }}
+                pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 条` }}
+                columns={[
+                  { title: "店铺", dataIndex: "store", key: "store", fixed: "left", width: 160, ellipsis: true },
+                  { title: "曝光", dataIndex: "imprCnt", key: "imprCnt", width: 90, align: "right", sorter: (a, b) => (a.imprCnt || 0) - (b.imprCnt || 0), render: (v) => v == null ? "—" : Number(v).toLocaleString("zh-CN") },
+                  { title: "点击", dataIndex: "clkCnt", key: "clkCnt", width: 80, align: "right", sorter: (a, b) => (a.clkCnt || 0) - (b.clkCnt || 0), render: (v) => v == null ? "—" : Number(v).toLocaleString("zh-CN") },
+                  { title: "点击率", dataIndex: "ctr", key: "ctr", width: 80, align: "right", render: (v) => v == null ? "—" : (v / 100).toFixed(2) + "%" },
+                  { title: "加购", dataIndex: "cartCnt", key: "cartCnt", width: 80, align: "right", render: (v) => v == null ? "—" : Number(v).toLocaleString("zh-CN") },
+                  { title: "转化率", dataIndex: "cvr", key: "cvr", width: 80, align: "right", render: (v) => v == null ? "—" : (v / 100).toFixed(2) + "%" },
+                  { title: "子订单", dataIndex: "orderPayCnt", key: "orderPayCnt", width: 80, align: "right", render: (v) => v == null ? "—" : Number(v).toLocaleString("zh-CN") },
+                  { title: "申报价销售额", dataIndex: "orderPayAmt", key: "orderPayAmt", width: 120, align: "right", sorter: (a, b) => (a.orderPayAmt || 0) - (b.orderPayAmt || 0), render: (v) => v == null ? "—" : "¥" + (v / 100).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) },
+                  { title: "花费", dataIndex: "spend", key: "spend", width: 100, align: "right", sorter: (a, b) => (a.spend || 0) - (b.spend || 0), render: (v) => v == null ? "—" : "¥" + (v / 100).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) },
+                  { title: "ROAS", dataIndex: "roas", key: "roas", width: 80, align: "right", sorter: (a, b) => (a.roas || 0) - (b.roas || 0), render: (v) => v == null ? "—" : (v / 1000).toFixed(2) },
+                  { title: "费比", dataIndex: "acos", key: "acos", width: 80, align: "right", render: (v) => v == null ? "—" : (v / 100).toFixed(2) + "%" },
+                ]}
+              />
+            </div>
+          ) : storeSeg === "health" ? (
             <div>
               <div style={{ padding: "12px 16px 0", display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16 }}>
                 <Statistic title="店铺数" value={shopView.length} />
@@ -1122,7 +1203,7 @@ export default function OperationsWorkbench() {
         extra={<div style={{ display: "flex", gap: 10, alignItems: "center" }}>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>我的店</Typography.Text>
           <Select size="small" style={{ width: 140 }} value={ownerFilter} onChange={setOwner} options={[{ value: "all", label: "全部负责人" }, ...ownerOptions.map((o) => ({ value: o, label: o }))]} disabled={ownerOptions.length === 0} placeholder="负责人" />
-          <Button icon={<ReloadOutlined />} loading={skuLoading || riskLoading || actLoading || shopLoading || trendLoading || stockLoading || panelLoading} onClick={() => { loadSku(); setShopLoaded(false); setTrendLoaded(false); setStockLoaded(false); setRiskLoaded(false); setActLoaded(false); setPanelLoaded(false); loadShop(); if (activeTab === "store") loadTrend(); else if (activeTab === "stock") loadStockOrders(); else if (activeTab === "risk") loadRisk(); else if (activeTab === "activity") loadAct(); else if (activeTab === "product") loadPanel(); else if (activeTab === "todo") { loadRisk(); loadAct(); } else if (activeTab === "overview") { loadTrend(); loadStockOrders(); loadRisk(); loadAct(); } message.success("已刷新"); }}>刷新</Button>
+          <Button icon={<ReloadOutlined />} loading={skuLoading || riskLoading || actLoading || shopLoading || trendLoading || adLoading || stockLoading || panelLoading} onClick={() => { loadSku(); setShopLoaded(false); setTrendLoaded(false); setAdLoaded(false); setStockLoaded(false); setRiskLoaded(false); setActLoaded(false); setPanelLoaded(false); loadShop(); if (activeTab === "store") { loadTrend(); loadAd(); } else if (activeTab === "stock") loadStockOrders(); else if (activeTab === "risk") loadRisk(); else if (activeTab === "activity") loadAct(); else if (activeTab === "product") loadPanel(); else if (activeTab === "todo") { loadRisk(); loadAct(); } else if (activeTab === "overview") { loadTrend(); loadStockOrders(); loadRisk(); loadAct(); } message.success("已刷新"); }}>刷新</Button>
         </div>}
         bodyStyle={{ padding: 0 }}
       >
