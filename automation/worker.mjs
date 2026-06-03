@@ -1377,6 +1377,8 @@ const BROWSER_ACCOUNT_ACTIONS = new Set([
   "yundu_activity_match",
   "yundu_activity_submit",
   "yundu_auto_enroll",
+  "yundu_enroll_priced",
+  "yundu_capture_enroll_submit",
   "price_review_scan",
   "competitor_scrape_reviews",
   "open_temu_login",
