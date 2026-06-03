@@ -49,6 +49,14 @@ interface ConfirmItemRow {
 
 const erp = (window as any).electronAPI?.erp;
 
+// 列表加载态指示器：「思考中 Thinking…」+ 三点跳动动画，替代搜索/刷新时的空白闪烁（样式见 global.css .as-thinking）
+const thinkingIndicator = (
+  <div className="as-thinking">
+    <span className="as-thinking__dots"><i /><i /><i /></span>
+    <span className="as-thinking__text">思考中 Thinking…</span>
+  </div>
+);
+
 function formatNumber(value: unknown) {
   const num = Number(value);
   if (!Number.isFinite(num)) return "-";
@@ -151,8 +159,9 @@ export default function ConsignAfterSalesSection() {
     try {
       const result = await fetchUnifiedAfterSales({
         q: query || undefined,
-        // 本地聚水潭秒回先渲染（去掉转圈），云端平台单 / 店铺名 / 确认状态随后补全
-        onPartial: (partialRows, partialTotal) => {
+        // 本地聚水潭秒回先渲染（去掉转圈），云端平台单 / 店铺名 / 确认状态随后补全。
+        // 搜索时关掉这个「秒回」：聚水潭命中 0 会先把表格清空、闪一下空白；改由「思考中」遮罩盖住整个过程，结果一次性出。
+        onPartial: query.trim() ? undefined : (partialRows, partialTotal) => {
           if (id !== requestIdRef.current) return;
           setAllRows(partialRows);
           setTotal(partialTotal);
@@ -602,7 +611,7 @@ export default function ConsignAfterSalesSection() {
             className="erp-compact-table"
             rowKey="id"
             size="middle"
-            loading={loading && !loadedOnce}
+            loading={{ spinning: loading && (!loadedOnce || !!query.trim()), indicator: thinkingIndicator }}
             columns={columns}
             dataSource={rows}
             scroll={{ x: 1710 }}

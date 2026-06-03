@@ -711,6 +711,42 @@ h6 {
   margin-top: 4px;
 }
 
+/* 列表加载态：「思考中 Thinking…」+ 三点跳动动画，替代搜索/刷新时的空白闪烁（用于 antd Table loading indicator） */
+.as-thinking {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--color-text-sec);
+  font-size: var(--font-size-xs);
+  line-height: 1;
+}
+
+.as-thinking__dots {
+  display: inline-flex;
+  gap: 5px;
+}
+
+.as-thinking__dots i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-brand);
+  animation: as-thinking-bounce 1.2s ease-in-out infinite;
+}
+
+.as-thinking__dots i:nth-child(2) { animation-delay: 0.16s; }
+.as-thinking__dots i:nth-child(3) { animation-delay: 0.32s; }
+
+.as-thinking__text {
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+@keyframes as-thinking-bounce {
+  0%, 80%, 100% { transform: translateY(0); opacity: 0.35; }
+  40% { transform: translateY(-6px); opacity: 1; }
+}
+
 .app-stat-card {
   position: relative;
   min-height: 116px;
