@@ -7036,6 +7036,13 @@ function getPurchaseWorkbench(params = {}) {
     po_amount_max: purchaseOrderAmountMax,
   };
   if (purchaseOrderSearch) {
+    // 关键词像运单号(纯字母数字、>=8 位,如 79008640442489 / YT.../JT.../LP...)时才追加搜物流单号。
+    // 运单号存在 external_logistics_json 这个每行几 KB 的大 JSON 里,全表 LIKE 较重;
+    // 按需触发:中文/短词等常规搜索不带它,避免拖慢日常搜索(智能判断方案)。
+    const looksLikeLogisticsNo = /^[A-Za-z0-9]{8,}$/.test(purchaseOrderSearch);
+    const logisticsSearchClause = looksLikeLogisticsNo
+      ? "\n      OR po.external_logistics_json LIKE @po_search"
+      : "";
     poConditions.push(`(
       po.id LIKE @po_search
       OR po.po_no LIKE @po_search
@@ -7046,7 +7053,7 @@ function getPurchaseWorkbench(params = {}) {
       OR supplier.name LIKE @po_search
       OR cand.supplier_name LIKE @po_search
       OR sku.internal_sku_code LIKE @po_search
-      OR sku.product_name LIKE @po_search
+      OR sku.product_name LIKE @po_search${logisticsSearchClause}
     )`);
   }
   if (purchaseOrderNo) {
