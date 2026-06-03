@@ -2527,9 +2527,9 @@ function resolveAutoImageProjectDir() {
   return { searchedPaths: candidates };
 }
 
-function httpGet(url, timeout = 5000) {
+function httpGet(url, timeout = 5000, headers = {}) {
   return new Promise((resolve, reject) => {
-    const req = http.get(url, { timeout }, (res) => {
+    const req = http.get(url, { timeout, headers }, (res) => {
       const chunks = [];
       res.on("data", (chunk) => chunks.push(chunk));
       res.on("end", () => resolve({ statusCode: res.statusCode || 0, body: Buffer.concat(chunks).toString("utf8") }));
@@ -2541,7 +2541,13 @@ function httpGet(url, timeout = 5000) {
 
 async function isImageStudioHealthy(port = imageStudioPort) {
   try {
-    const response = await httpGet(`${getImageStudioBaseUrl(port)}${AUTO_IMAGE_HEALTH_PATH}`);
+    const response = await httpGet(
+      `${getImageStudioBaseUrl(port)}${AUTO_IMAGE_HEALTH_PATH}`,
+      5000,
+      getImageStudioAuthHeaders(),
+    );
+    // 401/403 表示出图服务已在该端口运行且鉴权已生效，视为就绪，避免无限重启
+    if (response.statusCode === 401 || response.statusCode === 403) return true;
     if (response.statusCode !== 200) return false;
     JSON.parse(response.body || "{}");
     return true;
