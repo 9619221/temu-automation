@@ -679,7 +679,7 @@ export default function ConsignAfterSalesSection() {
               emptyText: (
                 <EmptyGuide
                   title="暂无送仓售后记录"
-                  description="确认历史数据已导入 + 云端连接正常。"
+                  description="确认聚水潭历史数据已导入，且官方开放平台退货包裹已采集。"
                 />
               ),
             }}

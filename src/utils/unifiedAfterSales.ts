@@ -1,13 +1,12 @@
-// 送仓售后统一视图：聚水潭历史台账 + Temu 平台后台 → 单表展示。
+// 送仓售后统一视图：聚水潭历史台账 + Temu 官方开放平台退货包裹 → 单表展示。
 //
 // 数据源：
-//   A. 聚水潭 consign_after_sales（本地 cache.db，~5483 条）— 主源
-//   B. Temu 平台 /api/dashboard/after-sales（云端 32 条左右）— 补充
+//   A. 聚水潭 consign_after_sales（本地 erp.sqlite，~5241 条）— 主源（中文品名/货物状态/送仓/物流）
+//   B. Temu 官方 OpenAPI 退货包裹（bg.refund.returnpackagelist.get，落 erp_temu_openapi_records 的 return 源）
+//      — 平台侧数据源，本地库读取、稳定、全店覆盖；替代了原先不稳定的云端抓包 /api/dashboard/after-sales。
 //
-// Join key：outerAsId (TGXJ...) ↔ 平台 packageSn (return_package 类型) / returnSupplierApplicationId (after_sale 类型)。
-// after_sale 类型 (TGSQ 前缀) 永远独占，不会跟聚水潭匹配。
-
-import { fetchTemuAfterSales, loadCloudConfig, type TemuAfterSaleRow } from "./cloudClient";
+// Join key：聚水潭 outerAsId === 官方 packageSn（两侧同为 "TGXJ…-N" 格式，精确匹配，不去后缀）。
+// 官方独占包裹（聚水潭尚无台账）单独成行，缺包裹状态/送仓子仓/物流单号/收货人（官方接口未返回这些字段）。
 
 export interface UnifiedAfterSaleRow {
   // 唯一行 id（前端 rowKey 用）
@@ -91,87 +90,17 @@ interface ConsignAfterSaleRow {
   confirmDate?: string | null;
 }
 
-function extractJoinKey(row: TemuAfterSaleRow): string | null {
-  // row_key 格式：return_package|TGXJ...|... 或 after_sale|<UUID>|...
-  // return_package 第 2 段就是 packageSn；after_sale 第 2 段是 UUID 不是单号
-  if (row.row_key) {
-    const parts = row.row_key.split("|");
-    if (row.after_sale_type === "return_package" && parts[1]) return parts[1];
-  }
-  // raw_json fallback
-  if (row.raw_json) {
-    try {
-      const raw = JSON.parse(row.raw_json) as Record<string, any>;
-      if (row.after_sale_type === "return_package") return raw.packageSn || null;
-      if (row.after_sale_type === "after_sale") return raw.returnSupplierApplicationId || null;
-    } catch {
-      /* swallow */
-    }
-  }
-  return null;
-}
-
-function platformAsBaseRow(p: TemuAfterSaleRow, joinKey: string, mallMap?: Map<string, string>): UnifiedAfterSaleRow {
-  // 解析 raw_json 拿更多字段
-  let raw: Record<string, any> = {};
-  if (p.raw_json) {
-    try { raw = JSON.parse(p.raw_json); } catch { /* swallow */ }
-  }
-
-  // 类型描述：return_package → "买家退货包裹"；after_sale → raw.typeDescription（"按SKC退"）
-  let typeText: string | null = null;
-  if (p.after_sale_type === "return_package") {
-    typeText = raw.orderTypeDesc || "买家退货包裹";
-  } else if (p.after_sale_type === "after_sale") {
-    typeText = raw.typeDescription || "按SKC退";
-  } else {
-    typeText = p.after_sale_type || null;
-  }
-
-  // 时间：return_package 用 outboundTime；after_sale 用 createdAtTimestamp
-  let asDate: string | null = null;
-  const ts = Number(raw.outboundTime || raw.createdAtTimestamp || 0);
-  if (ts > 0) {
-    asDate = new Date(ts).toISOString();
-  } else if (p.created_at_text) {
-    asDate = p.created_at_text;
-  }
-
-  // 平台没"店铺名"明文字段，用 erp_temu_malls 店铺绑定表把 mall_id 映射成"店号 店名"，映射不到才退回 mall_id
-  const shopName = (p.mall_id && mallMap?.get(p.mall_id)) || (p.mall_id ? `Temu ${p.mall_id}` : null);
-  const reason = Array.isArray(raw.reasonDesc) ? raw.reasonDesc.join("；") : (p.reason || null);
-
-  return {
-    id: `platform:${p.id || p.row_key}`,
-    source: "platform",
-    asId: null,
-    outerAsId: joinKey,
-    asDate,
-    shopName,
-    // 平台状态：Temu 平台侧状态（已出库 / 平台审核中 等）
-    shopStatus: raw.packageStatusDesc || raw.statusDescription || p.status || null,
-    // 内部状态：按聚水潭口径，是「我方在 ERP 是否确认建台账」（待确认/已确认），与 Temu 物流无关。
-    // 平台独占单尚未进聚水潭台账确认，统一显示「待确认」。
-    status: "待确认",
-    type: typeText,
-    refundQty: Number(p.quantity || raw.quantity || 0) || null,
-    rQty: null,
-    boxIdCount: null,
-    warehouse: p.warehouse_name || null,
-    lId: p.logistics_no || null,
-    // 退货包裹管理接口提供退货子仓名（returnSubWarehouseName，与聚水潭 receiver_name 同口径）
-    // 和联系人 contactName；「送仓」列优先展示子仓名，与聚水潭行保持一致。
-    receiverName: raw.returnSubWarehouseName || p.warehouse_name || raw.contactName || null,
-    receiverMobile: raw.contactPhone || null,
-    remark: (raw.remark || p.reason || "").trim() || null,
-    soId: p.order_id || null,
-    oId: null,
-    labels: null,
-    confirmDate: null,
-    platformReason: reason,
-    platformQuantity: Number(p.quantity || 0) || null,
-    platformProductName: p.product_name || null,
-  };
+// 官方 OpenAPI 退货包裹记录（erp.temuOpenApi.listRecords("return") 的一行 = 一个包裹内的一个 SKU）。
+// raw 为 bg.refund.returnpackagelist.get 的原始 item，含 packageSn/productSkuId/SkcId/SpuId/quantity/
+// orderTypeDesc/reasonDesc/remark/secondarySaleSpec/mainSaleSpec/thumbUrl/purchaseSubOrderSn/outboundTime。
+interface OfficialReturnRecord {
+  mall_id: string;
+  product_id?: string | null;
+  product_skc_id?: string | null;
+  ext_code?: string | null;
+  status?: string | null;
+  biz_time?: string | null;
+  raw?: Record<string, any> | null;
 }
 
 // Temu 图片常是协议相对 URL（//img.kwcdn.com/...），需补 https: 才能加载
@@ -185,25 +114,63 @@ function normalizeImageUrl(value: unknown): string | null {
   return remoteMatch?.[0] || raw;
 }
 
-function toPlatformItem(p: TemuAfterSaleRow): PlatformAfterSaleItem {
-  let raw: Record<string, any> = {};
-  if (p.raw_json) { try { raw = JSON.parse(p.raw_json); } catch { /* swallow */ } }
+function officialReturnToItem(rec: OfficialReturnRecord): PlatformAfterSaleItem {
+  const raw = rec.raw || {};
   const spec = raw.secondarySaleSpec || raw.mainSaleSpec || null;
-  const reason = Array.isArray(raw.reasonDesc) ? raw.reasonDesc.join("；") : (raw.remark || p.reason || null);
-  const picUrl = normalizeImageUrl(
-    raw.thumbUrl || raw.productSkcPicture || raw.goodsImageUrl || raw.imageUrl || raw.productPicture,
-  );
+  const reason = Array.isArray(raw.reasonDesc) ? raw.reasonDesc.join("；") : (raw.remark || null);
+  const picUrl = normalizeImageUrl(raw.thumbUrl || raw.productSkcPicture || raw.imageUrl);
   return {
-    id: `pi:${p.id || p.row_key}`,
+    id: `oi:${raw.packageSn || ""}:${raw.productSkuId ?? rec.product_skc_id ?? ""}`,
     picUrl,
-    skuId: raw.productSkuId != null ? String(raw.productSkuId) : (p.sku_id || null),
-    skcId: raw.productSkcId != null ? String(raw.productSkcId) : (p.skc_id || null),
+    skuId: raw.productSkuId != null ? String(raw.productSkuId) : null,
+    skcId: raw.productSkcId != null ? String(raw.productSkcId) : (rec.product_skc_id || null),
     spuId: raw.productSpuId != null ? String(raw.productSpuId) : null,
     spec,
-    qty: Number(raw.quantity ?? p.quantity ?? 0) || null,
+    qty: Number(raw.quantity ?? 0) || null,
     purchaseSn: raw.purchaseSubOrderSn || null,
-    type: raw.orderTypeDesc || p.after_sale_type || null,
+    type: raw.orderTypeDesc || null,
     reason,
+  };
+}
+
+// 官方退货包裹（按 packageSn 聚合的一组 SKU 行）→ 一张平台独占售后单（聚水潭尚无台账）。
+function officialReturnHead(packageSn: string, group: OfficialReturnRecord[], mallMap?: Map<string, string>): UnifiedAfterSaleRow {
+  const first = group[0];
+  const raw0 = first?.raw || {};
+  const mallId = first?.mall_id || null;
+  const shopName = (mallId && mallMap?.get(mallId)) || (mallId ? `Temu ${mallId}` : null);
+  const ts = Number(raw0.outboundTime || 0);
+  const asDate = ts > 0 ? new Date(ts).toISOString() : null;
+  const items = group.map(officialReturnToItem);
+  const totalQty = items.reduce((s, it) => s + Number(it.qty || 0), 0) || null;
+  return {
+    id: `platform:${packageSn}`,
+    source: "platform",
+    asId: null,
+    outerAsId: packageSn,
+    asDate,
+    shopName,
+    // 官方退货包裹接口未返回包裹状态/送仓子仓/物流单号/收货人，这些列对独占单显示为空。
+    shopStatus: null,
+    status: "待确认",
+    goodStatus: null,
+    type: raw0.orderTypeDesc || "退供",
+    refundQty: totalQty,
+    rQty: null,
+    boxIdCount: null,
+    warehouse: null,
+    lId: null,
+    receiverName: null,
+    receiverMobile: null,
+    remark: null,
+    soId: null,
+    oId: null,
+    labels: null,
+    confirmDate: null,
+    platformReason: items.find((it) => it.reason)?.reason || null,
+    platformQuantity: totalQty,
+    platformProductName: null,
+    platformItems: items,
   };
 }
 
@@ -243,19 +210,13 @@ function jstAsBaseRow(j: ConsignAfterSaleRow): UnifiedAfterSaleRow {
   };
 }
 
-function mergeJstAndPlatform(j: ConsignAfterSaleRow, p: TemuAfterSaleRow): UnifiedAfterSaleRow {
+function mergeJstAndOfficial(j: ConsignAfterSaleRow, group: OfficialReturnRecord[]): UnifiedAfterSaleRow {
   const base = jstAsBaseRow(j);
   base.source = "both";
-
-  let raw: Record<string, any> = {};
-  if (p.raw_json) {
-    try { raw = JSON.parse(p.raw_json); } catch { /* swallow */ }
-  }
-  const reason = Array.isArray(raw.reasonDesc) ? raw.reasonDesc.join("；") : (p.reason || null);
-
-  base.platformReason = reason;
-  base.platformQuantity = Number(p.quantity || 0) || null;
-  base.platformProductName = p.product_name || null;
+  // both：表头/明细以聚水潭为准（明细走 asId 异步加载），仅用官方补平台退货原因/数量。
+  const items = group.map(officialReturnToItem);
+  base.platformReason = items.find((it) => it.reason)?.reason || null;
+  base.platformQuantity = items.reduce((s, it) => s + Number(it.qty || 0), 0) || null;
   return base;
 }
 
@@ -288,8 +249,6 @@ export interface FetchUnifiedResult {
 let mallMapCache: { map: Map<string, string>; at: number } | null = null;
 const MALL_MAP_TTL_MS = 10 * 60 * 1000;
 const MALL_MAP_TIMEOUT_MS = 4000;
-// 云端平台售后单超时阈值：云端慢/挂时超过即降级到仅本地，避免拖垮整表加载
-const PLATFORM_FETCH_TIMEOUT_MS = 8000;
 
 async function loadMallNameMap(erp: any): Promise<Map<string, string>> {
   if (mallMapCache && Date.now() - mallMapCache.at < MALL_MAP_TTL_MS) return mallMapCache.map;
@@ -315,11 +274,11 @@ async function loadMallNameMap(erp: any): Promise<Map<string, string>> {
 }
 
 export async function fetchUnifiedAfterSales(params: FetchUnifiedParams = {}): Promise<FetchUnifiedResult> {
-  // 一次拉全量并合并排序，分页交给前端纯切片（避免每翻一页都重拉云端，导致「换页没反应」）。
+  // 一次拉全量并合并排序，分页交给前端纯切片（避免每翻一页都重拉，导致「换页没反应」）。
   const { q, onPartial } = params;
   const erp = (window as any).electronAPI?.erp;
 
-  // 并发拉两边
+  // 并发拉两边：A=本地聚水潭台账，B=官方 OpenAPI 退货包裹
   const jstPromise: Promise<{ rows: ConsignAfterSaleRow[]; error?: string | null }> = (async () => {
     if (!erp?.consignAfterSale?.list) {
       return { rows: [], error: "ERP 接口未就绪" };
@@ -332,20 +291,16 @@ export async function fetchUnifiedAfterSales(params: FetchUnifiedParams = {}): P
     }
   })();
 
-  const platformPromise: Promise<{ rows: TemuAfterSaleRow[]; error?: string | null }> = (async () => {
-    const cfg = await loadCloudConfig().catch(() => null);
-    if (!cfg) return { rows: [], error: "云端未配置" };
+  // 官方退货包裹（替代原云端抓包）：读本地 erp_temu_openapi_records 的 return 源，稳定、全店覆盖。
+  const officialPromise: Promise<{ records: OfficialReturnRecord[]; error?: string | null }> = (async () => {
+    const api = (erp as any)?.temuOpenApi;
+    if (!api?.listRecords) return { records: [], error: null };
     try {
-      // 云端平台单接口在重负载下偶发很慢/连接重置（Failed to fetch）。加超时降级：
-      // 超时即放弃，只用本地聚水潭，不让最终合并那步死等、拖垮整张表的加载。
-      const result = await Promise.race([
-        fetchTemuAfterSales(cfg, { q: q || undefined, limit: 1000 }),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("__platform_timeout__")), PLATFORM_FETCH_TIMEOUT_MS)),
-      ]);
-      return { rows: result.rows || [], error: null };
+      const resp = await api.listRecords("return");
+      const records = (Array.isArray(resp?.rows) ? resp.rows : []) as OfficialReturnRecord[];
+      return { records, error: null };
     } catch {
-      // 不把 "Failed to fetch" / 超时原文抛给用户，温和提示仅显示本地数据
-      return { rows: [], error: "云端平台数据暂不可用，仅显示本地聚水潭数据" };
+      return { records: [], error: "官方退货数据暂不可用，仅显示本地聚水潭数据" };
     }
   })();
 
@@ -366,68 +321,43 @@ export async function fetchUnifiedAfterSales(params: FetchUnifiedParams = {}): P
     }
   })();
 
-  // 本地聚水潭秒回 → 先把 jst-only 行渲染出来；云端平台单 / 店铺字典 / 确认台账慢慢补，
-  // 不让本地数据被慢的网络调用扣住（初次加载「好慢」的根因）。
+  // 本地聚水潭秒回 → 先把 jst-only 行渲染出来；官方退货 / 店铺字典 / 确认台账随后补。
   const jstFetch = await jstPromise;
   if (onPartial) {
     const jstRows = jstFetch.rows.map(jstAsBaseRow).sort(byAsDateDesc);
     onPartial(jstRows, jstRows.length);
   }
-  const [platformFetch, mallMap, receiptMap] = await Promise.all([platformPromise, mallPromise, receiptsPromise]);
+  const [officialFetch, mallMap, receiptMap] = await Promise.all([officialPromise, mallPromise, receiptsPromise]);
 
-  // 构造 jushuitan 索引
+  // 构造 jushuitan 索引（按 outerAsId）
   const jstByKey = new Map<string, ConsignAfterSaleRow>();
   for (const row of jstFetch.rows) {
     if (row.outerAsId) jstByKey.set(row.outerAsId, row);
   }
 
-  // 平台行按 join key 分组：同一 packageSn 的多个 SKU 聚合成一张售后单
-  const platformGroups = new Map<string, TemuAfterSaleRow[]>();
-  const platformNoKey: TemuAfterSaleRow[] = [];
-  for (const p of platformFetch.rows) {
-    const key = extractJoinKey(p);
-    if (key) {
-      const arr = platformGroups.get(key);
-      if (arr) arr.push(p);
-      else platformGroups.set(key, [p]);
-    } else {
-      platformNoKey.push(p);
-    }
+  // 官方退货行按 packageSn 分组：同一包裹的多个 SKU 聚合成一张售后单
+  const officialGroups = new Map<string, OfficialReturnRecord[]>();
+  for (const rec of officialFetch.records) {
+    const pkg = rec?.raw?.packageSn ? String(rec.raw.packageSn) : null;
+    if (!pkg) continue;
+    const arr = officialGroups.get(pkg);
+    if (arr) arr.push(rec);
+    else officialGroups.set(pkg, [rec]);
   }
 
   const unifiedRows: UnifiedAfterSaleRow[] = [];
   const usedJstIds = new Set<string>();
 
-  // 聚合后的平台单
-  for (const [key, group] of platformGroups) {
-    const j = jstByKey.get(key);
-    // 同一 packageSn 下可能既有「退货包裹管理」接口的包裹级行（带物流/子仓/状态），
-    // 又有「退货明细」接口的 SKU 级行（只有商品维度）。选包裹级行做表头，SKU 级行做商品明细。
-    const pkgRow = group.find((p) => p.logistics_no || p.warehouse_name) || group[0];
-    const detailRows = group.filter((p) => p.skc_id || p.sku_id);
+  for (const [pkg, group] of officialGroups) {
+    const j = jstByKey.get(pkg);
     if (j) {
-      // both：用聚水潭 head（明细走 asId 异步加载），平台字段用包裹级行补充
+      // both：聚水潭已有台账，用官方补平台退货原因/数量；明细走 asId 异步加载
       usedJstIds.add(j.id);
-      unifiedRows.push(mergeJstAndPlatform(j, pkgRow));
+      unifiedRows.push(mergeJstAndOfficial(j, group));
     } else {
-      // 平台独占：一张单 + 多 SKU 明细（来自 raw_json）
-      const head = platformAsBaseRow(pkgRow, key, mallMap);
-      head.id = `platform:${key}`;
-      head.platformItems = (detailRows.length ? detailRows : group).map(toPlatformItem);
-      head.refundQty = head.platformItems.reduce((s, it) => s + Number(it.qty || 0), 0) || null;
-      // 退货原因通常在 SKU 明细行里（包裹级行的 reason 可能为空），表头取明细兜底
-      if (!head.platformReason || !String(head.platformReason).trim()) {
-        head.platformReason = head.platformItems.find((it) => it.reason)?.reason || null;
-      }
-      unifiedRows.push(head);
+      // 官方独占：聚水潭尚无台账的新退货包裹，一张单 + 多 SKU 明细（来自 raw）
+      unifiedRows.push(officialReturnHead(pkg, group, mallMap));
     }
-  }
-
-  // 没法 join 的平台行：各自独立，明细取自身
-  for (const p of platformNoKey) {
-    const head = platformAsBaseRow(p, p.row_key || p.id, mallMap);
-    head.platformItems = [toPlatformItem(p)];
-    unifiedRows.push(head);
   }
 
   // 再补聚水潭独占
@@ -453,8 +383,8 @@ export async function fetchUnifiedAfterSales(params: FetchUnifiedParams = {}): P
     rows: unifiedRows,
     total: unifiedRows.length,
     jstOk: !jstFetch.error,
-    platformOk: !platformFetch.error,
+    platformOk: !officialFetch.error,
     jstError: jstFetch.error || null,
-    platformError: platformFetch.error || null,
+    platformError: officialFetch.error || null,
   };
 }

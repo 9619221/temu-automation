@@ -2825,9 +2825,9 @@ function listTemuOpenApiRecordsBySource(payload = {}, actor = {}) {
   const source = String((payload && payload.source) || "");
   if (!TEMU_OPENAPI_RECORD_SOURCES.has(source)) return { rows: [] };
   const { db } = requireErp();
-  // 广告报表(ad_report_*)需要 raw_json 里的指标体；生命周期/邀约等只用通用列，
-  // 解析+回传 raw 会让 1.8w+ 行的 payload 巨大且慢，故仅广告源带 raw。
-  const needRaw = source.startsWith("ad_report");
+  // 广告报表(ad_report_*)需要 raw_json 里的指标体；退货(return)需要包裹内 SKU 明细/规格/原因/图片
+  // 等送仓售后字段；生命周期/邀约等只用通用列，解析+回传 raw 会让大行数 payload 巨大且慢，故仅这两类带 raw。
+  const needRaw = source.startsWith("ad_report") || source === "return";
   const records = db.prepare(`
     SELECT r.mall_id, r.product_id, r.product_skc_id, r.ext_code, r.status, r.biz_time${needRaw ? ", r.raw_json" : ""}
     FROM erp_temu_openapi_records r
