@@ -32,6 +32,7 @@ export interface UnifiedAfterSaleRow {
   boxIdCount?: number | null;
   warehouse?: string | null;
   lId?: string | null;
+  logisticsCompany?: string | null;
   receiverName?: string | null;
   receiverMobile?: string | null;
   remark?: string | null;
@@ -81,6 +82,7 @@ interface ConsignAfterSaleRow {
   boxIdCount?: number | null;
   warehouse?: string | null;
   lId?: string | null;
+  logisticsCompany?: string | null;
   receiverName?: string | null;
   receiverMobile?: string | null;
   remark?: string | null;
@@ -101,6 +103,14 @@ interface OfficialReturnRecord {
   status?: string | null;
   biz_time?: string | null;
   raw?: Record<string, any> | null;
+}
+
+// 官方「包裹级」信息（来自 return_package 源 / bg.refund.returnpackage.get），
+// 按 packageSn 关联，补到官方独占单的物流/状态列。
+interface OfficialPackageInfo {
+  lId: string | null;
+  shopStatus: string | null;
+  logisticsCompany: string | null;
 }
 
 // Temu 图片常是协议相对 URL（//img.kwcdn.com/...），需补 https: 才能加载
@@ -134,7 +144,7 @@ function officialReturnToItem(rec: OfficialReturnRecord): PlatformAfterSaleItem 
 }
 
 // 官方退货包裹（按 packageSn 聚合的一组 SKU 行）→ 一张平台独占售后单（聚水潭尚无台账）。
-function officialReturnHead(packageSn: string, group: OfficialReturnRecord[], mallMap?: Map<string, string>): UnifiedAfterSaleRow {
+function officialReturnHead(packageSn: string, group: OfficialReturnRecord[], mallMap?: Map<string, string>, pkgInfo?: OfficialPackageInfo): UnifiedAfterSaleRow {
   const first = group[0];
   const raw0 = first?.raw || {};
   const mallId = first?.mall_id || null;
@@ -150,8 +160,8 @@ function officialReturnHead(packageSn: string, group: OfficialReturnRecord[], ma
     outerAsId: packageSn,
     asDate,
     shopName,
-    // 官方退货包裹接口未返回包裹状态/送仓子仓/物流单号/收货人，这些列对独占单显示为空。
-    shopStatus: null,
+    // 平台状态/物流单号/物流公司来自包裹级接口(return_package)；送仓子仓/收货人官方不返回，仍为空。
+    shopStatus: pkgInfo?.shopStatus || null,
     status: "待确认",
     goodStatus: null,
     type: raw0.orderTypeDesc || "退供",
@@ -159,7 +169,8 @@ function officialReturnHead(packageSn: string, group: OfficialReturnRecord[], ma
     rQty: null,
     boxIdCount: null,
     warehouse: null,
-    lId: null,
+    lId: pkgInfo?.lId || null,
+    logisticsCompany: pkgInfo?.logisticsCompany || null,
     receiverName: null,
     receiverMobile: null,
     remark: null,
@@ -200,6 +211,7 @@ function jstAsBaseRow(j: ConsignAfterSaleRow): UnifiedAfterSaleRow {
     boxIdCount: j.boxIdCount ?? null,
     warehouse: j.warehouse || null,
     lId: j.lId || null,
+    logisticsCompany: j.logisticsCompany || null,
     receiverName: j.receiverName || null,
     receiverMobile: j.receiverMobile || null,
     remark: j.remark || null,
@@ -291,16 +303,23 @@ export async function fetchUnifiedAfterSales(params: FetchUnifiedParams = {}): P
     }
   })();
 
-  // 官方退货包裹（替代原云端抓包）：读本地 erp_temu_openapi_records 的 return 源，稳定、全店覆盖。
-  const officialPromise: Promise<{ records: OfficialReturnRecord[]; error?: string | null }> = (async () => {
+  // 官方退货（替代原云端抓包）：读本地 erp_temu_openapi_records，稳定、全店覆盖。
+  //   return         = SKU 明细级（商品/规格/图片）
+  //   return_package = 包裹级（物流单号/物流公司/包裹状态）——按 packageSn 关联补字段
+  const officialPromise: Promise<{ records: OfficialReturnRecord[]; packages: OfficialReturnRecord[]; error?: string | null }> = (async () => {
     const api = (erp as any)?.temuOpenApi;
-    if (!api?.listRecords) return { records: [], error: null };
+    if (!api?.listRecords) return { records: [], packages: [], error: null };
     try {
-      const resp = await api.listRecords("return");
-      const records = (Array.isArray(resp?.rows) ? resp.rows : []) as OfficialReturnRecord[];
-      return { records, error: null };
+      const [retResp, pkgResp] = await Promise.all([
+        api.listRecords("return"),
+        // 包裹级是新 source，老服务器未部署时返回空，静默降级（物流/状态列回退为空）
+        Promise.resolve(api.listRecords("return_package")).catch(() => ({ rows: [] })),
+      ]);
+      const records = (Array.isArray(retResp?.rows) ? retResp.rows : []) as OfficialReturnRecord[];
+      const packages = (Array.isArray(pkgResp?.rows) ? pkgResp.rows : []) as OfficialReturnRecord[];
+      return { records, packages, error: null };
     } catch {
-      return { records: [], error: "官方退货数据暂不可用，仅显示本地聚水潭数据" };
+      return { records: [], packages: [], error: "官方退货数据暂不可用，仅显示本地聚水潭数据" };
     }
   })();
 
@@ -335,6 +354,19 @@ export async function fetchUnifiedAfterSales(params: FetchUnifiedParams = {}): P
     if (row.outerAsId) jstByKey.set(row.outerAsId, row);
   }
 
+  // 包裹级信息（物流单号/物流公司/包裹状态）按 packageSn 索引，用于补官方独占单
+  const pkgInfoMap = new Map<string, OfficialPackageInfo>();
+  for (const rec of officialFetch.packages) {
+    const raw = rec?.raw || {};
+    const pkg = raw.returnSupplierPackageNo ? String(raw.returnSupplierPackageNo) : null;
+    if (!pkg) continue;
+    pkgInfoMap.set(pkg, {
+      lId: raw.expressDeLiverySn != null ? String(raw.expressDeLiverySn) : null,
+      shopStatus: raw.packageStatusDesc || null,
+      logisticsCompany: raw.logisticsTypeDesc || null,
+    });
+  }
+
   // 官方退货行按 packageSn 分组：同一包裹的多个 SKU 聚合成一张售后单
   const officialGroups = new Map<string, OfficialReturnRecord[]>();
   for (const rec of officialFetch.records) {
@@ -351,12 +383,12 @@ export async function fetchUnifiedAfterSales(params: FetchUnifiedParams = {}): P
   for (const [pkg, group] of officialGroups) {
     const j = jstByKey.get(pkg);
     if (j) {
-      // both：聚水潭已有台账，用官方补平台退货原因/数量；明细走 asId 异步加载
+      // both：聚水潭已有台账（物流/送仓/状态更全），用官方补平台退货原因/数量；明细走 asId 异步加载
       usedJstIds.add(j.id);
       unifiedRows.push(mergeJstAndOfficial(j, group));
     } else {
-      // 官方独占：聚水潭尚无台账的新退货包裹，一张单 + 多 SKU 明细（来自 raw）
-      unifiedRows.push(officialReturnHead(pkg, group, mallMap));
+      // 官方独占：聚水潭尚无台账的新退货包裹 = SKU 明细 + 包裹级物流/状态
+      unifiedRows.push(officialReturnHead(pkg, group, mallMap, pkgInfoMap.get(pkg)));
     }
   }
 

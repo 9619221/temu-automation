@@ -97,6 +97,8 @@ const LIST_COLLECTORS = [
     }),
   },
   {
+    // 退货「SKU 明细级」：包裹内每个 SKU 一行（商品/规格/图片/原因/采购子单）。
+    // 与包裹级 return_package 按 packageSn 关联。本接口不返回物流/状态/送仓。
     source: "return",
     type: "bg.refund.returnpackagelist.get",
     region: "CN",
@@ -112,6 +114,28 @@ const LIST_COLLECTORS = [
       ext_code: s(it.skcExtCode || it.extCode),
       status: s(it.status || it.packageStatus || it.returnStatus),
       biz_time: s(it.outboundTime || it.gmtCreate),
+    }),
+  },
+  {
+    // 退货「包裹级」：每个退货包裹一行，含物流单号(expressDeLiverySn)/物流公司(logisticsTypeDesc)/
+    // 包裹状态(packageStatusDesc)/付款方式/交接方式。raw 存整个 DTO，前端按
+    // returnSupplierPackageNo(=packageSn) 关联 SKU 明细，补送仓售后的物流/状态列。
+    // 注：官方退货接口均不返回送仓子仓/收货人，那两列仍需靠聚水潭台账。
+    source: "return_package",
+    type: "bg.refund.returnpackage.get",
+    region: "CN",
+    extraParams: () => {
+      const now = Date.now();
+      return { outboundTimeStart: now - RETURN_WINDOW_DAYS * 86400000, outboundTimeEnd: now };
+    },
+    listOf: (r) => r.openReturnPackageDTOS,
+    map: (it) => ({
+      record_key: s(it.returnSupplierPackageNo),
+      product_id: null,
+      product_skc_id: null,
+      ext_code: null,
+      status: s(it.packageStatusDesc),
+      biz_time: s(it.outboundTime),
     }),
   },
 ];

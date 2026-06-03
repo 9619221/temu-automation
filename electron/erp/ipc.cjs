@@ -2818,7 +2818,7 @@ async function listAllTemuOpenApiSalesRuntime(payload = {}, actor = {}) {
 // 一个接口覆盖多源，避免重复接线。返回精简后的通用行 + 解析后的 raw。
 const TEMU_OPENAPI_RECORD_SOURCES = new Set([
   "ad_report_mall", "ad_report_goods", "product_lifecycle", "best_seller_invitation",
-  "sales", "inventory", "purchase_order", "ship_order", "return",
+  "sales", "inventory", "purchase_order", "ship_order", "return", "return_package",
 ]);
 function listTemuOpenApiRecordsBySource(payload = {}, actor = {}) {
   assertActorRole(actor, ["admin", "manager", "operations", "buyer", "viewer", "finance"], "查看 Temu 官方扩展数据");
@@ -2827,7 +2827,7 @@ function listTemuOpenApiRecordsBySource(payload = {}, actor = {}) {
   const { db } = requireErp();
   // 广告报表(ad_report_*)需要 raw_json 里的指标体；退货(return)需要包裹内 SKU 明细/规格/原因/图片
   // 等送仓售后字段；生命周期/邀约等只用通用列，解析+回传 raw 会让大行数 payload 巨大且慢，故仅这两类带 raw。
-  const needRaw = source.startsWith("ad_report") || source === "return";
+  const needRaw = source.startsWith("ad_report") || source === "return" || source === "return_package";
   const records = db.prepare(`
     SELECT r.mall_id, r.product_id, r.product_skc_id, r.ext_code, r.status, r.biz_time${needRaw ? ", r.raw_json" : ""}
     FROM erp_temu_openapi_records r

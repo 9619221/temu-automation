@@ -632,6 +632,7 @@ export default function ConsignAfterSalesSection() {
                     <Col xs={12} sm={6}><Text type="secondary">送仓收货人</Text><div>{row.receiverName || "-"}</div></Col>
                     <Col xs={12} sm={6}><Text type="secondary">收货电话</Text><div>{row.receiverMobile || "-"}</div></Col>
                     <Col xs={12} sm={6}><Text type="secondary">物流单号</Text><div>{row.lId || "-"}</div></Col>
+                    <Col xs={12} sm={6}><Text type="secondary">物流公司</Text><div>{row.logisticsCompany || "-"}</div></Col>
                     <Col xs={12} sm={6}><Text type="secondary">网店订单</Text><div>{row.soId || "-"}</div></Col>
                     <Col xs={12} sm={6}><Text type="secondary">标签</Text><div>{row.labels || "-"}</div></Col>
                     <Col xs={12} sm={6}><Text type="secondary">确认时间</Text><div>{formatTime(row.confirmDate)}</div></Col>
