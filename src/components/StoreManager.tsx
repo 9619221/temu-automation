@@ -292,7 +292,7 @@ function isDeleteAccountHandlerMissing(error: any) {
 export default function StoreManager({ onChanged }: StoreManagerProps) {
   const auth = useErpAuth();
   const role = auth.currentUser?.role;
-  const canManageAccounts = canRole(role, ["admin", "manager"]);
+  const canManageAccounts = canRole(role, ["admin", "manager", "operations"]);
   const canManageStoreAddress = canRole(role, ["admin", "manager", "buyer"]);
   const cachedData = useMemo(
     () => readPageCache<StoreManagerCache>(STORE_MANAGER_CACHE_KEY, {}),
