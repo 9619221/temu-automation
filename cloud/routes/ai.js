@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { Readable } from "node:stream";
 import { authMiddleware } from "../middleware/auth.js";
 
 // ============================================================
@@ -91,8 +92,21 @@ async function proxy(kind, req, res) {
   };
 
   const hasBody = !["GET", "HEAD"].includes(req.method);
+
+  // 超时模型（流式与非流式分治）：
+  //  - 连接超时 AI_CONNECT_TIMEOUT_MS(默认60s)：等待上游返回响应头
+  //  - 流式空闲超时 AI_IDLE_TIMEOUT_MS(默认120s)：拿到 SSE 流后，连续这么久收不到任何
+  //    字节才中止。grsai /v1/draw/* 这类持续推 processing 心跳、整体数分钟的生图流不会
+  //    被误杀（旧实现用整体180s硬超时缓冲整流，长生图必撞墙 → 502 "operation was aborted"）。
+  //  - 流式总时长上限 AI_MAX_STREAM_MS(默认600s)：防上游只推心跳永不结束导致连接泄漏
+  //  - 非流式整体超时 AI_TIMEOUT_MS(默认180s)：analyze 等一次性 JSON 响应沿用旧语义
+  const CONNECT_MS = Number(process.env.AI_CONNECT_TIMEOUT_MS || 60000);
+  const IDLE_MS = Number(process.env.AI_IDLE_TIMEOUT_MS || 120000);
+  const MAX_STREAM_MS = Number(process.env.AI_MAX_STREAM_MS || 600000);
+  const TOTAL_MS = Number(process.env.AI_TIMEOUT_MS || 180000);
+
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), Number(process.env.AI_TIMEOUT_MS || 180000));
+  let timer = setTimeout(() => controller.abort(), CONNECT_MS);
   try {
     const upstream = await fetch(url, {
       method: req.method,
@@ -101,6 +115,53 @@ async function proxy(kind, req, res) {
       signal: controller.signal,
     });
     const ct = upstream.headers.get("content-type") || "application/json";
+    const isStream = /text\/event-stream/i.test(ct);
+
+    if (isStream && upstream.body) {
+      // —— SSE 流式透传：边收边发，不缓冲整流；空闲超时 + 总时长上限兜底 ——
+      clearTimeout(timer);
+      res.status(upstream.status);
+      res.setHeader("Content-Type", ct);
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("X-Accel-Buffering", "no");
+      if (typeof res.flushHeaders === "function") res.flushHeaders();
+
+      const startedAt = Date.now();
+      const node = Readable.fromWeb(upstream.body);
+      let idleTimer = null;
+      const stop = (reason) => {
+        if (idleTimer) clearTimeout(idleTimer);
+        if (!node.destroyed) node.destroy(new Error(reason));
+        controller.abort();
+      };
+      const armIdle = () => {
+        if (idleTimer) clearTimeout(idleTimer);
+        if (Date.now() - startedAt > MAX_STREAM_MS) {
+          stop("max stream duration exceeded");
+          return;
+        }
+        idleTimer = setTimeout(() => stop("idle timeout"), IDLE_MS);
+      };
+      armIdle();
+      node.on("data", armIdle);
+      node.on("end", () => {
+        if (idleTimer) clearTimeout(idleTimer);
+        console.log(`[ai] uid=${req.user.uid} tid=${req.user.tid} ${kind}${subPath} -> ${upstream.status} STREAM ${Date.now() - startedAt}ms`);
+      });
+      node.on("error", (e) => {
+        if (idleTimer) clearTimeout(idleTimer);
+        console.warn(`[ai] uid=${req.user.uid} ${kind}${subPath} STREAM ERROR ${String(e?.message || e)} ${Date.now() - startedAt}ms`);
+        if (!res.writableEnded) res.destroy();
+      });
+      // 客户端提前断开：中止上游 fetch，避免 grsai 连接泄漏
+      res.on("close", () => stop("client closed"));
+      node.pipe(res);
+      return;
+    }
+
+    // —— 非流式：缓冲整个响应体后一次性返回（沿用旧逻辑），整体超时 AI_TIMEOUT_MS ——
+    clearTimeout(timer);
+    timer = setTimeout(() => controller.abort(), TOTAL_MS);
     const buf = Buffer.from(await upstream.arrayBuffer());
     console.log(`[ai] uid=${req.user.uid} tid=${req.user.tid} ${kind}${subPath} -> ${upstream.status} ${buf.length}B`);
     res.status(upstream.status);
@@ -109,9 +170,13 @@ async function proxy(kind, req, res) {
   } catch (e) {
     const msg = String(e?.message || e);
     console.warn(`[ai] uid=${req.user.uid} ${kind}${subPath} ERROR ${msg}`);
-    res.status(502).json({ error: "ai_upstream_error", detail: msg.slice(0, 300) });
+    if (!res.headersSent) {
+      res.status(502).json({ error: "ai_upstream_error", detail: msg.slice(0, 300) });
+    } else if (!res.writableEnded) {
+      res.destroy();
+    }
   } finally {
-    clearTimeout(timeout);
+    clearTimeout(timer);
   }
 }
 
