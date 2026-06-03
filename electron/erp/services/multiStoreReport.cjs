@@ -567,19 +567,71 @@ function _buildSkuSalesFresh(db, options = {}) {
   return { generated_at: Date.now(), row_count: out.length, rows: out };
 }
 
-// SKU 销售明细（带缓存）。需 attachCloudDb 接通 cloud 库。
+// 运营工作台数据源开关：默认走官方 API 物化表(erp_temu_openapi_sku_sales)，
+// 传 options.source='scrape' 或设环境变量 OPENAPI_SKU_SALES=0 可回退抓包(cloud.temu_*_snapshot)。
+function useOfficialReports(options = {}) {
+  if (options.source === "official") return true;
+  if (options.source === "scrape") return false;
+  return process.env.OPENAPI_SKU_SALES !== "0";
+}
+
+// 官方路径：读 erp_temu_openapi_sku_sales（物化自 bg.goods.salesv2.get），不依赖 cloud attach。
+function _buildSkuSalesOfficialFresh(db, options = {}) {
+  const includeTest = !!options.includeTest;
+  const limit = Math.min(8000, Math.max(50, Number(options.limit) || 4000));
+  const rows = optionalAllLocal(db, `
+    SELECT s.mall_id, m.store_code, m.mall_name,
+           s.product_skc_id AS skc_id, s.ext_code AS sku_ext_code, s.product_id, s.title, s.category,
+           s.today_sales, s.last7d_sales, s.last30d_sales,
+           s.warehouse_stock, s.occupy_stock, s.advice_qty, s.sale_days, s.synced_at
+      FROM erp_temu_openapi_sku_sales s
+      LEFT JOIN erp_temu_malls m ON m.mall_id = s.mall_id
+     WHERE (COALESCE(s.last30d_sales,0) > 0 OR COALESCE(s.today_sales,0) > 0 OR COALESCE(s.warehouse_stock,0) <= 0)
+       ${includeTest ? "" : "AND COALESCE(m.status,'active') <> 'test'"}
+     ORDER BY COALESCE(s.last7d_sales,0) DESC
+     LIMIT ?
+  `, [limit]);
+  const out = rows.map((r) => ({
+    mall_id: r.mall_id,
+    store_code: r.store_code || null,
+    mall_name: r.mall_name || null,
+    skc_id: r.skc_id || null,
+    sku_ext_code: r.sku_ext_code || null,
+    product_id: r.product_id || null,
+    title: r.title || null,
+    category: r.category || null,
+    today: toNum(r.today_sales),
+    last7d: toNum(r.last7d_sales),
+    last30d: toNum(r.last30d_sales),
+    stock: toNum(r.warehouse_stock),
+    occupy: toNum(r.occupy_stock),
+    advice_qty: toNum(r.advice_qty),
+    sale_days: r.sale_days == null ? null : Number(r.sale_days),
+    declared_price: null, // 官方 supplierPrice 单位/语义未定，Phase 1 留空（待接价格接口或 join 抓包）
+    stat_date: r.synced_at ? String(r.synced_at).slice(0, 10) : null,
+  }));
+  return { generated_at: Date.now(), row_count: out.length, rows: out, source: "official" };
+}
+
+// SKU 销售明细（带缓存）。官方路径读物化表；抓包路径需 attachCloudDb 接通 cloud 库。
 function buildSkuSales(db, options = {}) {
   if (!db) throw new Error("buildSkuSales: db is required (host mode only)");
-  const attachCloudDb = options.attachCloudDb;
-  if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
-    return { generated_at: Date.now(), row_count: 0, rows: [], attached: false };
-  }
-  const key = options.includeTest ? "1" : "0";
+  const official = useOfficialReports(options);
+  const key = (official ? "o:" : "s:") + (options.includeTest ? "1" : "0");
   if (!options.force) {
     const cached = _skuSalesCache.get(key);
     if (cached && Date.now() - cached.ts < REPORT_CACHE_TTL_MS) return cached.data;
   }
-  const data = _buildSkuSalesFresh(db, options);
+  let data;
+  if (official) {
+    data = _buildSkuSalesOfficialFresh(db, options);
+  } else {
+    const attachCloudDb = options.attachCloudDb;
+    if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
+      return { generated_at: Date.now(), row_count: 0, rows: [], attached: false };
+    }
+    data = _buildSkuSalesFresh(db, options);
+  }
   _skuSalesCache.set(key, { data, ts: Date.now() });
   return data;
 }
@@ -682,17 +734,8 @@ function buildActivityList(db, options = {}) {
 
 // ===== 店铺健康：店铺级体检（每店最新天）=====
 const _shopHealthCache = new Map();
-function buildShopHealth(db, options = {}) {
-  if (!db) throw new Error("buildShopHealth: db is required (host mode only)");
-  const attachCloudDb = options.attachCloudDb;
-  if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
-    return { generated_at: Date.now(), row_count: 0, rows: [], attached: false };
-  }
-  const key = options.includeTest ? "1" : "0";
-  if (!options.force) {
-    const c = _shopHealthCache.get(key);
-    if (c && Date.now() - c.ts < REPORT_CACHE_TTL_MS) return c.data;
-  }
+// 抓包路径：Temu 原生店铺体检快照（每店最新天）。
+function _buildShopHealthScrapeFresh(db, options = {}) {
   const tid = options.tenantId || DEFAULT_CLOUD_TENANT;
   const rows = optionalAllLocal(db, `
     WITH latest AS (
@@ -722,7 +765,59 @@ function buildShopHealth(db, options = {}) {
     after_sale_ratio_90d: s.quality_after_sale_ratio_90d == null ? null : Number(s.quality_after_sale_ratio_90d),
     stat_date: s.stat_date || null,
   }));
-  const data = { generated_at: Date.now(), row_count: out.length, rows: out };
+  return { generated_at: Date.now(), row_count: out.length, rows: out };
+}
+// 官方路径：从 erp_temu_openapi_sku_sales 按店聚合销量/缺货/售罄/建议/即将售罄。
+// 官方无对应数据的字段(high_price_limit/wait_online/after_sale_ratio)置 0/null，由风险面板等抓包侧另行覆盖。
+function _buildShopHealthOfficialFresh(db, options = {}) {
+  const rows = optionalAllLocal(db, `
+    SELECT s.mall_id, m.store_code, m.mall_name, m.owner,
+           SUM(COALESCE(s.today_sales,0))   AS sale_volume,
+           SUM(COALESCE(s.last7d_sales,0))  AS sale_7d,
+           SUM(COALESCE(s.last30d_sales,0)) AS sale_30d,
+           COUNT(DISTINCT CASE WHEN COALESCE(s.lack_quantity,0) > 0 THEN s.product_skc_id END) AS lack_skc,
+           COUNT(DISTINCT CASE WHEN COALESCE(s.advice_qty,0) > 0 THEN s.product_skc_id END) AS advice_prepare_skc,
+           COUNT(DISTINCT CASE WHEN s.sale_days IS NOT NULL AND s.sale_days < 7 THEN s.product_skc_id END) AS about_to_sell_out,
+           COUNT(DISTINCT CASE WHEN COALESCE(s.warehouse_stock,0) <= 0 AND (COALESCE(s.last30d_sales,0) > 0 OR COALESCE(s.last7d_sales,0) > 0) THEN s.product_skc_id END) AS already_sold_out,
+           COUNT(DISTINCT s.product_skc_id) AS on_sale
+      FROM erp_temu_openapi_sku_sales s
+      LEFT JOIN erp_temu_malls m ON m.mall_id = s.mall_id
+     WHERE 1=1
+       ${options.includeTest ? "" : "AND COALESCE(m.status,'active') <> 'test'"}
+     GROUP BY s.mall_id, m.store_code, m.mall_name, m.owner
+     ORDER BY already_sold_out DESC, lack_skc DESC, s.mall_id
+     LIMIT 4000
+  `, []);
+  const out = rows.map((s) => ({
+    mall_id: s.mall_id, store_code: s.store_code || null, mall_name: s.mall_name || null, owner: s.owner || null,
+    sale_volume: toNum(s.sale_volume), sale_7d: toNum(s.sale_7d), sale_30d: toNum(s.sale_30d),
+    on_sale: toNum(s.on_sale), wait_online: 0,
+    lack_skc: toNum(s.lack_skc), advice_prepare_skc: toNum(s.advice_prepare_skc),
+    about_to_sell_out: toNum(s.about_to_sell_out), already_sold_out: toNum(s.already_sold_out),
+    high_price_limit: 0,
+    after_sale_ratio_90d: null,
+    stat_date: null,
+  }));
+  return { generated_at: Date.now(), row_count: out.length, rows: out, source: "official" };
+}
+function buildShopHealth(db, options = {}) {
+  if (!db) throw new Error("buildShopHealth: db is required (host mode only)");
+  const official = useOfficialReports(options);
+  const key = (official ? "o:" : "s:") + (options.includeTest ? "1" : "0");
+  if (!options.force) {
+    const c = _shopHealthCache.get(key);
+    if (c && Date.now() - c.ts < REPORT_CACHE_TTL_MS) return c.data;
+  }
+  let data;
+  if (official) {
+    data = _buildShopHealthOfficialFresh(db, options);
+  } else {
+    const attachCloudDb = options.attachCloudDb;
+    if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
+      return { generated_at: Date.now(), row_count: 0, rows: [], attached: false };
+    }
+    data = _buildShopHealthScrapeFresh(db, options);
+  }
   _shopHealthCache.set(key, { data, ts: Date.now() });
   return data;
 }
