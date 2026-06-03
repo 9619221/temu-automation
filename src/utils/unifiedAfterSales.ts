@@ -148,7 +148,9 @@ function officialReturnHead(packageSn: string, group: OfficialReturnRecord[], ma
   const first = group[0];
   const raw0 = first?.raw || {};
   const mallId = first?.mall_id || null;
-  const shopName = (mallId && mallMap?.get(mallId)) || (mallId ? `Temu ${mallId}` : null);
+  // 过 normalizeShopName 统一口径：店铺字典 store_code 缺失时映射出的裸数字（如 068）归一成 temu-068店铺，
+  // 跟聚水潭/both 来源对齐，避免同一店两种写法。
+  const shopName = normalizeShopName((mallId && mallMap?.get(mallId)) || (mallId ? `Temu ${mallId}` : null));
   const ts = Number(raw0.outboundTime || 0);
   const asDate = ts > 0 ? new Date(ts).toISOString() : null;
   const items = group.map(officialReturnToItem);
@@ -185,13 +187,20 @@ function officialReturnHead(packageSn: string, group: OfficialReturnRecord[], ma
   };
 }
 
-// 聚水潭店铺名口径不统一（有的漏「铺」字，如 temu-073店），归一到平台口径 temu-NNN店铺，
-// 避免同一店在下拉框/筛选/计数里被当成两个店。
+// 店铺名口径不统一，归一到平台口径 temu-NNN店铺，避免同一店在下拉框/筛选/计数里被当成两个店：
+//   ① 聚水潭有的漏「铺」字（temu-073店）或漏连字符（temu046店铺）；
+//   ② 官方独占单：店铺字典 store_code 缺失时退化成裸数字店号（如 066/068/070）。
 function normalizeShopName(name?: string | null): string | null {
   const t = (name || "").trim();
   if (!t) return null;
+  // temu-046店铺 / temu046店 / temu-073店 → temu-046店铺
   const m = t.match(/^temu-?(\d+)\s*店铺?$/i);
-  return m ? `temu-${m[1]}店铺` : t;
+  if (m) return `temu-${m[1]}店铺`;
+  // 裸数字店号（官方独占单 store_code 缺失时的退化值）→ temu-NNN店铺；
+  // 限 2-4 位，避免把 15 位 mall_id（如 Temu 634418225265035 的兜底）误判成店号
+  const d = t.match(/^(\d{2,4})$/);
+  if (d) return `temu-${d[1]}店铺`;
+  return t;
 }
 
 function jstAsBaseRow(j: ConsignAfterSaleRow): UnifiedAfterSaleRow {

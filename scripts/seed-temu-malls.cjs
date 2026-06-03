@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 灌入 33 条 TEMU 店铺对照（30 有效 + 1 待确认 + 2 测试）
+// 灌入 38 条 TEMU 店铺对照（35 有效 + 1 待确认 + 2 测试）
 // 用法：
 //   开发机：node scripts/seed-temu-malls.cjs
 //   服务器：ELECTRON_RUN_AS_NODE=1 node scripts/seed-temu-malls.cjs --data-dir=/opt/temu-erp-data
@@ -28,7 +28,8 @@ const Database = require('better-sqlite3');
 const db = new Database(dbPath);
 
 const MALLS = [
-  // 30 家有效店（store_code = 内部三位数编号，按事件量序号#1-#31 排序，跳过#25 black good boy）
+  // 35 家有效店（store_code = 内部三位数编号）。066/068/069/070/073 为 CN 区半托管绑定授权时登记，
+  // 官方未回真实店名、mall_name 暂用店号占位；补上 store_code 后前端统一按 temu-NNN店铺 显示。
   { store_code: '028', mall_id: '634418224981125', mall_name: 'Lumen Global' },
   { store_code: '029', mall_id: '634418224983097', mall_name: 'Oasis Originals' },
   { store_code: '030', mall_id: '634418224983548', mall_name: 'Crafted Horizon' },
@@ -53,9 +54,14 @@ const MALLS = [
   { store_code: '062', mall_id: '634418226219194', mall_name: 'Borderless Mart Box' },
   { store_code: '063', mall_id: '634418226785687', mall_name: 'Rare Finds Global' },
   { store_code: '065', mall_id: '634418225172002', mall_name: 'Breeze Cargo' },
+  { store_code: '066', mall_id: '634418225262106', mall_name: '066' },
   { store_code: '067', mall_id: '634418225262761', mall_name: 'FixMaster Collection' },
+  { store_code: '068', mall_id: '634418225265035', mall_name: '068' },
+  { store_code: '069', mall_id: '634418227770668', mall_name: '069' },
+  { store_code: '070', mall_id: '634418227770734', mall_name: '070' },
   { store_code: '071', mall_id: '634418227770823', mall_name: 'Crafted to Perfection' },
   { store_code: '072', mall_id: '634418227770845', mall_name: 'Whimsical Wonders for Creative Living' },
+  { store_code: '073', mall_id: '634418227772475', mall_name: '073' },
   { store_code: '074', mall_id: '634418228924499', mall_name: 'OpalStyle' },
   { store_code: '075', mall_id: '634418229097960', mall_name: 'Monvique Novique' },
   { store_code: '076', mall_id: '634418227640222', mall_name: 'Quality Finds From Around the Globe' },
