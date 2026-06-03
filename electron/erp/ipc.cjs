@@ -6194,6 +6194,17 @@ function listJstConsignDeliverItems(params = {}) {
   return rows.map(toJstConsignDeliverItemRow);
 }
 
+// cloud-only 送仓单(聚水潭无对账)的官方逐SKU明细:读 erp_temu_openapi_consign.items_json(temuOpenApiConsign.cjs物化)。
+function getConsignCloudItems(params = {}) {
+  const { db } = requireErp();
+  const mallId = optionalString(params.mallId || params.mall_id);
+  const soId = optionalString(params.soId || params.so_id);
+  if (!mallId || !soId) return [];
+  const row = db.prepare("SELECT items_json FROM erp_temu_openapi_consign WHERE mall_id = ? AND so_id = ?").get(mallId, soId);
+  if (!row || !row.items_json) return [];
+  try { const arr = JSON.parse(row.items_json); return Array.isArray(arr) ? arr : []; } catch { return []; }
+}
+
 function getJstConsignDeliveryCacheStatus(params = {}) {
   const { db } = requireErp();
   const companyId = optionalString(params.companyId || params.company_id);
@@ -21144,6 +21155,24 @@ async function listJstConsignDeliverItemsRuntime(params = {}) {
   });
 }
 
+// cloud-only 单官方明细 runtime(host 本地查 / client 连主控端)。
+async function listConsignCloudItemsRuntime(params = {}) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    try {
+      const payload = await remoteRequest("/api/master-data/consign-deliver-cloud-items", {
+        method: "POST",
+        body: { ...params },
+      });
+      return (payload && payload.rows) || [];
+    } catch (error) {
+      if (error?.statusCode === 404 || /not found/i.test(error?.message || "")) return [];
+      throw error;
+    }
+  }
+  return getConsignCloudItems(params);
+}
+
 async function listJstConsignDeliveriesUnifiedRuntime(params = {}) {
   const emptyResult = {
     ok: true,
@@ -22052,6 +22081,7 @@ function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:consign-deliver:list", (_event, params) => listJstConsignDeliveriesRuntime(params || {}));
   ipcMain.handle("erp:consign-deliver:page", (_event, params) => listJstConsignDeliveriesPageRuntime(params || {}));
   ipcMain.handle("erp:consign-deliver:items", (_event, params) => listJstConsignDeliverItemsRuntime(params || {}));
+  ipcMain.handle("erp:consign-deliver:cloud-items", (_event, params) => listConsignCloudItemsRuntime(params || {}));
   ipcMain.handle("erp:consign-deliver:cache-status", (_event, params) => getJstConsignDeliveryCacheStatusRuntime(params || {}));
   ipcMain.handle("erp:consign-deliver:unified", (_event, params) => listJstConsignDeliveriesUnifiedRuntime(params || {}));
   // 其他出入库历史（聚水潭 jst_other_inout）：直查本地 sqlite，无 cache.db。

@@ -35,6 +35,7 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/master-data/consign-after-sale-item-ids": ["admin", "manager", "operations", "buyer", "finance", "warehouse"],
   "/api/master-data/consign-deliveries": ["admin", "manager", "operations", "buyer", "finance", "warehouse"],
   "/api/master-data/consign-deliver-items": ["admin", "manager", "operations", "buyer", "finance", "warehouse"],
+  "/api/master-data/consign-deliver-cloud-items": ["admin", "manager", "operations", "buyer", "finance", "warehouse"],
   "/api/master-data/consign-deliveries-status": ["admin", "manager", "operations", "buyer", "finance", "warehouse"],
   "/api/master-data/consign-deliveries-unified": ["admin", "manager", "operations", "buyer", "finance", "warehouse"],
   "/api/master-data/other-inout": ["admin", "manager", "operations", "buyer", "finance", "warehouse"],
@@ -494,6 +495,49 @@ unified AS (
 )
 `;
 
+// ===== 出库中心「官方 API 化」开关 =====
+// OPENAPI_CONSIGN=1 时,把上面 UNIFIED_CONSIGN_CTE 里的 cloud_agg 段(抓包 temu_stock_order_snapshot)
+// 用正则整段替换成读官方物化表 erp_temu_openapi_consign(temuOpenApiConsign.cjs 解析,WB级)。
+// 其余段(jst_base/jst_ship_agg/jst_left/cloud_only/unified)完全复用,杜绝 SQL 漂移;匹配不到则安全退回抓包。
+// 官方 cloud_agg 已是 WB 级(物化时聚合),不用 GROUP BY;temu_status 已映射中文;order_time 已是日期串(修排序乱)。
+const _CLOUD_AGG_OFFICIAL = `cloud_agg AS (
+    SELECT
+      so_id AS cloud_so,
+      so_id AS cloud_row_key,
+      mall_id AS cloud_mall_id,
+      NULL AS cloud_site,
+      original_po_sn AS cloud_parent_order_no,
+      NULL AS cloud_delivery_batch_sn,
+      product_id AS cloud_product_id,
+      product_skc_id AS cloud_skc_id,
+      NULL AS cloud_sku_id,
+      sku_ext_codes AS cloud_sku_ext_code,
+      temu_status AS cloud_temu_status,
+      demand_qty AS cloud_demand_qty,
+      delivered_qty AS cloud_delivered_qty,
+      received_qty AS cloud_inbound_qty,
+      amount_cents AS cloud_order_amount_cents,
+      'CNY' AS cloud_currency,
+      product_name AS cloud_product_name,
+      spec_names AS cloud_spec_name,
+      delivery_order_sn AS cloud_delivery_order_sn,
+      NULL AS cloud_receive_warehouse_id,
+      receive_warehouse_name AS cloud_receive_warehouse_name,
+      NULL AS cloud_warehouse_group,
+      NULL AS cloud_urgency_info,
+      order_time AS cloud_order_time,
+      latest_ship_at AS cloud_latest_ship_at,
+      NULL AS cloud_logistics_info,
+      sku_count AS cloud_item_count
+    FROM erp_temu_openapi_consign
+  ),`;
+const _CLOUD_AGG_SCRAPE_RE = /cloud_agg AS \([\s\S]*?GROUP BY stock_order_no\s*\n\),/;
+function buildUnifiedConsignCte() {
+  if (process.env.OPENAPI_CONSIGN !== "1") return UNIFIED_CONSIGN_CTE;
+  if (!_CLOUD_AGG_SCRAPE_RE.test(UNIFIED_CONSIGN_CTE)) return UNIFIED_CONSIGN_CTE;
+  return UNIFIED_CONSIGN_CTE.replace(_CLOUD_AGG_SCRAPE_RE, _CLOUD_AGG_OFFICIAL);
+}
+
 function buildUnifiedSearchClause(values, search) {
   if (!search) return "";
   values.search = `%${search}%`;
@@ -767,18 +811,18 @@ function runConsignDeliveriesUnified(db, params = {}) {
   const whereClause = filtered.length ? `WHERE ${filtered.join(" AND ")}` : "";
   const breakdownWhere = filterConditions.length ? `WHERE ${filterConditions.join(" AND ")}` : "";
 
-  const rowsSql = `${UNIFIED_CONSIGN_CTE}
+  const rowsSql = `${buildUnifiedConsignCte()}
     SELECT * FROM unified
     ${whereClause}
     ORDER BY COALESCE(jst_order_date, cloud_order_time) DESC, so_id DESC
     LIMIT @limit OFFSET @offset`;
   const rows = db.prepare(rowsSql).all({ ...baseValues, limit: pageSize, offset });
 
-  const totalSql = `${UNIFIED_CONSIGN_CTE} SELECT COUNT(*) AS n FROM unified ${whereClause}`;
+  const totalSql = `${buildUnifiedConsignCte()} SELECT COUNT(*) AS n FROM unified ${whereClause}`;
   const totalRow = db.prepare(totalSql).get(baseValues);
   const total = Number(totalRow?.n || 0);
 
-  const breakdownSql = `${UNIFIED_CONSIGN_CTE}
+  const breakdownSql = `${buildUnifiedConsignCte()}
     SELECT source, COUNT(*) AS n FROM unified ${breakdownWhere} GROUP BY source`;
   const breakdownRows = db.prepare(breakdownSql).all(baseValues);
   const sourceBreakdown = { cloud_only: 0, jst_only: 0, both: 0 };
@@ -791,7 +835,7 @@ function runConsignDeliveriesUnified(db, params = {}) {
   // 状态分布：基于显示状态(COALESCE(local_status_override, jst_status, cloud_temu_status))，
   // 只受搜索约束，与筛选口径一致，保证下拉始终能列出全部真实可筛状态值。
   const statusBreakdownWhere = searchClause ? `WHERE ${searchClause}` : "";
-  const statusBreakdownSql = `${UNIFIED_CONSIGN_CTE}
+  const statusBreakdownSql = `${buildUnifiedConsignCte()}
     SELECT COALESCE(local_status_override, jst_status, cloud_temu_status) AS status, COUNT(*) AS n
     FROM unified ${statusBreakdownWhere}
     GROUP BY COALESCE(local_status_override, jst_status, cloud_temu_status)`;
@@ -5035,6 +5079,19 @@ async function handleRequest({
       return;
     }
 
+    if (pathname === "/api/master-data/consign-deliver-cloud-items") {
+      const payload = await readOptionalPayload(req);
+      const mallId = payload?.mallId || payload?.mall_id;
+      const soId = payload?.soId || payload?.so_id;
+      let rows = [];
+      if (mallId && soId) {
+        const row = db.prepare("SELECT items_json FROM erp_temu_openapi_consign WHERE mall_id = ? AND so_id = ?").get(String(mallId), String(soId));
+        if (row && row.items_json) { try { const a = JSON.parse(row.items_json); if (Array.isArray(a)) rows = a; } catch { /* */ } }
+      }
+      writeJson(res, 200, { ok: true, rows });
+      return;
+    }
+
     if (pathname === "/api/master-data/consign-deliveries-status") {
       const companyId = session.user?.companyId;
       writeJson(res, 200, {
@@ -5772,5 +5829,6 @@ module.exports = {
   attachTemuCloudDbIfPossible,
   // 导出给 scripts/rebuild-consign-snapshot.cjs 复用，保证物化快照与在线查询同一份 SQL（不漂移）。
   UNIFIED_CONSIGN_CTE,
+  buildUnifiedConsignCte,
   unifiedRowToPayload,
 };

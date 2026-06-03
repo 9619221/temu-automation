@@ -356,6 +356,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
       list: (params) => ipcRenderer.invoke("erp:consign-deliver:list", params || {}),
       page: (params) => ipcRenderer.invoke("erp:consign-deliver:page", params || {}),
       items: (params) => ipcRenderer.invoke("erp:consign-deliver:items", params || {}),
+      cloudItems: (params) => ipcRenderer.invoke("erp:consign-deliver:cloud-items", params || {}),
       cacheStatus: (params) => ipcRenderer.invoke("erp:consign-deliver:cache-status", params || {}),
       unified: (params) => ipcRenderer.invoke("erp:consign-deliver:unified", params || {}),
     },

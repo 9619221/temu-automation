@@ -799,6 +799,7 @@ interface ErpAPI {
     list: (params?: Record<string, any>) => Promise<any[]>;
     page: (params?: { page?: number; pageSize?: number; limit?: number; offset?: number; search?: string; status?: string; companyId?: string }) => Promise<{ rows: any[]; total: number }>;
     items: (params?: { o_id?: number | string; oId?: number | string; companyId?: string }) => Promise<any[]>;
+    cloudItems: (params?: { mallId?: string; soId?: string; mall_id?: string; so_id?: string }) => Promise<any[]>;
     cacheStatus: (params?: { companyId?: string }) => Promise<{ count: number; lastImportedAt: string | null; lastUpdatedAt: string | null }>;
     unified: (params?: ConsignDeliverUnifiedParams) => Promise<ConsignDeliverUnifiedResult>;
   };
