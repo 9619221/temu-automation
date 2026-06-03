@@ -256,6 +256,18 @@ function byAsDateDesc(a: UnifiedAfterSaleRow, b: UnifiedAfterSaleRow) {
   return (tB || 0) - (tA || 0);
 }
 
+// 统一搜索：在合并后的行上按关键词匹配，覆盖所有来源 + 用户可见字段（店铺 / 售后单号 / 外部单号 /
+// 物流单号 / 备注 等）。官方平台退货侧（listRecords）不支持服务端过滤、只能整源全量拉，只靠聚水潭
+// 后端 q 会漏掉平台独占单（典型：平台退货包裹的物流单号搜不到）；故搜索统一放前端做、各来源口径一致。
+function rowMatchesQuery(row: UnifiedAfterSaleRow, needle: string): boolean {
+  if (!needle) return true;
+  const fields = [
+    row.shopName, row.outerAsId, row.asId, row.lId, row.remark,
+    row.platformReason, row.type, row.logisticsCompany, row.receiverName, row.soId,
+  ];
+  return fields.some((v) => v != null && String(v).toLowerCase().includes(needle));
+}
+
 export interface FetchUnifiedResult {
   rows: UnifiedAfterSaleRow[];
   total: number;
@@ -305,7 +317,9 @@ export async function fetchUnifiedAfterSales(params: FetchUnifiedParams = {}): P
       return { rows: [], error: "ERP 接口未就绪" };
     }
     try {
-      const list = await erp.consignAfterSale.list({ q: q || undefined, limit: 100000 });
+      // 不在聚水潭侧做服务端过滤：搜索统一在合并后的结果上做（见 rowMatchesQuery），
+      // 这样官方平台退货独占单也能命中，且各来源字段口径一致。
+      const list = await erp.consignAfterSale.list({ limit: 100000 });
       return { rows: Array.isArray(list) ? (list as ConsignAfterSaleRow[]) : [], error: null };
     } catch (e: any) {
       return { rows: [], error: e?.message || "送仓售后读取失败" };
@@ -349,10 +363,13 @@ export async function fetchUnifiedAfterSales(params: FetchUnifiedParams = {}): P
     }
   })();
 
+  // 搜索关键词（统一小写匹配）；空则不过滤。聚水潭秒回与最终合并都用它过滤，口径一致。
+  const needle = (q || "").trim().toLowerCase();
+
   // 本地聚水潭秒回 → 先把 jst-only 行渲染出来；官方退货 / 店铺字典 / 确认台账随后补。
   const jstFetch = await jstPromise;
   if (onPartial) {
-    const jstRows = jstFetch.rows.map(jstAsBaseRow).sort(byAsDateDesc);
+    const jstRows = jstFetch.rows.map(jstAsBaseRow).filter((r) => rowMatchesQuery(r, needle)).sort(byAsDateDesc);
     onPartial(jstRows, jstRows.length);
   }
   const [officialFetch, mallMap, receiptMap] = await Promise.all([officialPromise, mallPromise, receiptsPromise]);
@@ -418,11 +435,13 @@ export async function fetchUnifiedAfterSales(params: FetchUnifiedParams = {}): P
     }
   }
 
-  unifiedRows.sort(byAsDateDesc);
+  // 统一过滤：覆盖聚水潭 / 官方 / both 全部来源，搜什么字段都一致（修复平台退货物流单号搜不到）。
+  const resultRows = needle ? unifiedRows.filter((r) => rowMatchesQuery(r, needle)) : unifiedRows;
+  resultRows.sort(byAsDateDesc);
 
   return {
-    rows: unifiedRows,
-    total: unifiedRows.length,
+    rows: resultRows,
+    total: resultRows.length,
     jstOk: !jstFetch.error,
     platformOk: !officialFetch.error,
     jstError: jstFetch.error || null,
