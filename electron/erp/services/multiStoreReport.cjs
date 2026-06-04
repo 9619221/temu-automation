@@ -1397,10 +1397,25 @@ function buildPurchaseReport(db, options = {}) {
 // 默认只列不合格,关联店名 + join sku_sales 补货号(质检接口不返回货号)。纯本地 erp.sqlite。
 function parseFlawsJson(j) { if (!j) return []; try { const a = JSON.parse(j); return Array.isArray(a) ? a : []; } catch { return []; } }
 // 实时拉某质检单的疵点照片:私有图带 ~30 分钟签名,存的会失效,故实时调详情拿最新签名 URL + node fetch 带 referer 拉成 base64。
+const QC_FLAW_CACHE_DIR = process.env.QC_FLAW_CACHE_DIR || "/opt/temu-erp-data/qc-flaw-cache";
 async function fetchQcFlawImages(db, options = {}) {
+  const nodeFs = require("fs");
+  const nodePath = require("path");
   const mallId = String(options.mallId || options.mall_id || "");
-  const qcBillId = options.qcBillId || options.qc_bill_id;
+  const qcBillId = String(options.qcBillId || options.qc_bill_id || "");
   if (!mallId || !qcBillId) throw new Error("缺少 mallId/qcBillId");
+  const dir = nodePath.join(QC_FLAW_CACHE_DIR, qcBillId.replace(/[^0-9a-zA-Z_-]/g, ""));
+  // 1) 命中数据盘缓存:直接读文件返回(秒出,不调 Temu)
+  try {
+    if (nodeFs.existsSync(dir)) {
+      const files = nodeFs.readdirSync(dir).filter((f) => /\.jpg$/i.test(f)).sort((a, b) => Number(a.split(".")[0]) - Number(b.split(".")[0]));
+      if (files.length) {
+        const images = files.map((f) => `data:image/jpeg;base64,${nodeFs.readFileSync(nodePath.join(dir, f)).toString("base64")}`);
+        return { count: images.length, images, cached: true };
+      }
+    }
+  } catch { /* 读缓存失败则走实时拉 */ }
+  // 2) 未缓存:实时调详情拿最新签名 + 拉缩略,顺手写入数据盘缓存(增量)
   const m = db.prepare("SELECT app_key, app_secret, access_token, region FROM erp_temu_openapi_auth WHERE mall_id = ?").get(mallId);
   if (!m) throw new Error("该店未绑定官方授权");
   const { callOpenApi } = require("../temuOpenApiClient.cjs");
@@ -1409,19 +1424,23 @@ async function fetchQcFlawImages(db, options = {}) {
   const hist = (r.response.result && r.response.result.historyVOS) || [];
   const urls = [];
   for (const h of hist) for (const f of ((h.qcDetail && h.qcDetail.flawDTOList) || [])) for (const u of (f.attachments || [])) if (u && !urls.includes(u)) urls.push(u);
+  let cacheOk = false;
+  try { nodeFs.mkdirSync(dir, { recursive: true }); cacheOk = true; } catch { /* 缓存目录建失败仍可返回 */ }
   const images = [];
+  let idx = 0;
   for (const u of urls.slice(0, 30)) { // 上限 30 张防滥用
     try {
-      const thumbUrl = u + (u.includes("?") ? "&" : "?") + "imageMogr2/thumbnail/800x"; // COS 数据万象缩略(800px),体积降约4倍,疵点看合规标签够清
+      const thumbUrl = u + (u.includes("?") ? "&" : "?") + "imageMogr2/thumbnail/800x"; // COS 数据万象缩略(800px),体积降约4倍
       const resp = await fetch(thumbUrl, { headers: { Referer: "https://kuajingmaihuo.com/", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" } });
       if (!resp.ok) continue;
       const buf = Buffer.from(await resp.arrayBuffer());
       if (buf.length > 8 * 1024 * 1024) continue; // 单图 ≤ 8M
-      const ct = resp.headers.get("content-type") || "image/jpeg";
-      images.push(`data:${ct};base64,${buf.toString("base64")}`);
+      if (cacheOk) { try { nodeFs.writeFileSync(nodePath.join(dir, `${idx}.jpg`), buf); } catch { /* 写缓存失败不致命 */ } }
+      idx += 1;
+      images.push(`data:image/jpeg;base64,${buf.toString("base64")}`);
     } catch { /* 单图失败跳过 */ }
   }
-  return { count: images.length, images };
+  return { count: images.length, images, cached: false };
 }
 function buildOpenapiQc(db, options = {}) {
   const includeTest = !!options.includeTest;
