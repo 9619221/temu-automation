@@ -81,7 +81,9 @@ function retainErpEventSubscription() {
 function createImageStudioApi(profile) {
   const ensureProfile = () => ipcRenderer.invoke("image-studio:switch-profile", profile);
   const withProfile = (fn) => async (...args) => {
-    await ensureProfile();
+    // AI 出图业务已全量走云端（erp.temu.chat/agent），本地子进程仅为可选遗留；
+    // 其启动失败不应阻断走云的分析/生图请求，故尝试启动但吞掉异常继续。
+    try { await ensureProfile(); } catch {}
     return fn(...args);
   };
 

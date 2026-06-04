@@ -6961,8 +6961,9 @@ function triggerImageDownload(href: string, fileName: string) {
 
 export default function ImageStudioGPT() {
   const location = useLocation();
-  const [status, setStatus] = useState<ImageStudioStatus>(FALLBACK_STATUS);
-  const [loading, setLoading] = useState(true);
+  // 生图业务全量走云端（erp.temu.chat/agent），页面不再以本地子进程就绪为门槛 → 初始即视为就绪
+  const [status, setStatus] = useState<ImageStudioStatus>({ ...FALLBACK_STATUS, status: "ready", ready: true, message: "AI 出图服务已就绪" });
+  const [loading, setLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -7291,15 +7292,12 @@ export default function ImageStudioGPT() {
   };
 
   useEffect(() => {
-    refreshStatus(true).then((nextStatus) => {
-      if (nextStatus.ready) {
-        loadHistory().catch(() => {});
-        refreshBackgroundJobs();
-      }
-    }).catch(() => {});
+    // 生图业务全量走云端，页面不再依赖本地 image-studio 子进程就绪状态：
+    // 不再 ensureRunning 启动本地子进程，直接加载历史/后台任务（均走云）。
+    loadHistory().catch(() => {});
+    refreshBackgroundJobs();
 
     const timer = window.setInterval(() => {
-      refreshStatus(false).catch(() => {});
       refreshBackgroundJobs();
     }, 8000);
 
