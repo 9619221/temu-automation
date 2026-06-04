@@ -79,6 +79,17 @@ function parsePurchaseOrder(item, costMap) {
     receive_warehouse_name: di.receiveWarehouseName || null,
     supplier_name: item.supplierName || null,
     items_json: JSON.stringify(items),
+    // —— purchase_order 补接字段 ——
+    category: item.category || null,
+    today_can_deliver: item.todayCanDeliver === true ? 1 : (item.todayCanDeliver === false ? 0 : null),
+    is_first: item.isFirst === true ? 1 : (item.isFirst === false ? 0 : null),
+    expect_arrival_at: tsToStr(di.expectLatestArrivalTimeOrDefault),
+    urgency_type: num(item.urgencyType),
+    // —— ship_order 补接字段(主行先初始 null,发货单按 WB 合并时填) ——
+    express_company: null, express_delivery_sn: null, driver_name: null, plate_number: null,
+    deliver_package_num: null, receive_package_num: null, sub_warehouse_name: null, receive_address_json: null,
+    is_print_box_mark: null, delivery_method: null, express_batch_sn: null, predict_package_weight: null,
+    ship_create_time: null, inbound_time: null,
   };
 }
 
@@ -106,6 +117,21 @@ function refreshConsignAll(db) {
     row.ship_status = SHIP_STATUS[String(it.status)] || row.ship_status;
     const dt = tsToStr(it.deliverTime); if (dt) row.deliver_time = dt;
     if (!row.delivery_order_sn && it.deliveryOrderSn) row.delivery_order_sn = str(it.deliveryOrderSn);
+    // —— ship_order 补接:物流/司机/包裹/仓库/打印/批次/重量/时间 ——
+    row.express_company = it.expressCompany || null;
+    row.express_delivery_sn = str(it.expressDeliverySn);
+    row.driver_name = it.driverName || null;
+    row.plate_number = it.plateNumber || null;
+    row.deliver_package_num = num(it.deliverPackageNum);
+    row.receive_package_num = num(it.receivePackageNum);
+    row.sub_warehouse_name = it.subWarehouseName || null;
+    row.receive_address_json = it.receiveAddressInfo ? JSON.stringify(it.receiveAddressInfo) : null;
+    row.is_print_box_mark = it.isPrintBoxMark === true ? 1 : (it.isPrintBoxMark === false ? 0 : null);
+    row.delivery_method = num(it.deliveryMethod);
+    row.express_batch_sn = str(it.expressBatchSn);
+    row.predict_package_weight = num(it.predictTotalPackageWeight);
+    row.ship_create_time = tsToStr(it.deliveryOrderCreateTime);
+    row.inbound_time = tsToStr(it.inboundTime);
     shipMerged += 1;
   }
   const rows = [...byWb.values()];
@@ -114,12 +140,20 @@ function refreshConsignAll(db) {
       (mall_id, so_id, original_po_sn, delivery_order_sn, product_id, product_skc_id, product_name,
        sku_ext_codes, spec_names, demand_qty, delivered_qty, received_qty, amount_cents, cost_coverage,
        sku_count, temu_status, ship_status, order_time, deliver_time, latest_ship_at,
-       receive_warehouse_name, supplier_name, items_json, synced_at)
+       receive_warehouse_name, supplier_name, items_json,
+       express_company, express_delivery_sn, driver_name, plate_number, deliver_package_num, receive_package_num,
+       sub_warehouse_name, receive_address_json, is_print_box_mark, delivery_method, express_batch_sn,
+       predict_package_weight, ship_create_time, inbound_time, category, today_can_deliver, is_first,
+       expect_arrival_at, urgency_type, synced_at)
     VALUES
       (@mall_id, @so_id, @original_po_sn, @delivery_order_sn, @product_id, @product_skc_id, @product_name,
        @sku_ext_codes, @spec_names, @demand_qty, @delivered_qty, @received_qty, @amount_cents, @cost_coverage,
        @sku_count, @temu_status, @ship_status, @order_time, @deliver_time, @latest_ship_at,
-       @receive_warehouse_name, @supplier_name, @items_json, @now)`);
+       @receive_warehouse_name, @supplier_name, @items_json,
+       @express_company, @express_delivery_sn, @driver_name, @plate_number, @deliver_package_num, @receive_package_num,
+       @sub_warehouse_name, @receive_address_json, @is_print_box_mark, @delivery_method, @express_batch_sn,
+       @predict_package_weight, @ship_create_time, @inbound_time, @category, @today_can_deliver, @is_first,
+       @expect_arrival_at, @urgency_type, @now)`);
   const tx = db.transaction(() => {
     db.prepare("DELETE FROM erp_temu_openapi_consign").run();
     for (const row of rows) ins.run({ ...row, now });
