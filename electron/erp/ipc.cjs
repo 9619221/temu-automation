@@ -14158,7 +14158,16 @@ async function runScheduledOrderSync({ maxAgeHours = 168, limit = 50, logger } =
   }
   // 第三阶段：补 1688 物流单号。物流不随订单/支付同步自动来，需单独调 getLogisticsInfos。
   // 复用阶段一/二的退避状态机(key 加 logi: 前缀)与 failedAccounts 账号跳过。
-  const logisticsCandidates = selectPoIdsForLogisticsSync(db, { maxAgeHours, limit });
+  // 物流窗口独立于订单同步：默认 30 天(720h)，覆盖建单超 7 天但货仍在途的老单
+  // (订单同步的 7 天窗口会漏这类单)；开关 ERP_PURCHASE_LOGISTICS_AUTO_SYNC=0 可单独关停物流补单。
+  const logisticsAutoSyncOn = !["0", "false", "off", "no"].includes(
+    String(process.env.ERP_PURCHASE_LOGISTICS_AUTO_SYNC || "").toLowerCase(),
+  );
+  const logisticsMaxAgeHours = Number(process.env.ERP_PURCHASE_LOGISTICS_SYNC_MAX_AGE_HOURS) || 720;
+  const logisticsLimit = Math.min(Number(process.env.ERP_PURCHASE_LOGISTICS_SYNC_LIMIT) || limit, 200);
+  const logisticsCandidates = logisticsAutoSyncOn
+    ? selectPoIdsForLogisticsSync(db, { maxAgeHours: logisticsMaxAgeHours, limit: logisticsLimit })
+    : [];
   for (const row of logisticsCandidates) {
     const stateKey = "logi:" + row.id;
     const state = orderSyncAttemptState.get(stateKey) || { attempts: 0, nextAt: 0 };
@@ -21585,6 +21594,8 @@ async function listConsignCloudItemsRuntime(params = {}) {
       const payload = await remoteRequest("/api/master-data/consign-deliver-cloud-items", {
         method: "POST",
         body: { ...params },
+        // 同 jst 明细：cloud-only 单的官方逐 SKU 明细点查，超时与列表对齐到 120s，避免预取撞主控端繁忙时超时。
+        timeoutMs: 120000,
       });
       return (payload && payload.rows) || [];
     } catch (error) {
