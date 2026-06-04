@@ -83,11 +83,6 @@ with open(OUT, "w", encoding="utf-8") as f:
         if o_id is None:
             continue
         raw = json.dumps({k: v for k, v in r.items() if k != "items"}, ensure_ascii=False, separators=(",", ":"))
-        # 聚水潭把「待接单/等待确认」等待处理问题单(src_status=Question)导出为 status=异常，
-        # 业务口径归到「已付款待审核」阶段，这里规整，避免界面显示「异常」误导。原始值仍在 raw_json 和 src_status。
-        _status = r.get("status")
-        if _status == "异常":
-            _status = "已付款待审核"
         cols = [
             ("id", esc(f"jst:consign-deliver:{o_id}")),
             ("company_id", esc("company_default")),
@@ -107,7 +102,7 @@ with open(OUT, "w", encoding="utf-8") as f:
             ("shop_name", esc(r.get("shop_name"))),
             ("shop_site", esc(r.get("shop_site"))),
             ("type", esc(r.get("type"))),
-            ("status", esc(_status)),
+            ("status", esc(r.get("status"))),
             ("src_status", esc(r.get("src_status"))),
             ("shop_status", esc(r.get("shop_status"))),
             ("shop_status_text", esc(r.get("shop_status_text"))),
