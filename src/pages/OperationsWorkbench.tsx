@@ -61,7 +61,7 @@ interface StoreMatrixRow {
   sales: number; sale_7d: number; lack: number; soldout: number;
   high_risk: number; restock: number; stock_gap: number; activity: number;
 }
-interface SkuChild { skc_id: string | null; sku_ext_code: string | null; spec_name?: string | null; declared_price: number | null; today: number; last7d: number; sale_days: number | null; stock: number; occupy: number; advice_qty: number; lack_qty?: number; }
+interface SkuChild { skc_id: string | null; sku_ext_code: string | null; spec_name?: string | null; declared_price: number | null; today: number; last7d: number; last30d: number; sale_days: number | null; stock: number; occupy: number; advice_qty: number; lack_qty?: number; }
 interface ProductPanelRow {
   mall_id: string; product_id: string; store_code: string | null; mall_name: string | null; title: string | null; thumb: string | null;
   skc_codes: string | null; sku_codes: string | null; declared_price: number | null; score: number | null; comments: number | null;
@@ -140,10 +140,9 @@ export default function OperationsWorkbench() {
   const [ownerFilter, setOwnerFilter] = useState<string>(() => { try { return localStorage.getItem("ow_owner") || "all"; } catch { return "all"; } });
   const setOwner = useCallback((v: string) => { setOwnerFilter(v); try { localStorage.setItem("ow_owner", v); } catch { /* */ } }, []);
   // 合并 Tab 内的子段切换
-  const [storeSeg, setStoreSeg] = useState<string>("health");
+  const [storeSeg, setStoreSeg] = useState<string>("ad");
   const [prodSeg, setProdSeg] = useState<string>("panel");
   const goProduct = useCallback((seg: string) => { setProdSeg(seg); setActiveTab("product"); }, []);
-  const goStore = useCallback((seg: string) => { setStoreSeg(seg); setActiveTab("store"); }, []);
   const [skuRows, setSkuRows] = useState<SkuRow[]>([]);
   const [skuLoading, setSkuLoading] = useState(false);
   const [riskRows, setRiskRows] = useState<RiskRow[]>([]);
@@ -450,16 +449,15 @@ export default function OperationsWorkbench() {
     })();
   }, []);
   useEffect(() => {
-    const ov = activeTab === "overview";
     const store = activeTab === "store";
     const todo = activeTab === "todo"; // 今日待办依赖风险+活动+诊断(诊断走 skuRows,已在挂载时加载)
     // shop 始终加载:owner 映射是「我的店」全局过滤的基础
     if (!shopLoaded && !shopLoading) loadShop();
-    if ((store || ov) && !trendLoaded && !trendLoading) loadTrend();
+    if (!OFFICIAL_SOURCE && store && !trendLoaded && !trendLoading) loadTrend();
     if (store && !adLoaded && !adLoading) loadAd();
-    if ((activeTab === "stock" || ov) && !stockLoaded && !stockLoading) loadStockOrders();
-    if ((activeTab === "risk" || ov || todo) && !riskLoaded && !riskLoading) loadRisk();
-    if ((activeTab === "activity" || ov || todo) && !actLoaded && !actLoading) loadAct();
+    if (activeTab === "stock" && !stockLoaded && !stockLoading) loadStockOrders();
+    if ((activeTab === "risk" || todo) && !riskLoaded && !riskLoading) loadRisk();
+    if ((activeTab === "activity" || todo) && !actLoaded && !actLoading) loadAct();
     if (activeTab === "product" && !panelLoaded && !panelLoading) loadPanel();
   }, [activeTab, shopLoaded, shopLoading, trendLoaded, trendLoading, adLoaded, adLoading, stockLoaded, stockLoading, riskLoaded, riskLoading, actLoaded, actLoading, panelLoaded, panelLoading, loadShop, loadTrend, loadAd, loadStockOrders, loadRisk, loadAct, loadPanel]);
 
@@ -687,13 +685,6 @@ export default function OperationsWorkbench() {
     if (q) v = v.filter((r) => (r.title || "").toLowerCase().includes(q) || (r.product_id || "").includes(q));
     return v.map((r, i) => ({ ...r, __rk: i }));
   }, [panelRows, storeFilter, search, inScope]);
-  const shopView = useMemo(() => {
-    let v = shopRows.filter((r) => inScope(r.store_code || r.mall_id));
-    if (storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
-    const q = search.trim().toLowerCase();
-    if (q) v = v.filter((r) => (r.store_code || "").toLowerCase().includes(q) || (r.mall_name || "").toLowerCase().includes(q) || (r.owner || "").toLowerCase().includes(q));
-    return v.map((r, i) => ({ ...r, __rk: i }));
-  }, [shopRows, storeFilter, search, inScope]);
   // 官方流量(店铺维度)：用 shopRows 把 mall_id 映射成店名/store_code，沿用 owner/store 过滤
   const mallInfoMap = useMemo(() => {
     const m = new Map<string, { name: string; code: string | null }>();
@@ -838,21 +829,6 @@ export default function OperationsWorkbench() {
     { title: "截止", dataIndex: "end_at", width: 110, render: (v: string | null) => { if (!v) return "—"; const n = Number(v); return Number.isFinite(n) && n > 1e11 ? new Date(n).toLocaleDateString("zh-CN") : String(v); } },
   ];
 
-  const shopColumns: ColumnsType<ShopHealthRow> = [
-    { title: "店号", dataIndex: "store_code", width: 88, fixed: "left", render: (v, r) => formatStoreNo(v === r.mall_id ? null : v, r.mall_id) },
-    { title: "店铺", dataIndex: "mall_name", width: 140, ellipsis: true, render: (v: string | null) => formatMallName(v) },
-    { title: "负责人", dataIndex: "owner", width: 80, render: (v) => v || "—" },
-    { title: "今日销量", dataIndex: "sale_volume", width: 90, align: "right", sorter: (a, b) => a.sale_volume - b.sale_volume, defaultSortOrder: "descend", render: fmtNum },
-    { title: "7天销量", dataIndex: "sale_7d", width: 90, align: "right", sorter: (a, b) => a.sale_7d - b.sale_7d, render: fmtNum },
-    { title: "30天销量", dataIndex: "sale_30d", width: 95, align: "right", sorter: (a, b) => a.sale_30d - b.sale_30d, render: fmtNum },
-    { title: "在售", dataIndex: "on_sale", width: 75, align: "right", render: fmtNum },
-    { title: "缺货SKC", dataIndex: "lack_skc", width: 90, align: "right", sorter: (a, b) => a.lack_skc - b.lack_skc, render: (v: number) => (v > 0 ? <span style={{ color: "#d46b08", fontWeight: 600 }}>{fmtNum(v)}</span> : fmtNum(v)) },
-    { title: "即将售罄", dataIndex: "about_to_sell_out", width: 90, align: "right", sorter: (a, b) => a.about_to_sell_out - b.about_to_sell_out, render: (v: number) => (v > 0 ? <span style={{ color: "#d46b08" }}>{fmtNum(v)}</span> : fmtNum(v)) },
-    { title: "已售罄", dataIndex: "already_sold_out", width: 85, align: "right", sorter: (a, b) => a.already_sold_out - b.already_sold_out, render: (v: number) => (v > 0 ? <span style={{ color: "#cf1322", fontWeight: 600 }}>{fmtNum(v)}</span> : fmtNum(v)) },
-    { title: "建议备货SKC", dataIndex: "advice_prepare_skc", width: 110, align: "right", render: fmtNum },
-    { title: "高价限制", dataIndex: "high_price_limit", width: 90, align: "right", render: (v: number) => (v > 0 ? <span style={{ color: "#cf1322" }}>{fmtNum(v)}</span> : fmtNum(v)) },
-    { title: "90天售后率", dataIndex: "after_sale_ratio_90d", width: 100, align: "right", sorter: (a, b) => (a.after_sale_ratio_90d ?? 0) - (b.after_sale_ratio_90d ?? 0), render: (v: number | null) => (v == null ? "—" : (v * 100).toFixed(2) + "%") },
-  ];
 
   const SRC_LABEL: Record<string, string> = { stock_order: "备货单", shipping_list: "发货单", shipping_desk: "发货台" };
   const stockColumns: ColumnsType<StockOrderRow> = [
@@ -898,25 +874,35 @@ export default function OperationsWorkbench() {
 
   const panelColumns: ColumnsType<ProductPanelRow> = [
     { title: "店号", dataIndex: "store_code", width: 88, fixed: "left", render: (v, r) => formatStoreNo(v === r.mall_id ? null : v, r.mall_id) },
-    { title: "SPU", dataIndex: "product_id", width: 120, render: (v: string) => <Typography.Text copyable={{ text: v }} style={{ fontSize: 12, fontWeight: 600 }}>{v}</Typography.Text> },
-    { title: "SKC", key: "skc", width: 130, render: (_, r) => { const codes = (r.skc_codes || "").split(",").map((c) => c.trim()).filter(Boolean); return codes.length ? <div style={{ fontSize: 12 }}>{codes.map((c, i) => <div key={i} style={{ padding: "1px 0" }}><Typography.Text copyable={{ text: c }} style={{ fontSize: 12 }}>{c}</Typography.Text></div>)}</div> : <span style={{ color: "#bbb" }}>—</span>; } },
-    { title: "SKU货号", key: "sku_ext", width: 130, render: (_, r) => stackCell(skusOf(r), (s) => s.sku_ext_code || <span style={{ color: "#bbb" }}>—</span>) },
-    { title: "规格", key: "spec", width: 150, render: (_, r) => stackCell(skusOf(r), (s) => s.spec_name ? <span style={{ color: "#595959" }}>{s.spec_name}</span> : <span style={{ color: "#bbb" }}>—</span>) },
-    { title: "商品", key: "prod", width: 340, render: (_, r) => (
+    { title: "商品", key: "prod", width: 380, render: (_, r) => {
+      const codes = (r.skc_codes || "").split(",").map((c) => c.trim()).filter(Boolean);
+      return (
       <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
         {r.thumb ? <div style={{ flexShrink: 0, width: 40, height: 40 }}><Image src={r.thumb} width={40} height={40} style={{ objectFit: "cover", borderRadius: 4 }} preview={{ mask: <EyeOutlined />, maskClassName: "prod-thumb-mask" }} /></div> : <div style={{ width: 40, height: 40, borderRadius: 4, background: "#f0f0f0", flexShrink: 0 }} />}
-        <div style={{ minWidth: 0, fontSize: 12, lineHeight: 1.45, whiteSpace: "normal", wordBreak: "break-word" }}>{r.title || "—"}</div>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ fontSize: 12, lineHeight: 1.45, whiteSpace: "normal", wordBreak: "break-word" }}>{r.title || "—"}</div>
+          <div style={{ marginTop: 3, fontSize: 11, color: "#8c8c8c", display: "flex", flexWrap: "wrap", gap: "0 10px" }}>
+            <span>SPU <Typography.Text copyable={{ text: String(r.product_id) }} style={{ fontSize: 11, color: "#8c8c8c" }}>{r.product_id}</Typography.Text></span>
+            {codes.map((c, i) => <span key={i}>SKC <Typography.Text copyable={{ text: c }} style={{ fontSize: 11, color: "#8c8c8c" }}>{c}</Typography.Text></span>)}
+          </div>
+        </div>
       </div>
-    ) },
+      );
+    } },
+    { title: "SKU货号", key: "sku_ext", width: 130, render: (_, r) => stackCell(skusOf(r), (s) => s.sku_ext_code || <span style={{ color: "#bbb" }}>—</span>) },
+    { title: "规格", key: "spec", width: 150, render: (_, r) => stackCell(skusOf(r), (s) => s.spec_name ? <span style={{ color: "#595959" }}>{s.spec_name}</span> : <span style={{ color: "#bbb" }}>—</span>) },
     { title: "评价", key: "score", width: 110, align: "right", sorter: (a, b) => (a.comments ?? 0) - (b.comments ?? 0), render: (_, r) => { if (r.comments == null && r.score == null) return <span style={{ color: "#bbb" }}>—</span>; return <span>{r.score != null ? <span style={{ color: "#fadb14" }}>★{r.score.toFixed(1)} </span> : null}{r.comments != null ? <span>{fmtNum(r.comments)} 评论</span> : ""}</span>; } },
     { title: "申报价", key: "declared_price", width: 90, align: "right", render: (_, r) => { const skus = skusOf(r); const prices = skus.map((s) => s.declared_price).filter((p): p is number => p != null); const min = prices.length ? Math.min(...prices) : null; return stackCell(skus, (s) => (s.declared_price == null ? "—" : "¥" + s.declared_price.toFixed(2)), min == null ? "—" : "¥" + min.toFixed(2)); } },
-    { title: "可用库存", key: "stock", width: 90, align: "right", render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.stock || 0), 0); return stackCell(skus, (s) => <span style={{ color: (s.stock || 0) <= 0 ? "#cf1322" : undefined }}>{fmtNum(s.stock)}</span>, fmtNum(sum)); } },
-    { title: "预占用库存", key: "occupy", width: 100, align: "right", render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.occupy || 0), 0); return stackCell(skus, (s) => fmtNum(s.occupy), fmtNum(sum)); } },
-    { title: "暂不可用库存", dataIndex: "unavail", width: 110, align: "right", render: (v: number | null) => (v == null ? "—" : v > 0 ? <span style={{ color: "#d46b08" }}>{fmtNum(v)}</span> : fmtNum(v)) },
-    { title: "缺货件数", key: "lack_qty", width: 95, align: "right", sorter: (a, b) => (a.lack_qty ?? 0) - (b.lack_qty ?? 0), render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.lack_qty || 0), 0); return stackCell(skus, (s) => ((s.lack_qty || 0) > 0 ? <span style={{ color: "#cf1322", fontWeight: 600 }}>{fmtNum(s.lack_qty || 0)}</span> : <span style={{ color: "#bbb" }}>0</span>), sum > 0 ? <span style={{ color: "#cf1322" }}>{fmtNum(sum)}</span> : fmtNum(sum)); } },
-    { title: "发货在途", dataIndex: "shipping", width: 90, align: "right", sorter: (a, b) => (a.shipping ?? 0) - (b.shipping ?? 0), render: (v: number | null) => (v == null ? "—" : v > 0 ? <span style={{ color: "#1677ff" }}>{fmtNum(v)}</span> : <span style={{ color: "#bbb" }}>0</span>) },
-    { title: "总库存", dataIndex: "total_stock", width: 95, align: "right", sorter: (a, b) => (a.total_stock ?? 0) - (b.total_stock ?? 0), render: (v: number | null) => (v == null ? "—" : <span style={{ fontWeight: 700, color: v <= 0 ? "#cf1322" : "#1a73e8" }}>{fmtNum(v)}</span>) },
-    { title: "建议备货", key: "advice", width: 90, align: "right", render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.advice_qty || 0), 0); return stackCell(skus, (s) => ((s.advice_qty || 0) > 0 ? <Tag color="blue">{fmtNum(s.advice_qty)}</Tag> : <span style={{ color: "#bbb" }}>—</span>), fmtNum(sum)); } },
+    { title: "今日销量", key: "today_sales", width: 90, align: "right", sorter: (a, b) => skusOf(a).reduce((x, s) => x + (s.today || 0), 0) - skusOf(b).reduce((x, s) => x + (s.today || 0), 0), defaultSortOrder: "descend", render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.today || 0), 0); return stackCell(skus, (s) => fmtNum(s.today), fmtNum(sum)); } },
+    { title: "7天销量", key: "sales_7d", width: 95, align: "right", sorter: (a, b) => skusOf(a).reduce((x, s) => x + (s.last7d || 0), 0) - skusOf(b).reduce((x, s) => x + (s.last7d || 0), 0), render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.last7d || 0), 0); return stackCell(skus, (s) => fmtNum(s.last7d), fmtNum(sum)); } },
+    { title: "30天销量", key: "sales_30d", width: 95, align: "right", sorter: (a, b) => skusOf(a).reduce((x, s) => x + (s.last30d || 0), 0) - skusOf(b).reduce((x, s) => x + (s.last30d || 0), 0), render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.last30d || 0), 0); return stackCell(skus, (s) => fmtNum(s.last30d), fmtNum(sum)); } },
+    { title: "可用库存", key: "stock", width: 108, align: "right", sorter: (a, b) => skusOf(a).reduce((x, s) => x + (s.stock || 0), 0) - skusOf(b).reduce((x, s) => x + (s.stock || 0), 0), render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.stock || 0), 0); return stackCell(skus, (s) => <span style={{ color: (s.stock || 0) <= 0 ? "#cf1322" : undefined }}>{fmtNum(s.stock)}</span>, fmtNum(sum)); } },
+    { title: "预占用库存", key: "occupy", width: 116, align: "right", sorter: (a, b) => skusOf(a).reduce((x, s) => x + (s.occupy || 0), 0) - skusOf(b).reduce((x, s) => x + (s.occupy || 0), 0), render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.occupy || 0), 0); return stackCell(skus, (s) => fmtNum(s.occupy), fmtNum(sum)); } },
+    { title: "暂不可用库存", dataIndex: "unavail", width: 130, align: "right", sorter: (a, b) => (a.unavail ?? 0) - (b.unavail ?? 0), render: (v: number | null) => (v == null ? "—" : v > 0 ? <span style={{ color: "#d46b08" }}>{fmtNum(v)}</span> : fmtNum(v)) },
+    { title: "缺货件数", key: "lack_qty", width: 110, align: "right", sorter: (a, b) => (a.lack_qty ?? 0) - (b.lack_qty ?? 0), render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.lack_qty || 0), 0); return stackCell(skus, (s) => ((s.lack_qty || 0) > 0 ? <span style={{ color: "#cf1322", fontWeight: 600 }}>{fmtNum(s.lack_qty || 0)}</span> : <span style={{ color: "#bbb" }}>0</span>), sum > 0 ? <span style={{ color: "#cf1322" }}>{fmtNum(sum)}</span> : fmtNum(sum)); } },
+    { title: "发货在途", dataIndex: "shipping", width: 108, align: "right", sorter: (a, b) => (a.shipping ?? 0) - (b.shipping ?? 0), render: (v: number | null) => (v == null ? "—" : v > 0 ? <span style={{ color: "#1677ff" }}>{fmtNum(v)}</span> : <span style={{ color: "#bbb" }}>0</span>) },
+    { title: "总库存", dataIndex: "total_stock", width: 104, align: "right", sorter: (a, b) => (a.total_stock ?? 0) - (b.total_stock ?? 0), render: (v: number | null) => (v == null ? "—" : <span style={{ fontWeight: 700, color: v <= 0 ? "#cf1322" : "#1a73e8" }}>{fmtNum(v)}</span>) },
+    { title: "建议备货", key: "advice", width: 108, align: "right", render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.advice_qty || 0), 0); return stackCell(skus, (s) => ((s.advice_qty || 0) > 0 ? <Tag color="blue">{fmtNum(s.advice_qty)}</Tag> : <span style={{ color: "#bbb" }}>—</span>), fmtNum(sum)); } },
     { title: "可报活动", key: "act", width: 130, align: "right", sorter: (a, b) => a.act_cnt - b.act_cnt, render: (_, r) => (r.act_cnt > 0 ? <span style={{ color: "#3f8600" }}>{r.act_cnt}个{r.min_price != null ? ` / 低¥${r.min_price.toFixed(2)}` : ""}</span> : <span style={{ color: "#bbb" }}>—</span>) },
     { title: "合规", dataIndex: "compliance", width: 170, render: (v: string | null) => (v ? <Tag color="red" style={{ whiteSpace: "normal" }}>{v}</Tag> : <span style={{ color: "#3f8600" }}>正常</span>) },
     { title: "限流", dataIndex: "limited", width: 90, align: "center", sorter: (a, b) => (a.limited ? 1 : 0) - (b.limited ? 1 : 0), render: (v: boolean) => (v ? <Tag color="volcano">高价限流</Tag> : <span style={{ color: "#bbb" }}>—</span>) },
@@ -940,13 +926,13 @@ export default function OperationsWorkbench() {
       children: (
         <div style={{ padding: 16 }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 16 }}>
-            <Card size="small" hoverable onClick={() => goStore("health")}><Statistic title="今日销量(全店)" value={shopAgg.sales} /></Card>
-            <Card size="small" hoverable onClick={() => goStore("health")}><Statistic title="缺货 SKC" value={shopAgg.lack} valueStyle={{ color: shopAgg.lack > 0 ? "#d46b08" : undefined }} /></Card>
-            <Card size="small" hoverable onClick={() => goStore("health")}><Statistic title="已售罄" value={shopAgg.soldout} valueStyle={{ color: shopAgg.soldout > 0 ? "#cf1322" : undefined }} /></Card>
+            <Card size="small"><Statistic title="今日销量(全店)" value={shopAgg.sales} /></Card>
+            <Card size="small"><Statistic title="缺货 SKC" value={shopAgg.lack} valueStyle={{ color: shopAgg.lack > 0 ? "#d46b08" : undefined }} /></Card>
+            <Card size="small"><Statistic title="已售罄" value={shopAgg.soldout} valueStyle={{ color: shopAgg.soldout > 0 ? "#cf1322" : undefined }} /></Card>
             {!HIDE_RISK && <Card size="small" hoverable onClick={() => setActiveTab("risk")}><Statistic title="高风险待办" value={riskOverview.high} valueStyle={{ color: riskOverview.high > 0 ? "#cf1322" : undefined }} /></Card>}
             <Card size="small" hoverable onClick={() => goProduct("diag")}><Statistic title="诊断 · 急" value={overview.urgent} valueStyle={{ color: overview.urgent > 0 ? "#cf1322" : undefined }} /></Card>
             <Card size="small" hoverable onClick={() => goProduct("restock")}><Statistic title="急需补货 SKU" value={restockView.length} valueStyle={{ color: restockView.length > 0 ? "#d46b08" : undefined }} /></Card>
-            <Card size="small" hoverable onClick={() => setActiveTab("stock")}><Statistic title="备货缺口单" value={stockView.length} /></Card>
+            <Card size="small" hoverable onClick={() => setActiveTab("stock")}><Statistic title="备货缺口单" value={stockLoaded ? stockView.length : "查看"} valueStyle={!stockLoaded ? { fontSize: 16, color: "#1677ff" } : undefined} /></Card>
             {!HIDE_ACTIVITY && <Card size="small" hoverable onClick={() => setActiveTab("activity")}><Statistic title="可报活动" value={actView.length} valueStyle={{ color: "#3f8600" }} /></Card>}
           </div>
           <Card size="small" title="各店概览 · 点店查看商品明细,问题多的店排在前" style={{ marginBottom: 16 }} loading={shopLoading || riskLoading || skuLoading}>
@@ -1028,9 +1014,11 @@ export default function OperationsWorkbench() {
       key: "store", label: "店铺",
       children: (
         <div>
+          {!OFFICIAL_SOURCE && (
           <div style={{ padding: "12px 16px 0" }}>
-            <Segmented value={storeSeg} onChange={(v) => setStoreSeg(v as string)} options={[{ label: "健康体检", value: "health" }, ...(OFFICIAL_SOURCE ? [] : [{ label: "销量趋势", value: "trend" }]), { label: "流量投放", value: "ad" }]} />
+            <Segmented value={storeSeg} onChange={(v) => setStoreSeg(v as string)} options={[{ label: "销量趋势", value: "trend" }, { label: "流量投放", value: "ad" }]} />
           </div>
+          )}
           {storeSeg === "ad" ? (
             <div>
               <div style={{ padding: "12px 16px 0", display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 16 }}>
@@ -1064,18 +1052,6 @@ export default function OperationsWorkbench() {
                   { title: "费比", dataIndex: "acos", key: "acos", width: 80, align: "right", render: (v) => v == null ? "—" : (v / 100).toFixed(2) + "%" },
                 ]}
               />
-            </div>
-          ) : storeSeg === "health" ? (
-            <div>
-              <div style={{ padding: "12px 16px 0", display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16 }}>
-                <Statistic title="店铺数" value={shopView.length} />
-                <Statistic title="缺货SKC合计" value={shopAgg.lack} valueStyle={{ color: shopAgg.lack > 0 ? "#d46b08" : undefined }} />
-                <Statistic title="已售罄合计" value={shopAgg.soldout} valueStyle={{ color: shopAgg.soldout > 0 ? "#cf1322" : undefined }} />
-                <Statistic title="今日销量合计" value={shopAgg.sales} />
-              </div>
-              <div style={{ padding: "8px 16px 0", color: "#888", fontSize: 12 }}>各店体检:销量 / 在售 / 缺货 / 售罄 / 90天售后率,按已售罄、缺货降序。</div>
-              {commonFilters()}
-              <Table<ShopHealthRow> dataSource={shopView} columns={shopColumns} rowKey={(r) => String(r.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 条` }} scroll={{ x: 1200 }} loading={shopLoading} />
             </div>
           ) : (
             <div>
