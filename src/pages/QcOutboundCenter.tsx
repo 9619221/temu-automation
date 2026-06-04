@@ -864,6 +864,41 @@ export default function QcOutboundCenter() {
     }
   }, [unifiedItemsCache]);
 
+  // cloud-only 单某 SKU(productSkuId)的本地实发数量：写后端 + 乐观更新明细缓存与主表「送货数」之和(仿 handleSetItemShipQty)。
+  const handleSetCloudItemShipQty = useCallback(async (row: ConsignDeliverUnifiedRow, item: any, nextQty: number) => {
+    const mallId = row.rawCloud?.mall_id ? String(row.rawCloud.mall_id) : "";
+    const soId = row.soId || "";
+    const skuKey = item?.skuId != null ? String(item.skuId) : "";
+    if (!mallId || !soId || !skuKey || !erp?.inventory?.action) return;
+    const planQty = Number(item.qty || 0);
+    const clamped = Math.max(0, Math.min(Math.floor(Number(nextQty) || 0), planQty));
+    const savingKey = `cloud:${soId}:${skuKey}`;
+    setItemShipSaving((prev) => ({ ...prev, [savingKey]: true }));
+    try {
+      await erp.inventory.action({ action: "consign_deliver_cloud_set_item_ship_qty", mallId, soId, skuKey, shipQty: clamped });
+      const prevList = cloudItemsCache[soId] || [];
+      const nextList = prevList.map((it) => (String(it.skuId) === skuKey ? { ...it, localShipQty: clamped } : it));
+      const sum = nextList.reduce(
+        (acc, it) => acc + Number(it.localShipQty != null ? it.localShipQty : (it.qty || 0)),
+        0,
+      );
+      setCloudItemsCache((prev) => ({ ...prev, [soId]: nextList }));
+      setItemShipDraft((prev) => { const next = { ...prev }; delete next[savingKey]; return next; });
+      // 乐观更新主表该行送货数（明细本地实发之和），不必等物化快照重建。
+      setUnifiedSnapshot((snap) => ({
+        ...snap,
+        rows: snap.rows.map((r) => (
+          r.source === "cloud" && r.soId === soId ? { ...r, localShipQty: sum } : r
+        )),
+      }));
+      message.success("已更新实发数量");
+    } catch (error: any) {
+      message.error(error?.message || "更新实发数量失败");
+    } finally {
+      setItemShipSaving((prev) => ({ ...prev, [savingKey]: false }));
+    }
+  }, [cloudItemsCache, erp]);
+
   const renderUnifiedRowItems = useCallback((row: ConsignDeliverUnifiedRow) => {
     const oId = row.rawJst?.o_id ? String(row.rawJst.o_id) : "";
     if (!oId) {
@@ -889,6 +924,37 @@ export default function QcOutboundCenter() {
         ) },
         { title: "规格", dataIndex: "propertiesValue", key: "spec", width: 180, render: (v: any) => v || "-" },
         { title: "备货数", dataIndex: "qty", key: "qty", width: 90, align: "right" as const, render: (v: any) => formatQty(v) },
+        {
+          // cloud 单逐 SKU 本地实发数量（默认 = 备货数，可改小，驱动确认发货按实发扣本地库存）。已确认发货时锁定。
+          title: "发货数量",
+          key: "shipQty",
+          width: 130,
+          align: "right" as const,
+          render: (_v: any, it: any) => {
+            const skuKey = it.skuId != null ? String(it.skuId) : "";
+            const planQty = Number(it.qty || 0);
+            const stored = it.localShipQty != null ? Number(it.localShipQty) : planQty;
+            const dk = `cloud:${ck}:${skuKey}`;
+            const current = itemShipDraft[dk] != null ? Number(itemShipDraft[dk]) : stored;
+            const locked = Boolean(row.inventoryDeducted);
+            const commit = (next: number | null) => { if (next == null) return; if (next !== stored) void handleSetCloudItemShipQty(row, it, next); };
+            return (
+              <InputNumber
+                size="small"
+                min={0}
+                max={planQty}
+                precision={0}
+                value={current}
+                disabled={locked || !canCreateOutbound || Boolean(itemShipSaving[dk])}
+                status={current < planQty ? "warning" : undefined}
+                style={{ width: 110 }}
+                onChange={(val) => setItemShipDraft((prev) => ({ ...prev, [dk]: (val as number) ?? 0 }))}
+                onBlur={() => commit(itemShipDraft[dk] ?? null)}
+                onPressEnter={() => commit(itemShipDraft[dk] ?? null)}
+              />
+            );
+          },
+        },
         { title: "成本单价", dataIndex: "costPrice", key: "cp", width: 110, align: "right" as const, render: (v: any) => fmtC(v) },
         { title: "成本金额", dataIndex: "costAmount", key: "ca", width: 130, align: "right" as const, render: (v: any) => fmtC(v) },
       ];
@@ -990,41 +1056,50 @@ export default function QcOutboundCenter() {
         </Image.PreviewGroup>
       </div>
     );
-  }, [unifiedItemsCache, unifiedItemsLoading, cloudItemsCache, cloudItemsLoading, itemShipDraft, itemShipSaving, handleSetItemShipQty, canCreateOutbound]);
+  }, [unifiedItemsCache, unifiedItemsLoading, cloudItemsCache, cloudItemsLoading, itemShipDraft, itemShipSaving, handleSetItemShipQty, handleSetCloudItemShipQty, canCreateOutbound]);
 
   // 本地确认发货 / 撤销：对应后端 inventory.action consign_deliver_ship / consign_deliver_unship。
   const handleConsignShip = useCallback(async (row: ConsignDeliverUnifiedRow, ship: boolean) => {
     if (!erp?.inventory?.action) { message.error("ERP 接口未就绪"); return; }
     const oId = row.rawJst?.o_id;
-    if (!oId) { message.error("该行无聚水潭送仓单，无法确认发货"); return; }
-    setActingKey(`consign-${oId}`);
+    const mallId = row.rawCloud?.mall_id ? String(row.rawCloud.mall_id) : "";
+    // jst/both 走聚水潭 o_id；cloud-only(无 o_id)走官方 mall_id + 备货单号(soId)。
+    const isCloud = !oId && row.source === "cloud" && Boolean(mallId) && Boolean(row.soId);
+    if (!oId && !isCloud) { message.error("该行无法本地确认发货"); return; }
+    setActingKey(oId ? `consign-${oId}` : `consign-cloud-${row.soId}`);
     try {
-      const result = await erp.inventory.action({
-        action: ship ? "consign_deliver_ship" : "consign_deliver_unship",
-        oId,
-      });
+      const result = await erp.inventory.action(
+        oId
+          ? { action: ship ? "consign_deliver_ship" : "consign_deliver_unship", oId }
+          : { action: ship ? "consign_deliver_ship_cloud" : "consign_deliver_unship_cloud", mallId, soId: row.soId },
+      );
       if (result?.idempotent) {
         message.info(result?.message || (ship ? "已扣过本地库存，未重复扣减" : "未扣减，无需撤销"));
       } else {
         message.success(result?.message || (ship ? "已发货，本地库存已扣减" : "已撤销发货，本地库存已回补"));
       }
-      void loadUnified({
-        page: unifiedPage,
-        pageSize: unifiedPageSize,
-        search: stockQuery,
-        status: stockStatus,
-        shop: stockShop,
-        skuCode: stockSkuCode,
-        dateFrom: consignDateBound(stockDateRange?.[0], false),
-        dateTo: consignDateBound(stockDateRange?.[1], true),
-        source: unifiedSource,
-      });
+      // 乐观更新：立即翻转该行发货状态。物化快照重建有延迟，重查会读到旧快照把状态打回，故不重查。
+      setUnifiedSnapshot((snap) => ({
+        ...snap,
+        rows: snap.rows.map((r) => {
+          const sameJst = oId && r.rawJst?.o_id != null && String(r.rawJst.o_id) === String(oId);
+          const sameCloud = !oId && r.source === "cloud" && r.soId === row.soId
+            && String(r.rawCloud?.mall_id || "") === mallId;
+          if (!sameJst && !sameCloud) return r;
+          return {
+            ...r,
+            inventoryDeducted: ship,
+            localStatusOverride: ship ? "已发货" : null,
+            status: ship ? "已发货" : (r.rawJst?.status || r.rawCloud?.temu_status || r.status),
+          };
+        }),
+      }));
     } catch (error: any) {
       message.error(error?.message || (ship ? "确认发货失败" : "撤销失败"));
     } finally {
       setActingKey(null);
     }
-  }, [erp, loadUnified, unifiedPage, unifiedPageSize, stockQuery, stockStatus, stockShop, stockSkuCode, stockDateRange, unifiedSource]);
+  }, [erp]);
 
   const cloudStockColumns = useMemo<ColumnsType<ConsignDeliverUnifiedRow>>(() => {
     const columns: ColumnsType<ConsignDeliverUnifiedRow> = [
@@ -1191,9 +1266,11 @@ export default function QcOutboundCenter() {
       width: 140,
       fixed: "right" as const,
       render: (_value, row) => {
-        // 只有带聚水潭送仓单(jst/both)的行能扣本地库存；cloud-only 备货单行不可。
-        if (!row.rawJst?.o_id) return <Text type="secondary">-</Text>;
-        const busy = actingKey === `consign-${row.rawJst.o_id}`;
+        const oId = row.rawJst?.o_id;
+        // jst/both 走聚水潭 o_id；cloud-only(无 o_id)走官方 mall_id + 备货单号(soId)，也能本地扣库存。
+        const isCloud = !oId && row.source === "cloud" && Boolean(row.rawCloud?.mall_id) && Boolean(row.soId);
+        if (!oId && !isCloud) return <Text type="secondary">-</Text>;
+        const busy = actingKey === (oId ? `consign-${oId}` : `consign-cloud-${row.soId}`);
         if (row.inventoryDeducted) {
           return (
             <Button

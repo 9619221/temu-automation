@@ -455,8 +455,8 @@ cloud_only AS (
     NULL AS jst_sku_info,
     NULL AS jst_skus,
     NULL AS jst_currency,
-    NULL AS local_status_override,
-    0 AS inventory_deducted,
+    ls.local_status_override AS local_status_override,
+    COALESCE(ls.inventory_deducted, 0) AS inventory_deducted,
     NULL AS jst_local_ship_total,
     c.cloud_so,
     c.cloud_row_key,
@@ -486,6 +486,8 @@ cloud_only AS (
     c.cloud_logistics_info,
     c.cloud_item_count
   FROM cloud_agg c
+  LEFT JOIN erp_consign_local_state ls
+    ON ls.mall_id = c.cloud_mall_id AND ls.so_id = c.cloud_so
   WHERE NOT EXISTS (SELECT 1 FROM jst_base j WHERE j.so_id = c.cloud_so)
 ),
 unified AS (
@@ -5089,6 +5091,15 @@ async function handleRequest({
       if (mallId && soId) {
         const row = db.prepare("SELECT items_json FROM erp_temu_openapi_consign WHERE mall_id = ? AND so_id = ?").get(String(mallId), String(soId));
         if (row && row.items_json) { try { const a = JSON.parse(row.items_json); if (Array.isArray(a)) rows = a; } catch { /* */ } }
+        // 合并逐 SKU 本地实发数(erp_consign_local_state.ship_qty_json)，供前端可编辑「发货数量」列回显。
+        if (rows.length) {
+          try {
+            const st = db.prepare("SELECT ship_qty_json FROM erp_consign_local_state WHERE mall_id = ? AND so_id = ?").get(String(mallId), String(soId));
+            let shipMap = {};
+            if (st && st.ship_qty_json) { const m = JSON.parse(st.ship_qty_json); if (m && typeof m === "object") shipMap = m; }
+            rows = rows.map((it) => ({ ...it, localShipQty: (it.skuId != null && shipMap[String(it.skuId)] != null) ? Number(shipMap[String(it.skuId)]) : null }));
+          } catch { /* 表未建/解析失败：忽略，localShipQty 由前端兜底 */ }
+        }
       }
       writeJson(res, 200, { ok: true, rows });
       return;

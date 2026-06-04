@@ -23,6 +23,10 @@ const {
   shipConsignDelivery,
   unshipConsignDelivery,
   setConsignDeliverItemShipQty,
+  readCloudShipMap,
+  shipCloudConsignDelivery,
+  unshipCloudConsignDelivery,
+  setCloudConsignItemShipQty,
 } = require("./services/consignDeliverShip.cjs");
 const {
   HK_SERVER_URL,
@@ -6243,7 +6247,16 @@ function getConsignCloudItems(params = {}) {
   if (!mallId || !soId) return [];
   const row = db.prepare("SELECT items_json FROM erp_temu_openapi_consign WHERE mall_id = ? AND so_id = ?").get(mallId, soId);
   if (!row || !row.items_json) return [];
-  try { const arr = JSON.parse(row.items_json); return Array.isArray(arr) ? arr : []; } catch { return []; }
+  try {
+    const arr = JSON.parse(row.items_json);
+    if (!Array.isArray(arr)) return [];
+    // 合并逐 SKU 本地实发数(erp_consign_local_state.ship_qty_json)，供前端可编辑「发货数量」列回显。
+    const shipMap = readCloudShipMap(db, mallId, soId);
+    return arr.map((it) => ({
+      ...it,
+      localShipQty: (it.skuId != null && shipMap[String(it.skuId)] != null) ? Number(shipMap[String(it.skuId)]) : null,
+    }));
+  } catch { return []; }
 }
 
 function getJstConsignDeliveryCacheStatus(params = {}) {
@@ -20689,6 +20702,26 @@ function performInventoryAction(payload = {}, actorInput = {}) {
       const companyId = optionalString(payload.companyId || payload.company_id)
         || actorInput.companyId || erpState.currentUser?.companyId || "company_default";
       return { action, ...setConsignDeliverItemShipQty({ db, oId, oiId, shipQty, companyId }) };
+    }
+    case "consign_deliver_ship_cloud": {
+      // cloud-only 官方备货单本地确认发货：按官方逐 SKU 明细扣本地库存（状态存 erp_consign_local_state，无 company 维度）。
+      const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+      const soId = requireString(payload.soId || payload.so_id, "soId");
+      return { action, ...shipCloudConsignDelivery({ db, services, mallId, soId, actor }) };
+    }
+    case "consign_deliver_unship_cloud": {
+      // 撤销 cloud-only 单本地发货：按扣减流水原样回补本地库存。
+      const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+      const soId = requireString(payload.soId || payload.so_id, "soId");
+      return { action, ...unshipCloudConsignDelivery({ db, services, mallId, soId, actor }) };
+    }
+    case "consign_deliver_cloud_set_item_ship_qty": {
+      // 保存 cloud-only 单某 SKU(productSkuId)的本地实发数量，驱动确认发货按实发扣减。
+      const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+      const soId = requireString(payload.soId || payload.so_id, "soId");
+      const skuKey = requireString(payload.skuKey || payload.sku_key, "skuKey");
+      const shipQty = payload.shipQty ?? payload.ship_qty;
+      return { action, ...setCloudConsignItemShipQty({ db, mallId, soId, skuKey, shipQty }) };
     }
     default:
       throw new Error(`Unsupported inventory action: ${action}`);
