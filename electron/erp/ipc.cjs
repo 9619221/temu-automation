@@ -8113,7 +8113,6 @@ function getPurchaseWorkbench(params = {}) {
   const workbench = {
     generatedAt: nowIso(),
     summary,
-    purchaseRequests,
     purchaseOrderCounts,
     purchaseOrderPage: {
       limit: purchaseOrderLimit,
@@ -8139,6 +8138,10 @@ function getPurchaseWorkbench(params = {}) {
     paymentQueue,
     purchaseSettings,
   };
+  // 采购需求明细按需返回：采购单区(includePurchaseRequests:false)不回这一坨，
+  // 前端 applyWorkbench 检测到响应缺 purchaseRequests 键会保留上次的需求列表，
+  // 避免每次翻页/刷新重传十几 MB。注意：必须省略键而非回空数组（[] 会被前端当“清空”）。
+  if (includePurchaseRequests) workbench.purchaseRequests = purchaseRequests;
   if (includePurchaseOrders) workbench.purchaseOrders = purchaseOrders;
   if (includeOptions) {
     workbench.skuOptions = skuOptions;

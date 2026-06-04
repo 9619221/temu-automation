@@ -3372,6 +3372,10 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
 
   const buildPurchaseWorkbenchParams = useCallback(() => ({
     ...FAST_PURCHASE_WORKBENCH_PARAMS,
+    // 采购单区只看分页订单，无需随每次翻页/刷新重拉 2000 条采购需求明细（每条还挂 6 个
+    // 1688 映射/候选子查询，响应体可达十几 MB）。找品区才需要全量需求做本地分桶。
+    // 需求明细由首屏 supplemental(FULL) 拉一次后由 applyWorkbench 保留，采购单区刷新不再重传。
+    includePurchaseRequests: activeWorkArea !== "orders",
     purchaseOrderLimit: purchaseOrderPageSize,
     purchaseOrderOffset: Math.max(0, purchaseOrderPage - 1) * purchaseOrderPageSize,
     purchaseOrderQueue: activeWorkArea === "orders" ? purchaseOrderQueueForWorkbench(activeQueueKey) : "all",
