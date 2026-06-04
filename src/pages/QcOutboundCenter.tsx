@@ -958,7 +958,15 @@ export default function QcOutboundCenter() {
         { title: "成本单价", dataIndex: "costPrice", key: "cp", width: 110, align: "right" as const, render: (v: any) => fmtC(v) },
         { title: "成本金额", dataIndex: "costAmount", key: "ca", width: 130, align: "right" as const, render: (v: any) => fmtC(v) },
       ];
-      return <Table className="erp-compact-table" rowKey={(it, i) => String(it.skuId || i)} size="small" columns={cloudCols} dataSource={ci} pagination={false} />;
+      // 与聚水潭单明细一致套 .consign-item-detail：复用 global.css 的 width:100%+table-layout:fixed，
+      // 让列按 width 规整铺满容器，避免裸表在 table-layout:auto 下被超长商品名撑爆、把右侧成本列挤出裁掉。
+      return (
+        <div className="consign-item-detail">
+          <Image.PreviewGroup>
+            <Table className="erp-compact-table" rowKey={(it, i) => String(it.skuId || i)} size="small" columns={cloudCols} dataSource={ci} pagination={false} />
+          </Image.PreviewGroup>
+        </div>
+      );
     }
     if (unifiedItemsLoading[oId]) return <Spin size="small" />;
     const items = unifiedItemsCache[oId];
