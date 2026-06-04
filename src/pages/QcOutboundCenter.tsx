@@ -806,6 +806,32 @@ export default function QcOutboundCenter() {
     }
   }, [cloudItemsCache, cloudItemsLoading]);
 
+  // 整页明细预取：列表一加载好，就在后台「限并发」把当前页每行的商品明细提前捞回缓存。
+  // 背景：桌面端是客户端，展开某行时明细要现连主控端(跨海)取，单行常等一两秒(见「展开后加载中...」)。
+  // 这里趁列表到手先静默预取，用户展开任意一行即命中本地缓存、秒开。
+  // 复用 loadUnifiedItems/loadCloudItems(两者均自带「命中缓存/加载中即跳过」保护，不会重复请求)。
+  // 翻页或改筛选会让 unifiedRows 变化，旧预取经 cancelled 立即中断，避免堆积无用请求拖累主控端单进程。
+  useEffect(() => {
+    if (!unifiedRows.length) return;
+    let cancelled = false;
+    const PARALLEL = 4;          // 限并发：明细是按单号点查(有索引,毫秒级),4 路足够快又不给主控端瞬时压力
+    const MAX_PREFETCH = 300;    // 上限：pageSize 选 500 时只预取前 300,其余仍靠鼠标悬停/展开兜底
+    const targets = unifiedRows.slice(0, MAX_PREFETCH);
+    let cursor = 0;
+    const runners = Array.from({ length: Math.min(PARALLEL, targets.length) }, async () => {
+      while (cursor < targets.length && !cancelled) {
+        const row = targets[cursor++];
+        try {
+          await loadUnifiedItems(row);   // 有聚水潭 o_id 的走这条；另一条内部 guard 直接跳过
+          await loadCloudItems(row);     // cloud-only 单(无 o_id)走这条
+        } catch { /* 单行预取失败忽略,不影响其余行 */ }
+      }
+    });
+    void Promise.all(runners);
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unifiedRows]);
+
   // 保存某条明细的本地实发数量：写后端 + 乐观更新明细缓存与主表「送货数」之和。
   const handleSetItemShipQty = useCallback(async (row: ConsignDeliverUnifiedRow, item: any, nextQty: number) => {
     const oId = row.rawJst?.o_id != null ? String(row.rawJst.o_id) : "";
