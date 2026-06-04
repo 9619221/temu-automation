@@ -5824,27 +5824,45 @@ function listConsignAfterSales(params = {}) {
 // 平台单用 temuSkcId/temuSkuId；聚水潭单用 internalSkuCode（= 聚水潭 sku_id，对得上 internal_sku_code）。
 // 映射不到 / 无有效店铺 → throw（对应「阻止并提示」，迫使先在商品资料绑定）。
 function resolveConsignAfterSaleSku(db, item) {
+  // 平台退货单只带 Temu 的 SKU/SKC id，而商品资料(erp_skus)普遍未回填 temu_sku_id/temu_skc_id（货号绑定只在
+  // 商品编码侧）。故先用 temu_sku_id 去官方商品 SKU 表反查货号（erp_temu_openapi_skus.ext_code == internal_sku_code，
+  // 见 mig062 注释），补成 internalSkuCode 候选，走和聚水潭单一致的「按商品编码匹配」路径。实测可自动接通 97% 平台退货。
+  let internalSkuCode = item.internalSkuCode;
+  if (!internalSkuCode && item.temuSkuId) {
+    const bridge = db.prepare(`
+      SELECT ext_code FROM erp_temu_openapi_skus
+      WHERE product_sku_id = @sku AND ext_code IS NOT NULL AND ext_code != ''
+      LIMIT 1
+    `).get({ sku: String(item.temuSkuId) });
+    if (bridge && bridge.ext_code) internalSkuCode = String(bridge.ext_code);
+  }
   const conds = [];
   const p = {};
   if (item.temuSkcId) { conds.push("temu_skc_id = @skc"); p.skc = String(item.temuSkcId); }
   if (item.temuSkuId) { conds.push("temu_sku_id = @sku"); p.sku = String(item.temuSkuId); }
-  if (item.internalSkuCode) { conds.push("internal_sku_code = @code"); p.code = String(item.internalSkuCode); }
+  if (internalSkuCode) { conds.push("internal_sku_code = @code"); p.code = String(internalSkuCode); }
   if (!conds.length) throw new Error("退货明细缺少 SKC/SKU/商品编码，无法入库");
-  const sku = db.prepare(`
+  const rows = db.prepare(`
     SELECT id, account_id, internal_sku_code, product_name FROM erp_skus
     WHERE status != 'deleted'
       AND account_id IS NOT NULL
       AND account_id NOT IN ('jst:account:default', 'jst:account:none')
       AND (${conds.join(" OR ")})
     ORDER BY (id LIKE 'sku_%') DESC, updated_at DESC
-    LIMIT 1
-  `).get(p);
-  if (!sku) {
-    const key = item.internalSkuCode || item.temuSkuId || item.temuSkcId || "?";
+  `).all(p);
+  if (!rows.length) {
+    const key = internalSkuCode || item.temuSkuId || item.temuSkcId || "?";
     const label = item.productName ? `${key}（${item.productName}）` : key;
     throw new Error(`商品 ${label} 未绑定有效店铺/内部编码，无法确认收货入库，请先在商品资料补齐`);
   }
-  return sku;
+  // 同一货号可能在多个店都建了同编码商品（实测仅极个别）；归属不唯一时不臆测入库，提示人工确认，避免入错店稀释库存。
+  const distinctAccounts = new Set(rows.map((r) => r.account_id));
+  if (distinctAccounts.size > 1) {
+    const key = internalSkuCode || item.temuSkuId || item.temuSkcId || "?";
+    const label = item.productName ? `${key}（${item.productName}）` : key;
+    throw new Error(`商品 ${label} 的货号在多个店铺存在同编码商品，无法自动判定入库店铺，请手工确认`);
+  }
+  return rows[0];
 }
 
 // 确认收货：逐明细按实收数量增加库存（applyDirectInbound），并写本地确认台账。
