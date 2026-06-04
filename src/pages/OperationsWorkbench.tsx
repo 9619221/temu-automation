@@ -949,7 +949,7 @@ export default function OperationsWorkbench() {
 
   const qcColumns: ColumnsType<QcRow> = [
     { title: "店号", dataIndex: "store_code", width: 78, fixed: "left", render: (v, r) => formatStoreNo(v === r.mall_id ? null : v, r.mall_id) },
-    { title: "商品", key: "prod", width: 280, render: (_, r) => (<div style={{ display: "flex", gap: 8, alignItems: "center" }}>{r.thumb_url ? <div style={{ flexShrink: 0, width: 48, height: 48 }}><Image src={r.thumb_url} width={48} height={48} style={{ objectFit: "cover", borderRadius: 4 }} /></div> : <div style={{ width: 48, height: 48, background: "#f0f0f0", borderRadius: 4, flexShrink: 0 }} />}<div style={{ minWidth: 0 }}><div style={{ fontSize: 12, lineHeight: 1.4, maxHeight: 34, overflow: "hidden" }}>{r.sku_name || "—"}</div><div style={{ fontSize: 11, color: "#8c8c8c" }}>{r.spec || ""}{r.ext_code ? ` · ${r.ext_code}` : ""}</div></div></div>) },
+    { title: "商品", key: "prod", width: 280, render: (_, r) => (<div style={{ display: "flex", gap: 8, alignItems: "center" }}>{r.thumb_url ? <div style={{ flexShrink: 0, width: 64, height: 64 }}><Image src={r.thumb_url} width={64} height={64} style={{ objectFit: "cover", borderRadius: 4 }} /></div> : <div style={{ width: 64, height: 64, background: "#f0f0f0", borderRadius: 4, flexShrink: 0 }} />}<div style={{ minWidth: 0 }}><div style={{ fontSize: 12, lineHeight: 1.4, maxHeight: 34, overflow: "hidden" }}>{r.sku_name || "—"}</div><div style={{ fontSize: 11, color: "#8c8c8c" }}>{r.spec || ""}{r.ext_code ? ` · ${r.ext_code}` : ""}</div></div></div>) },
     { title: "采购单", dataIndex: "purchase_no", width: 150, render: (v) => v ? <Typography.Text copyable={{ text: String(v) }} style={{ fontSize: 12 }}>{v}</Typography.Text> : "—" },
     { title: "结果", dataIndex: "qc_result", width: 76, align: "center", render: (v) => v === 2 ? <span style={{ color: "#cf1322", fontWeight: 600 }}>不合格</span> : v === 1 ? <span style={{ color: "#3f8600" }}>合格</span> : "—" },
     { title: "疵点原因", dataIndex: "flaw_summary", width: 320, render: (v) => v ? <span style={{ color: "#cf1322", fontSize: 12 }}>{v}</span> : <span style={{ color: "#bbb" }}>—</span> },
@@ -1022,6 +1022,16 @@ export default function OperationsWorkbench() {
       <Input.Search size="small" allowClear placeholder="搜货号 / 标题" style={{ width: 220 }} value={search} onChange={(e) => setSearch(e.target.value)} />
     </div>
   );
+
+  const qcView = useMemo(() => {
+    const kw = search.trim().toLowerCase();
+    return qcRows.filter((r) => {
+      if (!inScope(r.store_code || r.mall_id)) return false;
+      if (storeFilter !== "all" && r.store_code !== storeFilter) return false;
+      if (!kw) return true;
+      return [r.sku_name, r.ext_code, r.purchase_no, r.cat_name, r.flaw_summary, r.store_code, r.receipt_no].some((x) => String(x || "").toLowerCase().includes(kw));
+    });
+  }, [qcRows, search, storeFilter, inScope]);
 
   const tabItems = [
     {
@@ -1229,7 +1239,8 @@ export default function OperationsWorkbench() {
       children: (
         <div>
           <div style={{ padding: "12px 16px 0", color: "#888", fontSize: 12 }}>Temu 平台仓质检结果(官方采集),默认只列<b>不合格</b>:疵点原因 + 次品数 + 关联采购单,用于跟进补合规标签 / 改进生产。数据每 3 小时刷新。</div>
-          <Table<QcRow> dataSource={qcRows} columns={qcColumns} rowKey={(r) => `${r.mall_id}|${r.qc_bill_id}`} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 条不合格` }} scroll={{ x: 1300 }} loading={qcLoading} />
+          {commonFilters()}
+          <Table<QcRow> dataSource={qcView} columns={qcColumns} rowKey={(r) => `${r.mall_id}|${r.qc_bill_id}`} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 条不合格` }} scroll={{ x: 1300 }} loading={qcLoading} />
         </div>
       ),
     },
