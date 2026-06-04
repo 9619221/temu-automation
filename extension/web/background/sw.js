@@ -18,6 +18,7 @@ import { enqueue, queueDepth, flush } from "./ingest-queue.js";
 const ALARM_FLUSH = "temu-monitor.flush";
 const ALARM_COLLECT = "temu-monitor.collect";
 const ALARM_ENROLL = "temu-monitor.enroll"; // 轮询云端待报名任务
+const ALARM_SALES_TREND = "temu-monitor.sales-trend";
 const STATS_KEY = "temu_monitor_stats";
 const MALLS_KEY = "temu_monitor_malls";
 const COLLECTOR_STATE_KEY = "temu_monitor_collector_state";
@@ -66,6 +67,12 @@ const JIT_VMI_PROBES = [
 ];
 // 流量分析主动直采：SW 对"当前登录店"直接 fetch flow/analysis/goods/list（实测不需 anti-content，
 // 但 mallid 必须=当前登录店，跨店 403）。多店覆盖靠多开（每实例一店）。parser parseProductFlowGoods 自动落 temu_product_flow_snapshot。
+const SALES_TREND_STATE_KEY = "temu_monitor_sales_trend_state";
+const SALES_TREND_TARGET_LIMIT = 1200;
+const SALES_TREND_PER_GROUP_LIMIT = 100;
+const SALES_TREND_MAX_MALLS_PER_RUN = 12;
+const SALES_TREND_BATCH_SIZE = 50;
+const SALES_TREND_RUN_INTERVAL_MS = 60 * 60 * 1000;
 const FLOW_STATE_KEY = "temu_monitor_flow_state";
 const FLOW_RUN_INTERVAL_MS = 30 * 60 * 1000; // 每店每 30 分钟一轮（避 429）
 const FLOW_PAGE_SIZE = 100;
@@ -116,10 +123,18 @@ chrome.runtime.onStartup.addListener(async () => {
 async function ensureRuntimeDefaults() {
   chrome.alarms.create(ALARM_FLUSH, { periodInMinutes: 0.5 });
   chrome.alarms.create(ALARM_ENROLL, { periodInMinutes: 1 });
+  chrome.alarms.create(ALARM_SALES_TREND, { periodInMinutes: Math.max(1, SALES_TREND_RUN_INTERVAL_MS / 60000) });
   await clearAlarm(ALARM_COLLECT);
-  const cur = await getStorage(["device_id", COLLECTOR_STATE_KEY, COLLECTOR_WINDOW_KEY, COLLECTOR_BOOT_VERSION_KEY]);
+  const cur = await getStorage(["device_id", COLLECTOR_STATE_KEY, COLLECTOR_WINDOW_KEY, COLLECTOR_BOOT_VERSION_KEY, SALES_TREND_STATE_KEY]);
   const patch = {};
   if (!cur.device_id) patch.device_id = crypto.randomUUID();
+  if (!cur[SALES_TREND_STATE_KEY]) {
+    patch[SALES_TREND_STATE_KEY] = {
+      enabled: false,
+      updated_at: Date.now(),
+      reason: "disabled_by_default",
+    };
+  }
   if (!cur[COLLECTOR_STATE_KEY]) {
     patch[COLLECTOR_STATE_KEY] = {
       enabled: false,
@@ -178,6 +193,10 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
   if (alarm.name === ALARM_ENROLL) {
     await pollEnrollTasks().catch((e) => console.warn("[sw] enroll poll err", e?.message || e));
+    return;
+  }
+  if (alarm.name === ALARM_SALES_TREND) {
+    collectSalesTrendFromTargets().catch((e) => console.warn("[sw] sales trend collect err", e?.message || e));
     return;
   }
   if (alarm.name !== ALARM_FLUSH) return;
@@ -724,6 +743,134 @@ async function collectJitVmiFromTargets() {
   });
   if (enqueuedCount > 0) await flush();
   return { ok: true, callCount, enqueuedCount, errorCount, targetCount: targets.length };
+}
+
+function normalizeSalesTrendSkuIds(values) {
+  const out = [];
+  const seen = new Set();
+  for (const value of Array.isArray(values) ? values : []) {
+    const id = String(value == null ? "" : value).trim();
+    if (!/^\d{5,}$/.test(id) || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+function createSalesTrendRequestBody(batch) {
+  // 请求体已实测确认（2026-06-04 抓包 querySkuSalesNumber）：{ productSkuIds:number[], startDate, endDate }，近 30 天窗口。
+  // 注意：前端一次只传 1 个 SKU；批量多个待部署后验证接口是否接受，若被拒就把 SALES_TREND_BATCH_SIZE 调小。
+  const fmt = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  const end = new Date(Date.now() - 86400000); // endDate 取昨天（当天数据未出全）
+  const start = new Date(end.getTime() - 30 * 86400000); // 近 30 天
+  return {
+    productSkuIds: batch.map((x) => Number(x)).filter((n) => Number.isFinite(n)),
+    startDate: fmt(start),
+    endDate: fmt(end),
+  };
+}
+
+async function collectSalesTrendFromTargets() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", SALES_TREND_STATE_KEY]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
+  const now = Date.now();
+  const state = cfg[SALES_TREND_STATE_KEY] || {};
+  if (!state.enabled) return { ok: true, skipped: "disabled" };
+  if (state.last_run_at && now - Number(state.last_run_at) < SALES_TREND_RUN_INTERVAL_MS) {
+    return { ok: true, skipped: "interval" };
+  }
+  await setStorage({
+    [SALES_TREND_STATE_KEY]: {
+      ...state,
+      last_run_at: now,
+    },
+  });
+
+  const targetUrl = `${cfg.cloud_endpoint.replace(/\/$/, "")}/api/ingest/v1/sales-trend-targets?limit=${SALES_TREND_TARGET_LIMIT}&per_group_limit=${SALES_TREND_PER_GROUP_LIMIT}`;
+  let targets = [];
+  try {
+    const resp = await fetch(targetUrl, {
+      headers: { Authorization: `Bearer ${cfg.auth_token}` },
+    });
+    if (!resp.ok) return { ok: false, reason: `targets_http_${resp.status}` };
+    const data = await resp.json().catch(() => null);
+    targets = Array.isArray(data?.targets) ? data.targets : [];
+  } catch (error) {
+    return { ok: false, reason: `targets_err_${String(error?.message || error).slice(0, 40)}` };
+  }
+
+  let mallCount = 0;
+  let callCount = 0;
+  let enqueuedCount = 0;
+  let errorCount = 0;
+  for (const target of targets) {
+    if (mallCount >= SALES_TREND_MAX_MALLS_PER_RUN) break;
+    const mallId = String(target?.mall_id || target?.mallId || "").trim();
+    if (!mallId) continue;
+    const ids = normalizeSalesTrendSkuIds(target?.sku_ids || target?.skuIds);
+    if (!ids.length) continue;
+    mallCount++;
+    const origin = activityLibraryOriginForSite(target?.site);
+    const url = `${origin}/mms/venom/api/supplier/sales/management/querySkuSalesNumber`;
+    for (let start = 0; start < ids.length; start += SALES_TREND_BATCH_SIZE) {
+      const batch = ids.slice(start, start + SALES_TREND_BATCH_SIZE);
+      const requestBody = JSON.stringify(createSalesTrendRequestBody(batch));
+      callCount++;
+      try {
+        const resp = await fetch(url, {
+          method: "POST",
+          credentials: "include",
+          cache: "no-store",
+          headers: {
+            "Content-Type": "application/json",
+            mallid: mallId,
+          },
+          body: requestBody,
+        });
+        const text = await resp.text();
+        const body = safeParseJson(text);
+        if (resp.ok && body && typeof body === "object") {
+          await enqueue({
+            kind: "fetch-active-sales-trend",
+            url,
+            method: "POST",
+            status: resp.status,
+            ts: Date.now(),
+            site: target?.site || "agentseller",
+            page: "background/sales-trend",
+            mall_id: mallId,
+            body,
+            bodyText: text.length > 200000 ? null : text,
+            requestBodyText: requestBody,
+            bodySize: text.length,
+            activeSource: "sales_trend_background",
+          });
+          await bumpStats({ captured_count_delta: 1 });
+          enqueuedCount++;
+        } else {
+          errorCount++;
+        }
+      } catch {
+        errorCount++;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+  }
+
+  await setStorage({
+    [SALES_TREND_STATE_KEY]: {
+      ...state,
+      last_run_at: now,
+      last_success_at: Date.now(),
+      last_call_count: callCount,
+      last_mall_count: mallCount,
+      last_enqueued_count: enqueuedCount,
+      last_error_count: errorCount,
+      last_target_count: targets.length,
+    },
+  });
+  if (enqueuedCount > 0) await flush();
+  return { ok: true, callCount, enqueuedCount, errorCount, mallCount, targetCount: targets.length };
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {

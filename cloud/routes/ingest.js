@@ -161,6 +161,77 @@ r.get("/v1/activity-targets", authMiddleware, (req, res) => {
   }
 });
 
+// Sales trend active backfill targets. The extension asks the cloud which
+// product SKU ids recently sold by mall, then fetches querySkuSalesNumber in
+// the seller browser session where Temu cookies are available.
+r.get("/v1/sales-trend-targets", authMiddleware, (req, res) => {
+  const db = getDb();
+  const tenantId = req.user.tid;
+  const limit = Math.min(1200, Math.max(1, Number(req.query.limit) || 1200));
+  const perGroupLimit = Math.min(200, Math.max(1, Number(req.query.per_group_limit) || 100));
+  try {
+    const rows = db.prepare(`
+      WITH candidates AS (
+        SELECT
+          mall_id,
+          COALESCE(NULLIF(site, ''), 'agentseller') AS site,
+          product_sku_id,
+          MAX(stat_date) AS latest_stat_date,
+          MAX(last_updated_at) AS updated_at,
+          SUM(CASE WHEN COALESCE(is_predict, 0) = 0 THEN COALESCE(sales_number, 0) ELSE 0 END) AS recent_sales
+        FROM temu_sku_sales_trend
+        WHERE tenant_id = ?
+          AND mall_id <> ''
+          AND product_sku_id <> ''
+          AND stat_date >= date('now', '-7 days')
+          AND stat_date <= date('now')
+        GROUP BY mall_id, COALESCE(NULLIF(site, ''), 'agentseller'), product_sku_id
+        HAVING SUM(CASE WHEN COALESCE(is_predict, 0) = 0 THEN COALESCE(sales_number, 0) ELSE 0 END) > 0
+      ),
+      ranked AS (
+        SELECT
+          mall_id,
+          site,
+          product_sku_id,
+          latest_stat_date,
+          updated_at,
+          recent_sales,
+          ROW_NUMBER() OVER (
+            PARTITION BY mall_id, site
+            ORDER BY recent_sales DESC, latest_stat_date DESC, updated_at DESC, product_sku_id ASC
+          ) AS rn
+        FROM candidates
+      )
+      SELECT mall_id, site, product_sku_id, latest_stat_date, updated_at, recent_sales
+      FROM ranked
+      WHERE rn <= ?
+      ORDER BY updated_at DESC, latest_stat_date DESC, recent_sales DESC, product_sku_id ASC
+      LIMIT ?
+    `).all(tenantId, perGroupLimit, limit);
+    const groups = new Map();
+    for (const row of rows) {
+      const mallId = String(row.mall_id || "").trim();
+      const site = String(row.site || "agentseller").trim() || "agentseller";
+      const skuId = String(row.product_sku_id || "").trim();
+      if (!mallId || !/^\d{5,}$/.test(skuId)) continue;
+      const key = `${mallId}|${site}`;
+      if (!groups.has(key)) groups.set(key, { mall_id: mallId, site, sku_ids: [] });
+      const group = groups.get(key);
+      if (group.sku_ids.length < perGroupLimit && !group.sku_ids.includes(skuId)) {
+        group.sku_ids.push(skuId);
+      }
+    }
+    const targets = Array.from(groups.values()).filter((group) => group.sku_ids.length);
+    res.json({ ok: true, targets, count: rows.length, generated_at: Date.now() });
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) {
+      res.json({ ok: true, targets: [], count: 0, generated_at: Date.now() });
+      return;
+    }
+    throw error;
+  }
+});
+
 // JIT/VMI 主动调度目标：返回本租户最近活跃的 mall_id 列表，让扩展 SW 主动调
 // TEMU agentseller 的 querySubOrderList(VMI) + querySuggestCloseJitSkc(JIT) 两个接口。
 // 数据写回 capture_events 后，parseTemuStockOrders / parseTemuJitStatus 自动落表。
