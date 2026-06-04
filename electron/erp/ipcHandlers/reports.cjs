@@ -251,6 +251,23 @@ function registerReportsHandlers(ipcMain, deps) {
       return { ok: false, error: error?.message || String(error) };
     }
   });
+
+  // 运营工作台：商品销量趋势（逐日，数据走 cloud 抓包快照，按 product_id 关联）
+  ipcMain.handle("erp:reports:product-trend", async (_event, payload) => {
+    try {
+      const pid = encodeURIComponent(String(payload?.productId || ""));
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest(`/api/erp/reports/product-trend?product_id=${pid}`, { method: "GET" });
+      }
+      requireErp();
+      const { buildProductSalesTrend } = require("../services/multiStoreReport.cjs");
+      const { attachTemuCloudDbIfPossible } = require("../lanServer.cjs");
+      return { ok: true, data: buildProductSalesTrend(erpState.db, { productId: payload?.productId, attachCloudDb: attachTemuCloudDbIfPossible }) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
 }
 
 module.exports = { registerReportsHandlers };

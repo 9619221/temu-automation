@@ -5,7 +5,7 @@ import type { ColumnsType } from "antd/es/table";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, Legend, ResponsiveContainer } from "recharts";
 import { useNavigate } from "react-router-dom";
 import { formatStoreNo, formatMallName } from "../utils/storeDisplay";
-import { HIDE_RISK, HIDE_ACTIVITY, HIDE_REVIEW, OFFICIAL_SOURCE } from "../utils/operationsFlags";
+import { HIDE_RISK, HIDE_ACTIVITY, HIDE_REVIEW, OFFICIAL_SOURCE, HIDE_DIAG, HIDE_RESTOCK } from "../utils/operationsFlags";
 
 // 分页「每页条数」选择器:antd 5.25+ 默认带搜索框(聚焦冒出可编辑光标),这里强制关掉
 const NoSearchSelect = (props: Record<string, unknown>) => <Select {...props} showSearch={false} />;
@@ -164,6 +164,9 @@ export default function OperationsWorkbench() {
   const [trendLoading, setTrendLoading] = useState(false);
   const [trendLoaded, setTrendLoaded] = useState(false);
   const [panelRows, setPanelRows] = useState<ProductPanelRow[]>([]);
+  const [trendOf, setTrendOf] = useState<{ productId: string; title: string } | null>(null);
+  const [trendModalRows, setTrendModalRows] = useState<Array<{ date: string; qty: number; revenue: number }>>([]);
+  const [trendModalLoading, setTrendModalLoading] = useState(false);
   const [panelLoading, setPanelLoading] = useState(false);
   const [panelLoaded, setPanelLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -429,6 +432,19 @@ export default function OperationsWorkbench() {
   }, []);
 
   useEffect(() => { loadSku(); }, [loadSku]);
+  // 商品销量趋势弹窗:打开时按 product_id 拉逐日数据(走 cloud 抓包快照)
+  useEffect(() => {
+    if (!trendOf) return;
+    let alive = true;
+    setTrendModalLoading(true); setTrendModalRows([]);
+    (async () => {
+      try {
+        const resp = await window.electronAPI.erp.reports.productTrend({ productId: trendOf.productId });
+        if (alive && resp?.ok && resp.data) setTrendModalRows(resp.data.rows || []);
+      } catch { /* */ } finally { if (alive) setTrendModalLoading(false); }
+    })();
+    return () => { alive = false; };
+  }, [trendOf]);
   // 挂载时从后端加载待办状态;本地有、后端没有的首次推上去(localStorage → 后端迁移);后端不可用则保持本地
   useEffect(() => {
     const api = window.electronAPI?.erp?.opTask;
@@ -884,6 +900,7 @@ export default function OperationsWorkbench() {
           <div style={{ marginTop: 3, fontSize: 11, color: "#8c8c8c", display: "flex", flexWrap: "wrap", gap: "0 10px" }}>
             <span>SPU <Typography.Text copyable={{ text: String(r.product_id) }} style={{ fontSize: 11, color: "#8c8c8c" }}>{r.product_id}</Typography.Text></span>
             {codes.map((c, i) => <span key={i}>SKC <Typography.Text copyable={{ text: c }} style={{ fontSize: 11, color: "#8c8c8c" }}>{c}</Typography.Text></span>)}
+            <a onClick={(e) => { e.stopPropagation(); setTrendOf({ productId: String(r.product_id), title: r.title || String(r.product_id) }); }} style={{ fontSize: 11 }}>销量趋势</a>
           </div>
         </div>
       </div>
@@ -930,8 +947,8 @@ export default function OperationsWorkbench() {
             <Card size="small"><Statistic title="缺货 SKC" value={shopAgg.lack} valueStyle={{ color: shopAgg.lack > 0 ? "#d46b08" : undefined }} /></Card>
             <Card size="small"><Statistic title="已售罄" value={shopAgg.soldout} valueStyle={{ color: shopAgg.soldout > 0 ? "#cf1322" : undefined }} /></Card>
             {!HIDE_RISK && <Card size="small" hoverable onClick={() => setActiveTab("risk")}><Statistic title="高风险待办" value={riskOverview.high} valueStyle={{ color: riskOverview.high > 0 ? "#cf1322" : undefined }} /></Card>}
-            <Card size="small" hoverable onClick={() => goProduct("diag")}><Statistic title="诊断 · 急" value={overview.urgent} valueStyle={{ color: overview.urgent > 0 ? "#cf1322" : undefined }} /></Card>
-            <Card size="small" hoverable onClick={() => goProduct("restock")}><Statistic title="急需补货 SKU" value={restockView.length} valueStyle={{ color: restockView.length > 0 ? "#d46b08" : undefined }} /></Card>
+            {!HIDE_DIAG && <Card size="small" hoverable onClick={() => goProduct("diag")}><Statistic title="诊断 · 急" value={overview.urgent} valueStyle={{ color: overview.urgent > 0 ? "#cf1322" : undefined }} /></Card>}
+            {!HIDE_RESTOCK && <Card size="small" hoverable onClick={() => goProduct("restock")}><Statistic title="急需补货 SKU" value={restockView.length} valueStyle={{ color: restockView.length > 0 ? "#d46b08" : undefined }} /></Card>}
             <Card size="small" hoverable onClick={() => setActiveTab("stock")}><Statistic title="备货缺口单" value={stockLoaded ? stockView.length : "查看"} valueStyle={!stockLoaded ? { fontSize: 16, color: "#1677ff" } : undefined} /></Card>
             {!HIDE_ACTIVITY && <Card size="small" hoverable onClick={() => setActiveTab("activity")}><Statistic title="可报活动" value={actView.length} valueStyle={{ color: "#3f8600" }} /></Card>}
           </div>
@@ -966,7 +983,7 @@ export default function OperationsWorkbench() {
               ))}
               {riskView.filter((r) => r.severity === "high").length === 0 && <div style={{ color: "#999", fontSize: 12, padding: "8px 0" }}>无高风险</div>}
             </Card>)}
-            <Card size="small" title="急需补货" extra={<a onClick={() => goProduct("restock")}>全部</a>} loading={skuLoading}>
+            {!HIDE_RESTOCK && (<Card size="small" title="急需补货" extra={<a onClick={() => goProduct("restock")}>全部</a>} loading={skuLoading}>
               {restockView.slice(0, 6).map((r, i) => (
                 <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "4px 0", borderBottom: "1px solid #f5f5f5", fontSize: 12 }}>
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}><Tag color="orange">{r.store_code || r.mall_id}</Tag>{r.title || r.sku_ext_code || "—"}</span>
@@ -974,7 +991,7 @@ export default function OperationsWorkbench() {
                 </div>
               ))}
               {restockView.length === 0 && <div style={{ color: "#999", fontSize: 12, padding: "8px 0" }}>无需补货</div>}
-            </Card>
+            </Card>)}
             <Card size="small" title="紧急备货在途" extra={<a onClick={() => setActiveTab("stock")}>全部</a>} loading={stockLoading}>
               {stockView.slice(0, 6).map((r) => (
                 <div key={r.__rk} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "4px 0", borderBottom: "1px solid #f5f5f5", fontSize: 12 }}>
@@ -1086,10 +1103,12 @@ export default function OperationsWorkbench() {
       key: "product", label: "商品",
       children: (
         <div>
+          {!(HIDE_DIAG && HIDE_RESTOCK) && (
           <div style={{ padding: "12px 16px 0" }}>
-            <Segmented value={prodSeg} onChange={(v) => setProdSeg(v as string)} options={[{ label: "运营全景", value: "panel" }, { label: "诊断待办", value: "diag" }, { label: "补货清单", value: "restock" }]} />
+            <Segmented value={prodSeg} onChange={(v) => setProdSeg(v as string)} options={[{ label: "运营全景", value: "panel" }, ...(HIDE_DIAG ? [] : [{ label: "诊断待办", value: "diag" }]), ...(HIDE_RESTOCK ? [] : [{ label: "补货清单", value: "restock" }])]} />
           </div>
-          {prodSeg === "panel" ? (
+          )}
+          {(prodSeg === "panel" || (HIDE_DIAG && HIDE_RESTOCK)) ? (
             <div>
               <div style={{ padding: "12px 16px 0", color: "#888", fontSize: 12 }}>每个商品(SPU)横向集成:可报活动 / 合规状态 / 流量(曝光·点击·转化) / 高价限流。按 限流 &gt; 违规 &gt; 活动 排序;流量「无」表示该商品暂未采到(采集覆盖待提升)。总库存 = 可用 + 暂不可用 − 缺货件数 + 发货在途。</div>
               {commonFilters()}
@@ -1192,6 +1211,20 @@ export default function OperationsWorkbench() {
         {error && <Alert type="error" showIcon message="加载失败" description={error} style={{ margin: 16 }} action={<Button size="small" onClick={loadSku}>重试</Button>} />}
         <Tabs activeKey={activeTab} onChange={setActiveTab} items={tabItems.filter((t) => !(HIDE_RISK && t.key === "risk") && !(HIDE_ACTIVITY && t.key === "activity"))} tabBarStyle={{ paddingLeft: 16, marginBottom: 0 }} />
       </Card>
+      <Modal open={!!trendOf} onCancel={() => setTrendOf(null)} footer={null} width={680} title={trendOf ? `销量趋势 · ${trendOf.title}` : ""} destroyOnClose>
+        <div style={{ fontSize: 12, color: "#888", marginBottom: 8 }}>逐日销量(抓包采集,覆盖近 2 周、部分店);SPU {trendOf?.productId}</div>
+        {trendModalLoading ? <div style={{ textAlign: "center", padding: 80, color: "#999" }}>加载中…</div>
+          : trendModalRows.length === 0 ? <Empty description="该商品暂无逐日数据(采集可能未覆盖其店铺)" style={{ padding: 40 }} />
+          : <ResponsiveContainer width="100%" height={300}>
+              <LineChart data={trendModalRows} margin={{ top: 10, right: 20, bottom: 0, left: -8 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
+                <XAxis dataKey="date" tick={{ fontSize: 11 }} minTickGap={16} />
+                <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
+                <RTooltip />
+                <Line type="monotone" dataKey="qty" name="销量" stroke="#1a73e8" strokeWidth={2} dot={{ r: 2 }} />
+              </LineChart>
+            </ResponsiveContainer>}
+      </Modal>
     </div>
   );
 }

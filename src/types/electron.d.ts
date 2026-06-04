@@ -874,6 +874,7 @@ interface ErpAPI {
     stockOrders: (options?: { includeTest?: boolean }) => Promise<ErpStockOrderResponse>;
     salesTrend: (options?: { includeTest?: boolean; days?: number }) => Promise<ErpSalesTrendResponse>;
     productPanel: (options?: { includeTest?: boolean }) => Promise<ErpProductPanelResponse>;
+    productTrend: (options?: { productId?: string }) => Promise<{ ok: boolean; data?: { product_id: string | null; rows: Array<{ date: string; qty: number; revenue: number }>; attached?: boolean; source?: string }; error?: string }>;
     purchase: (options?: { includeTest?: boolean }) => Promise<ErpPurchaseReportResponse>;
   };
   opTask?: {

@@ -5439,7 +5439,7 @@ async function handleRequest({
       return;
     }
 
-    if (pathname === "/api/erp/reports/risk-list" || pathname === "/api/erp/reports/activity-list" || pathname === "/api/erp/reports/shop-health" || pathname === "/api/erp/reports/stock-orders" || pathname === "/api/erp/reports/sales-trend" || pathname === "/api/erp/reports/product-panel" || pathname === "/api/erp/reports/purchase") {
+    if (pathname === "/api/erp/reports/risk-list" || pathname === "/api/erp/reports/activity-list" || pathname === "/api/erp/reports/shop-health" || pathname === "/api/erp/reports/stock-orders" || pathname === "/api/erp/reports/sales-trend" || pathname === "/api/erp/reports/product-panel" || pathname === "/api/erp/reports/product-trend" || pathname === "/api/erp/reports/purchase") {
       if (req.method !== "GET") {
         writeJson(res, 405, { ok: false, error: "Method not allowed" });
         return;
@@ -5447,9 +5447,10 @@ async function handleRequest({
       try {
         const parsed = new URL(req.url || "/", "http://127.0.0.1");
         const includeTest = parsed.searchParams.get("include_test") === "1";
+        const productId = parsed.searchParams.get("product_id") || "";
         const svc = require("./services/multiStoreReport.cjs");
-        const fn = pathname.endsWith("risk-list") ? svc.buildRiskList : pathname.endsWith("shop-health") ? svc.buildShopHealth : pathname.endsWith("stock-orders") ? svc.buildStockOrders : pathname.endsWith("sales-trend") ? svc.buildSalesTrend : pathname.endsWith("product-panel") ? svc.getProductPanelFast : pathname.endsWith("purchase") ? svc.buildPurchaseReport : svc.buildActivityList;
-        const data = fn(db, { includeTest, attachCloudDb: attachTemuCloudDbIfPossible });
+        const fn = pathname.endsWith("risk-list") ? svc.buildRiskList : pathname.endsWith("shop-health") ? svc.buildShopHealth : pathname.endsWith("stock-orders") ? svc.buildStockOrders : pathname.endsWith("sales-trend") ? svc.buildSalesTrend : pathname.endsWith("product-panel") ? svc.getProductPanelFast : pathname.endsWith("product-trend") ? svc.buildProductSalesTrend : pathname.endsWith("purchase") ? svc.buildPurchaseReport : svc.buildActivityList;
+        const data = fn(db, { includeTest, productId, attachCloudDb: attachTemuCloudDbIfPossible });
         writeJson(res, 200, { ok: true, data });
       } catch (error) {
         writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });

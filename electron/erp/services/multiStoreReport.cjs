@@ -1149,6 +1149,27 @@ function _buildProductPanelOfficialFresh(db, options = {}) {
   return { generated_at: Date.now(), row_count: out.length, rows: out, source: "official" };
 }
 
+// 商品销量趋势:从 cloud.temu_sales_snapshot 按 product_id 取逐日销量/营收(申报价×销量)。
+// 数据=抓包采集快照,覆盖采集到的店与天数(约近2周、部分店);需 attach cloud,未 attach 则返回空。
+function buildProductSalesTrend(db, options = {}) {
+  const productId = options.productId != null ? String(options.productId) : "";
+  if (!productId) return { product_id: null, rows: [], row_count: 0, source: "cloud" };
+  const attachCloudDb = options.attachCloudDb;
+  if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
+    return { product_id: productId, rows: [], row_count: 0, attached: false, source: "cloud" };
+  }
+  const rows = db.prepare(`
+    SELECT stat_date AS date,
+           SUM(COALESCE(today_sales,0)) AS qty,
+           ROUND(SUM(COALESCE(declared_price_cents,0)/100.0 * COALESCE(today_sales,0)), 2) AS revenue
+      FROM cloud.temu_sales_snapshot
+     WHERE product_id = ?
+     GROUP BY stat_date
+     ORDER BY stat_date
+  `).all(productId);
+  return { product_id: productId, rows, row_count: rows.length, source: "cloud" };
+}
+
 // 商品运营面板:优先读物化缓存表(cron 预聚合,毫秒),无/未跑则实时兜底(慢);官方源走 official 版
 function getProductPanelFast(db, options = {}) {
   if (useOfficialReports(options)) {
@@ -1373,6 +1394,7 @@ module.exports = {
   buildSalesTrend,
   buildProductPanel,
   getProductPanelFast,
+  buildProductSalesTrend,
   setMallOwner,
   listOpTaskState,
   setOpTaskState,
