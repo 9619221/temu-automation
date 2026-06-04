@@ -1396,6 +1396,15 @@ function buildPurchaseReport(db, options = {}) {
 // 平台仓质检结果(运营工作台「平台质检」Tab):读 erp_temu_openapi_qc(官方采集物化),
 // 默认只列不合格,关联店名 + join sku_sales 补货号(质检接口不返回货号)。纯本地 erp.sqlite。
 function parseFlawsJson(j) { if (!j) return []; try { const a = JSON.parse(j); return Array.isArray(a) ? a : []; } catch { return []; } }
+// 读某单第一张疵点小缩略(数据盘缓存 thumb.jpg)→ base64,供列表内嵌直显;无缓存返回 null(前端退化为「X张」点击)。
+function readQcThumb(qcBillId) {
+  try {
+    const fs = require("fs"); const path = require("path");
+    const p = path.join(QC_FLAW_CACHE_DIR, String(qcBillId).replace(/[^0-9a-zA-Z_-]/g, ""), "thumb.jpg");
+    if (fs.existsSync(p)) return "data:image/jpeg;base64," + fs.readFileSync(p).toString("base64");
+  } catch { /* 读失败返回 null */ }
+  return null;
+}
 // 实时拉某质检单的疵点照片:私有图带 ~30 分钟签名,存的会失效,故实时调详情拿最新签名 URL + node fetch 带 referer 拉成 base64。
 const QC_FLAW_CACHE_DIR = process.env.QC_FLAW_CACHE_DIR || "/opt/temu-erp-data/qc-flaw-cache";
 async function fetchQcFlawImages(db, options = {}) {
@@ -1475,6 +1484,7 @@ function buildOpenapiQc(db, options = {}) {
     qc_group_name: r.qc_group_name || null, receipt_no: r.receipt_no || null,
     flaw_summary: r.flaw_summary || null, flaws: parseFlawsJson(r.flaws_json),
     flaw_image_count: r.flaw_image_count == null ? 0 : toNum(r.flaw_image_count),
+    flaw_thumb: readQcThumb(r.qc_bill_id),
   }));
   return { generated_at: Date.now(), row_count: out.length, rows: out, source: "official" };
 }

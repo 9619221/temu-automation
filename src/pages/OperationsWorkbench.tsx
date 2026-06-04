@@ -73,6 +73,7 @@ interface QcRow {
   flaw_summary: string | null;
   flaws: Array<{ name: string | null; type: string | null; degree: string | null; degreeId: number | null; remark: string | null; images: string[] }>;
   flaw_image_count: number;
+  flaw_thumb: string | null;
 }
 
 interface ProductPanelRow {
@@ -948,7 +949,13 @@ export default function OperationsWorkbench() {
     { title: "采购单", dataIndex: "purchase_no", width: 150, render: (v) => v ? <Typography.Text copyable={{ text: String(v) }} style={{ fontSize: 12 }}>{v}</Typography.Text> : "—" },
     { title: "结果", dataIndex: "qc_result", width: 76, align: "center", render: (v) => v === 2 ? <span style={{ color: "#cf1322", fontWeight: 600 }}>不合格</span> : v === 1 ? <span style={{ color: "#3f8600" }}>合格</span> : "—" },
     { title: "疵点原因", dataIndex: "flaw_summary", width: 320, render: (v) => v ? <span style={{ color: "#cf1322", fontSize: 12 }}>{v}</span> : <span style={{ color: "#bbb" }}>—</span> },
-    { title: "疵点图", dataIndex: "flaw_image_count", width: 80, align: "center", render: (v, r) => v > 0 ? <a onClick={() => openFlawImages(r.mall_id, r.qc_bill_id, `疵点照片 · ${r.sku_name || r.qc_bill_id}`)}>{v} 张</a> : <span style={{ color: "#bbb" }}>—</span> },
+    { title: "疵点图", key: "flaw", width: 92, align: "center", render: (_, r) => {
+      if (!r.flaw_image_count) return <span style={{ color: "#bbb" }}>—</span>;
+      return <a onClick={() => openFlawImages(r.mall_id, r.qc_bill_id, `疵点照片 · ${r.sku_name || r.qc_bill_id}`)} style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+        {r.flaw_thumb ? <img src={r.flaw_thumb} width={44} height={44} style={{ objectFit: "cover", borderRadius: 3, border: "1px solid #f0f0f0" }} alt="" /> : null}
+        <span style={{ fontSize: 11 }}>{r.flaw_image_count} 张</span>
+      </a>;
+    } },
     { title: "次品/应检", key: "qty", width: 92, align: "right", render: (_, r) => `${r.defective_qty ?? "—"} / ${r.expect_qty ?? "—"}` },
     { title: "收货单", dataIndex: "receipt_no", width: 150, render: (v) => v || "—" },
     { title: "类目", dataIndex: "cat_name", width: 120, ellipsis: true, render: (v) => v || "—" },
