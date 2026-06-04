@@ -252,6 +252,22 @@ function registerReportsHandlers(ipcMain, deps) {
     }
   });
 
+  // 运营工作台：平台仓质检结果（官方采集,默认列不合格 + 疵点;不走 cloud）
+  ipcMain.handle("erp:reports:openapi-qc", async (_event, payload) => {
+    try {
+      const includeTest = payload?.includeTest ? "1" : "0";
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest(`/api/erp/reports/openapi-qc?include_test=${includeTest}`, { method: "GET" });
+      }
+      requireErp();
+      const { buildOpenapiQc } = require("../services/multiStoreReport.cjs");
+      return { ok: true, data: buildOpenapiQc(erpState.db, { includeTest: payload?.includeTest }) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+
   // 运营工作台：商品销量趋势（逐日，数据走 cloud 抓包快照，按 product_id 关联）
   ipcMain.handle("erp:reports:product-trend", async (_event, payload) => {
     try {

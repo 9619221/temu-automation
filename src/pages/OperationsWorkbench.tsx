@@ -63,6 +63,18 @@ interface StoreMatrixRow {
   high_risk: number; restock: number; stock_gap: number; activity: number;
 }
 interface SkuChild { skc_id: string | null; sku_ext_code: string | null; spec_name?: string | null; declared_price: number | null; today: number; last7d: number; last30d: number; sale_days: number | null; stock: number; occupy: number; advice_qty: number; lack_qty?: number; }
+interface QcRow {
+  mall_id: string; store_code: string | null; mall_name: string | null;
+  qc_bill_id: string; product_sku_id: string | null; product_skc_id: string | null; spu_id: string | null;
+  ext_code: string | null; sku_name: string | null; spec: string | null; cat_name: string | null;
+  purchase_no: string | null; thumb_url: string | null;
+  qc_result: number | null; qc_result_update_time: string | null; finish_time: string | null;
+  expect_qty: number | null; defective_qty: number | null; qc_group_name: string | null; receipt_no: string | null;
+  flaw_summary: string | null;
+  flaws: Array<{ name: string | null; type: string | null; degree: string | null; degreeId: number | null; remark: string | null; images: string[] }>;
+  flaw_image_count: number;
+}
+
 interface ProductPanelRow {
   mall_id: string; product_id: string; store_code: string | null; mall_name: string | null; title: string | null; thumb: string | null;
   skc_codes: string | null; sku_codes: string | null; declared_price: number | null; score: number | null; comments: number | null;
@@ -182,6 +194,9 @@ export default function OperationsWorkbench() {
   const [trendModalLoading, setTrendModalLoading] = useState(false);
   const [panelLoading, setPanelLoading] = useState(false);
   const [panelLoaded, setPanelLoaded] = useState(false);
+  const [qcRows, setQcRows] = useState<QcRow[]>([]);
+  const [qcLoaded, setQcLoaded] = useState(false);
+  const [qcLoading, setQcLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [storeFilter, setStoreFilter] = useSessionState(owViewKey("storeFilter"), "all");
@@ -444,6 +459,12 @@ export default function OperationsWorkbench() {
     try { const resp = await window.electronAPI.erp.reports.productPanel({ includeTest: false }); if (resp.ok && resp.data) { setPanelRows((resp.data.rows || []) as ProductPanelRow[]); setPanelLoaded(true); } } catch { /* */ } finally { setPanelLoading(false); }
   }, []);
 
+  const loadQc = useCallback(async () => {
+    if (!window.electronAPI?.erp?.reports?.openapiQc) return;
+    setQcLoading(true);
+    try { const resp = await window.electronAPI.erp.reports.openapiQc({ includeTest: false }); if (resp.ok && resp.data) { setQcRows((resp.data.rows || []) as unknown as QcRow[]); setQcLoaded(true); } } catch { /* */ } finally { setQcLoading(false); }
+  }, []);
+
   useEffect(() => { loadSku(); }, [loadSku]);
   // 商品销量趋势弹窗:打开时按 product_id 拉逐日数据(走 cloud 抓包快照)
   useEffect(() => {
@@ -488,7 +509,8 @@ export default function OperationsWorkbench() {
     if ((activeTab === "risk" || todo) && !riskLoaded && !riskLoading) loadRisk();
     if ((activeTab === "activity" || todo) && !actLoaded && !actLoading) loadAct();
     if (activeTab === "product" && !panelLoaded && !panelLoading) loadPanel();
-  }, [activeTab, shopLoaded, shopLoading, trendLoaded, trendLoading, adLoaded, adLoading, stockLoaded, stockLoading, riskLoaded, riskLoading, actLoaded, actLoading, panelLoaded, panelLoading, loadShop, loadTrend, loadAd, loadStockOrders, loadRisk, loadAct, loadPanel]);
+    if (activeTab === "qc" && !qcLoaded && !qcLoading) loadQc();
+  }, [activeTab, shopLoaded, shopLoading, trendLoaded, trendLoading, adLoaded, adLoading, stockLoaded, stockLoading, riskLoaded, riskLoading, actLoaded, actLoading, panelLoaded, panelLoading, qcLoaded, qcLoading, loadShop, loadTrend, loadAd, loadStockOrders, loadRisk, loadAct, loadPanel, loadQc]);
 
   const diagnosed: DiagnosedRow[] = useMemo(() => skuRows.map((r) => {
     const issues = diagnose(r);
@@ -910,6 +932,19 @@ export default function OperationsWorkbench() {
   const nowHour = new Date().getHours();
   const adviceOf = (r: ProductPanelRow) => { const skus = skusOf(r); return calcAdvice(skus.reduce((a, s) => a + (s.today || 0), 0), skus.reduce((a, s) => a + (s.last7d || 0), 0), r.total_stock || 0, nowHour); };
 
+  const qcColumns: ColumnsType<QcRow> = [
+    { title: "店号", dataIndex: "store_code", width: 78, fixed: "left", render: (v, r) => formatStoreNo(v === r.mall_id ? null : v, r.mall_id) },
+    { title: "商品", key: "prod", width: 280, render: (_, r) => (<div style={{ display: "flex", gap: 8, alignItems: "center" }}>{r.thumb_url ? <Image src={r.thumb_url} width={36} height={36} style={{ objectFit: "cover", borderRadius: 4 }} preview={false} /> : <div style={{ width: 36, height: 36, background: "#f0f0f0", borderRadius: 4 }} />}<div style={{ minWidth: 0 }}><div style={{ fontSize: 12, lineHeight: 1.4, maxHeight: 34, overflow: "hidden" }}>{r.sku_name || "—"}</div><div style={{ fontSize: 11, color: "#8c8c8c" }}>{r.spec || ""}{r.ext_code ? ` · ${r.ext_code}` : ""}</div></div></div>) },
+    { title: "采购单", dataIndex: "purchase_no", width: 150, render: (v) => v ? <Typography.Text copyable={{ text: String(v) }} style={{ fontSize: 12 }}>{v}</Typography.Text> : "—" },
+    { title: "结果", dataIndex: "qc_result", width: 76, align: "center", render: (v) => v === 2 ? <span style={{ color: "#cf1322", fontWeight: 600 }}>不合格</span> : v === 1 ? <span style={{ color: "#3f8600" }}>合格</span> : "—" },
+    { title: "疵点原因", dataIndex: "flaw_summary", width: 320, render: (v) => v ? <span style={{ color: "#cf1322", fontSize: 12 }}>{v}</span> : <span style={{ color: "#bbb" }}>—</span> },
+    { title: "疵点图", dataIndex: "flaw_image_count", width: 72, align: "right", render: (v) => v > 0 ? `${v} 张` : <span style={{ color: "#bbb" }}>—</span> },
+    { title: "次品/应检", key: "qty", width: 92, align: "right", render: (_, r) => `${r.defective_qty ?? "—"} / ${r.expect_qty ?? "—"}` },
+    { title: "收货单", dataIndex: "receipt_no", width: 150, render: (v) => v || "—" },
+    { title: "类目", dataIndex: "cat_name", width: 120, ellipsis: true, render: (v) => v || "—" },
+    { title: "质检时间", dataIndex: "qc_result_update_time", width: 150, render: (v) => v ? String(v).slice(0, 19).replace("T", " ") : "—", sorter: (a, b) => String(a.qc_result_update_time || "").localeCompare(String(b.qc_result_update_time || "")), defaultSortOrder: "descend" },
+  ];
+
   const panelColumns: ColumnsType<ProductPanelRow> = [
     { title: "店号", dataIndex: "store_code", width: 88, fixed: "left", render: (v, r) => <div style={{ height: "100%", display: "flex", flexDirection: "column", justifyContent: "center" }}>{formatStoreNo(v === r.mall_id ? null : v, r.mall_id)}</div> },
     { title: "商品", key: "prod", width: 410, render: (_, r) => {
@@ -1168,6 +1203,15 @@ export default function OperationsWorkbench() {
       ),
     },
     {
+      key: "qc", label: "平台质检",
+      children: (
+        <div>
+          <div style={{ padding: "12px 16px 0", color: "#888", fontSize: 12 }}>Temu 平台仓质检结果(官方采集),默认只列<b>不合格</b>:疵点原因 + 次品数 + 关联采购单,用于跟进补合规标签 / 改进生产。数据每 3 小时刷新。</div>
+          <Table<QcRow> dataSource={qcRows} columns={qcColumns} rowKey={(r) => `${r.mall_id}|${r.qc_bill_id}`} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 条不合格` }} scroll={{ x: 1300 }} loading={qcLoading} />
+        </div>
+      ),
+    },
+    {
       key: "stock", label: "备货在途",
       children: (
         <div>
@@ -1233,7 +1277,7 @@ export default function OperationsWorkbench() {
         extra={<div style={{ display: "flex", gap: 10, alignItems: "center" }}>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>我的店</Typography.Text>
           <Select size="small" style={{ width: 140 }} value={ownerFilter} onChange={setOwner} options={[{ value: "all", label: "全部负责人" }, ...ownerOptions.map((o) => ({ value: o, label: o }))]} disabled={ownerOptions.length === 0} placeholder="负责人" />
-          <Button icon={<ReloadOutlined />} loading={skuLoading || riskLoading || actLoading || shopLoading || trendLoading || adLoading || stockLoading || panelLoading} onClick={() => { loadSku(); setShopLoaded(false); setTrendLoaded(false); setAdLoaded(false); setStockLoaded(false); setRiskLoaded(false); setActLoaded(false); setPanelLoaded(false); loadShop(); if (activeTab === "store") { loadTrend(); loadAd(); } else if (activeTab === "stock") loadStockOrders(); else if (activeTab === "risk") loadRisk(); else if (activeTab === "activity") loadAct(); else if (activeTab === "product") loadPanel(); else if (activeTab === "todo") { loadRisk(); loadAct(); } else if (activeTab === "overview") { loadTrend(); loadStockOrders(); loadRisk(); loadAct(); } message.success("已刷新"); }}>刷新</Button>
+          <Button icon={<ReloadOutlined />} loading={skuLoading || riskLoading || actLoading || shopLoading || trendLoading || adLoading || stockLoading || panelLoading} onClick={() => { loadSku(); setShopLoaded(false); setTrendLoaded(false); setAdLoaded(false); setStockLoaded(false); setRiskLoaded(false); setActLoaded(false); setPanelLoaded(false); setQcLoaded(false); loadShop(); if (activeTab === "store") { loadTrend(); loadAd(); } else if (activeTab === "stock") loadStockOrders(); else if (activeTab === "risk") loadRisk(); else if (activeTab === "activity") loadAct(); else if (activeTab === "product") loadPanel(); else if (activeTab === "qc") loadQc(); else if (activeTab === "todo") { loadRisk(); loadAct(); } else if (activeTab === "overview") { loadTrend(); loadStockOrders(); loadRisk(); loadAct(); } message.success("已刷新"); }}>刷新</Button>
         </div>}
         bodyStyle={{ padding: 0 }}
       >

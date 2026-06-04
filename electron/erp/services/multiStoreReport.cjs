@@ -1393,8 +1393,49 @@ function buildPurchaseReport(db, options = {}) {
   return result;
 }
 
+// 平台仓质检结果(运营工作台「平台质检」Tab):读 erp_temu_openapi_qc(官方采集物化),
+// 默认只列不合格,关联店名 + join sku_sales 补货号(质检接口不返回货号)。纯本地 erp.sqlite。
+function parseFlawsJson(j) { if (!j) return []; try { const a = JSON.parse(j); return Array.isArray(a) ? a : []; } catch { return []; } }
+function buildOpenapiQc(db, options = {}) {
+  const includeTest = !!options.includeTest;
+  const limit = Math.min(5000, Math.max(50, Number(options.limit) || 2000));
+  const onlyBad = options.onlyBad !== false; // 默认只不合格
+  const rows = optionalAllLocal(db, `
+    SELECT q.mall_id, m.store_code, m.mall_name,
+           q.qc_bill_id, q.product_sku_id, q.product_skc_id, q.spu_id,
+           COALESCE(NULLIF(q.ext_code,''), s.ext_code) AS ext_code,
+           q.sku_name, q.spec, q.cat_name, q.purchase_no, q.thumb_url,
+           q.qc_result, q.qc_result_update_time, q.finish_time,
+           q.expect_qty, q.defective_qty, q.qc_group_name, q.receipt_no,
+           q.flaw_summary, q.flaws_json, q.flaw_image_count
+      FROM erp_temu_openapi_qc q
+      LEFT JOIN erp_temu_malls m ON m.mall_id = q.mall_id
+      LEFT JOIN erp_temu_openapi_sku_sales s ON s.mall_id = q.mall_id AND s.product_sku_id = q.product_sku_id
+     WHERE 1=1
+       ${onlyBad ? "AND q.qc_result = 2" : ""}
+       ${includeTest ? "" : "AND COALESCE(m.status,'active') <> 'test'"}
+     ORDER BY q.qc_result_update_time DESC
+     LIMIT ?
+  `, [limit]);
+  const out = rows.map((r) => ({
+    mall_id: r.mall_id, store_code: r.store_code || null, mall_name: r.mall_name || null,
+    qc_bill_id: r.qc_bill_id, product_sku_id: r.product_sku_id || null, product_skc_id: r.product_skc_id || null, spu_id: r.spu_id || null,
+    ext_code: r.ext_code || null, sku_name: r.sku_name || null, spec: r.spec || null, cat_name: r.cat_name || null,
+    purchase_no: r.purchase_no || null, thumb_url: r.thumb_url || null,
+    qc_result: r.qc_result == null ? null : toNum(r.qc_result),
+    qc_result_update_time: r.qc_result_update_time || null, finish_time: r.finish_time || null,
+    expect_qty: r.expect_qty == null ? null : toNum(r.expect_qty),
+    defective_qty: r.defective_qty == null ? null : toNum(r.defective_qty),
+    qc_group_name: r.qc_group_name || null, receipt_no: r.receipt_no || null,
+    flaw_summary: r.flaw_summary || null, flaws: parseFlawsJson(r.flaws_json),
+    flaw_image_count: r.flaw_image_count == null ? 0 : toNum(r.flaw_image_count),
+  }));
+  return { generated_at: Date.now(), row_count: out.length, rows: out, source: "official" };
+}
+
 module.exports = {
   buildMultiStoreReport,
+  buildOpenapiQc,
   buildPurchaseReport,
   prewarmMultiStoreReport,
   buildSkuSales,

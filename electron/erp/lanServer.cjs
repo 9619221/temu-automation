@@ -78,6 +78,7 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/erp/reports/stock-orders": ["admin", "manager", "operations", "warehouse", "viewer"],
   "/api/erp/reports/sales-trend": ["admin", "manager", "operations", "finance", "viewer"],
   "/api/erp/reports/product-panel": ["admin", "manager", "operations", "finance", "viewer"],
+  "/api/erp/reports/openapi-qc": ["admin", "manager", "operations", "finance", "viewer"],
   "/api/erp/reports/purchase": ["admin", "manager", "finance", "buyer", "operations", "viewer"],
   "/warehouse": ["admin", "manager", "warehouse"],
   "/api/warehouse/workbench": ["admin", "manager", "warehouse"],
@@ -5450,7 +5451,7 @@ async function handleRequest({
       return;
     }
 
-    if (pathname === "/api/erp/reports/risk-list" || pathname === "/api/erp/reports/activity-list" || pathname === "/api/erp/reports/shop-health" || pathname === "/api/erp/reports/stock-orders" || pathname === "/api/erp/reports/sales-trend" || pathname === "/api/erp/reports/product-panel" || pathname === "/api/erp/reports/product-trend" || pathname === "/api/erp/reports/purchase") {
+    if (pathname === "/api/erp/reports/risk-list" || pathname === "/api/erp/reports/activity-list" || pathname === "/api/erp/reports/shop-health" || pathname === "/api/erp/reports/stock-orders" || pathname === "/api/erp/reports/sales-trend" || pathname === "/api/erp/reports/product-panel" || pathname === "/api/erp/reports/product-trend" || pathname === "/api/erp/reports/purchase" || pathname === "/api/erp/reports/openapi-qc") {
       if (req.method !== "GET") {
         writeJson(res, 405, { ok: false, error: "Method not allowed" });
         return;
@@ -5460,7 +5461,7 @@ async function handleRequest({
         const includeTest = parsed.searchParams.get("include_test") === "1";
         const productId = parsed.searchParams.get("product_id") || "";
         const svc = require("./services/multiStoreReport.cjs");
-        const fn = pathname.endsWith("risk-list") ? svc.buildRiskList : pathname.endsWith("shop-health") ? svc.buildShopHealth : pathname.endsWith("stock-orders") ? svc.buildStockOrders : pathname.endsWith("sales-trend") ? svc.buildSalesTrend : pathname.endsWith("product-panel") ? svc.getProductPanelFast : pathname.endsWith("product-trend") ? svc.buildProductSalesTrend : pathname.endsWith("purchase") ? svc.buildPurchaseReport : svc.buildActivityList;
+        const fn = pathname.endsWith("risk-list") ? svc.buildRiskList : pathname.endsWith("shop-health") ? svc.buildShopHealth : pathname.endsWith("stock-orders") ? svc.buildStockOrders : pathname.endsWith("sales-trend") ? svc.buildSalesTrend : pathname.endsWith("product-panel") ? svc.getProductPanelFast : pathname.endsWith("product-trend") ? svc.buildProductSalesTrend : pathname.endsWith("purchase") ? svc.buildPurchaseReport : pathname.endsWith("openapi-qc") ? svc.buildOpenapiQc : svc.buildActivityList;
         const data = fn(db, { includeTest, productId, attachCloudDb: attachTemuCloudDbIfPossible });
         writeJson(res, 200, { ok: true, data });
       } catch (error) {
