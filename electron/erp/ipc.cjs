@@ -16332,7 +16332,6 @@ function updatePurchaseOrderFrom1688Snapshot({
   action,
   actor,
   forceCancel = false,
-  preserveMoney = false,
 }) {
   const before = getPurchaseOrder(db, po.id);
   const now = nowIso();
@@ -16348,11 +16347,8 @@ function updatePurchaseOrderFrom1688Snapshot({
       ?? before.freight_amount,
   );
   const snapshotPaidAmount = optionalNumber(order.totalAmount);
-  // preserveMoney：列表同步(import_1688_orders)等非详情来源的金额不可信
-  // （1688 订单列表接口返回的金额常不含运费），不得覆盖 fetch_1688_order_detail
-  // 写入的准确金额，否则会把含运费的真实实付冲成不含运费的偏小值。此时金额三列一律保持原值。
-  const money = (preserveMoney || snapshotPaidAmount === null)
-    ? { goodsAmount: null, paidAmount: null, freightAmount: preserveMoney ? null : snapshotFreight }
+  const money = snapshotPaidAmount === null
+    ? { goodsAmount: null, paidAmount: null, freightAmount: snapshotFreight }
     : splitOrderMoney(snapshotPaidAmount, snapshotFreight, before.total_amount);
   const payloadJson = {
     ...(parseJsonObject(before.external_order_payload_json) || {}),
@@ -17103,9 +17099,7 @@ async function import1688OrdersAction({ db, services, payload, actor }) {
         services,
         po: existing,
         order,
-        // 列表接口金额不含运费，不可覆盖详情同步写入的准确金额；
-        // 也不再把列表数据当 rawDetail 写入详情字段（避免冒充已拉详情、刷脏 detail_synced_at）。
-        preserveMoney: true,
+        rawDetail: order.raw || order,
         action: "import_1688_orders",
         actor,
       });
