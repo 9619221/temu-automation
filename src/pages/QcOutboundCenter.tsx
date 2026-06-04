@@ -1017,7 +1017,8 @@ export default function QcOutboundCenter() {
       key: "erpStatus",
       width: 110,
       render: (_value, row) => {
-        const s = row.localStatusOverride || row.rawJst?.status || "已付款待审核"; // 本地确认 > 聚水潭 > 聚水潭未接单兜底「已付款待审核」
+        // erp状态=自研系统处理进度: 本地确认 > 聚水潭历史 > 聚水潭无数据时(Temu取消→「取消」不误标废单, 否则→「已付款待审核」待处理)
+        const s = row.localStatusOverride || row.rawJst?.status || (row.rawCloud?.temu_status === "取消" ? "取消" : "已付款待审核");
         return <Tag color={stockStatusColor(s)} style={{ whiteSpace: "nowrap" }}>{s}</Tag>;
       },
     },
