@@ -4145,6 +4145,39 @@ h6 {
   background: #ffffff;
 }
 
+/* 出库中心送仓托管「列设置」Popover 内容（即时生效，独立于上面的旧浮层样式） */
+.consign-col-cfg {
+  width: 244px;
+}
+.consign-col-cfg__list {
+  max-height: 360px;
+  overflow-y: auto;
+  margin: -4px -4px 0;
+  padding: 0 4px;
+}
+.consign-col-cfg__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 30px;
+  padding: 1px 4px;
+  border-radius: 6px;
+}
+.consign-col-cfg__item:hover {
+  background: #f5f8ff;
+}
+.consign-col-cfg__moves {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.consign-col-cfg__foot {
+  margin-top: 6px;
+  padding-top: 6px;
+  text-align: right;
+  border-top: 1px solid rgba(60, 60, 67, 0.10);
+}
+
 .purchase-log-panel {
   display: flex;
   min-height: calc(100vh - 245px);

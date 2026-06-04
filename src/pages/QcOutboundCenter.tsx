@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { DragEvent, MouseEvent } from "react";
-import { createPortal } from "react-dom";
+import type { MouseEvent } from "react";
 import {
   Alert,
   Button,
@@ -11,22 +10,26 @@ import {
   InputNumber,
   Modal,
   Image,
+  Popover,
   Select,
   Space,
   Spin,
   Table,
   Tabs,
   Tag,
+  Tooltip,
   Typography,
   message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
+  ArrowDownOutlined,
+  ArrowUpOutlined,
   CloudSyncOutlined,
   EyeOutlined,
-  HolderOutlined,
   ReloadOutlined,
   SearchOutlined,
+  SettingOutlined,
 } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
 import StatCard from "../components/StatCard";
@@ -208,12 +211,6 @@ type UnifiedRowSource = "cloud" | "jst" | "both";
 
 const JST_STATUS_OPTIONS = ["已发货", "取消", "已付款待审核", "异常", "发货中", "待付款"];
 
-const UNIFIED_COLUMN_MENU_WIDTH = 280;
-const UNIFIED_COLUMN_MENU_EDGE_GAP = 12;
-const UNIFIED_COLUMN_MENU_OFFSET = 8;
-const UNIFIED_COLUMN_MENU_CHROME_HEIGHT = 96;
-const UNIFIED_COLUMN_MENU_MIN_BODY_HEIGHT = 180;
-const UNIFIED_COLUMN_MENU_MAX_BODY_HEIGHT = 430;
 // v3：新增「送货数」「入库数」独立列。升版本让旧客户端的列配置重置为含新列的全可见默认，
 // 否则旧 localStorage 的 visible 不含新 key，新列默认隐藏、用户仍看不到。
 const UNIFIED_COLUMN_ORDER_STORAGE_KEY = "temu.consign.unified.columnOrder.v4";
@@ -258,47 +255,6 @@ const UNIFIED_COLUMN_LABELS: Record<string, string> = {
 interface UnifiedColumnConfig {
   order: string[];
   visible: string[];
-}
-
-function clampNumber(value: number, min: number, max: number) {
-  return Math.min(Math.max(value, min), max);
-}
-
-function unifiedColumnMenuPosition(clientX: number, clientY: number) {
-  const maxLeft = Math.max(
-    UNIFIED_COLUMN_MENU_EDGE_GAP,
-    window.innerWidth - UNIFIED_COLUMN_MENU_WIDTH - UNIFIED_COLUMN_MENU_EDGE_GAP,
-  );
-  const maxTop = Math.max(
-    UNIFIED_COLUMN_MENU_EDGE_GAP,
-    window.innerHeight
-      - UNIFIED_COLUMN_MENU_CHROME_HEIGHT
-      - UNIFIED_COLUMN_MENU_MIN_BODY_HEIGHT
-      - UNIFIED_COLUMN_MENU_EDGE_GAP,
-  );
-  const x = clampNumber(
-    clientX + UNIFIED_COLUMN_MENU_OFFSET,
-    UNIFIED_COLUMN_MENU_EDGE_GAP,
-    maxLeft,
-  );
-  const y = clampNumber(
-    clientY + UNIFIED_COLUMN_MENU_OFFSET,
-    UNIFIED_COLUMN_MENU_EDGE_GAP,
-    maxTop,
-  );
-  const availableBodyHeight = window.innerHeight
-    - y
-    - UNIFIED_COLUMN_MENU_CHROME_HEIGHT
-    - UNIFIED_COLUMN_MENU_EDGE_GAP;
-  return {
-    x,
-    y,
-    bodyMaxHeight: clampNumber(
-      availableBodyHeight,
-      UNIFIED_COLUMN_MENU_MIN_BODY_HEIGHT,
-      UNIFIED_COLUMN_MENU_MAX_BODY_HEIGHT,
-    ),
-  };
 }
 
 function normalizeUnifiedColumnOrder(value: unknown) {
@@ -455,9 +411,7 @@ export default function QcOutboundCenter() {
   const [stockOrderPreviewError, setStockOrderPreviewError] = useState<string | null>(null);
   const [stockOrderPreviewLoading, setStockOrderPreviewLoading] = useState(false);
   const [unifiedColumnConfig, setUnifiedColumnConfig] = useState<UnifiedColumnConfig>(readUnifiedColumnConfig);
-  const [unifiedColumnDraft, setUnifiedColumnDraft] = useState<UnifiedColumnConfig | null>(null);
-  const [unifiedColumnMenu, setUnifiedColumnMenu] = useState({ open: false, x: 0, y: 0, bodyMaxHeight: UNIFIED_COLUMN_MENU_MAX_BODY_HEIGHT });
-  const [unifiedDraggedColumn, setUnifiedDraggedColumn] = useState<string | null>(null);
+  const [columnSettingsOpen, setColumnSettingsOpen] = useState(false);
   const [stockOrderForm] = Form.useForm();
 
   const canCreateOutbound = canRole(role, ["operations", "manager", "admin"]);
@@ -669,107 +623,48 @@ export default function QcOutboundCenter() {
     return JST_STATUS_OPTIONS.map((value) => ({ label: value, value }));
   }, [unifiedSnapshot.statusBreakdown]);
 
-  const openUnifiedColumnMenu = useCallback((event: MouseEvent<HTMLElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
-    const position = unifiedColumnMenuPosition(event.clientX, event.clientY);
-    setUnifiedColumnDraft({
-      order: [...unifiedColumnConfig.order],
-      visible: [...unifiedColumnConfig.visible],
-    });
-    setUnifiedColumnMenu({
-      open: true,
-      ...position,
-    });
-  }, [unifiedColumnConfig]);
-
-  const reorderUnifiedDraftColumn = useCallback((sourceField: string, targetField: string) => {
-    if (!sourceField || !targetField || sourceField === targetField) return;
-    setUnifiedColumnDraft((prev) => {
-      const current = normalizeUnifiedColumnConfig(prev || unifiedColumnConfig);
-      const sourceIndex = current.order.indexOf(sourceField);
-      const targetIndex = current.order.indexOf(targetField);
-      if (sourceIndex === -1 || targetIndex === -1) return current;
-      const nextOrder = current.order.slice();
-      const [movedField] = nextOrder.splice(sourceIndex, 1);
-      nextOrder.splice(targetIndex, 0, movedField);
-      return {
-        ...current,
-        order: nextOrder,
-        visible: nextOrder.filter((key) => current.visible.includes(key)),
-      };
-    });
-  }, [unifiedColumnConfig]);
-
-  const handleUnifiedColumnDragStart = useCallback((event: DragEvent<HTMLDivElement>, field: string) => {
-    setUnifiedDraggedColumn(field);
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", field);
-  }, []);
-
-  const handleUnifiedColumnDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "move";
-  }, []);
-
-  const handleUnifiedColumnDrop = useCallback((event: DragEvent<HTMLDivElement>, targetField: string) => {
-    event.preventDefault();
-    const sourceField = unifiedDraggedColumn || event.dataTransfer.getData("text/plain");
-    reorderUnifiedDraftColumn(sourceField, targetField);
-    setUnifiedDraggedColumn(null);
-  }, [unifiedDraggedColumn, reorderUnifiedDraftColumn]);
-
-  const handleUnifiedColumnDragEnd = useCallback(() => {
-    setUnifiedDraggedColumn(null);
-  }, []);
-
-  const toggleUnifiedDraftColumn = useCallback((field: string, checked: boolean) => {
-    setUnifiedColumnDraft((prev) => {
-      const current = normalizeUnifiedColumnConfig(prev || unifiedColumnConfig);
-      const visible = new Set(current.visible);
-      if (checked) {
-        visible.add(field);
-      } else if (visible.size > 1) {
-        visible.delete(field);
-      }
-      return { ...current, visible: current.order.filter((key) => visible.has(key)) };
-    });
-  }, [unifiedColumnConfig]);
-
-  const saveUnifiedColumnConfig = useCallback(() => {
-    const next = normalizeUnifiedColumnConfig(unifiedColumnDraft || unifiedColumnConfig);
-    setUnifiedColumnConfig(next);
+  // 列配置即时生效：所有改动直接写入 unifiedColumnConfig + localStorage，无草稿、无「保存」按钮。
+  const persistUnifiedColumnConfig = useCallback((next: UnifiedColumnConfig) => {
     try {
       window.localStorage.setItem(UNIFIED_COLUMN_ORDER_STORAGE_KEY, JSON.stringify(next));
     } catch {
       // localStorage 仅做便利保存，失败也不影响表格布局
     }
-    setUnifiedColumnMenu((prev) => ({ ...prev, open: false }));
-  }, [unifiedColumnConfig, unifiedColumnDraft]);
-
-  const restoreUnifiedColumnConfig = useCallback(() => {
-    setUnifiedColumnDraft(defaultUnifiedColumnConfig());
   }, []);
 
-  useEffect(() => {
-    if (!unifiedColumnMenu.open) return undefined;
-    const close = (event: globalThis.MouseEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (target?.closest?.(".purchase-order-column-menu")) return;
-      setUnifiedColumnMenu((prev) => ({ ...prev, open: false }));
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setUnifiedColumnMenu((prev) => ({ ...prev, open: false }));
-    };
-    window.addEventListener("mousedown", close);
-    window.addEventListener("keydown", closeOnEscape);
-    return () => {
-      window.removeEventListener("mousedown", close);
-      window.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [unifiedColumnMenu.open]);
+  // 勾选/取消某列（至少保留 1 列可见），即时反映到表格。
+  const toggleUnifiedColumn = useCallback((field: string, checked: boolean) => {
+    setUnifiedColumnConfig((prev) => {
+      const current = normalizeUnifiedColumnConfig(prev);
+      const visible = new Set(current.visible);
+      if (checked) visible.add(field);
+      else if (visible.size > 1) visible.delete(field);
+      const next = { ...current, visible: current.order.filter((key) => visible.has(key)) };
+      persistUnifiedColumnConfig(next);
+      return next;
+    });
+  }, [persistUnifiedColumnConfig]);
 
-  const activeUnifiedColumnConfig = unifiedColumnDraft || unifiedColumnConfig;
+  // 上移(-1)/下移(+1)某列，即时反映到表格。
+  const moveUnifiedColumn = useCallback((field: string, dir: -1 | 1) => {
+    setUnifiedColumnConfig((prev) => {
+      const current = normalizeUnifiedColumnConfig(prev);
+      const order = current.order.slice();
+      const i = order.indexOf(field);
+      const j = i + dir;
+      if (i === -1 || j < 0 || j >= order.length) return current;
+      [order[i], order[j]] = [order[j], order[i]];
+      const next = { ...current, order };
+      persistUnifiedColumnConfig(next);
+      return next;
+    });
+  }, [persistUnifiedColumnConfig]);
+
+  const restoreUnifiedColumnConfig = useCallback(() => {
+    const next = defaultUnifiedColumnConfig();
+    setUnifiedColumnConfig(next);
+    persistUnifiedColumnConfig(next);
+  }, [persistUnifiedColumnConfig]);
 
   const loadUnifiedItems = useCallback(async (row: ConsignDeliverUnifiedRow) => {
     const oId = row.rawJst?.o_id ? String(row.rawJst.o_id) : "";
@@ -1317,8 +1212,11 @@ export default function QcOutboundCenter() {
     ] as ColumnsType<ConsignDeliverUnifiedRow>;
 
     const buildColumnMenuHeaderProps = () => ({
-      title: "右键配置列",
-      onContextMenu: openUnifiedColumnMenu,
+      title: "右键或点工具栏「列设置」配置显示字段",
+      onContextMenu: (event: MouseEvent<HTMLElement>) => {
+        event.preventDefault();
+        setColumnSettingsOpen(true);
+      },
     });
 
     return orderedColumns.map((column) => {
@@ -1455,6 +1353,57 @@ export default function QcOutboundCenter() {
                       setUnifiedPage(1);
                     }}
                   />
+                  <Popover
+                    open={columnSettingsOpen}
+                    onOpenChange={setColumnSettingsOpen}
+                    trigger="click"
+                    placement="bottomRight"
+                    title="自定义显示字段（改动即时生效）"
+                    content={(
+                      <div className="consign-col-cfg">
+                        <div className="consign-col-cfg__list">
+                          {unifiedColumnConfig.order.map((field, idx) => {
+                            const checked = unifiedColumnConfig.visible.includes(field);
+                            const lockLast = checked && unifiedColumnConfig.visible.length <= 1;
+                            return (
+                              <div key={field} className="consign-col-cfg__item">
+                                <Checkbox
+                                  checked={checked}
+                                  disabled={lockLast}
+                                  onChange={(event) => toggleUnifiedColumn(field, event.target.checked)}
+                                >
+                                  {UNIFIED_COLUMN_LABELS[field] || field}
+                                </Checkbox>
+                                <span className="consign-col-cfg__moves">
+                                  <Button
+                                    type="text"
+                                    size="small"
+                                    disabled={idx === 0}
+                                    icon={<ArrowUpOutlined />}
+                                    onClick={() => moveUnifiedColumn(field, -1)}
+                                  />
+                                  <Button
+                                    type="text"
+                                    size="small"
+                                    disabled={idx === unifiedColumnConfig.order.length - 1}
+                                    icon={<ArrowDownOutlined />}
+                                    onClick={() => moveUnifiedColumn(field, 1)}
+                                  />
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <div className="consign-col-cfg__foot">
+                          <Button type="link" size="small" onClick={restoreUnifiedColumnConfig}>还原默认</Button>
+                        </div>
+                      </div>
+                    )}
+                  >
+                    <Tooltip title="自定义显示哪些列、调整顺序（改动即时生效）">
+                      <Button icon={<SettingOutlined />}>列设置</Button>
+                    </Tooltip>
+                  </Popover>
                 </div>
                 <Table
                   className="erp-compact-table consign-unified-table"
@@ -1570,47 +1519,6 @@ export default function QcOutboundCenter() {
         </Form>
       </Modal>
 
-      {unifiedColumnMenu.open && typeof document !== "undefined" ? createPortal(
-        <div
-          className="purchase-order-column-menu"
-          style={{ left: unifiedColumnMenu.x, top: unifiedColumnMenu.y }}
-          onClick={(event) => event.stopPropagation()}
-          onContextMenu={(event) => event.preventDefault()}
-        >
-          <div className="purchase-order-column-menu__head">自定义字段显示信息</div>
-          <div className="purchase-order-column-menu__body" style={{ maxHeight: unifiedColumnMenu.bodyMaxHeight }}>
-            {activeUnifiedColumnConfig.order.map((field) => {
-              const checked = activeUnifiedColumnConfig.visible.includes(field);
-              return (
-                <div
-                  key={field}
-                  className={unifiedDraggedColumn === field ? "purchase-order-column-menu__item is-dragging" : "purchase-order-column-menu__item"}
-                  draggable
-                  onDragStart={(event) => handleUnifiedColumnDragStart(event, field)}
-                  onDragOver={handleUnifiedColumnDragOver}
-                  onDrop={(event) => handleUnifiedColumnDrop(event, field)}
-                  onDragEnd={handleUnifiedColumnDragEnd}
-                >
-                  <span className="purchase-order-column-menu__drag" aria-hidden="true">
-                    <HolderOutlined />
-                  </span>
-                  <span>{UNIFIED_COLUMN_LABELS[field] || field}</span>
-                  <Checkbox
-                    checked={checked}
-                    disabled={checked && activeUnifiedColumnConfig.visible.length <= 1}
-                    onChange={(event) => toggleUnifiedDraftColumn(field, event.target.checked)}
-                  />
-                </div>
-              );
-            })}
-          </div>
-          <div className="purchase-order-column-menu__foot">
-            <Button size="small" type="primary" onClick={saveUnifiedColumnConfig}>保存</Button>
-            <Button size="small" onClick={restoreUnifiedColumnConfig}>还原</Button>
-          </div>
-        </div>,
-        document.body,
-      ) : null}
     </div>
   );
 }
