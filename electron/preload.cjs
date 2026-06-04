@@ -470,6 +470,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
       salesTrend: (options) => ipcRenderer.invoke("erp:reports:sales-trend", options || {}),
       productPanel: (options) => ipcRenderer.invoke("erp:reports:product-panel", options || {}),
       openapiQc: (options) => ipcRenderer.invoke("erp:reports:openapi-qc", options || {}),
+      qcFlawImages: (options) => ipcRenderer.invoke("erp:reports:qc-flaw-images", options || {}),
       productTrend: (options) => ipcRenderer.invoke("erp:reports:product-trend", options || {}),
       purchase: (options) => ipcRenderer.invoke("erp:reports:purchase", options || {}),
     },

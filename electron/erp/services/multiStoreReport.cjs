@@ -1396,6 +1396,32 @@ function buildPurchaseReport(db, options = {}) {
 // 平台仓质检结果(运营工作台「平台质检」Tab):读 erp_temu_openapi_qc(官方采集物化),
 // 默认只列不合格,关联店名 + join sku_sales 补货号(质检接口不返回货号)。纯本地 erp.sqlite。
 function parseFlawsJson(j) { if (!j) return []; try { const a = JSON.parse(j); return Array.isArray(a) ? a : []; } catch { return []; } }
+// 实时拉某质检单的疵点照片:私有图带 ~30 分钟签名,存的会失效,故实时调详情拿最新签名 URL + node fetch 带 referer 拉成 base64。
+async function fetchQcFlawImages(db, options = {}) {
+  const mallId = String(options.mallId || options.mall_id || "");
+  const qcBillId = options.qcBillId || options.qc_bill_id;
+  if (!mallId || !qcBillId) throw new Error("缺少 mallId/qcBillId");
+  const m = db.prepare("SELECT app_key, app_secret, access_token, region FROM erp_temu_openapi_auth WHERE mall_id = ?").get(mallId);
+  if (!m) throw new Error("该店未绑定官方授权");
+  const { callOpenApi } = require("../temuOpenApiClient.cjs");
+  const r = await callOpenApi({ type: "bg.goods.qualityinspectiondetail.get", appKey: m.app_key, appSecret: m.app_secret, accessToken: m.access_token, region: m.region || "CN", bizParams: { qcBillId: Number(qcBillId) } });
+  if (!r.response || r.response.success !== true) throw new Error((r.response && r.response.errorMsg) || "质检详情查询失败");
+  const hist = (r.response.result && r.response.result.historyVOS) || [];
+  const urls = [];
+  for (const h of hist) for (const f of ((h.qcDetail && h.qcDetail.flawDTOList) || [])) for (const u of (f.attachments || [])) if (u && !urls.includes(u)) urls.push(u);
+  const images = [];
+  for (const u of urls.slice(0, 30)) { // 上限 30 张防滥用
+    try {
+      const resp = await fetch(u, { headers: { Referer: "https://kuajingmaihuo.com/", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" } });
+      if (!resp.ok) continue;
+      const buf = Buffer.from(await resp.arrayBuffer());
+      if (buf.length > 8 * 1024 * 1024) continue; // 单图 ≤ 8M
+      const ct = resp.headers.get("content-type") || "image/jpeg";
+      images.push(`data:${ct};base64,${buf.toString("base64")}`);
+    } catch { /* 单图失败跳过 */ }
+  }
+  return { count: images.length, images };
+}
 function buildOpenapiQc(db, options = {}) {
   const includeTest = !!options.includeTest;
   const limit = Math.min(5000, Math.max(50, Number(options.limit) || 2000));
@@ -1436,6 +1462,7 @@ function buildOpenapiQc(db, options = {}) {
 module.exports = {
   buildMultiStoreReport,
   buildOpenapiQc,
+  fetchQcFlawImages,
   buildPurchaseReport,
   prewarmMultiStoreReport,
   buildSkuSales,

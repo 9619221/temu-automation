@@ -192,6 +192,9 @@ export default function OperationsWorkbench() {
   const [trendOf, setTrendOf] = useState<{ productId: string; title: string } | null>(null);
   const [trendModalRows, setTrendModalRows] = useState<Array<{ date: string; qty: number; revenue: number }>>([]);
   const [trendModalLoading, setTrendModalLoading] = useState(false);
+  const [flawModal, setFlawModal] = useState<{ title: string } | null>(null);
+  const [flawImages, setFlawImages] = useState<string[]>([]);
+  const [flawLoading, setFlawLoading] = useState(false);
   const [panelLoading, setPanelLoading] = useState(false);
   const [panelLoaded, setPanelLoaded] = useState(false);
   const [qcRows, setQcRows] = useState<QcRow[]>([]);
@@ -463,6 +466,13 @@ export default function OperationsWorkbench() {
     if (!window.electronAPI?.erp?.reports?.openapiQc) return;
     setQcLoading(true);
     try { const resp = await window.electronAPI.erp.reports.openapiQc({ includeTest: false }); if (resp.ok && resp.data) { setQcRows((resp.data.rows || []) as unknown as QcRow[]); setQcLoaded(true); } } catch { /* */ } finally { setQcLoading(false); }
+  }, []);
+
+  // 点击疵点图:实时去 Temu 拉(私有图签名会失效,不能用存的 URL),后端带 referer 拉成 base64 返回
+  const openFlawImages = useCallback(async (mallId: string, qcBillId: string, title: string) => {
+    if (!window.electronAPI?.erp?.reports?.qcFlawImages) return;
+    setFlawModal({ title }); setFlawImages([]); setFlawLoading(true);
+    try { const resp = await window.electronAPI.erp.reports.qcFlawImages({ mallId, qcBillId }); if (resp.ok && resp.data) setFlawImages(resp.data.images || []); } catch { /* */ } finally { setFlawLoading(false); }
   }, []);
 
   useEffect(() => { loadSku(); }, [loadSku]);
@@ -934,11 +944,11 @@ export default function OperationsWorkbench() {
 
   const qcColumns: ColumnsType<QcRow> = [
     { title: "店号", dataIndex: "store_code", width: 78, fixed: "left", render: (v, r) => formatStoreNo(v === r.mall_id ? null : v, r.mall_id) },
-    { title: "商品", key: "prod", width: 280, render: (_, r) => (<div style={{ display: "flex", gap: 8, alignItems: "center" }}>{r.thumb_url ? <Image src={r.thumb_url} width={36} height={36} style={{ objectFit: "cover", borderRadius: 4 }} preview={false} /> : <div style={{ width: 36, height: 36, background: "#f0f0f0", borderRadius: 4 }} />}<div style={{ minWidth: 0 }}><div style={{ fontSize: 12, lineHeight: 1.4, maxHeight: 34, overflow: "hidden" }}>{r.sku_name || "—"}</div><div style={{ fontSize: 11, color: "#8c8c8c" }}>{r.spec || ""}{r.ext_code ? ` · ${r.ext_code}` : ""}</div></div></div>) },
+    { title: "商品", key: "prod", width: 280, render: (_, r) => (<div style={{ display: "flex", gap: 8, alignItems: "center" }}>{r.thumb_url ? <div style={{ flexShrink: 0, width: 48, height: 48 }}><Image src={r.thumb_url} width={48} height={48} style={{ objectFit: "cover", borderRadius: 4 }} /></div> : <div style={{ width: 48, height: 48, background: "#f0f0f0", borderRadius: 4, flexShrink: 0 }} />}<div style={{ minWidth: 0 }}><div style={{ fontSize: 12, lineHeight: 1.4, maxHeight: 34, overflow: "hidden" }}>{r.sku_name || "—"}</div><div style={{ fontSize: 11, color: "#8c8c8c" }}>{r.spec || ""}{r.ext_code ? ` · ${r.ext_code}` : ""}</div></div></div>) },
     { title: "采购单", dataIndex: "purchase_no", width: 150, render: (v) => v ? <Typography.Text copyable={{ text: String(v) }} style={{ fontSize: 12 }}>{v}</Typography.Text> : "—" },
     { title: "结果", dataIndex: "qc_result", width: 76, align: "center", render: (v) => v === 2 ? <span style={{ color: "#cf1322", fontWeight: 600 }}>不合格</span> : v === 1 ? <span style={{ color: "#3f8600" }}>合格</span> : "—" },
     { title: "疵点原因", dataIndex: "flaw_summary", width: 320, render: (v) => v ? <span style={{ color: "#cf1322", fontSize: 12 }}>{v}</span> : <span style={{ color: "#bbb" }}>—</span> },
-    { title: "疵点图", dataIndex: "flaw_image_count", width: 72, align: "right", render: (v) => v > 0 ? `${v} 张` : <span style={{ color: "#bbb" }}>—</span> },
+    { title: "疵点图", dataIndex: "flaw_image_count", width: 80, align: "center", render: (v, r) => v > 0 ? <a onClick={() => openFlawImages(r.mall_id, r.qc_bill_id, `疵点照片 · ${r.sku_name || r.qc_bill_id}`)}>{v} 张</a> : <span style={{ color: "#bbb" }}>—</span> },
     { title: "次品/应检", key: "qty", width: 92, align: "right", render: (_, r) => `${r.defective_qty ?? "—"} / ${r.expect_qty ?? "—"}` },
     { title: "收货单", dataIndex: "receipt_no", width: 150, render: (v) => v || "—" },
     { title: "类目", dataIndex: "cat_name", width: 120, ellipsis: true, render: (v) => v || "—" },
@@ -1284,6 +1294,11 @@ export default function OperationsWorkbench() {
         {error && <Alert type="error" showIcon message="加载失败" description={error} style={{ margin: 16 }} action={<Button size="small" onClick={loadSku}>重试</Button>} />}
         <Tabs activeKey={activeTab} onChange={setActiveTab} items={tabItems.filter((t) => !(HIDE_RISK && t.key === "risk") && !(HIDE_ACTIVITY && t.key === "activity") && !(HIDE_STOCK && t.key === "stock"))} tabBarStyle={{ paddingLeft: 16, marginBottom: 0 }} />
       </Card>
+      <Modal open={!!flawModal} onCancel={() => setFlawModal(null)} footer={null} width={860} title={flawModal?.title || "疵点照片"} destroyOnClose>
+        {flawLoading ? <div style={{ textAlign: "center", padding: 80, color: "#999" }}>正在从 Temu 实时拉取疵点照片…(私有图带时效签名,需实时取)</div>
+          : flawImages.length === 0 ? <Empty description="未取到疵点照片(签名可能已变动或该单无图)" style={{ padding: 40 }} />
+          : <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}><Image.PreviewGroup>{flawImages.map((src, i) => <Image key={i} src={src} width={130} height={130} style={{ objectFit: "cover", borderRadius: 4 }} />)}</Image.PreviewGroup></div>}
+      </Modal>
       <Modal open={!!trendOf} onCancel={() => setTrendOf(null)} footer={null} width={680} title={trendOf ? `销量趋势 · ${trendOf.title}` : ""} destroyOnClose>
         <div style={{ fontSize: 12, color: "#888", marginBottom: 8 }}>逐日销量(抓包采集,覆盖近 2 周、部分店);SPU {trendOf?.productId}</div>
         {trendModalLoading ? <div style={{ textAlign: "center", padding: 80, color: "#999" }}>加载中…</div>

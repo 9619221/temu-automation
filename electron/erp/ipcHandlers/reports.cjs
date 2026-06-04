@@ -268,6 +268,23 @@ function registerReportsHandlers(ipcMain, deps) {
     }
   });
 
+  // 运营工作台：平台质检——点击实时拉某质检单的疵点照片(私有图签名会失效,故实时调详情拿新签名+后端带 referer 拉)
+  ipcMain.handle("erp:reports:qc-flaw-images", async (_event, payload) => {
+    try {
+      const mallId = payload?.mallId || "";
+      const qcBillId = payload?.qcBillId || "";
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest(`/api/erp/reports/qc-flaw-images?mall_id=${encodeURIComponent(mallId)}&qc_bill_id=${encodeURIComponent(qcBillId)}`, { method: "GET" });
+      }
+      requireErp();
+      const { fetchQcFlawImages } = require("../services/multiStoreReport.cjs");
+      return { ok: true, data: await fetchQcFlawImages(erpState.db, { mallId, qcBillId }) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+
   // 运营工作台：商品销量趋势（逐日，数据走 cloud 抓包快照，按 product_id 关联）
   ipcMain.handle("erp:reports:product-trend", async (_event, payload) => {
     try {
