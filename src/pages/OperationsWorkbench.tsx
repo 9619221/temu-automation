@@ -953,11 +953,12 @@ export default function OperationsWorkbench() {
     { title: "采购单", dataIndex: "purchase_no", width: 150, render: (v) => v ? <Typography.Text copyable={{ text: String(v) }} style={{ fontSize: 12 }}>{v}</Typography.Text> : "—" },
     { title: "结果", dataIndex: "qc_result", width: 76, align: "center", render: (v) => v === 2 ? <span style={{ color: "#cf1322", fontWeight: 600 }}>不合格</span> : v === 1 ? <span style={{ color: "#3f8600" }}>合格</span> : "—" },
     { title: "疵点原因", dataIndex: "flaw_summary", width: 320, render: (v) => v ? <span style={{ color: "#cf1322", fontSize: 12 }}>{v}</span> : <span style={{ color: "#bbb" }}>—</span> },
-    { title: "疵点图", key: "flaw", width: 92, align: "center", render: (_, r) => {
+    { title: "疵点图", key: "flaw", width: 86, align: "center", render: (_, r) => {
       if (!r.flaw_image_count) return <span style={{ color: "#bbb" }}>—</span>;
-      return <a onClick={() => openFlawImages(r.mall_id, r.qc_bill_id)} style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
-        {r.flaw_thumb ? <img src={r.flaw_thumb} width={44} height={44} style={{ objectFit: "cover", borderRadius: 3, border: "1px solid #f0f0f0" }} alt="" /> : null}
-        <span style={{ fontSize: 11 }}>{r.flaw_image_count} 张</span>
+      if (!r.flaw_thumb) return <a onClick={() => openFlawImages(r.mall_id, r.qc_bill_id)}>{r.flaw_image_count} 张</a>;
+      return <a onClick={() => openFlawImages(r.mall_id, r.qc_bill_id)} style={{ position: "relative", display: "inline-block", lineHeight: 0 }} title={`${r.flaw_image_count} 张疵点照片,点击查看`}>
+        <img src={r.flaw_thumb} width={64} height={64} style={{ objectFit: "cover", borderRadius: 4, border: "1px solid #f0f0f0" }} alt="" />
+        <span style={{ position: "absolute", right: 2, bottom: 2, background: "rgba(0,0,0,0.6)", color: "#fff", fontSize: 10, padding: "0 4px", borderRadius: 3, lineHeight: "15px" }}>{r.flaw_image_count}</span>
       </a>;
     } },
     { title: "次品/应检", key: "qty", width: 92, align: "right", render: (_, r) => `${r.defective_qty ?? "—"} / ${r.expect_qty ?? "—"}` },
