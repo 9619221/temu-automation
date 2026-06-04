@@ -824,8 +824,69 @@ function buildShopHealth(db, options = {}) {
 
 // ===== 备货在途：未完成的备货/发货单（需求量 > 已发量）=====
 const _stockOrderCache = new Map();
+// 官方路径：备货在途 = 采购单(purchase_order)算 需求/已发/缺口 + 发货单(ship_order)算 在途(已发出、未入库)。
+// 采购单 SKU 级、发货单 SKC 级；在途按 mall_id+SKC 汇总后挂到对应 SKC 的首行(避免同 SKC 多 SKU 重复计)。
+function _buildStockOrdersOfficialFresh(db, options = {}) {
+  const includeTest = !!options.includeTest;
+  const where = includeTest ? "" : " AND COALESCE(m.status,'active') <> 'test'";
+  // 1) 发货单：按 mall_id+SKC 汇总在途件数(inboundTime 为空=未入库；在途 = 已发件数 - 已收件数)
+  const shipRows = optionalAllLocal(db, "SELECT r.mall_id, r.raw_json FROM erp_temu_openapi_records r LEFT JOIN erp_temu_malls m ON m.mall_id = r.mall_id WHERE r.source = 'ship_order' AND r.raw_json IS NOT NULL" + where, []);
+  const transit = new Map();
+  for (const r of shipRows) {
+    let s; try { s = JSON.parse(r.raw_json); } catch (e) { continue; }
+    if (s.inboundTime) continue;
+    const skc = s.productSkcId != null ? String(s.productSkcId) : null;
+    if (!skc) continue;
+    const pkgs = Array.isArray(s.packageList) ? s.packageList : [];
+    let sent = 0; for (const p of pkgs) sent += toNum(p.skcNum);
+    const inTransit = Math.max(0, sent - toNum(s.receiveSkcNum));
+    if (inTransit <= 0) continue;
+    const k = r.mall_id + "|" + skc;
+    transit.set(k, (transit.get(k) || 0) + inTransit);
+  }
+  // 2) 采购单：SKU 级 需求/已发/已收/缺口
+  const poRows = optionalAllLocal(db, "SELECT r.mall_id, m.store_code, m.mall_name, r.raw_json FROM erp_temu_openapi_records r LEFT JOIN erp_temu_malls m ON m.mall_id = r.mall_id WHERE r.source = 'purchase_order' AND r.raw_json IS NOT NULL" + where, []);
+  const out = [];
+  const usedTransit = new Set();
+  for (const r of poRows) {
+    let p; try { p = JSON.parse(r.raw_json); } catch (e) { continue; }
+    const di = p.deliverInfo || {};
+    const latest = di.expectLatestDeliverTimeOrDefault || di.expectLatestArrivalTimeOrDefault || null;
+    const warehouse = di.receiveWarehouseName || null;
+    const orderNo = p.originalPurchaseOrderSn || null;
+    const skc = p.productSkcId != null ? String(p.productSkcId) : null;
+    const tk = r.mall_id + "|" + (skc || "");
+    const list = Array.isArray(p.skuQuantityDetailList) ? p.skuQuantityDetailList : [];
+    for (const d of list) {
+      const demand = toNum(d.purchaseQuantity);
+      const delivered = toNum(d.deliverQuantity);
+      const received = toNum(d.realReceiveAuthenticQuantity);
+      const gap = Math.max(0, demand - delivered);
+      let shipping = 0;
+      if (skc && transit.has(tk) && !usedTransit.has(tk)) { shipping = transit.get(tk); usedTransit.add(tk); }
+      if (gap <= 0 && shipping <= 0) continue;
+      out.push({
+        mall_id: r.mall_id, store_code: r.store_code || null, mall_name: r.mall_name || null,
+        sku_ext_code: d.extCode || null, product_name: p.productName || null, spec_name: d.className || null,
+        source_type: "purchase_order", demand_qty: demand, delivered_qty: delivered,
+        gap: gap, shipping_qty: shipping, inbound_qty: received,
+        latest_ship_at: latest ? String(latest) : null, warehouse: warehouse, order_no: orderNo,
+      });
+    }
+  }
+  out.sort((a, b) => ((a.latest_ship_at || "~").localeCompare(b.latest_ship_at || "~")) || (b.gap - a.gap));
+  return { generated_at: Date.now(), row_count: out.length, rows: out.slice(0, 4000), source: "official" };
+}
+
 function buildStockOrders(db, options = {}) {
   if (!db) throw new Error("buildStockOrders: db is required (host mode only)");
+  if (useOfficialReports(options)) {
+    const ok = "o:" + (options.includeTest ? "1" : "0");
+    if (!options.force) { const c = _stockOrderCache.get(ok); if (c && Date.now() - c.ts < REPORT_CACHE_TTL_MS) return c.data; }
+    const data = _buildStockOrdersOfficialFresh(db, options);
+    _stockOrderCache.set(ok, { data, ts: Date.now() });
+    return data;
+  }
   const attachCloudDb = options.attachCloudDb;
   if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
     return { generated_at: Date.now(), row_count: 0, rows: [], attached: false };
@@ -1036,8 +1097,63 @@ function buildProductPanel(db, options = {}) {
   return data;
 }
 
-// 商品运营面板:优先读物化缓存表(cron 预聚合,毫秒),无/未跑则实时兜底(慢)
+// 官方路径：从 erp_temu_openapi_sku_sales 聚合成 SPU 级运营面板。
+// 官方表无：申报价/评价/流量/限流/合规/可报活动 → 这些字段留空（前端对应列已/将隐藏）。
+function _buildProductPanelOfficialFresh(db, options = {}) {
+  const includeTest = !!options.includeTest;
+  const limit = Math.min(8000, Math.max(50, Number(options.limit) || 4000));
+  const rows = optionalAllLocal(db, `
+    SELECT s.mall_id, m.store_code, m.mall_name, s.product_id,
+           s.product_skc_id, s.ext_code, s.spec_name, s.title, s.thumb_url,
+           s.today_sales, s.last7d_sales, s.sale_days,
+           s.warehouse_stock, s.occupy_stock, s.unavailable_stock, s.advice_qty, s.lack_quantity
+      FROM erp_temu_openapi_sku_sales s
+      LEFT JOIN erp_temu_malls m ON m.mall_id = s.mall_id
+     WHERE 1=1 ${includeTest ? "" : "AND COALESCE(m.status,'active') <> 'test'"}
+  `, []);
+  const map = new Map();
+  for (const r of rows) {
+    const k = r.mall_id + "|" + r.product_id;
+    let e = map.get(k);
+    if (!e) {
+      e = { mall_id: r.mall_id, product_id: r.product_id, store_code: r.store_code || null, mall_name: r.mall_name || null,
+        title: r.title || null, thumb: r.thumb_url || null, _skc: new Set(), _sku: new Set(),
+        declared_price: null, score: null, comments: null,
+        stock: 0, occupy: 0, unavail: 0, advice: 0, lack: 0, lack_qty: 0, shipping: 0,
+        expose: null, click: null, pay: null, conv: null, grow: null, limited: false, act_cnt: 0, min_price: null, compliance: null,
+        skus_detail: [] };
+      map.set(k, e);
+    }
+    if (r.product_skc_id) e._skc.add(r.product_skc_id);
+    if (r.ext_code) e._sku.add(r.ext_code);
+    if (r.title && !e.title) e.title = r.title;
+    if (r.thumb_url && !e.thumb) e.thumb = r.thumb_url;
+    e.stock += toNum(r.warehouse_stock); e.occupy += toNum(r.occupy_stock); e.unavail += toNum(r.unavailable_stock);
+    e.advice += toNum(r.advice_qty); e.lack_qty += toNum(r.lack_quantity);
+    if (toNum(r.warehouse_stock) <= 0) e.lack++;
+    e.skus_detail.push({ skc_id: r.product_skc_id || null, sku_ext_code: r.ext_code || null, spec_name: r.spec_name || null, declared_price: null,
+      today: toNum(r.today_sales), last7d: toNum(r.last7d_sales), sale_days: r.sale_days == null ? null : Number(r.sale_days),
+      stock: toNum(r.warehouse_stock), occupy: toNum(r.occupy_stock), advice_qty: toNum(r.advice_qty), lack_qty: toNum(r.lack_quantity) });
+  }
+  const out = [...map.values()].map((e) => {
+    const { _skc, _sku, ...rest } = e;
+    // 子行按规格名排序(同色相邻、尺码递增),空规格排末尾;让同 SKC 多尺码堆叠更易读
+    rest.skus_detail.sort((a, b) => String(a.spec_name || "~").localeCompare(String(b.spec_name || "~"), "zh"));
+    return { ...rest, skc_codes: [..._skc].join(",") || null, sku_codes: [..._sku].join(",") || null,
+      total_stock: rest.stock + rest.unavail - rest.lack_qty + rest.shipping };
+  }).slice(0, limit);
+  return { generated_at: Date.now(), row_count: out.length, rows: out, source: "official" };
+}
+
+// 商品运营面板:优先读物化缓存表(cron 预聚合,毫秒),无/未跑则实时兜底(慢);官方源走 official 版
 function getProductPanelFast(db, options = {}) {
+  if (useOfficialReports(options)) {
+    const ok = "o:" + (options.includeTest ? "1" : "0");
+    if (!options.force) { const c = _productPanelCache.get(ok); if (c && Date.now() - c.ts < REPORT_CACHE_TTL_MS) return c.data; }
+    const data = _buildProductPanelOfficialFresh(db, options);
+    _productPanelCache.set(ok, { data, ts: Date.now() });
+    return data;
+  }
   try {
     const key = "product_panel:" + (options.includeTest ? "1" : "0");
     const row = db.prepare("SELECT payload_json, updated_at FROM erp_report_cache WHERE cache_key = ?").get(key);

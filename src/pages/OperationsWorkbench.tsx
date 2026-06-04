@@ -5,7 +5,7 @@ import type { ColumnsType } from "antd/es/table";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, Legend, ResponsiveContainer } from "recharts";
 import { useNavigate } from "react-router-dom";
 import { formatStoreNo, formatMallName } from "../utils/storeDisplay";
-import { HIDE_RISK, HIDE_ACTIVITY, HIDE_REVIEW } from "../utils/operationsFlags";
+import { HIDE_RISK, HIDE_ACTIVITY, HIDE_REVIEW, OFFICIAL_SOURCE } from "../utils/operationsFlags";
 
 // 分页「每页条数」选择器:antd 5.25+ 默认带搜索框(聚焦冒出可编辑光标),这里强制关掉
 const NoSearchSelect = (props: Record<string, unknown>) => <Select {...props} showSearch={false} />;
@@ -61,7 +61,7 @@ interface StoreMatrixRow {
   sales: number; sale_7d: number; lack: number; soldout: number;
   high_risk: number; restock: number; stock_gap: number; activity: number;
 }
-interface SkuChild { skc_id: string | null; sku_ext_code: string | null; declared_price: number | null; today: number; last7d: number; sale_days: number | null; stock: number; occupy: number; advice_qty: number; lack_qty?: number; }
+interface SkuChild { skc_id: string | null; sku_ext_code: string | null; spec_name?: string | null; declared_price: number | null; today: number; last7d: number; sale_days: number | null; stock: number; occupy: number; advice_qty: number; lack_qty?: number; }
 interface ProductPanelRow {
   mall_id: string; product_id: string; store_code: string | null; mall_name: string | null; title: string | null; thumb: string | null;
   skc_codes: string | null; sku_codes: string | null; declared_price: number | null; score: number | null; comments: number | null;
@@ -842,7 +842,7 @@ export default function OperationsWorkbench() {
     { title: "店号", dataIndex: "store_code", width: 88, fixed: "left", render: (v, r) => formatStoreNo(v === r.mall_id ? null : v, r.mall_id) },
     { title: "店铺", dataIndex: "mall_name", width: 140, ellipsis: true, render: (v: string | null) => formatMallName(v) },
     { title: "负责人", dataIndex: "owner", width: 80, render: (v) => v || "—" },
-    { title: "今日销量", dataIndex: "sale_volume", width: 90, align: "right", sorter: (a, b) => a.sale_volume - b.sale_volume, render: fmtNum },
+    { title: "今日销量", dataIndex: "sale_volume", width: 90, align: "right", sorter: (a, b) => a.sale_volume - b.sale_volume, defaultSortOrder: "descend", render: fmtNum },
     { title: "7天销量", dataIndex: "sale_7d", width: 90, align: "right", sorter: (a, b) => a.sale_7d - b.sale_7d, render: fmtNum },
     { title: "30天销量", dataIndex: "sale_30d", width: 95, align: "right", sorter: (a, b) => a.sale_30d - b.sale_30d, render: fmtNum },
     { title: "在售", dataIndex: "on_sale", width: 75, align: "right", render: fmtNum },
@@ -873,7 +873,7 @@ export default function OperationsWorkbench() {
     { title: "店号", dataIndex: "store_code", width: 88, fixed: "left", render: (v, r) => formatStoreNo(v === r.mall_id ? null : v, r.mall_id) },
     { title: "店铺", dataIndex: "mall_name", width: 130, ellipsis: true, render: (v: string | null) => formatMallName(v) },
     { title: "负责人", dataIndex: "owner", width: 70, render: (v) => v || "—" },
-    { title: "今日销量", dataIndex: "sales", width: 85, align: "right", sorter: (a, b) => a.sales - b.sales, render: fmtNum },
+    { title: "今日销量", dataIndex: "sales", width: 85, align: "right", sorter: (a, b) => a.sales - b.sales, defaultSortOrder: "descend", render: fmtNum },
     { title: "7天销量", dataIndex: "sale_7d", width: 85, align: "right", sorter: (a, b) => a.sale_7d - b.sale_7d, render: fmtNum },
     { title: "缺货", dataIndex: "lack", width: 70, align: "right", sorter: (a, b) => a.lack - b.lack, render: redNum("#d46b08") },
     { title: "售罄", dataIndex: "soldout", width: 70, align: "right", sorter: (a, b) => a.soldout - b.soldout, render: redNum("#cf1322") },
@@ -895,12 +895,28 @@ export default function OperationsWorkbench() {
     );
   };
   const skusOf = (r: ProductPanelRow): SkuChild[] => r.skus_detail || [];
+  // SKC 列专用:同一 SKC 的连续 SKU 只首行显示 SKC 值,重复行淡化为「″」,消除同 SKC 多尺码时的刷屏重复感
+  const stackSkcCell = (skus: SkuChild[]) => {
+    if (!skus.length) return <span style={{ color: "#bbb" }}>—</span>;
+    if (skus.length === 1) return <span style={{ fontSize: 12 }}>{skus[0].skc_id || <span style={{ color: "#bbb" }}>—</span>}</span>;
+    let prev: string | null = null;
+    return (
+      <div>
+        {skus.map((s, i) => {
+          const cur = s.skc_id || null;
+          const dup = cur != null && cur === prev;
+          prev = cur ?? prev;
+          return <div key={i} style={{ padding: "2px 0", borderBottom: "1px solid #f5f5f5", minHeight: 18, fontSize: 12, color: dup ? "#d9d9d9" : undefined }}>{cur == null ? <span style={{ color: "#bbb" }}>—</span> : dup ? "″" : cur}</div>;
+        })}
+      </div>
+    );
+  };
 
   const panelColumns: ColumnsType<ProductPanelRow> = [
     { title: "店号", dataIndex: "store_code", width: 88, fixed: "left", render: (v, r) => formatStoreNo(v === r.mall_id ? null : v, r.mall_id) },
     { title: "SPU", dataIndex: "product_id", width: 120, render: (v: string) => <Typography.Text copyable={{ text: v }} style={{ fontSize: 12, fontWeight: 600 }}>{v}</Typography.Text> },
-    { title: "SKC", key: "skc", width: 130, render: (_, r) => stackCell(skusOf(r), (s) => s.skc_id || <span style={{ color: "#bbb" }}>—</span>) },
-    { title: "SKU货号", key: "sku_ext", width: 140, render: (_, r) => stackCell(skusOf(r), (s) => s.sku_ext_code || <span style={{ color: "#bbb" }}>—</span>) },
+    { title: "SKC", key: "skc", width: 130, render: (_, r) => stackSkcCell(skusOf(r)) },
+    { title: "SKU货号 / 规格", key: "sku_ext", width: 140, render: (_, r) => stackCell(skusOf(r), (s) => s.sku_ext_code ? s.sku_ext_code : (s.spec_name ? <span style={{ color: "#888" }}>{s.spec_name}</span> : <span style={{ color: "#bbb" }}>—</span>)) },
     { title: "商品", key: "prod", width: 340, render: (_, r) => (
       <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
         {r.thumb ? <div style={{ flexShrink: 0, width: 40, height: 40 }}><Image src={r.thumb} width={40} height={40} style={{ objectFit: "cover", borderRadius: 4 }} preview={{ mask: <EyeOutlined />, maskClassName: "prod-thumb-mask" }} /></div> : <div style={{ width: 40, height: 40, borderRadius: 4, background: "#f0f0f0", flexShrink: 0 }} />}
@@ -955,7 +971,7 @@ export default function OperationsWorkbench() {
               columns={storeMatrixColumns.filter((c) => !(HIDE_RISK && (c as { dataIndex?: string }).dataIndex === "high_risk") && !(HIDE_ACTIVITY && (c as { dataIndex?: string }).dataIndex === "activity"))}
               onRow={(r) => ({ onClick: () => navigate(`/ops-workbench/store/${r.mall_id}`), style: { cursor: "pointer" } })} />
           </Card>
-          <Card size="small" title="全店销量趋势 · 近 30 天" style={{ marginBottom: 16 }} loading={trendLoading}>
+          {!OFFICIAL_SOURCE && (<Card size="small" title="全店销量趋势 · 近 30 天" style={{ marginBottom: 16 }} loading={trendLoading}>
             <div style={{ height: 200 }}>
               {overviewTrend.length === 0 ? <Empty description="暂无趋势数据" image={Empty.PRESENTED_IMAGE_SIMPLE} /> : (
                 <ResponsiveContainer width="100%" height="100%">
@@ -969,7 +985,7 @@ export default function OperationsWorkbench() {
                 </ResponsiveContainer>
               )}
             </div>
-          </Card>
+          </Card>)}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
             {!HIDE_RISK && (<Card size="small" title="高风险待办" extra={<a onClick={() => setActiveTab("risk")}>全部</a>} loading={riskLoading}>
               {riskView.filter((r) => r.severity === "high").slice(0, 6).map((r) => (
@@ -1028,7 +1044,7 @@ export default function OperationsWorkbench() {
       children: (
         <div>
           <div style={{ padding: "12px 16px 0" }}>
-            <Segmented value={storeSeg} onChange={(v) => setStoreSeg(v as string)} options={[{ label: "健康体检", value: "health" }, { label: "销量趋势", value: "trend" }, { label: "流量投放", value: "ad" }]} />
+            <Segmented value={storeSeg} onChange={(v) => setStoreSeg(v as string)} options={[{ label: "健康体检", value: "health" }, ...(OFFICIAL_SOURCE ? [] : [{ label: "销量趋势", value: "trend" }]), { label: "流量投放", value: "ad" }]} />
           </div>
           {storeSeg === "ad" ? (
             <div>
@@ -1116,7 +1132,7 @@ export default function OperationsWorkbench() {
             <div>
               <div style={{ padding: "12px 16px 0", color: "#888", fontSize: 12 }}>每个商品(SPU)横向集成:可报活动 / 合规状态 / 流量(曝光·点击·转化) / 高价限流。按 限流 &gt; 违规 &gt; 活动 排序;流量「无」表示该商品暂未采到(采集覆盖待提升)。总库存 = 可用 + 暂不可用 − 缺货件数 + 发货在途。</div>
               {commonFilters()}
-              <Table<ProductPanelRow> className="op-panel-table" dataSource={panelView} columns={panelColumns.filter((c) => !(HIDE_REVIEW && c.key === "score") && !(HIDE_ACTIVITY && c.key === "act"))} rowKey={(r) => String(r.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个商品` }} scroll={{ x: 1300 }} loading={panelLoading} />
+              <Table<ProductPanelRow> className="op-panel-table" dataSource={panelView} columns={panelColumns.filter((c) => { const k = String(c.key ?? ""); const di = String((c as { dataIndex?: string }).dataIndex ?? ""); if (HIDE_REVIEW && k === "score") return false; if (HIDE_ACTIVITY && k === "act") return false; if (OFFICIAL_SOURCE && (k === "declared_price" || ["limited", "compliance", "expose", "click", "pay", "conv"].includes(di))) return false; return true; })} rowKey={(r) => String(r.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个商品` }} scroll={{ x: 1300 }} loading={panelLoading} />
             </div>
           ) : prodSeg === "diag" ? (
             <div>
