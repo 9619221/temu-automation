@@ -5,7 +5,7 @@ import { ArrowLeftOutlined, ReloadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, ResponsiveContainer } from "recharts";
 import { formatMallName, formatStoreNo } from "../utils/storeDisplay";
-import { HIDE_RISK, HIDE_ACTIVITY } from "../utils/operationsFlags";
+import { HIDE_RISK, HIDE_ACTIVITY, OFFICIAL_SOURCE } from "../utils/operationsFlags";
 
 // 单店全景：把一家店（mall_id）散在各处的数据汇成一页。重构后由「各店概览」点店下钻进来。
 // 现成接口直接用；品质退货明细 / 抽检 / 财务 / 物流逐节点轨迹 4 块待后端接口，先占位。
@@ -159,7 +159,7 @@ export default function OperationStoreDetail() {
         </Row>
       </Card>
 
-      <Card size="small" title="销量趋势 · 近 30 天" style={{ marginBottom: 12 }}>
+      {!OFFICIAL_SOURCE && (<Card size="small" title="销量趋势 · 近 30 天" style={{ marginBottom: 12 }}>
         <div style={{ height: 200 }}>
           {trendData.length === 0 ? <Empty description="暂无趋势" image={Empty.PRESENTED_IMAGE_SIMPLE} /> : (
             <ResponsiveContainer width="100%" height="100%">
@@ -173,7 +173,7 @@ export default function OperationStoreDetail() {
             </ResponsiveContainer>
           )}
         </div>
-      </Card>
+      </Card>)}
 
       <Row gutter={12}>
         <Col span={10}>
