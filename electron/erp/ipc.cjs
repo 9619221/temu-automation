@@ -4257,6 +4257,7 @@ function listSkus(params = {}) {
         ELSE source.unit_price
       END) AS cost_price,
       COALESCE(bundle_meta.component_count, 0) AS bundle_component_count,
+      bundle_stock.available_sets AS bundle_available_sets,
       creator.name AS created_by_name,
       COALESCE(source_count.source_count, 0) AS procurement_source_count,
       source.id AS primary_1688_source_id,
@@ -4330,6 +4331,21 @@ function listSkus(params = {}) {
       WHERE status = 'active'
       GROUP BY bundle_sku_id
     ) bundle_meta ON bundle_meta.bundle_sku_id = sku.id
+    LEFT JOIN (
+      -- 组合装可售套数：木桶短板 = min(floor(各子商品实际库存 / 单套用量))。
+      -- 子商品实际库存口径与上方 inv 一致（available+reserved+blocked+defective+rework，跨账号按 sku_id 汇总）。
+      SELECT
+        c.bundle_sku_id,
+        MIN(CAST(COALESCE(ci.total_qty, 0) / c.qty AS INTEGER)) AS available_sets
+      FROM erp_sku_bundle_components c
+      LEFT JOIN (
+        SELECT sku_id, SUM(available_qty + reserved_qty + blocked_qty + defective_qty + rework_qty) AS total_qty
+        FROM erp_inventory_batches
+        GROUP BY sku_id
+      ) ci ON ci.sku_id = c.component_sku_id
+      WHERE c.status = 'active' AND c.qty > 0
+      GROUP BY c.bundle_sku_id
+    ) bundle_stock ON bundle_stock.bundle_sku_id = sku.id
     LEFT JOIN erp_sku_1688_sources source ON source.id = (
       SELECT id
       FROM erp_sku_1688_sources item
@@ -4747,6 +4763,14 @@ function toSkuOptionRow(row) {
   next.warehouseLocation = normalizeWarehouseLocationText(row.warehouse_location, row.jst_main_bin);
   next.costPrice = row.cost_price === null || row.cost_price === undefined ? null : Number(row.cost_price);
   next.bundleComponentCount = Number(row.bundle_component_count || 0);
+  // 组合装(虚拟SKU)本身无库存批次，库存=按子商品 BOM 折算的可售套数（木桶短板）。
+  if (String(row.sku_type || "single").toLowerCase() === "bundle") {
+    const sets = row.bundle_available_sets == null ? 0 : Number(row.bundle_available_sets);
+    next.bundleAvailableSets = sets;
+    next.actualStockQty = sets;  // 列表「库存」列展示可售套数
+  } else {
+    next.bundleAvailableSets = null;
+  }
   if (row.primary_1688_source_id) {
     next.primary1688Source = {
       id: row.primary_1688_source_id,

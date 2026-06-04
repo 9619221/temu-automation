@@ -26,6 +26,58 @@ function positiveInteger(value, fallback = 0) {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
 }
 
+// 把「下单 SKU + 数量」展开成实际扣库存的物理行（送仓发货扣减/回补共用）。
+//   普通商品：原样一行，account 用自身绑定店铺（回退 fallbackAccountId）。
+//   组合装(sku_type=bundle)：按 BOM 展开成各子商品行，qty = 套数 × 单套用量；
+//     子商品库存批次记在子商品自绑店铺下，故 account 用子商品自身 account_id（不回退）。
+//   组合装无组件 / 子商品已失效 / 子商品未绑有效店铺 / 单套用量非法 → 整单 throw。
+function expandSkuToInventoryLines(db, { skuId, qty, fallbackAccountId }) {
+  const sku = db.prepare(
+    "SELECT id, sku_type, account_id, internal_sku_code FROM erp_skus WHERE id = ?",
+  ).get(skuId);
+  if (!sku) throw new Error(`商品不存在，无法扣库存：${skuId}`);
+  const isBundle = String(sku.sku_type || "single").toLowerCase() === "bundle";
+  if (!isBundle) {
+    const accountId = optionalString(sku.account_id) || optionalString(fallbackAccountId);
+    if (!accountId) throw new Error(`商品编码 ${sku.internal_sku_code || skuId} 未绑定店铺，无法定位库存账号`);
+    return [{ skuId: sku.id, accountId, internalSkuCode: sku.internal_sku_code, qty, bundleSkuCode: null }];
+  }
+  const components = db.prepare(`
+    SELECT c.component_sku_id AS comp_id, c.qty AS comp_qty,
+           s.account_id AS comp_account_id, s.internal_sku_code AS comp_code, s.status AS comp_status
+    FROM erp_sku_bundle_components c
+    LEFT JOIN erp_skus s ON s.id = c.component_sku_id
+    WHERE c.bundle_sku_id = ? AND c.status = 'active'
+    ORDER BY c.sort_order ASC, c.created_at ASC
+  `).all(sku.id);
+  if (!components.length) {
+    throw new Error(`组合装 ${sku.internal_sku_code || skuId} 未配置子商品，无法扣库存`);
+  }
+  const bundleCode = sku.internal_sku_code || skuId;
+  const lines = [];
+  for (const comp of components) {
+    if (!comp.comp_id || comp.comp_status === "deleted") {
+      throw new Error(`组合装 ${bundleCode} 的子商品已失效，请检查组合装配置`);
+    }
+    const compAccountId = optionalString(comp.comp_account_id);
+    if (!compAccountId || compAccountId === "jst:account:default" || compAccountId === "jst:account:none") {
+      throw new Error(`组合装 ${bundleCode} 的子商品 ${comp.comp_code || comp.comp_id} 未绑定有效店铺，无法定位库存账号`);
+    }
+    const perSet = Number(comp.comp_qty || 0);
+    if (!(perSet > 0)) {
+      throw new Error(`组合装 ${bundleCode} 的子商品 ${comp.comp_code || comp.comp_id} 单套用量非法`);
+    }
+    lines.push({
+      skuId: comp.comp_id,
+      accountId: compAccountId,
+      internalSkuCode: comp.comp_code,
+      qty: qty * perSet,
+      bundleSkuCode: bundleCode,
+    });
+  }
+  return lines;
+}
+
 function resolveConsignDeliveryLines(db, { oId, companyId }) {
   const head = db.prepare(
     "SELECT * FROM jst_consign_deliveries WHERE company_id = ? AND o_id = ? AND status_internal != 'deleted'",
@@ -56,7 +108,10 @@ function resolveConsignDeliveryLines(db, { oId, companyId }) {
       "SELECT id, internal_sku_code FROM erp_skus WHERE company_id = ? AND account_id = ? AND internal_sku_code = ?",
     ).get(companyId, account.id, code);
     if (!sku) { unmatched.push(code); continue; }
-    lines.push({ oiId: item.oi_id, skuId: sku.id, internalSkuCode: sku.internal_sku_code, qty });
+    // 组合装按 BOM 展开成子商品库存行；普通商品原样一行。子商品用自绑店铺扣库存。
+    for (const phys of expandSkuToInventoryLines(db, { skuId: sku.id, qty, fallbackAccountId: account.id })) {
+      lines.push({ oiId: item.oi_id, skuId: phys.skuId, accountId: phys.accountId, internalSkuCode: phys.internalSkuCode, qty: phys.qty, bundleSkuCode: phys.bundleSkuCode });
+    }
   }
   if (unmatched.length) {
     throw new Error(`存在未匹配本地商品编码，整单不扣库存，请先维护编码绑定：${[...new Set(unmatched)].join("、")}`);
@@ -77,7 +132,7 @@ function shipConsignDelivery({ db, services, oId, companyId, actor }) {
       let outLines;
       try {
         outLines = services.inventory.applyDirectOutbound({
-          accountId: account.id,
+          accountId: line.accountId,
           skuId: line.skuId,
           qty: line.qty,
           unitCost,
@@ -89,7 +144,10 @@ function shipConsignDelivery({ db, services, oId, companyId, actor }) {
         });
       } catch (err) {
         if (/Insufficient available inventory/i.test(err?.message || "")) {
-          throw new Error(`商品编码 ${line.internalSkuCode} 在「${account.name}」可用库存不足，整单未发货`);
+          const who = line.bundleSkuCode
+            ? `组合装 ${line.bundleSkuCode} 的子商品 ${line.internalSkuCode}`
+            : `商品编码 ${line.internalSkuCode}`;
+          throw new Error(`${who} 在「${account.name}」可用库存不足，整单未发货`);
         }
         throw err;
       }
@@ -127,7 +185,7 @@ function unshipConsignDelivery({ db, services, oId, companyId, actor }) {
     for (const line of lines) {
       const unitCost = services.inventory.getSkuWeightedAvgCost(line.skuId);
       services.inventory.applyDirectInbound({
-        accountId: account.id,
+        accountId: line.accountId,
         skuId: line.skuId,
         qty: line.qty,
         unitLandedCost: unitCost,
@@ -240,13 +298,17 @@ function resolveCloudConsignLines(db, { mallId, soId }) {
     if (!skuRows.length) { unmatched.push(code); continue; }
     const distinctAccounts = new Set(skuRows.map((r) => r.account_id));
     if (distinctAccounts.size > 1) { ambiguous.push(code); continue; }
-    lines.push({
-      skuKey,
-      skuId: skuRows[0].id,
-      accountId: skuRows[0].account_id,
-      internalSkuCode: skuRows[0].internal_sku_code,
-      qty: shipQty,
-    });
+    // 组合装按 BOM 展开成子商品库存行；普通商品原样一行。子商品用自绑店铺扣库存。
+    for (const phys of expandSkuToInventoryLines(db, { skuId: skuRows[0].id, qty: shipQty, fallbackAccountId: skuRows[0].account_id })) {
+      lines.push({
+        skuKey,
+        skuId: phys.skuId,
+        accountId: phys.accountId,
+        internalSkuCode: phys.internalSkuCode,
+        qty: phys.qty,
+        bundleSkuCode: phys.bundleSkuCode,
+      });
+    }
   }
   if (ambiguous.length) {
     throw new Error(`货号在多个店铺存在同编码商品，无法自动判定扣哪个店库存，请手工确认：${[...new Set(ambiguous)].join("、")}`);
@@ -307,11 +369,14 @@ function shipCloudConsignDelivery({ db, services, mallId, soId, actor }) {
         });
       } catch (err) {
         if (/Insufficient available inventory/i.test(err?.message || "")) {
-          throw new Error(`商品编码 ${line.internalSkuCode} 可用库存不足，整单未发货`);
+          const who = line.bundleSkuCode
+            ? `组合装 ${line.bundleSkuCode} 的子商品 ${line.internalSkuCode}`
+            : `商品编码 ${line.internalSkuCode}`;
+          throw new Error(`${who} 可用库存不足，整单未发货`);
         }
         throw err;
       }
-      ledger.push({ skuKey: line.skuKey, skuId: line.skuId, accountId: line.accountId, qty: line.qty, lines: outLines });
+      ledger.push({ skuKey: line.skuKey, skuId: line.skuId, accountId: line.accountId, qty: line.qty, bundleSkuCode: line.bundleSkuCode, lines: outLines });
     }
     upsertCloudShipState(db, { mallId, soId, ledger, actor, now });
     return ledger;
@@ -398,6 +463,7 @@ function setCloudConsignItemShipQty({ db, mallId, soId, skuKey, shipQty }) {
 }
 
 module.exports = {
+  expandSkuToInventoryLines,
   resolveConsignDeliveryLines,
   shipConsignDelivery,
   unshipConsignDelivery,

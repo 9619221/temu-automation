@@ -108,6 +108,7 @@ interface ErpSkuRow {
   skuType?: string | null;
   bundleCostPrice?: number | null;
   bundleComponentCount?: number | null;
+  bundleAvailableSets?: number | null;
   jstActualStockQty?: number | null;
   jstCostPrice?: number | null;
   jstSupplierName?: string | null;
@@ -400,6 +401,8 @@ function isBundleSku(row: ErpSkuRow) {
 }
 
 function getSkuStockQty(row: ErpSkuRow) {
+  // 组合装库存 = 按子商品 BOM 折算的可售套数（后端 listSkus 已算好），不走聚水潭库存兜底。
+  if (isBundleSku(row)) return Number(row.bundleAvailableSets ?? row.actualStockQty ?? 0);
   const actualStockQty = toOptionalNumber(row.actualStockQty);
   const jstActualStockQty = toOptionalNumber(row.jstActualStockQty);
   if (actualStockQty !== null && actualStockQty !== 0) return actualStockQty;
@@ -3141,6 +3144,16 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
         destroyOnClose
       >
         {stockDetailRow ? (
+          <>
+            {isBundleSku(stockDetailRow) ? (
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message={`组合装库存 = 按子商品折算的可售套数：${getSkuStockQty(stockDetailRow)} 套`}
+                description="组合装本身不单独入库，库存取「各子商品实际库存 ÷ 单套用量」的最小值（木桶短板）。下方为组合装自身批次（通常为空），实际库存请查看各子商品。"
+              />
+            ) : null}
           <Table<SkuStockRecord>
             rowKey="key"
             size="small"
@@ -3207,6 +3220,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
               </Table.Summary.Row>
             )}
           />
+          </>
         ) : null}
       </Modal>
 
