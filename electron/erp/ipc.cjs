@@ -16408,15 +16408,20 @@ function updatePurchaseOrderFrom1688Snapshot({
   // 回填明细行 unit_cost：1688 同步只写了抬头货款，不补这步入库落地成本会漏掉全部货款。
   backfillPoLineUnitCostFromGoods(db, getPurchaseOrder(db, before.id));
   const after = getPurchaseOrder(db, before.id);
-  services.workflow.writeAudit({
-    accountId: before.account_id,
-    actor,
-    action,
-    entityType: "purchase_order",
-    entityId: before.id,
-    before,
-    after,
-  });
+  // import_1688_orders 是高频列表同步：每次对已存在订单做幂等 upsert（改前≈改后），
+  // 逐条写全量 before/after 审计会让 erp_audit_logs 爆炸式膨胀（实测半月 3.9G、占库一半），
+  // 且无追溯价值（订单详情/物流/取消等关键动作另有各自审计）。此类纯批量同步不写审计。
+  if (action !== "import_1688_orders") {
+    services.workflow.writeAudit({
+      accountId: before.account_id,
+      actor,
+      action,
+      entityType: "purchase_order",
+      entityId: before.id,
+      before,
+      after,
+    });
+  }
   if (before.pr_id) {
     const eventText = action === "get_1688_payment_url"
       ? "1688 支付链接已同步"
