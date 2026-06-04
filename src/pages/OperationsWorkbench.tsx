@@ -886,14 +886,21 @@ export default function OperationsWorkbench() {
     { title: "可报活动", dataIndex: "activity", width: 85, align: "right", sorter: (a, b) => a.activity - b.activity, render: (v: number) => (v > 0 ? <span style={{ color: "#3f8600" }}>{fmtNum(v)}</span> : <span style={{ color: "#bbb" }}>0</span>) },
   ];
 
-  // SKU 堆叠单元格:把同一 SPU 下多个 SKU 竖直堆叠,各列行数一致天然对齐;total 不为空时追加合计行
+  // 估算文本在规格列(宽~150,可用~138px)的像素宽:中文/全角按12px,空格4px,其余(数字/字母/标点)7px
+  const estTextW = (t: string | null | undefined) => { let w = 0; for (const ch of String(t ?? "")) w += /[一-龥＀-￯]/.test(ch) ? 12 : ch === " " ? 4 : 7; return w; };
+  // SKU 堆叠单元格:把同一 SPU 下多个 SKU 竖直堆叠。各列传入的是同一 skus 数组,故据最长规格名算出统一行高 rh,
+  // 让规格名换行时,货号/销量/库存等所有列仍逐行横向对齐(此前用 minHeight,规格列换行变高致跨列错位);total 不为空追加合计行
   const stackCell = (skus: SkuChild[], get: (s: SkuChild) => React.ReactNode, total?: React.ReactNode) => {
     if (!skus.length) return <span style={{ color: "#bbb" }}>—</span>;
     if (skus.length === 1) return <span style={{ fontSize: 12 }}>{get(skus[0])}</span>;
+    const lineH = 17;
+    const maxLines = Math.max(1, ...skus.map((s) => Math.ceil(estTextW(s.spec_name) / 138)));
+    const rh = maxLines * lineH + 4;
+    const cell: React.CSSProperties = { height: rh, boxSizing: "border-box", padding: "2px 0", overflow: "hidden", fontSize: 12, lineHeight: `${lineH}px` };
     return (
       <div>
-        {skus.map((s, i) => <div key={i} style={{ padding: "2px 0", borderBottom: "1px solid #f5f5f5", minHeight: 18, fontSize: 12 }}>{get(s)}</div>)}
-        {total != null && <div style={{ padding: "2px 0", fontWeight: 600, fontSize: 12, color: "#1a73e8", minHeight: 18 }}>合计 {total}</div>}
+        {skus.map((s, i) => <div key={i} style={{ ...cell, borderBottom: "1px solid #f5f5f5" }}>{get(s)}</div>)}
+        {total != null && <div style={{ ...cell, fontWeight: 600, color: "#1a73e8" }}>合计 {total}</div>}
       </div>
     );
   };
@@ -915,6 +922,7 @@ export default function OperationsWorkbench() {
             {codes.map((c, i) => <span key={i}>SKC <Typography.Text copyable={{ text: c }} style={{ fontSize: 11, color: "#8c8c8c" }}>{c}</Typography.Text></span>)}
             {!OFFICIAL_SOURCE && <a onClick={(e) => { e.stopPropagation(); setTrendOf({ productId: String(r.product_id), title: r.title || String(r.product_id) }); }} style={{ fontSize: 11 }}>销量趋势</a>}
           </div>
+          {r.onsales_duration && r.onsales_duration > 0 ? <div style={{ marginTop: 2, fontSize: 11, color: "#8c8c8c" }}>加入站点 <span style={{ color: "#595959" }}>{fmtNum(r.onsales_duration)} 天</span></div> : null}
         </div>
       </div>
       );
@@ -926,7 +934,6 @@ export default function OperationsWorkbench() {
     { title: "今日销量", key: "today_sales", width: 90, align: "right", sorter: (a, b) => skusOf(a).reduce((x, s) => x + (s.today || 0), 0) - skusOf(b).reduce((x, s) => x + (s.today || 0), 0), defaultSortOrder: "descend", render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.today || 0), 0); return stackCell(skus, (s) => fmtNum(s.today), fmtNum(sum)); } },
     { title: "7天销量", key: "sales_7d", width: 95, align: "right", sorter: (a, b) => skusOf(a).reduce((x, s) => x + (s.last7d || 0), 0) - skusOf(b).reduce((x, s) => x + (s.last7d || 0), 0), render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.last7d || 0), 0); return stackCell(skus, (s) => fmtNum(s.last7d), fmtNum(sum)); } },
     { title: "30天销量", key: "sales_30d", width: 95, align: "right", sorter: (a, b) => skusOf(a).reduce((x, s) => x + (s.last30d || 0), 0) - skusOf(b).reduce((x, s) => x + (s.last30d || 0), 0), render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.last30d || 0), 0); return stackCell(skus, (s) => fmtNum(s.last30d), fmtNum(sum)); } },
-    { title: "加入站点天数", key: "onsales_dur", width: 110, align: "right", sorter: (a, b) => (a.onsales_duration ?? -1) - (b.onsales_duration ?? -1), render: (_, r) => (r.onsales_duration && r.onsales_duration > 0 ? <span>{fmtNum(r.onsales_duration)} 天</span> : <span style={{ color: "#bbb" }}>—</span>) },
     { title: "可用库存", key: "stock", width: 108, align: "right", sorter: (a, b) => skusOf(a).reduce((x, s) => x + (s.stock || 0), 0) - skusOf(b).reduce((x, s) => x + (s.stock || 0), 0), render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.stock || 0), 0); return stackCell(skus, (s) => <span style={{ color: (s.stock || 0) <= 0 ? "#cf1322" : undefined }}>{fmtNum(s.stock)}</span>, fmtNum(sum)); } },
     { title: "预占用库存", key: "occupy", width: 116, align: "right", sorter: (a, b) => skusOf(a).reduce((x, s) => x + (s.occupy || 0), 0) - skusOf(b).reduce((x, s) => x + (s.occupy || 0), 0), render: (_, r) => { const skus = skusOf(r); const sum = skus.reduce((a, s) => a + (s.occupy || 0), 0); return stackCell(skus, (s) => fmtNum(s.occupy), fmtNum(sum)); } },
     { title: "暂不可用库存", dataIndex: "unavail", width: 130, align: "right", sorter: (a, b) => (a.unavail ?? 0) - (b.unavail ?? 0), render: (v: number | null) => (v == null ? "—" : v > 0 ? <span style={{ color: "#d46b08" }}>{fmtNum(v)}</span> : fmtNum(v)) },
@@ -1126,7 +1133,7 @@ export default function OperationsWorkbench() {
             <div>
               <div style={{ padding: "12px 16px 0", color: "#888", fontSize: 12 }}>每个商品(SPU)横向集成:可报活动 / 合规状态 / 流量(曝光·点击·转化) / 高价限流。按 限流 &gt; 违规 &gt; 活动 排序;流量「无」表示该商品暂未采到(采集覆盖待提升)。总库存 = 可用 + 暂不可用 − 缺货件数 + 在途库存。</div>
               {commonFilters()}
-              <Table<ProductPanelRow> className="op-panel-table" dataSource={panelView} columns={panelColumns.filter((c) => { const k = String(c.key ?? ""); const di = String((c as { dataIndex?: string }).dataIndex ?? ""); if (HIDE_REVIEW && k === "score") return false; if (HIDE_ACTIVITY && k === "act") return false; if (OFFICIAL_SOURCE && (k === "declared_price" || ["limited", "compliance", "expose", "click", "pay", "conv"].includes(di))) return false; return true; })} rowKey={(r) => String(r.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个商品` }} scroll={{ x: 1560 }} loading={panelLoading} />
+              <Table<ProductPanelRow> className="op-panel-table" dataSource={panelView} columns={panelColumns.filter((c) => { const k = String(c.key ?? ""); const di = String((c as { dataIndex?: string }).dataIndex ?? ""); if (HIDE_REVIEW && k === "score") return false; if (HIDE_ACTIVITY && k === "act") return false; if (OFFICIAL_SOURCE && (k === "declared_price" || ["limited", "compliance", "expose", "click", "pay", "conv"].includes(di))) return false; return true; })} rowKey={(r) => String(r.__rk)} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个商品` }} scroll={{ x: 1450 }} loading={panelLoading} />
             </div>
           ) : prodSeg === "diag" ? (
             <div>
