@@ -1106,7 +1106,8 @@ function _buildProductPanelOfficialFresh(db, options = {}) {
     SELECT s.mall_id, m.store_code, m.mall_name, s.product_id,
            s.product_skc_id, s.ext_code, s.spec_name, s.title, s.thumb_url,
            s.today_sales, s.last7d_sales, s.last30d_sales, s.sale_days,
-           s.warehouse_stock, s.occupy_stock, s.unavailable_stock, s.advice_qty, s.lack_quantity
+           s.warehouse_stock, s.occupy_stock, s.unavailable_stock, s.advice_qty, s.lack_quantity,
+           s.wait_in_stock
       FROM erp_temu_openapi_sku_sales s
       LEFT JOIN erp_temu_malls m ON m.mall_id = s.mall_id
      WHERE 1=1 ${includeTest ? "" : "AND COALESCE(m.status,'active') <> 'test'"}
@@ -1130,6 +1131,7 @@ function _buildProductPanelOfficialFresh(db, options = {}) {
     if (r.thumb_url && !e.thumb) e.thumb = r.thumb_url;
     e.stock += toNum(r.warehouse_stock); e.occupy += toNum(r.occupy_stock); e.unavail += toNum(r.unavailable_stock);
     e.advice += toNum(r.advice_qty); e.lack_qty += toNum(r.lack_quantity);
+    e.shipping += toNum(r.wait_in_stock); // 在途库存=官方 inventoryNumInfo 待收货(已发货未签收)+待入库
     if (toNum(r.warehouse_stock) <= 0) e.lack++;
     e.skus_detail.push({ skc_id: r.product_skc_id || null, sku_ext_code: r.ext_code || null, spec_name: r.spec_name || null, declared_price: null,
       today: toNum(r.today_sales), last7d: toNum(r.last7d_sales), last30d: toNum(r.last30d_sales), sale_days: r.sale_days == null ? null : Number(r.sale_days),
