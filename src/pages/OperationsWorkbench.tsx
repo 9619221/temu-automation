@@ -895,28 +895,12 @@ export default function OperationsWorkbench() {
     );
   };
   const skusOf = (r: ProductPanelRow): SkuChild[] => r.skus_detail || [];
-  // SKC 列专用:同一 SKC 的连续 SKU 只首行显示 SKC 值,重复行淡化为「″」,消除同 SKC 多尺码时的刷屏重复感
-  const stackSkcCell = (skus: SkuChild[]) => {
-    if (!skus.length) return <span style={{ color: "#bbb" }}>—</span>;
-    if (skus.length === 1) return <span style={{ fontSize: 12 }}>{skus[0].skc_id || <span style={{ color: "#bbb" }}>—</span>}</span>;
-    let prev: string | null = null;
-    return (
-      <div>
-        {skus.map((s, i) => {
-          const cur = s.skc_id || null;
-          const dup = cur != null && cur === prev;
-          prev = cur ?? prev;
-          return <div key={i} style={{ padding: "2px 0", borderBottom: "1px solid #f5f5f5", minHeight: 18, fontSize: 12, color: dup ? "#d9d9d9" : undefined }}>{cur == null ? <span style={{ color: "#bbb" }}>—</span> : dup ? "″" : cur}</div>;
-        })}
-      </div>
-    );
-  };
 
   const panelColumns: ColumnsType<ProductPanelRow> = [
     { title: "店号", dataIndex: "store_code", width: 88, fixed: "left", render: (v, r) => formatStoreNo(v === r.mall_id ? null : v, r.mall_id) },
     { title: "SPU", dataIndex: "product_id", width: 120, render: (v: string) => <Typography.Text copyable={{ text: v }} style={{ fontSize: 12, fontWeight: 600 }}>{v}</Typography.Text> },
-    { title: "SKC", key: "skc", width: 130, render: (_, r) => stackSkcCell(skusOf(r)) },
-    { title: "SKU货号 / 规格", key: "sku_ext", width: 140, render: (_, r) => stackCell(skusOf(r), (s) => s.sku_ext_code ? s.sku_ext_code : (s.spec_name ? <span style={{ color: "#888" }}>{s.spec_name}</span> : <span style={{ color: "#bbb" }}>—</span>)) },
+    { title: "SKC", key: "skc", width: 130, render: (_, r) => { const codes = (r.skc_codes || "").split(",").map((c) => c.trim()).filter(Boolean); return codes.length ? <div style={{ fontSize: 12 }}>{codes.map((c, i) => <div key={i} style={{ padding: "1px 0" }}><Typography.Text copyable={{ text: c }} style={{ fontSize: 12 }}>{c}</Typography.Text></div>)}</div> : <span style={{ color: "#bbb" }}>—</span>; } },
+    { title: "SKU货号 / 规格", key: "sku_ext", width: 200, render: (_, r) => stackCell(skusOf(r), (s) => { const code = s.sku_ext_code; const spec = s.spec_name; if (!code && !spec) return <span style={{ color: "#bbb" }}>—</span>; return <span style={{ display: "block", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{code || ""}{spec ? <span style={{ color: "#999" }}>{code ? " · " : ""}{spec}</span> : null}</span>; }) },
     { title: "商品", key: "prod", width: 340, render: (_, r) => (
       <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
         {r.thumb ? <div style={{ flexShrink: 0, width: 40, height: 40 }}><Image src={r.thumb} width={40} height={40} style={{ objectFit: "cover", borderRadius: 4 }} preview={{ mask: <EyeOutlined />, maskClassName: "prod-thumb-mask" }} /></div> : <div style={{ width: 40, height: 40, borderRadius: 4, background: "#f0f0f0", flexShrink: 0 }} />}
