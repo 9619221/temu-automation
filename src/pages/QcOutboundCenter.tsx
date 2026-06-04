@@ -1017,8 +1017,8 @@ export default function QcOutboundCenter() {
       key: "erpStatus",
       width: 110,
       render: (_value, row) => {
-        const s = row.localStatusOverride || row.rawJst?.status; // 本地确认发货优先,否则聚水潭发货状态
-        return s ? <Tag color={stockStatusColor(s)} style={{ whiteSpace: "nowrap" }}>{s}</Tag> : <Text type="secondary">-</Text>;
+        const s = row.localStatusOverride || row.rawJst?.status || "已付款待审核"; // 本地确认 > 聚水潭 > 聚水潭未接单兜底「已付款待审核」
+        return <Tag color={stockStatusColor(s)} style={{ whiteSpace: "nowrap" }}>{s}</Tag>;
       },
     },
     {
