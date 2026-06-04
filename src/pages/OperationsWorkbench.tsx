@@ -193,9 +193,8 @@ export default function OperationsWorkbench() {
   const [trendOf, setTrendOf] = useState<{ productId: string; title: string } | null>(null);
   const [trendModalRows, setTrendModalRows] = useState<Array<{ date: string; qty: number; revenue: number }>>([]);
   const [trendModalLoading, setTrendModalLoading] = useState(false);
-  const [flawModal, setFlawModal] = useState<{ title: string } | null>(null);
-  const [flawImages, setFlawImages] = useState<string[]>([]);
-  const [flawLoading, setFlawLoading] = useState(false);
+  const [flawPreviewVisible, setFlawPreviewVisible] = useState(false);
+  const [flawPreviewImages, setFlawPreviewImages] = useState<string[]>([]);
   const [panelLoading, setPanelLoading] = useState(false);
   const [panelLoaded, setPanelLoaded] = useState(false);
   const [qcRows, setQcRows] = useState<QcRow[]>([]);
@@ -470,10 +469,15 @@ export default function OperationsWorkbench() {
   }, []);
 
   // 点击疵点图:实时去 Temu 拉(私有图签名会失效,不能用存的 URL),后端带 referer 拉成 base64 返回
-  const openFlawImages = useCallback(async (mallId: string, qcBillId: string, title: string) => {
+  const openFlawImages = useCallback(async (mallId: string, qcBillId: string) => {
     if (!window.electronAPI?.erp?.reports?.qcFlawImages) return;
-    setFlawModal({ title }); setFlawImages([]); setFlawLoading(true);
-    try { const resp = await window.electronAPI.erp.reports.qcFlawImages({ mallId, qcBillId }); if (resp.ok && resp.data) setFlawImages(resp.data.images || []); } catch { /* */ } finally { setFlawLoading(false); }
+    const hide = message.loading("加载疵点照片…", 0);
+    try {
+      const resp = await window.electronAPI.erp.reports.qcFlawImages({ mallId, qcBillId });
+      hide();
+      const imgs = (resp.ok && resp.data && resp.data.images) || [];
+      if (imgs.length) { setFlawPreviewImages(imgs); setFlawPreviewVisible(true); } else message.info("未取到疵点照片");
+    } catch { hide(); message.error("加载疵点照片失败"); }
   }, []);
 
   useEffect(() => { loadSku(); }, [loadSku]);
@@ -951,7 +955,7 @@ export default function OperationsWorkbench() {
     { title: "疵点原因", dataIndex: "flaw_summary", width: 320, render: (v) => v ? <span style={{ color: "#cf1322", fontSize: 12 }}>{v}</span> : <span style={{ color: "#bbb" }}>—</span> },
     { title: "疵点图", key: "flaw", width: 92, align: "center", render: (_, r) => {
       if (!r.flaw_image_count) return <span style={{ color: "#bbb" }}>—</span>;
-      return <a onClick={() => openFlawImages(r.mall_id, r.qc_bill_id, `疵点照片 · ${r.sku_name || r.qc_bill_id}`)} style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+      return <a onClick={() => openFlawImages(r.mall_id, r.qc_bill_id)} style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
         {r.flaw_thumb ? <img src={r.flaw_thumb} width={44} height={44} style={{ objectFit: "cover", borderRadius: 3, border: "1px solid #f0f0f0" }} alt="" /> : null}
         <span style={{ fontSize: 11 }}>{r.flaw_image_count} 张</span>
       </a>;
@@ -1301,11 +1305,9 @@ export default function OperationsWorkbench() {
         {error && <Alert type="error" showIcon message="加载失败" description={error} style={{ margin: 16 }} action={<Button size="small" onClick={loadSku}>重试</Button>} />}
         <Tabs activeKey={activeTab} onChange={setActiveTab} items={tabItems.filter((t) => !(HIDE_RISK && t.key === "risk") && !(HIDE_ACTIVITY && t.key === "activity") && !(HIDE_STOCK && t.key === "stock"))} tabBarStyle={{ paddingLeft: 16, marginBottom: 0 }} />
       </Card>
-      <Modal open={!!flawModal} onCancel={() => setFlawModal(null)} footer={null} width={860} title={flawModal?.title || "疵点照片"} destroyOnClose>
-        {flawLoading ? <div style={{ textAlign: "center", padding: 80, color: "#999" }}>正在从 Temu 实时拉取疵点照片…(私有图带时效签名,需实时取)</div>
-          : flawImages.length === 0 ? <Empty description="未取到疵点照片(签名可能已变动或该单无图)" style={{ padding: 40 }} />
-          : <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}><Image.PreviewGroup>{flawImages.map((src, i) => <Image key={i} src={src} width={130} height={130} style={{ objectFit: "cover", borderRadius: 4 }} />)}</Image.PreviewGroup></div>}
-      </Modal>
+      <div style={{ display: "none" }}>
+        <Image.PreviewGroup items={flawPreviewImages} preview={{ visible: flawPreviewVisible, onVisibleChange: (v) => setFlawPreviewVisible(v) }} />
+      </div>
       <Modal open={!!trendOf} onCancel={() => setTrendOf(null)} footer={null} width={680} title={trendOf ? `销量趋势 · ${trendOf.title}` : ""} destroyOnClose>
         <div style={{ fontSize: 12, color: "#888", marginBottom: 8 }}>逐日销量(抓包采集,覆盖近 2 周、部分店);SPU {trendOf?.productId}</div>
         {trendModalLoading ? <div style={{ textAlign: "center", padding: 80, color: "#999" }}>加载中…</div>
