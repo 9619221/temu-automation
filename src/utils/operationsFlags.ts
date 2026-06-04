@@ -9,3 +9,5 @@ export const OFFICIAL_SOURCE = true;
 export const HIDE_DIAG = true;
 // 补货清单：库存源未接全（缺聚水潭真实库存）→ 已售罄误报、偏多报，先整页隐藏（改 false 即恢复）
 export const HIDE_RESTOCK = true;
+// 备货在途：备货单停留在历史过期单（最晚发货时间已过、已发/已入库为 0），参考价值低，先整页隐藏（改 false 即恢复）
+export const HIDE_STOCK = true;

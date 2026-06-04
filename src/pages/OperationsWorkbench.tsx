@@ -5,7 +5,7 @@ import type { ColumnsType } from "antd/es/table";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, Legend, ResponsiveContainer } from "recharts";
 import { useNavigate } from "react-router-dom";
 import { formatStoreNo, formatMallName } from "../utils/storeDisplay";
-import { HIDE_RISK, HIDE_ACTIVITY, HIDE_REVIEW, OFFICIAL_SOURCE, HIDE_DIAG, HIDE_RESTOCK } from "../utils/operationsFlags";
+import { HIDE_RISK, HIDE_ACTIVITY, HIDE_REVIEW, OFFICIAL_SOURCE, HIDE_DIAG, HIDE_RESTOCK, HIDE_STOCK } from "../utils/operationsFlags";
 
 // 分页「每页条数」选择器:antd 5.25+ 默认带搜索框(聚焦冒出可编辑光标),这里强制关掉
 const NoSearchSelect = (props: Record<string, unknown>) => <Select {...props} showSearch={false} />;
@@ -949,7 +949,7 @@ export default function OperationsWorkbench() {
             {!HIDE_RISK && <Card size="small" hoverable onClick={() => setActiveTab("risk")}><Statistic title="高风险待办" value={riskOverview.high} valueStyle={{ color: riskOverview.high > 0 ? "#cf1322" : undefined }} /></Card>}
             {!HIDE_DIAG && <Card size="small" hoverable onClick={() => goProduct("diag")}><Statistic title="诊断 · 急" value={overview.urgent} valueStyle={{ color: overview.urgent > 0 ? "#cf1322" : undefined }} /></Card>}
             {!HIDE_RESTOCK && <Card size="small" hoverable onClick={() => goProduct("restock")}><Statistic title="急需补货 SKU" value={restockView.length} valueStyle={{ color: restockView.length > 0 ? "#d46b08" : undefined }} /></Card>}
-            <Card size="small" hoverable onClick={() => setActiveTab("stock")}><Statistic title="备货缺口单" value={stockLoaded ? stockView.length : "查看"} valueStyle={!stockLoaded ? { fontSize: 16, color: "#1677ff" } : undefined} /></Card>
+            {!HIDE_STOCK && <Card size="small" hoverable onClick={() => setActiveTab("stock")}><Statistic title="备货缺口单" value={stockLoaded ? stockView.length : "查看"} valueStyle={!stockLoaded ? { fontSize: 16, color: "#1677ff" } : undefined} /></Card>}
             {!HIDE_ACTIVITY && <Card size="small" hoverable onClick={() => setActiveTab("activity")}><Statistic title="可报活动" value={actView.length} valueStyle={{ color: "#3f8600" }} /></Card>}
           </div>
           <Card size="small" title="各店概览 · 点店查看商品明细,问题多的店排在前" style={{ marginBottom: 16 }} loading={shopLoading || riskLoading || skuLoading}>
@@ -992,7 +992,7 @@ export default function OperationsWorkbench() {
               ))}
               {restockView.length === 0 && <div style={{ color: "#999", fontSize: 12, padding: "8px 0" }}>无需补货</div>}
             </Card>)}
-            <Card size="small" title="紧急备货在途" extra={<a onClick={() => setActiveTab("stock")}>全部</a>} loading={stockLoading}>
+            {!HIDE_STOCK && (<Card size="small" title="紧急备货在途" extra={<a onClick={() => setActiveTab("stock")}>全部</a>} loading={stockLoading}>
               {stockView.slice(0, 6).map((r) => (
                 <div key={r.__rk} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "4px 0", borderBottom: "1px solid #f5f5f5", fontSize: 12 }}>
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}><Tag>{r.store_code || r.mall_id}</Tag>{r.product_name || r.sku_ext_code || "—"}</span>
@@ -1000,7 +1000,7 @@ export default function OperationsWorkbench() {
                 </div>
               ))}
               {stockView.length === 0 && <div style={{ color: "#999", fontSize: 12, padding: "8px 0" }}>无备货缺口</div>}
-            </Card>
+            </Card>)}
           </div>
         </div>
       ),
@@ -1209,7 +1209,7 @@ export default function OperationsWorkbench() {
         bodyStyle={{ padding: 0 }}
       >
         {error && <Alert type="error" showIcon message="加载失败" description={error} style={{ margin: 16 }} action={<Button size="small" onClick={loadSku}>重试</Button>} />}
-        <Tabs activeKey={activeTab} onChange={setActiveTab} items={tabItems.filter((t) => !(HIDE_RISK && t.key === "risk") && !(HIDE_ACTIVITY && t.key === "activity"))} tabBarStyle={{ paddingLeft: 16, marginBottom: 0 }} />
+        <Tabs activeKey={activeTab} onChange={setActiveTab} items={tabItems.filter((t) => !(HIDE_RISK && t.key === "risk") && !(HIDE_ACTIVITY && t.key === "activity") && !(HIDE_STOCK && t.key === "stock"))} tabBarStyle={{ paddingLeft: 16, marginBottom: 0 }} />
       </Card>
       <Modal open={!!trendOf} onCancel={() => setTrendOf(null)} footer={null} width={680} title={trendOf ? `销量趋势 · ${trendOf.title}` : ""} destroyOnClose>
         <div style={{ fontSize: 12, color: "#888", marginBottom: 8 }}>逐日销量(抓包采集,覆盖近 2 周、部分店);SPU {trendOf?.productId}</div>
