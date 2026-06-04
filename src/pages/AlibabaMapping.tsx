@@ -137,6 +137,7 @@ interface MappingFormValues {
   externalOfferId?: string;
   externalSkuId?: string;
   externalSpecId?: string;
+  isNoSpec?: boolean;
   platformSkuName?: string;
   supplierName?: string;
   productTitle?: string;
@@ -154,6 +155,7 @@ interface MappingSpecRow {
   key: string;
   externalSkuId?: string | null;
   externalSpecId: string;
+  isNoSpec?: boolean;
   specText?: string | null;
   imageUrl?: string | null;
   price?: number | null;
@@ -309,17 +311,24 @@ function extract1688OfferId(value?: string | null) {
   return looseMatch?.[1] || "";
 }
 
+// 无规格商品的「选中标识」：specId 为空时用 row.key 兜底（selectedUrlSpecIds / 数量映射均以此为 key）。
+function specRowSelectId(row: MappingSpecRow): string {
+  return row.isNoSpec ? row.key : row.externalSpecId;
+}
+
 function productDetailSpecRows(detail?: UrlSpecDialogState["detail"] | null): MappingSpecRow[] {
   const options = Array.isArray(detail?.skuOptions) ? detail.skuOptions : [];
   return options
-    .filter((item) => item?.externalSpecId || item?.externalSkuId)
+    .filter((item) => item?.isNoSpec || item?.externalSpecId || item?.externalSkuId)
     .map((item, index) => {
+      const isNoSpec = Boolean(item.isNoSpec);
       const externalSpecId = String(item.externalSpecId || item.externalSkuId || "");
       return {
-        key: `${externalSpecId}:${item.externalSkuId || ""}:${index}`,
+        key: isNoSpec ? `__nospec__:${index}` : `${externalSpecId}:${item.externalSkuId || ""}:${index}`,
         externalSkuId: item.externalSkuId || externalSpecId,
         externalSpecId,
-        specText: item.specText || externalSpecId,
+        isNoSpec,
+        specText: item.specText || (isNoSpec ? "整款（无规格）" : externalSpecId),
         imageUrl: imageValue([(item as any).imageUrl, (item as any).raw]),
         price: item.price ?? null,
         stock: item.stock ?? null,
@@ -647,7 +656,7 @@ export default function AlibabaMapping() {
   const selectedUrlSpecs = useMemo(() => {
     if (!urlSpecDialog) return [];
     const selectedIds = new Set(selectedUrlSpecIds);
-    return urlSpecDialog.rows.filter((row) => selectedIds.has(row.externalSpecId));
+    return urlSpecDialog.rows.filter((row) => selectedIds.has(specRowSelectId(row)));
   }, [selectedUrlSpecIds, urlSpecDialog]);
 
   const filteredUrlSpecRows = useMemo(() => {
@@ -837,7 +846,7 @@ export default function AlibabaMapping() {
         rows,
       });
       setUrlSpecSearchText("");
-      const initialSpecIds = values.externalSpecId ? [values.externalSpecId] : (rows[0]?.externalSpecId ? [rows[0].externalSpecId] : []);
+      const initialSpecIds = values.externalSpecId ? [values.externalSpecId] : (rows[0] ? [specRowSelectId(rows[0])] : []);
       const initialPlatformQty = toPositiveInteger(values.platformQty, 1);
       setSelectedUrlSpecIds(initialSpecIds);
       setUrlSpecQtyBySpecId(Object.fromEntries(initialSpecIds.map((id) => [id, initialPlatformQty])));
@@ -852,26 +861,26 @@ export default function AlibabaMapping() {
 
   const applySelectedUrlSpec = useCallback(() => {
     if (!urlSpecDialog) return;
-    const selectedRows = urlSpecDialog.rows.filter((row) => selectedUrlSpecIds.includes(row.externalSpecId));
+    const selectedRows = urlSpecDialog.rows.filter((row) => selectedUrlSpecIds.includes(specRowSelectId(row)));
     if (!selectedRows.length) {
       message.warning("请先选择 1688 规格");
       return;
     }
     const selected = selectedRows[0];
     // 防御：不可信的 specId（缺失 / 与 skuId 同值）会被 1688 下单接口拒绝
-    const invalidMissingSpec = selectedRows.find((row) => !row.externalSpecId);
+    const invalidMissingSpec = selectedRows.find((row) => !row.isNoSpec && !row.externalSpecId);
     if (invalidMissingSpec) {
       message.error("这个 1688 规格没有可信的 specId，1688 下单时会被拒绝；请换一个规格或申请 1688 官方商品详情接口权限");
       return;
     }
-    const invalidSameSkuSpec = selectedRows.find((row) => row.externalSkuId && row.externalSkuId === row.externalSpecId);
+    const invalidSameSkuSpec = selectedRows.find((row) => !row.isNoSpec && row.externalSkuId && row.externalSkuId === row.externalSpecId);
     if (invalidSameSkuSpec) {
       message.error("数据源未提供独立的 specId（与 skuId 同值），1688 下单会失败；建议手工下单或更换数据源");
       return;
     }
     const selectedRowsWithQty = selectedRows.map((row) => ({
       ...row,
-      platformQty: toPositiveInteger(urlSpecQtyBySpecId[row.externalSpecId], 1),
+      platformQty: toPositiveInteger(urlSpecQtyBySpecId[specRowSelectId(row)], 1),
     }));
     const values = form.getFieldsValue() as MappingFormValues;
     form.setFieldsValue({
@@ -879,7 +888,8 @@ export default function AlibabaMapping() {
       productUrl: urlSpecDialog.productUrl,
       externalSkuId: selected.externalSkuId || undefined,
       externalSpecId: selected.externalSpecId,
-      platformSkuName: selected.specText || selected.externalSpecId,
+      isNoSpec: selected.isNoSpec,
+      platformSkuName: selected.specText || selected.externalSpecId || (selected.isNoSpec ? "整款（无规格）" : undefined),
       supplierName: values.supplierName || urlSpecDialog.detail.supplierName || undefined,
       productTitle: values.productTitle || urlSpecDialog.detail.productTitle || undefined,
       imageUrl: imageValue([selected.imageUrl, values.imageUrl, urlSpecDialog.detail.imageUrl]) || undefined,
@@ -908,7 +918,7 @@ export default function AlibabaMapping() {
         message.error("请填写可识别商品号的 1688 地址");
         return;
       }
-      if (!values.externalSpecId) {
+      if (!values.externalSpecId && !values.isNoSpec) {
         message.error("请先解析 1688 地址并选择要绑定的规格");
         return;
       }
@@ -916,10 +926,11 @@ export default function AlibabaMapping() {
       const specsToSave: PendingMappingSpecRow[] = pendingUrlSpecs.length
         ? pendingUrlSpecs
         : [{
-          key: values.externalSpecId,
+          key: values.externalSpecId || "__nospec__",
           externalSkuId: values.externalSkuId,
-          externalSpecId: values.externalSpecId,
-          specText: values.platformSkuName || values.externalSpecId,
+          externalSpecId: values.externalSpecId || "",
+          isNoSpec: values.isNoSpec,
+          specText: values.platformSkuName || values.externalSpecId || (values.isNoSpec ? "整款（无规格）" : ""),
           imageUrl: values.imageUrl,
           price: values.unitPrice ?? null,
           platformQty: toPositiveInteger(values.platformQty, 1),
@@ -944,7 +955,8 @@ export default function AlibabaMapping() {
           externalOfferId,
           externalSkuId: spec.externalSkuId || undefined,
           externalSpecId: spec.externalSpecId,
-          platformSkuName: spec.specText || spec.externalSpecId,
+          isNoSpec: spec.isNoSpec,
+          platformSkuName: spec.specText || spec.externalSpecId || (spec.isNoSpec ? "整款（无规格）" : undefined),
           supplierName: values.supplierName,
           productTitle: values.productTitle,
           productUrl,
@@ -1614,7 +1626,7 @@ export default function AlibabaMapping() {
           />
           <Table<MappingSpecRow>
             size="small"
-            rowKey="externalSpecId"
+            rowKey={(row) => specRowSelectId(row)}
             columns={urlSpecColumns}
             dataSource={filteredUrlSpecRows}
             pagination={{ pageSize: 8, hideOnSinglePage: true }}
@@ -1626,9 +1638,9 @@ export default function AlibabaMapping() {
             }}
             onRow={(row) => ({
               onClick: () => updateSelectedUrlSpecIds(
-                selectedUrlSpecIds.includes(row.externalSpecId)
-                  ? selectedUrlSpecIds.filter((id) => id !== row.externalSpecId)
-                  : [...selectedUrlSpecIds, row.externalSpecId],
+                selectedUrlSpecIds.includes(specRowSelectId(row))
+                  ? selectedUrlSpecIds.filter((id) => id !== specRowSelectId(row))
+                  : [...selectedUrlSpecIds, specRowSelectId(row)],
               ),
             })}
           />
@@ -1658,7 +1670,7 @@ export default function AlibabaMapping() {
               >
                 {selectedUrlSpecs.length ? selectedUrlSpecs.map((row, index) => (
                   <div
-                    key={row.externalSpecId}
+                    key={row.key}
                     style={{
                       display: "grid",
                       gridTemplateColumns: "minmax(0, 1fr) 104px",
@@ -1678,12 +1690,12 @@ export default function AlibabaMapping() {
                     <InputNumber
                       min={1}
                       precision={0}
-                      value={toPositiveInteger(urlSpecQtyBySpecId[row.externalSpecId], 1)}
+                      value={toPositiveInteger(urlSpecQtyBySpecId[specRowSelectId(row)], 1)}
                       style={{ width: "100%" }}
                       addonAfter="件"
                       onChange={(value) => setUrlSpecQtyBySpecId((previous) => ({
                         ...previous,
-                        [row.externalSpecId]: toPositiveInteger(value, 1),
+                        [specRowSelectId(row)]: toPositiveInteger(value, 1),
                       }))}
                     />
                   </div>

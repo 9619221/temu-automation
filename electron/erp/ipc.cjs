@@ -397,6 +397,18 @@ function require1688SpecId(value, context = "1688 mapping") {
   return text;
 }
 
+// 单规格/无 SKU 的 1688 商品：allowEmpty 为真时，缺规格不再抛错而是返回空串("")。
+// 返回空串而非 null，以匹配 erp_sku_1688_sources.external_spec_id 的 NOT NULL DEFAULT ''
+// 与联合唯一键；下单侧再据"空串"判定走 offerId-only。有规格商品 allowEmpty=false，行为不变。
+function optional1688SpecId(value, { allowEmpty = false, context = "1688 mapping" } = {}) {
+  const text = optionalString(value);
+  if (!text) {
+    if (allowEmpty) return "";
+    throw new Error(`${context} 缺少 1688 规格，请先选择具体规格`);
+  }
+  return text;
+}
+
 function optionalString(value) {
   if (value === null || value === undefined) return null;
   const text = String(value).trim();
@@ -4701,6 +4713,7 @@ function toSku1688Source(row) {
   if (!row) return null;
   const next = toCamelRow(row);
   next.isDefault = Boolean(row.is_default);
+  next.isNoSpec = Boolean(row.is_no_spec);
   next.ourQty = Number(row.our_qty || 1);
   next.platformQty = Number(row.platform_qty || 1);
   next.ratioText = `${next.ourQty}:${next.platformQty}`;
@@ -6537,7 +6550,8 @@ function upsertSku1688SourceRow(db, payload = {}, actor = {}) {
   if (!sku) throw new Error(`SKU not found: ${skuId}`);
   const now = nowIso();
   const externalOfferId = requireString(payload.externalOfferId || payload.external_offer_id, "externalOfferId");
-  const externalSpecId = require1688SpecId(payload.externalSpecId || payload.external_spec_id, "供应商映射");
+  const isNoSpec = payload.isNoSpec === true || payload.is_no_spec === 1 || payload.is_no_spec === true;
+  const externalSpecId = optional1688SpecId(payload.externalSpecId || payload.external_spec_id, { allowEmpty: isNoSpec, context: "供应商映射" });
   const mappingGroupId = optionalString(payload.mappingGroupId || payload.mapping_group_id) || `map_${sku.id}_${externalOfferId}`;
   const row = {
     id: optionalString(payload.id) || createId("sku_1688"),
@@ -6546,7 +6560,9 @@ function upsertSku1688SourceRow(db, payload = {}, actor = {}) {
     mapping_group_id: mappingGroupId,
     external_offer_id: externalOfferId,
     external_sku_id: optionalString(payload.externalSkuId || payload.external_sku_id) || "",
-    external_spec_id: externalSpecId,
+    external_spec_id: externalSpecId || "",
+    // 最终规格为空即标记无规格（与 allowEmpty 自洽：有规格则 0，确无规格则 1）。
+    is_no_spec: externalSpecId ? 0 : 1,
     platform_sku_name: optionalString(payload.platformSkuName || payload.platform_sku_name),
     supplier_name: optionalString(payload.supplierName || payload.supplier_name),
     product_title: optionalString(payload.productTitle || payload.product_title),
@@ -6600,13 +6616,13 @@ function upsertSku1688SourceRow(db, payload = {}, actor = {}) {
     INSERT INTO erp_sku_1688_sources (
       id, account_id, sku_id, mapping_group_id, external_offer_id, external_sku_id, external_spec_id,
       platform_sku_name, supplier_name, product_title, product_url, image_url, unit_price, moq,
-      lead_days, logistics_fee, our_qty, platform_qty, status, is_default, remark, source_payload_json,
+      lead_days, logistics_fee, our_qty, platform_qty, status, is_default, is_no_spec, remark, source_payload_json,
       created_by, created_at, updated_at
     )
     VALUES (
       @id, @account_id, @sku_id, @mapping_group_id, @external_offer_id, @external_sku_id, @external_spec_id,
       @platform_sku_name, @supplier_name, @product_title, @product_url, @image_url, @unit_price, @moq,
-      @lead_days, @logistics_fee, COALESCE(@our_qty, 1), COALESCE(@platform_qty, 1), @status, @is_default, @remark, @source_payload_json,
+      @lead_days, @logistics_fee, COALESCE(@our_qty, 1), COALESCE(@platform_qty, 1), @status, @is_default, @is_no_spec, @remark, @source_payload_json,
       @created_by, @created_at, @updated_at
     )
     ON CONFLICT(account_id, sku_id, external_offer_id, external_sku_id, external_spec_id) DO UPDATE SET
@@ -6626,6 +6642,7 @@ function upsertSku1688SourceRow(db, payload = {}, actor = {}) {
       platform_qty = COALESCE(@platform_qty, platform_qty),
       status = excluded.status,
       is_default = excluded.is_default,
+      is_no_spec = excluded.is_no_spec,
       remark = COALESCE(excluded.remark, remark),
       source_payload_json = excluded.source_payload_json,
       updated_at = excluded.updated_at
@@ -6729,9 +6746,10 @@ function upsertSku1688SourceFromCandidate(db, candidate = {}, pr = {}, actor = {
     ...candidate,
     raw: sourcePayload,
   };
-  const externalSpecId = require1688SpecId(
+  const noSpec = options.isNoSpec === true || candidate.is_no_spec === 1 || candidate.isNoSpec === true;
+  const externalSpecId = optional1688SpecId(
     candidate.external_spec_id || candidate.externalSpecId || infer1688CandidateSpecId(inferredCandidate),
-    "候选货源",
+    { allowEmpty: noSpec, context: "候选货源" },
   );
   const externalSkuId = optionalString(candidate.external_sku_id || candidate.externalSkuId || infer1688CandidateSkuId(inferredCandidate));
   const accountId = optionalString(candidate.account_id || candidate.accountId || pr.account_id || pr.accountId);
@@ -6773,6 +6791,7 @@ function upsertSku1688SourceFromCandidate(db, candidate = {}, pr = {}, actor = {
     platformQty,
     sourcePayload: finalSourcePayload,
     isDefault: Boolean(options.isDefault),
+    isNoSpec: noSpec,
     status: "active",
   }, actor);
 }
@@ -10390,7 +10409,23 @@ function pickSkuOption(detail = {}, payload = {}) {
 
 function hasSyncableSkuOptions(detail = {}) {
   return Array.isArray(detail.skuOptions)
-    && detail.skuOptions.some((sku) => optionalString(sku?.externalSpecId || sku?.externalSkuId));
+    && detail.skuOptions.some((sku) => sku?.isNoSpec || optionalString(sku?.externalSpecId || sku?.externalSkuId));
+}
+
+// 单规格/无 SKU 的 1688 商品：确认商品无任何可选规格时，造一个「整款（无规格）」默认项，
+// 让解析/绑定/下单流程能继续（externalSpecId 空、isNoSpec=true，下单走 offerId-only）。
+function buildNoSpec1688Option(detail = {}, offerId) {
+  return {
+    externalSkuId: "",
+    externalSpecId: "",
+    specText: "整款（无规格）",
+    isNoSpec: true,
+    imageUrl: optionalString(detail.imageUrl),
+    price: optionalNumber(detail.unitPrice ?? detail.price),
+    stock: null,
+    attributes: [],
+    raw: { noSpec: true, offerId: optionalString(offerId) },
+  };
 }
 
 function is1688ProductDetailAclError(error) {
@@ -10741,13 +10776,19 @@ async function preview1688UrlSpecsAction({ db, payload, actor }) {
   }
 
   if (!hasSyncableSkuOptions(detail)) {
-    const alphaShopMessage = alphaShopDetailError
-      ? `productDetailQuery 未拿到可绑定规格（${alphaShopDetailError.message || String(alphaShopDetailError)}），`
-      : "";
-    const officialMessage = officialDetailError
-      ? `1688 商品详情接口也未拿到规格（${officialDetailError.message || String(officialDetailError)}）。`
-      : "";
-    throw new Error(`${alphaShopMessage}${officialMessage || "未能从这个 1688 地址解析到可绑定规格。"}请开通 alibaba.product.get ACL，或手动填写 1688 商品规格ID。`);
+    // 接口成功拿到商品基本信息(非 fallback)但无任何可选 SKU → 判定单规格商品，注入「整款（无规格）」默认项；
+    // 接口失败(usedFallbackDetail)才报原错(配图搜密钥/开 alibaba.product.get ACL)。
+    if (!usedFallbackDetail && optionalString(detail.productTitle || detail.externalOfferId)) {
+      detail.skuOptions = [...(Array.isArray(detail.skuOptions) ? detail.skuOptions : []), buildNoSpec1688Option(detail, offerId)];
+    } else {
+      const alphaShopMessage = alphaShopDetailError
+        ? `productDetailQuery 未拿到可绑定规格（${alphaShopDetailError.message || String(alphaShopDetailError)}），`
+        : "";
+      const officialMessage = officialDetailError
+        ? `1688 商品详情接口也未拿到规格（${officialDetailError.message || String(officialDetailError)}）。`
+        : "";
+      throw new Error(`${alphaShopMessage}${officialMessage || "未能从这个 1688 地址解析到可绑定规格。"}请开通 alibaba.product.get ACL，或手动填写 1688 商品规格ID。`);
+    }
   }
 
   return {
@@ -10774,9 +10815,10 @@ function bind1688CandidateSpecAction({ db, services, payload, actor }) {
   if (!candidate) throw new Error(`Sourcing candidate not found: ${candidateId}`);
   const pr = getPurchaseRequest(db, candidate.pr_id);
   const skuOptions = parseJsonArray(candidate.external_sku_options_json);
-  const externalSpecId = require1688SpecId(
+  const noSpec = payload.isNoSpec === true || payload.is_no_spec === 1 || payload.is_no_spec === true;
+  const externalSpecId = optional1688SpecId(
     payload.externalSpecId || payload.external_spec_id,
-    "1688 spec binding",
+    { allowEmpty: noSpec, context: "1688 spec binding" },
   );
   const selectedSku = skuOptions.find((sku) => (
     String(sku.externalSpecId || sku.external_spec_id || sku.specId || sku.spec_id || "") === externalSpecId
@@ -10821,9 +10863,10 @@ function bind1688CandidateSpecAction({ db, services, payload, actor }) {
     actor,
     {
       isDefault: true,
+      isNoSpec: noSpec,
       ourQty,
       platformQty,
-      platformSkuName: selectedSku.specText || selectedSku.spec_text || externalSpecId,
+      platformSkuName: selectedSku.specText || selectedSku.spec_text || externalSpecId || (noSpec ? "整款（无规格）" : null),
       remark: `本地 ${ourQty} 件 = 1688 ${platformQty} 件`,
     },
   );
@@ -12642,6 +12685,7 @@ function getPurchaseOrderLines(db, poId) {
       sku_source.external_offer_id AS sku_1688_offer_id,
       sku_source.external_sku_id AS sku_1688_sku_id,
       sku_source.external_spec_id AS sku_1688_spec_id,
+      sku_source.is_no_spec AS sku_1688_no_spec,
       sku_source.supplier_name AS sku_1688_supplier_name
     FROM erp_purchase_order_lines line
     LEFT JOIN erp_skus sku ON sku.id = line.sku_id
@@ -12667,7 +12711,8 @@ function aggregate1688CargoParamList(cargoParamList = []) {
   const grouped = new Map();
   for (const item of cargoParamList) {
     const offerId = requireString(item.offerId || item.offer_id, "cargoParamList.offerId");
-    const specId = require1688SpecId(item.specId || item.spec_id || item.cargoSkuId || item.cargo_sku_id, `offer ${offerId}`);
+    const noSpec = item.noSpec === true || item.isNoSpec === true || item.is_no_spec === 1;
+    const specId = optional1688SpecId(item.specId || item.spec_id || item.cargoSkuId || item.cargo_sku_id, { allowEmpty: noSpec, context: `offer ${offerId}` });
     const quantity = optionalPositiveInteger(item.quantity, 1);
     const key = `${offerId}\u0000${specId}`;
     const existing = grouped.get(key);
@@ -12675,24 +12720,25 @@ function aggregate1688CargoParamList(cargoParamList = []) {
       existing.quantity += quantity;
       continue;
     }
-    grouped.set(key, {
-      ...item,
-      offerId,
-      specId,
-      quantity,
-    });
+    // 无规格（offerId-only）：cargo 不塞 specId 键，发给 1688 的就是 {"offerId","quantity"}；
+    // 有规格则照旧 {"offerId","specId","quantity"}。
+    grouped.set(key, specId ? { offerId, specId, quantity } : { offerId, quantity });
   }
   return Array.from(grouped.values());
 }
 
 function build1688OrderCargoParamList(po, lines, payload = {}) {
   if (Array.isArray(payload.cargoParamList) && payload.cargoParamList.length) {
-    return aggregate1688CargoParamList(payload.cargoParamList.map((item, index) => ({
-      ...item,
-      offerId: requireString(item.offerId || item.offer_id, `cargoParamList[${index}].offerId`),
-      specId: require1688SpecId(item.specId || item.spec_id || item.cargoSkuId || item.cargo_sku_id, `cargoParamList[${index}]`),
-      quantity: optionalPositiveInteger(item.quantity, 1),
-    })));
+    return aggregate1688CargoParamList(payload.cargoParamList.map((item, index) => {
+      const noSpec = item.noSpec === true || item.isNoSpec === true || item.is_no_spec === 1;
+      return {
+        ...item,
+        offerId: requireString(item.offerId || item.offer_id, `cargoParamList[${index}].offerId`),
+        specId: optional1688SpecId(item.specId || item.spec_id || item.cargoSkuId || item.cargo_sku_id, { allowEmpty: noSpec, context: `cargoParamList[${index}]` }),
+        quantity: optionalPositiveInteger(item.quantity, 1),
+        noSpec,
+      };
+    }));
   }
   const cargoParamList = lines.flatMap((line) => {
     const mappings = Array.isArray(line.source_mappings) && line.source_mappings.length
@@ -12701,6 +12747,7 @@ function build1688OrderCargoParamList(po, lines, payload = {}) {
         external_offer_id: po.external_offer_id || line.sku_1688_offer_id,
         external_sku_id: po.external_sku_id || line.sku_1688_sku_id,
         external_spec_id: po.external_spec_id || line.sku_1688_spec_id,
+        is_no_spec: line.sku_1688_no_spec,
         our_qty: 1,
         platform_qty: 1,
       }];
@@ -12709,14 +12756,15 @@ function build1688OrderCargoParamList(po, lines, payload = {}) {
       if (!offerId) {
         throw new Error(`商品编码 ${line.internal_sku_code || line.sku_id} 还没有绑定供应商管理记录`);
       }
-      const specId = require1688SpecId(
+      const noSpec = mapping.is_no_spec === 1 || mapping.isNoSpec === true;
+      const specId = optional1688SpecId(
         mapping.external_spec_id,
-        `商品编码 ${line.internal_sku_code || line.sku_id}`,
+        { allowEmpty: noSpec, context: `商品编码 ${line.internal_sku_code || line.sku_id}` },
       );
       // 护栏：specId 与 skuId 同值通常意味着上游（遨虾等第三方接口）没返回真正的 cargoSkuId，
       // 1688 下单接口会拒绝。在请求送出之前就拦下，并给出明确的修复指引。
       const externalSkuId = optionalString(mapping.external_sku_id);
-      if (externalSkuId && externalSkuId === specId) {
+      if (!noSpec && externalSkuId && externalSkuId === specId) {
         throw new Error(
           `商品编码 ${line.internal_sku_code || line.sku_id} 的 1688 specId 与 skuId 同值（${specId}），可能不是真实 cargoSkuId；请到「供应商管理」重新「解析规格」、申请 1688 官方商品详情接口权限，或先手工到 1688 下单`,
         );
@@ -12727,6 +12775,7 @@ function build1688OrderCargoParamList(po, lines, payload = {}) {
         offerId,
         specId,
         quantity: Math.max(1, Math.ceil(Number(line.qty || 0) * platformQty / ourQty)),
+        noSpec,
       };
     });
   });
@@ -19910,6 +19959,11 @@ async function buildClientProductDetailMockPayload(payload = {}) {
     timeoutMs: 120000,
   });
   if (!hasSyncableSkuOptions(alphaShopDetail.detail)) {
+    // 接口成功返回商品(productTitle 在)但无可选 SKU → 单规格商品。标记回传 detail，让上层注入
+    // 「整款（无规格）」默认项（mockDetail 往返会 filter 掉空 sku，故走 clientNoSpecDetail 标志位）。
+    if (optionalString(alphaShopDetail.detail.productTitle || alphaShopDetail.detail.externalOfferId)) {
+      return { ...payload, offerId, productId: offerId, productID: offerId, clientNoSpecDetail: alphaShopDetail.detail };
+    }
     throw new Error("productDetailQuery 未返回可绑定规格，请换一个 1688 候选商品或检查遨虾接口返回");
   }
   return {
@@ -19940,10 +19994,20 @@ async function tryExtract1688SkusViaWorker(offerId) {
       { offerId: String(offerId) },
       { timeoutMs: 60000 },
     );
-    if (!workerResult || !Array.isArray(workerResult.skus) || !workerResult.skus.length) {
-      return null;
+    if (workerResult && Array.isArray(workerResult.skus) && workerResult.skus.length) {
+      return workerResult;
     }
-    return workerResult;
+    // 严格判定「确实单规格」：页面正常打开(htmlLen>0)、非验证码(!captcha)、非要登录(!requiresLogin)、
+    // 且全页无任何 specId(specIdHits===0)。这类商品 1688 上无可选 SKU，标记 noSpec 让上层产无规格默认项；
+    // 区别于反爬/超时/未登录（返回 null，让上层走其它 fallback 或报原错）。
+    if (workerResult
+      && Number(workerResult.specIdHits) === 0
+      && Number(workerResult.htmlLen) > 0
+      && !workerResult.captcha
+      && !workerResult.requiresLogin) {
+      return { ...workerResult, skus: [], noSpec: true };
+    }
+    return null;
   } catch (error) {
     console.error("[preview_1688_url_specs] worker extract_1688_skus failed:", String(error?.message || error));
     return null;
@@ -19973,6 +20037,10 @@ function build1688DetailFromWorkerSkus(workerResult, offerId, payload = {}) {
       raw: sku,
     };
   });
+  if (!skuOptions.length && workerResult.noSpec) {
+    // Worker 确认无规格：注入「整款（无规格）」默认项，让前端能选中绑定、下单走 offerId-only。
+    skuOptions.push(buildNoSpec1688Option({ imageUrl: workerResult.imageUrl, unitPrice: payload.unitPrice }, offerId));
+  }
   const productUrl = optionalString(workerResult.url || payload.productUrl) || `https://detail.1688.com/offer/${offerId}.html`;
   return {
     externalOfferId: offerId,
@@ -20054,7 +20122,10 @@ async function performClientPreview1688UrlSpecs(payload = {}) {
     "offerId",
   );
   const rawResponse = fallbackPayload.mockDetail || fallbackPayload.mockResponse;
-  const detail = normalize1688ProductDetailResponse(rawResponse);
+  // 单规格商品走标志位直接注入默认项；否则照常从 mockDetail 解析。
+  const detail = fallbackPayload.clientNoSpecDetail
+    ? { ...fallbackPayload.clientNoSpecDetail, skuOptions: [buildNoSpec1688Option(fallbackPayload.clientNoSpecDetail, offerId)] }
+    : normalize1688ProductDetailResponse(rawResponse);
   if (!hasSyncableSkuOptions(detail)) {
     throw new Error("productDetailQuery 未返回可绑定规格，请换一个 1688 地址或检查遨虾接口返回");
   }
