@@ -206,7 +206,8 @@ interface OutboundCache {
 
 type UnifiedRowSource = "cloud" | "jst" | "both";
 
-const JST_STATUS_OPTIONS = ["已发货", "取消", "已付款待审核", "异常", "发货中", "待付款"];
+// 聚水潭「异常」(src_status=Question)已统一规整为「已付款待审核」，下拉不再单列「异常」。
+const JST_STATUS_OPTIONS = ["已发货", "取消", "已付款待审核", "发货中", "待付款"];
 
 const UNIFIED_COLUMN_MENU_WIDTH = 280;
 const UNIFIED_COLUMN_MENU_EDGE_GAP = 12;
