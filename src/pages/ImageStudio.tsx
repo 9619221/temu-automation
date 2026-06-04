@@ -1637,6 +1637,7 @@ export default function ImageStudio() {
     { value: "me", code: "SA", label: "中东" },
     { value: "latam", code: "MX", label: "拉美" },
     { value: "br", code: "BR", label: "巴西" },
+    { value: "ozon", code: "RU", label: "俄罗斯" },
   ];
 
   const currentRegion = regionCards.find((region) => region.value === salesRegion);

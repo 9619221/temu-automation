@@ -10,7 +10,8 @@ export type ImageStudioSalesRegion =
   | "sea"
   | "me"
   | "latam"
-  | "br";
+  | "br"
+  | "ozon";
 
 export type ImageStudioImageType =
   | "main"
@@ -309,6 +310,7 @@ export const SALES_REGION_OPTIONS = [
   { value: "me", label: "中东 / Middle East" },
   { value: "latam", label: "拉美 / Latin America" },
   { value: "br", label: "巴西 / Brazil" },
+  { value: "ozon", label: "俄罗斯 / Ozon" },
 ] as const;
 
 export const IMAGE_LANGUAGE_OPTIONS = [
@@ -401,6 +403,7 @@ const SALES_REGION_LANGUAGE_MAP: Record<ImageStudioSalesRegion, ImageStudioLangu
   me: "ar",
   latam: "es",
   br: "pt",
+  ozon: "ru",
 };
 
 export function getDefaultImageLanguageForRegion(region: string): ImageStudioLanguage {

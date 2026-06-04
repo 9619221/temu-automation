@@ -5524,6 +5524,8 @@ ipcMain.handle("image-studio:analyze", async (_event, payload) => {
       fields: {
         productMode: payload?.productMode || "single",
         analysisProfile: payload?.analysisProfile || "",
+        salesRegion: payload?.salesRegion || "us",
+        imageLanguage: payload?.imageLanguage || "en",
       },
     }),
   });
@@ -5850,6 +5852,8 @@ ipcMain.handle("image-studio:supervisor-start", async (_event, payload) => {
     brandLogoUrl: typeof payload?.brandLogoUrl === "string" && payload.brandLogoUrl ? payload.brandLogoUrl : undefined,
     stopAtPhase: payload?.stopAtPhase === "review_passed" ? "review_passed" : "completed",
     skipAssetLibrary: payload?.skipAssetLibrary === true ? true : undefined,
+    salesRegion: typeof payload?.salesRegion === "string" && payload.salesRegion ? payload.salesRegion : "us",
+    imageLanguage: typeof payload?.imageLanguage === "string" && payload.imageLanguage ? payload.imageLanguage : "en",
   };
   return imageStudioJson("/api/agent/supervisor", {
     method: "POST",

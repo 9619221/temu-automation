@@ -8,6 +8,7 @@
  * 后续（M3）main.cjs 把 /api/agent/* 整体切到云端 erp.temu.chat，本组件无需改动。
  */
 import { useEffect, useRef, useState } from "react";
+import { IMAGE_LANGUAGE_OPTIONS, getDefaultImageLanguageForRegion } from "../utils/imageStudio";
 
 const api = (typeof window !== "undefined" ? (window as any).electronAPI?.imageStudioGpt : null);
 
@@ -84,6 +85,21 @@ const PIPELINE_STEP_LABELS: Record<string, string> = {
 const TERMINAL_STEPS = new Set(["completed", "review_stuck"]);
 const POLL_INTERVAL_MS = 2500;
 
+// 市场地区卡片（与「AI 出图」「GPT 版」保持一致）；选中后图片语言按地区自动联动
+const REGION_CARDS = [
+  { value: "us", code: "US", label: "美国" },
+  { value: "eu", code: "EU", label: "欧洲" },
+  { value: "uk", code: "GB", label: "英国" },
+  { value: "jp", code: "JP", label: "日本" },
+  { value: "kr", code: "KR", label: "韩国" },
+  { value: "cn", code: "CN", label: "中国" },
+  { value: "sea", code: "TH", label: "东南亚" },
+  { value: "me", code: "SA", label: "中东" },
+  { value: "latam", code: "MX", label: "拉美" },
+  { value: "br", code: "BR", label: "巴西" },
+  { value: "ozon", code: "RU", label: "俄罗斯" },
+];
+
 /* ============================ helpers ============================ */
 
 function fileToDataUrl(file: File): Promise<string> {
@@ -115,6 +131,8 @@ function fmtElapsed(ms: number): string {
 export default function ImageStudioAgent() {
   const [productFiles, setProductFiles] = useState<File[]>([]);
   const [competitorFiles, setCompetitorFiles] = useState<File[]>([]);
+  const [salesRegion, setSalesRegion] = useState("us");
+  const [imageLanguage, setImageLanguage] = useState<string>(getDefaultImageLanguageForRegion("us"));
 
   const [running, setRunning] = useState(false);
   const [statusText, setStatusText] = useState<string>("");
@@ -235,6 +253,8 @@ export default function ImageStudioAgent() {
       const analysis = await api.analyze({
         files: filePayloads,
         productMode: "single",
+        salesRegion,
+        imageLanguage,
       });
       if (!analysis || analysis.error) {
         throw new Error(analysis?.error ? String(analysis.error) : "商品分析失败");
@@ -252,6 +272,8 @@ export default function ImageStudioAgent() {
         productReferences,
         competitorImages,
         stopAtPhase: "completed",
+        salesRegion,
+        imageLanguage,
       });
       const jid = startRes?.jobId;
       if (!jid) throw new Error(startRes?.error ? String(startRes.error) : "启动失败，未拿到 jobId");
@@ -310,6 +332,90 @@ export default function ImageStudioAgent() {
           disabled={running}
           accent="#6b7280"
         />
+      </div>
+
+      {/* 目标市场 / 图片语言 */}
+      <div
+        style={{
+          padding: 14,
+          background: "#fff",
+          border: "1px solid #e5e7eb",
+          borderRadius: 12,
+          display: "grid",
+          gap: 12,
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            flexWrap: "wrap",
+          }}
+        >
+          <div style={{ fontSize: 13, fontWeight: 600, color: "#111" }}>
+            目标市场（决定出图风格与图上文案语言）
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#6b7280" }}>
+            图片语言
+            <select
+              value={imageLanguage}
+              disabled={running}
+              onChange={(e) => setImageLanguage(e.target.value)}
+              style={{
+                padding: "4px 8px",
+                fontSize: 12,
+                borderRadius: 6,
+                border: "1px solid #cbd5e1",
+                background: running ? "#f1f5f9" : "#fff",
+                cursor: running ? "not-allowed" : "pointer",
+              }}
+            >
+              {IMAGE_LANGUAGE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(6, minmax(0, 1fr))", gap: 8 }}>
+          {REGION_CARDS.map((region) => {
+            const isSelected = salesRegion === region.value;
+            return (
+              <button
+                key={region.value}
+                type="button"
+                disabled={running}
+                onClick={() => {
+                  setSalesRegion(region.value);
+                  setImageLanguage(getDefaultImageLanguageForRegion(region.value));
+                }}
+                style={{
+                  minHeight: 56,
+                  padding: "8px 6px",
+                  borderRadius: 10,
+                  border: isSelected ? "1px solid #2563eb" : "1px solid #d9e1ea",
+                  background: isSelected ? "#2563eb" : "#fff",
+                  color: isSelected ? "#fff" : "#314156",
+                  cursor: running ? "not-allowed" : "pointer",
+                  textAlign: "center",
+                  transition: "background-color 0.2s, color 0.2s, border-color 0.2s",
+                }}
+              >
+                <div style={{ fontSize: 14, fontWeight: 700 }}>{region.code}</div>
+                <div style={{ fontSize: 11, marginTop: 2 }}>{region.label}</div>
+              </button>
+            );
+          })}
+        </div>
+
+        <div style={{ fontSize: 12, color: "#6b7280" }}>
+          当前：{REGION_CARDS.find((r) => r.value === salesRegion)?.label || salesRegion} 市场 · 图上文案语言{" "}
+          {IMAGE_LANGUAGE_OPTIONS.find((o) => o.value === imageLanguage)?.label || imageLanguage}
+        </div>
       </div>
 
       {/* 操作区 */}
