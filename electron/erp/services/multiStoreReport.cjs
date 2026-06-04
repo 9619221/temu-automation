@@ -1412,7 +1412,8 @@ async function fetchQcFlawImages(db, options = {}) {
   const images = [];
   for (const u of urls.slice(0, 30)) { // 上限 30 张防滥用
     try {
-      const resp = await fetch(u, { headers: { Referer: "https://kuajingmaihuo.com/", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" } });
+      const thumbUrl = u + (u.includes("?") ? "&" : "?") + "imageMogr2/thumbnail/800x"; // COS 数据万象缩略(800px),体积降约4倍,疵点看合规标签够清
+      const resp = await fetch(thumbUrl, { headers: { Referer: "https://kuajingmaihuo.com/", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" } });
       if (!resp.ok) continue;
       const buf = Buffer.from(await resp.arrayBuffer());
       if (buf.length > 8 * 1024 * 1024) continue; // 单图 ≤ 8M
