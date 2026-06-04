@@ -9,7 +9,8 @@ const { Paragraph, Text } = Typography;
 
 interface OtherInoutRow {
   id: string;
-  ioId: number;
+  ioId: number | string;
+  isSwap?: boolean;
   ioDate?: string | null;
   type?: string | null;
   status?: string | null;
@@ -92,6 +93,7 @@ function statusColor(value?: string | null) {
 
 function typeColor(value?: string | null) {
   const text = String(value || "").trim();
+  if (/换货/.test(text)) return "purple";
   if (/入库/.test(text)) return "blue";
   if (/出库/.test(text)) return "orange";
   if (/调拨/.test(text)) return "purple";
@@ -198,7 +200,9 @@ export default function OtherInoutSection() {
       title: "出入库单号",
       key: "io_id",
       width: 120,
-      render: (_v, row) => <Text style={{ fontWeight: 600 }}>{row.ioId}</Text>,
+      render: (_v, row) => (row.isSwap
+        ? <Tag color="purple">换货单</Tag>
+        : <Text style={{ fontWeight: 600 }}>{row.ioId}</Text>),
     },
     {
       title: "业务时间",

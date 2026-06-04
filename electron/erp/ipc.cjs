@@ -6299,6 +6299,157 @@ function toJstOtherInoutItemRow(row) {
   };
 }
 
+// === 商品编码换货(swap_sku) 接入「其他出入库」列表（查询时实时聚合，不落表）===
+// 换货只写 erp_inventory_ledger_entries（库存流水），从不写 jst_other_inout。
+// jst_other_inout 由聚水潭导入脚本「整表 DELETE 重灌」，落表的换货单会被清掉，
+// 故这里在查询时把换货流水按 source_doc_id 聚合成「虚拟出入库单」混入列表（历史换货自动包含）。
+function swapRound2(n) {
+  const x = Number(n);
+  return Number.isFinite(x) ? Math.round(x * 100) / 100 : 0;
+}
+
+// ISO(UTC) → 与 jst_other_inout.io_date 一致的「北京时间 YYYY-MM-DD HH:MM:SS」，
+// 同列同格式后字符串排序即时间排序，两源得以正确混排。
+function isoToBeijingText(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso);
+  return new Date(d.getTime() + 8 * 3600 * 1000).toISOString().slice(0, 19).replace("T", " ");
+}
+
+// 一个 source_doc_id = 一次换货（含换出 sku_swap_out / 换入 sku_swap_in 多腿）。
+// 返回结构与 toJstOtherInoutRow 同构，额外带 isSwap 标记；ioDate 已规整为北京时间文本。
+function listSkuSwapOtherInout(db, params = {}) {
+  if (!db) return [];
+  let legs;
+  try {
+    legs = db.prepare(`
+      SELECT l.source_doc_id AS doc, l.type AS type, l.qty_delta AS qd, l.unit_cost AS uc,
+             l.created_at AS ts, COALESCE(u.name, l.created_by) AS creator, s.internal_sku_code AS code
+      FROM erp_inventory_ledger_entries l
+      LEFT JOIN erp_skus s ON s.id = l.sku_id
+      LEFT JOIN erp_users u ON u.id = l.created_by
+      WHERE l.type IN ('sku_swap_out', 'sku_swap_in')
+    `).all();
+  } catch (_e) {
+    return []; // 老库无该表/列时安全降级
+  }
+  const byDoc = new Map();
+  for (const r of legs) {
+    let g = byDoc.get(r.doc);
+    if (!g) { g = { doc: r.doc, out: [], in: [], creator: null, tsList: [] }; byDoc.set(r.doc, g); }
+    g.tsList.push(r.ts);
+    if (r.creator && !g.creator) g.creator = r.creator;
+    (r.type === "sku_swap_out" ? g.out : g.in).push(r);
+  }
+  let rows = [];
+  for (const g of byDoc.values()) {
+    const sorted = g.tsList.slice().sort();
+    const firstTs = sorted[0];
+    const lastTs = sorted[sorted.length - 1];
+    const outQty = g.out.reduce((s, x) => s + Math.abs(Number(x.qd) || 0), 0);
+    const outAmount = g.out.reduce((s, x) => s + Math.abs(Number(x.qd) || 0) * (Number(x.uc) || 0), 0);
+    const outCodes = g.out.map((x) => `${x.code || "?"} −${Math.abs(Number(x.qd) || 0)}`).join("、");
+    const inCodes = g.in.map((x) => `${x.code || "?"} +${Math.abs(Number(x.qd) || 0)}`).join("、");
+    const ioDate = isoToBeijingText(firstTs);
+    rows.push({
+      id: `swap:${g.doc}`,
+      companyId: null,
+      ioId: g.doc,
+      ioDate,
+      type: "商品编码换货",
+      status: "生效",
+      fStatus: null,
+      whId: null, lwhId: null, lwhName: null,
+      warehouse: "本地库存调拨",
+      wmsCoId: null, wmsCoName: null,
+      totalQty: outQty,
+      totalAmount: swapRound2(outAmount),
+      totalCost: swapRound2(outAmount),
+      reason: "商品编码换货",
+      drpCoId: null, node: null,
+      labels: null,
+      remark: `${outCodes} → ${inCodes}`,
+      creatorName: g.creator || null,
+      archiverName: null, archivedAt: null, modifierName: null,
+      createdText: ioDate,
+      modifiedText: isoToBeijingText(lastTs),
+      statusInternal: "active",
+      importedAt: null,
+      updatedAt: lastTs,
+      isSwap: true,
+    });
+  }
+  // 过滤(type/status/date/search)，与 jst 侧语义对齐
+  const typeFilter = optionalString(params.type);
+  if (typeFilter && typeFilter !== "商品编码换货") return [];
+  const statusFilter = optionalString(params.status);
+  if (statusFilter && statusFilter !== "生效") return [];
+  const dateFrom = optionalString(params.dateFrom || params.date_from);
+  if (dateFrom) rows = rows.filter((r) => (r.ioDate || "") >= dateFrom);
+  const dateTo = optionalString(params.dateTo || params.date_to);
+  if (dateTo) rows = rows.filter((r) => (r.ioDate || "") <= dateTo);
+  const search = optionalString(params.search || params.q);
+  if (search) {
+    const kw = search.toLowerCase();
+    rows = rows.filter((r) =>
+      String(r.ioId || "").toLowerCase().includes(kw) ||
+      String(r.type || "").toLowerCase().includes(kw) ||
+      String(r.creatorName || "").toLowerCase().includes(kw) ||
+      String(r.remark || "").toLowerCase().includes(kw) ||
+      String(r.warehouse || "").toLowerCase().includes(kw)
+    );
+  }
+  return rows;
+}
+
+// 换货虚拟单的明细：换出腿 / 换入腿各一行（或多行），从库存流水还原。
+function listSkuSwapItems(db, docId) {
+  if (!db || !docId) return [];
+  let legs;
+  try {
+    legs = db.prepare(`
+      SELECT l.type AS type, l.qty_delta AS qd, l.unit_cost AS uc, l.sku_id AS sku_id,
+             s.internal_sku_code AS code, s.product_name AS pname, s.color_spec AS spec,
+             s.jst_supplier_name AS supplier
+      FROM erp_inventory_ledger_entries l
+      LEFT JOIN erp_skus s ON s.id = l.sku_id
+      WHERE l.source_doc_id = ? AND l.type IN ('sku_swap_out', 'sku_swap_in')
+      ORDER BY l.type DESC, l.id ASC
+    `).all(docId);
+  } catch (_e) {
+    return [];
+  }
+  return legs.map((r, i) => {
+    const isOut = r.type === "sku_swap_out";
+    const qty = Math.abs(Number(r.qd) || 0);
+    const unit = Number(r.uc) || 0;
+    return {
+      id: `${docId}:${i}`,
+      companyId: null,
+      ioId: docId,
+      seq: i + 1,
+      skuId: r.code || r.sku_id,
+      iId: null,
+      name: `${isOut ? "【换出】" : "【换入】"}${r.pname || r.code || ""}`,
+      propertiesValue: r.spec || null,
+      picUrl: null,
+      qty,
+      unit: "件",
+      shelfLife: null,
+      costPrice: swapRound2(unit),
+      costAmount: swapRound2(qty * unit),
+      supplierId: null, supplierIId: null, supplierSkuId: null,
+      supplierName: r.supplier || null,
+      labels: isOut ? "换出" : "换入",
+      remark: null,
+      statusInternal: "active",
+      importedAt: null,
+      updatedAt: null,
+    };
+  });
+}
+
 function listJstOtherInout(params = {}) {
   const { db } = requireErp();
   const since = optionalString(params.since);
@@ -6309,8 +6460,6 @@ function listJstOtherInout(params = {}) {
   const values = {
     company_id: companyId,
     since,
-    limit: normalizeLimit(params.limit, 1000, 100000),
-    offset: normalizeOffset(params.offset),
   };
   if (companyId) conditions.push("company_id = @company_id");
   if (since) conditions.push("updated_at > @since");
@@ -6346,13 +6495,21 @@ function listJstOtherInout(params = {}) {
     conditions.push(`io_id IN (${placeholders.join(", ")})`);
   }
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-  const rows = db.prepare(`
+  // 不在 SQL 里 LIMIT/OFFSET：要先和换货虚拟单按业务时间混排，再统一分页。
+  // jst_other_inout 量级约千行，全量取出 + JS 排序分页可接受；涨到数万再改 SQL UNION。
+  const jstRows = db.prepare(`
     SELECT * FROM jst_other_inout
     ${where}
     ORDER BY io_date DESC, io_id DESC
-    LIMIT @limit OFFSET @offset
-  `).all(values);
-  return rows.map(toJstOtherInoutRow);
+  `).all(values).map(toJstOtherInoutRow);
+  // 精确取单(ioIds)或增量(since)语义下不混入换货，避免破坏调用方预期。
+  const swapRows = (ioIdsRaw && ioIdsRaw.length) || since ? [] : listSkuSwapOtherInout(db, params);
+  const merged = swapRows.length
+    ? [...jstRows, ...swapRows].sort((a, b) => String(b.ioDate || "").localeCompare(String(a.ioDate || "")))
+    : jstRows;
+  const offset = normalizeOffset(params.offset);
+  const limit = normalizeLimit(params.limit, 1000, 100000);
+  return merged.slice(offset, offset + limit);
 }
 
 function countJstOtherInout(params = {}) {
@@ -6378,11 +6535,21 @@ function countJstOtherInout(params = {}) {
   if (dateTo) { values.date_to = dateTo; conditions.push("io_date <= @date_to"); }
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const row = db.prepare(`SELECT COUNT(*) AS n FROM jst_other_inout ${where}`).get(values);
-  return Number(row?.n || 0);
+  const jstN = Number(row?.n || 0);
+  // 列表混入了换货虚拟单，总数也要加上（与 listJstOtherInout 的混入条件保持一致）。
+  const since = optionalString(params.since);
+  const ioIdsRaw = Array.isArray(params.ioIds || params.io_ids) ? (params.ioIds || params.io_ids) : null;
+  const swapN = (since || (ioIdsRaw && ioIdsRaw.length)) ? 0 : listSkuSwapOtherInout(db, params).length;
+  return jstN + swapN;
 }
 
 function listJstOtherInoutItems(params = {}) {
   const { db } = requireErp();
+  const ioIdRaw = optionalString(params.ioId || params.io_id);
+  // 换货虚拟单（ioId 形如 swap_sku-xxx）：明细从库存流水两腿还原，不查 jst_other_inout_items。
+  if (ioIdRaw && /^swap_sku/i.test(ioIdRaw)) {
+    return listSkuSwapItems(db, ioIdRaw);
+  }
   const includeDeleted = Boolean(params.includeDeleted || params.include_deleted);
   const companyId = optionalString(params.companyId || params.company_id);
   const ioId = optionalString(params.ioId || params.io_id);
