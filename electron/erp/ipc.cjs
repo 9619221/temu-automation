@@ -14012,6 +14012,33 @@ function selectBoundPoIdsForPaymentSync(db, { maxAgeHours, limit }) {
   `).all({ cutoff, limit });
 }
 
+// 第三阶段候选：已绑定 1688 订单号、但本地还没拿到物流单号的「在途」单。
+// 物流单号不随订单/支付同步自动来，需单独调 getLogisticsInfos。挑出该补物流的单：
+//   - 从没同步过物流(synced_at 空)，或
+//   - 同步过但物流是空壳({} 没拿到单号)且已冷却 4h(在途单持续重拉直到出单号)。
+// 排除死单/已取消/已完成/已入库(那些天生无物流，拉也白拉，避免狂打 1688 接口)。
+function selectPoIdsForLogisticsSync(db, { maxAgeHours, limit }) {
+  const cutoff = new Date(Date.now() - maxAgeHours * 3600 * 1000).toISOString();
+  const retryBefore = new Date(Date.now() - 4 * 3600 * 1000).toISOString();
+  return db.prepare(`
+    SELECT id, account_id, external_logistics_synced_at
+    FROM erp_purchase_orders
+    WHERE external_order_id IS NOT NULL AND external_order_id != ''
+      AND status NOT IN ('cancelled','closed','inbounded','exception')
+      AND COALESCE(external_order_status, '') NOT IN ('cancelled','orphan_cleared','closed','success')
+      AND created_at >= @cutoff
+      AND (
+        external_logistics_synced_at IS NULL OR external_logistics_synced_at = ''
+        OR (
+          COALESCE(length(external_logistics_json), 0) < 20
+          AND external_logistics_synced_at < @retryBefore
+        )
+      )
+    ORDER BY (external_logistics_synced_at IS NULL OR external_logistics_synced_at = '') DESC, created_at DESC
+    LIMIT @limit
+  `).all({ cutoff, retryBefore, limit });
+}
+
 async function runScheduledOrderSync({ maxAgeHours = 168, limit = 50, logger } = {}) {
   if (isClientMode()) return { skipped: "client_mode", processed: 0, results: [] };
   if (!erpState.db || !erpState.services) return { skipped: "erp_not_ready", processed: 0, results: [] };
@@ -14129,11 +14156,62 @@ async function runScheduledOrderSync({ maxAgeHours = 168, limit = 50, logger } =
       results.push({ poId: row.id, status: "error", error: errMsg });
     }
   }
+  // 第三阶段：补 1688 物流单号。物流不随订单/支付同步自动来，需单独调 getLogisticsInfos。
+  // 复用阶段一/二的退避状态机(key 加 logi: 前缀)与 failedAccounts 账号跳过。
+  const logisticsCandidates = selectPoIdsForLogisticsSync(db, { maxAgeHours, limit });
+  for (const row of logisticsCandidates) {
+    const stateKey = "logi:" + row.id;
+    const state = orderSyncAttemptState.get(stateKey) || { attempts: 0, nextAt: 0 };
+    if (state.nextAt && state.nextAt > now) {
+      results.push({ poId: row.id, status: "logistics_backoff_skip", nextAt: state.nextAt });
+      continue;
+    }
+    if (row.account_id && failedAccounts.has(row.account_id)) {
+      results.push({ poId: row.id, status: "logistics_account_skip" });
+      continue;
+    }
+    try {
+      await sync1688LogisticsAction({
+        db,
+        services,
+        payload: { poId: row.id },
+        actor: sysActor,
+      });
+      const fresh = getPurchaseOrder(db, row.id);
+      // 物流 JSON 有实质内容(非空壳 {})才算拿到单号；空壳说明在途还没出号，退避后下轮再拉。
+      const gotBill = Boolean(fresh.external_logistics_json) && String(fresh.external_logistics_json).length >= 20;
+      if (gotBill) {
+        orderSyncAttemptState.delete(stateKey);
+        log({ event: "logistics_synced", poId: row.id });
+        results.push({ poId: row.id, status: "logistics_synced" });
+      } else {
+        const nextAttempts = state.attempts + 1;
+        orderSyncAttemptState.set(stateKey, {
+          attempts: nextAttempts,
+          nextAt: now + getOrderSyncBackoffMs(nextAttempts),
+        });
+        log({ event: "logistics_empty", poId: row.id, attempts: nextAttempts });
+        results.push({ poId: row.id, status: "logistics_empty" });
+      }
+    } catch (e) {
+      const nextAttempts = state.attempts + 1;
+      orderSyncAttemptState.set(stateKey, {
+        attempts: nextAttempts,
+        nextAt: now + getOrderSyncBackoffMs(nextAttempts),
+      });
+      const errMsg = e?.message || String(e);
+      const looksLikeAuthIssue = /(权限|未授权|授权|access[\s_-]?token|oauth|unauthorized|forbidden|invalid[_\s-]?(?:token|signature))/i.test(errMsg);
+      if (looksLikeAuthIssue && row.account_id) failedAccounts.add(row.account_id);
+      log({ event: "logistics_error", poId: row.id, error: errMsg, attempts: nextAttempts });
+      results.push({ poId: row.id, status: "logistics_error", error: errMsg });
+    }
+  }
   return {
-    processed: candidates.length + boundCandidates.length,
+    processed: candidates.length + boundCandidates.length + logisticsCandidates.length,
     bound: results.filter((r) => r.status === "bound").length,
     paidAdvanced: 0,
     externalPaidPendingFinance: results.filter((r) => r.status === "pending_finance_confirmation").length,
+    logisticsSynced: results.filter((r) => r.status === "logistics_synced").length,
     results,
   };
 }
@@ -16374,7 +16452,7 @@ async function fetch1688OrderDetailAction({ db, services, payload, actor }) {
 }
 
 async function sync1688LogisticsAction({ db, services, payload, actor }) {
-  assertActorRole(actor, ["buyer", "manager", "admin", "warehouse"], "1688 物流同步");
+  assertActorRole(actor, ["buyer", "manager", "admin", "warehouse", "system"], "1688 物流同步");
   const po = getPurchaseOrder(db, requireString(payload.poId || payload.id, "poId"));
   const apiParams = build1688OrderIdParams(payload, po);
   if (payload.dryRun) return { dryRun: true, apiKey: PROCUREMENT_APIS.LOGISTICS_INFO.key, params: apiParams };
@@ -21482,6 +21560,9 @@ async function listJstConsignDeliverItemsRuntime(params = {}) {
       const payload = await remoteRequest("/api/master-data/consign-deliver-items", {
         method: "POST",
         body: { ...params, limit: params.limit || 5000 },
+        // 明细按单号点查本是毫秒级，但主控端单进程被重查询（如采购工作台 18MB 大包）占满时会排队；
+        // 默认 30s 在跨海 + 主控端繁忙叠加下不够用，与列表 unified（120s）对齐，避免整页预取糊一脸「连接主控端超时」。
+        timeoutMs: 120000,
       });
       return (payload && payload.rows) || [];
     } catch (error) {
