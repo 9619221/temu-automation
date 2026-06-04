@@ -1227,7 +1227,7 @@ export default function QcOutboundCenter() {
         onHeaderCell: buildColumnMenuHeaderProps,
       };
     });
-  }, [accounts.length, actingKey, canCreateOutbound, handleConsignShip, openUnifiedColumnMenu, resolveUnifiedRowLink, unifiedColumnConfig]);
+  }, [accounts.length, actingKey, canCreateOutbound, handleConsignShip, resolveUnifiedRowLink, unifiedColumnConfig]);
 
   if (!erp) {
     return (
