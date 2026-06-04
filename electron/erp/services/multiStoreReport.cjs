@@ -1107,7 +1107,7 @@ function _buildProductPanelOfficialFresh(db, options = {}) {
            s.product_skc_id, s.ext_code, s.spec_name, s.title, s.thumb_url,
            s.today_sales, s.last7d_sales, s.last30d_sales, s.sale_days,
            s.warehouse_stock, s.occupy_stock, s.unavailable_stock, s.advice_qty, s.lack_quantity,
-           s.wait_in_stock
+           s.wait_in_stock, s.onsales_duration_offline
       FROM erp_temu_openapi_sku_sales s
       LEFT JOIN erp_temu_malls m ON m.mall_id = s.mall_id
      WHERE 1=1 ${includeTest ? "" : "AND COALESCE(m.status,'active') <> 'test'"}
@@ -1121,7 +1121,7 @@ function _buildProductPanelOfficialFresh(db, options = {}) {
         title: r.title || null, thumb: r.thumb_url || null, _skc: new Set(), _sku: new Set(),
         declared_price: null, score: null, comments: null,
         stock: 0, occupy: 0, unavail: 0, advice: 0, lack: 0, lack_qty: 0, shipping: 0,
-        expose: null, click: null, pay: null, conv: null, grow: null, limited: false, act_cnt: 0, min_price: null, compliance: null,
+        expose: null, click: null, pay: null, conv: null, grow: null, limited: false, act_cnt: 0, min_price: null, compliance: null, onsales_duration: null,
         skus_detail: [] };
       map.set(k, e);
     }
@@ -1132,6 +1132,7 @@ function _buildProductPanelOfficialFresh(db, options = {}) {
     e.stock += toNum(r.warehouse_stock); e.occupy += toNum(r.occupy_stock); e.unavail += toNum(r.unavailable_stock);
     e.advice += toNum(r.advice_qty); e.lack_qty += toNum(r.lack_quantity);
     e.shipping += toNum(r.wait_in_stock); // 在途库存=官方 inventoryNumInfo 待收货(已发货未签收)+待入库
+    if (toNum(r.onsales_duration_offline) > 0) e.onsales_duration = toNum(r.onsales_duration_offline); // 加入站点天数(商品级,取有效值)
     if (toNum(r.warehouse_stock) <= 0) e.lack++;
     e.skus_detail.push({ skc_id: r.product_skc_id || null, sku_ext_code: r.ext_code || null, spec_name: r.spec_name || null, declared_price: null,
       today: toNum(r.today_sales), last7d: toNum(r.last7d_sales), last30d: toNum(r.last30d_sales), sale_days: r.sale_days == null ? null : Number(r.sale_days),
@@ -1144,7 +1145,13 @@ function _buildProductPanelOfficialFresh(db, options = {}) {
   const out = arr.slice(0, limit).map((e) => {
     const { _skc, _sku, _s30, ...rest } = e;
     // 子行按规格名排序(同色相邻、尺码递增),空规格排末尾;让同 SKC 多尺码堆叠更易读
-    rest.skus_detail.sort((a, b) => String(a.spec_name || "~").localeCompare(String(b.spec_name || "~"), "zh"));
+    // numeric:true 走自然排序(39<118,而非字典序里"118"<"39");排序 key 去空白,消除"17.7 英寸"vs"17.7英寸"格式不一致致乱序
+    const specKey = (x) => String(x.spec_name || "").replace(/\s+/g, "");
+    rest.skus_detail.sort((a, b) => {
+      const ka = specKey(a), kb = specKey(b);
+      if (!ka || !kb) return (ka ? 0 : 1) - (kb ? 0 : 1); // 空规格垫底
+      return ka.localeCompare(kb, "zh", { numeric: true });
+    });
     return { ...rest, skc_codes: [..._skc].join(",") || null, sku_codes: [..._sku].join(",") || null,
       total_stock: rest.stock + rest.unavail - rest.lack_qty + rest.shipping };
   });
