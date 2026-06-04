@@ -507,6 +507,7 @@ export default function ConsignAfterSalesSection() {
         </Space>
       ),
     },
+    { title: "商品编码", dataIndex: "internalSkuCode", key: "internalSkuCode", width: 150, render: (v) => (v ? <Text copyable={{ text: String(v) }}>{v}</Text> : <Text type="secondary">未对应</Text>) },
     { title: "规格", dataIndex: "spec", key: "spec", width: 160, render: (v) => v || "-" },
     { title: "数量", dataIndex: "qty", key: "qty", width: 100, align: "right", render: (v) => formatNumber(v) },
     { title: "采购子单", dataIndex: "purchaseSn", key: "purchaseSn", width: 200, render: (v) => v || "-" },

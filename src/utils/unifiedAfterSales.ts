@@ -60,6 +60,8 @@ export interface PlatformAfterSaleItem {
   skuId?: string | null;
   skcId?: string | null;
   spuId?: string | null;
+  // 商品编码（= 货号，退货记录本身不带，由后端从官方 SKU 表按 productSkuId 中转 ext_code 补上）
+  internalSkuCode?: string | null;
   spec?: string | null;
   qty?: number | null;
   purchaseSn?: string | null;
@@ -135,6 +137,7 @@ function officialReturnToItem(rec: OfficialReturnRecord): PlatformAfterSaleItem 
     skuId: raw.productSkuId != null ? String(raw.productSkuId) : null,
     skcId: raw.productSkcId != null ? String(raw.productSkcId) : (rec.product_skc_id || null),
     spuId: raw.productSpuId != null ? String(raw.productSpuId) : null,
+    internalSkuCode: rec.ext_code || null,
     spec,
     qty: Number(raw.quantity ?? 0) || null,
     purchaseSn: raw.purchaseSubOrderSn || null,

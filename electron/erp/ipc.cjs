@@ -2840,10 +2840,20 @@ function listTemuOpenApiRecordsBySource(payload = {}, actor = {}) {
   // 广告报表(ad_report_*)需要 raw_json 里的指标体；退货(return)需要包裹内 SKU 明细/规格/原因/图片
   // 等送仓售后字段；生命周期/邀约等只用通用列，解析+回传 raw 会让大行数 payload 巨大且慢，故仅这两类带 raw。
   const needRaw = source.startsWith("ad_report") || source === "return" || source === "return_package";
+  // return 源（送仓售后退货明细）本身不带货号（ext_code 普遍为空），从官方商品 SKU 表按 productSkuId 中转补
+  // 货号（erp_temu_openapi_skus.ext_code == internal_sku_code，见 mig062），供前端明细直接显示商品编码。
+  const bridgeExtCode = source === "return";
+  const extCodeSelect = bridgeExtCode
+    ? "COALESCE(NULLIF(r.ext_code, ''), k.ext_code) AS ext_code"
+    : "r.ext_code";
+  const bridgeJoin = bridgeExtCode
+    ? "LEFT JOIN erp_temu_openapi_skus k ON k.mall_id = r.mall_id AND k.product_sku_id = CAST(json_extract(r.raw_json, '$.productSkuId') AS TEXT)"
+    : "";
   const records = db.prepare(`
-    SELECT r.mall_id, r.product_id, r.product_skc_id, r.ext_code, r.status, r.biz_time${needRaw ? ", r.raw_json" : ""}
+    SELECT r.mall_id, r.product_id, r.product_skc_id, ${extCodeSelect}, r.status, r.biz_time${needRaw ? ", r.raw_json" : ""}
     FROM erp_temu_openapi_records r
     JOIN erp_temu_openapi_auth a ON a.mall_id = r.mall_id AND a.status = 'active'
+    ${bridgeJoin}
     WHERE r.source = ?
   `).all(source);
   const rows = records.map((rec) => {
