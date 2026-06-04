@@ -6110,6 +6110,13 @@ function toJstConsignDeliveryRow(row) {
 
 function toJstConsignDeliverItemRow(row) {
   if (!row) return null;
+  // 成本兜底：聚水潭历史明细 cost_price/cost_amount 整列为空（同步未带成本），
+  // listJstConsignDeliverItems 已按货号归一出款级成本 fallback_cost_price，此处仅在表内成本为空时启用。
+  const costPrice = row.cost_price != null ? Number(row.cost_price)
+    : (row.fallback_cost_price != null ? Number(row.fallback_cost_price) : null);
+  const qtyNum = Number(row.qty || 0);
+  const costAmount = row.cost_amount != null ? Number(row.cost_amount)
+    : (costPrice != null ? Math.round(qtyNum * costPrice * 100) / 100 : null);
   return {
     id: row.id,
     companyId: row.company_id,
@@ -6129,8 +6136,8 @@ function toJstConsignDeliverItemRow(row) {
     basePrice: row.base_price,
     price: row.price,
     amount: row.amount,
-    costPrice: row.cost_price,
-    costAmount: row.cost_amount,
+    costPrice,
+    costAmount,
     // 本地实发数量：NULL 表示未单独设置，前端按 qty（备货数）默认全发展示。
     localShipQty: row.local_ship_qty != null ? Number(row.local_ship_qty) : null,
     statusInternal: row.status_internal,
@@ -6226,14 +6233,25 @@ function listJstConsignDeliverItems(params = {}) {
     limit: normalizeLimit(params.limit, 2000),
     offset: normalizeOffset(params.offset),
   };
-  if (companyId) conditions.push("company_id = @company_id");
-  if (!includeDeleted) conditions.push("status_internal != 'deleted'");
-  if (oId) conditions.push("o_id = @o_id");
+  if (companyId) conditions.push("i.company_id = @company_id");
+  if (!includeDeleted) conditions.push("i.status_internal != 'deleted'");
+  if (oId) conditions.push("i.o_id = @o_id");
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  // 成本兜底：聚水潭历史明细成本整列为空，按「货号前 6 位」归一到成本库（weighted_avg_cost 优先，退 jst_cost_price）
+  // 补出款级成本 fallback_cost_price，与 cloud-only 单（temuOpenApiConsign）同口径。仅展示兜底、不回填、可秒回滚。
+  // 每次只查单个 o_id 的几行明细，子查询全扫 erp_skus（数万行）聚合一次，耗时可忽略。
   const rows = db.prepare(`
-    SELECT * FROM jst_consign_deliver_items
+    SELECT i.*, cm.cost AS fallback_cost_price
+    FROM jst_consign_deliver_items i
+    LEFT JOIN (
+      SELECT substr(internal_sku_code, 1, 6) AS code6,
+             MAX(COALESCE(NULLIF(weighted_avg_cost, 0), NULLIF(jst_cost_price, 0))) AS cost
+      FROM erp_skus
+      WHERE internal_sku_code IS NOT NULL AND length(internal_sku_code) >= 6
+      GROUP BY substr(internal_sku_code, 1, 6)
+    ) cm ON cm.code6 = substr(i.i_id, 1, 6)
     ${where}
-    ORDER BY o_id DESC, oi_id ASC
+    ORDER BY i.o_id DESC, i.oi_id ASC
     LIMIT @limit OFFSET @offset
   `).all(values);
   return rows.map(toJstConsignDeliverItemRow);
