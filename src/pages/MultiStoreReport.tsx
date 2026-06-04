@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import PurchaseReportPanel from "./PurchaseReport";
+import { formatStoreNo, formatMallName } from "../utils/storeDisplay";
 import {
   Alert,
   AutoComplete,
@@ -183,7 +184,7 @@ function DeltaTag({ value }: { value: number | null }) {
 function StoreCell({ store }: { store: ReportStore }) {
   return (
     <span>
-      <Typography.Text strong>{store.store_code || "—"}</Typography.Text>
+      <Typography.Text strong>{formatStoreNo(store.store_code, store.mall_id)}</Typography.Text>
       {store.owner && (
         <Tag color="blue" style={{ marginLeft: 6 }}>{store.owner}</Tag>
       )}
@@ -192,7 +193,7 @@ function StoreCell({ store }: { store: ReportStore }) {
 }
 
 function storeNameCell(store: ReportStore) {
-  return <span style={{ color: "#555" }}>{store.mall_name || "(未命名)"}</span>;
+  return <span style={{ color: "#555" }}>{formatMallName(store.mall_name, "(未命名)")}</span>;
 }
 const storeNameSorter = (a: ReportStore, b: ReportStore) => (a.mall_name || "").localeCompare(b.mall_name || "");
 
@@ -471,8 +472,8 @@ export default function MultiStoreReport() {
 
   // === 销售管理：SKU 明细列 ===
   const salesColumns: ColumnsType<SkuRow> = [
-    { title: "店号", dataIndex: "store_code", width: 78, fixed: "left", render: (v) => <Typography.Text strong>{v || "—"}</Typography.Text>, sorter: (a, b) => (a.store_code || "").localeCompare(b.store_code || "") },
-    { title: "店铺", dataIndex: "mall_name", width: 130, render: (v) => <span style={{ color: "#555" }}>{v || "—"}</span> },
+    { title: "店号", dataIndex: "store_code", width: 78, fixed: "left", render: (v) => <Typography.Text strong>{formatStoreNo(v)}</Typography.Text>, sorter: (a, b) => (a.store_code || "").localeCompare(b.store_code || "") },
+    { title: "店铺", dataIndex: "mall_name", width: 130, render: (v: string | null) => <span style={{ color: "#555" }}>{formatMallName(v)}</span> },
     {
       title: "SKU / 商品", key: "sku", width: 300,
       render: (_, r) => (
@@ -570,8 +571,8 @@ export default function MultiStoreReport() {
 
   // === Tab 4: 店铺归属 ===
   const ownerEditColumns: ColumnsType<ReportStore> = [
-    { title: "店号", dataIndex: "store_code", width: 90, fixed: "left", render: (v) => <Typography.Text strong>{v || "—"}</Typography.Text>, sorter: (a, b) => (a.store_code || "").localeCompare(b.store_code || ""), defaultSortOrder: "ascend" },
-    { title: "店铺名", dataIndex: "mall_name", width: 200, render: (v) => v || "(未命名)" },
+    { title: "店号", dataIndex: "store_code", width: 90, fixed: "left", render: (v, r) => <Typography.Text strong>{formatStoreNo(v, r.mall_id)}</Typography.Text>, sorter: (a, b) => (a.store_code || "").localeCompare(b.store_code || ""), defaultSortOrder: "ascend" },
+    { title: "店铺名", dataIndex: "mall_name", width: 200, render: (v: string | null) => formatMallName(v, "(未命名)") },
     { title: "站点", dataIndex: "site", width: 120, render: (v) => v || "—" },
     {
       title: "运营负责人", key: "owner", width: 220,
