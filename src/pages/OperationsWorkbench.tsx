@@ -66,7 +66,7 @@ interface ProductPanelRow {
   mall_id: string; product_id: string; store_code: string | null; mall_name: string | null; title: string | null; thumb: string | null;
   skc_codes: string | null; sku_codes: string | null; declared_price: number | null; score: number | null; comments: number | null;
   stock: number | null; occupy: number | null; unavail: number | null; advice: number | null; lack: number | null; lack_qty: number | null; shipping: number | null; total_stock: number | null;
-  expose: number | null; click: number | null; pay: number | null; conv: number | null; grow: string | null; onsales_duration: number | null;
+  expose: number | null; click: number | null; pay: number | null; conv: number | null; grow: string | null; onsales_duration: number | null; hot_tag?: boolean; has_hot_sku?: boolean;
   limited: boolean; act_cnt: number; min_price: number | null; compliance: string | null; skus_detail?: SkuChild[]; __rk?: number;
 }
 
@@ -922,7 +922,11 @@ export default function OperationsWorkbench() {
             {codes.map((c, i) => <span key={i}>SKC <Typography.Text copyable={{ text: c }} style={{ fontSize: 11, color: "#8c8c8c" }}>{c}</Typography.Text></span>)}
             {!OFFICIAL_SOURCE && <a onClick={(e) => { e.stopPropagation(); setTrendOf({ productId: String(r.product_id), title: r.title || String(r.product_id) }); }} style={{ fontSize: 11 }}>销量趋势</a>}
           </div>
-          {r.onsales_duration && r.onsales_duration > 0 ? <div style={{ marginTop: 2, fontSize: 11, color: "#8c8c8c" }}>加入站点 <span style={{ color: "#595959" }}>{fmtNum(r.onsales_duration)} 天</span></div> : null}
+          {(r.hot_tag || r.has_hot_sku || (r.onsales_duration && r.onsales_duration > 0)) ? <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", gap: 4 }}>
+            {r.hot_tag ? <Tag color="red" style={{ fontSize: 11, marginInlineEnd: 0, lineHeight: "18px" }}>热销款</Tag> : null}
+            {r.has_hot_sku ? <Tag color="volcano" style={{ fontSize: 11, marginInlineEnd: 0, lineHeight: "18px" }}>爆旺SKU</Tag> : null}
+            {r.onsales_duration && r.onsales_duration > 0 ? <Tag color="blue" style={{ fontSize: 11, marginInlineEnd: 0, lineHeight: "18px" }}>加入站点 {fmtNum(r.onsales_duration)} 天</Tag> : null}
+          </div> : null}
         </div>
       </div>
       );

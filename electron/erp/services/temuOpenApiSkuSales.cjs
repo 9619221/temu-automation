@@ -66,6 +66,8 @@ function parseSalesRecords(recordRows) {
         wait_in_stock: (num(inv.waitInStock) || 0) + (num(inv.waitReceiveNum) || 0),
         supply_status: str(item.supplyStatus),
         onsales_duration_offline: num(item.onSalesDurationOffline),
+        hot_tag: item.hotTag ? 1 : 0,        // 热销款（商品级）
+        has_hot_sku: item.hasHotSku ? 1 : 0, // 存在爆旺款 SKU（商品级）
       });
     }
   }
@@ -81,11 +83,11 @@ function refreshSkuSalesAll(db) {
     INSERT OR REPLACE INTO erp_temu_openapi_sku_sales
       (mall_id, product_id, product_skc_id, product_sku_id, ext_code, title, thumb_url, category, spec_name,
        today_sales, last7d_sales, last30d_sales, total_sales, sale_days, advice_qty, lack_quantity,
-       warehouse_stock, occupy_stock, unavailable_stock, wait_in_stock, supply_status, onsales_duration_offline, synced_at)
+       warehouse_stock, occupy_stock, unavailable_stock, wait_in_stock, supply_status, onsales_duration_offline, hot_tag, has_hot_sku, synced_at)
     VALUES
       (@mall_id, @product_id, @product_skc_id, @product_sku_id, @ext_code, @title, @thumb_url, @category, @spec_name,
        @today_sales, @last7d_sales, @last30d_sales, @total_sales, @sale_days, @advice_qty, @lack_quantity,
-       @warehouse_stock, @occupy_stock, @unavailable_stock, @wait_in_stock, @supply_status, @onsales_duration_offline, @now)
+       @warehouse_stock, @occupy_stock, @unavailable_stock, @wait_in_stock, @supply_status, @onsales_duration_offline, @hot_tag, @has_hot_sku, @now)
   `);
   const tx = db.transaction(() => {
     db.prepare("DELETE FROM erp_temu_openapi_sku_sales").run();

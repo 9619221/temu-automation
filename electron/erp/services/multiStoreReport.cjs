@@ -1107,7 +1107,7 @@ function _buildProductPanelOfficialFresh(db, options = {}) {
            s.product_skc_id, s.ext_code, s.spec_name, s.title, s.thumb_url,
            s.today_sales, s.last7d_sales, s.last30d_sales, s.sale_days,
            s.warehouse_stock, s.occupy_stock, s.unavailable_stock, s.advice_qty, s.lack_quantity,
-           s.wait_in_stock, s.onsales_duration_offline
+           s.wait_in_stock, s.onsales_duration_offline, s.hot_tag, s.has_hot_sku
       FROM erp_temu_openapi_sku_sales s
       LEFT JOIN erp_temu_malls m ON m.mall_id = s.mall_id
      WHERE 1=1 ${includeTest ? "" : "AND COALESCE(m.status,'active') <> 'test'"}
@@ -1121,7 +1121,7 @@ function _buildProductPanelOfficialFresh(db, options = {}) {
         title: r.title || null, thumb: r.thumb_url || null, _skc: new Set(), _sku: new Set(),
         declared_price: null, score: null, comments: null,
         stock: 0, occupy: 0, unavail: 0, advice: 0, lack: 0, lack_qty: 0, shipping: 0,
-        expose: null, click: null, pay: null, conv: null, grow: null, limited: false, act_cnt: 0, min_price: null, compliance: null, onsales_duration: null,
+        expose: null, click: null, pay: null, conv: null, grow: null, limited: false, act_cnt: 0, min_price: null, compliance: null, onsales_duration: null, hot_tag: false, has_hot_sku: false,
         skus_detail: [] };
       map.set(k, e);
     }
@@ -1133,6 +1133,8 @@ function _buildProductPanelOfficialFresh(db, options = {}) {
     e.advice += toNum(r.advice_qty); e.lack_qty += toNum(r.lack_quantity);
     e.shipping += toNum(r.wait_in_stock); // 在途库存=官方 inventoryNumInfo 待收货(已发货未签收)+待入库
     if (toNum(r.onsales_duration_offline) > 0) e.onsales_duration = toNum(r.onsales_duration_offline); // 加入站点天数(商品级,取有效值)
+    if (toNum(r.hot_tag) > 0) e.hot_tag = true; // 热销款(商品级)
+    if (toNum(r.has_hot_sku) > 0) e.has_hot_sku = true; // 存在爆旺款SKU(商品级)
     if (toNum(r.warehouse_stock) <= 0) e.lack++;
     e.skus_detail.push({ skc_id: r.product_skc_id || null, sku_ext_code: r.ext_code || null, spec_name: r.spec_name || null, declared_price: null,
       today: toNum(r.today_sales), last7d: toNum(r.last7d_sales), last30d: toNum(r.last30d_sales), sale_days: r.sale_days == null ? null : Number(r.sale_days),
