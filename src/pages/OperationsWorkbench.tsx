@@ -6,6 +6,7 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, Lege
 import { useNavigate } from "react-router-dom";
 import { formatStoreNo, formatMallName } from "../utils/storeDisplay";
 import { HIDE_RISK, HIDE_ACTIVITY, HIDE_REVIEW, OFFICIAL_SOURCE, HIDE_DIAG, HIDE_RESTOCK, HIDE_STOCK } from "../utils/operationsFlags";
+import { useSessionState } from "../hooks/useSessionState";
 
 // 分页「每页条数」选择器:antd 5.25+ 默认带搜索框(聚焦冒出可编辑光标),这里强制关掉
 const NoSearchSelect = (props: Record<string, unknown>) => <Select {...props} showSearch={false} />;
@@ -146,13 +147,14 @@ const calcAdvice = (today: number, last7d: number, totalStock: number, hour: num
 };
 
 export default function OperationsWorkbench() {
-  const [activeTab, setActiveTab] = useState("overview");
+  const owViewKey = (suffix: string) => `temu.ops-workbench.${suffix}`;
+  const [activeTab, setActiveTab] = useSessionState(owViewKey("tab"), "overview");
   // 「我的店」视角:按负责人(owner)过滤全局,记住上次选择
   const [ownerFilter, setOwnerFilter] = useState<string>(() => { try { return localStorage.getItem("ow_owner") || "all"; } catch { return "all"; } });
   const setOwner = useCallback((v: string) => { setOwnerFilter(v); try { localStorage.setItem("ow_owner", v); } catch { /* */ } }, []);
   // 合并 Tab 内的子段切换
-  const [storeSeg, setStoreSeg] = useState<string>("ad");
-  const [prodSeg, setProdSeg] = useState<string>("panel");
+  const [storeSeg, setStoreSeg] = useSessionState<string>(owViewKey("storeSeg"), "ad");
+  const [prodSeg, setProdSeg] = useSessionState<string>(owViewKey("prodSeg"), "panel");
   const goProduct = useCallback((seg: string) => { setProdSeg(seg); setActiveTab("product"); }, []);
   const [skuRows, setSkuRows] = useState<SkuRow[]>([]);
   const [skuLoading, setSkuLoading] = useState(false);
@@ -182,18 +184,18 @@ export default function OperationsWorkbench() {
   const [panelLoaded, setPanelLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [storeFilter, setStoreFilter] = useState("all");
-  const [diagFilter, setDiagFilter] = useState("all");
-  const [search, setSearch] = useState("");
-  const [sevFilter, setSevFilter] = useState("all");
-  const [kindFilter, setKindFilter] = useState("all");
-  const [todoType, setTodoType] = useState("all");
-  const [todoStatus, setTodoStatus] = useState("open"); // 默认只看待处理
+  const [storeFilter, setStoreFilter] = useSessionState(owViewKey("storeFilter"), "all");
+  const [diagFilter, setDiagFilter] = useSessionState(owViewKey("diagFilter"), "all");
+  const [search, setSearch] = useSessionState(owViewKey("search"), "");
+  const [sevFilter, setSevFilter] = useSessionState(owViewKey("sevFilter"), "all");
+  const [kindFilter, setKindFilter] = useSessionState(owViewKey("kindFilter"), "all");
+  const [todoType, setTodoType] = useSessionState(owViewKey("todoType"), "all");
+  const [todoStatus, setTodoStatus] = useSessionState(owViewKey("todoStatus"), "open"); // 默认只看待处理
   const [batchPrice, setBatchPrice] = useState<number | null>(null); // 活动报名:批量填申报价
   const [batchStock, setBatchStock] = useState<number | null>(null); // 活动报名:批量填库存
   const [selActRows, setSelActRows] = useState<ActivityRow[]>([]); // 活动报名:勾选待提交行
   const [enrollBusy, setEnrollBusy] = useState(false);
-  const [actSkuOnly, setActSkuOnly] = useState(true); // 活动报名:仅看有货号的行(店铺-商品-活动维度)
+  const [actSkuOnly, setActSkuOnly] = useSessionState(owViewKey("actSkuOnly"), true); // 活动报名:仅看有货号的行(店铺-商品-活动维度)
   // 待办闭环(第一版落 localStorage,零后端撞车;task key 稳定,后续可平滑迁 op_task_state 表)
   const [todoState, setTodoState] = useState<Record<string, "done" | "ignored">>(() => {
     try { return JSON.parse(localStorage.getItem("ow_todo_state") || "{}"); } catch { return {}; }
@@ -887,20 +889,20 @@ export default function OperationsWorkbench() {
   ];
 
   // 估算文本在规格列(宽~150,可用~138px)的像素宽:中文/全角按12px,空格4px,其余(数字/字母/标点)7px
-  const estTextW = (t: string | null | undefined) => { let w = 0; for (const ch of String(t ?? "")) w += /[一-龥＀-￯]/.test(ch) ? 12 : ch === " " ? 4 : 7; return w; };
-  // SKU 堆叠单元格:把同一 SPU 下多个 SKU 竖直堆叠。各列传入的是同一 skus 数组,故据最长规格名算出统一行高 rh,
-  // 让规格名换行时,货号/销量/库存等所有列仍逐行横向对齐(此前用 minHeight,规格列换行变高致跨列错位);total 不为空追加合计行
+  const estTextW = (t: string | null | undefined) => { let w = 0; for (const ch of String(t ?? "")) w += /[一-龥＀-￯]/.test(ch) ? 13 : ch === " " ? 4 : 7.5; return w; };
+  // SKU 堆叠单元格:把同一 SPU 下多个 SKU 竖直堆叠,数据撑满整行高度(消除 SKU 少、商品图+标题较高时右侧数据下方的留白)。
+  // 关键:每列都渲染 N 个数据行 + 1 个合计行(无 total 的列渲染空白占位行),保证各列行数一致;每行 flex:1 等分撑满。
+  // 外层 height:100% 依赖 CSS .op-panel-table td{height:1px} 让百分比生效;minHeight 兜底——td 不够高时按内容紧凑、不挤压。
   const stackCell = (skus: SkuChild[], get: (s: SkuChild) => React.ReactNode, total?: React.ReactNode) => {
     if (!skus.length) return <span style={{ color: "#bbb" }}>—</span>;
-    if (skus.length === 1) return <span style={{ fontSize: 12 }}>{get(skus[0])}</span>;
-    const lineH = 17;
-    const maxLines = Math.max(1, ...skus.map((s) => Math.ceil(estTextW(s.spec_name) / 138)));
-    const rh = maxLines * lineH + 4;
-    const cell: React.CSSProperties = { height: rh, boxSizing: "border-box", padding: "2px 0", overflow: "hidden", fontSize: 12, lineHeight: `${lineH}px` };
+    const lineH = 19;
+    if (skus.length === 1) return <div style={{ height: "100%", minHeight: lineH + 4, display: "flex", flexDirection: "column", justifyContent: "center", fontSize: 13 }}>{get(skus[0])}</div>;
+    const rowMin = (s: SkuChild) => Math.max(1, Math.ceil(estTextW(s.spec_name) / 128)) * lineH + 4;
+    const rowBase: React.CSSProperties = { boxSizing: "border-box", padding: "2px 0", overflow: "hidden", fontSize: 13, lineHeight: `${lineH}px`, display: "flex", flexDirection: "column", justifyContent: "center", flex: "1 1 0" };
     return (
-      <div>
-        {skus.map((s, i) => <div key={i} style={{ ...cell, borderBottom: "1px solid #f5f5f5" }}>{get(s)}</div>)}
-        {total != null && <div style={{ ...cell, fontWeight: 600, color: "#1a73e8" }}>合计 {total}</div>}
+      <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: (skus.length + 1) * (lineH + 4) }}>
+        {skus.map((s, i) => <div key={i} style={{ ...rowBase, minHeight: rowMin(s), borderBottom: "1px solid #f5f5f5" }}>{get(s)}</div>)}
+        <div style={{ ...rowBase, minHeight: lineH + 4, fontWeight: total != null ? 600 : 400, color: total != null ? "#1a73e8" : undefined }}>{total != null ? <>合计 {total}</> : null}</div>
       </div>
     );
   };
@@ -909,25 +911,27 @@ export default function OperationsWorkbench() {
   const adviceOf = (r: ProductPanelRow) => { const skus = skusOf(r); return calcAdvice(skus.reduce((a, s) => a + (s.today || 0), 0), skus.reduce((a, s) => a + (s.last7d || 0), 0), r.total_stock || 0, nowHour); };
 
   const panelColumns: ColumnsType<ProductPanelRow> = [
-    { title: "店号", dataIndex: "store_code", width: 88, fixed: "left", render: (v, r) => formatStoreNo(v === r.mall_id ? null : v, r.mall_id) },
-    { title: "商品", key: "prod", width: 380, render: (_, r) => {
+    { title: "店号", dataIndex: "store_code", width: 88, fixed: "left", render: (v, r) => <div style={{ height: "100%", display: "flex", flexDirection: "column", justifyContent: "center" }}>{formatStoreNo(v === r.mall_id ? null : v, r.mall_id)}</div> },
+    { title: "商品", key: "prod", width: 410, render: (_, r) => {
       const codes = (r.skc_codes || "").split(",").map((c) => c.trim()).filter(Boolean);
       return (
-      <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-        {r.thumb ? <div style={{ flexShrink: 0, width: 40, height: 40 }}><Image src={r.thumb} width={40} height={40} style={{ objectFit: "cover", borderRadius: 4 }} preview={{ mask: <EyeOutlined />, maskClassName: "prod-thumb-mask" }} /></div> : <div style={{ width: 40, height: 40, borderRadius: 4, background: "#f0f0f0", flexShrink: 0 }} />}
+      <div style={{ height: "100%", display: "flex", flexDirection: "column", justifyContent: "center" }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+        {r.thumb ? <div style={{ flexShrink: 0, width: 56, height: 56 }}><Image src={r.thumb} width={56} height={56} style={{ objectFit: "cover", borderRadius: 4 }} preview={{ mask: <EyeOutlined />, maskClassName: "prod-thumb-mask" }} /></div> : <div style={{ width: 56, height: 56, borderRadius: 4, background: "#f0f0f0", flexShrink: 0 }} />}
         <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 12, lineHeight: 1.45, whiteSpace: "normal", wordBreak: "break-word" }}>{r.title || "—"}</div>
-          <div style={{ marginTop: 3, fontSize: 11, color: "#8c8c8c", display: "flex", flexWrap: "wrap", gap: "0 10px" }}>
-            <span>SPU <Typography.Text copyable={{ text: String(r.product_id) }} style={{ fontSize: 11, color: "#8c8c8c" }}>{r.product_id}</Typography.Text></span>
-            {codes.map((c, i) => <span key={i}>SKC <Typography.Text copyable={{ text: c }} style={{ fontSize: 11, color: "#8c8c8c" }}>{c}</Typography.Text></span>)}
+          <div style={{ fontSize: 14, lineHeight: 1.45, whiteSpace: "normal", wordBreak: "break-word" }}>{r.title || "—"}</div>
+          <div style={{ marginTop: 4, fontSize: 13, color: "#8c8c8c", display: "flex", flexWrap: "wrap", gap: "0 10px" }}>
+            <span>SPU <Typography.Text copyable={{ text: String(r.product_id) }} style={{ fontSize: 13, color: "#8c8c8c" }}>{r.product_id}</Typography.Text></span>
+            {codes.map((c, i) => <span key={i}>SKC <Typography.Text copyable={{ text: c }} style={{ fontSize: 13, color: "#8c8c8c" }}>{c}</Typography.Text></span>)}
             {!OFFICIAL_SOURCE && <a onClick={(e) => { e.stopPropagation(); setTrendOf({ productId: String(r.product_id), title: r.title || String(r.product_id) }); }} style={{ fontSize: 11 }}>销量趋势</a>}
           </div>
-          {(r.hot_tag || r.has_hot_sku || (r.onsales_duration && r.onsales_duration > 0)) ? <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", gap: 4 }}>
-            {r.hot_tag ? <Tag color="red" style={{ fontSize: 11, marginInlineEnd: 0, lineHeight: "18px" }}>热销款</Tag> : null}
-            {r.has_hot_sku ? <Tag color="volcano" style={{ fontSize: 11, marginInlineEnd: 0, lineHeight: "18px" }}>爆旺SKU</Tag> : null}
-            {r.onsales_duration && r.onsales_duration > 0 ? <Tag color="blue" style={{ fontSize: 11, marginInlineEnd: 0, lineHeight: "18px" }}>加入站点 {fmtNum(r.onsales_duration)} 天</Tag> : null}
+          {(r.hot_tag || r.has_hot_sku || (r.onsales_duration && r.onsales_duration > 0)) ? <div style={{ marginTop: 5, display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {r.hot_tag ? <Tag color="red" style={{ fontSize: 12, marginInlineEnd: 0, lineHeight: "20px", padding: "0 8px", fontWeight: 500, borderRadius: 10 }}>热销款</Tag> : null}
+            {r.has_hot_sku ? <Tag color="volcano" style={{ fontSize: 12, marginInlineEnd: 0, lineHeight: "20px", padding: "0 8px", fontWeight: 500, borderRadius: 10 }}>爆旺SKU</Tag> : null}
+            {r.onsales_duration && r.onsales_duration > 0 ? <Tag color="blue" style={{ fontSize: 12, marginInlineEnd: 0, lineHeight: "20px", padding: "0 8px", fontWeight: 500, borderRadius: 10 }}>加入站点 {fmtNum(r.onsales_duration)} 天</Tag> : null}
           </div> : null}
         </div>
+      </div>
       </div>
       );
     } },

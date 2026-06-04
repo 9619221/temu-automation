@@ -8702,7 +8702,14 @@ body {
   caret-color: transparent !important;
 }
 
-/* 商品运营面板:SKU 多行堆叠时,让 SPU 级单值列垂直居中对齐 */
+/* 商品运营面板:SKU 多行堆叠时,所有列统一顶端对齐——保证同一 SKU 在各列上下咬齐。
+   不能用 middle:带「合计」行的销量/库存列更高,无合计行的货号/规格列会被居中下沉半行,导致跨列错位。 */
 .op-panel-table .ant-table-tbody > tr > td {
-  vertical-align: middle;
+  vertical-align: top;
+  font-size: 14px;
+  height: 1px; /* trick:table-cell 高度由内容撑开,内部 div height:100% 即可取到整行高度,实现 SKU 数据撑满整行、消除下方留白 */
+}
+/* 整表字号调大(默认 small 偏小):表头 + 单元格 */
+.op-panel-table .ant-table-thead > tr > th {
+  font-size: 14px;
 }
