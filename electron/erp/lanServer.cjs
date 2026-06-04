@@ -527,7 +527,9 @@ const _CLOUD_AGG_OFFICIAL = `cloud_agg AS (
       NULL AS cloud_urgency_info,
       order_time AS cloud_order_time,
       latest_ship_at AS cloud_latest_ship_at,
-      NULL AS cloud_logistics_info,
+      CASE WHEN COALESCE(express_company,'')<>'' OR COALESCE(express_delivery_sn,'')<>''
+           THEN TRIM(COALESCE(express_company,'') || ' ' || COALESCE(express_delivery_sn,''))
+           ELSE NULL END AS cloud_logistics_info,
       sku_count AS cloud_item_count
     FROM erp_temu_openapi_consign
   ),`;
