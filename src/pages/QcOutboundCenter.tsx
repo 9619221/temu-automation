@@ -23,10 +23,9 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
-  ArrowDownOutlined,
-  ArrowUpOutlined,
   CloudSyncOutlined,
   EyeOutlined,
+  HolderOutlined,
   ReloadOutlined,
   SearchOutlined,
   SettingOutlined,
@@ -367,6 +366,115 @@ function stockStatusColor(status?: string | null) {
   return "processing";
 }
 
+// 鼠标落在目标行的上半 → 插到它前面；下半 → 插到它后面（拖到最后一行的下半即落到末尾）。
+function insertPosByY(clientY: number, rect: DOMRect): "before" | "after" {
+  return clientY < rect.top + rect.height / 2 ? "before" : "after";
+}
+
+// 列设置弹层内容：可拖拽调列序 + 勾选显隐。
+// 关键：拖动途中的高频状态(谁在拖 / 悬停在谁身上 / 插哪一侧)全封装在本组件内部，
+// 拖动时只重渲染这十几个小项，绝不触达父组件那张大表——这是「拖动流畅」的前提。
+// 拖动途中也不改父组件的列顺序，只画一条插入指示线；松手(onDrop)才回调 onReorder 落子一次。
+function UnifiedColumnSettings({
+  order,
+  visible,
+  onToggle,
+  onReorder,
+  onRestore,
+}: {
+  order: string[];
+  visible: string[];
+  onToggle: (field: string, checked: boolean) => void;
+  onReorder: (fromField: string, overField: string, pos: "before" | "after") => void;
+  onRestore: () => void;
+}) {
+  const [dragField, setDragField] = useState<string | null>(null);
+  const [overField, setOverField] = useState<string | null>(null);
+  const [overPos, setOverPos] = useState<"before" | "after" | null>(null);
+
+  const clearDrag = () => {
+    setDragField(null);
+    setOverField(null);
+    setOverPos(null);
+  };
+
+  return (
+    <div className="consign-col-cfg">
+      <div className="consign-col-cfg__list">
+        {order.map((field) => {
+          const checked = visible.includes(field);
+          const lockLast = checked && visible.length <= 1;
+          const cls = [
+            "consign-col-cfg__item",
+            dragField === field ? "is-dragging" : "",
+            overField === field && overPos === "before" ? "is-over-before" : "",
+            overField === field && overPos === "after" ? "is-over-after" : "",
+          ]
+            .filter(Boolean)
+            .join(" ");
+          return (
+            <div
+              key={field}
+              className={cls}
+              draggable
+              onDragStart={(event) => {
+                setDragField(field);
+                event.dataTransfer.effectAllowed = "move";
+                try {
+                  event.dataTransfer.setData("text/plain", field);
+                } catch {
+                  /* 个别环境禁写 dataTransfer，忽略即可 */
+                }
+              }}
+              onDragOver={(event) => {
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+                if (!dragField || dragField === field) {
+                  if (overField !== null) {
+                    setOverField(null);
+                    setOverPos(null);
+                  }
+                  return;
+                }
+                const pos = insertPosByY(event.clientY, event.currentTarget.getBoundingClientRect());
+                // 仅当落点真的变化时才 setState，避免 dragover 每一帧都触发重渲染。
+                if (overField !== field || overPos !== pos) {
+                  setOverField(field);
+                  setOverPos(pos);
+                }
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                if (dragField && dragField !== field) {
+                  onReorder(dragField, field, insertPosByY(event.clientY, event.currentTarget.getBoundingClientRect()));
+                }
+                clearDrag();
+              }}
+              onDragEnd={clearDrag}
+            >
+              <HolderOutlined className="consign-col-cfg__handle" />
+              <Checkbox
+                className="consign-col-cfg__check"
+                checked={checked}
+                disabled={lockLast}
+                onChange={(event) => onToggle(field, event.target.checked)}
+              >
+                {UNIFIED_COLUMN_LABELS[field] || field}
+              </Checkbox>
+            </div>
+          );
+        })}
+      </div>
+      <div className="consign-col-cfg__foot">
+        <span className="consign-col-cfg__hint">拖动调整顺序</span>
+        <Button type="link" size="small" onClick={onRestore}>
+          还原默认
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export default function QcOutboundCenter() {
   const auth = useErpAuth();
   const role = auth.currentUser?.role || "";
@@ -645,15 +753,21 @@ export default function QcOutboundCenter() {
     });
   }, [persistUnifiedColumnConfig]);
 
-  // 上移(-1)/下移(+1)某列，即时反映到表格。
-  const moveUnifiedColumn = useCallback((field: string, dir: -1 | 1) => {
+  // 拖拽排序「落子」：松手时一次性把 fromField 列移动到 overField 的前/后，并落盘。
+  // 拖动途中的高频状态(谁在拖 / 悬停在谁身上 / 插哪一侧)全封装在 UnifiedColumnSettings 子组件里，
+  // 不进父组件 state——否则每动一下都会带着下面那张大表一起重渲染，正是之前「拖动不流畅」的根因。
+  const commitUnifiedColumnDrag = useCallback((fromField: string, overField: string, pos: "before" | "after") => {
+    if (fromField === overField) return;
     setUnifiedColumnConfig((prev) => {
       const current = normalizeUnifiedColumnConfig(prev);
       const order = current.order.slice();
-      const i = order.indexOf(field);
-      const j = i + dir;
-      if (i === -1 || j < 0 || j >= order.length) return current;
-      [order[i], order[j]] = [order[j], order[i]];
+      const from = order.indexOf(fromField);
+      if (from === -1) return current;
+      const [moved] = order.splice(from, 1);
+      let to = order.indexOf(overField);
+      if (to === -1) return current;
+      if (pos === "after") to += 1;
+      order.splice(to, 0, moved);
       const next = { ...current, order };
       persistUnifiedColumnConfig(next);
       return next;
@@ -1360,44 +1474,13 @@ export default function QcOutboundCenter() {
                     placement="bottomRight"
                     title="自定义显示字段（改动即时生效）"
                     content={(
-                      <div className="consign-col-cfg">
-                        <div className="consign-col-cfg__list">
-                          {unifiedColumnConfig.order.map((field, idx) => {
-                            const checked = unifiedColumnConfig.visible.includes(field);
-                            const lockLast = checked && unifiedColumnConfig.visible.length <= 1;
-                            return (
-                              <div key={field} className="consign-col-cfg__item">
-                                <Checkbox
-                                  checked={checked}
-                                  disabled={lockLast}
-                                  onChange={(event) => toggleUnifiedColumn(field, event.target.checked)}
-                                >
-                                  {UNIFIED_COLUMN_LABELS[field] || field}
-                                </Checkbox>
-                                <span className="consign-col-cfg__moves">
-                                  <Button
-                                    type="text"
-                                    size="small"
-                                    disabled={idx === 0}
-                                    icon={<ArrowUpOutlined />}
-                                    onClick={() => moveUnifiedColumn(field, -1)}
-                                  />
-                                  <Button
-                                    type="text"
-                                    size="small"
-                                    disabled={idx === unifiedColumnConfig.order.length - 1}
-                                    icon={<ArrowDownOutlined />}
-                                    onClick={() => moveUnifiedColumn(field, 1)}
-                                  />
-                                </span>
-                              </div>
-                            );
-                          })}
-                        </div>
-                        <div className="consign-col-cfg__foot">
-                          <Button type="link" size="small" onClick={restoreUnifiedColumnConfig}>还原默认</Button>
-                        </div>
-                      </div>
+                      <UnifiedColumnSettings
+                        order={unifiedColumnConfig.order}
+                        visible={unifiedColumnConfig.visible}
+                        onToggle={toggleUnifiedColumn}
+                        onReorder={commitUnifiedColumnDrag}
+                        onRestore={restoreUnifiedColumnConfig}
+                      />
                     )}
                   >
                     <Tooltip title="自定义显示哪些列、调整顺序（改动即时生效）">
