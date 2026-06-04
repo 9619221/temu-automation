@@ -216,9 +216,10 @@ const UNIFIED_COLUMN_MENU_MIN_BODY_HEIGHT = 180;
 const UNIFIED_COLUMN_MENU_MAX_BODY_HEIGHT = 430;
 // v3：新增「送货数」「入库数」独立列。升版本让旧客户端的列配置重置为含新列的全可见默认，
 // 否则旧 localStorage 的 visible 不含新 key，新列默认隐藏、用户仍看不到。
-const UNIFIED_COLUMN_ORDER_STORAGE_KEY = "temu.consign.unified.columnOrder.v3";
+const UNIFIED_COLUMN_ORDER_STORAGE_KEY = "temu.consign.unified.columnOrder.v4";
 const UNIFIED_CONFIGURABLE_COLUMN_KEYS = [
-  "status",
+  "onlineStatus",
+  "erpStatus",
   "order",
   "deliver",
   "shop",
@@ -236,7 +237,8 @@ const UNIFIED_CONFIGURABLE_COLUMN_KEYS = [
 ];
 const UNIFIED_CONFIGURABLE_COLUMN_KEY_SET = new Set(UNIFIED_CONFIGURABLE_COLUMN_KEYS);
 const UNIFIED_COLUMN_LABELS: Record<string, string> = {
-  status: "状态",
+  onlineStatus: "线上状态",
+  erpStatus: "erp状态",
   order: "备货单",
   deliver: "发货单",
   shop: "店铺",
@@ -1001,12 +1003,22 @@ export default function QcOutboundCenter() {
   const cloudStockColumns = useMemo<ColumnsType<ConsignDeliverUnifiedRow>>(() => {
     const columns: ColumnsType<ConsignDeliverUnifiedRow> = [
     {
-      title: "状态",
-      key: "status",
-      width: 130,
-      render: (_value, row) => (
-        row.status ? <Tag color={stockStatusColor(row.status)} style={{ whiteSpace: "nowrap" }}>{row.status}</Tag> : <Text type="secondary">-</Text>
-      ),
+      title: "线上状态",
+      key: "onlineStatus",
+      width: 110,
+      render: (_value, row) => {
+        const s = row.rawCloud?.temu_status; // Temu 平台备货单状态(官方)
+        return s ? <Tag color={stockStatusColor(s)} style={{ whiteSpace: "nowrap" }}>{s}</Tag> : <Text type="secondary">-</Text>;
+      },
+    },
+    {
+      title: "erp状态",
+      key: "erpStatus",
+      width: 110,
+      render: (_value, row) => {
+        const s = row.localStatusOverride || row.rawJst?.status; // 本地确认发货优先,否则聚水潭发货状态
+        return s ? <Tag color={stockStatusColor(s)} style={{ whiteSpace: "nowrap" }}>{s}</Tag> : <Text type="secondary">-</Text>;
+      },
     },
     {
       title: "备货单",
