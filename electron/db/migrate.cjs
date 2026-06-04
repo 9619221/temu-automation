@@ -127,6 +127,37 @@ function execStatementsIdempotently(db, sql) {
   }
 }
 
+// 列出 backups/ 目录下的自动备份文件（erp-<时间戳>.sqlite），按修改时间从新到旧排序。
+// 只认 "erp-" 前缀，不会误伤主库 erp.sqlite 或手工快照 erp.sqlite.PRE-* / erp.sqlite.CORRUPT-*。
+function listAutoBackups(backupDir) {
+  if (!fs.existsSync(backupDir)) return [];
+  return fs.readdirSync(backupDir)
+    .filter((name) => /^erp-.*\.sqlite$/i.test(name))
+    .map((name) => {
+      const full = path.join(backupDir, name);
+      let mtimeMs = 0;
+      try { mtimeMs = fs.statSync(full).mtimeMs; } catch (_) { /* stat 失败按最旧处理 */ }
+      return { name, full, mtimeMs };
+    })
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+}
+
+// 只保留最近 keep 份自动备份，删除更旧的。清理失败不影响主流程。
+function pruneAutoBackups(backupDir, keep) {
+  const limit = Math.max(0, keep);
+  for (const file of listAutoBackups(backupDir).slice(limit)) {
+    try { fs.unlinkSync(file.full); } catch (_) { /* 删除失败忽略 */ }
+  }
+}
+
+// 解析自动备份保留份数：options.backupKeep > 环境变量 ERP_BACKUP_KEEP > 默认 3。
+function resolveBackupKeep(options = {}) {
+  if (Number.isInteger(options.backupKeep) && options.backupKeep >= 1) return options.backupKeep;
+  const envKeep = parseInt(process.env.ERP_BACKUP_KEEP || "", 10);
+  if (Number.isInteger(envKeep) && envKeep >= 1) return envKeep;
+  return 3;
+}
+
 function backupDatabaseIfNeeded(dbPath, options = {}) {
   if (options.backup === false) return null;
   if (!fs.existsSync(dbPath)) return null;
@@ -134,9 +165,17 @@ function backupDatabaseIfNeeded(dbPath, options = {}) {
   const backupDir = options.backupDir || path.join(path.dirname(dbPath), "backups");
   fs.mkdirSync(backupDir, { recursive: true });
 
+  // 备份前先清理旧备份，给新备份腾出空间（先收到 keep-1 份，加上即将生成的共 keep 份）。
+  // erp.sqlite 已数 GB，整库 copy 若撞 ENOSPC 会让迁移失败、服务进 restart loop，故先腾空间。
+  const keep = resolveBackupKeep(options);
+  pruneAutoBackups(backupDir, Math.max(0, keep - 1));
+
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const backupPath = path.join(backupDir, `erp-${stamp}.sqlite`);
   fs.copyFileSync(dbPath, backupPath);
+
+  // copy 成功后再校正一次，确保最终恰好保留 keep 份。
+  pruneAutoBackups(backupDir, keep);
   return backupPath;
 }
 
@@ -192,4 +231,6 @@ module.exports = {
   ensureMigrationLog,
   listMigrationFiles,
   runMigrations,
+  backupDatabaseIfNeeded,
+  pruneAutoBackups,
 };

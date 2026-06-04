@@ -35,6 +35,35 @@ function pickActor(actor = {}) {
   };
 }
 
+// 审计快照裁剪：剔除大 JSON 字段、截断超长字符串，避免 before/after 把整行的大字段
+// （external_*_json / payload / raw_json / preview 等）原样各存一份，导致审计表爆量
+// （历史上单条曾达 30KB、半月 4.3G）。只保留状态/金额/单号等小字段，不影响现有审计读取
+// （展示只用 status 等小字段，见 ipc.cjs 流转历史查询）。
+const AUDIT_DROP_KEY = /(_json$|payload|raw_|preview|sensitive|logistics_json|detail_json)/i;
+const AUDIT_MAX_FIELD_BYTES = 512;
+
+function sanitizeAuditSnapshot(value) {
+  if (value == null || typeof value !== "object") return value;
+  const isArray = Array.isArray(value);
+  const out = isArray ? [] : {};
+  for (const [key, val] of Object.entries(value)) {
+    if (!isArray && AUDIT_DROP_KEY.test(key)) continue; // 整列丢弃已知大字段
+    if (val == null) { out[key] = val; continue; }
+    if (typeof val === "object") {
+      let serialized = "";
+      try { serialized = JSON.stringify(val) || ""; } catch (_) { serialized = "[unserializable]"; }
+      out[key] = serialized.length > AUDIT_MAX_FIELD_BYTES ? `[omitted ${serialized.length}B]` : val;
+      continue;
+    }
+    if (typeof val === "string" && val.length > AUDIT_MAX_FIELD_BYTES) {
+      out[key] = `${val.slice(0, 64)}…[truncated ${val.length}B]`;
+      continue;
+    }
+    out[key] = val;
+  }
+  return out;
+}
+
 class ErpWorkflowService {
   constructor({ db }) {
     if (!db) throw new Error("ErpWorkflowService requires db");
@@ -138,8 +167,8 @@ class ErpWorkflowService {
       action: input.action,
       entity_type: input.entityType,
       entity_id: input.entityId,
-      before_json: JSON.stringify(input.before || null),
-      after_json: JSON.stringify(input.after || null),
+      before_json: JSON.stringify(sanitizeAuditSnapshot(input.before || null)),
+      after_json: JSON.stringify(sanitizeAuditSnapshot(input.after || null)),
       created_at: nowIso(),
     });
   }
@@ -148,4 +177,5 @@ class ErpWorkflowService {
 module.exports = {
   ENTITY_CONFIG,
   ErpWorkflowService,
+  sanitizeAuditSnapshot,
 };
