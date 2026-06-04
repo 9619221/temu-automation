@@ -1105,7 +1105,7 @@ function _buildProductPanelOfficialFresh(db, options = {}) {
   const rows = optionalAllLocal(db, `
     SELECT s.mall_id, m.store_code, m.mall_name, s.product_id,
            s.product_skc_id, s.ext_code, s.spec_name, s.title, s.thumb_url,
-           s.today_sales, s.last7d_sales, s.sale_days,
+           s.today_sales, s.last7d_sales, s.last30d_sales, s.sale_days,
            s.warehouse_stock, s.occupy_stock, s.unavailable_stock, s.advice_qty, s.lack_quantity
       FROM erp_temu_openapi_sku_sales s
       LEFT JOIN erp_temu_malls m ON m.mall_id = s.mall_id
@@ -1132,16 +1132,20 @@ function _buildProductPanelOfficialFresh(db, options = {}) {
     e.advice += toNum(r.advice_qty); e.lack_qty += toNum(r.lack_quantity);
     if (toNum(r.warehouse_stock) <= 0) e.lack++;
     e.skus_detail.push({ skc_id: r.product_skc_id || null, sku_ext_code: r.ext_code || null, spec_name: r.spec_name || null, declared_price: null,
-      today: toNum(r.today_sales), last7d: toNum(r.last7d_sales), sale_days: r.sale_days == null ? null : Number(r.sale_days),
+      today: toNum(r.today_sales), last7d: toNum(r.last7d_sales), last30d: toNum(r.last30d_sales), sale_days: r.sale_days == null ? null : Number(r.sale_days),
       stock: toNum(r.warehouse_stock), occupy: toNum(r.occupy_stock), advice_qty: toNum(r.advice_qty), lack_qty: toNum(r.lack_quantity) });
   }
-  const out = [...map.values()].map((e) => {
-    const { _skc, _sku, ...rest } = e;
+  const arr = [...map.values()];
+  // 按 SPU 级30天销量降序后再截断:总 SPU(上万)远多于 limit,若直接对无序 map slice 会漏掉高销量商品
+  for (const e of arr) e._s30 = e.skus_detail.reduce((x, s) => x + (s.last30d || 0), 0);
+  arr.sort((a, b) => b._s30 - a._s30);
+  const out = arr.slice(0, limit).map((e) => {
+    const { _skc, _sku, _s30, ...rest } = e;
     // 子行按规格名排序(同色相邻、尺码递增),空规格排末尾;让同 SKC 多尺码堆叠更易读
     rest.skus_detail.sort((a, b) => String(a.spec_name || "~").localeCompare(String(b.spec_name || "~"), "zh"));
     return { ...rest, skc_codes: [..._skc].join(",") || null, sku_codes: [..._sku].join(",") || null,
       total_stock: rest.stock + rest.unavail - rest.lack_qty + rest.shipping };
-  }).slice(0, limit);
+  });
   return { generated_at: Date.now(), row_count: out.length, rows: out, source: "official" };
 }
 
