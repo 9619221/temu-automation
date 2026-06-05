@@ -1232,40 +1232,34 @@ function BatchCreate() {
   };
 
   const modeHint = mode === "classic"
-    ? "保留你之前一直在用的 AI 生图上品流程：导表后直接走 AI 生图、图片上传和草稿生成。"
-    : "新上品流程会沿用批量上品入口，后台自动准备素材、上传素材中心并回写 kwcdn 数据。";
+    ? "你原来一直用的流程：导表后直接走 AI 生图、图片上传和草稿生成。"
+    : "新流程沿用批量上品入口，导表后自动准备素材、上传素材中心并生成草稿。";
+
+  const modeSwitch = (
+    <Segmented<BatchCreateMode>
+      value={mode}
+      onChange={(value) => setMode(value as BatchCreateMode)}
+      options={[
+        { label: "AI 生图上品流程", value: "classic" },
+        { label: "新上品流程", value: "workflow" },
+      ]}
+    />
+  );
 
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
-      <Card className="create-mode-card" style={{ borderRadius: 22, borderColor: "#eceff4" }} bodyStyle={{ padding: 20 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 16, flexWrap: "wrap", alignItems: "center" }}>
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <Text className="create-flow-toolbar__eyebrow">上品流程模式</Text>
-            <Title level={4} style={{ margin: "4px 0 0" }}>
-              {mode === "classic" ? "AI 生图上品流程" : "新上品流程"}
-            </Title>
-            <Text type="secondary" className="create-flow-toolbar__desc">
-              {modeHint}
-            </Text>
-          </div>
-          <Segmented<BatchCreateMode>
-            value={mode}
-            onChange={(value) => setMode(value as BatchCreateMode)}
-            options={[
-              { label: "AI 生图上品流程", value: "classic" },
-              { label: "新上品流程", value: "workflow" },
-            ]}
-          />
-        </div>
-      </Card>
-
       {mode === "classic" ? (
         <div className="create-flow-toolbar">
           <div className="create-flow-toolbar__summary">
-            <Text className="create-flow-toolbar__eyebrow">批量创建</Text>
-            <Title level={4} style={{ margin: 0 }}>AI 生图上品流程</Title>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 16, flexWrap: "wrap", alignItems: "flex-start" }}>
+              <div style={{ minWidth: 0 }}>
+                <Text className="create-flow-toolbar__eyebrow">批量创建</Text>
+                <Title level={4} style={{ margin: "2px 0 0" }}>AI 生图上品流程</Title>
+              </div>
+              {modeSwitch}
+            </div>
             <Text type="secondary" className="create-flow-toolbar__desc">
-              这是你原来的老流程。导入 Excel 或 CSV 后，可选过滤高风险商品，然后直接走 AI 生图、图片上传和 Temu 草稿生成。
+              {modeHint}
             </Text>
             <Space wrap className="app-table-meta">
               <Tag color={batchTagColor}>{batchStatusLabel}</Tag>
@@ -1333,19 +1327,20 @@ function BatchCreate() {
             <div style={{ display: "grid", gap: 18 }}>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 16, flexWrap: "wrap", alignItems: "flex-start" }}>
                 <div style={{ minWidth: 0, flex: 1 }}>
-                  <Text className="create-flow-toolbar__eyebrow">新上品流程</Text>
-                  <Title level={4} style={{ margin: "4px 0 0" }}>批量创建</Title>
+                  <Text className="create-flow-toolbar__eyebrow">批量创建</Text>
+                  <Title level={4} style={{ margin: "2px 0 0" }}>新上品流程</Title>
                   <Text type="secondary" className="create-flow-toolbar__desc">
-                    导入 Excel 或 CSV 后，可先过滤高风险商品，然后按新流程批量处理。
+                    {modeHint}
                   </Text>
                 </div>
-                <Space wrap className="app-table-meta">
-                  <Tag color={batchTagColor}>{batchStatusLabel}</Tag>
-                  {hasFile ? <Tag>{currentFileName}</Tag> : <Tag>待上传商品表</Tag>}
-                  {hasFile ? <Tag>{`从第 ${startRow + 1} 行开始`}</Tag> : null}
-                  {preview?.total ? <Tag color="blue">{`共 ${preview.total} 个商品`}</Tag> : null}
-                </Space>
+                {modeSwitch}
               </div>
+              <Space wrap className="app-table-meta">
+                <Tag color={batchTagColor}>{batchStatusLabel}</Tag>
+                {hasFile ? <Tag>{currentFileName}</Tag> : <Tag>待上传商品表</Tag>}
+                {hasFile ? <Tag>{`从第 ${startRow + 1} 行开始`}</Tag> : null}
+                {preview?.total ? <Tag color="blue">{`共 ${preview.total} 个商品`}</Tag> : null}
+              </Space>
 
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 }}>
                 <div>

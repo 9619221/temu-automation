@@ -41,7 +41,7 @@ function getReviewCursor(db, companyId) {
 
 function syncReviews(db, { companyId, since, now, limit }) {
   const rows = db.prepare(`
-    SELECT mall_id, review_id, product_id, product_skc_id,
+    SELECT mall_id, site, review_id, product_id, product_skc_id,
            goods_id, goods_name, score, comment, spec_summary, category_path,
            status, on_sale, created_at_ts, raw_json, last_updated_at
     FROM cloud.temu_review_snapshot
@@ -54,18 +54,19 @@ function syncReviews(db, { companyId, since, now, limit }) {
   if (!rows.length) return { upserted: 0, skipped: 0, latestCursor: since };
   const upsert = db.prepare(`
     INSERT INTO erp_temu_reviews (
-      id, company_id, platform_shop_id, review_id,
+      id, company_id, platform_shop_id, site, review_id,
       product_id, product_skc_id, goods_id, goods_name,
       score, comment, spec_summary, category_path,
       status, on_sale, created_at_ts, raw_json, created_at, updated_at
     )
     VALUES (
-      @id, @company_id, @platform_shop_id, @review_id,
+      @id, @company_id, @platform_shop_id, @site, @review_id,
       @product_id, @product_skc_id, @goods_id, @goods_name,
       @score, @comment, @spec_summary, @category_path,
       @status, @on_sale, @created_at_ts, @raw_json, @now, @now
     )
     ON CONFLICT(company_id, platform_shop_id, review_id) DO UPDATE SET
+      site = excluded.site,
       product_id = excluded.product_id,
       product_skc_id = excluded.product_skc_id,
       goods_id = excluded.goods_id,
@@ -89,6 +90,7 @@ function syncReviews(db, { companyId, since, now, limit }) {
       id: stableId("temu_review", [companyId, row.mall_id, row.review_id]),
       company_id: companyId,
       platform_shop_id: String(row.mall_id),
+      site: row.site || null,
       review_id: String(row.review_id),
       product_id: row.product_id || null,
       product_skc_id: row.product_skc_id || null,

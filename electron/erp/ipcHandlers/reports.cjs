@@ -268,6 +268,86 @@ function registerReportsHandlers(ipcMain, deps) {
     }
   });
 
+  // 运营工作台：今日首单发货(官方采集物化,读当天 erp_temu_firstship_daily)
+  ipcMain.handle("erp:reports:firstship-today", async (_event, payload) => {
+    try {
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest(`/api/erp/reports/firstship-today`, { method: "GET" });
+      }
+      requireErp();
+      const { buildFirstShipToday } = require("../services/multiStoreReport.cjs");
+      return { ok: true, data: buildFirstShipToday(erpState.db, {}) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+
+  // 运营工作台：今日创建商品(官方采集物化,读当天 erp_temu_goods_created_daily)
+  ipcMain.handle("erp:reports:goods-created-today", async (_event, payload) => {
+    try {
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest(`/api/erp/reports/goods-created-today`, { method: "GET" });
+      }
+      requireErp();
+      const { buildGoodsCreatedToday } = require("../services/multiStoreReport.cjs");
+      return { ok: true, data: buildGoodsCreatedToday(erpState.db, {}) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+
+  // 运营工作台：商品品质看板（Temu 后台「商品品质看板」抓包 → cloud.capture_events 解析:品质分/售后率/问题分布）
+  ipcMain.handle("erp:reports:quality-panel", async (_event, payload) => {
+    try {
+      const includeTest = payload?.includeTest ? "1" : "0";
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest(`/api/erp/reports/quality-panel?include_test=${includeTest}`, { method: "GET" });
+      }
+      requireErp();
+      const { buildQualityPanel } = require("../services/multiStoreReport.cjs");
+      const { attachTemuCloudDbIfPossible } = require("../lanServer.cjs");
+      return { ok: true, data: buildQualityPanel(erpState.db, { includeTest: payload?.includeTest, attachCloudDb: attachTemuCloudDbIfPossible }) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+
+  // 运营工作台：商品评价（Chrome 扩展抓包采集 → erp_temu_reviews;不走官方 API。默认全部评价按时间倒序）
+  ipcMain.handle("erp:reports:reviews", async (_event, payload) => {
+    try {
+      const includeTest = payload?.includeTest ? "1" : "0";
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest(`/api/erp/reports/reviews?include_test=${includeTest}`, { method: "GET" });
+      }
+      requireErp();
+      const { buildReviews } = require("../services/multiStoreReport.cjs");
+      return { ok: true, data: buildReviews(erpState.db, { includeTest: payload?.includeTest }) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+
+  // 运营工作台：高价限流清单（被 Temu「高价流量受限」的商品,抓包 cloud.temu_operation_risk_snapshot;官方 API 无此数据）
+  ipcMain.handle("erp:reports:high-price-flow", async (_event, payload) => {
+    try {
+      const includeTest = payload?.includeTest ? "1" : "0";
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest(`/api/erp/reports/high-price-flow?include_test=${includeTest}`, { method: "GET" });
+      }
+      requireErp();
+      const { buildHighPriceFlowList } = require("../services/multiStoreReport.cjs");
+      const { attachTemuCloudDbIfPossible } = require("../lanServer.cjs");
+      return { ok: true, data: buildHighPriceFlowList(erpState.db, { includeTest: payload?.includeTest, attachCloudDb: attachTemuCloudDbIfPossible }) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+
   // 运营工作台：平台质检——点击实时拉某质检单的疵点照片(私有图签名会失效,故实时调详情拿新签名+后端带 referer 拉)
   ipcMain.handle("erp:reports:qc-flaw-images", async (_event, payload) => {
     try {

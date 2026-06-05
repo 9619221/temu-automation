@@ -3,7 +3,7 @@ import path from "path";
 import { createRequire } from "module";
 import { spawn } from "child_process";
 import { findChromeExe } from "./browser.mjs";
-import { importFromRows, importFromApiItems, searchProducts, getStats, getTopProducts, getDbPath, getRowCount } from "./yunqi-db.mjs";
+import { importFromRows, importFromApiItems, searchProducts, getStats, getTopProducts, getDbPath, getRowCount, addSelection, removeSelection, updateSelection, listSelection, listSelectionIds, listCategories } from "./yunqi-db.mjs";
 
 const APPDATA_DIR = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation");
 const CHROME_YUNQI_EXT_ID = "emdedfmhnfkfiaogfakhdfbpekiefjkp";
@@ -2061,5 +2061,11 @@ export function buildYunqiOnlineHandlers({ ensureBrowser, getContext, randomDela
 
       return { results, totalImported, totalSkipped, syncedAt: new Date().toISOString(), dbRowCount: getRowCount() };
     },
+    yunqiDbSelectionAdd: async (params = {}) => addSelection(params.item || params),
+    yunqiDbSelectionRemove: async (params = {}) => removeSelection(params.goodsId),
+    yunqiDbSelectionUpdate: async (params = {}) => updateSelection(params.goodsId, { status: params.status, note: params.note }),
+    yunqiDbSelectionList: async (params = {}) => listSelection({ status: params.status }),
+    yunqiDbSelectionIds: async () => listSelectionIds(),
+    yunqiDbCategories: async () => listCategories(),
   };
 }

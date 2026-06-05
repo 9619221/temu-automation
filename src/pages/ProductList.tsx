@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSessionState } from "../hooks/useSessionState";
+import { selectStatusLabel } from "../utils/temuSelectStatus";
 import { Alert, Button, Card, Checkbox, Drawer, Empty, Image, Input, Modal, Radio, Segmented, Space, Spin, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
@@ -279,22 +280,7 @@ const EMPTY_COUNT_SUMMARY: ProductCountSummary = {
 };
 
 const CLOUD_PRODUCTS_ONLY: boolean = true;
-// 官方 selectStatus(选品/生命周期状态)码 -> 中文。
-// 已由卖家后台「上新生命周期管理」两店的状态聚合(productSkcStatusAggregation)逐码对 Tab 计数确认。
-// 注：部分 Tab 由多码合并 —— 未发布={1,14,15}，价格申报中={7,9}。
-const SELECT_STATUS_LABELS: Record<string, string> = {
-  "1": "未发布", "14": "未发布", "15": "未发布",
-  "3": "待寄样",
-  "7": "价格申报中", "9": "价格申报中",
-  "10": "待创建首单",
-  "11": "已创建首单",
-  "12": "已发布到站点", // 在售
-  "13": "已下架/终止",
-};
-function selectStatusLabel(code: string | null | undefined): string {
-  if (code == null || code === "") return "—";
-  return SELECT_STATUS_LABELS[String(code)] || `选品状态-${code}`;
-}
+// 选品 / 生命周期状态码 -> 中文映射已抽到 ../utils/temuSelectStatus(与运营工作台「生命周期」列共用)。
 const CLOUD_PRODUCT_BUNDLE_CACHE_KEY = "temu.product-list.cloud-bundle.cache.v1";
 const CLOUD_PRODUCT_FETCH_TIMEOUT_MS = 10000;
 

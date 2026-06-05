@@ -236,6 +236,7 @@ interface AppAPI {
   openExtensionDirectory?: () => Promise<string>;
   openChromeExtensions?: () => Promise<string>;
   openExternal: (url: string) => Promise<string>;
+  openPdf?: (payload: { base64: string; filename?: string }) => Promise<string>;
   openLogisticsWindow?: (billNo: string) => Promise<string>;
   readWorkflowPackLogs?: (params?: { limit?: number }) => Promise<{
     logFile?: string;
@@ -884,6 +885,11 @@ interface ErpAPI {
     salesTrend: (options?: { includeTest?: boolean; days?: number }) => Promise<ErpSalesTrendResponse>;
     productPanel: (options?: { includeTest?: boolean }) => Promise<ErpProductPanelResponse>;
     openapiQc: (options?: { includeTest?: boolean }) => Promise<{ ok: boolean; data?: { generated_at: number; row_count: number; rows: unknown[]; source?: string }; error?: string }>;
+    firstShipToday: (options?: { includeTest?: boolean }) => Promise<{ ok: boolean; data?: { generated_at: number; stat_date: string; row_count: number; rows: unknown[]; source?: string }; error?: string }>;
+    goodsCreatedToday: (options?: { includeTest?: boolean }) => Promise<{ ok: boolean; data?: { generated_at: number; stat_date: string; row_count: number; rows: unknown[]; source?: string }; error?: string }>;
+    qualityPanel: (options?: { includeTest?: boolean }) => Promise<{ ok: boolean; data?: { generated_at: number; row_count: number; rows: unknown[]; shops?: unknown[]; attached?: boolean; source?: string }; error?: string }>;
+    reviews: (options?: { includeTest?: boolean }) => Promise<{ ok: boolean; data?: { generated_at: number; row_count: number; rows: unknown[]; summary?: { total: number; avg_score: number | null; bad_count: number; bad_rate: number | null; pic_count: number }; source?: string }; error?: string }>;
+    highPriceFlow: (options?: { includeTest?: boolean; days?: number }) => Promise<{ ok: boolean; data?: { generated_at: number; row_count: number; rows: unknown[]; attached?: boolean; source?: string }; error?: string }>;
     qcFlawImages: (options?: { mallId?: string; qcBillId?: string }) => Promise<{ ok: boolean; data?: { count: number; images: string[] }; error?: string }>;
     productTrend: (options?: { productId?: string }) => Promise<{ ok: boolean; data?: { product_id: string | null; rows: Array<{ date: string; qty: number; revenue: number }>; attached?: boolean; source?: string }; error?: string }>;
     purchase: (options?: { includeTest?: boolean }) => Promise<ErpPurchaseReportResponse>;
@@ -1416,6 +1422,12 @@ interface YunqiDbAPI {
     results: { keyword: string; fetched: number; imported: number; skipped: number; batchId: string }[];
     totalImported: number; totalSkipped: number; syncedAt: string; dbRowCount: number;
   }>;
+  selectionAdd: (params: any) => Promise<{ ok: boolean; goodsId?: string; reason?: string }>;
+  selectionRemove: (params: { goodsId: string }) => Promise<{ ok: boolean; removed?: number }>;
+  selectionUpdate: (params: { goodsId: string; status?: string; note?: string }) => Promise<{ ok: boolean; changed?: number; reason?: string }>;
+  selectionList: (params?: { status?: string }) => Promise<{ rows: any[]; summary: Record<string, number> }>;
+  selectionIds: () => Promise<string[]>;
+  categories: () => Promise<Array<{ cat_id: number; cat_name: string; cat_en_name: string; cat_level: number; parent_cat_id: number; is_leaf: number }>>;
 }
 
 interface AutoImageSwapResultItem {

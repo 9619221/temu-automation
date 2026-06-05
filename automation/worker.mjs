@@ -9351,6 +9351,18 @@ async function handleRequest(body) {
       return await yunqiHandlers.yunqiDbInfo();
     case "yunqi_db_sync_online":
       return await yunqiHandlers.yunqiDbSyncOnline(params || {});
+    case "yunqi_db_selection_add":
+      return await yunqiHandlers.yunqiDbSelectionAdd(params || {});
+    case "yunqi_db_selection_remove":
+      return await yunqiHandlers.yunqiDbSelectionRemove(params || {});
+    case "yunqi_db_selection_update":
+      return await yunqiHandlers.yunqiDbSelectionUpdate(params || {});
+    case "yunqi_db_selection_list":
+      return await yunqiHandlers.yunqiDbSelectionList(params || {});
+    case "yunqi_db_selection_ids":
+      return await yunqiHandlers.yunqiDbSelectionIds();
+    case "yunqi_db_categories":
+      return await yunqiHandlers.yunqiDbCategories();
     case "price_review_scan":
       return await handlePriceReviewScan(params || {});
     case "price_review_list":

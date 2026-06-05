@@ -73,6 +73,7 @@ interface StoreMatrixRow {
   high_risk: number; restock: number; stock_gap: number; activity: number;
   lc: Record<string, number>; // 各上新生命周期阶段(中文标签)的 SKC 数
   first_ship: number;         // 今日(北京)发出的首单数(按 WB 去重)
+  goods_created: number;      // 今日(北京)创建的商品 SKC 数
 }
 interface SkuChild { skc_id: string | null; sku_ext_code: string | null; spec_name?: string | null; declared_price: number | null; today: number; last7d: number; last30d: number; sale_days: number | null; stock: number; occupy: number; advice_qty: number; lack_qty?: number; }
 interface FirstShipRow { mall_id: string; store_code: string | null; mall_name: string | null; sub_purchase_order_sn: string; delivery_order_sn: string | null; product_skc_id: string | null; ext_code: string | null; deliver_time: number | null; }
@@ -132,7 +133,7 @@ interface HpfRow {
   mall_id: string; store_code: string | null; mall_name: string | null; owner: string | null;
   product_id: string; skc_id: string | null; title: string | null; thumb: string | null;
   sku_codes: string | null; decline_rate: number | null; last_seen_date: string | null;
-  declared_price: number | null; stock: number | null; today_sales: number | null; last7d_sales: number | null;
+  declared_price: number | null; current_price: number | null; target_price: number | null; stock: number | null; today_sales: number | null; last7d_sales: number | null;
   __rk?: number;
 }
 
@@ -279,6 +280,9 @@ export default function OperationsWorkbench() {
   const [firstShipRows, setFirstShipRows] = useState<FirstShipRow[]>([]);
   const [firstShipLoaded, setFirstShipLoaded] = useState(false);
   const [firstShipLoading, setFirstShipLoading] = useState(false);
+  const [goodsCreatedRows, setGoodsCreatedRows] = useState<Array<{ mall_id: string; store_code: string | null }>>([]);
+  const [goodsCreatedLoaded, setGoodsCreatedLoaded] = useState(false);
+  const [goodsCreatedLoading, setGoodsCreatedLoading] = useState(false);
   const [qcRows, setQcRows] = useState<QcRow[]>([]);
   const [qcLoaded, setQcLoaded] = useState(false);
   const [qcLoading, setQcLoading] = useState(false);
@@ -583,6 +587,12 @@ export default function OperationsWorkbench() {
     try { const resp = await window.electronAPI.erp.reports.firstShipToday({ includeTest: false }); if (resp.ok && resp.data) { setFirstShipRows((resp.data.rows || []) as unknown as FirstShipRow[]); setFirstShipLoaded(true); } } catch { /* */ } finally { setFirstShipLoading(false); }
   }, []);
 
+  const loadGoodsCreated = useCallback(async () => {
+    if (!window.electronAPI?.erp?.reports?.goodsCreatedToday) return;
+    setGoodsCreatedLoading(true);
+    try { const resp = await window.electronAPI.erp.reports.goodsCreatedToday({ includeTest: false }); if (resp.ok && resp.data) { setGoodsCreatedRows((resp.data.rows || []) as unknown as Array<{ mall_id: string; store_code: string | null }>); setGoodsCreatedLoaded(true); } } catch { /* */ } finally { setGoodsCreatedLoading(false); }
+  }, []);
+
   const loadQc = useCallback(async () => {
     if (!window.electronAPI?.erp?.reports?.openapiQc) return;
     setQcLoading(true);
@@ -667,11 +677,12 @@ export default function OperationsWorkbench() {
     if ((activeTab === "overview" || activeTab === "product") && !lifecycleLoaded && !lifecycleLoading) loadLifecycle();
     // 今日首单发货:在总览展示,首屏拉(独立 loading,数据小不阻塞其它统计)
     if (activeTab === "overview" && !firstShipLoaded && !firstShipLoading) loadFirstShip();
+    if (activeTab === "overview" && !goodsCreatedLoaded && !goodsCreatedLoading) loadGoodsCreated();
     if (activeTab === "qc" && !qcLoaded && !qcLoading) loadQc();
     if (activeTab === "quality" && !qualityLoaded && !qualityLoading) loadQuality();
     if (activeTab === "review" && !reviewLoaded && !reviewLoading) loadReviews();
     if (activeTab === "hpf" && !hpfLoaded && !hpfLoading) loadHpf();
-  }, [activeTab, shopLoaded, shopLoading, trendLoaded, trendLoading, adLoaded, adLoading, stockLoaded, stockLoading, riskLoaded, riskLoading, actLoaded, actLoading, panelLoaded, panelLoading, lifecycleLoaded, lifecycleLoading, firstShipLoaded, firstShipLoading, qcLoaded, qcLoading, qualityLoaded, qualityLoading, reviewLoaded, reviewLoading, hpfLoaded, hpfLoading, loadShop, loadTrend, loadAd, loadStockOrders, loadRisk, loadAct, loadPanel, loadLifecycle, loadFirstShip, loadQc, loadQuality, loadReviews, loadHpf]);
+  }, [activeTab, shopLoaded, shopLoading, trendLoaded, trendLoading, adLoaded, adLoading, stockLoaded, stockLoading, riskLoaded, riskLoading, actLoaded, actLoading, panelLoaded, panelLoading, lifecycleLoaded, lifecycleLoading, firstShipLoaded, firstShipLoading, goodsCreatedLoaded, goodsCreatedLoading, qcLoaded, qcLoading, qualityLoaded, qualityLoading, reviewLoaded, reviewLoading, hpfLoaded, hpfLoading, loadShop, loadTrend, loadAd, loadStockOrders, loadRisk, loadAct, loadPanel, loadLifecycle, loadFirstShip, loadGoodsCreated, loadQc, loadQuality, loadReviews, loadHpf]);
 
   const diagnosed: DiagnosedRow[] = useMemo(() => skuRows.map((r) => {
     const issues = diagnose(r);
@@ -914,7 +925,7 @@ export default function OperationsWorkbench() {
     const m = new Map<string, StoreMatrixRow>();
     const get = (code: string, mall_id: string, mall_name: string | null, owner: string | null) => {
       let e = m.get(code);
-      if (!e) { e = { store_code: code, mall_id, mall_name, owner, sales: 0, sale_7d: 0, lack: 0, soldout: 0, high_risk: 0, restock: 0, stock_gap: 0, activity: 0, lc: {}, first_ship: 0 }; m.set(code, e); }
+      if (!e) { e = { store_code: code, mall_id, mall_name, owner, sales: 0, sale_7d: 0, lack: 0, soldout: 0, high_risk: 0, restock: 0, stock_gap: 0, activity: 0, lc: {}, first_ship: 0, goods_created: 0 }; m.set(code, e); }
       if (mall_name && !e.mall_name) e.mall_name = mall_name;
       if (owner && !e.owner) e.owner = owner;
       return e;
@@ -933,9 +944,11 @@ export default function OperationsWorkbench() {
     for (const [k, status] of seenSkc) { const e = byMall.get(k.split("|")[0]); if (e) { const label = selectStatusLabel(status); e.lc[label] = (e.lc[label] || 0) + 1; } }
     // 今日首单发货:按 mall_id 累加到该店(firstShipRows 每行 = 一个已去重首单)
     for (const r of firstShipRows) { if (!inScope(r.store_code || r.mall_id)) continue; const e = byMall.get(r.mall_id); if (e) e.first_ship += 1; }
+    // 今日创建商品:按 mall_id 累加到该店(goodsCreatedRows 每行 = 今天创建的一个 SKC)
+    for (const r of goodsCreatedRows) { if (!inScope(r.store_code || r.mall_id)) continue; const e = byMall.get(r.mall_id); if (e) e.goods_created += 1; }
     // 各店概览只显示已建档的店（有真实店号）；没建档的店 store_code 被 mall_id 顶替，过滤掉
     return [...m.values()].filter((e) => e.store_code !== e.mall_id).sort((a, b) => (b.lack + b.soldout + b.high_risk * 5) - (a.lack + a.soldout + a.high_risk * 5));
-  }, [shopRows, riskRows, skuRows, stockRows, actRows, lifecycleRows, firstShipRows, inScope]);
+  }, [shopRows, riskRows, skuRows, stockRows, actRows, lifecycleRows, firstShipRows, goodsCreatedRows, inScope]);
   const panelBase = useMemo(() => {
     let v = panelRows.filter((r) => inScope(r.store_code || r.mall_id));
     if (storeFilter !== "all") v = v.filter((r) => r.store_code === storeFilter);
@@ -1137,6 +1150,7 @@ export default function OperationsWorkbench() {
     { title: "备货缺口", dataIndex: "stock_gap", width: 95, align: "right", sorter: (a, b) => a.stock_gap - b.stock_gap, render: fmtNum },
     { title: "可报活动", dataIndex: "activity", width: 95, align: "right", sorter: (a, b) => a.activity - b.activity, render: (v: number) => (v > 0 ? <span style={{ color: "#3f8600" }}>{fmtNum(v)}</span> : <span style={{ color: "#bbb" }}>0</span>) },
     { title: "今日首单", dataIndex: "first_ship", width: 90, align: "right", sorter: (a, b) => a.first_ship - b.first_ship, render: (v: number) => (v > 0 ? <span style={{ color: "#1a73e8", fontWeight: 600 }}>{fmtNum(v)}</span> : <span style={{ color: "#bbb" }}>0</span>) },
+    { title: "今日创建", dataIndex: "goods_created", width: 90, align: "right", sorter: (a, b) => a.goods_created - b.goods_created, render: (v: number) => (v > 0 ? <span style={{ color: "#13c2c2", fontWeight: 600 }}>{fmtNum(v)}</span> : <span style={{ color: "#bbb" }}>0</span>) },
     ...LIFECYCLE_STAGE_ORDER.map((label): ColumnsType<StoreMatrixRow>[number] => ({
       title: LC_SHORT[label] || label, key: "lc_" + label, width: 88, align: "right",
       sorter: (a, b) => (a.lc?.[label] || 0) - (b.lc?.[label] || 0),
@@ -1221,6 +1235,7 @@ export default function OperationsWorkbench() {
 
   const reviewColumns: ColumnsType<ReviewRow> = [
     { title: "店号", dataIndex: "store_code", width: 78, fixed: "left", render: (v, r) => formatStoreNo(v === r.mall_id ? null : v, r.mall_id) },
+    { title: "区域", dataIndex: "site", width: 60, align: "center", render: (v: string | null) => { const m: Record<string, string> = { agentseller: "全球", "agentseller-us": "美区", "agentseller-eu": "欧区" }; return v ? <Tag color={v === "agentseller-us" ? "blue" : v === "agentseller-eu" ? "purple" : "green"}>{m[v] || v}</Tag> : <span style={{ color: "#bbb" }}>—</span>; } },
     { title: "评分", dataIndex: "score", width: 96, align: "center", sorter: (a, b) => (a.score ?? 0) - (b.score ?? 0), render: (v: number | null) => {
       if (v == null) return <span style={{ color: "#bbb" }}>—</span>;
       const n = Math.max(0, Math.min(5, v));
@@ -1321,7 +1336,7 @@ export default function OperationsWorkbench() {
     ) },
     { title: "货号", dataIndex: "sku_codes", width: 140, ellipsis: true, render: (v: string | null) => v ? <span style={{ fontSize: 12 }}>{v}</span> : <span style={{ color: "#bbb" }}>—</span> },
     { title: "流量下降率", dataIndex: "decline_rate", width: 124, align: "right", defaultSortOrder: "descend", sorter: (a, b) => (a.decline_rate || 0) - (b.decline_rate || 0), render: (v: number | null) => v == null ? <span style={{ color: "#bbb" }}>—</span> : <Tag color={v >= 50 ? "red" : v >= 20 ? "orange" : "gold"} style={{ fontWeight: 600 }}>↓ {v.toFixed(1)}%</Tag> },
-    { title: "申报价", dataIndex: "declared_price", width: 92, align: "right", render: (v: number | null) => v == null ? <span style={{ color: "#bbb" }}>—</span> : "¥" + v.toFixed(2) },
+    { title: "建议调价(降价)", key: "advise_price", width: 168, align: "right", render: (_, r) => { const cur = r.current_price != null ? r.current_price : r.declared_price; if (r.target_price == null) return cur != null ? <span>¥{cur.toFixed(2)}</span> : <span style={{ color: "#bbb" }}>—</span>; const cut = cur && cur > 0 ? Math.round((1 - r.target_price / cur) * 100) : null; return <span style={{ fontSize: 12 }}>{cur != null ? <span style={{ color: "#888" }}>¥{cur.toFixed(2)} </span> : null}<span style={{ color: "#cf1322", fontWeight: 700 }}>→¥{r.target_price.toFixed(2)}</span>{cut != null ? <span style={{ color: "#cf1322" }}> -{cut}%</span> : null}</span>; } },
     { title: "可用库存", dataIndex: "stock", width: 100, align: "right", sorter: (a, b) => (a.stock || 0) - (b.stock || 0), render: (v: number | null) => v == null ? "—" : <span style={{ color: v <= 0 ? "#cf1322" : undefined }}>{fmtNum(v)}</span> },
     { title: "7天销量", dataIndex: "last7d_sales", width: 92, align: "right", sorter: (a, b) => (a.last7d_sales || 0) - (b.last7d_sales || 0), render: (v: number | null) => v == null ? "—" : fmtNum(v) },
     { title: "最近限流日", dataIndex: "last_seen_date", width: 110, render: (v: string | null) => v || "—" },
@@ -1418,7 +1433,7 @@ export default function OperationsWorkbench() {
           <Card size="small" title="各店概览 · 点店看明细,问题多的店排前;后段列为各店上新生命周期阶段(SKC)" style={{ marginBottom: 16 }} loading={shopLoading || riskLoading || skuLoading || lifecycleLoading}>
             <Table<StoreMatrixRow> dataSource={storeMatrix} rowKey="store_code" size="small"
               pagination={{ defaultPageSize: 20, showSizeChanger: true, pageSizeOptions: [10, 20, 50], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 店` }}
-              scroll={{ x: 1650 }}
+              scroll={{ x: 1740 }}
               columns={storeMatrixColumns.filter((c) => !(HIDE_RISK && (c as { dataIndex?: string }).dataIndex === "high_risk") && !(HIDE_ACTIVITY && (c as { dataIndex?: string }).dataIndex === "activity"))}
               onRow={(r) => ({ onClick: () => navigate(`/ops-workbench/store/${r.mall_id}`), style: { cursor: "pointer" } })} />
           </Card>

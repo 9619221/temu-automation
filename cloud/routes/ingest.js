@@ -277,6 +277,51 @@ r.get("/v1/jit-vmi-targets", authMiddleware, (req, res) => {
   }
 });
 
+// 评价主动采集目标：返回本租户最近活跃的 mall_id 列表，让扩展 SW 主动调
+// TEMU agentseller 的 /bg-luna-agent-seller/review/pageQuery（带 mallid 头 + body {page,pageSize}，无需 anti-content）。
+// 数据写回 capture_events 后，parseTemuReview 自动落 temu_review_snapshot。
+r.get("/v1/review-targets", authMiddleware, (req, res) => {
+  const db = getDb();
+  const tenantId = req.user.tid;
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
+  const recentDays = Math.min(90, Math.max(1, Number(req.query.recent_days) || 30));
+  try {
+    const rows = db.prepare(`
+      SELECT mall_id, site, mall_name, last_seen
+      FROM mall_accounts
+      WHERE tenant_id = ?
+        AND mall_id <> ''
+        AND last_seen IS NOT NULL
+        AND last_seen >= datetime('now', ?)
+      ORDER BY last_seen DESC
+      LIMIT ?
+    `).all(tenantId, `-${recentDays} days`, limit);
+    const targets = [];
+    const seen = new Set();
+    for (const row of rows) {
+      const mallId = String(row.mall_id || "").trim();
+      if (!mallId) continue;
+      const site = String(row.site || "").trim() || "agentseller";
+      const key = `${mallId}|${site}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      targets.push({
+        mall_id: mallId,
+        site,
+        mall_name: row.mall_name || null,
+        last_seen: row.last_seen || null,
+      });
+    }
+    res.json({ ok: true, targets, generated_at: Date.now() });
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) {
+      res.json({ ok: true, targets: [], generated_at: Date.now() });
+      return;
+    }
+    throw error;
+  }
+});
+
 // 桌面端 ERP 增量拉：把云端 temu_jit_status_snapshot + temu_stock_order_snapshot(querySubOrderList 源)
 // 增量同步到本地 erp_temu_jit_status / erp_temu_vmi_suborder。
 // 客户端记 next_cursor，下次以 since 传回。

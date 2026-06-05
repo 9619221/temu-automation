@@ -41,6 +41,7 @@ const ImageStudioAgent = lazyWithPreload(() => import("./pages/ImageStudioAgent"
 const AutoImageSwap = lazyWithPreload(() => import("./pages/AutoImageSwap"));
 const Logs = lazyWithPreload(() => import("./pages/Logs"));
 const CompetitorAnalysis = lazyWithPreload(() => import("./pages/CompetitorAnalysis"));
+const SelectionPlaza = lazyWithPreload(() => import("./pages/SelectionPlaza"));
 const PriceReview = lazyWithPreload(() => import("./pages/PriceReview"));
 const ErpDebug = lazyWithPreload(() => import("./pages/ErpDebug"));
 const TemuRobots = lazyWithPreload(() => import("./pages/TemuRobots"));
@@ -57,6 +58,8 @@ const MultiStoreReport = lazyWithPreload(() => import("./pages/MultiStoreReport"
 const OperationsWorkbench = lazyWithPreload(() => import("./pages/OperationsWorkbench"));
 const OperationStoreDetail = lazyWithPreload(() => import("./pages/OperationStoreDetail"));
 const TemuAuthManager = lazyWithPreload(() => import("./pages/TemuAuthManager"));
+const AutoPurchase = lazyWithPreload(() => import("./pages/AutoPurchase"));
+const AutoShipMap = lazyWithPreload(() => import("./pages/AutoShipMap"));
 
 const CORE_ROUTE_PRELOADERS = [
   AppLayout.preload,
@@ -68,6 +71,8 @@ const CORE_ROUTE_PRELOADERS = [
   PurchaseCenter.preload,
   WarehouseCenter.preload,
   QcOutboundCenter.preload,
+  AutoPurchase.preload,
+  AutoShipMap.preload,
   WorkItems.preload,
   AccountManager.preload,
   Logs.preload,
@@ -76,6 +81,7 @@ const CORE_ROUTE_PRELOADERS = [
   PriceReview.preload,
   Dashboard.preload,
   CompetitorAnalysis.preload,
+  SelectionPlaza.preload,
   ProductCreate.preload,
   ProductDetail.preload,
 ];
@@ -365,6 +371,7 @@ function App() {
               <Route path="browser-multi" element={<RoleRoute path="/browser-multi"><BrowserMulti /></RoleRoute>} />
               <Route path="tasks" element={<Navigate to="/work-items" replace />} />
               <Route path="competitor" element={<RoleRoute path="/competitor"><CompetitorAnalysis /></RoleRoute>} />
+              <Route path="selection-plaza" element={<RoleRoute path="/selection-plaza"><SelectionPlaza /></RoleRoute>} />
               <Route path="price-review" element={<RoleRoute path="/price-review"><PriceReview /></RoleRoute>} />
               <Route path="daily-command" element={<RoleHomeRedirect />} />
               <Route path="product-master-data" element={<RoleRoute path="/product-master-data"><ProductMasterData mode="skus" /></RoleRoute>} />
@@ -374,6 +381,8 @@ function App() {
               <Route path="purchase-center" element={<RoleRoute path="/purchase-center"><PurchaseCenter workArea="orders" /></RoleRoute>} />
               <Route path="warehouse-center" element={<RoleRoute path="/warehouse-center"><WarehouseCenter /></RoleRoute>} />
               <Route path="qc-outbound" element={<RoleRoute path="/qc-outbound"><QcOutboundCenter /></RoleRoute>} />
+              <Route path="auto-purchase" element={<RoleRoute path="/auto-purchase"><AutoPurchase /></RoleRoute>} />
+              <Route path="auto-ship-map" element={<RoleRoute path="/auto-ship-map"><AutoShipMap /></RoleRoute>} />
               <Route path="work-items" element={<RoleRoute path="/work-items"><WorkItems /></RoleRoute>} />
               <Route path="users" element={<RoleRoute path="/users"><UserManagement /></RoleRoute>} />
               <Route path="erp-debug" element={<RoleRoute path="/erp-debug"><ErpDebug /></RoleRoute>} />

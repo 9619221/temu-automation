@@ -1222,7 +1222,9 @@ function buildHighPriceFlowList(db, options = {}) {
        GROUP BY mall_id, product_id)
     SELECT r.mall_id, r.product_id, lr.sd AS last_seen_date,
            MAX(r.skc_id) skc_id,
-           MAX(CAST(json_extract(r.raw_json, '$.flowDeclineRate') AS REAL)) AS decline_rate
+           MAX(CAST(json_extract(r.raw_json, '$.flowDeclineRate') AS REAL)) AS decline_rate,
+           MAX(CAST(json_extract(r.raw_json, '$.currentSupplierPrice') AS REAL)) AS cur_cents,
+           MAX(CAST(json_extract(r.raw_json, '$.targetSupplierPriceForAllSite') AS REAL)) AS tgt_cents
       FROM cloud.temu_operation_risk_snapshot r
       JOIN lr ON lr.mall_id = r.mall_id AND lr.product_id = r.product_id AND lr.sd = r.stat_date
      WHERE r.risk_type = 'high_price_flow'
@@ -1272,6 +1274,8 @@ function buildHighPriceFlowList(db, options = {}) {
       thumb: (off && off.thumb) || (cl && cl.thumb) || null,
       sku_codes: off && off.sku_codes ? off.sku_codes : null,
       decline_rate: r.decline_rate == null ? null : Number(r.decline_rate),
+      current_price: r.cur_cents == null ? null : Number(r.cur_cents) / 100,
+      target_price: r.tgt_cents == null ? null : Number(r.tgt_cents) / 100,
       last_seen_date: r.last_seen_date || null,
       declared_price: cl && cl.declared_cents ? Number(cl.declared_cents) / 100 : null,
       stock: off ? toNum(off.stock) : null,
@@ -1594,12 +1598,64 @@ function buildOpenapiQc(db, options = {}) {
   return { generated_at: Date.now(), row_count: out.length, rows: out, source: "official" };
 }
 
+// 今日首单发货(运营工作台总览统计卡):读 erp_temu_firstship_daily 当天(北京时区)行,关联店名。
+// 数据由 temuOpenApiFirstShip.cjs(cron)物化(bg.shiporderv2.get 筛 isFirst,按 WB 去重)。纯本地 erp.sqlite。
+function buildFirstShipToday(db, options = {}) {
+  const includeTest = !!options.includeTest;
+  const statDate = options.statDate || new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10); // 北京今天 YYYY-MM-DD
+  const rows = optionalAllLocal(db, `
+    SELECT f.mall_id, m.store_code, m.mall_name,
+           f.sub_purchase_order_sn, f.delivery_order_sn, f.product_skc_id, f.ext_code, f.deliver_time
+      FROM erp_temu_firstship_daily f
+      LEFT JOIN erp_temu_malls m ON m.mall_id = f.mall_id
+     WHERE f.stat_date = ?
+       ${includeTest ? "" : "AND COALESCE(m.status,'active') <> 'test'"}
+     ORDER BY f.deliver_time DESC
+  `, [statDate]);
+  const out = rows.map((r) => ({
+    mall_id: r.mall_id, store_code: r.store_code || null, mall_name: r.mall_name || null,
+    sub_purchase_order_sn: r.sub_purchase_order_sn, delivery_order_sn: r.delivery_order_sn || null,
+    product_skc_id: r.product_skc_id || null, ext_code: r.ext_code || null,
+    deliver_time: r.deliver_time == null ? null : toNum(r.deliver_time),
+  }));
+  return { generated_at: Date.now(), stat_date: statDate, row_count: out.length, rows: out, source: "official" };
+}
+
+// 今日创建商品(各店概览「今日创建」列):读 erp_temu_goods_created_daily 当天(北京)行,关联店名。
+// 数据由 temuOpenApiGoodsCreated.cjs(cron)物化(goods.list createdAt=今天)。纯本地 erp.sqlite。
+function buildGoodsCreatedToday(db, options = {}) {
+  const includeTest = !!options.includeTest;
+  const statDate = options.statDate || new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
+  const rows = optionalAllLocal(db, `
+    SELECT g.mall_id, m.store_code, m.mall_name, g.product_skc_id, g.product_id, g.skc_site_status, g.created_at
+      FROM erp_temu_goods_created_daily g
+      LEFT JOIN erp_temu_malls m ON m.mall_id = g.mall_id
+     WHERE g.stat_date = ?
+       ${includeTest ? "" : "AND COALESCE(m.status,'active') <> 'test'"}
+     ORDER BY g.created_at DESC
+  `, [statDate]);
+  const out = rows.map((r) => ({
+    mall_id: r.mall_id, store_code: r.store_code || null, mall_name: r.mall_name || null,
+    product_skc_id: r.product_skc_id || null, product_id: r.product_id || null,
+    skc_site_status: r.skc_site_status == null ? null : toNum(r.skc_site_status),
+    created_at: r.created_at == null ? null : toNum(r.created_at),
+  }));
+  return { generated_at: Date.now(), stat_date: statDate, row_count: out.length, rows: out, source: "official" };
+}
+
 // 商品品质看板(运营工作台「商品品质」Tab):读 cloud 抓包(Temu 后台「商品品质看板」/main/quality/dashboard
 // 的 supplyChain/qualityMetrics 系列接口),解析品质分 + 售后率 + 售后/差评问题分布 + 店铺级 90 天指标。
 // ⚠️数据是被动抓包(谁在后台打开过该店品质看板才抓得到)→只覆盖被浏览过的店,其余店为空(非 bug)。
 // 一行 = 一个商品(按 mall_id+productId 去重,保留最新一次抓包)。纯读 cloud.capture_events,不写。
 const QUALITY_PAGEQUERY_PATH = "/bg-luna-agent-seller/goods/quality/supplyChain/qualityMetrics/pageQuery"; // 商品级列表
 const QUALITY_SHOPMETRIC_PATH = "/bg-luna-agent-seller/goods/quality/supplyChain/qualityMetrics/query";   // 店铺级 90 天指标
+// 从 capture_events.url 的 origin 提站点:cn(agentseller.temu.com)/us(-us)/eu(-eu)。品质数据按「店+站点」区分(同店各站点品质分/评分不同)。
+function qualitySiteFromUrl(url) {
+  const u = String(url || "");
+  if (/agentseller-us\./i.test(u)) return "us";
+  if (/agentseller-eu\./i.test(u)) return "eu";
+  return "cn";
+}
 // Temu 售后/差评问题名常见英文 → 中文(problAfsItemList 多为英文,problRevItemList 多为中文,未命中保留原文)
 const QUALITY_PROBLEM_ZH = {
   "Damaged or unusable goods": "货物损坏/无法使用",
@@ -1639,9 +1695,9 @@ function buildQualityPanel(db, options = {}) {
   }
   const isTestMall = (mallId) => (dict.get(String(mallId))?.status === "test");
 
-  // 1) 商品级品质列表:pageQuery 抓包(量小,全取),按 received_at 升序解析,同 mall+productId 后写覆盖=最新
+  // 1) 商品级品质列表:pageQuery 抓包(量小,全取),按 received_at 升序解析,同 mall+站点+productId 后写覆盖=最新
   const pageRows = optionalAllLocal(db, `
-    SELECT mall_id, body_json, received_at
+    SELECT mall_id, url, body_json, received_at
       FROM cloud.capture_events
      WHERE url_path = ? AND mall_id IS NOT NULL AND mall_id <> ''
      ORDER BY received_at ASC
@@ -1649,19 +1705,20 @@ function buildQualityPanel(db, options = {}) {
   const byKey = new Map();
   for (const ev of pageRows) {
     if (!includeTest && isTestMall(ev.mall_id)) continue;
+    const site = qualitySiteFromUrl(ev.url);
     const j = _qParse(ev.body_json);
     const items = j && j.result && Array.isArray(j.result.pageItems) ? j.result.pageItems : [];
     for (const it of items) {
       const pid = it.productId != null ? String(it.productId) : (it.goodsId != null ? String(it.goodsId) : null);
       if (!pid) continue;
-      byKey.set(String(ev.mall_id) + "|" + pid, { mall_id: String(ev.mall_id), received_at: ev.received_at, it });
+      byKey.set(String(ev.mall_id) + "|" + site + "|" + pid, { mall_id: String(ev.mall_id), site, received_at: ev.received_at, it });
     }
   }
   const rows = [];
-  for (const { mall_id, received_at, it } of byKey.values()) {
+  for (const { mall_id, site, received_at, it } of byKey.values()) {
     const d = dict.get(mall_id) || {};
     rows.push({
-      mall_id, store_code: d.store_code || null, mall_name: d.mall_name || null, owner: d.owner || null,
+      mall_id, site, store_code: d.store_code || null, mall_name: d.mall_name || null, owner: d.owner || null,
       product_id: it.productId != null ? String(it.productId) : null,
       goods_id: it.goodsId != null ? String(it.goodsId) : null,
       product_name: it.productName || null,
@@ -1685,9 +1742,9 @@ function buildQualityPanel(db, options = {}) {
     return a.afs_score - b.afs_score;
   });
 
-  // 2) 店铺级 90 天指标:query 抓包,每店保留最新一条
+  // 2) 店铺级 90 天指标:query 抓包,每店每站点保留最新一条
   const shopRows = optionalAllLocal(db, `
-    SELECT mall_id, body_json, received_at
+    SELECT mall_id, url, body_json, received_at
       FROM cloud.capture_events
      WHERE url_path = ? AND mall_id IS NOT NULL AND mall_id <> ''
      ORDER BY received_at ASC
@@ -1695,12 +1752,13 @@ function buildQualityPanel(db, options = {}) {
   const shopByMall = new Map();
   for (const ev of shopRows) {
     if (!includeTest && isTestMall(ev.mall_id)) continue;
+    const site = qualitySiteFromUrl(ev.url);
     const j = _qParse(ev.body_json);
     const r = j && j.result ? j.result : null;
     if (!r) continue;
     const d = dict.get(String(ev.mall_id)) || {};
-    shopByMall.set(String(ev.mall_id), {
-      mall_id: String(ev.mall_id), store_code: d.store_code || null, mall_name: d.mall_name || null, owner: d.owner || null,
+    shopByMall.set(String(ev.mall_id) + "|" + site, {
+      mall_id: String(ev.mall_id), site, store_code: d.store_code || null, mall_name: d.mall_name || null, owner: d.owner || null,
       afs_rate_90d: _qNum(r.qltyAfsOrdrRate90d),
       avg_score_90d: _qNum(r.avgScore90d),
       expect_loss: _qNum(r.expectLoss),
@@ -1726,7 +1784,7 @@ function parseReviewExtras(rawJson) {
       if (typeof p === "string") {
         if (/^https?:/i.test(p)) pictures.push(p);
       } else if (p && typeof p === "object") {
-        const u = p.url || p.imageUrl || p.thumbUrl || p.picUrl || p.image;
+        const u = p.pictureUrl || p.url || p.imageUrl || p.thumbUrl || p.picUrl || p.image;
         if (typeof u === "string" && /^https?:/i.test(u)) pictures.push(u);
       }
       if (pictures.length >= 9) break;
@@ -1741,9 +1799,9 @@ function buildReviews(db, options = {}) {
   const includeTest = !!options.includeTest;
   const limit = Math.min(10000, Math.max(50, Number(options.limit) || 3000));
   const rows = optionalAllLocal(db, `
-    SELECT r.platform_shop_id AS mall_id, m.store_code, m.mall_name,
+    SELECT r.platform_shop_id AS mall_id, r.site, m.store_code, m.mall_name,
            r.review_id, r.product_id, r.product_skc_id, r.goods_id, r.goods_name,
-           r.score, r.comment, r.spec_summary, r.category_path,
+           r.score, r.comment, r.comment_zh, r.spec_summary, r.category_path,
            r.status, r.on_sale, r.created_at_ts, r.raw_json
       FROM erp_temu_reviews r
       LEFT JOIN erp_temu_malls m ON m.mall_id = r.platform_shop_id
@@ -1762,10 +1820,10 @@ function buildReviews(db, options = {}) {
     const extras = parseReviewExtras(r.raw_json);
     if (extras.pictures.length) withPic += 1;
     return {
-      mall_id: r.mall_id, store_code: r.store_code || null, mall_name: r.mall_name || null,
+      mall_id: r.mall_id, site: r.site || null, store_code: r.store_code || null, mall_name: r.mall_name || null,
       review_id: r.review_id, product_id: r.product_id || null, product_skc_id: r.product_skc_id || null,
       goods_id: r.goods_id || null, goods_name: r.goods_name || null,
-      score, comment: r.comment || null, spec_summary: r.spec_summary || null, category_path: r.category_path || null,
+      score, comment: r.comment || null, comment_zh: r.comment_zh || null, spec_summary: r.spec_summary || null, category_path: r.category_path || null,
       status: r.status == null ? null : toNum(r.status), on_sale: r.on_sale == null ? null : toNum(r.on_sale),
       created_at_ts: r.created_at_ts == null ? null : toNum(r.created_at_ts),
       is_benefit: extras.benefit, pictures: extras.pictures,
@@ -1784,6 +1842,8 @@ function buildReviews(db, options = {}) {
 module.exports = {
   buildMultiStoreReport,
   buildOpenapiQc,
+  buildFirstShipToday,
+  buildGoodsCreatedToday,
   buildQualityPanel,
   buildReviews,
   fetchQcFlawImages,

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Col, Modal, Row, Segmented, Select, Space, Spin, Tag, Typography, message } from "antd";
+import { Alert, Button, Checkbox, Col, Empty, Input, Modal, Row, Segmented, Space, Spin, Tag, Typography, message } from "antd";
 import type { MallDictItem, PermissionAdminView, PermissionCatalogGroup } from "../utils/permissionCatalog";
 import { PRIVILEGED_ROLES, formatStoreLabel } from "../utils/permissionCatalog";
 
@@ -27,6 +27,9 @@ export default function UserPermissionModal({
   const [saving, setSaving] = useState(false);
   const [selectedMalls, setSelectedMalls] = useState<string[]>([]);
   const [overrides, setOverrides] = useState<Record<string, "allow" | "deny">>({});
+  const [storeModalOpen, setStoreModalOpen] = useState(false);
+  const [tempMalls, setTempMalls] = useState<string[]>([]);
+  const [storeSearch, setStoreSearch] = useState("");
 
   const privileged = user ? PRIVILEGED_ROLES.has(user.role) : false;
 
@@ -139,17 +142,50 @@ export default function UserPermissionModal({
     </Space>
   );
 
-  const mallOptions = [...malls]
-    .sort((a, b) => {
-      const na = parseInt((a.store_code || "").trim(), 10);
-      const nb = parseInt((b.store_code || "").trim(), 10);
-      const ka = Number.isFinite(na) ? na : Number.MAX_SAFE_INTEGER;
-      const kb = Number.isFinite(nb) ? nb : Number.MAX_SAFE_INTEGER;
-      return ka - kb;
-    })
-    .map((m) => ({ label: formatStoreLabel(m), value: m.mall_id }));
+  const mallById = useMemo(() => new Map(malls.map((m) => [m.mall_id, m])), [malls]);
+  // 可选店铺：剔除测试 / 调试店（status='test'），按店号升序、无店号排最后。
+  const selectableMalls = useMemo(
+    () =>
+      [...malls]
+        .filter((m) => m.status !== "test")
+        .sort((a, b) => {
+          const na = parseInt((a.store_code || "").trim(), 10);
+          const nb = parseInt((b.store_code || "").trim(), 10);
+          const ka = Number.isFinite(na) ? na : Number.MAX_SAFE_INTEGER;
+          const kb = Number.isFinite(nb) ? nb : Number.MAX_SAFE_INTEGER;
+          return ka - kb;
+        }),
+    [malls],
+  );
+  // 已选店铺的字典项；字典里查不到的 mall_id 用占位项兜底，仍能显示与移除。
+  const selectedMallItems = selectedMalls.map(
+    (id) => mallById.get(id) || ({ mall_id: id } as MallDictItem),
+  );
+  const filteredStoreList = useMemo(() => {
+    const kw = storeSearch.trim().toLowerCase();
+    if (!kw) return selectableMalls;
+    return selectableMalls.filter((m) =>
+      `${m.store_code || ""} ${m.mall_name || ""} ${m.mall_id}`.toLowerCase().includes(kw),
+    );
+  }, [selectableMalls, storeSearch]);
+
+  const openStoreModal = () => {
+    setTempMalls(selectedMalls);
+    setStoreSearch("");
+    setStoreModalOpen(true);
+  };
+  const confirmStores = () => {
+    setSelectedMalls(tempMalls);
+    setStoreModalOpen(false);
+  };
+  const toggleTempMall = (id: string) =>
+    setTempMalls((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  const removeMall = (id: string) => setSelectedMalls((prev) => prev.filter((x) => x !== id));
+  const selectAllFiltered = () =>
+    setTempMalls((prev) => Array.from(new Set([...prev, ...filteredStoreList.map((m) => m.mall_id)])));
 
   return (
+    <>
     <Modal
       open={open}
       title={user ? `权限与店铺 · ${user.name}` : "权限与店铺"}
@@ -166,21 +202,35 @@ export default function UserPermissionModal({
         ) : null}
 
         <div style={{ marginBottom: 16 }}>
-          <Text strong>负责的店铺</Text>
-          <div style={{ marginTop: 6 }}>
-            <Select
-              mode="multiple"
-              allowClear
-              disabled={privileged}
-              style={{ width: "100%" }}
-              placeholder="选择该用户负责的店铺（开启数据隔离后，TA 只能看到这些店铺的数据）"
-              value={selectedMalls}
-              onChange={(vals) => setSelectedMalls(vals as string[])}
-              options={mallOptions}
-              optionFilterProp="label"
-              showSearch
-              maxTagCount="responsive"
-            />
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <Text strong>负责的店铺</Text>
+            <Button size="small" disabled={privileged} onClick={openStoreModal}>
+              {`选择店铺${selectedMalls.length ? `（已选 ${selectedMalls.length}）` : ""}`}
+            </Button>
+          </div>
+          <div style={{ marginTop: 8 }}>
+            {privileged ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                管理员 / 负责人默认拥有全部店铺，无需指定。
+              </Text>
+            ) : selectedMallItems.length ? (
+              <Space size={[6, 6]} wrap>
+                {selectedMallItems.map((m) => (
+                  <Tag
+                    key={m.mall_id}
+                    closable
+                    onClose={() => removeMall(m.mall_id)}
+                    style={{ marginRight: 0 }}
+                  >
+                    {formatStoreLabel(m)}
+                  </Tag>
+                ))}
+              </Space>
+            ) : (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                未指定店铺（开启数据隔离后，TA 只能看到所负责店铺的数据）。
+              </Text>
+            )}
           </div>
         </div>
 
@@ -208,5 +258,70 @@ export default function UserPermissionModal({
         ) : null}
       </Spin>
     </Modal>
+
+    <Modal
+      open={storeModalOpen}
+      title="选择负责的店铺"
+      width={560}
+      zIndex={1100}
+      onCancel={() => setStoreModalOpen(false)}
+      onOk={confirmStores}
+      okText="确定"
+      cancelText="取消"
+      destroyOnClose
+    >
+      <Input
+        allowClear
+        placeholder="按店号或店名筛选"
+        value={storeSearch}
+        onChange={(e) => setStoreSearch(e.target.value)}
+        style={{ marginBottom: 10 }}
+      />
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+        <Space size={12}>
+          <a style={{ cursor: "pointer" }} onClick={selectAllFiltered}>
+            {`全选${storeSearch.trim() ? "（当前筛选）" : ""}`}
+          </a>
+          <a style={{ cursor: "pointer" }} onClick={() => setTempMalls([])}>
+            清空
+          </a>
+        </Space>
+        <Text type="secondary" style={{ fontSize: 12 }}>{`已选 ${tempMalls.length} 个`}</Text>
+      </div>
+      <div style={{ maxHeight: "52vh", overflowY: "auto", paddingRight: 4 }}>
+        {filteredStoreList.length ? (
+          <Space direction="vertical" size={2} style={{ width: "100%" }}>
+            {filteredStoreList.map((m) => {
+              const checked = tempMalls.includes(m.mall_id);
+              return (
+                <div
+                  key={m.mall_id}
+                  onClick={() => toggleTempMall(m.mall_id)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    padding: "6px 8px",
+                    cursor: "pointer",
+                    borderRadius: 4,
+                    background: checked ? "var(--ant-color-primary-bg, #e6f4ff)" : "transparent",
+                  }}
+                >
+                  <Checkbox
+                    checked={checked}
+                    onChange={() => toggleTempMall(m.mall_id)}
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                  <span style={{ fontSize: 13 }}>{formatStoreLabel(m)}</span>
+                </div>
+              );
+            })}
+          </Space>
+        ) : (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有匹配的店铺" />
+        )}
+      </div>
+    </Modal>
+    </>
   );
 }

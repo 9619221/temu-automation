@@ -2374,7 +2374,8 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
             style={{
               alignItems: "flex-start",
               display: "flex",
-              gap: 6,
+              flexDirection: "column",
+              gap: 4,
               maxWidth: "100%",
               minWidth: 0,
               width: "100%",

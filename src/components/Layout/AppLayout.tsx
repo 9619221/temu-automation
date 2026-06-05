@@ -3,6 +3,7 @@ import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { Badge, Button, Dropdown, Layout, List, Menu, Space, Tag } from "antd";
 import {
   ApiOutlined,
+  AppstoreOutlined,
   ArrowRightOutlined,
   BarChartOutlined,
   BellOutlined,
@@ -74,7 +75,9 @@ const menuItems = [
       { key: "/shop", icon: <DashboardOutlined />, label: "店铺概览" },
       { key: "/multi-store-report", icon: <BarChartOutlined />, label: "多店报表" },
       { key: "/ops-workbench", icon: <FundProjectionScreenOutlined />, label: "运营工作台" },
+      { key: "/auto-purchase", icon: <PlusCircleOutlined />, label: "采购备货" },
       { key: "/products", icon: <ShoppingOutlined />, label: "商品管理" },
+      { key: "/selection-plaza", icon: <AppstoreOutlined />, label: "选品广场" },
       { key: "/browser-multi", icon: <RocketOutlined />, label: "浏览器多开" },
     ],
   },
@@ -97,7 +100,6 @@ const menuItems = [
     children: [
       { key: "/work-items", icon: <BellOutlined />, label: "事项中心" },
       { key: "/users", icon: <UserOutlined />, label: "用户管理" },
-      { key: "/erp-debug", icon: <DatabaseOutlined />, label: "调试台" },
       { key: "/settings", icon: <SettingOutlined />, label: "设置" },
     ],
   },

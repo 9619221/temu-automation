@@ -3,7 +3,7 @@
  * - 导入 Excel 导出文件
  * - 查询、搜索、统计
  */
-import Database from "better-sqlite3";
+import { DatabaseSync } from "node:sqlite";
 import path from "path";
 import fs from "fs";
 
@@ -21,11 +21,26 @@ export function getDb() {
   if (_db) return _db;
   const dir = path.dirname(DB_PATH);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  _db = new Database(DB_PATH);
-  _db.pragma("journal_mode = WAL");
-  _db.pragma("foreign_keys = ON");
+  _db = new DatabaseSync(DB_PATH);
+  _db.exec("PRAGMA journal_mode = WAL");
+  _db.exec("PRAGMA foreign_keys = ON");
   initSchema(_db);
   return _db;
+}
+
+// node:sqlite 没有 better-sqlite3 的 db.transaction()，用 helper 模拟（返回可调用的事务函数，保持原调用方式 tx() 不变）。
+function makeTransaction(db, fn) {
+  return (...args) => {
+    db.exec("BEGIN");
+    try {
+      const result = fn(...args);
+      db.exec("COMMIT");
+      return result;
+    } catch (e) {
+      try { db.exec("ROLLBACK"); } catch {}
+      throw e;
+    }
+  };
 }
 
 function initSchema(db) {
@@ -142,7 +157,48 @@ function initSchema(db) {
       cost_source TEXT,
       updated_at INTEGER
     );
+
+    -- 选品池：用户从选品广场标记「想上的」商品。
+    -- 独立保留商品快照（不随 products 表重抓/清空而丢失），并承接后续「找货源 → 上架」状态流转。
+    CREATE TABLE IF NOT EXISTS selection_pool (
+      goods_id TEXT PRIMARY KEY,
+      sku_id TEXT,
+      title_zh TEXT,
+      title_en TEXT,
+      main_image TEXT,
+      product_url TEXT,
+      usd_price REAL DEFAULT 0,
+      daily_sales INTEGER DEFAULT 0,
+      weekly_sales INTEGER DEFAULT 0,
+      monthly_sales INTEGER DEFAULT 0,
+      usd_gmv REAL DEFAULT 0,
+      score REAL DEFAULT 0,
+      category_zh TEXT,
+      mall_name TEXT,
+      mall_mode TEXT,
+      status TEXT DEFAULT 'want',          -- want想上 / sourcing找货源中 / sourced已找到货源 / listing上架中 / listed已上架 / dropped弃用
+      note TEXT,
+      source_keyword TEXT,                 -- 从哪个抓取关键词进入选品池
+      added_at TEXT DEFAULT (datetime('now','localtime')),
+      updated_at TEXT DEFAULT (datetime('now','localtime'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_selection_status ON selection_pool(status);
+    CREATE INDEX IF NOT EXISTS idx_selection_added ON selection_pool(added_at DESC);
+
+    -- 云启类目树（gettemucategorieslist 抓来），选品广场分类下拉的数据源
+    CREATE TABLE IF NOT EXISTS categories (
+      cat_id INTEGER PRIMARY KEY,
+      cat_name TEXT,
+      cat_en_name TEXT,
+      cat_level INTEGER,
+      parent_cat_id INTEGER,
+      is_leaf INTEGER DEFAULT 0,
+      updated_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_categories_parent ON categories(parent_cat_id);
   `);
+  // 商品类目 ID（catId 数组，JSON 字符串）。已有库幂等加列。
+  try { db.exec("ALTER TABLE products ADD COLUMN opt_ids TEXT"); } catch (e) { /* 列已存在 */ }
 }
 
 // ============ 核价筛选器 CRUD ============
@@ -170,7 +226,7 @@ export function savePriceReviewSnapshot(batch) {
     )
   `);
   let inserted = 0;
-  const tx = db.transaction(() => {
+  const tx = makeTransaction(db, () => {
     for (const r of batch.rows) {
       if (!r?.skuId) continue;
       insert.run(
@@ -329,21 +385,21 @@ export function importFromRows(rows, fileName = "unknown") {
       usd_gmv, eur_gmv, score, total_comments,
       category_en, category_zh, backend_category, labels,
       mall_id, mall_name, mall_mode, mall_logo, mall_product_count, mall_total_sales, mall_score, mall_fans,
-      listed_at, recorded_at, import_batch
+      listed_at, recorded_at, import_batch, opt_ids
     ) VALUES (
       ?, ?, ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?, ?,
       ?, ?, ?, ?,
       ?, ?, ?, ?,
       ?, ?, ?, ?, ?, ?, ?, ?,
-      ?, ?, ?
+      ?, ?, ?, ?
     )
   `);
 
   let imported = 0;
   let skipped = 0;
 
-  const tx = db.transaction(() => {
+  const tx = makeTransaction(db, () => {
     for (let i = 2; i < rows.length; i++) {
       const r = rows[i];
       if (!r || !r[10]) { skipped++; continue; } // 跳过没有商品ID的行
@@ -381,7 +437,8 @@ export function importFromRows(rows, fileName = "unknown") {
           parseInt(r[7]) || 0,            // mall_fans
           r[8] || "",                     // listed_at
           r[9] ? String(r[9]) : "",       // recorded_at
-          batchId                         // import_batch
+          batchId,                        // import_batch
+          "[]"                            // opt_ids（Excel 导入无类目）
         );
         imported++;
       } catch (e) {
@@ -411,6 +468,7 @@ export function searchProducts(params = {}) {
     mallName = "",
     mallMode = "",
     category = "",
+    optId = "",
     minPrice = null,
     maxPrice = null,
     minDailySales = null,
@@ -438,6 +496,11 @@ export function searchProducts(params = {}) {
   if (category) {
     conditions.push("(category_zh LIKE ? OR category_en LIKE ? OR backend_category LIKE ?)");
     values.push(`%${category}%`, `%${category}%`, `%${category}%`);
+  }
+  if (optId) {
+    // 商品 opt_ids 存为 JSON 字符串如 ["580","1099","2708"]，按 opt_id（带引号防 580 误匹配 5801）筛
+    conditions.push("opt_ids LIKE ?");
+    values.push(`%"${optId}"%`);
   }
   if (minPrice != null) {
     conditions.push("usd_price >= ?");
@@ -556,14 +619,14 @@ export function importFromApiItems(items, sourceName = "api-sync") {
       usd_gmv, eur_gmv, score, total_comments,
       category_en, category_zh, backend_category, labels,
       mall_id, mall_name, mall_mode, mall_logo, mall_product_count, mall_total_sales, mall_score, mall_fans,
-      listed_at, recorded_at, import_batch
+      listed_at, recorded_at, import_batch, opt_ids
     ) VALUES (
       ?, ?, ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?, ?,
       ?, ?, ?, ?,
       ?, ?, ?, ?,
       ?, ?, ?, ?, ?, ?, ?, ?,
-      ?, ?, ?
+      ?, ?, ?, ?
     )
   `);
 
@@ -575,7 +638,7 @@ export function importFromApiItems(items, sourceName = "api-sync") {
   const firstStr = (...vals) => { for (const v of vals) { const s = str(v); if (s) return s; } return ""; };
   const firstNum = (...vals) => { for (const v of vals) { const n = Number(v); if (Number.isFinite(n)) return n; } return 0; };
 
-  const tx = db.transaction(() => {
+  const tx = makeTransaction(db, () => {
     for (const row of items) {
       if (!row) { skipped++; continue; }
       const goodsId = firstStr(row.goods_id, row.goodsId, row.id);
@@ -615,7 +678,8 @@ export function importFromApiItems(items, sourceName = "api-sync") {
           firstNum(row.mall_fans, mall.fans),
           firstStr(row.created_at, row.createdAt, row.listed_at, row.issued_date),
           new Date().toISOString(),
-          batchId
+          batchId,
+          JSON.stringify(Array.isArray(row.opt_ids) ? row.opt_ids : (row.opt_id != null ? [row.opt_id] : []))
         );
         imported++;
       } catch { skipped++; }
@@ -629,4 +693,151 @@ export function importFromApiItems(items, sourceName = "api-sync") {
 
   tx();
   return { batchId, imported, skipped, total: items.length };
+}
+
+// ============ 云启 opt_id 类目树 ============
+
+/**
+ * 保存云启 opt_id 类目树（从选品页 cascader 读出的扁平数组）。
+ * 复用 categories 表，字段语义改为 opt_id 体系：
+ *   cat_id = opt_id（如 580=汽车用品）, cat_name = 中文名, cat_level = 层级(1一级/2二级), parent_cat_id = 父 opt_id
+ * 商品的 opt_ids 字段（如 ["580","1099","2708"]）与此 opt_id 同体系，前端选类目后按 opt_id 筛商品。
+ * @param {Array} rows - [{ id, name, enName?, parentId, level }]
+ */
+export function saveCategories(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return { saved: 0 };
+  const db = getDb();
+  const now = new Date().toISOString();
+  const insert = db.prepare(`
+    INSERT OR REPLACE INTO categories (cat_id, cat_name, cat_en_name, cat_level, parent_cat_id, is_leaf, updated_at)
+    VALUES (@cat_id, @cat_name, @cat_en_name, @cat_level, @parent_cat_id, @is_leaf, @updated_at)
+  `);
+  let saved = 0;
+  const tx = makeTransaction(db, () => {
+    db.exec("DELETE FROM categories"); // 全量刷新整棵树
+    for (const c of rows) {
+      const optId = Number(c?.id ?? c?.optId);
+      if (!Number.isFinite(optId)) continue;
+      const parentId = Number(c?.parentId ?? c?.parent_opt_id) || 0;
+      const level = Number(c?.level) || (parentId ? 2 : 1);
+      insert.run({
+        cat_id: optId,
+        cat_name: String(c.name || c.showName || ""),
+        cat_en_name: String(c.enName || ""),
+        cat_level: level,
+        parent_cat_id: parentId,
+        is_leaf: level >= 2 ? 1 : 0,
+        updated_at: now,
+      });
+      saved += 1;
+    }
+  });
+  tx();
+  return { saved };
+}
+
+/** 读取全部类目（前端构建分类树） */
+export function listCategories() {
+  return getDb().prepare("SELECT cat_id, cat_name, cat_en_name, cat_level, parent_cat_id, is_leaf FROM categories ORDER BY cat_level, cat_id").all();
+}
+
+// ============ 选品池 CRUD ============
+
+export const SELECTION_STATUSES = ["want", "sourcing", "sourced", "listing", "listed", "dropped"];
+
+/**
+ * 加入选品池：存商品快照。
+ * 已存在则刷新快照（价格/销量等），但保留用户的 status 与 note 不被覆盖。
+ */
+export function addSelection(item = {}) {
+  const goodsId = String(item?.goods_id || item?.goodsId || "").trim();
+  if (!goodsId) return { ok: false, reason: "缺少 goods_id" };
+  const db = getDb();
+  const now = new Date().toISOString();
+  const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+  db.prepare(`
+    INSERT INTO selection_pool (
+      goods_id, sku_id, title_zh, title_en, main_image, product_url,
+      usd_price, daily_sales, weekly_sales, monthly_sales, usd_gmv, score,
+      category_zh, mall_name, mall_mode, status, note, source_keyword, added_at, updated_at
+    ) VALUES (
+      @goods_id, @sku_id, @title_zh, @title_en, @main_image, @product_url,
+      @usd_price, @daily_sales, @weekly_sales, @monthly_sales, @usd_gmv, @score,
+      @category_zh, @mall_name, @mall_mode, @status, @note, @source_keyword, @added_at, @updated_at
+    )
+    ON CONFLICT(goods_id) DO UPDATE SET
+      sku_id = excluded.sku_id, title_zh = excluded.title_zh, title_en = excluded.title_en,
+      main_image = excluded.main_image, product_url = excluded.product_url,
+      usd_price = excluded.usd_price, daily_sales = excluded.daily_sales,
+      weekly_sales = excluded.weekly_sales, monthly_sales = excluded.monthly_sales,
+      usd_gmv = excluded.usd_gmv, score = excluded.score,
+      category_zh = excluded.category_zh, mall_name = excluded.mall_name, mall_mode = excluded.mall_mode,
+      updated_at = excluded.updated_at
+  `).run({
+    goods_id: goodsId,
+    sku_id: String(item.sku_id || ""),
+    title_zh: String(item.title_zh || ""),
+    title_en: String(item.title_en || ""),
+    main_image: String(item.main_image || ""),
+    product_url: String(item.product_url || `https://www.temu.com/goods.html?goods_id=${goodsId}`),
+    usd_price: num(item.usd_price),
+    daily_sales: num(item.daily_sales),
+    weekly_sales: num(item.weekly_sales),
+    monthly_sales: num(item.monthly_sales),
+    usd_gmv: num(item.usd_gmv),
+    score: num(item.score),
+    category_zh: String(item.category_zh || ""),
+    mall_name: String(item.mall_name || ""),
+    mall_mode: String(item.mall_mode || ""),
+    status: SELECTION_STATUSES.includes(item.status) ? item.status : "want",
+    note: String(item.note || ""),
+    source_keyword: String(item.source_keyword || ""),
+    added_at: now,
+    updated_at: now,
+  });
+  return { ok: true, goodsId };
+}
+
+/** 移出选品池 */
+export function removeSelection(goodsId) {
+  const id = String(goodsId || "").trim();
+  if (!id) return { ok: false };
+  const db = getDb();
+  const r = db.prepare(`DELETE FROM selection_pool WHERE goods_id = ?`).run(id);
+  return { ok: true, removed: r.changes };
+}
+
+/** 更新选品池条目的状态 / 备注 */
+export function updateSelection(goodsId, { status, note } = {}) {
+  const id = String(goodsId || "").trim();
+  if (!id) return { ok: false };
+  const db = getDb();
+  const sets = [];
+  const params = { goods_id: id, updated_at: new Date().toISOString() };
+  if (status != null && SELECTION_STATUSES.includes(status)) { sets.push("status = @status"); params.status = status; }
+  if (note != null) { sets.push("note = @note"); params.note = String(note); }
+  if (sets.length === 0) return { ok: false, reason: "无可更新字段" };
+  sets.push("updated_at = @updated_at");
+  const r = db.prepare(`UPDATE selection_pool SET ${sets.join(", ")} WHERE goods_id = @goods_id`).run(params);
+  return { ok: true, changed: r.changes };
+}
+
+/** 列出选品池（可按状态过滤），附各状态计数 */
+export function listSelection({ status = "" } = {}) {
+  const db = getDb();
+  const rows = (status && SELECTION_STATUSES.includes(status))
+    ? db.prepare(`SELECT * FROM selection_pool WHERE status = ? ORDER BY added_at DESC`).all(status)
+    : db.prepare(`SELECT * FROM selection_pool ORDER BY added_at DESC`).all();
+  const summary = { total: db.prepare(`SELECT COUNT(*) AS c FROM selection_pool`).get().c };
+  for (const s of SELECTION_STATUSES) summary[s] = 0;
+  for (const row of db.prepare(`SELECT status, COUNT(*) AS c FROM selection_pool GROUP BY status`).all()) {
+    if (row.status) summary[row.status] = row.c;
+  }
+  return { rows, summary };
+}
+
+/** 返回已在选品池中的 goods_id 列表（前端给商品墙打「已加入」标记用） */
+export function listSelectionIds() {
+  const db = getDb();
+  return db.prepare(`SELECT goods_id FROM selection_pool`).all().map((r) => String(r.goods_id));
 }

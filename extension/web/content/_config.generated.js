@@ -1,6 +1,6 @@
 // ! 自动生成，勿手改 — 由 scripts/build-bridge.cjs 同步自 hook-config.js
-// 生成时间: 2026-05-31T08:13:55.972Z
-// 白名单数量: 209
+// 生成时间: 2026-06-05T05:30:24.802Z
+// 白名单数量: 210
 window.__TEMU_MONITOR_BUILD_CONFIG__ = {
   "URL_WHITELIST": [
     "/api/seller/auth/userInfo",
@@ -199,6 +199,7 @@ window.__TEMU_MONITOR_BUILD_CONFIG__ = {
     "/bg-brando-agent-seller/retrieval/board/retrieval/reason/list",
     "/bg-brando-agent-seller/retrieval/board/supplierRetrievedEvaluationInfo",
     "/bg-luna-mms/goods/quality/optimize/order/wait/optimize/count",
+    "/bg-luna-agent-seller/goods/quality/supplyChain/",
     "/mms/tmod_punish/agent/merchant_appeal/entrance/list",
     "/api/kiana/direnjie/common/gray/match",
     "/api/kiana/direnjie/common/gray/matchSubGroup",
@@ -258,6 +259,6 @@ window.__TEMU_MONITOR_BUILD_CONFIG__ = {
   "DISCOVERY_MAX_BODY_CHARS": 60000,
   "EVENT_NAME": "temu-monitor.captured",
   "BYPASS_SYMBOL_KEY": "temu-monitor.fetch.bypass",
-  "GENERATED_AT": "2026-05-31T08:13:55.972Z",
-  "WHITELIST_COUNT": 209
+  "GENERATED_AT": "2026-06-05T05:30:24.802Z",
+  "WHITELIST_COUNT": 210
 };

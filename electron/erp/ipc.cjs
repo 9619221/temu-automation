@@ -43,7 +43,12 @@ const {
   getOfficialPackage,
   editOfficialPackage,
   getOfficialExpressNotePdf,
+  applyOfficialPurchaseOrder,
+  editOfficialPurchaseOrder,
+  cancelOfficialPurchaseOrder,
 } = require("./services/temuOpenApiShipping.cjs");
+const { getAutoPurchaseCandidates, applyAutoPurchaseBatch } = require("./services/temuAutoPurchase.cjs");
+const { listCarrierMap, upsertCarrierMap, deleteCarrierMap, getDefault: getAutoShipDefault, setDefault: setAutoShipDefault, listShippableProducts } = require("./services/temuAutoShipMap.cjs");
 const {
   HK_SERVER_URL,
   configureClientRuntime,
@@ -1886,6 +1891,8 @@ const PERMISSION_MENU_CATALOG = [
     { key: "/shop", label: "店铺概览" },
     { key: "/multi-store-report", label: "多店报表" },
     { key: "/ops-workbench", label: "运营工作台" },
+    { key: "/auto-purchase", label: "采购备货" },
+    { key: "/auto-ship-map", label: "快递映射" },
     { key: "/products", label: "商品管理" },
     { key: "/competitor", label: "竞品分析" },
     { key: "/browser-multi", label: "浏览器多开" },
@@ -1950,6 +1957,8 @@ const DEFAULT_MENU_ROLE_ACCESS = {
   "/1688-mapping": ["operations", "buyer"],
   "/sourcing-center": ["operations", "buyer"],
   "/purchase-center": ["operations", "buyer", "finance"],
+  "/auto-purchase": ["operations"],
+  "/auto-ship-map": ["operations"],
   "/stores": ["operations", "buyer"],
   "/warehouse-center": ["warehouse"],
   "/qc-outbound": ["operations", "warehouse"],
@@ -6663,6 +6672,9 @@ function listJstConsignDeliverItems(params = {}) {
   if (!includeDeleted) conditions.push("i.status_internal != 'deleted'");
   if (oId) conditions.push("i.o_id = @o_id");
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  // jst_cost_price 是非标准列（部分库有、部分库没有，如本地 dev 库），缺列时退化为只用 weighted_avg_cost，
+  // 避免 no such column 报错（与上方 hasJstCost 检查同口径）。
+  const hasJstCostCol = tableHasColumn(db, "erp_skus", "jst_cost_price");
   // 成本兜底：聚水潭历史明细成本整列为空，按「货号前 6 位」归一到成本库（weighted_avg_cost 优先，退 jst_cost_price）
   // 补出款级成本 fallback_cost_price，与 cloud-only 单（temuOpenApiConsign）同口径。仅展示兜底、不回填、可秒回滚。
   // 每次只查单个 o_id 的几行明细，子查询全扫 erp_skus（数万行）聚合一次，耗时可忽略。
@@ -6671,7 +6683,7 @@ function listJstConsignDeliverItems(params = {}) {
     FROM jst_consign_deliver_items i
     LEFT JOIN (
       SELECT substr(internal_sku_code, 1, 6) AS code6,
-             MAX(COALESCE(NULLIF(weighted_avg_cost, 0), NULLIF(jst_cost_price, 0))) AS cost
+             MAX(COALESCE(NULLIF(weighted_avg_cost, 0), ${hasJstCostCol ? "NULLIF(jst_cost_price, 0)" : "NULL"})) AS cost
       FROM erp_skus
       WHERE internal_sku_code IS NOT NULL AND length(internal_sku_code) >= 6
       GROUP BY substr(internal_sku_code, 1, 6)
@@ -21377,6 +21389,63 @@ function performInventoryAction(payload = {}, actorInput = {}) {
       const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
       const deliveryOrderSn = requireString(payload.deliveryOrderSn, "deliveryOrderSn");
       return getOfficialExpressNotePdf({ db, mallId, deliveryOrderSn }).then((r) => ({ action, ...r }));
+    }
+    case "consign_purchase_apply": {
+      // ⚠️ 备货单·创建（purchaseorder.apply）：真下备货单（当日额度上限、核价限制，错误码透传）。
+      const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+      const purchaseDetailList = Array.isArray(payload.purchaseDetailList) ? payload.purchaseDetailList : [];
+      return applyOfficialPurchaseOrder({ db, mallId, purchaseDetailList }).then((r) => ({ action, ...r }));
+    }
+    case "consign_purchase_edit": {
+      // 备货单·改下单量（purchaseorder.edit）：仅待创建备货单。
+      const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+      const subPurchaseOrderSn = requireString(payload.subPurchaseOrderSn || payload.soId || payload.so_id, "subPurchaseOrderSn");
+      const purchaseDetailList = Array.isArray(payload.purchaseDetailList) ? payload.purchaseDetailList : [];
+      return editOfficialPurchaseOrder({ db, mallId, subPurchaseOrderSn, purchaseDetailList }).then((r) => ({ action, ...r }));
+    }
+    case "consign_purchase_cancel": {
+      // 备货单·批量取消待接单（purchaseorder.cancel）。
+      const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+      const snList = Array.isArray(payload.subPurchaseOrderSnList)
+        ? payload.subPurchaseOrderSnList
+        : (payload.subPurchaseOrderSn ? [payload.subPurchaseOrderSn] : (payload.soId ? [payload.soId] : []));
+      return cancelOfficialPurchaseOrder({ db, mallId, subPurchaseOrderSnList: snList }).then((r) => ({ action, ...r }));
+    }
+    case "consign_auto_purchase_candidates": {
+      // 采购自动备货·扫描候选(只读)：建议备货量>0 且无现成备货单的 SKU + 预估花费汇总。
+      const mallId = optionalString(payload.mallId || payload.mall_id);
+      return { action, ...getAutoPurchaseCandidates(db, { mallId }) };
+    }
+    case "consign_auto_purchase_apply": {
+      // ⚠️ 采购自动备货·批量申请(真下备货单，前端二次确认后调)。items:[{mallId,productSkuId,productSkcId,quantity}]。
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      return applyAutoPurchaseBatch(db, items).then((r) => ({ action, ...r }));
+    }
+    case "auto_ship_map_list": {
+      // 自动发货·快递映射表：列(可按店)。
+      const mallId = optionalString(payload.mallId || payload.mall_id);
+      return { action, rows: listCarrierMap(db, { mallId }) };
+    }
+    case "auto_ship_map_upsert": {
+      // 自动发货·快递映射表：批量配置/Excel 导入。rows:[{mallId,productId,expressCompanyId?,expressCompanyName?,pickupPref?,...}]
+      const rows = Array.isArray(payload.rows) ? payload.rows : [];
+      return { action, ...upsertCarrierMap(db, rows, optionalString(payload.actor)) };
+    }
+    case "auto_ship_map_delete": {
+      const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+      const productId = requireString(payload.productId || payload.product_id, "productId");
+      return { action, ...deleteCarrierMap(db, { mallId, productId }) };
+    }
+    case "auto_ship_default_get": {
+      return { action, default: getAutoShipDefault(db) };
+    }
+    case "auto_ship_default_set": {
+      // 默认策略：carrierStrategy(cheapest/most_used/most_used_then_cheapest) + pickupPref。
+      return { action, default: setAutoShipDefault(db, { carrierStrategy: payload.carrierStrategy, pickupPref: payload.pickupPref }, optionalString(payload.actor)) };
+    }
+    case "auto_ship_map_products": {
+      // 自动发货·待配商品清单(已接单待发货涉及的商品 + 现有映射)，供前端表格 + Excel 模板。
+      return { action, products: listShippableProducts(db) };
     }
     default:
       throw new Error(`Unsupported inventory action: ${action}`);

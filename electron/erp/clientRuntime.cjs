@@ -45,7 +45,9 @@ function normalizeServerUrl(value) {
 
 function isHkServerUrl(value) {
   try {
-    return new URL(normalizeServerUrl(value)).hostname.toLowerCase() === "erp.temu.chat";
+    const host = new URL(normalizeServerUrl(value)).hostname.toLowerCase();
+    // 本地联调允许直连本机 erp-server（localhost / 127.0.0.1），其余仍只认 HK 生产
+    return host === "erp.temu.chat" || host === "localhost" || host === "127.0.0.1";
   } catch {
     return false;
   }
@@ -54,6 +56,10 @@ function isHkServerUrl(value) {
 function normalizeHkServerUrl(value) {
   const normalized = normalizeServerUrl(value);
   if (!normalized) return "";
+  try {
+    const host = new URL(normalized).hostname.toLowerCase();
+    if (host === "localhost" || host === "127.0.0.1") return normalized; // 本地联调直连本机
+  } catch {}
   return HK_SERVER_URL;
 }
 

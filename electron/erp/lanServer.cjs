@@ -83,8 +83,22 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/erp/reports/sales-trend": ["admin", "manager", "operations", "finance", "viewer"],
   "/api/erp/reports/product-panel": ["admin", "manager", "operations", "finance", "viewer"],
   "/api/erp/reports/openapi-qc": ["admin", "manager", "operations", "finance", "viewer"],
+  "/api/erp/reports/firstship-today": ["admin", "manager", "operations", "finance", "viewer"],
+  "/api/erp/reports/goods-created-today": ["admin", "manager", "operations", "finance", "viewer"],
+  "/api/erp/reports/quality-panel": ["admin", "manager", "operations", "finance", "viewer"],
+  "/api/erp/reports/reviews": ["admin", "manager", "operations", "finance", "viewer"],
   "/api/erp/reports/qc-flaw-images": ["admin", "manager", "operations", "finance", "viewer"],
   "/api/erp/reports/purchase": ["admin", "manager", "finance", "buyer", "operations", "viewer"],
+  "/api/erp/reports/yunqi-search": ["admin", "manager", "operations"],
+  "/api/erp/reports/yunqi-stats": ["admin", "manager", "operations"],
+  "/api/erp/reports/yunqi-info": ["admin", "manager", "operations"],
+  "/api/erp/reports/yunqi-selection-list": ["admin", "manager", "operations"],
+  "/api/erp/reports/yunqi-selection-ids": ["admin", "manager", "operations"],
+  "/api/erp/reports/yunqi-selection-add": ["admin", "manager", "operations"],
+  "/api/erp/reports/yunqi-selection-remove": ["admin", "manager", "operations"],
+  "/api/erp/reports/yunqi-selection-update": ["admin", "manager", "operations"],
+  "/api/erp/reports/yunqi-sync": ["admin", "manager", "operations"],
+  "/api/erp/reports/yunqi-categories": ["admin", "manager", "operations"],
   "/warehouse": ["admin", "manager", "warehouse"],
   "/api/warehouse/workbench": ["admin", "manager", "warehouse"],
   "/api/warehouse/action": ["admin", "manager", "warehouse"],
@@ -5525,7 +5539,7 @@ async function handleRequest({
       return;
     }
 
-    if (pathname === "/api/erp/reports/risk-list" || pathname === "/api/erp/reports/activity-list" || pathname === "/api/erp/reports/shop-health" || pathname === "/api/erp/reports/stock-orders" || pathname === "/api/erp/reports/sales-trend" || pathname === "/api/erp/reports/product-panel" || pathname === "/api/erp/reports/product-trend" || pathname === "/api/erp/reports/purchase" || pathname === "/api/erp/reports/openapi-qc") {
+    if (pathname === "/api/erp/reports/risk-list" || pathname === "/api/erp/reports/activity-list" || pathname === "/api/erp/reports/shop-health" || pathname === "/api/erp/reports/stock-orders" || pathname === "/api/erp/reports/sales-trend" || pathname === "/api/erp/reports/product-panel" || pathname === "/api/erp/reports/product-trend" || pathname === "/api/erp/reports/purchase" || pathname === "/api/erp/reports/openapi-qc" || pathname === "/api/erp/reports/firstship-today" || pathname === "/api/erp/reports/goods-created-today" || pathname === "/api/erp/reports/quality-panel" || pathname === "/api/erp/reports/reviews" || pathname === "/api/erp/reports/high-price-flow") {
       if (req.method !== "GET") {
         writeJson(res, 405, { ok: false, error: "Method not allowed" });
         return;
@@ -5535,7 +5549,7 @@ async function handleRequest({
         const includeTest = parsed.searchParams.get("include_test") === "1";
         const productId = parsed.searchParams.get("product_id") || "";
         const svc = require("./services/multiStoreReport.cjs");
-        const fn = pathname.endsWith("risk-list") ? svc.buildRiskList : pathname.endsWith("shop-health") ? svc.buildShopHealth : pathname.endsWith("stock-orders") ? svc.buildStockOrders : pathname.endsWith("sales-trend") ? svc.buildSalesTrend : pathname.endsWith("product-panel") ? svc.getProductPanelFast : pathname.endsWith("product-trend") ? svc.buildProductSalesTrend : pathname.endsWith("purchase") ? svc.buildPurchaseReport : pathname.endsWith("openapi-qc") ? svc.buildOpenapiQc : svc.buildActivityList;
+        const fn = pathname.endsWith("risk-list") ? svc.buildRiskList : pathname.endsWith("shop-health") ? svc.buildShopHealth : pathname.endsWith("stock-orders") ? svc.buildStockOrders : pathname.endsWith("sales-trend") ? svc.buildSalesTrend : pathname.endsWith("product-panel") ? svc.getProductPanelFast : pathname.endsWith("product-trend") ? svc.buildProductSalesTrend : pathname.endsWith("purchase") ? svc.buildPurchaseReport : pathname.endsWith("openapi-qc") ? svc.buildOpenapiQc : pathname.endsWith("firstship-today") ? svc.buildFirstShipToday : pathname.endsWith("goods-created-today") ? svc.buildGoodsCreatedToday : pathname.endsWith("quality-panel") ? svc.buildQualityPanel : pathname.endsWith("reviews") ? svc.buildReviews : pathname.endsWith("high-price-flow") ? svc.buildHighPriceFlowList : svc.buildActivityList;
         const data = fn(db, { includeTest, productId, attachCloudDb: attachTemuCloudDbIfPossible });
         writeJson(res, 200, { ok: true, data });
       } catch (error) {
@@ -5602,6 +5616,74 @@ async function handleRequest({
       } catch (error) {
         writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });
       }
+      return;
+    }
+
+    // ===== 选品广场：云端选品库读取 + 选品池（读 /opt/temu-erp-data/yunqi_products.db）=====
+    if (pathname === "/api/erp/reports/yunqi-search") {
+      if (req.method !== "POST") { writeJson(res, 405, { ok: false, error: "Method not allowed" }); return; }
+      try { const p = await readOptionalPayload(req); writeJson(res, 200, { ok: true, data: require("./services/yunqiCloud.cjs").searchProducts(p || {}) }); }
+      catch (error) { writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) }); }
+      return;
+    }
+    if (pathname === "/api/erp/reports/yunqi-stats") {
+      try { writeJson(res, 200, { ok: true, data: require("./services/yunqiCloud.cjs").getStats() }); }
+      catch (error) { writeJson(res, 500, { ok: false, error: error?.message || String(error) }); }
+      return;
+    }
+    if (pathname === "/api/erp/reports/yunqi-info") {
+      try { writeJson(res, 200, { ok: true, data: require("./services/yunqiCloud.cjs").getInfo() }); }
+      catch (error) { writeJson(res, 500, { ok: false, error: error?.message || String(error) }); }
+      return;
+    }
+    if (pathname === "/api/erp/reports/yunqi-selection-list") {
+      try { const status = new URL(req.url || "/", "http://127.0.0.1").searchParams.get("status") || ""; writeJson(res, 200, { ok: true, data: require("./services/yunqiCloud.cjs").listSelection({ status }) }); }
+      catch (error) { writeJson(res, 500, { ok: false, error: error?.message || String(error) }); }
+      return;
+    }
+    if (pathname === "/api/erp/reports/yunqi-selection-ids") {
+      try { writeJson(res, 200, { ok: true, data: require("./services/yunqiCloud.cjs").listSelectionIds() }); }
+      catch (error) { writeJson(res, 500, { ok: false, error: error?.message || String(error) }); }
+      return;
+    }
+    if (pathname === "/api/erp/reports/yunqi-selection-add") {
+      if (req.method !== "POST") { writeJson(res, 405, { ok: false, error: "Method not allowed" }); return; }
+      try { const p = await readOptionalPayload(req); writeJson(res, 200, { ok: true, data: require("./services/yunqiCloud.cjs").addSelection(p?.item || p || {}) }); }
+      catch (error) { writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) }); }
+      return;
+    }
+    if (pathname === "/api/erp/reports/yunqi-selection-remove") {
+      if (req.method !== "POST") { writeJson(res, 405, { ok: false, error: "Method not allowed" }); return; }
+      try { const p = await readOptionalPayload(req); writeJson(res, 200, { ok: true, data: require("./services/yunqiCloud.cjs").removeSelection(p?.goodsId) }); }
+      catch (error) { writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) }); }
+      return;
+    }
+    if (pathname === "/api/erp/reports/yunqi-selection-update") {
+      if (req.method !== "POST") { writeJson(res, 405, { ok: false, error: "Method not allowed" }); return; }
+      try { const p = await readOptionalPayload(req); writeJson(res, 200, { ok: true, data: require("./services/yunqiCloud.cjs").updateSelection(p?.goodsId, { status: p?.status, note: p?.note }) }); }
+      catch (error) { writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) }); }
+      return;
+    }
+
+    // 选品广场：触发服务器云端抓取（无头登录云启 + 抓 + 存云端库），后台异步执行
+    if (pathname === "/api/erp/reports/yunqi-sync") {
+      if (req.method !== "POST") { writeJson(res, 405, { ok: false, error: "Method not allowed" }); return; }
+      try {
+        const p = await readOptionalPayload(req);
+        const { spawn } = require("child_process");
+        const env = { ...process.env, YQ_MAX_PAGES: String(Math.min(Math.max(Number(p?.maxPages) || 5, 1), 20)) };
+        const kws = Array.isArray(p?.keywords) ? p.keywords.map((s) => String(s || "").trim()).filter(Boolean) : [];
+        if (kws.length) env.YQ_KEYWORDS = kws.join(",");
+        const child = spawn(process.execPath, ["--experimental-sqlite", "/opt/temu-automation/scripts/yunqi-cloud-fetch.mjs"], { cwd: "/opt/temu-automation", env, detached: true, stdio: "ignore" });
+        child.unref();
+        writeJson(res, 200, { ok: true, data: { triggered: true, message: "已触发服务器抓取(无头登录云启)，约 30-60 秒后点「刷新」查看新数据" } });
+      } catch (error) { writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) }); }
+      return;
+    }
+
+    if (pathname === "/api/erp/reports/yunqi-categories") {
+      try { writeJson(res, 200, { ok: true, data: require("./services/yunqiCloud.cjs").listCategories() }); }
+      catch (error) { writeJson(res, 500, { ok: false, error: error?.message || String(error) }); }
       return;
     }
 

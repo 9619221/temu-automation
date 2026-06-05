@@ -234,6 +234,8 @@ export const URL_WHITELIST = [
   "/bg-brando-agent-seller/retrieval/board/retrieval/reason/list",
   "/bg-brando-agent-seller/retrieval/board/supplierRetrievedEvaluationInfo",
   "/bg-luna-mms/goods/quality/optimize/order/wait/optimize/count",
+  // 商品品质看板(/main/quality/dashboard):品质分(goodsAfsScore)/售后率/售后·差评问题分布/趋势,供运营工作台「商品品质」Tab。子串前缀覆盖 pageQuery/query/count/trend
+  "/bg-luna-agent-seller/goods/quality/supplyChain/",
   "/mms/tmod_punish/agent/merchant_appeal/entrance/list",
 
   // === 灰度 / 配置 ===

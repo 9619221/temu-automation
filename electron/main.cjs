@@ -5258,12 +5258,22 @@ ipcMain.handle("competitor:vision-compare", async (_event, payload) => {
 
 // ============ 云启数据库 IPC ============
 ipcMain.handle("competitor:fetch-yunqi-token", async () => sendCmd("fetch_yunqi_token_from_browser", {}, { timeoutMs: 5 * 60 * 1000 }));
+// yunqi-db（选品广场）：client 模式走 erp 服务器读云端库(全云端)，本地模式走 worker。
+const __yunqiRT = require("./erp/clientRuntime.cjs");
+const __yunqiIsClient = () => { try { return __yunqiRT.readRuntimeConfig().mode === "client"; } catch { return false; } };
+const __yunqiRemote = async (p, opts) => { const r = await __yunqiRT.remoteRequest(p, opts); return r && r.data !== undefined ? r.data : r; };
 ipcMain.handle("yunqi-db:import", async (_e, params) => sendCmd("yunqi_db_import", params || {}, { timeoutMs: 120000 }));
-ipcMain.handle("yunqi-db:search", async (_e, params) => sendCmd("yunqi_db_search", params || {}));
-ipcMain.handle("yunqi-db:stats", async () => sendCmd("yunqi_db_stats", {}));
+ipcMain.handle("yunqi-db:search", async (_e, params) => __yunqiIsClient() ? __yunqiRemote("/api/erp/reports/yunqi-search", { method: "POST", body: params || {} }) : sendCmd("yunqi_db_search", params || {}));
+ipcMain.handle("yunqi-db:stats", async () => __yunqiIsClient() ? __yunqiRemote("/api/erp/reports/yunqi-stats", { method: "GET" }) : sendCmd("yunqi_db_stats", {}));
 ipcMain.handle("yunqi-db:top", async (_e, params) => sendCmd("yunqi_db_top", params || {}));
-ipcMain.handle("yunqi-db:info", async () => sendCmd("yunqi_db_info", {}));
-ipcMain.handle("yunqi-db:sync-online", async (_e, params) => sendCmd("yunqi_db_sync_online", params || {}, { timeoutMs: 300000 }));
+ipcMain.handle("yunqi-db:info", async () => __yunqiIsClient() ? __yunqiRemote("/api/erp/reports/yunqi-info", { method: "GET" }) : sendCmd("yunqi_db_info", {}));
+ipcMain.handle("yunqi-db:sync-online", async (_e, params) => __yunqiIsClient() ? __yunqiRemote("/api/erp/reports/yunqi-sync", { method: "POST", body: params || {} }) : sendCmd("yunqi_db_sync_online", params || {}, { timeoutMs: 300000 }));
+ipcMain.handle("yunqi-db:selection-add", async (_e, params) => __yunqiIsClient() ? __yunqiRemote("/api/erp/reports/yunqi-selection-add", { method: "POST", body: params || {} }) : sendCmd("yunqi_db_selection_add", params || {}));
+ipcMain.handle("yunqi-db:selection-remove", async (_e, params) => __yunqiIsClient() ? __yunqiRemote("/api/erp/reports/yunqi-selection-remove", { method: "POST", body: params || {} }) : sendCmd("yunqi_db_selection_remove", params || {}));
+ipcMain.handle("yunqi-db:selection-update", async (_e, params) => __yunqiIsClient() ? __yunqiRemote("/api/erp/reports/yunqi-selection-update", { method: "POST", body: params || {} }) : sendCmd("yunqi_db_selection_update", params || {}));
+ipcMain.handle("yunqi-db:selection-list", async (_e, params) => __yunqiIsClient() ? __yunqiRemote(`/api/erp/reports/yunqi-selection-list?status=${encodeURIComponent((params && params.status) || "")}`, { method: "GET" }) : sendCmd("yunqi_db_selection_list", params || {}));
+ipcMain.handle("yunqi-db:selection-ids", async () => __yunqiIsClient() ? __yunqiRemote("/api/erp/reports/yunqi-selection-ids", { method: "GET" }) : sendCmd("yunqi_db_selection_ids", {}));
+ipcMain.handle("yunqi-db:categories", async () => __yunqiIsClient() ? __yunqiRemote("/api/erp/reports/yunqi-categories", { method: "GET" }) : sendCmd("yunqi_db_categories", {}));
 
 // ============ 核价筛选器 IPC ============
 ipcMain.handle("price-review:scan-now", async (_e, params) => {
@@ -6300,6 +6310,23 @@ ipcMain.handle("app:open-external", async (_event, rawUrl) => {
   }
   await shell.openExternal(url.toString());
   return url.toString();
+});
+
+// 面单 PDF：前端传 base64（主控端已带鉴权 header 下载好），写临时文件后用系统阅读器打开（可打印）。
+ipcMain.handle("app:open-pdf", async (_event, payload) => {
+  const base64 = String(payload?.base64 || "");
+  if (!base64) throw new Error("缺少 PDF 数据");
+  const os = require("node:os");
+  const path = require("node:path");
+  const fs = require("node:fs");
+  let name = String(payload?.filename || "面单.pdf").replace(/[\\/:*?"<>|]/g, "_");
+  if (!name.toLowerCase().endsWith(".pdf")) name += ".pdf";
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "temu-waybill-"));
+  const filePath = path.join(dir, name);
+  fs.writeFileSync(filePath, Buffer.from(base64, "base64"));
+  const error = await shell.openPath(filePath);
+  if (error) throw new Error(`打开 PDF 失败：${error}`);
+  return filePath;
 });
 
 let logisticsWindow = null;
