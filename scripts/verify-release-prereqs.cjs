@@ -109,6 +109,13 @@ function verifyAnalyzeKey(env) {
     throw new Error("AI runtime .env.local 缺少 ANALYZE_API_KEY / ANALYZE_BASE_URL / ANALYZE_MODEL");
   }
 
+  // 上游大模型临时超载/不可用时（凭证与线路均正常，仅生成请求超时），可设 SKIP_ANALYZE_LIVE_CHECK=1
+  // 跳过实际联网探活。凭证存在性(上方)与一致性(assertAiCredentialsMatchRuntimeEnv)仍会校验，不会放过真正缺凭证的坏包。
+  if (process.env.SKIP_ANALYZE_LIVE_CHECK === "1") {
+    console.log(`[skip] ANALYZE_API_KEY 连通性检查（SKIP_ANALYZE_LIVE_CHECK=1，keyLength=${getMaskedLength(apiKey)}, model=${model}）`);
+    return Promise.resolve();
+  }
+
   const endpoint = new URL(`${baseUrl}/chat/completions`);
   const body = JSON.stringify({
     model,
