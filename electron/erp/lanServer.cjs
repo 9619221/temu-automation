@@ -318,6 +318,7 @@ WITH jst_base AS (
     o_id, so_id, shop_name, status, src_status, shop_status_text,
     item_amount, items_qty, order_date, send_date, outer_deliver_no,
     supplier_name, logistics_company, l_id, sku_info, skus, currency,
+    receiver_state, receiver_city, receiver_district,
     local_status_override, inventory_deducted
   FROM jst_consign_deliveries
   WHERE company_id = @company_id AND status_internal != 'deleted'
@@ -407,6 +408,9 @@ jst_left AS (
     j.sku_info AS jst_sku_info,
     j.skus AS jst_skus,
     j.currency AS jst_currency,
+    j.receiver_state AS jst_receiver_state,
+    j.receiver_city AS jst_receiver_city,
+    j.receiver_district AS jst_receiver_district,
     j.local_status_override AS local_status_override,
     j.inventory_deducted AS inventory_deducted,
     sa.local_ship_total AS jst_local_ship_total,
@@ -461,6 +465,9 @@ cloud_only AS (
     NULL AS jst_sku_info,
     NULL AS jst_skus,
     NULL AS jst_currency,
+    NULL AS jst_receiver_state,
+    NULL AS jst_receiver_city,
+    NULL AS jst_receiver_district,
     ls.local_status_override AS local_status_override,
     COALESCE(ls.inventory_deducted, 0) AS inventory_deducted,
     NULL AS jst_local_ship_total,
@@ -512,7 +519,7 @@ const _CLOUD_AGG_OFFICIAL = `cloud_agg AS (
     SELECT
       so_id AS cloud_so,
       so_id AS cloud_row_key,
-      mall_id AS cloud_mall_id,
+      c.mall_id AS cloud_mall_id,
       NULL AS cloud_site,
       original_po_sn AS cloud_parent_order_no,
       NULL AS cloud_delivery_batch_sn,
@@ -538,8 +545,11 @@ const _CLOUD_AGG_OFFICIAL = `cloud_agg AS (
       CASE WHEN COALESCE(express_company,'')<>'' OR COALESCE(express_delivery_sn,'')<>''
            THEN TRIM(COALESCE(express_company,'') || ' ' || COALESCE(express_delivery_sn,''))
            ELSE NULL END AS cloud_logistics_info,
-      sku_count AS cloud_item_count
-    FROM erp_temu_openapi_consign
+      sku_count AS cloud_item_count,
+      receive_address_json AS cloud_receive_address_json,
+      m.send_address_json AS cloud_send_address_json
+    FROM erp_temu_openapi_consign c
+    LEFT JOIN erp_temu_malls m ON m.mall_id = c.mall_id
   ),`;
 const _CLOUD_AGG_SCRAPE_RE = /cloud_agg AS \([\s\S]*?GROUP BY stock_order_no\s*\n\),/;
 function buildUnifiedConsignCte() {
@@ -611,6 +621,8 @@ function unifiedRowToPayload(row) {
     latest_ship_at: row.cloud_latest_ship_at,
     logistics_info: row.cloud_logistics_info,
     item_count: row.cloud_item_count,
+    receive_address_json: row.cloud_receive_address_json,
+    send_address_json: row.cloud_send_address_json,
   } : null;
   const rawJst = (source === "jst" || source === "both") ? {
     o_id: row.jst_o_id,
@@ -630,6 +642,9 @@ function unifiedRowToPayload(row) {
     sku_info: row.jst_sku_info,
     skus: row.jst_skus,
     currency: row.jst_currency,
+    receiver_state: row.jst_receiver_state,
+    receiver_city: row.jst_receiver_city,
+    receiver_district: row.jst_receiver_district,
   } : null;
   return {
     soId: row.so_id,

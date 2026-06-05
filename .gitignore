@@ -66,3 +66,7 @@ import-*.sql
 _probe_*
 _pu*
 _dbpath.txt
+
+# 部署临时中转目录（含 sqlite / cjs 副本，绝不提交）
+.sync-tmp/
+tmp_deploy/

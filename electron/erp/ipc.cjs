@@ -29,6 +29,22 @@ const {
   setCloudConsignItemShipQty,
 } = require("./services/consignDeliverShip.cjs");
 const {
+  getOfficialShipPreview,
+  stagingAddOfficial,
+  createOfficialShipOrder,
+  cancelOfficialShipOrder,
+  getOfficialLogisticsCompanies,
+  getOfficialLogisticsMatch,
+  matchOfficialPacking,
+  sendOfficialPacking,
+  printOfficialBoxmark,
+  printOfficialGoodsLabel,
+  getOfficialPredictVolume,
+  getOfficialPackage,
+  editOfficialPackage,
+  getOfficialExpressNotePdf,
+} = require("./services/temuOpenApiShipping.cjs");
+const {
   HK_SERVER_URL,
   configureClientRuntime,
   discoverControllers,
@@ -21245,6 +21261,122 @@ function performInventoryAction(payload = {}, actorInput = {}) {
       const skuKey = requireString(payload.skuKey || payload.sku_key, "skuKey");
       const shipQty = payload.shipQty ?? payload.ship_qty;
       return { action, ...setCloudConsignItemShipQty({ db, mallId, soId, skuKey, shipQty }) };
+    }
+    case "consign_official_ship_preview": {
+      // 出库中心送仓行「发货信息预览」(第一阶段·只读)：拿官方大仓收货地址 + 本店发货地址，绝不发货。
+      // performInventoryAction 是同步函数，官方接口是异步，故本 case 返回 promise（调用方都会 await）。
+      const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+      const soId = optionalString(payload.soId || payload.so_id);
+      return getOfficialShipPreview({ db, mallId, subPurchaseOrderSn: soId }).then((r) => ({ action, ...r }));
+    }
+    case "consign_official_staging_add": {
+      // 加入发货台（单个备货单，独立按钮用）。
+      const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+      const soId = requireString(payload.soId || payload.so_id || payload.subPurchaseOrderSn, "subPurchaseOrderSn");
+      return stagingAddOfficial({ db, mallId, subPurchaseOrderSn: soId }).then((r) => ({ action, ...r }));
+    }
+    case "consign_official_ship_create": {
+      // 创建官方发货单（生成 FH 单，可撤销、不真发货）。skuList=[{productSkuId,qty}]。
+      const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+      const soId = requireString(payload.soId || payload.so_id || payload.subPurchaseOrderSn, "subPurchaseOrderSn");
+      const skuList = Array.isArray(payload.skuList) ? payload.skuList : [];
+      const deliveryAddressId = optionalString(payload.deliveryAddressId);
+      return createOfficialShipOrder({ db, mallId, subPurchaseOrderSn: soId, skuList, deliveryAddressId })
+        .then((r) => ({ action, ...r }));
+    }
+    case "consign_official_ship_cancel": {
+      // 撤销官方发货单（仅 FH 未物流下单可撤）。
+      const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+      const deliveryOrderSn = requireString(payload.deliveryOrderSn, "deliveryOrderSn");
+      return cancelOfficialShipOrder({ db, mallId, deliveryOrderSn }).then((r) => ({ action, ...r }));
+    }
+    case "consign_official_logistics_companies": {
+      // 快递公司字典（自寄兜底；全托管店多返回空，主路径用 logistics_match）。
+      const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+      return getOfficialLogisticsCompanies({ db, mallId }).then((companies) => ({ action, companies }));
+    }
+    case "consign_official_logistics_match": {
+      // 平台推荐物流商匹配（logisticsmatch.get）：选哪家上门揽收 + 运费 + predictId。
+      const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+      const deliveryOrderSn = requireString(payload.deliveryOrderSn, "deliveryOrderSn");
+      return getOfficialLogisticsMatch({
+        db, mallId, deliveryOrderSn,
+        deliveryAddressId: payload.deliveryAddressId,
+        subWarehouseId: payload.subWarehouseId,
+        receiveAddressInfo: payload.receiveAddressInfo,
+        predictTotalPackageWeight: payload.predictTotalPackageWeight,
+        totalPackageNum: payload.totalPackageNum,
+        predictVolume: payload.predictVolume,
+      }).then((r) => ({ action, ...r }));
+    }
+    case "consign_official_packing_match": {
+      // 发货前校验（packing.match）。
+      const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+      const snList = Array.isArray(payload.deliveryOrderSnList) ? payload.deliveryOrderSnList : [];
+      return matchOfficialPacking({ db, mallId, deliveryOrderSnList: snList }).then((r) => ({ action, ...r }));
+    }
+    case "consign_official_packing_send": {
+      // ⚠️ 物流下单真发货、生成 EB 运单、不可逆。需 confirm===true。平台 TMS 揽收：带 predictId。
+      const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+      const snList = Array.isArray(payload.deliveryOrderSnList) ? payload.deliveryOrderSnList : [];
+      return sendOfficialPacking({
+        db, mallId, confirm: payload.confirm === true,
+        deliveryAddressId: payload.deliveryAddressId,
+        deliveryOrderSnList: snList,
+        expressCompanyId: payload.expressCompanyId,
+        expressCompanyName: payload.expressCompanyName,
+        predictId: payload.predictId,
+        deliverMethod: payload.deliverMethod,
+        pickupMethod: payload.pickupMethod,
+        predictTotalPackageWeight: payload.predictTotalPackageWeight,
+        expressPackageNum: payload.expressPackageNum,
+        expectPickUpGoodsTime: payload.expectPickUpGoodsTime,
+        expressDeliverySn: payload.expressDeliverySn,
+      }).then((r) => ({ action, ...r }));
+    }
+    case "consign_official_print_boxmark": {
+      // 打印箱唛：取 Temu 打印页 URL（浏览器打开即印）。需发货单号（创建发货单后）。
+      const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+      const deliveryOrderSn = optionalString(payload.deliveryOrderSn);
+      const snList = Array.isArray(payload.deliveryOrderSnList) ? payload.deliveryOrderSnList : [];
+      return printOfficialBoxmark({ db, mallId, deliveryOrderSn, deliveryOrderSnList: snList }).then((r) => ({ action, ...r }));
+    }
+    case "consign_official_print_label": {
+      // 打印商品条码：按 SKC/SKU 取 Temu 打印页 URL，不依赖发货单。
+      const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+      const skcIds = Array.isArray(payload.skcIds) ? payload.skcIds : [];
+      const skuIds = Array.isArray(payload.skuIds) ? payload.skuIds : [];
+      return printOfficialGoodsLabel({ db, mallId, skcIds, skuIds }).then((r) => ({ action, ...r }));
+    }
+    case "consign_official_predict_volume": {
+      // 预估体积（predict.volume.get）：物流匹配前取，喂给 logisticsmatch 让运费/匹配更准。
+      const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+      const snList = Array.isArray(payload.deliveryOrderSnList)
+        ? payload.deliveryOrderSnList
+        : (payload.deliveryOrderSn ? [payload.deliveryOrderSn] : []);
+      return getOfficialPredictVolume({ db, mallId, deliveryOrderSnList: snList }).then((r) => ({ action, ...r }));
+    }
+    case "consign_official_package_get": {
+      // 装箱明细查询（package.get）。
+      const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+      const deliveryOrderSn = requireString(payload.deliveryOrderSn, "deliveryOrderSn");
+      return getOfficialPackage({ db, mallId, deliveryOrderSn }).then((r) => ({ action, ...r }));
+    }
+    case "consign_official_package_edit": {
+      // 装箱编辑（package.edit）：调整分箱（哪些 SKU 装哪箱、各箱数量）。
+      const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+      const deliveryOrderSn = requireString(payload.deliveryOrderSn, "deliveryOrderSn");
+      return editOfficialPackage({
+        db, mallId, deliveryOrderSn,
+        deliverOrderDetailInfos: payload.deliverOrderDetailInfos,
+        packageInfos: payload.packageInfos,
+      }).then((r) => ({ action, ...r }));
+    }
+    case "consign_official_express_note": {
+      // 面单 PDF（express.note.get + 鉴权下载）：返回 base64，前端用 app.openPdf 打开打印。
+      const mallId = requireString(payload.mallId || payload.mall_id, "mallId");
+      const deliveryOrderSn = requireString(payload.deliveryOrderSn, "deliveryOrderSn");
+      return getOfficialExpressNotePdf({ db, mallId, deliveryOrderSn }).then((r) => ({ action, ...r }));
     }
     default:
       throw new Error(`Unsupported inventory action: ${action}`);
