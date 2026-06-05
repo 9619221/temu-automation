@@ -312,6 +312,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
       getProfile: () => ipcRenderer.invoke("erp:permission:get-profile"),
       upsertRole: (payload) => ipcRenderer.invoke("erp:permission:upsert-role", payload || {}),
       upsertScope: (payload) => ipcRenderer.invoke("erp:permission:upsert-scope", payload || {}),
+      adminView: (params) => ipcRenderer.invoke("erp:permission:admin-view", params || {}),
+      setRoleAccess: (payload) => ipcRenderer.invoke("erp:permission:set-role-access", payload || {}),
+      setUserOverrides: (payload) => ipcRenderer.invoke("erp:permission:set-user-overrides", payload || {}),
+      setUserScopes: (payload) => ipcRenderer.invoke("erp:permission:set-user-scopes", payload || {}),
     },
     supplier: {
       list: (params) => ipcRenderer.invoke("erp:supplier:list", params || {}),

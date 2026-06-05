@@ -2,7 +2,8 @@ import { Component, Suspense, lazy, useEffect, useRef, useState, type ComponentT
 import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { CollectionProvider } from "./contexts/CollectionContext";
 import { ErpAuthProvider, useErpAuth } from "./contexts/ErpAuthContext";
-import { canAccessRoute, getDefaultPathForRole, roleLabel } from "./utils/erpRoleAccess";
+import { ErpPermissionProvider, useErpPermissions } from "./contexts/ErpPermissionContext";
+import { getDefaultPathForRole, roleLabel } from "./utils/erpRoleAccess";
 import {
   ACTIVE_ACCOUNT_CHANGED_EVENT,
   emitActiveAccountChanged,
@@ -190,7 +191,8 @@ class AppRouteErrorBoundary extends Component<
 
 function RoleRoute({ path, children }: { path: string; children: JSX.Element }) {
   const { currentUser } = useErpAuth();
-  if (!canAccessRoute(currentUser?.role, path)) return <AccessDenied />;
+  const { canMenu } = useErpPermissions();
+  if (!canMenu(path)) return <AccessDenied />;
   return (
     <OperationsExtensionGate role={currentUser?.role} routePath={path}>
       {children}
@@ -326,6 +328,7 @@ function App() {
 
   return (
     <ErpAuthProvider>
+      <ErpPermissionProvider>
       <CollectionProvider key={`collection-${accountViewVersion}`}>
         <AppRouteErrorBoundary resetKey={`${location.pathname}${location.search}`}>
           <Suspense fallback={<PremiumRouteLoading />}>
@@ -386,6 +389,7 @@ function App() {
           </Suspense>
         </AppRouteErrorBoundary>
       </CollectionProvider>
+      </ErpPermissionProvider>
     </ErpAuthProvider>
   );
 }

@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Button, Col, Form, Input, Row, Select, Space, Table, Tag, Typography, message } from "antd";
+import { Button, Col, Form, Input, Modal, Row, Select, Space, Table, Tag, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { EditOutlined, KeyOutlined, PlusOutlined, ReloadOutlined, SafetyCertificateOutlined, StopOutlined, SyncOutlined } from "@ant-design/icons";
+import { EditOutlined, KeyOutlined, PlusOutlined, ReloadOutlined, SafetyCertificateOutlined, StopOutlined } from "@ant-design/icons";
 import PageHeader from "../components/PageHeader";
 import { roleLabel } from "../utils/erpRoleAccess";
 import { useErpAuth } from "../contexts/ErpAuthContext";
-import { ERP_CLOUD_SERVER_URL } from "../config/erpCloud";
 import { hasPageCache, readPageCache, writePageCache } from "../utils/pageCache";
+import RolePermissionPanel from "../components/RolePermissionPanel";
+import UserPermissionModal from "../components/UserPermissionModal";
 
 const { Text } = Typography;
 const erp = window.electronAPI?.erp;
@@ -73,7 +74,6 @@ function statusTag(status?: string) {
 
 export default function UserManagement() {
   const [form] = Form.useForm<UserFormValues>();
-  const [cloudForm] = Form.useForm<{ login: string; accessCode: string }>();
   const auth = useErpAuth();
   const cached = useMemo(() => readPageCache<UserManagementCache>(USER_MANAGEMENT_CACHE_KEY, {
     users: [],
@@ -84,7 +84,8 @@ export default function UserManagement() {
   const [loading, setLoading] = useState(false);
   const [loadedOnce, setLoadedOnce] = useState(() => hasPageCache(cached));
   const [submitting, setSubmitting] = useState(false);
-  const [cloudSubmitting, setCloudSubmitting] = useState(false);
+  const [userModalOpen, setUserModalOpen] = useState(false);
+  const [permUser, setPermUser] = useState<ErpUserRow | null>(null);
   const editingId = Form.useWatch("id", form);
 
   const activeCount = useMemo(() => users.filter((user) => user.status === "active").length, [users]);
@@ -148,24 +149,18 @@ export default function UserManagement() {
     form.setFieldsValue({ role: "buyer", status: "active" });
   };
 
-  const handleConnectCloud = async () => {
-    if (!erp) return;
-    const values = await cloudForm.validateFields();
-    setCloudSubmitting(true);
-    try {
-      const nextStatus = await auth.login({
-        login: values.login,
-        accessCode: values.accessCode,
-        serverUrl: ERP_CLOUD_SERVER_URL,
-      });
-      message.success(`已连接云端：${nextStatus.currentUser?.name || values.login}`);
-      cloudForm.resetFields(["accessCode"]);
-      await loadUsers();
-    } catch (error: any) {
-      message.error(error?.message || "云端连接失败");
-    } finally {
-      setCloudSubmitting(false);
+  const openCreate = () => {
+    if (!canManageUsers) {
+      message.warning("请先连接云端，再创建用户");
+      return;
     }
+    resetForm();
+    setUserModalOpen(true);
+  };
+
+  const closeUserModal = () => {
+    setUserModalOpen(false);
+    resetForm();
   };
 
   const handleSubmit = async () => {
@@ -185,6 +180,7 @@ export default function UserManagement() {
         accessCode: values.accessCode,
       });
       message.success(values.id ? "用户已更新" : "用户已创建");
+      setUserModalOpen(false);
       resetForm();
       await loadUsers();
     } catch (error: any) {
@@ -202,6 +198,7 @@ export default function UserManagement() {
       status: record.status || "active",
       accessCode: "",
     });
+    setUserModalOpen(true);
   };
 
   const handleToggleStatus = async (record: ErpUserRow) => {
@@ -238,12 +235,7 @@ export default function UserManagement() {
       dataIndex: "name",
       key: "name",
       ellipsis: true,
-      render: (value, record) => (
-        <Space direction="vertical" size={2}>
-          <Text strong>{value}</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>{record.id}</Text>
-        </Space>
-      ),
+      render: (value) => <Text strong>{value}</Text>,
     },
     {
       title: "角色",
@@ -276,11 +268,14 @@ export default function UserManagement() {
     {
       title: "操作",
       key: "actions",
-      width: 180,
+      width: 280,
       render: (_, record) => (
         <Space size={8}>
           <Button size="small" icon={<EditOutlined />} onClick={() => handleEdit(record)}>
             编辑
+          </Button>
+          <Button size="small" icon={<KeyOutlined />} onClick={() => setPermUser(record)}>
+            权限
           </Button>
           <Button
             size="small"
@@ -308,118 +303,15 @@ export default function UserManagement() {
       <div className="app-panel">
         <div className="app-panel__title">
           <div>
-            <div className="app-panel__title-main">用户同步</div>
-            <div className="app-panel__title-sub">用户管理统一同步云端服务器，避免本地和云端两套数据不一致。</div>
-          </div>
-          <Tag color={isCloudMode ? "success" : "warning"}>
-            {isCloudMode ? "云端模式" : "未连接云端"}
-          </Tag>
-        </div>
-        <Alert
-          type={isCloudMode ? "success" : "warning"}
-          showIcon
-          message={isCloudMode ? "当前正在同步云端用户库" : "请先连接云端"}
-          description={isCloudMode ? "创建、编辑和停用用户都会直接同步到云端服务器。" : "本地历史数据不会丢失，但用户管理以云端为准；连接后列表会显示服务器上的用户。"}
-          style={{ marginBottom: 12 }}
-        />
-        <Form form={cloudForm} layout="vertical" initialValues={{ login: "admin" }}>
-          <Row gutter={12}>
-            <Col xs={24} md={8}>
-              <Form.Item name="login" label="管理员" rules={[{ required: true, message: "请输入管理员用户" }]}>
-                <Input placeholder="admin" />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={10}>
-              <Form.Item name="accessCode" label="访问码" rules={[{ required: true, message: "请输入访问码" }]}>
-                <Input.Password placeholder="云端管理员访问码" />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={6}>
-              <Form.Item label=" ">
-                <Button block type="primary" icon={<SyncOutlined />} loading={cloudSubmitting} onClick={handleConnectCloud}>
-                  连接
-                </Button>
-              </Form.Item>
-            </Col>
-          </Row>
-        </Form>
-      </div>
-
-      <div className="app-panel">
-        <div className="app-panel__title">
-          <div>
-            <div className="app-panel__title-main">{editingId ? "编辑用户" : "创建用户"}</div>
-            <div className="app-panel__title-sub">新用户必须设置访问码；保存后立即写入{userStoreName}。</div>
-          </div>
-          <KeyOutlined style={{ color: "var(--color-brand)", fontSize: 18 }} />
-        </div>
-        {!canManageUsers ? (
-          <Alert
-            type="warning"
-            showIcon
-            message="暂不能创建用户"
-            description="请先在上方输入管理员和访问码连接云端。"
-            style={{ marginBottom: 12 }}
-          />
-        ) : null}
-        <Form form={form} layout="vertical" initialValues={{ role: "buyer", status: "active" }} disabled={!canManageUsers}>
-          <Form.Item name="id" hidden>
-            <Input />
-          </Form.Item>
-          <Row gutter={12}>
-            <Col xs={24} md={6}>
-              <Form.Item name="name" label="用户名称" rules={[{ required: true, message: "请输入用户名称" }]}>
-                <Input placeholder="例如：采购小王" />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={5}>
-              <Form.Item name="role" label="角色" rules={[{ required: true, message: "请选择角色" }]}>
-                <Select options={ROLE_OPTIONS} />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={4}>
-              <Form.Item name="status" label="状态">
-                <Select options={STATUS_OPTIONS} />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={6}>
-              <Form.Item
-                name="accessCode"
-                label="访问码"
-                dependencies={["id"]}
-                rules={[
-                  ({ getFieldValue }) => ({
-                    validator(_, value) {
-                      if (getFieldValue("id") || value) return Promise.resolve();
-                      return Promise.reject(new Error("请输入访问码"));
-                    },
-                  }),
-                ]}
-              >
-                <Input.Password placeholder={editingId ? "留空则不修改" : "用于登录软件"} />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={3}>
-              <Form.Item label=" ">
-                <Space.Compact block>
-                  <Button type="primary" icon={<PlusOutlined />} loading={submitting} onClick={handleSubmit}>
-                    保存
-                  </Button>
-                  {editingId ? <Button onClick={resetForm}>取消</Button> : null}
-                </Space.Compact>
-              </Form.Item>
-            </Col>
-          </Row>
-        </Form>
-      </div>
-
-      <div className="app-panel">
-        <div className="app-panel__title">
-          <div>
             <div className="app-panel__title-main">系统用户</div>
             <div className="app-panel__title-sub">列表来自{userStoreName}；启用的用户可以按角色登录软件。</div>
           </div>
-          <SafetyCertificateOutlined style={{ color: "var(--color-success)", fontSize: 18 }} />
+          <Space>
+            <Tag color={isCloudMode ? "success" : "warning"}>{isCloudMode ? "云端模式" : "未连接云端"}</Tag>
+            <Button type="primary" icon={<PlusOutlined />} disabled={!canManageUsers} onClick={openCreate}>
+              新建用户
+            </Button>
+          </Space>
         </div>
         <Table
           size="small"
@@ -430,6 +322,65 @@ export default function UserManagement() {
           pagination={{ pageSize: 8, showSizeChanger: false }}
         />
       </div>
+
+      <RolePermissionPanel disabled={!canManageUsers} />
+
+      <Modal
+        open={userModalOpen}
+        title={editingId ? "编辑用户" : "新建用户"}
+        width={460}
+        onCancel={closeUserModal}
+        onOk={handleSubmit}
+        okText="保存"
+        confirmLoading={submitting}
+        destroyOnClose
+        centered
+      >
+        <Form form={form} layout="vertical" initialValues={{ role: "buyer", status: "active" }}>
+          <Form.Item name="id" hidden>
+            <Input />
+          </Form.Item>
+          <Form.Item name="name" label="用户名称" rules={[{ required: true, message: "请输入用户名称" }]}>
+            <Input placeholder="例如：采购小王" />
+          </Form.Item>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item name="role" label="角色" rules={[{ required: true, message: "请选择角色" }]}>
+                <Select options={ROLE_OPTIONS} />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="status" label="状态">
+                <Select options={STATUS_OPTIONS} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item
+            name="accessCode"
+            label="访问码"
+            dependencies={["id"]}
+            rules={[
+              ({ getFieldValue }) => ({
+                validator(_, value) {
+                  if (getFieldValue("id") || value) return Promise.resolve();
+                  return Promise.reject(new Error("请输入访问码"));
+                },
+              }),
+            ]}
+          >
+            <Input.Password placeholder={editingId ? "留空则不修改" : "用于登录软件"} />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <UserPermissionModal
+        open={Boolean(permUser)}
+        user={permUser}
+        onClose={(changed) => {
+          setPermUser(null);
+          if (changed) void loadUsers();
+        }}
+      />
     </div>
   );
 }

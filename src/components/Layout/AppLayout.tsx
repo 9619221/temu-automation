@@ -30,7 +30,8 @@ import {
 import { ACTIVE_ACCOUNT_CHANGED_EVENT, readActiveAccountId } from "../../utils/multiStore";
 import { COLLECT_TASKS, useCollection } from "../../contexts/CollectionContext";
 import { useErpAuth } from "../../contexts/ErpAuthContext";
-import { canAccessRoute, roleLabel } from "../../utils/erpRoleAccess";
+import { roleLabel } from "../../utils/erpRoleAccess";
+import { useErpPermissions } from "../../contexts/ErpPermissionContext";
 import BrandMark from "../BrandMark";
 import ExtensionInstallGuide from "../ExtensionInstallGuide";
 
@@ -114,19 +115,20 @@ export default function AppLayout() {
   const currentRole = auth.currentUser?.role || "";
   const { collecting, progress, successCount, errorCount, taskStates } = useCollection();
   const completedCount = successCount + errorCount;
-  const canUseCollection = canAccessRoute(currentRole, "/collect");
-  const canManageAccounts = canAccessRoute(currentRole, "/accounts");
-  const canViewLogs = canAccessRoute(currentRole, "/logs");
+  const { canMenu } = useErpPermissions();
+  const canUseCollection = canMenu("/collect");
+  const canManageAccounts = canMenu("/accounts");
+  const canViewLogs = canMenu("/logs");
   const isStudioRoute = location.pathname.startsWith("/image-studio");
 
   const visibleMenuItems = useMemo(() => (
     menuItems
       .map((group) => ({
         ...group,
-        children: group.children.filter((item) => canAccessRoute(currentRole, item.key)),
+        children: group.children.filter((item) => canMenu(item.key)),
       }))
       .filter((group) => group.children.length > 0)
-  ), [currentRole]);
+  ), [canMenu]);
 
   const recentErrors = Object.entries(taskStates)
     .filter(([, state]) => state.status === "error")
@@ -376,7 +378,7 @@ export default function AppLayout() {
               {auth.currentUser?.name || "-"} · {roleLabel(currentRole)}
             </Tag>
 
-            {canAccessRoute(currentRole, "/settings") ? (
+            {canMenu("/settings") ? (
               <Button icon={<SettingOutlined />} onClick={() => navigate("/settings")} className="app-header-button">
                 设置
               </Button>

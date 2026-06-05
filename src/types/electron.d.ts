@@ -607,6 +607,15 @@ interface ErpAPI {
       accessCode?: string;
     }) => Promise<any>;
   };
+  permission: {
+    getProfile: () => Promise<any>;
+    upsertRole: (payload?: any) => Promise<any>;
+    upsertScope: (payload?: any) => Promise<any>;
+    adminView: (params?: any) => Promise<any>;
+    setRoleAccess: (payload?: any) => Promise<any>;
+    setUserOverrides: (payload?: any) => Promise<any>;
+    setUserScopes: (payload?: any) => Promise<any>;
+  };
   supplier: {
     list: (params?: ErpListParams) => Promise<any[]>;
     create: (payload: {

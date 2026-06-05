@@ -19,6 +19,10 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/permissions/profile": ["admin", "manager", "operations", "buyer", "finance", "warehouse", "viewer"],
   "/api/permissions/role/upsert": ["admin", "manager"],
   "/api/permissions/scope/upsert": ["admin", "manager"],
+  "/api/permissions/admin-view": ["admin", "manager"],
+  "/api/permissions/role/set-access": ["admin", "manager"],
+  "/api/permissions/user/set-overrides": ["admin", "manager"],
+  "/api/permissions/user/set-scopes": ["admin", "manager"],
   "/api/master-data/workbench": ["admin", "manager", "operations", "buyer"],
   "/api/master-data/sku-ids": ["admin", "manager", "operations", "buyer"],
   "/api/master-data/sku-stock-details": ["admin", "manager", "operations", "buyer", "warehouse"],
@@ -3518,6 +3522,16 @@ function createRequestHandler(options = {}) {
   const upsertUserResourceScope = options.upsertUserResourceScope || (() => {
     throw new Error("User resource scope handler is not available");
   });
+  const getPermissionAdminView = options.getPermissionAdminView || (() => ({ catalog: {}, rolePermissions: [], user: null }));
+  const setRoleResourceAccess = options.setRoleResourceAccess || (() => {
+    throw new Error("Role access handler is not available");
+  });
+  const setUserPermissionOverrides = options.setUserPermissionOverrides || (() => {
+    throw new Error("User override handler is not available");
+  });
+  const setUserResourceScopes = options.setUserResourceScopes || (() => {
+    throw new Error("User scope handler is not available");
+  });
   const listAccounts = options.listAccounts || (() => []);
   const upsertAccount = options.upsertAccount || (() => {
     throw new Error("Account action handler is not available");
@@ -3633,6 +3647,10 @@ function createRequestHandler(options = {}) {
       getPermissionProfile,
       upsertRolePermission,
       upsertUserResourceScope,
+      getPermissionAdminView,
+      setRoleResourceAccess,
+      setUserPermissionOverrides,
+      setUserResourceScopes,
       listAccounts,
       upsertAccount,
       deleteAccount,
@@ -4611,6 +4629,10 @@ async function handleRequest({
   getPermissionProfile,
   upsertRolePermission,
   upsertUserResourceScope,
+  getPermissionAdminView,
+  setRoleResourceAccess,
+  setUserPermissionOverrides,
+  setUserResourceScopes,
   listAccounts,
   upsertAccount,
   deleteAccount,
@@ -4855,6 +4877,42 @@ async function handleRequest({
       writeJson(res, 200, {
         ok: true,
         scope: await upsertUserResourceScope(payload, session.user),
+      });
+      return;
+    }
+
+    if (pathname === "/api/permissions/admin-view") {
+      const payload = await readOptionalPayload(req);
+      writeJson(res, 200, {
+        ok: true,
+        view: await getPermissionAdminView(payload || {}),
+      });
+      return;
+    }
+
+    if (pathname === "/api/permissions/role/set-access") {
+      const payload = await readOptionalPayload(req);
+      writeJson(res, 200, {
+        ok: true,
+        rolePermissions: await setRoleResourceAccess(payload || {}, session.user),
+      });
+      return;
+    }
+
+    if (pathname === "/api/permissions/user/set-overrides") {
+      const payload = await readOptionalPayload(req);
+      writeJson(res, 200, {
+        ok: true,
+        overrides: await setUserPermissionOverrides(payload || {}, session.user),
+      });
+      return;
+    }
+
+    if (pathname === "/api/permissions/user/set-scopes") {
+      const payload = await readOptionalPayload(req);
+      writeJson(res, 200, {
+        ok: true,
+        scopes: await setUserResourceScopes(payload || {}, session.user),
       });
       return;
     }

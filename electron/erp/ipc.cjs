@@ -190,7 +190,7 @@ const AUTO_1688_ORDER_SYNC_INTERVAL_MS = 10 * 60 * 1000;
 const AUTO_1688_ORDER_SYNC_START_DELAY_MS = 15 * 1000;
 const VALID_COMPANY_STATUSES = new Set(["active", "disabled"]);
 const VALID_PERMISSION_RESOURCE_TYPES = new Set(["menu", "document", "action"]);
-const VALID_RESOURCE_SCOPE_TYPES = new Set(["account", "warehouse"]);
+const VALID_RESOURCE_SCOPE_TYPES = new Set(["account", "warehouse", "mall"]);
 const VALID_ACCESS_LEVELS = new Set(["read", "write", "approve", "manage", "allow", "deny"]);
 const ALIBABA_1688_AUTH_SETTING_ID = "default";
 const ALIBABA_1688_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
@@ -1831,6 +1831,391 @@ function createLanSessionStore() {
   };
 }
 
+// ===== 权限体系（菜单 + 操作）：catalog / 默认 seed / 用户覆盖 / 有效权限叠加 =====
+// 菜单权限 key = 路由路径（与前端 AppLayout 菜单一致）；操作权限 key = "域:动作"。
+// access_level 统一 allow / deny。admin / manager 永久全通（硬豁免，防配置失误锁死管理员）。
+const PERMISSION_PRIVILEGED_ROLES = new Set(["admin", "manager"]);
+
+const PERMISSION_ROLE_CATALOG = [
+  { key: "admin", label: "管理员", privileged: true },
+  { key: "manager", label: "负责人", privileged: true },
+  { key: "operations", label: "运营" },
+  { key: "buyer", label: "采购" },
+  { key: "finance", label: "财务" },
+  { key: "warehouse", label: "仓库" },
+  { key: "viewer", label: "只读" },
+];
+
+// 菜单清单：按 AppLayout 分组，key = 路由路径。
+const PERMISSION_MENU_CATALOG = [
+  { group: "账号", items: [
+    { key: "/accounts", label: "账号管理" },
+    { key: "/temu-auth", label: "Temu 授权" },
+  ] },
+  { group: "业务", items: [
+    { key: "/product-master-data", label: "商品资料" },
+    { key: "/1688-mapping", label: "供应商管理" },
+    { key: "/sourcing-center", label: "找品" },
+    { key: "/purchase-center", label: "采购单" },
+    { key: "/stores", label: "店铺设置" },
+    { key: "/after-sales", label: "售后" },
+    { key: "/warehouse-center", label: "仓库中心" },
+    { key: "/qc-outbound", label: "出库中心" },
+  ] },
+  { group: "数据", items: [
+    { key: "/collect", label: "数据采集" },
+    { key: "/temu-robots", label: "TEMU 机器人" },
+  ] },
+  { group: "运营", items: [
+    { key: "/shop", label: "店铺概览" },
+    { key: "/multi-store-report", label: "多店报表" },
+    { key: "/ops-workbench", label: "运营工作台" },
+    { key: "/products", label: "商品管理" },
+    { key: "/competitor", label: "竞品分析" },
+    { key: "/browser-multi", label: "浏览器多开" },
+  ] },
+  { group: "工具", items: [
+    { key: "/create-product", label: "上品管理" },
+    { key: "/image-studio", label: "AI 出图" },
+    { key: "/image-studio-gpt", label: "AI 生图 GPT 版" },
+    { key: "/image-studio-agent", label: "AI 生图 多Agent版" },
+    { key: "/auto-image-swap", label: "批量替换图片" },
+    { key: "/price-review", label: "核价筛选" },
+    { key: "/logs", label: "日志中心" },
+  ] },
+  { group: "系统", items: [
+    { key: "/work-items", label: "事项中心" },
+    { key: "/users", label: "用户管理" },
+    { key: "/erp-debug", label: "调试台" },
+    { key: "/settings", label: "设置" },
+  ] },
+];
+
+// 操作清单（敏感操作）：阶段一可配置可存储；后端实际拦截在阶段二接入。
+const PERMISSION_ACTION_CATALOG = [
+  { group: "采购", items: [
+    { key: "purchase:create", label: "创建/生成采购单" },
+    { key: "purchase:edit", label: "编辑采购单/明细" },
+    { key: "purchase:delete", label: "删除采购单" },
+    { key: "purchase:price-edit", label: "采购改价/留言" },
+    { key: "purchase:push", label: "推送 1688 下单" },
+  ] },
+  { group: "财务", items: [
+    { key: "finance:confirm-paid", label: "确认已付款" },
+    { key: "finance:pay", label: "发起 1688 支付" },
+  ] },
+  { group: "仓库", items: [
+    { key: "warehouse:inbound-edit", label: "修改入库单" },
+    { key: "warehouse:confirm-receive", label: "确认收货入库" },
+  ] },
+  { group: "店铺与授权", items: [
+    { key: "store-auth:manage", label: "绑定/解绑 Temu 店铺授权" },
+    { key: "account:manage", label: "新建/编辑/删除店铺账号" },
+  ] },
+  { group: "售后", items: [
+    { key: "aftersale:confirm-receipt", label: "售后确认收货" },
+  ] },
+  { group: "系统", items: [
+    { key: "user:manage", label: "创建/停用用户" },
+    { key: "permission:manage", label: "配置角色与权限" },
+    { key: "report:export", label: "导出报表数据" },
+  ] },
+];
+
+const PERMISSION_ALL_MENU_KEYS = PERMISSION_MENU_CATALOG.flatMap((g) => g.items.map((i) => i.key));
+const PERMISSION_ALL_ACTION_KEYS = PERMISSION_ACTION_CATALOG.flatMap((g) => g.items.map((i) => i.key));
+const PERMISSION_MENU_KEY_SET = new Set(PERMISSION_ALL_MENU_KEYS);
+const PERMISSION_ACTION_KEY_SET = new Set(PERMISSION_ALL_ACTION_KEYS);
+
+// 默认菜单权限映射（= 前端 ROUTE_ROLES 的非特权角色部分，保持改造后与现状一致）。
+// 仅用于首次 seed；之后以数据库为准。admin / manager 不列（硬豁免）。
+const DEFAULT_MENU_ROLE_ACCESS = {
+  "/product-master-data": ["operations", "buyer"],
+  "/1688-mapping": ["operations", "buyer"],
+  "/sourcing-center": ["operations", "buyer"],
+  "/purchase-center": ["operations", "buyer", "finance"],
+  "/stores": ["operations", "buyer"],
+  "/warehouse-center": ["warehouse"],
+  "/qc-outbound": ["operations", "warehouse"],
+  "/work-items": ["operations", "buyer", "finance", "warehouse", "viewer"],
+  "/shop": ["operations", "viewer"],
+  "/multi-store-report": ["operations", "finance", "viewer"],
+  "/ops-workbench": ["operations", "viewer"],
+  "/after-sales": ["operations", "viewer"],
+  "/products": ["operations", "viewer"],
+  "/create-product": ["operations"],
+  "/image-studio": ["operations"],
+  "/image-studio-gpt": ["operations"],
+  "/image-studio-agent": ["operations"],
+  "/auto-image-swap": ["operations"],
+  "/collect": ["operations"],
+  "/temu-robots": ["operations"],
+  "/accounts": ["operations"],
+  "/temu-auth": [],
+  "/browser-multi": ["operations"],
+  "/competitor": ["operations"],
+  "/price-review": ["operations"],
+  "/users": [],
+  "/erp-debug": [],
+  "/logs": ["operations"],
+  "/settings": ["operations"],
+};
+
+// 默认操作权限映射（按现有 assertActorRole 的角色合理推断）。admin / manager 硬豁免不列。
+const DEFAULT_ACTION_ROLE_ACCESS = {
+  "purchase:create": ["buyer"],
+  "purchase:edit": ["buyer"],
+  "purchase:delete": ["buyer"],
+  "purchase:price-edit": ["buyer"],
+  "purchase:push": ["buyer"],
+  "finance:confirm-paid": ["finance"],
+  "finance:pay": ["finance"],
+  "warehouse:inbound-edit": ["warehouse"],
+  "warehouse:confirm-receive": ["warehouse", "buyer"],
+  "store-auth:manage": [],
+  "account:manage": [],
+  "aftersale:confirm-receipt": ["operations"],
+  "user:manage": [],
+  "permission:manage": [],
+  "report:export": ["operations", "finance"],
+};
+
+const __permissionSeedDone = new Set();
+
+// 首次把默认角色权限写进库（幂等）。判据：该公司是否已有任意「路由级」菜单权限记录
+// （新体系 key 以 / 开头，区别于 012 旧种子的粗粒度 key），没有才 seed，避免覆盖管理员后续调整。
+function ensureDefaultPermissionsSeeded(companyId = DEFAULT_COMPANY_ID) {
+  const cid = normalizeCompanyId(companyId, null);
+  if (__permissionSeedDone.has(cid)) return;
+  const { db } = requireErp();
+  const seeded = db.prepare(
+    "SELECT 1 FROM erp_role_permissions WHERE company_id = ? AND resource_type = 'menu' AND resource_key LIKE '/%' LIMIT 1",
+  ).get(cid);
+  if (seeded) { __permissionSeedDone.add(cid); return; }
+  const now = nowIso();
+  const insert = db.prepare(`
+    INSERT OR IGNORE INTO erp_role_permissions
+      (id, company_id, role, resource_type, resource_key, access_level, conditions_json, created_at, updated_at)
+    VALUES (@id, @company_id, @role, @resource_type, @resource_key, 'allow', '{}', @created_at, @updated_at)
+  `);
+  const run = db.transaction(() => {
+    for (const [key, roles] of Object.entries(DEFAULT_MENU_ROLE_ACCESS)) {
+      for (const role of roles) {
+        insert.run({ id: createId("perm"), company_id: cid, role, resource_type: "menu", resource_key: key, created_at: now, updated_at: now });
+      }
+    }
+    for (const [key, roles] of Object.entries(DEFAULT_ACTION_ROLE_ACCESS)) {
+      for (const role of roles) {
+        insert.run({ id: createId("perm"), company_id: cid, role, resource_type: "action", resource_key: key, created_at: now, updated_at: now });
+      }
+    }
+  });
+  run();
+  __permissionSeedDone.add(cid);
+}
+
+// 把一组 mall_id 解析成 { mallId, storeCode, mallName }（用于前端显示「负责的店铺」）。
+function resolveMallStores(companyId, mallIds) {
+  if (!Array.isArray(mallIds) || !mallIds.length) return [];
+  const { db } = requireErp();
+  const ph = mallIds.map(() => "?").join(",");
+  let rows = [];
+  try {
+    rows = db.prepare(`SELECT mall_id, mall_name, store_code FROM erp_temu_malls WHERE mall_id IN (${ph})`).all(...mallIds);
+  } catch { rows = []; }
+  const map = new Map(rows.map((r) => [r.mall_id, r]));
+  return mallIds.map((id) => {
+    const r = map.get(id);
+    return { mallId: id, storeCode: r?.store_code || "", mallName: r?.mall_name || "" };
+  });
+}
+
+function listUserPermissionOverrides(params = {}) {
+  const { db } = requireErp();
+  const companyId = normalizeCompanyId(params.companyId || params.company_id, erpState.currentUser);
+  const userId = optionalString(params.userId || params.user_id);
+  const whereUser = userId ? "AND user_id = @user_id" : "";
+  return db.prepare(`
+    SELECT *
+    FROM erp_user_permission_overrides
+    WHERE company_id = @company_id
+    ${whereUser}
+    ORDER BY user_id ASC, resource_type ASC, resource_key ASC
+  `).all({ company_id: companyId, user_id: userId }).map((row) => {
+    const next = toCamelRow(row);
+    next.conditions = parseJsonObject(row.conditions_json);
+    return next;
+  });
+}
+
+// 覆盖式重写某用户的全部权限覆盖（entries 里只放 allow / deny 的差异项，「跟随角色」的不传）。
+function setUserPermissionOverrides(payload = {}, actor = erpState.currentUser) {
+  const { db } = requireErp();
+  const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
+  const userId = requireString(payload.userId || payload.user_id, "userId");
+  const user = db.prepare("SELECT id FROM erp_users WHERE id = ? AND company_id = ?").get(userId, companyId);
+  if (!user) throw new Error("Override user does not exist in this company");
+  const entries = Array.isArray(payload.entries) ? payload.entries : [];
+  const now = nowIso();
+  const insert = db.prepare(`
+    INSERT OR IGNORE INTO erp_user_permission_overrides
+      (id, company_id, user_id, resource_type, resource_key, access_level, conditions_json, created_at, updated_at)
+    VALUES (@id, @company_id, @user_id, @resource_type, @resource_key, @access_level, '{}', @created_at, @updated_at)
+  `);
+  const run = db.transaction(() => {
+    db.prepare("DELETE FROM erp_user_permission_overrides WHERE company_id = ? AND user_id = ?").run(companyId, userId);
+    for (const entry of entries) {
+      const resourceType = optionalString(entry.resourceType || entry.resource_type);
+      const resourceKey = optionalString(entry.resourceKey || entry.resource_key);
+      const accessLevel = optionalString(entry.accessLevel || entry.access_level);
+      if (!VALID_PERMISSION_RESOURCE_TYPES.has(resourceType)) continue;
+      if (accessLevel !== "allow" && accessLevel !== "deny") continue;
+      const known = resourceType === "menu" ? PERMISSION_MENU_KEY_SET.has(resourceKey) : PERMISSION_ACTION_KEY_SET.has(resourceKey);
+      if (!known) continue;
+      insert.run({ id: createId("uperm"), company_id: companyId, user_id: userId, resource_type: resourceType, resource_key: resourceKey, access_level: accessLevel, created_at: now, updated_at: now });
+    }
+  });
+  run();
+  return listUserPermissionOverrides({ companyId, userId });
+}
+
+// 覆盖式设置某角色在某资源类型（menu / action）下的「允许」集合：allowKeys 之外的全部移除。
+function setRoleResourceAccess(payload = {}, actor = erpState.currentUser) {
+  const { db } = requireErp();
+  const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
+  const role = requireString(payload.role, "role");
+  const resourceType = requireString(payload.resourceType || payload.resource_type, "resourceType");
+  if (!VALID_USER_ROLES.has(role)) throw new Error("Invalid user role");
+  if (resourceType !== "menu" && resourceType !== "action") throw new Error("Invalid permission resource type");
+  // 特权角色硬豁免，权限不可编辑，直接返回现状。
+  if (PERMISSION_PRIVILEGED_ROLES.has(role)) return listRolePermissions({ companyId, role });
+  const keySet = resourceType === "menu" ? PERMISSION_MENU_KEY_SET : PERMISSION_ACTION_KEY_SET;
+  const allowKeys = (Array.isArray(payload.allowKeys) ? payload.allowKeys : [])
+    .map((k) => optionalString(k))
+    .filter((k) => keySet.has(k));
+  const now = nowIso();
+  const insert = db.prepare(`
+    INSERT OR IGNORE INTO erp_role_permissions
+      (id, company_id, role, resource_type, resource_key, access_level, conditions_json, created_at, updated_at)
+    VALUES (@id, @company_id, @role, @resource_type, @resource_key, 'allow', '{}', @created_at, @updated_at)
+  `);
+  const run = db.transaction(() => {
+    // 只清掉本体系（catalog 内）的 key，保留 012 旧粗粒度记录不动。
+    const placeholders = [...keySet].map(() => "?").join(",");
+    db.prepare(
+      `DELETE FROM erp_role_permissions WHERE company_id = ? AND role = ? AND resource_type = ? AND resource_key IN (${placeholders})`,
+    ).run(companyId, role, resourceType, ...keySet);
+    for (const key of allowKeys) {
+      insert.run({ id: createId("perm"), company_id: companyId, role, resource_type: resourceType, resource_key: key, created_at: now, updated_at: now });
+    }
+  });
+  run();
+  return listRolePermissions({ companyId, role });
+}
+
+// 覆盖式设置某用户在某资源范围类型（mall / account / warehouse）下负责的资源 id 列表。
+function setUserResourceScopes(payload = {}, actor = erpState.currentUser) {
+  const { db } = requireErp();
+  const companyId = normalizeCompanyId(payload.companyId || payload.company_id, actor);
+  const userId = requireString(payload.userId || payload.user_id, "userId");
+  const resourceType = requireString(payload.resourceType || payload.resource_type, "resourceType");
+  if (!VALID_RESOURCE_SCOPE_TYPES.has(resourceType)) throw new Error("Invalid resource scope type");
+  const user = db.prepare("SELECT id FROM erp_users WHERE id = ? AND company_id = ?").get(userId, companyId);
+  if (!user) throw new Error("Scoped user does not exist in this company");
+  const ids = (Array.isArray(payload.resourceIds || payload.resource_ids) ? (payload.resourceIds || payload.resource_ids) : [])
+    .map((v) => optionalString(v))
+    .filter(Boolean);
+  const accessLevel = optionalString(payload.accessLevel || payload.access_level) || "manage";
+  const now = nowIso();
+  const insert = db.prepare(`
+    INSERT OR IGNORE INTO erp_user_resource_scopes
+      (id, company_id, user_id, resource_type, resource_id, access_level, created_at, updated_at)
+    VALUES (@id, @company_id, @user_id, @resource_type, @resource_id, @access_level, @created_at, @updated_at)
+  `);
+  const run = db.transaction(() => {
+    db.prepare("DELETE FROM erp_user_resource_scopes WHERE company_id = ? AND user_id = ? AND resource_type = ?").run(companyId, userId, resourceType);
+    for (const rid of ids) {
+      insert.run({ id: createId("scope"), company_id: companyId, user_id: userId, resource_type: resourceType, resource_id: rid, access_level: accessLevel, created_at: now, updated_at: now });
+    }
+  });
+  run();
+  return listUserResourceScopes({ companyId, userId }).filter((s) => s.resourceType === resourceType);
+}
+
+// 算出某用户的有效权限：admin / manager 全通；其余按 用户deny > 用户allow > 角色allow > 默认deny 叠加。
+function computeEffectivePermissions(sessionUser) {
+  const role = optionalString(sessionUser?.role);
+  const companyId = normalizeCompanyId(sessionUser?.companyId, null);
+  ensureDefaultPermissionsSeeded(companyId);
+
+  const mallScopes = sessionUser?.id
+    ? listUserResourceScopes({ companyId, userId: sessionUser.id }).filter((s) => s.resourceType === "mall")
+    : [];
+  const mallIds = mallScopes.map((s) => s.resourceId).filter(Boolean);
+  const stores = resolveMallStores(companyId, mallIds);
+
+  if (PERMISSION_PRIVILEGED_ROLES.has(role)) {
+    return {
+      role,
+      isPrivileged: true,
+      allStores: true,
+      menuKeys: [...PERMISSION_ALL_MENU_KEYS],
+      actionKeys: [...PERMISSION_ALL_ACTION_KEYS],
+      mallIds,
+      stores,
+    };
+  }
+
+  const rolePerms = role ? listRolePermissions({ companyId, role }) : [];
+  const overrides = sessionUser?.id ? listUserPermissionOverrides({ companyId, userId: sessionUser.id }) : [];
+  const roleMap = new Map();
+  for (const p of rolePerms) roleMap.set(`${p.resourceType}:${p.resourceKey}`, p.accessLevel);
+  const userMap = new Map();
+  for (const o of overrides) userMap.set(`${o.resourceType}:${o.resourceKey}`, o.accessLevel);
+
+  const allow = (type, key) => {
+    const u = userMap.get(`${type}:${key}`);
+    if (u === "deny") return false;
+    if (u === "allow") return true;
+    const r = roleMap.get(`${type}:${key}`);
+    if (r === "deny") return false;
+    if (r === "allow" || r === "write" || r === "manage" || r === "approve" || r === "read") return true;
+    return false;
+  };
+
+  return {
+    role,
+    isPrivileged: false,
+    allStores: false,
+    menuKeys: PERMISSION_ALL_MENU_KEYS.filter((k) => allow("menu", k)),
+    actionKeys: PERMISSION_ALL_ACTION_KEYS.filter((k) => allow("action", k)),
+    mallIds,
+    stores,
+  };
+}
+
+// 管理界面用：返回 catalog + 全部角色权限 + （可选）指定用户的覆盖与店铺范围。
+function getPermissionAdminView(params = {}) {
+  const companyId = normalizeCompanyId(params.companyId || params.company_id, erpState.currentUser);
+  ensureDefaultPermissionsSeeded(companyId);
+  const userId = optionalString(params.userId || params.user_id);
+  return {
+    catalog: {
+      roles: PERMISSION_ROLE_CATALOG,
+      menus: PERMISSION_MENU_CATALOG,
+      actions: PERMISSION_ACTION_CATALOG,
+    },
+    rolePermissions: listRolePermissions({ companyId }),
+    user: userId
+      ? {
+        userId,
+        overrides: listUserPermissionOverrides({ companyId, userId }),
+        scopes: listUserResourceScopes({ companyId, userId }),
+      }
+      : null,
+  };
+}
+
 function listRolePermissions(params = {}) {
   const { db } = requireErp();
   const companyId = normalizeCompanyId(params.companyId || params.company_id, erpState.currentUser);
@@ -1964,6 +2349,7 @@ function getPermissionProfile(user = erpState.currentUser) {
     resourceScopes: sessionUser?.id
       ? listUserResourceScopes({ companyId, userId: sessionUser.id })
       : [],
+    effective: computeEffectivePermissions(sessionUser),
   };
 }
 
@@ -21902,6 +22288,10 @@ function startLanService(payload = {}) {
     getPermissionProfile,
     upsertRolePermission,
     upsertUserResourceScope,
+    getPermissionAdminView,
+    setRoleResourceAccess,
+    setUserPermissionOverrides,
+    setUserResourceScopes,
     listAccounts,
     upsertAccount,
     deleteAccount,
@@ -22103,6 +22493,10 @@ async function startErpHeadlessServer(options = {}) {
     getPermissionProfile,
     upsertRolePermission,
     upsertUserResourceScope,
+    getPermissionAdminView,
+    setRoleResourceAccess,
+    setUserPermissionOverrides,
+    setUserResourceScopes,
     listAccounts,
     upsertAccount,
     deleteAccount,
@@ -22466,23 +22860,68 @@ function registerErpIpcHandlers(ipcMain) {
     if (!shouldUseClientRuntime()) assertHostMode("用户管理");
     return upsertUserRuntime(payload || {}, erpState.currentUser || {});
   });
-  ipcMain.handle("erp:permission:get-profile", () => {
+  ipcMain.handle("erp:permission:get-profile", async () => {
     if (shouldUseClientRuntime()) {
       ensureClientRuntime();
-      return remoteRequest("/api/permissions/profile");
+      const payload = await remoteRequest("/api/permissions/profile");
+      return payload.profile;
     }
     assertHostMode("权限档案");
     return getPermissionProfile(erpState.currentUser);
   });
-  ipcMain.handle("erp:permission:upsert-role", (_event, payload) => {
-    assertHostMode("角色权限");
+  ipcMain.handle("erp:permission:upsert-role", async (_event, payload) => {
+    if (shouldUseClientRuntime()) {
+      ensureClientRuntime();
+      const resp = await remoteRequest("/api/permissions/role/upsert", { method: "POST", body: payload || {} });
+      return resp.permission;
+    }
     assertRoleIfLoggedIn(["admin", "manager"]);
     return upsertRolePermission(payload || {}, erpState.currentUser || {});
   });
-  ipcMain.handle("erp:permission:upsert-scope", (_event, payload) => {
-    assertHostMode("资源权限");
+  ipcMain.handle("erp:permission:upsert-scope", async (_event, payload) => {
+    if (shouldUseClientRuntime()) {
+      ensureClientRuntime();
+      const resp = await remoteRequest("/api/permissions/scope/upsert", { method: "POST", body: payload || {} });
+      return resp.scope;
+    }
     assertRoleIfLoggedIn(["admin", "manager"]);
     return upsertUserResourceScope(payload || {}, erpState.currentUser || {});
+  });
+  ipcMain.handle("erp:permission:admin-view", async (_event, params) => {
+    if (shouldUseClientRuntime()) {
+      ensureClientRuntime();
+      const resp = await remoteRequest("/api/permissions/admin-view", { method: "POST", body: params || {} });
+      return resp.view;
+    }
+    assertRoleIfLoggedIn(["admin", "manager"]);
+    return getPermissionAdminView(params || {});
+  });
+  ipcMain.handle("erp:permission:set-role-access", async (_event, payload) => {
+    if (shouldUseClientRuntime()) {
+      ensureClientRuntime();
+      const resp = await remoteRequest("/api/permissions/role/set-access", { method: "POST", body: payload || {} });
+      return resp.rolePermissions;
+    }
+    assertRoleIfLoggedIn(["admin", "manager"]);
+    return setRoleResourceAccess(payload || {}, erpState.currentUser || {});
+  });
+  ipcMain.handle("erp:permission:set-user-overrides", async (_event, payload) => {
+    if (shouldUseClientRuntime()) {
+      ensureClientRuntime();
+      const resp = await remoteRequest("/api/permissions/user/set-overrides", { method: "POST", body: payload || {} });
+      return resp.overrides;
+    }
+    assertRoleIfLoggedIn(["admin", "manager"]);
+    return setUserPermissionOverrides(payload || {}, erpState.currentUser || {});
+  });
+  ipcMain.handle("erp:permission:set-user-scopes", async (_event, payload) => {
+    if (shouldUseClientRuntime()) {
+      ensureClientRuntime();
+      const resp = await remoteRequest("/api/permissions/user/set-scopes", { method: "POST", body: payload || {} });
+      return resp.scopes;
+    }
+    assertRoleIfLoggedIn(["admin", "manager"]);
+    return setUserResourceScopes(payload || {}, erpState.currentUser || {});
   });
   ipcMain.handle("erp:supplier:list", wrapErpHandler("erp:supplier:list", (_event, params) => listSuppliersRuntime(params || {})));
   ipcMain.handle("erp:supplier:create", (_event, payload) => createSupplierRuntime(payload || {}, erpState.currentUser || {}));
