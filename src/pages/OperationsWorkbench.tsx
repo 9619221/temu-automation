@@ -107,11 +107,11 @@ interface QualityShopRow {
   mall_id: string; site: string; store_code: string | null; mall_name: string | null; owner: string | null;
   afs_rate_90d: number | null; avg_score_90d: number | null; expect_loss: number | null; captured_at: number | null;
 }
-// 站点标记 → 中文标签（cn=CN主站 / us=美区 / eu=欧区）
-const QUALITY_SITE_LABEL: Record<string, string> = { cn: "CN", us: "美区", eu: "欧区" };
+// 站点标记 → 中文标签（cn=agentseller.temu.com 主站「全球」 / us=美区 / eu=欧区）
+const QUALITY_SITE_LABEL: Record<string, string> = { cn: "全球", us: "美区", eu: "欧区" };
 
 interface ReviewRow {
-  mall_id: string; store_code: string | null; mall_name: string | null;
+  mall_id: string; site: string | null; store_code: string | null; mall_name: string | null;
   review_id: string; product_id: string | null; product_skc_id: string | null;
   goods_id: string | null; goods_name: string | null;
   score: number | null; comment: string | null; comment_zh: string | null; spec_summary: string | null; category_path: string | null;
@@ -302,6 +302,7 @@ export default function OperationsWorkbench() {
   const [diagFilter, setDiagFilter] = useSessionState(owViewKey("diagFilter"), "all");
   const [search, setSearch] = useSessionState(owViewKey("search"), "");
   const [scoreFilter, setScoreFilter] = useSessionState(owViewKey("scoreFilter"), "all");
+  const [regionFilter, setRegionFilter] = useSessionState(owViewKey("reviewRegion"), "all");
   const [slowFilter, setSlowFilter] = useSessionState(owViewKey("slowFilter"), "all"); // 商品运营全景:全部 / 仅看滞销
   const [sevFilter, setSevFilter] = useSessionState(owViewKey("sevFilter"), "all");
   const [kindFilter, setKindFilter] = useSessionState(owViewKey("kindFilter"), "all");
@@ -1384,10 +1385,11 @@ export default function OperationsWorkbench() {
       if (scoreFilter === "bad" && !(r.score != null && r.score <= 3)) return false;
       if (scoreFilter === "good" && !(r.score != null && r.score >= 4)) return false;
       if (scoreFilter === "pic" && !(r.pictures && r.pictures.length)) return false;
+      if (regionFilter !== "all" && r.site !== regionFilter) return false;
       if (!kw) return true;
       return [r.goods_name, r.comment, r.spec_summary, r.category_path, r.store_code].some((x) => String(x || "").toLowerCase().includes(kw));
     });
-  }, [reviewRows, search, storeFilter, scoreFilter, inScope]);
+  }, [reviewRows, search, storeFilter, scoreFilter, regionFilter, inScope]);
 
   const reviewAgg = useMemo(() => {
     let sum = 0, scored = 0, bad = 0, pic = 0;
@@ -1626,7 +1628,7 @@ export default function OperationsWorkbench() {
             </div>
           )}
           {commonFilters(
-            <Select size="small" style={{ width: 110 }} value={qualitySiteFilter} onChange={setQualitySiteFilter} options={[{ value: "all", label: "全部站点" }, { value: "cn", label: "CN" }, { value: "us", label: "美区" }, { value: "eu", label: "欧区" }]} />,
+            <Select size="small" style={{ width: 110 }} value={qualitySiteFilter} onChange={setQualitySiteFilter} options={[{ value: "all", label: "全部站点" }, { value: "cn", label: "全球" }, { value: "us", label: "美区" }, { value: "eu", label: "欧区" }]} />,
           )}
           <Table<QualityRow> dataSource={qualityView} columns={qualityColumns} rowKey={(r) => `${r.mall_id}|${r.site}|${r.product_id || r.goods_id}`} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个商品` }} scroll={{ x: 1360 }} loading={qualityLoading} />
         </div>
@@ -1660,7 +1662,10 @@ export default function OperationsWorkbench() {
           </div>
           <div style={{ padding: "8px 16px 0", color: "#888", fontSize: 12 }}>商品评价:运营在 Temu 后台翻看评价页时,扩展自动抓取累积(非官方 API,覆盖取决于访问情况)。默认全部评价按<b>时间倒序</b>,差评(≤3★)标红。<b>福利评价</b>是商家给返利换的好评,单独标注。</div>
           {commonFilters(
-            <Select size="small" style={{ width: 130 }} value={scoreFilter} onChange={setScoreFilter} options={[{ value: "all", label: "全部评分" }, { value: "bad", label: "差评 ≤3★" }, { value: "good", label: "好评 ≥4★" }, { value: "pic", label: "带图评价" }]} />,
+            <>
+              <Select size="small" style={{ width: 120 }} value={regionFilter} onChange={setRegionFilter} options={[{ value: "all", label: "全部区域" }, { value: "agentseller", label: "全球" }, { value: "agentseller-us", label: "美区" }, { value: "agentseller-eu", label: "欧区" }]} />
+              <Select size="small" style={{ width: 130 }} value={scoreFilter} onChange={setScoreFilter} options={[{ value: "all", label: "全部评分" }, { value: "bad", label: "差评 ≤3★" }, { value: "good", label: "好评 ≥4★" }, { value: "pic", label: "带图评价" }]} />
+            </>,
           )}
           <Table<ReviewRow> dataSource={reviewView} columns={reviewColumns} rowKey={(r) => `${r.mall_id}|${r.review_id}`} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 条评价` }} scroll={{ x: 1180 }} loading={reviewLoading} />
         </div>
@@ -1748,9 +1753,10 @@ export default function OperationsWorkbench() {
           <InputNumber size="small" min={0} precision={0} placeholder="批量库存" value={batchStock ?? undefined} style={{ width: 110 }} onChange={(v) => setBatchStock(v == null ? null : Number(v))} />
           <Button size="small" disabled={batchStock == null} onClick={() => { const next = { ...enrollDraft }; for (const r of modalActRows) { next[enrollKey(r)] = { ...(next[enrollKey(r)] || {}), stock: batchStock! }; } persistDraft(next); }}>填库存</Button>
         </div>
-        <Table<ActivityRow> dataSource={modalActRows} columns={actColumns} rowKey={(r) => String(r.__rk)} size="small"
-          rowSelection={{ selectedRowKeys: selActRows.map((r) => String(r.__rk)), onChange: (_, rows) => setSelActRows(rows as ActivityRow[]), getCheckboxProps: (r) => ({ disabled: !r.activity_id }) }}
-          pagination={false} scroll={{ x: 1240 }} />
+        <Table<ActivityRow> dataSource={modalActRows.filter((r) => r.activity_id)} columns={actColumns} rowKey={(r) => String(r.__rk)} size="small"
+          rowSelection={{ selectedRowKeys: selActRows.map((r) => String(r.__rk)), onChange: (_, rows) => setSelActRows(rows as ActivityRow[]) }}
+          pagination={false} scroll={{ x: 1240 }} locale={{ emptyText: "该商品暂无可报名的活动(缺活动ID,需扩展采集)" }} />
+        {modalActRows.some((r) => !r.activity_id) && <div style={{ fontSize: 12, color: "#d46b08", marginTop: 8 }}>另有 {modalActRows.filter((r) => !r.activity_id).length} 个活动缺活动ID(扩展只采到列表、没采到可报名场次),暂时报不了——用扩展逛该店活动后台采集后才会出现在上面。</div>}
       </Modal>
       <Modal open={!!trendOf} onCancel={() => setTrendOf(null)} footer={null} width={680} title={trendOf ? `销量趋势 · ${trendOf.title}` : ""} destroyOnClose>
         <div style={{ fontSize: 12, color: "#888", marginBottom: 8 }}>逐日销量(抓包采集,覆盖近 2 周、部分店);SPU {trendOf?.productId}</div>
