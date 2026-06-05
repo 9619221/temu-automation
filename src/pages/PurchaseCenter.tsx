@@ -57,6 +57,8 @@ import {
   SyncOutlined,
   UploadOutlined,
 } from "@ant-design/icons";
+import dayjs from "dayjs";
+import { useSessionState, readSessionState } from "../hooks/useSessionState";
 import PageHeader from "../components/PageHeader";
 import StoreManager from "../components/StoreManager";
 import { useErpAuth } from "../contexts/ErpAuthContext";
@@ -930,6 +932,27 @@ function toPurchaseOrderFilters(draft: PurchaseOrderFilterDraft): PurchaseOrderF
     productCode: draft.productCode.trim(),
     amountMin: normalizeMoneyFilter(draft.amountMin),
     amountMax: normalizeMoneyFilter(draft.amountMax),
+  };
+}
+
+// 从「已应用筛选」反推出筛选框草稿：日期范围用 dayjs 由字符串重建，
+// 让会话级恢复时筛选框显示的内容与实际生效的查询条件一致。
+function purchaseOrderDraftFromFilters(filters: PurchaseOrderFilters): PurchaseOrderFilterDraft {
+  const dateRange =
+    filters.dateFrom && filters.dateTo ? [dayjs(filters.dateFrom), dayjs(filters.dateTo)] : null;
+  return {
+    keyword: filters.keyword,
+    poNo: filters.poNo,
+    dateRange,
+    purchaser: filters.purchaser,
+    accountId: filters.accountId,
+    supplier: filters.supplier,
+    paymentState: filters.paymentState,
+    sourceState: filters.sourceState,
+    riskState: filters.riskState,
+    productCode: filters.productCode,
+    amountMin: filters.amountMin,
+    amountMax: filters.amountMax,
   };
 }
 
@@ -2563,12 +2586,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   } | null>(null);
   const [importDialogOpen, setImportDialogOpen] = useState(false);
   const [imported1688Orders, setImported1688Orders] = useState<Imported1688OrderRow[]>([]);
+  // 会话级视图状态 key：按 workArea（采购单 / 找品）分桶，避免两个区互相覆盖。
+  const purchaseViewKey = (suffix: string) => `temu.purchase-center.${workArea || "default"}.${suffix}`;
   const [activeWorkArea, setActiveWorkArea] = useState<PurchaseWorkArea>(() => workArea || "sourcing");
-  const [activeQueueKey, setActiveQueueKey] = useState<PurchaseQueueKey>("all");
-  const [purchaseOrderPageSize, setPurchaseOrderPageSize] = useState(() => (
+  const [activeQueueKey, setActiveQueueKey] = useSessionState<PurchaseQueueKey>(purchaseViewKey("queue"), "all");
+  const [purchaseOrderPageSize, setPurchaseOrderPageSize] = useSessionState(purchaseViewKey("pageSize"), () => (
     Math.max(1, Number(initialWorkbench.purchaseOrderPage?.limit || PURCHASE_ORDER_DEFAULT_PAGE_SIZE))
   ));
-  const [purchaseOrderPage, setPurchaseOrderPage] = useState(() => (
+  const [purchaseOrderPage, setPurchaseOrderPage] = useSessionState(purchaseViewKey("page"), () => (
     Math.floor(Number(initialWorkbench.purchaseOrderPage?.offset || 0) / Math.max(1, Number(initialWorkbench.purchaseOrderPage?.limit || PURCHASE_ORDER_DEFAULT_PAGE_SIZE))) + 1
   ));
   const [purchaseOrderTotal, setPurchaseOrderTotal] = useState(() => (
@@ -2579,21 +2604,26 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   // 预取下一页缓存:key=请求参数签名,value=原始 workbench。真翻页命中即时渲染,详见标杆收口。
   const purchaseOrderPrefetchRef = useRef<Map<string, PurchaseWorkbench>>(new Map());
   const initialFocusPo = readFocusPoFromHash();
-  const [purchaseOrderFilterDraft, setPurchaseOrderFilterDraft] = useState<PurchaseOrderFilterDraft>(() => ({
-    keyword: "",
-    poNo: activeWorkArea === "orders" ? initialFocusPo : "",
-    dateRange: null,
-    purchaser: "",
-    accountId: "",
-    supplier: "",
-    paymentState: "",
-    sourceState: "",
-    riskState: "",
-    productCode: "",
-    amountMin: null,
-    amountMax: null,
-  }));
-  const [purchaseOrderFilters, setPurchaseOrderFilters] = useState<PurchaseOrderFilters>(() => ({
+  const [purchaseOrderFilterDraft, setPurchaseOrderFilterDraft] = useState<PurchaseOrderFilterDraft>(() =>
+    purchaseOrderDraftFromFilters(
+      readSessionState<PurchaseOrderFilters>(purchaseViewKey("filters"), {
+        keyword: "",
+        poNo: activeWorkArea === "orders" ? initialFocusPo : "",
+        dateFrom: "",
+        dateTo: "",
+        purchaser: "",
+        accountId: "",
+        supplier: "",
+        paymentState: "",
+        sourceState: "",
+        riskState: "",
+        productCode: "",
+        amountMin: null,
+        amountMax: null,
+      }),
+    ),
+  );
+  const [purchaseOrderFilters, setPurchaseOrderFilters] = useSessionState<PurchaseOrderFilters>(purchaseViewKey("filters"), () => ({
     keyword: "",
     poNo: activeWorkArea === "orders" ? initialFocusPo : "",
     dateFrom: "",
@@ -2608,13 +2638,13 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     amountMin: null,
     amountMax: null,
   }));
-  const [purchaseOrderSort, setPurchaseOrderSort] = useState<PurchaseOrderSortState>(() => ({
+  const [purchaseOrderSort, setPurchaseOrderSort] = useSessionState<PurchaseOrderSortState>(purchaseViewKey("sort"), () => ({
     field: initialWorkbench.purchaseOrderPage?.sortField || "",
     direction: initialWorkbench.purchaseOrderPage?.sortDirection || null,
   }));
-  const [purchaseSearchText, setPurchaseSearchText] = useState(() => {
-    return activeWorkArea === "sourcing" ? initialFocusPo : "";
-  });
+  const [purchaseSearchText, setPurchaseSearchText] = useSessionState(purchaseViewKey("search"), () => (
+    activeWorkArea === "sourcing" ? initialFocusPo : ""
+  ));
   const [selectedInquiryCandidateIds, setSelectedInquiryCandidateIds] = useState<string[]>([]);
   const [inquiryDialogPrId, setInquiryDialogPrId] = useState<string | null>(null);
   const [inquiryDialogCandidateIds, setInquiryDialogCandidateIds] = useState<string[]>([]);
@@ -2665,9 +2695,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   }, [navigate, switchWorkArea, workArea]);
 
   useEffect(() => {
-    if (!workArea) return;
+    // workArea 由路由锁定，挂载时 activeWorkArea 已与之一致：此时不调 switchWorkArea，
+    // 以免把会话恢复的状态标签 / 分页重置掉。仅在真正切换工作区（不一致）时才重置。
+    if (!workArea || activeWorkArea === workArea) return;
     switchWorkArea(workArea);
-  }, [switchWorkArea, workArea]);
+  }, [switchWorkArea, workArea, activeWorkArea]);
 
   useEffect(() => {
     if (activeWorkArea !== "orders" || !routeFocusPo) return;

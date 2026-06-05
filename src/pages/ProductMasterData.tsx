@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type Key } from "rea
 import { Alert, Button, Col, Descriptions, Drawer, Form, Image, Input, InputNumber, Modal, Popconfirm, Progress, Row, Select, Space, Table, Tag, Tooltip, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { DeleteOutlined, EditOutlined, EyeOutlined, LineChartOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
+import { useSessionState } from "../hooks/useSessionState";
 import PageHeader from "../components/PageHeader";
 import { useErpAuth } from "../contexts/ErpAuthContext";
 import { hasPageCache, readIndexedPageCache, readPageCache, writeIndexedPageCache, writePageCache } from "../utils/pageCache";
@@ -1094,9 +1095,11 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
   const [stockDetailRows, setStockDetailRows] = useState<SkuStockRecord[]>([]);
   const [stockDetailLoading, setStockDetailLoading] = useState(false);
   const [supplierDetailRow, setSupplierDetailRow] = useState<ErpSupplierRow | null>(null);
-  const [skuFilters, setSkuFilters] = useState<SkuFilters>({ keyword: "" });
+  // 会话级视图状态 key：按 mode 分桶（商品 / 供应商 / 店铺），切走再切回时恢复筛选，重启软件清空。
+  const pmdViewKey = (suffix: string) => `temu.product-master-data.${mode}.${suffix}`;
+  const [skuFilters, setSkuFilters] = useSessionState<SkuFilters>(pmdViewKey("skuFilters"), { keyword: "" });
   const [selectedSkuRowKeys, setSelectedSkuRowKeys] = useState<Key[]>([]);
-  const [supplierFilters, setSupplierFilters] = useState<SupplierFilters>({ keyword: "" });
+  const [supplierFilters, setSupplierFilters] = useSessionState<SupplierFilters>(pmdViewKey("supplierFilters"), { keyword: "" });
   const mountedRef = useRef(true);
   const loadSeqRef = useRef(0);
   const imageBackfillTriggeredRef = useRef(false);

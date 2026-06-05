@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSessionState, readSessionState } from "../hooks/useSessionState";
 import type { DragEvent, MouseEvent } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -243,10 +244,11 @@ export default function PurchaseReturnsSection() {
   const [loadedOnce, setLoadedOnce] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loadedAt, setLoadedAt] = useState<string | null>(null);
-  const [searchDraft, setSearchDraft] = useState("");
-  const [query, setQuery] = useState("");
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
+  const prViewKey = (suffix: string) => `temu.purchase-returns.${suffix}`;
+  const [searchDraft, setSearchDraft] = useState(() => readSessionState(prViewKey("query"), ""));
+  const [query, setQuery] = useSessionState(prViewKey("query"), "");
+  const [page, setPage] = useSessionState(prViewKey("page"), 1);
+  const [pageSize, setPageSize] = useSessionState(prViewKey("pageSize"), 20);
   // 单行展开（accordion）：一次只看一单，跟原 Drawer 行为一致
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [items, setItems] = useState<PurchaseReturnItemRow[]>([]);

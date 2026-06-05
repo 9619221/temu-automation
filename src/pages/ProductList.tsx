@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useSessionState } from "../hooks/useSessionState";
 import { Alert, Button, Card, Checkbox, Drawer, Empty, Image, Input, Modal, Radio, Segmented, Space, Spin, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
@@ -3316,8 +3317,8 @@ export default function ProductList() {
   const [cloudProductMeta, setCloudProductMeta] = useState({ latestAt: "", error: "" });
 
   const [loading, setLoading] = useState(false);
-  const [searchText, setSearchText] = useState("");
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [searchText, setSearchText] = useSessionState("temu.product-list.search", "");
+  const [statusFilter, setStatusFilter] = useSessionState<StatusFilter>("temu.product-list.status", "all");
   const [hasAccount, setHasAccount] = useState<boolean | null>(null);
   const [diagnostics, setDiagnostics] = useState<CollectionDiagnostics | null>(null);
   const [, setSourceState] = useState<ProductSourceState>(EMPTY_SOURCES);

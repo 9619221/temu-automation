@@ -13,6 +13,8 @@ import {
   ReloadOutlined,
   SearchOutlined,
 } from "@ant-design/icons";
+import dayjs from "dayjs";
+import { useSessionState, readSessionState } from "../hooks/useSessionState";
 import PageHeader from "../components/PageHeader";
 import { useErpAuth } from "../contexts/ErpAuthContext";
 import { hasPageCache, readPageCache, writePageCache } from "../utils/pageCache";
@@ -620,10 +622,12 @@ export default function WarehouseCenter() {
     [],
   );
   const [data, setData] = useState<WarehouseWorkbench>(cachedData);
-  const [inboundReceiptPageSize, setInboundReceiptPageSize] = useState(() => (
+  // 会话级视图状态 key：切走再切回仓库中心时恢复筛选 / 分页 / 标签，重启软件清空。
+  const whViewKey = (suffix: string) => `temu.warehouse.${suffix}`;
+  const [inboundReceiptPageSize, setInboundReceiptPageSize] = useSessionState(whViewKey("pageSize"), () => (
     normalizeReceiptPageSize(cachedData.inboundReceiptPage?.limit)
   ));
-  const [inboundReceiptPage, setInboundReceiptPage] = useState(() => {
+  const [inboundReceiptPage, setInboundReceiptPage] = useSessionState(whViewKey("page"), () => {
     const limit = normalizeReceiptPageSize(cachedData.inboundReceiptPage?.limit);
     return Math.floor(Number(cachedData.inboundReceiptPage?.offset || 0) / limit) + 1;
   });
@@ -633,17 +637,21 @@ export default function WarehouseCenter() {
   const [loadedOnce, setLoadedOnce] = useState(() => hasPageCache(cachedData));
   const [loading, setLoading] = useState(false);
   const [actingKey, setActingKey] = useState<string | null>(null);
-  const [receiptScopeKey, setReceiptScopeKey] = useState<ReceiptScopeKey>(DEFAULT_RECEIPT_SCOPE);
-  const [receiptQueueKey, setReceiptQueueKey] = useState<ReceiptQueueKey>("all");
-  const [receiptSearchDraft, setReceiptSearchDraft] = useState("");
-  const [receiptKeyword, setReceiptKeyword] = useState("");
-  const [receiptSupplierDraft, setReceiptSupplierDraft] = useState("");
-  const [receiptSupplierFilter, setReceiptSupplierFilter] = useState("");
-  const [receiptIssueDraft, setReceiptIssueDraft] = useState<ReceiptIssueKey>("all");
-  const [receiptIssueFilter, setReceiptIssueFilter] = useState<ReceiptIssueKey>("all");
-  const [receiptDateRangeDraft, setReceiptDateRangeDraft] = useState<any>(null);
-  const [receiptDateFrom, setReceiptDateFrom] = useState("");
-  const [receiptDateTo, setReceiptDateTo] = useState("");
+  const [receiptScopeKey, setReceiptScopeKey] = useSessionState<ReceiptScopeKey>(whViewKey("scope"), DEFAULT_RECEIPT_SCOPE);
+  const [receiptQueueKey, setReceiptQueueKey] = useSessionState<ReceiptQueueKey>(whViewKey("queue"), "all");
+  const [receiptSearchDraft, setReceiptSearchDraft] = useState(() => readSessionState(whViewKey("keyword"), ""));
+  const [receiptKeyword, setReceiptKeyword] = useSessionState(whViewKey("keyword"), "");
+  const [receiptSupplierDraft, setReceiptSupplierDraft] = useState(() => readSessionState(whViewKey("supplier"), ""));
+  const [receiptSupplierFilter, setReceiptSupplierFilter] = useSessionState(whViewKey("supplier"), "");
+  const [receiptIssueDraft, setReceiptIssueDraft] = useState<ReceiptIssueKey>(() => readSessionState<ReceiptIssueKey>(whViewKey("issue"), "all"));
+  const [receiptIssueFilter, setReceiptIssueFilter] = useSessionState<ReceiptIssueKey>(whViewKey("issue"), "all");
+  const [receiptDateRangeDraft, setReceiptDateRangeDraft] = useState<any>(() => {
+    const from = readSessionState(whViewKey("dateFrom"), "");
+    const to = readSessionState(whViewKey("dateTo"), "");
+    return from && to ? [dayjs(from), dayjs(to)] : null;
+  });
+  const [receiptDateFrom, setReceiptDateFrom] = useSessionState(whViewKey("dateFrom"), "");
+  const [receiptDateTo, setReceiptDateTo] = useSessionState(whViewKey("dateTo"), "");
   const [selectedReceiptId, setSelectedReceiptId] = useState<string | null>(null);
   const [receiptDetailDrawerOpen, setReceiptDetailDrawerOpen] = useState(false);
   const [selectedReceiptIds, setSelectedReceiptIds] = useState<string[]>([]);

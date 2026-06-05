@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Card, Row, Col, Table, Tag, Select, Input, Space, Typography, Alert, Button, Progress, Tooltip, Checkbox } from "antd";
 import { ReloadOutlined, AccountBookOutlined, CheckCircleOutlined, ClockCircleOutlined, InboxOutlined, CalendarOutlined, WalletOutlined, InfoCircleOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
+import { useSessionState } from "../hooks/useSessionState";
 
 const fmtMoney = (n?: number | null) => "¥" + Number(n || 0).toLocaleString("zh-CN", { maximumFractionDigits: 2 });
 const fmtNum = (n?: number | null) => Number(n || 0).toLocaleString("zh-CN");
@@ -60,10 +61,11 @@ export default function PurchaseReportPanel() {
   const [data, setData] = useState<Report | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [statusFilter, setStatusFilter] = useState("all");
-  const [supplierFilter, setSupplierFilter] = useState("all");
-  const [keyword, setKeyword] = useState("");
-  const [psOnly, setPsOnly] = useState(false);
+  const prViewKey = (suffix: string) => `temu.purchase-report.${suffix}`;
+  const [statusFilter, setStatusFilter] = useSessionState(prViewKey("status"), "all");
+  const [supplierFilter, setSupplierFilter] = useSessionState(prViewKey("supplier"), "all");
+  const [keyword, setKeyword] = useSessionState(prViewKey("keyword"), "");
+  const [psOnly, setPsOnly] = useSessionState(prViewKey("psOnly"), false);
 
   const load = useCallback(async () => {
     if (!window.electronAPI?.erp?.reports?.purchase) {

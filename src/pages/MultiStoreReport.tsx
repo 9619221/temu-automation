@@ -35,6 +35,7 @@ import {
   YAxis,
 } from "recharts";
 import { readPageCache, writePageCache } from "../utils/pageCache";
+import { useSessionState } from "../hooks/useSessionState";
 
 interface FinWindow {
   revenue: number;
@@ -232,16 +233,17 @@ export default function MultiStoreReport() {
     () => readPageCache<ReportData | null>(MULTI_STORE_REPORT_CACHE_KEY, null),
   );
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState("daily");
-  const [ownerFilter, setOwnerFilter] = useState<string>("all");
+  const msrViewKey = (suffix: string) => `temu.multi-store-report.${suffix}`;
+  const [activeTab, setActiveTab] = useSessionState(msrViewKey("tab"), "daily");
+  const [ownerFilter, setOwnerFilter] = useSessionState<string>(msrViewKey("owner"), "all");
   const [savingMall, setSavingMall] = useState<string | null>(null);
   // 销售管理 Tab（SKU 明细，懒加载）
   const [skuRows, setSkuRows] = useState<SkuRow[]>([]);
   const [skuLoading, setSkuLoading] = useState(false);
   const [skuLoaded, setSkuLoaded] = useState(false);
-  const [skuStoreFilter, setSkuStoreFilter] = useState("all");
-  const [skuStatusFilter, setSkuStatusFilter] = useState("all");
-  const [skuSearch, setSkuSearch] = useState("");
+  const [skuStoreFilter, setSkuStoreFilter] = useSessionState(msrViewKey("skuStore"), "all");
+  const [skuStatusFilter, setSkuStatusFilter] = useSessionState(msrViewKey("skuStatus"), "all");
+  const [skuSearch, setSkuSearch] = useSessionState(msrViewKey("skuSearch"), "");
 
   const load = useCallback(async () => {
     if (!window.electronAPI?.erp?.reports?.multiStore) {

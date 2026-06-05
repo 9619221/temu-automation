@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSessionState, readSessionState } from "../hooks/useSessionState";
 import { Alert, Button, Col, Image, Input, InputNumber, Modal, Row, Select, Space, Table, Tag, Typography, message } from "antd";
 import type { SorterResult } from "antd/es/table/interface";
 import type { ColumnsType } from "antd/es/table";
@@ -137,15 +138,16 @@ export default function ConsignAfterSalesSection() {
   const [jstError, setJstError] = useState<string | null>(null);
   const [platformError, setPlatformError] = useState<string | null>(null);
   const [loadedAt, setLoadedAt] = useState<string | null>(null);
-  const [searchDraft, setSearchDraft] = useState("");
-  const [query, setQuery] = useState("");
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
+  const caViewKey = (suffix: string) => `temu.consign-aftersale.${suffix}`;
+  const [searchDraft, setSearchDraft] = useState(() => readSessionState(caViewKey("query"), ""));
+  const [query, setQuery] = useSessionState(caViewKey("query"), "");
+  const [page, setPage] = useSessionState(caViewKey("page"), 1);
+  const [pageSize, setPageSize] = useSessionState(caViewKey("pageSize"), 20);
   // 筛选：货物状态 / 平台状态 / 店铺；排序：退货时间（默认倒序，与原行为一致）
-  const [goodStatusFilter, setGoodStatusFilter] = useState<string | null>(null);
-  const [shopStatusFilter, setShopStatusFilter] = useState<string | null>(null);
-  const [shopFilter, setShopFilter] = useState<string | null>(null);
-  const [sortOrder, setSortOrder] = useState<"ascend" | "descend">("descend");
+  const [goodStatusFilter, setGoodStatusFilter] = useSessionState<string | null>(caViewKey("goodStatus"), null);
+  const [shopStatusFilter, setShopStatusFilter] = useSessionState<string | null>(caViewKey("shopStatus"), null);
+  const [shopFilter, setShopFilter] = useSessionState<string | null>(caViewKey("shop"), null);
+  const [sortOrder, setSortOrder] = useSessionState<"ascend" | "descend">(caViewKey("sortOrder"), "descend");
   // 单行展开（accordion）：一次只看一单，跟原 Drawer 行为一致
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [items, setItems] = useState<ConsignAfterSaleItemRow[]>([]);

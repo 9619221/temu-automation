@@ -30,6 +30,8 @@ import {
   SearchOutlined,
   SettingOutlined,
 } from "@ant-design/icons";
+import dayjs from "dayjs";
+import { useSessionState } from "../hooks/useSessionState";
 import PageHeader from "../components/PageHeader";
 import StatCard from "../components/StatCard";
 import OtherInoutSection from "../components/OtherInoutSection";
@@ -98,6 +100,9 @@ interface ConsignDeliverUnifiedRawJst {
   sku_info?: string | null;
   skus?: string | null;
   currency?: string | null;
+  receiver_state?: string | null;
+  receiver_city?: string | null;
+  receiver_district?: string | null;
 }
 interface ConsignDeliverUnifiedRow {
   soId: string | null;
@@ -494,17 +499,26 @@ export default function QcOutboundCenter() {
   const [unifiedLoading, setUnifiedLoading] = useState(false);
   const [unifiedError, setUnifiedError] = useState<string | null>(null);
   const [unifiedLoadedAt, setUnifiedLoadedAt] = useState<string | null>(() => cachedData.generatedAt || null);
-  const [unifiedPage, setUnifiedPage] = useState(1);
-  const [unifiedPageSize, setUnifiedPageSize] = useState(UNIFIED_DEFAULT_PAGE_SIZE);
+  // 会话级视图状态 key：切走再切回出库中心时恢复筛选 / 分页 / 标签，重启软件清空。
+  const qcViewKey = (suffix: string) => `temu.qc-outbound.${suffix}`;
+  const [unifiedPage, setUnifiedPage] = useSessionState(qcViewKey("page"), 1);
+  const [unifiedPageSize, setUnifiedPageSize] = useSessionState(qcViewKey("pageSize"), UNIFIED_DEFAULT_PAGE_SIZE);
   const unifiedSource: "all" | UnifiedRowSource = "all";
   const [loading, setLoading] = useState(false);
   const [actingKey, setActingKey] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState("cloud");
-  const [stockStatus, setStockStatus] = useState("");
-  const [stockShop, setStockShop] = useState("");
-  const [stockSkuCode, setStockSkuCode] = useState("");
-  const [stockDateRange, setStockDateRange] = useState<any>(null);
-  const [stockQuery, setStockQuery] = useState("");
+  const [activeTab, setActiveTab] = useSessionState(qcViewKey("tab"), "cloud");
+  const [stockStatus, setStockStatus] = useSessionState(qcViewKey("status"), "");
+  const [stockShop, setStockShop] = useSessionState(qcViewKey("shop"), "");
+  const [stockSkuCode, setStockSkuCode] = useSessionState(qcViewKey("skuCode"), "");
+  const [stockDateRange, setStockDateRange] = useSessionState<any>(qcViewKey("dateRange"), null, {
+    serialize: (value) =>
+      Array.isArray(value) && value[0] && value[1]
+        ? [value[0].toISOString?.() ?? null, value[1].toISOString?.() ?? null]
+        : null,
+    deserialize: (raw) =>
+      Array.isArray(raw) && raw[0] && raw[1] ? [dayjs(raw[0]), dayjs(raw[1])] : null,
+  });
+  const [stockQuery, setStockQuery] = useSessionState(qcViewKey("query"), "");
   const [unifiedItemsCache, setUnifiedItemsCache] = useState<Record<string, any[]>>({});
   const [unifiedItemsLoading, setUnifiedItemsLoading] = useState<Record<string, boolean>>({});
   // cloud-only 单官方明细缓存(按 soId);与聚水潭明细分开。
@@ -822,8 +836,8 @@ export default function QcOutboundCenter() {
   useEffect(() => {
     if (!unifiedRows.length) return;
     let cancelled = false;
-    const PARALLEL = 4;          // 限并发：明细是按单号点查(有索引,毫秒级),4 路足够快又不给主控端瞬时压力
-    const MAX_PREFETCH = 300;    // 上限：pageSize 选 500 时只预取前 300,其余仍靠鼠标悬停/展开兜底
+    const PARALLEL = 2;          // 限并发 4→2：明细点查虽快，但主控端单进程被采购工作台等重查询占满时，4 路并发会放大瞬时排队压力；2 路够预热又更克制
+    const MAX_PREFETCH = 150;    // 上限 300→150：一屏可见也就十几行，预取太多只是徒增主控端负载；其余仍靠鼠标悬停/展开兜底
     const targets = unifiedRows.slice(0, MAX_PREFETCH);
     let cursor = 0;
     const runners = Array.from({ length: Math.min(PARALLEL, targets.length) }, async () => {
@@ -1075,6 +1089,201 @@ export default function QcOutboundCenter() {
     );
   }, [unifiedItemsCache, unifiedItemsLoading, cloudItemsCache, cloudItemsLoading, itemShipDraft, itemShipSaving, handleSetItemShipQty, handleSetCloudItemShipQty, canCreateOutbound]);
 
+  // 官方发货信息预览(第一阶段·只读)：大仓收货地址 + 本店发货地址，绝不发货。
+  const [shipPreviewRow, setShipPreviewRow] = useState<ConsignDeliverUnifiedRow | null>(null);
+  const [shipPreviewData, setShipPreviewData] = useState<any>(null);
+  const [shipPreviewLoading, setShipPreviewLoading] = useState(false);
+  const handleShipPreview = useCallback(async (row: ConsignDeliverUnifiedRow) => {
+    if (!erp?.inventory?.action) { message.error("ERP 接口未就绪"); return; }
+    const mallId = row.rawCloud?.mall_id ? String(row.rawCloud.mall_id) : "";
+    if (!mallId || !row.soId) { message.error("该单缺少店铺或备货单号，无法查官方发货信息"); return; }
+    setShipPreviewRow(row);
+    setShipPreviewData(null);
+    setShipPreviewLoading(true);
+    try {
+      const r = await erp.inventory.action({ action: "consign_official_ship_preview", mallId, soId: row.soId });
+      setShipPreviewData(r);
+    } catch (error: any) {
+      message.error(error?.message || "官方发货信息查询失败");
+      setShipPreviewRow(null);
+    } finally {
+      setShipPreviewLoading(false);
+    }
+  }, [erp]);
+
+  // ── 官方发货工作流（勾选 + 批量按钮）：加入发货台 → 创建发货单 → 确认发货 ──
+  const [selectedShipKeys, setSelectedShipKeys] = useState<string[]>([]);
+  // 本会话发货状态：soId → { stage:'staged'|'created'|'shipped', deliveryOrderSn, subWarehouseId, receiveAddressInfo, deliveryAddressId, expressBatchSn }
+  const [officialShipState, setOfficialShipState] = useState<Record<string, any>>({});
+  const [shipBatchBusy, setShipBatchBusy] = useState(false);
+  // 确认发货弹窗：逐单选快递+重量
+  const [confirmShipOpen, setConfirmShipOpen] = useState(false);
+  const [confirmShipRows, setConfirmShipRows] = useState<any[]>([]);
+
+  // 勾选行里属于「官方单」（有店铺 + 备货单号）的行。
+  const selectedShipRows = useMemo(
+    () => unifiedRows.filter((r) => r.soId && selectedShipKeys.includes(r.soId) && r.rawCloud?.mall_id),
+    [unifiedRows, selectedShipKeys],
+  );
+
+  // 官方发货阶段：优先本会话 state，回退 rawCloud 线上/erp 字段。
+  const getShipStage = useCallback((row: ConsignDeliverUnifiedRow): "none" | "staged" | "created" | "shipped" => {
+    const st = row.soId ? officialShipState[row.soId] : null;
+    if (st?.stage) return st.stage;
+    if (row.rawCloud?.delivery_batch_sn) return "shipped";
+    const ts = row.rawCloud?.temu_status || "";
+    if (ts.includes("已发货") || ts.includes("已收货") || ts.includes("已入库")) return "shipped";
+    if (row.rawCloud?.delivery_order_sn) return "created";
+    return "none";
+  }, [officialShipState]);
+
+  // 批量「加入发货台」：对勾选官方单串行 staging.add。
+  const handleBatchStaging = useCallback(async () => {
+    if (!erp?.inventory?.action) { message.error("ERP 接口未就绪"); return; }
+    const rows = selectedShipRows;
+    if (!rows.length) { message.warning("请先勾选官方单"); return; }
+    setShipBatchBusy(true);
+    const hide = message.loading(`加入发货台中…（${rows.length} 单）`, 0);
+    let ok = 0, already = 0, fail = 0;
+    for (const row of rows) {
+      try {
+        const r = await erp.inventory.action({ action: "consign_official_staging_add", mallId: String(row.rawCloud!.mall_id), soId: row.soId });
+        if (r?.alreadyIn) already++; else ok++;
+        setOfficialShipState((s) => {
+          const prev = s[row.soId!]?.stage;
+          return { ...s, [row.soId!]: { ...(s[row.soId!] || {}), stage: prev === "created" || prev === "shipped" ? prev : "staged" } };
+        });
+      } catch { fail++; }
+    }
+    hide();
+    setShipBatchBusy(false);
+    message[fail ? "warning" : "success"](`加入发货台完成：新加 ${ok}、已在台 ${already}、失败 ${fail}`);
+  }, [selectedShipRows, erp]);
+
+  // 批量「创建发货单」：成功后写 officialShipState（含确认发货所需子仓/地址参数）。
+  const handleBatchCreate = useCallback(async () => {
+    if (!erp?.inventory?.action) { message.error("ERP 接口未就绪"); return; }
+    const rows = selectedShipRows;
+    if (!rows.length) { message.warning("请先勾选官方单"); return; }
+    setShipBatchBusy(true);
+    const hide = message.loading(`创建发货单中…（${rows.length} 单）`, 0);
+    let ok = 0, fail = 0; const fails: string[] = [];
+    for (const row of rows) {
+      try {
+        const r = await erp.inventory.action({ action: "consign_official_ship_create", mallId: String(row.rawCloud!.mall_id), soId: row.soId });
+        if (!r?.deliveryOrderSn) throw new Error("未返回发货单号");
+        setOfficialShipState((s) => ({ ...s, [row.soId!]: { stage: "created", deliveryOrderSn: r.deliveryOrderSn, subWarehouseId: r.subWarehouseId, receiveAddressInfo: r.receiveAddressInfo, deliveryAddressId: r.deliveryAddressId } }));
+        ok++;
+      } catch (e: any) { fail++; fails.push(`${row.soId}: ${e?.message || "失败"}`); }
+    }
+    hide();
+    setShipBatchBusy(false);
+    if (fail) message.warning(`创建发货单完成：成功 ${ok}、失败 ${fail}。${fails.slice(0, 3).join("；")}`);
+    else message.success(`创建发货单完成：成功 ${ok} 单`);
+  }, [selectedShipRows, erp]);
+
+  // 撤销单个发货单（发货信息列用）。
+  const handleCancelShipOrderBySoId = useCallback(async (row: ConsignDeliverUnifiedRow) => {
+    if (!erp?.inventory?.action || !row.soId || !row.rawCloud?.mall_id) return;
+    const fh = officialShipState[row.soId]?.deliveryOrderSn || row.rawCloud?.delivery_order_sn;
+    if (!fh) { message.error("无发货单号可撤销"); return; }
+    try {
+      await erp.inventory.action({ action: "consign_official_ship_cancel", mallId: String(row.rawCloud.mall_id), deliveryOrderSn: fh });
+      message.success(`已撤销发货单 ${fh}`);
+      setOfficialShipState((s) => { const n = { ...s }; delete n[row.soId!]; return n; });
+    } catch (e: any) { message.error(e?.message || "撤销失败（刚创建的单需稍等几秒）"); }
+  }, [officialShipState, erp]);
+
+  // 发货信息列「物流下单」：对单个已创建FH的官方单做官方真发货（packing.send 选平台快递、平台揽收）。
+  const openShipLogistics = useCallback(async (row: ConsignDeliverUnifiedRow) => {
+    if (!erp?.inventory?.action || !row.soId || !row.rawCloud?.mall_id) return;
+    const st = officialShipState[row.soId];
+    if (!(st?.stage === "created" && st?.deliveryOrderSn && st?.subWarehouseId && st?.receiveAddressInfo)) {
+      message.warning("请先在本会话点「创建发货单」（物流下单要用创建时拿到的子仓参数）"); return;
+    }
+    const initRows = [{ soId: row.soId, mallId: String(row.rawCloud.mall_id), deliveryOrderSn: st.deliveryOrderSn, deliveryAddressId: st.deliveryAddressId, subWarehouseId: st.subWarehouseId, receiveAddressInfo: st.receiveAddressInfo, matched: [], selectedIdx: -1, weightKg: 1, packageNum: 1, loading: true, error: "" }];
+    setConfirmShipRows(initRows);
+    setConfirmShipOpen(true);
+    const r0 = initRows[0];
+    try {
+      const r = await erp.inventory.action({ action: "consign_official_logistics_match", mallId: r0.mallId, deliveryOrderSn: r0.deliveryOrderSn, deliveryAddressId: r0.deliveryAddressId, subWarehouseId: r0.subWarehouseId, receiveAddressInfo: r0.receiveAddressInfo, predictTotalPackageWeight: 1000, totalPackageNum: 1 });
+      const companies = Array.isArray(r?.companies) ? r.companies : [];
+      setConfirmShipRows((rows) => rows.map((x) => x.soId === r0.soId ? { ...x, matched: companies, selectedIdx: companies.length ? 0 : -1, loading: false, error: companies.length ? "" : "无可用物流" } : x));
+    } catch (e: any) {
+      setConfirmShipRows((rows) => rows.map((x) => x.soId === r0.soId ? { ...x, loading: false, error: e?.message || "匹配失败" } : x));
+    }
+  }, [officialShipState, erp]);
+
+  // 工具栏「确认发货」：对勾选行批量做本地确认发货（扣 ERP 库存；jst 走 o_id，cloud 走 mall_id+soId）。
+  const handleBatchConsignShip = useCallback(async () => {
+    if (!erp?.inventory?.action) { message.error("ERP 接口未就绪"); return; }
+    const rows = unifiedRows.filter((r) => r.soId && selectedShipKeys.includes(r.soId) && !r.inventoryDeducted);
+    if (!rows.length) { message.warning("勾选项里没有「未确认发货」的单"); return; }
+    setShipBatchBusy(true);
+    const hide = message.loading(`确认发货中…（${rows.length} 单）`, 0);
+    let ok = 0, skip = 0, fail = 0; const fails: string[] = []; const doneIds = new Set<string>();
+    for (const row of rows) {
+      const oId = row.rawJst?.o_id;
+      const mallId = row.rawCloud?.mall_id ? String(row.rawCloud.mall_id) : "";
+      const isCloud = !oId && row.source === "cloud" && Boolean(mallId) && Boolean(row.soId);
+      if (!oId && !isCloud) { skip++; continue; }
+      try {
+        const result = await erp.inventory.action(
+          oId ? { action: "consign_deliver_ship", oId } : { action: "consign_deliver_ship_cloud", mallId, soId: row.soId },
+        );
+        if (result?.idempotent) skip++; else ok++;
+        doneIds.add(row.soId!);
+      } catch (e: any) { fail++; fails.push(`${row.soId}: ${e?.message || "失败"}`); }
+    }
+    hide();
+    setShipBatchBusy(false);
+    // 乐观更新成功的行（含已扣过的），与单行确认发货一致：不重查，等物化快照刷新。
+    setUnifiedSnapshot((snap) => ({
+      ...snap,
+      rows: snap.rows.map((r) => (r.soId && doneIds.has(r.soId)) ? { ...r, inventoryDeducted: true, localStatusOverride: "已发货", status: "已发货" } : r),
+    }));
+    setSelectedShipKeys([]);
+    if (fail) message.warning(`确认发货完成：成功 ${ok}、跳过(已扣) ${skip}、失败 ${fail}。${fails.slice(0, 3).join("；")}`);
+    else message.success(`确认发货完成：成功 ${ok}、跳过(已扣) ${skip}`);
+  }, [unifiedRows, selectedShipKeys, erp]);
+
+  // 更新确认发货弹窗某行字段。
+  const updateConfirmRow = useCallback((soId: string, patch: any) => {
+    setConfirmShipRows((rows) => rows.map((x) => x.soId === soId ? { ...x, ...patch } : x));
+  }, []);
+
+  // 提交：逐单真发货（强二次确认，confirm=true，不可逆）。
+  const handleConfirmShipSubmit = useCallback(() => {
+    const rows = confirmShipRows.filter((x: any) => !x.loading && x.matched.length && x.selectedIdx >= 0);
+    if (!rows.length) { message.error("没有可发货的单（请等物流匹配完成并选好快递）"); return; }
+    Modal.confirm({
+      title: `确认真发货 ${rows.length} 单？此操作不可撤销`,
+      content: "将逐单物流下单、平台上门揽收、生成运单(EB)，无法撤回。",
+      okText: "确认发货",
+      okButtonProps: { danger: true },
+      cancelText: "再想想",
+      onOk: async () => {
+        setShipBatchBusy(true);
+        const hide = message.loading(`发货中…（${rows.length} 单）`, 0);
+        let ok = 0, fail = 0; const fails: string[] = [];
+        for (const x of rows) {
+          const sel = x.matched[x.selectedIdx];
+          try {
+            const r = await erp.inventory.action({ action: "consign_official_packing_send", mallId: x.mallId, confirm: true, deliveryAddressId: x.deliveryAddressId, deliveryOrderSnList: [x.deliveryOrderSn], expressCompanyId: sel.expressCompanyId, expressCompanyName: sel.expressCompanyName, predictId: sel.predictId, pickupMethod: sel.pickupMethod ?? 0, predictTotalPackageWeight: Math.round(Number(x.weightKg || 1) * 1000), expressPackageNum: x.packageNum || 1 });
+            setOfficialShipState((s) => ({ ...s, [x.soId]: { ...(s[x.soId] || {}), stage: "shipped", expressBatchSn: r?.expressBatchSn } }));
+            ok++;
+          } catch (e: any) { fail++; fails.push(`${x.soId}: ${e?.message || "失败"}`); }
+        }
+        hide();
+        setShipBatchBusy(false);
+        setConfirmShipOpen(false);
+        setSelectedShipKeys([]);
+        if (fail) message.warning(`发货完成：成功 ${ok}、失败 ${fail}。${fails.slice(0, 3).join("；")}`);
+        else message.success(`发货成功：${ok} 单`);
+      },
+    });
+  }, [confirmShipRows, erp]);
+
   // 本地确认发货 / 撤销：对应后端 inventory.action consign_deliver_ship / consign_deliver_unship。
   const handleConsignShip = useCallback(async (row: ConsignDeliverUnifiedRow, ship: boolean) => {
     if (!erp?.inventory?.action) { message.error("ERP 接口未就绪"); return; }
@@ -1252,8 +1461,62 @@ export default function QcOutboundCenter() {
       title: "收货仓",
       key: "warehouse",
       width: 180,
-      render: (_value, row) =>
-        row.rawCloud?.receive_warehouse_name || row.rawCloud?.warehouse_group || "-",
+      render: (_value, row) => {
+        // 官方单显示 Temu 子仓名；聚水潭单显示收货省市区(即收货仓地址,简短)。
+        const cloud = row.rawCloud?.receive_warehouse_name || row.rawCloud?.warehouse_group;
+        if (cloud) return cloud;
+        const j = row.rawJst;
+        const jst = j ? [j.receiver_state, j.receiver_city, j.receiver_district].filter(Boolean).join("·") : "";
+        return jst || "-";
+      },
+    },
+    {
+      title: "发货信息",
+      key: "shipInfo",
+      width: 240,
+      render: (_value, row) => {
+        const isCloud = Boolean(row.rawCloud?.mall_id) && Boolean(row.soId);
+        if (isCloud) {
+          // 官方单：发货阶段标签 + 收货仓 + 发货单号(FH) + 运单号(EB) + 详情/撤销
+          const stage = getShipStage(row);
+          const st = row.soId ? officialShipState[row.soId] : null;
+          const fh = st?.deliveryOrderSn || row.rawCloud?.delivery_order_sn;
+          const eb = st?.expressBatchSn || row.rawCloud?.delivery_batch_sn;
+          const stageTag = stage === "shipped" ? <Tag color="success">已发货</Tag>
+            : stage === "created" ? <Tag color="processing">已创建发货单</Tag>
+            : stage === "staged" ? <Tag color="warning">已加发货台</Tag>
+            : <Tag>待发货</Tag>;
+          return (
+            <Space direction="vertical" size={2} style={{ width: "100%" }}>
+              <Space size={4} wrap>
+                {stageTag}
+                <Button size="small" type="link" style={{ padding: 0 }} onClick={() => handleShipPreview(row)}>详情</Button>
+                {stage === "created" && st?.deliveryOrderSn ? (
+                  <>
+                    <Button size="small" type="link" style={{ padding: 0 }} onClick={() => openShipLogistics(row)}>物流下单</Button>
+                    <Button size="small" type="link" danger style={{ padding: 0 }} onClick={() => handleCancelShipOrderBySoId(row)}>撤销</Button>
+                  </>
+                ) : null}
+              </Space>
+              {row.rawCloud?.receive_warehouse_name ? <Text type="secondary" style={{ fontSize: 12 }}>仓：{row.rawCloud.receive_warehouse_name}</Text> : null}
+              {fh ? <Text type="secondary" style={{ fontSize: 12 }}>FH：{fh}</Text> : null}
+              {eb ? <Text type="secondary" style={{ fontSize: 12 }}>运单：{eb}</Text> : null}
+            </Space>
+          );
+        }
+        // 聚水潭单：物流公司 + 物流单号 + 收货地
+        const j = row.rawJst;
+        if (!j) return <Text type="secondary">-</Text>;
+        const addr = [j.receiver_state, j.receiver_city, j.receiver_district].filter(Boolean).join("·");
+        if (!j.logistics_company && !j.outer_deliver_no && !addr) return <Text type="secondary">-</Text>;
+        return (
+          <Space direction="vertical" size={2} style={{ width: "100%" }}>
+            {j.logistics_company ? <Text style={{ fontSize: 12 }}>{j.logistics_company}</Text> : null}
+            {j.outer_deliver_no ? <Text type="secondary" style={{ fontSize: 12 }}>单号：{j.outer_deliver_no}</Text> : null}
+            {addr ? <Text type="secondary" style={{ fontSize: 12 }}>收货：{addr}</Text> : null}
+          </Space>
+        );
+      },
     },
     {
       title: "本地承接",
@@ -1288,29 +1551,11 @@ export default function QcOutboundCenter() {
         const isCloud = !oId && row.source === "cloud" && Boolean(row.rawCloud?.mall_id) && Boolean(row.soId);
         if (!oId && !isCloud) return <Text type="secondary">-</Text>;
         const busy = actingKey === (oId ? `consign-${oId}` : `consign-cloud-${row.soId}`);
-        if (row.inventoryDeducted) {
-          return (
-            <Button
-              size="small"
-              danger
-              loading={busy}
-              disabled={!canCreateOutbound}
-              onClick={() => handleConsignShip(row, false)}
-            >
-              撤销发货
-            </Button>
-          );
-        }
-        return (
-          <Button
-            size="small"
-            type="primary"
-            loading={busy}
-            disabled={!canCreateOutbound}
-            onClick={() => handleConsignShip(row, true)}
-          >
-            确认发货
-          </Button>
+        // 本地库存扣减/回补（与官方发货是两套：官方发货走上方工具栏批量按钮）。
+        return row.inventoryDeducted ? (
+          <Button size="small" danger loading={busy} disabled={!canCreateOutbound} onClick={() => handleConsignShip(row, false)}>撤销发货</Button>
+        ) : (
+          <Button size="small" type="primary" loading={busy} disabled={!canCreateOutbound} onClick={() => handleConsignShip(row, true)}>确认发货</Button>
         );
       },
     },
@@ -1488,9 +1733,24 @@ export default function QcOutboundCenter() {
                     </Tooltip>
                   </Popover>
                 </div>
+                {/* 批量工具栏：①② 官方流程(仅官方单)；③ 本地确认发货(扣ERP库存,所有勾选单)。官方真发货在发货信息列「物流下单」 */}
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                  <Text strong>批量操作</Text>
+                  <Text type="secondary">已选 {selectedShipKeys.length} 单（官方 {selectedShipRows.length}）</Text>
+                  <Button size="small" disabled={!canCreateOutbound || !selectedShipRows.length} loading={shipBatchBusy} onClick={handleBatchStaging}>① 加入发货台</Button>
+                  <Button size="small" disabled={!canCreateOutbound || !selectedShipRows.length} loading={shipBatchBusy} onClick={handleBatchCreate}>② 创建发货单</Button>
+                  <Button size="small" type="primary" disabled={!canCreateOutbound || !selectedShipKeys.length} loading={shipBatchBusy} onClick={handleBatchConsignShip}>③ 确认发货（本地扣库存）</Button>
+                  <Text type="secondary" style={{ fontSize: 12 }}>①② 官方流程(仅官方单) · ③ 本地确认发货扣库存 · 官方真发货在「发货信息」列点「物流下单」</Text>
+                </div>
                 <Table
                   className="erp-compact-table consign-unified-table"
                   rowKey={(row) => row.soId || JSON.stringify(row)}
+                  rowSelection={{
+                    selectedRowKeys: selectedShipKeys,
+                    onChange: (keys) => setSelectedShipKeys(keys as string[]),
+                    preserveSelectedRowKeys: true,
+                    getCheckboxProps: (row) => ({ disabled: !row.soId }),
+                  }}
                   size="middle"
                   loading={unifiedLoading}
                   columns={cloudStockColumns}
@@ -1600,6 +1860,88 @@ export default function QcOutboundCenter() {
             )}
           </Space>
         </Form>
+      </Modal>
+
+      <Modal
+        title="官方发货信息预览（只读）"
+        open={Boolean(shipPreviewRow)}
+        footer={null}
+        onCancel={() => setShipPreviewRow(null)}
+        width={640}
+        destroyOnClose
+      >
+        {shipPreviewLoading ? (
+          <div style={{ textAlign: "center", padding: 32 }}><Spin /></div>
+        ) : shipPreviewData ? (
+          <Space direction="vertical" size={16} style={{ width: "100%" }}>
+            <div>
+              <Text strong>大仓收货地址（发到哪个 Temu 仓）</Text>
+              {shipPreviewData.receiveWarehouse ? (
+                <div style={{ marginTop: 8, lineHeight: 1.9 }}>
+                  <div>子仓 {shipPreviewData.receiveWarehouse.subWarehouseId}　收货人 {shipPreviewData.receiveWarehouse.receiverName} {shipPreviewData.receiveWarehouse.phone}</div>
+                  <div>{shipPreviewData.receiveWarehouse.provinceName}{shipPreviewData.receiveWarehouse.cityName}{shipPreviewData.receiveWarehouse.districtName} {shipPreviewData.receiveWarehouse.detailAddress}</div>
+                </div>
+              ) : (
+                <div style={{ marginTop: 8 }}><Text type="secondary">{shipPreviewData.receiveWarehouseError || "该备货单当前非「待发货」状态，取不到大仓地址"}</Text></div>
+              )}
+            </div>
+            <div>
+              <Text strong>本店发货地址（从哪发）</Text>
+              {Array.isArray(shipPreviewData.sendAddresses) && shipPreviewData.sendAddresses.length ? (
+                <div style={{ marginTop: 8, lineHeight: 1.9 }}>
+                  {(() => {
+                    const def = shipPreviewData.sendAddresses.find((a: any) => a.isDefault) || shipPreviewData.sendAddresses[0];
+                    return <div>默认：{def.provinceName}{def.cityName}{def.districtName} {def.addressDetail}{def.addressLabel ? `（${def.addressLabel}）` : ""}</div>;
+                  })()}
+                  <Text type="secondary">共 {shipPreviewData.sendAddresses.length} 个发货地址（创建发货单时可选）</Text>
+                </div>
+              ) : (
+                <div style={{ marginTop: 8 }}><Text type="secondary">{shipPreviewData.sendAddressesError || "无发货地址"}</Text></div>
+              )}
+            </div>
+            <Text type="secondary" style={{ fontSize: 12 }}>第一阶段：只读预览，不触发任何发货操作。</Text>
+          </Space>
+        ) : null}
+      </Modal>
+
+      <Modal
+        title="物流下单（官方真发货：选平台快递 → 平台上门揽收）"
+        open={confirmShipOpen}
+        onCancel={() => setConfirmShipOpen(false)}
+        width={760}
+        okText="确认物流下单（不可逆）"
+        okButtonProps={{ danger: true, loading: shipBatchBusy, disabled: !confirmShipRows.some((x: any) => !x.loading && x.matched.length && x.selectedIdx >= 0) }}
+        cancelText="关闭"
+        onOk={handleConfirmShipSubmit}
+        destroyOnClose
+      >
+        <Alert type="warning" showIcon style={{ marginBottom: 12 }} message="选好平台推荐快递、填重量箱数后，「确认物流下单」将真发货、平台上门揽收、生成运单(EB)，不可撤销。" />
+        <Space direction="vertical" size={10} style={{ width: "100%" }}>
+          {confirmShipRows.map((x: any) => (
+            <div key={x.soId} style={{ border: "1px solid #f0f0f0", borderRadius: 6, padding: "10px 12px" }}>
+              <div style={{ marginBottom: 6 }}>
+                <Text strong>{x.soId}</Text>　<Text type="secondary" style={{ fontSize: 12 }}>发货单 {x.deliveryOrderSn}</Text>
+              </div>
+              {x.loading ? (
+                <Text type="secondary"><Spin size="small" /> 匹配平台快递中…</Text>
+              ) : x.error ? (
+                <Text type="danger">{x.error}</Text>
+              ) : (
+                <Space size={12} wrap>
+                  <Select
+                    style={{ width: 300 }}
+                    placeholder="选平台推荐快递"
+                    value={x.selectedIdx >= 0 ? x.selectedIdx : undefined}
+                    onChange={(v) => updateConfirmRow(x.soId, { selectedIdx: v })}
+                    options={x.matched.map((c: any, idx: number) => ({ value: idx, label: `${c.expressCompanyName}（运费 ${c.minCharge ?? "?"}~${c.maxCharge ?? "?"} 元）` }))}
+                  />
+                  <span><Text type="secondary">重量kg </Text><InputNumber min={1} step={1} style={{ width: 90 }} value={x.weightKg} onChange={(v) => updateConfirmRow(x.soId, { weightKg: v })} /></span>
+                  <span><Text type="secondary">箱数 </Text><InputNumber min={1} step={1} style={{ width: 80 }} value={x.packageNum} onChange={(v) => updateConfirmRow(x.soId, { packageNum: v })} /></span>
+                </Space>
+              )}
+            </div>
+          ))}
+        </Space>
       </Modal>
 
     </div>
