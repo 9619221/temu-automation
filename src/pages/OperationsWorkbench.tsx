@@ -90,7 +90,7 @@ interface QcRow {
 }
 // 商品品质看板(Temu 后台「商品品质看板」抓包):一行 = 一个商品
 interface QualityRow {
-  mall_id: string; store_code: string | null; mall_name: string | null; owner: string | null;
+  mall_id: string; site: string; store_code: string | null; mall_name: string | null; owner: string | null;
   product_id: string | null; goods_id: string | null; product_name: string | null;
   image_url: string | null; category_name: string | null;
   afs_score: number | null;        // 品质分(goodsAfsScore,0-100,越低越差)
@@ -104,15 +104,17 @@ interface QualityRow {
 }
 // 商品品质看板 - 店铺级 90 天指标
 interface QualityShopRow {
-  mall_id: string; store_code: string | null; mall_name: string | null; owner: string | null;
+  mall_id: string; site: string; store_code: string | null; mall_name: string | null; owner: string | null;
   afs_rate_90d: number | null; avg_score_90d: number | null; expect_loss: number | null; captured_at: number | null;
 }
+// 站点标记 → 中文标签（cn=CN主站 / us=美区 / eu=欧区）
+const QUALITY_SITE_LABEL: Record<string, string> = { cn: "CN", us: "美区", eu: "欧区" };
 
 interface ReviewRow {
   mall_id: string; store_code: string | null; mall_name: string | null;
   review_id: string; product_id: string | null; product_skc_id: string | null;
   goods_id: string | null; goods_name: string | null;
-  score: number | null; comment: string | null; spec_summary: string | null; category_path: string | null;
+  score: number | null; comment: string | null; comment_zh: string | null; spec_summary: string | null; category_path: string | null;
   status: number | null; on_sale: number | null; created_at_ts: number | null;
   is_benefit: boolean; pictures: string[];
 }
@@ -173,6 +175,8 @@ const SEV_COLOR: Record<string, string> = { high: "red", medium: "orange", low: 
 const SEV_TEXT: Record<string, string> = { high: "高", medium: "中", low: "低" };
 const SEV_RANK: Record<string, number> = { high: 3, medium: 2, low: 1 };
 const KIND_LABEL: Record<string, string> = { activity: "活动", bidding: "竞价", coupon: "优惠券" };
+// 活动类型(activity_type)中文:用于报名弹窗区分同商品的多个活动
+const ACTIVITY_TYPE_LABEL: Record<number, string> = { 1: "限时秒杀", 5: "大促活动", 13: "官方大促", 14: "限时专属", 21: "超级秒杀", 27: "清仓甩卖", 101: "秒杀进阶", 127: "清仓进阶" };
 
 function diagnose(r: SkuRow): Diag[] {
   const issues: Diag[] = [];
@@ -844,19 +848,6 @@ export default function OperationsWorkbench() {
   }, [actRows, storeFilter, kindFilter, search, inScope, actSkuOnly]);
 
   // 每货号可报活动数(去重后,按 activity_id||活动名 区分)
-  const skuActCount = useMemo(() => {
-    const m = new Map<string, Set<string>>();
-    for (const r of actView) {
-      if (!r.sku_ext_code) continue;
-      const a = r.activity_id || r.title || "";
-      if (!m.has(r.sku_ext_code)) m.set(r.sku_ext_code, new Set());
-      m.get(r.sku_ext_code)!.add(a);
-    }
-    const c = new Map<string, number>();
-    for (const [k, s] of m) c.set(k, s.size);
-    return c;
-  }, [actView]);
-
   // 活动报名「概览」:把逐行 actView 按(店×货号)聚合成每商品一行,算可报活动数/待补ID/最优参考利润率
   const actProductView = useMemo<ActProductRow[]>(() => {
     const m = new Map<string, ActProductRow>();
@@ -1068,22 +1059,13 @@ export default function OperationsWorkbench() {
   ];
 
   const actColumns: ColumnsType<ActivityRow> = [
-    storeCol,
-    { title: "类型", dataIndex: "kind", width: 70, render: (v: string | null) => <Tag color={v === "bidding" ? "purple" : v === "coupon" ? "cyan" : "blue"}>{KIND_LABEL[v || ""] || v || "—"}</Tag> },
-    { title: "商品 / SKC / 货号", key: "at", width: 360, render: (_, r) => (
-      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-        {r.thumb ? <div style={{ flexShrink: 0, width: 40, height: 40 }}><Image src={r.thumb} width={40} height={40} style={{ objectFit: "cover", borderRadius: 4 }} preview={{ mask: <EyeOutlined /> }} /></div> : <div style={{ width: 40, height: 40, borderRadius: 4, background: "#f0f0f0", flexShrink: 0 }} />}
-        <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 12, maxWidth: 290, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.product_name || undefined}>{r.product_name || <span style={{ color: "#bbb" }}>(无商品名)</span>}</div>
-          {r.sku_ext_code ? <Typography.Text copyable={{ text: r.sku_ext_code }} style={{ fontSize: 12, fontWeight: 600 }}>{r.sku_ext_code}</Typography.Text> : <span style={{ color: "#bbb", fontSize: 12 }}>(无货号·活动表头)</span>}
-          <div style={{ fontSize: 11, color: "#aaa", marginTop: 1, display: "flex", gap: 8 }}>
-            {r.product_id ? <Typography.Text copyable={{ text: r.product_id }} style={{ fontSize: 11, color: "#aaa" }}>SPU {r.product_id}</Typography.Text> : null}
-            {r.skc_id ? <Typography.Text copyable={{ text: r.skc_id }} style={{ fontSize: 11, color: "#aaa" }}>SKC {r.skc_id}</Typography.Text> : null}
-          </div>
-        </div>
+    { title: "活动", key: "act", width: 230, render: (_, r) => (
+      <div>
+        <Tag color={r.kind === "bidding" ? "purple" : r.kind === "coupon" ? "cyan" : "blue"}>{(r.activity_type != null && ACTIVITY_TYPE_LABEL[r.activity_type]) || KIND_LABEL[r.kind || ""] || "活动"}</Tag>
+        {r.title ? <span style={{ fontSize: 12 }}>{r.title}</span> : (r.activity_id ? <span style={{ fontSize: 11, color: "#aaa" }}>ID {r.activity_id}</span> : null)}
+        {!r.activity_id && <Tooltip title="缺活动ID(扩展只采到列表、没采到可报名场次),需扩展逛该店活动后台采集后才能报"><span style={{ color: "#d46b08", fontSize: 11, marginLeft: 6 }}>待补ID</span></Tooltip>}
       </div>
     ) },
-    { title: "可报活动", key: "actcnt", width: 80, align: "center", render: (_, r) => { const n = r.sku_ext_code ? (skuActCount.get(r.sku_ext_code) || 0) : 0; return n > 0 ? <Tag color={n >= 3 ? "green" : "blue"}>{n} 个</Tag> : <span style={{ color: "#bbb" }}>—</span>; }, sorter: (a, b) => (skuActCount.get(a.sku_ext_code || "") || 0) - (skuActCount.get(b.sku_ext_code || "") || 0) },
     { title: "原申报价", dataIndex: "signup_price", width: 80, align: "right", render: (v) => fmtMoney(v) },
     { title: "活动参考价", dataIndex: "suggested_price", width: 90, align: "right", render: (v: number | null) => (v == null ? <span style={{ color: "#bbb" }}>—</span> : fmtMoney(v)) },
     { title: "真实成本", dataIndex: "cost", width: 85, align: "right", render: (v: number | null) => (v == null ? <Tooltip title="无成本台账（未采购入库/未绑定）"><span style={{ color: "#bbb" }}>—</span></Tooltip> : fmtMoney(v)) },
@@ -1205,6 +1187,7 @@ export default function OperationsWorkbench() {
 
   const qualityColumns: ColumnsType<QualityRow> = [
     { title: "店号", dataIndex: "store_code", width: 78, fixed: "left", render: (v, r) => formatStoreNo(v === r.mall_id ? null : v, r.mall_id) },
+    { title: "站点", dataIndex: "site", width: 64, fixed: "left", align: "center", render: (v: string) => <Tag color={v === "us" ? "blue" : v === "eu" ? "purple" : "default"}>{QUALITY_SITE_LABEL[v] || v || "—"}</Tag> },
     { title: "商品", key: "prod", width: 300, render: (_, r) => (
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         {r.image_url ? <div style={{ flexShrink: 0, width: 64, height: 64 }}><Image src={r.image_url} width={64} height={64} style={{ objectFit: "cover", borderRadius: 4 }} /></div> : <div style={{ width: 64, height: 64, background: "#f0f0f0", borderRadius: 4, flexShrink: 0 }} />}
@@ -1245,7 +1228,7 @@ export default function OperationsWorkbench() {
     } },
     { title: "评论内容", dataIndex: "comment", width: 440, render: (v: string | null, r) => (
       <div>
-        <div style={{ fontSize: 13, lineHeight: 1.5, whiteSpace: "pre-wrap", color: r.score != null && r.score <= 3 ? "#cf1322" : undefined }}>{v || <span style={{ color: "#bbb" }}>（仅评分,无文字）</span>}</div>
+        <div style={{ fontSize: 13, lineHeight: 1.5, whiteSpace: "pre-wrap", color: r.score != null && r.score <= 3 ? "#cf1322" : undefined }}>{(r.comment_zh || v) || <span style={{ color: "#bbb" }}>（仅评分,无文字）</span>}</div>
         {r.is_benefit ? <Tag color="orange" style={{ marginTop: 4 }}>福利评价</Tag> : null}
       </div>
     ) },
@@ -1361,15 +1344,17 @@ export default function OperationsWorkbench() {
     });
   }, [qcRows, search, storeFilter, inScope]);
 
+  const [qualitySiteFilter, setQualitySiteFilter] = useSessionState(owViewKey("qualitySite"), "all");
   const qualityView = useMemo(() => {
     const kw = search.trim().toLowerCase();
     return qualityRows.filter((r) => {
       if (!inScope(r.store_code || r.mall_id)) return false;
       if (storeFilter !== "all" && r.store_code !== storeFilter) return false;
+      if (qualitySiteFilter !== "all" && r.site !== qualitySiteFilter) return false;
       if (!kw) return true;
       return [r.product_name, r.product_id, r.goods_id, r.category_name, r.afs_problems, r.rev_problems, r.store_code].some((x) => String(x || "").toLowerCase().includes(kw));
     });
-  }, [qualityRows, search, storeFilter, inScope]);
+  }, [qualityRows, search, storeFilter, qualitySiteFilter, inScope]);
 
   const qualityShopsView = useMemo(() => qualityShops.filter((s) => inScope(s.store_code || s.mall_id)), [qualityShops, inScope]);
 
@@ -1640,8 +1625,10 @@ export default function OperationsWorkbench() {
               ))}
             </div>
           )}
-          {commonFilters()}
-          <Table<QualityRow> dataSource={qualityView} columns={qualityColumns} rowKey={(r) => `${r.mall_id}|${r.product_id || r.goods_id}`} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个商品` }} scroll={{ x: 1300 }} loading={qualityLoading} />
+          {commonFilters(
+            <Select size="small" style={{ width: 110 }} value={qualitySiteFilter} onChange={setQualitySiteFilter} options={[{ value: "all", label: "全部站点" }, { value: "cn", label: "CN" }, { value: "us", label: "美区" }, { value: "eu", label: "欧区" }]} />,
+          )}
+          <Table<QualityRow> dataSource={qualityView} columns={qualityColumns} rowKey={(r) => `${r.mall_id}|${r.site}|${r.product_id || r.goods_id}`} size="small" pagination={{ defaultPageSize: 50, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], selectComponentClass: NoSearchSelect, showTotal: (t) => `共 ${t} 个商品` }} scroll={{ x: 1360 }} loading={qualityLoading} />
         </div>
       ),
     },
