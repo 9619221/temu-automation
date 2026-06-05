@@ -19,6 +19,8 @@ const ALARM_FLUSH = "temu-monitor.flush";
 const ALARM_COLLECT = "temu-monitor.collect";
 const ALARM_ENROLL = "temu-monitor.enroll"; // 轮询云端待报名任务
 const ALARM_SALES_TREND = "temu-monitor.sales-trend";
+const ALARM_REVIEW = "temu-monitor.review";
+const ALARM_HPF = "temu-monitor.hpf";
 const STATS_KEY = "temu_monitor_stats";
 const MALLS_KEY = "temu_monitor_malls";
 const COLLECTOR_STATE_KEY = "temu_monitor_collector_state";
@@ -52,6 +54,9 @@ const ENROLL_RECORD_STATE_KEY = "temu_monitor_enroll_record_state";
 const ENROLL_RECORD_RUN_INTERVAL_MS = 30 * 60 * 1000; // 30min/轮
 const ENROLL_RECORD_PAGE_SIZE = 50;
 const ENROLL_RECORD_MAX_PAGES = 60; // 1498/50≈30页,留余量
+// 活动场次(scroll/match,补活动ID)多店自动采集:遍历云端 targets 各店,每轮采 N 个店、cursor 轮换覆盖全部
+const ACTIVITY_MATCH_TARGETS_STATE_KEY = "temu_monitor_activity_match_targets_state";
+const ACTIVITY_MATCH_MALLS_PER_RUN = 4; // 每轮采几个店(轮换),35店约9轮转完
 // JIT(全托管建议关闭) + VMI(普通备货单) 主动调度：替代桌面端 worker.mjs urgentOrders Playwright 任务。
 // 云端 /v1/jit-vmi-targets 给本租户近 30 天活跃 mall，SW 对每个 mall 调两个 venom 接口。
 const JIT_VMI_STATE_KEY = "temu_monitor_jit_vmi_state";
@@ -78,11 +83,40 @@ const SALES_TREND_PER_GROUP_LIMIT = 100;
 const SALES_TREND_MAX_MALLS_PER_RUN = 12;
 const SALES_TREND_BATCH_SIZE = 50;
 const SALES_TREND_RUN_INTERVAL_MS = 60 * 60 * 1000;
+// 评价主动采集（review/pageQuery）：SW 后台定时按店翻页采，带 mallid 头 + body {page,pageSize}，无需 anti-content（2026-06-05 实测确认）。
+const REVIEW_STATE_KEY = "temu_monitor_review_state";
+const REVIEW_TARGET_LIMIT = 100;        // 一次最多取多少店
+const REVIEW_MAX_MALLS_PER_RUN = 8;     // 单轮最多采几个店（控时长/风控）
+const REVIEW_MAX_PAGES_PER_MALL = 5;    // 每店最多翻几页（评价按时间倒序，覆盖近期）
+const REVIEW_PAGE_SIZE = 50;            // 每页条数
+const REVIEW_RUN_INTERVAL_MS = 6 * 60 * 60 * 1000; // 每 6 小时一轮
+// 高价限流主动采集（high/price/flow/reduce/queryFullHighPriceFlowReduceList）：SW 后台定时按店翻页采被限流商品清单，
+// 带 mallid 头（仿评价/品质，无需 anti-content）。请求体先按 {pageNum,pageSize} 试，上线后用真实抓包校准。
+const HPF_STATE_KEY = "temu_monitor_hpf_state";
+const HPF_TARGET_LIMIT = 100;        // 一次最多取多少店
+const HPF_MAX_MALLS_PER_RUN = 8;     // 单轮最多采几个店（控时长/风控）
+const HPF_MAX_PAGES_PER_MALL = 6;    // 每店最多翻几页
+const HPF_PAGE_SIZE = 50;            // 每页条数
+const HPF_PAGE_DELAY_MS = 450;       // 翻页间隔（避 429）
+const HPF_RUN_INTERVAL_MS = 6 * 60 * 60 * 1000; // 每 6 小时一轮
 const FLOW_STATE_KEY = "temu_monitor_flow_state";
 const FLOW_RUN_INTERVAL_MS = 30 * 60 * 1000; // 每店每 30 分钟一轮（避 429）
 const FLOW_PAGE_SIZE = 100;
 const FLOW_MAX_PAGES = 12;
 const FLOW_PAGE_DELAY_MS = 500;
+// 商品品质看板主动直采：对当前登录店调 goods/quality/supplyChain/qualityMetrics/pageQuery（带 mallid 头，无需 anti-content）。
+// 品质数据量小、变化慢，间隔放宽到每店每 6 小时一轮。多店覆盖靠多开（每实例一店）。
+const QUALITY_STATE_KEY = "temu_monitor_quality_state";
+// 品质看板采集的区域域名(同店各区域 mall_id 一致,故用一个 mallId + 各域名登录态即可采全部):全球主站 + 欧区。
+// 美区品质分析无数据,不列。要加区域在此加一行 {site, origin} 即可。
+const QUALITY_SITES = [
+  { site: "cn", origin: "https://agentseller.temu.com" },
+  { site: "eu", origin: "https://agentseller-eu.temu.com" },
+];
+const QUALITY_RUN_INTERVAL_MS = 6 * 60 * 60 * 1000; // 每店每 6 小时一轮
+const QUALITY_PAGE_SIZE = 50;
+const QUALITY_MAX_PAGES = 10; // 50×10=500 商品/店，足够覆盖
+const QUALITY_PAGE_DELAY_MS = 500;
 const FEISHU_SUPPLIER_TABLE_URL = "https://mcn24onb5t1o.feishu.cn/base/RLy7bndc4aCXhtsx4yAcr2d8nSg?table=tbl0UhZRpR0niDSt&view=vew5Spjz7c";
 const FEISHU_SUPPLIER_ONCE_KEY = "temu_monitor_feishu_supplier_once";
 
@@ -119,6 +153,8 @@ ensureRuntimeDefaults().catch((e) => console.warn("[sw] bootstrap skipped:", e?.
 // ---------- 启动期初始化 ----------
 chrome.runtime.onInstalled.addListener(async () => {
   await ensureRuntimeDefaults();
+  // reload/更新扩展时清品质采集节流(last_success_at),让新版立即采一次;SW 唤醒走 onStartup 不清,保留每店 6h 节流
+  try { const qs = (await getStorage([QUALITY_STATE_KEY]))[QUALITY_STATE_KEY] || {}; await setStorage({ [QUALITY_STATE_KEY]: { ...qs, last_success_at: 0 } }); } catch {}
 });
 
 chrome.runtime.onStartup.addListener(async () => {
@@ -129,8 +165,10 @@ async function ensureRuntimeDefaults() {
   chrome.alarms.create(ALARM_FLUSH, { periodInMinutes: 0.5 });
   chrome.alarms.create(ALARM_ENROLL, { periodInMinutes: 1 });
   chrome.alarms.create(ALARM_SALES_TREND, { periodInMinutes: Math.max(1, SALES_TREND_RUN_INTERVAL_MS / 60000) });
+  chrome.alarms.create(ALARM_REVIEW, { periodInMinutes: Math.max(1, REVIEW_RUN_INTERVAL_MS / 60000) });
+  chrome.alarms.create(ALARM_HPF, { periodInMinutes: Math.max(1, HPF_RUN_INTERVAL_MS / 60000) });
   await clearAlarm(ALARM_COLLECT);
-  const cur = await getStorage(["device_id", COLLECTOR_STATE_KEY, COLLECTOR_WINDOW_KEY, COLLECTOR_BOOT_VERSION_KEY, SALES_TREND_STATE_KEY]);
+  const cur = await getStorage(["device_id", COLLECTOR_STATE_KEY, COLLECTOR_WINDOW_KEY, COLLECTOR_BOOT_VERSION_KEY, SALES_TREND_STATE_KEY, REVIEW_STATE_KEY, HPF_STATE_KEY]);
   const patch = {};
   if (!cur.device_id) patch.device_id = crypto.randomUUID();
   if (!cur[SALES_TREND_STATE_KEY]) {
@@ -138,6 +176,22 @@ async function ensureRuntimeDefaults() {
       enabled: false,
       updated_at: Date.now(),
       reason: "disabled_by_default",
+    };
+  }
+  if (!cur[REVIEW_STATE_KEY]) {
+    // 评价后台主动采集默认开启（用户明确要求自动化）。参数温和（每6h、每轮8店、每店5页、400ms间隔）以控风控。
+    patch[REVIEW_STATE_KEY] = {
+      enabled: true,
+      updated_at: Date.now(),
+      reason: "enabled_for_review_automation",
+    };
+  }
+  if (!cur[HPF_STATE_KEY]) {
+    // 高价限流后台主动采集默认开启。参数温和（每6h、每轮8店、每店6页、450ms间隔）以控风控。
+    patch[HPF_STATE_KEY] = {
+      enabled: true,
+      updated_at: Date.now(),
+      reason: "enabled_for_hpf_automation",
     };
   }
   if (!cur[COLLECTOR_STATE_KEY]) {
@@ -204,6 +258,14 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     collectSalesTrendFromTargets().catch((e) => console.warn("[sw] sales trend collect err", e?.message || e));
     return;
   }
+  if (alarm.name === ALARM_REVIEW) {
+    collectReviewsFromTargets().catch((e) => console.warn("[sw] review collect err", e?.message || e));
+    return;
+  }
+  if (alarm.name === ALARM_HPF) {
+    collectHighPriceFlowFromTargets().catch((e) => console.warn("[sw] hpf collect err", e?.message || e));
+    return;
+  }
   if (alarm.name !== ALARM_FLUSH) return;
   // 未配置兜底：onInstalled 阶段 fetch 偶尔失败（network stack 没准备好），
   // 这里 30s 一次重试，配置成功后立即心跳上来
@@ -221,9 +283,11 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   sendHeartbeat().catch((e) => console.warn("[sw] heartbeat err", e));
   collectActivityLibraryFromTargets().catch((e) => console.warn("[sw] activity library collect err", e?.message || e));
   collectActivityMatchForCurrentMall().catch((e) => console.warn("[sw] activity match collect err", e?.message || e));
+  collectActivityMatchFromTargets().catch((e) => console.warn("[sw] activity match targets collect err", e?.message || e));
   collectEnrollRecords().catch((e) => console.warn("[sw] enroll record collect err", e?.message || e));
   collectJitVmiFromTargets().catch((e) => console.warn("[sw] jit/vmi collect err", e?.message || e));
   collectFlowForCurrentMall().catch((e) => console.warn("[sw] flow collect err", e?.message || e));
+  collectQualityAllSites().catch((e) => console.warn("[sw] quality collect err", e?.message || e));
 });
 
 // 在任意 Temu tab 上抓 page world stats（供心跳用）
@@ -479,6 +543,41 @@ async function getCurrentAgentSellerMall() {
   }
 }
 
+// 拿所有打开的各站点 agentseller tab（CN / 美 -us / 欧 -eu），每个站点一个 {mallId, origin}。
+// 供「需分站点采集」的任务（如品质看板）：同一店各站点品质分/评分不同，需各站点用各自登录态分别采。
+async function getAllAgentSellerMalls() {
+  try {
+    const tabs = await chrome.tabs.query({
+      url: ["https://agentseller.temu.com/*", "https://agentseller-us.temu.com/*", "https://agentseller-eu.temu.com/*"],
+    });
+    const byOrigin = new Map();
+    for (const tab of tabs.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))) {
+      let origin = "";
+      try { origin = new URL(tab.url).origin; } catch { continue; }
+      if (byOrigin.has(origin)) continue; // 每站点取最近访问的一个 tab
+      let mallId = "";
+      try {
+        const [res] = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: () => (document.cookie.match(/mallid=([^;]+)/i)?.[1] || ""),
+        });
+        mallId = String(res?.result || "").trim();
+      } catch { continue; }
+      if (mallId) byOrigin.set(origin, { mallId, origin });
+    }
+    return Array.from(byOrigin.values());
+  } catch {
+    return [];
+  }
+}
+
+// origin → 站点标记（cn/us/eu），用于品质数据按站点区分。
+function qualitySiteTag(origin) {
+  if (/agentseller-us\./i.test(origin)) return "us";
+  if (/agentseller-eu\./i.test(origin)) return "eu";
+  return "cn";
+}
+
 // 轮询云端待报名任务,按当前店分发到登录态 agentseller tab(page world 发 submit),结果回传云端
 async function pollEnrollTasks() {
   const cfg = await getStorage(["cloud_endpoint", "auth_token"]);
@@ -594,6 +693,70 @@ async function collectActivityMatchForCurrentMall() {
   return { ok: true, thematics: cap.length, enqueued };
 }
 
+// 多店自动采集活动场次:遍历云端 targets 各店(用 mallid 头切店,跟活动库采集同机制),每轮采 N 个店、cursor 轮换覆盖全部。
+// 补全各店活动ID(scroll/match),不依赖用户手动逛各店后台。
+async function collectActivityMatchFromTargets() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", ACTIVITY_MATCH_TARGETS_STATE_KEY]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
+  const now = Date.now();
+  const state = cfg[ACTIVITY_MATCH_TARGETS_STATE_KEY] || {};
+  if (state.last_run_at && now - Number(state.last_run_at) < ACTIVITY_MATCH_RUN_INTERVAL_MS) return { ok: true, skipped: "interval" };
+  let malls = [];
+  try {
+    const tr = await fetch(`${cfg.cloud_endpoint.replace(/\/$/, "")}/api/ingest/v1/activity-targets?limit=${ACTIVITY_LIBRARY_TARGET_LIMIT}`, { headers: { Authorization: `Bearer ${cfg.auth_token}` } });
+    if (!tr.ok) return { ok: false, reason: `targets_http_${tr.status}` };
+    const td = await tr.json().catch(() => null);
+    const seen = new Set();
+    for (const t of (Array.isArray(td?.targets) ? td.targets : [])) {
+      const mid = String(t?.mall_id || t?.mallId || "").trim();
+      if (!mid || seen.has(mid)) continue;
+      seen.add(mid);
+      malls.push({ mallId: mid, site: t?.site || "agentseller" });
+    }
+  } catch { return { ok: false, reason: "targets_failed" }; }
+  if (!malls.length) return { ok: true, reason: "no_malls" };
+  const start = Number(state.cursor || 0) % malls.length;
+  const slice = [];
+  for (let i = 0; i < ACTIVITY_MATCH_MALLS_PER_RUN && i < malls.length; i++) slice.push(malls[(start + i) % malls.length]);
+  await setStorage({ [ACTIVITY_MATCH_TARGETS_STATE_KEY]: { ...state, last_run_at: now, cursor: (start + ACTIVITY_MATCH_MALLS_PER_RUN) % malls.length, total_malls: malls.length } });
+  let enqueued = 0;
+  for (const m of slice) {
+    const origin = activityLibraryOriginForSite(m.site);
+    let types = [];
+    try {
+      const lr = await fetch(`${origin}${ACTIVITY_MATCH_LIST_ENDPOINT}`, { method: "POST", credentials: "include", cache: "no-store", headers: { "Content-Type": "application/json", mallid: m.mallId }, body: JSON.stringify({ pageNum: 1, pageSize: 50 }) });
+      const j = safeParseJson(await lr.text());
+      types = j?.result?.activityList || j?.result?.list || [];
+    } catch { continue; }
+    const thematics = [];
+    for (const t of types) for (const th of (t.thematicList || [])) if (th?.activityThematicId) thematics.push({ type: t.activityType, tid: th.activityThematicId });
+    const cap = thematics.slice(0, ACTIVITY_MATCH_MAX_THEMATICS);
+    for (const th of cap) {
+      let ctx = null, rounds = 0;
+      while (rounds < ACTIVITY_MATCH_MAX_SCROLL) {
+        const reqBody = JSON.stringify({ activityThematicId: th.tid, activityType: th.type, productIds: [], productSkcExtCodes: [], rowCount: ACTIVITY_MATCH_ROWCOUNT, ...(ctx ? { searchScrollContext: ctx } : {}) });
+        let body = null, text = "";
+        try {
+          const resp = await fetch(`${origin}${ACTIVITY_MATCH_ENDPOINT}`, { method: "POST", credentials: "include", cache: "no-store", headers: { "Content-Type": "application/json", mallid: m.mallId }, body: reqBody });
+          text = await resp.text();
+          body = safeParseJson(text);
+          if (!resp.ok || !body || typeof body !== "object") break;
+        } catch { break; }
+        await enqueue({ kind: "fetch-activity-match", url: `${origin}${ACTIVITY_MATCH_ENDPOINT}`, method: "POST", status: 200, ts: Date.now(), site: m.site, page: "background/activity-match-targets", mall_id: m.mallId, body, bodyText: text.length > 200000 ? null : text, requestBodyText: reqBody, bodySize: text.length, activeSource: "scroll_match_targets" });
+        enqueued++;
+        await bumpStats({ captured_count_delta: 1 });
+        const res = body.result || {};
+        ctx = res.searchScrollContext || null; rounds++;
+        if (!res.hasMore || !(res.matchList || []).length) break;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+  await setStorage({ [ACTIVITY_MATCH_TARGETS_STATE_KEY]: { ...state, last_run_at: now, last_success_at: Date.now(), cursor: (start + ACTIVITY_MATCH_MALLS_PER_RUN) % malls.length, total_malls: malls.length, last_malls: slice.length, last_enqueued: enqueued } });
+  return { ok: true, malls: slice.length, enqueued };
+}
+
 // 已报名活动记录:按当前店翻页调 /enroll/list(不带 sessionStatusTag/productSkcIds=已报名),enqueue 上云。
 // cloud parser 据 list 项的 enrollId 自动分流到 temu_activity_enroll_record(不混可报快照)。
 async function collectEnrollRecords() {
@@ -696,6 +859,81 @@ async function collectFlowForCurrentMall() {
   });
   if (enqueuedCount > 0) await flush();
   return { ok: true, enqueuedCount, mall: cur.mallId };
+}
+
+// 商品品质看板主动直采（自动切区域）：用当前登录店的 mallId,对预设各区域域名(QUALITY_SITES:全球+欧区)各 fetch 一遍。
+// 同店各区域 mall_id 一致,故一个 mallId + 各域名登录态 cookie 即可采全部区域,免手动开各域名 tab(只需任一 agentseller tab 拿 mallId)。
+// fetch goods/quality/supplyChain/qualityMetrics/pageQuery → enqueue(site 标记 cn/eu、url 带各域名 origin,供 buildQualityPanel 区分)。
+// 品质看板按品质分档(qualityScoreEnum 1-4)分返回,逐档翻页;参数名 page(非 pageNum)。节流按「上次成功」算(采空不计,reload 自动清)。
+async function collectQualityAllSites() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", QUALITY_STATE_KEY]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
+  const now = Date.now();
+  const state = cfg[QUALITY_STATE_KEY] || {};
+  if (state.last_success_at && now - Number(state.last_success_at) < QUALITY_RUN_INTERVAL_MS) {
+    return { ok: true, skipped: "interval" };
+  }
+  const cur = await getCurrentAgentSellerMall();
+  if (!cur || !cur.mallId) return { ok: false, reason: "no_agentseller_tab" };
+  const mallId = cur.mallId;
+
+  let enqueuedCount = 0;
+  // 用同一个 mallId 对各区域域名各采一遍(各域名靠浏览器存的登录态 cookie),不依赖手动开各域名 tab
+  for (const { site: siteTag, origin } of QUALITY_SITES) {
+    const url = `${origin}/bg-luna-agent-seller/goods/quality/supplyChain/qualityMetrics/pageQuery`;
+    for (const scoreEnum of [1, 2, 3, 4]) {
+      for (let pageNo = 1; pageNo <= QUALITY_MAX_PAGES; pageNo++) {
+        const requestBody = JSON.stringify({ page: pageNo, pageSize: QUALITY_PAGE_SIZE, qualityScoreEnum: scoreEnum });
+        let listLen = 0;
+        let total = 0;
+        try {
+          const resp = await fetch(url, {
+            method: "POST",
+            credentials: "include",
+            cache: "no-store",
+            headers: { "Content-Type": "application/json", mallid: mallId },
+            body: requestBody,
+          });
+          const text = await resp.text();
+          const body = safeParseJson(text);
+          if (!resp.ok || !body || typeof body !== "object") break;
+          const result = body.result || {};
+          const list = result.pageItems || result.list || [];
+          listLen = Array.isArray(list) ? list.length : 0;
+          total = Number(result.total) || 0;
+          if (listLen > 0) {
+            await enqueue({
+              kind: "fetch-active-quality",
+              url,
+              method: "POST",
+              status: resp.status,
+              ts: Date.now(),
+              site: siteTag,
+              page: "background/quality",
+              mall_id: mallId,
+              body,
+              bodyText: text.length > 200000 ? null : text,
+              requestBodyText: requestBody,
+              bodySize: text.length,
+              activeSource: "quality_background",
+            });
+            await bumpStats({ captured_count_delta: 1 });
+            enqueuedCount++;
+          }
+        } catch {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, QUALITY_PAGE_DELAY_MS));
+        if (listLen < QUALITY_PAGE_SIZE) break; // 该档末页
+        if (total && pageNo * QUALITY_PAGE_SIZE >= total) break;
+      }
+    }
+  }
+  const patch = { ...state, last_run_at: now, last_enqueued: enqueuedCount, last_sites: QUALITY_SITES.map((s) => s.site) };
+  if (enqueuedCount > 0) patch.last_success_at = now;
+  await setStorage({ [QUALITY_STATE_KEY]: patch });
+  if (enqueuedCount > 0) await flush();
+  return { ok: true, enqueuedCount, sites: QUALITY_SITES.length };
 }
 
 // ---------- JIT/VMI 主动调度（替代桌面端 urgentOrders Playwright 任务） ----------
@@ -911,6 +1149,110 @@ async function collectSalesTrendFromTargets() {
 
   await setStorage({
     [SALES_TREND_STATE_KEY]: {
+      ...state,
+      last_run_at: now,
+      last_success_at: Date.now(),
+      last_call_count: callCount,
+      last_mall_count: mallCount,
+      last_enqueued_count: enqueuedCount,
+      last_error_count: errorCount,
+      last_target_count: targets.length,
+    },
+  });
+  if (enqueuedCount > 0) await flush();
+  return { ok: true, callCount, enqueuedCount, errorCount, mallCount, targetCount: targets.length };
+}
+
+function createReviewRequestBody(page, pageSize) {
+  // 请求体已实测确认（2026-06-05 agentseller 登录态抓包）：{ page, pageSize }，带 mallid 头，无需 anti-content。
+  return { page, pageSize };
+}
+
+// 评价主动采集：按 cloud /v1/review-targets 给的店列表，SW 后台逐店翻页 fetch review/pageQuery
+// （带 mallid 头 + cookie，无需 anti-content）。响应 enqueue→flush→cloud parseTemuReview 落 temu_review_snapshot。
+async function collectReviewsFromTargets() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", REVIEW_STATE_KEY]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
+  const now = Date.now();
+  const state = cfg[REVIEW_STATE_KEY] || {};
+  if (!state.enabled) return { ok: true, skipped: "disabled" };
+  if (state.last_run_at && now - Number(state.last_run_at) < REVIEW_RUN_INTERVAL_MS) {
+    return { ok: true, skipped: "interval" };
+  }
+  await setStorage({ [REVIEW_STATE_KEY]: { ...state, last_run_at: now } });
+
+  const targetUrl = `${cfg.cloud_endpoint.replace(/\/$/, "")}/api/ingest/v1/review-targets?limit=${REVIEW_TARGET_LIMIT}`;
+  let targets = [];
+  try {
+    const resp = await fetch(targetUrl, { headers: { Authorization: `Bearer ${cfg.auth_token}` } });
+    if (!resp.ok) return { ok: false, reason: `targets_http_${resp.status}` };
+    const data = await resp.json().catch(() => null);
+    targets = Array.isArray(data?.targets) ? data.targets : [];
+  } catch (error) {
+    return { ok: false, reason: `targets_err_${String(error?.message || error).slice(0, 40)}` };
+  }
+
+  let mallCount = 0;
+  let callCount = 0;
+  let enqueuedCount = 0;
+  let errorCount = 0;
+  for (const target of targets) {
+    if (mallCount >= REVIEW_MAX_MALLS_PER_RUN) break;
+    const mallId = String(target?.mall_id || target?.mallId || "").trim();
+    if (!mallId) continue;
+    mallCount++;
+    const origin = activityLibraryOriginForSite(target?.site);
+    const url = `${origin}/bg-luna-agent-seller/review/pageQuery`;
+    let total = null;
+    for (let page = 1; page <= REVIEW_MAX_PAGES_PER_MALL; page++) {
+      const requestBody = JSON.stringify(createReviewRequestBody(page, REVIEW_PAGE_SIZE));
+      callCount++;
+      let pageItemsLen = 0;
+      try {
+        const resp = await fetch(url, {
+          method: "POST",
+          credentials: "include",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json", mallid: mallId },
+          body: requestBody,
+        });
+        const text = await resp.text();
+        const body = safeParseJson(text);
+        if (resp.ok && body && typeof body === "object" && body.success) {
+          await enqueue({
+            kind: "fetch-active-review",
+            url,
+            method: "POST",
+            status: resp.status,
+            ts: Date.now(),
+            site: target?.site || "agentseller",
+            page: "background/review",
+            mall_id: mallId,
+            body,
+            bodyText: text.length > 200000 ? null : text,
+            requestBodyText: requestBody,
+            bodySize: text.length,
+            activeSource: "review_background",
+          });
+          await bumpStats({ captured_count_delta: 1 });
+          enqueuedCount++;
+          const result = body.result || {};
+          if (total == null && Number.isFinite(Number(result.total))) total = Number(result.total);
+          pageItemsLen = Array.isArray(result.pageItems) ? result.pageItems.length : 0;
+        } else {
+          errorCount++;
+        }
+      } catch {
+        errorCount++;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      if (pageItemsLen < REVIEW_PAGE_SIZE) break; // 不足一页 = 最后一页
+      if (total != null && page * REVIEW_PAGE_SIZE >= total) break; // 已覆盖全部评价
+    }
+  }
+
+  await setStorage({
+    [REVIEW_STATE_KEY]: {
       ...state,
       last_run_at: now,
       last_success_at: Date.now(),
