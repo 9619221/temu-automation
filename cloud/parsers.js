@@ -2092,7 +2092,114 @@ function activityRowKey(item, evt, index) {
   ].map((part) => String(part ?? "")).join("|").slice(0, 500);
 }
 
+// 已报名活动记录(/enroll/list 不带 sessionStatusTag/productSkcIds;list 项带 enrollId,可报库没有)。
+// 分表 temu_activity_enroll_record,展开到 sku 维度,便于 ERP 按货号/SPU 聚合「已报活动数」。
+function parseEnrollRecord(db, ctx, evt, body) {
+  const result = body?.result || body?.data || body || {};
+  const list = Array.isArray(result.list) ? result.list : [];
+  if (!list.length) return;
+  const upsert = db.prepare(`
+    INSERT INTO temu_activity_enroll_record (
+      id, tenant_id, mall_id, site, stat_date, row_key,
+      enroll_id, enroll_status, enroll_time, activity_type, activity_thematic_id, activity_thematic_name,
+      product_id, skc_id, sku_id, sku_ext_code, goods_id,
+      activity_price_cents, daily_price_cents, activity_stock, sold_status, session_end_time,
+      raw_json, source_event_id
+    ) VALUES (
+      @id, @tenant_id, @mall_id, @site, @stat_date, @row_key,
+      @enroll_id, @enroll_status, @enroll_time, @activity_type, @activity_thematic_id, @activity_thematic_name,
+      @product_id, @skc_id, @sku_id, @sku_ext_code, @goods_id,
+      @activity_price_cents, @daily_price_cents, @activity_stock, @sold_status, @session_end_time,
+      @raw_json, @source_event_id
+    )
+    ON CONFLICT(tenant_id, mall_id, row_key, stat_date) DO UPDATE SET
+      enroll_status        = COALESCE(excluded.enroll_status, enroll_status),
+      enroll_time          = COALESCE(excluded.enroll_time, enroll_time),
+      activity_type        = COALESCE(excluded.activity_type, activity_type),
+      activity_thematic_id = COALESCE(excluded.activity_thematic_id, activity_thematic_id),
+      activity_thematic_name = COALESCE(excluded.activity_thematic_name, activity_thematic_name),
+      product_id           = COALESCE(excluded.product_id, product_id),
+      skc_id               = COALESCE(excluded.skc_id, skc_id),
+      sku_id               = COALESCE(excluded.sku_id, sku_id),
+      sku_ext_code         = COALESCE(excluded.sku_ext_code, sku_ext_code),
+      goods_id             = COALESCE(excluded.goods_id, goods_id),
+      activity_price_cents = COALESCE(excluded.activity_price_cents, activity_price_cents),
+      daily_price_cents    = COALESCE(excluded.daily_price_cents, daily_price_cents),
+      activity_stock       = COALESCE(excluded.activity_stock, activity_stock),
+      sold_status          = COALESCE(excluded.sold_status, sold_status),
+      session_end_time     = COALESCE(excluded.session_end_time, session_end_time),
+      source_event_id      = COALESCE(excluded.source_event_id, source_event_id),
+      last_updated_at      = datetime('now')
+  `);
+  const stat_date = normalizeStatDate(firstDefined(result, ["statDate", "date", "dataDate"]), evt);
+  const mall_id = eventMallId(ctx, evt);
+  for (const rec of list) {
+    if (!isRecord(rec)) continue;
+    const base = {
+      enroll_id: toNullableString(firstDefined(rec, ["enrollId", "enroll_id"]), 100),
+      enroll_status: toNullableInteger(firstDefined(rec, ["enrollStatus"])),
+      enroll_time: toNullableString(firstDefined(rec, ["enrollTime"])),
+      activity_type: toNullableInteger(firstDefined(rec, ["activityType"])),
+      activity_thematic_id: toNullableString(firstDefined(rec, ["activityThematicId", "activityId", "themeId"]), 100),
+      activity_thematic_name: toNullableString(firstDefined(rec, ["activityThematicName", "activityName"]), 500),
+      product_id: toNullableString(firstDefined(rec, ["productId", "productSpuId", "spuId"]), 100),
+      goods_id: toNullableString(firstDefined(rec, ["goodsId", "goods_id"]), 100),
+      activity_stock: toNullableInteger(firstDefined(rec, ["activityStock", "remainingActivityStock"])),
+      sold_status: toNullableInteger(firstDefined(rec, ["soldStatus"])),
+      session_end_time: toNullableString(firstDefined(rec, ["sessionEndTime", "endTime"])),
+    };
+    const skcList = Array.isArray(rec.skcList) ? rec.skcList : [];
+    const rows = [];
+    for (const skc of skcList) {
+      if (!isRecord(skc)) continue;
+      const skc_id = toNullableString(firstDefined(skc, ["skcId", "productSkcId"]), 100);
+      const skcDaily = pickActivityPriceCents(skc, ["dailyPrice", "dailyPriceCents"]);
+      const skcAct = pickActivityPriceCents(skc, ["activityPrice", "activityPriceCents"]);
+      const skuList = Array.isArray(skc.skuList) ? skc.skuList : [];
+      if (!skuList.length) {
+        rows.push({ skc_id, sku_id: null, sku_ext_code: toNullableString(firstDefined(skc, ["extCode", "skuExtCode", "skcExtCode"]), 200), activity_price_cents: skcAct, daily_price_cents: skcDaily });
+        continue;
+      }
+      for (const sku of skuList) {
+        if (!isRecord(sku)) continue;
+        rows.push({
+          skc_id,
+          sku_id: toNullableString(firstDefined(sku, ["skuId", "productSkuId"]), 100),
+          sku_ext_code: toNullableString(firstDefined(sku, ["extCode", "skuExtCode", "skuCode"]), 200),
+          activity_price_cents: pickActivityPriceCents(sku, ["activityPrice", "activityPriceCents"]) ?? skcAct,
+          daily_price_cents: pickActivityPriceCents(sku, ["dailyPrice", "dailyPriceCents"]) ?? skcDaily,
+        });
+      }
+    }
+    if (!rows.length) rows.push({ skc_id: null, sku_id: null, sku_ext_code: null, activity_price_cents: null, daily_price_cents: null });
+    for (const r of rows) {
+      const row_key = [base.enroll_id || "", r.skc_id || "", r.sku_id || "", base.activity_thematic_id || ""].join("|").slice(0, 300);
+      upsert.run({
+        id: crypto.randomUUID(),
+        tenant_id: ctx.tenant_id,
+        mall_id,
+        site: evt.site || null,
+        stat_date,
+        row_key,
+        ...base,
+        skc_id: r.skc_id,
+        sku_id: r.sku_id,
+        sku_ext_code: r.sku_ext_code,
+        activity_price_cents: r.activity_price_cents,
+        daily_price_cents: r.daily_price_cents,
+        raw_json: null,
+        source_event_id: evt.id,
+      });
+    }
+  }
+}
+
 function parseActivitySnapshot(db, ctx, evt, body) {
+  // 已报名记录分流:/enroll/list 不带筛选返回的 result.list 项带 enrollId(可报库没有)→落独立表,不混入可报快照
+  const rawList = body?.result?.list || body?.data?.list;
+  if (Array.isArray(rawList) && rawList.some((r) => r && r.enrollId != null)) {
+    return parseEnrollRecord(db, ctx, evt, body);
+  }
   const items = pickActivityItems(body, evt);
   if (!items.length) return;
   const upsert = db.prepare(`

@@ -47,6 +47,11 @@ const ACTIVITY_MATCH_RUN_INTERVAL_MS = 30 * 60 * 1000; // 整轮间隔
 const ACTIVITY_MATCH_MAX_THEMATICS = 30; // 每轮最多 match 的活动数(限速)
 const ACTIVITY_MATCH_ROWCOUNT = 10; // 实测 >10 被拒
 const ACTIVITY_MATCH_MAX_SCROLL = 10; // 每活动最多翻页
+// 已报名活动记录:同 /enroll/list 但不带 sessionStatusTag/productSkcIds(=已报名记录);按当前店翻页扫全
+const ENROLL_RECORD_STATE_KEY = "temu_monitor_enroll_record_state";
+const ENROLL_RECORD_RUN_INTERVAL_MS = 30 * 60 * 1000; // 30min/轮
+const ENROLL_RECORD_PAGE_SIZE = 50;
+const ENROLL_RECORD_MAX_PAGES = 60; // 1498/50≈30页,留余量
 // JIT(全托管建议关闭) + VMI(普通备货单) 主动调度：替代桌面端 worker.mjs urgentOrders Playwright 任务。
 // 云端 /v1/jit-vmi-targets 给本租户近 30 天活跃 mall，SW 对每个 mall 调两个 venom 接口。
 const JIT_VMI_STATE_KEY = "temu_monitor_jit_vmi_state";
@@ -216,6 +221,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   sendHeartbeat().catch((e) => console.warn("[sw] heartbeat err", e));
   collectActivityLibraryFromTargets().catch((e) => console.warn("[sw] activity library collect err", e?.message || e));
   collectActivityMatchForCurrentMall().catch((e) => console.warn("[sw] activity match collect err", e?.message || e));
+  collectEnrollRecords().catch((e) => console.warn("[sw] enroll record collect err", e?.message || e));
   collectJitVmiFromTargets().catch((e) => console.warn("[sw] jit/vmi collect err", e?.message || e));
   collectFlowForCurrentMall().catch((e) => console.warn("[sw] flow collect err", e?.message || e));
 });
@@ -586,6 +592,52 @@ async function collectActivityMatchForCurrentMall() {
   }
   await setStorage({ [ACTIVITY_MATCH_STATE_KEY]: { ...state, last_run_at: now, last_success_at: Date.now(), last_thematics: cap.length, last_enqueued: enqueued } });
   return { ok: true, thematics: cap.length, enqueued };
+}
+
+// 已报名活动记录:按当前店翻页调 /enroll/list(不带 sessionStatusTag/productSkcIds=已报名),enqueue 上云。
+// cloud parser 据 list 项的 enrollId 自动分流到 temu_activity_enroll_record(不混可报快照)。
+async function collectEnrollRecords() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", ENROLL_RECORD_STATE_KEY]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
+  const now = Date.now();
+  const state = cfg[ENROLL_RECORD_STATE_KEY] || {};
+  if (state.last_run_at && now - Number(state.last_run_at) < ENROLL_RECORD_RUN_INTERVAL_MS) return { ok: true, skipped: "interval" };
+  const cur = await getCurrentAgentSellerMall();
+  if (!cur) return { ok: false, reason: "no_agentseller_tab_or_mallid" };
+  await setStorage({ [ENROLL_RECORD_STATE_KEY]: { ...state, last_run_at: now } });
+  const site = cur.origin.includes("-us") ? "agentseller-us" : cur.origin.includes("-eu") ? "agentseller-eu" : "agentseller";
+  const url = `${cur.origin}${ACTIVITY_LIBRARY_ENDPOINT}`; // /enroll/list
+  let enqueued = 0;
+  for (let page = 1; page <= ENROLL_RECORD_MAX_PAGES; page++) {
+    const reqBody = JSON.stringify({ pageNo: page, pageSize: ENROLL_RECORD_PAGE_SIZE });
+    let body = null, text = "";
+    try {
+      const resp = await fetch(url, {
+        method: "POST", credentials: "include", cache: "no-store",
+        headers: { "Content-Type": "application/json", mallid: cur.mallId },
+        body: reqBody,
+      });
+      text = await resp.text();
+      body = safeParseJson(text);
+      if (!resp.ok || !body || typeof body !== "object") break;
+    } catch { break; }
+    const list = body?.result?.list || [];
+    if (!list.length) break;
+    await enqueue({
+      kind: "fetch-enroll-record", url,
+      method: "POST", status: 200, ts: Date.now(), site,
+      page: "background/enroll-record", mall_id: cur.mallId,
+      body, bodyText: text.length > 200000 ? null : text, requestBodyText: reqBody, bodySize: text.length,
+      activeSource: "marketing_enroll_record_background",
+    });
+    enqueued++;
+    await bumpStats({ captured_count_delta: 1 });
+    const total = Number(body?.result?.total || 0);
+    if (page * ENROLL_RECORD_PAGE_SIZE >= total) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  await setStorage({ [ENROLL_RECORD_STATE_KEY]: { ...state, last_run_at: now, last_success_at: Date.now(), last_enqueued: enqueued } });
+  return { ok: true, enqueued };
 }
 
 async function collectFlowForCurrentMall() {

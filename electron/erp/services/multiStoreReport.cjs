@@ -727,7 +727,17 @@ function buildActivityList(db, options = {}) {
     cost: a.cost != null && Number(a.cost) > 0 ? Number(a.cost) : null,
     end_at: a.end_at || null, stat_date: a.stat_date || null,
   }));
-  const data = { generated_at: Date.now(), row_count: out.length, rows: out };
+  // 已报名活动:按(店×货号)聚合已报活动数(扩展采的报名记录 temu_activity_enroll_record,每店最新天;排除报名失败=2)。
+  // 表未建(migration 024 未部署)时 optionalAllLocal 返回 [] 不报错。
+  const enrolledRows = optionalAllLocal(db, `
+    WITH le AS (SELECT mall_id, MAX(stat_date) sd FROM cloud.temu_activity_enroll_record WHERE tenant_id = ? AND mall_id <> '' GROUP BY mall_id)
+    SELECT e.mall_id, e.sku_ext_code, e.product_id, COUNT(DISTINCT e.activity_thematic_id) AS enrolled_count
+      FROM cloud.temu_activity_enroll_record e
+      JOIN le ON le.mall_id = e.mall_id AND le.sd = e.stat_date
+     WHERE e.tenant_id = ? AND COALESCE(e.enroll_status, 0) <> 2 AND e.activity_thematic_id IS NOT NULL
+     GROUP BY e.mall_id, e.sku_ext_code`, [tid, tid]);
+  const enrolled = enrolledRows.map((r) => ({ mall_id: r.mall_id, sku_ext_code: r.sku_ext_code || null, product_id: r.product_id || null, count: toNum(r.enrolled_count) }));
+  const data = { generated_at: Date.now(), row_count: out.length, rows: out, enrolled };
   _activityCache.set(key, { data, ts: Date.now() });
   return data;
 }
@@ -1181,6 +1191,101 @@ function buildProductSalesTrend(db, options = {}) {
   return { product_id: productId, rows, row_count: rows.length, source: "cloud" };
 }
 
+// ===== 高价限流清单：被 Temu「高价流量受限」的商品 =====
+// 数据源=抓包 cloud.temu_operation_risk_snapshot(risk_type='high_price_flow')，官方 API 无此数据(价格类零权限)。
+// 被动抓包：只有运营逛过 Temu 限流页的店才有数据；故按「近 N 天出现过」聚合，而非只看最新一天。
+// 流量下降率取自 raw_json.flowDeclineRate；商品基础信息 join 官方物化表 erp_temu_openapi_sku_sales(最新最全)，
+// 申报价从 cloud.temu_sales_snapshot 补(官方表无)。降价建议/目标价抓包为空壳，不提供。
+const _hpfListCache = new Map();
+function buildHighPriceFlowList(db, options = {}) {
+  if (!db) throw new Error("buildHighPriceFlowList: db is required (host mode only)");
+  const attachCloudDb = options.attachCloudDb;
+  if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
+    return { generated_at: Date.now(), row_count: 0, rows: [], attached: false, source: "cloud" };
+  }
+  const includeTest = !!options.includeTest;
+  const days = Math.min(60, Math.max(1, Number(options.days) || 14));
+  const key = (includeTest ? "1" : "0") + ":" + days;
+  if (!options.force) {
+    const c = _hpfListCache.get(key);
+    if (c && Date.now() - c.ts < REPORT_CACHE_TTL_MS) return c.data;
+  }
+  const tid = options.tenantId || DEFAULT_CLOUD_TENANT;
+  // 1) 高价限流：per (mall_id, product_id) 近 days 天最新一条，取流量下降率
+  const limRows = optionalAllLocal(db, `
+    WITH lr AS (
+      SELECT mall_id, product_id, MAX(stat_date) sd
+        FROM cloud.temu_operation_risk_snapshot
+       WHERE tenant_id = ? AND risk_type = 'high_price_flow'
+         AND product_id IS NOT NULL AND product_id <> ''
+         AND stat_date >= date('now', ?)
+       GROUP BY mall_id, product_id)
+    SELECT r.mall_id, r.product_id, lr.sd AS last_seen_date,
+           MAX(r.skc_id) skc_id,
+           MAX(CAST(json_extract(r.raw_json, '$.flowDeclineRate') AS REAL)) AS decline_rate
+      FROM cloud.temu_operation_risk_snapshot r
+      JOIN lr ON lr.mall_id = r.mall_id AND lr.product_id = r.product_id AND lr.sd = r.stat_date
+     WHERE r.risk_type = 'high_price_flow'
+     GROUP BY r.mall_id, r.product_id`, [tid, `-${days} days`]);
+  if (!limRows.length) {
+    const data = { generated_at: Date.now(), row_count: 0, rows: [], source: "cloud" };
+    _hpfListCache.set(key, { data, ts: Date.now() });
+    return data;
+  }
+  const pids = [...new Set(limRows.map((r) => String(r.product_id)))].filter(Boolean);
+  const ph = pids.map(() => "?").join(",");
+  // 2) 商品基础信息(官方物化表,by mall_id+product_id 聚合 SPU)：标题/缩略图/货号/可用库存/今日·7天销量
+  const offRows = optionalAllLocal(db, `
+    SELECT mall_id, product_id, MAX(title) title, MAX(thumb_url) thumb,
+           GROUP_CONCAT(DISTINCT ext_code) sku_codes,
+           SUM(COALESCE(warehouse_stock, 0)) stock,
+           SUM(COALESCE(today_sales, 0)) today_sales,
+           SUM(COALESCE(last7d_sales, 0)) last7d_sales
+      FROM erp_temu_openapi_sku_sales
+     WHERE product_id IN (${ph})
+     GROUP BY mall_id, product_id`, pids);
+  const offMap = new Map(offRows.map((o) => [o.mall_id + "|" + o.product_id, o]));
+  // 3) 申报价 + 标题/缩略图兜底(cloud temu_sales_snapshot 每商品最新天，取最低申报价)
+  const cloudRows = optionalAllLocal(db, `
+    WITH ls AS (SELECT product_id, MAX(stat_date) sd FROM cloud.temu_sales_snapshot WHERE tenant_id = ? AND product_id IN (${ph}) GROUP BY product_id)
+    SELECT s.product_id, MIN(NULLIF(s.declared_price_cents, 0)) declared_cents, MAX(s.title) title, MAX(s.thumb_url) thumb
+      FROM cloud.temu_sales_snapshot s JOIN ls ON ls.product_id = s.product_id AND ls.sd = s.stat_date
+     WHERE s.product_id IN (${ph}) GROUP BY s.product_id`, [tid, ...pids, ...pids]);
+  const cloudMap = new Map(cloudRows.map((c) => [String(c.product_id), c]));
+  // 4) 店铺信息(店号/店名/负责人)
+  const malls = optionalAllLocal(db, `SELECT mall_id, store_code, mall_name, owner, status FROM erp_temu_malls`, []);
+  const mallMap = new Map(malls.map((m) => [m.mall_id, m]));
+  const out = [];
+  for (const r of limRows) {
+    const m = mallMap.get(r.mall_id);
+    if (!includeTest && m && m.status === "test") continue;
+    const off = offMap.get(r.mall_id + "|" + r.product_id);
+    const cl = cloudMap.get(String(r.product_id));
+    out.push({
+      mall_id: r.mall_id,
+      store_code: m ? m.store_code || null : null,
+      mall_name: m ? m.mall_name || null : null,
+      owner: m ? m.owner || null : null,
+      product_id: r.product_id,
+      skc_id: r.skc_id || null,
+      title: (off && off.title) || (cl && cl.title) || null,
+      thumb: (off && off.thumb) || (cl && cl.thumb) || null,
+      sku_codes: off && off.sku_codes ? off.sku_codes : null,
+      decline_rate: r.decline_rate == null ? null : Number(r.decline_rate),
+      last_seen_date: r.last_seen_date || null,
+      declared_price: cl && cl.declared_cents ? Number(cl.declared_cents) / 100 : null,
+      stock: off ? toNum(off.stock) : null,
+      today_sales: off ? toNum(off.today_sales) : null,
+      last7d_sales: off ? toNum(off.last7d_sales) : null,
+    });
+  }
+  // 默认按流量下降率降序(限得最狠的排前)，其次最近限流日新的在前
+  out.sort((a, b) => (b.decline_rate || 0) - (a.decline_rate || 0) || String(b.last_seen_date || "").localeCompare(String(a.last_seen_date || "")));
+  const data = { generated_at: Date.now(), row_count: out.length, rows: out, source: "cloud" };
+  _hpfListCache.set(key, { data, ts: Date.now() });
+  return data;
+}
+
 // 商品运营面板:优先读物化缓存表(cron 预聚合,毫秒),无/未跑则实时兜底(慢);官方源走 official 版
 function getProductPanelFast(db, options = {}) {
   if (useOfficialReports(options)) {
@@ -1489,9 +1594,198 @@ function buildOpenapiQc(db, options = {}) {
   return { generated_at: Date.now(), row_count: out.length, rows: out, source: "official" };
 }
 
+// 商品品质看板(运营工作台「商品品质」Tab):读 cloud 抓包(Temu 后台「商品品质看板」/main/quality/dashboard
+// 的 supplyChain/qualityMetrics 系列接口),解析品质分 + 售后率 + 售后/差评问题分布 + 店铺级 90 天指标。
+// ⚠️数据是被动抓包(谁在后台打开过该店品质看板才抓得到)→只覆盖被浏览过的店,其余店为空(非 bug)。
+// 一行 = 一个商品(按 mall_id+productId 去重,保留最新一次抓包)。纯读 cloud.capture_events,不写。
+const QUALITY_PAGEQUERY_PATH = "/bg-luna-agent-seller/goods/quality/supplyChain/qualityMetrics/pageQuery"; // 商品级列表
+const QUALITY_SHOPMETRIC_PATH = "/bg-luna-agent-seller/goods/quality/supplyChain/qualityMetrics/query";   // 店铺级 90 天指标
+// Temu 售后/差评问题名常见英文 → 中文(problAfsItemList 多为英文,problRevItemList 多为中文,未命中保留原文)
+const QUALITY_PROBLEM_ZH = {
+  "Damaged or unusable goods": "货物损坏/无法使用",
+  "Item description discrepancy": "描述不符",
+  "Quality issue": "质量问题",
+  "Missing parts or accessories": "零件/配件缺失",
+  "Wrong item received": "发错货",
+  "Wrong item": "发错货",
+  "Size issue": "尺寸问题",
+  "Functional issue": "功能问题",
+  "Poor quality": "质量差",
+};
+const _qNum = (v) => { if (v == null || v === "") return null; const n = Number(v); return Number.isFinite(n) ? n : null; };
+const _qParse = (s) => { if (!s) return null; try { return JSON.parse(s); } catch { return null; } };
+// 问题分布数组(problemName + quantity) → 摘要文本「描述不符×4; 货损×1」;空返回 null
+function summarizeQualityProblems(list) {
+  if (!Array.isArray(list)) return null;
+  const parts = [];
+  for (const p of list) {
+    if (!p || !p.problemName) continue;
+    const name = QUALITY_PROBLEM_ZH[p.problemName] || p.problemName;
+    const q = Number(p.quantity);
+    parts.push(Number.isFinite(q) && q > 0 ? `${name}×${q}` : name);
+  }
+  return parts.length ? parts.join("; ") : null;
+}
+function buildQualityPanel(db, options = {}) {
+  const attachCloudDb = options.attachCloudDb;
+  if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
+    return { generated_at: Date.now(), row_count: 0, rows: [], shops: [], attached: false, source: "cloud" };
+  }
+  const includeTest = !!options.includeTest;
+  // 店铺字典:mall_id → 店名/店号/负责人/test 标记(品质数据按 Temu mall_id 关联)
+  const dict = new Map();
+  for (const m of readMallDictionary(db)) {
+    dict.set(String(m.mall_id), { store_code: m.store_code || null, mall_name: m.mall_name || null, owner: m.owner || null, status: m.status || null });
+  }
+  const isTestMall = (mallId) => (dict.get(String(mallId))?.status === "test");
+
+  // 1) 商品级品质列表:pageQuery 抓包(量小,全取),按 received_at 升序解析,同 mall+productId 后写覆盖=最新
+  const pageRows = optionalAllLocal(db, `
+    SELECT mall_id, body_json, received_at
+      FROM cloud.capture_events
+     WHERE url_path = ? AND mall_id IS NOT NULL AND mall_id <> ''
+     ORDER BY received_at ASC
+  `, [QUALITY_PAGEQUERY_PATH]);
+  const byKey = new Map();
+  for (const ev of pageRows) {
+    if (!includeTest && isTestMall(ev.mall_id)) continue;
+    const j = _qParse(ev.body_json);
+    const items = j && j.result && Array.isArray(j.result.pageItems) ? j.result.pageItems : [];
+    for (const it of items) {
+      const pid = it.productId != null ? String(it.productId) : (it.goodsId != null ? String(it.goodsId) : null);
+      if (!pid) continue;
+      byKey.set(String(ev.mall_id) + "|" + pid, { mall_id: String(ev.mall_id), received_at: ev.received_at, it });
+    }
+  }
+  const rows = [];
+  for (const { mall_id, received_at, it } of byKey.values()) {
+    const d = dict.get(mall_id) || {};
+    rows.push({
+      mall_id, store_code: d.store_code || null, mall_name: d.mall_name || null, owner: d.owner || null,
+      product_id: it.productId != null ? String(it.productId) : null,
+      goods_id: it.goodsId != null ? String(it.goodsId) : null,
+      product_name: it.productName || null,
+      image_url: it.carouselImageUrl || null,
+      category_name: it.categoryName || null,
+      afs_score: _qNum(it.goodsAfsScore),
+      afs_order_rate: _qNum(it.qltyAfsOrdrRate),
+      afs_order_cnt: _qNum(it.qltyAfsOrdCnt),
+      afs_problems: summarizeQualityProblems(it.problAfsItemList),
+      rev_cnt: _qNum(it.revCnt),
+      avg_rev_score: _qNum(it.avgRevScr),
+      rev_problems: summarizeQualityProblems(it.problRevItemList),
+      captured_at: received_at || null,
+    });
+  }
+  // 品质分升序(最差排前),null(无分)排最后
+  rows.sort((a, b) => {
+    if (a.afs_score == null && b.afs_score == null) return 0;
+    if (a.afs_score == null) return 1;
+    if (b.afs_score == null) return -1;
+    return a.afs_score - b.afs_score;
+  });
+
+  // 2) 店铺级 90 天指标:query 抓包,每店保留最新一条
+  const shopRows = optionalAllLocal(db, `
+    SELECT mall_id, body_json, received_at
+      FROM cloud.capture_events
+     WHERE url_path = ? AND mall_id IS NOT NULL AND mall_id <> ''
+     ORDER BY received_at ASC
+  `, [QUALITY_SHOPMETRIC_PATH]);
+  const shopByMall = new Map();
+  for (const ev of shopRows) {
+    if (!includeTest && isTestMall(ev.mall_id)) continue;
+    const j = _qParse(ev.body_json);
+    const r = j && j.result ? j.result : null;
+    if (!r) continue;
+    const d = dict.get(String(ev.mall_id)) || {};
+    shopByMall.set(String(ev.mall_id), {
+      mall_id: String(ev.mall_id), store_code: d.store_code || null, mall_name: d.mall_name || null, owner: d.owner || null,
+      afs_rate_90d: _qNum(r.qltyAfsOrdrRate90d),
+      avg_score_90d: _qNum(r.avgScore90d),
+      expect_loss: _qNum(r.expectLoss),
+      captured_at: ev.received_at || null,
+    });
+  }
+  const shops = Array.from(shopByMall.values());
+
+  return { generated_at: Date.now(), row_count: rows.length, rows, shops, source: "cloud", attached: true };
+}
+
+// raw_json（同步时存的整条 review item）里捞 erp 表没单列存的字段：是否福利评价 + 晒图 URL。
+// 福利评价 = 商家给好处换的好评，需要在前端标注区分；晒图是 C 端买家秀，一般是公开 CDN 图。
+function parseReviewExtras(rawJson) {
+  if (!rawJson) return { benefit: false, pictures: [] };
+  let obj;
+  try { obj = JSON.parse(rawJson); } catch { return { benefit: false, pictures: [] }; }
+  const benefit = obj && (obj.isBenefitReview === true || obj.isBenefitReview === 1);
+  const raw = obj && (obj.reviewPictures || obj.review_pictures || obj.reviewImageList || obj.images);
+  const pictures = [];
+  if (Array.isArray(raw)) {
+    for (const p of raw) {
+      if (typeof p === "string") {
+        if (/^https?:/i.test(p)) pictures.push(p);
+      } else if (p && typeof p === "object") {
+        const u = p.url || p.imageUrl || p.thumbUrl || p.picUrl || p.image;
+        if (typeof u === "string" && /^https?:/i.test(u)) pictures.push(u);
+      }
+      if (pictures.length >= 9) break;
+    }
+  }
+  return { benefit: !!benefit, pictures };
+}
+
+// 运营工作台：商品评价（Chrome 扩展抓 /bg-luna-agent-seller/review/pageQuery → cloud → erp_temu_reviews）。
+// 不走官方 API（官方无评价接口）。默认全部评价按时间倒序，前端按店铺/评分档/关键词筛选。
+function buildReviews(db, options = {}) {
+  const includeTest = !!options.includeTest;
+  const limit = Math.min(10000, Math.max(50, Number(options.limit) || 3000));
+  const rows = optionalAllLocal(db, `
+    SELECT r.platform_shop_id AS mall_id, m.store_code, m.mall_name,
+           r.review_id, r.product_id, r.product_skc_id, r.goods_id, r.goods_name,
+           r.score, r.comment, r.spec_summary, r.category_path,
+           r.status, r.on_sale, r.created_at_ts, r.raw_json
+      FROM erp_temu_reviews r
+      LEFT JOIN erp_temu_malls m ON m.mall_id = r.platform_shop_id
+     WHERE 1=1
+       ${includeTest ? "" : "AND COALESCE(m.status,'active') <> 'test'"}
+     ORDER BY r.created_at_ts DESC, r.updated_at DESC
+     LIMIT ?
+  `, [limit]);
+  let sum = 0;
+  let scored = 0;
+  let bad = 0;
+  let withPic = 0;
+  const out = rows.map((r) => {
+    const score = r.score == null ? null : toNum(r.score);
+    if (score != null) { sum += score; scored += 1; if (score <= 3) bad += 1; }
+    const extras = parseReviewExtras(r.raw_json);
+    if (extras.pictures.length) withPic += 1;
+    return {
+      mall_id: r.mall_id, store_code: r.store_code || null, mall_name: r.mall_name || null,
+      review_id: r.review_id, product_id: r.product_id || null, product_skc_id: r.product_skc_id || null,
+      goods_id: r.goods_id || null, goods_name: r.goods_name || null,
+      score, comment: r.comment || null, spec_summary: r.spec_summary || null, category_path: r.category_path || null,
+      status: r.status == null ? null : toNum(r.status), on_sale: r.on_sale == null ? null : toNum(r.on_sale),
+      created_at_ts: r.created_at_ts == null ? null : toNum(r.created_at_ts),
+      is_benefit: extras.benefit, pictures: extras.pictures,
+    };
+  });
+  const summary = {
+    total: out.length,
+    avg_score: scored ? Number((sum / scored).toFixed(2)) : null,
+    bad_count: bad,
+    bad_rate: scored ? Number(((bad / scored) * 100).toFixed(1)) : null,
+    pic_count: withPic,
+  };
+  return { generated_at: Date.now(), row_count: out.length, rows: out, summary, source: "extension" };
+}
+
 module.exports = {
   buildMultiStoreReport,
   buildOpenapiQc,
+  buildQualityPanel,
+  buildReviews,
   fetchQcFlawImages,
   buildPurchaseReport,
   prewarmMultiStoreReport,
@@ -1503,6 +1797,7 @@ module.exports = {
   buildSalesTrend,
   buildProductPanel,
   getProductPanelFast,
+  buildHighPriceFlowList,
   buildProductSalesTrend,
   setMallOwner,
   listOpTaskState,
