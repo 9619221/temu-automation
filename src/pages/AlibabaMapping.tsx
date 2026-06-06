@@ -848,7 +848,13 @@ export default function AlibabaMapping() {
         rows,
       });
       setUrlSpecSearchText("");
-      const initialSpecIds = values.externalSpecId ? [values.externalSpecId] : (rows[0] ? [specRowSelectId(rows[0])] : []);
+      // 预选规格：表单里已有的 specId 必须真出现在本次解析的规格行里才复用（编辑场景）；
+      // 否则——例如旧记录是被 offerId 顶替的假 specId、或这次解析退化成了整款行——
+      // 落到第一行，避免出现「选中项不存在、点确认却报请先选择规格」。
+      const presetSpecId = values.externalSpecId;
+      const initialSpecIds = presetSpecId && rows.some((row) => specRowSelectId(row) === presetSpecId)
+        ? [presetSpecId]
+        : (rows[0] ? [specRowSelectId(rows[0])] : []);
       const initialPlatformQty = toPositiveInteger(values.platformQty, 1);
       setSelectedUrlSpecIds(initialSpecIds);
       setUrlSpecQtyBySpecId(Object.fromEntries(initialSpecIds.map((id) => [id, initialPlatformQty])));

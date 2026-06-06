@@ -7215,7 +7215,14 @@ function upsertSku1688SourceRow(db, payload = {}, actor = {}) {
   const now = nowIso();
   const externalOfferId = requireString(payload.externalOfferId || payload.external_offer_id, "externalOfferId");
   const isNoSpec = payload.isNoSpec === true || payload.is_no_spec === 1 || payload.is_no_spec === true;
-  const externalSpecId = optional1688SpecId(payload.externalSpecId || payload.external_spec_id, { allowEmpty: isNoSpec, context: "供应商映射" });
+  const externalSkuId = optionalString(payload.externalSkuId || payload.external_sku_id) || "";
+  let externalSpecId = optional1688SpecId(payload.externalSpecId || payload.external_spec_id, { allowEmpty: isNoSpec, context: "供应商映射" });
+  // 护栏：specId 与 skuId 同值＝上游（遨虾/聚水潭/网页推断）没拿到真 cargoSkuId、拿 skuId 顶替的伪规格，
+  // 1688 下单接口会拒。落库时就规整为「无规格」（清空 specId → is_no_spec=1），下单走 offerId-only，
+  // 把伪规格挡在入库环节，而不是留到下单才被护栏拦下。这是所有手动/候选写入的唯一落库点，一处管多路径。
+  if (externalSpecId && externalSkuId && externalSpecId === externalSkuId) {
+    externalSpecId = "";
+  }
   const mappingGroupId = optionalString(payload.mappingGroupId || payload.mapping_group_id) || `map_${sku.id}_${externalOfferId}`;
   const row = {
     id: optionalString(payload.id) || createId("sku_1688"),
@@ -7223,7 +7230,7 @@ function upsertSku1688SourceRow(db, payload = {}, actor = {}) {
     sku_id: sku.id,
     mapping_group_id: mappingGroupId,
     external_offer_id: externalOfferId,
-    external_sku_id: optionalString(payload.externalSkuId || payload.external_sku_id) || "",
+    external_sku_id: externalSkuId,
     external_spec_id: externalSpecId || "",
     // 最终规格为空即标记无规格（与 allowEmpty 自洽：有规格则 0，确无规格则 1）。
     is_no_spec: externalSpecId ? 0 : 1,
@@ -11246,6 +11253,13 @@ async function refresh1688ProductDetailAction({ db, services, payload, actor }) 
       }
     }
   }
+  // 无 SKU 商品(单规格)：与 preview_1688_url_specs 对称——接口成功拿到商品但无任何可选规格时，
+  // 注入「整款（无规格）」默认项，让采购中心「同步规格」也能绑定无规格、下单走 offerId-only
+  // （否则 skuOptions 落空、前端弹窗打不开、无法绑定）。fallback 失败仍走下方原有报错逻辑。
+  if (detail && !hasSyncableSkuOptions(detail) && !usedFallbackDetail
+    && optionalString(detail.productTitle || detail.externalOfferId)) {
+    detail.skuOptions = [...(Array.isArray(detail.skuOptions) ? detail.skuOptions : []), buildNoSpec1688Option(detail, offerId)];
+  }
   const selectedSku = pickSkuOption(detail, {
     ...payload,
     externalSkuId: payload.externalSkuId || payload.external_sku_id || candidate.external_sku_id,
@@ -13683,6 +13697,9 @@ async function fetch1688WebSkuOptions(offerId) {
 }
 
 async function resolve1688NumericSkuMapping(db, mapping = {}) {
+  // 无规格映射(is_no_spec=1)下单走 offerId-only，绝不能反查回写 specId（否则把整款单变成指定规格单、
+  // 破坏 offerId-only）。即使 external_sku_id 残留了历史数字值，也直接跳过反查。
+  if (mapping.is_no_spec === 1 || mapping.is_no_spec === true || mapping.isNoSpec === true) return null;
   const offerId = optionalString(mapping.external_offer_id || mapping.externalOfferId);
   const skuId = optionalString(mapping.external_sku_id || mapping.externalSkuId);
   const specId = optionalString(mapping.external_spec_id || mapping.externalSpecId);

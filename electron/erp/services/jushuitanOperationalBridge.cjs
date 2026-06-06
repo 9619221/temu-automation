@@ -370,14 +370,14 @@ class JushuitanOperationalBridge {
       INSERT INTO erp_sku_1688_sources (
         id, account_id, sku_id, external_offer_id, external_sku_id, external_spec_id,
         supplier_name, product_title, product_url, image_url, unit_price, moq,
-        lead_days, logistics_fee, status, is_default, source_payload_json,
+        lead_days, logistics_fee, status, is_default, is_no_spec, source_payload_json,
         created_by, created_at, updated_at, mapping_group_id, platform_sku_name,
         our_qty, platform_qty, remark
       )
       VALUES (
         @id, @account_id, @sku_id, @external_offer_id, @external_sku_id, @external_spec_id,
         @supplier_name, @product_title, @product_url, @image_url, @unit_price, @moq,
-        @lead_days, @logistics_fee, @status, @is_default, @source_payload_json,
+        @lead_days, @logistics_fee, @status, @is_default, @is_no_spec, @source_payload_json,
         @created_by, @created_at, @updated_at, @mapping_group_id, @platform_sku_name,
         @our_qty, @platform_qty, @remark
       )
@@ -390,6 +390,7 @@ class JushuitanOperationalBridge {
         unit_price = COALESCE(excluded.unit_price, erp_sku_1688_sources.unit_price),
         moq = COALESCE(excluded.moq, erp_sku_1688_sources.moq),
         status = excluded.status,
+        is_no_spec = excluded.is_no_spec,
         source_payload_json = excluded.source_payload_json,
         platform_sku_name = COALESCE(NULLIF(excluded.platform_sku_name, ''), erp_sku_1688_sources.platform_sku_name),
         our_qty = CASE WHEN @ratio_from_jst = 1 THEN excluded.our_qty ELSE erp_sku_1688_sources.our_qty END,
@@ -658,13 +659,19 @@ class JushuitanOperationalBridge {
     const jstOurQty = toNumber(first(raw, ["base_qty", "our_qty"]));
     const jstPlatformQty = toNumber(first(raw, ["pack_qty", "plat_map_qty", "platform_qty"]));
     const ratioFromJst = jstOurQty != null || jstPlatformQty != null ? 1 : 0;
+    const jstExternalSkuId = firstText(raw, ["plat_sku_id", "external_sku_id"]) || "";
+    let jstExternalSpecId = firstText(raw, ["plat_spec_id", "external_spec_id"]) || "";
+    // 与手动绑定落库口径(ipc.cjs upsertSku1688SourceRow)一致:spec 与 sku 同值=伪 cargoSkuId,规整为无规格;
+    // plat_spec_id 为空(单规格/无 SKU 商品)也按无规格处理。否则下单时 noSpec=false 会对空 spec 抛「缺少 1688 规格」、
+    // 或被「specId 与 skuId 同值」护栏拦下。is_no_spec 由 external_spec_id 是否为空反推,与 7229 自洽。
+    if (jstExternalSpecId && jstExternalSkuId && jstExternalSpecId === jstExternalSkuId) jstExternalSpecId = "";
     this.upsertSku1688SourceStmt.run({
       id: stableId("sku1688", `${skuId}:${offerId}:${firstText(raw, ["plat_sku_id"])}:${firstText(raw, ["plat_spec_id"])}`),
       account_id: accountId,
       sku_id: skuId,
       external_offer_id: offerId,
-      external_sku_id: firstText(raw, ["plat_sku_id", "external_sku_id"]) || "",
-      external_spec_id: firstText(raw, ["plat_spec_id", "external_spec_id"]) || "",
+      external_sku_id: jstExternalSkuId,
+      external_spec_id: jstExternalSpecId,
       supplier_name: firstText(raw, ["supplier_name", "manage_name_1688"]) || null,
       product_title: firstText(raw, ["name", "platform_sku_name"]) || null,
       product_url: firstText(raw, ["url", "platpromotionurl", "cpsUrl"]) || null,
@@ -675,6 +682,7 @@ class JushuitanOperationalBridge {
       logistics_fee: null,
       status: isInactive(raw) ? "inactive" : "active",
       is_default: /是|true|1/i.test(firstText(raw, ["is_default_supplier", "is_default"])) ? 1 : 0,
+      is_no_spec: jstExternalSpecId ? 0 : 1,
       source_payload_json: stringify(raw),
       created_by: null,
       created_at: now,

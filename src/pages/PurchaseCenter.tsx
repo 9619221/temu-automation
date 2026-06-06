@@ -175,6 +175,7 @@ type PurchaseRequestDrawerMode = "collaboration" | "imageSearch";
 interface ExternalSkuOptionRow {
   externalSkuId?: string | null;
   externalSpecId?: string | null;
+  isNoSpec?: boolean;
   specText?: string | null;
   imageUrl?: string | null;
   price?: number | null;
@@ -1668,11 +1669,15 @@ function shouldIgnorePurchaseOrderRowClick(target: EventTarget | null) {
 function candidateSpecRows(candidate?: SourcingCandidateRow | null): BindingSpecRow[] {
   const options = Array.isArray(candidate?.externalSkuOptions) ? candidate.externalSkuOptions : [];
   return options
-    .filter((item) => item.externalSpecId)
+    .filter((item) => item.externalSpecId || item.isNoSpec)
     .map((item, index) => ({
       ...item,
-      externalSpecId: String(item.externalSpecId),
-      key: `${item.externalSpecId || ""}:${item.externalSkuId || ""}:${index}`,
+      externalSpecId: String(item.externalSpecId || ""),
+      isNoSpec: Boolean(item.isNoSpec),
+      // 选中键统一用 key：整款（无规格）行 externalSpecId='' 不能作键，否则选不中、绑定按钮恒灰。
+      key: item.isNoSpec
+        ? `__nospec__:${index}`
+        : `${item.externalSpecId || ""}:${item.externalSkuId || ""}:${index}`,
     }));
 }
 
@@ -2863,7 +2868,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     return specBindingRows.filter((row) => normalizePurchaseSearch(specRowSearchText(row)).includes(needle));
   }, [specBindingRows, specBindingSearchText]);
   const selectedBindingSpec = useMemo(
-    () => specBindingRows.find((row) => row.externalSpecId === selectedBindingSpecId) || null,
+    () => specBindingRows.find((row) => row.key === selectedBindingSpecId) || null,
     [selectedBindingSpecId, specBindingRows],
   );
   const specBindingColumns = useMemo<ColumnsType<BindingSpecRow>>(() => [
@@ -5620,7 +5625,11 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
   const openSpecBindingDialog = (candidate: SourcingCandidateRow, prId?: string | null) => {
     const rows = candidateSpecRows(candidate);
     setSpecBindingDialog({ candidate, prId: prId || candidate.prId || detailPr?.id || null });
-    setSelectedBindingSpecId(candidate.externalSpecId || rows[0]?.externalSpecId || null);
+    // 选中键统一用 row.key：优先复用候选已绑的 specId（须真在本次行里），否则落第一行（含整款无规格行）。
+    const presetKey = candidate.externalSpecId
+      ? rows.find((row) => row.externalSpecId === candidate.externalSpecId)?.key
+      : null;
+    setSelectedBindingSpecId(presetKey || rows[0]?.key || null);
     setSpecBindingSearchText("");
     setBindingOurQty(1);
     setBindingPlatformQty(1);
@@ -5671,6 +5680,8 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         skuId: bindingPr?.skuId || undefined,
         externalSkuId: selectedBindingSpec.externalSkuId || undefined,
         externalSpecId: selectedBindingSpec.externalSpecId,
+        // 整款（无规格）行：显式传 isNoSpec，后端 allowEmpty 接住空 specId、落 is_no_spec=1、下单走 offerId-only。
+        isNoSpec: selectedBindingSpec.isNoSpec === true || selectedBindingSpec.externalSpecId === "",
         unitPrice: selectedBindingSpec.price ?? specBindingCandidate.unitPrice,
         supplierName: specBindingCandidate.supplierName || undefined,
         productTitle: specBindingCandidate.productTitle || undefined,
@@ -8589,7 +8600,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
           />
           <Table<BindingSpecRow>
             size="small"
-            rowKey="externalSpecId"
+            rowKey="key"
             columns={specBindingColumns}
             dataSource={filteredSpecBindingRows}
             pagination={{ pageSize: 8, hideOnSinglePage: true }}
@@ -8600,7 +8611,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               onChange: (keys) => setSelectedBindingSpecId(String(keys[0] || "")),
             }}
             onRow={(row) => ({
-              onClick: () => setSelectedBindingSpecId(row.externalSpecId),
+              onClick: () => setSelectedBindingSpecId(row.key),
             })}
           />
           <Row gutter={12}>

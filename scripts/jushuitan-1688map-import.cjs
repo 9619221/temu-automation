@@ -57,13 +57,13 @@ function main() {
     INSERT INTO erp_sku_1688_sources (
       id, account_id, sku_id, external_offer_id, external_sku_id, external_spec_id,
       supplier_name, product_title, product_url, image_url, unit_price, moq,
-      lead_days, logistics_fee, status, is_default, source_payload_json,
+      lead_days, logistics_fee, status, is_default, is_no_spec, source_payload_json,
       created_by, created_at, updated_at, mapping_group_id, platform_sku_name,
       our_qty, platform_qty, remark
     ) VALUES (
       @id, @account_id, @sku_id, @external_offer_id, @external_sku_id, @external_spec_id,
       @supplier_name, @product_title, @product_url, @image_url, NULL, @moq,
-      NULL, NULL, 'active', @is_default, @source_payload_json,
+      NULL, NULL, 'active', @is_default, @is_no_spec, @source_payload_json,
       NULL, @created_at, @updated_at, '', @platform_sku_name,
       @our_qty, @platform_qty, @remark
     )
@@ -94,7 +94,10 @@ function main() {
       if (!hit) { stats.unmatched++; continue; }
 
       const extSku = s(r.plat_sku_id);
-      const extSpec = s(r.plat_spec_id);
+      let extSpec = s(r.plat_spec_id);
+      // 与落库口径(ipc.cjs:7229)一致:spec 与 sku 同值=伪 cargoSkuId 规整为无规格,plat_spec_id 空也按无规格;
+      // id 与 unique key 都基于 extSpec,故在算 id 前规整,保证两者一致、重跑不撞 UNIQUE。
+      if (extSpec && extSku && extSpec === extSku) extSpec = "";
       const acct = hit.account_id == null ? "" : String(hit.account_id);
       const id = "jst:1688src:" + crypto
         .createHash("sha1")
@@ -114,6 +117,7 @@ function main() {
         external_offer_id: offer,
         external_sku_id: extSku,
         external_spec_id: extSpec,
+        is_no_spec: extSpec ? 0 : 1,
         supplier_name: s(r.supplier_name) || s(r.manage_name_1688) || null,
         product_title: s(r.name) || null,
         product_url: s(r.url) || s(r.platpromotionurl) || s(r.cpsUrl) || null,
