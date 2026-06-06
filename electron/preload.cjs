@@ -133,6 +133,7 @@ function createImageStudioApi(profile) {
     supervisorPoll: withProfile((jobId) => ipcRenderer.invoke("image-studio:supervisor-poll", jobId)),
     supervisorCancel: withProfile((jobId) => ipcRenderer.invoke("image-studio:supervisor-cancel", jobId)),
     supervisorFetchImage: withProfile((payload) => ipcRenderer.invoke("image-studio:supervisor-fetch-image", payload)),
+    supervisorRegen: withProfile((payload) => ipcRenderer.invoke("image-studio:supervisor-regen", payload)),
   };
 }
 

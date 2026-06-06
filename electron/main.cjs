@@ -5864,6 +5864,8 @@ ipcMain.handle("image-studio:supervisor-start", async (_event, payload) => {
     skipAssetLibrary: payload?.skipAssetLibrary === true ? true : undefined,
     salesRegion: typeof payload?.salesRegion === "string" && payload.salesRegion ? payload.salesRegion : "us",
     imageLanguage: typeof payload?.imageLanguage === "string" && payload.imageLanguage ? payload.imageLanguage : "en",
+    imageSize: typeof payload?.imageSize === "string" && payload.imageSize ? payload.imageSize : undefined,
+    imageTypes: Array.isArray(payload?.imageTypes) && payload.imageTypes.length ? payload.imageTypes : undefined,
   };
   return imageStudioJson("/api/agent/supervisor", {
     method: "POST",
@@ -5904,6 +5906,24 @@ ipcMain.handle("image-studio:supervisor-fetch-image", async (_event, payload) =>
     try { await resp.arrayBuffer(); } catch {}
   }
   return { slot, dataUrl: null };
+});
+
+// 方案确认后续跑生图：把 review_passed 阶段就绪的 imagePrompts 按 shotOrder 生成图（走云端 /api/agent/regen）
+ipcMain.handle("image-studio:supervisor-regen", async (_event, payload) => {
+  const jobId = typeof payload?.jobId === "string" ? payload.jobId : "";
+  if (!SUPERVISOR_JOB_ID_RE.test(jobId)) {
+    throw new Error("非法 jobId");
+  }
+  const shots = Array.isArray(payload?.shots) ? payload.shots.filter((n) => Number.isInteger(n)) : [];
+  const productReferences = Array.isArray(payload?.productReferences) ? payload.productReferences : [];
+  if (shots.length === 0 || productReferences.length === 0) {
+    throw new Error("缺少 shots 或 productReferences");
+  }
+  return imageStudioJson("/api/agent/regen", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jobId, shots, productReferences }),
+  });
 });
 
 ipcMain.handle("image-studio:start-generate", async (event, payload) => {
