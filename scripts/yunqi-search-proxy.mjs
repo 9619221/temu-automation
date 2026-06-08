@@ -52,11 +52,18 @@ async function login(page, account, password) {
   if (!ok) throw new Error("登录失败：未拿到 token");
 }
 
+let _loginPromise = null;
 async function ensureBrowser() {
   if (_ready && _page) {
     _lastUsed = Date.now();
     return _page;
   }
+  // 并发锁：多个请求同时到达时只登录一次
+  if (_loginPromise) return _loginPromise;
+  _loginPromise = _doEnsureBrowser();
+  try { return await _loginPromise; } finally { _loginPromise = null; }
+}
+async function _doEnsureBrowser() {
   log("启动浏览器...");
   if (_browser) try { await _browser.close(); } catch {}
   _browser = await chromium.launch({ headless: true, args: ["--no-sandbox", "--disable-blink-features=AutomationControlled"] });
@@ -108,14 +115,13 @@ async function ensureBrowser() {
   return _page;
 }
 
-async function doSearch(params) {
-  const page = await ensureBrowser();
-  const result = await page.evaluate(async (p) => {
+async function doSearchOnce(page, params) {
+  return page.evaluate(async (p) => {
     const ls = {}; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); ls[k] = localStorage.getItem(k); }
     const cookie = document.cookie || ""; let token = ""; const m = cookie.match(/(?:^|;\s*)token=([^;]+)/); if (m) token = m[1];
     if (!token) for (const [k, v] of Object.entries(ls)) { if (/token|auth/i.test(k) && String(v).includes("eyJ")) { token = String(v).replace(/^"|"$/g, ""); break; } }
     const body = {
-      from: p.from || 0, size: p.size || 24,
+      from: p.from || 0, size: p.size || 48,
       sort: p.sort || [{ daily_sales: "desc" }],
       ware_house_type: p.ware_house_type ?? 0,
       regions: [], region: 0, ids: [], mall_ids: [], opt_ids: p.opt_ids || [], tags: [], brands: [],
@@ -130,12 +136,21 @@ async function doSearch(params) {
     const json = await res.json();
     return { code: json?.code, message: json?.message, total: json?.data?.total || 0, items: json?.data?.data || [] };
   }, params);
+}
+
+async function doSearch(params) {
+  const page = await ensureBrowser();
+  let result = await doSearchOnce(page, params);
+
+  // code=1 或 401 = session 过期，自动重连一次
+  if (result.code !== 0 && (result.code === 1 || result.code === 401 || (result.message || "").includes("登录"))) {
+    log("搜索返回 code=" + result.code + "，自动重连...");
+    _ready = false;
+    const newPage = await ensureBrowser();
+    result = await doSearchOnce(newPage, params);
+  }
 
   if (result.code !== 0) {
-    if (result.code === 401 || (result.message || "").includes("登录")) {
-      _ready = false;
-      throw new Error("session 过期");
-    }
     throw new Error(`API error: code=${result.code} msg=${result.message || ""}`);
   }
   return result;

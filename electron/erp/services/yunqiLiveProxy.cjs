@@ -55,29 +55,63 @@ function normalizeItem(raw) {
   const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
   const mall = raw.mall || {};
   const imgs = Array.isArray(raw.image_urls) ? raw.image_urls : [];
-  const kwcdn = imgs.find((u) => /kwcdn\.com/.test(String(u || "")));
+  const kwcdnImgs = imgs.filter((u) => /kwcdn\.com/.test(String(u || "")));
+  const kwcdn = kwcdnImgs[0];
   const wht = raw.ware_house_type;
+
+  // 分区域评论
+  const regionComments = [];
+  if (raw.comment && typeof raw.comment === "object") {
+    for (const [area, v] of Object.entries(raw.comment)) {
+      if (v && typeof v === "object") regionComments.push({ area, goods_score: v.goods_score ?? null, comment_num_tips: v.comment_num_tips ?? null });
+    }
+  }
+  // global 评分兜底
+  const globalComment = regionComments.find((c) => c.area === "global") || {};
+  const scoreVal = num(raw.score) || num(globalComment.goods_score);
+  const commentsVal = num(raw.total_comment_num_tips || raw.comment_num_tips) || num(globalComment.comment_num_tips);
+
+  // 各区域当前价格（取前 10 个主要区域）
+  const pricesArr = Array.isArray(raw.prices) ? raw.prices.slice(0, 10).map((p) => ({
+    region: String(p.region || ""), price: num(p.price), currency: str(p.currency), market_price: num(p.market_price),
+  })) : [];
+
+  // 每日销量走势
+  const dailySalesList = Array.isArray(raw.daily_sales_list) ? raw.daily_sales_list.map((d) => ({
+    date: Number(d.date) || 0, sales: num(d.sales), total_sales: num(d.total_sales), usd_gmv: num(d.usd_gmv),
+  })) : [];
+
   return {
     goods_id: str(raw.goods_id || raw.id),
     sku_id: str(raw.sku_id),
     title_zh: str(raw.title_zh || raw.title || raw.productName),
-    title_en: str(raw.title_en),
+    title_en: str(raw.title_en || raw.original_title),
     main_image: str(kwcdn || raw.thumb_url || imgs[0]),
+    image_urls: kwcdnImgs.length ? kwcdnImgs : imgs.slice(0, 6),
     product_url: str(raw.product_url) || `https://www.temu.com/goods.html?goods_id=${str(raw.goods_id || raw.id)}`,
     usd_price: num(raw.usd_price || raw.price),
+    eur_price: num(raw.eur_price),
     daily_sales: num(raw.daily_sales),
     weekly_sales: num(raw.weekly_sales),
     monthly_sales: num(raw.monthly_sales),
     total_sales: num(raw.sales || raw.total_sales),
     usd_gmv: num(raw.usd_gmv),
-    score: num(raw.score),
-    total_comments: num(raw.total_comment_num_tips || raw.comment_num_tips),
+    eur_gmv: num(raw.eur_gmv),
+    score: scoreVal,
+    total_comments: commentsVal,
+    region_comments: regionComments.length ? regionComments : undefined,
     category_zh: str(raw.category_zh || raw.categoryName),
     mall_name: str(raw.mall_name || mall.name),
+    mall_logo: str(mall.logo_url),
     mall_mode: wht === 0 ? "全托管" : wht === 1 ? "半托管" : str(raw.mall_mode),
     same_num: num(raw.same_num),
     listed_at: str(raw.created_at || raw.issued_date),
-    opt_ids: JSON.stringify(Array.isArray(raw.opt_ids) ? raw.opt_ids : []),
+    daily_sales_list: dailySalesList.length ? dailySalesList : undefined,
+    prices: pricesArr.length ? pricesArr : undefined,
+    sold_out: raw.sold_out === true ? true : raw.sold_out === false ? false : null,
+    video_url: str(raw.video_url),
+    brand: str(raw.brand),
+    opt_ids: Array.isArray(raw.opt_ids) ? raw.opt_ids.map(String) : [],
   };
 }
 
