@@ -1,40 +1,44 @@
 "use strict";
-// 选品广场实时搜索代理：读 token 直连云端搜索 API，返回格式与原 yunqiCloud.searchProducts 兼容。
-const fs = require("fs");
-const https = require("https");
+// 选品广场实时搜索代理：转发请求到 yunqi-search-proxy（Playwright 浏览器 session 内 fetch）。
+const http = require("http");
 
-const TOKEN_FILE = process.env.YUNQI_TOKEN_FILE || "/opt/temu-erp-data/yunqi-token.json";
-const SEARCH_URL = "https://www.yunqishuju.com/api/proxytemu/good/search";
+const PROXY_PORT = Number(process.env.YQ_PROXY_PORT) || 19281;
+const PROXY_HOST = "127.0.0.1";
 
-function readToken() {
-  try {
-    const raw = fs.readFileSync(TOKEN_FILE, "utf8");
-    const j = JSON.parse(raw);
-    if (!j.token) return null;
-    if (j.expiresAt && Date.now() > j.expiresAt) return null;
-    return j.token;
-  } catch { return null; }
-}
-
-function httpsPost(url, body, headers, timeout = 15000) {
+function proxyPost(path, body, timeout = 20000) {
   return new Promise((resolve, reject) => {
-    const u = new URL(url);
     const data = JSON.stringify(body);
-    const req = https.request({
-      hostname: u.hostname, port: 443, path: u.pathname + u.search,
-      method: "POST", headers: { ...headers, "Content-Type": "application/json;charset=UTF-8", "Content-Length": Buffer.byteLength(data) },
+    const req = http.request({
+      hostname: PROXY_HOST, port: PROXY_PORT, path, method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) },
       timeout,
     }, (res) => {
       const chunks = [];
       res.on("data", (c) => chunks.push(c));
       res.on("end", () => {
-        try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
-        catch { reject(new Error("响应解析失败")); }
+        try { resolve({ statusCode: res.statusCode, body: JSON.parse(Buffer.concat(chunks).toString()) }); }
+        catch { reject(new Error("代理响应解析失败")); }
       });
     });
-    req.on("error", reject);
-    req.on("timeout", () => { req.destroy(); reject(new Error("请求超时")); });
+    req.on("error", (e) => reject(new Error(`搜索代理不可用 (${e.code || e.message})，请稍后重试`)));
+    req.on("timeout", () => { req.destroy(); reject(new Error("搜索代理响应超时")); });
     req.write(data);
+    req.end();
+  });
+}
+
+function proxyGet(path, timeout = 5000) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ hostname: PROXY_HOST, port: PROXY_PORT, path, method: "GET", timeout }, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
+        catch { resolve(null); }
+      });
+    });
+    req.on("error", () => resolve(null));
+    req.on("timeout", () => { req.destroy(); resolve(null); });
     req.end();
   });
 }
@@ -78,46 +82,38 @@ function normalizeItem(raw) {
 }
 
 async function liveSearch(params = {}) {
-  const token = readToken();
-  if (!token) {
-    const err = new Error("搜索登录已过期，请点击「刷新登录」重新获取");
-    err.statusCode = 401;
-    throw err;
-  }
-
   const { keyword = "", optId = "", mallMode = "", sortBy = "daily_sales", sortOrder = "DESC", page = 1, pageSize = 24 } = params;
   const pSize = Math.min(Math.max(Number(pageSize) || 24, 1), 100);
   const pNo = Math.max(Number(page) || 1, 1);
 
   const sortField = SORT_MAP[sortBy] || "daily_sales";
   const sortDir = String(sortOrder).toUpperCase() === "ASC" ? "asc" : "desc";
+  const wareHouseType = (mallMode && MODE_MAP[mallMode] !== undefined) ? MODE_MAP[mallMode] : 0;
 
-  const body = {
+  const searchBody = {
     from: (pNo - 1) * pSize,
     size: pSize,
     sort: [{ [sortField]: sortDir }],
-    regions: [], region: 0, ids: [], mall_ids: [], opt_ids: [], tags: [], brands: [],
-    with_mall: true, sold_out: null,
+    ware_house_type: wareHouseType,
   };
-  if (keyword) body.keyword = keyword;
-  if (optId) body.opt_ids = [String(optId)];
-  if (mallMode && MODE_MAP[mallMode] !== undefined) body.ware_house_type = MODE_MAP[mallMode];
+  if (keyword) searchBody.keyword = keyword;
+  if (optId) searchBody.opt_ids = [String(optId)];
 
-  const json = await httpsPost(SEARCH_URL, body, { Authorization: `Bearer ${token}` });
-  if (json.code !== 0) {
-    if (json.code === 401 || json.code === 403 || (json.msg || "").includes("token")) {
-      const err = new Error("搜索登录已过期，请点击「刷新登录」重新获取");
-      err.statusCode = 401;
-      throw err;
-    }
-    throw new Error(`搜索接口返回异常: code=${json.code} msg=${json.msg || ""}`);
+  const resp = await proxyPost("/search", searchBody);
+  if (resp.statusCode === 401) {
+    const err = new Error("搜索登录已过期，请点击「刷新登录」重新获取");
+    err.statusCode = 401;
+    throw err;
+  }
+  const result = resp.body;
+  if (result.code !== 0 && result.code !== undefined) {
+    throw new Error(result.message || `搜索异常: code=${result.code}`);
   }
 
-  const rawItems = json.data?.data || json.data?.items || json.data?.list || (Array.isArray(json.data) ? json.data : []);
-  const total = json.data?.total || rawItems.length;
+  const rawItems = result.items || [];
+  const total = result.total || rawItems.length;
   let items = rawItems.map(normalizeItem).filter(Boolean);
 
-  // 服务端后过滤（API 不原生支持的筛选条件）
   const minPrice = params.minPrice != null && params.minPrice !== "" ? Number(params.minPrice) : null;
   const maxPrice = params.maxPrice != null && params.maxPrice !== "" ? Number(params.maxPrice) : null;
   const minDailySales = params.minDailySales != null && params.minDailySales !== "" ? Number(params.minDailySales) : null;
@@ -133,14 +129,10 @@ async function liveSearch(params = {}) {
   return { items, total, page: pNo, pageSize: pSize, totalPages: Math.ceil(total / pSize) };
 }
 
-function tokenStatus() {
-  try {
-    const raw = fs.readFileSync(TOKEN_FILE, "utf8");
-    const j = JSON.parse(raw);
-    if (!j.token) return { valid: false, reason: "token 文件为空" };
-    if (j.expiresAt && Date.now() > j.expiresAt) return { valid: false, reason: "token 已过期", expiredAt: new Date(j.expiresAt).toISOString() };
-    return { valid: true, savedAt: j.savedAt || null, expiresAt: j.expiresAt ? new Date(j.expiresAt).toISOString() : null };
-  } catch { return { valid: false, reason: "token 文件不存在或无法读取" }; }
+async function tokenStatus() {
+  const health = await proxyGet("/health");
+  if (!health) return { valid: false, reason: "搜索代理未运行" };
+  return { valid: health.ready === true, ready: health.ready, lastUsed: health.lastUsed };
 }
 
-module.exports = { liveSearch, tokenStatus, readToken };
+module.exports = { liveSearch, tokenStatus };

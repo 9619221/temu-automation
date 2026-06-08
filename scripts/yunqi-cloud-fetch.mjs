@@ -107,7 +107,7 @@ async function fetchAndStore(page, { wareHouseType, keyword, label }) {
     await login(page, account, password);
     log("登录成功 ✓");
 
-    // 保存 token 供实时搜索代理使用（yunqiLiveProxy.cjs）
+    // 保存 token + cookies 供实时搜索代理使用（yunqiLiveProxy.cjs）
     const TOKEN_FILE = process.env.YUNQI_TOKEN_FILE || "/opt/temu-erp-data/yunqi-token.json";
     try {
       const savedToken = await page.evaluate(() => {
@@ -116,9 +116,11 @@ async function fetchAndStore(page, { wareHouseType, keyword, label }) {
         if (!token) for (const [k, v] of Object.entries(ls)) { if (/token|auth/i.test(k) && String(v).includes("eyJ")) { token = String(v).replace(/^"|"$/g, ""); break; } }
         return token;
       });
+      const browserCookies = await ctx.cookies("https://www.yunqishuju.com");
+      const cookieStr = browserCookies.map((c) => `${c.name}=${c.value}`).join("; ");
       if (savedToken) {
-        fs.writeFileSync(TOKEN_FILE, JSON.stringify({ token: savedToken, savedAt: new Date().toISOString(), expiresAt: Date.now() + 23 * 3600 * 1000 }));
-        log(`token 已保存 → ${TOKEN_FILE}`);
+        fs.writeFileSync(TOKEN_FILE, JSON.stringify({ token: savedToken, cookies: cookieStr, savedAt: new Date().toISOString(), expiresAt: Date.now() + 23 * 3600 * 1000 }));
+        log(`token + ${browserCookies.length} cookies 已保存 → ${TOKEN_FILE}`);
       }
     } catch (e) { log("保存 token 失败:", e.message); }
 
