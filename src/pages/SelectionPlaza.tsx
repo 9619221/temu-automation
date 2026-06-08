@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import {
+  Alert,
   Badge,
   Button,
   Card,
@@ -12,10 +13,8 @@ import {
   Pagination,
   Popconfirm,
   Row,
-  Segmented,
   Select,
   Space,
-  Statistic,
   Tabs,
   Tag,
   Tooltip,
@@ -24,34 +23,42 @@ import {
 } from "antd";
 import {
   CheckCircleFilled,
+  ClearOutlined,
   DeleteOutlined,
+  DollarOutlined,
+  EditOutlined,
   FireOutlined,
   LinkOutlined,
   PlusOutlined,
   ReloadOutlined,
+  RiseOutlined,
   SearchOutlined,
   ShoppingOutlined,
   StarFilled,
-  ThunderboltOutlined,
+  WarningOutlined,
 } from "@ant-design/icons";
 import { readPageCache, writePageCache } from "../utils/pageCache";
 
 const { Text, Paragraph } = Typography;
-const yunqiDb = window.electronAPI?.yunqiDb;
+const api = window.electronAPI?.yunqiDb;
 
 const BLUE = "#1a73e8";
-const CARD_STYLE: React.CSSProperties = { borderRadius: 10, boxShadow: "0 1px 2px rgba(0,0,0,0.04), 0 8px 24px rgba(0,0,0,0.05)" };
-// 选品搜索结果缓存（仅首页）：挂载时先显上次结果不空白，后台再刷新（stale-while-revalidate）。
+const CARD_STYLE: React.CSSProperties = { borderRadius: 10, boxShadow: "0 1px 3px rgba(0,0,0,0.04), 0 4px 16px rgba(0,0,0,0.06)" };
+const PRODUCT_GRID_STYLE: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fill, minmax(232px, 1fr))",
+  gap: 12,
+  alignItems: "stretch",
+};
 const SELECTION_RESULT_CACHE_KEY = "temu.selection-plaza.result.v1";
 
-// 选品池状态：流转链路 想上 → 找货源 → 已找到 → 上架中 → 已上架（或弃用）
-const STATUS_META: Record<string, { label: string; color: string }> = {
-  want: { label: "想上", color: "blue" },
-  sourcing: { label: "找货源中", color: "orange" },
-  sourced: { label: "已找到货源", color: "cyan" },
-  listing: { label: "上架中", color: "purple" },
-  listed: { label: "已上架", color: "green" },
-  dropped: { label: "已弃用", color: "default" },
+const STATUS_META: Record<string, { label: string; color: string; hex: string }> = {
+  want: { label: "想上", color: "blue", hex: "#1677ff" },
+  sourcing: { label: "找货源中", color: "orange", hex: "#fa8c16" },
+  sourced: { label: "已找到货源", color: "cyan", hex: "#13c2c2" },
+  listing: { label: "上架中", color: "purple", hex: "#722ed1" },
+  listed: { label: "已上架", color: "green", hex: "#52c41a" },
+  dropped: { label: "已弃用", color: "default", hex: "#8c8c8c" },
 };
 const STATUS_KEYS = ["want", "sourcing", "sourced", "listing", "listed", "dropped"];
 
@@ -65,10 +72,63 @@ const SORT_OPTIONS = [
   { value: "usd_price", label: "价格" },
 ];
 
+const QUICK_FILTERS: Array<{ key: string; label: string; icon: React.ReactNode; ov: Record<string, any> }> = [
+  { key: "hotSales", label: "销量优先", icon: <FireOutlined />, ov: { minDailySales: 50, sortBy: "daily_sales", sortOrder: "DESC" } },
+  { key: "highScore", label: "高评分", icon: <StarFilled />, ov: { sortBy: "score", sortOrder: "DESC" } },
+  { key: "highGmv", label: "高 GMV", icon: <RiseOutlined />, ov: { sortBy: "usd_gmv", sortOrder: "DESC" } },
+  { key: "lowPrice", label: "低价潜力", icon: <DollarOutlined />, ov: { maxPrice: 10, minDailySales: 20, sortBy: "daily_sales", sortOrder: "DESC" } },
+];
+
 const MODE_MAP: Record<string, string> = { "0": "全托管", "1": "半托管", 全托管: "全托管", 半托管: "半托管" };
 const normMode = (m: any) => MODE_MAP[String(m ?? "")] || (m ? String(m) : "");
 const usd = (v: any) => `$${(Number(v) || 0).toFixed(2)}`;
 const intFmt = (v: any) => (Number(v) || 0).toLocaleString("en-US");
+const usdCompact = (v: any) => {
+  const n = Number(v) || 0;
+  if (Math.abs(n) >= 1000000) return `$${(n / 1000000).toFixed(1)}M`;
+  if (Math.abs(n) >= 1000) return `$${(n / 1000).toFixed(1)}K`;
+  return usd(n);
+};
+
+interface Signal { text: string; color: string }
+
+function computeSignals(item: ProductRow): { opp?: Signal; risk?: Signal } {
+  const ds = Number(item.daily_sales) || 0;
+  const gmv = Number(item.usd_gmv) || 0;
+  const sc = Number(item.score) || 0;
+  const same = Number(item.same_num) || 0;
+
+  let opp: Signal | undefined;
+  if (ds >= 100) opp = { text: "爆款", color: "red" };
+  else if (gmv >= 10000) opp = { text: "高 GMV", color: "green" };
+  else if (ds >= 30) opp = { text: "热销", color: "volcano" };
+  else if (sc >= 4.7 && ds > 0) opp = { text: "高口碑", color: "gold" };
+  else if (ds > 0 && same > 0 && same < 5) opp = { text: "竞争少", color: "cyan" };
+
+  let risk: Signal | undefined;
+  if (same >= 100) risk = { text: "同款多", color: "orange" };
+  else if (sc > 0 && sc < 3.8) risk = { text: "评分低", color: "red" };
+  else if (ds === 0) risk = { text: "近期无销", color: "default" };
+
+  return { opp, risk };
+}
+
+function computeOpportunityScore(item: ProductRow) {
+  const dailySales = Number(item.daily_sales) || 0;
+  const gmv = Number(item.usd_gmv) || 0;
+  const score = Number(item.score) || 0;
+  const sameNum = Number(item.same_num) || 0;
+  const price = Number(item.usd_price) || 0;
+
+  const demandScore = Math.min(38, Math.log10(dailySales + 1) * 10);
+  const gmvScore = Math.min(24, Math.log10(gmv + 1) * 4.2);
+  const ratingScore = score > 0 ? Math.min(16, Math.max(0, score - 3) * 8) : 6;
+  const priceScore = price > 0 && price <= 10 ? 10 : price <= 20 ? 7 : 4;
+  const competitionPenalty = sameNum >= 100 ? 16 : sameNum >= 30 ? 9 : sameNum >= 10 ? 5 : 0;
+  const value = Math.max(0, Math.min(100, Math.round(demandScore + gmvScore + ratingScore + priceScore + 12 - competitionPenalty)));
+  const tone = value >= 80 ? "#137333" : value >= 65 ? "#b06000" : "#5f6368";
+  return { value, tone };
+}
 
 interface ProductRow {
   goods_id: string;
@@ -96,13 +156,203 @@ interface ProductRow {
 
 const PAGE_SIZE = 24;
 
-export default function SelectionPlaza() {
-  const [dbRowCount, setDbRowCount] = useState(0);
-  const [stats, setStats] = useState<any>(null);
+// ---------- 商品卡片（memo 避免列表重绘） ----------
 
-  // 筛选
+interface CardProps {
+  item: ProductRow;
+  inPool: boolean;
+  pool?: boolean;
+  onAdd: () => void;
+  onRemove: () => void;
+  onOpen: () => void;
+  onStatusChange?: (status: string) => void;
+  onNoteUpdate?: (note: string) => void;
+}
+
+const ProductCard = memo(function ProductCard({ item, inPool, pool, onAdd, onRemove, onOpen, onStatusChange, onNoteUpdate }: CardProps) {
+  const [editingNote, setEditingNote] = useState(false);
+  const [noteText, setNoteText] = useState(item.note || "");
+
+  useEffect(() => { setNoteText(item.note || ""); }, [item.note]);
+
+  const mode = normMode(item.mall_mode);
+  const listedDate = item.listed_at ? String(item.listed_at).slice(0, 10) : "";
+  const { risk } = computeSignals(item);
+  const { opp } = computeSignals(item);
+  const dailySales = Number(item.daily_sales) || 0;
+  const score = Number(item.score) || 0;
+  const sameNum = Number(item.same_num) || 0;
+  const title = item.title_zh || item.title_en || "（无标题）";
+  const quietSignal = risk || (opp?.text === "竞争少" ? opp : undefined);
+  const opportunity = computeOpportunityScore(item);
+
+  const saveNote = () => {
+    onNoteUpdate?.(noteText);
+    setEditingNote(false);
+  };
+
+  return (
+    <Card
+      hoverable
+      className="sp-card"
+      style={{ ...CARD_STYLE, height: "100%", overflow: "hidden", borderColor: "#e8eaed" }}
+      styles={{ body: { padding: 10 } }}
+      cover={
+        <div style={{ height: 172, position: "relative", overflow: "hidden", background: "#f7f8fa", cursor: "pointer" }} onClick={onOpen}>
+          <Image
+            src={item.main_image}
+            alt={title}
+            width="100%"
+            height={172}
+            style={{ objectFit: "cover" }}
+            preview={false}
+            fallback="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect width='100' height='100' fill='%23eee'/%3E%3C/svg%3E"
+          />
+          <span style={{ position: "absolute", right: 8, bottom: 8, padding: "2px 8px", borderRadius: 6, background: "rgba(255,255,255,0.94)", color: "#202124", fontSize: 14, fontWeight: 800, boxShadow: "0 1px 4px rgba(0,0,0,0.12)" }}>
+            {usd(item.usd_price)}
+          </span>
+          {opp && opp.text !== "竞争少" && (
+            <span style={{ position: "absolute", left: 0, top: 10, padding: "2px 10px 2px 6px", borderRadius: "0 10px 10px 0", background: opp.color === "red" ? "#ff4d4f" : opp.color === "green" ? "#52c41a" : opp.color === "volcano" ? "#fa541c" : "#faad14", color: "#fff", fontSize: 11, fontWeight: 700, letterSpacing: 0.5 }}>
+              {opp.text}
+            </span>
+          )}
+        </div>
+      }
+    >
+      {/* 标签行 */}
+      <div style={{ display: "flex", alignItems: "center", gap: 4, minHeight: 22, marginBottom: 6, overflow: "hidden", flexWrap: "wrap" }}>
+        <Tag color={opportunity.value >= 80 ? "green" : opportunity.value >= 65 ? "gold" : "default"} style={{ marginInlineEnd: 0, borderRadius: 6, lineHeight: "18px", fontSize: 11 }}>
+          {opportunity.value}分
+        </Tag>
+        {quietSignal && <Tag color={quietSignal.color} style={{ marginInlineEnd: 0, borderRadius: 6, lineHeight: "18px", fontSize: 11 }}>{quietSignal.text}</Tag>}
+        {mode && <Tag color={mode === "全托管" ? "blue" : "cyan"} style={{ marginInlineEnd: 0, borderRadius: 6, lineHeight: "18px", fontSize: 11 }}>{mode}</Tag>}
+        {pool && item.status && (
+          <Tag color={STATUS_META[item.status]?.color || "default"} style={{ marginInlineEnd: 0, borderRadius: 6, lineHeight: "18px", fontSize: 11 }}>
+            {STATUS_META[item.status]?.label || item.status}
+          </Tag>
+        )}
+      </div>
+
+      {/* 标题 */}
+      <Tooltip title="点击打开商品页">
+        <Paragraph ellipsis={{ rows: 2 }} onClick={onOpen} style={{ marginBottom: 8, minHeight: 38, fontSize: 13, lineHeight: 1.45, fontWeight: 600, color: "#202124", cursor: "pointer" }}>
+          {title}
+        </Paragraph>
+      </Tooltip>
+
+      {/* 数据格 */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 1, overflow: "hidden", border: "1px solid #edf0f2", borderRadius: 8, background: "#edf0f2", marginBottom: 8 }}>
+        <div style={{ padding: "6px 7px", background: "#fff", minWidth: 0 }}>
+          <div style={{ color: "#8c8c8c", fontSize: 10, lineHeight: 1.1 }}>日销</div>
+          <div style={{ color: dailySales > 0 ? "#d93025" : "#9aa0a6", fontSize: 14, lineHeight: 1.35, fontWeight: 800 }}>{dailySales > 0 ? intFmt(dailySales) : "-"}</div>
+        </div>
+        <div style={{ padding: "6px 7px", background: "#fff", minWidth: 0 }}>
+          <div style={{ color: "#8c8c8c", fontSize: 10, lineHeight: 1.1 }}>GMV</div>
+          <Tooltip title={usd(item.usd_gmv)}>
+            <div style={{ color: "#137333", fontSize: 14, lineHeight: 1.35, fontWeight: 800, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{usdCompact(item.usd_gmv)}</div>
+          </Tooltip>
+        </div>
+        <div style={{ padding: "6px 7px", background: "#fff", minWidth: 0 }}>
+          <div style={{ color: "#8c8c8c", fontSize: 10, lineHeight: 1.1 }}>评分</div>
+          <div style={{ color: score > 0 ? "#b06000" : "#9aa0a6", fontSize: 14, lineHeight: 1.35, fontWeight: 800 }}>
+            {score > 0 ? score.toFixed(1) : "-"}
+          </div>
+        </div>
+      </div>
+
+      {/* 机会分进度条 */}
+      <Tooltip title="综合日销、GMV、评分、价格与同款竞争的选品参考分">
+        <div style={{ display: "grid", gridTemplateColumns: "42px minmax(0, 1fr)", alignItems: "center", gap: 8, marginBottom: 8 }}>
+          <span style={{ color: opportunity.tone, fontSize: 11, fontWeight: 700 }}>机会分</span>
+          <span style={{ height: 6, overflow: "hidden", borderRadius: 999, background: "#edf0f2" }}>
+            <span style={{ display: "block", width: `${opportunity.value}%`, height: "100%", borderRadius: 999, background: opportunity.tone, transition: "width .3s ease" }} />
+          </span>
+        </div>
+      </Tooltip>
+
+      {/* 元信息行 */}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", color: "#5f6368", fontSize: 11, marginBottom: 8, minWidth: 0, whiteSpace: "nowrap" }}>
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}><ShoppingOutlined /> {item.mall_name || "-"}</span>
+        {sameNum > 0 && <span style={{ flex: "0 0 auto" }}>{intFmt(sameNum)} 同款</span>}
+        {listedDate && <span style={{ marginLeft: "auto", color: "#bfbfbf" }}>{listedDate}</span>}
+      </div>
+
+      {/* 选品池备注 */}
+      {pool && (
+        <div style={{ marginBottom: 8 }}>
+          {editingNote ? (
+            <Space.Compact style={{ width: "100%" }}>
+              <Input
+                size="small"
+                value={noteText}
+                onChange={(e) => setNoteText(e.target.value)}
+                placeholder="添加备注..."
+                onPressEnter={saveNote}
+                autoFocus
+                style={{ fontSize: 12 }}
+              />
+              <Button size="small" type="primary" onClick={saveNote}>保存</Button>
+            </Space.Compact>
+          ) : (
+            <div
+              onClick={() => setEditingNote(true)}
+              style={{
+                fontSize: 11, color: item.note ? "#595959" : "#bfbfbf", cursor: "pointer",
+                padding: "3px 6px", borderRadius: 4, background: item.note ? "#f6f8fa" : "transparent",
+                border: "1px dashed transparent", transition: "all .15s",
+              }}
+              onMouseEnter={(e) => { (e.currentTarget.style.borderColor = "#d9d9d9"); }}
+              onMouseLeave={(e) => { (e.currentTarget.style.borderColor = "transparent"); }}
+            >
+              <EditOutlined style={{ marginRight: 4, fontSize: 10 }} />
+              {item.note || "点击添加备注"}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 操作按钮 */}
+      {pool ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "nowrap" }}>
+          <Select
+            size="small"
+            value={item.status || "want"}
+            style={{ flex: 1, minWidth: 0 }}
+            onChange={(v) => onStatusChange?.(v)}
+            options={STATUS_KEYS.map((k) => ({ value: k, label: STATUS_META[k].label }))}
+          />
+          <Tooltip title="打开商品页">
+            <Button size="small" type="text" icon={<LinkOutlined />} onClick={onOpen} />
+          </Tooltip>
+          <Popconfirm title="移出选品池？" onConfirm={onRemove} okText="移出" cancelText="取消">
+            <Button size="small" type="text" danger icon={<DeleteOutlined />} />
+          </Popconfirm>
+        </div>
+      ) : (
+        <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "nowrap" }}>
+          <Button
+            size="small"
+            type={inPool ? "default" : "primary"}
+            icon={inPool ? <CheckCircleFilled /> : <PlusOutlined />}
+            disabled={inPool}
+            onClick={onAdd}
+            style={{ flex: 1, minWidth: 0 }}
+          >
+            {inPool ? "已加入" : "加入选品池"}
+          </Button>
+          <Tooltip title="打开商品页">
+            <Button size="small" icon={<LinkOutlined />} onClick={onOpen} />
+          </Tooltip>
+        </div>
+      )}
+    </Card>
+  );
+});
+
+// ---------- 主页面 ----------
+
+export default function SelectionPlaza() {
   const [keyword, setKeyword] = useState("");
-  // 类目筛：optIdPath 是 Cascader 选中路径（[一级optId] 或 [一级,二级]），取最后一个最具体的 opt_id 传给后端按商品 opt_ids 筛
   const [optIdPath, setOptIdPath] = useState<string[]>([]);
   const [categories, setCategories] = useState<Array<{ cat_id: number; cat_name: string; cat_level: number; parent_cat_id: number }>>([]);
   const [minPrice, setMinPrice] = useState<number | undefined>(undefined);
@@ -115,13 +365,9 @@ export default function SelectionPlaza() {
     () => readPageCache(SELECTION_RESULT_CACHE_KEY, { items: [] as ProductRow[], total: 0, page: 1, totalPages: 0 }),
   );
   const [searching, setSearching] = useState(false);
+  const [tokenExpired, setTokenExpired] = useState(false);
+  const [refreshingToken, setRefreshingToken] = useState(false);
 
-  // 抓一批
-  const [syncKeywords, setSyncKeywords] = useState("");
-  const [syncMaxPages, setSyncMaxPages] = useState(5);
-  const [syncing, setSyncing] = useState(false);
-
-  // 选品池
   const [poolRows, setPoolRows] = useState<ProductRow[]>([]);
   const [poolSummary, setPoolSummary] = useState<Record<string, number>>({});
   const [poolIds, setPoolIds] = useState<Set<string>>(new Set());
@@ -129,64 +375,54 @@ export default function SelectionPlaza() {
 
   const [activeTab, setActiveTab] = useState("plaza");
 
-  const loadDbInfo = useCallback(async () => {
-    try {
-      const info = await yunqiDb?.info();
-      if (info) setDbRowCount(info.rowCount || 0);
-      const s = await yunqiDb?.stats();
-      if (s) setStats(s);
-    } catch {
-      /* ignore */
-    }
-  }, []);
+  // ---- 数据加载 ----
 
   const loadCategories = useCallback(async () => {
     try {
-      const cats = await yunqiDb?.categories();
+      const cats = await api?.categories();
       if (Array.isArray(cats)) setCategories(cats as any);
-    } catch {
-      /* ignore */
-    }
+    } catch { /* ignore */ }
   }, []);
 
   const loadPoolIds = useCallback(async () => {
     try {
-      const ids = await yunqiDb?.selectionIds();
+      const ids = await api?.selectionIds();
       if (Array.isArray(ids)) setPoolIds(new Set(ids.map(String)));
-    } catch {
-      /* ignore */
-    }
+    } catch { /* ignore */ }
   }, []);
 
   const loadPool = useCallback(async () => {
     try {
-      const r = await yunqiDb?.selectionList({ status: poolStatusFilter || undefined });
+      const r = await api?.selectionList({ status: poolStatusFilter || undefined });
       if (r) {
         setPoolRows(r.rows || []);
         setPoolSummary(r.summary || {});
       }
-    } catch {
-      /* ignore */
-    }
+    } catch { /* ignore */ }
   }, [poolStatusFilter]);
 
+  // ---- 搜索 ----
+
   const doSearch = useCallback(
-    async (toPage = 1) => {
-      if (!yunqiDb) return message.error("数据库功能暂不可用");
+    async (toPage = 1, overrides: Record<string, any> = {}) => {
+      if (!api) return message.error("选品功能暂不可用");
+      const eff = { keyword, optIdPath, minPrice, maxPrice, minDailySales, sortBy, sortOrder, ...overrides };
       setSearching(true);
       try {
-        const params: any = { sortBy, sortOrder, page: toPage, pageSize: PAGE_SIZE };
-        if (keyword.trim()) params.keyword = keyword.trim();
-        if (optIdPath.length) params.optId = String(optIdPath[optIdPath.length - 1]);
-        if (minPrice != null) params.minPrice = minPrice;
-        if (maxPrice != null) params.maxPrice = maxPrice;
-        if (minDailySales != null) params.minDailySales = minDailySales;
-        const r = await yunqiDb.search(params);
+        const params: any = { sortBy: eff.sortBy, sortOrder: eff.sortOrder, page: toPage, pageSize: PAGE_SIZE };
+        if (String(eff.keyword || "").trim()) params.keyword = String(eff.keyword).trim();
+        if (eff.optIdPath?.length) params.optId = String(eff.optIdPath[eff.optIdPath.length - 1]);
+        if (eff.minPrice != null) params.minPrice = eff.minPrice;
+        if (eff.maxPrice != null) params.maxPrice = eff.maxPrice;
+        if (eff.minDailySales != null) params.minDailySales = eff.minDailySales;
+        const r = await api.search(params);
         setResult(r);
         setPage(toPage);
-        if (toPage === 1) writePageCache(SELECTION_RESULT_CACHE_KEY, r); // 仅缓存首页，挂载先显旧结果
+        setTokenExpired(false);
+        if (toPage === 1) writePageCache(SELECTION_RESULT_CACHE_KEY, r);
       } catch (e: any) {
-        message.error(e?.message || "搜索失败");
+        if (String(e?.message || "").includes("过期")) setTokenExpired(true);
+        else message.error(e?.message || "搜索失败");
       } finally {
         setSearching(false);
       }
@@ -194,33 +430,49 @@ export default function SelectionPlaza() {
     [keyword, optIdPath, minPrice, maxPrice, minDailySales, sortBy, sortOrder],
   );
 
-  const doSync = async () => {
-    const kws = syncKeywords.split(/[,，\n]/).map((k) => k.trim()).filter(Boolean);
-    if (!yunqiDb) return message.error("数据库功能暂不可用");
-    setSyncing(true);
+  const applyQuick = (ov: Record<string, any>) => {
+    if ("minDailySales" in ov) setMinDailySales(ov.minDailySales);
+    if ("maxPrice" in ov) setMaxPrice(ov.maxPrice);
+    if ("minPrice" in ov) setMinPrice(ov.minPrice);
+    if ("sortBy" in ov) setSortBy(ov.sortBy);
+    if ("sortOrder" in ov) setSortOrder(ov.sortOrder);
+    void doSearch(1, ov);
+  };
+
+  const clearFilters = () => {
+    setKeyword("");
+    setOptIdPath([]);
+    setMinPrice(undefined);
+    setMaxPrice(undefined);
+    setMinDailySales(undefined);
+    setSortBy("daily_sales");
+    setSortOrder("DESC");
+    void doSearch(1, { keyword: "", optIdPath: [], minPrice: undefined, maxPrice: undefined, minDailySales: undefined, sortBy: "daily_sales", sortOrder: "DESC" });
+  };
+
+  // ---- 刷新登录（触发服务器重新抓取 token） ----
+
+  const refreshToken = async () => {
+    if (!api) return message.error("选品功能暂不可用");
+    setRefreshingToken(true);
     try {
-      const res: any = await yunqiDb.syncOnline({ keywords: kws, maxPages: syncMaxPages });
+      const res: any = await api.syncOnline({ keywords: [], maxPages: 1 });
       if (res?.triggered) {
-        // 全云端：服务器后台无头登录云启 + 抓取，约 30-60 秒，到点自动刷新一次
-        message.success(res.message || "已触发服务器抓取，约 1 分钟后自动刷新");
-        window.setTimeout(() => { void loadDbInfo(); void doSearch(1); }, 50000);
-      } else {
-        // 本地 worker 模式（非全云端时的兜底）
-        const details = (res?.results || []).map((r: any) => `「${r.keyword}」${r.imported}条`).join("，");
-        message.success(`抓取完成：新增/更新 ${res?.totalImported || 0} 条。${details}`);
-        await loadDbInfo();
-        await doSearch(1);
+        message.success("已触发登录刷新，约 30 秒后重新搜索");
+        window.setTimeout(() => { setTokenExpired(false); void doSearch(1); }, 35000);
       }
     } catch (e: any) {
-      message.error(e?.message || "抓取失败");
+      message.error(e?.message || "刷新登录失败");
     } finally {
-      setSyncing(false);
+      setRefreshingToken(false);
     }
   };
 
+  // ---- 选品池操作 ----
+
   const addToPool = async (item: ProductRow) => {
     try {
-      const r = await yunqiDb?.selectionAdd({
+      const r = await api?.selectionAdd({
         goods_id: item.goods_id,
         sku_id: item.sku_id,
         title_zh: item.title_zh,
@@ -252,13 +504,9 @@ export default function SelectionPlaza() {
 
   const removeFromPool = async (goodsId: string) => {
     try {
-      await yunqiDb?.selectionRemove({ goodsId });
+      await api?.selectionRemove({ goodsId });
       message.success("已移出选品池");
-      setPoolIds((prev) => {
-        const n = new Set(prev);
-        n.delete(String(goodsId));
-        return n;
-      });
+      setPoolIds((prev) => { const n = new Set(prev); n.delete(String(goodsId)); return n; });
       void loadPool();
     } catch (e: any) {
       message.error(e?.message || "移除失败");
@@ -267,10 +515,19 @@ export default function SelectionPlaza() {
 
   const changeStatus = async (goodsId: string, status: string) => {
     try {
-      await yunqiDb?.selectionUpdate({ goodsId, status });
+      await api?.selectionUpdate({ goodsId, status });
       void loadPool();
     } catch (e: any) {
       message.error(e?.message || "更新状态失败");
+    }
+  };
+
+  const updateNote = async (goodsId: string, note: string) => {
+    try {
+      await api?.selectionUpdate({ goodsId, note });
+      void loadPool();
+    } catch (e: any) {
+      message.error(e?.message || "更新备注失败");
     }
   };
 
@@ -279,8 +536,9 @@ export default function SelectionPlaza() {
     if (url) window.open(url, "_blank");
   };
 
+  // ---- 生命周期 ----
+
   useEffect(() => {
-    void loadDbInfo();
     void loadCategories();
     void loadPoolIds();
     void doSearch(1);
@@ -293,106 +551,8 @@ export default function SelectionPlaza() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [poolStatusFilter]);
 
-  const renderCard = (item: ProductRow, opts: { pool?: boolean } = {}) => {
-    const inPool = poolIds.has(String(item.goods_id));
-    const mode = normMode(item.mall_mode);
-    const listedDate = item.listed_at ? String(item.listed_at).slice(0, 10) : "";
-    return (
-      <Card
-        key={item.goods_id}
-        hoverable
-        className="sp-card"
-        style={{ ...CARD_STYLE, height: "100%", overflow: "hidden", borderRadius: 12 }}
-        styles={{ body: { padding: 12 } }}
-        cover={
-          <div style={{ height: 190, overflow: "hidden", background: "#f7f8fa", cursor: "pointer" }} onClick={() => openProduct(item)}>
-            <Image
-              src={item.main_image}
-              alt={item.title_zh}
-              width="100%"
-              height={190}
-              style={{ objectFit: "cover" }}
-              preview={false}
-              fallback="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect width='100' height='100' fill='%23eee'/%3E%3C/svg%3E"
-            />
-          </div>
-        }
-      >
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6, marginTop: 2 }}>
-          {Number(item.daily_sales) > 0 ? (
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 3, color: "#f5222d", fontSize: 14, fontWeight: 700 }}>
-              <FireOutlined /> 日销 {intFmt(item.daily_sales)}
-            </span>
-          ) : <span />}
-          <span style={{ fontSize: 15, fontWeight: 700, color: "#262626" }}>{usd(item.usd_price)}</span>
-        </div>
-        <Tooltip title="点击打开 Temu 商品页">
-          <Paragraph ellipsis={{ rows: 2 }} onClick={() => openProduct(item)} style={{ marginBottom: 8, minHeight: 38, fontSize: 13, lineHeight: 1.45, fontWeight: 500, cursor: "pointer" }}>
-            {item.title_zh || item.title_en || "（无标题）"}
-          </Paragraph>
-        </Tooltip>
-        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 6 }}>
-          <div>
-            <span style={{ fontSize: 11, color: "#8c8c8c" }}>GMV </span>
-            <span style={{ fontSize: 16, fontWeight: 700, color: "#16a34a" }}>{usd(item.usd_gmv)}</span>
-          </div>
-          {Number(item.score) > 0 && (
-            <span style={{ fontSize: 12, color: "#faad14", fontWeight: 600 }}>
-              <StarFilled /> {Number(item.score).toFixed(1)}
-            </span>
-          )}
-        </div>
-        <div style={{ display: "flex", gap: 12, fontSize: 11, color: "#8c8c8c", marginBottom: 8 }}>
-          <span>周销 <b style={{ color: "#595959" }}>{intFmt(item.weekly_sales)}</b></span>
-          <span>月销 <b style={{ color: "#595959" }}>{intFmt(item.monthly_sales)}</b></span>
-          {Number(item.same_num) > 0 && <span style={{ marginLeft: "auto" }}>{intFmt(item.same_num)} 同款</span>}
-        </div>
-        <div style={{ fontSize: 11, color: "#8c8c8c", marginBottom: 10, display: "flex", alignItems: "center", gap: 5, overflow: "hidden", whiteSpace: "nowrap" }}>
-          <ShoppingOutlined />
-          <span style={{ overflow: "hidden", textOverflow: "ellipsis", maxWidth: 88 }}>{item.mall_name || "-"}</span>
-          {mode && <Tag color={mode === "全托管" ? "blue" : "cyan"} style={{ margin: 0, fontSize: 10, lineHeight: "15px", padding: "0 5px" }}>{mode}</Tag>}
-          {listedDate && <span style={{ marginLeft: "auto", color: "#bfbfbf" }}>{listedDate}</span>}
-        </div>
-        {opts.pool ? (
-          <Space size={4} style={{ width: "100%", justifyContent: "space-between" }}>
-            <Select
-              size="small"
-              value={item.status || "want"}
-              style={{ width: 116 }}
-              onChange={(v) => changeStatus(item.goods_id, v)}
-              options={STATUS_KEYS.map((k) => ({ value: k, label: STATUS_META[k].label }))}
-            />
-            <Space size={2}>
-              <Tooltip title="打开商品页">
-                <Button size="small" type="text" icon={<LinkOutlined />} onClick={() => openProduct(item)} />
-              </Tooltip>
-              <Popconfirm title="移出选品池？" onConfirm={() => removeFromPool(item.goods_id)} okText="移出" cancelText="取消">
-                <Button size="small" type="text" danger icon={<DeleteOutlined />} />
-              </Popconfirm>
-            </Space>
-          </Space>
-        ) : (
-          <Space size={4} style={{ width: "100%", justifyContent: "space-between" }}>
-            <Button
-              size="small"
-              type={inPool ? "default" : "primary"}
-              icon={inPool ? <CheckCircleFilled /> : <PlusOutlined />}
-              disabled={inPool}
-              onClick={() => addToPool(item)}
-              style={{ flex: 1 }}
-            >
-              {inPool ? "已加入" : "加入选品池"}
-            </Button>
-            <Tooltip title="打开商品页">
-              <Button size="small" icon={<LinkOutlined />} onClick={() => openProduct(item)} />
-            </Tooltip>
-          </Space>
-        )}
-      </Card>
-    );
-  };
+  // ---- 派生数据 ----
 
-  // 把扁平 categories（cat_id=opt_id、parent_cat_id=父 opt_id）组装成 Cascader 两级树
   const categoryOptions = useMemo(() => {
     const l1 = categories.filter((c) => c.cat_level === 1).map((c) => ({ value: String(c.cat_id), label: c.cat_name, children: [] as any[] }));
     const byParent: Record<string, any[]> = {};
@@ -403,127 +563,214 @@ export default function SelectionPlaza() {
     return l1;
   }, [categories]);
 
-  const poolSegOptions = useMemo(() => {
-    const total = poolSummary.total || 0;
-    return [
-      { value: "", label: `全部 ${total}` },
-      ...STATUS_KEYS.map((k) => ({ value: k, label: `${STATUS_META[k].label} ${poolSummary[k] || 0}` })),
-    ];
-  }, [poolSummary]);
+  const catNameMap = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const c of categories) m[String(c.cat_id)] = c.cat_name;
+    return m;
+  }, [categories]);
+
+  const activeFilters = useMemo(() => {
+    const arr: Array<{ key: string; label: string; clear: () => void }> = [];
+    if (keyword.trim()) arr.push({ key: "kw", label: `关键词：${keyword.trim()}`, clear: () => { setKeyword(""); void doSearch(1, { keyword: "" }); } });
+    if (optIdPath.length) {
+      const last = optIdPath[optIdPath.length - 1];
+      arr.push({ key: "cat", label: `类目：${catNameMap[String(last)] || last}`, clear: () => { setOptIdPath([]); void doSearch(1, { optIdPath: [] }); } });
+    }
+    if (minPrice != null || maxPrice != null) {
+      const lbl = `价格：${minPrice != null ? `$${minPrice}` : "0"} ~ ${maxPrice != null ? `$${maxPrice}` : "∞"}`;
+      arr.push({ key: "price", label: lbl, clear: () => { setMinPrice(undefined); setMaxPrice(undefined); void doSearch(1, { minPrice: undefined, maxPrice: undefined }); } });
+    }
+    if (minDailySales != null) arr.push({ key: "ds", label: `日销 ≥ ${minDailySales}`, clear: () => { setMinDailySales(undefined); void doSearch(1, { minDailySales: undefined }); } });
+    return arr;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keyword, optIdPath, minPrice, maxPrice, minDailySales, catNameMap]);
+
+  const currentSortLabel = useMemo(() => {
+    const sort = SORT_OPTIONS.find((o) => o.value === sortBy)?.label || "日销量";
+    return `${sort} ${sortOrder === "DESC" ? "高→低" : "低→高"}`;
+  }, [sortBy, sortOrder]);
+
+  const isQuickActive = (ov: Record<string, any>) => Object.entries(ov).every(([key, value]) => {
+    if (key === "minDailySales") return minDailySales === value;
+    if (key === "minPrice") return minPrice === value;
+    if (key === "maxPrice") return maxPrice === value;
+    if (key === "sortBy") return sortBy === value;
+    if (key === "sortOrder") return sortOrder === value;
+    return false;
+  });
+
+  // ---- 渲染 ----
+
+  const metricSummary = (
+    <div style={{ display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
+      <Metric icon={<SearchOutlined />} color="#16a34a" label="搜索结果" value={intFmt(result.total)} />
+      <Metric icon={<StarFilled />} color="#fa8c16" label="选品池" value={intFmt(poolSummary.total || 0)} />
+      <div style={{ display: "flex", gap: 6 }}>
+        <Button
+          size="small"
+          icon={<ReloadOutlined />}
+          onClick={() => { void loadPoolIds(); void loadPool(); void doSearch(page); }}
+        >
+          刷新
+        </Button>
+        {tokenExpired && (
+          <Button
+            size="small"
+            type="primary"
+            danger
+            icon={<WarningOutlined />}
+            loading={refreshingToken}
+            onClick={refreshToken}
+          >
+            刷新登录
+          </Button>
+        )}
+      </div>
+    </div>
+  );
 
   const plazaTab = (
-    <Space direction="vertical" size={14} style={{ width: "100%" }}>
-      <style>{`.sp-card{transition:transform .18s ease,box-shadow .22s ease} .sp-card:hover{transform:translateY(-5px)}`}</style>
-      {/* 抓一批 + 库存概览 */}
-      <Card style={CARD_STYLE} styles={{ body: { padding: 16 } }}>
-        <Row gutter={[16, 12]} align="middle">
-          <Col flex="auto">
-            <Space direction="vertical" size={6} style={{ width: "100%" }}>
-              <Text strong>
-                <ThunderboltOutlined style={{ color: BLUE }} /> 从云启抓一批商品进库
-              </Text>
-              <Space.Compact style={{ width: "100%", maxWidth: 760 }}>
-                <Input
-                  value={syncKeywords}
-                  onChange={(e) => setSyncKeywords(e.target.value)}
-                  placeholder="输入关键词，逗号或换行分隔多个（如：手机壳, 宠物玩具, 收纳盒）"
-                  onPressEnter={() => void doSync()}
-                  allowClear
-                />
-                <Tooltip title="每个关键词抓取的页数（每页约 100 条）">
-                  <InputNumber min={1} max={10} value={syncMaxPages} onChange={(v) => setSyncMaxPages(Number(v) || 5)} addonBefore="页数" style={{ width: 130 }} />
-                </Tooltip>
-                <Button type="primary" loading={syncing} icon={<ThunderboltOutlined />} onClick={() => void doSync()}>
-                  抓一批
-                </Button>
-              </Space.Compact>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                抓取按日销量倒序拉取；若云启登录过期，会自动打开云启页面让你登录后重试。
-              </Text>
-            </Space>
-          </Col>
-          <Col>
-            <Space size={24}>
-              <Statistic title="库内商品" value={dbRowCount} valueStyle={{ color: BLUE }} prefix={<ShoppingOutlined />} />
-              <Statistic title="涉及店铺" value={stats?.totalMalls || 0} />
-              <Button icon={<ReloadOutlined />} onClick={() => void loadDbInfo()}>
-                刷新
-              </Button>
-            </Space>
-          </Col>
-        </Row>
-      </Card>
+    <Space direction="vertical" size={12} style={{ width: "100%" }}>
+      <style>{`
+        .sp-card{transition:transform .18s ease,box-shadow .22s ease}
+        .sp-card:hover{transform:translateY(-3px);box-shadow:0 4px 12px rgba(0,0,0,0.08),0 12px 28px rgba(0,0,0,0.1)!important}
+      `}</style>
 
-      {/* 筛选条 */}
-      <Card style={CARD_STYLE} styles={{ body: { padding: 16 } }}>
-        <Row gutter={[12, 12]} align="middle">
-          <Col xs={24} sm={12} md={6}>
-            <Input
-              value={keyword}
-              onChange={(e) => setKeyword(e.target.value)}
-              placeholder="商品标题关键词"
-              prefix={<SearchOutlined />}
-              onPressEnter={() => void doSearch(1)}
-              allowClear
-            />
-          </Col>
-          <Col xs={12} sm={8} md={4}>
-            <Cascader
-              options={categoryOptions}
-              value={optIdPath}
-              onChange={(val) => setOptIdPath((val as string[]) || [])}
-              placeholder={categoryOptions.length ? "选类目" : "类目加载中"}
-              changeOnSelect
-              allowClear
-              showSearch={{ filter: (input, path) => path.some((o) => String(o.label).toLowerCase().includes(input.toLowerCase())) }}
-              style={{ width: "100%" }}
-            />
-          </Col>
-          <Col xs={12} sm={8} md={5}>
-            <Space.Compact style={{ width: "100%" }}>
-              <InputNumber value={minPrice} onChange={(v) => setMinPrice(v ?? undefined)} placeholder="最低价$" min={0} style={{ width: "50%" }} />
-              <InputNumber value={maxPrice} onChange={(v) => setMaxPrice(v ?? undefined)} placeholder="最高价$" min={0} style={{ width: "50%" }} />
-            </Space.Compact>
-          </Col>
-          <Col xs={12} sm={8} md={3}>
-            <InputNumber value={minDailySales} onChange={(v) => setMinDailySales(v ?? undefined)} placeholder="日销≥" min={0} style={{ width: "100%" }} />
-          </Col>
-          <Col xs={12} sm={8} md={4}>
-            <Space.Compact style={{ width: "100%" }}>
-              <Select value={sortBy} onChange={setSortBy} options={SORT_OPTIONS} style={{ width: "62%" }} />
-              <Select
-                value={sortOrder}
-                onChange={setSortOrder}
-                style={{ width: "38%" }}
-                options={[
-                  { value: "DESC", label: "高→低" },
-                  { value: "ASC", label: "低→高" },
-                ]}
+      {/* 筛选区 */}
+      <Card style={CARD_STYLE} styles={{ body: { padding: "14px 16px" } }}>
+        <Space direction="vertical" size={10} style={{ width: "100%" }}>
+          {metricSummary}
+
+          <div style={{ height: 1, background: "#f0f0f0", margin: "2px 0" }} />
+
+          {/* 搜索行 */}
+          <Row gutter={[10, 10]} align="middle">
+            <Col xs={24} sm={12} md={7}>
+              <Input
+                value={keyword}
+                onChange={(e) => setKeyword(e.target.value)}
+                placeholder="搜索商品标题关键词"
+                prefix={<SearchOutlined style={{ color: "#bfbfbf" }} />}
+                onPressEnter={() => void doSearch(1)}
+                allowClear
+                size="middle"
               />
-            </Space.Compact>
-          </Col>
-          <Col xs={12} sm={8} md={2}>
-            <Button type="primary" block loading={searching} icon={<SearchOutlined />} onClick={() => void doSearch(1)}>
-              筛选
+            </Col>
+            <Col xs={12} sm={8} md={4}>
+              <Cascader
+                options={categoryOptions}
+                value={optIdPath}
+                onChange={(val) => setOptIdPath((val as string[]) || [])}
+                placeholder={categoryOptions.length ? "选类目" : "类目加载中"}
+                changeOnSelect
+                allowClear
+                showSearch={{ filter: (input, path) => path.some((o) => String(o.label).toLowerCase().includes(input.toLowerCase())) }}
+                style={{ width: "100%" }}
+              />
+            </Col>
+            <Col xs={12} sm={8} md={4}>
+              <Space.Compact style={{ width: "100%" }}>
+                <InputNumber value={minPrice} onChange={(v) => setMinPrice(v ?? undefined)} placeholder="最低价$" min={0} style={{ width: "50%" }} />
+                <InputNumber value={maxPrice} onChange={(v) => setMaxPrice(v ?? undefined)} placeholder="最高价$" min={0} style={{ width: "50%" }} />
+              </Space.Compact>
+            </Col>
+            <Col xs={8} sm={6} md={3}>
+              <InputNumber value={minDailySales} onChange={(v) => setMinDailySales(v ?? undefined)} placeholder="日销≥" min={0} style={{ width: "100%" }} />
+            </Col>
+            <Col xs={10} sm={8} md={4}>
+              <Space.Compact style={{ width: "100%" }}>
+                <Select value={sortBy} onChange={setSortBy} options={SORT_OPTIONS} style={{ width: "62%" }} />
+                <Select
+                  value={sortOrder}
+                  onChange={setSortOrder}
+                  style={{ width: "38%" }}
+                  options={[{ value: "DESC", label: "降序" }, { value: "ASC", label: "升序" }]}
+                />
+              </Space.Compact>
+            </Col>
+            <Col xs={6} sm={4} md={2} style={{ minWidth: 80 }}>
+              <Button type="primary" block loading={searching} icon={<SearchOutlined />} onClick={() => void doSearch(1)}>
+                搜索
+              </Button>
+            </Col>
+          </Row>
+
+          {/* 快捷筛选 + 清空 */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+            <Space size={6} wrap>
+              <Text type="secondary" style={{ fontSize: 12 }}>快捷：</Text>
+              {QUICK_FILTERS.map((q) => (
+                <Button key={q.key} size="small" type={isQuickActive(q.ov) ? "primary" : "default"} icon={q.icon} onClick={() => applyQuick(q.ov)}>
+                  {q.label}
+                </Button>
+              ))}
+            </Space>
+            <Button size="small" type="text" icon={<ClearOutlined />} disabled={!activeFilters.length} onClick={clearFilters}>
+              清空筛选
             </Button>
-          </Col>
-        </Row>
+          </div>
+
+          {/* 活跃筛选标签 */}
+          {activeFilters.length > 0 && (
+            <Space size={6} wrap>
+              <Text type="secondary" style={{ fontSize: 12 }}>已选：</Text>
+              {activeFilters.map((f) => (
+                <Tag key={f.key} closable color="blue" onClose={(e) => { e.preventDefault(); f.clear(); }} style={{ marginInlineEnd: 0 }}>
+                  {f.label}
+                </Tag>
+              ))}
+            </Space>
+          )}
+        </Space>
       </Card>
 
-      {/* 商品墙 */}
+      {/* token 过期提示 */}
+      {tokenExpired && (
+        <Alert
+          showIcon
+          type="warning"
+          icon={<WarningOutlined />}
+          message="搜索登录已过期"
+          description="实时搜索需要有效的登录凭证。点击「刷新登录」重新获取，约 30 秒后即可恢复搜索。"
+          action={
+            <Button size="small" type="primary" loading={refreshingToken} onClick={refreshToken}>
+              刷新登录
+            </Button>
+          }
+          style={{ borderRadius: 10 }}
+        />
+      )}
+
+      {/* 结果头 */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        <Space size={8} wrap>
+          <Text strong>候选商品</Text>
+          <Tag color="blue" style={{ marginInlineEnd: 0 }}>共 {intFmt(result.total)} 件</Tag>
+          <Text type="secondary" style={{ fontSize: 12 }}>排序：{currentSortLabel}</Text>
+        </Space>
+        <Text type="secondary" style={{ fontSize: 12 }}>每页 {PAGE_SIZE} 件</Text>
+      </div>
+
+      {/* 商品网格 */}
       {result.items.length === 0 ? (
         <Card style={CARD_STYLE}>
-          <Empty description={dbRowCount === 0 ? "选品库还是空的——先在上方「抓一批」拉点商品进来" : "没有符合条件的商品，换个筛选条件试试"} />
+          <Empty description={tokenExpired ? "搜索登录已过期，请先「刷新登录」" : "没有符合条件的商品，换个关键词或筛选条件试试"} />
         </Card>
       ) : (
         <>
-          <Row gutter={[12, 12]}>
+          <div style={PRODUCT_GRID_STYLE}>
             {result.items.map((item) => (
-              <Col key={item.goods_id} xs={12} sm={8} md={6} lg={4} xl={4}>
-                {renderCard(item)}
-              </Col>
+              <div key={item.goods_id} style={{ minWidth: 0 }}>
+                <ProductCard
+                  item={item}
+                  inPool={poolIds.has(String(item.goods_id))}
+                  onAdd={() => addToPool(item)}
+                  onRemove={() => removeFromPool(item.goods_id)}
+                  onOpen={() => openProduct(item)}
+                />
+              </div>
             ))}
-          </Row>
+          </div>
           <div style={{ textAlign: "center", marginTop: 16 }}>
             <Pagination
               current={page}
@@ -540,46 +787,106 @@ export default function SelectionPlaza() {
   );
 
   const poolTab = (
-    <Space direction="vertical" size={14} style={{ width: "100%" }}>
-      <Card style={CARD_STYLE} styles={{ body: { padding: 16 } }}>
-        <Segmented value={poolStatusFilter} onChange={(v) => setPoolStatusFilter(String(v))} options={poolSegOptions} />
+    <Space direction="vertical" size={12} style={{ width: "100%" }}>
+      <style>{`
+        .sp-card{transition:transform .18s ease,box-shadow .22s ease}
+        .sp-card:hover{transform:translateY(-3px);box-shadow:0 4px 12px rgba(0,0,0,0.08),0 12px 28px rgba(0,0,0,0.1)!important}
+      `}</style>
+
+      {/* 状态看板 */}
+      <Card style={CARD_STYLE} styles={{ body: { padding: 12 } }}>
+        <Row gutter={[8, 8]}>
+          {[
+            { value: "", label: "全部", hex: BLUE, count: poolSummary.total || 0 },
+            ...STATUS_KEYS.map((k) => ({ value: k, label: STATUS_META[k].label, hex: STATUS_META[k].hex, count: poolSummary[k] || 0 })),
+          ].map((s) => {
+            const active = poolStatusFilter === s.value;
+            return (
+              <Col key={s.value || "all"} flex="1 1 0" style={{ minWidth: 84 }}>
+                <div
+                  onClick={() => setPoolStatusFilter(s.value)}
+                  style={{
+                    cursor: "pointer",
+                    borderRadius: 8,
+                    padding: "10px 10px 8px",
+                    border: active ? `2px solid ${s.hex}` : "1px solid #f0f0f0",
+                    background: active ? `${s.hex}0a` : "#fafafa",
+                    transition: "all .15s ease",
+                    textAlign: "center",
+                  }}
+                >
+                  <div style={{ fontSize: 22, fontWeight: 700, color: s.hex, lineHeight: 1.1 }}>{intFmt(s.count)}</div>
+                  <div style={{ fontSize: 12, color: active ? s.hex : "#8c8c8c", marginTop: 3, fontWeight: active ? 600 : 400 }}>{s.label}</div>
+                </div>
+              </Col>
+            );
+          })}
+        </Row>
       </Card>
+
+      {/* 选品池网格 */}
       {poolRows.length === 0 ? (
         <Card style={CARD_STYLE}>
-          <Empty description="选品池还是空的——去「商品广场」把想上的品加进来" />
+          <Empty description={poolStatusFilter ? `「${STATUS_META[poolStatusFilter]?.label || ""}」状态下暂无商品` : "选品池还是空的，去「商品广场」把想上的品加进来"} />
         </Card>
       ) : (
-        <Row gutter={[12, 12]}>
+        <div style={PRODUCT_GRID_STYLE}>
           {poolRows.map((item) => (
-            <Col key={item.goods_id} xs={12} sm={8} md={6} lg={4} xl={4}>
-              {renderCard(item, { pool: true })}
-            </Col>
+            <div key={item.goods_id} style={{ minWidth: 0 }}>
+              <ProductCard
+                item={item}
+                inPool
+                pool
+                onAdd={() => {}}
+                onRemove={() => removeFromPool(item.goods_id)}
+                onOpen={() => openProduct(item)}
+                onStatusChange={(s) => changeStatus(item.goods_id, s)}
+                onNoteUpdate={(n) => updateNote(item.goods_id, n)}
+              />
+            </div>
           ))}
-        </Row>
+        </div>
       )}
     </Space>
   );
 
   return (
     <div style={{ padding: 16 }}>
-      <Tabs
-        activeKey={activeTab}
-        onChange={setActiveTab}
-        items={[
-          { key: "plaza", label: <span><ShoppingOutlined /> 商品广场</span>, children: plazaTab },
-          {
-            key: "pool",
-            label: (
-              <span>
-                <Badge count={poolSummary.total || 0} size="small" offset={[8, -2]} color={BLUE}>
-                  <StarFilled /> 我的选品池
-                </Badge>
-              </span>
-            ),
-            children: poolTab,
-          },
-        ]}
-      />
+      <Space direction="vertical" size={12} style={{ width: "100%" }}>
+        <Tabs
+          activeKey={activeTab}
+          onChange={setActiveTab}
+          items={[
+            { key: "plaza", label: <span><ShoppingOutlined /> 商品广场</span>, children: plazaTab },
+            {
+              key: "pool",
+              label: (
+                <span>
+                  <Badge count={poolSummary.total || 0} size="small" offset={[8, -2]} color={BLUE}>
+                    <StarFilled /> 我的选品池
+                  </Badge>
+                </span>
+              ),
+              children: poolTab,
+            },
+          ]}
+        />
+      </Space>
+
     </div>
+  );
+}
+
+function Metric({ icon, label, value, color }: { icon: React.ReactNode; label: string; value: string; color: string }) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+      <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, borderRadius: 8, background: `${color}12`, color, fontSize: 15 }}>
+        {icon}
+      </span>
+      <span style={{ display: "inline-flex", flexDirection: "column", lineHeight: 1.15 }}>
+        <span style={{ fontSize: 17, fontWeight: 700, color: "#262626" }}>{value}</span>
+        <span style={{ fontSize: 11, color: "#8c8c8c" }}>{label}</span>
+      </span>
+    </span>
   );
 }

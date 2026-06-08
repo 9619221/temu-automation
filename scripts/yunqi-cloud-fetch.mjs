@@ -107,6 +107,21 @@ async function fetchAndStore(page, { wareHouseType, keyword, label }) {
     await login(page, account, password);
     log("登录成功 ✓");
 
+    // 保存 token 供实时搜索代理使用（yunqiLiveProxy.cjs）
+    const TOKEN_FILE = process.env.YUNQI_TOKEN_FILE || "/opt/temu-erp-data/yunqi-token.json";
+    try {
+      const savedToken = await page.evaluate(() => {
+        const ls = {}; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); ls[k] = localStorage.getItem(k); }
+        const cookie = document.cookie || ""; let token = ""; const m = cookie.match(/(?:^|;\s*)token=([^;]+)/); if (m) token = m[1];
+        if (!token) for (const [k, v] of Object.entries(ls)) { if (/token|auth/i.test(k) && String(v).includes("eyJ")) { token = String(v).replace(/^"|"$/g, ""); break; } }
+        return token;
+      });
+      if (savedToken) {
+        fs.writeFileSync(TOKEN_FILE, JSON.stringify({ token: savedToken, savedAt: new Date().toISOString(), expiresAt: Date.now() + 23 * 3600 * 1000 }));
+        log(`token 已保存 → ${TOKEN_FILE}`);
+      }
+    } catch (e) { log("保存 token 失败:", e.message); }
+
     // 抓云启 opt_id 类目树：导航选品页，读 ElCascader 组件的 options（id=opt_id, showName=显示名, child_opts=二级）。
     // 这套 opt_id 与商品的 opt_ids 字段同体系（如 580=汽车），是「按类目筛」的真实键。
     try {

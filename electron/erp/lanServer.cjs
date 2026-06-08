@@ -70,6 +70,7 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/temu/jit-vmi-cloud-sync": ["admin", "manager", "operations"],
   "/api/temu/reviews-cloud-sync": ["admin", "manager", "operations"],
   "/api/temu/images-cloud-sync": ["admin", "manager", "operations"],
+  "/api/temu/settlement-income-sync": ["admin", "manager", "operations", "finance"],
   "/api/erp/reports/multi-store": ["admin", "manager", "operations", "finance"],
   "/api/erp/reports/mall-dict": ["admin", "manager", "operations", "finance", "buyer", "warehouse"],
   "/api/erp/reports/set-mall-owner": ["admin", "manager"],
@@ -4381,6 +4382,48 @@ async function handleTemuImagesCloudSyncRequest({ req, res, db }) {
   }
 }
 
+async function handleTemuSettlementIncomeSyncRequest({ req, res, db }) {
+  if (req.method !== "POST") {
+    writeJson(res, 405, { ok: false, error: "Method not allowed" });
+    return;
+  }
+  try {
+    await readLoginPayload(req, 64 * 1024);
+    const {
+      syncSettlementIncomeFromCapture,
+      syncSettlementDetailFromCapture,
+      clearMultiStoreReportCache,
+    } = require("./services/multiStoreReport.cjs");
+    const income = syncSettlementIncomeFromCapture(db, {
+      attachCloudDb: attachTemuCloudDbIfPossible,
+    });
+    const detail = income.attached
+      ? syncSettlementDetailFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible })
+      : { ok: false, attached: false, malls: 0, rows: 0 };
+    const totalRows = (Number(income.rows) || 0) + (Number(detail.rows) || 0);
+    if (totalRows > 0 && typeof clearMultiStoreReportCache === "function") {
+      clearMultiStoreReportCache();
+    }
+    const result = {
+      ok: Boolean(income.ok && detail.ok),
+      attached: income.attached,
+      malls: Math.max(Number(income.malls) || 0, Number(detail.malls) || 0),
+      rows: totalRows,
+      incomeRows: Number(income.rows) || 0,
+      detailRows: Number(detail.rows) || 0,
+      income,
+      detail,
+    };
+    writeJson(res, 200, { ok: true, result });
+  } catch (error) {
+    writeJson(res, error?.statusCode || 400, {
+      ok: false,
+      error: error?.message || String(error),
+      code: error?.code || null,
+    });
+  }
+}
+
 async function handleMultiStoreReportRequest({ req, res, db }) {
   if (req.method !== "GET") {
     writeJson(res, 405, { ok: false, error: "Method not allowed" });
@@ -5512,6 +5555,15 @@ async function handleRequest({
       return;
     }
 
+    if (pathname === "/api/temu/settlement-income-sync") {
+      await handleTemuSettlementIncomeSyncRequest({
+        req,
+        res,
+        db,
+      });
+      return;
+    }
+
     if (pathname === "/api/erp/reports/multi-store") {
       await handleMultiStoreReportRequest({ req, res, db });
       return;
@@ -5619,20 +5671,15 @@ async function handleRequest({
       return;
     }
 
-    // ===== 选品广场：云端选品库读取 + 选品池（读 /opt/temu-erp-data/yunqi_products.db）=====
+    // ===== 选品广场：实时搜索代理 + 选品池（读 /opt/temu-erp-data/yunqi_products.db）=====
     if (pathname === "/api/erp/reports/yunqi-search") {
       if (req.method !== "POST") { writeJson(res, 405, { ok: false, error: "Method not allowed" }); return; }
-      try { const p = await readOptionalPayload(req); writeJson(res, 200, { ok: true, data: require("./services/yunqiCloud.cjs").searchProducts(p || {}) }); }
+      try { const p = await readOptionalPayload(req); writeJson(res, 200, { ok: true, data: await require("./services/yunqiLiveProxy.cjs").liveSearch(p || {}) }); }
       catch (error) { writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) }); }
       return;
     }
-    if (pathname === "/api/erp/reports/yunqi-stats") {
-      try { writeJson(res, 200, { ok: true, data: require("./services/yunqiCloud.cjs").getStats() }); }
-      catch (error) { writeJson(res, 500, { ok: false, error: error?.message || String(error) }); }
-      return;
-    }
-    if (pathname === "/api/erp/reports/yunqi-info") {
-      try { writeJson(res, 200, { ok: true, data: require("./services/yunqiCloud.cjs").getInfo() }); }
+    if (pathname === "/api/erp/reports/yunqi-token-status") {
+      try { writeJson(res, 200, { ok: true, data: require("./services/yunqiLiveProxy.cjs").tokenStatus() }); }
       catch (error) { writeJson(res, 500, { ok: false, error: error?.message || String(error) }); }
       return;
     }
