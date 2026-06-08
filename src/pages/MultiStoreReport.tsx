@@ -36,6 +36,7 @@ import {
 } from "recharts";
 import { readPageCache, writePageCache } from "../utils/pageCache";
 import { useSessionState } from "../hooks/useSessionState";
+import { useDebouncedValue } from "../hooks/useDebouncedValue";
 
 interface FinWindow {
   revenue: number;
@@ -64,6 +65,7 @@ interface ReportStore {
   financials: StoreFinancials | null;
   sales: { today_qty: number; last7d_qty: number; last30d_qty: number; sku_count: number };
   stock_orders: { total: number; pending: number; demand_qty: number; delivered_qty: number };
+  inventory?: { warehouse_value: number; in_transit_value: number };
   activities: { count: number; unique: number; skc_count: number };
   shop_stats: {
     stat_date: string | null;
@@ -243,7 +245,9 @@ export default function MultiStoreReport() {
   const [skuLoaded, setSkuLoaded] = useState(false);
   const [skuStoreFilter, setSkuStoreFilter] = useSessionState(msrViewKey("skuStore"), "all");
   const [skuStatusFilter, setSkuStatusFilter] = useSessionState(msrViewKey("skuStatus"), "all");
-  const [skuSearch, setSkuSearch] = useSessionState(msrViewKey("skuSearch"), "");
+  const [skuSearchInput, setSkuSearchInput] = useSessionState(msrViewKey("skuSearch"), "");
+  // 搜索框防抖：输入框绑 skuSearchInput 跟手，下游过滤用防抖后的 skuSearch（变量名不变，下游无需改）。
+  const skuSearch = useDebouncedValue(skuSearchInput, 250);
 
   const load = useCallback(async () => {
     if (!window.electronAPI?.erp?.reports?.multiStore) {
@@ -357,7 +361,9 @@ export default function MultiStoreReport() {
     const rev30 = stores.reduce((acc, s) => acc + (s.financials?.last30d.revenue || 0), 0);
     const gp30 = stores.reduce((acc, s) => acc + (s.financials?.last30d.gross_profit || 0), 0);
     const revToday = stores.reduce((acc, s) => acc + (s.financials?.today.revenue || 0), 0);
-    return { onlineCount, totalPending, rev30, gp30, revToday, margin30: rev30 > 0 ? gp30 / rev30 : null };
+    const warehouseValue = stores.reduce((acc, s) => acc + (s.inventory?.warehouse_value || 0), 0);
+    const inTransitValue = stores.reduce((acc, s) => acc + (s.inventory?.in_transit_value || 0), 0);
+    return { onlineCount, totalPending, rev30, gp30, revToday, warehouseValue, inTransitValue, margin30: rev30 > 0 ? gp30 / rev30 : null };
   }, [stores]);
 
   // 全局趋势（合并各店 trend_daily）
@@ -643,7 +649,7 @@ export default function MultiStoreReport() {
               options={[{ value: "all", label: "全部店铺" }, ...skuStoreOptions.map((c) => ({ value: c, label: c }))]} />
             <Select size="small" style={{ width: 130 }} value={skuStatusFilter} onChange={setSkuStatusFilter}
               options={[{ value: "all", label: "全部状态" }, { value: "soldout", label: "已售罄" }, { value: "low", label: "建议补货" }, { value: "selling", label: "在售" }]} />
-            <Input.Search size="small" allowClear placeholder="搜货号 / 标题 / SKC" style={{ width: 240 }} value={skuSearch} onChange={(e) => setSkuSearch(e.target.value)} />
+            <Input.Search size="small" allowClear placeholder="搜货号 / 标题 / SKC" style={{ width: 240 }} value={skuSearchInput} onChange={(e) => setSkuSearchInput(e.target.value)} />
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>共 {skuView.length} 条（仅含动销或售罄 SKU，取各店最新一天）</Typography.Text>
           </div>
           <Table<SkuRow>
@@ -832,11 +838,21 @@ export default function MultiStoreReport() {
       >
         {summary && (
           <>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 16 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 16 }}>
               <Statistic title="店铺数" value={stores.length} suffix={`/ ${summary.onlineCount} 实时`} />
               <Statistic title="今日营收" value={finAvailable ? fmtMoney(summary.revToday) : "—"} />
               <Statistic title={`${label30}营收`} value={finAvailable ? fmtMoney(summary.rev30) : "—"} />
               <Statistic title={`${label30}毛利率`} value={finAvailable ? fmtPct(summary.margin30) : "—"} valueStyle={summary.margin30 != null ? { color: marginColor(summary.margin30) } : undefined} />
+              <Statistic
+                title={<Tooltip title="Temu 平台仓可售库存 × 加权均价；成本未覆盖的 SKU 按 0 计，为下限值"><span style={{ borderBottom: "1px dotted #bbb", cursor: "help" }}>仓内货值</span></Tooltip>}
+                value={finAvailable ? fmtMoney(summary.warehouseValue) : "—"}
+                valueStyle={{ color: "#1677ff" }}
+              />
+              <Statistic
+                title={<Tooltip title="送仓在途（已从自有仓发出、Temu 仓未签收）× 加权均价；成本未覆盖的 SKU 按 0 计，为下限值"><span style={{ borderBottom: "1px dotted #bbb", cursor: "help" }}>在途货值</span></Tooltip>}
+                value={finAvailable ? fmtMoney(summary.inTransitValue) : "—"}
+                valueStyle={{ color: "#d46b08" }}
+              />
               <Statistic title="待发备货合计" value={summary.totalPending} valueStyle={summary.totalPending > 0 ? { color: "#fa8c16" } : undefined} />
             </div>
             <div style={{ marginTop: 14, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>

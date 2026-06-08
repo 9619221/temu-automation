@@ -276,6 +276,8 @@ function buildByStoreLocal(db, options = {}) {
 
   // today_sales/last7d_sales/last30d_sales 是 Temu 在每个 stat_date 当天算好的快照值，
   // 表里每天每 SKU 一行（保留历史），所以只能取每店最新 stat_date 当天，绝不可跨天 SUM（否则虚高 N 倍）。
+  // warehouse_value（仓内货值）= 最新天 Temu 平台仓可售库存(warehouse_stock) × 加权均价，按 sku_ext_code join 成本；
+  // 同样只取最新天（latest CTE 约束），避免跨天库存快照重复累加。
   const salesRows = optionalAllLocal(db,
     `WITH latest AS (
        SELECT mall_supplier_id, MAX(stat_date) AS sd
@@ -288,9 +290,14 @@ function buildByStoreLocal(db, options = {}) {
             SUM(COALESCE(s.today_sales,0))   AS sales_today_qty,
             SUM(COALESCE(s.last7d_sales,0))  AS sales_7d_qty,
             SUM(COALESCE(s.last30d_sales,0)) AS sales_30d_qty,
-            COUNT(DISTINCT s.skc_id) AS sku_count
+            COUNT(DISTINCT s.skc_id) AS sku_count,
+            SUM(COALESCE(s.warehouse_stock,0) * COALESCE(k.wac,0)) AS warehouse_value
        FROM cloud.temu_sales_snapshot s
        JOIN latest l ON l.mall_supplier_id = s.mall_supplier_id AND l.sd = s.stat_date
+       LEFT JOIN (
+         SELECT internal_sku_code, MAX(weighted_avg_cost) AS wac
+           FROM erp_skus GROUP BY internal_sku_code
+       ) k ON k.internal_sku_code = s.sku_ext_code
       WHERE s.tenant_id = ? AND s.skc_id NOT IN ('SKC-EXT-E2E','SKC-DBG')
       GROUP BY s.mall_supplier_id`,
     [tid, ...excludeMallIds, tid]);
@@ -300,6 +307,8 @@ function buildByStoreLocal(db, options = {}) {
   // 中文 LIKE 对数字码失效(老坑)。证据：stock_order 码 7=已完成(已发完,数量口径自动排除)、
   // 8=已取消(delivered=0 全为 0 + applyDeleteStatus=2 + 量级远超销量)，故按数量排除 7、按状态排除 8；
   // 兼容历史中文状态。7/8 只出现在 stock_order 套，排除不误伤 shipping_list/shipping_desk。
+  // in_transit_value（在途货值）= 送仓在途数量(shipping_qty，运输中=已发未签收) × 加权均价，按 sku_ext_code join 成本。
+  // stock_order 是当前态 upsert（无跨天虚高），已签收行 shipping_qty 归 0，故直接 SUM 即「自有仓→Temu仓」在途货值。
   const stockRows = optionalAllLocal(db,
     `SELECT mall_id, COUNT(*) AS total_orders,
             SUM(CASE WHEN COALESCE(delivered_qty,0) < COALESCE(demand_qty,0)
@@ -308,8 +317,13 @@ function buildByStoreLocal(db, options = {}) {
                       AND temu_status NOT LIKE '%已签收%' AND temu_status NOT LIKE '%取消%'
                      THEN 1 ELSE 0 END) AS pending_orders,
             SUM(COALESCE(demand_qty,0))    AS demand_qty_total,
-            SUM(COALESCE(delivered_qty,0)) AS delivered_qty_total
+            SUM(COALESCE(delivered_qty,0)) AS delivered_qty_total,
+            SUM(COALESCE(shipping_qty,0) * COALESCE(k.wac,0)) AS in_transit_value
        FROM cloud.temu_stock_order_snapshot
+       LEFT JOIN (
+         SELECT internal_sku_code, MAX(weighted_avg_cost) AS wac
+           FROM erp_skus GROUP BY internal_sku_code
+       ) k ON k.internal_sku_code = sku_ext_code
       WHERE tenant_id = ? AND mall_id <> '' ${baseMallFilter}
       GROUP BY mall_id`, [tid, ...excludeMallIds]);
   const stockMap = new Map(stockRows.map((r) => [r.mall_id, r]));
@@ -378,6 +392,11 @@ function buildByStoreLocal(db, options = {}) {
         pending: toNum(o.pending_orders),
         demand_qty: toNum(o.demand_qty_total),
         delivered_qty: toNum(o.delivered_qty_total),
+      },
+      // 货值（按加权均价计；成本未覆盖的 SKU 计 0，故为下限值）
+      inventory: {
+        warehouse_value: toNum(s.warehouse_value),   // 仓内货值：Temu 平台仓可售库存 × 加权均价
+        in_transit_value: toNum(o.in_transit_value), // 在途货值：送仓在途(已发未签收) × 加权均价
       },
       activities: {
         count: toNum(a.activity_count),
