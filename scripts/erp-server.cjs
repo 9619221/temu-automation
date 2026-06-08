@@ -29,6 +29,8 @@ function envNumber(name, fallback) {
 
 let purchaseSchedulerTimer = null;
 let purchaseSchedulerRunning = false;
+let settlementSchedulerTimer = null;
+let settlementSchedulerRunning = false;
 
 async function tickPurchaseAutoSync() {
   if (purchaseSchedulerRunning) return;
@@ -73,6 +75,41 @@ function startPurchaseAutoSyncScheduler() {
   setImmediate(() => { tickPurchaseAutoSync().catch((e) => console.warn("[order-sync] initial tick failed:", e?.message || e)); });
 }
 
+async function tickSettlementIncomeSync(erpDbPath) {
+  if (settlementSchedulerRunning) return;
+  settlementSchedulerRunning = true;
+  try {
+    const { runOnce } = require("./sync-temu-settlement-income.cjs");
+    const result = runOnce({ erpDbPath });
+    if (result && result.attached === false) {
+      console.warn("[settlement-income-sync] cloud db not attached, skipped");
+    } else if (result && result.ok === false) {
+      console.warn(`[settlement-income-sync] tick did not complete: income_ok=${result.income?.ok} detail_ok=${result.detail?.ok}`);
+    } else if (result && Number(result.rows) > 0) {
+      console.log(`[settlement-income-sync] tick malls=${result.malls || 0} rows=${result.rows || 0}`);
+    }
+  } catch (e) {
+    console.warn("[settlement-income-sync] tick failed:", e?.message || e);
+  } finally {
+    settlementSchedulerRunning = false;
+  }
+}
+
+function startSettlementIncomeSyncScheduler(erpDbPath) {
+  if (!envFlag("ERP_SETTLEMENT_INCOME_AUTO_SYNC", true)) {
+    console.log("[settlement-income-sync] scheduler disabled (ERP_SETTLEMENT_INCOME_AUTO_SYNC=0)");
+    return;
+  }
+  const intervalMin = Math.max(1, envNumber("ERP_SETTLEMENT_INCOME_SYNC_INTERVAL_MIN", 15));
+  settlementSchedulerTimer = setInterval(() => {
+    tickSettlementIncomeSync(erpDbPath).catch((e) => console.warn("[settlement-income-sync] interval tick failed:", e?.message || e));
+  }, intervalMin * 60 * 1000);
+  console.log(`[settlement-income-sync] scheduler started, interval=${intervalMin}min`);
+  setImmediate(() => {
+    tickSettlementIncomeSync(erpDbPath).catch((e) => console.warn("[settlement-income-sync] initial tick failed:", e?.message || e));
+  });
+}
+
 async function main() {
   const port = Number(readOption("port", process.env.ERP_PORT || 19380));
   const bindAddress = readOption("bind", process.env.ERP_BIND_ADDRESS || "0.0.0.0");
@@ -96,12 +133,14 @@ async function main() {
   }
   setTimeout(() => {
     try { startPurchaseAutoSyncScheduler(); } catch (e) { console.warn("[order-sync] start failed:", e?.message || e); }
+    try { startSettlementIncomeSyncScheduler(result.initResult.dbPath); } catch (e) { console.warn("[settlement-income-sync] start failed:", e?.message || e); }
   }, 30 * 1000);
 }
 
 function shutdown(signal) {
   console.log(`[ERP Server] received ${signal}, shutting down...`);
   if (purchaseSchedulerTimer) { clearInterval(purchaseSchedulerTimer); purchaseSchedulerTimer = null; }
+  if (settlementSchedulerTimer) { clearInterval(settlementSchedulerTimer); settlementSchedulerTimer = null; }
   Promise.resolve(closeErp()).finally(() => process.exit(0));
 }
 

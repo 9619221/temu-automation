@@ -23166,6 +23166,54 @@ function registerErpIpcHandlers(ipcMain) {
       return { ok: false, error: error?.message || String(error) };
     }
   });
+  ipcMain.handle("erp:sync-temu-settlement-income-from-cloud", async (_event, payload) => {
+    try {
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest("/api/temu/settlement-income-sync", {
+          method: "POST",
+          body: payload || {},
+        });
+      }
+      requireErp();
+      const {
+        syncSettlementIncomeFromCapture,
+        syncSettlementDetailFromCapture,
+        syncFundDetailFromCapture,
+        clearMultiStoreReportCache,
+      } = require("./services/multiStoreReport.cjs");
+      const { attachTemuCloudDbIfPossible } = require("./lanServer.cjs");
+      const income = syncSettlementIncomeFromCapture(erpState.db, {
+        attachCloudDb: attachTemuCloudDbIfPossible,
+      });
+      const detail = income.attached
+        ? syncSettlementDetailFromCapture(erpState.db, { attachCloudDb: attachTemuCloudDbIfPossible })
+        : { ok: false, attached: false, malls: 0, rows: 0 };
+      // 对账中心账务明细（fund_detail）：售后赔付/仓储费/EPR/广告等费用
+      const fund = income.attached
+        ? syncFundDetailFromCapture(erpState.db, { attachCloudDb: attachTemuCloudDbIfPossible })
+        : { ok: false, attached: false, malls: 0, rows: 0 };
+      const totalRows = (Number(income.rows) || 0) + (Number(detail.rows) || 0) + (Number(fund.rows) || 0);
+      if (totalRows > 0 && typeof clearMultiStoreReportCache === "function") {
+        clearMultiStoreReportCache();
+      }
+      const result = {
+        ok: Boolean(income.ok && detail.ok),
+        attached: income.attached,
+        malls: Math.max(Number(income.malls) || 0, Number(detail.malls) || 0, Number(fund.malls) || 0),
+        rows: totalRows,
+        incomeRows: Number(income.rows) || 0,
+        detailRows: Number(detail.rows) || 0,
+        fundRows: Number(fund.rows) || 0,
+        income,
+        detail,
+        fund,
+      };
+      return { ok: true, result };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
   ipcMain.handle("erp:get-enums", () => enums);
   ipcMain.handle("erp:auth:get-status", () => getAuthStatus());
   ipcMain.handle("erp:auth:get-current-user", async () => {

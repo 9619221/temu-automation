@@ -278,6 +278,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     syncTemuAdditionalFromCloud: (payload) => ipcRenderer.invoke("erp:sync-temu-additional-from-cloud", payload || {}),
     syncTemuReviewsFromCloud: (payload) => ipcRenderer.invoke("erp:sync-temu-reviews-from-cloud", payload || {}),
     syncTemuImagesFromCloud: (payload) => ipcRenderer.invoke("erp:sync-temu-images-from-cloud", payload || {}),
+    syncTemuSettlementIncomeFromCloud: (payload) => ipcRenderer.invoke("erp:sync-temu-settlement-income-from-cloud", payload || {}),
     getEnums: () => ipcRenderer.invoke("erp:get-enums"),
     client: {
       getStatus: () => ipcRenderer.invoke("erp:client:get-status"),
@@ -489,6 +490,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
       qcFlawImages: (options) => ipcRenderer.invoke("erp:reports:qc-flaw-images", options || {}),
       productTrend: (options) => ipcRenderer.invoke("erp:reports:product-trend", options || {}),
       purchase: (options) => ipcRenderer.invoke("erp:reports:purchase", options || {}),
+      warehouseInventory: (options) => ipcRenderer.invoke("erp:reports:warehouse-inventory", options || {}),
+      settlement: (options) => ipcRenderer.invoke("erp:reports:settlement", options || {}),
     },
     opTask: {
       list: () => ipcRenderer.invoke("erp:op-task:list"),

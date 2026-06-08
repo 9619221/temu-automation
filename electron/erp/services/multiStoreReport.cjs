@@ -10,6 +10,10 @@
 //   毛利 = 营收 − 成本（最简口径，不扣运费/退款）
 //   join 键：cloud.temu_sales_snapshot.sku_ext_code == erp_skus.internal_sku_code
 
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+
 const CLOUD_BASE = "https://erp.temu.chat/cloud";
 const CLOUD_LOGIN_USER = "admin";
 const CLOUD_LOGIN_PASS = "cjl20020421";
@@ -162,6 +166,862 @@ function emptyFinancials() {
 }
 
 // 返回 Map<mall_id, financials>。attachCloudDb 失败时返回 null（前端据此知道金额维度不可用）。
+function getRawApis(data) {
+  if (Array.isArray(data?.apis)) return data.apis;
+  if (Array.isArray(data?.data?.apis)) return data.data.apis;
+  return [];
+}
+
+function unwrapApiPayload(entry) {
+  return entry?.data?.result ?? entry?.data?.data ?? entry?.data ?? entry?.result ?? null;
+}
+
+function findDashboardApi(raw, pattern) {
+  return getRawApis(raw).find((item) => String(item?.path || "").includes(pattern));
+}
+
+function parseIncomeAmount(value) {
+  const amount = value && typeof value === "object" ? value : {};
+  const cents = Number(amount.amount);
+  if (Number.isFinite(cents)) return { yuan: cents / 100, cents: Math.round(cents) };
+  const yuan = Number(amount.digitalText ?? amount.fullText ?? value);
+  return { yuan: Number.isFinite(yuan) ? yuan : 0, cents: Number.isFinite(yuan) ? Math.round(yuan * 100) : null };
+}
+
+function firstDefined(obj, keys) {
+  if (!obj || typeof obj !== "object") return null;
+  for (const key of keys) {
+    const value = obj[key];
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return null;
+}
+
+function normalizeSettlementDate(item) {
+  const raw = firstDefined(item, [
+    "date", "statDate", "stat_date", "dateStr", "dataDate", "day", "pt",
+    "settleDate", "settlementDate",
+  ]);
+  if (raw === null) return null;
+  const text = String(raw).trim();
+  if (!text) return null;
+  const match = text.match(/\d{4}-\d{2}-\d{2}/) || text.match(/\d{4}\/\d{2}\/\d{2}/);
+  return (match ? match[0] : text.slice(0, 10)).replace(/\//g, "-");
+}
+
+function pickSettlementAmount(item) {
+  return firstDefined(item, [
+    "incomeAmount", "amount", "income", "incomeAmt", "settlementIncome",
+    "settleAmount", "settlementAmount", "value",
+  ]);
+}
+
+function inferDashboardMallId(raw, explicitMallId) {
+  const mallId = String(explicitMallId || "").trim();
+  if (mallId) return mallId;
+  const userInfo = unwrapApiPayload(findDashboardApi(raw, "/auth/userInfo"));
+  const malls = Array.isArray(userInfo?.mallList) ? userInfo.mallList : [];
+  return malls.length === 1 && malls[0]?.mallId ? String(malls[0].mallId) : null;
+}
+
+function extractSettlementIncomeRows(raw, options = {}) {
+  const incomeApi = findDashboardApi(raw, "finance/income-summary");
+  const income = extractSettlementIncomeListFromCaptureBody(unwrapApiPayload(incomeApi));
+  if (!Array.isArray(income) || !income.length) return [];
+  const mallId = inferDashboardMallId(raw, options.mallId || options.mall_id);
+  const accountId = String(options.accountId || options.account_id || "").trim() || null;
+  const scopeKey = mallId || accountId || "__dashboard__";
+  return income
+    .map((item) => ({ item, statDate: normalizeSettlementDate(item) }))
+    .filter(({ item, statDate }) => item && statDate)
+    .map((item) => {
+      const amount = pickSettlementAmount(item.item);
+      const parsed = parseIncomeAmount(amount);
+      return {
+        scope_key: scopeKey,
+        mall_id: mallId,
+        account_id: accountId,
+        stat_date: item.statDate,
+        currency: String(amount?.currencyCode || item.item.incomeAmount?.currencyCode || item.item.currency || "CNY"),
+        income_amount: parsed.yuan,
+        income_amount_cents: parsed.cents,
+        raw_json: JSON.stringify(item.item),
+      };
+    });
+}
+
+function upsertSettlementIncomeFromDashboard(db, payload = {}) {
+  const rows = extractSettlementIncomeRows(payload.dashboard || payload.raw || payload, payload);
+  if (!rows.length) return { rows: 0, scopeKey: null, mallId: null, accountId: payload.accountId || payload.account_id || null };
+  const now = new Date().toISOString();
+  const stmt = db.prepare(`
+    INSERT INTO erp_temu_settlement_income
+      (scope_key, mall_id, account_id, stat_date, currency, income_amount, income_amount_cents, raw_json, synced_at)
+    VALUES
+      (@scope_key, @mall_id, @account_id, @stat_date, @currency, @income_amount, @income_amount_cents, @raw_json, @synced_at)
+    ON CONFLICT(scope_key, stat_date) DO UPDATE SET
+      mall_id = excluded.mall_id,
+      account_id = excluded.account_id,
+      currency = excluded.currency,
+      income_amount = excluded.income_amount,
+      income_amount_cents = excluded.income_amount_cents,
+      raw_json = excluded.raw_json,
+      synced_at = excluded.synced_at
+  `);
+  const tx = db.transaction(() => {
+    for (const row of rows) stmt.run({ ...row, synced_at: now });
+  });
+  tx();
+  return { rows: rows.length, scopeKey: rows[0].scope_key, mallId: rows[0].mall_id, accountId: rows[0].account_id };
+}
+
+// 看板财务接口路径（官方开放平台无财务/结算 API，只能走 worker/扩展抓包，原始事件落 cloud.capture_events）
+const SETTLEMENT_INCOME_PATH = "/api/merchant/front/finance/income-summary";
+const SETTLEMENT_INCOME_MIGRATION = path.join(__dirname, "..", "..", "db", "migrations", "081_temu_settlement_income.sql");
+
+function ensureSettlementIncomeSchema(db) {
+  db.exec(fs.readFileSync(SETTLEMENT_INCOME_MIGRATION, "utf8"));
+}
+
+function extractSettlementIncomeListFromCaptureBody(body) {
+  const candidates = [
+    body?.result,
+    body?.result?.data,
+    body?.result?.list,
+    body?.result?.rows,
+    body?.result?.items,
+    body?.result?.records,
+    body?.result?.incomeSummaryList,
+    body?.data?.result,
+    body?.data?.data,
+    body?.data?.list,
+    body?.data?.rows,
+    body?.data?.items,
+    body?.data?.records,
+    body?.data?.incomeSummaryList,
+    body?.data,
+    body?.list,
+    body?.rows,
+    body?.items,
+    body?.records,
+    body?.incomeSummaryList,
+    body,
+  ];
+  return candidates.find((value) => Array.isArray(value)) || [];
+}
+
+// 采集入口：从 cloud.capture_events 批量物化结算收入。抓包按店、按日合并（received_at 升序、
+// 后写覆盖=最新一条），逐店复用 upsertSettlementIncomeFromDashboard 落 erp_temu_settlement_income。
+// 需要 db 已具备挂载 cloud 的能力（opts.attachCloudDb）。供独立同步脚本/定时器调用，不进报表热路径。
+function syncSettlementIncomeFromCapture(db, opts = {}) {
+  ensureSettlementIncomeSchema(db);
+  const attachCloudDb = opts.attachCloudDb;
+  if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
+    return { ok: false, attached: false, malls: 0, rows: 0 };
+  }
+  let events;
+  try {
+    events = db.prepare(`
+      SELECT mall_id, body_json, received_at
+        FROM cloud.capture_events
+       WHERE url_path = ? AND mall_id IS NOT NULL AND mall_id <> ''
+       ORDER BY received_at ASC
+    `).all(SETTLEMENT_INCOME_PATH);
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) {
+      return { ok: false, attached: true, malls: 0, rows: 0 };
+    }
+    throw error;
+  }
+  // 按 mall 聚合：stat_date → 原始 income item（received_at 升序遍历，后写覆盖=最新抓包）
+  const byMall = new Map();
+  for (const ev of events) {
+    let body;
+    try { body = JSON.parse(ev.body_json); } catch { continue; }
+    const list = extractSettlementIncomeListFromCaptureBody(body);
+    if (!Array.isArray(list)) continue;
+    const mallId = String(ev.mall_id);
+    if (!byMall.has(mallId)) byMall.set(mallId, new Map());
+    const dayMap = byMall.get(mallId);
+    for (const item of list) {
+      const statDate = normalizeSettlementDate(item);
+      if (item && statDate) dayMap.set(statDate, item);
+    }
+  }
+  let totalRows = 0;
+  for (const [mallId, dayMap] of byMall) {
+    if (!dayMap.size) continue;
+    const apis = [{ path: SETTLEMENT_INCOME_PATH, data: { result: Array.from(dayMap.values()) } }];
+    totalRows += upsertSettlementIncomeFromDashboard(db, { dashboard: { apis }, mallId }).rows;
+  }
+  return { ok: true, attached: true, malls: byMall.size, rows: totalRows };
+}
+
+function emptySettlement() {
+  return {
+    latest_date: null,
+    today: { income: 0 },
+    last7d: { income: 0, income_prev: 0, income_wow: null },
+    last30d: { income: 0, income_prev: 0, income_mom: null },
+    trend_daily: [],
+  };
+}
+
+function buildSettlementIncomeByMall(db) {
+  let latest;
+  try {
+    latest = db.prepare(`
+      SELECT MAX(stat_date) AS d
+      FROM erp_temu_settlement_income
+      WHERE mall_id IS NOT NULL AND mall_id <> ''
+    `).get()?.d;
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) return null;
+    throw error;
+  }
+  if (!latest) return new Map();
+
+  const since = shiftDate(latest, -59);
+  const rows = db.prepare(`
+    SELECT mall_id, stat_date AS d, SUM(income_amount) AS income
+    FROM erp_temu_settlement_income
+    WHERE mall_id IS NOT NULL AND mall_id <> ''
+      AND stat_date >= ? AND stat_date <= ?
+    GROUP BY mall_id, stat_date
+  `).all(since, latest);
+
+  const d7start = shiftDate(latest, -6);
+  const d7prevStart = shiftDate(latest, -13);
+  const d7prevEnd = shiftDate(latest, -7);
+  const d30start = shiftDate(latest, -29);
+  const d30prevStart = shiftDate(latest, -59);
+  const d30prevEnd = shiftDate(latest, -30);
+  const byMall = new Map();
+  const ensure = (mallId) => {
+    if (!byMall.has(mallId)) {
+      const settlement = emptySettlement();
+      settlement.latest_date = latest;
+      settlement._trend = new Map();
+      byMall.set(mallId, settlement);
+    }
+    return byMall.get(mallId);
+  };
+
+  for (const row of rows) {
+    const settlement = ensure(row.mall_id);
+    const income = Number(row.income) || 0;
+    const d = row.d;
+    settlement._trend.set(d, { date: d, income });
+    if (d === latest) settlement.today.income += income;
+    if (d >= d7start && d <= latest) settlement.last7d.income += income;
+    if (d >= d7prevStart && d <= d7prevEnd) settlement.last7d.income_prev += income;
+    if (d >= d30start && d <= latest) settlement.last30d.income += income;
+    if (d >= d30prevStart && d <= d30prevEnd) settlement.last30d.income_prev += income;
+  }
+
+  for (const settlement of byMall.values()) {
+    settlement.last7d.income_wow = settlement.last7d.income_prev > 0
+      ? (settlement.last7d.income - settlement.last7d.income_prev) / settlement.last7d.income_prev
+      : null;
+    settlement.last30d.income_mom = settlement.last30d.income_prev > 0
+      ? (settlement.last30d.income - settlement.last30d.income_prev) / settlement.last30d.income_prev
+      : null;
+    settlement.trend_daily = Array.from(settlement._trend.values()).sort((a, b) => a.date.localeCompare(b.date));
+    delete settlement._trend;
+  }
+
+  return byMall;
+}
+
+// 结算明细三态（待处理/结算中/已到账）按店聚合，来源 erp_temu_settlement_detail（抓包物化）。
+// 与收入汇总 income 旁路独立：income 是日度收入总额，detail 是逐笔结算单按状态汇总。
+function emptySettlementDetailBucket() {
+  return { count: 0, estimated: 0, sales_receipt: 0, chargeback: 0, subsidy: 0, total: 0 };
+}
+
+function emptySettlementDetail() {
+  return {
+    currency: "CNY",
+    wait_settlement: emptySettlementDetailBucket(),
+    in_settlement: emptySettlementDetailBucket(),
+    settled: emptySettlementDetailBucket(),
+  };
+}
+
+function buildSettlementDetailByMall(db) {
+  let rows;
+  try {
+    rows = db.prepare(`
+      SELECT mall_id, settlement_status,
+             COUNT(*) AS cnt,
+             SUM(estimated_amount) AS estimated,
+             SUM(sales_receipt_amount) AS sales_receipt,
+             SUM(chargeback_amount) AS chargeback,
+             SUM(subsidy_amount) AS subsidy,
+             SUM(total_amount) AS total,
+             MAX(currency) AS currency
+      FROM erp_temu_settlement_detail
+      WHERE mall_id IS NOT NULL AND mall_id <> ''
+      GROUP BY mall_id, settlement_status
+    `).all();
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) return null;
+    throw error;
+  }
+  if (!rows.length) return new Map();
+
+  const byMall = new Map();
+  for (const row of rows) {
+    if (!byMall.has(row.mall_id)) byMall.set(row.mall_id, emptySettlementDetail());
+    const detail = byMall.get(row.mall_id);
+    const bucket = detail[row.settlement_status];
+    if (!bucket) continue; // 未知状态忽略
+    bucket.count = Number(row.cnt) || 0;
+    bucket.estimated = Number(row.estimated) || 0;
+    bucket.sales_receipt = Number(row.sales_receipt) || 0;
+    bucket.chargeback = Number(row.chargeback) || 0;
+    bucket.subsidy = Number(row.subsidy) || 0;
+    bucket.total = Number(row.total) || 0;
+    if (row.currency) detail.currency = row.currency;
+  }
+  return byMall;
+}
+
+const SETTLEMENT_DETAIL_PATH_STATUS = new Map([
+  ["/api/merchant/settle/detail/full/wait-settlement", "wait_settlement"],
+  ["/api/merchant/settle/detail/full/in-settlement", "in_settlement"],
+  ["/api/merchant/settle/detail/full/settled", "settled"],
+]);
+const SETTLEMENT_DETAIL_PATHS = Array.from(SETTLEMENT_DETAIL_PATH_STATUS.keys());
+const SETTLEMENT_DETAIL_MIGRATION = path.join(__dirname, "..", "..", "db", "migrations", "082_temu_settlement_detail.sql");
+
+function ensureSettlementDetailSchema(db) {
+  db.exec(fs.readFileSync(SETTLEMENT_DETAIL_MIGRATION, "utf8"));
+}
+
+function bjDateFromTimestamp(value) {
+  const n = Number(value);
+  const ms = Number.isFinite(n) && n > 0 ? n : Date.now();
+  return new Date(ms + 8 * 3600000).toISOString().slice(0, 10);
+}
+
+function normalizeSettlementDetailDate(item, receivedAt) {
+  return normalizeSettlementDate(item) || bjDateFromTimestamp(receivedAt);
+}
+
+function stableJsonHash(value) {
+  return crypto.createHash("sha1").update(JSON.stringify(value || {})).digest("hex").slice(0, 16);
+}
+
+function extractSettlementDetailListFromCaptureBody(body) {
+  const candidates = [
+    body?.result?.data?.list,
+    body?.result?.data?.rows,
+    body?.result?.data?.items,
+    body?.result?.list,
+    body?.result?.rows,
+    body?.result?.items,
+    body?.data?.result?.list,
+    body?.data?.result?.rows,
+    body?.data?.list,
+    body?.data?.rows,
+    body?.data?.items,
+    body?.list,
+    body?.rows,
+    body?.items,
+  ];
+  const list = candidates.find((value) => Array.isArray(value));
+  if (Array.isArray(list)) return list;
+  const objectCandidate = body?.result?.data || body?.result || body?.data || body;
+  return objectCandidate && typeof objectCandidate === "object" ? [objectCandidate] : [];
+}
+
+function normalizeMoneyAmount(value) {
+  if (value == null || value === "") return null;
+  if (typeof value === "object") {
+    const cents = Number(value.amount ?? value.cent ?? value.cents);
+    if (Number.isFinite(cents)) {
+      return {
+        yuan: cents / 100,
+        cents: Math.round(cents),
+        currency: value.currencyCode || value.currency || null,
+      };
+    }
+    const yuanObj = Number(value.digitalText ?? value.fullText ?? value.value ?? value.text);
+    if (Number.isFinite(yuanObj)) {
+      return {
+        yuan: yuanObj,
+        cents: Math.round(yuanObj * 100),
+        currency: value.currencyCode || value.currency || null,
+      };
+    }
+    return null;
+  }
+  const yuan = Number(String(value).replace(/[,\s]/g, "").replace(/^[^\d.-]+/, ""));
+  if (!Number.isFinite(yuan)) return null;
+  return { yuan, cents: Math.round(yuan * 100), currency: null };
+}
+
+function collectSettlementAmounts(root) {
+  const out = {};
+  const stack = [{ value: root, path: "" }];
+  let steps = 0;
+  const amountKeyRe = /(amount|income|payment|receipt|reverse|reversal|chargeback|subsidy|settlement|sales|refund|compensat|allowance)/i;
+  while (stack.length && steps < 3000) {
+    steps++;
+    const { value, path: p } = stack.pop();
+    if (!value || typeof value !== "object") continue;
+    if (Array.isArray(value)) {
+      value.forEach((item, idx) => stack.push({ value: item, path: `${p}[${idx}]` }));
+      continue;
+    }
+    for (const [key, child] of Object.entries(value)) {
+      const childPath = p ? `${p}.${key}` : key;
+      if (amountKeyRe.test(key)) {
+        const parsed = normalizeMoneyAmount(child);
+        if (parsed) out[childPath] = parsed;
+      }
+      if (child && typeof child === "object") stack.push({ value: child, path: childPath });
+    }
+  }
+  return out;
+}
+
+function firstAmountByPath(amounts, patterns, rejectPatterns = []) {
+  for (const [key, parsed] of Object.entries(amounts || {})) {
+    if (rejectPatterns.some((pattern) => pattern.test(key))) continue;
+    if (patterns.some((pattern) => pattern.test(key))) return parsed;
+  }
+  return null;
+}
+
+function pickSettlementDetailItemKey(item) {
+  const explicit = firstDefined(item, [
+    "settlementOrderSn", "settlementSn", "settlementNo", "settlementId",
+    "billNo", "billId", "detailId", "id", "orderSn", "transactionId",
+  ]);
+  return explicit ? String(explicit) : `raw_${stableJsonHash(item)}`;
+}
+
+function buildSettlementDetailRowsFromCaptureEvent(ev) {
+  const status = SETTLEMENT_DETAIL_PATH_STATUS.get(ev.url_path);
+  if (!status) return [];
+  let body;
+  try { body = JSON.parse(ev.body_json); } catch { return []; }
+  const list = extractSettlementDetailListFromCaptureBody(body);
+  const mallId = String(ev.mall_id || "").trim();
+  if (!mallId || !list.length) return [];
+  const site = String(ev.site || "").trim();
+  const scopeKey = mallId;
+  return list
+    .filter((item) => item && typeof item === "object")
+    .map((item) => {
+      const amounts = collectSettlementAmounts(item);
+      // Temu 实际字段名：waitSettleAmount / incomeAmount / afsReverseAmount / afsReleaseAmount
+      const estimated = firstAmountByPath(amounts, [/estimate/i, /waitSettle/i, /wait.*settle/i, /pending/i]);
+      const sales = firstAmountByPath(amounts, [/sales/i, /receipt/i, /payment/i, /^incomeAmount/i, /^income/i], [/chargeback/i, /reverse/i, /reversal/i, /refund/i]);
+      const chargeback = firstAmountByPath(amounts, [/chargeback/i, /reverse/i, /reversal/i, /refund/i]);
+      const subsidy = firstAmountByPath(amounts, [/subsidy/i, /compensat/i, /allowance/i, /afsRelease/i, /release/i]);
+      const total = firstAmountByPath(amounts, [/total/i, /^amount$/i, /settlementAmount/i]);
+      const currency = estimated?.currency || sales?.currency || chargeback?.currency || subsidy?.currency || total?.currency || item.currency || "CNY";
+      const derivedTotal = total?.yuan ?? ((sales?.yuan || 0) - (chargeback?.yuan || 0) + (subsidy?.yuan || 0));
+      return {
+        scope_key: scopeKey,
+        mall_id: mallId,
+        site,
+        settlement_status: status,
+        stat_date: normalizeSettlementDetailDate(item, ev.received_at),
+        item_key: pickSettlementDetailItemKey(item),
+        currency: String(currency || "CNY"),
+        estimated_amount: estimated?.yuan || 0,
+        sales_receipt_amount: sales?.yuan || 0,
+        chargeback_amount: chargeback?.yuan || 0,
+        subsidy_amount: subsidy?.yuan || 0,
+        total_amount: Number.isFinite(derivedTotal) ? derivedTotal : 0,
+        amounts_json: JSON.stringify(amounts),
+        raw_json: JSON.stringify(item),
+        source_received_at: Number(ev.received_at) || null,
+      };
+    });
+}
+
+function upsertSettlementDetailRows(db, rows) {
+  if (!rows.length) return { rows: 0 };
+  const now = new Date().toISOString();
+  const stmt = db.prepare(`
+    INSERT INTO erp_temu_settlement_detail
+      (scope_key, mall_id, site, settlement_status, stat_date, item_key, currency,
+       estimated_amount, sales_receipt_amount, chargeback_amount, subsidy_amount, total_amount,
+       amounts_json, raw_json, source_received_at, synced_at)
+    VALUES
+      (@scope_key, @mall_id, @site, @settlement_status, @stat_date, @item_key, @currency,
+       @estimated_amount, @sales_receipt_amount, @chargeback_amount, @subsidy_amount, @total_amount,
+       @amounts_json, @raw_json, @source_received_at, @synced_at)
+    ON CONFLICT(scope_key, site, settlement_status, stat_date, item_key) DO UPDATE SET
+      mall_id = excluded.mall_id,
+      currency = excluded.currency,
+      estimated_amount = excluded.estimated_amount,
+      sales_receipt_amount = excluded.sales_receipt_amount,
+      chargeback_amount = excluded.chargeback_amount,
+      subsidy_amount = excluded.subsidy_amount,
+      total_amount = excluded.total_amount,
+      amounts_json = excluded.amounts_json,
+      raw_json = excluded.raw_json,
+      source_received_at = excluded.source_received_at,
+      synced_at = excluded.synced_at
+  `);
+  const tx = db.transaction(() => {
+    for (const row of rows) stmt.run({ ...row, synced_at: now });
+  });
+  tx();
+  return { rows: rows.length };
+}
+
+function syncSettlementDetailFromCapture(db, opts = {}) {
+  ensureSettlementDetailSchema(db);
+  const attachCloudDb = opts.attachCloudDb;
+  if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
+    return { ok: false, attached: false, malls: 0, rows: 0 };
+  }
+  let events;
+  try {
+    const columns = db.prepare("PRAGMA cloud.table_info(capture_events)").all().map((row) => row.name);
+    const siteSelect = columns.includes("site") ? "site" : "'' AS site";
+    events = db.prepare(`
+      SELECT mall_id, ${siteSelect}, url_path, body_json, received_at
+        FROM cloud.capture_events
+       WHERE url_path IN (${SETTLEMENT_DETAIL_PATHS.map(() => "?").join(",")})
+         AND mall_id IS NOT NULL AND mall_id <> ''
+       ORDER BY received_at ASC
+    `).all(...SETTLEMENT_DETAIL_PATHS);
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) {
+      return { ok: false, attached: true, malls: 0, rows: 0 };
+    }
+    throw error;
+  }
+  const rows = [];
+  const malls = new Set();
+  for (const ev of events) {
+    const eventRows = buildSettlementDetailRowsFromCaptureEvent(ev);
+    for (const row of eventRows) {
+      rows.push(row);
+      if (row.mall_id) malls.add(row.mall_id);
+    }
+  }
+  const result = upsertSettlementDetailRows(db, rows);
+  return { ok: true, attached: true, malls: malls.size, rows: result.rows };
+}
+
+// =====================================================================
+// 对账中心账务明细（seller.kuajingmaihuo.com /api/merchant/fund/detail/pageSearch）
+// 被动 hook 抓包 → cloud.capture_events → erp_temu_fund_detail
+// 费用类型靠 fundTypeDesc + remark 映射：售后赔付/仓储费/EPR/广告/推广等
+// =====================================================================
+const FUND_DETAIL_PATH = "/api/merchant/fund/detail/pageSearch";
+
+function ensureFundDetailSchema(db) {
+  const migSql = fs.readFileSync(
+    path.join(__dirname, "..", "..", "db", "migrations", "083_temu_fund_detail.sql"),
+    "utf8"
+  );
+  db.exec(migSql);
+}
+
+function buildFundDetailRowsFromCaptureEvent(ev) {
+  let body;
+  try { body = JSON.parse(ev.body_json); } catch { return []; }
+  let list = body?.result?.resultList || body?.result?.list || body?.resultList || body?.list || [];
+  if (!Array.isArray(list)) return [];
+  const mallId = String(ev.mall_id || "").trim();
+  if (!mallId) return [];
+  const site = String(ev.site || "").trim() || "kuajingmaihuo";
+
+  return list
+    .filter((item) => item && typeof item === "object")
+    .map((item) => {
+      let amount = null;
+      if (item.amountFormat && typeof item.amountFormat.value === "number") {
+        amount = item.amountFormat.value;
+      } else if (typeof item.amount === "number") {
+        amount = item.amount;
+      } else if (typeof item.amount === "string") {
+        const m = item.amount.match(/[+-]?[\d,]+\.?\d*/);
+        if (m) amount = parseFloat(m[0].replace(/,/g, ""));
+      }
+      if (amount != null && item.moneyChangeType === 2 && amount > 0) amount = -amount;
+      let originAmount = null;
+      if (item.originAmount != null) {
+        if (typeof item.originAmount === "number") originAmount = item.originAmount;
+        else if (typeof item.originAmount === "string") {
+          const om = item.originAmount.match(/[+-]?[\d,]+\.?\d*/);
+          if (om) originAmount = parseFloat(om[0].replace(/,/g, ""));
+        }
+      }
+      return {
+        mall_id: mallId,
+        trans_sn: item.transSn || item.transactionSn || null,
+        batch_id: item.batchId || "",
+        transaction_time: item.transactionTime || item.createTime || "",
+        create_time: item.createTime || "",
+        money_change_type: item.moneyChangeType ?? null,
+        fund_type: item.fundType ?? null,
+        fund_type_desc: item.fundTypeDesc || "",
+        currency: item.currencyType || item.amountFormat?.currencyCode || "CNY",
+        amount,
+        origin_amount: originAmount,
+        remark: item.remark || "",
+        remark_prompt: typeof item.remarkPrompt === "string" ? item.remarkPrompt : (item.remarkPrompt ? JSON.stringify(item.remarkPrompt) : ""),
+        biz_type: item.bizType != null ? String(item.bizType) : "",
+        source_region: item.sourceRegion != null ? String(item.sourceRegion) : "",
+        query_id: item.queryId || "",
+        site,
+      };
+    });
+}
+
+function upsertFundDetailRows(db, rows) {
+  if (!rows.length) return { rows: 0 };
+  const now = new Date().toISOString();
+  const stmtWithSn = db.prepare(`
+    INSERT INTO erp_temu_fund_detail
+      (mall_id, trans_sn, batch_id, transaction_time, create_time,
+       money_change_type, fund_type, fund_type_desc, currency,
+       amount, origin_amount, remark, remark_prompt,
+       biz_type, source_region, query_id, site, updated_at)
+    VALUES
+      (@mall_id, @trans_sn, @batch_id, @transaction_time, @create_time,
+       @money_change_type, @fund_type, @fund_type_desc, @currency,
+       @amount, @origin_amount, @remark, @remark_prompt,
+       @biz_type, @source_region, @query_id, @site, @now)
+    ON CONFLICT(mall_id, trans_sn) DO UPDATE SET
+      batch_id = excluded.batch_id,
+      transaction_time = excluded.transaction_time,
+      money_change_type = excluded.money_change_type,
+      fund_type = excluded.fund_type,
+      fund_type_desc = excluded.fund_type_desc,
+      currency = excluded.currency,
+      amount = excluded.amount,
+      origin_amount = excluded.origin_amount,
+      remark = excluded.remark,
+      remark_prompt = excluded.remark_prompt,
+      biz_type = excluded.biz_type,
+      source_region = excluded.source_region,
+      query_id = excluded.query_id,
+      site = excluded.site,
+      updated_at = excluded.updated_at
+  `);
+  const stmtNoSn = db.prepare(`
+    INSERT INTO erp_temu_fund_detail
+      (mall_id, trans_sn, batch_id, transaction_time, create_time,
+       money_change_type, fund_type, fund_type_desc, currency,
+       amount, origin_amount, remark, remark_prompt,
+       biz_type, source_region, query_id, site, updated_at)
+    VALUES
+      (@mall_id, @trans_sn, @batch_id, @transaction_time, @create_time,
+       @money_change_type, @fund_type, @fund_type_desc, @currency,
+       @amount, @origin_amount, @remark, @remark_prompt,
+       @biz_type, @source_region, @query_id, @site, @now)
+  `);
+  let inserted = 0;
+  const tx = db.transaction(() => {
+    for (const row of rows) {
+      const params = { ...row, now };
+      if (row.trans_sn) stmtWithSn.run(params);
+      else stmtNoSn.run(params);
+      inserted++;
+    }
+  });
+  tx();
+  return { rows: inserted };
+}
+
+function syncFundDetailFromCapture(db, opts = {}) {
+  ensureFundDetailSchema(db);
+  const attachCloudDb = opts.attachCloudDb;
+  if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
+    return { ok: false, attached: false, malls: 0, rows: 0 };
+  }
+  let events;
+  try {
+    const columns = db.prepare("PRAGMA cloud.table_info(capture_events)").all().map((r) => r.name);
+    const siteSelect = columns.includes("site") ? "site" : "'' AS site";
+    events = db.prepare(`
+      SELECT mall_id, ${siteSelect}, url_path, body_json, received_at
+        FROM cloud.capture_events
+       WHERE url_path = ?
+         AND mall_id IS NOT NULL AND mall_id <> ''
+       ORDER BY received_at ASC
+    `).all(FUND_DETAIL_PATH);
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) {
+      return { ok: false, attached: true, malls: 0, rows: 0 };
+    }
+    throw error;
+  }
+  const rows = [];
+  const malls = new Set();
+  for (const ev of events) {
+    const eventRows = buildFundDetailRowsFromCaptureEvent(ev);
+    for (const r of eventRows) {
+      rows.push(r);
+      if (r.mall_id) malls.add(r.mall_id);
+    }
+  }
+  if (!rows.length) return { ok: true, attached: true, malls: 0, rows: 0 };
+  const result = upsertFundDetailRows(db, rows);
+  return { ok: true, attached: true, malls: malls.size, rows: result.rows };
+}
+
+function buildFundDetailByMall(db, opts = {}) {
+  const { startDate, endDate } = opts;
+  let dateFilter, params;
+  if (startDate && endDate) {
+    dateFilter = "transaction_time >= ? AND transaction_time < date(?, '+1 day')";
+    params = [startDate, endDate];
+  } else {
+    dateFilter = "transaction_time >= date('now', '-30 days')";
+    params = [];
+  }
+  let rows;
+  try {
+    rows = db.prepare(`
+      SELECT mall_id,
+             money_change_type,
+             COALESCE(NULLIF(remark,''), fund_type_desc) AS category,
+             SUM(amount) AS total_amount,
+             COUNT(*) AS cnt
+        FROM erp_temu_fund_detail
+       WHERE ${dateFilter}
+       GROUP BY mall_id, money_change_type, category
+    `).all(...params);
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) return new Map();
+    throw error;
+  }
+  const byMall = new Map();
+  for (const r of rows) {
+    if (!byMall.has(r.mall_id)) {
+      byMall.set(r.mall_id, { in_total: 0, out_total: 0, by_category: {} });
+    }
+    const m = byMall.get(r.mall_id);
+    const amt = Number(r.total_amount) || 0;
+    if (r.money_change_type === 1) m.in_total += amt;
+    else if (r.money_change_type === 2) m.out_total += amt;
+    m.by_category[r.category] = (m.by_category[r.category] || 0) + amt;
+  }
+  return byMall;
+}
+
+// ===== 结算报表独立查询（支持自定义时间段） =====
+function querySettlementData(db, opts = {}) {
+  const { startDate, endDate, attachCloudDb } = opts;
+
+  // 1. fund_detail 按时间段
+  let fundByMall;
+  try { fundByMall = buildFundDetailByMall(db, { startDate, endDate }); }
+  catch { fundByMall = new Map(); }
+
+  // 2. 销量/成本：纯本地数据（官方 salesv2 物化表 × erp_skus 加权均价）
+  //    salesv2 是快照，只有 today/7d/30d 三个固定窗口，无法按自定义日期精确筛选。
+  //    根据所选日期跨度选最接近的字段：<=7天用 last7d，>7天用 last30d。
+  const finByMall = new Map();
+  try {
+    let daySpan = 30;
+    if (startDate && endDate) {
+      daySpan = Math.max(1, Math.round((new Date(endDate) - new Date(startDate)) / 86400000));
+    }
+    const salesCol = daySpan <= 7 ? "last7d_sales" : "last30d_sales";
+    const rows = db.prepare(`
+      SELECT s.mall_id,
+             SUM(COALESCE(s.${salesCol}, 0)) AS qty,
+             SUM(COALESCE(s.${salesCol}, 0) * COALESCE(k.wac, 0)) AS cost
+        FROM erp_temu_openapi_sku_sales s
+        LEFT JOIN (
+          SELECT internal_sku_code, MAX(weighted_avg_cost) AS wac
+            FROM erp_skus GROUP BY internal_sku_code
+        ) k ON k.internal_sku_code = s.ext_code
+       GROUP BY s.mall_id
+    `).all();
+    for (const r of rows) {
+      finByMall.set(r.mall_id, {
+        cost: Number(r.cost) || 0,
+        qty: Number(r.qty) || 0,
+      });
+    }
+  } catch { /* salesv2 表不存在时保持空 */ }
+
+  // 3. settlement_income（真实结算收入，income-summary 主动采集）
+  const stlIncByMall = new Map();
+  try {
+    let siDateWhere, siParams;
+    if (startDate && endDate) {
+      siDateWhere = "AND stat_date >= ? AND stat_date <= ?";
+      siParams = [startDate, endDate];
+    } else {
+      siDateWhere = "AND stat_date >= date('now', '-30 days')";
+      siParams = [];
+    }
+    const siRows = db.prepare(`
+      SELECT mall_id, SUM(income_amount) AS total_income, COUNT(*) AS days
+        FROM erp_temu_settlement_income
+       WHERE income_amount IS NOT NULL ${siDateWhere}
+       GROUP BY mall_id
+    `).all(...siParams);
+    for (const r of siRows) {
+      stlIncByMall.set(r.mall_id, { income: Number(r.total_income) || 0, days: r.days || 0 });
+    }
+  } catch { /* settlement_income 表不存在时保持空 */ }
+
+  // 4. settlement_detail (全量不限时段)
+  let sdByMall = null;
+  try { sdByMall = buildSettlementDetailByMall(db); } catch { sdByMall = null; }
+
+  // 5. 店铺字典
+  const dict = readMallDictionary(db);
+  const dictByMall = new Map(dict.map((row) => [row.mall_id, row]));
+
+  // 6. 合并所有出现过的 mall_id
+  const allMalls = new Set([...fundByMall.keys(), ...finByMall.keys(), ...stlIncByMall.keys()]);
+  for (const d of dict) allMalls.add(d.mall_id);
+
+  const stores = [];
+  for (const mallId of allMalls) {
+    const d = dictByMall.get(mallId);
+    if (!d || d.status === "test") continue;
+    const fd = fundByMall.get(mallId) || null;
+    const fin = finByMall.get(mallId) || null;
+    const sd = sdByMall ? (sdByMall.get(mallId) || null) : null;
+    const si = stlIncByMall.get(mallId) || null;
+    stores.push({
+      mall_id: mallId,
+      store_code: d.store_code || null,
+      mall_name: d.mall_name || null,
+      owner: d.owner || null,
+      fund_detail: fd,
+      settlement_income: si?.income || 0,  // 真实结算收入（income-summary）
+      settlement_income_days: si?.days || 0,
+      cost: fin?.cost || 0,               // 销量 × 加权均价（salesv2 × erp_skus）
+      qty: fin?.qty || 0,
+      settlement_detail: sd,
+    });
+  }
+  stores.sort((a, b) => {
+    if (!a.store_code && !b.store_code) return 0;
+    if (!a.store_code) return 1;
+    if (!b.store_code) return -1;
+    return a.store_code.localeCompare(b.store_code);
+  });
+
+  return {
+    stores,
+    fund_detail_available: fundByMall.size > 0,
+    financials_available: finByMall.size > 0,
+    settlement_income_available: stlIncByMall.size > 0,
+    date_range: { start: startDate || null, end: endDate || null },
+  };
+}
+
 function buildFinancialsByMall(db, attachCloudDb) {
   if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
     return null;
@@ -444,11 +1304,29 @@ function buildByStoreLocal(db, options = {}) {
   };
 }
 
+// 建议备货自算（统一口径，替代 Temu 黑盒 adviceQuantity）——与 temuAutoPurchase.cjs calcAdvice 同公式。
+const _RESTOCK_FAST_QTY = 50, _RESTOCK_DAYS_NORMAL = 10, _RESTOCK_DAYS_FAST = 7;
+function _beijingHour() { return (new Date().getUTCHours() + 8) % 24; }
+function _skuTotalStock(warehouse, unavail, lack, waitIn) {
+  return (warehouse || 0) + (unavail || 0) - (lack || 0) + (waitIn || 0);
+}
+function _calcAdvice(today, last7d, totalStock) {
+  const hour = _beijingHour();
+  const daily = Math.max((last7d || 0) / 7, (today || 0) * (hour < 12 ? 2 : hour < 18 ? 1.5 : 1.3));
+  const days = daily > _RESTOCK_FAST_QTY ? _RESTOCK_DAYS_FAST : _RESTOCK_DAYS_NORMAL;
+  return Math.max(0, Math.ceil(daily * days - (totalStock || 0)));
+}
+
 // 进程级结果缓存：跨库聚合冷态可达 ~17s（OS page cache 被挤出后首查），
 // 缓存 + 服务端定时预热让用户请求永远命中暖缓存、秒回。
 const REPORT_CACHE_TTL_MS = 5 * 60 * 1000;
 const _reportCache = new Map();    // includeTest -> { data, ts }
 const _reportInflight = new Map(); // includeTest -> Promise（并发去重，避免多请求同时冷算）
+
+function clearMultiStoreReportCache() {
+  _reportCache.clear();
+  _reportInflight.clear();
+}
 
 // 主入口（带缓存）：force=true 跳过读缓存（预热用），仍写缓存。
 async function buildMultiStoreReport(db, options = {}) {
@@ -496,6 +1374,34 @@ async function _buildMultiStoreReportFresh(db, options = {}) {
     cloud = await fetchCloudReport({ includeTest: options.includeTest });
   }
 
+  // 实际结算收入（本地物化表 erp_temu_settlement_income，纯本地、不依赖 cloud attach，
+  // 与销量×申报价预估营收 financials 独立旁路）。表缺失/无数据时返回 null，前端据此知道维度不可用。
+  let settlementByMall = null;
+  try {
+    settlementByMall = buildSettlementIncomeByMall(db);
+  } catch (error) {
+    settlementByMall = null;
+    if (options.onError) options.onError(error);
+  }
+
+  // 结算明细三态（待处理/结算中/已到账，物化表 erp_temu_settlement_detail），与收入汇总独立旁路。
+  let settlementDetailByMall = null;
+  try {
+    settlementDetailByMall = buildSettlementDetailByMall(db);
+  } catch (error) {
+    settlementDetailByMall = null;
+    if (options.onError) options.onError(error);
+  }
+
+  // 对账中心账务明细（fund_detail），按店铺聚合近 30 天费用分类汇总
+  let fundDetailByMall = null;
+  try {
+    fundDetailByMall = buildFundDetailByMall(db);
+  } catch (error) {
+    fundDetailByMall = null;
+    if (options.onError) options.onError(error);
+  }
+
   const dict = readMallDictionary(db);
   const dictByMall = new Map(dict.map((row) => [row.mall_id, row]));
 
@@ -504,6 +1410,9 @@ async function _buildMultiStoreReportFresh(db, options = {}) {
   for (const s of cloud.stores || []) {
     const dictRow = dictByMall.get(s.mall_id);
     const financials = financialsByMall ? (financialsByMall.get(s.mall_id) || emptyFinancials()) : null;
+    const settlement = settlementByMall ? (settlementByMall.get(s.mall_id) || emptySettlement()) : null;
+    const settlement_detail = settlementDetailByMall ? (settlementDetailByMall.get(s.mall_id) || emptySettlementDetail()) : null;
+    const fund_detail = fundDetailByMall ? (fundDetailByMall.get(s.mall_id) || null) : null;
     const enriched = {
       ...s,
       store_code: dictRow?.store_code || null,
@@ -511,6 +1420,9 @@ async function _buildMultiStoreReportFresh(db, options = {}) {
       dict_remark: dictRow?.remark || null,
       owner: dictRow?.owner || null,
       financials,
+      settlement,
+      settlement_detail,
+      fund_detail,
     };
     if (!dictRow) {
       unmapped.push(enriched);
@@ -532,6 +1444,9 @@ async function _buildMultiStoreReportFresh(db, options = {}) {
     cloud_tenant_id: cloud.tenant_id || null,
     store_count: stores.length,
     financials_available: financialsByMall !== null,
+    settlement_available: settlementByMall !== null, // 实际结算收入维度是否有数据（抓包物化）
+    settlement_detail_available: settlementDetailByMall !== null, // 结算明细三态维度是否有数据（抓包物化）
+    fund_detail_available: fundDetailByMall !== null && fundDetailByMall.size > 0, // 对账中心账务明细维度
     sales_window: cloud.sales_window || null, // 销量数据实际覆盖窗口（不足30天时前端据此标注真实天数）
     stores,
     unmapped, // 云端有数据但本地字典没登记的（应该提醒用户去 seed）
@@ -555,8 +1470,8 @@ function _buildSkuSalesFresh(db, options = {}) {
     SELECT s.mall_supplier_id AS mall_id, m.store_code, m.mall_name, m.status AS dict_status,
            s.skc_id, s.sku_ext_code, s.product_id, s.title, s.category_name,
            s.today_sales, s.last7d_sales, s.last30d_sales,
-           s.warehouse_stock, s.occupy_stock, s.advice_qty, s.available_sale_days,
-           s.declared_price_cents, s.stat_date
+           s.warehouse_stock, s.occupy_stock, s.unavailable_stock, s.lack_quantity,
+           s.available_sale_days, s.declared_price_cents, s.stat_date
       FROM cloud.temu_sales_snapshot s
       JOIN latest l ON l.mall_supplier_id = s.mall_supplier_id AND l.sd = s.stat_date
       LEFT JOIN erp_temu_malls m ON m.mall_id = s.mall_supplier_id
@@ -581,7 +1496,8 @@ function _buildSkuSalesFresh(db, options = {}) {
     last30d: toNum(r.last30d_sales),
     stock: toNum(r.warehouse_stock),
     occupy: toNum(r.occupy_stock),
-    advice_qty: toNum(r.advice_qty),
+    total_stock: _skuTotalStock(toNum(r.warehouse_stock), toNum(r.unavailable_stock), toNum(r.lack_quantity), 0),
+    advice_qty: _calcAdvice(toNum(r.today_sales), toNum(r.last7d_sales), _skuTotalStock(toNum(r.warehouse_stock), toNum(r.unavailable_stock), toNum(r.lack_quantity), 0)),
     sale_days: r.available_sale_days == null ? null : Number(r.available_sale_days),
     declared_price: r.declared_price_cents == null ? null : Number(r.declared_price_cents) / 100,
     stat_date: r.stat_date || null,
@@ -605,7 +1521,8 @@ function _buildSkuSalesOfficialFresh(db, options = {}) {
     SELECT s.mall_id, m.store_code, m.mall_name,
            s.product_skc_id AS skc_id, s.ext_code AS sku_ext_code, s.product_id, s.title, s.category,
            s.today_sales, s.last7d_sales, s.last30d_sales,
-           s.warehouse_stock, s.occupy_stock, s.advice_qty, s.sale_days, s.synced_at
+           s.warehouse_stock, s.occupy_stock, s.unavailable_stock, s.lack_quantity, s.wait_in_stock,
+           s.sale_days, s.synced_at
       FROM erp_temu_openapi_sku_sales s
       LEFT JOIN erp_temu_malls m ON m.mall_id = s.mall_id
      WHERE (COALESCE(s.last30d_sales,0) > 0 OR COALESCE(s.today_sales,0) > 0 OR COALESCE(s.warehouse_stock,0) <= 0)
@@ -627,9 +1544,10 @@ function _buildSkuSalesOfficialFresh(db, options = {}) {
     last30d: toNum(r.last30d_sales),
     stock: toNum(r.warehouse_stock),
     occupy: toNum(r.occupy_stock),
-    advice_qty: toNum(r.advice_qty),
+    total_stock: _skuTotalStock(toNum(r.warehouse_stock), toNum(r.unavailable_stock), toNum(r.lack_quantity), toNum(r.wait_in_stock)),
+    advice_qty: _calcAdvice(toNum(r.today_sales), toNum(r.last7d_sales), _skuTotalStock(toNum(r.warehouse_stock), toNum(r.unavailable_stock), toNum(r.lack_quantity), toNum(r.wait_in_stock))),
     sale_days: r.sale_days == null ? null : Number(r.sale_days),
-    declared_price: null, // 官方 supplierPrice 单位/语义未定，Phase 1 留空（待接价格接口或 join 抓包）
+    declared_price: null,
     stat_date: r.synced_at ? String(r.synced_at).slice(0, 10) : null,
   }));
   return { generated_at: Date.now(), row_count: out.length, rows: out, source: "official" };
@@ -1070,7 +1988,8 @@ function buildProductPanel(db, options = {}) {
       const k = String(d.product_id);
       let arr = detailMap.get(k);
       if (!arr) { arr = []; detailMap.set(k, arr); }
-      arr.push({ skc_id: d.skc_id || null, sku_ext_code: d.sku_ext_code || null, declared_price: d.declared_price_cents ? Number(d.declared_price_cents) / 100 : null, today: toNum(d.today_sales), last7d: toNum(d.last7d_sales), sale_days: d.available_sale_days == null ? null : Number(d.available_sale_days), stock: toNum(d.warehouse_stock), occupy: toNum(d.occupy_stock), advice_qty: toNum(d.advice_qty), lack_qty: toNum(d.lack_quantity) });
+      const _cts = _skuTotalStock(toNum(d.warehouse_stock), toNum(d.unavailable_stock), toNum(d.lack_quantity), 0);
+      arr.push({ skc_id: d.skc_id || null, sku_ext_code: d.sku_ext_code || null, declared_price: d.declared_price_cents ? Number(d.declared_price_cents) / 100 : null, today: toNum(d.today_sales), last7d: toNum(d.last7d_sales), sale_days: d.available_sale_days == null ? null : Number(d.available_sale_days), stock: toNum(d.warehouse_stock), occupy: toNum(d.occupy_stock), advice_qty: _calcAdvice(toNum(d.today_sales), toNum(d.last7d_sales), _cts), lack_qty: toNum(d.lack_quantity) });
       let a = agg.get(k);
       if (!a) { a = { skcs: new Set(), skus: new Set(), declared: null, score: null, comments: null, stock: 0, occupy: 0, unavail: 0, advice: 0, lack: 0, lackQty: 0 }; agg.set(k, a); }
       if (d.skc_id) a.skcs.add(d.skc_id);
@@ -1081,7 +2000,7 @@ function buildProductPanel(db, options = {}) {
       if (sc && (a.score == null || sc > a.score)) a.score = sc;
       const cn = d.comment_num != null ? toNum(d.comment_num) : null;
       if (cn != null && (a.comments == null || cn > a.comments)) a.comments = cn;
-      a.stock += toNum(d.warehouse_stock); a.occupy += toNum(d.occupy_stock); a.unavail += toNum(d.unavailable_stock); a.advice += toNum(d.advice_qty); a.lackQty += toNum(d.lack_quantity);
+      a.stock += toNum(d.warehouse_stock); a.occupy += toNum(d.occupy_stock); a.unavail += toNum(d.unavailable_stock); a.advice += _calcAdvice(toNum(d.today_sales), toNum(d.last7d_sales), _cts); a.lackQty += toNum(d.lack_quantity);
       if (toNum(d.warehouse_stock) <= 0) a.lack++;
     }
     codeMap = new Map([...agg].map(([k, a]) => [k, { skcs: [...a.skcs].join(",") || null, skus: [...a.skus].join(",") || null, declared: a.declared, score: a.score, comments: a.comments, stock: a.stock, occupy: a.occupy, unavail: a.unavail, advice: a.advice, lack: a.lack, lackQty: a.lackQty }]));
@@ -1161,16 +2080,17 @@ function _buildProductPanelOfficialFresh(db, options = {}) {
     if (r.ext_code) e._sku.add(r.ext_code);
     if (r.title && !e.title) e.title = r.title;
     if (r.thumb_url && !e.thumb) e.thumb = r.thumb_url;
+    const _ts = _skuTotalStock(toNum(r.warehouse_stock), toNum(r.unavailable_stock), toNum(r.lack_quantity), toNum(r.wait_in_stock));
     e.stock += toNum(r.warehouse_stock); e.occupy += toNum(r.occupy_stock); e.unavail += toNum(r.unavailable_stock);
-    e.advice += toNum(r.advice_qty); e.lack_qty += toNum(r.lack_quantity);
-    e.shipping += toNum(r.wait_in_stock); // 在途库存=官方 inventoryNumInfo 待收货(已发货未签收)+待入库
-    if (toNum(r.onsales_duration_offline) > 0) e.onsales_duration = toNum(r.onsales_duration_offline); // 加入站点天数(商品级,取有效值)
-    if (toNum(r.hot_tag) > 0) e.hot_tag = true; // 热销款(商品级)
-    if (toNum(r.has_hot_sku) > 0) e.has_hot_sku = true; // 存在爆旺款SKU(商品级)
+    e.advice += _calcAdvice(toNum(r.today_sales), toNum(r.last7d_sales), _ts); e.lack_qty += toNum(r.lack_quantity);
+    e.shipping += toNum(r.wait_in_stock);
+    if (toNum(r.onsales_duration_offline) > 0) e.onsales_duration = toNum(r.onsales_duration_offline);
+    if (toNum(r.hot_tag) > 0) e.hot_tag = true;
+    if (toNum(r.has_hot_sku) > 0) e.has_hot_sku = true;
     if (toNum(r.warehouse_stock) <= 0) e.lack++;
     e.skus_detail.push({ skc_id: r.product_skc_id || null, sku_ext_code: r.ext_code || null, spec_name: r.spec_name || null, declared_price: null,
       today: toNum(r.today_sales), last7d: toNum(r.last7d_sales), last30d: toNum(r.last30d_sales), sale_days: r.sale_days == null ? null : Number(r.sale_days),
-      stock: toNum(r.warehouse_stock), occupy: toNum(r.occupy_stock), advice_qty: toNum(r.advice_qty), lack_qty: toNum(r.lack_quantity) });
+      stock: toNum(r.warehouse_stock), occupy: toNum(r.occupy_stock), advice_qty: _calcAdvice(toNum(r.today_sales), toNum(r.last7d_sales), _ts), lack_qty: toNum(r.lack_quantity) });
   }
   const arr = [...map.values()];
   // 按 SPU 级30天销量降序后再截断:总 SPU(上万)远多于 limit,若直接对无序 map slice 会漏掉高销量商品
@@ -1861,8 +2781,67 @@ function buildReviews(db, options = {}) {
   return { generated_at: Date.now(), row_count: out.length, rows: out, summary, source: "extension" };
 }
 
+// 本地仓内库存报表（按店铺/账号聚合，数据源 = erp_inventory_batches 自有仓库）
+function buildWarehouseInventory(db, options = {}) {
+  const rows = optionalAllLocal(db,
+    `SELECT
+       b.account_id,
+       acct.name AS account_name,
+       COUNT(DISTINCT b.sku_id) AS sku_count,
+       SUM(COALESCE(b.available_qty, 0))  AS available_qty,
+       SUM(COALESCE(b.reserved_qty, 0))   AS reserved_qty,
+       SUM(COALESCE(b.blocked_qty, 0))    AS blocked_qty,
+       SUM(COALESCE(b.defective_qty, 0))  AS defective_qty,
+       SUM(COALESCE(b.rework_qty, 0))     AS rework_qty,
+       SUM(COALESCE(b.available_qty,0) + COALESCE(b.reserved_qty,0)
+         + COALESCE(b.blocked_qty,0) + COALESCE(b.defective_qty,0)
+         + COALESCE(b.rework_qty,0)) AS total_qty,
+       SUM(
+         COALESCE(sku.jst_cost_price, 0)
+         * (COALESCE(b.available_qty,0) + COALESCE(b.reserved_qty,0)
+           + COALESCE(b.blocked_qty,0) + COALESCE(b.defective_qty,0) + COALESCE(b.rework_qty,0))
+       ) AS stock_value,
+       COUNT(DISTINCT b.id) AS batch_count
+     FROM erp_inventory_batches b
+     LEFT JOIN erp_skus sku ON sku.id = b.sku_id
+     LEFT JOIN erp_accounts acct ON acct.id = b.account_id
+     WHERE (COALESCE(b.available_qty,0) + COALESCE(b.reserved_qty,0)
+       + COALESCE(b.blocked_qty,0) + COALESCE(b.defective_qty,0)
+       + COALESCE(b.rework_qty,0)) > 0
+     GROUP BY b.account_id
+     ORDER BY stock_value DESC`, []);
+
+  const stores = rows.map((r) => ({
+    account_id: r.account_id,
+    account_name: r.account_name || null,
+    sku_count: toNum(r.sku_count),
+    available_qty: toNum(r.available_qty),
+    reserved_qty: toNum(r.reserved_qty),
+    blocked_qty: toNum(r.blocked_qty),
+    defective_qty: toNum(r.defective_qty),
+    rework_qty: toNum(r.rework_qty),
+    total_qty: toNum(r.total_qty),
+    stock_value: toNum(r.stock_value),
+    batch_count: toNum(r.batch_count),
+  }));
+
+  const totalQty = stores.reduce((a, s) => a + s.total_qty, 0);
+  const totalValue = stores.reduce((a, s) => a + s.stock_value, 0);
+  const totalAvailable = stores.reduce((a, s) => a + s.available_qty, 0);
+  const totalReserved = stores.reduce((a, s) => a + s.reserved_qty, 0);
+  const totalSku = stores.reduce((a, s) => a + s.sku_count, 0);
+
+  return {
+    generated_at: Date.now(),
+    store_count: stores.length,
+    summary: { total_qty: totalQty, total_value: totalValue, available_qty: totalAvailable, reserved_qty: totalReserved, sku_count: totalSku },
+    stores,
+  };
+}
+
 module.exports = {
   buildMultiStoreReport,
+  buildWarehouseInventory,
   buildOpenapiQc,
   buildFirstShipToday,
   buildGoodsCreatedToday,
@@ -1886,6 +2865,33 @@ module.exports = {
   setOpTaskState,
   createEnrollTasks,
   pollEnrollResults,
+  // 结算收入（income-summary 抓包物化）：采集入口 + 报表聚合
+  upsertSettlementIncomeFromDashboard,
+  syncSettlementIncomeFromCapture,
+  syncSettlementDetailFromCapture,
+  buildSettlementIncomeByMall,
+  buildSettlementDetailByMall,
+  ensureSettlementIncomeSchema,
+  ensureSettlementDetailSchema,
+  // 对账中心账务明细（费用采集）+ 结算报表独立查询
+  syncFundDetailFromCapture,
+  buildFundDetailByMall,
+  ensureFundDetailSchema,
+  querySettlementData,
+  clearMultiStoreReportCache,
   // 暴露给测试用
-  _internal: { fetchCloudReport, readMallDictionary, loginCloud, buildFinancialsByMall, buildByStoreLocal, shiftDate },
+  _internal: {
+    fetchCloudReport, readMallDictionary, loginCloud,
+    buildFinancialsByMall, buildByStoreLocal, shiftDate,
+    ensureSettlementIncomeSchema, ensureSettlementDetailSchema,
+    extractSettlementIncomeRows, upsertSettlementIncomeFromDashboard,
+    syncSettlementIncomeFromCapture, buildSettlementIncomeByMall, emptySettlement,
+    extractSettlementIncomeListFromCaptureBody,
+    buildSettlementDetailRowsFromCaptureEvent, syncSettlementDetailFromCapture,
+    buildSettlementDetailByMall, emptySettlementDetail,
+    extractSettlementDetailListFromCaptureBody, SETTLEMENT_DETAIL_PATHS,
+    SETTLEMENT_INCOME_PATH, FUND_DETAIL_PATH,
+    buildFundDetailRowsFromCaptureEvent, upsertFundDetailRows,
+    syncFundDetailFromCapture, buildFundDetailByMall,
+  },
 };

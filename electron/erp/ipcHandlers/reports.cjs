@@ -117,6 +117,30 @@ function registerReportsHandlers(ipcMain, deps) {
     }
   });
 
+  // 结算报表：独立端点，支持自定义时间段
+  ipcMain.handle("erp:reports:settlement", async (_event, payload) => {
+    try {
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        const qs = new URLSearchParams();
+        if (payload?.startDate) qs.set("start_date", payload.startDate);
+        if (payload?.endDate) qs.set("end_date", payload.endDate);
+        return await remoteRequest(`/api/erp/reports/settlement?${qs}`, { method: "GET" });
+      }
+      requireErp();
+      const { querySettlementData } = require("../services/multiStoreReport.cjs");
+      const { attachTemuCloudDbIfPossible } = require("../lanServer.cjs");
+      const data = querySettlementData(erpState.db, {
+        startDate: payload?.startDate || null,
+        endDate: payload?.endDate || null,
+        attachCloudDb: attachTemuCloudDbIfPossible,
+      });
+      return { ok: true, data };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+
   // 销售管理：SKU 级销售明细（跨店）
   ipcMain.handle("erp:reports:sku-sales", async (_event, payload) => {
     try {
@@ -360,6 +384,21 @@ function registerReportsHandlers(ipcMain, deps) {
       requireErp();
       const { fetchQcFlawImages } = require("../services/multiStoreReport.cjs");
       return { ok: true, data: await fetchQcFlawImages(erpState.db, { mallId, qcBillId }) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+
+  ipcMain.handle("erp:reports:warehouse-inventory", async (_event, payload) => {
+    try {
+      const includeTest = payload?.includeTest ? "1" : "0";
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest(`/api/erp/reports/warehouse-inventory?include_test=${includeTest}`, { method: "GET" });
+      }
+      requireErp();
+      const { buildWarehouseInventory } = require("../services/multiStoreReport.cjs");
+      return { ok: true, data: buildWarehouseInventory(erpState.db, { includeTest: payload?.includeTest }) };
     } catch (error) {
       return { ok: false, error: error?.message || String(error) };
     }

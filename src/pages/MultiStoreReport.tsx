@@ -19,7 +19,7 @@ import {
   Typography,
   message,
 } from "antd";
-import { ArrowDownOutlined, ArrowUpOutlined, ReloadOutlined } from "@ant-design/icons";
+import { ArrowDownOutlined, ArrowUpOutlined, CloudDownloadOutlined, DownloadOutlined, ReloadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import {
   Bar,
@@ -53,6 +53,35 @@ interface StoreFinancials {
   trend_daily: Array<{ date: string; revenue: number; gross_profit: number }>;
 }
 
+interface StoreSettlement {
+  latest_date: string | null;
+  today: { income: number };
+  last7d: { income: number; income_prev: number; income_wow: number | null };
+  last30d: { income: number; income_prev: number; income_mom: number | null };
+  trend_daily: Array<{ date: string; income: number }>;
+}
+
+interface SettlementDetailBucket {
+  count: number;
+  estimated: number;
+  sales_receipt: number;
+  chargeback: number;
+  subsidy: number;
+  total: number;
+}
+interface StoreSettlementDetail {
+  currency: string;
+  wait_settlement: SettlementDetailBucket;
+  in_settlement: SettlementDetailBucket;
+  settled: SettlementDetailBucket;
+}
+
+interface FundDetailData {
+  in_total: number;
+  out_total: number;
+  by_category: Record<string, number>;
+}
+
 interface ReportStore {
   mall_id: string;
   mall_name: string | null;
@@ -63,6 +92,9 @@ interface ReportStore {
   dict_remark: string | null;
   owner: string | null;
   financials: StoreFinancials | null;
+  settlement: StoreSettlement | null;
+  settlement_detail: StoreSettlementDetail | null;
+  fund_detail: FundDetailData | null;
   sales: { today_qty: number; last7d_qty: number; last30d_qty: number; sku_count: number };
   stock_orders: { total: number; pending: number; demand_qty: number; delivered_qty: number };
   inventory?: { warehouse_value: number; in_transit_value: number };
@@ -91,6 +123,9 @@ interface ReportData {
   cloud_tenant_id: string | null;
   store_count: number;
   financials_available: boolean;
+  settlement_available: boolean;
+  settlement_detail_available: boolean;
+  fund_detail_available: boolean;
   sales_window: { start: string | null; end: string | null; days: number } | null;
   stores: ReportStore[];
   unmapped: ReportStore[];
@@ -229,8 +264,125 @@ function HeatNum({ value, max, hue }: { value: number; max: number; hue: "red" |
   );
 }
 
+function csvCell(value: unknown) {
+  const text = String(value ?? "");
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function downloadCsv(filename: string, rows: unknown[][]) {
+  const csv = rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
+  const blob = new Blob([`﻿${csv}`], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+// ===== 结算报表：将 fund_detail 按类别映射到 Excel 列 =====
+interface SettlementRow {
+  mall_id: string;
+  store: string;
+  owner: string;
+  qty: number;           // 销量
+  income: number;        // 收入金额
+  reserve: number;       // 售后预留金额（待结算）
+  release: number;       // 售后释放金额（已到账）
+  income_total: number;  // 收入合计
+  after_sale: number;    // 售后赔付
+  deduction: number;     // 扣款
+  warehouse_fee: number; // 仓储综合服务费
+  epr_fee: number;       // EPR费用
+  ad_fee: number;        // 广告服务费
+  other_fee: number;     // 其它服务费
+  cost: number;          // 销售成本
+  expense_total: number; // 支出合计
+  profit: number;        // 预估利润
+  profit_rate: number | null; // 预估利润率
+}
+
+interface SettlementStoreData {
+  mall_id: string;
+  store_code: string | null;
+  mall_name: string | null;
+  owner: string | null;
+  fund_detail: FundDetailData | null;
+  settlement_income: number;       // 真实结算收入（income-summary）
+  settlement_income_days: number;  // 结算数据覆盖天数
+  cost: number;                    // 销量×加权均价（salesv2 × erp_skus）
+  qty: number;
+  settlement_detail: StoreSettlementDetail | null;
+}
+
+function classifyFundCategories(fd: FundDetailData | null) {
+  let warehouseFee = 0, eprFee = 0, adFee = 0, afterSale = 0, deduction = 0, otherFee = 0;
+  if (fd?.by_category) {
+    for (const [cat, amt] of Object.entries(fd.by_category)) {
+      if (amt >= 0) continue;
+      const absAmt = Math.abs(amt);
+      const lower = cat.toLowerCase();
+      if (lower.includes("仓储综合服务费") || (lower.includes("仓储") && lower.includes("服务费"))) {
+        warehouseFee += absAmt;
+      } else if (lower.includes("epr") || lower.includes("环保")) {
+        eprFee += absAmt;
+      } else if (lower.includes("推广") || lower.includes("广告")) {
+        adFee += absAmt;
+      } else if (lower.includes("赔付") || lower.includes("售后赔") || lower.includes("售后问题") || lower.includes("履约保障")) {
+        afterSale += absAmt;
+      } else if (lower.includes("扣款")) {
+        deduction += absAmt;
+      } else {
+        otherFee += absAmt;
+      }
+    }
+  }
+  return { warehouseFee, eprFee, adFee, afterSale, deduction, otherFee };
+}
+
+function buildSettlementRowFromData(s: SettlementStoreData): SettlementRow {
+  const store = formatStoreNo(s.store_code, s.mall_id);
+  const owner = s.owner || "";
+  const fd = s.fund_detail;
+  const sd = s.settlement_detail;
+  // 收入金额：只用真实结算收入（income-summary），不混入估算值
+  const income = s.settlement_income || 0;
+  const reserve = sd?.wait_settlement?.estimated || 0;
+  const release = sd?.settled?.total || 0;
+  const income_total = income - reserve + release;
+  const fees = classifyFundCategories(fd);
+  const cost = s.cost || 0;
+  const expense_total = fees.afterSale + fees.deduction + fees.warehouseFee + fees.eprFee + fees.adFee + fees.otherFee + cost;
+  const profit = income_total - expense_total;
+  const profit_rate = income_total > 0 ? profit / income_total : null;
+  return {
+    mall_id: s.mall_id, store, owner, qty: s.qty || 0,
+    income, reserve, release, income_total,
+    after_sale: fees.afterSale, deduction: fees.deduction, warehouse_fee: fees.warehouseFee,
+    epr_fee: fees.eprFee, ad_fee: fees.adFee, other_fee: fees.otherFee,
+    cost, expense_total, profit, profit_rate,
+  };
+}
+
+// 日期工具
+function dateStr(d: Date): string { return d.toISOString().slice(0, 10); }
+function monthStart(offset = 0): string {
+  const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() + offset);
+  return dateStr(d);
+}
+function monthEnd(offset = 0): string {
+  const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() + offset + 1); d.setDate(0);
+  return dateStr(d);
+}
+function daysAgo(n: number): string {
+  const d = new Date(); d.setDate(d.getDate() - n); return dateStr(d);
+}
+
 export default function MultiStoreReport() {
   const [loading, setLoading] = useState(false);
+  const [settlementSyncing, setSettlementSyncing] = useState(false);
   const [data, setData] = useState<ReportData | null>(
     () => readPageCache<ReportData | null>(MULTI_STORE_REPORT_CACHE_KEY, null),
   );
@@ -248,6 +400,12 @@ export default function MultiStoreReport() {
   const [skuSearchInput, setSkuSearchInput] = useSessionState(msrViewKey("skuSearch"), "");
   // 搜索框防抖：输入框绑 skuSearchInput 跟手，下游过滤用防抖后的 skuSearch（变量名不变，下游无需改）。
   const skuSearch = useDebouncedValue(skuSearchInput, 250);
+
+  // 仓内库存 Tab（按店铺聚合，懒加载）
+  const [invRows, setInvRows] = useState<any[]>([]);
+  const [invSummary, setInvSummary] = useState<any>(null);
+  const [invLoading, setInvLoading] = useState(false);
+  const [invLoaded, setInvLoaded] = useState(false);
 
   const load = useCallback(async () => {
     if (!window.electronAPI?.erp?.reports?.multiStore) {
@@ -273,6 +431,39 @@ export default function MultiStoreReport() {
     }
   }, []);
 
+  const syncSettlementIncome = useCallback(async () => {
+    if (!window.electronAPI?.erp?.syncTemuSettlementIncomeFromCloud) {
+      message.error("当前版本不支持结算收入同步，请升级桌面端");
+      return;
+    }
+    setSettlementSyncing(true);
+    try {
+      const resp = await window.electronAPI.erp.syncTemuSettlementIncomeFromCloud({});
+      if (!resp?.ok) {
+        message.error(resp?.error || "结算收入同步失败");
+        return;
+      }
+      const result = resp.result || {};
+      if (result.attached === false) {
+        message.warning("未挂载 cloud 抓包库，暂时没有可同步的结算数据");
+        return;
+      }
+      if (result.ok === false) {
+        message.warning("cloud 抓包库已挂载，但结算抓包表不可用或同步未完成，请先跑预检");
+        return;
+      }
+      const incomeRows = result.incomeRows ?? result.rows ?? 0;
+      const detailRows = result.detailRows ?? 0;
+      const fundRows = result.fundRows ?? 0;
+      message.success(`结算数据已同步：${result.malls || 0} 店 / 收入 ${incomeRows} 行 / 明细 ${detailRows} 行 / 费用 ${fundRows} 行`);
+      await load();
+    } catch (e: any) {
+      message.error(e?.message || String(e));
+    } finally {
+      setSettlementSyncing(false);
+    }
+  }, [load]);
+
   useEffect(() => {
     load();
     const timer = window.setInterval(load, REFRESH_MS);
@@ -281,6 +472,8 @@ export default function MultiStoreReport() {
 
   const allStores = data?.stores || [];
   const finAvailable = data?.financials_available ?? false;
+  const settlementAvailable = data?.settlement_available ?? false;
+  const settlementDetailAvailable = data?.settlement_detail_available ?? false;
   const salesWindow = data?.sales_window ?? null;
   const windowDays = salesWindow?.days && salesWindow.days > 0 ? salesWindow.days : 0;
   const label30 = windowDays > 0 && windowDays < 30 ? `近 ${windowDays} 天` : "近 30 天";
@@ -337,6 +530,25 @@ export default function MultiStoreReport() {
     if (activeTab === "sales" && !skuLoaded && !skuLoading) loadSkuSales();
   }, [activeTab, skuLoaded, skuLoading, loadSkuSales]);
 
+  const loadWarehouseInventory = useCallback(async () => {
+    if (!window.electronAPI?.erp?.reports?.warehouseInventory) return;
+    setInvLoading(true);
+    try {
+      const resp = await window.electronAPI.erp.reports.warehouseInventory({ includeTest: false });
+      if (resp.ok && resp.data) {
+        setInvRows(resp.data.stores || []);
+        setInvSummary(resp.data.summary || null);
+        setInvLoaded(true);
+      }
+    } catch { /* ignore */ } finally {
+      setInvLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === "warehouse" && !invLoaded && !invLoading) loadWarehouseInventory();
+  }, [activeTab, invLoaded, invLoading, loadWarehouseInventory]);
+
   const skuStoreOptions = useMemo(() => {
     const set = new Set<string>();
     for (const r of skuRows) if (r.store_code) set.add(r.store_code);
@@ -361,9 +573,14 @@ export default function MultiStoreReport() {
     const rev30 = stores.reduce((acc, s) => acc + (s.financials?.last30d.revenue || 0), 0);
     const gp30 = stores.reduce((acc, s) => acc + (s.financials?.last30d.gross_profit || 0), 0);
     const revToday = stores.reduce((acc, s) => acc + (s.financials?.today.revenue || 0), 0);
+    const settlementToday = stores.reduce((acc, s) => acc + (s.settlement?.today.income || 0), 0);
+    const settlement30 = stores.reduce((acc, s) => acc + (s.settlement?.last30d.income || 0), 0);
+    const settleWait = stores.reduce((acc, s) => acc + (s.settlement_detail?.wait_settlement.estimated || 0), 0);
+    const settleIn = stores.reduce((acc, s) => acc + (s.settlement_detail?.in_settlement.total || 0), 0);
+    const settleDone = stores.reduce((acc, s) => acc + (s.settlement_detail?.settled.total || 0), 0);
     const warehouseValue = stores.reduce((acc, s) => acc + (s.inventory?.warehouse_value || 0), 0);
     const inTransitValue = stores.reduce((acc, s) => acc + (s.inventory?.in_transit_value || 0), 0);
-    return { onlineCount, totalPending, rev30, gp30, revToday, warehouseValue, inTransitValue, margin30: rev30 > 0 ? gp30 / rev30 : null };
+    return { onlineCount, totalPending, rev30, gp30, revToday, settlementToday, settlement30, settleWait, settleIn, settleDone, warehouseValue, inTransitValue, margin30: rev30 > 0 ? gp30 / rev30 : null };
   }, [stores]);
 
   // 全局趋势（合并各店 trend_daily）
@@ -379,6 +596,77 @@ export default function MultiStoreReport() {
     }
     return Array.from(m.values()).sort((a, b) => a.date.localeCompare(b.date));
   }, [stores]);
+
+  const combinedSettlementTrend = useMemo(() => {
+    const m = new Map<string, { date: string; income: number }>();
+    for (const s of stores) {
+      for (const t of s.settlement?.trend_daily ?? []) {
+        const e = m.get(t.date) || { date: t.date, income: 0 };
+        e.income += t.income;
+        m.set(t.date, e);
+      }
+    }
+    return Array.from(m.values()).sort((a, b) => a.date.localeCompare(b.date));
+  }, [stores]);
+
+  // ===== 结算报表（独立数据源 + 时间段选择器）=====
+  const [stlRange, setStlRange] = useSessionState<[string, string]>(msrViewKey("stlRange"), [daysAgo(30), dateStr(new Date())]);
+  const [stlData, setStlData] = useState<SettlementStoreData[]>([]);
+  const [stlFundAvail, setStlFundAvail] = useState(false);
+  const [stlLoading, setStlLoading] = useState(false);
+  const [stlLoaded, setStlLoaded] = useState(false);
+
+  const loadSettlement = useCallback(async (start?: string, end?: string) => {
+    if (!window.electronAPI?.erp?.reports?.settlement) return;
+    setStlLoading(true);
+    try {
+      const resp = await window.electronAPI.erp.reports.settlement({
+        startDate: start || stlRange[0],
+        endDate: end || stlRange[1],
+      });
+      if (resp.ok && resp.data) {
+        setStlData((resp.data.stores || []) as SettlementStoreData[]);
+        setStlFundAvail(resp.data.fund_detail_available ?? false);
+        setStlLoaded(true);
+      }
+    } catch { /* ignore */ } finally {
+      setStlLoading(false);
+    }
+  }, [stlRange]);
+
+  // 进入结算 Tab 时懒加载
+  useEffect(() => {
+    if (activeTab === "settlement" && !stlLoaded && !stlLoading) loadSettlement();
+  }, [activeTab, stlLoaded, stlLoading, loadSettlement]);
+
+  const stlPresets: Array<{ label: string; range: [string, string] }> = useMemo(() => [
+    { label: "近7天", range: [daysAgo(7), dateStr(new Date())] },
+    { label: "近30天", range: [daysAgo(30), dateStr(new Date())] },
+    { label: "本月", range: [monthStart(0), dateStr(new Date())] },
+    { label: "上月", range: [monthStart(-1), monthEnd(-1)] },
+  ], []);
+
+  const handleStlRangeChange = useCallback((range: [string, string]) => {
+    setStlRange(range);
+    setStlLoaded(false); // 下次 useEffect 自动重新加载
+  }, [setStlRange]);
+
+  const settlementRows = useMemo(() => stlData.map(buildSettlementRowFromData), [stlData]);
+
+  const settlementTotals = useMemo(() => {
+    const t: Omit<SettlementRow, "mall_id" | "store" | "owner" | "profit_rate"> = {
+      qty: 0, income: 0, reserve: 0, release: 0, income_total: 0,
+      after_sale: 0, deduction: 0, warehouse_fee: 0, epr_fee: 0,
+      ad_fee: 0, other_fee: 0, cost: 0, expense_total: 0, profit: 0,
+    };
+    for (const r of settlementRows) {
+      t.qty += r.qty; t.income += r.income; t.reserve += r.reserve; t.release += r.release;
+      t.income_total += r.income_total; t.after_sale += r.after_sale; t.deduction += r.deduction;
+      t.warehouse_fee += r.warehouse_fee; t.epr_fee += r.epr_fee; t.ad_fee += r.ad_fee;
+      t.other_fee += r.other_fee; t.cost += r.cost; t.expense_total += r.expense_total; t.profit += r.profit;
+    }
+    return { ...t, profit_rate: t.income_total > 0 ? t.profit / t.income_total : null };
+  }, [settlementRows]);
 
   // 店铺营收排名（Top 15，营收毛利 Tab 横向条形）
   const revRank = useMemo(() => stores
@@ -532,6 +820,12 @@ export default function MultiStoreReport() {
   const bossColumns: ColumnsType<ReportStore> = [
     { title: "店号", key: "code", width: 110, fixed: "left", render: (_, s) => <StoreCell store={s} />, sorter: (a, b) => (a.store_code || "").localeCompare(b.store_code || "") },
     { title: "店铺", key: "name", width: 170, render: (_, s) => storeNameCell(s), sorter: storeNameSorter },
+    { title: "近 7 天结算", key: "settle7", width: 120, align: "right", render: (_, s) => fmtMoney(s.settlement?.last7d.income), sorter: (a, b) => (a.settlement?.last7d.income || 0) - (b.settlement?.last7d.income || 0) },
+    { title: "结算 7 天环比", key: "settleWow", width: 100, align: "right", render: (_, s) => <DeltaTag value={s.settlement?.last7d.income_wow ?? null} /> },
+    { title: "近 30 天结算", key: "settle30", width: 120, align: "right", render: (_, s) => fmtMoney(s.settlement?.last30d.income), sorter: (a, b) => (a.settlement?.last30d.income || 0) - (b.settlement?.last30d.income || 0) },
+    { title: "待处理款项", key: "settleWait", width: 120, align: "right", render: (_, s) => fmtMoney(s.settlement_detail?.wait_settlement.estimated), sorter: (a, b) => (a.settlement_detail?.wait_settlement.estimated || 0) - (b.settlement_detail?.wait_settlement.estimated || 0) },
+    { title: "结算中款项", key: "settleIn", width: 120, align: "right", render: (_, s) => fmtMoney(s.settlement_detail?.in_settlement.total), sorter: (a, b) => (a.settlement_detail?.in_settlement.total || 0) - (b.settlement_detail?.in_settlement.total || 0) },
+    { title: "已到账款项", key: "settleDone", width: 120, align: "right", render: (_, s) => fmtMoney(s.settlement_detail?.settled.total), sorter: (a, b) => (a.settlement_detail?.settled.total || 0) - (b.settlement_detail?.settled.total || 0) },
     { title: "近 7 天营收", key: "rev7", width: 120, align: "right", render: (_, s) => fmtMoney(s.financials?.last7d.revenue), sorter: (a, b) => (a.financials?.last7d.revenue || 0) - (b.financials?.last7d.revenue || 0), defaultSortOrder: "descend" },
     { title: "7 天环比", key: "wow", width: 90, align: "right", render: (_, s) => <DeltaTag value={s.financials?.last7d.rev_wow ?? null} /> },
     { title: "近 30 天营收", key: "rev30", width: 120, align: "right", render: (_, s) => fmtMoney(s.financials?.last30d.revenue), sorter: (a, b) => (a.financials?.last30d.revenue || 0) - (b.financials?.last30d.revenue || 0) },
@@ -684,6 +978,9 @@ export default function MultiStoreReport() {
           {!finAvailable && (
             <Alert type="warning" showIcon style={{ margin: 16 }} message="金额维度暂不可用" description="未能连接 cloud 销量库（attach 失败或主控端未配置），营收/毛利显示为空。" />
           )}
+          {!settlementAvailable && (
+            <Alert type="info" showIcon style={{ margin: 16 }} message="实际结算维度暂不可用" description="请先同步 Temu 结算收入抓包；若仍不可用，确认迁移 081_temu_settlement_income 已执行。" />
+          )}
           {finAvailable && salesWindow && windowDays > 0 && windowDays < 30 && (
             <Alert
               type="info"
@@ -708,6 +1005,20 @@ export default function MultiStoreReport() {
               </ResponsiveContainer>
             </div>
           )}
+          {settlementAvailable && combinedSettlementTrend.length >= 2 && (
+            <div style={{ padding: "8px 16px 0" }}>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>实际结算收入趋势（所选范围合计）</Typography.Text>
+              <ResponsiveContainer width="100%" height={160}>
+                <LineChart data={combinedSettlementTrend} margin={{ top: 8, right: 16, bottom: 0, left: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                  <XAxis dataKey="date" tick={{ fontSize: 11 }} tickFormatter={(d) => String(d).slice(5)} />
+                  <YAxis tick={{ fontSize: 11 }} width={56} tickFormatter={(v) => "¥" + (v >= 1000 ? (v / 1000).toFixed(0) + "k" : v)} />
+                  <RTooltip formatter={(v: any) => fmtMoney(Number(v))} labelFormatter={(d) => `日期 ${d}`} />
+                  <Line type="monotone" dataKey="income" name="实际结算" stroke="#13c2c2" dot={false} strokeWidth={2} isAnimationActive={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
           {finAvailable && revRank.length > 0 && (
             <div style={{ padding: "8px 16px 0" }}>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
@@ -727,8 +1038,99 @@ export default function MultiStoreReport() {
               </ResponsiveContainer>
             </div>
           )}
-          <Table<ReportStore> dataSource={stores} columns={bossColumns} rowKey="mall_id" size="small" pagination={false} scroll={{ x: 1240 }} loading={loading} />
+          <Table<ReportStore> dataSource={stores} columns={bossColumns} rowKey="mall_id" size="small" pagination={false} scroll={{ x: 1580 }} loading={loading} />
         </>
+      ),
+    },
+    {
+      key: "warehouse",
+      label: "仓内库存",
+      children: (
+        <div>
+          {invSummary && (
+            <div style={{ padding: "12px 16px 0", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12 }}>
+              <Statistic title="总库存（件）" value={fmtNum(invSummary.total_qty)} />
+              <Statistic title="可用库存" value={fmtNum(invSummary.available_qty)} valueStyle={{ color: COLOR.good }} />
+              <Statistic title="已预留" value={fmtNum(invSummary.reserved_qty)} valueStyle={invSummary.reserved_qty > 0 ? { color: "#d46b08" } : undefined} />
+              <Statistic title="库存货值" value={fmtMoney(invSummary.total_value)} valueStyle={{ fontWeight: 600 }} />
+              <Statistic title="SKU 总数" value={fmtNum(invSummary.sku_count)} />
+            </div>
+          )}
+          <div style={{ padding: "8px 16px 0", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ color: "#888", fontSize: 12 }}>自有仓库库存，按店铺账号聚合。货值 = 批次落地成本 x 库存件数（无成本批次按 0 计）。</span>
+            {invRows.length > 0 && (
+              <Button
+                size="small"
+                icon={<DownloadOutlined />}
+                onClick={() => {
+                  const header = ["店铺账号", "SKU数", "可用", "预留待发", "冻结", "残次", "返工", "总库存", "库存货值", "批次数"];
+                  const body = invRows.map((r: any) => [
+                    r.account_name || r.account_id, r.sku_count, r.available_qty, r.reserved_qty,
+                    r.blocked_qty, r.defective_qty, r.rework_qty, r.total_qty,
+                    Number(r.stock_value.toFixed(2)), r.batch_count,
+                  ]);
+                  const total = invRows.reduce((a: any, r: any) => ({
+                    s: a.s + r.sku_count, av: a.av + r.available_qty, re: a.re + r.reserved_qty,
+                    bl: a.bl + r.blocked_qty, de: a.de + r.defective_qty, rw: a.rw + r.rework_qty,
+                    to: a.to + r.total_qty, va: a.va + r.stock_value, ba: a.ba + r.batch_count,
+                  }), { s: 0, av: 0, re: 0, bl: 0, de: 0, rw: 0, to: 0, va: 0, ba: 0 });
+                  body.push(["合计", total.s, total.av, total.re, total.bl, total.de, total.rw, total.to, Number(total.va.toFixed(2)), total.ba]);
+                  downloadCsv(`仓内库存_${new Date().toISOString().slice(0, 10)}.csv`, [header, ...body]);
+                }}
+              >导出 CSV</Button>
+            )}
+          </div>
+          <Table
+            dataSource={invRows}
+            rowKey="account_id"
+            size="small"
+            pagination={false}
+            scroll={{ x: 1100 }}
+            loading={invLoading}
+            columns={[
+              { title: "店铺账号", dataIndex: "account_name", width: 160, fixed: "left" as const, render: (v: string | null, r: any) => <Typography.Text strong>{v || r.account_id}</Typography.Text>, sorter: (a: any, b: any) => (a.account_name || a.account_id).localeCompare(b.account_name || b.account_id) },
+              { title: "SKU 数", dataIndex: "sku_count", width: 80, align: "right" as const, render: (v: number) => fmtNum(v), sorter: (a: any, b: any) => a.sku_count - b.sku_count },
+              { title: "可用", dataIndex: "available_qty", width: 100, align: "right" as const, render: (v: number) => <span style={{ color: COLOR.good }}>{fmtNum(v)}</span>, sorter: (a: any, b: any) => a.available_qty - b.available_qty },
+              { title: "预留待发", dataIndex: "reserved_qty", width: 100, align: "right" as const, render: (v: number) => v > 0 ? <span style={{ color: "#d46b08" }}>{fmtNum(v)}</span> : <span style={{ color: COLOR.muted }}>—</span>, sorter: (a: any, b: any) => a.reserved_qty - b.reserved_qty },
+              { title: "冻结", dataIndex: "blocked_qty", width: 80, align: "right" as const, render: (v: number) => v > 0 ? <span style={{ color: COLOR.bad }}>{fmtNum(v)}</span> : <span style={{ color: COLOR.muted }}>—</span>, sorter: (a: any, b: any) => a.blocked_qty - b.blocked_qty },
+              { title: "残次", dataIndex: "defective_qty", width: 80, align: "right" as const, render: (v: number) => v > 0 ? <span style={{ color: COLOR.bad }}>{fmtNum(v)}</span> : <span style={{ color: COLOR.muted }}>—</span>, sorter: (a: any, b: any) => a.defective_qty - b.defective_qty },
+              { title: "返工", dataIndex: "rework_qty", width: 80, align: "right" as const, render: (v: number) => v > 0 ? <span style={{ color: COLOR.warn }}>{fmtNum(v)}</span> : <span style={{ color: COLOR.muted }}>—</span>, sorter: (a: any, b: any) => a.rework_qty - b.rework_qty },
+              { title: "总库存", dataIndex: "total_qty", width: 100, align: "right" as const, render: (v: number) => <Typography.Text strong>{fmtNum(v)}</Typography.Text>, sorter: (a: any, b: any) => a.total_qty - b.total_qty, defaultSortOrder: "descend" as const },
+              { title: "库存货值", dataIndex: "stock_value", width: 130, align: "right" as const, render: (v: number) => <Typography.Text strong>{fmtMoney(v)}</Typography.Text>, sorter: (a: any, b: any) => a.stock_value - b.stock_value },
+              { title: "批次数", dataIndex: "batch_count", width: 80, align: "right" as const, render: (v: number) => fmtNum(v), sorter: (a: any, b: any) => a.batch_count - b.batch_count },
+            ]}
+            summary={() => {
+              if (!invSummary || invRows.length === 0) return null;
+              const t = invRows.reduce((acc, r) => ({
+                sku: acc.sku + r.sku_count,
+                avail: acc.avail + r.available_qty,
+                res: acc.res + r.reserved_qty,
+                blk: acc.blk + r.blocked_qty,
+                def: acc.def + r.defective_qty,
+                rew: acc.rew + r.rework_qty,
+                tot: acc.tot + r.total_qty,
+                val: acc.val + r.stock_value,
+                bat: acc.bat + r.batch_count,
+              }), { sku: 0, avail: 0, res: 0, blk: 0, def: 0, rew: 0, tot: 0, val: 0, bat: 0 });
+              return (
+                <Table.Summary fixed>
+                  <Table.Summary.Row style={{ fontWeight: 600, background: "#fafafa" }}>
+                    <Table.Summary.Cell index={0}>合计</Table.Summary.Cell>
+                    <Table.Summary.Cell index={1} align="right">{fmtNum(t.sku)}</Table.Summary.Cell>
+                    <Table.Summary.Cell index={2} align="right">{fmtNum(t.avail)}</Table.Summary.Cell>
+                    <Table.Summary.Cell index={3} align="right">{fmtNum(t.res)}</Table.Summary.Cell>
+                    <Table.Summary.Cell index={4} align="right">{fmtNum(t.blk)}</Table.Summary.Cell>
+                    <Table.Summary.Cell index={5} align="right">{fmtNum(t.def)}</Table.Summary.Cell>
+                    <Table.Summary.Cell index={6} align="right">{fmtNum(t.rew)}</Table.Summary.Cell>
+                    <Table.Summary.Cell index={7} align="right">{fmtNum(t.tot)}</Table.Summary.Cell>
+                    <Table.Summary.Cell index={8} align="right">{fmtMoney(t.val)}</Table.Summary.Cell>
+                    <Table.Summary.Cell index={9} align="right">{fmtNum(t.bat)}</Table.Summary.Cell>
+                  </Table.Summary.Row>
+                </Table.Summary>
+              );
+            }}
+          />
+        </div>
       ),
     },
     {
@@ -817,6 +1219,149 @@ export default function MultiStoreReport() {
       label: "采购报表",
       children: <PurchaseReportPanel />,
     },
+    {
+      key: "settlement",
+      label: "结算报表",
+      children: (
+        <div>
+          {/* 时间段选择器 */}
+          <div style={{ padding: "12px 16px 0", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            {stlPresets.map((p) => (
+              <Button key={p.label} size="small"
+                type={stlRange[0] === p.range[0] && stlRange[1] === p.range[1] ? "primary" : "default"}
+                onClick={() => handleStlRangeChange(p.range)}
+              >{p.label}</Button>
+            ))}
+            <span style={{ color: "#888", margin: "0 4px" }}>|</span>
+            <input type="date" value={stlRange[0]} style={{ fontSize: 13, padding: "2px 6px" }}
+              onChange={(e) => e.target.value && handleStlRangeChange([e.target.value, stlRange[1]])} />
+            <span style={{ color: "#888" }}>~</span>
+            <input type="date" value={stlRange[1]} style={{ fontSize: 13, padding: "2px 6px" }}
+              onChange={(e) => e.target.value && handleStlRangeChange([stlRange[0], e.target.value])} />
+            <Button size="small" icon={<ReloadOutlined />} loading={stlLoading} onClick={() => loadSettlement()}>刷新</Button>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>{stlRange[0]} ~ {stlRange[1]}</Typography.Text>
+          </div>
+          {!stlFundAvail && stlLoaded && (
+            <Alert type="info" showIcon style={{ margin: "8px 16px 0" }}
+              message="对账中心费用明细暂不可用"
+              description={"请先在 seller.kuajingmaihuo.com 对账中心翻阅账务明细页面（被动抓包采集），然后点击「同步结算数据」。费用分类（仓储/EPR/广告/赔付等）依赖抓包数据填充。"} />
+          )}
+          {/* 汇总卡片 */}
+          <div style={{ padding: "12px 16px 0", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 12 }}>
+            <Statistic title="收入合计" value={fmtMoney(settlementTotals.income_total)} valueStyle={{ color: COLOR.good, fontSize: 18 }} />
+            <Statistic title="支出合计" value={fmtMoney(settlementTotals.expense_total)} valueStyle={{ color: COLOR.bad, fontSize: 18 }} />
+            <Statistic title="预估利润" value={fmtMoney(settlementTotals.profit)} valueStyle={{ color: settlementTotals.profit >= 0 ? COLOR.good : COLOR.bad, fontSize: 18 }} />
+            <Statistic title="利润率" value={fmtPct(settlementTotals.profit_rate)} valueStyle={{ color: settlementTotals.profit_rate != null && settlementTotals.profit_rate < ALERT_MARGIN_LOW ? COLOR.bad : COLOR.good, fontSize: 18 }} />
+            <Statistic title="仓储综合服务费" value={fmtMoney(settlementTotals.warehouse_fee)} valueStyle={{ fontSize: 16 }} />
+            <Statistic title="售后赔付" value={fmtMoney(settlementTotals.after_sale)} valueStyle={{ fontSize: 16 }} />
+            <Statistic title="广告服务费" value={fmtMoney(settlementTotals.ad_fee)} valueStyle={{ fontSize: 16 }} />
+            <Statistic title="销售成本" value={fmtMoney(settlementTotals.cost)} valueStyle={{ fontSize: 16 }} />
+          </div>
+          <div style={{ padding: "8px 16px 0", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ color: "#888", fontSize: 12 }}>
+              收入 = 结算中心实际结算金额（income-summary），成本 = 销量 x 加权平均成本，费用来自对账中心抓包。
+              {!stlFundAvail && stlLoaded ? " 费用列为空 = 该店尚未抓到对账数据。" : ""}
+            </span>
+            <Button size="small" icon={<DownloadOutlined />}
+              onClick={() => {
+                const header = ["店铺", "负责人", "销量", "收入金额", "售后预留金额", "售后释放金额", "收入合计", "售后赔付", "扣款", "仓储综合服务费", "EPR费用", "广告服务费", "其它服务费", "销售成本", "支出合计", "预估利润", "预估利润率(%)"];
+                const body = settlementRows.map((r) => [
+                  r.store, r.owner, r.qty,
+                  r.income.toFixed(2), r.reserve.toFixed(2), r.release.toFixed(2), r.income_total.toFixed(2),
+                  r.after_sale.toFixed(2), r.deduction.toFixed(2), r.warehouse_fee.toFixed(2),
+                  r.epr_fee.toFixed(2), r.ad_fee.toFixed(2), r.other_fee.toFixed(2),
+                  r.cost.toFixed(2), r.expense_total.toFixed(2), r.profit.toFixed(2),
+                  r.profit_rate != null ? (r.profit_rate * 100).toFixed(2) : "",
+                ]);
+                const t = settlementTotals;
+                body.push(["合计", "", t.qty, t.income.toFixed(2), t.reserve.toFixed(2), t.release.toFixed(2), t.income_total.toFixed(2), t.after_sale.toFixed(2), t.deduction.toFixed(2), t.warehouse_fee.toFixed(2), t.epr_fee.toFixed(2), t.ad_fee.toFixed(2), t.other_fee.toFixed(2), t.cost.toFixed(2), t.expense_total.toFixed(2), t.profit.toFixed(2), t.profit_rate != null ? (t.profit_rate * 100).toFixed(2) : ""]);
+                downloadCsv(`结算报表_${stlRange[0]}_${stlRange[1]}.csv`, [header, ...body]);
+              }}
+            >导出 CSV</Button>
+          </div>
+          <Table<SettlementRow>
+            dataSource={settlementRows}
+            rowKey="mall_id"
+            size="small"
+            pagination={false}
+            scroll={{ x: 1800 }}
+            loading={stlLoading}
+            summary={() => (
+              <Table.Summary fixed>
+                <Table.Summary.Row>
+                  <Table.Summary.Cell index={0}><Typography.Text strong>合计</Typography.Text></Table.Summary.Cell>
+                  <Table.Summary.Cell index={1} />
+                  <Table.Summary.Cell index={2} align="right"><Typography.Text strong>{fmtNum(settlementTotals.qty)}</Typography.Text></Table.Summary.Cell>
+                  <Table.Summary.Cell index={3} align="right"><Typography.Text strong>{fmtMoney(settlementTotals.income)}</Typography.Text></Table.Summary.Cell>
+                  <Table.Summary.Cell index={4} align="right">{fmtMoney(settlementTotals.reserve)}</Table.Summary.Cell>
+                  <Table.Summary.Cell index={5} align="right">{fmtMoney(settlementTotals.release)}</Table.Summary.Cell>
+                  <Table.Summary.Cell index={6} align="right"><Typography.Text strong style={{ color: COLOR.good }}>{fmtMoney(settlementTotals.income_total)}</Typography.Text></Table.Summary.Cell>
+                  <Table.Summary.Cell index={7} align="right">{fmtMoney(settlementTotals.after_sale)}</Table.Summary.Cell>
+                  <Table.Summary.Cell index={8} align="right">{fmtMoney(settlementTotals.deduction)}</Table.Summary.Cell>
+                  <Table.Summary.Cell index={9} align="right">{fmtMoney(settlementTotals.warehouse_fee)}</Table.Summary.Cell>
+                  <Table.Summary.Cell index={10} align="right">{fmtMoney(settlementTotals.epr_fee)}</Table.Summary.Cell>
+                  <Table.Summary.Cell index={11} align="right">{fmtMoney(settlementTotals.ad_fee)}</Table.Summary.Cell>
+                  <Table.Summary.Cell index={12} align="right">{fmtMoney(settlementTotals.other_fee)}</Table.Summary.Cell>
+                  <Table.Summary.Cell index={13} align="right">{fmtMoney(settlementTotals.cost)}</Table.Summary.Cell>
+                  <Table.Summary.Cell index={14} align="right"><Typography.Text strong style={{ color: COLOR.bad }}>{fmtMoney(settlementTotals.expense_total)}</Typography.Text></Table.Summary.Cell>
+                  <Table.Summary.Cell index={15} align="right"><Typography.Text strong style={{ color: settlementTotals.profit >= 0 ? COLOR.good : COLOR.bad }}>{fmtMoney(settlementTotals.profit)}</Typography.Text></Table.Summary.Cell>
+                  <Table.Summary.Cell index={16} align="right"><Typography.Text strong>{fmtPct(settlementTotals.profit_rate)}</Typography.Text></Table.Summary.Cell>
+                </Table.Summary.Row>
+              </Table.Summary>
+            )}
+            columns={[
+              { title: "店铺", dataIndex: "store", key: "store", width: 90, fixed: "left",
+                render: (v: string) => <Typography.Text strong>{v}</Typography.Text> },
+              { title: "负责人", dataIndex: "owner", key: "owner", width: 70,
+                render: (v: string) => v ? <Tag color="blue">{v}</Tag> : <span style={{ color: "#ccc" }}>—</span> },
+              { title: "销量", dataIndex: "qty", key: "qty", width: 80, align: "right",
+                render: (v: number) => fmtNum(v), sorter: (a, b) => a.qty - b.qty },
+              { title: "收入金额", dataIndex: "income", key: "income", width: 110, align: "right",
+                render: (v: number) => v ? fmtMoney(v) : <span style={{ color: "#ccc" }}>—</span>,
+                sorter: (a, b) => a.income - b.income },
+              { title: "售后预留", dataIndex: "reserve", key: "reserve", width: 100, align: "right",
+                render: (v: number) => v ? fmtMoney(v) : <span style={{ color: "#ccc" }}>—</span> },
+              { title: "售后释放", dataIndex: "release", key: "release", width: 100, align: "right",
+                render: (v: number) => v ? fmtMoney(v) : <span style={{ color: "#ccc" }}>—</span> },
+              { title: "收入合计", dataIndex: "income_total", key: "income_total", width: 110, align: "right",
+                render: (v: number) => <Typography.Text style={{ color: v > 0 ? COLOR.good : undefined }}>{v ? fmtMoney(v) : "—"}</Typography.Text>,
+                sorter: (a, b) => a.income_total - b.income_total },
+              { title: "售后赔付", dataIndex: "after_sale", key: "after_sale", width: 100, align: "right",
+                render: (v: number) => v ? <span style={{ color: COLOR.bad }}>{fmtMoney(v)}</span> : <span style={{ color: "#ccc" }}>—</span>,
+                sorter: (a, b) => a.after_sale - b.after_sale },
+              { title: "扣款", dataIndex: "deduction", key: "deduction", width: 80, align: "right",
+                render: (v: number) => v ? <span style={{ color: COLOR.bad }}>{fmtMoney(v)}</span> : <span style={{ color: "#ccc" }}>—</span> },
+              { title: "仓储服务费", dataIndex: "warehouse_fee", key: "warehouse_fee", width: 110, align: "right",
+                render: (v: number) => v ? fmtMoney(v) : <span style={{ color: "#ccc" }}>—</span>,
+                sorter: (a, b) => a.warehouse_fee - b.warehouse_fee },
+              { title: "EPR费用", dataIndex: "epr_fee", key: "epr_fee", width: 90, align: "right",
+                render: (v: number) => v ? fmtMoney(v) : <span style={{ color: "#ccc" }}>—</span> },
+              { title: "广告服务费", dataIndex: "ad_fee", key: "ad_fee", width: 100, align: "right",
+                render: (v: number) => v ? fmtMoney(v) : <span style={{ color: "#ccc" }}>—</span>,
+                sorter: (a, b) => a.ad_fee - b.ad_fee },
+              { title: "其它服务费", dataIndex: "other_fee", key: "other_fee", width: 100, align: "right",
+                render: (v: number) => v ? fmtMoney(v) : <span style={{ color: "#ccc" }}>—</span> },
+              { title: "销售成本", dataIndex: "cost", key: "cost", width: 100, align: "right",
+                render: (v: number) => v ? fmtMoney(v) : <span style={{ color: "#ccc" }}>—</span>,
+                sorter: (a, b) => a.cost - b.cost },
+              { title: "支出合计", dataIndex: "expense_total", key: "expense_total", width: 110, align: "right",
+                render: (v: number) => <Typography.Text style={{ color: v > 0 ? COLOR.bad : undefined }}>{v ? fmtMoney(v) : "—"}</Typography.Text>,
+                sorter: (a, b) => a.expense_total - b.expense_total },
+              { title: "预估利润", dataIndex: "profit", key: "profit", width: 110, align: "right",
+                render: (v: number) => <Typography.Text strong style={{ color: v >= 0 ? COLOR.good : COLOR.bad }}>{fmtMoney(v)}</Typography.Text>,
+                sorter: (a, b) => a.profit - b.profit, defaultSortOrder: "descend" as const },
+              { title: "利润率", dataIndex: "profit_rate", key: "profit_rate", width: 80, align: "right",
+                render: (v: number | null) => {
+                  if (v == null) return <span style={{ color: "#ccc" }}>—</span>;
+                  const color = v < ALERT_MARGIN_LOW ? COLOR.bad : v < 0.3 ? COLOR.warn : COLOR.good;
+                  return <span style={{ color }}>{(v * 100).toFixed(1)}%</span>;
+                },
+                sorter: (a, b) => (a.profit_rate ?? -999) - (b.profit_rate ?? -999) },
+            ]}
+          />
+        </div>
+      ),
+    },
   ];
 
   return (
@@ -841,6 +1386,9 @@ export default function MultiStoreReport() {
                 生成于 {new Date(data.generated_at).toLocaleString("zh-CN")}
               </Typography.Text>
             )}
+            <Button icon={<CloudDownloadOutlined />} loading={settlementSyncing} onClick={syncSettlementIncome}>
+              同步结算数据
+            </Button>
             <Button icon={<ReloadOutlined />} loading={loading} onClick={() => { load(); message.success("已刷新"); }}>
               刷新
             </Button>
@@ -850,10 +1398,15 @@ export default function MultiStoreReport() {
       >
         {summary && (
           <>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 16 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 16 }}>
               <Statistic title="店铺数" value={stores.length} suffix={`/ ${summary.onlineCount} 实时`} />
               <Statistic title="今日营收" value={finAvailable ? fmtMoney(summary.revToday) : "—"} />
               <Statistic title={`${label30}营收`} value={finAvailable ? fmtMoney(summary.rev30) : "—"} />
+              <Statistic title="今日结算" value={settlementAvailable ? fmtMoney(summary.settlementToday) : "—"} />
+              <Statistic title={`${label30}结算`} value={settlementAvailable ? fmtMoney(summary.settlement30) : "—"} />
+              <Statistic title="待处理款项" value={settlementDetailAvailable ? fmtMoney(summary.settleWait) : "—"} valueStyle={{ color: "#faad14" }} />
+              <Statistic title="结算中款项" value={settlementDetailAvailable ? fmtMoney(summary.settleIn) : "—"} valueStyle={{ color: "#13c2c2" }} />
+              <Statistic title="已到账款项" value={settlementDetailAvailable ? fmtMoney(summary.settleDone) : "—"} valueStyle={{ color: "#52c41a" }} />
               <Statistic title={`${label30}毛利率`} value={finAvailable ? fmtPct(summary.margin30) : "—"} valueStyle={summary.margin30 != null ? { color: marginColor(summary.margin30) } : undefined} />
               <Statistic
                 title={<Tooltip title="Temu 平台仓可售库存 × 加权均价；成本未覆盖的 SKU 按 0 计，为下限值"><span style={{ borderBottom: "1px dotted #bbb", cursor: "help" }}>仓内货值</span></Tooltip>}

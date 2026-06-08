@@ -552,6 +552,7 @@ interface ErpAPI {
   syncTemuAdditionalFromCloud?: (payload: any) => Promise<{ ok: boolean; result?: any; error?: string }>;
   syncTemuReviewsFromCloud?: (payload: any) => Promise<{ ok: boolean; result?: any; error?: string }>;
   syncTemuImagesFromCloud?: (payload: any) => Promise<{ ok: boolean; result?: any; error?: string }>;
+  syncTemuSettlementIncomeFromCloud?: (payload: any) => Promise<{ ok: boolean; result?: any; error?: string }>;
   getEnums: () => Promise<Record<string, Record<string, string>>>;
   client: {
     getStatus: () => Promise<ErpClientStatus>;
@@ -893,6 +894,8 @@ interface ErpAPI {
     qcFlawImages: (options?: { mallId?: string; qcBillId?: string }) => Promise<{ ok: boolean; data?: { count: number; images: string[] }; error?: string }>;
     productTrend: (options?: { productId?: string }) => Promise<{ ok: boolean; data?: { product_id: string | null; rows: Array<{ date: string; qty: number; revenue: number }>; attached?: boolean; source?: string }; error?: string }>;
     purchase: (options?: { includeTest?: boolean }) => Promise<ErpPurchaseReportResponse>;
+    warehouseInventory: (options?: { includeTest?: boolean }) => Promise<{ ok: boolean; data?: { generated_at: number; store_count: number; summary: { total_qty: number; total_value: number; available_qty: number; reserved_qty: number; sku_count: number }; stores: Array<{ account_id: string; account_name: string | null; sku_count: number; available_qty: number; reserved_qty: number; blocked_qty: number; defective_qty: number; rework_qty: number; total_qty: number; stock_value: number; batch_count: number }> }; error?: string }>;
+    settlement: (options?: { startDate?: string; endDate?: string }) => Promise<{ ok: boolean; data?: { stores: Array<{ mall_id: string; store_code: string | null; mall_name: string | null; owner: string | null; fund_detail: { in_total: number; out_total: number; by_category: Record<string, number> } | null; revenue: number; cost: number; qty: number; settlement_detail: any | null }>; fund_detail_available: boolean; financials_available: boolean; date_range: { start: string | null; end: string | null } }; error?: string }>;
   };
   opTask?: {
     list: () => Promise<{ ok: boolean; data?: { rows: Array<{ task_key: string; status: "done" | "ignored"; owner: string | null; note: string | null; updated_at: number }> }; error?: string }>;
@@ -919,6 +922,8 @@ interface ErpMultiStoreReportStore {
   dict_remark: string | null;
   owner: string | null;
   financials: ErpStoreFinancials | null;
+  settlement: ErpStoreSettlement | null;
+  settlement_detail: ErpStoreSettlementDetail | null;
   sales: {
     today_qty: number;
     last7d_qty: number;
@@ -977,6 +982,30 @@ interface ErpStoreFinancials {
   trend_daily: Array<{ date: string; revenue: number; gross_profit: number }>;
 }
 
+interface ErpStoreSettlement {
+  latest_date: string | null;
+  today: { income: number };
+  last7d: { income: number; income_prev: number; income_wow: number | null };
+  last30d: { income: number; income_prev: number; income_mom: number | null };
+  trend_daily: Array<{ date: string; income: number }>;
+}
+
+interface ErpStoreSettlementDetailBucket {
+  count: number;
+  estimated: number;
+  sales_receipt: number;
+  chargeback: number;
+  subsidy: number;
+  total: number;
+}
+
+interface ErpStoreSettlementDetail {
+  currency: string;
+  wait_settlement: ErpStoreSettlementDetailBucket;
+  in_settlement: ErpStoreSettlementDetailBucket;
+  settled: ErpStoreSettlementDetailBucket;
+}
+
 interface ErpMultiStoreReportResponse {
   ok: boolean;
   error?: string;
@@ -985,6 +1014,8 @@ interface ErpMultiStoreReportResponse {
     cloud_tenant_id: string | null;
     store_count: number;
     financials_available: boolean;
+    settlement_available: boolean;
+    settlement_detail_available: boolean;
     stores: ErpMultiStoreReportStore[];
     unmapped: ErpMultiStoreReportStore[];
   };

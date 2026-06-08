@@ -1021,6 +1021,54 @@
   }
   try { window.fetch = TrackedFetch; } catch {}
 
+  // -------------------- Response.prototype 兜底 --------------------
+  // Qiankun 微前端沙箱在 hook 之前缓存原始 fetch 引用，导致 TrackedFetch 被绕过。
+  // 这里拦截 Response.prototype.json/text，无论哪个 fetch 引用发的请求都能抓到响应体。
+  // 仅在白名单 URL 且 TrackedFetch 未拦截时触发（用 fetchCapturedUrls 去重）。
+  const fetchCapturedUrls = new Set(); // TrackedFetch 已捕获的 url|ts 集合
+  const origRespJson = Response.prototype.json;
+  const origRespText = Response.prototype.text;
+  const respInterceptSeen = new Set();
+
+  function respInterceptEmit(url, text) {
+    const ts = Date.now();
+    const dedupKey = url + "|" + Math.floor(ts / 2000);
+    if (respInterceptSeen.has(dedupKey)) return;
+    respInterceptSeen.add(dedupKey);
+    if (respInterceptSeen.size > 2000) {
+      const it = respInterceptSeen.values();
+      for (let i = 0; i < 500; i++) respInterceptSeen.delete(it.next().value);
+    }
+    emit(buildCapturedPayload({
+      kind: "response-intercept",
+      url, method: "POST", status: 200, ts,
+      site: inferMallSite(), page: location.pathname,
+      reqBody: null, reqHeaders: null,
+    }, text, null, false));
+  }
+
+  Response.prototype.json = function () {
+    const url = this.url || "";
+    const result = origRespJson.call(this);
+    if (url && shouldCapture(url)) {
+      result.then((data) => {
+        try { respInterceptEmit(url, JSON.stringify(data)); } catch {}
+      }).catch(() => {});
+    }
+    return result;
+  };
+
+  Response.prototype.text = function () {
+    const url = this.url || "";
+    const result = origRespText.call(this);
+    if (url && shouldCapture(url)) {
+      result.then((text) => {
+        try { respInterceptEmit(url, text); } catch {}
+      }).catch(() => {});
+    }
+    return result;
+  };
+
   // Active activity library collector. It mirrors the reference plugin:
   // collect current SKC ids, call marketing/enroll/list, and emit the response
   // through the same capture pipeline so the cloud parser builds the activity library.

@@ -99,6 +99,34 @@ const HPF_MAX_PAGES_PER_MALL = 6;    // 每店最多翻几页
 const HPF_PAGE_SIZE = 50;            // 每页条数
 const HPF_PAGE_DELAY_MS = 450;       // 翻页间隔（避 429）
 const HPF_RUN_INTERVAL_MS = 6 * 60 * 60 * 1000; // 每 6 小时一轮
+// 结算收入概览（income-summary）主动采集：SW 后台定时按店调 /api/merchant/front/finance/income-summary，
+// 带 mallid 头，POST 空 body，返回日度收入列表。数据 enqueue 到 cloud.capture_events（url_path 与
+// 被动 hook 一致），ERP 端 syncSettlementIncomeFromCapture 自动解析入库 erp_temu_settlement_income。
+// 接口在 agentseller 域名，不需要 anti-content。
+const ALARM_INCOME_SUMMARY = "temu-monitor.income-summary";
+const INCOME_SUMMARY_STATE_KEY = "temu_monitor_income_summary_state";
+const INCOME_SUMMARY_RUN_INTERVAL_MS = 4 * 60 * 60 * 1000; // 每 4 小时一轮
+const INCOME_SUMMARY_PATH = "/api/merchant/front/finance/income-summary";
+// 结算明细三态（待处理/结算中/已到账）主动采集：SW 后台定时按店调 3 端点，带 mallid 头。
+// 与 income-summary（被动 hook 采概览页）互补：income-summary 只有日度收入合计，
+// 三态明细拆到销售回款/冲回/补贴维度。接口在 agentseller 域名，不需要 anti-content。
+const ALARM_SETTLEMENT = "temu-monitor.settlement";
+const SETTLEMENT_STATE_KEY = "temu_monitor_settlement_state";
+const SETTLEMENT_RUN_INTERVAL_MS = 4 * 60 * 60 * 1000; // 每 4 小时一轮
+const SETTLEMENT_ENDPOINTS = [
+  { path: "/api/merchant/settle/detail/full/wait-settlement", status: "wait_settlement" },
+  { path: "/api/merchant/settle/detail/full/in-settlement", status: "in_settlement" },
+  { path: "/api/merchant/settle/detail/full/settled", status: "settled" },
+];
+// 对账中心账务明细（fund/detail/pageSearch）主动采集：SW 后台定时按店翻页采，带 mallid 头。
+// 接口原属 kuajingmaihuo 域名（需 anti-content），但 agentseller 域名也暴露相同路径且不验签名（2026-06-08 实测确认）。
+// 数据经 cloud.capture_events 中转 → ERP syncFundDetailFromCapture 自动解析入库 erp_temu_fund_detail。
+const ALARM_FUND_DETAIL = "temu-monitor.fund-detail";
+const FUND_DETAIL_STATE_KEY = "temu_monitor_fund_detail_state";
+const FUND_DETAIL_RUN_INTERVAL_MS = 4 * 60 * 60 * 1000; // 每 4 小时一轮
+const FUND_DETAIL_MAX_PAGES = 10; // 每店最多翻 10 页（每页 50 条 = 最多 500 条）
+const FUND_DETAIL_PAGE_SIZE = 50;
+const FUND_DETAIL_PAGE_DELAY_MS = 600; // 翻页间隔（避 429）
 const FLOW_STATE_KEY = "temu_monitor_flow_state";
 const FLOW_RUN_INTERVAL_MS = 30 * 60 * 1000; // 每店每 30 分钟一轮（避 429）
 const FLOW_PAGE_SIZE = 100;
@@ -169,8 +197,11 @@ async function ensureRuntimeDefaults() {
   chrome.alarms.create(ALARM_SALES_TREND, { periodInMinutes: Math.max(1, SALES_TREND_RUN_INTERVAL_MS / 60000) });
   chrome.alarms.create(ALARM_REVIEW, { periodInMinutes: Math.max(1, REVIEW_RUN_INTERVAL_MS / 60000) });
   chrome.alarms.create(ALARM_HPF, { periodInMinutes: Math.max(1, HPF_RUN_INTERVAL_MS / 60000) });
+  chrome.alarms.create(ALARM_INCOME_SUMMARY, { periodInMinutes: Math.max(1, INCOME_SUMMARY_RUN_INTERVAL_MS / 60000) });
+  chrome.alarms.create(ALARM_SETTLEMENT, { periodInMinutes: Math.max(1, SETTLEMENT_RUN_INTERVAL_MS / 60000) });
+  chrome.alarms.create(ALARM_FUND_DETAIL, { periodInMinutes: Math.max(1, FUND_DETAIL_RUN_INTERVAL_MS / 60000) });
   await clearAlarm(ALARM_COLLECT);
-  const cur = await getStorage(["device_id", COLLECTOR_STATE_KEY, COLLECTOR_WINDOW_KEY, COLLECTOR_BOOT_VERSION_KEY, SALES_TREND_STATE_KEY, REVIEW_STATE_KEY, HPF_STATE_KEY]);
+  const cur = await getStorage(["device_id", COLLECTOR_STATE_KEY, COLLECTOR_WINDOW_KEY, COLLECTOR_BOOT_VERSION_KEY, SALES_TREND_STATE_KEY, REVIEW_STATE_KEY, HPF_STATE_KEY, INCOME_SUMMARY_STATE_KEY, SETTLEMENT_STATE_KEY, FUND_DETAIL_STATE_KEY]);
   const patch = {};
   if (!cur.device_id) patch.device_id = crypto.randomUUID();
   if (!cur[SALES_TREND_STATE_KEY]) {
@@ -194,6 +225,30 @@ async function ensureRuntimeDefaults() {
       enabled: true,
       updated_at: Date.now(),
       reason: "enabled_for_hpf_automation",
+    };
+  }
+  if (!cur[INCOME_SUMMARY_STATE_KEY]) {
+    // 结算收入概览（income-summary）主动采集默认开启。每 4h 一轮，按店 POST 拉日度收入列表，600ms 间隔。
+    patch[INCOME_SUMMARY_STATE_KEY] = {
+      enabled: true,
+      updated_at: Date.now(),
+      reason: "enabled_for_income_summary_automation",
+    };
+  }
+  if (!cur[SETTLEMENT_STATE_KEY]) {
+    // 结算明细三态主动采集默认开启。每 4h 一轮，每个 mall 调 3 端点（wait/in/settled），请求间隔 600ms。
+    patch[SETTLEMENT_STATE_KEY] = {
+      enabled: true,
+      updated_at: Date.now(),
+      reason: "enabled_for_settlement_automation",
+    };
+  }
+  if (!cur[FUND_DETAIL_STATE_KEY]) {
+    // 对账中心账务明细主动采集默认开启。每 4h 一轮，每店翻页采近 30 天资金流水，600ms 间隔。
+    patch[FUND_DETAIL_STATE_KEY] = {
+      enabled: true,
+      updated_at: Date.now(),
+      reason: "enabled_for_fund_detail_automation",
     };
   }
   if (!cur[COLLECTOR_STATE_KEY]) {
@@ -266,6 +321,18 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
   if (alarm.name === ALARM_HPF) {
     collectHighPriceFlowFromTargets().catch((e) => console.warn("[sw] hpf collect err", e?.message || e));
+    return;
+  }
+  if (alarm.name === ALARM_INCOME_SUMMARY) {
+    collectIncomeSummaryFromTargets().catch((e) => console.warn("[sw] income-summary collect err", e?.message || e));
+    return;
+  }
+  if (alarm.name === ALARM_SETTLEMENT) {
+    collectSettlementFromTargets().catch((e) => console.warn("[sw] settlement collect err", e?.message || e));
+    return;
+  }
+  if (alarm.name === ALARM_FUND_DETAIL) {
+    collectFundDetailFromTargets().catch((e) => console.warn("[sw] fund-detail collect err", e?.message || e));
     return;
   }
   if (alarm.name !== ALARM_FLUSH) return;
@@ -1415,6 +1482,290 @@ async function collectReviewsFromTargets() {
   return { ok: true, callCount, enqueuedCount, errorCount, mallCount };
 }
 
+// ===== 结算收入概览（income-summary）主动采集 =====
+// 每 4h 一轮，遍历所有 agentseller 店铺，POST /api/merchant/front/finance/income-summary（空 body + mallid 头），
+// 返回日度收入列表。enqueue 到 cloud.capture_events（url_path 与被动 hook 一致），
+// ERP 端 syncSettlementIncomeFromCapture 自动解析入库 erp_temu_settlement_income，覆盖全部 35 店。
+async function collectIncomeSummaryFromTargets() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", INCOME_SUMMARY_STATE_KEY]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
+  const now = Date.now();
+  const state = cfg[INCOME_SUMMARY_STATE_KEY] || {};
+  if (!state.enabled) return { ok: true, skipped: "disabled" };
+  if (state.last_run_at && now - Number(state.last_run_at) < INCOME_SUMMARY_RUN_INTERVAL_MS) {
+    return { ok: true, skipped: "interval" };
+  }
+  await setStorage({ [INCOME_SUMMARY_STATE_KEY]: { ...state, last_run_at: now } });
+
+  const malls = await getAllAgentSellerMalls();
+  let mallCount = 0;
+  let enqueuedCount = 0;
+  let errorCount = 0;
+
+  for (const m of malls) {
+    const mallId = String(m?.mallId || "").trim();
+    const origin = m?.origin || "https://agentseller.temu.com";
+    if (!mallId) continue;
+    mallCount++;
+    const siteTag = (origin.match(/\/(agentseller(?:-us|-eu)?)\./) || [])[1] || "agentseller";
+    const url = `${origin}${INCOME_SUMMARY_PATH}`;
+    try {
+      const resp = await fetch(url, {
+        method: "POST",
+        credentials: "include",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json", mallid: mallId },
+        body: "{}",
+      });
+      const text = await resp.text();
+      const body = safeParseJson(text);
+      if (resp.ok && body && typeof body === "object" && body.success !== false) {
+        // 检查是否有有效数据（result 应为日度收入数组）
+        const list = Array.isArray(body.result) ? body.result : [];
+        if (list.length > 0) {
+          await enqueue({
+            kind: "fetch-active-income-summary",
+            url,
+            method: "POST",
+            status: resp.status,
+            ts: Date.now(),
+            site: siteTag,
+            page: "background/income-summary",
+            mall_id: mallId,
+            body,
+            bodyText: text.length > 200000 ? null : text,
+            requestBodyText: "{}",
+            bodySize: text.length,
+            activeSource: "income_summary_background",
+          });
+          await bumpStats({ captured_count_delta: 1 });
+          enqueuedCount++;
+        }
+      } else {
+        errorCount++;
+        console.warn(`[sw] income-summary mall=${mallId} HTTP ${resp.status}`, body?.errorMsg || "");
+      }
+    } catch (e) {
+      errorCount++;
+      console.warn(`[sw] income-summary mall=${mallId} err`, e?.message || e);
+    }
+    // 店铺间间隔 600ms 控风控
+    await new Promise((resolve) => setTimeout(resolve, 600));
+  }
+
+  await setStorage({
+    [INCOME_SUMMARY_STATE_KEY]: {
+      ...state,
+      last_run_at: now,
+      last_success_at: Date.now(),
+      last_mall_count: mallCount,
+      last_enqueued_count: enqueuedCount,
+      last_error_count: errorCount,
+    },
+  });
+  if (enqueuedCount > 0) await flush();
+  return { ok: true, enqueuedCount, errorCount, mallCount };
+}
+
+// ---------- 结算明细三态主动采集 ----------
+// 每 4h 一轮，遍历当前打开的各区域 agentseller tab 的登录店，
+// 每店调 3 端点（wait-settlement / in-settlement / settled），
+// enqueue 到云端，后端 syncSettlementDetailFromCapture 自动物化。
+async function collectSettlementFromTargets() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", SETTLEMENT_STATE_KEY]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
+  const now = Date.now();
+  const state = cfg[SETTLEMENT_STATE_KEY] || {};
+  if (!state.enabled) return { ok: true, skipped: "disabled" };
+  if (state.last_run_at && now - Number(state.last_run_at) < SETTLEMENT_RUN_INTERVAL_MS) {
+    return { ok: true, skipped: "interval" };
+  }
+  await setStorage({ [SETTLEMENT_STATE_KEY]: { ...state, last_run_at: now } });
+
+  const malls = await getAllAgentSellerMalls();
+  let mallCount = 0;
+  let callCount = 0;
+  let enqueuedCount = 0;
+  let errorCount = 0;
+
+  for (const m of malls) {
+    const mallId = String(m?.mallId || "").trim();
+    const origin = m?.origin || "https://agentseller.temu.com";
+    if (!mallId) continue;
+    mallCount++;
+    const siteTag = (origin.match(/\/(agentseller(?:-us|-eu)?)\./) || [])[1] || "agentseller";
+
+    for (const ep of SETTLEMENT_ENDPOINTS) {
+      const url = `${origin}${ep.path}`;
+      callCount++;
+      // settled 端点必须带 startDate/endDate 否则 Params invalid；默认最近 30 天
+      let reqBody = {};
+      if (ep.status === "settled") {
+        const end = new Date();
+        const start = new Date(end.getTime() - 30 * 86400000);
+        const fmt = (d) => d.toISOString().slice(0, 10);
+        reqBody = { startDate: fmt(start), endDate: fmt(end) };
+      }
+      const requestBodyText = JSON.stringify(reqBody);
+      try {
+        const resp = await fetch(url, {
+          method: "POST",
+          credentials: "include",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json", mallid: mallId },
+          body: requestBodyText,
+        });
+        const text = await resp.text();
+        const body = safeParseJson(text);
+        if (resp.ok && body && typeof body === "object") {
+          await enqueue({
+            kind: "fetch-active-settlement",
+            url,
+            method: "POST",
+            status: resp.status,
+            ts: Date.now(),
+            site: siteTag,
+            page: "background/settlement",
+            mall_id: mallId,
+            body,
+            bodyText: text.length > 200000 ? null : text,
+            requestBodyText,
+            bodySize: text.length,
+            activeSource: "settlement_background",
+          });
+          await bumpStats({ captured_count_delta: 1 });
+          enqueuedCount++;
+        } else {
+          errorCount++;
+          console.warn(`[sw] settlement ${ep.status} mall=${mallId} HTTP ${resp.status}`);
+        }
+      } catch (e) {
+        errorCount++;
+        console.warn(`[sw] settlement ${ep.status} mall=${mallId} err`, e?.message || e);
+      }
+      // 端点间间隔 600ms 控风控
+      await new Promise((resolve) => setTimeout(resolve, 600));
+    }
+  }
+
+  await setStorage({
+    [SETTLEMENT_STATE_KEY]: {
+      ...state,
+      last_run_at: now,
+      last_success_at: Date.now(),
+      last_call_count: callCount,
+      last_mall_count: mallCount,
+      last_enqueued_count: enqueuedCount,
+      last_error_count: errorCount,
+    },
+  });
+  if (enqueuedCount > 0) await flush();
+  return { ok: true, callCount, enqueuedCount, errorCount, mallCount };
+}
+
+// ===== 对账中心账务明细（fund detail）主动采集 =====
+// agentseller 域名下 /api/merchant/fund/detail/pageSearch 带 mallid 头翻页采近 30 天流水。
+// 数据 enqueue 到 cloud.capture_events（url_path 与被动抓包一致），
+// ERP 端 syncFundDetailFromCapture 自动识别并解析入库 erp_temu_fund_detail。
+async function collectFundDetailFromTargets() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", FUND_DETAIL_STATE_KEY]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
+  const now = Date.now();
+  const state = cfg[FUND_DETAIL_STATE_KEY] || {};
+  if (!state.enabled) return { ok: true, skipped: "disabled" };
+  if (state.last_run_at && now - Number(state.last_run_at) < FUND_DETAIL_RUN_INTERVAL_MS) {
+    return { ok: true, skipped: "interval" };
+  }
+  await setStorage({ [FUND_DETAIL_STATE_KEY]: { ...state, last_run_at: now } });
+
+  const malls = await getAllAgentSellerMalls();
+  let mallCount = 0, callCount = 0, enqueuedCount = 0, errorCount = 0;
+
+  // 近 30 天日期范围
+  const endDate = new Date();
+  const startDate = new Date(endDate.getTime() - 30 * 86400000);
+  const fmt = (d) => d.toISOString().slice(0, 10);
+  const startStr = fmt(startDate);
+  const endStr = fmt(endDate);
+
+  for (const m of malls) {
+    const mallId = String(m?.mallId || "").trim();
+    const origin = m?.origin || "https://agentseller.temu.com";
+    if (!mallId) continue;
+    mallCount++;
+    const siteTag = (origin.match(/\/(agentseller(?:-us|-eu)?)\./) || [])[1] || "agentseller";
+    const url = `${origin}/api/merchant/fund/detail/pageSearch`;
+    let total = null;
+
+    for (let page = 1; page <= FUND_DETAIL_MAX_PAGES; page++) {
+      const requestBody = JSON.stringify({
+        pageNo: page,
+        pageSize: FUND_DETAIL_PAGE_SIZE,
+        startDate: startStr,
+        endDate: endStr,
+      });
+      callCount++;
+      let listLen = 0;
+      try {
+        const resp = await fetch(url, {
+          method: "POST",
+          credentials: "include",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json", mallid: mallId },
+          body: requestBody,
+        });
+        const text = await resp.text();
+        const body = safeParseJson(text);
+        if (resp.ok && body && typeof body === "object" && body.success !== false) {
+          await enqueue({
+            kind: "fetch-active-fund-detail",
+            url,
+            method: "POST",
+            status: resp.status,
+            ts: Date.now(),
+            site: siteTag,
+            page: "background/fund-detail",
+            mall_id: mallId,
+            body,
+            bodyText: text.length > 200000 ? null : text,
+            requestBodyText: requestBody,
+            bodySize: text.length,
+            activeSource: "fund_detail_background",
+          });
+          await bumpStats({ captured_count_delta: 1 });
+          enqueuedCount++;
+          const result = body.result || {};
+          if (total == null && Number.isFinite(Number(result.total))) total = Number(result.total);
+          listLen = Array.isArray(result.resultList) ? result.resultList.length : 0;
+        } else {
+          errorCount++;
+          console.warn(`[sw] fund-detail page=${page} mall=${mallId} HTTP ${resp.status}`, body?.errorMsg || "");
+        }
+      } catch (e) {
+        errorCount++;
+        console.warn(`[sw] fund-detail page=${page} mall=${mallId} err`, e?.message || e);
+      }
+      await new Promise((resolve) => setTimeout(resolve, FUND_DETAIL_PAGE_DELAY_MS));
+      if (listLen < FUND_DETAIL_PAGE_SIZE) break; // 不足一页 = 最后一页
+      if (total != null && page * FUND_DETAIL_PAGE_SIZE >= total) break;
+    }
+  }
+
+  await setStorage({
+    [FUND_DETAIL_STATE_KEY]: {
+      ...state,
+      last_run_at: now,
+      last_success_at: Date.now(),
+      last_call_count: callCount,
+      last_mall_count: mallCount,
+      last_enqueued_count: enqueuedCount,
+      last_error_count: errorCount,
+    },
+  });
+  if (enqueuedCount > 0) await flush();
+  return { ok: true, callCount, enqueuedCount, errorCount, mallCount };
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg !== "object") return;
 
@@ -1816,9 +2167,11 @@ function setStorage(obj) {
 
 function collectMallInfos(payload) {
   const body = payload?.body || safeParseJson(payload?.bodyText);
+  const reqBody = payload?.reqBody || safeParseJson(payload?.requestBodyText);
+  const reqHeaders = payload?.reqHeaders || null;
   const out = [];
   const seen = new Set();
-  const stack = [body];
+  const stack = [body, reqBody, reqHeaders].filter(Boolean);
   let steps = 0;
   while (stack.length && steps < 8000) {
     steps++;
@@ -1829,7 +2182,7 @@ function collectMallInfos(payload) {
       continue;
     }
 
-    const rawMallId = node.mallId ?? node.mall_id ?? node.mallSupplierId ?? node.supplierId;
+    const rawMallId = node.mallId ?? node.mallID ?? node.mall_id ?? node.mallid ?? node.mallSupplierId ?? node.supplierId;
     if (rawMallId != null && rawMallId !== "") {
       const mallId = String(rawMallId).trim();
       if (mallId && !seen.has(mallId)) {

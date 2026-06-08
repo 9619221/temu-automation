@@ -77,6 +77,7 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/erp/op-task/list": ["admin", "manager", "operations", "viewer"],
   "/api/erp/op-task/set": ["admin", "manager", "operations"],
   "/api/erp/reports/sku-sales": ["admin", "manager", "operations", "finance"],
+  "/api/erp/reports/warehouse-inventory": ["admin", "manager", "operations", "finance", "warehouse"],
   "/api/erp/reports/risk-list": ["admin", "manager", "operations", "viewer"],
   "/api/erp/reports/activity-list": ["admin", "manager", "operations", "viewer"],
   "/api/erp/reports/shop-health": ["admin", "manager", "operations", "finance", "viewer"],
@@ -90,6 +91,7 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/erp/reports/reviews": ["admin", "manager", "operations", "finance", "viewer"],
   "/api/erp/reports/qc-flaw-images": ["admin", "manager", "operations", "finance", "viewer"],
   "/api/erp/reports/purchase": ["admin", "manager", "finance", "buyer", "operations", "viewer"],
+  "/api/erp/reports/settlement": ["admin", "manager", "operations", "finance"],
   "/api/erp/reports/yunqi-search": ["admin", "manager", "operations"],
   "/api/erp/reports/yunqi-stats": ["admin", "manager", "operations"],
   "/api/erp/reports/yunqi-info": ["admin", "manager", "operations"],
@@ -5591,7 +5593,25 @@ async function handleRequest({
       return;
     }
 
-    if (pathname === "/api/erp/reports/risk-list" || pathname === "/api/erp/reports/activity-list" || pathname === "/api/erp/reports/shop-health" || pathname === "/api/erp/reports/stock-orders" || pathname === "/api/erp/reports/sales-trend" || pathname === "/api/erp/reports/product-panel" || pathname === "/api/erp/reports/product-trend" || pathname === "/api/erp/reports/purchase" || pathname === "/api/erp/reports/openapi-qc" || pathname === "/api/erp/reports/firstship-today" || pathname === "/api/erp/reports/goods-created-today" || pathname === "/api/erp/reports/quality-panel" || pathname === "/api/erp/reports/reviews" || pathname === "/api/erp/reports/high-price-flow") {
+    if (pathname === "/api/erp/reports/settlement") {
+      if (req.method !== "GET") {
+        writeJson(res, 405, { ok: false, error: "Method not allowed" });
+        return;
+      }
+      try {
+        const parsed = new URL(req.url || "/", "http://127.0.0.1");
+        const startDate = parsed.searchParams.get("start_date") || null;
+        const endDate = parsed.searchParams.get("end_date") || null;
+        const { querySettlementData } = require("./services/multiStoreReport.cjs");
+        const data = querySettlementData(db, { startDate, endDate, attachCloudDb: attachTemuCloudDbIfPossible });
+        writeJson(res, 200, { ok: true, data });
+      } catch (error) {
+        writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });
+      }
+      return;
+    }
+
+    if (pathname === "/api/erp/reports/risk-list" || pathname === "/api/erp/reports/activity-list" || pathname === "/api/erp/reports/shop-health" || pathname === "/api/erp/reports/stock-orders" || pathname === "/api/erp/reports/sales-trend" || pathname === "/api/erp/reports/product-panel" || pathname === "/api/erp/reports/product-trend" || pathname === "/api/erp/reports/purchase" || pathname === "/api/erp/reports/openapi-qc" || pathname === "/api/erp/reports/firstship-today" || pathname === "/api/erp/reports/goods-created-today" || pathname === "/api/erp/reports/quality-panel" || pathname === "/api/erp/reports/reviews" || pathname === "/api/erp/reports/high-price-flow" || pathname === "/api/erp/reports/warehouse-inventory") {
       if (req.method !== "GET") {
         writeJson(res, 405, { ok: false, error: "Method not allowed" });
         return;
@@ -5601,7 +5621,7 @@ async function handleRequest({
         const includeTest = parsed.searchParams.get("include_test") === "1";
         const productId = parsed.searchParams.get("product_id") || "";
         const svc = require("./services/multiStoreReport.cjs");
-        const fn = pathname.endsWith("risk-list") ? svc.buildRiskList : pathname.endsWith("shop-health") ? svc.buildShopHealth : pathname.endsWith("stock-orders") ? svc.buildStockOrders : pathname.endsWith("sales-trend") ? svc.buildSalesTrend : pathname.endsWith("product-panel") ? svc.getProductPanelFast : pathname.endsWith("product-trend") ? svc.buildProductSalesTrend : pathname.endsWith("purchase") ? svc.buildPurchaseReport : pathname.endsWith("openapi-qc") ? svc.buildOpenapiQc : pathname.endsWith("firstship-today") ? svc.buildFirstShipToday : pathname.endsWith("goods-created-today") ? svc.buildGoodsCreatedToday : pathname.endsWith("quality-panel") ? svc.buildQualityPanel : pathname.endsWith("reviews") ? svc.buildReviews : pathname.endsWith("high-price-flow") ? svc.buildHighPriceFlowList : svc.buildActivityList;
+        const fn = pathname.endsWith("risk-list") ? svc.buildRiskList : pathname.endsWith("shop-health") ? svc.buildShopHealth : pathname.endsWith("stock-orders") ? svc.buildStockOrders : pathname.endsWith("sales-trend") ? svc.buildSalesTrend : pathname.endsWith("product-panel") ? svc.getProductPanelFast : pathname.endsWith("product-trend") ? svc.buildProductSalesTrend : pathname.endsWith("purchase") ? svc.buildPurchaseReport : pathname.endsWith("openapi-qc") ? svc.buildOpenapiQc : pathname.endsWith("firstship-today") ? svc.buildFirstShipToday : pathname.endsWith("goods-created-today") ? svc.buildGoodsCreatedToday : pathname.endsWith("quality-panel") ? svc.buildQualityPanel : pathname.endsWith("reviews") ? svc.buildReviews : pathname.endsWith("high-price-flow") ? svc.buildHighPriceFlowList : pathname.endsWith("warehouse-inventory") ? svc.buildWarehouseInventory : svc.buildActivityList;
         const data = fn(db, { includeTest, productId, attachCloudDb: attachTemuCloudDbIfPossible });
         writeJson(res, 200, { ok: true, data });
       } catch (error) {

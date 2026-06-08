@@ -226,7 +226,15 @@ export const URL_WHITELIST = [
 
   // === 财务 ===
   "/api/merchant/front/finance/income-summary",
+  "/api/merchant/settle/detail/full/wait-settlement",
+  "/api/merchant/settle/detail/full/in-settlement",
+  "/api/merchant/settle/detail/full/settled",
   "/api/merchant/fund/detail/item/semi/download",
+  // 对账中心账务明细（seller.kuajingmaihuo.com）:被动 hook 抓包——需 anti-content，SW 无法直采
+  "/api/merchant/fund/detail/pageSearch",
+  "/api/merchant/fund/detail/enum",
+  "/api/merchant/fund/detail/daySummary",
+  "/api/merchant/fund/detail/monthSummary",
 
   // === 合规 / 美国巡查 / 体检 ===
   "/bg-brando-agent-seller/retrieval/board/pageQuery",
