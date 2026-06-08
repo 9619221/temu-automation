@@ -6,7 +6,7 @@ function relaunchUnderElectronIfNeeded(scriptPath, args = process.argv.slice(2))
   const electronPath = require("electron");
   const result = spawnSync(electronPath, [scriptPath, ...args], {
     cwd: process.cwd(),
-    env: process.env,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
     stdio: "inherit",
     windowsHide: true,
   });

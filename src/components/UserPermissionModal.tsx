@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Button, Checkbox, Col, Empty, Input, Modal, Row, Segmented, Space, Spin, Tag, Typography, message } from "antd";
+import { Alert, Button, Checkbox, Col, ConfigProvider, Empty, Input, Modal, Row, Segmented, Space, Spin, Tag, Typography, message } from "antd";
 import type { MallDictItem, PermissionAdminView, PermissionCatalogGroup } from "../utils/permissionCatalog";
 import { PRIVILEGED_ROLES, formatStoreLabel } from "../utils/permissionCatalog";
 
@@ -110,22 +110,34 @@ export default function UserPermissionModal({
   const renderRow = (type: string, item: { key: string; label: string }) => {
     const ck = `${type}|${item.key}`;
     const def = isDefaultAllowed(type, item.key);
+    const cur: string = overrides[ck] || "inherit";
     return (
       <div key={ck} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "3px 0" }}>
         <span style={{ fontSize: 13 }}>{item.label}</span>
         <Space size={8}>
           <Tag color={def ? "green" : "default"} style={{ marginRight: 0 }}>{`默认${def ? "允许" : "禁止"}`}</Tag>
-          <Segmented
-            size="small"
-            value={overrides[ck] || "inherit"}
-            disabled={privileged}
-            onChange={(v) => updateOverride(ck, String(v))}
-            options={[
-              { label: "跟随", value: "inherit" },
-              { label: "允许", value: "allow" },
-              { label: "禁止", value: "deny" },
-            ]}
-          />
+          <ConfigProvider
+            theme={{
+              components: {
+                Segmented: {
+                  itemSelectedBg: cur === "allow" ? "#52c41a" : cur === "deny" ? "#ff4d4f" : "#fff",
+                  itemSelectedColor: cur === "inherit" ? undefined : "#fff",
+                },
+              },
+            }}
+          >
+            <Segmented
+              size="small"
+              value={cur}
+              disabled={privileged}
+              onChange={(v) => updateOverride(ck, String(v))}
+              options={[
+                { label: "跟随", value: "inherit" },
+                { label: "允许", value: "allow" },
+                { label: "禁止", value: "deny" },
+              ]}
+            />
+          </ConfigProvider>
         </Space>
       </div>
     );

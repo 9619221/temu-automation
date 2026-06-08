@@ -2474,6 +2474,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       dataIndex: "costPrice",
       key: "costPrice",
       width: 100,
+      sorter: (left, right) => (getSkuCostPrice(left) ?? -1) - (getSkuCostPrice(right) ?? -1),
       render: (value, row) => {
         const hasCost = getSkuCostPrice(row) !== null;
         const missingCostQty = Number(row.missingCostStockQty || 0);
