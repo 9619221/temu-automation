@@ -421,6 +421,24 @@ async function main() {
         });
 
         seedDb.prepare(`
+          INSERT INTO erp_sku_1688_sources (
+            id, account_id, sku_id, external_offer_id, external_sku_id, external_spec_id,
+            supplier_name, product_title, unit_price, moq, lead_days, logistics_fee,
+            status, is_default, source_payload_json, created_by, created_at, updated_at
+          )
+          VALUES (
+            'sku_1688_source_ipc', @account_id, @sku_id, 'offer_ipc_1688',
+            'sku1688_ipc', 'spec_ipc', 'IPC 1688 Supplier', 'IPC 1688 Product',
+            10.5, 50, 5, 0, 'active', 1, '{}', @buyer_id, @now, @now
+          )
+        `).run({
+          account_id: account.id,
+          sku_id: sku.id,
+          buyer_id: buyer.id,
+          now,
+        });
+
+        seedDb.prepare(`
           INSERT INTO erp_payment_approvals (
             id, account_id, po_id, amount, status, requested_by,
             created_at, updated_at
@@ -824,8 +842,59 @@ async function main() {
       assert.ok(messageRow.processed_at);
       const messagePo = messageDb.prepare("SELECT external_order_status FROM erp_purchase_orders WHERE id = ?").get("po_ipc");
       assert.equal(messagePo.external_order_status, "success");
+      const orderMessageWorkItem = messageDb.prepare(`
+        SELECT *
+        FROM erp_work_items
+        WHERE dedupe_key = '1688_message:msg_ipc_1688:buyer'
+      `).get();
+      assert.ok(orderMessageWorkItem);
+      assert.equal(orderMessageWorkItem.owner_role, "buyer");
+      assert.equal(orderMessageWorkItem.related_doc_type, "purchase_order");
+      assert.equal(orderMessageWorkItem.related_doc_id, "po_ipc");
     } finally {
       messageDb.close();
+    }
+
+    const receive1688InventoryMessage = await requestUrl(`${lanStatus.localUrl}/api/1688/message`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        messageId: "msg_ipc_1688_inventory",
+        topic: "PRODUCT_INVENTORY_CHANGE",
+        messageType: "product",
+        productId: "offer_ipc_1688",
+        skuId: "sku1688_ipc",
+        specId: "spec_ipc",
+      }),
+    });
+    assert.equal(receive1688InventoryMessage.statusCode, 200);
+    const receive1688InventoryBody = JSON.parse(receive1688InventoryMessage.body);
+    assert.equal(receive1688InventoryBody.ok, true);
+    const inventoryMessageDb = openErpDatabase({ userDataDir: tempUserData });
+    try {
+      const inventoryMessageRow = inventoryMessageDb.prepare("SELECT * FROM erp_1688_message_events WHERE message_id = ?").get("msg_ipc_1688_inventory");
+      assert.equal(inventoryMessageRow.topic, "PRODUCT_INVENTORY_CHANGE");
+      assert.equal(inventoryMessageRow.status, "processed");
+      const inventorySource = inventoryMessageDb.prepare("SELECT source_payload_json FROM erp_sku_1688_sources WHERE id = ?").get("sku_1688_source_ipc");
+      assert.equal(JSON.parse(inventorySource.source_payload_json).lastMessage.topic, "PRODUCT_INVENTORY_CHANGE");
+      const inventoryWorkItems = inventoryMessageDb.prepare(`
+        SELECT owner_role, related_doc_type, related_doc_id, sku_id
+        FROM erp_work_items
+        WHERE dedupe_key IN (
+          '1688_message:msg_ipc_1688_inventory:buyer',
+          '1688_message:msg_ipc_1688_inventory:operations'
+        )
+        ORDER BY owner_role
+      `).all();
+      assert.deepEqual(inventoryWorkItems.map((item) => item.owner_role), ["buyer", "operations"]);
+      assert.equal(inventoryWorkItems[0].related_doc_type, "sku_1688_source");
+      assert.equal(inventoryWorkItems[0].related_doc_id, "sku_1688_source_ipc");
+      assert.equal(inventoryWorkItems[0].sku_id, "sku_ipc");
+    } finally {
+      inventoryMessageDb.close();
     }
 
     const unauthPurchase = await requestUrl(`${lanStatus.localUrl}/purchase`);

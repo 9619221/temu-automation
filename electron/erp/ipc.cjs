@@ -233,6 +233,7 @@ const ALIBABA_1688_MESSAGE_TOPICS = Object.freeze([
   ["order", "ORDER_BUYER_VIEW_ORDER_REFUND_AFTER_SALES", "1688 after-sale refund"],
   ["order", "ORDER_BUYER_VIEW_ORDER_COMFIRM_RECEIVEGOODS", "1688 received goods"],
   ["order", "ORDER_BUYER_VIEW_ORDER_STEP_PAY", "1688 step payment"],
+  ["product", "PRODUCT_INVENTORY_CHANGE", "1688 inventory changed"],
   ["product", "PRODUCT_PRODUCT_INVENTORY_CHANGE", "1688 inventory changed"],
   ["product", "PRODUCT_RELATION_VIEW_PRODUCT_DELETE", "1688 product deleted"],
   ["product", "PRODUCT_RELATION_VIEW_PRODUCT_EXPIRE", "1688 product expired"],
@@ -3908,6 +3909,94 @@ function updatePurchaseOrderFrom1688Message({ db, services, po, refs, effect, ro
   return after;
 }
 
+function getFallback1688MessageAccountId(db) {
+  return optionalString(db.prepare(`
+    SELECT id
+    FROM erp_accounts
+    WHERE COALESCE(status, 'active') <> 'disabled'
+    ORDER BY updated_at DESC, created_at DESC
+    LIMIT 1
+  `).get()?.id);
+}
+
+function get1688MessageTargetRoles(topic = "") {
+  const text = String(topic || "").toUpperCase();
+  if (text.includes("REFUND") || text.includes("AFTER_SALES")) return [enums.ERP_ROLES.OPERATIONS];
+  if (
+    text.includes("ANNOUNCE_SENDGOODS")
+    || text.includes("PART_PART_SENDGOODS")
+    || text.includes("LOGISTICS")
+    || text.includes("COMFIRM_RECEIVEGOODS")
+    || text.includes("CONFIRM_RECEIVEGOODS")
+  ) {
+    return [enums.ERP_ROLES.WAREHOUSE];
+  }
+  if (text.includes("PRODUCT")) return [enums.ERP_ROLES.BUYER, enums.ERP_ROLES.OPERATIONS];
+  if (text.includes("AGENT_SUPPLY_CHANGE_RECOMMEND")) return [enums.ERP_ROLES.BUYER];
+  if (text.includes("ORDER_PAY") || text.includes("BATCH_PAY") || text.includes("ORDER_STEP_PAY") || text.includes("ORDER_PRICE_MODIFY")) {
+    return [enums.ERP_ROLES.BUYER, enums.ERP_ROLES.FINANCE];
+  }
+  return [enums.ERP_ROLES.BUYER];
+}
+
+function get1688MessageWorkItemType(role, topic = "") {
+  const text = String(topic || "").toUpperCase();
+  if (role === enums.ERP_ROLES.FINANCE) {
+    return text.includes("PRICE") ? enums.WORK_ITEM_TYPE.PAYMENT_EXCEPTION : enums.WORK_ITEM_TYPE.PAYMENT_CONFIRM_PENDING;
+  }
+  if (role === enums.ERP_ROLES.WAREHOUSE) return enums.WORK_ITEM_TYPE.WAREHOUSE_RECEIVE_PENDING;
+  return enums.WORK_ITEM_TYPE.SUPPLIER_FOLLOW_UP;
+}
+
+function get1688MessageWorkItemPriority(role, topic = "") {
+  const text = String(topic || "").toUpperCase();
+  if (text.includes("REFUND") || text.includes("PRICE") || role === enums.ERP_ROLES.FINANCE) return enums.WORK_ITEM_PRIORITY.P1;
+  if (role === enums.ERP_ROLES.WAREHOUSE) return enums.WORK_ITEM_PRIORITY.P1;
+  return enums.WORK_ITEM_PRIORITY.P2;
+}
+
+function upsert1688MessageWorkItems({ db, services, refs, effect, row, accountIds = [], relatedDocType = null, relatedDocId = null, skuId = null } = {}) {
+  if (!services?.workItem || !effect) return [];
+  const fallbackAccountId = getFallback1688MessageAccountId(db);
+  const uniqueAccountIds = [...new Set(accountIds.map(optionalString).filter(Boolean))];
+  if (!uniqueAccountIds.length && fallbackAccountId) uniqueAccountIds.push(fallbackAccountId);
+  if (!uniqueAccountIds.length) return [];
+
+  const topic = optionalString(refs?.topic || row?.topic || row?.message_type) || "UNKNOWN";
+  const messageKey = optionalString(row?.message_id) || optionalString(row?.id) || `${topic}:${nowIso()}`;
+  const roles = get1688MessageTargetRoles(topic);
+  const evidence = [
+    `topic: ${topic}`,
+    row?.message_id ? `messageId: ${row.message_id}` : null,
+    refs?.externalOrderId ? `orderId: ${refs.externalOrderId}` : null,
+    refs?.refundId ? `refundId: ${refs.refundId}` : null,
+    refs?.logisticsBillNo ? `logistics: ${refs.logisticsBillNo}` : null,
+    refs?.productId ? `productId: ${refs.productId}` : null,
+    refs?.skuId ? `skuId: ${refs.skuId}` : null,
+    refs?.specId ? `specId: ${refs.specId}` : null,
+  ].filter(Boolean);
+  const items = [];
+  for (const accountId of uniqueAccountIds) {
+    for (const role of roles) {
+      const change = services.workItem.upsertGeneratedTask({
+        accountId,
+        type: get1688MessageWorkItemType(role, topic),
+        priority: get1688MessageWorkItemPriority(role, topic),
+        ownerRole: role,
+        title: `1688 message: ${effect.eventType || topic}`,
+        evidence,
+        relatedDocType,
+        relatedDocId,
+        skuId,
+        sourceRule: `1688_message:${role}`,
+        dedupeKey: `1688_message:${messageKey}:${role}`,
+      }, { id: null, role: "system" });
+      items.push(toCamelRow(change.item));
+    }
+  }
+  return items;
+}
+
 function get1688MessageTopicDefinition(topic) {
   const normalizedTopic = optionalString(topic)?.toUpperCase();
   if (!normalizedTopic) return null;
@@ -4097,7 +4186,10 @@ function update1688MessageSubscriptionStats(db, row = {}, status = "received") {
 
 function process1688ProductMessageEvent({ db, services, refs, effect, row }) {
   const productId = optionalString(refs.productId);
-  if (!productId) return { status: "unmatched", reason: "product_id_not_found", refs };
+  if (!productId) {
+    const workItems = upsert1688MessageWorkItems({ db, services, refs, effect, row });
+    return { status: "unmatched", reason: "product_id_not_found", refs, workItems };
+  }
   const rows = db.prepare(`
     SELECT *
     FROM erp_sku_1688_sources
@@ -4109,12 +4201,21 @@ function process1688ProductMessageEvent({ db, services, refs, effect, row }) {
     external_sku_id: optionalString(refs.skuId),
     external_spec_id: optionalString(refs.specId),
   });
-  if (!rows.length) return { status: "unmatched", reason: "sku_1688_source_not_found", refs };
+  if (!rows.length) {
+    const workItems = upsert1688MessageWorkItems({ db, services, refs, effect, row });
+    return { status: "unmatched", reason: "sku_1688_source_not_found", refs, workItems };
+  }
   const now = nowIso();
   const nextStatus = ["product_deleted", "product_expired"].includes(effect.productStatus)
     ? "inactive"
     : (["product_reposted", "product_changed"].includes(effect.productStatus) ? "active" : null);
+  const accountIds = [];
+  let relatedDocId = null;
+  let relatedSkuId = null;
   for (const source of rows) {
+    accountIds.push(source.account_id);
+    relatedDocId ||= source.id;
+    relatedSkuId ||= source.sku_id;
     const before = source;
     const payload = {
       ...(parseJsonObject(source.source_payload_json) || {}),
@@ -4149,19 +4250,33 @@ function process1688ProductMessageEvent({ db, services, refs, effect, row }) {
       after,
     });
   }
+  const workItems = upsert1688MessageWorkItems({
+    db,
+    services,
+    refs,
+    effect,
+    row,
+    accountIds,
+    relatedDocType: "sku_1688_source",
+    relatedDocId,
+    skuId: relatedSkuId,
+  });
   return {
     status: "processed",
     refs,
     productStatus: effect.productStatus,
     updatedCount: rows.length,
+    workItems,
   };
 }
 
-function process1688AgentMessageEvent({ refs, effect }) {
+function process1688AgentMessageEvent({ db, services, refs, effect, row }) {
+  const workItems = upsert1688MessageWorkItems({ db, services, refs, effect, row });
   return {
     status: "processed",
     refs,
     agentStatus: effect.eventType,
+    workItems,
   };
 }
 
@@ -4175,13 +4290,24 @@ function process1688MessageEvent({ db, services, input, normalized, row }) {
     return process1688ProductMessageEvent({ db, services, refs, effect, row });
   }
   if (effect.agent) {
-    return process1688AgentMessageEvent({ refs, effect });
+    return process1688AgentMessageEvent({ db, services, refs, effect, row });
   }
   const po = findPurchaseOrderByExternalOrderId(db, refs.externalOrderId);
   if (!po) {
-    return { status: "unmatched", reason: "purchase_order_not_found", refs };
+    const workItems = upsert1688MessageWorkItems({ db, services, refs, effect, row });
+    return { status: "unmatched", reason: "purchase_order_not_found", refs, workItems };
   }
   const afterPo = updatePurchaseOrderFrom1688Message({ db, services, po, refs, effect, row });
+  const workItems = upsert1688MessageWorkItems({
+    db,
+    services,
+    refs,
+    effect,
+    row,
+    accountIds: [afterPo.account_id],
+    relatedDocType: "purchase_order",
+    relatedDocId: afterPo.id,
+  });
   if (effect.refund || refs.refundId) {
     upsert1688RefundRow(db, {
       po: afterPo,
@@ -4198,6 +4324,7 @@ function process1688MessageEvent({ db, services, input, normalized, row }) {
     status: "processed",
     refs,
     purchaseOrder: toCamelRow(afterPo),
+    workItems,
   };
 }
 
