@@ -3,6 +3,7 @@ import { Alert, Button, Col, Descriptions, Drawer, Form, Image, Input, InputNumb
 import type { ColumnsType } from "antd/es/table";
 import { DeleteOutlined, EditOutlined, EyeOutlined, LineChartOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import { useSessionState } from "../hooks/useSessionState";
+import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import PageHeader from "../components/PageHeader";
 import { useErpAuth } from "../contexts/ErpAuthContext";
 import { hasPageCache, readIndexedPageCache, readPageCache, writeIndexedPageCache, writePageCache } from "../utils/pageCache";
@@ -1098,6 +1099,8 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
   // 会话级视图状态 key：按 mode 分桶（商品 / 供应商 / 店铺），切走再切回时恢复筛选，重启软件清空。
   const pmdViewKey = (suffix: string) => `temu.product-master-data.${mode}.${suffix}`;
   const [skuFilters, setSkuFilters] = useSessionState<SkuFilters>(pmdViewKey("skuFilters"), { keyword: "" });
+  // 搜索框防抖：keyword 输入与大列表过滤解耦；其他筛选项(店铺/状态/问题)仍即时生效。
+  const debouncedKeyword = useDebouncedValue(skuFilters.keyword, 250);
   const [selectedSkuRowKeys, setSelectedSkuRowKeys] = useState<Key[]>([]);
   const [supplierFilters, setSupplierFilters] = useSessionState<SupplierFilters>(pmdViewKey("supplierFilters"), { keyword: "" });
   const mountedRef = useRef(true);
@@ -1192,7 +1195,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
     return tags;
   }, [accountNameById, skuFilters]);
   const filteredSkus = useMemo(() => {
-    const keyword = skuFilters.keyword.trim().toLowerCase();
+    const keyword = debouncedKeyword.trim().toLowerCase();
     return skus.filter((sku) => {
       if (skuFilters.accountId && sku.accountId !== skuFilters.accountId) return false;
       if (skuFilters.status && sku.status !== skuFilters.status) return false;
@@ -1216,7 +1219,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       ].filter(Boolean).join(" ").toLowerCase();
       return searchableText.includes(keyword);
     });
-  }, [accountNameById, skuFilters, skus]);
+  }, [accountNameById, skus, debouncedKeyword, skuFilters.accountId, skuFilters.status, skuFilters.hasIssue, skuFilters.issue]);
   const skuQualitySummary = useMemo(() => {
     const issueCounts = Object.fromEntries(SKU_ISSUE_KEYS.map((key) => [key, 0])) as Record<SkuIssueKey, number>;
     let pendingCount = 0;

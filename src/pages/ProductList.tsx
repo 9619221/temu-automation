@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSessionState } from "../hooks/useSessionState";
+import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { selectStatusLabel } from "../utils/temuSelectStatus";
 import { Alert, Button, Card, Checkbox, Drawer, Empty, Image, Input, Modal, Radio, Segmented, Space, Spin, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
@@ -3305,6 +3306,8 @@ export default function ProductList() {
   const [loading, setLoading] = useState(false);
   const [searchText, setSearchText] = useSessionState("temu.product-list.search", "");
   const [statusFilter, setStatusFilter] = useSessionState<StatusFilter>("temu.product-list.status", "all");
+  // 搜索框防抖：输入框仍绑 searchText 保持跟手，大列表过滤用防抖值，避免逐字符触发整表重算。
+  const debouncedSearchText = useDebouncedValue(searchText, 250);
   const [hasAccount, setHasAccount] = useState<boolean | null>(null);
   const [diagnostics, setDiagnostics] = useState<CollectionDiagnostics | null>(null);
   const [, setSourceState] = useState<ProductSourceState>(EMPTY_SOURCES);
@@ -4252,7 +4255,7 @@ export default function ProductList() {
   };
 
   const filteredProducts = useMemo(() => {
-    const keyword = normalizeLookupValue(searchText);
+    const keyword = normalizeLookupValue(debouncedSearchText);
     return products.filter((product) => {
       const matchKeyword = !keyword || buildSearchIndex(product).includes(keyword);
       const statusText = product.status || normalizeStatusText(product.removeStatus);
@@ -4276,7 +4279,7 @@ export default function ProductList() {
       }
       return matchKeyword && matchStatus;
     });
-  }, [products, searchText, statusFilter]);
+  }, [products, debouncedSearchText, statusFilter]);
 
   // 优先用合并后的真实 products 数（含 sales-only 条目），countSummary 仅作 fallback
   const totalProducts = Math.max(products.length, countSummary.totalCount || 0);

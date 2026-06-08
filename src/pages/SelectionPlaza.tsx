@@ -34,12 +34,15 @@ import {
   StarFilled,
   ThunderboltOutlined,
 } from "@ant-design/icons";
+import { readPageCache, writePageCache } from "../utils/pageCache";
 
 const { Text, Paragraph } = Typography;
 const yunqiDb = window.electronAPI?.yunqiDb;
 
 const BLUE = "#1a73e8";
 const CARD_STYLE: React.CSSProperties = { borderRadius: 10, boxShadow: "0 1px 2px rgba(0,0,0,0.04), 0 8px 24px rgba(0,0,0,0.05)" };
+// 选品搜索结果缓存（仅首页）：挂载时先显上次结果不空白，后台再刷新（stale-while-revalidate）。
+const SELECTION_RESULT_CACHE_KEY = "temu.selection-plaza.result.v1";
 
 // 选品池状态：流转链路 想上 → 找货源 → 已找到 → 上架中 → 已上架（或弃用）
 const STATUS_META: Record<string, { label: string; color: string }> = {
@@ -108,7 +111,9 @@ export default function SelectionPlaza() {
   const [sortBy, setSortBy] = useState("daily_sales");
   const [sortOrder, setSortOrder] = useState("DESC");
   const [page, setPage] = useState(1);
-  const [result, setResult] = useState<{ items: ProductRow[]; total: number; page: number; totalPages: number }>({ items: [], total: 0, page: 1, totalPages: 0 });
+  const [result, setResult] = useState<{ items: ProductRow[]; total: number; page: number; totalPages: number }>(
+    () => readPageCache(SELECTION_RESULT_CACHE_KEY, { items: [] as ProductRow[], total: 0, page: 1, totalPages: 0 }),
+  );
   const [searching, setSearching] = useState(false);
 
   // 抓一批
@@ -179,6 +184,7 @@ export default function SelectionPlaza() {
         const r = await yunqiDb.search(params);
         setResult(r);
         setPage(toPage);
+        if (toPage === 1) writePageCache(SELECTION_RESULT_CACHE_KEY, r); // 仅缓存首页，挂载先显旧结果
       } catch (e: any) {
         message.error(e?.message || "搜索失败");
       } finally {

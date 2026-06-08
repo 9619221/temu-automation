@@ -24,7 +24,26 @@ function db() {
   return _db;
 }
 
-// 商品搜索：products 去重(同 goods_id 取最新 id 的一行) + 筛选/排序/分页
+// products_latest：物化「每个 goods_id 最新一行」，供 searchProducts 免去每次全表去重。
+// products 由抓取服务写入（只增不改历史），MAX(id) 单调增；据此惰性重建——抓取后首次
+// 搜索重建一次，平时仅多一次主键 MAX 检查。重建为 DROP+CREATE AS SELECT，单进程同步无并发。
+let _latestMaxId = null;
+function ensureLatest(d) {
+  let curMax;
+  try { curMax = d.prepare("SELECT COALESCE(MAX(id), 0) AS m FROM products").get().m; }
+  catch { return false; } // products 表尚未就绪
+  const exists = d.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='products_latest'").get();
+  if (exists && _latestMaxId === curMax) return true;
+  d.exec("DROP TABLE IF EXISTS products_latest");
+  d.exec("CREATE TABLE products_latest AS SELECT p.* FROM products p WHERE p.id IN (SELECT MAX(id) FROM products GROUP BY goods_id)");
+  for (const col of ["daily_sales", "weekly_sales", "monthly_sales", "total_sales", "usd_price", "usd_gmv", "score", "total_comments", "mall_mode"]) {
+    try { d.exec(`CREATE INDEX IF NOT EXISTS idx_pl_${col} ON products_latest(${col})`); } catch { /* 列缺失则跳过 */ }
+  }
+  _latestMaxId = curMax;
+  return true;
+}
+
+// 商品搜索：查 products_latest(每商品最新一行) + 筛选/排序/分页
 function searchProducts(params = {}) {
   const d = db();
   const { keyword = "", category = "", optId = "", mallMode = "", minPrice = null, maxPrice = null, minDailySales = null, sortBy = "daily_sales", sortOrder = "DESC", page = 1, pageSize = 24 } = params || {};
@@ -48,12 +67,20 @@ function searchProducts(params = {}) {
   const pNo = Math.max(Number(page) || 1, 1);
   const offset = (pNo - 1) * pSize;
 
-  // 去重子查询：每个 goods_id 只保留最新一行(MAX(id))
+  // 查物化表 products_latest（去重已在重建时算好，搜索免每次全表去重）。
+  // ensureLatest 据 products.MAX(id) 惰性重建：抓取后首次搜索重建一次，之后命中。
+  if (ensureLatest(d)) {
+    let base = "FROM products_latest";
+    if (conds.length) base += " WHERE " + conds.join(" AND ");
+    const total = d.prepare(`SELECT COUNT(*) AS c ${base}`).get(...vals).c;
+    const items = d.prepare(`SELECT * ${base} ORDER BY ${sort} ${order}, id DESC LIMIT ? OFFSET ?`).all(...vals, pSize, offset);
+    return { items, total, page: pNo, pageSize: pSize, totalPages: Math.ceil(total / pSize) };
+  }
+  // 兜底：products 表尚未就绪、物化表建不出来时，回退原全表去重写法。
   let base = "FROM products WHERE id IN (SELECT MAX(id) FROM products GROUP BY goods_id)";
   if (conds.length) base += " AND " + conds.join(" AND ");
-
   const total = d.prepare(`SELECT COUNT(*) AS c ${base}`).get(...vals).c;
-  const items = d.prepare(`SELECT * ${base} ORDER BY ${sort} ${order} LIMIT ? OFFSET ?`).all(...vals, pSize, offset);
+  const items = d.prepare(`SELECT * ${base} ORDER BY ${sort} ${order}, id DESC LIMIT ? OFFSET ?`).all(...vals, pSize, offset);
   return { items, total, page: pNo, pageSize: pSize, totalPages: Math.ceil(total / pSize) };
 }
 

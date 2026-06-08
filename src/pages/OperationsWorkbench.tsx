@@ -7,6 +7,7 @@ import { useNavigate } from "react-router-dom";
 import { formatStoreNo, formatMallName } from "../utils/storeDisplay";
 import { HIDE_RISK, HIDE_ACTIVITY, HIDE_REVIEW, OFFICIAL_SOURCE, HIDE_DIAG, HIDE_RESTOCK, HIDE_STOCK } from "../utils/operationsFlags";
 import { useSessionState } from "../hooks/useSessionState";
+import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { selectStatusLabel } from "../utils/temuSelectStatus";
 
 // 分页「每页条数」选择器:antd 5.25+ 默认带搜索框(聚焦冒出可编辑光标),这里强制关掉
@@ -304,7 +305,9 @@ export default function OperationsWorkbench() {
 
   const [storeFilter, setStoreFilter] = useSessionState(owViewKey("storeFilter"), "all");
   const [diagFilter, setDiagFilter] = useSessionState(owViewKey("diagFilter"), "all");
-  const [search, setSearch] = useSessionState(owViewKey("search"), "");
+  const [searchInput, setSearchInput] = useSessionState(owViewKey("search"), "");
+  // 搜索框防抖：输入框绑 searchInput 跟手，下游多个视图过滤用防抖后的 search（变量名不变，下游无需改）。
+  const search = useDebouncedValue(searchInput, 250);
   const [scoreFilter, setScoreFilter] = useSessionState(owViewKey("scoreFilter"), "all");
   const [regionFilter, setRegionFilter] = useSessionState(owViewKey("reviewRegion"), "all");
   const [slowFilter, setSlowFilter] = useSessionState(owViewKey("slowFilter"), "all"); // 商品运营全景:全部 / 仅看滞销
@@ -1346,7 +1349,7 @@ export default function OperationsWorkbench() {
     <div style={{ padding: "12px 16px", display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
       <Select size="small" style={{ width: 130 }} value={storeFilter} onChange={setStoreFilter} options={[{ value: "all", label: "全部店铺" }, ...storeOptions.map((c) => ({ value: c, label: c }))]} />
       {extra}
-      <Input.Search size="small" allowClear placeholder="搜货号 / 标题" style={{ width: 220 }} value={search} onChange={(e) => setSearch(e.target.value)} />
+      <Input.Search size="small" allowClear placeholder="搜货号 / 标题" style={{ width: 220 }} value={searchInput} onChange={(e) => setSearchInput(e.target.value)} />
     </div>
   );
 
