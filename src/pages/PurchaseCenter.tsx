@@ -1738,21 +1738,6 @@ const PURCHASE_ORDER_PAYMENT_FILTER_OPTIONS = [
   { label: "待付款确认", value: "pending" },
   { label: "已付款", value: "paid" },
 ];
-const PURCHASE_ORDER_SOURCE_FILTER_OPTIONS = [
-  { label: "来源：全部", value: "" },
-  { label: "1688 已绑定", value: "1688_bound" },
-  { label: "待推 1688", value: "1688_pushable" },
-  { label: "线下采购", value: "offline" },
-  { label: "未绑定", value: "unbound" },
-];
-const PURCHASE_ORDER_RISK_FILTER_OPTIONS = [
-  { label: "风险：全部", value: "" },
-  { label: "缺 1688 地址", value: "missing_address" },
-  { label: "待付款确认", value: "pending_payment" },
-  { label: "待入库", value: "pending_inbound" },
-  { label: "售后跟进", value: "refund" },
-  { label: "履约异常", value: "exception" },
-];
 const PURCHASE_ORDER_COLUMN_MENU_WIDTH = 280;
 const PURCHASE_ORDER_COLUMN_MENU_EDGE_GAP = 12;
 const PURCHASE_ORDER_COLUMN_MENU_OFFSET = 8;
@@ -7348,18 +7333,6 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               options={PURCHASE_ORDER_PAYMENT_FILTER_OPTIONS}
               onChange={(value) => setPurchaseOrderFilterDraft((prev) => ({ ...prev, paymentState: value }))}
               style={{ width: 140 }}
-            />
-            <Select
-              value={purchaseOrderFilterDraft.sourceState}
-              options={PURCHASE_ORDER_SOURCE_FILTER_OPTIONS}
-              onChange={(value) => setPurchaseOrderFilterDraft((prev) => ({ ...prev, sourceState: value }))}
-              style={{ width: 150 }}
-            />
-            <Select
-              value={purchaseOrderFilterDraft.riskState}
-              options={PURCHASE_ORDER_RISK_FILTER_OPTIONS}
-              onChange={(value) => setPurchaseOrderFilterDraft((prev) => ({ ...prev, riskState: value }))}
-              style={{ width: 150 }}
             />
             <Input
               allowClear
