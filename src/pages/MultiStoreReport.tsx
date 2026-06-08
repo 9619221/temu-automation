@@ -551,6 +551,18 @@ export default function MultiStoreReport() {
       sorter: (a, b) => (marginOf(a.financials?.last30d) ?? -1) - (marginOf(b.financials?.last30d) ?? -1),
     },
     {
+      title: <Tooltip title="官方平台仓可售库存(warehouse_stock) × 加权均价；成本未覆盖 SKU 按 0 计，为下限值"><span style={{ borderBottom: "1px dotted #bbb", cursor: "help" }}>仓内货值</span></Tooltip>,
+      key: "wh_value", width: 120, align: "right",
+      render: (_, s) => (s.inventory?.warehouse_value ? <span style={{ color: "#1677ff" }}>{fmtMoney(s.inventory.warehouse_value)}</span> : <span style={{ color: "#bbb" }}>—</span>),
+      sorter: (a, b) => (a.inventory?.warehouse_value || 0) - (b.inventory?.warehouse_value || 0),
+    },
+    {
+      title: <Tooltip title="官方在途/待入库库存(wait_in_stock：已发往 Temu 仓待签收 + 待入库) × 加权均价；成本未覆盖 SKU 按 0 计，为下限值"><span style={{ borderBottom: "1px dotted #bbb", cursor: "help" }}>在途货值</span></Tooltip>,
+      key: "transit_value", width: 120, align: "right",
+      render: (_, s) => (s.inventory?.in_transit_value ? <span style={{ color: "#d46b08" }}>{fmtMoney(s.inventory.in_transit_value)}</span> : <span style={{ color: "#bbb" }}>—</span>),
+      sorter: (a, b) => (a.inventory?.in_transit_value || 0) - (b.inventory?.in_transit_value || 0),
+    },
+    {
       title: "30 天趋势", key: "trend", width: 140,
       render: (_, s) => {
         const t = s.financials?.trend_daily ?? [];
@@ -715,7 +727,7 @@ export default function MultiStoreReport() {
               </ResponsiveContainer>
             </div>
           )}
-          <Table<ReportStore> dataSource={stores} columns={bossColumns} rowKey="mall_id" size="small" pagination={false} scroll={{ x: 1000 }} loading={loading} />
+          <Table<ReportStore> dataSource={stores} columns={bossColumns} rowKey="mall_id" size="small" pagination={false} scroll={{ x: 1240 }} loading={loading} />
         </>
       ),
     },
