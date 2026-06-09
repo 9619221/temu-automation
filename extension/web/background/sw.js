@@ -1169,6 +1169,10 @@ async function collectQualityViaPage(origin, mallId) {
 
 // ---------- JIT/VMI 主动调度（替代桌面端 urgentOrders Playwright 任务） ----------
 async function collectJitVmiFromTargets() {
+  // 已停用（2026-06-09）：VMI 备货单已走官方 API、JIT 建议关闭不再需要，
+  // 停掉扩展端 JIT/VMI 主动采集，避免持续往云端写无用数据占空间。
+  return { ok: true, skipped: "disabled" };
+  // eslint-disable-next-line no-unreachable
   const cfg = await getStorage(["cloud_endpoint", "auth_token", JIT_VMI_STATE_KEY]);
   if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
   const now = Date.now();
