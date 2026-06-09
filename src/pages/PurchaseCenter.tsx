@@ -682,12 +682,23 @@ interface BuyerFeedbackFormValues {
   buyerRemark?: string;
 }
 
+interface OfflinePoLineFormValue {
+  lineId: string;
+  skuCode?: string;
+  productName?: string;
+  specText?: string;
+  unitPrice: number;
+  qty: number;
+}
+
 interface OfflinePoFormValues {
   supplierId?: string;
   supplierName?: string;
-  unitPrice: number;
+  // 单 SKU 时填单头 unitPrice/qty；多 SKU 时改用 lines 逐行填，运费仍走单头 logisticsFee
+  unitPrice?: number;
   logisticsFee?: number;
-  qty: number;
+  qty?: number;
+  lines?: OfflinePoLineFormValue[];
 }
 
 interface DirectPoLineFormValues {
@@ -885,7 +896,7 @@ function purchaseOrderPayableAmount(row: PurchaseOrderRow) {
 function purchaseOrderIsPaid(row: PurchaseOrderRow) {
   const status = String(row.status || "").toLowerCase();
   const paymentStatus = String(row.paymentStatus || "").toLowerCase();
-  return ["paid", "supplier_processing", "shipped", "arrived", "inbounded", "closed"].includes(status)
+  return ["paid", "supplier_processing", "shipped", "trade_completed", "arrived", "inbounded", "closed"].includes(status)
     || ["paid", "confirmed", "success"].includes(paymentStatus)
     || Boolean(row.paidAt);
 }
@@ -1486,7 +1497,7 @@ function externalPaymentNeedsFinanceConfirm(row: PurchaseOrderRow) {
     && !purchaseOrderIsPaid(row);
 }
 
-const REFUND_READY_LOCAL_STATUSES = new Set(["paid", "shipped", "arrived", "received", "success", "completed"]);
+const REFUND_READY_LOCAL_STATUSES = new Set(["paid", "shipped", "trade_completed", "arrived", "received", "success", "completed"]);
 const REFUND_READY_PAYMENT_STATUSES = new Set(["paid", "confirmed", "success"]);
 
 function canUse1688RefundActions(row: PurchaseOrderRow) {
@@ -2022,6 +2033,8 @@ function getPurchaseOrderRollbackTarget(row?: PurchaseOrderRow | null) {
       return "paid";
     case "shipped":
       return "supplier_processing";
+    case "trade_completed":
+      return "shipped";
     case "arrived":
       return Number(row.receivedQty || 0) > 0 ? null : "shipped";
     default:
@@ -2951,6 +2964,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       row.status === "paid"
       || row.status === "supplier_processing"
       || row.status === "shipped"
+      || row.status === "trade_completed"
       || row.status === "arrived",
     ),
     [purchaseOrders],
@@ -3954,6 +3968,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     // paid 状态的回退仍由财务（撤销付款确认）。
     if (row.status === "approved_to_pay") return canPurchase || canFinance;
     if (row.status === "paid") return canFinance;
+    if (row.status === "trade_completed") return canPurchase;
     if (row.status === "arrived") return canWarehouse;
     return canPurchase;
   };
@@ -4502,6 +4517,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     }
   };
 
+  // 多 SKU 采购单：编辑 / 转线下时按行展示，每行单独填单价、数量；运费走单头。
+  // create 模式恒为单 SKU（采购需求 PR 级别），不进多行表。
+  const offlinePoLines = useMemo<PurchaseOrderLineDetail[]>(() => {
+    if (!offlinePoTarget || offlinePoTarget.mode === "create") return [];
+    return purchaseOrderDetailLines(offlinePoTarget.po);
+  }, [offlinePoTarget]);
+  const offlinePoMultiSku = offlinePoLines.length > 1;
+
   const offlinePoInitialValues = useMemo<Partial<OfflinePoFormValues>>(() => {
     if (!offlinePoTarget) return {};
     if (offlinePoTarget.mode === "create") {
@@ -4509,6 +4532,28 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       return { unitPrice: pr.targetUnitCost ?? undefined, qty: pr.requestedQty ?? 1 };
     }
     const po = offlinePoTarget.po;
+    if (offlinePoMultiSku) {
+      const freightTotal = roundCurrency(
+        offlinePoLines.reduce((sum, line) => sum + roundCurrency(line.logisticsFee), 0),
+      );
+      return {
+        supplierId: po.supplierId ?? undefined,
+        supplierName: po.supplierName || undefined,
+        logisticsFee: (po.freightAmount ?? freightTotal) || undefined,
+        lines: offlinePoLines.map((line) => {
+          const qty = toFiniteNumber(line.qty);
+          const amount = roundCurrency(line.amount);
+          return {
+            lineId: String(line.id || ""),
+            skuCode: joinGroupedText(purchaseOrderDetailLineCodes(line)) || line.skuCode || "-",
+            productName: line.productName || undefined,
+            specText: line.specText || undefined,
+            qty: qty || 1,
+            unitPrice: qty > 0 ? roundCurrency(amount / qty) : roundCurrency(line.unitCost),
+          };
+        }),
+      };
+    }
     return {
       supplierId: po.supplierId ?? undefined,
       supplierName: po.supplierName || undefined,
@@ -4516,7 +4561,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
       logisticsFee: po.logisticsFee ?? undefined,
       qty: po.totalQty ?? 1,
     };
-  }, [offlinePoTarget]);
+  }, [offlinePoTarget, offlinePoMultiSku, offlinePoLines]);
 
   const offlinePoSubmitting = offlinePoTarget
     ? (offlinePoTarget.mode === "create"
@@ -4534,6 +4579,14 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     if (!offlinePoTarget) return;
     const supplierId = values.supplierId || undefined;
     const supplierName = values.supplierName?.trim() || undefined;
+    // 多 SKU：把逐行的数量/单价打包成 lines；后端有 lines 就逐行改，否则走单一 unitPrice/qty。
+    const lineUpdates = Array.isArray(values.lines) && values.lines.length
+      ? values.lines.map((line) => ({
+          lineId: line.lineId,
+          qty: line.qty,
+          unitPrice: line.unitPrice,
+        }))
+      : undefined;
     if (offlinePoTarget.mode === "create") {
       const pr = offlinePoTarget.pr;
       const result = await runAction(`po-${pr.id}`, {
@@ -4562,6 +4615,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         supplierName,
         unitPrice: values.unitPrice,
         logisticsFee: values.logisticsFee,
+        lines: lineUpdates,
       }, "采购单已更新");
       if (!result) return;
     } else {
@@ -4574,6 +4628,7 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
         supplierName,
         unitPrice: values.unitPrice,
         logisticsFee: values.logisticsFee,
+        lines: lineUpdates,
       }, po.externalOrderId ? "已取消 1688 原单并转为线下采购" : "已转为线下采购");
       if (!result) return;
     }
@@ -5416,13 +5471,72 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
     }
   };
 
-  const confirm1688ReceiveGoods = async (row: PurchaseOrderRow) => {
-    await runActionOptimistic(
-      `1688-receive-${row.id}`,
-      { action: "confirm_1688_receive_goods", poId: row.id },
-      "1688 已确认收货",
-      { poId: row.id, patch: { status: "arrived" } },
-    );
+  // 「确认收货」入库：点了先拉本次待入库明细，弹框逐行核对实收数（支持部分入库），不调 1688。
+  const [inboundModal, setInboundModal] = useState<{
+    poId: string;
+    poNo: string;
+    rows: { id: string; skuCode: string; productName: string; colorSpec: string; expectedQty: number; receivedQty: number }[];
+  } | null>(null);
+  const [inboundSubmitting, setInboundSubmitting] = useState(false);
+
+  const confirmPoInbound = async (row: PurchaseOrderRow) => {
+    const result = await runAction(`po-inbound-preview-${row.id}`, {
+      action: "confirm_po_inbound",
+      poId: row.id,
+      preview: true,
+      includeWorkbench: false,
+    });
+    if (!result) return;
+    const lines = Array.isArray(result?.result?.lines) ? result.result.lines : [];
+    if (!lines.length) {
+      message.info("这单暂无待入库的明细");
+      void loadData({ silent: true });
+      return;
+    }
+    setInboundModal({
+      poId: row.id,
+      poNo: row.poNo || row.id,
+      rows: lines.map((l: any) => ({
+        id: String(l.id),
+        skuCode: l.internalSkuCode || "",
+        productName: l.productName || "",
+        colorSpec: l.colorSpec || "",
+        expectedQty: Number(l.expectedQty || 0),
+        receivedQty: Number(l.expectedQty || 0),
+      })),
+    });
+  };
+
+  const submitPoInbound = async () => {
+    if (!inboundModal) return;
+    const rows = inboundModal.rows;
+    if (rows.every((r) => Number(r.receivedQty || 0) <= 0)) {
+      message.warning("实收数量为 0，无法入库");
+      return;
+    }
+    setInboundSubmitting(true);
+    try {
+      const result = await runAction(
+        `po-inbound-${inboundModal.poId}`,
+        {
+          action: "confirm_po_inbound",
+          poId: inboundModal.poId,
+          lines: rows.map((r) => ({ id: r.id, receivedQty: Number(r.receivedQty || 0) })),
+          includeWorkbench: false,
+        },
+        "已确认收货并入库",
+      );
+      if (result) {
+        patchPurchaseOrderFromResult(result);
+        if (result?.result?.inbound?.remainderReceiptNo) {
+          message.info("部分入库完成，未收齐的已转待入库，下次到货可继续确认收货补入");
+        }
+        setInboundModal(null);
+        void loadData({ silent: true });
+      }
+    } finally {
+      setInboundSubmitting(false);
+    }
   };
 
   const import1688Orders = async (autoGenerate = false) => {
@@ -6911,12 +7025,12 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
               留言
             </Button>
           ) : null}
-          {row.externalOrderId && canPurchase && ["paid", "shipped", "arrived"].includes(row.status) ? (
+          {canPurchase && purchaseOrderIsPaid(row) && !isCompletedOrder(row) ? (
             <Button
               size="small"
               icon={<CheckCircleOutlined />}
-              loading={actingKey === `1688-receive-${row.id}`}
-              onClick={() => confirm1688ReceiveGoods(row)}
+              loading={actingKey === `po-inbound-${row.id}`}
+              onClick={() => confirmPoInbound(row)}
             >
               确认收货
             </Button>
@@ -7539,6 +7653,61 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
           document.body,
         ) : null}
       </div>
+
+      <Modal
+        title={`确认收货入库 — ${inboundModal?.poNo || ""}`}
+        open={!!inboundModal}
+        onCancel={() => setInboundModal(null)}
+        onOk={() => void submitPoInbound()}
+        okText="确认入库"
+        okButtonProps={{ loading: inboundSubmitting }}
+        width={680}
+        destroyOnClose
+      >
+        <Table
+          size="small"
+          rowKey="id"
+          pagination={false}
+          dataSource={inboundModal?.rows || []}
+          columns={[
+            {
+              title: "商品",
+              key: "sku",
+              render: (_: any, r: any) => (
+                <div>
+                  <div>{r.skuCode || "-"}</div>
+                  <div style={{ color: "#888", fontSize: 12 }}>
+                    {r.productName}{r.colorSpec ? ` / ${r.colorSpec}` : ""}
+                  </div>
+                </div>
+              ),
+            },
+            { title: "应收", dataIndex: "expectedQty", width: 80, align: "center" as const },
+            {
+              title: "实收",
+              key: "received",
+              width: 130,
+              render: (_: any, r: any) => (
+                <InputNumber
+                  min={0}
+                  max={r.expectedQty}
+                  value={r.receivedQty}
+                  onChange={(v) =>
+                    setInboundModal((prev) =>
+                      prev
+                        ? { ...prev, rows: prev.rows.map((x) => (x.id === r.id ? { ...x, receivedQty: Number(v ?? 0) } : x)) }
+                        : prev,
+                    )
+                  }
+                />
+              ),
+            },
+          ]}
+        />
+        <div style={{ marginTop: 8, color: "#888", fontSize: 12 }}>
+          实收少于应收时，差额会自动留作「待入库」，下次到货可继续点确认收货补入。
+        </div>
+      </Modal>
 
       <Modal
         open={Boolean(requestImagePreview)}
@@ -8403,23 +8572,78 @@ export default function PurchaseCenter({ initialStoreManagerOpen = false, workAr
           <Form.Item name="supplierName" label="供应商名称">
             <Input placeholder="手填供应商或平台店铺名称（线下采购可不绑已有供应商）" />
           </Form.Item>
-          <Row gutter={12}>
-            <Col span={8}>
-              <Form.Item name="unitPrice" label="采购单价" rules={[{ required: true, message: "请输入采购单价" }]}>
+          {offlinePoMultiSku ? (
+            <>
+              <div style={{ marginBottom: 8, fontWeight: 500 }}>多 SKU 采购单：请分别填写每个商品的数量与单价</div>
+              <Form.List name="lines">
+                {(fields) => (
+                  <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                    {fields.map((field) => {
+                      const detail = offlinePoLines[field.name];
+                      const codeText = (detail ? joinGroupedText(purchaseOrderDetailLineCodes(detail)) : "") || detail?.skuCode || "-";
+                      const nameText = detail?.productName || "";
+                      const specText = detail?.specText && detail.specText !== "-" ? detail.specText : "";
+                      return (
+                        <div key={field.key} style={{ border: "1px solid #f0f0f0", borderRadius: 6, padding: "8px 12px" }}>
+                          <div style={{ fontSize: 12, marginBottom: 6 }}>
+                            <Text strong>{codeText}</Text>
+                            {specText ? <Text type="secondary"> · {specText}</Text> : null}
+                            {nameText ? <div style={{ color: "#888" }}>{nameText}</div> : null}
+                          </div>
+                          <Form.Item name={[field.name, "lineId"]} hidden noStyle>
+                            <Input type="hidden" />
+                          </Form.Item>
+                          <Row gutter={12}>
+                            <Col span={12}>
+                              <Form.Item
+                                label="采购数量"
+                                name={[field.name, "qty"]}
+                                rules={[{ required: true, message: "请输入采购数量" }]}
+                                style={{ marginBottom: 0 }}
+                              >
+                                <InputNumber min={1} precision={0} style={{ width: "100%" }} />
+                              </Form.Item>
+                            </Col>
+                            <Col span={12}>
+                              <Form.Item
+                                label="采购单价"
+                                name={[field.name, "unitPrice"]}
+                                rules={[{ required: true, message: "请输入采购单价" }]}
+                                style={{ marginBottom: 0 }}
+                              >
+                                <InputNumber min={0} precision={2} prefix="¥" style={{ width: "100%" }} />
+                              </Form.Item>
+                            </Col>
+                          </Row>
+                        </div>
+                      );
+                    })}
+                  </Space>
+                )}
+              </Form.List>
+              <Form.Item name="logisticsFee" label="运费（整单，按各 SKU 金额比例平摊）" style={{ marginTop: 12 }}>
                 <InputNumber min={0} precision={2} prefix="¥" style={{ width: "100%" }} />
               </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item name="logisticsFee" label="运费">
-                <InputNumber min={0} precision={2} prefix="¥" style={{ width: "100%" }} />
-              </Form.Item>
-            </Col>
-            <Col span={8}>
-              <Form.Item name="qty" label="采购数量" rules={[{ required: true, message: "请输入采购数量" }]}>
-                <InputNumber min={1} precision={0} style={{ width: "100%" }} />
-              </Form.Item>
-            </Col>
-          </Row>
+            </>
+          ) : (
+            <Row gutter={12}>
+              <Col span={8}>
+                <Form.Item name="unitPrice" label="采购单价" rules={[{ required: true, message: "请输入采购单价" }]}>
+                  <InputNumber min={0} precision={2} prefix="¥" style={{ width: "100%" }} />
+                </Form.Item>
+              </Col>
+              <Col span={8}>
+                <Form.Item name="logisticsFee" label="运费">
+                  <InputNumber min={0} precision={2} prefix="¥" style={{ width: "100%" }} />
+                </Form.Item>
+              </Col>
+              <Col span={8}>
+                <Form.Item name="qty" label="采购数量" rules={[{ required: true, message: "请输入采购数量" }]}>
+                  <InputNumber min={1} precision={0} style={{ width: "100%" }} />
+                </Form.Item>
+              </Col>
+            </Row>
+          )}
         </Form>
       </Modal>
 

@@ -48,6 +48,7 @@ const PURCHASE_ORDER_STATUS = Object.freeze({
   PAID: "paid",
   SUPPLIER_PROCESSING: "supplier_processing",
   SHIPPED: "shipped",
+  TRADE_COMPLETED: "trade_completed",
   ARRIVED: "arrived",
   INBOUNDED: "inbounded",
   CLOSED: "closed",

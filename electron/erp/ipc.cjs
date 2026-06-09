@@ -191,6 +191,7 @@ const BROADCAST_PURCHASE_ACTIONS = new Set([
   "update_po_line",
   "update_po_totals",
   "convert_po_to_offline",
+  "confirm_po_inbound",
 ]);
 
 const ACCESS_CODE_ITERATIONS = 120000;
@@ -2222,6 +2223,29 @@ function computeEffectivePermissions(sessionUser) {
   };
 }
 
+// 店铺数据隔离（阶段三）：算出某用户登录后「能看到哪些店铺」的范围。
+// 受开关 ENFORCE_STORE_SCOPE 控制：未开启时一律返回 enforce=false（看全部，行为与历史一致）。
+// 开启后：admin/manager 等特权角色仍看全部；其余角色只能看到自己「负责的店铺」（mall_id 集合）。
+// 没分配任何店铺的非特权用户 → enforce=true 且集合为空 → 看不到任何带店铺标识的数据（符合预期）。
+const STORE_SCOPE_ENFORCED = process.env.ENFORCE_STORE_SCOPE === "1";
+
+function resolveStoreScope(sessionUser) {
+  if (!STORE_SCOPE_ENFORCED) return { enforce: false };
+  let eff;
+  try {
+    eff = computeEffectivePermissions(sessionUser);
+  } catch {
+    return { enforce: false };
+  }
+  if (!eff || eff.isPrivileged || eff.allStores) return { enforce: false };
+  const mallIds = new Set((eff.mallIds || []).map((v) => String(v)).filter(Boolean));
+  const storeCodes = new Set();
+  for (const s of eff.stores || []) {
+    if (s && s.storeCode) storeCodes.add(String(s.storeCode));
+  }
+  return { enforce: true, mallIds, storeCodes };
+}
+
 // 管理界面用：返回 catalog + 全部角色权限 + （可选）指定用户的覆盖与店铺范围。
 function getPermissionAdminView(params = {}) {
   const companyId = normalizeCompanyId(params.companyId || params.company_id, erpState.currentUser);
@@ -3854,9 +3878,10 @@ function safeMessagePoStatus(currentStatus, nextStatus) {
   if (!nextStatus) return null;
   const current = optionalString(currentStatus);
   if (["closed", "cancelled", "inbounded"].includes(current)) return null;
-  if (nextStatus === "paid" && ["shipped", "arrived"].includes(current)) return null;
-  if (nextStatus === "shipped" && ["arrived"].includes(current)) return null;
-  if (nextStatus === "cancelled" && ["paid", "supplier_processing", "shipped", "arrived"].includes(current)) return null;
+  if (nextStatus === "paid" && ["shipped", "trade_completed", "arrived"].includes(current)) return null;
+  if (nextStatus === "shipped" && ["trade_completed", "arrived"].includes(current)) return null;
+  if (nextStatus === "trade_completed" && ["arrived"].includes(current)) return null;
+  if (nextStatus === "cancelled" && ["paid", "supplier_processing", "shipped", "trade_completed", "arrived"].includes(current)) return null;
   return nextStatus;
 }
 
@@ -3905,6 +3930,10 @@ function updatePurchaseOrderFrom1688Message({ db, services, po, refs, effect, ro
   });
   if (before.pr_id) {
     writePurchaseRequestEvent(db, getPurchaseRequest(db, before.pr_id), { role: "system" }, effect.eventType, effect.message);
+  }
+  // 1688 同步到已付款后续状态时，自动补建入库单（仓库中心立即可见）
+  if (nextStatus && ["paid", "supplier_processing", "shipped", "trade_completed", "arrived"].includes(nextStatus)) {
+    try { ensureInboundReceiptForPo(db, services, after, { id: null, role: "system" }); } catch {}
   }
   return after;
 }
@@ -7796,7 +7825,7 @@ function getPurchaseWorkbench(params = {}) {
     limit,
   };
   const poConditions = [];
-  const poPaidSignalSql = `(po.status IN ('paid', 'supplier_processing', 'shipped', 'arrived')
+  const poPaidSignalSql = `(po.status IN ('paid', 'supplier_processing', 'shipped', 'trade_completed', 'arrived')
     OR LOWER(COALESCE(po.payment_status, '')) IN ('paid', 'confirmed', 'success')
     OR NULLIF(TRIM(COALESCE(po.paid_at, '')), '') IS NOT NULL)`;
   const poActivePaidSql = `(${poPaidSignalSql} AND po.status NOT IN ('inbounded', 'closed', 'cancelled', 'delayed', 'exception'))`;
@@ -8040,11 +8069,12 @@ function getPurchaseWorkbench(params = {}) {
         WHEN 'paid' THEN 3
         WHEN 'supplier_processing' THEN 4
         WHEN 'shipped' THEN 5
-        WHEN 'arrived' THEN 6
-        WHEN 'draft' THEN 7
-        WHEN 'inbounded' THEN 8
-        WHEN 'closed' THEN 9
-        ELSE 9
+        WHEN 'trade_completed' THEN 6
+        WHEN 'arrived' THEN 7
+        WHEN 'draft' THEN 8
+        WHEN 'inbounded' THEN 9
+        WHEN 'closed' THEN 10
+        ELSE 10
       END,
       po.updated_at DESC,
       po.id DESC`;
@@ -8930,6 +8960,7 @@ const PAYMENT_SUBMITTED_PO_STATUSES = new Set([
   "paid",
   "supplier_processing",
   "shipped",
+  "trade_completed",
   "arrived",
   "inbounded",
   "closed",
@@ -8938,6 +8969,7 @@ const PAYMENT_PAID_OR_LATER_PO_STATUSES = new Set([
   "paid",
   "supplier_processing",
   "shipped",
+  "trade_completed",
   "arrived",
   "inbounded",
   "closed",
@@ -9189,6 +9221,139 @@ function ensureInboundReceiptForPo(db, services, po, actor) {
   return { id: receiptId, isNew: true };
 }
 
+// 拉某入库单的明细行（含 SKU 编码/名称/规格/图片），供采购单「确认收货」弹框逐行核对实收数。
+function getInboundReceiptLinesForConfirm(db, receiptId) {
+  return db.prepare(`
+    SELECT line.id, line.po_line_id, line.sku_id,
+           line.expected_qty, line.received_qty,
+           sku.internal_sku_code, sku.product_name, sku.color_spec,
+           sku.image_url AS sku_image_url
+    FROM erp_inbound_receipt_lines line
+    LEFT JOIN erp_skus sku ON sku.id = line.sku_id
+    WHERE line.receipt_id = ?
+    ORDER BY line.id ASC
+  `).all(receiptId).map(toCamelRow);
+}
+
+// 部分入库后，把没收到的差额另开一张「待到仓」入库单，留作下次补入。
+function createRemainderInboundReceipt(db, po, remainderLines, actor) {
+  if (!remainderLines.length) return null;
+  const now = nowIso();
+  const receiptId = createId("ir");
+  const receiptNo = generateInboundReceiptNo(db, po.account_id, now);
+  db.prepare(`
+    INSERT INTO erp_inbound_receipts (id, account_id, po_id, receipt_no, status, created_at, updated_at)
+    VALUES (@id, @account_id, @po_id, @receipt_no, 'pending_arrival', @now, @now)
+  `).run({ id: receiptId, account_id: po.account_id, po_id: po.id, receipt_no: receiptNo, now });
+  const insertLine = db.prepare(`
+    INSERT INTO erp_inbound_receipt_lines (id, account_id, receipt_id, po_line_id, sku_id, expected_qty, received_qty)
+    VALUES (@id, @account_id, @receipt_id, @po_line_id, @sku_id, @expected_qty, 0)
+  `);
+  for (const ln of remainderLines) {
+    insertLine.run({
+      id: createId("irl"),
+      account_id: po.account_id,
+      receipt_id: receiptId,
+      po_line_id: ln.poLineId,
+      sku_id: ln.skuId,
+      expected_qty: ln.remainder,
+    });
+  }
+  writePurchaseOrderFlowEvent(db, po, actor, "auto_create_inbound_receipt", `部分入库，剩余转待入库：${receiptNo}`);
+  return { id: receiptId, receiptNo };
+}
+
+// 采购单「确认收货」入库（支持部分入库）：
+//   - options.preview=true：只返回当前待入库单的明细（应收 + 默认实收=应收），供前端弹框，不入库。
+//   - 否则按 options.lines（每行本次实收数；缺省按应收充满）建批次入库，复用现有
+//     到仓→核数→建批次 链路。把本张单改成「纯本次实收」(expected=received) 故不触发数量异常；
+//     没收齐的差额拆成一张新的「待入库」单，采购单因 received<采购总数 自动保持「待入库」，下次可补。
+// 本函数不自开事务，由调用方决定事务边界（同步 action 已在外层 db.transaction 内）。
+function completePurchaseOrderInbound(db, services, po, actor, options = {}) {
+  if (!po || !po.id) throw new Error("采购单不存在");
+  const ensured = ensureInboundReceiptForPo(db, services, po, actor);
+  if (ensured && ensured.error) {
+    throw new Error(`生成入库单失败：${ensured.error}`);
+  }
+  // 取当前「待到仓」入库单：付款时自建的初始单，或上次部分入库拆出的剩余单。
+  let receipt = db.prepare(
+    "SELECT * FROM erp_inbound_receipts WHERE po_id = ? AND status = 'pending_arrival' ORDER BY created_at ASC, id ASC LIMIT 1"
+  ).get(po.id);
+  if (!receipt) {
+    // 没有待到仓单：明细缺失或已全部入库完成。
+    return { receipt: null, batches: [], inbounded: true, reason: "nothing_pending", lines: [] };
+  }
+  // 注意：不在此同步 expected_qty。初始单建单时 expected 已=采购数；剩余单的 expected 是
+  // 上次部分入库算出的「剩余量」，若用 syncInboundLineExpectedQty 重置成采购总数会破坏语义、
+  // 导致补入时反复拆出孤儿剩余单。
+
+  if (options.preview) {
+    return {
+      preview: true,
+      poId: po.id,
+      receiptId: receipt.id,
+      lines: getInboundReceiptLinesForConfirm(db, receipt.id),
+    };
+  }
+
+  const linesInput = Array.isArray(options.lines) ? options.lines : null;
+  const receivedById = new Map();
+  if (linesInput) {
+    for (const it of linesInput) {
+      const id = optionalString(it.id || it.lineId);
+      if (id) receivedById.set(id, Math.max(0, Math.floor(Number(it.receivedQty ?? it.received ?? 0))));
+    }
+  }
+
+  const receiptLines = db.prepare(
+    "SELECT id, po_line_id, sku_id, expected_qty FROM erp_inbound_receipt_lines WHERE receipt_id = ?"
+  ).all(receipt.id);
+  const updateLine = db.prepare(
+    "UPDATE erp_inbound_receipt_lines SET received_qty = @r, expected_qty = @e, shortage_qty = 0, over_qty = 0, damaged_qty = 0 WHERE id = @id"
+  );
+  const remainderLines = [];
+  let totalReceived = 0;
+  for (const ln of receiptLines) {
+    const expected = Math.max(0, Math.floor(Number(ln.expected_qty || 0)));
+    const received = linesInput ? Math.min(expected, receivedById.get(ln.id) ?? 0) : expected;
+    const remainder = Math.max(0, expected - received);
+    // 把本张单这行改成「纯本次实收」：expected=received → 无短少，正常建批次。
+    updateLine.run({ id: ln.id, r: received, e: received });
+    totalReceived += received;
+    if (remainder > 0) {
+      remainderLines.push({ poLineId: ln.po_line_id, skuId: ln.sku_id, remainder });
+    }
+  }
+  if (totalReceived <= 0) {
+    throw new Error("本次实收数量为 0，无法入库");
+  }
+
+  // 走完入库：到仓 → 核数 → 建批次（按实收落库存 + 成本批次）。
+  if (receipt.status === "pending_arrival") {
+    services.inventory.registerArrival(receipt.id, actor);
+    writeInboundReceiptFlowEvent(db, receipt, actor, "register_arrival", `仓库确认到仓：${receipt.receipt_no || receipt.id}`);
+    receipt = getInboundReceipt(db, receipt.id);
+  }
+  if (receipt.status === "arrived") {
+    services.inventory.confirmCount(receipt.id, actor);
+    writeInboundReceiptFlowEvent(db, receipt, actor, "confirm_count", `仓库确认实收：${receipt.receipt_no || receipt.id}`);
+    receipt = getInboundReceipt(db, receipt.id);
+  }
+  writeInboundReceiptFlowEvent(db, receipt, actor, "confirm_inbound", `仓库确认入库：${receipt.receipt_no || receipt.id}`);
+  const batches = createBatchesForReceipt({ db, services, receipt, actor });
+
+  // 没收齐的差额另开一张待入库单，下次补入。
+  const remainder = createRemainderInboundReceipt(db, po, remainderLines, actor);
+
+  const finalPo = getPurchaseOrder(db, po.id);
+  return {
+    receipt: toCamelRow(getInboundReceipt(db, receipt.id)),
+    batches,
+    remainderReceiptNo: remainder ? remainder.receiptNo : null,
+    inbounded: finalPo.status === "inbounded",
+  };
+}
+
 function confirmPaymentPaid({ db, services, payload, actor }) {
   assertActorRole(actor, ["finance", "manager", "admin"], "确认已付款");
   const poId = optionalString(payload.poId || payload.id);
@@ -9302,6 +9467,7 @@ function getRollbackPurchaseOrderTarget(po, receivedQty = 0) {
   if (status === "paid") return "approved_to_pay";
   if (status === "supplier_processing") return "paid";
   if (status === "shipped") return "supplier_processing";
+  if (status === "trade_completed") return "shipped";
   if (status === "arrived") {
     if (Number(receivedQty || 0) > 0) {
       throw new Error("该采购单已有入库数量，不能直接回退到发货前状态");
@@ -16939,10 +17105,10 @@ function map1688StatusToLocal(status, currentStatus, logistics = {}) {
   const text = String(status || "").toUpperCase();
   const current = optionalString(currentStatus);
   if (["closed", "cancelled", "inbounded"].includes(current)) return null;
-  const paidOrLater = ["paid", "supplier_processing", "shipped", "arrived"].includes(current);
+  const paidOrLater = ["paid", "supplier_processing", "shipped", "trade_completed", "arrived"].includes(current);
   if (/CANCEL|TERMINATED|CLOSE/.test(text)) return "cancelled";
-  if (paidOrLater && logistics.signed) return "arrived";
-  if (paidOrLater && /CONFIRM_?RECEIVE|RECEIVEGOODS|RECEIVED|SIGNED/.test(text)) return "arrived";
+  if (paidOrLater && logistics.signed) return "trade_completed";
+  if (paidOrLater && /CONFIRM_?RECEIVE|RECEIVEGOODS|RECEIVED|SIGNED/.test(text)) return "trade_completed";
   if (paidOrLater && (/WAIT_?BUYER_?RECEIVE|SELLER_?SEND|SHIPPED|SENDGOODS/.test(text) || logistics.shipped)) return "shipped";
   if (/WAIT_?BUYER_?PAY|UNPAID|CREATED|PREVIEW/.test(text)) {
     return current === "draft" ? "pushed_pending_price" : null;
@@ -17550,11 +17716,42 @@ async function confirm1688ReceiveGoodsAction({ db, services, payload, actor }) {
     action: "confirm_1688_receive_goods",
     actor,
   });
+  // 1688 确认收货成功后，自动把货入库（走与仓库中心「完成入库」一致的链路：到仓→核数→入库）。
+  // 入库失败不回滚 1688 确认收货（平台侧已确认，无法撤回），把错误透出给前端提示即可。
+  let inbound = null;
+  try {
+    inbound = db.transaction(() =>
+      completePurchaseOrderInbound(db, services, afterPo, actor),
+    )();
+  } catch (e) {
+    inbound = { inbounded: false, error: e?.message || String(e) };
+  }
   return {
     apiKey: PROCUREMENT_APIS.CONFIRM_RECEIVE_GOODS.key,
     query: params,
-    purchaseOrder: toCamelRow(afterPo),
+    purchaseOrder: toCamelRow(getPurchaseOrder(db, afterPo.id)),
+    inbound,
     rawResponse,
+  };
+}
+
+// 采购单「直接入库」：不依赖 1688 确认收货，直接把这张单的货走完入库流程。
+// 主要给线下供应商单 / 无 1688 订单号的单使用。已在采购 switch 的 db.transaction 内，
+// completePurchaseOrderInbound 直接调用、不再自开事务。
+function confirmPurchaseOrderInboundAction({ db, services, payload, actor }) {
+  assertActorRole(actor, ["warehouse", "buyer", "manager", "admin"], "采购单确认收货入库");
+  const po = getPurchaseOrder(db, requireString(payload.poId || payload.id, "poId"));
+  if (!po) throw new Error("采购单不存在");
+  // 预览模式：只返回当前待入库单的明细，供前端弹框逐行核对实收数，不入库。
+  if (payload.preview) {
+    return completePurchaseOrderInbound(db, services, po, actor, { preview: true });
+  }
+  const inbound = completePurchaseOrderInbound(db, services, po, actor, {
+    lines: Array.isArray(payload.lines) ? payload.lines : null,
+  });
+  return {
+    purchaseOrder: toCamelRow(getPurchaseOrder(db, po.id)),
+    inbound,
   };
 }
 
@@ -18233,6 +18430,9 @@ async function performPurchaseAction(payload = {}, actorInput = {}) {
           payload,
           actor,
         });
+      }
+      case "confirm_po_inbound": {
+        return confirmPurchaseOrderInboundAction({ db, services, payload, actor });
       }
       default:
         throw new Error(`Unsupported purchase action: ${action}`);
@@ -22717,6 +22917,7 @@ function startLanService(payload = {}) {
     updateWorkItemStatus: updateWorkItemStatusForUser,
     listCompanies,
     getPermissionProfile,
+    resolveStoreScope,
     upsertRolePermission,
     upsertUserResourceScope,
     getPermissionAdminView,
@@ -22922,6 +23123,7 @@ async function startErpHeadlessServer(options = {}) {
     updateWorkItemStatus: updateWorkItemStatusForUser,
     listCompanies,
     getPermissionProfile,
+    resolveStoreScope,
     upsertRolePermission,
     upsertUserResourceScope,
     getPermissionAdminView,

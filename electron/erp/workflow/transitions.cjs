@@ -57,7 +57,7 @@ const TRANSITIONS = Object.freeze({
     rule(PO.APPROVED_TO_PAY, "confirm_paid", PO.PAID, FINANCE),
     rule(PO.PAID, "mark_supplier_processing", PO.SUPPLIER_PROCESSING, BUYER),
     rule(PO.SUPPLIER_PROCESSING, "mark_supplier_shipped", PO.SHIPPED, BUYER),
-    rule([PO.PAID, PO.SUPPLIER_PROCESSING, PO.SHIPPED], "mark_arrived", PO.ARRIVED, WAREHOUSE),
+    rule([PO.PAID, PO.SUPPLIER_PROCESSING, PO.SHIPPED, PO.TRADE_COMPLETED], "mark_arrived", PO.ARRIVED, WAREHOUSE),
     rule(PO.ARRIVED, "mark_inbounded", PO.INBOUNDED, WAREHOUSE),
     rule(PO.INBOUNDED, "close_po", PO.CLOSED, BUYER),
     rule([PO.PAID, PO.SUPPLIER_PROCESSING, PO.SHIPPED], "mark_delayed", PO.DELAYED, BUYER),
@@ -72,6 +72,7 @@ const TRANSITIONS = Object.freeze({
     rule(PO.PAID, "rollback_po_status", PO.APPROVED_TO_PAY, FINANCE),
     rule(PO.SUPPLIER_PROCESSING, "rollback_po_status", PO.PAID, BUYER),
     rule(PO.SHIPPED, "rollback_po_status", PO.SUPPLIER_PROCESSING, BUYER),
+    rule(PO.TRADE_COMPLETED, "rollback_po_status", PO.SHIPPED, BUYER),
     rule(PO.ARRIVED, "rollback_po_status", PO.SHIPPED, WAREHOUSE),
   ],
 

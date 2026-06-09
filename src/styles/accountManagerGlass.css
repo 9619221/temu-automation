@@ -1,0 +1,123 @@
+/* ============================================================
+   账号管理页 · iOS 26 液态玻璃（Liquid Glass）皮肤
+   仅作用于 .am-glass-page 作用域，不影响全局与其它页面。
+   逻辑/结构零改动，纯视觉覆盖。
+   ============================================================ */
+
+.am-glass-page {
+  /* 抵消 .app-workspace-shell 的内边距，让壁纸铺满内容区 */
+  margin: -22px -24px -28px;
+  padding: 24px 26px 32px;
+  min-height: calc(100vh - 64px);
+  position: relative;
+  isolation: isolate;
+  /* 壁纸：克制低饱和冷调光团，给玻璃提供可折射的底色 */
+  background:
+    radial-gradient(46% 48% at 14% 6%, rgba(94, 155, 255, 0.16) 0%, transparent 56%),
+    radial-gradient(42% 44% at 90% 2%, rgba(191, 90, 242, 0.10) 0%, transparent 55%),
+    radial-gradient(52% 54% at 82% 100%, rgba(75, 227, 201, 0.12) 0%, transparent 58%),
+    linear-gradient(155deg, #eef2f9 0%, #e9edf5 52%, #eef0f8 100%);
+}
+
+/* ---- 液态玻璃基底：模糊 + 增亮提饱和 + 厚度边光 + 悬浮投影 ---- */
+.am-glass-page .ant-card {
+  border: none !important;
+  border-radius: 22px !important;
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.66), rgba(255, 255, 255, 0.44)) !important;
+  -webkit-backdrop-filter: blur(26px) saturate(185%) brightness(1.06);
+  backdrop-filter: blur(26px) saturate(185%) brightness(1.06);
+  box-shadow:
+    0 1px 1px rgba(8, 11, 18, 0.05),
+    0 10px 26px -12px rgba(8, 11, 18, 0.22),
+    0 30px 60px -24px rgba(8, 11, 18, 0.26),
+    inset 1.5px 1.5px 1px rgba(255, 255, 255, 0.9),
+    inset -1px -1px 1px rgba(255, 255, 255, 0.3),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.2) !important;
+  transition: transform 0.32s cubic-bezier(.32,.72,0,1), box-shadow 0.32s cubic-bezier(.32,.72,0,1);
+}
+
+/* 统计小卡：hover 轻微上浮 */
+.am-glass-page .ant-card-small:hover {
+  transform: translateY(-4px);
+  box-shadow:
+    0 2px 3px rgba(8, 11, 18, 0.06),
+    0 16px 34px -10px rgba(8, 11, 18, 0.26),
+    0 44px 80px -28px rgba(8, 11, 18, 0.3),
+    inset 1.5px 1.5px 1px rgba(255, 255, 255, 0.95),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.32) !important;
+}
+
+.am-glass-page .ant-card-head {
+  border-bottom: 1px solid rgba(15, 23, 42, 0.07) !important;
+  background: transparent !important;
+}
+
+/* ---- 左侧账号列表：整块玻璃面板 ---- */
+.am-glass-page .am-glass-aside {
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0.4)) !important;
+  -webkit-backdrop-filter: blur(40px) saturate(190%) brightness(1.05);
+  backdrop-filter: blur(40px) saturate(190%) brightness(1.05);
+  border-radius: 26px !important;
+  box-shadow:
+    0 2px 3px rgba(8, 11, 18, 0.05),
+    0 14px 32px -12px rgba(8, 11, 18, 0.24),
+    0 40px 80px -28px rgba(8, 11, 18, 0.3),
+    inset 1.5px 1.5px 1px rgba(255, 255, 255, 0.9),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.22) !important;
+}
+
+/* 列表项：更大圆角 */
+.am-glass-page .am-glass-aside > div {
+  border-radius: 14px;
+}
+
+/* ---- 按钮玻璃化（保留 primary 渐变按钮不动）---- */
+.am-glass-page .ant-btn-default {
+  border: none !important;
+  border-radius: 999px !important;
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.46)) !important;
+  box-shadow:
+    inset 1px 1px 0 rgba(255, 255, 255, 0.9),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.4),
+    0 2px 6px -2px rgba(8, 11, 18, 0.2) !important;
+  transition: transform 0.22s cubic-bezier(.32,.72,0,1), box-shadow 0.22s cubic-bezier(.32,.72,0,1);
+}
+.am-glass-page .ant-btn-default:hover {
+  transform: translateY(-1.5px);
+  box-shadow:
+    inset 1px 1px 0 rgba(255, 255, 255, 0.95),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.55),
+    0 8px 18px -6px rgba(8, 11, 18, 0.28) !important;
+}
+
+/* primary 按钮：玻璃质感的高光描边 + 更润的蓝 */
+.am-glass-page .ant-btn-primary {
+  border: none !important;
+  border-radius: 999px !important;
+  box-shadow:
+    inset 0 1.5px 0 rgba(255, 255, 255, 0.45),
+    inset 0 -2px 4px rgba(0, 40, 120, 0.35),
+    0 10px 22px -6px rgba(10, 132, 255, 0.6) !important;
+}
+
+/* ---- 标签胶囊化 ---- */
+.am-glass-page .ant-tag {
+  border-radius: 999px !important;
+  border: none !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+
+/* ---- 进度条圆润 ---- */
+.am-glass-page .ant-progress-inner {
+  background: rgba(10, 20, 40, 0.07) !important;
+}
+
+/* ---- 统计卡里的图标底座：玻璃高光 ---- */
+.am-glass-page .ant-card-small .ant-card-body > div > div:first-child {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6), inset 0 0 0 1px rgba(255, 255, 255, 0.35);
+}
+
+/* 空状态/虚线卡也玻璃化 */
+.am-glass-page .ant-empty {
+  opacity: 0.9;
+}

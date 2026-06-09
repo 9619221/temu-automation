@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>03-supply-chain</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:1080px;height:1440px;overflow:hidden}body{font-family:"Microsoft YaHei","PingFang SC","Noto Sans CJK SC",Arial,sans-serif;background:#f5f2eb;letter-spacing:0;color:#162033}
+.poster{position:relative;width:1080px;height:1440px;padding:66px 70px 58px;overflow:hidden;background:linear-gradient(145deg,#f8f6f1 0%,#f2efe7 54%,#eef5f1 100%)}
+.poster:before{content:"";position:absolute;inset:28px;border:1px solid rgba(27,36,54,.12);pointer-events:none}.poster:after{content:"";position:absolute;width:680px;height:680px;right:-310px;top:-300px;border-radius:50%;border:104px solid rgba(201,148,63,.12);pointer-events:none}.grain{position:absolute;inset:0;background-image:radial-gradient(rgba(22,32,51,.06) 1px,transparent 1px);background-size:26px 26px;opacity:.18}
+.content{position:relative;z-index:2;height:100%;display:flex;flex-direction:column}.top{display:flex;justify-content:space-between;align-items:center}.brand{display:flex;align-items:center;gap:14px}.brand img{width:66px;height:66px;border-radius:17px;object-fit:cover;background:#fff;box-shadow:0 16px 36px rgba(30,35,45,.16)}.brand b{display:block;font-size:29px;font-weight:900;line-height:1}.brand span{display:block;margin-top:7px;font-size:14px;font-weight:800;color:#697386}.label{font-size:19px;font-weight:900;color:#697386;border:1px solid rgba(27,36,54,.14);background:rgba(255,255,255,.44);padding:11px 16px}
+h1{margin:64px 0 0;font-size:68px;line-height:1.1;font-weight:900;letter-spacing:0;max-width:900px}h1 span{display:block}.subtitle{margin:26px 0 0;max-width:860px;font-size:29px;line-height:1.52;font-weight:700;color:#5f6b7b}.visual-wrap{margin-top:44px}.window{height:508px;background:#fff;border:1px solid rgba(24,32,47,.1);box-shadow:0 34px 90px rgba(29,35,45,.16);overflow:hidden}.window-bar{height:54px;background:#172033;color:#fff;display:flex;align-items:center;gap:8px;padding:0 20px}.window-bar span{width:10px;height:10px;border-radius:50%;background:#d2a04b}.window-bar span:nth-child(2){background:#55c8b6}.window-bar span:nth-child(3){background:#8ab4ff}.window-bar b{font-size:17px;margin-left:12px}.window-body{height:454px;background:#f7f9fb;padding:24px}
+.app-grid{height:100%;display:grid;grid-template-columns:158px 1fr;gap:18px}.side{background:#fff;border:1px solid #e4e9ef;border-radius:14px;padding:16px;display:grid;align-content:start;gap:10px}.side strong{font-size:20px;margin-bottom:8px}.side p{margin:0;border:1px solid #edf1f5;border-radius:10px;padding:10px 12px;color:#64748b;font-weight:900}.side .active{background:#f2f5fa;color:#172033}.screen-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:15px}.screen-head h3{font-size:27px;margin:0}.screen-head button,.actions button{border:0;border-radius:10px;background:#172033;color:#fff;font-weight:900;padding:11px 16px}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:13px}.metrics div{background:#fff;border:1px solid #e4e9ef;border-radius:14px;padding:18px}.metrics b{display:block;font-size:38px}.metrics span{display:block;color:#697386;font-weight:900}.lower{display:grid;grid-template-columns:1fr 1fr;gap:13px;margin-top:15px}.radar,.next{background:#fff;border:1px solid #e4e9ef;border-radius:14px;padding:17px}.radar h4,.next h4{margin:0 0 13px;font-size:20px}.radar p{display:grid;grid-template-columns:96px 1fr;gap:12px;align-items:center;margin:13px 0;font-weight:900}.radar i{height:10px;border-radius:999px;background:linear-gradient(90deg,#c8943f,#47c4b6)}.next p{margin:12px 0;font-weight:900}
+.status{display:inline-flex;border-radius:999px;padding:4px 10px;margin-right:8px;font-size:13px;font-weight:900;background:#e8f1ff;color:#2563eb}.status.gold{background:#fff2d6;color:#a66f12}.status.green{background:#e7fbf5;color:#0f8f82}.status.blue{background:#e8f1ff;color:#2563eb}
+.matrix-head,.matrix-row{display:grid;grid-template-columns:150px repeat(4,1fr);gap:10px}.matrix-head{margin-bottom:10px}.matrix-head span,.matrix-head b,.matrix-row b,.matrix-row span{min-height:56px;border:1px solid #e4e9ef;background:#fff;display:flex;align-items:center;justify-content:center;font-weight:900}.matrix-row{margin-bottom:10px}.matrix-row b{justify-content:flex-start;padding-left:16px;color:#526174}.matrix-row span.urgent{background:#fff5ec;color:#dc5d2a}.matrix-row span.done{background:#e7fbf5;color:#0f8f82}.summary{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:16px}.summary p{margin:0;background:#172033;color:#fff;border-radius:0;padding:17px;text-align:center}.summary b{display:block;font-size:31px}.summary span{font-weight:900;color:#cbd5e1}
+.flow{display:grid;grid-template-columns:1fr 24px 1fr 24px 1fr 24px 1fr;align-items:center}.flow div{height:124px;background:#fff;border:1px solid #e4e9ef;padding:20px}.flow b{font-size:23px;display:block}.flow span{display:block;margin-top:14px;color:#697386;font-weight:900}.flow i{height:3px;background:#8ab4ff}.supply-lower{display:grid;grid-template-columns:.82fr 1.18fr;gap:16px;margin-top:18px}.supply-lower section{background:#fff;border:1px solid #e4e9ef;padding:18px}.supply-lower h4{margin:0 0 14px;font-size:22px}.supply-lower p{display:flex;align-items:center;gap:14px;margin:13px 0;font-weight:900}.supply-lower p span{color:#697386;min-width:62px}.supply-lower p b{margin-left:auto}.supply-lower section:nth-child(2) p b{margin-left:0}.supply-lower section:nth-child(2) .status{margin-left:auto}
+.launch{display:grid;grid-template-columns:.75fr 1.25fr;gap:18px}.product{background:#fff;border:1px solid #e4e9ef;padding:18px}.product div{height:178px;border-radius:14px;background:linear-gradient(135deg,#edf6ff,#d9f4ed);border:1px solid #dce8ef;margin-bottom:16px}.product h4{font-size:25px;margin:0 0 10px}.product p{margin:0;color:#697386;font-weight:900}.checks{display:grid;gap:12px}.checks p{display:grid;grid-template-columns:126px 1fr;align-items:center;gap:12px;margin:0;background:#fff;border:1px solid #e4e9ef;padding:16px;font-weight:900}.checks p span:last-child{color:#526174}.actions{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:18px}.actions button{background:#eef4ff;color:#2563eb}.actions .primary{background:#172033;color:#fff}
+.footer{margin-top:auto;display:grid;grid-template-columns:1fr auto;align-items:end;gap:28px;padding-top:34px}.point{font-size:41px;line-height:1.22;font-weight:900;max-width:770px}.micro{font-size:17px;color:#8a7460;font-weight:900;text-align:right}
+</style>
+</head>
+<body>
+<main class="poster">
+  <div class="grain"></div>
+  <div class="content">
+    <div class="top">
+    <div class="brand">
+      <img src="../assets/yunduo-logo.jpg" alt="云舵AI logo">
+      <div>
+        <b>云舵AI</b>
+        <span>跨境电商 AI 运营中枢</span>
+      </div>
+    </div><div class="label">采购与仓库</div></div>
+    <h1><span>采购、入库、库存、出库</span><span>在一条线上核对</span></h1>
+    <p class="subtitle">从采购需求到到货差异，再到出库确认，减少错单、漏发和重复沟通。</p>
+    <div class="visual-wrap">
+    <section class="window ">
+      <div class="window-bar">
+        <span></span><span></span><span></span>
+        <b>云舵AI · 采购到出库链路</b>
+      </div>
+      <div class="window-body">
+    <div class="flow">
+      <div><b>采购需求</b><span>保温杯 200 件</span></div><i></i>
+      <div><b>采购单</b><span>PO20260605001</span></div><i></i>
+      <div><b>到货入库</b><span>实收 198 件</span></div><i></i>
+      <div><b>出库确认</b><span>待打印 60 件</span></div>
+    </div>
+    <div class="supply-lower">
+      <section>
+        <h4>差异核对</h4>
+        <p><span>应收</span><b>200</b></p>
+        <p><span>实收</span><b>198</b></p>
+        <p><span>原因</span><b>待确认</b></p>
+      </section>
+      <section>
+        <h4>状态同步</h4>
+        <p><span>供应商</span><b>义乌优选</b><span class="status green">可下单</span></p>
+        <p><span>库存</span><b>当前 240 件</b><span class="status green">健康</span></p>
+        <p><span>出库单</span><b>OUT20260605001</b><span class="status gold">待打印</span></p>
+      </section>
+    </div></div>
+    </section></div>
+    <footer class="footer">
+      <div class="point">采购单 · 库存差异 · 出库确认</div>
+      <div class="micro">Yunduo AI</div>
+    </footer>
+  </div>
+</main>
+</body>
+</html>

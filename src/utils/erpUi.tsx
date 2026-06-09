@@ -19,6 +19,7 @@ export const PO_STATUS_LABELS: Record<string, string> = {
   paid: "已付款",
   supplier_processing: "供应商备货",
   shipped: "供应商已发货",
+  trade_completed: "交易完成",
   arrived: "货已到仓",
   inbounded: "已入库",
   closed: "已关闭",
@@ -36,6 +37,7 @@ export const PO_ROLLBACK_BUTTON_LABELS: Record<string, string> = {
   paid: "撤销付款",
   supplier_processing: "撤销备货",
   shipped: "撤销发货",
+  trade_completed: "撤销交易完成",
   arrived: "撤销到货",
 };
 
@@ -146,6 +148,7 @@ const STATUS_COLOR: Record<string, string> = {
   paid: "blue",                    // 已付款（处理中）
   supplier_processing: "processing",
   shipped: "blue",
+  trade_completed: "purple",
   arrived: "cyan",
   inbounded: "success",
   delayed: "warning",

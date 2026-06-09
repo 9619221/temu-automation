@@ -59,7 +59,7 @@ const OperationStoreDetail = lazyWithPreload(() => import("./pages/OperationStor
 const TemuAuthManager = lazyWithPreload(() => import("./pages/TemuAuthManager"));
 const AutoPurchase = lazyWithPreload(() => import("./pages/AutoPurchase"));
 const AutoShipMap = lazyWithPreload(() => import("./pages/AutoShipMap"));
-const Settlement = lazyWithPreload(() => import("./pages/Settlement"));
+// Settlement 页面已合并到多店报表的结算 Tab
 
 const CORE_ROUTE_PRELOADERS = [
   AppLayout.preload,
@@ -382,7 +382,6 @@ function App() {
               <Route path="qc-outbound" element={<RoleRoute path="/qc-outbound"><QcOutboundCenter /></RoleRoute>} />
               <Route path="auto-purchase" element={<RoleRoute path="/auto-purchase"><AutoPurchase /></RoleRoute>} />
               <Route path="auto-ship-map" element={<RoleRoute path="/auto-ship-map"><AutoShipMap /></RoleRoute>} />
-              <Route path="settlement" element={<RoleRoute path="/settlement"><Settlement /></RoleRoute>} />
               <Route path="work-items" element={<RoleRoute path="/work-items"><WorkItems /></RoleRoute>} />
               <Route path="users" element={<RoleRoute path="/users"><UserManagement /></RoleRoute>} />
               <Route path="erp-debug" element={<RoleRoute path="/erp-debug"><ErpDebug /></RoleRoute>} />

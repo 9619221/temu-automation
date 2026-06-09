@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>01-brand-command-center</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:1080px;height:1440px;overflow:hidden}body{font-family:"Microsoft YaHei","PingFang SC","Noto Sans CJK SC",Arial,sans-serif;background:#fff;letter-spacing:0}
+.poster{--bg:#f6f3ea;--bg2:#eef6f3;--ink:#162033;--muted:#596579;--panel:#ffffff;--stroke:#d8d4ca;--accent:#c8943f;--accent2:#0f8f82;--reverse:#121927;position:relative;width:1080px;height:1440px;overflow:hidden;padding:58px 64px 54px;color:var(--ink);background:linear-gradient(135deg,var(--bg),var(--bg2))}
+.poster:before{content:"";position:absolute;inset:26px;border:1px solid var(--stroke)}.poster:after{content:"";position:absolute;width:760px;height:760px;right:-420px;top:-390px;border-radius:50%;border:120px solid rgba(215,166,75,.13)}.line{position:absolute;inset:auto -120px 250px auto;width:760px;height:120px;background:rgba(255,255,255,.08);transform:rotate(18deg)}
+.content{position:relative;z-index:2;height:100%;display:flex;flex-direction:column}.top{display:flex;justify-content:space-between;align-items:center}.brand-mark{display:flex;align-items:center;gap:14px}.brand-mark img{width:62px;height:62px;border-radius:16px;object-fit:cover;background:#fff;box-shadow:0 12px 30px rgba(0,0,0,.18)}.brand-mark b{display:block;font-size:28px;line-height:1;font-weight:900}.brand-mark span{display:block;margin-top:7px;color:var(--muted);font-size:14px;font-weight:800}.kicker{font-size:20px;color:var(--muted);font-weight:900;border:1px solid var(--stroke);padding:12px 18px;background:rgba(255,255,255,.08)}
+h1{margin:58px 0 0;font-size:66px;line-height:1.12;font-weight:900;letter-spacing:0;max-width:930px}h1 span{display:block}.subtitle{margin:28px 0 0;max-width:900px;font-size:30px;line-height:1.52;color:var(--muted);font-weight:700}.chips{display:flex;gap:12px;flex-wrap:wrap;margin-top:28px}.chip{font-size:22px;font-weight:900;border:1px solid var(--stroke);background:rgba(255,255,255,.08);padding:11px 15px;color:var(--ink)}
+.browser{margin-top:38px;height:500px;background:#fff;color:#162033;border:1px solid rgba(15,23,42,.08);box-shadow:0 42px 100px rgba(0,0,0,.26);overflow:hidden}.browser-top{height:54px;background:#121927;color:#f8fafc;display:flex;align-items:center;gap:8px;padding:0 20px}.browser-top i{width:10px;height:10px;border-radius:50%;background:#d7a64b}.browser-top i:nth-child(2){background:#55d6be}.browser-top i:nth-child(3){background:#8ab4ff}.browser-top b{margin-left:12px;font-size:17px}.browser-body{height:446px;padding:22px;background:#f8fafc}
+.layout{display:grid;grid-template-columns:158px 1fr;height:100%;gap:18px}.mini-nav{background:#fff;border:1px solid #e3e8ef;border-radius:12px;padding:16px;display:grid;align-content:start;gap:12px}.mini-nav b{font-size:20px;margin-bottom:8px}.mini-nav span{font-weight:800;color:#64748b;background:#f8fafc;border:1px solid #edf1f5;border-radius:8px;padding:10px}.dash-title{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}.dash-title h3{font-size:26px;margin:0}.dash-title button,.launch-actions button{border:0;border-radius:9px;background:#162033;color:#fff;font-weight:900;padding:11px 16px}.metric-row{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.metric-row div{background:#fff;border:1px solid #e3e8ef;border-radius:12px;padding:18px}.metric-row strong{font-size:36px;display:block}.metric-row span{font-weight:800;color:#64748b}.two-col{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}.risk-card,.task-card{background:#fff;border:1px solid #e3e8ef;border-radius:12px;padding:16px}.risk-card h4,.task-card h4{font-size:20px;margin:0 0 12px}.risk-card p{display:grid;grid-template-columns:88px 1fr;align-items:center;gap:12px;margin:12px 0;font-weight:900}.risk-card i{height:10px;border-radius:999px;background:linear-gradient(90deg,#d7a64b,#55d6be)}.task-card p{margin:12px 0;font-weight:900}
+.status{display:inline-flex;border-radius:999px;padding:4px 10px;font-size:13px;font-weight:900;margin-right:8px;background:#e8f1ff;color:#0b63f6}.status.gold{background:#fff3d6;color:#a66f12}.status.teal{background:#e7fbf6;color:#0f8f82}.status.blue{background:#e8f1ff;color:#2563eb}
+.team-head,.team-row{display:grid;grid-template-columns:150px repeat(4,1fr);gap:10px}.team-head{margin-bottom:10px}.team-head span,.team-head b,.team-row b,.team-row span{min-height:54px;border:1px solid #e3e8ef;background:#fff;display:flex;align-items:center;justify-content:center;font-weight:900}.team-row{margin-bottom:10px}.team-row b{justify-content:flex-start;padding-left:16px;color:#475569}.team-row span.hot{background:#fff5ec;color:#dc5d2a}.team-row span.ok{background:#e7fbf6;color:#0f8f82}.team-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:16px}.team-summary p{margin:0;background:#121927;color:#fff;padding:18px;text-align:center}.team-summary strong{display:block;font-size:30px}.team-summary span{font-weight:900;color:#cbd5e1}
+.supply-flow{display:grid;grid-template-columns:1fr 24px 1fr 24px 1fr 24px 1fr;align-items:center}.supply-flow div{height:120px;background:#fff;border:1px solid #e3e8ef;padding:20px}.supply-flow b{font-size:22px;display:block}.supply-flow span{display:block;margin-top:13px;color:#64748b;font-weight:900}.supply-flow i{height:3px;background:#8ab4ff}.supply-bottom{display:grid;grid-template-columns:.8fr 1.2fr;gap:16px;margin-top:18px}.reconcile,.chain-list{background:#fff;border:1px solid #e3e8ef;padding:18px}.reconcile h4{font-size:22px;margin:0 0 14px}.reconcile p,.chain-list p{display:flex;align-items:center;justify-content:space-between;margin:12px 0;font-weight:900}.chain-list p{gap:12px;justify-content:flex-start}.chain-list .status{margin-left:auto}
+.launch-grid{display:grid;grid-template-columns:.75fr 1.25fr;gap:18px}.product{background:#fff;border:1px solid #e3e8ef;padding:18px}.product-img{height:176px;border-radius:14px;background:linear-gradient(135deg,#edf6ff,#d8f6ed);border:1px solid #dbe7ef;margin-bottom:16px}.product h4{font-size:24px;margin:0 0 10px}.product span{color:#64748b;font-weight:900}.checks{display:grid;gap:12px}.checks p{display:grid;grid-template-columns:122px 1fr;align-items:center;gap:12px;margin:0;background:#fff;border:1px solid #e3e8ef;padding:16px;font-weight:900}.checks p span:last-child{color:#475569}.launch-actions{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:18px}.launch-actions button{background:#eef4ff;color:#2563eb}.launch-actions .primary{background:#162033;color:#fff}
+.bottom{margin-top:auto;display:flex;align-items:flex-end;justify-content:space-between;gap:28px;padding-top:30px}.point{font-size:42px;line-height:1.22;font-weight:900;max-width:760px}.footer-wordmark{font-size:18px;line-height:1.2;color:var(--muted);font-weight:900;text-align:right;letter-spacing:0}.footer-wordmark b{display:block;color:var(--ink);font-size:22px;margin-bottom:5px}
+</style>
+</head>
+<body>
+<main class="poster">
+  <div class="line"></div>
+  <div class="content">
+    <div class="top">
+    <div class="brand-mark">
+      <img src="assets/yunduo-logo.jpg" alt="云舵AI logo">
+      <div><b>云舵AI</b><span>跨境团队运营系统</span></div>
+    </div><div class="kicker">云舵AI / 跨境电商运营中枢</div></div>
+    <h1><span>让 5-100 人团队</span><span>从混乱协作回到同一个驾驶台</span></h1>
+    <p class="subtitle">多店铺、多 SKU、多岗位协作，不再靠群消息、临时表格和反复追问推进。</p>
+    <div class="chips"><span class="chip">多店铺</span><span class="chip">多岗位</span><span class="chip">每日风险</span><span class="chip">团队待办</span></div>
+    
+    <section class="browser">
+      <div class="browser-top"><i></i><i></i><i></i><b>云舵AI · 今日经营驾驶台</b></div>
+      <div class="browser-body">
+    <div class="layout">
+      <aside class="mini-nav"><b>云舵AI</b><span>经营概览</span><span>事项中心</span><span>采购链路</span><span>上新检查</span></aside>
+      <main class="dash">
+        <div class="dash-title"><h3>今日优先级</h3><button>分派动作</button></div>
+        <div class="metric-row">
+          <div><strong>14</strong><span>待我处理</span></div>
+          <div><strong>6</strong><span>高优先级</span></div>
+          <div><strong>3</strong><span>即将超时</span></div>
+        </div>
+        <div class="two-col">
+          <div class="risk-card"><h4>风险雷达</h4><p><b>缺货</b><i style="width:78%"></i></p><p><b>低毛利</b><i style="width:52%"></i></p><p><b>素材待处理</b><i style="width:64%"></i></p></div>
+          <div class="task-card"><h4>下一步动作</h4><p><span class="status gold">运营</span> 保温杯库存预警</p><p><span class="status teal">采购</span> 采购单付款确认</p><p><span class="status blue">仓库</span> 出库单待打印</p></div>
+        </div>
+      </main>
+    </div></div>
+    </section>
+    <footer class="bottom"><div class="point">每天先看风险，再分派动作。</div><div class="footer-wordmark"><b>云舵AI</b>Yunduo AI</div></footer>
+  </div>
+</main>
+</body>
+</html>

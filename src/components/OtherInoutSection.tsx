@@ -17,6 +17,7 @@ interface OtherInoutRow {
   fStatus?: string | null;
   warehouse?: string | null;
   wmsCoName?: string | null;
+  storeName?: string | null;
   totalQty?: number | null;
   totalAmount?: number | null;
   totalCost?: number | null;
@@ -235,6 +236,16 @@ export default function OtherInoutSection() {
           <Text type="secondary" style={{ fontSize: 12 }}>{row.wmsCoName || ""}</Text>
         </Space>
       ),
+    },
+    {
+      title: "店铺",
+      dataIndex: "storeName",
+      key: "storeName",
+      width: 160,
+      ellipsis: true,
+      render: (v) => v
+        ? <Text style={{ fontSize: 12 }} title={v}>{v}</Text>
+        : <Text type="secondary">-</Text>,
     },
     {
       title: "总数量",

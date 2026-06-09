@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>04-launch-control</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:1080px;height:1440px;overflow:hidden}body{font-family:"Microsoft YaHei","PingFang SC","Noto Sans CJK SC",Arial,sans-serif;color:#151d2c;background:#f8f5ee;letter-spacing:0}
+.poster{position:relative;width:1080px;height:1440px;overflow:hidden;background:#f7f4ee;padding:58px 66px}.poster:before{content:"";position:absolute;inset:22px;border:1px solid rgba(21,29,44,.12)}.poster:after{content:"";position:absolute;right:-320px;top:-300px;width:760px;height:760px;border-radius:50%;border:116px solid rgba(202,146,54,.10)}
+.paper{position:absolute;inset:0;background:radial-gradient(circle at 18% 14%,rgba(255,255,255,.86),transparent 36%),radial-gradient(circle at 85% 82%,rgba(221,239,232,.76),transparent 42%)}.content{position:relative;z-index:2;height:100%;display:flex;flex-direction:column}.top{display:flex;align-items:center;justify-content:space-between}.brand{display:flex;align-items:center;gap:13px}.brand img{width:58px;height:58px;border-radius:15px;object-fit:cover;background:#fff;box-shadow:0 14px 30px rgba(20,27,39,.12)}.brand b{display:block;font-size:28px;font-weight:900;line-height:1}.brand span{display:block;margin-top:6px;color:#697284;font-size:14px;font-weight:800}.tag{font-size:16px;font-weight:900;color:#9a7133;letter-spacing:.08em;text-transform:uppercase}
+h1{margin:58px 0 0;font-size:74px;line-height:1.06;font-weight:900;letter-spacing:0;max-width:880px}h1 span{display:block}.body{margin:26px 0 0;max-width:840px;color:#596273;font-size:28px;line-height:1.5;font-weight:700}.visual{margin-top:44px;position:relative}.brand-visual{position:relative}.device{height:500px;background:#fff;border:1px solid rgba(15,23,42,.08);box-shadow:0 36px 90px rgba(35,39,47,.16);overflow:hidden}.device.dashboard{transform:perspective(1000px) rotateX(0deg)}.device.flat{height:500px}.device-top{height:52px;background:#151d2c;color:#fff;display:flex;align-items:center;gap:8px;padding:0 20px}.device-top i{width:10px;height:10px;border-radius:50%;background:#d2a04b}.device-top i:nth-child(2){background:#51c6b5}.device-top i:nth-child(3){background:#80aef8}.device-top b{margin-left:12px;font-size:17px}.device-body{height:448px;background:#f7f9fb;padding:24px;display:grid;grid-template-columns:158px 1fr;gap:18px}.device.flat .device-body{display:block}.nav{background:#fff;border:1px solid #e4e8ef;border-radius:14px;padding:15px;display:grid;gap:10px;align-content:start}.nav b{font-size:20px}.nav span{border:1px solid #edf1f5;border-radius:10px;padding:10px;color:#657185;font-weight:900}.nav .on{background:#f1f4f8;color:#151d2c}.screen-title{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}.screen-title h3{margin:0;font-size:27px}.screen-title button{border:0;border-radius:10px;background:#151d2c;color:#fff;padding:11px 16px;font-weight:900}.stats,.mini-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:13px}.stats p,.mini-stats p{margin:0;background:#fff;border:1px solid #e4e8ef;border-radius:14px;padding:17px}.stats b,.mini-stats b{display:block;font-size:38px}.stats span,.mini-stats span{color:#697284;font-weight:900}.cards{display:grid;grid-template-columns:1fr 1fr;gap:13px;margin-top:15px}.cards section{background:#fff;border:1px solid #e4e8ef;border-radius:14px;padding:17px}.cards h4{margin:0 0 13px;font-size:20px}.cards p{margin:12px 0;font-weight:900}.cards section:first-child p{display:grid;grid-template-columns:82px 1fr;gap:12px;align-items:center}.cards i{height:10px;border-radius:999px;background:linear-gradient(90deg,#c8943f,#45c4b4)}.pill{display:inline-flex;border-radius:999px;padding:4px 10px;margin-right:8px;font-size:13px;font-weight:900;background:#edf4ff;color:#2563eb}.pill.gold{background:#fff0d3;color:#a66f12}.pill.green{background:#e4fbf4;color:#0f8f82}.pill.blue{background:#edf4ff;color:#2563eb}
+.float-card{position:absolute;right:58px;top:54px;width:150px;height:96px;background:#151d2c;color:#fff;display:flex;flex-direction:column;justify-content:center;padding:20px;box-shadow:0 18px 40px rgba(21,29,44,.18)}.float-card.second{top:174px;right:-8px;background:#fff;color:#151d2c;border:1px solid #e4e8ef}.float-card b{font-size:34px;line-height:1}.float-card span{font-size:14px;color:inherit;font-weight:900;margin-top:8px}
+.wide-screen{height:100%}.priority{display:grid;gap:12px;margin:8px 0 18px}.priority p{margin:0;background:#fff;border:1px solid #e4e8ef;display:grid;grid-template-columns:58px 1fr 150px;gap:12px;align-items:center;padding:16px;font-weight:900}.priority b{font-size:24px;color:#c8943f}.priority em{font-style:normal;color:#2563eb;text-align:right}.flow{display:grid;grid-template-columns:1fr 22px 1fr 22px 1fr 22px 1fr;align-items:center}.flow div{height:124px;background:#fff;border:1px solid #e4e8ef;padding:20px}.flow b{font-size:23px}.flow span{display:block;margin-top:13px;color:#697284;font-weight:900}.flow i{height:3px;background:#90b5f8}.supply-panels{display:grid;grid-template-columns:.82fr 1.18fr;gap:16px;margin-top:18px}.supply-panels section{background:#fff;border:1px solid #e4e8ef;padding:18px}.supply-panels h4{font-size:22px;margin:0 0 14px}.supply-panels p{margin:12px 0;display:flex;align-items:center;gap:14px;font-weight:900}.supply-panels p span{min-width:62px;color:#697284}.supply-panels p b{margin-left:auto}.supply-panels section:nth-child(2) p b{margin-left:0}.supply-panels section:nth-child(2) .pill{margin-left:auto}
+.launch-screen{display:grid!important;grid-template-columns:.76fr 1.24fr;gap:18px;position:relative}.product{background:#fff;border:1px solid #e4e8ef;padding:18px}.product div{height:176px;border-radius:14px;background:linear-gradient(135deg,#edf6ff,#d9f3ed);border:1px solid #dce8ef;margin-bottom:16px}.product h4{font-size:25px;margin:0 0 10px}.product span{color:#697284;font-weight:900}.check-list{display:grid;gap:12px}.check-list p{display:grid;grid-template-columns:126px 1fr;align-items:center;gap:12px;margin:0;background:#fff;border:1px solid #e4e8ef;padding:16px;font-weight:900}.check-list p span:last-child{color:#526174}.action-row{position:absolute;left:0;right:0;bottom:0;display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.action-row button{border:0;border-radius:10px;background:#eef4ff;color:#2563eb;padding:12px;font-weight:900}.action-row button:last-child{background:#151d2c;color:#fff}
+.footer{margin-top:auto;display:grid;grid-template-columns:1fr auto;align-items:end;gap:30px;padding-top:32px}.meta{font-size:41px;line-height:1.2;font-weight:900}.wordmark{font-size:18px;color:#92764c;font-weight:900}
+</style>
+</head>
+<body>
+  <main class="poster">
+    <div class="paper"></div>
+    <div class="content">
+      <div class="top">
+    <div class="brand compact">
+      <img src="../assets/yunduo-logo.jpg" alt="云舵AI logo">
+      <div><b>云舵AI</b><span>跨境电商 AI 运营中枢</span></div>
+    </div><div class="tag">Launch Control</div></div>
+      <h1><span>上新前</span><span>把返工点一次检查清楚</span></h1>
+      <p class="body">图片、规格、成本、核价同步检查，减少最后一步反复退回。</p>
+      <div class="visual">
+    <section class="device flat">
+      <div class="device-top">
+        <i></i><i></i><i></i>
+        <b>云舵AI</b>
+      </div>
+      <div class="device-body">
+    <main class="wide-screen launch-screen">
+      <section class="product">
+        <div></div><h4>保温杯 500ml 蓝</h4><span>待上新 · 负责人：运营 A</span>
+      </section>
+      <section class="check-list">
+        <p><span class="pill green">资料完整</span><span>标题、规格、类目已确认</span></p>
+        <p><span class="pill gold">图片待处理</span><span>主图需要替换</span></p>
+        <p><span class="pill green">成本已填写</span><span>采购成本 12.50</span></p>
+        <p><span class="pill green">核价通过</span><span>毛利率 31.2%</span></p>
+      </section>
+      <div class="action-row"><button>AI 出图</button><button>批量换图</button><button>核价复核</button><button>提交上架</button></div>
+    </main></div>
+    </section></div>
+      <footer class="footer"><div class="meta">AI 出图 · 批量换图 · 核价复核</div><div class="wordmark">Yunduo AI</div></footer>
+    </div>
+  </main>
+</body>
+</html>

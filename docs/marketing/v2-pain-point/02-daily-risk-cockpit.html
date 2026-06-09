@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>02-daily-risk-cockpit</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:1080px;height:1440px;overflow:hidden}body{font-family:"Microsoft YaHei","PingFang SC","Noto Sans CJK SC",Arial,sans-serif;letter-spacing:0;background:#fff}
+.poster{--bg:#f4efe6;--bg2:#e7f3ef;--text:#172033;--muted:#4b5563;--panel:#ffffff;--ink:#172033;--accent:#2563eb;--accent2:#ef7d4a;--soft:rgba(23,32,51,.07);--line:rgba(23,32,51,.16);width:1080px;height:1440px;position:relative;overflow:hidden;padding:64px 70px 54px;color:var(--text);background:linear-gradient(135deg,var(--bg),var(--bg2))}
+.poster:before{content:"";position:absolute;inset:30px;border:2px solid var(--line)}.poster:after{content:"";position:absolute;width:860px;height:860px;right:-430px;top:-370px;border:90px solid var(--soft);transform:rotate(18deg)}
+.content{position:relative;z-index:2;height:100%;display:flex;flex-direction:column}.eyebrow{display:inline-flex;align-items:center;gap:14px;width:max-content;max-width:100%;padding:13px 18px;border:1px solid var(--line);background:var(--soft);font-size:23px;color:var(--muted);font-weight:900}.eyebrow:before{content:"";display:block;width:12px;height:12px;background:var(--accent)}
+h1{margin:42px 0 0;font-size:64px;line-height:1.12;font-weight:900;letter-spacing:0;max-width:940px}.proof{margin:28px 0 0;font-size:31px;line-height:1.52;color:var(--muted);font-weight:700;max-width:900px}.chips{display:flex;gap:12px;flex-wrap:wrap;margin:28px 0 0}.chips span{font-size:23px;font-weight:900;border:1px solid var(--line);background:var(--soft);padding:12px 15px;color:var(--text)}
+.visual{margin-top:38px;background:var(--panel);color:var(--ink);border:1px solid rgba(15,23,42,.08);box-shadow:0 34px 90px rgba(0,0,0,.22);padding:28px;height:492px;overflow:hidden}.visual-head{height:48px;display:flex;align-items:flex-start;justify-content:space-between;border-bottom:1px solid #e5ebf2;margin-bottom:20px}.visual-head b{font-size:24px}.visual-head span{font-size:15px;color:#64748b;font-weight:800}
+.status{display:inline-flex;align-items:center;justify-content:center;min-height:28px;border-radius:999px;padding:3px 11px;font-size:14px;font-weight:900;background:#e8f1ff;color:#0b63f6}.status.green{background:#e9fbf3;color:#0e8f72}.status.orange{background:#fff3e8;color:#dc5d2a}.status.purple{background:#f3e8ff;color:#7c3aed}
+.metric{background:#fff;border:1px solid #dce3ec;padding:18px}.metric strong{font-size:38px;display:block;line-height:1;color:#111827}.metric span{display:block;color:#64748b;margin-top:7px;font-weight:800}.metric.warn strong{color:#dc5d2a}
+.matrix{display:grid;grid-template-columns:112px repeat(4,1fr);gap:10px}.matrix>div,.matrix p{margin:0;min-height:58px;border:1px solid #e5ebf2;background:#f8fafc;display:flex;align-items:center;justify-content:center;font-weight:900}.matrix p{background:#fff}.matrix .shop{justify-content:flex-start;padding-left:14px;color:#334155}.matrix-head{background:transparent!important;border:0!important}.owner-strip{margin-top:18px;display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.owner-strip span{background:#102033;color:#fff;padding:16px;text-align:center;font-size:18px;font-weight:900}
+.risk-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:18px}.priority-list{display:grid;gap:10px}.priority-list p{margin:0;display:grid;grid-template-columns:54px 1fr 148px;gap:12px;align-items:center;border:1px solid #e5ebf2;background:#fff;padding:13px 15px;font-weight:900}.priority-list b{color:#0b63f6;font-size:22px}.priority-list em{font-style:normal;color:#0b63f6;text-align:right}.trend-bars{height:100px;display:flex;align-items:end;gap:18px;margin-top:18px}.trend-bars i{flex:1;background:linear-gradient(180deg,var(--accent2),var(--accent))}
+.flow{display:grid;grid-template-columns:1fr 26px 1fr 26px 1fr 26px 1fr;align-items:center}.flow div{min-height:112px;border:1px solid #dce3ec;background:#f8fafc;padding:18px}.flow b{display:block;font-size:22px}.flow span{display:block;color:#64748b;font-size:16px;font-weight:800;margin-top:12px}.flow i{height:3px;background:var(--accent)}.reconcile{margin-top:20px;display:grid;grid-template-columns:.8fr 1.2fr;gap:18px}.ledger,.chain-table{border:1px solid #e5ebf2;background:#fff;padding:18px}.ledger h4{font-size:21px;margin:0 0 12px}.ledger p,.chain-table p{margin:0 0 11px;display:flex;align-items:center;justify-content:space-between;font-weight:900}.ledger span,.chain-table span{color:#64748b}.chain-table p{gap:12px;justify-content:flex-start}.chain-table p .status{margin-left:auto}
+.launch-grid{display:grid;grid-template-columns:.76fr 1.24fr;gap:18px}.product-card{border:1px solid #dce3ec;background:#f8fafc;padding:18px}.mock-image{height:170px;border-radius:12px;background:linear-gradient(135deg,#e8f1ff,#d6f7ed);border:1px solid #dce3ec;margin-bottom:16px}.product-card h4{font-size:23px;margin:0 0 10px}.product-card p{margin:0;color:#64748b;font-weight:800}.readiness{display:grid;gap:12px}.readiness p{margin:0;border:1px solid #e5ebf2;background:#fff;padding:15px;display:grid;grid-template-columns:118px 1fr;gap:12px;align-items:center;font-weight:900}.readiness span:last-child{color:#475569}.launch-actions{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:20px}.launch-actions button{border:0;background:#eef4ff;color:#0b63f6;border-radius:8px;padding:14px 8px;font-size:16px;font-weight:900}.launch-actions button.primary{background:#0b63f6;color:#fff}
+.bottom{margin-top:auto;display:grid;grid-template-columns:1fr auto;align-items:end;gap:24px;padding-top:28px}.solution{font-size:42px;line-height:1.22;font-weight:900;color:var(--text)}.brand{width:178px;height:178px;border:2px solid var(--line);background:var(--soft);display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--text)}.brand b{font-size:36px;line-height:1}.brand span{margin-top:8px;font-size:19px;font-weight:900;color:var(--muted)}
+</style>
+</head>
+<body>
+<main class="poster">
+  <div class="content">
+    <div class="eyebrow">多店铺 / 多 SKU / 每日经营</div>
+    <h1>风险不能等月底复盘时才发现</h1>
+    <p class="proof">缺货、低毛利、差评、素材缺失每天都在发生，发现晚一天，就多一天损失。</p>
+    <div class="chips"><span>缺货预警</span><span>低毛利</span><span>评价新增</span><span>素材待处理</span></div>
+    
+    <section class="visual risk-visual">
+      <div class="visual-head">
+        <b>每日风险看板</b>
+        <span>先处理会影响销售和利润的事项</span>
+      </div>
+      <div class="risk-grid">
+        <div class="metric warn"><strong>15</strong><span>低库存 SKU</span></div>
+        <div class="metric warn"><strong>8</strong><span>低毛利商品</span></div>
+        <div class="metric "><strong>12</strong><span>新增评价</span></div>
+        <div class="metric "><strong>9</strong><span>素材待处理</span></div>
+      </div>
+      <div class="priority-list">
+        <p><b>01</b><span>保温杯蓝：预计 2 天断货</span><em>进采购备货</em></p>
+        <p><b>02</b><span>旅行杯：毛利率 18.5%</span><em>进核价筛选</em></p>
+        <p><b>03</b><span>收纳盒：新增差评 3 条</span><em>进商品详情</em></p>
+      </div>
+      <div class="trend-bars"><i style="height:42%"></i><i style="height:68%"></i><i style="height:54%"></i><i style="height:86%"></i><i style="height:74%"></i><i style="height:92%"></i></div>
+    </section>
+    <footer class="bottom">
+      <div class="solution">每天先看风险，再安排动作。</div>
+      <div class="brand"><b>跨境<br>运营</b><span>工作台</span></div>
+    </footer>
+  </div>
+</main>
+</body>
+</html>

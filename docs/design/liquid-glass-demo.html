@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Temu Ops · 液态玻璃（Liquid Glass）UI 方案 Demo</title>
+<style>
+  /* ============================================================
+     iOS 26 Liquid Glass 设计 token —— 可直接迁移到 tokens.css
+     ============================================================ */
+  :root {
+    /* 品牌色沿用现有 Google 蓝，保证迁移成本最低 */
+    --lg-brand: #1a73e8;
+    --lg-brand-2: #4f9bff;
+    --lg-success: #34c759;
+    --lg-warning: #ff9f0a;
+    --lg-danger: #ff453a;
+
+    --lg-text: #1c1c1e;
+    --lg-text-sec: #50555c;
+    --lg-text-muted: #8a9099;
+
+    /* 玻璃材质：半透明白 + 高斯模糊 + 内描边高光 */
+    --glass-bg: rgba(255, 255, 255, 0.55);
+    --glass-bg-strong: rgba(255, 255, 255, 0.72);
+    --glass-bg-thin: rgba(255, 255, 255, 0.38);
+    --glass-stroke: rgba(255, 255, 255, 0.65);
+    --glass-hairline: rgba(60, 60, 67, 0.12);
+    --glass-blur: 30px;
+    --glass-blur-strong: 44px;
+
+    /* iOS 大圆角体系 —— 比现在的 8px 更圆润 */
+    --r-sm: 12px;
+    --r-md: 18px;
+    --r-lg: 24px;
+    --r-pill: 999px;
+
+    /* 柔和景深阴影（多层、低透明、大扩散） */
+    --shadow-1: 0 1px 1px rgba(0,0,0,.04), 0 6px 16px rgba(28,40,64,.06);
+    --shadow-2: 0 2px 4px rgba(0,0,0,.05), 0 14px 40px rgba(28,40,64,.10);
+    --shadow-float: 0 8px 24px rgba(28,40,64,.12), 0 24px 60px rgba(28,40,64,.14);
+
+    --ease: cubic-bezier(.32,.72,0,1); /* iOS 弹性缓动 */
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: var(--lg-text);
+    font-size: 15px;
+    /* 关键：动态壁纸渐变 —— 玻璃要有东西可以「透」 */
+    background:
+      radial-gradient(1200px 800px at 12% -8%, #dce8ff 0%, transparent 55%),
+      radial-gradient(1000px 700px at 100% 0%, #ffe6f0 0%, transparent 50%),
+      radial-gradient(900px 900px at 50% 120%, #e7fff4 0%, transparent 55%),
+      linear-gradient(160deg, #f4f7fc 0%, #eef1f8 100%);
+    background-attachment: fixed;
+  }
+
+  .app { display: flex; min-height: 100vh; }
+
+  /* ============================== 侧栏 ============================== */
+  .sider {
+    width: 248px; flex-shrink: 0;
+    position: sticky; top: 0; height: 100vh;
+    padding: 14px 12px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .sider-glass {
+    flex: 1; min-height: 0;
+    display: flex; flex-direction: column;
+    background: var(--glass-bg);
+    backdrop-filter: blur(var(--glass-blur-strong)) saturate(180%);
+    -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(180%);
+    border: 1px solid var(--glass-stroke);
+    border-radius: var(--r-lg);
+    box-shadow: var(--shadow-2), inset 0 1px 0 rgba(255,255,255,.7);
+    overflow: hidden;
+  }
+  .brand {
+    display: flex; align-items: center; gap: 11px;
+    padding: 18px 18px 14px;
+  }
+  .brand-mark {
+    width: 36px; height: 36px; border-radius: 11px;
+    background: linear-gradient(145deg, #1d1d1f, #3a3a3d);
+    color: #fff; display: grid; place-items: center; font-weight: 800;
+    box-shadow: 0 6px 16px rgba(0,0,0,.18);
+  }
+  .brand-text { font-weight: 800; font-size: 16px; letter-spacing: .2px; }
+  .brand-text small { display:block; font-weight:600; font-size:11px; color:var(--lg-text-muted); letter-spacing:.4px; }
+
+  .nav { padding: 4px 8px 14px; overflow:auto; flex:1; }
+  .nav-group { font-size: 11px; font-weight: 700; color: var(--lg-text-muted);
+    letter-spacing: .6px; padding: 14px 12px 6px; text-transform: uppercase; }
+  .nav-item {
+    display: flex; align-items: center; gap: 11px;
+    padding: 9px 12px; margin: 2px 0; border-radius: var(--r-sm);
+    color: var(--lg-text-sec); font-weight: 600; font-size: 14px;
+    cursor: pointer; transition: all .22s var(--ease);
+    position: relative;
+  }
+  .nav-item .ic { width: 18px; text-align:center; opacity:.85; }
+  .nav-item:hover { background: rgba(120,140,170,.12); color: var(--lg-text); }
+  .nav-item.active {
+    color: var(--lg-brand); font-weight: 700;
+    background: linear-gradient(135deg, rgba(26,115,232,.16), rgba(79,155,255,.10));
+    box-shadow: inset 0 0 0 1px rgba(26,115,232,.18), 0 4px 12px rgba(26,115,232,.12);
+  }
+  .nav-item.active::before {
+    content:""; position:absolute; left:-8px; top:50%; transform:translateY(-50%);
+    width:4px; height:18px; border-radius:4px; background:var(--lg-brand);
+  }
+
+  /* ============================== 主区 ============================== */
+  .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+  .topbar {
+    position: sticky; top: 0; z-index: 20;
+    margin: 14px 18px 0;
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    padding: 10px 14px 10px 18px;
+    background: var(--glass-bg-strong);
+    backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+    border: 1px solid var(--glass-stroke);
+    border-radius: var(--r-pill);
+    box-shadow: var(--shadow-1), inset 0 1px 0 rgba(255,255,255,.7);
+  }
+  .crumb { display:grid; gap:1px; line-height:1.2; }
+  .crumb span { font-size:11px; color:var(--lg-text-muted); font-weight:600; }
+  .crumb strong { font-size:15px; font-weight:800; }
+
+  .toolbar { display:flex; align-items:center; gap:8px; }
+
+  /* 胶囊按钮 / 状态条 */
+  .pill {
+    display:inline-flex; align-items:center; gap:7px;
+    height:36px; padding:0 15px; border-radius:var(--r-pill);
+    font-weight:650; font-size:13.5px; cursor:pointer;
+    border:1px solid var(--glass-hairline);
+    background: rgba(255,255,255,.55);
+    color: var(--lg-text-sec);
+    transition: all .2s var(--ease);
+    -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+  }
+  .pill:hover { background:rgba(255,255,255,.85); color:var(--lg-text); transform:translateY(-1px); box-shadow:var(--shadow-1); }
+  .pill .dot { width:7px; height:7px; border-radius:50%; }
+  .pill.success { color:#1e7a37; background:rgba(52,199,89,.15); border-color:rgba(52,199,89,.28); }
+  .pill.success .dot{ background:var(--lg-success); box-shadow:0 0 0 3px rgba(52,199,89,.18); }
+  .pill.brand { color:#fff; background:linear-gradient(135deg,var(--lg-brand),var(--lg-brand-2)); border:none; box-shadow:0 6px 16px rgba(26,115,232,.30); }
+  .pill.brand:hover{ box-shadow:0 8px 22px rgba(26,115,232,.40); }
+  .pill.ghost-user { color:var(--lg-brand); background:rgba(26,115,232,.12); border-color:rgba(26,115,232,.22); }
+
+  .content { padding: 18px; display:flex; flex-direction:column; gap:18px; }
+
+  /* KPI 卡片 */
+  .kpi-row { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; }
+  .card {
+    background: var(--glass-bg);
+    backdrop-filter: blur(var(--glass-blur)) saturate(160%);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(160%);
+    border: 1px solid var(--glass-stroke);
+    border-radius: var(--r-md);
+    box-shadow: var(--shadow-1), inset 0 1px 0 rgba(255,255,255,.6);
+    padding: 18px 20px;
+    transition: transform .25s var(--ease), box-shadow .25s var(--ease);
+  }
+  .card:hover { transform:translateY(-3px); box-shadow:var(--shadow-2), inset 0 1px 0 rgba(255,255,255,.6); }
+  .kpi-label { font-size:13px; color:var(--lg-text-muted); font-weight:600; display:flex; align-items:center; gap:7px; }
+  .kpi-ic { width:28px; height:28px; border-radius:9px; display:grid; place-items:center; font-size:14px; }
+  .kpi-val { font-size:30px; font-weight:800; margin-top:10px; letter-spacing:-.5px; }
+  .kpi-delta { font-size:12.5px; font-weight:700; margin-top:4px; }
+  .up { color:var(--lg-success); } .down{ color:var(--lg-danger); }
+
+  /* 大面板（表格容器） */
+  .panel {
+    background: var(--glass-bg);
+    backdrop-filter: blur(var(--glass-blur)) saturate(160%);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(160%);
+    border: 1px solid var(--glass-stroke);
+    border-radius: var(--r-lg);
+    box-shadow: var(--shadow-2), inset 0 1px 0 rgba(255,255,255,.6);
+    overflow: hidden;
+  }
+  .panel-head { display:flex; align-items:center; justify-content:space-between; padding:18px 22px; border-bottom:1px solid var(--glass-hairline); }
+  .panel-title { font-weight:800; font-size:16px; }
+  .seg { display:flex; gap:4px; padding:3px; border-radius:var(--r-pill); background:rgba(120,140,170,.12); }
+  .seg button { border:none; background:transparent; padding:6px 14px; border-radius:var(--r-pill); font-weight:650; font-size:13px; color:var(--lg-text-sec); cursor:pointer; transition:all .2s var(--ease); }
+  .seg button.on { background:#fff; color:var(--lg-brand); box-shadow:0 2px 8px rgba(0,0,0,.10); }
+
+  table { width:100%; border-collapse:collapse; }
+  thead th { text-align:left; font-size:12px; font-weight:700; color:var(--lg-text-muted); padding:12px 22px; background:rgba(255,255,255,.35); letter-spacing:.3px; }
+  tbody td { padding:14px 22px; font-size:14px; border-top:1px solid var(--glass-hairline); }
+  tbody tr { transition:background .18s var(--ease); }
+  tbody tr:hover { background:rgba(120,140,170,.08); }
+  .tag { display:inline-flex; align-items:center; gap:5px; padding:3px 11px; border-radius:var(--r-pill); font-size:12px; font-weight:700; }
+  .tag.g{ color:#1e7a37; background:rgba(52,199,89,.16);} .tag.o{ color:#a85708; background:rgba(255,159,10,.18);} .tag.r{ color:#b3261e; background:rgba(255,69,58,.15);}
+  .money { font-weight:800; font-variant-numeric:tabular-nums; }
+
+  /* 浮动 dock（演示 iOS 风浮动操作栏） */
+  .dock {
+    position:fixed; left:50%; bottom:22px; transform:translateX(-50%);
+    display:flex; gap:6px; padding:8px;
+    background:var(--glass-bg-strong);
+    backdrop-filter:blur(var(--glass-blur-strong)) saturate(180%);
+    -webkit-backdrop-filter:blur(var(--glass-blur-strong)) saturate(180%);
+    border:1px solid var(--glass-stroke); border-radius:var(--r-pill);
+    box-shadow:var(--shadow-float), inset 0 1px 0 rgba(255,255,255,.8);
+    z-index:50;
+  }
+  .dock button { width:46px; height:46px; border:none; border-radius:50%; background:transparent; font-size:18px; cursor:pointer; transition:all .22s var(--ease); color:var(--lg-text-sec); }
+  .dock button:hover { background:rgba(120,140,170,.16); transform:translateY(-3px) scale(1.05); color:var(--lg-brand); }
+  .dock button.primary { background:linear-gradient(135deg,var(--lg-brand),var(--lg-brand-2)); color:#fff; box-shadow:0 6px 16px rgba(26,115,232,.4); }
+
+  .note { font-size:12px; color:var(--lg-text-muted); padding:0 4px; }
+  @media (max-width: 1100px){ .kpi-row{ grid-template-columns:repeat(2,1fr);} }
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- ===== 侧栏 ===== -->
+  <aside class="sider">
+    <div class="sider-glass">
+      <div class="brand">
+        <div class="brand-mark">T</div>
+        <div class="brand-text">Temu Ops<small>液态玻璃版</small></div>
+      </div>
+      <nav class="nav">
+        <div class="nav-group">运营</div>
+        <div class="nav-item active"><span class="ic">📊</span>多店报表</div>
+        <div class="nav-item"><span class="ic">🧭</span>运营工作台</div>
+        <div class="nav-item"><span class="ic">🛒</span>商品管理</div>
+        <div class="nav-item"><span class="ic">🏬</span>店铺概览</div>
+        <div class="nav-group">采购</div>
+        <div class="nav-item"><span class="ic">🧾</span>采购单</div>
+        <div class="nav-item"><span class="ic">📦</span>仓库中心</div>
+        <div class="nav-item"><span class="ic">🚚</span>出库中心</div>
+        <div class="nav-group">工具</div>
+        <div class="nav-item"><span class="ic">🎨</span>AI 出图</div>
+        <div class="nav-item"><span class="ic">📄</span>日志中心</div>
+      </nav>
+    </div>
+  </aside>
+
+  <!-- ===== 主区 ===== -->
+  <div class="main">
+    <header class="topbar">
+      <div class="crumb"><span>运营</span><strong>多店报表</strong></div>
+      <div class="toolbar">
+        <span class="pill success"><span class="dot"></span>采集完成 62/62</span>
+        <span class="pill">🔔 通知</span>
+        <span class="pill ghost-user">👤 账号 旗舰一店</span>
+        <span class="pill brand">⚙️ 设置</span>
+      </div>
+    </header>
+
+    <div class="content">
+      <!-- KPI -->
+      <div class="kpi-row">
+        <div class="card">
+          <div class="kpi-label"><span class="kpi-ic" style="background:rgba(26,115,232,.14);color:#1a73e8">💰</span>今日营收</div>
+          <div class="kpi-val">¥182,340</div>
+          <div class="kpi-delta up">▲ 12.4% 较昨日</div>
+        </div>
+        <div class="card">
+          <div class="kpi-label"><span class="kpi-ic" style="background:rgba(52,199,89,.16);color:#1e7a37">📈</span>毛利</div>
+          <div class="kpi-val">¥51,620</div>
+          <div class="kpi-delta up">▲ 8.1% 毛利率 28.3%</div>
+        </div>
+        <div class="card">
+          <div class="kpi-label"><span class="kpi-ic" style="background:rgba(255,159,10,.18);color:#a85708">📦</span>待发货</div>
+          <div class="kpi-val">348</div>
+          <div class="kpi-delta down">▼ 23 单 需补货</div>
+        </div>
+        <div class="card">
+          <div class="kpi-label"><span class="kpi-ic" style="background:rgba(124,58,237,.16);color:#7c3aed">⭐</span>店铺品质分</div>
+          <div class="kpi-val">92.6</div>
+          <div class="kpi-delta up">▲ 1.2 健康</div>
+        </div>
+      </div>
+
+      <!-- 表格面板 -->
+      <div class="panel">
+        <div class="panel-head">
+          <div class="panel-title">店铺经营明细</div>
+          <div class="seg">
+            <button class="on">今日</button>
+            <button>近 7 天</button>
+            <button>近 30 天</button>
+          </div>
+        </div>
+        <table>
+          <thead><tr><th>店铺</th><th>营收</th><th>毛利</th><th>订单</th><th>状态</th></tr></thead>
+          <tbody>
+            <tr><td>旗舰一店 US</td><td class="money">¥72,180</td><td class="money up">¥21,540</td><td>1,204</td><td><span class="tag g">● 健康</span></td></tr>
+            <tr><td>精品二店 US</td><td class="money">¥48,930</td><td class="money up">¥13,210</td><td>842</td><td><span class="tag g">● 健康</span></td></tr>
+            <tr><td>清仓三店 EU</td><td class="money">¥31,260</td><td class="money down">¥6,180</td><td>556</td><td><span class="tag o">● 待优化</span></td></tr>
+            <tr><td>测试四店 MX</td><td class="money">¥9,970</td><td class="money down">¥1,290</td><td>198</td><td><span class="tag r">● 限流</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p class="note">演示界面：液态玻璃材质透出背景渐变，圆角更大、阴影更柔。所有色值沿用现有品牌蓝 #1a73e8，迁移成本最低。</p>
+    </div>
+  </div>
+</div>
+
+<!-- 浮动 dock：演示 iOS 风浮动快捷栏 -->
+<div class="dock">
+  <button title="首页">🏠</button>
+  <button title="采集" class="primary">⚡</button>
+  <button title="搜索">🔍</button>
+  <button title="通知">🔔</button>
+</div>
+</body>
+</html>

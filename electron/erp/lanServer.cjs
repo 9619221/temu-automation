@@ -140,6 +140,7 @@ const PO_STATUS_LABELS = Object.freeze({
   paid: "已付款",
   supplier_processing: "供应商备货",
   shipped: "供应商已发货",
+  trade_completed: "交易完成",
   arrived: "货已到仓",
   inbounded: "已入库",
   closed: "已关闭",
@@ -1006,7 +1007,93 @@ function runConsignDeliveriesUnifiedJstOnly(db, opts) {
   };
 }
 
+// ===== 店铺数据隔离（阶段三）响应裁剪器 =====
+// 递归遍历响应体：凡是「带店铺标识(mall_id 等)的对象」组成的数组，丢掉不属于当前用户负责店铺的元素。
+// copy-on-change：未变化的分支返回原引用，既避免深拷贝大响应，又避免污染上游缓存对象
+// （multiStoreReport 等 build 函数会缓存并复用返回值，直接 mutate 会让特权用户也拿到被裁数据）。
+const STORE_SCOPE_ID_KEYS = ["mall_id", "mallId", "mall_supplier_id", "mallSupplierId"];
+const STORE_SCOPE_CODE_KEYS = ["store_code", "storeCode"];
+// 计数型汇总字段名特征（店铺数/在线数/条数等）。裁剪数组后，同对象里等于「被裁数组原长度」的计数字段同步重算。
+// 只匹配计数语义的键名，避免误伤金额字段（金额合计前端基于裁剪后列表 reduce，自动正确，无需后端重算）。
+const STORE_SCOPE_COUNT_KEY_RE = /count|num/i;
+
+function storeScopeItemMallId(item) {
+  for (const k of STORE_SCOPE_ID_KEYS) {
+    const v = item[k];
+    if (v != null && v !== "") return String(v);
+  }
+  return null;
+}
+
+function storeScopeItemHasStoreKey(item) {
+  for (const k of STORE_SCOPE_ID_KEYS) if (item[k] != null && item[k] !== "") return true;
+  for (const k of STORE_SCOPE_CODE_KEYS) if (item[k] != null && item[k] !== "") return true;
+  return false;
+}
+
+function storeScopeItemAllowed(item, scope) {
+  const mid = storeScopeItemMallId(item);
+  if (mid != null) return scope.mallIds.has(mid);
+  for (const k of STORE_SCOPE_CODE_KEYS) {
+    const v = item[k];
+    if (v != null && v !== "") return scope.storeCodes.has(String(v));
+  }
+  return true; // 没有店铺标识的元素不裁
+}
+
+function pruneStoreScope(value, scope, depth = 0) {
+  if (depth > 12 || value == null || typeof value !== "object") return value;
+  if (Array.isArray(value)) {
+    let changed = false;
+    const kept = [];
+    for (const el of value) {
+      if (el && typeof el === "object" && !Array.isArray(el)
+        && storeScopeItemHasStoreKey(el) && !storeScopeItemAllowed(el, scope)) {
+        changed = true; // 不属于负责店铺，丢弃
+        continue;
+      }
+      const pruned = pruneStoreScope(el, scope, depth + 1);
+      if (pruned !== el) changed = true;
+      kept.push(pruned);
+    }
+    return changed ? kept : value;
+  }
+  let changed = false;
+  const out = {};
+  const prunedArrays = []; // 记录被裁短的数组：{ oldLen, newLen }，供同级计数字段同步重算
+  for (const k of Object.keys(value)) {
+    const v = value[k];
+    const pruned = pruneStoreScope(v, scope, depth + 1);
+    out[k] = pruned;
+    if (pruned !== v) {
+      changed = true;
+      if (Array.isArray(v) && Array.isArray(pruned) && pruned.length < v.length) {
+        prunedArrays.push({ oldLen: v.length, newLen: pruned.length });
+      }
+    }
+  }
+  // 汇总兜底：同一对象内「计数型标量字段」若其值恰等于某个被裁数组的原长度，同步改为裁剪后长度。
+  // 双约束(键名像计数 + 值==被裁数组原长度)使误伤金额字段概率极低；金额合计前端基于裁剪后列表 reduce 自动正确。
+  if (prunedArrays.length) {
+    for (const k of Object.keys(out)) {
+      if (typeof out[k] === "number" && STORE_SCOPE_COUNT_KEY_RE.test(k)) {
+        const hit = prunedArrays.find((d) => d.oldLen === out[k]);
+        if (hit) { out[k] = hit.newLen; changed = true; }
+      }
+    }
+  }
+  return changed ? out : value;
+}
+
 function writeJson(res, statusCode, payload, headers = {}) {
+  // 店铺数据隔离：handleRequest 鉴权后给非特权用户的请求挂了 res._storeScope，这里统一裁剪。
+  if (res && res._storeScope && payload && typeof payload === "object" && payload.ok !== false) {
+    try {
+      payload = pruneStoreScope(payload, res._storeScope);
+    } catch {
+      // 裁剪失败回退原 payload，不阻断响应。
+    }
+  }
   const body = JSON.stringify(payload, null, 2);
   let buf = Buffer.from(body);
   const respHeaders = {
@@ -2323,7 +2410,7 @@ function statusClass(status) {
   if (["submitted", "pushed_pending_price", "pending_finance_approval", "pending", "approved_to_pay", "pending_arrival", "pending_qc", "pending_warehouse", "pending_ops_confirm"].includes(status)) {
     return "status-warn";
   }
-  if (["buyer_processing", "sourced", "waiting_ops_confirm", "supplier_processing", "shipped", "arrived", "counted", "in_progress", "picking", "packed", "shipped_out"].includes(status)) {
+  if (["buyer_processing", "sourced", "waiting_ops_confirm", "supplier_processing", "shipped", "trade_completed", "arrived", "counted", "in_progress", "picking", "packed", "shipped_out"].includes(status)) {
     return "status-info";
   }
   if (["active", "converted_to_po", "paid", "inbounded", "closed", "approved", "inbounded_pending_qc", "passed", "passed_with_observation", "partial_passed", "confirmed"].includes(status)) {
@@ -3550,6 +3637,7 @@ function createRequestHandler(options = {}) {
   });
   const listCompanies = options.listCompanies || (() => []);
   const getPermissionProfile = options.getPermissionProfile || (() => ({}));
+  const resolveStoreScope = options.resolveStoreScope || (() => ({ enforce: false }));
   const upsertRolePermission = options.upsertRolePermission || (() => {
     throw new Error("Role permission handler is not available");
   });
@@ -3679,6 +3767,7 @@ function createRequestHandler(options = {}) {
       upsertUser,
       listCompanies,
       getPermissionProfile,
+      resolveStoreScope,
       upsertRolePermission,
       upsertUserResourceScope,
       getPermissionAdminView,
@@ -4710,6 +4799,7 @@ async function handleRequest({
   upsertUser,
   listCompanies,
   getPermissionProfile,
+  resolveStoreScope,
   upsertRolePermission,
   upsertUserResourceScope,
   getPermissionAdminView,
@@ -4910,6 +5000,17 @@ async function handleRequest({
       }
       writeForbidden(res, session.user, pathname);
       return;
+    }
+
+    // 店铺数据隔离（阶段三）：对受保护接口，按当前用户「负责的店铺」范围裁剪响应里带店铺标识的数据。
+    // 仅当 ENFORCE_STORE_SCOPE=1 且用户非特权、已限定店铺时挂 scope；其余情况 enforce=false，零影响。
+    if (protectedPath && session?.user) {
+      try {
+        const scope = resolveStoreScope(session.user);
+        if (scope && scope.enforce) res._storeScope = scope;
+      } catch {
+        // 解析失败不阻断请求：宁可这次不裁，也不能让接口 500。
+      }
     }
 
     if (pathname === "/api/users/list") {

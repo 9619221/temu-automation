@@ -14,14 +14,14 @@ const pctOf = (a: number, b: number) => (b > 0 ? `占 ${Math.round((a / b) * 100
 const STATUS_COLOR: Record<string, string> = {
   draft: "default", pushed_pending_price: "orange", pending_finance_approval: "gold",
   approved_to_pay: "blue", paid: "cyan", supplier_processing: "geekblue",
-  shipped: "purple", arrived: "lime", inbounded: "green", closed: "default",
+  shipped: "purple", trade_completed: "magenta", arrived: "lime", inbounded: "green", closed: "default",
   delayed: "volcano", exception: "red", cancelled: "default",
 };
 // 状态语义色（分布图色点/条）
 const STATUS_HEX: Record<string, string> = {
   draft: "#bfbfbf", pushed_pending_price: "#fa8c16", pending_finance_approval: "#faad14",
   approved_to_pay: "#1677ff", paid: "#13c2c2", supplier_processing: "#2f54eb",
-  shipped: "#722ed1", arrived: "#a0d911", inbounded: "#52c41a", closed: "#8c8c8c",
+  shipped: "#722ed1", trade_completed: "#eb2f96", arrived: "#a0d911", inbounded: "#52c41a", closed: "#8c8c8c",
   delayed: "#fa541c", exception: "#f5222d", cancelled: "#d9d9d9",
 };
 // 账龄分桶配色/标签
@@ -30,7 +30,7 @@ const AGE_LABEL: Record<string, string> = { "0-30": "0-30 天", "31-60": "31-60 
 // 已付未发货账龄分桶配色/标签(付款后拖延天数)
 const PS_HEX: Record<string, string> = { "0-7": "#52c41a", "8-15": "#faad14", "16-30": "#fa8c16", "30+": "#cf1322" };
 const PS_LABEL: Record<string, string> = { "0-7": "0-7 天", "8-15": "8-15 天", "16-30": "16-30 天", "30+": "30 天以上" };
-const SHIPPED_STATUSES = ["shipped", "arrived", "inbounded", "closed"];
+const SHIPPED_STATUSES = ["shipped", "trade_completed", "arrived", "inbounded", "closed"];
 
 interface OrderRow {
   id: string; po_no: string; status: string; status_label: string; payment_status: string | null;

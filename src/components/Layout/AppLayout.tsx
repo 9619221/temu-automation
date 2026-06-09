@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { Badge, Button, Dropdown, Layout, List, Menu, Space, Tag } from "antd";
 import {
-  AccountBookOutlined,
   ApiOutlined,
   AppstoreOutlined,
   ArrowRightOutlined,
@@ -76,7 +75,6 @@ const menuItems = [
       { key: "/multi-store-report", icon: <BarChartOutlined />, label: "多店报表" },
       { key: "/ops-workbench", icon: <FundProjectionScreenOutlined />, label: "运营工作台" },
       { key: "/auto-purchase", icon: <PlusCircleOutlined />, label: "采购备货" },
-      { key: "/settlement", icon: <AccountBookOutlined />, label: "财务结算" },
       { key: "/products", icon: <ShoppingOutlined />, label: "商品管理" },
       { key: "/selection-plaza", icon: <AppstoreOutlined />, label: "选品广场" },
       { key: "/browser-multi", icon: <RocketOutlined />, label: "浏览器多开" },

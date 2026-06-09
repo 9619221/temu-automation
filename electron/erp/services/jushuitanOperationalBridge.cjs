@@ -252,7 +252,8 @@ function mapPurchaseStatus(raw) {
   ].join(" ");
   if (/作废|取消|关闭|cancel/i.test(text)) return "cancelled";
   if (/已入库|全部入库|入库完成|完成/i.test(text)) return "inbounded";
-  if (/已到货|到货|交易成功|交易完成|success/i.test(text)) return "arrived";
+  if (/交易成功|交易完成|success/i.test(text)) return "trade_completed";
+  if (/已到货|到货/i.test(text)) return "arrived";
   if (/已发货|待收货|等待买家收货|买家收货|卖家已发货|shipped/i.test(text)) return "shipped";
   if (/供应商|生产|备货/i.test(text)) return "supplier_processing";
   if (/等待卖家发货|待卖家发货/i.test(text)) return "paid";

@@ -55,6 +55,7 @@ import {
   type CollectionDiagnostics,
 } from "../utils/collectionDiagnostics";
 import { useCollection, COLLECT_TASKS } from "../contexts/CollectionContext";
+import "../styles/accountManagerGlass.css";
 
 const { Text, Title } = Typography;
 
@@ -1097,7 +1098,7 @@ export default function AccountManager() {
   };
 
   return (
-    <div className="dashboard-shell">
+    <div className="dashboard-shell am-glass-page">
       <PageHeader
         compact
         eyebrow="账号工作台"
@@ -1152,13 +1153,12 @@ export default function AccountManager() {
         <div style={{ display: "flex", gap: 16, minHeight: 500 }}>
           {/* 左侧账号列表 */}
           <div
+            className="am-glass-aside"
             style={{
               width: 240,
               flexShrink: 0,
-              background: "#fff",
               borderRadius: 16,
               padding: "12px 10px",
-              boxShadow: "0 2px 12px rgba(0,0,0,0.04)",
               overflowY: "auto",
               maxHeight: "calc(100vh - 260px)",
             }}

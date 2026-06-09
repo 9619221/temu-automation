@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>02-cross-border-supply-chain</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:1080px;height:1440px;overflow:hidden}body{font-family:"Microsoft YaHei","PingFang SC","Noto Sans CJK SC",Arial,sans-serif;background:#fff;letter-spacing:0}
+.poster{--bg:#f4f1e8;--bg2:#e7f3ef;--text:#18212f;--muted:#4b5563;--accent:#2563eb;--accent2:#ef7d4a;--soft:rgba(24,33,47,.08);--line:rgba(24,33,47,.18);width:1080px;height:1440px;position:relative;overflow:hidden;color:var(--text);padding:70px 78px 56px;background:linear-gradient(135deg,var(--bg),var(--bg2))}
+.poster:before{content:"";position:absolute;inset:34px;border:2px solid var(--line)}.poster:after{content:"";position:absolute;width:820px;height:820px;right:-280px;top:-300px;border:80px solid var(--soft);transform:rotate(18deg)}
+.content{position:relative;z-index:2;height:100%;display:flex;flex-direction:column}.eyebrow{display:inline-flex;align-items:center;gap:18px;width:max-content;max-width:100%;padding:14px 22px;border:1px solid var(--line);background:var(--soft);color:var(--muted);font-size:25px;font-weight:700}.eyebrow:before{content:"";width:14px;height:14px;background:var(--accent);display:inline-block}
+h1{margin:36px 0 0;font-size:66px;line-height:1.14;font-weight:900;letter-spacing:0}h1 span{display:block;white-space:nowrap}.subtitle{margin:26px 0 0;width:880px;color:var(--muted);font-size:31px;line-height:1.52;font-weight:600}.chips{margin:28px 0 0;display:flex;gap:12px;flex-wrap:wrap}.chips span{font-size:24px;line-height:1;color:var(--text);border:1px solid var(--line);background:var(--soft);padding:13px 16px 14px;font-weight:700}
+.visual{margin-top:38px;width:100%;height:430px;background:#fff;color:#172033;box-shadow:0 32px 78px rgba(0,0,0,.22);padding:28px;position:relative;overflow:hidden}.visual:before{content:"";position:absolute;inset:0;background:linear-gradient(135deg,rgba(64,196,183,.10),rgba(255,180,92,.12))}.topbar,.metric-row,.chart,.task-list,.team-grid,.timeline,.tool-stack,.image-board,.flow-step,.flow-note{position:relative;z-index:1}
+.topbar{height:54px;display:flex;align-items:center;justify-content:space-between;border-bottom:2px solid rgba(17,24,39,.09);font-size:25px}.topbar span{color:#0f766e;font-weight:800}.metric-row{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:18px}.metric-row div{background:#f6f8fb;padding:17px 18px;border:1px solid #e5e7eb}.metric-row strong{display:block;font-size:40px;line-height:1}.metric-row small{display:block;margin-top:8px;font-size:18px;color:#5b6675;font-weight:700}.chart{height:92px;display:flex;align-items:end;gap:18px;margin-top:20px;padding:0 8px}.chart i{flex:1;display:block;background:linear-gradient(180deg,var(--accent2),var(--accent))}.task-list{margin-top:18px;display:grid;gap:10px}.task-list p{margin:0;display:flex;align-items:center;justify-content:space-between;background:#fff;border:1px solid #e5e7eb;padding:13px 18px;font-size:22px;font-weight:700}.task-list b{width:13px;height:13px;background:var(--accent);margin-right:12px;display:inline-block}.task-list em{font-style:normal;color:#dc5d2a}
+.flow{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}.flow-step{min-height:118px;background:#f8fafc;border:1px solid #dfe5ec;padding:18px}.flow-step small{display:block;color:var(--accent);font-size:20px;font-weight:900}.flow-step strong{display:block;margin-top:8px;font-size:31px}.flow-step span{display:block;margin-top:8px;color:#64748b;font-size:20px;font-weight:700}.flow-note{grid-column:1/4;background:#172033;color:#fff;padding:22px 26px;display:flex;gap:24px;align-items:center}.flow-note b{font-size:29px;white-space:nowrap}.flow-note p{margin:0;color:#dbe7f5;font-size:23px;line-height:1.42;font-weight:700}
+.team-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}.team-grid div{min-height:122px;background:#f8fafc;border:1px solid #dfe5ec;padding:22px}.team-grid span{display:block;color:var(--accent);font-size:28px;font-weight:900}.team-grid strong{display:block;margin-top:15px;font-size:26px;line-height:1.32}.timeline{margin-top:20px;background:#162033;color:#fff;padding:18px 24px;display:grid;gap:10px}.timeline p{margin:0;font-size:23px;font-weight:700;color:#e5edf6}.timeline i{display:inline-block;width:12px;height:12px;background:var(--accent);margin-right:10px}
+.ai{display:grid;grid-template-columns:1.05fr .95fr;gap:22px;align-items:stretch}.image-board{background:#f7faf9;border:1px solid #dfe7e2;height:374px;display:flex;align-items:center;justify-content:center;overflow:hidden}.product-shape{width:190px;height:228px;background:linear-gradient(135deg,var(--accent),var(--accent2));box-shadow:24px 24px 0 rgba(16,38,31,.15);transform:rotate(-8deg)}.spark{position:absolute;width:48px;height:48px;border:10px solid var(--accent2)}.s1{left:70px;top:58px}.s2{left:284px;top:256px;border-color:var(--accent)}.s3{left:238px;top:90px;width:30px;height:30px}.tool-stack{display:grid;gap:16px}.tool-stack p{margin:0;background:#f8fafc;border:1px solid #dfe5ec;padding:22px}.tool-stack b{display:block;font-size:28px}.tool-stack span{display:block;margin-top:10px;color:#64748b;font-size:21px;font-weight:700}
+.bottom{margin-top:auto;display:grid;grid-template-columns:1fr auto;align-items:end;gap:28px;padding-top:30px}.quote{font-size:38px;line-height:1.24;font-weight:900;color:var(--text)}.brand{width:168px;height:168px;border:2px solid var(--line);background:var(--soft);display:flex;flex-direction:column;justify-content:center;align-items:center;gap:6px;color:var(--text)}.brand b{font-size:37px;line-height:1;letter-spacing:0}.brand span{font-size:20px;color:var(--muted);font-weight:800}
+</style>
+</head>
+<body><main class="poster"><div class="content"><div class="eyebrow">跨境电商 / 供应链协同</div><h1><span>从选品到发货</span><span>一条链路看清楚</span></h1><p class="subtitle">选品、供应商、采购单、库存、质检、发货连在一起，异常不再靠聊天记录追。</p><div class="chips"><span>选品跟进</span><span>供应商档案</span><span>采购单</span><span>仓库中心</span><span>发货出库</span><span>事项提醒</span></div>
+    <section class="visual flow">
+      
+        <div class="flow-step">
+          <small>01</small>
+          <strong>选品</strong>
+          <span>发现机会</span>
+        </div>
+      
+        <div class="flow-step">
+          <small>02</small>
+          <strong>商品资料</strong>
+          <span>状态同步</span>
+        </div>
+      
+        <div class="flow-step">
+          <small>03</small>
+          <strong>供应商</strong>
+          <span>状态同步</span>
+        </div>
+      
+        <div class="flow-step">
+          <small>04</small>
+          <strong>采购</strong>
+          <span>锁定进度</span>
+        </div>
+      
+        <div class="flow-step">
+          <small>05</small>
+          <strong>仓库</strong>
+          <span>状态同步</span>
+        </div>
+      
+        <div class="flow-step">
+          <small>06</small>
+          <strong>发货</strong>
+          <span>完成交付</span>
+        </div>
+      
+      <div class="flow-note"><b>异常优先级</b><p>缺货、超时、待质检、待出库自动聚合到同一张待办清单。</p></div>
+    </section><footer class="bottom"><div class="quote">让采购和仓库对同一张表负责。</div><div class="brand"><b>跨境<br>运营</b><span>工作台</span></div></footer></div></main></body></html>

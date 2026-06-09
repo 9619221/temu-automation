@@ -1,0 +1,615 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Temu Ops 用户使用手册（专业详细版）</title>
+<style>
+*{box-sizing:border-box}
+html{font-family:"Microsoft YaHei","PingFang SC","Noto Sans CJK SC",Arial,sans-serif;color:#172033;background:#eef2f7;font-size:14px;line-height:1.68;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+body{margin:0}
+@page{size:A4;margin:0}
+.page{width:210mm;min-height:297mm;margin:0 auto;background:#fff;position:relative;overflow:hidden;page-break-after:always;padding:18mm 17mm}
+@media screen{.page{margin:10mm auto;box-shadow:0 12px 40px rgba(15,23,42,.18)}}
+.cover{padding:28mm;background:linear-gradient(135deg,#ff6a00 0%,#f45b23 42%,#202938 100%);color:white;display:flex;flex-direction:column;justify-content:center}
+.cover:before{content:"";position:absolute;right:-42mm;top:-40mm;width:130mm;height:130mm;border-radius:50%;background:rgba(255,255,255,.12)}
+.cover:after{content:"";position:absolute;right:20mm;bottom:20mm;width:72mm;height:72mm;border:1.5px solid rgba(255,255,255,.24);border-radius:24mm;transform:rotate(16deg)}
+.brand{font-size:42px;font-weight:900;margin-bottom:20mm;letter-spacing:0}
+.cover h1{font-size:72px;line-height:1.02;margin:0 0 10mm;font-weight:900;letter-spacing:0}
+.cover h2{font-size:42px;line-height:1.16;margin:0 0 16mm;font-weight:900;letter-spacing:0}
+.cover .sub{font-size:30px;line-height:1.42;max-width:160mm;margin:0 0 17mm;font-weight:800}
+.cover .version{font-size:30px;font-weight:900;border:2px solid rgba(255,255,255,.68);border-radius:999px;padding:6mm 10mm;width:max-content;background:rgba(255,255,255,.14)}
+.cover .roles{position:absolute;left:28mm;bottom:24mm;font-size:26px;font-weight:900;opacity:.98}
+.top-title{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:2px solid #172033;padding-bottom:5mm;margin-bottom:8mm}
+.top-title h2{font-size:32px;line-height:1.2;margin:0;font-weight:900}
+.top-title span{font-size:15px;color:#f05a1a;font-weight:900}
+.guide{display:grid;grid-template-columns:1fr 1fr;gap:5mm;margin-top:7mm}
+.guide-card,.toc-card,.faq-card{border:1px solid #dce3ec;border-radius:10px;background:#fff;padding:5mm;break-inside:avoid}
+.guide-card h3,.toc-card h3,.faq-card h3{margin:0 0 2mm;font-size:17px;line-height:1.25}
+.guide-card p,.toc-card p,.faq-card p{margin:0;color:#536273}
+.toc{display:grid;grid-template-columns:1fr 1fr;gap:4mm 6mm}
+.toc-card{border-left:5px solid #f05a1a}
+.section{background:#f8fafc}
+.section-num{position:absolute;right:17mm;top:16mm;font-size:58px;font-weight:900;color:#e3e9f0}
+.section h2{font-size:38px;line-height:1.16;margin:45mm 0 8mm;font-weight:900}
+.section p{font-size:18px;color:#4b5969;max-width:155mm}
+.path-table{width:100%;border-collapse:separate;border-spacing:0 3mm;margin-top:8mm}
+.path-table th{text-align:left;color:#64748b;font-size:12px;padding:0 4mm}
+.path-table td{background:#fff;border-top:1px solid #dce3ec;border-bottom:1px solid #dce3ec;padding:4mm;color:#334155}
+.path-table td:first-child{border-left:1px solid #dce3ec;border-radius:9px 0 0 9px;font-weight:900;color:#f05a1a}
+.path-table td:last-child{border-right:1px solid #dce3ec;border-radius:0 9px 9px 0}
+.module-page{padding:14mm 14mm 12mm}
+.module-header{display:grid;grid-template-columns:1fr 52mm;gap:8mm;align-items:start;margin-bottom:5mm}
+.eyebrow{display:inline-block;color:#f05a1a;font-weight:900;font-size:12px;margin-bottom:2mm}
+.module-header h2{font-size:28px;line-height:1.18;margin:0 0 2mm;font-weight:900}
+.module-header p{margin:0;color:#485769;font-size:14.5px}
+.meta-card{border:1px solid #dce3ec;border-radius:10px;background:#f8fafc;padding:4mm;display:grid;grid-template-columns:1fr;gap:1mm}
+.meta-card b{font-size:11px;color:#64748b}
+.meta-card span{font-size:12.5px;color:#172033;font-weight:800;margin-bottom:2mm}
+.screen{margin:0 0 5mm;border:1px solid #d3dce7;border-radius:10px;overflow:hidden;background:#fff;box-shadow:0 5px 18px rgba(15,23,42,.08)}
+.screen img{display:block;width:100%;height:auto}
+.screen figcaption{font-size:11.5px;color:#64748b;background:#f8fafc;border-top:1px solid #e6ebf1;padding:2.5mm 4mm}
+.module-grid{display:grid;grid-template-columns:1fr 1fr;gap:6mm}
+.module-grid section{break-inside:avoid}
+.module-grid h3{font-size:15px;line-height:1.2;margin:0 0 2mm;border-left:4px solid #f05a1a;padding-left:2mm}
+ol,ul{margin:0;padding-left:5mm}
+li{margin:1.2mm 0;color:#334155}
+.note{margin-top:4mm;border-left:4px solid #0e8f72;background:#eefaf6;border-radius:0 8px 8px 0;padding:3.5mm 4mm;color:#304256}
+.note b{color:#0b705c}
+.image-note{margin-top:6mm;border:1px solid #fed7aa;background:#fff7ed;border-radius:10px;padding:5mm;color:#7c2d12;font-size:15px}
+footer{position:absolute;left:14mm;right:14mm;bottom:7mm;color:#94a3b8;font-size:10.5px;display:flex;justify-content:space-between}
+.final p{font-size:17px;color:#334155}
+</style>
+</head>
+<body>
+<section class="page cover">
+  <div class="brand">Temu Ops</div>
+  <h1>用户使用手册</h1>
+  <h2>专业详细版</h2>
+  <p class="sub">多店铺运营、采购供应链、送仓出库、选品、上品素材与团队协作的一体化使用指南。</p>
+  <div class="version">用户版 v0.3.68</div>
+  <div class="roles">适用对象：运营 / 采购 / 仓库 / 美工 / 负责人 / 管理员</div>
+</section>
+
+<section class="page">
+  <div class="top-title"><h2>目录</h2><span>高清示例界面 · 清晰步骤 · 可打印阅读</span></div>
+  <div class="toc"><div class="toc-card"><h3>开始之前</h3><p>软件定位、角色、当前店铺、每日使用顺序</p></div><div class="toc-card"><h3>账号与授权</h3><p>账号管理、Temu 授权、当前店铺切换</p></div><div class="toc-card"><h3>数据更新</h3><p>数据采集、数据新鲜度、采集状态</p></div><div class="toc-card"><h3>运营与分析</h3><p>店铺概览、多店报表、工作台、商品管理、选品</p></div><div class="toc-card"><h3>采购与供应链</h3><p>商品资料、供应商、采购单、仓库、出库</p></div><div class="toc-card"><h3>上品与素材</h3><p>上品管理、AI 出图、图片替换、核价</p></div><div class="toc-card"><h3>协作与系统</h3><p>事项中心、用户管理、设置、日志中心</p></div><div class="toc-card"><h3>常用场景</h3><p>按真实工作场景给出推荐入口</p></div></div>
+  <div class="image-note">本手册配图按各功能重新绘制，用于展示对应页面的典型结构、关键操作区和判断位置；实际使用时，页面会显示你所在店铺和团队的真实业务数据。</div>
+  <div class="guide">
+    <div class="guide-card"><h3>阅读方式</h3><p>新用户建议先看“开始之前”和“常用场景”，再按自己的岗位阅读相关模块。</p></div>
+    <div class="guide-card"><h3>日常顺序</h3><p>先确认当前店铺，再更新数据，然后从店铺概览或运营工作台进入处理页面。</p></div>
+    <div class="guide-card"><h3>角色权限</h3><p>你能看到的菜单由角色决定。看不到某个入口时，联系管理员调整权限。</p></div>
+    <div class="guide-card"><h3>截图说明</h3><p>截图用于识别页面结构和按钮位置。具体数据、状态和按钮以软件内当前版本为准。</p></div>
+  </div>
+  <footer><span>Temu Ops 用户使用手册</span><span>v0.3.68</span></footer>
+</section>
+
+<section class="page section">
+  <div class="section-num">00</div>
+  <h2>开始之前</h2>
+  <p>Temu Ops 是面向一线团队的运营工作台。它把店铺、商品、采购、仓库、出库、选品、图片、核价和协作事项集中到同一套界面里，让不同岗位围绕同一份数据工作。</p>
+  <div class="guide">
+    <div class="guide-card"><h3>当前店铺</h3><p>右上角显示当前店铺。切换店铺后，概览、商品、报表、采购等页面会随之切换。</p></div>
+    <div class="guide-card"><h3>角色权限</h3><p>管理员、负责人、运营、采购、仓库、财务等角色看到的菜单不同。</p></div>
+    <div class="guide-card"><h3>数据新鲜度</h3><p>做采购、核价、备货前，先到数据采集更新一次，避免按旧数据操作。</p></div>
+    <div class="guide-card"><h3>反馈问题</h3><p>反馈时带店铺名、页面名、发生时间、操作步骤、截图和日志提示。</p></div>
+  </div>
+  <footer><span>开始之前</span><span>2026-06-05</span></footer>
+</section>
+
+<section class="page section">
+  <div class="section-num">01</div>
+  <h2>常用场景与推荐入口</h2>
+  <p>不知道从哪里开始时，先按场景找入口。下面是团队最常用的使用路径。</p>
+  <table class="path-table">
+    <thead><tr><th>场景</th><th>推荐入口</th><th>怎么做</th></tr></thead>
+    <tbody><tr><td>每天开工</td><td>账号管理 → 数据采集 → 店铺概览 → 运营工作台</td><td>先确认店铺和登录状态，再更新数据，最后处理今日提醒。</td></tr><tr><td>商品快缺货</td><td>商品管理 → 采购备货 → 采购单 → 仓库中心</td><td>确认销量、库存和建议采购量，再创建采购单并跟进入库。</td></tr><tr><td>新商品上架</td><td>选品广场 → 找品 → 商品资料 → 上品管理 → AI 出图</td><td>先确认机会和货源，再补资料、做素材、提交上架。</td></tr><tr><td>毛利偏低</td><td>多店报表 → 核价筛选 → 商品资料 → 供应商管理</td><td>先补成本，再判断调价、换货源或下架处理。</td></tr><tr><td>图片整改</td><td>商品管理 → AI 出图 → 批量替换图片</td><td>先生成或准备新图，预览确认后批量替换。</td></tr><tr><td>团队协作</td><td>事项中心 → 对应业务页 → 日志中心</td><td>用事项明确责任，反馈问题时带截图和时间。</td></tr></tbody>
+  </table>
+  <footer><span>常用场景</span><span>Temu Ops</span></footer>
+</section>
+
+
+    <section class="page module-page">
+      <header class="module-header">
+        <div>
+          <span class="eyebrow">账号与授权</span>
+          <h2>01 · 账号管理</h2>
+          <p>用于接入和维护多个 Temu 店铺。日常查看任何数据前，先确认右上角当前店铺是否选对。</p>
+        </div>
+        <div class="meta-card">
+          <b>入口</b><span>账号 / 账号管理</span>
+          <b>适用角色</b><span>管理员、负责人、运营</span>
+        </div>
+      </header>
+      <figure class="screen">
+        <img src="manual-assets/real-account-manager.png" alt="账号管理页面截图">
+        <figcaption>账号管理对应功能界面示意图。图中数据为说明用样例，实际以你的店铺数据为准。</figcaption>
+      </figure>
+      <div class="module-grid">
+        <section><h3>推荐操作</h3><ol><li>新增店铺账号并填写店铺名称</li><li>完成首次登录，遇到验证码时按页面提示手动确认</li><li>把要处理的店铺设为当前店铺</li><li>查看登录状态和数据更新时间</li><li>账号失效时回到本页重新登录</li></ol></section>
+        <section><h3>看数重点</h3><ul><li>当前店铺会影响所有业务页面展示的数据</li><li>店铺名称建议使用团队熟悉的简称</li><li>多人协作时，先确认自己是否在处理正确店铺</li></ul></section>
+      </div>
+      <div class="note"><b>使用建议：</b>新店接入后，建议按“账号管理 → Temu 授权 → 数据采集”的顺序完成初始化。</div>
+      <footer>Temu Ops 用户手册 · v0.3.68</footer>
+    </section>
+    <section class="page module-page">
+      <header class="module-header">
+        <div>
+          <span class="eyebrow">账号与授权</span>
+          <h2>02 · Temu 授权</h2>
+          <p>用于绑定店铺授权状态，让商品、销量、采购、发货、售后等数据同步更稳定。</p>
+        </div>
+        <div class="meta-card">
+          <b>入口</b><span>账号 / Temu 授权</span>
+          <b>适用角色</b><span>管理员、负责人</span>
+        </div>
+      </header>
+      <figure class="screen">
+        <img src="manual-assets/real-temu-auth.png" alt="Temu 授权页面截图">
+        <figcaption>Temu 授权对应功能界面示意图。图中数据为说明用样例，实际以你的店铺数据为准。</figcaption>
+      </figure>
+      <div class="module-grid">
+        <section><h3>推荐操作</h3><ol><li>在 Temu 卖家后台按管理员要求完成授权</li><li>复制授权信息并回到本页保存</li><li>确认店铺状态显示已授权</li><li>点击立即采集或一键采集全部</li><li>授权临近到期时及时重新绑定</li></ol></section>
+        <section><h3>看数重点</h3><ul><li>重点看授权状态、店铺类型、到期时间和最近采集结果</li><li>未授权店铺无法获得完整经营数据</li><li>普通用户通常只查看状态，不需要修改授权</li></ul></section>
+      </div>
+      <div class="note"><b>使用建议：</b>授权到期会影响后续数据更新，建议负责人定期检查。</div>
+      <footer>Temu Ops 用户手册 · v0.3.68</footer>
+    </section>
+    <section class="page module-page">
+      <header class="module-header">
+        <div>
+          <span class="eyebrow">数据更新</span>
+          <h2>03 · 数据采集</h2>
+          <p>把当前店铺的商品、销量、库存、物流、售后等数据更新到软件里。日常操作建议先更新数据，再做判断。</p>
+        </div>
+        <div class="meta-card">
+          <b>入口</b><span>数据 / 数据采集</span>
+          <b>适用角色</b><span>运营、采购、负责人</span>
+        </div>
+      </header>
+      <figure class="screen">
+        <img src="manual-assets/real-data-collect.png" alt="数据采集页面截图">
+        <figcaption>数据采集对应功能界面示意图。图中数据为说明用样例，实际以你的店铺数据为准。</figcaption>
+      </figure>
+      <div class="module-grid">
+        <section><h3>推荐操作</h3><ol><li>确认右上角当前店铺正确</li><li>点击一键采集全部</li><li>等待任务完成</li><li>如有失败项，按提示重试或重新登录店铺</li><li>更新完成后进入概览、商品、采购备货等页面</li></ol></section>
+        <section><h3>看数重点</h3><ul><li>进度区用于判断今天的数据是否更新完成</li><li>核心数据适合赶时间先看经营情况</li><li>失败项通常和登录状态、授权状态或网络有关</li></ul></section>
+      </div>
+      <div class="note"><b>使用建议：</b>建议每天开工、午后、下班前各更新一次，避免按旧数据做采购或调价。</div>
+      <footer>Temu Ops 用户手册 · v0.3.68</footer>
+    </section>
+    <section class="page module-page">
+      <header class="module-header">
+        <div>
+          <span class="eyebrow">运营与分析</span>
+          <h2>04 · 店铺概览</h2>
+          <p>当前店铺的经营首页。用于快速查看销量、风险、备货、售后、活动和商品动态。</p>
+        </div>
+        <div class="meta-card">
+          <b>入口</b><span>运营 / 店铺概览</span>
+          <b>适用角色</b><span>运营、负责人</span>
+        </div>
+      </header>
+      <figure class="screen">
+        <img src="manual-assets/real-shop-overview.png" alt="店铺概览页面截图">
+        <figcaption>店铺概览对应功能界面示意图。图中数据为说明用样例，实际以你的店铺数据为准。</figcaption>
+      </figure>
+      <div class="module-grid">
+        <section><h3>推荐操作</h3><ol><li>先完成数据采集</li><li>查看顶部经营指标和风险提醒</li><li>进入数据概览、流量分析、质量与履约等标签</li><li>从提醒跳转到对应处理页面</li><li>处理后刷新数据确认变化</li></ol></section>
+        <section><h3>看数重点</h3><ul><li>适合每天开工第一眼查看</li><li>不是详细处理页，主要用于发现优先事项</li><li>低销量、缺货、售后和云端状态都应重点关注</li></ul></section>
+      </div>
+      <div class="note"><b>使用建议：</b>店铺概览解决“今天先看什么”的问题。看到预警后，再进入商品管理、采购备货或核价筛选处理。</div>
+      <footer>Temu Ops 用户手册 · v0.3.68</footer>
+    </section>
+    <section class="page module-page">
+      <header class="module-header">
+        <div>
+          <span class="eyebrow">运营与分析</span>
+          <h2>05 · 多店报表</h2>
+          <p>用于横向比较多个店铺的销量、营收、毛利和负责人表现。适合例会和复盘。</p>
+        </div>
+        <div class="meta-card">
+          <b>入口</b><span>运营 / 多店报表</span>
+          <b>适用角色</b><span>负责人、运营主管、财务</span>
+        </div>
+      </header>
+      <figure class="screen">
+        <img src="manual-assets/real-multi-store-report.png" alt="多店报表页面截图">
+        <figcaption>多店报表对应功能界面示意图。图中数据为说明用样例，实际以你的店铺数据为准。</figcaption>
+      </figure>
+      <div class="module-grid">
+        <section><h3>推荐操作</h3><ol><li>选择统计日期或时间范围</li><li>查看销售管理与营收毛利</li><li>筛出低毛利或销量异常店铺</li><li>按负责人汇总团队表现</li><li>导出报表用于复盘</li></ol></section>
+        <section><h3>看数重点</h3><ul><li>不要只看销量，还要结合毛利率和库存风险</li><li>多店对比前先确认所有店铺已更新数据</li><li>低毛利店铺可跳转到核价筛选继续处理</li></ul></section>
+      </div>
+      <div class="note"><b>使用建议：</b>负责人每周至少查看一次多店报表，提前发现长期低毛利或异常波动店铺。</div>
+      <footer>Temu Ops 用户手册 · v0.3.68</footer>
+    </section>
+    <section class="page module-page">
+      <header class="module-header">
+        <div>
+          <span class="eyebrow">运营与分析</span>
+          <h2>06 · 运营工作台</h2>
+          <p>把运营日常要处理的商品、风险、评价、备货和动作集中在一个页面。</p>
+        </div>
+        <div class="meta-card">
+          <b>入口</b><span>运营 / 运营工作台</span>
+          <b>适用角色</b><span>运营、负责人</span>
+        </div>
+      </header>
+      <figure class="screen">
+        <img src="manual-assets/real-ops-workbench.png" alt="运营工作台页面截图">
+        <figcaption>运营工作台对应功能界面示意图。图中数据为说明用样例，实际以你的店铺数据为准。</figcaption>
+      </figure>
+      <div class="module-grid">
+        <section><h3>推荐操作</h3><ol><li>选择只看自己的店铺或全部店铺</li><li>优先处理高风险事项</li><li>缺货商品进入采购备货</li><li>低毛利商品进入核价筛选</li><li>处理后在事项中心或页面内标记状态</li></ol></section>
+        <section><h3>看数重点</h3><ul><li>适合日常多次查看</li><li>处理顺序建议先缺货、再毛利、再评价和素材</li><li>工作台是行动入口，不只是报表</li></ul></section>
+      </div>
+      <div class="note"><b>使用建议：</b>运营工作台用于减少来回翻页，把“该做什么”集中呈现。</div>
+      <footer>Temu Ops 用户手册 · v0.3.68</footer>
+    </section>
+    <section class="page module-page">
+      <header class="module-header">
+        <div>
+          <span class="eyebrow">运营与分析</span>
+          <h2>07 · 商品管理</h2>
+          <p>查看 Temu 商品维度的销量、库存、状态、流量、评价和风险，适合分析单品问题。</p>
+        </div>
+        <div class="meta-card">
+          <b>入口</b><span>运营 / 商品管理</span>
+          <b>适用角色</b><span>运营、负责人</span>
+        </div>
+      </header>
+      <figure class="screen">
+        <img src="manual-assets/real-product-list.png" alt="商品管理页面截图">
+        <figcaption>商品管理对应功能界面示意图。图中数据为说明用样例，实际以你的店铺数据为准。</figcaption>
+      </figure>
+      <div class="module-grid">
+        <section><h3>推荐操作</h3><ol><li>按关键词、状态、库存或风险筛选商品</li><li>查看销量、库存和状态标签</li><li>点进商品详情查看趋势</li><li>根据问题进入备货、核价、素材或售后处理</li><li>批量导出商品数据给团队核对</li></ol></section>
+        <section><h3>看数重点</h3><ul><li>单品问题优先来商品管理</li><li>低库存、低毛利和评价新增是常见处理入口</li><li>商品详情适合看趋势和原因</li></ul></section>
+      </div>
+      <div class="note"><b>使用建议：</b>商品管理是运营最常用页面之一，建议熟悉筛选条件和状态标签。</div>
+      <footer>Temu Ops 用户手册 · v0.3.68</footer>
+    </section>
+    <section class="page module-page">
+      <header class="module-header">
+        <div>
+          <span class="eyebrow">运营与分析</span>
+          <h2>08 · 选品广场</h2>
+          <p>按关键词获取市场候选商品，把看中的商品加入选品池并持续跟进上架状态。</p>
+        </div>
+        <div class="meta-card">
+          <b>入口</b><span>运营 / 选品广场</span>
+          <b>适用角色</b><span>选品、运营</span>
+        </div>
+      </header>
+      <figure class="screen">
+        <img src="manual-assets/real-selection.png" alt="选品广场页面截图">
+        <figcaption>选品广场对应功能界面示意图。图中数据为说明用样例，实际以你的店铺数据为准。</figcaption>
+      </figure>
+      <div class="module-grid">
+        <section><h3>推荐操作</h3><ol><li>输入关键词获取候选商品</li><li>按价格、销量、类目筛选</li><li>把合适商品加入选品池</li><li>推进状态：想上、找货源、已找到、上架中、已上架</li><li>定期清理不再跟进的候选商品</li></ol></section>
+        <section><h3>看数重点</h3><ul><li>选品池用于长期跟进，不会因为重新获取候选而丢失</li><li>加入选品池前要先判断类目、价格和可采购性</li><li>找到货源后再进入上品准备</li></ul></section>
+      </div>
+      <div class="note"><b>使用建议：</b>选品不要只看低价，优先确认同款、供应稳定和上架成本。</div>
+      <footer>Temu Ops 用户手册 · v0.3.68</footer>
+    </section>
+    <section class="page module-page">
+      <header class="module-header">
+        <div>
+          <span class="eyebrow">采购与供应链</span>
+          <h2>09 · 商品资料</h2>
+          <p>维护商品编码、规格、成本、库存、供应商和组合装信息，是采购、核价、入库、出库的基础。</p>
+        </div>
+        <div class="meta-card">
+          <b>入口</b><span>采购 / 商品资料</span>
+          <b>适用角色</b><span>采购、运营</span>
+        </div>
+      </header>
+      <figure class="screen">
+        <img src="manual-assets/real-product-master.png" alt="商品资料页面截图">
+        <figcaption>商品资料对应功能界面示意图。图中数据为说明用样例，实际以你的店铺数据为准。</figcaption>
+      </figure>
+      <div class="module-grid">
+        <section><h3>推荐操作</h3><ol><li>查看缺成本、零库存、有问题等标签</li><li>进入商品详情补全成本、规格、供应商</li><li>需要时新增组合装并维护子商品用量</li><li>保存后确认问题标签消失</li><li>再进入采购备货或核价筛选使用</li></ol></section>
+        <section><h3>看数重点</h3><ul><li>缺成本会影响毛利判断</li><li>缺供应商会影响采购下单</li><li>组合装库存由子商品库存共同决定</li></ul></section>
+      </div>
+      <div class="note"><b>使用建议：</b>每周建议集中清理一次缺成本、缺供应商和零库存商品。</div>
+      <footer>Temu Ops 用户手册 · v0.3.68</footer>
+    </section>
+    <section class="page module-page">
+      <header class="module-header">
+        <div>
+          <span class="eyebrow">采购与供应链</span>
+          <h2>10 · 供应商管理</h2>
+          <p>把商品与货源建立对应关系，后续采购、比价、补货都会依赖这里的绑定信息。</p>
+        </div>
+        <div class="meta-card">
+          <b>入口</b><span>采购 / 供应商管理</span>
+          <b>适用角色</b><span>采购</span>
+        </div>
+      </header>
+      <figure class="screen">
+        <img src="manual-assets/real-supplier.png" alt="供应商管理页面截图">
+        <figcaption>供应商管理对应功能界面示意图。图中数据为说明用样例，实际以你的店铺数据为准。</figcaption>
+      </figure>
+      <div class="module-grid">
+        <section><h3>推荐操作</h3><ol><li>筛选未绑定商品</li><li>按商品名称、图片或货号查找货源</li><li>确认规格、颜色、单价和起订量</li><li>绑定主货源并保留备选货源</li><li>回商品资料确认供应商信息已生效</li></ol></section>
+        <section><h3>看数重点</h3><ul><li>同一商品可维护多个候选货源</li><li>绑定前要核对规格和图片，避免买错</li><li>供应商价格变化后应更新成本</li></ul></section>
+      </div>
+      <div class="note"><b>使用建议：</b>热销 SKU 至少保留一个备选货源，避免主供应商缺货时断供。</div>
+      <footer>Temu Ops 用户手册 · v0.3.68</footer>
+    </section>
+    <section class="page module-page">
+      <header class="module-header">
+        <div>
+          <span class="eyebrow">采购与供应链</span>
+          <h2>11 · 采购单</h2>
+          <p>管理从采购需求到下单、付款、到货的全过程，适合团队按状态协同处理。</p>
+        </div>
+        <div class="meta-card">
+          <b>入口</b><span>采购 / 采购单</span>
+          <b>适用角色</b><span>采购、财务、负责人</span>
+        </div>
+      </header>
+      <figure class="screen">
+        <img src="manual-assets/real-purchase.png" alt="采购单页面截图">
+        <figcaption>采购单对应功能界面示意图。图中数据为说明用样例，实际以你的店铺数据为准。</figcaption>
+      </figure>
+      <div class="module-grid">
+        <section><h3>推荐操作</h3><ol><li>从采购备货或手工方式创建采购需求</li><li>确认商品、供应商、数量和金额</li><li>生成采购单并提交</li><li>付款后更新付款状态</li><li>到货后进入仓库中心处理入库</li></ol></section>
+        <section><h3>看数重点</h3><ul><li>重点看待下单、待付款、待到货、部分到货、异常状态</li><li>采购金额要和供应商确认一致</li><li>部分到货要按实际数量处理</li></ul></section>
+      </div>
+      <div class="note"><b>使用建议：</b>采购单是团队协作主线，付款、物流、到货、异常都建议在单据里留痕。</div>
+      <footer>Temu Ops 用户手册 · v0.3.68</footer>
+    </section>
+    <section class="page module-page">
+      <header class="module-header">
+        <div>
+          <span class="eyebrow">采购与供应链</span>
+          <h2>12 · 仓库中心</h2>
+          <p>处理到货入库、库存明细、退货入库和库存调整，保证账面库存与实际情况一致。</p>
+        </div>
+        <div class="meta-card">
+          <b>入口</b><span>采购 / 仓库中心</span>
+          <b>适用角色</b><span>仓库、采购</span>
+        </div>
+      </header>
+      <figure class="screen">
+        <img src="manual-assets/real-warehouse.png" alt="仓库中心页面截图">
+        <figcaption>仓库中心对应功能界面示意图。图中数据为说明用样例，实际以你的店铺数据为准。</figcaption>
+      </figure>
+      <div class="module-grid">
+        <section><h3>推荐操作</h3><ol><li>在待入库列表找到采购单</li><li>核对商品、规格和应收数量</li><li>填写实收数量</li><li>有差异时备注原因</li><li>确认入库后查看库存是否增加</li></ol></section>
+        <section><h3>看数重点</h3><ul><li>应收与实收不一致时必须记录差异</li><li>库存调整需要写清原因</li><li>退货入库要及时处理，避免库存判断偏差</li></ul></section>
+      </div>
+      <div class="note"><b>使用建议：</b>入库时先核规格再填数量，少收、破损、错货要立刻记录。</div>
+      <footer>Temu Ops 用户手册 · v0.3.68</footer>
+    </section>
+    <section class="page module-page">
+      <header class="module-header">
+        <div>
+          <span class="eyebrow">采购与供应链</span>
+          <h2>13 · 出库中心</h2>
+          <p>处理送仓、发货、面单、批量撤销和本地发货状态，让库存流出有据可查。</p>
+        </div>
+        <div class="meta-card">
+          <b>入口</b><span>采购 / 出库中心</span>
+          <b>适用角色</b><span>仓库、运营</span>
+        </div>
+      </header>
+      <figure class="screen">
+        <img src="manual-assets/real-outbound.png" alt="出库中心页面截图">
+        <figcaption>出库中心对应功能界面示意图。图中数据为说明用样例，实际以你的店铺数据为准。</figcaption>
+      </figure>
+      <div class="module-grid">
+        <section><h3>推荐操作</h3><ol><li>筛选待出库或待打印单据</li><li>核对店铺、商品和数量</li><li>打印面单或箱唛</li><li>确认出库并扣减库存</li><li>发现错误时按规则撤销并重新处理</li></ol></section>
+        <section><h3>看数重点</h3><ul><li>确认出库前务必核对商品和数量</li><li>撤销后要确认库存是否回补</li><li>面单打印后不要混放</li></ul></section>
+      </div>
+      <div class="note"><b>使用建议：</b>出库是库存减少的关键节点，建议仓库人员按单逐条处理。</div>
+      <footer>Temu Ops 用户手册 · v0.3.68</footer>
+    </section>
+    <section class="page module-page">
+      <header class="module-header">
+        <div>
+          <span class="eyebrow">上品与素材</span>
+          <h2>14 · 上品管理</h2>
+          <p>管理待上架商品，从资料准备、图片处理、规格确认到提交上架，减少漏项。</p>
+        </div>
+        <div class="meta-card">
+          <b>入口</b><span>工具 / 上品管理</span>
+          <b>适用角色</b><span>运营、美工、负责人</span>
+        </div>
+      </header>
+      <figure class="screen">
+        <img src="manual-assets/real-create-product.png" alt="上品管理页面截图">
+        <figcaption>上品管理对应功能界面示意图。图中数据为说明用样例，实际以你的店铺数据为准。</figcaption>
+      </figure>
+      <div class="module-grid">
+        <section><h3>推荐操作</h3><ol><li>导入或创建待上品商品</li><li>检查资料、图片、规格、成本是否完整</li><li>缺图时进入 AI 出图或批量替换图片</li><li>确认后提交上架</li><li>根据结果处理失败项</li></ol></section>
+        <section><h3>看数重点</h3><ul><li>资料、图片、规格是提交前的三大检查点</li><li>批量提交前建议先小批量试一次</li><li>失败项要按提示逐条修正</li></ul></section>
+      </div>
+      <div class="note"><b>使用建议：</b>不要在资料不完整时直接提交，先补商品资料和图片。</div>
+      <footer>Temu Ops 用户手册 · v0.3.68</footer>
+    </section>
+    <section class="page module-page">
+      <header class="module-header">
+        <div>
+          <span class="eyebrow">上品与素材</span>
+          <h2>15 · AI 出图</h2>
+          <p>为商品生成白底图、场景图、细节图或风格图，用于上品和素材优化。</p>
+        </div>
+        <div class="meta-card">
+          <b>入口</b><span>工具 / AI 出图</span>
+          <b>适用角色</b><span>美工、运营</span>
+        </div>
+      </header>
+      <figure class="screen">
+        <img src="manual-assets/real-image-studio.png" alt="AI 出图页面截图">
+        <figcaption>AI 出图对应功能界面示意图。图中数据为说明用样例，实际以你的店铺数据为准。</figcaption>
+      </figure>
+      <div class="module-grid">
+        <section><h3>推荐操作</h3><ol><li>上传商品图或参考图</li><li>选择出图类型和用途</li><li>填写画面要求</li><li>生成后查看候选图</li><li>保存可用图片或调整要求重新生成</li></ol></section>
+        <section><h3>看数重点</h3><ul><li>基础版适合简单出图</li><li>GPT 版适合文字描述更复杂的需求</li><li>多 Agent 版适合复杂方案和多轮设计</li></ul></section>
+      </div>
+      <div class="note"><b>使用建议：</b>AI 图片生成后必须人工确认款式、颜色和细节，不建议未经检查直接上架。</div>
+      <footer>Temu Ops 用户手册 · v0.3.68</footer>
+    </section>
+    <section class="page module-page">
+      <header class="module-header">
+        <div>
+          <span class="eyebrow">上品与素材</span>
+          <h2>16 · 批量替换图片</h2>
+          <p>对多个商品批量替换主图、详情图或指定位置图片，适合素材整改和统一风格。</p>
+        </div>
+        <div class="meta-card">
+          <b>入口</b><span>工具 / 批量替换图片</span>
+          <b>适用角色</b><span>美工、运营</span>
+        </div>
+      </header>
+      <figure class="screen">
+        <img src="manual-assets/real-image-swap.png" alt="批量替换图片页面截图">
+        <figcaption>批量替换图片对应功能界面示意图。图中数据为说明用样例，实际以你的店铺数据为准。</figcaption>
+      </figure>
+      <div class="module-grid">
+        <section><h3>推荐操作</h3><ol><li>筛选需要换图的商品</li><li>选择替换位置</li><li>上传对应新图片</li><li>预览替换前后效果</li><li>开始替换并处理失败项</li></ol></section>
+        <section><h3>看数重点</h3><ul><li>大批量替换前先选少量商品试跑</li><li>图片文件名建议包含商品编码</li><li>替换后回商品页面抽查效果</li></ul></section>
+      </div>
+      <div class="note"><b>使用建议：</b>批量替换效率高，也最怕图片错位；开始前一定要预览。</div>
+      <footer>Temu Ops 用户手册 · v0.3.68</footer>
+    </section>
+    <section class="page module-page">
+      <header class="module-header">
+        <div>
+          <span class="eyebrow">上品与素材</span>
+          <h2>17 · 核价筛选</h2>
+          <p>按成本、申报价、销量和毛利率筛出需要调价或补资料的商品。</p>
+        </div>
+        <div class="meta-card">
+          <b>入口</b><span>工具 / 核价筛选</span>
+          <b>适用角色</b><span>运营、采购、财务</span>
+        </div>
+      </header>
+      <figure class="screen">
+        <img src="manual-assets/real-price-review.png" alt="核价筛选页面截图">
+        <figcaption>核价筛选对应功能界面示意图。图中数据为说明用样例，实际以你的店铺数据为准。</figcaption>
+      </figure>
+      <div class="module-grid">
+        <section><h3>推荐操作</h3><ol><li>确认商品资料成本已尽量补齐</li><li>点击扫描或刷新</li><li>先处理缺成本商品</li><li>再查看低毛利商品</li><li>需要调价时交负责人确认</li></ol></section>
+        <section><h3>看数重点</h3><ul><li>缺成本会导致毛利无法判断</li><li>爆品低毛利要优先处理</li><li>核价结果适合采购和财务一起复核</li></ul></section>
+      </div>
+      <div class="note"><b>使用建议：</b>核价的价值是提前发现利润问题，而不是月底才发现卖得多却不赚钱。</div>
+      <footer>Temu Ops 用户手册 · v0.3.68</footer>
+    </section>
+    <section class="page module-page">
+      <header class="module-header">
+        <div>
+          <span class="eyebrow">协作与系统</span>
+          <h2>18 · 事项中心</h2>
+          <p>集中查看需要跟进的任务、提醒和跨角色协作事项，让工作不遗漏。</p>
+        </div>
+        <div class="meta-card">
+          <b>入口</b><span>系统 / 事项中心</span>
+          <b>适用角色</b><span>所有人</span>
+        </div>
+      </header>
+      <figure class="screen">
+        <img src="manual-assets/real-work-items.png" alt="事项中心页面截图">
+        <figcaption>事项中心对应功能界面示意图。图中数据为说明用样例，实际以你的店铺数据为准。</figcaption>
+      </figure>
+      <div class="module-grid">
+        <section><h3>推荐操作</h3><ol><li>每天开工查看待我处理</li><li>优先处理高优先级和今日到期事项</li><li>需要别人协作时创建事项</li><li>处理完成后标记完成</li><li>下班前确认无遗漏</li></ol></section>
+        <section><h3>看数重点</h3><ul><li>事项标题要写清动作</li><li>转交事项时补充原因</li><li>来源页面可以帮助快速回到问题位置</li></ul></section>
+      </div>
+      <div class="note"><b>使用建议：</b>事项中心适合团队协作，避免口头消息散落在聊天里。</div>
+      <footer>Temu Ops 用户手册 · v0.3.68</footer>
+    </section>
+    <section class="page module-page">
+      <header class="module-header">
+        <div>
+          <span class="eyebrow">协作与系统</span>
+          <h2>19 · 用户管理</h2>
+          <p>管理团队成员、角色、店铺范围和菜单权限，让每个人只看到自己需要的功能。</p>
+        </div>
+        <div class="meta-card">
+          <b>入口</b><span>系统 / 用户管理</span>
+          <b>适用角色</b><span>管理员、负责人</span>
+        </div>
+      </header>
+      <figure class="screen">
+        <img src="manual-assets/real-users.png" alt="用户管理页面截图">
+        <figcaption>用户管理对应功能界面示意图。图中数据为说明用样例，实际以你的店铺数据为准。</figcaption>
+      </figure>
+      <div class="module-grid">
+        <section><h3>推荐操作</h3><ol><li>新增用户并填写姓名和登录信息</li><li>选择角色</li><li>选择可见店铺</li><li>确认菜单权限</li><li>让用户登录后检查是否能看到对应页面</li></ol></section>
+        <section><h3>看数重点</h3><ul><li>按岗位给权限，不按个人习惯随意开</li><li>采购、仓库、运营的菜单建议分清</li><li>离职或换岗成员要及时调整</li></ul></section>
+      </div>
+      <div class="note"><b>使用建议：</b>看不到某个页面通常是权限原因，联系管理员调整即可。</div>
+      <footer>Temu Ops 用户手册 · v0.3.68</footer>
+    </section>
+    <section class="page module-page">
+      <header class="module-header">
+        <div>
+          <span class="eyebrow">协作与系统</span>
+          <h2>20 · 设置</h2>
+          <p>查看版本、更新软件、检查连接状态和按引导完成必要配置。普通用户日常很少需要修改。</p>
+        </div>
+        <div class="meta-card">
+          <b>入口</b><span>系统 / 设置</span>
+          <b>适用角色</b><span>管理员、负责人、运营</span>
+        </div>
+      </header>
+      <figure class="screen">
+        <img src="manual-assets/real-settings.png" alt="设置页面截图">
+        <figcaption>设置对应功能界面示意图。图中数据为说明用样例，实际以你的店铺数据为准。</figcaption>
+      </figure>
+      <div class="module-grid">
+        <section><h3>推荐操作</h3><ol><li>进入版本与更新</li><li>点击检查更新</li><li>有新版本时按提示更新</li><li>首次配置按管理员给的信息完成连接</li><li>不确定用途的开关先不要修改</li></ol></section>
+        <section><h3>看数重点</h3><ul><li>重点看当前版本、连接状态、扩展状态</li><li>更新前先保存手头工作</li><li>连接信息由管理员提供</li></ul></section>
+      </div>
+      <div class="note"><b>使用建议：</b>设置页是配置和更新入口，不是日常业务处理页。</div>
+      <footer>Temu Ops 用户手册 · v0.3.68</footer>
+    </section>
+    <section class="page module-page">
+      <header class="module-header">
+        <div>
+          <span class="eyebrow">协作与系统</span>
+          <h2>21 · 日志中心</h2>
+          <p>查看软件提醒、异常和最近操作结果。反馈问题时，可把页面内容一起发给负责人。</p>
+        </div>
+        <div class="meta-card">
+          <b>入口</b><span>工具 / 日志中心</span>
+          <b>适用角色</b><span>所有人</span>
+        </div>
+      </header>
+      <figure class="screen">
+        <img src="manual-assets/real-logs.png" alt="日志中心页面截图">
+        <figcaption>日志中心对应功能界面示意图。图中数据为说明用样例，实际以你的店铺数据为准。</figcaption>
+      </figure>
+      <div class="module-grid">
+        <section><h3>推荐操作</h3><ol><li>出现页面提示或操作失败时进入日志中心</li><li>筛选提醒或异常</li><li>找到对应时间的记录</li><li>复制摘要或截图</li><li>反馈时说明店铺、页面、时间和操作</li></ol></section>
+        <section><h3>看数重点</h3><ul><li>重点看发生时间、来源模块、提示内容和当前店铺</li><li>用户不需要理解技术细节</li><li>信息越完整，负责人越容易判断</li></ul></section>
+      </div>
+      <div class="note"><b>使用建议：</b>反馈问题推荐格式：店铺名 + 页面名 + 发生时间 + 操作步骤 + 截图 + 日志提示。</div>
+      <footer>Temu Ops 用户手册 · v0.3.68</footer>
+    </section>
+
+<section class="page final">
+  <div class="top-title"><h2>常见问题</h2><span>用户快速答疑</span></div>
+  <div class="faq-card"><h3>为什么我看不到某个菜单？</h3><p>通常是角色权限限制。联系管理员确认你的角色、可见店铺和菜单权限。</p></div><div class="faq-card"><h3>为什么页面没有数据？</h3><p>先确认当前店铺是否选对，再到数据采集更新一次数据，最后检查账号是否在线、授权是否有效。</p></div><div class="faq-card"><h3>截图里有些页面是空态，正常吗？</h3><p>正常。本手册配图来自当前版本真实页面，示例环境没有接入你的真实店铺数据；你实际使用时会显示自己的业务数据。</p></div><div class="faq-card"><h3>采购备货建议能直接全选下单吗？</h3><p>不建议。建议数量需要结合活动、在途、供应商交期和团队经验确认。</p></div><div class="faq-card"><h3>AI 出图能直接上架吗？</h3><p>需要人工确认款式、颜色、文字和细节正确后再使用。</p></div><div class="faq-card"><h3>反馈问题要带什么？</h3><p>带店铺名、页面名、发生时间、操作步骤、截图，以及日志中心相关提示。</p></div>
+  <div class="image-note"><b>推荐反馈格式：</b>店铺名 + 页面名 + 发生时间 + 你点击了什么 + 页面截图 + 日志中心相关提示。</div>
+  <footer><span>常见问题</span><span>v0.3.68</span></footer>
+</section>
+
+<section class="page final">
+  <div class="top-title"><h2>结束语</h2><span>把复杂工作变成清晰动作</span></div>
+  <p>Temu Ops 的核心价值，是让团队在同一个工作台里看同一份数据，并通过清晰入口处理同一批问题。运营看经营和商品，采购看货源与采购单，仓库看入库和出库，负责人看报表与事项，管理员保证账号、授权和权限稳定。</p>
+  <div class="guide">
+    <div class="guide-card"><h3>运营</h3><p>从店铺概览、运营工作台、商品管理开始处理缺货、毛利、评价和新品。</p></div>
+    <div class="guide-card"><h3>采购</h3><p>从采购备货、商品资料、供应商管理和采购单开始跟进货源与到货。</p></div>
+    <div class="guide-card"><h3>仓库</h3><p>从仓库中心和出库中心开始，按单入库、打印、发货和回补。</p></div>
+    <div class="guide-card"><h3>负责人</h3><p>从多店报表、事项中心、用户管理和设置开始掌握团队状态。</p></div>
+  </div>
+  <div class="image-note">版本：用户版 v0.3.68　生成日期：2026-06-05　交付格式：HTML / PDF</div>
+  <footer><span>Temu Ops 用户使用手册</span><span>完成</span></footer>
+</section>
+</body>
+</html>
