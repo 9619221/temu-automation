@@ -1,7 +1,7 @@
 {
   "name": "temu-automation",
   "private": true,
-  "version": "0.3.71",
+  "version": "0.3.72",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
