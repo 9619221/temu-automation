@@ -168,6 +168,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.invoke("automation:scrape-goods-data"),
     scrapeActivity: () =>
       ipcRenderer.invoke("automation:scrape-activity"),
+    scrapeSettlement: () =>
+      ipcRenderer.invoke("automation:scrape-settlement"),
     scrapePerformance: () =>
       ipcRenderer.invoke("automation:scrape-performance"),
     scrapeAll: () =>
@@ -265,6 +267,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     selectionList: (params) => ipcRenderer.invoke("yunqi-db:selection-list", params),
     selectionIds: () => ipcRenderer.invoke("yunqi-db:selection-ids"),
     categories: () => ipcRenderer.invoke("yunqi-db:categories"),
+    exportAutoPrice: (params) => ipcRenderer.invoke("yunqi-db:export-auto-price", params),
   },
 
   // 每次调用前显式切到对应 profile，保证普通版/GPT 版不会串用生图凭证。
@@ -492,6 +495,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
       purchase: (options) => ipcRenderer.invoke("erp:reports:purchase", options || {}),
       warehouseInventory: (options) => ipcRenderer.invoke("erp:reports:warehouse-inventory", options || {}),
       settlement: (options) => ipcRenderer.invoke("erp:reports:settlement", options || {}),
+      pipelineOverview: (options) => ipcRenderer.invoke("erp:reports:pipeline-overview", options || {}),
+      productRiskTags: (options) => ipcRenderer.invoke("erp:reports:product-risk-tags", options || {}),
     },
     opTask: {
       list: () => ipcRenderer.invoke("erp:op-task:list"),

@@ -1059,7 +1059,7 @@ export default function AccountManager() {
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap", padding: "8px 0" }}>
             <Button
               icon={<SyncOutlined />}
-              onClick={() => navigate("/collect")}
+              onClick={() => navigate("/settings")}
               style={{ borderRadius: 10 }}
               disabled={selectedAccount.status !== "online"}
             >

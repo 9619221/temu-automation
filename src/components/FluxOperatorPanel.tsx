@@ -79,7 +79,7 @@ const FluxOperatorPanel: React.FC<Props> = ({ cache, region, onRegionChange }) =
           description={
             <div>
               <div style={{ marginBottom: 8 }}>暂无商品级流量数据</div>
-              <Text type="secondary">在「数据采集」中触发流量采集，等待 1-3 分钟，本面板将自动展现诊断结果。</Text>
+              <Text type="secondary">流量数据由浏览器扩展自动采集，请确认 Temu 后台页面已打开，稍后刷新即可。</Text>
             </div>
           }
         />

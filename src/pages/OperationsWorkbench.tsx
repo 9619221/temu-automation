@@ -9,6 +9,7 @@ import { HIDE_RISK, HIDE_ACTIVITY, HIDE_REVIEW, OFFICIAL_SOURCE, HIDE_DIAG, HIDE
 import { useSessionState } from "../hooks/useSessionState";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { selectStatusLabel } from "../utils/temuSelectStatus";
+import PipelineTab from "../components/PipelineTab";
 
 // 分页「每页条数」选择器:antd 5.25+ 默认带搜索框(聚焦冒出可编辑光标),这里强制关掉
 const NoSearchSelect = (props: Record<string, unknown>) => <Select {...props} showSearch={false} />;
@@ -1487,6 +1488,10 @@ export default function OperationsWorkbench() {
       ),
     },
     {
+      key: "pipeline", label: "商品全景",
+      children: <PipelineTab />,
+    },
+    {
       key: "todo", label: "今日待办",
       children: (
         <div>
@@ -1721,6 +1726,7 @@ export default function OperationsWorkbench() {
       children: (
         <div>
           <div style={{ padding: "12px 16px 0", color: "#888", fontSize: 12 }}>按<b>商品</b>看活动报名:每个商品能报几个活动、最优参考利润率、已报几个。点<b>「去报名」</b>弹窗逐个填价提交(单店worker)/下发多店任务(扩展)。</div>
+
           <div style={{ padding: "12px 16px 0", display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16 }}>
             <Statistic title="在售商品(我的店)" value={actSummary.onSale} />
             <Statistic title="有活动可报商品" value={actSummary.withAct} valueStyle={{ color: "#3f8600" }} />

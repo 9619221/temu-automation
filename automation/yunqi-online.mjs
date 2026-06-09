@@ -3,7 +3,7 @@ import path from "path";
 import { createRequire } from "module";
 import { spawn } from "child_process";
 import { findChromeExe } from "./browser.mjs";
-import { importFromRows, importFromApiItems, searchProducts, getStats, getTopProducts, getDbPath, getRowCount, addSelection, removeSelection, updateSelection, listSelection, listSelectionIds, listCategories } from "./yunqi-db.mjs";
+import { importFromRows, importFromApiItems, searchProducts, getStats, getTopProducts, getDbPath, getRowCount, addSelection, removeSelection, updateSelection, listSelection, listSelectionIds, listCategories, exportSelectionForAutoPricing } from "./yunqi-db.mjs";
 
 const APPDATA_DIR = path.join(process.env.APPDATA || "C:/Users/Administrator/AppData/Roaming", "temu-automation");
 const CHROME_YUNQI_EXT_ID = "emdedfmhnfkfiaogfakhdfbpekiefjkp";
@@ -2067,5 +2067,6 @@ export function buildYunqiOnlineHandlers({ ensureBrowser, getContext, randomDela
     yunqiDbSelectionList: async (params = {}) => listSelection({ status: params.status }),
     yunqiDbSelectionIds: async () => listSelectionIds(),
     yunqiDbCategories: async () => listCategories(),
+    yunqiDbExportAutoPrice: async (params = {}) => exportSelectionForAutoPricing(params.goodsIds || []),
   };
 }

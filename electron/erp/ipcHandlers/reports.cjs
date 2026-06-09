@@ -404,6 +404,37 @@ function registerReportsHandlers(ipcMain, deps) {
     }
   });
 
+  // 管线概览（ERP 侧生命周期）
+  ipcMain.handle("erp:reports:pipeline-overview", async (_event, payload) => {
+    try {
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest("/api/erp/reports/pipeline-overview", { method: "GET" });
+      }
+      requireErp();
+      const { buildPipelineOverview } = require("../services/multiStoreReport.cjs");
+      return { ok: true, data: buildPipelineOverview(erpState.db, { force: !!payload?.force }) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+
+  // 单品风险标签
+  ipcMain.handle("erp:reports:product-risk-tags", async (_event, payload) => {
+    try {
+      const codes = payload?.skuCodes || (payload?.skuCode ? [payload.skuCode] : []);
+      if (shouldUseClientRuntime()) {
+        ensureClientRuntime();
+        return await remoteRequest("/api/erp/reports/product-risk-tags", { method: "POST", body: { skuCodes: codes } });
+      }
+      requireErp();
+      const { buildProductRiskTags } = require("../services/multiStoreReport.cjs");
+      return { ok: true, data: buildProductRiskTags(erpState.db, { skuCodes: codes }) };
+    } catch (error) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  });
+
   // 运营工作台：商品销量趋势（逐日，数据走 cloud 抓包快照，按 product_id 关联）
   ipcMain.handle("erp:reports:product-trend", async (_event, payload) => {
     try {

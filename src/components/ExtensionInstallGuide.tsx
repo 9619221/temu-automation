@@ -190,8 +190,8 @@ export default function ExtensionInstallGuide({ variant = "panel" }: ExtensionIn
           <Button size="small" icon={<ApiOutlined />} onClick={openTemuSeller}>
             打开 Temu 后台
           </Button>
-          <Button size="small" type="link" onClick={() => navigate("/collect")} style={{ paddingInline: 0 }}>
-            查看指引
+          <Button size="small" type="link" onClick={() => navigate("/settings")} style={{ paddingInline: 0 }}>
+            查看设置
           </Button>
         </Space>
       </div>

@@ -23,7 +23,7 @@ const { Text } = Typography;
 
 const ONLINE_WINDOW_MS = 90_000;
 const REFRESH_INTERVAL_MS = 15_000;
-const OPERATIONS_EXTENSION_FREE_ROUTES = new Set(["/collect", "/settings"]);
+const OPERATIONS_EXTENSION_FREE_ROUTES = new Set(["/settings"]);
 const CHROME_EXTENSIONS_URL = "chrome://extensions/";
 
 interface OperationsExtensionGateProps {

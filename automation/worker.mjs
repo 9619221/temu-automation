@@ -6984,7 +6984,215 @@ function extractFluxIdentity(resp) {
   }
 }
 
+// ============ 结算数据采集 (income-summary) ============
+const SETTLEMENT_MALLS = [
+  { mall_id: "634418224981125", store_code: "028" },
+  { mall_id: "634418224983097", store_code: "029" },
+  { mall_id: "634418224983548", store_code: "030" },
+  { mall_id: "634418225054807", store_code: "031" },
+  { mall_id: "634418225055378", store_code: "032" },
+  { mall_id: "634418225083598", store_code: "035" },
+  { mall_id: "634418225372884", store_code: "037" },
+  { mall_id: "634418225373734", store_code: "038" },
+  { mall_id: "634418225440775", store_code: "040" },
+  { mall_id: "634418225514990", store_code: "042" },
+  { mall_id: "634418226016579", store_code: "044" },
+  { mall_id: "634418226017029", store_code: "045" },
+  { mall_id: "634418226016823", store_code: "046" },
+  { mall_id: "634418226025690", store_code: "047" },
+  { mall_id: "634418226026279", store_code: "048" },
+  { mall_id: "634418226026528", store_code: "049" },
+  { mall_id: "634418226026966", store_code: "050" },
+  { mall_id: "634418226026828", store_code: "051" },
+  { mall_id: "634418226026300", store_code: "052" },
+  { mall_id: "634418226025563", store_code: "053" },
+  { mall_id: "634418226041962", store_code: "054" },
+  { mall_id: "634418226219194", store_code: "062" },
+  { mall_id: "634418226785687", store_code: "063" },
+  { mall_id: "634418225172002", store_code: "065" },
+  { mall_id: "634418225262106", store_code: "066" },
+  { mall_id: "634418225262761", store_code: "067" },
+  { mall_id: "634418225265035", store_code: "068" },
+  { mall_id: "634418227770668", store_code: "069" },
+  { mall_id: "634418227770734", store_code: "070" },
+  { mall_id: "634418227770823", store_code: "071" },
+  { mall_id: "634418227770845", store_code: "072" },
+  { mall_id: "634418227772475", store_code: "073" },
+  { mall_id: "634418228924499", store_code: "074" },
+  { mall_id: "634418229097960", store_code: "075" },
+  { mall_id: "634418227640222", store_code: "076" },
+  { mall_id: "634418230546312", store_code: "077" },
+];
+
+const SETTLEMENT_INCOME_PATH = "/api/merchant/front/finance/income-summary";
+
+function loadSettlementCloudConfig() {
+  const envFile = path.join(projectRootDir, ".settlement-robot.env");
+  const config = { endpoint: "https://erp.temu.chat", authToken: "", deviceId: "settlement-robot" };
+  try {
+    if (!fs.existsSync(envFile)) return config;
+    const content = fs.readFileSync(envFile, "utf-8");
+    for (const line of content.split(/\r?\n/)) {
+      const m = line.match(/^\s*([A-Z_]+)\s*=\s*(.+?)\s*$/);
+      if (!m) continue;
+      if (m[1] === "CLOUD_ENDPOINT") config.endpoint = m[2];
+      if (m[1] === "AUTH_TOKEN") config.authToken = m[2];
+      if (m[1] === "DEVICE_ID") config.deviceId = m[2];
+    }
+  } catch (e) {
+    console.error("[settlement] 读取 .settlement-robot.env 失败:", e.message);
+  }
+  return config;
+}
+
+async function postSettlementBatch(items, cloudConfig) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(`${cloudConfig.endpoint}/api/ingest/v1/batch`);
+    const bodyStr = JSON.stringify({ items });
+    const mod = url.protocol === "https:" ? https : http;
+    const req = mod.request(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${cloudConfig.authToken}`,
+        "X-Device-Id": cloudConfig.deviceId,
+        "Content-Length": Buffer.byteLength(bodyStr),
+      },
+      timeout: 60000,
+    }, (res) => {
+      let d = "";
+      res.on("data", (c) => (d += c));
+      res.on("end", () => resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode }));
+    });
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(); reject(new Error("cloud ingest timeout")); });
+    req.write(bodyStr);
+    req.end();
+  });
+}
+
+async function scrapeSettlement() {
+  const logPrefix = "[settlement]";
+  console.error(`${logPrefix} 开始结算数据采集, ${SETTLEMENT_MALLS.length} 店`);
+
+  const cloudConfig = loadSettlementCloudConfig();
+
+  // 打开 agentseller 页面建立 session
+  const page = await createSellerCentralPage("/", {
+    attempts: 2,
+    lite: true,
+    readyDelayMin: 1000,
+    readyDelayMax: 2000,
+    logPrefix,
+  });
+
+  const stats = { total: SETTLEMENT_MALLS.length, success: 0, expired: 0, error: 0 };
+  const batchItems = [];
+
+  try {
+    for (const mall of SETTLEMENT_MALLS) {
+      const { mall_id: mallId, store_code: tag } = mall;
+      try {
+        const result = await page.evaluate(
+          async ({ apiUrl, mid }) => {
+            try {
+              const resp = await fetch(apiUrl, {
+                method: "POST",
+                credentials: "include",
+                cache: "no-store",
+                headers: { "Content-Type": "application/json", mallid: mid },
+                body: "{}",
+              });
+              const text = await resp.text();
+              return { status: resp.status, text, ok: resp.ok };
+            } catch (e) {
+              return { status: 0, text: "", ok: false, err: e.message };
+            }
+          },
+          { apiUrl: `https://agentseller.temu.com${SETTLEMENT_INCOME_PATH}`, mid: mallId }
+        );
+
+        let body = null;
+        try { body = JSON.parse(result.text); } catch { /* ignore */ }
+
+        // session 过期立即中止
+        if (body?.error_code === 40001 || body?.error_code === "40001") {
+          console.error(`${logPrefix} [${tag}] session 过期，中止采集`);
+          stats.expired++;
+          break;
+        }
+
+        const list = Array.isArray(body?.result) ? body.result : [];
+        if (result.ok && list.length > 0) {
+          batchItems.push({
+            kind: "fetch-active-income-summary",
+            url: `https://agentseller.temu.com${SETTLEMENT_INCOME_PATH}`,
+            url_path: SETTLEMENT_INCOME_PATH,
+            method: "POST",
+            status: result.status,
+            ts: Date.now(),
+            site: "agentseller",
+            page: "robot/income-summary",
+            mall_id: mallId,
+            body,
+            bodyText: result.text.length > 200000 ? null : result.text,
+            requestBodyText: "{}",
+            bodySize: result.text.length,
+            activeSource: "settlement_robot",
+          });
+          stats.success++;
+          if (stats.success % 10 === 0) {
+            console.error(`${logPrefix} 已采 ${stats.success}/${stats.total}`);
+          }
+        } else {
+          stats.error++;
+          console.error(`${logPrefix} [${tag}] 无数据: status=${result.status}, items=${list.length}`);
+        }
+      } catch (e) {
+        stats.error++;
+        console.error(`${logPrefix} [${tag}] 异常: ${e.message}`);
+      }
+      // 每店间隔防限流
+      await randomDelay(400, 600);
+    }
+
+    // 上报 cloud ingest
+    let uploaded = 0;
+    if (batchItems.length > 0 && cloudConfig.authToken) {
+      const CHUNK = 30;
+      for (let i = 0; i < batchItems.length; i += CHUNK) {
+        try {
+          const resp = await postSettlementBatch(batchItems.slice(i, i + CHUNK), cloudConfig);
+          if (resp.ok) uploaded += Math.min(CHUNK, batchItems.length - i);
+          else console.error(`${logPrefix} 上报失败 HTTP ${resp.status}`);
+        } catch (e) {
+          console.error(`${logPrefix} 上报异常: ${e.message}`);
+        }
+      }
+      console.error(`${logPrefix} 上报 cloud: ${uploaded}/${batchItems.length} 条`);
+    } else if (!cloudConfig.authToken) {
+      console.error(`${logPrefix} 未配置 AUTH_TOKEN（.settlement-robot.env），跳过上报`);
+    }
+
+    console.error(`${logPrefix} 完成: 成功=${stats.success}, 失败=${stats.error}, 过期=${stats.expired}`);
+
+    return {
+      success: stats.success > 0,
+      stats,
+      uploadedToCloud: uploaded,
+      collectedAt: new Date().toISOString(),
+    };
+  } finally {
+    await page.close().catch(() => {});
+  }
+}
+
 async function scrapeCustomTask(taskKey, task = {}) {
+  // 结算数据采集
+  if (task?.custom === "settlement") {
+    return await scrapeSettlement();
+  }
+
   if (task?.custom !== "fluxAnalysis") {
     throw new Error(`Unsupported custom task: ${taskKey}`);
   }
@@ -9363,6 +9571,8 @@ async function handleRequest(body) {
       return await yunqiHandlers.yunqiDbSelectionIds();
     case "yunqi_db_categories":
       return await yunqiHandlers.yunqiDbCategories();
+    case "yunqi_db_export_auto_price":
+      return await yunqiHandlers.yunqiDbExportAutoPrice(params || {});
     case "price_review_scan":
       return await handlePriceReviewScan(params || {});
     case "price_review_list":

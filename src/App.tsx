@@ -27,7 +27,6 @@ function lazyWithPreload<T extends ComponentType<any>>(factory: LazyFactory<T>) 
 }
 
 const AppLayout = lazyWithPreload(() => import("./components/Layout/AppLayout"));
-const Dashboard = lazyWithPreload(() => import("./pages/Dashboard"));
 const ShopOverview = lazyWithPreload(() => import("./pages/ShopOverview"));
 const AfterSales = lazyWithPreload(() => import("./pages/AfterSales"));
 const AccountManager = lazyWithPreload(() => import("./pages/AccountManager"));
@@ -60,6 +59,7 @@ const OperationStoreDetail = lazyWithPreload(() => import("./pages/OperationStor
 const TemuAuthManager = lazyWithPreload(() => import("./pages/TemuAuthManager"));
 const AutoPurchase = lazyWithPreload(() => import("./pages/AutoPurchase"));
 const AutoShipMap = lazyWithPreload(() => import("./pages/AutoShipMap"));
+const Settlement = lazyWithPreload(() => import("./pages/Settlement"));
 
 const CORE_ROUTE_PRELOADERS = [
   AppLayout.preload,
@@ -79,7 +79,6 @@ const CORE_ROUTE_PRELOADERS = [
   Settings.preload,
   UserManagement.preload,
   PriceReview.preload,
-  Dashboard.preload,
   CompetitorAnalysis.preload,
   SelectionPlaza.preload,
   ProductCreate.preload,
@@ -362,9 +361,9 @@ function App() {
               <Route path="image-studio-gpt" element={<RoleRoute path="/image-studio-gpt"><ImageStudioGPT /></RoleRoute>} />
               <Route path="image-studio-agent" element={<RoleRoute path="/image-studio-agent"><ImageStudioAgent /></RoleRoute>} />
               <Route path="auto-image-swap" element={<RoleRoute path="/auto-image-swap"><AutoImageSwap /></RoleRoute>} />
-              <Route path="collect" element={<RoleRoute path="/collect"><Dashboard /></RoleRoute>} />
-              <Route path="temu-robots" element={<RoleRoute path="/collect"><TemuRobots /></RoleRoute>} />
-              <Route path="multi-store-cloud" element={<Navigate to="/collect" replace />} />
+              <Route path="collect" element={<Navigate to="/" replace />} />
+              <Route path="temu-robots" element={<RoleRoute path="/temu-robots"><TemuRobots /></RoleRoute>} />
+              <Route path="multi-store-cloud" element={<Navigate to="/" replace />} />
               <Route path="jushuitan-import" element={<Navigate to="/product-master-data" replace />} />
               <Route path="accounts" element={<RoleRoute path="/accounts"><AccountManager /></RoleRoute>} />
               <Route path="temu-auth" element={<RoleRoute path="/temu-auth"><TemuAuthManager /></RoleRoute>} />
@@ -383,6 +382,7 @@ function App() {
               <Route path="qc-outbound" element={<RoleRoute path="/qc-outbound"><QcOutboundCenter /></RoleRoute>} />
               <Route path="auto-purchase" element={<RoleRoute path="/auto-purchase"><AutoPurchase /></RoleRoute>} />
               <Route path="auto-ship-map" element={<RoleRoute path="/auto-ship-map"><AutoShipMap /></RoleRoute>} />
+              <Route path="settlement" element={<RoleRoute path="/settlement"><Settlement /></RoleRoute>} />
               <Route path="work-items" element={<RoleRoute path="/work-items"><WorkItems /></RoleRoute>} />
               <Route path="users" element={<RoleRoute path="/users"><UserManagement /></RoleRoute>} />
               <Route path="erp-debug" element={<RoleRoute path="/erp-debug"><ErpDebug /></RoleRoute>} />

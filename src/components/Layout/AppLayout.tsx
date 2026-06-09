@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { Badge, Button, Dropdown, Layout, List, Menu, Space, Tag } from "antd";
 import {
+  AccountBookOutlined,
   ApiOutlined,
   AppstoreOutlined,
   ArrowRightOutlined,
@@ -64,7 +65,6 @@ const menuItems = [
     key: "group-data",
     label: "数据",
     children: [
-      { key: "/collect", icon: <SyncOutlined />, label: "数据采集" },
       { key: "/temu-robots", icon: <DatabaseOutlined />, label: "TEMU 机器人" },
     ],
   },
@@ -76,6 +76,7 @@ const menuItems = [
       { key: "/multi-store-report", icon: <BarChartOutlined />, label: "多店报表" },
       { key: "/ops-workbench", icon: <FundProjectionScreenOutlined />, label: "运营工作台" },
       { key: "/auto-purchase", icon: <PlusCircleOutlined />, label: "采购备货" },
+      { key: "/settlement", icon: <AccountBookOutlined />, label: "财务结算" },
       { key: "/products", icon: <ShoppingOutlined />, label: "商品管理" },
       { key: "/selection-plaza", icon: <AppstoreOutlined />, label: "选品广场" },
       { key: "/browser-multi", icon: <RocketOutlined />, label: "浏览器多开" },
@@ -143,7 +144,7 @@ export default function AppLayout() {
   } else if (location.pathname === "/dashboard") {
     selectedKey = "/shop";
   } else if (location.pathname === "/tasks") {
-    selectedKey = "/collect";
+    selectedKey = "/temu-robots";
   }
 
   const selectedGroupKey = useMemo(() => {
@@ -210,7 +211,7 @@ export default function AppLayout() {
   }, []);
 
   const noAccount = accounts.length === 0;
-  const showExtensionBanner = currentRole !== "operations" && canUseCollection && location.pathname !== "/collect";
+  const showExtensionBanner = currentRole !== "operations" && canUseCollection && location.pathname !== "/settings";
 
   const accountMenuItems = [
     ...accounts.map((account) => ({
@@ -271,8 +272,8 @@ export default function AppLayout() {
         />
       )}
       <div className="app-notification-popover__footer">
-        <Button size="small" type="link" style={{ padding: 0 }} onClick={() => navigate("/collect")}>
-          查看全部采集任务
+        <Button size="small" type="link" style={{ padding: 0 }} onClick={() => navigate("/settings")}>
+          采集设置
         </Button>
       </div>
     </div>
@@ -330,7 +331,7 @@ export default function AppLayout() {
             {canUseCollection ? (
             <Button
               type="text"
-              onClick={() => navigate("/collect")}
+              onClick={() => navigate("/settings")}
               className={[
                 "app-status-chip",
                 collecting ? "is-processing" : "",

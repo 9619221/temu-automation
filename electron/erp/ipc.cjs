@@ -19160,6 +19160,14 @@ function confirmInboundReceiptFinalWithoutBatch({ db, services, receipt, actor }
   const batches = createBatchesForReceipt({ db, services, receipt: current, actor });
   current = getInboundReceipt(db, current.id);
   syncPurchaseAfterInboundReceipt(db, services, current, actor, { allowMarkInbounded: true });
+  try {
+    const lines = db.prepare("SELECT sku_id FROM erp_inbound_receipt_lines WHERE receipt_id = ?").all(current.id);
+    for (const line of lines) {
+      const key = `pipeline|restock|${line.sku_id}`;
+      db.prepare("INSERT INTO op_task_state (task_key, status, owner, note, updated_at) VALUES (?, 'pending', NULL, ?, ?) ON CONFLICT(task_key) DO NOTHING")
+        .run(key, `入库完成，检查是否需要备货 (${current.receipt_no || current.id})`, Date.now());
+    }
+  } catch (_) { /* op_task_state 表可能不存在 */ }
   return { receipt: toCamelRow(current), batches };
 }
 

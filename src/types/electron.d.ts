@@ -496,6 +496,33 @@ interface ErpJushuitanAPI {
   listRaw: (params?: Record<string, any>) => Promise<any[]>;
 }
 
+interface PipelineSkuRow {
+  sku_id: string;
+  sku_code: string;
+  name: string | null;
+  image: string | null;
+  stage: string;
+  today_sales: number | null;
+  w7_sales: number | null;
+  m30_sales: number | null;
+  warehouse_stock: number | null;
+  advice_qty: number | null;
+  local_available: number;
+  local_reserved: number;
+  review_count: number;
+  avg_score: number | null;
+  bad_reviews: number;
+  return_count: number;
+  risk_tags: string[];
+}
+
+interface PipelineOverviewData {
+  generated_at: number;
+  sku_count: number;
+  summary: Record<string, number>;
+  stages: Record<string, PipelineSkuRow[]>;
+}
+
 interface ErpPurchaseUpdateEvent {
   type: "purchase:update";
   action: string;
@@ -896,6 +923,8 @@ interface ErpAPI {
     purchase: (options?: { includeTest?: boolean }) => Promise<ErpPurchaseReportResponse>;
     warehouseInventory: (options?: { includeTest?: boolean }) => Promise<{ ok: boolean; data?: { generated_at: number; store_count: number; summary: { total_qty: number; total_value: number; available_qty: number; reserved_qty: number; sku_count: number }; stores: Array<{ account_id: string; account_name: string | null; sku_count: number; available_qty: number; reserved_qty: number; blocked_qty: number; defective_qty: number; rework_qty: number; total_qty: number; stock_value: number; batch_count: number }> }; error?: string }>;
     settlement: (options?: { startDate?: string; endDate?: string }) => Promise<{ ok: boolean; data?: { stores: Array<{ mall_id: string; store_code: string | null; mall_name: string | null; owner: string | null; fund_detail: { in_total: number; out_total: number; by_category: Record<string, number> } | null; revenue: number; cost: number; qty: number; settlement_detail: any | null }>; fund_detail_available: boolean; financials_available: boolean; date_range: { start: string | null; end: string | null } }; error?: string }>;
+    pipelineOverview: (options?: { force?: boolean }) => Promise<{ ok: boolean; data?: PipelineOverviewData; error?: string }>;
+    productRiskTags: (options?: { skuCodes?: string[]; skuCode?: string }) => Promise<{ ok: boolean; data?: { generated_at: number; rows: Array<{ sku_code: string; risk_tags: string[] }> }; error?: string }>;
   };
   opTask?: {
     list: () => Promise<{ ok: boolean; data?: { rows: Array<{ task_key: string; status: "done" | "ignored"; owner: string | null; note: string | null; updated_at: number }> }; error?: string }>;

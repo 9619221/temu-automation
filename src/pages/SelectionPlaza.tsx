@@ -5,6 +5,7 @@ import {
   Button,
   Card,
   Cascader,
+  Checkbox,
   Col,
   Empty,
   Image,
@@ -35,6 +36,7 @@ import {
   SearchOutlined,
   ShoppingOutlined,
   StarFilled,
+  UploadOutlined,
   WarningOutlined,
 } from "@ant-design/icons";
 import { readPageCache, writePageCache } from "../utils/pageCache";
@@ -476,6 +478,8 @@ export default function SelectionPlaza() {
   const [poolStatusFilter, setPoolStatusFilter] = useState<string>("");
 
   const [activeTab, setActiveTab] = useState("plaza");
+  const [selectedPoolIds, setSelectedPoolIds] = useState<Set<string>>(new Set());
+  const [exportLoading, setExportLoading] = useState(false);
 
   // ---- 数据加载 ----
 
@@ -643,6 +647,46 @@ export default function SelectionPlaza() {
     const url = item.product_url || (item.goods_id ? `https://www.temu.com/goods.html?goods_id=${item.goods_id}` : "");
     if (url) window.open(url, "_blank");
   };
+
+  // 切换选品池卡片的选中状态
+  const togglePoolSelect = useCallback((goodsId: string) => {
+    setSelectedPoolIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(goodsId)) next.delete(goodsId);
+      else next.add(goodsId);
+      return next;
+    });
+  }, []);
+
+  // 全选 / 取消全选（仅限可上品的 want / sourced 状态）
+  const eligiblePoolRows = useMemo(
+    () => poolRows.filter((r) => r.status === "want" || r.status === "sourced"),
+    [poolRows],
+  );
+
+  const toggleSelectAll = useCallback(() => {
+    if (selectedPoolIds.size >= eligiblePoolRows.length && eligiblePoolRows.length > 0) {
+      setSelectedPoolIds(new Set());
+    } else {
+      setSelectedPoolIds(new Set(eligiblePoolRows.map((r) => r.goods_id)));
+    }
+  }, [selectedPoolIds.size, eligiblePoolRows]);
+
+  // 批量上品
+  const handleBatchExport = useCallback(async () => {
+    if (!selectedPoolIds.size) return;
+    setExportLoading(true);
+    try {
+      const goodsIds = Array.from(selectedPoolIds);
+      await (window.electronAPI as any)?.yunqiDb?.exportAutoPrice?.({ goodsIds });
+      message.success(`已提交 ${goodsIds.length} 个商品的批量上品任务`);
+      setSelectedPoolIds(new Set());
+    } catch (e: any) {
+      message.error(e?.message || "批量上品失败");
+    } finally {
+      setExportLoading(false);
+    }
+  }, [selectedPoolIds]);
 
   // ---- 生命周期 ----
 
@@ -938,6 +982,35 @@ export default function SelectionPlaza() {
         </Row>
       </Card>
 
+      {/* 批量上品工具栏 */}
+      {poolRows.length > 0 && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+          <Space size={8}>
+            <Checkbox
+              checked={selectedPoolIds.size > 0 && selectedPoolIds.size >= eligiblePoolRows.length && eligiblePoolRows.length > 0}
+              indeterminate={selectedPoolIds.size > 0 && selectedPoolIds.size < eligiblePoolRows.length}
+              onChange={toggleSelectAll}
+            >
+              全选可上品
+            </Checkbox>
+            {selectedPoolIds.size > 0 && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                已选 {selectedPoolIds.size} 件（仅"想上"和"已找到货源"状态可上品）
+              </Text>
+            )}
+          </Space>
+          <Button
+            type="primary"
+            icon={<UploadOutlined />}
+            disabled={selectedPoolIds.size === 0}
+            loading={exportLoading}
+            onClick={handleBatchExport}
+          >
+            {selectedPoolIds.size > 0 ? `批量上品(${selectedPoolIds.size})` : "批量上品"}
+          </Button>
+        </div>
+      )}
+
       {/* 选品池网格 */}
       {poolRows.length === 0 ? (
         <Card style={CARD_STYLE}>
@@ -945,20 +1018,46 @@ export default function SelectionPlaza() {
         </Card>
       ) : (
         <div style={PRODUCT_GRID_STYLE}>
-          {poolRows.map((item) => (
-            <div key={item.goods_id} style={{ minWidth: 0 }}>
-              <ProductCard
-                item={item}
-                inPool
-                pool
-                onAdd={() => {}}
-                onRemove={() => removeFromPool(item.goods_id)}
-                onOpen={() => openProduct(item)}
-                onStatusChange={(s) => changeStatus(item.goods_id, s)}
-                onNoteUpdate={(n) => updateNote(item.goods_id, n)}
-              />
-            </div>
-          ))}
+          {poolRows.map((item) => {
+            const isEligible = item.status === "want" || item.status === "sourced";
+            const isSelected = selectedPoolIds.has(item.goods_id);
+            return (
+              <div
+                key={item.goods_id}
+                style={{
+                  minWidth: 0,
+                  position: "relative",
+                  borderRadius: 10,
+                  outline: isSelected ? `2px solid ${BLUE}` : "none",
+                  outlineOffset: -1,
+                  transition: "outline .15s ease",
+                }}
+              >
+                {isEligible && (
+                  <Checkbox
+                    checked={isSelected}
+                    onChange={() => togglePoolSelect(item.goods_id)}
+                    style={{
+                      position: "absolute",
+                      top: 8,
+                      left: 8,
+                      zIndex: 2,
+                    }}
+                  />
+                )}
+                <ProductCard
+                  item={item}
+                  inPool
+                  pool
+                  onAdd={() => {}}
+                  onRemove={() => removeFromPool(item.goods_id)}
+                  onOpen={() => openProduct(item)}
+                  onStatusChange={(s) => changeStatus(item.goods_id, s)}
+                  onNoteUpdate={(n) => updateNote(item.goods_id, n)}
+                />
+              </div>
+            );
+          })}
         </div>
       )}
     </Space>

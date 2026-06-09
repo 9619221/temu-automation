@@ -703,7 +703,7 @@ export default function ProductDetail() {
         icon={<DatabaseOutlined />}
         title={title}
         description={description}
-        action={<Button onClick={() => navigate("/collect")}>前往采集</Button>}
+        action={<Button onClick={() => navigate("/products")}>返回商品列表</Button>}
       />
     </div>
   );
@@ -740,13 +740,8 @@ export default function ProductDetail() {
           <EmptyGuide
             icon={<DatabaseOutlined />}
             title="商品未找到"
-            description="可以先回到商品列表重新选择，或者重新执行商品列表与销售数据采集。"
-            action={(
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "center" }}>
-                <Button type="primary" onClick={() => navigate("/products")}>返回商品列表</Button>
-                <Button onClick={() => navigate("/collect")}>前往采集</Button>
-              </div>
-            )}
+            description="可以先回到商品列表重新选择，数据由扩展自动采集。"
+            action={<Button type="primary" onClick={() => navigate("/products")}>返回商品列表</Button>}
           />
         </div>
       </div>
@@ -1212,11 +1207,10 @@ export default function ProductDetail() {
               {dataIssues.slice(0, 4).join("；")}
               {dataIssues.length > 4 ? `；另有 ${dataIssues.length - 4} 个数据源也需要补采。` : ""}
               <div className="friendly-alert__details">
-                {diagnostics?.syncedAt ? `最近一次采集时间：${diagnostics.syncedAt}` : "建议回到数据采集页补齐该商品相关数据。"}
+                {diagnostics?.syncedAt ? `最近一次采集时间：${diagnostics.syncedAt}` : "数据由扩展自动采集，请确认 Temu 后台已打开。"}
               </div>
             </div>
           )}
-          action={<Button type="link" onClick={() => navigate("/collect")}>前往采集</Button>}
         />
       )}
 

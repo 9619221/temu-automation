@@ -3340,7 +3340,7 @@ export default function ProductList() {
   const fluxDetailFetchStateRef = useRef<Map<string, "loading" | "done" | "empty">>(new Map());
   void fluxDetailFetchStateRef; // 保留
   const gpDetailRangeOptions: Array<"1d" | "7d" | "30d"> = ["30d", "7d", "1d"];
-  const gpDetailCacheMissingMessage = "该商品的动销详情还没有进入缓存，请先到数据采集运行“动销详情 / 地区明细”。";
+  const gpDetailCacheMissingMessage = "该商品的动销详情还没有进入缓存，数据由扩展自动采集，请稍后再试。";
 
   const openGpDetail = (record: any, range?: "1d" | "7d" | "30d") => {
     const gp = record?.gp;
@@ -6557,7 +6557,7 @@ export default function ProductList() {
           message="部分商品数据还没有准备好"
           description={dataIssues.slice(0, 3).join("；")}
           action={(
-            <Button type="link" onClick={() => navigate("/collect")}>查看采集状态</Button>
+            <Button type="link" onClick={() => navigate("/settings")}>查看设置</Button>
           )}
         />
       ) : null}
@@ -6577,7 +6577,7 @@ export default function ProductList() {
                 {hasAccount === false ? (
                   <Button type="primary" onClick={() => navigate("/settings")}>前往设置云端</Button>
                 ) : (
-                  <Button type="primary" onClick={() => navigate("/collect")}>查看采集状态</Button>
+                  <Button type="primary" onClick={() => navigate("/settings")}>查看设置</Button>
                 )}
                 <Button onClick={loadProducts}>重新检查</Button>
               </div>

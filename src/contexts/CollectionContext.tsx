@@ -28,6 +28,7 @@ export const COLLECT_TASKS: CollectTask[] = [
   { key: "sales", label: "销售数据", storeKey: "temu_sales", category: "核心数据" },
   { key: "salesChart", label: "销售图表", storeKey: "temu_raw_salesChart", category: "核心数据" },
   { key: "flux", label: "流量分析", storeKey: "temu_flux", category: "核心数据" },
+  { key: "settlement", label: "结算数据", storeKey: "temu_settlement", category: "核心数据" },
   { key: "goodsData", label: "商品数据", storeKey: "temu_raw_goodsData", category: "商品数据" },
   { key: "lifecycle", label: "上新生命周期", storeKey: "temu_raw_lifecycle", category: "商品数据" },
   { key: "yunduOverall", label: "已加站点+处罚", storeKey: "temu_raw_yunduOverall", category: "商品数据" },

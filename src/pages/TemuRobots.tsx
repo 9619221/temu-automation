@@ -27,7 +27,7 @@ import PageHeader from "../components/PageHeader";
 
 const { Text } = Typography;
 
-type ScrapeMethod = "scrapeSales" | "scrapeProducts" | "scrapeGoodsData" | "scrapeAfterSales" | "scrapeActivity";
+type ScrapeMethod = "scrapeSettlement";
 type RobotTaskStatus = "pending" | "running" | "success" | "error" | "unavailable";
 type PreviewRow = Record<string, unknown>;
 
@@ -47,11 +47,10 @@ interface RobotTaskState {
   usedStoreKey?: string;
 }
 
+// 商品信息和售后已迁移到扩展 page world 主动采集（利用 Temu wrap 自动注入 anti-content 签名，hook.js 捕获上报）。
+// 机器人只保留结算数据（无对应扩展 API，需 Playwright 完整浏览器环境）。
 const ROBOT_TASKS = [
-  { key: "products", label: "商品信息", method: "scrapeProducts", storeKeys: ["temu_products"] },
-  { key: "quality", label: "质量分", method: "scrapeGoodsData", storeKeys: ["temu_raw_goodsData", "temu_raw_yunduQualityMetrics"] },
-  { key: "afterSales", label: "售后", method: "scrapeAfterSales", storeKeys: ["temu_raw_salesReturn", "temu_raw_returnOrders"] },
-  { key: "activity", label: "活动报价", method: "scrapeActivity", storeKeys: ["temu_raw_activity"] },
+  { key: "settlement", label: "结算数据", method: "scrapeSettlement", storeKeys: ["temu_settlement"] },
 ] as const satisfies readonly RobotTask[];
 
 type RobotTaskKey = (typeof ROBOT_TASKS)[number]["key"];

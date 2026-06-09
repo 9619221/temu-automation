@@ -4563,6 +4563,10 @@ ipcMain.handle("automation:scrape-activity", async () => {
   return sendCmd("scrape_activity");
 });
 
+ipcMain.handle("automation:scrape-settlement", async () => {
+  return sendCmd("scrape_settlement");
+});
+
 ipcMain.handle("automation:scrape-performance", async () => {
   return sendCmd("scrape_performance");
 });
@@ -5274,6 +5278,28 @@ ipcMain.handle("yunqi-db:selection-update", async (_e, params) => __yunqiIsClien
 ipcMain.handle("yunqi-db:selection-list", async (_e, params) => __yunqiIsClient() ? __yunqiRemote(`/api/erp/reports/yunqi-selection-list?status=${encodeURIComponent((params && params.status) || "")}`, { method: "GET" }) : sendCmd("yunqi_db_selection_list", params || {}));
 ipcMain.handle("yunqi-db:selection-ids", async () => __yunqiIsClient() ? __yunqiRemote("/api/erp/reports/yunqi-selection-ids", { method: "GET" }) : sendCmd("yunqi_db_selection_ids", {}));
 ipcMain.handle("yunqi-db:categories", async () => __yunqiIsClient() ? __yunqiRemote("/api/erp/reports/yunqi-categories", { method: "GET" }) : sendCmd("yunqi_db_categories", {}));
+ipcMain.handle("yunqi-db:export-auto-price", async (_e, params) => {
+  const goodsIds = params?.goodsIds || [];
+  if (!goodsIds.length) return { ok: false, reason: "无选中商品" };
+  const exportResult = await sendCmd("yunqi_db_export_auto_price", { goodsIds });
+  if (!exportResult?.ok) return exportResult;
+  try {
+    const fs = require("fs");
+    const path = require("path");
+    const os = require("os");
+    const rows = exportResult.csvRows || [];
+    if (!rows.length) return { ok: false, reason: "导出行为空" };
+    const headers = Object.keys(rows[0]);
+    const csvLines = [headers.join(","), ...rows.map(r => headers.map(h => `"${String(r[h] || "").replace(/"/g, '""')}"`).join(","))];
+    const tmpPath = path.join(os.tmpdir(), `selection-auto-price-${Date.now()}.csv`);
+    fs.writeFileSync(tmpPath, "﻿" + csvLines.join("\n"), "utf-8");
+    const result = await sendCmd("auto_pricing", { csvPath: tmpPath }, { timeoutMs: 300000 });
+    try { fs.unlinkSync(tmpPath); } catch (_) {}
+    return { ok: true, exportCount: exportResult.count, pricingResult: result };
+  } catch (e) {
+    return { ok: false, error: `上品流程失败: ${e?.message || String(e)}`, exportCount: exportResult.count };
+  }
+});
 
 // ============ 核价筛选器 IPC ============
 ipcMain.handle("price-review:scan-now", async (_e, params) => {

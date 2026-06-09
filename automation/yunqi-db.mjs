@@ -841,3 +841,43 @@ export function listSelectionIds() {
   const db = getDb();
   return db.prepare(`SELECT goods_id FROM selection_pool`).all().map((r) => String(r.goods_id));
 }
+
+/**
+ * 选品→上品桥：把选品池商品导出为 autoPricingFromCSV 能吃的格式，
+ * 直接在内存中生成行数据（不写临时 CSV），由 worker 侧调用 autoPricing。
+ * 同时把选品池 status 标记为 listing。
+ */
+export function exportSelectionForAutoPricing(goodsIds = []) {
+  if (!goodsIds.length) return { ok: false, reason: "无选中商品" };
+  const db = getDb();
+  const ph = goodsIds.map(() => "?").join(",");
+  const rows = db.prepare(`
+    SELECT sp.goods_id, sp.title_zh, sp.title_en, sp.main_image, sp.usd_price, sp.category_zh,
+           p.carousel_images, p.backend_category, p.product_url
+      FROM selection_pool sp
+      LEFT JOIN products p ON p.goods_id = sp.goods_id
+     WHERE sp.goods_id IN (${ph}) AND sp.status IN ('want', 'sourced')
+  `).all(...goodsIds);
+  if (!rows.length) return { ok: false, reason: "没有可上品的商品(需 want/sourced 状态)" };
+
+  const csvRows = rows.map(r => ({
+    "商品标题（中文）": r.title_zh || "",
+    "商品标题（英文）": r.title_en || "",
+    "商品主图": r.main_image || "",
+    "商品轮播图": r.carousel_images || "",
+    "美元价格($)": r.usd_price || 0,
+    "分类（中文）": r.category_zh || "",
+    "后台分类": r.backend_category || "",
+    "goods_id": r.goods_id,
+    "product_url": r.product_url || "",
+  }));
+
+  const now = new Date().toISOString();
+  const update = db.prepare("UPDATE selection_pool SET status = 'listing', updated_at = ? WHERE goods_id = ?");
+  const tx = db.transaction(() => {
+    for (const r of rows) update.run(now, r.goods_id);
+  });
+  tx();
+
+  return { ok: true, count: csvRows.length, csvRows, goodsIds: rows.map(r => r.goods_id) };
+}

@@ -2778,6 +2778,15 @@ function buildReviews(db, options = {}) {
     bad_rate: scored ? Number(((bad / scored) * 100).toFixed(1)) : null,
     pic_count: withPic,
   };
+  try {
+    const stmt = db.prepare("INSERT INTO op_task_state (task_key, status, owner, note, updated_at) VALUES (?, 'pending', NULL, ?, ?) ON CONFLICT(task_key) DO NOTHING");
+    for (const r of out) {
+      if (r.score != null && r.score <= 2) {
+        const snippet = (r.comment_zh || r.comment || "").slice(0, 50);
+        stmt.run(`review_alert|${r.mall_id}|${r.review_id}`, `差评(${r.score}分): ${snippet}`, Date.now());
+      }
+    }
+  } catch (_) { /* op_task_state 表可能不存在 */ }
   return { generated_at: Date.now(), row_count: out.length, rows: out, summary, source: "extension" };
 }
 
@@ -2839,6 +2848,194 @@ function buildWarehouseInventory(db, options = {}) {
   };
 }
 
+// ─── 商品生命周期管线概览 ───────────────────────────────────────────────
+// 实时计算每个 erp_skus 处于哪个生命周期阶段，返回按阶段分组的汇总 + 明细。
+// 前端再合并云启侧(选品/核价)的数据，拼出完整 13 阶段管线。
+const _pipelineCache = new Map();
+
+function buildPipelineOverview(db, options = {}) {
+  if (!db) throw new Error("buildPipelineOverview: db is required");
+  if (!options.force) {
+    const c = _pipelineCache.get("p");
+    if (c && Date.now() - c.ts < REPORT_CACHE_TTL_MS) return c.data;
+  }
+
+  // 1) 采购中的 SKU（PO 非终态）
+  const purchasingSkus = new Set(
+    optionalAllLocal(db, `
+      SELECT DISTINCT pol.sku_id FROM erp_purchase_order_lines pol
+      JOIN erp_purchase_orders po ON po.id = pol.po_id
+      WHERE po.status NOT IN ('inbounded','cancelled','closed')`, [])
+      .map(r => r.sku_id)
+  );
+
+  // 2) 入库中的 SKU（入库单非终态）
+  const inboundSkus = new Set(
+    optionalAllLocal(db, `
+      SELECT DISTINCT irl.sku_id FROM erp_inbound_receipt_lines irl
+      JOIN erp_inbound_receipts ir ON ir.id = irl.receipt_id
+      WHERE ir.status NOT IN ('inbounded_pending_qc','cancelled')
+        AND ir.status <> 'counted'`, [])
+      .map(r => r.sku_id)
+  );
+
+  // 3) 本地库存 > 0 的 SKU
+  const invMap = new Map();
+  for (const r of optionalAllLocal(db, `SELECT sku_id, SUM(available_qty) aq, SUM(reserved_qty) rq FROM erp_inventory_batches GROUP BY sku_id`, [])) {
+    if (toNum(r.aq) > 0 || toNum(r.rq) > 0) invMap.set(r.sku_id, { available: toNum(r.aq), reserved: toNum(r.rq) });
+  }
+
+  // 4) Temu 官方 salesv2 数据（按 ext_code→internal_sku_code 关联）
+  const salesMap = new Map();
+  for (const r of optionalAllLocal(db, `
+    SELECT ext_code, mall_id, title, thumb_url,
+           SUM(COALESCE(today_sales, 0)) today, SUM(COALESCE(last7d_sales, 0)) w7,
+           SUM(COALESCE(last30d_sales, 0)) m30, SUM(COALESCE(warehouse_stock, 0)) wh,
+           SUM(COALESCE(advice_qty, 0)) adv, SUM(COALESCE(lack_quantity, 0)) lack
+      FROM erp_temu_openapi_sku_sales
+     WHERE ext_code IS NOT NULL AND ext_code <> ''
+     GROUP BY ext_code`, [])) {
+    salesMap.set(r.ext_code, { mall_id: r.mall_id, title: r.title, thumb: r.thumb_url, today: toNum(r.today), w7: toNum(r.w7), m30: toNum(r.m30), wh: toNum(r.wh), adv: toNum(r.adv), lack: toNum(r.lack) });
+  }
+
+  // 5) 评价聚合（按 product_skc_id）
+  const reviewMap = new Map();
+  for (const r of optionalAllLocal(db, `
+    SELECT product_skc_id, COUNT(*) cnt, AVG(score) avg_s,
+           SUM(CASE WHEN score <= 2 THEN 1 ELSE 0 END) bad
+      FROM erp_temu_reviews WHERE product_skc_id IS NOT NULL AND product_skc_id <> ''
+     GROUP BY product_skc_id`, [])) {
+    reviewMap.set(r.product_skc_id, { count: toNum(r.cnt), avg_score: r.avg_s ? Math.round(r.avg_s * 10) / 10 : null, bad_count: toNum(r.bad) });
+  }
+
+  // 6) 售后退货聚合（按 internal_sku_code）
+  const returnMap = new Map();
+  for (const r of optionalAllLocal(db, `
+    SELECT sku_code, COUNT(*) cnt FROM consign_after_sale_items
+     WHERE sku_code IS NOT NULL AND sku_code <> ''
+     GROUP BY sku_code`, [])) {
+    returnMap.set(r.sku_code, toNum(r.cnt));
+  }
+
+  // 7) 遍历所有活跃 SKU，分配阶段
+  const skus = optionalAllLocal(db, `
+    SELECT id, internal_sku_code, product_name, image_url, temu_skc_id, temu_product_id, account_id, status
+      FROM erp_skus WHERE status = 'active'`, []);
+
+  const stages = {
+    selling: [],
+    needs_restock: [],
+    in_stock: [],
+    outbound: [],
+    inbound: [],
+    purchasing: [],
+    created: [],
+  };
+  const STAGE_ORDER = ["selling", "needs_restock", "in_stock", "outbound", "inbound", "purchasing", "created"];
+
+  for (const sku of skus) {
+    const code = sku.internal_sku_code;
+    const s = salesMap.get(code);
+    const inv = invMap.get(sku.id);
+    const rev = reviewMap.get(sku.temu_skc_id);
+    const retCnt = returnMap.get(code) || 0;
+
+    let stage;
+    if (s && s.m30 > 0 && s.adv > 0) stage = "needs_restock";
+    else if (s && s.m30 > 0) stage = "selling";
+    else if (inv) stage = "in_stock";
+    else if (inboundSkus.has(sku.id)) stage = "inbound";
+    else if (purchasingSkus.has(sku.id)) stage = "purchasing";
+    else stage = "created";
+
+    const row = {
+      sku_id: sku.id,
+      sku_code: code,
+      name: (s && s.title) || sku.product_name,
+      image: (s && s.thumb) || sku.image_url,
+      stage,
+      today_sales: s ? s.today : null,
+      w7_sales: s ? s.w7 : null,
+      m30_sales: s ? s.m30 : null,
+      warehouse_stock: s ? s.wh : null,
+      advice_qty: s ? s.adv : null,
+      local_available: inv ? inv.available : 0,
+      local_reserved: inv ? inv.reserved : 0,
+      review_count: rev ? rev.count : 0,
+      avg_score: rev ? rev.avg_score : null,
+      bad_reviews: rev ? rev.bad_count : 0,
+      return_count: retCnt,
+      risk_tags: _computeRiskTags(s, rev, retCnt, s ? s.m30 : 0),
+    };
+    stages[stage].push(row);
+  }
+
+  const summary = {};
+  for (const st of STAGE_ORDER) summary[st] = stages[st].length;
+
+  const data = { generated_at: Date.now(), sku_count: skus.length, summary, stages };
+  _pipelineCache.set("p", { ts: Date.now(), data });
+  return data;
+}
+
+function _computeRiskTags(sales, review, returnCount, m30Sales) {
+  const tags = [];
+  if (review && review.avg_score !== null && review.avg_score < 3) tags.push("low_score");
+  if (review && review.bad_count >= 3) tags.push("many_bad_reviews");
+  if (m30Sales > 0 && returnCount > 0 && returnCount / m30Sales > 0.05) tags.push("high_return_rate");
+  if (sales && sales.lack > 0) tags.push("stock_out");
+  if (sales && sales.adv > 0 && sales.wh <= 0) tags.push("urgent_restock");
+  return tags;
+}
+
+// 单品风险标签查询（给商品面板用）
+function buildProductRiskTags(db, options = {}) {
+  if (!db) throw new Error("buildProductRiskTags: db is required");
+  const skuCode = options.skuCode;
+  const skuCodes = skuCode ? [skuCode] : (options.skuCodes || []);
+  if (!skuCodes.length) return { generated_at: Date.now(), rows: [] };
+
+  const ph = skuCodes.map(() => "?").join(",");
+
+  const salesRows = optionalAllLocal(db, `
+    SELECT ext_code, SUM(COALESCE(last30d_sales, 0)) m30, SUM(COALESCE(advice_qty, 0)) adv,
+           SUM(COALESCE(lack_quantity, 0)) lack, SUM(COALESCE(warehouse_stock, 0)) wh
+      FROM erp_temu_openapi_sku_sales WHERE ext_code IN (${ph}) GROUP BY ext_code`, skuCodes);
+  const sm = new Map(salesRows.map(r => [r.ext_code, r]));
+
+  const skuRows = optionalAllLocal(db, `SELECT id, internal_sku_code, temu_skc_id FROM erp_skus WHERE internal_sku_code IN (${ph})`, skuCodes);
+  const skcIds = skuRows.map(r => r.temu_skc_id).filter(Boolean);
+
+  let revMap = new Map();
+  if (skcIds.length) {
+    const ph2 = skcIds.map(() => "?").join(",");
+    const revRows = optionalAllLocal(db, `
+      SELECT product_skc_id, COUNT(*) cnt, AVG(score) avg_s, SUM(CASE WHEN score <= 2 THEN 1 ELSE 0 END) bad
+        FROM erp_temu_reviews WHERE product_skc_id IN (${ph2}) GROUP BY product_skc_id`, skcIds);
+    revMap = new Map(revRows.map(r => [r.product_skc_id, r]));
+  }
+
+  const retRows = optionalAllLocal(db, `SELECT sku_code, COUNT(*) cnt FROM consign_after_sale_items WHERE sku_code IN (${ph}) GROUP BY sku_code`, skuCodes);
+  const retM = new Map(retRows.map(r => [r.sku_code, toNum(r.cnt)]));
+
+  const rows = skuRows.map(sku => {
+    const s = sm.get(sku.internal_sku_code);
+    const rev = revMap.get(sku.temu_skc_id);
+    const retCnt = retM.get(sku.internal_sku_code) || 0;
+    const m30 = s ? toNum(s.m30) : 0;
+    return {
+      sku_code: sku.internal_sku_code,
+      risk_tags: _computeRiskTags(
+        s ? { lack: toNum(s.lack), adv: toNum(s.adv), wh: toNum(s.wh) } : null,
+        rev ? { avg_score: rev.avg_s ? Math.round(rev.avg_s * 10) / 10 : null, bad_count: toNum(rev.bad) } : null,
+        retCnt, m30
+      ),
+    };
+  });
+
+  return { generated_at: Date.now(), rows };
+}
+
 module.exports = {
   buildMultiStoreReport,
   buildWarehouseInventory,
@@ -2879,6 +3076,8 @@ module.exports = {
   ensureFundDetailSchema,
   querySettlementData,
   clearMultiStoreReportCache,
+  buildPipelineOverview,
+  buildProductRiskTags,
   // 暴露给测试用
   _internal: {
     fetchCloudReport, readMallDictionary, loginCloud,

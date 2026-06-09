@@ -18,6 +18,7 @@ export const SCRAPE_TASKS = {
   products:       { type: "page", path: "/goods/list", opts: { waitTime: 8000, waitForApi: "product/skc/pageQuery", waitForApiTimeout: 90000, paginate: true, paginateApi: "product/skc/pageQuery", paginateMaxPages: 30 } },
   orders:         { type: "page", path: "/stock/fully-mgt/order-manage", opts: { waitTime: 8000, waitForApi: "querySubOrderList", waitForApiTimeout: 90000 } },
   flux:           { type: "custom", path: "/main/flux-analysis-full", custom: "fluxAnalysis", opts: { siteLabel: "全球" } },
+  settlement:     { type: "custom", custom: "settlement" },
   dashboard:      { type: "page", path: "/", opts: { waitTime: 12000 } },
   aftersales:     { type: "page", path: "/main/aftersales/information" },
   soldout:        { type: "page", path: "/stock/fully-mgt/sale-manage/board/sku-sale-out" },

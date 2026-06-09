@@ -57,6 +57,10 @@ const ENROLL_RECORD_MAX_PAGES = 60; // 1498/50≈30页,留余量
 // 活动场次(scroll/match,补活动ID)多店自动采集:遍历云端 targets 各店,每轮采 N 个店、cursor 轮换覆盖全部
 const ACTIVITY_MATCH_TARGETS_STATE_KEY = "temu_monitor_activity_match_targets_state";
 const ACTIVITY_MATCH_MALLS_PER_RUN = 4; // 每轮采几个店(轮换),35店约9轮转完
+// 已报名活动记录多店主动采集:遍历云端 targets 各店(轮换),每店翻页采全量 /enroll/list
+const ENROLL_RECORD_TARGETS_STATE_KEY = "temu_monitor_enroll_record_targets_state";
+const ENROLL_RECORD_TARGETS_RUN_INTERVAL_MS = 2 * 60 * 60 * 1000; // 2h/轮
+const ENROLL_RECORD_TARGETS_MALLS_PER_RUN = 4; // 每轮 4 店,35店约9轮转完
 // JIT(全托管建议关闭) + VMI(普通备货单) 主动调度：替代桌面端 worker.mjs urgentOrders Playwright 任务。
 // 云端 /v1/jit-vmi-targets 给本租户近 30 天活跃 mall，SW 对每个 mall 调两个 venom 接口。
 const JIT_VMI_STATE_KEY = "temu_monitor_jit_vmi_state";
@@ -127,6 +131,24 @@ const FUND_DETAIL_RUN_INTERVAL_MS = 4 * 60 * 60 * 1000; // 每 4 小时一轮
 const FUND_DETAIL_MAX_PAGES = 10; // 每店最多翻 10 页（每页 50 条 = 最多 500 条）
 const FUND_DETAIL_PAGE_SIZE = 50;
 const FUND_DETAIL_PAGE_DELAY_MS = 600; // 翻页间隔（避 429）
+// 价格/改价主动采集：SW 后台定时按店翻页采申报价调整(price-adjust/page-query)+建议价(suggestedPrice/pageQuery)，
+// 带 mallid 头（仿高价限流，无需 anti-content）。数据 enqueue→cloud parsePriceAdjust/parseSuggestedPrice 落 skc_snapshots。
+const ALARM_PRICE = "temu-monitor.price";
+const PRICE_STATE_KEY = "temu_monitor_price_state";
+const PRICE_RUN_INTERVAL_MS = 4 * 60 * 60 * 1000;
+const PRICE_MAX_MALLS_PER_RUN = 8;
+const PRICE_MAX_PAGES = 10;
+const PRICE_PAGE_SIZE = 50;
+const PRICE_PAGE_DELAY_MS = 500;
+// 合规巡查主动采集：SW 后台定时按店翻页采 retrieval/board/pageQuery（违规命中 SKC），
+// 带 mallid 头。数据 enqueue→cloud parseComplianceBoard 回填 skc_snapshots.compliance_status。
+const ALARM_COMPLIANCE = "temu-monitor.compliance";
+const COMPLIANCE_STATE_KEY = "temu_monitor_compliance_state";
+const COMPLIANCE_RUN_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const COMPLIANCE_MAX_MALLS_PER_RUN = 8;
+const COMPLIANCE_MAX_PAGES = 10;
+const COMPLIANCE_PAGE_SIZE = 50;
+const COMPLIANCE_PAGE_DELAY_MS = 500;
 const FLOW_STATE_KEY = "temu_monitor_flow_state";
 const FLOW_RUN_INTERVAL_MS = 30 * 60 * 1000; // 每店每 30 分钟一轮（避 429）
 const FLOW_PAGE_SIZE = 100;
@@ -147,6 +169,20 @@ const QUALITY_RUN_INTERVAL_MS = 6 * 60 * 60 * 1000; // 每店每 6 小时一轮
 const QUALITY_PAGE_SIZE = 50;
 const QUALITY_MAX_PAGES = 10; // 50×10=500 商品/店，足够覆盖
 const QUALITY_PAGE_DELAY_MS = 500;
+// 商品列表 page world 主动采集（需 anti-content）：在已打开的 agentseller tab 的 MAIN world 调
+// /visage-agent-seller/product/skc/pageQuery，页面 Temu wrap 自动注入 anti-content 签名，
+// hook.js TrackedFetch 拦截 → enqueue → cloud。依赖至少一个已打开的 agentseller tab。
+const PRODUCTS_STATE_KEY = "temu_monitor_products_state";
+const PRODUCTS_RUN_INTERVAL_MS = 4 * 60 * 60 * 1000; // 每 4 小时一轮
+const PRODUCTS_PAGE_SIZE = 50;
+const PRODUCTS_MAX_PAGES = 30;  // 50×30 = 1500 SKC/店
+const PRODUCTS_PAGE_DELAY_MS = 600;
+// 售后信息 page world 主动采集（需 anti-content）：同商品列表，调 /mms/api/appalachian/afs/queryPageV3。
+const AFTERSALES_STATE_KEY = "temu_monitor_aftersales_state";
+const AFTERSALES_RUN_INTERVAL_MS = 4 * 60 * 60 * 1000;
+const AFTERSALES_PAGE_SIZE = 50;
+const AFTERSALES_MAX_PAGES = 20; // 50×20 = 1000 条/店
+const AFTERSALES_PAGE_DELAY_MS = 600;
 const FEISHU_SUPPLIER_TABLE_URL = "https://mcn24onb5t1o.feishu.cn/base/RLy7bndc4aCXhtsx4yAcr2d8nSg?table=tbl0UhZRpR0niDSt&view=vew5Spjz7c";
 const FEISHU_SUPPLIER_ONCE_KEY = "temu_monitor_feishu_supplier_once";
 
@@ -200,6 +236,8 @@ async function ensureRuntimeDefaults() {
   chrome.alarms.create(ALARM_INCOME_SUMMARY, { periodInMinutes: Math.max(1, INCOME_SUMMARY_RUN_INTERVAL_MS / 60000) });
   chrome.alarms.create(ALARM_SETTLEMENT, { periodInMinutes: Math.max(1, SETTLEMENT_RUN_INTERVAL_MS / 60000) });
   chrome.alarms.create(ALARM_FUND_DETAIL, { periodInMinutes: Math.max(1, FUND_DETAIL_RUN_INTERVAL_MS / 60000) });
+  chrome.alarms.create(ALARM_PRICE, { periodInMinutes: Math.max(1, PRICE_RUN_INTERVAL_MS / 60000) });
+  chrome.alarms.create(ALARM_COMPLIANCE, { periodInMinutes: Math.max(1, COMPLIANCE_RUN_INTERVAL_MS / 60000) });
   await clearAlarm(ALARM_COLLECT);
   const cur = await getStorage(["device_id", COLLECTOR_STATE_KEY, COLLECTOR_WINDOW_KEY, COLLECTOR_BOOT_VERSION_KEY, SALES_TREND_STATE_KEY, REVIEW_STATE_KEY, HPF_STATE_KEY, INCOME_SUMMARY_STATE_KEY, SETTLEMENT_STATE_KEY, FUND_DETAIL_STATE_KEY]);
   const patch = {};
@@ -335,6 +373,14 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     collectFundDetailFromTargets().catch((e) => console.warn("[sw] fund-detail collect err", e?.message || e));
     return;
   }
+  if (alarm.name === ALARM_PRICE) {
+    collectPriceFromTargets().catch((e) => console.warn("[sw] price collect err", e?.message || e));
+    return;
+  }
+  if (alarm.name === ALARM_COMPLIANCE) {
+    collectComplianceFromTargets().catch((e) => console.warn("[sw] compliance collect err", e?.message || e));
+    return;
+  }
   if (alarm.name !== ALARM_FLUSH) return;
   // 未配置兜底：onInstalled 阶段 fetch 偶尔失败（network stack 没准备好），
   // 这里 30s 一次重试，配置成功后立即心跳上来
@@ -354,9 +400,11 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   collectActivityMatchForCurrentMall().catch((e) => console.warn("[sw] activity match collect err", e?.message || e));
   collectActivityMatchFromTargets().catch((e) => console.warn("[sw] activity match targets collect err", e?.message || e));
   collectEnrollRecords().catch((e) => console.warn("[sw] enroll record collect err", e?.message || e));
+  collectEnrollRecordsFromTargets().catch((e) => console.warn("[sw] enroll record targets collect err", e?.message || e));
   collectJitVmiFromTargets().catch((e) => console.warn("[sw] jit/vmi collect err", e?.message || e));
   collectFlowForCurrentMall().catch((e) => console.warn("[sw] flow collect err", e?.message || e));
   collectQualityAllSites().catch((e) => console.warn("[sw] quality collect err", e?.message || e));
+  collectProductsAndAfterSalesViaPage().catch((e) => console.warn("[sw] products/aftersales page-world collect err", e?.message || e));
 });
 
 // 在任意 Temu tab 上抓 page world stats（供心跳用）
@@ -870,6 +918,77 @@ async function collectEnrollRecords() {
   }
   await setStorage({ [ENROLL_RECORD_STATE_KEY]: { ...state, last_run_at: now, last_success_at: Date.now(), last_enqueued: enqueued } });
   return { ok: true, enqueued };
+}
+
+// 多店版:遍历云端 targets 各店,每店翻页采全量 /enroll/list(含 signSessionList/sites/活动库存),
+// enqueue 上云后由 parser 落 temu_activity_enroll_record。每 2h 一轮,4 店/轮,cursor 轮换覆盖全部。
+async function collectEnrollRecordsFromTargets() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", ENROLL_RECORD_TARGETS_STATE_KEY]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
+  const now = Date.now();
+  const state = cfg[ENROLL_RECORD_TARGETS_STATE_KEY] || {};
+  if (state.last_run_at && now - Number(state.last_run_at) < ENROLL_RECORD_TARGETS_RUN_INTERVAL_MS) {
+    return { ok: true, skipped: "interval" };
+  }
+  let malls = [];
+  try {
+    const tr = await fetch(`${cfg.cloud_endpoint.replace(/\/$/, "")}/api/ingest/v1/activity-targets?limit=${ACTIVITY_LIBRARY_TARGET_LIMIT}`, {
+      headers: { Authorization: `Bearer ${cfg.auth_token}` },
+    });
+    if (!tr.ok) return { ok: false, reason: `targets_http_${tr.status}` };
+    const td = await tr.json().catch(() => null);
+    const seen = new Set();
+    for (const t of (Array.isArray(td?.targets) ? td.targets : [])) {
+      const mid = String(t?.mall_id || t?.mallId || "").trim();
+      if (!mid || seen.has(mid)) continue;
+      seen.add(mid);
+      malls.push({ mallId: mid, site: t?.site || "agentseller" });
+    }
+  } catch { return { ok: false, reason: "targets_failed" }; }
+  if (!malls.length) return { ok: true, reason: "no_malls" };
+  const start = Number(state.cursor || 0) % malls.length;
+  const slice = [];
+  for (let i = 0; i < ENROLL_RECORD_TARGETS_MALLS_PER_RUN && i < malls.length; i++) {
+    slice.push(malls[(start + i) % malls.length]);
+  }
+  await setStorage({ [ENROLL_RECORD_TARGETS_STATE_KEY]: { ...state, last_run_at: now, cursor: (start + ENROLL_RECORD_TARGETS_MALLS_PER_RUN) % malls.length, total_malls: malls.length } });
+  let enqueued = 0;
+  for (const m of slice) {
+    const origin = activityLibraryOriginForSite(m.site);
+    const url = `${origin}${ACTIVITY_LIBRARY_ENDPOINT}`;
+    for (let page = 1; page <= ENROLL_RECORD_MAX_PAGES; page++) {
+      const reqBody = JSON.stringify({ pageNo: page, pageSize: ENROLL_RECORD_PAGE_SIZE });
+      let body = null, text = "";
+      try {
+        const resp = await fetch(url, {
+          method: "POST", credentials: "include", cache: "no-store",
+          headers: { "Content-Type": "application/json", mallid: m.mallId },
+          body: reqBody,
+        });
+        text = await resp.text();
+        body = safeParseJson(text);
+        if (!resp.ok || !body || typeof body !== "object") break;
+      } catch { break; }
+      const list = body?.result?.list || [];
+      if (!list.length) break;
+      await enqueue({
+        kind: "fetch-enroll-record", url,
+        method: "POST", status: 200, ts: Date.now(), site: m.site,
+        page: "background/enroll-record-targets", mall_id: m.mallId,
+        body, bodyText: text.length > 200000 ? null : text, requestBodyText: reqBody, bodySize: text.length,
+        activeSource: "marketing_enroll_record_targets",
+      });
+      enqueued++;
+      await bumpStats({ captured_count_delta: 1 });
+      const total = Number(body?.result?.total || 0);
+      if (page * ENROLL_RECORD_PAGE_SIZE >= total) break;
+      await new Promise((r) => setTimeout(r, 400));
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  await setStorage({ [ENROLL_RECORD_TARGETS_STATE_KEY]: { ...state, last_run_at: now, last_success_at: Date.now(), cursor: (start + ENROLL_RECORD_TARGETS_MALLS_PER_RUN) % malls.length, total_malls: malls.length, last_malls: slice.length, last_enqueued: enqueued } });
+  if (enqueued > 0) await flush();
+  return { ok: true, malls: slice.length, enqueued };
 }
 
 async function collectFlowForCurrentMall() {
@@ -1766,6 +1885,168 @@ async function collectFundDetailFromTargets() {
   return { ok: true, callCount, enqueuedCount, errorCount, mallCount };
 }
 
+// ===== 价格主动采集（申报价调整 + 建议价） =====
+async function collectPriceFromTargets() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", PRICE_STATE_KEY]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
+  const now = Date.now();
+  const state = cfg[PRICE_STATE_KEY] || {};
+  if (state.last_run_at && now - Number(state.last_run_at) < PRICE_RUN_INTERVAL_MS) {
+    return { ok: true, skipped: "interval" };
+  }
+  await setStorage({ [PRICE_STATE_KEY]: { ...state, last_run_at: now } });
+
+  const targetUrl = `${cfg.cloud_endpoint.replace(/\/$/, "")}/api/ingest/v1/review-targets?limit=${PRICE_MAX_MALLS_PER_RUN * 2}`;
+  let targets = [];
+  try {
+    const resp = await fetch(targetUrl, { headers: { Authorization: `Bearer ${cfg.auth_token}` } });
+    if (!resp.ok) return { ok: false, reason: `targets_http_${resp.status}` };
+    const data = await resp.json().catch(() => null);
+    targets = Array.isArray(data?.targets) ? data.targets : [];
+  } catch (error) {
+    return { ok: false, reason: `targets_err_${String(error?.message || error).slice(0, 40)}` };
+  }
+
+  let mallCount = 0, callCount = 0, enqueuedCount = 0, errorCount = 0;
+  const PROBES = [
+    { kind: "fetch-active-price-adjust", path: "/api/kiana/mms/magneto/price-adjust/page-query", pageKey: "pageNumber", sizeKey: "pageSize", label: "price-adjust" },
+    { kind: "fetch-active-suggested-price", path: "/visage-agent-seller/product/sku/site/suggestedPrice/pageQuery", pageKey: "pageNo", sizeKey: "pageSize", label: "suggested-price" },
+  ];
+
+  for (const target of targets) {
+    if (mallCount >= PRICE_MAX_MALLS_PER_RUN) break;
+    const mallId = String(target?.mall_id || target?.mallId || "").trim();
+    if (!mallId) continue;
+    mallCount++;
+    const siteTag = target?.site || "agentseller";
+
+    for (const probe of PROBES) {
+      const url = `https://agentseller.temu.com${probe.path}`;
+      let total = null;
+      for (let page = 1; page <= PRICE_MAX_PAGES; page++) {
+        const requestBody = JSON.stringify({ [probe.pageKey]: page, [probe.sizeKey]: PRICE_PAGE_SIZE });
+        callCount++;
+        let listLen = 0;
+        try {
+          const resp = await fetch(url, {
+            method: "POST", credentials: "include", cache: "no-store",
+            headers: { "Content-Type": "application/json", mallid: mallId },
+            body: requestBody,
+          });
+          const text = await resp.text();
+          const body = safeParseJson(text);
+          if (resp.ok && body && typeof body === "object" && body.success !== false) {
+            const result = body.result || {};
+            const list = result.pageItems || result.list || result.dataList || [];
+            listLen = Array.isArray(list) ? list.length : 0;
+            if (total == null && Number.isFinite(Number(result.total))) total = Number(result.total);
+            if (listLen > 0) {
+              await enqueue({
+                kind: probe.kind, url, method: "POST", status: resp.status, ts: Date.now(),
+                site: siteTag, page: `background/${probe.label}`, mall_id: mallId,
+                body, bodyText: text.length > 200000 ? null : text, requestBodyText: requestBody,
+                bodySize: text.length, activeSource: `${probe.label}_background`,
+              });
+              await bumpStats({ captured_count_delta: 1 });
+              enqueuedCount++;
+            }
+          } else { errorCount++; }
+        } catch { errorCount++; }
+        await new Promise((resolve) => setTimeout(resolve, PRICE_PAGE_DELAY_MS));
+        if (listLen < PRICE_PAGE_SIZE) break;
+        if (total != null && page * PRICE_PAGE_SIZE >= total) break;
+      }
+    }
+  }
+
+  await setStorage({
+    [PRICE_STATE_KEY]: {
+      ...state, last_run_at: now, last_success_at: Date.now(),
+      last_call_count: callCount, last_mall_count: mallCount,
+      last_enqueued_count: enqueuedCount, last_error_count: errorCount,
+    },
+  });
+  if (enqueuedCount > 0) await flush();
+  return { ok: true, callCount, enqueuedCount, errorCount, mallCount };
+}
+
+// ===== 合规巡查主动采集（retrieval/board/pageQuery） =====
+async function collectComplianceFromTargets() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", COMPLIANCE_STATE_KEY]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
+  const now = Date.now();
+  const state = cfg[COMPLIANCE_STATE_KEY] || {};
+  if (state.last_run_at && now - Number(state.last_run_at) < COMPLIANCE_RUN_INTERVAL_MS) {
+    return { ok: true, skipped: "interval" };
+  }
+  await setStorage({ [COMPLIANCE_STATE_KEY]: { ...state, last_run_at: now } });
+
+  const targetUrl = `${cfg.cloud_endpoint.replace(/\/$/, "")}/api/ingest/v1/review-targets?limit=${COMPLIANCE_MAX_MALLS_PER_RUN * 2}`;
+  let targets = [];
+  try {
+    const resp = await fetch(targetUrl, { headers: { Authorization: `Bearer ${cfg.auth_token}` } });
+    if (!resp.ok) return { ok: false, reason: `targets_http_${resp.status}` };
+    const data = await resp.json().catch(() => null);
+    targets = Array.isArray(data?.targets) ? data.targets : [];
+  } catch (error) {
+    return { ok: false, reason: `targets_err_${String(error?.message || error).slice(0, 40)}` };
+  }
+
+  let mallCount = 0, callCount = 0, enqueuedCount = 0, errorCount = 0;
+  const url = "https://agentseller.temu.com/bg-brando-agent-seller/retrieval/board/pageQuery";
+
+  for (const target of targets) {
+    if (mallCount >= COMPLIANCE_MAX_MALLS_PER_RUN) break;
+    const mallId = String(target?.mall_id || target?.mallId || "").trim();
+    if (!mallId) continue;
+    mallCount++;
+    let total = null;
+    for (let page = 1; page <= COMPLIANCE_MAX_PAGES; page++) {
+      const requestBody = JSON.stringify({ pageNo: page, pageSize: COMPLIANCE_PAGE_SIZE });
+      callCount++;
+      let listLen = 0;
+      try {
+        const resp = await fetch(url, {
+          method: "POST", credentials: "include", cache: "no-store",
+          headers: { "Content-Type": "application/json", mallid: mallId },
+          body: requestBody,
+        });
+        const text = await resp.text();
+        const body = safeParseJson(text);
+        if (resp.ok && body && typeof body === "object" && body.success !== false) {
+          const result = body.result || {};
+          const list = result.pageItems || result.list || [];
+          listLen = Array.isArray(list) ? list.length : 0;
+          if (total == null && Number.isFinite(Number(result.total))) total = Number(result.total);
+          if (listLen > 0) {
+            await enqueue({
+              kind: "fetch-active-compliance", url, method: "POST", status: resp.status, ts: Date.now(),
+              site: target?.site || "agentseller", page: "background/compliance", mall_id: mallId,
+              body, bodyText: text.length > 200000 ? null : text, requestBodyText: requestBody,
+              bodySize: text.length, activeSource: "compliance_background",
+            });
+            await bumpStats({ captured_count_delta: 1 });
+            enqueuedCount++;
+          }
+        } else { errorCount++; }
+      } catch { errorCount++; }
+      await new Promise((resolve) => setTimeout(resolve, COMPLIANCE_PAGE_DELAY_MS));
+      if (listLen < COMPLIANCE_PAGE_SIZE) break;
+      if (total != null && page * COMPLIANCE_PAGE_SIZE >= total) break;
+    }
+  }
+
+  await setStorage({
+    [COMPLIANCE_STATE_KEY]: {
+      ...state, last_run_at: now, last_success_at: Date.now(),
+      last_call_count: callCount, last_mall_count: mallCount,
+      last_enqueued_count: enqueuedCount, last_error_count: errorCount,
+    },
+  });
+  if (enqueuedCount > 0) await flush();
+  return { ok: true, callCount, enqueuedCount, errorCount, mallCount };
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg !== "object") return;
 
@@ -2247,4 +2528,125 @@ async function bumpStats(patch) {
     cur.total_sent = (cur.total_sent || 0) + patch.last_flush_sent;
   }
   await setStorage({ [STATS_KEY]: cur });
+}
+
+// ---------- 商品列表 + 售后 page world 主动采集 ----------
+// 原理：在已打开 agentseller tab 的 MAIN world 里调 fetch()，请求链为
+//   fetch() → Temu wrap（自动注入 anti-content 签名） → TrackedFetch（hook.js clone + enqueue） → 原生 fetch → 网络
+// 数据自动走 hook → flush → cloud 管道，不需要手动 enqueue。
+// 条件：用户至少打开了一个 agentseller tab（不会创建新 tab、不打断用户浏览）。
+async function collectProductsAndAfterSalesViaPage() {
+  const cfg = await getStorage(["cloud_endpoint", "auth_token", PRODUCTS_STATE_KEY, AFTERSALES_STATE_KEY]);
+  if (!cfg.cloud_endpoint || !cfg.auth_token) return { ok: false, reason: "not_configured" };
+  const now = Date.now();
+
+  const pState = cfg[PRODUCTS_STATE_KEY] || {};
+  const aState = cfg[AFTERSALES_STATE_KEY] || {};
+  const needProducts = !pState.last_success_at || now - Number(pState.last_success_at) >= PRODUCTS_RUN_INTERVAL_MS;
+  const needAfterSales = !aState.last_success_at || now - Number(aState.last_success_at) >= AFTERSALES_RUN_INTERVAL_MS;
+  if (!needProducts && !needAfterSales) return { ok: true, skipped: "interval" };
+
+  // 获取所有已打开的 agentseller tabs，按 origin 去重取最近访问的
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({
+      url: ["https://agentseller.temu.com/*", "https://agentseller-us.temu.com/*", "https://agentseller-eu.temu.com/*"],
+    });
+  } catch { return { ok: false, reason: "tabs_query_failed" }; }
+  if (!tabs.length) return { ok: false, reason: "no_agentseller_tab" };
+
+  const byOrigin = new Map();
+  for (const tab of tabs.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))) {
+    let origin = "";
+    try { origin = new URL(tab.url).origin; } catch { continue; }
+    if (byOrigin.has(origin)) continue;
+    let mallId = "";
+    try {
+      const [res] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => (document.cookie.match(/mallid=([^;]+)/i)?.[1] || ""),
+      });
+      mallId = String(res?.result || "").trim();
+    } catch { continue; }
+    if (mallId) byOrigin.set(origin, { mallId, tabId: tab.id, origin });
+  }
+  if (!byOrigin.size) return { ok: false, reason: "no_mallid" };
+
+  let productPages = 0;
+  let afterSalesPages = 0;
+
+  for (const { mallId, tabId } of byOrigin.values()) {
+    // 商品列表采集：逐页 fetch，hook 自动捕获每页响应
+    if (needProducts) {
+      try {
+        const [result] = await chrome.scripting.executeScript({
+          target: { tabId },
+          world: "MAIN",
+          args: [mallId, PRODUCTS_PAGE_SIZE, PRODUCTS_MAX_PAGES, PRODUCTS_PAGE_DELAY_MS],
+          func: async (mid, pageSize, maxPages, delay) => {
+            const s = (ms) => new Promise((r) => setTimeout(r, ms));
+            let pages = 0;
+            for (let page = 1; page <= maxPages; page++) {
+              let n = 0;
+              try {
+                const r = await fetch("/visage-agent-seller/product/skc/pageQuery", {
+                  method: "POST", credentials: "include", cache: "no-store",
+                  headers: { "Content-Type": "application/json", mallid: mid },
+                  body: JSON.stringify({ page, pageSize }),
+                });
+                const j = await r.json();
+                n = ((j && j.result && (j.result.pageItems || j.result.list)) || []).length;
+              } catch { break; }
+              pages++;
+              await s(delay);
+              if (n < pageSize) break;
+            }
+            return pages;
+          },
+        });
+        productPages += result?.result || 0;
+      } catch (e) { console.warn("[sw] products page-world err", e?.message || e); }
+    }
+
+    // 售后采集：逐页 fetch，hook 自动捕获
+    if (needAfterSales) {
+      try {
+        const [result] = await chrome.scripting.executeScript({
+          target: { tabId },
+          world: "MAIN",
+          args: [mallId, AFTERSALES_PAGE_SIZE, AFTERSALES_MAX_PAGES, AFTERSALES_PAGE_DELAY_MS],
+          func: async (mid, pageSize, maxPages, delay) => {
+            const s = (ms) => new Promise((r) => setTimeout(r, ms));
+            let pages = 0;
+            for (let pageNo = 1; pageNo <= maxPages; pageNo++) {
+              let n = 0;
+              try {
+                const r = await fetch("/mms/api/appalachian/afs/queryPageV3", {
+                  method: "POST", credentials: "include", cache: "no-store",
+                  headers: { "Content-Type": "application/json", mallid: mid },
+                  body: JSON.stringify({ pageNo, pageSize }),
+                });
+                const j = await r.json();
+                n = ((j && j.result && (j.result.pageItems || j.result.list || j.result.data)) || []).length;
+              } catch { break; }
+              pages++;
+              await s(delay);
+              if (n < pageSize) break;
+            }
+            return pages;
+          },
+        });
+        afterSalesPages += result?.result || 0;
+      } catch (e) { console.warn("[sw] aftersales page-world err", e?.message || e); }
+    }
+  }
+
+  // 只要跑过且翻了页就记成功，下次走节流
+  if (needProducts) {
+    await setStorage({ [PRODUCTS_STATE_KEY]: { ...pState, last_run_at: now, ...(productPages > 0 ? { last_success_at: now } : {}), last_pages: productPages, last_malls: byOrigin.size } });
+  }
+  if (needAfterSales) {
+    await setStorage({ [AFTERSALES_STATE_KEY]: { ...aState, last_run_at: now, ...(afterSalesPages > 0 ? { last_success_at: now } : {}), last_pages: afterSalesPages, last_malls: byOrigin.size } });
+  }
+  return { ok: true, productPages, afterSalesPages, malls: byOrigin.size };
 }

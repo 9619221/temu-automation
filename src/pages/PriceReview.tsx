@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Alert,
   Button,
@@ -22,6 +23,7 @@ import {
   LinkOutlined,
   QuestionCircleTwoTone,
   ReloadOutlined,
+  ShoppingCartOutlined,
   SyncOutlined,
 } from "@ant-design/icons";
 import { APP_SETTINGS_KEY, normalizeAppSettings } from "../utils/appSettings";
@@ -64,6 +66,7 @@ declare global {
 const DEFAULT_PRICE_REVIEW_SETTINGS = normalizeAppSettings(null);
 
 export default function PriceReview() {
+  const navigate = useNavigate();
   const [rows, setRows] = useState<PriceReviewRow[]>([]);
   const [summary, setSummary] = useState<Summary>({ total: 0, pass: 0, fail: 0, unknown: 0 });
   const [snapshotId, setSnapshotId] = useState<string | null>(null);
@@ -275,7 +278,7 @@ export default function PriceReview() {
     },
     {
       title: "操作",
-      width: 200,
+      width: 250,
       fixed: "right" as const,
       render: (_: any, r: PriceReviewRow) => (
         <Space size="small">
@@ -287,6 +290,19 @@ export default function PriceReview() {
               <Button size="small" danger type="link">清除</Button>
             </Popconfirm>
           )}
+          {r.pass_175 === 1 && (
+            <Tooltip title="跳转采购中心并预填该 SKU 信息">
+              <Button
+                size="small"
+                type="primary"
+                ghost
+                icon={<ShoppingCartOutlined />}
+                onClick={() => navigate(`/purchase-center?prefill=1&skuCode=${encodeURIComponent(r.sku_id || "")}&cost=${r.cost_1688 || ""}`)}
+              >
+                采购
+              </Button>
+            </Tooltip>
+          )}
           {r.detail_url && (
             <Tooltip title="跳转 Temu 后台核价页">
               <Button size="small" type="link" icon={<LinkOutlined />} onClick={() => window.open(r.detail_url, "_blank")} />
@@ -295,7 +311,7 @@ export default function PriceReview() {
         </Space>
       ),
     },
-  ], [handleClearManualCost, marginRatio]);
+  ], [handleClearManualCost, marginRatio, navigate]);
 
   return (
     <div style={{ padding: 16 }}>
