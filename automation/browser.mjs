@@ -163,11 +163,12 @@ async function fillInputVerified(input, value, options = {}) {
     await clearInput();
     await randomDelay(120, 240);
 
-    if (attempt < 2) {
-      for (const char of String(value ?? "")) {
-        await input.type(char, { delay: delayProvider() });
-      }
-    } else {
+    if (attempt === 0) {
+      // 优先整串一次性注入：Temu 手机号/密码框是 React 受控组件，逐字符 type 会被前端异步重排
+      // 导致字符错位（如 17896077737 → 37077769817），进而触发"格式不对"+风控验证码。
+      // 用标准 value setter 注入再派发 input 事件，React 的 _valueTracker 能识别这次变更，
+      // 既不会乱序、也不会因格式错误误触发验证码。
+      await input.focus().catch(() => {});
       await input.evaluate((node, nextValue) => {
         const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
         setter?.call(node, nextValue);
@@ -175,6 +176,14 @@ async function fillInputVerified(input, value, options = {}) {
         node.dispatchEvent(new Event("change", { bubbles: true }));
         node.dispatchEvent(new Event("blur", { bubbles: true }));
       }, String(value ?? ""));
+    } else if (attempt === 1) {
+      // 降级：Playwright 原生 fill（一次性设值）
+      await input.fill(String(value ?? "")).catch(() => {});
+    } else {
+      // 兜底：逐字符 type（慢、贴近真人输入，给受控组件足够更新时间）
+      for (const char of String(value ?? "")) {
+        await input.type(char, { delay: delayProvider() });
+      }
     }
 
     await randomDelay(150, 320);
@@ -832,7 +841,9 @@ export async function login(phone, password) {
     if (page.url().includes("login") && !page.url().includes("seller-login")) {
       const cap = await page.locator('[class*="captcha"], [class*="verify"], [class*="slider"], iframe[src*="captcha"]').first().isVisible().catch(() => false);
       if (cap) {
-        await page.waitForURL((u) => !u.toString().includes("login"), { timeout: 120000 });
+        // 检测到验证码：等用户手动处理后跳转。超时与外层验证码等待保持一致（5 分钟），
+        // 否则会在验证码还没处理完时就提前超时失败（坑过：120s 太短，用户输验证码慢一点就栽）。
+        await page.waitForURL((u) => !u.toString().includes("login"), { timeout: 300000 });
       } else {
         const e = await page.locator('[class*="error"], [class*="toast"], [class*="tip"]').first().textContent().catch(() => "");
         throw new Error(e || "login failed, please check credentials");

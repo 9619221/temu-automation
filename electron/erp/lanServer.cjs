@@ -92,6 +92,8 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/erp/reports/qc-flaw-images": ["admin", "manager", "operations", "finance", "viewer"],
   "/api/erp/reports/purchase": ["admin", "manager", "finance", "buyer", "operations", "viewer"],
   "/api/erp/reports/settlement": ["admin", "manager", "operations", "finance"],
+  "/api/erp/reports/pipeline-overview": ["admin", "manager", "operations", "finance", "viewer"],
+  "/api/erp/reports/product-risk-tags": ["admin", "manager", "operations", "finance", "viewer"],
   "/api/erp/reports/yunqi-search": ["admin", "manager", "operations"],
   "/api/erp/reports/yunqi-stats": ["admin", "manager", "operations"],
   "/api/erp/reports/yunqi-info": ["admin", "manager", "operations"],
@@ -4394,6 +4396,7 @@ async function handleTemuSettlementIncomeSyncRequest({ req, res, db }) {
     const {
       syncSettlementIncomeFromCapture,
       syncSettlementDetailFromCapture,
+      syncFundDetailFromCapture,
       clearMultiStoreReportCache,
     } = require("./services/multiStoreReport.cjs");
     const income = syncSettlementIncomeFromCapture(db, {
@@ -4402,19 +4405,25 @@ async function handleTemuSettlementIncomeSyncRequest({ req, res, db }) {
     const detail = income.attached
       ? syncSettlementDetailFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible })
       : { ok: false, attached: false, malls: 0, rows: 0 };
-    const totalRows = (Number(income.rows) || 0) + (Number(detail.rows) || 0);
+    // 对账中心账务明细（fund_detail）：售后赔付/仓储费/EPR/广告等费用（与 ipc.cjs 主控端对齐，原先漏同步）
+    const fund = income.attached
+      ? syncFundDetailFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible })
+      : { ok: false, attached: false, malls: 0, rows: 0 };
+    const totalRows = (Number(income.rows) || 0) + (Number(detail.rows) || 0) + (Number(fund.rows) || 0);
     if (totalRows > 0 && typeof clearMultiStoreReportCache === "function") {
       clearMultiStoreReportCache();
     }
     const result = {
       ok: Boolean(income.ok && detail.ok),
       attached: income.attached,
-      malls: Math.max(Number(income.malls) || 0, Number(detail.malls) || 0),
+      malls: Math.max(Number(income.malls) || 0, Number(detail.malls) || 0, Number(fund.malls) || 0),
       rows: totalRows,
       incomeRows: Number(income.rows) || 0,
       detailRows: Number(detail.rows) || 0,
+      fundRows: Number(fund.rows) || 0,
       income,
       detail,
+      fund,
     };
     writeJson(res, 200, { ok: true, result });
   } catch (error) {
@@ -5604,6 +5613,34 @@ async function handleRequest({
         const endDate = parsed.searchParams.get("end_date") || null;
         const { querySettlementData } = require("./services/multiStoreReport.cjs");
         const data = querySettlementData(db, { startDate, endDate, attachCloudDb: attachTemuCloudDbIfPossible });
+        writeJson(res, 200, { ok: true, data });
+      } catch (error) {
+        writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });
+      }
+      return;
+    }
+
+    if (pathname === "/api/erp/reports/pipeline-overview") {
+      if (req.method !== "GET") { writeJson(res, 405, { ok: false, error: "Method not allowed" }); return; }
+      try {
+        const parsed = new URL(req.url || "/", "http://127.0.0.1");
+        const force = parsed.searchParams.get("force") === "1";
+        const svc = require("./services/multiStoreReport.cjs");
+        const data = svc.buildPipelineOverview(db, { force });
+        writeJson(res, 200, { ok: true, data });
+      } catch (error) {
+        writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });
+      }
+      return;
+    }
+
+    if (pathname === "/api/erp/reports/product-risk-tags") {
+      if (req.method !== "POST") { writeJson(res, 405, { ok: false, error: "Method not allowed" }); return; }
+      try {
+        const p = await readOptionalPayload(req);
+        const codes = p?.skuCodes || [];
+        const svc = require("./services/multiStoreReport.cjs");
+        const data = svc.buildProductRiskTags(db, { skuCodes: codes });
         writeJson(res, 200, { ok: true, data });
       } catch (error) {
         writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });

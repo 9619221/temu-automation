@@ -1696,6 +1696,9 @@ async function openSellerCentralTarget(page, targetPath = "/goods/list", options
 }
 
 let dedicatedSellerLoginPromise = null;
+// popup 自动登录是否正在填表。与 dedicated 登录互斥：两套登录绝不同时操作同一个输入框，
+// 否则手机号/密码字符会被并发写入打乱（如 17896077737 → 37077769817 / <empty>）。
+let __popupLoginInFlight = false;
 
 async function ensureDedicatedSellerLogin(logPrefix = "[seller-login-fallback]") {
   if (dedicatedSellerLoginPromise) {
@@ -1709,6 +1712,12 @@ async function ensureDedicatedSellerLogin(logPrefix = "[seller-login-fallback]")
   }
 
   dedicatedSellerLoginPromise = (async () => {
+    // 先等正在进行的 popup 自动登录填表完成，避免两套登录并发抢输入框
+    let waitedForPopup = 0;
+    while (__popupLoginInFlight && waitedForPopup < 8000) {
+      await randomDelay(200, 300);
+      waitedForPopup += 250;
+    }
     console.error(`${logPrefix} Starting dedicated seller login`);
     try {
       await loginWithTransientPassword(phone, password);
@@ -1765,6 +1774,13 @@ async function tryAutoLoginInPopup(popup, logPrefix = "[popup-login]") {
 
   try {
     const initialStage = await detectSellerPopupStage(popup);
+
+    // ★ 验证码阶段：不填密码，等用户手动输入验证码
+    if (initialStage === "verification") {
+      console.error(`${logPrefix} Popup in verification stage (SMS code), skipping auto-login — waiting for manual input`);
+      return false;
+    }
+
     if (initialStage === "auth") {
       await ensurePopupConsentChecked(popup, `${logPrefix}-auth`);
       const clicked = await clickSellerAuthConfirmButton(popup, `${logPrefix}-auth`);
@@ -1825,6 +1841,13 @@ async function tryAutoLoginInPopup(popup, logPrefix = "[popup-login]") {
         return true;
       }
     }
+
+    // dedicated 登录正在进行时，popup 自动登录让路，避免两套登录并发抢同一个输入框
+    if (dedicatedSellerLoginPromise) {
+      console.error(`${logPrefix} dedicated 登录进行中，popup 自动登录让路（避免输入框并发冲突）`);
+      return false;
+    }
+    __popupLoginInFlight = true;
 
     let phoneTarget = await findSellerPhoneInputOnPage(popup);
     if (!phoneTarget) {
@@ -1941,6 +1964,8 @@ async function tryAutoLoginInPopup(popup, logPrefix = "[popup-login]") {
     await captureWorkerErrorScreenshot("auto_login_popup_error", popup);
     console.error(`${logPrefix} Auto-login failed: ${error.message}`);
     return false;
+  } finally {
+    __popupLoginInFlight = false;
   }
 }
 
@@ -2102,6 +2127,16 @@ async function detectSellerPopupStage(popup) {
         const rect = node.getBoundingClientRect();
         return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
       };
+
+      // ★★★ 最先检测验证码弹窗 — 必须在 login 判定之前
+      //   验证码弹窗出现时底层登录表单 DOM 仍在，如果先判 login 会误触自动填密码
+      const verificationKeywords = /账号安全验证|安全验证|短信验证|验证码|请输入.*位验证码|请输入验证码|发送验证码|获取验证码|已发送至/;
+      if (verificationKeywords.test(text)) {
+        // 排除误判：纯登录页上的"图形验证码"滑块不算 SMS 验证
+        // 真正的 SMS 验证弹窗通常有"发送"/"已发送"/"账号安全"字样
+        const isSmsVerification = /账号安全验证|短信验证|已发送至|发送验证码|获取验证码|请输入.*位验证码/.test(text);
+        if (isSmsVerification) return "verification";
+      }
 
       // ★ 先检测登录输入框 — 如果页面有手机号/密码输入框，说明需要填写凭证
       //   即使页面同时包含"授权登录"按钮或授权文案，也应该优先判定为 login
@@ -2388,6 +2423,28 @@ async function handleSellerAuthPopupPage(newPage, logPrefix = "[popup-monitor]")
 
         const popupStage = await detectSellerPopupStage(newPage);
         console.error(`${logPrefix} Popup stage on attempt ${attempt + 1}: ${popupStage} url=${loopUrl.slice(0, 100)}`);
+
+        // ★ 验证码阶段：等待用户手动输入，最多等 5 分钟
+        if (popupStage === "verification") {
+          const captchaDeadline = Date.now() + 5 * 60 * 1000;
+          console.error(`${logPrefix} 检测到验证码，等待手动处理（最多 5 分钟）…`);
+          while (Date.now() < captchaDeadline) {
+            if (newPage.isClosed()) return;
+            const stage = await detectSellerPopupStage(newPage);
+            if (stage !== "verification") {
+              console.error(`${logPrefix} 验证码已处理，继续登录流程`);
+              break;
+            }
+            const remaining = Math.ceil((captchaDeadline - Date.now()) / 1000);
+            console.error(`${logPrefix} 等待验证码… 剩余 ${remaining} 秒`);
+            await randomDelay(8000, 12000);
+          }
+          if (Date.now() >= captchaDeadline) {
+            console.error(`${logPrefix} 验证码等待超时（5 分钟），放弃本次登录`);
+            return;
+          }
+          continue;
+        }
 
         if (popupStage === "login") {
           const submitted = await tryAutoLoginInPopup(newPage, logPrefix);
@@ -7049,6 +7106,7 @@ async function postSettlementBatch(items, cloudConfig) {
   return new Promise((resolve, reject) => {
     const url = new URL(`${cloudConfig.endpoint}/api/ingest/v1/batch`);
     const bodyStr = JSON.stringify({ items });
+    const sizeKb = Math.round(Buffer.byteLength(bodyStr) / 1024);
     const mod = url.protocol === "https:" ? https : http;
     const req = mod.request(url, {
       method: "POST",
@@ -7058,14 +7116,15 @@ async function postSettlementBatch(items, cloudConfig) {
         "X-Device-Id": cloudConfig.deviceId,
         "Content-Length": Buffer.byteLength(bodyStr),
       },
-      timeout: 60000,
+      // 商品+售后 body 可能上 MB，60s 不够。提到 180s，配合上层分类小批拆分。
+      timeout: 180000,
     }, (res) => {
       let d = "";
       res.on("data", (c) => (d += c));
-      res.on("end", () => resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode }));
+      res.on("end", () => resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, sizeKb }));
     });
     req.on("error", reject);
-    req.on("timeout", () => { req.destroy(); reject(new Error("cloud ingest timeout")); });
+    req.on("timeout", () => { req.destroy(); reject(new Error(`cloud ingest timeout (${sizeKb}KB)`)); });
     req.write(bodyStr);
     req.end();
   });
@@ -7185,6 +7244,702 @@ async function scrapeSettlement() {
   } finally {
     await page.close().catch(() => {});
   }
+}
+
+// ============ 批量店铺采集（products + afterSales + settlement 全自动遍历 35 店）============
+
+const BATCH_COLLECT_API = {
+  products: {
+    label: "商品",
+    urlPath: "/visage-agent-seller/product/skc/pageQuery",
+    buildBody: (pageNum) => JSON.stringify({ page: pageNum, pageSize: 100 }),
+    getList: (body) => body?.result?.pageItems || body?.result?.goodsSkcList || body?.result?.list || [],
+    getTotal: (body) => body?.result?.total ?? body?.result?.totalCount ?? 0,
+    paginate: true,
+    pageField: "page",       // body 里翻页用 page
+    ingestKind: "fetch-active-products",
+    ingestPage: "robot/products",
+  },
+  afterSales: {
+    label: "售后",
+    urlPath: "/mms/api/appalachian/afs/queryPageV3",
+    buildBody: (pageNum) => JSON.stringify({ pageNo: pageNum, pageSize: 100 }),
+    getList: (body) => body?.result?.list || body?.result?.data || [],
+    getTotal: (body) => body?.result?.total ?? body?.result?.totalCount ?? 0,
+    paginate: true,
+    pageField: "pageNo",
+    ingestKind: "fetch-active-aftersales",
+    ingestPage: "robot/aftersales",
+  },
+  settlement: {
+    label: "结算",
+    urlPath: SETTLEMENT_INCOME_PATH,
+    buildBody: () => "{}",
+    getList: (body) => Array.isArray(body?.result) ? body.result : [],
+    getTotal: (body) => Array.isArray(body?.result) ? body.result.length : 0,
+    paginate: false,
+    ingestKind: "fetch-active-income-summary",
+    ingestPage: "robot/income-summary",
+  },
+  // 结算明细三态（待结算/结算中/已到账）：agentseller 同域，POST 空体、不分页。
+  // 响应 result 是汇总对象（非数组），ERP 端 extractSettlementDetailListFromCaptureBody 会包成单元素列表解析；
+  // cloud→ERP 按 url_path 识别状态（SETTLEMENT_DETAIL_PATH_STATUS），三态共用 ingestKind 不影响入库。
+  settleWait: {
+    label: "待结算",
+    urlPath: "/api/merchant/settle/detail/full/wait-settlement",
+    buildBody: () => "{}",
+    getList: (body) => (body?.result && typeof body.result === "object") ? [body.result] : [],
+    getTotal: () => 1,
+    paginate: false,
+    ingestKind: "fetch-active-settlement-detail",
+    ingestPage: "robot/settle-wait",
+  },
+  settleIn: {
+    label: "结算中",
+    urlPath: "/api/merchant/settle/detail/full/in-settlement",
+    buildBody: () => "{}",
+    getList: (body) => (body?.result && typeof body.result === "object") ? [body.result] : [],
+    getTotal: () => 1,
+    paginate: false,
+    ingestKind: "fetch-active-settlement-detail",
+    ingestPage: "robot/settle-in",
+  },
+  settleDone: {
+    label: "已到账",
+    urlPath: "/api/merchant/settle/detail/full/settled",
+    // 已到账接口必须带时间范围（空体报 Params invalid），近 30 天（参数名 startDate/endDate，实测自被动抓包）
+    buildBody: () => {
+      const end = new Date();
+      const start = new Date(end.getTime() - 30 * 86400000);
+      const f = (d) => d.toISOString().slice(0, 10);
+      return JSON.stringify({ startDate: f(start), endDate: f(end) });
+    },
+    getList: (body) => (body?.result && typeof body.result === "object") ? [body.result] : [],
+    getTotal: () => 1,
+    paginate: false,
+    ingestKind: "fetch-active-settlement-detail",
+    ingestPage: "robot/settle-settled",
+  },
+  // 对账中心账务费用明细：agentseller 域 + mallid 头翻页采近 30 天流水（照搬扩展 sw.js collectFundDetailFromTargets）。
+  // 费用分类（仓储/EPR/广告/售后赔付/扣款）由 ERP 端按 fundTypeDesc 映射，落 erp_temu_fund_detail。
+  fundDetail: {
+    label: "账务费用",
+    urlPath: "/api/merchant/fund/detail/pageSearch",
+    buildBody: (pageNum) => {
+      const end = new Date();
+      const start = new Date(end.getTime() - 30 * 86400000);
+      const f = (d) => d.toISOString().slice(0, 10);
+      return JSON.stringify({ pageNo: pageNum, pageSize: 50, startDate: f(start), endDate: f(end) });
+    },
+    getList: (body) => Array.isArray(body?.result?.resultList) ? body.result.resultList : [],
+    getTotal: (body) => Number(body?.result?.total) || 0,
+    paginate: true,
+    pageField: "pageNo",
+    ingestKind: "fetch-active-fund-detail",
+    ingestPage: "robot/fund-detail",
+  },
+};
+
+// 账号 -> 名下店铺(mall_id)归属缓存。
+// 第一次采集时逐店试错自动探测出「哪个登录账号能访问哪些店」，写入此文件；
+// 之后每个账号登录后只采它名下的店 + 还没被任何账号认领的店，省去对无权限店的反复试错(403)。
+function accountMallMapPath() {
+  return path.join(projectRootDir, ".settlement-account-mall-map.json");
+}
+function loadAccountMallMap() {
+  try {
+    const p = accountMallMapPath();
+    if (!fs.existsSync(p)) return {};
+    const obj = JSON.parse(fs.readFileSync(p, "utf-8"));
+    return (obj && typeof obj === "object" && !Array.isArray(obj)) ? obj : {};
+  } catch {
+    return {};
+  }
+}
+function saveAccountMallMap(map) {
+  try {
+    fs.writeFileSync(accountMallMapPath(), JSON.stringify(map, null, 2), "utf-8");
+  } catch (e) {
+    console.error(`[batch-collect] 写归属缓存失败: ${e.message}`);
+  }
+}
+
+/**
+ * 批量采集：打开一个 agentseller 页面，遍历所有店铺 × 选定任务类型
+ * 利用 Temu 前端 JS 的 fetch wrapper 自动注入 anti-content 签名
+ * @param {Object} params
+ * @param {string[]} params.tasks - 要采集的类型 ["products", "afterSales", "settlement"]
+ * @param {Function} [params.onProgress] - 进度回调
+ */
+async function scrapeBatchCollect(params = {}) {
+  const taskKeys = Array.isArray(params.tasks) && params.tasks.length > 0
+    ? params.tasks.filter((k) => BATCH_COLLECT_API[k])
+    : Object.keys(BATCH_COLLECT_API);
+
+  const mallsList = Array.isArray(params.selectedMalls) && params.selectedMalls.length > 0
+    ? params.selectedMalls
+    : SETTLEMENT_MALLS;
+
+  const allCredentials = Array.isArray(params.allCredentials) && params.allCredentials.length > 0
+    ? params.allCredentials.filter((c) => {
+        if (!c) return false;
+        const phone = sanitizeLoginPhone(normalizeRequestCredential(c.phone));
+        return phone && phone.length >= 11 && !isPlaceholderLoginPhone(phone);
+      })
+    : [];
+
+  const logPrefix = "[batch-collect]";
+  console.error(`${logPrefix} 开始批量采集: tasks=${taskKeys.join(",")}, stores=${mallsList.length}, accounts=${allCredentials.length}`);
+
+  if (allCredentials.length === 0) {
+    return { success: false, error: "没有可用的账号密码，请先在「账号」中添加 Temu 账号。", stats: {} };
+  }
+
+  const cloudConfig = loadSettlementCloudConfig();
+  const collectedSet = new Set();       // mallTaskKey 已覆盖（有权限即算覆盖，含空数据），跨账号去重
+  const allBatchItems = [];
+
+  // 店铺归属缓存：账号 -> 它名下能访问的 mall_id 列表
+  const accountMallMap = loadAccountMallMap();
+  const mallById = new Map(mallsList.map((m) => [String(m.mall_id), m]));
+  const selectedMallIds = mallsList.map((m) => String(m.mall_id));
+  // claimedMallIds：已被任一账号缓存认领的（选中范围内）mall_id
+  const claimedMallIds = new Set();
+  for (const ids of Object.values(accountMallMap)) {
+    if (!Array.isArray(ids)) continue;
+    for (const id of ids) {
+      const sid = String(id);
+      if (mallById.has(sid)) claimedMallIds.add(sid);
+    }
+  }
+  const hasCache = claimedMallIds.size > 0;
+  console.error(`${logPrefix} 归属缓存: ${hasCache ? `已认领 ${claimedMallIds.size} 店，按缓存精准采集` : "无缓存，首轮逐店探测建立归属"}`);
+
+  const overallStats = {
+    totalStores: mallsList.length,
+    totalAccounts: allCredentials.length,
+    accountsUsed: 0,
+    tasks: {},
+  };
+  for (const taskKey of taskKeys) {
+    overallStats.tasks[taskKey] = { success: 0, error: 0, empty: 0, expired: 0, noAccess: 0, totalRecords: 0 };
+  }
+
+  const totalNeeded = mallsList.length * taskKeys.length;
+
+  for (let accIdx = 0; accIdx < allCredentials.length; accIdx++) {
+    if (collectedSet.size >= totalNeeded) {
+      console.error(`${logPrefix} 全部 ${totalNeeded} 个 mall×task 已覆盖，跳过剩余账号`);
+      break;
+    }
+
+    const cred = allCredentials[accIdx];
+    const accId = cred.accountId || "";
+    const accLabel = cred.name || accId || `account-${accIdx}`;
+
+    // 本账号要采的店 = 它缓存名下的店 ∪ 还没被任何账号认领的选中店，再去掉所有 task 都已覆盖的店。
+    // 首次（无缓存）→ 没有 claimed → 每个账号都试全部选中店，逐店探测出归属。
+    const cachedForAcc = (Array.isArray(accountMallMap[accId]) ? accountMallMap[accId] : [])
+      .map(String).filter((id) => mallById.has(id));
+    const targetIds = new Set(cachedForAcc);
+    for (const id of selectedMallIds) {
+      if (!claimedMallIds.has(id)) targetIds.add(id);
+    }
+    const accountTargets = [...targetIds]
+      .map((id) => mallById.get(id))
+      .filter(Boolean)
+      .filter((m) => taskKeys.some((tk) => !collectedSet.has(`${m.mall_id}:${tk}`)));
+
+    if (accountTargets.length === 0) {
+      console.error(`${logPrefix} ──── 账号 ${accIdx + 1}/${allCredentials.length}: ${accLabel} 无待采店铺，跳过 ────`);
+      continue;
+    }
+
+    console.error(`${logPrefix} ──── 账号 ${accIdx + 1}/${allCredentials.length}: ${accLabel}，待采 ${accountTargets.length} 店${cachedForAcc.length ? `（缓存名下 ${cachedForAcc.length}）` : ""} ────`);
+
+    // 每个账号都关闭浏览器重开，确保干净的 session，账号之间绝不串号（根治抢号）
+    try { await closeBrowser(); } catch {}
+    clearStickyWorkerCredentials();
+    browserState.lastAccountId = accId;
+    syncBrowserState();
+
+    const phone = sanitizeLoginPhone(normalizeRequestCredential(cred.phone));
+    const pwd = normalizeRequestCredential(cred.password);
+    requestCredentialPhone = phone;
+    requestCredentialPassword = pwd;
+    stickyCredentialPhone = phone;
+    stickyCredentialPassword = pwd;
+    stickyCredentialAccountId = accId;
+    browserState.lastPhone = phone;
+    clearBrowserPassword();
+
+    await ensureBrowser();
+    const stopPopupMonitor = registerSellerAuthPopupMonitor(`${logPrefix}-popup`);
+    let page = null;
+    try {
+      await establishSellerCentralSession(logPrefix);
+      page = await createSellerCentralPage("/goods/list", {
+        attempts: 2,
+        lite: true,
+        readyDelayMin: 1500,
+        readyDelayMax: 2500,
+        logPrefix,
+      });
+    } catch (error) {
+      try { stopPopupMonitor?.(); } catch {}
+      console.error(`${logPrefix} 账号 ${accLabel} 登录失败: ${error.message}，跳过`);
+      continue;
+    }
+
+    overallStats.accountsUsed++;
+    const accAccessible = new Set();    // 本账号确认有权限的店（含空数据），用于刷新归属缓存
+    const accDenied = new Set();
+    let accSessionExpired = false;
+
+    try {
+      for (const taskKey of taskKeys) {
+        if (accSessionExpired) break;
+        const apiDef = BATCH_COLLECT_API[taskKey];
+        const taskStats = overallStats.tasks[taskKey];
+
+        for (const mall of accountTargets) {
+          if (accSessionExpired) break;
+          const { mall_id: mallId, store_code: tag } = mall;
+          const mallTaskKey = `${mallId}:${taskKey}`;
+
+          if (collectedSet.has(mallTaskKey)) continue;
+          if (accDenied.has(mallId)) { taskStats.noAccess++; continue; }
+
+          try {
+            let allRecords = [];
+            let pageNum = 1;
+            let hasMore = true;
+            let hadAccess = false;   // 本店本任务是否拿到了正常响应（有权限）
+
+            while (hasMore) {
+              const reqBody = apiDef.buildBody(pageNum);
+
+              const result = await page.evaluate(
+                async ({ apiUrl, mid, body }) => {
+                  try {
+                    const resp = await fetch(apiUrl, {
+                      method: "POST",
+                      credentials: "include",
+                      cache: "no-store",
+                      headers: { "Content-Type": "application/json", mallid: mid },
+                      body,
+                    });
+                    const text = await resp.text();
+                    return { status: resp.status, text, ok: resp.ok };
+                  } catch (e) {
+                    return { status: 0, text: "", ok: false, err: e.message };
+                  }
+                },
+                { apiUrl: `https://agentseller.temu.com${apiDef.urlPath}`, mid: mallId, body: reqBody }
+              );
+
+              let body = null;
+              try { body = JSON.parse(result.text); } catch { /* ignore */ }
+              const errCode = body?.error_code ?? body?.errorCode;
+
+              if (errCode === 40001 || errCode === "40001") {
+                console.error(`${logPrefix} [${tag}] ${accLabel} session 过期`);
+                taskStats.expired++;
+                accSessionExpired = true;
+                break;
+              }
+
+              if (result.status === 403 || errCode === 400020037 || String(errCode) === "400020037") {
+                accDenied.add(mallId);
+                taskStats.noAccess++;
+                break;
+              }
+
+              // 走到这里是有权限的正常响应（哪怕数据为空）
+              hadAccess = true;
+              const list = apiDef.getList(body);
+              const total = apiDef.getTotal(body);
+              allRecords.push(...list);
+
+              if (result.ok && list.length > 0) {
+                allBatchItems.push({
+                  kind: apiDef.ingestKind,
+                  url: `https://agentseller.temu.com${apiDef.urlPath}`,
+                  url_path: apiDef.urlPath,
+                  method: "POST",
+                  status: result.status,
+                  ts: Date.now(),
+                  site: "agentseller",
+                  page: apiDef.ingestPage,
+                  mall_id: mallId,
+                  body,
+                  bodyText: result.text.length > 200000 ? null : result.text,
+                  requestBodyText: reqBody,
+                  bodySize: result.text.length,
+                  activeSource: "batch_robot",
+                });
+              }
+
+              if (!apiDef.paginate || list.length === 0 || allRecords.length >= total) {
+                hasMore = false;
+              } else {
+                pageNum++;
+                await randomDelay(300, 500);
+              }
+            }
+
+            if (!accSessionExpired) {
+              if (hadAccess) {
+                // 有权限 → 该 mall 归本账号；该 mall×task 标记已覆盖（含空数据），跨账号不再试
+                accAccessible.add(mallId);
+                collectedSet.add(mallTaskKey);
+                if (allRecords.length > 0) {
+                  taskStats.success++;
+                  taskStats.totalRecords += allRecords.length;
+                } else {
+                  taskStats.empty++;
+                }
+              } else if (!accDenied.has(mallId)) {
+                taskStats.error++;
+              }
+            }
+          } catch (e) {
+            taskStats.error++;
+            console.error(`${logPrefix} [${tag}] ${apiDef.label} 异常: ${e.message}`);
+          }
+
+          await randomDelay(accDenied.has(mallId) ? 50 : 400, accDenied.has(mallId) ? 100 : 700);
+        }
+      }
+    } finally {
+      await page?.close().catch(() => {});
+      try { stopPopupMonitor?.(); } catch {}
+    }
+
+    // 刷新归属缓存：把本账号确认有权限的店写入映射，并标记为已认领
+    if (accAccessible.size > 0) {
+      accountMallMap[accId] = [...accAccessible];
+      for (const id of accAccessible) claimedMallIds.add(String(id));
+      saveAccountMallMap(accountMallMap);
+    }
+
+    console.error(`${logPrefix} 账号 ${accLabel} 完成: 名下=${accAccessible.size}店, 无权限=${accDenied.size}店${accSessionExpired ? ", session过期" : ""}`);
+  }
+
+  for (const taskKey of taskKeys) {
+    const ts = overallStats.tasks[taskKey];
+    console.error(`${logPrefix} ${BATCH_COLLECT_API[taskKey].label} 汇总: 成功=${ts.success}, 空数据=${ts.empty || 0}, 无权限=${ts.noAccess}, 失败=${ts.error}, 过期=${ts.expired}, 记录=${ts.totalRecords}`);
+  }
+
+  const uncovered = mallsList.filter((m) => !taskKeys.every((tk) => collectedSet.has(`${m.mall_id}:${tk}`))).map((m) => m.store_code);
+  if (uncovered.length > 0) {
+    console.error(`${logPrefix} 未覆盖店铺(${uncovered.length}): ${uncovered.join(",")}`);
+  }
+
+  let uploaded = 0;
+  if (allBatchItems.length > 0 && cloudConfig.authToken) {
+    const CHUNK = 30;
+    for (let i = 0; i < allBatchItems.length; i += CHUNK) {
+      try {
+        const resp = await postSettlementBatch(allBatchItems.slice(i, i + CHUNK), cloudConfig);
+        if (resp.ok) uploaded += Math.min(CHUNK, allBatchItems.length - i);
+        else console.error(`${logPrefix} 上报失败 HTTP ${resp.status}`);
+      } catch (e) {
+        console.error(`${logPrefix} 上报异常: ${e.message}`);
+      }
+    }
+    console.error(`${logPrefix} 上报 cloud: ${uploaded}/${allBatchItems.length} 条`);
+  }
+
+  const settlementItems = allBatchItems
+    .filter((item) => item.kind === "fetch-active-income-summary" && item.body)
+    .map((item) => ({ mall_id: item.mall_id, body: item.body }));
+
+  const summary = {
+    success: true,
+    stats: overallStats,
+    totalItems: allBatchItems.length,
+    uploadedToCloud: uploaded,
+    collectedAt: new Date().toISOString(),
+    uncoveredStores: uncovered,
+    settlementItems,
+  };
+  console.error(`${logPrefix} 批量采集完成: ${settlementItems.length} 条结算数据待入库`);
+  console.error(`${logPrefix}`, JSON.stringify(overallStats.tasks));
+  return summary;
+}
+
+// 单账号采集：供 main 进程逐账号循环调用，实现「每采完一个账号就增量入库」。
+// 中途任何中断（手动停 / 断网 / 崩溃），已采完账号的数据已落库，不会丢。
+// 归属缓存（哪个店归哪个账号）全局共享文件，每次调用都读最新、采完即写。
+async function collectOneAccount(params = {}) {
+  // 任务顺序优先级：settlement（结算，1 次请求）→ afterSales（售后）→ products（商品，最多页）
+  // 用户最关心的是结算入库，先把它采完不会被后面分页 session 过期影响。
+  const TASK_PRIORITY = { settlement: 0, settleWait: 1, settleIn: 1, settleDone: 1, fundDetail: 2, afterSales: 3, products: 4 };
+  let rawTasks = Array.isArray(params.tasks) && params.tasks.length > 0
+    ? params.tasks.filter((k) => BATCH_COLLECT_API[k])
+    : Object.keys(BATCH_COLLECT_API);
+  // 勾选「结算」=完整结算链路：结算明细三态（agentseller 同域）进主循环；
+  // 账务费用 fundDetail 在跨境猫 kuajingmaihuo 域、与 agentseller 跨域，页面内 fetch 受同源限制，
+  // 必须在 kuajingmaihuo 页面内同源采（主循环后单独处理，见下方 fund 采集段）。
+  const wantFundDetail = rawTasks.includes("settlement") || rawTasks.includes("fundDetail");
+  if (rawTasks.includes("settlement")) {
+    for (const ek of ["settleWait", "settleIn", "settleDone"]) {
+      if (!rawTasks.includes(ek)) rawTasks.push(ek);
+    }
+  }
+  rawTasks = rawTasks.filter((k) => k !== "fundDetail"); // fundDetail 不进 agentseller 主循环
+  const taskKeys = [...rawTasks].sort((a, b) => (TASK_PRIORITY[a] ?? 99) - (TASK_PRIORITY[b] ?? 99));
+  const mallsList = Array.isArray(params.selectedMalls) && params.selectedMalls.length > 0
+    ? params.selectedMalls : SETTLEMENT_MALLS;
+  const cred = params.credential || null;
+  const collectedSet = new Set(Array.isArray(params.collectedKeys) ? params.collectedKeys : []);
+  const logPrefix = "[batch-collect]";
+
+  const taskStats = {};
+  for (const tk of taskKeys) taskStats[tk] = { success: 0, error: 0, empty: 0, expired: 0, noAccess: 0, totalRecords: 0 };
+
+  if (!cred) return { success: false, error: "缺少账号凭证", skipped: true, stats: taskStats };
+  const phone0 = sanitizeLoginPhone(normalizeRequestCredential(cred.phone));
+  if (!phone0 || phone0.length < 11 || isPlaceholderLoginPhone(phone0)) {
+    return { success: false, error: "账号手机号无效", skipped: true, accLabel: cred.name || cred.accountId || "", stats: taskStats };
+  }
+
+  const accId = cred.accountId || "";
+  const accLabel = cred.name || accId || "account";
+
+  // 归属缓存 → 算该账号待采店
+  const accountMallMap = loadAccountMallMap();
+  const mallById = new Map(mallsList.map((m) => [String(m.mall_id), m]));
+  const selectedMallIds = mallsList.map((m) => String(m.mall_id));
+  const claimedMallIds = new Set();
+  for (const ids of Object.values(accountMallMap)) {
+    if (!Array.isArray(ids)) continue;
+    for (const id of ids) { const sid = String(id); if (mallById.has(sid)) claimedMallIds.add(sid); }
+  }
+  const cachedForAcc = (Array.isArray(accountMallMap[accId]) ? accountMallMap[accId] : []).map(String).filter((id) => mallById.has(id));
+  const targetIds = new Set(cachedForAcc);
+  for (const id of selectedMallIds) if (!claimedMallIds.has(id)) targetIds.add(id);
+  const accountTargets = [...targetIds].map((id) => mallById.get(id)).filter(Boolean)
+    .filter((m) => taskKeys.some((tk) => !collectedSet.has(`${m.mall_id}:${tk}`)));
+
+  if (accountTargets.length === 0) {
+    console.error(`${logPrefix} 账号 ${accLabel} 无待采店铺，跳过`);
+    return { success: true, skipped: true, accLabel, accAccessible: [], settlementItems: [], newlyCollectedKeys: [], stats: taskStats };
+  }
+
+  console.error(`${logPrefix} ──── 账号 ${accLabel}，待采 ${accountTargets.length} 店${cachedForAcc.length ? `（缓存名下 ${cachedForAcc.length}）` : ""} ────`);
+
+  // 每个账号都关闭浏览器重开，确保干净 session，账号之间绝不串号（根治抢号）
+  try { await closeBrowser(); } catch {}
+  clearStickyWorkerCredentials();
+  browserState.lastAccountId = accId;
+  syncBrowserState();
+  const pwd = normalizeRequestCredential(cred.password);
+  requestCredentialPhone = phone0;
+  requestCredentialPassword = pwd;
+  stickyCredentialPhone = phone0;
+  stickyCredentialPassword = pwd;
+  stickyCredentialAccountId = accId;
+  browserState.lastPhone = phone0;
+  clearBrowserPassword();
+
+  await ensureBrowser();
+  const stopPopupMonitor = registerSellerAuthPopupMonitor(`${logPrefix}-popup`);
+  let page = null;
+  try {
+    await establishSellerCentralSession(logPrefix);
+    page = await createSellerCentralPage("/goods/list", { attempts: 2, lite: true, readyDelayMin: 1500, readyDelayMax: 2500, logPrefix });
+  } catch (error) {
+    try { stopPopupMonitor?.(); } catch {}
+    console.error(`${logPrefix} 账号 ${accLabel} 登录失败: ${error.message}`);
+    return { success: false, loginFailed: true, accLabel, error: error.message, accAccessible: [], settlementItems: [], newlyCollectedKeys: [], stats: taskStats };
+  }
+
+  const accAccessible = new Set();
+  const accDenied = new Set();
+  const newlyCollectedKeys = [];
+  const batchItems = [];
+  let accSessionExpired = false;
+
+  try {
+    for (const taskKey of taskKeys) {
+      if (accSessionExpired) break;
+      const apiDef = BATCH_COLLECT_API[taskKey];
+      const ts = taskStats[taskKey];
+      for (const mall of accountTargets) {
+        if (accSessionExpired) break;
+        const { mall_id: mallId, store_code: tag } = mall;
+        const mallTaskKey = `${mallId}:${taskKey}`;
+        if (collectedSet.has(mallTaskKey)) continue;
+        if (accDenied.has(mallId)) { ts.noAccess++; continue; }
+        try {
+          let allRecords = []; let pageNum = 1; let hasMore = true; let hadAccess = false;
+          while (hasMore) {
+            const reqBody = apiDef.buildBody(pageNum);
+            const result = await page.evaluate(async ({ apiUrl, mid, body }) => {
+              try {
+                const resp = await fetch(apiUrl, { method: "POST", credentials: "include", cache: "no-store", headers: { "Content-Type": "application/json", mallid: mid }, body });
+                const text = await resp.text();
+                return { status: resp.status, text, ok: resp.ok };
+              } catch (e) { return { status: 0, text: "", ok: false, err: e.message }; }
+            }, { apiUrl: `https://agentseller.temu.com${apiDef.urlPath}`, mid: mallId, body: reqBody });
+            let body = null; try { body = JSON.parse(result.text); } catch { /* ignore */ }
+            const errCode = body?.error_code ?? body?.errorCode;
+            if (errCode === 40001 || errCode === "40001") { console.error(`${logPrefix} [${tag}] ${accLabel} session 过期`); ts.expired++; accSessionExpired = true; break; }
+            if (result.status === 403 || errCode === 400020037 || String(errCode) === "400020037") { accDenied.add(mallId); ts.noAccess++; break; }
+            hadAccess = true;
+            const list = apiDef.getList(body); const total = apiDef.getTotal(body);
+            // 诊断日志：每次请求都打出 status/errCode/list长度/body 前缀，定位"为啥返回 200 却没数据"
+            const errMsg = body?.error_msg || body?.errorMsg || body?.errorMessage || body?.msg || "";
+            const success = body?.success;
+            const sample = result.text ? result.text.slice(0, 220) : "<empty>";
+            console.error(`${logPrefix} [${tag}] ${apiDef.label} HTTP ${result.status} success=${success} errCode=${errCode || "-"} errMsg="${errMsg}" list=${list.length} total=${total} body0..220=${sample}`);
+            allRecords.push(...list);
+            if (result.ok && list.length > 0) {
+              batchItems.push({ kind: apiDef.ingestKind, url: `https://agentseller.temu.com${apiDef.urlPath}`, url_path: apiDef.urlPath, method: "POST", status: result.status, ts: Date.now(), site: "agentseller", page: apiDef.ingestPage, mall_id: mallId, body, bodyText: result.text.length > 200000 ? null : result.text, requestBodyText: reqBody, bodySize: result.text.length, activeSource: "batch_robot" });
+            }
+            if (!apiDef.paginate || list.length === 0 || allRecords.length >= total) hasMore = false;
+            else { pageNum++; await randomDelay(300, 500); }
+          }
+          // session 过期时也保留已认领信息：即使本任务被截断，已经 hadAccess 的店仍是该账号的店
+          if (hadAccess) {
+            accAccessible.add(mallId);
+            if (!accSessionExpired) {
+              newlyCollectedKeys.push(mallTaskKey);
+              if (allRecords.length > 0) { ts.success++; ts.totalRecords += allRecords.length; }
+              else ts.empty++;
+            }
+          } else if (!accSessionExpired && !accDenied.has(mallId)) ts.error++;
+        } catch (e) { ts.error++; console.error(`${logPrefix} [${tag}] ${apiDef.label} 异常: ${e.message}`); }
+        await randomDelay(accDenied.has(mallId) ? 50 : 400, accDenied.has(mallId) ? 100 : 700);
+      }
+    }
+  } finally {
+    await page?.close().catch(() => {});
+    try { stopPopupMonitor?.(); } catch {}
+  }
+
+  // 刷新归属缓存：把本账号确认有权限的店写入映射
+  if (accAccessible.size > 0) {
+    accountMallMap[accId] = [...accAccessible];
+    saveAccountMallMap(accountMallMap);
+  }
+
+  // ===== 账务费用（fund_detail）跨境猫域单独采集 =====
+  // fund/detail/pageSearch 仅在 seller.kuajingmaihuo.com 暴露（agentseller 返 405），页面内 fetch 受同源限制，
+  // 必须在 kuajingmaihuo 页面内同源 fetch。整段防御：失败不影响已采的明细/商品/售后。
+  if (wantFundDetail && accAccessible.size > 0 && !accSessionExpired) {
+    const fundDef = BATCH_COLLECT_API.fundDetail;
+    const fundTargets = accountTargets.filter((m) => accAccessible.has(String(m.mall_id)) && !collectedSet.has(`${m.mall_id}:fundDetail`));
+    if (fundTargets.length > 0) {
+      const fts = taskStats.fundDetail || (taskStats.fundDetail = { success: 0, error: 0, empty: 0, expired: 0, noAccess: 0, totalRecords: 0 });
+      let kjmhPage = null;
+      try {
+        kjmhPage = await safeNewPage(context);
+        // 进入跨境猫工作台建立同域 session（agentseller 已登录，跨境猫通常自动授权）
+        await kjmhPage.goto("https://seller.kuajingmaihuo.com/main/authentication", { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
+        await randomDelay(2500, 3500);
+        console.error(`${logPrefix} 账务费用：进入跨境猫页面 ${kjmhPage.url()}，待采 ${fundTargets.length} 店`);
+        // fund 接口要求"开始/结束时间必选"，真实字段名未知（hook 未记录请求体），逐候选探测命中后固定
+        const fundVariants = (pageNum) => {
+          const end = new Date(); const start = new Date(end.getTime() - 30 * 86400000);
+          const ds = (d) => d.toISOString().slice(0, 10);
+          const t0 = start.getTime(), t1 = end.getTime();
+          return [
+            JSON.stringify({ pageNo: pageNum, pageSize: 50, startTime: t0, endTime: t1 }),
+            JSON.stringify({ pageNo: pageNum, pageSize: 50, startTime: ds(start), endTime: ds(end) }),
+            JSON.stringify({ pageNo: pageNum, pageSize: 50, startDate: ds(start), endDate: ds(end) }),
+            JSON.stringify({ pageNo: pageNum, pageSize: 50, beginTime: t0, endTime: t1 }),
+          ];
+        };
+        const fundFetch = (mallId, bodyStr) => kjmhPage.evaluate(async ({ apiUrl, mid, body }) => {
+          try {
+            const resp = await fetch(apiUrl, { method: "POST", credentials: "include", cache: "no-store", headers: { "Content-Type": "application/json", mallid: mid }, body });
+            const text = await resp.text();
+            return { status: resp.status, text, ok: resp.ok };
+          } catch (e) { return { status: 0, text: "", ok: false, err: e.message }; }
+        }, { apiUrl: `https://seller.kuajingmaihuo.com${fundDef.urlPath}`, mid: mallId, body: bodyStr });
+        let fundVariant = -1; // 命中的参数变体下标，第一店探测后固定
+        for (const mall of fundTargets) {
+          const { mall_id: mallId, store_code: tag } = mall;
+          try {
+            let allRecords = []; let pageNum = 1; let hasMore = true;
+            while (hasMore) {
+              let reqBody, result, body = null;
+              if (fundVariant < 0) {
+                // 探测：逐候选试，命中（success!==false）则固定
+                const cands = fundVariants(pageNum);
+                for (let vi = 0; vi < cands.length; vi++) {
+                  reqBody = cands[vi];
+                  result = await fundFetch(mallId, reqBody);
+                  try { body = JSON.parse(result.text); } catch { body = null; }
+                  console.error(`${logPrefix} [${tag}] 账务费用探测 v${vi} HTTP ${result.status} success=${body?.success} msg="${(body?.errorMsg || "").slice(0, 50)}"`);
+                  if (result.ok && body && body.success !== false) { fundVariant = vi; break; }
+                }
+                if (fundVariant < 0) { hasMore = false; break; }
+              } else {
+                reqBody = fundVariants(pageNum)[fundVariant];
+                result = await fundFetch(mallId, reqBody);
+                try { body = JSON.parse(result.text); } catch { body = null; }
+              }
+              const list = fundDef.getList(body); const total = fundDef.getTotal(body);
+              allRecords.push(...list);
+              if (result.ok && list.length > 0) {
+                batchItems.push({ kind: fundDef.ingestKind, url: `https://seller.kuajingmaihuo.com${fundDef.urlPath}`, url_path: fundDef.urlPath, method: "POST", status: result.status, ts: Date.now(), site: "kuajingmaihuo", page: fundDef.ingestPage, mall_id: mallId, body, bodyText: result.text.length > 200000 ? null : result.text, requestBodyText: reqBody, bodySize: result.text.length, activeSource: "batch_robot" });
+              }
+              if (list.length === 0 || allRecords.length >= total || pageNum >= 10) hasMore = false;
+              else { pageNum++; await randomDelay(300, 500); }
+            }
+            if (allRecords.length > 0) { fts.success++; fts.totalRecords += allRecords.length; newlyCollectedKeys.push(`${mallId}:fundDetail`); }
+            else fts.empty++;
+          } catch (e) { fts.error++; console.error(`${logPrefix} [${tag}] 账务费用异常: ${e.message}`); }
+          await randomDelay(400, 700);
+        }
+        console.error(`${logPrefix} 账务费用完成: 命中变体=${fundVariant}, 成功 ${fts.success} 店 / ${fts.totalRecords} 条, 空 ${fts.empty}, 错 ${fts.error}`);
+      } catch (e) {
+        console.error(`${logPrefix} 账务费用采集整体失败（跨境猫页面）: ${e.message}`);
+      } finally {
+        await kjmhPage?.close().catch(() => {});
+      }
+    }
+  }
+
+  // cloud 上报：按类型分组小批上报，结算优先（body 最小、最重要），单 chunk 1-2 条防 body 过大超时。
+  // 注意：商品 body 可能 200KB+，14 页就 3MB，60s 内传不完。所以分类型 + 小 chunk。
+  let uploaded = 0;
+  const cloudConfig = loadSettlementCloudConfig();
+  if (batchItems.length > 0 && cloudConfig.authToken) {
+    const byKind = { "fetch-active-income-summary": [], "fetch-active-settlement-detail": [], "fetch-active-fund-detail": [], "fetch-active-aftersales": [], "fetch-active-products": [] };
+    for (const it of batchItems) (byKind[it.kind] || (byKind[it.kind] = [])).push(it);
+    // CHUNK 大小按 body 估算：结算收入/明细 body 小可一批多条；账务费用每页 50 条中等；商品/售后 body 大每批 2 条
+    const kindChunk = { "fetch-active-income-summary": 10, "fetch-active-settlement-detail": 10, "fetch-active-fund-detail": 4, "fetch-active-aftersales": 2, "fetch-active-products": 2 };
+    // 顺序：结算收入 → 结算明细 → 账务费用 → 售后 → 商品（任何一类失败不影响其他）
+    for (const kind of ["fetch-active-income-summary", "fetch-active-settlement-detail", "fetch-active-fund-detail", "fetch-active-aftersales", "fetch-active-products"]) {
+      const items = byKind[kind] || [];
+      if (items.length === 0) continue;
+      const CHUNK = kindChunk[kind] || 2;
+      for (let i = 0; i < items.length; i += CHUNK) {
+        const slice = items.slice(i, i + CHUNK);
+        try {
+          const resp = await postSettlementBatch(slice, cloudConfig);
+          if (resp.ok) {
+            uploaded += slice.length;
+            console.error(`${logPrefix} 上报 ${kind} ${i + slice.length}/${items.length} ok (${resp.sizeKb}KB)`);
+          } else {
+            console.error(`${logPrefix} 上报 ${kind} ${i}/${items.length} 失败 HTTP ${resp.status}`);
+          }
+        } catch (e) {
+          console.error(`${logPrefix} 上报 ${kind} ${i}/${items.length} 异常: ${e.message}`);
+        }
+      }
+    }
+  }
+
+  const settlementItems = batchItems.filter((it) => it.kind === "fetch-active-income-summary" && it.body).map((it) => ({ mall_id: it.mall_id, body: it.body }));
+  console.error(`${logPrefix} 账号 ${accLabel} 完成: 名下=${accAccessible.size}店, 无权限=${accDenied.size}店${accSessionExpired ? ", session过期" : ""}, 上报${uploaded}`);
+
+  return { success: true, accLabel, accAccessible: [...accAccessible], settlementItems, newlyCollectedKeys, uploadedToCloud: uploaded, totalItems: batchItems.length, stats: taskStats, sessionExpired: accSessionExpired };
 }
 
 async function scrapeCustomTask(taskKey, task = {}) {
@@ -9583,6 +10338,15 @@ async function handleRequest(body) {
       return await handlePriceReviewClearManualCost(params || {});
     case "price_review_open_1688_login":
       return await handlePriceReviewOpen1688Login(params || {});
+    case "batch_collect": {
+      const allCreds = Array.isArray(params.allCredentials) ? params.allCredentials : [];
+      console.error(`[batch_collect] 多账号批量采集: ${allCreds.length} 个账号`);
+      return await scrapeBatchCollect(params || {});
+    }
+    case "batch_collect_account": {
+      // 单账号采集（main 进程逐账号循环调用，实现增量入库）
+      return await collectOneAccount(params || {});
+    }
     default: {
       // 注册表驱动的采集命令（替代 50+ 重复 case）
       const scrapeHandlers = buildScrapeHandlers({

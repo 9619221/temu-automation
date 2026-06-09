@@ -170,6 +170,22 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.invoke("automation:scrape-activity"),
     scrapeSettlement: () =>
       ipcRenderer.invoke("automation:scrape-settlement"),
+    batchCollect: (params) =>
+      ipcRenderer.invoke("automation:batch-collect", params),
+    batchCollectStop: () =>
+      ipcRenderer.invoke("automation:batch-collect-stop"),
+    onBatchCollectProgress: (handler) => {
+      const channel = "automation:batch-collect-progress";
+      const listener = (_event, payload) => handler(payload);
+      ipcRenderer.on(channel, listener);
+      return () => ipcRenderer.removeListener(channel, listener);
+    },
+    listAccounts: () =>
+      ipcRenderer.invoke("automation:list-accounts"),
+    storeMappingGet: () =>
+      ipcRenderer.invoke("automation:store-mapping:get"),
+    storeMappingSave: (mapping) =>
+      ipcRenderer.invoke("automation:store-mapping:save", mapping),
     scrapePerformance: () =>
       ipcRenderer.invoke("automation:scrape-performance"),
     scrapeAll: () =>

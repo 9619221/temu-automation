@@ -6876,6 +6876,7 @@ function toJstOtherInoutRow(row) {
     warehouse: row.warehouse,
     wmsCoId: row.wms_co_id,
     wmsCoName: row.wms_co_name,
+    storeName: row.store_name || null, // 聚水潭单是仓库级；店铺由 items.sku_id 反推 erp_skus.account_id 聚合得到
     totalQty: row.total_qty,
     totalAmount: row.total_amount,
     totalCost: row.total_cost,
@@ -6951,10 +6952,12 @@ function listSkuSwapOtherInout(db, params = {}) {
   try {
     legs = db.prepare(`
       SELECT l.source_doc_id AS doc, l.type AS type, l.qty_delta AS qd, l.unit_cost AS uc,
-             l.created_at AS ts, COALESCE(u.name, l.created_by) AS creator, s.internal_sku_code AS code
+             l.created_at AS ts, COALESCE(u.name, l.created_by) AS creator, s.internal_sku_code AS code,
+             acct.name AS store
       FROM erp_inventory_ledger_entries l
       LEFT JOIN erp_skus s ON s.id = l.sku_id
       LEFT JOIN erp_users u ON u.id = l.created_by
+      LEFT JOIN erp_accounts acct ON acct.id = s.account_id AND acct.id != 'jst:account:default'
       WHERE l.type IN ('sku_swap_out', 'sku_swap_in')
     `).all();
   } catch (_e) {
@@ -6963,9 +6966,11 @@ function listSkuSwapOtherInout(db, params = {}) {
   const byDoc = new Map();
   for (const r of legs) {
     let g = byDoc.get(r.doc);
-    if (!g) { g = { doc: r.doc, out: [], in: [], creator: null, tsList: [] }; byDoc.set(r.doc, g); }
+    if (!g) { g = { doc: r.doc, out: [], in: [], creator: null, tsList: [], stores: new Set() }; byDoc.set(r.doc, g); }
     g.tsList.push(r.ts);
     if (r.creator && !g.creator) g.creator = r.creator;
+    // 店铺跟着 SKU 走：一单可能涉及换出/换入多个店铺，去重后全部列出。
+    if (r.store) g.stores.add(r.store);
     (r.type === "sku_swap_out" ? g.out : g.in).push(r);
   }
   let rows = [];
@@ -6988,6 +6993,7 @@ function listSkuSwapOtherInout(db, params = {}) {
       fStatus: null,
       whId: null, lwhId: null, lwhName: null,
       warehouse: "本地库存调拨",
+      storeName: [...g.stores].join("、") || null,
       wmsCoId: null, wmsCoName: null,
       totalQty: outQty,
       totalAmount: swapRound2(outAmount),
@@ -7023,6 +7029,7 @@ function listSkuSwapOtherInout(db, params = {}) {
       String(r.type || "").toLowerCase().includes(kw) ||
       String(r.creatorName || "").toLowerCase().includes(kw) ||
       String(r.remark || "").toLowerCase().includes(kw) ||
+      String(r.storeName || "").toLowerCase().includes(kw) ||
       String(r.warehouse || "").toLowerCase().includes(kw)
     );
   }
@@ -7123,8 +7130,20 @@ function listJstOtherInout(params = {}) {
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   // 不在 SQL 里 LIMIT/OFFSET：要先和换货虚拟单按业务时间混排，再统一分页。
   // jst_other_inout 量级约千行，全量取出 + JS 排序分页可接受；涨到数万再改 SQL UNION。
+  // store_name 关联子查询：聚水潭单是仓库级，由明细 sku_id → erp_skus.internal_sku_code →
+  // erp_accounts.name 反推；同 io_id 涉及多店时去重逗号串接，剔除聚水潭默认占位账号。
+  // 同 internal_sku_code 可能在多个 account 下存在（多店共用货号），全部列出，列名不冲突无需别名前缀。
   const jstRows = db.prepare(`
-    SELECT * FROM jst_other_inout
+    SELECT jst_other_inout.*, (
+      SELECT GROUP_CONCAT(DISTINCT acct.name)
+      FROM jst_other_inout_items it
+      LEFT JOIN erp_skus s ON s.internal_sku_code = it.sku_id
+      LEFT JOIN erp_accounts acct ON acct.id = s.account_id AND acct.id != 'jst:account:default'
+      WHERE it.io_id = jst_other_inout.io_id
+        AND it.company_id = jst_other_inout.company_id
+        AND acct.name IS NOT NULL
+    ) AS store_name
+    FROM jst_other_inout
     ${where}
     ORDER BY io_date DESC, io_id DESC
   `).all(values).map(toJstOtherInoutRow);
@@ -12929,6 +12948,73 @@ function generatePurchaseOrderAction({ db, services, payload, actor }) {
   };
 }
 
+// 线下采购单逐行解析：编辑 / 转线下共用。多 SKU 单子按 payload.lines 逐行改数量/单价；
+// 没传 lines 时兼容老的单行口径(只动第一行)。运费在单头填一个总额，按各行金额(数量×单价)比例摊到各行。
+// 返回 { lines:[{id,qty,unitCost,logisticsFee}], goodsAmount, totalFreight, totalQty, avgUnitCost }。
+function resolveOfflinePoLineUpdates(db, poId, payload) {
+  const rows = db.prepare(
+    "SELECT * FROM erp_purchase_order_lines WHERE po_id = ? ORDER BY id ASC",
+  ).all(poId);
+  if (!rows.length) throw new Error("采购单没有明细行");
+
+  const totalFreight = optionalNumber(payload.logisticsFee)
+    ?? moneyOrZero(rows.reduce((sum, line) => sum + Number(line.logistics_fee || 0), 0));
+  if (!Number.isFinite(totalFreight) || totalFreight < 0) {
+    throw new Error("logisticsFee must be greater than or equal to 0");
+  }
+
+  const payloadLines = Array.isArray(payload.lines) ? payload.lines.filter((item) => item && typeof item === "object") : [];
+  const updates = [];
+  if (payloadLines.length) {
+    // 多 SKU：按 lineId 定位数据库行逐行改；前端未覆盖的行保持原值
+    const byId = new Map(rows.map((line) => [String(line.id), line]));
+    const covered = new Set();
+    for (const item of payloadLines) {
+      const lineId = optionalString(item.lineId ?? item.id);
+      const line = lineId ? byId.get(String(lineId)) : null;
+      if (!line) throw new Error(`明细行不存在或不属于本采购单: ${lineId || "(空)"}`);
+      const unitCost = optionalNumber(item.unitPrice ?? item.unit_cost) ?? Number(line.unit_cost || 0);
+      const qty = optionalNumber(item.qty) ?? Number(line.qty || 0);
+      if (!Number.isFinite(unitCost) || unitCost < 0) throw new Error("unitPrice must be greater than or equal to 0");
+      if (!Number.isInteger(qty) || qty <= 0) throw new Error("qty must be a positive integer");
+      updates.push({ id: line.id, qty, unitCost });
+      covered.add(String(line.id));
+    }
+    for (const line of rows) {
+      if (covered.has(String(line.id))) continue;
+      updates.push({ id: line.id, qty: Number(line.qty || 0), unitCost: Number(line.unit_cost || 0) });
+    }
+  } else {
+    // 单行兼容口径：用单一 unitPrice/qty 改第一行，其余行(若有)保持原值
+    const first = rows[0];
+    const unitCost = optionalNumber(payload.unitPrice) ?? Number(first.unit_cost || 0);
+    const qty = optionalNumber(payload.qty) ?? Number(first.qty || 0);
+    if (!Number.isFinite(unitCost) || unitCost < 0) throw new Error("unitPrice must be greater than or equal to 0");
+    if (!Number.isInteger(qty) || qty <= 0) throw new Error("qty must be a positive integer");
+    updates.push({ id: first.id, qty, unitCost });
+    for (let i = 1; i < rows.length; i += 1) {
+      updates.push({ id: rows[i].id, qty: Number(rows[i].qty || 0), unitCost: Number(rows[i].unit_cost || 0) });
+    }
+  }
+
+  const goodsAmount = moneyOrZero(updates.reduce((sum, u) => sum + moneyOrZero(u.qty * u.unitCost), 0));
+  const totalQty = updates.reduce((sum, u) => sum + u.qty, 0);
+  // 运费按各行金额比例摊(金额为 0 时退化按数量)，与前端展示口径一致
+  const freightByLine = allocateMoneyByWeight(
+    totalFreight,
+    updates.map((u) => moneyOrZero(u.qty * u.unitCost) || u.qty),
+  );
+  updates.forEach((u, index) => { u.logisticsFee = freightByLine[index] ?? 0; });
+
+  return {
+    lines: updates,
+    goodsAmount,
+    totalFreight: moneyOrZero(totalFreight),
+    totalQty,
+    avgUnitCost: totalQty > 0 ? roundMoney(goodsAmount / totalQty) ?? 0 : 0,
+  };
+}
+
 // 编辑线下手工单：改单价/运费/数量/供应商，重算金额。仅限草稿(draft)未推单的手工单。
 // 供应商名挂在候选上：有候选就更新，没有就新建一条并回填 selected_candidate_id。
 function updateOfflinePurchaseOrderAction({ db, services, payload, actor }) {
@@ -12941,18 +13027,10 @@ function updateOfflinePurchaseOrderAction({ db, services, payload, actor }) {
   if (optionalString(po.external_order_id)) {
     throw new Error("已推送 1688 的采购单不能在这里改价");
   }
-  const lines = db.prepare(
-    "SELECT * FROM erp_purchase_order_lines WHERE po_id = ? ORDER BY id ASC",
-  ).all(poId);
-  if (!lines.length) throw new Error("采购单没有明细行");
-  const line = lines[0];
-
-  const unitCost = optionalNumber(payload.unitPrice) ?? Number(line.unit_cost || 0);
-  const logisticsFee = optionalNumber(payload.logisticsFee) ?? Number(line.logistics_fee || 0);
-  const qty = optionalNumber(payload.qty) ?? Number(line.qty || 0);
-  if (!Number.isFinite(unitCost) || unitCost < 0) throw new Error("unitPrice must be greater than or equal to 0");
-  if (!Number.isFinite(logisticsFee) || logisticsFee < 0) throw new Error("logisticsFee must be greater than or equal to 0");
-  if (!Number.isInteger(qty) || qty <= 0) throw new Error("qty must be a positive integer");
+  const resolved = resolveOfflinePoLineUpdates(db, poId, payload);
+  const unitCost = resolved.avgUnitCost;
+  const logisticsFee = resolved.totalFreight;
+  const qty = resolved.totalQty;
 
   const supplierId = optionalString(payload.supplierId);
   const supplier = supplierId ? db.prepare("SELECT * FROM erp_suppliers WHERE id = ?").get(supplierId) : null;
@@ -13012,13 +13090,16 @@ function updateOfflinePurchaseOrderAction({ db, services, payload, actor }) {
     });
   }
 
-  const goodsAmount = qty * unitCost;
-  const totalAmount = goodsAmount + logisticsFee;
-  db.prepare(`
+  const goodsAmount = resolved.goodsAmount;
+  const totalAmount = moneyOrZero(goodsAmount + logisticsFee);
+  const updateOfflineLine = db.prepare(`
     UPDATE erp_purchase_order_lines
     SET qty = @qty, expected_qty = @qty, unit_cost = @unit_cost, logistics_fee = @logistics_fee
     WHERE id = @id
-  `).run({ id: line.id, qty, unit_cost: unitCost, logistics_fee: logisticsFee });
+  `);
+  for (const u of resolved.lines) {
+    updateOfflineLine.run({ id: u.id, qty: u.qty, unit_cost: u.unitCost, logistics_fee: u.logisticsFee });
+  }
 
   db.prepare(`
     UPDATE erp_purchase_orders
@@ -13303,18 +13384,10 @@ async function convertPoToOfflineAction({ db, services, payload, actor }) {
     throw new Error("已付款的采购单不能转线下");
   }
 
-  const lines = db.prepare(
-    "SELECT * FROM erp_purchase_order_lines WHERE po_id = ? ORDER BY id ASC",
-  ).all(poId);
-  if (!lines.length) throw new Error("采购单没有明细行");
-  const line = lines[0];
-
-  const unitCost = optionalNumber(payload.unitPrice) ?? Number(line.unit_cost || 0);
-  const logisticsFee = optionalNumber(payload.logisticsFee) ?? Number(line.logistics_fee || 0);
-  const qty = optionalNumber(payload.qty) ?? Number(line.qty || 0);
-  if (!Number.isFinite(unitCost) || unitCost < 0) throw new Error("unitPrice must be greater than or equal to 0");
-  if (!Number.isFinite(logisticsFee) || logisticsFee < 0) throw new Error("logisticsFee must be greater than or equal to 0");
-  if (!Number.isInteger(qty) || qty <= 0) throw new Error("qty must be a positive integer");
+  const resolved = resolveOfflinePoLineUpdates(db, poId, payload);
+  const unitCost = resolved.avgUnitCost;
+  const logisticsFee = resolved.totalFreight;
+  const qty = resolved.totalQty;
 
   const supplierId = optionalString(payload.supplierId);
   const supplier = supplierId ? db.prepare("SELECT * FROM erp_suppliers WHERE id = ?").get(supplierId) : null;
@@ -13412,13 +13485,16 @@ async function convertPoToOfflineAction({ db, services, payload, actor }) {
       });
     }
 
-    const goodsAmount = qty * unitCost;
-    const totalAmount = goodsAmount + logisticsFee;
-    db.prepare(`
+    const goodsAmount = resolved.goodsAmount;
+    const totalAmount = moneyOrZero(goodsAmount + logisticsFee);
+    const updateOfflineLine = db.prepare(`
       UPDATE erp_purchase_order_lines
       SET qty = @qty, expected_qty = @qty, unit_cost = @unit_cost, logistics_fee = @logistics_fee
       WHERE id = @id
-    `).run({ id: line.id, qty, unit_cost: unitCost, logistics_fee: logisticsFee });
+    `);
+    for (const u of resolved.lines) {
+      updateOfflineLine.run({ id: u.id, qty: u.qty, unit_cost: u.unitCost, logistics_fee: u.logisticsFee });
+    }
 
     db.prepare(`
       UPDATE erp_purchase_orders
@@ -23498,6 +23574,30 @@ function closeErp() {
   erpState.currentUser = null;
 }
 
+function processSettlementBatchItems(items) {
+  if (!Array.isArray(items) || !items.length) { console.error(`[processSettlementBatchItems] items 为空`); return { ok: false, rows: 0 }; }
+  if (!erpState.db) { console.error(`[processSettlementBatchItems] erpState.db 未初始化（可能 client 模式 dev 不用本地库），无法入库`); return { ok: false, rows: 0, reason: "no_local_db" }; }
+  try {
+    console.error(`[processSettlementBatchItems] 开始处理 ${items.length} 个店的结算 body`);
+    const { upsertSettlementIncomeFromDashboard, ensureSettlementIncomeSchema, _internal } = require("./services/multiStoreReport.cjs");
+    ensureSettlementIncomeSchema(erpState.db);
+    const INCOME_PATH = _internal.SETTLEMENT_INCOME_PATH;
+    let totalRows = 0;
+    for (const item of items) {
+      if (!item.mall_id || !item.body) continue;
+      const r = upsertSettlementIncomeFromDashboard(erpState.db, {
+        dashboard: { apis: [{ path: INCOME_PATH, data: item.body }] },
+        mallId: item.mall_id,
+      });
+      totalRows += r.rows;
+    }
+    return { ok: true, rows: totalRows };
+  } catch (e) {
+    console.error("[processSettlementBatchItems] 入库失败:", e.message);
+    return { ok: false, rows: 0, error: e.message };
+  }
+}
+
 module.exports = {
   initializeErp,
   getErpStatus,
@@ -23507,4 +23607,5 @@ module.exports = {
   runScheduledOrderSync,
   resetScheduledOrderSyncState,
   runScheduledMessageReprocess,
+  processSettlementBatchItems,
 };

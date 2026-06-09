@@ -18,6 +18,7 @@ const {
   runScheduledOrderSync,
   resetScheduledOrderSyncState,
   runScheduledMessageReprocess,
+  processSettlementBatchItems,
 } = require("./erp/ipc.cjs");
 
 const MAX_DIAGNOSTIC_LOG_BYTES = 5 * 1024 * 1024;
@@ -158,6 +159,9 @@ let workerAiImageServer = "";
 let workerAuthToken = "";
 let workerStartPromise = null;
 let workerStartTargetAiImageServer = "";
+// 批量采集「停止」标志（模块级，便于 sendCmd 在停止期间不自动重启 worker 重采）。
+// 前端点停止 → 置 true → ① 强制杀 worker 进程中断当前店；② sendCmd 不再自动重启重试。
+let _batchCollectStopRequested = false;
 const AUTO_PRICING_TASKS_KEY = "temu_auto_pricing_tasks";
 const AUTO_PRICING_TASK_LIMIT = 20;
 const CREATE_HISTORY_KEY = "temu_create_history";
@@ -1195,6 +1199,27 @@ function getActiveWorkerCredentials() {
   }
 }
 
+function getAllWorkerCredentials() {
+  try {
+    const accounts = readStoreJsonWithRecovery(getStoreFilePath(ACCOUNT_STORE_KEY), ACCOUNT_STORE_KEY);
+    if (!Array.isArray(accounts) || accounts.length === 0) return [];
+    return accounts
+      .filter((a) => {
+        const phone = typeof a?.phone === "string" ? a.phone.trim() : "";
+        const name = typeof a?.name === "string" ? a.name.trim() : "";
+        return phone && phone !== "13800138000" && !/回归测试|test/i.test(name);
+      })
+      .map((a) => ({
+        accountId: a.id || "",
+        name: a.name || "",
+        phone: a.phone,
+        password: a.password || "",
+      }));
+  } catch {
+    return [];
+  }
+}
+
 function attachWorkerCredentials(action, params = {}) {
   const nextParams = params && typeof params === "object" ? params : {};
   if (action === "login") {
@@ -1565,7 +1590,10 @@ async function sendCmd(action, params = {}, requestOptions = {}) {
     return await httpPost(workerPort, payload);
   } catch (error) {
     const message = String(error?.message || "");
-    const shouldRetry = /ECONNRESET|ECONNREFUSED|socket hang up|Worker 通信失败|Worker 请求超时/i.test(message);
+    // 用户主动停止批量采集时会强杀 worker，导致此处连接断开。这种情况不能自动重启重试，
+    // 否则会把刚被停掉的那个店重新采一遍——直接把错误抛上去，让采集循环识别停止并退出。
+    const shouldRetry = /ECONNRESET|ECONNREFUSED|socket hang up|Worker 通信失败|Worker 请求超时/i.test(message)
+      && !_batchCollectStopRequested;
     if (!shouldRetry || keepLongRunningWorkerAlive) {
       throw error;
     }
@@ -4565,6 +4593,182 @@ ipcMain.handle("automation:scrape-activity", async () => {
 
 ipcMain.handle("automation:scrape-settlement", async () => {
   return sendCmd("scrape_settlement");
+});
+
+// 批量采集「停止」：前端点停止 → 置标志 + 强杀 worker 进程，立即中断当前店采集。
+// taskkill /F /T 会连带关闭 worker 启动的浏览器（playwright 子进程），所以「无论卡在哪都能秒停」。
+// 已增量上报入库的数据不丢；正在采的那个店本次可能采一半，下次重采即可。
+ipcMain.handle("automation:batch-collect-stop", async () => {
+  _batchCollectStopRequested = true;
+  console.error(`[batch-collect] 收到停止请求：强杀 worker 进程 + 关闭浏览器，立即中断当前采集`);
+  const w = worker;
+  if (w) {
+    try { await killChildProcessTree(w); } catch (e) { console.error(`[batch-collect] 杀 worker 失败: ${e?.message || e}`); }
+  }
+  return { ok: true };
+});
+
+ipcMain.handle("automation:batch-collect", async (_e, params) => {
+  // 按店铺顺序逐店采集：照你选的店一个一个来。
+  // 每个店：查映射表得到归属账号 → 关浏览器 → 新浏览器登录账号 → 采这个店 → 入库 → 关浏览器 → 下一个店。
+  // 用户随时可暂停（当前正在采的店采完就停），已采的店数据已落库不丢。
+  _batchCollectStopRequested = false;
+  const allCreds = getAllWorkerCredentials();
+  const selectedMalls = Array.isArray(params?.selectedMalls) ? params.selectedMalls : [];
+  const tasks = Array.isArray(params?.tasks) && params.tasks.length > 0 ? params.tasks : ["products", "afterSales", "settlement"];
+  console.error(`[batch-collect] 逐店采集: 选中 ${selectedMalls.length} 店（按店铺顺序）, 任务=${tasks.join(",")}`);
+
+  // 读映射表：mall_id -> accountId
+  const STORE_MAPPING_FILE = path.join(__dirname, "..", ".settlement-account-mall-map.json");
+  const mallToAccountId = new Map();
+  try {
+    if (fs.existsSync(STORE_MAPPING_FILE)) {
+      const m = JSON.parse(fs.readFileSync(STORE_MAPPING_FILE, "utf-8"));
+      for (const [accId, mallIds] of Object.entries(m || {})) {
+        if (Array.isArray(mallIds)) for (const mid of mallIds) mallToAccountId.set(String(mid), accId);
+      }
+    }
+  } catch { /* ignore */ }
+  const accountById = new Map(allCreds.map((c) => [c.accountId, c]));
+
+  const mergedTasks = {};
+  for (const tk of tasks) mergedTasks[tk] = { success: 0, error: 0, empty: 0, expired: 0, noAccess: 0, totalRecords: 0 };
+  let totalItems = 0, totalUploaded = 0, totalInserted = 0;
+  const failedStores = [];
+  const unmappedStores = [];
+  const collected = new Set();          // 跨店去重（防止映射重叠时重复采）
+  let storesCollected = 0;
+  let stoppedByUser = false;
+
+  for (let i = 0; i < selectedMalls.length; i++) {
+    if (_batchCollectStopRequested) {
+      console.error(`[batch-collect] 用户暂停：已采 ${storesCollected} 店，停止剩余 ${selectedMalls.length - i} 店`);
+      stoppedByUser = true;
+      break;
+    }
+    const mall = selectedMalls[i];
+    const mallId = String(mall.mall_id);
+    const tag = mall.store_code || mallId.slice(-4);
+
+    const accId = mallToAccountId.get(mallId);
+    if (!accId || !accountById.has(accId)) {
+      console.error(`[batch-collect] [${tag}] 未在映射表中找到归属账号，跳过`);
+      unmappedStores.push(tag);
+      continue;
+    }
+    const cred = accountById.get(accId);
+    const accName = cred.name || cred.accountId;
+    console.error(`[batch-collect] [${i + 1}/${selectedMalls.length}] 采集店 ${tag} → 登录账号 ${accName}`);
+
+    // 调 worker 采单个店（复用 batch_collect_account：传单个店让它登该账号、只采这一店）
+    let r;
+    try {
+      r = await sendCmd("batch_collect_account", {
+        credential: cred,
+        selectedMalls: [mall],
+        tasks,
+        collectedKeys: [...collected],
+      }, { timeoutMs: 10 * 60 * 1000 });
+    } catch (e) {
+      // 用户强制停止会杀掉 worker，导致这里抛连接错误——这是预期的，直接干净退出，
+      // 不把当前店算作「采集失败/未覆盖」（避免误导用户以为是出错了）。
+      if (_batchCollectStopRequested) {
+        console.error(`[batch-collect] [${tag}] 已被用户强制停止，中断采集`);
+        stoppedByUser = true;
+        break;
+      }
+      console.error(`[batch-collect] [${tag}] 采集异常: ${e.message}`);
+      failedStores.push(tag);
+      continue;
+    }
+
+    if (r?.loginFailed) { console.error(`[batch-collect] [${tag}] 登录失败`); failedStores.push(tag); continue; }
+    if (!r?.success || r?.skipped) { continue; }
+
+    storesCollected++;
+    if (r.settlementItems?.length > 0) {
+      try {
+        const ir = processSettlementBatchItems(r.settlementItems);
+        if (ir.ok) {
+          totalInserted += ir.rows || 0;
+          console.error(`[batch-collect] [${tag}] 结算本地入库 ${ir.rows} 行（累计 ${totalInserted}）`);
+        } else if (ir.reason === "no_local_db") {
+          // client 模式下没本地 db。数据已经走 worker 上报到云端，云端 cron 会同步到 ERP 表，
+          // 多店报表查云端 ERP 就能看到 → 这种"入库 0 行"是预期、不算失败。
+        }
+      } catch (e) { console.error(`[batch-collect] [${tag}] 入库失败: ${e.message}`); }
+    }
+    totalItems += r.totalItems || 0;
+    totalUploaded += r.uploadedToCloud || 0;
+    (r.newlyCollectedKeys || []).forEach((k) => collected.add(k));
+    for (const [tk, s] of Object.entries(r.stats || {})) {
+      if (!mergedTasks[tk]) mergedTasks[tk] = { success: 0, error: 0, empty: 0, expired: 0, noAccess: 0, totalRecords: 0 };
+      for (const key of Object.keys(mergedTasks[tk])) mergedTasks[tk][key] += s[key] || 0;
+    }
+
+    try {
+      _e.sender.send("automation:batch-collect-progress", {
+        current: i + 1, total: selectedMalls.length, tag, accLabel: accName,
+        uploaded: totalUploaded, inserted: totalInserted,
+      });
+    } catch { /* ignore */ }
+  }
+
+  console.error(`[batch-collect] ${stoppedByUser ? "已暂停" : "全部完成"}: 已采 ${storesCollected}/${selectedMalls.length} 店, 入库 ${totalInserted}, 上报 ${totalUploaded}${unmappedStores.length ? `, ${unmappedStores.length} 店无归属(${unmappedStores.join(",")})` : ""}`);
+  return {
+    success: true,
+    stoppedByUser,
+    stats: { totalStores: selectedMalls.length, totalAccounts: allCreds.length, accountsUsed: storesCollected, tasks: mergedTasks },
+    totalItems,
+    uploadedToCloud: totalUploaded,
+    settlementInserted: totalInserted,
+    collectedAt: new Date().toISOString(),
+    uncoveredStores: [...unmappedStores, ...failedStores],
+    failedAccounts: failedStores,
+  };
+});
+
+// ===== 店铺映射表（手动指定「哪个店归哪个账号」，采集时按它精准登账号）=====
+// 与 worker 共用同一个映射文件（项目根 .settlement-account-mall-map.json）。
+const STORE_MAPPING_FILE = path.join(__dirname, "..", ".settlement-account-mall-map.json");
+
+ipcMain.handle("automation:list-accounts", async () => {
+  try {
+    const creds = getAllWorkerCredentials();
+    return { ok: true, accounts: creds.map((c) => ({ id: c.accountId, name: c.name })) };
+  } catch (e) {
+    return { ok: false, error: e.message, accounts: [] };
+  }
+});
+
+ipcMain.handle("automation:store-mapping:get", async () => {
+  try {
+    if (!fs.existsSync(STORE_MAPPING_FILE)) return { ok: true, mapping: {} };
+    const obj = JSON.parse(fs.readFileSync(STORE_MAPPING_FILE, "utf-8"));
+    return { ok: true, mapping: (obj && typeof obj === "object" && !Array.isArray(obj)) ? obj : {} };
+  } catch (e) {
+    return { ok: false, error: e.message, mapping: {} };
+  }
+});
+
+ipcMain.handle("automation:store-mapping:save", async (_e, mapping) => {
+  try {
+    const clean = {};
+    if (mapping && typeof mapping === "object") {
+      for (const [accId, mallIds] of Object.entries(mapping)) {
+        if (!accId) continue;
+        if (Array.isArray(mallIds) && mallIds.length > 0) {
+          clean[accId] = [...new Set(mallIds.map((x) => String(x)).filter(Boolean))];
+        }
+      }
+    }
+    fs.writeFileSync(STORE_MAPPING_FILE, JSON.stringify(clean, null, 2), "utf-8");
+    const storeCount = Object.values(clean).reduce((n, arr) => n + arr.length, 0);
+    console.error(`[store-mapping] 已保存映射表: ${Object.keys(clean).length} 账号 / ${storeCount} 店`);
+    return { ok: true, accounts: Object.keys(clean).length, stores: storeCount };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
 });
 
 ipcMain.handle("automation:scrape-performance", async () => {
