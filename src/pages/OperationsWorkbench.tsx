@@ -243,6 +243,8 @@ const isSlowMoving = (r: ProductPanelRow): boolean =>
 export default function OperationsWorkbench() {
   const owViewKey = (suffix: string) => `temu.ops-workbench.${suffix}`;
   const [activeTab, setActiveTab] = useSessionState(owViewKey("tab"), "overview");
+  // 「商品全景」Tab(PipelineTab)自管数据,顶部统一刷新通过递增此信号触发它重新加载
+  const [pipelineReloadSignal, setPipelineReloadSignal] = useState(0);
   // 「我的店」视角:按负责人(owner)过滤全局,记住上次选择
   const [ownerFilter, setOwnerFilter] = useState<string>(() => { try { return localStorage.getItem("ow_owner") || "all"; } catch { return "all"; } });
   const setOwner = useCallback((v: string) => { setOwnerFilter(v); try { localStorage.setItem("ow_owner", v); } catch { /* */ } }, []);
@@ -1489,7 +1491,7 @@ export default function OperationsWorkbench() {
     },
     {
       key: "pipeline", label: "商品全景",
-      children: <PipelineTab />,
+      children: <PipelineTab reloadSignal={pipelineReloadSignal} />,
     },
     {
       key: "todo", label: "今日待办",
@@ -1752,7 +1754,7 @@ export default function OperationsWorkbench() {
         extra={<div style={{ display: "flex", gap: 10, alignItems: "center" }}>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>我的店</Typography.Text>
           <Select size="small" style={{ width: 140 }} value={ownerFilter} onChange={setOwner} options={[{ value: "all", label: "全部负责人" }, ...ownerOptions.map((o) => ({ value: o, label: o }))]} disabled={ownerOptions.length === 0} placeholder="负责人" />
-          <Button icon={<ReloadOutlined />} loading={skuLoading || riskLoading || actLoading || shopLoading || trendLoading || adLoading || stockLoading || panelLoading} onClick={() => { loadSku(); setShopLoaded(false); setTrendLoaded(false); setAdLoaded(false); setStockLoaded(false); setRiskLoaded(false); setActLoaded(false); setPanelLoaded(false); setQcLoaded(false); setQualityLoaded(false); setReviewLoaded(false); loadShop(); if (activeTab === "store") { loadTrend(); loadAd(); } else if (activeTab === "stock") loadStockOrders(); else if (activeTab === "risk") loadRisk(); else if (activeTab === "activity") loadAct(); else if (activeTab === "product") loadPanel(); else if (activeTab === "qc") loadQc(); else if (activeTab === "quality") loadQuality(); else if (activeTab === "review") loadReviews(); else if (activeTab === "todo") { loadRisk(); loadAct(); } else if (activeTab === "overview") { loadTrend(); loadStockOrders(); loadRisk(); loadAct(); } message.success("已刷新"); }}>刷新</Button>
+          <Button icon={<ReloadOutlined />} loading={skuLoading || riskLoading || actLoading || shopLoading || trendLoading || adLoading || stockLoading || panelLoading} onClick={() => { loadSku(); setShopLoaded(false); setTrendLoaded(false); setAdLoaded(false); setStockLoaded(false); setRiskLoaded(false); setActLoaded(false); setPanelLoaded(false); setQcLoaded(false); setQualityLoaded(false); setReviewLoaded(false); loadShop(); if (activeTab === "store") { loadTrend(); loadAd(); } else if (activeTab === "stock") loadStockOrders(); else if (activeTab === "risk") loadRisk(); else if (activeTab === "activity") loadAct(); else if (activeTab === "product") loadPanel(); else if (activeTab === "qc") loadQc(); else if (activeTab === "quality") loadQuality(); else if (activeTab === "review") loadReviews(); else if (activeTab === "todo") { loadRisk(); loadAct(); } else if (activeTab === "overview") { loadTrend(); loadStockOrders(); loadRisk(); loadAct(); } else if (activeTab === "pipeline") setPipelineReloadSignal((n) => n + 1); message.success("已刷新"); }}>刷新</Button>
         </div>}
         bodyStyle={{ padding: 0 }}
       >

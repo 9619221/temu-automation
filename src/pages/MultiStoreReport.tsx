@@ -1238,7 +1238,6 @@ export default function MultiStoreReport() {
             <span style={{ color: "#888" }}>~</span>
             <input type="date" value={stlRange[1]} style={{ fontSize: 13, padding: "2px 6px" }}
               onChange={(e) => e.target.value && handleStlRangeChange([stlRange[0], e.target.value])} />
-            <Button size="small" icon={<ReloadOutlined />} loading={stlLoading} onClick={() => loadSettlement()}>刷新</Button>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>{stlRange[0]} ~ {stlRange[1]}</Typography.Text>
           </div>
           {!stlFundAvail && stlLoaded && (
@@ -1389,7 +1388,7 @@ export default function MultiStoreReport() {
             <Button icon={<CloudDownloadOutlined />} loading={settlementSyncing} onClick={syncSettlementIncome}>
               同步结算数据
             </Button>
-            <Button icon={<ReloadOutlined />} loading={loading} onClick={() => { load(); message.success("已刷新"); }}>
+            <Button icon={<ReloadOutlined />} loading={loading || stlLoading} onClick={() => { load(); if (activeTab === "settlement") loadSettlement(); message.success("已刷新"); }}>
               刷新
             </Button>
           </Space>
