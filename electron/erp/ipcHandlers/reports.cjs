@@ -413,7 +413,8 @@ function registerReportsHandlers(ipcMain, deps) {
       }
       requireErp();
       const { buildPipelineOverview } = require("../services/multiStoreReport.cjs");
-      return { ok: true, data: buildPipelineOverview(erpState.db, { force: !!payload?.force }) };
+      const { attachTemuCloudDbIfPossible } = require("../lanServer.cjs");
+      return { ok: true, data: buildPipelineOverview(erpState.db, { force: !!payload?.force, attachCloudDb: attachTemuCloudDbIfPossible }) };
     } catch (error) {
       return { ok: false, error: error?.message || String(error) };
     }

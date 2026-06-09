@@ -4,7 +4,7 @@ import type { ColumnsType } from "antd/es/table";
 import {
   RightOutlined, WarningOutlined, ShoppingCartOutlined,
   InboxOutlined, RocketOutlined, ShopOutlined, PlusOutlined, AlertOutlined,
-  FireOutlined, StarOutlined, SearchOutlined,
+  FireOutlined, SearchOutlined, EyeOutlined, RiseOutlined, FallOutlined,
   AppstoreOutlined, UnorderedListOutlined,
 } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
@@ -31,6 +31,30 @@ interface PipelineSkuRow {
   bad_reviews: number;
   return_count: number;
   risk_tags: string[];
+  // ── 体检卡扩展字段(后端 buildPipelineOverviewFast) ──
+  product_id?: string;
+  store_code?: string | null;
+  mall_name?: string | null;
+  occupy?: number | null;
+  unavail?: number | null;
+  shipping?: number | null;
+  total_stock?: number | null;
+  lack_qty?: number | null;
+  hot_tag?: boolean;
+  has_hot_sku?: boolean;
+  onsales_duration?: number | null;
+  expose?: number | null;
+  click?: number | null;
+  conv?: number | null;
+  grow?: string | null;
+  limited?: boolean;
+  act_cnt?: number | null;
+  act_min_price?: number | null;
+  declared_price?: number | null;
+  compliance?: string | null;
+  lifecycle_status?: string | null;
+  qc_bad?: number | null;
+  qc_defective?: number | null;
 }
 
 interface YunqiSelectionItem {
@@ -60,6 +84,28 @@ type UnifiedItem = {
   reviewCount: number;
   badReviews: number;
   returnCount: number;
+  // ── 体检卡扩展(erp 源填充,yunqi 源留空) ──
+  store?: string | null;
+  occupy?: number;
+  unavail?: number;
+  shipping?: number;
+  totalStock?: number | null;
+  lackQty?: number;
+  hotTag?: boolean;
+  hasHotSku?: boolean;
+  onsalesDuration?: number | null;
+  expose?: number | null;
+  click?: number | null;
+  conv?: number | null;
+  grow?: string | null;
+  limited?: boolean;
+  actCnt?: number;
+  actMinPrice?: number | null;
+  declaredPrice?: number | null;
+  compliance?: string | null;
+  lifecycleStatus?: string | null;
+  qcBad?: number;
+  qcDefective?: number;
 };
 
 /* ================================================================== */
@@ -124,6 +170,9 @@ const RISK_LABELS: Record<string, { text: string; color: string }> = {
   high_return_rate: { text: "退货率高", color: "volcano" },
   stock_out:        { text: "缺货",     color: "orange" },
   urgent_restock:   { text: "紧急补货", color: "red" },
+  limited:          { text: "高价限流", color: "volcano" },
+  qc_fail:          { text: "抽检不合格", color: "red" },
+  compliance:       { text: "合规风险", color: "gold" },
 };
 
 const SORT_OPTIONS = [
@@ -140,56 +189,7 @@ const PRIORITY: Record<string, number> = {
   purchasing: 4, created: 5, pricing: 6, listing: 7, selected: 8,
 };
 
-/* ================================================================== */
-/*  Demo data                                                          */
-/* ================================================================== */
-
-const _s = (id: string, code: string, name: string, stage: string, x: Partial<PipelineSkuRow> = {}): PipelineSkuRow => ({
-  sku_id: id, sku_code: code, name, image: null, stage,
-  today_sales: 0, w7_sales: 0, m30_sales: 0, warehouse_stock: 0, advice_qty: 0,
-  local_available: 0, local_reserved: 0, review_count: 0, avg_score: null, bad_reviews: 0, return_count: 0, risk_tags: [], ...x,
-});
-const _DEMO_ERP: Record<string, PipelineSkuRow[]> = {
-  selling: [
-    _s("s1", "TM-SP-1001", "创意硅胶厨具套装 5件", "selling", { today_sales: 12, w7_sales: 87, m30_sales: 342, warehouse_stock: 520, review_count: 24, avg_score: 4.6 }),
-    _s("s2", "TM-SP-1002", "多功能旅行收纳袋 6件套", "selling", { today_sales: 8, w7_sales: 63, m30_sales: 218, warehouse_stock: 310, review_count: 5, avg_score: 4.2 }),
-    _s("s3", "TM-SP-1003", "加厚珊瑚绒浴巾 大号", "selling", { today_sales: 6, w7_sales: 45, m30_sales: 189, warehouse_stock: 200, review_count: 8, avg_score: 3.1, bad_reviews: 3, risk_tags: ["low_score", "many_bad_reviews"] }),
-    _s("s4", "TM-SP-1004", "LED 护眼台灯 折叠款", "selling", { today_sales: 5, w7_sales: 38, m30_sales: 156, warehouse_stock: 150 }),
-    _s("s5", "TM-SP-1005", "自动感应泡沫洗手机", "selling", { today_sales: 3, w7_sales: 29, m30_sales: 105, warehouse_stock: 88, review_count: 2, avg_score: 5.0 }),
-    _s("s6", "TM-SP-1006", "便携式迷你风扇 USB充电", "selling", { today_sales: 2, w7_sales: 22, m30_sales: 91, warehouse_stock: 60 }),
-  ],
-  needs_restock: [
-    _s("r1", "TM-SP-1007", "儿童益智磁力积木 64片", "needs_restock", { today_sales: 9, w7_sales: 52, m30_sales: 198, warehouse_stock: 12, advice_qty: 200, risk_tags: ["urgent_restock", "stock_out"] }),
-    _s("r2", "TM-SP-1008", "不锈钢保温杯 500ml", "needs_restock", { today_sales: 7, w7_sales: 41, m30_sales: 163, warehouse_stock: 8, advice_qty: 150, risk_tags: ["urgent_restock"] }),
-    _s("r3", "TM-SP-1009", "宠物自动喂食器", "needs_restock", { w7_sales: 18, m30_sales: 72, warehouse_stock: 5, advice_qty: 80, risk_tags: ["stock_out"] }),
-  ],
-  in_stock: [
-    _s("i1", "TM-SP-1010", "竹纤维毛巾礼盒 3件", "in_stock", { local_available: 450 }),
-    _s("i2", "TM-SP-1011", "透明收纳鞋盒 12个装", "in_stock", { local_available: 300 }),
-  ],
-  purchasing: [
-    _s("p1", "TM-SP-1012", "无线蓝牙耳机 降噪款", "purchasing", {}),
-    _s("p2", "TM-SP-1013", "车载手机支架 磁吸式", "purchasing", {}),
-    _s("p3", "TM-SP-1014", "桌面整理抽屉柜 4层", "purchasing", {}),
-    _s("p4", "TM-SP-1015", "电动牙刷替换头 8支", "purchasing", {}),
-  ],
-  inbound: [
-    _s("b1", "TM-SP-1016", "户外折叠椅 便携式", "inbound", {}),
-    _s("b2", "TM-SP-1017", "防水化妆包 大容量", "inbound", {}),
-  ],
-  created: [
-    _s("c1", "TM-SP-1018", "迷你投影仪 家用", "created", {}),
-    _s("c2", "TM-SP-1019", "陶瓷杯垫 隔热 4件套", "created", {}),
-    _s("c3", "TM-SP-1020", "多功能开瓶器 3合1", "created", {}),
-  ],
-};
-const _DEMO_YUNQI: YunqiSelectionItem[] = [
-  { goods_id: "YQ-001", title_zh: "创意挂钟 北欧风", main_image: "", usd_price: 8.99, category_zh: "家居装饰", status: "want" },
-  { goods_id: "YQ-002", title_zh: "记忆棉坐垫 办公室", main_image: "", usd_price: 12.5, category_zh: "家居日用", status: "want" },
-  { goods_id: "YQ-003", title_zh: "便携榨汁杯 USB充电", main_image: "", usd_price: 15.0, category_zh: "厨房小家电", status: "want" },
-  { goods_id: "YQ-004", title_zh: "水晶球音乐盒", main_image: "", usd_price: 6.8, category_zh: "创意礼品", status: "listing" },
-  { goods_id: "YQ-005", title_zh: "LED 化妆镜 带灯", main_image: "", usd_price: 9.5, category_zh: "美妆工具", status: "listing" },
-];
+/* 演示数据已移除:本组件直接读后端 pipelineOverview + 云栖选品,无需占位数据 */
 
 /* ================================================================== */
 /*  Main component                                                     */
@@ -240,6 +240,15 @@ export default function PipelineTab({ reloadSignal }: { reloadSignal?: number } 
           riskTags: r.risk_tags || [], adviceQty: r.advice_qty || 0,
           reviewScore: r.avg_score, reviewCount: r.review_count || 0,
           badReviews: r.bad_reviews || 0, returnCount: r.return_count || 0,
+          store: r.store_code || r.mall_name || null,
+          occupy: r.occupy || 0, unavail: r.unavail || 0, shipping: r.shipping || 0,
+          totalStock: r.total_stock ?? null, lackQty: r.lack_qty || 0,
+          hotTag: !!r.hot_tag, hasHotSku: !!r.has_hot_sku, onsalesDuration: r.onsales_duration ?? null,
+          expose: r.expose ?? null, click: r.click ?? null, conv: r.conv ?? null, grow: r.grow ?? null,
+          limited: !!r.limited, actCnt: r.act_cnt || 0, actMinPrice: r.act_min_price ?? null,
+          declaredPrice: r.declared_price ?? null, compliance: r.compliance ?? null,
+          lifecycleStatus: r.lifecycle_status ?? null,
+          qcBad: r.qc_bad || 0, qcDefective: r.qc_defective || 0,
         });
       }
     }
@@ -443,11 +452,11 @@ function ProductCard({ item, navigate }: { item: UnifiedItem; navigate: ReturnTy
   const isUrgent = item.stage === "needs_restock";
 
   const hasSales = (item.todaySales + item.sales7d + item.sales30d) > 0;
-  const hasStock = item.stock > 0 || item.adviceQty > 0;
-  // 评分只在异常区间显示(<4.0 或 ≥4.8),中等评分对运营无价值
-  const showScore = item.reviewScore != null && (item.reviewScore < 4.0 || item.reviewScore >= 4.8);
-  const hasContent = hasSales || hasStock || showScore;
-  const hasFooter = hasRisk || !!meta?.nav;
+  const hasStock = item.stock > 0 || item.adviceQty > 0 || (item.lackQty || 0) > 0 || (item.shipping || 0) > 0;
+  const hasFlow = item.expose != null && item.expose > 0;
+  const hasAct = (item.actCnt || 0) > 0;
+  const hasTags = hasRisk || hasAct || !!item.hotTag;
+  const hasMetrics = hasSales || hasStock;
 
   return (
     <div style={{
@@ -461,7 +470,7 @@ function ProductCard({ item, navigate }: { item: UnifiedItem; navigate: ReturnTy
       onMouseLeave={e => { e.currentTarget.style.boxShadow = "none"; e.currentTarget.style.transform = "none"; }}
     >
       <div style={{ padding: "16px 18px" }}>
-        {/* 头部:图 + 名称/编码 + 阶段Tag */}
+        {/* 头部:图 + 名称/编码/店铺 + 阶段Tag */}
         <div style={{ display: "flex", gap: 12, marginBottom: 8 }}>
           {item.image ? (
             <Image src={item.image} width={88} height={88} style={{ borderRadius: 8, objectFit: "cover", flexShrink: 0 }} preview={false} fallback="data:image/svg+xml,<svg/>" />
@@ -474,7 +483,11 @@ function ProductCard({ item, navigate }: { item: UnifiedItem; navigate: ReturnTy
             <div style={{ fontSize: 16, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", lineHeight: 1.3 }}>
               {item.name}
             </div>
-            <div style={{ fontSize: 13, color: "#aaa", marginTop: 2 }}>{item.code}</div>
+            <div style={{ fontSize: 13, color: "#aaa", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {item.code}
+              {item.store ? <span style={{ marginLeft: 6, color: "#ccc" }}>· {item.store}</span> : null}
+              {item.onsalesDuration != null && item.onsalesDuration > 0 ? <span style={{ marginLeft: 6, color: "#ccc" }}>· 上新{item.onsalesDuration}天</span> : null}
+            </div>
           </div>
           {/* 阶段Tag:仅 danger 显式着色,其它走 ghost 样式 */}
           <span style={{
@@ -492,44 +505,54 @@ function ProductCard({ item, navigate }: { item: UnifiedItem; navigate: ReturnTy
         {/* 阶段进度条(仅进度,无文字) */}
         <StageBar current={item.stageIdx} color={meta?.color || "#1890ff"} />
 
-        {/* 指标区 / 空态文案 */}
-        {hasContent ? (
-          <div style={{ display: "flex", gap: 12, padding: "8px 0", margin: "8px 0 0", borderTop: "1px solid #f5f5f5", borderBottom: hasFooter ? "1px solid #f5f5f5" : "none" }}>
+        {/* ── 主指标:销量 + 库存(可用/在途/建议补/缺货件数) ── */}
+        {hasMetrics ? (
+          <div style={{ display: "flex", gap: 12, padding: "8px 0 6px", margin: "8px 0 0", borderTop: "1px solid #f5f5f5" }}>
             {hasSales && <SalesCell today={item.todaySales} d7={item.sales7d} d30={item.sales30d} />}
-            {hasStock && <StockCell stock={item.stock} advice={item.adviceQty} />}
-            {showScore && <ScoreCell score={item.reviewScore!} count={item.reviewCount} />}
+            {hasStock && <StockCell stock={item.stock} occupy={item.occupy || 0} shipping={item.shipping || 0} advice={item.adviceQty} lack={item.lackQty || 0} />}
           </div>
         ) : (
-          <div style={{
-            padding: "8px 0 2px", marginTop: 6,
-            fontSize: 13, color: "#aaa", textAlign: "center",
-            borderTop: "1px solid #f5f5f5",
-          }}>
+          <div style={{ padding: "8px 0 2px", marginTop: 6, fontSize: 13, color: "#aaa", textAlign: "center", borderTop: "1px solid #f5f5f5" }}>
             {STAGE_HINT[item.stage] || meta?.label}
           </div>
         )}
 
-        {/* 底部:风险 + 操作按钮(都没就不渲染整行) */}
-        {hasFooter && (
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: hasContent ? 8 : 6, minHeight: 24 }}>
-            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center" }}>
-              {item.riskTags.map(t => {
-                const m = RISK_LABELS[t];
-                return m ? <Tag key={t} color={m.color} style={{ fontSize: 12, lineHeight: "20px", margin: 0, borderRadius: 3 }}>{m.text}</Tag> : null;
-              })}
-            </div>
-            {meta?.nav && (
-              <Button
-                type="primary"
-                ghost={!isUrgent}
-                danger={isUrgent}
-                size="small"
-                style={{ borderRadius: 4, fontSize: 13, fontWeight: isUrgent ? 600 : 400 }}
-                onClick={() => navigate(meta.nav!)}
-              >
-                {meta.navLabel} <RightOutlined />
-              </Button>
+        {/* ── 流量行(有抓包数据才显示) ── */}
+        {hasFlow && (
+          <div style={{ borderTop: "1px solid #f5f5f5", paddingTop: 6, marginTop: 2 }}>
+            <FlowCell expose={item.expose!} click={item.click ?? null} conv={item.conv ?? null} grow={item.grow ?? null} />
+          </div>
+        )}
+
+        {/* ── 诊断/机会标签行:热品 + 可报活动 + 风险(限流/抽检/合规/缺货/差评) ── */}
+        {hasTags && (
+          <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
+            {item.hotTag && <Tag color="volcano" style={{ fontSize: 12, lineHeight: "20px", margin: 0, borderRadius: 3 }}><FireOutlined style={{ marginRight: 2 }} />热品</Tag>}
+            {hasAct && (
+              <Tag color="blue" style={{ fontSize: 12, lineHeight: "20px", margin: 0, borderRadius: 3 }}>
+                可报活动 {item.actCnt}{item.actMinPrice != null ? ` · 参考¥${item.actMinPrice}` : ""}
+              </Tag>
             )}
+            {item.riskTags.map(t => {
+              const m = RISK_LABELS[t];
+              return m ? <Tag key={t} color={m.color} style={{ fontSize: 12, lineHeight: "20px", margin: 0, borderRadius: 3 }}>{m.text}</Tag> : null;
+            })}
+          </div>
+        )}
+
+        {/* ── 底部操作按钮 ── */}
+        {meta?.nav && (
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
+            <Button
+              type="primary"
+              ghost={!isUrgent}
+              danger={isUrgent}
+              size="small"
+              style={{ borderRadius: 4, fontSize: 13, fontWeight: isUrgent ? 600 : 400 }}
+              onClick={() => navigate(meta.nav!)}
+            >
+              {meta.navLabel} <RightOutlined />
+            </Button>
           </div>
         )}
       </div>
@@ -581,43 +604,54 @@ function SalesCell({ today, d7, d30 }: { today: number; d7: number; d30: number 
   );
 }
 
-function StockCell({ stock, advice }: { stock: number; advice: number }) {
+function StockCell({ stock, occupy, shipping, advice, lack }: { stock: number; occupy: number; shipping: number; advice: number; lack: number }) {
   const danger = stock === 0;
   const warn = stock > 0 && stock < 20;
   const stockColor = danger ? TONE_COLOR.danger : warn ? TONE_COLOR.warning : "#333";
   return (
     <div style={{ flex: 1, minWidth: 0 }}>
       <div style={{ fontSize: 12, color: "#aaa", lineHeight: 1, marginBottom: 4 }}>
-        <InboxOutlined style={{ marginRight: 3 }} />库存{advice > 0 ? " · 建议补" : ""}
+        <InboxOutlined style={{ marginRight: 3 }} />库存 可用/占用/在途
       </div>
       <div style={{ fontSize: 16, fontWeight: 600, lineHeight: 1.2, whiteSpace: "nowrap" }}>
         <span style={{ color: stockColor }}>{stock}</span>
-        {advice > 0 && (
-          <>
-            <span style={{ color: "#ddd", margin: "0 4px" }}>·</span>
-            <span style={{ color: TONE_COLOR.danger }}>+{advice}</span>
-          </>
-        )}
+        <span style={{ color: "#ddd", margin: "0 4px" }}>/</span>
+        <span style={{ color: "#999" }}>{occupy || "—"}</span>
+        <span style={{ color: "#ddd", margin: "0 4px" }}>/</span>
+        <span style={{ color: "#999" }}>{shipping || "—"}</span>
       </div>
+      {(advice > 0 || lack > 0) && (
+        <div style={{ fontSize: 12, marginTop: 3, whiteSpace: "nowrap" }}>
+          {advice > 0 && <span style={{ color: TONE_COLOR.danger, fontWeight: 600 }}>建议补 +{advice}</span>}
+          {advice > 0 && lack > 0 && <span style={{ color: "#ddd", margin: "0 5px" }}>·</span>}
+          {lack > 0 && <span style={{ color: TONE_COLOR.warning, fontWeight: 600 }}>缺货 {lack}</span>}
+        </div>
+      )}
     </div>
   );
 }
 
-function ScoreCell({ score, count }: { score: number; count: number }) {
-  const danger = score < 3.5;
-  const warn = score >= 3.5 && score < 4.0;
-  const good = score >= 4.8;
-  const color = danger ? TONE_COLOR.danger : warn ? TONE_COLOR.warning : good ? "#52c41a" : "#333";
+// 流量行:曝光/点击/转化 + 增长趋势(箭头)。conv 沿用商品面板口径(比率→百分比)。
+function FlowCell({ expose, click, conv, grow }: { expose: number; click: number | null; conv: number | null; grow: string | null }) {
+  const convPct = conv == null ? null : (conv <= 1 ? conv * 100 : conv);
+  const down = grow != null && /(down|decline|下滑|下降|减)/i.test(grow);
+  const up = grow != null && /(up|grow|增|上升|上涨)/i.test(grow);
   return (
-    <div style={{ flex: 1, minWidth: 0 }}>
-      <div style={{ fontSize: 12, color: "#aaa", lineHeight: 1, marginBottom: 4 }}>
-        <StarOutlined style={{ marginRight: 3 }} />评分{count > 0 ? ` · ${count}` : ""}
-      </div>
-      <div style={{ fontSize: 16, fontWeight: 600, color, lineHeight: 1.2 }}>
-        {score.toFixed(1)}
-      </div>
+    <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+      <span style={{ fontSize: 12, color: "#aaa", whiteSpace: "nowrap" }}><EyeOutlined style={{ marginRight: 3 }} />流量</span>
+      <span style={{ fontSize: 13, color: "#666", whiteSpace: "nowrap" }}>曝光 <b style={{ color: "#333" }}>{fmtNum(expose)}</b></span>
+      {click != null && <span style={{ fontSize: 13, color: "#666", whiteSpace: "nowrap" }}>点击 <b style={{ color: "#333" }}>{fmtNum(click)}</b></span>}
+      {convPct != null && <span style={{ fontSize: 13, color: "#666", whiteSpace: "nowrap" }}>转化 <b style={{ color: "#333" }}>{convPct.toFixed(1)}%</b></span>}
+      {down && <FallOutlined style={{ color: TONE_COLOR.danger }} />}
+      {up && <RiseOutlined style={{ color: "#52c41a" }} />}
     </div>
   );
+}
+
+function fmtNum(n: number): string {
+  if (n >= 10000) return (n / 10000).toFixed(1) + "w";
+  if (n >= 1000) return (n / 1000).toFixed(1) + "k";
+  return String(n);
 }
 
 /* ================================================================== */
@@ -682,6 +716,26 @@ function ProductTable({ items, navigate }: { items: UnifiedItem[]; navigate: Ret
       render: v => v > 0 ? <span style={{ color: TONE_COLOR.danger, fontWeight: 600 }}>+{v}</span> : <span style={{ color: "#ccc" }}>—</span>,
       sorter: (a, b) => a.adviceQty - b.adviceQty,
     },
+    { title: "缺货件数", dataIndex: "lackQty", key: "lackQty", width: 90, align: "right",
+      render: (v?: number) => (v && v > 0) ? <span style={{ color: TONE_COLOR.warning, fontWeight: 600 }}>{v}</span> : <span style={{ color: "#ccc" }}>—</span>,
+      sorter: (a, b) => (a.lackQty || 0) - (b.lackQty || 0),
+    },
+    { title: "在途", dataIndex: "shipping", key: "shipping", width: 70, align: "right",
+      render: (v?: number) => (v && v > 0) ? v : <span style={{ color: "#ccc" }}>—</span>,
+      sorter: (a, b) => (a.shipping || 0) - (b.shipping || 0),
+    },
+    { title: "曝光", dataIndex: "expose", key: "expose", width: 80, align: "right",
+      render: (v?: number | null) => (v != null && v > 0) ? fmtNum(v) : <span style={{ color: "#ccc" }}>—</span>,
+      sorter: (a, b) => (a.expose || 0) - (b.expose || 0),
+    },
+    { title: "转化", dataIndex: "conv", key: "conv", width: 80, align: "right",
+      render: (v?: number | null) => { if (v == null) return <span style={{ color: "#ccc" }}>—</span>; const p = v <= 1 ? v * 100 : v; return p.toFixed(1) + "%"; },
+      sorter: (a, b) => (a.conv || 0) - (b.conv || 0),
+    },
+    { title: "可报活动", dataIndex: "actCnt", key: "actCnt", width: 90, align: "right",
+      render: (v?: number) => (v && v > 0) ? <span style={{ color: "#1677ff" }}>{v}</span> : <span style={{ color: "#ccc" }}>—</span>,
+      sorter: (a, b) => (a.actCnt || 0) - (b.actCnt || 0),
+    },
     { title: "评分", dataIndex: "reviewScore", key: "score", width: 80, align: "right",
       render: (v, r) => {
         if (v == null) return <span style={{ color: "#ccc" }}>—</span>;
@@ -720,7 +774,7 @@ function ProductTable({ items, navigate }: { items: UnifiedItem[]; navigate: Ret
       columns={columns}
       dataSource={items}
       pagination={{ pageSize: 50, showSizeChanger: true, pageSizeOptions: [25, 50, 100, 200], size: "small" }}
-      scroll={{ x: 1200 }}
+      scroll={{ x: 1700 }}
     />
   );
 }

@@ -2304,7 +2304,7 @@ function buildPurchaseReport(db, options = {}) {
   const STATUS_LABELS = {
     draft: "草稿", pushed_pending_price: "待报价", pending_finance_approval: "待财务审批",
     approved_to_pay: "待付款", paid: "已付款", supplier_processing: "供应商处理中",
-    shipped: "已发货", arrived: "已到货", inbounded: "已入库", closed: "已关闭",
+    shipped: "已发货", trade_completed: "交易完成", arrived: "已到货", inbounded: "已入库", closed: "已关闭",
     delayed: "已延期", exception: "异常", cancelled: "已取消",
   };
   const ORDERS_LIMIT = 500;
@@ -2388,7 +2388,7 @@ function buildPurchaseReport(db, options = {}) {
   const covR = db.prepare(`SELECT SUM(CASE WHEN paid_at IS NOT NULL AND paid_at<>'' THEN 1 ELSE 0 END) f, COUNT(*) c FROM erp_purchase_orders WHERE ${ACT} AND payment_status='paid'`).get();
   const cash_outflow = { coverage: toNum(covR.c) > 0 ? Math.round((toNum(covR.f) / toNum(covR.c)) * 100) : 0, monthly: cashMonthly };
   // 9) 已付未发货(预付风险敞口)：钱付了但 status 未到 shipped+，资金占用 + 供应商履约/跑路风险；按下单后拖延天数分桶
-  const UNSHIP = "status<>'cancelled' AND payment_status='paid' AND status NOT IN ('shipped','arrived','inbounded','closed')";
+  const UNSHIP = "status<>'cancelled' AND payment_status='paid' AND status NOT IN ('shipped','trade_completed','arrived','inbounded','closed')";
   const psT = db.prepare(`SELECT COUNT(*) c, COALESCE(SUM(${AMT}),0) a FROM erp_purchase_orders WHERE ${UNSHIP}`).get();
   const psAgingRaw = optionalAllLocal(db, `
     SELECT CASE WHEN julianday('now')-julianday(created_at)<=7 THEN '0-7'
@@ -2853,7 +2853,185 @@ function buildWarehouseInventory(db, options = {}) {
 // 前端再合并云启侧(选品/核价)的数据，拼出完整 13 阶段管线。
 const _pipelineCache = new Map();
 
+// 商品全景概览入口:默认走「物化表 + 官方/cloud」快版,PIPELINE_USE_PANEL=0 回退旧实现。
 function buildPipelineOverview(db, options = {}) {
+  if (process.env.PIPELINE_USE_PANEL !== "0") return buildPipelineOverviewFast(db, options);
+  return _buildPipelineOverviewLegacy(db, options);
+}
+
+// 商品全景「体检卡」数据底座:
+//   主体 = 官方版商品面板(_buildProductPanelOfficialFresh,SPU 级,全店库存/销量/补货/缺货/在途/hot_tag);
+//   增强 = cloud 流量/活动/限流/合规/申报价/评分(抓包,attach 成功才查,优雅降级);
+//   阶段 = 官方生命周期(前半段) + 本地采购/入库(流转) + 销量/库存(后半段);
+//   抽检 = 官方质检不合格(按 spu_id)。
+// 维度统一:官方 salesv2 覆盖所有已建品(含 0 销量),故无需再 union erp_skus;纯选品(未建品)由前端云栖补。
+function buildPipelineOverviewFast(db, options = {}) {
+  if (!db) throw new Error("buildPipelineOverviewFast: db is required");
+  if (!options.force) {
+    const c = _pipelineCache.get("pf");
+    if (c && Date.now() - c.ts < REPORT_CACHE_TTL_MS) return c.data;
+  }
+  const includeTest = !!options.includeTest;
+
+  // 1) 主体:官方版商品面板(全店权威库存/销量)
+  const base = (_buildProductPanelOfficialFresh(db, { includeTest, force: true }).rows) || [];
+
+  // 2) cloud 增强(attach 成功才查;失败则流量/活动/限流/合规留空,主体照常)
+  const attachCloudDb = options.attachCloudDb;
+  const cloudOk = typeof attachCloudDb === "function" && attachCloudDb(db) === true;
+  const flowMap = new Map();   // mall|pid -> {expose,click,conv,grow}
+  const limSet = new Set();    // mall|pid 高价限流
+  const actMap = new Map();    // mall|pid -> {act_cnt,min_price}
+  const compMap = new Map();   // mall|pid -> compliance_status
+  const enrichMap = new Map(); // mall|pid -> {declared,score,comments} (官方版没有,cloud 补)
+  if (cloudOk) {
+    const tid = options.tenantId || DEFAULT_CLOUD_TENANT;
+    for (const f of optionalAllLocal(db, `
+      WITH lf AS (SELECT mall_id, MAX(stat_date) sd FROM cloud.temu_product_flow_snapshot WHERE tenant_id = ? GROUP BY mall_id)
+      SELECT f.mall_id, f.product_id, f.expose_num, f.click_num, f.expose_pay_conversion_rate, f.flow_grow_status
+        FROM cloud.temu_product_flow_snapshot f JOIN lf ON lf.mall_id = f.mall_id AND lf.sd = f.stat_date
+       WHERE f.product_id IS NOT NULL AND f.product_id <> ''`, [tid])) {
+      flowMap.set(f.mall_id + "|" + f.product_id, { expose: toNum(f.expose_num), click: toNum(f.click_num), conv: f.expose_pay_conversion_rate == null ? null : Number(f.expose_pay_conversion_rate), grow: f.flow_grow_status || null });
+    }
+    for (const r of optionalAllLocal(db, `
+      WITH lr AS (SELECT mall_id, MAX(stat_date) sd FROM cloud.temu_operation_risk_snapshot WHERE tenant_id = ? AND risk_type = 'high_price_flow' GROUP BY mall_id)
+      SELECT DISTINCT r.mall_id, r.product_id FROM cloud.temu_operation_risk_snapshot r JOIN lr ON lr.mall_id = r.mall_id AND lr.sd = r.stat_date
+       WHERE r.risk_type = 'high_price_flow' AND r.product_id IS NOT NULL AND r.product_id <> ''`, [tid])) {
+      limSet.add(r.mall_id + "|" + r.product_id);
+    }
+    for (const a of optionalAllLocal(db, `
+      WITH la AS (SELECT mall_id, MAX(stat_date) sd FROM cloud.temu_activity_snapshot WHERE tenant_id = ? GROUP BY mall_id)
+      SELECT a.mall_id, a.product_id, COUNT(*) cnt, MIN(a.signup_price_cents) minp
+        FROM cloud.temu_activity_snapshot a JOIN la ON la.mall_id = a.mall_id AND la.sd = a.stat_date
+       WHERE a.product_id IS NOT NULL AND a.product_id <> '' AND a.signup_price_cents IS NOT NULL
+       GROUP BY a.mall_id, a.product_id`, [tid])) {
+      actMap.set(a.mall_id + "|" + a.product_id, { act_cnt: toNum(a.cnt), min_price: a.minp == null ? null : Number(a.minp) / 100 });
+    }
+    for (const c of optionalAllLocal(db, `
+      SELECT mall_id, product_id, MAX(compliance_status) cs
+        FROM cloud.skc_snapshots WHERE tenant_id = ? AND compliance_status IS NOT NULL AND product_id IS NOT NULL AND product_id <> ''
+       GROUP BY mall_id, product_id`, [tid])) {
+      compMap.set(c.mall_id + "|" + c.product_id, c.cs || null);
+    }
+    for (const s of optionalAllLocal(db, `
+      WITH ls AS (SELECT mall_id, MAX(stat_date) sd FROM cloud.temu_sales_snapshot WHERE tenant_id = ? GROUP BY mall_id)
+      SELECT s.mall_id, s.product_id, MIN(NULLIF(s.declared_price_cents,0)) dp, MAX(s.asf_score) score, MAX(s.comment_num) comments
+        FROM cloud.temu_sales_snapshot s JOIN ls ON ls.mall_id = s.mall_id AND ls.sd = s.stat_date
+       WHERE s.product_id IS NOT NULL AND s.product_id <> '' GROUP BY s.mall_id, s.product_id`, [tid])) {
+      enrichMap.set(s.mall_id + "|" + s.product_id, { declared: s.dp ? Number(s.dp) / 100 : null, score: s.score == null ? null : Number(s.score), comments: s.comments == null ? null : toNum(s.comments) });
+    }
+  }
+
+  // 3) 官方生命周期(按 product_skc_id),给前半段阶段(核价/上品中/已建品)用
+  const lifeMap = new Map();
+  for (const r of optionalAllLocal(db, `
+    SELECT product_skc_id, status FROM erp_temu_openapi_records
+     WHERE source = 'product_lifecycle' AND product_skc_id IS NOT NULL AND product_skc_id <> ''`, [])) {
+    lifeMap.set(String(r.product_skc_id), String(r.status));
+  }
+
+  // 4) 官方质检(抽检):按 spu_id 聚合不合格(qc_result=2)
+  const qcMap = new Map();
+  for (const r of optionalAllLocal(db, `
+    SELECT spu_id, COUNT(*) bad, SUM(COALESCE(defective_qty,0)) defective
+      FROM erp_temu_openapi_qc WHERE qc_result = 2 AND spu_id IS NOT NULL AND spu_id <> ''
+     GROUP BY spu_id`, [])) {
+    qcMap.set(String(r.spu_id), { bad: toNum(r.bad), defective: toNum(r.defective) });
+  }
+
+  // 5) 本地采购/入库非终态 → 映射到 temu_product_id(SPU 维度,与主体对齐)
+  const purchasingPids = new Set(optionalAllLocal(db, `
+    SELECT DISTINCT sk.temu_product_id pid FROM erp_purchase_order_lines pol
+      JOIN erp_purchase_orders po ON po.id = pol.po_id
+      JOIN erp_skus sk ON sk.id = pol.sku_id
+     WHERE po.status NOT IN ('inbounded','cancelled','closed') AND sk.temu_product_id IS NOT NULL AND sk.temu_product_id <> ''`, [])
+    .map(r => String(r.pid)));
+  const inboundPids = new Set(optionalAllLocal(db, `
+    SELECT DISTINCT sk.temu_product_id pid FROM erp_inbound_receipt_lines irl
+      JOIN erp_inbound_receipts ir ON ir.id = irl.receipt_id
+      JOIN erp_skus sk ON sk.id = irl.sku_id
+     WHERE ir.status NOT IN ('inbounded_pending_qc','cancelled') AND ir.status <> 'counted' AND sk.temu_product_id IS NOT NULL AND sk.temu_product_id <> ''`, [])
+    .map(r => String(r.pid)));
+
+  // 阶段判定(SPU 级,取最该处理的阶段)。生命周期码见 src/utils/temuSelectStatus.ts。
+  const stageOf = (row, life) => {
+    const s30 = (row.skus_detail || []).reduce((x, d) => x + (d.last30d || 0), 0);
+    const hasSales = s30 > 0;
+    if (hasSales && (toNum(row.advice) > 0 || toNum(row.lack_qty) > 0)) return "needs_restock";
+    if (hasSales) return "selling";
+    if (life === "7" || life === "9") return "pricing";
+    if (life === "1" || life === "3" || life === "14" || life === "15") return "listing";
+    if (purchasingPids.has(String(row.product_id))) return "purchasing";
+    if (inboundPids.has(String(row.product_id))) return "inbound";
+    if (toNum(row.stock) > 0) return "in_stock";
+    if (life === "12") return "selling";
+    return "created";
+  };
+
+  const STAGE_ORDER = ["selling", "needs_restock", "in_stock", "inbound", "purchasing", "created", "pricing", "listing"];
+  const stages = {};
+  for (const k of STAGE_ORDER) stages[k] = [];
+  for (const row of base) {
+    const k = row.mall_id + "|" + row.product_id;
+    let life = null;
+    if (row.skc_codes) { for (const skc of String(row.skc_codes).split(",")) { const st = lifeMap.get(skc.trim()); if (st) { life = st; break; } } }
+    const flow = flowMap.get(k) || {};
+    const act = actMap.get(k) || {};
+    const enr = enrichMap.get(k) || {};
+    const qc = qcMap.get(String(row.product_id)) || {};
+    const detail = row.skus_detail || [];
+    const today = detail.reduce((x, d) => x + (d.today || 0), 0);
+    const w7 = detail.reduce((x, d) => x + (d.last7d || 0), 0);
+    const m30 = detail.reduce((x, d) => x + (d.last30d || 0), 0);
+    const stage = stageOf(row, life);
+    const out = {
+      sku_id: row.product_id,
+      sku_code: row.sku_codes ? String(row.sku_codes).split(",")[0] : (row.skc_codes || row.product_id),
+      product_id: row.product_id, mall_id: row.mall_id, store_code: row.store_code || null, mall_name: row.mall_name || null,
+      name: row.title || null, image: row.thumb || null, stage,
+      today_sales: today, w7_sales: w7, m30_sales: m30,
+      warehouse_stock: toNum(row.stock), occupy: toNum(row.occupy), unavail: toNum(row.unavail),
+      shipping: toNum(row.shipping), total_stock: toNum(row.total_stock),
+      advice_qty: toNum(row.advice), lack_qty: toNum(row.lack_qty),
+      hot_tag: !!row.hot_tag, has_hot_sku: !!row.has_hot_sku, onsales_duration: row.onsales_duration == null ? null : toNum(row.onsales_duration),
+      // cloud 增强(可能为空)
+      expose: flow.expose == null ? null : flow.expose, click: flow.click == null ? null : flow.click,
+      conv: flow.conv == null ? null : flow.conv, grow: flow.grow || null,
+      limited: limSet.has(k), act_cnt: act.act_cnt || 0, act_min_price: act.min_price == null ? null : act.min_price,
+      declared_price: enr.declared == null ? null : enr.declared,
+      compliance: compMap.get(k) || null,
+      lifecycle_status: life,
+      qc_bad: qc.bad || 0, qc_defective: qc.defective || 0,
+      review_count: enr.comments == null ? 0 : enr.comments, avg_score: enr.score == null ? null : enr.score,
+      bad_reviews: 0, return_count: 0,
+      // 兼容旧前端字段名
+      local_available: toNum(row.stock), local_reserved: toNum(row.occupy),
+      risk_tags: [],
+    };
+    out.risk_tags = _computePipelineRiskTags(out);
+    (stages[stage] || (stages[stage] = [])).push(out);
+  }
+
+  const summary = {};
+  for (const sKey of Object.keys(stages)) summary[sKey] = stages[sKey].length;
+  const data = { generated_at: Date.now(), sku_count: base.length, summary, stages, source: cloudOk ? "official+cloud" : "official" };
+  _pipelineCache.set("pf", { ts: Date.now(), data });
+  return data;
+}
+
+// 体检卡风险标签(基于全景行字段)
+function _computePipelineRiskTags(o) {
+  const tags = [];
+  if (o.lack_qty > 0 && o.advice_qty > 0 && o.warehouse_stock <= 0) tags.push("urgent_restock");
+  else if (o.lack_qty > 0) tags.push("stock_out");
+  if (o.limited) tags.push("limited");
+  if (o.qc_bad > 0) tags.push("qc_fail");
+  if (o.compliance && /(违规|缺失|待整改|不合规|风险|fail|invalid|risk)/i.test(String(o.compliance))) tags.push("compliance");
+  if (o.avg_score != null && o.avg_score < 3) tags.push("low_score");
+  return tags;
+}
+
+function _buildPipelineOverviewLegacy(db, options = {}) {
   if (!db) throw new Error("buildPipelineOverview: db is required");
   if (!options.force) {
     const c = _pipelineCache.get("p");
@@ -3077,6 +3255,7 @@ module.exports = {
   querySettlementData,
   clearMultiStoreReportCache,
   buildPipelineOverview,
+  buildPipelineOverviewFast,
   buildProductRiskTags,
   // 暴露给测试用
   _internal: {

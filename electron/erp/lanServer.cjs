@@ -5626,7 +5626,7 @@ async function handleRequest({
         const parsed = new URL(req.url || "/", "http://127.0.0.1");
         const force = parsed.searchParams.get("force") === "1";
         const svc = require("./services/multiStoreReport.cjs");
-        const data = svc.buildPipelineOverview(db, { force });
+        const data = svc.buildPipelineOverview(db, { force, attachCloudDb: attachTemuCloudDbIfPossible });
         writeJson(res, 200, { ok: true, data });
       } catch (error) {
         writeJson(res, error?.statusCode || 500, { ok: false, error: error?.message || String(error) });
