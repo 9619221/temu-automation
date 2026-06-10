@@ -3786,6 +3786,7 @@ function createRequestHandler(options = {}) {
       getPurchaseReturnIds,
       listPurchaseReturnItems,
       getPurchaseReturnItemIds,
+      performPurchaseReturnAction,
       listConsignAfterSales,
       getConsignAfterSaleIds,
       listConsignAfterSaleItems,
@@ -4059,10 +4060,14 @@ async function buildMasterDataWorkbench({
     limit: Number(params?.limit) || 500,
     companyId,
   };
+  // part 参数只查请求的段：客户端 list 调用都带 part（accounts/suppliers/skus），
+  // 此前服务器忽略 part 三段全查全返，suppliers 4836 行 + skus 全字段同包 70MB+ 跨海必超时。
+  // 不传 part 保持原全量行为。
+  const part = String(params?.part || "").trim();
   const [accounts, suppliers, skus] = await Promise.all([
-    Promise.resolve(listAccounts(scopedParams)),
-    Promise.resolve(listSuppliers(scopedParams)),
-    Promise.resolve(listSkus(scopedParams)),
+    !part || part === "accounts" ? Promise.resolve(listAccounts(scopedParams)) : Promise.resolve([]),
+    !part || part === "suppliers" ? Promise.resolve(listSuppliers(scopedParams)) : Promise.resolve([]),
+    !part || part === "skus" ? Promise.resolve(listSkus(scopedParams)) : Promise.resolve([]),
   ]);
   return {
     accounts,
@@ -4849,6 +4854,7 @@ async function handleRequest({
   getPurchaseReturnIds,
   listPurchaseReturnItems,
   getPurchaseReturnItemIds,
+  performPurchaseReturnAction,
   listConsignAfterSales,
   getConsignAfterSaleIds,
   listConsignAfterSaleItems,

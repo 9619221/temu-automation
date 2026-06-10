@@ -2587,6 +2587,98 @@ async function main() {
       operationLogDb.close();
     }
 
+    const purchaseReturnAccount = await invoke("erp:account:upsert", {
+      id: "acct_purchase_return_ipc",
+      name: "Purchase Return IPC Account",
+      source: "test",
+    });
+    const purchaseReturnSku = await invoke("erp:sku:create", {
+      id: "sku_purchase_return_ipc",
+      accountId: purchaseReturnAccount.id,
+      internalSkuCode: "SKU-RETURN-IPC",
+      productName: "Purchase Return IPC SKU",
+      colorSpec: "Return / Test",
+      supplierId: supplier.id,
+    });
+
+    const purchaseReturnSeedDb = openErpDatabase({ userDataDir: tempUserData });
+    try {
+      const now = new Date().toISOString();
+      purchaseReturnSeedDb.prepare(`
+        INSERT INTO erp_inventory_batches (
+          id, account_id, batch_code, sku_id, received_qty, available_qty,
+          reserved_qty, blocked_qty, defective_qty, rework_qty, unit_landed_cost,
+          qc_status, received_at, created_at, updated_at
+        ) VALUES (
+          'batch_purchase_return_ipc', @account_id, 'BATCH-RETURN-IPC', @sku_id, 3, 3,
+          0, 0, 0, 0, 10.5, 'passed', @now, @now, @now
+        )
+      `).run({ account_id: purchaseReturnAccount.id, sku_id: purchaseReturnSku.id, now });
+      purchaseReturnSeedDb.prepare(`
+        UPDATE erp_skus
+        SET weighted_avg_cost = 10.5,
+            cost_balance_qty = COALESCE(cost_balance_qty, 0) + 3,
+            updated_at = @now
+        WHERE id = @sku_id
+      `).run({ sku_id: purchaseReturnSku.id, now });
+    } finally {
+      purchaseReturnSeedDb.close();
+    }
+
+    const createPurchaseReturn = await requestUrl(`${lanStatus.localUrl}/api/master-data/purchase-return/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "create_draft",
+        supplierName: supplier.name,
+        accountId: purchaseReturnAccount.id,
+        items: [{ skuId: purchaseReturnSku.id, qty: 1, costPrice: 10.5 }],
+      }),
+    });
+    assert.equal(createPurchaseReturn.statusCode, 200, createPurchaseReturn.body);
+    const createPurchaseReturnBody = JSON.parse(createPurchaseReturn.body);
+    assert.equal(createPurchaseReturnBody.ok, true);
+    assert.match(createPurchaseReturnBody.result.id, /^po-ret:/);
+
+    const effectivePurchaseReturn = await requestUrl(`${lanStatus.localUrl}/api/master-data/purchase-return/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "effective",
+        id: createPurchaseReturnBody.result.id,
+      }),
+    });
+    assert.equal(effectivePurchaseReturn.statusCode, 200, effectivePurchaseReturn.body);
+    const effectivePurchaseReturnBody = JSON.parse(effectivePurchaseReturn.body);
+    assert.equal(effectivePurchaseReturnBody.ok, true);
+    assert.equal(effectivePurchaseReturnBody.result.lifecycle, "effective");
+
+    const purchaseReturnCheckDb = openErpDatabase({ userDataDir: tempUserData });
+    try {
+      const returnRow = purchaseReturnCheckDb.prepare("SELECT lifecycle FROM purchase_returns WHERE id = ?").get(createPurchaseReturnBody.result.id);
+      assert.equal(returnRow.lifecycle, "effective");
+      const returnBatch = purchaseReturnCheckDb.prepare("SELECT available_qty FROM erp_inventory_batches WHERE id = ?").get("batch_purchase_return_ipc");
+      assert.equal(returnBatch.available_qty, 2);
+      const returnLedger = purchaseReturnCheckDb.prepare(`
+        SELECT type, qty_delta
+        FROM erp_inventory_ledger_entries
+        WHERE source_doc_type = 'purchase_return'
+          AND source_doc_id = ?
+      `).get(createPurchaseReturnBody.result.id);
+      assert.equal(returnLedger.type, "purchase_return");
+      assert.equal(returnLedger.qty_delta, -1);
+    } finally {
+      purchaseReturnCheckDb.close();
+    }
+
     lanStatus = await invoke("erp:lan:stop");
     assert.equal(lanStatus.running, false);
 
