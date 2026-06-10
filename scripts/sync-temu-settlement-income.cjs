@@ -28,6 +28,11 @@ const {
   syncSettlementIncomeFromCapture,
   syncSettlementDetailFromCapture,
   syncFundDetailFromCapture,
+  syncSettlementOrderDetailFromCapture,
+  syncFundSummaryFromCapture,
+  syncEprFeeFromCapture,
+  syncFundFrozenFromCapture,
+  syncViolationFromCapture,
   clearMultiStoreReportCache,
 } = require("../electron/erp/services/multiStoreReport.cjs");
 
@@ -67,25 +72,42 @@ function runOnce(options = {}) {
     const income = syncSettlementIncomeFromCapture(db, { attachCloudDb });
     if (!income.attached) {
       log(`cloud 未挂载（${CLOUD_DB} 不存在或挂载失败），跳过`);
-      return { ...income, incomeRows: 0, detailRows: 0, elapsedMs: Date.now() - t0 };
+      return { ...income, incomeRows: 0, detailRows: 0, fundRows: 0, orderRows: 0, fundSummaryRows: 0, eprRows: 0, frozenRows: 0, violationRows: 0, elapsedMs: Date.now() - t0 };
     }
     const detail = syncSettlementDetailFromCapture(db, { attachCloudDb });
     const fund = syncFundDetailFromCapture(db, { attachCloudDb });
-    if ((income.rows > 0 || detail.rows > 0 || fund.rows > 0) && typeof clearMultiStoreReportCache === "function") {
+    const order = syncSettlementOrderDetailFromCapture(db, { attachCloudDb });
+    const fundSummary = syncFundSummaryFromCapture(db, { attachCloudDb });
+    // EPR 费用 / 资金限制 / 违规处罚（聚协云 P1+P2 对标）
+    const epr = syncEprFeeFromCapture(db, { attachCloudDb });
+    const frozen = syncFundFrozenFromCapture(db, { attachCloudDb });
+    const violation = syncViolationFromCapture(db, { attachCloudDb });
+    const totalRows = (Number(income.rows) || 0) + (Number(detail.rows) || 0) + (Number(fund.rows) || 0) + (Number(order.rows) || 0) + (Number(fundSummary.rows) || 0) + (Number(epr.rows) || 0) + (Number(frozen.rows) || 0) + (Number(violation.rows) || 0);
+    if (totalRows > 0 && typeof clearMultiStoreReportCache === "function") {
       clearMultiStoreReportCache();
     }
-    log(`done: income_malls=${income.malls} income_rows=${income.rows} detail_malls=${detail.malls} detail_rows=${detail.rows} fund_malls=${fund.malls} fund_rows=${fund.rows} in ${Math.round((Date.now() - t0) / 1000)}s`);
+    log(`done: income_malls=${income.malls} income_rows=${income.rows} detail_malls=${detail.malls} detail_rows=${detail.rows} fund_malls=${fund.malls} fund_rows=${fund.rows} order_malls=${order.malls} order_rows=${order.rows} fund_summary_malls=${fundSummary.malls} fund_summary_rows=${fundSummary.rows} epr_rows=${epr.rows} frozen_rows=${frozen.rows} violation_rows=${violation.rows} in ${Math.round((Date.now() - t0) / 1000)}s`);
     return {
-      ok: income.ok && detail.ok && fund.ok,
+      ok: income.ok && detail.ok && fund.ok && order.ok && fundSummary.ok && epr.ok && frozen.ok && violation.ok,
       attached: true,
-      malls: Math.max(Number(income.malls) || 0, Number(detail.malls) || 0, Number(fund.malls) || 0),
-      rows: (Number(income.rows) || 0) + (Number(detail.rows) || 0) + (Number(fund.rows) || 0),
+      malls: Math.max(Number(income.malls) || 0, Number(detail.malls) || 0, Number(fund.malls) || 0, Number(order.malls) || 0, Number(fundSummary.malls) || 0, Number(epr.malls) || 0, Number(frozen.malls) || 0, Number(violation.malls) || 0),
+      rows: totalRows,
       incomeRows: income.rows || 0,
       detailRows: detail.rows || 0,
       fundRows: fund.rows || 0,
+      orderRows: order.rows || 0,
+      fundSummaryRows: fundSummary.rows || 0,
+      eprRows: epr.rows || 0,
+      frozenRows: frozen.rows || 0,
+      violationRows: violation.rows || 0,
       income,
       detail,
       fund,
+      order,
+      fundSummary,
+      epr,
+      frozen,
+      violation,
       elapsedMs: Date.now() - t0,
     };
   } finally {

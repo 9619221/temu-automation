@@ -4486,6 +4486,11 @@ async function handleTemuSettlementIncomeSyncRequest({ req, res, db }) {
       syncSettlementIncomeFromCapture,
       syncSettlementDetailFromCapture,
       syncFundDetailFromCapture,
+      syncSettlementOrderDetailFromCapture,
+      syncFundSummaryFromCapture,
+      syncEprFeeFromCapture,
+      syncFundFrozenFromCapture,
+      syncViolationFromCapture,
       clearMultiStoreReportCache,
     } = require("./services/multiStoreReport.cjs");
     const income = syncSettlementIncomeFromCapture(db, {
@@ -4498,21 +4503,47 @@ async function handleTemuSettlementIncomeSyncRequest({ req, res, db }) {
     const fund = income.attached
       ? syncFundDetailFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible })
       : { ok: false, attached: false, malls: 0, rows: 0 };
-    const totalRows = (Number(income.rows) || 0) + (Number(detail.rows) || 0) + (Number(fund.rows) || 0);
+    const order = income.attached
+      ? syncSettlementOrderDetailFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible })
+      : { ok: false, attached: false, malls: 0, rows: 0 };
+    const fundSummary = income.attached
+      ? syncFundSummaryFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible })
+      : { ok: false, attached: false, malls: 0, rows: 0 };
+    // EPR 费用 / 资金限制 / 违规处罚（聚协云 P1+P2 对标）
+    const epr = income.attached
+      ? syncEprFeeFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible })
+      : { ok: false, attached: false, malls: 0, rows: 0 };
+    const frozen = income.attached
+      ? syncFundFrozenFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible })
+      : { ok: false, attached: false, malls: 0, rows: 0 };
+    const violation = income.attached
+      ? syncViolationFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible })
+      : { ok: false, attached: false, malls: 0, rows: 0 };
+    const totalRows = (Number(income.rows) || 0) + (Number(detail.rows) || 0) + (Number(fund.rows) || 0) + (Number(order.rows) || 0) + (Number(fundSummary.rows) || 0) + (Number(epr.rows) || 0) + (Number(frozen.rows) || 0) + (Number(violation.rows) || 0);
     if (totalRows > 0 && typeof clearMultiStoreReportCache === "function") {
       clearMultiStoreReportCache();
     }
     const result = {
-      ok: Boolean(income.ok && detail.ok),
+      ok: Boolean(income.ok && detail.ok && fund.ok && order.ok && fundSummary.ok && epr.ok && frozen.ok && violation.ok),
       attached: income.attached,
-      malls: Math.max(Number(income.malls) || 0, Number(detail.malls) || 0, Number(fund.malls) || 0),
+      malls: Math.max(Number(income.malls) || 0, Number(detail.malls) || 0, Number(fund.malls) || 0, Number(order.malls) || 0, Number(fundSummary.malls) || 0, Number(epr.malls) || 0, Number(frozen.malls) || 0, Number(violation.malls) || 0),
       rows: totalRows,
       incomeRows: Number(income.rows) || 0,
       detailRows: Number(detail.rows) || 0,
       fundRows: Number(fund.rows) || 0,
+      orderRows: Number(order.rows) || 0,
+      fundSummaryRows: Number(fundSummary.rows) || 0,
+      eprRows: Number(epr.rows) || 0,
+      frozenRows: Number(frozen.rows) || 0,
+      violationRows: Number(violation.rows) || 0,
       income,
       detail,
       fund,
+      order,
+      fundSummary,
+      epr,
+      frozen,
+      violation,
     };
     writeJson(res, 200, { ok: true, result });
   } catch (error) {

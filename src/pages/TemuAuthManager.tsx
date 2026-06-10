@@ -29,6 +29,29 @@ interface TemuOpenApiBinding {
   recordsSyncSummary?: Record<string, number>;
 }
 
+// 绑定时人工填的店铺名口径不一（裸数字「067」/带后缀「044店铺」/temu-067店铺），
+// 提取 2-4 位店号用于统一显示和排序；提不出店号的返回 null，原样显示并排在最后
+function extractShopNo(name?: string | null): string | null {
+  const m = (name || "").trim().match(/^(?:temu-?)?(\d{2,4})\s*(?:店铺?)?$/i);
+  return m ? m[1] : null;
+}
+
+function formatMallName(row: TemuOpenApiBinding): string {
+  const no = extractShopNo(row.mallName);
+  return no ? `${no}店铺` : (row.mallName || row.mallId);
+}
+
+function sortBindings(list: TemuOpenApiBinding[]): TemuOpenApiBinding[] {
+  return [...list].sort((a, b) => {
+    const na = extractShopNo(a.mallName);
+    const nb = extractShopNo(b.mallName);
+    if (na && nb) return Number(na) - Number(nb);
+    if (na) return -1;
+    if (nb) return 1;
+    return (a.mallName || a.mallId).localeCompare(b.mallName || b.mallId);
+  });
+}
+
 const REGION_OPTIONS = [
   { value: "CN", label: "CN（全托/半托发品·库存·全托备货履约）" },
   { value: "PA", label: "PA（半托库存·调价核价）" },
@@ -53,7 +76,7 @@ export default function TemuAuthManager() {
     setLoading(true);
     try {
       const res = await erp.temuOpenApi.list();
-      setBindings(Array.isArray(res?.malls) ? res.malls : []);
+      setBindings(sortBindings(Array.isArray(res?.malls) ? res.malls : []));
     } catch (error: any) {
       message.error(error?.message || "读取授权列表失败");
     } finally {
@@ -141,7 +164,7 @@ export default function TemuAuthManager() {
       key: "mall",
       render: (_value, row) => (
         <Space direction="vertical" size={0}>
-          <span>{row.mallName || row.mallId}</span>
+          <span>{formatMallName(row)}</span>
           <span style={{ color: "#667085", fontSize: 12 }}>mallId: {row.mallId}</span>
         </Space>
       ),

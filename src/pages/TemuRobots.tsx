@@ -560,6 +560,10 @@ const BATCH_TASK_EXTRA_LABELS: Record<string, string> = {
   settleIn: "结算中",
   settleDone: "已到账",
   fundDetail: "账务费用",
+  fundSummary: "账户概览/资金汇总",
+  fundEnum: "资金限制枚举",
+  settlementOrders: "结算订单明细",
+  settlementViolation: "违规信息",
 };
 function batchTaskLabel(key: string): string {
   return BATCH_TASKS.find((t) => t.key === key)?.label || BATCH_TASK_EXTRA_LABELS[key] || key;

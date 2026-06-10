@@ -7338,6 +7338,98 @@ const BATCH_COLLECT_API = {
     ingestKind: "fetch-active-fund-detail",
     ingestPage: "robot/fund-detail",
   },
+  settlementViolation: {
+    label: "违规信息",
+    urlPath: "/mms/tmod_punish/agent/merchant_appeal/entrance/list",
+    // 抓包实测请求体（违规页实发）：下划线命名 + 全部申诉状态 + target_type=goods
+    buildBody: (pageNum) => JSON.stringify({ page_num: pageNum, page_size: 20, appeal_status_list: [1, 2, 0, 97, 96], target_type: "goods", version: 4 }),
+    getList: (body) => {
+      const candidates = [
+        body?.result?.punish_appeal_entrance_list,
+        body?.result?.list,
+        body?.result?.rows,
+        body?.result?.items,
+        body?.result?.data?.list,
+        body?.result?.data?.rows,
+        body?.data?.list,
+        body?.data?.rows,
+        body?.list,
+        body?.rows,
+      ];
+      return candidates.find((v) => Array.isArray(v)) || [];
+    },
+    getTotal: (body) => Number(body?.result?.total ?? body?.result?.totalCount ?? body?.data?.total ?? body?.total ?? 0),
+    paginate: true,
+    pageField: "page_num",
+    ingestKind: "fetch-active-settlement-violation",
+    ingestPage: "robot/settlement-violation",
+  },
+  // 店铺级违规汇总（加站限制状态 + 违规总数），island 体系，空体一次拿全
+  violationSummary: {
+    label: "违规汇总",
+    urlPath: "/mms/island/punish/summary",
+    buildBody: () => "{}",
+    getList: (body) => (body?.result && typeof body.result === "object") ? [body.result] : [],
+    getTotal: () => 1,
+    paginate: false,
+    ingestKind: "fetch-active-settlement-violation",
+    ingestPage: "robot/violation-summary",
+  },
+  // EPR 商品环保费（agentseller 域）。queryType 控制响应里哪个列表非空：
+  // 1=待扣 waitDeductionEprFeeInfoList，2=已扣 deductedEprFeeInfoList（getList 容错取第一个非空数组）
+  eprGoodsWait: {
+    label: "EPR待扣",
+    urlPath: "/api/merchant/eprfee/goods/page-query",
+    buildBody: (pageNum) => JSON.stringify({ withhold: null, queryType: 1, pageSize: 20, pageNum }),
+    getList: (body) => {
+      const r = body?.result || {};
+      const candidates = [r.waitDeductionEprFeeInfoList, r.deductedEprFeeInfoList, r.waitRefundEprFeeInfoList, r.refundedEprFeeInfoList];
+      return candidates.find((v) => Array.isArray(v) && v.length > 0) || candidates.find((v) => Array.isArray(v)) || [];
+    },
+    getTotal: (body) => Number(body?.result?.total) || 0,
+    paginate: true,
+    pageField: "pageNum",
+    ingestKind: "fetch-active-epr-fee",
+    ingestPage: "robot/epr-goods-wait",
+  },
+  eprGoodsDeducted: {
+    label: "EPR已扣",
+    urlPath: "/api/merchant/eprfee/goods/page-query",
+    buildBody: (pageNum) => JSON.stringify({ withhold: null, queryType: 2, pageSize: 20, pageNum }),
+    getList: (body) => {
+      const r = body?.result || {};
+      const candidates = [r.deductedEprFeeInfoList, r.waitDeductionEprFeeInfoList, r.waitRefundEprFeeInfoList, r.refundedEprFeeInfoList];
+      return candidates.find((v) => Array.isArray(v) && v.length > 0) || candidates.find((v) => Array.isArray(v)) || [];
+    },
+    getTotal: (body) => Number(body?.result?.total) || 0,
+    paginate: true,
+    pageField: "pageNum",
+    ingestKind: "fetch-active-epr-fee",
+    ingestPage: "robot/epr-goods-deducted",
+  },
+  // EPR 平台代扣待扣款（按资质证书维度）
+  eprPlatform: {
+    label: "EPR平台待扣",
+    urlPath: "/api/merchant/eprfee/platform/wait-deduction/page-query",
+    buildBody: (pageNum) => JSON.stringify({ certId: null, pageSize: 20, pageNum }),
+    getList: (body) => Array.isArray(body?.result?.dataList) ? body.result.dataList : [],
+    getTotal: (body) => Number(body?.result?.total) || 0,
+    paginate: true,
+    pageField: "pageNum",
+    ingestKind: "fetch-active-epr-fee",
+    ingestPage: "robot/epr-platform-wait",
+  },
+  // 资金限制（提现冻结规则）：空体一次拿全店全部冻结项（result.rules 数组），物化端拆行
+  fundFrozen: {
+    label: "资金限制",
+    urlPath: "/api/merchant/fund-frozen/rules",
+    buildBody: () => "{}",
+    getList: (body) => (body?.result && typeof body.result === "object") ? [body.result] : [],
+    getTotal: () => 1,
+    paginate: false,
+    ingestKind: "fetch-active-fund-frozen",
+    ingestPage: "robot/fund-frozen",
+  },
 };
 
 // 账号 -> 名下店铺(mall_id)归属缓存。
@@ -7675,7 +7767,7 @@ async function scrapeBatchCollect(params = {}) {
 async function collectOneAccount(params = {}) {
   // 任务顺序优先级：settlement（结算，1 次请求）→ afterSales（售后）→ products（商品，最多页）
   // 用户最关心的是结算入库，先把它采完不会被后面分页 session 过期影响。
-  const TASK_PRIORITY = { settlement: 0, settleWait: 1, settleIn: 1, settleDone: 1, fundDetail: 2, afterSales: 3, products: 4 };
+  const TASK_PRIORITY = { settlement: 0, settleWait: 1, settleIn: 1, settleDone: 1, fundDetail: 2, settlementViolation: 3, violationSummary: 3, fundFrozen: 3, eprGoodsWait: 3, eprGoodsDeducted: 3, eprPlatform: 3, afterSales: 4, products: 5 };
   let rawTasks = Array.isArray(params.tasks) && params.tasks.length > 0
     ? params.tasks.filter((k) => BATCH_COLLECT_API[k])
     : Object.keys(BATCH_COLLECT_API);
@@ -7684,7 +7776,7 @@ async function collectOneAccount(params = {}) {
   // 必须在 kuajingmaihuo 页面内同源采（主循环后单独处理，见下方 fund 采集段）。
   const wantFundDetail = rawTasks.includes("settlement") || rawTasks.includes("fundDetail");
   if (rawTasks.includes("settlement")) {
-    for (const ek of ["settleWait", "settleIn", "settleDone"]) {
+    for (const ek of ["settleWait", "settleIn", "settleDone", "settlementViolation", "violationSummary", "fundFrozen", "eprGoodsWait", "eprGoodsDeducted", "eprPlatform"]) {
       if (!rawTasks.includes(ek)) rawTasks.push(ek);
     }
   }
@@ -7721,7 +7813,8 @@ async function collectOneAccount(params = {}) {
   const targetIds = new Set(cachedForAcc);
   for (const id of selectedMallIds) if (!claimedMallIds.has(id)) targetIds.add(id);
   const accountTargets = [...targetIds].map((id) => mallById.get(id)).filter(Boolean)
-    .filter((m) => taskKeys.some((tk) => !collectedSet.has(`${m.mall_id}:${tk}`)));
+    .filter((m) => taskKeys.some((tk) => !collectedSet.has(`${m.mall_id}:${tk}`))
+      || (wantFundDetail && (!collectedSet.has(`${m.mall_id}:fundDetail`) || !collectedSet.has(`${m.mall_id}:fundSummary`))));
 
   if (accountTargets.length === 0) {
     console.error(`${logPrefix} 账号 ${accLabel} 无待采店铺，跳过`);
@@ -7829,38 +7922,109 @@ async function collectOneAccount(params = {}) {
   // ===== 账务费用（fund_detail）跨境猫域单独采集 =====
   // fund/detail/pageSearch 仅在 seller.kuajingmaihuo.com 暴露（agentseller 返 405），页面内 fetch 受同源限制，
   // 必须在 kuajingmaihuo 页面内同源 fetch。整段防御：失败不影响已采的明细/商品/售后。
+  const settleOrderTargets = []; // 结算批次（settle 流水）待下载订单级明细
   if (wantFundDetail && accAccessible.size > 0 && !accSessionExpired) {
     const fundDef = BATCH_COLLECT_API.fundDetail;
     const fundTargets = accountTargets.filter((m) => accAccessible.has(String(m.mall_id)) && !collectedSet.has(`${m.mall_id}:fundDetail`));
-    if (fundTargets.length > 0) {
+    const fundSummaryTargets = accountTargets.filter((m) => accAccessible.has(String(m.mall_id)) && !collectedSet.has(`${m.mall_id}:fundSummary`));
+    if (fundTargets.length > 0 || fundSummaryTargets.length > 0) {
       const fts = taskStats.fundDetail || (taskStats.fundDetail = { success: 0, error: 0, empty: 0, expired: 0, noAccess: 0, totalRecords: 0 });
+      const fsts = taskStats.fundSummary || (taskStats.fundSummary = { success: 0, error: 0, empty: 0, expired: 0, noAccess: 0, totalRecords: 0 });
       let kjmhPage = null;
       try {
         kjmhPage = await safeNewPage(context);
         // 进入跨境猫工作台建立同域 session（agentseller 已登录，跨境猫通常自动授权）
         await kjmhPage.goto("https://seller.kuajingmaihuo.com/main/authentication", { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
         await randomDelay(2500, 3500);
-        console.error(`${logPrefix} 账务费用：进入跨境猫页面 ${kjmhPage.url()}，待采 ${fundTargets.length} 店`);
+        console.error(`${logPrefix} 账务费用：进入跨境猫页面 ${kjmhPage.url()}，流水待采 ${fundTargets.length} 店，资金汇总待采 ${fundSummaryTargets.length} 店`);
         // fund 接口要求"开始/结束时间必选"，真实字段名未知（hook 未记录请求体），逐候选探测命中后固定
         const fundVariants = (pageNum) => {
           const end = new Date(); const start = new Date(end.getTime() - 30 * 86400000);
           const ds = (d) => d.toISOString().slice(0, 10);
           const t0 = start.getTime(), t1 = end.getTime();
           return [
+            // 抓包确认的真实格式（042 店页面实发：beginTime/endTime 毫秒 + pageNum）
+            JSON.stringify({ pageNum, pageSize: 50, beginTime: t0, endTime: t1 }),
             JSON.stringify({ pageNo: pageNum, pageSize: 50, startTime: t0, endTime: t1 }),
             JSON.stringify({ pageNo: pageNum, pageSize: 50, startTime: ds(start), endTime: ds(end) }),
             JSON.stringify({ pageNo: pageNum, pageSize: 50, startDate: ds(start), endDate: ds(end) }),
             JSON.stringify({ pageNo: pageNum, pageSize: 50, beginTime: t0, endTime: t1 }),
           ];
         };
-        const fundFetch = (mallId, bodyStr) => kjmhPage.evaluate(async ({ apiUrl, mid, body }) => {
+        const fundSummaryDefs = [
+          { label: "资金日汇总", urlPath: "/api/merchant/fund/detail/daySummary", ingestPage: "robot/fund-day-summary" },
+          { label: "资金月汇总", urlPath: "/api/merchant/fund/detail/monthSummary", ingestPage: "robot/fund-month-summary" },
+        ];
+        const fundSummaryVariants = () => {
+          const end = new Date(); const start = new Date(end.getTime() - 30 * 86400000);
+          const ds = (d) => d.toISOString().slice(0, 10);
+          const t0 = start.getTime(), t1 = end.getTime();
+          return [
+            JSON.stringify({ beginTime: t0, endTime: t1 }),
+            JSON.stringify({ startTime: t0, endTime: t1 }),
+            JSON.stringify({ beginDate: ds(start), endDate: ds(end) }),
+            JSON.stringify({ startDate: ds(start), endDate: ds(end) }),
+            JSON.stringify({}),
+          ];
+        };
+        const fundSummaryCount = (body) => {
+          const cands = [
+            body?.result?.data?.list, body?.result?.data?.rows, body?.result?.data?.items,
+            body?.result?.list, body?.result?.rows, body?.result?.items,
+            body?.data?.list, body?.data?.rows, body?.data?.items,
+            body?.list, body?.rows, body?.items,
+          ];
+          const list = cands.find((v) => Array.isArray(v));
+          if (Array.isArray(list)) return list.length;
+          const obj = body?.result?.data || body?.result || body?.data || null;
+          return obj && typeof obj === "object" ? 1 : 0;
+        };
+        const fundFetch = (urlPath, mallId, bodyStr) => kjmhPage.evaluate(async ({ apiUrl, mid, body }) => {
           try {
             const resp = await fetch(apiUrl, { method: "POST", credentials: "include", cache: "no-store", headers: { "Content-Type": "application/json", mallid: mid }, body });
             const text = await resp.text();
             return { status: resp.status, text, ok: resp.ok };
           } catch (e) { return { status: 0, text: "", ok: false, err: e.message }; }
-        }, { apiUrl: `https://seller.kuajingmaihuo.com${fundDef.urlPath}`, mid: mallId, body: bodyStr });
+        }, { apiUrl: `https://seller.kuajingmaihuo.com${urlPath}`, mid: mallId, body: bodyStr });
         let fundVariant = -1; // 命中的参数变体下标，第一店探测后固定
+        const fundMetaTargets = Array.from(new Map([...fundTargets, ...fundSummaryTargets].map((m) => [String(m.mall_id), m])).values());
+        const mets = taskStats.fundEnum || (taskStats.fundEnum = { success: 0, error: 0, empty: 0, expired: 0, noAccess: 0, totalRecords: 0 });
+        for (const mall of fundMetaTargets) {
+          const { mall_id: mallId, store_code: tag } = mall;
+          try {
+            const result = await fundFetch("/api/merchant/fund/detail/enum", mallId, "{}");
+            let body = null;
+            try { body = JSON.parse(result.text); } catch { body = null; }
+            if (result.ok && body && body.success !== false) {
+              const count = Array.isArray(body?.result) ? body.result.length : (body?.result && typeof body.result === "object" ? Object.keys(body.result).length : 1);
+              batchItems.push({
+                kind: "fetch-active-fund-enum",
+                url: "https://seller.kuajingmaihuo.com/api/merchant/fund/detail/enum",
+                url_path: "/api/merchant/fund/detail/enum",
+                method: "POST",
+                status: result.status,
+                ts: Date.now(),
+                site: "kuajingmaihuo",
+                page: "robot/fund-enum",
+                mall_id: mallId,
+                body,
+                bodyText: result.text.length > 200000 ? null : result.text,
+                requestBodyText: "{}",
+                bodySize: result.text.length,
+                activeSource: "batch_robot",
+              });
+              mets.success++;
+              mets.totalRecords += count;
+              console.error(`${logPrefix} [${tag}] 资金枚举 HTTP ${result.status} records=${count}`);
+            } else {
+              mets.error++;
+            }
+          } catch (e) {
+            mets.error++;
+            console.error(`${logPrefix} [${tag}] 资金枚举异常: ${e.message}`);
+          }
+          await randomDelay(150, 250);
+        }
         for (const mall of fundTargets) {
           const { mall_id: mallId, store_code: tag } = mall;
           try {
@@ -7872,7 +8036,7 @@ async function collectOneAccount(params = {}) {
                 const cands = fundVariants(pageNum);
                 for (let vi = 0; vi < cands.length; vi++) {
                   reqBody = cands[vi];
-                  result = await fundFetch(mallId, reqBody);
+                  result = await fundFetch(fundDef.urlPath, mallId, reqBody);
                   try { body = JSON.parse(result.text); } catch { body = null; }
                   console.error(`${logPrefix} [${tag}] 账务费用探测 v${vi} HTTP ${result.status} success=${body?.success} msg="${(body?.errorMsg || "").slice(0, 50)}"`);
                   if (result.ok && body && body.success !== false) { fundVariant = vi; break; }
@@ -7880,7 +8044,7 @@ async function collectOneAccount(params = {}) {
                 if (fundVariant < 0) { hasMore = false; break; }
               } else {
                 reqBody = fundVariants(pageNum)[fundVariant];
-                result = await fundFetch(mallId, reqBody);
+                result = await fundFetch(fundDef.urlPath, mallId, reqBody);
                 try { body = JSON.parse(result.text); } catch { body = null; }
               }
               const list = fundDef.getList(body); const total = fundDef.getTotal(body);
@@ -7891,16 +8055,171 @@ async function collectOneAccount(params = {}) {
               if (list.length === 0 || allRecords.length >= total || pageNum >= 10) hasMore = false;
               else { pageNum++; await randomDelay(300, 500); }
             }
+            // 结算类流水自带 detailJumpPath（中转到 agentseller-<region> 下载页），收集待下载批次
+            for (const r of allRecords) {
+              if ((r?.bizType === "settle" || r?.bizType === "settle_negative") && r?.batchId && r?.detailJumpPath) {
+                settleOrderTargets.push({
+                  mallId, tag, batchId: String(r.batchId), fundType: String(r.fundType ?? "100"),
+                  createTime: r.createTime || r.transactionTime || "", transactionTime: r.transactionTime || r.createTime || "",
+                  jumpPath: r.detailJumpPath, amount: r.originAmount ?? null, currency: r.currencyType || "",
+                });
+              }
+            }
             if (allRecords.length > 0) { fts.success++; fts.totalRecords += allRecords.length; newlyCollectedKeys.push(`${mallId}:fundDetail`); }
             else fts.empty++;
           } catch (e) { fts.error++; console.error(`${logPrefix} [${tag}] 账务费用异常: ${e.message}`); }
           await randomDelay(400, 700);
         }
         console.error(`${logPrefix} 账务费用完成: 命中变体=${fundVariant}, 成功 ${fts.success} 店 / ${fts.totalRecords} 条, 空 ${fts.empty}, 错 ${fts.error}`);
+        for (const mall of fundSummaryTargets) {
+          const { mall_id: mallId, store_code: tag } = mall;
+          let mallOk = false;
+          for (const def of fundSummaryDefs) {
+            let ok = false;
+            let lastStatus = 0;
+            let lastMsg = "";
+            for (const reqBody of fundSummaryVariants()) {
+              try {
+                const result = await fundFetch(def.urlPath, mallId, reqBody);
+                lastStatus = result.status;
+                let body = null;
+                try { body = JSON.parse(result.text); } catch { body = null; }
+                lastMsg = body?.errorMsg || body?.error_msg || body?.msg || body?.message || "";
+                if (result.ok && body && body.success !== false) {
+                  const count = fundSummaryCount(body);
+                  batchItems.push({
+                    kind: "fetch-active-fund-summary",
+                    url: `https://seller.kuajingmaihuo.com${def.urlPath}`,
+                    url_path: def.urlPath,
+                    method: "POST",
+                    status: result.status,
+                    ts: Date.now(),
+                    site: "kuajingmaihuo",
+                    page: def.ingestPage,
+                    mall_id: mallId,
+                    body,
+                    bodyText: result.text.length > 200000 ? null : result.text,
+                    requestBodyText: reqBody,
+                    bodySize: result.text.length,
+                    activeSource: "batch_robot",
+                  });
+                  fsts.success++;
+                  fsts.totalRecords += count;
+                  if (count <= 0) fsts.empty++;
+                  mallOk = true;
+                  ok = true;
+                  console.error(`${logPrefix} [${tag}] ${def.label} HTTP ${result.status} records=${count}`);
+                  break;
+                }
+              } catch (e) {
+                lastMsg = e.message;
+              }
+              await randomDelay(150, 250);
+            }
+            if (!ok) {
+              fsts.error++;
+              console.error(`${logPrefix} [${tag}] ${def.label} 未采到 HTTP ${lastStatus || "-"} msg="${String(lastMsg).slice(0, 80)}"`);
+            }
+            await randomDelay(250, 450);
+          }
+          if (mallOk) newlyCollectedKeys.push(`${mallId}:fundSummary`);
+          await randomDelay(400, 700);
+        }
+        console.error(`${logPrefix} 资金汇总完成: 成功 ${fsts.success} 项 / ${fsts.totalRecords} 条, 空 ${fsts.empty}, 错 ${fsts.error}`);
       } catch (e) {
         console.error(`${logPrefix} 账务费用采集整体失败（跨境猫页面）: ${e.message}`);
       } finally {
         await kjmhPage?.close().catch(() => {});
+      }
+    }
+  }
+
+  // ===== 结算批次订单级明细（xlsx 下载解析）=====
+  // 每笔 settle 流水的 detailJumpPath 中转到 agentseller-<region> 的 bill-download 页，该域
+  // /api/merchant/fund/detail/item/semi/download 按 {itemBizId,fundType,createTime} 返回 xlsx 签名 URL（10 分钟有效），
+  // 内容 = 该结算批次的订单级明细（结算口径核算成本的数据源）。整段防御：失败不影响其余采集。
+  if (settleOrderTargets.length > 0 && !accSessionExpired) {
+    const SETTLE_ORDER_DAYS = Number(process.env.SETTLE_ORDER_DAYS || 14);
+    const SETTLE_ORDER_MAX_PER_MALL = Number(process.env.SETTLE_ORDER_MAX_PER_MALL || 30);
+    const cutoffTs = Date.now() - SETTLE_ORDER_DAYS * 86400000;
+    // 近 N 天 + 每店上限，防一店几百批次拖垮整轮
+    const byMall = new Map();
+    for (const t of settleOrderTargets) {
+      const ts = new Date(String(t.transactionTime).replace(" ", "T")).getTime();
+      if (!Number.isFinite(ts) || ts < cutoffTs) continue;
+      const arr = byMall.get(t.mallId) || [];
+      if (arr.length < SETTLE_ORDER_MAX_PER_MALL) { arr.push(t); byMall.set(t.mallId, arr); }
+    }
+    let XLSX = null;
+    try { const m = await import("xlsx"); XLSX = m.default || m; }
+    catch (e) { console.error(`${logPrefix} xlsx 库加载失败，跳过结算订单明细: ${e.message}`); }
+    if (XLSX && byMall.size > 0) {
+      const sts = taskStats.settlementOrders || (taskStats.settlementOrders = { success: 0, error: 0, empty: 0, totalRecords: 0 });
+      const fetchXlsxBuffer = (fileUrl) => new Promise((resolve, reject) => {
+        const req = https.get(new URL(fileUrl), { timeout: 60000 }, (res) => {
+          if (res.statusCode !== 200) { res.resume(); reject(new Error(`xlsx HTTP ${res.statusCode}`)); return; }
+          const chunks = [];
+          res.on("data", (c) => chunks.push(c));
+          res.on("end", () => resolve(Buffer.concat(chunks)));
+        });
+        req.on("error", reject);
+        req.on("timeout", () => { req.destroy(); reject(new Error("xlsx download timeout")); });
+      });
+      let dlPage = null;
+      try {
+        dlPage = await safeNewPage(context);
+        console.error(`${logPrefix} 结算订单明细：待下载 ${[...byMall.values()].reduce((a, b) => a + b.length, 0)} 批次 / ${byMall.size} 店（近${SETTLE_ORDER_DAYS}天，每店上限${SETTLE_ORDER_MAX_PER_MALL}）`);
+        for (const [mallId, targets] of byMall) {
+          for (const t of targets) {
+            try {
+              // detailJumpPath 是跨境猫域的中转路径，targetUrl 参数里带落地域（按 region 而异）
+              const jumpUrl = new URL(t.jumpPath, "https://seller.kuajingmaihuo.com");
+              const targetUrl = jumpUrl.searchParams.get("targetUrl");
+              if (!targetUrl) { sts.error++; continue; }
+              const apiBase = new URL(targetUrl).origin;
+              // 首次或换域时走一次中转跳转，建立落地域 session
+              if (!dlPage.url().startsWith(apiBase)) {
+                await dlPage.goto(jumpUrl.href, { waitUntil: "domcontentloaded", timeout: 60000 });
+                await randomDelay(2000, 3000);
+              }
+              const payload = { itemBizId: t.batchId, fundType: t.fundType, createTime: t.createTime };
+              const dl = await dlPage.evaluate(async ({ api, mid, body }) => {
+                try {
+                  const resp = await fetch(api, { method: "POST", credentials: "include", cache: "no-store", headers: { "Content-Type": "application/json", mallid: mid }, body });
+                  return { status: resp.status, text: await resp.text() };
+                } catch (e) { return { status: 0, text: "", err: e.message }; }
+              }, { api: `${apiBase}/api/merchant/fund/detail/item/semi/download`, mid: mallId, body: JSON.stringify(payload) });
+              let fileUrl = null;
+              try { fileUrl = JSON.parse(dl.text)?.result?.fileUrl || null; } catch {}
+              if (!fileUrl) {
+                sts.error++;
+                console.error(`${logPrefix} [${t.tag}] 结算明细 ${t.batchId} 取下载链接失败 HTTP ${dl.status} body0..160=${(dl.text || "").slice(0, 160)}`);
+                continue;
+              }
+              const buf = await fetchXlsxBuffer(fileUrl);
+              const wb = XLSX.read(buf, { type: "buffer" });
+              const ws = wb.Sheets[wb.SheetNames[0]];
+              const rows = XLSX.utils.sheet_to_json(ws, { defval: null });
+              const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
+              const truncated = rows.length > 3000;
+              const body = {
+                success: true, batchId: t.batchId, fundType: t.fundType, createTime: t.createTime,
+                amount: t.amount, currency: t.currency, sheetName: wb.SheetNames[0],
+                columns, rowCount: rows.length, truncated, rows: truncated ? rows.slice(0, 3000) : rows,
+              };
+              const bodyText = JSON.stringify(body);
+              batchItems.push({ kind: "fetch-active-settlement-orders", url: `${apiBase}/api/merchant/fund/detail/item/semi/download`, url_path: "/api/merchant/fund/detail/item/semi/download", method: "POST", status: 200, ts: Date.now(), site: "agentseller", page: "robot/settlement-orders", mall_id: mallId, body, bodyText: bodyText.length > 200000 ? null : bodyText, requestBodyText: JSON.stringify(payload), bodySize: bodyText.length, activeSource: "batch_robot" });
+              if (rows.length > 0) { sts.success++; sts.totalRecords += rows.length; } else sts.empty++;
+              console.error(`${logPrefix} [${t.tag}] 结算明细 ${t.batchId}: ${rows.length} 行, 列=[${columns.slice(0, 8).join("|")}]`);
+            } catch (e) { sts.error++; console.error(`${logPrefix} [${t.tag}] 结算明细 ${t.batchId} 异常: ${e.message}`); }
+            await randomDelay(800, 1500);
+          }
+        }
+        console.error(`${logPrefix} 结算订单明细完成: 批次成功 ${sts.success} / 空 ${sts.empty} / 错 ${sts.error}, 共 ${sts.totalRecords} 行`);
+      } catch (e) {
+        console.error(`${logPrefix} 结算订单明细整体失败: ${e.message}`);
+      } finally {
+        await dlPage?.close().catch(() => {});
       }
     }
   }
@@ -7910,12 +8229,12 @@ async function collectOneAccount(params = {}) {
   let uploaded = 0;
   const cloudConfig = loadSettlementCloudConfig();
   if (batchItems.length > 0 && cloudConfig.authToken) {
-    const byKind = { "fetch-active-income-summary": [], "fetch-active-settlement-detail": [], "fetch-active-fund-detail": [], "fetch-active-aftersales": [], "fetch-active-products": [] };
+    const byKind = { "fetch-active-income-summary": [], "fetch-active-settlement-detail": [], "fetch-active-fund-detail": [], "fetch-active-fund-summary": [], "fetch-active-fund-enum": [], "fetch-active-fund-frozen": [], "fetch-active-epr-fee": [], "fetch-active-settlement-orders": [], "fetch-active-settlement-violation": [], "fetch-active-aftersales": [], "fetch-active-products": [] };
     for (const it of batchItems) (byKind[it.kind] || (byKind[it.kind] = [])).push(it);
-    // CHUNK 大小按 body 估算：结算收入/明细 body 小可一批多条；账务费用每页 50 条中等；商品/售后 body 大每批 2 条
-    const kindChunk = { "fetch-active-income-summary": 10, "fetch-active-settlement-detail": 10, "fetch-active-fund-detail": 4, "fetch-active-aftersales": 2, "fetch-active-products": 2 };
-    // 顺序：结算收入 → 结算明细 → 账务费用 → 售后 → 商品（任何一类失败不影响其他）
-    for (const kind of ["fetch-active-income-summary", "fetch-active-settlement-detail", "fetch-active-fund-detail", "fetch-active-aftersales", "fetch-active-products"]) {
+    // CHUNK 大小按 body 估算：结算收入/明细 body 小可一批多条；账务费用每页 50 条中等；商品/售后/结算订单明细 body 大每批 2 条
+    const kindChunk = { "fetch-active-income-summary": 10, "fetch-active-settlement-detail": 10, "fetch-active-fund-detail": 4, "fetch-active-fund-summary": 4, "fetch-active-fund-enum": 4, "fetch-active-fund-frozen": 10, "fetch-active-epr-fee": 4, "fetch-active-settlement-orders": 2, "fetch-active-settlement-violation": 4, "fetch-active-aftersales": 2, "fetch-active-products": 2 };
+    // 顺序：结算收入 → 结算明细 → 账务费用/资金汇总/枚举 → 结算订单明细 → 违规 → 售后 → 商品（任何一类失败不影响其他）
+    for (const kind of ["fetch-active-income-summary", "fetch-active-settlement-detail", "fetch-active-fund-detail", "fetch-active-fund-summary", "fetch-active-fund-enum", "fetch-active-fund-frozen", "fetch-active-epr-fee", "fetch-active-settlement-orders", "fetch-active-settlement-violation", "fetch-active-aftersales", "fetch-active-products"]) {
       const items = byKind[kind] || [];
       if (items.length === 0) continue;
       const CHUNK = kindChunk[kind] || 2;

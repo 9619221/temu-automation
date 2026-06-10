@@ -20,6 +20,11 @@ const SETTLEMENT_DETAIL_PATHS = [
   "/api/merchant/settle/detail/full/in-settlement",
   "/api/merchant/settle/detail/full/settled",
 ];
+const SETTLEMENT_ORDER_DETAIL_PATH = "/api/merchant/fund/detail/item/semi/download";
+const FUND_SUMMARY_PATHS = [
+  "/api/merchant/fund/detail/daySummary",
+  "/api/merchant/fund/detail/monthSummary",
+];
 
 function argValue(name) {
   const idx = process.argv.indexOf(name);
@@ -262,10 +267,34 @@ function inspectCloud() {
     const detailTotal = detailSummary.reduce((acc, row) => acc + Number(row.capture_count || 0), 0);
     report.cloud.settlement_detail_summary = detailSummary;
 
-    if (!summary.capture_count && detailTotal <= 0) {
-      addCheck("fail", "finance_captures_missing", "no income-summary or wait/in/settled settlement capture_events found");
+    const orderSummary = db.prepare(`
+      SELECT COUNT(*) AS capture_count,
+             COUNT(DISTINCT NULLIF(mall_id, '')) AS mall_count,
+             SUM(CASE WHEN mall_id IS NULL OR mall_id = '' THEN 1 ELSE 0 END) AS empty_mall_count,
+             MAX(received_at) AS latest_received_at
+        FROM capture_events
+       WHERE url_path = ?
+    `).get(SETTLEMENT_ORDER_DETAIL_PATH);
+    report.cloud.settlement_order_detail_summary = orderSummary;
+
+    const fundSummary = db.prepare(`
+      SELECT url_path,
+             COUNT(*) AS capture_count,
+             COUNT(DISTINCT NULLIF(mall_id, '')) AS mall_count,
+             SUM(CASE WHEN mall_id IS NULL OR mall_id = '' THEN 1 ELSE 0 END) AS empty_mall_count,
+             MAX(received_at) AS latest_received_at
+        FROM capture_events
+       WHERE url_path IN (${FUND_SUMMARY_PATHS.map(() => "?").join(",")})
+       GROUP BY url_path
+       ORDER BY url_path
+    `).all(...FUND_SUMMARY_PATHS);
+    const fundSummaryTotal = fundSummary.reduce((acc, row) => acc + Number(row.capture_count || 0), 0);
+    report.cloud.fund_summary = fundSummary;
+
+    if (!summary.capture_count && detailTotal <= 0 && !orderSummary.capture_count && fundSummaryTotal <= 0) {
+      addCheck("fail", "finance_captures_missing", "no income-summary, wait/in/settled, settlement order, or fund summary capture_events found");
     } else if (!summary.capture_count) {
-      addCheck("warn", "income_summary_missing", "no income-summary capture_events found; settlement detail captures can still sync");
+      addCheck("warn", "income_summary_missing", "no income-summary capture_events found; other settlement captures can still sync");
     } else {
       addCheck("ok", "income_summary_present", "income-summary captures found", summary);
       if (Number(summary.empty_mall_count) > 0) {
@@ -279,6 +308,18 @@ function inspectCloud() {
       addCheck("ok", "settlement_detail_present", "settlement detail captures found", { total: detailTotal, endpoints: detailSummary });
     } else {
       addCheck("warn", "settlement_detail_missing", "no wait/in/settled settlement detail captures found yet");
+    }
+
+    if (Number(orderSummary.capture_count) > 0) {
+      addCheck("ok", "settlement_order_detail_present", "settlement order detail captures found", orderSummary);
+    } else {
+      addCheck("warn", "settlement_order_detail_missing", "no settlement order detail captures found yet");
+    }
+
+    if (fundSummaryTotal > 0) {
+      addCheck("ok", "fund_summary_present", "fund day/month summary captures found", { total: fundSummaryTotal, endpoints: fundSummary });
+    } else {
+      addCheck("warn", "fund_summary_missing", "no fund day/month summary captures found yet");
     }
 
     const planRows = db.prepare(`
@@ -402,6 +443,44 @@ function inspectErp() {
         addCheck("warn", "settlement_detail_table_empty", "erp_temu_settlement_detail exists but has no rows");
       } else {
         addCheck("ok", "settlement_detail_table_populated", "ERP settlement detail table has rows", detail);
+      }
+    }
+
+    report.erp.settlement_order_detail_table_exists = tableExists(db, "erp_temu_settlement_order_detail");
+    if (!report.erp.settlement_order_detail_table_exists) {
+      addCheck("warn", "settlement_order_detail_table_missing", "erp_temu_settlement_order_detail does not exist yet; first sync will create it");
+    } else {
+      const orderDetail = db.prepare(`
+        SELECT COUNT(*) AS rows,
+               COUNT(DISTINCT NULLIF(mall_id, '')) AS mall_count,
+               COUNT(DISTINCT NULLIF(batch_id, '')) AS batch_count,
+               MAX(updated_at) AS latest_updated_at
+          FROM erp_temu_settlement_order_detail
+      `).get();
+      report.erp.settlement_order_detail_summary = orderDetail;
+      if (!orderDetail.rows) {
+        addCheck("warn", "settlement_order_detail_table_empty", "erp_temu_settlement_order_detail exists but has no rows");
+      } else {
+        addCheck("ok", "settlement_order_detail_table_populated", "ERP settlement order detail table has rows", orderDetail);
+      }
+    }
+
+    report.erp.fund_summary_table_exists = tableExists(db, "erp_temu_fund_summary");
+    if (!report.erp.fund_summary_table_exists) {
+      addCheck("warn", "fund_summary_table_missing", "erp_temu_fund_summary does not exist yet; first sync will create it");
+    } else {
+      const fund = db.prepare(`
+        SELECT COUNT(*) AS rows,
+               COUNT(DISTINCT NULLIF(mall_id, '')) AS mall_count,
+               MAX(summary_date) AS latest_summary_date,
+               MAX(updated_at) AS latest_updated_at
+          FROM erp_temu_fund_summary
+      `).get();
+      report.erp.fund_summary = fund;
+      if (!fund.rows) {
+        addCheck("warn", "fund_summary_table_empty", "erp_temu_fund_summary exists but has no rows");
+      } else {
+        addCheck("ok", "fund_summary_table_populated", "ERP fund summary table has rows", fund);
       }
     }
   } finally {

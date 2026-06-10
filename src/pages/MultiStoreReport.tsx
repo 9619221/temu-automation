@@ -9,6 +9,7 @@ import {
   Card,
   Empty,
   Input,
+  Modal,
   Select,
   Space,
   Statistic,
@@ -82,6 +83,73 @@ interface FundDetailData {
   by_category: Record<string, number>;
 }
 
+interface FundSummaryData {
+  latest_date: string | null;
+  currency: string;
+  income_total: number;
+  expense_total: number;
+  balance_amount: number;
+  frozen_amount: number;
+  available_amount: number;
+  total_amount: number;
+  rows: number;
+  day_rows: number;
+  month_rows: number;
+}
+
+interface SettlementRiskData {
+  violation_count: number;
+  inbound_exception_count: number;
+  high_count: number;
+  latest_date: string | null;
+  by_type: Record<string, number>;
+}
+
+// EPR 费用（erp_temu_epr_fee 物化，机器人主动采 eprfee 接口）
+interface EprDetailData {
+  wait_amount: number;
+  deducted_amount: number;
+  wait_count: number;
+  deducted_count: number;
+  total_count: number;
+}
+
+// 资金限制（erp_temu_fund_frozen 物化，fund-frozen/rules 快照）
+interface FundFrozenItem {
+  frozen_type: string;
+  reason: string | null;
+  amount: number;
+  currency: string | null;
+  unfreeze_condition: string | null;
+}
+interface FundFrozenData {
+  total_amount: number;
+  items: FundFrozenItem[];
+}
+
+// 违规处罚明细（erp_temu_violation 物化，tmod_punish entrance/list 直解）
+interface ViolationItem {
+  target_id: string;
+  goods_id: string | null;
+  goods_name: string | null;
+  source_punish_name: string | null;
+  leaf_reason_name: string | null;
+  violation_desc: string | null;
+  punish_status_desc: string | null;
+  appeal_status: number | null;
+  can_appeal: number | null;
+  can_rectify: number | null;
+  site_num: number | null;
+  punish_num: number | null;
+  stat_date: string | null;
+}
+interface ViolationData {
+  violation_count: number;
+  add_site_limit_status: number | null;
+  release_limit_time: string | null;
+  items: ViolationItem[];
+}
+
 interface ReportStore {
   mall_id: string;
   mall_name: string | null;
@@ -95,6 +163,8 @@ interface ReportStore {
   settlement: StoreSettlement | null;
   settlement_detail: StoreSettlementDetail | null;
   fund_detail: FundDetailData | null;
+  fund_summary: FundSummaryData | null;
+  risk_detail: SettlementRiskData | null;
   sales: { today_qty: number; last7d_qty: number; last30d_qty: number; sku_count: number };
   stock_orders: { total: number; pending: number; demand_qty: number; delivered_qty: number };
   inventory?: { warehouse_value: number; in_transit_value: number };
@@ -126,6 +196,8 @@ interface ReportData {
   settlement_available: boolean;
   settlement_detail_available: boolean;
   fund_detail_available: boolean;
+  fund_summary_available: boolean;
+  risk_detail_available: boolean;
   sales_window: { start: string | null; end: string | null; days: number } | null;
   stores: ReportStore[];
   unmapped: ReportStore[];
@@ -300,7 +372,15 @@ interface SettlementRow {
   other_fee: number;     // 其它服务费
   cost: number;          // 销售成本
   expense_total: number; // 支出合计
-  profit: number;        // 预估利润
+  net_amount: number;    // 资金净额 = 收入合计 − 费用合计（不含销售成本，聚水潭口径）
+  available_amount: number;
+  frozen_amount: number;
+  balance_amount: number;
+  violation_count: number;
+  epr_wait: number;                       // EPR 待扣合计（erp_temu_epr_fee 明细）
+  fund_frozen: FundFrozenData | null;     // 资金限制明细（点击冻结资金查看）
+  violation_detail: ViolationData | null; // 违规明细（点击违规数查看）
+  profit: number | null; // 预估利润（未采到结算数据的店为 null，不假亏）
   profit_rate: number | null; // 预估利润率
 }
 
@@ -310,6 +390,11 @@ interface SettlementStoreData {
   mall_name: string | null;
   owner: string | null;
   fund_detail: FundDetailData | null;
+  fund_summary: FundSummaryData | null;
+  risk_detail: SettlementRiskData | null;
+  epr_detail: EprDetailData | null;
+  fund_frozen: FundFrozenData | null;
+  violation: ViolationData | null;
   settlement_income: number;       // 真实结算收入（income-summary）
   settlement_income_days: number;  // 结算数据覆盖天数
   cost: number;                    // 销量×加权均价（salesv2 × erp_skus）
@@ -324,15 +409,18 @@ function classifyFundCategories(fd: FundDetailData | null) {
       if (amt >= 0) continue;
       const absAmt = Math.abs(amt);
       const lower = cat.toLowerCase();
-      if (lower.includes("仓储综合服务费") || (lower.includes("仓储") && lower.includes("服务费"))) {
+      // 聚水潭口径：提现是资金转出、结算冲减属收入侧（已含在 income-summary），都不算经营费用
+      if (lower === "提现" || lower === "结算") {
+        continue;
+      } else if (lower.includes("仓储综合服务费") || (lower.includes("仓储") && lower.includes("服务费"))) {
         warehouseFee += absAmt;
       } else if (lower.includes("epr") || lower.includes("环保")) {
         eprFee += absAmt;
       } else if (lower.includes("推广") || lower.includes("广告")) {
         adFee += absAmt;
-      } else if (lower.includes("赔付") || lower.includes("售后赔") || lower.includes("售后问题") || lower.includes("履约保障")) {
+      } else if (lower.includes("赔付") || lower.includes("售后赔") || lower.includes("售后问题") || lower.includes("履约保障") || lower.includes("售后补贴")) {
         afterSale += absAmt;
-      } else if (lower.includes("扣款")) {
+      } else if (lower.includes("扣款") || lower.includes("违规") || lower.includes("罚款") || lower.includes("处罚") || lower.includes("质量事故")) {
         deduction += absAmt;
       } else {
         otherFee += absAmt;
@@ -346,6 +434,8 @@ function buildSettlementRowFromData(s: SettlementStoreData): SettlementRow {
   const store = formatStoreNo(s.store_code, s.mall_id);
   const owner = s.owner || "";
   const fd = s.fund_detail;
+  const fs = s.fund_summary;
+  const risk = s.risk_detail;
   const sd = s.settlement_detail;
   // 收入金额：只用真实结算收入（income-summary），不混入估算值
   const income = s.settlement_income || 0;
@@ -354,15 +444,31 @@ function buildSettlementRowFromData(s: SettlementStoreData): SettlementRow {
   const income_total = income - reserve + release;
   const fees = classifyFundCategories(fd);
   const cost = s.cost || 0;
-  const expense_total = fees.afterSale + fees.deduction + fees.warehouseFee + fees.eprFee + fees.adFee + fees.otherFee + cost;
-  const profit = income_total - expense_total;
-  const profit_rate = income_total > 0 ? profit / income_total : null;
+  const fee_total = fees.afterSale + fees.deduction + fees.warehouseFee + fees.eprFee + fees.adFee + fees.otherFee;
+  const expense_total = fee_total + cost;
+  // 资金净额：纯钱进钱出（聚水潭口径），不含销售成本
+  const net_amount = income_total - fee_total;
+  // 预估利润：只对采到结算数据的店计算，没数据的店不假亏
+  const hasSettlementData = (s.settlement_income_days || 0) > 0 || income_total > 0 || !!fd;
+  const profit = hasSettlementData ? income_total - expense_total : null;
+  const profit_rate = profit != null && income_total > 0 ? profit / income_total : null;
   return {
     mall_id: s.mall_id, store, owner, qty: s.qty || 0,
     income, reserve, release, income_total,
     after_sale: fees.afterSale, deduction: fees.deduction, warehouse_fee: fees.warehouseFee,
     epr_fee: fees.eprFee, ad_fee: fees.adFee, other_fee: fees.otherFee,
-    cost, expense_total, profit, profit_rate,
+    cost, expense_total, net_amount,
+    available_amount: fs?.available_amount || 0,
+    frozen_amount: fs?.frozen_amount || 0,
+    balance_amount: fs?.balance_amount || 0,
+    // 违规数优先用主动采集的明细表（含申诉状态），无明细时回退云端泛化风险快照
+    violation_count: s.violation
+      ? s.violation.violation_count
+      : (risk?.violation_count || 0) + (risk?.inbound_exception_count || 0),
+    epr_wait: s.epr_detail?.wait_amount || 0,
+    fund_frozen: s.fund_frozen,
+    violation_detail: s.violation,
+    profit, profit_rate,
   };
 }
 
@@ -455,7 +561,12 @@ export default function MultiStoreReport() {
       const incomeRows = result.incomeRows ?? result.rows ?? 0;
       const detailRows = result.detailRows ?? 0;
       const fundRows = result.fundRows ?? 0;
-      message.success(`结算数据已同步：${result.malls || 0} 店 / 收入 ${incomeRows} 行 / 明细 ${detailRows} 行 / 费用 ${fundRows} 行`);
+      const orderRows = result.orderRows ?? 0;
+      const fundSummaryRows = result.fundSummaryRows ?? 0;
+      const eprRows = result.eprRows ?? 0;
+      const frozenRows = result.frozenRows ?? 0;
+      const violationRows = result.violationRows ?? 0;
+      message.success(`结算数据已同步：${result.malls || 0} 店 / 收入 ${incomeRows} 行 / 明细 ${detailRows} 行 / 费用 ${fundRows} 行 / 订单 ${orderRows} 行 / 资金汇总 ${fundSummaryRows} 行 / EPR ${eprRows} 行 / 资金限制 ${frozenRows} 行 / 违规 ${violationRows} 行`);
       await load();
     } catch (e: any) {
       message.error(e?.message || String(e));
@@ -613,8 +724,15 @@ export default function MultiStoreReport() {
   const [stlRange, setStlRange] = useSessionState<[string, string]>(msrViewKey("stlRange"), [daysAgo(30), dateStr(new Date())]);
   const [stlData, setStlData] = useState<SettlementStoreData[]>([]);
   const [stlFundAvail, setStlFundAvail] = useState(false);
+  const [stlFundSummaryAvail, setStlFundSummaryAvail] = useState(false);
+  const [stlRiskAvail, setStlRiskAvail] = useState(false);
+  const [stlEprAvail, setStlEprAvail] = useState(false);
+  const [stlFrozenAvail, setStlFrozenAvail] = useState(false);
+  const [stlViolationAvail, setStlViolationAvail] = useState(false);
   const [stlLoading, setStlLoading] = useState(false);
   const [stlLoaded, setStlLoaded] = useState(false);
+  // 明细弹窗：点击「冻结资金」/「违规」数字查看该店明细
+  const [stlDetailModal, setStlDetailModal] = useState<{ type: "frozen" | "violation"; row: SettlementRow } | null>(null);
 
   const loadSettlement = useCallback(async (start?: string, end?: string) => {
     if (!window.electronAPI?.erp?.reports?.settlement) return;
@@ -627,6 +745,11 @@ export default function MultiStoreReport() {
       if (resp.ok && resp.data) {
         setStlData((resp.data.stores || []) as SettlementStoreData[]);
         setStlFundAvail(resp.data.fund_detail_available ?? false);
+        setStlFundSummaryAvail(resp.data.fund_summary_available ?? false);
+        setStlRiskAvail(resp.data.risk_detail_available ?? false);
+        setStlEprAvail(resp.data.epr_detail_available ?? false);
+        setStlFrozenAvail(resp.data.fund_frozen_available ?? false);
+        setStlViolationAvail(resp.data.violation_available ?? false);
         setStlLoaded(true);
       }
     } catch { /* ignore */ } finally {
@@ -654,18 +777,26 @@ export default function MultiStoreReport() {
   const settlementRows = useMemo(() => stlData.map(buildSettlementRowFromData), [stlData]);
 
   const settlementTotals = useMemo(() => {
-    const t: Omit<SettlementRow, "mall_id" | "store" | "owner" | "profit_rate"> = {
+    const t = {
       qty: 0, income: 0, reserve: 0, release: 0, income_total: 0,
       after_sale: 0, deduction: 0, warehouse_fee: 0, epr_fee: 0,
-      ad_fee: 0, other_fee: 0, cost: 0, expense_total: 0, profit: 0,
+      ad_fee: 0, other_fee: 0, cost: 0, expense_total: 0, net_amount: 0,
+      available_amount: 0, frozen_amount: 0, balance_amount: 0, violation_count: 0,
+      epr_wait: 0,
+      profit: 0, profitIncomeTotal: 0, // profit 只累加有结算数据的店，对应收入也单独累计算利润率
     };
     for (const r of settlementRows) {
       t.qty += r.qty; t.income += r.income; t.reserve += r.reserve; t.release += r.release;
       t.income_total += r.income_total; t.after_sale += r.after_sale; t.deduction += r.deduction;
       t.warehouse_fee += r.warehouse_fee; t.epr_fee += r.epr_fee; t.ad_fee += r.ad_fee;
-      t.other_fee += r.other_fee; t.cost += r.cost; t.expense_total += r.expense_total; t.profit += r.profit;
+      t.other_fee += r.other_fee; t.cost += r.cost; t.expense_total += r.expense_total;
+      t.net_amount += r.net_amount;
+      t.available_amount += r.available_amount; t.frozen_amount += r.frozen_amount;
+      t.balance_amount += r.balance_amount; t.violation_count += r.violation_count;
+      t.epr_wait += r.epr_wait;
+      if (r.profit != null) { t.profit += r.profit; t.profitIncomeTotal += r.income_total; }
     }
-    return { ...t, profit_rate: t.income_total > 0 ? t.profit / t.income_total : null };
+    return { ...t, profit_rate: t.profitIncomeTotal > 0 ? t.profit / t.profitIncomeTotal : null };
   }, [settlementRows]);
 
   // 店铺营收排名（Top 15，营收毛利 Tab 横向条形）
@@ -1245,10 +1376,26 @@ export default function MultiStoreReport() {
               message="对账中心费用明细暂不可用"
               description={"请先在 seller.kuajingmaihuo.com 对账中心翻阅账务明细页面（被动抓包采集），然后点击「同步结算数据」。费用分类（仓储/EPR/广告/赔付等）依赖抓包数据填充。"} />
           )}
+          {stlLoaded && (!stlFundSummaryAvail || !stlRiskAvail || !stlEprAvail || !stlFrozenAvail || !stlViolationAvail) && (
+            <Alert type="warning" showIcon style={{ margin: "8px 16px 0" }}
+              message="聚协云完整结算维度尚未全部入库"
+              description={`缺少：${[
+                !stlFundSummaryAvail ? "账户概览/资金限制汇总" : "",
+                !stlRiskAvail && !stlViolationAvail ? "违规信息" : "",
+                !stlEprAvail ? "EPR费用明细" : "",
+                !stlFrozenAvail ? "资金限制明细" : "",
+              ].filter(Boolean).join("、")}。请先运行「结算数据」机器人采集，再点击「同步结算数据」。`} />
+          )}
           {/* 汇总卡片 */}
           <div style={{ padding: "12px 16px 0", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 12 }}>
             <Statistic title="收入合计" value={fmtMoney(settlementTotals.income_total)} valueStyle={{ color: COLOR.good, fontSize: 18 }} />
             <Statistic title="支出合计" value={fmtMoney(settlementTotals.expense_total)} valueStyle={{ color: COLOR.bad, fontSize: 18 }} />
+            <Statistic title="资金净额" value={fmtMoney(settlementTotals.net_amount)} valueStyle={{ color: settlementTotals.net_amount >= 0 ? COLOR.good : COLOR.bad, fontSize: 18 }} />
+            <Statistic title="可用资金" value={stlFundSummaryAvail ? fmtMoney(settlementTotals.available_amount) : "—"} valueStyle={{ color: COLOR.good, fontSize: 18 }} />
+            <Statistic title="冻结资金" value={stlFundSummaryAvail ? fmtMoney(settlementTotals.frozen_amount) : "—"} valueStyle={{ color: COLOR.warn, fontSize: 18 }} />
+            <Statistic title="账户余额" value={stlFundSummaryAvail ? fmtMoney(settlementTotals.balance_amount) : "—"} valueStyle={{ fontSize: 18 }} />
+            <Statistic title="违规/异常" value={(stlRiskAvail || stlViolationAvail) ? fmtNum(settlementTotals.violation_count) : "—"} valueStyle={{ color: settlementTotals.violation_count > 0 ? COLOR.bad : undefined, fontSize: 18 }} />
+            <Statistic title="EPR待扣" value={stlEprAvail ? fmtMoney(settlementTotals.epr_wait) : "—"} valueStyle={{ color: settlementTotals.epr_wait > 0 ? COLOR.warn : undefined, fontSize: 18 }} />
             <Statistic title="预估利润" value={fmtMoney(settlementTotals.profit)} valueStyle={{ color: settlementTotals.profit >= 0 ? COLOR.good : COLOR.bad, fontSize: 18 }} />
             <Statistic title="利润率" value={fmtPct(settlementTotals.profit_rate)} valueStyle={{ color: settlementTotals.profit_rate != null && settlementTotals.profit_rate < ALERT_MARGIN_LOW ? COLOR.bad : COLOR.good, fontSize: 18 }} />
             <Statistic title="仓储综合服务费" value={fmtMoney(settlementTotals.warehouse_fee)} valueStyle={{ fontSize: 16 }} />
@@ -1258,22 +1405,25 @@ export default function MultiStoreReport() {
           </div>
           <div style={{ padding: "8px 16px 0", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span style={{ color: "#888", fontSize: 12 }}>
-              收入 = 结算中心实际结算金额（income-summary），成本 = 销量 x 加权平均成本，费用来自对账中心抓包。
+              资金净额 = 收入合计 − 费用（不含销售成本，聚水潭口径，纯钱进钱出）；预估利润 = 收入合计 − 费用 − 销售成本，仅对已采到结算数据的店计算（"—" = 未采集，非亏损）。
+              收入为"到账"口径，与成本的"本期销量"口径存在 1~2 周时间差，利润仅供参考。
               {!stlFundAvail && stlLoaded ? " 费用列为空 = 该店尚未抓到对账数据。" : ""}
             </span>
             <Button size="small" icon={<DownloadOutlined />}
               onClick={() => {
-                const header = ["店铺", "负责人", "销量", "收入金额", "售后预留金额", "售后释放金额", "收入合计", "售后赔付", "扣款", "仓储综合服务费", "EPR费用", "广告服务费", "其它服务费", "销售成本", "支出合计", "预估利润", "预估利润率(%)"];
+                const header = ["店铺", "负责人", "销量", "收入金额", "售后预留金额", "售后释放金额", "收入合计", "售后赔付", "扣款", "仓储综合服务费", "EPR费用", "EPR待扣", "广告服务费", "其它服务费", "销售成本", "支出合计", "资金净额", "可用资金", "冻结资金", "账户余额", "违规/异常", "预估利润", "预估利润率(%)"];
                 const body = settlementRows.map((r) => [
                   r.store, r.owner, r.qty,
                   r.income.toFixed(2), r.reserve.toFixed(2), r.release.toFixed(2), r.income_total.toFixed(2),
                   r.after_sale.toFixed(2), r.deduction.toFixed(2), r.warehouse_fee.toFixed(2),
-                  r.epr_fee.toFixed(2), r.ad_fee.toFixed(2), r.other_fee.toFixed(2),
-                  r.cost.toFixed(2), r.expense_total.toFixed(2), r.profit.toFixed(2),
+                  r.epr_fee.toFixed(2), r.epr_wait.toFixed(2), r.ad_fee.toFixed(2), r.other_fee.toFixed(2),
+                  r.cost.toFixed(2), r.expense_total.toFixed(2), r.net_amount.toFixed(2),
+                  r.available_amount.toFixed(2), r.frozen_amount.toFixed(2), r.balance_amount.toFixed(2), r.violation_count,
+                  r.profit != null ? r.profit.toFixed(2) : "",
                   r.profit_rate != null ? (r.profit_rate * 100).toFixed(2) : "",
                 ]);
                 const t = settlementTotals;
-                body.push(["合计", "", t.qty, t.income.toFixed(2), t.reserve.toFixed(2), t.release.toFixed(2), t.income_total.toFixed(2), t.after_sale.toFixed(2), t.deduction.toFixed(2), t.warehouse_fee.toFixed(2), t.epr_fee.toFixed(2), t.ad_fee.toFixed(2), t.other_fee.toFixed(2), t.cost.toFixed(2), t.expense_total.toFixed(2), t.profit.toFixed(2), t.profit_rate != null ? (t.profit_rate * 100).toFixed(2) : ""]);
+                body.push(["合计", "", t.qty, t.income.toFixed(2), t.reserve.toFixed(2), t.release.toFixed(2), t.income_total.toFixed(2), t.after_sale.toFixed(2), t.deduction.toFixed(2), t.warehouse_fee.toFixed(2), t.epr_fee.toFixed(2), t.epr_wait.toFixed(2), t.ad_fee.toFixed(2), t.other_fee.toFixed(2), t.cost.toFixed(2), t.expense_total.toFixed(2), t.net_amount.toFixed(2), t.available_amount.toFixed(2), t.frozen_amount.toFixed(2), t.balance_amount.toFixed(2), t.violation_count, t.profit.toFixed(2), t.profit_rate != null ? (t.profit_rate * 100).toFixed(2) : ""]);
                 downloadCsv(`结算报表_${stlRange[0]}_${stlRange[1]}.csv`, [header, ...body]);
               }}
             >导出 CSV</Button>
@@ -1283,7 +1433,7 @@ export default function MultiStoreReport() {
             rowKey="mall_id"
             size="small"
             pagination={false}
-            scroll={{ x: 1800 }}
+            scroll={{ x: 2220 }}
             loading={stlLoading}
             summary={() => (
               <Table.Summary fixed>
@@ -1303,8 +1453,13 @@ export default function MultiStoreReport() {
                   <Table.Summary.Cell index={12} align="right">{fmtMoney(settlementTotals.other_fee)}</Table.Summary.Cell>
                   <Table.Summary.Cell index={13} align="right">{fmtMoney(settlementTotals.cost)}</Table.Summary.Cell>
                   <Table.Summary.Cell index={14} align="right"><Typography.Text strong style={{ color: COLOR.bad }}>{fmtMoney(settlementTotals.expense_total)}</Typography.Text></Table.Summary.Cell>
-                  <Table.Summary.Cell index={15} align="right"><Typography.Text strong style={{ color: settlementTotals.profit >= 0 ? COLOR.good : COLOR.bad }}>{fmtMoney(settlementTotals.profit)}</Typography.Text></Table.Summary.Cell>
-                  <Table.Summary.Cell index={16} align="right"><Typography.Text strong>{fmtPct(settlementTotals.profit_rate)}</Typography.Text></Table.Summary.Cell>
+                  <Table.Summary.Cell index={15} align="right"><Typography.Text strong style={{ color: settlementTotals.net_amount >= 0 ? COLOR.good : COLOR.bad }}>{fmtMoney(settlementTotals.net_amount)}</Typography.Text></Table.Summary.Cell>
+                  <Table.Summary.Cell index={16} align="right">{stlFundSummaryAvail ? fmtMoney(settlementTotals.available_amount) : "—"}</Table.Summary.Cell>
+                  <Table.Summary.Cell index={17} align="right">{stlFundSummaryAvail ? fmtMoney(settlementTotals.frozen_amount) : "—"}</Table.Summary.Cell>
+                  <Table.Summary.Cell index={18} align="right">{stlFundSummaryAvail ? fmtMoney(settlementTotals.balance_amount) : "—"}</Table.Summary.Cell>
+                  <Table.Summary.Cell index={19} align="right">{stlRiskAvail ? fmtNum(settlementTotals.violation_count) : "—"}</Table.Summary.Cell>
+                  <Table.Summary.Cell index={20} align="right"><Typography.Text strong style={{ color: settlementTotals.profit >= 0 ? COLOR.good : COLOR.bad }}>{fmtMoney(settlementTotals.profit)}</Typography.Text></Table.Summary.Cell>
+                  <Table.Summary.Cell index={21} align="right"><Typography.Text strong>{fmtPct(settlementTotals.profit_rate)}</Typography.Text></Table.Summary.Cell>
                 </Table.Summary.Row>
               </Table.Summary>
             )}
@@ -1346,9 +1501,42 @@ export default function MultiStoreReport() {
               { title: "支出合计", dataIndex: "expense_total", key: "expense_total", width: 110, align: "right",
                 render: (v: number) => <Typography.Text style={{ color: v > 0 ? COLOR.bad : undefined }}>{v ? fmtMoney(v) : "—"}</Typography.Text>,
                 sorter: (a, b) => a.expense_total - b.expense_total },
+              { title: "资金净额", dataIndex: "net_amount", key: "net_amount", width: 110, align: "right",
+                render: (v: number) => <Typography.Text strong style={{ color: v > 0 ? COLOR.good : v < 0 ? COLOR.bad : undefined }}>{v ? fmtMoney(v) : "—"}</Typography.Text>,
+                sorter: (a, b) => a.net_amount - b.net_amount, defaultSortOrder: "descend" as const },
+              { title: "可用资金", dataIndex: "available_amount", key: "available_amount", width: 110, align: "right",
+                render: (v: number) => stlFundSummaryAvail && v ? fmtMoney(v) : <span style={{ color: "#ccc" }}>—</span>,
+                sorter: (a, b) => a.available_amount - b.available_amount },
+              { title: "冻结资金", dataIndex: "frozen_amount", key: "frozen_amount", width: 110, align: "right",
+                // 有 fund-frozen/rules 明细时数字可点击查看冻结原因/解冻条件
+                render: (v: number, row) => {
+                  const hasDetail = (row.fund_frozen?.items?.length || 0) > 0;
+                  const shown = stlFundSummaryAvail && v ? v : (hasDetail ? row.fund_frozen!.total_amount : 0);
+                  if (!shown && !hasDetail) return <span style={{ color: "#ccc" }}>—</span>;
+                  const text = <span style={{ color: COLOR.warn }}>{fmtMoney(shown)}</span>;
+                  return hasDetail
+                    ? <a onClick={() => setStlDetailModal({ type: "frozen", row })}>{text}</a>
+                    : text;
+                },
+                sorter: (a, b) => a.frozen_amount - b.frozen_amount },
+              { title: "账户余额", dataIndex: "balance_amount", key: "balance_amount", width: 110, align: "right",
+                render: (v: number) => stlFundSummaryAvail && v ? fmtMoney(v) : <span style={{ color: "#ccc" }}>—</span>,
+                sorter: (a, b) => a.balance_amount - b.balance_amount },
+              { title: "违规/异常", dataIndex: "violation_count", key: "violation_count", width: 90, align: "right",
+                // 有主动采集的违规明细时数字可点击查看商品/原因/申诉状态
+                render: (v: number, row) => {
+                  if (!((stlRiskAvail || stlViolationAvail) && v)) return <span style={{ color: "#ccc" }}>—</span>;
+                  const text = <span style={{ color: COLOR.bad }}>{fmtNum(v)}</span>;
+                  return (row.violation_detail?.items?.length || 0) > 0
+                    ? <a onClick={() => setStlDetailModal({ type: "violation", row })}>{text}</a>
+                    : text;
+                },
+                sorter: (a, b) => a.violation_count - b.violation_count },
               { title: "预估利润", dataIndex: "profit", key: "profit", width: 110, align: "right",
-                render: (v: number) => <Typography.Text strong style={{ color: v >= 0 ? COLOR.good : COLOR.bad }}>{fmtMoney(v)}</Typography.Text>,
-                sorter: (a, b) => a.profit - b.profit, defaultSortOrder: "descend" as const },
+                render: (v: number | null) => v == null
+                  ? <span style={{ color: "#ccc" }}>—</span>
+                  : <Typography.Text strong style={{ color: v >= 0 ? COLOR.good : COLOR.bad }}>{fmtMoney(v)}</Typography.Text>,
+                sorter: (a, b) => (a.profit ?? -Infinity) - (b.profit ?? -Infinity) },
               { title: "利润率", dataIndex: "profit_rate", key: "profit_rate", width: 80, align: "right",
                 render: (v: number | null) => {
                   if (v == null) return <span style={{ color: "#ccc" }}>—</span>;
@@ -1358,6 +1546,80 @@ export default function MultiStoreReport() {
                 sorter: (a, b) => (a.profit_rate ?? -999) - (b.profit_rate ?? -999) },
             ]}
           />
+          {/* 资金限制 / 违规明细弹窗（点击表格内冻结资金 / 违规数字打开） */}
+          <Modal
+            open={stlDetailModal != null}
+            onCancel={() => setStlDetailModal(null)}
+            footer={null}
+            width={stlDetailModal?.type === "violation" ? 920 : 680}
+            title={stlDetailModal
+              ? `${stlDetailModal.row.store} ${stlDetailModal.type === "frozen" ? "资金限制明细" : "违规处罚明细"}`
+              : ""}
+          >
+            {stlDetailModal?.type === "frozen" && (
+              <Table<FundFrozenItem>
+                dataSource={stlDetailModal.row.fund_frozen?.items || []}
+                rowKey="frozen_type"
+                size="small"
+                pagination={false}
+                columns={[
+                  { title: "冻结原因", dataIndex: "reason", key: "reason", width: 160,
+                    render: (v: string | null) => v || <span style={{ color: "#ccc" }}>—</span> },
+                  { title: "金额", dataIndex: "amount", key: "amount", width: 100, align: "right",
+                    render: (v: number) => <span style={{ color: COLOR.warn }}>{fmtMoney(v)}</span>,
+                    sorter: (a, b) => a.amount - b.amount, defaultSortOrder: "descend" },
+                  { title: "解冻条件", dataIndex: "unfreeze_condition", key: "unfreeze_condition",
+                    render: (v: string | null) => v || <span style={{ color: "#ccc" }}>—</span> },
+                ]}
+              />
+            )}
+            {stlDetailModal?.type === "violation" && (
+              <>
+                {stlDetailModal.row.violation_detail?.add_site_limit_status != null && stlDetailModal.row.violation_detail.add_site_limit_status !== 0 && (
+                  <Alert type="error" showIcon style={{ marginBottom: 12 }}
+                    message="该店存在加站限制"
+                    description={stlDetailModal.row.violation_detail.release_limit_time ? `预计解除时间：${stlDetailModal.row.violation_detail.release_limit_time}` : undefined} />
+                )}
+                <Table<ViolationItem>
+                  dataSource={stlDetailModal.row.violation_detail?.items || []}
+                  rowKey="target_id"
+                  size="small"
+                  pagination={{ pageSize: 10, hideOnSinglePage: true }}
+                  columns={[
+                    { title: "商品", dataIndex: "goods_name", key: "goods_name", width: 240, ellipsis: true,
+                      render: (v: string | null, r) => (
+                        <Tooltip title={v || r.goods_id || ""}>
+                          <span>{v || r.goods_id || "—"}</span>
+                        </Tooltip>
+                      ) },
+                    { title: "违规原因", dataIndex: "leaf_reason_name", key: "leaf_reason_name", width: 140,
+                      render: (v: string | null) => v ? <Tag color="red">{v}</Tag> : <span style={{ color: "#ccc" }}>—</span> },
+                    { title: "说明", dataIndex: "violation_desc", key: "violation_desc", ellipsis: true,
+                      render: (v: string | null) => v ? <Tooltip title={v}><span>{v}</span></Tooltip> : <span style={{ color: "#ccc" }}>—</span> },
+                    { title: "状态", dataIndex: "punish_status_desc", key: "punish_status_desc", width: 110,
+                      render: (v: string | null) => v ? <Tag color="orange">{v}</Tag> : <span style={{ color: "#ccc" }}>—</span> },
+                    { title: "站点数", dataIndex: "site_num", key: "site_num", width: 70, align: "right",
+                      render: (v: number | null) => v ?? "—" },
+                    { title: "处罚数", dataIndex: "punish_num", key: "punish_num", width: 70, align: "right",
+                      render: (v: number | null) => v ?? "—" },
+                    { title: "可操作", key: "actions", width: 110,
+                      render: (_: unknown, r) => (
+                        <Space size={4}>
+                          {r.can_appeal === 1 && <Tag color="blue">可申诉</Tag>}
+                          {r.can_rectify === 1 && <Tag color="green">可整改</Tag>}
+                          {r.can_appeal !== 1 && r.can_rectify !== 1 && <span style={{ color: "#ccc" }}>—</span>}
+                        </Space>
+                      ) },
+                  ]}
+                />
+                {(stlDetailModal.row.violation_detail?.violation_count || 0) > (stlDetailModal.row.violation_detail?.items?.length || 0) && (
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    共 {stlDetailModal.row.violation_detail?.violation_count} 条违规，明细仅展示最近 {stlDetailModal.row.violation_detail?.items?.length} 条。
+                  </Typography.Text>
+                )}
+              </>
+            )}
+          </Modal>
         </div>
       ),
     },

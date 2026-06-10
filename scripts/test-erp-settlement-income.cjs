@@ -22,10 +22,26 @@ const {
   upsertSettlementIncomeFromDashboard,
   syncSettlementIncomeFromCapture,
   syncSettlementDetailFromCapture,
+  syncSettlementOrderDetailFromCapture,
+  syncFundSummaryFromCapture,
   buildSettlementIncomeByMall,
   extractSettlementIncomeListFromCaptureBody,
   SETTLEMENT_INCOME_PATH,
   SETTLEMENT_DETAIL_PATHS,
+  SETTLEMENT_ORDER_DETAIL_PATH,
+  FUND_SUMMARY_PATHS,
+  buildFundSummaryByMall,
+  buildSettlementRiskByMall,
+  syncEprFeeFromCapture,
+  buildEprFeeByMall,
+  syncFundFrozenFromCapture,
+  buildFundFrozenByMall,
+  syncViolationFromCapture,
+  buildViolationByMall,
+  EPR_FEE_PATHS,
+  FUND_FROZEN_PATH,
+  VIOLATION_LIST_PATH,
+  VIOLATION_SUMMARY_PATH,
 } = svc._internal;
 
 let pass = 0, fail = 0;
@@ -151,6 +167,12 @@ console.log("\n=== 5) capture 同步 syncSettlementIncomeFromCapture（读 cloud
     d.exec(`CREATE TABLE IF NOT EXISTS cloud.capture_events (
       mall_id TEXT, url_path TEXT, body_json TEXT, received_at INTEGER
     )`);
+    d.exec(`CREATE TABLE IF NOT EXISTS cloud.temu_operation_risk_snapshot (
+      mall_id TEXT,
+      risk_type TEXT,
+      severity TEXT,
+      stat_date TEXT
+    )`);
     d.__cloudAttachState = "attached";
     return true;
   };
@@ -180,6 +202,42 @@ console.log("\n=== 5) capture 同步 syncSettlementIncomeFromCapture（读 cloud
       nonSellerResponsibilitySubsidy: { amount: 4353 },
     },
   ] } } }), 5000);
+  insEv.run("MALL-G", SETTLEMENT_ORDER_DETAIL_PATH, JSON.stringify({
+    success: true,
+    batchId: "BATCH-001",
+    fundType: "100",
+    createTime: "2026-06-14 10:00:00",
+    currency: "USD",
+    sheetName: "Sheet1",
+    columns: ["订单号", "商家SKU", "数量", "结算金额", "币种"],
+    rowCount: 2,
+    rows: [
+      { "订单号": "PO-1", "商家SKU": "SKU-A", "数量": 2, "结算金额": "12.34", "币种": "USD" },
+      { "订单号": "PO-2", "商品SKU ID": "SKU-ID-B", "数量": "3", "金额": "￥45.67" },
+    ],
+  }), 6000);
+  insEv.run("MALL-H", FUND_SUMMARY_PATHS[0], JSON.stringify({ result: [
+    {
+      statDate: "2026-06-14",
+      incomeAmount: { amount: 10000, currencyCode: "USD" },
+      expenseAmount: { amount: 2300 },
+      frozenAmount: { amount: 4500 },
+      availableBalance: { amount: 70000 },
+      totalAmount: { amount: 77700 },
+    },
+  ] }), 7000);
+  insEv.run("MALL-H", FUND_SUMMARY_PATHS[1], JSON.stringify({ result: { rows: [
+    {
+      month: "2026-06",
+      totalIncome: "123.45",
+      totalExpense: "23.45",
+      accountBalance: "100.00",
+      restrictedAmount: "9.99",
+    },
+  ] } }), 8000);
+  const insRisk = erp2.prepare("INSERT INTO cloud.temu_operation_risk_snapshot (mall_id, risk_type, severity, stat_date) VALUES (?,?,?,?)");
+  insRisk.run("MALL-H", "violation_goods", "high", "2026-06-14");
+  insRisk.run("MALL-H", "inbound_exception", "medium", "2026-06-15");
 
   const r = syncSettlementIncomeFromCapture(erp2, { attachCloudDb });
   ok("同步成功 attached", r.ok && r.attached);
@@ -200,6 +258,107 @@ console.log("\n=== 5) capture 同步 syncSettlementIncomeFromCapture（读 cloud
   near("销售回款=245.25", d1?.sales_receipt_amount, 245.25);
   near("销售冲回=6.90", d1?.chargeback_amount, 6.9);
   near("非商责补贴=43.53", d1?.subsidy_amount, 43.53);
+
+  const order = syncSettlementOrderDetailFromCapture(erp2, { attachCloudDb });
+  ok("结算订单明细同步成功 attached", order.ok && order.attached);
+  ok("结算订单明细写入 2 行", order.rows === 2 && order.malls === 1);
+  const o1 = erp2.prepare("SELECT batch_id, order_sn, sku_ext_code, quantity, currency, amount FROM erp_temu_settlement_order_detail WHERE mall_id='MALL-G' AND row_index=1").get();
+  ok("结算订单第一行字段入库", o1?.batch_id === "BATCH-001" && o1?.order_sn === "PO-1" && o1?.sku_ext_code === "SKU-A");
+  near("结算订单第一行数量=2", o1?.quantity, 2);
+  near("结算订单第一行金额=12.34", o1?.amount, 12.34);
+  ok("结算订单第一行币种=USD", o1?.currency === "USD");
+  const o2 = erp2.prepare("SELECT order_sn, sku_id, quantity, amount, raw_json FROM erp_temu_settlement_order_detail WHERE mall_id='MALL-G' AND row_index=2").get();
+  ok("结算订单第二行 SKU ID 入库且保留原始行", o2?.order_sn === "PO-2" && o2?.sku_id === "SKU-ID-B" && /SKU-ID-B/.test(o2?.raw_json || ""));
+  near("结算订单第二行数量=3", o2?.quantity, 3);
+  near("结算订单第二行金额=45.67", o2?.amount, 45.67);
+
+  const fundSummary = syncFundSummaryFromCapture(erp2, { attachCloudDb });
+  ok("资金汇总同步成功 attached", fundSummary.ok && fundSummary.attached);
+  ok("资金汇总写入 2 行", fundSummary.rows === 2 && fundSummary.malls === 1);
+  const fsDay = erp2.prepare("SELECT summary_scope, summary_date, currency, income_amount, expense_amount, frozen_amount, available_amount, total_amount FROM erp_temu_fund_summary WHERE mall_id='MALL-H' AND summary_scope='day'").get();
+  ok("资金日汇总日期/币种入库", fsDay?.summary_scope === "day" && fsDay?.summary_date === "2026-06-14" && fsDay?.currency === "USD");
+  near("资金日汇总收入=100", fsDay?.income_amount, 100);
+  near("资金日汇总支出=23", fsDay?.expense_amount, 23);
+  near("资金日汇总冻结=45", fsDay?.frozen_amount, 45);
+  near("资金日汇总可用=700", fsDay?.available_amount, 700);
+  near("资金日汇总合计=777", fsDay?.total_amount, 777);
+  const fsMonth = erp2.prepare("SELECT summary_scope, summary_date, income_amount, expense_amount, balance_amount, frozen_amount, metrics_json FROM erp_temu_fund_summary WHERE mall_id='MALL-H' AND summary_scope='month'").get();
+  ok("资金月汇总日期入库且保留 metrics", fsMonth?.summary_scope === "month" && fsMonth?.summary_date === "2026-06" && /totalIncome/.test(fsMonth?.metrics_json || ""));
+  near("资金月汇总收入=123.45", fsMonth?.income_amount, 123.45);
+  near("资金月汇总支出=23.45", fsMonth?.expense_amount, 23.45);
+  near("资金月汇总余额=100", fsMonth?.balance_amount, 100);
+  near("资金月汇总冻结=9.99", fsMonth?.frozen_amount, 9.99);
+  const fsAgg = buildFundSummaryByMall(erp2, { startDate: "2026-06-01", endDate: "2026-06-30" }).get("MALL-H");
+  ok("资金汇总聚合返回 MALL-H", !!fsAgg);
+  near("资金汇总聚合优先日收入=100", fsAgg?.income_total, 100);
+  near("资金汇总聚合最新账户余额=100", fsAgg?.balance_amount, 100);
+  const riskAgg = buildSettlementRiskByMall(erp2, { startDate: "2026-06-01", endDate: "2026-06-30" }).get("MALL-H");
+  ok("违规/异常聚合返回 MALL-H", !!riskAgg);
+  ok("违规/异常计数正确", riskAgg?.violation_count === 1 && riskAgg?.inbound_exception_count === 1 && riskAgg?.high_count === 1);
+
+  // ===== EPR 费用（eprfee goods/platform）=====
+  insEv.run("MALL-I", EPR_FEE_PATHS[0], JSON.stringify({ result: {
+    total: 2,
+    waitDeductionEprFeeInfoList: [
+      { certId: "CERT-1", certDisplayName: "法国EPR包装", regionName: "法国", amount: { value: 12.5, currencyCode: "EUR", digitalText: "12.50" }, quantity: 5, statDate: "2026-06-10" },
+    ],
+    deductedEprFeeInfoList: [
+      { certId: "CERT-2", certDisplayName: "德国EPR", amount: { value: 3.4, digitalText: "3.40" } },
+    ],
+  } }), 9000);
+  insEv.run("MALL-I", EPR_FEE_PATHS[1], JSON.stringify({ result: {
+    total: 1,
+    dataList: [
+      { certId: "CERT-3", certName: "西班牙EPR代扣", deductAmount: "￥7.70" },
+    ],
+  } }), 9100);
+  const epr = syncEprFeeFromCapture(erp2, { attachCloudDb });
+  ok("EPR 同步成功 attached", epr.ok && epr.attached);
+  ok("EPR 写入 3 行（goods 待扣+已扣+platform）", epr.rows === 3 && epr.malls === 1);
+  const eprWait = erp2.prepare("SELECT amount, currency, cert_name, deduct_status FROM erp_temu_epr_fee WHERE mall_id='MALL-I' AND fee_scope='goods' AND deduct_status='wait'").get();
+  near("EPR 待扣金额取 Format.value=12.5", eprWait?.amount, 12.5);
+  ok("EPR 待扣币种/证书名入库", eprWait?.currency === "EUR" && eprWait?.cert_name === "法国EPR包装");
+  const eprPlat = erp2.prepare("SELECT amount FROM erp_temu_epr_fee WHERE mall_id='MALL-I' AND fee_scope='platform'").get();
+  near("EPR 平台待扣剥￥符号=7.70", eprPlat?.amount, 7.7);
+  const eprAgg = buildEprFeeByMall(erp2).get("MALL-I");
+  near("EPR 聚合待扣合计=20.2（含 platform）", eprAgg?.wait_amount, 12.5 + 7.7);
+  near("EPR 聚合已扣合计=3.4", eprAgg?.deducted_amount, 3.4);
+
+  // ===== 资金限制（fund-frozen/rules，快照语义：最新抓包整店替换）=====
+  insEv.run("MALL-J", FUND_FROZEN_PATH, JSON.stringify({ result: { currency: "CNY", rules: [
+    { frozenType: "goods_refund_cost", reason: "退回服务费", amount: "￥7.40", unfreezeCondition: "出账缴费完毕" },
+    { frozenType: "advertising_expenses", reason: "广告费", amount: "￥100.00" },
+  ] } }), 9200);
+  insEv.run("MALL-J", FUND_FROZEN_PATH, JSON.stringify({ result: { currency: "CNY", rules: [
+    { frozenType: "goods_refund_cost", reason: "退回服务费", amount: "￥9.99", unfreezeCondition: "出账缴费完毕" },
+  ] } }), 9300);
+  const frozen = syncFundFrozenFromCapture(erp2, { attachCloudDb });
+  ok("资金限制同步成功 attached", frozen.ok && frozen.attached);
+  const frozenRows = erp2.prepare("SELECT COUNT(*) c FROM erp_temu_fund_frozen WHERE mall_id='MALL-J'").get().c;
+  ok("快照语义：只留最新抓包 1 项（广告费旧项被清掉）", frozenRows === 1);
+  const frozenRow = erp2.prepare("SELECT amount, reason FROM erp_temu_fund_frozen WHERE mall_id='MALL-J' AND frozen_type='goods_refund_cost'").get();
+  near("冻结金额剥￥取最新=9.99", frozenRow?.amount, 9.99);
+  const frozenAgg = buildFundFrozenByMall(erp2).get("MALL-J");
+  near("冻结聚合总额=9.99", frozenAgg?.total_amount, 9.99);
+  ok("冻结聚合带明细项", frozenAgg?.items?.length === 1 && frozenAgg.items[0].unfreeze_condition === "出账缴费完毕");
+
+  // ===== 违规处罚（entrance/list 明细 + island summary）=====
+  insEv.run("MALL-K", VIOLATION_LIST_PATH, JSON.stringify({ result: { total: 2, punish_appeal_entrance_list: [
+    { target_id: 1001, goods_id: 606001, goods_name: "刀具A", leaf_reason_name: "欧盟刀具禁投", violation_desc: "不符合法规", punish_status_desc: "违规处理中", appeal_status: 1, can_not_appeal: false, can_rectify: true, site_num: 3, punish_num: 30 },
+    { target_id: 1002, goods_name: "玩具B", leaf_reason_name: "缺CE标", can_not_appeal: true, can_rectify: false, site_num: 1, punish_num: 2 },
+  ] } }), 9400);
+  insEv.run("MALL-K", VIOLATION_SUMMARY_PATH, JSON.stringify({ result: {
+    violationCount: 5, addSiteLimitStatus: 1, releaseLimitTime: "2026-07-01",
+  } }), 9500);
+  const violation = syncViolationFromCapture(erp2, { attachCloudDb });
+  ok("违规同步成功 attached", violation.ok && violation.attached);
+  ok("违规写入 3 行（2 明细 + 1 汇总）", violation.rows === 3 && violation.malls === 1);
+  const vRow = erp2.prepare("SELECT goods_name, leaf_reason_name, can_appeal, can_rectify, punish_num FROM erp_temu_violation WHERE mall_id='MALL-K' AND target_id='1001'").get();
+  ok("违规明细字段入库（can_not_appeal 取反）", vRow?.goods_name === "刀具A" && vRow?.leaf_reason_name === "欧盟刀具禁投" && vRow?.can_appeal === 1 && vRow?.can_rectify === 1 && vRow?.punish_num === 30);
+  const vAgg = buildViolationByMall(erp2).get("MALL-K");
+  ok("违规聚合带明细", vAgg?.items?.length === 2);
+  ok("违规计数取 summary 与明细的大者=5", vAgg?.violation_count === 5);
+  ok("加站限制状态透出", vAgg?.add_site_limit_status === 1 && vAgg?.release_limit_time === "2026-07-01");
 
   const { buildSettlementDetailByMall } = require("../electron/erp/services/multiStoreReport.cjs")._internal;
   const detailByMall = buildSettlementDetailByMall(erp2);
@@ -241,8 +400,18 @@ console.log("\n=== 6) cloud 已挂载但 capture_events 缺失时不能误报成
   };
   const incomeMissing = syncSettlementIncomeFromCapture(erpMissing, { attachCloudDb: attachEmptyCloud });
   const detailMissing = syncSettlementDetailFromCapture(erpMissing, { attachCloudDb: attachEmptyCloud });
+  const orderMissing = syncSettlementOrderDetailFromCapture(erpMissing, { attachCloudDb: attachEmptyCloud });
+  const fundSummaryMissing = syncFundSummaryFromCapture(erpMissing, { attachCloudDb: attachEmptyCloud });
   ok("income 同步不把缺失 capture_events 当成功", incomeMissing.attached === true && incomeMissing.ok === false);
   ok("detail 同步不把缺失 capture_events 当成功", detailMissing.attached === true && detailMissing.ok === false);
+  ok("order 同步不把缺失 capture_events 当成功", orderMissing.attached === true && orderMissing.ok === false);
+  ok("fund summary 同步不把缺失 capture_events 当成功", fundSummaryMissing.attached === true && fundSummaryMissing.ok === false);
+  const eprMissing = syncEprFeeFromCapture(erpMissing, { attachCloudDb: attachEmptyCloud });
+  const frozenMissing = syncFundFrozenFromCapture(erpMissing, { attachCloudDb: attachEmptyCloud });
+  const violationMissing = syncViolationFromCapture(erpMissing, { attachCloudDb: attachEmptyCloud });
+  ok("EPR 同步不把缺失 capture_events 当成功", eprMissing.attached === true && eprMissing.ok === false);
+  ok("资金限制同步不把缺失 capture_events 当成功", frozenMissing.attached === true && frozenMissing.ok === false);
+  ok("违规同步不把缺失 capture_events 当成功", violationMissing.attached === true && violationMissing.ok === false);
   erpMissing.close();
   try { fs.unlinkSync(cloudFile); } catch {}
 }
@@ -325,6 +494,47 @@ console.log("\n=== 8) check-temu-settlement-income：仅三态结算明细也可
   const output = `${check.stdout || ""}\n${check.stderr || ""}`;
   ok("仅结算明细不会触发 fail 退出码", check.status !== 2);
   ok("预检识别 settlement_detail_present", /settlement_detail_present/.test(output));
+
+  try { fs.unlinkSync(cloudFile); } catch {}
+  try { fs.unlinkSync(erpFile); } catch {}
+}
+
+console.log("\n=== 9) check-temu-settlement-income：仅结算订单明细也可通过预检 ===\n");
+{
+  const os = require("os");
+  const cloudFile = path.join(os.tmpdir(), `test-check-order-detail-cloud-${process.pid}.sqlite`);
+  const erpFile = path.join(os.tmpdir(), `test-check-order-detail-erp-${process.pid}.sqlite`);
+  try { fs.unlinkSync(cloudFile); } catch {}
+  try { fs.unlinkSync(erpFile); } catch {}
+  const cloudDb = new Database(cloudFile);
+  cloudDb.exec(`
+    CREATE TABLE capture_events (
+      mall_id TEXT,
+      url_path TEXT,
+      body_json TEXT,
+      received_at INTEGER
+    );
+    CREATE INDEX idx_capture_events_url_path ON capture_events(url_path);
+  `);
+  cloudDb.prepare("INSERT INTO capture_events (mall_id, url_path, body_json, received_at) VALUES (?,?,?,?)")
+    .run("MALL-CHECK-ORDER", SETTLEMENT_ORDER_DETAIL_PATH, JSON.stringify({
+      batchId: "BATCH-CHECK-001",
+      rows: [{ "订单号": "PO-CHECK-001", "商家SKU": "SKU-CHECK", "结算金额": "10" }],
+    }), 6000);
+  cloudDb.close();
+  const erpDb = new Database(erpFile);
+  erpDb.close();
+
+  const checkPath = path.join(__dirname, "check-temu-settlement-income.cjs");
+  const check = spawnSync(process.execPath, [
+    checkPath,
+    "--erp-db", erpFile,
+    "--cloud-db", cloudFile,
+    "--deep",
+  ], { cwd: path.join(__dirname, ".."), encoding: "utf8" });
+  const output = `${check.stdout || ""}\n${check.stderr || ""}`;
+  ok("仅结算订单明细不会触发 fail 退出码", check.status !== 2);
+  ok("预检识别 settlement_order_detail_present", /settlement_order_detail_present/.test(output));
 
   try { fs.unlinkSync(cloudFile); } catch {}
   try { fs.unlinkSync(erpFile); } catch {}
