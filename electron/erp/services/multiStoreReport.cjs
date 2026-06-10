@@ -2232,11 +2232,22 @@ function buildByStoreLocal(db, options = {}) {
   const baseMallFilter = excludeMallIds.length ? `AND mall_id NOT IN (${ph})` : "";
   const salesMallFilter = excludeMallIds.length ? `AND mall_supplier_id NOT IN (${ph})` : "";
 
-  const malls = optionalAllLocal(db,
+  const cloudMalls = optionalAllLocal(db,
     `SELECT mall_id, MAX(mall_name) AS mall_name, MAX(site) AS site, MAX(last_seen) AS last_seen_at
        FROM cloud.mall_accounts
       WHERE tenant_id = ? AND mall_id <> '' ${baseMallFilter}
       GROUP BY mall_id`, [tid, ...excludeMallIds]);
+  const localMalls = optionalAllLocal(db,
+    `SELECT mall_id, mall_name, site, NULL AS last_seen_at
+       FROM erp_temu_malls
+      WHERE mall_id <> ''
+        ${includeTest ? "" : "AND COALESCE(status,'active') <> 'test'"}`, []);
+  const mallById = new Map();
+  for (const m of cloudMalls) mallById.set(m.mall_id, m);
+  for (const m of localMalls) {
+    if (!mallById.has(m.mall_id)) mallById.set(m.mall_id, m);
+  }
+  const malls = Array.from(mallById.values());
 
   // today_sales/last7d_sales/last30d_sales 是 Temu 在每个 stat_date 当天算好的快照值，
   // 表里每天每 SKU 一行（保留历史），所以只能取每店最新 stat_date 当天，绝不可跨天 SUM（否则虚高 N 倍）。
@@ -2256,9 +2267,24 @@ function buildByStoreLocal(db, options = {}) {
        FROM cloud.temu_sales_snapshot s
        JOIN latest l ON l.mall_supplier_id = s.mall_supplier_id AND l.sd = s.stat_date
       WHERE s.tenant_id = ? AND s.skc_id NOT IN ('SKC-EXT-E2E','SKC-DBG')
-      GROUP BY s.mall_supplier_id`,
+     GROUP BY s.mall_supplier_id`,
     [tid, ...excludeMallIds, tid]);
   const salesMap = new Map(salesRows.map((r) => [r.mall_id, r]));
+
+  // Keep report sales in step with OperationsWorkbench: prefer the official
+  // salesv2 materialized table, and fall back to cloud scrape snapshots.
+  const officialSalesRows = optionalAllLocal(db,
+    `SELECT s.mall_id,
+            SUM(COALESCE(s.today_sales,0))   AS sales_today_qty,
+            SUM(COALESCE(s.last7d_sales,0))  AS sales_7d_qty,
+            SUM(COALESCE(s.last30d_sales,0)) AS sales_30d_qty,
+            COUNT(DISTINCT s.product_skc_id) AS sku_count
+       FROM erp_temu_openapi_sku_sales s
+       LEFT JOIN erp_temu_malls m ON m.mall_id = s.mall_id
+      WHERE s.mall_id <> ''
+        ${includeTest ? "" : "AND COALESCE(m.status,'active') <> 'test'"}
+      GROUP BY s.mall_id`, []);
+  for (const r of officialSalesRows) salesMap.set(r.mall_id, r);
 
   // 待发口径：未发完(delivered<demand) 且排除终态。temu_status 是裸数字码、按 source_type 混 3 套枚举，
   // 中文 LIKE 对数字码失效(老坑)。证据：stock_order 码 7=已完成(已发完,数量口径自动排除)、
@@ -2318,6 +2344,27 @@ function buildByStoreLocal(db, options = {}) {
        JOIN latest l ON l.mall_id = s.mall_id AND l.stat_date = s.stat_date
       WHERE s.tenant_id = ?`, [tid, ...excludeMallIds, tid]);
   const shopStatsMap = new Map(shopStatsRows.map((r) => [r.mall_id, r]));
+  const officialShopStatsRows = optionalAllLocal(db,
+    `SELECT s.mall_id,
+            MAX(SUBSTR(COALESCE(s.synced_at,''),1,10)) AS stat_date,
+            SUM(COALESCE(s.today_sales,0))   AS sale_volume,
+            SUM(COALESCE(s.last7d_sales,0))  AS seven_days_sale_volume,
+            SUM(COALESCE(s.last30d_sales,0)) AS thirty_days_sale_volume,
+            COUNT(DISTINCT s.product_skc_id) AS on_sale_product_number,
+            0 AS wait_product_number,
+            COUNT(DISTINCT CASE WHEN COALESCE(s.lack_quantity,0) > 0 THEN s.product_skc_id END) AS lack_skc_number,
+            COUNT(DISTINCT CASE WHEN COALESCE(s.advice_qty,0) > 0 THEN s.product_skc_id END) AS advice_prepare_skc_number,
+            COUNT(DISTINCT CASE WHEN s.sale_days IS NOT NULL AND s.sale_days < 7 THEN s.product_skc_id END) AS about_to_sell_out_number,
+            COUNT(DISTINCT CASE WHEN COALESCE(s.warehouse_stock,0) <= 0 AND (COALESCE(s.last30d_sales,0) > 0 OR COALESCE(s.last7d_sales,0) > 0) THEN s.product_skc_id END) AS already_sold_out_number,
+            0 AS high_price_limit_number,
+            NULL AS quality_after_sale_ratio_90d,
+            MAX(s.synced_at) AS last_updated_at
+       FROM erp_temu_openapi_sku_sales s
+       LEFT JOIN erp_temu_malls m ON m.mall_id = s.mall_id
+      WHERE s.mall_id <> ''
+        ${includeTest ? "" : "AND COALESCE(m.status,'active') <> 'test'"}
+      GROUP BY s.mall_id`, []);
+  for (const r of officialShopStatsRows) shopStatsMap.set(r.mall_id, r);
 
   const healthRows = optionalAllLocal(db,
     `SELECT mall_id, MAX(received_at) AS last_capture_at, COUNT(*) AS captures_total

@@ -8113,20 +8113,23 @@ async function collectOneAccount(params = {}) {
             let ok = false;
             let lastStatus = 0;
             let lastMsg = "";
-            for (const reqBody of fundSummaryVariants()) {
+            const attempts = [];
+            for (const variant of fundSummaryVariants()) {
               try {
-                const result = await fundFetch(def.urlPath, mallId, reqBody);
+                const reqBody = variant.body;
+                const result = await fundFetch(def.urlPath, mallId, reqBody, { method: variant.method });
                 lastStatus = result.status;
                 let body = null;
                 try { body = JSON.parse(result.text); } catch { body = null; }
-                lastMsg = body?.errorMsg || body?.error_msg || body?.msg || body?.message || "";
+                lastMsg = body?.errorMsg || body?.error_msg || body?.msg || body?.message || result.err || "";
+                attempts.push(`${variant.label}/${result.method || variant.method} HTTP ${result.status || "-"} ct=${String(result.contentType || "").slice(0, 40)} msg=${String(lastMsg || "").slice(0, 50)} body=${String(result.text || "").slice(0, 80).replace(/\s+/g, " ")}`);
                 if (result.ok && body && body.success !== false) {
                   const count = fundSummaryCount(body);
                   batchItems.push({
                     kind: "fetch-active-fund-summary",
                     url: `https://seller.kuajingmaihuo.com${def.urlPath}`,
                     url_path: def.urlPath,
-                    method: "POST",
+                    method: variant.method,
                     status: result.status,
                     ts: Date.now(),
                     site: "kuajingmaihuo",
@@ -8143,17 +8146,18 @@ async function collectOneAccount(params = {}) {
                   if (count <= 0) fsts.empty++;
                   mallOk = true;
                   ok = true;
-                  console.error(`${logPrefix} [${tag}] ${def.label} HTTP ${result.status} records=${count}`);
+                  console.error(`${logPrefix} [${tag}] ${def.label} ${variant.label}/${variant.method} HTTP ${result.status} records=${count}`);
                   break;
                 }
               } catch (e) {
                 lastMsg = e.message;
+                attempts.push(`${variant.label}/${variant.method} exception=${e.message}`);
               }
               await randomDelay(150, 250);
             }
             if (!ok) {
               fsts.error++;
-              console.error(`${logPrefix} [${tag}] ${def.label} 未采到 HTTP ${lastStatus || "-"} msg="${String(lastMsg).slice(0, 80)}"`);
+              console.error(`${logPrefix} [${tag}] ${def.label} 未采到 HTTP ${lastStatus || "-"} msg="${String(lastMsg).slice(0, 80)}" attempts=${attempts.slice(-6).join(" | ")}`);
             }
             await randomDelay(250, 450);
           }
@@ -8190,8 +8194,15 @@ async function collectOneAccount(params = {}) {
     catch (e) { console.error(`${logPrefix} xlsx 库加载失败，跳过结算订单明细: ${e.message}`); }
     if (XLSX && byMall.size > 0) {
       const sts = taskStats.settlementOrders || (taskStats.settlementOrders = { success: 0, error: 0, empty: 0, totalRecords: 0 });
-      const fetchXlsxBuffer = (fileUrl) => new Promise((resolve, reject) => {
-        const req = https.get(new URL(fileUrl), { timeout: 60000 }, (res) => {
+      const fetchXlsxBuffer = (fileUrl, redirectCount = 0) => new Promise((resolve, reject) => {
+        const u = new URL(fileUrl);
+        const mod = u.protocol === "http:" ? http : https;
+        const req = mod.get(u, { timeout: 60000 }, (res) => {
+          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirectCount < 5) {
+            res.resume();
+            resolve(fetchXlsxBuffer(new URL(res.headers.location, fileUrl).href, redirectCount + 1));
+            return;
+          }
           if (res.statusCode !== 200) { res.resume(); reject(new Error(`xlsx HTTP ${res.statusCode}`)); return; }
           const chunks = [];
           res.on("data", (c) => chunks.push(c));
@@ -8200,6 +8211,92 @@ async function collectOneAccount(params = {}) {
         req.on("error", reject);
         req.on("timeout", () => { req.destroy(); reject(new Error("xlsx download timeout")); });
       });
+      const extractSettlementFileUrl = (body) => {
+        const candidates = [
+          body?.result?.fileUrl,
+          body?.result?.downloadUrl,
+          body?.result?.download_url,
+          body?.result?.url,
+          body?.result?.data?.fileUrl,
+          body?.result?.data?.downloadUrl,
+          body?.data?.fileUrl,
+          body?.data?.downloadUrl,
+          body?.fileUrl,
+          body?.downloadUrl,
+          body?.url,
+          typeof body?.result === "string" ? body.result : "",
+        ];
+        return candidates.find((value) => typeof value === "string" && /^https?:\/\//i.test(value)) || null;
+      };
+      const buildSettlementDownloadPayloads = (target) => {
+        const payloads = [];
+        const add = (payload) => {
+          const cleaned = {};
+          for (const [key, value] of Object.entries(payload || {})) {
+            if (value == null || value === "") continue;
+            cleaned[key] = value;
+          }
+          const key = JSON.stringify(cleaned);
+          if (Object.keys(cleaned).length > 0 && !payloads.some((item) => JSON.stringify(item) === key)) payloads.push(cleaned);
+        };
+        const addSearchParams = (urlLike) => {
+          try {
+            const u = new URL(urlLike, "https://seller.kuajingmaihuo.com");
+            const params = u.searchParams;
+            add({
+              itemBizId: params.get("itemBizId") || params.get("bizId") || params.get("batchId"),
+              fundType: params.get("fundType"),
+              createTime: params.get("createTime") || params.get("transactionTime"),
+            });
+            const nestedTarget = params.get("targetUrl");
+            if (nestedTarget) addSearchParams(nestedTarget);
+          } catch { /* ignore malformed jump urls */ }
+        };
+        addSearchParams(target.jumpPath);
+        add({ itemBizId: target.batchId, fundType: target.fundType, createTime: target.createTime });
+        add({ itemBizId: target.batchId, fundType: target.fundType, createTime: target.transactionTime });
+        const createMs = Number(target.createTime);
+        if (Number.isFinite(createMs)) add({ itemBizId: target.batchId, fundType: target.fundType, createTime: createMs });
+        const parsedCreateMs = new Date(String(target.createTime || target.transactionTime || "").replace(" ", "T")).getTime();
+        if (Number.isFinite(parsedCreateMs)) add({ itemBizId: target.batchId, fundType: target.fundType, createTime: parsedCreateMs });
+        const fundTypeNo = Number(target.fundType);
+        if (Number.isFinite(fundTypeNo)) add({ itemBizId: target.batchId, fundType: fundTypeNo, createTime: target.createTime });
+        add({ bizId: target.batchId, fundType: target.fundType, createTime: target.createTime });
+        add({ batchId: target.batchId, fundType: target.fundType, createTime: target.createTime });
+        return payloads;
+      };
+      const fetchSettlementDownloadLink = (page, apiUrl, mallId, payload) => page.evaluate(async ({ api, mid, body }) => {
+        const headers = {
+          Accept: "application/json, text/plain, */*",
+          "Content-Type": "application/json",
+          "X-Requested-With": "XMLHttpRequest",
+          mallid: mid,
+        };
+        try {
+          const resp = await fetch(api, { method: "POST", credentials: "include", cache: "no-store", headers, body });
+          return { status: resp.status, text: await resp.text(), ok: resp.ok, err: "", finalUrl: resp.url, contentType: resp.headers.get("content-type") || "" };
+        } catch (fetchErr) {
+          return new Promise((resolve) => {
+            try {
+              const xhr = new XMLHttpRequest();
+              xhr.open("POST", api, true);
+              for (const [key, value] of Object.entries(headers)) xhr.setRequestHeader(key, value);
+              xhr.withCredentials = true;
+              xhr.timeout = 45000;
+              xhr.onreadystatechange = () => {
+                if (xhr.readyState === 4) {
+                  resolve({ status: xhr.status, text: xhr.responseText || "", ok: xhr.status >= 200 && xhr.status < 300, err: `fetch:${fetchErr.message}`, finalUrl: api, contentType: xhr.getResponseHeader("content-type") || "" });
+                }
+              };
+              xhr.onerror = () => resolve({ status: 0, text: "", ok: false, err: `fetch:${fetchErr.message}; xhr:error`, finalUrl: api, contentType: "" });
+              xhr.ontimeout = () => resolve({ status: 0, text: "", ok: false, err: `fetch:${fetchErr.message}; xhr:timeout`, finalUrl: api, contentType: "" });
+              xhr.send(body);
+            } catch (xhrErr) {
+              resolve({ status: 0, text: "", ok: false, err: `fetch:${fetchErr.message}; xhr:${xhrErr.message}`, finalUrl: api, contentType: "" });
+            }
+          });
+        }
+      }, { api: apiUrl, mid: mallId, body: JSON.stringify(payload) });
       let dlPage = null;
       try {
         dlPage = await safeNewPage(context);
@@ -8216,19 +8313,41 @@ async function collectOneAccount(params = {}) {
               if (!dlPage.url().startsWith(apiBase)) {
                 await dlPage.goto(jumpUrl.href, { waitUntil: "domcontentloaded", timeout: 60000 });
                 await randomDelay(2000, 3000);
+                await handleSellerAuthPopupPage(dlPage, `${logPrefix}-settlement-orders-auth`);
+                await randomDelay(800, 1200);
+                if (!dlPage.url().startsWith(apiBase)) {
+                  await dlPage.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
+                  await randomDelay(1500, 2500);
+                  await handleSellerAuthPopupPage(dlPage, `${logPrefix}-settlement-orders-target-auth`);
+                  await randomDelay(800, 1200);
+                }
               }
-              const payload = { itemBizId: t.batchId, fundType: t.fundType, createTime: t.createTime };
-              const dl = await dlPage.evaluate(async ({ api, mid, body }) => {
-                try {
-                  const resp = await fetch(api, { method: "POST", credentials: "include", cache: "no-store", headers: { "Content-Type": "application/json", mallid: mid }, body });
-                  return { status: resp.status, text: await resp.text() };
-                } catch (e) { return { status: 0, text: "", err: e.message }; }
-              }, { api: `${apiBase}/api/merchant/fund/detail/item/semi/download`, mid: mallId, body: JSON.stringify(payload) });
+              const currentOrigin = (() => { try { return new URL(dlPage.url()).origin; } catch { return ""; } })();
+              const apiOrigins = Array.from(new Set([apiBase, currentOrigin, "https://seller.kuajingmaihuo.com"].filter((origin) => /^https?:\/\//i.test(origin))));
+              const payloads = buildSettlementDownloadPayloads(t);
+              let dl = null;
+              let payload = payloads[0] || { itemBizId: t.batchId, fundType: t.fundType, createTime: t.createTime };
               let fileUrl = null;
-              try { fileUrl = JSON.parse(dl.text)?.result?.fileUrl || null; } catch {}
+              const attempts = [];
+              for (const payloadVariant of payloads) {
+                for (const origin of apiOrigins) {
+                  const apiUrl = `${origin}/api/merchant/fund/detail/item/semi/download`;
+                  dl = await fetchSettlementDownloadLink(dlPage, apiUrl, mallId, payloadVariant);
+                  let parsed = null;
+                  try { parsed = JSON.parse(dl.text); } catch { parsed = null; }
+                  fileUrl = extractSettlementFileUrl(parsed);
+                  attempts.push(`${origin.replace(/^https:\/\//, "")} HTTP ${dl.status || "-"} ct=${String(dl.contentType || "").slice(0, 35)} err=${String(dl.err || "").slice(0, 60)} body=${String(dl.text || "").slice(0, 80).replace(/\s+/g, " ")}`);
+                  if (fileUrl) {
+                    payload = payloadVariant;
+                    break;
+                  }
+                  await randomDelay(120, 220);
+                }
+                if (fileUrl) break;
+              }
               if (!fileUrl) {
                 sts.error++;
-                console.error(`${logPrefix} [${t.tag}] 结算明细 ${t.batchId} 取下载链接失败 HTTP ${dl.status} body0..160=${(dl.text || "").slice(0, 160)}`);
+                console.error(`${logPrefix} [${t.tag}] 结算明细 ${t.batchId} 取下载链接失败 current=${dlPage.url().slice(0, 160)} attempts=${attempts.slice(-6).join(" | ")}`);
                 continue;
               }
               const buf = await fetchXlsxBuffer(fileUrl);

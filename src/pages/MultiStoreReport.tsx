@@ -229,6 +229,33 @@ interface SkuRow {
   stat_date: string | null;
 }
 
+interface ShopHealthRow {
+  mall_id: string;
+  store_code: string | null;
+  mall_name: string | null;
+  owner: string | null;
+  sale_volume: number;
+  sale_7d: number;
+  sale_30d: number;
+  on_sale: number;
+  wait_online: number;
+  lack_skc: number;
+  advice_prepare_skc: number;
+  about_to_sell_out: number;
+  already_sold_out: number;
+  high_price_limit: number;
+  after_sale_ratio_90d: number | null;
+  stat_date: string | null;
+}
+
+interface StoreSalesView {
+  today: number;
+  last7d: number;
+  last30d: number;
+  stat_date: string | null;
+  source: "shopHealth" | "shopStats" | "sales";
+}
+
 const REFRESH_MS = 5 * 60 * 1000; // 5 分钟自动刷新一次
 const MULTI_STORE_REPORT_CACHE_KEY = "temu.multi-store-report.cache.v1";
 const STALE_THRESHOLD_SECONDS = 2 * 60 * 60; // 2 小时无数据视为掉线
@@ -504,6 +531,8 @@ export default function MultiStoreReport() {
   const [skuStoreFilter, setSkuStoreFilter] = useSessionState(msrViewKey("skuStore"), "all");
   const [skuStatusFilter, setSkuStatusFilter] = useSessionState(msrViewKey("skuStatus"), "all");
   const [skuSearchInput, setSkuSearchInput] = useSessionState(msrViewKey("skuSearch"), "");
+  const [shopHealthRows, setShopHealthRows] = useState<ShopHealthRow[]>([]);
+  const [shopHealthLoaded, setShopHealthLoaded] = useState(false);
   // 搜索框防抖：输入框绑 skuSearchInput 跟手，下游过滤用防抖后的 skuSearch（变量名不变，下游无需改）。
   const skuSearch = useDebouncedValue(skuSearchInput, 250);
 
@@ -520,7 +549,19 @@ export default function MultiStoreReport() {
     }
     setLoading(true);
     try {
-      const resp = (await window.electronAPI.erp.reports.multiStore({ includeTest: false })) as MultiStoreResponse;
+      const [resp, shopHealthResp] = await Promise.all([
+        window.electronAPI.erp.reports.multiStore({ includeTest: false }) as Promise<MultiStoreResponse>,
+        window.electronAPI.erp.reports.shopHealth
+          ? window.electronAPI.erp.reports.shopHealth({ includeTest: false }).catch(() => null)
+          : Promise.resolve(null),
+      ]);
+      if (shopHealthResp?.ok && shopHealthResp.data) {
+        setShopHealthRows((shopHealthResp.data.rows || []) as ShopHealthRow[]);
+        setShopHealthLoaded(true);
+      } else {
+        setShopHealthRows([]);
+        setShopHealthLoaded(false);
+      }
       if (!resp.ok || !resp.data) {
         setError(resp.error || "未知错误");
         setData(null);
@@ -532,6 +573,8 @@ export default function MultiStoreReport() {
     } catch (e: any) {
       setError(e?.message || String(e));
       setData(null);
+      setShopHealthRows([]);
+      setShopHealthLoaded(false);
     } finally {
       setLoading(false);
     }
@@ -600,6 +643,45 @@ export default function MultiStoreReport() {
     if (ownerFilter === UNASSIGNED) return allStores.filter((s) => !s.owner);
     return allStores.filter((s) => s.owner === ownerFilter);
   }, [allStores, ownerFilter]);
+
+  const shopHealthByMall = useMemo(() => {
+    return new Map(shopHealthRows.map((row) => [row.mall_id, row]));
+  }, [shopHealthRows]);
+
+  const getStoreSales = useCallback((store: ReportStore): StoreSalesView => {
+    const health = shopHealthByMall.get(store.mall_id);
+    if (health) {
+      return {
+        today: health.sale_volume || 0,
+        last7d: health.sale_7d || 0,
+        last30d: health.sale_30d || 0,
+        stat_date: health.stat_date || null,
+        source: "shopHealth",
+      };
+    }
+    if (store.shop_stats?.stat_date) {
+      return {
+        today: store.shop_stats.sale_volume || 0,
+        last7d: store.shop_stats.sale_7d || 0,
+        last30d: store.shop_stats.sale_30d || 0,
+        stat_date: store.shop_stats.stat_date || null,
+        source: "shopStats",
+      };
+    }
+    return {
+      today: store.sales?.today_qty || 0,
+      last7d: store.sales?.last7d_qty || 0,
+      last30d: store.sales?.last30d_qty || 0,
+      stat_date: null,
+      source: "sales",
+    };
+  }, [shopHealthByMall]);
+
+  const storeSalesRows = useMemo(() => {
+    return stores
+      .map((store) => ({ store, sales: getStoreSales(store) }))
+      .sort((a, b) => b.sales.today - a.sales.today || b.sales.last7d - a.sales.last7d);
+  }, [stores, getStoreSales]);
 
   const saveOwner = useCallback(async (mallId: string, owner: string | null) => {
     if (!window.electronAPI?.erp?.reports?.setMallOwner) {
@@ -691,8 +773,11 @@ export default function MultiStoreReport() {
     const settleDone = stores.reduce((acc, s) => acc + (s.settlement_detail?.settled.total || 0), 0);
     const warehouseValue = stores.reduce((acc, s) => acc + (s.inventory?.warehouse_value || 0), 0);
     const inTransitValue = stores.reduce((acc, s) => acc + (s.inventory?.in_transit_value || 0), 0);
-    return { onlineCount, totalPending, rev30, gp30, revToday, settlementToday, settlement30, settleWait, settleIn, settleDone, warehouseValue, inTransitValue, margin30: rev30 > 0 ? gp30 / rev30 : null };
-  }, [stores]);
+    const salesToday = stores.reduce((acc, s) => acc + getStoreSales(s).today, 0);
+    const sales7d = stores.reduce((acc, s) => acc + getStoreSales(s).last7d, 0);
+    const sales30d = stores.reduce((acc, s) => acc + getStoreSales(s).last30d, 0);
+    return { onlineCount, totalPending, rev30, gp30, revToday, settlementToday, settlement30, settleWait, settleIn, settleDone, warehouseValue, inTransitValue, salesToday, sales7d, sales30d, margin30: rev30 > 0 ? gp30 / rev30 : null };
+  }, [stores, getStoreSales]);
 
   // 全局趋势（合并各店 trend_daily）
   const combinedTrend = useMemo(() => {
@@ -821,6 +906,9 @@ export default function MultiStoreReport() {
     const m = new Map<string, {
       owner: string;
       store_count: number;
+      sales_today: number;
+      sales_7d: number;
+      sales_30d: number;
       rev30: number;
       gp30: number;
       pending: number;
@@ -829,8 +917,12 @@ export default function MultiStoreReport() {
     }>();
     for (const s of stores) {
       const key = s.owner || "(未分配)";
-      const r = m.get(key) || { owner: key, store_count: 0, rev30: 0, gp30: 0, pending: 0, after_sales: 0, risk: 0 };
+      const r = m.get(key) || { owner: key, store_count: 0, sales_today: 0, sales_7d: 0, sales_30d: 0, rev30: 0, gp30: 0, pending: 0, after_sales: 0, risk: 0 };
+      const sales = getStoreSales(s);
       r.store_count += 1;
+      r.sales_today += sales.today;
+      r.sales_7d += sales.last7d;
+      r.sales_30d += sales.last30d;
       r.rev30 += s.financials?.last30d.revenue || 0;
       r.gp30 += s.financials?.last30d.gross_profit || 0;
       r.pending += s.stock_orders.pending || 0;
@@ -838,8 +930,8 @@ export default function MultiStoreReport() {
       r.risk += 0; // 风险数当前 by-store 未透出，预留
       m.set(key, r);
     }
-    return Array.from(m.values()).sort((a, b) => b.rev30 - a.rev30);
-  }, [stores]);
+    return Array.from(m.values()).sort((a, b) => b.sales_today - a.sales_today || b.rev30 - a.rev30);
+  }, [stores, getStoreSales]);
 
   // 异常预警
   const alerts = useMemo(() => {
@@ -897,6 +989,18 @@ export default function MultiStoreReport() {
     return [...stores].sort((a, b) => urgency(b) - urgency(a));
   }, [stores]);
 
+  // === 销售管理：店铺销量列 ===
+  const storeSalesColumns: ColumnsType<(typeof storeSalesRows)[number]> = [
+    { title: "店号", key: "code", width: 110, fixed: "left", render: (_, r) => <StoreCell store={r.store} />, sorter: (a, b) => (a.store.store_code || "").localeCompare(b.store.store_code || "") },
+    { title: "店铺", key: "name", width: 170, render: (_, r) => storeNameCell(r.store), sorter: (a, b) => (a.store.mall_name || "").localeCompare(b.store.mall_name || "") },
+    { title: "今日销量", key: "today", width: 100, align: "right", render: (_, r) => fmtNum(r.sales.today), sorter: (a, b) => a.sales.today - b.sales.today, defaultSortOrder: "descend" },
+    { title: "7日销量", key: "last7d", width: 100, align: "right", render: (_, r) => fmtNum(r.sales.last7d), sorter: (a, b) => a.sales.last7d - b.sales.last7d },
+    { title: "30日销量", key: "last30d", width: 110, align: "right", render: (_, r) => fmtNum(r.sales.last30d), sorter: (a, b) => a.sales.last30d - b.sales.last30d },
+    { title: "在售", key: "onSale", width: 90, align: "right", render: (_, r) => fmtNum(shopHealthByMall.get(r.store.mall_id)?.on_sale ?? r.store.shop_stats.on_sale_skc) },
+    { title: "缺货 SKC", key: "lack", width: 90, align: "right", render: (_, r) => <HeatNum value={shopHealthByMall.get(r.store.mall_id)?.lack_skc ?? r.store.shop_stats.lack_skc} max={maxes.lack} hue="gold" /> },
+    { title: "数据源", key: "source", width: 120, render: (_, r) => r.sales.source === "shopHealth" ? <Tag color="green">官方聚合</Tag> : r.sales.source === "shopStats" ? <Tag color="blue">店铺快照</Tag> : <Tag>SKU汇总</Tag> },
+  ];
+
   // === 销售管理：SKU 明细列 ===
   const salesColumns: ColumnsType<SkuRow> = [
     { title: "店号", dataIndex: "store_code", width: 78, fixed: "left", render: (v) => <Typography.Text strong>{formatStoreNo(v)}</Typography.Text>, sorter: (a, b) => (a.store_code || "").localeCompare(b.store_code || "") },
@@ -925,8 +1029,9 @@ export default function MultiStoreReport() {
   const dailyColumns: ColumnsType<ReportStore> = [
     { title: "店号", key: "code", width: 110, fixed: "left", render: (_, s) => <StoreCell store={s} />, sorter: (a, b) => (a.store_code || "").localeCompare(b.store_code || "") },
     { title: "店铺", key: "name", width: 170, render: (_, s) => storeNameCell(s), sorter: storeNameSorter },
-    { title: "今日销量", dataIndex: ["sales", "today_qty"], width: 90, align: "right", render: (v) => fmtNum(v), sorter: (a, b) => (a.sales.today_qty || 0) - (b.sales.today_qty || 0) },
-    { title: "近 7 天", dataIndex: ["sales", "last7d_qty"], width: 90, align: "right", render: (v) => fmtNum(v), sorter: (a, b) => (a.sales.last7d_qty || 0) - (b.sales.last7d_qty || 0) },
+    { title: "今日销量", key: "salesToday", width: 90, align: "right", render: (_, s) => fmtNum(getStoreSales(s).today), sorter: (a, b) => getStoreSales(a).today - getStoreSales(b).today },
+    { title: "近 7 天", key: "sales7d", width: 90, align: "right", render: (_, s) => fmtNum(getStoreSales(s).last7d), sorter: (a, b) => getStoreSales(a).last7d - getStoreSales(b).last7d },
+    { title: "近 30 天", key: "sales30d", width: 95, align: "right", render: (_, s) => fmtNum(getStoreSales(s).last30d), sorter: (a, b) => getStoreSales(a).last30d - getStoreSales(b).last30d },
     { title: "待发备货", dataIndex: ["stock_orders", "pending"], width: 95, align: "right", render: (v: number) => <HeatNum value={v} max={maxes.pending} hue="orange" />, sorter: (a, b) => (a.stock_orders.pending || 0) - (b.stock_orders.pending || 0) },
     { title: "缺货", dataIndex: ["shop_stats", "lack_skc"], width: 80, align: "right", render: (v: number) => <HeatNum value={v} max={maxes.lack} hue="gold" />, sorter: (a, b) => (a.shop_stats.lack_skc || 0) - (b.shop_stats.lack_skc || 0) },
     { title: "已售罄", dataIndex: ["shop_stats", "already_sold_out_skc"], width: 80, align: "right", render: (v: number) => <HeatNum value={v} max={maxes.soldout} hue="red" />, sorter: (a, b) => (a.shop_stats.already_sold_out_skc || 0) - (b.shop_stats.already_sold_out_skc || 0) },
@@ -1007,7 +1112,10 @@ export default function MultiStoreReport() {
   const managerColumns: ColumnsType<(typeof ownerRollup)[number]> = [
     { title: "负责人", dataIndex: "owner", key: "owner", width: 140, fixed: "left", render: (v: string) => <Typography.Text strong>{v}</Typography.Text> },
     { title: "管理店数", dataIndex: "store_count", key: "store_count", width: 100, align: "right", render: (v) => fmtNum(v), sorter: (a, b) => a.store_count - b.store_count },
-    { title: "近 30 天营收", dataIndex: "rev30", key: "rev30", width: 130, align: "right", render: (v) => fmtMoney(v), sorter: (a, b) => a.rev30 - b.rev30, defaultSortOrder: "descend" },
+    { title: "今日销量", dataIndex: "sales_today", key: "sales_today", width: 100, align: "right", render: (v) => fmtNum(v), sorter: (a, b) => a.sales_today - b.sales_today, defaultSortOrder: "descend" },
+    { title: "7日销量", dataIndex: "sales_7d", key: "sales_7d", width: 100, align: "right", render: (v) => fmtNum(v), sorter: (a, b) => a.sales_7d - b.sales_7d },
+    { title: "30日销量", dataIndex: "sales_30d", key: "sales_30d", width: 110, align: "right", render: (v) => fmtNum(v), sorter: (a, b) => a.sales_30d - b.sales_30d },
+    { title: "近 30 天营收", dataIndex: "rev30", key: "rev30", width: 130, align: "right", render: (v) => fmtMoney(v), sorter: (a, b) => a.rev30 - b.rev30 },
     { title: "近 30 天毛利", dataIndex: "gp30", key: "gp30", width: 130, align: "right", render: (v) => fmtMoney(v), sorter: (a, b) => a.gp30 - b.gp30 },
     { title: "毛利率", key: "margin", width: 100, align: "right", render: (_, r) => { const m = r.rev30 > 0 ? r.gp30 / r.rev30 : null; return <span style={{ color: marginColor(m), fontWeight: 600 }}>{fmtPct(m)}</span>; } },
     { title: "待发备货", dataIndex: "pending", key: "pending", width: 100, align: "right", render: (v: number) => (v > 0 ? <Tag color="orange">{fmtNum(v)}</Tag> : "—"), sorter: (a, b) => a.pending - b.pending },
@@ -1065,14 +1173,17 @@ export default function MultiStoreReport() {
       label: "运营日报",
       children: (
         <>
-          <div style={{ padding: "12px 16px 0", display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+          <div style={{ padding: "12px 16px 0", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12 }}>
+            <Statistic title="今日销量" value={fmtNum(summary?.salesToday || 0)} valueStyle={{ fontSize: 20, color: "#1677ff" }} />
+            <Statistic title="7日销量" value={fmtNum(summary?.sales7d || 0)} valueStyle={{ fontSize: 20, color: "#1677ff" }} />
+            <Statistic title="30日销量" value={fmtNum(summary?.sales30d || 0)} valueStyle={{ fontSize: 20, color: "#1677ff" }} />
             <Statistic title="待发备货" value={summary?.totalPending || 0} valueStyle={{ fontSize: 20, color: (summary?.totalPending || 0) > 0 ? "#fa8c16" : undefined }} />
             <Statistic title="缺货 SKC" value={highlights.lack} valueStyle={{ fontSize: 20, color: highlights.lack > 0 ? "#d4b106" : undefined }} />
             <Statistic title="已售罄 SKC" value={highlights.soldout} valueStyle={{ fontSize: 20, color: highlights.soldout > 0 ? "#cf1322" : undefined }} />
             <Statistic title="待处理售后" value={highlights.aftersale} valueStyle={{ fontSize: 20, color: highlights.aftersale > 0 ? "#cf1322" : undefined }} />
           </div>
           <div style={{ padding: "8px 16px 0", color: "#888", fontSize: 12 }}>已按紧急度排序：掉线 / 售罄 / 缺货 / 待处理售后 / 待发 多的店自动置顶。</div>
-          <Table<ReportStore> dataSource={dailyStores} columns={dailyColumns} rowKey="mall_id" size="small" pagination={false} scroll={{ x: 945 }} loading={loading} />
+          <Table<ReportStore> dataSource={dailyStores} columns={dailyColumns} rowKey="mall_id" size="small" pagination={false} scroll={{ x: 1040 }} loading={loading} />
         </>
       ),
     },
@@ -1081,6 +1192,21 @@ export default function MultiStoreReport() {
       label: "销售管理",
       children: (
         <div>
+          <div style={{ padding: "12px 16px 0", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12 }}>
+            <Statistic title="今日销量" value={fmtNum(summary?.salesToday || 0)} valueStyle={{ color: "#1677ff" }} />
+            <Statistic title="7日销量" value={fmtNum(summary?.sales7d || 0)} valueStyle={{ color: "#1677ff" }} />
+            <Statistic title="30日销量" value={fmtNum(summary?.sales30d || 0)} valueStyle={{ color: "#1677ff" }} />
+            <Statistic title="覆盖店铺" value={storeSalesRows.length} suffix={shopHealthLoaded ? `/ 官方 ${shopHealthRows.length}` : ""} />
+          </div>
+          <Table
+            dataSource={storeSalesRows}
+            columns={storeSalesColumns}
+            rowKey={(r) => r.store.mall_id}
+            size="small"
+            pagination={false}
+            scroll={{ x: 880 }}
+            loading={loading}
+          />
           <div style={{ padding: "12px 16px", display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
             <Select size="small" style={{ width: 130 }} value={skuStoreFilter} onChange={setSkuStoreFilter}
               options={[{ value: "all", label: "全部店铺" }, ...skuStoreOptions.map((c) => ({ value: c, label: c }))]} />
@@ -1306,7 +1432,7 @@ export default function MultiStoreReport() {
               })}
             </div>
           )}
-          <Table dataSource={ownerRollup} columns={managerColumns} rowKey="owner" size="small" pagination={false} scroll={{ x: 820 }} loading={loading} />
+          <Table dataSource={ownerRollup} columns={managerColumns} rowKey="owner" size="small" pagination={false} scroll={{ x: 1130 }} loading={loading} />
         </div>
       ),
     },
@@ -1661,6 +1787,9 @@ export default function MultiStoreReport() {
           <>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 16 }}>
               <Statistic title="店铺数" value={stores.length} suffix={`/ ${summary.onlineCount} 实时`} />
+              <Statistic title="今日销量" value={fmtNum(summary.salesToday)} valueStyle={{ color: "#1677ff" }} />
+              <Statistic title="7日销量" value={fmtNum(summary.sales7d)} valueStyle={{ color: "#1677ff" }} />
+              <Statistic title="30日销量" value={fmtNum(summary.sales30d)} valueStyle={{ color: "#1677ff" }} />
               <Statistic title="今日营收" value={finAvailable ? fmtMoney(summary.revToday) : "—"} />
               <Statistic title={`${label30}营收`} value={finAvailable ? fmtMoney(summary.rev30) : "—"} />
               <Statistic title="今日结算" value={settlementAvailable ? fmtMoney(summary.settlementToday) : "—"} />
