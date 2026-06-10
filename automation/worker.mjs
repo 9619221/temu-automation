@@ -7933,9 +7933,23 @@ async function collectOneAccount(params = {}) {
       let kjmhPage = null;
       try {
         kjmhPage = await safeNewPage(context);
-        // 进入跨境猫工作台建立同域 session（agentseller 已登录，跨境猫通常自动授权）
-        await kjmhPage.goto("https://seller.kuajingmaihuo.com/main/authentication", { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
-        await randomDelay(2500, 3500);
+        // 进入跨境猫对账中心建立同域 session，并加载账务模块的前端签名包装。
+        // 只停在 main/authentication 时 pageSearch 可用，但 day/month summary 可能稳定 405。
+        const kjmhWarmRoutes = ["/labor/bill", "/labor/reconciliation/export-history", "/main/authentication"];
+        let kjmhWarmUrl = "";
+        for (const route of kjmhWarmRoutes) {
+          try {
+            await kjmhPage.goto(`https://seller.kuajingmaihuo.com${route}`, { waitUntil: "domcontentloaded", timeout: 60000 });
+            await randomDelay(1800, 2800);
+            await handleSellerAuthPopupPage(kjmhPage, `${logPrefix}-kjmh-auth`);
+            await randomDelay(800, 1200);
+            kjmhWarmUrl = kjmhPage.url();
+            if (/seller\.kuajingmaihuo\.com/i.test(kjmhWarmUrl) && !/seller-login|\/settle\//i.test(kjmhWarmUrl)) break;
+          } catch (e) {
+            console.error(`${logPrefix} 跨境猫预热 ${route} 失败: ${e.message}`);
+          }
+        }
+        console.error(`${logPrefix} 跨境猫预热完成 URL=${kjmhWarmUrl || kjmhPage.url()}`);
         console.error(`${logPrefix} 账务费用：进入跨境猫页面 ${kjmhPage.url()}，流水待采 ${fundTargets.length} 店，资金汇总待采 ${fundSummaryTargets.length} 店`);
         // fund 接口要求"开始/结束时间必选"，真实字段名未知（hook 未记录请求体），逐候选探测命中后固定
         const fundVariants = (pageNum) => {
@@ -7959,12 +7973,16 @@ async function collectOneAccount(params = {}) {
           const end = new Date(); const start = new Date(end.getTime() - 30 * 86400000);
           const ds = (d) => d.toISOString().slice(0, 10);
           const t0 = start.getTime(), t1 = end.getTime();
+          const bodies = [
+            { beginTime: t0, endTime: t1 },
+            { startTime: t0, endTime: t1 },
+            { beginDate: ds(start), endDate: ds(end) },
+            { startDate: ds(start), endDate: ds(end) },
+            {},
+          ];
           return [
-            JSON.stringify({ beginTime: t0, endTime: t1 }),
-            JSON.stringify({ startTime: t0, endTime: t1 }),
-            JSON.stringify({ beginDate: ds(start), endDate: ds(end) }),
-            JSON.stringify({ startDate: ds(start), endDate: ds(end) }),
-            JSON.stringify({}),
+            ...bodies.map((body, idx) => ({ label: `post-v${idx}`, method: "POST", body: JSON.stringify(body) })),
+            ...bodies.map((body, idx) => ({ label: `get-v${idx}`, method: "GET", body: JSON.stringify(body) })),
           ];
         };
         const fundSummaryCount = (body) => {
@@ -7979,13 +7997,30 @@ async function collectOneAccount(params = {}) {
           const obj = body?.result?.data || body?.result || body?.data || null;
           return obj && typeof obj === "object" ? 1 : 0;
         };
-        const fundFetch = (urlPath, mallId, bodyStr) => kjmhPage.evaluate(async ({ apiUrl, mid, body }) => {
+        const fundFetch = (urlPath, mallId, bodyStr, options = {}) => kjmhPage.evaluate(async ({ apiUrl, mid, body, method }) => {
           try {
-            const resp = await fetch(apiUrl, { method: "POST", credentials: "include", cache: "no-store", headers: { "Content-Type": "application/json", mallid: mid }, body });
+            const headers = { Accept: "application/json, text/plain, */*", "X-Requested-With": "XMLHttpRequest", mallid: mid };
+            const init = { method, credentials: "include", cache: "no-store", headers };
+            let targetUrl = apiUrl;
+            if (method === "GET") {
+              let parsed = {};
+              try { parsed = JSON.parse(body || "{}") || {}; } catch { parsed = {}; }
+              const params = new URLSearchParams();
+              for (const [key, value] of Object.entries(parsed)) {
+                if (value == null || value === "") continue;
+                params.set(key, String(value));
+              }
+              const qs = params.toString();
+              if (qs) targetUrl += (targetUrl.includes("?") ? "&" : "?") + qs;
+            } else {
+              headers["Content-Type"] = "application/json";
+              init.body = body;
+            }
+            const resp = await fetch(targetUrl, init);
             const text = await resp.text();
-            return { status: resp.status, text, ok: resp.ok };
-          } catch (e) { return { status: 0, text: "", ok: false, err: e.message }; }
-        }, { apiUrl: `https://seller.kuajingmaihuo.com${urlPath}`, mid: mallId, body: bodyStr });
+            return { status: resp.status, text, ok: resp.ok, method, contentType: resp.headers.get("content-type") || "", finalUrl: resp.url };
+          } catch (e) { return { status: 0, text: "", ok: false, err: e.message, method }; }
+        }, { apiUrl: `https://seller.kuajingmaihuo.com${urlPath}`, mid: mallId, body: bodyStr, method: options.method || "POST" });
         let fundVariant = -1; // 命中的参数变体下标，第一店探测后固定
         const fundMetaTargets = Array.from(new Map([...fundTargets, ...fundSummaryTargets].map((m) => [String(m.mall_id), m])).values());
         const mets = taskStats.fundEnum || (taskStats.fundEnum = { success: 0, error: 0, empty: 0, expired: 0, noAccess: 0, totalRecords: 0 });
