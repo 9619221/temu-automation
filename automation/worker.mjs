@@ -8105,6 +8105,92 @@ async function collectOneAccount(params = {}) {
         console.error(`${logPrefix} [${tag}] ${def.label} 使用真实页面捕获兜底 ${cap.method} ${cap.urlPath} HTTP ${cap.status} records=${count}`);
         return true;
       };
+      const fundRecordsByMall = new Map();
+      const parseFundRecordAmount = (item) => {
+        let amount = null;
+        if (item?.amountFormat && typeof item.amountFormat.value === "number") {
+          amount = item.amountFormat.value;
+        } else if (typeof item?.amount === "number") {
+          amount = item.amount;
+        } else if (typeof item?.amount === "string") {
+          const m = item.amount.match(/[+-]?[\d,]+\.?\d*/);
+          if (m) amount = Number(m[0].replace(/,/g, ""));
+        }
+        if (!Number.isFinite(amount)) return null;
+        if (item?.moneyChangeType === 2 && amount > 0) amount = -amount;
+        return amount;
+      };
+      const fundRecordDate = (item, scope) => {
+        const raw = String(item?.transactionTime || item?.createTime || "").trim();
+        const m = raw.match(/\d{4}[-/]\d{1,2}[-/]\d{1,2}/);
+        if (!m) return "";
+        const [y, mo, d] = m[0].replace(/\//g, "-").split("-");
+        const day = `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+        return scope === "month" ? day.slice(0, 7) : day;
+      };
+      const buildDerivedFundSummaryBody = (records, scope) => {
+        const groups = new Map();
+        for (const item of records || []) {
+          const amount = parseFundRecordAmount(item);
+          if (!Number.isFinite(amount)) continue;
+          const summaryDate = fundRecordDate(item, scope);
+          if (!summaryDate) continue;
+          const currency = String(item?.currencyType || item?.amountFormat?.currencyCode || "CNY");
+          const key = `${summaryDate}|${currency}`;
+          const row = groups.get(key) || {
+            date: scope === "day" ? summaryDate : undefined,
+            month: scope === "month" ? summaryDate : undefined,
+            currency,
+            incomeAmount: 0,
+            expenseAmount: 0,
+            totalAmount: 0,
+            recordCount: 0,
+            derivedFrom: "fund/detail/pageSearch",
+          };
+          if (amount >= 0) row.incomeAmount += amount;
+          else row.expenseAmount += Math.abs(amount);
+          row.totalAmount += amount;
+          row.recordCount += 1;
+          groups.set(key, row);
+        }
+        const list = [...groups.values()]
+          .sort((a, b) => String(a.date || a.month).localeCompare(String(b.date || b.month)))
+          .map((row) => ({
+            ...row,
+            incomeAmount: Number(row.incomeAmount.toFixed(2)),
+            expenseAmount: Number(row.expenseAmount.toFixed(2)),
+            totalAmount: Number(row.totalAmount.toFixed(2)),
+          }));
+        return list.length > 0 ? { success: true, errorCode: 1000000, errorMsg: null, result: { list } } : null;
+      };
+      const pushDerivedFundSummary = (def, mallId, tag) => {
+        const records = fundRecordsByMall.get(String(mallId)) || [];
+        const body = buildDerivedFundSummaryBody(records, def.scope);
+        if (!body) return false;
+        const bodyText = JSON.stringify(body);
+        const count = fundSummaryCount(body);
+        batchItems.push({
+          kind: "fetch-active-fund-summary",
+          url: `derived://kuajingmaihuo${def.urlPath}`,
+          url_path: def.urlPath,
+          method: "DERIVED",
+          status: 200,
+          ts: Date.now(),
+          site: "kuajingmaihuo",
+          page: `${def.ingestPage}-derived-from-fund-detail`,
+          mall_id: mallId,
+          body,
+          bodyText: bodyText.length > 200000 ? null : bodyText,
+          requestBodyText: JSON.stringify({ derivedFrom: "/api/merchant/fund/detail/pageSearch", records: records.length }),
+          bodySize: bodyText.length,
+          activeSource: "batch_robot_fund_detail_derived",
+        });
+        fsts.success++;
+        fsts.totalRecords += count;
+        if (count <= 0) fsts.empty++;
+        console.error(`${logPrefix} [${tag}] ${def.label} 使用账务流水聚合兜底 records=${count} sourceRecords=${records.length}`);
+        return true;
+      };
       try {
         kjmhPage = await safeNewPage(context);
         financeCapture = createFinanceNetworkCapture(kjmhPage);
@@ -8260,6 +8346,7 @@ async function collectOneAccount(params = {}) {
                 });
               }
             }
+            fundRecordsByMall.set(String(mallId), allRecords);
             if (allRecords.length > 0) { fts.success++; fts.totalRecords += allRecords.length; newlyCollectedKeys.push(`${mallId}:fundDetail`); }
             else fts.empty++;
           } catch (e) { fts.error++; console.error(`${logPrefix} [${tag}] 账务费用异常: ${e.message}`); }
@@ -8317,6 +8404,8 @@ async function collectOneAccount(params = {}) {
             }
             if (!ok) {
               if (pushCapturedFundSummary(def, mallId, tag)) {
+                mallOk = true;
+              } else if (pushDerivedFundSummary(def, mallId, tag)) {
                 mallOk = true;
               } else {
                 fsts.error++;
