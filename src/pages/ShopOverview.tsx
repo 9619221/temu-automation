@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Button,
@@ -220,6 +220,230 @@ function isDiagnosticCloudText(value?: string | null) {
   );
 }
 
+interface OfficialShopHealthRow {
+  mall_id: string;
+  store_code: string | null;
+  mall_name: string | null;
+  owner: string | null;
+  sale_volume: number;
+  sale_7d: number;
+  sale_30d: number;
+  on_sale: number;
+  wait_online: number;
+  lack_skc: number;
+  advice_prepare_skc: number;
+  about_to_sell_out: number;
+  already_sold_out: number;
+  high_price_limit: number;
+  after_sale_ratio_90d: number | null;
+  stat_date: string | null;
+}
+
+function normalizeShopHealthKey(value?: string | null) {
+  const text = String(value || "").trim();
+  return text ? text.toLowerCase() : "";
+}
+
+function isDiagnosticOfficialShopRow(row: OfficialShopHealthRow) {
+  return isDiagnosticCloudText(row.mall_id) || isDiagnosticCloudText(row.store_code) || isDiagnosticCloudText(row.mall_name);
+}
+
+function createEmptyCloudTotals(deviceCount = 0): CloudShopMonitorPayload["totals"] {
+  return {
+    mall_count: 0,
+    capture_count_24h: 0,
+    device_count: deviceCount,
+    sale_volume: 0,
+    seven_days_sale_volume: 0,
+    thirty_days_sale_volume: 0,
+    on_sale_product_number: 0,
+    lack_skc_number: 0,
+    advice_prepare_skc_number: 0,
+    already_sold_out_number: 0,
+    flow_product_count: 0,
+    flow_expose_num: 0,
+    flow_click_num: 0,
+    flow_detail_visit_num: 0,
+    flow_detail_visitor_num: 0,
+    flow_add_to_cart_user_num: 0,
+    flow_collect_user_num: 0,
+    flow_pay_goods_num: 0,
+    flow_pay_order_num: 0,
+    flow_buyer_num: 0,
+    flow_expose_pay_conversion_rate: null,
+    flow_expose_click_conversion_rate: null,
+    flow_click_pay_conversion_rate: null,
+    flow_search_expose_num: 0,
+    flow_search_click_num: 0,
+    flow_search_pay_goods_num: 0,
+    flow_search_pay_order_num: 0,
+    flow_recommend_expose_num: 0,
+    flow_recommend_click_num: 0,
+    flow_recommend_pay_goods_num: 0,
+    flow_recommend_pay_order_num: 0,
+    activity_count: 0,
+    risk_count: 0,
+    high_risk_count: 0,
+    stock_order_count: 0,
+    pending_stock_order_count: 0,
+    stock_order_demand_qty: 0,
+    stock_order_delivered_qty: 0,
+    after_sale_count: 0,
+    pending_after_sale_count: 0,
+    return_package_count: 0,
+    after_sale_quantity: 0,
+    after_sale_amount_cents: 0,
+  };
+}
+
+function applyOfficialShopHealth(row: CloudShopMonitorRow, official: OfficialShopHealthRow): CloudShopMonitorRow {
+  return {
+    ...row,
+    mall_id: row.mall_id || official.mall_id || official.store_code || "",
+    mall_name: official.mall_name || row.mall_name,
+    stat_date: official.stat_date || row.stat_date,
+    sale_volume: Number(official.sale_volume || 0),
+    seven_days_sale_volume: Number(official.sale_7d || 0),
+    thirty_days_sale_volume: Number(official.sale_30d || 0),
+    on_sale_product_number: Number(official.on_sale || 0),
+    wait_product_number: Number(official.wait_online || 0),
+    lack_skc_number: Number(official.lack_skc || 0),
+    advice_prepare_skc_number: Number(official.advice_prepare_skc || 0),
+    about_to_sell_out_number: Number(official.about_to_sell_out || 0),
+    already_sold_out_number: Number(official.already_sold_out || 0),
+    high_price_limit_number: Number(official.high_price_limit || 0),
+    quality_after_sale_ratio_90d: official.after_sale_ratio_90d,
+  };
+}
+
+function createCloudMonitorRowFromOfficial(official: OfficialShopHealthRow): CloudShopMonitorRow {
+  return applyOfficialShopHealth({
+    mall_id: official.mall_id || official.store_code || "",
+    site: null,
+    mall_name: official.mall_name,
+    last_seen: null,
+    last_capture_at: null,
+    capture_count_24h: 0,
+    stat_date: official.stat_date,
+    sale_volume: 0,
+    seven_days_sale_volume: 0,
+    thirty_days_sale_volume: 0,
+    on_sale_product_number: 0,
+    wait_product_number: 0,
+    lack_skc_number: 0,
+    advice_prepare_skc_number: 0,
+    about_to_sell_out_number: 0,
+    already_sold_out_number: 0,
+    high_price_limit_number: 0,
+    quality_after_sale_ratio_90d: null,
+    product_skc_count: 0,
+    product_stock_available: 0,
+    product_occupy_stock: 0,
+    product_unavailable_stock: 0,
+    flow_product_count: 0,
+    flow_expose_num: 0,
+    flow_click_num: 0,
+    flow_detail_visit_num: 0,
+    flow_detail_visitor_num: 0,
+    flow_add_to_cart_user_num: 0,
+    flow_collect_user_num: 0,
+    flow_pay_goods_num: 0,
+    flow_pay_order_num: 0,
+    flow_buyer_num: 0,
+    flow_expose_pay_conversion_rate: null,
+    flow_expose_click_conversion_rate: null,
+    flow_click_pay_conversion_rate: null,
+    flow_search_expose_num: 0,
+    flow_search_click_num: 0,
+    flow_search_pay_goods_num: 0,
+    flow_search_pay_order_num: 0,
+    flow_recommend_expose_num: 0,
+    flow_recommend_click_num: 0,
+    flow_recommend_pay_goods_num: 0,
+    flow_recommend_pay_order_num: 0,
+    activity_count: 0,
+    bidding_activity_count: 0,
+    coupon_activity_count: 0,
+    activity_stock: 0,
+    risk_count: 0,
+    high_risk_count: 0,
+    medium_risk_count: 0,
+    stock_order_count: 0,
+    pending_stock_order_count: 0,
+    stock_order_demand_qty: 0,
+    stock_order_delivered_qty: 0,
+    after_sale_count: 0,
+    pending_after_sale_count: 0,
+    return_package_count: 0,
+    after_sale_quantity: 0,
+    after_sale_amount_cents: 0,
+    last_flow_at: null,
+    last_activity_at: null,
+    last_risk_at: null,
+    last_stock_order_at: null,
+    last_after_sale_at: null,
+    last_updated_at: null,
+  }, official);
+}
+
+function sumCloudMonitorRows(
+  rows: CloudShopMonitorRow[],
+  sourceTotals: CloudShopMonitorPayload["totals"] | null,
+): CloudShopMonitorPayload["totals"] {
+  const totals = rows.reduce<CloudShopMonitorPayload["totals"]>((acc, row) => ({
+    mall_count: acc.mall_count + 1,
+    capture_count_24h: acc.capture_count_24h + Number(row.capture_count_24h || 0),
+    device_count: acc.device_count,
+    sale_volume: acc.sale_volume + Number(row.sale_volume || 0),
+    seven_days_sale_volume: acc.seven_days_sale_volume + Number(row.seven_days_sale_volume || 0),
+    thirty_days_sale_volume: acc.thirty_days_sale_volume + Number(row.thirty_days_sale_volume || 0),
+    on_sale_product_number: acc.on_sale_product_number + Number(row.on_sale_product_number || 0),
+    lack_skc_number: acc.lack_skc_number + Number(row.lack_skc_number || 0),
+    advice_prepare_skc_number: acc.advice_prepare_skc_number + Number(row.advice_prepare_skc_number || 0),
+    already_sold_out_number: acc.already_sold_out_number + Number(row.already_sold_out_number || 0),
+    flow_product_count: acc.flow_product_count + Number(row.flow_product_count || 0),
+    flow_expose_num: acc.flow_expose_num + Number(row.flow_expose_num || 0),
+    flow_click_num: acc.flow_click_num + Number(row.flow_click_num || 0),
+    flow_detail_visit_num: acc.flow_detail_visit_num + Number(row.flow_detail_visit_num || 0),
+    flow_detail_visitor_num: acc.flow_detail_visitor_num + Number(row.flow_detail_visitor_num || 0),
+    flow_add_to_cart_user_num: acc.flow_add_to_cart_user_num + Number(row.flow_add_to_cart_user_num || 0),
+    flow_collect_user_num: acc.flow_collect_user_num + Number(row.flow_collect_user_num || 0),
+    flow_pay_goods_num: acc.flow_pay_goods_num + Number(row.flow_pay_goods_num || 0),
+    flow_pay_order_num: acc.flow_pay_order_num + Number(row.flow_pay_order_num || 0),
+    flow_buyer_num: acc.flow_buyer_num + Number(row.flow_buyer_num || 0),
+    flow_expose_pay_conversion_rate: acc.flow_expose_pay_conversion_rate,
+    flow_expose_click_conversion_rate: acc.flow_expose_click_conversion_rate,
+    flow_click_pay_conversion_rate: acc.flow_click_pay_conversion_rate,
+    flow_search_expose_num: acc.flow_search_expose_num + Number(row.flow_search_expose_num || 0),
+    flow_search_click_num: acc.flow_search_click_num + Number(row.flow_search_click_num || 0),
+    flow_search_pay_goods_num: acc.flow_search_pay_goods_num + Number(row.flow_search_pay_goods_num || 0),
+    flow_search_pay_order_num: acc.flow_search_pay_order_num + Number(row.flow_search_pay_order_num || 0),
+    flow_recommend_expose_num: acc.flow_recommend_expose_num + Number(row.flow_recommend_expose_num || 0),
+    flow_recommend_click_num: acc.flow_recommend_click_num + Number(row.flow_recommend_click_num || 0),
+    flow_recommend_pay_goods_num: acc.flow_recommend_pay_goods_num + Number(row.flow_recommend_pay_goods_num || 0),
+    flow_recommend_pay_order_num: acc.flow_recommend_pay_order_num + Number(row.flow_recommend_pay_order_num || 0),
+    activity_count: acc.activity_count + Number(row.activity_count || 0),
+    risk_count: acc.risk_count + Number(row.risk_count || 0),
+    high_risk_count: acc.high_risk_count + Number(row.high_risk_count || 0),
+    stock_order_count: acc.stock_order_count + Number(row.stock_order_count || 0),
+    pending_stock_order_count: acc.pending_stock_order_count + Number(row.pending_stock_order_count || 0),
+    stock_order_demand_qty: acc.stock_order_demand_qty + Number(row.stock_order_demand_qty || 0),
+    stock_order_delivered_qty: acc.stock_order_delivered_qty + Number(row.stock_order_delivered_qty || 0),
+    after_sale_count: acc.after_sale_count + Number(row.after_sale_count || 0),
+    pending_after_sale_count: acc.pending_after_sale_count + Number(row.pending_after_sale_count || 0),
+    return_package_count: acc.return_package_count + Number(row.return_package_count || 0),
+    after_sale_quantity: acc.after_sale_quantity + Number(row.after_sale_quantity || 0),
+    after_sale_amount_cents: acc.after_sale_amount_cents + Number(row.after_sale_amount_cents || 0),
+  }), createEmptyCloudTotals(sourceTotals?.device_count || 0));
+
+  return {
+    ...totals,
+    flow_expose_pay_conversion_rate: sourceTotals?.flow_expose_pay_conversion_rate ?? totals.flow_expose_pay_conversion_rate,
+    flow_expose_click_conversion_rate: sourceTotals?.flow_expose_click_conversion_rate ?? totals.flow_expose_click_conversion_rate,
+    flow_click_pay_conversion_rate: sourceTotals?.flow_click_pay_conversion_rate ?? totals.flow_click_pay_conversion_rate,
+  };
+}
+
 const ShopOverview: React.FC = () => {
   const [loading, setLoading] = useState(true);
   // 首屏是否已成功加载过:warm 刷新不再整页骨架,只在冷启动(从未加载)时显骨架。
@@ -247,6 +471,7 @@ const ShopOverview: React.FC = () => {
   const [cloudError, setCloudError] = useState("");
   const [cloudMonitorRows, setCloudMonitorRows] = useState<CloudShopMonitorRow[]>([]);
   const [cloudMonitorTotals, setCloudMonitorTotals] = useState<CloudShopMonitorPayload["totals"] | null>(null);
+  const [officialShopRows, setOfficialShopRows] = useState<OfficialShopHealthRow[]>([]);
   const [cloudActivities, setCloudActivities] = useState<TemuActivityRow[]>([]);
   const [cloudActivitySummary, setCloudActivitySummary] = useState<TemuActivitySummaryRow[]>([]);
   const [cloudRisks, setCloudRisks] = useState<TemuOperationRiskRow[]>([]);
@@ -286,6 +511,7 @@ const ShopOverview: React.FC = () => {
     setCloudError("");
     setCloudMonitorRows([]);
     setCloudMonitorTotals(null);
+    setOfficialShopRows([]);
     setCloudActivities([]);
     setCloudActivitySummary([]);
     setCloudRisks([]);
@@ -370,12 +596,30 @@ const ShopOverview: React.FC = () => {
       setLoading(false);
 
       try {
+        const shopHealth = window.electronAPI?.erp?.reports?.shopHealth;
+        if (shopHealth) {
+          const resp = await shopHealth({ includeTest: false });
+          if (resp?.ok && resp.data) {
+            setOfficialShopRows(((resp.data.rows || []) as OfficialShopHealthRow[]).filter((row) => !isDiagnosticOfficialShopRow(row)));
+          } else {
+            setOfficialShopRows([]);
+          }
+        } else {
+          setOfficialShopRows([]);
+        }
+      } catch {
+        setOfficialShopRows([]);
+      }
+
+      try {
         setCloudLoading(true);
         const cfg = await loadCloudConfig();
         if (!cfg) {
           setCloudConfigured(false);
+          setCloudError("");
         } else {
           setCloudConfigured(true);
+          setCloudError("");
           const [monitorResult, activityResult, riskResult, stockOrderResult, afterSaleResult] = await Promise.all([
             fetchCloudShopMonitor(cfg),
             fetchTemuActivity(cfg, { limit: 500 }),
@@ -542,104 +786,50 @@ const ShopOverview: React.FC = () => {
   const cloudPendingStockOrderCount = cloudStockOrders.filter((row) => cloudBusinessStatusColor(row.temu_status) !== "green").length;
   const cloudStockDemandQty = cloudStockOrders.reduce((sum, row) => sum + Number(row.demand_qty || 0), 0);
   const cloudStockDeliveredQty = cloudStockOrders.reduce((sum, row) => sum + Number(row.delivered_qty || 0), 0);
-  const cloudLatestAt = [
-    ...cloudMonitorRows.flatMap((row) => [row.last_seen, row.last_updated_at, row.last_flow_at, row.last_activity_at, row.last_risk_at, row.last_stock_order_at, row.last_after_sale_at]),
+  const shopMonitorRows = useMemo(() => {
+    const officialByKey = new Map<string, OfficialShopHealthRow>();
+    officialShopRows.forEach((row) => {
+      [row.mall_id, row.store_code, row.mall_name].forEach((value) => {
+        const key = normalizeShopHealthKey(value);
+        if (key && !officialByKey.has(key)) officialByKey.set(key, row);
+      });
+    });
+
+    const usedOfficialRows = new Set<OfficialShopHealthRow>();
+    const mergedRows = cloudMonitorRows.map((row) => {
+      const official = officialByKey.get(normalizeShopHealthKey(row.mall_id))
+        || officialByKey.get(normalizeShopHealthKey(row.mall_name));
+      if (!official) return row;
+      usedOfficialRows.add(official);
+      return applyOfficialShopHealth(row, official);
+    });
+
+    officialShopRows.forEach((row) => {
+      if (!usedOfficialRows.has(row)) mergedRows.push(createCloudMonitorRowFromOfficial(row));
+    });
+
+    return mergedRows;
+  }, [cloudMonitorRows, officialShopRows]);
+  const shopDataConfigured = cloudConfigured || officialShopRows.length > 0;
+  const cloudLatestAt = useMemo(() => ([
+    ...shopMonitorRows.flatMap((row) => [row.last_seen, row.last_updated_at, row.last_flow_at, row.last_activity_at, row.last_risk_at, row.last_stock_order_at, row.last_after_sale_at]),
     ...cloudActivities.map((row) => row.last_updated_at),
     ...cloudRisks.map((row) => row.last_updated_at),
     ...cloudStockOrders.map((row) => row.last_updated_at),
     ...cloudAfterSales.map((row) => row.last_updated_at),
   ]
     .filter(Boolean)
-    .sort((left, right) => String(right).localeCompare(String(left)))[0] || "";
-  const cloudTotals = cloudMonitorTotals || cloudMonitorRows.reduce((acc, row) => ({
-    mall_count: acc.mall_count + 1,
-    capture_count_24h: acc.capture_count_24h + Number(row.capture_count_24h || 0),
-    device_count: acc.device_count,
-    sale_volume: acc.sale_volume + Number(row.sale_volume || 0),
-    seven_days_sale_volume: acc.seven_days_sale_volume + Number(row.seven_days_sale_volume || 0),
-    thirty_days_sale_volume: acc.thirty_days_sale_volume + Number(row.thirty_days_sale_volume || 0),
-    on_sale_product_number: acc.on_sale_product_number + Number(row.on_sale_product_number || 0),
-    lack_skc_number: acc.lack_skc_number + Number(row.lack_skc_number || 0),
-    advice_prepare_skc_number: acc.advice_prepare_skc_number + Number(row.advice_prepare_skc_number || 0),
-    already_sold_out_number: acc.already_sold_out_number + Number(row.already_sold_out_number || 0),
-    flow_product_count: acc.flow_product_count + Number(row.flow_product_count || 0),
-    flow_expose_num: acc.flow_expose_num + Number(row.flow_expose_num || 0),
-    flow_click_num: acc.flow_click_num + Number(row.flow_click_num || 0),
-    flow_detail_visit_num: acc.flow_detail_visit_num + Number(row.flow_detail_visit_num || 0),
-    flow_detail_visitor_num: acc.flow_detail_visitor_num + Number(row.flow_detail_visitor_num || 0),
-    flow_add_to_cart_user_num: acc.flow_add_to_cart_user_num + Number(row.flow_add_to_cart_user_num || 0),
-    flow_collect_user_num: acc.flow_collect_user_num + Number(row.flow_collect_user_num || 0),
-    flow_pay_goods_num: acc.flow_pay_goods_num + Number(row.flow_pay_goods_num || 0),
-    flow_pay_order_num: acc.flow_pay_order_num + Number(row.flow_pay_order_num || 0),
-    flow_buyer_num: acc.flow_buyer_num + Number(row.flow_buyer_num || 0),
-    flow_expose_pay_conversion_rate: acc.flow_expose_pay_conversion_rate,
-    flow_expose_click_conversion_rate: acc.flow_expose_click_conversion_rate,
-    flow_click_pay_conversion_rate: acc.flow_click_pay_conversion_rate,
-    flow_search_expose_num: acc.flow_search_expose_num + Number(row.flow_search_expose_num || 0),
-    flow_search_click_num: acc.flow_search_click_num + Number(row.flow_search_click_num || 0),
-    flow_search_pay_goods_num: acc.flow_search_pay_goods_num + Number(row.flow_search_pay_goods_num || 0),
-    flow_search_pay_order_num: acc.flow_search_pay_order_num + Number(row.flow_search_pay_order_num || 0),
-    flow_recommend_expose_num: acc.flow_recommend_expose_num + Number(row.flow_recommend_expose_num || 0),
-    flow_recommend_click_num: acc.flow_recommend_click_num + Number(row.flow_recommend_click_num || 0),
-    flow_recommend_pay_goods_num: acc.flow_recommend_pay_goods_num + Number(row.flow_recommend_pay_goods_num || 0),
-    flow_recommend_pay_order_num: acc.flow_recommend_pay_order_num + Number(row.flow_recommend_pay_order_num || 0),
-    activity_count: acc.activity_count + Number(row.activity_count || 0),
-    risk_count: acc.risk_count + Number(row.risk_count || 0),
-    high_risk_count: acc.high_risk_count + Number(row.high_risk_count || 0),
-    stock_order_count: acc.stock_order_count + Number(row.stock_order_count || 0),
-    pending_stock_order_count: acc.pending_stock_order_count + Number(row.pending_stock_order_count || 0),
-    stock_order_demand_qty: acc.stock_order_demand_qty + Number(row.stock_order_demand_qty || 0),
-    stock_order_delivered_qty: acc.stock_order_delivered_qty + Number(row.stock_order_delivered_qty || 0),
-    after_sale_count: acc.after_sale_count + Number(row.after_sale_count || 0),
-    pending_after_sale_count: acc.pending_after_sale_count + Number(row.pending_after_sale_count || 0),
-    return_package_count: acc.return_package_count + Number(row.return_package_count || 0),
-    after_sale_quantity: acc.after_sale_quantity + Number(row.after_sale_quantity || 0),
-    after_sale_amount_cents: acc.after_sale_amount_cents + Number(row.after_sale_amount_cents || 0),
-  }), {
-    mall_count: 0,
-    capture_count_24h: 0,
-    device_count: 0,
-    sale_volume: 0,
-    seven_days_sale_volume: 0,
-    thirty_days_sale_volume: 0,
-    on_sale_product_number: 0,
-    lack_skc_number: 0,
-    advice_prepare_skc_number: 0,
-    already_sold_out_number: 0,
-    flow_product_count: 0,
-    flow_expose_num: 0,
-    flow_click_num: 0,
-    flow_detail_visit_num: 0,
-    flow_detail_visitor_num: 0,
-    flow_add_to_cart_user_num: 0,
-    flow_collect_user_num: 0,
-    flow_pay_goods_num: 0,
-    flow_pay_order_num: 0,
-    flow_buyer_num: 0,
-    flow_expose_pay_conversion_rate: null,
-    flow_expose_click_conversion_rate: null,
-    flow_click_pay_conversion_rate: null,
-    flow_search_expose_num: 0,
-    flow_search_click_num: 0,
-    flow_search_pay_goods_num: 0,
-    flow_search_pay_order_num: 0,
-    flow_recommend_expose_num: 0,
-    flow_recommend_click_num: 0,
-    flow_recommend_pay_goods_num: 0,
-    flow_recommend_pay_order_num: 0,
-    activity_count: 0,
-    risk_count: 0,
-    high_risk_count: 0,
-    stock_order_count: 0,
-    pending_stock_order_count: 0,
-    stock_order_demand_qty: 0,
-    stock_order_delivered_qty: 0,
-    after_sale_count: 0,
-    pending_after_sale_count: 0,
-    return_package_count: 0,
-    after_sale_quantity: 0,
-    after_sale_amount_cents: 0,
-  });
+    .sort((left, right) => String(right).localeCompare(String(left)))[0] || ""), [
+    shopMonitorRows,
+    cloudActivities,
+    cloudRisks,
+    cloudStockOrders,
+    cloudAfterSales,
+  ]);
+  const cloudTotals = useMemo(
+    () => sumCloudMonitorRows(shopMonitorRows, cloudMonitorTotals),
+    [shopMonitorRows, cloudMonitorTotals],
+  );
 
   const renderCloudMonitorPanel = () => (
     <div className="app-panel">
@@ -647,16 +837,16 @@ const ShopOverview: React.FC = () => {
         <div className="app-panel__title-main">云端店铺监控</div>
         <div className="app-panel__title-sub">{cloudLatestAt ? `最近更新：${formatCloudTime(cloudLatestAt)}` : ""}</div>
       </div>
-      {cloudLoading && cloudMonitorRows.length === 0 && !cloudError ? (
+      {cloudLoading && shopMonitorRows.length === 0 && !cloudError ? (
         <Skeleton active paragraph={{ rows: 4 }} />
-      ) : !cloudConfigured ? (
+      ) : !shopDataConfigured ? (
         <Alert type="warning" showIcon message="云端未配置" />
       ) : cloudError ? (
         <Alert type="warning" showIcon message="云端读取失败" description={cloudError} />
       ) : (
         <Space direction="vertical" size={16} style={{ width: "100%" }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
-            <StatCard compact title="云端店铺" value={formatCloudNumber(cloudTotals.mall_count || cloudMonitorRows.length)} color="brand" />
+            <StatCard compact title="店铺" value={formatCloudNumber(cloudTotals.mall_count || shopMonitorRows.length)} color="brand" />
             <StatCard compact title="24小时上报" value={formatCloudNumber(cloudTotals.capture_count_24h)} color="blue" />
             <StatCard compact title="采集设备" value={formatCloudNumber(cloudTotals.device_count)} color="purple" />
             <StatCard compact title="今日销量" value={formatCloudNumber(cloudTotals.sale_volume)} color="success" />
@@ -670,10 +860,10 @@ const ShopOverview: React.FC = () => {
             <StatCard compact title="待发备货单" value={formatCloudNumber(cloudTotals.pending_stock_order_count)} color={cloudTotals.pending_stock_order_count ? "orange" : "neutral"} />
             <StatCard compact title="售后待处理" value={formatCloudNumber(cloudTotals.pending_after_sale_count || cloudTotals.after_sale_count)} color={cloudTotals.pending_after_sale_count ? "danger" : cloudTotals.after_sale_count ? "orange" : "neutral"} />
           </div>
-          {cloudMonitorRows.length > 0 ? (
+          {shopMonitorRows.length > 0 ? (
             <Table
               rowKey={(row: CloudShopMonitorRow) => row.mall_id}
-              dataSource={cloudMonitorRows}
+              dataSource={shopMonitorRows}
               size="small"
               pagination={false}
               scroll={{ x: 1760 }}
@@ -1883,8 +2073,8 @@ const ShopOverview: React.FC = () => {
       children: renderProductTab(),
     },
   ];
-  const commandSaleValue = cloudConfigured ? formatCloudNumber(cloudTotals.sale_volume) : safeVal(stats?.sevenDaysSales);
-  const commandThirtyDayValue = cloudConfigured ? formatCloudNumber(cloudTotals.thirty_days_sale_volume) : safeVal(stats?.thirtyDaysSales);
+  const commandSaleValue = shopDataConfigured ? formatCloudNumber(cloudTotals.sale_volume) : safeVal(stats?.sevenDaysSales);
+  const commandThirtyDayValue = shopDataConfigured ? formatCloudNumber(cloudTotals.thirty_days_sale_volume) : safeVal(stats?.thirtyDaysSales);
   const commandFlowValue = cloudConfigured ? formatCloudNumber(cloudTotals.flow_expose_num) : safeVal(fluxSummary?.todayVisitors);
   const commandRiskValue = cloudConfigured ? formatCloudNumber(cloudTotals.risk_count || cloudRiskCount) : formatCloudNumber(dataIssues.length);
   const commandStatusText = dataIssues.length > 0
@@ -1903,7 +2093,7 @@ const ShopOverview: React.FC = () => {
         title="店铺概览"
         subtitle={cloudLatestAt ? `云端最近更新：${formatCloudTime(cloudLatestAt)}` : diagnostics?.syncedAt ? `最近采集：${diagnostics.syncedAt}` : "核心经营数据、预警信息、流量与合规一览"}
         meta={[
-          cloudConfigured ? `云端店铺 ${cloudTotals.mall_count || cloudMonitorRows.length}` : "云端未配置",
+          shopDataConfigured ? `店铺 ${cloudTotals.mall_count || shopMonitorRows.length}` : "云端未配置",
           cloudConfigured ? `活动 ${cloudTotals.activity_count || cloudActivityCount}` : null,
           cloudConfigured ? `风险 ${cloudTotals.risk_count || cloudRiskCount}` : null,
           cloudConfigured ? `备货单 ${cloudTotals.stock_order_count}` : null,

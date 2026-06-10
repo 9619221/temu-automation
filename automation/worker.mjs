@@ -8194,13 +8194,13 @@ async function collectOneAccount(params = {}) {
     catch (e) { console.error(`${logPrefix} xlsx 库加载失败，跳过结算订单明细: ${e.message}`); }
     if (XLSX && byMall.size > 0) {
       const sts = taskStats.settlementOrders || (taskStats.settlementOrders = { success: 0, error: 0, empty: 0, totalRecords: 0 });
-      const fetchXlsxBuffer = (fileUrl, redirectCount = 0) => new Promise((resolve, reject) => {
+      const fetchXlsxBufferNode = (fileUrl, headers = {}, redirectCount = 0) => new Promise((resolve, reject) => {
         const u = new URL(fileUrl);
         const mod = u.protocol === "http:" ? http : https;
-        const req = mod.get(u, { timeout: 60000 }, (res) => {
+        const req = mod.get(u, { timeout: 60000, headers }, (res) => {
           if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirectCount < 5) {
             res.resume();
-            resolve(fetchXlsxBuffer(new URL(res.headers.location, fileUrl).href, redirectCount + 1));
+            resolve(fetchXlsxBufferNode(new URL(res.headers.location, fileUrl).href, headers, redirectCount + 1));
             return;
           }
           if (res.statusCode !== 200) { res.resume(); reject(new Error(`xlsx HTTP ${res.statusCode}`)); return; }
@@ -8211,6 +8211,30 @@ async function collectOneAccount(params = {}) {
         req.on("error", reject);
         req.on("timeout", () => { req.destroy(); reject(new Error("xlsx download timeout")); });
       });
+      const fetchXlsxBuffer = async (page, fileUrl, refererUrl = "") => {
+        const headers = {
+          Accept: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,application/octet-stream,*/*",
+        };
+        if (refererUrl) headers.Referer = refererUrl;
+        const userAgent = await page.evaluate(() => navigator.userAgent).catch(() => "");
+        if (userAgent) headers["User-Agent"] = userAgent;
+
+        let browserError = null;
+        try {
+          const resp = await page.context().request.get(fileUrl, { headers, timeout: 60000, maxRedirects: 5 });
+          if (resp.status() === 200) return Buffer.from(await resp.body());
+          const preview = await resp.text().catch(() => "");
+          browserError = new Error(`browser request HTTP ${resp.status()} body=${preview.slice(0, 120).replace(/\s+/g, " ")}`);
+        } catch (e) {
+          browserError = e;
+        }
+
+        try {
+          return await fetchXlsxBufferNode(fileUrl, headers);
+        } catch (nodeError) {
+          throw new Error(`${browserError?.message || "browser request failed"}; node ${nodeError.message}`);
+        }
+      };
       const extractSettlementFileUrl = (body) => {
         const candidates = [
           body?.result?.fileUrl,
@@ -8350,7 +8374,7 @@ async function collectOneAccount(params = {}) {
                 console.error(`${logPrefix} [${t.tag}] 结算明细 ${t.batchId} 取下载链接失败 current=${dlPage.url().slice(0, 160)} attempts=${attempts.slice(-6).join(" | ")}`);
                 continue;
               }
-              const buf = await fetchXlsxBuffer(fileUrl);
+              const buf = await fetchXlsxBuffer(dlPage, fileUrl, dlPage.url());
               const wb = XLSX.read(buf, { type: "buffer" });
               const ws = wb.Sheets[wb.SheetNames[0]];
               const rows = XLSX.utils.sheet_to_json(ws, { defval: null });
