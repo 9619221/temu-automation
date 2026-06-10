@@ -7931,8 +7931,183 @@ async function collectOneAccount(params = {}) {
       const fts = taskStats.fundDetail || (taskStats.fundDetail = { success: 0, error: 0, empty: 0, expired: 0, noAccess: 0, totalRecords: 0 });
       const fsts = taskStats.fundSummary || (taskStats.fundSummary = { success: 0, error: 0, empty: 0, expired: 0, noAccess: 0, totalRecords: 0 });
       let kjmhPage = null;
+      const fundSummaryDefs = [
+        { label: "资金日汇总", scope: "day", urlPath: "/api/merchant/fund/detail/daySummary", ingestPage: "robot/fund-day-summary" },
+        { label: "资金月汇总", scope: "month", urlPath: "/api/merchant/fund/detail/monthSummary", ingestPage: "robot/fund-month-summary" },
+      ];
+      const fundSummaryCount = (body) => {
+        const cands = [
+          body?.result?.data?.list, body?.result?.data?.rows, body?.result?.data?.items,
+          body?.result?.list, body?.result?.rows, body?.result?.items,
+          body?.data?.list, body?.data?.rows, body?.data?.items,
+          body?.list, body?.rows, body?.items,
+        ];
+        const list = cands.find((v) => Array.isArray(v));
+        if (Array.isArray(list)) return list.length;
+        const obj = body?.result?.data || body?.result || body?.data || null;
+        return obj && typeof obj === "object" ? 1 : 0;
+      };
+      const classifyFinanceCaptureScope = (url, urlPath, body) => {
+        const hayUrl = `${urlPath || ""} ${url || ""}`.toLowerCase();
+        if (/day[-_]?summary|daily|daystat|day-stat/.test(hayUrl)) return "day";
+        if (/month[-_]?summary|monthly|monthstat|month-stat/.test(hayUrl)) return "month";
+        let sample = "";
+        try { sample = JSON.stringify(body || {}).slice(0, 6000).toLowerCase(); } catch { sample = ""; }
+        const summaryish = /(summary|overview|accountamount|account-amount|stat|statistics|balance|amount)|汇总|概览|统计|余额|金额/.test(`${hayUrl} ${sample}`);
+        if (!summaryish) return "";
+        if (/(yearmonth|statmonth|billmonth|month)|月份|月汇总/.test(sample)) return "month";
+        if (/(statdate|bizdate|settledate|summarydate|day)|日期|日汇总/.test(sample)) return "day";
+        return "";
+      };
+      const isFinanceCaptureUrl = (url, urlPath) => {
+        if (!/seller\.kuajingmaihuo\.com/i.test(url)) return false;
+        return /(fund|settle|finance|bill|reconciliation|eprfee|punish|violation|summary|accountamount|account-amount)/i.test(`${urlPath || ""} ${url}`);
+      };
+      const createFinanceNetworkCapture = (page) => {
+        const captures = [];
+        const seen = new Set();
+        const onResponse = async (resp) => {
+          try {
+            const url = resp.url();
+            const parsed = new URL(url);
+            const urlPath = parsed.pathname;
+            if (!isFinanceCaptureUrl(url, urlPath)) return;
+            const req = resp.request();
+            const method = req.method();
+            const postData = req.postData() || "";
+            const key = `${method} ${url} ${postData.slice(0, 300)}`;
+            if (seen.has(key) || captures.length >= 160) return;
+            seen.add(key);
+            const status = resp.status();
+            const headers = resp.headers();
+            const contentType = String(headers["content-type"] || "");
+            if (!/json|text\/plain|javascript/i.test(contentType) && !/\/api\//i.test(urlPath)) return;
+            const text = await resp.text().catch(() => "");
+            if (!text || text.length > 900000) return;
+            let body = null;
+            try { body = JSON.parse(text); } catch { return; }
+            if (!body || typeof body !== "object") return;
+            const reqHeaders = await req.allHeaders().catch(() => ({}));
+            const mallIdFromHeader = reqHeaders.mallid || reqHeaders.mallId || reqHeaders["mall-id"] || "";
+            const scope = classifyFinanceCaptureScope(url, urlPath, body);
+            captures.push({
+              url,
+              urlPath,
+              method,
+              status,
+              contentType,
+              body,
+              text,
+              requestBodyText: postData,
+              mallId: String(mallIdFromHeader || ""),
+              scope,
+              ts: Date.now(),
+            });
+            const label = scope ? ` scope=${scope}` : "";
+            console.error(`${logPrefix} 真实页面捕获 ${method} ${urlPath} HTTP ${status}${label}`);
+          } catch {
+            // 监听页面包不能影响主采集。
+          }
+        };
+        page.on("response", onResponse);
+        return {
+          captures,
+          stop: () => {
+            try { page.off("response", onResponse); } catch {}
+          },
+        };
+      };
+      const probeFinancePageInteractions = async (page) => {
+        const texts = ["账户概览", "资金限制", "资金汇总", "财务明细", "结算", "流出", "履约已缴费", "EPR费用", "违规信息"];
+        for (const text of texts) {
+          try {
+            const loc = page.getByText(text, { exact: false }).first();
+            await loc.click({ timeout: 1800 });
+            await randomDelay(900, 1500);
+          } catch {}
+        }
+        await page.evaluate(() => {
+          try { window.scrollTo(0, Math.max(document.body.scrollHeight || 0, document.documentElement.scrollHeight || 0)); } catch {}
+        }).catch(() => {});
+        await randomDelay(1200, 1800);
+      };
+      let financeCapture = null;
+      const pushedProbeKeys = new Set();
+      const pushFinanceProbeCaptures = (mallId, tag) => {
+        if (!financeCapture?.captures?.length) return 0;
+        let pushed = 0;
+        const knownPaths = new Set([
+          "/api/merchant/fund/detail/enum",
+          "/api/merchant/fund/detail/pageSearch",
+          "/api/merchant/fund/detail/daySummary",
+          "/api/merchant/fund/detail/monthSummary",
+        ]);
+        for (const cap of financeCapture.captures) {
+          if (!cap?.body || cap.status < 200 || cap.status >= 300) continue;
+          if (knownPaths.has(cap.urlPath)) continue;
+          if (cap.mallId && String(cap.mallId) !== String(mallId)) continue;
+          const key = `${mallId}|${cap.method}|${cap.urlPath}|${cap.requestBodyText.slice(0, 160)}|${cap.text.length}`;
+          if (pushedProbeKeys.has(key)) continue;
+          pushedProbeKeys.add(key);
+          batchItems.push({
+            kind: "fetch-active-finance-probe",
+            url: cap.url,
+            url_path: cap.urlPath,
+            method: cap.method,
+            status: cap.status,
+            ts: cap.ts || Date.now(),
+            site: "kuajingmaihuo",
+            page: "robot/finance-probe",
+            mall_id: mallId,
+            body: cap.body,
+            bodyText: cap.text.length > 200000 ? null : cap.text,
+            requestBodyText: cap.requestBodyText,
+            bodySize: cap.text.length,
+            activeSource: "batch_robot_page_probe",
+          });
+          pushed++;
+          if (pushed >= 50) break;
+        }
+        if (pushed > 0) console.error(`${logPrefix} [${tag}] 真实页面原始财务包加入上报 ${pushed} 条`);
+        return pushed;
+      };
+      const pushCapturedFundSummary = (def, mallId, tag) => {
+        const cap = (financeCapture?.captures || []).find((c) => {
+          if (!c?.body || c.status < 200 || c.status >= 300) return false;
+          if (c.body?.success === false) return false;
+          if (c.mallId && String(c.mallId) !== String(mallId)) return false;
+          return c.urlPath === def.urlPath || c.scope === def.scope;
+        });
+        if (!cap) return false;
+        const key = `${mallId}|${def.urlPath}|${cap.method}|${cap.urlPath}|${cap.text.length}`;
+        if (pushedProbeKeys.has(key)) return false;
+        pushedProbeKeys.add(key);
+        const count = fundSummaryCount(cap.body);
+        batchItems.push({
+          kind: "fetch-active-fund-summary",
+          url: cap.url,
+          url_path: def.urlPath,
+          method: cap.method,
+          status: cap.status,
+          ts: cap.ts || Date.now(),
+          site: "kuajingmaihuo",
+          page: `${def.ingestPage}-page-probe`,
+          mall_id: mallId,
+          body: cap.body,
+          bodyText: cap.text.length > 200000 ? null : cap.text,
+          requestBodyText: cap.requestBodyText,
+          bodySize: cap.text.length,
+          activeSource: "batch_robot_page_probe",
+        });
+        fsts.success++;
+        fsts.totalRecords += count;
+        if (count <= 0) fsts.empty++;
+        console.error(`${logPrefix} [${tag}] ${def.label} 使用真实页面捕获兜底 ${cap.method} ${cap.urlPath} HTTP ${cap.status} records=${count}`);
+        return true;
+      };
       try {
         kjmhPage = await safeNewPage(context);
+        financeCapture = createFinanceNetworkCapture(kjmhPage);
         // 进入跨境猫对账中心建立同域 session，并加载账务模块的前端签名包装。
         // 只停在 main/authentication 时 pageSearch 可用，但 day/month summary 可能稳定 405。
         const kjmhWarmRoutes = ["/labor/bill", "/labor/reconciliation/export-history", "/main/authentication"];
@@ -7950,6 +8125,7 @@ async function collectOneAccount(params = {}) {
           }
         }
         console.error(`${logPrefix} 跨境猫预热完成 URL=${kjmhWarmUrl || kjmhPage.url()}`);
+        await probeFinancePageInteractions(kjmhPage);
         console.error(`${logPrefix} 账务费用：进入跨境猫页面 ${kjmhPage.url()}，流水待采 ${fundTargets.length} 店，资金汇总待采 ${fundSummaryTargets.length} 店`);
         // fund 接口要求"开始/结束时间必选"，真实字段名未知（hook 未记录请求体），逐候选探测命中后固定
         const fundVariants = (pageNum) => {
@@ -7965,10 +8141,6 @@ async function collectOneAccount(params = {}) {
             JSON.stringify({ pageNo: pageNum, pageSize: 50, beginTime: t0, endTime: t1 }),
           ];
         };
-        const fundSummaryDefs = [
-          { label: "资金日汇总", urlPath: "/api/merchant/fund/detail/daySummary", ingestPage: "robot/fund-day-summary" },
-          { label: "资金月汇总", urlPath: "/api/merchant/fund/detail/monthSummary", ingestPage: "robot/fund-month-summary" },
-        ];
         const fundSummaryVariants = () => {
           const end = new Date(); const start = new Date(end.getTime() - 30 * 86400000);
           const ds = (d) => d.toISOString().slice(0, 10);
@@ -7984,18 +8156,6 @@ async function collectOneAccount(params = {}) {
             ...bodies.map((body, idx) => ({ label: `post-v${idx}`, method: "POST", body: JSON.stringify(body) })),
             ...bodies.map((body, idx) => ({ label: `get-v${idx}`, method: "GET", body: JSON.stringify(body) })),
           ];
-        };
-        const fundSummaryCount = (body) => {
-          const cands = [
-            body?.result?.data?.list, body?.result?.data?.rows, body?.result?.data?.items,
-            body?.result?.list, body?.result?.rows, body?.result?.items,
-            body?.data?.list, body?.data?.rows, body?.data?.items,
-            body?.list, body?.rows, body?.items,
-          ];
-          const list = cands.find((v) => Array.isArray(v));
-          if (Array.isArray(list)) return list.length;
-          const obj = body?.result?.data || body?.result || body?.data || null;
-          return obj && typeof obj === "object" ? 1 : 0;
         };
         const fundFetch = (urlPath, mallId, bodyStr, options = {}) => kjmhPage.evaluate(async ({ apiUrl, mid, body, method }) => {
           try {
@@ -8156,11 +8316,16 @@ async function collectOneAccount(params = {}) {
               await randomDelay(150, 250);
             }
             if (!ok) {
-              fsts.error++;
-              console.error(`${logPrefix} [${tag}] ${def.label} 未采到 HTTP ${lastStatus || "-"} msg="${String(lastMsg).slice(0, 80)}" attempts=${attempts.slice(-6).join(" | ")}`);
+              if (pushCapturedFundSummary(def, mallId, tag)) {
+                mallOk = true;
+              } else {
+                fsts.error++;
+                console.error(`${logPrefix} [${tag}] ${def.label} 未采到 HTTP ${lastStatus || "-"} msg="${String(lastMsg).slice(0, 80)}" attempts=${attempts.slice(-6).join(" | ")}`);
+              }
             }
             await randomDelay(250, 450);
           }
+          pushFinanceProbeCaptures(mallId, tag);
           if (mallOk) newlyCollectedKeys.push(`${mallId}:fundSummary`);
           await randomDelay(400, 700);
         }
@@ -8168,6 +8333,7 @@ async function collectOneAccount(params = {}) {
       } catch (e) {
         console.error(`${logPrefix} 账务费用采集整体失败（跨境猫页面）: ${e.message}`);
       } finally {
+        try { financeCapture?.stop?.(); } catch {}
         await kjmhPage?.close().catch(() => {});
       }
     }
@@ -8407,12 +8573,12 @@ async function collectOneAccount(params = {}) {
   let uploaded = 0;
   const cloudConfig = loadSettlementCloudConfig();
   if (batchItems.length > 0 && cloudConfig.authToken) {
-    const byKind = { "fetch-active-income-summary": [], "fetch-active-settlement-detail": [], "fetch-active-fund-detail": [], "fetch-active-fund-summary": [], "fetch-active-fund-enum": [], "fetch-active-fund-frozen": [], "fetch-active-epr-fee": [], "fetch-active-settlement-orders": [], "fetch-active-settlement-violation": [], "fetch-active-aftersales": [], "fetch-active-products": [] };
+    const byKind = { "fetch-active-income-summary": [], "fetch-active-settlement-detail": [], "fetch-active-fund-detail": [], "fetch-active-fund-summary": [], "fetch-active-fund-enum": [], "fetch-active-fund-frozen": [], "fetch-active-epr-fee": [], "fetch-active-finance-probe": [], "fetch-active-settlement-orders": [], "fetch-active-settlement-violation": [], "fetch-active-aftersales": [], "fetch-active-products": [] };
     for (const it of batchItems) (byKind[it.kind] || (byKind[it.kind] = [])).push(it);
     // CHUNK 大小按 body 估算：结算收入/明细 body 小可一批多条；账务费用每页 50 条中等；商品/售后/结算订单明细 body 大每批 2 条
-    const kindChunk = { "fetch-active-income-summary": 10, "fetch-active-settlement-detail": 10, "fetch-active-fund-detail": 4, "fetch-active-fund-summary": 4, "fetch-active-fund-enum": 4, "fetch-active-fund-frozen": 10, "fetch-active-epr-fee": 4, "fetch-active-settlement-orders": 2, "fetch-active-settlement-violation": 4, "fetch-active-aftersales": 2, "fetch-active-products": 2 };
+    const kindChunk = { "fetch-active-income-summary": 10, "fetch-active-settlement-detail": 10, "fetch-active-fund-detail": 4, "fetch-active-fund-summary": 4, "fetch-active-fund-enum": 4, "fetch-active-fund-frozen": 10, "fetch-active-epr-fee": 4, "fetch-active-finance-probe": 4, "fetch-active-settlement-orders": 2, "fetch-active-settlement-violation": 4, "fetch-active-aftersales": 2, "fetch-active-products": 2 };
     // 顺序：结算收入 → 结算明细 → 账务费用/资金汇总/枚举 → 结算订单明细 → 违规 → 售后 → 商品（任何一类失败不影响其他）
-    for (const kind of ["fetch-active-income-summary", "fetch-active-settlement-detail", "fetch-active-fund-detail", "fetch-active-fund-summary", "fetch-active-fund-enum", "fetch-active-fund-frozen", "fetch-active-epr-fee", "fetch-active-settlement-orders", "fetch-active-settlement-violation", "fetch-active-aftersales", "fetch-active-products"]) {
+    for (const kind of ["fetch-active-income-summary", "fetch-active-settlement-detail", "fetch-active-fund-detail", "fetch-active-fund-summary", "fetch-active-fund-enum", "fetch-active-fund-frozen", "fetch-active-epr-fee", "fetch-active-finance-probe", "fetch-active-settlement-orders", "fetch-active-settlement-violation", "fetch-active-aftersales", "fetch-active-products"]) {
       const items = byKind[kind] || [];
       if (items.length === 0) continue;
       const CHUNK = kindChunk[kind] || 2;
