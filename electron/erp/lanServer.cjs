@@ -4496,6 +4496,8 @@ async function handleTemuSettlementIncomeSyncRequest({ req, res, db }) {
       syncFundSummaryFromCapture,
       syncEprFeeFromCapture,
       syncFundFrozenFromCapture,
+      syncAccountOverviewFromCapture,
+      syncFulfillmentBillFromCapture,
       syncViolationFromCapture,
       clearMultiStoreReportCache,
     } = require("./services/multiStoreReport.cjs");
@@ -4522,17 +4524,24 @@ async function handleTemuSettlementIncomeSyncRequest({ req, res, db }) {
     const frozen = income.attached
       ? syncFundFrozenFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible })
       : { ok: false, attached: false, malls: 0, rows: 0 };
+    // 账户概览 / 履约费用流出（聚协云第①、⑧类对标）
+    const accountOverview = income.attached
+      ? syncAccountOverviewFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible })
+      : { ok: false, attached: false, malls: 0, rows: 0 };
+    const fulfillment = income.attached
+      ? syncFulfillmentBillFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible })
+      : { ok: false, attached: false, malls: 0, rows: 0 };
     const violation = income.attached
       ? syncViolationFromCapture(db, { attachCloudDb: attachTemuCloudDbIfPossible })
       : { ok: false, attached: false, malls: 0, rows: 0 };
-    const totalRows = (Number(income.rows) || 0) + (Number(detail.rows) || 0) + (Number(fund.rows) || 0) + (Number(order.rows) || 0) + (Number(fundSummary.rows) || 0) + (Number(epr.rows) || 0) + (Number(frozen.rows) || 0) + (Number(violation.rows) || 0);
+    const totalRows = (Number(income.rows) || 0) + (Number(detail.rows) || 0) + (Number(fund.rows) || 0) + (Number(order.rows) || 0) + (Number(fundSummary.rows) || 0) + (Number(epr.rows) || 0) + (Number(frozen.rows) || 0) + (Number(accountOverview.rows) || 0) + (Number(fulfillment.rows) || 0) + (Number(violation.rows) || 0);
     if (totalRows > 0 && typeof clearMultiStoreReportCache === "function") {
       clearMultiStoreReportCache();
     }
     const result = {
-      ok: Boolean(income.ok && detail.ok && fund.ok && order.ok && fundSummary.ok && epr.ok && frozen.ok && violation.ok),
+      ok: Boolean(income.ok && detail.ok && fund.ok && order.ok && fundSummary.ok && epr.ok && frozen.ok && accountOverview.ok && fulfillment.ok && violation.ok),
       attached: income.attached,
-      malls: Math.max(Number(income.malls) || 0, Number(detail.malls) || 0, Number(fund.malls) || 0, Number(order.malls) || 0, Number(fundSummary.malls) || 0, Number(epr.malls) || 0, Number(frozen.malls) || 0, Number(violation.malls) || 0),
+      malls: Math.max(Number(income.malls) || 0, Number(detail.malls) || 0, Number(fund.malls) || 0, Number(order.malls) || 0, Number(fundSummary.malls) || 0, Number(epr.malls) || 0, Number(frozen.malls) || 0, Number(accountOverview.malls) || 0, Number(fulfillment.malls) || 0, Number(violation.malls) || 0),
       rows: totalRows,
       incomeRows: Number(income.rows) || 0,
       detailRows: Number(detail.rows) || 0,
@@ -4541,6 +4550,8 @@ async function handleTemuSettlementIncomeSyncRequest({ req, res, db }) {
       fundSummaryRows: Number(fundSummary.rows) || 0,
       eprRows: Number(epr.rows) || 0,
       frozenRows: Number(frozen.rows) || 0,
+      accountOverviewRows: Number(accountOverview.rows) || 0,
+      fulfillmentRows: Number(fulfillment.rows) || 0,
       violationRows: Number(violation.rows) || 0,
       income,
       detail,

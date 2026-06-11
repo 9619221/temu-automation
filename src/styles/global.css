@@ -8713,3 +8713,10 @@ body {
 .op-panel-table .ant-table-thead > tr > th {
   font-size: 14px;
 }
+
+/* Settlement report: keep header labels on one line; horizontal scroll handles width. */
+.settlement-report-table .ant-table-thead > tr > th,
+.settlement-report-table .ant-table-column-title,
+.settlement-report-table .ant-table-column-sorters {
+  white-space: nowrap;
+}

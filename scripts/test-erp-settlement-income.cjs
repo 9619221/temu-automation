@@ -38,10 +38,16 @@ const {
   buildFundFrozenByMall,
   syncViolationFromCapture,
   buildViolationByMall,
+  syncAccountOverviewFromCapture,
+  buildAccountOverviewByMall,
+  syncFulfillmentBillFromCapture,
+  buildFulfillmentBillByMall,
   EPR_FEE_PATHS,
   FUND_FROZEN_PATH,
   VIOLATION_LIST_PATH,
   VIOLATION_SUMMARY_PATH,
+  ACCOUNT_OVERVIEW_PATH,
+  FULFILLMENT_PATHS,
 } = svc._internal;
 
 let pass = 0, fail = 0;
@@ -312,17 +318,30 @@ console.log("\n=== 5) capture 同步 syncSettlementIncomeFromCapture（读 cloud
       { certId: "CERT-3", certName: "西班牙EPR代扣", deductAmount: "￥7.70" },
     ],
   } }), 9100);
+  insEv.run("MALL-I", EPR_FEE_PATHS[3], JSON.stringify({
+    success: true,
+    source: "juxieyun_export",
+    businessType: "Epr",
+    type: "Epr_Product",
+    taskType: 18,
+    rows: [
+      { "\u5546\u54c1ID": "P-EXPORT-1", "\u5546\u54c1\u540d\u79f0": "\u73af\u4fdd\u888b", "\u6570\u91cf": 2, "\u6263\u8d39\u91d1\u989d": "\uffe55.60", "\u56fd\u5bb6/\u5730\u533a": "\u5fb7\u56fd", "\u8bc1\u4e66\u540d\u79f0": "\u5fb7\u56fd\u5305\u88c5EPR" },
+    ],
+  }), 9150);
   const epr = syncEprFeeFromCapture(erp2, { attachCloudDb });
   ok("EPR 同步成功 attached", epr.ok && epr.attached);
-  ok("EPR 写入 3 行（goods 待扣+已扣+platform）", epr.rows === 3 && epr.malls === 1);
+  ok("EPR writes 4 rows including Juxieyun export", epr.rows === 4 && epr.malls === 1);
   const eprWait = erp2.prepare("SELECT amount, currency, cert_name, deduct_status FROM erp_temu_epr_fee WHERE mall_id='MALL-I' AND fee_scope='goods' AND deduct_status='wait'").get();
   near("EPR 待扣金额取 Format.value=12.5", eprWait?.amount, 12.5);
   ok("EPR 待扣币种/证书名入库", eprWait?.currency === "EUR" && eprWait?.cert_name === "法国EPR包装");
   const eprPlat = erp2.prepare("SELECT amount FROM erp_temu_epr_fee WHERE mall_id='MALL-I' AND fee_scope='platform'").get();
   near("EPR 平台待扣剥￥符号=7.70", eprPlat?.amount, 7.7);
+  const eprExport = erp2.prepare("SELECT amount, goods_name, region, cert_name, deduct_status FROM erp_temu_epr_fee WHERE mall_id='MALL-I' AND spu_id='P-EXPORT-1'").get();
+  near("EPR Juxieyun export Chinese amount=5.60", eprExport?.amount, 5.6);
+  ok("EPR Juxieyun export Chinese fields stored", eprExport?.goods_name === "\u73af\u4fdd\u888b" && eprExport?.region === "\u5fb7\u56fd" && eprExport?.cert_name === "\u5fb7\u56fd\u5305\u88c5EPR" && eprExport?.deduct_status === "deducted");
   const eprAgg = buildEprFeeByMall(erp2).get("MALL-I");
   near("EPR 聚合待扣合计=20.2（含 platform）", eprAgg?.wait_amount, 12.5 + 7.7);
-  near("EPR 聚合已扣合计=3.4", eprAgg?.deducted_amount, 3.4);
+  near("EPR deducted amount includes Juxieyun export", eprAgg?.deducted_amount, 3.4 + 5.6);
 
   // ===== 资金限制（fund-frozen/rules，快照语义：最新抓包整店替换）=====
   insEv.run("MALL-J", FUND_FROZEN_PATH, JSON.stringify({ result: { currency: "CNY", rules: [
@@ -356,9 +375,58 @@ console.log("\n=== 5) capture 同步 syncSettlementIncomeFromCapture（读 cloud
   const vRow = erp2.prepare("SELECT goods_name, leaf_reason_name, can_appeal, can_rectify, punish_num FROM erp_temu_violation WHERE mall_id='MALL-K' AND target_id='1001'").get();
   ok("违规明细字段入库（can_not_appeal 取反）", vRow?.goods_name === "刀具A" && vRow?.leaf_reason_name === "欧盟刀具禁投" && vRow?.can_appeal === 1 && vRow?.can_rectify === 1 && vRow?.punish_num === 30);
   const vAgg = buildViolationByMall(erp2).get("MALL-K");
+  const vAggDate = buildViolationByMall(erp2, { startDate: "1970-01-01", endDate: "1970-01-01" }).get("MALL-K");
+  ok("buildViolationByMall date range uses detail rows only", vAggDate?.violation_count === 2);
+  const vAggMiss = buildViolationByMall(erp2, { startDate: "2026-06-01", endDate: "2026-06-30" }).get("MALL-K");
+  ok("buildViolationByMall date range excludes out-of-range rows", !vAggMiss);
   ok("违规聚合带明细", vAgg?.items?.length === 2);
   ok("违规计数取 summary 与明细的大者=5", vAgg?.violation_count === 5);
   ok("加站限制状态透出", vAgg?.add_site_limit_status === 1 && vAgg?.release_limit_time === "2026-07-01");
+
+  // ===== 账户概览（payment/account/amount/info，快照语义：最新抓包整店替换）=====
+  insEv.run("MALL-L", ACCOUNT_OVERVIEW_PATH, JSON.stringify({ result: {
+    availableAmount: { amount: 123456, currencyCode: "CNY" }, // 分→1234.56
+    pendingSettlementAmount: "￥3,200.00",                      // 字符串剥￥逗号→3200
+    frozenAmount: 50, totalAmount: { amount: 480000 },          // 裸对象分→4800
+  } }), 9600);
+  insEv.run("MALL-L", ACCOUNT_OVERVIEW_PATH, JSON.stringify({ result: {
+    availableAmount: { amount: 999900, currencyCode: "CNY" },  // 最新抓包→9999
+    totalAmount: { amount: 999900 },
+  } }), 9700);
+  const account = syncAccountOverviewFromCapture(erp2, { attachCloudDb });
+  ok("账户概览同步成功 attached", account.ok && account.attached);
+  const accountRows = erp2.prepare("SELECT COUNT(*) c FROM erp_temu_account_overview WHERE mall_id='MALL-L'").get().c;
+  ok("账户概览快照语义：每店一行", accountRows === 1);
+  const accRow = erp2.prepare("SELECT available_amount, total_amount FROM erp_temu_account_overview WHERE mall_id='MALL-L'").get();
+  near("账户可用取最新抓包分→元=9999", accRow?.available_amount, 9999);
+  const accAgg = buildAccountOverviewByMall(erp2).get("MALL-L");
+  near("账户聚合总额=9999", accAgg?.total_amount, 9999);
+
+  // ===== 履约费用流出（warehouse/express/bill overview+detail）=====
+  insEv.run("MALL-M", FULFILLMENT_PATHS[0], JSON.stringify({ result: {
+    totalAmount: { amount: 654300, currencyCode: "CNY" },      // overview 总额：分→6543
+  } }), 9800);
+  insEv.run("MALL-M", FULFILLMENT_PATHS[1], JSON.stringify({ result: { list: [
+    { billId: "WB-1", billType: "跨境运费", amount: "￥120.50", waybillNo: "SF123", statDate: "2026-06-10" },
+    { billId: "WB-2", feeType: "仓储费", feeAmount: { amount: 8000, currencyCode: "CNY" } }, // 分→80
+  ] } }), 9900);
+  const fulfillment = syncFulfillmentBillFromCapture(erp2, { attachCloudDb });
+  ok("履约费用同步成功 attached", fulfillment.ok && fulfillment.attached);
+  ok("履约写入 3 行（1 overview + 2 detail）", fulfillment.rows === 3 && fulfillment.malls === 1);
+  const fbOverview = erp2.prepare("SELECT amount FROM erp_temu_fulfillment_bill WHERE mall_id='MALL-M' AND record_type='overview'").get();
+  near("履约 overview 总额分→元=6543", fbOverview?.amount, 6543);
+  const fbDetail = erp2.prepare("SELECT amount, bill_type, waybill_no FROM erp_temu_fulfillment_bill WHERE mall_id='MALL-M' AND record_type='detail' AND item_key='WB-1'").get();
+  near("履约明细剥￥=120.50", fbDetail?.amount, 120.5);
+  ok("履约明细费用类型/运单号入库", fbDetail?.bill_type === "跨境运费" && fbDetail?.waybill_no === "SF123");
+  const fbAgg = buildFulfillmentBillByMall(erp2).get("MALL-M");
+  const fbAggDate = buildFulfillmentBillByMall(erp2, { startDate: "2026-06-10", endDate: "2026-06-10" }).get("MALL-M");
+  near("buildFulfillmentBillByMall date range filters detail_total", fbAggDate?.detail_total, 120.5);
+  ok("buildFulfillmentBillByMall date range ignores overview snapshot", fbAggDate?.overview_amount === 0 && fbAggDate?.detail_count === 1);
+  const fbAggMiss = buildFulfillmentBillByMall(erp2, { startDate: "2026-06-11", endDate: "2026-06-11" }).get("MALL-M");
+  ok("buildFulfillmentBillByMall date range excludes out-of-range rows", !fbAggMiss);
+  near("履约聚合 overview_amount=6543", fbAgg?.overview_amount, 6543);
+  near("履约聚合 detail_total=200.50", fbAgg?.detail_total, 120.5 + 80);
+  ok("履约聚合 detail_count=2", fbAgg?.detail_count === 2);
 
   const { buildSettlementDetailByMall } = require("../electron/erp/services/multiStoreReport.cjs")._internal;
   const detailByMall = buildSettlementDetailByMall(erp2);
@@ -368,6 +436,10 @@ console.log("\n=== 5) capture 同步 syncSettlementIncomeFromCapture（读 cloud
   near("聚合 settled.total=已到账合计", fAgg?.settled.total, 245.25 - 6.9 + 43.53);
   ok("settled.count=1", fAgg?.settled.count === 1);
   ok("wait_settlement 默认空桶", fAgg?.wait_settlement.total === 0 && fAgg?.wait_settlement.count === 0);
+  const detailInRange = buildSettlementDetailByMall(erp2, { startDate: "2026-06-14", endDate: "2026-06-14" }).get("MALL-F");
+  near("buildSettlementDetailByMall date range includes matching detail", detailInRange?.settled.total, 245.25 - 6.9 + 43.53);
+  const detailOutRange = buildSettlementDetailByMall(erp2, { startDate: "2026-06-10", endDate: "2026-06-13" });
+  ok("buildSettlementDetailByMall date range excludes out-of-range detail", !detailOutRange.has("MALL-F"));
   const emptyDetail = buildSettlementDetailByMall(new Database(":memory:"));
   ok("无表返回 null", emptyDetail === null);
 

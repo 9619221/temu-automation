@@ -448,7 +448,14 @@ function emptySettlementDetail() {
   };
 }
 
-function buildSettlementDetailByMall(db) {
+function buildSettlementDetailByMall(db, opts = {}) {
+  const { startDate, endDate } = opts;
+  const params = [];
+  let dateWhere = "";
+  if (startDate && endDate) {
+    dateWhere = "AND stat_date >= ? AND stat_date <= ?";
+    params.push(startDate, endDate);
+  }
   let rows;
   try {
     rows = db.prepare(`
@@ -462,8 +469,9 @@ function buildSettlementDetailByMall(db) {
              MAX(currency) AS currency
       FROM erp_temu_settlement_detail
       WHERE mall_id IS NOT NULL AND mall_id <> ''
+        ${dateWhere}
       GROUP BY mall_id, settlement_status
-    `).all();
+    `).all(...params);
   } catch (error) {
     if (/no such table/i.test(String(error?.message || ""))) return null;
     throw error;
@@ -1426,7 +1434,9 @@ function buildFundSummaryByMall(db, opts = {}) {
 
 const EPR_FEE_GOODS_PATH = "/api/merchant/eprfee/goods/page-query";
 const EPR_FEE_PLATFORM_PATH = "/api/merchant/eprfee/platform/wait-deduction/page-query";
-const EPR_FEE_PATHS = [EPR_FEE_GOODS_PATH, EPR_FEE_PLATFORM_PATH];
+const EPR_FEE_PACKAGE_PATH = "/api/merchant/eprfee/package/query";
+const EPR_FEE_EXPORT_PATH = "/api/merchant/file/export/history/page";
+const EPR_FEE_PATHS = [EPR_FEE_GOODS_PATH, EPR_FEE_PLATFORM_PATH, EPR_FEE_PACKAGE_PATH, EPR_FEE_EXPORT_PATH];
 const EPR_FEE_MIGRATION = path.join(__dirname, "..", "..", "db", "migrations", "087_temu_epr_fee.sql");
 // goods 响应里四个列表各对应一种扣款状态
 const EPR_GOODS_LIST_STATUS = [
@@ -1444,6 +1454,7 @@ function buildEprFeeRow(item, { mallId, site, feeScope, deductStatus, receivedAt
   // 字段名暂无非空真实样本，按 enum/summary 接口字段推测 + 宽容提取；raw_json 全留供校准
   const amountRaw = firstDefined(item, [
     "amount", "feeAmount", "deductAmount", "totalAmount", "eprFeeAmount", "deductionAmount", "payAmount",
+    "金额", "扣费金额", "已扣费", "费用", "账单金额", "扣款金额", "应付金额", "实付金额",
   ]);
   const amount = (amountRaw && typeof amountRaw === "object")
     ? (normalizeMoneyAmount(amountRaw)?.yuan ?? parseNumberLoose(amountRaw))
@@ -1456,6 +1467,7 @@ function buildEprFeeRow(item, { mallId, site, feeScope, deductStatus, receivedAt
     || item.currency || item.currencyCode || item.alphabetCode || "CNY";
   const explicitKey = firstDefined(item, [
     "id", "billId", "feeId", "certId", "recordId", "detailId", "skuId", "productSkuId",
+    "单据号", "账单号", "流水号", "订单号", "商品ID", "SKU ID", "SKU",
   ]);
   return {
     mall_id: mallId,
@@ -1463,13 +1475,13 @@ function buildEprFeeRow(item, { mallId, site, feeScope, deductStatus, receivedAt
     fee_scope: feeScope,
     deduct_status: deductStatus,
     item_key: explicitKey != null && explicitKey !== "" ? String(explicitKey) : `raw_${stableJsonHash(item)}`,
-    cert_type: toNullableText(firstDefined(item, ["certType", "certCode"])),
-    cert_name: toNullableText(firstDefined(item, ["certName", "certDisplayName"])),
-    region: toNullableText(firstDefined(item, ["regionName", "regionCode", "region", "siteName"])),
-    sku_id: toNullableText(firstDefined(item, ["skuId", "productSkuId", "prodSkuId"])),
-    spu_id: toNullableText(firstDefined(item, ["spuId", "productId", "goodsId"])),
-    goods_name: toNullableText(firstDefined(item, ["goodsName", "productName", "skuName", "title"])),
-    quantity: parseNumberLoose(firstDefined(item, ["quantity", "totalQuantity", "qty", "num"])),
+    cert_type: toNullableText(firstDefined(item, ["certType", "certCode", "证书类型", "资质类型"])),
+    cert_name: toNullableText(firstDefined(item, ["certName", "certDisplayName", "证书名称", "资质名称", "EPR名称", "费用名称", "项目"])),
+    region: toNullableText(firstDefined(item, ["regionName", "regionCode", "region", "siteName", "区域", "站点", "国家/地区", "国家"])),
+    sku_id: toNullableText(firstDefined(item, ["skuId", "productSkuId", "prodSkuId", "SKU ID", "SKU", "sku"])),
+    spu_id: toNullableText(firstDefined(item, ["spuId", "productId", "goodsId", "商品ID", "商品 Id", "SPU ID"])),
+    goods_name: toNullableText(firstDefined(item, ["goodsName", "productName", "skuName", "title", "商品名称", "品名"])),
+    quantity: parseNumberLoose(firstDefined(item, ["quantity", "totalQuantity", "qty", "num", "数量", "件数"])),
     amount: Number.isFinite(amount) ? amount : 0,
     original_amount: Number.isFinite(originalAmount) ? originalAmount : null,
     currency: String(currency || "CNY"),
@@ -1485,6 +1497,15 @@ function toNullableText(value) {
   return text ? text.slice(0, 500) : null;
 }
 
+function getEprExportMeta(body) {
+  const taskType = Number(body?.taskType ?? body?.result?.taskType);
+  const type = String(body?.type || body?.result?.type || "");
+  if (taskType === 18 || type === "Epr_Product") return { feeScope: "goods", deductStatus: "deducted" };
+  if (taskType === 16 || type === "Epr_Proxy") return { feeScope: "proxy", deductStatus: "deducted" };
+  if (taskType === 21 || type === "Epr_Agency") return { feeScope: "agency", deductStatus: "deducted" };
+  return { feeScope: "export", deductStatus: "deducted" };
+}
+
 function buildEprFeeRowsFromCaptureEvent(ev) {
   let body;
   try { body = JSON.parse(ev.body_json); } catch { return []; }
@@ -1493,7 +1514,20 @@ function buildEprFeeRowsFromCaptureEvent(ev) {
   const site = String(ev.site || "").trim() || "agentseller";
   const result = body?.result || {};
   const rows = [];
-  if (ev.url_path === EPR_FEE_GOODS_PATH) {
+  if (ev.url_path === EPR_FEE_EXPORT_PATH) {
+    const exportRows = Array.isArray(body?.rows) ? body.rows : (Array.isArray(result?.rows) ? result.rows : []);
+    const meta = getEprExportMeta(body);
+    for (const item of exportRows) {
+      if (!item || typeof item !== "object") continue;
+      rows.push(buildEprFeeRow({
+        ...item,
+        __juxieyun_type: body.type || result.type || "",
+        __juxieyun_task_type: body.taskType || result.taskType || "",
+        __juxieyun_file_name: body.fileName || result.fileName || "",
+        __juxieyun_area: body.area || result.area || "",
+      }, { mallId, site, feeScope: meta.feeScope, deductStatus: meta.deductStatus, receivedAt: ev.received_at }));
+    }
+  } else if (ev.url_path === EPR_FEE_GOODS_PATH) {
     for (const [listKey, deductStatus] of EPR_GOODS_LIST_STATUS) {
       const list = result[listKey];
       if (!Array.isArray(list)) continue;
@@ -1507,6 +1541,22 @@ function buildEprFeeRowsFromCaptureEvent(ev) {
     for (const item of list) {
       if (!item || typeof item !== "object") continue;
       rows.push(buildEprFeeRow(item, { mallId, site, feeScope: "platform", deductStatus: "wait", receivedAt: ev.received_at }));
+    }
+  } else if (ev.url_path === EPR_FEE_PACKAGE_PATH) {
+    // 包裹级：响应列表名无真实样本，按 goods 四列表 + dataList/list 通用提取，落 fee_scope='package'。
+    // item_key 优先显式 id、否则按内容 hash 去重，多列表并存不会重复落同一条。
+    const pkgLists = [
+      ...EPR_GOODS_LIST_STATUS,
+      ["dataList", "wait"],
+      ["list", "wait"],
+    ];
+    for (const [listKey, deductStatus] of pkgLists) {
+      const list = result[listKey];
+      if (!Array.isArray(list)) continue;
+      for (const item of list) {
+        if (!item || typeof item !== "object") continue;
+        rows.push(buildEprFeeRow(item, { mallId, site, feeScope: "package", deductStatus, receivedAt: ev.received_at }));
+      }
     }
   }
   return rows;
@@ -1744,6 +1794,300 @@ function buildFundFrozenByMall(db) {
   return byMall;
 }
 
+// ============ 账户概览（090）：payment/account/amount/info 抓包物化（每店一行快照） ============
+
+const ACCOUNT_OVERVIEW_PATH = "/api/merchant/payment/account/amount/info";
+const ACCOUNT_OVERVIEW_MIGRATION = path.join(__dirname, "..", "..", "db", "migrations", "090_temu_account_overview.sql");
+
+function ensureAccountOverviewSchema(db) {
+  db.exec(fs.readFileSync(ACCOUNT_OVERVIEW_MIGRATION, "utf8"));
+}
+
+// 金额宽容提取：对象走 normalizeMoneyAmount（分→元），字符串/数字走 parseNumberLoose（按元）
+function extractMoneyYuan(obj, keys) {
+  const raw = firstDefined(obj, keys);
+  if (raw == null) return 0;
+  if (typeof raw === "object") {
+    const n = normalizeMoneyAmount(raw)?.yuan ?? parseNumberLoose(raw);
+    return Number.isFinite(n) ? n : 0;
+  }
+  const n = parseNumberLoose(raw);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function buildAccountOverviewRow(ev) {
+  let body;
+  try { body = JSON.parse(ev.body_json); } catch { return null; }
+  const mallId = String(ev.mall_id || "").trim();
+  if (!mallId) return null;
+  const r = body?.result;
+  if (!r || typeof r !== "object") return null;
+  const currencyRaw = firstDefined(r, ["currency", "currencyCode", "alphabetCode"]);
+  return {
+    mall_id: mallId,
+    available_amount: extractMoneyYuan(r, ["availableAmount", "availableBalance", "available", "canUseAmount"]),
+    in_transit_amount: extractMoneyYuan(r, ["inTransitAmount", "onTheWayAmount", "transitAmount", "onWayAmount"]),
+    pending_settle_amount: extractMoneyYuan(r, ["pendingSettlementAmount", "waitSettleAmount", "toBeSettledAmount", "unsettledAmount", "pendingAmount"]),
+    frozen_amount: extractMoneyYuan(r, ["frozenAmount", "freezeAmount", "frozen"]),
+    withdrawable_amount: extractMoneyYuan(r, ["withdrawableAmount", "canWithdrawAmount", "withdrawAmount"]),
+    total_amount: extractMoneyYuan(r, ["totalAmount", "accountAmount", "balanceAmount", "balance", "total"]),
+    currency: String(currencyRaw || "CNY"),
+    raw_json: JSON.stringify(r),
+    source_received_at: Number(ev.received_at) || null,
+  };
+}
+
+function syncAccountOverviewFromCapture(db, opts = {}) {
+  ensureAccountOverviewSchema(db);
+  const attachCloudDb = opts.attachCloudDb;
+  if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
+    return { ok: false, attached: false, malls: 0, rows: 0 };
+  }
+  let events;
+  try {
+    events = db.prepare(`
+      SELECT mall_id, body_json, received_at
+        FROM cloud.capture_events
+       WHERE url_path = ?
+         AND mall_id IS NOT NULL AND mall_id <> ''
+         AND body_json IS NOT NULL AND body_json <> ''
+       ORDER BY received_at ASC
+    `).all(ACCOUNT_OVERVIEW_PATH);
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) {
+      return { ok: false, attached: true, malls: 0, rows: 0 };
+    }
+    throw error;
+  }
+  // 快照语义：每店取最新一次抓包覆盖
+  const latestByMall = new Map();
+  for (const ev of events) latestByMall.set(String(ev.mall_id), ev);
+  const now = new Date().toISOString();
+  const ins = db.prepare(`
+    INSERT INTO erp_temu_account_overview
+      (mall_id, available_amount, in_transit_amount, pending_settle_amount, frozen_amount,
+       withdrawable_amount, total_amount, currency, raw_json, source_received_at, synced_at)
+    VALUES
+      (@mall_id, @available_amount, @in_transit_amount, @pending_settle_amount, @frozen_amount,
+       @withdrawable_amount, @total_amount, @currency, @raw_json, @source_received_at, @now)
+    ON CONFLICT(mall_id) DO UPDATE SET
+      available_amount = excluded.available_amount,
+      in_transit_amount = excluded.in_transit_amount,
+      pending_settle_amount = excluded.pending_settle_amount,
+      frozen_amount = excluded.frozen_amount,
+      withdrawable_amount = excluded.withdrawable_amount,
+      total_amount = excluded.total_amount,
+      currency = excluded.currency,
+      raw_json = excluded.raw_json,
+      source_received_at = excluded.source_received_at,
+      synced_at = excluded.synced_at
+  `);
+  let total = 0;
+  const malls = new Set();
+  const tx = db.transaction(() => {
+    for (const [mallId, ev] of latestByMall) {
+      const row = buildAccountOverviewRow(ev);
+      if (!row) continue;
+      ins.run({ ...row, now });
+      total++;
+      malls.add(mallId);
+    }
+  });
+  tx();
+  return { ok: true, attached: true, malls: malls.size, rows: total };
+}
+
+function buildAccountOverviewByMall(db) {
+  let rows;
+  try {
+    rows = db.prepare(`
+      SELECT mall_id, available_amount, in_transit_amount, pending_settle_amount, frozen_amount,
+             withdrawable_amount, total_amount, currency
+        FROM erp_temu_account_overview
+    `).all();
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) return new Map();
+    throw error;
+  }
+  const byMall = new Map();
+  for (const row of rows) {
+    const mallId = String(row.mall_id || "").trim();
+    if (!mallId) continue;
+    byMall.set(mallId, {
+      available_amount: Number(row.available_amount) || 0,
+      in_transit_amount: Number(row.in_transit_amount) || 0,
+      pending_settle_amount: Number(row.pending_settle_amount) || 0,
+      frozen_amount: Number(row.frozen_amount) || 0,
+      withdrawable_amount: Number(row.withdrawable_amount) || 0,
+      total_amount: Number(row.total_amount) || 0,
+      currency: row.currency || "CNY",
+    });
+  }
+  return byMall;
+}
+
+// ============ 履约费用流出（091）：warehouse/express/bill overview+detail 抓包物化 ============
+
+const FULFILLMENT_OVERVIEW_PATH = "/api/merchant/warehouse/express/bill/global/overview";
+const FULFILLMENT_DETAIL_PATH = "/api/merchant/warehouse/express/bill/detail/list";
+const FULFILLMENT_PATHS = [FULFILLMENT_OVERVIEW_PATH, FULFILLMENT_DETAIL_PATH];
+const FULFILLMENT_MIGRATION = path.join(__dirname, "..", "..", "db", "migrations", "091_temu_fulfillment_bill.sql");
+
+function ensureFulfillmentBillSchema(db) {
+  db.exec(fs.readFileSync(FULFILLMENT_MIGRATION, "utf8"));
+}
+
+function buildFulfillmentDetailRow(item, { mallId, receivedAt }) {
+  const explicitKey = firstDefined(item, ["billId", "id", "waybillNo", "trackingNumber", "recordId", "detailId", "ptransId"]);
+  return {
+    mall_id: mallId,
+    record_type: "detail",
+    item_key: explicitKey != null && explicitKey !== "" ? String(explicitKey) : `raw_${stableJsonHash(item)}`,
+    bill_type: toNullableText(firstDefined(item, ["billType", "feeType", "chargeType", "expenseType", "type"])),
+    amount: extractMoneyYuan(item, ["amount", "feeAmount", "chargeAmount", "totalAmount", "expressFee", "billAmount"]),
+    currency: String(firstDefined(item, ["currency", "currencyCode"]) || "CNY"),
+    waybill_no: toNullableText(firstDefined(item, ["waybillNo", "trackingNumber", "expressNo"])),
+    stat_date: normalizeSettlementDetailDate(item, receivedAt),
+    raw_json: JSON.stringify(item),
+    source_received_at: Number(receivedAt) || null,
+  };
+}
+
+function buildFulfillmentOverviewRow(result, { mallId, receivedAt }) {
+  return {
+    mall_id: mallId,
+    record_type: "overview",
+    item_key: "_overview",
+    bill_type: null,
+    amount: extractMoneyYuan(result, ["totalWaitPayAmount", "totalAmount", "totalFee", "totalExpense", "amount", "billTotalAmount", "sumAmount"]),
+    currency: String(firstDefined(result, ["currency", "currencyCode"]) || "CNY"),
+    waybill_no: null,
+    stat_date: null,
+    raw_json: JSON.stringify(result),
+    source_received_at: Number(receivedAt) || null,
+  };
+}
+
+function syncFulfillmentBillFromCapture(db, opts = {}) {
+  ensureFulfillmentBillSchema(db);
+  const attachCloudDb = opts.attachCloudDb;
+  if (typeof attachCloudDb !== "function" || attachCloudDb(db) !== true) {
+    return { ok: false, attached: false, malls: 0, rows: 0 };
+  }
+  let events;
+  try {
+    events = db.prepare(`
+      SELECT mall_id, url_path, body_json, received_at
+        FROM cloud.capture_events
+       WHERE url_path IN (${FULFILLMENT_PATHS.map(() => "?").join(",")})
+         AND mall_id IS NOT NULL AND mall_id <> ''
+         AND body_json IS NOT NULL AND body_json <> ''
+       ORDER BY received_at ASC
+    `).all(...FULFILLMENT_PATHS);
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) {
+      return { ok: false, attached: true, malls: 0, rows: 0 };
+    }
+    throw error;
+  }
+  const now = new Date().toISOString();
+  // overview：每店取最新覆盖；detail：清掉该店旧明细后重灌（快照语义，避免历史明细累积虚高）
+  const latestOverview = new Map();
+  const detailEventsByMall = new Map();
+  for (const ev of events) {
+    const mid = String(ev.mall_id);
+    if (ev.url_path === FULFILLMENT_OVERVIEW_PATH) {
+      latestOverview.set(mid, ev);
+    } else {
+      if (!detailEventsByMall.has(mid)) detailEventsByMall.set(mid, []);
+      detailEventsByMall.get(mid).push(ev);
+    }
+  }
+  const ins = db.prepare(`
+    INSERT INTO erp_temu_fulfillment_bill
+      (mall_id, record_type, item_key, bill_type, amount, currency, waybill_no, stat_date, raw_json, source_received_at, synced_at)
+    VALUES
+      (@mall_id, @record_type, @item_key, @bill_type, @amount, @currency, @waybill_no, @stat_date, @raw_json, @source_received_at, @now)
+    ON CONFLICT(mall_id, record_type, item_key) DO UPDATE SET
+      bill_type = excluded.bill_type, amount = excluded.amount, currency = excluded.currency,
+      waybill_no = excluded.waybill_no, stat_date = excluded.stat_date, raw_json = excluded.raw_json,
+      source_received_at = excluded.source_received_at, synced_at = excluded.synced_at
+  `);
+  const delDetail = db.prepare("DELETE FROM erp_temu_fulfillment_bill WHERE mall_id = ? AND record_type = 'detail'");
+  let total = 0;
+  const malls = new Set();
+  const tx = db.transaction(() => {
+    for (const [mallId, ev] of latestOverview) {
+      let body; try { body = JSON.parse(ev.body_json); } catch { continue; }
+      const r = body?.result;
+      if (!r || typeof r !== "object") continue;
+      ins.run({ ...buildFulfillmentOverviewRow(r, { mallId, receivedAt: ev.received_at }), now });
+      total++; malls.add(mallId);
+    }
+    for (const [mallId, evs] of detailEventsByMall) {
+      delDetail.run(mallId);
+      for (const ev of evs) {
+        let body; try { body = JSON.parse(ev.body_json); } catch { continue; }
+        const r = body?.result || {};
+        const list = [r.list, r.resultList, r.dataList, r.pageItems, r.records].find((v) => Array.isArray(v)) || [];
+        for (const item of list) {
+          if (!item || typeof item !== "object") continue;
+          ins.run({ ...buildFulfillmentDetailRow(item, { mallId, receivedAt: ev.received_at }), now });
+          total++; malls.add(mallId);
+        }
+      }
+    }
+  });
+  tx();
+  return { ok: true, attached: true, malls: malls.size, rows: total };
+}
+
+function buildFulfillmentBillByMall(db, opts = {}) {
+  const { startDate, endDate } = opts;
+  const params = [];
+  let where = "";
+  if (startDate && endDate) {
+    where = "WHERE record_type = 'detail' AND stat_date >= ? AND stat_date <= ?";
+    params.push(startDate, endDate);
+  }
+  let rows;
+  try {
+    rows = db.prepare(`
+      SELECT mall_id, record_type, bill_type, amount, currency, waybill_no, stat_date
+        FROM erp_temu_fulfillment_bill
+       ${where}
+       ORDER BY mall_id, record_type, amount DESC
+    `).all(...params);
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message || ""))) return new Map();
+    throw error;
+  }
+  const byMall = new Map();
+  for (const row of rows) {
+    const mallId = String(row.mall_id || "").trim();
+    if (!mallId) continue;
+    if (!byMall.has(mallId)) byMall.set(mallId, { overview_amount: 0, detail_total: 0, detail_count: 0, currency: "CNY", items: [] });
+    const out = byMall.get(mallId);
+    if (row.currency) out.currency = row.currency;
+    if (row.record_type === "overview") {
+      out.overview_amount = Number(row.amount) || 0;
+    } else {
+      out.detail_total += Number(row.amount) || 0;
+      out.detail_count += 1;
+      if (out.items.length < 200) {
+        out.items.push({
+          bill_type: row.bill_type,
+          amount: Number(row.amount) || 0,
+          currency: row.currency,
+          waybill_no: row.waybill_no,
+          stat_date: row.stat_date,
+        });
+      }
+    }
+  }
+  return byMall;
+}
+
 // ============ 违规处罚明细（089）：tmod_punish entrance/list + island summary 物化 ============
 
 const VIOLATION_LIST_PATH = "/mms/tmod_punish/agent/merchant_appeal/entrance/list";
@@ -1891,6 +2235,14 @@ function syncViolationFromCapture(db, opts = {}) {
 
 function buildViolationByMall(db, opts = {}) {
   const detailLimit = Number(opts.detailLimit) || 50;
+  const { startDate, endDate } = opts;
+  const params = [];
+  let detailWhere = "";
+  const hasDateRange = !!(startDate && endDate);
+  if (hasDateRange) {
+    detailWhere = "WHERE stat_date >= ? AND stat_date <= ?";
+    params.push(startDate, endDate);
+  }
   let detailRows, summaryRows;
   try {
     detailRows = db.prepare(`
@@ -1898,9 +2250,10 @@ function buildViolationByMall(db, opts = {}) {
              violation_desc, punish_status_desc, appeal_status, can_appeal, can_rectify,
              site_num, punish_num, stat_date
         FROM erp_temu_violation
+       ${detailWhere}
        ORDER BY mall_id, source_received_at DESC
-    `).all();
-    summaryRows = db.prepare(`
+    `).all(...params);
+    summaryRows = hasDateRange ? [] : db.prepare(`
       SELECT mall_id, violation_count, add_site_limit_status, release_limit_time
         FROM erp_temu_violation_summary
     `).all();
@@ -2010,8 +2363,14 @@ function querySettlementData(db, opts = {}) {
   let frozenByMall;
   try { frozenByMall = buildFundFrozenByMall(db); }
   catch { frozenByMall = new Map(); }
+  let accountOverviewByMall;
+  try { accountOverviewByMall = buildAccountOverviewByMall(db); }
+  catch { accountOverviewByMall = new Map(); }
+  let fulfillmentByMall;
+  try { fulfillmentByMall = buildFulfillmentBillByMall(db, { startDate, endDate }); }
+  catch { fulfillmentByMall = new Map(); }
   let violationByMall;
-  try { violationByMall = buildViolationByMall(db); }
+  try { violationByMall = buildViolationByMall(db, { startDate, endDate }); }
   catch { violationByMall = new Map(); }
 
   // 2. 销量/成本：纯本地数据（官方 salesv2 物化表 × erp_skus 加权均价）
@@ -2067,14 +2426,14 @@ function querySettlementData(db, opts = {}) {
 
   // 4. settlement_detail (全量不限时段)
   let sdByMall = null;
-  try { sdByMall = buildSettlementDetailByMall(db); } catch { sdByMall = null; }
+  try { sdByMall = buildSettlementDetailByMall(db, { startDate, endDate }); } catch { sdByMall = null; }
 
   // 5. 店铺字典
   const dict = readMallDictionary(db);
   const dictByMall = new Map(dict.map((row) => [row.mall_id, row]));
 
   // 6. 合并所有出现过的 mall_id
-  const allMalls = new Set([...fundByMall.keys(), ...fundSummaryByMall.keys(), ...riskByMall.keys(), ...eprByMall.keys(), ...frozenByMall.keys(), ...violationByMall.keys(), ...finByMall.keys(), ...stlIncByMall.keys()]);
+  const allMalls = new Set([...fundByMall.keys(), ...fundSummaryByMall.keys(), ...riskByMall.keys(), ...eprByMall.keys(), ...frozenByMall.keys(), ...accountOverviewByMall.keys(), ...fulfillmentByMall.keys(), ...violationByMall.keys(), ...finByMall.keys(), ...stlIncByMall.keys()]);
   for (const d of dict) allMalls.add(d.mall_id);
 
   const stores = [];
@@ -2097,6 +2456,8 @@ function querySettlementData(db, opts = {}) {
       risk_detail: risk,
       epr_detail: eprByMall.get(mallId) || null,
       fund_frozen: frozenByMall.get(mallId) || null,
+      account_overview: accountOverviewByMall.get(mallId) || null,
+      fulfillment_bill: fulfillmentByMall.get(mallId) || null,
       violation: violationByMall.get(mallId) || null,
       settlement_income: si?.income || 0,  // 真实结算收入（income-summary）
       settlement_income_days: si?.days || 0,
@@ -2119,6 +2480,8 @@ function querySettlementData(db, opts = {}) {
     risk_detail_available: riskByMall.size > 0,
     epr_detail_available: eprByMall.size > 0,
     fund_frozen_available: frozenByMall.size > 0,
+    account_overview_available: accountOverviewByMall.size > 0,
+    fulfillment_bill_available: fulfillmentByMall.size > 0,
     violation_available: violationByMall.size > 0,
     financials_available: finByMall.size > 0,
     settlement_income_available: stlIncByMall.size > 0,
@@ -3783,6 +4146,17 @@ const QUALITY_PROBLEM_ZH = {
 };
 const _qNum = (v) => { if (v == null || v === "") return null; const n = Number(v); return Number.isFinite(n) ? n : null; };
 const _qParse = (s) => { if (!s) return null; try { return JSON.parse(s); } catch { return null; } };
+function getQualityPageItems(j) {
+  const result = j && j.result ? j.result : j;
+  const containers = [result, result?.data, result?.page, result?.pageInfo].filter(Boolean);
+  for (const c of containers) {
+    if (Array.isArray(c)) return c;
+    for (const key of ["pageItems", "items", "list", "records", "data"]) {
+      if (Array.isArray(c?.[key])) return c[key];
+    }
+  }
+  return [];
+}
 // 问题分布数组(problemName + quantity) → 摘要文本「描述不符×4; 货损×1」;空返回 null
 function summarizeQualityProblems(list) {
   if (!Array.isArray(list)) return null;
@@ -3820,7 +4194,7 @@ function buildQualityPanel(db, options = {}) {
     if (!includeTest && isTestMall(ev.mall_id)) continue;
     const site = qualitySiteFromUrl(ev.url);
     const j = _qParse(ev.body_json);
-    const items = j && j.result && Array.isArray(j.result.pageItems) ? j.result.pageItems : [];
+    const items = getQualityPageItems(j);
     for (const it of items) {
       const pid = it.productId != null ? String(it.productId) : (it.goodsId != null ? String(it.goodsId) : null);
       if (!pid) continue;
@@ -4050,6 +4424,7 @@ function buildPipelineOverviewFast(db, options = {}) {
   // 2) cloud 增强(attach 成功才查;失败则流量/活动/限流/合规留空,主体照常)
   const attachCloudDb = options.attachCloudDb;
   const cloudOk = typeof attachCloudDb === "function" && attachCloudDb(db) === true;
+  const qualityMap = new Map(); // mall|pid -> {score,site,afs_order_rate}
   const flowMap = new Map();   // mall|pid -> {expose,click,conv,grow}
   const limSet = new Set();    // mall|pid 高价限流
   const actMap = new Map();    // mall|pid -> {act_cnt,min_price}
@@ -4083,6 +4458,42 @@ function buildPipelineOverviewFast(db, options = {}) {
         FROM cloud.skc_snapshots WHERE tenant_id = ? AND compliance_status IS NOT NULL AND product_id IS NOT NULL AND product_id <> ''
        GROUP BY mall_id, product_id`, [tid])) {
       compMap.set(c.mall_id + "|" + c.product_id, c.cs || null);
+    }
+    const latestQualityBySite = new Map();
+    for (const ev of optionalAllLocal(db, `
+      SELECT mall_id, url, body_json, received_at
+        FROM cloud.capture_events
+       WHERE url_path = ? AND mall_id IS NOT NULL AND mall_id <> ''
+       ORDER BY received_at ASC`, [QUALITY_PAGEQUERY_PATH])) {
+      const site = qualitySiteFromUrl(ev.url);
+      const j = _qParse(ev.body_json);
+      const items = getQualityPageItems(j);
+      for (const it of items) {
+        const productId = it.productId != null ? String(it.productId) : "";
+        const goodsId = it.goodsId != null ? String(it.goodsId) : "";
+        const pid = productId || goodsId;
+        if (!pid) continue;
+        const score = _qNum(it.goodsAfsScore);
+        if (score == null) continue;
+        latestQualityBySite.set(`${ev.mall_id}|${site}|${pid}`, {
+          mall_id: String(ev.mall_id),
+          product_id: productId || null,
+          goods_id: goodsId || null,
+          site,
+          score,
+          afs_order_rate: _qNum(it.qltyAfsOrdrRate),
+        });
+      }
+    }
+    const rememberQuality = (mallId, id, q) => {
+      if (!id) return;
+      const key = mallId + "|" + id;
+      const prev = qualityMap.get(key);
+      if (!prev || q.score < prev.score) qualityMap.set(key, q);
+    };
+    for (const q of latestQualityBySite.values()) {
+      rememberQuality(q.mall_id, q.product_id, q);
+      rememberQuality(q.mall_id, q.goods_id, q);
     }
     for (const s of optionalAllLocal(db, `
       WITH ls AS (SELECT mall_id, MAX(stat_date) sd FROM cloud.temu_sales_snapshot WHERE tenant_id = ? GROUP BY mall_id)
@@ -4149,6 +4560,7 @@ function buildPipelineOverviewFast(db, options = {}) {
     const flow = flowMap.get(k) || {};
     const act = actMap.get(k) || {};
     const enr = enrichMap.get(k) || {};
+    const quality = qualityMap.get(k) || {};
     const qc = qcMap.get(String(row.product_id)) || {};
     const detail = row.skus_detail || [];
     const today = detail.reduce((x, d) => x + (d.today || 0), 0);
@@ -4170,6 +4582,9 @@ function buildPipelineOverviewFast(db, options = {}) {
       conv: flow.conv == null ? null : flow.conv, grow: flow.grow || null,
       limited: limSet.has(k), act_cnt: act.act_cnt || 0, act_min_price: act.min_price == null ? null : act.min_price,
       declared_price: enr.declared == null ? null : enr.declared,
+      quality_score: quality.score == null ? null : quality.score,
+      quality_site: quality.site || null,
+      quality_afs_order_rate: quality.afs_order_rate == null ? null : quality.afs_order_rate,
       compliance: compMap.get(k) || null,
       lifecycle_status: life,
       qc_bad: qc.bad || 0, qc_defective: qc.defective || 0,
@@ -4436,6 +4851,12 @@ module.exports = {
   syncFundFrozenFromCapture,
   ensureFundFrozenSchema,
   buildFundFrozenByMall,
+  syncAccountOverviewFromCapture,
+  ensureAccountOverviewSchema,
+  buildAccountOverviewByMall,
+  syncFulfillmentBillFromCapture,
+  ensureFulfillmentBillSchema,
+  buildFulfillmentBillByMall,
   syncViolationFromCapture,
   ensureViolationSchema,
   buildViolationByMall,
@@ -4468,6 +4889,10 @@ module.exports = {
     syncEprFeeFromCapture, buildEprFeeByMall,
     FUND_FROZEN_PATH, buildFundFrozenRowsFromCaptureEvent,
     syncFundFrozenFromCapture, buildFundFrozenByMall,
+    ACCOUNT_OVERVIEW_PATH, buildAccountOverviewRow,
+    syncAccountOverviewFromCapture, buildAccountOverviewByMall,
+    FULFILLMENT_PATHS, buildFulfillmentDetailRow, buildFulfillmentOverviewRow,
+    syncFulfillmentBillFromCapture, buildFulfillmentBillByMall,
     VIOLATION_LIST_PATH, VIOLATION_SUMMARY_PATH, buildViolationRowsFromCaptureEvent,
     syncViolationFromCapture, buildViolationByMall,
   },
