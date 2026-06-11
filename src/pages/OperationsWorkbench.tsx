@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useTransition } from "react";
 import { Alert, Button, Card, Empty, Image, Input, InputNumber, Modal, Segmented, Select, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from "antd";
 import { EyeOutlined, ReloadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
@@ -323,6 +323,39 @@ export default function OperationsWorkbench() {
   const [selActRows, setSelActRows] = useState<ActivityRow[]>([]); // 活动报名:勾选待提交行
   const [enrollBusy, setEnrollBusy] = useState(false);
   const [actSkuOnly, setActSkuOnly] = useSessionState(owViewKey("actSkuOnly"), true); // 活动报名:仅看有货号的行(店铺-商品-活动维度)
+  const [, startJumpTransition] = useTransition();
+  const jumpWorkbench = useCallback((tab: string, query: string, before?: () => void) => {
+    before?.();
+    setActiveTab(tab);
+    if (query) startJumpTransition(() => setSearchInput(query));
+  }, [setActiveTab, setSearchInput, startJumpTransition]);
+  const goPipelineRiskTag = useCallback((tag: string, item: { code?: string; name?: string; productId?: string | null }) => {
+    const codeQuery = String(item.code || "").trim();
+    const productQuery = String(item.productId || "").trim();
+    const nameQuery = String(item.name || "").trim();
+    if (tag === "qc_fail") {
+      jumpWorkbench("qc", codeQuery || nameQuery || productQuery);
+      return;
+    }
+    if (tag === "compliance") {
+      jumpWorkbench("product", productQuery || nameQuery || codeQuery, () => setProdSeg("panel"));
+      return;
+    }
+    if (tag === "limited") {
+      jumpWorkbench("hpf", productQuery || nameQuery || codeQuery);
+      return;
+    }
+    if (tag === "stock_out" || tag === "urgent_restock") {
+      jumpWorkbench("product", codeQuery || nameQuery || productQuery, () => setProdSeg("restock"));
+      return;
+    }
+    if (tag === "quality_score" || tag === "low_score" || tag === "many_bad_reviews" || tag === "high_return_rate" || tag === "quality" || tag === "quality_risk") {
+      jumpWorkbench("quality", productQuery || nameQuery || codeQuery);
+      return;
+    }
+
+    jumpWorkbench("risk", nameQuery || codeQuery || productQuery);
+  }, [jumpWorkbench, setProdSeg]);
   const [enrollModalSku, setEnrollModalSku] = useState<{ mall_id: string; store_code: string | null; sku_ext_code: string; product_name: string | null } | null>(null); // 报名弹窗:当前商品(null=关闭)
   // 待办闭环(第一版落 localStorage,零后端撞车;task key 稳定,后续可平滑迁 op_task_state 表)
   const [todoState, setTodoState] = useState<Record<string, "done" | "ignored">>(() => {
@@ -690,6 +723,23 @@ export default function OperationsWorkbench() {
     if (activeTab === "hpf" && !hpfLoaded && !hpfLoading) loadHpf();
   }, [activeTab, shopLoaded, shopLoading, trendLoaded, trendLoading, adLoaded, adLoading, stockLoaded, stockLoading, riskLoaded, riskLoading, actLoaded, actLoading, panelLoaded, panelLoading, lifecycleLoaded, lifecycleLoading, firstShipLoaded, firstShipLoading, goodsCreatedLoaded, goodsCreatedLoading, qcLoaded, qcLoading, qualityLoaded, qualityLoading, reviewLoaded, reviewLoading, hpfLoaded, hpfLoading, loadShop, loadTrend, loadAd, loadStockOrders, loadRisk, loadAct, loadPanel, loadLifecycle, loadFirstShip, loadGoodsCreated, loadQc, loadQuality, loadReviews, loadHpf]);
 
+  useEffect(() => {
+    if (activeTab !== "pipeline") return;
+    const lightTimer = window.setTimeout(() => {
+      if (!riskLoaded && !riskLoading) loadRisk();
+      if (!qcLoaded && !qcLoading) loadQc();
+      if (!qualityLoaded && !qualityLoading) loadQuality();
+      if (!hpfLoaded && !hpfLoading) loadHpf();
+    }, 700);
+    const panelTimer = window.setTimeout(() => {
+      if (!panelLoaded && !panelLoading) loadPanel();
+    }, 1600);
+    return () => {
+      window.clearTimeout(lightTimer);
+      window.clearTimeout(panelTimer);
+    };
+  }, [activeTab, riskLoaded, riskLoading, panelLoaded, panelLoading, qcLoaded, qcLoading, qualityLoaded, qualityLoading, hpfLoaded, hpfLoading, loadRisk, loadPanel, loadQc, loadQuality, loadHpf]);
+
   const diagnosed: DiagnosedRow[] = useMemo(() => skuRows.map((r) => {
     const issues = diagnose(r);
     return { ...r, _issues: issues, _level: issues.length ? Math.max(...issues.map((i) => i.level)) : 0 };
@@ -716,6 +766,9 @@ export default function OperationsWorkbench() {
     if (storeOwnerMap.size === 0) return true;
     return storeOwnerMap.get(code || "") === ownerFilter;
   }, [ownerFilter, storeOwnerMap]);
+  const isPipelineStoreInScope = useCallback((storeCode?: string | null, mallId?: string | null) => {
+    return inScope(storeCode || mallId);
+  }, [inScope]);
 
   const storeOptions = useMemo(() => {
     const s = new Set<string>();
@@ -1491,7 +1544,7 @@ export default function OperationsWorkbench() {
     },
     {
       key: "pipeline", label: "商品全景",
-      children: <PipelineTab reloadSignal={pipelineReloadSignal} />,
+      children: <PipelineTab reloadSignal={pipelineReloadSignal} isStoreInScope={isPipelineStoreInScope} onRiskTagClick={goPipelineRiskTag} />,
     },
     {
       key: "todo", label: "今日待办",

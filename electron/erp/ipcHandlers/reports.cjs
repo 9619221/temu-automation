@@ -409,7 +409,8 @@ function registerReportsHandlers(ipcMain, deps) {
     try {
       if (shouldUseClientRuntime()) {
         ensureClientRuntime();
-        return await remoteRequest("/api/erp/reports/pipeline-overview", { method: "GET" });
+        const force = payload?.force ? "1" : "0";
+        return await remoteRequest(`/api/erp/reports/pipeline-overview?force=${force}`, { method: "GET" });
       }
       requireErp();
       const { buildPipelineOverview } = require("../services/multiStoreReport.cjs");
