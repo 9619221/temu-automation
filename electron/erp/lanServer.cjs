@@ -26,6 +26,7 @@ const ROLE_PERMISSIONS = Object.freeze({
   "/api/master-data/workbench": ["admin", "manager", "operations", "buyer"],
   "/api/master-data/sku-ids": ["admin", "manager", "operations", "buyer"],
   "/api/master-data/sku-stock-details": ["admin", "manager", "operations", "buyer", "warehouse"],
+  "/api/master-data/supplier-goods": ["admin", "manager", "operations", "buyer"],
   "/api/master-data/mappings": ["admin", "manager", "operations", "buyer"],
   "/api/master-data/mapping-ids": ["admin", "manager", "operations", "buyer"],
   "/api/master-data/purchase-returns": ["admin", "manager", "operations", "buyer", "finance"],
@@ -5152,6 +5153,59 @@ async function handleRequest({
         workbench,
         ...workbench,
       });
+      return;
+    }
+
+    if (pathname === "/api/master-data/supplier-goods") {
+      // supplierId 可选：不传返回全量货盘明细（供应商管理页主表），传则只返回该供应商名下货品
+      const payload = await readOptionalPayload(req);
+      const supplierId = String(payload?.supplierId || payload?.supplier_id || payload?.id || "").trim();
+      const companyId = session.user?.companyId;
+      const limit = Math.min(Number(payload?.limit) || 500, 10000);
+      const conditions = [];
+      if (supplierId) conditions.push("goods.supplier_id = @supplier_id");
+      if (companyId) conditions.push("goods.company_id = @company_id");
+      const whereSql = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+      const rows = db.prepare(`
+        SELECT
+          goods.*,
+          supplier.address AS supplier_address,
+          supplier.contact_name AS supplier_contact_name,
+          supplier.phone AS supplier_phone,
+          supplier.tags_json AS supplier_tags_json,
+          supplier.tax_rate AS supplier_tax_rate
+        FROM erp_feishu_supplier_goods goods
+        LEFT JOIN erp_suppliers supplier ON supplier.id = goods.supplier_id
+        ${whereSql}
+        ORDER BY goods.source_table, goods.product_name
+        LIMIT @limit
+      `).all({ supplier_id: supplierId || undefined, company_id: companyId, limit });
+      const goods = rows.map((r) => {
+        let supplierTags = [];
+        try { supplierTags = JSON.parse(r.supplier_tags_json || "[]"); } catch {}
+        return {
+          id: r.id,
+          supplierId: r.supplier_id,
+          supplierName: r.supplier_name,
+          productName: r.product_name,
+          productCode: r.product_code,
+          colorSpec: r.color_spec,
+          purchasePrice: r.purchase_price,
+          alibabaUrl: r.alibaba_url,
+          labelSize: r.label_size,
+          shippingReq: r.shipping_req,
+          purchaseMode: r.purchase_mode,
+          shop: r.shop,
+          sourceTable: r.source_table,
+          imageUrl: r.image_url,
+          supplierAddress: r.supplier_address,
+          supplierContactName: r.supplier_contact_name,
+          supplierPhone: r.supplier_phone,
+          supplierTags,
+          supplierTaxRate: r.supplier_tax_rate,
+        };
+      });
+      writeJson(res, 200, { ok: true, goods });
       return;
     }
 
