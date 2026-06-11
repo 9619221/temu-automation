@@ -12,6 +12,7 @@ const erp = window.electronAPI?.erp;
 const appAPI = window.electronAPI?.app;
 const PRODUCT_MASTER_DATA_CACHE_KEY = "temu.product-master-data.cache.v2";
 const PRODUCT_MASTER_DATA_SKUS_CACHE_KEY = `${PRODUCT_MASTER_DATA_CACHE_KEY}.skus`;
+const PRODUCT_MASTER_DATA_GOODS_CACHE_KEY = `${PRODUCT_MASTER_DATA_CACHE_KEY}.supplierGoods`;
 const ADDRESS_WORKBENCH_PARAMS = {
   limit: 20,
   includeRequestDetails: false,
@@ -189,6 +190,26 @@ interface SkuActiveFilterTag {
 }
 
 // 飞书货盘供应商名下货品（erp_feishu_supplier_goods）
+// image_url 兼容两种格式：单 URL 字符串（早期回填）或 JSON 数组（多图）
+function parseGoodsImageUrls(value?: string | null): string[] {
+  const text = String(value || "").trim();
+  if (!text) return [];
+  if (text.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(text);
+      return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
+    } catch {
+      return [];
+    }
+  }
+  return [text];
+}
+
+// 列表缩略图：原图同名 webp 存 feishu-goods-thumbs/，点开预览仍用原图
+function goodsThumbUrl(url: string): string {
+  return url.replace("/uploads/feishu-goods/", "/uploads/feishu-goods-thumbs/").replace(/\.(png|jpg|webp)$/i, ".webp");
+}
+
 interface FeishuSupplierGoodsRow {
   id: string;
   supplierId: string;
@@ -303,6 +324,12 @@ interface ProductMasterDataCache {
 interface ProductMasterDataSkuCache {
   generatedAt?: string;
   skus?: ErpSkuRow[];
+}
+
+// 供应商货品明细量大（8000+ 行），与 SKU 一样走 IndexedDB 缓存，重启后先显示快照再后台刷新。
+interface ProductMasterDataGoodsCache {
+  generatedAt?: string;
+  goods?: FeishuSupplierGoodsRow[];
 }
 
 function statusColor(status?: string) {
@@ -1280,9 +1307,17 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
           const nextAddresses = get1688AddressRows(purchaseWorkbench);
           const nextAccountRows = nextAccounts as ErpAccountRow[];
           const nextSupplierRows = nextSuppliers as ErpSupplierRow[];
+          const nextGoodsRows = Array.isArray(nextGoods) ? (nextGoods as FeishuSupplierGoodsRow[]) : [];
           setAccounts(nextAccountRows);
           setSuppliers(nextSupplierRows);
-          setAllGoods(Array.isArray(nextGoods) ? (nextGoods as FeishuSupplierGoodsRow[]) : []);
+          // 接口瞬断回空时保留已显示的缓存快照，避免列表被清空。
+          setAllGoods((current) => (nextGoodsRows.length || !current.length ? nextGoodsRows : current));
+          if (nextGoodsRows.length) {
+            void writeIndexedPageCache<ProductMasterDataGoodsCache>(PRODUCT_MASTER_DATA_GOODS_CACHE_KEY, {
+              generatedAt: new Date().toISOString(),
+              goods: nextGoodsRows,
+            });
+          }
           if (nextAddresses.length) setAlibaba1688Addresses(nextAddresses);
           try {
             const store = window.electronAPI?.store;
@@ -1381,6 +1416,15 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
     let cancelled = false;
     const boot = async () => {
       if (mode !== "skus") {
+        if (mode === "suppliers") {
+          const goodsSnapshot = await readIndexedPageCache<ProductMasterDataGoodsCache>(PRODUCT_MASTER_DATA_GOODS_CACHE_KEY, {});
+          if (cancelled || !mountedRef.current) return;
+          const cachedGoods = goodsSnapshot.goods || [];
+          if (cachedGoods.length) {
+            setAllGoods((current) => (current.length ? current : cachedGoods));
+            setLoadedOnce(true);
+          }
+        }
         void loadAll({ silent: hasPageCache(cachedData) });
         return;
       }
@@ -1978,20 +2022,36 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       key: "imageUrl",
       width: 68,
       fixed: "left",
-      render: (value: string) => value ? (
-        <Image
-          src={value}
-          alt="产品图片"
-          width={48}
-          height={48}
-          preview={{ mask: <EyeOutlined /> }}
-          style={{ borderRadius: 6, objectFit: "cover", background: "#f5f7fb" }}
-        />
-      ) : (
-        <div style={{ width: 48, height: 48, borderRadius: 6, border: "1px dashed #d8dee9", color: "#98a2b3", fontSize: 12, display: "flex", alignItems: "center", justifyContent: "center", background: "#f8fbff" }}>
-          无图
-        </div>
-      ),
+      render: (value: string) => {
+        const urls = parseGoodsImageUrls(value);
+        if (!urls.length) {
+          return (
+            <div style={{ width: 48, height: 48, borderRadius: 6, border: "1px dashed #d8dee9", color: "#98a2b3", fontSize: 12, display: "flex", alignItems: "center", justifyContent: "center", background: "#f8fbff" }}>
+              无图
+            </div>
+          );
+        }
+        return (
+          <div style={{ position: "relative", width: 48, height: 48 }}>
+            <Image.PreviewGroup items={urls}>
+              <Image
+                src={goodsThumbUrl(urls[0])}
+                alt="产品图片"
+                width={48}
+                height={48}
+                fallback={urls[0]}
+                preview={{ mask: <EyeOutlined />, src: urls[0] }}
+                style={{ borderRadius: 6, objectFit: "cover", background: "#f5f7fb" }}
+              />
+            </Image.PreviewGroup>
+            {urls.length > 1 ? (
+              <span style={{ position: "absolute", right: -4, bottom: -4, background: "#2563eb", color: "#fff", borderRadius: 8, fontSize: 10, lineHeight: "14px", padding: "0 4px", pointerEvents: "none" }}>
+                {urls.length}
+              </span>
+            ) : null}
+          </div>
+        );
+      },
     },
     {
       title: "商品名称",
@@ -2047,11 +2107,15 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       title: "1688 链接",
       dataIndex: "alibabaUrl",
       key: "alibabaUrl",
-      width: 100,
+      width: 210,
       render: (value: string) => value ? (
-        <Button size="small" type="link" style={{ padding: 0 }} onClick={() => appAPI?.openExternal?.(value)}>
-          打开
-        </Button>
+        <Typography.Link
+          ellipsis
+          style={{ maxWidth: 194, display: "inline-block", verticalAlign: "bottom" }}
+          onClick={() => appAPI?.openExternal?.(value)}
+        >
+          {value}
+        </Typography.Link>
       ) : "-",
     },
     {
@@ -2787,55 +2851,61 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
 
         {mode === "suppliers" ? (
         <div className="app-panel product-master-data-panel product-master-data-panel--suppliers">
-          <div className="app-panel__title">
-            <div>
-              <div className="app-panel__title-main">供应商</div>
-              <div className="app-panel__title-sub">维护供应商资料、联系方式、经营类目和采购关系。</div>
+          {!embedded ? (
+            <div className="app-panel__title">
+              <div>
+                <div className="app-panel__title-main">供应商</div>
+                <div className="app-panel__title-sub">维护供应商资料、联系方式、经营类目和采购关系。</div>
+              </div>
+            </div>
+          ) : null}
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+            <div
+              style={{
+                flex: 1,
+                minWidth: 0,
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))",
+                gap: 8,
+              }}
+            >
+              {[
+                { label: "货品总数", value: supplierSummary.goodsTotal, tone: "#2563eb" },
+                { label: "供应商总数", value: supplierSummary.supplierTotal, tone: "#7c3aed" },
+                { label: "有联系方式", value: supplierSummary.hasContactCount, tone: "#16a34a" },
+                { label: "可开票", value: supplierSummary.invoiceableCount, tone: "#0891b2" },
+              ].map((item) => (
+                <div
+                  key={item.label}
+                  style={{
+                    display: "flex",
+                    alignItems: "baseline",
+                    gap: 8,
+                    border: "1px solid #e5e7eb",
+                    borderLeft: `3px solid ${item.tone}`,
+                    borderRadius: 6,
+                    padding: "5px 10px",
+                    background: "#fff",
+                    minWidth: 0,
+                  }}
+                >
+                  <div style={{ color: "#64748b", fontSize: 12, lineHeight: "20px", whiteSpace: "nowrap" }}>{item.label}</div>
+                  <div style={{ color: "#0f172a", fontSize: 16, fontWeight: 700, lineHeight: "20px" }}>{item.value}</div>
+                </div>
+              ))}
             </div>
             {embedded ? (
-              <Space size={8} wrap>
+              <Space size={8}>
                 {canManageSuppliers ? (
-                  <>
-                    <Button type="primary" icon={<PlusOutlined />} onClick={() => openSupplierModal()}>
-                      新增供应商
-                    </Button>
-                  </>
+                  <Button type="primary" icon={<PlusOutlined />} onClick={() => openSupplierModal()}>
+                    新增供应商
+                  </Button>
                 ) : null}
                 <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void loadAll({ forceFull: true })}>
                   刷新
                 </Button>
               </Space>
             ) : null}
-          </div>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))",
-              gap: 8,
-              marginBottom: 12,
-            }}
-          >
-            {[
-              { label: "货品总数", value: supplierSummary.goodsTotal, tone: "#2563eb" },
-              { label: "供应商总数", value: supplierSummary.supplierTotal, tone: "#7c3aed" },
-              { label: "有联系方式", value: supplierSummary.hasContactCount, tone: "#16a34a" },
-              { label: "可开票", value: supplierSummary.invoiceableCount, tone: "#0891b2" },
-            ].map((item) => (
-              <div
-                key={item.label}
-                style={{
-                  border: "1px solid #e5e7eb",
-                  borderLeft: `3px solid ${item.tone}`,
-                  borderRadius: 6,
-                  padding: "8px 10px",
-                  background: "#fff",
-                  minWidth: 0,
-                }}
-              >
-                <div style={{ color: "#64748b", fontSize: 12, lineHeight: "18px" }}>{item.label}</div>
-                <div style={{ color: "#0f172a", fontSize: 18, fontWeight: 700, lineHeight: "24px" }}>{item.value}</div>
-              </div>
-            ))}
           </div>
           {canManageSuppliers ? (
             null
@@ -2905,7 +2975,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
             loading={tableLoading}
             columns={supplierColumns}
             dataSource={filteredGoods}
-            scroll={{ x: 2050, y: "max(220px, calc(100vh - 540px))" }}
+            scroll={{ x: 2050, y: "max(220px, calc(100vh - 390px))" }}
             pagination={{
               defaultPageSize: 20,
               pageSizeOptions: [10, 20, 50, 100, 200],
@@ -3016,7 +3086,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
                 width: 110,
                 align: "right",
                 render: (value) => (
-                  <span style={{ color: Number(value) > 0 ? "#16a34a" : "#0f172a", fontWeight: 700 }}>
+                  <span style={{ color: Number(value) > 0 ? "#16a34a" : Number(value) < 0 ? "#dc2626" : "#0f172a", fontWeight: 700 }}>
                     {value}
                   </span>
                 ),
@@ -3033,7 +3103,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
                 width: 110,
                 render: (value, row) => value === "missing"
                   ? <Tag color="red">缺成本 {row.missingCostQty || row.currentQty || 0}</Tag>
-                  : <Tag color="green">已确认</Tag>,
+                  : value === "none" ? "-" : <Tag color="green">已确认</Tag>,
               },
               { title: "单号", dataIndex: "orderNo", key: "orderNo", width: 150, ellipsis: true },
               { title: "内部订单号", dataIndex: "poNo", key: "poNo", width: 140, ellipsis: true },
