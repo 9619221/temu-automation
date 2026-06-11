@@ -4,8 +4,8 @@
     {
       "name": "vite-dev",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["node_modules/vite/bin/vite.js"],
-      "port": 1420
+      "runtimeArgs": ["node_modules/vite/bin/vite.js", "--port", "1421"],
+      "port": 1421
     }
   ]
 }
