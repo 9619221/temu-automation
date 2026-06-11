@@ -567,8 +567,9 @@ function buildSettlementRowFromData(s: SettlementStoreData): SettlementRow {
   const useOrder = !!od && od.qty > 0;
   const qty = useOrder ? od.qty : (s.qty || 0);
   const cost = useOrder ? od.cost : (s.cost || 0);
-  // 覆盖率 = 订单明细金额 ÷ 已结算货款，<95% 说明批次没采全（前端列上提示）
-  const order_coverage = useOrder && income > 0 ? od.amount / income : null;
+  // 覆盖率 = 订单明细金额 ÷ 资金入账流水「结算」类合计（同为入账口径，分母不能用结算汇总卡片）
+  const settleInflow = fd?.by_category?.["结算"] || 0;
+  const order_coverage = useOrder && settleInflow > 0 ? od.amount / settleInflow : null;
   const fee_total = fees.afterSale + fees.deduction + fees.warehouseFee + fees.eprFee + fees.adFee + fees.otherFee;
   const expense_total = fee_total + cost;
   // 资金净额：纯钱进钱出（聚水潭口径），不含销售成本
