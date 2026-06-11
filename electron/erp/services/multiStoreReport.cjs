@@ -2047,7 +2047,8 @@ function buildFulfillmentBillByMall(db, opts = {}) {
   const params = [];
   let where = "";
   if (startDate && endDate) {
-    where = "WHERE record_type = 'detail' AND stat_date >= ? AND stat_date <= ?";
+    // overview 是无日期的快照行，任何时间段都要带上；只有 detail 按账单日期过滤
+    where = "WHERE record_type = 'overview' OR (record_type = 'detail' AND stat_date >= ? AND stat_date <= ?)";
     params.push(startDate, endDate);
   }
   let rows;
