@@ -8589,73 +8589,107 @@ async function collectOneAccount(params = {}) {
       try {
         dlPage = await safeNewPage(context);
         console.error(`${logPrefix} 结算订单明细：待下载 ${[...byMall.values()].reduce((a, b) => a + b.length, 0)} 批次 / ${byMall.size} 店（下限 ${new Date(cutoffTs).toISOString().slice(0, 10)}，每店上限${SETTLE_ORDER_MAX_PER_MALL}）`);
+        // 增量：已成功下载过的批次跳过（本机持久记录；要强制全量重下，删项目根 .settlement-order-downloaded.json）
+        const DOWNLOADED_FILE = path.join(process.cwd(), ".settlement-order-downloaded.json");
+        let downloadedMap = {};
+        try { downloadedMap = JSON.parse(fs.readFileSync(DOWNLOADED_FILE, "utf-8")) || {}; } catch { downloadedMap = {}; }
+        let downloadedDirty = 0;
+        const flushDownloaded = () => {
+          if (!downloadedDirty) return;
+          try { fs.writeFileSync(DOWNLOADED_FILE, JSON.stringify(downloadedMap)); downloadedDirty = 0; } catch {}
+        };
+        const SETTLE_ORDER_CONCURRENCY = Math.max(1, Number(process.env.SETTLE_ORDER_CONCURRENCY || 3));
         for (const [mallId, targets] of byMall) {
-          for (const t of targets) {
-            try {
-              // detailJumpPath 是跨境猫域的中转路径，targetUrl 参数里带落地域（按 region 而异）
-              const jumpUrl = new URL(t.jumpPath, "https://seller.kuajingmaihuo.com");
-              const targetUrl = jumpUrl.searchParams.get("targetUrl");
-              if (!targetUrl) { sts.error++; continue; }
-              const apiBase = new URL(targetUrl).origin;
-              // 首次或换域时走一次中转跳转，建立落地域 session
-              if (!dlPage.url().startsWith(apiBase)) {
-                await dlPage.goto(jumpUrl.href, { waitUntil: "domcontentloaded", timeout: 60000 });
-                await randomDelay(2000, 3000);
-                await handleSellerAuthPopupPage(dlPage, `${logPrefix}-settlement-orders-auth`);
-                await randomDelay(800, 1200);
-                if (!dlPage.url().startsWith(apiBase)) {
-                  await dlPage.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
-                  await randomDelay(1500, 2500);
-                  await handleSellerAuthPopupPage(dlPage, `${logPrefix}-settlement-orders-target-auth`);
-                  await randomDelay(800, 1200);
-                }
-              }
-              const currentOrigin = (() => { try { return new URL(dlPage.url()).origin; } catch { return ""; } })();
-              const apiOrigins = Array.from(new Set([apiBase, currentOrigin, "https://seller.kuajingmaihuo.com"].filter((origin) => /^https?:\/\//i.test(origin))));
-              const payloads = buildSettlementDownloadPayloads(t);
-              let dl = null;
-              let payload = payloads[0] || { itemBizId: t.batchId, fundType: t.fundType, createTime: t.createTime };
-              let fileUrl = null;
-              const attempts = [];
-              for (const payloadVariant of payloads) {
-                for (const origin of apiOrigins) {
-                  const apiUrl = `${origin}/api/merchant/fund/detail/item/semi/download`;
-                  dl = await fetchSettlementDownloadLink(dlPage, apiUrl, mallId, payloadVariant);
-                  let parsed = null;
-                  try { parsed = JSON.parse(dl.text); } catch { parsed = null; }
-                  fileUrl = extractSettlementFileUrl(parsed);
-                  attempts.push(`${origin.replace(/^https:\/\//, "")} HTTP ${dl.status || "-"} ct=${String(dl.contentType || "").slice(0, 35)} err=${String(dl.err || "").slice(0, 60)} body=${String(dl.text || "").slice(0, 80).replace(/\s+/g, " ")}`);
-                  if (fileUrl) {
-                    payload = payloadVariant;
-                    break;
-                  }
-                  await randomDelay(120, 220);
-                }
-                if (fileUrl) break;
-              }
-              if (!fileUrl) {
-                sts.error++;
-                console.error(`${logPrefix} [${t.tag}] 结算明细 ${t.batchId} 取下载链接失败 current=${dlPage.url().slice(0, 160)} attempts=${attempts.slice(-6).join(" | ")}`);
-                continue;
-              }
-              const buf = await fetchXlsxBuffer(dlPage, fileUrl, dlPage.url());
-              const wb = XLSX.read(buf, { type: "buffer" });
-              const ws = wb.Sheets[wb.SheetNames[0]];
-              const rows = XLSX.utils.sheet_to_json(ws, { defval: null });
-              const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
-              const truncated = rows.length > 3000;
-              const body = {
-                success: true, batchId: t.batchId, fundType: t.fundType, createTime: t.createTime,
-                amount: t.amount, currency: t.currency, sheetName: wb.SheetNames[0],
-                columns, rowCount: rows.length, truncated, rows: truncated ? rows.slice(0, 3000) : rows,
-              };
-              const bodyText = JSON.stringify(body);
-              batchItems.push({ kind: "fetch-active-settlement-orders", url: `${apiBase}/api/merchant/fund/detail/item/semi/download`, url_path: "/api/merchant/fund/detail/item/semi/download", method: "POST", status: 200, ts: Date.now(), site: "agentseller", page: "robot/settlement-orders", mall_id: mallId, body, bodyText: bodyText.length > 200000 ? null : bodyText, requestBodyText: JSON.stringify(payload), bodySize: bodyText.length, activeSource: "batch_robot" });
-              if (rows.length > 0) { sts.success++; sts.totalRecords += rows.length; } else sts.empty++;
-              console.error(`${logPrefix} [${t.tag}] 结算明细 ${t.batchId}: ${rows.length} 行, 列=[${columns.slice(0, 8).join("|")}]`);
-            } catch (e) { sts.error++; console.error(`${logPrefix} [${t.tag}] 结算明细 ${t.batchId} 异常: ${e.message}`); }
-            await randomDelay(800, 1500);
+          const fresh = targets.filter((t) => !downloadedMap[`${mallId}|${t.batchId}`]);
+          const skippedCount = targets.length - fresh.length;
+          if (skippedCount > 0) console.error(`${logPrefix} 结算订单明细：跳过已下载 ${skippedCount} 批（增量），本轮新下 ${fresh.length} 批`);
+          // 按落地域分组：goto 建 session 必须串行（同一页面），组内批次并发下载
+          const groups = new Map();
+          for (const t of fresh) {
+            // detailJumpPath 是跨境猫域的中转路径，targetUrl 参数里带落地域（按 region 而异）
+            const jumpUrl = new URL(t.jumpPath, "https://seller.kuajingmaihuo.com");
+            const targetUrl = jumpUrl.searchParams.get("targetUrl");
+            if (!targetUrl) { sts.error++; continue; }
+            const apiBase = new URL(targetUrl).origin;
+            if (!groups.has(apiBase)) groups.set(apiBase, []);
+            groups.get(apiBase).push({ t, jumpUrl, targetUrl });
           }
+          for (const [apiBase, group] of groups) {
+            // 首次或换域时走一次中转跳转，建立落地域 session
+            if (!dlPage.url().startsWith(apiBase)) {
+              const { jumpUrl, targetUrl } = group[0];
+              await dlPage.goto(jumpUrl.href, { waitUntil: "domcontentloaded", timeout: 60000 });
+              await randomDelay(2000, 3000);
+              await handleSellerAuthPopupPage(dlPage, `${logPrefix}-settlement-orders-auth`);
+              await randomDelay(800, 1200);
+              if (!dlPage.url().startsWith(apiBase)) {
+                await dlPage.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
+                await randomDelay(1500, 2500);
+                await handleSellerAuthPopupPage(dlPage, `${logPrefix}-settlement-orders-target-auth`);
+                await randomDelay(800, 1200);
+              }
+            }
+            const currentOrigin = (() => { try { return new URL(dlPage.url()).origin; } catch { return ""; } })();
+            const apiOrigins = Array.from(new Set([apiBase, currentOrigin, "https://seller.kuajingmaihuo.com"].filter((origin) => /^https?:\/\//i.test(origin))));
+            const processOne = async (t) => {
+              try {
+                const payloads = buildSettlementDownloadPayloads(t);
+                let dl = null;
+                let payload = payloads[0] || { itemBizId: t.batchId, fundType: t.fundType, createTime: t.createTime };
+                let fileUrl = null;
+                const attempts = [];
+                for (const payloadVariant of payloads) {
+                  for (const origin of apiOrigins) {
+                    const apiUrl = `${origin}/api/merchant/fund/detail/item/semi/download`;
+                    dl = await fetchSettlementDownloadLink(dlPage, apiUrl, mallId, payloadVariant);
+                    let parsed = null;
+                    try { parsed = JSON.parse(dl.text); } catch { parsed = null; }
+                    fileUrl = extractSettlementFileUrl(parsed);
+                    attempts.push(`${origin.replace(/^https:\/\//, "")} HTTP ${dl.status || "-"} ct=${String(dl.contentType || "").slice(0, 35)} err=${String(dl.err || "").slice(0, 60)} body=${String(dl.text || "").slice(0, 80).replace(/\s+/g, " ")}`);
+                    if (fileUrl) {
+                      payload = payloadVariant;
+                      break;
+                    }
+                    await randomDelay(120, 220);
+                  }
+                  if (fileUrl) break;
+                }
+                if (!fileUrl) {
+                  sts.error++;
+                  console.error(`${logPrefix} [${t.tag}] 结算明细 ${t.batchId} 取下载链接失败 current=${dlPage.url().slice(0, 160)} attempts=${attempts.slice(-6).join(" | ")}`);
+                  return;
+                }
+                const buf = await fetchXlsxBuffer(dlPage, fileUrl, dlPage.url());
+                const wb = XLSX.read(buf, { type: "buffer" });
+                const ws = wb.Sheets[wb.SheetNames[0]];
+                const rows = XLSX.utils.sheet_to_json(ws, { defval: null });
+                const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
+                const truncated = rows.length > 3000;
+                const body = {
+                  success: true, batchId: t.batchId, fundType: t.fundType, createTime: t.createTime,
+                  amount: t.amount, currency: t.currency, sheetName: wb.SheetNames[0],
+                  columns, rowCount: rows.length, truncated, rows: truncated ? rows.slice(0, 3000) : rows,
+                };
+                const bodyText = JSON.stringify(body);
+                batchItems.push({ kind: "fetch-active-settlement-orders", url: `${apiBase}/api/merchant/fund/detail/item/semi/download`, url_path: "/api/merchant/fund/detail/item/semi/download", method: "POST", status: 200, ts: Date.now(), site: "agentseller", page: "robot/settlement-orders", mall_id: mallId, body, bodyText: bodyText.length > 200000 ? null : bodyText, requestBodyText: JSON.stringify(payload), bodySize: bodyText.length, activeSource: "batch_robot" });
+                if (rows.length > 0) { sts.success++; sts.totalRecords += rows.length; } else sts.empty++;
+                downloadedMap[`${mallId}|${t.batchId}`] = Date.now();
+                downloadedDirty++;
+                if (downloadedDirty >= 20) flushDownloaded();
+                console.error(`${logPrefix} [${t.tag}] 结算明细 ${t.batchId}: ${rows.length} 行, 列=[${columns.slice(0, 8).join("|")}]`);
+              } catch (e) { sts.error++; console.error(`${logPrefix} [${t.tag}] 结算明细 ${t.batchId} 异常: ${e.message}`); }
+            };
+            // 并发池：同一 dlPage 的 evaluate/request 调用可安全并发（Playwright 协议层会串行化 CDP 消息）
+            const queue = group.map((item) => item.t);
+            await Promise.all(Array.from({ length: Math.min(SETTLE_ORDER_CONCURRENCY, queue.length) }, async () => {
+              while (queue.length) {
+                const t = queue.shift();
+                await processOne(t);
+                await randomDelay(250, 500);
+              }
+            }));
+          }
+          flushDownloaded();
         }
         console.error(`${logPrefix} 结算订单明细完成: 批次成功 ${sts.success} / 空 ${sts.empty} / 错 ${sts.error}, 共 ${sts.totalRecords} 行`);
       } catch (e) {

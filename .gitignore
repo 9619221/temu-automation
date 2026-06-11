@@ -79,3 +79,5 @@ tmp_deploy/
 .supplier-import/
 # 结算账号→店铺映射（本机运行时产物）
 .settlement-account-mall-map.json
+# 结算订单明细增量下载记录（本机运行时产物）
+.settlement-order-downloaded.json
