@@ -547,10 +547,15 @@ function buildSettlementRowFromData(s: SettlementStoreData): SettlementRow {
   const fs = s.fund_summary;
   const risk = s.risk_detail;
   const sd = s.settlement_detail;
-  // 收入金额：只用真实结算收入（income-summary），不混入估算值
-  const income = s.settlement_income || 0;
-  const reserve = sd?.wait_settlement?.estimated || 0;
-  const release = sd?.settled?.total || 0;
+  // 聚水潭口径（与 Temu 结算单原生字段对齐，只取已结算行）：
+  //   收入金额 = incomeAmount（已结算货款，物化列 sales_receipt_amount）
+  //   售后预留 = afsReverseAmount（物化列 chargeback_amount，列名历史误称）
+  //   售后释放 = afsReleaseAmount（物化列 subsidy_amount，列名历史误称）
+  //   收入合计 = 收入 − 预留 + 释放 = Temu 结算单合计（settled.total）
+  // income-summary 逐日收入是另一口径，不进报表列（仅趋势图使用）。
+  const income = sd?.settled?.sales_receipt || 0;
+  const reserve = sd?.settled?.chargeback || 0;
+  const release = sd?.settled?.subsidy || 0;
   const income_total = income - reserve + release;
   const fees = classifyFundCategories(fd);
   const cost = s.cost || 0;
