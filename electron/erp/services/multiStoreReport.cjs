@@ -1302,7 +1302,7 @@ function buildFundDetailByMall(db, opts = {}) {
       SELECT mall_id,
              money_change_type,
              COALESCE(NULLIF(remark,''), fund_type_desc) AS category,
-             SUM(amount) AS total_amount,
+             SUM(amount) / 100.0 AS total_amount, -- amount 物化为接口原值（分），聚合输出统一转元
              COUNT(*) AS cnt
         FROM erp_temu_fund_detail
        WHERE ${dateFilter}
