@@ -7307,12 +7307,12 @@ const BATCH_COLLECT_API = {
   settleDone: {
     label: "已到账",
     urlPath: "/api/merchant/settle/detail/full/settled",
-    // 已到账接口必须带时间范围（空体报 Params invalid），近 30 天（参数名 startDate/endDate，实测自被动抓包）
-    buildBody: () => {
+    // 已到账接口必须带时间范围（空体报 Params invalid），优先面板「结算时间范围」，无则近 30 天（参数名 startDate/endDate，实测自被动抓包）
+    buildBody: (_pageNum, range) => {
       const end = new Date();
       const start = new Date(end.getTime() - 30 * 86400000);
       const f = (d) => d.toISOString().slice(0, 10);
-      return JSON.stringify({ startDate: f(start), endDate: f(end) });
+      return JSON.stringify({ startDate: range?.startDate || f(start), endDate: range?.endDate || f(end) });
     },
     getList: (body) => (body?.result && typeof body.result === "object") ? [body.result] : [],
     getTotal: () => 1,
@@ -7325,11 +7325,11 @@ const BATCH_COLLECT_API = {
   fundDetail: {
     label: "账务费用",
     urlPath: "/api/merchant/fund/detail/pageSearch",
-    buildBody: (pageNum) => {
+    buildBody: (pageNum, range) => {
       const end = new Date();
       const start = new Date(end.getTime() - 30 * 86400000);
       const f = (d) => d.toISOString().slice(0, 10);
-      return JSON.stringify({ pageNo: pageNum, pageSize: 50, startDate: f(start), endDate: f(end) });
+      return JSON.stringify({ pageNo: pageNum, pageSize: 50, startDate: range?.startDate || f(start), endDate: range?.endDate || f(end) });
     },
     getList: (body) => Array.isArray(body?.result?.resultList) ? body.result.resultList : [],
     getTotal: (body) => Number(body?.result?.total) || 0,
@@ -7609,7 +7609,7 @@ async function scrapeBatchCollect(params = {}) {
             let hadAccess = false;   // 本店本任务是否拿到了正常响应（有权限）
 
             while (hasMore) {
-              const reqBody = apiDef.buildBody(pageNum);
+              const reqBody = apiDef.buildBody(pageNum, { startDate: params.startDate, endDate: params.endDate });
 
               const result = await page.evaluate(
                 async ({ apiUrl, mid, body }) => {
@@ -7869,7 +7869,7 @@ async function collectOneAccount(params = {}) {
         try {
           let allRecords = []; let pageNum = 1; let hasMore = true; let hadAccess = false;
           while (hasMore) {
-            const reqBody = apiDef.buildBody(pageNum);
+            const reqBody = apiDef.buildBody(pageNum, { startDate: params.startDate, endDate: params.endDate });
             const result = await page.evaluate(async ({ apiUrl, mid, body }) => {
               try {
                 const resp = await fetch(apiUrl, { method: "POST", credentials: "include", cache: "no-store", headers: { "Content-Type": "application/json", mallid: mid }, body });
@@ -8214,8 +8214,11 @@ async function collectOneAccount(params = {}) {
         await probeFinancePageInteractions(kjmhPage);
         console.error(`${logPrefix} 账务费用：进入跨境猫页面 ${kjmhPage.url()}，流水待采 ${fundTargets.length} 店，资金汇总待采 ${fundSummaryTargets.length} 店`);
         // fund 接口要求"开始/结束时间必选"，真实字段名未知（hook 未记录请求体），逐候选探测命中后固定
+        // 时间范围优先面板「结算时间范围」(params.startDate/endDate)，无则近 30 天
+        const fundRangeStart = params.startDate ? new Date(`${params.startDate}T00:00:00+08:00`) : null;
+        const fundRangeEnd = params.endDate ? new Date(`${params.endDate}T23:59:59+08:00`) : null;
         const fundVariants = (pageNum) => {
-          const end = new Date(); const start = new Date(end.getTime() - 30 * 86400000);
+          const end = fundRangeEnd || new Date(); const start = fundRangeStart || new Date(end.getTime() - 30 * 86400000);
           const ds = (d) => d.toISOString().slice(0, 10);
           const t0 = start.getTime(), t1 = end.getTime();
           return [
@@ -8228,7 +8231,7 @@ async function collectOneAccount(params = {}) {
           ];
         };
         const fundSummaryVariants = () => {
-          const end = new Date(); const start = new Date(end.getTime() - 30 * 86400000);
+          const end = fundRangeEnd || new Date(); const start = fundRangeStart || new Date(end.getTime() - 30 * 86400000);
           const ds = (d) => d.toISOString().slice(0, 10);
           const t0 = start.getTime(), t1 = end.getTime();
           const bodies = [
@@ -8433,9 +8436,12 @@ async function collectOneAccount(params = {}) {
   // /api/merchant/fund/detail/item/semi/download 按 {itemBizId,fundType,createTime} 返回 xlsx 签名 URL（10 分钟有效），
   // 内容 = 该结算批次的订单级明细（结算口径核算成本的数据源）。整段防御：失败不影响其余采集。
   if (settleOrderTargets.length > 0 && !accSessionExpired) {
+    // 结算口径报表（销量/成本按已结算订单）要求批次全量：
+    // 下限对齐面板「结算时间范围」起始日（params.startDate），未传时回退近 N 天。
     const SETTLE_ORDER_DAYS = Number(process.env.SETTLE_ORDER_DAYS || 14);
-    const SETTLE_ORDER_MAX_PER_MALL = Number(process.env.SETTLE_ORDER_MAX_PER_MALL || 30);
-    const cutoffTs = Date.now() - SETTLE_ORDER_DAYS * 86400000;
+    const SETTLE_ORDER_MAX_PER_MALL = Number(process.env.SETTLE_ORDER_MAX_PER_MALL || 200);
+    const rangeStartMs = params.startDate ? new Date(`${params.startDate}T00:00:00+08:00`).getTime() : NaN;
+    const cutoffTs = Number.isFinite(rangeStartMs) ? rangeStartMs : Date.now() - SETTLE_ORDER_DAYS * 86400000;
     // 近 N 天 + 每店上限，防一店几百批次拖垮整轮
     const byMall = new Map();
     for (const t of settleOrderTargets) {
@@ -8579,7 +8585,7 @@ async function collectOneAccount(params = {}) {
       let dlPage = null;
       try {
         dlPage = await safeNewPage(context);
-        console.error(`${logPrefix} 结算订单明细：待下载 ${[...byMall.values()].reduce((a, b) => a + b.length, 0)} 批次 / ${byMall.size} 店（近${SETTLE_ORDER_DAYS}天，每店上限${SETTLE_ORDER_MAX_PER_MALL}）`);
+        console.error(`${logPrefix} 结算订单明细：待下载 ${[...byMall.values()].reduce((a, b) => a + b.length, 0)} 批次 / ${byMall.size} 店（下限 ${new Date(cutoffTs).toISOString().slice(0, 10)}，每店上限${SETTLE_ORDER_MAX_PER_MALL}）`);
         for (const [mallId, targets] of byMall) {
           for (const t of targets) {
             try {

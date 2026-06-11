@@ -4616,7 +4616,10 @@ ipcMain.handle("automation:batch-collect", async (_e, params) => {
   const allCreds = getAllWorkerCredentials();
   const selectedMalls = Array.isArray(params?.selectedMalls) ? params.selectedMalls : [];
   const tasks = Array.isArray(params?.tasks) && params.tasks.length > 0 ? params.tasks : ["products", "afterSales", "settlement"];
-  console.error(`[batch-collect] 逐店采集: 选中 ${selectedMalls.length} 店（按店铺顺序）, 任务=${tasks.join(",")}`);
+  // 结算时间范围（面板透传），worker 用于账务流水/已到账/结算订单明细的采集窗口
+  const startDate = typeof params?.startDate === "string" ? params.startDate : "";
+  const endDate = typeof params?.endDate === "string" ? params.endDate : "";
+  console.error(`[batch-collect] 逐店采集: 选中 ${selectedMalls.length} 店（按店铺顺序）, 任务=${tasks.join(",")}, 结算范围=${startDate || "-"}~${endDate || "-"}`);
 
   // 读映射表：mall_id -> accountId
   const STORE_MAPPING_FILE = path.join(__dirname, "..", ".settlement-account-mall-map.json");
@@ -4668,7 +4671,10 @@ ipcMain.handle("automation:batch-collect", async (_e, params) => {
         selectedMalls: [mall],
         tasks,
         collectedKeys: [...collected],
-      }, { timeoutMs: 10 * 60 * 1000 });
+        ...(startDate ? { startDate } : {}),
+        ...(endDate ? { endDate } : {}),
+        // 结算订单明细批次全量下载(每店上限200批,约2-4s/批),10分钟可能不够
+      }, { timeoutMs: 20 * 60 * 1000 });
     } catch (e) {
       // 用户强制停止会杀掉 worker，导致这里抛连接错误——这是预期的，直接干净退出，
       // 不把当前店算作「采集失败/未覆盖」（避免误导用户以为是出错了）。

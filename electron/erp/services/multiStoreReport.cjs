@@ -2403,6 +2403,44 @@ function querySettlementData(db, opts = {}) {
     }
   } catch { /* salesv2 表不存在时保持空 */ }
 
+  // 2b. 结算订单口径（C 口径）：已结算订单明细 × 加权均价。
+  //     与「收入金额」同一批货（已结算订单），消除"收入算老订单、成本算新销量"的时间错配；
+  //     sku_ext_code 即货号，与 erp_skus.internal_sku_code 直接关联（关联率 100%）。
+  //     amount 用于前端算覆盖率（订单明细金额 ÷ 已结算货款，判断批次是否采全）。
+  const orderByMall = new Map();
+  try {
+    let odWhere, odParams;
+    if (startDate && endDate) {
+      odWhere = "WHERE d.create_time >= ? AND d.create_time < date(?, '+1 day')";
+      odParams = [startDate, endDate];
+    } else {
+      odWhere = "WHERE d.create_time >= date('now', '-30 days')";
+      odParams = [];
+    }
+    const odRows = db.prepare(`
+      SELECT d.mall_id,
+             SUM(COALESCE(d.quantity, 0)) AS qty,
+             SUM(CASE WHEN COALESCE(k.wac, 0) > 0 THEN COALESCE(d.quantity, 0) ELSE 0 END) AS qty_costed,
+             SUM(COALESCE(d.quantity, 0) * COALESCE(k.wac, 0)) AS cost,
+             SUM(COALESCE(d.amount, 0)) AS amount
+        FROM erp_temu_settlement_order_detail d
+        LEFT JOIN (
+          SELECT internal_sku_code, MAX(weighted_avg_cost) AS wac
+            FROM erp_skus GROUP BY internal_sku_code
+        ) k ON k.internal_sku_code = d.sku_ext_code
+       ${odWhere}
+       GROUP BY d.mall_id
+    `).all(...odParams);
+    for (const r of odRows) {
+      orderByMall.set(r.mall_id, {
+        qty: Number(r.qty) || 0,
+        qty_costed: Number(r.qty_costed) || 0,
+        cost: Number(r.cost) || 0,
+        amount: Number(r.amount) || 0,
+      });
+    }
+  } catch { /* settlement_order_detail 表不存在时保持空 */ }
+
   // 3. settlement_income（真实结算收入，income-summary 主动采集）
   const stlIncByMall = new Map();
   try {
@@ -2434,7 +2472,7 @@ function querySettlementData(db, opts = {}) {
   const dictByMall = new Map(dict.map((row) => [row.mall_id, row]));
 
   // 6. 合并所有出现过的 mall_id
-  const allMalls = new Set([...fundByMall.keys(), ...fundSummaryByMall.keys(), ...riskByMall.keys(), ...eprByMall.keys(), ...frozenByMall.keys(), ...accountOverviewByMall.keys(), ...fulfillmentByMall.keys(), ...violationByMall.keys(), ...finByMall.keys(), ...stlIncByMall.keys()]);
+  const allMalls = new Set([...fundByMall.keys(), ...fundSummaryByMall.keys(), ...riskByMall.keys(), ...eprByMall.keys(), ...frozenByMall.keys(), ...accountOverviewByMall.keys(), ...fulfillmentByMall.keys(), ...violationByMall.keys(), ...finByMall.keys(), ...stlIncByMall.keys(), ...orderByMall.keys()]);
   for (const d of dict) allMalls.add(d.mall_id);
 
   const stores = [];
@@ -2462,9 +2500,10 @@ function querySettlementData(db, opts = {}) {
       violation: violationByMall.get(mallId) || null,
       settlement_income: si?.income || 0,  // 真实结算收入（income-summary）
       settlement_income_days: si?.days || 0,
-      cost: fin?.cost || 0,               // 销量 × 加权均价（salesv2 × erp_skus）
+      cost: fin?.cost || 0,               // 销量 × 加权均价（salesv2 × erp_skus，A 口径近似）
       qty: fin?.qty || 0,
       settlement_detail: sd,
+      order_detail: orderByMall.get(mallId) || null, // C 口径：已结算订单件数/成本/金额
     });
   }
   stores.sort((a, b) => {
@@ -2486,6 +2525,7 @@ function querySettlementData(db, opts = {}) {
     violation_available: violationByMall.size > 0,
     financials_available: finByMall.size > 0,
     settlement_income_available: stlIncByMall.size > 0,
+    order_detail_available: orderByMall.size > 0,
     date_range: { start: startDate || null, end: endDate || null },
   };
 }

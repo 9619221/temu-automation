@@ -463,7 +463,9 @@ interface SettlementRow {
   mall_id: string;
   store: string;
   owner: string;
-  qty: number;           // 销量
+  qty: number;           // 销量（C 口径=已结算订单件数；回退 salesv2 窗口）
+  cost_source: "order" | "salesv2"; // 销量/成本口径来源
+  order_coverage: number | null;    // 订单明细金额 ÷ 已结算货款（C 口径覆盖率，<0.95 提示未采全）
   income: number;        // 收入金额
   reserve: number;       // 售后预留金额（待结算）
   release: number;       // 售后释放金额（已到账）
@@ -507,9 +509,11 @@ interface SettlementStoreData {
   violation: ViolationData | null;
   settlement_income: number;       // 真实结算收入（income-summary）
   settlement_income_days: number;  // 结算数据覆盖天数
-  cost: number;                    // 销量×加权均价（salesv2 × erp_skus）
+  cost: number;                    // 销量×加权均价（salesv2 × erp_skus，A 口径近似）
   qty: number;
   settlement_detail: StoreSettlementDetail | null;
+  // C 口径：已结算订单明细（与收入同批货）。amount 用于覆盖率 = amount ÷ 已结算货款
+  order_detail: { qty: number; qty_costed: number; cost: number; amount: number } | null;
 }
 
 function classifyFundCategories(fd: FundDetailData | null) {
@@ -558,7 +562,13 @@ function buildSettlementRowFromData(s: SettlementStoreData): SettlementRow {
   const release = sd?.settled?.subsidy || 0;
   const income_total = income - reserve + release;
   const fees = classifyFundCategories(fd);
-  const cost = s.cost || 0;
+  // 销量/成本：优先 C 口径（已结算订单明细，与收入同批货）；未采到订单明细的店回退 salesv2 窗口近似。
+  const od = s.order_detail;
+  const useOrder = !!od && od.qty > 0;
+  const qty = useOrder ? od.qty : (s.qty || 0);
+  const cost = useOrder ? od.cost : (s.cost || 0);
+  // 覆盖率 = 订单明细金额 ÷ 已结算货款，<95% 说明批次没采全（前端列上提示）
+  const order_coverage = useOrder && income > 0 ? od.amount / income : null;
   const fee_total = fees.afterSale + fees.deduction + fees.warehouseFee + fees.eprFee + fees.adFee + fees.otherFee;
   const expense_total = fee_total + cost;
   // 资金净额：纯钱进钱出（聚水潭口径），不含销售成本
@@ -568,7 +578,9 @@ function buildSettlementRowFromData(s: SettlementStoreData): SettlementRow {
   const profit = hasSettlementData ? income_total - expense_total : null;
   const profit_rate = profit != null && income_total > 0 ? profit / income_total : null;
   return {
-    mall_id: s.mall_id, store, owner, qty: s.qty || 0,
+    mall_id: s.mall_id, store, owner, qty,
+    cost_source: useOrder ? "order" : "salesv2",
+    order_coverage,
     income, reserve, release, income_total,
     after_sale: fees.afterSale, deduction: fees.deduction, warehouse_fee: fees.warehouseFee,
     epr_fee: fees.eprFee, ad_fee: fees.adFee, other_fee: fees.otherFee,
@@ -1586,7 +1598,13 @@ export default function MultiStoreReport() {
               { title: "店铺", dataIndex: "store", key: "store", width: 120, fixed: "left",
                 render: (v: string) => <Typography.Text strong>{v}</Typography.Text> },
               { title: "销量", dataIndex: "qty", key: "qty", width: 80, align: "right",
-                render: (v: number) => fmtSettlementCell(v, 0), sorter: (a, b) => a.qty - b.qty },
+                render: (v: number, r: SettlementRow) => (
+                  <Tooltip title={r.cost_source === "order"
+                    ? `已结算订单件数${r.order_coverage != null && r.order_coverage < 0.95 ? `（订单明细仅覆盖已结算货款 ${(r.order_coverage * 100).toFixed(0)}%，批次未采全）` : ""}`
+                    : "结算订单明细未采集，回退近7/30天销量近似"}>
+                    <span style={r.cost_source !== "order" || (r.order_coverage != null && r.order_coverage < 0.95) ? { color: "#faad14" } : undefined}>{fmtSettlementCell(v, 0)}</span>
+                  </Tooltip>
+                ), sorter: (a, b) => a.qty - b.qty },
               { title: "收入金额", dataIndex: "income", key: "income", width: 110, align: "right",
                 render: (v: number) => fmtSettlementCell(v),
                 sorter: (a, b) => a.income - b.income },
@@ -1613,7 +1631,13 @@ export default function MultiStoreReport() {
               { title: "其它服务费", dataIndex: "other_fee", key: "other_fee", width: 110, align: "right",
                 render: (v: number) => fmtSettlementCell(v) },
               { title: "销售成本", dataIndex: "cost", key: "cost", width: 100, align: "right",
-                render: (v: number) => fmtSettlementCell(v),
+                render: (v: number, r: SettlementRow) => (
+                  <Tooltip title={r.cost_source === "order"
+                    ? "已结算订单件数 × 加权均价（与收入同批货）"
+                    : "结算订单明细未采集，按销量近似 × 加权均价（成本未维护的 SKU 计 0，为下限值）"}>
+                    <span style={r.cost_source !== "order" ? { color: "#faad14" } : undefined}>{fmtSettlementCell(v)}</span>
+                  </Tooltip>
+                ),
                 sorter: (a, b) => a.cost - b.cost },
               { title: "支出合计", dataIndex: "expense_total", key: "expense_total", width: 110, align: "right",
                 render: (v: number) => <Typography.Text style={{ color: v > 0 ? COLOR.bad : undefined }}>{fmtSettlementCell(v)}</Typography.Text>,
