@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import dayjs, { type Dayjs } from "dayjs";
 import {
   Alert,
   Button,
   Checkbox,
   Collapse,
+  DatePicker,
   Empty,
   Progress,
   Space,
@@ -564,6 +566,18 @@ const BATCH_TASK_EXTRA_LABELS: Record<string, string> = {
   fundEnum: "资金限制枚举",
   settlementOrders: "结算订单明细",
   settlementViolation: "违规信息",
+  eprGoodsWait: "EPR商品级待扣",
+  eprGoodsDeducted: "EPR商品级已扣",
+  eprPlatform: "EPR平台/主权级",
+  eprPackage: "EPR包裹级",
+  fundFrozen: "资金限制明细",
+  accountOverview: "账户概览",
+  fulfillmentBillOverview: "履约费用总览",
+  fulfillmentBillDetail: "履约费用明细",
+  eprExport: "EPR导出明细",
+  settleExport: "结算数据导出",
+  financeExport: "账务明细导出",
+  fulfillmentPaid: "履约已缴费",
 };
 function batchTaskLabel(key: string): string {
   return BATCH_TASKS.find((t) => t.key === key)?.label || BATCH_TASK_EXTRA_LABELS[key] || key;
@@ -609,6 +623,8 @@ function BatchCollectSection() {
   const [mallList, setMallList] = useState<MallItem[]>([]);
   const [selectedMallIds, setSelectedMallIds] = useState<Set<string>>(new Set());
   const [progress, setProgress] = useState<{ current: number; total: number; currentMall: string } | null>(null);
+  // 结算时间范围：默认当月 1 号→今天（与 worker 兜底一致），透传给 batch-collect 的 startDate/endDate
+  const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>(() => [dayjs().startOf("month"), dayjs()]);
 
   useEffect(() => {
     const api = (window as any).electronAPI;
@@ -709,6 +725,8 @@ function BatchCollectSection() {
       const resp = await batchCollect({
         tasks: selectedTasks,
         selectedMalls,
+        startDate: dateRange[0].format("YYYY-MM-DD"),
+        endDate: dateRange[1].format("YYYY-MM-DD"),
       });
 
       if (resp?.success) {
@@ -738,7 +756,7 @@ function BatchCollectSection() {
     setCollecting(false);
     setStopping(false);
     setProgress(null);
-  }, [selectedTasks, mallList, selectedMallIds]);
+  }, [selectedTasks, mallList, selectedMallIds, dateRange]);
 
   const handleStop = useCallback(async () => {
     const stop = (window as any).electronAPI?.automation?.batchCollectStop;
@@ -813,6 +831,20 @@ function BatchCollectSection() {
           );
         })}
       </div>
+
+      {selectedTasks.includes("settlement") && (
+        <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8 }}>
+          <Text strong style={{ fontSize: 13 }}>结算时间范围</Text>
+          <DatePicker.RangePicker
+            value={dateRange}
+            onChange={(vals) => { if (vals?.[0] && vals?.[1]) setDateRange([vals[0], vals[1]]); }}
+            disabled={collecting}
+            allowClear={false}
+            size="small"
+          />
+          <Text type="secondary" style={{ fontSize: 12 }}>账务流水 / 已结算 / EPR 按此范围采集（账户余额等汇总不受影响）</Text>
+        </div>
+      )}
 
       {mallList.length > 0 && (
         <div style={{ marginTop: 12 }}>
