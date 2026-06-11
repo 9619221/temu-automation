@@ -8216,7 +8216,10 @@ async function collectOneAccount(params = {}) {
         // fund 接口要求"开始/结束时间必选"，真实字段名未知（hook 未记录请求体），逐候选探测命中后固定
         // 时间范围优先面板「结算时间范围」(params.startDate/endDate)，无则近 30 天
         const fundRangeStart = params.startDate ? new Date(`${params.startDate}T00:00:00+08:00`) : null;
-        const fundRangeEnd = params.endDate ? new Date(`${params.endDate}T23:59:59+08:00`) : null;
+        // endTime 不能超过当前时刻（未来时间实测被平台 403 拒绝）
+        const fundRangeEnd = params.endDate
+          ? new Date(Math.min(new Date(`${params.endDate}T23:59:59+08:00`).getTime(), Date.now()))
+          : null;
         const fundVariants = (pageNum) => {
           const end = fundRangeEnd || new Date(); const start = fundRangeStart || new Date(end.getTime() - 30 * 86400000);
           const ds = (d) => d.toISOString().slice(0, 10);
