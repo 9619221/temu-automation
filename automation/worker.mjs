@@ -8339,7 +8339,7 @@ async function collectOneAccount(params = {}) {
               if (result.ok && list.length > 0) {
                 batchItems.push({ kind: fundDef.ingestKind, url: `https://seller.kuajingmaihuo.com${fundDef.urlPath}`, url_path: fundDef.urlPath, method: "POST", status: result.status, ts: Date.now(), site: "kuajingmaihuo", page: fundDef.ingestPage, mall_id: mallId, body, bodyText: result.text.length > 200000 ? null : result.text, requestBodyText: reqBody, bodySize: result.text.length, activeSource: "batch_robot" });
               }
-              if (list.length === 0 || allRecords.length >= total || pageNum >= 10) hasMore = false;
+              if (list.length === 0 || allRecords.length >= total || pageNum >= 40) hasMore = false; // 大店11天流水可超500条,40页=2000条
               else { pageNum++; await randomDelay(300, 500); }
             }
             // 结算类流水自带 detailJumpPath（中转到 agentseller-<region> 下载页），收集待下载批次
@@ -8442,7 +8442,7 @@ async function collectOneAccount(params = {}) {
     // 结算口径报表（销量/成本按已结算订单）要求批次全量：
     // 下限对齐面板「结算时间范围」起始日（params.startDate），未传时回退近 N 天。
     const SETTLE_ORDER_DAYS = Number(process.env.SETTLE_ORDER_DAYS || 14);
-    const SETTLE_ORDER_MAX_PER_MALL = Number(process.env.SETTLE_ORDER_MAX_PER_MALL || 200);
+    const SETTLE_ORDER_MAX_PER_MALL = Number(process.env.SETTLE_ORDER_MAX_PER_MALL || 600);
     const rangeStartMs = params.startDate ? new Date(`${params.startDate}T00:00:00+08:00`).getTime() : NaN;
     const cutoffTs = Number.isFinite(rangeStartMs) ? rangeStartMs : Date.now() - SETTLE_ORDER_DAYS * 86400000;
     // 近 N 天 + 每店上限，防一店几百批次拖垮整轮

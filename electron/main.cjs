@@ -4673,8 +4673,8 @@ ipcMain.handle("automation:batch-collect", async (_e, params) => {
         collectedKeys: [...collected],
         ...(startDate ? { startDate } : {}),
         ...(endDate ? { endDate } : {}),
-        // 结算订单明细批次全量下载(每店上限200批,约2-4s/批),10分钟可能不够
-      }, { timeoutMs: 20 * 60 * 1000 });
+        // 结算订单明细批次全量下载(每店上限600批,约2-4s/批),大店可达40分钟
+      }, { timeoutMs: 40 * 60 * 1000 });
     } catch (e) {
       // 用户强制停止会杀掉 worker，导致这里抛连接错误——这是预期的，直接干净退出，
       // 不把当前店算作「采集失败/未覆盖」（避免误导用户以为是出错了）。
