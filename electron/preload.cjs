@@ -348,6 +348,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
       list: (params) => ipcRenderer.invoke("erp:supplier:list", params || {}),
       create: (payload) => ipcRenderer.invoke("erp:supplier:create", payload || {}),
       importFeishuOnce: (payload) => ipcRenderer.invoke("erp:supplier:import-feishu-once", payload || {}),
+      goods: (params) => ipcRenderer.invoke("erp:supplier:goods", params || {}),
     },
     sku: {
       list: (params) => ipcRenderer.invoke("erp:sku:list", params || {}),

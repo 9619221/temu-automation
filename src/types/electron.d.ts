@@ -678,6 +678,7 @@ interface ErpAPI {
       skipped: number;
       errors?: Array<{ row: number; reason: string }>;
     }>;
+    goods: (params?: { supplierId?: string; limit?: number; offset?: number }) => Promise<any[]>;
   };
   sku: {
     list: (params?: ErpListParams) => Promise<any[]>;
