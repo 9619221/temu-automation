@@ -265,6 +265,11 @@ function toSupplier(row) {
   } catch {
     next.categories = [];
   }
+  try {
+    next.tags = JSON.parse(row.tags_json || "[]");
+  } catch {
+    next.tags = [];
+  }
   if (!next.source && String(next.id || "").startsWith("feishu:")) {
     next.source = "feishu";
   }
@@ -4742,6 +4747,7 @@ function createSupplier(payload = {}, actor = erpState.currentUser) {
     tax_rate: optionalNumber(payload.taxRate ?? payload.tax_rate),
     settlement_currency: optionalString(payload.settlementCurrency ?? payload.settlement_currency) || "CNY",
     remark: optionalString(payload.remark),
+    tags_json: JSON.stringify(Array.isArray(payload.tags) ? payload.tags : []),
     status: optionalString(payload.status) || "active",
     created_at: now,
     updated_at: now,
@@ -4750,13 +4756,13 @@ function createSupplier(payload = {}, actor = erpState.currentUser) {
   db.prepare(`
     INSERT INTO erp_suppliers (
       id, company_id, supplier_code, name, contact_name, phone, wechat, address, categories_json,
-      supplier_level, payment_terms, lead_days, tax_rate, settlement_currency, remark,
+      supplier_level, payment_terms, lead_days, tax_rate, settlement_currency, remark, tags_json,
       status, created_at, updated_at
     )
     VALUES (
       @id, @company_id, @supplier_code, @name, @contact_name, @phone, @wechat, @address,
       @categories_json, @supplier_level, @payment_terms, @lead_days, @tax_rate, @settlement_currency,
-      @remark, @status, @created_at, @updated_at
+      @remark, @tags_json, @status, @created_at, @updated_at
     )
     ON CONFLICT(id) DO UPDATE SET
       company_id = excluded.company_id,
@@ -4773,11 +4779,52 @@ function createSupplier(payload = {}, actor = erpState.currentUser) {
       tax_rate = excluded.tax_rate,
       settlement_currency = excluded.settlement_currency,
       remark = excluded.remark,
+      tags_json = excluded.tags_json,
       status = excluded.status,
       updated_at = excluded.updated_at
   `).run(row);
 
   return toSupplier(db.prepare("SELECT * FROM erp_suppliers WHERE id = ?").get(row.id));
+}
+
+// 飞书货盘货品清单：supplierId 可选（不传=全量货盘明细），JOIN 供应商档案带出地址/标签/税率
+function listFeishuSupplierGoods(params = {}) {
+  const { db } = requireErp();
+  const supplierId = optionalString(params.supplierId || params.supplier_id || params.id);
+  const companyId = optionalString(params.companyId || params.company_id);
+  const conditions = [];
+  if (supplierId) conditions.push("goods.supplier_id = @supplier_id");
+  if (companyId) conditions.push("goods.company_id = @company_id");
+  const whereSql = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const rows = db.prepare(`
+    SELECT
+      goods.*,
+      supplier.address AS supplier_address,
+      supplier.contact_name AS supplier_contact_name,
+      supplier.phone AS supplier_phone,
+      supplier.tags_json AS supplier_tags_json,
+      supplier.tax_rate AS supplier_tax_rate
+    FROM erp_feishu_supplier_goods goods
+    LEFT JOIN erp_suppliers supplier ON supplier.id = goods.supplier_id
+    ${whereSql}
+    ORDER BY goods.source_table, goods.product_name
+    LIMIT @limit OFFSET @offset
+  `).all({
+    supplier_id: supplierId,
+    company_id: companyId,
+    limit: Math.min(normalizeLimit(params.limit, 500), 10000),
+    offset: normalizeOffset(params.offset),
+  });
+  return rows.map((row) => {
+    const next = toCamelRow(row);
+    try {
+      next.supplierTags = JSON.parse(row.supplier_tags_json || "[]");
+    } catch {
+      next.supplierTags = [];
+    }
+    delete next.supplierTagsJson;
+    return next;
+  });
 }
 
 function listSkus(params = {}) {
@@ -5401,6 +5448,98 @@ function toSkuStockDetail(row) {
   return next;
 }
 
+// 库存明细弹窗的「变动流水」行：批次表只体现入库与现存差额，出库动作（退货/发货/换出等）
+// 从 erp_inventory_ledger_entries 取 qty_delta < 0 的流水补成单独行（入库腿已由批次行表达，不重复列）。
+const LEDGER_TYPE_LABELS = {
+  purchase_return: "采购退货出仓",
+  outbound_to_temu: "出库发货",
+  sku_swap_out: "换货换出",
+  transfer_out: "调拨出库",
+  platform_return_out: "平台仓转出",
+  scrap: "报废",
+  stock_adjustment: "库存调整",
+};
+
+// 与前端 displayReturnNo 同口径：手建退货单 io_id = -创建毫秒时间戳 → TH+北京时间年月日时分秒。
+function formatManualReturnNo(ioId) {
+  const ts = Math.abs(Number(ioId));
+  if (!Number.isFinite(ts) || ts <= 0) return null;
+  const d = new Date(ts + 8 * 3600 * 1000);
+  if (Number.isNaN(d.getTime())) return null;
+  const pad = (n) => String(n).padStart(2, "0");
+  return `TH${String(d.getUTCFullYear()).slice(2)}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}`;
+}
+
+function listSkuStockLedgerRows(db, { skuId, internalSkuCode }) {
+  let rows;
+  try {
+    // 先把商品编码解析成 sku 主键，流水查询走 sku_id 索引（OR 编码写法会退化为全表扫描）
+    const skuIds = new Set();
+    if (skuId) skuIds.add(skuId);
+    if (internalSkuCode) {
+      for (const r of db.prepare("SELECT id FROM erp_skus WHERE internal_sku_code = ?").all(internalSkuCode)) {
+        skuIds.add(r.id);
+      }
+    }
+    if (!skuIds.size) return [];
+    const ids = [...skuIds];
+    rows = db.prepare(`
+      SELECT l.id, l.type, l.qty_delta, l.unit_cost, l.created_at,
+             l.source_doc_type, l.source_doc_id,
+             acct.name AS account_name,
+             COALESCE(u.name, l.created_by) AS operator_name,
+             pret.io_id AS return_io_id, pret.source AS return_source
+      FROM erp_inventory_ledger_entries l
+      LEFT JOIN erp_accounts acct ON acct.id = l.account_id
+      LEFT JOIN erp_users u ON u.id = l.created_by
+      LEFT JOIN purchase_returns pret ON pret.id = l.source_doc_id
+      WHERE l.sku_id IN (${ids.map(() => "?").join(", ")}) AND l.qty_delta < 0
+      ORDER BY datetime(l.created_at) DESC
+      LIMIT 1000
+    `).all(ids);
+  } catch (_e) {
+    return []; // 老库无流水表时安全降级
+  }
+  return rows.map((row) => {
+    let orderNo = "-";
+    if (row.return_io_id != null) {
+      orderNo = Number(row.return_io_id) < 0
+        ? (formatManualReturnNo(row.return_io_id) || "-")
+        : String(row.return_io_id);
+    } else if (row.source_doc_id && !/^(jst[:-]|direct-|po-ret:|swap_|outbound:)/i.test(row.source_doc_id)) {
+      orderNo = row.source_doc_id;
+    }
+    const unitCost = Number(row.unit_cost || 0);
+    return {
+      id: row.id,
+      recordType: "ledger",
+      businessType: LEDGER_TYPE_LABELS[row.type] || row.type,
+      date: row.created_at,
+      qty: Number(row.qty_delta || 0),
+      orderNo,
+      batchCode: "",
+      receiptNo: "",
+      poNo: "",
+      warehouse: "-",
+      store: row.account_name || "-",
+      operator: row.operator_name || "-",
+      availableQty: 0,
+      reservedQty: 0,
+      blockedQty: 0,
+      defectiveQty: 0,
+      reworkQty: 0,
+      currentQty: 0,
+      unitCost,
+      unitFreightCost: 0,
+      unitLandedCost: unitCost,
+      stockValue: 0,
+      costStatus: "none",
+      costedQty: 0,
+      missingCostQty: 0,
+    };
+  });
+}
+
 function listSkuStockDetails(params = {}) {
   const { db } = requireErp();
   const skuId = optionalString(params.skuId || params.sku_id || params.id);
@@ -5478,9 +5617,13 @@ function listSkuStockDetails(params = {}) {
     LIMIT @limit OFFSET @offset
   `).all(queryParams).map(toSkuStockDetail);
 
+  // 出库类变动流水与批次行按时间混排（弹窗一次拉全量，前端本地分页）
+  const ledgerRows = listSkuStockLedgerRows(db, { skuId, internalSkuCode });
+  const merged = [...rows, ...ledgerRows].sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+
   return {
-    rows,
-    total: Number(summary.row_count || 0),
+    rows: merged,
+    total: Number(summary.row_count || 0) + ledgerRows.length,
     summary: {
       receivedQty: Number(summary.received_qty || 0),
       availableQty: Number(summary.available_qty || 0),
@@ -5670,6 +5813,7 @@ function toPurchaseReturnItemRow(row) {
     ioId: row.io_id,
     ioiId: row.ioi_id,
     skuId: row.sku_id,
+    internalSkuCode: row.internal_sku_code ?? null,
     productName: row.product_name,
     propertiesValue: row.properties_value,
     picUrl: row.pic_url,
@@ -5898,22 +6042,25 @@ function listPurchaseReturnItems(params = {}) {
     limit: normalizeLimit(params.limit, 2000),
     offset: normalizeOffset(params.offset),
   };
-  if (companyId) conditions.push("company_id = @company_id");
-  if (since) conditions.push("updated_at > @since");
-  if (!includeDeleted) conditions.push("status_internal != 'deleted'");
-  if (ioId) conditions.push("io_id = @io_id");
+  if (companyId) conditions.push("pri.company_id = @company_id");
+  if (since) conditions.push("pri.updated_at > @since");
+  if (!includeDeleted) conditions.push("pri.status_internal != 'deleted'");
+  if (ioId) conditions.push("pri.io_id = @io_id");
   if (ioIdsRaw && ioIdsRaw.length) {
     const placeholders = ioIdsRaw.map((_, idx) => `@io_id_${idx}`);
     ioIdsRaw.forEach((value, idx) => {
       values[`io_id_${idx}`] = Number(value) || 0;
     });
-    conditions.push(`io_id IN (${placeholders.join(", ")})`);
+    conditions.push(`pri.io_id IN (${placeholders.join(", ")})`);
   }
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  // 手建单 sku_id 存的是 erp_skus 主键，join 带出商品编码供前端显示
   const rows = db.prepare(`
-    SELECT * FROM purchase_return_items
+    SELECT pri.*, sk.internal_sku_code AS internal_sku_code
+    FROM purchase_return_items pri
+    LEFT JOIN erp_skus sk ON sk.id = pri.sku_id
     ${where}
-    ORDER BY io_id DESC, ioi_id ASC
+    ORDER BY pri.io_id DESC, pri.ioi_id ASC
     LIMIT @limit OFFSET @offset
   `).all(values);
   return rows.map(toPurchaseReturnItemRow);
@@ -22071,6 +22218,19 @@ async function listSuppliersRuntime(params = {}) {
   return workbench.suppliers || [];
 }
 
+async function listFeishuSupplierGoodsRuntime(params = {}) {
+  if (shouldUseClientRuntime()) {
+    ensureClientRuntime();
+    const payload = await remoteRequest("/api/master-data/supplier-goods", {
+      method: "POST",
+      body: params,
+      timeoutMs: 60000,
+    });
+    return payload.goods || payload.result || [];
+  }
+  return listFeishuSupplierGoods(params);
+}
+
 async function createSupplierRuntime(payload = {}, actor = {}) {
   if (shouldUseClientRuntime()) {
     ensureClientRuntime();
@@ -23470,6 +23630,8 @@ function registerErpIpcHandlers(ipcMain) {
         syncFundSummaryFromCapture,
         syncEprFeeFromCapture,
         syncFundFrozenFromCapture,
+        syncAccountOverviewFromCapture,
+        syncFulfillmentBillFromCapture,
         syncViolationFromCapture,
         clearMultiStoreReportCache,
       } = require("./services/multiStoreReport.cjs");
@@ -23497,17 +23659,24 @@ function registerErpIpcHandlers(ipcMain) {
       const frozen = income.attached
         ? syncFundFrozenFromCapture(erpState.db, { attachCloudDb: attachTemuCloudDbIfPossible })
         : { ok: false, attached: false, malls: 0, rows: 0 };
+      // 账户概览 / 履约费用流出（聚协云第①、⑧类对标）
+      const accountOverview = income.attached
+        ? syncAccountOverviewFromCapture(erpState.db, { attachCloudDb: attachTemuCloudDbIfPossible })
+        : { ok: false, attached: false, malls: 0, rows: 0 };
+      const fulfillment = income.attached
+        ? syncFulfillmentBillFromCapture(erpState.db, { attachCloudDb: attachTemuCloudDbIfPossible })
+        : { ok: false, attached: false, malls: 0, rows: 0 };
       const violation = income.attached
         ? syncViolationFromCapture(erpState.db, { attachCloudDb: attachTemuCloudDbIfPossible })
         : { ok: false, attached: false, malls: 0, rows: 0 };
-      const totalRows = (Number(income.rows) || 0) + (Number(detail.rows) || 0) + (Number(fund.rows) || 0) + (Number(order.rows) || 0) + (Number(fundSummary.rows) || 0) + (Number(epr.rows) || 0) + (Number(frozen.rows) || 0) + (Number(violation.rows) || 0);
+      const totalRows = (Number(income.rows) || 0) + (Number(detail.rows) || 0) + (Number(fund.rows) || 0) + (Number(order.rows) || 0) + (Number(fundSummary.rows) || 0) + (Number(epr.rows) || 0) + (Number(frozen.rows) || 0) + (Number(accountOverview.rows) || 0) + (Number(fulfillment.rows) || 0) + (Number(violation.rows) || 0);
       if (totalRows > 0 && typeof clearMultiStoreReportCache === "function") {
         clearMultiStoreReportCache();
       }
       const result = {
-        ok: Boolean(income.ok && detail.ok && fund.ok && order.ok && fundSummary.ok && epr.ok && frozen.ok && violation.ok),
+        ok: Boolean(income.ok && detail.ok && fund.ok && order.ok && fundSummary.ok && epr.ok && frozen.ok && accountOverview.ok && fulfillment.ok && violation.ok),
         attached: income.attached,
-        malls: Math.max(Number(income.malls) || 0, Number(detail.malls) || 0, Number(fund.malls) || 0, Number(order.malls) || 0, Number(fundSummary.malls) || 0, Number(epr.malls) || 0, Number(frozen.malls) || 0, Number(violation.malls) || 0),
+        malls: Math.max(Number(income.malls) || 0, Number(detail.malls) || 0, Number(fund.malls) || 0, Number(order.malls) || 0, Number(fundSummary.malls) || 0, Number(epr.malls) || 0, Number(frozen.malls) || 0, Number(accountOverview.malls) || 0, Number(fulfillment.malls) || 0, Number(violation.malls) || 0),
         rows: totalRows,
         incomeRows: Number(income.rows) || 0,
         detailRows: Number(detail.rows) || 0,
@@ -23516,6 +23685,8 @@ function registerErpIpcHandlers(ipcMain) {
         fundSummaryRows: Number(fundSummary.rows) || 0,
         eprRows: Number(epr.rows) || 0,
         frozenRows: Number(frozen.rows) || 0,
+        accountOverviewRows: Number(accountOverview.rows) || 0,
+        fulfillmentRows: Number(fulfillment.rows) || 0,
         violationRows: Number(violation.rows) || 0,
         income,
         detail,
@@ -23638,6 +23809,7 @@ function registerErpIpcHandlers(ipcMain) {
   ipcMain.handle("erp:supplier:list", wrapErpHandler("erp:supplier:list", (_event, params) => listSuppliersRuntime(params || {})));
   ipcMain.handle("erp:supplier:create", (_event, payload) => createSupplierRuntime(payload || {}, erpState.currentUser || {}));
   ipcMain.handle("erp:supplier:import-feishu-once", (_event, payload) => importFeishuSuppliersOnceRuntime(payload || {}, erpState.currentUser || {}));
+  ipcMain.handle("erp:supplier:goods", (_event, params) => listFeishuSupplierGoodsRuntime(params || {}));
   ipcMain.handle("erp:sku:list", (_event, params) => listSkusRuntime(params || {}));
   ipcMain.handle("erp:sku:stock-details", (_event, params) => listSkuStockDetailsRuntime(params || {}));
   ipcMain.handle("erp:sku:create", (_event, payload) => createSkuRuntime(payload || {}, erpState.currentUser || {}));

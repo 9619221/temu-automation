@@ -134,6 +134,7 @@ interface PurchaseReturnItemRow {
   ioId: number;
   ioiId: number;
   skuId?: string | null;
+  internalSkuCode?: string | null;
   productName?: string | null;
   propertiesValue?: string | null;
   picUrl?: string | null;
@@ -208,6 +209,19 @@ function formatTime(value?: string | null) {
   const date = new Date(text);
   if (Number.isNaN(date.getTime())) return text;
   return date.toLocaleString("zh-CN");
+}
+
+// 手建单退货单号：io_id 约定为 -创建毫秒时间戳（见 ipc.cjs 手动单约定），
+// 格式化为 TH+年月日时分秒 的可读流水号；聚水潭历史单直接显示原 io_id。
+function displayReturnNo(row: PurchaseReturnRow) {
+  if (row.source !== "manual") return String(row.ioId);
+  const ts = Math.abs(Number(row.ioId));
+  const date = new Date(ts);
+  if (!Number.isFinite(ts) || ts <= 0 || Number.isNaN(date.getTime())) {
+    return row.id.replace(/^po-ret:/, "").slice(0, 8);
+  }
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `TH${String(date.getFullYear()).slice(2)}${pad(date.getMonth() + 1)}${pad(date.getDate())}${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
 }
 
 function statusColor(value?: string | null) {
@@ -656,8 +670,7 @@ export default function PurchaseReturnsSection() {
       key: "ioId",
       width: 130,
       render: (_v, row) => {
-        const display = row.source === "manual" ? row.id.replace(/^po-ret:/, "").slice(0, 8) : String(row.ioId);
-        return <Text style={{ fontWeight: 600, fontSize: 12 }}>{display}</Text>;
+        return <Text style={{ fontWeight: 600, fontSize: 12 }}>{displayReturnNo(row)}</Text>;
       },
     },
     {
@@ -775,7 +788,7 @@ export default function PurchaseReturnsSection() {
       ),
     },
     { title: "货号", dataIndex: "iId", key: "iId", width: 130, render: (v) => v || "-" },
-    { title: "SKU", dataIndex: "skuId", key: "skuId", width: 130, render: (v) => v || "-" },
+    { title: "SKU", dataIndex: "skuId", key: "skuId", width: 130, render: (_v, it) => it.internalSkuCode || it.skuId || "-" },
     { title: "规格", dataIndex: "propertiesValue", key: "spec", width: 160, render: (v) => v || "-" },
     { title: "数量", dataIndex: "qty", key: "qty", width: 80, align: "right", render: (v) => formatNumber(v) },
     { title: "单价", dataIndex: "costPrice", key: "costPrice", width: 100, align: "right", render: (v) => formatMoney(v) },
