@@ -8442,7 +8442,7 @@ async function collectOneAccount(params = {}) {
     // 结算口径报表（销量/成本按已结算订单）要求批次全量：
     // 下限对齐面板「结算时间范围」起始日（params.startDate），未传时回退近 N 天。
     const SETTLE_ORDER_DAYS = Number(process.env.SETTLE_ORDER_DAYS || 14);
-    const SETTLE_ORDER_MAX_PER_MALL = Number(process.env.SETTLE_ORDER_MAX_PER_MALL || 600);
+    const SETTLE_ORDER_MAX_PER_MALL = Number(process.env.SETTLE_ORDER_MAX_PER_MALL || 1500);
     const rangeStartMs = params.startDate ? new Date(`${params.startDate}T00:00:00+08:00`).getTime() : NaN;
     const cutoffTs = Number.isFinite(rangeStartMs) ? rangeStartMs : Date.now() - SETTLE_ORDER_DAYS * 86400000;
     // 近 N 天 + 每店上限，防一店几百批次拖垮整轮
