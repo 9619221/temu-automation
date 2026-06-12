@@ -7248,6 +7248,47 @@ async function scrapeSettlement() {
 
 // ============ 批量店铺采集（products + afterSales + settlement 全自动遍历 35 店）============
 
+// 已到账快照接口（settle/detail/full/settled）超 31 天会被平台静默截断（实测 36 天窗口只按尾部 30 天返回），
+// 超长范围必须分段请求后把金额按段累加合并成单条快照上报（ERP 物化取最新一行，逐段上报会互相覆盖）。
+function splitSettleRange(startDate, endDate) {
+  if (!startDate || !endDate) return null;
+  const DAY = 86400000;
+  const t0 = new Date(`${startDate}T00:00:00+08:00`).getTime();
+  const t1 = new Date(`${endDate}T00:00:00+08:00`).getTime();
+  if (!Number.isFinite(t0) || !Number.isFinite(t1) || t1 - t0 < 31 * DAY) return null;
+  const f = (t) => new Date(t + 8 * 3600000).toISOString().slice(0, 10);
+  const segs = [];
+  let s = t0;
+  while (s <= t1) {
+    const e = Math.min(s + 30 * DAY, t1);
+    segs.push({ startDate: f(s), endDate: f(e) });
+    s = e + DAY;
+  }
+  return segs;
+}
+function mergeSettledSnapshots(snapshots) {
+  const merged = JSON.parse(JSON.stringify(snapshots[0]));
+  for (let i = 1; i < snapshots.length; i++) {
+    const src = snapshots[i] || {};
+    for (const k of Object.keys(src)) {
+      const sv = src[k];
+      const dv = merged[k];
+      if (sv && typeof sv === "object" && typeof sv.value === "number") {
+        if (dv && typeof dv === "object" && typeof dv.value === "number") {
+          dv.value += sv.value;
+          dv.digitalText = (Math.abs(dv.value) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+          if (dv.sign) dv.sign = dv.value < 0 ? "-" : "+";
+        } else if (dv == null) merged[k] = sv;
+      } else if (typeof sv === "number" && typeof dv === "number") {
+        merged[k] = dv + sv;
+      } else if (dv == null) {
+        merged[k] = sv;
+      }
+    }
+  }
+  return merged;
+}
+
 const BATCH_COLLECT_API = {
   products: {
     label: "商品",
@@ -7608,8 +7649,14 @@ async function scrapeBatchCollect(params = {}) {
             let hasMore = true;
             let hadAccess = false;   // 本店本任务是否拿到了正常响应（有权限）
 
+            // 已到账快照超31天分段：逐段请求，金额累加合并后单条上报（见 splitSettleRange 注释）
+            const settleSegs = taskKey === "settleDone" ? splitSettleRange(params.startDate, params.endDate) : null;
+            const segSnapshots = [];
+
             while (hasMore) {
-              const reqBody = apiDef.buildBody(pageNum, { startDate: params.startDate, endDate: params.endDate });
+              const reqBody = settleSegs
+                ? JSON.stringify(settleSegs[pageNum - 1])
+                : apiDef.buildBody(pageNum, { startDate: params.startDate, endDate: params.endDate });
 
               const result = await page.evaluate(
                 async ({ apiUrl, mid, body }) => {
@@ -7651,6 +7698,19 @@ async function scrapeBatchCollect(params = {}) {
               hadAccess = true;
               const list = apiDef.getList(body);
               const total = apiDef.getTotal(body);
+
+              if (settleSegs) {
+                // 分段模式：只收集各段快照，合并后再统一上报
+                if (result.ok && body?.result && typeof body.result === "object") segSnapshots.push(body.result);
+                if (pageNum >= settleSegs.length) {
+                  hasMore = false;
+                } else {
+                  pageNum++;
+                  await randomDelay(300, 500);
+                }
+                continue;
+              }
+
               allRecords.push(...list);
 
               if (result.ok && list.length > 0) {
@@ -7678,6 +7738,30 @@ async function scrapeBatchCollect(params = {}) {
                 pageNum++;
                 await randomDelay(300, 500);
               }
+            }
+
+            if (settleSegs && segSnapshots.length > 0) {
+              const merged = mergeSettledSnapshots(segSnapshots);
+              allRecords = [merged];
+              const mergedBody = { success: true, errorCode: 1000000, result: merged };
+              const mergedText = JSON.stringify(mergedBody);
+              allBatchItems.push({
+                kind: apiDef.ingestKind,
+                url: `https://agentseller.temu.com${apiDef.urlPath}`,
+                url_path: apiDef.urlPath,
+                method: "POST",
+                status: 200,
+                ts: Date.now(),
+                site: "agentseller",
+                page: apiDef.ingestPage,
+                mall_id: mallId,
+                body: mergedBody,
+                bodyText: mergedText,
+                requestBodyText: JSON.stringify({ startDate: params.startDate, endDate: params.endDate, mergedSegments: settleSegs.length }),
+                bodySize: mergedText.length,
+                activeSource: "batch_robot",
+              });
+              console.error(`${logPrefix} [${tag}] 已到账超31天分段合并: ${segSnapshots.length}/${settleSegs.length} 段`);
             }
 
             if (!accSessionExpired) {
@@ -7853,6 +7937,7 @@ async function collectOneAccount(params = {}) {
   const accDenied = new Set();
   const newlyCollectedKeys = [];
   const batchItems = [];
+  let liveUploadedTotal = 0; // 边下边传已实时上报的订单明细批次数（计入最终上报总数）
   let accSessionExpired = false;
 
   try {
@@ -8220,16 +8305,29 @@ async function collectOneAccount(params = {}) {
         const fundRangeEnd = params.endDate
           ? new Date(Math.min(new Date(`${params.endDate}T23:59:59+08:00`).getTime(), Date.now()))
           : null;
-        const fundVariants = (pageNum) => {
-          const end = fundRangeEnd || new Date(); const start = fundRangeStart || new Date(end.getTime() - 30 * 86400000);
-          const ds = (d) => d.toISOString().slice(0, 10);
-          const t0 = start.getTime(), t1 = end.getTime();
+        // 平台流水查询单次最长约 31 天（超长直接拒"查询参数不合法"），超过则按 30 天分段循环采集后合并
+        const fundSegments = (() => {
+          const end = (fundRangeEnd || new Date()).getTime();
+          const start = (fundRangeStart || new Date(end - 30 * 86400000)).getTime();
+          const segs = [];
+          let s = start;
+          while (s <= end) {
+            const e = Math.min(s + 30 * 86400000 - 1, end);
+            segs.push({ t0: s, t1: e });
+            s = e + 1;
+          }
+          return segs;
+        })();
+        if (fundSegments.length > 1) console.error(`${logPrefix} 账务费用时间范围超31天，分 ${fundSegments.length} 段采集`);
+        const fundVariants = (pageNum, seg) => {
+          const t0 = seg.t0, t1 = seg.t1;
+          const ds = (t) => new Date(t).toISOString().slice(0, 10);
           return [
             // 抓包确认的真实格式（042 店页面实发：beginTime/endTime 毫秒 + pageNum）
             JSON.stringify({ pageNum, pageSize: 50, beginTime: t0, endTime: t1 }),
             JSON.stringify({ pageNo: pageNum, pageSize: 50, startTime: t0, endTime: t1 }),
-            JSON.stringify({ pageNo: pageNum, pageSize: 50, startTime: ds(start), endTime: ds(end) }),
-            JSON.stringify({ pageNo: pageNum, pageSize: 50, startDate: ds(start), endDate: ds(end) }),
+            JSON.stringify({ pageNo: pageNum, pageSize: 50, startTime: ds(t0), endTime: ds(t1) }),
+            JSON.stringify({ pageNo: pageNum, pageSize: 50, startDate: ds(t0), endDate: ds(t1) }),
             JSON.stringify({ pageNo: pageNum, pageSize: 50, beginTime: t0, endTime: t1 }),
           ];
         };
@@ -8315,32 +8413,38 @@ async function collectOneAccount(params = {}) {
         for (const mall of fundTargets) {
           const { mall_id: mallId, store_code: tag } = mall;
           try {
-            let allRecords = []; let pageNum = 1; let hasMore = true;
-            while (hasMore) {
-              let reqBody, result, body = null;
-              if (fundVariant < 0) {
-                // 探测：逐候选试，命中（success!==false）则固定
-                const cands = fundVariants(pageNum);
-                for (let vi = 0; vi < cands.length; vi++) {
-                  reqBody = cands[vi];
+            let allRecords = [];
+            for (const seg of fundSegments) {
+              let segRecords = []; let pageNum = 1; let hasMore = true;
+              while (hasMore) {
+                let reqBody, result, body = null;
+                if (fundVariant < 0) {
+                  // 探测：逐候选试，命中（success!==false）则固定
+                  const cands = fundVariants(pageNum, seg);
+                  for (let vi = 0; vi < cands.length; vi++) {
+                    reqBody = cands[vi];
+                    result = await fundFetch(fundDef.urlPath, mallId, reqBody);
+                    try { body = JSON.parse(result.text); } catch { body = null; }
+                    console.error(`${logPrefix} [${tag}] 账务费用探测 v${vi} HTTP ${result.status} success=${body?.success} msg="${(body?.errorMsg || "").slice(0, 50)}"`);
+                    if (result.ok && body && body.success !== false) { fundVariant = vi; break; }
+                  }
+                  if (fundVariant < 0) { hasMore = false; break; }
+                } else {
+                  reqBody = fundVariants(pageNum, seg)[fundVariant];
                   result = await fundFetch(fundDef.urlPath, mallId, reqBody);
                   try { body = JSON.parse(result.text); } catch { body = null; }
-                  console.error(`${logPrefix} [${tag}] 账务费用探测 v${vi} HTTP ${result.status} success=${body?.success} msg="${(body?.errorMsg || "").slice(0, 50)}"`);
-                  if (result.ok && body && body.success !== false) { fundVariant = vi; break; }
                 }
-                if (fundVariant < 0) { hasMore = false; break; }
-              } else {
-                reqBody = fundVariants(pageNum)[fundVariant];
-                result = await fundFetch(fundDef.urlPath, mallId, reqBody);
-                try { body = JSON.parse(result.text); } catch { body = null; }
+                const list = fundDef.getList(body); const total = fundDef.getTotal(body);
+                segRecords.push(...list);
+                if (result.ok && list.length > 0) {
+                  batchItems.push({ kind: fundDef.ingestKind, url: `https://seller.kuajingmaihuo.com${fundDef.urlPath}`, url_path: fundDef.urlPath, method: "POST", status: result.status, ts: Date.now(), site: "kuajingmaihuo", page: fundDef.ingestPage, mall_id: mallId, body, bodyText: result.text.length > 200000 ? null : result.text, requestBodyText: reqBody, bodySize: result.text.length, activeSource: "batch_robot" });
+                }
+                if (list.length === 0 || segRecords.length >= total || pageNum >= 200) hasMore = false; // 按 total/空页自然终止,200页(1万条)仅防接口异常死循环
+                else { pageNum++; await randomDelay(300, 500); }
               }
-              const list = fundDef.getList(body); const total = fundDef.getTotal(body);
-              allRecords.push(...list);
-              if (result.ok && list.length > 0) {
-                batchItems.push({ kind: fundDef.ingestKind, url: `https://seller.kuajingmaihuo.com${fundDef.urlPath}`, url_path: fundDef.urlPath, method: "POST", status: result.status, ts: Date.now(), site: "kuajingmaihuo", page: fundDef.ingestPage, mall_id: mallId, body, bodyText: result.text.length > 200000 ? null : result.text, requestBodyText: reqBody, bodySize: result.text.length, activeSource: "batch_robot" });
-              }
-              if (list.length === 0 || allRecords.length >= total || pageNum >= 200) hasMore = false; // 按 total/空页自然终止,200页(1万条)仅防接口异常死循环
-              else { pageNum++; await randomDelay(300, 500); }
+              allRecords.push(...segRecords);
+              if (fundVariant < 0) break; // 探测失败说明接口不可用，后续分段不再试
+              if (fundSegments.length > 1) await randomDelay(300, 500);
             }
             // 结算类流水自带 detailJumpPath（中转到 agentseller-<region> 下载页），收集待下载批次
             for (const r of allRecords) {
@@ -8587,6 +8691,8 @@ async function collectOneAccount(params = {}) {
         }
       }, { api: apiUrl, mid: mallId, body: JSON.stringify(payload) });
       let dlPage = null;
+      let orderUploadPump = null;
+      let orderUploadDone = false;
       try {
         dlPage = await safeNewPage(context);
         console.error(`${logPrefix} 结算订单明细：待下载 ${[...byMall.values()].reduce((a, b) => a + b.length, 0)} 批次 / ${byMall.size} 店（下限 ${new Date(cutoffTs).toISOString().slice(0, 10)}${Number.isFinite(SETTLE_ORDER_MAX_PER_MALL) ? `，每店上限${SETTLE_ORDER_MAX_PER_MALL}` : "，不限批次数"}）`);
@@ -8600,6 +8706,29 @@ async function collectOneAccount(params = {}) {
           try { fs.writeFileSync(DOWNLOADED_FILE, JSON.stringify(downloadedMap)); downloadedDirty = 0; } catch {}
         };
         const SETTLE_ORDER_CONCURRENCY = Math.max(1, Number(process.env.SETTLE_ORDER_CONCURRENCY || 3));
+        // 边下边传：订单明细批次下载完一个就进上报队列，后台泵串行传云端（不等全部下载完）。
+        // 上报失败的退回 batchItems，由收尾统一上报兜底，零丢数据。
+        const orderUploadCfg = loadSettlementCloudConfig();
+        const orderUploadQueue = [];
+        let orderUploadedLive = 0;
+        orderUploadPump = (async () => {
+          if (!orderUploadCfg.authToken) { orderUploadDone = true; return; }
+          while (!orderUploadDone || orderUploadQueue.length > 0) {
+            if (orderUploadQueue.length === 0) { await new Promise((r) => setTimeout(r, 500)); continue; }
+            const slice = orderUploadQueue.splice(0, 2);
+            try {
+              const resp = await postSettlementBatch(slice, orderUploadCfg);
+              if (resp.ok) {
+                orderUploadedLive += slice.length;
+                if (orderUploadedLive % 100 === 0) console.error(`${logPrefix} 边下边传 settlement-orders 已上报 ${orderUploadedLive}`);
+              } else {
+                batchItems.push(...slice);
+              }
+            } catch {
+              batchItems.push(...slice);
+            }
+          }
+        })();
         for (const [mallId, targets] of byMall) {
           const skippedCount = targets.filter((t) => downloadedMap[`${mallId}|${t.batchId}`]).length;
           if (skippedCount > 0) console.error(`${logPrefix} 结算订单明细：跳过已下载 ${skippedCount} 批（增量），本轮新下 ${targets.length - skippedCount} 批`);
@@ -8639,21 +8768,39 @@ async function collectOneAccount(params = {}) {
               const regionSite = `agentseller-${regionMatch[1].toLowerCase()}`;
               const f = (d) => d.toISOString().slice(0, 10);
               const defEnd = new Date(); const defStart = new Date(defEnd.getTime() - 30 * 86400000);
+              // 已到账超31天同样分段合并（与主流程一致，平台静默截断）
+              const regionSettleSegs = splitSettleRange(params.startDate, params.endDate);
+              const settledPayloads = regionSettleSegs
+                || [{ startDate: params.startDate || f(defStart), endDate: params.endDate || f(defEnd) }];
               const settleDefs = [
-                { path: "/api/merchant/settle/detail/full/wait-settlement", page: "robot/settle-wait", payload: {} },
-                { path: "/api/merchant/settle/detail/full/in-settlement", page: "robot/settle-in", payload: {} },
-                { path: "/api/merchant/settle/detail/full/settled", page: "robot/settle-settled", payload: { startDate: params.startDate || f(defStart), endDate: params.endDate || f(defEnd) } },
+                { path: "/api/merchant/settle/detail/full/wait-settlement", page: "robot/settle-wait", payloads: [{}] },
+                { path: "/api/merchant/settle/detail/full/in-settlement", page: "robot/settle-in", payloads: [{}] },
+                { path: "/api/merchant/settle/detail/full/settled", page: "robot/settle-settled", payloads: settledPayloads, merge: !!regionSettleSegs },
               ];
               for (const def of settleDefs) {
                 try {
-                  const r = await fetchSettlementDownloadLink(dlPage, `${apiBase}${def.path}`, mallId, def.payload);
-                  let parsed = null;
-                  try { parsed = JSON.parse(r.text); } catch { parsed = null; }
-                  if (r.ok && parsed && parsed.success !== false && parsed.result) {
-                    batchItems.push({ kind: "fetch-active-settlement-detail", url: `${apiBase}${def.path}`, url_path: def.path, method: "POST", status: r.status, ts: Date.now(), site: regionSite, page: def.page, mall_id: mallId, body: parsed, bodyText: r.text.length > 200000 ? null : r.text, requestBodyText: JSON.stringify(def.payload), bodySize: r.text.length, activeSource: "batch_robot" });
-                    console.error(`${logPrefix} [${(group[0] && group[0].t && group[0].t.tag) || mallId}] ${regionSite} 结算汇总补采 ${def.path.split("/").pop()} OK`);
-                  } else {
-                    console.error(`${logPrefix} [${(group[0] && group[0].t && group[0].t.tag) || mallId}] ${regionSite} 结算汇总补采 ${def.path.split("/").pop()} HTTP ${r.status || "-"} ${String(r.text || "").slice(0, 60).replace(/\s+/g, " ")}`);
+                  const snapshots = [];
+                  let lastResp = null;
+                  for (const payload of def.payloads) {
+                    const r = await fetchSettlementDownloadLink(dlPage, `${apiBase}${def.path}`, mallId, payload);
+                    let parsed = null;
+                    try { parsed = JSON.parse(r.text); } catch { parsed = null; }
+                    if (r.ok && parsed && parsed.success !== false && parsed.result) {
+                      snapshots.push(parsed.result);
+                      lastResp = { r, parsed, payload };
+                    } else {
+                      console.error(`${logPrefix} [${(group[0] && group[0].t && group[0].t.tag) || mallId}] ${regionSite} 结算汇总补采 ${def.path.split("/").pop()} HTTP ${r.status || "-"} ${String(r.text || "").slice(0, 60).replace(/\s+/g, " ")}`);
+                    }
+                    if (def.payloads.length > 1) await randomDelay(200, 400);
+                  }
+                  if (snapshots.length > 0) {
+                    const mergedResult = def.merge && snapshots.length > 1 ? mergeSettledSnapshots(snapshots) : snapshots[snapshots.length - 1];
+                    const outBody = def.merge && snapshots.length > 1
+                      ? { success: true, errorCode: 1000000, result: mergedResult }
+                      : lastResp.parsed;
+                    const outText = JSON.stringify(outBody);
+                    batchItems.push({ kind: "fetch-active-settlement-detail", url: `${apiBase}${def.path}`, url_path: def.path, method: "POST", status: lastResp.r.status, ts: Date.now(), site: regionSite, page: def.page, mall_id: mallId, body: outBody, bodyText: outText.length > 200000 ? null : outText, requestBodyText: JSON.stringify(def.merge ? { startDate: params.startDate, endDate: params.endDate, mergedSegments: snapshots.length } : lastResp.payload), bodySize: outText.length, activeSource: "batch_robot" });
+                    console.error(`${logPrefix} [${(group[0] && group[0].t && group[0].t.tag) || mallId}] ${regionSite} 结算汇总补采 ${def.path.split("/").pop()} OK${def.merge && snapshots.length > 1 ? ` (${snapshots.length}段合并)` : ""}`);
                   }
                 } catch (e) { console.error(`${logPrefix} ${regionSite} 结算汇总补采异常: ${e.message}`); }
                 await randomDelay(200, 400);
@@ -8699,7 +8846,7 @@ async function collectOneAccount(params = {}) {
                   columns, rowCount: rows.length, truncated, rows: truncated ? rows.slice(0, 3000) : rows,
                 };
                 const bodyText = JSON.stringify(body);
-                batchItems.push({ kind: "fetch-active-settlement-orders", url: `${apiBase}/api/merchant/fund/detail/item/semi/download`, url_path: "/api/merchant/fund/detail/item/semi/download", method: "POST", status: 200, ts: Date.now(), site: "agentseller", page: "robot/settlement-orders", mall_id: mallId, body, bodyText: bodyText.length > 200000 ? null : bodyText, requestBodyText: JSON.stringify(payload), bodySize: bodyText.length, activeSource: "batch_robot" });
+                orderUploadQueue.push({ kind: "fetch-active-settlement-orders", url: `${apiBase}/api/merchant/fund/detail/item/semi/download`, url_path: "/api/merchant/fund/detail/item/semi/download", method: "POST", status: 200, ts: Date.now(), site: "agentseller", page: "robot/settlement-orders", mall_id: mallId, body, bodyText: bodyText.length > 200000 ? null : bodyText, requestBodyText: JSON.stringify(payload), bodySize: bodyText.length, activeSource: "batch_robot" });
                 if (rows.length > 0) { sts.success++; sts.totalRecords += rows.length; } else sts.empty++;
                 downloadedMap[`${mallId}|${t.batchId}`] = Date.now();
                 downloadedDirty++;
@@ -8720,10 +8867,17 @@ async function collectOneAccount(params = {}) {
           }
           flushDownloaded();
         }
+        // 下载全部结束，等后台上报泵清空队列（失败项已退回 batchItems 由收尾兜底）
+        orderUploadDone = true;
+        await orderUploadPump;
+        liveUploadedTotal += orderUploadedLive;
+        if (orderUploadedLive > 0) console.error(`${logPrefix} 边下边传完成: 订单明细已实时上报 ${orderUploadedLive} 批`);
         console.error(`${logPrefix} 结算订单明细完成: 批次成功 ${sts.success} / 空 ${sts.empty} / 错 ${sts.error}, 共 ${sts.totalRecords} 行`);
       } catch (e) {
         console.error(`${logPrefix} 结算订单明细整体失败: ${e.message}`);
       } finally {
+        orderUploadDone = true;
+        if (orderUploadPump) { try { await orderUploadPump; } catch {} }
         await dlPage?.close().catch(() => {});
       }
     }
@@ -8731,7 +8885,7 @@ async function collectOneAccount(params = {}) {
 
   // cloud 上报：按类型分组小批上报，结算优先（body 最小、最重要），单 chunk 1-2 条防 body 过大超时。
   // 注意：商品 body 可能 200KB+，14 页就 3MB，60s 内传不完。所以分类型 + 小 chunk。
-  let uploaded = 0;
+  let uploaded = liveUploadedTotal;
   const cloudConfig = loadSettlementCloudConfig();
   if (batchItems.length > 0 && cloudConfig.authToken) {
     const byKind = { "fetch-active-income-summary": [], "fetch-active-settlement-detail": [], "fetch-active-fund-detail": [], "fetch-active-fund-summary": [], "fetch-active-fund-enum": [], "fetch-active-fund-frozen": [], "fetch-active-epr-fee": [], "fetch-active-finance-probe": [], "fetch-active-settlement-orders": [], "fetch-active-settlement-violation": [], "fetch-active-aftersales": [], "fetch-active-products": [] };

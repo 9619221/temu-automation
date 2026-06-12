@@ -108,22 +108,28 @@ function BatchCollectSection() {
   const [error, setError] = useState<string | null>(null);
   const [startedAt, setStartedAt] = useState<string | null>(null);
   const [mallList, setMallList] = useState<MallItem[]>([]);
+  const [mallLoading, setMallLoading] = useState(false);
   const [selectedMallIds, setSelectedMallIds] = useState<Set<string>>(new Set());
   const [progress, setProgress] = useState<{ current: number; total: number; currentMall: string } | null>(null);
   // 结算时间范围：默认当月 1 号→今天（与 worker 兜底一致），透传给 batch-collect 的 startDate/endDate
   const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>(() => [dayjs().startOf("month"), dayjs()]);
 
-  useEffect(() => {
+  const loadMalls = useCallback(async (manual = false) => {
     const api = (window as any).electronAPI;
-    (async () => {
+    setMallLoading(true);
+    try {
       try {
         const resp = await api?.erp?.reports?.mallDict?.();
-        if (!resp?.ok || !Array.isArray(resp.data?.malls)) return;
+        if (!resp?.ok || !Array.isArray(resp.data?.malls)) {
+          if (manual) message.warning("店铺列表加载失败：主控端无响应，请稍后再试");
+          return;
+        }
         const malls: MallItem[] = resp.data.malls
           .filter((m: any) => m.status !== "test" && m.mall_id && m.store_code)
           .sort((a: any, b: any) => (a.store_code || "").localeCompare(b.store_code || ""));
         setMallList(malls);
         setSelectedMallIds(new Set(malls.map((m: MallItem) => m.mall_id)));
+        if (manual) message.success(`已加载 ${malls.length} 个店铺`);
 
         // 自动按店铺名解析归属：店铺名带账号名（如「Lumen Global店铺」），按 name 子串匹配账号；
         // 写入映射表 → 采集时直接按这张表精准登对应账号，不再逐账号试探。
@@ -149,9 +155,15 @@ function BatchCollectSection() {
           // 不打 message 提示，避免每次进入 TEMU 机器人页都弹通知
           console.log(`[batch-collect] 自动按店铺名建立映射：${Object.keys(mapping).length} 账号 / ${matched} 店`);
         }
-      } catch { /* ignore */ }
-    })();
+      } catch {
+        if (manual) message.warning("店铺列表加载失败：主控端无响应，请稍后再试");
+      }
+    } finally {
+      setMallLoading(false);
+    }
   }, []);
+
+  useEffect(() => { loadMalls(); }, [loadMalls]);
 
   const handleToggle = (key: BatchTaskKey, checked: boolean) => {
     setSelectedTasks((prev) => checked ? [...prev, key] : prev.filter((k) => k !== key));
@@ -272,25 +284,35 @@ function BatchCollectSection() {
             选择店铺和采集类型，机器人按顺序逐店采集。遇到验证码会等待 5 分钟供手动处理。
           </div>
         </div>
-        {collecting ? (
+        <Space size={8}>
           <Button
-            danger
-            icon={<CloseCircleOutlined />}
-            loading={stopping}
-            onClick={handleStop}
+            icon={<SyncOutlined />}
+            loading={mallLoading}
+            disabled={collecting}
+            onClick={() => loadMalls(true)}
           >
-            {stopping ? "正在停止..." : "停止采集"}
+            刷新
           </Button>
-        ) : (
-          <Button
-            type="primary"
-            icon={<RocketOutlined />}
-            disabled={selectedTasks.length === 0 || (mallList.length > 0 && selectedMallIds.size === 0)}
-            onClick={handleStart}
-          >
-            一键批量采集
-          </Button>
-        )}
+          {collecting ? (
+            <Button
+              danger
+              icon={<CloseCircleOutlined />}
+              loading={stopping}
+              onClick={handleStop}
+            >
+              {stopping ? "正在停止..." : "停止采集"}
+            </Button>
+          ) : (
+            <Button
+              type="primary"
+              icon={<RocketOutlined />}
+              disabled={selectedTasks.length === 0 || (mallList.length > 0 && selectedMallIds.size === 0)}
+              onClick={handleStart}
+            >
+              一键批量采集
+            </Button>
+          )}
+        </Space>
       </div>
 
       <div className="robot-task-selector" style={{ marginTop: 12 }}>
