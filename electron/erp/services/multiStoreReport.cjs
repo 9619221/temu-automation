@@ -562,7 +562,17 @@ function normalizeMoneyAmount(value) {
         currency: value.currencyCode || value.currency || null,
       };
     }
-    const yuanObj = Number(value.digitalText ?? value.fullText ?? value.value ?? value.text);
+    // digitalText 可能带千分位逗号（"3,359.43"），直接 Number() 会 NaN（028 实测金额>999 全被解析成 0）
+    const text = value.digitalText ?? value.fullText ?? value.text;
+    let yuanObj = typeof text === "number" ? text : NaN;
+    if (typeof text === "string") {
+      const n = Number(text.replace(/[,\s¥$€£]/g, ""));
+      if (Number.isFinite(n)) yuanObj = n;
+    }
+    // text 字段缺失时退到 value.value（接口原值，单位分；digitalText 语义是绝对值，保持一致取 abs）
+    if (!Number.isFinite(yuanObj) && Number.isFinite(Number(value.value))) {
+      yuanObj = Math.abs(Number(value.value)) / 100;
+    }
     if (Number.isFinite(yuanObj)) {
       return {
         yuan: yuanObj,
