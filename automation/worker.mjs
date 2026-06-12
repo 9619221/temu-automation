@@ -8339,7 +8339,7 @@ async function collectOneAccount(params = {}) {
               if (result.ok && list.length > 0) {
                 batchItems.push({ kind: fundDef.ingestKind, url: `https://seller.kuajingmaihuo.com${fundDef.urlPath}`, url_path: fundDef.urlPath, method: "POST", status: result.status, ts: Date.now(), site: "kuajingmaihuo", page: fundDef.ingestPage, mall_id: mallId, body, bodyText: result.text.length > 200000 ? null : result.text, requestBodyText: reqBody, bodySize: result.text.length, activeSource: "batch_robot" });
               }
-              if (list.length === 0 || allRecords.length >= total || pageNum >= 40) hasMore = false; // 大店11天流水可超500条,40页=2000条
+              if (list.length === 0 || allRecords.length >= total || pageNum >= 200) hasMore = false; // 按 total/空页自然终止,200页(1万条)仅防接口异常死循环
               else { pageNum++; await randomDelay(300, 500); }
             }
             // 结算类流水自带 detailJumpPath（中转到 agentseller-<region> 下载页），收集待下载批次
@@ -8442,7 +8442,8 @@ async function collectOneAccount(params = {}) {
     // 结算口径报表（销量/成本按已结算订单）要求批次全量：
     // 下限对齐面板「结算时间范围」起始日（params.startDate），未传时回退近 N 天。
     const SETTLE_ORDER_DAYS = Number(process.env.SETTLE_ORDER_DAYS || 14);
-    const SETTLE_ORDER_MAX_PER_MALL = Number(process.env.SETTLE_ORDER_MAX_PER_MALL || 1500);
+    // 用户拍板:批次不设上限,按面板时间范围全量(SETTLE_ORDER_MAX_PER_MALL 仅作可选防御开关)
+    const SETTLE_ORDER_MAX_PER_MALL = Number(process.env.SETTLE_ORDER_MAX_PER_MALL || Infinity);
     const rangeStartMs = params.startDate ? new Date(`${params.startDate}T00:00:00+08:00`).getTime() : NaN;
     const cutoffTs = Number.isFinite(rangeStartMs) ? rangeStartMs : Date.now() - SETTLE_ORDER_DAYS * 86400000;
     // 近 N 天 + 每店上限，防一店几百批次拖垮整轮
@@ -8588,7 +8589,7 @@ async function collectOneAccount(params = {}) {
       let dlPage = null;
       try {
         dlPage = await safeNewPage(context);
-        console.error(`${logPrefix} 结算订单明细：待下载 ${[...byMall.values()].reduce((a, b) => a + b.length, 0)} 批次 / ${byMall.size} 店（下限 ${new Date(cutoffTs).toISOString().slice(0, 10)}，每店上限${SETTLE_ORDER_MAX_PER_MALL}）`);
+        console.error(`${logPrefix} 结算订单明细：待下载 ${[...byMall.values()].reduce((a, b) => a + b.length, 0)} 批次 / ${byMall.size} 店（下限 ${new Date(cutoffTs).toISOString().slice(0, 10)}${Number.isFinite(SETTLE_ORDER_MAX_PER_MALL) ? `，每店上限${SETTLE_ORDER_MAX_PER_MALL}` : "，不限批次数"}）`);
         // 增量：已成功下载过的批次跳过（本机持久记录；要强制全量重下，删项目根 .settlement-order-downloaded.json）
         const DOWNLOADED_FILE = path.join(process.cwd(), ".settlement-order-downloaded.json");
         let downloadedMap = {};
