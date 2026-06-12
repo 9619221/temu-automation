@@ -6200,7 +6200,8 @@ function ensureManualDraft(row) {
 function createPurchaseReturnDraft(payload, actor) {
   const { db } = requireErp();
   const companyId = optionalString(payload.companyId) || erpState.currentUser?.companyId || "company_default";
-  const supplierName = requireString(payload.supplierName, "supplierName");
+  // 供应商对线下/手工采购退货可为空（没绑定 1688/系统来源时留空），不强制必填。
+  const supplierName = optionalString(payload.supplierName);
   const accountId = requireString(payload.accountId, "accountId");
   const items = normalizePurchaseReturnItemsInput(payload.items);
   const summary = summarizePurchaseReturnItems(items);
@@ -6290,7 +6291,8 @@ function updatePurchaseReturnDraft(payload, actor) {
   const id = requireString(payload.id, "id");
   const items = normalizePurchaseReturnItemsInput(payload.items);
   const summary = summarizePurchaseReturnItems(items);
-  const supplierName = requireString(payload.supplierName, "supplierName");
+  // 供应商对线下/手工采购退货可为空，与 createPurchaseReturnDraft 口径一致。
+  const supplierName = optionalString(payload.supplierName);
   const accountId = requireString(payload.accountId, "accountId");
   const now = nowIso();
   const account = db.prepare("SELECT id, name FROM erp_accounts WHERE id = ?").get(accountId);

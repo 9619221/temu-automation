@@ -531,7 +531,7 @@ export default function PurchaseReturnsSection() {
   }, [draftItems]);
 
   const submitEditor = async (effective: boolean) => {
-    if (!supplierName.trim()) { message.error("供应商必填"); return; }
+    // 供应商对线下/手工采购退货可为空（选 SKU 后自动带出，没绑定来源时允许留空），不再强制必填。
     if (!accountId) { message.error("仓库账户必选"); return; }
     if (!draftItems.length) { message.error("至少一条明细"); return; }
     for (const it of draftItems) {
@@ -555,7 +555,7 @@ export default function PurchaseReturnsSection() {
       if (editorMode === "create") {
         const res = await erp.purchaseReturn.action({
           action: "create_draft",
-          supplierName: supplierName.trim(),
+          supplierName: supplierName.trim() || null,
           accountId,
           remark: remark.trim() || null,
           items: itemsPayload,
@@ -566,7 +566,7 @@ export default function PurchaseReturnsSection() {
         await erp.purchaseReturn.action({
           action: "update_draft",
           id: editorId,
-          supplierName: supplierName.trim(),
+          supplierName: supplierName.trim() || null,
           accountId,
           remark: remark.trim() || null,
           items: itemsPayload,

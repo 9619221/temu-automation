@@ -2679,6 +2679,72 @@ async function main() {
       purchaseReturnCheckDb.close();
     }
 
+    const createPurchaseReturnWithoutSupplier = await requestUrl(`${lanStatus.localUrl}/api/master-data/purchase-return/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "create_draft",
+        supplierName: null,
+        accountId: purchaseReturnAccount.id,
+        items: [{ skuId: purchaseReturnSku.id, qty: 1, costPrice: 10.5 }],
+      }),
+    });
+    assert.equal(createPurchaseReturnWithoutSupplier.statusCode, 200, createPurchaseReturnWithoutSupplier.body);
+    const createPurchaseReturnWithoutSupplierBody = JSON.parse(createPurchaseReturnWithoutSupplier.body);
+    assert.equal(createPurchaseReturnWithoutSupplierBody.ok, true);
+    assert.match(createPurchaseReturnWithoutSupplierBody.result.id, /^po-ret:/);
+
+    const updatePurchaseReturnWithoutSupplier = await requestUrl(`${lanStatus.localUrl}/api/master-data/purchase-return/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "update_draft",
+        id: createPurchaseReturnWithoutSupplierBody.result.id,
+        supplierName: "",
+        accountId: purchaseReturnAccount.id,
+        items: [{ skuId: purchaseReturnSku.id, qty: 1, costPrice: 10.5 }],
+      }),
+    });
+    assert.equal(updatePurchaseReturnWithoutSupplier.statusCode, 200, updatePurchaseReturnWithoutSupplier.body);
+    const updatePurchaseReturnWithoutSupplierBody = JSON.parse(updatePurchaseReturnWithoutSupplier.body);
+    assert.equal(updatePurchaseReturnWithoutSupplierBody.ok, true);
+
+    const effectivePurchaseReturnWithoutSupplier = await requestUrl(`${lanStatus.localUrl}/api/master-data/purchase-return/action`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        action: "effective",
+        id: createPurchaseReturnWithoutSupplierBody.result.id,
+      }),
+    });
+    assert.equal(effectivePurchaseReturnWithoutSupplier.statusCode, 200, effectivePurchaseReturnWithoutSupplier.body);
+    const effectivePurchaseReturnWithoutSupplierBody = JSON.parse(effectivePurchaseReturnWithoutSupplier.body);
+    assert.equal(effectivePurchaseReturnWithoutSupplierBody.ok, true);
+    assert.equal(effectivePurchaseReturnWithoutSupplierBody.result.lifecycle, "effective");
+
+    const noSupplierPurchaseReturnCheckDb = openErpDatabase({ userDataDir: tempUserData });
+    try {
+      const noSupplierReturnRow = noSupplierPurchaseReturnCheckDb.prepare("SELECT supplier_name, lifecycle FROM purchase_returns WHERE id = ?").get(createPurchaseReturnWithoutSupplierBody.result.id);
+      assert.equal(noSupplierReturnRow.supplier_name, null);
+      assert.equal(noSupplierReturnRow.lifecycle, "effective");
+      const returnBatchAfterNoSupplier = noSupplierPurchaseReturnCheckDb.prepare("SELECT available_qty FROM erp_inventory_batches WHERE id = ?").get("batch_purchase_return_ipc");
+      assert.equal(returnBatchAfterNoSupplier.available_qty, 1);
+    } finally {
+      noSupplierPurchaseReturnCheckDb.close();
+    }
+
     lanStatus = await invoke("erp:lan:stop");
     assert.equal(lanStatus.running, false);
 
