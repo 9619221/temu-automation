@@ -663,6 +663,20 @@ interface ErpAPI {
       settlementCurrency?: string;
       remark?: string;
       status?: string;
+      tags?: string[];
+      // 新增供应商时可附带录入货品行（对齐供应商档案列表字段），写入飞书货盘明细表
+      goods?: Array<{
+        productName: string;
+        productCode?: string;
+        colorSpec?: string;
+        purchasePrice?: string;
+        alibabaUrl?: string;
+        labelSize?: string;
+        shippingReq?: string;
+        purchaseMode?: string;
+        shop?: string;
+        sourceTable?: string;
+      }>;
     }) => Promise<any>;
     importFeishuOnce: (payload: {
       filePath: string;

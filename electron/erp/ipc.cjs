@@ -4784,6 +4784,63 @@ function createSupplier(payload = {}, actor = erpState.currentUser) {
       updated_at = excluded.updated_at
   `).run(row);
 
+  // 「新增供应商」可同时录入货品行（对齐供应商档案列表字段），写入飞书货盘明细表
+  const goodsRows = Array.isArray(payload.goods) ? payload.goods : [];
+  if (goodsRows.length) {
+    const insertGoods = db.prepare(`
+      INSERT INTO erp_feishu_supplier_goods (
+        id, company_id, supplier_id, supplier_name, product_name, product_code, color_spec,
+        purchase_price, alibaba_url, label_size, shipping_req, purchase_mode, shop, source_table,
+        created_at, updated_at
+      )
+      VALUES (
+        @id, @company_id, @supplier_id, @supplier_name, @product_name, @product_code, @color_spec,
+        @purchase_price, @alibaba_url, @label_size, @shipping_req, @purchase_mode, @shop, @source_table,
+        @created_at, @updated_at
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        supplier_id = excluded.supplier_id,
+        supplier_name = excluded.supplier_name,
+        color_spec = excluded.color_spec,
+        purchase_price = excluded.purchase_price,
+        alibaba_url = excluded.alibaba_url,
+        label_size = excluded.label_size,
+        shipping_req = excluded.shipping_req,
+        purchase_mode = excluded.purchase_mode,
+        shop = excluded.shop,
+        source_table = excluded.source_table,
+        updated_at = excluded.updated_at
+    `);
+    for (const item of goodsRows) {
+      const productName = optionalString(item.productName ?? item.product_name);
+      if (!productName) continue;
+      const productCode = optionalString(item.productCode ?? item.product_code);
+      const digest = crypto
+        .createHash("sha1")
+        .update(`${row.company_id}:${row.name}|${productCode || ""}|${productName}`)
+        .digest("hex")
+        .slice(0, 24);
+      insertGoods.run({
+        id: `feishu:goods:${digest}`,
+        company_id: row.company_id,
+        supplier_id: row.id,
+        supplier_name: row.name,
+        product_name: productName,
+        product_code: productCode,
+        color_spec: optionalString(item.colorSpec ?? item.color_spec),
+        purchase_price: optionalString(item.purchasePrice ?? item.purchase_price),
+        alibaba_url: optionalString(item.alibabaUrl ?? item.alibaba_url),
+        label_size: optionalString(item.labelSize ?? item.label_size),
+        shipping_req: optionalString(item.shippingReq ?? item.shipping_req),
+        purchase_mode: optionalString(item.purchaseMode ?? item.purchase_mode),
+        shop: optionalString(item.shop),
+        source_table: optionalString(item.sourceTable ?? item.source_table),
+        created_at: now,
+        updated_at: now,
+      });
+    }
+  }
+
   return toSupplier(db.prepare("SELECT * FROM erp_suppliers WHERE id = ?").get(row.id));
 }
 

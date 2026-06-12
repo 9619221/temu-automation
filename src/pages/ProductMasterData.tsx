@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Key } from "react";
-import { Alert, Button, Col, Descriptions, Drawer, Form, Image, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Table, Tag, Typography, message } from "antd";
+import { Alert, Button, Col, Descriptions, Divider, Drawer, Form, Image, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Table, Tag, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { DeleteOutlined, EditOutlined, EyeOutlined, LineChartOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import { useSessionState } from "../hooks/useSessionState";
@@ -205,9 +205,14 @@ function parseGoodsImageUrls(value?: string | null): string[] {
   return [text];
 }
 
-// 列表缩略图：原图同名 webp 存 feishu-goods-thumbs/，点开预览仍用原图
+// 列表缩略图：原图同名 webp 存 feishu-goods-thumbs/
 function goodsThumbUrl(url: string): string {
   return url.replace("/uploads/feishu-goods/", "/uploads/feishu-goods-thumbs/").replace(/\.(png|jpg|webp)$/i, ".webp");
+}
+
+// 点开预览用中等尺寸预览图（最长边1000 webp，feishu-goods-previews/）；原图最大15MB打开太慢
+function goodsPreviewUrl(url: string): string {
+  return url.replace("/uploads/feishu-goods/", "/uploads/feishu-goods-previews/").replace(/\.(png|jpg|webp)$/i, ".webp");
 }
 
 interface FeishuSupplierGoodsRow {
@@ -394,30 +399,7 @@ const SUPPLIER_TAG_META: Record<string, { color: string }> = {
 
 const SUPPLIER_TAG_OPTIONS = Object.keys(SUPPLIER_TAG_META).map((tag) => ({ label: tag, value: tag }));
 
-const SUPPLIER_LEVEL_OPTIONS = [
-  { label: "战略", value: "strategic", color: "purple" },
-  { label: "优选", value: "preferred", color: "green" },
-  { label: "标准", value: "standard", color: "blue" },
-  { label: "观察", value: "watch", color: "orange" },
-  { label: "淘汰", value: "blocked", color: "red" },
-];
-
-const PAYMENT_TERM_OPTIONS = [
-  { label: "现结", value: "cash" },
-  { label: "预付", value: "prepaid" },
-  { label: "货到付款", value: "cod" },
-  { label: "7 天账期", value: "net_7" },
-  { label: "15 天账期", value: "net_15" },
-  { label: "30 天账期", value: "net_30" },
-  { label: "月结", value: "monthly" },
-];
-
 const SKU_STALE_DAYS = 90;
-
-function optionLabel(options: Array<{ label: string; value: string }>, value?: string | null) {
-  if (!value) return "-";
-  return options.find((item) => item.value === value)?.label || value;
-}
 
 function toOptionalNumber(value: unknown) {
   if (value === null || value === undefined || value === "") return null;
@@ -602,6 +584,11 @@ function formatDateTime(value?: string | null) {
     minute: "2-digit",
     hour12: false,
   });
+}
+
+function optionalText(value: unknown): string | undefined {
+  const text = typeof value === "string" ? value.trim() : "";
+  return text || undefined;
 }
 
 function formatMoney(value?: number | string | null) {
@@ -1174,13 +1161,47 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       .sort((left, right) => left.localeCompare(right, "zh-Hans-CN", { numeric: true }))
       .map((label) => ({ label: label.replace(/货盘$/, ""), value: label }));
   }, [allGoods]);
+  // 店铺字典：store_code → TEMU 店名。飞书「品牌（店）」写法不一（46店 / 62店 / (62) Borderless Mart Box），
+  // 按店号对齐到内部店铺字典，同一店在列表/筛选里不再被当成多个值
+  const [mallNameByCode, setMallNameByCode] = useState<Map<string, string>>(new Map());
+  useEffect(() => {
+    let cancelled = false;
+    erp?.reports?.mallDict?.().then((resp: { ok: boolean; data?: { malls?: Array<{ store_code: string | null; mall_name: string | null }> } } | null) => {
+      if (cancelled || !resp?.ok || !resp.data) return;
+      const map = new Map<string, string>();
+      for (const mall of resp.data.malls || []) {
+        if (mall.store_code) map.set(mall.store_code, mall.mall_name || "");
+      }
+      setMallNameByCode(map);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  const alignGoodsShop = useCallback((shop?: string | null): string => {
+    const text = (shop || "").trim();
+    if (!text) return "";
+    const matched = text.match(/\d{2,3}/);
+    if (!matched) return text;
+    const code = matched[0].padStart(3, "0");
+    const name = mallNameByCode.get(code);
+    if (!name) return text;
+    return name === code ? `${code}店` : `${code} · ${name}`;
+  }, [mallNameByCode]);
   const goodsShopOptions = useMemo(() => {
     const labels = new Set<string>();
-    allGoods.forEach((item) => { if (item.shop) labels.add(item.shop); });
+    allGoods.forEach((item) => { const label = alignGoodsShop(item.shop); if (label) labels.add(label); });
     return Array.from(labels)
       .sort((left, right) => left.localeCompare(right, "zh-Hans-CN", { numeric: true }))
       .map((label) => ({ label, value: label }));
-  }, [allGoods]);
+  }, [allGoods, alignGoodsShop]);
+  // 新增供应商弹窗「品牌（店）」下拉：直接列内部店铺字典（店号 · 店名）
+  const mallShopFormOptions = useMemo(() => (
+    Array.from(mallNameByCode.entries())
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([code, name]) => {
+        const label = !name || name === code ? `${code}店` : `${code} · ${name}`;
+        return { label, value: label };
+      })
+  ), [mallNameByCode]);
   const goodsPurchaseModeOptions = useMemo(() => {
     const labels = new Set<string>();
     allGoods.forEach((item) => { if (item.purchaseMode) labels.add(item.purchaseMode); });
@@ -1200,7 +1221,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
     return allGoods.filter((item) => {
       if (supplierFilters.sourceTable && item.sourceTable !== supplierFilters.sourceTable) return false;
       if (supplierFilters.purchaseMode && item.purchaseMode !== supplierFilters.purchaseMode) return false;
-      if (supplierFilters.shop && item.shop !== supplierFilters.shop) return false;
+      if (supplierFilters.shop && alignGoodsShop(item.shop) !== supplierFilters.shop) return false;
       if (supplierFilters.tag && !(item.supplierTags || []).includes(supplierFilters.tag)) return false;
       if (!keyword) return true;
       const searchableText = [
@@ -1216,7 +1237,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       ].filter(Boolean).join(" ").toLowerCase();
       return searchableText.includes(keyword);
     });
-  }, [supplierFilters, allGoods]);
+  }, [supplierFilters, allGoods, alignGoodsShop]);
   const supplierSummary = useMemo(() => {
     let invoiceableCount = 0;
     let hasContactCount = 0;
@@ -1613,21 +1634,13 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       phone: supplier.phone,
       wechat: supplier.wechat,
       address: supplier.address,
-      categories: supplier.categories || [],
       tags: supplier.tags || [],
-      supplierLevel: supplier.supplierLevel || "standard",
-      paymentTerms: supplier.paymentTerms,
-      leadDays: supplier.leadDays,
       taxRate: supplier.taxRate,
-      settlementCurrency: supplier.settlementCurrency || "CNY",
       remark: supplier.remark,
       status: supplier.status || "active",
     } : {
       status: "active",
-      categories: [],
       tags: [],
-      supplierLevel: "standard",
-      settlementCurrency: "CNY",
     });
     setSupplierModalOpen(true);
   };
@@ -1645,15 +1658,29 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
         phone: values.phone,
         wechat: values.wechat,
         address: values.address,
-        categories: values.categories || [],
+        // 遗留字段不再出现在表单中，编辑时透传原值避免被默认值冲掉
+        categories: editingSupplier?.categories || [],
         tags: values.tags || [],
-        supplierLevel: values.supplierLevel || "standard",
-        paymentTerms: values.paymentTerms,
-        leadDays: values.leadDays ?? null,
+        supplierLevel: editingSupplier?.supplierLevel || "standard",
+        paymentTerms: editingSupplier?.paymentTerms,
+        leadDays: editingSupplier?.leadDays ?? null,
         taxRate: values.taxRate ?? null,
-        settlementCurrency: values.settlementCurrency || "CNY",
+        settlementCurrency: editingSupplier?.settlementCurrency || "CNY",
         remark: values.remark,
         status: values.status || "active",
+        // 新增时附带录入货品行（对齐供应商档案列表字段）；编辑供应商不动货品
+        goods: !editingSupplier && optionalText(values.goodsProductName) ? [{
+          productName: String(values.goodsProductName).trim(),
+          productCode: optionalText(values.goodsProductCode),
+          colorSpec: optionalText(values.goodsColorSpec),
+          purchasePrice: optionalText(values.goodsPurchasePrice),
+          alibabaUrl: optionalText(values.goodsAlibabaUrl),
+          labelSize: optionalText(values.goodsLabelSize),
+          shippingReq: optionalText(values.goodsShippingReq),
+          purchaseMode: optionalText(values.goodsPurchaseMode),
+          shop: optionalText(values.goodsShop),
+          sourceTable: optionalText(values.goodsSourceTable),
+        }] : undefined,
       });
       supplierForm.resetFields();
       setSupplierModalOpen(false);
@@ -2020,27 +2047,27 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       title: "图片",
       dataIndex: "imageUrl",
       key: "imageUrl",
-      width: 68,
+      width: 100,
       fixed: "left",
       render: (value: string) => {
         const urls = parseGoodsImageUrls(value);
         if (!urls.length) {
           return (
-            <div style={{ width: 48, height: 48, borderRadius: 6, border: "1px dashed #d8dee9", color: "#98a2b3", fontSize: 12, display: "flex", alignItems: "center", justifyContent: "center", background: "#f8fbff" }}>
+            <div style={{ width: 80, height: 80, borderRadius: 6, border: "1px dashed #d8dee9", color: "#98a2b3", fontSize: 12, display: "flex", alignItems: "center", justifyContent: "center", background: "#f8fbff" }}>
               无图
             </div>
           );
         }
         return (
-          <div style={{ position: "relative", width: 48, height: 48 }}>
-            <Image.PreviewGroup items={urls}>
+          <div style={{ position: "relative", width: 80, height: 80 }}>
+            <Image.PreviewGroup items={urls.map(goodsPreviewUrl)}>
               <Image
                 src={goodsThumbUrl(urls[0])}
                 alt="产品图片"
-                width={48}
-                height={48}
+                width={80}
+                height={80}
                 fallback={urls[0]}
-                preview={{ mask: <EyeOutlined />, src: urls[0] }}
+                preview={{ mask: <EyeOutlined />, src: goodsPreviewUrl(urls[0]) }}
                 style={{ borderRadius: 6, objectFit: "cover", background: "#f5f7fb" }}
               />
             </Image.PreviewGroup>
@@ -2072,8 +2099,8 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       title: "品牌（店）",
       dataIndex: "shop",
       key: "shop",
-      width: 110,
-      render: (value: string) => value || "-",
+      width: 130,
+      render: (value: string) => alignGoodsShop(value) || "-",
     },
     {
       title: "采购状态",
@@ -2107,11 +2134,10 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
       title: "1688 链接",
       dataIndex: "alibabaUrl",
       key: "alibabaUrl",
-      width: 210,
+      width: 240,
       render: (value: string) => value ? (
         <Typography.Link
-          ellipsis
-          style={{ maxWidth: 194, display: "inline-block", verticalAlign: "bottom" }}
+          style={{ wordBreak: "break-all", whiteSpace: "pre-wrap" }}
           onClick={() => appAPI?.openExternal?.(value)}
         >
           {value}
@@ -3250,19 +3276,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
                 { key: "phone", label: "电话", children: supplierDetailRow.phone || "-" },
                 { key: "wechat", label: "微信", children: supplierDetailRow.wechat || "-" },
                 { key: "address", label: "地址", children: supplierDetailRow.address || "-" },
-                { key: "paymentTerms", label: "结算方式", children: optionLabel(PAYMENT_TERM_OPTIONS, supplierDetailRow.paymentTerms) },
-                { key: "leadDays", label: "标准交期", children: supplierDetailRow.leadDays === null || supplierDetailRow.leadDays === undefined ? "-" : `${supplierDetailRow.leadDays} 天` },
                 { key: "taxRate", label: "税率", children: supplierDetailRow.taxRate === null || supplierDetailRow.taxRate === undefined ? "-" : `${supplierDetailRow.taxRate}%` },
-                { key: "currency", label: "结算币种", children: supplierDetailRow.settlementCurrency || "CNY" },
-                {
-                  key: "categories",
-                  label: "经营类目",
-                  children: supplierDetailRow.categories?.length ? (
-                    <Space size={[4, 4]} wrap>
-                      {supplierDetailRow.categories.map((category) => <Tag key={category}>{category}</Tag>)}
-                    </Space>
-                  ) : "-",
-                },
                 { key: "remark", label: "备注", children: supplierDetailRow.remark || "-" },
                 { key: "lastPurchaseAt", label: "最近采购", children: formatDateTime(supplierDetailRow.lastPurchaseAt) },
                 { key: "createdAt", label: "创建时间", children: formatDateTime(supplierDetailRow.createdAt) },
@@ -3304,7 +3318,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
                     width: 90,
                     render: (value) => (value ? <Tag color={value === "代发" ? "blue" : "orange"} style={{ marginInlineEnd: 0 }}>{value}</Tag> : "-"),
                   },
-                  { title: "店铺", dataIndex: "shop", key: "shop", width: 90, render: (value) => value || "-" },
+                  { title: "店铺", dataIndex: "shop", key: "shop", width: 120, render: (value) => alignGoodsShop(value as string) || "-" },
                   { title: "标签尺寸", dataIndex: "labelSize", key: "labelSize", width: 100, render: (value) => value || "-" },
                   { title: "快递要求", dataIndex: "shippingReq", key: "shippingReq", width: 140, render: (value) => <Typography.Text style={{ maxWidth: 130 }} ellipsis={{ tooltip: value }}>{value || "-"}</Typography.Text> },
                   { title: "货盘", dataIndex: "sourceTable", key: "sourceTable", width: 100, render: (value) => value || "-" },
@@ -3456,7 +3470,7 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
         open={supplierModalOpen}
         okText="保存"
         cancelText="取消"
-        width={720}
+        width={editingSupplier ? 720 : 1200}
         confirmLoading={submitting === "supplier"}
         onOk={handleSaveSupplier}
         onCancel={() => {
@@ -3466,92 +3480,135 @@ export default function ProductMasterData({ mode = "skus", embedded = false }: P
         destroyOnClose
       >
         <Form form={supplierForm} layout="vertical">
-          <Row gutter={12}>
-            <Col xs={24} md={12}>
-              <Form.Item name="name" label="供应商名称" rules={[{ required: true, message: "请输入供应商名称" }]}>
-                <Input placeholder="例如：义乌某某工厂" />
-              </Form.Item>
+          <Row gutter={32}>
+            <Col xs={24} md={editingSupplier ? 24 : 12}>
+              {!editingSupplier ? (
+                <Divider style={{ margin: "4px 0 16px" }} orientation="left" plain>供应商信息</Divider>
+              ) : null}
+              <Row gutter={12}>
+                <Col xs={24} md={12}>
+                  <Form.Item name="name" label="供应商名称" rules={[{ required: true, message: "请输入供应商名称" }]}>
+                    <Input placeholder="例如：义乌某某工厂" />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={12}>
+                  <Form.Item name="status" label="状态" initialValue="active">
+                    <Select
+                      options={[
+                        { label: "启用", value: "active" },
+                        { label: "停用", value: "blocked" },
+                      ]}
+                    />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={12}>
+                  <Form.Item name="supplierCode" label="供应商编码">
+                    <Input placeholder="例如：SUP-001" />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={12}>
+                  <Form.Item name="taxRate" label="税率(%)">
+                    <InputNumber min={0} max={100} precision={2} style={{ width: "100%" }} placeholder="例如 13" />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={8}>
+                  <Form.Item name="contactName" label="联系人">
+                    <Input placeholder="联系人姓名" />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={8}>
+                  <Form.Item name="phone" label="电话">
+                    <Input placeholder="手机号 / 座机" />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={8}>
+                  <Form.Item name="wechat" label="微信">
+                    <Input placeholder="微信号" />
+                  </Form.Item>
+                </Col>
+                <Col xs={24}>
+                  <Form.Item name="address" label="地址">
+                    <Input placeholder="工厂 / 仓库地址" />
+                  </Form.Item>
+                </Col>
+                <Col xs={24}>
+                  <Form.Item name="tags" label="标签">
+                    <Select mode="multiple" allowClear options={SUPPLIER_TAG_OPTIONS} placeholder="可开票 / 可做品牌等" />
+                  </Form.Item>
+                </Col>
+                <Col xs={24}>
+                  <Form.Item name="remark" label="备注">
+                    <Input.TextArea rows={3} placeholder="供应能力、合作要求或风险备注" />
+                  </Form.Item>
+                </Col>
+              </Row>
             </Col>
-            <Col xs={24} md={12}>
-              <Form.Item name="status" label="状态" initialValue="active">
-                <Select
-                  options={[
-                    { label: "启用", value: "active" },
-                    { label: "停用", value: "blocked" },
-                  ]}
-                />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={8}>
-              <Form.Item name="supplierCode" label="供应商编码">
-                <Input placeholder="例如：SUP-001" />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={8}>
-              <Form.Item name="supplierLevel" label="供应商等级" initialValue="standard">
-                <Select options={SUPPLIER_LEVEL_OPTIONS} />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={8}>
-              <Form.Item name="paymentTerms" label="结算方式">
-                <Select allowClear options={PAYMENT_TERM_OPTIONS} placeholder="选择账期" />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={8}>
-              <Form.Item name="leadDays" label="标准交期">
-                <InputNumber min={0} precision={0} style={{ width: "100%" }} placeholder="天数" />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={8}>
-              <Form.Item name="taxRate" label="税率(%)">
-                <InputNumber min={0} max={100} precision={2} style={{ width: "100%" }} placeholder="例如 13" />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={8}>
-              <Form.Item name="settlementCurrency" label="结算币种" initialValue="CNY">
-                <Select
-                  options={[
-                    { label: "CNY", value: "CNY" },
-                    { label: "USD", value: "USD" },
-                  ]}
-                />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={8}>
-              <Form.Item name="contactName" label="联系人">
-                <Input placeholder="联系人姓名" />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={8}>
-              <Form.Item name="phone" label="电话">
-                <Input placeholder="手机号 / 座机" />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={8}>
-              <Form.Item name="wechat" label="微信">
-                <Input placeholder="微信号" />
-              </Form.Item>
-            </Col>
-            <Col xs={24}>
-              <Form.Item name="address" label="地址">
-                <Input placeholder="工厂 / 仓库地址" />
-              </Form.Item>
-            </Col>
-            <Col xs={24}>
-              <Form.Item name="categories" label="经营类目">
-                <Select mode="tags" tokenSeparators={[",", "，"]} placeholder="输入后回车" />
-              </Form.Item>
-            </Col>
-            <Col xs={24}>
-              <Form.Item name="tags" label="标签">
-                <Select mode="multiple" allowClear options={SUPPLIER_TAG_OPTIONS} placeholder="可开票 / 可做品牌等" />
-              </Form.Item>
-            </Col>
-            <Col xs={24}>
-              <Form.Item name="remark" label="备注">
-                <Input.TextArea rows={3} placeholder="供应能力、合作要求或风险备注" />
-              </Form.Item>
-            </Col>
+            {!editingSupplier ? (
+              <Col xs={24} md={12}>
+                <Divider style={{ margin: "4px 0 16px" }} orientation="left" plain>
+                  货品信息（选填，填写商品名称后写入供应商档案列表）
+                </Divider>
+                <Row gutter={12}>
+                  <Col xs={24}>
+                    <Form.Item name="goodsProductName" label="商品名称">
+                      <Input placeholder="货品品名" />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} md={12}>
+                    <Form.Item name="goodsSourceTable" label="类目">
+                      <Select allowClear showSearch optionFilterProp="label" options={goodsSourceOptions} placeholder="所属货盘" />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} md={12}>
+                    <Form.Item name="goodsShop" label="品牌（店）">
+                      <Select allowClear showSearch optionFilterProp="label" options={mallShopFormOptions} placeholder="内部店铺" />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} md={8}>
+                    <Form.Item name="goodsPurchaseMode" label="采购状态">
+                      <Select
+                        allowClear
+                        options={[
+                          { label: "代发", value: "代发" },
+                          { label: "自发", value: "自发" },
+                        ]}
+                        placeholder="代发 / 自发"
+                      />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} md={8}>
+                    <Form.Item name="goodsProductCode" label="商品编码">
+                      <Input placeholder="货号" />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} md={8}>
+                    <Form.Item name="goodsPurchasePrice" label="采购单价">
+                      <Input placeholder="例如 2.8贴标免费" />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24}>
+                    <Form.Item name="goodsColorSpec" label="颜色及规格">
+                      <Input placeholder="例如 7 件 材质：铝合金" />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24}>
+                    <Form.Item name="goodsAlibabaUrl" label="1688 链接">
+                      <Input placeholder="https://detail.1688.com/..." />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} md={12}>
+                    <Form.Item name="goodsLabelSize" label="标签尺寸">
+                      <Input placeholder="例如 10*10" />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} md={12}>
+                    <Form.Item name="goodsShippingReq" label="快递要求">
+                      <Input placeholder="例如 量多贴" />
+                    </Form.Item>
+                  </Col>
+                </Row>
+              </Col>
+            ) : null}
           </Row>
         </Form>
       </Modal>
