@@ -449,13 +449,11 @@ function emptySettlementDetail() {
 }
 
 function buildSettlementDetailByMall(db, opts = {}) {
-  const { startDate, endDate } = opts;
+  // 注意：不按 stat_date 过滤。汇总卡片的统计窗口由采集时的请求参数决定（面板「结算时间范围」），
+  // 物化行的 stat_date 只是采集日，按它过滤会把最新快照误伤掉（如 6/12 凌晨采的 6/1-11 窗口数据）。
+  // 因此三态列展示的是「最近一次采集时所选窗口」的快照。
   const params = [];
-  let dateWhere = "";
-  if (startDate && endDate) {
-    dateWhere = "AND stat_date >= ? AND stat_date <= ?";
-    params.push(startDate, endDate);
-  }
+  const dateWhere = "";
   let rows;
   try {
     // settle/detail/full/* 接口返回的是「汇总卡片」（一段时间范围一个总数），每次采集落一行快照。
