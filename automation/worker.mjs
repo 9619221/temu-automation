@@ -8600,12 +8600,12 @@ async function collectOneAccount(params = {}) {
         };
         const SETTLE_ORDER_CONCURRENCY = Math.max(1, Number(process.env.SETTLE_ORDER_CONCURRENCY || 3));
         for (const [mallId, targets] of byMall) {
-          const fresh = targets.filter((t) => !downloadedMap[`${mallId}|${t.batchId}`]);
-          const skippedCount = targets.length - fresh.length;
-          if (skippedCount > 0) console.error(`${logPrefix} 结算订单明细：跳过已下载 ${skippedCount} 批（增量），本轮新下 ${fresh.length} 批`);
-          // 按落地域分组：goto 建 session 必须串行（同一页面），组内批次并发下载
+          const skippedCount = targets.filter((t) => downloadedMap[`${mallId}|${t.batchId}`]).length;
+          if (skippedCount > 0) console.error(`${logPrefix} 结算订单明细：跳过已下载 ${skippedCount} 批（增量），本轮新下 ${targets.length - skippedCount} 批`);
+          // 按落地域分组：goto 建 session 必须串行（同一页面），组内批次并发下载。
+          // 注意分组用全量批次（含已下载的）——分区结算汇总补采依赖进入各域，不能因增量跳过整个域。
           const groups = new Map();
-          for (const t of fresh) {
+          for (const t of targets) {
             // detailJumpPath 是跨境猫域的中转路径，targetUrl 参数里带落地域（按 region 而异）
             const jumpUrl = new URL(t.jumpPath, "https://seller.kuajingmaihuo.com");
             const targetUrl = jumpUrl.searchParams.get("targetUrl");
@@ -8631,6 +8631,33 @@ async function collectOneAccount(params = {}) {
             }
             const currentOrigin = (() => { try { return new URL(dlPage.url()).origin; } catch { return ""; } })();
             const apiOrigins = Array.from(new Set([apiBase, currentOrigin, "https://seller.kuajingmaihuo.com"].filter((origin) => /^https?:\/\//i.test(origin))));
+            // 分区补采结算汇总：全球/美区/欧区是独立站点账户，主任务只采了全球域（agentseller），
+            // 美/欧的待结算/结算中/已到账只能在对应域内同域 fetch，漏采会让多区店收入三列严重偏小。
+            const regionMatch = apiBase.match(/agentseller-(us|eu)\./i);
+            if (regionMatch) {
+              const regionSite = `agentseller-${regionMatch[1].toLowerCase()}`;
+              const f = (d) => d.toISOString().slice(0, 10);
+              const defEnd = new Date(); const defStart = new Date(defEnd.getTime() - 30 * 86400000);
+              const settleDefs = [
+                { path: "/api/merchant/settle/detail/full/wait-settlement", page: "robot/settle-wait", payload: {} },
+                { path: "/api/merchant/settle/detail/full/in-settlement", page: "robot/settle-in", payload: {} },
+                { path: "/api/merchant/settle/detail/full/settled", page: "robot/settle-settled", payload: { startDate: params.startDate || f(defStart), endDate: params.endDate || f(defEnd) } },
+              ];
+              for (const def of settleDefs) {
+                try {
+                  const r = await fetchSettlementDownloadLink(dlPage, `${apiBase}${def.path}`, mallId, def.payload);
+                  let parsed = null;
+                  try { parsed = JSON.parse(r.text); } catch { parsed = null; }
+                  if (r.ok && parsed && parsed.success !== false && parsed.result) {
+                    batchItems.push({ kind: "fetch-active-settlement-detail", url: `${apiBase}${def.path}`, url_path: def.path, method: "POST", status: r.status, ts: Date.now(), site: regionSite, page: def.page, mall_id: mallId, body: parsed, bodyText: r.text.length > 200000 ? null : r.text, requestBodyText: JSON.stringify(def.payload), bodySize: r.text.length, activeSource: "batch_robot" });
+                    console.error(`${logPrefix} [${(group[0] && group[0].t && group[0].t.tag) || mallId}] ${regionSite} 结算汇总补采 ${def.path.split("/").pop()} OK`);
+                  } else {
+                    console.error(`${logPrefix} [${(group[0] && group[0].t && group[0].t.tag) || mallId}] ${regionSite} 结算汇总补采 ${def.path.split("/").pop()} HTTP ${r.status || "-"} ${String(r.text || "").slice(0, 60).replace(/\s+/g, " ")}`);
+                  }
+                } catch (e) { console.error(`${logPrefix} ${regionSite} 结算汇总补采异常: ${e.message}`); }
+                await randomDelay(200, 400);
+              }
+            }
             const processOne = async (t) => {
               try {
                 const payloads = buildSettlementDownloadPayloads(t);
@@ -8679,8 +8706,9 @@ async function collectOneAccount(params = {}) {
                 console.error(`${logPrefix} [${t.tag}] 结算明细 ${t.batchId}: ${rows.length} 行, 列=[${columns.slice(0, 8).join("|")}]`);
               } catch (e) { sts.error++; console.error(`${logPrefix} [${t.tag}] 结算明细 ${t.batchId} 异常: ${e.message}`); }
             };
-            // 并发池：同一 dlPage 的 evaluate/request 调用可安全并发（Playwright 协议层会串行化 CDP 消息）
-            const queue = group.map((item) => item.t);
+            // 并发池：同一 dlPage 的 evaluate/request 调用可安全并发（Playwright 协议层会串行化 CDP 消息）。
+            // 增量过滤在此处（域分组保持全量以保证每域都会进入并补采结算汇总）。
+            const queue = group.map((item) => item.t).filter((t) => !downloadedMap[`${mallId}|${t.batchId}`]);
             await Promise.all(Array.from({ length: Math.min(SETTLE_ORDER_CONCURRENCY, queue.length) }, async () => {
               while (queue.length) {
                 const t = queue.shift();

@@ -459,25 +459,27 @@ function buildSettlementDetailByMall(db, opts = {}) {
   let rows;
   try {
     // settle/detail/full/* 接口返回的是「汇总卡片」（一段时间范围一个总数），每次采集落一行快照。
-    // 同店同状态多行快照是同一笔钱的重复观测，必须取最新一条（按 source_received_at），绝不能 SUM。
+    // 同店同状态同区域多行快照是同一笔钱的重复观测，必须取最新一条（按 source_received_at），绝不能 SUM。
+    // 多区店（全球/美区/欧区是独立站点账户）按区各取最新后跨区加总，单区店行为不变。
     rows = db.prepare(`
       SELECT mall_id, settlement_status,
-             1 AS cnt,
-             estimated_amount AS estimated,
-             sales_receipt_amount AS sales_receipt,
-             chargeback_amount AS chargeback,
-             subsidy_amount AS subsidy,
-             total_amount AS total,
-             currency
+             COUNT(*) AS cnt,
+             SUM(estimated_amount) AS estimated,
+             SUM(sales_receipt_amount) AS sales_receipt,
+             SUM(chargeback_amount) AS chargeback,
+             SUM(subsidy_amount) AS subsidy,
+             SUM(total_amount) AS total,
+             MAX(currency) AS currency
       FROM (
         SELECT *, ROW_NUMBER() OVER (
-                 PARTITION BY mall_id, settlement_status
+                 PARTITION BY mall_id, settlement_status, COALESCE(site, '')
                  ORDER BY COALESCE(source_received_at, 0) DESC, stat_date DESC
                ) AS rn
           FROM erp_temu_settlement_detail
          WHERE mall_id IS NOT NULL AND mall_id <> ''
            ${dateWhere}
       ) WHERE rn = 1
+      GROUP BY mall_id, settlement_status
     `).all(...params);
   } catch (error) {
     if (/no such table/i.test(String(error?.message || ""))) return null;
