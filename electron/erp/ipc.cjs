@@ -11741,6 +11741,13 @@ async function refresh1688ProductDetailAction({ db, services, payload, actor }) 
           rawResponse = alphaShopDetail.rawResponse;
           detail = alphaShopDetail.detail;
           usedAlphaShopProductDetail = true;
+        } else if (optionalString(alphaShopDetail.detail?.productTitle || alphaShopDetail.detail?.externalOfferId)) {
+          // Worker 成功拿到商品（标题/ID 在）但 SKU 列表为空 → 证实是单规格商品，
+          // 注入「整款（无规格）」选项直接采信，不再去撞官方 API 的 ACL 报错。
+          rawResponse = alphaShopDetail.rawResponse;
+          detail = alphaShopDetail.detail;
+          detail.skuOptions = [...(Array.isArray(detail.skuOptions) ? detail.skuOptions : []), buildNoSpec1688Option(detail, offerId)];
+          usedAlphaShopProductDetail = true;
         } else {
           alphaShopDetailError = new Error("productDetailQuery 未返回可绑定规格");
         }
@@ -11787,7 +11794,7 @@ async function refresh1688ProductDetailAction({ db, services, payload, actor }) 
     const alphaShopMessage = alphaShopDetailError
       ? `productDetailQuery 也未拿到可绑定规格（${alphaShopDetailError.message || String(alphaShopDetailError)}），`
       : "";
-    throw new Error(`${alphaShopMessage}当前 1688 AppKey 没有商品详情接口权限，且未能从图搜候选或 1688 页面解析到具体规格。请开通 alibaba.product.get ACL，或在供应商管理里手动填写 1688 规格ID。`);
+    throw new Error(`${alphaShopMessage}未能解析到该 1688 商品的可绑定规格：可能是商品页面暂时无法访问，请稍后重试或检查链接；也可以在供应商管理里手动填写 1688 规格ID（当前 1688 AppKey 没有商品详情接口权限，开通 alibaba.product.get ACL 可作兜底）。`);
   }
   const shouldBindMapping = payload.bindMapping !== false && payload.bind_mapping !== false;
   const explicitExternalSkuId = optionalString(payload.externalSkuId || payload.external_sku_id);
@@ -11940,6 +11947,13 @@ async function preview1688UrlSpecsAction({ db, payload, actor }) {
           rawResponse = alphaShopDetail.rawResponse;
           detail = alphaShopDetail.detail;
           usedAlphaShopProductDetail = true;
+        } else if (optionalString(alphaShopDetail.detail?.productTitle || alphaShopDetail.detail?.externalOfferId)) {
+          // Worker 成功拿到商品（标题/ID 在）但 SKU 列表为空 → 证实是单规格商品，
+          // 注入「整款（无规格）」选项直接采信，不再去撞官方 API 的 ACL 报错。
+          rawResponse = alphaShopDetail.rawResponse;
+          detail = alphaShopDetail.detail;
+          detail.skuOptions = [...(Array.isArray(detail.skuOptions) ? detail.skuOptions : []), buildNoSpec1688Option(detail, offerId)];
+          usedAlphaShopProductDetail = true;
         } else {
           alphaShopDetailError = new Error("productDetailQuery 未返回可绑定规格");
         }
@@ -11986,7 +12000,7 @@ async function preview1688UrlSpecsAction({ db, payload, actor }) {
       const officialMessage = officialDetailError
         ? `1688 商品详情接口也未拿到规格（${officialDetailError.message || String(officialDetailError)}）。`
         : "";
-      throw new Error(`${alphaShopMessage}${officialMessage || "未能从这个 1688 地址解析到可绑定规格。"}请开通 alibaba.product.get ACL，或手动填写 1688 商品规格ID。`);
+      throw new Error(`${alphaShopMessage}${officialMessage || "未能从这个 1688 地址解析到可绑定规格。"}可能是商品页面暂时无法访问，请稍后重试或检查链接；也可以手动填写 1688 商品规格ID（开通 alibaba.product.get ACL 可作兜底）。`);
     }
   }
 
