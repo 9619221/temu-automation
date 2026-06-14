@@ -90,12 +90,12 @@ db.prepare(`INSERT INTO erp_inventory_batches (
 svc.applySkuCostChange("sku1", 100, 2.0);
 snap("[初始] 采购入库 100@2.0 → acct_A");
 
-console.log("\n=== 1. 采购退货 30 件（自家仓退给供应商，SKU总量 -30，均价不变）===");
+console.log("\n=== 1. 采购退货 30 件（按退货单价冲库存金额，重算剩余均价）===");
 svc.applyDirectOutbound({
   accountId: "acct_A",
   skuId: "sku1",
   qty: 30,
-  unitCost: 2.0,  // 按 PO 原单价
+  unitCost: 2.4,  // 按退货单价冲库存金额
   ledgerType: INVENTORY_LEDGER_TYPE.PURCHASE_RETURN,
   sourceDocType: "purchase_return",
   sourceDocId: "PR-001",
@@ -104,7 +104,7 @@ svc.applyDirectOutbound({
 let s = snap("采购退货 30");
 expect("acct_A 剩 70", s.stocks.acct_A, 70);
 expect("SKU 总量=70", s.sku.qty, 70);
-expect("均价仍=2.0", s.sku.avg, 2.0);
+expect("均价=(100*2.0-30*2.4)/70", s.sku.avg, 128 / 70);
 
 console.log("\n=== 2. 客户退货 20 件 到 acct_B（平台仓）===");
 svc.applyDirectInbound({
@@ -121,7 +121,7 @@ s = snap("客户退货 20");
 expect("acct_A 仍 70", s.stocks.acct_A, 70);
 expect("acct_B 有 20", s.stocks.acct_B, 20);
 expect("SKU 总量=90", s.sku.qty, 90);
-expect("均价仍=2.0", s.sku.avg, 2.0);
+expect("均价仍为采购退货后的均价", s.sku.avg, 128 / 70);
 
 console.log("\n=== 3. 调拨 50 件 acct_A → acct_C（搬位置，总量不变）===");
 const transferUnitCost = svc.getSkuWeightedAvgCost("sku1");
@@ -152,7 +152,7 @@ expect("acct_A 剩 20", s.stocks.acct_A, 20);
 expect("acct_B 仍 20", s.stocks.acct_B, 20);
 expect("acct_C 有 50", s.stocks.acct_C, 50);
 expect("SKU 总量仍=90", s.sku.qty, 90);  // 关键：总量不变
-expect("均价仍=2.0", s.sku.avg, 2.0);
+expect("均价仍为采购退货后的均价", s.sku.avg, 128 / 70);
 
 console.log("\n=== 4. 平台退回自家仓 15 件 acct_B → acct_A（同调拨规则）===");
 const returnUnitCost = svc.getSkuWeightedAvgCost("sku1");
@@ -183,7 +183,7 @@ expect("acct_A 增到 35", s.stocks.acct_A, 35);
 expect("acct_B 剩 5", s.stocks.acct_B, 5);
 expect("acct_C 仍 50", s.stocks.acct_C, 50);
 expect("SKU 总量仍=90", s.sku.qty, 90);
-expect("均价仍=2.0", s.sku.avg, 2.0);
+expect("均价仍为采购退货后的均价", s.sku.avg, 128 / 70);
 
 // 验证 ledger 流水类型分布
 console.log("\n=== Ledger 类型分布 ===");

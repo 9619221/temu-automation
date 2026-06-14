@@ -17,6 +17,78 @@ const crypto = require("crypto");
 const CLOUD_BASE = "https://erp.temu.chat/cloud";
 const CLOUD_LOGIN_USER = "admin";
 const CLOUD_LOGIN_PASS = "cjl20020421";
+const SETTLEMENT_ROBOT_SOURCE = "robot";
+const SETTLEMENT_UNKNOWN_SOURCE = "unknown";
+const SETTLEMENT_ROBOT_DEVICE_UUIDS = (process.env.SETTLEMENT_ROBOT_DEVICE_UUIDS || "settlement-robot")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean);
+
+function sqlQuote(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function tableColumns(db, tableName) {
+  try {
+    return db.prepare(`PRAGMA table_info(${tableName})`).all().map((row) => row.name);
+  } catch {
+    return [];
+  }
+}
+
+function cloudTableColumns(db, tableName) {
+  try {
+    return db.prepare(`PRAGMA cloud.table_info(${tableName})`).all().map((row) => row.name);
+  } catch {
+    return [];
+  }
+}
+
+function cloudTableExists(db, tableName) {
+  try {
+    return !!db.prepare("SELECT 1 FROM cloud.sqlite_master WHERE type='table' AND name=?").get(tableName);
+  } catch {
+    return false;
+  }
+}
+
+function addColumnIfMissing(db, tableName, columnName, definition) {
+  const columns = tableColumns(db, tableName);
+  if (!columns.length || columns.includes(columnName)) return;
+  db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${definition}`);
+}
+
+function ensureSourceColumn(db, tableName) {
+  addColumnIfMissing(db, tableName, "source", `source TEXT NOT NULL DEFAULT '${SETTLEMENT_UNKNOWN_SOURCE}'`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_${tableName}_source ON ${tableName}(source)`);
+}
+
+function sourceWhere(db, tableName, alias = "") {
+  const columns = tableColumns(db, tableName);
+  if (!columns.includes("source")) return " AND 1 = 0";
+  const prefix = alias ? `${alias}.` : "";
+  return ` AND ${prefix}source = '${SETTLEMENT_ROBOT_SOURCE}'`;
+}
+
+function robotCaptureSql(db, alias = "ce") {
+  const eventColumns = cloudTableColumns(db, "capture_events");
+  if (!eventColumns.includes("device_id") || !SETTLEMENT_ROBOT_DEVICE_UUIDS.length) {
+    return { from: `cloud.capture_events ${alias}`, where: " AND 1 = 0", columns: eventColumns };
+  }
+  const ids = SETTLEMENT_ROBOT_DEVICE_UUIDS.map(sqlQuote).join(",");
+  if (cloudTableExists(db, "devices")) {
+    return {
+      from: `cloud.capture_events ${alias} LEFT JOIN cloud.devices cd ON cd.id = ${alias}.device_id`,
+      where: ` AND (${alias}.device_id IN (${ids}) OR cd.device_uuid IN (${ids}))`,
+      columns: eventColumns,
+    };
+  }
+  return {
+    from: `cloud.capture_events ${alias}`,
+    where: ` AND ${alias}.device_id IN (${ids})`,
+    columns: eventColumns,
+  };
+}
 
 // 进程级 token 缓存
 let cachedToken = null;
@@ -231,6 +303,7 @@ function extractSettlementIncomeRows(raw, options = {}) {
   const mallId = inferDashboardMallId(raw, options.mallId || options.mall_id);
   const accountId = String(options.accountId || options.account_id || "").trim() || null;
   const scopeKey = mallId || accountId || "__dashboard__";
+  const source = String(options.source || SETTLEMENT_UNKNOWN_SOURCE).trim() || SETTLEMENT_UNKNOWN_SOURCE;
   return income
     .map((item) => ({ item, statDate: normalizeSettlementDate(item) }))
     .filter(({ item, statDate }) => item && statDate)
@@ -246,6 +319,7 @@ function extractSettlementIncomeRows(raw, options = {}) {
         income_amount: parsed.yuan,
         income_amount_cents: parsed.cents,
         raw_json: JSON.stringify(item.item),
+        source,
       };
     });
 }
@@ -253,12 +327,13 @@ function extractSettlementIncomeRows(raw, options = {}) {
 function upsertSettlementIncomeFromDashboard(db, payload = {}) {
   const rows = extractSettlementIncomeRows(payload.dashboard || payload.raw || payload, payload);
   if (!rows.length) return { rows: 0, scopeKey: null, mallId: null, accountId: payload.accountId || payload.account_id || null };
+  ensureSourceColumn(db, "erp_temu_settlement_income");
   const now = new Date().toISOString();
   const stmt = db.prepare(`
     INSERT INTO erp_temu_settlement_income
-      (scope_key, mall_id, account_id, stat_date, currency, income_amount, income_amount_cents, raw_json, synced_at)
+      (scope_key, mall_id, account_id, stat_date, currency, income_amount, income_amount_cents, raw_json, source, synced_at)
     VALUES
-      (@scope_key, @mall_id, @account_id, @stat_date, @currency, @income_amount, @income_amount_cents, @raw_json, @synced_at)
+      (@scope_key, @mall_id, @account_id, @stat_date, @currency, @income_amount, @income_amount_cents, @raw_json, @source, @synced_at)
     ON CONFLICT(scope_key, stat_date) DO UPDATE SET
       mall_id = excluded.mall_id,
       account_id = excluded.account_id,
@@ -266,6 +341,7 @@ function upsertSettlementIncomeFromDashboard(db, payload = {}) {
       income_amount = excluded.income_amount,
       income_amount_cents = excluded.income_amount_cents,
       raw_json = excluded.raw_json,
+      source = excluded.source,
       synced_at = excluded.synced_at
   `);
   const tx = db.transaction(() => {
@@ -281,6 +357,7 @@ const SETTLEMENT_INCOME_MIGRATION = path.join(__dirname, "..", "..", "db", "migr
 
 function ensureSettlementIncomeSchema(db) {
   db.exec(fs.readFileSync(SETTLEMENT_INCOME_MIGRATION, "utf8"));
+  ensureSourceColumn(db, "erp_temu_settlement_income");
 }
 
 function extractSettlementIncomeListFromCaptureBody(body) {
@@ -321,11 +398,13 @@ function syncSettlementIncomeFromCapture(db, opts = {}) {
   }
   let events;
   try {
+    const capture = robotCaptureSql(db, "ce");
     events = db.prepare(`
-      SELECT mall_id, body_json, received_at
-        FROM cloud.capture_events
-       WHERE url_path = ? AND mall_id IS NOT NULL AND mall_id <> ''
-       ORDER BY received_at ASC
+      SELECT ce.mall_id, ce.body_json, ce.received_at
+        FROM ${capture.from}
+       WHERE ce.url_path = ? AND ce.mall_id IS NOT NULL AND ce.mall_id <> ''
+         ${capture.where}
+       ORDER BY ce.received_at ASC
     `).all(SETTLEMENT_INCOME_PATH);
   } catch (error) {
     if (/no such table/i.test(String(error?.message || ""))) {
@@ -352,7 +431,7 @@ function syncSettlementIncomeFromCapture(db, opts = {}) {
   for (const [mallId, dayMap] of byMall) {
     if (!dayMap.size) continue;
     const apis = [{ path: SETTLEMENT_INCOME_PATH, data: { result: Array.from(dayMap.values()) } }];
-    totalRows += upsertSettlementIncomeFromDashboard(db, { dashboard: { apis }, mallId }).rows;
+    totalRows += upsertSettlementIncomeFromDashboard(db, { dashboard: { apis }, mallId, source: SETTLEMENT_ROBOT_SOURCE }).rows;
   }
   return { ok: true, attached: true, malls: byMall.size, rows: totalRows };
 }
@@ -370,10 +449,12 @@ function emptySettlement() {
 function buildSettlementIncomeByMall(db) {
   let latest;
   try {
+    const sourceSql = sourceWhere(db, "erp_temu_settlement_income");
     latest = db.prepare(`
       SELECT MAX(stat_date) AS d
       FROM erp_temu_settlement_income
       WHERE mall_id IS NOT NULL AND mall_id <> ''
+        ${sourceSql}
     `).get()?.d;
   } catch (error) {
     if (/no such table/i.test(String(error?.message || ""))) return null;
@@ -382,11 +463,13 @@ function buildSettlementIncomeByMall(db) {
   if (!latest) return new Map();
 
   const since = shiftDate(latest, -59);
+  const sourceSql = sourceWhere(db, "erp_temu_settlement_income");
   const rows = db.prepare(`
     SELECT mall_id, stat_date AS d, SUM(income_amount) AS income
     FROM erp_temu_settlement_income
     WHERE mall_id IS NOT NULL AND mall_id <> ''
       AND stat_date >= ? AND stat_date <= ?
+      ${sourceSql}
     GROUP BY mall_id, stat_date
   `).all(since, latest);
 
@@ -452,10 +535,16 @@ function buildSettlementDetailByMall(db, opts = {}) {
   // 注意：不按 stat_date 过滤。汇总卡片的统计窗口由采集时的请求参数决定（面板「结算时间范围」），
   // 物化行的 stat_date 只是采集日，按它过滤会把最新快照误伤掉（如 6/12 凌晨采的 6/1-11 窗口数据）。
   // 因此三态列展示的是「最近一次采集时所选窗口」的快照。
+  const { startDate, endDate } = opts;
   const params = [];
-  const dateWhere = "";
+  let dateWhere = "";
+  if (startDate && endDate) {
+    dateWhere = "AND stat_date >= ? AND stat_date <= ?";
+    params.push(startDate, endDate);
+  }
   let rows;
   try {
+    const sourceSql = sourceWhere(db, "erp_temu_settlement_detail");
     // settle/detail/full/* 接口返回的是「汇总卡片」（一段时间范围一个总数），每次采集落一行快照。
     // 同店同状态同区域多行快照是同一笔钱的重复观测，必须取最新一条（按 source_received_at），绝不能 SUM。
     // 多区店（全球/美区/欧区是独立站点账户）按区各取最新后跨区加总，单区店行为不变。
@@ -476,6 +565,7 @@ function buildSettlementDetailByMall(db, opts = {}) {
           FROM erp_temu_settlement_detail
          WHERE mall_id IS NOT NULL AND mall_id <> ''
            ${dateWhere}
+           ${sourceSql}
       ) WHERE rn = 1
       GROUP BY mall_id, settlement_status
     `).all(...params);
@@ -512,6 +602,7 @@ const SETTLEMENT_DETAIL_MIGRATION = path.join(__dirname, "..", "..", "db", "migr
 
 function ensureSettlementDetailSchema(db) {
   db.exec(fs.readFileSync(SETTLEMENT_DETAIL_MIGRATION, "utf8"));
+  ensureSourceColumn(db, "erp_temu_settlement_detail");
 }
 
 function bjDateFromTimestamp(value) {
@@ -670,6 +761,7 @@ function buildSettlementDetailRowsFromCaptureEvent(ev) {
         amounts_json: JSON.stringify(amounts),
         raw_json: JSON.stringify(item),
         source_received_at: Number(ev.received_at) || null,
+        source: SETTLEMENT_ROBOT_SOURCE,
       };
     });
 }
@@ -681,11 +773,11 @@ function upsertSettlementDetailRows(db, rows) {
     INSERT INTO erp_temu_settlement_detail
       (scope_key, mall_id, site, settlement_status, stat_date, item_key, currency,
        estimated_amount, sales_receipt_amount, chargeback_amount, subsidy_amount, total_amount,
-       amounts_json, raw_json, source_received_at, synced_at)
+       amounts_json, raw_json, source_received_at, source, synced_at)
     VALUES
       (@scope_key, @mall_id, @site, @settlement_status, @stat_date, @item_key, @currency,
        @estimated_amount, @sales_receipt_amount, @chargeback_amount, @subsidy_amount, @total_amount,
-       @amounts_json, @raw_json, @source_received_at, @synced_at)
+       @amounts_json, @raw_json, @source_received_at, @source, @synced_at)
     ON CONFLICT(scope_key, site, settlement_status, stat_date, item_key) DO UPDATE SET
       mall_id = excluded.mall_id,
       currency = excluded.currency,
@@ -697,6 +789,7 @@ function upsertSettlementDetailRows(db, rows) {
       amounts_json = excluded.amounts_json,
       raw_json = excluded.raw_json,
       source_received_at = excluded.source_received_at,
+      source = excluded.source,
       synced_at = excluded.synced_at
   `);
   const tx = db.transaction(() => {
@@ -714,14 +807,15 @@ function syncSettlementDetailFromCapture(db, opts = {}) {
   }
   let events;
   try {
-    const columns = db.prepare("PRAGMA cloud.table_info(capture_events)").all().map((row) => row.name);
-    const siteSelect = columns.includes("site") ? "site" : "'' AS site";
+    const capture = robotCaptureSql(db, "ce");
+    const siteSelect = capture.columns.includes("site") ? "ce.site" : "'' AS site";
     events = db.prepare(`
-      SELECT mall_id, ${siteSelect}, url_path, body_json, received_at
-        FROM cloud.capture_events
-       WHERE url_path IN (${SETTLEMENT_DETAIL_PATHS.map(() => "?").join(",")})
-         AND mall_id IS NOT NULL AND mall_id <> ''
-       ORDER BY received_at ASC
+      SELECT ce.mall_id, ${siteSelect}, ce.url_path, ce.body_json, ce.received_at
+        FROM ${capture.from}
+       WHERE ce.url_path IN (${SETTLEMENT_DETAIL_PATHS.map(() => "?").join(",")})
+         AND ce.mall_id IS NOT NULL AND ce.mall_id <> ''
+         ${capture.where}
+       ORDER BY ce.received_at ASC
     `).all(...SETTLEMENT_DETAIL_PATHS);
   } catch (error) {
     if (/no such table/i.test(String(error?.message || ""))) {
@@ -755,6 +849,7 @@ function ensureFundDetailSchema(db) {
     "utf8"
   );
   db.exec(migSql);
+  ensureSourceColumn(db, "erp_temu_fund_detail");
 }
 
 function buildFundDetailRowsFromCaptureEvent(ev) {
@@ -805,6 +900,7 @@ function buildFundDetailRowsFromCaptureEvent(ev) {
         source_region: item.sourceRegion != null ? String(item.sourceRegion) : "",
         query_id: item.queryId || "",
         site,
+        source: SETTLEMENT_ROBOT_SOURCE,
       };
     });
 }
@@ -817,12 +913,12 @@ function upsertFundDetailRows(db, rows) {
       (mall_id, trans_sn, batch_id, transaction_time, create_time,
        money_change_type, fund_type, fund_type_desc, currency,
        amount, origin_amount, remark, remark_prompt,
-       biz_type, source_region, query_id, site, updated_at)
+       biz_type, source_region, query_id, site, source, updated_at)
     VALUES
       (@mall_id, @trans_sn, @batch_id, @transaction_time, @create_time,
        @money_change_type, @fund_type, @fund_type_desc, @currency,
        @amount, @origin_amount, @remark, @remark_prompt,
-       @biz_type, @source_region, @query_id, @site, @now)
+       @biz_type, @source_region, @query_id, @site, @source, @now)
     ON CONFLICT(mall_id, trans_sn) DO UPDATE SET
       batch_id = excluded.batch_id,
       transaction_time = excluded.transaction_time,
@@ -838,6 +934,7 @@ function upsertFundDetailRows(db, rows) {
       source_region = excluded.source_region,
       query_id = excluded.query_id,
       site = excluded.site,
+      source = excluded.source,
       updated_at = excluded.updated_at
   `);
   const stmtNoSn = db.prepare(`
@@ -845,12 +942,12 @@ function upsertFundDetailRows(db, rows) {
       (mall_id, trans_sn, batch_id, transaction_time, create_time,
        money_change_type, fund_type, fund_type_desc, currency,
        amount, origin_amount, remark, remark_prompt,
-       biz_type, source_region, query_id, site, updated_at)
+       biz_type, source_region, query_id, site, source, updated_at)
     VALUES
       (@mall_id, @trans_sn, @batch_id, @transaction_time, @create_time,
        @money_change_type, @fund_type, @fund_type_desc, @currency,
        @amount, @origin_amount, @remark, @remark_prompt,
-       @biz_type, @source_region, @query_id, @site, @now)
+       @biz_type, @source_region, @query_id, @site, @source, @now)
   `);
   let inserted = 0;
   const tx = db.transaction(() => {
@@ -873,14 +970,15 @@ function syncFundDetailFromCapture(db, opts = {}) {
   }
   let events;
   try {
-    const columns = db.prepare("PRAGMA cloud.table_info(capture_events)").all().map((r) => r.name);
-    const siteSelect = columns.includes("site") ? "site" : "'' AS site";
+    const capture = robotCaptureSql(db, "ce");
+    const siteSelect = capture.columns.includes("site") ? "ce.site" : "'' AS site";
     events = db.prepare(`
-      SELECT mall_id, ${siteSelect}, url_path, body_json, received_at
-        FROM cloud.capture_events
-       WHERE url_path = ?
-         AND mall_id IS NOT NULL AND mall_id <> ''
-       ORDER BY received_at ASC
+      SELECT ce.mall_id, ${siteSelect}, ce.url_path, ce.body_json, ce.received_at
+        FROM ${capture.from}
+       WHERE ce.url_path = ?
+         AND ce.mall_id IS NOT NULL AND ce.mall_id <> ''
+         ${capture.where}
+       ORDER BY ce.received_at ASC
     `).all(FUND_DETAIL_PATH);
   } catch (error) {
     if (/no such table/i.test(String(error?.message || ""))) {
@@ -912,6 +1010,12 @@ const SETTLEMENT_ORDER_DETAIL_MIGRATION = path.join(__dirname, "..", "..", "db",
 
 function ensureSettlementOrderDetailSchema(db) {
   db.exec(fs.readFileSync(SETTLEMENT_ORDER_DETAIL_MIGRATION, "utf8"));
+  ensureSourceColumn(db, "erp_temu_settlement_order_detail");
+  const columns = db.prepare("PRAGMA table_info(erp_temu_settlement_order_detail)").all().map((row) => row.name);
+  if (!columns.includes("wb_no")) {
+    db.exec("ALTER TABLE erp_temu_settlement_order_detail ADD COLUMN wb_no TEXT");
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_temu_settlement_order_detail_wb ON erp_temu_settlement_order_detail(wb_no)");
 }
 
 function normalizeHeaderName(value) {
@@ -966,6 +1070,43 @@ function parseIntegerLoose(value) {
   return Number.isFinite(n) ? Math.round(n) : null;
 }
 
+function normalizeWbNo(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return null;
+  const match = text.match(/\bWB[A-Z0-9-]+\b/i);
+  return match ? match[0].toUpperCase() : null;
+}
+
+function pickSettlementWbNo(row) {
+  const direct = pickRowValue(row, [
+    "wb_no",
+    "wbNo",
+    "WB",
+    "WB No",
+    "WB No.",
+    "stockUpOrderNo",
+    "stock_up_order_no",
+    "purchaseOrderNo",
+    "purchase_order_no",
+    "备货单号",
+    "备货单编号",
+    "备货单",
+  ], { includes: true });
+  const directWb = normalizeWbNo(direct);
+  if (directWb) return directWb;
+  if (!row || typeof row !== "object") return null;
+  for (const value of Object.values(row)) {
+    if (value && typeof value === "object") {
+      const nested = normalizeWbNo(firstDefined(value, ["value", "text", "fullText", "digitalText"]));
+      if (nested) return nested;
+      continue;
+    }
+    const found = normalizeWbNo(value);
+    if (found) return found;
+  }
+  return null;
+}
+
 function extractSettlementOrderDetailRowsFromCaptureBody(body) {
   const meta = body?.result?.data || body?.result || body?.data || body || {};
   const candidates = [
@@ -1009,6 +1150,7 @@ function buildSettlementOrderDetailRowsFromCaptureEvent(ev) {
         sheet_name: String(firstDefined(meta, ["sheetName", "sheet_name"]) || ""),
         source_row_count: sourceRowCount,
         row_index: index + 1,
+        wb_no: pickSettlementWbNo(row),
         order_sn: pickRowValue(row, ["订单号", "订单编号", "子订单号", "orderSn", "order_sn", "orderNo", "order_no"]),
         parent_order_sn: pickRowValue(row, ["父订单号", "父单号", "parentOrderSn", "parent_order_sn", "parentOrderNo"]),
         sku_id: pickRowValue(row, ["SKU ID", "商品SKU ID", "商品 SKU ID", "skuId", "sku_id", "productSkuId"]),
@@ -1020,6 +1162,7 @@ function buildSettlementOrderDetailRowsFromCaptureEvent(ev) {
         columns_json: columnsJson,
         raw_json: JSON.stringify(row),
         source_received_at: Number(ev.received_at) || null,
+        source: SETTLEMENT_ROBOT_SOURCE,
       };
     });
 }
@@ -1030,18 +1173,19 @@ function upsertSettlementOrderDetailRows(db, rows) {
   const stmt = db.prepare(`
     INSERT INTO erp_temu_settlement_order_detail
       (mall_id, site, batch_id, fund_type, create_time, sheet_name, source_row_count, row_index,
-       order_sn, parent_order_sn, sku_id, sku_ext_code, product_name, quantity, currency, amount,
-       columns_json, raw_json, source_received_at, updated_at)
+       wb_no, order_sn, parent_order_sn, sku_id, sku_ext_code, product_name, quantity, currency, amount,
+       columns_json, raw_json, source_received_at, source, updated_at)
     VALUES
       (@mall_id, @site, @batch_id, @fund_type, @create_time, @sheet_name, @source_row_count, @row_index,
-       @order_sn, @parent_order_sn, @sku_id, @sku_ext_code, @product_name, @quantity, @currency, @amount,
-       @columns_json, @raw_json, @source_received_at, @now)
+       @wb_no, @order_sn, @parent_order_sn, @sku_id, @sku_ext_code, @product_name, @quantity, @currency, @amount,
+       @columns_json, @raw_json, @source_received_at, @source, @now)
     ON CONFLICT(mall_id, batch_id, row_index) DO UPDATE SET
       site = excluded.site,
       fund_type = excluded.fund_type,
       create_time = excluded.create_time,
       sheet_name = excluded.sheet_name,
       source_row_count = excluded.source_row_count,
+      wb_no = excluded.wb_no,
       order_sn = excluded.order_sn,
       parent_order_sn = excluded.parent_order_sn,
       sku_id = excluded.sku_id,
@@ -1053,6 +1197,7 @@ function upsertSettlementOrderDetailRows(db, rows) {
       columns_json = excluded.columns_json,
       raw_json = excluded.raw_json,
       source_received_at = excluded.source_received_at,
+      source = excluded.source,
       updated_at = excluded.updated_at
   `);
   const tx = db.transaction(() => {
@@ -1070,15 +1215,16 @@ function syncSettlementOrderDetailFromCapture(db, opts = {}) {
   }
   let events;
   try {
-    const columns = db.prepare("PRAGMA cloud.table_info(capture_events)").all().map((r) => r.name);
-    const siteSelect = columns.includes("site") ? "site" : "'' AS site";
+    const capture = robotCaptureSql(db, "ce");
+    const siteSelect = capture.columns.includes("site") ? "ce.site" : "'' AS site";
     events = db.prepare(`
-      SELECT mall_id, ${siteSelect}, url_path, body_json, received_at
-        FROM cloud.capture_events
-       WHERE url_path = ?
-         AND mall_id IS NOT NULL AND mall_id <> ''
-         AND body_json IS NOT NULL AND body_json <> ''
-       ORDER BY received_at ASC
+      SELECT ce.mall_id, ${siteSelect}, ce.url_path, ce.body_json, ce.received_at
+        FROM ${capture.from}
+       WHERE ce.url_path = ?
+         AND ce.mall_id IS NOT NULL AND ce.mall_id <> ''
+         AND ce.body_json IS NOT NULL AND ce.body_json <> ''
+         ${capture.where}
+       ORDER BY ce.received_at ASC
     `).all(SETTLEMENT_ORDER_DETAIL_PATH);
   } catch (error) {
     if (/no such table/i.test(String(error?.message || ""))) {
@@ -1112,6 +1258,7 @@ const FUND_SUMMARY_MIGRATION = path.join(__dirname, "..", "..", "db", "migration
 
 function ensureFundSummarySchema(db) {
   db.exec(fs.readFileSync(FUND_SUMMARY_MIGRATION, "utf8"));
+  ensureSourceColumn(db, "erp_temu_fund_summary");
 }
 
 function extractFundSummaryListFromCaptureBody(body) {
@@ -1229,6 +1376,7 @@ function buildFundSummaryRowsFromCaptureEvent(ev) {
         metrics_json: JSON.stringify(metrics),
         raw_json: JSON.stringify(item),
         source_received_at: Number(ev.received_at) || null,
+        source: SETTLEMENT_ROBOT_SOURCE,
       };
     });
 }
@@ -1240,11 +1388,11 @@ function upsertFundSummaryRows(db, rows) {
     INSERT INTO erp_temu_fund_summary
       (mall_id, site, summary_scope, summary_date, currency,
        income_amount, expense_amount, balance_amount, frozen_amount, available_amount, total_amount,
-       metrics_json, raw_json, source_received_at, updated_at)
+       metrics_json, raw_json, source_received_at, source, updated_at)
     VALUES
       (@mall_id, @site, @summary_scope, @summary_date, @currency,
        @income_amount, @expense_amount, @balance_amount, @frozen_amount, @available_amount, @total_amount,
-       @metrics_json, @raw_json, @source_received_at, @now)
+       @metrics_json, @raw_json, @source_received_at, @source, @now)
     ON CONFLICT(mall_id, site, summary_scope, summary_date) DO UPDATE SET
       currency = excluded.currency,
       income_amount = excluded.income_amount,
@@ -1256,6 +1404,7 @@ function upsertFundSummaryRows(db, rows) {
       metrics_json = excluded.metrics_json,
       raw_json = excluded.raw_json,
       source_received_at = excluded.source_received_at,
+      source = excluded.source,
       updated_at = excluded.updated_at
   `);
   const tx = db.transaction(() => {
@@ -1273,15 +1422,16 @@ function syncFundSummaryFromCapture(db, opts = {}) {
   }
   let events;
   try {
-    const columns = db.prepare("PRAGMA cloud.table_info(capture_events)").all().map((r) => r.name);
-    const siteSelect = columns.includes("site") ? "site" : "'' AS site";
+    const capture = robotCaptureSql(db, "ce");
+    const siteSelect = capture.columns.includes("site") ? "ce.site" : "'' AS site";
     events = db.prepare(`
-      SELECT mall_id, ${siteSelect}, url_path, body_json, received_at
-        FROM cloud.capture_events
-       WHERE url_path IN (${FUND_SUMMARY_PATHS.map(() => "?").join(",")})
-         AND mall_id IS NOT NULL AND mall_id <> ''
-         AND body_json IS NOT NULL AND body_json <> ''
-       ORDER BY received_at ASC
+      SELECT ce.mall_id, ${siteSelect}, ce.url_path, ce.body_json, ce.received_at
+        FROM ${capture.from}
+       WHERE ce.url_path IN (${FUND_SUMMARY_PATHS.map(() => "?").join(",")})
+         AND ce.mall_id IS NOT NULL AND ce.mall_id <> ''
+         AND ce.body_json IS NOT NULL AND ce.body_json <> ''
+         ${capture.where}
+       ORDER BY ce.received_at ASC
     `).all(...FUND_SUMMARY_PATHS);
   } catch (error) {
     if (/no such table/i.test(String(error?.message || ""))) {
@@ -1315,6 +1465,7 @@ function buildFundDetailByMall(db, opts = {}) {
   }
   let rows;
   try {
+    const sourceSql = sourceWhere(db, "erp_temu_fund_detail");
     rows = db.prepare(`
       SELECT mall_id,
              money_change_type,
@@ -1323,6 +1474,7 @@ function buildFundDetailByMall(db, opts = {}) {
              COUNT(*) AS cnt
         FROM erp_temu_fund_detail
        WHERE ${dateFilter}
+         ${sourceSql}
        GROUP BY mall_id, money_change_type, category
     `).all(...params);
   } catch (error) {
@@ -1359,12 +1511,14 @@ function buildFundSummaryByMall(db, opts = {}) {
   }
   let rows;
   try {
+    const sourceSql = sourceWhere(db, "erp_temu_fund_summary");
     rows = db.prepare(`
       SELECT id, mall_id, site, summary_scope, summary_date, currency,
              income_amount, expense_amount, balance_amount, frozen_amount, available_amount, total_amount,
              source_received_at
         FROM erp_temu_fund_summary
-        ${where}
+        ${where || "WHERE 1=1"}
+        ${sourceSql}
        ORDER BY summary_date ASC, COALESCE(source_received_at, 0) ASC, id ASC
     `).all(...params);
   } catch (error) {
@@ -1465,6 +1619,7 @@ const EPR_GOODS_LIST_STATUS = [
 
 function ensureEprFeeSchema(db) {
   db.exec(fs.readFileSync(EPR_FEE_MIGRATION, "utf8"));
+  ensureSourceColumn(db, "erp_temu_epr_fee");
 }
 
 function buildEprFeeRow(item, { mallId, site, feeScope, deductStatus, receivedAt }) {
@@ -1505,6 +1660,7 @@ function buildEprFeeRow(item, { mallId, site, feeScope, deductStatus, receivedAt
     stat_date: normalizeSettlementDetailDate(item, receivedAt),
     raw_json: JSON.stringify(item),
     source_received_at: Number(receivedAt) || null,
+    source: SETTLEMENT_ROBOT_SOURCE,
   };
 }
 
@@ -1586,11 +1742,11 @@ function upsertEprFeeRows(db, rows) {
     INSERT INTO erp_temu_epr_fee
       (mall_id, site, fee_scope, deduct_status, item_key, cert_type, cert_name, region,
        sku_id, spu_id, goods_name, quantity, amount, original_amount, currency, stat_date,
-       raw_json, source_received_at, synced_at)
+       raw_json, source_received_at, source, synced_at)
     VALUES
       (@mall_id, @site, @fee_scope, @deduct_status, @item_key, @cert_type, @cert_name, @region,
        @sku_id, @spu_id, @goods_name, @quantity, @amount, @original_amount, @currency, @stat_date,
-       @raw_json, @source_received_at, @now)
+       @raw_json, @source_received_at, @source, @now)
     ON CONFLICT(mall_id, fee_scope, deduct_status, item_key) DO UPDATE SET
       site = excluded.site,
       cert_type = excluded.cert_type,
@@ -1606,6 +1762,7 @@ function upsertEprFeeRows(db, rows) {
       stat_date = excluded.stat_date,
       raw_json = excluded.raw_json,
       source_received_at = excluded.source_received_at,
+      source = excluded.source,
       synced_at = excluded.synced_at
   `);
   const tx = db.transaction(() => {
@@ -1623,15 +1780,16 @@ function syncEprFeeFromCapture(db, opts = {}) {
   }
   let events;
   try {
-    const columns = db.prepare("PRAGMA cloud.table_info(capture_events)").all().map((r) => r.name);
-    const siteSelect = columns.includes("site") ? "site" : "'' AS site";
+    const capture = robotCaptureSql(db, "ce");
+    const siteSelect = capture.columns.includes("site") ? "ce.site" : "'' AS site";
     events = db.prepare(`
-      SELECT mall_id, ${siteSelect}, url_path, body_json, received_at
-        FROM cloud.capture_events
-       WHERE url_path IN (${EPR_FEE_PATHS.map(() => "?").join(",")})
-         AND mall_id IS NOT NULL AND mall_id <> ''
-         AND body_json IS NOT NULL AND body_json <> ''
-       ORDER BY received_at ASC
+      SELECT ce.mall_id, ${siteSelect}, ce.url_path, ce.body_json, ce.received_at
+        FROM ${capture.from}
+       WHERE ce.url_path IN (${EPR_FEE_PATHS.map(() => "?").join(",")})
+         AND ce.mall_id IS NOT NULL AND ce.mall_id <> ''
+         AND ce.body_json IS NOT NULL AND ce.body_json <> ''
+         ${capture.where}
+       ORDER BY ce.received_at ASC
     `).all(...EPR_FEE_PATHS);
   } catch (error) {
     if (/no such table/i.test(String(error?.message || ""))) {
@@ -1655,9 +1813,12 @@ function syncEprFeeFromCapture(db, opts = {}) {
 function buildEprFeeByMall(db) {
   let rows;
   try {
+    const sourceSql = sourceWhere(db, "erp_temu_epr_fee");
     rows = db.prepare(`
       SELECT mall_id, deduct_status, SUM(amount) AS total_amount, COUNT(*) AS cnt
         FROM erp_temu_epr_fee
+       WHERE 1=1
+         ${sourceSql}
        GROUP BY mall_id, deduct_status
     `).all();
   } catch (error) {
@@ -1693,6 +1854,7 @@ const FUND_FROZEN_MIGRATION = path.join(__dirname, "..", "..", "db", "migrations
 
 function ensureFundFrozenSchema(db) {
   db.exec(fs.readFileSync(FUND_FROZEN_MIGRATION, "utf8"));
+  ensureSourceColumn(db, "erp_temu_fund_frozen");
 }
 
 function buildFundFrozenRowsFromCaptureEvent(ev) {
@@ -1716,6 +1878,7 @@ function buildFundFrozenRowsFromCaptureEvent(ev) {
       description: toNullableText(item.description),
       raw_json: JSON.stringify(item),
       source_received_at: Number(ev.received_at) || null,
+      source: SETTLEMENT_ROBOT_SOURCE,
     }));
 }
 
@@ -1727,13 +1890,15 @@ function syncFundFrozenFromCapture(db, opts = {}) {
   }
   let events;
   try {
+    const capture = robotCaptureSql(db, "ce");
     events = db.prepare(`
-      SELECT mall_id, body_json, received_at
-        FROM cloud.capture_events
-       WHERE url_path = ?
-         AND mall_id IS NOT NULL AND mall_id <> ''
-         AND body_json IS NOT NULL AND body_json <> ''
-       ORDER BY received_at ASC
+      SELECT ce.mall_id, ce.body_json, ce.received_at
+        FROM ${capture.from}
+       WHERE ce.url_path = ?
+         AND ce.mall_id IS NOT NULL AND ce.mall_id <> ''
+         AND ce.body_json IS NOT NULL AND ce.body_json <> ''
+         ${capture.where}
+       ORDER BY ce.received_at ASC
     `).all(FUND_FROZEN_PATH);
   } catch (error) {
     if (/no such table/i.test(String(error?.message || ""))) {
@@ -1746,14 +1911,14 @@ function syncFundFrozenFromCapture(db, opts = {}) {
   const latestByMall = new Map();
   for (const ev of events) latestByMall.set(String(ev.mall_id), ev);
   const now = new Date().toISOString();
-  const del = db.prepare("DELETE FROM erp_temu_fund_frozen WHERE mall_id = ?");
+  const del = db.prepare(`DELETE FROM erp_temu_fund_frozen WHERE mall_id = ?${sourceWhere(db, "erp_temu_fund_frozen")}`);
   const ins = db.prepare(`
     INSERT INTO erp_temu_fund_frozen
       (mall_id, frozen_type, reason, amount, currency, unfreeze_condition, description,
-       raw_json, source_received_at, synced_at)
+       raw_json, source_received_at, source, synced_at)
     VALUES
       (@mall_id, @frozen_type, @reason, @amount, @currency, @unfreeze_condition, @description,
-       @raw_json, @source_received_at, @now)
+       @raw_json, @source_received_at, @source, @now)
     ON CONFLICT(mall_id, frozen_type) DO UPDATE SET
       reason = excluded.reason,
       amount = excluded.amount,
@@ -1762,6 +1927,7 @@ function syncFundFrozenFromCapture(db, opts = {}) {
       description = excluded.description,
       raw_json = excluded.raw_json,
       source_received_at = excluded.source_received_at,
+      source = excluded.source,
       synced_at = excluded.synced_at
   `);
   let total = 0;
@@ -1784,9 +1950,12 @@ function syncFundFrozenFromCapture(db, opts = {}) {
 function buildFundFrozenByMall(db) {
   let rows;
   try {
+    const sourceSql = sourceWhere(db, "erp_temu_fund_frozen");
     rows = db.prepare(`
       SELECT mall_id, frozen_type, reason, amount, currency, unfreeze_condition
         FROM erp_temu_fund_frozen
+       WHERE 1=1
+         ${sourceSql}
        ORDER BY mall_id, amount DESC
     `).all();
   } catch (error) {
@@ -1818,6 +1987,7 @@ const ACCOUNT_OVERVIEW_MIGRATION = path.join(__dirname, "..", "..", "db", "migra
 
 function ensureAccountOverviewSchema(db) {
   db.exec(fs.readFileSync(ACCOUNT_OVERVIEW_MIGRATION, "utf8"));
+  ensureSourceColumn(db, "erp_temu_account_overview");
 }
 
 // 金额宽容提取：对象走 normalizeMoneyAmount（分→元），字符串/数字走 parseNumberLoose（按元）
@@ -1851,6 +2021,7 @@ function buildAccountOverviewRow(ev) {
     currency: String(currencyRaw || "CNY"),
     raw_json: JSON.stringify(r),
     source_received_at: Number(ev.received_at) || null,
+    source: SETTLEMENT_ROBOT_SOURCE,
   };
 }
 
@@ -1862,13 +2033,15 @@ function syncAccountOverviewFromCapture(db, opts = {}) {
   }
   let events;
   try {
+    const capture = robotCaptureSql(db, "ce");
     events = db.prepare(`
-      SELECT mall_id, body_json, received_at
-        FROM cloud.capture_events
-       WHERE url_path = ?
-         AND mall_id IS NOT NULL AND mall_id <> ''
-         AND body_json IS NOT NULL AND body_json <> ''
-       ORDER BY received_at ASC
+      SELECT ce.mall_id, ce.body_json, ce.received_at
+        FROM ${capture.from}
+       WHERE ce.url_path = ?
+         AND ce.mall_id IS NOT NULL AND ce.mall_id <> ''
+         AND ce.body_json IS NOT NULL AND ce.body_json <> ''
+         ${capture.where}
+       ORDER BY ce.received_at ASC
     `).all(ACCOUNT_OVERVIEW_PATH);
   } catch (error) {
     if (/no such table/i.test(String(error?.message || ""))) {
@@ -1883,10 +2056,10 @@ function syncAccountOverviewFromCapture(db, opts = {}) {
   const ins = db.prepare(`
     INSERT INTO erp_temu_account_overview
       (mall_id, available_amount, in_transit_amount, pending_settle_amount, frozen_amount,
-       withdrawable_amount, total_amount, currency, raw_json, source_received_at, synced_at)
+       withdrawable_amount, total_amount, currency, raw_json, source_received_at, source, synced_at)
     VALUES
       (@mall_id, @available_amount, @in_transit_amount, @pending_settle_amount, @frozen_amount,
-       @withdrawable_amount, @total_amount, @currency, @raw_json, @source_received_at, @now)
+       @withdrawable_amount, @total_amount, @currency, @raw_json, @source_received_at, @source, @now)
     ON CONFLICT(mall_id) DO UPDATE SET
       available_amount = excluded.available_amount,
       in_transit_amount = excluded.in_transit_amount,
@@ -1897,6 +2070,7 @@ function syncAccountOverviewFromCapture(db, opts = {}) {
       currency = excluded.currency,
       raw_json = excluded.raw_json,
       source_received_at = excluded.source_received_at,
+      source = excluded.source,
       synced_at = excluded.synced_at
   `);
   let total = 0;
@@ -1917,10 +2091,13 @@ function syncAccountOverviewFromCapture(db, opts = {}) {
 function buildAccountOverviewByMall(db) {
   let rows;
   try {
+    const sourceSql = sourceWhere(db, "erp_temu_account_overview");
     rows = db.prepare(`
       SELECT mall_id, available_amount, in_transit_amount, pending_settle_amount, frozen_amount,
              withdrawable_amount, total_amount, currency
         FROM erp_temu_account_overview
+       WHERE 1=1
+         ${sourceSql}
     `).all();
   } catch (error) {
     if (/no such table/i.test(String(error?.message || ""))) return new Map();
@@ -1952,6 +2129,7 @@ const FULFILLMENT_MIGRATION = path.join(__dirname, "..", "..", "db", "migrations
 
 function ensureFulfillmentBillSchema(db) {
   db.exec(fs.readFileSync(FULFILLMENT_MIGRATION, "utf8"));
+  ensureSourceColumn(db, "erp_temu_fulfillment_bill");
 }
 
 function buildFulfillmentDetailRow(item, { mallId, receivedAt }) {
@@ -1967,6 +2145,7 @@ function buildFulfillmentDetailRow(item, { mallId, receivedAt }) {
     stat_date: normalizeSettlementDetailDate(item, receivedAt),
     raw_json: JSON.stringify(item),
     source_received_at: Number(receivedAt) || null,
+    source: SETTLEMENT_ROBOT_SOURCE,
   };
 }
 
@@ -1982,6 +2161,7 @@ function buildFulfillmentOverviewRow(result, { mallId, receivedAt }) {
     stat_date: null,
     raw_json: JSON.stringify(result),
     source_received_at: Number(receivedAt) || null,
+    source: SETTLEMENT_ROBOT_SOURCE,
   };
 }
 
@@ -1993,13 +2173,15 @@ function syncFulfillmentBillFromCapture(db, opts = {}) {
   }
   let events;
   try {
+    const capture = robotCaptureSql(db, "ce");
     events = db.prepare(`
-      SELECT mall_id, url_path, body_json, received_at
-        FROM cloud.capture_events
-       WHERE url_path IN (${FULFILLMENT_PATHS.map(() => "?").join(",")})
-         AND mall_id IS NOT NULL AND mall_id <> ''
-         AND body_json IS NOT NULL AND body_json <> ''
-       ORDER BY received_at ASC
+      SELECT ce.mall_id, ce.url_path, ce.body_json, ce.received_at
+        FROM ${capture.from}
+       WHERE ce.url_path IN (${FULFILLMENT_PATHS.map(() => "?").join(",")})
+         AND ce.mall_id IS NOT NULL AND ce.mall_id <> ''
+         AND ce.body_json IS NOT NULL AND ce.body_json <> ''
+         ${capture.where}
+       ORDER BY ce.received_at ASC
     `).all(...FULFILLMENT_PATHS);
   } catch (error) {
     if (/no such table/i.test(String(error?.message || ""))) {
@@ -2022,15 +2204,15 @@ function syncFulfillmentBillFromCapture(db, opts = {}) {
   }
   const ins = db.prepare(`
     INSERT INTO erp_temu_fulfillment_bill
-      (mall_id, record_type, item_key, bill_type, amount, currency, waybill_no, stat_date, raw_json, source_received_at, synced_at)
+      (mall_id, record_type, item_key, bill_type, amount, currency, waybill_no, stat_date, raw_json, source_received_at, source, synced_at)
     VALUES
-      (@mall_id, @record_type, @item_key, @bill_type, @amount, @currency, @waybill_no, @stat_date, @raw_json, @source_received_at, @now)
+      (@mall_id, @record_type, @item_key, @bill_type, @amount, @currency, @waybill_no, @stat_date, @raw_json, @source_received_at, @source, @now)
     ON CONFLICT(mall_id, record_type, item_key) DO UPDATE SET
       bill_type = excluded.bill_type, amount = excluded.amount, currency = excluded.currency,
       waybill_no = excluded.waybill_no, stat_date = excluded.stat_date, raw_json = excluded.raw_json,
-      source_received_at = excluded.source_received_at, synced_at = excluded.synced_at
+      source_received_at = excluded.source_received_at, source = excluded.source, synced_at = excluded.synced_at
   `);
-  const delDetail = db.prepare("DELETE FROM erp_temu_fulfillment_bill WHERE mall_id = ? AND record_type = 'detail'");
+  const delDetail = db.prepare(`DELETE FROM erp_temu_fulfillment_bill WHERE mall_id = ? AND record_type = 'detail'${sourceWhere(db, "erp_temu_fulfillment_bill")}`);
   let total = 0;
   const malls = new Set();
   const tx = db.transaction(() => {
@@ -2064,16 +2246,17 @@ function buildFulfillmentBillByMall(db, opts = {}) {
   const params = [];
   let where = "";
   if (startDate && endDate) {
-    // overview 是无日期的快照行，任何时间段都要带上；只有 detail 按账单日期过滤
-    where = "WHERE record_type = 'overview' OR (record_type = 'detail' AND stat_date >= ? AND stat_date <= ?)";
+    where = "WHERE record_type = 'detail' AND stat_date >= ? AND stat_date <= ?";
     params.push(startDate, endDate);
   }
   let rows;
   try {
+    const sourceSql = sourceWhere(db, "erp_temu_fulfillment_bill");
     rows = db.prepare(`
       SELECT mall_id, record_type, bill_type, amount, currency, waybill_no, stat_date
         FROM erp_temu_fulfillment_bill
-       ${where}
+       ${where || "WHERE 1=1"}
+       ${sourceSql}
        ORDER BY mall_id, record_type, amount DESC
     `).all(...params);
   } catch (error) {
@@ -2114,6 +2297,8 @@ const VIOLATION_MIGRATION = path.join(__dirname, "..", "..", "db", "migrations",
 
 function ensureViolationSchema(db) {
   db.exec(fs.readFileSync(VIOLATION_MIGRATION, "utf8"));
+  ensureSourceColumn(db, "erp_temu_violation");
+  ensureSourceColumn(db, "erp_temu_violation_summary");
 }
 
 function buildViolationRowsFromCaptureEvent(ev) {
@@ -2145,6 +2330,7 @@ function buildViolationRowsFromCaptureEvent(ev) {
       stat_date: bjDateFromTimestamp(ev.received_at),
       raw_json: JSON.stringify(item),
       source_received_at: Number(ev.received_at) || null,
+      source: SETTLEMENT_ROBOT_SOURCE,
     }));
 }
 
@@ -2156,13 +2342,15 @@ function syncViolationFromCapture(db, opts = {}) {
   }
   let events;
   try {
+    const capture = robotCaptureSql(db, "ce");
     events = db.prepare(`
-      SELECT mall_id, url_path, body_json, received_at
-        FROM cloud.capture_events
-       WHERE url_path IN (?, ?)
-         AND mall_id IS NOT NULL AND mall_id <> ''
-         AND body_json IS NOT NULL AND body_json <> ''
-       ORDER BY received_at ASC
+      SELECT ce.mall_id, ce.url_path, ce.body_json, ce.received_at
+        FROM ${capture.from}
+       WHERE ce.url_path IN (?, ?)
+         AND ce.mall_id IS NOT NULL AND ce.mall_id <> ''
+         AND ce.body_json IS NOT NULL AND ce.body_json <> ''
+         ${capture.where}
+       ORDER BY ce.received_at ASC
     `).all(VIOLATION_LIST_PATH, VIOLATION_SUMMARY_PATH);
   } catch (error) {
     if (/no such table/i.test(String(error?.message || ""))) {
@@ -2176,12 +2364,12 @@ function syncViolationFromCapture(db, opts = {}) {
       (mall_id, target_id, target_type, goods_id, spu_id, goods_name, goods_img_url,
        source_punish_name, leaf_reason_name, violation_desc, punish_status_desc,
        appeal_status, can_appeal, can_rectify, site_num, punish_num, stat_date,
-       raw_json, source_received_at, synced_at)
+       raw_json, source_received_at, source, synced_at)
     VALUES
       (@mall_id, @target_id, @target_type, @goods_id, @spu_id, @goods_name, @goods_img_url,
        @source_punish_name, @leaf_reason_name, @violation_desc, @punish_status_desc,
        @appeal_status, @can_appeal, @can_rectify, @site_num, @punish_num, @stat_date,
-       @raw_json, @source_received_at, @now)
+       @raw_json, @source_received_at, @source, @now)
     ON CONFLICT(mall_id, target_id) DO UPDATE SET
       target_type = excluded.target_type,
       goods_id = excluded.goods_id,
@@ -2200,21 +2388,23 @@ function syncViolationFromCapture(db, opts = {}) {
       stat_date = excluded.stat_date,
       raw_json = excluded.raw_json,
       source_received_at = excluded.source_received_at,
+      source = excluded.source,
       synced_at = excluded.synced_at
   `);
   const insSummary = db.prepare(`
     INSERT INTO erp_temu_violation_summary
       (mall_id, violation_count, add_site_limit_status, release_limit_time,
-       raw_json, source_received_at, synced_at)
+       raw_json, source_received_at, source, synced_at)
     VALUES
       (@mall_id, @violation_count, @add_site_limit_status, @release_limit_time,
-       @raw_json, @source_received_at, @now)
+       @raw_json, @source_received_at, @source, @now)
     ON CONFLICT(mall_id) DO UPDATE SET
       violation_count = excluded.violation_count,
       add_site_limit_status = excluded.add_site_limit_status,
       release_limit_time = excluded.release_limit_time,
       raw_json = excluded.raw_json,
       source_received_at = excluded.source_received_at,
+      source = excluded.source,
       synced_at = excluded.synced_at
   `);
   let total = 0;
@@ -2240,6 +2430,7 @@ function syncViolationFromCapture(db, opts = {}) {
           release_limit_time: toNullableText(result.releaseLimitTime),
           raw_json: JSON.stringify(result),
           source_received_at: Number(ev.received_at) || null,
+          source: SETTLEMENT_ROBOT_SOURCE,
           now,
         });
         total++;
@@ -2263,17 +2454,22 @@ function buildViolationByMall(db, opts = {}) {
   }
   let detailRows, summaryRows;
   try {
+    const detailSourceSql = sourceWhere(db, "erp_temu_violation");
+    const summarySourceSql = sourceWhere(db, "erp_temu_violation_summary");
     detailRows = db.prepare(`
       SELECT mall_id, target_id, goods_id, goods_name, source_punish_name, leaf_reason_name,
              violation_desc, punish_status_desc, appeal_status, can_appeal, can_rectify,
              site_num, punish_num, stat_date
         FROM erp_temu_violation
-       ${detailWhere}
+       ${detailWhere || "WHERE 1=1"}
+       ${detailSourceSql}
        ORDER BY mall_id, source_received_at DESC
     `).all(...params);
     summaryRows = hasDateRange ? [] : db.prepare(`
       SELECT mall_id, violation_count, add_site_limit_status, release_limit_time
         FROM erp_temu_violation_summary
+       WHERE 1=1
+         ${summarySourceSql}
     `).all();
   } catch (error) {
     if (/no such table/i.test(String(error?.message || ""))) return new Map();
@@ -2369,12 +2565,7 @@ function querySettlementData(db, opts = {}) {
   let fundSummaryByMall;
   try { fundSummaryByMall = buildFundSummaryByMall(db, { startDate, endDate }); }
   catch { fundSummaryByMall = new Map(); }
-  let riskByMall;
-  try {
-    riskByMall = (typeof attachCloudDb === "function" && attachCloudDb(db) === true)
-      ? buildSettlementRiskByMall(db, { startDate, endDate })
-      : new Map();
-  } catch { riskByMall = new Map(); }
+  const riskByMall = new Map();
   let eprByMall;
   try { eprByMall = buildEprFeeByMall(db); }
   catch { eprByMall = new Map(); }
@@ -2419,6 +2610,7 @@ function querySettlementData(db, opts = {}) {
       });
     }
   } catch { /* salesv2 表不存在时保持空 */ }
+  finByMall.clear();
 
   // 2b. 结算订单口径（C 口径）：已结算订单明细 × 加权均价。
   //     与「收入金额」同一批货（已结算订单），消除"收入算老订单、成本算新销量"的时间错配；
@@ -2427,31 +2619,87 @@ function querySettlementData(db, opts = {}) {
   const orderByMall = new Map();
   try {
     let odWhere, odParams;
+    const odSourceSql = sourceWhere(db, "erp_temu_settlement_order_detail", "d");
     if (startDate && endDate) {
-      odWhere = "WHERE d.create_time >= ? AND d.create_time < date(?, '+1 day')";
+      odWhere = `WHERE d.create_time >= ? AND d.create_time < date(?, '+1 day') ${odSourceSql}`;
       odParams = [startDate, endDate];
     } else {
-      odWhere = "WHERE d.create_time >= date('now', '-30 days')";
+      odWhere = `WHERE d.create_time >= date('now', '-30 days') ${odSourceSql}`;
       odParams = [];
     }
     const odRows = db.prepare(`
-      SELECT d.mall_id,
-             SUM(COALESCE(d.quantity, 0)) AS qty,
-             SUM(CASE WHEN COALESCE(k.wac, 0) > 0 THEN COALESCE(d.quantity, 0) ELSE 0 END) AS qty_costed,
-             SUM(COALESCE(d.quantity, 0) * COALESCE(k.wac, 0)) AS cost,
-             SUM(COALESCE(d.amount, 0)) AS amount
-        FROM erp_temu_settlement_order_detail d
-        LEFT JOIN (
-          SELECT internal_sku_code, MAX(weighted_avg_cost) AS wac
-            FROM erp_skus GROUP BY internal_sku_code
-        ) k ON k.internal_sku_code = d.sku_ext_code
-       ${odWhere}
-       GROUP BY d.mall_id
+      WITH sku_wac AS (
+        SELECT internal_sku_code, MAX(id) AS sku_id, MAX(weighted_avg_cost) AS wac
+          FROM erp_skus
+         WHERE COALESCE(internal_sku_code, '') <> ''
+         GROUP BY internal_sku_code
+      ),
+      ledger_cost AS (
+        SELECT s.internal_sku_code,
+               l.source_doc_id,
+               SUM(ABS(COALESCE(l.qty_delta, 0)) * COALESCE(l.unit_cost, 0))
+                 / NULLIF(SUM(ABS(COALESCE(l.qty_delta, 0))), 0) AS unit_cost
+          FROM erp_inventory_ledger_entries l
+          JOIN erp_skus s ON s.id = l.sku_id
+         WHERE l.type = 'outbound_to_temu'
+           AND COALESCE(l.unit_cost, 0) > 0
+           AND COALESCE(s.internal_sku_code, '') <> ''
+         GROUP BY s.internal_sku_code, l.source_doc_id
+      ),
+      detail_cost AS (
+        SELECT d.mall_id,
+               COALESCE(d.quantity, 0) AS qty,
+               COALESCE(d.amount, 0) AS amount,
+               CASE
+                 WHEN COALESCE(lc.unit_cost, 0) > 0 THEN lc.unit_cost
+                 WHEN COALESCE(h.weighted_avg_cost, 0) > 0 THEN h.weighted_avg_cost
+                 WHEN COALESCE(k.wac, 0) > 0 THEN k.wac
+                 ELSE 0
+               END AS unit_cost,
+               CASE
+                 WHEN COALESCE(lc.unit_cost, 0) > 0 THEN 'ledger'
+                 WHEN COALESCE(h.weighted_avg_cost, 0) > 0 THEN 'history'
+                 WHEN COALESCE(k.wac, 0) > 0 THEN 'current'
+                 ELSE 'missing'
+               END AS source_kind
+          FROM erp_temu_settlement_order_detail d
+          LEFT JOIN sku_wac k ON k.internal_sku_code = d.sku_ext_code
+          LEFT JOIN ledger_cost lc
+            ON lc.internal_sku_code = d.sku_ext_code
+           AND (
+             lc.source_doc_id = 'consign-ship-cloud:' || d.mall_id || ':' || COALESCE(NULLIF(d.wb_no, ''), NULLIF(d.order_sn, ''), NULLIF(d.parent_order_sn, ''))
+             OR lc.source_doc_id = 'consign-ship:' || COALESCE(NULLIF(d.wb_no, ''), NULLIF(d.order_sn, ''), NULLIF(d.parent_order_sn, ''))
+           )
+          LEFT JOIN erp_sku_cost_daily_snapshot h
+            ON h.sku_id = k.sku_id
+           AND h.stat_date = (
+             SELECT MAX(h2.stat_date)
+               FROM erp_sku_cost_daily_snapshot h2
+              WHERE h2.sku_id = k.sku_id
+                AND h2.stat_date <= date(COALESCE(NULLIF(d.create_time, ''), 'now'))
+           )
+         ${odWhere}
+      )
+      SELECT mall_id,
+             SUM(qty) AS qty,
+             SUM(CASE WHEN unit_cost > 0 THEN qty ELSE 0 END) AS qty_costed,
+             SUM(CASE WHEN source_kind = 'ledger' THEN qty ELSE 0 END) AS qty_time_costed,
+             SUM(CASE WHEN source_kind = 'history' THEN qty ELSE 0 END) AS qty_history_costed,
+             SUM(CASE WHEN source_kind = 'current' THEN qty ELSE 0 END) AS qty_current_fallback,
+             SUM(CASE WHEN source_kind = 'missing' THEN qty ELSE 0 END) AS qty_missing_cost,
+             SUM(qty * unit_cost) AS cost,
+             SUM(amount) AS amount
+        FROM detail_cost
+       GROUP BY mall_id
     `).all(...odParams);
     for (const r of odRows) {
       orderByMall.set(r.mall_id, {
         qty: Number(r.qty) || 0,
         qty_costed: Number(r.qty_costed) || 0,
+        qty_time_costed: Number(r.qty_time_costed) || 0,
+        qty_history_costed: Number(r.qty_history_costed) || 0,
+        qty_current_fallback: Number(r.qty_current_fallback) || 0,
+        qty_missing_cost: Number(r.qty_missing_cost) || 0,
         cost: Number(r.cost) || 0,
         amount: Number(r.amount) || 0,
       });
@@ -2462,6 +2710,7 @@ function querySettlementData(db, opts = {}) {
   const stlIncByMall = new Map();
   try {
     let siDateWhere, siParams;
+    const siSourceSql = sourceWhere(db, "erp_temu_settlement_income");
     if (startDate && endDate) {
       siDateWhere = "AND stat_date >= ? AND stat_date <= ?";
       siParams = [startDate, endDate];
@@ -2473,6 +2722,7 @@ function querySettlementData(db, opts = {}) {
       SELECT mall_id, SUM(income_amount) AS total_income, COUNT(*) AS days
         FROM erp_temu_settlement_income
        WHERE income_amount IS NOT NULL ${siDateWhere}
+         ${siSourceSql}
        GROUP BY mall_id
     `).all(...siParams);
     for (const r of siRows) {
@@ -2489,8 +2739,7 @@ function querySettlementData(db, opts = {}) {
   const dictByMall = new Map(dict.map((row) => [row.mall_id, row]));
 
   // 6. 合并所有出现过的 mall_id
-  const allMalls = new Set([...fundByMall.keys(), ...fundSummaryByMall.keys(), ...riskByMall.keys(), ...eprByMall.keys(), ...frozenByMall.keys(), ...accountOverviewByMall.keys(), ...fulfillmentByMall.keys(), ...violationByMall.keys(), ...finByMall.keys(), ...stlIncByMall.keys(), ...orderByMall.keys()]);
-  for (const d of dict) allMalls.add(d.mall_id);
+  const allMalls = new Set([...fundByMall.keys(), ...fundSummaryByMall.keys(), ...eprByMall.keys(), ...frozenByMall.keys(), ...accountOverviewByMall.keys(), ...fulfillmentByMall.keys(), ...violationByMall.keys(), ...stlIncByMall.keys(), ...orderByMall.keys()]);
 
   const stores = [];
   for (const mallId of allMalls) {
@@ -2517,7 +2766,7 @@ function querySettlementData(db, opts = {}) {
       violation: violationByMall.get(mallId) || null,
       settlement_income: si?.income || 0,  // 真实结算收入（income-summary）
       settlement_income_days: si?.days || 0,
-      cost: fin?.cost || 0,               // 销量 × 加权均价（salesv2 × erp_skus，A 口径近似）
+      cost: fin?.cost || 0,
       qty: fin?.qty || 0,
       settlement_detail: sd,
       order_detail: orderByMall.get(mallId) || null, // C 口径：已结算订单件数/成本/金额
@@ -2540,7 +2789,7 @@ function querySettlementData(db, opts = {}) {
     account_overview_available: accountOverviewByMall.size > 0,
     fulfillment_bill_available: fulfillmentByMall.size > 0,
     violation_available: violationByMall.size > 0,
-    financials_available: finByMall.size > 0,
+    financials_available: false,
     settlement_income_available: stlIncByMall.size > 0,
     order_detail_available: orderByMall.size > 0,
     date_range: { start: startDate || null, end: endDate || null },
@@ -2628,6 +2877,106 @@ function buildFinancialsByMall(db, attachCloudDb) {
   }
 
   // 收尾：算环比、成本覆盖率、趋势数组
+  for (const f of byMall.values()) {
+    f.last7d.rev_wow = f.last7d.revenue_prev > 0
+      ? (f.last7d.revenue - f.last7d.revenue_prev) / f.last7d.revenue_prev
+      : null;
+    f.last30d.rev_mom = f.last30d.revenue_prev > 0
+      ? (f.last30d.revenue - f.last30d.revenue_prev) / f.last30d.revenue_prev
+      : null;
+    f.cost_coverage = f._sku_rows > 0 ? f._cost_rows / f._sku_rows : null;
+    f.trend_daily = Array.from(f._trend.values()).sort((a, b) => a.date.localeCompare(b.date));
+    delete f._trend; delete f._sku_rows; delete f._cost_rows;
+  }
+
+  return byMall;
+}
+
+// 结算口径财务（实际结算明细 erp_temu_settlement_order_detail，纯本地、不依赖 cloud attach）。
+//   营收 = Σ结算金额（销售回款 − 销售冲回 + 非商责补贴 的净额，真实结算到账）
+//   成本 = Σ(结算数量 × 加权平均成本)  —— 仅「销售回款」行有数量，故成本天然只摊到卖出的货
+//   毛利 = 营收 − 成本
+// 相比 buildFinancialsByMall（销量×申报价预估营收）：货号 99.96% 齐全、成本匹配 ~97.6%，
+// 不再因 cloud 销量快照货号缺失把无成本 SKU 按 0 成本算、导致毛利虚高。代价是结算有数天滞后。
+// 返回 Map<mall_id, financials>（结构同 emptyFinancials）。表缺失返回 null（前端据此知维度不可用）。
+function buildSettlementProfitByMall(db) {
+  const hasTable = db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='erp_temu_settlement_order_detail'")
+    .get();
+  if (!hasTable) return null;
+
+  const latest = db
+    .prepare("SELECT MAX(date(create_time)) AS d FROM erp_temu_settlement_order_detail")
+    .get()?.d;
+  if (!latest) return new Map();
+
+  const since = shiftDate(latest, -59); // 覆盖 last30d + prev30d 环比
+  const rows = db.prepare(`
+    SELECT s.mall_id AS mall_id, date(s.create_time) AS d,
+           SUM(COALESCE(s.amount,0)) AS revenue,
+           SUM(COALESCE(s.quantity,0) * COALESCE(k.wac,0)) AS cost,
+           SUM(COALESCE(s.quantity,0)) AS qty,
+           SUM(CASE WHEN COALESCE(s.quantity,0) > 0 THEN 1 ELSE 0 END) AS sku_rows,
+           SUM(CASE WHEN COALESCE(s.quantity,0) > 0 AND COALESCE(k.wac,0) > 0 THEN 1 ELSE 0 END) AS cost_rows
+      FROM erp_temu_settlement_order_detail s
+      LEFT JOIN (
+        SELECT internal_sku_code, MAX(weighted_avg_cost) AS wac
+          FROM erp_skus GROUP BY internal_sku_code
+      ) k ON k.internal_sku_code = s.sku_ext_code
+     WHERE date(s.create_time) >= ? AND date(s.create_time) <= ?
+     GROUP BY s.mall_id, date(s.create_time)
+  `).all(since, latest);
+
+  const d7start = shiftDate(latest, -6);
+  const d7prevStart = shiftDate(latest, -13);
+  const d7prevEnd = shiftDate(latest, -7);
+  const d30start = shiftDate(latest, -29);
+  const d30prevStart = shiftDate(latest, -59);
+  const d30prevEnd = shiftDate(latest, -30);
+
+  const byMall = new Map();
+  const ensure = (mallId) => {
+    if (!byMall.has(mallId)) {
+      const f = emptyFinancials();
+      f.latest_date = latest;
+      f._sku_rows = 0;
+      f._cost_rows = 0;
+      f._trend = new Map();
+      byMall.set(mallId, f);
+    }
+    return byMall.get(mallId);
+  };
+
+  for (const row of rows) {
+    const f = ensure(row.mall_id);
+    const rev = Number(row.revenue) || 0;
+    const cost = Number(row.cost) || 0;
+    const qty = Number(row.qty) || 0;
+    const gp = rev - cost;
+    const d = row.d;
+
+    f._trend.set(d, { date: d, revenue: rev, gross_profit: gp });
+
+    if (d === latest) {
+      f.today.revenue += rev; f.today.cost += cost; f.today.gross_profit += gp; f.today.qty += qty;
+    }
+    if (d >= d7start && d <= latest) {
+      f.last7d.revenue += rev; f.last7d.cost += cost; f.last7d.gross_profit += gp; f.last7d.qty += qty;
+      f._sku_rows += Number(row.sku_rows) || 0;
+      f._cost_rows += Number(row.cost_rows) || 0;
+    }
+    if (d >= d7prevStart && d <= d7prevEnd) {
+      f.last7d.revenue_prev += rev;
+    }
+    if (d >= d30start && d <= latest) {
+      f.last30d.revenue += rev; f.last30d.cost += cost; f.last30d.gross_profit += gp; f.last30d.qty += qty;
+    }
+    if (d >= d30prevStart && d <= d30prevEnd) {
+      f.last30d.revenue_prev += rev;
+    }
+  }
+
+  // 收尾：算环比、成本覆盖率、趋势数组（与 buildFinancialsByMall 同口径）
   for (const f of byMall.values()) {
     f.last7d.rev_wow = f.last7d.revenue_prev > 0
       ? (f.last7d.revenue - f.last7d.revenue_prev) / f.last7d.revenue_prev
@@ -2932,17 +3281,20 @@ async function _buildMultiStoreReportFresh(db, options = {}) {
 
   // 优先本地 ATTACH cloud 直接聚合（快、不触碰 cloud HTTP 单进程）；attach 不可用时退回 HTTP API
   let cloud;
+  // 财务口径：实际结算明细（erp_temu_settlement_order_detail），纯本地、不依赖 cloud attach。
+  // 货号 99.96% 齐全、成本匹配 ~97.6%，替代原销量×申报价预估口径（buildFinancialsByMall，
+  // 因 cloud 销量快照货号缺失把无成本 SKU 按 0 成本算、致部分店毛利虚高）。
   let financialsByMall = null;
+  try {
+    financialsByMall = buildSettlementProfitByMall(db);
+  } catch (error) {
+    financialsByMall = null;
+    if (options.onError) options.onError(error);
+  }
   if (attached) {
     cloud = buildByStoreLocal(db, { includeTest: options.includeTest });
-    try {
-      financialsByMall = buildFinancialsByMall(db, attachCloudDb);
-    } catch (error) {
-      financialsByMall = null;
-      if (options.onError) options.onError(error);
-    }
   } else {
-    // 降级：本地开发机无 cloud sqlite 等场景，退回 cloud HTTP API（金额维度不可用）
+    // 降级：本地开发机无 cloud sqlite 等场景，退回 cloud HTTP API（by-store 维度不可用）
     cloud = await fetchCloudReport({ includeTest: options.includeTest });
   }
 
@@ -4926,7 +5278,7 @@ module.exports = {
   // 暴露给测试用
   _internal: {
     fetchCloudReport, readMallDictionary, loginCloud,
-    buildFinancialsByMall, buildByStoreLocal, shiftDate,
+    buildFinancialsByMall, buildSettlementProfitByMall, buildByStoreLocal, shiftDate,
     ensureSettlementIncomeSchema, ensureSettlementDetailSchema,
     extractSettlementIncomeRows, upsertSettlementIncomeFromDashboard,
     syncSettlementIncomeFromCapture, buildSettlementIncomeByMall, emptySettlement,

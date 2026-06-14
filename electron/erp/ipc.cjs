@@ -21736,8 +21736,8 @@ function performInventoryAction(payload = {}, actorInput = {}) {
 
   switch (action) {
     case "purchase_return": {
-      // 自家仓退给 1688 供应商。库存按 FIFO 扣，均价不变，但 cost_balance_qty 同步扣（实物总量真的少了）。
-      // unit_cost 按调用方传的 PO 原单价（这是冲应付的口径，跟 SKU 均价无关）。
+      // 自家仓退给 1688 供应商。库存按 FIFO 扣，并按退货单价冲减 SKU 货值、重算剩余均价。
+      // unit_cost 按调用方传的退货单价/PO 原单价；它会进入库存货值公式。
       const accountId = requireString(payload.accountId, "accountId");
       const skuId = requireString(payload.skuId, "skuId");
       const qty = positiveInteger(payload.qty, 0);
@@ -24066,6 +24066,7 @@ function processSettlementBatchItems(items) {
       const r = upsertSettlementIncomeFromDashboard(erpState.db, {
         dashboard: { apis: [{ path: INCOME_PATH, data: item.body }] },
         mallId: item.mall_id,
+        source: "robot",
       });
       totalRows += r.rows;
     }

@@ -65,6 +65,7 @@ function near(label, actual, expected) {
 function dashboard(mallId, rows) {
   return {
     mallId,
+    source: "robot",
     dashboard: {
       apis: [
         { path: "/auth/userInfo", data: { result: { mallList: [{ mallId }] } } },
@@ -171,8 +172,18 @@ console.log("\n=== 5) capture 同步 syncSettlementIncomeFromCapture（读 cloud
     if (d.__cloudAttachState === "attached") return true;
     d.exec(`ATTACH DATABASE '${cloudFile.replace(/'/g, "''")}' AS cloud`);
     d.exec(`CREATE TABLE IF NOT EXISTS cloud.capture_events (
+      device_id TEXT DEFAULT 'settlement-robot',
       mall_id TEXT, url_path TEXT, body_json TEXT, received_at INTEGER
     )`);
+    d.exec(`CREATE TABLE IF NOT EXISTS cloud.devices (
+      id TEXT PRIMARY KEY,
+      device_uuid TEXT
+    )`);
+    d.exec(`
+      INSERT OR IGNORE INTO cloud.devices (id, device_uuid) VALUES
+        ('settlement-robot', 'settlement-robot'),
+        ('extension-device', 'browser-extension')
+    `);
     d.exec(`CREATE TABLE IF NOT EXISTS cloud.temu_operation_risk_snapshot (
       mall_id TEXT,
       risk_type TEXT,
@@ -184,6 +195,7 @@ console.log("\n=== 5) capture 同步 syncSettlementIncomeFromCapture（读 cloud
   };
   attachCloudDb(erp2);
   const insEv = erp2.prepare("INSERT INTO cloud.capture_events (mall_id, url_path, body_json, received_at) VALUES (?,?,?,?)");
+  const insForeignEv = erp2.prepare("INSERT INTO cloud.capture_events (device_id, mall_id, url_path, body_json, received_at) VALUES (?,?,?,?,?)");
   // 同店两次抓包，06-10 后一次(received_at 大)覆盖前一次
   insEv.run("MALL-C", SETTLEMENT_INCOME_PATH, JSON.stringify({ result: [
     { date: "2026-06-10", incomeAmount: { amount: 10000 } }, // 旧:100
@@ -198,6 +210,9 @@ console.log("\n=== 5) capture 同步 syncSettlementIncomeFromCapture（读 cloud
   insEv.run("MALL-E", SETTLEMENT_INCOME_PATH, JSON.stringify({ result: { rows: [
     { dateStr: "2026/06/13", settleAmount: { amount: 9900 } },
   ] } }), 4000);
+  insForeignEv.run("extension-device", "MALL-Z", SETTLEMENT_INCOME_PATH, JSON.stringify({ result: [
+    { date: "2026-06-10", incomeAmount: { amount: 999900 } },
+  ] }), 4500);
   insEv.run("MALL-F", SETTLEMENT_DETAIL_PATHS[2], JSON.stringify({ result: { data: { list: [
     {
       statDate: "2026-06-14",
@@ -215,10 +230,10 @@ console.log("\n=== 5) capture 同步 syncSettlementIncomeFromCapture（读 cloud
     createTime: "2026-06-14 10:00:00",
     currency: "USD",
     sheetName: "Sheet1",
-    columns: ["订单号", "商家SKU", "数量", "结算金额", "币种"],
+    columns: ["订单号", "备货单号", "商家SKU", "数量", "结算金额", "币种"],
     rowCount: 2,
     rows: [
-      { "订单号": "PO-1", "商家SKU": "SKU-A", "数量": 2, "结算金额": "12.34", "币种": "USD" },
+      { "订单号": "PO-1", "备货单号": "WB2511096326799", "商家SKU": "SKU-A", "数量": 2, "结算金额": "12.34", "币种": "USD" },
       { "订单号": "PO-2", "商品SKU ID": "SKU-ID-B", "数量": "3", "金额": "￥45.67" },
     ],
   }), 6000);
@@ -256,6 +271,9 @@ console.log("\n=== 5) capture 同步 syncSettlementIncomeFromCapture（读 cloud
   const v13 = erp2.prepare("SELECT income_amount a FROM erp_temu_settlement_income WHERE mall_id='MALL-E' AND stat_date='2026-06-13'").get();
   near("result.rows + dateStr/settleAmount 形态也能同步 99", v13.a, 99);
 
+  const nonRobot = erp2.prepare("SELECT COUNT(*) c FROM erp_temu_settlement_income WHERE mall_id='MALL-Z'").get();
+  ok("non-robot capture excluded from settlement income sync", nonRobot.c === 0);
+
   const detail = syncSettlementDetailFromCapture(erp2, { attachCloudDb });
   ok("结算明细同步成功 attached", detail.ok && detail.attached);
   ok("结算明细写入 1 行", detail.rows === 1 && detail.malls === 1);
@@ -268,8 +286,8 @@ console.log("\n=== 5) capture 同步 syncSettlementIncomeFromCapture（读 cloud
   const order = syncSettlementOrderDetailFromCapture(erp2, { attachCloudDb });
   ok("结算订单明细同步成功 attached", order.ok && order.attached);
   ok("结算订单明细写入 2 行", order.rows === 2 && order.malls === 1);
-  const o1 = erp2.prepare("SELECT batch_id, order_sn, sku_ext_code, quantity, currency, amount FROM erp_temu_settlement_order_detail WHERE mall_id='MALL-G' AND row_index=1").get();
-  ok("结算订单第一行字段入库", o1?.batch_id === "BATCH-001" && o1?.order_sn === "PO-1" && o1?.sku_ext_code === "SKU-A");
+  const o1 = erp2.prepare("SELECT batch_id, wb_no, order_sn, sku_ext_code, quantity, currency, amount FROM erp_temu_settlement_order_detail WHERE mall_id='MALL-G' AND row_index=1").get();
+  ok("结算订单第一行字段入库", o1?.batch_id === "BATCH-001" && o1?.wb_no === "WB2511096326799" && o1?.order_sn === "PO-1" && o1?.sku_ext_code === "SKU-A");
   near("结算订单第一行数量=2", o1?.quantity, 2);
   near("结算订单第一行金额=12.34", o1?.amount, 12.34);
   ok("结算订单第一行币种=USD", o1?.currency === "USD");

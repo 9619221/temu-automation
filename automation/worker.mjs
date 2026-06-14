@@ -7845,6 +7845,30 @@ async function scrapeBatchCollect(params = {}) {
   return summary;
 }
 
+// 同账号多子店时，浏览器 cookie 里的 mallid 会停留在最后切换过的那家子店（如 028）。
+// 跨境猫(seller.kuajingmaihuo.com)及各落地域的 fund/结算下载接口走 credentials:"include"，
+// 后端按 cookie 的 mallid 判定「当前店」—— 即使请求头已带目标 mallid，cookie 不对齐也可能返回错店/空数据。
+// 这里把上下文里所有名为 mallid 的 cookie（不论域）统一改写成目标店，保证 cookie 与请求头一致，
+// 把每一次按店采集真正隔离到目标 mall_id。纯防御，失败不抛错。
+async function forceActiveMallCookies(mallId, hostHint = "") {
+  if (!context || !mallId) return false;
+  try {
+    const all = await context.cookies();
+    const dups = all.filter((c) => String(c.name).toLowerCase() === "mallid");
+    if (dups.length > 0) {
+      await context.addCookies(dups.map((c) => ({ ...c, value: String(mallId) })));
+      return true;
+    }
+    if (hostHint) {
+      await context.addCookies([{ name: "mallid", value: String(mallId), domain: hostHint, path: "/" }]);
+      return true;
+    }
+  } catch (e) {
+    console.error(`[batch-collect] 切换活跃店铺 cookie 失败(${mallId}): ${e.message}`);
+  }
+  return false;
+}
+
 // 单账号采集：供 main 进程逐账号循环调用，实现「每采完一个账号就增量入库」。
 // 中途任何中断（手动停 / 断网 / 崩溃），已采完账号的数据已落库，不会丢。
 // 归属缓存（哪个店归哪个账号）全局共享文件，每次调用都读最新、采完即写。
@@ -8130,7 +8154,9 @@ async function collectOneAccount(params = {}) {
         for (const cap of financeCapture.captures) {
           if (!cap?.body || cap.status < 200 || cap.status >= 300) continue;
           if (knownPaths.has(cap.urlPath)) continue;
-          if (cap.mallId && String(cap.mallId) !== String(mallId)) continue;
+          // 必须精确匹配捕获请求头里的 mallid：头里没带 mallid 时无法判定归属，
+          // 宁可丢弃也不能误挂到当前目标店（避免把同账号活跃店的包错算到别的子店）。
+          if (String(cap.mallId || "") !== String(mallId)) continue;
           const key = `${mallId}|${cap.method}|${cap.urlPath}|${cap.requestBodyText.slice(0, 160)}|${cap.text.length}`;
           if (pushedProbeKeys.has(key)) continue;
           pushedProbeKeys.add(key);
@@ -8160,7 +8186,8 @@ async function collectOneAccount(params = {}) {
         const cap = (financeCapture?.captures || []).find((c) => {
           if (!c?.body || c.status < 200 || c.status >= 300) return false;
           if (c.body?.success === false) return false;
-          if (c.mallId && String(c.mallId) !== String(mallId)) return false;
+          // 同 pushFinanceProbeCaptures：捕获请求头 mallid 必须精确等于目标店，缺失即丢弃，杜绝跨店错挂。
+          if (String(c.mallId || "") !== String(mallId)) return false;
           return c.urlPath === def.urlPath || c.scope === def.scope;
         });
         if (!cap) return false;
@@ -8376,6 +8403,7 @@ async function collectOneAccount(params = {}) {
         const mets = taskStats.fundEnum || (taskStats.fundEnum = { success: 0, error: 0, empty: 0, expired: 0, noAccess: 0, totalRecords: 0 });
         for (const mall of fundMetaTargets) {
           const { mall_id: mallId, store_code: tag } = mall;
+          await forceActiveMallCookies(mallId, "seller.kuajingmaihuo.com");
           try {
             const result = await fundFetch("/api/merchant/fund/detail/enum", mallId, "{}");
             let body = null;
@@ -8412,6 +8440,7 @@ async function collectOneAccount(params = {}) {
         }
         for (const mall of fundTargets) {
           const { mall_id: mallId, store_code: tag } = mall;
+          await forceActiveMallCookies(mallId, "seller.kuajingmaihuo.com");
           try {
             let allRecords = [];
             for (const seg of fundSegments) {
@@ -8465,6 +8494,7 @@ async function collectOneAccount(params = {}) {
         console.error(`${logPrefix} 账务费用完成: 命中变体=${fundVariant}, 成功 ${fts.success} 店 / ${fts.totalRecords} 条, 空 ${fts.empty}, 错 ${fts.error}`);
         for (const mall of fundSummaryTargets) {
           const { mall_id: mallId, store_code: tag } = mall;
+          await forceActiveMallCookies(mallId, "seller.kuajingmaihuo.com");
           let mallOk = false;
           for (const def of fundSummaryDefs) {
             let ok = false;
@@ -8761,6 +8791,9 @@ async function collectOneAccount(params = {}) {
             }
             const currentOrigin = (() => { try { return new URL(dlPage.url()).origin; } catch { return ""; } })();
             const apiOrigins = Array.from(new Set([apiBase, currentOrigin, "https://seller.kuajingmaihuo.com"].filter((origin) => /^https?:\/\//i.test(origin))));
+            // 导航到落地域后，cookie 里的 mallid 可能被服务端重置回另一家子店；下载前强制对齐到本店，
+            // 否则结算订单明细会按 cookie 取到错店/空数据（请求头已带 mallid，但接口按 cookie 判定当前店）。
+            await forceActiveMallCookies(mallId);
             // 分区补采结算汇总：全球/美区/欧区是独立站点账户，主任务只采了全球域（agentseller），
             // 美/欧的待结算/结算中/已到账只能在对应域内同域 fetch，漏采会让多区店收入三列严重偏小。
             const regionMatch = apiBase.match(/agentseller-(us|eu)\./i);

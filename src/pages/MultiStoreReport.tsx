@@ -464,11 +464,16 @@ interface SettlementRow {
   mall_id: string;
   store: string;
   owner: string;
-  qty: number;           // 销量（C 口径=已结算订单件数；回退 salesv2 窗口）
-  cost_source: "order" | "salesv2"; // 销量/成本口径来源
+  qty: number;           // 销量（C 口径=已结算订单件数）
+  cost_source: "order" | "order_mixed" | "order_current_fallback" | "order_missing" | "none"; // 销量/成本口径来源
   order_coverage: number | null;    // 订单明细金额 ÷ 已结算货款（C 口径覆盖率，<0.95 提示未采全）
   est_qty: number;       // 空批次估算补足件数（平台未提供明细的批次按本店实际件均价折算）
   est_cost: number;      // 空批次估算补足成本（按本店实际成本率折算）
+  uncovered_amount: number; // 已结算货款里没有订单明细覆盖的金额，不进正式成本
+  qty_time_costed: number;
+  qty_history_costed: number;
+  qty_current_fallback: number;
+  qty_missing_cost: number;
   income: number;        // 收入金额
   reserve: number;       // 售后预留金额（待结算）
   release: number;       // 售后释放金额（已到账）
@@ -512,11 +517,20 @@ interface SettlementStoreData {
   violation: ViolationData | null;
   settlement_income: number;       // 真实结算收入（income-summary）
   settlement_income_days: number;  // 结算数据覆盖天数
-  cost: number;                    // 销量×加权均价（salesv2 × erp_skus，A 口径近似）
+  cost: number;
   qty: number;
   settlement_detail: StoreSettlementDetail | null;
   // C 口径：已结算订单明细（与收入同批货）。amount 用于覆盖率 = amount ÷ 已结算货款
-  order_detail: { qty: number; qty_costed: number; cost: number; amount: number } | null;
+  order_detail: {
+    qty: number;
+    qty_costed: number;
+    qty_time_costed?: number;
+    qty_history_costed?: number;
+    qty_current_fallback?: number;
+    qty_missing_cost?: number;
+    cost: number;
+    amount: number;
+  } | null;
 }
 
 function classifyFundCategories(fd: FundDetailData | null) {
@@ -535,6 +549,8 @@ function classifyFundCategories(fd: FundDetailData | null) {
         eprFee += absAmt;
       } else if (lower.includes("推广") || lower.includes("广告")) {
         adFee += absAmt;
+      } else if (lower.includes("售后补寄") || lower.includes("非商责")) {
+        otherFee += absAmt;
       } else if (lower.includes("赔付") || lower.includes("售后赔") || lower.includes("售后问题") || lower.includes("履约保障") || lower.includes("售后补贴")) {
         afterSale += absAmt;
       } else if (lower.includes("扣款") || lower.includes("违规") || lower.includes("罚款") || lower.includes("处罚") || lower.includes("质量事故")) {
@@ -563,25 +579,34 @@ function buildSettlementRowFromData(s: SettlementStoreData): SettlementRow {
   const income = sd?.settled?.sales_receipt || 0;
   const reserve = sd?.settled?.chargeback || 0;
   const release = sd?.settled?.subsidy || 0;
-  const income_total = income - reserve + release;
   const fees = classifyFundCategories(fd);
-  // 销量/成本：优先 C 口径（已结算订单明细，与收入同批货）；未采到订单明细的店回退 salesv2 窗口近似。
+  // 销量/成本只认结算机器人采集到的已结算订单明细；未采到时保持 0，不回退其它口径。
   const od = s.order_detail;
   const useOrder = !!od && od.qty > 0;
+  // 收入合计：优先用逐订单结算明细净额（账期口径，后端按账务时间 create_time 过滤所选时间段，
+  //   与销量/成本同批货、可逐店对账聚协云）；无逐订单数据的店回退已到账卡片口径（收入−预留+释放）。
+  //   收入金额/售后预留/售后释放三列仍展示卡片快照，仅供参考，可能与收入合计口径不一致。
+  const income_total = useOrder ? od.amount : (income - reserve + release);
   // 覆盖率 = 订单明细金额 ÷ 资金入账流水「结算」类合计（同为入账口径，分母不能用结算汇总卡片）
   const settleInflow = fd?.by_category?.["结算"] || 0;
   const order_coverage = useOrder && settleInflow > 0 ? od.amount / settleInflow : null;
-  // 空批次估算补足（配比原则）：平台对零元/小币种尾差批次只给总额不给明细行，这部分收入已入账、
-  // 货也真实发出，成本不能记 0。按本店本窗口已覆盖部分的实际成本率/件均价折算补足，并在 UI 标注估算。
-  let est_qty = 0;
-  let est_cost = 0;
-  if (useOrder && settleInflow > od.amount && od.amount > 0) {
-    const uncovered = settleInflow - od.amount;
-    est_qty = Math.round(uncovered / (od.amount / od.qty));
-    est_cost = uncovered * (od.cost / od.amount);
+  // 空批次/缺明细不再硬估进正式成本；只保留缺口提示，等明细或成本补齐后再入账。
+  const uncovered_amount = useOrder && settleInflow > od.amount ? settleInflow - od.amount : 0;
+  const est_qty = 0;
+  const est_cost = 0;
+  const qty = useOrder ? od.qty : (s.qty || 0);
+  const cost = useOrder ? od.cost : (s.cost || 0);
+  const qty_time_costed = od?.qty_time_costed || 0;
+  const qty_history_costed = od?.qty_history_costed || 0;
+  const qty_current_fallback = od?.qty_current_fallback || 0;
+  const qty_missing_cost = od?.qty_missing_cost || 0;
+  let cost_source: SettlementRow["cost_source"] = "none";
+  if (useOrder) {
+    if (qty_missing_cost > 0) cost_source = "order_missing";
+    else if (qty_current_fallback > 0) cost_source = "order_current_fallback";
+    else if (qty_time_costed > 0 && qty_time_costed < od.qty) cost_source = "order_mixed";
+    else cost_source = "order";
   }
-  const qty = useOrder ? od.qty + est_qty : (s.qty || 0);
-  const cost = useOrder ? od.cost + est_cost : (s.cost || 0);
   const fee_total = fees.afterSale + fees.deduction + fees.warehouseFee + fees.eprFee + fees.adFee + fees.otherFee;
   const expense_total = fee_total + cost;
   // 资金净额：纯钱进钱出（聚水潭口径），不含销售成本
@@ -592,9 +617,10 @@ function buildSettlementRowFromData(s: SettlementStoreData): SettlementRow {
   const profit_rate = profit != null && income_total > 0 ? profit / income_total : null;
   return {
     mall_id: s.mall_id, store, owner, qty,
-    cost_source: useOrder ? "order" : "salesv2",
+    cost_source,
     order_coverage,
-    est_qty, est_cost,
+    est_qty, est_cost, uncovered_amount,
+    qty_time_costed, qty_history_costed, qty_current_fallback, qty_missing_cost,
     income, reserve, release, income_total,
     after_sale: fees.afterSale, deduction: fees.deduction, warehouse_fee: fees.warehouseFee,
     epr_fee: fees.eprFee, ad_fee: fees.adFee, other_fee: fees.otherFee,
@@ -615,6 +641,31 @@ function buildSettlementRowFromData(s: SettlementStoreData): SettlementRow {
     violation_detail: s.violation,
     profit, profit_rate,
   };
+}
+
+function isOrderCostSource(source: SettlementRow["cost_source"]) {
+  return source !== "none";
+}
+
+function settlementQtyTooltip(r: SettlementRow) {
+  if (!isOrderCostSource(r.cost_source)) return "结算订单明细未采集，机器人干净口径下暂不展示销量";
+  const notes = [`已结算订单明细件数 ${fmtSettlementCell(r.qty, 0)} 件`];
+  if (r.order_coverage != null && r.order_coverage < 0.95) {
+    notes.push(`订单明细仅覆盖已结算货款 ${(r.order_coverage * 100).toFixed(0)}%，未覆盖金额不硬估进正式销量/成本`);
+  }
+  if (r.uncovered_amount > 0) notes.push(`未覆盖金额 ${fmtSettlementCell(r.uncovered_amount)}，等待明细补齐`);
+  return notes.join("；");
+}
+
+function settlementCostTooltip(r: SettlementRow) {
+  if (!isOrderCostSource(r.cost_source)) return "结算订单明细未采集，机器人干净口径下暂不展示销售成本";
+  const notes = [
+    `销售成本按已结算订单明细计算：发货流水成本 ${fmtSettlementCell(r.qty_time_costed, 0)} 件，历史成本快照 ${fmtSettlementCell(r.qty_history_costed, 0)} 件`,
+  ];
+  if (r.qty_current_fallback > 0) notes.push(`当前均价兜底 ${fmtSettlementCell(r.qty_current_fallback, 0)} 件`);
+  if (r.qty_missing_cost > 0) notes.push(`缺成本 ${fmtSettlementCell(r.qty_missing_cost, 0)} 件，已按 0 计入并标黄`);
+  if (r.uncovered_amount > 0) notes.push(`未覆盖金额 ${fmtSettlementCell(r.uncovered_amount)} 不做估算成本`);
+  return notes.join("；");
 }
 
 // 日期工具
@@ -1591,7 +1642,7 @@ export default function MultiStoreReport() {
           )}
           <div style={{ padding: "8px 16px 0", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span style={{ color: "#888", fontSize: 12 }}>
-              表格口径对齐店铺分析报告：收入合计 = 收入金额 − 售后预留金额 + 售后释放金额；支出合计 = 售后赔付 + 扣款 + 仓储综合服务费 + EPR费用 + 广告服务费 + 其它服务费 + 销售成本。
+              表格口径对齐店铺分析报告：收入合计 = 逐笔结算明细按账期（账务时间）合计，与销量/成本同批货、可逐店对账；收入金额/售后预留/售后释放为已到账卡片快照，仅供参考（口径可能与收入合计不一致）。支出合计 = 售后赔付 + 扣款 + 仓储综合服务费 + EPR费用 + 广告服务费 + 其它服务费 + 销售成本。
               {!stlFundAvail && stlLoaded ? " 费用列为空 = 该店尚未抓到对账数据。" : ""}
             </span>
             <Button size="small" icon={<DownloadOutlined />}
@@ -1613,10 +1664,8 @@ export default function MultiStoreReport() {
                 render: (v: string) => <Typography.Text strong>{v}</Typography.Text> },
               { title: "销量", dataIndex: "qty", key: "qty", width: 80, align: "right",
                 render: (v: number, r: SettlementRow) => (
-                  <Tooltip title={r.cost_source === "order"
-                    ? `已结算订单件数${r.est_qty > 0 ? `（含估算补足 ${r.est_qty} 件：平台对零元/小币种尾差批次只给总额不给明细，按本店件均价折算）` : ""}${r.order_coverage != null && r.order_coverage < 0.95 ? `（订单明细仅覆盖已结算货款 ${(r.order_coverage * 100).toFixed(0)}%，批次未采全）` : ""}`
-                    : "结算订单明细未采集，回退近7/30天销量近似"}>
-                    <span style={r.cost_source !== "order" || (r.order_coverage != null && r.order_coverage < 0.95) ? { color: "#faad14" } : undefined}>{fmtSettlementCell(v, 0)}{r.est_qty > 0 ? <span style={{ color: "#999", fontSize: 11 }}>*</span> : null}</span>
+                  <Tooltip title={settlementQtyTooltip(r)}>
+                    <span style={!isOrderCostSource(r.cost_source) || r.uncovered_amount > 0 || (r.order_coverage != null && r.order_coverage < 0.95) ? { color: "#faad14" } : undefined}>{fmtSettlementCell(v, 0)}</span>
                   </Tooltip>
                 ), sorter: (a, b) => a.qty - b.qty },
               { title: "收入金额", dataIndex: "income", key: "income", width: 110, align: "right",
@@ -1646,10 +1695,8 @@ export default function MultiStoreReport() {
                 render: (v: number) => fmtSettlementCell(v) },
               { title: "销售成本", dataIndex: "cost", key: "cost", width: 100, align: "right",
                 render: (v: number, r: SettlementRow) => (
-                  <Tooltip title={r.cost_source === "order"
-                    ? `已结算订单件数 × 加权均价（与收入同批货）${r.est_cost > 0 ? `（含估算补足 ¥${r.est_cost.toFixed(2)}：平台未提供明细的批次按本店实际成本率折算，保证与收入配比）` : ""}`
-                    : "结算订单明细未采集，按销量近似 × 加权均价（成本未维护的 SKU 计 0，为下限值）"}>
-                    <span style={r.cost_source !== "order" ? { color: "#faad14" } : undefined}>{fmtSettlementCell(v)}{r.est_cost > 0 ? <span style={{ color: "#999", fontSize: 11 }}>*</span> : null}</span>
+                  <Tooltip title={settlementCostTooltip(r)}>
+                    <span style={r.cost_source !== "order" ? { color: "#faad14" } : undefined}>{fmtSettlementCell(v)}</span>
                   </Tooltip>
                 ),
                 sorter: (a, b) => a.cost - b.cost },

@@ -35,6 +35,35 @@ db.exec(`
     created_at TEXT,
     created_by TEXT
   );
+  CREATE TABLE erp_inventory_cost_events (
+    id TEXT PRIMARY KEY,
+    sku_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    event_time TEXT NOT NULL,
+    qty_delta REAL NOT NULL DEFAULT 0,
+    old_qty REAL NOT NULL DEFAULT 0,
+    new_qty REAL NOT NULL DEFAULT 0,
+    unit_cost REAL,
+    old_weighted_avg_cost REAL,
+    new_weighted_avg_cost REAL,
+    source_doc_type TEXT,
+    source_doc_id TEXT,
+    severity TEXT NOT NULL DEFAULT 'info',
+    status TEXT NOT NULL DEFAULT 'recorded',
+    message TEXT,
+    raw_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE erp_sku_cost_daily_snapshot (
+    sku_id TEXT NOT NULL,
+    stat_date TEXT NOT NULL,
+    weighted_avg_cost REAL NOT NULL DEFAULT 0,
+    cost_balance_qty REAL NOT NULL DEFAULT 0,
+    source_event_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (sku_id, stat_date)
+  );
 `);
 
 const { InventoryService } = require(path.join(
@@ -65,6 +94,18 @@ function expect(label, actual, expected) {
   const ok = Math.abs(actual - expected) < 0.0001;
   console.log(`  ${ok ? "✅" : "❌"} ${label}  实际=${actual}  期望=${expected}`);
   if (ok) pass++; else fail++;
+}
+
+function expectThrows(label, fn, pattern) {
+  try {
+    fn();
+    console.log(`  ❌ ${label}  未抛错`);
+    fail++;
+  } catch (error) {
+    const ok = pattern.test(String(error?.message || error));
+    console.log(`  ${ok ? "✅" : "❌"} ${label}  ${error.message}`);
+    if (ok) pass++; else fail++;
+  }
 }
 
 console.log("\n=== 场景：典型采购入库 + 平台销售出货流转 ===\n");
@@ -99,9 +140,9 @@ s = snap("客户退货 20");
 expect("数量=170", s.qty, 170);
 expect("均价仍=2.2", s.avg, 2.2);
 
-// 6. 采购退货 30 件（均价不变）
+// 6. 普通出库扣减 30 件（只扣数量，均价不变）
 svc.applySkuCostChange("sku1", -30);
-s = snap("采购退货 30");
+s = snap("出库扣减 30");
 expect("数量=140", s.qty, 140);
 expect("均价仍=2.2", s.avg, 2.2);
 
@@ -111,6 +152,25 @@ s = snap("入库 70 @ 1.8");
 expect("数量=210", s.qty, 210);
 // 新均价 = (140*2.2 + 70*1.8) / 210 = (308 + 126) / 210 = 434/210 ≈ 2.0667
 expect("均价=2.0667", s.avg, 2.0667);
+
+// 8. 入库成本为空/0 必须拦截，不允许把库存成本打成 0
+expectThrows("0 成本入库被拦截", () => svc.applySkuCostChange("sku1", 10, 0), /greater than 0/i);
+s = snap("0 成本拦截后");
+expect("数量仍=210", s.qty, 210);
+expect("均价仍=2.0667", s.avg, 2.0667);
+
+// 9. 明显输错单价（偏离当前均价超过 50%）必须先挡住
+expectThrows("异常高价入库被拦截", () => svc.applySkuCostChange("sku1", 1, 20), /more than 50%/i);
+s = snap("异常高价拦截后");
+expect("数量仍=210", s.qty, 210);
+expect("均价仍=2.0667", s.avg, 2.0667);
+
+const blockedEvents = db.prepare(`
+  SELECT COUNT(*) AS n
+    FROM erp_inventory_cost_events
+   WHERE status = 'blocked'
+`).get().n;
+expect("已记录 2 条拦截事件", blockedEvents, 2);
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`);
 process.exit(fail === 0 ? 0 : 1);

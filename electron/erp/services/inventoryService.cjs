@@ -13,6 +13,80 @@ class InventoryService {
     this.workflow = workflow;
   }
 
+  runOptionalCostTrace(sql, params = {}) {
+    try {
+      return this.db.prepare(sql).run(params);
+    } catch (error) {
+      if (/no such table|no such column/i.test(String(error?.message || ""))) return null;
+      throw error;
+    }
+  }
+
+  recordCostEvent(input = {}) {
+    if (!input.skuId) return null;
+    const eventTime = input.eventTime || nowIso();
+    const id = input.id || createId("costevt");
+    const unitCost = input.unitCost == null ? null : Number(input.unitCost);
+    const oldAvg = input.oldAvg == null ? null : Number(input.oldAvg);
+    const newAvg = input.newAvg == null ? null : Number(input.newAvg);
+    this.runOptionalCostTrace(`
+      INSERT INTO erp_inventory_cost_events (
+        id, sku_id, event_type, event_time, qty_delta, old_qty, new_qty,
+        unit_cost, old_weighted_avg_cost, new_weighted_avg_cost,
+        source_doc_type, source_doc_id, severity, status, message, raw_json, created_at
+      ) VALUES (
+        @id, @sku_id, @event_type, @event_time, @qty_delta, @old_qty, @new_qty,
+        @unit_cost, @old_weighted_avg_cost, @new_weighted_avg_cost,
+        @source_doc_type, @source_doc_id, @severity, @status, @message, @raw_json, @created_at
+      )
+    `, {
+      id,
+      sku_id: input.skuId,
+      event_type: input.eventType || "weighted_avg_change",
+      event_time: eventTime,
+      qty_delta: Number(input.qtyDelta || 0),
+      old_qty: Number(input.oldQty || 0),
+      new_qty: Number(input.newQty || 0),
+      unit_cost: Number.isFinite(unitCost) ? unitCost : null,
+      old_weighted_avg_cost: Number.isFinite(oldAvg) ? oldAvg : null,
+      new_weighted_avg_cost: Number.isFinite(newAvg) ? newAvg : null,
+      source_doc_type: input.sourceDocType || null,
+      source_doc_id: input.sourceDocId || null,
+      severity: input.severity || "info",
+      status: input.status || "recorded",
+      message: input.message || null,
+      raw_json: JSON.stringify(input.raw || {}),
+      created_at: nowIso(),
+    });
+    return id;
+  }
+
+  upsertDailyCostSnapshot(input = {}) {
+    if (!input.skuId || !Number.isFinite(Number(input.weightedAvgCost))) return;
+    const eventTime = input.eventTime || nowIso();
+    this.runOptionalCostTrace(`
+      INSERT INTO erp_sku_cost_daily_snapshot (
+        sku_id, stat_date, weighted_avg_cost, cost_balance_qty,
+        source_event_id, created_at, updated_at
+      ) VALUES (
+        @sku_id, @stat_date, @weighted_avg_cost, @cost_balance_qty,
+        @source_event_id, @now, @now
+      )
+      ON CONFLICT(sku_id, stat_date) DO UPDATE SET
+        weighted_avg_cost = excluded.weighted_avg_cost,
+        cost_balance_qty = excluded.cost_balance_qty,
+        source_event_id = excluded.source_event_id,
+        updated_at = excluded.updated_at
+    `, {
+      sku_id: input.skuId,
+      stat_date: String(eventTime).slice(0, 10),
+      weighted_avg_cost: Number(input.weightedAvgCost),
+      cost_balance_qty: Number(input.costBalanceQty || 0),
+      source_event_id: input.sourceEventId || null,
+      now: nowIso(),
+    });
+  }
+
   registerArrival(id, actor) {
     return this.workflow.transition({
       entityType: "inbound_receipt",
@@ -172,6 +246,22 @@ class InventoryService {
         sourceDocId: batch.inbound_receipt_id || batch.id,
         actor: input.actor,
       });
+      if (!Number.isFinite(batch.unit_landed_cost) || batch.unit_landed_cost <= 0) {
+        this.recordCostEvent({
+          skuId: batch.sku_id,
+          eventType: "invalid_inbound_batch_cost",
+          qtyDelta: receivedQty,
+          oldQty: 0,
+          newQty: 0,
+          unitCost: batch.unit_landed_cost,
+          sourceDocType: "inbound_receipt",
+          sourceDocId: batch.inbound_receipt_id || batch.id,
+          severity: "warn",
+          status: "open",
+          message: `Inventory batch ${batch.id} has no valid unit cost`,
+          raw: { batchId: batch.id, unitLandedCost: input.unitLandedCost },
+        });
+      }
 
       return this.getBatch(batch.id);
     });
@@ -326,7 +416,11 @@ class InventoryService {
 
       // COGS 按 SKU 全公司加权成本结转；均价不变，仅扣减 cost_balance_qty
       const unitCost = this.getSkuWeightedAvgCost(batch.sku_id);
-      this.applySkuCostChange(batch.sku_id, -qty);
+      this.applySkuCostChange(batch.sku_id, -qty, null, {
+        sourceDocType: "outbound_shipment",
+        sourceDocId: input.outboundId,
+        actor: input.actor,
+      });
 
       this.writeLedger({
         accountId: batch.account_id,
@@ -378,12 +472,14 @@ class InventoryService {
 
   // 全公司单 SKU 移动加权成本。只在"实物总量变化"的动作里调用：
   //   addedQty > 0 + addedUnitCost：采购入库 / 客户退货 → 按加权重算均价
-  //   addedQty < 0：采购退货 / 平台销售 → 均价不变，只扣减 cost_balance_qty
+  //   addedQty < 0：平台销售 / 普通出库 → 均价不变，只扣减 cost_balance_qty
   // 调拨 / 平台送仓 / 平台退回自家仓：均价和总量都不变，不要调用本方法
-  applySkuCostChange(skuId, addedQty, addedUnitCost) {
+  applySkuCostChange(skuId, addedQty, addedUnitCost, options = {}) {
     if (!skuId) return null;
     const qty = Number(addedQty || 0);
     if (qty === 0) return null;
+    const opts = options && typeof options === "object" ? options : {};
+    const eventTime = nowIso();
     const sku = this.db
       .prepare("SELECT weighted_avg_cost, cost_balance_qty FROM erp_skus WHERE id = ?")
       .get(skuId);
@@ -393,7 +489,50 @@ class InventoryService {
     const newQty = oldQty + qty;
     let newAvg = oldAvg;
     if (qty > 0) {
-      const unitCost = Number(addedUnitCost || 0);
+      const unitCost = Number(addedUnitCost);
+      if (!Number.isFinite(unitCost) || unitCost <= 0) {
+        const message = `SKU ${skuId} inbound cost must be greater than 0`;
+        this.recordCostEvent({
+          skuId,
+          eventType: "invalid_inbound_cost",
+          eventTime,
+          qtyDelta: qty,
+          oldQty,
+          newQty: oldQty,
+          unitCost,
+          oldAvg,
+          newAvg: oldAvg,
+          sourceDocType: opts.sourceDocType,
+          sourceDocId: opts.sourceDocId,
+          severity: "error",
+          status: "blocked",
+          message,
+          raw: { addedQty, addedUnitCost },
+        });
+        throw new Error(message);
+      }
+      const costJumpLimit = Number.isFinite(Number(opts.costJumpLimit)) ? Number(opts.costJumpLimit) : 0.5;
+      if (!opts.allowCostJump && oldAvg > 0 && Math.abs(unitCost - oldAvg) / oldAvg > costJumpLimit) {
+        const message = `SKU ${skuId} inbound cost ${unitCost} differs from current average ${oldAvg} by more than ${(costJumpLimit * 100).toFixed(0)}%`;
+        this.recordCostEvent({
+          skuId,
+          eventType: "inbound_cost_jump",
+          eventTime,
+          qtyDelta: qty,
+          oldQty,
+          newQty: oldQty,
+          unitCost,
+          oldAvg,
+          newAvg: oldAvg,
+          sourceDocType: opts.sourceDocType,
+          sourceDocId: opts.sourceDocId,
+          severity: "warn",
+          status: "blocked",
+          message,
+          raw: { addedQty, addedUnitCost, costJumpLimit },
+        });
+        throw new Error(message);
+      }
       newAvg = newQty > 0 ? (oldQty * oldAvg + qty * unitCost) / newQty : 0;
     }
     this.db.prepare(`
@@ -406,17 +545,42 @@ class InventoryService {
       id: skuId,
       avg: newAvg,
       qty: Math.max(0, newQty),
-      updated_at: nowIso(),
+      updated_at: eventTime,
     });
-    return { weightedAvgCost: newAvg, costBalanceQty: Math.max(0, newQty) };
+    const costBalanceQty = Math.max(0, newQty);
+    const eventId = this.recordCostEvent({
+      skuId,
+      eventType: qty > 0 ? "weighted_avg_inbound" : "weighted_avg_qty_out",
+      eventTime,
+      qtyDelta: qty,
+      oldQty,
+      newQty: costBalanceQty,
+      unitCost: qty > 0 ? Number(addedUnitCost) : null,
+      oldAvg,
+      newAvg,
+      sourceDocType: opts.sourceDocType,
+      sourceDocId: opts.sourceDocId,
+      severity: "info",
+      status: "recorded",
+      raw: { addedQty, addedUnitCost },
+    });
+    this.upsertDailyCostSnapshot({
+      skuId,
+      eventTime,
+      weightedAvgCost: newAvg,
+      costBalanceQty,
+      sourceEventId: eventId,
+    });
+    return { weightedAvgCost: newAvg, costBalanceQty };
   }
 
   // 换货专用：按「货值变动」调整 SKU 主表并重算加权均价。
   // deltaQty 件 + deltaValue 货值一起记账（出库腿传负、入库腿传正）。
   // 新均价 = (旧货值 + deltaValue) / (旧库存 + deltaQty)；库存到 0 则均价归 0。
   // 跟 applySkuCostChange 的区别：出库时也按指定货值扣并重算均价，而非「按旧均价扣、均价不变」。
-  adjustSkuInventoryValue(skuId, deltaQty, deltaValue) {
+  adjustSkuInventoryValue(skuId, deltaQty, deltaValue, options = {}) {
     if (!skuId) return null;
+    const opts = options && typeof options === "object" ? options : {};
     const sku = this.db
       .prepare("SELECT weighted_avg_cost, cost_balance_qty FROM erp_skus WHERE id = ?")
       .get(skuId);
@@ -425,7 +589,11 @@ class InventoryService {
     const oldAvg = Number(sku.weighted_avg_cost || 0);
     const newQty = oldQty + Number(deltaQty || 0);
     const newValue = oldQty * oldAvg + Number(deltaValue || 0);
+    if (newQty > 0 && newValue < -0.0001) {
+      throw new Error(`SKU ${skuId} inventory value cannot become negative`);
+    }
     const newAvg = newQty > 0 ? newValue / newQty : 0;
+    const eventTime = nowIso();
     this.db.prepare(`
       UPDATE erp_skus
       SET weighted_avg_cost = @avg,
@@ -436,9 +604,31 @@ class InventoryService {
       id: skuId,
       avg: newAvg,
       qty: Math.max(0, newQty),
-      updated_at: nowIso(),
+      updated_at: eventTime,
     });
-    return { weightedAvgCost: newAvg, costBalanceQty: Math.max(0, newQty) };
+    const costBalanceQty = Math.max(0, newQty);
+    const eventId = this.recordCostEvent({
+      skuId,
+      eventType: opts.eventType || "inventory_value_adjustment",
+      eventTime,
+      qtyDelta: Number(deltaQty || 0),
+      oldQty,
+      newQty: costBalanceQty,
+      unitCost: null,
+      oldAvg,
+      newAvg,
+      sourceDocType: opts.sourceDocType,
+      sourceDocId: opts.sourceDocId,
+      raw: { deltaQty, deltaValue },
+    });
+    this.upsertDailyCostSnapshot({
+      skuId,
+      eventTime,
+      weightedAvgCost: newAvg,
+      costBalanceQty,
+      sourceEventId: eventId,
+    });
+    return { weightedAvgCost: newAvg, costBalanceQty };
   }
 
   getSkuWeightedAvgCost(skuId) {
@@ -452,7 +642,7 @@ class InventoryService {
   // 直接出库（绕开 outbound_shipment 单据流程）。
   // 用于：采购退货 / 店铺间调拨出库腿 / 平台仓→自家仓出库腿。
   // 按 FIFO（received_at ASC）跨批次扣 available_qty，每批次单独写一条 ledger。
-  // affectSkuTotal=true 时同步扣 cost_balance_qty（采购退货是；调拨/位置切换是 false）。
+  // affectSkuTotal=true 时同步扣 SKU 总量；采购退货按退货单价同步冲货值并重算均价。
   // unitCost 由调用方传：采购退按 PO 原单价；位置切换按 SKU 当前均价。
   applyDirectOutbound(input = {}) {
     const accountId = input.accountId;
@@ -509,7 +699,23 @@ class InventoryService {
         remaining -= take;
       }
       if (input.affectSkuTotal) {
-        this.applySkuCostChange(skuId, -qty);
+        if (ledgerType === INVENTORY_LEDGER_TYPE.PURCHASE_RETURN) {
+          const unitCost = Number(input.unitCost);
+          if (!Number.isFinite(unitCost) || unitCost <= 0) {
+            throw new Error("purchase return unitCost must be greater than 0");
+          }
+          this.adjustSkuInventoryValue(skuId, -qty, -(qty * unitCost), {
+            eventType: "purchase_return_value_out",
+            sourceDocType: input.sourceDocType || "purchase_return",
+            sourceDocId: input.sourceDocId || "",
+          });
+        } else {
+          this.applySkuCostChange(skuId, -qty, null, {
+            sourceDocType: input.sourceDocType || "manual",
+            sourceDocId: input.sourceDocId || "",
+            actor: input.actor,
+          });
+        }
       }
       return lines;
     });
@@ -572,7 +778,22 @@ class InventoryService {
         actor: input.actor,
       });
       if (input.affectSkuTotal) {
-        this.applySkuCostChange(skuId, qty, unitLandedCost);
+        if (ledgerType === INVENTORY_LEDGER_TYPE.PURCHASE_RETURN_REVERSAL) {
+          if (!Number.isFinite(unitLandedCost) || unitLandedCost <= 0) {
+            throw new Error("purchase return reversal unitCost must be greater than 0");
+          }
+          this.adjustSkuInventoryValue(skuId, qty, qty * unitLandedCost, {
+            eventType: "purchase_return_value_reversal",
+            sourceDocType: input.sourceDocType || "purchase_return_cancel",
+            sourceDocId: input.sourceDocId || "",
+          });
+        } else {
+          this.applySkuCostChange(skuId, qty, unitLandedCost, {
+            sourceDocType: input.sourceDocType || "manual",
+            sourceDocId: input.sourceDocId || "",
+            actor: input.actor,
+          });
+        }
       }
       return this.getBatch(batchId);
     });
