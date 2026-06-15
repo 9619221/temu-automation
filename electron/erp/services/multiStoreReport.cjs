@@ -5004,6 +5004,7 @@ function buildPipelineOverviewFast(db, options = {}) {
       warehouse_stock: toNum(row.stock), occupy: toNum(row.occupy), unavail: toNum(row.unavail),
       shipping: toNum(row.shipping), total_stock: toNum(row.total_stock),
       advice_qty: toNum(row.advice), lack_qty: toNum(row.lack_qty),
+      skus_advice: detail.filter(d => (d.advice_qty || 0) > 0 || (d.lack_qty || 0) > 0).map(d => ({ code: d.sku_ext_code || null, spec: d.spec_name || null, advice: d.advice_qty || 0, lack: d.lack_qty || 0 })),
       hot_tag: !!row.hot_tag, has_hot_sku: !!row.has_hot_sku, onsales_duration: row.onsales_duration == null ? null : toNum(row.onsales_duration),
       // cloud 增强(可能为空)
       expose: flow.expose == null ? null : flow.expose, click: flow.click == null ? null : flow.click,

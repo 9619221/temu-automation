@@ -104,6 +104,7 @@ type UnifiedItem = {
   stock: number;
   riskTags: string[];
   adviceQty: number;
+  skusAdvice?: Array<{ code: string | null; spec: string | null; advice: number; lack: number }>;
   reviewScore: number | null;
   reviewCount: number;
   badReviews: number;
@@ -280,7 +281,7 @@ export default function PipelineTab({ reloadSignal, isStoreInScope, onRiskTagCli
           stage, stageIdx: STAGE_IDX[stage] ?? 99, source: "erp", productId: r.product_id ?? null,
           todaySales: r.today_sales || 0, sales7d: r.w7_sales || 0, sales30d: r.m30_sales || 0,
           stock: r.warehouse_stock || r.local_available || 0,
-          riskTags: r.risk_tags || [], adviceQty: r.advice_qty || 0,
+          riskTags: r.risk_tags || [], adviceQty: r.advice_qty || 0, skusAdvice: r.skus_advice || [],
           reviewScore: r.avg_score, reviewCount: r.review_count || 0,
           badReviews: r.bad_reviews || 0, returnCount: r.return_count || 0,
           store: r.store_code || r.mall_name || null,
@@ -608,7 +609,7 @@ function ProductCard({ item, navigate, onRiskTagClick }: { item: UnifiedItem; na
             {hasSales && <SalesCell today={item.todaySales} d7={item.sales7d} d30={item.sales30d} />}
             {hasStock && (
               <div style={{ marginTop: hasSales ? 8 : 0, paddingTop: hasSales ? 7 : 0, borderTop: hasSales ? "1px solid #f5f5f5" : "none" }}>
-                <StockCell stock={item.stock} unavail={item.unavail || 0} shipping={item.shipping || 0} advice={item.adviceQty} lack={item.lackQty || 0} />
+                <StockCell stock={item.stock} unavail={item.unavail || 0} shipping={item.shipping || 0} advice={item.adviceQty} lack={item.lackQty || 0} skusAdvice={item.skusAdvice} />
               </div>
             )}
           </div>
@@ -785,7 +786,7 @@ function SalesCell({ today, d7, d30 }: { today: number; d7: number; d30: number 
   );
 }
 
-function StockCell({ stock, unavail, shipping, advice, lack }: { stock: number; unavail: number; shipping: number; advice: number; lack: number }) {
+function StockCell({ stock, unavail, shipping, advice, lack, skusAdvice }: { stock: number; unavail: number; shipping: number; advice: number; lack: number; skusAdvice?: Array<{ code: string | null; spec: string | null; advice: number; lack: number }> }) {
   const danger = stock === 0;
   const warn = stock > 0 && stock < 20;
   const stockColor = danger ? TONE_COLOR.danger : warn ? TONE_COLOR.warning : "#333";
@@ -795,6 +796,7 @@ function StockCell({ stock, unavail, shipping, advice, lack }: { stock: number; 
     { label: "已发货", value: shipping, color: "#666" },
     { label: "缺货数量", value: lack, color: lack > 0 ? TONE_COLOR.warning : "#666" },
   ];
+  const needSkus = skusAdvice?.filter(s => s.advice > 0) || [];
   return (
     <div style={{ flex: 1, minWidth: 0 }}>
       <div style={{ fontSize: 12, color: "#aaa", lineHeight: 1, marginBottom: 4 }}>
@@ -810,11 +812,24 @@ function StockCell({ stock, unavail, shipping, advice, lack }: { stock: number; 
           </div>
         ))}
       </div>
-      {advice > 0 && (
+      {needSkus.length > 1 ? (
+        <div style={{ fontSize: 12, marginTop: 3 }}>
+          {needSkus.map((s, i) => (
+            <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 4, lineHeight: 1.5 }}>
+              <span style={{ color: "#666", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{s.spec || s.code || `SKU${i + 1}`}</span>
+              <span style={{ color: TONE_COLOR.danger, fontWeight: 600, flexShrink: 0 }}>+{s.advice}</span>
+            </div>
+          ))}
+          <div style={{ display: "flex", justifyContent: "space-between", borderTop: "1px solid #f5f5f5", marginTop: 2, paddingTop: 2 }}>
+            <span style={{ color: "#999", fontSize: 11 }}>合计</span>
+            <span style={{ color: TONE_COLOR.danger, fontWeight: 600 }}>+{advice}</span>
+          </div>
+        </div>
+      ) : advice > 0 ? (
         <div style={{ fontSize: 12, marginTop: 3, whiteSpace: "nowrap" }}>
           <span style={{ color: TONE_COLOR.danger, fontWeight: 600 }}>建议补 +{advice}</span>
         </div>
-      )}
+      ) : null}
     </div>
   );
 }
