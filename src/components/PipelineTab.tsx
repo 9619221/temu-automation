@@ -54,12 +54,14 @@ interface PipelineSkuRow {
   act_min_price?: number | null;
   declared_price?: number | null;
   compliance?: string | null;
+  compliance_details?: string[];
   lifecycle_status?: string | null;
   quality_score?: number | null;
   quality_site?: string | null;
   quality_afs_order_rate?: number | null;
   qc_bad?: number | null;
   qc_defective?: number | null;
+  skus_advice?: Array<{ code: string | null; spec: string | null; advice: number; lack: number }>;
 }
 
 type PipelineQualityRow = {
@@ -71,10 +73,17 @@ type PipelineQualityRow = {
   afs_order_rate?: number | null;
 };
 
+type PipelineQualitySiteEntry = {
+  site: string;
+  score: number;
+  afsOrderRate?: number | null;
+};
+
 type PipelineQualityValue = {
   score: number;
   site?: string | null;
   afsOrderRate?: number | null;
+  sites: PipelineQualitySiteEntry[];
 };
 
 interface YunqiSelectionItem {
@@ -128,10 +137,12 @@ type UnifiedItem = {
   actMinPrice?: number | null;
   declaredPrice?: number | null;
   compliance?: string | null;
+  complianceDetails?: string[];
   lifecycleStatus?: string | null;
   qualityScore?: number | null;
   qualitySite?: string | null;
   qualityAfsOrderRate?: number | null;
+  qualitySites?: PipelineQualitySiteEntry[];
   qcBad?: number;
   qcDefective?: number;
 };
@@ -290,9 +301,9 @@ export default function PipelineTab({ reloadSignal, isStoreInScope, onRiskTagCli
           hotTag: !!r.hot_tag, hasHotSku: !!r.has_hot_sku, onsalesDuration: r.onsales_duration ?? null,
           expose: r.expose ?? null, click: r.click ?? null, conv: r.conv ?? null, grow: r.grow ?? null,
           limited: !!r.limited, actCnt: r.act_cnt || 0, actMinPrice: r.act_min_price ?? null,
-          declaredPrice: r.declared_price ?? null, compliance: r.compliance ?? null,
+          declaredPrice: r.declared_price ?? null, compliance: r.compliance ?? null, complianceDetails: r.compliance_details || [],
           lifecycleStatus: r.lifecycle_status ?? null,
-          qualityScore, qualitySite: r.quality_site ?? quality?.site ?? null, qualityAfsOrderRate: r.quality_afs_order_rate ?? quality?.afsOrderRate ?? null,
+          qualityScore, qualitySite: r.quality_site ?? quality?.site ?? null, qualityAfsOrderRate: r.quality_afs_order_rate ?? quality?.afsOrderRate ?? null, qualitySites: quality?.sites || [],
           qcBad: r.qc_bad || 0, qcDefective: r.qc_defective || 0,
         });
       }
@@ -576,11 +587,13 @@ function ProductCard({ item, navigate, onRiskTagClick }: { item: UnifiedItem; na
       borderRadius: 8,
       overflow: "hidden",
       transition: "box-shadow 0.2s, transform 0.15s",
+      display: "flex",
+      flexDirection: "column",
     }}
       onMouseEnter={e => { e.currentTarget.style.boxShadow = "0 4px 16px rgba(0,0,0,0.08)"; e.currentTarget.style.transform = "translateY(-1px)"; }}
       onMouseLeave={e => { e.currentTarget.style.boxShadow = "none"; e.currentTarget.style.transform = "none"; }}
     >
-      <div style={{ padding: "16px 18px" }}>
+      <div style={{ padding: "16px 18px", display: "flex", flexDirection: "column", flex: 1 }}>
         {/* 头部:图 + 名称/编码/店铺 + 阶段Tag */}
         <div style={{ display: "flex", gap: 12, marginBottom: 8, alignItems: "flex-start", height: PRODUCT_CARD_HEADER_HEIGHT }}>
           <div style={{ width: 88, flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 6 }}>
@@ -619,72 +632,75 @@ function ProductCard({ item, navigate, onRiskTagClick }: { item: UnifiedItem; na
           </div>
         )}
 
-        {/* ── 流量行(有抓包数据才显示) ── */}
-        {hasFlow && (
-          <div style={{ borderTop: "1px solid #f5f5f5", paddingTop: 6, marginTop: 2 }}>
-            <FlowCell expose={item.expose!} click={item.click ?? null} conv={item.conv ?? null} grow={item.grow ?? null} />
-          </div>
-        )}
+        {/* ── 底部固定区域:流量 + 标签 + 按钮,推到卡片底部对齐 ── */}
+        <div style={{ marginTop: "auto" }}>
+          {/* ── 流量行(有抓包数据才显示) ── */}
+          {hasFlow && (
+            <div style={{ borderTop: "1px solid #f5f5f5", paddingTop: 6, marginTop: 2 }}>
+              <FlowCell expose={item.expose!} click={item.click ?? null} conv={item.conv ?? null} grow={item.grow ?? null} />
+            </div>
+          )}
 
-        {/* ── 诊断/机会标签行:热品 + 可报活动 + 风险(限流/抽检/合规/缺货/差评) ── */}
-        {hasTags && (
-          <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
-            {item.hotTag && (
-              <PreviewTag tag="hot" item={item} color="volcano" fontSize={12} lineHeight="20px">
-                <FireOutlined style={{ marginRight: 2 }} />热品
-              </PreviewTag>
-            )}
-            {hasAct && (
-              <PreviewTag tag="activity" item={item} color="blue" fontSize={12} lineHeight="20px">
-                可报活动 {item.actCnt}{item.actMinPrice != null ? ` · 参考¥${item.actMinPrice}` : ""}
-              </PreviewTag>
-            )}
-            {hasQualityScore && (
-              <PreviewTag
-                tag="quality_score"
-                item={item}
-                color={qualityScoreTagColor(item.qualityScore)}
-                fontSize={12}
-                lineHeight="20px"
-                onClick={(e) => { e.stopPropagation(); onRiskTagClick?.("quality_score", item); }}
-              >
-                品质分 {formatQualityScore(item.qualityScore)}
-              </PreviewTag>
-            )}
-            {item.riskTags.map(t => {
-              const m = RISK_LABELS[t];
-              return m ? (
+          {/* ── 诊断/机会标签行:热品 + 可报活动 + 风险(限流/抽检/合规/缺货/差评) ── */}
+          {hasTags && (
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
+              {item.hotTag && (
+                <PreviewTag tag="hot" item={item} color="volcano" fontSize={12} lineHeight="20px">
+                  <FireOutlined style={{ marginRight: 2 }} />热品
+                </PreviewTag>
+              )}
+              {hasAct && (
+                <PreviewTag tag="activity" item={item} color="blue" fontSize={12} lineHeight="20px">
+                  可报活动 {item.actCnt}{item.actMinPrice != null ? ` · 参考¥${item.actMinPrice}` : ""}
+                </PreviewTag>
+              )}
+              {hasQualityScore && (
                 <PreviewTag
-                  key={t}
-                  tag={t}
+                  tag="quality_score"
                   item={item}
-                  color={m.color}
+                  color={qualityScoreTagColor(item.qualityScore)}
                   fontSize={12}
                   lineHeight="20px"
-                  onClick={(e) => { e.stopPropagation(); onRiskTagClick?.(t, item); }}
+                  onClick={(e) => { e.stopPropagation(); onRiskTagClick?.("quality_score", item); }}
                 >
-                  {m.text}
+                  品质分 {formatQualityScore(item.qualityScore)}
                 </PreviewTag>
-              ) : null;
-            })}
-          </div>
-        )}
+              )}
+              {item.riskTags.map(t => {
+                const m = RISK_LABELS[t];
+                return m ? (
+                  <PreviewTag
+                    key={t}
+                    tag={t}
+                    item={item}
+                    color={m.color}
+                    fontSize={12}
+                    lineHeight="20px"
+                    onClick={(e) => { e.stopPropagation(); onRiskTagClick?.(t, item); }}
+                  >
+                    {m.text}
+                  </PreviewTag>
+                ) : null;
+              })}
+            </div>
+          )}
 
-        {/* ── 底部操作按钮 ── */}
-        {meta?.nav && !isUrgent && (
-          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
-            <Button
-              type="primary"
-              ghost={!isUrgent}
-              danger={isUrgent}
-              size="small"
-              style={{ borderRadius: 4, fontSize: 13, fontWeight: isUrgent ? 600 : 400 }}
-              onClick={(e) => { e.stopPropagation(); navigate(meta.nav!); }}
-            >
-              {meta.navLabel} <RightOutlined />
-            </Button>
-          </div>
-        )}
+          {/* ── 底部操作按钮 ── */}
+          {meta?.nav && !isUrgent && (
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
+              <Button
+                type="primary"
+                ghost={!isUrgent}
+                danger={isUrgent}
+                size="small"
+                style={{ borderRadius: 4, fontSize: 13, fontWeight: isUrgent ? 600 : 400 }}
+                onClick={(e) => { e.stopPropagation(); navigate(meta.nav!); }}
+              >
+                {meta.navLabel} <RightOutlined />
+              </Button>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -716,7 +732,7 @@ function ProductTitle({ name }: { name: string }) {
 function ProductMetaGrid({ item }: { item: UnifiedItem }) {
   const onlineText = item.onsalesDuration != null && item.onsalesDuration > 0 ? `${item.onsalesDuration}天` : "—";
   const cells = [
-    { label: "商品ID", value: item.productId || item.code || "—", color: item.productId || item.code ? "#aaa" : "#ccc" },
+    { label: "SPU", value: item.productId || item.code || "—", color: item.productId || item.code ? "#aaa" : "#ccc" },
     { label: "店铺", value: item.store || "—", color: item.store ? "#aaa" : "#ccc" },
     { label: "上新", value: onlineText, color: onlineText === "—" ? "#ccc" : "#aaa" },
   ];
@@ -816,7 +832,7 @@ function StockCell({ stock, unavail, shipping, advice, lack, skusAdvice }: { sto
         <div style={{ fontSize: 12, marginTop: 3 }}>
           {needSkus.map((s, i) => (
             <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 4, lineHeight: 1.5 }}>
-              <span style={{ color: "#666", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{s.spec || s.code || `SKU${i + 1}`}</span>
+              <span style={{ color: "#666", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{s.code ? <><span style={{ fontSize: 11, color: "#999" }}>{s.code}</span>{s.spec ? <span style={{ marginLeft: 8 }}>{s.spec}</span> : null}</> : s.spec || `SKU${i + 1}`}</span>
               <span style={{ color: TONE_COLOR.danger, fontWeight: 600, flexShrink: 0 }}>+{s.advice}</span>
             </div>
           ))}
@@ -865,23 +881,32 @@ function qualityLookupKey(mallId?: string | null, id?: string | null) {
 
 function buildQualityLookup(rows: PipelineQualityRow[]) {
   const lookup: Record<string, PipelineQualityValue> = {};
-  const remember = (mallId?: string | null, id?: string | null, value?: PipelineQualityValue) => {
-    if (!value) return;
+  const ensure = (key: string): PipelineQualityValue => {
+    if (!lookup[key]) lookup[key] = { score: Infinity, sites: [] };
+    return lookup[key];
+  };
+  const addSite = (mallId?: string | null, id?: string | null, entry?: PipelineQualitySiteEntry) => {
+    if (!entry) return;
     const key = qualityLookupKey(mallId, id);
     if (!key) return;
-    const prev = lookup[key];
-    if (!prev || value.score < prev.score) lookup[key] = value;
+    const val = ensure(key);
+    if (!val.sites.some(s => s.site === entry.site)) val.sites.push(entry);
+    if (entry.score < val.score) {
+      val.score = entry.score;
+      val.site = entry.site;
+      val.afsOrderRate = entry.afsOrderRate;
+    }
   };
   for (const row of rows || []) {
     const score = row.afs_score == null ? null : Number(row.afs_score);
     if (score == null || !Number.isFinite(score)) continue;
-    const value: PipelineQualityValue = {
+    const entry: PipelineQualitySiteEntry = {
+      site: row.site || "cn",
       score,
-      site: row.site || null,
       afsOrderRate: row.afs_order_rate == null ? null : Number(row.afs_order_rate),
     };
-    remember(row.mall_id, row.product_id, value);
-    remember(row.mall_id, row.goods_id, value);
+    addSite(row.mall_id, row.product_id, entry);
+    addSite(row.mall_id, row.goods_id, entry);
   }
   return lookup;
 }
@@ -934,18 +959,35 @@ function renderTagPreview(tag: string, item: UnifiedItem) {
     lines.push(tagPreviewLine("参考价", item.actMinPrice != null ? `¥${item.actMinPrice}` : "—"));
   } else if (tag === "quality_score") {
     title = "商品品质";
-    lines.push(tagPreviewLine("品质分", formatQualityScore(item.qualityScore)));
-    lines.push(tagPreviewLine("品质售后率", formatPercentValue(item.qualityAfsOrderRate)));
-    lines.push(tagPreviewLine("站点", item.qualitySite || "—"));
+    const sites = item.qualitySites || [];
+    const siteLabel: Record<string, string> = { cn: "全球", us: "美区", eu: "欧区" };
+    if (sites.length > 1) {
+      for (const s of sites) {
+        const label = siteLabel[s.site] || s.site;
+        const color = s.score < 60 ? "#ff7875" : s.score < 75 ? "#ffc069" : "#95de64";
+        lines.push(tagPreviewLine(label, <span style={{ color }}>{s.score.toFixed(1)}{s.afsOrderRate != null ? <span style={{ color: "rgba(255,255,255,0.55)", fontSize: 11 }}> · {formatPercentValue(s.afsOrderRate)}</span> : null}</span>));
+      }
+    } else {
+      lines.push(tagPreviewLine("品质分", formatQualityScore(item.qualityScore)));
+      lines.push(tagPreviewLine("品质售后率", formatPercentValue(item.qualityAfsOrderRate)));
+      lines.push(tagPreviewLine("站点", siteLabel[item.qualitySite || ""] || item.qualitySite || "—"));
+    }
   } else if (tag === "qc_fail") {
     title = "抽检不合格";
     lines.push(tagPreviewLine("不合格单数", item.qcBad || "—"));
     lines.push(tagPreviewLine("次品数", item.qcDefective || "—"));
-    lines.push(tagPreviewLine("商品ID", item.productId || item.code || "—"));
+    lines.push(tagPreviewLine("SPU", item.productId || item.code || "—"));
   } else if (tag === "compliance") {
     title = "合规风险";
     lines.push(tagPreviewLine("状态", item.compliance || "有风险"));
-    lines.push(tagPreviewLine("商品ID", item.productId || item.code || "—"));
+    const details = item.complianceDetails || [];
+    if (details.length > 0) {
+      for (const d of details.slice(0, 4)) {
+        lines.push(<div key={d} style={{ fontSize: 11, lineHeight: "18px", color: "rgba(255,255,255,0.82)" }}>· {d}</div>);
+      }
+      if (details.length > 4) lines.push(<div style={{ fontSize: 11, color: "rgba(255,255,255,0.5)" }}>...等 {details.length} 项</div>);
+    }
+    lines.push(tagPreviewLine("SPU", item.productId || item.code || "—"));
   } else if (tag === "limited") {
     title = "高价限流";
     lines.push(tagPreviewLine("曝光", item.expose != null ? fmtNum(item.expose) : "—"));

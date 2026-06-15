@@ -1443,6 +1443,22 @@ export default function OperationsWorkbench() {
 
   const qualityShopsView = useMemo(() => qualityShops.filter((s) => inScope(s.store_code || s.mall_id)), [qualityShops, inScope]);
 
+  const qualityDist = useMemo(() => {
+    let total = 0, hasScore = 0, danger = 0, warn = 0, good = 0, excellent = 0;
+    let sum = 0;
+    for (const r of qualityView) {
+      total++;
+      if (r.afs_score == null) continue;
+      hasScore++;
+      sum += r.afs_score;
+      if (r.afs_score < 60) danger++;
+      else if (r.afs_score < 75) warn++;
+      else if (r.afs_score < 90) good++;
+      else excellent++;
+    }
+    return { total, hasScore, danger, warn, good, excellent, avg: hasScore > 0 ? sum / hasScore : null };
+  }, [qualityView]);
+
   const hpfView = useMemo(() => {
     const kw = search.trim().toLowerCase();
     return hpfRows.filter((r) => {
@@ -1708,7 +1724,25 @@ export default function OperationsWorkbench() {
       key: "quality", label: "商品品质",
       children: (
         <div>
-          <div style={{ padding: "12px 16px 0", color: "#888", fontSize: 12 }}>Temu 后台「商品品质看板」数据(扩展抓包):每个商品的<b>品质分</b>(0-100,越低越差) + 品质售后率 + 售后/差评问题分布,默认按品质分升序(最差排前)。⚠️被动抓包:仅覆盖在后台打开过品质看板的店,其余店暂无数据。</div>
+          <div style={{ padding: "12px 16px 0", display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 16 }}>
+            <Statistic title="商品数(当前筛选)" value={qualityDist.total} />
+            <Statistic title="均分" value={qualityDist.avg != null ? qualityDist.avg.toFixed(1) : "—"} valueStyle={{ color: qualityDist.avg != null && qualityDist.avg < 75 ? "#d46b08" : "#3f8600" }} />
+            <Statistic title={<span style={{ color: "#cf1322" }}>危险 &lt;60</span>} value={qualityDist.danger} valueStyle={{ color: qualityDist.danger > 0 ? "#cf1322" : undefined }} />
+            <Statistic title={<span style={{ color: "#d46b08" }}>警告 60-74</span>} value={qualityDist.warn} valueStyle={{ color: qualityDist.warn > 0 ? "#d46b08" : undefined }} />
+            <Statistic title={<span style={{ color: "#3f8600" }}>良好 75-89</span>} value={qualityDist.good} valueStyle={{ color: "#3f8600" }} />
+            <Statistic title={<span style={{ color: "#1677ff" }}>优秀 ≥90</span>} value={qualityDist.excellent} valueStyle={{ color: "#1677ff" }} />
+          </div>
+          {qualityDist.hasScore > 0 && (
+            <div style={{ padding: "8px 16px 0" }}>
+              <div style={{ display: "flex", height: 8, borderRadius: 4, overflow: "hidden", background: "#f0f0f0" }}>
+                {qualityDist.danger > 0 && <div style={{ width: `${(qualityDist.danger / qualityDist.hasScore) * 100}%`, background: "#cf1322" }} />}
+                {qualityDist.warn > 0 && <div style={{ width: `${(qualityDist.warn / qualityDist.hasScore) * 100}%`, background: "#faad14" }} />}
+                {qualityDist.good > 0 && <div style={{ width: `${(qualityDist.good / qualityDist.hasScore) * 100}%`, background: "#52c41a" }} />}
+                {qualityDist.excellent > 0 && <div style={{ width: `${(qualityDist.excellent / qualityDist.hasScore) * 100}%`, background: "#1677ff" }} />}
+              </div>
+            </div>
+          )}
+          <div style={{ padding: "8px 16px 0", color: "#888", fontSize: 12 }}>Temu 后台「商品品质看板」数据(扩展抓包):每个商品的<b>品质分</b>(0-100,越低越差) + 品质售后率 + 售后/差评问题分布,默认按品质分升序(最差排前)。⚠️被动抓包:仅覆盖在后台打开过品质看板的店,其余店暂无数据。</div>
           {qualityShopsView.length > 0 && (
             <div style={{ padding: "8px 16px 0", display: "flex", flexWrap: "wrap", gap: 8 }}>
               {qualityShopsView.map((s) => (
